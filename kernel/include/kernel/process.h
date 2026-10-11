@@ -221,6 +221,12 @@ struct process {
      * its last thread is gone -- and process_vfork_release sets this. */
     struct waitqueue vfork_wq;
     bool vfork_released;
+    /* exec (docs/kernel/process/design.md, "exec"): the thread replacing
+     * the image, under lock; every other thread leaves at its next
+     * return to user mode or killable wait, and the reaper wakes exec_wq
+     * as each is released. */
+    struct thread *exec_thread;
+    struct waitqueue exec_wq;
 };
 
 /* How spawn builds a child (kernel creators pass NULL: console handles
@@ -445,6 +451,42 @@ struct process_fork_args {
     unsigned flags;
 };
 int process_fork(const struct process_fork_args *a, struct process **out);
+
+/*
+ * exec (docs/kernel/process/design.md, "exec"): replace the calling
+ * process's image with `exe` (and its interpreter) in place. Everything
+ * that can fail -- the new space, the image, the stack and its frame --
+ * is built first, and a failure there returns with the caller intact.
+ * Then every other thread ends, and from that point the call cannot
+ * fail: the old space goes (or returns to a vfork parent, which is
+ * released), close-on-exec handles close, caught signals return to their
+ * defaults, the personality is the new image's, and the calling thread
+ * returns to user mode at the new entry through `syscall_frame`. 0 when
+ * it did; the old image is gone.
+ */
+int process_exec_images(const struct process_image *exe, const struct process_image *interp, const char *name,
+                        const char *const argv[], const char *const envp[], const char *execfn, void *syscall_frame);
+
+/* The argument block both doors copy in (exec.c): bounded like Linux's
+ * ARG_MAX order, and the room "#!" needs to prepend two words. */
+#define EXEC_ARG_MAX     (32u << 10)
+#define EXEC_ARG_ENTRIES 1024u
+struct exec_args {
+    char path[1024];   /* VFS_PATH_MAX */
+    const char *argv[EXEC_ARG_ENTRIES + 4];
+    const char *envp[EXEC_ARG_ENTRIES + 1];
+    unsigned argc, envc;
+    size_t used;
+    char strings[EXEC_ARG_MAX + 2048];   /* + the "#!" lines' words */
+};
+/* Copy a path and NULL-terminated argv and envp from user memory;
+ * -E2BIG past the bounds, -EFAULT, -ENAMETOOLONG. */
+int exec_args_copy(struct exec_args *ea, uint64_t upath, uint64_t uargv, uint64_t uenvp);
+/* execve: resolve ea->path from the caller's directory -- "#!" scripts
+ * to their interpreters, at most 4 deep (-ELOOP), and an ELF's PT_INTERP
+ * -- and process_exec_images. Returns only an error, or 0 having
+ * replaced the image. */
+int process_execve(struct exec_args *ea, void *syscall_frame);
 
 /* vfork: wait (killable) until `child` no longer borrows the caller's
  * space; 0, or -EINTR when the caller is being killed. */

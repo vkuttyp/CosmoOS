@@ -102,6 +102,16 @@ it. Returns the child referenced (the caller puts it), or `-ENOMEM`,
 `-EAGAIN` (`COSMO_RLIMIT_NPROC`) with nothing created. The caller's
 personality must have a `fork` hook.
 
+### `int process_exec_images(exe, interp, name, argv, envp, execfn, syscall_frame)`, `int process_execve(struct exec_args *ea, void *syscall_frame)`, `int exec_args_copy(struct exec_args *ea, uint64_t upath, uint64_t uargv, uint64_t uenvp)` (roadmap M3)
+exec (design.md, "exec"; P36). `exec_args_copy` copies a path and argv
+and envp from user memory into `struct exec_args` (at most
+`EXEC_ARG_ENTRIES` 1024 strings and `EXEC_ARG_MAX` 32 KiB, `-E2BIG`).
+`process_execve` resolves the path (`#!`, `PT_INTERP`) and calls
+`process_exec_images`, which replaces the caller's image and rewrites
+`syscall_frame` to enter it. Both return 0 when the image was replaced,
+or an error with the caller intact; the system call returns 0 into the
+new image.
+
 ### `int process_vfork_wait(struct process *child)`, `void process_vfork_release(struct process *p)` (roadmap M3)
 The vfork handshake: the caller waits, killably (`-EINTR`), until the
 child releases the borrowed space; the child's side runs at its last

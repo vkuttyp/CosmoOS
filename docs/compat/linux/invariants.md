@@ -246,14 +246,23 @@ so it stays shared across the fork. Check: `lxtest`'s fork section (and
 the refusals: `CLONE_VM` alone, exit signal 0, `CLONE_FS`, all
 `-EINVAL`).
 
+**L17. A descriptor's close-on-exec flag is set when the call that made
+it asks, and exec closes exactly the marked ones.** Every `*_CLOEXEC`
+flag and `F_SETFD` reach the slot's `HANDLE_FLAG_CLOEXEC` in the same
+hold that installs it; `dup`, `dup2` and `F_DUPFD` start without it; fork
+copies it. Check: `lxtest`'s exec section (a handle without the flag
+survives the exec and is written by the new image; one from `dup3(...,
+O_CLOEXEC)` and one from `F_SETFD` are `-EBADF` there; `pipe2(O_CLOEXEC)`
+reads back `FD_CLOEXEC`).
+
 ## Gaps (documented, not invariants)
 
 - `wait4` does not wait for a process group: `pid` 0 or a negative
   pgid is `-ECHILD`. Process groups exist (the signals unit) and
   `kill(-pgid)` uses them, so this is a gap in `wait4` rather than in
   the kernel.
-- No `execve` (M3 PR 3), real-time signal queues. (`fork` arrived with
-  roadmap M3, L16; `select`/`epoll` and shared file mappings with their
+- No real-time signal queues. (`fork` and `execve` arrived with roadmap
+  M3, L16 and L17; `select`/`epoll` and shared file mappings with their
   units.) (Job control arrived with the
   job-control unit, `wait4` included.)
 - ~~`dirfd` arguments other than `AT_FDCWD` are refused (`-ENOSYS`)

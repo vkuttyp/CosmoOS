@@ -170,5 +170,8 @@ int signal_process_init(struct process *p);
 void signal_process_release(struct process *p);
 /* fork: the child (signal_process_init done) takes the parent's dispositions. */
 void signal_process_fork(struct process *child, struct process *parent);
+/* exec: caught signals return to SIG_DFL (ignored ones stay ignored), the
+ * thread's alternate stack is gone; the mask and pending signals stay. */
+void signal_exec_reset(struct process *p, struct thread *t);
 
 #endif /* KERNEL_SIGNAL_H */

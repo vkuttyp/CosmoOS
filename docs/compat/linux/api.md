@@ -190,8 +190,8 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 32 | `dup` | `handle_install` of the same object with the same rights (lowest free slot) | |
 | 33 | `dup2` | closes the target, `handle_install_at`; `dup2(fd, fd)` returns `fd` | target must be `0..63` (`-EBADF`) |
 | 292 | `dup3` | as `dup2` | `-EINVAL` when both are equal; flags dropped |
-| 22, 293 | `pipe`, `pipe2` | `pipe_create`; read end with READ, write end with WRITE | `pipe2` flags (`O_CLOEXEC`, `O_NONBLOCK`) dropped; `-EMFILE` installs nothing |
-| 72 | `fcntl` | `F_GETFD F_SETFD F_SETFL` → 0; `F_GETFL` → `O_RDONLY`/`O_WRONLY`/`O_RDWR` reconstructed from the handle's rights; `F_DUPFD`, `F_DUPFD_CLOEXEC` (1030) → first free slot at or above `arg` | other commands `-EINVAL` |
+| 22, 293 | `pipe`, `pipe2` | `pipe_create`; read end with READ, write end with WRITE | `pipe2`: `O_NONBLOCK` on both ends, `O_CLOEXEC` marks both close-on-exec (roadmap M3; dropped before); `-EMFILE` installs nothing |
+| 72 | `fcntl` | `F_GETFD`/`F_SETFD` the handle's `FD_CLOEXEC` (roadmap M3; 0 before); `F_SETFL` `O_NONBLOCK`; `F_GETFL` → `O_RDONLY`/`O_WRONLY`/`O_RDWR` reconstructed from the handle's rights; `F_DUPFD`, `F_DUPFD_CLOEXEC` (1030, the copy marked close-on-exec) → first free slot at or above `arg` | other commands `-EINVAL` |
 | 16 | `ioctl` | `TCGETS`, `TCSETS`/`TCSETSW`/`TCSETSF`, `TIOCGWINSZ` on a terminal, through `lx_termios_*` | `-ENOTTY` for any other request, and for a handle that is not a terminal |
 
 ### Memory
@@ -212,8 +212,11 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 60 | `exit` | `process_thread_exit(status & 0xff)`: the calling thread; the process ends with that status when it was the last live thread | |
 | 231 | `exit_group` | `process_exit(status & 0xff)`: every thread | |
 | 39 | `getpid` | `pid` | |
+| 57, 58 / -- | `fork`, `vfork` (x86-64 only; AArch64 programs use `clone`) | `clone(SIGCHLD)` and `clone(CLONE_VM\|CLONE_VFORK\|SIGCHLD)`: `lx_fork_common` → `process_fork` (design.md, "fork") | |
+| 56 / 220 | `clone` without `CLONE_THREAD` (roadmap M3) | `process_fork`; `CLONE_VM` only with `CLONE_VFORK` (the space borrowed, the caller waits until the child execs or exits), `CLONE_VFORK` alone, `SETTLS`, `PARENT_SETTID` (in the caller), `CHILD_SETTID` (in the child, before its first instruction), `CHILD_CLEARTID`; returns the pid | another flag, `CLONE_VM` alone, or an exit signal other than `SIGCHLD` `-EINVAL`; `-ENOMEM`, `-EAGAIN` (`NPROC`) with nothing created |
+| 59 / 221 | `execve` (roadmap M3) | `exec_args_copy` then `process_execve` (design.md, "execve") | `-ENOENT`, `-EACCES`, `-ENOEXEC`, `-ELOOP`, `-E2BIG`, `-EFAULT` with the caller intact |
 | 186 | `gettid` | `thread->user_tid`: the pid for the main thread, `0x10000 + kernel tid` for a clone | |
-| 56 | `clone` (milestone 10) | the thread set only: `CLONE_VM\|THREAD\|SIGHAND` required, plus any of `FS`, `FILES`, `SYSVSEM`, `SETTLS`, `PARENT_SETTID`, `CHILD_CLEARTID`, `CHILD_SETTID`, `DETACHED`, `UNTRACED`; `process_add_thread` with the caller's frame (result 0, `rsp`/`sp` = `stack` when non-zero, thread pointer = `tls` under `SETTLS` else the caller's), the tid words written before the child runs, `clear_child_tid` recorded; returns the child's tid. Argument order: x86-64 `flags, stack, ptid, ctid, tls`; AArch64 `flags, stack, ptid, tls, ctid` | without `CLONE_THREAD` (a fork) `-ENOSYS`; `THREAD` without `SIGHAND`/`VM`, or a flag outside the set, `-EINVAL`; an unwritable tid word `-EFAULT` (the child is abandoned); more than 256 live threads `-EAGAIN`; the child's FPU state is the reset state |
+| 56 | `clone` (milestone 10) | the thread set only: `CLONE_VM\|THREAD\|SIGHAND` required, plus any of `FS`, `FILES`, `SYSVSEM`, `SETTLS`, `PARENT_SETTID`, `CHILD_CLEARTID`, `CHILD_SETTID`, `DETACHED`, `UNTRACED`; `process_add_thread` with the caller's frame (result 0, `rsp`/`sp` = `stack` when non-zero, thread pointer = `tls` under `SETTLS` else the caller's), the tid words written before the child runs, `clear_child_tid` recorded; returns the child's tid. Argument order: x86-64 `flags, stack, ptid, ctid, tls`; AArch64 `flags, stack, ptid, tls, ctid` | without `CLONE_THREAD`: the fork row below; `THREAD` without `SIGHAND`/`VM`, or a flag outside the set, `-EINVAL`; an unwritable tid word `-EFAULT` (the child is abandoned); more than 256 live threads `-EAGAIN`; the child's FPU state is the reset state |
 | 203, 204 | `sched_setaffinity`, `sched_getaffinity` | set: accepted and ignored (`-EINVAL` below 8 bytes or an unreadable mask); get: the online CPU mask in 8 bytes, returns 8 | `pid` 0, the caller, one of its threads, or any live process; unknown `-ESRCH` |
 | 110 | `getppid` | `parent_pid` | |
 | 102, 107 | `getuid`, `geteuid` | `cred.uid` | |
@@ -277,9 +280,9 @@ as Linux does.
 
 ### Explicit `-ENOSYS`
 
-`fork` 57, `vfork` 58, `execve` 59, `sysinfo` 99, `rseq` 334,
-`clone3` 435 (x86-64 numbers; the AArch64
-rows use that table's). These are `lx_nosys`, not `lx_unknown`: they are
+`rseq` 334, `clone3` 435 (x86-64 numbers; the AArch64 rows use that
+table's). `fork` 57, `vfork` 58 and `execve` 59 left this list with
+roadmap M3 (the rows above), `sysinfo` 99 with the sysinfo unit. These are `lx_nosys`, not `lx_unknown`: they are
 known and refused, so they are not counted as unknown. `mremap` 25 has
 a number in the tables but no entry: it goes through `lx_unknown`;
 `sendmsg` 46 and `recvmsg` 47 have entries since the unix-sockets unit,

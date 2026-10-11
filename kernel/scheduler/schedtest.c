@@ -800,6 +800,65 @@ int sched_preempt_probe_sysctl(char *out, size_t n)
 
 #endif
 
+#if CONFIG_DEBUG
+/*
+ * Some CI boots run the pair loop 7x slower from the start of the boot
+ * (docs/testing/flakes.md, 2026-10-10). Per CPU, three loops separate
+ * the candidates: the pair as the benchmark runs it (calls, lockdep, the
+ * restore point), the interrupt flag alone in one asm sequence (no calls),
+ * and dependent arithmetic with interrupts left alone (the control).
+ */
+struct irq_probe {
+    unsigned cpu;
+    uint64_t pair_ns, flag_ns, arith_ns;
+};
+
+static void irq_probe_thread(void *arg)
+{
+    struct irq_probe *r = arg;
+    enum { M = 200000 };
+    r->cpu = arch_cpu_id_raw();
+    uint64_t t0 = clock_now_ns();
+    for (unsigned i = 0; i < M; i++) {
+        arch_irq_state_t st = arch_irq_save();
+        arch_irq_restore(st);
+    }
+    r->pair_ns = clock_since_ns(t0) * 10 / M;
+    t0 = clock_now_ns();
+    for (unsigned i = 0; i < M; i++) {
+#if defined(ARCH_X86_64)
+        __asm__ volatile("pushfq\n\tcli\n\tpopfq" ::: "memory", "cc");
+#else
+        __asm__ volatile("mrs x9, daif\n\tmsr daifset, #2\n\tmsr daif, x9" ::: "memory", "x9");
+#endif
+    }
+    r->flag_ns = clock_since_ns(t0) * 10 / M;
+    volatile uint64_t acc = 1;
+    t0 = clock_now_ns();
+    for (unsigned i = 0; i < M; i++)
+        acc = acc * 6364136223846793005ull + i;
+    r->arith_ns = clock_since_ns(t0) * 10 / M;
+}
+
+static void irq_probe_all_cpus(void)
+{
+    cpumask_t online = cpu_online_mask();
+    for (unsigned c = 0; c < 64; c++) {
+        if (!(online & CPUMASK_OF(c)))
+            continue;
+        struct irq_probe r = { 0 };
+        struct thread *t = thread_create_on(irq_probe_thread, &r, "irq-probe", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
+        if (t == NULL)
+            continue;
+        thread_join(t);
+        kinfo("selftest: irqrestore-bench: cpu %u: pair %llu.%llu ns, flag only %llu.%llu ns, arithmetic %llu.%llu ns",
+              r.cpu, (unsigned long long)(r.pair_ns / 10), (unsigned long long)(r.pair_ns % 10),
+              (unsigned long long)(r.flag_ns / 10), (unsigned long long)(r.flag_ns % 10),
+              (unsigned long long)(r.arith_ns / 10), (unsigned long long)(r.arith_ns % 10));
+    }
+}
+#endif
+
 /* --- the cost of the restore point: a million save/restore pairs --- */
 bool selftest_irqrestore_bench(const char **reason)
 {
@@ -811,6 +870,14 @@ bool selftest_irqrestore_bench(const char **reason)
         arch_irq_restore(s);   /* with need_resched clear: the predicate's two loads and a branch */
     }
     uint64_t dt = clock_since_ns(t0);
+#if CONFIG_DEBUG
+    /* Some CI boots run this loop 7x slower from the start of the boot
+     * (docs/testing/flakes.md, 2026-10-10): name the interrupt state. */
+    char irqs[200];
+    arch_test_irq_state(irqs, sizeof(irqs));
+    kinfo("selftest: irqrestore-bench: interrupt controller: %s", irqs);
+    irq_probe_all_cpus();
+#endif
     kinfo("selftest: irqrestore-bench: %u save/restore pairs in %llu us, %llu ns a pair; restore-point preemptions so far on this CPU: %llu",
           N, (unsigned long long)(dt / 1000), (unsigned long long)(dt / N),
           (unsigned long long)preempt_point_count(raw_cpu_id()));   /* a statistic */

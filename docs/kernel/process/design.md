@@ -1348,7 +1348,7 @@ initial stack, so `kernel/process/process.c` names no personality.
 | `platform` | the initial-stack builder pushes it when not NULL (AT_PLATFORM) | NULL | `x86_64` / `aarch64` |
 | `auxv` | the initial-stack builder, with the addresses it placed (`struct personality_auxv_args`) | PHDR/PHENT/PHNUM/PAGESZ/ENTRY/RANDOM | the Linux vector |
 | `fork` | `process_fork`, after the space is copied or borrowed, before the handles; fails the fork | none (no native fork) | `linux_process_fork`: the break, and a record per SysV shm attach with the attach's tag (none for a vfork child) |
-| `exec` | M3 PR 3: the state reset for a new image | | |
+| `exec` | `process_exec_images` after the point of no return, when the new image keeps the personality (a different one is the old `release`, then the new `init`) | none | `linux_process_exec`: release, then init (attaches detached, a new break, the trampoline in the new space) |
 
 The only behaviour that moved: a native process's initial stack no longer
 carries the AT_PLATFORM string, which its vector never pointed at.
@@ -1385,6 +1385,43 @@ so `wait4` finds it from the moment the caller learns its pid.
 **vfork.** A vfork child borrows the parent's space, and the parent waits
 in `process_vfork_wait` (killable) on the child's `vfork_wq` until
 `process_vfork_release(child)`: when the child's last thread is gone
-(`process_last_thread_gone`, after its use of the space ends) and, from
-M3 PR 3, when it execs. A parent killed while it waits returns and exits;
-the child keeps the space through its own reference (memory M51).
+(`process_last_thread_gone`, after its use of the space ends) and when it
+execs. A parent killed while it waits returns and exits; the child keeps
+the space through its own reference (memory M51).
+
+## exec (roadmap M3)
+
+`process_execve(args, frame)` (`kernel/process/spawn.c`) resolves the
+path from the caller's directory, follows `#!` scripts to their
+interpreters (at most four deep, `-ELOOP`; argv becomes interpreter,
+the line's one optional argument, the script's path, then `argv[1..]`)
+and an ELF's `PT_INTERP`, refuses a personality the caller's syscall
+filter cannot describe (as spawn does), and calls
+`process_exec_images`. Both doors reach it: Linux `execve` and native
+`SYS_exec`, with argv and envp copied in by `exec_args_copy`.
+
+`process_exec_images` (`kernel/process/process.c`) builds before it
+changes anything: `image_build`, shared with spawn, validates the images,
+creates a space, loads the executable and its interpreter, maps the stack
+and writes the initial frame (as many populated pages as the strings
+need, up to 32). Then every other thread ends (`exec_single_thread`:
+`exec_thread` makes each leave at its next return to user mode or
+killable wait, and the caller waits until the reaper has released them,
+so none touches the old space again; an ordinary signal does not
+interrupt this wait, the process's death does, `-EINTR`). That is the
+point of no return:
+
+| Step | |
+|---|---|
+| the old image's `CHILD_CLEARTID` word | cleared and woken while that image is still mapped |
+| the space | the new one installed and switched to on this CPU; the old one `vm_space_put` -- destroyed, or for a vfork child returned to its parent, which `process_vfork_release` then lets run |
+| handles | `handle_close_on_exec` |
+| signals | caught ones back to `SIG_DFL`, ignored stay ignored, the alternate stack gone; mask and pending kept (`signal_exec_reset`) |
+| personality | the new image's: the same one's `exec` hook, or the old one's `release` and the new one's `init` |
+| the process | name (the path's last component), `exec_path` (AT_EXECFN: the path asked for, also for a script), image fields; the calling thread becomes `main_thread` with the pid as its tid |
+| the thread | thread pointer 0, FP/SIMD reset (`arch_fpu_reset_current`), `set_child_tid` 0, the syscall frame rewritten to enter the new image with the frame's stack pointer |
+
+A failure of the personality's state after that point ends the process
+(`128 + SIGKILL`); nothing else can fail there. Credentials, limits,
+directories, namespaces, the domain, the syscall filter, the pid, the
+parent and the children are unchanged.

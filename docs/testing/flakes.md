@@ -3807,3 +3807,86 @@ neighbour table is correct and stays. **Recorded, not fixed:**
 test and its interface are gone (deferred-work inventory §8). This
 mechanism may also account for the unattributed `+0` sightings of
 2026-10-07 above; their logs predate the instrumentation and cannot show it.
+
+## `net-bench`'s slow mode with the watchdog, PR #347's x86-64 guard boot, 2026-10-10
+
+**Run 38072717584, PR #347's x86-64 job, "Boot test on a
+protection-capable CPU (debug)":** `boot-test: FAIL after 152.5s` with
+two failures, both in `net-bench`:
+
+- `net-bench took 9818 ms (budget 8000 ms)`. Steer 0: `tcp 1 flow 2
+  MiB/s, 2 flows 2 MiB/s total, udp 7702 sends/s (10000 of 10000
+  delivered)`; steer 1: `tcp 1 flow 4 MiB/s, 2 flows 19 MiB/s total, udp
+  7753 sends/s`. Every assertion passed. This is the slow mode of the
+  `net-bench` row above.
+- `[WATCHDOG] no progress for 8002 ms`, printed between the two steers:
+  `netrx/0` running on CPU 0, ticking ("last tick 0 ms ago"), `kmain`
+  blocked on a completion, the other three CPUs idle. A slow benchmark,
+  not a hang: the test then finished.
+
+Unlike the 2026-10-08 sighting, the rest of the boot was normal
+(self-tests summed 131.8 s). PR #347 (exec, close-on-exec) changes no
+network code, and the same commit's AArch64 job and every other x86-64
+boot of the run passed. Still the open follow-up the row names: a
+mechanism for the slow mode.
+
+**Twice more on the same PR.** The rerun (attempt 2 of run 38072717584)
+failed the two-CPU boot: `net-bench took 22142 ms`, both steers at 1
+MiB/s. Run 38075570263 (a documentation commit) failed the harness-retry
+boot: `net-bench took 16575 ms`. Every failing boot was slow as a whole:
+`cosmofs-replay` 22.3-27.1 s and self-tests summing 143.5-167.8 s,
+against `cosmofs-replay` 14.3-17.4 s and 110.7-126.7 s in every passing
+x86-64 boot of the same runs and of main's #345 and #346 merge runs. In
+the passing boots PR #347's times match main's (`cosmofs-replay`
+15.9-16.6 s against 16.4-17.4 s), and `net-bench` is never among the
+five slowest tests on either.
+
+**Corrected: not the host, and more often on this branch.** A fifth boot
+failed the same way in run 38078343577 (the build job's first boot,
+`net-bench` 19.1 s, and the entropy job's second, 24.6 s). Main's #346
+merge run, rerun as a control at the same time (38072676670, attempt 2),
+passed every job: its eight x86-64 boots were uniformly slower on that
+runner -- compute included (`lockdep-graph-bench` 6.9-7.3 s) -- and none
+had this mode. Today that is 0 of about 20 main boots against 5 of about
+22 on PR #347. And the slow boots are not uniformly slow, which a host
+stretch would be: in the harness-retry boot of run 38075570263 against
+the same run's chaos boot, compute-bound tests read the same
+(`lockdep-graph-bench` 1.06x, `process-user` 1.07x, `syscall-fuzz`
+1.03x) while code that toggles interrupts or waits on devices is slow:
+`irqrestore-bench` 1567 ns a pair against 215-233 (6.8x; every slow
+boot 943-1655, every normal one 213-229), `net-bench` 5.8x, the cosmofs
+and block tests 1.6-2.2x. It is there from the eighth self-test (`pmm`
+228 ms against 45), before any code the branch adds runs; in the
+entropy job a normal boot and a slow one ran on the same runner.
+
+The 2026-10-06 entry's per-boot modes were about 1.3x and these are 7x.
+The shape -- code running with interrupts masked untouched, every
+interrupt enable expensive -- fits a CPU with an interrupt request it
+can never deliver, which QEMU re-examines at every `sti`/`popf`. The
+branch moves code (`.text` +9.6 KB; 160 functions newly cross a page,
+`tick_isr` among them) but not the interrupt path's own functions, so a
+layout effect on an early race is the working hypothesis, not a
+measurement. Debug builds now print the local APIC's in-service and
+request bitmaps, TPR and PPR in `irqrestore-bench`, so the next slow boot
+says whether a vector is stuck.
+
+**What the next runs said.** The interrupt controller was clean in a slow
+boot (run 38082931708: 936 ns a pair, in-service and request bitmaps
+empty, TPR and PPR 0), so no vector is stuck. In run 38085149981 every
+boot's pair loop read 254-274 ns on every CPU (the per-CPU probe now in
+the benchmark), yet the two-CPU boot failed: `net-bench` 11.4 s with
+steer 0 at 1 MiB/s. **Every slow `net-bench` of the series is the TCP
+collapse** -- 1 MiB/s on the single flow, against 23-38 in normal boots
+-- with or without the 7x interrupt-path mode.
+
+**The control: layout alone.** Draft PR #348 is main plus 9616 bytes of
+dead padding in `kernel/process/process.c`'s text, PR #347's `.text`
+growth and none of its code. Its run 38087072382 failed the same way, in
+the harness-break boot: `net-bench took 14551 ms`, steer 0 `tcp 1 flow 1
+MiB/s, 2 flows 1 MiB/s`, the watchdog, with the pair loop at 291 ns. At
+the same time PR #347's rerun (38085149981, attempt 2) passed every job.
+So the collapse is main's code, and the layout PR #347 brings makes it
+more frequent on CI's x86-64 runners; the branch's code is not its cause.
+This is the `net-bench` row's open follow-up -- a mechanism for the TCP
+collapse -- and it now blocks: a main with this layout would go red.
+

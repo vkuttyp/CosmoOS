@@ -223,6 +223,7 @@ struct lx_winsize {
 #define LX_F_GETFL 3
 #define LX_F_SETFL 4
 #define LX_F_DUPFD_CLOEXEC 1030
+#define LX_FD_CLOEXEC 1
 
 /* --- clocks --- */
 #define LX_CLOCK_REALTIME 0
@@ -246,6 +247,7 @@ struct lx_winsize {
 #define LX_MSG_TRUNC    0x20
 #define LX_MSG_DONTWAIT 0x40
 #define LX_MSG_NOSIGNAL 0x4000
+#define LX_MSG_CMSG_CLOEXEC 0x40000000
 #define LX_SOCK_NONBLOCK 04000
 #define LX_SOCK_CLOEXEC 02000000
 #define LX_SOL_SOCKET 1

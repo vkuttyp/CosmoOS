@@ -35,10 +35,11 @@ void handle_table_destroy(struct handle_table *t)
     KASSERT(t->count == 0);
 }
 
-static int install_slot(struct handle_table *t, int h, struct kobject *obj, unsigned rights)
+static int install_slot(struct handle_table *t, int h, struct kobject *obj, unsigned rights, unsigned flags)
 {
     t->entries[h].obj = obj;
     t->entries[h].rights = rights;
+    t->entries[h].flags = flags;
     t->count++;
     /* One more descriptor to the object, in some process (the count is
      * per object, across every table). */
@@ -47,6 +48,11 @@ static int install_slot(struct handle_table *t, int h, struct kobject *obj, unsi
 }
 
 int handle_install(struct handle_table *t, struct kobject *obj, unsigned rights)
+{
+    return handle_install_flags(t, obj, rights, 0);
+}
+
+int handle_install_flags(struct handle_table *t, struct kobject *obj, unsigned rights, unsigned flags)
 {
     KASSERT(obj != NULL);
     kobject_get(obj);
@@ -64,7 +70,7 @@ int handle_install(struct handle_table *t, struct kobject *obj, unsigned rights)
     }
     for (int h = 0; h < HANDLE_TABLE_SIZE; h++) {
         if (t->entries[h].obj == NULL) {
-            int r = install_slot(t, h, obj, rights);
+            int r = install_slot(t, h, obj, rights, flags);
             spin_unlock_irqrestore(&t->lock, s);
             return r;
         }
@@ -76,6 +82,11 @@ int handle_install(struct handle_table *t, struct kobject *obj, unsigned rights)
 }
 
 int handle_install_at(struct handle_table *t, int h, struct kobject *obj, unsigned rights)
+{
+    return handle_install_at_flags(t, h, obj, rights, 0);
+}
+
+int handle_install_at_flags(struct handle_table *t, int h, struct kobject *obj, unsigned rights, unsigned flags)
 {
     KASSERT(obj != NULL);
     if (h < 0 || h >= HANDLE_TABLE_SIZE)
@@ -93,7 +104,7 @@ int handle_install_at(struct handle_table *t, int h, struct kobject *obj, unsign
         kobject_put(obj);
         return -EBUSY;
     }
-    install_slot(t, h, obj, rights);
+    install_slot(t, h, obj, rights, flags);
     spin_unlock_irqrestore(&t->lock, s);
     return h;
 }
@@ -153,6 +164,7 @@ int handle_close(struct handle_table *t, int h)
     }
     t->entries[h].obj = NULL;
     t->entries[h].rights = 0;
+    t->entries[h].flags = 0;
     t->count--;
     uint32_t left = __atomic_sub_fetch(&obj->handles, 1u, __ATOMIC_ACQ_REL);
     spin_unlock_irqrestore(&t->lock, s);
@@ -185,6 +197,46 @@ int handle_close(struct handle_table *t, int h)
         rc = io->flush(obj);
     kobject_put(obj); /* outside the lock: release may block */
     return rc;
+}
+
+struct kobject *handle_get_flags(struct handle_table *t, int h, unsigned *rights_out, unsigned *flags_out)
+{
+    if (h < 0 || h >= HANDLE_TABLE_SIZE)
+        return NULL;
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    struct kobject *obj = t->exiting ? NULL : t->entries[h].obj;
+    if (obj != NULL) {
+        kobject_get(obj);
+        *rights_out = t->entries[h].rights;
+        *flags_out = t->entries[h].flags;
+    }
+    spin_unlock_irqrestore(&t->lock, s);
+    return obj;
+}
+
+int handle_set_flags(struct handle_table *t, int h, unsigned flags)
+{
+    if (h < 0 || h >= HANDLE_TABLE_SIZE)
+        return -EBADF;
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    int rc = -EBADF;
+    if (!t->exiting && t->entries[h].obj != NULL) {
+        t->entries[h].flags = flags;
+        rc = 0;
+    }
+    spin_unlock_irqrestore(&t->lock, s);
+    return rc;
+}
+
+void handle_close_on_exec(struct handle_table *t)
+{
+    for (int h = 0; h < HANDLE_TABLE_SIZE; h++) {
+        arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+        bool close = t->entries[h].obj != NULL && (t->entries[h].flags & HANDLE_FLAG_CLOEXEC);
+        spin_unlock_irqrestore(&t->lock, s);
+        if (close)
+            (void)handle_close(t, h);   /* exec has no reader for a flush's error */
+    }
 }
 
 int handle_transfer_check(struct handle_table *t, int h, unsigned give, struct kobject **obj, unsigned *rights)

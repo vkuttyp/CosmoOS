@@ -4645,6 +4645,14 @@ static unsigned bench_tcp(unsigned flows, uint16_t port)
         ts[i] = thread_create(bench_sink_main, &sinks[i], "bench-sink", SCHED_PRIO_DEFAULT);
     }
     thread_sleep_ms(20);
+    struct tcp_stats tb;
+    tcp_get_stats(&tb);
+    uint64_t qb = 0;
+    for (unsigned c = 0; c < 64; c++) {
+        struct net_cpu_stats cs;
+        if (netif_cpu_stats(c, &cs))
+            qb += cs.rx_dropped;
+    }
     uint64_t t0 = clock_now_ns();
     for (unsigned i = 0; i < flows; i++) {
         memset(&clients[i], 0, sizeof(clients[i]));
@@ -4661,6 +4669,24 @@ static unsigned bench_tcp(unsigned flows, uint16_t port)
         total += sinks[i].bytes;
     }
     uint64_t dt = clock_since_ns(t0);
+    /* What a slow run lost (docs/testing/flakes.md, 2026-10-10: some CI
+     * boots run one flow at 1 MiB/s): the TCP counters and the receive
+     * queues' drops over this run. */
+    struct tcp_stats ta;
+    tcp_get_stats(&ta);
+    uint64_t qa = 0;
+    for (unsigned c = 0; c < 64; c++) {
+        struct net_cpu_stats cs;
+        if (netif_cpu_stats(c, &cs))
+            qa += cs.rx_dropped;
+    }
+    kinfo("net-bench: tcp %u flow(s) in %llu ms: segs in %llu out %llu, retransmits %llu, timeouts %llu, "
+          "out of order %llu (queued %llu dropped %llu), receive-queue drops %llu",
+          flows, (unsigned long long)(dt / 1000000), (unsigned long long)(ta.segs_in - tb.segs_in),
+          (unsigned long long)(ta.segs_out - tb.segs_out), (unsigned long long)(ta.retransmits - tb.retransmits),
+          (unsigned long long)(ta.timeouts - tb.timeouts), (unsigned long long)(ta.out_of_order - tb.out_of_order),
+          (unsigned long long)(ta.ooo_queued - tb.ooo_queued), (unsigned long long)(ta.ooo_dropped - tb.ooo_dropped),
+          (unsigned long long)(qa - qb));
     if (total != (uint64_t)flows * BENCH_TCP_BYTES || dt == 0) {
         for (unsigned i = 0; i < flows; i++)
             kwarn("net-bench: flow %u: sink got %u (err %d), client sent %u (err %d)", i, sinks[i].bytes, sinks[i].err,

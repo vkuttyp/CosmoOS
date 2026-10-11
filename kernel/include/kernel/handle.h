@@ -76,7 +76,12 @@
 struct handle_entry {
     struct kobject *obj;   /* NULL = free */
     unsigned rights;
+    unsigned flags;        /* HANDLE_FLAG_*: the slot's, not the object's (POSIX FD_CLOEXEC) */
 };
+
+/* Closed by exec (process_exec): Linux's FD_CLOEXEC. A dup or an install
+ * at a slot starts without it; fork copies it. */
+#define HANDLE_FLAG_CLOEXEC 1u
 
 struct handle_table {
     spinlock_t lock;
@@ -97,10 +102,23 @@ void handle_table_destroy(struct handle_table *t);
 /* Take a reference on `obj` and store it in the lowest free slot.
  * Returns the handle or -EMFILE. */
 int handle_install(struct handle_table *t, struct kobject *obj, unsigned rights);
+/* The same with the slot's flags set in the same hold, so no exec in
+ * another thread can see the handle without them (O_CLOEXEC). */
+int handle_install_flags(struct handle_table *t, struct kobject *obj, unsigned rights, unsigned flags);
 
 /* Store at a specific slot (used for the standard handles of a new
  * process). -EBUSY if occupied, -EBADF if out of range. */
 int handle_install_at(struct handle_table *t, int h, struct kobject *obj, unsigned rights);
+int handle_install_at_flags(struct handle_table *t, int h, struct kobject *obj, unsigned rights, unsigned flags);
+
+/* A slot's flags: read with the object (referenced, as handle_get), or
+ * replaced; -EBADF for an empty slot. */
+struct kobject *handle_get_flags(struct handle_table *t, int h, unsigned *rights_out, unsigned *flags_out);
+int handle_set_flags(struct handle_table *t, int h, unsigned flags);
+
+/* exec: close every handle marked HANDLE_FLAG_CLOEXEC, through
+ * handle_close (each object's last-close work runs as for close). */
+void handle_close_on_exec(struct handle_table *t);
 
 /* Referenced object if `h` is valid and holds every right in
  * `rights_needed`; NULL otherwise. `missing_rights` distinguishes the

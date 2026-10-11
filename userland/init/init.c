@@ -1251,6 +1251,25 @@ static void proc_selftest(void)
         CHECK(rmdir("/tmp/ncn/deep") == 0 && rmdir("/tmp/ncn") == 0);
     }
 
+    /* exec (roadmap M3): a failure leaves this process as it was; a
+     * spawned child becomes another native image, and a Linux one (the
+     * personality follows the new image). */
+    {
+        const char *const nv[] = { "x", NULL };
+        CHECK(cosmo_exec("/no/such/program", nv, NULL) == -COSMO_ENOENT);
+        CHECK(cosmo_exec("/etc/rc", nv, NULL) == -COSMO_EACCES);   /* no execute bit */
+        int est = -1;
+        const char *ex_argv[] = { "init", "--exec-to", "/boot/init", NULL };
+        pid_t ep = spawnve("/boot/init", ex_argv, NULL, NULL, 0);
+        CHECK(ep > 1 && waitpid(ep, &est, 0) == ep && est == 42);
+        struct cosmo_stat lxst;
+        if (cosmo_stat("/boot/tests/linux/lxhello", &lxst) == 0) {
+            const char *lx_argv[] = { "init", "--exec-to", "/boot/tests/linux/lxhello", NULL };
+            ep = spawnve("/boot/init", lx_argv, NULL, NULL, 0);
+            CHECK(ep > 1 && waitpid(ep, &est, 0) == ep && est == 0);
+        }
+    }
+
     /* Introspection. */
     CHECK(getppid() == 0);                                 /* spawned by the kernel */
     struct cosmo_procinfo pi[16];
@@ -5858,6 +5877,14 @@ int main(int argc, char **argv)
         return trap_self(argv[2]);
     if (argc >= 3 && strcmp(argv[1], "--probe") == 0)
         return probe(argv[2]);
+    if (argc >= 3 && strcmp(argv[1], "--exec-to") == 0) {
+        /* SYS_exec (roadmap M3): become argv[2], which reports 42. */
+        const char *const ev[] = { argv[2], "--exec-done", "42", NULL };
+        long rc = cosmo_exec(argv[2], ev, NULL);
+        return 100 + (int)-rc;   /* only a failed exec returns */
+    }
+    if (argc >= 3 && strcmp(argv[1], "--exec-done") == 0)
+        return atoi(argv[2]);
     if (argc >= 3 && strcmp(argv[1], "--filter") == 0)
         return filter_case(argv[2]);
     if (argc >= 4 && strcmp(argv[1], "--syscall-fuzz") == 0)

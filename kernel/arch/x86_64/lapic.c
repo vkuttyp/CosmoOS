@@ -7,11 +7,13 @@
  */
 
 #include <kernel/log.h>
+#include <kernel/printf.h>
 #include <kernel/panic.h>
 #include <kernel/vmm.h>
 
 #include <arch/cpu.h>
 #include <arch/irq.h>
+#include <arch/testhooks.h>
 
 #include <x86/cpu.h>
 #include <x86/lapic.h>
@@ -203,3 +205,21 @@ void lapic_send_sipi(uint32_t apic_id, uint8_t start_page)
 {
     icr_send(apic_id, ICR_DELIVERY_SIPI | start_page);
 }
+
+/* arch/testhooks.h: ISR and IRR as eight 32-bit words each, highest first. */
+void arch_test_irq_state(char *buf, unsigned n)
+{
+    if (!lapic_present()) {
+        ksnprintf(buf, n, "no lapic");
+        return;
+    }
+    uint32_t isr[8], irr[8];
+    for (unsigned i = 0; i < 8; i++) {
+        isr[i] = lapic_read(0x100 + 0x10 * i);
+        irr[i] = lapic_read(0x200 + 0x10 * i);
+    }
+    ksnprintf(buf, n, "isr %08x%08x%08x%08x%08x%08x%08x%08x irr %08x%08x%08x%08x%08x%08x%08x%08x tpr %x ppr %x",
+              isr[7], isr[6], isr[5], isr[4], isr[3], isr[2], isr[1], isr[0], irr[7], irr[6], irr[5], irr[4], irr[3],
+              irr[2], irr[1], irr[0], lapic_read(REG_TPR), lapic_read(0x0A0));
+}
+

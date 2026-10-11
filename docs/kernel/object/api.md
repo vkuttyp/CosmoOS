@@ -158,8 +158,11 @@ Acquire load; for tests and diagnostics only.
 ## Handle tables (`kernel/include/kernel/handle.h`, `kernel/object/handle.c`)
 
 `struct handle_table`: spinlock, `HANDLE_TABLE_SIZE` (64) entries of
-`{ struct kobject *obj; unsigned rights; }` with `NULL` meaning free,
-and a live count. Embedded in `struct process`.
+`{ struct kobject *obj; unsigned rights; unsigned flags; }` with `NULL`
+meaning free, and a live count. Embedded in `struct process`. `flags`
+belong to the slot, not the object (POSIX's descriptor flags): since
+roadmap M3 the one flag is `HANDLE_FLAG_CLOEXEC`, which exec closes; a
+dup or an install at a slot starts without it, fork copies it.
 
 Rights (docs/kernel/object/architecture.md, "Rights"):
 `HANDLE_RIGHT_READ` (1), `WRITE` (2), `DUP` (4), `TRANSFER` (8),
@@ -192,6 +195,21 @@ Zero the slots, count 0, initialise the lock. Once, before any use.
 ### `int handle_install_at(struct handle_table *t, int h, struct kobject *obj, unsigned rights)`
 - Purpose: store at slot `h` (used for handles 0–2 of a new process).
 - Outputs: `h`; `-EBADF` if out of range; `-EBUSY` if occupied.
+
+### `handle_install_flags`, `handle_install_at_flags` (roadmap M3)
+`handle_install` and `handle_install_at` with the slot's flags set in the
+same hold, so an exec in another thread never sees the handle without
+them (`O_CLOEXEC`, `pipe2`, `dup3`, `F_DUPFD_CLOEXEC`, `SOCK_CLOEXEC`,
+`MSG_CMSG_CLOEXEC`, the `*_CLOEXEC` flags of `eventfd2`, `signalfd4`,
+`timerfd_create`, `epoll_create1`, `memfd_create`).
+
+### `struct kobject *handle_get_flags(t, h, &rights, &flags)`, `int handle_set_flags(t, h, flags)` (roadmap M3)
+`handle_get` that also reports the slot's flags (fork copies them), and
+`F_SETFD`'s replacement of them; `-EBADF` for a free slot.
+
+### `void handle_close_on_exec(struct handle_table *t)` (roadmap M3)
+Close every slot marked `HANDLE_FLAG_CLOEXEC` through `handle_close`, so
+each object's last-close work runs as for `close`.
 
 ### `struct kobject *handle_get(struct handle_table *t, int h, unsigned *rights_out)`
 - Purpose: translate a handle to a referenced object *and* its rights,

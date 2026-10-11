@@ -84,4 +84,9 @@ bool arch_test_msi_per_device(void);
  * register. */
 uint64_t arch_test_host_vtimer_ctl(void);
 
+/* The calling CPU's interrupt controller state as text, for a benchmark
+ * that wants to say why it is slow (x86-64: the local APIC's in-service
+ * and request bitmaps, TPR and PPR; elsewhere "n/a"). Debug builds. */
+void arch_test_irq_state(char *buf, unsigned n);
+
 #endif /* ARCH_TESTHOOKS_H */

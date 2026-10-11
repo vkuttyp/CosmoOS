@@ -187,6 +187,15 @@ static int linux_process_fork(struct process *parent, struct process *child)
     }
 }
 
+/* exec: the state for a new Linux image -- the old attaches detached (their
+ * mappings went with the old space), a new break, the trampoline mapped in
+ * the new space. */
+static int linux_process_exec(struct process *p, const struct elf_info *info)
+{
+    linux_process_release(p);
+    return linux_process_init(p, info);
+}
+
 static unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x, uint64_t *w,
                     unsigned max)
 {
@@ -503,7 +512,8 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
     /* Rights only shrink on the way down: what is derived through a
      * descriptor carries no data right the descriptor lacks (P31). */
     rights &= have | ~(HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
-    int h = handle_install(&process_current()->handles, &f->obj, rights);
+    int h = handle_install_flags(&process_current()->handles, &f->obj, rights,
+                                 (lxflags & LX_O_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
     file_put(f);
     return h;
 }
@@ -741,10 +751,9 @@ static int64_t do_eventfd(uint32_t initval, unsigned flags)
         return rc;
     if (flags & LX_EFD_NONBLOCK)
         kobject_set_nonblock(obj, 1);
-    /* EFD_CLOEXEC is accepted and ignored: this kernel's spawn model carries
-     * no descriptor across exec, so there is nothing to mark (as pipe2 does). */
-    int h = handle_install(&process_current()->handles, obj,
-                           HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
+    int h = handle_install_flags(&process_current()->handles, obj,
+                                 HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER,
+                                 (flags & LX_EFD_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
     kobject_put(obj);   /* the handle holds its own reference */
     return h;
 }
@@ -784,9 +793,8 @@ static int64_t do_signalfd(int fd, uint64_t umask, size_t sizemask, unsigned fla
     int rc = signalfd_obj_create(mask, (flags & LX_SFD_NONBLOCK) != 0, &obj);
     if (rc)
         return rc;
-    /* SFD_CLOEXEC is accepted and ignored (the spawn model carries no fd across
-     * exec), as eventfd/timerfd do. */
-    int h = handle_install(&process_current()->handles, obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+    int h = handle_install_flags(&process_current()->handles, obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER,
+                                 (flags & LX_SFD_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
     kobject_put(obj);
     return h;
 }
@@ -812,10 +820,9 @@ static int64_t do_timerfd_create(unsigned clockid, unsigned flags)
                                        clockid == LX_CLOCK_REALTIME, &obj);
     if (rc)
         return rc;
-    /* TFD_CLOEXEC is accepted and ignored: the spawn model carries no
-     * descriptor across exec (as for pipe2/eventfd). A timerfd is read-only. */
-    int h = handle_install(&process_current()->handles, obj,
-                           HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+    /* A timerfd is read-only. */
+    int h = handle_install_flags(&process_current()->handles, obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER,
+                                 (flags & LX_TFD_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
     kobject_put(obj);
     return h;
 }
@@ -898,8 +905,7 @@ static int64_t lx_memfd_create(struct syscall_args *a)
      * accounting): validate that it is a readable, bounded string, then
      * ignore it. Linux caps it at 249 bytes and returns -EINVAL for a longer
      * one, so a 250-byte buffer turns strncpy_from_user's -ENAMETOOLONG into
-     * -EINVAL; a faulting pointer stays -EFAULT. MFD_CLOEXEC is a no-op under
-     * the spawn model. */
+     * -EINVAL; a faulting pointer stays -EFAULT. */
     char name[250];
     int rc = strncpy_from_user(name, a->a[0], sizeof(name));
     if (rc == -EFAULT)
@@ -914,8 +920,9 @@ static int64_t lx_memfd_create(struct syscall_args *a)
     rc = vfs_open_vnode(vn, COSMO_O_RDWR, &f);   /* consumes vn's reference */
     if (rc)
         return rc;
-    int h = handle_install(&process_current()->handles, &f->obj,
-                           HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
+    int h = handle_install_flags(&process_current()->handles, &f->obj,
+                           HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER,
+                                 (flags & LX_MFD_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
     file_put(f);   /* the table holds its own reference */
     return h;
 }
@@ -985,8 +992,8 @@ static int64_t do_epoll_create(unsigned flags)
     int rc = epoll_obj_create(&obj);
     if (rc)
         return rc;
-    /* EPOLL_CLOEXEC is accepted and a no-op under the spawn model. */
-    int h = handle_install(&process_current()->handles, obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+    int h = handle_install_flags(&process_current()->handles, obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER,
+                                 (flags & LX_EPOLL_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
     kobject_put(obj);
     return h;
 }
@@ -1368,7 +1375,7 @@ static int64_t lx_dup(struct syscall_args *a)
     return rc;
 }
 
-static int64_t dup_to(int h, int target)
+static int64_t dup_to(int h, int target, unsigned flags)
 {
     if (target < 0 || target >= HANDLE_TABLE_SIZE)
         return -EBADF;
@@ -1382,18 +1389,19 @@ static int64_t dup_to(int h, int target)
         rc = h;
     } else {
         handle_close(t, target);
-        rc = handle_install_at(t, target, obj, rights);
+        rc = handle_install_at_flags(t, target, obj, rights, flags);
     }
     kobject_put(obj);
     return rc;
 }
 
-static __maybe_unused int64_t lx_dup2(struct syscall_args *a) { return dup_to((int)a->a[0], (int)a->a[1]); }
+static __maybe_unused int64_t lx_dup2(struct syscall_args *a) { return dup_to((int)a->a[0], (int)a->a[1], 0); }
 static int64_t lx_dup3(struct syscall_args *a)
 {
-    if ((int)a->a[0] == (int)a->a[1])
+    unsigned flags = (unsigned)a->a[2];
+    if ((int)a->a[0] == (int)a->a[1] || (flags & ~(unsigned)LX_O_CLOEXEC))
         return -EINVAL;
-    return dup_to((int)a->a[0], (int)a->a[1]);
+    return dup_to((int)a->a[0], (int)a->a[1], (flags & LX_O_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
 }
 
 static int64_t do_pipe(uint64_t uarr, unsigned flags)
@@ -1412,8 +1420,9 @@ static int64_t do_pipe(uint64_t uarr, unsigned flags)
     int32_t h[2];
     /* The owner rights too, as the native pipe gives: a Linux descriptor
      * can be dup'd and passed in a message (SCM_RIGHTS needs TRANSFER). */
-    h[0] = handle_install(t, rd, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
-    h[1] = h[0] < 0 ? -EMFILE : handle_install(t, wr, HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
+    unsigned hf = (flags & LX_O_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0;
+    h[0] = handle_install_flags(t, rd, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER, hf);
+    h[1] = h[0] < 0 ? -EMFILE : handle_install_flags(t, wr, HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER, hf);
     kobject_put(rd);
     kobject_put(wr);
     if (h[0] < 0 || h[1] < 0) {
@@ -1430,22 +1439,24 @@ static int64_t do_pipe(uint64_t uarr, unsigned flags)
 }
 
 static __maybe_unused int64_t lx_pipe(struct syscall_args *a) { return do_pipe(a->a[0], 0); }
-static int64_t lx_pipe2(struct syscall_args *a) { return do_pipe(a->a[0], (unsigned)a->a[1]); }   /* O_CLOEXEC dropped */
+static int64_t lx_pipe2(struct syscall_args *a) { return do_pipe(a->a[0], (unsigned)a->a[1]); }
 
 static int64_t lx_fcntl(struct syscall_args *a)
 {
     int h = (int)a->a[0];
     unsigned cmd = (unsigned)a->a[1];
     struct handle_table *t = &process_current()->handles;
-    unsigned rights;
-    struct kobject *obj = handle_get(t, h, &rights);
+    unsigned rights, hflags;
+    struct kobject *obj = handle_get_flags(t, h, &rights, &hflags);
     if (obj == NULL)
         return -EBADF;
     int64_t rc;
     switch (cmd) {
     case LX_F_GETFD:
+        rc = (hflags & HANDLE_FLAG_CLOEXEC) ? LX_FD_CLOEXEC : 0;
+        break;
     case LX_F_SETFD:
-        rc = 0;
+        rc = handle_set_flags(t, h, (a->a[2] & LX_FD_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
         break;
     case LX_F_SETFL: {
         /* O_NONBLOCK is the one status flag with an effect; the rest are accepted and dropped. */
@@ -1465,7 +1476,7 @@ static int64_t lx_fcntl(struct syscall_args *a)
         int min = (int)a->a[2];
         rc = -EMFILE;
         for (int i = min < 0 ? 0 : min; i < HANDLE_TABLE_SIZE; i++) {
-            int r = handle_install_at(t, i, obj, rights);
+            int r = handle_install_at_flags(t, i, obj, rights, cmd == LX_F_DUPFD_CLOEXEC ? HANDLE_FLAG_CLOEXEC : 0);
             if (r >= 0) {
                 rc = r;
                 break;
@@ -2768,6 +2779,20 @@ static int64_t lx_fork_common(struct syscall_args *a, uint64_t flags, unsigned e
     return pid;
 }
 
+/* execve (docs/compat/linux/design.md, "execve"): the image replaced in
+ * place, through the same operation as the native SYS_exec. */
+static int64_t lx_execve(struct syscall_args *a)
+{
+    struct exec_args *ea = kmalloc(sizeof(*ea), 0);
+    if (ea == NULL)
+        return -ENOMEM;
+    int rc = exec_args_copy(ea, a->a[0], a->a[1], a->a[2]);
+    if (rc == 0)
+        rc = process_execve(ea, a->frame);
+    kfree(ea);
+    return rc;
+}
+
 #ifdef LX_fork
 static int64_t lx_fork(struct syscall_args *a) { return lx_fork_common(a, 0, LX_CLONE_EXIT_SIGCHLD, 0, 0, 0, 0); }
 #endif
@@ -3000,7 +3025,8 @@ static int64_t lx_socket(struct syscall_args *a)
         return rc;
     if (nonblock)
         ksock_set_nonblock(s, true);
-    int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_SOCK_ALL);
+    int h = handle_install_flags(&process_current()->handles, &s->obj, HANDLE_RIGHT_SOCK_ALL,
+                                 ((unsigned)a->a[1] & LX_SOCK_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
     ksock_put(s);
     return h;
 }
@@ -3074,7 +3100,8 @@ static int64_t lx_accept(struct syscall_args *a)
         ksock_put(c);
         return rc;
     }
-    int h = handle_install(&process_current()->handles, &c->obj, HANDLE_RIGHT_SOCK_CONNECTED);
+    int h = handle_install_flags(&process_current()->handles, &c->obj, HANDLE_RIGHT_SOCK_CONNECTED,
+                                 (a->a[3] & LX_SOCK_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);   /* accept4 */
     ksock_put(c);
     return h;
 }
@@ -3445,7 +3472,8 @@ static int64_t lx_recvmsg(struct syscall_args *a)
     unsigned installed = 0;
     int32_t fds[UNIX_HANDLES_MAX];
     for (unsigned i = 0; i < hs.nr && n >= 0; i++) {
-        int hv = handle_install(t, hs.objs[i], hs.rights[i]);
+        int hv = handle_install_flags(t, hs.objs[i], hs.rights[i],
+                                      (flags & LX_MSG_CMSG_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
         if (hv < 0) {
             oflags |= COSMO_MSG_HTRUNC;
             break;
@@ -3515,8 +3543,9 @@ static int64_t lx_socketpair(struct syscall_args *a)
     }
     struct handle_table *t = &process_current()->handles;
     int32_t h[2];
-    h[0] = handle_install(t, &x->obj, HANDLE_RIGHT_SOCK_CONNECTED);
-    h[1] = h[0] < 0 ? -EMFILE : handle_install(t, &y->obj, HANDLE_RIGHT_SOCK_CONNECTED);
+    unsigned hf = ((unsigned)a->a[1] & LX_SOCK_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0;
+    h[0] = handle_install_flags(t, &x->obj, HANDLE_RIGHT_SOCK_CONNECTED, hf);
+    h[1] = h[0] < 0 ? -EMFILE : handle_install_flags(t, &y->obj, HANDLE_RIGHT_SOCK_CONNECTED, hf);
     ksock_put(x);
     ksock_put(y);
     if (h[0] < 0 || h[1] < 0) {
@@ -3625,7 +3654,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
 #ifdef LX_vfork
     [LX_vfork] = lx_vfork,
 #endif
-    [LX_execve] = lx_nosys,
+    [LX_execve] = lx_execve,
     [LX_exit] = lx_exit,
     [LX_wait4] = lx_wait4,
     [LX_kill] = lx_kill,
@@ -3792,6 +3821,7 @@ const struct personality personality_linux = {
     .init = linux_process_init,
     .release = linux_process_release,
     .fork = linux_process_fork,
+    .exec = linux_process_exec,
     .platform = LINUX_PLATFORM,   /* AT_PLATFORM: the string Linux gives on this machine */
     .auxv = linux_auxv,
     .table = g_table,

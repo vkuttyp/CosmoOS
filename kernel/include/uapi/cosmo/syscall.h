@@ -165,7 +165,8 @@
 #define SYS_mknod     100 /* (const char *path, uint32_t mode, uint32_t type) -> 0; type COSMO_DT_FIFO: a named pipe */
 #define SYS_timer_create 101 /* (uint64_t initial_ns, uint64_t interval_ns) -> handle; a timer as a submittable I/O object (timerfd) */
 #define SYS_switch_root 102 /* (const char *path) -> 0; init alone: the mount at path becomes the root (roadmap M2) */
-#define SYS_COUNT     103
+#define SYS_exec      103 /* (const char *path, char *const argv[], char *const envp[]) -> no return; the image replaced in place (roadmap M3) */
+#define SYS_COUNT     104
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
