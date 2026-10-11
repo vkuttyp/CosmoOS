@@ -248,6 +248,10 @@ still go through the per-CPU network workers, and nothing polls with
 interrupts off), interrupt moderation, busy polling; TCP window scaling, SACK,
 timestamps, ECN, fast recovery, Nagle; IP fragmentation and reassembly;
 IPv6 routing beyond loopback and ND against a real peer.
+Seen by `net-bench`'s counters (2026-10-11, flakes.md): a loopback TCP
+flow's 200 ms retransmission timeout with no drop anywhere (twice in 16 CI
+boots), and a connection left by an earlier self-test still retransmitting
+at backoff 4-7 while `net-bench` runs.
 
 ### 2.6 Linux compatibility (constitution §40 phases 3-4; Prompt #2 §30)
 

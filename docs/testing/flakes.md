@@ -333,7 +333,7 @@ code:
 | --- | --- | --- | --- | --- |
 | `net-tcp-syncache` | `nettest.c:983` | a fixed `settle(N)` before an assertion | 4, one blocking a merge | waits for the SYN-answered counter |
 | `net-icmp-limit` | `nettest.c:1236` | the same, "N things after a fixed settle" | 1, on the unit's own pull request | waits for the echoes decided |
-| `net-bench` | its 8 s per-test budget (2026-09-14, the unit's third twenty-boot run, x86-64) | 71 s with every assertion passing and normal throughput: time lost between rounds, a retransmit backoff after a receive-queue drop the likeliest mechanism; seen twice more on CI's slow x86-64 runners on 2026-10-07 (PR #328's guard boot, 11.5 s, and a debug boot, 9.2 s: one flow at 6-7 MiB/s, two flows at 1 MiB/s, UDP 65-70 % delivered, the second phase of the same boot normal, every assertion passing). Not that branch's doing: under the host slow mode (`QEMU_WRAP="taskpolicy -c utility nice -n 5"`) main's kernel and the branch's alternated two rounds each at 3.0/2.1 s and 2.1/2.7 s with the same throughput spread; a slow runner reaches the mode more often than a quiet development host does | 1 in 100 locally; 2 of about 6 x86-64 boots on CI's slow runners that day | **fixed 2026-10-11**: the mechanism was the sender's silly window -- in a slow boot one flow sent about 13,900 segments for 4 MiB (about 300 bytes each) against about 800 in a normal one, with no retransmit, timeout or drop; RFC 1122's sender rule (N29, `docs/audit/2026-10-11-tcp-sws-report.md`) |
+| `net-bench` | its 8 s per-test budget (2026-09-14, the unit's third twenty-boot run, x86-64) | 71 s with every assertion passing and normal throughput: time lost between rounds, a retransmit backoff after a receive-queue drop the likeliest mechanism; seen twice more on CI's slow x86-64 runners on 2026-10-07 (PR #328's guard boot, 11.5 s, and a debug boot, 9.2 s: one flow at 6-7 MiB/s, two flows at 1 MiB/s, UDP 65-70 % delivered, the second phase of the same boot normal, every assertion passing). Not that branch's doing: under the host slow mode (`QEMU_WRAP="taskpolicy -c utility nice -n 5"`) main's kernel and the branch's alternated two rounds each at 3.0/2.1 s and 2.1/2.7 s with the same throughput spread; a slow runner reaches the mode more often than a quiet development host does | 1 in 100 locally; 2 of about 6 x86-64 boots on CI's slow runners that day | **fixed 2026-10-11**: the mechanism was the sender's silly window -- in a slow boot one flow sent about 13,900 segments for 4 MiB (about 300 bytes each) against about 800 in a normal one, with no retransmit, timeout or drop; RFC 1122's sender rule (N29, `docs/audit/2026-10-11-tcp-sws-report.md`); **restated 2026-10-11**: fixed time windows, after #351's code took aarch64 CI boots to 6-8.7 s with no RTOs or drops in the slow rounds (the section below) |
 | `net-icmp-limit` | `nettest.c:1444` (2026-09-14, the unit's own twenty-boot run) | the limiter window's boundary inside the burst -- a phase the test never controlled | 1 in 40 | the phase made known: fill and probe until a refusal, then probe until a reply, flood into the fresh window; the residual listed above |
 | `sleep` | `schedtest.c:368` | upper bound | 1 | widened and labelled; listed above |
 | `smp-parallel` | `smptest.c:239` | work ratio | 1 | restated: parallelism observed from CPU 0 |
@@ -425,6 +425,46 @@ Earlier, the same family: `schedtest.c`'s tick-rate lag bound was widened
 in pull request #63 after failing on a loaded host, and its comment
 already says what this file says -- a tighter bound was only ever
 measuring the host.
+
+## `net-bench` over its 8 s guard with #351's code: no RTOs, no drops -- restated as windows, 2026-10-11
+
+**What failed.** After #351 (M4's DHCP client) merged, main's aarch64
+build-and-boot failed twice (run 38127318850 and its re-run): `net-bench`
+8673 ms and 8347 ms against its 8 s per-test budget, every assertion
+passing. On CI's aarch64 runners, trees carrying #351 ran it 2.0-8.7 s, a
+same-day control with #351 reverted (#353) 1.7-3.1 s, and 2 KiB of padding
+ahead of the network code alone (#359) 2.7-4.3 s. CI's exact images ran it
+1.4-1.9 s locally (QEMU 11.1, and CI's 10.0.13 in a container). The slow
+boots' CPUs were idle in the watchdog dump, with 3-8x more thread switches
+than the control. #351 was reverted (#356).
+
+**What was measured.** The owner's Step 1 added, per round, the wall time,
+RTO fires and their backoff, fast retransmits, the time senders waited on a
+retransmission timer, each netrx worker's drops and loopback's drops; Step 2
+ran them with #351 re-applied on CI (#362: eight debug boots per
+architecture). Result, every round of 16 boots:
+
+| | slow rounds (aarch64: TCP 0.5-0.86 s, UDP 1.4-2.2 s) | fast rounds (x86-64: TCP 0.06-0.17 s, UDP 0.28-0.39 s) |
+|---|---|---|
+| RTO fires of the bench's own flows | 1 (200 ms waited, in an 861 ms round) | 1 (201 ms waited, in a 282 ms round) |
+| other RTO fires in the round | backoff 4-7, 8.0-12.8 s waited: a leftover connection from an earlier test retransmitting into the void, in slow and fast rounds alike | the same, once |
+| fast retransmits | 0 | 0 |
+| netrx / loopback drops | 0 in every TCP round; UDP 0 in most, 74 and 307 in two | 0 in TCP; UDP 263 and 368 in the two-CPU boot |
+
+The slow rounds' time is neither retransmission timeouts nor drops -- UDP,
+which retransmits nothing, is the slowest phase -- so it is the time the
+host takes, which the bench measured because it was a fixed amount of work.
+
+**Classification: restate.** `net-bench`'s phases are fixed time windows
+(300 ms each, TCP and UDP), each client timing its own window from its
+connect (the migration-safe deadline helpers), its rate that flow's bytes
+over its own elapsed time; the assertion is each flow's integrity -- no
+error, something sent, and exactly that received -- rather than a byte
+count; the per-round counters stay in its output. The 8 s budget is a hang guard
+again. Recorded beside it, not chased here: a bench flow's 200 ms RTO with
+no drop anywhere (twice in 16 boots), and a connection left from an earlier
+test still retransmitting at backoff 7 during `net-bench` (deferred-work
+inventory, 2.5).
 
 ## `lockup-sample`, and a failure that was not a flake at all
 

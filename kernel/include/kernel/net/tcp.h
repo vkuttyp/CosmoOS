@@ -137,6 +137,9 @@ struct tcp_pcb {
     /* timers (interrupt context) hand off to the worker */
     struct timer rexmit, delack, timewait, keep;
     unsigned rexmit_count;
+#if CONFIG_SELFTEST
+    uint64_t rexmit_armed_ns;   /* when the retransmission timer was last armed (rto_wait_ns) */
+#endif
     uint64_t last_rx_ns;           /* last acceptable segment; keepalive idles from here */
     unsigned keep_probes;          /* unanswered keepalive probes */
     bool delack_pending, fin_queued, fin_sent, fin_rcvd;
@@ -246,8 +249,19 @@ struct tcp_stats {
     uint64_t out_recorded;    /* verdicts recorded on a synchronized connection */
     uint64_t out_cleared;     /* recorded verdicts cleared by a later segment that left */
     uint64_t syn_refused;     /* half-open SYN-cache entries dropped: the SYN-ACK was refused */
+    /* Where a slow transfer's time went (net-bench; docs/testing/flakes.md).
+     * `retransmits` is both kinds; these separate them. Counted in
+     * CONFIG_SELFTEST builds only: 0 in a release kernel. */
+    uint64_t rto_fires;       /* retransmission timeouts that resent */
+    uint64_t fast_retransmits; /* third duplicate ACK */
+    uint64_t rto_backoff_max; /* the largest backoff any fire reached (rexmit_count; 1 = no backoff yet) */
+    uint64_t rto_wait_ns;     /* CONFIG_SELFTEST: summed, the time each firing timer ran -- from its arm,
+                               * with data unacknowledged, to its fire: what senders spent waiting on it */
 };
 void tcp_get_stats(struct tcp_stats *out);
+#if CONFIG_SELFTEST
+void tcp_test_reset_rto_backoff_max(void);   /* net-bench: the maximum per round */
+#endif
 const char *tcp_state_name(enum tcp_state s);
 
 #endif /* KERNEL_NET_TCP_H */

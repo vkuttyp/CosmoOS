@@ -2746,3 +2746,13 @@ See the [history index](README.md).
   second stall fails, and any output of ours ends the watch.
   `tests/boot/test_firmware_stall.py`. Report:
   `docs/audit/2026-10-11-firmware-stall-retry-report.md`.
+
+- **`net-bench` counters and fixed windows (2026-10-11; PR #363).** A
+  blocker for M4: #351 sent aarch64 CI's `net-bench` over its 8 s budget
+  and was reverted (#356). `net-bench` now prints, per round, wall time,
+  RTO fires and backoff, fast retransmits, retransmits, RTO wait time and
+  netrx/loopback drops (TCP counters `CONFIG_SELFTEST` only); with #351
+  re-applied on CI the slow rounds had none of them, so the test was
+  restated as 300 ms windows with per-flow integrity checks
+  (`docs/testing/flakes.md`). Report:
+  `docs/audit/2026-10-11-net-bench-restate-report.md`.
