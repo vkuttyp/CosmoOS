@@ -107,3 +107,8 @@ their own addresses or none. The full debug suite passed without change.
 
 Every debug boot ran the network harness with `eth0` and `eth1` configured
 by DHCP (`dhcp: 2 interface(s) bound`) and `net-dhcp-client` passing.
+
+After the trap-async-inject fix (AArch64 only, so re-run there): debug
+`test` PASS 144.3 s; `test-guard` (cortex-a76) PASS 144.8 s and
+`test-entropy` PASS 156.5 s / 146.4 s, both RAS boots running the test from
+a cold CPU (`trap-async-inject ... ok`); the probe as above.
