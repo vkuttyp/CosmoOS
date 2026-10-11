@@ -404,20 +404,10 @@ struct netif *netif_connected(uint32_t dst)
 
 void netif_set_ipv4(struct netif *nif, uint32_t addr, uint32_t mask, uint32_t gateway)
 {
-    /*
-     * The packet paths read these without the lock. Since the DHCP client
-     * changes them on a live interface (a lease ending, a NAK, a new
-     * lease), the address is published last and withdrawn first, each
-     * field a single store: a reader that sees an address sees a mask and
-     * gateway that went with an address (the old or the new), and one that
-     * sees 0 treats the interface as unconfigured whatever the others say.
-     */
     arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
-    if (addr == 0 || nif->ip4.addr != 0)
-        __atomic_store_n(&nif->ip4.addr, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&nif->ip4.mask, mask, __ATOMIC_RELEASE);
-    __atomic_store_n(&nif->ip4.gateway, gateway, __ATOMIC_RELEASE);
-    __atomic_store_n(&nif->ip4.addr, addr, __ATOMIC_RELEASE);
+    nif->ip4.addr = addr;
+    nif->ip4.mask = mask;
+    nif->ip4.gateway = gateway;
     spin_unlock_irqrestore(&nif->lock, s);
     const uint8_t *a = (const uint8_t *)&addr, *g = (const uint8_t *)&gateway;
     kinfo("net: %s: %u.%u.%u.%u gateway %u.%u.%u.%u", nif->name, a[0], a[1], a[2], a[3], g[0], g[1], g[2], g[3]);

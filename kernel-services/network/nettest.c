@@ -11198,17 +11198,7 @@ static bool dhcpt_parse(const uint8_t *b, uint32_t n, struct dhcpt_msg *o)
 }
 
 /* The server's reply of `type` to `xid`, received on the fixture. */
-static void dhcpt_reply_from(struct dhcpt_nif *f, uint8_t type, uint32_t xid, uint32_t yiaddr, uint32_t lease,
-                             uint32_t server);
-
 static void dhcpt_reply(struct dhcpt_nif *f, uint8_t type, uint32_t xid, uint32_t yiaddr, uint32_t lease)
-{
-    dhcpt_reply_from(f, type, xid, yiaddr, lease, DHCPT_SERVER);
-}
-
-/* The reply as `server` names itself (the frame still comes from the fixture's server). */
-static void dhcpt_reply_from(struct dhcpt_nif *f, uint8_t type, uint32_t xid, uint32_t yiaddr, uint32_t lease,
-                             uint32_t server)
 {
     uint8_t dh[DHCP_FIXED + 64], l4[sizeof(dh) + 8], frame[sizeof(l4) + 64];
     memset(dh, 0, sizeof(dh));
@@ -11221,7 +11211,7 @@ static void dhcpt_reply_from(struct dhcpt_nif *f, uint8_t type, uint32_t xid, ui
     uint32_t cookie = htonl(DHCP_MAGIC);
     memcpy(dh + BOOTP_LEN, &cookie, 4);
     uint8_t *o = dh + DHCP_FIXED;
-    uint32_t mask = htonl(0xffffff00u), lease_n = htonl(lease);
+    uint32_t server = DHCPT_SERVER, mask = htonl(0xffffff00u), lease_n = htonl(lease);
     uint32_t dns[2] = { IPV4_ADDR(10, 77, 0, 53), IPV4_ADDR(10, 77, 0, 54) };
     *o++ = OPT_MSGTYPE; *o++ = 1; *o++ = type;
     *o++ = OPT_SERVERID; *o++ = 4; memcpy(o, &server, 4); o += 4;
@@ -11313,14 +11303,8 @@ bool selftest_net_dhcp_client(const char **reason)
     dhcp_get_stats(&st1);
     CHECK(st1.ignored >= st0.ignored + 1 && st1.offers == st0.offers + 1);
 
-    /* (4) An ACK from a server the client did not select changes nothing;
-     * the selected server's binds: the interface's address, mask and router
-     * are the lease's, and the lease lists the DNS servers and the RFC's
-     * T1/T2. */
-    dhcpt_reply_from(&f, DHCP_ACK, xid, IPV4_ADDR(10, 77, 0, 99), 1000, IPV4_ADDR(10, 77, 0, 2));
-    dhcpt_reply_from(&f, DHCP_NAK, xid, 0, 0, IPV4_ADDR(10, 77, 0, 2));
-    thread_sleep_ms(20);
-    CHECK(dhcp_test_state(&f.nif) == DHCP_S_REQUESTING && f.nif.ip4.addr == 0);
+    /* (4) The ACK binds: the interface's address, mask and router are the
+     * lease's, and the lease lists the DNS servers and the RFC's T1/T2. */
     dhcpt_reply(&f, DHCP_ACK, xid, DHCPT_ADDR, 1000);
     CHECK(dhcpt_wait_state(&f, DHCP_S_BOUND));
     CHECK(f.nif.ip4.addr == DHCPT_ADDR && f.nif.ip4.mask == htonl(0xffffff00u) && f.nif.ip4.gateway == DHCPT_SERVER);

@@ -6,9 +6,7 @@
  * The kernel's DHCP client (docs/kernel-services/network/design.md, "The
  * DHCP client") holds each interface's lease; /dev/net/tapctl's snapshot
  * lists them in its lease section (version 7). /etc/rc runs `netcfg` once
- * the system is up: it waits (10 s by default, 0-600) until every DHCP
- * client holds a lease -- not merely the first, which may name no DNS
- * server while another's would -- and not at all when there is none, then
+ * the system is up: it waits (10 s by default) for a bound lease, then
  * writes one `nameserver` line per DNS server the leases name -- musl's
  * resolver reads that file, and uses the first three. The file is written
  * beside the target and renamed over it, so a reader never sees half of
@@ -125,15 +123,8 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "show") == 0)
             show_only = 1;
-        else if (strcmp(argv[i], "--wait") == 0 && i + 1 < argc) {
-            char *end;
-            long v = strtol(argv[++i], &end, 10);
-            if (*argv[i] == '\0' || *end != '\0' || v < 0 || v > 600) {
-                fprintf(stderr, "netcfg: --wait wants whole seconds, 0 to 600\n");
-                return 2;
-            }
-            wait_s = (unsigned)v;
-        }
+        else if (strcmp(argv[i], "--wait") == 0 && i + 1 < argc)
+            wait_s = (unsigned)atoi(argv[++i]);
         else if (strcmp(argv[i], "--resolv") == 0 && i + 1 < argc)
             path = argv[++i];
         else {
@@ -154,16 +145,14 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* Wait for every client to hold a lease, 100 ms at a time; with no
-     * client at all (every interface configured otherwise) there is
-     * nothing to wait for. */
+    /* Wait for a bound lease, 100 ms at a time. */
     for (unsigned tries = 0;; tries++) {
         if ((n = read_leases(&l)) < 0)
             return 1;
-        int all = 1;
+        int bound = 0;
         for (int i = 0; i < n; i++)
-            all &= held(&l[i]);
-        if (n == 0 || all || tries >= wait_s * 10)
+            bound |= held(&l[i]);
+        if (bound || tries >= wait_s * 10)
             break;
         usleep(100000);
     }
@@ -194,10 +183,7 @@ int main(int argc, char **argv)
     }
 
     char tmp[256];
-    if ((size_t)snprintf(tmp, sizeof(tmp), "%s.netcfg", path) >= sizeof(tmp)) {
-        fprintf(stderr, "netcfg: %s: the path is too long\n", path);
-        return 1;
-    }
+    snprintf(tmp, sizeof(tmp), "%s.netcfg", path);
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0 || write(fd, text, len) != (ssize_t)len || close(fd) < 0 || rename(tmp, path) < 0) {
         fprintf(stderr, "netcfg: writing %s: %s\n", path, strerror(errno));
