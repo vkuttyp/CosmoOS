@@ -48,6 +48,31 @@ Both were in the first build of the feature, so they are not defect fixes
 in the probe sense; `net-dhcp-client` covers both paths (every reply is
 checksummed by the fixture, and inputs re-arm a pending timer in steps 3-8).
 
+### A defect PR 1's CI exposed: trap-async-inject depended on its CPU
+
+PR 1's first CI run failed the aarch64 entropy job's second boot
+(neoverse-v1, run 38119192127): `trap-async-inject ... FAIL: EL2 refused
+the virtual SError`. Nothing in PR 1 touches EL2. The test asks EL2 for a
+virtual SError with a bare call; EL2 answers that only through the
+switch's vectors, which a CPU has once the run loop (or a TLB
+invalidation) readied it -- elsewhere the loader's stub refuses (S25,
+`kernel/arch/aarch64/hv_el2.c`). So the test passed where it happened to
+run on a CPU a guest had used, and the DHCP boot wait moved the
+self-tests' timing. It blocks PR 1 (a red CI run) and would turn main red,
+so it is fixed here (AGENTS.md, "Scope rules"):
+
+- **Proof** (`de30611d`): the test pins its CPU and hands EL2 back to the
+  stub there first; it then fails on every boot of a CPU with FEAT_RAS --
+  `test-guard` (cortex-a76), local, the CI symptom exactly.
+- **Fix** (`c16df400`): the test readies EL2 on that CPU
+  (`aarch64_el2_ready_here`, the run loop's `el2_ready_here`).
+- **Probe**: `tools/async-inject-probe.py --arch aarch64 [--old]`, on
+  cortex-a76: `--old` PROBE: PASS (the test fails with "EL2 refused the
+  virtual SError", the only failure), fixed PROBE: PASS ("a corrected
+  SError was taken at EL1 and execution continued"). AArch64 only: x86-64
+  has no EL2, and its half of the test (vector 18 has a handler) is
+  unaffected.
+
 ### Test fixtures no longer receive 10.0.2.15
 
 Before this PR, every non-loopback interface registered without an address
