@@ -113,6 +113,7 @@ struct tcp_pcb {
     struct netaddr local, remote;
     /* send side */
     uint32_t iss, snd_una, snd_nxt, snd_wnd, snd_wl1, snd_wl2, snd_max;
+    uint32_t max_sndwnd;   /* the largest window the peer has offered (sender silly-window avoidance) */
     uint16_t mss;                  /* negotiated: min(peer's option, path_mss) */
     uint16_t path_mss;             /* what this end can send on the path: TCP_MSS_LO when the peer is this
                                       host, else the family default. Fixed when the connection is set up

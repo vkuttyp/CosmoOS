@@ -290,6 +290,14 @@ processes the client's final ACK, and the test thread (higher priority)
 can run ahead of the worker now that `quiesce_read_unlock` at the end of
 a transmit is a prompt preemption point.
 
+**`net-tcp-sws`**: sender silly-window avoidance (N29). A world driven
+through a tap offers a 64240-byte window in the handshake, then one
+segment's worth; the host has more than two segments queued and one in
+flight; the world acknowledges 200 bytes of it (the window's right edge
+moves by 200) and then all of it. The next data segment must start where
+the first ended and be a full segment -- the old sender sent the 200 bytes
+at once. Any mismatch prints where the next data began and its length.
+
 **`net-tcp-delack`**: the delayed acknowledgement. A loopback server
 accepts and then neither reads nor writes; the client sends one byte and
 counts the host's segments: the data segment, then the acknowledgement,

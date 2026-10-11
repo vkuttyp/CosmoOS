@@ -102,6 +102,14 @@ was on the "superfloppy" image, so the disk layout is not what makes the
 firmware stop. Only `test-harness-retry` has the 30 s handover retry, so
 this boot timed out. Still unassigned; the boot was rerun.
 
+**Third sighting, 2026-10-11:** local x86-64 `BUILD=release test-install`
+on the TCP silly-window branch (M3 PR 5 matrix), the fallback stage's boot:
+`boot-fallback.log` holds only OVMF's screen-clear sequences, no `BdsDxe:`
+line and no loader banner, and the stage timed out waiting for its first
+prompt. The install, reboot and persist boots of the same run had passed;
+the rerun passed every stage (fallback 5.2 s). `install_test.py` has no
+handover retry either. Still unassigned.
+
 ## What the harness does with it
 
 `tests/boot/run_boot_test.py` reads the table under "The list" below --
@@ -303,7 +311,7 @@ code:
 | --- | --- | --- | --- | --- |
 | `net-tcp-syncache` | `nettest.c:983` | a fixed `settle(N)` before an assertion | 4, one blocking a merge | waits for the SYN-answered counter |
 | `net-icmp-limit` | `nettest.c:1236` | the same, "N things after a fixed settle" | 1, on the unit's own pull request | waits for the echoes decided |
-| `net-bench` | its 8 s per-test budget (2026-09-14, the unit's third twenty-boot run, x86-64) | 71 s with every assertion passing and normal throughput: time lost between rounds, a retransmit backoff after a receive-queue drop the likeliest mechanism; seen twice more on CI's slow x86-64 runners on 2026-10-07 (PR #328's guard boot, 11.5 s, and a debug boot, 9.2 s: one flow at 6-7 MiB/s, two flows at 1 MiB/s, UDP 65-70 % delivered, the second phase of the same boot normal, every assertion passing). Not that branch's doing: under the host slow mode (`QEMU_WRAP="taskpolicy -c utility nice -n 5"`) main's kernel and the branch's alternated two rounds each at 3.0/2.1 s and 2.1/2.7 s with the same throughput spread; a slow runner reaches the mode more often than a quiet development host does | 1 in 100 locally; 2 of about 6 x86-64 boots on CI's slow runners that day | **not listed** -- a real slowness with a mechanism to find, named as a follow-up in the unit's report |
+| `net-bench` | its 8 s per-test budget (2026-09-14, the unit's third twenty-boot run, x86-64) | 71 s with every assertion passing and normal throughput: time lost between rounds, a retransmit backoff after a receive-queue drop the likeliest mechanism; seen twice more on CI's slow x86-64 runners on 2026-10-07 (PR #328's guard boot, 11.5 s, and a debug boot, 9.2 s: one flow at 6-7 MiB/s, two flows at 1 MiB/s, UDP 65-70 % delivered, the second phase of the same boot normal, every assertion passing). Not that branch's doing: under the host slow mode (`QEMU_WRAP="taskpolicy -c utility nice -n 5"`) main's kernel and the branch's alternated two rounds each at 3.0/2.1 s and 2.1/2.7 s with the same throughput spread; a slow runner reaches the mode more often than a quiet development host does | 1 in 100 locally; 2 of about 6 x86-64 boots on CI's slow runners that day | **fixed 2026-10-11**: the mechanism was the sender's silly window -- in a slow boot one flow sent about 13,900 segments for 4 MiB (about 300 bytes each) against about 800 in a normal one, with no retransmit, timeout or drop; RFC 1122's sender rule (N29, `docs/audit/2026-10-11-tcp-sws-report.md`) |
 | `net-icmp-limit` | `nettest.c:1444` (2026-09-14, the unit's own twenty-boot run) | the limiter window's boundary inside the burst -- a phase the test never controlled | 1 in 40 | the phase made known: fill and probe until a refusal, then probe until a reply, flood into the fresh window; the residual listed above |
 | `sleep` | `schedtest.c:368` | upper bound | 1 | widened and labelled; listed above |
 | `smp-parallel` | `smptest.c:239` | work ratio | 1 | restated: parallelism observed from CPU 0 |

@@ -950,6 +950,14 @@ static void established_locked(struct tcp_pcb *pcb, uint64_t now)
 }
 
 /* pcb lock held. Send what the windows allow, a queued FIN, or a pending ACK. */
+/* The peer's window, and the largest it has offered. */
+static void set_snd_wnd(struct tcp_pcb *pcb, uint32_t win)
+{
+    pcb->snd_wnd = win;
+    if (win > pcb->max_sndwnd)
+        pcb->max_sndwnd = win;
+}
+
 static void tcp_output_locked(struct tcp_pcb *pcb, struct tcp_batch *b)
 {
     bool sent = false;
@@ -968,6 +976,19 @@ static void tcp_output_locked(struct tcp_pcb *pcb, struct tcp_batch *b)
                 seglen = pcb->mss;
             if (seglen > room)
                 seglen = room;
+            /*
+             * Sender silly-window avoidance (RFC 1122 4.2.3.4): with data in
+             * flight, a segment smaller than a full one, than what is queued,
+             * and than half the largest window the peer has offered waits for
+             * the acknowledgement that is coming. Without it a receiver that
+             * fell behind opened its window a sliver at a time and every
+             * sliver went out as a segment of its own: net-bench's loopback
+             * stream ran at 1 MiB/s in 300-byte segments on slow CI boots
+             * (docs/testing/flakes.md, 2026-10-10). Nothing in flight: send,
+             * since no acknowledgement will come to reopen the window.
+             */
+            if (seglen > 0 && seglen < pcb->mss && seglen < avail && inflight > 0 && seglen < pcb->max_sndwnd / 2)
+                break;
             if (seglen == 0) {
                 /* Zero window with data waiting: one-byte probe on the timer. */
                 if (avail && pcb->snd_wnd == 0 && inflight == 0 && pcb->work_flags & WORK_REXMIT)
@@ -1350,7 +1371,7 @@ int tcp_connect(struct tcp_pcb *pcb, const struct netaddr *remote)
     pcb->snd_nxt = pcb->snd_max = pcb->iss + 1;
     pcb->path_mss = path_mss;
     pcb->mss = path_mss;
-    pcb->snd_wnd = pcb->mss;
+    set_snd_wnd(pcb, pcb->mss);
     pcb->cwnd = 2 * pcb->mss;
     set_state(pcb, TCP_SYN_SENT);
     STAT(conns_active);
@@ -1863,7 +1884,7 @@ static struct tcp_pcb *listen_input(struct tcp_pcb *l, struct seg *g, struct tcp
         c->iss = iss;
         c->snd_una = iss + 1;
         c->snd_nxt = c->snd_max = iss + 1;
-        c->snd_wnd = g->win;
+        set_snd_wnd(c, g->win);
         c->snd_wl1 = g->seq;
         c->snd_wl2 = g->ack;
         c->path_mss = path_mss;
@@ -2061,7 +2082,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         if (pcb->mss > pcb->path_mss)
             pcb->mss = pcb->path_mss;
         pcb->cwnd = 2 * pcb->mss;
-        pcb->snd_wnd = win;
+        set_snd_wnd(pcb, win);
         pcb->snd_wl1 = seq;
         pcb->snd_wl2 = ack;
         if (flags & TH_ACK) {
@@ -2162,7 +2183,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             goto out;
         }
         pcb->snd_una = ack;
-        pcb->snd_wnd = win;
+        set_snd_wnd(pcb, win);
         pcb->snd_wl1 = seq;
         pcb->snd_wl2 = ack;
         disarm_rexmit(pcb);
@@ -2231,7 +2252,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         }
     }
     if (SEQ_LT(pcb->snd_wl1, seq) || (pcb->snd_wl1 == seq && SEQ_LEQ(pcb->snd_wl2, ack))) {
-        pcb->snd_wnd = win;
+        set_snd_wnd(pcb, win);
         pcb->snd_wl1 = seq;
         pcb->snd_wl2 = ack;
     }
