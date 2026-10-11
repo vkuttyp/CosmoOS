@@ -2574,6 +2574,16 @@ branch's change (GPT partition devices at boot, the command line) is not
 on the irq-poll or scheduler path. First sighting; the failed job was
 rerun.
 
+**Second sighting, 2026-10-11:** x86-64 CI, PR #365 (M4 PR 1's re-land,
+run 38168819526, job 114556901987), the `entropy boots` job's second boot:
+`cpu 1, a spinner above the default for 300 ms: 334 calls of the poll,
+longest gap 290 ms (bound 100)` -- the same 290 ms, the worker again not
+raised before the spinner ended; the same job's first boot passed it, as
+did all 22 local debug boots of the branch's two matrices. The branch (the
+DHCP client, ARP and route fixes) is not on the irq-poll or scheduler
+path. Not attributed; two sightings, both x86-64 CI, both 290 ms. The
+failed job was rerun.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
