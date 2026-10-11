@@ -12,7 +12,10 @@
 > ([report](audit/2026-10-10-m2-persistent-system-report.md)); M3 (real
 > process model: fork, vfork, execve, BusyBox ash as the shell) done
 > 2026-10-10 ([report](audit/2026-10-10-m3-process-model-report.md)).
-> Next: M4.
+> Next: M4. Its PR 1 (#351) was reverted when `net-bench` went over its
+> budget on aarch64 CI; `net-bench` is now instrumented and restated as
+> fixed windows ([report](audit/2026-10-11-net-bench-restate-report.md)),
+> and PR 1 re-lands next.
 
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.

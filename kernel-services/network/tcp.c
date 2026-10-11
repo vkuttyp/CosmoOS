@@ -1211,12 +1211,13 @@ static void pcb_work(void *arg)
             pcb->rexmit_count++;
             pcb->retransmits++;
             STAT(retransmits);
+#if CONFIG_SELFTEST
+            /* net-bench's counters (nettest.c, bench_report): self-test builds only. */
             STAT(rto_fires);
             for (uint64_t m = __atomic_load_n(&g_stats.rto_backoff_max, __ATOMIC_RELAXED); pcb->rexmit_count > m;)
                 if (__atomic_compare_exchange_n(&g_stats.rto_backoff_max, &m, pcb->rexmit_count, false,
                                                 __ATOMIC_RELAXED, __ATOMIC_RELAXED))
                     break;
-#if CONFIG_SELFTEST
             if (pcb->rexmit_armed_ns)
                 __atomic_fetch_add(&g_stats.rto_wait_ns, clock_delta_ns(clock_now_ns(), pcb->rexmit_armed_ns),
                                    __ATOMIC_RELAXED);
@@ -2259,7 +2260,9 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             pcb->cwnd = pcb->ssthresh;
             pcb->retransmits++;
             STAT(retransmits);
+#if CONFIG_SELFTEST
             STAT(fast_retransmits);
+#endif
             uint32_t seglen1 = pcb->sndbuf.len < pcb->mss ? pcb->sndbuf.len : pcb->mss;
             if (seglen1)
                 build_segment(pcb, &b, TH_ACK, pcb->snd_una, seglen1, false);

@@ -456,9 +456,11 @@ which retransmits nothing, is the slowest phase -- so it is the time the
 host takes, which the bench measured because it was a fixed amount of work.
 
 **Classification: restate.** `net-bench`'s phases are fixed time windows
-(300 ms each, TCP and UDP), the rates over the window, the assertion the
-stream's integrity (every byte sent arrives) rather than a byte count; the
-per-round counters stay in its output. The 8 s budget is a hang guard
+(300 ms each, TCP and UDP), each client timing its own window from its
+connect (the migration-safe deadline helpers), its rate that flow's bytes
+over its own elapsed time; the assertion is each flow's integrity -- no
+error, something sent, and exactly that received -- rather than a byte
+count; the per-round counters stay in its output. The 8 s budget is a hang guard
 again. Recorded beside it, not chased here: a bench flow's 200 ms RTO with
 no drop anywhere (twice in 16 boots), and a connection left from an earlier
 test still retransmitting at backoff 7 during `net-bench` (deferred-work
