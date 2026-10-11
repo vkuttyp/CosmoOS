@@ -231,6 +231,22 @@ networking with no fw_cfg address, so the kernel's DHCP client configures
   and `wget -O - http://example.com/` returns a body containing `Example
   Domain` -- up to three attempts, since this depends on the runner's
   internet access through slirp's resolver (10.0.2.3, the host's).
+- **Console job control** (M4 PR 2), the same boot, ash on the console:
+  `sleep 100 &` then `jobs` lists it Running, `kill %1` and `wait`; `sleep
+  30` stopped by `^Z` (`Stopped`), `jobs`, `bg` (`Running`), `kill %1`;
+  `readlink /proc/self/fd/0` is `/dev/console`.
+- **d. ssh** (M4 PR 3): the boot forwards a free host port to the guest's
+  22 (`QEMU_NET_HOSTFWD`). The harness makes an Ed25519 key, types its
+  public half into `/root/.ssh/authorized_keys` at the console, and waits
+  (120 s at most) for dropbear to answer -- it makes its host key at this
+  first boot. The host's OpenSSH client (`BatchMode`, `IdentitiesOnly`, a
+  known_hosts of the run's own, `accept-new`) runs `uname -a; echo ok`;
+  then `ssh -tt` under a host pty of 37 x 101 types `tty` (must print
+  `/dev/pts/N`), `stty size` (must print `37 101`), `sleep 100 &`, `jobs`
+  (Running), `kill %1`, `wait` and a marker.
+- **e. Reboot**: the installed disk boots again; a login with
+  `StrictHostKeyChecking=yes` against the first boot's known_hosts must
+  pass, so the host key was kept.
 
 ## `make test-busybox` (`tests/boot/busybox_test.py`)
 

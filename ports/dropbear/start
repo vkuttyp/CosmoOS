@@ -1,0 +1,21 @@
+#!/bin/sh
+# /etc/dropbear/start - the ssh server's service (roadmap M4, decision 6;
+# ports/dropbear/README.md). cosmo-install writes /etc/svc/dropbear to run
+# this on the installed system only.
+#
+# The host key is made once, at the first boot that starts the service,
+# and kept on the disk: a reboot keeps the identity a client recorded.
+# dropbearkey draws it from getrandom, which blocks until the kernel's pool
+# is seeded (roadmap M1), so no key is ever made from an unseeded pool, and
+# dropbear seeds itself the same way before it accepts anything.
+key=/etc/dropbear/dropbear_ed25519_host_key
+if [ ! -s "$key" ]; then
+    /bin/rm -f "$key"
+    /sbin/dropbearkey -t ed25519 -f "$key" || exit 1
+    /bin/sync
+fi
+# -F: in the foreground, under svc's supervision. It logs to stderr, which
+# svc keeps in /var/log/svc/dropbear (built without syslog, so there is no
+# -E to ask). -p 22 on every address. (No -s: password logins are compiled
+# out, and the option with them.)
+exec /sbin/dropbear -F -p 22 -r "$key"

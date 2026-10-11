@@ -39,10 +39,13 @@ def digest(path):
 def fetch_once(url, tmp, want):
     """Download url into tmp; None on success, else the reason it failed."""
     try:
-        # The timeout is per blocking read, not the whole download: a slow
-        # transfer that keeps moving finishes, a stalled one gives up in a
-        # minute, so every URL's attempts end well inside a CI job.
-        with urllib.request.urlopen(url, timeout=STALL_S) as r, open(tmp, "wb") as f:
+        # A name of our own: matt.ucc.asn.au (dropbear's upstream) answers
+        # Python's default User-Agent with 403 Forbidden. The timeout is per
+        # blocking read, not the whole download: a slow transfer that keeps
+        # moving finishes, a stalled one gives up in a minute, so every
+        # URL's attempts end well inside a CI job.
+        req = urllib.request.Request(url, headers={"User-Agent": "cosmoos-fetch-pinned/1"})
+        with urllib.request.urlopen(req, timeout=STALL_S) as r, open(tmp, "wb") as f:
             while True:
                 chunk = r.read(1 << 20)
                 if not chunk:

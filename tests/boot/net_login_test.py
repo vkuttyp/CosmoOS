@@ -20,19 +20,36 @@ configures it:
      -- up to three attempts, since this needs the runner's internet.
 
 And on the same boot, job control in ash on the console (PR 2 of M4):
-`&`, `jobs`, `kill %1`, `^Z` and `bg`.
+`&`, `jobs`, `kill %1`, `^Z` and `bg`. Then ssh (PR 3), with the guest's
+port 22 forwarded to a host port:
+
+  d. The host's OpenSSH client logs in as root with a key made for this
+     run (its public half typed into /root/.ssh/authorized_keys at the
+     console), runs `uname -a; echo ok`; then a session with a PTY
+     (ssh -tt, under a host pty of a known size) where `tty` names
+     /dev/pts/N, `stty size` is the client's window, and job control works
+     (sleep 100 &, jobs, kill %1, wait).
+  e. The installed system reboots; the second login passes the client's
+     known_hosts check (StrictHostKeyChecking=yes): the host key was kept.
 
 Exit 0 PASS, 1 FAIL.
 """
 
 import argparse
+import fcntl
 import hashlib
 import http.server
 import os
+import pty
 import re
+import select
 import shutil
+import socket
 import socketserver
+import struct
+import subprocess
 import sys
+import termios
 import threading
 import time
 
@@ -95,6 +112,152 @@ def console_jobs(b, results):
                    "/proc/self/fd/0 is /dev/console")
 
 
+WIN_ROWS, WIN_COLS = 37, 101
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def ssh_base(work, port, strict):
+    return ["ssh", "-i", os.path.join(work, "id_ed25519"), "-p", str(port), "-o", "IdentitiesOnly=yes",
+            "-o", "BatchMode=yes", "-o", "UserKnownHostsFile=" + os.path.join(work, "known_hosts"),
+            "-o", "StrictHostKeyChecking=" + ("yes" if strict else "accept-new"), "-o", "ConnectTimeout=20",
+            "-o", "LogLevel=ERROR", "root@127.0.0.1"]
+
+
+def ssh_run(work, port, strict, command, timeout=60):
+    """`command` over ssh; (exit status, output)."""
+    p = subprocess.run(ssh_base(work, port, strict) + [command], capture_output=True, text=True, timeout=timeout)
+    return p.returncode, p.stdout + p.stderr
+
+
+def ssh_wait(work, port, strict, deadline_s=120):
+    """Until the server answers a login: it makes its host key at the first
+    boot, from a pool that may still be seeding."""
+    t0 = time.monotonic()
+    last = ""
+    while time.monotonic() - t0 < deadline_s:
+        try:
+            rc, out = ssh_run(work, port, strict, "echo ready", timeout=40)
+        except subprocess.TimeoutExpired:
+            rc, out = -1, "timeout"
+        if rc == 0 and "ready" in out:
+            return time.monotonic() - t0
+        last = out.strip()[-300:]
+        time.sleep(2)
+    raise Fail(f"ssh: no login within {deadline_s} s; the last attempt said: {last}")
+
+
+def ssh_pty_session(work, port, lines, marker, timeout=90):
+    """ssh -tt under a host pty of WIN_ROWS x WIN_COLS, typing `lines`;
+    the session's whole output once `marker` has been seen."""
+    master, slave = pty.openpty()
+    p = None
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", WIN_ROWS, WIN_COLS, 0, 0))
+        p = subprocess.Popen(ssh_base(work, port, True)[:-1] + ["-tt", "root@127.0.0.1"], stdin=slave,
+                             stdout=slave, stderr=slave, close_fds=True, start_new_session=True)
+    finally:
+        os.close(slave)
+    try:
+        return _pty_session(p, master, lines, marker, timeout)
+    finally:
+        # Whatever happened, the client is gone and reaped and the pty closed.
+        if p is not None and p.poll() is None:
+            p.kill()
+            p.wait()
+        os.close(master)
+
+
+def _pty_session(p, master, lines, marker, timeout):
+    out = b""
+    t0 = time.monotonic()
+
+    def pump(until, secs):
+        nonlocal out
+        end = time.monotonic() + secs
+        while time.monotonic() < end and (until is None or until not in out):
+            r, _, _ = select.select([master], [], [], 0.2)
+            if r:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+
+    pump(b"# ", 30)   # the remote shell's prompt (root's)
+    for ln in lines:
+        os.write(master, ln.encode() + b"\n")
+        pump(None, 1.0)
+    pump(("\n" + marker).encode(), max(1.0, timeout - (time.monotonic() - t0)))   # its output, not its echo
+    os.write(master, b"exit\n")
+    try:
+        p.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+    pump(None, 0.5)
+    return out.decode("utf-8", "replace").replace("\r", "")
+
+
+def stage_ssh(args, results, b, port):
+    work = args.workdir
+    key = os.path.join(work, "id_ed25519")
+    for f in (key, key + ".pub", os.path.join(work, "known_hosts")):
+        if os.path.exists(f):
+            os.unlink(f)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "net-login-test", "-f", key], check=True)
+    pub = open(key + ".pub").read().strip()
+    out = b.run(f"echo '{pub}' > /root/.ssh/authorized_keys && cat /root/.ssh/authorized_keys | wc -l")
+    need(out, r"^1$", "root's authorized_keys")
+    waited = ssh_wait(work, port, strict=False)
+    rc, out = ssh_run(work, port, True, "uname -a; echo ok")
+    if rc != 0 or not re.search(r"^ok$", out, re.M) or not re.search(r"^Linux \S+ ", out, re.M):
+        raise Fail(f"ssh: uname -a; echo ok: status {rc}, output {out!r}")
+    uname = re.search(r"^Linux .*$", out, re.M).group(0)
+    results.append(f"d. ssh: key login as root ({waited:.1f}s to the first login): {uname!r}, ok")
+    marker = "pty-session-done"
+    out = ssh_pty_session(work, port, ["tty", "stty size", "sleep 100 &", "jobs", "kill %1",
+                                       f"wait; echo {marker} wait=$?"], marker)
+    m = re.search(r"^(/dev/pts/\d+)$", out, re.M)
+    if not m:
+        raise Fail(f"ssh -tt: tty named no /dev/pts/N: {out[-600:]!r}")
+    if not re.search(rf"^{WIN_ROWS} {WIN_COLS}$", out, re.M):
+        raise Fail(f"ssh -tt: stty size is not the client's {WIN_ROWS} {WIN_COLS}: {out[-600:]!r}")
+    if not re.search(r"\[1\]\+\s+Running\s+sleep 100", out):
+        raise Fail(f"ssh -tt: jobs did not list sleep 100: {out[-600:]!r}")
+    if not re.search(rf"^{marker} wait=0$", out.split("echo " + marker, 1)[-1], re.M):
+        raise Fail(f"ssh -tt: the session's wait did not succeed: {out[-600:]!r}")
+    results.append(f"d. ssh -tt: tty {m.group(1)}, stty size {WIN_ROWS} {WIN_COLS}, sleep 100 & / jobs / "
+                   "kill %1 / wait")
+
+
+def stage_reboot_ssh(args, results, inst, port):
+    """e: the second boot; the client's known_hosts must still match."""
+    b = Boot("reboot", inst["target"], args.workdir,
+             {"QEMU_DISKS": "boot", "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{port}-:22"}, args.timeout)
+    try:
+        b.wait_prompt("the first prompt")
+        ssh_wait(args.workdir, port, strict=True)
+        rc, out = ssh_run(args.workdir, port, True, "echo again")
+        if rc != 0 or not re.search(r"^again$", out, re.M):
+            raise Fail(f"ssh after the reboot: status {rc}, output {out!r}")
+        rc = b.finish()
+        if rc != install_test.EXIT_SUCCESS:
+            raise Fail(f"reboot boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"e. reboot: the host key was kept (StrictHostKeyChecking=yes passed), PASS in {b.elapsed():.1f}s")
+
+
 def stage_net(args, results, inst):
     work = args.workdir
     www = os.path.join(work, "www")
@@ -104,7 +267,9 @@ def stage_net(args, results, inst):
         f.write(blob)
     want = hashlib.sha256(blob).hexdigest()
     srv, port = start_http(www)
-    b = Boot("net", inst["target"], work, {"QEMU_DISKS": "boot"}, args.timeout)
+    ssh_port = free_port()   # after the HTTP server has its port, so the two cannot be the same
+    b = Boot("net", inst["target"], work,
+             {"QEMU_DISKS": "boot", "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{ssh_port}-:22"}, args.timeout)
     try:
         b.wait_prompt("the first prompt")
         log = b.text()
@@ -153,6 +318,7 @@ def stage_net(args, results, inst):
             raise Fail(f"by name: three attempts failed; the last said:\n{last}")
 
         console_jobs(b, results)
+        stage_ssh(args, results, b, ssh_port)
 
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
@@ -163,6 +329,7 @@ def stage_net(args, results, inst):
     finally:
         srv.shutdown()
     results.append(f"net boot: PASS in {b.elapsed():.1f}s")
+    return ssh_port
 
 
 def main():
@@ -177,7 +344,8 @@ def main():
     t0 = time.monotonic()
     try:
         inst = install_test.stage_install(args, results)
-        stage_net(args, results, inst)
+        ssh_port = stage_net(args, results, inst)
+        stage_reboot_ssh(args, results, inst, ssh_port)
     except Fail as e:
         for r in results:
             print(f"test-net-login: {r}")

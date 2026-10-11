@@ -15,9 +15,10 @@ a="$root/out/repro-a"
 b="$root/out/repro-b"
 rm -rf "$a" "$b"
 
-# BusyBox too, in each tree (BB_DIR: by default one per architecture).
-make -C "$root" ARCH="$arch" BUILD="$build" OUT="$a" BB_DIR="$a/busybox" all "$a/boot.tar" >/dev/null
-make -C "$root" ARCH="$arch" BUILD="$build" OUT="$b" BB_DIR="$b/busybox" all "$b/boot.tar" >/dev/null
+# BusyBox and dropbear too, in each tree (BB_DIR, DB_DIR: by default one
+# per architecture, shared by both trees, which would hide a build-path leak).
+make -C "$root" ARCH="$arch" BUILD="$build" OUT="$a" BB_DIR="$a/busybox" DB_DIR="$a/dropbear" all "$a/boot.tar" >/dev/null
+make -C "$root" ARCH="$arch" BUILD="$build" OUT="$b" BB_DIR="$b/busybox" DB_DIR="$b/dropbear" all "$b/boot.tar" >/dev/null
 
 status=0
 case "$arch" in aarch64) loader=boot/BOOTAA64.EFI ;; *) loader=boot/BOOTX64.EFI ;; esac
