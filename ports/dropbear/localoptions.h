@@ -4,9 +4,11 @@
  * before the build; each line overrides src/default_options.h.
  *
  * Public-key authentication only: password authentication is compiled
- * out, not merely refused. One host key type, Ed25519: generated at the
- * installed system's first boot (dropbearkey, from the seeded pool), and
- * the one OpenSSH clients prefer. What an ssh login needs and nothing
+ * out, not merely refused. One key type, Ed25519, for the host key --
+ * generated at the installed system's first boot (dropbearkey, from the
+ * seeded pool), the one OpenSSH clients prefer -- and for the keys users
+ * log in with: the RSA and ECDSA switches below govern both, so a key in
+ * authorized_keys must be an ssh-ed25519 one. What an ssh login needs and nothing
  * else: no forwarding of any kind, no sftp server (scp/sftp are outside
  * M4), no X11, no MOTD, no inetd mode.
  */

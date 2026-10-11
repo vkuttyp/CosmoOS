@@ -157,10 +157,24 @@ def ssh_pty_session(work, port, lines, marker, timeout=90):
     """ssh -tt under a host pty of WIN_ROWS x WIN_COLS, typing `lines`;
     the session's whole output once `marker` has been seen."""
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", WIN_ROWS, WIN_COLS, 0, 0))
-    p = subprocess.Popen(ssh_base(work, port, True)[:-1] + ["-tt", "root@127.0.0.1"], stdin=slave, stdout=slave,
-                         stderr=slave, close_fds=True, start_new_session=True)
-    os.close(slave)
+    p = None
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", WIN_ROWS, WIN_COLS, 0, 0))
+        p = subprocess.Popen(ssh_base(work, port, True)[:-1] + ["-tt", "root@127.0.0.1"], stdin=slave,
+                             stdout=slave, stderr=slave, close_fds=True, start_new_session=True)
+    finally:
+        os.close(slave)
+    try:
+        return _pty_session(p, master, lines, marker, timeout)
+    finally:
+        # Whatever happened, the client is gone and reaped and the pty closed.
+        if p is not None and p.poll() is None:
+            p.kill()
+            p.wait()
+        os.close(master)
+
+
+def _pty_session(p, master, lines, marker, timeout):
     out = b""
     t0 = time.monotonic()
 
@@ -188,8 +202,8 @@ def ssh_pty_session(work, port, lines, marker, timeout=90):
         p.wait(timeout=20)
     except subprocess.TimeoutExpired:
         p.kill()
+        p.wait()
     pump(None, 0.5)
-    os.close(master)
     return out.decode("utf-8", "replace").replace("\r", "")
 
 
@@ -211,7 +225,7 @@ def stage_ssh(args, results, b, port):
     results.append(f"d. ssh: key login as root ({waited:.1f}s to the first login): {uname!r}, ok")
     marker = "pty-session-done"
     out = ssh_pty_session(work, port, ["tty", "stty size", "sleep 100 &", "jobs", "kill %1",
-                                       f"wait; echo {marker}"], marker)
+                                       f"wait; echo {marker} wait=$?"], marker)
     m = re.search(r"^(/dev/pts/\d+)$", out, re.M)
     if not m:
         raise Fail(f"ssh -tt: tty named no /dev/pts/N: {out[-600:]!r}")
@@ -219,8 +233,8 @@ def stage_ssh(args, results, b, port):
         raise Fail(f"ssh -tt: stty size is not the client's {WIN_ROWS} {WIN_COLS}: {out[-600:]!r}")
     if not re.search(r"\[1\]\+\s+Running\s+sleep 100", out):
         raise Fail(f"ssh -tt: jobs did not list sleep 100: {out[-600:]!r}")
-    if marker not in out.split("echo " + marker, 1)[-1]:
-        raise Fail(f"ssh -tt: the session did not finish its jobs: {out[-600:]!r}")
+    if not re.search(rf"^{marker} wait=0$", out.split("echo " + marker, 1)[-1], re.M):
+        raise Fail(f"ssh -tt: the session's wait did not succeed: {out[-600:]!r}")
     results.append(f"d. ssh -tt: tty {m.group(1)}, stty size {WIN_ROWS} {WIN_COLS}, sleep 100 & / jobs / "
                    "kill %1 / wait")
 

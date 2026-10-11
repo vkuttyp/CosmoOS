@@ -239,5 +239,5 @@ Built binaries (release, both stripped and statically linked):
 | `test-harness-retry` | PASS 170.4 s | PASS 153.0 s |
 | release build and `test` | PASS 17.8 s | PASS 20.7 s |
 | `test-net-login` (release; acceptance a-e) | PASS 53.1 s | PASS 58.9 s |
-| `fuzz` | pass | -- |
+| `fuzz` | pass (host binaries: the targets are architecture-independent, one run covers both) | -- |
 

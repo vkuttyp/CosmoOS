@@ -32,7 +32,9 @@ the binaries (`make reproducible`).
 
 `localoptions.h` is the configuration, each line with its reason:
 public-key authentication only -- password authentication is compiled
-out, not refused; Ed25519 host keys only; no TCP or agent forwarding, no
+out, not refused; Ed25519 only, for the host key and for the keys users
+log in with (RSA and ECDSA are compiled out, so `authorized_keys` takes
+`ssh-ed25519` keys); no TCP or agent forwarding, no
 X11, no sftp server (scp and sftp are outside M4), no MOTD, no inetd mode.
 
 ## On the system

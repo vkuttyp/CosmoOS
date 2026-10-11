@@ -25,7 +25,8 @@ $(DROPBEAR_TAR):
 # link with musl's start files, the image at 4 MiB). Hardening is off:
 # its -pie would make a static-pie, which the wrapper's fixed image base
 # rules out. No zlib, no login records (utmp, wtmp, lastlog: decision 6),
-# no syslog (dropbear runs with -E and logs to the service's log).
+# no syslog (dropbear runs in the foreground, -F, and logs to stderr,
+# which svc keeps in the service's log).
 # -ffile-prefix-map keeps the build directory out of the binary (make
 # reproducible).
 $(DROPBEAR_ELF) $(DROPBEARKEY_ELF) &: $(DROPBEAR_TAR) $(DROPBEAR_LOCALOPTS) $(BB_LIBC) $(BB_BUILTINS) $(BB_CC) \
