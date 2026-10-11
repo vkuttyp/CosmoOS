@@ -4557,9 +4557,19 @@ bool selftest_net_csum_offload(const char **reason)
  * Reports, never fails on timing: loopback TCP throughput with one and
  * with two concurrent flows, and UDP datagrams per second, each with
  * steering off (the single-queue architecture) and on.
+ *
+ * Each phase is a fixed time window, not a fixed amount of work (restated
+ * 2026-10-11, as net-nicbench's UDP phase was in PR #317): a TCP client
+ * sends until its window closes and the sink must then have received
+ * exactly what was sent; the UDP sender sends until its window closes. The
+ * rates are over the window. A fixed amount of work made the bench's wall
+ * time the host's speed -- on CI's aarch64 runners 6-8 s against the 8 s
+ * hang guard with every assertion passing, and neither retransmission
+ * timeouts nor drops in the slow rounds (docs/testing/flakes.md). Each
+ * round still prints its counters (bench_report).
  */
-#define BENCH_TCP_BYTES (4u * 1024u * 1024u)
-#define BENCH_UDP_SENDS 10000u
+#define BENCH_TCP_WINDOW_NS (300ull * 1000000ull)
+#define BENCH_UDP_WINDOW_NS (300ull * 1000000ull)
 
 struct bench_sink {
     struct netaddr addr;
@@ -4598,7 +4608,8 @@ static void bench_sink_main(void *arg)
 
 struct bench_client {
     struct netaddr addr;
-    uint32_t bytes, sent;
+    uint64_t until_ns;   /* send until this clock_now_ns, then shut down */
+    uint32_t sent;
     int err;
     volatile bool done;
 };
@@ -4611,9 +4622,8 @@ static void bench_client_main(void *arg)
     if (buf && ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0) {
         int rc = ksock_connect(c, &cl->addr);
         if (rc == 0) {
-            while (cl->sent < cl->bytes) {
-                uint32_t want = cl->bytes - cl->sent < 16384 ? cl->bytes - cl->sent : 16384;
-                int64_t w = ksock_sendto(c, buf, want, NULL);
+            while (clock_now_ns() < cl->until_ns) {
+                int64_t w = ksock_sendto(c, buf, 16384, NULL);
                 if (w <= 0) {
                     cl->err = (int)w;
                     break;
@@ -4676,7 +4686,8 @@ static void bench_report(const char *what, const struct bench_snap *a, const str
           (unsigned long long)(b->lo_drop - a->lo_drop));
 }
 
-/* `flows` concurrent transfers of BENCH_TCP_BYTES each; returns MiB/s in total, 0 on failure. */
+/* `flows` concurrent transfers for BENCH_TCP_WINDOW_NS each; returns MiB/s in
+ * total over the time to the last byte received, 0 on failure. */
 static unsigned bench_tcp(unsigned flows, uint16_t port)
 {
     struct bench_sink sinks[2];
@@ -4707,16 +4718,17 @@ static unsigned bench_tcp(unsigned flows, uint16_t port)
     for (unsigned i = 0; i < flows; i++) {
         memset(&clients[i], 0, sizeof(clients[i]));
         clients[i].addr = sinks[i].addr;
-        clients[i].bytes = BENCH_TCP_BYTES;
+        clients[i].until_ns = t0 + BENCH_TCP_WINDOW_NS;
         tc[i] = thread_create(bench_client_main, &clients[i], "bench-client", SCHED_PRIO_DEFAULT);
     }
-    uint64_t total = 0;
+    uint64_t total = 0, sent = 0;
     for (unsigned i = 0; i < flows; i++) {
         if (tc[i])
             thread_join(tc[i]);
         if (ts[i])
             thread_join(ts[i]);
         total += sinks[i].bytes;
+        sent += clients[i].sent;
     }
     uint64_t dt = clock_since_ns(t0);
     bench_snap(&sb);
@@ -4743,7 +4755,9 @@ static unsigned bench_tcp(unsigned flows, uint16_t port)
           (unsigned long long)(ta.timeouts - tb.timeouts), (unsigned long long)(ta.out_of_order - tb.out_of_order),
           (unsigned long long)(ta.ooo_queued - tb.ooo_queued), (unsigned long long)(ta.ooo_dropped - tb.ooo_dropped),
           (unsigned long long)(qa - qb));
-    if (total != (uint64_t)flows * BENCH_TCP_BYTES || dt == 0) {
+    /* Every byte sent arrived, and something was sent: the window is the
+     * measure, the stream's integrity the assertion. */
+    if (total != sent || total == 0 || dt == 0) {
         for (unsigned i = 0; i < flows; i++)
             kwarn("net-bench: flow %u: sink got %u (err %d), client sent %u (err %d)", i, sinks[i].bytes, sinks[i].err,
                   clients[i].sent, clients[i].err);
@@ -4772,12 +4786,13 @@ static void bench_udp_rx_main(void *arg)
     thread_exit(0);
 }
 
-/* BENCH_UDP_SENDS datagrams to a loopback receiver: the send rate in
+/* Datagrams to a loopback receiver for BENCH_UDP_WINDOW_NS: the send rate in
  * datagrams per second (0 on failure) and how many the receiver got (the
  * socket queue holds UDP_RXQ_MAX; the rest were dropped there). */
-static unsigned bench_udp(uint16_t port, uint32_t *delivered)
+static unsigned bench_udp(uint16_t port, uint32_t *delivered, uint32_t *sent_out)
 {
     *delivered = 0;
+    *sent_out = 0;
     struct netaddr addr = v4addr(INADDR_LOOPBACK_N, port);
     struct socket *rx, *tx;
     if (nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &rx) != 0)
@@ -4793,7 +4808,7 @@ static unsigned bench_udp(uint16_t port, uint32_t *delivered)
     bench_snap(&sa);
     uint64_t t0 = clock_now_ns();
     uint32_t sent = 0;
-    for (unsigned i = 0; i < BENCH_UDP_SENDS; i++) {
+    for (unsigned i = 0; clock_now_ns() - t0 < BENCH_UDP_WINDOW_NS; i++) {
         if (ksock_sendto(tx, payload, sizeof(payload), &addr) == (int64_t)sizeof(payload))
             sent++;
         if ((i & 63) == 63)
@@ -4805,6 +4820,7 @@ static unsigned bench_udp(uint16_t port, uint32_t *delivered)
     bench_snap(&sb);
     bench_report("udp", &sa, &sb);
     *delivered = r.got;
+    *sent_out = sent;
     r.stop = true;
     ksock_set_nonblock(rx, true);   /* the receiver's blocked recv returns */
     ksock_shutdown(rx, COSMO_SHUT_RD);
@@ -4826,11 +4842,11 @@ bool selftest_net_bench(const char **reason)
         /* Fresh ports per round: the previous round's connections may still
          * be in TIME_WAIT on theirs. */
         uint16_t base = (uint16_t)(6100 + 40 * steer);
-        uint32_t delivered = 0;
+        uint32_t delivered = 0, sent = 0;
         unsigned one = bench_tcp(1, base), two = bench_tcp(2, (uint16_t)(base + 10));
-        unsigned pps = bench_udp((uint16_t)(base + 20), &delivered);
+        unsigned pps = bench_udp((uint16_t)(base + 20), &delivered, &sent);
         kinfo("net-bench: steer=%u cpus=%u: tcp 1 flow %u MiB/s, 2 flows %u MiB/s total, udp %u sends/s (%u of %u delivered)",
-              steer, ncpu, one, two, pps, delivered, BENCH_UDP_SENDS);
+              steer, ncpu, one, two, pps, delivered, sent);
     }
     nt_netif_set_steering(true);
     return true;

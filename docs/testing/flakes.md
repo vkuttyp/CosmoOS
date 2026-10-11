@@ -426,6 +426,44 @@ in pull request #63 after failing on a loaded host, and its comment
 already says what this file says -- a tighter bound was only ever
 measuring the host.
 
+## `net-bench` over its 8 s guard with #351's code: no RTOs, no drops -- restated as windows, 2026-10-11
+
+**What failed.** After #351 (M4's DHCP client) merged, main's aarch64
+build-and-boot failed twice (run 38127318850 and its re-run): `net-bench`
+8673 ms and 8347 ms against its 8 s per-test budget, every assertion
+passing. On CI's aarch64 runners, trees carrying #351 ran it 2.0-8.7 s, a
+same-day control with #351 reverted (#353) 1.7-3.1 s, and 2 KiB of padding
+ahead of the network code alone (#359) 2.7-4.3 s. CI's exact images ran it
+1.4-1.9 s locally (QEMU 11.1, and CI's 10.0.13 in a container). The slow
+boots' CPUs were idle in the watchdog dump, with 3-8x more thread switches
+than the control. #351 was reverted (#356).
+
+**What was measured.** The owner's Step 1 added, per round, the wall time,
+RTO fires and their backoff, fast retransmits, the time senders waited on a
+retransmission timer, each netrx worker's drops and loopback's drops; Step 2
+ran them with #351 re-applied on CI (#362: eight debug boots per
+architecture). Result, every round of 16 boots:
+
+| | slow rounds (aarch64: TCP 0.5-0.86 s, UDP 1.4-2.2 s) | fast rounds (x86-64: TCP 0.06-0.17 s, UDP 0.28-0.39 s) |
+|---|---|---|
+| RTO fires of the bench's own flows | 1 (200 ms waited, in an 861 ms round) | 1 (201 ms waited, in a 282 ms round) |
+| other RTO fires in the round | backoff 4-7, 8.0-12.8 s waited: a leftover connection from an earlier test retransmitting into the void, in slow and fast rounds alike | the same, once |
+| fast retransmits | 0 | 0 |
+| netrx / loopback drops | 0 in every TCP round; UDP 0 in most, 74 and 307 in two | 0 in TCP; UDP 263 and 368 in the two-CPU boot |
+
+The slow rounds' time is neither retransmission timeouts nor drops -- UDP,
+which retransmits nothing, is the slowest phase -- so it is the time the
+host takes, which the bench measured because it was a fixed amount of work.
+
+**Classification: restate.** `net-bench`'s phases are fixed time windows
+(300 ms each, TCP and UDP), the rates over the window, the assertion the
+stream's integrity (every byte sent arrives) rather than a byte count; the
+per-round counters stay in its output. The 8 s budget is a hang guard
+again. Recorded beside it, not chased here: a bench flow's 200 ms RTO with
+no drop anywhere (twice in 16 boots), and a connection left from an earlier
+test still retransmitting at backoff 7 during `net-bench` (deferred-work
+inventory, 2.5).
+
 ## `lockup-sample`, and a failure that was not a flake at all
 
 **`lockup-sample-busy` itself, three times on 2026-09-17 and 18**, at
