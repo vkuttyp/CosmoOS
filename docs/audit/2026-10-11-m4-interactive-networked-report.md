@@ -225,3 +225,19 @@ Built binaries (release, both stripped and statically linked):
 | e. reboot | host key kept (`StrictHostKeyChecking=yes` passed), 5.2 s | the same, 8.3 s |
 | whole test | PASS in 49.3 s | PASS in 58.1 s |
 
+### PR 3 validation (local, macOS host, QEMU TCG; one sequential run, on the final stack: main with #365 and #352 plus this PR)
+
+| Item | x86-64 | AArch64 |
+|---|---|---|
+| host-test | pass | pass |
+| analyze | clean | clean |
+| debug `test`, `QEMU_SMP=1` | PASS 133.7 s | PASS 133.5 s |
+| debug `test`, `QEMU_SMP=2` | PASS 143.7 s | PASS 154.5 s |
+| debug `test`, `QEMU_SMP=4` | PASS 161.7 s | PASS 156.6 s |
+| `test-smp2` | PASS 154.3 s | PASS 144.7 s |
+| `test-chaos` | PASS 165.1 s | PASS 151.0 s |
+| `test-harness-retry` | PASS 170.4 s | PASS 153.0 s |
+| release build and `test` | PASS 17.8 s | PASS 20.7 s |
+| `test-net-login` (release; acceptance a-e) | PASS 53.1 s | PASS 58.9 s |
+| `fuzz` | pass | -- |
+
