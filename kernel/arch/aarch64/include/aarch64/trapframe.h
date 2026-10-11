@@ -57,6 +57,10 @@ uint64_t aarch64_async_corrected_count(void);
  * CPU it happens to run on. Interrupts off: the caller's CPU. */
 void aarch64_el2_hand_back_here(void);
 #endif
+/* EL2 on the calling CPU with the switch's vectors installed, readied now
+ * when the run loop has not (S25): false when it cannot be. Interrupts
+ * off: the caller's CPU. */
+bool aarch64_el2_ready_here(void);
 #endif
 
 #ifndef __ASSEMBLER__

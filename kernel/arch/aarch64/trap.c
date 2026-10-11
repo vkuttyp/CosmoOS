@@ -411,6 +411,13 @@ bool arch_test_async_inject(const char **why)
 #if CONFIG_SELFTEST
     aarch64_el2_hand_back_here();
 #endif
+    /* EL2 answers this call only through the switch, which a CPU gets
+     * when something readies it -- the run loop, or this. */
+    if (!aarch64_el2_ready_here()) {
+        arch_irq_restore(irq);
+        *why = "EL2 could not be readied on this CPU";
+        return false;
+    }
     uint64_t before = aarch64_async_corrected_count();
     /* EC 0x2F with IDS clear and AET = CE: the syndrome for an error the
      * hardware corrected. */

@@ -343,6 +343,11 @@ static void el2_hand_back(void *arg)
     g_el2_ready[cpu] = false;
 }
 
+bool aarch64_el2_ready_here(void)
+{
+    return el2_ready_here();
+}
+
 #if CONFIG_SELFTEST
 void aarch64_el2_hand_back_here(void)
 {
