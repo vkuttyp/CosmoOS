@@ -21,6 +21,12 @@
  *      expire; the age sweep runs)
  *   4  the resolver address string from the firmware configuration
  *   5  the upstream resolver is configured (payload byte 0 odd) or not
+ *   6  an Ethernet frame to the kernel's DHCP client (dhcp.c) on a second
+ *      interface with no address; bit 5 of the kind byte stamps the xid of
+ *      the client's latest message and its MAC as chaddr (so a reply can
+ *      be for its exchange)
+ *   7  the clock moves to the client's next deadline (T1, T2, the lease's
+ *      end; 65 s without a lease, past any retransmission)
  *
  * Oracles: every DHCP reply the filter builds is a well-formed BOOTP reply
  * (op 2, the request's xid, the magic cookie, a message type that is
@@ -30,7 +36,10 @@
  * for its id, and never relayed without the upstream; an answer is relayed
  * only when it arrives from the configured upstream and carries an id the
  * proxy lent and has not yet consumed, and then with the guest's id
- * restored, to the guest that asked; live pending queries never exceed
+ * restored, to the guest that asked; every frame the DHCP client sends is
+ * ARP or a well-formed DISCOVER or REQUEST (op 1, UDP 68 -> 67, the cookie,
+ * its own MAC) in a correct frame, and its interface holds an address
+ * exactly while the client holds a lease, and then the lease's (N30); live pending queries never exceed
  * DNS_PENDING_MAX and go to zero as time passes; every lock released; after
  * teardown no mbuf alive and the allocator at its baseline.
  */
@@ -39,6 +48,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/dhcp.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
 #include <kernel/socket.h>
@@ -73,7 +83,9 @@ static const uint8_t k_guest_mac[6] = { 0x02, 0xa1, 0x00, 0x00, 0x00, 0x0f };
 #define STRANGER IPV4_ADDR(10, 0, 2, 9)
 #define DNS_PENDING_MAX_EXPECTED 128u
 
-static struct fz_netif g_f1;
+static const uint8_t k_mac2[6] = { 0x02, 0xf2, 0x00, 0x00, 0x00, 0x02 };
+static struct fz_netif g_f1, g_f2;
+static uint32_t g_client_xid;   /* the xid of the client's latest message (wire order) */
 static size_t g_baseline;
 static struct tapsvc *g_svc;
 static unsigned g_bad_frames;
@@ -180,6 +192,74 @@ static void on_frame(struct fz_netif *f, const uint8_t *frame, uint32_t len)
         g_bad_frames++;
 }
 
+/* --- the DHCP client's oracle -------------------------------------------- */
+
+static void on_client_frame(struct fz_netif *f, const uint8_t *frame, uint32_t len)
+{
+    (void)f;
+    if (np_check_checksums(frame, len) != 0 || len < NP_ETH + 28) {
+        g_bad_frames++;
+        return;
+    }
+    if (np_get16(frame + 12) == ETH_P_ARP)
+        return;   /* resolving the server for a renewal */
+    if (np_get16(frame + 12) != ETH_P_IP || len < NP_ETH + NP_IPV4 + NP_UDP + 240) {
+        g_bad_frames++;
+        return;
+    }
+    const uint8_t *ip = frame + NP_ETH;
+    const uint8_t *uh = ip + NP_IPV4;
+    const uint8_t *dh = uh + NP_UDP;
+    uint16_t ulen = np_get16(uh + 4);
+    if (ip[0] != 0x45 || ip[9] != IPPROTO_UDP || np_get16(uh) != 68 || np_get16(uh + 2) != 67 ||
+        ulen < NP_UDP + 240 || NP_ETH + NP_IPV4 + ulen > len || dh[0] != 1 || memcmp(dh + 28, k_mac2, 6) != 0 ||
+        np_get32(dh + 236) != 0x63825363u) {
+        g_bad_frames++;
+        return;
+    }
+    uint8_t l;
+    const uint8_t *t = dhcp_opt(dh + 240, ulen - NP_UDP - 240u, OPT_MSGTYPE, &l);
+    if (t == NULL || l != 1 || (*t != DHCP_DISCOVER && *t != DHCP_REQUEST)) {
+        g_bad_frames++;
+        return;
+    }
+    memcpy(&g_client_xid, dh + 4, 4);
+}
+
+/* N30: an address exactly while a lease is held, and then the lease's. */
+static void client_check(void)
+{
+    struct dhcp_lease_info l[DHCP_MAX_CLIENTS];
+    unsigned n = dhcp_lease_list(l, DHCP_MAX_CLIENTS);
+    FUZZ_ASSERT(n == 1 && strcmp(l[0].ifname, "fz2") == 0);
+    bool held = l[0].state == DHCP_S_BOUND || l[0].state == DHCP_S_RENEWING || l[0].state == DHCP_S_REBINDING;
+    if (held)
+        FUZZ_ASSERT(g_f2.nif.ip4.addr == l[0].addr && l[0].addr != 0 && g_f2.nif.ip4.mask == l[0].mask &&
+                    l[0].ndns <= DHCP_MAX_DNS && l[0].t1_s <= l[0].t2_s && l[0].t2_s <= l[0].lease_s);
+    else
+        FUZZ_ASSERT(g_f2.nif.ip4.addr == 0 && l[0].addr == 0);
+}
+
+static void client_frame(const uint8_t *p, size_t n, bool stamp)
+{
+    uint8_t frame[FZ_CAPTURE_MAX];
+    if (n > sizeof(frame))
+        n = sizeof(frame);
+    memcpy(frame, p, n);
+    /* Stamp the client's xid and MAC into the BOOTP header of a frame with a
+     * plain IPv4 header, and fix the checksums so the reply is believed. */
+    if (stamp && n >= NP_ETH + NP_IPV4 + NP_UDP + 40) {
+        uint8_t *ip = frame + NP_ETH, *uh = ip + (ip[0] & 0xf) * 4u;
+        if (uh + NP_UDP + 40 <= frame + n) {
+            memcpy(uh + NP_UDP + 4, &g_client_xid, 4);
+            memcpy(uh + NP_UDP + 28, k_mac2, 6);
+            np_fix_checksums(frame, (uint32_t)n);
+        }
+    }
+    fz_deliver(&g_f2, frame, (uint32_t)n);
+    client_check();
+}
+
 /* --- setup and teardown -------------------------------------------------- */
 
 static uint16_t g_last_lent;   /* the id the proxy most recently sent upstream */
@@ -198,6 +278,11 @@ static void setup(void)
     memset(&g_usock, 0, sizeof(g_usock));
     kobject_init(&g_gsock.obj, &g_sock_type);
     kobject_init(&g_usock.obj, &g_sock_type);
+    fz_netif_register(&g_f2, "fz2", k_mac2, 0, 0, 0, NETIF_NODEFAULT);
+    g_f2.on_frame = on_client_frame;
+    g_client_xid = 0;
+    FUZZ_ASSERT(dhcp_client_start(&g_f2.nif) == 0);
+    fz_run_work();   /* the first DISCOVER */
     g_svc = tapsvc_test_new(&g_f1.nif);
     FUZZ_ASSERT(g_svc != NULL);
     tapsvc_test_set_sockets(g_svc, &g_gsock, &g_usock);
@@ -215,6 +300,10 @@ static void teardown(void)
     FUZZ_ASSERT(st.dns_pending == 0);
     tapsvc_test_free(g_svc);
     g_svc = NULL;
+    client_check();
+    dhcp_client_stop(&g_f2.nif);
+    struct dhcp_lease_info gone[DHCP_MAX_CLIENTS];
+    FUZZ_ASSERT(dhcp_lease_list(gone, DHCP_MAX_CLIENTS) == 0);   /* stopped: nothing listed, nothing armed */
     fz_netif_unregister_all();
     FUZZ_ASSERT(harness_locks_held() == 0);
     FUZZ_ASSERT(g_bad_frames == 0);
@@ -388,6 +477,22 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             }
             break;
         }
+        case 6:
+            client_frame(p, len, (kind & K_LENT_ID) != 0);
+            break;
+        case 7: {
+            /* The clock to the client's next deadline: T1, T2 or the end
+             * while a lease is held, else past any retransmission (64 s). */
+            struct dhcp_lease_info l[DHCP_MAX_CLIENTS];
+            uint64_t ms = 65000;
+            if (dhcp_lease_list(l, DHCP_MAX_CLIENTS) == 1 && l[0].remaining_ms) {
+                ms = l[0].t1_ms ? l[0].t1_ms : l[0].t2_ms ? l[0].t2_ms : l[0].remaining_ms;
+                ms += 1;
+            }
+            fz_clock_advance(ms * 1000000ull);
+            client_check();
+            break;
+        }
         case K_UPSTREAM:
             g_up_set = len >= 1 && (p[0] & 1);
             tapsvc_test_set_upstream(g_svc, g_up_set ? UPSTREAM : 0, 53);
@@ -446,6 +551,33 @@ static size_t dhcp_frame(uint8_t *f, uint8_t mt, const uint8_t mac[6], uint32_t 
     return np_frame_udp4(f, eth_broadcast, mac, 0, INADDR_BROADCAST_N, 68, 67, dh, (size_t)(o - dh));
 }
 
+/* A server's reply of type `mt` to the client on fz2, from 10.76.0.1, to
+ * the address offered (xid and chaddr are stamped by the K_LENT_ID bit). */
+static size_t client_reply(uint8_t *f, uint8_t mt, uint32_t lease)
+{
+    static const uint8_t server_mac[6] = { 0x02, 0xcc, 0, 0, 0, 0x01 };
+    uint32_t server = IPV4_ADDR(10, 76, 0, 1), yi = IPV4_ADDR(10, 76, 0, 15);
+    uint8_t dh[300];
+    memset(dh, 0, sizeof(dh));
+    dh[0] = 2;
+    dh[1] = 1;
+    dh[2] = 6;
+    memcpy(dh + 16, &yi, 4);
+    memcpy(dh + 28, k_mac2, 6);
+    np_put32(dh + 236, 0x63825363u);
+    uint8_t *o = dh + 240;
+    *o++ = 53; *o++ = 1; *o++ = mt;
+    *o++ = 54; *o++ = 4; memcpy(o, &server, 4); o += 4;
+    if (mt != DHCP_NAK) {
+        *o++ = 51; *o++ = 4; np_put32(o, lease); o += 4;
+        *o++ = 1; *o++ = 4; np_put32(o, 0xffffff00u); o += 4;
+        *o++ = 3; *o++ = 4; memcpy(o, &server, 4); o += 4;
+        *o++ = 6; *o++ = 8; memcpy(o, &server, 4); np_put32(o + 4, 0x0a4c0035u); o += 8;
+    }
+    *o++ = 255;
+    return np_frame_udp4(f, k_mac2, server_mac, server, yi, 67, 68, dh, (size_t)(o - dh));
+}
+
 size_t fuzz_seed(unsigned i, uint8_t *buf, size_t cap)
 {
     uint8_t f[600];
@@ -498,6 +630,18 @@ size_t fuzz_seed(unsigned i, uint8_t *buf, size_t cap)
             n += record(buf + n, cap - n, K_QUERY, q, sizeof(q));
         }
         return n;
+    case 7: { /* the client: offer, ack, T1 (renew), ack, T2, the end, an offer and a NAK */
+        static const uint8_t mts[] = { DHCP_OFFER, DHCP_ACK, 0, DHCP_ACK, 0, 0, 0, DHCP_OFFER, DHCP_NAK };
+        n = 0;
+        for (unsigned k = 0; k < sizeof(mts); k++) {
+            size_t r = mts[k] ? record(buf + n, cap - n, 6 | K_LENT_ID, f, client_reply(f, mts[k], 600))
+                              : record(buf + n, cap - n, 7, f, 0);
+            if (r == 0)
+                break;
+            n += r;
+        }
+        return n;
+    }
     default:
         return 0;
     }
