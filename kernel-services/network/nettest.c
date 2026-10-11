@@ -4758,6 +4758,25 @@ static unsigned bench_udp(uint16_t port, uint32_t *delivered)
     return (unsigned)(((uint64_t)sent * 1000000000ull) / dt);
 }
 
+/* EXPERIMENT (do not merge): machine-wide counters around net-bench's phases. */
+#include <kernel/ipi.h>
+static void exp_snap(uint64_t out[5])
+{
+    for (unsigned i = 0; i < 5; i++)
+        out[i] = 0;
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++) {
+        struct percpu *pc = percpu_get(c);
+        if (pc == NULL || !pc->online)
+            continue;
+        out[0] += pc->rq ? pc->rq->switches : 0;
+        out[1] += pc->irq_count;
+        out[2] += pc->ticks;
+        for (unsigned k = 0; k < IPI_KIND_COUNT; k++)
+            out[3] += ipi_count_on(c, (enum ipi_kind)k);
+        out[4] += pc->idle ? pc->idle->run_time_ns / 1000000 : 0;
+    }
+}
+
 bool selftest_net_bench(const char **reason)
 {
     (void)reason;
@@ -4768,8 +4787,21 @@ bool selftest_net_bench(const char **reason)
          * be in TIME_WAIT on theirs. */
         uint16_t base = (uint16_t)(6100 + 40 * steer);
         uint32_t delivered = 0;
-        unsigned one = bench_tcp(1, base), two = bench_tcp(2, (uint16_t)(base + 10));
+        uint64_t e0[5], e1[5];
+        exp_snap(e0);
+        uint64_t te0 = clock_now_ns();
+        unsigned one = bench_tcp(1, base);
+        uint64_t te1 = clock_now_ns();
+        unsigned two = bench_tcp(2, (uint16_t)(base + 10));
+        uint64_t te2 = clock_now_ns();
         unsigned pps = bench_udp((uint16_t)(base + 20), &delivered);
+        uint64_t te3 = clock_now_ns();
+        exp_snap(e1);
+        kinfo("EXP net-bench steer=%u: ms tcp1 %llu tcp2 %llu udp %llu; switches %llu irqs %llu ticks %llu ipis %llu idle-switch %llu",
+              steer, (unsigned long long)((te1 - te0) / 1000000), (unsigned long long)((te2 - te1) / 1000000),
+              (unsigned long long)((te3 - te2) / 1000000), (unsigned long long)(e1[0] - e0[0]),
+              (unsigned long long)(e1[1] - e0[1]), (unsigned long long)(e1[2] - e0[2]), (unsigned long long)(e1[3] - e0[3]),
+              (unsigned long long)(e1[4] - e0[4]));
         kinfo("net-bench: steer=%u cpus=%u: tcp 1 flow %u MiB/s, 2 flows %u MiB/s total, udp %u sends/s (%u of %u delivered)",
               steer, ncpu, one, two, pps, delivered, BENCH_UDP_SENDS);
     }
