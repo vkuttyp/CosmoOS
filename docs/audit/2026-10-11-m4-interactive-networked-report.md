@@ -108,6 +108,12 @@ one retry of the firmware-handover stall (#364, Step 4), which had hit
 (a revert of the revert, `17e5bab3`) with these records updated; the
 revert and the re-land count once among M4's PRs.
 
+Re-land validation (local, one sequential run of every item, on main
+`0b76962c` plus the re-land): `host-test`, `analyze`, debug `test` at
+`QEMU_SMP=1/2/4`, `test-smp2`, `test-chaos`, `test-harness-retry`, release
+`test` and `test-net-login` PASS on both architectures (`test-net-login`
+14.7 s x86-64, 21.4 s AArch64; debug boots 133.8-161.6 s); `fuzz` PASS.
+
 ### Acceptance a-c (local, macOS host, QEMU TCG, release builds)
 
 | Step | x86-64 | AArch64 |
