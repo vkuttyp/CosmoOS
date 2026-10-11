@@ -13,7 +13,6 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/net/cksum.h>
-#include <kernel/net/dhcp.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
@@ -29,6 +28,39 @@
 #include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
+
+/* --- DHCP wire format (RFC 2131 / 2132) ----------------------------------- */
+
+#define BOOTP_REQUEST 1
+#define BOOTP_REPLY   2
+#define DHCP_HTYPE_ETHER 1
+#define DHCP_MAGIC    0x63825363u
+
+#define OPT_PAD        0
+#define OPT_SUBNET     1
+#define OPT_ROUTER     3
+#define OPT_DNS        6
+#define OPT_LEASE      51
+#define OPT_MSGTYPE    53
+#define OPT_SERVERID   54
+#define OPT_REQIP      50
+#define OPT_END        255
+
+#define DHCP_SPORT 67   /* server */
+#define DHCP_CPORT 68   /* client */
+#define DHCP_FLAG_BROADCAST 0x8000u
+
+/* BOOTP fixed header (236 bytes), then the 4-byte magic cookie, then options. */
+#define BOOTP_LEN 236
+#define DHCP_FIXED (BOOTP_LEN + 4)
+#define BOOTP_OFF_OP     0
+#define BOOTP_OFF_HTYPE  1
+#define BOOTP_OFF_HLEN   2
+#define BOOTP_OFF_XID    4
+#define BOOTP_OFF_FLAGS  10
+#define BOOTP_OFF_YIADDR 16
+#define BOOTP_OFF_SIADDR 20
+#define BOOTP_OFF_CHADDR 28
 
 /* --- DNS proxy (§3): per-instance state ------------------------------------ */
 
@@ -72,6 +104,31 @@ static spinlock_t g_svcs_lock = SPINLOCK_INIT("tapsvc-list");
 static struct tapsvc_stats g_stats;
 
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
+
+/* Find DHCP option `code` in [opts, opts+len); returns its length via *olen
+ * and a pointer to its value, or NULL. Stops at OPT_END, skips OPT_PAD. */
+static const uint8_t *dhcp_opt(const uint8_t *opts, uint32_t len, uint8_t code, uint8_t *olen)
+{
+    uint32_t i = 0;
+    while (i < len) {
+        uint8_t c = opts[i++];
+        if (c == OPT_END)
+            break;
+        if (c == OPT_PAD)
+            continue;
+        if (i >= len)
+            break;
+        uint8_t l = opts[i++];
+        if (i + l > len)
+            break;
+        if (c == code) {
+            *olen = l;
+            return opts + i;
+        }
+        i += l;
+    }
+    return NULL;
+}
 
 static uint8_t *put_opt(uint8_t *p, uint8_t code, uint8_t len, const void *val)
 {

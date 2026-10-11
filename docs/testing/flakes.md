@@ -110,16 +110,6 @@ prompt. The install, reboot and persist boots of the same run had passed;
 the rerun passed every stage (fallback 5.2 s). `install_test.py` has no
 handover retry either. Still unassigned.
 
-**Fourth sighting, 2026-10-11:** local x86-64 `BUILD=release
-test-net-login` on the M4 DHCP branch (PR 1 matrix), the install stage's
-live boot: `boot-install.log` holds only OVMF's screen-clear sequences, no
-`BdsDxe:` line and no loader banner, for the whole 240 s. The release
-`test` boot just before it in the same matrix passed (17.8 s); three
-reruns of `test-net-login` passed (14.9, 14.3, 14.2 s). `net_login_test.py`
-reuses `install_test.py`'s boot and has no handover retry. Still
-unassigned; four sightings now, all x86-64, all before the firmware's
-first line.
-
 ## What the harness does with it
 
 `tests/boot/run_boot_test.py` reads the table under "The list" below --

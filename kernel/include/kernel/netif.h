@@ -22,7 +22,6 @@
 #define NETIF_NODEFAULT (1u << 4)  /* never the machine's default interface (a tap: a point-to-point owner link) */
 #define NETIF_FORWARD  (1u << 5)  /* forward IPv4 datagrams arriving here that are not for the host (a tap, never the real NIC) */
 #define NETIF_MASQUERADE (1u << 6) /* masquerade flows forwarded from here: rewrite source to the egress address (a tap) */
-#define NETIF_AUTOCONF (1u << 7)   /* a NIC driver's interface: IPv4 from fw_cfg opt/cosmo/ipv4, else DHCP (kernel/net/dhcp.h) */
 
 /* nif->caps, set by the driver before netif_register (unit 11). */
 #define NETIF_CAP_TXCSUM (1u << 0)   /* finishes NET_CSUM_* transport checksums (virtio NEEDS_CSUM) */

@@ -3,9 +3,6 @@ echo "CosmoOS userland ready"
 # Services, in dependency order. Their output goes to /var/log/svc/<name>
 # and `svc status` says what is running (docs/userland/design.md).
 svc boot
-# The DHCP lease's DNS servers into /etc/resolv.conf, which musl's
-# resolver reads (roadmap M4; docs/userland/design.md, "netcfg").
-netcfg
 # The shell test script exists only in self-test builds (SELFTEST=1).
 ls /etc/rc.test 2> /tmp/.rc.probe && cosmo-sh /etc/rc.test
 rm /tmp/.rc.probe
