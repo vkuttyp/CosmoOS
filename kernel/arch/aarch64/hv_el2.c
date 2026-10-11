@@ -9,6 +9,7 @@
  * EL2 sees is physical, because its MMU is off.
  */
 
+#include <aarch64/trapframe.h>
 #include <kernel/bootinfo.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
@@ -341,6 +342,13 @@ static void el2_hand_back(void *arg)
     }
     g_el2_ready[cpu] = false;
 }
+
+#if CONFIG_SELFTEST
+void aarch64_el2_hand_back_here(void)
+{
+    el2_hand_back(NULL);
+}
+#endif
 
 void arch_hv_disable(void)
 {

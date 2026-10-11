@@ -50,6 +50,13 @@ _Static_assert(sizeof(struct arch_trap_frame) == 0x130, "trap frame layout");
  * no CI CPU produces -- can be table-tested (invariant I-ARCH-16). */
 enum arch_async_error aarch64_async_class(uint64_t esr, unsigned ras);
 uint64_t aarch64_async_corrected_count(void);
+#if CONFIG_SELFTEST
+/* EL2 on the calling CPU back to the loader's stub, as on a CPU the run
+ * loop has never readied (kernel/arch/aarch64/hv_el2.c, S25): what
+ * trap-async-inject starts from, so its result does not depend on which
+ * CPU it happens to run on. Interrupts off: the caller's CPU. */
+void aarch64_el2_hand_back_here(void);
+#endif
 #endif
 
 #ifndef __ASSEMBLER__

@@ -403,11 +403,20 @@ bool arch_test_async_inject(const char **why)
               ras == 0 ? "no FEAT_RAS on this CPU model" : "no EL2");
         return true;
     }
+    /* One CPU for the whole of it: interrupts off from here to the end.
+     * EL2 on it starts as the loader's stub, as on a CPU no guest has run
+     * on -- which CPU this runs on is the scheduler's choice, and the
+     * answer must not depend on it. */
+    arch_irq_state_t irq = arch_irq_save();
+#if CONFIG_SELFTEST
+    aarch64_el2_hand_back_here();
+#endif
     uint64_t before = aarch64_async_corrected_count();
     /* EC 0x2F with IDS clear and AET = CE: the syndrome for an error the
      * hardware corrected. */
     uint64_t esr = ((uint64_t)ESR_EC_SERROR << ESR_EC_SHIFT) | ((uint64_t)ESR_AET_CE << 10);
     if (el2_call_raw(HV_EL2_CALL_VSE, esr) != 0) {
+        arch_irq_restore(irq);
         *why = "EL2 refused the virtual SError";
         return false;
     }
@@ -431,6 +440,7 @@ bool arch_test_async_inject(const char **why)
         __asm__ volatile("isb" ::: "memory");
     __asm__ volatile("msr daifset, #4" ::: "memory");
     (void)el2_call_raw(HV_EL2_CALL_VSE_CLEAR, 0);
+    arch_irq_restore(irq);
     if (aarch64_async_corrected_count() <= before) {
         *why = "a corrected SError was not delivered, or did not return";
         return false;
