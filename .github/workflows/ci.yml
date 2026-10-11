@@ -42,7 +42,12 @@ jobs:
     # 30 was the limit until 2026-09-25: main's aarch64 job had grown to
     # 29-29.5 minutes (runs 36069717395, 36008860068) and was cancelled by
     # it once with every boot passed (run 36028371189).
-    timeout-minutes: 40
+    # 40 was the limit until 2026-10-11: M3's BusyBox build (musl,
+    # compiler-rt, BusyBox, built once more by the reproducible check) took
+    # the aarch64 job from 38.9 minutes (run 38098643393) past 40, cancelled
+    # in its last boot with every earlier one passed (run 38101481703), and
+    # the x86_64 job from 25.8 to 36.9 minutes.
+    timeout-minutes: 55
     env:
       # SIGNING=dev generates an ephemeral signing key here on first use; it
       # lives only in this job's filesystem and is never uploaded (the
