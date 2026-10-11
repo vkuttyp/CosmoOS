@@ -13,15 +13,7 @@ symbolic link per applet of `applets` (docs/userland/design.md,
 
 `scripts/fetch-pinned.py` downloads each once into `$(PORTS_CACHE)`
 (`.cache/ports` by default; CI caches it) and refuses a file whose digest
-is not the pinned one. That is the only network access of the build. Each
-archive has two URLs, tried in order with three attempts each and
-backoff: the upstream one, then the copy in this repository's
-[`pinned-sources`](https://github.com/vkuttyp/CosmoOS/releases/tag/pinned-sources)
-release (the same bytes; the digest is checked whichever URL served them).
-The fetch fails only when every URL has failed, and its error names each
-URL with its last failure. A DNS failure of busybox.net alone once turned
-main red (run 38105614715, first attempt). A new pinned archive is
-attached to that release in the PR that pins it.
+is not the pinned one. That is the only network access of the build.
 
 ## The build (`busybox.mk`)
 

@@ -197,8 +197,6 @@ $(HOST_OUT)/test_cosmofs: $(addprefix $(ROOT)/,$(HOST_COSMOFS_SRCS)) \
 .PHONY: host-test
 host-test: $(HOST_TESTS)
 	$(Q)for t in $(HOST_TESTS); do echo "== $$t"; ASAN_OPTIONS=detect_leaks=0 $$t || exit 1; done
-	@echo "== $(ROOT)/tests/host/test_fetch_pinned.py"
-	$(Q)$(PYTHON) $(ROOT)/tests/host/test_fetch_pinned.py
 	@echo "== $(ROOT)/tests/host/test_analysis_gate.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_analysis_gate.py
 	@echo "== $(ROOT)/tests/boot/test_nettest_deadline.py"

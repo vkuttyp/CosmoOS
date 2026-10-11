@@ -566,7 +566,7 @@ static int e1000e_probe(struct pci_device *pdev, const struct pci_id *id)
     e->nif.mtu = 1500;
     e->nif.ops = &e1000e_ops;
     e->nif.priv = e;
-    e->nif.flags = NETIF_AUTOCONF;   /* fw_cfg opt/cosmo/ipv4 or DHCP at registration */
+    e->nif.flags = 0;
     e->nif.caps = 0;   /* offloads are measured before they are claimed */
     rc = netif_register(&e->nif);
     if (rc) {

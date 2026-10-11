@@ -21,10 +21,6 @@ BUSYBOX_TAR := $(PORTS_CACHE)/busybox-$(BUSYBOX_VERSION).tar.bz2
 MUSL_TAR    := $(PORTS_CACHE)/musl-$(MUSL_VERSION).tar.gz
 CRT_TAR     := $(PORTS_CACHE)/compiler-rt-$(CRT_VERSION).src.tar.xz
 
-# Each archive's second URL: the copy in this repository's "pinned-sources"
-# release, the same bytes (fetch-pinned.py checks the digest either way).
-PINNED_MIRROR := https://github.com/vkuttyp/CosmoOS/releases/download/pinned-sources
-
 # One BusyBox per architecture, shared by the build variants beside
 # $(OUT) (debug, release, chaos, crash...): none of them changes it, and
 # each would otherwise spend minutes building the same binary.
@@ -47,11 +43,11 @@ BB_RT_EXCLUDE_aarch64 := divxc3 fixunsxfdi fixunsxfsi fixunsxfti fixxfdi fixxfti
 BB_RT_EXCLUDE_x86_64 :=
 
 $(BUSYBOX_TAR):
-	$(Q)$(PYTHON) $(ROOT)/scripts/fetch-pinned.py $@ $(BUSYBOX_SHA256) $(BUSYBOX_URL) $(PINNED_MIRROR)/$(notdir $(BUSYBOX_TAR))
+	$(Q)$(PYTHON) $(ROOT)/scripts/fetch-pinned.py $@ $(BUSYBOX_URL) $(BUSYBOX_SHA256)
 $(MUSL_TAR):
-	$(Q)$(PYTHON) $(ROOT)/scripts/fetch-pinned.py $@ $(MUSL_SHA256) $(MUSL_URL) $(PINNED_MIRROR)/$(notdir $(MUSL_TAR))
+	$(Q)$(PYTHON) $(ROOT)/scripts/fetch-pinned.py $@ $(MUSL_URL) $(MUSL_SHA256)
 $(CRT_TAR):
-	$(Q)$(PYTHON) $(ROOT)/scripts/fetch-pinned.py $@ $(CRT_SHA256) $(CRT_URL) $(PINNED_MIRROR)/$(notdir $(CRT_TAR))
+	$(Q)$(PYTHON) $(ROOT)/scripts/fetch-pinned.py $@ $(CRT_URL) $(CRT_SHA256)
 
 $(BB_LIBC): $(MUSL_TAR) $(ROOT)/ports/busybox/busybox.mk
 	$(call log,MUSL,$(MUSL_VERSION) $(BB_TARGET))

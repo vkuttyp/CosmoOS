@@ -61,7 +61,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 FUZZ_NET_STACK := kernel-services/network/ether.c kernel-services/network/arp.c kernel-services/network/ipv4.c \
 	kernel-services/network/ipv6.c kernel-services/network/udp.c kernel-services/network/tcp.c \
 	kernel-services/network/nat.c kernel-services/network/fw.c kernel-services/network/mbuf.c \
-	kernel-services/network/cksum.c kernel-services/network/inet.c kernel-services/network/dhcp.c
+	kernel-services/network/cksum.c kernel-services/network/inet.c
 FUZZ_NET_FRAME_SRCS := tests/fuzz/fuzz_net_frame.c tests/fuzz/shim_net.c $(FUZZ_NET_STACK) $(FUZZ_COMMON)
 FUZZ_TCP_SEGMENTS_SRCS := tests/fuzz/fuzz_tcp_segments.c tests/fuzz/shim_net.c $(FUZZ_NET_STACK) $(FUZZ_COMMON)
 FUZZ_NET_CONFIG_SRCS := tests/fuzz/fuzz_net_config.c tests/fuzz/shim_net.c $(FUZZ_NET_STACK) $(FUZZ_COMMON)

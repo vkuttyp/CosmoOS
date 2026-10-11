@@ -315,24 +315,6 @@ first buffer was too small. `kill` accepts `-9`, `-KILL`, `-s KILL`.
 `dmesg` writes the `klog` buffer. `sysctl -a` lists `sysctl.names` then
 each value as `name = value`.
 
-## netcfg (`userland/system/netcfg.c`; roadmap M4)
-
-DNS for user space without a resolver in the kernel. The kernel's DHCP
-client holds each interface's lease (docs/kernel-services/network/design.md,
-"The DHCP client"); `/dev/net/tapctl`'s snapshot lists the leases in its
-lease section (netctl version 7). `/etc/rc` runs `netcfg` after the
-services start: it waits up to 10 s (`--wait`) for a bound lease, prints
-each bound one, and writes one `nameserver` line per distinct DNS server
-the leases name to `/etc/resolv.conf` (`--resolv`), through a temporary
-file renamed over it so a reader never sees half a file. musl's resolver,
-which BusyBox's `wget` reaches through `getaddrinfo`, reads that file;
-BusyBox's `nslookup` reads it too. No lease with a DNS server (an
-interface configured from fw_cfg, or no DHCP server) leaves the file as
-it was and exits 1. `netcfg show` prints the leases: state, address and
-prefix, gateway, server, lease, T1/T2 and the time left, DNS servers.
-The file is written once per boot: a renewal that changed the servers is
-picked up at the next boot (or another `netcfg`).
-
 ## Test script (`userland/etc/rc.test`)
 
 Straight-line shell (no control flow exists): every check is a command

@@ -844,43 +844,6 @@ sa)`, `cosmo_listen(h, backlog)`, `cosmo_accept(h, peer, len)`,
 `sizeof(struct cosmo_sockaddr)` (0 for a NULL `to`). `<sys/socket.h>`
 maps `SOCK_NONBLOCK`; `<errno.h>` `EAGAIN`, `EINPROGRESS`, `EALREADY`.
 
-## The DHCP client (`kernel/include/kernel/net/dhcp.h`, `dhcp.c`; roadmap M4)
-
-**`NETIF_AUTOCONF`** (`netif.h`), set by a NIC driver before
-`netif_register` (`virtio_net`, `e1000e`): the interface takes its IPv4
-configuration from fw_cfg `opt/cosmo/ipv4` when the boot names one, else
-from DHCP. Interfaces without it (loopback, taps, self-test fixtures) are
-configured by their creator.
-
-**`int dhcp_client_start(struct netif *nif)`** starts a client (called by
-`netif_register`; a self-test calls it for its fixture). `-ENOSPC` when
-`DHCP_MAX_CLIENTS` (4) run. Thread context.
-**`void dhcp_client_stop(struct netif *nif)`** (`netif_unregister`, step
-2a): no timer or work item of the client runs after it returns, and its
-interface reference is put. Sleeps. No-op without a client.
-**`void dhcp_client_kick(struct netif *nif)`** (`netif_set_up(true)`):
-a DISCOVER or REQUEST awaiting its retransmission goes now.
-**`bool dhcp_client_input(struct netif *nif, struct mbuf *m, unsigned ihl)`**
-(`ipv4_input`, before the address checks): takes a UDP 67->68 datagram
-for an interface with a client and returns true; anything else is
-untouched (false).
-**`unsigned dhcp_lease_list(struct dhcp_lease_info *out, unsigned max)`**
-copies every client (state, address, mask, router, server, up to three
-DNS servers, the granted lease/T1/T2 and the milliseconds left to each).
-**`void dhcp_boot_wait(void)`** (`main.c`, after `random_boot_wait`):
-waits at most `DHCP_BOOT_WAIT_NS` (10 s) for every client to be bound.
-**`dhcp_get_stats`**: discovers, requests, offers, acks, naks, renews,
-rebinds, expiries, ignored replies. Self-test seams (`CONFIG_SELFTEST`):
-`dhcp_test_fire(nif, RETX|T1|T2|EXPIRE)` moves that deadline (and the
-earlier ones) to now and runs the client; `dhcp_test_state`.
-
-**The lease in the netctl snapshot** (`uapi/cosmo/netctl.h`, version 7):
-after the flow section, a `struct cosmo_netctl_lease_list` and one
-`struct cosmo_netctl_lease` per client (`ifname`, `state`
-`COSMO_NETCTL_DHCP_*`, `addr`, `mask`, `router`, `server`, `dns[3]` and
-`dns_count`, `lease_s`/`t1_s`/`t2_s`, `remaining_ms`/`t1_ms`/`t2_ms`).
-`netcfg` reads it (docs/userland).
-
 ## Boot parameters (`kernel/include/kernel/fwcfg.h`, `kernel/include/arch/fwcfg.h`)
 
 **`bool fwcfg_get_string(const char *key, char *buf, size_t len)`**
@@ -889,8 +852,7 @@ into `buf` (truncated to `len - 1`); `false` when the item or the
 device is absent. Any context (a spinlock around the port accesses);
 each call walks the file directory, so it is for boot-time
 configuration, not hot paths. Keys used: `ipv4`
-(`"a.b.c.d/prefix,gateway"`, read by `netif_register` for an interface
-marked `NETIF_AUTOCONF`; without it the DHCP client runs), `nettest`
+(`"a.b.c.d/prefix,gateway"`, read by `netif_register`), `nettest`
 (`"tcp=<port>"`, read by the `net-harness` self-test).
 
 **`int arch_fwcfg_read(const char *name, void *buf, size_t len)`**
