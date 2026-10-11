@@ -46,9 +46,16 @@
 static bool threads_settle(unsigned expected)
 {
     uint64_t deadline = clock_now_ns() + MS(200);
-    while (thread_count() != expected) {
-        if (clock_now_ns() > deadline)
+    unsigned n;
+    while ((n = thread_count()) != expected) {
+        if (clock_now_ns() > deadline) {
+            /* Machine-wide: say what it saw, and who, so a failure names the
+             * thread that came or did not go (docs/testing/flakes.md,
+             * sched-restore-loop, 2026-10-11). */
+            kwarn("selftest: threads_settle: %u threads after 200 ms, expected %u", n, expected);
+            thread_dump_all();
             return false;
+        }
         sched_yield();
     }
     return true;

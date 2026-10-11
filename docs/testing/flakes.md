@@ -2560,6 +2560,20 @@ held one report, one probe script and this file. The test itself passed
 is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
+## `sched-restore-loop`: the thread count not back in 200 ms, 2026-10-11
+
+`SELFTEST: sched-restore-loop ... FAIL: check failed: threads_settle(before)
+at line 974 (248 ms)`, aarch64 CI, main's merge run for #365 (M4 PR 1;
+run 38172582326, job 114568106232), the `entropy boots` job's no-entropy
+boot. The test's own line passed every other check (100 runs of 32, 3200
+trips, nesting 1); only the machine-wide `thread_count()` was not back to
+its value before the test 200 ms after its partner's join. First
+sighting. `thread_count` counts every thread, so a thread created or
+exited anywhere in that window fails it as surely as the partner's slow
+reap; the log could not say which: `threads_settle` (schedtest.c) now
+prints the count it saw and dumps the thread list when it gives up. Not
+attributed; the failed job was rerun.
+
 ## `irqpoll-boost` over its gap bound, 2026-10-10
 
 `SELFTEST: irqpoll-boost ... FAIL: check failed: gap_ms <= BOOST_GAP_MS
