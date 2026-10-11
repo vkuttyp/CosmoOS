@@ -14,6 +14,7 @@ the owner's and were not reopened; this report records how each was built.
 | 2 | Linux `fork`, fork-like `clone`, `CLONE_VM|CLONE_VFORK`, `wait4` for children, handle-table duplication. |
 | 3 | `execve` (Linux) and `SYS_exec` (native), close-on-exec, `#!`, personality switching on exec, vfork release. |
 | 4 | The BusyBox port, the image layout, `make test-busybox` and its CI job; M3 ticked. |
+| 5 | Added on the way: TCP sender silly-window avoidance (#349, merged before PR 3), the defect behind `net-bench`'s 1 MiB/s mode that PR 3's layout made frequent on CI ([report](2026-10-11-tcp-sws-report.md)). |
 
 ## PR 1 (as built)
 
