@@ -2782,3 +2782,13 @@ See the [history index](README.md).
     console), `/proc/<pid>/fd`, switch_root carrying nested mounts;
     `tty-pty`, `lxpty`, test-net-login's console stage.
   - Report: `docs/audit/2026-10-11-m4-interactive-networked-report.md`.
+
+- **`threads_settle` names what it saw (2026-10-12; PR #367).** Main's
+  merge run for #365 failed `sched-restore-loop`'s machine-wide thread
+  count settle once (aarch64, no-entropy boot; rerun passed). No allowance
+  added: `threads_settle` (schedtest.c) now prints the count it saw and
+  dumps the thread list when it gives up, so a next sighting says whether
+  a thread came (named in the dump) or went (a count below the expected).
+  Record: `docs/testing/flakes.md`, "`sched-restore-loop`: the thread
+  count not back in 200 ms".
+
