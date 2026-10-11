@@ -42,6 +42,7 @@ include $(ROOT)/libc/libc.mk
 # BusyBox before userland: its applet list decides which native programs
 # move aside to cosmo-<name> (userland/userland.mk).
 include $(ROOT)/ports/busybox/busybox.mk
+include $(ROOT)/ports/dropbear/dropbear.mk
 include $(ROOT)/userland/userland.mk
 include $(ROOT)/pkg/pkg.mk
 # The Linux ABI test programs and the virtualization guests both build
@@ -63,9 +64,9 @@ image: $(IMAGE)
 # order the kernel loads them (dependencies first). See
 # scripts/mkbootarchive.py and docs/kernel/module/.
 BOOT_ARCHIVE := $(OUT)/boot.tar
-BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
+BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) $(DROPBEAR_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
 
-$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
+$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
 	$(call log,ARCHIVE,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
 

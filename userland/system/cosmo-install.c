@@ -240,6 +240,23 @@ static int copy_tree(const char *src, const char *dst)
     return rc;
 }
 
+/* Write `text` to MNT `path` with `mode`, whole; -1 with a message. */
+static int write_file(const char *path, const char *text, uint32_t mode)
+{
+    char t[256];
+    snprintf(t, sizeof(t), MNT "%s", path);
+    size_t n = strlen(text);
+    int fd = open(t, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (fd < 0 || write(fd, text, n) != (ssize_t)n) {
+        fprintf(stderr, "cosmo-install: %s: %s\n", t, strerror(errno));
+        if (fd >= 0)
+            close(fd);
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
 /* What the installed system is made of: the running system's own files.
  * /boot is not copied -- the boot archive is on the ESP -- and the
  * filesystems the kernel provides get empty mountpoints. */
@@ -249,6 +266,8 @@ static int populate(void)
     static const struct { const char *path; uint32_t mode; } dirs[] = {
         { "/dev", 0755 }, { "/proc", 0555 }, { "/tmp", 01777 }, { "/mnt", 0755 },
         { "/var", 0755 }, { "/var/log", 0755 }, { "/boot", 0755 },
+        /* Roadmap M4: root's home and the ssh server's (decision 6). */
+        { "/root", 0700 }, { "/root/.ssh", 0700 },
     };
     for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         char t[256];
@@ -277,6 +296,29 @@ static int populate(void)
         return -1;
     }
     close(fd);
+    /*
+     * Roadmap M4 (decision 6): one user, root, whom the ssh server logs in
+     * by public key alone -- no password exists to check (the '*' field)
+     * and password authentication is compiled out of dropbear. The keys
+     * that may log in are root's authorized_keys, empty until the owner
+     * adds one. The server is a service of the installed system only: its
+     * host key is made at that system's first boot (/etc/dropbear/start).
+     */
+    if (write_file("/etc/passwd", "root:*:0:0:root:/root:/bin/sh\n", 0644) < 0 ||
+        write_file("/etc/group", "root:x:0:\n", 0644) < 0 ||
+        write_file("/root/.ssh/authorized_keys", "", 0600) < 0)
+        return -1;
+    char d[256];
+    snprintf(d, sizeof(d), MNT "/etc/svc");
+    if (mkdir(d, 0755) < 0 && errno != EEXIST) {
+        fprintf(stderr, "cosmo-install: %s: %s\n", d, strerror(errno));
+        return -1;
+    }
+    if (write_file("/etc/svc/dropbear",
+                   "# The ssh server (roadmap M4): its host key at the first boot, then dropbear.\n"
+                   "exec /bin/sh /etc/dropbear/start\n"
+                   "restart always\n", 0644) < 0)
+        return -1;
     return 0;
 }
 

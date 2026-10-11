@@ -78,7 +78,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk') }}
 
       - name: Verify toolchain and that no signing secret is tracked
         run: make ARCH=${{ matrix.arch }} check-tools
@@ -242,7 +242,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk') }}
 
       - name: Build (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug all
@@ -288,7 +288,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -308,8 +308,10 @@ jobs:
   # "test-net-login"): the installed system on QEMU user networking with no
   # fw_cfg address -- the kernel's DHCP client configures eth0, netcfg writes
   # /etc/resolv.conf, BusyBox wget fetches by address and by name (the last
-  # through the runner's internet, three attempts). Release builds, a job of
-  # its own like the install test.
+  # through the runner's internet, three attempts); job control in ash on the
+  # console; the host's OpenSSH client logs in to dropbear by key, runs a
+  # command and a PTY session, and logs in again after a reboot with the
+  # host key unchanged. Release builds, a job of its own like the install test.
   net-login:
     name: net-login test (${{ matrix.arch }})
     runs-on: ubuntu-24.04
@@ -327,7 +329,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
-            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
+            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64 openssh-client
 
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -343,12 +345,12 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
 
-      - name: DHCP, wget by address and by name on the installed system (release)
+      - name: DHCP, wget by address and by name, ssh login and a PTY session on the installed system (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release test-net-login
 
       - name: Upload the boots' serial logs (on failure)
@@ -396,7 +398,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
