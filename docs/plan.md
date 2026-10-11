@@ -18,7 +18,7 @@
 > (#351, reverted by #356, re-landed after `net-bench`'s restate,
 > [report](audit/2026-10-11-net-bench-restate-report.md)); PR 2, pseudo-terminals,
 > controlling terminals and job control (ash on the console and on a pty);
-> PR 3, static dropbear and ssh login. Next: M5.
+> PR 3 (#366), static dropbear and ssh login. Next: M5.
 
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.

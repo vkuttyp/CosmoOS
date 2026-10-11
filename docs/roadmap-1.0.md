@@ -62,7 +62,7 @@ userland.
 - [x] **Acceptance:** from the installed system, BusyBox `wget` fetches a
   file by hostname through QEMU user networking; ssh login from the host
   with static dropbear. Done 2026-10-11: `make test-net-login` in CI on
-  both architectures (PRs #365 (re-land of #351), #352 and PR 3;
+  both architectures (PRs #365 (re-land of #351), #352 and #366;
   [report](audit/2026-10-11-m4-interactive-networked-report.md)).
 
 ### M5 Security baseline
