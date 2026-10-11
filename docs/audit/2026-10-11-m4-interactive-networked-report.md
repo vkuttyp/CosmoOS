@@ -73,6 +73,19 @@ so it is fixed here (AGENTS.md, "Scope rules"):
   has no EL2, and its half of the test (vector 18 has a handler) is
   unaffected.
 
+### PR 1 review
+
+Qodo, Codex and CosmoReview raised 15 findings on PR #351; 13 were fixed in
+`18561ad3` (the client's slot lifetime under its own lock, the server identifier
+required and matched for ACK/NAK, the lease counted from the REQUEST,
+nanosecond T1/T2 for short leases, only datagrams for this host claimed,
+`netif_set_ipv4`'s publish order, `secs_since` underflow, netcfg's wait and
+path checks, fetch-pinned's bounds, wget without unverified https), and two
+are deferred with inventory lines (resolv.conf refresh on a lease change, a
+consistent snapshot of an interface's IPv4 tuple). Re-validated: debug
+`test`, `analyze` and `test-net-login` on both architectures, `host-test`,
+`fuzz`.
+
 ### Test fixtures no longer receive 10.0.2.15
 
 Before this PR, every non-loopback interface registered without an address
