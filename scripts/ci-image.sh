@@ -18,8 +18,14 @@ df="$root/ci/Dockerfile"
 hash=$(sha256sum "$df" | cut -c1-16)
 for target in toolchain litmus; do
     ref="$repo:$target-$hash"
-    if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+    # Built only when the registry says the tag is not there: any other
+    # failure (the network, authentication) stops here, rather than
+    # rebuilding an unchanged Dockerfile with whatever Debian serves today.
+    if err=$(docker buildx imagetools inspect "$ref" 2>&1 >/dev/null); then
         echo "ci-image: $ref exists" >&2
+    elif ! printf '%s' "$err" | grep -qi 'not found\|manifest unknown'; then
+        echo "ci-image: cannot tell whether $ref exists: $err" >&2
+        exit 1
     else
         echo "ci-image: building $ref" >&2
         docker build --target "$target" -t "$ref" -f "$df" "$root/ci"

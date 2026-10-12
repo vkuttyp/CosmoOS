@@ -26,13 +26,8 @@ done
 
 status=0
 case "$arch" in aarch64) loader=boot/BOOTAA64.EFI ;; *) loader=boot/BOOTX64.EFI ;; esac
-# The self-test fixtures exist only when SELFTEST=1 (debug builds): absent
-# from both trees is fine for them and for nothing else.
-optional=" modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko busybox/testsuite.tgz "
 for f in kernel/kernel.elf $loader boot.tar modules/hello.ko modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko userland/init.elf userland/sh.elf userland/ls.elf userland/pkg.elf busybox/busybox busybox/testsuite.tgz libc/libc.a pkg/repo/INDEX pkg/repo/hello-1.1.cpk pkg/repo/fortune-1.0.cpk cmdline manifest cosmoos.img release/SHA256SUMS; do
-    if [ ! -e "$a/$f" ] && [ ! -e "$b/$f" ] && [ "${optional#* $f }" != "$optional" ]; then
-        printf '  absent   %s\n' "$f"
-    elif cmp -s "$a/$f" "$b/$f"; then
+    if cmp -s "$a/$f" "$b/$f"; then
         printf '  same     %s\n' "$f"
     else
         printf '  DIFFERS  %s\n' "$f"

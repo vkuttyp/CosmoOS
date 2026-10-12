@@ -2,8 +2,10 @@
 """mkrelease.py ARCH DEST IMAGE LOADER KERNEL ARCHIVE MANIFEST CMDLINE
 
 Collect one architecture's release set (roadmap M6; docs/development.md,
-"Releases") into DEST, which is emptied first, under the names the GitHub
-release carries:
+"Releases") into DEST under the names the GitHub release carries. DEST is
+created if missing; a DEST that holds anything but an earlier release set
+(cosmoos-* and SHA256SUMS) is refused rather than emptied, so a mistyped
+RELEASE_DIR deletes nothing:
 
     cosmoos-ARCH.img           the signed live image (GPT, ESP)
     cosmoos-ARCH-BOOTX64.EFI   the UEFI loader (BOOTAA64.EFI on AArch64)
@@ -26,8 +28,13 @@ def main():
     if len(sys.argv) != 9:
         sys.exit(__doc__)
     arch, dest, image, loader, kernel, archive, manifest, cmdline = sys.argv[1:]
-    shutil.rmtree(dest, ignore_errors=True)
-    os.makedirs(dest)
+    os.makedirs(dest, exist_ok=True)
+    stray = [f for f in os.listdir(dest) if not (f.startswith("cosmoos-") or f == "SHA256SUMS")]
+    if stray:
+        sys.exit(f"mkrelease: {dest} holds {', '.join(sorted(stray)[:5])}, which no release set has; "
+                 "refusing to write the set over it")
+    for f in os.listdir(dest):
+        os.remove(os.path.join(dest, f))   # the earlier set: no name of it may outlive this one
     files = [
         (image, f"cosmoos-{arch}.img"),
         (loader, f"cosmoos-{arch}-{os.path.basename(loader)}"),

@@ -24,6 +24,12 @@
 > `VERIFY_BOOT=0` override, `root=boot-disk`, `make test-security`);
 > PR 2, user-space ASLR and the W^X check; PR 3, operation-specific
 > privileges.
+> M5 done 2026-10-12. M6 (release) in progress
+> ([report](audit/2026-10-12-m6-release-report.md)): PR 1 (#371), the
+> native signal frame behind arch functions, no stack-frame exemptions
+> and the stack high-water check, the package repository on the
+> installed disk; PR 2, the CI toolchain image on GHCR and `make
+> release` with the reproducible release set.
 
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.

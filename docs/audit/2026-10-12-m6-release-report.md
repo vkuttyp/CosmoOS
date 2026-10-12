@@ -154,7 +154,8 @@ the release notes copy the compiler and QEMU versions from there.
 
 `make release` runs `release-set` with `BUILD=release`, and
 `scripts/mkrelease.py` copies the image, loader, kernel, archive,
-command line and manifest into `out/release/<arch>/` as
+command line and manifest into `out/release/<arch>/` (refusing a
+directory that holds anything but an earlier set) as
 `cosmoos-<arch>.img`, `cosmoos-<arch>-BOOTX64.EFI` (`BOOTAA64.EFI`),
 `cosmoos-<arch>-kernel.elf`, `-boot.tar`, `-cmdline`, `-manifest`, with
 `SHA256SUMS` in `sha256sum -c` form. Signed with what `SIGNING` selects;
@@ -162,8 +163,8 @@ the release workflow (PR 5) passes the release key.
 
 `make reproducible` now also builds `image` and `release-set` in both
 trees and compares `cmdline`, `manifest`, `cosmoos.img` and the set's
-`SHA256SUMS`; self-test fixtures absent from both trees of a release
-build are reported `absent`, anything else missing fails. The FAT image
+`SHA256SUMS`; every file is required in both trees (release builds make
+the test modules and the BusyBox testsuite archive too). The FAT image
 was already deterministic: `mkimage.sh` gives `mformat` a fixed serial,
 and two runs on the same inputs a minute apart, with the kernel's mtime
 changed between them, gave identical bytes (mtools 4.0.49). CI's new
