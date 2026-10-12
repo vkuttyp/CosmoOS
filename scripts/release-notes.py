@@ -83,7 +83,10 @@ def main():
     n.append("Built and tested in the project's CI images (`ci/Dockerfile`), pinned by digest:\n")
     n.append(f"- toolchain: `{a.toolchain}`")
     n.append(f"- litmus: `{a.litmus}`")
-    for p in ("clang", "lld", "llvm", "qemu-system-x86", "qemu-system-arm", "ovmf", "qemu-efi-aarch64", "mtools", "python3"):
+    names = ["clang", "lld", "llvm", "qemu-system-x86", "qemu-system-arm", "ovmf", "qemu-efi-aarch64", "mtools", "python3"]
+    # The versioned packages the metapackages depend on: what actually ran.
+    names += sorted(p for p in pkgs if re.match(r"^(clang|lld|llvm)-\d+$", p))
+    for p in names:
         if p in pkgs:
             n.append(f"- {p} {pkgs[p]}")
     n.append("")

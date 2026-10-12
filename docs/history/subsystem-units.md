@@ -2830,7 +2830,7 @@ See the [history index](README.md).
     `test-security` stage `priv` (acceptance d), test-net-login checks
     the ssh session's set (e). M5 ticked.
   - Report: `docs/audit/2026-10-12-m5-security-baseline-report.md`.
-- **Roadmap M6, release (2026-10-12; in progress).**
+- **Roadmap M6, release (2026-10-12).**
   - PR 1: `native_signal_frame` is one generic function over
     `arch_sigframe_place`/`arch_sigframe_enter`/`arch_sigreturn_frame`
     (`kernel/arch/<arch>/user.c`); the WXN crash test calls
@@ -2858,4 +2858,10 @@ See the [history index](README.md).
     run by `tests/guide/run_guide.py` in CI (Linux both architectures;
     macOS on main); README status, "Not in 1.0", the plan's post-1.0
     preface, inventory lines closed by M1-M6 struck.
+  - PR 5: the release workflow (two builds per architecture from the
+    tag in fresh containers, compared; M1-M5's acceptance tests and the
+    guide on the published bytes; notes with the toolchain digests, the
+    third-party digests and the release key; a GitHub release), the
+    release key `release-2026` (id `36ae7bb4947896ab`), the
+    `v1.0.0-rc1` dry run green first time, M6 ticked, `v1.0.0`.
   - Report: `docs/audit/2026-10-12-m6-release-report.md`.
