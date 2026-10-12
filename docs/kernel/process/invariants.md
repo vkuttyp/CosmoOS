@@ -242,7 +242,8 @@ parent survives).
 only shrink.** (Roadmap M5; `docs/kernel/security/design.md` §1.) Each
 of the thirty former `cred_privileged` sites, and the raw devices,
 asks `cred_has(c, PRIV_X)` for the one privilege it needs; uid 0 alone
-grants nothing. `privs` is copied by fork, spawn and exec and written
+grants nothing, and a bit acts only while the effective uid is 0
+(`cred_has`). `privs` is copied by fork, spawn and exec and written
 only to clear bits: a spawn's drop mask, or a uid change that leaves no
 id 0 (`cred_ids_changed`); no call adds one. Check:
 `tests/host/test_cred.c` (the rules), `init --unpriv-test` (every

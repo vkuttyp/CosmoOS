@@ -40,10 +40,14 @@ static void test_privilege(void)
     }
     EXPECT(!cred_has(&r, 0));
     EXPECT(PRIV_ALL == 0x3fu && COSMO_PRIV_COUNT <= 16);
-    /* Effective uid 0 without privileges is nothing. */
+    /* Effective uid 0 without privileges is nothing, and privileges with
+     * another effective uid are dormant. */
     struct credentials z = root();
     z.privs = 0;
     EXPECT(!cred_has(&z, PRIV_MOUNT));
+    struct credentials d = root();
+    d.euid = 1000;
+    EXPECT(!cred_has(&d, PRIV_MOUNT) && d.privs == PRIV_ALL);
     /* Dropping one leaves the others. */
     cred_drop(&r, PRIV_MOUNT);
     EXPECT(!cred_has(&r, PRIV_MOUNT) && cred_has(&r, PRIV_SYS_ADMIN));
@@ -58,13 +62,17 @@ static void test_setresuid_root(void)
     EXPECT(c.ruid == 1000 && c.euid == 1001 && c.suid == 1002);
     /* No id 0 is left: every privilege went with it. */
     EXPECT(c.privs == 0);
-    /* With a 0 still among the ids, nothing is cleared. */
+    /* With a 0 still among the ids, nothing is cleared -- but the bits act
+     * only while the effective uid is 0 (Linux's effective set). */
     c = root();
     EXPECT(cred_setresuid(&c, -1, 1000, -1) == 0 && c.ruid == 0 && c.euid == 1000 && c.suid == 0);
     EXPECT(c.privs == PRIV_ALL);
-    EXPECT(cred_setresuid(&c, 5, -1, -1) == 0 && c.ruid == 5);   /* PRIV_CRED: any ids */
-    EXPECT(c.privs == PRIV_ALL);                                    /* the saved id is still 0 */
-    EXPECT(cred_setresuid(&c, -1, -1, 5) == 0 && c.privs == 0);     /* and now it is not */
+    EXPECT(!cred_has(&c, PRIV_CRED) && !cred_has(&c, PRIV_SYS_ADMIN));   /* acting as uid 1000 */
+    EXPECT(cred_setresuid(&c, 5, -1, -1) == -EPERM);                      /* so no foreign ids */
+    EXPECT(cred_setresuid(&c, -1, 0, -1) == 0 && cred_has(&c, PRIV_CRED)); /* back: the bits act again */
+    EXPECT(cred_setresuid(&c, 5, -1, -1) == 0 && c.ruid == 5);           /* PRIV_CRED: any ids */
+    EXPECT(c.privs == PRIV_ALL);                                          /* the saved id is still 0 */
+    EXPECT(cred_setresuid(&c, -1, 7, 5) == 0 && c.privs == 0);            /* and now no id is */
     /* Without PRIV_CRED a uid-0 process may only shuffle its own ids. */
     c = root();
     cred_drop(&c, PRIV_CRED);

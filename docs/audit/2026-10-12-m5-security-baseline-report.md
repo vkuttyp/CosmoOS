@@ -208,6 +208,25 @@ namespace to `PRIV_SYS_ADMIN`, with the hostname. A service file without
 `privileges` keeps the supervisor's set (every existing definition
 behaves as before).
 
+### Review of PR #370
+
+- A privilege acts only while the effective uid is 0 (`cred_has`): with
+  the bits alone, `setresuid(-1, 1000, -1)` left a process acting as
+  uid 1000 with root's overrides -- before M5 that move made it
+  unprivileged, and Linux's effective set clears the same way. Changing
+  the effective uid back restores them; leaving every uid 0 still clears
+  them for good.
+- Every use of a raw device rechecks its privilege: `/dev/net/tap` reads
+  and writes and `SYS_vm_create` now ask for `PRIV_DEVICE` themselves,
+  so a handle kept across a drop or passed to a child does nothing.
+- `priv -u`/`-g` accept only a whole decimal id up to 2^32-1 (a typo was
+  uid 0).
+- `SYS_sysctl_set` answers `ENOENT`, not `EROFS`, for a listed name this
+  build does not have (`debug.*` in a release kernel).
+- Not fixed, recorded: a root session with a reduced set can rewrite
+  root-owned configuration that later runs with every privilege
+  (security design §1; inventory 2.9).
+
 ### Acceptance d-e (local, release)
 
 | Check | x86-64 | AArch64 |

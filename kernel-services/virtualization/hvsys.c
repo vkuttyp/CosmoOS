@@ -7,6 +7,7 @@
  * writing: the node's mode (0600) is the policy.
  */
 
+#include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/handle.h>
 #include <kernel/hv.h>
@@ -80,6 +81,11 @@ static struct vm *vm_of(int h, unsigned rights)
 int64_t sys_vm_create(struct syscall_args *a)
 {
     struct process *p = process_current();
+    /* PRIV_DEVICE now, not only when /dev/vmm was opened: a handle kept
+     * across a drop, or handed to a child that never had it, creates
+     * nothing (roadmap M5, PR #370 review). */
+    if (!cred_has(cred_current(), PRIV_DEVICE))
+        return -EPERM;
     struct kobject *obj = handle_lookup(&p->handles, (int)a->a[0], HANDLE_RIGHT_WRITE);
     if (obj == NULL)
         return -EBADF;

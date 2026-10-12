@@ -2545,6 +2545,14 @@ static int64_t sys_sysctl_set(struct syscall_args *a)
     bool known = false;
     for (size_t i = 0; i < ARRAY_SIZE(sysctl_names); i++)
         known = known || strcmp(name, sysctl_names[i]) == 0;
+    /* Listed but not built in this kernel: absent, as a read says (PR
+     * #370 review). The build conditions are sysctl_value's. */
+    if (strcmp(name, "debug.preempt_probe") == 0)
+        known = known && CONFIG_SELFTEST;
+    else if (strcmp(name, "debug.faultinject") == 0)
+        known = known && CONFIG_FAULTINJECT;
+    else if (strncmp(name, "debug.", 6) == 0)
+        known = known && CONFIG_DEBUG;
     if (!known)
         return -ENOENT;
     if (strcmp(name, "kernel.hostname") != 0)

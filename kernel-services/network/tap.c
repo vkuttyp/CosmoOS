@@ -296,6 +296,8 @@ static void tap_chr_release(struct vnode *vn, struct file *f)
 static int64_t tap_chr_read_file(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
 {
     (void)vn; (void)off;
+    if (!cred_has(cred_current(), PRIV_DEVICE))
+        return -EPERM;   /* a handle may outlive the privilege that opened it */
     struct tap_open *o = f->priv;
     struct mbuf *m = NULL;
     int rc = tap_recv_wait(o->tap, io_nonblocking(file_nonblocking(f)), &m);
@@ -317,6 +319,8 @@ static int64_t tap_chr_read_file(struct vnode *vn, struct file *f, uint64_t off,
 static int64_t tap_chr_write_file(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
 {
     (void)vn; (void)off;
+    if (!cred_has(cred_current(), PRIV_DEVICE))
+        return -EPERM;   /* as for a read */
     struct tap_open *o = f->priv;
     int rc = tap_inject(o->tap, buf, (uint32_t)len);
     return rc ? rc : (int64_t)len;

@@ -55,6 +55,22 @@ static int parse_list(const char *s, uint32_t *out)
     return 0;
 }
 
+/* A whole decimal id, 0..UINT32_MAX: anything else -- empty, a sign, a
+ * typo, an overflow -- is refused, so a mistyped -u can never become
+ * uid 0 (PR #370 review). */
+static int parse_id(const char *s, unsigned long *out)
+{
+    if (*s < '0' || *s > '9')
+        return -1;
+    char *end;
+    errno = 0;
+    unsigned long v = strtoul(s, &end, 10);
+    if (errno != 0 || *end != '\0' || v > 0xffffffffUL)
+        return -1;
+    *out = v;
+    return 0;
+}
+
 static int show(void)
 {
     FILE *f = fopen("/proc/self/status", "r");
@@ -102,10 +118,16 @@ int main(int argc, char **argv)
                 return 125;
             drop = argv[i][1] == 'd' ? m : (COSMO_PRIV_ALL & ~m);
         } else if (strcmp(argv[i], "-u") == 0) {
-            uid = strtoul(argv[i + 1], NULL, 10);
+            if (parse_id(argv[i + 1], &uid) < 0) {
+                fprintf(stderr, "priv: -u %s is not a uid\n", argv[i + 1]);
+                return 125;
+            }
             set_cred = true;
         } else if (strcmp(argv[i], "-g") == 0) {
-            gid = strtoul(argv[i + 1], NULL, 10);
+            if (parse_id(argv[i + 1], &gid) < 0) {
+                fprintf(stderr, "priv: -g %s is not a gid\n", argv[i + 1]);
+                return 125;
+            }
             have_gid = true;
         } else {
             return usage();

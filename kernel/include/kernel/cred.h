@@ -8,7 +8,8 @@
  * inherited by fork, spawn and exec and can only ever be dropped -- spawn
  * takes a mask to drop, and an id change that leaves a process with no id
  * 0 drops them all, as Linux clears capabilities on setuid. No call adds
- * one, and effective uid 0 by itself grants nothing. Discretionary access
+ * one, and effective uid 0 by itself grants nothing; a privilege acts only
+ * while the effective uid is 0 (cred_has). Discretionary access
  * to files uses the effective ids and the supplementary groups
  * (vfs_permission); PRIV_SYS_ADMIN overrides it.
  *
@@ -56,10 +57,16 @@ struct credentials {
  * privilege. Kernel threads, boot-time work and init start with these. */
 extern const struct credentials cred_kernel;
 
-/* Whether `c` holds privilege `priv` (one PRIV_* bit). */
+/* Whether `c` may use privilege `priv` (one PRIV_* bit): it holds the bit
+ * and its effective uid is 0. Uid 0 without the bit is nothing; the bit
+ * without uid 0 is dormant -- a process that moved only its effective
+ * uid away from 0 (seteuid to act as a user) acts as that user, and gets
+ * its privileges back by moving it back, as Linux's effective capability
+ * set does (PR #370 review). Leaving every uid 0 clears the bits for good
+ * (cred_ids_changed). */
 static inline bool cred_has(const struct credentials *c, uint32_t priv)
 {
-    return (c->privs & priv) == priv && priv != 0;
+    return (c->privs & priv) == priv && priv != 0 && c->euid == CRED_ROOT_UID;
 }
 
 /* Clear `drop` (any PRIV_* bits): the only change privileges admit. */

@@ -29,7 +29,11 @@ in the ABI; at most 16 in 1.0):
 Rules the code enforces:
 
 - **Every privileged operation names one privilege** and asks
-  `cred_has(c, PRIV_X)`. Effective uid 0 by itself grants nothing:
+  `cred_has(c, PRIV_X)`, which is true when the process holds the bit
+  **and** its effective uid is 0: a process that moves only its
+  effective uid away (`seteuid` to act as a user) acts as that user until
+  it moves back, as Linux's effective capability set works. Effective uid
+  0 by itself grants nothing:
   `cred_privileged` is gone. The table of the thirty sites it had, and the
   privilege each now asks for, is in the M5 report
   (`docs/audit/2026-10-12-m5-security-baseline-report.md`).
@@ -52,9 +56,10 @@ Rules the code enforces:
   POSIX rule without `PRIV_CRED` and freely with it.
 - **Raw devices name their privilege** in `chrdev_ops.open_priv`, checked
   in `ramfs_chr_open` on top of the node's mode, so `chmod` cannot open
-  them to everyone; handlers that act later (`blkctl`, `fsctl`, `tapctl`
-  writes) check again, since a handle can outlive the privilege that
-  opened it.
+  them to everyone; every later use checks again (`blkctl` and `fsctl`
+  commands, `tapctl` writes, `/dev/net/tap` reads and writes,
+  `SYS_vm_create` on a `/dev/vmm` handle), since a handle can outlive
+  the privilege that opened it or be passed to a child that never had it.
 
 The service manager gives each service exactly what its file lists
 (`privileges net cred`, `docs/userland/design.md`, "Services"); a file
@@ -62,7 +67,12 @@ without the line runs the service with the supervisor's. The ssh server
 the installer configures has `net` (port 22) and `cred` (a session's
 `setgid`/`initgroups`/`setuid`) and nothing else, so a root login over ssh
 can neither mount, administer, signal others' processes nor open raw
-devices. `/sbin/priv` shows a process's privileges and runs a command
+devices. **That containment is not durable**: the session is uid 0, uid 0
+owns `/etc`, and plain owner permissions let it rewrite a service file or
+init's scripts, which run with every privilege at the next boot or
+restart. Closing that needs logins that are not root, or system
+configuration that writing needs a privilege for -- an inventory line,
+not 1.0 work this milestone was given. `/sbin/priv` shows a process's privileges and runs a command
 with fewer (`priv -d mount -- cmd`, `priv -k mount -- cmd`).
 
 What remains as before: no setuid executables (`S_ISUID`/`S_ISGID` are
