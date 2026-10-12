@@ -128,14 +128,15 @@ attributes):
    Measured on `init`, per additional process running it: 89 pages
    before this unit, 40 once the read-only segments are shared, 16 once
    the tail is no longer populated. Both architectures agree.
-4. Stack: `vm_user_map_anon(space, USER_STACK_TOP - USER_STACK_SIZE,
-   USER_STACK_SIZE, RW, "stack")` with a guard page below, lazily
+4. Stack: `vm_user_map_anon(space, stack_top - USER_STACK_SIZE,
+   USER_STACK_SIZE, RW, "stack")` with a guard page below, `stack_top`
+   being the randomised top (§4a), lazily
    populated except the top two pages (`INITIAL_STACK_PAGES`), which
    receive the initial frame (written byte by byte through the direct
    map, since the two frames need not be adjacent):
 
    ```text
-   USER_STACK_TOP-ish (16-byte aligned at the final rsp):
+   stack_top - sp_offset (16-byte aligned at the final rsp):
      argc
      argv[0..argc-1], NULL
      envp[0..], NULL
@@ -154,6 +155,40 @@ attributes):
    Create the main thread with `thread_prepare`
    plus `t->proc = process`, `t->user_entry = elf.entry`, `t->user_sp =
    initial rsp`, entry function `user_thread_start`. Enqueue.
+
+### 4a. Address-space layout randomisation
+
+Roadmap M5, decision 2: Linux-style user-space ASLR for both
+personalities. `image_build` draws 24 bytes from the pool
+(`random_get_bytes`, never blocking; a may-be-early caller,
+`docs/kernel/security/design.md` §6) once per spawn and exec:
+
+| What | Placement | Random bits |
+|---|---|---|
+| stack top | `USER_STACK_TOP - r * PAGE_SIZE`, `r < 2^22` | 22 (16 GiB) |
+| initial stack pointer | the frame is laid out from `stack_top - sp_offset`, `sp_offset` a 16-byte multiple below 4 KiB; one page more is populated when it needs it | 8 |
+| mmap base (`space->mmap_base`) | `USER_MMAP_BASE + r * PAGE_SIZE`, `r < 2^28`; every placement without an address (native and Linux `mmap`, `shmat`) starts there (`user_mmap_base`) | 28 (1 TiB) |
+| `ET_DYN` executable | bias `USER_PIE_BASE + r * PAGE_SIZE`, `r < 2^28` | 28 |
+| `ET_DYN` interpreter | the first free range at or above the mmap base, as Linux puts it among the mappings (it was `USER_INTERP_BASE`) | with the mmap base |
+| Linux break | `brk_start = page_up(info.hi) + r * PAGE_SIZE`, `r < 2^13` (`linux_process_init`) | 13 (32 MiB) |
+
+An `ET_EXEC` image keeps its link address: there is nothing to move it
+with. The stack keeps its 8 MiB, its guard page below and the rlimits;
+the ranges cannot meet (static asserts in `process.h`: the lowest stack
+stays above the highest PIE, the highest mmap base below the lowest
+PIE). `vm_space_fork` copies `mmap_base`, so a fork child has its
+parent's layout, as on Linux; every exec draws a new one. The Linux
+signal trampoline page stays at its fixed `LX_SIGTRAMP` above the
+highest stack top (an inventory line).
+
+W^X (decision 4): the map and protect paths already refuse a writable
+and executable request (`vm_user_map_*`, `vm_user_protect`, native and
+Linux `mmap`/`mprotect` with `-EINVAL`), the stack and the initial stack
+are mapped RW; debug builds also walk every region of every image
+`image_build` makes and panic on a W+X region or an executable stack
+(`vm_user_wx_violations`). `make test-security` shows both on release
+builds: code copied to the stack faults, a W+X `mmap` or `mprotect` is
+`EINVAL`.
 
 `user_thread_start()` (kernel side of a user thread's first run): the
 usual trampoline has released the run-queue lock and enabled

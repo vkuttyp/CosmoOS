@@ -132,6 +132,9 @@ Roadmap M5's acceptance (`tests/boot/security_test.py`, its own CI job,
 | `no-manifest` | the manifest deleted: `cannot read \cosmo\manifest` |
 | `unverified` | `$(OUT)/boot/noverify/` loader on the tampered-kernel image: boots, `UNVERIFIED BOOT` in the banner and a WARN in the log, sysctl `no` |
 
+Stage `aslr` (user-space ASLR and W^X) is described in
+`docs/kernel/process/testing.md`, "make test-security, stage aslr".
+
 The files are changed through mtools at the ESP's offset
 (`scripts/mkmanifest.py`'s `esp_get`/`esp_put`). Every ordinary boot
 test also requires the `verified boot` lines and forbids `UNVERIFIED

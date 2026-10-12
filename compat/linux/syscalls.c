@@ -90,7 +90,10 @@ static int linux_process_init(struct process *p, const struct elf_info *info)
     struct linux_state *ls = kzalloc(sizeof(*ls));
     if (ls == NULL)
         return -ENOMEM;
-    ls->brk_start = page_align_up(info->hi);
+    /* The break starts a random number of pages above the image, up to
+     * 2^ASLR_BRK_BITS (roadmap M5, as Linux's randomize_va_space=2); the
+     * gap below it stays unmapped. Drawn once per exec. */
+    ls->brk_start = page_align_up(info->hi) + ((random_u64() & (((uint64_t)1 << ASLR_BRK_BITS) - 1)) << PAGE_SHIFT);
     ls->brk = ls->brk_start;
     spinlock_init(&ls->shm_lock, "lx-shm-attach");
     p->linux = ls;
@@ -1927,13 +1930,14 @@ static int64_t lx_mmap(struct syscall_args *a)
     /* As the native door: each attempt chooses and inserts under one hold
      * (M46), because Linux never answers mmap(NULL, ...) with EEXIST and
      * two holds did about half the time two threads placed at once. */
-    uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
+    const uint64_t mbase = user_mmap_base(p->space);
+    uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : mbase;
     for (;;) {
         rc = vn ? vm_user_map_file_free(p->space, from, len, vprot, maxprot, fflags, vn, off, "mmap-file", &base)
                : vm_user_map_anon_free(p->space, from, len, vprot, 0, "mmap", &base);
-        if (rc != -ENOMEM || from == USER_MMAP_BASE)
+        if (rc != -ENOMEM || from == mbase)
             break;
-        from = USER_MMAP_BASE;
+        from = mbase;
     }
 out:
     if (f)
@@ -2045,7 +2049,7 @@ static int64_t lx_shmat(struct syscall_args *a)
     uint64_t shmaddr = a->a[1];
     uint64_t base, tag;
     if (shmaddr == 0) {
-        base = USER_MMAP_BASE;
+        base = user_mmap_base(space);
         rc = vm_user_map_shm(space, 0, &base, size, prot, maxprot, vn, "shm", &tag);
     } else {
         if (!is_page_aligned(shmaddr)) {   /* SHM_RND rounding is deferred */

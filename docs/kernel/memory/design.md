@@ -379,7 +379,8 @@ chosen and inserted under **one** hold of the space lock
 caller's hint, a guard page between regions; the search is
 `range_first_fit_locked`, and the insert follows before the lock is
 released. Both doors make at most two attempts, from the hint and then
-from `USER_MMAP_BASE`, and only `-ENOMEM` -- "no gap there" -- moves from
+from the space's mmap base (`user_mmap_base`: random per exec since
+roadmap M5, `USER_MMAP_BASE` in a space no exec built), and only `-ENOMEM` -- "no gap there" -- moves from
 the first to the second.
 
 It used to be two holds, `vm_user_find_free` and then the map, and the

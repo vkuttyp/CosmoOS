@@ -521,6 +521,7 @@ says yes is a draw from a seeded pool.
 | cosmofs block nonces (`cfs_block_nonce`) | must-be-seeded | a key is only loaded (`cfs_keys_load`) when seeded: waits up to 5 s, then `-EAGAIN`; a mount with the firmware key then stays locked (metadata only) | a repeated ChaCha20 (key, nonce) pair gives away the xor of two plaintexts |
 | `AT_RANDOM` (`process.c`, 16 bytes at exec) | must-be-seeded by purpose | exec does not wait (Linux semantics); the boot waits for seeding before the first user process | musl seeds its stack-protector canary and pointer guard from it |
 | cosmofs pool UUID (`format_at`) | may-be-early | drawn | an identity, not a secret: it needs only to differ |
+| user-space ASLR (`image_build`: stack top, initial stack offset, mmap base, PIE bias; `linux_process_init`: break) | may-be-early | drawn at every spawn and exec | defence in depth; the boot waits for seeding before the first user process, as for `AT_RANDOM`, and a process started earlier is the kernel's own (docs/kernel/process/design.md §4a) |
 | TCP initial sequence numbers (`tcp.c`) | may-be-early | drawn | RFC 6528 unpredictability against off-path guessing; defence in depth, as in Linux |
 | TCP SYN-cookie secret (`tcp_init`) | may-be-early | drawn at network start | drawn once before a device-only pool can seed; recorded in the inventory, not changed here |
 | ephemeral port starts (`tcp.c`, `udp.c`), tap port (`tapsvc.c`) | may-be-early | drawn | RFC 6056 port randomisation is a hint, not a secret |

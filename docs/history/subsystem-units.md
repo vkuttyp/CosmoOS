@@ -2812,4 +2812,12 @@ See the [history index](README.md).
     says `root=boot-disk` (the CosmoOS root partition on the loader's
     disk), so `cosmo-install` copies the ESP byte for byte and signs
     nothing. `make test-security` (acceptance a-b), its own CI job.
+  - PR 2: user-space ASLR for both personalities, drawn from the pool at
+    every spawn and exec (`image_build`): stack top (22 bits of pages),
+    initial stack offset (8 bits of 16 bytes), mmap base (28 bits;
+    `space->mmap_base`, kept across fork), `ET_DYN` bias (28 bits), Linux
+    break (13 bits); the interpreter now goes at the mmap base. Debug
+    builds walk every new image for W+X or an executable stack
+    (`vm_user_wx_violations`). `test-security` stage `aslr`: static musl,
+    static-PIE musl and native probes, ten runs each (acceptance c).
   - Report: `docs/audit/2026-10-12-m5-security-baseline-report.md`.

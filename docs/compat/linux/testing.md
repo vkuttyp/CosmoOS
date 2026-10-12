@@ -111,14 +111,15 @@ the shell collected, and the harness requires each line:
 `lxinterp` and `lxdyn` (milestone 10): `lxdyn` is an `ET_DYN` executable
 (linked `-pie -z norelro`, no `user.ld`) whose `PT_INTERP` names
 `/boot/tests/linux/lxinterp`, itself an `ET_DYN` image without an
-interpreter. The kernel loads both, starts `lxinterp` at
-`USER_INTERP_BASE` or above with the original stack; `lxinterp` checks
+interpreter. The kernel loads both, starts `lxinterp` at the
+randomised mmap base or above (roadmap M5) with the original stack; `lxinterp` checks
 the auxiliary vector (`AT_BASE` is its own `__ehdr_start`, `AT_PHDR`/
-`AT_PHNUM`/`AT_ENTRY` describe `lxdyn` at `USER_PIE_BASE`, `AT_EXECFN` is
+`AT_PHNUM`/`AT_ENTRY` describe `lxdyn` page aligned in the randomised
+range `[USER_PIE_BASE, +2^40)`, `AT_EXECFN` is
 the path, `AT_PLATFORM` the machine, `AT_RANDOM` and `AT_PAGESZ` present),
 applies `lxdyn`'s `R_X86_64_RELATIVE`/`R_AARCH64_RELATIVE` relocations
 from `PT_DYNAMIC` (at least one must exist), prints `lxinterp: ok` and
-jumps to `AT_ENTRY`; `lxdyn` checks that it sits at `USER_PIE_BASE`, that
+jumps to `AT_ENTRY`; `lxdyn` checks that it sits in that range, that
 a relocated pointer table and function pointer are right, that `argv`
 arrived, makes a system call and prints `lxdyn: ok`.
 

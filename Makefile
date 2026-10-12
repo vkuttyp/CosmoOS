@@ -49,6 +49,7 @@ include $(ROOT)/pkg/pkg.mk
 # The Linux ABI test programs and the virtualization guests both build
 # for the architecture in hand; the guests live in tests/hv/$(ARCH)/.
 include $(ROOT)/tests/linux/linux.mk
+include $(ROOT)/tests/security/security.mk
 include $(ROOT)/tests/hv/hv.mk
 ARCH_TEST_TARGETS := hv-guests linux-tests
 include $(ROOT)/build/module.mk
@@ -65,9 +66,9 @@ image: $(IMAGE)
 # order the kernel loads them (dependencies first). See
 # scripts/mkbootarchive.py and docs/kernel/module/.
 BOOT_ARCHIVE := $(OUT)/boot.tar
-BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) $(DROPBEAR_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
+BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) $(DROPBEAR_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(SECURITY_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
 
-$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
+$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(SECURITY_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
 	$(call log,ARCHIVE,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
 

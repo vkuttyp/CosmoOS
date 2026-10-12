@@ -1616,6 +1616,7 @@ retry:
     rc = vm_space_create_user(&dst);
     if (rc)
         goto out_maps;
+    dst->mmap_base = src->mmap_base;   /* the layout survives fork, as on Linux */
     for (unsigned i = 0; i < nmaps; i++) {
         struct vm_file_map *m = kzalloc(sizeof(*m));
         if (m == NULL) {
@@ -3048,6 +3049,25 @@ uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size)
     uint64_t result = range_first_fit_locked(space, from, size);
     spin_unlock_irqrestore(&space->lock, s);
     return result;
+}
+
+unsigned vm_user_wx_violations(struct vm_space *space, uint64_t *first)
+{
+    KASSERT(space->user);
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r;
+    list_for_each_entry(r, &space->regions, link) {
+        bool wx = (r->prot & VM_PROT_WRITE) && (r->prot & VM_PROT_EXEC);
+        bool xstack = (r->prot & VM_PROT_EXEC) && r->name != NULL && strcmp(r->name, "stack") == 0;
+        if (wx || xstack) {
+            if (n == 0 && first != NULL)
+                *first = r->base;
+            n++;
+        }
+    }
+    spin_unlock_irqrestore(&space->lock, s);
+    return n;
 }
 
 bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_prot_t prot)

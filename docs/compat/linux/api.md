@@ -67,7 +67,8 @@ for a Linux process, `linux_process_init` allocates `p->linux`.
   (`struct linux_state`: `brk_start`, `brk`, `unknown_syscalls`; since
   milestone 10 the signal state lives in the kernel core, `kernel/signal.h`,
   and `clear_child_tid` on the thread), set `brk_start = brk =
-  page_align_up(info->hi)`, and map the signal trampoline page
+  page_align_up(info->hi)` plus a random number of pages below
+  2^`ASLR_BRK_BITS` (M5), and map the signal trampoline page
   (`linux_sigtramp_map`: one RX page at `LX_SIGTRAMP` = `0x7FFFFFFF1000`
   holding `mov $15,%eax; syscall` / `mov x8,#139; svc #0`). Also
   completes the personality table the first time (every empty slot

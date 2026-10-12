@@ -27,16 +27,40 @@ typedef uint32_t pid_t;
 
 #define PROCESS_NAME_MAX 32
 
-/* User address-space layout (the canonical lower half on both targets, page aligned). */
+/* User address-space layout (the canonical lower half on both targets, page aligned).
+ * Since roadmap M5 every exec randomises four of these, Linux-style
+ * (docs/kernel/process/design.md, "Address-space layout randomisation"):
+ * the stack top moves down by up to 2^ASLR_STACK_BITS pages and the
+ * initial stack pointer by a random 16-byte multiple within a page; the
+ * mmap base and an ET_DYN executable's bias move up by up to
+ * 2^ASLR_MMAP_BITS / 2^ASLR_PIE_BITS pages; the Linux break starts up to
+ * 2^ASLR_BRK_BITS pages above the image. The constants below are the
+ * lowest (stack: highest) values. An ET_EXEC image keeps its link address. */
 #define USER_LO         VM_USER_LO
 #define USER_HI         VM_USER_HI
 #define USER_STACK_TOP  0x00007FFFFFFF0000ULL
 #define USER_STACK_SIZE ((size_t)8 << 20)
 #define USER_MMAP_BASE  0x0000100000000000ULL   /* hint-less mmap searches upward from here */
 #define USER_PIE_BASE    0x0000555500000000ULL   /* an ET_DYN executable's load bias (milestone 10) */
-#define USER_INTERP_BASE 0x00007F0000000000ULL   /* the interpreter: first free range at or above */
+#define USER_INTERP_BASE 0x00007F0000000000ULL   /* unused since M5: the interpreter goes at the mmap base */
+#define ASLR_STACK_BITS 22u
+#define ASLR_MMAP_BITS  28u
+#define ASLR_PIE_BITS   28u
+#define ASLR_BRK_BITS   13u
+_Static_assert(USER_STACK_TOP - ((uint64_t)1 << (ASLR_STACK_BITS + 12)) - USER_STACK_SIZE > USER_PIE_BASE +
+                   ((uint64_t)1 << (ASLR_PIE_BITS + 12)),
+               "the randomised stack stays above the randomised PIE range");
+_Static_assert(USER_MMAP_BASE + ((uint64_t)1 << (ASLR_MMAP_BITS + 12)) < USER_PIE_BASE,
+               "the randomised mmap base stays below the PIE range");
 
 enum process_state { PROCESS_RUNNING, PROCESS_EXITING, PROCESS_EXITED };
+
+/* Where an mmap without an address starts its search in `space`: the base
+ * drawn at exec, or USER_MMAP_BASE in a space no exec built. */
+static inline uint64_t user_mmap_base(const struct vm_space *space)
+{
+    return space->mmap_base ? space->mmap_base : USER_MMAP_BASE;
+}
 
 struct syscall_args;
 typedef int64_t (*syscall_fn)(struct syscall_args *a);

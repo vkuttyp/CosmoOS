@@ -24,7 +24,11 @@ Check: assert in `vm_user_map_anon` (`user_range_valid`), test
 and an executable `PT_GNU_STACK`; `vm_user_map_anon` and
 `vm_user_protect` refuse W+X; `sys_mmap` refuses
 `PROT_WRITE|PROT_EXEC`. The stack region is RW. Check: tests `elf`
-(W^X rule string), `process-user` (`mmap` W+X `-EINVAL`).
+(W^X rule string), `process-user` (`mmap` W+X `-EINVAL`). Since roadmap M5 debug builds also
+walk every region of every image `image_build` makes and panic on a W+X
+region or an executable stack (`vm_user_wx_violations`), and `make
+test-security` runs code on the stack (SIGSEGV) and asks for W+X
+through both doors' `mmap` and `mprotect` (`EINVAL`), on release builds.
 
 **P4. ELF bytes are copied through the direct map.** `elf_load_into`
 resolves each destination page with `arch_mmu_query` and writes via
@@ -682,6 +686,20 @@ argv, envp, handles, signals, mask and tid; a script; an exec from a
 second thread; vfork released at exec) and the native exec checks in
 `usertest`'s processes section; mutation runs in
 `docs/audit/2026-10-10-m3-process-model-report.md`.
+
+**P37. Every exec draws a fresh layout; nothing else moves it.**
+(Roadmap M5, design.md §4a.) `image_build` draws the stack top (22 bits
+of pages), the initial stack offset (8 bits of 16 bytes), the mmap base
+and an `ET_DYN` executable's bias (28 bits of pages each) from the pool
+at every spawn and exec, and `linux_process_init` the break (13 bits of
+pages); an `ET_EXEC` image keeps its link address; `vm_space_fork`
+copies `mmap_base`, so a fork child keeps its parent's layout; every
+placement without an address starts at `user_mmap_base(space)`. The
+ranges cannot overlap (static asserts in `process.h`). Check: `make
+test-security` stage `aslr` (ten runs each of a static musl, a static
+PIE musl and a native program: every value distinct, the varying bits
+inside and nearly filling the designed range, the static load address
+fixed); `lxdyn`/`lxinterp` accept any page in their ranges.
 
 ## Gaps (documented, not invariants)
 
