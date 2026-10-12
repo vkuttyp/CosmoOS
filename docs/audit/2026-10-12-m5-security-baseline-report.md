@@ -207,3 +207,25 @@ that covers administration of the machine's objects; `SETROOT` to
 namespace to `PRIV_SYS_ADMIN`, with the hostname. A service file without
 `privileges` keeps the supervisor's set (every existing definition
 behaves as before).
+
+### Acceptance d-e (local, release)
+
+| Check | x86-64 | AArch64 |
+|---|---|---|
+| d: `test-security` stage `priv` (mount, sysctl write, kill; regain refused; uid 1000 sees no kernel address, no klog) | PASS 5.8 s, 9 EPERM lines | PASS 9.8 s, 9 EPERM lines |
+| e: `test-install` on the signed, randomised, privilege-checked system | PASS 24.1 s | PASS 38.7 s |
+| e: `test-net-login` (the ssh session holds `net cred`, its `mount` is EPERM; key login, pty, reboot) | PASS 49.2 s | PASS 60.3 s |
+
+### PR 3 validation (local, 2026-10-12, at `729ce8c2`)
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| `make host-test`, `make fuzz`, `make analyze` | PASS | PASS |
+| debug `make test`, `QEMU_SMP=1` / `2` / `4` | PASS 140.0 / 140.5 / 153.7 s | PASS 134.9 / 144.9 / 155.7 s |
+| `make test-smp2` | PASS 151.9 s | PASS 153.8 s |
+| `make test-chaos` | PASS 154.4 s | PASS 148.2 s |
+| `make test-harness-retry` | PASS 143.3 s | PASS 161.0 s |
+| `make BUILD=release test` | PASS 17.7 s | PASS 20.9 s |
+| `make BUILD=release test-security` (verify, aslr, priv) | PASS 98.5 s | PASS 133.8 s |
+| `make BUILD=release test-install` | PASS 24.1 s | PASS 38.7 s |
+| `make BUILD=release test-net-login` | PASS 49.2 s | PASS 60.3 s |
