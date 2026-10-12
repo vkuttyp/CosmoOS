@@ -74,8 +74,6 @@ bool aarch64_console_serial(paddr_t *base, unsigned *intid, const char **kind);
 #define VIRT_GICD_BASE     0x08000000ull
 #define VIRT_GICC_BASE     0x08010000ull
 #define VIRT_GICV2M_BASE   0x08020000ull
-#define VIRT_PL011_BASE    0x09000000ull
-#define VIRT_PL011_INTID   33u
 #define VIRT_PL031_BASE    0x09010000ull   /* the real-time clock: RTCDR (seconds since 1970) at offset 0 */
 #define VIRT_FWCFG_BASE    0x09020000ull
 /* The SMMUv3 (0x09050000, INTIDs 106-109) is described in drivers/iommu/arm_smmuv3.c, which has no arch include path. */

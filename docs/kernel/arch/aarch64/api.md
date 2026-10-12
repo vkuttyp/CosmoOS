@@ -78,16 +78,24 @@ Everything here is **internal kernel ABI**.
   any fault status that is not a translation fault.
 
 ### `arch/console.h`
-- `arch_console_early_init`: the PL011 at the `virt` default through the
-  direct map; registers the `pl011` sink. `arch_console_input_init`:
-  SPCR, `irq_request` on the GSIV (33), RX/RT interrupts into `tty_input`.
+- `arch_console_early_init`: the serial port the boot info records
+  (protocol v9: `console_type` `COSMOBOOT_CONSOLE_PL011` or `16550_MMIO`
+  at `console_base`, read through `aarch64_boot_info` before
+  `bootinfo_init`) through the direct map; registers the `serial` sink.
+  No serial console, and no sink, when there is no such record, the base
+  is 0 or beyond `hhdm_size`, or the command line has `serial=none`.
+  `arch_console_input_init`: `irq_request` on `console_gsiv` (33 on
+  QEMU), receive interrupts into `tty_input`; when the GSIV is 0 or the
+  request fails, a kernel timer polls the FIFO every 10 ms. Nothing
+  without a serial console.
 
 ### `arch/shutdown.h`
 - `arch_emulator_exit(code)`: semihosting `SYS_EXIT_EXTENDED` with
   `ADP_Stopped_ApplicationExit` and status `(code << 1) | 1`; QEMU exits
   with that status when `-semihosting-config enable=on,target=native` is
-  given, so the harness decodes both architectures identically. Without
-  semihosting the `hlt #0xF000` is undefined and the caller's halt follows.
+  given, so the harness decodes both architectures identically. Only when
+  `acpi_platform_is_qemu()`; elsewhere it returns at once and the
+  caller's halt follows (without semihosting `hlt #0xF000` is undefined).
 
 ### `arch/backtrace.h`
 - Walks the `x29` chain; frames must be 16-byte aligned, lie in kernel
@@ -96,8 +104,9 @@ Everything here is **internal kernel ABI**.
 
 ### `arch/fwcfg.h`
 - `arch_fwcfg_read`: the MMIO fw_cfg block at the `virt` address (selector
-  at +8 big-endian, data at +0 byte-wise); `-ENODEV` without the `QEMU`
-  signature, `-ENOENT` for an unknown file, else the file size.
+  at +8 big-endian, data at +0 byte-wise); `-ENODEV` when the firmware is
+  not QEMU's (`acpi_platform_is_qemu`, the block is not probed) or
+  without the `QEMU` signature, `-ENOENT` for an unknown file, else the file size.
 
 ### `arch/irqc.h` (see `docs/kernel/interrupt/api.md`)
 - GSI = INTID; `arch_irqc_gsi_count()` = 1020; `arch_irqc_spurious_vector()`
@@ -125,7 +134,8 @@ Everything here is **internal kernel ABI**.
 
 ### `arch/timer.h`, `arch/testhooks.h`
 - Clock `"arch-timer"`, `CNTPCT_EL0` at `CNTFRQ_EL0` Hz. Tick on the EL1
-  physical timer PPI (GTDT, default 30) with absolute `CNTP_CVAL_EL0`
+  physical timer PPI (GTDT offset 56; 30 on QEMU, which is also the
+  fallback on QEMU's firmware only) with absolute `CNTP_CVAL_EL0`
   compares; `arch_timer_vector()` is the dynamic vector bound to it.
   `arch_test_periodic_irq_start(hz)` returns INTID 27 (the EL1 virtual
   timer) and runs it with `CNTV_TVAL_EL0` reloads.
@@ -190,11 +200,22 @@ Only files under `kernel/arch/aarch64/` include these.
   `gic_irq_dispatch(frame)`, `gic_current_intid()`, `gic_bind_ppi(intid,
   vector)`, `gic_enable_local/disable_local(intid)`; `aarch64_hhdm_base`
   (set by `start.c` from the bootinfo); `aarch64_timer_init_cpu()`,
-  `aarch64_timer_ack(intid)`; `pl011_early_putc(c)`; the `virt` defaults
-  (`VIRT_GICD_BASE` 0x08000000, `VIRT_GICC_BASE` 0x08010000,
-  `VIRT_GICV2M_BASE` 0x08020000, `VIRT_PL011_BASE` 0x09000000,
-  `VIRT_PL011_INTID` 33, `VIRT_FWCFG_BASE` 0x09020000, timer PPIs 30/27);
-  PSCI function ids and return codes; the FADT ARM boot flags.
+  `aarch64_timer_ack(intid)`, `aarch64_timer_read_gtdt()` (the timer
+  PPIs from the GTDT, after `acpi_init`), `aarch64_timer_intids(&phys,
+  &virt)`; `aarch64_boot_info` (the boot info as the loader passed it, set
+  by `start.c` before the console), `pl011_early_putc(c)`,
+  `aarch64_console_serial(&base, &intid, &kind)` (the serial console in
+  use, `kind` `"PL011"` or `"16550"`, `intid` 0 when polled; false when
+  there is none); `aarch64_psci_conduit()` (1 HVC, 0 SMC, -1 none, from
+  the FADT); `aarch64_platform_report()` (the platform line); the `virt`
+  constants, **fallbacks used only when `acpi_platform_is_qemu()` and
+  the tables lack the device** (`VIRT_GICD_BASE` 0x08000000,
+  `VIRT_GICC_BASE` 0x08010000, `VIRT_GICV2M_BASE` 0x08020000,
+  `VIRT_PL031_BASE` 0x09010000, `VIRT_FWCFG_BASE` 0x09020000, timer PPIs
+  `VIRT_TIMER_EL1_PHYS_INTID` 30 / `VIRT_TIMER_EL1_VIRT_INTID` 27; there
+  is no PL011 default any more: the console is the boot info's or none);
+  PSCI function ids and return codes;
+  the FADT ARM boot flags.
 - `modreloc.h`: the `R_AARCH64_*` type numbers, `aarch64_reloc_apply`,
   `aarch64_reloc_width`.
 - Assembly entry points: `_start` (`entry.S`), `aarch64_vectors`
@@ -211,6 +232,8 @@ pool_pages, pool_used, root, root_user, nx}`, `paging_pool_size`,
 `paging_build(ctx, img, loader_base, loader_size, mmap, mmap_size,
 desc_size)`, `cpu_prepare` (returns false at any EL but EL1),
 `cpu_finish` (nothing), `cpu_halt`, `cpu_jump_to_kernel(pg, stack_top,
-info, entry)`, `arch_serial_init/present/putc` (the PL011 at 0x09000000),
+info, entry)`, `arch_serial_init/configure/present/putc` (the port the
+SPCR or DBG2 names, `arch_serial_configure(info)` after `acpi_scan`; no
+output without one),
 `LOADER_ELF_MACHINE` 183, `COSMOBOOT_ARCH_NATIVE` =
 `COSMOBOOT_ARCH_AARCH64`.

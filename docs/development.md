@@ -74,6 +74,7 @@ Notes:
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`); since Phase 8 a virtio-net NIC on QEMU user-mode networking (`eth0` is `10.0.2.15`, gateway `10.0.2.2`); and since the virtio-removal unit a second, 4 MiB virtio-blk that exists to be removed (`QEMU_RMDISK`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md`. Since Phase 9 it types commands at the shell prompt through QEMU's serial stdin (`tests/boot/shelltest.py`) and requires their output; the boot ends when the harness types `exit 0` |
 | `test-entropy` | Milestone M1's acceptance boots (docs/kernel/security/design.md §6): the image without the virtio-rng (`QEMU_RNG=0`) on the default CPU model (no entropy source: the pool must stay unseeded, `getrandom(GRND_NONBLOCK)` is `-EAGAIN`, an encrypted pool is refused, the boot completes), then on `HWRNG_CPU` (`qemu64,+rdrand,+rdseed`; `neoverse-v1`) with `QEMU_HWRNG=1` (seeded by the CPU alone). Logs `boot-test-noentropy.log`, `boot-test-cpurng.log` |
+| `test-platforms` | AArch64 platform discovery (`tests/boot/platform_test.py`; `docs/kernel/arch/aarch64/testing.md`, "make test-platforms"): the image under six QEMU configurations that differ from virt's defaults (`gicv2`, `gicv3`, `lowmem` with `highmem=off`, `rndr` on `neoverse-v1`, `nornd` on `cortex-a72`, both without virtio-rng, and `noserial`: `-serial none` and `serial=none` on a re-signed command line); each must reach the userland and print the platform line with what that machine has. Logs in `$(OUT)/test-platforms/<variant>/`. Prints that it is AArch64 only and succeeds on x86-64. CI job `platforms` (`BUILD=release`) |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
 | `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc, package-parser, Linux-conversion, nested-page-table and AArch64-relocation algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `fuzz` | Build the host fuzz targets in `tests/fuzz/` (module ELF, user ELF, package formats, Linux ABI conversions, virtqueue, cosmofs images) under ASan/UBSan and run each over its seeds and `FUZZ_RUNS` (default 20000) seeded mutations; `FUZZ_ENGINE=libfuzzer` links libFuzzer instead; `fuzz-build` builds only (`docs/verification/`) |
@@ -280,6 +281,8 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `QEMU_CPU` | `qemu64,+nx,+svm,+npt` (x86-64), `cortex-a72` (aarch64) | QEMU CPU model; the x86-64 default gives TCG guests AMD-V with nested paging for the virtualization tests. Use `host` with `kvm`/`hvf` (nested virtualization then depends on the host). On aarch64 `max` adds PAN and is also supported |
 | `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim (for example `-fw_cfg name=opt/cosmo/ipv4,string=10.0.2.20/24,10.0.2.2` to give `eth0` a static address) |
 | `QEMU_WRAP` | empty | A command QEMU is run through, word-split: `QEMU_WRAP="taskpolicy -b" make test` pins the whole QEMU process to a macOS host's efficiency cores, which the host-modes investigation used to test where the two benchmark modes come from ("Benchmark runs" below) |
+| `QEMU_SERIAL` | `stdio` | The `-serial` backend on both architectures; `none` leaves the machine with no serial port attached (`make test-platforms`, variant `noserial`) |
+| `QEMU_VIRT_OPTS` | empty | AArch64: appended to the `-machine virt,...` options, for example `,highmem=off` (`make test-platforms`, variant `lowmem`) |
 | `QEMU_TESTDISK` | `<image dir>/testdisk.img` | Raw backing file of the virtio-blk scratch disk (`vda`); created as 8 MiB of zeros when missing. The boot test always uses a fresh `boot-test.log.testdisk.img` |
 | `QEMU_RMDISK` | `<image dir>/rmdisk.img` | Raw backing file of the second virtio-blk, the disk `virtio-remove-inflight` removes and re-probes (`vdb` on q35, `vdc` on `virt`); created as 4 MiB of zeros when missing. `0` leaves the device out and the test skips. The boot test uses a fresh `boot-test.log.rmdisk.img` |
 | `QEMU_VCON` | `<image dir>/vcon.log` | File the virtio console writes to (truncated at start). The boot test uses `boot-test.log.vcon` and checks it |
@@ -510,7 +513,10 @@ The `build-and-boot` job is a matrix over `arch: [x86_64, aarch64]`. Each
 runs `check-tools`, a debug build with `test`, a release build with
 `test`, `host-test`, `analyze`, `reproducible`, and `test-crash` with
 `ARCH=<arch>`; the x86-64 job also runs `fuzz` (the targets are host
-binaries, the same on either job), and each uploads serial logs and images per architecture. Both targets are
+binaries, the same on either job), and each uploads serial logs and images per architecture.
+The `platforms` job builds the AArch64 release image and runs `make
+ARCH=aarch64 BUILD=release test-platforms`, uploading the boots' logs on
+failure. Both targets are
 cross-compiled and emulated under TCG on the x86-64 runner: the toolchain
 is host-agnostic, which is the point of using clang, but CI does not
 exercise an ARM64 host. GitHub's hosted ARM64 runners are not enabled

@@ -2865,3 +2865,16 @@ See the [history index](README.md).
     release key `release-2026` (id `36ae7bb4947896ab`), the
     `v1.0.0-rc1` dry run green first time, M6 ticked, `v1.0.0`.
   - Report: `docs/audit/2026-10-12-m6-release-report.md`.
+- **After 1.0: AArch64 platform discovery (2026-10-13, v1.0.1).** Boot
+  protocol v9: the loader finds the serial console in the SPCR, else the
+  DBG2, records it and writes there after ExitBootServices; the kernel's
+  early console is that port or none (then the framebuffer from the first
+  line; `serial=none` forces it), input polled when no interrupt is named.
+  QEMU virt's fixed addresses are used only when the RSDP's OEM is QEMU's;
+  the PSCI conduit comes from the FADT; the GTDT is read at the right
+  offsets. Found on Parallels: `arch_mmu_map` lacked an ISB (4 of 6 boots
+  panicked), a 64-bit BAR with a read-only upper half was sized 16 EiB.
+  The platform line; `make test-platforms` (six QEMU variants, CI job
+  `platforms`); the guide's "Tested platforms". Parallels reaches the live
+  shell; disks, network and randomness there are the next unit.
+  Report: `docs/audit/2026-10-13-acpi-discovery-report.md`.

@@ -30,6 +30,12 @@ checked at compile time; a non-literal format is a build error.
 - **Purpose**: whether a sink of that name is registered (self-tests).
 - **Concurrency**: lock-free walk; any context.
 
+### `bool console_any_sink(void)`
+- **Purpose**: whether any sink is registered; false means nothing
+  printed is seen. `kernel_main` asks it after `bootinfo_init` to decide
+  on `fbcon_early_init`.
+- **Concurrency**: one pointer read; any context.
+
 ### `void console_write(const char *s, size_t len)` / `void console_puts(const char *s)`
 - **Purpose**: emit bytes to every sink.
 - **Concurrency**: each call writes under the console spinlock (IRQs
@@ -55,11 +61,30 @@ checked at compile time; a non-literal format is a build error.
 
 ## `kernel/fbcon.h`
 
+### `void fbcon_early_init(void)`
+
+The framebuffer as the console from the first line, for a machine with
+no serial console: `kernel_main` calls it right after `bootinfo_init`
+when `console_any_sink()` is false (on AArch64 when the boot info names
+no serial port or the command line says `serial=none`; x86-64 always has
+COM1 by then). It draws through the loader's direct map
+(`bootinfo_phys_to_virt(fb->phys)`) with a static character buffer of
+`FBCON_EARLY_CELLS` (65536) cells -- no heap exists yet; a mode with more
+cells uses its top rows -- and registers the `fbcon` sink, logging
+`fbcon: no serial console: the framebuffer is the console from the first
+line (<cols>x<rows> cells)`. It does nothing when there is no
+framebuffer, the range extends beyond `hhdm_size` or overlaps usable
+RAM, or the mode cannot hold one cell. The architecture must keep the
+range mapped in its own tables (AArch64: `map_early_devices`). Not
+thread safe; boot CPU only.
+
 ### `void fbcon_init(void)`
 
 Map the framebuffer the loader reported, replay the newest screenful of
 the log ring onto it, and register a console sink named `fbcon`. Called
-once, from `kernel_main` after `vmm_init`. A machine with no framebuffer
+once, from `kernel_main` after `vmm_init`; returns at once when
+`fbcon_early_init` already brought the console up, which then keeps its
+direct-map mapping and static buffer. A machine with no framebuffer
 (or one whose description the validator refuses, or one overlapping free
 memory) keeps the serial console and gets a line saying why; none of
 that is an error.
@@ -105,6 +130,13 @@ The validated description, or NULL. Set once by `bootinfo_init`.
   to `KLOG_LINE_MAX - 2` characters of text.
 - **Memory**: ~320 bytes of stack.
 - Macros: `kdebug(...)`, `kinfo(...)`, `kwarn(...)`, `kerror(...)`.
+
+### `size_t klog_copy(char *buf, size_t len)` *(exported to modules)*
+- **Purpose**: copy the newest whole lines of the log ring
+  (`KLOG_RING_SIZE` 32768 bytes) that fit in `buf`, oldest first; returns
+  the byte count. Reading does not consume. `virtio_console` uses it to
+  replay the boot so far when it registers.
+- **Concurrency**: takes the ring lock; not a panic or NMI API.
 
 ### `void klog_set_level(enum klog_level)` / `enum klog_level klog_get_level(void)`
 - **Purpose**: threshold control. Default DEBUG in debug builds, INFO

@@ -2,7 +2,7 @@
 
 ## The protocol structure
 
-`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 8). All
+`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 9). All
 fields are fixed-width integers; there are no pointers, enums, or
 padding surprises, so the layout is identical on every architecture and
 compiler.
@@ -10,7 +10,7 @@ compiler.
 | Field | Meaning |
 |---|---|
 | `magic` | `COSMOBOOT_MAGIC` = `0x3154424F4D534F43` ("COSMOBT1") |
-| `version` | `COSMOBOOT_VERSION` = 8 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub; 6: the framebuffer; 7: the command line and the boot partition; 8: verified boot) |
+| `version` | `COSMOBOOT_VERSION` = 9 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub; 6: the framebuffer; 7: the command line and the boot partition; 8: verified boot; 9: the serial console the firmware names) |
 | `size` | `sizeof(struct cosmoboot_info)` as written by the loader; lets a newer kernel detect an older loader |
 | `arch` | `COSMOBOOT_ARCH_X86_64` = 1, `COSMOBOOT_ARCH_AARCH64` = 2 |
 | `firmware` | `COSMOBOOT_FIRMWARE_UEFI` = 1 |
@@ -28,6 +28,7 @@ compiler.
 | `cmdline_phys`, `cmdline_size` | (v7, spending `reserved2`) the text of `\cosmo\cmdline` up to its first NUL, NUL terminated, at most `COSMOBOOT_CMDLINE_MAX` (1023) bytes, in the last of the bootinfo pages (`COSMOBOOT_MEM_BOOTINFO`); both zero when the file is absent or empty. See "The command line" |
 | `verify_flags`, `verify_key_id[8]` | (v8) `COSMOBOOT_VERIFIED` when the loader checked `kernel.elf`, `boot.tar` and `cmdline` against `\cosmo\manifest` under a signature by a key compiled into it, with that key's id (first 8 bytes of SHA-512 of the public key, the module ring's naming); both zero from a `VERIFY_BOOT=0` loader. See "Verified boot" |
 | `boot_flags`, `boot_partuuid[16]` | (v7) `COSMOBOOT_BOOT_PARTUUID` set when the loader was read from a GPT partition: `boot_partuuid` is that partition's unique GUID in on-disk byte order, from the hard-drive node of the loader's device path. Clear for a volume with no partition table. See "The boot disk" |
+| `console_type`, `console_gsiv`, `console_base`, `console_access`, `console_flags` | (v9) the serial console the firmware's ACPI tables name, found by the loader (`boot/uefi/acpi.c`): `console_type` is `COSMOBOOT_CONSOLE_NONE` 0, `PL011` 1 (PL011 or SBSA generic UART, MMIO), `16550_MMIO` 2 or `16550_PORT` 3; `console_base` the register block's physical address (an I/O port for `16550_PORT`); `console_access` the register width in bytes, 1 or 4, 0 when the table says "undefined"; `console_gsiv` the interrupt, 0 for a polled port; `console_flags` `COSMOBOOT_CONSOLE_FROM_DBG2` when the port came from the DBG2 rather than the SPCR. All zero when no table names a port the kernel drives. See "The serial console" |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,
 `ACPI_RECLAIMABLE` 3, `ACPI_NVS` 4, `BAD` 5, `LOADER_RECLAIMABLE` 6,
@@ -69,6 +70,7 @@ Keys the kernel reads:
 |---|---|
 | `root=PARTUUID=<guid>` | the root filesystem is on the GPT partition with that unique GUID (any case) |
 | `root=<device>` | the root filesystem is on the named block device (`vda2`); for development, since names depend on probe order |
+| `serial=none` | AArch64: no serial console even when the firmware names one (boot protocol v9, "The serial console"): the framebuffer is the console from the first line. Read by the early console before `bootinfo_init`, with the same bounds. For testing the path a machine without a serial port takes (`make test-platforms`) |
 
 The kernel only resolves `root=` (after its partition scan, `root:` log
 line; sysctls `kernel.root` and `kernel.rootdev`); it always starts on
@@ -167,6 +169,61 @@ installer finds the ESP to copy (roadmap M2), and the kernel registers
 it as a block device like any other partition (`ahci0p0p1` on q35,
 `vdb1` on virt; `docs/kernel/device/design.md`, "Partitions").
 
+## The serial console
+
+The kernel cannot find a serial port before it has a console to report
+from, and before it has its own page tables it cannot read an ACPI table
+outside RAM. The loader can: it runs on the firmware's identity map. So
+`acpi_scan` (`boot/uefi/acpi.c`), called in step 7 while boot services
+are up, walks RSDP → XSDT (the RSDT when the RSDP is revision 1 or has
+no XSDT; at most 64 entries, every table checksum-checked and read within
+its length) and records one port in the boot info (protocol v9):
+
+- **SPCR** (Serial Port Console Redirection), when present and at least
+  58 bytes: interface type at offset 36, the base address's generic
+  address structure at 40 (address space at 40, access size at 43,
+  address at 44), the GSIV at 54. Types 0x03 (PL011), 0x0D and 0x0E (SBSA
+  generic UART) in memory space become `COSMOBOOT_CONSOLE_PL011`; 0x00,
+  0x01 and 0x12 (16550 variants) become `16550_MMIO` in memory space or
+  `16550_PORT` in I/O space; any other type, space, or a zero base is
+  `NONE`. An SPCR that names a port of another kind is final: the DBG2 is
+  not consulted.
+- **DBG2** (Debug Port Table), only when there is no SPCR: the first
+  device entry of port type 0x8000 (serial) with an address descriptor,
+  its subtype mapped as above. The DBG2 names no interrupt, so
+  `console_gsiv` is 0 and `console_flags` has `COSMOBOOT_CONSOLE_FROM_DBG2`.
+- Neither: `console_type` stays `NONE` and the loader prints `acpi: no
+  SPCR and no DBG2 serial port: no serial console`.
+
+`console_access` is the descriptor's access size translated to bytes
+(1 → 1, 3 → 4, anything else 0, "the type's natural width").
+
+While boot services are up `acpi_scan` prints, on the firmware console,
+the OEM id and the table signatures (`acpi: OEM 'BOCHS ', N tables: ...`)
+and the SPCR or DBG2 line with its verdict. After `ExitBootServices`,
+`acpi_report` prints on the recorded port what the kernel will take from
+the MADT (GICC count, GICD and its version, GICR, ITS and MSI frames, or
+the local APIC count on x86-64), the MCFG (segment, buses, ECAM), the GTDT
+(EL1 physical and virtual GSIVs at offsets 56 and 64) and the FADT's ARM
+boot flags (PSCI and the conduit). It is printed after, not before,
+because firmware that mirrors its console to serial would show it twice,
+and on a machine that then stays silent it is the evidence.
+
+The loader's own output after `ExitBootServices` goes to that port and
+nowhere else (BT16): on AArch64 `arch_serial_configure`
+(`boot/uefi/arch/aarch64/serial.c`) drives a PL011 or a memory-mapped
+16550 (registers 1 byte apart, or 4 when `console_access` is 4) at
+`console_base`, which the firmware's identity map still covers; with no
+record it writes nothing. No address is assumed: until this version it
+wrote QEMU virt's 0x09000000, a store to whatever another machine has
+there. x86-64 ignores the record and keeps COM1, as before.
+
+The kernel's AArch64 serial console is the same port
+(`docs/kernel/arch/aarch64/design.md`, "Platform discovery");
+`serial=none` on the command line makes it ignore the record, and with no
+serial console the framebuffer is the console from the first line
+(`docs/kernel/diagnostics/design.md`).
+
 ## Entry state on x86-64
 
 Set by `cpu_jump_to_kernel()` in `boot/uefi/cpu.c`:
@@ -216,7 +273,10 @@ address and no calling convention across the boundary.
 6. `paging_build()` (below).
 7. Fill the info header, including `archive_phys`/`archive_size`.
    `find_acpi_rsdp()` scans `ConfigurationTable` for the ACPI 2.0 GUID,
-   remembering a 1.0 hit as fallback.
+   remembering a 1.0 hit as fallback. Then `acpi_scan(info)` records the
+   serial console the tables name in `console_*` (v9) and
+   `arch_serial_configure(info)` points the loader's own later output at
+   it (AArch64; x86-64 keeps COM1); see "The serial console".
 8. Memory map: `GetMemoryMap(size=0)` to learn the size, add 16
    descriptors of slack, allocate the buffer (`EfiLoaderData`, itself a
    map change the slack absorbs). Then up to two rounds of
@@ -227,7 +287,8 @@ address and no calling convention across the boundary.
    call is a null-pointer fault rather than undefined firmware behaviour.
 10. `translate_memory_map()` into the bootinfo entry array; 0 entries
     means overflow and is fatal.
-11. Print the translated map on the serial line.
+11. `acpi_report()` (what the MADT, MCFG, GTDT and FADT say), then the
+    translated map, on the serial line.
 12. `cpu_enable_nx()` then `cpu_enable_wp()` (NX presence was verified in
     step 4, before any allocation): NXE must be
     set before a CR3 whose entries carry bit 63 is loaded, otherwise the
