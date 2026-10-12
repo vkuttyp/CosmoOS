@@ -2844,4 +2844,9 @@ See the [history index](README.md).
     cwd; GICC "online capable" is bit 3. `cosmo-install` copies the
     repository to `/var/lib/pkg/repo`; `test-install` installs `hello`
     after reboot.
+  - PR 2: CI runs in the project's toolchain image (`ci/Dockerfile`,
+    bases pinned by digest), built and pushed to
+    `ghcr.io/vkuttyp/cosmoos-ci` only when it changes and pulled by
+    digest; `make release` makes the signed release set with
+    `SHA256SUMS`, and `make reproducible` compares it.
   - Report: `docs/audit/2026-10-12-m6-release-report.md`.

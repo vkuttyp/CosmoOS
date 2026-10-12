@@ -78,7 +78,8 @@ Notes:
 | `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc, package-parser, Linux-conversion, nested-page-table and AArch64-relocation algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `fuzz` | Build the host fuzz targets in `tests/fuzz/` (module ELF, user ELF, package formats, Linux ABI conversions, virtqueue, cosmofs images) under ASan/UBSan and run each over its seeds and `FUZZ_RUNS` (default 20000) seeded mutations; `FUZZ_ENGINE=libfuzzer` links libFuzzer instead; `fuzz-build` builds only (`docs/verification/`) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
-| `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries |
+| `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries, the image and the release set |
+| `release` | The signed release set for `ARCH` (always `BUILD=release`) in `out/release/<arch>/`, with `SHA256SUMS` ("Releases" below) |
 | `check-tools` | Verify toolchain, image tools, QEMU, firmware, and both compiler targets |
 | `compile-commands` | Write `compile_commands.json` for clangd using the real cross flags |
 | `clean` | Remove `$(OUT)` |
@@ -489,21 +490,52 @@ past its whole-boot budget: a loaded host, not a mode (report §7.3).
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and pull request on the
-GitHub-hosted `ubuntu-24.04` (x86-64) runner, inside a `debian:trixie`
-container pulled from `public.ecr.aws/docker/library` (Docker's official
-image through ECR Public's mirror, which has no Docker Hub pull limit;
-2026-10-10) (QEMU 10, `libclang-rt-dev` for the sanitizers,
-`qemu-system-arm` and `qemu-efi-aarch64` for the AArch64 target), as a
-matrix over `arch: [x86_64, aarch64]`. Each job runs `check-tools`, a
-debug build with `test`, a release build with `test`, `host-test`,
-`analyze`, `reproducible`, and `test-crash` with `ARCH=<arch>`; the
-x86-64 job also runs `fuzz` (the targets are host binaries, the same on
-either job), and each uploads serial logs and images per architecture. Both targets are
+GitHub-hosted `ubuntu-24.04` (x86-64) runner. Its first job, `image`,
+makes sure the project's toolchain image exists: `ci/Dockerfile` (Debian
+trixie, pinned by digest, with QEMU 10, `libclang-rt-dev` for the
+sanitizers, `qemu-system-arm` and `qemu-efi-aarch64` for the AArch64
+target) is built and pushed to `ghcr.io/vkuttyp/cosmoos-ci` by
+`scripts/ci-image.sh` only when the Dockerfile's SHA-256 is not already
+a tag there, and the job outputs the image's digest reference. Every
+other job runs in that image, pulled from this repository's GitHub
+Container Registry by digest (roadmap M6: pulling Debian from Docker Hub,
+then from ECR Public, on every job failed whole runs at "Initialize
+containers" on rate limits). The litmus job uses the Dockerfile's
+`litmus` target (Debian sid with herdtools7) the same way. To change the
+toolchain, edit `ci/Dockerfile`: the next run builds the new image, and
+its packages are listed in the image at
+`/usr/share/cosmoos-ci/packages.txt`.
+
+The `build-and-boot` job is a matrix over `arch: [x86_64, aarch64]`. Each
+runs `check-tools`, a debug build with `test`, a release build with
+`test`, `host-test`, `analyze`, `reproducible`, and `test-crash` with
+`ARCH=<arch>`; the x86-64 job also runs `fuzz` (the targets are host
+binaries, the same on either job), and each uploads serial logs and images per architecture. Both targets are
 cross-compiled and emulated under TCG on the x86-64 runner: the toolchain
 is host-agnostic, which is the point of using clang, but CI does not
 exercise an ARM64 host. GitHub's hosted ARM64 runners are not enabled
 for this private repository; when they are, the same matrix can add the
 host dimension.
+
+## Releases
+
+`make release` (roadmap M6) builds one architecture's release set with
+`BUILD=release` and copies it, with `scripts/mkrelease.py`, to
+`out/release/<arch>/` (`RELEASE_DIR` overrides): `cosmoos-<arch>.img`
+(the signed live image), `cosmoos-<arch>-BOOTX64.EFI` (`BOOTAA64.EFI`),
+`cosmoos-<arch>-kernel.elf`, `cosmoos-<arch>-boot.tar`,
+`cosmoos-<arch>-cmdline`, `cosmoos-<arch>-manifest` and `SHA256SUMS`
+(`sha256sum -c` format). It is signed with whatever `SIGNING` selects:
+the developer key by default; the release workflow passes
+`SIGNING=release MODSIGN_KEY=<the release key> KEYRING_PUBS=tools/keys/<release>.pub`.
+
+Every file of the set is deterministic: `make reproducible` builds the
+tree twice and compares the kernel, loader, archive, modules, programs,
+packages, the command line, the manifest, the image and the set's
+`SHA256SUMS`; CI's `release-set` job runs it with `BUILD=release` and
+uploads one `make release`. The release workflow builds each
+architecture twice more, from the tag, in two fresh containers, and
+requires the two `SHA256SUMS` to be equal before it publishes.
 
 ## Workflow for a change
 
