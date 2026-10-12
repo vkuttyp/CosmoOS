@@ -324,10 +324,14 @@ bool acpi_rsdp_oem(char out[7])
         memcpy(out, g_oem, 7);
         return g_oem_state > 0;
     }
+    out[0] = '\0';
+    if (!bootinfo_ready())
+        return false;   /* asked from a panic before bootinfo_init: unknown, and not cached */
     g_oem_state = -1;
     const struct cosmoboot_info *info = bootinfo_get();
-    out[0] = '\0';
-    if (info == NULL || info->acpi_rsdp == 0)
+    /* An RSDP outside the direct map is not QEMU's (its tables are low):
+     * no OEM, rather than the panic bootinfo_phys_to_virt would raise. */
+    if (info->acpi_rsdp == 0 || info->acpi_rsdp + 36 > info->hhdm_size)
         return false;
     /* Byte reads: before the kernel's own tables the direct map may give
      * a non-RAM page device attributes, where wider unaligned reads fault. */

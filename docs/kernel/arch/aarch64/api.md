@@ -200,9 +200,9 @@ Only files under `kernel/arch/aarch64/` include these.
   `gic_irq_dispatch(frame)`, `gic_current_intid()`, `gic_bind_ppi(intid,
   vector)`, `gic_enable_local/disable_local(intid)`; `aarch64_hhdm_base`
   (set by `start.c` from the bootinfo); `aarch64_timer_init_cpu()`,
-  `aarch64_timer_ack(intid)`, `aarch64_timer_read_gtdt()` (the timer
-  PPIs from the GTDT, after `acpi_init`), `aarch64_timer_intids(&phys,
-  &virt)`; `aarch64_boot_info` (the boot info as the loader passed it, set
+  `aarch64_timer_ack(intid)`, `aarch64_timer_gtdt(&phys, &virt)` (the
+  GTDT's EL1 physical and virtual timer GSIVs, after `acpi_init`; true when
+  both are PPIs; reads only, never panics: the platform line uses it); `aarch64_boot_info` (the boot info as the loader passed it, set
   by `start.c` before the console), `pl011_early_putc(c)`,
   `aarch64_console_serial(&base, &intid, &kind)` (the serial console in
   use, `kind` `"PL011"` or `"16550"`, `intid` 0 when polled; false when

@@ -390,7 +390,7 @@ it.
 Clock: `CNTPCT_EL0` (after an `isb`) at `CNTFRQ_EL0` Hz (62.5 MHz on
 QEMU), name `"arch-timer"`; no calibration needed: `arch_timer_calibrate`
 reads the frequency (panics outside 1 MHz–10 GHz), reads the GTDT for
-the non-secure EL1 and virtual timer GSIVs (`aarch64_timer_read_gtdt`:
+the non-secure EL1 and virtual timer GSIVs (`aarch64_timer_gtdt`, then `read_gtdt`:
 offsets 56 and 64; both must be PPIs, else the `virt` 30 and 27 with a
 warning on QEMU's firmware and a panic elsewhere; see "Platform
 discovery"), allocates the tick

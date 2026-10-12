@@ -56,8 +56,10 @@ extern uint64_t aarch64_hhdm_base;
 void aarch64_timer_init_cpu(void);
 void aarch64_timer_ack(unsigned intid);   /* gic.c: before dispatching a PPI */
 unsigned aarch64_timer_virt_intid(void);  /* the virtual timer's PPI: a guest's, and the hypervisor's to bind */
-void aarch64_timer_read_gtdt(void);   /* the timer interrupts from the GTDT (after acpi_init) */
-void aarch64_timer_intids(unsigned *phys, unsigned *virt);
+/* The GTDT's EL1 physical and virtual timer GSIVs (after acpi_init); true
+ * when both are PPIs. Reads only: arch_timer_calibrate decides what a bad
+ * table means. */
+bool aarch64_timer_gtdt(unsigned *phys, unsigned *virt);
 
 /* --- pl011.c: the serial console the boot info names --- */
 struct cosmoboot_info;

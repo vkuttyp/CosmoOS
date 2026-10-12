@@ -11,6 +11,7 @@
 
 #include <arch/shutdown.h>
 #include <kernel/acpi.h>
+#include <kernel/bootinfo.h>
 #include <kernel/types.h>
 
 #define SEMIHOSTING_SYS_EXIT_EXTENDED 0x20u
@@ -20,7 +21,9 @@ void arch_emulator_exit(unsigned code)
 {
     /* Semihosting is QEMU's (with -semihosting-config): on anything else
      * HLT #0xF000 is an undefined instruction, not an exit. */
-    if (!acpi_platform_is_qemu())
+    /* Before bootinfo_init (an early panic) the firmware is unknown: try,
+     * as every boot did before v1.0.1. */
+    if (bootinfo_ready() && !acpi_platform_is_qemu())
         return;
     static volatile uint64_t block[2];
     block[0] = ADP_STOPPED_APPLICATION_EXIT;

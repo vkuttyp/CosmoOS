@@ -59,12 +59,16 @@ void aarch64_platform_report(void)
         ksnprintf(gic, sizeof(gic), "no GIC in the MADT");
     }
 
-    aarch64_timer_read_gtdt();
+    /* The GTDT as it reads, never a panic: this line must print before
+     * arch_timer_calibrate refuses a bad table. */
+    char timer[64];
     unsigned tphys, tvirt;
-    aarch64_timer_intids(&tphys, &tvirt);
+    if (aarch64_timer_gtdt(&tphys, &tvirt))
+        ksnprintf(timer, sizeof(timer), "timer PPIs %u (physical) %u (virtual)", tphys, tvirt);
+    else
+        ksnprintf(timer, sizeof(timer), "timer: no usable GTDT (%u, %u)", tphys, tvirt);
     int conduit = aarch64_psci_conduit();
 
-    kinfo("platform: firmware OEM '%s'%s; console %s; %s; timer PPIs %u (physical) %u (virtual); PSCI %s", oem,
-          qemu ? " (QEMU)" : "", console, gic, tphys, tvirt,
-          conduit == 1 ? "HVC" : conduit == 0 ? "SMC" : "none");
+    kinfo("platform: firmware OEM '%s'%s; console %s; %s; %s; PSCI %s", oem, qemu ? " (QEMU)" : "", console, gic,
+          timer, conduit == 1 ? "HVC" : conduit == 0 ? "SMC" : "none");
 }

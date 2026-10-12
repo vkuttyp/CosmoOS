@@ -28,6 +28,7 @@ userland. Exit 0 PASS, 1 FAIL; every boot's logs stay in DIR.
 """
 
 import argparse
+import math
 import os
 import re
 import shutil
@@ -109,10 +110,14 @@ def boot(name, image, work, spec, timeout, key):
         if serial:
             with lock:
                 return bytes(buf)
+        # Handed over once the kernel has written anything to the virtio
+        # console (qemu-run.sh creates it empty): a firmware that never
+        # hands over leaves it empty and is retried like any other boot.
         try:
-            return open(vcon, "rb").read() + firmware_stall.BANNER
+            data = open(vcon, "rb").read()
         except OSError:
             return b""
+        return data + firmware_stall.BANNER if data else b""
 
     def kill(p):
         p.kill()
@@ -193,6 +198,8 @@ def main():
     ap.add_argument("--timeout", type=float, default=240.0)
     ap.add_argument("--key", required=True, help="the build's signing key (MODSIGN_KEY), to sign noserial's command line")
     a = ap.parse_args()
+    if not (math.isfinite(a.timeout) and 0 < a.timeout <= 3600):
+        ap.error("--timeout must be a number of seconds in (0, 3600]")
     shutil.rmtree(a.workdir, ignore_errors=True)
     os.makedirs(a.workdir)
     names = a.variants.split(",")

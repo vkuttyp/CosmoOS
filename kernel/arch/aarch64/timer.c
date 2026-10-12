@@ -44,7 +44,7 @@ static uint64_t g_next_cval[CONFIG_MAX_CPUS];   /* the tick's next absolute comp
  * every boot took the virt defaults below and was right only because they
  * are QEMU's numbers too. The defaults now apply only on QEMU's firmware.
  */
-void aarch64_timer_read_gtdt(void)
+bool aarch64_timer_gtdt(unsigned *phys_out, unsigned *virt_out)
 {
     const struct acpi_sdt_header *gtdt = acpi_find_table("GTDT");
     uint32_t phys = 0, virt = 0;
@@ -53,9 +53,16 @@ void aarch64_timer_read_gtdt(void)
         memcpy(&phys, b + 56, 4);
         memcpy(&virt, b + 64, 4);
     }
-    bool phys_ok = phys >= GIC_PPI_BASE && phys < GIC_SPI_BASE;
-    bool virt_ok = virt >= GIC_PPI_BASE && virt < GIC_SPI_BASE;
-    if (phys_ok && virt_ok) {
+    *phys_out = phys;
+    *virt_out = virt;
+    return phys >= GIC_PPI_BASE && phys < GIC_SPI_BASE && virt >= GIC_PPI_BASE && virt < GIC_SPI_BASE;
+}
+
+static void read_gtdt(void)
+{
+    const struct acpi_sdt_header *gtdt = acpi_find_table("GTDT");
+    unsigned phys, virt;
+    if (aarch64_timer_gtdt(&phys, &virt)) {
         g_phys_intid = phys;
         g_virt_intid = virt;
         return;
@@ -67,19 +74,13 @@ void aarch64_timer_read_gtdt(void)
           gtdt == NULL ? "absent" : "unusable", g_phys_intid, g_virt_intid);
 }
 
-/* The timer interrupts in use, for the platform line. */
-void aarch64_timer_intids(unsigned *phys, unsigned *virt)
-{
-    *phys = g_phys_intid;
-    *virt = g_virt_intid;
-}
 
 void arch_timer_calibrate(void)
 {
     g_hz = READ_SYSREG(cntfrq_el0);
     if (g_hz < 1000000ull || g_hz > 10000000000ull)
         panic("timer: implausible generic timer frequency %llu Hz", (unsigned long long)g_hz);
-    aarch64_timer_read_gtdt();
+    read_gtdt();
     int v = arch_vector_alloc();
     if (v < 0)
         panic("timer: no vector for the tick");

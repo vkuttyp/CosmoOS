@@ -33,6 +33,10 @@ struct sdt {
 } __attribute__((packed));
 
 #define SDT_HDR 36u
+/* No table this loader reads is near this long; a length past it is a
+ * corrupt header, refused before the checksum walks off the table. */
+#define SDT_MAX (1u << 20)
+#define MAX_TABLES 64u
 
 static bool sum_ok(const void *p, size_t n)
 {
@@ -47,7 +51,7 @@ static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v;
 static uint64_t rd64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
 
 /* The root table's entries, as table pointers; 0 when there is none. */
-static const struct sdt *g_tables[64];
+static const struct sdt *g_tables[MAX_TABLES];
 static unsigned g_ntables;
 static char g_oem[7];
 
@@ -60,7 +64,8 @@ static void collect(uint64_t rsdp_addr)
     uint8_t rev = rsdp[15];
     uint64_t root;
     unsigned width;
-    if (rev >= 2 && rd32(rsdp + 20) >= 36 && sum_ok(rsdp, rd32(rsdp + 20)) && rd64(rsdp + 24) != 0) {
+    uint32_t rlen = rd32(rsdp + 20);
+    if (rev >= 2 && rlen >= 36 && rlen <= 4096 && sum_ok(rsdp, rlen) && rd64(rsdp + 24) != 0) {
         root = rd64(rsdp + 24);
         width = 8;
     } else {
@@ -68,15 +73,20 @@ static void collect(uint64_t rsdp_addr)
         width = 4;
     }
     const struct sdt *r = (const struct sdt *)(uintptr_t)root;
-    if (r == NULL || r->length < SDT_HDR || !sum_ok(r, r->length))
+    if (r == NULL || r->length < SDT_HDR || r->length > SDT_MAX || !sum_ok(r, r->length))
         return;
     const uint8_t *e = (const uint8_t *)r + SDT_HDR;
     unsigned n = (r->length - SDT_HDR) / width;
-    for (unsigned i = 0; i < n && g_ntables < 64; i++) {
+    for (unsigned i = 0; i < n; i++) {
         uint64_t a = width == 8 ? rd64(e + i * 8) : rd32(e + i * 4);
         const struct sdt *t = (const struct sdt *)(uintptr_t)a;
-        if (t == NULL || t->length < SDT_HDR || !sum_ok(t, t->length))
+        if (t == NULL || t->length < SDT_HDR || t->length > SDT_MAX || !sum_ok(t, t->length))
             continue;
+        if (g_ntables == MAX_TABLES) {
+            /* As the kernel's walker (ACPI_MAX_TABLES): said, not silent. */
+            lprintf("acpi: more than %u tables; the rest are not read\n", MAX_TABLES);
+            break;
+        }
         g_tables[g_ntables++] = t;
     }
 }
@@ -132,7 +142,8 @@ static bool dbg2(struct cosmoboot_info *info)
     const uint8_t *d = find("DBG2", &len);
     if (d == NULL || len < 44)
         return false;
-    uint32_t off = rd32(d + 36), n = rd32(d + 40);
+    uint64_t off = rd32(d + 36);   /* 64-bit sums: a corrupt offset must not wrap past the checks */
+    uint32_t n = rd32(d + 40);
     for (uint32_t i = 0; i < n && off >= 44 && off + 22 <= len; i++) {
         const uint8_t *e = d + off;
         uint16_t elen, type, sub, baro;
@@ -142,7 +153,7 @@ static bool dbg2(struct cosmoboot_info *info)
         memcpy(&baro, e + 18, 2);
         if (elen < 22 || off + elen > len)
             break;
-        if (type == 0x8000 && e[3] > 0 && baro + 12u <= elen) {
+        if (type == 0x8000 && e[3] > 0 && (uint32_t)baro + 12u <= elen) {
             uint8_t space = e[baro], access = e[baro + 3];
             uint64_t base = rd64(e + baro + 4);
             uint32_t kind = base != 0 && sub <= 0xff ? console_kind((uint8_t)sub, space) : COSMOBOOT_CONSOLE_NONE;
@@ -174,9 +185,12 @@ static void spcr(struct cosmoboot_info *info)
             lputs("acpi: no SPCR and no DBG2 serial port: no serial console\n");
         return;
     }
-    uint8_t type = t[36], space = t[40], access = t[43];
+    uint8_t type = t[36], space = t[40], access = t[43], itype = t[52];
     uint64_t base = rd64(t + 44);
-    uint32_t gsiv = rd32(t + 54);
+    /* The interrupt type at 52: bit 3 says the GSIV is a GIC interrupt.
+     * Anything else (a PC-AT IRQ, an I/O APIC's) is not one the kernel can
+     * request on an ARM machine: the port is then polled. */
+    uint32_t gsiv = (itype & 0x08) ? rd32(t + 54) : 0;
     uint32_t kind = base != 0 ? console_kind(type, space) : COSMOBOOT_CONSOLE_NONE;
     lprintf("acpi: SPCR: interface type 0x%x, space %u, base 0x%llx, access %u, GSIV %u -> %s\n", type, space,
             (unsigned long long)base, access, gsiv, kind_name(kind));
