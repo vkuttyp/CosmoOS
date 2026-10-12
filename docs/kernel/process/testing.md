@@ -454,8 +454,9 @@ checking.
 - `elf_validate` compiles on the host (`ELF_HOST_TEST`) but no host
   test drives it yet; a `tests/host/test_elf.c` with the crafted cases
   and a fuzz loop over random mutations of the init image is planned.
-- No fuzzing of the syscall surface from user space; a user-side
-  fuzzer for argument combinations is planned.
+- User-space syscall fuzzing is `init --syscall-fuzz` (the
+  `syscall-fuzz` self-test; `docs/kernel/syscall/testing.md`); it reaches
+  few calls numbered 62 and above.
 - No test kills a process blocked in a socket wait or in `sleep`; no
   test creates an orphan under the real init; no test exceeds
   `COSMO_ARG_MAX`.

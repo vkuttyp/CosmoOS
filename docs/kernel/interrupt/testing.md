@@ -79,7 +79,8 @@ branch of `interrupt_dispatch` for an exception.
 
 ### `acpi` self-test (`kernel/scheduler/schedtest.c`)
 
-`acpi_available()`, a non-zero `acpi_madt_lapic_base()`, at least one
+`acpi_available()`, a non-zero `acpi_madt_lapic_base()` or a GIC
+description (`kernel/scheduler/schedtest.c`), at least one
 MADT processor entry, `acpi_find_table("APIC")` non-NULL and a bogus
 signature NULL. Proves the RSDP → XSDT → MADT walk and checksum path
 that the controllers depend on.

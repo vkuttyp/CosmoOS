@@ -179,7 +179,7 @@ every child it creates and sees `-ECHILD` afterwards.
 **P21. Syscall numbers are stable and only appended.**
 `uapi/cosmo/syscall.h` numbers, once assigned, never change meaning
 (0–42 when this was written, 0–96 as of the file-regions unit, whose
-`SYS_msync` is 96); `SYS_COUNT` (97) only grows. Unknown numbers, including values above `SYS_COUNT` and
+`SYS_msync` is 96; 0–104 at roadmap M6); `SYS_COUNT` (105 at M6) only grows. Unknown numbers, including values above `SYS_COUNT` and
 negative values reinterpreted as large unsigned, return `-ENOSYS`
 without side effects. Check: test `process-user` (`SYS_COUNT`, 999999,
 -1), review.

@@ -179,7 +179,7 @@ debug operations exist for the harnesses:
   of a log to the device; with `torn`, the last write is applied only up
   to half its sectors (a torn sector write of the kind a power cut leaves).
 
-## 4. Crash consistency (`kernel-services/filesystem/cosmofs/cosmofscrash.c`, self-test `cosmofs-crash`)
+## 4. Crash consistency (`kernel-services/filesystem/cosmofs/cosmofscrash.c`, self-test `cosmofs-replay`)
 
 The property cosmofs promises (`docs/kernel-services/filesystem/cosmofs/design.md`):
 a committed generation is never partially visible; after any interruption

@@ -170,3 +170,25 @@ and two runs on the same inputs a minute apart, with the kernel's mtime
 changed between them, gave identical bytes (mtools 4.0.49). CI's new
 `release-set` job runs `make reproducible BUILD=release` and uploads one
 `make release` per architecture.
+## PR 3 (as built): the five-file docs and their check
+
+| Directory | Added | Corrected |
+|---|---|---|
+| `docs/drivers/acpi/` | `design.md`, `api.md`, `invariants.md` (AC1-AC8), `testing.md` | `architecture.md`: the read-only mapping fallback, GICR/ITS entries, which overflows are silent, the full panic list |
+| `docs/kernel/object/` | `design.md`, `invariants.md` (OB1-OB12, with an index of the object rules other subsystems own), `testing.md` | `architecture.md` (`process_lookup` uses `kobject_tryget`; the `*_of_err` accessors), `api.md` (console write is `tty_write`; `read_undo`, `handles`, `watchers`, the NOFILE `limit`) |
+| `docs/kernel/syscall/` | `design.md`, `invariants.md` (SC1-SC14), `testing.md` | `api.md`, `architecture.md`: `SYS_COUNT` 105 (said 101/97), thread calls 82-87, the 21-word x86-64 frame and IRETQ exit, the AArch64 `SVC` path, exception-table user access, the dispatcher's filter/signal/restart work, `PRIV_MOUNT` |
+| `docs/kernel-services/filesystem/cosmofs/` | `api.md`, `invariants.md` (CF1-CF15, with an index of the V/F/S rules), `testing.md` (71 registered tests) | `architecture.md`: `CFS_VERSION` 11, seventeen corruptions |
+| `docs/drivers/usb/`, `e1000e/`, `ahci/` | `architecture.md` each (they had the other four; `docs/README.md` listed the last two as `drivers/network/` and `drivers/storage/`, which do not exist) | |
+
+The docs were written from the code by reading it; every claim names a
+file, function or constant. Code findings that are not release defects
+are inventory lines (section 3: ACPI, cosmofs, syscalls and handles).
+The two that were defects in the release image (the GICC flag bit and
+the unchecked MADT/MCFG lengths) are fixed in PR 1.
+
+**The check.** `scripts/check-docs.py` (`make check-docs`, CI job
+`docs`) reads the Layout table of `docs/README.md` and fails when a
+listed subsystem directory is missing, or lacks or has an empty one of
+the five files; `history/`, `testing/` and `audit/` are records. It
+checks 37 directories. With `docs/kernel/object/invariants.md` moved
+away it fails naming the file.

@@ -485,6 +485,23 @@ tree.
   `acpi_init` would duplicate every entry; the root table's
   `XSDT`/`RSDT` signature is not compared.
 
+- cosmofs (found by M6's docs, `docs/kernel-services/filesystem/cosmofs/invariants.md`):
+  a read-only mount still replays a free or orphan record to the device
+  (as ext4 replays its journal); new files are LZ4 on any format version,
+  so an older-version image written here can hold v6 records; scrub's
+  `-EIO` discards the counts fsctl would report; snapshot ids are unique
+  per mount, so a deleted newest snapshot's id can be reused after a
+  remount (V22 says never); `cosmofs_rekey` leaves the key block in the
+  open transaction until the next commit; a file is capped at 516128
+  blocks (64516 encrypted) by the one-level checksum index (`-EFBIG`).
+- Syscalls and handles (found by M6's docs): `syscall_count`,
+  `syscall_unknown_count`, `syscall_filtered_count` have no callers;
+  `p->syscalls` is a plain increment shared by threads; `dup2`
+  (`handle_install_at`) installs at a slot at or above `RLIMIT_NOFILE`
+  (bounded by `HANDLE_TABLE_SIZE`), where Linux returns `EBADF`; the
+  `handle.h` comment says every function is non-blocking but
+  `handle_close` can block in the last put.
+
 ## 4. The quiesce report's remaining risks and debt
 
 The 2026-10-03 renewed lock-discipline audit found two defects in the

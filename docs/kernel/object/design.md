@@ -1,0 +1,235 @@
+# Kernel Object Model and Handles: Design
+
+Points 5 to 12 of constitution section 64 for `kernel/object/`:
+`object.c` (the reference-counted header), `handle.c` (the per-process
+handle table) and `console_obj.c` (the console object). The interfaces
+are in `api.md`; the rules that must hold are in `invariants.md`; the
+lifetime rules shared with every converted object are in
+`docs/kernel/quiesce/` ("The kobject rule and the converted objects",
+"Module unload protocol").
+
+## Data structures
+
+### `struct kobject` (`kernel/include/kernel/object.h`)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `type` | `const struct kobject_type *` | immortal type descriptor |
+| `refcount` | `uint32_t` | references; changed only by atomic RMW |
+| `handles` | `uint32_t` | handle-table slots holding the object, in every process (atomic) |
+| `watched` | `uint8_t` | set, never cleared, when an epoll registration is made |
+| `owner` | `struct module *` | module whose code the release lives in; NULL for the kernel |
+| `watchers` | `struct epoll_item *` | epoll entries on the object, under epoll's watch lock |
+
+By field layout the header is 40 bytes on both 64-bit targets (`type`
+at 0, `refcount` 8, `handles` 12, `watched` 16, `owner` 24, `watchers`
+32); no static assertion pins it. The layout is module ABI: adding
+`owner` was ABI 2, `handles` and `watchers` ABI 5, `watched` ABI 6
+(`COSMO_MODULE_ABI_VERSION` comment in `kernel/include/kernel/module.h`).
+
+The header is embedded in the concrete object and recovered with
+`container_of`. `kobject_init` sets `refcount = 1`, `handles = 0`,
+`watched = 0`, `watchers = NULL` and `owner = module_owner_of(release)`.
+
+### Types
+
+`struct kobject_type { name, release, flags }` is a static descriptor.
+`flags & KOBJECT_TYPE_IO` (1) says the descriptor is the `base` of a
+`struct kobject_io_type`, which adds `read`, `write`, and the optional
+`stat`, `ready`, `set_nonblock`, `flush`, `poll_wq` and `read_undo`.
+`kobject_io_of` is the only cast from one to the other and returns NULL
+without the flag, so the I/O system calls (`syscall_obj_read`,
+`syscall_obj_write` in `kernel/syscall/native.c`) answer `-EBADF` for a
+plain object (a vCPU) instead of reading past its descriptor.
+`kobject_ready`, `kobject_poll_wq` and `kobject_set_nonblock` supply the
+defaults listed in `api.md`.
+
+### `struct handle_table` (`kernel/include/kernel/handle.h`)
+
+| Field | Meaning |
+|---|---|
+| `lock` | spinlock `"handles"`, taken `irqsave` |
+| `entries[HANDLE_TABLE_SIZE]` | 64 `struct handle_entry { obj, rights, flags }`; `obj == NULL` is free |
+| `count` | non-empty slots |
+| `limit` | `COSMO_RLIMIT_NOFILE`; `handle_install*` refuses at or above it |
+| `exiting` | set by `handle_table_destroy` before the slots are emptied |
+
+An entry is 16 bytes, so the slot array is 1 KiB. The table is embedded
+in `struct process` as `handles`; it is never allocated separately
+(tests allocate one with `kmalloc` or put it in static storage).
+
+`rights` is a 32-bit capability mask: bits 0..15 generic
+(`HANDLE_RIGHT_READ` 1, `WRITE` 2, `DUP` 4, `TRANSFER` 8, `MANAGE` 16),
+bits 16..31 per type (`HANDLE_RIGHT_SOCK_*`, `HANDLE_RIGHT_VM_*`,
+`HANDLE_RIGHT_VCPU_*`, aliases of the `COSMO_RIGHT_*` values in
+`uapi/cosmo/syscall.h`). `flags` belongs to the slot; the only flag is
+`HANDLE_FLAG_CLOEXEC` (1).
+
+### The console object (`kernel/object/console_obj.c`)
+
+`g_console` is a static `struct kobject` initialised to
+`{ .type = &console_type.base, .refcount = 1 }`, not through
+`kobject_init`; its other fields are zero (owner NULL). Its operations
+delegate to the console tty: `read` is `tty_read(tty_console(), ...)`,
+`write` is `tty_write(tty_console(), buf, len, false)` (the background
+job check, then `console_write`), `ready` reports `WRITABLE` plus
+`READABLE` when `tty_read_ready` says a line is there, and `poll_wq`
+returns `&tty_console()->readers` for `READABLE` and NULL otherwise.
+`tty_of_object` maps the console object to `tty_console()` and every
+other object to NULL; `kernel/tty/ttydev.c` uses it to tell whether a
+handle names a terminal.
+
+## Ownership and lifetime
+
+- The creator holds reference 1 from `kobject_init`. A table slot holds
+  one (taken by `handle_install*` before its lock); every lookup
+  (`handle_lookup*`, `handle_get*`, `handle_transfer_check`) returns one
+  more that the caller puts. A registry that hands the object out holds
+  its own (`docs/kernel/quiesce/invariants.md` Q10).
+- The last `kobject_put` calls `kobject_release_final`, which reads
+  `owner`, runs `type->release` in the putter's context, and only then
+  calls `module_object_released(owner)`, so the module's text is mapped
+  while its release runs (Q16). The release frees the object (Q9).
+- `kobject_track_code` replaces the owner for types whose release
+  trampolines to a per-object callback (`device_register` in
+  `kernel/device/device.c`, `blk_register` in `kernel/block/blk.c`,
+  `netif_register` in `kernel-services/network/netif.c`): it raises the
+  new owner's count through `module_owner_of` and drops the old one's.
+- The console object is never released: nothing puts its static
+  reference, and `console_obj_release` panics.
+- A table's life: `handle_table_init` when the process is built;
+  `limit` set from the process's `COSMO_RLIMIT_NOFILE`, capped at
+  `HANDLE_TABLE_SIZE` (`kernel/process/process.c`, at process creation
+  and in the setrlimit path, where a value above 64 is `-EINVAL`);
+  `handle_close_on_exec` in `process_exec_images` after the point where only
+  the exec'ing thread is left; `handle_table_destroy` from
+  `process_last_thread_gone` (handles close at exit, not at reaping),
+  again from `process_release` on the empty table, and from
+  `process_unbuild` for a process never published.
+
+## Concurrency model
+
+**Reference counts.** `kobject_get` and `kobject_get_n` are one
+`fetch_add` (acq_rel) and panic if the old value was 0.
+`kobject_tryget` is a CAS loop that refuses at 0; it is the form for a
+lookup that may find an object whose release has begun (TCP `sock_ref`,
+`udp_input`, `process_lookup`, `kernel/ipc/unix.c`,
+`kernel-services/vfs/pagecache.c`). `kobject_put` is one `fetch_sub`
+(acq_rel); the acq_rel order makes every holder's writes visible to the
+release.
+
+**Leaving a lookup table.** `kobject_put_and_lock(obj, lock, &state)`
+drops by CAS without the lock while the count is above 1 and takes
+`lock` (irqsave) only for a drop from 1; it returns true with the lock
+held only when that drop reached 0 under the lock, so the caller unlinks
+and then calls `kobject_release_final` after unlocking. A lookup under
+the same lock may then use a plain `kobject_get`. `vnode_put`
+(`kernel-services/vfs/vfs.c`, the vnode hash under `mnt->lock`) is the
+caller today. The process table uses the other form: a process leaves
+it inside its release, so `process_lookup` uses `kobject_tryget`.
+
+**The table lock** protects the slot contents, `count`, and the
+`exiting` flag. Nothing that can sleep or take another lock runs under
+it: inside are only slot reads and writes, `kobject_get` (an atomic),
+and the atomic changes of `obj->handles`. Every reference a handle
+function gives back on failure, and the put in `handle_close`, happens
+after the unlock (Q17). `limit` is read under the table lock but written
+by the setrlimit path under the process lock `p->lock`, not the table
+lock; it is a single aligned `unsigned` store.
+
+**`handle_close`** empties the slot and decrements `obj->handles` in
+one hold, then, outside the lock: if the count reached 0, a `seq_cst`
+fence and an acquire load of `watched`, and `epoll_last_handle_closed`
+when it is set (the fence pairs with epoll's add, which sets `watched`
+under its watch lock before reading the count: store buffering,
+`tests/litmus/epoll/watched.litmus`); then the type's `flush`; then the
+put. Its caller must be in thread context with no spinlock held.
+
+**Multi-step operations are not atomic.** Native `dup` is `handle_get`
+then `handle_install` (or `handle_close` then `handle_install_at` for a
+target), each in its own hold; the reference from `handle_get` keeps
+the object alive between them, and a concurrent install into the target
+slot makes the second step `-EBUSY`. `handle_close_on_exec` reads each
+slot's flag in one hold and closes in another, which is safe because
+exec runs it with one thread left.
+
+**Object state** is the object's own concern: the table neither locks
+nor inspects it.
+
+## Memory
+
+Nothing in `kernel/object/` allocates. A table is 64 × 16 bytes of
+slots plus the lock and three scalars, inside `struct process`. Objects
+are allocated and freed by their own types; this code frees nothing
+but runs the release.
+
+## Error handling
+
+| Condition | Result |
+|---|---|
+| `kobject_init` with NULL type or NULL release | `KASSERT` panic |
+| get on a count of 0, put below 0, `kobject_put_and_lock` at 0 | `panic` naming the type |
+| `kobject_release_final` on a nonzero count | `panic` |
+| console object released | `panic` |
+| `handle_install*` when the table is exiting | `-EBADF`, reference returned |
+| `handle_install` at `limit` or with no free slot | `-EMFILE`, reference returned |
+| `handle_install_at*`: `h` out of range / slot occupied / exiting | `-EBADF` / `-EBUSY` / `-EBADF` |
+| lookup of an out-of-range, free, or exiting slot | NULL |
+| lookup lacking a right | NULL; `handle_lookup_rights` sets `*missing_rights` |
+| `handle_close` of an out-of-range or free slot | `-EBADF` (never a panic) |
+| `handle_close` whose `flush` fails | the flush's errno; the slot is closed anyway |
+| `handle_transfer_check`: no handle / no TRANSFER or wider `give` | `-EBADF` / `-EPERM` |
+| `handle_table_destroy` leaves a nonzero `count` | `KASSERT` panic |
+| an object's `read`/`write` returns more than offered | `KASSERT` panic in `syscall_obj_read`/`_write` |
+
+`KASSERT` (`kernel/include/kernel/panic.h`) is unconditional, so the
+`rc = -EIO` branch that follows each count check in `native.c` is not
+reached in any build.
+
+## Performance
+
+A lookup is one `irqsave` spinlock hold and one atomic add; a close is
+one hold, one atomic subtract, a fence and a load only when the last
+descriptor goes, the optional flush, and the put. `handle_install`
+scans for the lowest free slot, at most 64 entries. `kobject_get`/`put`
+are one atomic each; `kobject_put_and_lock` takes the lock only for a
+drop from 1. No measurement of these paths is recorded in this tree.
+
+## Security
+
+- User space sees handle integers only, never a kernel pointer
+  (`docs/kernel/process/invariants.md` P16).
+- Rights are checked at lookup (P17) and only ever shrink: `sys_dup`
+  and `handle_transfer_check` refuse a wider set with `-EPERM`, and no
+  function adds a right to an existing slot
+  (`docs/kernel/security/invariants.md` S9).
+- A per-type right is tested only by code that has already converted
+  the object to its type (`sock_of_err` in `kernel/syscall/native.c`,
+  `vm_of_err` and `vcpu_of_err` in
+  `kernel-services/virtualization/hvsys.c`, and the `sock_of`/`vm_of`
+  wrappers), so the same bit cannot be spent on another kind of object.
+- The `exiting` gate keeps a thread still inside a system call from
+  taking a reference the exit is releasing or installing one nothing
+  will close.
+- Handle numbers are reused lowest-first and carry no generation: after
+  a close, the same integer may name a different object, as POSIX
+  descriptors do.
+- An object that over-reports a transfer count panics the kernel
+  rather than sizing a copy from that count.
+
+## Future extensibility
+
+Not implemented today:
+
+- Growth of a table beyond `HANDLE_TABLE_SIZE` (64): the slot array is
+  fixed and `COSMO_RLIMIT_NOFILE` above 64 is `-EINVAL`.
+- An open-file-description layer between a handle and its object:
+  non-blocking mode is a property of the object (`set_nonblock`); a
+  `struct file` per open is how per-open state exists today.
+- A global object namespace, or per-object permissions beyond handle
+  rights.
+- Handle transfer over IPC other than `spawn`'s map and a unix
+  socket's `sendmsg` (both through `handle_transfer_check`).
+- More than one console terminal: `tty_of_object` knows only
+  `g_console`; a second terminal object would carry its own tty pointer
+  (comment above `tty_of_object`).

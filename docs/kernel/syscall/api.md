@@ -19,6 +19,13 @@ A negative result in `[-4095, -1]` is `-errno`; anything else is a
 success value (a count, a pid, an address). The kernel never returns
 a kernel pointer.
 
+### Calling convention (AArch64)
+
+`SVC #0` with the number in `x8` and arguments in `x0`–`x5`; the result
+returns in `x0`, which therefore no longer holds the first argument
+(`libc/include/cosmo/syscall.h`, `kernel/arch/aarch64/trap.c`
+`handle_syscall`). Every other register is preserved.
+
 Every call may block (sleep, demand-zero fault during a copy), may be
 preempted, and runs with interrupts enabled on the calling thread's
 kernel stack.
@@ -69,7 +76,7 @@ kernel stack.
 | 38 | `chdir` | `const char *path` | 0 | `EFAULT`, `ENAMETOOLONG`, path errors, `ENOTDIR` |
 | 39 | `getcwd` | `char *buf, size_t len` | the path length (the NUL is written too) | `ERANGE`, `EFAULT` |
 | 40 | `procinfo` | `struct cosmo_procinfo *buf, size_t count` | the number of processes the caller may see (up to `count` records filled): every process for a `PRIV_PROC` caller, else those with its real uid | `EFAULT`, `ENOMEM` |
-| 41 | `klog` | `char *buf, size_t len` | bytes copied: the newest whole log lines that fit | `EFAULT`, `ENOMEM` |
+| 41 | `klog` | `char *buf, size_t len` | bytes copied: the newest whole log lines that fit | `EPERM` (no `PRIV_SYS_ADMIN`), `EFAULT`, `ENOMEM` |
 | 42 | `sysctl` | `const char *name, char *buf, size_t len` | the value's length (NUL written when it fits) | `ENOENT`, `EFAULT` |
 | 56 | `getrlimit` | `unsigned resource, uint64_t *value` | 0 | `EINVAL`, `EFAULT` |
 | 57 | `setrlimit` | `unsigned resource, uint64_t value` | 0 | `EINVAL` (resource, `NOFILE` > 64), `EPERM` (raising without privilege) |
@@ -125,7 +132,12 @@ object (`read` drains the guest's debug console, `fstat` is
 credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
 58–59 the readiness and non-blocking calls (milestone 8;
 `docs/kernel/object/api.md`), 60–62 the asynchronous I/O ring
-(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 101: **100 is `SYS_mknod`** (the named-pipes unit: a `COSMO_DT_FIFO` node, with `COSMO_O_NONBLOCK` `0x0800` joining `open`'s flags -- row 100 and `docs/kernel/ipc/api.md`), 89–91 are the symbolic-link calls, 97–99 are `SYS_sendmsg`, `SYS_recvmsg` and `SYS_socketpair` (the unix-sockets unit, `docs/kernel/ipc/api.md`), **96 is `SYS_msync`** (the file-regions unit, with `mmap` gaining `fd` and `off`, `COSMO_MAP_SHARED` and `COSMO_MAP_PRIVATE`: row 96 and the **mmap** and **msync** bullets below; `docs/audit/next-subsystem-file-regions.md`), **94 is `SYS_futex_requeue` and 95 `SYS_thread_kill`** (the last two calls the native thread ABI lacked and the Linux personality had: the compare-form requeue over `futex_requeue`, and `tgkill` with the process implied over `signal_send_thread` — rows 94–95, the **futex_requeue** and **thread_kill** bullets below, and `docs/audit/next-subsystem-native-thread-door.md`; the milestone-10 thread calls 83–88 are described in `docs/kernel/process/design.md`, "Five system calls", rather than in this table), **93 is `SYS_mprotect`** (the native door onto `vm_user_protect`, which the Linux personality had reached since milestone 10 and the native ABI could not — row 93 and the **mprotect** bullet below; `docs/audit/next-subsystem-mprotect.md`), and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
+(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 105 (101 when
+this paragraph was written: 101 is `SYS_timer_create`,
+`docs/kernel/io/api.md`; 102–104 are `SYS_switch_root`, `SYS_exec` and
+`SYS_sysctl_set`, the bullets below; 63–65 are `gethostname`,
+`sethostname`, `syscall_filter`; 79–80 `vm_raise_spi`/`vm_lower_spi`,
+81 `fsync`, 88 `vcpu_stop`): **100 is `SYS_mknod`** (the named-pipes unit: a `COSMO_DT_FIFO` node, with `COSMO_O_NONBLOCK` `0x0800` joining `open`'s flags -- row 100 and `docs/kernel/ipc/api.md`), 89–91 are the symbolic-link calls, 97–99 are `SYS_sendmsg`, `SYS_recvmsg` and `SYS_socketpair` (the unix-sockets unit, `docs/kernel/ipc/api.md`), **96 is `SYS_msync`** (the file-regions unit, with `mmap` gaining `fd` and `off`, `COSMO_MAP_SHARED` and `COSMO_MAP_PRIVATE`: row 96 and the **mmap** and **msync** bullets below; `docs/audit/next-subsystem-file-regions.md`), **94 is `SYS_futex_requeue` and 95 `SYS_thread_kill`** (the last two calls the native thread ABI lacked and the Linux personality had: the compare-form requeue over `futex_requeue`, and `tgkill` with the process implied over `signal_send_thread` — rows 94–95, the **futex_requeue** and **thread_kill** bullets below, and `docs/audit/next-subsystem-native-thread-door.md`; the milestone-10 thread calls 82–87 are described in `docs/kernel/process/design.md`, "Five system calls", rather than in this table), **93 is `SYS_mprotect`** (the native door onto `vm_user_protect`, which the Linux personality had reached since milestone 10 and the native ABI could not — row 93 and the **mprotect** bullet below; `docs/audit/next-subsystem-mprotect.md`), and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` carries every
@@ -150,11 +162,14 @@ Details per call:
   kernel logs it for `init`). The wrapper loops on the instruction so
   it is `noreturn` even if a future multi-threaded exit returns.
 - **write**: `[buf, buf+len)` must lie inside `[0x400000,
-  0x00007FFFFFFFF000)` and be mapped in the caller's space; the copy is
-  done in 1024-byte chunks through a kernel bounce buffer, so a fault in
-  a later chunk returns the bytes written so far. `len` 0 returns 0
+  0x00007FFFFFFFF000)` (`EFAULT` before the handle lookup otherwise);
+  the copy is done in chunks of the bounce (`syscall_bounce_get`: up to
+  `IO_BOUNCE_MAX` = 64 KiB, 1024 bytes when the request is that small or
+  the heap refuses), so a fault in a later chunk returns the bytes
+  written so far. `len` 0 returns 0
   after the handle check. The console object accepts every byte.
-- **read**: at most 1024 bytes per call. The console blocks until a line
+- **read**: one object call of at most 64 KiB (`IO_BOUNCE_MAX`; the
+  architecture document's "The bounce"). The console blocks until a line
   has been typed and returns at most one line (`docs/kernel/tty/api.md`);
   a pipe returns what is buffered or 0 when every write end is gone.
 - **sleep_ns**: bounded to 3600 s to catch garbage arguments; the wait
@@ -193,8 +208,10 @@ Details per call:
   page-aligned `hint` at or above 4 MiB is the first-fit search start,
   falling back to `0x0000100000000000`; the result keeps one unmapped
   page between regions. With `COSMO_MAP_FIXED`, `hint` must be page
-  aligned and inside the window, and an overlap is `EEXIST` (no silent
-  replacement). Pages are demand-zero. A file mapping with
+  aligned and inside the window, and the new mapping replaces what is
+  there (POSIX); `COSMO_MAP_FIXED | COSMO_MAP_FIXED_NOREPLACE` keeps the
+  older rule, `EEXIST` on an overlap with nothing changed, and
+  `NOREPLACE` without `FIXED` is `EINVAL`. Pages are demand-zero. A file mapping with
   `COSMO_MAP_FIXED` goes through the same replacement (M40 holds for it).
 - **msync**: a page-aligned range inside the window whose every page is
   mapped (`ENOMEM` otherwise, checked before anything is written).
@@ -341,7 +358,9 @@ Details per call:
   `SIGURG` 23, `SIGWINCH` 28, `SIGCONT` 18, the stop signals) is
   discarded. *Since the signals unit a native process can install a
   handler, and a signal with one runs it; the sentence below describes
-  what happens when it has not.* The caller must have the target's uid or uid 0. A zombie is a
+  what happens when it has not.* The caller's real or effective uid
+must match the target's real or saved uid, or the caller must hold
+`PRIV_PROC` (`cred_may_signal`, `kernel/process/cred.c`). A zombie is a
   valid target (nothing happens). A user-mode CPU exception now ends the
   process with `128 + its own signal` (`SIGILL` 132, `SIGFPE` 136,
   `SIGTRAP` 133, `SIGSEGV` 139), not 139 for all.
@@ -416,7 +435,10 @@ Details per call:
 ### Constants
 
 `COSMO_PROT_NONE/READ/WRITE/EXEC` (0, 1, 2, 4); `COSMO_MAP_ANONYMOUS`
-(1), `COSMO_MAP_FIXED` (2); `COSMO_RLIMIT_AS/MEM/NOFILE/NPROC/VMEM`
+(1), `COSMO_MAP_FIXED` (2), `COSMO_MAP_FIXED_NOREPLACE` (4),
+`COSMO_MAP_SHARED` (8), `COSMO_MAP_PRIVATE` (16);
+`COSMO_SYSCALL_MASK_WORDS` (8); `COSMO_PRIV_MOUNT/SYS_ADMIN/NET/PROC/
+CRED/DEVICE` (bits 0–5); `COSMO_RLIMIT_AS/MEM/NOFILE/NPROC/VMEM`
 (0–4), `COSMO_RLIM_INFINITY`; `COSMO_SPAWN_SETCRED` (1) with the
 `uid`/`gid` fields of `struct cosmo_spawn`; `COSMO_E*` error numbers equal to the
 kernel's `errno.h` values (`EBADF` 9, `EFAULT` 14, `EEXIST` 17,
@@ -497,21 +519,30 @@ raw wrappers are internal to it (and to `init --selftest`).
   interrupts enabled, `irq_depth == 0`, `preempt_count == 0` (asserted).
   Panics if the current thread has no process. Increments the global
   and per-process call counters; unknown numbers also bump
-  `syscall_unknown_count` and log at DEBUG. Calls `process_check_kill`
-  before and after the handler: a process with a pending kill exits
-  here instead of returning to user mode.
+  `syscall_unknown_count`, log at DEBUG and return `-ENOSYS`. A known
+  number outside the process's filter (`syscall_allowed`) kills the
+  process with `SIGSYS`. Otherwise records the number and first
+  argument in the thread (`syscall_nr`, `syscall_arg0`, for restarts),
+  calls `process_check_kill` (a process with a pending kill exits here),
+  runs the handler, and, when `signal_pending()`, stores the result in
+  the frame and calls `signal_deliver(frame, true)`, which may build a
+  handler frame, restart an interrupted call, or end the process.
 - Blocking: whatever the handler does.
 
 ### `struct syscall_args { uint64_t nr; uint64_t a[6]; void *frame; }`
 Built on the dispatcher's stack; lives for one call.
 
-### `struct personality { const char *name; const syscall_fn *table; size_t count; }`
+### `struct personality { const char *name; const syscall_fn *table; unsigned count; const uint16_t *always_allowed; unsigned nr_always_allowed; ... }`
+Declared in `kernel/include/kernel/process.h`, with optional signal,
+lifecycle and initial-stack hooks after these fields.
 A handler is `int64_t (*)(struct syscall_args *)`. `personality_native`
 (`kernel/syscall/native.c`) has `count == SYS_COUNT`; NULL entries are
 `-ENOSYS`. `personality_linux` (`compat/linux/syscalls.c`, Phase 11)
 has `count == 512` and no NULL entry (unimplemented numbers are a
 counting `-ENOSYS` handler); `docs/compat/linux/api.md`. A process's
-`pers` is set at creation (by the CosmoOS ELF note) and never changes.
+`pers` is set at creation (by the CosmoOS ELF note,
+`personality_for_elf` in `kernel/syscall/personality.c`); since roadmap
+M3 `exec` may run the new image under another personality.
 
 ### `int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len)`, `int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len)`, `int syscall_handle_stat(int h, struct cosmo_stat *st)`
 The bodies of the native `read`, `write` and `fstat` (handle lookup
@@ -537,17 +568,42 @@ Relaxed atomic reads; interrupt-safe; for diagnostics and tests.
 `x86_syscall_entry`: `swapgs`; save the user `rsp` at `%gs:16`; load
 the kernel stack from `%gs:8`; push `ss`, user `rsp`, `r11` (rflags),
 `cs`, `rcx` (rip), `rax`, then `rdi rsi rdx r10 r8 r9`, then the
-callee-saved `rbx rbp r12–r15`; `sti`; `call x86_syscall_c`; `cli`; pop
-everything; `swapgs`; `sysretq`. The push order defines
-`struct x86_syscall_frame` (`x86/trapframe.h`, 18 words):
+callee-saved `rbx rbp r12–r15`, then `r11`, `rcx` and a zero `flags`
+word; `cld`; `sti`; `call x86_syscall_c`; `cli`. If `flags` has
+`X86_SYSCALL_FULL_RESTORE` every register is popped and the exit is
+`swapgs; iretq`; otherwise the result and the preserved registers are
+popped and the exit is `swapgs; sysretq`. The push order defines
+`struct x86_syscall_frame` (`x86/trapframe.h`, 21 words,
+`_Static_assert`ed):
 
 | Offset | Field |
 |---|---|
-| 0–40 | `r15 r14 r13 r12 rbp rbx` |
-| 48–88 | `r9 r8 r10 rdx rsi rdi` (arguments 6..1) |
-| 96 | `rax` (number in, result out) |
-| 104–136 | `rip cs rflags rsp ss` |
+| 0 | `flags` (`X86_SYSCALL_FULL_RESTORE` = 1) |
+| 8–16 | `rcx r11` (restored on the `iretq` path only) |
+| 24–64 | `r15 r14 r13 r12 rbp rbx` |
+| 72–112 | `r9 r8 r10 rdx rsi rdi` (arguments 6..1) |
+| 120 | `rax` (number in, result out) |
+| 128–160 | `rip cs rflags rsp ss` |
 
 `x86_syscall_c(frame)` calls `syscall_dispatch(frame->rax, {rdi, rsi,
-rdx, r10, r8, r9}, frame)` and stores the result in `frame->rax`.
+rdx, r10, r8, r9}, frame)`, stores the result in `frame->rax`, and calls
+`x86_syscall_return_check`, which sets `X86_SYSCALL_FULL_RESTORE` when
+`rip` is not canonical or `rflags` has a bit outside the user mask
+(`docs/kernel/process/invariants.md` P-S1).
 Per-CPU setup is `arch_syscall_init_cpu` (`docs/kernel/process/api.md`).
+
+## AArch64 entry (`kernel/arch/aarch64/vectors.S`, `trap.c`)
+
+**ABI stability: internal.**
+
+There is no separate system-call entry. `SVC #0` from EL0 is a
+synchronous exception taken at the `el0_sync` vector, which saves a
+`struct arch_trap_frame` (`aarch64/trapframe.h`, `0x130` bytes:
+`x0`–`x30`, `SP_EL0`, `ELR`, `SPSR`, `ESR`, `FAR`, `vector`, `kind`) on
+the kernel stack and calls `aarch64_trap_entry`. `handle_sync` sees
+`ESR_EC_SVC64` (an SVC from EL1 panics) and calls `handle_syscall`, which
+copies `x0`–`x5`, enables interrupts, calls
+`syscall_dispatch(frame->x[8], args, frame)`, stores the result in
+`frame->x[0]` and disables interrupts; `return_to_user_check` then runs
+`process_return_to_user` before the vector restores the frame and
+returns with `eret`.

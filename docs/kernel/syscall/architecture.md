@@ -20,6 +20,11 @@ maps a number to a function through the calling process's personality.
                                   │ handles, uaccess, process, vmm, sched
 ```
 
+On AArch64 the entry is `SVC #0`, taken by the `el0_sync` vector
+(`kernel/arch/aarch64/vectors.S`) and routed by `handle_sync` in
+`kernel/arch/aarch64/trap.c` to `handle_syscall`, which calls the same
+`syscall_dispatch`.
+
 Invariant 7 (Linux compatibility must not contaminate the native ABI)
 is met structurally: a personality is a table plus conventions; the
 native functions never see Linux numbers, and the Linux table (Phase
@@ -41,23 +46,36 @@ native arguments.
 - The native table (`uapi/cosmo/syscall.h`); numbers are stable from
   the first release of this document.
 - User memory access only through `uaccess.h`: range check against
-  `[USER_LO, USER_HI)`, mapping check against the process's regions with
-  the required protection, then a copy inside an SMAP window.
+  `[USER_LO, USER_HI)`, then a copy inside a user-access window (SMAP
+  on x86-64, PAN on AArch64) by `arch_copy_user_raw`, whose faulting
+  instructions carry exception fixups; there is no walk of the region
+  list (`docs/kernel/memory/design.md` §6.1).
+- The syscall filter: a known number outside the process's mask kills
+  it with `SIGSYS` (`syscall_allowed`, `docs/kernel/security/design.md`
+  §1f).
+- Signal delivery and restart on the system-call frame after the
+  handler returns (`signal_deliver(frame, true)`).
 - Errno convention: negative values in the return register; user
   wrappers negate into `errno` if they wish.
 
 ## Non-responsibilities
 
-- Signal handlers, restartable calls, `SA_RESTART` semantics (a kill is
-  delivered at the boundary as process termination, `docs/kernel/process/`).
+- The signal core itself: queues, actions, handler frames and the
+  restart rule live in `kernel/process/signal.c` and the personalities'
+  frame builders (`docs/kernel/process/design.md` §11); the dispatcher
+  only calls `signal_deliver`.
 - vDSO/fast paths.
-- Compatibility numbering of any other operating system.
-- Audit and seccomp-style filtering (the dispatcher has the hook point).
+- Compatibility numbering of any other operating system (the Linux
+  numbering is the Linux personality's, `compat/linux/`).
+- Audit logging and argument-level (seccomp-BPF-style) filtering; the
+  filter decides by number only.
 
 ## Data structures
 
 ```c
-struct syscall_frame {       /* pushed by syscall_entry.S, x86-64 */
+struct x86_syscall_frame {   /* pushed by syscall_entry.S, x86-64 (x86/trapframe.h) */
+    uint64_t flags;                          /* X86_SYSCALL_FULL_RESTORE: return by IRETQ */
+    uint64_t rcx, r11;                       /* restored on the IRETQ path */
     uint64_t r15, r14, r13, r12, rbp, rbx;   /* callee-saved, for diagnostics */
     uint64_t r9, r8, r10, rdx, rsi, rdi;     /* arguments 6..1 */
     uint64_t rax;                            /* number in, result out */
@@ -66,8 +84,13 @@ struct syscall_frame {       /* pushed by syscall_entry.S, x86-64 */
 
 struct syscall_args { uint64_t nr; uint64_t a[6]; void *frame; };
 typedef int64_t (*syscall_fn)(struct syscall_args *a);
-struct personality { const char *name; const syscall_fn *table; unsigned count; };
+struct personality { const char *name; const syscall_fn *table; unsigned count;
+                     const uint16_t *always_allowed; unsigned nr_always_allowed;
+                     /* signal, lifecycle and auxv hooks: kernel/process.h */ };
 ```
+
+AArch64 uses its ordinary `struct arch_trap_frame` as the system-call
+frame. `docs/kernel/syscall/design.md` describes the rest.
 
 ## Concurrency
 
@@ -79,9 +102,11 @@ is dropped before returning to user mode.
 ## Error handling
 
 Every argument is validated before use; the first failing check
-determines the errno. A pointer that passes validation but faults is a
-kernel bug (panic) except for demand-zero faults on the process's own
-anonymous regions, which the fault handler services.
+determines the errno. A pointer inside the user window that faults
+during a copy (unmapped, `PROT_NONE`, wrong permission, or a demand
+fault that finds no memory) makes the copy return `-EFAULT` through the
+exception fixup; demand-zero faults on the process's own regions are
+serviced during the copy (`docs/kernel/memory/invariants.md` M32).
 
 ## Security
 
@@ -100,9 +125,9 @@ result; the kernel self-test runs it and requires status 0. See
 
 ## Future
 
-Per-thread syscall accounting, tracing hooks, `copy_from_user` with
-fault recovery (exception tables) so validation can be relaxed for
-performance. The Linux personality table arrived in Phase 11
+Per-thread syscall accounting and tracing hooks. (Fault recovery by
+exception tables, once listed here, exists since audit milestone 5,
+`docs/kernel/memory/design.md` §6.1.) The Linux personality table arrived in Phase 11
 (`docs/compat/linux/`); the virtualization calls in Phase 12
 (`docs/kernel-services/virtualization/`).
 
@@ -115,7 +140,8 @@ to `kernel-services/vfs/` entry points: paths are copied with
 `strncpy_from_user` (1024 bytes), handles resolve to `struct file`
 through `file_from_kobject`, results are copied out. `struct file` is a
 `kobject_io_type`, so the dispatcher's `read`/`write`/`close` need no
-knowledge of files. `mount`/`umount` check `cred.uid == 0`. See
+knowledge of files. `mount`/`umount` require `PRIV_MOUNT`
+(`cred_has`, since roadmap M5; `cred.uid == 0` before it). See
 `docs/kernel-services/vfs/api.md`.
 
 ## The bounce
@@ -156,7 +182,9 @@ before anything else runs; `sys_fstat` accepts every I/O object with a
 pipe, `write` on a full pipe, `wait`, `sleep_ns`, the socket waits) use
 `wait_event_killable` and return `-EINTR` when the process is killed,
 after which the dispatcher's `process_check_kill` ends the process.
-`SYS_COUNT` was 58 at the end of audit milestone 6 and is 97 as of the file-regions unit (`SYS_msync` 96) — the
+`SYS_COUNT` was 58 at the end of audit milestone 6, 97 as of the
+file-regions unit (`SYS_msync` 96), and is 105 as of roadmap M5
+(`SYS_sysctl_set` 104) — the
 header is the authority and `docs/kernel/syscall/api.md` lists every
 number; what follows is how it grew: Phase 12 added the seven virtualization calls 43–49,
 the Prompt #3 fix pass the six credential calls 50–55, audit milestone 6
