@@ -252,7 +252,16 @@ static void decode_bars(struct pci_device *p)
                 m |= 0xffffffff00000000ULL;
             }
             b->base = base;
-            b->size = ~m + 1;
+            /* The size is the mask's lowest set bit: the address bits the
+             * device decodes are writable, the ones below its size read
+             * zero. Not ~m + 1, which assumed every bit above the size is
+             * writable: a 64-bit BAR may hard-wire its upper half to zero
+             * (the device decodes below 4 GiB only), and ~m + 1 then gave
+             * Parallels' NVMe controller a 16 KiB BAR of about 16 EiB,
+             * which nothing could map (docs/audit/2026-10-13-acpi-discovery-
+             * report.md). For every BAR whose upper bits are writable --
+             * every one QEMU offers -- the two agree. */
+            b->size = m & ~(m - 1);
         }
         if (b->size)
             device_add_resource(&p->dev, b->io ? RES_IO : RES_MMIO, b->base, b->size, i);

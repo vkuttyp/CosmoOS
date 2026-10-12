@@ -9,6 +9,7 @@ LOADER_EFI_NOVERIFY := $(OUT)/boot/noverify/$(LOADER_EFI_NAME)
 
 LOADER_SRCS := \
 	boot/uefi/main.c \
+	boot/uefi/acpi.c \
 	boot/uefi/console.c \
 	boot/uefi/string.c \
 	boot/uefi/memory.c \

@@ -56,11 +56,21 @@ extern uint64_t aarch64_hhdm_base;
 void aarch64_timer_init_cpu(void);
 void aarch64_timer_ack(unsigned intid);   /* gic.c: before dispatching a PPI */
 unsigned aarch64_timer_virt_intid(void);  /* the virtual timer's PPI: a guest's, and the hypervisor's to bind */
+void aarch64_timer_read_gtdt(void);   /* the timer interrupts from the GTDT (after acpi_init) */
+void aarch64_timer_intids(unsigned *phys, unsigned *virt);
 
-/* --- pl011.c --- */
+/* --- pl011.c: the serial console the boot info names --- */
+struct cosmoboot_info;
+extern const struct cosmoboot_info *aarch64_boot_info;   /* start.c sets it before the console */
 void pl011_early_putc(char c);
+/* The serial console in use: its base, interrupt (0: polled) and kind;
+ * false when there is none. */
+bool aarch64_console_serial(paddr_t *base, unsigned *intid, const char **kind);
 
-/* --- QEMU virt defaults, used only when the ACPI tables lack the device --- */
+/* --- QEMU virt defaults: used only when the firmware is QEMU's
+ * (acpi_platform_is_qemu) and its tables lack the device; anywhere else a
+ * missing description is an error (docs/kernel/arch/aarch64/design.md,
+ * "Platform discovery") --- */
 #define VIRT_GICD_BASE     0x08000000ull
 #define VIRT_GICC_BASE     0x08010000ull
 #define VIRT_GICV2M_BASE   0x08020000ull
@@ -71,6 +81,12 @@ void pl011_early_putc(char c);
 /* The SMMUv3 (0x09050000, INTIDs 106-109) is described in drivers/iommu/arm_smmuv3.c, which has no arch include path. */
 #define VIRT_TIMER_EL1_PHYS_INTID 30u
 #define VIRT_TIMER_EL1_VIRT_INTID 27u
+
+/* --- smp.c: the PSCI conduit from the FADT; 1 HVC, 0 SMC, -1 none --- */
+int aarch64_psci_conduit(void);
+
+/* --- platform.c: the boot-time platform line (after acpi_init) --- */
+void aarch64_platform_report(void);
 
 /* --- PSCI (SMC calling convention, 32-bit function ids) --- */
 #define PSCI_FN_VERSION        0x84000000u

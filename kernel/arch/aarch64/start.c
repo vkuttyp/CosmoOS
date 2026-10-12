@@ -17,6 +17,7 @@ void aarch64_start(const void *info_ptr)
 {
     const struct cosmoboot_info *info = info_ptr;
     aarch64_hhdm_base = info->hhdm_base;
+    aarch64_boot_info = info;   /* the console record (boot protocol v9) */
     arch_console_early_init();
     percpu_init_boot();
     aarch64_cpu_init();

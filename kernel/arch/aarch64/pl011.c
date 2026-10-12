@@ -1,11 +1,19 @@
 /*
- * pl011.c - The PL011 UART: early console, console sink, receive interrupt
- * into the tty (docs/kernel/arch/aarch64/design.md, "Console").
+ * pl011.c - The serial console: early output, console sink, receive into
+ * the tty (docs/kernel/arch/aarch64/design.md, "Console").
  *
- * Before ACPI is parsed the `virt` default address is used through the
- * direct map (the loader maps non-RAM ranges as device memory there);
- * arch_console_input_init consults the SPCR table for the base and the
- * interrupt, warning when they differ from the defaults.
+ * The port is the one the loader found in the firmware's ACPI tables
+ * (boot protocol v9: the SPCR, else the DBG2) and recorded in the boot
+ * info: a PL011/SBSA UART or a memory-mapped 16550, reached through the
+ * loader's direct map, where every non-RAM range has device attributes;
+ * map_early_devices carries that page into the kernel's own tables. With
+ * no record there is no serial console, and kernel_main brings the
+ * framebuffer console up instead. No address is assumed: QEMU virt's
+ * 0x09000000, which this file wrote to before reading anything until
+ * v1.0.1, is a store into whatever another machine has there.
+ *
+ * Input: on the recorded interrupt, or, when the firmware names none (a
+ * DBG2 port has no interrupt), polled every POLL_NS from a kernel timer.
  */
 
 #include <kernel/acpi.h>
@@ -15,10 +23,13 @@
 #include <kernel/log.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 #include <kernel/tty.h>
 #include <kernel/vmm.h>
 #include <arch/console.h>
 #include <aarch64/platform.h>
+
+#include <cosmoboot.h>
 
 extern uint64_t aarch64_hhdm_base;
 
@@ -45,21 +56,58 @@ extern uint64_t aarch64_hhdm_base;
 #define IMSC_RXIM (1u << 4)
 #define IMSC_RTIM (1u << 6)
 
-static volatile uint32_t *g_regs;
-static bool g_rx_ready;   /* the receive interrupt is requested and enabled */
-static paddr_t g_base = VIRT_PL011_BASE;
-static unsigned g_intid = VIRT_PL011_INTID;
+/* 16550: register index, scaled by g_stride bytes. */
+#define U_RBR 0   /* read */
+#define U_THR 0   /* write */
+#define U_IER 1
+#define U_FCR 2
+#define U_LCR 3
+#define U_LSR 5
+#define LSR_DR   (1u << 0)
+#define LSR_THRE (1u << 5)
+#define IER_RDI  (1u << 0)
+
+#define POLL_NS 10000000ull   /* 10 ms: typing speed, not a throughput */
+
+static uint32_t g_type = COSMOBOOT_CONSOLE_NONE;
+static uintptr_t g_va;            /* register block, virtual */
+static paddr_t g_base;            /* register block, physical */
+static unsigned g_stride = 1;     /* 16550 register spacing in bytes */
+static unsigned g_intid;          /* 0: none named, input is polled */
+static volatile uint32_t *g_regs; /* PL011 registers (g_va) */
+static bool g_rx_ready;           /* receive interrupt requested and enabled, or polling */
+static bool g_polled;
+static struct timer g_poll;
 
 static inline uint32_t rd(unsigned off) { return g_regs[off / 4]; }
 static inline void wr(unsigned off, uint32_t v) { g_regs[off / 4] = v; }
 
+static inline uint32_t u_rd(unsigned reg)
+{
+    if (g_stride == 4)
+        return *(volatile uint32_t *)(g_va + reg * 4);
+    return *(volatile uint8_t *)(g_va + reg * g_stride);
+}
+
+static inline void u_wr(unsigned reg, uint32_t v)
+{
+    if (g_stride == 4)
+        *(volatile uint32_t *)(g_va + reg * 4) = v;
+    else
+        *(volatile uint8_t *)(g_va + reg * g_stride) = (uint8_t)v;
+}
+
 void pl011_early_putc(char c)
 {
-    if (g_regs == NULL)
-        return;
-    while (rd(UART_FR) & FR_TXFF)
-        ;
-    wr(UART_DR, (uint32_t)(uint8_t)c);
+    if (g_type == COSMOBOOT_CONSOLE_PL011) {
+        while (rd(UART_FR) & FR_TXFF)
+            ;
+        wr(UART_DR, (uint32_t)(uint8_t)c);
+    } else if (g_type == COSMOBOOT_CONSOLE_16550_MMIO) {
+        while ((u_rd(U_LSR) & LSR_THRE) == 0)
+            ;
+        u_wr(U_THR, (uint8_t)c);
+    }
 }
 
 static void pl011_write(const char *s, size_t len)
@@ -78,53 +126,84 @@ static void sink_write(struct console_sink *sink, const char *s, size_t len)
 }
 
 static struct console_sink g_sink = {
-    .name = "pl011",
+    .name = "serial",
     .write = sink_write,
 };
 
+/* Set by aarch64_start before arch_console_early_init: the boot info as
+ * the loader passed it, not yet validated by bootinfo_init. */
+const struct cosmoboot_info *aarch64_boot_info;
+
+/* "serial=none" on the command line (docs/boot/design.md, "The command
+ * line"): no serial console even when the firmware names one, so the boot
+ * is on the framebuffer alone -- the path a machine without a serial port
+ * takes, made reachable on QEMU, whose SPCR is always there (make
+ * test-platforms). Read here, before bootinfo_init has copied and checked
+ * the line, so with the same bounds: inside the direct map, at most
+ * COSMOBOOT_CMDLINE_MAX bytes, byte reads. */
+static bool cmdline_says_no_serial(const struct cosmoboot_info *info)
+{
+    static const char key[] = "serial=none";
+    const size_t klen = sizeof(key) - 1;
+    if (info->cmdline_phys == 0 || info->cmdline_size == 0 || info->cmdline_size > COSMOBOOT_CMDLINE_MAX ||
+        info->cmdline_phys + info->cmdline_size > info->hhdm_size)
+        return false;
+    const volatile char *t = (const volatile char *)(uintptr_t)(aarch64_hhdm_base + info->cmdline_phys);
+    size_t n = info->cmdline_size;
+    for (size_t i = 0; i + klen <= n; i++) {
+        if (i > 0 && t[i - 1] != ' ' && t[i - 1] != '\t' && t[i - 1] != '\n')
+            continue;
+        size_t j = 0;
+        while (j < klen && t[i + j] == key[j])
+            j++;
+        if (j == klen && (i + klen == n || t[i + klen] == ' ' || t[i + klen] == '\t' || t[i + klen] == '\n'))
+            return true;
+    }
+    return false;
+}
+
 void arch_console_early_init(void)
 {
-    g_regs = (volatile uint32_t *)(uintptr_t)(aarch64_hhdm_base + g_base);
-    /* The firmware left the UART configured; make the state explicit. */
-    wr(UART_IMSC, 0);
-    wr(UART_ICR, 0x7FF);
-    wr(UART_LCR_H, LCR_WLEN8 | LCR_FEN);
-    wr(UART_CR, CR_UARTEN | CR_TXE | CR_RXE);
+    const struct cosmoboot_info *info = aarch64_boot_info;
+    /* A loader of another protocol version has no console record (or a
+     * different one): no serial console, and bootinfo_init then refuses
+     * the mismatch on the screen. */
+    if (info == NULL || info->version != COSMOBOOT_VERSION || info->size < sizeof(*info))
+        return;
+    if (info->console_type != COSMOBOOT_CONSOLE_PL011 && info->console_type != COSMOBOOT_CONSOLE_16550_MMIO)
+        return;
+    if (cmdline_says_no_serial(info))
+        return;
+    if (info->console_base == 0 || info->console_base >= info->hhdm_size)
+        return;
+    g_base = (paddr_t)info->console_base;
+    g_va = (uintptr_t)(aarch64_hhdm_base + g_base);
+    g_intid = info->console_gsiv < GIC_INTID_COUNT ? info->console_gsiv : 0;
+    g_type = info->console_type;
+    if (g_type == COSMOBOOT_CONSOLE_PL011) {
+        g_regs = (volatile uint32_t *)g_va;
+        /* The firmware left the UART configured; make the state explicit. */
+        wr(UART_IMSC, 0);
+        wr(UART_ICR, 0x7FF);
+        wr(UART_LCR_H, LCR_WLEN8 | LCR_FEN);
+        wr(UART_CR, CR_UARTEN | CR_TXE | CR_RXE);
+    } else {
+        g_stride = info->console_access == 4 ? 4 : 1;
+        u_wr(U_IER, 0);
+        u_wr(U_FCR, 0x07);   /* FIFOs on and cleared */
+        u_wr(U_LCR, 0x03);   /* 8N1; the firmware's baud rate stays */
+    }
     console_register(&g_sink);
 }
 
-/* SPCR: interface type at 36, base address GAS at 40 (address at 44), GSIV at 54. */
-static void read_spcr(void)
+bool aarch64_console_serial(paddr_t *base, unsigned *intid, const char **kind)
 {
-    const struct acpi_sdt_header *spcr = acpi_find_table("SPCR");
-    if (spcr == NULL || spcr->length < 60) {
-        kwarn("pl011: no SPCR table; using the virt defaults (0x%llx, INTID %u)", (unsigned long long)g_base,
-              g_intid);
-        return;
-    }
-    const uint8_t *b = (const uint8_t *)spcr;
-    uint8_t type = b[36];
-    uint64_t addr;
-    uint32_t gsiv;
-    memcpy(&addr, b + 44, 8);
-    memcpy(&gsiv, b + 54, 4);
-    if (type != 3 && type != 0x0E) {   /* PL011 (3) or ARM SBSA generic UART (0x0E) */
-        kwarn("pl011: SPCR describes interface type %u, not a PL011; keeping the defaults", type);
-        return;
-    }
-    if (addr != 0 && addr != g_base) {
-        vaddr_t va = vm_map_phys(addr, 0x1000, VM_PROT_RW, VM_CACHE_UC);
-        if (va == 0) {
-            kwarn("pl011: cannot map SPCR base 0x%llx; keeping 0x%llx", (unsigned long long)addr,
-                  (unsigned long long)g_base);
-        } else {
-            g_base = addr;
-            g_regs = (volatile uint32_t *)va;
-            kinfo("pl011: SPCR moves the console to 0x%llx", (unsigned long long)addr);
-        }
-    }
-    if (gsiv != 0 && gsiv < GIC_INTID_COUNT)
-        g_intid = gsiv;
+    if (g_type == COSMOBOOT_CONSOLE_NONE)
+        return false;
+    *base = g_base;
+    *intid = g_intid;
+    *kind = g_type == COSMOBOOT_CONSOLE_PL011 ? "PL011" : "16550";
+    return true;
 }
 
 /*
@@ -143,6 +222,16 @@ static void read_spcr(void)
  */
 static void rx_service(struct tty *t, void (*after_drain)(void))
 {
+    if (g_type == COSMOBOOT_CONSOLE_16550_MMIO) {
+        while (u_rd(U_LSR) & LSR_DR) {
+            uint8_t c = (uint8_t)u_rd(U_RBR);
+            if (t != NULL)
+                tty_input(t, &c, 1);
+        }
+        if (after_drain != NULL)
+            after_drain();
+        return;
+    }
     wr(UART_ICR, IMSC_RXIM | IMSC_RTIM);
     while ((rd(UART_FR) & FR_RXFE) == 0) {
         uint8_t c = (uint8_t)rd(UART_DR);
@@ -160,24 +249,46 @@ static void rx_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
     rx_service(arg, NULL);
 }
 
+/* No interrupt named: the receive FIFO is read every POLL_NS. A timer
+ * callback runs where an interrupt handler would, so rx_service sees the
+ * same context either way. */
+static void rx_poll(struct timer *t, void *arg)
+{
+    rx_service(arg, NULL);
+    timer_start(t, POLL_NS);
+}
+
 void arch_console_input_init(void)
 {
-    read_spcr();
-    int rc = irq_request(g_intid, rx_irq, tty_console(), "pl011-rx", IRQ_TRIGGER_LEVEL, 0);
-    if (rc) {
-        kwarn("pl011: cannot request INTID %u for receive (%d); console input disabled", g_intid, rc);
-        return;
+    if (g_type == COSMOBOOT_CONSOLE_NONE)
+        return;   /* no serial console: input, if any, is a keyboard's */
+    if (g_intid != 0) {
+        int rc = irq_request(g_intid, rx_irq, tty_console(), "serial-rx", IRQ_TRIGGER_LEVEL, 0);
+        if (rc == 0) {
+            if (g_type == COSMOBOOT_CONSOLE_PL011) {
+                while ((rd(UART_FR) & FR_RXFE) == 0)
+                    (void)rd(UART_DR);
+                wr(UART_IMSC, IMSC_RXIM | IMSC_RTIM);
+            } else {
+                while (u_rd(U_LSR) & LSR_DR)
+                    (void)u_rd(U_RBR);
+                u_wr(U_IER, IER_RDI);
+            }
+            rc = irq_enable(g_intid);
+        }
+        if (rc == 0) {
+            g_rx_ready = true;
+            kinfo("serial: console input on IRQ %u", g_intid);
+            return;
+        }
+        kwarn("serial: cannot use INTID %u for receive (%d); polling instead", g_intid, rc);
     }
-    while ((rd(UART_FR) & FR_RXFE) == 0)
-        (void)rd(UART_DR);
-    wr(UART_IMSC, IMSC_RXIM | IMSC_RTIM);
-    rc = irq_enable(g_intid);
-    if (rc) {
-        kwarn("pl011: cannot enable INTID %u (%d); console input disabled", g_intid, rc);
-        return;
-    }
+    g_polled = true;
     g_rx_ready = true;
-    kinfo("serial: console input on IRQ %u", g_intid);
+    timer_setup(&g_poll, rx_poll, tty_console());
+    timer_start(&g_poll, POLL_NS);
+    kinfo("serial: console input polled every %llu ms (the firmware names no interrupt)",
+          (unsigned long long)(POLL_NS / 1000000ull));
 }
 
 /* --- console-rx-clear: the race, made to happen ---------------------------
@@ -210,8 +321,8 @@ static void rx_test_send(void)
 
 bool selftest_console_rx_clear(const char **reason)
 {
-    if (!g_rx_ready) {
-        kinfo("selftest: console-rx-clear: no console receive interrupt; skipping");
+    if (!g_rx_ready || g_polled || g_type != COSMOBOOT_CONSOLE_PL011) {
+        kinfo("selftest: console-rx-clear: no PL011 receive interrupt; skipping");
         return true;
     }
     CHECK(irq_disable(g_intid) == 0);

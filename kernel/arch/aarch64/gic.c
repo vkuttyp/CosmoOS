@@ -100,7 +100,10 @@ static void gicv2_init_cpu(void);
 static void gicv2_init(const struct acpi_gic *acpi)
 {
     struct acpi_gic gic = *acpi;
-    g_gicd_pa = gic.gicd_base ? gic.gicd_base : VIRT_GICD_BASE;
+    if ((gic.gicd_base == 0 || gic.gicc_base == 0) && !acpi_platform_is_qemu())
+        panic("gic: the MADT gives no %s base for a GICv2, and this firmware is not QEMU's",
+              gic.gicd_base == 0 ? "GICD" : "GICC");
+    g_gicd_pa = gic.gicd_base ? gic.gicd_base : VIRT_GICD_BASE;   /* QEMU only, checked above */
     g_gicc_pa = gic.gicc_base ? gic.gicc_base : VIRT_GICC_BASE;
     g_gicd = map(g_gicd_pa, 0x10000, "GICD");
     g_gicc = map(g_gicc_pa, 0x2000, "GICC");

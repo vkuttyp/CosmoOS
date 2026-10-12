@@ -35,22 +35,43 @@ static unsigned g_phys_intid = VIRT_TIMER_EL1_PHYS_INTID;
 static unsigned g_virt_intid = VIRT_TIMER_EL1_VIRT_INTID;
 static uint64_t g_next_cval[CONFIG_MAX_CPUS];   /* the tick's next absolute compare value, per CPU */
 
-/* GTDT (ACPI 5.1+): non-secure EL1 timer GSIV at 80, virtual timer GSIV at 88. */
-static void read_gtdt(void)
+/*
+ * GTDT (ACPI 5.0+): after the 36-byte header, CntControlBase (8) and a
+ * reserved word, the secure EL1 timer's GSIV and flags at 48, the
+ * non-secure EL1 timer's at 56, the virtual timer's at 64, the EL2
+ * timer's at 72. Until v1.0.1 this read 80 and 88 -- CntReadBase and the
+ * platform timer count -- which never passed the PPI range check, so
+ * every boot took the virt defaults below and was right only because they
+ * are QEMU's numbers too. The defaults now apply only on QEMU's firmware.
+ */
+void aarch64_timer_read_gtdt(void)
 {
     const struct acpi_sdt_header *gtdt = acpi_find_table("GTDT");
-    if (gtdt == NULL || gtdt->length < 96) {
-        kwarn("timer: no GTDT; using the virt PPIs %u (physical) and %u (virtual)", g_phys_intid, g_virt_intid);
+    uint32_t phys = 0, virt = 0;
+    if (gtdt != NULL && gtdt->length >= 72) {
+        const uint8_t *b = (const uint8_t *)gtdt;
+        memcpy(&phys, b + 56, 4);
+        memcpy(&virt, b + 64, 4);
+    }
+    bool phys_ok = phys >= GIC_PPI_BASE && phys < GIC_SPI_BASE;
+    bool virt_ok = virt >= GIC_PPI_BASE && virt < GIC_SPI_BASE;
+    if (phys_ok && virt_ok) {
+        g_phys_intid = phys;
+        g_virt_intid = virt;
         return;
     }
-    const uint8_t *b = (const uint8_t *)gtdt;
-    uint32_t phys, virt;
-    memcpy(&phys, b + 80, 4);
-    memcpy(&virt, b + 88, 4);
-    if (phys >= GIC_PPI_BASE && phys < GIC_SPI_BASE)
-        g_phys_intid = phys;
-    if (virt >= GIC_PPI_BASE && virt < GIC_SPI_BASE)
-        g_virt_intid = virt;
+    if (!acpi_platform_is_qemu())
+        panic("timer: the GTDT gives no usable timer interrupts (EL1 physical %u, virtual %u%s), and this "
+              "firmware is not QEMU's", phys, virt, gtdt == NULL ? "; no GTDT at all" : "");
+    kwarn("timer: GTDT %s; QEMU firmware: using the virt PPIs %u (physical) and %u (virtual)",
+          gtdt == NULL ? "absent" : "unusable", g_phys_intid, g_virt_intid);
+}
+
+/* The timer interrupts in use, for the platform line. */
+void aarch64_timer_intids(unsigned *phys, unsigned *virt)
+{
+    *phys = g_phys_intid;
+    *virt = g_virt_intid;
 }
 
 void arch_timer_calibrate(void)
@@ -58,7 +79,7 @@ void arch_timer_calibrate(void)
     g_hz = READ_SYSREG(cntfrq_el0);
     if (g_hz < 1000000ull || g_hz > 10000000000ull)
         panic("timer: implausible generic timer frequency %llu Hz", (unsigned long long)g_hz);
-    read_gtdt();
+    aarch64_timer_read_gtdt();
     int v = arch_vector_alloc();
     if (v < 0)
         panic("timer: no vector for the tick");
@@ -214,6 +235,8 @@ bool arch_rtc_read_epoch(uint64_t *seconds)
      * register is read at its known address and validated: a machine
      * without the device reads zero (or faults on nothing: the range is
      * device memory on every virt variant). */
+    if (!acpi_platform_is_qemu())
+        return false;   /* the fixed address is QEMU virt's; elsewhere there is no RTC this kernel finds */
     vaddr_t va = vm_map_phys((paddr_t)VIRT_PL031_BASE, PAGE_SIZE, VM_PROT_RW, VM_CACHE_UC);
     if (va == 0)
         return false;

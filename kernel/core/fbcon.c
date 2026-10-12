@@ -263,8 +263,75 @@ static bool overlaps_usable_ram(uint64_t pa, uint64_t len)
     return false;
 }
 
+/* Fill in the console over an already-mapped framebuffer at `base`, with
+ * `text` (cols * rows cells) as its character buffer. False, with a
+ * warning, when the mode cannot hold one cell. */
+static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, volatile uint8_t *base)
+{
+    c->base = base;
+    c->pitch = fb->pitch;
+    c->bytes_pp = fb->bpp / 8;
+    c->width = fb->width;
+    c->height = fb->height;
+    c->cols = fb->width / FONT_WIDTH;
+    c->rows = fb->height / FONT_HEIGHT;
+    c->cx = c->cy = 0;
+    c->fg = pack(fb, 0xd0, 0xd0, 0xd0);
+    c->bg = pack(fb, 0x00, 0x00, 0x00);
+    c->sink.name = "fbcon";
+    c->sink.write = fbcon_write;
+    if (c->cols == 0 || c->rows == 0) {
+        kwarn("fbcon: %ux%u is smaller than one character cell", c->width, c->height);
+        return false;
+    }
+    return true;
+}
+
+static void fbcon_start(struct fbcon *c)
+{
+    memset(c->text, ' ', (size_t)c->cols * c->rows);
+    c->scroll_rows = c->rows / 8 ? c->rows / 8 : 1;
+    c->ready = true;
+    fbcon_draw_clear_rows(c, 0, c->rows);
+}
+
+/*
+ * The early console (docs/kernel/diagnostics/design.md, "The framebuffer
+ * console"): when the machine has no serial console, kernel_main calls
+ * this before its first line, so a boot that fails is visible on the
+ * screen. It draws through the loader's direct map, which the
+ * architecture carries into its own tables for this range (AArch64:
+ * map_early_devices), with a static character buffer: there is no heap
+ * yet. fbcon_init later keeps it as it is.
+ */
+#define FBCON_EARLY_CELLS (64u * 1024u)
+static char g_early_text[FBCON_EARLY_CELLS];
+
+void fbcon_early_init(void)
+{
+    const struct bootinfo_framebuffer *fb = bootinfo_framebuffer();
+    const struct cosmoboot_info *info = bootinfo_get();
+    if (fb == NULL || fb->phys + fb->size > info->hhdm_size || overlaps_usable_ram(fb->phys, fb->size))
+        return;
+    struct fbcon *c = &g_fbcon;
+    if (!fbcon_setup(c, fb, (volatile uint8_t *)bootinfo_phys_to_virt(fb->phys)))
+        return;
+    if ((size_t)c->cols * c->rows > FBCON_EARLY_CELLS) {
+        c->rows = FBCON_EARLY_CELLS / c->cols;   /* a very large mode: use the top of it */
+        if (c->rows == 0)
+            return;
+    }
+    c->text = g_early_text;
+    fbcon_start(c);
+    console_register(&c->sink);
+    kinfo("fbcon: no serial console: the framebuffer is the console from the first line (%ux%u cells)", c->cols,
+          c->rows);
+}
+
 void fbcon_init(void)
 {
+    if (g_fbcon.ready)
+        return;   /* fbcon_early_init has it, through a mapping that stays */
     const struct bootinfo_framebuffer *fb = bootinfo_framebuffer();
     if (fb == NULL)
         return;
@@ -286,21 +353,7 @@ void fbcon_init(void)
     }
 
     struct fbcon *c = &g_fbcon;
-    c->base = (volatile uint8_t *)(va + (vaddr_t)offset);
-    c->pitch = fb->pitch;
-    c->bytes_pp = fb->bpp / 8;
-    c->width = fb->width;
-    c->height = fb->height;
-    c->cols = fb->width / FONT_WIDTH;
-    c->rows = fb->height / FONT_HEIGHT;
-    c->cx = c->cy = 0;
-    c->fg = pack(fb, 0xd0, 0xd0, 0xd0);
-    c->bg = pack(fb, 0x00, 0x00, 0x00);
-    c->sink.name = "fbcon";
-    c->sink.write = fbcon_write;
-
-    if (c->cols == 0 || c->rows == 0) {
-        kwarn("fbcon: %ux%u is smaller than one character cell", c->width, c->height);
+    if (!fbcon_setup(c, fb, (volatile uint8_t *)(va + (vaddr_t)offset))) {
         vm_unmap_phys(va);
         return;
     }
@@ -313,11 +366,7 @@ void fbcon_init(void)
         vm_unmap_phys(va);
         return;
     }
-    memset(c->text, ' ', (size_t)c->cols * c->rows);
-    c->scroll_rows = c->rows / 8 ? c->rows / 8 : 1;
-
-    c->ready = true;
-    fbcon_draw_clear_rows(c, 0, c->rows);
+    fbcon_start(c);
     replay_log(c);
     console_register(&c->sink);
     kinfo("fbcon: %ux%u cells of %ux%u pixels at %p, scrolling %u rows at a time", c->cols, c->rows,

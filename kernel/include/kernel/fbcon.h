@@ -17,6 +17,11 @@
 #include <stdint.h>
 
 void fbcon_init(void);
+/* The framebuffer as the console from the first line, when there is no
+ * serial console (kernel_main): through the loader's direct map and a
+ * static buffer, no allocation. Needs the architecture to keep that range
+ * mapped in its own tables (AArch64: map_early_devices). */
+void fbcon_early_init(void);
 bool fbcon_present(void);
 
 struct fbcon_stats {

@@ -559,6 +559,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->mem_map_phys = (uint64_t)(uintptr_t)entries;
     info->mem_map_entry_size = sizeof(struct cosmoboot_mem_entry);
     info->acpi_rsdp = find_acpi_rsdp();
+    acpi_scan(info);
+    arch_serial_configure(info);
     info->firmware_system_table = (uint64_t)(uintptr_t)st;
     info->archive_phys = (uint64_t)(uintptr_t)archive;
     info->archive_size = archive_size;
@@ -644,6 +646,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     }
     info->mem_map_entries = n;
 
+    acpi_report();
     lprintf("memory map: %u entries\n", n);
     for (uint32_t i = 0; i < n; i++) {
         lprintf("  0x%016llx - 0x%016llx %s\n",

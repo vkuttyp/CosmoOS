@@ -50,6 +50,14 @@ void console_firmware_gone(void);
 void lputs(const char *s);
 void lprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/* acpi.c: walk the firmware's ACPI tables (info->acpi_rsdp), record the
+ * SPCR serial console in info->console_*, and print what the firmware
+ * offers. Boot services must still be up (the firmware console prints). */
+struct cosmoboot_info;
+void acpi_scan(struct cosmoboot_info *info);
+/* After ExitBootServices: what the MADT, MCFG, GTDT and FADT say. */
+void acpi_report(void);
+
 /* Print a message and stop. Returns to firmware while boot services are
  * available, halts the CPU forever otherwise. */
 void die(const char *what, EFI_STATUS status) __attribute__((noreturn));

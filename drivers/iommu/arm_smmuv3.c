@@ -32,7 +32,6 @@
  * devices write to is the MADT's GIC MSI frame. */
 #define VIRT_SMMU_EVENTQ_INTID 106u            /* only if the IORT leaves the GSIV zero */
 #define VIRT_SMMU_GERROR_INTID 109u
-#define VIRT_GICV2M_BASE       0x08020000ull   /* only if the MADT has no MSI frame */
 #define IORT_NODE_SMMUV3       4u
 
 #define SMMU_IDR0        0x000
@@ -403,8 +402,12 @@ static bool iort_find_smmuv3(struct smmu_desc *out)
             memcpy(&ev, t + off + 44, 4);
             memcpy(&gerr, t + off + 52, 4);
             out->base = (paddr_t)base;
-            out->event_intid = ev ? ev : VIRT_SMMU_EVENTQ_INTID;
-            out->gerror_intid = gerr ? gerr : VIRT_SMMU_GERROR_INTID;
+            /* QEMU's IORT leaves the GSIVs zero; its virt numbers are
+             * assumed there and nowhere else (no interrupt elsewhere:
+             * the driver then polls nothing and reports faults late). */
+            bool qemu = acpi_platform_is_qemu();
+            out->event_intid = ev ? ev : qemu ? VIRT_SMMU_EVENTQ_INTID : 0;
+            out->gerror_intid = gerr ? gerr : qemu ? VIRT_SMMU_GERROR_INTID : 0;
             return base != 0;
         }
         off += len;

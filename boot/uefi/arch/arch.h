@@ -64,8 +64,13 @@ void cpu_halt(void) __attribute__((noreturn));
 void cpu_jump_to_kernel(const struct paging_ctx *pg, uint64_t stack_top, uint64_t info, uint64_t entry)
     __attribute__((noreturn));
 
-/* The early serial console (before and after the firmware console). */
+/* The early serial console (before and after the firmware console).
+ * arch_serial_configure takes the port the firmware's SPCR names
+ * (boot protocol v9; acpi_scan) once it is known: AArch64 writes there
+ * and nowhere else, x86-64 keeps COM1. */
 void arch_serial_init(void);
+struct cosmoboot_info;
+void arch_serial_configure(const struct cosmoboot_info *info);
 bool arch_serial_present(void);
 void arch_serial_putc(char c);
 

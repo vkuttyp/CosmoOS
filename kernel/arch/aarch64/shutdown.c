@@ -10,6 +10,7 @@
  */
 
 #include <arch/shutdown.h>
+#include <kernel/acpi.h>
 #include <kernel/types.h>
 
 #define SEMIHOSTING_SYS_EXIT_EXTENDED 0x20u
@@ -17,6 +18,10 @@
 
 void arch_emulator_exit(unsigned code)
 {
+    /* Semihosting is QEMU's (with -semihosting-config): on anything else
+     * HLT #0xF000 is an undefined instruction, not an exit. */
+    if (!acpi_platform_is_qemu())
+        return;
     static volatile uint64_t block[2];
     block[0] = ADP_STOPPED_APPLICATION_EXIT;
     block[1] = ((uint64_t)code << 1) | 1u;

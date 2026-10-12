@@ -6,6 +6,7 @@
 #   make run          boot the image under QEMU on the terminal (serial)
 #   make test         automated QEMU boot test with PASS/FAIL exit code
 #   make test-gic     AArch64: the same boot test on the GICv3 machine
+#   make test-platforms  AArch64: boots where QEMU differs from virt's defaults; the platform line (CI: BUILD=release)
 #   make test-guard   the same boot test on a CPU model with SMEP/SMAP/UMIP (x86-64) or PAN (AArch64)
 #   make test-smp2    the same boot test with two CPUs (the default is four)
 #   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
@@ -36,7 +37,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -243,6 +244,18 @@ test-smp2:
 # (what GICv3 hardware offers, and QEMU's default for that machine) and a
 # GICv2m frame (the fallback when firmware describes no ITS). A no-op on
 # architectures with no GIC, so CI can call it for every target.
+# Platform discovery (docs/kernel/arch/aarch64/testing.md, "make
+# test-platforms"): the AArch64 image under each QEMU configuration that
+# differs from virt's defaults -- GICv2 and GICv3, highmem off, a CPU with
+# and without RNDR, no serial port -- must reach the shell and print the
+# platform line with what that machine has. A no-op elsewhere.
+test-platforms: $(IMAGE)
+ifeq ($(ARCH),aarch64)
+	$(Q)$(PYTHON) $(ROOT)/tests/boot/platform_test.py --image $(IMAGE) --workdir $(OUT)/test-platforms --key $(MODSIGN_KEY)
+else
+	@echo "test-platforms: AArch64 only; nothing to do on $(ARCH)"
+endif
+
 test-gic:
 ifeq ($(ARCH),aarch64)
 	$(Q)QEMU_GIC=3 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) test

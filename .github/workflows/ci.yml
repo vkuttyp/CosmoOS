@@ -571,6 +571,53 @@ jobs:
           name: release-set-${{ matrix.arch }}
           path: out/release/${{ matrix.arch }}/
 
+  # Platform discovery (docs/kernel/arch/aarch64/testing.md, "make
+  # test-platforms"): the AArch64 kernel takes its console, GIC, timer and
+  # PSCI conduit from the firmware tables, never from QEMU virt's fixed
+  # addresses. The image boots under every configuration QEMU can vary --
+  # GICv2 and GICv3, highmem off, a CPU with and without RNDR, no serial
+  # port -- and must reach the shell with the platform line to match.
+  platforms:
+    name: platform discovery (aarch64)
+    runs-on: ubuntu-24.04
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 30
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk') }}
+
+      - name: Build (release)
+        run: make ARCH=aarch64 BUILD=release image
+
+      - name: Six machines that are not virt's defaults
+        run: make ARCH=aarch64 BUILD=release test-platforms
+
+      - name: Upload the boots' logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-platforms
+          path: out/aarch64-release/test-platforms/*/*.log
+          if-no-files-found: ignore
+
   # Roadmap M6, decision 4: every subsystem directory docs/README.md lists
   # has architecture, design, api, invariants and testing
   # (scripts/check-docs.py). Python on the runner; no container.

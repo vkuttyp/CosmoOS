@@ -312,6 +312,44 @@ static void parse_madt(const struct acpi_madt *madt)
     }
 }
 
+/* Read once, the first time it is asked -- which kernel_main arranges to
+ * be before the kernel's own page tables, whose direct map covers RAM
+ * alone -- and kept: an RSDP outside RAM is not mapped afterwards. */
+static char g_oem[7];
+static int g_oem_state;   /* 0 unread, 1 read, -1 absent */
+
+bool acpi_rsdp_oem(char out[7])
+{
+    if (g_oem_state != 0) {
+        memcpy(out, g_oem, 7);
+        return g_oem_state > 0;
+    }
+    g_oem_state = -1;
+    const struct cosmoboot_info *info = bootinfo_get();
+    out[0] = '\0';
+    if (info == NULL || info->acpi_rsdp == 0)
+        return false;
+    /* Byte reads: before the kernel's own tables the direct map may give
+     * a non-RAM page device attributes, where wider unaligned reads fault. */
+    const volatile uint8_t *p = bootinfo_phys_to_virt(info->acpi_rsdp);
+    static const char sig[] = "RSD PTR ";
+    for (unsigned i = 0; i < 8; i++)
+        if (p[i] != (uint8_t)sig[i])
+            return false;
+    for (unsigned i = 0; i < 6; i++)
+        g_oem[i] = (char)p[9 + i];
+    g_oem[6] = '\0';
+    g_oem_state = 1;
+    memcpy(out, g_oem, 7);
+    return true;
+}
+
+bool acpi_platform_is_qemu(void)
+{
+    char oem[7];
+    return acpi_rsdp_oem(oem) && memcmp(oem, "BOCHS ", 6) == 0;
+}
+
 void acpi_init(void)
 {
     const struct cosmoboot_info *info = bootinfo_get();

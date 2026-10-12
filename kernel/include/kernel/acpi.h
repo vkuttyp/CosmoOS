@@ -99,6 +99,19 @@ size_t  acpi_madt_overrides(const struct acpi_madt_override **out);
 /* false when the MADT carries no GIC distributor entry. */
 bool    acpi_madt_gic(struct acpi_gic *out);
 
+/*
+ * The firmware's OEM id, the six bytes of the RSDP (NUL-terminated, trailing
+ * spaces kept), read through the loader's direct map: usable from
+ * bootinfo_init on, before acpi_init. False when there is no RSDP or its
+ * signature is wrong. acpi_platform_is_qemu: the OEM id is QEMU's,
+ * "BOCHS " (QEMU builds its ACPI tables with that id) -- the one machine
+ * whose fixed device addresses the kernel may assume when a table that
+ * should describe a device is missing (docs/kernel/arch/aarch64/design.md,
+ * "Platform discovery"). Neither sleeps, allocates or takes a lock.
+ */
+bool acpi_rsdp_oem(char out[7]);
+bool acpi_platform_is_qemu(void);
+
 /* Map a physical table range to a kernel virtual pointer: direct map when
  * it is RAM, otherwise a fresh uncached-free WB window. */
 const void *acpi_map(paddr_t pa, size_t len);

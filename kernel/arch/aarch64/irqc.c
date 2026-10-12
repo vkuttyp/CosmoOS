@@ -40,9 +40,17 @@ static void ops_check(const struct aarch64_irqc_ops *o)
 
 void arch_irqc_init(void)
 {
+    aarch64_platform_report();   /* the first line after the tables: what everything below is built from */
     struct acpi_gic gic;
     if (!acpi_madt_gic(&gic)) {
-        kwarn("gic: MADT has no GIC entries; using the virt defaults");
+        /* QEMU virt's addresses are the one layout assumed, and only when
+         * the firmware is QEMU's (docs/kernel/arch/aarch64/design.md,
+         * "Platform discovery"); anywhere else a missing GIC description
+         * is the firmware's error, said as such. */
+        if (!acpi_platform_is_qemu())
+            panic("gic: the MADT describes no GIC distributor, and this firmware is not QEMU's; "
+                  "no interrupt controller to use");
+        kwarn("gic: MADT has no GIC entries; QEMU firmware: using the virt defaults");
         gic = (struct acpi_gic){ 0 };
         gic.gicd_base = VIRT_GICD_BASE;
         gic.gicc_base = VIRT_GICC_BASE;
