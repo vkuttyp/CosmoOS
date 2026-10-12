@@ -24,6 +24,13 @@ directory under `/tmp` that is created in the job and never uploaded.
 
 ## Release signing
 
+The 1.0 release key (roadmap M6): its public half is the one `*.pub`
+here; its seed is the repository secret `COSMOOS_RELEASE_KEY`, which only
+the release workflow reads (`scripts/release-key.sh` writes it to a
+0600 file in the job and checks it against the `.pub`). The release
+notes print the public key and its key id. Rotating it means a new
+`.pub` here, the old one moved to `REVOKED`, and the secret replaced.
+
 `SIGNING=release MODSIGN_KEY=/path/to/release.key KEYRING_PUBS="/path/a.pub /path/b.pub"`
 signs with a key that never touches a shared build host and trusts exactly
 the listed public keys. Nothing is generated. Distribute the public keys
