@@ -4,7 +4,8 @@ Public keys the kernel trusts in addition to the developer key: release
 signing keys, one `*.pub` file each (32-byte Ed25519 public key as 64 hex
 characters). `scripts/gen-keyring.py` compiles every `.pub` here, plus the
 current developer public key, into `out/<arch>-<build>/gen/keyring_builtin.c`.
-There are none yet.
+One today: `release-2026.pub`, the 1.0 release key (key id
+`36ae7bb4947896ab`), below.
 
 **No private key is ever committed here or anywhere in the repository.**
 `scripts/check-secrets.sh` (run by `make check-tools`, so by CI before every
@@ -23,6 +24,13 @@ directory, so the outputs still compare equal. CI uses an ephemeral key
 directory under `/tmp` that is created in the job and never uploaded.
 
 ## Release signing
+
+The 1.0 release key (roadmap M6): its public half is the one `*.pub`
+here; its seed is the repository secret `COSMOOS_RELEASE_KEY`, which only
+the release workflow reads (`scripts/release-key.sh` writes it to a
+0600 file in the job and checks it against the `.pub`). The release
+notes print the public key and its key id. Rotating it means a new
+`.pub` here, the old one moved to `REVOKED`, and the secret replaced.
 
 `SIGNING=release MODSIGN_KEY=/path/to/release.key KEYRING_PUBS="/path/a.pub /path/b.pub"`
 signs with a key that never touches a shared build host and trusts exactly

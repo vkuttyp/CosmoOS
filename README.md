@@ -126,14 +126,14 @@ Pass `ARCH=aarch64` for AArch64 and `BUILD=release` for a release build;
 
 ## Status
 
-**CosmoOS 1.0** is the [1.0 roadmap](docs/roadmap-1.0.md) completed: a
-system that installs to a disk, reboots into it, is used through BusyBox
-`ash`, keeps files across reboots, reaches the network by name, accepts
-an ssh login, and has a verified boot chain and sound randomness, on
-x86-64 and AArch64 under QEMU, all checked by CI. Milestones M1-M5 are
-done; M6, the release (signed images that rebuild bit for bit from their
-tag, the user guide, the completed subsystem docs), is in progress
-([report](docs/audit/2026-10-12-m6-release-report.md)). Start with the
+**CosmoOS 1.0** is the [1.0 roadmap](docs/roadmap-1.0.md) completed: it
+installs to a disk, reboots into it, is used through BusyBox `ash`, keeps
+files across reboots, reaches the network by name, accepts an ssh login,
+and has a verified boot chain and sound randomness, on x86-64 and
+AArch64 under QEMU, all checked by CI. The release images are signed and
+rebuild bit for bit from their tag (`make release`); they are attached
+to the [`v1.0.0` release](https://github.com/vkuttyp/CosmoOS/releases/tag/v1.0.0)
+with their `SHA256SUMS` and the release key. Start with the
 [user guide](docs/guide/README.md); what was built, milestone by
 milestone, is in [`docs/history/`](docs/history/README.md) and the
 milestone reports in [`docs/audit/`](docs/audit/README.md).

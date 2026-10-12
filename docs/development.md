@@ -537,6 +537,41 @@ uploads one `make release`. The release workflow builds each
 architecture twice more, from the tag, in two fresh containers, and
 requires the two `SHA256SUMS` to be equal before it publishes.
 
+**The release workflow** (`.github/workflows/release.yml`) runs on a tag
+`v*`:
+
+1. `image`: the CI images for the tag's `ci/Dockerfile` (as in CI).
+2. `build` (x86-64 and AArch64, copies `a` and `b`, four jobs): the
+   release key from the secret `COSMOOS_RELEASE_KEY` into a 0600 file
+   (`scripts/release-key.sh`, which refuses a key whose public half is
+   not the one `tools/keys/*.pub`), then `make SIGNING=release
+   MODSIGN_KEY=<it> KEYRING_PUBS=tools/keys/<release>.pub release`.
+3. `reproducible`: each architecture's two sets compared file by file
+   (`scripts/compare-release-sets.sh`).
+4. `acceptance` (each architecture × `test-entropy`, `test-install`,
+   `test-busybox`, `test-net-login`, `test-security`, the guide): the job
+   builds again and requires its `SHA256SUMS` to equal the published
+   set's, so the images tested are the bytes published; then runs the
+   test with `BUILD=release`. `guide-macos` runs the guide on macOS
+   against the published set.
+5. `publish`: one `SHA256SUMS` for both architectures, the notes
+   (`scripts/release-notes.py`: the release key and its id, the CI image
+   digests and the compiler and QEMU versions in them, BusyBox, musl,
+   compiler-rt and dropbear with their pinned SHA-256, the
+   reproducibility lines, every file's SHA-256, the guide's known
+   limitations), and `gh release create`; a tag with a hyphen is a
+   pre-release.
+
+A release (a tag without a hyphen) must point at a commit on main (job
+`guard`); a pre-release may be any head. The key itself is a repository
+secret, which any workflow pushed by someone with write access can read;
+moving it to a GitHub environment with required reviewers would close
+that, and is the owner's to set up (inventory 2.9).
+
+The release key's public half is the only `tools/keys/*.pub`
+(`tools/keys/README.md`); developer builds keep their per-machine key
+and trust the release key too.
+
 ## Workflow for a change
 
 Constitution section 66 applies to every subsystem change. In practice:
