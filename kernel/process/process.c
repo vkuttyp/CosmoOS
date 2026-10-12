@@ -262,12 +262,12 @@ static unsigned initial_stack_pages(size_t need)
  * does not fit, -ENOMEM for scratch allocation failure.
  */
 static int build_initial_stack(struct process *p, const struct personality *pers, struct vm_space *space,
-                               const struct elf_info *info, uint64_t stack_top, const char *const argv[],
-                               const char *const envp[], const char *execfn, uint64_t interp_base, unsigned npages,
-                               uint64_t *sp_out)
+                               const struct elf_info *info, uint64_t stack_top, uint64_t sp_offset,
+                               const char *const argv[], const char *const envp[], const char *execfn,
+                               uint64_t interp_base, unsigned npages, uint64_t *sp_out)
 {
     unsigned argc, envc;
-    size_t need = initial_stack_need(pers, argv, envp, execfn, &argc, &envc);
+    size_t need = initial_stack_need(pers, argv, envp, execfn, &argc, &envc) + sp_offset;
     const size_t span = (size_t)npages * PAGE_SIZE;
     if (npages > INITIAL_STACK_PAGES_MAX || need > span)
         return -E2BIG;
@@ -283,8 +283,9 @@ static int build_initial_stack(struct process *p, const struct personality *pers
         pages[i] = phys_to_virt(pa);
     }
 #define AT(va) (pages[((va) - base_va) / PAGE_SIZE] + (((va) - base_va) % PAGE_SIZE))
-    /* Strings grow down from the top; a copy may straddle the page boundary. */
-    uint64_t sp = stack_top;
+    /* Strings grow down from the top, less the random sub-page offset; a
+     * copy may straddle the page boundary. */
+    uint64_t sp = stack_top - sp_offset;
     /* The string addresses and the word area, off the kernel stack: spawn
      * and exec already have several caller frames live. */
     uint64_t *str_addrs = kmalloc(((size_t)argc + envc + 1 + (argc + 1) + (envc + 1) + 40) * sizeof(uint64_t), 0);
@@ -384,8 +385,22 @@ static int image_build(struct process *p, const struct process_image *exe, const
         kwarn("process: '%s' rejected: %s", name, why ? why : "?");
         return rc;
     }
+    /* User-space ASLR (roadmap M5, Linux-style; process.h): one draw per
+     * exec from the pool. random_get_bytes never blocks; before seeding
+     * its output is predictable in principle, which design.md §6 accepts
+     * for layout (a process started that early is init or the boot's own
+     * tests). */
+    uint64_t rnd[3];
+    random_get_bytes(rnd, sizeof(rnd));
+    const uint64_t pie_bias = USER_PIE_BASE + ((rnd[0] & (((uint64_t)1 << ASLR_PIE_BITS) - 1)) << PAGE_SHIFT);
+    const uint64_t mmap_base = USER_MMAP_BASE + ((rnd[1] & (((uint64_t)1 << ASLR_MMAP_BITS) - 1)) << PAGE_SHIFT);
+    const uint64_t stack_top0 = USER_STACK_TOP - ((rnd[2] & (((uint64_t)1 << ASLR_STACK_BITS) - 1)) << PAGE_SHIFT);
+    /* The initial stack pointer: a random 16-byte multiple below the top
+     * within the page (bits 22.. of the stack draw); one more page is
+     * populated for it. */
+    const uint64_t sp_offset = ((rnd[2] >> ASLR_STACK_BITS) & 0xFF) << 4;
     if (info->is_dyn) {
-        elf_rebase(info, USER_PIE_BASE);
+        elf_rebase(info, pie_bias & ~(info->max_align - 1));   /* USER_PIE_BASE is 4 GiB aligned */
         if (info->hi > USER_HI || info->hi < info->lo) {
             kwarn("process: '%s' rejected: PIE does not fit at its base", name);
             return -ENOEXEC;
@@ -410,7 +425,14 @@ static int image_build(struct process *p, const struct process_image *exe, const
      * ELF decides (personality_for_elf: the CosmoOS note is native). */
     ib->pers = personality_for_elf(info, kernel_created);
     unsigned argc, envc;
-    unsigned npages = initial_stack_pages(initial_stack_need(ib->pers, argv, envp, execfn, &argc, &envc));
+    /* One page more than the frame needs whenever it moves down: the
+     * populated stack below the initial frame is then never less than it
+     * was before the offset existed. process-oom's probe assumes its first
+     * frames need no demand fault; with up to 4 KiB of that headroom taken
+     * by the offset, its pipe() took the injected failure (AArch64,
+     * reproduced every boot with the offset forced to 0xFF0). */
+    unsigned npages = initial_stack_pages(initial_stack_need(ib->pers, argv, envp, execfn, &argc, &envc)) +
+                      (sp_offset != 0 ? 1u : 0u);
     if (npages > INITIAL_STACK_PAGES_MAX)
         return -E2BIG;
 
@@ -419,6 +441,7 @@ static int image_build(struct process *p, const struct process_image *exe, const
         return rc;
     struct vm_space *space = ib->space;
     apply_space_limits(space, &p->rlim);
+    space->mmap_base = mmap_base;
     ib->interp_base = 0;
     rc = elf_load_into(space, exe->data, info, exe->vn);
     if (rc) {
@@ -429,13 +452,19 @@ static int image_build(struct process *p, const struct process_image *exe, const
     ib->entry = info->entry;
     if (interp) {
         /* The interpreter: an ET_DYN one at the first free range at or
-         * above USER_INTERP_BASE, an ET_EXEC one where it was linked. */
+         * above the (random) mmap base, as Linux puts it among the
+         * mappings; an ET_EXEC one where it was linked. */
         if (iinfo->is_dyn) {
-            uint64_t base = vm_user_find_free(space, USER_INTERP_BASE, (size_t)(iinfo->hi - iinfo->lo));
+            /* A hole with room to align the start to the interpreter's
+             * largest p_align, then that aligned start. */
+            uint64_t a = iinfo->max_align;
+            uint64_t base = vm_user_find_free(space, (mmap_base + a - 1) & ~(a - 1),
+                                              (size_t)(iinfo->hi - iinfo->lo + a - PAGE_SIZE));
             if (base == 0) {
                 rc = -ENOMEM;
                 goto fail;
             }
+            base = (base + a - 1) & ~(a - 1);
             elf_rebase(iinfo, base);
             ib->interp_base = base;
         }
@@ -449,9 +478,19 @@ static int image_build(struct process *p, const struct process_image *exe, const
             ib->image_end = iinfo->hi;
     }
 
-    /* Stack: lazily populated except the top pages, with a guard below. */
-    rc = vm_user_map_anon(space, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, VM_PROT_RW,
-                          VM_REGION_GUARD_BELOW, "stack");
+    /* Stack: lazily populated except the top pages, with a guard below. An
+     * ET_EXEC image (or interpreter) linked inside the 16 GiB the top is
+     * drawn from takes that place first; the draw is then made again, so
+     * whether such an image runs does not depend on luck (PR #369 review).
+     * Eight draws all meeting it means the image covers the band. */
+    uint64_t stack_top = stack_top0;
+    for (unsigned attempt = 0;; attempt++) {
+        rc = vm_user_map_anon(space, stack_top - USER_STACK_SIZE, USER_STACK_SIZE, VM_PROT_RW,
+                              VM_REGION_GUARD_BELOW, "stack");
+        if (rc != -EEXIST || attempt == 8)
+            break;
+        stack_top = USER_STACK_TOP - ((random_u64() & (((uint64_t)1 << ASLR_STACK_BITS) - 1)) << PAGE_SHIFT);
+    }
     if (rc)
         goto fail;
     for (unsigned i = 1; i <= npages; i++) {
@@ -461,7 +500,7 @@ static int image_build(struct process *p, const struct process_image *exe, const
             rc = -ENOMEM;
             goto fail;
         }
-        rc = arch_mmu_map(&space->mmu, (vaddr_t)(USER_STACK_TOP - i * PAGE_SIZE), page_to_phys(pg), PAGE_SIZE,
+        rc = arch_mmu_map(&space->mmu, (vaddr_t)(stack_top - i * PAGE_SIZE), page_to_phys(pg), PAGE_SIZE,
                           VM_PROT_RW, VM_CACHE_WB, ARCH_MMU_MAP_USER);
         if (rc) {
             pmm_free_page(pg);
@@ -469,10 +508,18 @@ static int image_build(struct process *p, const struct process_image *exe, const
         }
         space->anon_pages++;
     }
-    rc = build_initial_stack(p, ib->pers, space, info, USER_STACK_TOP, argv, envp, execfn, ib->interp_base, npages,
-                             &ib->sp);
+    rc = build_initial_stack(p, ib->pers, space, info, stack_top, sp_offset, argv, envp, execfn, ib->interp_base,
+                             npages, &ib->sp);
     if (rc)
         goto fail;
+#if CONFIG_DEBUG
+    /* W^X over every mapping of the new image (decision 4); the map and
+     * protect paths refuse W+X already, this proves the image has none. */
+    uint64_t bad = 0;
+    if (vm_user_wx_violations(space, &bad) != 0)
+        panic("process: '%s': a writable and executable mapping, or an executable stack, at 0x%llx", name,
+              (unsigned long long)bad);
+#endif
     return 0;
 
 fail:

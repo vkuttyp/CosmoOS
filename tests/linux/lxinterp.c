@@ -1,7 +1,7 @@
 /*
  * lxinterp.c - a program interpreter for lxdyn (docs/compat/linux/testing.md).
  *
- * The kernel loads this ET_DYN image at USER_INTERP_BASE (or above) and
+ * The kernel loads this ET_DYN image at the randomised mmap base (or above; roadmap M5) and
  * starts the process here with the original stack. It checks the
  * auxiliary vector the kernel built (AT_BASE is its own load address,
  * AT_PHDR/AT_PHNUM/AT_ENTRY describe the executable, AT_EXECFN names
@@ -73,8 +73,8 @@ unsigned long interp_main(unsigned long *sp)
     }
     if (base != (unsigned long)__ehdr_start)
         fail("AT_BASE is not the interpreter's load address");
-    if (base < 0x7F0000000000UL)
-        fail("interpreter below USER_INTERP_BASE");
+    if (base < 0x100000000000UL || base >= 0x110000000000UL + (1UL << 32) || (base & 4095) != 0)
+        fail("interpreter outside the mmap range");
     if (phdr == 0 || phnum == 0 || entry == 0 || pagesz != 4096 || random == 0)
         fail("auxv incomplete");
     if (execfn == 0 || !streq((const char *)execfn, "/boot/tests/linux/lxdyn"))
@@ -106,8 +106,8 @@ unsigned long interp_main(unsigned long *sp)
     }
     if (!have_bias)
         fail("cannot find the executable's bias");
-    if (bias != 0x555500000000UL)
-        fail("executable not at USER_PIE_BASE");
+    if (bias < 0x555500000000UL || bias - 0x555500000000UL >= (1UL << 40) || (bias & 4095) != 0)
+        fail("executable outside the PIE range");
     if (entry < bias)
         fail("AT_ENTRY below the executable");
 

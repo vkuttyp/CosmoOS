@@ -42,7 +42,7 @@ small block hung off the process:
 
 ```c
 struct linux_state {                 /* process->linux, allocated by linux_process_init for Linux processes */
-    uint64_t brk_start, brk;         /* heap: page above info.hi; the mapping moves in pages */
+    uint64_t brk_start, brk;         /* heap: a random page above info.hi (M5); the mapping moves in pages */
     uint64_t clear_child_tid;        /* set_tid_address (stored; no threads exit yet) */
     uint64_t sigmask;                /* rt_sigprocmask */
     struct lx_sigaction act[64];     /* rt_sigaction: handler, flags, restorer, mask (32 bytes each) */
@@ -52,7 +52,8 @@ struct linux_state {                 /* process->linux, allocated by linux_proce
 ```
 
 `process` also records `image_end` (`info.hi`) for every process; the
-Linux state's `brk_start` is its page-rounded value.
+Linux state's `brk_start` is its page-rounded value plus a random number
+of pages below 2^13 (roadmap M5, `docs/kernel/process/design.md` §4a).
 
 The initial stack for a Linux process is built by the same
 `build_initial_stack` with a personality flag: the auxiliary vector
@@ -78,8 +79,8 @@ the kernel owns `GS_BASE` through `swapgs`.
 
 ### brk
 
-`brk_start` is the page after the highest loaded segment; `brk` starts
-equal to it. `brk(0)` returns the current value; `brk(addr)` maps
+`brk_start` is a random page among the 2^13 after the highest loaded
+segment (ASLR, roadmap M5); `brk` starts equal to it. `brk(0)` returns the current value; `brk(addr)` maps
 `[page_up(brk), page_up(addr))` anonymous read-write when growing (fails
 with the old value returned, as Linux does, when the range is taken or
 memory runs out; the region is capped at 1 GiB above `brk_start`) and
@@ -422,10 +423,11 @@ gone; nothing else about `clone` or `set_tid_address` changes.
 `elf_validate` accepts `ET_DYN` (`info->is_dyn`; segment addresses are
 relative and the caller chooses the load bias) and records `PT_INTERP`
 (`info->interp`, a path of at most 255 bytes inside the file). `spawn`
-loads a PIE at `USER_PIE_BASE` (`0x555500000000`) and, when the image
+loads a PIE at a random page bias in `[USER_PIE_BASE, + 2^40)`
+(`0x555500000000`; ASLR, roadmap M5) and, when the image
 names an interpreter, reads that file too (through the caller's path
 lookup and `VFS_MAY_EXEC` check, `ET_DYN` or `ET_EXEC`), loads it at the
-first free range at or above `USER_INTERP_BASE` (`0x7F0000000000`) and
+first free range at or above the space's random mmap base and
 starts the process at the interpreter's entry with `AT_BASE` = its bias,
 `AT_ENTRY` = the program's entry, `AT_PHDR`/`AT_PHNUM` = the program's
 table, `AT_EXECFN` = the path and `AT_PLATFORM` = the machine string.

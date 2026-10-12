@@ -492,14 +492,15 @@ static int64_t sys_mmap(struct syscall_args *a)
          * -ENOMEM from the first attempt means "no gap there" and nothing
          * else, so it is the only answer that tries the second.
          */
-        uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
+        const uint64_t mbase = user_mmap_base(p->space);
+        uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : mbase;
         for (;;) {
             rc = f ? vm_user_map_file_free(p->space, from, len, vprot, maxprot, shared ? VM_MAP_SHARED : 0, f->vn,
                                            off, "mmap-file", &base)
                    : vm_user_map_anon_free(p->space, from, len, vprot, 0, "mmap", &base);
-            if (rc != -ENOMEM || from == USER_MMAP_BASE)
+            if (rc != -ENOMEM || from == mbase)
                 break;
-            from = USER_MMAP_BASE;
+            from = mbase;
         }
         goto out;
     }

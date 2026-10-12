@@ -66,10 +66,10 @@ documented in `docs/kernel/syscall/api.md`.
   `struct process_image { const void *data; size_t size; const char
   *path; }`, `path` being what `AT_EXECFN` reports.
   `process_create_from_elf` is this with `interp == NULL`.
-- An `ET_DYN` executable is rebased to `USER_PIE_BASE`
-  (`0x555500000000`); an `ET_DYN` interpreter to the first free range at
-  or above `USER_INTERP_BASE` (`0x7F0000000000`) after the executable is
-  mapped; an `ET_EXEC` interpreter loads where it was linked. With an
+- An `ET_DYN` executable is rebased to a random page in
+  `[USER_PIE_BASE, + 2^40)` (`0x555500000000`; design.md §4a); an `ET_DYN`
+  interpreter to the first free range at or above the space's random
+  mmap base after the executable is mapped; an `ET_EXEC` interpreter loads where it was linked. With an
   interpreter the main thread starts at the interpreter's entry;
   `p->interp_base` (0 without one) and `p->exec_entry` feed `AT_BASE`
   and `AT_ENTRY`. An executable with `PT_INTERP` and no interpreter
@@ -380,8 +380,13 @@ is the wait flag.
 Constants: `USER_LO` = `VM_USER_LO` (4 MiB), `USER_HI` = `VM_USER_HI`,
 `USER_STACK_TOP` = `0x00007FFFFFFF0000`, `USER_STACK_SIZE` = 8 MiB,
 `USER_MMAP_BASE` = `0x0000100000000000`, `USER_PIE_BASE` =
-`0x0000555500000000`, `USER_INTERP_BASE` = `0x00007F0000000000`,
-`PROCESS_MAX_THREADS` = 256.
+`0x0000555500000000`, `USER_INTERP_BASE` = `0x00007F0000000000` (unused
+since M5), `ASLR_STACK_BITS` 22, `ASLR_MMAP_BITS` 28, `ASLR_PIE_BITS`
+28, `ASLR_BRK_BITS` 13 (the stack top, mmap base and PIE bias are drawn
+at each exec within those many pages of the constant; design.md §4a),
+`PROCESS_MAX_THREADS` = 256. `user_mmap_base(space)`: where a placement
+without an address starts in `space` (`space->mmap_base`, or
+`USER_MMAP_BASE` in a space no exec built).
 
 ## kernel/elf.h
 

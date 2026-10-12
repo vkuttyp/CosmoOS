@@ -264,7 +264,8 @@ struct lx_winsize {
 #define LX_UC_STRICT_RESTORE_SS 0x4
 /* The kernel's signal-return trampoline page (docs/compat/linux/design.md,
  * stage 2): `mov $15, %eax; syscall` or `mov x8, #139; svc #0`. The page
- * above the stack's top (USER_STACK_TOP), with one unmapped page between. */
+ * above the highest stack top (USER_STACK_TOP), with one unmapped page
+ * between; a fixed address, unlike the randomised stack below it (M5). */
 #define LX_SIGTRAMP 0x7FFFFFFF1000ull
 
 /* --- fcntl --- */

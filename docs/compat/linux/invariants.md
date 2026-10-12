@@ -125,13 +125,15 @@ sockets through `ksock_*`, processes through `process_*`, memory through
 sys_" compat/linux/syscalls.c` finds nothing. Gap: review only.
 
 **L9. The heap stays where the program expects it.** `brk_start` is
-`page_align_up(info->hi)` (the page after the highest loaded segment);
+`page_align_up(info->hi)` (the page after the highest loaded segment)
+plus a random number of pages below 2^13 (ASLR, roadmap M5), or the
+first free page above that when something is already mapped there;
 `brk` never moves below `brk_start` nor more than 1 GiB (`LX_BRK_MAX`)
 above it; growth maps only `[page_up(old), page_up(new))`, shrinking
 unmaps only `[page_up(new), page_up(old))`; a failed `brk` returns the
 unchanged break and changes no mapping. `mmap` without `MAP_FIXED`
-allocates from `USER_MMAP_BASE` (`0x1000_0000_0000`, far above any
-break) or from the caller's aligned hint, so the two never collide by
+allocates from the space's mmap base (random in `[USER_MMAP_BASE, +
+2^40)`, `0x1000_0000_0000`, far above any break) or from the caller's aligned hint, so the two never collide by
 default. Check: `lxtest` grows the break by 8 KiB, writes the pages,
 shrinks back, and sees a request below `brk_start` refused with the old
 value; `hello_musl`'s `malloc` (musl uses `brk` first, then `mmap`).

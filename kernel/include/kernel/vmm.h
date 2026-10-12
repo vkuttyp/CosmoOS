@@ -131,6 +131,11 @@ struct vm_space {
     uint64_t mapped_pages;   /* user: pages covered by regions (COSMO_RLIMIT_AS) */
     uint64_t limit_mapped_pages;   /* user: vm_user_map_anon refuses beyond this (-ENOMEM) */
     uint64_t limit_anon_pages;     /* user: a demand-zero fault at or beyond this is "no memory" */
+    /* User: where a placement without an address starts its search, drawn
+     * at exec (user-space ASLR, roadmap M5; process.c image_build) and
+     * inherited by vm_space_fork. 0 in a space no exec built: the
+     * process layer then uses its fixed USER_MMAP_BASE. */
+    uint64_t mmap_base;
     /* User spaces: the processes using it (atomic). One, except while a
      * vfork child borrows its parent's (docs/kernel/memory/design.md §8.4);
      * the last vm_space_put tears it down. */
@@ -377,6 +382,15 @@ void vm_space_switch(struct vm_space *prev, struct vm_space *next);
  * a space another thread can place into must use the _free forms above
  * (M46); see the comment at the definition for the two that may not. */
 uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size);
+
+#if CONFIG_DEBUG
+/* W^X over a whole user space (roadmap M5, decision 4): the number of
+ * regions that are both writable and executable, plus the stack ("stack")
+ * if it is executable at all; the first such region's base in *first
+ * (if not NULL). 0 for a sound space. Takes the space lock. Debug builds
+ * only: its one caller is image_build's debug check. */
+unsigned vm_user_wx_violations(struct vm_space *space, uint64_t *first);
+#endif
 
 /* True if every page of [addr, addr+len) is inside one or more regions
  * of `space` that all carry `prot`. */

@@ -3979,3 +3979,27 @@ more frequent on CI's x86-64 runners; the branch's code is not its cause.
 This is the `net-bench` row's open follow-up -- a mechanism for the TCP
 collapse -- and it now blocks: a main with this layout would go red.
 
+
+## `signal-async`: the signal arrived before the spin, 2026-10-12
+
+`SELFTEST: signal-async ... FAIL: the signal probe reported a failure (88
+ms)`, the probe's status 52, local, x86-64 debug `test-harness-retry`
+(four CPUs), PR 2 of roadmap M5 (user-space ASLR) at `4ff32b41`, no other
+QEMU or build running on the host. Status 52 is bit 32 of
+`spin_until_signalled`: the handler had already run before the loop's
+first 1000 iterations, so the parent cannot prove the signal interrupted
+user code. The child (`--probe signal-poke`) sleeps 20 ms after it starts
+and then signals; the parent, after `spawnve` returns, fills the vector
+registers and enters the loop -- a few stores and no system call. For the
+signal to come first, the parent did not reach the loop within 20 ms of
+the child starting: it was not running for that long.
+
+First sighting. The same tree's x86-64 `test-chaos` and every other boot
+of that matrix passed, and three more `test-harness-retry` boots of the
+tree passed at once (`signal-async` 54, 47 and 46 ms; the failing run's 88
+ms is the child's sleep plus a parent that lost the CPU). Nothing ASLR
+changes is on the parent's path between the spawn's return and the loop
+(the layout is drawn inside the spawn, before the child exists).
+Provisional: a scheduling delay of the parent longer than the child's 20
+ms sleep. Watch for a second sighting; with one, have the probe report
+how long `spawnve` took to return and when the child sent its signal.

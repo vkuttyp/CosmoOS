@@ -23,6 +23,16 @@ Stage `verify` (verified boot, docs/boot/design.md):
               tampered kernel: it boots, the banner says UNVERIFIED BOOT
               and the sysctl says "no".
 
+Stage `aslr` (user-space ASLR and W^X, docs/kernel/process/design.md):
+one boot of the signed image runs /boot/tests/security/aslr-static,
+aslr-pie (static musl, ET_EXEC and static PIE) and aslr-native ten times
+each. Every run's stack, stack pointer, mmap and (musl) break must differ
+from every other run's, the bits that vary must lie inside the range the
+design randomises and nearly all of them must vary; the PIE's load address
+varies the same way and the ET_EXEC and native images stay at their link
+address. Every run also reports code on its stack faulting with SIGSEGV
+and a writable-and-executable mmap or mprotect refused with EINVAL.
+
 The image's files are read and written through mtools at partition 1's
 offset (scripts/mkmanifest.py). Every boot's serial log is kept in the
 work directory. Exit 0 PASS, 1 FAIL.
@@ -230,15 +240,108 @@ def stage_verify(args, results):
                                                                             "cosmoos.img")))
 
 
+RUNS = 10
+LINE = re.compile(r"^aslr: kind=(\w+) stack=0x([0-9a-f]+) sp=0x([0-9a-f]+) mmap=0x([0-9a-f]+)"
+                  r"(?: brk=0x([0-9a-f]+))? load=0x([0-9a-f]+)$", re.M)
+# The bits each value may vary in (process.h), with room for the carry or
+# borrow the random term can cause: the stack top moves down by up to 2^22
+# pages and the initial frame by a 16-byte multiple within a page (bits
+# 4..33, a borrow into 34); the mmap base and a PIE's bias up by up to 2^28
+# pages (bits 12..39, carries into 40-41); the break up to 2^13 pages above
+# the image (bits 12..24), and with the image when it is a PIE. The second
+# number is how many bits are random.
+def bits(lo, hi):
+    return ((1 << hi) - 1) & ~((1 << lo) - 1)
+
+
+EXPECT = {
+    "stack": (bits(4, 35), 30),
+    "sp": (bits(4, 35), 30),
+    "mmap": (bits(12, 42), 28),
+    "load": (bits(12, 42), 28),
+    "brk-static": (bits(12, 27), 13),
+    "brk-pie": (bits(12, 43), 28),
+}
+
+
+def check_field(kind, name, values, key):
+    # Ten draws from 2^13 pages (a static image's break) collide about
+    # once in 180 boots (45 pairs / 8192): one repeated pair there is
+    # chance, two is not (PR #369 review). Every wider field must be
+    # distinct.
+    allowed_repeats = 1 if key == "brk-static" else 0
+    if len(values) - len(set(values)) > allowed_repeats:
+        raise Fail(f"aslr {kind}: {name} repeats across {len(values)} runs: {[hex(v) for v in values]}")
+    varying = 0
+    for v in values:
+        varying |= v ^ values[0]
+    mask, want = EXPECT[key]
+    if varying & ~mask:
+        raise Fail(f"aslr {kind}: {name} varies outside its range: bits {hex(varying & ~mask)}")
+    n = bin(varying).count("1")
+    # Ten draws leave a given random bit unchanged with probability 2^-9;
+    # four of them is beyond chance.
+    if n < want - 4:
+        raise Fail(f"aslr {kind}: {name} varies in {n} bits, expected about {want} ({hex(varying)})")
+    return n
+
+
+def stage_aslr(args, results):
+    image = variant(args, "aslr")
+    b = Boot("aslr", image, args.workdir, {}, args.timeout)
+    summary = []
+    try:
+        b.wait_prompt("the first prompt")
+        for prog in ("aslr-static", "aslr-pie", "aslr-native"):
+            runs = []
+            for i in range(RUNS):
+                out = b.run(f"/boot/tests/security/{prog}")
+                m = LINE.search(out)
+                if not m:
+                    raise Fail(f"{prog} run {i + 1}: no aslr line in {out!r}")
+                runs.append(m)
+                if prog == "aslr-native":
+                    need(out, r"^aslr: wx mmap-wx=EINVAL mprotect-wx=EINVAL$", f"{prog} run {i + 1}")
+                else:
+                    need(out, r"^aslr: wx stack-exec=SIGSEGV mmap-wx=EINVAL mprotect-wx=EINVAL$",
+                         f"{prog} run {i + 1}")
+            kind = runs[0].group(1)
+            vals = {f: [int(r.group(k), 16) for r in runs] for f, k in (("stack", 2), ("sp", 3), ("mmap", 4),
+                                                                       ("load", 6))}
+            line = [f"{kind}:"]
+            for f in ("stack", "sp", "mmap"):
+                line.append(f"{f} {check_field(kind, f, vals[f], f)} bits")
+            if kind == "pie":
+                line.append(f"load {check_field(kind, 'load', vals['load'], 'load')} bits")
+            elif len(set(vals["load"])) != 1:
+                raise Fail(f"aslr {kind}: the load address moved: {[hex(v) for v in vals['load']]}")
+            else:
+                line.append(f"load fixed {hex(vals['load'][0])}")
+            if kind != "native":
+                brk = [int(r.group(5), 16) for r in runs]
+                line.append(f"brk {check_field(kind, 'brk', brk, 'brk-' + kind)} bits")
+            summary.append(" ".join(line))
+        rc = b.finish()
+        if rc != EXIT_SUCCESS:
+            raise Fail(f"aslr boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"aslr: PASS in {b.elapsed():.1f}s, {RUNS} runs each: " + "; ".join(summary) +
+                   "; W^X: stack code SIGSEGV, W+X mmap/mprotect EINVAL")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
     ap.add_argument("--noverify-loader", required=True)
-    ap.add_argument("--key", required=True, help="the build's signing key (MODSIGN_KEY)")
+    ap.add_argument("--key", help="the build's signing key (MODSIGN_KEY); the verify stage alone needs it")
     ap.add_argument("--workdir", required=True)
-    ap.add_argument("--stages", default="verify")
+    ap.add_argument("--stages", default="verify,aslr")
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
     args = ap.parse_args()
+    if "verify" in args.stages.split(",") and not args.key:
+        ap.error("--key is needed for the verify stage (it signs manifests of its own)")
     shutil.rmtree(args.workdir, ignore_errors=True)
     os.makedirs(args.workdir)
     results = []
@@ -247,6 +350,8 @@ def main():
         stages = args.stages.split(",")
         if "verify" in stages:
             stage_verify(args, results)
+        if "aslr" in stages:
+            stage_aslr(args, results)
     except Fail as e:
         for r in results:
             print(f"test-security: {r}")

@@ -84,7 +84,7 @@ what Linux is.
 - **Threads**: `clone` with the pthread flag set, `set_tid_address`,
   `CHILD_CLEARTID`, `futex` requeue and bitset waits, `sched_*affinity`;
   `exit` ends a thread, `exit_group` the process.
-- **Dynamic executables**: `ET_DYN` at `USER_PIE_BASE`, `PT_INTERP`
+- **Dynamic executables**: `ET_DYN` at a random bias above `USER_PIE_BASE`, `PT_INTERP`
   loaded and started first with `AT_BASE`/`AT_ENTRY`/`AT_EXECFN`/
   `AT_PLATFORM`; file-backed private `mmap`.
 - **`poll`/`ppoll`** over the kernel's `io_poll`; **wall clock** behind

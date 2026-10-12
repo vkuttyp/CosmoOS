@@ -2,8 +2,8 @@
  * lxdyn.c - a position-independent executable with a program interpreter
  * (docs/compat/linux/testing.md). PT_INTERP names lxinterp, which the
  * kernel loads and starts first; lxinterp applies this image's RELATIVE
- * relocations and jumps to _start. The checks: the image sits at
- * USER_PIE_BASE, a pointer table in writable data was relocated (it is
+ * relocations and jumps to _start. The checks: the image sits page aligned
+ * in the randomised PIE range [USER_PIE_BASE, + 2^40) (roadmap M5), a pointer table in writable data was relocated (it is
  * what lxinterp fixed up), argv arrived intact through the interpreter.
  */
 
@@ -21,7 +21,8 @@ int main(int argc, char **argv)
 {
     int ok = 1;
     volatile int idx = argc;   /* 1: opaque to the compiler */
-    if ((unsigned long)__ehdr_start != 0x555500000000UL)
+    unsigned long at = (unsigned long)__ehdr_start;
+    if (at < 0x555500000000UL || at - 0x555500000000UL >= (1UL << 40) || (at & 4095) != 0)
         ok = 0;
     if (names[idx][0] != 'b' || names[idx + 1][4] != 'a')
         ok = 0;

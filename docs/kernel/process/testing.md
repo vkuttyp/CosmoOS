@@ -863,3 +863,21 @@ one pass of three (`capture`, `outlive`, `swapfirst`), A's relative
 `open("f")` held with its pointer in hand until B's `chdir` has published
 and put, the order enforced by the seam. Its twin at the Linux door is
 `tests/linux/lxcwd.c` under `cwd-hold-linux`, with the first two passes.
+
+## `make test-security`, stage `aslr` (roadmap M5)
+
+`tests/boot/security_test.py` boots the signed release image and runs
+`/boot/tests/security/aslr-static` (static musl, `ET_EXEC`), `aslr-pie`
+(static-PIE musl: `ET_DYN` without an interpreter, relocated by musl's
+`rcrt1.o`) and `aslr-native` ten times each (`tests/security/`, built
+with the BusyBox port's musl sysroot, so on both architectures). Each run
+prints its argv (the initial stack), a local, an anonymous `mmap`, the
+initial break (musl) and its load address. Required: every value
+distinct across the ten runs (a static image's break, 13 bits, may
+repeat once: ten draws from 8192 collide about once in 180 boots); the bits that vary inside the designed
+range (stack 4..34, mmap and PIE 12..41, break 12..26 above a static
+image) and at least the designed count less four varying (a random bit
+stays put across ten draws with probability 2^-9); the `ET_EXEC` and
+native load addresses fixed. Every run also reports `stack-exec=SIGSEGV`
+(a `ret` copied to the stack and called) and `mmap-wx=EINVAL
+mprotect-wx=EINVAL` (decision 4).

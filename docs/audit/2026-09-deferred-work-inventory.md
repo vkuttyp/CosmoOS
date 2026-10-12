@@ -345,6 +345,12 @@ no transport beyond `sysctl` and the self-tests that print them.
     symbolisation, `ksymtab` and the panic path adjusted.
   - manifest anti-rollback: any manifest ever signed by a trusted key
     verifies forever (as for modules, below).
+- User-space ASLR (roadmap M5 PR 2) leaves out: the Linux signal
+  trampoline page stays at the fixed `LX_SIGTRAMP` (`0x7FFFFFFF1000`), an
+  executable page at a known address in every Linux process (Linux has a
+  randomised vDSO); `ET_EXEC` images keep their link address (every
+  native program and BusyBox are static `ET_EXEC`: only a static-PIE or
+  dynamic build moves its code); the kernel's own layout (KASLR, above).
 - audit logging: none.
 - per-process capabilities beyond handle rights (§54's "file, network,
   device, IPC, VM capability"); network namespaces; cgroups-style

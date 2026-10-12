@@ -77,3 +77,72 @@ the boot ESP in every sector, `root=boot-disk` resolved to `ahci0p0p2`.
 
 The network harness passed in every debug boot (the boot test's verdict
 requires it).
+
+## PR 2 (as built): user-space ASLR and W^X
+
+| Area | Change | Files |
+|---|---|---|
+| Layout draw | `image_build` draws 24 bytes from the pool (`random_get_bytes`: never blocks; a may-be-early caller in `docs/kernel/security/design.md` §6) at every spawn and exec: stack top `USER_STACK_TOP - r*4K`, `r < 2^22`; initial stack pointer a further `sp_offset`, a 16-byte multiple below 4 KiB (8 bits; the builder lays the frame out from `stack_top - sp_offset`); mmap base `USER_MMAP_BASE + r*4K`, `r < 2^28`; `ET_DYN` bias `USER_PIE_BASE + r*4K`, `r < 2^28`. Static asserts keep the four ranges apart. | `kernel/process/process.c`, `kernel/include/kernel/process.h` |
+| mmap base | `struct vm_space` gains `mmap_base` (copied by `vm_space_fork`: a fork child keeps its parent's layout, as on Linux); `user_mmap_base(space)` replaces `USER_MMAP_BASE` in native and Linux `mmap` and in `shmat`. The `ET_DYN` interpreter now loads at the first free range above the mmap base, as Linux places it, instead of the fixed `USER_INTERP_BASE`. | `kernel/include/kernel/vmm.h`, `kernel/memory/vmm.c`, `kernel/syscall/native.c`, `compat/linux/syscalls.c` |
+| Break | `linux_process_init`: `brk_start = page_up(info.hi) + r*4K`, `r < 2^13`, drawn at each exec; if that page is mapped (a fixed-address interpreter loaded above the executable), the first free page above it (PR #369 review). | `compat/linux/syscalls.c` |
+| W^X | The map and protect paths refused W+X already (P3). New: `vm_user_wx_violations(space)` (under `CONFIG_DEBUG` only) counts W+X regions and an executable stack; debug builds run it over every image `image_build` makes and panic on any. | `kernel/memory/vmm.c`, `vmm.h`, `process.c` |
+| Review (PR #369) | An `ET_DYN` bias is a multiple of the image's largest `PT_LOAD` `p_align` (`elf_info.max_align`, at most 2 MiB; `aslr-pie` links with 4 KiB pages so both architectures keep all 28 bits); the stack top is drawn again (up to eight times) when a fixed `ET_EXEC` image occupies the drawn place; the static break may repeat once in ten draws; the break starts at the first free page at or above its draw. | `kernel/process/elf.c`, `elf.h`, `process.c`, `compat/linux/syscalls.c`, `tests/` |
+| Tests | `tests/security/aslr.c` built as `aslr-static` (`ET_EXEC`) and `aslr-pie` (static PIE: `-static-pie`, musl's `rcrt1.o`) with the BusyBox port's musl sysroot -- so both architectures, unlike `hello_musl` -- and `aslr-native.c`; all three in every image under `/boot/tests/security/`. `test-security` stage `aslr`: ten runs each; every stack, stack pointer, mmap and break distinct; the varying bits inside the designed range and at least the designed count less four; the PIE's load address varying likewise, the `ET_EXEC` and native load addresses fixed; every run reports code on its stack faulting with SIGSEGV and W+X `mmap`/`mprotect` refused with EINVAL. `lxdyn`/`lxinterp` accept any page of their ranges instead of the old fixed addresses. | `tests/security/`, `tests/boot/security_test.py`, `tests/linux/lxdyn.c`, `lxinterp.c`, `Makefile` |
+
+Design: `docs/kernel/process/design.md` §4a; invariants P3 (extended),
+P37; `docs/compat/linux/design.md` (brk, dynamic executables), L9;
+`docs/kernel/memory/design.md` (mmap placement).
+
+What stays fixed: an `ET_EXEC` image (BusyBox, dropbear and every native
+program are static `ET_EXEC`), the Linux signal trampoline page, and the
+kernel (no KASLR in 1.0) -- inventory lines.
+
+### A defect the matrix found in this PR: the stack headroom
+
+The first local matrix of PR 2 failed `process-oom` in the AArch64
+`test-chaos` and `test-harness-retry` boots (`check failed: status == 0`,
+the `oom-copy` probe exiting 10). The probe expects the first
+kernel-mode demand fault of its life to be its `read` into a fresh page,
+where the kernel injects a failure; status 10 is its `pipe()` failing
+first. The random sub-page offset had taken up to 4 KiB of the
+populated stack below the initial frame, so the probe's `h[2]` could
+land on a page not yet populated and the pipe's copy-out met the
+injected failure. Forcing `sp_offset` to `0xFF0` made it fail on every
+AArch64 debug boot; populating one page more whenever the offset is not
+0 (the headroom below the frame is then never less than before) passed
+under the same forcing. Commit "ASLR: keep the pre-populated stack
+headroom below a moved initial frame".
+
+### Acceptance c (local, release)
+
+x86-64, ten runs each. "Bits" counts the bit positions in which any of
+the ten values differed from the first: the random term is added, so a
+carry can flip a bit above the drawn ones (the static break draws 13 bits
+of pages and differed in 14 positions; the harness allows the designed
+range plus the carry, `security_test.py` `EXPECT`):
+
+| Probe | stack | sp | mmap | brk | load |
+|---|---|---|---|---|---|
+| `aslr-static` (musl, `ET_EXEC`) | 30 | 30 | 28 | 14 | fixed `0x400000` |
+| `aslr-pie` (musl, static PIE) | 29 | 29 | 28 | 30 | 30 |
+| `aslr-native` | 30 | 30 | 28 | -- | fixed `0x4001b0` |
+
+AArch64, the same: static 30 / 30 / 28 / 13 bits and load fixed
+`0x400000`; PIE 30 / 30 / 28 / 30 bits, load 30 bits; native 30 / 30 /
+28 bits, load fixed `0x4001bc`.
+
+W^X in every run: `stack-exec=SIGSEGV mmap-wx=EINVAL mprotect-wx=EINVAL`.
+
+### PR 2 validation (local, 2026-10-12, at `4ff32b41`)
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| `make host-test`, `make fuzz`, `make analyze` | PASS | PASS |
+| debug `make test`, `QEMU_SMP=1` / `2` / `4` | PASS 137.1 / 140.1 / 151.8 s | PASS 145.0 / 142.2 / 162.1 s |
+| `make test-smp2` | PASS 142.5 s | PASS 142.6 s |
+| `make test-chaos` | PASS 143.0 s | PASS 157.5 s |
+| `make test-harness-retry` | FAIL (`signal-async` status 52, first sighting, `docs/testing/flakes.md`); then PASS three times, 167.3 / 141.9 / 142.1 s | PASS 151.1 s |
+| `make BUILD=release test` | PASS 17.5 s | PASS 20.8 s |
+| `make BUILD=release test-security` | PASS 93.9 s | PASS 125.8 s |
+| `make BUILD=release test-install` | PASS 23.7 s | PASS 38.5 s |
+

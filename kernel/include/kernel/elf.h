@@ -47,9 +47,16 @@ struct elf_info {
     uint16_t phnum, phent;
     /* Milestone 10: position-independent executables and interpreters. */
     bool is_dyn;       /* ET_DYN: every address above is relative until elf_rebase */
+    /* Roadmap M5: the largest PT_LOAD p_align that is a power of two above
+     * the page size, capped at ELF_ALIGN_MAX; the page size otherwise. A
+     * random bias for an ET_DYN image is a multiple of it, so every
+     * segment keeps the alignment its linker gave it (PR #369 review). */
+    uint64_t max_align;
     bool has_interp;   /* PT_INTERP named a program interpreter */
     char interp[256];  /* its path (NUL-terminated, at most 255 bytes) */
 };
+
+#define ELF_ALIGN_MAX (2ULL << 20)
 
 /* Validate a native static executable for the user range
  * [user_lo, user_hi). On failure returns -ENOEXEC and, when `why` is
