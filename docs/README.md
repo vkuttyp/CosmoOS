@@ -33,15 +33,15 @@ wins and the document is wrong.
 | `verification/` | The verification infrastructure: host fuzz targets and the portable driver (`make fuzz`), kernel fault injection (`kmalloc`, block submit/complete, the demand-zero page and copy, the USB status read, the AHCI slot; `debug.faultinject`), the RAM block device with a write recorder, the cosmofs crash-consistency harness (prefix replay), the user-mode syscall fuzzer, per-test timing |
 | `kernel/quiesce/` | Kernel object lifetime and quiescence: epoch-based grace periods (`synchronize_quiesce`, `call_quiesce`), `synchronize_irq`, `timer_cancel_sync`, the mandatory-release object rule, the module unload protocol, the converted device, block, interface, TCP and UDP lifetimes, with the memory-ordering argument for every barrier |
 | `kernel/process/` | Processes, user address spaces, the ELF loader (`ET_EXEC` and, since milestone 10, `ET_DYN` with `PT_INTERP`), ring-3 entry and return, user-memory access, fatal user faults, the `init` boot module; since Phase 9 `spawn` from a file with a handle map, zombies and `wait`, `kill` delivery, the working directory, `procinfo`; since Phase 11 personality selection by ELF note and the two-page initial stack with the Linux auxiliary vector; since milestone 10 several threads per process, the signal core (`signal.c`) and the SYSRET guard |
-| `kernel/syscall/` | SYSCALL/SYSRET entry, the generic dispatcher and personalities (native and, since Phase 11, Linux), the native system-call ABI (`uapi/cosmo/syscall.h`, 58 calls) and user-side wrappers |
+| `kernel/syscall/` | SYSCALL/SYSRET entry, the generic dispatcher and personalities (native and, since Phase 11, Linux), the native system-call ABI (`uapi/cosmo/syscall.h`, `SYS_COUNT` 105 calls) and user-side wrappers |
 | `kernel/module/` | The boot archive, the module ABI (`COSMO_MODULE`, `EXPORT_SYMBOL`, ABI version), the signed `ET_REL` module loader (validation, relocation, symbol resolution, dependencies, W^X, unload), signing tools and keys |
 | `kernel/security/` | SHA-512, Ed25519 verification, the compiled-in key ring, kernel taint; the access-control and resource-limit design (privilege flows down, `COSMO_SPAWN_SETCRED`, rlimits, ramfs and page-cache caps with reclaim, the `procinfo`/`log` gates) |
 | `kernel/device/` | The bus/device/driver model with resources and probing, the DMA API (an IOMMU domain behind it since the IOMMU unit), the block layer (`kernel/block/`), the entropy pool, console sinks, MSI in the interrupt layer, and the QEMU device configuration the tests rely on |
 | `kernel/iommu/` | DMA remapping (IOMMU unit): a domain and an IOVA allocator per device, the shared page-table walker, attach at bus-master enable, fault accounting, what the DMA API does with all of it, and the two unit drivers (`drivers/iommu/`: Intel VT-d and ARM SMMUv3) |
 | `drivers/pci/` | PCI core: ECAM or legacy configuration access, enumeration, BAR sizing, capabilities, MSI/MSI-X, the `pci` bus and `struct pci_driver` |
-| `drivers/network/` | The `e1000e` module: an Intel 82574L driver, the first NIC here that is not virtio — legacy descriptor rings, one MSI-X vector, a transmit watchdog, and no offloads because the NIC-path benchmark (`net-nicbench`) put the software checksum at 1–2 % of a send; the check on the stack's claim not to depend on a device |
+| `drivers/e1000e/` | The `e1000e` module: an Intel 82574L driver, the first NIC here that is not virtio — legacy descriptor rings, one MSI-X vector, a transmit watchdog, and no offloads because the NIC-path benchmark (`net-nicbench`) put the software checksum at 1–2 % of a send; the check on the stack's claim not to depend on a device |
 | `drivers/usb/` | The `xhci` module (the USB core: bus, enumeration, transfers, class binding; and the xHCI controller driver: rings, contexts, commands, the event ring, root-hub ports, one worker per controller) and the class drivers: `usb_storage` (bulk-only mass storage as `sda`), `usb_hid` (a boot-protocol keyboard, the first periodic transfer in the tree, whose keys go to the console tty) and `usb_hub` (devices behind a hub: a parent, a depth and a route on `struct usb_device`, a route string in the slot context); the DMA-through-the-controller rule and the children-first removal order the device model needed |
-| `drivers/storage/` | The `ahci` module: SATA disks through an AHCI host bus adapter (the ICH9 on `q35`, `-device ahci` on `virt`) — per-port command slots, PRDT scatter-gather, task-file error recovery, hotplug through a worker, one blkdev per port with the controller as DMA device; the DMA-parent question answered (no `struct device` per port) |
+| `drivers/ahci/` | The `ahci` module: SATA disks through an AHCI host bus adapter (the ICH9 on `q35`, `-device ahci` on `virt`) — per-port command slots, PRDT scatter-gather, task-file error recovery, hotplug through a worker, one blkdev per port with the controller as DMA device; the DMA-parent question answered (no `struct device` per port) |
 | `drivers/nvme/` | The `nvme` module (milestone 9): controller bring-up, one I/O queue per CPU with its own MSI-X vector, PRP construction from bio segments, abort and reset, one block device per namespace |
 | `drivers/virtio/` | The `virtio` module (bus, device initialisation, split virtqueues, virtio-pci modern transport) and the `virtio_blk`, `virtio_rng`, `virtio_console` driver modules |
 | `kernel-services/vfs/` | The VFS (mounts, path walk, vnodes, files, the `fs_type` registry), the page cache, ramfs and the boot namespace, the storage pool (`kernel-services/storage/`), and the twelve filesystem system calls |
@@ -57,7 +57,7 @@ wins and the document is wrong.
 | `pkg/` | The package system: recipes (`ports/`), the host builder `tools/pkgbuild.py`, the `.cpk` and `INDEX` formats, the `pkg` manager (`pkg/`), signing and checksums, the `/var/db/pkg` database, the package tests |
 
 Further subsystem directories are added as subsystems come into existence
-(`drivers/network/`, `compat/<other>/`, and so on).
+(`compat/<other>/` and so on).
 
 ## Per-subsystem convention
 
@@ -70,6 +70,11 @@ Constitution section 64 requires five files for every major subsystem:
 | `api.md` | Every public interface with purpose, inputs, outputs, ownership, lifetime, concurrency, blocking behaviour, interrupt-context restrictions, failure modes, ABI stability (section 52) |
 | `invariants.md` | Rules that must never be violated without revising the document and the code together |
 | `testing.md` | How the subsystem is tested and how to run those tests |
+
+`scripts/check-docs.py` (CI job `docs`, `make check-docs`) fails when a
+subsystem directory in the Layout table above lacks one of the five or
+has an empty one; `history/`, `testing/` and `audit/` are records, not
+subsystems (roadmap M6).
 
 The twelve explanation points of section 64 (purpose, responsibilities,
 non-responsibilities, interfaces, data structures, concurrency model,

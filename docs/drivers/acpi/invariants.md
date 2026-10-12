@@ -13,9 +13,10 @@ rejection path is reviewed, not driven.
 **AC2. Every MADT entry is read only within the table and within its own
 declared length.** `parse_madt` stops at an entry whose `length` is
 below 2 or runs past `madt->hdr.length`, and each `case` checks a
-minimum entry length before its `memcpy`s. Check: review. Gap: the
-MADT's fixed fields (`lapic_address`, `flags`) are read without checking
-`hdr.length >= 44`; no malformed-table test or fuzzer exists (host
+minimum entry length before its `memcpy`s; a MADT shorter than its
+fixed fields (`hdr.length < sizeof(struct acpi_madt)`, 44 bytes) is
+ignored with a warning before `lapic_address` is read (roadmap M6).
+Check: review. Gap: no malformed-table test or fuzzer exists (host
 fuzzing of ACPI tables is open work in [docs/plan.md](../../plan.md)).
 
 **AC3. The decoded arrays never exceed their capacities.** Every append
@@ -46,15 +47,18 @@ other code runs. Check: `acpi` self-test asserts `acpi_available()`;
 every boot reaches `acpi_init`. Gap: the panic paths are not exercised.
 
 **AC7. Only usable processors are reported.** A processor entry (type
-0, 9 or 11) enters `g_cpus` only when its flags have bit 0 (enabled) or
-bit 1 set; `smp_init` starts every reported CPU except the boot CPU.
+0, 9 or 11) enters `g_cpus` only when its flags say enabled (bit 0) or
+online capable: bit 1 in a LAPIC or x2APIC entry
+(`MADT_CPU_ONLINE_CAPABLE`), bit 3 in a GICC entry
+(`MADT_GICC_ONLINE_CAPABLE`, ACPI 6.5 5.2.12.14, where bit 1 is the
+performance interrupt's trigger mode); `smp_init` starts every reported
+CPU except the boot CPU.
 Check: `smp-online` self-test (`online == reported` unless more than
 `CONFIG_MAX_CPUS` were reported), run at `QEMU_SMP` 1, 2 and 4.
-Gap: for type 0 and 9, bit 1 is "online capable"; for a type 11 (GICC)
-entry the ACPI 6.5 flags layout puts "online capable" in bit 3 and the
-performance-interrupt mode in bit 1, so a disabled GICC entry with an
-edge-triggered performance interrupt would be reported. QEMU marks
-every GICC entry enabled, so no test reaches this.
+Gap: until roadmap M6 a GICC entry was tested against bit 1 like a
+LAPIC entry, so a disabled GICC entry with an edge-triggered performance
+interrupt was reported; QEMU marks every GICC entry enabled, so no test
+reaches either version (inventory, section 3).
 
 **AC8. The boot CPU is identified by the same id space the MADT uses.**
 `acpi_madt_cpu.apic_id` holds the APIC/x2APIC id on x86-64 and the

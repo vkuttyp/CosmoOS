@@ -571,6 +571,20 @@ jobs:
           name: release-set-${{ matrix.arch }}
           path: out/release/${{ matrix.arch }}/
 
+  # Roadmap M6, decision 4: every subsystem directory docs/README.md lists
+  # has architecture, design, api, invariants and testing
+  # (scripts/check-docs.py). Python on the runner; no container.
+  docs:
+    name: five-file docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Every listed subsystem has its five files
+        run: python3 scripts/check-docs.py
+
   # The quiescence protocol's litmus tests against the C11 (RC11) model.
   # herdtools7 is packaged in Debian testing and sid but not trixie, so
   # this runs in its own small container rather than the build job's.

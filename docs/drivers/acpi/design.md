@@ -31,7 +31,7 @@ State, all file-scope statics in `acpi.c`:
 |---|---|
 | `g_tables[ACPI_MAX_TABLES]`, `g_table_count` | Pointers to the checksum-valid tables named by the root table, in root-table order; `ACPI_MAX_TABLES` is 64 |
 | `g_lapic_base` | MADT `lapic_address`, replaced by a type 5 (64-bit override) entry if one appears |
-| `g_cpus[ACPI_MAX_CPUS]`, `g_cpu_count` | Processor entries (types 0, 9, 11) whose flags have bit 0 or bit 1 set; at most 64 |
+| `g_cpus[ACPI_MAX_CPUS]`, `g_cpu_count` | Processor entries (types 0, 9, 11) flagged enabled or online capable (AC7); at most 64 |
 | `g_ioapics[ACPI_MAX_IOAPICS]`, `g_ioapic_count` | Type 1 entries; at most 8 |
 | `g_overrides[ACPI_MAX_OVERRIDES]`, `g_override_count` | Type 2 entries; at most 24 |
 | `g_gic`, `g_gic_present` | The GIC description; `g_gic_present` is set by a type 12 (distributor) entry only |
@@ -173,14 +173,11 @@ is still checked: checksums on every table before it is recorded,
 entry is checked against the table end and against its own minimum
 length before a field is read.
 
-Not checked: the MADT's own fixed fields (`lapic_address`, `flags` at
-offsets 36-43) are read without checking `hdr.length >= 44`; the root
-table's signature is not compared; and consumers of `acpi_find_table`
-must bound their own reads by `hdr.length` (the AArch64 `timer.c`,
-`pl011.c` and `smp.c` and `arm_smmuv3.c` compare it with a minimum
-length; `pci.c`'s `setup_ecam` subtracts `sizeof(struct acpi_mcfg)`
-from `hdr.length` without first checking that it is at least that
-large).
+Not checked: the root table's signature is not compared; and consumers
+of `acpi_find_table` must bound their own reads by `hdr.length` (the
+AArch64 `timer.c`, `pl011.c` and `smp.c`, `arm_smmuv3.c` and, since
+roadmap M6, `pci.c`'s `setup_ecam` compare it with a minimum length; a
+MADT shorter than its 44 bytes of fixed fields is ignored).
 
 The table contents are not reachable from user space: no system call or
 device file exposes them.
