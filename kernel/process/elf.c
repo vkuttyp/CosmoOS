@@ -126,6 +126,11 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
             return fail(why, "PT_LOAD is writable and executable (W^X)");
         if ((ph.p_vaddr & (ELF_PAGE - 1)) != (ph.p_offset & (ELF_PAGE - 1)))
             return fail(why, "PT_LOAD vaddr and offset are not congruent modulo the page size");
+        if (ph.p_align > ELF_PAGE && (ph.p_align & (ph.p_align - 1)) == 0) {
+            uint64_t a = ph.p_align < ELF_ALIGN_MAX ? ph.p_align : ELF_ALIGN_MAX;
+            if (a > info->max_align)
+                info->max_align = a;
+        }
 
         uint64_t seg_lo = ph.p_vaddr & ~(ELF_PAGE - 1);
         uint64_t seg_hi = (ph.p_vaddr + ph.p_memsz + ELF_PAGE - 1) & ~(ELF_PAGE - 1);
@@ -157,6 +162,8 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
 
     if (info->nr_segments == 0)
         return fail(why, "no PT_LOAD segments");
+    if (info->max_align < ELF_PAGE)
+        info->max_align = ELF_PAGE;
 
     bool entry_ok = false;
     for (unsigned j = 0; j < info->nr_segments; j++) {

@@ -173,7 +173,14 @@ personalities. `image_build` draws 24 bytes from the pool
 | Linux break | `brk_start = page_up(info.hi) + r * PAGE_SIZE`, `r < 2^13` (`linux_process_init`) | 13 (32 MiB) |
 
 An `ET_EXEC` image keeps its link address: there is nothing to move it
-with. The stack keeps its 8 MiB, its guard page below and the rlimits;
+with. An `ET_DYN` bias -- the executable's and the interpreter's -- is a
+multiple of the image's largest power-of-two `PT_LOAD` `p_align` above
+the page size (`elf_info.max_align`, capped at 2 MiB), so segments keep
+the alignment their linker gave them; an image aligned to 64 KiB loses
+four of the 28 bits, as on Linux. An `ET_EXEC` image linked inside the
+16 GiB band the stack top is drawn from would take that place first: the
+stack is then drawn again, up to eight times, so such an image does not
+run or fail by chance (PR #369 review). The stack keeps its 8 MiB, its guard page below and the rlimits;
 the ranges cannot meet (static asserts in `process.h`: the lowest stack
 stays above the highest PIE, the highest mmap base below the lowest
 PIE). `vm_space_fork` copies `mmap_base`, so a fork child has its
@@ -186,7 +193,7 @@ and executable request (`vm_user_map_*`, `vm_user_protect`, native and
 Linux `mmap`/`mprotect` with `-EINVAL`), the stack and the initial stack
 are mapped RW; debug builds also walk every region of every image
 `image_build` makes and panic on a W+X region or an executable stack
-(`vm_user_wx_violations`). `make test-security` shows both on release
+(`vm_user_wx_violations`, compiled only under `CONFIG_DEBUG`). `make test-security` shows both on release
 builds: code copied to the stack faults, a W+X `mmap` or `mprotect` is
 `EINVAL`.
 

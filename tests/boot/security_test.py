@@ -335,11 +335,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
     ap.add_argument("--noverify-loader", required=True)
-    ap.add_argument("--key", required=True, help="the build's signing key (MODSIGN_KEY)")
+    ap.add_argument("--key", help="the build's signing key (MODSIGN_KEY); the verify stage alone needs it")
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--stages", default="verify,aslr")
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
     args = ap.parse_args()
+    if "verify" in args.stages.split(",") and not args.key:
+        ap.error("--key is needed for the verify stage (it signs manifests of its own)")
     shutil.rmtree(args.workdir, ignore_errors=True)
     os.makedirs(args.workdir)
     results = []

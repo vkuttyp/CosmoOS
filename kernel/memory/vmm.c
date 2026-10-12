@@ -3051,6 +3051,7 @@ uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size)
     return result;
 }
 
+#if CONFIG_DEBUG
 unsigned vm_user_wx_violations(struct vm_space *space, uint64_t *first)
 {
     KASSERT(space->user);
@@ -3069,6 +3070,7 @@ unsigned vm_user_wx_violations(struct vm_space *space, uint64_t *first)
     spin_unlock_irqrestore(&space->lock, s);
     return n;
 }
+#endif
 
 bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_prot_t prot)
 {

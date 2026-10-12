@@ -383,11 +383,14 @@ void vm_space_switch(struct vm_space *prev, struct vm_space *next);
  * (M46); see the comment at the definition for the two that may not. */
 uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size);
 
+#if CONFIG_DEBUG
 /* W^X over a whole user space (roadmap M5, decision 4): the number of
  * regions that are both writable and executable, plus the stack ("stack")
  * if it is executable at all; the first such region's base in *first
- * (if not NULL). 0 for a sound space. Takes the space lock. */
+ * (if not NULL). 0 for a sound space. Takes the space lock. Debug builds
+ * only: its one caller is image_build's debug check. */
 unsigned vm_user_wx_violations(struct vm_space *space, uint64_t *first);
+#endif
 
 /* True if every page of [addr, addr+len) is inside one or more regions
  * of `space` that all carry `prot`. */

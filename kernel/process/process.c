@@ -394,13 +394,13 @@ static int image_build(struct process *p, const struct process_image *exe, const
     random_get_bytes(rnd, sizeof(rnd));
     const uint64_t pie_bias = USER_PIE_BASE + ((rnd[0] & (((uint64_t)1 << ASLR_PIE_BITS) - 1)) << PAGE_SHIFT);
     const uint64_t mmap_base = USER_MMAP_BASE + ((rnd[1] & (((uint64_t)1 << ASLR_MMAP_BITS) - 1)) << PAGE_SHIFT);
-    const uint64_t stack_top = USER_STACK_TOP - ((rnd[2] & (((uint64_t)1 << ASLR_STACK_BITS) - 1)) << PAGE_SHIFT);
+    const uint64_t stack_top0 = USER_STACK_TOP - ((rnd[2] & (((uint64_t)1 << ASLR_STACK_BITS) - 1)) << PAGE_SHIFT);
     /* The initial stack pointer: a random 16-byte multiple below the top
      * within the page (bits 22.. of the stack draw); one more page is
      * populated for it. */
     const uint64_t sp_offset = ((rnd[2] >> ASLR_STACK_BITS) & 0xFF) << 4;
     if (info->is_dyn) {
-        elf_rebase(info, pie_bias);
+        elf_rebase(info, pie_bias & ~(info->max_align - 1));   /* USER_PIE_BASE is 4 GiB aligned */
         if (info->hi > USER_HI || info->hi < info->lo) {
             kwarn("process: '%s' rejected: PIE does not fit at its base", name);
             return -ENOEXEC;
@@ -455,11 +455,16 @@ static int image_build(struct process *p, const struct process_image *exe, const
          * above the (random) mmap base, as Linux puts it among the
          * mappings; an ET_EXEC one where it was linked. */
         if (iinfo->is_dyn) {
-            uint64_t base = vm_user_find_free(space, mmap_base, (size_t)(iinfo->hi - iinfo->lo));
+            /* A hole with room to align the start to the interpreter's
+             * largest p_align, then that aligned start. */
+            uint64_t a = iinfo->max_align;
+            uint64_t base = vm_user_find_free(space, (mmap_base + a - 1) & ~(a - 1),
+                                              (size_t)(iinfo->hi - iinfo->lo + a - PAGE_SIZE));
             if (base == 0) {
                 rc = -ENOMEM;
                 goto fail;
             }
+            base = (base + a - 1) & ~(a - 1);
             elf_rebase(iinfo, base);
             ib->interp_base = base;
         }
@@ -473,9 +478,19 @@ static int image_build(struct process *p, const struct process_image *exe, const
             ib->image_end = iinfo->hi;
     }
 
-    /* Stack: lazily populated except the top pages, with a guard below. */
-    rc = vm_user_map_anon(space, stack_top - USER_STACK_SIZE, USER_STACK_SIZE, VM_PROT_RW,
-                          VM_REGION_GUARD_BELOW, "stack");
+    /* Stack: lazily populated except the top pages, with a guard below. An
+     * ET_EXEC image (or interpreter) linked inside the 16 GiB the top is
+     * drawn from takes that place first; the draw is then made again, so
+     * whether such an image runs does not depend on luck (PR #369 review).
+     * Eight draws all meeting it means the image covers the band. */
+    uint64_t stack_top = stack_top0;
+    for (unsigned attempt = 0;; attempt++) {
+        rc = vm_user_map_anon(space, stack_top - USER_STACK_SIZE, USER_STACK_SIZE, VM_PROT_RW,
+                              VM_REGION_GUARD_BELOW, "stack");
+        if (rc != -EEXIST || attempt == 8)
+            break;
+        stack_top = USER_STACK_TOP - ((random_u64() & (((uint64_t)1 << ASLR_STACK_BITS) - 1)) << PAGE_SHIFT);
+    }
     if (rc)
         goto fail;
     for (unsigned i = 1; i <= npages; i++) {
