@@ -57,3 +57,23 @@ installer".
 
 `make test-install` (release, x86-64): PASS, the installed ESP equal to
 the boot ESP in every sector, `root=boot-disk` resolved to `ahci0p0p2`.
+
+### PR 1 validation (local, 2026-10-12, at `418b9ac8`)
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| `make host-test` | PASS | PASS |
+| `make fuzz` | PASS | PASS |
+| `make analyze` | PASS | PASS |
+| debug `make test`, `QEMU_SMP=1` | PASS 140.2 s | PASS 144.3 s |
+| debug `make test`, `QEMU_SMP=2` | PASS 148.7 s | PASS 141.5 s |
+| debug `make test`, `QEMU_SMP=4` | PASS 142.5 s | PASS 156.5 s |
+| `make test-smp2` | PASS 149.8 s | PASS 151.0 s |
+| `make test-chaos` | PASS 143.8 s | PASS 153.3 s |
+| `make test-harness-retry` | PASS 142.0 s | PASS 157.4 s |
+| `make BUILD=release test` | PASS 17.7 s | PASS 21.1 s |
+| `make BUILD=release test-security` | PASS 87 s | PASS 112.9 s |
+| `make BUILD=release test-install` | PASS 27.5 s | PASS 38.5 s |
+
+The network harness passed in every debug boot (the boot test's verdict
+requires it).
