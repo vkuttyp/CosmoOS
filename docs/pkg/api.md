@@ -129,7 +129,7 @@ operation stops. A file owned by another installed package is a conflict
 
 | Path | Content |
 |---|---|
-| `/etc/pkg/repos.conf` | one repository directory per line; `#` comments; Phase 10 ships `/boot/repo` |
+| `/etc/pkg/repos.conf` | one repository directory per line; `#` comments; the live image ships `/boot/repo`, and `cosmo-install` copies that repository to `/var/lib/pkg/repo` on the installed root and writes this file to name it (roadmap M6) |
 | `/etc/pkg/keys/*.pub` | accepted Ed25519 public keys, 64 hex characters each (the `tools/keys/*.pub` format, at most 16 keys); the image ships the first trusted key, `dev.pub` for a development build (`PKG_TRUST_PUB`) |
 | `/var/db/pkg/index` | the last verified `INDEX` text (trailer stripped) |
 | `/var/db/pkg/installed/<name>/MANIFEST` | the installed package's manifest, as extracted |

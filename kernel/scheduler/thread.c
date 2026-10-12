@@ -141,6 +141,112 @@ struct thread *thread_alloc(const char *name, int priority, unsigned flags)
     return t;
 }
 
+#if CONFIG_DEBUG
+/*
+ * Stack high-water marks, debug builds (docs/kernel/scheduler/design.md,
+ * "Stack use"). Every stack thread_prepare allocates is painted with
+ * STACK_PAINT, and the lowest word that no longer holds it is as deep as
+ * the stack has ever been used. Each thread is measured when it is freed
+ * (thread_put) and the ones still alive at the end of the boot
+ * (thread_report_stack_use), so every thread the boot made is counted
+ * once at least; the deepest few are reported, and any over 75 % of its
+ * stack is a warning the boot harness fails on.
+ */
+#define STACK_PAINT 0x5354414b5354414bull   /* "KATSKATS" */
+#define STACK_TOP_N 5
+
+struct stack_mark {
+    size_t used;
+    char name[THREAD_NAME_MAX];
+};
+static spinlock_t g_stack_lock = SPINLOCK_INIT("stack_marks");
+static struct stack_mark g_stack_top[STACK_TOP_N];   /* deepest first, one per name */
+static unsigned g_stack_measured, g_stack_over;
+
+static void stack_paint(struct thread *t)
+{
+    uint64_t *w = (uint64_t *)t->stack_base;
+    for (size_t i = 0; i < t->stack_size / sizeof(*w); i++)
+        w[i] = STACK_PAINT;
+}
+
+static bool stack_painted(const struct thread *t)
+{
+    return t->stack_base != 0 && (t->flags & THREAD_FLAG_BOOT) == 0;
+}
+
+/* Bytes from the top of the stack down to the deepest word written. A
+ * running thread's stack can be read while it changes: the answer is
+ * then a lower bound, which is what a high-water mark taken early is. */
+static size_t stack_used(const struct thread *t)
+{
+    const volatile uint64_t *w = (const volatile uint64_t *)t->stack_base;
+    size_t n = t->stack_size / sizeof(uint64_t), i = 0;
+    while (i < n && w[i] == STACK_PAINT)
+        i++;
+    return (n - i) * sizeof(uint64_t);
+}
+
+/* Any context that may take a spinlock; takes g_stack_lock. */
+static void stack_note(const struct thread *t)
+{
+    if (!stack_painted(t))
+        return;
+    size_t used = stack_used(t);
+    bool over = used * 4 > t->stack_size * 3;
+    arch_irq_state_t s = spin_lock_irqsave(&g_stack_lock);
+    g_stack_measured++;
+    if (over)
+        g_stack_over++;
+    /* One slot per name: the deepest a thread of that name went. */
+    unsigned at = STACK_TOP_N;
+    for (unsigned i = 0; i < STACK_TOP_N && g_stack_top[i].used != 0; i++) {
+        if (strcmp(g_stack_top[i].name, t->name) == 0) {
+            at = i;
+            break;
+        }
+    }
+    if (at == STACK_TOP_N || used > g_stack_top[at].used) {
+        if (at == STACK_TOP_N)
+            at = STACK_TOP_N - 1;   /* evict the shallowest, if this is deeper */
+        if (used > g_stack_top[at].used) {
+            g_stack_top[at].used = used;
+            strlcpy(g_stack_top[at].name, t->name, THREAD_NAME_MAX);
+            for (; at > 0 && g_stack_top[at].used > g_stack_top[at - 1].used; at--) {
+                struct stack_mark m = g_stack_top[at];
+                g_stack_top[at] = g_stack_top[at - 1];
+                g_stack_top[at - 1] = m;
+            }
+        }
+    }
+    spin_unlock_irqrestore(&g_stack_lock, s);
+    if (over)
+        kwarn("stack: thread %u '%s' used %zu of %zu bytes, over 75%%", t->tid, t->name, used, t->stack_size);
+}
+
+void thread_report_stack_use(void)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_thread_list_lock);
+    struct thread *t;
+    list_for_each_entry(t, &g_all_threads, all_link)
+        stack_note(t);
+    spin_unlock_irqrestore(&g_thread_list_lock, s);
+
+    s = spin_lock_irqsave(&g_stack_lock);
+    struct stack_mark top[STACK_TOP_N];
+    memcpy(top, g_stack_top, sizeof(top));
+    unsigned measured = g_stack_measured, over = g_stack_over;
+    spin_unlock_irqrestore(&g_stack_lock, s);
+    kinfo("stack: high-water %zu of %u bytes (%zu%%) on '%s'; %u stacks measured, %u over 75%%", top[0].used,
+          THREAD_STACK_SIZE, top[0].used * 100 / THREAD_STACK_SIZE, top[0].name, measured, over);
+    for (unsigned i = 1; i < STACK_TOP_N && top[i].used != 0; i++)
+        kinfo("stack:   then %zu bytes on '%s'", top[i].used, top[i].name);
+}
+#else
+static inline void stack_paint(struct thread *t) { (void)t; }
+static inline void stack_note(const struct thread *t) { (void)t; }
+#endif
+
 struct thread *thread_prepare(void (*entry)(void *arg), void *arg, const char *name, int priority,
                               unsigned flags)
 {
@@ -157,6 +263,7 @@ struct thread *thread_prepare(void (*entry)(void *arg), void *arg, const char *n
         kmem_cache_free(g_thread_cache, t);
         return NULL;
     }
+    stack_paint(t);
 
     t->entry = entry;
     t->arg = arg;
@@ -278,6 +385,7 @@ void thread_put(struct thread *t)
     arch_fpu_free(t);
     kfree(t->sig_info);
     kfree(t->init_regs);
+    stack_note(t);   /* debug builds: the high-water mark, before the stack goes */
     if (t->stack_base != 0 && (t->flags & THREAD_FLAG_BOOT) == 0)
         vm_kernel_free(t->stack_base);
 

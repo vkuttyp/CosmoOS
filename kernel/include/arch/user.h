@@ -109,6 +109,33 @@ void arch_user_regs_sanitize(struct arch_user_regs *r);
 void arch_user_regs_init_thread(struct arch_user_regs *r, uintptr_t entry, uintptr_t arg, uintptr_t sp);
 #define ARCH_THREAD_TOP_BYTES 8u
 
+/*
+ * Entering a native signal handler (docs/kernel/process/design.md, "The
+ * native signal ABI"). What the frame holds is generic
+ * (kernel/process/native_signal.c); where it goes, how the handler gets
+ * back, and which registers carry its arguments are the architecture's.
+ *
+ * arch_sigframe_place: the address a frame of `size` bytes is written at,
+ * below the interrupted stack pointer in `r`, 16-byte aligned, with room
+ * under it for what arch_sigframe_enter writes (x86-64 also leaves the
+ * 128-byte red zone alone). Pure arithmetic.
+ *
+ * arch_sigframe_enter: write the return path under `frame` and point `r`
+ * at `handler` with (sig, info, frame) as its three arguments. x86-64
+ * pushes `restorer` where a CALL leaves its return address, so the
+ * handler is entered with rsp 8 mod 16 and returns into the restorer;
+ * AArch64 writes the frame record (the interrupted fp and lr) and puts
+ * `restorer` in the link register. A user write: may sleep, never in
+ * interrupt context. -EFAULT with `r` untouched when the write faults.
+ *
+ * arch_sigreturn_frame: where the frame is, from the registers the
+ * restorer's sigreturn call arrived with (the inverse of the two above).
+ */
+uint64_t arch_sigframe_place(const struct arch_user_regs *r, size_t size);
+int arch_sigframe_enter(struct arch_user_regs *r, uint64_t frame, uint64_t handler, uint64_t restorer,
+                        uint64_t sig, uint64_t info);
+uint64_t arch_sigreturn_frame(const struct arch_user_regs *r);
+
 /* Bracket direct kernel access to user memory (STAC/CLAC with SMAP,
  * PAN on AArch64). */
 void arch_user_access_begin(void);

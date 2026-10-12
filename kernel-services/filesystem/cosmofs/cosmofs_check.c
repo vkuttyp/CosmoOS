@@ -986,21 +986,24 @@ static bool report_clean(const struct cosmofs_check_report *r)
            !r->partial;
 }
 
-FRAME_EXEMPT_BEGIN(cosmofs_check)   /* scripts/frame-baseline.txt: 2336 bytes */
 int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags)
 {
     struct cfs *fs = cfs_of(mnt);
     if (fs == NULL)
         return -EINVAL;
 
-    struct cosmofs_check_report rep;
-    memset(&rep, 0, sizeof(rep));
-    struct check ck = { .fs = fs, .rep = &rep, .flags = flags };
+    /* The report is about 1.6 KiB: on the heap, not the kernel stack
+     * (scripts/frame-baseline.txt). */
+    struct cosmofs_check_report *rep = kzalloc(sizeof(*rep));
+    if (rep == NULL)
+        return -ENOMEM;
+    struct check ck = { .fs = fs, .rep = rep, .flags = flags };
     uint64_t t0 = clock_now_ns();
 
     mutex_lock(&fs->lock);
     if (fs->failed) {
         mutex_unlock(&fs->lock);
+        kfree(rep);
         return -EIO;
     }
     int rc = bitmap_alloc(&ck.seen, fs->nblocks);
@@ -1035,9 +1038,10 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         kfree(ck.name_seen);
         kfree(ck.dup_blk);
         kfree(ck.dup_cmp);
+        kfree(rep);
         return rc;   /* -ENOMEM before the walk, never half way through it */
     }
-    rep.bytes_allocated = (uint64_t)(ck.seen.nchunks + ck.live.nchunks + ck.reach.nchunks + ck.alive.nchunks +
+    rep->bytes_allocated = (uint64_t)(ck.seen.nchunks + ck.live.nchunks + ck.reach.nchunks + ck.alive.nchunks +
                                      ck.links.nchunks + ck.nlink.nchunks) * CFS_BLOCK +
                           CFS_CHECK_NAMEBYTES + 2u * CFS_BLOCK;
 
@@ -1085,8 +1089,8 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         bitmap_set(&ck.reach, CFS_ROOT_INO);
         walk_dir(&ck, CFS_ROOT_INO, &root, 0);
     } else {
-        name_it(&rep.unreadable, CFS_ROOT_INO);
-        rep.partial = true;
+        name_it(&rep->unreadable, CFS_ROOT_INO);
+        rep->partial = true;
     }
 
     compare(&ck);
@@ -1104,25 +1108,25 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     kfree(ck.dup_blk);
     kfree(ck.dup_cmp);
 
-    rep.clean = report_clean(&rep);
-    rep.elapsed_ns = clock_since_ns(t0);
+    rep->clean = report_clean(rep);
+    rep->elapsed_ns = clock_since_ns(t0);
     if (out)
-        *out = rep;
-    if (!rep.clean && rep.unreadable.count != 0)
+        *out = *rep;
+    if (!rep->clean && rep->unreadable.count != 0)
         kwarn("cosmofs: check: first unreadable block 0x%llx",
-              (unsigned long long)rep.unreadable.name[0]);
-    if (!rep.clean)
+              (unsigned long long)rep->unreadable.name[0]);
+    if (!rep->clean)
         kwarn("cosmofs: check: %llu leaked, %llu free-in-use, %llu cross-linked, %llu bad nlink, %llu orphan, "
               "%llu dangling, %llu bad entries, %llu counters, %llu cycles, %llu unordered extents, "
               "%llu overlapping extents, %llu duplicate names, %llu unreadable",
-              (unsigned long long)rep.alloc_not_seen.count, (unsigned long long)rep.seen_not_alloc.count,
-              (unsigned long long)rep.dup.count, (unsigned long long)rep.nlink_wrong.count,
-              (unsigned long long)rep.orphan.count, (unsigned long long)rep.dangling_entry.count,
-              (unsigned long long)rep.dir_bad.count, (unsigned long long)rep.counter_wrong.count,
-              (unsigned long long)rep.chain_cycle.count, (unsigned long long)rep.extent_order.count,
-              (unsigned long long)rep.extent_overlap.count, (unsigned long long)rep.dir_dup_name.count,
-              (unsigned long long)rep.unreadable.count);
+              (unsigned long long)rep->alloc_not_seen.count, (unsigned long long)rep->seen_not_alloc.count,
+              (unsigned long long)rep->dup.count, (unsigned long long)rep->nlink_wrong.count,
+              (unsigned long long)rep->orphan.count, (unsigned long long)rep->dangling_entry.count,
+              (unsigned long long)rep->dir_bad.count, (unsigned long long)rep->counter_wrong.count,
+              (unsigned long long)rep->chain_cycle.count, (unsigned long long)rep->extent_order.count,
+              (unsigned long long)rep->extent_overlap.count, (unsigned long long)rep->dir_dup_name.count,
+              (unsigned long long)rep->unreadable.count);
+    kfree(rep);
     return rc;
 }
-FRAME_EXEMPT_END(cosmofs_check)
 

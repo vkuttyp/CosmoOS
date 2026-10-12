@@ -83,7 +83,8 @@ are ignored).
 ### Configuration
 
 ```text
-/etc/pkg/repos.conf     one repository directory per line (Phase 10: /boot/repo)
+/etc/pkg/repos.conf     one repository directory per line (the live image: /boot/repo;
+                        an installed system: /var/lib/pkg/repo, written by cosmo-install)
 /etc/pkg/keys/*.pub     accepted Ed25519 public keys, 64 hex characters (tools/keys/*.pub format)
 ```
 

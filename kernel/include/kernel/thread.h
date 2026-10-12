@@ -205,6 +205,14 @@ bool thread_stack_contains(const struct thread *t, uintptr_t addr);
 
 /* Diagnostics. */
 void thread_dump_all(void);
+#if CONFIG_DEBUG
+/* Debug builds: measure every live thread's stack high-water mark and log
+ * the deepest (with the ones measured as threads were freed), and how many
+ * passed 75 % of their stack (docs/kernel/scheduler/design.md, "Stack
+ * use"). Takes the thread-list lock with interrupts off and reads 16 KiB
+ * per thread: once, at the end of a boot. */
+void thread_report_stack_use(void);
+#endif
 unsigned thread_count(void);
 
 #endif /* KERNEL_THREAD_H */

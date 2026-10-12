@@ -624,29 +624,32 @@ static struct file *file_of(int h, unsigned rights)
     return f;
 }
 
-FRAME_EXEMPT_BEGIN(sys_open)   /* scripts/frame-baseline.txt: 3128 bytes */
+/* The three path buffers (3 KiB) live on the heap, not the 16 KiB kernel
+ * stack (scripts/frame-baseline.txt). */
 static int64_t sys_open(struct syscall_args *a)
 {
     unsigned flags = (unsigned)a->a[1];
     if (flags & ~(COSMO_O_ACCMODE | COSMO_O_CREAT | COSMO_O_EXCL | COSMO_O_TRUNC | COSMO_O_APPEND |
                   COSMO_O_DIRECTORY | COSMO_O_NOFOLLOW | COSMO_O_NONBLOCK | COSMO_O_NOCTTY))
         return -EINVAL;   /* an unknown flag bit: see sys_mmap */
-    char path[VFS_PATH_MAX];
+    char *path = kmalloc(3 * VFS_PATH_MAX, 0);
+    if (path == NULL)
+        return -ENOMEM;
+    char *base = path + VFS_PATH_MAX;
+    char *name = base + VFS_PATH_MAX;
     int rc = get_path(a->a[0], path);
     if (rc)
-        return rc;
+        goto out;
     uint32_t mode = (uint32_t)a->a[2];
     struct file *f;
-    char base[VFS_PATH_MAX];
-    struct vnode *cwd = process_cwd_snapshot(base, sizeof(base));
+    struct vnode *cwd = process_cwd_snapshot(base, VFS_PATH_MAX);
     /* A directory remembers the name its own walk took to it, from the
      * same snapshot, so a Linux program handed this handle can fchdir
      * into it (P31, P32). */
-    char name[VFS_PATH_MAX];
-    rc = vfs_open_named(cwd, base, path, flags, mode, &f, name, sizeof(name));
+    rc = vfs_open_named(cwd, base, path, flags, mode, &f, name, VFS_PATH_MAX);
     vnode_put(cwd);
     if (rc)
-        return rc;
+        goto out;
     if (f->vn->type == VNODE_DIR)
         file_set_dir_path(f, name);
     /* The access mode decides read and write; opening a file is what
@@ -663,30 +666,32 @@ static int64_t sys_open(struct syscall_args *a)
      * delegation narrows by giving READ alone (P31). */
     if (f->vn->type == VNODE_DIR)
         rights |= HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE;
-    int h = handle_install(&process_current()->handles, &f->obj, rights);
+    rc = handle_install(&process_current()->handles, &f->obj, rights);
     file_put(f);   /* the table holds its own reference */
-    return h;
+out:
+    kfree(path);
+    return rc;
 }
-FRAME_EXEMPT_END(sys_open)
 
 /* The three symbolic-link calls. readlink copies without a terminator,
  * as POSIX says and as the walk wants (docs/kernel-services/vfs/api.md). */
-FRAME_EXEMPT_BEGIN(sys_symlink)   /* scripts/frame-baseline.txt: 2096 bytes */
 static int64_t sys_symlink(struct syscall_args *a)
 {
-    char target[VFS_PATH_MAX], path[VFS_PATH_MAX];
-    int rc = strncpy_from_user(target, a->a[0], sizeof(target));
-    if (rc < 0)
-        return rc;
-    rc = get_path(a->a[1], path);
-    if (rc)
-        return rc;
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_symlink(cwd, path, target);
-    vnode_put(cwd);
+    char *target = kmalloc(2 * VFS_PATH_MAX, 0);   /* heap: see sys_open */
+    if (target == NULL)
+        return -ENOMEM;
+    char *path = target + VFS_PATH_MAX;
+    int rc = strncpy_from_user(target, a->a[0], VFS_PATH_MAX);
+    if (rc >= 0)
+        rc = get_path(a->a[1], path);
+    if (rc >= 0) {
+        struct vnode *cwd = process_cwd_get();
+        rc = vfs_symlink(cwd, path, target);
+        vnode_put(cwd);
+    }
+    kfree(target);
     return rc;
 }
-FRAME_EXEMPT_END(sys_symlink)
 
 static int64_t sys_readlink(struct syscall_args *a)
 {
@@ -836,22 +841,23 @@ static int64_t sys_rmdir(struct syscall_args *a)
     return rc;
 }
 
-FRAME_EXEMPT_BEGIN(sys_rename)   /* scripts/frame-baseline.txt: 2072 bytes */
 static int64_t sys_rename(struct syscall_args *a)
 {
-    char oldp[VFS_PATH_MAX], newp[VFS_PATH_MAX];
+    char *oldp = kmalloc(2 * VFS_PATH_MAX, 0);   /* heap: see sys_open */
+    if (oldp == NULL)
+        return -ENOMEM;
+    char *newp = oldp + VFS_PATH_MAX;
     int rc = get_path(a->a[0], oldp);
-    if (rc)
-        return rc;
-    rc = get_path(a->a[1], newp);
-    if (rc)
-        return rc;
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_rename(cwd, oldp, newp);
-    vnode_put(cwd);
+    if (rc == 0)
+        rc = get_path(a->a[1], newp);
+    if (rc == 0) {
+        struct vnode *cwd = process_cwd_get();
+        rc = vfs_rename(cwd, oldp, newp);
+        vnode_put(cwd);
+    }
+    kfree(oldp);
     return rc;
 }
-FRAME_EXEMPT_END(sys_rename)
 
 static int64_t sys_getdents(struct syscall_args *a)
 {

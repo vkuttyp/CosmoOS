@@ -3,6 +3,7 @@
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/thread.h>
+#include <kernel/uaccess.h>
 #include <arch/irq.h>
 #include <arch/user.h>
 #include <aarch64/platform.h>
@@ -175,4 +176,37 @@ bool arch_user_fpu_image_restore(const void *buf)
     area.fpcr = img->fpcr;
     memcpy(area.vregs, img->vregs, sizeof(area.vregs));
     return aarch64_fpu_set_current(&area);
+}
+
+/* --- native signal frames (arch/user.h) ---------------------------------- */
+
+uint64_t arch_sigframe_place(const struct arch_user_regs *r, size_t size)
+{
+    return (r->sp - size) & ~15ull;   /* the frame record goes under it */
+}
+
+int arch_sigframe_enter(struct arch_user_regs *r, uint64_t frame, uint64_t handler, uint64_t restorer,
+                        uint64_t sig, uint64_t info)
+{
+    /* The link register carries the restorer, so a handler returns
+     * through it the way it returns from anything. Below the frame sits
+     * the frame record -- the interrupted fp and lr -- so that a debugger
+     * unwinding out of a handler finds the code the signal interrupted. */
+    uint64_t sp = frame - 16;
+    uint64_t record[2] = { r->x[29], r->x[30] };
+    if (copy_to_user(sp, record, sizeof(record)))
+        return -EFAULT;
+    r->x[0] = sig;
+    r->x[1] = info;
+    r->x[2] = frame;
+    r->x[29] = sp;
+    r->x[30] = restorer;
+    r->sp = sp;
+    r->pc = handler;
+    return 0;
+}
+
+uint64_t arch_sigreturn_frame(const struct arch_user_regs *r)
+{
+    return r->sp + 16;   /* the restorer runs with sp at the frame record */
 }

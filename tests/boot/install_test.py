@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Roadmap M2's acceptance test: install to a blank disk, reboot from it,
-write a file, reboot, read it (docs/userland/testing.md, "test-install").
+write a file, reboot, read it (docs/userland/testing.md, "test-install");
+and, since roadmap M6, install a package from the repository the
+installer put on the disk.
 
     install_test.py --image cosmoos.img --workdir DIR [--stages install,...]
 
 Stages: `install`, then `reboot` (boot the installed disk alone -- no
 other disk attached -- check init switched to it, write /persist.txt,
-power off; boot it again and read the file back), then `fallback` (a
+power off; boot it again, read the file back and `pkg install hello`), then `fallback` (a
 live image whose command line names the blank scratch disk as root=, and
 re-signed with the build's key since the command line is signed: init says
 it cannot mount it and the live shell works).
@@ -259,7 +261,7 @@ def stage_install(args, results):
         need(out, r"^again-status=3$", "a second install without --force")
         need(out, r"already has a partition table; --force replaces it", "a second install without --force")
         out = b.run(f"mkdir /mnt/v && mount {root_dev} /mnt/v cosmofs && ls -1 /mnt/v/sbin && ls -1 /mnt/v && "
-                    "cat /mnt/v/etc/rc")
+                    "cat /mnt/v/etc/rc && cat /mnt/v/etc/pkg/repos.conf && ls -1 /mnt/v/var/lib/pkg/repo")
         out += b.status(f"cosmo-install --force {dev}", "busy-status")
         out += b.run("umount /mnt/v && echo look-ok")
         need(out, r"^busy-status=3$", "an install over a mounted disk")
@@ -267,6 +269,9 @@ def stage_install(args, results):
         need(out, r"^look-ok$", "the installed root")
         need(out, r"^cosmo-install$", "the installed /sbin")
         need(out, r"^svc boot$", "the installed /etc/rc")
+        # Roadmap M6: the repository is on the root and repos.conf names it.
+        need(out, r"^/var/lib/pkg/repo$", "the installed /etc/pkg/repos.conf")
+        need(out, r"^INDEX$", "the installed repository /var/lib/pkg/repo")
         for d in ("bin", "sbin", "etc", "dev", "proc", "tmp", "mnt", "var"):
             need(out, rf"^{d}$", f"the installed root's /{d}")
         rc = b.finish()
@@ -348,13 +353,20 @@ def stage_persist(args, results, inst, nonce):
         out = b.run("cat /persist.txt && echo read-ok")
         need(out, r"^read-ok$", "reading /persist.txt")
         need(out, rf"^{nonce}$", "reading /persist.txt")
+        # Roadmap M6: packages on the installed system, from the repository
+        # the installer put on its root, verified by the keys in its /etc.
+        out = b.status("pkg update && pkg install hello && hello && pkg list", "pkg-status")
+        need(out, r"^pkg-status=0$", "pkg install hello on the installed system")
+        need(out, r"^hello, world \(hello 1\.1\)$", "pkg install hello on the installed system")
+        need(out, r"^hello\s+1\.1\s+prints a greeting$", "pkg list on the installed system")
         rc = b.finish()
         if rc != EXIT_SUCCESS:
             raise Fail(f"persist boot: QEMU exit code {rc}")
     except Exception:
         b.kill()
         raise
-    results.append(f"persist: PASS in {b.elapsed():.1f}s (read back {nonce})")
+    results.append(f"persist: PASS in {b.elapsed():.1f}s (read back {nonce}; pkg install hello from "
+                   "/var/lib/pkg/repo)")
 
 
 def stage_fallback(args, results):

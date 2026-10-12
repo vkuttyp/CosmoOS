@@ -1407,8 +1407,10 @@ static bool selftest_quiesce_stress_pinned(const char **reason)
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu();
     struct stress_shared sh = { 0 };
-    struct stress_reader readers[CONFIG_MAX_CPUS];
-    struct thread *th[CONFIG_MAX_CPUS];
+    /* static: off the 16 KiB kernel stack (scripts/frame-baseline.txt); the
+     * runner runs one test at a time */
+    static struct stress_reader readers[CONFIG_MAX_CPUS];
+    static struct thread *th[CONFIG_MAX_CPUS];
     unsigned nr = 0;
 
     struct stress_obj *first = kzalloc(sizeof(*first));
@@ -1480,7 +1482,6 @@ static bool selftest_quiesce_stress_pinned(const char **reason)
  * this thread's CPU that must outlive its sleeps (S25); a callback or a
  * spinner parked on that other CPU must never find this thread queued
  * behind it. */
-FRAME_EXEMPT_BEGIN(selftest_quiesce_stress)   /* scripts/frame-baseline.txt: 2192 bytes */
 bool selftest_quiesce_stress(const char **reason)
 {
     cpumask_t saved = thread_pin_self();
@@ -1488,7 +1489,6 @@ bool selftest_quiesce_stress(const char **reason)
     thread_set_affinity_self(saved);
     return r;
 }
-FRAME_EXEMPT_END(selftest_quiesce_stress)
 
 
 /*

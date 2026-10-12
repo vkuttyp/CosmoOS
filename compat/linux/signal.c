@@ -193,7 +193,44 @@ int64_t lx_rt_sigreturn(struct syscall_args *a)
 }
 
 #elif defined(ARCH_AARCH64)
-FRAME_EXEMPT_BEGIN(linux_signal_frame)   /* scripts/frame-baseline.txt: 5344 bytes (AArch64; the x86-64 frame is small) */
+/*
+ * The AArch64 frame is about 4.7 KiB, 4 KiB of it the reserved area that
+ * holds the context records, so it is never assembled on the 16 KiB kernel
+ * stack (scripts/frame-baseline.txt): delivery zeroes the frame in user
+ * memory and writes each part at its offset, and the return reads back
+ * only the parts it uses. What the handler finds, and what the return
+ * accepts and refuses, are the same as when the frame was built whole.
+ */
+#define A64_OFF(member) offsetof(struct lx_rt_sigframe_a64, member)
+
+static const uint8_t a64_zero[256];
+
+static int zero_user(uint64_t dst, size_t len)
+{
+    while (len) {
+        size_t n = len < sizeof(a64_zero) ? len : sizeof(a64_zero);
+        if (copy_to_user(dst, a64_zero, n))
+            return -EFAULT;
+        dst += n;
+        len -= n;
+    }
+    return 0;
+}
+
+/* Fault exactly where a copy of all `len` bytes would have. */
+static int probe_user(uint64_t src, size_t len)
+{
+    uint8_t buf[256];
+    while (len) {
+        size_t n = len < sizeof(buf) ? len : sizeof(buf);
+        if (copy_from_user(buf, src, n))
+            return -EFAULT;
+        src += n;
+        len -= n;
+    }
+    return 0;
+}
+
 int linux_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act, const struct signal_info *info,
                        uint64_t blocked_before)
 {
@@ -204,17 +241,10 @@ int linux_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act, 
     uint64_t frame = sp;
     sp -= 16;   /* the frame record: the interrupted fp and lr */
 
-    struct lx_rt_sigframe_a64 f;
-    memset(&f, 0, sizeof(f));
-    fill_siginfo(&f.info, info);
-    f.uc.uc_stack = altstack_out(t, user_sp);
-    f.uc.uc_sigmask = blocked_before;
-    struct lx_sigcontext_a64 *mc = &f.uc.uc_mcontext;
-    mc->fault_address = info->source == SIGSRC_FAULT ? info->fault_addr : 0;
-    memcpy(mc->regs, r->x, sizeof(mc->regs));
-    mc->sp = r->sp;
-    mc->pc = r->pc;
-    mc->pstate = r->pstate;
+    struct lx_siginfo si;
+    fill_siginfo(&si, info);
+    struct lx_stack_t ss = altstack_out(t, user_sp);
+    uint64_t fault = info->source == SIGSRC_FAULT ? info->fault_addr : 0;
     /*
      * The reserved area holds a list of records: the FP/SIMD state, then
      * an esr_context (syndrome 0: not carried yet), then the terminator.
@@ -222,76 +252,87 @@ int linux_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act, 
      * a program built by an ordinary toolchain -- would otherwise return
      * into an interrupted function whose registers it had overwritten.
      */
-    unsigned off = 0;
     struct lx_fpsimd_context fp;
     memset(&fp, 0, sizeof(fp));
     fp.magic = LX_FPSIMD_MAGIC;
     fp.size = sizeof(fp);
-    if (arch_user_fpu_image_size() == sizeof(fp) - offsetof(struct lx_fpsimd_context, fpsr) &&
-        arch_user_fpu_image_save(&fp.fpsr)) {
-        memcpy(mc->reserved + off, &fp, sizeof(fp));
-        off += sizeof(fp);
-    }
+    bool have_fp = arch_user_fpu_image_size() == sizeof(fp) - offsetof(struct lx_fpsimd_context, fpsr) &&
+                   arch_user_fpu_image_save(&fp.fpsr);
     struct lx_esr_context esr = { .magic = LX_ESR_MAGIC, .size = sizeof(esr), .esr = 0 };
-    memcpy(mc->reserved + off, &esr, sizeof(esr));
-    off += sizeof(esr);
-    struct lx_ctx_terminator end = { .magic = 0, .size = 0 };
-    memcpy(mc->reserved + off, &end, sizeof(end));
+    uint64_t rsv = frame + A64_OFF(uc.uc_mcontext.reserved);
+    uint64_t esr_at = rsv + (have_fp ? sizeof(fp) : 0);
+    /* The terminator is eight zero bytes after the last record, which the
+     * zeroing already wrote. */
     uint64_t record[2] = { r->x[29], r->x[30] };
-    if (copy_to_user(frame, &f, sizeof(f)) || copy_to_user(sp, record, sizeof(record)))
+    if (zero_user(frame, sizeof(struct lx_rt_sigframe_a64)) ||
+        copy_to_user(frame + A64_OFF(info), &si, sizeof(si)) ||
+        copy_to_user(frame + A64_OFF(uc.uc_stack), &ss, sizeof(ss)) ||
+        copy_to_user(frame + A64_OFF(uc.uc_sigmask), &blocked_before, sizeof(blocked_before)) ||
+        copy_to_user(frame + A64_OFF(uc.uc_mcontext.fault_address), &fault, sizeof(fault)) ||
+        copy_to_user(frame + A64_OFF(uc.uc_mcontext.regs), r->x, sizeof(r->x)) ||
+        copy_to_user(frame + A64_OFF(uc.uc_mcontext.sp), &r->sp, sizeof(r->sp)) ||
+        copy_to_user(frame + A64_OFF(uc.uc_mcontext.pc), &r->pc, sizeof(r->pc)) ||
+        copy_to_user(frame + A64_OFF(uc.uc_mcontext.pstate), &r->pstate, sizeof(r->pstate)) ||
+        (have_fp && copy_to_user(rsv, &fp, sizeof(fp))) ||
+        copy_to_user(esr_at, &esr, sizeof(esr)) ||
+        copy_to_user(sp, record, sizeof(record)))
         return -EFAULT;
 
     r->x[0] = (uint64_t)info->sig;
-    r->x[1] = frame + offsetof(struct lx_rt_sigframe_a64, info);
-    r->x[2] = frame + offsetof(struct lx_rt_sigframe_a64, uc);
+    r->x[1] = frame + A64_OFF(info);
+    r->x[2] = frame + A64_OFF(uc);
     r->x[29] = sp;
     r->x[30] = (act->flags & SA_RESTORER) ? act->restorer : LX_SIGTRAMP;
     r->sp = sp;
     r->pc = act->handler;
     return 0;
 }
-FRAME_EXEMPT_END(linux_signal_frame)
 
-FRAME_EXEMPT_BEGIN(lx_rt_sigreturn)   /* scripts/frame-baseline.txt: 5456 bytes (AArch64; the x86-64 frame is small) */
 int64_t lx_rt_sigreturn(struct syscall_args *a)
 {
     struct thread *t = thread_current();
     struct arch_user_regs r;
     arch_user_regs_from_syscall(a->frame, &r);
     uint64_t frame = r.sp + 16;   /* the restorer runs with sp at the frame record */
-    struct lx_ucontext_a64 uc;
-    if (copy_from_user(&uc, frame + offsetof(struct lx_rt_sigframe_a64, uc), sizeof(uc))) {
+    uint64_t uc = frame + A64_OFF(uc);
+    const size_t mc = A64_OFF(uc.uc_mcontext) - A64_OFF(uc);
+    uint64_t mask;
+    if (probe_user(uc, sizeof(struct lx_ucontext_a64)) ||
+        copy_from_user(&mask, uc + offsetof(struct lx_ucontext_a64, uc_sigmask), sizeof(mask)) ||
+        copy_from_user(r.x, uc + mc + offsetof(struct lx_sigcontext_a64, regs), sizeof(r.x)) ||
+        copy_from_user(&r.sp, uc + mc + offsetof(struct lx_sigcontext_a64, sp), sizeof(r.sp)) ||
+        copy_from_user(&r.pc, uc + mc + offsetof(struct lx_sigcontext_a64, pc), sizeof(r.pc)) ||
+        copy_from_user(&r.pstate, uc + mc + offsetof(struct lx_sigcontext_a64, pstate), sizeof(r.pstate))) {
         struct signal_info info = { .sig = SIGSEGV, .source = SIGSRC_FAULT, .fault_addr = frame, .code = 1 };
         signal_send_thread(t, SIGSEGV, &info);
         t->syscall_nr = SIGNAL_NO_RESTART;
         return -EFAULT;
     }
-    memcpy(r.x, uc.uc_mcontext.regs, sizeof(r.x));
-    r.sp = uc.uc_mcontext.sp;
-    r.pc = uc.uc_mcontext.pc;
-    r.pstate = uc.uc_mcontext.pstate;
     /* Put the interrupted code's vector registers back, if the frame
      * still carries them: a handler is free to have used its own. The
      * records are walked rather than assumed, because a program may
-     * build its own frame. */
-    for (unsigned off = 0; off + sizeof(struct lx_ctx_terminator) <= sizeof(uc.uc_mcontext.reserved);) {
+     * build its own frame. A record that cannot be read ends the walk,
+     * as a malformed one does. */
+    const uint64_t rsv = uc + mc + offsetof(struct lx_sigcontext_a64, reserved);
+    const size_t rsv_len = sizeof(((struct lx_sigcontext_a64 *)0)->reserved);
+    for (unsigned off = 0; off + sizeof(struct lx_ctx_terminator) <= rsv_len;) {
         struct lx_ctx_terminator head;
-        memcpy(&head, uc.uc_mcontext.reserved + off, sizeof(head));
-        if (head.magic == 0 || head.size < sizeof(head) || head.size > sizeof(uc.uc_mcontext.reserved) - off)
+        if (copy_from_user(&head, rsv + off, sizeof(head)))
+            break;
+        if (head.magic == 0 || head.size < sizeof(head) || head.size > rsv_len - off)
             break;
         if (head.magic == LX_FPSIMD_MAGIC && head.size == sizeof(struct lx_fpsimd_context)) {
             struct lx_fpsimd_context fp;
-            memcpy(&fp, uc.uc_mcontext.reserved + off, sizeof(fp));
-            (void)arch_user_fpu_image_restore(&fp.fpsr);
+            if (copy_from_user(&fp, rsv + off, sizeof(fp)) == 0)
+                (void)arch_user_fpu_image_restore(&fp.fpsr);
             break;
         }
         off += head.size;
     }
-    signal_return(a->frame, &r, uc.uc_sigmask);
+    signal_return(a->frame, &r, mask);
     t->syscall_nr = SIGNAL_NO_RESTART;
     return (int64_t)r.x[0];
 }
-FRAME_EXEMPT_END(lx_rt_sigreturn)
 #endif
 
 /* --- the trampoline page and the exit hook ------------------------------------- */

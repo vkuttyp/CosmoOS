@@ -471,7 +471,35 @@ static struct nvme_queue *queue_for_this_cpu(struct nvme_ctrl *c)
     return c->ioq[raw_cpu_id() % c->nr_ioq];   /* a preference: every queue has its own lock, any CPU may use any */
 }
 
-FRAME_EXEMPT_BEGIN(nvme_submit)   /* scripts/frame-baseline.txt: 2784 bytes */
+/* The PRP entries of a request's mapped segments, in order: one per page
+ * each segment touches; only the first may start mid-page. The first goes
+ * to *first and the rest to list[0..]; either may be NULL to count only.
+ * Returns the count, or max + 1 once it passes `max`. */
+static unsigned prp_walk(const dma_addr_t *seg_dma, const uint32_t *seg_len, unsigned nsegs, uint64_t *first,
+                         uint64_t *list, unsigned max)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < nsegs; i++) {
+        dma_addr_t p = seg_dma[i];
+        uint32_t left = seg_len[i];
+        while (left) {
+            uint32_t in_page = (uint32_t)(PAGE_SIZE - (p & (PAGE_SIZE - 1)));
+            if (in_page > left)
+                in_page = left;
+            if (n == max)
+                return max + 1;
+            if (n == 0 && first)
+                *first = p;
+            else if (n > 0 && list)
+                list[n - 1] = p;
+            n++;
+            p += in_page;
+            left -= in_page;
+        }
+    }
+    return n;
+}
+
 static int nvme_submit(struct blkdev *bd, struct bio *bio)
 {
     struct nvme_ns *ns = bd->priv;
@@ -480,11 +508,12 @@ static int nvme_submit(struct blkdev *bd, struct bio *bio)
         return -EIO;
     struct nvme_queue *q = queue_for_this_cpu(c);
 
-    /* Map the segments and lay out the PRP entries before taking the
-     * queue lock: no allocation, no sleeping, but no need to hold it. */
+    /* Map the segments and count the PRP entries before taking the queue
+     * lock: no allocation, no sleeping, but no need to hold it. The entries
+     * themselves are written under it, straight into the slot's list, so
+     * the frame carries no copy of them (scripts/frame-baseline.txt). */
     dma_addr_t seg_dma[NVME_MAX_PAGES];
     uint32_t seg_len[NVME_MAX_PAGES];
-    uint64_t prps[NVME_MAX_PAGES + 1];
     unsigned nsegs = 0, nprps = 0;
     enum dma_dir dir = bio->dir == BIO_WRITE ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
     if (bio->dir != BIO_FLUSH) {
@@ -503,22 +532,12 @@ static int nvme_submit(struct blkdev *bd, struct bio *bio)
             seg_dma[nsegs] = d;
             seg_len[nsegs] = v.len;
             nsegs++;
-            /* One PRP per page the segment touches; only the first may start mid-page. */
-            dma_addr_t p = d;
-            uint32_t left = v.len;
-            while (left) {
-                uint32_t in_page = (uint32_t)(PAGE_SIZE - (p & (PAGE_SIZE - 1)));
-                if (in_page > left)
-                    in_page = left;
-                if (nprps == ARRAY_SIZE(prps)) {
-                    for (unsigned k = 0; k < nsegs; k++)
-                        dma_unmap(bd->dev, seg_dma[k], seg_len[k], dir);
-                    return -EINVAL;
-                }
-                prps[nprps++] = p;
-                p += in_page;
-                left -= in_page;
-            }
+        }
+        nprps = prp_walk(seg_dma, seg_len, nsegs, NULL, NULL, NVME_MAX_PAGES + 1);
+        if (nprps > NVME_MAX_PAGES + 1) {
+            for (unsigned k = 0; k < nsegs; k++)
+                dma_unmap(bd->dev, seg_dma[k], seg_len[k], dir);
+            return -EINVAL;
         }
     }
 
@@ -562,12 +581,12 @@ static int nvme_submit(struct blkdev *bd, struct bio *bio)
         sqe.cdw10 = (uint32_t)slba;
         sqe.cdw11 = (uint32_t)(slba >> 32);
         sqe.cdw12 = bio->nsectors - 1;
-        sqe.prp1 = prps[0];
+        uint64_t prp1 = 0;   /* the entry is packed: no pointer into it */
+        (void)prp_walk(seg_dma, seg_len, nsegs, &prp1, cmd->prp_list, NVME_MAX_PAGES + 1);
+        sqe.prp1 = prp1;
         if (nprps == 2) {
-            sqe.prp2 = prps[1];
+            sqe.prp2 = cmd->prp_list[0];
         } else if (nprps > 2) {
-            for (unsigned i = 1; i < nprps; i++)
-                cmd->prp_list[i - 1] = prps[i];
             dma_sync_for_device(bd->dev, cmd->prp_dma, PAGE_SIZE, DMA_TO_DEVICE);
             sqe.prp2 = cmd->prp_dma;
         }
@@ -577,7 +596,6 @@ static int nvme_submit(struct blkdev *bd, struct bio *bio)
     spin_unlock_irqrestore(&q->lock, s);
     return 0;
 }
-FRAME_EXEMPT_END(nvme_submit)
 
 #define NVME_DISABLE_PENDING 0u   /* the first controller_die has not finished */
 #define NVME_DISABLE_ACKED   1u   /* RDY fell and every slot was released */
@@ -799,7 +817,6 @@ static bool nvme_remove_queues(struct nvme_ctrl *c, bool stopped)
     return true;
 }
 
-FRAME_EXEMPT_BEGIN(nvme_probe)   /* scripts/frame-baseline.txt: 4336 bytes */
 static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
 {
     (void)id;
@@ -942,13 +959,20 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
     rc = identify(c, NVME_CNS_ACTIVE_LIST, 0, idbuf, id_dma);
     if (rc)
         goto fail_queues;
-    uint32_t list[1024];
-    memcpy(list, idbuf, sizeof(list));
+    /* A copy, because add_namespace reuses idbuf; 4 KiB, so on the heap
+     * rather than the kernel stack (scripts/frame-baseline.txt). */
+    uint32_t *list = kmalloc(PAGE_SIZE, 0);
+    if (list == NULL) {
+        rc = -ENOMEM;
+        goto fail_queues;
+    }
+    memcpy(list, idbuf, PAGE_SIZE);
     unsigned added = 0;
-    for (unsigned i = 0; i < 1024 && list[i] != 0; i++) {
+    for (unsigned i = 0; i < PAGE_SIZE / sizeof(list[0]) && list[i] != 0; i++) {
         if (add_namespace(c, list[i], idbuf, id_dma) == 0)
             added++;
     }
+    kfree(list);
     dma_free(&pdev->dev, PAGE_SIZE, idbuf, id_dma);
     idbuf = NULL;
     pdev->dev.drvdata = c;
@@ -984,7 +1008,6 @@ fail:
     kfree(c);
     return rc;
 }
-FRAME_EXEMPT_END(nvme_probe)
 
 static void nvme_remove(struct pci_device *pdev)
 {

@@ -136,14 +136,14 @@ static int64_t bad_frame(struct thread *t, uint64_t addr)
     return -EFAULT;
 }
 
-#if defined(ARCH_X86_64)
-
 /*
- * The handler is entered as an ordinary call: the restorer's address is
- * pushed where a CALL would have left it, so a handler that simply
- * returns lands in the restorer, and the stack pointer at entry is
- * 8 mod 16 as the ABI promises. `sigreturn` therefore runs with rsp
- * exactly at the frame.
+ * The frame goes below the interrupted stack pointer, and the handler is
+ * entered with the return path the architecture's calling convention
+ * expects (arch_sigframe_enter in kernel/arch/<arch>/user.c: the
+ * restorer's address as a return address on x86-64, a frame record and
+ * the link register on AArch64), so a handler that simply returns lands
+ * in the restorer, whose `sigreturn` finds the frame again
+ * (arch_sigreturn_frame).
  */
 int native_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act,
                         const struct signal_info *info, uint64_t blocked_before)
@@ -154,82 +154,12 @@ int native_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act,
     struct native_sigframe f;
     fill_frame(&f, r, info, blocked_before);
 
-    /* Below the red zone the ABI grants leaf functions, 16-byte aligned,
-     * with the return address in the eight bytes under the frame. */
-    uint64_t frame = ((r->rsp - 128) - sizeof(f)) & ~15ull;
-    uint64_t sp = frame - 8;
-    if (copy_to_user(frame, &f, sizeof(f)) || copy_to_user(sp, &act->restorer, 8))
+    uint64_t frame = arch_sigframe_place(r, sizeof(f));
+    if (copy_to_user(frame, &f, sizeof(f)))
         return -EFAULT;
-
-    r->rdi = (uint64_t)info->sig;
-    r->rsi = frame + offsetof(struct native_sigframe, info);
-    r->rdx = frame;
-    r->rax = 0;
-    r->rsp = sp;
-    r->rip = act->handler;
-    r->rflags &= ~(0x400ull | 0x100ull | 0x10000ull);   /* DF, TF, RF */
-    return 0;
+    return arch_sigframe_enter(r, frame, act->handler, act->restorer, (uint64_t)info->sig,
+                               frame + offsetof(struct native_sigframe, info));
 }
-
-static uint64_t sigreturn_frame_addr(const struct arch_user_regs *r)
-{
-    return r->rsp;   /* the handler's RET popped the restorer's address */
-}
-
-#elif defined(ARCH_AARCH64)
-
-/*
- * The link register carries the restorer, so a handler returns through
- * it the way it returns from anything. Below the frame sits the frame
- * record -- the interrupted fp and lr -- so that a debugger unwinding
- * out of a handler finds the code the signal interrupted.
- */
-int native_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act,
-                        const struct signal_info *info, uint64_t blocked_before)
-{
-    if (act->restorer == 0)
-        return -EFAULT;
-
-    struct native_sigframe f;
-    fill_frame(&f, r, info, blocked_before);
-
-    uint64_t frame = (r->sp - sizeof(f)) & ~15ull;
-    uint64_t sp = frame - 16;
-    uint64_t record[2] = { r->x[29], r->x[30] };
-    if (copy_to_user(frame, &f, sizeof(f)) || copy_to_user(sp, record, sizeof(record)))
-        return -EFAULT;
-
-    r->x[0] = (uint64_t)info->sig;
-    r->x[1] = frame + offsetof(struct native_sigframe, info);
-    r->x[2] = frame;
-    r->x[29] = sp;
-    r->x[30] = act->restorer;
-    r->sp = sp;
-    r->pc = act->handler;
-    return 0;
-}
-
-static uint64_t sigreturn_frame_addr(const struct arch_user_regs *r)
-{
-    return r->sp + 16;   /* the restorer runs with sp at the frame record */
-}
-
-#else
-
-int native_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act,
-                        const struct signal_info *info, uint64_t blocked_before)
-{
-    (void)r; (void)act; (void)info; (void)blocked_before;
-    return -ENOSYS;
-}
-
-static uint64_t sigreturn_frame_addr(const struct arch_user_regs *r)
-{
-    (void)r;
-    return 0;
-}
-
-#endif
 
 /* --- the system calls ---------------------------------------------------- */
 
@@ -303,7 +233,7 @@ int64_t sys_sigreturn(struct syscall_args *a)
     struct thread *t = thread_current();
     struct arch_user_regs r;
     arch_user_regs_from_syscall(a->frame, &r);
-    uint64_t addr = sigreturn_frame_addr(&r);
+    uint64_t addr = arch_sigreturn_frame(&r);
     struct native_sigframe f;
     if (copy_from_user(&f, addr, sizeof(f)) || f.magic != NATIVE_SIGFRAME_MAGIC)
         return bad_frame(t, addr);

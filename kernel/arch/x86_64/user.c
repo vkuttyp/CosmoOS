@@ -8,6 +8,7 @@
 #include <kernel/percpu.h>
 #include <kernel/syscall.h>
 #include <kernel/thread.h>
+#include <kernel/uaccess.h>
 
 #include <arch/irq.h>
 #include <arch/user.h>
@@ -279,3 +280,37 @@ int64_t arch_user_regs_result_in_frame(const void *frame) { return (int64_t)((co
 size_t arch_user_fpu_image_size(void) { return X86_FXSAVE_SIZE; }
 bool arch_user_fpu_image_save(void *buf) { return x86_fpu_legacy_get(buf); }
 bool arch_user_fpu_image_restore(const void *buf) { return x86_fpu_legacy_set(buf); }
+
+/* --- native signal frames (arch/user.h) ---------------------------------- */
+
+uint64_t arch_sigframe_place(const struct arch_user_regs *r, size_t size)
+{
+    /* Below the red zone the ABI grants leaf functions, 16-byte aligned,
+     * with the return address in the eight bytes under the frame. */
+    return ((r->rsp - 128) - size) & ~15ull;
+}
+
+int arch_sigframe_enter(struct arch_user_regs *r, uint64_t frame, uint64_t handler, uint64_t restorer,
+                        uint64_t sig, uint64_t info)
+{
+    /* Entered as an ordinary call: the restorer's address sits where a
+     * CALL would have left it, so the stack pointer at entry is 8 mod 16
+     * as the ABI promises, and `sigreturn` runs with rsp exactly at the
+     * frame. */
+    uint64_t sp = frame - 8;
+    if (copy_to_user(sp, &restorer, 8))
+        return -EFAULT;
+    r->rdi = sig;
+    r->rsi = info;
+    r->rdx = frame;
+    r->rax = 0;
+    r->rsp = sp;
+    r->rip = handler;
+    r->rflags &= ~(0x400ull | 0x100ull | 0x10000ull);   /* DF, TF, RF */
+    return 0;
+}
+
+uint64_t arch_sigreturn_frame(const struct arch_user_regs *r)
+{
+    return r->rsp;   /* the handler's RET popped the restorer's address */
+}

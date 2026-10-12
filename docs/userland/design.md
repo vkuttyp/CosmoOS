@@ -557,10 +557,15 @@ Roadmap M2. Non-interactive; everything through `/dev/blkctl`
    `boot-disk`): that disk would not boot its own root.
 5. `FORMAT` partition 2 as cosmofs, mount it at `/mnt/cosmo-install`,
    create `/dev`, `/proc`, `/tmp` (01777), `/mnt`, `/var`, `/var/log`,
-   `/boot`, and copy `/bin`, `/sbin`, `/etc` and, when present, `/usr`
-   and `/var/db` (files with their modes, directories, symbolic links;
-   device nodes, FIFOs and sockets are not copied). `/boot` stays empty:
-   the boot archive is on the ESP.
+   `/var/lib/pkg`, `/boot`, and copy `/bin`, `/sbin`, `/etc` and, when
+   present, `/usr` and `/var/db` (files with their modes, directories,
+   symbolic links; device nodes, FIFOs and sockets are not copied).
+   `/boot` stays empty: the boot archive is on the ESP. Since roadmap M6
+   the image's package repository (`/boot/repo`, the boot archive's
+   `repo/`) is copied to `/var/lib/pkg/repo` and the installed
+   `/etc/pkg/repos.conf` names that directory, so `pkg` works on the
+   installed system; the keys that verify it (`/etc/pkg/keys`) came with
+   `/etc`.
 6. `sync`, unmount, flush the disk, print the result.
 
 Any failure after the table was written unmounts what it mounted and

@@ -1225,11 +1225,12 @@ static void make_note_elf(struct note_elf *e, uint32_t namesz, uint32_t descsz, 
 }
 
 /* Phase 11: the CosmoOS note marks native programs; a Linux test program lacks it. */
-FRAME_EXEMPT_BEGIN(selftest_linux_elf)   /* scripts/frame-baseline.txt: 2704 bytes */
 bool selftest_linux_elf(const char **reason)
 {
-    struct note_elf ne;
-    struct elf_info ninfo;
+    /* static: off the 16 KiB kernel stack (scripts/frame-baseline.txt); the
+     * runner runs one test at a time */
+    static struct note_elf ne;
+    static struct elf_info ninfo, info;
     const char *nwhy;
     make_note_elf(&ne, 8, 4, 1, "CosmoOS");
     put32(ne.note + 20, 1);                    /* desc: ABI version */
@@ -1249,7 +1250,6 @@ bool selftest_linux_elf(const char **reason)
 
     const void *image;
     size_t image_size;
-    struct elf_info info;
     const char *why;
     if (bootarchive_find("init", &image, &image_size)) {
         CHECK(elf_validate(image, image_size, USER_LO, USER_HI, &info, &why) == 0);
@@ -1263,7 +1263,6 @@ bool selftest_linux_elf(const char **reason)
     }
     return true;
 }
-FRAME_EXEMPT_END(selftest_linux_elf)
 
 /*
  * A note on the children these tests run.

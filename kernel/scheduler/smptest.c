@@ -263,13 +263,13 @@ static void spin_observe(void *arg)
     }
 }
 
-FRAME_EXEMPT_BEGIN(selftest_smp_parallel)   /* scripts/frame-baseline.txt: 2176 bytes */
 bool selftest_smp_parallel(const char **reason)
 {
     unsigned before = thread_count();
     unsigned n = cpu_count();
-    struct spin_work work[CONFIG_MAX_CPUS];
-    struct thread *t[CONFIG_MAX_CPUS];
+    /* static: off the 16 KiB kernel stack (scripts/frame-baseline.txt) */
+    static struct spin_work work[CONFIG_MAX_CPUS];
+    static struct thread *t[CONFIG_MAX_CPUS];
 
     for (unsigned c = 0; c < n; c++) {
         work[c].iterations = 0;
@@ -313,7 +313,6 @@ bool selftest_smp_parallel(const char **reason)
     CHECK(threads_settle(before));
     return true;
 }
-FRAME_EXEMPT_END(selftest_smp_parallel)
 
 /* --- cross-CPU function call lands on the target --- */
 

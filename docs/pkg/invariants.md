@@ -107,7 +107,9 @@ the root filesystem.
 ## Gaps (documented, not invariants)
 
 - No fetcher: repositories are directories (`/boot/repo` from the boot
-  archive).
+  archive on the live image, `/var/lib/pkg/repo` on an installed system:
+  the image's repository as the installer copied it, so an installed
+  system has the packages its image was built with and no newer ones).
 - No rollback of a completed upgrade (section 47 "eventually").
 - Recipes describe in-tree C sources only: no `source:` URL, `checksum:`,
   `patches:` or build steps.

@@ -139,7 +139,6 @@ static int read_executable(const char *path, struct process_image *img)
     return 0;
 }
 
-FRAME_EXEMPT_BEGIN(process_spawn)   /* scripts/frame-baseline.txt: 3616 bytes */
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   bool new_domain, bool new_mountns, bool new_utsns, const struct process_spawn_cred *cred,
@@ -205,26 +204,38 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         .gid = cred ? cred->gid : 0,
         .priv_drop = priv_drop,
     };
-    char cwd_path[sizeof(cur->cwd_path_locked)];
+    /* The child's cwd name and the caller's base: 2 KiB, on the heap
+     * rather than the kernel stack (scripts/frame-baseline.txt), and
+     * freed at out_cwd once the child has copied the name. */
+    char *cwd_path = NULL;
     if (cwd) {
+        const size_t n = sizeof(cur->cwd_path_locked);
+        cwd_path = kmalloc(2 * n, 0);
+        if (cwd_path == NULL) {
+            rc = -ENOMEM;
+            goto out_cwd;
+        }
         /*
          * One snapshot for the base and the lookup, for the reason
          * `process_chdir` takes one: separately, the path can be of one
          * directory and the vnode of another
          * (docs/audit/next-subsystem-cwd-ref.md).
          */
-        char base[sizeof(cur->cwd_path_locked)];
-        struct vnode *cur_cwd = process_cwd_snapshot(base, sizeof(base));
+        char *base = cwd_path + n;
+        struct vnode *cur_cwd = process_cwd_snapshot(base, n);
         /* The child is given the name the walk took (P32). */
         struct vnode *vn = NULL;
-        rc = vfs_lookup_named(cur_cwd, base, cwd, &vn, cwd_path, sizeof(cwd_path));
+        rc = vfs_lookup_named(cur_cwd, base, cwd, &vn, cwd_path, n);
         if (cur_cwd)
             vnode_put(cur_cwd);
+        /* Through out_cwd, which puts the namespaces made above: these
+         * two returned directly and leaked them. */
         if (rc)
-            return rc;
+            goto out_cwd;
         if (vn->type != VNODE_DIR) {
             vnode_put(vn);
-            return -ENOTDIR;
+            rc = -ENOTDIR;
+            goto out_cwd;
         }
         attr.cwd = vn;
         attr.cwd_path = cwd_path;
@@ -334,9 +345,9 @@ out_cwd:
         mountns_put(mntns);     /* likewise; on failure this is the last one */
     if (utsns)
         utsns_put(utsns);
+    kfree(cwd_path);
     return rc;
 }
-FRAME_EXEMPT_END(process_spawn)
 
 /* --- exec from a path (docs/kernel/process/design.md, "exec") ---------- */
 

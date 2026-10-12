@@ -542,12 +542,14 @@ static void nvme_worker_free(uint8_t *buf)
     kfree(buf);
 }
 
-FRAME_EXEMPT_BEGIN(nvme_run_workers)   /* scripts/frame-baseline.txt: 2192 bytes */
 static bool nvme_run_workers(struct blkdev *bd, unsigned ncpu, unsigned *started_out)
 {
     bool ok = true;
-    struct nvme_worker workers[CONFIG_MAX_CPUS];
-    struct thread *threads[CONFIG_MAX_CPUS] = {NULL};
+    /* static: off the 16 KiB kernel stack (scripts/frame-baseline.txt);
+     * every worker is joined before this returns */
+    static struct nvme_worker workers[CONFIG_MAX_CPUS];
+    static struct thread *threads[CONFIG_MAX_CPUS];
+    memset(threads, 0, sizeof(threads));
     unsigned started = 0;
     for (unsigned c = 0; c < ncpu && c < CONFIG_MAX_CPUS; c++) {
         if (!cpu_online(c))
@@ -576,7 +578,6 @@ static bool nvme_run_workers(struct blkdev *bd, unsigned ncpu, unsigned *started
     *started_out = started;
     return ok;
 }
-FRAME_EXEMPT_END(nvme_run_workers)
 
 bool selftest_nvme_worker_cleanup(const char **reason)
 {
@@ -612,7 +613,6 @@ bool selftest_nvme_worker_cleanup(const char **reason)
     return true;
 }
 
-FRAME_EXEMPT_BEGIN(selftest_nvme)   /* scripts/frame-baseline.txt: 2264 bytes */
 bool selftest_nvme(const char **reason)
 {
     struct blkdev *bd = blk_find("nvme0n1");
@@ -724,7 +724,6 @@ bool selftest_nvme(const char **reason)
 #undef STEP
     return true;
 }
-FRAME_EXEMPT_END(selftest_nvme)
 
 void selftest_nvme_mark_done(struct bio *bio)
 {

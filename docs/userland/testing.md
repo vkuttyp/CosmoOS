@@ -206,7 +206,11 @@ typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
   `echo NONCE > /persist.txt && sync` and `/dev/console` listed; on exit,
   `init: disk root synced`.
 - **persist**: the same disk booted again: `cat /persist.txt` prints the
-  nonce.
+  nonce; then `pkg update && pkg install hello && hello && pkg list` exits
+  0 with `hello, world (hello 1.1)` and `hello 1.1 prints a greeting`, from
+  the repository the installer copied to `/var/lib/pkg/repo` (roadmap M6;
+  the install stage also checks the installed `repos.conf` names it and
+  that it holds `INDEX`).
 - **fallback**: a copy of the live image whose command line says
   `root=vda` (the blank scratch disk on both machines), re-signed with the
   build's key (`--key`, `scripts/mkmanifest.py resign`): the kernel
