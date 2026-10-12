@@ -265,7 +265,12 @@ EXPECT = {
 
 
 def check_field(kind, name, values, key):
-    if len(set(values)) != len(values):
+    # Ten draws from 2^13 pages (a static image's break) collide about
+    # once in 180 boots (45 pairs / 8192): one repeated pair there is
+    # chance, two is not (PR #369 review). Every wider field must be
+    # distinct.
+    allowed_repeats = 1 if key == "brk-static" else 0
+    if len(values) - len(set(values)) > allowed_repeats:
         raise Fail(f"aslr {kind}: {name} repeats across {len(values)} runs: {[hex(v) for v in values]}")
     varying = 0
     for v in values:

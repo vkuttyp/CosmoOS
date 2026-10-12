@@ -84,7 +84,7 @@ requires it).
 |---|---|---|
 | Layout draw | `image_build` draws 24 bytes from the pool (`random_get_bytes`: never blocks; a may-be-early caller in `docs/kernel/security/design.md` §6) at every spawn and exec: stack top `USER_STACK_TOP - r*4K`, `r < 2^22`; initial stack pointer a further `sp_offset`, a 16-byte multiple below 4 KiB (8 bits; the builder lays the frame out from `stack_top - sp_offset`); mmap base `USER_MMAP_BASE + r*4K`, `r < 2^28`; `ET_DYN` bias `USER_PIE_BASE + r*4K`, `r < 2^28`. Static asserts keep the four ranges apart. | `kernel/process/process.c`, `kernel/include/kernel/process.h` |
 | mmap base | `struct vm_space` gains `mmap_base` (copied by `vm_space_fork`: a fork child keeps its parent's layout, as on Linux); `user_mmap_base(space)` replaces `USER_MMAP_BASE` in native and Linux `mmap` and in `shmat`. The `ET_DYN` interpreter now loads at the first free range above the mmap base, as Linux places it, instead of the fixed `USER_INTERP_BASE`. | `kernel/include/kernel/vmm.h`, `kernel/memory/vmm.c`, `kernel/syscall/native.c`, `compat/linux/syscalls.c` |
-| Break | `linux_process_init`: `brk_start = page_up(info.hi) + r*4K`, `r < 2^13`, drawn at each exec. | `compat/linux/syscalls.c` |
+| Break | `linux_process_init`: `brk_start = page_up(info.hi) + r*4K`, `r < 2^13`, drawn at each exec; if that page is mapped (a fixed-address interpreter loaded above the executable), the first free page above it (PR #369 review). | `compat/linux/syscalls.c` |
 | W^X | The map and protect paths refused W+X already (P3). New: `vm_user_wx_violations(space)` counts W+X regions and an executable stack; debug builds run it over every image `image_build` makes and panic on any. | `kernel/memory/vmm.c`, `vmm.h`, `process.c` |
 | Tests | `tests/security/aslr.c` built as `aslr-static` (`ET_EXEC`) and `aslr-pie` (static PIE: `-static-pie`, musl's `rcrt1.o`) with the BusyBox port's musl sysroot -- so both architectures, unlike `hello_musl` -- and `aslr-native.c`; all three in every image under `/boot/tests/security/`. `test-security` stage `aslr`: ten runs each; every stack, stack pointer, mmap and break distinct; the varying bits inside the designed range and at least the designed count less four; the PIE's load address varying likewise, the `ET_EXEC` and native load addresses fixed; every run reports code on its stack faulting with SIGSEGV and W+X `mmap`/`mprotect` refused with EINVAL. `lxdyn`/`lxinterp` accept any page of their ranges instead of the old fixed addresses. | `tests/security/`, `tests/boot/security_test.py`, `tests/linux/lxdyn.c`, `lxinterp.c`, `Makefile` |
 
@@ -114,7 +114,11 @@ headroom below a moved initial frame".
 
 ### Acceptance c (local, release)
 
-x86-64, ten runs each (bits = how many bits differed across the ten):
+x86-64, ten runs each. "Bits" counts the bit positions in which any of
+the ten values differed from the first: the random term is added, so a
+carry can flip a bit above the drawn ones (the static break draws 13 bits
+of pages and differed in 14 positions; the harness allows the designed
+range plus the carry, `security_test.py` `EXPECT`):
 
 | Probe | stack | sp | mmap | brk | load |
 |---|---|---|---|---|---|

@@ -92,8 +92,13 @@ static int linux_process_init(struct process *p, const struct elf_info *info)
         return -ENOMEM;
     /* The break starts a random number of pages above the image, up to
      * 2^ASLR_BRK_BITS (roadmap M5, as Linux's randomize_va_space=2); the
-     * gap below it stays unmapped. Drawn once per exec. */
-    ls->brk_start = page_align_up(info->hi) + ((random_u64() & (((uint64_t)1 << ASLR_BRK_BITS) - 1)) << PAGE_SHIFT);
+     * gap below it stays unmapped. Drawn once per exec. The image is
+     * loaded already: a fixed-address interpreter there pushes the start
+     * to the first free page above the draw, so brk(0) never names a page
+     * someone else maps (PR #369 review). */
+    uint64_t brk = page_align_up(info->hi) + ((random_u64() & (((uint64_t)1 << ASLR_BRK_BITS) - 1)) << PAGE_SHIFT);
+    uint64_t free = vm_user_find_free(p->space, brk, PAGE_SIZE);
+    ls->brk_start = free != 0 ? free : brk;
     ls->brk = ls->brk_start;
     spinlock_init(&ls->shm_lock, "lx-shm-attach");
     p->linux = ls;

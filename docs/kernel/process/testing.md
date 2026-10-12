@@ -873,7 +873,8 @@ and put, the order enforced by the seam. Its twin at the Linux door is
 with the BusyBox port's musl sysroot, so on both architectures). Each run
 prints its argv (the initial stack), a local, an anonymous `mmap`, the
 initial break (musl) and its load address. Required: every value
-distinct across the ten runs; the bits that vary inside the designed
+distinct across the ten runs (a static image's break, 13 bits, may
+repeat once: ten draws from 8192 collide about once in 180 boots); the bits that vary inside the designed
 range (stack 4..34, mmap and PIE 12..41, break 12..26 above a static
 image) and at least the designed count less four varying (a random bit
 stays put across ten draws with probability 2^-9); the `ET_EXEC` and

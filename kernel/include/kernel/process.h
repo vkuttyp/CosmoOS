@@ -314,8 +314,10 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
 
 /* Milestone 10: the same from an executable image plus, when it names a
  * program interpreter (PT_INTERP), the interpreter's image; `path` is what
- * AT_EXECFN reports. An ET_DYN executable loads at USER_PIE_BASE, an
- * ET_DYN interpreter at the first free range at or above USER_INTERP_BASE;
+ * AT_EXECFN reports. An ET_DYN executable loads at a random page bias in
+ * [USER_PIE_BASE, + 2^(ASLR_PIE_BITS + 12)), an ET_DYN interpreter at the
+ * first free range at or above the space's random mmap base (roadmap M5,
+ * docs/kernel/process/design.md §4a);
  * the process starts at the interpreter's entry when there is one. An
  * executable with PT_INTERP and no interpreter image is -ENOEXEC. */
 struct process_image {
