@@ -20,7 +20,8 @@
 #   make litmus       check the quiescence litmus tests against the C11 model (needs herd7)
 #   make fuzz         fuzz the parsers on the host (docs/verification/)
 #   make analyze      clang static analyzer over all target sources
-#   make reproducible build twice into separate trees and compare outputs
+#   make reproducible build twice into separate trees and compare outputs, the release set included
+#   make release      roadmap M6: the signed release set for ARCH in out/release/ARCH (BUILD=release)
 #   make compile-commands  compile_commands.json for clangd with cross flags
 #   make check-tools  verify the cross toolchain is usable (and run check-secrets)
 #   make check-secrets  fail if a private or revoked module-signing key is tracked
@@ -34,7 +35,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -99,6 +100,23 @@ $(MANIFEST): $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MODSIGN_KEY) $(SIGN
 $(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(ROOT)/scripts/mkimage.sh $(ROOT)/scripts/mkgpt.py
 	$(call log,IMAGE,$@)
 	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST)
+
+# Roadmap M6 (docs/development.md, "Releases"): one architecture's release
+# set -- the signed live image, the loader, kernel.elf, boot.tar, the
+# command line, the manifest and SHA256SUMS -- copied by scripts/
+# mkrelease.py into RELEASE_DIR under the names the GitHub release carries.
+# Always a release build: `make release` runs release-set with
+# BUILD=release. Signed with whatever key SIGNING selects: the developer
+# key by default, the release key in the release workflow (SIGNING=release
+# MODSIGN_KEY=... KEYRING_PUBS=tools/keys/<release>.pub).
+RELEASE_DIR ?= $(ROOT)/out/release/$(ARCH)
+release:
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=release RELEASE_DIR=$(RELEASE_DIR) release-set
+
+release-set: $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(ROOT)/scripts/mkrelease.py
+	$(call log,RELEASE,$(RELEASE_DIR))
+	$(Q)$(PYTHON) $(ROOT)/scripts/mkrelease.py $(ARCH) $(RELEASE_DIR) $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) \
+		$(BOOT_ARCHIVE) $(MANIFEST) $(CMDLINE_FILE)
 
 run: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \

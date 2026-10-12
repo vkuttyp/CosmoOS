@@ -12,10 +12,13 @@
 # hv self-check then disables the backend and the guest tests are
 # skipped, which the harness treats as a failure). The toolchain is
 # host-agnostic so the outputs match the ARM64 development environment.
-# The images are Docker's official Debian images pulled through Amazon ECR
-# Public's mirror of the Docker library: Docker Hub's unauthenticated pull
-# limit on the shared runner addresses refused every job's container on
-# main's merge of PR #340 three times (run 37991912859, "toomanyrequests").
+# Every job runs in the project's own toolchain image, built from
+# ci/Dockerfile by the `image` job only when that file changes and pulled
+# from this repository's GitHub Container Registry by digest (roadmap M6).
+# Pulling Debian from a public registry on every job was refused twice by
+# rate limits before any code ran: Docker Hub's on main's merge of PR #340
+# (run 37991912859, "toomanyrequests"), then ECR Public's ("Data limit
+# exceeded", M4).
 # Both targets build and boot on the same x86-64 runner: QEMU/TCG runs
 # the AArch64 `virt` machine with the qemu-efi-aarch64 firmware.
 
@@ -28,12 +31,44 @@ on:
 
 permissions:
   contents: read
+  packages: read   # the toolchain image on ghcr.io
 
 jobs:
+  # The CI images (ci/Dockerfile; scripts/ci-image.sh): pushed to
+  # ghcr.io/<owner>/cosmoos-ci under a tag naming the Dockerfile's hash the
+  # first time that Dockerfile is seen, found there every later time. Its
+  # outputs are digest references, so every job below runs in exactly the
+  # image this Dockerfile produced, and a release records that digest.
+  image:
+    name: CI image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      toolchain: ${{ steps.image.outputs.toolchain }}
+      litmus: ${{ steps.image.outputs.litmus }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Log in to the GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push the images if ci/Dockerfile changed
+        id: image
+        run: scripts/ci-image.sh "ghcr.io/${{ github.repository_owner }}/cosmoos-ci"
+
   build-and-boot:
     name: build, boot, analyze (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
-    container: public.ecr.aws/docker/library/debian:trixie
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -55,14 +90,11 @@ jobs:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
 
     steps:
-      - name: Install cross toolchain and test tools
+      - name: Toolchain versions (ci/Dockerfile)
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
-            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
-          qemu-system-x86_64 --version
-          qemu-system-aarch64 --version
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
 
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -212,7 +244,12 @@ jobs:
   entropy:
     name: entropy boots (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    container: public.ecr.aws/docker/library/debian:trixie
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -221,12 +258,11 @@ jobs:
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:
-      - name: Install cross toolchain and test tools
+      - name: Toolchain versions (ci/Dockerfile)
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
-            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
 
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -258,7 +294,12 @@ jobs:
   install:
     name: install test (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    container: public.ecr.aws/docker/library/debian:trixie
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -267,12 +308,11 @@ jobs:
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:
-      - name: Install cross toolchain and test tools
+      - name: Toolchain versions (ci/Dockerfile)
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
-            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
 
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -314,7 +354,12 @@ jobs:
   security:
     name: security test (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    container: public.ecr.aws/docker/library/debian:trixie
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -323,12 +368,11 @@ jobs:
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:
-      - name: Install cross toolchain and test tools
+      - name: Toolchain versions (ci/Dockerfile)
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
-            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
 
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -371,7 +415,12 @@ jobs:
   net-login:
     name: net-login test (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    container: public.ecr.aws/docker/library/debian:trixie
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -380,12 +429,11 @@ jobs:
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:
-      - name: Install cross toolchain and test tools
+      - name: Toolchain versions (ci/Dockerfile)
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
-            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64 openssh-client
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
 
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -424,7 +472,12 @@ jobs:
   busybox:
     name: busybox test (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    container: public.ecr.aws/docker/library/debian:trixie
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -433,12 +486,11 @@ jobs:
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:
-      - name: Install cross toolchain and test tools
+      - name: Toolchain versions (ci/Dockerfile)
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
-            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
 
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -470,20 +522,71 @@ jobs:
           path: out/${{ matrix.arch }}-release/test-busybox/*.log
           if-no-files-found: ignore
 
+  # Roadmap M6, decision 8: the release set (`make release`: the signed live
+  # image, loader, kernel.elf, boot.tar, cmdline, manifest, SHA256SUMS)
+  # built twice in separate trees and compared byte for byte, then made
+  # once more and uploaded. Developer-signed here (an ephemeral key in this
+  # job); the release workflow builds the same set with the release key in
+  # two fresh containers and compares those.
+  release-set:
+    name: release set, reproducible (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 40
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk') }}
+
+      - name: Release build twice, every output and the release set compared
+        run: make ARCH=${{ matrix.arch }} BUILD=release reproducible
+
+      - name: make release
+        run: make ARCH=${{ matrix.arch }} release && cat out/release/${{ matrix.arch }}/SHA256SUMS
+
+      - name: Upload the release set
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-set-${{ matrix.arch }}
+          path: out/release/${{ matrix.arch }}/
+
   # The quiescence protocol's litmus tests against the C11 (RC11) model.
   # herdtools7 is packaged in Debian testing and sid but not trixie, so
   # this runs in its own small container rather than the build job's.
   litmus:
     name: memory-order litmus (herd7)
     runs-on: ubuntu-24.04
-    container: public.ecr.aws/docker/library/debian:sid
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.litmus }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 10
     steps:
-      - name: Install herdtools7
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends herdtools7 python3 ca-certificates
-          herd7 -version
+      - name: herd7 version (ci/Dockerfile, target litmus)
+        run: herd7 -version
 
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
