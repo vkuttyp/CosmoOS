@@ -166,7 +166,7 @@ personalities. `image_build` draws 24 bytes from the pool
 | What | Placement | Random bits |
 |---|---|---|
 | stack top | `USER_STACK_TOP - r * PAGE_SIZE`, `r < 2^22` | 22 (16 GiB) |
-| initial stack pointer | the frame is laid out from `stack_top - sp_offset`, `sp_offset` a 16-byte multiple below 4 KiB; one page more is populated when it needs it | 8 |
+| initial stack pointer | the frame is laid out from `stack_top - sp_offset`, `sp_offset` a 16-byte multiple below 4 KiB; one page more is populated whenever `sp_offset` is not 0, so the populated stack below the frame is never less than before the offset existed | 8 |
 | mmap base (`space->mmap_base`) | `USER_MMAP_BASE + r * PAGE_SIZE`, `r < 2^28`; every placement without an address (native and Linux `mmap`, `shmat`) starts there (`user_mmap_base`) | 28 (1 TiB) |
 | `ET_DYN` executable | bias `USER_PIE_BASE + r * PAGE_SIZE`, `r < 2^28` | 28 |
 | `ET_DYN` interpreter | the first free range at or above the mmap base, as Linux puts it among the mappings (it was `USER_INTERP_BASE`) | with the mmap base |

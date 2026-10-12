@@ -425,7 +425,14 @@ static int image_build(struct process *p, const struct process_image *exe, const
      * ELF decides (personality_for_elf: the CosmoOS note is native). */
     ib->pers = personality_for_elf(info, kernel_created);
     unsigned argc, envc;
-    unsigned npages = initial_stack_pages(initial_stack_need(ib->pers, argv, envp, execfn, &argc, &envc) + sp_offset);
+    /* One page more than the frame needs whenever it moves down: the
+     * populated stack below the initial frame is then never less than it
+     * was before the offset existed. process-oom's probe assumes its first
+     * frames need no demand fault; with up to 4 KiB of that headroom taken
+     * by the offset, its pipe() took the injected failure (AArch64,
+     * reproduced every boot with the offset forced to 0xFF0). */
+    unsigned npages = initial_stack_pages(initial_stack_need(ib->pers, argv, envp, execfn, &argc, &envc)) +
+                      (sp_offset != 0 ? 1u : 0u);
     if (npages > INITIAL_STACK_PAGES_MAX)
         return -E2BIG;
 

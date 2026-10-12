@@ -96,6 +96,22 @@ What stays fixed: an `ET_EXEC` image (BusyBox, dropbear and every native
 program are static `ET_EXEC`), the Linux signal trampoline page, and the
 kernel (no KASLR in 1.0) -- inventory lines.
 
+### A defect the matrix found in this PR: the stack headroom
+
+The first local matrix of PR 2 failed `process-oom` in the AArch64
+`test-chaos` and `test-harness-retry` boots (`check failed: status == 0`,
+the `oom-copy` probe exiting 10). The probe expects the first
+kernel-mode demand fault of its life to be its `read` into a fresh page,
+where the kernel injects a failure; status 10 is its `pipe()` failing
+first. The random sub-page offset had taken up to 4 KiB of the
+populated stack below the initial frame, so the probe's `h[2]` could
+land on a page not yet populated and the pipe's copy-out met the
+injected failure. Forcing `sp_offset` to `0xFF0` made it fail on every
+AArch64 debug boot; populating one page more whenever the offset is not
+0 (the headroom below the frame is then never less than before) passed
+under the same forcing. Commit "ASLR: keep the pre-populated stack
+headroom below a moved initial frame".
+
 ### Acceptance c (local, release)
 
 x86-64, ten runs each (bits = how many bits differed across the ten):
