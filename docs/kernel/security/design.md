@@ -20,7 +20,7 @@ in the ABI; at most 16 in 1.0):
 | Privilege | What it allows |
 |---|---|
 | `PRIV_MOUNT` | `mount`, `umount`, `switch_root`; a new mount namespace and a child's root (`COSMO_SPAWN_NEWMOUNTNS`, `SETROOT`) |
-| `PRIV_SYS_ADMIN` | sysctl writes (`SYS_sysctl_set`, `sethostname`), `/dev/blkctl`, `/dev/fsctl`, `klog`, an unthrottled `log`, a new domain or uts namespace, overriding file permissions, ownership and the sticky bit; module load and unload would be here, but there is no door for them (modules load from the boot archive only) |
+| `PRIV_SYS_ADMIN` | sysctl writes (`SYS_sysctl_set`, `sethostname`), `/dev/blkctl`, `/dev/fsctl`, `klog`, an unthrottled `log`, a new domain or uts namespace, overriding file permissions, ownership and the sticky bit, and a SysV shared memory segment's permissions and removal (`kernel/ipc/shm.c`, which tested `euid == 0` directly); module load and unload would be here, but there is no door for them (modules load from the boot archive only) |
 | `PRIV_NET` | `/dev/net/tapctl` (netctl configuration), binding a port below 1024 |
 | `PRIV_PROC` | signalling any process, seeing and inspecting any process (`procinfo`, `/proc`), raising a resource limit |
 | `PRIV_CRED` | spawning with other ids (`SETCRED`), changing uid, gid and groups beyond the POSIX unprivileged rule |

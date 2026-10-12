@@ -362,6 +362,10 @@ PRIV_EXPECT = {
     "kill-granted": "0",
     "victim-gone": "143",   # the victim's sleep, ended by SIGTERM
     "seen-kernel-addresses": "0",
+    "shm-attach": "EACCES",            # uid 0 without PRIV_SYS_ADMIN, a uid-1000 0600 segment
+    "shm-dropped-remove": "EPERM",
+    "shm-attach-root": "ok",
+    "shm-remove-root": "ok",
 }
 PRIV_NONZERO = ("kill-dropped", "kill-dropped-linux", "kill-user", "dmesg-user")
 

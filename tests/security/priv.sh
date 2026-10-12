@@ -44,6 +44,16 @@ $P -k proc -- /sbin/kill $v; echo "kill-granted=$?"
 wait $holder
 echo "victim-gone=$?"
 
+# SysV shared memory: a uid-1000 segment, mode 0600. uid 0 without
+# PRIV_SYS_ADMIN neither attaches nor removes it; with it, both.
+S=/boot/tests/security/shmprobe
+id=$($P -u 1000 -- $S create 0x4d35)
+echo "shm-id=$id"
+echo "shm-$($P -d sys_admin -- $S attach $id)"
+echo "shm-dropped-$($P -d sys_admin -- $S remove $id)"
+echo "shm-$($S attach $id | sed s/attach/attach-root/)"
+echo "shm-$($S remove $id | sed s/remove/remove-root/)"
+
 # What an unprivileged process can read of the kernel: no addresses in
 # /proc or the sysctls, and no kernel log.
 $P -u 1000 -- /sbin/dmesg > /dev/null; echo "dmesg-user=$?"

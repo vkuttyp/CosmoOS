@@ -85,6 +85,7 @@ refusal printing EPERM by name:
 | as uid 1000 (`priv -u 1000`) | 1; its `priv` says `none` (leaving uid 0 drops all) |
 | `sysctl kernel.hostname=...` as root / `-d sys_admin` / `-k sys_admin` | 0 / 1 (EPERM) / 0, and the name is the last one set |
 | kill of a uid-1000 process: native `kill` under `-d proc`, ash's builtin under `-d proc`, ash's as uid 1001, native under `-k proc` | refused, refused, refused, 0 (the victim's status 143) |
+| SysV shm: a uid-1000 `0600` segment (`tests/security/shmprobe`) attached and removed by uid 0 under `-d sys_admin`, then with every privilege | `EACCES`, `EPERM`, then `ok`, `ok` |
 | uid 1000: `dmesg`; `cat /proc/*/status /proc/*/limits; ls -l /proc/*/fd; sysctl -a` | refused; at least 1000 bytes read and no `ffff` followed by twelve hex digits |
 
 `test-net-login` adds acceptance e: the root session over ssh prints `net

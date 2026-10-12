@@ -138,7 +138,7 @@ struct process {
     unsigned nr_threads;
     struct credentials cred;
     struct rlimits rlim;               /* kernel/rlimit.h; written under lock by the process itself */
-    uint32_t log_tokens;               /* sys_log rate limit for unprivileged callers */
+    uint32_t log_tokens;               /* sys_log rate limit for callers without PRIV_SYS_ADMIN */
     uint64_t log_refill_ns;
     const struct personality *pers;
     enum process_state state;
@@ -363,7 +363,7 @@ int process_getrlimit(unsigned resource, uint64_t *value);
 int process_setrlimit(unsigned resource, uint64_t value);
 /* Processes whose real uid is `ruid` (the NPROC count). */
 unsigned process_count_uid(uint32_t ruid);
-/* One sys_log line: always for a privileged caller, else within the rate limit. */
+/* One sys_log line: always for a PRIV_SYS_ADMIN caller, else within the rate limit. */
 bool process_log_permitted(void);
 
 /* Collect an exited child: pid > 0 for that child, -1 for any. Returns

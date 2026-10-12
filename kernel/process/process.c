@@ -789,7 +789,13 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     struct process *parent = attr ? attr->parent : NULL;
     if (parent) {
         p->parent_pid = parent->pid;
+        /* One snapshot under the lock the parent's setres* takes, as
+         * fork_inherit does: another thread's uid change writes the ids
+         * and then clears the privileges, and a copy between the two would
+         * give the child new ids with the old mask (PR #370 review). */
+        arch_irq_state_t cs = spin_lock_irqsave(&parent->lock);
         p->cred = parent->cred;
+        spin_unlock_irqrestore(&parent->lock, cs);
         p->rlim = parent->rlim;
         p->umask = __atomic_load_n(&parent->umask, __ATOMIC_RELAXED);
     } else {

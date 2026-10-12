@@ -223,6 +223,18 @@ behaves as before).
   uid 0).
 - `SYS_sysctl_set` answers `ENOENT`, not `EROFS`, for a listed name this
   build does not have (`debug.*` in a release kernel).
+- Two root shortcuts the thirty `cred_privileged` calls did not cover:
+  SysV shared memory tested `euid == 0` itself (`access_check`,
+  `shm_rmid`). Both now ask for `PRIV_SYS_ADMIN`, the file-permission
+  override's privilege; a sweep for every other direct uid-0 test
+  (`euid == 0`, `!= 0`, `CRED_ROOT_UID`) found none. `priv.sh` checks it
+  with `tests/security/shmprobe` (a uid-1000 0600 segment: uid 0 without
+  the privilege gets `EACCES` attaching and `EPERM` removing; with it,
+  both succeed).
+- A spawn copies the parent's credentials under the parent's lock, as
+  fork does: a uid change on another thread writes the ids and then
+  clears the privileges, and a copy between the two would give the child
+  the new ids with the old mask.
 - Not fixed, recorded: a root session with a reduced set can rewrite
   root-owned configuration that later runs with every privilege
   (security design §1; inventory 2.9).

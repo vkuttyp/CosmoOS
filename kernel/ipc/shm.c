@@ -73,13 +73,15 @@ static struct shm_segment *unref_locked(struct shm_segment *s)
     return --s->refs == 0 ? s : NULL;
 }
 
-/* SysV ipc_perm access: root passes; otherwise the owner, group or other
- * triad of the mode is chosen by the caller's identity and must grant every
- * `want` bit (4 read, 2 write). The group triad applies when the segment's
- * group is the caller's effective OR a supplementary group. 0 or -EACCES. */
+/* SysV ipc_perm access: PRIV_SYS_ADMIN passes, as it overrides file
+ * permissions (roadmap M5: uid 0 alone does not); otherwise the owner,
+ * group or other triad of the mode is chosen by the caller's identity and
+ * must grant every `want` bit (4 read, 2 write). The group triad applies
+ * when the segment's group is the caller's effective OR a supplementary
+ * group. 0 or -EACCES. */
 static int access_check(const struct shm_segment *s, const struct credentials *c, unsigned want)
 {
-    if (c->euid == 0)
+    if (cred_has(c, PRIV_SYS_ADMIN))
         return 0;
     unsigned granted;
     if (c->euid == s->cuid)
@@ -265,7 +267,7 @@ int shm_rmid(int shmid, const struct credentials *cred)
         spin_unlock_irqrestore(&g_shm_lock, s);
         return -EINVAL;
     }
-    if (cred->euid != 0 && cred->euid != seg->cuid) {   /* only the creator or root may remove */
+    if (!cred_has(cred, PRIV_SYS_ADMIN) && cred->euid != seg->cuid) {   /* the creator, or PRIV_SYS_ADMIN */
         spin_unlock_irqrestore(&g_shm_lock, s);
         return -EPERM;
     }

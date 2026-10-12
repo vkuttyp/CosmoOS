@@ -2487,7 +2487,7 @@ static int sysctl_value(const char *name, char *out, size_t n)
 #if CONFIG_SELFTEST
         /* The read is the system call under test
          * (docs/audit/next-subsystem-wake-preempt.md); it creates a
-         * kernel thread, so only a privileged caller may ask. */
+         * kernel thread, so only a PRIV_SYS_ADMIN caller may ask. */
         if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
             return -EPERM;
         return sched_preempt_probe_sysctl(out, n);

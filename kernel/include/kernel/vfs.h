@@ -331,7 +331,7 @@ uint64_t vfs_now_ns(void);
 /* Discretionary access control (docs/kernel-services/vfs/design.md,
  * "Permissions"): the caller's credentials (cred_current) against the
  * vnode's mode bits by owner, group (effective or supplementary) or
- * other. A privileged caller passes every check except execute, which
+ * other. A PRIV_SYS_ADMIN caller (roadmap M5) passes every check except execute, which
  * needs at least one x bit on a regular file. Search (traversal) of a
  * directory is VFS_MAY_EXEC; the path walk applies it to every component
  * it enters, the mutation paths require write and search on the parent,
@@ -345,7 +345,7 @@ int vfs_permission(const struct vnode *vn, unsigned mask);
  * chmod and utimensat (roadmap M3): set `vn`'s permission bits
  * (VFS_SET_MODE, `mode & 07777`) and/or its modification time
  * (VFS_SET_MTIME to `mtime_ns`, VFS_SET_MTIME_NOW to the clock). The
- * owner or a privileged caller may do either; setting the time to now is
+ * owner or a PRIV_SYS_ADMIN caller may do either; setting the time to now is
  * also allowed to a caller who may write the node, as POSIX says. The
  * change time becomes now. -EPERM (-EACCES for "now") otherwise, -EROFS
  * on a read-only mount, or the filesystem's error from storing them.

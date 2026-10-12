@@ -300,8 +300,8 @@ struct cosmo_spawn {
 /* And one that predates `priv_drop`. */
 #define COSMO_SPAWN_SIZE_V3 __builtin_offsetof(struct cosmo_spawn, priv_drop)
 /* The child starts with real, effective and saved ids `uid`/`gid` and no
- * supplementary groups. A privileged caller names any ids; an unprivileged
- * one only ids it holds (docs/kernel/security/design.md §1). */
+ * supplementary groups. A PRIV_CRED caller names any ids; one without it
+ * only ids it holds (docs/kernel/security/design.md §1). */
 #define COSMO_SPAWN_SETCRED (1u << 0)
 /* The handle map is an array of struct cosmo_spawn_handle as declared
  * above -- child, parent, rights, pad. Without this flag the kernel
