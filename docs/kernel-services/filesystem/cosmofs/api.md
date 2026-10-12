@@ -10,10 +10,15 @@ modules; cosmofs is built into the kernel.
 
 Common to every kernel entry point below:
 
-- **Context.** Thread context only. Every one that touches a mount takes
-  `cfs->lock` (a `struct mutex`, one per mount) and may perform pool I/O,
-  so each may sleep and must not be called from interrupt context, with
-  a spinlock held, or with `cfs->lock` already held.
+- **Context.** Thread context only. Every one that touches a mount,
+  except the test hooks noted below, takes `cfs->lock` (a `struct mutex`,
+  one per mount) and may perform pool I/O, so each may sleep and must not
+  be called from interrupt context, with a spinlock held, or with
+  `cfs->lock` already held. The test hooks that only set or read a field
+  of a live mount (`cosmofs_test_fail_freelog`, `cosmofs_test_fail_snapfill`,
+  `cosmofs_test_fail_orphan`, `cosmofs_test_discard_on_unmount`, the
+  snapshot counters) take no lock: the self-test that calls them is the
+  mount's only user while it does, and that is the caller's to ensure.
 - **Allocation.** Every one may call `kmalloc` (4 KiB scratch blocks,
   the bitmap, the pending lists); `-ENOMEM` is a possible result
   wherever an error is returned.

@@ -86,7 +86,9 @@ four bytes of `signature`. Inputs: `signature` must point at at least
 four readable bytes (compared with `memcmp`, so no NUL is needed).
 Output: a kernel virtual pointer valid for the life of the kernel, or
 NULL when no table listed by the XSDT/RSDT has that signature, the
-table failed its checksum, or it was beyond the 64th root-table entry.
+table failed its checksum, or it was not among the first 64 tables
+`acpi_init` recorded (entries that are zero, unmappable, short or fail
+their checksum are skipped and do not count toward the 64).
 Tables reached only through another table (DSDT, FACS) are never
 found. The caller casts to the table's own layout and must bound every
 read by `hdr.length`. Linear scan of at most 64 entries.

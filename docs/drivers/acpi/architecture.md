@@ -66,9 +66,9 @@ warning.
 
 Tables come from firmware, part of the trusted computing base, but
 table lengths are checked against the header size and every MADT entry
-against the table end and its own minimum length before it is read (the
-MADT's fixed `lapic_address`/`flags` fields are the exception; see
-[invariants.md](invariants.md) AC2).
+against the table end and its own minimum length before it is read; a
+MADT shorter than its fixed fields is ignored ([invariants.md](invariants.md)
+AC2).
 
 ## Testing
 

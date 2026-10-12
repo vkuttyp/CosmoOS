@@ -29,7 +29,7 @@ State, all file-scope statics in `acpi.c`:
 
 | Variable | Contents |
 |---|---|
-| `g_tables[ACPI_MAX_TABLES]`, `g_table_count` | Pointers to the checksum-valid tables named by the root table, in root-table order; `ACPI_MAX_TABLES` is 64 |
+| `g_tables[ACPI_MAX_TABLES]`, `g_table_count` | Pointers to the checksum-valid tables named by the root table, in root-table order; `ACPI_MAX_TABLES` is 64, and the walk stops once 64 are recorded (skipped entries do not count) |
 | `g_lapic_base` | MADT `lapic_address`, replaced by a type 5 (64-bit override) entry if one appears |
 | `g_cpus[ACPI_MAX_CPUS]`, `g_cpu_count` | Processor entries (types 0, 9, 11) flagged enabled or online capable (AC7); at most 64 |
 | `g_ioapics[ACPI_MAX_IOAPICS]`, `g_ioapic_count` | Type 1 entries; at most 8 |
@@ -72,7 +72,9 @@ last one wins.
 5. For each non-zero entry, `map_table` it and append it to `g_tables`
    while there is room. A table with a bad checksum is logged with
    `kwarn` and skipped; one that cannot be mapped or has a length below
-   36 is skipped silently; entries past the 64th are not examined.
+   36 is skipped silently; the walk stops once 64 tables are recorded
+   (`g_table_count == ACPI_MAX_TABLES`), so skipped entries do not use up
+   the 64.
 6. `acpi_find_table("APIC")` must find the MADT; `parse_madt` decodes
    it; `g_available` is set; one `kinfo` line summarises the result
    (GIC form when `g_gic_present`, LAPIC form otherwise), with extra
