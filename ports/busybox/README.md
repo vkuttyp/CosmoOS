@@ -64,7 +64,7 @@ grep -v '^# [A-Z][a-z][a-z] [A-Z][a-z][a-z] .* [0-9][0-9][0-9][0-9]$' /tmp/bbcfg
 `mkconfig.py` starts from defconfig, turns off every applet outside the
 list (an applet is a symbol named by some `//applet:IF_<SYMBOL>(` line),
 and forces a few options, each with its reason in the script: static;
-no ash job control; ash as `sh`; no setuid; no SHA hardware paths (x86
+ash job control (since M4); ash as `sh`; no setuid; no SHA hardware paths (x86
 only, and one configuration serves both architectures); `ls` plain on a
 terminal; and `-DBB_GLOBAL_CONST=` -- BusyBox's "const pointer to
 globals" trick assumes a const pointer is reloaded after an asm barrier,

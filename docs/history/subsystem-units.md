@@ -2849,9 +2849,13 @@ See the [history index](README.md).
     `ghcr.io/vkuttyp/cosmoos-ci` only when it changes and pulled by
     digest; `make release` makes the signed release set with
     `SHA256SUMS`, and `make reproducible` compares it.
-  - Report: `docs/audit/2026-10-12-m6-release-report.md`.
   - PR 3: the five-file docs for ACPI, kernel objects, system calls and
     cosmofs completed from the code (invariant sets AC, OB, SC, CF), and
     `architecture.md` for the usb, e1000e and ahci drivers;
     `scripts/check-docs.py` (CI job `docs`) requires all five files in
     every subsystem directory `docs/README.md` lists.
+  - PR 4: the user guide (`docs/guide/`, seven pages) with every command
+    run by `tests/guide/run_guide.py` in CI (Linux both architectures;
+    macOS on main); README status, "Not in 1.0", the plan's post-1.0
+    preface, inventory lines closed by M1-M6 struck.
+  - Report: `docs/audit/2026-10-12-m6-release-report.md`.

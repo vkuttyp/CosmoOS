@@ -11,14 +11,15 @@
 # carries the list (/usr/share/cosmoos-ci/packages.txt) for the release notes.
 
 # The build, boot and test toolchain: Debian trixie (QEMU >= 9.2 for the
-# virtualization tests; docs/development.md).
+# virtualization tests; docs/development.md). `sudo` because the user
+# guide's commands use it and the guide job runs them as written.
 FROM public.ecr.aws/docker/library/debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5 AS toolchain
 LABEL org.opencontainers.image.source=https://github.com/vkuttyp/CosmoOS
 LABEL org.opencontainers.image.description="CosmoOS CI toolchain (clang, lld, QEMU, UEFI firmware)"
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools bzip2 xz-utils \
-      qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64 openssh-client \
+      qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64 openssh-client sudo \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /usr/share/cosmoos-ci \
  && dpkg-query -W -f '${Package} ${Version}\n' > /usr/share/cosmoos-ci/packages.txt

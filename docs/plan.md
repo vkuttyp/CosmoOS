@@ -29,7 +29,10 @@
 > native signal frame behind arch functions, no stack-frame exemptions
 > and the stack high-water check, the package repository on the
 > installed disk; PR 2, the CI toolchain image on GHCR and `make
-> release` with the reproducible release set.
+> release` with the reproducible release set.; PR 3, the five-file docs for ACPI, objects, syscalls and cosmofs
+> with their CI check; PR 4, the user guide (`docs/guide/`) with every
+> command run by CI, the README's status. The post-1.0 preface replaces
+> this note when `v1.0.0` is tagged.
 
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.

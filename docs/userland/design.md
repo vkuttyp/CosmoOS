@@ -32,8 +32,8 @@ convention), documented in `docs/kernel/module/` (the archive) and
 
 The Linux userland is static musl BusyBox, built from source with the
 system (`ports/busybox/README.md`). `/bin/busybox` and one symbolic
-link per applet of `ports/busybox/applets` -- exactly the 48 of decision
-7, `/bin/sh` among them -- come from the boot archive
+link per applet of `ports/busybox/applets` -- the 48 of M3's decision
+7, `/bin/sh` among them, and M4's `wget`, `nslookup`, `stty` and `tty` -- come from the boot archive
 (`mkbootarchive.py`'s `NAME@TARGET` entries, ustar type 2; the kernel
 makes them with `vfs_symlink` in `ramfs_populate_boot`). A native program
 whose name an applet takes is installed as `/bin/cosmo-<name>`

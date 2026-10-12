@@ -585,6 +585,82 @@ jobs:
       - name: Every listed subsystem has its five files
         run: python3 scripts/check-docs.py
 
+  # Roadmap M6, decision 5: every command in the user guide (docs/guide/),
+  # run as written against the release set by tests/guide/run_guide.py --
+  # the host commands in one shell, QEMU and ssh as sessions, each CosmoOS
+  # command typed at its prompt with its output checked. Linux, both
+  # architectures, on every run.
+  guide:
+    name: user guide commands (linux, ${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    needs: [image, release-set]
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The set the release-set job built, the same bytes guide-macos runs.
+      - name: The release set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-set-${{ matrix.arch }}
+          path: out/release/${{ matrix.arch }}
+
+      - name: Every command of the guide, as written
+        run: python3 tests/guide/run_guide.py --arch ${{ matrix.arch }} --host linux --release out/release/${{ matrix.arch }} --workdir out/guide-${{ matrix.arch }}
+
+      - name: Upload the guide run's transcripts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guide-linux-${{ matrix.arch }}
+          path: out/guide-${{ matrix.arch }}/*.log
+          if-no-files-found: ignore
+
+  # The guide's macOS steps (Homebrew's QEMU and firmware), with the rest of
+  # the guide, on GitHub's macOS runner against the release set the
+  # release-set job made. On pushes to main (and in the release workflow),
+  # not on every pull request: macOS minutes cost ten times Linux's.
+  guide-macos:
+    name: user guide commands (macos, ${{ matrix.arch }})
+    if: github.event_name == 'push'
+    runs-on: macos-14
+    needs: release-set
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: The release set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-set-${{ matrix.arch }}
+          path: out/release/${{ matrix.arch }}
+
+      - name: Every command of the guide, as written
+        run: python3 tests/guide/run_guide.py --arch ${{ matrix.arch }} --host macos --release out/release/${{ matrix.arch }} --workdir out/guide-${{ matrix.arch }}
+
+      - name: Upload the guide run's transcripts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guide-macos-${{ matrix.arch }}
+          path: out/guide-${{ matrix.arch }}/*.log
+          if-no-files-found: ignore
+
   # The quiescence protocol's litmus tests against the C11 (RC11) model.
   # herdtools7 is packaged in Debian testing and sid but not trixie, so
   # this runs in its own small container rather than the build job's.
