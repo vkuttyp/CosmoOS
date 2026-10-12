@@ -98,6 +98,22 @@ throwaway worktree, the x86-64 debug boot failed on the forbidden
 warning (`usbs-racer` 4616 bytes, `blk-bench` 5160) and on the missing
 `0 over 75%` summary.
 
+### Found writing the ACPI docs (PR 3), fixed here
+
+- `parse_madt` (`drivers/acpi/acpi.c`) accepted a GICC entry when flag
+  bit 1 was set, the LAPIC entry's "online capable"; in a GICC entry bit
+  1 is the performance interrupt's trigger mode and "online capable" is
+  bit 3 (ACPI 6.5, 5.2.12.14). A disabled GICC entry with an
+  edge-triggered performance interrupt would have been counted as a
+  CPU. Now `MADT_GICC_ONLINE_CAPABLE`. QEMU marks every GICC entry
+  enabled, so no test here can reach the difference (no hardware matrix
+  in 1.0); recorded in the inventory.
+- `parse_madt` read the MADT's fixed fields without checking the table
+  holds them; a shorter MADT is now ignored with a warning.
+- `setup_ecam` (`drivers/pci/pci.c`) computed the MCFG entry count as
+  `length - sizeof(header)` without checking the length first, which
+  wraps for a short table; such a table is now ignored.
+
 ### Decision 3: packages on an installed system
 
 `cosmo-install` creates `/var/lib/pkg`, copies the image's repository

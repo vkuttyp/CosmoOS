@@ -479,6 +479,12 @@ tree.
 
 ---
 
+- ACPI (found by M6's docs, `docs/drivers/acpi/invariants.md`): the GICC
+  "online capable" fix (bit 3) has no test, because QEMU marks every GICC
+  entry enabled; `acpi.c` has no host test or fuzzer; a second
+  `acpi_init` would duplicate every entry; the root table's
+  `XSDT`/`RSDT` signature is not compared.
+
 ## 4. The quiesce report's remaining risks and debt
 
 The 2026-10-03 renewed lock-discipline audit found two defects in the
@@ -971,9 +977,12 @@ each; none is needed by M2's acceptance test.
   reaper thread) is not exercised by a test.
 - `/dev/blkctl`'s mounted check sees a mount's named device, its disk and
   its partitions, not the other members of a multi-device cosmofs pool.
-- An installed system's `/etc/pkg/repos.conf` still names `/boot/repo`,
+- ~~An installed system's `/etc/pkg/repos.conf` still names `/boot/repo`,
   which the installer does not copy: `pkg update` on an installed system
-  has no repository until one is configured.
+  has no repository until one is configured.~~ **Closed by M6 PR 1**:
+  `cosmo-install` copies the repository to `/var/lib/pkg/repo` and
+  writes `repos.conf` to name it; `test-install` installs `hello` after
+  reboot.
 - The native shell expands `$?` for a whole line before running any of
   it (`cmd; echo $?` reports the previous line); M3 replaces the shell.
 - `net-neigh-down-race`'s ARP and ND park hooks park the first caller on
