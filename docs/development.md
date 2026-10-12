@@ -562,6 +562,12 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    limitations), and `gh release create`; a tag with a hyphen is a
    pre-release.
 
+A release (a tag without a hyphen) must point at a commit on main (job
+`guard`); a pre-release may be any head. The key itself is a repository
+secret, which any workflow pushed by someone with write access can read;
+moving it to a GitHub environment with required reviewers would close
+that, and is the owner's to set up (inventory 2.9).
+
 The release key's public half is the only `tools/keys/*.pub`
 (`tools/keys/README.md`); developer builds keep their per-machine key
 and trust the release key too.

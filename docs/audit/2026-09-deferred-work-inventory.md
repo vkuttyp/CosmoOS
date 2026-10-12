@@ -388,6 +388,13 @@ no transport beyond `sysctl` and the self-tests that print them.
 - module signature versioning and anti-rollback: any previously signed
   module loads forever (audit 10.2).
 
+- The release signing key (roadmap M6) is a repository secret: any
+  workflow that someone with write access pushes can read it, so the
+  release workflow's `guard` (a release's tag must be on main) protects
+  what is published, not the key. A GitHub environment with required
+  reviewers holding `COSMOOS_RELEASE_KEY` would; it is configured in the
+  repository settings, not in the tree.
+
 ### 2.10 Build, packaging, hardware, benchmarks (constitution §49; Prompt #2 §44-45, §58, §61, §65)
 
 - coverage builds and LTO: neither configured.

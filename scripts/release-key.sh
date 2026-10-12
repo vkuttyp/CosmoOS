@@ -22,5 +22,8 @@ if [ $# -ne 1 ] || [ ! -f "$1" ]; then
 fi
 mkdir -p "$(dirname "$out")"
 umask 077
+# A new file, so the mode is the umask's even if a file was there before.
+rm -f "$out"
 printf '%s\n' "$key" > "$out"
+chmod 600 "$out"
 python3 "$root/scripts/release-key-check.py" "$out" "$1"

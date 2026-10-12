@@ -28,6 +28,37 @@ env:
   COSMO_RELEASE_KEY_FILE: /tmp/cosmo-release/release.key
 
 jobs:
+  # A release (a tag without a hyphen) is made only from a commit on main;
+  # a pre-release (v1.0.0-rc1) may be any reviewed head. Every job that
+  # reads the release key needs this one. It does not protect the key from
+  # someone who can push to this repository -- any pushed workflow can read
+  # repository secrets; that is what an environment with required reviewers
+  # is for (docs/development.md, "Releases").
+  guard:
+    name: tag points at main (releases)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: A release's commit is on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "$TAG" in
+            *-*) echo "release-guard: $TAG is a pre-release; any commit"; exit 0 ;;
+          esac
+          git fetch -q origin main
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "release-guard: $TAG ($GITHUB_SHA) is on main"
+          else
+            echo "release-guard: $TAG ($GITHUB_SHA) is not on main; a release is tagged on main" >&2
+            exit 1
+          fi
+
   image:
     name: CI image
     runs-on: ubuntu-24.04
@@ -54,7 +85,7 @@ jobs:
   build:
     name: build ${{ matrix.arch }} (${{ matrix.copy }})
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [guard, image]
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
@@ -120,7 +151,7 @@ jobs:
   acceptance:
     name: ${{ matrix.test }} (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    needs: [image, build]
+    needs: [guard, image, build]
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
