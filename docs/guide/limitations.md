@@ -81,6 +81,7 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 
 - Static and PIE Linux binaries for x86-64 and AArch64 run under the
   Linux personality; it is a subset of Linux's system calls, so a
-  program that needs a missing one gets `ENOSYS`. Dynamically linked
-  musl programs run (`PT_INTERP`); glibc-linked programs are not tested.
+  program that needs a missing one gets `ENOSYS`. The loader honours
+  `PT_INTERP`, but only a stand-in interpreter has been run through it:
+  no real `ld.so` with shared libraries, musl's or glibc's, has.
   No containers or desktop software (`docs/plan.md`).

@@ -593,7 +593,7 @@ jobs:
   guide:
     name: user guide commands (linux, ${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [image, release-set]
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
@@ -604,25 +604,16 @@ jobs:
       matrix:
         arch: [x86_64, aarch64]
     timeout-minutes: 45
-    env:
-      COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The set the release-set job built, the same bytes guide-macos runs.
+      - name: The release set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          fetch-depth: 0 # git describe needs history for BUILD_ID
-
-      - name: Trust the checkout
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Cache the pinned source archives
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk') }}
-
-      - name: make release
-        run: make ARCH=${{ matrix.arch }} release
+          name: release-set-${{ matrix.arch }}
+          path: out/release/${{ matrix.arch }}
 
       - name: Every command of the guide, as written
         run: python3 tests/guide/run_guide.py --arch ${{ matrix.arch }} --host linux --release out/release/${{ matrix.arch }} --workdir out/guide-${{ matrix.arch }}

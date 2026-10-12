@@ -28,9 +28,11 @@ one is an error, so no command can be left untested.
       prompt is a command, typed when the prompt is shown; the lines after
       it are output that must appear, in that order, before the next
       prompt (other lines may come between them). In an expected line,
-      `...` matches any text. `exit` (or `poweroff`) ends the session: the
-      process must exit with a status the session allows (0, or 33 for
-      x86-64 QEMU's debug-exit device, which reports a clean power-off).
+      `...` matches any text. A command followed by the single line
+      `(no output)` must print nothing but the kernel's own log lines
+      (`[ INFO] ...`). `exit` (or `poweroff`) ends the session: the process
+      must exit 0, or, for an x86-64 QEMU session, 33 (the debug-exit
+      device's clean power-off).
 
 A block whose host or architecture does not match the run is skipped:
 the guide gives x86-64 and AArch64, Linux and macOS variants of the steps
@@ -39,6 +41,7 @@ the working directory.
 """
 
 import argparse
+import math
 import os
 import re
 import shutil
@@ -151,14 +154,16 @@ class HostShell:
         self.log.write(f"$ {cmd}\n")
         # Its input is /dev/null, not this script's pipe: a command must
         # not read the lines that follow it (ssh would).
-        self.proc.stdin.write(f"{{\n{cmd}\n}} </dev/null\necho \"{tag} $?\"\n")
+        # The marker on a line of its own even when the output did not end
+        # with a newline.
+        self.proc.stdin.write(f"{{\n{cmd}\n}} </dev/null\n__rc=$?; echo; echo \"{tag} $__rc\"\n")
         self.proc.stdin.flush()
         out = []
         result = {}
 
         def reader():
             for line in self.proc.stdout:
-                if line.startswith(tag):
+                if line.startswith(tag + " "):
                     result["rc"] = int(line.split()[1])
                     return
                 out.append(line)
@@ -196,6 +201,9 @@ class Session:
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         threading.Thread(target=self._read, daemon=True).start()
         self.cmd = cmd
+        # 33 is a clean power-off only through x86-64 QEMU's debug-exit
+        # device; any other session (ssh) must end 0.
+        self.ok_status = (0, 33) if cmd.split()[0] == "qemu-system-x86_64" else (0,)
 
     def _read(self):
         while True:
@@ -237,7 +245,7 @@ class Session:
             raise Fail(f"session did not end within {self.timeout:.0f}s after {what}")
         time.sleep(0.5)
         self.log.close()
-        if rc not in (0, 33):
+        if rc not in self.ok_status:
             raise Fail(f"session ended with status {rc} after {what}")
         return self.text()[self.consumed:]
 
@@ -250,9 +258,18 @@ class Session:
             pass
 
 
+KLOG = re.compile(r"^\[ ?(DEBUG|INFO|WARN|ERROR)\] ")
+
+
 def expect(output, wanted, where):
-    """Each wanted line must match a line of output, in order."""
+    """Each wanted line must match a line of output, in order; `(no output)`
+    alone means nothing but the echoed command and kernel log lines."""
     lines = [ln.rstrip() for ln in output.split("\n")]
+    if wanted == ["(no output)"]:
+        rest = [ln for ln in lines[1:] if ln.strip() and not KLOG.match(ln)]
+        if rest:
+            raise Fail(f"{where}: expected no output; got:\n" + "\n".join(rest[:20]))
+        return
     k = 0
     for w in wanted:
         pat = "^" + ".*".join(re.escape(p) for p in w.rstrip().split("...")) + "$"
@@ -296,15 +313,28 @@ def main():
     ap.add_argument("--pages", help="comma-separated subset, in guide order")
     ap.add_argument("--timeout", type=float, default=300.0, help="per command or prompt")
     args = ap.parse_args()
+    if not (math.isfinite(args.timeout) and args.timeout > 0):
+        ap.error("--timeout must be a positive number of seconds")
 
+    # The working directory is this script's: made fresh, and an existing
+    # one is removed only if an earlier run made it (its marker file), so a
+    # mistyped --workdir deletes nothing.
     work = args.workdir or tempfile.mkdtemp(prefix="guide-")
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work)
+    marker = os.path.join(work, ".run_guide")
+    if os.path.isdir(work) and os.listdir(work):
+        if not os.path.exists(marker):
+            ap.error(f"--workdir {work} exists and was not made by run_guide.py; refusing to empty it")
+        shutil.rmtree(work)
+    os.makedirs(work, exist_ok=True)
+    open(marker, "w").close()
     for f in os.listdir(args.release):
         shutil.copyfile(os.path.join(args.release, f), os.path.join(work, f))
     pages = pages_in_order()
     if args.pages:
         want = args.pages.split(",")
+        unknown = [p for p in want if p not in pages]
+        if unknown:
+            ap.error(f"--pages: {', '.join(unknown)} not in docs/guide/README.md's list")
         pages = [p for p in pages if p in want]
     log = open(os.path.join(work, "host.log"), "w")
     shell = HostShell(work, log)

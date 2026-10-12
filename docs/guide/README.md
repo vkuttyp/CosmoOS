@@ -30,7 +30,9 @@ Every command in these pages is run by CI against the release images:
 `tests/guide/run_guide.py` reads the pages in the order above, runs each
 block for your computer in one shell, starts each QEMU or ssh session,
 types each CosmoOS command at its prompt and requires the output shown
-(`...` stands for text that differs from run to run). It runs on Linux
-for both architectures, and the macOS steps run on a macOS runner (the
-CI job `guide`; the release workflow runs it against the signed images
-before publishing them). A change that makes a page wrong fails CI.
+(`...` stands for text that differs from run to run; the kernel's
+`[ INFO]` lines are left out). The CI job `guide` runs it on Linux for
+both architectures on every pull request, so a change that makes a
+Linux step wrong fails there; `guide-macos` runs the macOS steps on a
+macOS runner on every push to main; and the release workflow runs both
+against the signed images before it publishes them.

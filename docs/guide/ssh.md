@@ -63,6 +63,15 @@ kill $!
 
 ## Logging in
 
+Wait for the server: right after a boot it may still be starting, and
+until it listens QEMU accepts the connection and closes it. This tries
+for up to 30 seconds:
+
+<!-- test: host -->
+```sh
+for i in 1 2 3 4 5 6 7 8 9 10; do ssh -i cosmo_key -p 2222 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=known_hosts -o ConnectTimeout=5 root@127.0.0.1 true && break; sleep 3; done
+```
+
 Run a command:
 
 <!-- test: host -->

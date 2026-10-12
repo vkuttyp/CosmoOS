@@ -106,6 +106,7 @@ cosmo$ kill %1
 cosmo$ wait
 ...
 cosmo$ jobs
+(no output)
 ```
 
 ## What is missing compared with Linux
