@@ -71,6 +71,14 @@ left it:
 | `gtdt` | the GTDT read at 80 and 88 | `test-platforms`' gicv3 variant: timer PPIs not 30/27, `timer: GTDT unusable` | AArch64 (x86-64 reads no GTDT) |
 | `isb` | `dsb ishst` without the ISB | none on QEMU (TCG never shows it): the check boots a Parallels VM N times and counts panics | AArch64 on Parallels, a rate |
 
+Results, 2026-10-13 (tree `86f315ee`): `bar` passes fixed and fails old on
+both host builds (x86-64, AArch64); `gtdt` passes fixed and fails old with
+`gicv3: the GTDT was not used` (the kernel: `timer: GTDT unusable`, and the
+platform line `timer: no usable GTDT (4294967295, 0)`); `isb` on Parallels,
+fixed: 3 of 3 boots to the shell; old: 5 of 6 and then 4 of 6 panicked,
+every one `page fault: kernel read at 0xffffc0000048b000 (not present):
+region 'phys-map'` in `xhci_probe`.
+
 ## The Parallels iteration log
 
 VM "CosmoOS 1.0 test": EFI ARM64, 2 CPUs, 1 GiB, the image on a plain
