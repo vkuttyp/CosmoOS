@@ -122,5 +122,22 @@ x86-64, ten runs each (bits = how many bits differed across the ten):
 | `aslr-pie` (musl, static PIE) | 29 | 29 | 28 | 30 | 30 |
 | `aslr-native` | 30 | 30 | 28 | -- | fixed `0x4001b0` |
 
+AArch64, the same: static 30 / 30 / 28 / 13 bits and load fixed
+`0x400000`; PIE 30 / 30 / 28 / 30 bits, load 30 bits; native 30 / 30 /
+28 bits, load fixed `0x4001bc`.
+
 W^X in every run: `stack-exec=SIGSEGV mmap-wx=EINVAL mprotect-wx=EINVAL`.
+
+### PR 2 validation (local, 2026-10-12, at `4ff32b41`)
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| `make host-test`, `make fuzz`, `make analyze` | PASS | PASS |
+| debug `make test`, `QEMU_SMP=1` / `2` / `4` | PASS 137.1 / 140.1 / 151.8 s | PASS 145.0 / 142.2 / 162.1 s |
+| `make test-smp2` | PASS 142.5 s | PASS 142.6 s |
+| `make test-chaos` | PASS 143.0 s | PASS 157.5 s |
+| `make test-harness-retry` | FAIL (`signal-async` status 52, first sighting, `docs/testing/flakes.md`); then PASS three times, 167.3 / 141.9 / 142.1 s | PASS 151.1 s |
+| `make BUILD=release test` | PASS 17.5 s | PASS 20.8 s |
+| `make BUILD=release test-security` | PASS 93.9 s | PASS 125.8 s |
+| `make BUILD=release test-install` | PASS 23.7 s | PASS 38.5 s |
 
