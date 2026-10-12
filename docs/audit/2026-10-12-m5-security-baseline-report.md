@@ -234,7 +234,9 @@ behaves as before).
 - A spawn copies the parent's credentials under the parent's lock, as
   fork does: a uid change on another thread writes the ids and then
   clears the privileges, and a copy between the two would give the child
-  the new ids with the old mask.
+  the new ids with the old mask. No deterministic test: it needs a seam that holds
+  a spawn between the two writes. (Such a child's bits would be dormant
+  anyway since 503777c7: its ids hold no 0 to return its effective uid to.)
 - Not fixed, recorded: a root session with a reduced set can rewrite
   root-owned configuration that later runs with every privilege
   (security design §1; inventory 2.9).
