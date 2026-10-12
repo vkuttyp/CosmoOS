@@ -15,8 +15,8 @@ import re
 import sys
 
 FILES = ("architecture.md", "design.md", "api.md", "invariants.md", "testing.md")
-# Rows of the Layout table that are records, not subsystems.
-NOT_SUBSYSTEMS = {"history/", "testing/", "audit/"}
+# Rows of the Layout table that are records or the user guide, not subsystems.
+NOT_SUBSYSTEMS = {"history/", "testing/", "audit/", "guide/"}
 
 
 def main():

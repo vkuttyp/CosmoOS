@@ -146,23 +146,52 @@ boot" below), the kernel boots, and the live system's shell prompts with
 
 ## Installing
 
-List the disks:
+List the disks. On x86-64:
 
-<!-- test: console -->
+<!-- test: console x86_64 -->
 ```console
 cosmo$ cosmo-install --list
-...vda ... 2097152 ...512...
+NAME         DISK            SECTORS SECTOR  FLAGS
+vda          -               2097152    512
+ahci0p0      -                135168    512
+ahci0p0p1    ahci0p0          131072    512  boot partuuid=...
 ```
 
-`vda` is the blank 1 GiB disk (2097152 sectors of 512 bytes); the live
-image's own disk is marked `boot`. Install on it:
+and on AArch64:
 
-<!-- test: console -->
+<!-- test: console aarch64 -->
+```console
+cosmo$ cosmo-install --list
+NAME         DISK            SECTORS SECTOR  FLAGS
+vda          -                135168    512
+vdb          -               2097152    512
+vda1         vda              131072    512  boot partuuid=...
+```
+
+The live image's disk is the one with the `boot` partition (on x86-64
+QEMU attaches it to the SATA controller, `ahci0p0`; on AArch64 it is the
+first virtio disk). The blank 1 GiB disk is the one of 2097152 sectors of
+512 bytes: `vda` on x86-64, `vdb` on AArch64. The kernel logs each
+program it starts and the status it exits with (`[ INFO] process: ...`)
+on the console between the lines the programs print; this guide leaves
+those lines out. Install on the blank disk. On x86-64:
+
+<!-- test: console x86_64 -->
 ```console
 cosmo$ cosmo-install vda
-cosmo-install: vda: esp sectors ..., root sectors ...
+cosmo-install: vda: esp sectors 2048-133119, root sectors 133120-2097118
 cosmo-install: copied ... files in ... directories
-cosmo-install: installed on vda: esp vda..., root vda..., partuuid ...
+cosmo-install: installed on vda: esp vda1, root vda2, partuuid ...
+```
+
+On AArch64:
+
+<!-- test: console aarch64 -->
+```console
+cosmo$ cosmo-install vdb
+cosmo-install: vdb: esp sectors 2048-133119, root sectors 133120-2097118
+cosmo-install: copied ... files in ... directories
+cosmo-install: installed on vdb: esp vdb1, root vdb2, partuuid ...
 ```
 
 `cosmo-install` refuses a disk that already has a partition table unless

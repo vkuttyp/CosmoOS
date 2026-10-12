@@ -53,14 +53,16 @@ cosmo$ echo $0
 cosmo$ id
 uid=0(root) gid=0(root)...
 cosmo$ uname -s -m
-CosmoOS ...
+Linux ...
 cosmo$ ls /
-...bin
-...etc
-...root
-...sbin
-...var
+bin   boot  dev   etc   mnt   proc  root  run   sbin  tmp   var
 ```
+
+`uname` says `Linux`: BusyBox is a static Linux program, and CosmoOS
+runs it under its Linux personality, which answers as Linux does. The
+kernel also logs each program it starts and the status it exits with
+(`[ INFO] process: pid N 'id' exited with status 0`) on the console,
+between the lines the programs print.
 
 The commands are BusyBox applets, linked in `/bin`, and CosmoOS's own
 tools in `/sbin`. The full list:
@@ -68,7 +70,7 @@ tools in `/sbin`. The full list:
 <!-- test: console -->
 ```console
 cosmo$ ls /bin
-...wget
+...wget...
 ```
 
 The applets are `sh` (ash) and `[ awk basename cat chmod cp cut date

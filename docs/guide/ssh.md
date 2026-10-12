@@ -74,21 +74,22 @@ The first connection records the host key in `known_hosts`; later ones
 check it. Or log in to a shell (`-tt` asks for a terminal even when, as
 here, the command's input is not one):
 
-<!-- test: session prompt="# " -->
+<!-- test: session prompt="~ # " -->
 ```sh
 ssh -tt -i cosmo_key -p 2222 -o UserKnownHostsFile=known_hosts root@127.0.0.1
 ```
 
 <!-- test: console -->
 ```console
-# tty
+~ # tty
 /dev/pts/...
-# echo $HOME
+~ # echo $HOME
 /root
-# exit
+~ # exit
 ```
 
-The session is BusyBox `ash` on a pseudo-terminal, with job control as on
+The prompt shows the current directory (`~`, root's home) and `#` for
+root. The session is BusyBox `ash` on a pseudo-terminal, with job control as on
 the console. It holds fewer privileges than the console does: see
 [Privileges](privileges.md). Power off from the console:
 

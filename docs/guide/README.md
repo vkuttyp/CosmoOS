@@ -21,8 +21,8 @@ the pages in order: each one continues where the one before it stopped.
 7. [Known limitations](limitations.md).
 
 Commands for your computer are shown as plain blocks; commands typed on
-CosmoOS are shown after its prompt, `cosmo$ ` on the console and `# `
-in an ssh session, followed by what they print.
+CosmoOS are shown after its prompt, `cosmo$ ` on the console and
+`~ # ` in an ssh session, followed by what they print.
 
 ## How this guide is tested
 
