@@ -6,15 +6,17 @@ entry follows constitution section 52.
 
 ## Objects (`kernel/include/kernel/object.h`, `kernel/object/object.c`)
 
-### `struct kobject { const struct kobject_type *type; uint32_t refcount; struct module *owner; }`
+### `struct kobject { type; refcount; handles; watched; owner; watchers; }`
 Embedded as the first or any member of a concrete object; recover the
 container with `container_of`. The count is manipulated only through
 the functions below. `owner` is the module whose code the release lives
 in (NULL for the kernel), recorded so the module cannot be unloaded
 while the object exists (`docs/kernel/quiesce/design.md`, "Module
-unload"). Adding the field changed the layout of every exported
+unload protocol"). Adding the field changed the layout of every exported
 structure that embeds a kobject (`struct device`, `struct blkdev`,
-`struct netif`): module ABI v2.
+`struct netif`): module ABI v2. `handles` (the descriptor count, ABI 5),
+`watched` (ABI 6) and `watchers` (ABI 5) belong to the handle table and
+epoll (`design.md`).
 
 Lifetime rules every type follows (`docs/kernel/quiesce/invariants.md`
 Q9–Q10): the release frees the memory and nothing else does; the creator
@@ -32,7 +34,9 @@ instead of reading operations past the end of the descriptor. Subtypes
 embed it as `base` and add operations (`struct kobject_io_type` adds
 `read`, `write`, since Phase 9 an optional `stat`, since milestone 8 the
 optional `ready` and `set_nonblock`, since milestone 9 the optional
-`poll_wq`, and since the file-path unit the optional `flush`). Contract for `read(obj,
+`poll_wq`, since the file-path unit the optional `flush`, and the
+optional `read_undo`, which `syscall_obj_read` calls when copying a
+successful read to user space faults -- the signalfd has one). Contract for `read(obj,
 buf, len)` / `write(obj, buf, len)`: return the bytes transferred,
 `0 <= count <= len`, or a negative errno; a NULL operation means the
 object does not support that direction (`-EBADF` from the system
@@ -76,8 +80,9 @@ since Phase 12 `struct vm` (`read` drains the guest's debug console,
 `write` `-ENOTSUP`, `stat` `COSMO_DT_CHR`; `kernel-services/virtualization/`),
 whose companion `struct vcpu` is a plain kobject. The system call
 layer bounds every copy by `len`, not by the returned count: a count
-above `len` trips a `KASSERT` and fails the call with `-EIO`, so a
-buggy object can never make the kernel read past its stack buffer.
+above what was offered trips a `KASSERT`, which panics in every build
+(the `-EIO` branch after it is not reached), so a buggy object can
+never make the kernel read past its stack buffer.
 
 ### `const struct kobject_io_type *kobject_io_of(const struct kobject *obj)`
 The object's io type, or NULL for a plain object (or NULL `obj`).
@@ -139,6 +144,18 @@ expose them (`docs/kernel/syscall/api.md`).
   made under a spinlock or in interrupt context. `handle_close` and
   `thread_put` obey this by unlocking first. Panics on underflow.
 
+### `bool kobject_put_and_lock(struct kobject *obj, spinlock_t *lock, arch_irq_state_t *state)`, `void kobject_release_final(struct kobject *obj)`
+- Purpose: drop a reference of an object a lookup finds under `lock`
+  (architecture.md, "Leaving a table"). Returns true with `lock` held
+  (irqsave, `*state`) only when this drop reached zero under it; the
+  caller unlinks, unlocks, then calls `kobject_release_final`, which
+  runs the release and drops the owner's count. Returns false, lock not
+  held, otherwise.
+- Concurrency: CAS without the lock while the count is above 1; the
+  caller of `kobject_release_final` must be able to block. Panics on
+  underflow, and `kobject_release_final` on a nonzero count.
+- Caller today: `vnode_put` (`kernel-services/vfs/vfs.c`).
+
 ### `uint32_t kobject_refcount(const struct kobject *obj)`
 Acquire load; for tests and diagnostics only.
 
@@ -148,8 +165,11 @@ Acquire load; for tests and diagnostics only.
   never dropped; its `release` panics.
 - Ownership: the caller must `kobject_get` before installing it in a
   table (`handle_install` does this itself).
-- Operations: `write(obj, buf, len)` calls `console_write` and returns
-  `len` (takes the console sink lock, may spin, never blocks); `read`
+- Operations: `write(obj, buf, len)` calls
+  `tty_write(tty_console(), buf, len, false)`: a background job with
+  TOSTOP gets `-EIO` or `-EINTR` (SIGTTOU), a hung-up tty `-EIO`;
+  otherwise `console_write` and `len` (takes the console sink lock, may
+  spin, never blocks); `read`
   calls `tty_read(tty_console(), buf, len)` and blocks until a line has
   been typed (`docs/kernel/tty/api.md`; `-EINTR` when the process is
   killed); `stat` reports `COSMO_DT_CHR`, mode 0620, one link. `buf` is
@@ -159,7 +179,9 @@ Acquire load; for tests and diagnostics only.
 
 `struct handle_table`: spinlock, `HANDLE_TABLE_SIZE` (64) entries of
 `{ struct kobject *obj; unsigned rights; unsigned flags; }` with `NULL`
-meaning free, and a live count. Embedded in `struct process`. `flags`
+meaning free, a live count, `limit` (the process's
+`COSMO_RLIMIT_NOFILE`, at most 64, honoured by `handle_install` and
+`handle_install_flags`) and the `exiting` flag. Embedded in `struct process`. `flags`
 belong to the slot, not the object (POSIX's descriptor flags): since
 roadmap M3 the one flag is `HANDLE_FLAG_CLOEXEC`, which exec closes; a
 dup or an install at a slot starts without it, fork copies it.
@@ -188,13 +210,15 @@ Zero the slots, count 0, initialise the lock. Once, before any use.
 ### `int handle_install(struct handle_table *t, struct kobject *obj, unsigned rights)`
 - Purpose: take a reference on `obj` and store it in the lowest free
   slot.
-- Outputs: the handle (0..63) or `-EMFILE` (reference dropped again).
+- Outputs: the handle (0..63); `-EMFILE` when full or at `limit`;
+  `-EBADF` when the table is exiting (reference dropped again).
 - Concurrency: reference taken before the lock, so `obj` must be alive
   on entry (`KASSERT obj != NULL`).
 
 ### `int handle_install_at(struct handle_table *t, int h, struct kobject *obj, unsigned rights)`
 - Purpose: store at slot `h` (used for handles 0–2 of a new process).
-- Outputs: `h`; `-EBADF` if out of range; `-EBUSY` if occupied.
+- Outputs: `h`; `-EBADF` if out of range or the table is exiting;
+  `-EBUSY` if occupied. Does not consult `limit`.
 
 ### `handle_install_flags`, `handle_install_at_flags` (roadmap M3)
 `handle_install` and `handle_install_at` with the slot's flags set in the
