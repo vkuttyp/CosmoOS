@@ -49,11 +49,11 @@ with only some kept (`-k`):
 <!-- test: console -->
 ```console
 cosmo$ priv
-privs: mount sys_admin net proc cred device
+mount sys_admin net proc cred device
 cosmo$ priv -d mount -- priv
-privs: sys_admin net proc cred device
-cosmo$ priv -k net -- mount -t ramfs none /mnt
-...Operation not permitted...
+sys_admin net proc cred device
+cosmo$ priv -k net -- mount none /mnt ramfs
+mount: Operation not permitted
 ```
 
 Services get theirs from the `privileges` line of their file in
@@ -71,10 +71,10 @@ privileges net cred
 
 <!-- test: host -->
 ```sh
-ssh -i cosmo_key -p 2222 -o UserKnownHostsFile=known_hosts root@127.0.0.1 priv | grep -x 'privs: net cred'
+ssh -i cosmo_key -p 2222 -o UserKnownHostsFile=known_hosts root@127.0.0.1 priv | grep -x 'net cred'
 ```
 
-prints `privs: net cred`.
+prints `net cred`.
 
 The console is where the machine is administered. Note that a root
 session with fewer privileges can still edit files in `/etc` that a

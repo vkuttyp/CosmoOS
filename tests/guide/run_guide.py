@@ -149,7 +149,9 @@ class HostShell:
         self.n += 1
         tag = f"__guide_done_{self.n}__"
         self.log.write(f"$ {cmd}\n")
-        self.proc.stdin.write(f"{cmd}\necho \"{tag} $?\"\n")
+        # Its input is /dev/null, not this script's pipe: a command must
+        # not read the lines that follow it (ssh would).
+        self.proc.stdin.write(f"{{\n{cmd}\n}} </dev/null\necho \"{tag} $?\"\n")
         self.proc.stdin.flush()
         out = []
         result = {}

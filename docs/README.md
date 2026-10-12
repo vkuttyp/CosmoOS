@@ -13,6 +13,7 @@ wins and the document is wrong.
 |---|---|
 | `development.md` | Setting up a development host, building, running, testing, CI |
 | `roadmap-1.0.md` | The 1.0 definition of done, its milestones M1-M6 and their acceptance tests |
+| `guide/` | The user guide (roadmap M6): installing, the shell, networking, ssh, packages, privileges, known limitations; every command in it is run by CI (`tests/guide/run_guide.py`) |
 | `plan.md` | Remaining work grouped by area, with suggested next increments |
 | `history/` | What was built, phase by phase and unit by unit (formerly the README's Status section); indexed in [`history/README.md`](history/README.md) |
 | `testing/` | Cross-suite testing records: `flakes.md`, the history and tally of intermittent failures |
@@ -73,8 +74,8 @@ Constitution section 64 requires five files for every major subsystem:
 
 `scripts/check-docs.py` (CI job `docs`, `make check-docs`) fails when a
 subsystem directory in the Layout table above lacks one of the five or
-has an empty one; `history/`, `testing/` and `audit/` are records, not
-subsystems (roadmap M6).
+has an empty one; `history/`, `testing/` and `audit/` are records and
+`guide/` is the user guide, not subsystems (roadmap M6).
 
 The twelve explanation points of section 64 (purpose, responsibilities,
 non-responsibilities, interfaces, data structures, concurrency model,

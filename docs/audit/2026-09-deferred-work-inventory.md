@@ -160,7 +160,10 @@ AHCI are the two entries from that list now built.
   counter (invariant **P30**); the description of the
   two doors above is the record of what was wrong, and what they do now
   is in `docs/kernel/syscall/api.md` and `docs/compat/linux/api.md`.
-- ASLR and KASLR: none; no randomised load base, stack or `brk`.
+- ~~ASLR and KASLR: none; no randomised load base, stack or `brk`.~~
+  **User-space ASLR closed by M5 PR 2** (stack, mmap base, `ET_DYN` bias,
+  Linux break; `docs/audit/2026-10-12-m5-security-baseline-report.md`).
+  KASLR stays open (2.9).
 
 ### 2.3 Scheduler and synchronisation (constitution §20-22)
 
@@ -269,9 +272,10 @@ undo for a file-backed object would need a vnode-level hook (#352 review).
 
 ### 2.6 Linux compatibility (constitution §40 phases 3-4; Prompt #2 §30)
 
-- `execve` is still `lx_nosys` (compat/linux/syscalls.c:3451) -- by the
+- ~~`execve` is still `lx_nosys` (compat/linux/syscalls.c:3451) -- by the
   native model's design (spawn, no fork/exec), but a Linux program that
-  execs dies.
+  execs dies.~~ **Closed by M3**: `lx_execve` over `process_execve`, with
+  `fork` and `vfork` (`docs/audit/2026-10-10-m3-process-model-report.md`).
 - missing (re-checked 2026-09-21): ~~`epoll`~~ (**BUILT — the epoll unit, `docs/audit/next-subsystem-epoll.md`, PR #291**: `epoll_create1`/`create`/`ctl`/`wait`/`pwait` as an interest-set kobject (`kernel/io/epoll.c`) composing the readiness operations via the aio ring's multi-wait, level-triggered with `EPOLLONESHOT`; ~~`EPOLLET`~~ (**BUILT — the epollet unit, `docs/audit/next-subsystem-epollet.md`, PR #301**: edge-triggered via per-item `edge`/`armed`, `collect` reporting an edge member only while armed and re-arming it on a drain or a real (non-timeout) wake), ~~auto-remove-on-close deferred~~ (**BUILT — the epoll-close unit, `docs/audit/2026-10-07-epoll-close-report.md`**: the handle table counts an object's slots across every process and the last close removes its registrations, invariant A9), ~~nesting refused~~ (**BUILT — the epoll-callback unit, `docs/audit/2026-10-07-epoll-callback-report.md`**: readiness by callback, a set in a set with `-ELOOP`, a chain of four)), ~~`sendmsg`/`recvmsg`,
   `socketpair`~~ (built with `AF_UNIX` and `SCM_RIGHTS`, the unix-sockets
   unit), `rseq`, ~~`statx`~~ (**BUILT — the statx unit, `docs/audit/next-subsystem-statx.md`, PR #283**: `LX_statx` 332/291 + `lx_statx` marshalling a 256-byte `struct statx` over the existing VFS stat path, `stx_mask` reporting the supported set and omitting the atime/btime the kernel does not keep), ~~`memfd_create`~~ (**BUILT — the memfd unit, `docs/audit/next-subsystem-memfd.md`, PR #289**: `memfd_create` (319/279) making an anonymous ramfs regular file via `ramfs_anon_reg` — born unlinked so it frees on the last close — plus `ftruncate` (77/46) over the vnode truncate op; `mmap`-able through the page cache),
@@ -413,7 +417,7 @@ above; the built ones are kept here so the coverage is visible.
 | statement | where | state |
 | --- | --- | --- |
 | "framebuffer only later" | constitution §6 | built (the console unit) |
-| "ASLR eventually" | §15 | open (2.2) |
+| "ASLR eventually" | §15 | user space built (M5); KASLR open (2.9) |
 | huge pages, deduplication, NUMA, memory compression "but do not implement them initially" | §14 | open (2.2) |
 | "Design NUMA support into the abstraction, but do not implement NUMA initially" | §13 | open (2.2) |
 | snapshots: "Later support: writable clones, rollback, boot environments, incremental send/receive" | §32 | open (2.4) |
@@ -1001,7 +1005,9 @@ each; none is needed by M2's acceptance test.
   writes `repos.conf` to name it; `test-install` installs `hello` after
   reboot.
 - The native shell expands `$?` for a whole line before running any of
-  it (`cmd; echo $?` reports the previous line); M3 replaces the shell.
+  it (`cmd; echo $?` reports the previous line). ~~M3 replaces the
+  shell.~~ **M3 made BusyBox `ash` the installed system's shell**; the
+  live image's console is still the native shell, which keeps this.
 - `net-neigh-down-race`'s ARP and ND park hooks park the first caller on
   any interface; another interface's traffic can take the park (flakes.md,
   2026-10-10). Filter the hook by the test's interface.
@@ -1027,6 +1033,8 @@ each; none is needed by M2's acceptance test.
   duration, not the remainder (the core's restart re-executes the call).
 - BusyBox's testsuite compares with `cmp`, which is not an M3 applet;
   `tests/busybox/suite.sh` supplies a stand-in over `diff`.
-- ash job control (`ASH_JOB_CONTROL`) is off: an installed system's
-  console has no `^Z`, `jobs` or `fg` until PTYs and job control for ash.
+- ~~ash job control (`ASH_JOB_CONTROL`) is off: an installed system's
+  console has no `^Z`, `jobs` or `fg` until PTYs and job control for ash.~~
+  **Closed by M4 PR 2** (PTYs, controlling terminals, job control in ash
+  on the console and on a pty; `docs/audit/2026-10-11-m4-interactive-networked-report.md`).
 

@@ -191,3 +191,63 @@ listed subsystem directory is missing, or lacks or has an empty one of
 the five files; `history/`, `testing/` and `audit/` are records. It
 checks 37 directories. With `docs/kernel/object/invariants.md` moved
 away it fails naming the file.
+
+## PR 4 (as built): the user guide, README, plan
+
+### Decision 5: the guide
+
+`docs/guide/`: `README.md` (the index, and how the guide is tested),
+`installing.md` (QEMU and firmware on Linux and macOS, checking the
+images with `SHA256SUMS`, booting the live image with a blank disk on
+both architectures, `cosmo-install`, the disk layout, verified boot and
+the `UNVERIFIED BOOT` banner), `shell.md` (the installed system, BusyBox
+`ash`, the applet list, job control, what is missing), `networking.md`
+(DHCP, `netcfg show`, `/etc/resolv.conf`, `wget` by address and by name,
+why HTTP only), `ssh.md` (a key, dropbear, root by key only, a command
+and a pty session), `packages.md` (`pkg` against `/var/lib/pkg/repo`),
+`privileges.md` (the six privileges, `priv`, an ssh login's `net cred`),
+`limitations.md` (from the inventory, the roadmap's out-of-scope list and
+the M1-M5 reports).
+
+**The command job.** `tests/guide/run_guide.py` runs every ```` ```sh ````
+and ```` ```console ```` block of the guide, in the index's order, in one
+directory that starts with the release set: each block is preceded by a
+`<!-- test: ... -->` line saying how it runs (a host command in one
+persistent bash, an interactive session -- QEMU or ssh -- waited on for
+its prompt, or a console block typed at the current session's prompt
+with its output lines required in order, `...` matching what varies); a
+command block without one is an error. Blocks name the host (`linux`,
+`macos`) and architecture they apply to when the steps differ. CI: job
+`guide` (Linux, both architectures, in the toolchain image, after `make
+release`) on every run; job `guide-macos` (macOS 14 runner, Homebrew's
+QEMU, the `release-set` job's images) on pushes to main; the release
+workflow runs both against the signed images. `ci/Dockerfile` gains
+`sudo`, because the Linux steps use it as written.
+
+Writing the guide against the real system found what the first draft
+had wrong, each now as the system prints it: `uname` says `Linux` (BusyBox
+runs under the Linux personality); the blank disk is `vda` on x86-64 and
+`vdb` on AArch64 (the live disk is SATA `ahci0p0` on `q35`, the first
+virtio disk on `virt`); the release kernel logs every process start and
+exit on the console; `priv` prints the set without a prefix; `mount`'s
+syntax is `mount SOURCE TARGET FSTYPE`; an ssh session's prompt is `~ # `.
+The runner itself needed host commands to read `/dev/null` (ssh read the
+runner's next lines) and sessions to nest (ssh while QEMU runs).
+
+Local results (macOS 27 host, Homebrew QEMU 11.1.2, developer-signed
+release builds of this branch): `--host macos --arch aarch64` PASS (12
+host blocks, 7 sessions, 20 console blocks); `--host macos --arch x86_64`
+PASS (11, 7, 20). The Linux blocks run in CI.
+
+### Decision 6: README, plan, inventory
+
+`README.md`: Status says what 1.0 is and links the guide, the roadmap,
+the history and the reports; "What exists" opens with the M1-M5 system
+(installer and cosmofs root, fork/vfork/execve, BusyBox `ash`, PTYs and
+job control, DHCP and DNS, dropbear, verified boot, ASLR, privileges,
+randomness); a "Not in 1.0" section points at the guide's limitations and
+`docs/plan.md`. `docs/plan.md` is retitled "After 1.0" with a preface
+saying so. Inventory lines closed by M1-M6 are struck (user-space ASLR,
+Linux `execve`, ash job control, the installed repository, the native
+shell's replacement on installed systems). `docs/audit/README.md` lists
+the M3-M6 reports; `docs/README.md` lists `guide/`.

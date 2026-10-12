@@ -2850,3 +2850,12 @@ See the [history index](README.md).
     `architecture.md` for the usb, e1000e and ahci drivers;
     `scripts/check-docs.py` (CI job `docs`) requires all five files in
     every subsystem directory `docs/README.md` lists.
+  - PR 2: CI runs in the project's toolchain image (`ci/Dockerfile`,
+    bases pinned by digest), built and pushed to
+    `ghcr.io/vkuttyp/cosmoos-ci` only when it changes and pulled by
+    digest; `make release` makes the signed release set with
+    `SHA256SUMS`, and `make reproducible` compares it.
+  - PR 4: the user guide (`docs/guide/`, seven pages) with every command
+    run by `tests/guide/run_guide.py` in CI (Linux both architectures;
+    macOS on main); README status, "Not in 1.0", the plan's post-1.0
+    preface, inventory lines closed by M1-M6 struck.
