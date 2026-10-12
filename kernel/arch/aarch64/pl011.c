@@ -73,6 +73,8 @@ static uint32_t g_type = COSMOBOOT_CONSOLE_NONE;
 static uintptr_t g_va;            /* register block, virtual */
 static paddr_t g_base;            /* register block, physical */
 static unsigned g_stride = 1;     /* 16550 register spacing in bytes */
+static bool g_wide;               /* 16550: 32-bit accesses, not byte ones */
+static paddr_t g_unreached;       /* a firmware console above the bootstrap direct map, not used */
 static unsigned g_intid;          /* 0: none named, input is polled */
 static volatile uint32_t *g_regs; /* PL011 registers (g_va) */
 static bool g_rx_ready;           /* receive interrupt requested and enabled, or polling */
@@ -84,15 +86,15 @@ static inline void wr(unsigned off, uint32_t v) { g_regs[off / 4] = v; }
 
 static inline uint32_t u_rd(unsigned reg)
 {
-    if (g_stride == 4)
-        return *(volatile uint32_t *)(g_va + reg * 4);
+    if (g_wide)
+        return *(volatile uint32_t *)(g_va + reg * g_stride);
     return *(volatile uint8_t *)(g_va + reg * g_stride);
 }
 
 static inline void u_wr(unsigned reg, uint32_t v)
 {
-    if (g_stride == 4)
-        *(volatile uint32_t *)(g_va + reg * 4) = v;
+    if (g_wide)
+        *(volatile uint32_t *)(g_va + reg * g_stride) = v;
     else
         *(volatile uint8_t *)(g_va + reg * g_stride) = (uint8_t)v;
 }
@@ -174,8 +176,17 @@ void arch_console_early_init(void)
         return;
     if (cmdline_says_no_serial(info))
         return;
-    if (info->console_base == 0 || info->console_base >= info->hhdm_size)
+    if (info->console_type == COSMOBOOT_CONSOLE_16550_MMIO && info->console_access != 0 &&
+        info->console_access != 1 && info->console_access != 4)
+        return;   /* 2- or 8-byte accesses: the loader refuses these too */
+    if (info->console_base == 0)
         return;
+    if (info->console_base >= info->hhdm_size) {
+        /* The early console runs on the loader's direct map, which ends
+         * at hhdm_size: said once the log can say it (inventory). */
+        g_unreached = (paddr_t)info->console_base;
+        return;
+    }
     g_base = (paddr_t)info->console_base;
     g_va = (uintptr_t)(aarch64_hhdm_base + g_base);
     g_intid = info->console_gsiv < GIC_INTID_COUNT ? info->console_gsiv : 0;
@@ -188,7 +199,10 @@ void arch_console_early_init(void)
         wr(UART_LCR_H, LCR_WLEN8 | LCR_FEN);
         wr(UART_CR, CR_UARTEN | CR_TXE | CR_RXE);
     } else {
-        g_stride = info->console_access == 4 ? 4 : 1;
+        /* The loader's rule (boot/uefi/arch/aarch64/serial.c): either of
+         * spacing and width left undefined follows the other. */
+        g_stride = info->console_stride ? info->console_stride : info->console_access == 4 ? 4 : 1;
+        g_wide = info->console_access ? info->console_access == 4 : g_stride == 4;
         u_wr(U_IER, 0);
         u_wr(U_FCR, 0x07);   /* FIFOs on and cleared */
         u_wr(U_LCR, 0x03);   /* 8N1; the firmware's baud rate stays */
@@ -260,6 +274,9 @@ static void rx_poll(struct timer *t, void *arg)
 
 void arch_console_input_init(void)
 {
+    if (g_unreached != 0)
+        kwarn("serial: the firmware's console at 0x%llx is above the bootstrap direct map; not used",
+              (unsigned long long)g_unreached);
     if (g_type == COSMOBOOT_CONSOLE_NONE)
         return;   /* no serial console: input, if any, is a keyboard's */
     if (g_intid != 0) {

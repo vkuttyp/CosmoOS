@@ -2581,6 +2581,25 @@ re-picks the thread it just moved (S26). No thread was lost.
 with a late starter that makes the old assertion fail on every boot
 (`docs/audit/next-subsystem-migrate-stress.md`).
 
+**The first since that fix, 2026-10-13**: `SELFTEST: sched-migrate-stress
+... FAIL: a worker did not run again after the migrator stopped (2308 ms)`,
+PR #376's run 38318608592 (job 115041135787), aarch64, the `test-guard`
+boot (cortex-a76); that job's `test` and `test-gic` boots passed. The
+test's line: `mutex worker 25 did not run again: entered 22873 us, first
+round 22880 us, rounds 2423 (2423 at the migrator's stop), thread state 0
+on cpu 3` -- READY, queued on cpu 3, not run for the whole 2 s deadline,
+after 2423 rounds in the stress window. Only that worker was named. The
+branch (AArch64 platform discovery) changes no scheduler, mutex or timer
+path that QEMU takes; its QEMU-visible changes are the PSCI conduit
+(SMC), an ISB after `arch_mmu_map`'s stores and the GTDT read at the
+right offsets (the same PPIs). Locally, with the test registered 30
+times per boot on that CPU model, one boot of the branch and one of main
+passed all 30 runs each on a quiet host. Not attributed. The line could not say what cpu 3 ran instead
+(a candidate: the other mutex worker, which never yields, re-taking the
+mutex before the woken one runs); the failure line now names that CPU's
+current thread (one of the test's workers by index, the migrator, the
+idle thread or another) and its load. The failed job was rerun.
+
 ## `net-accept-race` over the per-test budget, 2026-09-24
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,

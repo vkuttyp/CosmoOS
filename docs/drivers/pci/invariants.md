@@ -10,11 +10,14 @@ services. Check: review (no file outside `drivers/pci/` and
 **P2. BAR sizes are derived by probing, never trusted from a table, and
 decode is off while probing.** `decode_bars` clears memory/IO decode,
 writes all ones, restores the original value. A memory BAR's size is
-the lowest set bit of its mask (`m & ~(m - 1)`), so it is a power of two
-even when the upper half of a 64-bit BAR is read-only zero. Check: `pci`
-self-test (every size a power of two, base aligned to size); QEMU offers
-no BAR with a read-only upper half, so the case that motivated the rule
-(a 16 KiB BAR sized about 16 EiB on Parallels Desktop) is not tested. Gap: a device whose
+the lowest set bit of its mask (`pci_bar_mem_size`,
+`kernel/include/kernel/pci_bar.h`), so it is a power of two even when the
+upper half of a 64-bit BAR is read-only zero. Check: `pci` self-test
+(every size a power of two, base aligned to size); QEMU offers no BAR with
+a read-only upper half, so the case that motivated the rule (a 16 KiB BAR
+sized about 16 EiB on Parallels Desktop) is the host test `test_pci_bar`,
+with Parallels' masks (`tools/acpi-discovery-probe.py bar --old` restores
+`~mask + 1` and it fails). Gap: a device whose
 BAR the firmware left unprogrammed (base 0) is recorded as is; nothing
 assigns it.
 

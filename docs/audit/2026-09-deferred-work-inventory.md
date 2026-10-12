@@ -529,6 +529,11 @@ tree.
   pool never seeds; no RTC is found. The debug self-test suite assumes
   QEMU's machine (`pci` expects the host bridge at 00:00.0; `net-firewall`,
   `net-tap-release-order`, `blk-submit-unregister` failed there).
+- AArch64: a firmware serial console at or above the loader's 4 GiB
+  direct map is not used (logged at input setup): the early console runs
+  on that map. Needs the loader to map the console page and
+  `map_early_devices` to carry it (found in review of PR #376; no machine
+  seen with one).
 
 ## 4. The quiesce report's remaining risks and debt
 

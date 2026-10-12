@@ -23,7 +23,23 @@
 
 static uint32_t g_type;   /* COSMOBOOT_CONSOLE_*; NONE until configured */
 static uintptr_t g_base;
-static unsigned g_shift;  /* 16550 registers: 1 byte apart, or 4 when the SPCR says 32-bit access */
+static unsigned g_stride; /* 16550: bytes between registers */
+static bool g_wide;       /* 16550: 32-bit accesses, not byte ones */
+
+static uint32_t u_rd(unsigned reg)
+{
+    uintptr_t a = g_base + reg * g_stride;
+    return g_wide ? *(volatile uint32_t *)a : *(volatile uint8_t *)a;
+}
+
+static void u_wr(unsigned reg, uint8_t v)
+{
+    uintptr_t a = g_base + reg * g_stride;
+    if (g_wide)
+        *(volatile uint32_t *)a = v;
+    else
+        *(volatile uint8_t *)a = v;
+}
 
 void arch_serial_init(void)
 {
@@ -34,7 +50,12 @@ void arch_serial_configure(const struct cosmoboot_info *info)
     if (info->console_type == COSMOBOOT_CONSOLE_PL011 || info->console_type == COSMOBOOT_CONSOLE_16550_MMIO) {
         g_type = info->console_type;
         g_base = (uintptr_t)info->console_base;
-        g_shift = info->console_access == 4 ? 2 : 0;
+        /* The descriptor's register spacing and access width; either
+         * left undefined follows the other, and both undefined is a
+         * byte-wide, byte-spaced 16550 (docs/boot/design.md, "The serial
+         * console"). */
+        g_stride = info->console_stride ? info->console_stride : info->console_access == 4 ? 4 : 1;
+        g_wide = info->console_access ? info->console_access == 4 : g_stride == 4;
     }
 }
 
@@ -51,16 +72,8 @@ void arch_serial_putc(char c)
             ;
         r[PL011_DR / 4] = (uint32_t)(uint8_t)c;
     } else if (g_type == COSMOBOOT_CONSOLE_16550_MMIO) {
-        if (g_shift == 2) {
-            volatile uint32_t *r = (volatile uint32_t *)g_base;
-            while ((r[U16550_LSR] & U16550_THRE) == 0)
-                ;
-            r[U16550_THR] = (uint32_t)(uint8_t)c;
-        } else {
-            volatile uint8_t *r = (volatile uint8_t *)g_base;
-            while ((r[U16550_LSR] & U16550_THRE) == 0)
-                ;
-            r[U16550_THR] = (uint8_t)c;
-        }
+        while ((u_rd(U16550_LSR) & U16550_THRE) == 0)
+            ;
+        u_wr(U16550_THR, (uint8_t)c);
     }
 }

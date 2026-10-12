@@ -128,6 +128,25 @@ static const char *kind_name(uint32_t kind)
                                                   : "not a console this kernel drives";
 }
 
+/* The register layout from the port's address descriptor (GAS: space,
+ * bit width, bit offset, access size, address): the access width from its
+ * access size, the register spacing from its bit width; each 0 when the
+ * descriptor leaves it undefined. A 16550 the drivers cannot reach (an
+ * access of 2 or 8 bytes) is no console. */
+static uint32_t console_layout(struct cosmoboot_info *info, uint32_t kind, const uint8_t *gas)
+{
+    uint8_t width = gas[1], access = gas[3];
+    info->console_access = access >= 1 && access <= 4 ? 1u << (access - 1) : 0u;
+    info->console_stride = width == 8 || width == 16 || width == 32 || width == 64 ? width / 8u : 0u;
+    if (kind == COSMOBOOT_CONSOLE_16550_MMIO && info->console_access != 0 && info->console_access != 1 &&
+        info->console_access != 4) {
+        lprintf("acpi: a 16550 accessed %u bytes at a time is not one this loader drives\n", info->console_access);
+        info->console_access = info->console_stride = 0;
+        return COSMOBOOT_CONSOLE_NONE;
+    }
+    return kind;
+}
+
 /*
  * DBG2 (the Debug Port Table), when there is no SPCR: the firmware's debug
  * serial port. Its device entries follow an offset at 36 and a count at
@@ -159,11 +178,12 @@ static bool dbg2(struct cosmoboot_info *info)
             uint32_t kind = base != 0 && sub <= 0xff ? console_kind((uint8_t)sub, space) : COSMOBOOT_CONSOLE_NONE;
             lprintf("acpi: DBG2 serial port %u: subtype 0x%x, space %u, base 0x%llx, access %u, no interrupt -> %s\n",
                     i, sub, space, (unsigned long long)base, access, kind_name(kind));
+            if (kind != COSMOBOOT_CONSOLE_NONE)
+                kind = console_layout(info, kind, e + baro);
             if (kind != COSMOBOOT_CONSOLE_NONE) {
                 info->console_type = kind;
                 info->console_base = base;
                 info->console_gsiv = 0;
-                info->console_access = access == 1 ? 1u : access == 3 ? 4u : 0u;
                 info->console_flags = COSMOBOOT_CONSOLE_FROM_DBG2;
                 return true;
             }
@@ -194,11 +214,12 @@ static void spcr(struct cosmoboot_info *info)
     uint32_t kind = base != 0 ? console_kind(type, space) : COSMOBOOT_CONSOLE_NONE;
     lprintf("acpi: SPCR: interface type 0x%x, space %u, base 0x%llx, access %u, GSIV %u -> %s\n", type, space,
             (unsigned long long)base, access, gsiv, kind_name(kind));
+    if (kind != COSMOBOOT_CONSOLE_NONE)
+        kind = console_layout(info, kind, t + 40);
     info->console_type = kind;
     if (kind != COSMOBOOT_CONSOLE_NONE) {
         info->console_base = base;
         info->console_gsiv = gsiv;
-        info->console_access = access == 1 ? 1u : access == 3 ? 4u : 0u;
     }
 }
 

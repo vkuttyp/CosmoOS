@@ -619,7 +619,7 @@ Neither sleeps, allocates nor takes a lock.
 | GIC distributor / CPU interface | MADT (`acpi_madt_gic`) | `VIRT_GICD_BASE`, `VIRT_GICC_BASE` (a warning when the MADT has no GIC entry at all) | panic: `gic: the MADT describes no GIC distributor, and this firmware is not QEMU's` (`irqc.c`), or a GICD/GICC base of 0 (`gic.c`, `gicv3.c`) |
 | Timer PPIs | GTDT, offsets 56 and 64 | 30 and 27, warning | panic: `timer: the GTDT gives no usable timer interrupts ...` |
 | PSCI conduit | FADT ARM boot flags | HVC | none: no secondary CPUs (`kerror`) |
-| SMMUv3 interrupts | IORT GSIVs | `VIRT_SMMU_EVENTQ_INTID` 106, `VIRT_SMMU_GERROR_INTID` 109 | 0: no interrupts |
+| SMMUv3 interrupts | IORT GSIVs | `VIRT_SMMU_EVENTQ_INTID` 106, `VIRT_SMMU_GERROR_INTID` 109 | the SMMU is not used (`kwarn`): 0 would be an SGI, accepted by `irq_request` and never delivered, so its event queue would never drain |
 | fw_cfg | QEMU only, `VIRT_FWCFG_BASE` | — | absent: `opt/cosmo/` keys unset |
 | RTC | QEMU only, `VIRT_PL031_BASE` | — | `arch_rtc_read_epoch` returns false |
 | Emulator exit | QEMU only, semihosting | — | `arch_emulator_exit` returns |
@@ -661,8 +661,13 @@ configurations.
   before `bootinfo_init`, with the same bounds). A PL011's mask and
   pending bits are reset, 8N1 with FIFOs set and TX/RX enabled; a 16550's
   interrupts are disabled, FIFOs enabled and cleared and 8N1 set, the
-  firmware's baud rate kept, registers 1 byte apart or 4 when
-  `console_access` is 4. It registers the `serial` console sink; that page
+  firmware's baud rate kept, the registers `console_stride` apart and
+  accessed `console_access` bytes wide, by the loader's rule for either
+  left undefined (docs/boot/design.md, "The serial console"). A console
+  at or above `hhdm_size` is not used: the early console runs on the
+  loader's direct map, which ends there, and `arch_console_input_init`
+  then logs `serial: the firmware's console at ... is above the bootstrap
+  direct map; not used`. It registers the `serial` console sink; that page
   is one `map_early_devices` keeps alive across takeover.
   `arch_console_input_init` requests `console_gsiv` (33 on `virt`) level
   triggered with the generic `irq_request`, drains the FIFO, enables the
@@ -754,7 +759,8 @@ initialisation run on the CPU itself. Errors follow the contract (see
 missing MADT GIC entry or base, or IORT SMMU GSIVs of zero fall back to
 the `virt` values (with a warning for the GTDT and a missing GIC
 entry); on any other firmware the GIC and GTDT
-cases panic naming the table and the SMMU gets no interrupts. No SPCR
+cases panic naming the table and an SMMU without both interrupts is
+not used. No SPCR
 or DBG2 port means no serial console, not an error. A missing MADT
 panics as on x86.
 

@@ -28,7 +28,7 @@ compiler.
 | `cmdline_phys`, `cmdline_size` | (v7, spending `reserved2`) the text of `\cosmo\cmdline` up to its first NUL, NUL terminated, at most `COSMOBOOT_CMDLINE_MAX` (1023) bytes, in the last of the bootinfo pages (`COSMOBOOT_MEM_BOOTINFO`); both zero when the file is absent or empty. See "The command line" |
 | `verify_flags`, `verify_key_id[8]` | (v8) `COSMOBOOT_VERIFIED` when the loader checked `kernel.elf`, `boot.tar` and `cmdline` against `\cosmo\manifest` under a signature by a key compiled into it, with that key's id (first 8 bytes of SHA-512 of the public key, the module ring's naming); both zero from a `VERIFY_BOOT=0` loader. See "Verified boot" |
 | `boot_flags`, `boot_partuuid[16]` | (v7) `COSMOBOOT_BOOT_PARTUUID` set when the loader was read from a GPT partition: `boot_partuuid` is that partition's unique GUID in on-disk byte order, from the hard-drive node of the loader's device path. Clear for a volume with no partition table. See "The boot disk" |
-| `console_type`, `console_gsiv`, `console_base`, `console_access`, `console_flags` | (v9) the serial console the firmware's ACPI tables name, found by the loader (`boot/uefi/acpi.c`): `console_type` is `COSMOBOOT_CONSOLE_NONE` 0, `PL011` 1 (PL011 or SBSA generic UART, MMIO), `16550_MMIO` 2 or `16550_PORT` 3; `console_base` the register block's physical address (an I/O port for `16550_PORT`); `console_access` the register width in bytes, 1 or 4, 0 when the table says "undefined"; `console_gsiv` the interrupt, 0 for a polled port; `console_flags` `COSMOBOOT_CONSOLE_FROM_DBG2` when the port came from the DBG2 rather than the SPCR. All zero when no table names a port the kernel drives. See "The serial console" |
+| `console_type`, `console_gsiv`, `console_base`, `console_access`, `console_flags`, `console_stride` | (v9) the serial console the firmware's ACPI tables name, found by the loader (`boot/uefi/acpi.c`): `console_type` is `COSMOBOOT_CONSOLE_NONE` 0, `PL011` 1 (PL011 or SBSA generic UART, MMIO), `16550_MMIO` 2 or `16550_PORT` 3; `console_base` the register block's physical address (an I/O port for `16550_PORT`); `console_access` the width of one register access in bytes and `console_stride` the spacing of the registers in bytes, each 0 when the table leaves it undefined (below); `console_gsiv` the interrupt, 0 for a polled port; `console_flags` `COSMOBOOT_CONSOLE_FROM_DBG2` when the port came from the DBG2 rather than the SPCR. All zero when no table names a port the kernel drives. See "The serial console" |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,
 `ACPI_RECLAIMABLE` 3, `ACPI_NVS` 4, `BAD` 5, `LOADER_RECLAIMABLE` 6,
@@ -196,7 +196,14 @@ its length) and records one port in the boot info (protocol v9):
   SPCR and no DBG2 serial port: no serial console`.
 
 `console_access` is the descriptor's access size translated to bytes
-(1 → 1, 3 → 4, anything else 0, "the type's natural width").
+(1, 2, 3, 4 → 1, 2, 4, 8; 0 "undefined") and `console_stride` its
+register bit width in bytes (8, 16, 32, 64 → 1, 2, 4, 8; anything else
+0). They differ on a 16550 read a byte at a time from registers 4 bytes
+apart, which the DBG2 specification allows. Either left undefined
+follows the other, and both undefined is a byte-wide, byte-spaced 16550.
+A 16550 whose accesses are 2 or 8 bytes wide is not one the loader or
+the kernel drives: the loader says so and records no console. A PL011
+is always driven with 32-bit accesses.
 
 While boot services are up `acpi_scan` prints, on the firmware console,
 the OEM id and the table signatures (`acpi: OEM 'BOCHS ', N tables: ...`)
@@ -212,7 +219,7 @@ and on a machine that then stays silent it is the evidence.
 The loader's own output after `ExitBootServices` goes to that port and
 nowhere else (BT16): on AArch64 `arch_serial_configure`
 (`boot/uefi/arch/aarch64/serial.c`) drives a PL011 or a memory-mapped
-16550 (registers 1 byte apart, or 4 when `console_access` is 4) at
+16550 (spacing and width as above) at
 `console_base`, which the firmware's identity map still covers; with no
 record it writes nothing. No address is assumed: until this version it
 wrote QEMU virt's 0x09000000, a store to whatever another machine has

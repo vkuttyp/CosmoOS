@@ -238,16 +238,21 @@ struct cosmoboot_info {
     /* v9: the serial console the firmware describes (ACPI SPCR; docs/boot/
      * design.md, "The serial console"). console_base is the register
      * block's physical address (an I/O port for 16550_PORT);
-     * console_access the register width in bytes from the SPCR's address
-     * descriptor (1 or 4; 0 when the descriptor says "undefined", which
-     * means the type's natural width); console_gsiv the interrupt, 0 when
-     * the port is polled. The loader writes its own output after
-     * ExitBootServices to this port and to nothing else. */
+     * console_access the width of one register access in bytes, from the
+     * address descriptor's access size (1, 2, 4 or 8; 0 when it says
+     * "undefined"); console_stride the spacing of the registers in bytes,
+     * from the descriptor's register bit width (0 when it says nothing):
+     * the two differ on a 16550 read a byte at a time from 32-bit-spaced
+     * registers. console_gsiv the interrupt, 0 when the port is polled.
+     * The loader writes its own output after ExitBootServices to this port
+     * and to nothing else. */
     uint32_t console_type;    /* COSMOBOOT_CONSOLE_* */
     uint32_t console_gsiv;
     uint64_t console_base;
     uint32_t console_access;
     uint32_t console_flags;   /* COSMOBOOT_CONSOLE_FROM_DBG2 */
+    uint32_t console_stride;
+    uint32_t reserved4;
 };
 
 #endif /* __ASSEMBLER__ */

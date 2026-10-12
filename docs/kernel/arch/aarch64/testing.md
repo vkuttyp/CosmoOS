@@ -156,6 +156,13 @@ and agree with what the kernel drives, not that a different map works:
 the non-QEMU paths (no `VIRT_*` fallback, a DBG2 or 16550 console, no
 PSCI) are not run here.
 
+The gicv3 variant is also the proof that the GTDT is read at its timer
+offsets (56 and 64): `tools/acpi-discovery-probe.py gtdt --old` reads 80
+and 88 again and the variant fails on its timer PPIs. The ISB after
+`arch_mmu_map`'s stores has no QEMU test; `tools/acpi-discovery-probe.py
+isb` boots a Parallels Desktop VM N times and counts panics, with and
+without it (docs/audit/2026-10-13-acpi-discovery-report.md).
+
 ### Sixteen CPUs
 
 `QEMU_GIC=3 QEMU_SMP=16` boots and brings all sixteen CPUs online --

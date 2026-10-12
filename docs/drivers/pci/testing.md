@@ -22,6 +22,16 @@ function has MSI-X and a memory BAR. The test logs the function count
 (9 under the default QEMU configuration), the virtio count (3) and the
 access mechanism (`ECAM`).
 
+## Host test `test_pci_bar` (`tests/host/test_pci_bar.c`)
+
+`pci_bar_mem_size` on sizing masks: 32-bit and 64-bit BARs with writable
+upper halves (4 KiB, 16 KiB, 8 GiB), 64-bit BARs whose upper half reads
+zero (Parallels' NVMe controller, `0xffffc004` low, 16 KiB; and 1 MiB),
+and no BAR (mask 0, size 0). QEMU offers no BAR of the second kind, so
+this is where invariant P2's motivating case is checked;
+`tools/acpi-discovery-probe.py bar --old` restores `~mask + 1` and the
+test fails.
+
 ## Indirect coverage
 
 Every boot exercises `pci_msix_enable`/`pci_msix_request` for the

@@ -26,7 +26,7 @@ On Parallels the store to 0x09000000 faults before any handler exists.
 
 | Area | Change | Files |
 |---|---|---|
-| Boot protocol v9 | `console_type` (none, PL011, MMIO 16550, port 16550), `console_base`, `console_gsiv`, `console_access`, `console_flags` (`FROM_DBG2`). Loader and kernel already refuse a protocol mismatch (the ELF note; `bootinfo_init`), and the AArch64 early console checks the version before it reads the record | `boot/protocol/cosmoboot.h` |
+| Boot protocol v9 | `console_type` (none, PL011, MMIO 16550, port 16550), `console_base`, `console_gsiv`, `console_access` (access width), `console_stride` (register spacing), `console_flags` (`FROM_DBG2`). Loader and kernel already refuse a protocol mismatch (the ELF note; `bootinfo_init`), and the AArch64 early console checks the version before it reads the record | `boot/protocol/cosmoboot.h` |
 | Loader | `acpi_scan` walks RSDP -> XSDT, finds the SPCR, or when there is none the DBG2's debug serial port (no interrupt), records the port and prints its choice; the AArch64 loader's output after `ExitBootServices` goes to that port and nowhere else (x86-64 keeps COM1); `acpi_report` prints what the MADT, MCFG, GTDT and FADT say, after `ExitBootServices`, on that port | `boot/uefi/acpi.c`, `arch/aarch64/serial.c`, `main.c` |
 | Early console | the recorded PL011 or MMIO 16550 through the direct map; input on the recorded interrupt or, with none, polled every 10 ms from a kernel timer; `serial=none` on the command line disables it. With no serial console `kernel_main` brings the framebuffer console up before its first line (`fbcon_early_init`, static buffer, the loader's direct map, which `map_early_devices` carries into the kernel's tables) | `kernel/arch/aarch64/pl011.c`, `kernel/core/fbcon.c`, `main.c`, `console.c` |
 | No fixed addresses | QEMU is identified by the RSDP's OEM id, `BOCHS ` (`acpi_platform_is_qemu`); virt's GIC, fw_cfg, PL031, SMMU interrupts and the semihosting exit are used only there. Elsewhere a MADT without a GIC or an unusable GTDT is a panic naming the table; fw_cfg is absent and every `opt/cosmo/` key reads unset; no RTC; the emulator exit returns | `drivers/acpi/acpi.c`, `kernel/arch/aarch64/{irqc,gic,gicv3,timer,fwcfg,shutdown,mmu}.c`, `drivers/iommu/arm_smmuv3.c` |
@@ -59,6 +59,17 @@ the path a machine without a serial port takes.
    low mask `0xffffc004`), was sized about 16 EiB and could not be mapped.
    Now the mask's lowest set bit (16 KiB). Every BAR with writable upper
    bits, which is every one QEMU offers, gets the same answer as before.
+
+**The proofs** (`tools/acpi-discovery-probe.py`). The three fixes are part
+of the unit's one commit, so `--old` puts back exactly the defect's own
+expression in a throwaway worktree, refusing if it is not where the fix
+left it:
+
+| Check | `--old` | The test that fails with it | Architectures |
+|---|---|---|---|
+| `bar` | `pci_bar_mem_size` returns `~mask + 1` (the sizing now lives in `kernel/include/kernel/pci_bar.h`) | host test `test_pci_bar`: "a 64-bit BAR whose upper half reads zero" (Parallels' NVMe masks) | both host builds |
+| `gtdt` | the GTDT read at 80 and 88 | `test-platforms`' gicv3 variant: timer PPIs not 30/27, `timer: GTDT unusable` | AArch64 (x86-64 reads no GTDT) |
+| `isb` | `dsb ishst` without the ISB | none on QEMU (TCG never shows it): the check boots a Parallels VM N times and counts panics | AArch64 on Parallels, a rate |
 
 ## The Parallels iteration log
 

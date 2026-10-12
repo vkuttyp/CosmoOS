@@ -403,11 +403,18 @@ static bool iort_find_smmuv3(struct smmu_desc *out)
             memcpy(&gerr, t + off + 52, 4);
             out->base = (paddr_t)base;
             /* QEMU's IORT leaves the GSIVs zero; its virt numbers are
-             * assumed there and nowhere else (no interrupt elsewhere:
-             * the driver then polls nothing and reports faults late). */
+             * assumed there and nowhere else. Elsewhere an SMMU without
+             * both interrupts is not used: 0 would be an SGI, which
+             * irq_request accepts and nothing ever delivers, so its
+             * event queue would never be drained. */
             bool qemu = acpi_platform_is_qemu();
             out->event_intid = ev ? ev : qemu ? VIRT_SMMU_EVENTQ_INTID : 0;
             out->gerror_intid = gerr ? gerr : qemu ? VIRT_SMMU_GERROR_INTID : 0;
+            if (base != 0 && (out->event_intid == 0 || out->gerror_intid == 0)) {
+                kwarn("iommu: the IORT's smmuv3 at 0x%llx names no event or global-error interrupt; not used",
+                      (unsigned long long)base);
+                return false;
+            }
             return base != 0;
         }
         off += len;

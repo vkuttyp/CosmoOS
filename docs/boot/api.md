@@ -8,7 +8,7 @@ follows constitution section 52.
 
 **ABI stability: stable.** Version 9 adds the serial console the
 firmware names (`console_type`, `console_gsiv`, `console_base`,
-`console_access`, `console_flags`) and grows the structure; a loader
+`console_access`, `console_flags`, `console_stride`) and grows the structure; a loader
 that finds no port writes them zero (`COSMOBOOT_CONSOLE_NONE`). The
 `console_type` values are `COSMOBOOT_CONSOLE_NONE` 0,
 `COSMOBOOT_CONSOLE_PL011` 1, `COSMOBOOT_CONSOLE_16550_MMIO` 2 and
