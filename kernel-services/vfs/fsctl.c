@@ -47,7 +47,7 @@ static int fsctl_open_file(struct vnode *vn, struct file *f)
      * discretionary: an operator can change it, and the check that
      * cannot be changed is the one that matters. Both, on purpose.
      */
-    if (!cred_privileged(cred_current()))
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
         return -EPERM;
     struct fsctl_open *o = kmalloc(sizeof(*o), KMEM_ZERO);
     if (o == NULL)
@@ -259,7 +259,7 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     struct fsctl_open *o = f->priv;
     if (o == NULL)
         return -EINVAL;
-    if (!cred_privileged(cred_current()))
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
         return -EPERM;   /* the fd may have outlived the privilege that opened it */
     if (len != sizeof(struct cosmo_fsctl))
         return -EINVAL;  /* a command is exactly one struct, applied whole */

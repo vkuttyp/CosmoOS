@@ -789,10 +789,17 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     struct process *parent = attr ? attr->parent : NULL;
     if (parent) {
         p->parent_pid = parent->pid;
+        /* One snapshot under the lock the parent's setres* takes, as
+         * fork_inherit does: another thread's uid change writes the ids
+         * and then clears the privileges, and a copy between the two would
+         * give the child new ids with the old mask (PR #370 review). */
+        arch_irq_state_t cs = spin_lock_irqsave(&parent->lock);
         p->cred = parent->cred;
+        spin_unlock_irqrestore(&parent->lock, cs);
         p->rlim = parent->rlim;
         p->umask = __atomic_load_n(&parent->umask, __ATOMIC_RELAXED);
     } else {
+        p->cred = cred_kernel;   /* a kernel-created process -- init -- starts with every privilege */
         p->rlim = rlimits_default;
     }
     if (attr && attr->rlim)
@@ -801,10 +808,14 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         /* COSMO_SPAWN_SETCRED, validated by the caller: the child's three
          * ids are the named ones and it starts with no supplementary
          * groups (docs/kernel/security/design.md §1). */
+        uint32_t r = p->cred.ruid, e = p->cred.euid, s = p->cred.suid;
         p->cred.ruid = p->cred.euid = p->cred.suid = attr->uid;
         p->cred.rgid = p->cred.egid = p->cred.sgid = attr->gid;
         p->cred.ngroups = 0;
+        cred_ids_changed(&p->cred, r, e, s);   /* leaving uid 0 leaves the privileges too */
     }
+    if (attr)
+        cred_drop(&p->cred, attr->priv_drop);   /* COSMO_SPAWN_DROPPRIV: privileges only shrink */
     p->handles.limit = p->rlim.v[COSMO_RLIMIT_NOFILE] < HANDLE_TABLE_SIZE ? (unsigned)p->rlim.v[COSMO_RLIMIT_NOFILE]
                                                                         : HANDLE_TABLE_SIZE;
     p->log_tokens = LOG_BUCKET;
@@ -1897,7 +1908,7 @@ bool process_visible_to_current(const struct process *p)
 {
     const struct process *self = process_current();
     const struct credentials *viewer = cred_current();
-    return visible_to(p, viewer, self ? self->domain : 0, cred_privileged(viewer));
+    return visible_to(p, viewer, self ? self->domain : 0, cred_has(viewer, PRIV_PROC));
 }
 
 /*
@@ -1910,7 +1921,7 @@ unsigned process_list_visible(pid_t *out, unsigned max)
     const struct process *self = process_current();
     const struct credentials *viewer = cred_current();
     uint32_t domain = self ? self->domain : 0;
-    bool all = cred_privileged(viewer);
+    bool all = cred_has(viewer, PRIV_PROC);
     unsigned total = 0;
     arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
     struct process *p;
@@ -1928,7 +1939,7 @@ unsigned process_list_visible(pid_t *out, unsigned max)
 unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct credentials *viewer)
 {
     unsigned total = 0;
-    bool all = cred_privileged(viewer);
+    bool all = cred_has(viewer, PRIV_PROC);
     struct process *self = process_current();
     uint32_t domain = self ? self->domain : 0;
     arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
@@ -2100,7 +2111,7 @@ int process_setrlimit(unsigned resource, uint64_t value)
     if (resource == COSMO_RLIMIT_NOFILE && value > HANDLE_TABLE_SIZE)
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    if (value > p->rlim.v[resource] && !cred_privileged(&p->cred)) {
+    if (value > p->rlim.v[resource] && !cred_has(&p->cred, PRIV_PROC)) {
         spin_unlock_irqrestore(&p->lock, s);
         return -EPERM;   /* raising a limit is a privileged act */
     }
@@ -2113,12 +2124,13 @@ int process_setrlimit(unsigned resource, uint64_t value)
     return 0;
 }
 
-/* sys_log for an unprivileged process: a token bucket of LOG_BUCKET lines
- * refilling at LOG_RATE_PER_S. Returns false when the caller must wait. */
+/* sys_log for a process without PRIV_SYS_ADMIN: a token bucket of
+ * LOG_BUCKET lines refilling at LOG_RATE_PER_S. Returns false when the
+ * caller must wait. */
 bool process_log_permitted(void)
 {
     struct process *p = process_current();
-    if (cred_privileged(&p->cred))
+    if (cred_has(&p->cred, PRIV_SYS_ADMIN))
         return true;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     uint64_t now = clock_now_ns();

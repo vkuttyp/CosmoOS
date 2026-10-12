@@ -378,6 +378,11 @@ static inline long cosmo_sysctl(const char *name, char *buf, size_t len)
 {
     return cosmo_syscall3(SYS_sysctl, name, buf, len);
 }
+/* Roadmap M5: write a sysctl (kernel.hostname); PRIV_SYS_ADMIN. */
+static inline long cosmo_sysctl_set(const char *name, const char *value, size_t len)
+{
+    return cosmo_syscall3(SYS_sysctl_set, name, value, len);
+}
 
 /* Credentials: -1 keeps an id. */
 static inline long cosmo_setresuid(long ruid, long euid, long suid)

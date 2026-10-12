@@ -67,3 +67,29 @@ x86-64. The syscall fuzzer exercises `getrlimit` and leaves
 - `procinfo` visibility is tested for the unprivileged view only; that
   root sees every process is exercised by `ps` in the shell test.
 - No `chmod`/`chown`, no group-permission test (unchanged from V14).
+
+## `make test-security`, stage `priv` (roadmap M5)
+
+`tests/boot/security_test.py` boots the signed release image and runs
+`/boot/tests/security/priv.sh` with BusyBox ash as root from init's
+shell; the script prints `KEY=VALUE` lines the harness checks, each
+refusal printing EPERM by name:
+
+| Check | Expected |
+|---|---|
+| `priv` as root | `mount sys_admin net proc cred device` |
+| `/sbin/mount none /tmp/m5-mnt ramfs` as root | 0 |
+| the same under `priv -d mount` | 1, `Operation not permitted`; the child's `priv` lacks `mount` |
+| `priv -d mount -- priv -k all -- mount ...`, and the same through `sh -c` | 1: nothing gives a privilege back |
+| under `priv -k mount` (that privilege alone) | 0, then `umount` 0 |
+| as uid 1000 (`priv -u 1000`) | 1; its `priv` says `none` (leaving uid 0 drops all) |
+| `sysctl kernel.hostname=...` as root / `-d sys_admin` / `-k sys_admin` | 0 / 1 (EPERM) / 0, and the name is the last one set |
+| kill of a uid-1000 process: native `kill` under `-d proc`, ash's builtin under `-d proc`, ash's as uid 1001, native under `-k proc` | refused, refused, refused, 0 (the victim's status 143) |
+| SysV shm: a uid-1000 `0600` segment (`tests/security/shmprobe`) attached and removed by uid 0 under `-d sys_admin`, then with every privilege | `EACCES`, `EPERM`, then `ok`, `ok` |
+| uid 1000: `dmesg`; `cat /proc/*/status /proc/*/limits; ls -l /proc/*/fd; sysctl -a` | refused; at least 1000 bytes read and no `ffff` followed by twelve hex digits |
+
+`test-net-login` adds acceptance e: the root session over ssh prints `net
+cred` from `priv` and its `mount` is EPERM (the dropbear service's
+`privileges net cred`). `tests/host/test_cred.c` holds the rules
+(`cred_has`, `cred_drop`, `cred_ids_changed`, `setres*`, `setgroups`,
+`cred_may_signal` with and without each privilege).

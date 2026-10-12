@@ -630,23 +630,29 @@ vector 3 (the `breakpoint-trap` self-test owns that vector temporarily).
 ### Credentials (Prompt #3 fix pass)
 
 `struct credentials` (`kernel/cred.h`) is POSIX-shaped: `ruid, euid,
-suid`, `rgid, egid, sgid`, `ngroups` and `groups[16]`. The security
-boundary is one predicate, `cred_privileged(c)` (`euid == 0`), consulted
-by every privileged operation: `mount`, `umount`, `klog`, binding a port
-below 1024, `setgroups`, and any `setres*` change beyond shuffling ids
-the caller already holds. Discretionary file access uses the effective
-ids and the supplementary groups (`vfs_permission`). `kill` uses
-`cred_may_signal`. Kernel threads and boot-time work run as
-`cred_kernel` (root); `cred_current()` returns the current process's
-credentials or that.
+suid`, `rgid, egid, sgid`, `ngroups` and `groups[16]`, plus (roadmap M5)
+`privs`, the operation-specific privileges
+(`docs/kernel/security/design.md` §1). Every privileged operation names
+the privilege it needs and asks `cred_has(c, PRIV_X)`: `PRIV_MOUNT` for
+`mount`/`umount`/`switch_root`, `PRIV_SYS_ADMIN` for `klog` and sysctl
+writes, `PRIV_NET` for a port below 1024, `PRIV_CRED` for `setgroups` and
+any `setres*` change beyond shuffling ids the caller already holds, and
+so on; uid 0 alone grants nothing. Discretionary file access uses the
+effective ids and the supplementary groups (`vfs_permission`). `kill`
+uses `cred_may_signal`. Kernel threads and boot-time work run as
+`cred_kernel` (root, every privilege); `cred_current()` returns the
+current process's credentials or that.
 
-A child inherits its parent's credentials by copy at spawn; the kernel
-creates init with all ids 0. A process changes only its own credentials,
+A child inherits its parent's credentials by copy at spawn, less what
+`COSMO_SPAWN_DROPPRIV` drops; the kernel creates init with all ids 0 and
+every privilege (`cred_kernel`). Privileges are only ever cleared: by a
+spawn's drop mask, or by a uid change that leaves no id 0
+(`cred_ids_changed`). A process changes only its own credentials,
 under `process->lock` (it is single-threaded today; the lock is for the
 readers on other CPUs once threads exist): `setresuid`/`setresgid`
 follow POSIX (`-1` keeps an id; an unprivileged caller may set each id
-only to one of its current real, effective or saved ids; all or
-nothing, `-EPERM`), `setgroups` is privileged, `getres*`/`getgroups`
+only to one of its current real, effective or saved ids unless it holds
+`PRIV_CRED`; all or nothing, `-EPERM`), `setgroups` needs `PRIV_CRED`, `getres*`/`getgroups`
 read. Native system calls 50-55 (`SYS_setresuid` ... `SYS_getgroups`);
 the Linux personality maps `setuid`, `setgid`, `setreuid`, `setregid`,
 `setresuid`, `setresgid`, `getresuid`, `getresgid`, `getgroups`,
@@ -665,11 +671,11 @@ and `MEM` before the ELF is loaded, `handles.limit` for `NOFILE`; the
 `NPROC` count (`process_count_uid(child ruid) + 1`) is checked before
 the process is registered and fails creation with `-EAGAIN`; `VMEM` is
 read by `sys_vm_create`. `process_setrlimit` lowers freely and raises
-only for a privileged caller, under `process.lock`.
+only for a `PRIV_PROC` caller, under `process.lock`.
 
 `COSMO_SPAWN_SETCRED`: `sys_spawn` passes the request's `uid`/`gid` to
-`process_spawn`, which refuses (`-EPERM`) unless the caller is
-privileged or both ids are among its real, effective and saved ones,
+`process_spawn`, which refuses (`-EPERM`) unless the caller holds
+`PRIV_CRED` or both ids are among its real, effective and saved ones,
 then `process_create_from_elf` sets the child's three uids and three
 gids and clears its groups. Without the flag the child inherits by copy
 as before. The executable's setuid/setgid bits are ignored.

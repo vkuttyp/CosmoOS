@@ -138,7 +138,7 @@ struct process {
     unsigned nr_threads;
     struct credentials cred;
     struct rlimits rlim;               /* kernel/rlimit.h; written under lock by the process itself */
-    uint32_t log_tokens;               /* sys_log rate limit for unprivileged callers */
+    uint32_t log_tokens;               /* sys_log rate limit for callers without PRIV_SYS_ADMIN */
     uint64_t log_refill_ns;
     const struct personality *pers;
     enum process_state state;
@@ -295,6 +295,7 @@ struct process_spawn_attr {
     bool new_session;
     bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
     uint32_t uid, gid;
+    uint32_t priv_drop;                            /* PRIV_* the child does not get (COSMO_SPAWN_DROPPRIV) */
     const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
 };
 
@@ -341,7 +342,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   bool new_domain, bool new_mountns, bool new_utsns, const struct process_spawn_cred *cred,
-                  bool set_pgid, pid_t pgid, bool new_session, pid_t *pid_out);
+                  bool set_pgid, pid_t pgid, bool new_session, uint32_t priv_drop, pid_t *pid_out);
 
 /* A domain identifier nobody has had. Monotonic and never reused, so a
  * live domain's identity cannot be handed to a second set of processes;
@@ -362,7 +363,7 @@ int process_getrlimit(unsigned resource, uint64_t *value);
 int process_setrlimit(unsigned resource, uint64_t value);
 /* Processes whose real uid is `ruid` (the NPROC count). */
 unsigned process_count_uid(uint32_t ruid);
-/* One sys_log line: always for a privileged caller, else within the rate limit. */
+/* One sys_log line: always for a PRIV_SYS_ADMIN caller, else within the rate limit. */
 bool process_log_permitted(void);
 
 /* Collect an exited child: pid > 0 for that child, -1 for any. Returns

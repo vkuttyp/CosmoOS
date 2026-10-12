@@ -95,6 +95,19 @@ static struct vnode *proc_vnode(struct mount *mnt, uint64_t ino, enum vnode_type
 
 static const char *const g_states[] = { "running", "exiting", "exited" };
 
+/* The privileges by name (roadmap M5), "none" when there are none. */
+static void render_privs(uint32_t privs, char *out, size_t n)
+{
+    static const char *const names[COSMO_PRIV_COUNT] = { "mount", "sys_admin", "net", "proc", "cred", "device" };
+    size_t used = 0;
+    out[0] = '\0';
+    for (unsigned i = 0; i < COSMO_PRIV_COUNT; i++)
+        if (privs & (1u << i))
+            used += (size_t)ksnprintf(out + used, used < n ? n - used : 0, "%s%s", used ? " " : "", names[i]);
+    if (used == 0)
+        ksnprintf(out, n, "none");
+}
+
 static int render_status(struct process *p, char *out, size_t n)
 {
     unsigned nr_threads;
@@ -107,6 +120,8 @@ static int render_status(struct process *p, char *out, size_t n)
     spin_unlock_irqrestore(&p->lock, s);
 
     unsigned st = (unsigned)p->state;
+    char privs[64];
+    render_privs(__atomic_load_n(&p->cred.privs, __ATOMIC_RELAXED), privs, sizeof(privs));
     return ksnprintf(out, n,
                      "name: %s\n"
                      "pid: %u\n"
@@ -114,13 +129,14 @@ static int render_status(struct process *p, char *out, size_t n)
                      "state: %s\n"
                      "uid: %u\n"
                      "gid: %u\n"
+                     "privs: %s\n"
                      "domain: %u\n"
                      "threads: %u\n"
                      "syscalls: %llu\n"
                      "cpu_ns: %llu\n",
                      p->name, p->pid, p->parent_pid,
                      st < sizeof(g_states) / sizeof(g_states[0]) ? g_states[st] : "?", p->cred.euid,
-                     p->cred.egid, p->domain, nr_threads, (unsigned long long)p->syscalls,
+                     p->cred.egid, privs, p->domain, nr_threads, (unsigned long long)p->syscalls,
                      (unsigned long long)run_ns);
 }
 
@@ -231,7 +247,7 @@ static struct process *proc_get_own(pid_t pid)
     if (p == NULL)
         return NULL;
     struct process *me = process_current();
-    if (me != NULL && me != p && me->cred.euid != p->cred.euid && !cred_privileged(&me->cred)) {
+    if (me != NULL && me != p && me->cred.euid != p->cred.euid && !cred_has(&me->cred, PRIV_PROC)) {
         process_put(p);
         return NULL;
     }

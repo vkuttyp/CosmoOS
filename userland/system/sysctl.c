@@ -1,8 +1,28 @@
-/* sysctl - read kernel values: sysctl -a | sysctl name... */
+/* sysctl - read kernel values: sysctl -a | sysctl name... ; write one:
+ * sysctl name=value (kernel.hostname; PRIV_SYS_ADMIN, roadmap M5). */
 #include <cosmo/sysctl.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+
+static int set(const char *arg)
+{
+    const char *eq = strchr(arg, '=');
+    char name[64];
+    size_t n = (size_t)(eq - arg);
+    if (n >= sizeof(name)) {
+        fprintf(stderr, "sysctl: %s: name too long\n", arg);
+        return 1;
+    }
+    memcpy(name, arg, n);
+    name[n] = '\0';
+    if (sysctl_set(name, eq + 1, strlen(eq + 1)) < 0) {
+        fprintf(stderr, "sysctl: %s: %s\n", name, strerror(errno));
+        return 1;
+    }
+    printf("%s = %s\n", name, eq + 1);
+    return 0;
+}
 
 static int show(const char *name)
 {
@@ -31,12 +51,12 @@ int main(int argc, char **argv)
         return rc;
     }
     if (argc < 2) {
-        fprintf(stderr, "usage: sysctl -a | sysctl name...\n");
+        fprintf(stderr, "usage: sysctl -a | sysctl name[=value]...\n");
         return 2;
     }
     int rc = 0;
     for (int i = 1; i < argc; i++)
-        if (show(argv[i]))
+        if (strchr(argv[i], '=') ? set(argv[i]) : show(argv[i]))
             rc = 1;
     return rc;
 }

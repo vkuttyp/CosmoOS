@@ -146,3 +146,119 @@ W^X in every run: `stack-exec=SIGSEGV mmap-wx=EINVAL mprotect-wx=EINVAL`.
 | `make BUILD=release test-security` | PASS 93.9 s | PASS 125.8 s |
 | `make BUILD=release test-install` | PASS 23.7 s | PASS 38.5 s |
 
+
+
+## PR 3 (as built): operation-specific privileges
+
+| Area | Change | Files |
+|---|---|---|
+| Model | `struct credentials` gains `privs`, six `PRIV_*` bits (`COSMO_PRIV_*` in the ABI, at most 16): `MOUNT`, `SYS_ADMIN`, `NET`, `PROC`, `CRED`, `DEVICE`. `cred_has(c, PRIV_X)`; `cred_drop` (the only change); `cred_ids_changed`: credentials that had a uid 0 and have none after a `setres*uid` or a `SETCRED` spawn lose every privilege (Linux's capability-clearing rule; what keeps a server's privileges from reaching the user it switches to). `cred_kernel` holds `PRIV_ALL`, and a kernel-created process -- init -- starts from it. `cred_privileged` is deleted. | `kernel/include/kernel/cred.h`, `kernel/process/cred.c`, `kernel/process/process.c`, `uapi/cosmo/syscall.h` |
+| Spawn | `COSMO_SPAWN_DROPPRIV` (bit 8) with `priv_drop` (after `pgid`; `COSMO_SPAWN_SIZE_V3` is the struct before it): the child does not get those bits. No flag or call adds one; exec changes nothing. No new native call or Linux `prctl` door: neither BusyBox nor dropbear needs one. | `kernel/syscall/native.c`, `kernel/process/spawn.c`, `process.h` |
+| Raw devices | `chrdev_ops.open_priv`, checked by `ramfs_chr_open` before the device's own open: `/dev/net/tap` and `/dev/vmm` need `PRIV_DEVICE` (`vmctl` opens both), `/dev/net/tapctl` `PRIV_NET` (and each write rechecks it). | `kernel/include/kernel/vfs.h`, `kernel-services/vfs/ramfs.c`, `kernel-services/network/tap.c`, `kernel-services/virtualization/vmm.c` |
+| Sysctl writes | `SYS_sysctl_set` 104 (`SYS_COUNT` 105): `kernel.hostname` is writable with `PRIV_SYS_ADMIN`; `ENOENT`/`EROFS`/`EPERM`. libc `sysctl_set`; `sysctl name=value`. | `kernel/syscall/native.c`, `libc/`, `userland/system/sysctl.c` |
+| /proc | `status` gains `privs:`. Kernel addresses: none rendered before this unit either (handles are named by kind and inode); now checked as uid 1000 by the acceptance test. | `kernel-services/filesystem/procfs/procfs.c` |
+| User space | `/sbin/priv` (show; run a command with `-d LIST` dropped or `-k LIST` kept, optionally `-u UID`); svc's `privileges LIST` key; the installed `dropbear` service gets `privileges net cred`. | `userland/system/priv.c`, `svc.c`, `cosmo-install.c` |
+| Tests | `test_cred.c` rewritten for the rules; `test-security` stage `priv` (`tests/security/priv.sh`, acceptance d); `test-net-login` checks that the ssh session holds `net cred` and cannot mount (acceptance e). | `tests/host/test_cred.c`, `tests/security/priv.sh`, `tests/boot/security_test.py`, `tests/boot/net_login_test.py` |
+
+### The thirty former `cred_privileged` sites
+
+| # | Site | Operation | Privilege |
+|---|---|---|---|
+| 1 | `compat/linux/syscalls.c` `lx_setuid` | Linux `setuid`: all three ids, or the effective one | `PRIV_CRED` |
+| 2 | `compat/linux/syscalls.c` `lx_setgid` | Linux `setgid` likewise | `PRIV_CRED` |
+| 3 | `procfs.c` `proc_get_own` | another user's `/proc/<pid>/fd` | `PRIV_PROC` |
+| 4 | `network/socket.c` `ksock_bind` | binding a port below 1024 | `PRIV_NET` |
+| 5 | `vfs/blkctl.c` `blkctl_open_file` | opening `/dev/blkctl` | `PRIV_SYS_ADMIN` |
+| 6 | `vfs/blkctl.c` `blkctl_write_file` | each blkctl command | `PRIV_SYS_ADMIN` |
+| 7 | `vfs/fsctl.c` `fsctl_open_file` | opening `/dev/fsctl` | `PRIV_SYS_ADMIN` |
+| 8 | `vfs/fsctl.c` `fsctl_write_file` | each fsctl command | `PRIV_SYS_ADMIN` |
+| 9 | `vfs/vfs.c` `vfs_permission` | overriding file permission bits | `PRIV_SYS_ADMIN` |
+| 10 | `vfs/vfs.c` `vfs_setattr` | changing mode or time of a file one does not own | `PRIV_SYS_ADMIN` |
+| 11 | `vfs/vfs.c` `sticky_denies` | removing or renaming another's entry in a sticky directory | `PRIV_SYS_ADMIN` |
+| 12 | `process/cred.c` `cred_setresuid` | uids beyond one's own | `PRIV_CRED` |
+| 13 | `process/cred.c` `cred_setresgid` | gids beyond one's own | `PRIV_CRED` |
+| 14 | `process/cred.c` `cred_setgroups` | supplementary groups | `PRIV_CRED` |
+| 15 | `process/cred.c` `cred_may_signal` | signalling another user's process | `PRIV_PROC` |
+| 16 | `process.c` `process_visible_to_current` | seeing another user's process | `PRIV_PROC` |
+| 17 | `process.c` `process_list_visible` | listing every process | `PRIV_PROC` |
+| 18 | `process.c` `process_info` | `procinfo` on every process | `PRIV_PROC` |
+| 19 | `process.c` `process_setrlimit` | raising a resource limit | `PRIV_PROC` |
+| 20 | `process.c` `process_log_permitted` | `log` without the rate limit | `PRIV_SYS_ADMIN` |
+| 21 | `spawn.c` `may_set_cred` | `SETCRED` naming others' ids | `PRIV_CRED` |
+| 22 | `spawn.c` `process_spawn` | `NEWDOMAIN` | `PRIV_SYS_ADMIN` |
+| 23 | `spawn.c` `process_spawn` | `NEWMOUNTNS` / `NEWUTSNS` (one site, now two checks) | `PRIV_MOUNT` / `PRIV_SYS_ADMIN` |
+| 24 | `spawn.c` `process_spawn` | `SETROOT` (a child's root) | `PRIV_MOUNT` |
+| 25 | `native.c` `sys_mount` | `mount` | `PRIV_MOUNT` |
+| 26 | `native.c` `sys_umount` | `umount` | `PRIV_MOUNT` |
+| 27 | `native.c` `sys_switch_root` | `switch_root` (init only, as before) | `PRIV_MOUNT` |
+| 28 | `native.c` `sys_klog` | reading the kernel log | `PRIV_SYS_ADMIN` |
+| 29 | `native.c` `sys_sethostname` | `sethostname` | `PRIV_SYS_ADMIN` |
+| 30 | `native.c` `sysctl_value` | `debug.preempt_probe` (selftest builds; starts a kernel thread) | `PRIV_SYS_ADMIN` |
+
+New gates beside them: `SYS_sysctl_set` (`PRIV_SYS_ADMIN`), the three raw
+devices (`PRIV_DEVICE`, `PRIV_NET`), `tapctl` writes (`PRIV_NET`). One
+operation the decision names has no door to gate: module load and unload
+(modules load from the boot archive only).
+
+Choices inside the decision, recorded: the file-permission overrides
+(sites 9-11) belong to `PRIV_SYS_ADMIN`, the only privilege in the set
+that covers administration of the machine's objects; `SETROOT` to
+`PRIV_MOUNT`, since a root is a view of the filesystem namespace; a uts
+namespace to `PRIV_SYS_ADMIN`, with the hostname. A service file without
+`privileges` keeps the supervisor's set (every existing definition
+behaves as before).
+
+### Review of PR #370
+
+- A privilege acts only while the effective uid is 0 (`cred_has`): with
+  the bits alone, `setresuid(-1, 1000, -1)` left a process acting as
+  uid 1000 with root's overrides -- before M5 that move made it
+  unprivileged, and Linux's effective set clears the same way. Changing
+  the effective uid back restores them; leaving every uid 0 still clears
+  them for good.
+- Every use of a raw device rechecks its privilege: `/dev/net/tap` reads
+  and writes and `SYS_vm_create` now ask for `PRIV_DEVICE` themselves,
+  so a handle kept across a drop or passed to a child does nothing.
+- `priv -u`/`-g` accept only a whole decimal id up to 2^32-1 (a typo was
+  uid 0).
+- `SYS_sysctl_set` answers `ENOENT`, not `EROFS`, for a listed name this
+  build does not have (`debug.*` in a release kernel).
+- Two root shortcuts the thirty `cred_privileged` calls did not cover:
+  SysV shared memory tested `euid == 0` itself (`access_check`,
+  `shm_rmid`). Both now ask for `PRIV_SYS_ADMIN`, the file-permission
+  override's privilege; a sweep for every other direct uid-0 test
+  (`euid == 0`, `!= 0`, `CRED_ROOT_UID`) found none. `priv.sh` checks it
+  with `tests/security/shmprobe` (a uid-1000 0600 segment: uid 0 without
+  the privilege gets `EACCES` attaching and `EPERM` removing; with it,
+  both succeed).
+- A spawn copies the parent's credentials under the parent's lock, as
+  fork does: a uid change on another thread writes the ids and then
+  clears the privileges, and a copy between the two would give the child
+  the new ids with the old mask. No deterministic test: it needs a seam that holds
+  a spawn between the two writes. (Such a child's bits would be dormant
+  anyway since 503777c7: its ids hold no 0 to return its effective uid to.)
+- Not fixed, recorded: a root session with a reduced set can rewrite
+  root-owned configuration that later runs with every privilege
+  (security design §1; inventory 2.9).
+
+### Acceptance d-e (local, release)
+
+| Check | x86-64 | AArch64 |
+|---|---|---|
+| d: `test-security` stage `priv` (mount, sysctl write, kill; regain refused; uid 1000 sees no kernel address, no klog) | PASS 5.8 s, 9 EPERM lines | PASS 9.8 s, 9 EPERM lines |
+| e: `test-install` on the signed, randomised, privilege-checked system | PASS 24.1 s | PASS 38.7 s |
+| e: `test-net-login` (the ssh session holds `net cred`, its `mount` is EPERM; key login, pty, reboot) | PASS 49.2 s | PASS 60.3 s |
+
+### PR 3 validation (local, 2026-10-12, at `729ce8c2`)
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| `make host-test`, `make fuzz`, `make analyze` | PASS | PASS |
+| debug `make test`, `QEMU_SMP=1` / `2` / `4` | PASS 140.0 / 140.5 / 153.7 s | PASS 134.9 / 144.9 / 155.7 s |
+| `make test-smp2` | PASS 151.9 s | PASS 153.8 s |
+| `make test-chaos` | PASS 154.4 s | PASS 148.2 s |
+| `make test-harness-retry` | PASS 143.3 s | PASS 161.0 s |
+| `make BUILD=release test` | PASS 17.7 s | PASS 20.9 s |
+| `make BUILD=release test-security` (verify, aslr, priv) | PASS 98.5 s | PASS 133.8 s |
+| `make BUILD=release test-install` | PASS 24.1 s | PASS 38.7 s |
+| `make BUILD=release test-net-login` | PASS 49.2 s | PASS 60.3 s |

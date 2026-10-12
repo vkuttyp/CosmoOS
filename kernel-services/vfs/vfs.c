@@ -1256,9 +1256,10 @@ static int follow_mount(struct vnode **vnp)
 int vfs_permission(const struct vnode *vn, unsigned mask)
 {
     const struct credentials *c = cred_current();
-    if (cred_privileged(c)) {
-        /* Root reads, writes and searches everything; executing a regular
-         * file still needs it to be marked executable by someone. */
+    if (cred_has(c, PRIV_SYS_ADMIN)) {
+        /* PRIV_SYS_ADMIN reads, writes and searches everything (uid 0
+         * alone does not, roadmap M5); executing a regular file still
+         * needs it to be marked executable by someone. */
         if ((mask & VFS_MAY_EXEC) && vn->type == VNODE_REG && (vn->mode & 0111) == 0)
             return -EACCES;
         return 0;
@@ -1276,7 +1277,7 @@ int vfs_permission(const struct vnode *vn, unsigned mask)
 int vfs_setattr(struct vnode *vn, unsigned what, uint32_t mode, uint64_t mtime_ns)
 {
     const struct credentials *c = cred_current();
-    bool owner = cred_privileged(c) || c->euid == vn->uid;
+    bool owner = cred_has(c, PRIV_SYS_ADMIN) || c->euid == vn->uid;
     if ((what & (VFS_SET_MODE | VFS_SET_MTIME)) && !owner)
         return -EPERM;
     if ((what & VFS_SET_MTIME_NOW) && !owner && vfs_permission(vn, VFS_MAY_WRITE) != 0)
@@ -2391,7 +2392,7 @@ static bool sticky_denies(const struct vnode *dir, const struct vnode *entry)
     if (!(dir->mode & 01000))
         return false;
     const struct credentials *c = cred_current();
-    return !cred_privileged(c) && c->euid != entry->uid && c->euid != dir->uid;
+    return !cred_has(c, PRIV_SYS_ADMIN) && c->euid != entry->uid && c->euid != dir->uid;
 }
 
 /* Resolve the parent directory for a mutation; locks it. The last

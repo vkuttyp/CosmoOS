@@ -153,7 +153,8 @@ numbers coincide for 1..31; a real-time signal is delivered as
 `SIGKILL`), and the target's exit status becomes `128 + sig` natively,
 which the Linux `wait4` encodes as "terminated by signal `sig`".
 `kill(pid, 0)` is an existence probe; a target with another uid is
-`-EPERM` unless the caller is uid 0.
+`-EPERM` unless the caller holds `PRIV_PROC` (roadmap M5; uid 0 alone
+does not).
 
 ### Files
 

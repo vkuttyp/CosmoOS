@@ -345,6 +345,15 @@ no transport beyond `sysctl` and the self-tests that print them.
     symbolisation, `ksymtab` and the panic path adjusted.
   - manifest anti-rollback: any manifest ever signed by a trusted key
     verifies forever (as for modules, below).
+- Operation-specific privileges (roadmap M5 PR 3) leave a root session's
+  containment non-durable: a process with uid 0 and a reduced set (the
+  ssh server's `net cred`, inherited by a root login) can rewrite
+  root-owned system configuration (`/etc/svc/*`, init's scripts) that runs
+  with every privilege at the next boot or restart. Closing it needs
+  non-root logins (users other than root in `/etc/passwd`, dropbear
+  switching to them) or writes to system configuration that need a
+  privilege (an immutable `/etc` on the installed root, or a
+  `PRIV_SYS_ADMIN` check on files marked as system configuration).
 - User-space ASLR (roadmap M5 PR 2) leaves out: the Linux signal
   trampoline page stays at the fixed `LX_SIGTRAMP` (`0x7FFFFFFF1000`), an
   executable page at a known address in every Linux process (Linux has a

@@ -36,7 +36,7 @@ kernel stack.
 | 6 | `clock_ns` | `unsigned clock` (`COSMO_CLOCK_MONOTONIC` 0, `COSMO_CLOCK_REALTIME` 1; milestone 10) | monotonic nanoseconds since boot, or nanoseconds since 1970 from the RTC-seeded wall clock | `EINVAL` |
 | 7 | `mmap` | `void *hint, size_t len, int prot, int flags, int fd, uint64_t off` | address | `EINVAL`, `ENOMEM`, `EEXIST`; a file mapping (since the file-regions unit): `EBADF`, `ENODEV`, `EACCES` -- the **mmap** bullet below |
 | 8 | `munmap` | `void *addr, size_t len` | 0 | `EINVAL` (range, or a page in it is unmapped) |
-| 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200), `EAGAIN` (an unprivileged caller past 64 lines, refilled at 16 per second) |
+| 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200), `EAGAIN` (a caller without `PRIV_SYS_ADMIN` past 64 lines, refilled at 16 per second) |
 | 10 | `close` | `int h` | 0; the handle is closed even when an error is returned | `EBADF`; a file's pending write-back error (`EIO`, once per open file: `docs/kernel-services/vfs/design.md`, "Write-back errors") |
 | 11 | `open` | `const char *path, int flags, uint32_t mode` | handle | `EINVAL` (an unknown flag bit), path errors, `EEXIST`, `EISDIR`, `EROFS`, `EMFILE`, `ENXIO` (a socket's name; a FIFO opened write-only with `COSMO_O_NONBLOCK` and no reader), `EINTR` (a FIFO's blocking open, killed) |
 | 12 | `stat` | `const char *path, struct cosmo_stat *st` | 0 | path errors, `EFAULT` |
@@ -68,7 +68,7 @@ kernel stack.
 | 37 | `getppid` | none | the parent's pid, 0 for a kernel-created process | none |
 | 38 | `chdir` | `const char *path` | 0 | `EFAULT`, `ENAMETOOLONG`, path errors, `ENOTDIR` |
 | 39 | `getcwd` | `char *buf, size_t len` | the path length (the NUL is written too) | `ERANGE`, `EFAULT` |
-| 40 | `procinfo` | `struct cosmo_procinfo *buf, size_t count` | the number of processes the caller may see (up to `count` records filled): every process for a privileged caller, else those with its real uid | `EFAULT`, `ENOMEM` |
+| 40 | `procinfo` | `struct cosmo_procinfo *buf, size_t count` | the number of processes the caller may see (up to `count` records filled): every process for a `PRIV_PROC` caller, else those with its real uid | `EFAULT`, `ENOMEM` |
 | 41 | `klog` | `char *buf, size_t len` | bytes copied: the newest whole log lines that fit | `EFAULT`, `ENOMEM` |
 | 42 | `sysctl` | `const char *name, char *buf, size_t len` | the value's length (NUL written when it fits) | `ENOENT`, `EFAULT` |
 | 56 | `getrlimit` | `unsigned resource, uint64_t *value` | 0 | `EINVAL`, `EFAULT` |
@@ -288,7 +288,19 @@ Details per call:
   of the caller's hostname. Anything else is `EINVAL`. `root` is read only with
   `SETROOT`, so a caller built against the header that predates it
   passes the shorter struct (`COSMO_SPAWN_SIZE_V1`) and the kernel never
-  reads past what it gave.
+  reads past what it gave. Since roadmap M5 each flag names its
+  privilege (`SETCRED` beyond the caller's ids: `PRIV_CRED`; `SETROOT`
+  and `NEWMOUNTNS`: `PRIV_MOUNT`; `NEWDOMAIN` and `NEWUTSNS`:
+  `PRIV_SYS_ADMIN`), and `DROPPRIV` (256) gives the child none of the
+  `COSMO_PRIV_*` bits in `priv_drop` (read only with the flag;
+  `COSMO_SPAWN_SIZE_V3` is the struct before it; an unknown bit is
+  `EINVAL`). Dropping needs nothing; no flag adds a privilege.
+- **sysctl_set** (`SYS_sysctl_set` 104, roadmap M5): `(const char *name,
+  const char *value, size_t len)`. The one writable name is
+  `kernel.hostname` (the caller's uts namespace, as `sethostname`);
+  `ENOENT` for an unknown name, `EROFS` for a read-only one, `EPERM`
+  without `PRIV_SYS_ADMIN`, `EINVAL` for a value of 64 bytes or more.
+  `SYS_COUNT` is 105.
 - **syscall_filter**: `mask` is `words` (1..`COSMO_SYSCALL_MASK_WORDS`,
   8) 64-bit words; bit N of the mask allows system call N in the
   caller's personality, and the words not supplied are treated as zero.

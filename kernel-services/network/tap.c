@@ -6,6 +6,7 @@
  * ARP, IP, the transport -- over an interface whose driver is a reader and
  * a writer rather than a device.
  */
+#include <kernel/cred.h>
 #include <kernel/net/dhcp.h>
 #include <kernel/net/tap.h>
 
@@ -295,6 +296,8 @@ static void tap_chr_release(struct vnode *vn, struct file *f)
 static int64_t tap_chr_read_file(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
 {
     (void)vn; (void)off;
+    if (!cred_has(cred_current(), PRIV_DEVICE))
+        return -EPERM;   /* a handle may outlive the privilege that opened it */
     struct tap_open *o = f->priv;
     struct mbuf *m = NULL;
     int rc = tap_recv_wait(o->tap, io_nonblocking(file_nonblocking(f)), &m);
@@ -316,6 +319,8 @@ static int64_t tap_chr_read_file(struct vnode *vn, struct file *f, uint64_t off,
 static int64_t tap_chr_write_file(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
 {
     (void)vn; (void)off;
+    if (!cred_has(cred_current(), PRIV_DEVICE))
+        return -EPERM;   /* as for a read */
     struct tap_open *o = f->priv;
     int rc = tap_inject(o->tap, buf, (uint32_t)len);
     return rc ? rc : (int64_t)len;
@@ -344,7 +349,7 @@ static int tap_chr_set_nonblock(struct vnode *vn, struct file *f, int on)
 }
 
 static const struct chrdev_ops tap_chr_ops = {
-    .open = tap_chr_open, .release = tap_chr_release,
+    .open = tap_chr_open, .release = tap_chr_release, .open_priv = PRIV_DEVICE,
     .read_file = tap_chr_read_file, .write_file = tap_chr_write_file,
     .ready = tap_chr_ready, .poll_wq = tap_chr_poll_wq, .set_nonblock = tap_chr_set_nonblock,
 };
@@ -425,6 +430,8 @@ static int64_t tap_ctl_filter(const void *buf, size_t len)
 static int64_t tap_ctl_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
 {
     (void)vn; (void)off;
+    if (!cred_has(cred_current(), PRIV_NET))
+        return -EPERM;
     struct { uint16_t version, op; } hdr;
     if (len < sizeof(hdr))
         return -EINVAL;
@@ -640,7 +647,9 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
     return rc < 0 ? rc : (int64_t)(p - (uint8_t *)buf) + rc;
 }
 
-static const struct chrdev_ops tap_ctl_ops = { .read = tap_ctl_read, .write = tap_ctl_write };
+/* netctl configuration is PRIV_NET's (roadmap M5): at the open, and again
+ * at each write, since a handle may outlive the privilege that opened it. */
+static const struct chrdev_ops tap_ctl_ops = { .read = tap_ctl_read, .write = tap_ctl_write, .open_priv = PRIV_NET };
 
 void tap_dev_init(void)
 {

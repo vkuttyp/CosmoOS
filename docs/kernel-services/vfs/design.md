@@ -604,7 +604,7 @@ commits only at sync and unmount.
 Roadmap M2. What an installer needs from the kernel to put a system on a
 blank disk, and nothing that interprets what is written
 (`kernel-services/vfs/blkctl.c`, `uapi/cosmo/blkctl.h`). Like
-`/dev/fsctl`: 0600 and `cred_privileged` at open and at every write; a
+`/dev/fsctl`: 0600 and `PRIV_SYS_ADMIN` at open and at every write; a
 command is one `struct cosmo_blkctl` written whole (a WRITE is the struct
 and its data in the same write, at most `COSMO_BLKCTL_IO_MAX` = 32 KiB);
 the result is read back from the same open file, whole or not at all,
@@ -794,7 +794,7 @@ follows user pointers during a walk. Every field read from disk is
 bounds-checked (block numbers below `nblocks`, extent counts, inode
 numbers below `next_ino`, directory entry lengths) before use, and
 metadata is checksummed; corrupt or hostile images yield `-EIO`, not a
-wild pointer. `mount`/`umount` need `cred_privileged`. ramfs limits a
+wild pointer. `mount`/`umount` need `PRIV_MOUNT` (roadmap M5). ramfs limits a
 file to `RAMFS_MAX_FILE` (64 MiB) and a mount to `RAMFS_MAX_PAGES` (16 K
 pages, enforced by the page cache's per-mount budget since audit
 milestone 6; before it the constant was declared and unused) so a user
@@ -809,7 +809,8 @@ with `VFS_MAY_READ/WRITE/EXEC`, judged with the caller's credentials
 (`cred_current()`, `kernel/cred.h`: the process's, or the kernel's for
 boot-time work): the owner bits when the effective uid matches `vn->uid`,
 the group bits when the effective or a supplementary gid matches
-`vn->gid`, else the other bits. A privileged caller (euid 0) passes every
+`vn->gid`, else the other bits. A caller holding `PRIV_SYS_ADMIN` (since
+roadmap M5; euid 0 alone does not) passes every
 check except executing a regular file that has no x bit at all. The
 checks sit where POSIX puts them: `step` needs search (`VFS_MAY_EXEC`) on
 every directory it enters, including `.` and `..`; `vfs_open` needs
@@ -829,7 +830,7 @@ needs write permission on the directory itself (its `..` changes).
 **Modes and times (roadmap M3).** `vfs_setattr(vn, what, mode, mtime)`
 changes a node's permission bits (`VFS_SET_MODE`) and modification time
 (`VFS_SET_MTIME`, or `VFS_SET_MTIME_NOW`); the change time becomes now.
-The owner or a privileged caller may do either; setting the time to now
+The owner or a `PRIV_SYS_ADMIN` caller may do either; setting the time to now
 is also allowed to a caller who may write the node; a read-only mount
 is `-EROFS`. The fields change under `vn->lock`, and a filesystem that
 stores them takes them through the optional `setattr` vnode operation:

@@ -4,10 +4,11 @@ Rules milestone 6 adds on top of the credential and permission rules
 recorded in `docs/kernel/process/invariants.md` (P26a, P28) and
 `docs/kernel-services/vfs/invariants.md` (V14). Each names its check.
 
-**S1. Privilege flows down.** A process's effective uid becomes 0 only by
-inheritance from a privileged parent, either by copy or through
-`COSMO_SPAWN_SETCRED` from a privileged caller. `setresuid` refuses ids
-the caller does not hold (P26a); `SETCRED` from an unprivileged caller
+**S1. Privilege flows down.** A process's privileges are its parent's
+less what was dropped (roadmap M5, P26a); none is ever added. Its
+effective uid becomes 0 only by inheritance, by copy or through
+`COSMO_SPAWN_SETCRED` from a `PRIV_CRED` caller. `setresuid` refuses ids
+the caller does not hold without `PRIV_CRED` (P26a); `SETCRED` from a caller without it
 refuses a uid or gid outside its real, effective and saved set
 (`may_set_cred`, `spawn.c`); the executable's setuid and setgid mode
 bits are never consulted. Check: `process-rlimit` (`rlimit-unpriv`:
@@ -77,9 +78,12 @@ reclaimed, contents intact, the root ramfs's page count unchanged; with
 the limit at one page a dirty write stays cached and reads back),
 lockdep (the trylock takes no class edge), review.
 
-**S8. Information gates.** `klog` is privileged; `procinfo` returns to an
-unprivileged caller only processes whose real uid is its own; `log`
-from an unprivileged process is limited to a bucket of 64 lines
+**S8. Information gates.** `klog` needs `PRIV_SYS_ADMIN`; `procinfo`
+returns to a caller without `PRIV_PROC` only processes whose real uid is
+its own; nothing in `/proc` or the sysctls renders a kernel address
+(handles are named by kind and inode, `procfs.c` `fd_target`; checked
+as uid 1000 by `make test-security` stage `priv`); `log` from a process
+without `PRIV_SYS_ADMIN` is limited to a bucket of 64 lines
 refilled at 16 per second (`-EAGAIN` beyond). Check: `init --unpriv-test`
 (`klog` `-EPERM`), `process-rlimit` (`rlimit-unpriv`: every `procinfo`
 record has uid 1000; of 80 quick `log` calls at least 16 succeed and at

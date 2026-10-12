@@ -429,7 +429,27 @@ A definition is `key value`, no sections and no expressions:
   utsns yes                  a uts namespace of its own
   domain yes                 a process domain of its own
   limit-nofile 32            any COSMO_RLIMIT_* by name
+  privileges net cred        keep exactly these privileges, drop the rest (M5)
 ```
+
+`privileges` (roadmap M5) names the privileges the service keeps --
+`mount`, `sys_admin`, `net`, `proc`, `cred`, `device`, or `none` -- and
+svc spawns it with `COSMO_SPAWN_DROPPRIV` for the others; a name it does
+not know fails the service. Without the line the service has the
+supervisor's privileges. The installed system's `dropbear` service says
+`privileges net cred`: port 22 and a session's `setgid`/`initgroups`/
+`setuid`, nothing more (`docs/kernel/security/design.md` §1).
+
+## priv (`userland/system/priv.c`, roadmap M5)
+
+`priv` prints the calling process's privileges (the `privs:` line of
+`/proc/self/status`). `priv [-d LIST | -k LIST] [-u UID [-g GID]] [--]
+COMMAND [ARG...]` runs COMMAND without the privileges in LIST (`-d`), or
+with only those (`-k`), optionally as UID/GID (`COSMO_SPAWN_SETCRED`,
+which drops every privilege when no id stays 0), waits, and exits with
+its status: 125 when priv itself fails, 127 when COMMAND cannot start.
+LIST is comma-separated names or `all`. A child never holds what priv
+lacks, so `priv -k all` inside a dropped process gives nothing back.
 
 **A definition that is not understood fails the service**, and that
 covers more than unknown keys. A typo in `root` or `user` would

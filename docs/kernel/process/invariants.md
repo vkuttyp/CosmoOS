@@ -238,14 +238,18 @@ sender's real/effective uid equals the target's real/saved uid). Check:
 uid-1000 child's `kill(getppid(), SIGTERM)` is `-EPERM` and the root
 parent survives).
 
-**P26a. Privilege is `cred_privileged` and nothing else.** Every
-privileged operation (mount, umount, klog, reserved ports, setgroups,
-setres* beyond the caller's own ids) asks the one predicate in
-`kernel/cred.h`; an unprivileged process cannot regain privilege
-(`setresuid` refuses ids it does not hold, all or nothing). Check:
+**P26a. Every privileged operation names one privilege, and privileges
+only shrink.** (Roadmap M5; `docs/kernel/security/design.md` §1.) Each
+of the thirty former `cred_privileged` sites, and the raw devices,
+asks `cred_has(c, PRIV_X)` for the one privilege it needs; uid 0 alone
+grants nothing, and a bit acts only while the effective uid is 0
+(`cred_has`). `privs` is copied by fork, spawn and exec and written
+only to clear bits: a spawn's drop mask, or a uid change that leaves no
+id 0 (`cred_ids_changed`); no call adds one. Check:
 `tests/host/test_cred.c` (the rules), `init --unpriv-test` (every
-privileged call and every root-owned object refused). Gap: no
-capability set yet; privilege is all-or-nothing.
+privileged call and every root-owned object refused to uid 1000), `make
+test-security` stage `priv` (mount, sysctl write and kill with each
+privilege dropped, kept alone, and asked back from inside).
 
 **P26b. Privilege flows down and limits bind.** The rules S1–S5 and S8
 of `docs/kernel/security/invariants.md`: a new process's ids come only
