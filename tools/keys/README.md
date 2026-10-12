@@ -4,7 +4,8 @@ Public keys the kernel trusts in addition to the developer key: release
 signing keys, one `*.pub` file each (32-byte Ed25519 public key as 64 hex
 characters). `scripts/gen-keyring.py` compiles every `.pub` here, plus the
 current developer public key, into `out/<arch>-<build>/gen/keyring_builtin.c`.
-There are none yet.
+One today: `release-2026.pub`, the 1.0 release key (key id
+`36ae7bb4947896ab`), below.
 
 **No private key is ever committed here or anywhere in the repository.**
 `scripts/check-secrets.sh` (run by `make check-tools`, so by CI before every
