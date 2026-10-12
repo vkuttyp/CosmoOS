@@ -1,0 +1,252 @@
+# CosmoOS release (roadmap M6, decision 8; docs/development.md, "Releases").
+#
+# A tag v* builds, for each architecture, the release set (`make release`:
+# the signed live image, loader, kernel.elf, boot.tar, cmdline, manifest,
+# SHA256SUMS) twice, in two fresh containers, with the release key, and
+# requires the two to be identical; runs the M1-M5 acceptance tests and
+# every command of the user guide against images that hash the same as the
+# published ones; and only then publishes a GitHub release with the files,
+# one SHA256SUMS, and notes naming the toolchain image digests, the
+# third-party source digests, the release key and the known limitations.
+# A tag with a hyphen (v1.0.0-rc1) is published as a pre-release.
+#
+# Secret: COSMOOS_RELEASE_KEY, the Ed25519 seed (64 hex characters) whose
+# public half is the one tools/keys/*.pub file. Nothing else is signed with
+# it, and it never leaves the job's filesystem.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  COSMO_RELEASE_KEY_FILE: /tmp/cosmo-release/release.key
+
+jobs:
+  image:
+    name: CI image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      toolchain: ${{ steps.image.outputs.toolchain }}
+      litmus: ${{ steps.image.outputs.litmus }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Log in to the GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: The images for this tag's ci/Dockerfile
+        id: image
+        run: scripts/ci-image.sh "ghcr.io/${{ github.repository_owner }}/cosmoos-ci"
+
+  # Two independent builds of each architecture: separate jobs, so separate
+  # fresh containers on separate runners, nothing shared but the tag.
+  build:
+    name: build ${{ matrix.arch }} (${{ matrix.copy }})
+    runs-on: ubuntu-24.04
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        copy: [a, b]
+    timeout-minutes: 40
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe names the tag in the kernel's banner
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: The release key
+        env:
+          KEY: ${{ secrets.COSMOOS_RELEASE_KEY }}
+        run: scripts/release-key.sh "$COSMO_RELEASE_KEY_FILE"
+
+      - name: make release (release key)
+        run: make ARCH=${{ matrix.arch }} SIGNING=release MODSIGN_KEY="$COSMO_RELEASE_KEY_FILE" KEYRING_PUBS="$(ls "$PWD"/tools/keys/*.pub)" release
+
+      - name: Upload the release set
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.arch }}-${{ matrix.copy }}
+          path: out/release/${{ matrix.arch }}/
+
+  reproducible:
+    name: two builds compared
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 10
+    outputs:
+      x86_64: ${{ steps.cmp.outputs.x86_64 }}
+      aarch64: ${{ steps.cmp.outputs.aarch64 }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Both builds of both architectures
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: sets
+
+      - name: Byte-for-byte
+        id: cmp
+        run: |
+          for arch in x86_64 aarch64; do
+            line=$(scripts/compare-release-sets.sh "sets/release-$arch-a" "sets/release-$arch-b")
+            echo "$line"
+            echo "$arch=$line" >> "$GITHUB_OUTPUT"
+          done
+
+  # M1-M5's acceptance tests and the guide, each in its own job, on a build
+  # that must hash exactly as the published set does.
+  acceptance:
+    name: ${{ matrix.test }} (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    needs: [image, build]
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        test: [test-entropy, test-install, test-busybox, test-net-login, test-security, guide]
+    timeout-minutes: 45
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: The release key
+        env:
+          KEY: ${{ secrets.COSMOOS_RELEASE_KEY }}
+        run: scripts/release-key.sh "$COSMO_RELEASE_KEY_FILE"
+
+      - name: The published set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ matrix.arch }}-a
+          path: published
+
+      - name: Build, and require the published bytes
+        run: |
+          make ARCH=${{ matrix.arch }} SIGNING=release MODSIGN_KEY="$COSMO_RELEASE_KEY_FILE" KEYRING_PUBS="$(ls "$PWD"/tools/keys/*.pub)" release
+          cmp published/SHA256SUMS out/release/${{ matrix.arch }}/SHA256SUMS
+
+      - name: ${{ matrix.test }} against the release image
+        if: matrix.test != 'guide'
+        run: make ARCH=${{ matrix.arch }} BUILD=release SIGNING=release MODSIGN_KEY="$COSMO_RELEASE_KEY_FILE" KEYRING_PUBS="$(ls "$PWD"/tools/keys/*.pub)" ${{ matrix.test }}
+
+      - name: Every command of the user guide against the release set
+        if: matrix.test == 'guide'
+        run: python3 tests/guide/run_guide.py --arch ${{ matrix.arch }} --host linux --release published --workdir out/guide-${{ matrix.arch }}
+
+      - name: Upload logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: logs-${{ matrix.test }}-${{ matrix.arch }}
+          path: |
+            out/**/*.log
+          if-no-files-found: ignore
+
+  guide-macos:
+    name: guide (macos, ${{ matrix.arch }})
+    runs-on: macos-14
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: The published set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ matrix.arch }}-a
+          path: published
+
+      - name: Every command of the user guide against the release set
+        run: python3 tests/guide/run_guide.py --arch ${{ matrix.arch }} --host macos --release published --workdir out/guide-${{ matrix.arch }}
+
+      - name: Upload logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: logs-guide-macos-${{ matrix.arch }}
+          path: out/guide-${{ matrix.arch }}/*.log
+          if-no-files-found: ignore
+
+  publish:
+    name: GitHub release
+    runs-on: ubuntu-24.04
+    needs: [image, reproducible, acceptance, guide-macos]
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: The published sets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*-a
+          path: sets
+
+      - name: Files, SHA256SUMS and notes
+        run: |
+          mkdir -p dist
+          for arch in x86_64 aarch64; do
+            for f in sets/release-$arch-a/cosmoos-*; do cp "$f" dist/; done
+            cat sets/release-$arch-a/SHA256SUMS >> dist/SHA256SUMS
+          done
+          (cd dist && sha256sum -c SHA256SUMS)
+          python3 scripts/release-notes.py --tag "${{ github.ref_name }}" \
+            --toolchain "${{ needs.image.outputs.toolchain }}" --litmus "${{ needs.image.outputs.litmus }}" \
+            --packages /usr/share/cosmoos-ci/packages.txt --pub "$(ls tools/keys/*.pub)" --sums dist/SHA256SUMS \
+            --repro "${{ needs.reproducible.outputs.x86_64 }}" --repro "${{ needs.reproducible.outputs.aarch64 }}" \
+            --out notes.md
+          cat notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          pre=""
+          case "$TAG" in *-*) pre="--prerelease" ;; esac
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          gh release create "$TAG" dist/* --title "CosmoOS ${TAG#v}" --notes-file notes.md --verify-tag $pre
