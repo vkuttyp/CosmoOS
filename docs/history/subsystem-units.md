@@ -2830,3 +2830,18 @@ See the [history index](README.md).
     `test-security` stage `priv` (acceptance d), test-net-login checks
     the ssh session's set (e). M5 ticked.
   - Report: `docs/audit/2026-10-12-m5-security-baseline-report.md`.
+- **Roadmap M6, release (2026-10-12; in progress).**
+  - PR 1: `native_signal_frame` is one generic function over
+    `arch_sigframe_place`/`arch_sigframe_enter`/`arch_sigreturn_frame`
+    (`kernel/arch/<arch>/user.c`); the WXN crash test calls
+    `arch_mmu_sync_icache_kernel`. The 32 stack-frame exemptions of
+    `scripts/frame-baseline.txt` are gone (path buffers and the fsck
+    report on the heap, the AArch64 Linux signal frame written in pieces,
+    NVMe PRPs straight into the slot, self-test buffers static); a new
+    exemption needs its measured depth and reason. Debug boots paint
+    thread stacks and fail on one over 75 % (S32; 49 % x86-64, 52 %
+    AArch64 deepest). `process_spawn` no longer leaks namespaces on a bad
+    cwd; GICC "online capable" is bit 3. `cosmo-install` copies the
+    repository to `/var/lib/pkg/repo`; `test-install` installs `hello`
+    after reboot.
+  - Report: `docs/audit/2026-10-12-m6-release-report.md`.
