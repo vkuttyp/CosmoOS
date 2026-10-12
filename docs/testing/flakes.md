@@ -1881,6 +1881,29 @@ x86-64.
 Update this section and leave the rest alone.
 
 
+## `test-crash` (aarch64) over its 180 s timeout, 2026-10-12
+
+CI, `build, boot, analyze (aarch64)` on PR #375 (run 38285518444, head
+3c7d22c0; the kernel the same as main's but for one more key in its
+trusted ring): `make test-crash` failed `timed out after 180s` with every
+panic marker missing. Its serial log holds all 470 self-tests `ok` and
+then the end-of-suite output; the deliberate fault after `SELFTEST:
+PASS` was never reached. The harness verdict is the timeout, nothing
+else. The same job's other debug boots took 184-199 s, the same as on
+main's run of #372's merge (38284097939: 185-198 s), so the runner was
+not slower overall. Main's crash boots on three runs (38246041108,
+38265981385, 38284097939) passed in 159.0, 158.9 and 160.7 s. Per-test
+times against 38284097939's crash boot: the 470 tests summed 165.4 s
+against 144.8 s, and the difference is concentrated in the I/O-bound
+cosmofs tests -- `cosmofs-replay` 32.6 s against 22.4 s, `process-user`
+10.1 against 8.8, then six more cosmofs tests 0.3-0.6 s each. Mechanism
+as far as the evidence goes: a slow draw of the runner's disk I/O in the
+job's last boot, against a timeout with about 11 % margin
+(`test-crash` keeps the runner's 180 s, Makefile "The whole-boot
+timeout"; the ordinary boots have 240 s). Rerun: see the PR. First
+sighting; if it recurs, the crash boot's timeout is the candidate, under
+the keep / restate / widen-and-label rule above.
+
 ## An aarch64 boot that reached the self-tests and no further
 
 **2026-09-20, `0814e79`, the same one-document branch** (`make
