@@ -20,7 +20,9 @@ one is an error, so no command can be left untested.
   <!-- test: session [linux|macos] [x86_64|aarch64] prompt="cosmo$ " -->   ```sh
       One command that is interactive (QEMU on its serial console, ssh):
       started with its input and output connected to this script, which
-      waits for the prompt (at the start of a line). It becomes the
+      waits for the prompt (at the start of a line); a QEMU session whose
+      firmware never hands over to the loader is started once more, as
+      every harness boot is (tests/boot/firmware_stall.py). It becomes the
       current session; one started while another runs (ssh while QEMU
       runs) is current until it ends, and then the one under it again.
   <!-- test: console -->   ```console
@@ -47,6 +49,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -54,6 +57,8 @@ import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "tests", "boot"))
+import firmware_stall  # noqa: E402
 GUIDE = os.path.join(ROOT, "docs", "guide")
 MARK = re.compile(r"^<!--\s*test:\s*(.*?)\s*-->\s*$")
 FENCE = re.compile(r"^```(\w*)\s*$")
@@ -195,28 +200,63 @@ class Session:
     def __init__(self, cmd, prompt, workdir, log_path, timeout):
         self.prompt = prompt
         self.timeout = timeout
-        self.buf = bytearray()
         self.lock = threading.Lock()
         self.consumed = 0          # bytes of output already matched
-        self.log = open(log_path, "wb")
-        self.proc = subprocess.Popen(["bash", "--noprofile", "--norc", "-c", "exec " + cmd], cwd=workdir,
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        threading.Thread(target=self._read, daemon=True).start()
         self.cmd = cmd
+        qemu = cmd.split()[0].startswith("qemu-system-")
         # 33 is a clean power-off only from QEMU (both machines: the
         # debug-exit device and the semihosting exit report the kernel's
         # success the same way); any other session, ssh, must end 0.
-        self.ok_status = (0, 33) if cmd.split()[0].startswith("qemu-system-") else (0,)
+        self.ok_status = (0, 33) if qemu else (0,)
 
-    def _read(self):
+        def launch(attempt):
+            if attempt:
+                os.replace(log_path, os.path.splitext(log_path)[0] + "-stall.log")
+            self.buf = bytearray()
+            self.log = open(log_path, "wb")
+            self.proc = subprocess.Popen(["bash", "--noprofile", "--norc", "-c", "exec " + cmd], cwd=workdir,
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         start_new_session=True)
+            self.reader = threading.Thread(target=self._read, args=(self.proc, self.log, self.buf), daemon=True)
+            self.reader.start()
+            return self.proc
+
+        if not qemu:
+            launch(0)
+            return
+
+        # QEMU: the firmware-handover stall that every harness boot
+        # retries once (tests/boot/firmware_stall.py; docs/testing/flakes.md,
+        # "firmware handover"). Once the loader's banner is out, nothing is
+        # retried.
+        def read_log(attempt):
+            with self.lock:
+                return bytes(self.buf)
+
+        def kill(proc):
+            os.killpg(proc.pid, signal.SIGKILL)   # and anything it started
+            proc.wait()
+            self.reader.join()
+            self.log.close()
+
+        def on_retry():
+            print(f"run-guide: {firmware_stall.RETRIED_NOTE} (no loader banner within "
+                  f"{firmware_stall.HANDOVER_S:.0f}s)", flush=True)
+
+        try:
+            firmware_stall.launch_with_retry(launch, read_log, kill, on_retry)
+        except firmware_stall.FirmwareStall as e:
+            raise Fail(f"session '{cmd[:40]}': {e}")
+
+    def _read(self, proc, log, buf):
         while True:
-            b = self.proc.stdout.read1(4096)
+            b = proc.stdout.read1(4096)
             if not b:
                 break
             with self.lock:
-                self.buf += b
-            self.log.write(b)
-            self.log.flush()
+                buf += b
+            log.write(b)
+            log.flush()
 
     def text(self):
         with self.lock:

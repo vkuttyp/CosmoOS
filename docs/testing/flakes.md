@@ -119,6 +119,19 @@ live boot: only OVMF's screen-clear sequences for 240 s; the release
 experiment PR #359 (a layout-padding branch that changes no boot code):
 the reboot stage's boot holds only OVMF's screen-clear sequences.
 
+**Sixth sighting, 2026-10-12, the first on AArch64 and on macOS:** CI,
+the release workflow's `guide (macos, aarch64)` job on `v1.0.0-rc3`
+(run 38280733354, macOS 14 runner, Homebrew QEMU 11.1.1 and its
+`edk2-aarch64-code.fd`), the user guide's live boot: edk2's banner,
+`ArmTrngLib could not be correctly initialized`, five `Image at ...
+start failed` lines (`00000001`, `Not Found`, `Unsupported`, `Not Found`,
+`Aborted`), two `Tpm2SubmitCommand - Tcg2 - Not Found`, `Image type X64
+can't be loaded on AARCH64 UEFI system`, then the screen-clear sequences
+and nothing for 300 s: no `cosmoboot-uefi`. The same step passed on the
+same runner type for `v1.0.0-rc1` an hour earlier, and locally. The guide
+runner (`tests/guide/run_guide.py`, roadmap M6) was the one QEMU launcher
+without the retry; its QEMU sessions now use `firmware_stall` too.
+
 **The retry, everywhere (2026-10-11).** The rule moved into
 `tests/boot/firmware_stall.py` and every harness boot uses it --
 `run_boot_test.py` (which had its own copy) and `install_test.Boot`
