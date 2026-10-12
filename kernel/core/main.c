@@ -25,6 +25,8 @@
 #include <kernel/ipi.h>
 #include <kernel/irq.h>
 #include <kernel/kernel.h>
+#include <kernel/keyring.h>
+#include <kernel/printf.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
@@ -66,6 +68,23 @@ static const char *firmware_name(uint32_t firmware)
     }
 }
 
+/* Verified boot as the loader reported it (boot protocol v8). The key is
+ * named from the kernel's own ring, which the loader's was built from. */
+static void verified_boot_line(char *out, size_t n, bool banner)
+{
+    uint8_t id[COSMOBOOT_KEY_ID_SIZE];
+    if (!bootinfo_verified(id)) {
+        ksnprintf(out, n, "UNVERIFIED BOOT: the loader was built with VERIFY_BOOT=0 and checked nothing");
+        return;
+    }
+    char hex[2 * COSMOBOOT_KEY_ID_SIZE + 1];
+    for (unsigned i = 0; i < COSMOBOOT_KEY_ID_SIZE; i++)
+        ksnprintf(hex + 2 * i, 3, "%02x", id[i]);
+    const struct trusted_key *k = keyring_find(id);
+    ksnprintf(out, n, "%s, key %s (%s)", banner ? "Verified boot" : "verified boot", hex,
+              k ? k->name : "not in the kernel's ring");
+}
+
 static void print_banner(void)
 {
     const struct cosmoboot_info *info = bootinfo_get();
@@ -89,6 +108,9 @@ static void print_banner(void)
     kprintf("Build: %s\n", build);
     kprintf("Boot: %s (%s v%u, protocol v%u)\n", firmware_name(info->firmware),
             info->loader_name, info->loader_version, info->version);
+    char vb[96];
+    verified_boot_line(vb, sizeof(vb), true);
+    kprintf("%s\n", vb);
     kprintf("CPU: %s\n", cpu);
     kprintf("Memory: %llu MiB usable in %u regions, RAM ends at %llu MiB\n",
             (unsigned long long)(bootinfo_usable_bytes() >> 20), regions,
@@ -133,6 +155,12 @@ void kernel_main(const struct cosmoboot_info *info)
 {
     bootinfo_init(info);
     print_banner();
+    char vb[96];
+    verified_boot_line(vb, sizeof(vb), false);
+    if (bootinfo_verified((uint8_t[COSMOBOOT_KEY_ID_SIZE]){ 0 }))
+        kinfo("boot: %s", vb);
+    else
+        kwarn("boot: %s", vb);
     log_memory_map();
     bootarchive_init();
 

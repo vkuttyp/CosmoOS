@@ -8,10 +8,10 @@
  * The disk becomes: a GPT, partition 1 a copy of the EFI System Partition
  * the loader was read from (the same loader, kernel and boot archive),
  * partition 2 a cosmofs filesystem holding the running system's /bin,
- * /sbin, /etc and package database, and the ESP's command-line slot
- * rewritten to root=PARTUUID=<partition 2>. The installer never writes
- * FAT: the slot is one sector found by its marker (docs/boot/design.md,
- * "The command line").
+ * /sbin, /etc and package database. The ESP is copied byte for byte: its
+ * signed command line says root=boot-disk, the CosmoOS root partition on
+ * the disk the loader was read from, so the installer writes nothing on it
+ * and signs nothing (roadmap M5; docs/boot/design.md, "Verified boot").
  *
  * Non-interactive. A disk that already has a partition table is refused
  * unless --force. Exit 0 installed, 1 failed (nothing left mounted, the
@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include <cosmo/auxv.h>
+#include <cosmo/sysctl.h>
 #include <kernel/crypto.h>
 #include <kernel/gpt.h>
 #include <uapi/cosmo/blkctl.h>
@@ -322,18 +323,6 @@ static int populate(void)
     return 0;
 }
 
-/* --- the command-line slot ------------------------------------------------------ */
-
-/* The marker, assembled at run time: the installer's own image is inside
- * the boot archive on the ESP it scans, and must not carry a copy of the
- * marker that could land at the start of a sector. */
-static size_t slot_marker(char *m)
-{
-    strcpy(m, "#cosmo");
-    strcat(m, "-cmdline v1\n");
-    return strlen(m);
-}
-
 /* --- the install ---------------------------------------------------------------- */
 
 static bool g_mounted;
@@ -417,6 +406,17 @@ static int install(const char *target_name, bool force)
             boot = &g_devs[i];
     if (boot == NULL) {
         fprintf(stderr, "cosmo-install: the loader was not read from a GPT partition; there is no ESP to copy\n");
+        return 3;
+    }
+    /* The ESP is copied with its signed command line (roadmap M5): only
+     * root=boot-disk names the root partition this install makes. An
+     * image built with another CMDLINE would install "successfully" and
+     * then boot some other root, or none (PR #368 review). */
+    char root_spec[160];
+    long rn = sysctl_get("kernel.root", root_spec, sizeof(root_spec));
+    if (rn < 0 || rn >= (long)sizeof(root_spec) || strcmp(root_spec, "boot-disk") != 0) {
+        fprintf(stderr, "cosmo-install: this image's signed command line says root=%s, not root=boot-disk; "
+                "the installed disk would not boot its own root\n", rn >= 0 ? root_spec : "?");
         return 3;
     }
     const struct cosmo_blkctl_dev *t = find_dev(target_name);
@@ -516,11 +516,8 @@ static int install(const char *target_name, bool force)
     if (g_target == NULL || esp == NULL || root == NULL || boot == NULL)
         return fail("the new partitions did not appear", 0);
 
-    /* Partition 1: the boot ESP, byte for byte, but for the slot. */
-    char marker[32];
-    size_t mlen = slot_marker(marker);
-    uint64_t slot = 0;
-    unsigned slots = 0;
+    /* Partition 1: the boot ESP, byte for byte -- the loader, the kernel,
+     * the archive, the command line and the manifest that signs them. */
     for (uint64_t off = 0; off < esp_bytes; off += CHUNK) {
         size_t len = esp_bytes - off < CHUNK ? (size_t)(esp_bytes - off) : CHUNK;
         static uint8_t chunk[CHUNK];
@@ -529,31 +526,7 @@ static int install(const char *target_name, bool force)
             rc = dev_write(esp, off, chunk, len);
         if (rc < 0)
             return fail("copying the EFI system partition", rc);
-        for (size_t s = 0; s < len; s += 512) {
-            if (memcmp(chunk + s, marker, mlen) == 0) {
-                slot = off + s;
-                slots++;
-            }
-        }
     }
-    if (slots != 1) {
-        fprintf(stderr, "cosmo-install: the ESP has %u command-line slots, not one\n", slots);
-        return fail("finding the command-line slot", 0);
-    }
-    static uint8_t sec[512];
-    memset(sec, 0, sizeof(sec));
-    snprintf((char *)sec, sizeof(sec), "%sroot=PARTUUID=%s\n", marker, root_uuid);
-    /* The slot is one 512-byte sector of the FAT image; on a disk with
-     * larger sectors, rewrite the sector that holds it. */
-    uint64_t at = slot / ss * ss;
-    static uint8_t big[4096];
-    rc = dev_read(esp, at, big, ss);
-    if (rc == 0) {
-        memcpy(big + (slot - at), sec, sizeof(sec));
-        rc = dev_write(esp, at, big, ss);
-    }
-    if (rc < 0)
-        return fail("writing the command line", rc);
 
     /* Partition 2: an empty cosmofs, then the system. */
     rc = (int)ctl(COSMO_BLKCTL_FORMAT, root->name, 0, 0, NULL, 0, "cosmofs");
@@ -575,7 +548,7 @@ static int install(const char *target_name, bool force)
     if (rc < 0)
         return fail("flushing the disk", rc);
     printf("cosmo-install: copied %u files in %u directories\n", g_files, g_dirs);
-    printf("cosmo-install: installed on %s: esp %s, root %s, root=PARTUUID=%s\n", tname, esp->name, root->name,
+    printf("cosmo-install: installed on %s: esp %s, root %s, partuuid %s\n", tname, esp->name, root->name,
            root_uuid);
     return 0;
 }

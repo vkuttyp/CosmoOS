@@ -75,6 +75,13 @@ SIGNING_PUB :=
 else
 $(error SIGNING must be dev or release, got '$(SIGNING)')
 endif
+# The signing identity as a file whose contents change exactly when the
+# key path, the trusted set or the revoked list does (scripts/
+# write-if-changed below, in kernel/kernel.mk): the key ring, every
+# signed module and the boot manifest depend on it, so switching keys or
+# trust in an existing output tree rebuilds them rather than keeping
+# what the previous identity signed or trusted (PR #368 review).
+SIGNING_STAMP = $(OUT)/gen/signing.stamp
 # Packages and the INDEX are signed with the same key unless overridden; the
 # image ships the first trusted public key as /etc/pkg/keys/<name>.pub.
 PKGSIGN_KEY ?= $(MODSIGN_KEY)
@@ -109,8 +116,20 @@ SCHED_BALANCE ?= 1
 # suite under migration. `make test-chaos` builds and boots it.
 SCHED_CHAOS ?= 0
 
+# Verified boot (docs/boot/design.md, "Verified boot"). 1 (the default in
+# every build type): the UEFI loader refuses to boot unless \cosmo\manifest
+# is signed by a key in its ring (KEYRING_PUBS, the module ring) and
+# kernel.elf, boot.tar and cmdline match it. 0 is the developer override: a
+# loader that checks nothing and tells the kernel the boot is unverified,
+# which the kernel's banner and sysctl kernel.verified_boot then say. There
+# is no runtime switch. It changes the loader, so it gets its own tree.
+VERIFY_BOOT ?= 1
+ifeq ($(filter $(VERIFY_BOOT),0 1),)
+$(error VERIFY_BOOT must be 0 or 1, got '$(VERIFY_BOOT)')
+endif
+
 # Output tree. Never inside the source directories.
-OUT ?= $(ROOT)/out/$(ARCH)-$(BUILD)
+OUT ?= $(ROOT)/out/$(ARCH)-$(BUILD)$(if $(filter 0,$(VERIFY_BOOT)),-noverify)
 
 # V=1 shows full command lines.
 V ?= 0

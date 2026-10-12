@@ -61,4 +61,12 @@ bool blk_part_info(const struct blkdev *bd, struct blk_part_info *out);
  * NULL. Sleeps. */
 struct blkdev *blk_find_partuuid(const uint8_t uuid[16]);
 
+/* The one registered partition of `type` on the disk that holds the
+ * partition whose unique GUID is `uuid`, referenced; NULL when there is no
+ * such partition, no partition `uuid` or more than one (a cloned disk:
+ * which disk is meant is unknown), or more than one of `type` there.
+ * *matches (if not NULL) receives how many of `type` the disk has (0 when
+ * `uuid` is unknown). root=boot-disk's resolution (bootfs.c). Sleeps. */
+struct blkdev *blk_find_sibling_typed(const uint8_t uuid[16], const uint8_t type[16], unsigned *matches);
+
 #endif /* KERNEL_PART_H */

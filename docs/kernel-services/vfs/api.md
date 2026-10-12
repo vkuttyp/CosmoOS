@@ -119,7 +119,9 @@ and resolves `root=` and logs the result (`root:`).
 *out, size_t len)`** The `root=` value as written (`""` without one) and
 the device it names now: 0 with the name, `-ENOENT` without `root=`,
 `-ENODEV` when nothing registered matches, `-EINVAL` for a value that is
-neither `PARTUUID=<guid>` nor a device name. Behind the sysctls
+neither `boot-disk`, `PARTUUID=<guid>` nor a device name; `root=boot-disk`
+(the build's default since roadmap M5) is the one CosmoOS root partition
+on the disk the loader was read from, `-EEXIST` when there are several. Behind the sysctls
 `kernel.root` and `kernel.rootdev`.
 
 **`int vfs_register_fs(struct fs_type *fs)`** Adds an immortal

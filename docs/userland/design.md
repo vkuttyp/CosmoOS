@@ -527,12 +527,14 @@ Roadmap M2. Non-interactive; everything through `/dev/blkctl`
 3. Write the backup copy, then the primary (until the primary lands the
    disk has no table the kernel accepts), flush, `RESCAN`: the two
    partitions appear.
-4. Copy the boot ESP to partition 1 sector for sector, finding the
-   command-line slot on the way: exactly one 512-byte sector must begin
-   with the marker line, else the install fails. The installer builds
-   the marker at run time, because its own image is inside the boot
-   archive it scans. The slot becomes the marker line,
-   `root=PARTUUID=<partition 2>`, and NULs.
+4. Copy the boot ESP to partition 1 sector for sector, unchanged. Its
+   command line is signed with the kernel (verified boot, roadmap M5)
+   and says `root=boot-disk`: the CosmoOS root partition on the disk the
+   loader was read from, which is partition 2 once the installed disk
+   boots (docs/boot/design.md, "Verified boot"). The installer writes
+   nothing on the ESP and signs nothing, and so refuses (exit 3) an image
+   whose signed command line says anything else (`kernel.root` is not
+   `boot-disk`): that disk would not boot its own root.
 5. `FORMAT` partition 2 as cosmofs, mount it at `/mnt/cosmo-install`,
    create `/dev`, `/proc`, `/tmp` (01777), `/mnt`, `/var`, `/var/log`,
    `/boot`, and copy `/bin`, `/sbin`, `/etc` and, when present, `/usr`
@@ -544,7 +546,7 @@ Roadmap M2. Non-interactive; everything through `/dev/blkctl`
 Any failure after the table was written unmounts what it mounted and
 wipes both copies of the table, so a failed install never leaves a disk
 that looks bootable. The installer writes no FAT: the ESP is the boot
-ESP's bytes and the one sector it rewrites is a file's whole contents.
+ESP's bytes.
 
 ## Security
 

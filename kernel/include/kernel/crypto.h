@@ -11,7 +11,10 @@
 #ifndef KERNEL_CRYPTO_H
 #define KERNEL_CRYPTO_H
 
-#include <kernel/types.h>
+/* Standard headers only: the UEFI loader builds this too (boot/uefi/boot.mk). */
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #define SHA512_DIGEST_SIZE 64
 #define SHA512_BLOCK_SIZE  128

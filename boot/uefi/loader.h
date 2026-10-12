@@ -22,6 +22,7 @@
 #define KERNEL_PATH L"\\cosmo\\kernel.elf"
 #define ARCHIVE_PATH L"\\cosmo\\boot.tar"
 #define CMDLINE_PATH L"\\cosmo\\cmdline"
+#define MANIFEST_PATH L"\\cosmo\\manifest"
 
 /* Everything the loader allocates stays below this so it is covered by the
  * bootstrap identity map and HHDM. */
@@ -92,6 +93,18 @@ struct elf_image {
 /* Validate an x86-64 ELF64 executable and copy its PT_LOAD segments into
  * freshly allocated physical memory. `img` describes the result. */
 EFI_STATUS elf_load(const uint8_t *file, size_t size, struct elf_image *img, bool *fallback_used);
+
+/* verify.c - verified boot (docs/boot/design.md, "Verified boot").
+ * verify_manifest() checks \cosmo\manifest (NULL when it could not be
+ * read) and fills key_id; verify_file() checks one file, by its
+ * COSMO_MANIFEST_* index, once it is in memory (NULL when it could not be
+ * read). Both die() on any mismatch, naming the file. verify_complete()
+ * is true when every file was checked. In a VERIFY_BOOT=0 loader they
+ * check nothing and verify_complete() is false. */
+void verify_manifest(const uint8_t *file, size_t size, uint8_t key_id[8]);
+void verify_file(unsigned which, const uint8_t *data, size_t size);
+bool verify_complete(void);
+const char *verify_path(unsigned which);
 
 /* paging.c */
 #include "arch/arch.h"

@@ -379,7 +379,9 @@ Details per call:
   `kernel.uptime_ns`, `kernel.nprocs`, `kernel.cmdline` (the boot
   command line), `kernel.root` (its `root=` value, `""` without one) and
   `kernel.rootdev` (the block device that names now, `""` when none;
-  `docs/kernel-services/vfs/design.md`, "Boot composition"), `hw.ncpu`,
+  `docs/kernel-services/vfs/design.md`, "Boot composition"),
+  `kernel.verified_boot` (`yes <key id>` when the loader verified the
+  boot, `no` otherwise; `docs/boot/design.md`, "Verified boot"), `hw.ncpu`,
   `vm.page_size`, `vm.pages_total`, `vm.pages_free`, `vm.cache_pages`
   and `vm.cache_limit` (the page cache's size and its reclaim limit,
   `docs/kernel/security/design.md` §3), since the file-regions unit

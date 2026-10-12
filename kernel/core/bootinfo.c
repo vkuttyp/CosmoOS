@@ -22,6 +22,9 @@ static bool g_have_fb;
 static char g_cmdline[COSMOBOOT_CMDLINE_MAX + 1];
 static uint8_t g_boot_partuuid[16];
 static bool g_have_boot_partuuid;
+/* v8: verified boot, as the loader reported it. */
+static uint8_t g_verify_key_id[COSMOBOOT_KEY_ID_SIZE];
+static bool g_verified;
 
 void bootinfo_init(const struct cosmoboot_info *info)
 {
@@ -71,6 +74,16 @@ void bootinfo_init(const struct cosmoboot_info *info)
             g_boot_partuuid[i] = info->boot_partuuid[i];
         g_have_boot_partuuid = true;
     }
+    /* v8: a loader that verified says so with the key; one that did not
+     * (VERIFY_BOOT=0) writes zeros. A key id without the flag, or an
+     * unknown flag, is a loader bug. */
+    if (info->verify_flags & ~COSMOBOOT_VERIFIED)
+        panic("bootinfo: unknown verify_flags 0x%x", info->verify_flags);
+    if (info->verify_flags & COSMOBOOT_VERIFIED) {
+        for (unsigned i = 0; i < COSMOBOOT_KEY_ID_SIZE; i++)
+            g_verify_key_id[i] = info->verify_key_id[i];
+        g_verified = true;
+    }
 
     g_info = info;
     g_map = (const struct cosmoboot_mem_entry *)(uintptr_t)(info->hhdm_base + info->mem_map_phys);
@@ -107,6 +120,15 @@ bool bootinfo_boot_partuuid(uint8_t out[16])
         return false;
     for (unsigned i = 0; i < 16; i++)
         out[i] = g_boot_partuuid[i];
+    return true;
+}
+
+bool bootinfo_verified(uint8_t key_id[COSMOBOOT_KEY_ID_SIZE])
+{
+    if (!g_verified)
+        return false;
+    for (unsigned i = 0; i < COSMOBOOT_KEY_ID_SIZE; i++)
+        key_id[i] = g_verify_key_id[i];
     return true;
 }
 

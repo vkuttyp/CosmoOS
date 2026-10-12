@@ -66,7 +66,7 @@ MODULE_ARCHIVE_ENTRIES := \
 define module_rules
 MODULE_$(1)_OBJS := $$(call objs_of,$$(MODULE_$(1)_SRCS))
 $$(eval $$(call compile_rules,$$(MODULE_$(1)_OBJS),MODULE_CFLAGS))
-$$(MODULE_OUT)/$(1).ko: $$(MODULE_$(1)_OBJS) $$(ROOT)/scripts/modsign.py $$(MODSIGN_KEY)
+$$(MODULE_OUT)/$(1).ko: $$(MODULE_$(1)_OBJS) $$(ROOT)/scripts/modsign.py $$(MODSIGN_KEY) $$(SIGNING_STAMP)
 	$$(call log,MODLD,$$@)
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)$$(LD) $$(MODULE_LDFLAGS) -o $$@.unsigned $$(MODULE_$(1)_OBJS)

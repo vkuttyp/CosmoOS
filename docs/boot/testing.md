@@ -116,6 +116,27 @@ asserts that there is no stub and that `el2_set_vectors` refuses. Both
 configurations run four CPUs, which is what proves the secondary
 trampoline's own drop from EL2 works: PSCI starts every AP at EL2 too.
 
+## Verified boot: `make test-security`
+
+Roadmap M5's acceptance (`tests/boot/security_test.py`, its own CI job,
+`BUILD=release`, both architectures). Stage `verify`:
+
+| Boot | Expected |
+|---|---|
+| `signed` | the loader's four `verified boot:` lines, the banner `Verified boot, key <id>`, `[ INFO] boot: verified boot, key <id>`, `sysctl kernel.verified_boot` = `yes <id>` |
+| `kernel.elf` | one byte of the kernel's `.strtab` (no PT_LOAD covers it) changed: `verified boot: rejected \cosmo\kernel.elf: its SHA-512 does not match the signed manifest`, the FATAL line, and no kernel output for 8 s after |
+| `boot.tar` | the archive's last byte changed: refused the same way, naming `boot.tar` |
+| `cmdline` | the command line's final newline changed: refused, naming `cmdline` |
+| `other-key` | the manifest signed again with a throwaway key: `is signed by key <id>, which this loader does not trust` |
+| `forged-id` | that manifest with the trusted key's id written into its trailer: `the signature does not verify` |
+| `no-manifest` | the manifest deleted: `cannot read \cosmo\manifest` |
+| `unverified` | `$(OUT)/boot/noverify/` loader on the tampered-kernel image: boots, `UNVERIFIED BOOT` in the banner and a WARN in the log, sysctl `no` |
+
+The files are changed through mtools at the ESP's offset
+(`scripts/mkmanifest.py`'s `esp_get`/`esp_put`). Every ordinary boot
+test also requires the `verified boot` lines and forbids `UNVERIFIED
+BOOT` (`run_boot_test.py`), so CI boots only verified images.
+
 ## Not yet tested
 
 - Host-side fuzzing of `elf_load()` and `parse_notes()` with malformed

@@ -46,6 +46,12 @@ const char *bootinfo_cmdline(void);
  * byte order. False when the boot volume had no GPT partition. */
 bool bootinfo_boot_partuuid(uint8_t out[16]);
 
+/* v8: true when the loader verified kernel, archive and command line
+ * against the signed manifest (docs/boot/design.md, "Verified boot"),
+ * with the signing key's id in key_id; false for an unverified boot (a
+ * loader built with VERIFY_BOOT=0). */
+bool bootinfo_verified(uint8_t key_id[COSMOBOOT_KEY_ID_SIZE]);
+
 /* True for types that are RAM (usable, reclaimable, kernel, boot data,
  * ACPI, firmware runtime), false for MMIO, reserved, bad, persistent. */
 bool bootinfo_mem_type_is_ram(uint32_t type);

@@ -7,6 +7,7 @@
  */
 
 #include <kernel/blk.h>
+#include <kernel/bootinfo.h>
 #include <kernel/bootfs.h>
 #include <kernel/cmdline.h>
 #include <kernel/cosmofs.h>
@@ -60,12 +61,36 @@ const char *bootfs_root_spec(void)
     return g_root_spec;
 }
 
+/*
+ * root=boot-disk: the one CosmoOS root partition on the disk the loader was
+ * read from. The command line is signed with the kernel (verified boot), so
+ * it cannot name the installed disk's partition by its GUID; it names the
+ * disk by the loader's own partition instead, and the installer, which
+ * copies the ESP byte for byte, writes nothing on it (docs/boot/design.md,
+ * "Verified boot"). The live image's disk has no root partition: -ENODEV,
+ * and the live root stays. More than one, or the loader's GUID on two
+ * disks: -EEXIST / -ENODEV, and so does it.
+ */
+static int boot_disk_root(struct blkdev **out)
+{
+    uint8_t boot[16];
+    unsigned n = 0;
+    if (!bootinfo_boot_partuuid(boot))
+        return -ENODEV;
+    *out = blk_find_sibling_typed(boot, gpt_type_cosmo_root, &n);
+    return *out != NULL ? 0 : n > 1 ? -EEXIST : -ENODEV;
+}
+
 int bootfs_root_device(char *out, size_t len)
 {
     if (g_root_spec[0] == '\0')
         return -ENOENT;
     struct blkdev *bd = NULL;
-    if (strncmp(g_root_spec, "PARTUUID=", 9) == 0) {
+    if (strcmp(g_root_spec, "boot-disk") == 0) {
+        int rc = boot_disk_root(&bd);
+        if (rc < 0)
+            return rc;
+    } else if (strncmp(g_root_spec, "PARTUUID=", 9) == 0) {
         uint8_t uuid[16];
         if (strlen(g_root_spec + 9) != 36 || !gpt_guid_parse(g_root_spec + 9, uuid))
             return -EINVAL;
@@ -102,8 +127,13 @@ void bootfs_disks_ready(void)
     if (rc == 0)
         kinfo("root: root=%s is %s; init mounts it and switches to it", g_root_spec, dev);
     else if (rc == -EINVAL)
-        kerror("root: root=%s is neither PARTUUID=<guid> nor a device name; init stays on the live root",
+        kerror("root: root=%s is neither boot-disk, PARTUUID=<guid> nor a device name; init stays on the live root",
                g_root_spec);
+    else if (rc == -EEXIST)
+        kerror("root: root=boot-disk: the boot disk has more than one CosmoOS root partition; init stays on the "
+               "live root");
+    else if (strcmp(g_root_spec, "boot-disk") == 0)
+        kinfo("root: root=boot-disk: the boot disk has no CosmoOS root partition; the live root stays");
     else
         kerror("root: root=%s: no such device; init stays on the live root", g_root_spec);
 }
