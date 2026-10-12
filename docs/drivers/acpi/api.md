@@ -103,7 +103,8 @@ MADT reports none. `kernel/arch/x86_64/irqc.c` panics on 0.
 ### `size_t acpi_madt_cpus(const struct acpi_madt_cpu **out)`
 Stores a pointer to the processor array in `*out` (non-NULL `out`
 required) and returns the count, at most `ACPI_MAX_CPUS`. Only entries
-flagged enabled (bit 0) or with bit 1 set are included, in MADT order.
+flagged enabled or online capable are included (invariant AC7), in MADT
+order.
 The array is owned by the driver and never changes after boot.
 Callers: `smp_init` (`kernel/core/smp.c`), the `smp-online` self-test.
 

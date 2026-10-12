@@ -2845,3 +2845,8 @@ See the [history index](README.md).
     repository to `/var/lib/pkg/repo`; `test-install` installs `hello`
     after reboot.
   - Report: `docs/audit/2026-10-12-m6-release-report.md`.
+  - PR 3: the five-file docs for ACPI, kernel objects, system calls and
+    cosmofs completed from the code (invariant sets AC, OB, SC, CF), and
+    `architecture.md` for the usb, e1000e and ahci drivers;
+    `scripts/check-docs.py` (CI job `docs`) requires all five files in
+    every subsystem directory `docs/README.md` lists.

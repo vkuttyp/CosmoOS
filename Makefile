@@ -25,6 +25,7 @@
 #   make compile-commands  compile_commands.json for clangd with cross flags
 #   make check-tools  verify the cross toolchain is usable (and run check-secrets)
 #   make check-secrets  fail if a private or revoked module-signing key is tracked
+#   make check-docs   every subsystem in docs/README.md has its five documentation files
 #   make clean        remove $(OUT)
 #
 # Host and target are separate concepts throughout. See docs/build/.
@@ -35,7 +36,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -332,6 +333,9 @@ analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE) $(
 
 reproducible:
 	$(Q)$(ROOT)/scripts/check-reproducible.sh $(ARCH) $(BUILD)
+
+check-docs:
+	$(Q)$(PYTHON) $(ROOT)/scripts/check-docs.py $(ROOT)
 
 # compile_commands.json for clangd/IDEs, using the real cross flags so
 # editor diagnostics match the build. The file is git-ignored.
