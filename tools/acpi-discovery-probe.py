@@ -133,7 +133,13 @@ def parallels_boot(vm, hds, sock, img, log, timeout):
     data = b""
     if s is not None:
         s.settimeout(0.5)
-        while time.monotonic() < end and b"KERNEL PANIC" not in data and b"\ncosmo$ " not in data:
+        # Read to the shell prompt, or past a panic to its end (the reason
+        # follows the "KERNEL PANIC" line), or to the deadline.
+        while time.monotonic() < end and b"\ncosmo$ " not in data:
+            if b"KERNEL PANIC" in data:
+                end = min(end, time.monotonic() + 3)
+                if b"halting" in data:
+                    break
             try:
                 d = s.recv(65536)
                 if not d:
@@ -156,6 +162,11 @@ def check_isb(tree, work, a):
         print(f"isb: boot {i + 1}: {r}", flush=True)
     panics = seen.count("panic")
     print(f"isb: {panics} of {a.boots} panicked, {seen.count('shell')} reached the shell")
+    for i, r in enumerate(seen):
+        if r == "panic":
+            text = (work / f"boot{i + 1}.serial").read_text(errors="replace")
+            why = re.search(r"KERNEL PANIC:?\s*(.*)", text[text.index("KERNEL PANIC"):])
+            print(f"isb: boot {i + 1}: {why.group(1).strip()[:160] if why else '?'}")
     return panics == 0 and seen.count("shell") == a.boots, panics > 0
 
 

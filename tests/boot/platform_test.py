@@ -169,6 +169,10 @@ def boot(name, image, work, spec, timeout, key):
         klog = bytes(buf).decode("utf-8", "replace") if serial else ""
     if not serial and os.path.exists(vcon):
         klog = open(vcon, "rb").read().decode("utf-8", "replace")
+    # First, so an unusable GTDT is named as that rather than as a platform
+    # line whose timer part ("timer: no usable GTDT (...)") does not parse.
+    if re.search(r"timer: GTDT (absent|unusable)", klog):
+        raise Fail(f"{name}: the GTDT was not used")
     m = PLATFORM.search(klog)
     if not m:
         raise Fail(f"{name}: no platform line in the kernel log")
@@ -181,8 +185,6 @@ def boot(name, image, work, spec, timeout, key):
         raise Fail(f"{name}: no PSCI conduit, though QEMU's FADT declares one")
     if serial and not console.startswith("PL011 at 0x9000000 (SPCR, IRQ 33)"):
         raise Fail(f"{name}: console {console!r}, expected the SPCR's PL011")
-    if re.search(r"timer: GTDT (absent|unusable)", klog):
-        raise Fail(f"{name}: the GTDT was not used")
     for what, pat in spec["want"].items():
         hay = {"gic": gic, "console": console}.get(what, klog)
         if not re.search(pat, hay, re.M):
