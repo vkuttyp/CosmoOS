@@ -1,29 +1,16 @@
-# Remaining milestone work
+# After 1.0: remaining work
 
-> **1.0 roadmap.** Work is now driven by the
-> [1.0 roadmap](roadmap-1.0.md) and the scope rules in
-> [AGENTS.md](../AGENTS.md#scope-rules). Items below are taken only when
-> the current milestone's acceptance test needs them; the roadmap's
-> out-of-scope list stays here.
->
-> M1 (sound randomness) done 2026-10-09; M2 (persistent system: GPT
-> partitions, boot command line, `cosmo-install`, a cosmofs root that init
-> switches to) done 2026-10-10
-> ([report](audit/2026-10-10-m2-persistent-system-report.md)); M3 (real
-> process model: fork, vfork, execve, BusyBox ash as the shell) done
-> 2026-10-10 ([report](audit/2026-10-10-m3-process-model-report.md)).
-> M4 (interactive and networked: DHCP, DNS, PTYs, job control, ssh) done
-> 2026-10-11 ([report](audit/2026-10-11-m4-interactive-networked-report.md)): PR 1,
-> the DHCP client, netctl's lease section, `netcfg` and BusyBox `wget`/`nslookup`
-> (#351, reverted by #356, re-landed after `net-bench`'s restate,
-> [report](audit/2026-10-11-net-bench-restate-report.md)); PR 2, pseudo-terminals,
-> controlling terminals and job control (ash on the console and on a pty);
-> PR 3 (#366), static dropbear and ssh login. M5 (security baseline) in
-> progress ([report](audit/2026-10-12-m5-security-baseline-report.md)):
-> PR 1, verified boot (signed manifest checked by the loader,
-> `VERIFY_BOOT=0` override, `root=boot-disk`, `make test-security`);
-> PR 2, user-space ASLR and the W^X check; PR 3, operation-specific
-> privileges.
+> **This is post-1.0 work.** CosmoOS 1.0 is the
+> [1.0 roadmap](roadmap-1.0.md) completed: milestones M1-M6 (sound
+> randomness, a persistent installed system, the real process model,
+> interactive and networked use, the security baseline, the release),
+> each with its report under [audit/](audit/README.md). What 1.0 is and
+> how to use it is in the [user guide](guide/README.md); what it does not
+> do is on the guide's [Known limitations](guide/limitations.md) page.
+> Everything below is what remains after 1.0, grouped by area; none of it
+> is promised for a date. The roadmap's out-of-scope list (VMX on
+> hardware, NUMA, huge pages, live migration, GPU and display, RAID-Z,
+> hotplug, eBPF, more than 64 CPUs, a hardware matrix) is part of it.
 
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.
