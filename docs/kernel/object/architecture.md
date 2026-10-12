@@ -117,8 +117,9 @@ contents, and reading a vCPU's registers is READ for the same reason.
 
 **The same bit means different things on different types, and that is
 safe because a per-type right is only ever tested by code that has
-already established the type.** `sock_of`, `vm_of` and `vcpu_of` each
-convert the object and refuse anything of another kind, so bit 18
+already established the type.** `sock_of_err`, `vm_of_err` and
+`vcpu_of_err` each convert the object and refuse anything of another
+kind, so bit 18
 (CONNECT on a socket, IRQ on a vCPU) cannot be spent on the wrong
 object: the conversion fails before the operation runs.
 
@@ -130,12 +131,15 @@ something false.
 
 ### Leaving a table
 
-An object that lives in a lookup table (the vnode hash, the process
-table) must leave it in the same act that takes its count to zero, under
-the lock a lookup holds -- or the table will, for a moment, hold a dead
-object, and a lookup in that moment either takes a reference on it (a
-panic in `kobject_get`) or hands out something whose release is already
-running. `kobject_put_and_lock` is that act: it drops the count without
+An object that lives in a lookup table (the vnode hash) must leave it in
+the same act that takes its count to zero, under the lock a lookup
+holds -- or the table will, for a moment, hold a dead object, and a
+lookup in that moment either takes a reference on it (a panic in
+`kobject_get`) or hands out something whose release is already
+running. A table whose objects leave it only in their release (the
+process table) takes the other form: its lookup uses `kobject_tryget`
+and treats a refusal as "not found" (`process_lookup`). For the first
+kind, `kobject_put_and_lock` is that act: it drops the count without
 the lock while more than one reference remains and takes the lock only
 for the drop that reaches zero, returning with the lock held so the
 caller can unlink; `kobject_release_final` then runs the release. The
@@ -180,7 +184,9 @@ that until `vfs-put-race` reproduced it (`docs/kernel-services/vfs/design.md`,
 
 ## Error handling
 
-`handle_install` returns `-EMFILE` when full. `handle_lookup` returns
+`handle_install` returns `-EMFILE` when full or at the process's
+`COSMO_RLIMIT_NOFILE` limit, and `-EBADF` once the table is exiting.
+`handle_lookup` returns
 NULL for empty slots and for insufficient rights (the caller maps both
 to `-EBADF` or `-EPERM` as it sees fit; the native syscalls use
 `-EBADF`).
@@ -196,7 +202,8 @@ process.
 
 Self-test `objects`: refcount get/put with a counting release, install
 until full (`-EMFILE`), lookup with and without rights, close, destroy
-releasing everything. See `docs/kernel/process/testing.md`.
+releasing everything. See `docs/kernel/process/testing.md`, and
+`testing.md` here for every test that exercises this code.
 
 ## Future
 
