@@ -8,7 +8,8 @@
  * The disk becomes: a GPT, partition 1 a copy of the EFI System Partition
  * the loader was read from (the same loader, kernel and boot archive),
  * partition 2 a cosmofs filesystem holding the running system's /bin,
- * /sbin, /etc and package database. The ESP is copied byte for byte: its
+ * /sbin, /etc and package database, and the image's package repository
+ * at /var/lib/pkg/repo, which the installed /etc/pkg/repos.conf names. The ESP is copied byte for byte: its
  * signed command line says root=boot-disk, the CosmoOS root partition on
  * the disk the loader was read from, so the installer writes nothing on it
  * and signs nothing (roadmap M5; docs/boot/design.md, "Verified boot").
@@ -37,6 +38,8 @@
 #include <uapi/cosmo/blkctl.h>
 
 #define MNT "/mnt/cosmo-install"
+#define PKG_LIVE_REPO "/boot/repo"               /* the boot archive's repo/ */
+#define PKG_INSTALLED_REPO "/var/lib/pkg/repo"   /* where the installed system keeps it */
 #define CHUNK COSMO_BLKCTL_IO_MAX
 #define ALIGN_BYTES (1024u * 1024u)          /* partitions start on 1 MiB */
 #define MIN_ROOT_BYTES (32u * 1024u * 1024u)
@@ -266,7 +269,8 @@ static int populate(void)
     static const char *const trees[] = { "/bin", "/sbin", "/etc", "/usr", "/var/db" };
     static const struct { const char *path; uint32_t mode; } dirs[] = {
         { "/dev", 0755 }, { "/proc", 0555 }, { "/tmp", 01777 }, { "/mnt", 0755 },
-        { "/var", 0755 }, { "/var/log", 0755 }, { "/boot", 0755 },
+        { "/var", 0755 }, { "/var/log", 0755 }, { "/var/lib", 0755 }, { "/var/lib/pkg", 0755 },
+        { "/boot", 0755 },
         /* Roadmap M4: root's home and the ssh server's (decision 6). */
         { "/root", 0700 }, { "/root/.ssh", 0700 },
     };
@@ -287,6 +291,21 @@ static int populate(void)
         if (copy_tree(trees[i], t) < 0)
             return -1;
     }
+    /*
+     * Roadmap M6: the image's package repository goes onto the root, and
+     * the installed system's repos.conf names it there. The live system's
+     * names /boot/repo, which is the boot archive's and is not on an
+     * installed disk. The keys that verify it, /etc/pkg/keys, came with
+     * /etc above.
+     */
+    struct stat rst;
+    if (stat(PKG_LIVE_REPO, &rst) < 0) {
+        fprintf(stderr, "cosmo-install: %s: %s\n", PKG_LIVE_REPO, strerror(errno));
+        return -1;
+    }
+    if (copy_tree(PKG_LIVE_REPO, MNT PKG_INSTALLED_REPO) < 0 ||
+        write_file("/etc/pkg/repos.conf", PKG_INSTALLED_REPO "\n", 0644) < 0)
+        return -1;
     /* The installed system's console shell is BusyBox ash (roadmap M3;
      * init reads this file, docs/userland/design.md, "BusyBox"). */
     int fd = open(MNT "/etc/console-shell", O_WRONLY | O_CREAT | O_TRUNC, 0644);

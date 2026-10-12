@@ -2741,7 +2741,6 @@ static void vio_reg(struct vm *vm, struct vio_model *m, unsigned off, bool write
     }
 }
 
-FRAME_EXEMPT_BEGIN(selftest_el2_virtq_device)   /* scripts/frame-baseline.txt: 4832 bytes */
 bool selftest_el2_virtq_device(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -2749,7 +2748,7 @@ bool selftest_el2_virtq_device(const char **reason)
     struct vm *vm;
     struct vcpu *v;
     CHECK(make_guest("tests/hv/guest_vblk.bin", &vm, &v) == 0);
-    struct vio_model m;
+    static struct vio_model m;   /* 4 KiB of disk: off the kernel stack (scripts/frame-baseline.txt) */
     memset(&m, 0, sizeof(m));
     for (unsigned i = 0; i < sizeof(m.disk); i++)
         m.disk[i] = (uint8_t)(i * 5 + 3);          /* the known pattern the guest must read back */
@@ -2831,7 +2830,6 @@ bool selftest_el2_virtq_device(const char **reason)
           "then wrote one, flushed, and read back what it wrote");
     return true;
 }
-FRAME_EXEMPT_END(selftest_el2_virtq_device)
 
 /*
  * el2-virtq-net: a guest drives a virtio-mmio network device at the second

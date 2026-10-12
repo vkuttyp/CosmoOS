@@ -289,7 +289,10 @@ void kernel_main(const struct cosmoboot_info *info)
                               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC, VM_CACHE_WB, 0);
         if (rc != 0)
             panic("crash test: the writable and executable page could not be mapped (%d)", rc);
-        __asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0\n\tdsb ish\n\tisb" ::"r"(va) : "memory");
+        /* The store went through the direct map: make it what the fetch
+         * through `va` sees (dc cvau by that alias, then the whole
+         * instruction cache, arch/mmu.h). */
+        arch_mmu_sync_icache_kernel((vaddr_t)phys_to_virt(pa), PAGE_SIZE);
         ((void (*)(void))va)();
     }
     kerror("crash test: a writable page executed; WXN is off");
@@ -336,6 +339,7 @@ void kernel_main(const struct cosmoboot_info *info)
     }
 #if CONFIG_DEBUG
     sched_report_depth();
+    thread_report_stack_use();
 #endif
     kinfo("boot complete; nothing more to do in this phase");
     kernel_shutdown(failed ? KERNEL_EXIT_FAILURE : KERNEL_EXIT_SUCCESS);

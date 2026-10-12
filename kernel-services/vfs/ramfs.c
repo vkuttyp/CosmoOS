@@ -721,10 +721,11 @@ static int write_file(const char *path, const void *data, size_t len, uint32_t m
 }
 
 /* mkdir -p for the parents of `path` (archive entries may be nested). */
-static void ensure_parents(const char *path)
+/* Cuts `dir` at each separator in place and puts it back, rather than
+ * copying it: a second 1 KiB path took ramfs_populate_boot's frame past
+ * the kernel-stack guard (scripts/frame-baseline.txt). */
+static void ensure_parents(char *dir)
 {
-    char dir[VFS_PATH_MAX];
-    strlcpy(dir, path, sizeof(dir));
     for (char *p = dir + 1; *p; p++) {
         if (*p != '/')
             continue;
@@ -736,7 +737,6 @@ static void ensure_parents(const char *path)
     }
 }
 
-FRAME_EXEMPT_BEGIN(ramfs_populate_boot)   /* scripts/frame-baseline.txt: 2160 bytes */
 void ramfs_populate_boot(void)
 {
     static const struct {
@@ -782,4 +782,3 @@ void ramfs_populate_boot(void)
     }
     kinfo("ramfs: /boot holds %u file(s) and link(s) from the boot archive", copied);
 }
-FRAME_EXEMPT_END(ramfs_populate_boot)

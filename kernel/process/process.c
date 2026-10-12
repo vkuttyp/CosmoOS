@@ -1794,7 +1794,6 @@ struct vnode *process_cwd_snapshot(char *path, size_t len)
 static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpath);
 static int chdir_inner(struct process *cur, const char *path);
 
-FRAME_EXEMPT_BEGIN(process_chdir)   /* scripts/frame-baseline.txt: 2128 bytes */
 int process_chdir(const char *path)
 {
     struct process *cur = process_current();
@@ -1805,7 +1804,6 @@ int process_chdir(const char *path)
         vfs_cwd_hold_swapper_leave();   /* every failure after the enter, one place */
     return rc;
 }
-FRAME_EXEMPT_END(process_chdir)
 
 static int chdir_inner(struct process *cur, const char *path)
 {
@@ -1814,20 +1812,24 @@ static int chdir_inner(struct process *cur, const char *path)
      * directory this looks up in must be the same directory, or what gets
      * published below is the path of one and the vnode of another.
      */
-    char base[sizeof(cur->cwd_path_locked)];
-    struct vnode *cwd = process_cwd_snapshot(base, sizeof(base));
+    const size_t n = sizeof(cur->cwd_path_locked);
+    char *base = kmalloc(2 * n, 0);   /* 2 KiB: the heap, not the kernel stack */
+    if (base == NULL)
+        return -ENOMEM;
+    struct vnode *cwd = process_cwd_snapshot(base, n);
     /* The name published is the one the walk took (P32), not a lexical
      * normalisation of the argument: through a symbolic link the two name
      * different directories, and `..` after it made getcwd name one the
      * process was not in (docs/audit/next-subsystem-cwd-name.md). */
-    char newpath[sizeof(cur->cwd_path_locked)];
+    char *newpath = base + n;
     struct vnode *vn;
-    int rc = vfs_lookup_named(cwd, base, path, &vn, newpath, sizeof(newpath));
+    int rc = vfs_lookup_named(cwd, base, path, &vn, newpath, n);
     if (cwd)
         vnode_put(cwd);
-    if (rc)
-        return rc;
-    return cwd_publish(cur, vn, newpath);
+    if (rc == 0)
+        rc = cwd_publish(cur, vn, newpath);
+    kfree(base);
+    return rc;
 }
 
 /*

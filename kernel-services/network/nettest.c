@@ -423,7 +423,6 @@ static struct netaddr v6loop(uint16_t port)
 
 /* --- mbufs ------------------------------------------------------------- */
 
-FRAME_EXEMPT_BEGIN(selftest_net_mbuf)   /* scripts/frame-baseline.txt: 6192 bytes */
 bool selftest_net_mbuf(const char **reason)
 {
     struct mbuf_stats s0, s1;
@@ -432,12 +431,13 @@ bool selftest_net_mbuf(const char **reason)
     struct mbuf *m = m_getcl();
     CHECK(m != NULL && (m->flags & (M_PKTHDR | M_EXT)) == (M_PKTHDR | M_EXT));
     CHECK(m_leadingspace(m) == NET_HEADROOM && m->len == 0);
-    uint8_t pat[3000];
+    /* static: off the 16 KiB kernel stack (scripts/frame-baseline.txt); the runner runs one test at a time */
+    static uint8_t pat[3000];
     for (unsigned i = 0; i < sizeof(pat); i++)
         pat[i] = (uint8_t)(i * 13);
     CHECK(m_append(m, pat, sizeof(pat)) == 0);
     CHECK(m->pkt.len == 3000 && m_length(m) == 3000 && m->next != NULL);   /* two clusters */
-    uint8_t out[3000];
+    static uint8_t out[3000];
     CHECK(m_copydata(m, 0, 3000, out) && memcmp(out, pat, 3000) == 0);
     CHECK(m_copydata(m, 2990, 10, out) && memcmp(out, pat + 2990, 10) == 0);
     CHECK(!m_copydata(m, 2990, 11, out));
@@ -492,7 +492,6 @@ bool selftest_net_mbuf(const char **reason)
     CHECK(s1.mbufs_alive == s0.mbufs_alive && s1.clusters_alive == s0.clusters_alive);
     return true;
 }
-FRAME_EXEMPT_END(selftest_net_mbuf)
 
 /* An mbuf enqueued while already on a queue is refused and the queue
  * stays whole: count and list agree, order is kept, nothing leaks. The
@@ -659,7 +658,6 @@ bool selftest_net_arp(const char **reason)
 
 /* --- UDP over loopback ------------------------------------------------------------ */
 
-FRAME_EXEMPT_BEGIN(udp_roundtrip)   /* scripts/frame-baseline.txt: 3072 bytes */
 static bool udp_roundtrip(const char **reason, struct netaddr srv_addr, struct netaddr cli_addr)
 {
     struct socket *srv, *cli;
@@ -674,12 +672,13 @@ static bool udp_roundtrip(const char **reason, struct netaddr srv_addr, struct n
     struct netaddr srv_name;
     CHECK(ksock_getsockname(srv, &srv_name) == 0 && srv_name.port == srv_addr.port);
 
-    char msg[1400];
+    /* static: see selftest_net_mbuf; the two callers run one after the other */
+    static char msg[1400];
     for (unsigned i = 0; i < sizeof(msg); i++)
         msg[i] = (char)('a' + i % 26);
     CHECK(ksock_sendto(cli, msg, 5, &srv_addr) == 5);
     CHECK(ksock_sendto(cli, msg, sizeof(msg), &srv_addr) == (int64_t)sizeof(msg));
-    char buf[1500];
+    static char buf[1500];
     struct netaddr from;
     CHECK(ksock_recvfrom(srv, buf, sizeof(buf), &from) == 5 && memcmp(buf, msg, 5) == 0);
     CHECK(from.family == cli_addr.family && from.port >= NET_EPHEMERAL_LO);
@@ -708,7 +707,6 @@ static bool udp_roundtrip(const char **reason, struct netaddr srv_addr, struct n
     nt_ksock_put(srv);
     return true;
 }
-FRAME_EXEMPT_END(udp_roundtrip)
 
 bool selftest_net_lo_udp(const char **reason)
 {
@@ -3831,7 +3829,6 @@ static bool icmp_probe(uint16_t seq, bool *replied)
     return true;
 }
 
-FRAME_EXEMPT_BEGIN(selftest_net_icmp_limit)   /* scripts/frame-baseline.txt: 3440 bytes */
 bool selftest_net_icmp_limit(const char **reason)
 {
     struct ip_stats i0, i1;
@@ -3918,7 +3915,7 @@ bool selftest_net_icmp_limit(const char **reason)
     CHECK(c->tcp->mss == TCP_MSS_LO && ipv4_path_mtu(INADDR_LOOPBACK_N) == 65535);
     g_guard_port = 6026;
     nt_loopback_set_filter(blackhole_filter, NULL);   /* the data stays in flight */
-    uint8_t big[2000];
+    static uint8_t big[2000];   /* static: see selftest_net_mbuf */
     memset(big, 'm', sizeof(big));
     uint32_t nxt0 = c->tcp->snd_nxt;   /* the baseline, taken before the send */
     CHECK(ksock_sendto(c, big, sizeof(big), NULL) == (int64_t)sizeof(big));
@@ -4022,9 +4019,7 @@ bool selftest_net_icmp_limit(const char **reason)
           (unsigned long long)sent, (unsigned long long)limited);
     return true;
 }
-FRAME_EXEMPT_END(selftest_net_icmp_limit)
 
-FRAME_EXEMPT_BEGIN(selftest_net_nonblock)   /* scripts/frame-baseline.txt: 4304 bytes */
 bool selftest_net_nonblock(const char **reason)
 {
     struct socket *ls, *c, *a;
@@ -4049,7 +4044,7 @@ bool selftest_net_nonblock(const char **reason)
     CHECK(ksock_ready(ls) & COSMO_IO_READABLE);
     CHECK(nt_ksock_accept(ls, &a, NULL) == 0);
     ksock_set_nonblock(a, true);
-    uint8_t buf[4096];
+    static uint8_t buf[4096];   /* static: see selftest_net_mbuf */
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == -EAGAIN);
     CHECK(!(ksock_ready(c) & COSMO_IO_READABLE));
     CHECK(ksock_sendto(a, "hello", 5, NULL) == 5);
@@ -4179,7 +4174,6 @@ bool selftest_net_nonblock(const char **reason)
     kinfo("selftest: net-nonblock: sockets, datagrams and pipe ends report readiness and never block");
     return true;
 }
-FRAME_EXEMPT_END(selftest_net_nonblock)
 
 /* --- receive steering (unit 11) ------------------------------------------------
  *
@@ -8702,9 +8696,11 @@ static bool hin_tcp_listener(struct socket **out, uint16_t port)
     ((struct fw_rule){ .direction = (dir_), .proto = (proto_), .verdict = (verdict_), .dst_port = (port_), \
                        .src_ip = (sip_), .src_prefix = (sp_) })
 
-FRAME_EXEMPT_BEGIN(selftest_net_hostinput)   /* scripts/frame-baseline.txt: 2816 bytes */
 bool selftest_net_hostinput(const char **reason)
 {
+    /* The packet buffers and statistics snapshots below are static: off the
+     * 16 KiB kernel stack (scripts/frame-baseline.txt); the runner runs one
+     * test at a time. */
     *reason = NULL;
     fw_flush();
     nat_flush();
@@ -8741,13 +8737,14 @@ bool selftest_net_hostinput(const char **reason)
     { struct netaddr p = v4addr(w[0], 5555); CHECK(ksock_connect(uc, &p) == 0); }
     CHECK(hin_udp_listener(&ul, INADDR_LOOPBACK_N, 7002));
 
-    uint8_t l4[160], buf[256], pl[4] = { 'a', 'b', 'c', 'd' };
+    uint8_t pl[4] = { 'a', 'b', 'c', 'd' };
+    static uint8_t l4[160], buf[256];
     uint16_t l4len;
     struct hin_seg sg;
-    struct fw_stats fs0, fs1;
-    struct ip_stats is0, is1;
-    struct tcp_stats ts0, ts1;
-    struct udp_stats us0, us1;
+    static struct fw_stats fs0, fs1;
+    static struct ip_stats is0, is1;
+    static struct tcp_stats ts0, ts1;
+    static struct udp_stats us0, us1;
     hin_drain(u);
 
     /* (1) the host object ships with default ACCEPT and no rules, and the
@@ -9245,7 +9242,6 @@ bool selftest_net_hostinput(const char **reason)
           "the scopes held, and the control listing carried the host record with its source");
     return true;
 }
-FRAME_EXEMPT_END(selftest_net_hostinput)
 
 /* --- the host's own flows (docs/audit/next-subsystem-host-state.md) ------- */
 
@@ -9585,9 +9581,11 @@ bool selftest_net_fin_acks_last_data(const char **reason)
     return true;
 }
 
-FRAME_EXEMPT_BEGIN(selftest_net_hoststate)   /* scripts/frame-baseline.txt: 2944 bytes */
 bool selftest_net_hoststate(const char **reason)
 {
+    /* The packet buffers and statistics snapshots below are static: off the
+     * 16 KiB kernel stack (scripts/frame-baseline.txt); the runner runs one
+     * test at a time. */
     *reason = NULL;
     fw_flush();
     nat_flush();
@@ -9619,13 +9617,14 @@ bool selftest_net_hoststate(const char **reason)
     CHECK(hin_udp_listener(&cs2, 0, 7101));
     CHECK(hin_udp_listener(&cs3, 0, 7102));
     struct netaddr peer = v4addr(w, 5300);
-    uint8_t pl[4] = { 'p', 'i', 'n', 'g' }, l4[160], buf[256], frame[512];
+    uint8_t pl[4] = { 'p', 'i', 'n', 'g' };
+    static uint8_t l4[160], buf[256], frame[512];
     uint16_t l4len;
     struct hin_seg sg;
-    struct fw_stats fs0, fs1;
-    struct udp_stats us0, us1;
-    struct tcp_stats ts0, ts1;
-    struct ip_stats is0, is1;
+    static struct fw_stats fs0, fs1;
+    static struct udp_stats us0, us1;
+    static struct tcp_stats ts0, ts1;
+    static struct ip_stats is0, is1;
     hin_drain(u);
 
     /* (1) an unconnected UDP client's reply survives the DROP. The send is
@@ -9974,7 +9973,6 @@ bool selftest_net_hoststate(const char **reason)
           "the tuple, and the host's share held while the guests' pool stayed its own");
     return true;
 }
-FRAME_EXEMPT_END(selftest_net_hoststate)
 
 /* --- the operator's flow listing (docs/audit/next-subsystem-net-flows.md) --- */
 
@@ -10319,9 +10317,11 @@ static void out_drain_file(struct file *f)
                        .dst_ip = (dip_), .dst_prefix = (dp_), .dst_port = (port_), \
                        .src_ip = (sip_), .src_prefix = (sp_), .scope = (scope_) })
 
-FRAME_EXEMPT_BEGIN(selftest_net_output)   /* scripts/frame-baseline.txt: 2272 bytes */
 bool selftest_net_output(const char **reason)
 {
+    /* The packet buffers and statistics snapshots below are static: off the
+     * 16 KiB kernel stack (scripts/frame-baseline.txt); the runner runs one
+     * test at a time. */
     *reason = NULL;
     fw_flush();
     nat_flush();
@@ -10346,11 +10346,12 @@ bool selftest_net_output(const char **reason)
 
     struct socket *cs = NULL;
     CHECK(hin_udp_listener(&cs, 0, 7200));        /* bound, never connected */
-    uint8_t pl[4] = { 'o', 'u', 't', '!' }, l4[160], buf[256];
+    uint8_t pl[4] = { 'o', 'u', 't', '!' };
+    static uint8_t l4[160], buf[256];
     uint16_t l4len;
     struct hin_seg sg;
-    struct fw_stats fs0, fs1;
-    struct ip_stats is0, is1;
+    static struct fw_stats fs0, fs1;
+    static struct ip_stats is0, is1;
     struct netaddr to;
     hin_drain(u);
 
@@ -10671,7 +10672,6 @@ bool selftest_net_output(const char **reason)
           "fifth policy with the rule's egress");
     return true;
 }
-FRAME_EXEMPT_END(selftest_net_output)
 /* --- the OUTPUT verdict, carried back into the connection ----------------- */
 
 bool selftest_net_tcpverdict(const char **reason)

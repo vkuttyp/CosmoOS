@@ -857,6 +857,17 @@ struct native_sigframe {
   debugger unwinding out of a handler finds the interrupted code. Both
   hand the handler three arguments: the signal, a `struct cosmo_siginfo
   *`, and the frame's address.
+- **Who does what.** `native_signal_frame` is one generic function: it
+  fills the frame and copies it to user memory. The three steps that
+  differ by architecture are behind `arch/user.h` (roadmap M6):
+  `arch_sigframe_place(r, size)` (where the frame goes: the arithmetic
+  of the first point), `arch_sigframe_enter(r, frame, handler,
+  restorer, sig, info)` (the return path under the frame and the
+  handler's registers: the second point; a user write, so it may sleep
+  and fails with `-EFAULT` leaving the registers alone) and
+  `arch_sigreturn_frame(r)` (where `sigreturn` finds the frame: `rsp`
+  on x86-64, `sp + 16` on AArch64), in `kernel/arch/<arch>/user.c`.
+  `native_signal.c` has no architecture conditional.
 - **The FP/SIMD image.** Carried, and the frame records the length it
   carries rather than assuming it: a handler compiled by an ordinary
   toolchain uses vector registers, so without the image the interrupted

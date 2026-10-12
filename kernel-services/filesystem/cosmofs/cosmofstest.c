@@ -228,7 +228,6 @@ bool selftest_cosmofs_ops(const char **reason)
     return true;
 }
 
-FRAME_EXEMPT_BEGIN(selftest_cosmofs_crash)   /* scripts/frame-baseline.txt: 8592 bytes */
 bool selftest_cosmofs_crash(const char **reason)
 {
     struct blkdev *bd = scratch();
@@ -265,7 +264,8 @@ bool selftest_cosmofs_crash(const char **reason)
     CHECK(pool_open(bd, &p) == 0);
     uint8_t *blk = kmalloc(4096, 0);
     CHECK(blk != NULL);
-    uint8_t saved_a[4096], saved_b[4096];
+    /* static: off the 16 KiB kernel stack (scripts/frame-baseline.txt); the runner runs one test at a time */
+    static uint8_t saved_a[4096], saved_b[4096];
     CHECK(pool_read(p, 0, blk) == 0);
     memcpy(saved_a, blk, 4096);
     CHECK(pool_read(p, 1, blk) == 0);
@@ -293,7 +293,6 @@ bool selftest_cosmofs_crash(const char **reason)
     blkdev_put(bd);
     return true;
 }
-FRAME_EXEMPT_END(selftest_cosmofs_crash)
 
 /* --- the transaction engine (audit milestone 7), on RAM devices --------------- */
 
@@ -2666,7 +2665,6 @@ bool selftest_cosmofs_orphan_rename(const char **reason)
  * decrement, which is the only thing standing between this and a count
  * that drops twice.
  */
-FRAME_EXEMPT_BEGIN(selftest_cosmofs_orphan_idempotent)   /* scripts/frame-baseline.txt: 2752 bytes */
 bool selftest_cosmofs_orphan_idempotent(const char **reason)
 {
     struct blkdev *bd;
@@ -2688,7 +2686,7 @@ bool selftest_cosmofs_orphan_idempotent(const char **reason)
     struct cosmofs_stats first;
     CHECK(cosmofs_stats(mount_of(ENG), &first) == 0);
     CHECK(first.orphan_root != 0);
-    struct cosmofs_check_report r1;
+    static struct cosmofs_check_report r1;   /* static: see selftest_cosmofs_crash */
     CHECK(cosmofs_check(mount_of(ENG), &r1, 0) == 0);
 
     /* Away again without committing. */
@@ -2703,7 +2701,7 @@ bool selftest_cosmofs_orphan_idempotent(const char **reason)
     CHECK(second.inode_count == first.inode_count);
     CHECK(second.free_blocks == first.free_blocks);
     CHECK(vfs_sync() == 0);   /* and only now is the reclaim durable */
-    struct cosmofs_check_report r2;
+    static struct cosmofs_check_report r2;
     CHECK(cosmofs_check(mount_of(ENG), &r2, 0) == 0);
     CHECK(r2.clean);
     CHECK(r2.counted_inodes == r1.counted_inodes);
@@ -2712,7 +2710,6 @@ bool selftest_cosmofs_orphan_idempotent(const char **reason)
           (unsigned long long)second.inode_count);
     return engine_unmount(bd, reason);
 }
-FRAME_EXEMPT_END(selftest_cosmofs_orphan_idempotent)
 
 /*
  * The record's blocks are allocated in the bitmap the root publishes,

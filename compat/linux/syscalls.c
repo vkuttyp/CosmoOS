@@ -482,35 +482,40 @@ static int64_t rw_vec(struct syscall_args *a, bool write)
 static int64_t lx_readv(struct syscall_args *a) { return rw_vec(a, false); }
 static int64_t lx_writev(struct syscall_args *a) { return rw_vec(a, true); }
 
-FRAME_EXEMPT_BEGIN(do_open)   /* scripts/frame-baseline.txt: 3144 bytes */
+/* The three path buffers (3 KiB) live on the heap, not the 16 KiB kernel
+ * stack (scripts/frame-baseline.txt). */
 static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t mode)
 {
-    char path[VFS_PATH_MAX];
-    int rc = get_path(upath, path);
+    char *path = kmalloc(3 * VFS_PATH_MAX, 0);
+    if (path == NULL)
+        return -ENOMEM;
+    char *base = path + VFS_PATH_MAX;
+    char *name = base + VFS_PATH_MAX;
+    int64_t rc = get_path(upath, path);
     if (rc)
-        return rc;
+        goto out;
     unsigned flags;
-    if (lx_open_flags(lxflags, &flags) < 0)
-        return -EINVAL;
+    if (lx_open_flags(lxflags, &flags) < 0) {
+        rc = -EINVAL;
+        goto out;
+    }
     struct file *f;
-    char base[VFS_PATH_MAX];
     struct vnode *start;
     /* Creating, truncating or opening for writing puts data in through
      * the base: it needs WRITE, as an entry change does. */
     unsigned acc = flags & COSMO_O_ACCMODE, have;
     bool writes = (flags & (COSMO_O_CREAT | COSMO_O_TRUNC)) || acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR;
     unsigned need = HANDLE_RIGHT_READ | (writes ? HANDLE_RIGHT_WRITE : 0);
-    rc = at_base(dirfd, path, need, &start, base, sizeof(base), &have);
+    rc = at_base(dirfd, path, need, &start, base, VFS_PATH_MAX, &have);
     if (rc)
-        return rc;
+        goto out;
     /* A directory remembers the name its own walk took to it, for fchdir
      * (P31, P32); a relative path from a base with no name gives it
      * none, and fchdir then refuses it. */
-    char name[VFS_PATH_MAX];
-    rc = vfs_open_named(start, base, path, flags, mode & 07777u & ~lx_umask_get(), &f, name, sizeof(name));
+    rc = vfs_open_named(start, base, path, flags, mode & 07777u & ~lx_umask_get(), &f, name, VFS_PATH_MAX);
     vnode_put(start);
     if (rc)
-        return rc;
+        goto out;
     if (f->vn->type == VNODE_DIR)
         file_set_dir_path(f, name);
     unsigned rights = HANDLE_RIGHT_OWNER;   /* as the native open: the file is the caller's to dup and pass */
@@ -527,12 +532,13 @@ static int64_t do_open(int64_t dirfd, uint64_t upath, unsigned lxflags, uint32_t
     /* Rights only shrink on the way down: what is derived through a
      * descriptor carries no data right the descriptor lacks (P31). */
     rights &= have | ~(HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
-    int h = handle_install_flags(&process_current()->handles, &f->obj, rights,
-                                 (lxflags & LX_O_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
+    rc = handle_install_flags(&process_current()->handles, &f->obj, rights,
+                              (lxflags & LX_O_CLOEXEC) ? HANDLE_FLAG_CLOEXEC : 0);
     file_put(f);
-    return h;
+out:
+    kfree(path);
+    return rc;
 }
-FRAME_EXEMPT_END(do_open)
 
 static __maybe_unused int64_t lx_open(struct syscall_args *a)
 {
@@ -542,12 +548,10 @@ static __maybe_unused int64_t lx_creat(struct syscall_args *a)
 {
     return do_open(LX_AT_FDCWD, a->a[0], LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, (uint32_t)a->a[1]);
 }
-FRAME_EXEMPT_BEGIN(lx_openat)   /* scripts/frame-baseline.txt: 3184 bytes */
 static int64_t lx_openat(struct syscall_args *a)
 {
     return do_open((int64_t)a->a[0], a->a[1], (unsigned)a->a[2], (uint32_t)a->a[3]);
 }
-FRAME_EXEMPT_END(lx_openat)
 
 static int64_t lx_close(struct syscall_args *a) { return handle_close(&process_current()->handles, (int)a->a[0]); }
 
@@ -644,37 +648,35 @@ static int64_t lx_readlinkat(struct syscall_args *a)
 
 /* The link is made relative to `dirfd`; its target is stored verbatim and
  * resolved when the link is followed, as Linux does. */
-FRAME_EXEMPT_BEGIN(symlink_common)   /* scripts/frame-baseline.txt: 2104 bytes */
 static int64_t symlink_common(uint64_t utarget, int64_t dirfd, uint64_t upath)
 {
-    char target[VFS_PATH_MAX], path[VFS_PATH_MAX];
-    int rc = strncpy_from_user(target, utarget, sizeof(target));
-    if (rc < 0)
-        return rc;
-    rc = get_path(upath, path);
-    if (rc)
-        return rc;
+    char *target = kmalloc(2 * VFS_PATH_MAX, 0);   /* heap: see do_open */
+    if (target == NULL)
+        return -ENOMEM;
+    char *path = target + VFS_PATH_MAX;
+    int rc = strncpy_from_user(target, utarget, VFS_PATH_MAX);
+    if (rc >= 0)
+        rc = get_path(upath, path);
     struct vnode *start;
-    rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
-    if (rc)
-        return rc;
-    rc = vfs_symlink(start, path, target);
-    vnode_put(start);
+    if (rc >= 0)
+        rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
+    if (rc >= 0) {
+        rc = vfs_symlink(start, path, target);
+        vnode_put(start);
+    }
+    kfree(target);
     return rc;
 }
-FRAME_EXEMPT_END(symlink_common)
 
 static __maybe_unused int64_t lx_symlink(struct syscall_args *a)
 {
     return symlink_common(a->a[0], LX_AT_FDCWD, a->a[1]);
 }
 
-FRAME_EXEMPT_BEGIN(lx_symlinkat)   /* scripts/frame-baseline.txt: 2112 bytes */
 static int64_t lx_symlinkat(struct syscall_args *a)
 {
     return symlink_common(a->a[0], (int64_t)a->a[1], a->a[2]);
 }
-FRAME_EXEMPT_END(lx_symlinkat)
 
 static int64_t lx_fstat(struct syscall_args *a)
 {
@@ -1402,48 +1404,47 @@ static int64_t lx_faccessat(struct syscall_args *a)
     return rc;
 }
 
-FRAME_EXEMPT_BEGIN(lx_rename)   /* scripts/frame-baseline.txt: 2072 bytes */
 static __maybe_unused int64_t lx_rename(struct syscall_args *a)
 {
-    char oldp[VFS_PATH_MAX], newp[VFS_PATH_MAX];
+    char *oldp = kmalloc(2 * VFS_PATH_MAX, 0);   /* heap: see do_open */
+    if (oldp == NULL)
+        return -ENOMEM;
+    char *newp = oldp + VFS_PATH_MAX;
     int rc = get_path(a->a[0], oldp);
-    if (rc)
-        return rc;
-    rc = get_path(a->a[1], newp);
-    if (rc)
-        return rc;
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_rename(cwd, oldp, newp);
-    vnode_put(cwd);
+    if (rc == 0)
+        rc = get_path(a->a[1], newp);
+    if (rc == 0) {
+        struct vnode *cwd = process_cwd_get();
+        rc = vfs_rename(cwd, oldp, newp);
+        vnode_put(cwd);
+    }
+    kfree(oldp);
     return rc;
 }
-FRAME_EXEMPT_END(lx_rename)
 
-FRAME_EXEMPT_BEGIN(lx_renameat)   /* scripts/frame-baseline.txt: 2120 bytes */
 static int64_t lx_renameat(struct syscall_args *a)
 {
-    char oldp[VFS_PATH_MAX], newp[VFS_PATH_MAX];
+    char *oldp = kmalloc(2 * VFS_PATH_MAX, 0);   /* heap: see do_open */
+    if (oldp == NULL)
+        return -ENOMEM;
+    char *newp = oldp + VFS_PATH_MAX;
+    struct vnode *ostart, *nstart = NULL;
     int rc = get_path(a->a[1], oldp);
-    if (rc)
-        return rc;
-    rc = get_path(a->a[3], newp);
-    if (rc)
-        return rc;
-    struct vnode *ostart, *nstart;
-    rc = at_base((int64_t)a->a[0], oldp, HANDLE_RIGHT_WRITE, &ostart, NULL, 0, NULL);   /* both directories change */
-    if (rc)
-        return rc;
-    rc = at_base((int64_t)a->a[2], newp, HANDLE_RIGHT_WRITE, &nstart, NULL, 0, NULL);
-    if (rc) {
+    if (rc == 0)
+        rc = get_path(a->a[3], newp);
+    if (rc == 0)   /* both directories change */
+        rc = at_base((int64_t)a->a[0], oldp, HANDLE_RIGHT_WRITE, &ostart, NULL, 0, NULL);
+    if (rc == 0) {
+        rc = at_base((int64_t)a->a[2], newp, HANDLE_RIGHT_WRITE, &nstart, NULL, 0, NULL);
+        if (rc == 0)
+            rc = vfs_rename2(ostart, oldp, nstart, newp);
         vnode_put(ostart);
-        return rc;
+        if (nstart != NULL)
+            vnode_put(nstart);
     }
-    rc = vfs_rename2(ostart, oldp, nstart, newp);
-    vnode_put(ostart);
-    vnode_put(nstart);
+    kfree(oldp);
     return rc;
 }
-FRAME_EXEMPT_END(lx_renameat)
 
 static int64_t lx_chdir(struct syscall_args *a)
 {

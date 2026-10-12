@@ -52,7 +52,9 @@ struct madt_entry {
 #define MADT_GIC_ITS        15
 
 #define MADT_CPU_ENABLED        (1u << 0)
-#define MADT_CPU_ONLINE_CAPABLE (1u << 1)
+#define MADT_CPU_ONLINE_CAPABLE (1u << 1)   /* LAPIC and x2APIC entries */
+#define MADT_GICC_ONLINE_CAPABLE (1u << 3)  /* GICC entries: bit 1 there is the performance
+                                             * interrupt's trigger mode (ACPI 6.5, 5.2.12.14) */
 
 #define ACPI_MAX_TABLES 64
 
@@ -118,6 +120,12 @@ static const struct acpi_sdt_header *map_table(paddr_t pa)
 
 static void parse_madt(const struct acpi_madt *madt)
 {
+    /* The fixed fields first: a table shorter than them has none of its
+     * own to give, and nothing past its length is read. */
+    if (madt->hdr.length < sizeof(*madt)) {
+        kwarn("acpi: MADT of %u bytes is shorter than its fixed fields; ignored", madt->hdr.length);
+        return;
+    }
     g_lapic_base = madt->lapic_address;
 
     const uint8_t *p = (const uint8_t *)madt + sizeof(*madt);
@@ -233,7 +241,7 @@ static void parse_madt(const struct acpi_madt *madt)
                     memcpy(&gicr, p + 60, 8);
                     g_gic.gicc_gicr_base = gicr;
                 }
-                if (flags & (MADT_CPU_ENABLED | MADT_CPU_ONLINE_CAPABLE)) {
+                if (flags & (MADT_CPU_ENABLED | MADT_GICC_ONLINE_CAPABLE)) {
                     if (g_cpu_count < ACPI_MAX_CPUS) {
                         uint32_t acpi_id;
                         memcpy(&acpi_id, p + 8, 4);

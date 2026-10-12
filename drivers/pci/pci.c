@@ -358,8 +358,8 @@ static void scan_bus(uint8_t bus, struct device *parent, unsigned depth)
 static void setup_ecam(void)
 {
     const struct acpi_mcfg *mcfg = (const struct acpi_mcfg *)acpi_find_table("MCFG");
-    if (mcfg == NULL)
-        return;
+    if (mcfg == NULL || mcfg->hdr.length < sizeof(*mcfg))
+        return;   /* a table shorter than its header would wrap the count below */
     size_t n = (mcfg->hdr.length - sizeof(*mcfg)) / sizeof(struct acpi_mcfg_alloc);
     for (size_t i = 0; i < n; i++) {
         const struct acpi_mcfg_alloc *a = &mcfg->alloc[i];

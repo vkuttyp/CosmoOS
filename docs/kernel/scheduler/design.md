@@ -87,6 +87,33 @@ Stacks: `THREAD_STACK_SIZE` = 16 KiB, allocated with
 `VM_KALLOC_GUARD | VM_KALLOC_POPULATE`. The boot stack (`entry.S`, 64 KiB
 in `.bss`) belongs to thread 0 and is never freed.
 
+### Stack use
+
+Two checks keep 16 KiB enough (roadmap M6):
+
+- **Per function, at build time.** `-Wframe-larger-than=2048`
+  (`KERNEL_FRAME_LIMIT`, `build/toolchain.mk`) is an error for kernel and
+  module code. An exemption is a `FRAME_EXEMPT_BEGIN/END` pair in the
+  source and a line in `scripts/frame-baseline.txt` giving the measured
+  frame, the deepest measured stack use and the reason;
+  `scripts/check-frame-baseline.py` fails the kernel link when the two
+  disagree. Since M6 there are none: the 32 functions of the M3 baseline
+  were rewritten below the limit (large buffers to the heap or, in
+  self-tests, to static storage).
+- **Per thread, at run time (debug builds).** `thread_prepare` paints
+  each stack it allocates with `STACK_PAINT`; the lowest word that no
+  longer holds it is the stack's high-water mark. `thread_put` measures a
+  thread before its stack is freed, and `thread_report_stack_use`, called
+  by `kmain` after the whole boot (self-tests, the user-mode suite and
+  the shell session), measures the threads still alive and logs
+  `stack: high-water N of 16384 bytes (P%) on '<thread>'; M stacks
+  measured, K over 75%` with the next four deepest thread names. A thread
+  past 75 % (12288 bytes) is logged as `stack: thread T '<name>' used N of
+  16384 bytes, over 75%`; the boot harness requires the summary with K = 0
+  and fails on that warning (`tests/boot/run_boot_test.py`,
+  `STACK_SUMMARY_MARKER`). The boot stack is not painted and is not
+  measured. Release builds compile none of it.
+
 Creation (`thread_create(entry, arg, name, priority)`):
 1. Allocate `struct thread` from the thread cache, stack from the arena.
 2. `arch_context_init(&t->ctx, stack_top, thread_trampoline)`: build a

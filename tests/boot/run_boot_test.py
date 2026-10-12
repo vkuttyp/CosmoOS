@@ -552,7 +552,10 @@ FORBIDDEN_MARKERS = [
     # arms it per test at that budget, so a passing boot prints none
     # (docs/audit/next-subsystem-watchdog-spent.md).
     r"^\[WATCHDOG\] no progress",
+    # A thread whose stack went past 75 % (thread_report_stack_use).
+    r"stack: thread \d+ '.*' used \d+ of \d+ bytes, over 75%",
 ]
+STACK_SUMMARY_MARKER = r"stack: high-water \d+ of \d+ bytes \(\d+%\) on '.*'; \d+ stacks measured, 0 over 75%$"
 # The guard boot: the WARN naming an absent protection contradicts the
 # required INFO line and fails the run on its own.
 if GUARD:
@@ -1148,6 +1151,14 @@ def main():
         failures.append("missing successful xHCI retired-callback cancel proof")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
+    # Stack high-water marks after the whole suite (debug builds,
+    # docs/kernel/scheduler/design.md, "Stack use"): the summary must be
+    # there, so the check cannot vanish quietly, and no thread may have
+    # passed 75 % of its stack -- each such thread is also a forbidden
+    # warning line of its own (FORBIDDEN_MARKERS).
+    if want_selftest and any(re.search(r"^Build: DEBUG", ln) for ln in lines):
+        if not any(re.search(STACK_SUMMARY_MARKER, ln) for ln in lines):
+            failures.append(f"missing marker /{STACK_SUMMARY_MARKER}/ (stack high-water check)")
     # The cosmofs write-back from a system call (lz4's table off the
     # kernel stack, roadmap M2): the check runs only when the scratch disk
     # holds the kernel tests' cosmofs, which it always does in a debug

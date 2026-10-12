@@ -368,6 +368,20 @@ with `tools/sched-restore-loop-probe.py` showing the test fails on the
 recursive structure with a forced non-tail link and passes with the loop
 under the same link.
 
+**S32. No kernel thread uses more than 75 % of its 16 KiB stack, and no
+kernel or module function's frame exceeds 2 KiB without a recorded
+exemption.** The frame limit is the compiler's
+(`-Wframe-larger-than=2048`, an error), and an exemption needs both its
+`FRAME_EXEMPT_BEGIN/END` wrapper and a line in
+`scripts/frame-baseline.txt` with the measured frame, the deepest measured
+stack use and a reason (`scripts/check-frame-baseline.py`, run at the
+kernel link); there are none since roadmap M6. The 75 % is measured, not
+derived: every debug boot paints its thread stacks and reports their
+high-water marks after the whole suite (design.md §2, "Stack use"). Check:
+the build (frame limit and baseline); the debug boot harness
+(`STACK_SUMMARY_MARKER` required with zero over 75 %, the per-thread
+warning forbidden).
+
 ## Gaps (documented, not invariants)
 
 - Cross-CPU `need_resched` is signalled by `IPI_RESCHEDULE` when the
