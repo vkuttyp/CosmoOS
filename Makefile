@@ -80,16 +80,18 @@ $(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE
 CMDLINE ?= root=boot-disk
 CMDLINE_FILE := $(OUT)/cmdline
 FORCE:
+# $(file) writes the value exactly, newline added: no shell sees it, so
+# a quote in it is a quote in the signed text (PR #368 review).
 $(CMDLINE_FILE): FORCE
-	$(Q)mkdir -p $(dir $@)
-	$(Q)printf '%s\n' '$(CMDLINE)' > $@.tmp
+	$(shell mkdir -p $(dir $@))$(file >$@.tmp,$(CMDLINE))
 	$(Q)if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
 
 # The signed manifest over kernel, archive and command line (scripts/
 # mkmanifest.py, docs/boot/design.md "Verified boot"), with the key that
 # signs modules: the loader trusts the ring the kernel trusts.
 MANIFEST := $(OUT)/manifest
-$(MANIFEST): $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MODSIGN_KEY) $(ROOT)/scripts/mkmanifest.py $(ROOT)/scripts/modsign.py
+$(MANIFEST): $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MODSIGN_KEY) $(SIGNING_STAMP) $(ROOT)/scripts/mkmanifest.py \
+		$(ROOT)/scripts/modsign.py
 	$(call log,MANIFEST,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkmanifest.py sign --key $(MODSIGN_KEY) --out $@ $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE)
 

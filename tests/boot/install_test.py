@@ -391,8 +391,10 @@ def main():
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--stages", default="install,reboot,fallback")
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
-    ap.add_argument("--key", required=True, help="the build's signing key (MODSIGN_KEY), for the fallback image")
+    ap.add_argument("--key", help="the build's signing key (MODSIGN_KEY); the fallback stage alone needs it")
     args = ap.parse_args()
+    if "fallback" in args.stages.split(",") and not args.key:
+        ap.error("--key is needed for the fallback stage (its image is signed again)")
     shutil.rmtree(args.workdir, ignore_errors=True)
     os.makedirs(args.workdir)
     results = []

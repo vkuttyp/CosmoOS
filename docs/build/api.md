@@ -121,7 +121,7 @@ are callable outside make.
 
 | Script | Arguments | Purpose | Exit status |
 |---|---|---|---|
-| `scripts/mkimage.sh` | `OUT.img BOOTX64.EFI kernel.elf` | build the FAT32 image with mtools | non-zero on any mtools error |
+| `scripts/mkimage.sh` | `OUT.img BOOTX64.EFI kernel.elf boot.tar cmdline manifest` | build the GPT boot disk, its ESP with mtools (the manifest from `scripts/mkmanifest.py sign`) | non-zero on any mtools error |
 | `scripts/find-firmware.sh` | `[x86_64]` | print an OVMF/EDK2 code image path, honouring `OVMF_CODE` | 1 if none found |
 | `scripts/qemu-run.sh` | `IMAGE` | `exec` QEMU with the standard machine description | QEMU's status |
 | `scripts/check-tools.sh` | `CC LD LDLINK OBJCOPY PYTHON` | prerequisite report | 1 if anything missing |

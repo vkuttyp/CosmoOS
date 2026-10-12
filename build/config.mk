@@ -75,6 +75,13 @@ SIGNING_PUB :=
 else
 $(error SIGNING must be dev or release, got '$(SIGNING)')
 endif
+# The signing identity as a file whose contents change exactly when the
+# key path, the trusted set or the revoked list does (scripts/
+# write-if-changed below, in kernel/kernel.mk): the key ring, every
+# signed module and the boot manifest depend on it, so switching keys or
+# trust in an existing output tree rebuilds them rather than keeping
+# what the previous identity signed or trusted (PR #368 review).
+SIGNING_STAMP = $(OUT)/gen/signing.stamp
 # Packages and the INDEX are signed with the same key unless overridden; the
 # image ships the first trusted public key as /etc/pkg/keys/<name>.pub.
 PKGSIGN_KEY ?= $(MODSIGN_KEY)

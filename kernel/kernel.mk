@@ -187,7 +187,15 @@ KERNEL_GENERIC_SRCS := \
 KEYRING_SRC  := $(OUT)/gen/keyring_builtin.c
 KEYRING_OBJ  := $(OUT)/gen/keyring_builtin.o
 
-$(KEYRING_SRC): $(KEYRING_PUBS) $(ROOT)/scripts/gen-keyring.py
+.PHONY: signing-stamp-force
+signing-stamp-force:
+$(SIGNING_STAMP): signing-stamp-force
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '%s\n' 'MODSIGN_KEY=$(abspath $(MODSIGN_KEY))' 'KEYRING_PUBS=$(foreach k,$(KEYRING_PUBS),$(abspath $(k)))' \
+		"REVOKED=$$(cksum < $(ROOT)/tools/keys/REVOKED)" > $@.tmp
+	$(Q)if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+
+$(KEYRING_SRC): $(KEYRING_PUBS) $(SIGNING_STAMP) $(ROOT)/tools/keys/REVOKED $(ROOT)/scripts/gen-keyring.py
 	$(call log,GEN,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/gen-keyring.py $@ $(KEYRING_PUBS)

@@ -454,9 +454,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     }
     verify_file(COSMO_MANIFEST_ARCHIVE, archive, archive_size);
 
-    /* --- command line (optional, protocol v7): \cosmo\cmdline up to its
-     * first NUL. The file may be longer than its text: the installer
-     * rewrites a fixed-size slot in place (docs/boot/design.md, "The
+    /* --- command line (protocol v7): \cosmo\cmdline up to its first NUL,
+     * signed with the kernel since roadmap M5 (docs/boot/design.md, "The
      * command line"). Copied into the bootinfo area below. --- */
     uint8_t *cmdline_file = NULL;
     size_t cmdline_file_size = 0;
