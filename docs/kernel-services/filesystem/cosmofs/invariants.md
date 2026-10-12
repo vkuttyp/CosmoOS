@@ -1,0 +1,289 @@
+# cosmofs: invariants
+
+Rules cosmofs keeps on disk and in memory. Each has a **Check** (what
+verifies it today) and, where honest, a **Gap**. Changing a rule means
+changing this file, `design.md` and the code together.
+
+Most of cosmofs's rules were numbered before this file existed, in the
+VFS's list, and keep their numbers there. Section 1 indexes them; it
+does not restate or renumber them. Section 2 numbers, with the prefix
+`CF`, the rules that `design.md` and the audit reports state in prose
+but that no invariants file carried.
+
+## 1. Rules numbered elsewhere
+
+| Rule | Where | In one line | Checked by |
+|---|---|---|---|
+| V2 | `docs/kernel-services/vfs/invariants.md` | every committed root describes a completely valid filesystem | `cosmofs-crash`, `cosmofs-replay`, `cosmofs-fallback` |
+| V3 | same | a block a committed root references is never overwritten | review, `cosmofs-crash` |
+| V4 | same | blocks freed in a transaction are allocatable only after its root is durable | `cosmofs-ops`, review |
+| V5 | same | every block read from the pool is verified before use | `cosmofs-format`, `cosmofs-crash`, `cosmofs-csum`, `cosmofs-badmap`, `fuzz_cosmofs` |
+| V6 | same | inode numbers are never reused | review |
+| V15 | same | file data reaches cosmofs only through `writepage`; a hole costs nothing | `cosmofs-ops`, `cosmofs-holes` |
+| V16 | same | every mutation writes its inode through | `cosmofs-ops` |
+| V17 | same | commit on `vfs_sync`, `fsync`, unmount and the writeback thresholds | `cosmofs-fsync`, `cosmofs-writeback`, `cosmofs-format`, `cosmofs-ops` |
+| V18 | same | the pool is the only thing cosmofs addresses | `pool`, review |
+| V19 | same | a full disk can still delete and commit (the metadata reserve) | `cosmofs-reserve` |
+| V20 | same | a block-layer queue-full answer never reaches cosmofs | `blk-queue` |
+| V21 | same | a snapshot's blocks are never handed out while it exists, and are handed back when it stops needing them | `cosmofs-snapshot`, `cosmofs-snapshot-remount` |
+| V22 | same | a snapshot is read-only and history is reachable only by name | `cosmofs-snapshot`, `SNAPTEST`, `test_cosmofs` |
+| V23 | same | a snapshot somebody is reading is not deleted (`-EBUSY`) | `cosmofs-snapshot` |
+| V24 | same | a block is named by the member that holds it; a run lies on one member | `cosmofs-pool2`, `cosmofs-v3`, `cosmofs-badmembers`, `pool`, `test_cosmofs` |
+| V25 | same | a mirror is read with a checker; a copy that missed a commit is not mirrored | `cosmofs-mirror`, `cosmofs-mirror-stale` |
+| V26 | same | a compressed record is one object; its checksums are of the disk bytes | `cosmofs-compress`, `test_lz4`, `fuzz_lz4` |
+| V27 | same | what is encrypted is authenticated; what is not is stated | `cosmofs-crypt`, `test_chacha20` |
+| V30 | same | a mount named by id stays alive for a pass; unmount waits | `vfs-mount-id`, `vfs-mount-pin` |
+| V31 | same | a mount listing is the caller's own namespace | `fsctl-list` |
+| V36 | same | nothing writes raw sectors to a mounted device (incl. `vfs_format`) | see that file |
+| F4 | `docs/verification/invariants.md` | crash consistency under every prefix of the write stream | `cosmofs-replay` |
+| S18 | `docs/kernel/security/invariants.md` | no master key, salt or nonce is drawn from an unseeded pool | `cosmofs-crypt` |
+
+Two of those entries are behind the code (section 4): F4's gap says
+block-bitmap and space accounting are not checked, and V22 says a
+snapshot id is never reused while the filesystem lives.
+
+## 2. The CF rules
+
+**CF1. Every metadata block names itself, and a block that does not is
+refused before its contents are used.** `struct cfs_mhdr` carries
+`CFS_MHDR_MAGIC`, the kind, the generation that wrote it, its own DVA
+(`blkno`), a checksum and, from version 11, `csum_algo`.
+`cfs_mhdr_fault_of` (`cosmofs_core.c`) answers in a fixed order --
+`MHDR_MAGIC`, `MHDR_BLKNO`, `MHDR_KIND`, `MHDR_ALGO`, `MHDR_CRC` -- so an
+algorithm this build cannot verify is named as such and not reported as
+damage; a zero `csum_algo` (a pre-v11 image) and `CFS_CSUM_CRC32C` both
+mean CRC32C. The superblock and the member label are read before
+anything can be parsed and keep a fixed CRC32C. A block whose generation
+equals the open transaction may be changed in place; any other is copied
+first (`cfs_buf_cow`). Check: `cosmofs-metadata-csum-id` (a sealed block
+is `MHDR_OK` with `csum_algo == CFS_CSUM_CRC32C`; a zero algorithm still
+verifies; an unknown algorithm with a valid CRC is `MHDR_ALGO`; a flipped
+byte is `MHDR_CRC`; the algorithm word is inside the checksum),
+`cosmofs-badmap`, `cosmofs-fallback`, `fuzz_cosmofs`, and
+`test_cosmofs` for the header's size and the field's offset.
+
+**CF2. Nothing allocates after the bitmap fixpoint.** `commit_bitmap` is
+the one pass that makes the on-disk bitmap agree with memory. Every
+block a commit needs -- the free record, the orphan record, the copies of
+the snapshot list and deadlists, the member table and every member's
+allocation index -- is reserved or copied before it; blocks reserved and
+not used are listed in the free record as free. A dirty chunk with no
+reserved destination fails the transaction instead of being written to
+DVA 0. A block allocated after the fixpoint would be reachable and free
+in the published root (`seen_not_alloc`). Check:
+`cosmofs-freelog-accounted`, `cosmofs-orphan-reserved`,
+`cosmofs-snap-reserved` (each runs the structural check on the published
+root), `cosmofs-freelog-chain` (the over-reserved slack is listed),
+`cosmofs-replay` (every prefix image must check clean).
+
+**CF3. A root records what its transaction freed, and a mount finishes
+the job.** From version 9, `free_root` heads a `CFS_KIND_FREELOG` chain
+of `struct cfs_dead_block` (506 numbers per block) naming every block the
+transaction released whose bit the root's bitmap still sets, except
+blocks a snapshot holds. `freelog_replay` applies it at mount, before
+the bitmap is used for allocation, and does **not** clear it; the next
+commit releases the previous chain directly (exempt from the snapshot
+filter, since no snapshot's tree reaches a record). A record block that
+does not read, a chain longer than the bound, or a `count` above
+`CFS_DEAD_PER_BLOCK` refuses that root with `-EIO` (the mount may fall
+back to the other slot); it is never treated as empty. Check:
+`cosmofs-unmount-leak`, `cosmofs-freelog-format`,
+`cosmofs-freelog-supersede`, `cosmofs-freelog-not-held`,
+`cosmofs-freelog-snapshot`, `cosmofs-freelog-idempotent`,
+`cosmofs-freelog-reuse`, `cosmofs-freelog-chain`,
+`cosmofs-freelog-rollback`, `cosmofs-freelog-malformed`, and
+`cosmofs-replay` (the stranded-block total over every prefix must be
+zero).
+
+**CF4. A root records the inodes it still owes, and the replay deletes
+only what has no name.** From version 10, `orphan_root` heads a
+`CFS_KIND_ORPHAN` chain of inode numbers whose last name is gone while a
+reference holds them. The set lives in memory (`fs->orphans`) and each
+commit writes it whole; an unlink and an eviction inside one transaction
+cancel and write nothing. `orphan_replay` reads each inode raw, skips a
+slot that is already empty (so a repeated replay changes nothing and
+`inode_count` is never taken twice), **refuses** an inode with
+`nlink != 0` (logged, left for the checker), and fails the mount if
+releasing an inode fails after its truncate began. It never touches the
+parent of a removed directory. An unreadable, over-long or over-full
+record refuses that root, as in CF3. Check: `cosmofs-orphan-crash`,
+`cosmofs-orphan-cancels`, `cosmofs-orphan-dir`, `cosmofs-orphan-rename`,
+`cosmofs-orphan-idempotent`, `cosmofs-orphan-reserved`,
+`cosmofs-orphan-supersede`, `cosmofs-orphan-rollback`,
+`cosmofs-orphan-suspect`, `cosmofs-check-orphan-crash`, and the held
+handle in `cosmofs-replay`'s workload. Gap: a writeback commit can land
+between `cfs_unlink_common` dropping `cfs->lock` and the eviction, and
+writes a record for an inode about to go; the next commit retires it.
+
+**CF5. The snapshot list and every deadlist are copy-on-write, and no
+block is on two deadlists.** `cfs_super.snap_root` alone names the list,
+so a change to a `CFS_KIND_SNAPLIST` or `CFS_KIND_DEADLIST` block copies
+it first (`snap_cow`, `DL_COPY`) and the superseded block is freed
+exempt. A deadlist entry is appended before the root, inside the
+reservation of CF2. A deletion releases blocks and clears the entry that
+names them in one transaction; a failure once releasing began abandons
+the transaction (CF7). Check: `cosmofs-snap-cow` (the list's head block
+changes across one commit), `cosmofs-snap-unmount`,
+`cosmofs-snap-nogrow`, `cosmofs-snap-reserved`, `cosmofs-snap-rollback`;
+`cosmofs-replay` calls `cosmofs_test_deadlist_dups` on every prefix and
+requires zero duplicates **and** a non-zero number of entries examined.
+Gap: `cosmofs_check` claims deadlist entries as non-live, so a
+duplicated entry is not one of its findings; only the replay suite's
+count sees it.
+
+**CF6. Whether a snapshot holds a freed block is decided once.**
+`cfs_snapshot_fill` takes one verdict per pending free and the free
+record, the deadlist append and the release loop all read it; the
+release loop after the root only clears bits. Check:
+`cosmofs-snap-onewalk` (walks of the snapshot list minus verdicts, read
+from `cosmofs_test_snap_walks` and `cosmofs_test_snap_verdicts`).
+
+**CF7. An abandoned transaction is never published.** `cfs_fail` sets
+`fs->failed` once; `cfs_commit_ex` then returns it, the vnode operations
+that test it (lookup, create, unlink, the page writers and others)
+answer `-EIO`, `cosmofs_check` and
+`cosmofs_scrub` refuse, and unmount drops the transaction. A commit that
+fails after reserving record blocks gives the reservation back and
+publishes no root. `cfs_reset_root` (the older-slot fallback) clears the
+pending, exempt and orphan lists and `failed`, because they belong to
+the abandoned attempt and not to the root about to load. Check:
+`cosmofs-freelog-rollback`, `cosmofs-orphan-rollback`,
+`cosmofs-snap-rollback` (each injects `-EIO` through a
+`cosmofs_test_fail_*` hook and checks the next mount sees the previous
+root with nothing leaked), `fault-blk` (device errors injected under a
+cosmofs workload; a forced unmount drops whatever was abandoned and the
+remount shows a committed root whose files all read). Gap: a release
+build has no fault injection, so these paths run only in debug boots.
+
+**CF8. No autonomous committer exists before the mount is live.** The
+replay runs without `cfs->lock`, which is sound only while no other
+thread is in the filesystem. `note_dirty` starts the `cfs-wb` thread
+only once `fs->mount_done` is set; `cosmofs_mount` starts it at the end
+if the replay left the transaction dirty, and unmount and `cfs_destroy`
+join it before freeing. The thread takes `mount.sync_lock` with
+`mutex_trylock` and never commits an unmounted mount. Check:
+`cosmofs-mount-no-early-writeback` (the replay's dirty marks are
+non-zero and none found a running thread; read through
+`cosmofs_test_mount_writeback`).
+
+**CF9. A field a version added is read and written only at that
+version or later.** `free_root` from 9, `orphan_root` from 10,
+`key_root` from 7, the member table from 4; below those versions the
+words are reserved zeros and are ignored even if non-zero. Symlink
+creation is refused below version 8 (`-EOPNOTSUPP`). The mount never
+rewrites the superblock's version. Check: `cosmofs-freelog-format` (a
+non-zero `free_root` written by `cosmofs_test_poison_free_root` into a
+version-8 image is ignored), `cosmofs-symlink-version`, `cosmofs-v3`.
+Gap: compression is not gated. `cfs_create_common` gives every new
+regular file `CFS_COMPRESS_LZ4` on any version, so a version-2 to 5 image
+written by this kernel can hold version-6 records; `cosmofs-v3` writes
+such an image and passes because this kernel reads it.
+
+**CF10. An extent is valid before it maps anything, and an inode's runs
+ascend and do not overlap.** `extent_valid` (`cosmofs.c`): logical and
+physical counts non-zero; a compressed record covers at most
+`CFS_RECORD_BLOCKS` (8) logical blocks in no more physical blocks, with
+algorithm `CFS_COMPRESS_LZ4`; both ends are valid DVAs on one member;
+`lblk + count <= 2^32`. Runs are sorted by `lblk` and never overlap; a
+gap is a hole. At most `CFS_MAX_EXTENTS` (4096) runs are loaded per
+inode. Check: `cosmofs-badmap` (two swapped direct runs re-sealed: both
+reads `-EIO`), `cosmofs-check-extent-order`,
+`cosmofs-check-extent-overlap` (two runs over one `lblk` at different
+blocks), `cosmofs-check-chain-cycle` (the extent chain's own bound),
+`test_cosmofs` (`cfs_map_block`), `fuzz_cosmofs`.
+
+**CF11. An inode slot holds the inode its position means.** Inode `i`
+lives in slot `i % 15` of the inode block at imap position `i / 15`; the
+slot's `ino` must equal `i` and `i` must be below `next_ino`. A slot with
+`ino == 0` or `nlink == 0` is absent to the ordinary read
+(`cfs_inode_read`: `-ENOENT`). Check: `cosmofs-check-slot-identity` (a
+slot that disowns itself is named, the report is partial and repair is
+refused), `test_cosmofs` (index arithmetic).
+
+**CF12. The checker repairs only from a complete walk, and calls a
+filesystem clean only after one.** `report_clean` requires every class
+empty and `partial` false. With `COSMOFS_CHECK_REPAIR`, only
+`alloc_not_seen`, `orphan`, `nlink_wrong` and `counter_wrong` are
+repaired, from the full maps; anything the walk had to skip sets
+`repair_refused` and nothing is repaired. Every chain walk is bounded
+(`CFS_CHECK_MAX_CHAIN` 4096, `CFS_CHECK_MAX_DEPTH` 64, the extent chain
+by `CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 2`) and duplicate-name
+confirmations by `CFS_CHECK_MAX_DUP_CONFIRMS` (256) per directory. All
+maps are allocated before the walk. Check: `cosmofs-check-clean`,
+`cosmofs-check-leak`, `cosmofs-check-faults` (seven manufactured
+faults; `nlink_wrong`, `orphan` and `counter_wrong` repaired,
+`seen_not_alloc` and `dup` never, and nothing repaired once a dangling
+or malformed entry is present),
+`cosmofs-check-many-orphans` (twelve orphans, one pass, none left),
+`cosmofs-check-partial` (an unreadable directory: partial, repair
+refused, nothing it named freed), `cosmofs-check-snapshot` (a snapshot's
+shared blocks are neither leaks nor cross-links), `fsctl-check`. Gap:
+of the five walkers that can report `chain_cycle`, only the extent
+chain's has a test; the deadlist, imap and directory-depth guards are
+untested.
+
+**CF13. A directory is a set of well-formed entries in a tree.** An
+entry's `namelen` is at most 47 and fits its slot; no name appears
+twice in one directory; the entry's type matches its inode's; a
+directory is named from exactly one parent, and its `parent` field
+names that directory (the root names itself). `.` and `..` are never
+stored. The VFS validates names before a mutation (V12) and cosmofs
+answers `-EEXIST` for an existing name. Check:
+`cosmofs-check-namelen`, `cosmofs-check-dup-name` (with two names whose
+hashes are asserted to collide), `cosmofs-check-two-parents`,
+`cosmofs-check-faults` (`COSMOFS_CORRUPT_DIRENT`), `cosmofs-ops` (`..`
+across a remount).
+
+**CF14. Lock order is `vnode->lock` → `cfs->lock` → `mount->lock`, and
+no cosmofs code waits for `mount.sync_lock`.** `cfs_sync_vnodes` runs
+before `cfs->lock` is taken because `writepage` takes it;
+`cfs_vnode_get` and `vnode_cache_any` take `mount->lock` under
+`cfs->lock`; the writeback thread uses `mutex_trylock` on
+`mount.sync_lock`. `cfs->lock` is held across pool I/O (commit, check,
+scrub), which V32's rule about device operations does not cover: it
+concerns the VFS's vnode lock around character devices. Check: lockdep
+in debug builds (`lockdep_assert_held(&fs->lock, ...)` in
+`cosmofs_sync_counted`), review.
+
+**CF15. A `/dev/fsctl` command is one whole struct of one version, and
+a failed command leaves no answer.** A write is exactly
+`sizeof(struct cosmo_fsctl)`, `version == COSMO_FSCTL_VERSION`, and only
+`COSMO_FSCTL_F_REPAIR` on `CHECK`; `PRIV_SYS_ADMIN` is required at open
+and again at write. Each open file owns its result; a read returns all
+of it or `-ERANGE`. The check classes keep their array indices across
+versions. Check: `fsctl-check` (wrong version and wrong size `-EINVAL`,
+`-EOPNOTSUPP`, `-ENOENT`), `fsctl-result-per-open` (two files, two
+answers; an unused file reads zero bytes; a short buffer is refused),
+`fsctl_selftest` in `init --selftest` (the tool lists, checks, scrubs
+and repairs a real cosmofs), `unpriv_test` in `init` (an open as uid
+1000 is `EACCES`, which is the node's mode answering before
+`PRIV_SYS_ADMIN` is asked). Gap: the
+refusal of an undefined flag bit is checked by review only.
+
+## 3. Rules stated in `design.md` and not checked
+
+- The commit's flush before and after the root assumes the device honours
+  `flush`; a device that did not negotiate one is taken to have no
+  volatile cache (V2's gap).
+- A member-0 device that missed only a root write cannot be told from a
+  stale one, and nothing resilvers a copy left out; the pool runs
+  degraded until reformatted (`design.md`, "The failure a checksum
+  cannot see").
+- Space a snapshot keeps alive is not reported (V21's gap).
+
+## 4. Where documents and code disagree
+
+Found while writing this file; the code was read, nothing was changed.
+
+- `docs/verification/invariants.md` F4 and `docs/verification/design.md`
+  section 4 say the crash harness does not check block-bitmap
+  consistency or space accounting. `check_prefix` in `cosmofscrash.c`
+  runs `cosmofs_check` on every prefix image and fails a prefix that is
+  not clean. `docs/verification/design.md` section 4 also names the
+  harness `cosmofs-crash`; `cosmofscrash.c` registers `cosmofs-replay`.
+- V22 and `design.md` ("Reading a snapshot") say a snapshot id is never
+  reused while the filesystem lives. `snap_max_id` (`cosmofs_snap.c`)
+  starts from `fs->snap_max_id`, which is per mount, and the ids on the
+  list; after the newest snapshot is deleted and the filesystem
+  remounted, its id can be handed out again. The vnode cache is per
+  mount, so the property V22 relies on still holds.
