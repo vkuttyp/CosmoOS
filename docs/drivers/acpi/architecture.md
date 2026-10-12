@@ -10,9 +10,10 @@ interpreter, no power management, no device tree of ACPI objects.
 
 `drivers/acpi/acpi.c` sits below the interrupt controllers and SMP
 bring-up and above the memory subsystem. Its only input is
-`cosmoboot_info.acpi_rsdp`. It reads tables through the direct map; ACPI
-tables are RAM (types ACPI reclaim and NVS) and the direct map covers
-all RAM after `vmm_init`.
+`cosmoboot_info.acpi_rsdp`. It reads tables through the direct map when
+they lie in RAM-typed memory (ACPI reclaim and NVS count as RAM, and the
+direct map covers all RAM after `vmm_init`), and through a read-only
+`vm_map_phys` window otherwise (`acpi_map`).
 
 ## Responsibilities
 
@@ -27,7 +28,10 @@ all RAM after `vmm_init`.
   11, the MPIDR affinity fields become the processor `hw_id`, the first
   entry's base is the GICv2 CPU interface), the distributor (type 12,
   base and version) and the MSI frame (type 13, base and optional SPI
-  range), exposed as `struct acpi_gic` through `acpi_madt_gic()`.
+  range); for GICv3 the GICR discovery window (type 14), the GICC
+  entry's own redistributor base and the ITS (type 15); and the GICC
+  virtualisation fields (GICV, GICH, maintenance GSIV). All are exposed
+  as `struct acpi_gic` through `acpi_madt_gic()`.
 
 ## Non-responsibilities
 
@@ -46,23 +50,29 @@ acpi_gic` records.
 
 Initialised once on the BSP before any other CPU exists; read-only
 afterwards, no locks. Decoded arrays are static with fixed maxima
-(`ACPI_MAX_CPUS` 64, `ACPI_MAX_IOAPICS` 8, `ACPI_MAX_OVERRIDES` 24);
-excess entries are logged and dropped.
+(`ACPI_MAX_CPUS` 64, `ACPI_MAX_IOAPICS` 8, `ACPI_MAX_OVERRIDES` 24) and
+at most 64 tables are recorded; excess entries are dropped, with a
+warning for LAPIC/GICC CPUs and I/O APICs and silently for x2APIC CPUs,
+overrides and tables.
 
 ## Error handling
 
-Missing RSDP or MADT is a panic: this kernel targets APIC (x86-64) and
-GIC (AArch64) platforms only. A bad checksum on an individual table skips
-that table with a warning.
+A missing or invalid RSDP, an unusable root table or a missing MADT is
+a panic: this kernel targets APIC (x86-64) and GIC (AArch64) platforms
+only. A bad checksum on an individual table skips that table with a
+warning.
 
 ## Security
 
 Tables come from firmware, part of the trusted computing base, but
-lengths are still bounds-checked against the table header before any
-entry is read.
+table lengths are checked against the header size and every MADT entry
+against the table end and its own minimum length before it is read (the
+MADT's fixed `lapic_address`/`flags` fields are the exception; see
+[invariants.md](invariants.md) AC2).
 
 ## Testing
 
-Self-test: the MADT reports at least one CPU and either the LAPIC base
-(x86-64) or the GIC distributor (AArch64) is present; under QEMU with
-`-smp N` exactly N processor entries appear.
+Self-test `acpi`: the MADT reports at least one CPU and either the LAPIC
+base (x86-64) or the GIC distributor (AArch64) is present. The
+`smp-online` self-test checks that as many CPUs come online as the MADT
+reports. See [testing.md](testing.md).
