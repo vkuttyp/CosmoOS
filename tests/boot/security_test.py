@@ -129,24 +129,29 @@ def boot_signed(args, results):
     return kid
 
 
+FATAL = re.compile(r"^cosmoboot: FATAL: verified boot: refusing to boot \(status 0x800000000000001a\)\n", re.M)
+
+
 def boot_refused(args, results, name, image, pattern):
     """The loader must print `pattern`, then its FATAL line, and the kernel nothing."""
     b = Boot(name, image, args.workdir, {}, args.timeout)
     try:
-        while time.monotonic() < b.deadline and "cosmoboot: FATAL" not in b.text():
+        # The whole FATAL line, newline included: the serial line delivers
+        # it in pieces, and a check on a half-arrived line fails a refusal
+        # that happened (CI run 38210009760).
+        while time.monotonic() < b.deadline and not FATAL.search(b.text()):
             if KERNEL_OUTPUT.search(b.text()):
                 raise Fail(f"{name}: the kernel ran")
             time.sleep(0.2)
-        log = b.text()
-        need(log, pattern, f"the {name} boot")
-        need(log, r"^cosmoboot: FATAL: verified boot: refusing to boot \(status 0x800000000000001a\)$",
-             f"the {name} boot")
         t = time.monotonic()
         while time.monotonic() - t < QUIET_S:
             time.sleep(0.2)
-        if KERNEL_OUTPUT.search(b.text()):
+        log = b.text()
+        need(log, pattern, f"the {name} boot")
+        need(log, FATAL.pattern, f"the {name} boot")
+        if KERNEL_OUTPUT.search(log):
             raise Fail(f"{name}: kernel output after the refusal")
-        if re.search(r"^jumping to kernel entry", b.text(), re.M):
+        if re.search(r"^jumping to kernel entry", log, re.M):
             raise Fail(f"{name}: the loader jumped to the kernel")
     finally:
         b.kill()
