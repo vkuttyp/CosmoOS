@@ -6,7 +6,12 @@ Violating any of these requires changing this file, the code, and
 ## BT1. `cosmoboot.h` is the only thing loader and kernel share
 
 No loader source includes a kernel header and no kernel source includes
-a loader header. The protocol header itself contains no pointers, enums
+a loader header, with one exception made by roadmap M5: the loader
+compiles the kernel's `kernel/security/sha512.c`, `ed25519.c`,
+`keyring.c` and the generated key ring, and `verify.c` includes
+`<kernel/crypto.h>` and `<kernel/keyring.h>`, which include only standard
+headers for that reason. The manifest layout is a second shared header,
+`cosmomanifest.h`, between the build and the loader. The protocol header itself contains no pointers, enums
 in struct fields, firmware types, or architecture-specific fields, and is
 usable from assembly for its constants (`__ASSEMBLER__` guard). A
 protocol change is a version bump, never a silent edit.
@@ -133,4 +138,21 @@ that does not fit is refused rather than shortened into another device's
 name (`cmdline_find` returns -2). An unknown `boot_flags` bit is a panic.
 Check: `tests/host/test_gpt.c` (the parser), the boot log's `cmdline:`
 line on every boot, and `make test-install` (a real `root=`). Gap: no
-boot exercises the panics, which need a broken loader.
+boot exercises the panics, which need a broken loader. Since M5 the text
+is also signed (BT15); untrusted still, since the kernel validates it.
+
+## BT15. A verifying loader hands over only what the signed manifest names
+
+A loader built with `VERIFY_BOOT=1` (the default) jumps to a kernel only
+when `\cosmo\manifest` carries a valid Ed25519 signature by a key in the
+ring compiled into it and `kernel.elf`, `boot.tar` and `cmdline` each
+match the manifest's size and SHA-512; each file is checked as soon as it
+is in memory and before anything parses it, and any failure is a `die()`
+naming the file. `COSMOBOOT_VERIFIED` is set only then, with that key's
+id. A `VERIFY_BOOT=0` loader compiles no checks and always writes zeros,
+and the kernel says so in its banner (`UNVERIFIED BOOT`), its log and
+`kernel.verified_boot`. There is no runtime switch. Check: `make
+test-security` (each file tampered, another key, a forged key id, no
+manifest; the override), and the boot harness's required `verified boot`
+lines and forbidden `UNVERIFIED BOOT` on every boot. Gap: the loader is
+not itself signed for UEFI Secure Boot, so replacing it defeats the check.

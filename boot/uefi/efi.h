@@ -59,6 +59,7 @@ typedef struct {
 #define EFI_DEVICE_ERROR       (EFI_ERROR_BIT | 7)
 #define EFI_OUT_OF_RESOURCES   (EFI_ERROR_BIT | 9)
 #define EFI_NOT_FOUND          (EFI_ERROR_BIT | 14)
+#define EFI_SECURITY_VIOLATION (EFI_ERROR_BIT | 26)
 #define EFI_ERROR(s)           (((INTN)(s)) < 0)
 
 /* Memory types. */

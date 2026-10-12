@@ -193,22 +193,24 @@ typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
   hold `/sbin/cosmo-install`, the `/etc/rc` line `svc boot`, and the
   mountpoint directories. On the host: both GPT copies valid and equal,
   two partitions of the ESP and CosmoOS-root types, partition 2's GUID
-  the one printed, partition 1 equal to the boot image's ESP in every
-  sector but the slot, and the slot exactly the marker line plus
-  `root=PARTUUID=<that GUID>` and NULs.
+  the one printed, and partition 1 equal to the boot image's ESP in every
+  sector (its signed command line says `root=boot-disk`; roadmap M5).
 
 - **reboot**: the installed disk alone (`QEMU_DISKS=boot`: no scratch
   disk, no USB, the boot disk writable), the same release firmware. The
-  log must show `init: switched to the disk root DEV
-  (root=PARTUUID=<the GUID>)`, the kernel's `root switched to cosmofs`
+  log must show the kernel's `root: root=boot-disk is DEV` and `boot:
+  verified boot, key <id>`, `init: switched to the disk root DEV
+  (root=boot-disk)`, the kernel's `root switched to cosmofs`
   with at least one mount moved, `the old root (ramfs) is released`, and
   the installed `/etc/rc`'s `CosmoOS userland ready`; then
   `echo NONCE > /persist.txt && sync` and `/dev/console` listed; on exit,
   `init: disk root synced`.
 - **persist**: the same disk booted again: `cat /persist.txt` prints the
   nonce.
-- **fallback**: a copy of the live image whose slot says `root=vda` (the
-  blank scratch disk on both machines): the kernel resolves it, init says
+- **fallback**: a copy of the live image whose command line says
+  `root=vda` (the blank scratch disk on both machines), re-signed with the
+  build's key (`--key`, `scripts/mkmanifest.py resign`): the kernel
+  resolves it, init says
   `cannot mount vda ... staying on the live root`, and the live shell
   answers.
 

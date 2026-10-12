@@ -5841,7 +5841,12 @@ static bool switch_to_disk_root(void)
         return false;   /* no root=: the live system */
     n = sysctl_get("kernel.rootdev", dev, sizeof(dev));
     if (n <= 0 || n >= (long)sizeof(dev)) {
-        printf("init: root=%s: no such device; staying on the live root\n", spec);
+        /* root=boot-disk on the live image: its disk has no root partition
+         * until the system is installed (roadmap M5), which is no fault. */
+        if (strcmp(spec, "boot-disk") == 0)
+            printf("init: the boot disk has no CosmoOS root partition; the live root stays\n");
+        else
+            printf("init: root=%s: no such device; staying on the live root\n", spec);
         return false;
     }
     if (mkdir("/sysroot", 0755) < 0 && errno != EEXIST) {

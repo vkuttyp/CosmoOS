@@ -326,8 +326,25 @@ no transport beyond `sysctl` and the self-tests that print them.
 
 ### 2.9 Security (constitution §44; Prompt #2 §54)
 
-- secure or measured boot: the kernel and boot archive are unsigned;
-  module signing roots trust in an unverified image.
+- ~~secure or measured boot: the kernel and boot archive are unsigned;
+  module signing roots trust in an unverified image.~~ Verified boot
+  closed by roadmap M5 PR 1 (2026-10-12): the loader checks kernel,
+  archive and command line against a signed manifest
+  (docs/boot/design.md, "Verified boot"). Still open, out of M5's scope:
+  - the loader itself is not signed for UEFI Secure Boot (no db
+    enrollment), so replacing `BOOTX64.EFI` defeats the check; 1.0 needs a
+    signed loader for the chain to start at the firmware.
+  - measured boot (TPM PCR extends of the manifest and files): none.
+  - the root filesystem is not verified (no dm-verity-like tree over the
+    installed cosmofs); verified boot ends at the boot archive.
+  - KASLR: the kernel runs at its link address. It needs a relocatable
+    kernel image (PIE or relocations kept and applied, the higher-half
+    base chosen at boot), loader support (a random slide from
+    `EFI_RNG_PROTOCOL` or the CPU's instruction, the bootstrap tables
+    built for it, the slide in the boot protocol), and the kernel's
+    symbolisation, `ksymtab` and the panic path adjusted.
+  - manifest anti-rollback: any manifest ever signed by a trusted key
+    verifies forever (as for modules, below).
 - audit logging: none.
 - per-process capabilities beyond handle rights (§54's "file, network,
   device, IPC, VM capability"); network namespaces; cgroups-style

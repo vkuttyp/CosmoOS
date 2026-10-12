@@ -7,16 +7,17 @@ write a file, reboot, read it (docs/userland/testing.md, "test-install").
 Stages: `install`, then `reboot` (boot the installed disk alone -- no
 other disk attached -- check init switched to it, write /persist.txt,
 power off; boot it again and read the file back), then `fallback` (a
-live image whose command line names the blank scratch disk as root=:
-init says it cannot mount it and the live shell works).
+live image whose command line names the blank scratch disk as root=, and
+re-signed with the build's key since the command line is signed: init says
+it cannot mount it and the live shell works).
 
 Stage `install`: boot the live image with a blank 256 MiB virtio disk
 attached, find that disk in `cosmo-install --list` by its size, install on
 it, check that a second install without --force is refused, mount the new
 root and look at it, and power off. Then, on the host, read the disk
-image: a valid GPT, partition 1 the boot image's ESP byte for byte except
-the command-line slot, the slot naming partition 2 by its PARTUUID, and
-partition 2 of the CosmoOS root type.
+image: a valid GPT, partition 1 the boot image's ESP byte for byte (its
+signed command line says root=boot-disk; roadmap M5), and partition 2 of
+the CosmoOS root type.
 
 Each boot is QEMU through scripts/qemu-run.sh with the serial console on
 stdin/stdout; commands are typed at the shell's prompt as the shell test
@@ -35,15 +36,17 @@ import time
 import uuid
 import zlib
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import firmware_stall  # noqa: E402
-
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+import firmware_stall  # noqa: E402
+import mkmanifest  # noqa: E402
+import modsign  # noqa: E402
+
 PROMPT = b"\ncosmo$ "
 TARGET_MIB = 256
 SS = 512
 EXIT_SUCCESS = (0x10 << 1) | 1
-MARKER = b"#cosmo-cmdline v1\n"
 ESP_TYPE = uuid.UUID("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
 ROOT_TYPE = uuid.UUID("c9b09224-e00d-418e-846a-9f1d9a61bfd5")
 
@@ -250,7 +253,7 @@ def stage_install(args, results):
         install_s = time.monotonic() - t0
         need(out, r"^install-status=0$", "cosmo-install")
         m = need(out, rf"^cosmo-install: installed on {dev}: esp ({dev}p?1), root ({dev}p?2), "
-                      r"root=PARTUUID=([0-9a-f-]{36})$", "cosmo-install")
+                      r"partuuid ([0-9a-f-]{36})$", "cosmo-install")
         root_dev, partuuid = m.group(2), m.group(3)
         out = b.status(f"cosmo-install {dev}", "again-status")
         need(out, r"^again-status=3$", "a second install without --force")
@@ -293,13 +296,9 @@ def stage_install(args, results):
     if len(esp_new) != len(esp_live):
         raise Fail("target: partition 1 is not the size of the boot ESP")
     diff = [s for s in range(0, len(esp_live), SS) if esp_live[s:s + SS] != esp_new[s:s + SS]]
-    if len(diff) != 1 or not esp_live[diff[0]:diff[0] + SS].startswith(MARKER):
-        raise Fail(f"target: partition 1 differs from the boot ESP in {len(diff)} sectors, expected the slot alone")
-    slot = esp_new[diff[0]:diff[0] + SS]
-    want = MARKER + f"root=PARTUUID={partuuid}\n".encode()
-    if slot != want + bytes(SS - len(want)):
-        raise Fail(f"target: the slot reads {slot[:80]!r}")
-    results.append(f"install: target disk: GPT valid, ESP = boot ESP but the slot, slot root=PARTUUID={partuuid}, "
+    if diff:
+        raise Fail(f"target: partition 1 differs from the boot ESP in {len(diff)} sectors, expected none")
+    results.append(f"install: target disk: GPT valid, ESP = boot ESP byte for byte, root partuuid {partuuid}, "
                    f"root partition sectors {f2}-{l2}")
     return {"target": target, "partuuid": partuuid}
 
@@ -310,8 +309,11 @@ def stage_reboot(args, results, inst, nonce):
     try:
         b.wait_prompt("the first prompt")
         log = b.text()
-        m = need(log, rf"^init: switched to the disk root (\S+) \(root=PARTUUID={inst['partuuid']}\)$",
-                 "the installed boot")
+        m = need(log, r"^init: switched to the disk root (\S+) \(root=boot-disk\)$", "the installed boot")
+        # root=boot-disk found the partition the installer made.
+        need(log, rf"^\[ INFO\] root: root=boot-disk is {re.escape(m.group(1))}; init mounts it and switches to it$",
+             "the installed boot")
+        need(log, r"^\[ INFO\] boot: verified boot, key [0-9a-f]{16} ", "the installed boot")
         need(log, r"^\[ INFO\] vfs: the old root \(ramfs\) is released: \d+ vnodes$", "the installed boot")
         need(log, r"^\[ INFO\] vfs: root switched to cosmofs on \S+; [1-9]\d* mount\(s\) moved onto it$",
              "the installed boot")
@@ -360,13 +362,12 @@ def stage_fallback(args, results):
     work = os.path.join(args.workdir, "fallback")
     os.makedirs(work, exist_ok=True)
     image = os.path.join(work, "cosmoos.img")
-    data = bytearray(open(args.image, "rb").read())
-    at = [i for i in range(0, len(data), SS) if data[i:i + len(MARKER)] == MARKER]
-    if len(at) != 1:
-        raise Fail(f"fallback: the live image has {len(at)} command-line slots")
-    slot = MARKER + b"root=vda\n"   # the blank scratch disk: vda on both machines
-    data[at[0]:at[0] + SS] = slot + bytes(SS - len(slot))
-    open(image, "wb").write(data)
+    shutil.copyfile(args.image, image)
+    # The blank scratch disk: vda on both machines. The command line is
+    # signed (verified boot), so the image is signed again with the key
+    # the build signs with; unsigned, the loader would refuse it.
+    mkmanifest.esp_put(image, "::/cosmo/cmdline", b"root=vda\n")
+    mkmanifest.resign_image(image, modsign.read_hex_key(args.key, "signing key"))
     b = Boot("fallback", image, args.workdir, {}, args.timeout)
     try:
         b.wait_prompt("the first prompt")
@@ -390,6 +391,7 @@ def main():
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--stages", default="install,reboot,fallback")
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
+    ap.add_argument("--key", required=True, help="the build's signing key (MODSIGN_KEY), for the fallback image")
     args = ap.parse_args()
     shutil.rmtree(args.workdir, ignore_errors=True)
     os.makedirs(args.workdir)

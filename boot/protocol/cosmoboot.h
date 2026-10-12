@@ -62,8 +62,11 @@
  *      loader wrote and the ELF note pairs kernel and loader exactly
  *   7  + the command line from \cosmo\cmdline (cmdline_phys/cmdline_size,
  *      spending reserved2) and the GPT partition the loader was read
- *      from (boot_partuuid); the structure grows */
-#define COSMOBOOT_VERSION 7
+ *      from (boot_partuuid); the structure grows
+ *   8  + verified boot (verify_flags, verify_key_id): whether the loader
+ *      checked kernel, archive and command line against the signed
+ *      manifest, and with which key; the structure grows */
+#define COSMOBOOT_VERSION 8
 
 /* ELF note carried by the kernel so the loader can verify protocol version.
  * Name "COSMO\0", type COSMOBOOT_NOTE_TYPE, desc = uint32_t version. */
@@ -105,6 +108,10 @@
 
 /* v7 boot_flags. */
 #define COSMOBOOT_BOOT_PARTUUID 1u   /* boot_partuuid names a GPT partition */
+
+/* v8 verify_flags. */
+#define COSMOBOOT_VERIFIED 1u        /* every file matched a manifest signed by verify_key_id */
+#define COSMOBOOT_KEY_ID_SIZE 8u
 
 struct cosmoboot_mem_entry {
     uint64_t base;   /* physical address, page aligned */
@@ -201,6 +208,17 @@ struct cosmoboot_info {
      * byte order; valid when boot_flags has COSMOBOOT_BOOT_PARTUUID. A
      * volume without a partition table (a "superfloppy") has none. */
     uint8_t  boot_partuuid[16];
+
+    /* v8: verified boot (docs/boot/design.md, "Verified boot"). A loader
+     * that verifies refuses to boot unless \cosmo\manifest carries a valid
+     * signature by a key compiled into it and kernel.elf, boot.tar and
+     * cmdline all match it; it then sets COSMOBOOT_VERIFIED and the key's
+     * id (the first 8 bytes of SHA-512 of the public key, as the module
+     * ring names keys). A loader built with VERIFY_BOOT=0 checks nothing
+     * and writes zeros: the kernel then reports an unverified boot. */
+    uint32_t verify_flags;    /* COSMOBOOT_VERIFIED */
+    uint32_t reserved3;
+    uint8_t  verify_key_id[COSMOBOOT_KEY_ID_SIZE];
 };
 
 #endif /* __ASSEMBLER__ */

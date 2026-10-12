@@ -12,7 +12,6 @@
 #define KERNEL_KEYRING_H
 
 #include <kernel/crypto.h>
-#include <kernel/types.h>
 
 #define KEYRING_ID_SIZE 8
 

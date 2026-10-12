@@ -312,6 +312,36 @@ bool blk_part_info(const struct blkdev *bd, struct blk_part_info *out)
     return true;
 }
 
+struct blkdev *blk_find_sibling_typed(const uint8_t uuid[16], const uint8_t type[16], unsigned *matches)
+{
+    struct blkdev *found = NULL;
+    unsigned n = 0;
+    mutex_lock(&g_part_lock);
+    struct blkpart *p, *self = NULL;
+    list_for_each_entry(p, &g_parts, link) {
+        if (memcmp(p->uuid, uuid, 16) == 0) {
+            self = p;
+            break;
+        }
+    }
+    if (self != NULL) {
+        list_for_each_entry(p, &g_parts, link) {
+            if (p->disk == self->disk && memcmp(p->type, type, 16) == 0) {
+                n++;
+                found = &p->bd;
+            }
+        }
+    }
+    if (n == 1)
+        blkdev_get(found);
+    else
+        found = NULL;
+    mutex_unlock(&g_part_lock);
+    if (matches != NULL)
+        *matches = n;
+    return found;
+}
+
 struct blkdev *blk_find_partuuid(const uint8_t uuid[16])
 {
     struct blkdev *found = NULL;

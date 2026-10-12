@@ -6,7 +6,8 @@ Automation: toolchain setup, QEMU runners, CI helpers.
 |---|---|
 | `setup-dev-linux.sh`, `setup-dev-macos.sh` | Install the cross toolchain and test tools |
 | `check-tools.sh` | Verify the toolchain before a build |
-| `mkimage.sh` | FAT32 boot image: loader, kernel, boot archive |
+| `mkimage.sh` | GPT boot disk, ESP: loader, kernel, boot archive, command line, signed manifest |
+| `mkmanifest.py` | the signed boot manifest (verified boot): sign, verify, re-sign an image; the tests' way into an image's ESP |
 | `mkbootarchive.py` | Reproducible ustar boot archive (`init`, modules, fixtures) |
 | `modsign.py` | Ed25519 key generation, module signing, verification (pure Python) |
 | `devkey.sh` | Create the per-machine developer signing key in `$COSMO_KEYDIR` on first use (`SIGNING=dev`) |

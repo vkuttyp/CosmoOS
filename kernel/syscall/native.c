@@ -2333,7 +2333,7 @@ static int64_t sys_sethostname(struct syscall_args *a)
 
 static const char *const sysctl_names[] = {
     "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
-    "kernel.hostname", "kernel.cmdline", "kernel.root", "kernel.rootdev",
+    "kernel.hostname", "kernel.cmdline", "kernel.root", "kernel.rootdev", "kernel.verified_boot",
     "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "vm.cache_pages", "vm.cache_limit",
     "vm.cache_writebacks", "vm.cache_exec_syncs", "vm.file_faults", "vm.file_cow_faults", "vm.file_dirty_faults",
     "vm.file_fault_retries", "vm.file_sigbus", "vm.futex_shared_keys", "vm.anon_fault_retries",
@@ -2379,6 +2379,16 @@ static int sysctl_value(const char *name, char *out, size_t n)
         if (bootfs_root_device(dev, sizeof(dev)) != 0)
             dev[0] = '\0';
         return ksnprintf(out, n, "%s", dev);
+    }
+    /* Verified boot (boot protocol v8, docs/boot/design.md): "yes <key id>"
+     * when the loader checked kernel, archive and command line against the
+     * signed manifest, "no" for a VERIFY_BOOT=0 loader. */
+    if (strcmp(name, "kernel.verified_boot") == 0) {
+        uint8_t id[COSMOBOOT_KEY_ID_SIZE];
+        if (!bootinfo_verified(id))
+            return ksnprintf(out, n, "no");
+        return ksnprintf(out, n, "yes %02x%02x%02x%02x%02x%02x%02x%02x", id[0], id[1], id[2], id[3], id[4], id[5],
+                         id[6], id[7]);
     }
     if (strcmp(name, "kernel.nprocs") == 0)
         return ksnprintf(out, n, "%u", process_count());

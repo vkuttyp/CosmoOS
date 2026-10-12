@@ -1,0 +1,59 @@
+# Roadmap M5: security baseline — 2026-10-12
+
+Milestone M5 of the [1.0 roadmap](../roadmap-1.0.md): a tampered kernel or
+archive is refused; layouts differ across runs; an unprivileged process
+cannot mount and a granted one can; both architectures, in CI. Base: main
+`c09b26b1` (M1-M4 done, CI green). Decisions 1-4 of the task are the
+owner's and were not reopened; this report records how each was built.
+
+## Plan as worked
+
+| PR | Content |
+|---|---|
+| 1 | Decision 1: the signed manifest, the loader's verification, boot protocol v8, the kernel's log line, banner and sysctl, `VERIFY_BOOT=0`, the install flow; `make test-security` with acceptance a-b and its CI job. |
+| 2 | Decision 2 (user-space ASLR) and the W^X check of decision 4; acceptance c. |
+| 3 | Decision 3 (operation-specific privileges), every call site converted, the service manager's configuration, `/proc` address hiding; acceptance d-e; M5 ticked. |
+
+## PR 1 (as built): verified boot
+
+| Area | Change | Files |
+|---|---|---|
+| Manifest | `\cosmo\manifest`: magic `COSMOMAN`, version 1, then for `kernel.elf`, `boot.tar`, `cmdline` in that order the 16-byte name, the size and the SHA-512; then the module-signing trailer (Ed25519 signature, key id, `COSMOSIG`) over those 280 bytes. Written by `scripts/mkmanifest.py sign` with `MODSIGN_KEY` (developer key, or the release key with `SIGNING=release`); deterministic, so reproducible. The make rule depends on the three files and the key, so a rebuilt image always carries a fresh manifest. | `boot/protocol/cosmomanifest.h`, `scripts/mkmanifest.py`, `Makefile`, `scripts/mkimage.sh` |
+| Loader | `verify.c`: read the manifest first (missing, wrong size, no trailer, a key id outside the ring, a bad signature or the wrong layout: refused), then each file is checked against its size and SHA-512 as soon as it is read -- the kernel before the ELF parser sees it. Refusal: `verified boot: rejected \cosmo\<file>: <reason>` and `cosmoboot: FATAL: verified boot: refusing to boot (status 0x800000000000001a)`. The ring is `KEYRING_PUBS` (the module ring) through `gen-keyring.py`; hashing, signature check and ring lookup are the kernel's `kernel/security/sha512.c`, `ed25519.c`, `keyring.c`, compiled freestanding into `$(OUT)/boot/kcrypto/` (`crypto.h` and `keyring.h` now include standard headers only, for that reason). | `boot/uefi/verify.c`, `main.c`, `loader.h`, `boot.mk`, `efi.h`, `kernel/include/kernel/crypto.h`, `keyring.h` |
+| Override | `VERIFY_BOOT=0` (`build/config.mk`, its own tree `out/<arch>-<build>-noverify`): a loader with no checks linked, `verified boot: OFF` on its console, zeros in the boot protocol. `$(OUT)/boot/noverify/` holds one in every tree for the test, never placed in an image unless the build asks. No runtime switch. | `build/config.mk`, `boot/uefi/boot.mk` |
+| Protocol v8 | `verify_flags` (`COSMOBOOT_VERIFIED`), `reserved3`, `verify_key_id[8]`; `bootinfo_init` panics on an unknown flag; `bootinfo_verified()`. | `boot/protocol/cosmoboot.h`, `kernel/core/bootinfo.c`, `bootinfo.h` |
+| Kernel | Banner `Verified boot, key <id> (<name>)` or `UNVERIFIED BOOT: the loader was built with VERIFY_BOOT=0 and checked nothing`; log `[ INFO] boot: verified boot, key <id> (<name>)` (a WARN when unverified); sysctl `kernel.verified_boot` = `yes <id>` / `no`. The key's name comes from the kernel's own ring. | `kernel/core/main.c`, `kernel/syscall/native.c` |
+| Install flow | The command line is signed, so the build fixes it: `CMDLINE ?= root=boot-disk`. `root=boot-disk` is the one partition of the CosmoOS root type on the disk the loader was read from (`blk_find_sibling_typed`). The live image's disk has only its ESP: the live root stays (`root: root=boot-disk: the boot disk has no CosmoOS root partition`, init says the same). The installed disk has exactly one: init switches to it. `cosmo-install` copies the ESP byte for byte and writes and signs nothing; the 512-byte command-line slot and its marker are gone. | `Makefile`, `kernel/core/bootfs.c`, `kernel/block/part.c`, `part.h`, `userland/init/init.c`, `userland/system/cosmo-install.c` |
+| Tests | `make test-security` stage `verify` (below); every ordinary boot requires the loader's four `verified boot` lines and the kernel's, and forbids `UNVERIFIED BOOT`; `test-install` checks the installed ESP is the boot ESP byte for byte, the installed boot resolves `root=boot-disk` and is verified, and its fallback image is re-signed with `--key`. | `tests/boot/security_test.py`, `run_boot_test.py`, `install_test.py`, CI job `security` |
+
+**Why `root=boot-disk` and not an unsigned PARTUUID file.** The task
+offered an unsigned file the kernel reads only for `root=`. Naming the
+root relative to the loader's own partition needs no unsigned input at
+all, no protocol field, and removes code from the installer instead of
+moving it. The GPT that says which partition is the root is unsigned
+either way, and the root filesystem is not verified in 1.0, so neither
+variant protects the root more than the other; the chosen one has less
+to get wrong. An image built with another `CMDLINE` (`root=PARTUUID=`,
+`root=vda2`) is signed with it and works as before.
+
+Design: `docs/boot/design.md`, "Verified boot" and "The command line";
+invariants BT1 (restated), BT14, BT15; `docs/boot/testing.md`,
+"Verified boot: make test-security"; `docs/userland/design.md`, "The
+installer".
+
+### Acceptance a-b (local, release builds)
+
+| Boot | x86-64 | AArch64 |
+|---|---|---|
+| signed: `verified boot, key ec28a00bf331f50b (dev)`, sysctl `yes ec28a00bf331f50b` | PASS 5.7 s | PASS 9.3 s |
+| `kernel.elf` one byte (`.strtab`) changed: refused naming it, no kernel output | PASS | PASS |
+| `boot.tar` one byte changed | PASS | PASS |
+| `cmdline` one byte changed | PASS | PASS |
+| manifest signed by another key: refused naming that key | PASS | PASS |
+| that manifest with the trusted key's id: signature does not verify | PASS | PASS |
+| manifest deleted | PASS | PASS |
+| VERIFY_BOOT=0 loader, tampered kernel: boots, UNVERIFIED BOOT, sysctl `no` | PASS 5.3 s | PASS 8.9 s |
+| whole stage | 87.4 s | 113.3 s |
+
+`make test-install` (release, x86-64): PASS, the installed ESP equal to
+the boot ESP in every sector, `root=boot-disk` resolved to `ahci0p0p2`.

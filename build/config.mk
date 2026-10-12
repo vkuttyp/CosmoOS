@@ -109,8 +109,20 @@ SCHED_BALANCE ?= 1
 # suite under migration. `make test-chaos` builds and boots it.
 SCHED_CHAOS ?= 0
 
+# Verified boot (docs/boot/design.md, "Verified boot"). 1 (the default in
+# every build type): the UEFI loader refuses to boot unless \cosmo\manifest
+# is signed by a key in its ring (KEYRING_PUBS, the module ring) and
+# kernel.elf, boot.tar and cmdline match it. 0 is the developer override: a
+# loader that checks nothing and tells the kernel the boot is unverified,
+# which the kernel's banner and sysctl kernel.verified_boot then say. There
+# is no runtime switch. It changes the loader, so it gets its own tree.
+VERIFY_BOOT ?= 1
+ifeq ($(filter $(VERIFY_BOOT),0 1),)
+$(error VERIFY_BOOT must be 0 or 1, got '$(VERIFY_BOOT)')
+endif
+
 # Output tree. Never inside the source directories.
-OUT ?= $(ROOT)/out/$(ARCH)-$(BUILD)
+OUT ?= $(ROOT)/out/$(ARCH)-$(BUILD)$(if $(filter 0,$(VERIFY_BOOT)),-noverify)
 
 # V=1 shows full command lines.
 V ?= 0

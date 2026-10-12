@@ -285,12 +285,22 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] init exited with status 0",
     r"^\[ INFO\] boot complete",
     # Roadmap M2: the boot disk is a GPT disk; the loader was read from
-    # its partition 1, which the kernel registers as a block device, and
-    # without root= the live root stays (docs/boot/design.md).
+    # its partition 1, which the kernel registers as a block device. The
+    # signed command line says root=boot-disk, and the live image's disk
+    # has no root partition, so the live root stays (docs/boot/design.md).
     r"^boot volume: a GPT partition$",
     r"^\[ INFO\] part: \S+1: \S+ partition 1, sectors 2048-\d+, type esp, partuuid [0-9a-f-]{36}$",
-    r"^\[ INFO\] cmdline: #cosmo-cmdline v1 *$",
-    r"^\[ INFO\] root: no root= on the command line; the live root stays$",
+    r"^\[ INFO\] cmdline: root=boot-disk *$",
+    r"^\[ INFO\] root: root=boot-disk: the boot disk has no CosmoOS root partition; the live root stays$",
+    r"^init: the boot disk has no CosmoOS root partition; the live root stays$",
+    # Roadmap M5: the loader checked the manifest's signature and every
+    # file against it before the kernel ran, and the kernel says so.
+    r"^verified boot: \\cosmo\\manifest signed by key [0-9a-f]{16} \(",
+    r"^verified boot: \\cosmo\\kernel\.elf matches the manifest$",
+    r"^verified boot: \\cosmo\\boot\.tar matches the manifest$",
+    r"^verified boot: \\cosmo\\cmdline matches the manifest$",
+    r"^Verified boot, key [0-9a-f]{16} \(",
+    r"^\[ INFO\] boot: verified boot, key [0-9a-f]{16} \(",
 ]
 # The guard boot: every protection on, the guard proved live by the
 # self-test, UMIP proved from user mode (x86-64); the WARN that names an
@@ -533,6 +543,7 @@ FORBIDDEN_MARKERS = [
     r"BUG:",
     r"SELFTEST: FAIL",
     r"cosmoboot: FATAL",
+    r"UNVERIFIED BOOT",
     # The lockup detectors (docs/kernel/diagnostics/design.md, "Lockups"):
     # a real report fails the run with the CPU's trace in the log; the
     # self-tests' own reports say "expected" and do not match.

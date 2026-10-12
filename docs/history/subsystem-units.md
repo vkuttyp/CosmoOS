@@ -2800,3 +2800,16 @@ See the [history index](README.md).
   Record: `docs/testing/flakes.md`, "`sched-restore-loop`: the thread
   count not back in 200 ms".
 
+- **Roadmap M5, security baseline (2026-10-12; in progress).**
+  - PR 1: verified boot. `make image` signs `\cosmo\manifest` (SHA-512 and
+    size of `kernel.elf`, `boot.tar`, `cmdline`; Ed25519 in the module
+    trailer, `scripts/mkmanifest.py`); the loader checks it with the
+    kernel's own `sha512.c`/`ed25519.c`/`keyring.c` and ring, each file
+    before it is used, and refuses naming the file; boot protocol v8
+    (`verify_flags`, `verify_key_id`); banner, `boot:` log line and sysctl
+    `kernel.verified_boot`; `VERIFY_BOOT=0` builds a loader that checks
+    nothing and the kernel says UNVERIFIED BOOT. The signed command line
+    says `root=boot-disk` (the CosmoOS root partition on the loader's
+    disk), so `cosmo-install` copies the ESP byte for byte and signs
+    nothing. `make test-security` (acceptance a-b), its own CI job.
+  - Report: `docs/audit/2026-10-12-m5-security-baseline-report.md`.

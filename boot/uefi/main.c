@@ -3,7 +3,9 @@
  *
  * Sequence:
  *   1. console + watchdog off
- *   2. locate the boot volume and read \cosmo\kernel.elf
+ *   2. locate the boot volume; read and check the signed \cosmo\manifest,
+ *      then \cosmo\kernel.elf, boot.tar and cmdline, each checked against
+ *      it as soon as it is in memory (verified boot, verify.c)
  *   3. validate + load the ELF into low physical memory
  *   4. allocate page-table pool, bootinfo area, and a handoff stack
  *   5. build bootstrap page tables
@@ -18,6 +20,7 @@
 
 #include "loader.h"
 #include "cosmoboot.h"
+#include "cosmomanifest.h"
 
 EFI_SYSTEM_TABLE  *g_st;
 EFI_BOOT_SERVICES *g_bs;
@@ -416,7 +419,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     if (EFI_ERROR(status))
         die("cannot locate own loaded image", status);
 
-    /* --- kernel file --- */
+    /* --- the signed manifest, before anything it vouches for (verify.c);
+     * a VERIFY_BOOT=0 loader ignores it --- */
+    uint8_t *manifest = NULL;
+    size_t manifest_size = 0;
+    uint8_t key_id[COSMOBOOT_KEY_ID_SIZE];
+    memset(key_id, 0, sizeof(key_id));
+    static CHAR16 manifest_path[] = MANIFEST_PATH;
+    if (EFI_ERROR(read_boot_file(manifest_path, EfiLoaderData, NULL, &manifest, &manifest_size)))
+        manifest = NULL;
+    verify_manifest(manifest, manifest_size, key_id);
+
+    /* --- kernel file, checked before the ELF parser sees it --- */
     uint8_t *file = NULL;
     size_t file_size = 0;
     static CHAR16 kernel_path[] = KERNEL_PATH;
@@ -424,6 +438,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     if (EFI_ERROR(status))
         die("cannot read \\cosmo\\kernel.elf from the boot volume", status);
     lprintf("kernel: %u bytes read\n", (unsigned)file_size);
+    verify_file(COSMO_MANIFEST_KERNEL, file, file_size);
 
     /* --- boot archive (optional): init and boot-time kernel modules --- */
     uint8_t *archive = NULL;
@@ -437,6 +452,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     } else {
         lprintf("archive: %u bytes read\n", (unsigned)archive_size);
     }
+    verify_file(COSMO_MANIFEST_ARCHIVE, archive, archive_size);
 
     /* --- command line (optional, protocol v7): \cosmo\cmdline up to its
      * first NUL. The file may be longer than its text: the installer
@@ -446,7 +462,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     size_t cmdline_file_size = 0;
     size_t cmdline_len = 0;
     static CHAR16 cmdline_path[] = CMDLINE_PATH;
-    if (!EFI_ERROR(read_boot_file(cmdline_path, EfiLoaderData, NULL, &cmdline_file, &cmdline_file_size))) {
+    if (EFI_ERROR(read_boot_file(cmdline_path, EfiLoaderData, NULL, &cmdline_file, &cmdline_file_size)))
+        cmdline_file = NULL;
+    verify_file(COSMO_MANIFEST_CMDLINE, cmdline_file, cmdline_file_size);
+    if (cmdline_file != NULL) {
         while (cmdline_len < cmdline_file_size && cmdline_file[cmdline_len] != 0)
             cmdline_len++;
         if (cmdline_len > COSMOBOOT_CMDLINE_MAX) {
@@ -554,6 +573,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     if (have_partuuid) {
         memcpy(info->boot_partuuid, boot_partuuid, sizeof(boot_partuuid));
         info->boot_flags |= COSMOBOOT_BOOT_PARTUUID;
+    }
+    if (verify_complete()) {
+        info->verify_flags |= COSMOBOOT_VERIFIED;
+        memcpy(info->verify_key_id, key_id, sizeof(key_id));
     }
     find_framebuffer(info);
 

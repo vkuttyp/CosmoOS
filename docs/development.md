@@ -262,6 +262,8 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `SELFTEST` | `1` for debug, `0` for release | Compile boot-time self-tests (`CONFIG_SELFTEST`) |
 | `CRASH_TEST` | `0` | Compile a deliberate fault after the banner (`CONFIG_CRASH_TEST`) to exercise the panic path |
 | `MODULE_SIG_ENFORCE` | `1` | `CONFIG_MODULE_SIG_ENFORCE`: refuse a kernel module without a valid signature from a key in the kernel's ring. `0` loads unsigned modules with a warning and taints the kernel; a bad signature is refused either way |
+| `VERIFY_BOOT` | `1` | verified boot (docs/boot/design.md): the UEFI loader refuses to boot unless `\cosmo\manifest` is signed by a key in its ring and the kernel, archive and command line match it. `0` builds a loader that checks nothing, in its own tree `out/<arch>-<build>-noverify`; the kernel then says `UNVERIFIED BOOT`. No runtime switch |
+| `CMDLINE` | `root=boot-disk` | the text of `\cosmo\cmdline`, signed with the kernel: changing it means building the image again |
 | `SIGNING` | `dev` | `dev`: sign with a per-machine developer key created on first use outside the tree; `release`: `MODSIGN_KEY` and `KEYRING_PUBS` must be given, nothing is generated (`tools/keys/README.md`) |
 | `COSMO_KEYDIR` | `$HOME/.config/cosmoos/keys` | Where `SIGNING=dev` keeps `dev.key` (0600) and `dev.pub`; never inside the repository |
 | `MODSIGN_KEY` | `$(COSMO_KEYDIR)/dev.key` | Ed25519 seed used by `build/module.mk` to sign modules |

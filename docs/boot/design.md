@@ -2,7 +2,7 @@
 
 ## The protocol structure
 
-`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 7). All
+`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 8). All
 fields are fixed-width integers; there are no pointers, enums, or
 padding surprises, so the layout is identical on every architecture and
 compiler.
@@ -10,7 +10,7 @@ compiler.
 | Field | Meaning |
 |---|---|
 | `magic` | `COSMOBOOT_MAGIC` = `0x3154424F4D534F43` ("COSMOBT1") |
-| `version` | `COSMOBOOT_VERSION` = 7 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub; 6: the framebuffer; 7: the command line and the boot partition) |
+| `version` | `COSMOBOOT_VERSION` = 8 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub; 6: the framebuffer; 7: the command line and the boot partition; 8: verified boot) |
 | `size` | `sizeof(struct cosmoboot_info)` as written by the loader; lets a newer kernel detect an older loader |
 | `arch` | `COSMOBOOT_ARCH_X86_64` = 1, `COSMOBOOT_ARCH_AARCH64` = 2 |
 | `firmware` | `COSMOBOOT_FIRMWARE_UEFI` = 1 |
@@ -26,6 +26,7 @@ compiler.
 | `el2_stub_phys` | (v5, AArch64) the page holding the EL2 stub the loader installed before dropping to EL1, in memory of type `COSMOBOOT_MEM_EL2_STUB` (never freed). 0 when firmware handed over at EL1, when the machine has no EL2, or when the page could not be reserved — the kernel then reports no EL2 and boots exactly as before (`docs/kernel/arch/aarch64/design.md`, "Exception level 2") |
 | `fb_phys`, `fb_size`, `fb_width`, `fb_height`, `fb_pitch`, `fb_bpp`, and three (shift, bits) pairs | (v6) the framebuffer the firmware had already configured when the loader ran: the Graphics Output Protocol's *current* mode, never one the loader set. All zero when there is none, which is not an error. The pixel format is three (shift, bits) pairs rather than an enumeration, so a bit-mask format is described exactly like the two common ones. The range is not RAM: it is `EfiMemoryMappedIO` on a PCI display and `EfiReservedMemoryType` for a `ramfb`, and either way the PMM never hands it out |
 | `cmdline_phys`, `cmdline_size` | (v7, spending `reserved2`) the text of `\cosmo\cmdline` up to its first NUL, NUL terminated, at most `COSMOBOOT_CMDLINE_MAX` (1023) bytes, in the last of the bootinfo pages (`COSMOBOOT_MEM_BOOTINFO`); both zero when the file is absent or empty. See "The command line" |
+| `verify_flags`, `verify_key_id[8]` | (v8) `COSMOBOOT_VERIFIED` when the loader checked `kernel.elf`, `boot.tar` and `cmdline` against `\cosmo\manifest` under a signature by a key compiled into it, with that key's id (first 8 bytes of SHA-512 of the public key, the module ring's naming); both zero from a `VERIFY_BOOT=0` loader. See "Verified boot" |
 | `boot_flags`, `boot_partuuid[16]` | (v7) `COSMOBOOT_BOOT_PARTUUID` set when the loader was read from a GPT partition: `boot_partuuid` is that partition's unique GUID in on-disk byte order, from the hard-drive node of the loader's device path. Clear for a volume with no partition table. See "The boot disk" |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,
@@ -74,12 +75,84 @@ line; sysctls `kernel.root` and `kernel.rootdev`); it always starts on
 the live ramfs root, and init mounts the named device and switches to it
 (`docs/kernel-services/vfs/design.md`, "Boot composition").
 
-**The slot.** `scripts/mkimage.sh` writes `\cosmo\cmdline` as one
-512-byte sector: the marker line `#cosmo-cmdline v1` (a comment to the
-parser) followed by NULs. The installer rewrites that sector in place --
-found by its marker, never through FAT -- with the marker line and the
-`root=` it chose, so it never needs a FAT writer (roadmap M2). The file
-keeps its length; the loader stops at the first NUL.
+**The file.** `make image` writes `\cosmo\cmdline` from `CMDLINE`
+(default `root=boot-disk`) and signs it with the kernel and the archive
+(below), so the command line is fixed when the image is built; changing
+it means signing again. Until roadmap M5 the file was a 512-byte slot the
+installer rewrote in place with `root=PARTUUID=`; a signed command line
+cannot be rewritten, so the installer now writes nothing on the ESP.
+
+## Verified boot
+
+Roadmap M5. The loader boots nothing it has not checked. `make image`
+writes `\cosmo\manifest` (`scripts/mkmanifest.py`, layout in
+`boot/protocol/cosmomanifest.h`): magic `COSMOMAN`, version 1, and for
+`kernel.elf`, `boot.tar` and `cmdline`, in that order, the name, the size
+and the SHA-512 of the file; then the module-signing trailer
+(`scripts/modsign.py`: Ed25519 signature, key id, `COSMOSIG`) over those
+280 bytes, signed with `MODSIGN_KEY` -- the per-machine developer key, or
+the release key with `SIGNING=release`. The signature is deterministic,
+so the manifest is reproducible. The rule rebuilds it whenever any of
+the three files or the key changes, so a rebuilt image is never stale; a
+stale or unsigned manifest in someone else's image is refused like any
+other mismatch.
+
+The loader (`boot/uefi/verify.c`) carries the key ring the kernel uses
+for modules: `KEYRING_PUBS` through `scripts/gen-keyring.py`, compiled a
+second time for the loader, together with the kernel's own
+`kernel/security/sha512.c`, `ed25519.c` and `keyring.c` (there is no
+second implementation; `boot/uefi/boot.mk`). In order:
+
+1. Read `\cosmo\manifest`. Missing, the wrong size, no trailer, a key id
+   the ring does not hold, a signature that does not verify, or a payload
+   that is not three files named as above: refused.
+2. Read `kernel.elf`, check its size and SHA-512 against the manifest
+   *before* the ELF parser sees it; then `boot.tar`, then `cmdline`, each
+   checked as soon as it is in memory. A missing file the manifest lists
+   is refused.
+3. Set `COSMOBOOT_VERIFIED` and `verify_key_id` in the boot information.
+
+A refusal prints `verified boot: rejected \cosmo\<file>: <reason>` (or
+`cannot read`, or `is signed by key <id>, which this loader does not
+trust`) and `cosmoboot: FATAL: verified boot: refusing to boot (status
+0x800000000000001a)` (`EFI_SECURITY_VIOLATION`), then returns to the
+firmware as every `die()` does. The kernel never runs.
+
+The kernel logs `boot: verified boot, key <id> (<name>)` (the name from
+its own ring), prints `Verified boot, key <id> (<name>)` in the banner,
+and answers the sysctl `kernel.verified_boot` with `yes <id>` or `no`.
+
+**The developer override** is a build-time knob, `VERIFY_BOOT=0`
+(`build/config.mk`, its own output tree `out/<arch>-<build>-noverify`): a
+loader that compiles none of the checks, says `verified boot: OFF` on its
+console and writes zeros into the v8 fields. The kernel then prints
+`UNVERIFIED BOOT: the loader was built with VERIFY_BOOT=0 and checked
+nothing` in the banner, warns the same in the log, and the sysctl says
+`no`. There is no runtime switch: the only way to boot an unchecked
+kernel is to put a different loader on the ESP, which is exactly what
+Secure Boot of the loader itself (future work) would close.
+`$(OUT)/boot/noverify/` holds such a loader in every tree for `make
+test-security`; it is never put in an image unless the build says
+`VERIFY_BOOT=0`.
+
+**Where the root is.** The installed disk's root partition is chosen by
+the installer, after the build, but the command line naming it is signed
+by the build. The signed command line therefore names it relative to the
+loader: `root=boot-disk` is the one partition of the CosmoOS root type on
+the disk the loader was read from (`boot_partuuid`; `bootfs.c`,
+`blk_find_sibling_typed`). The live image's disk has only its ESP, so
+the live root stays (`root: root=boot-disk: the boot disk has no CosmoOS
+root partition; the live root stays`); the installed disk has exactly
+one, so init switches to it. The installer copies the ESP byte for byte
+and signs nothing. This was chosen over an unsigned file holding the
+PARTUUID because it leaves no unsigned input at all and makes the
+installer simpler; the GPT itself is no more and no less trusted than
+before (the root filesystem is not verified in 1.0). `root=PARTUUID=`
+and `root=<device>` still work, for images built with another `CMDLINE`.
+
+What verified boot does not cover: the loader itself (`BOOTX64.EFI` is
+not signed for UEFI Secure Boot), the root filesystem, and measured boot;
+see the inventory.
 
 ## The boot disk
 
@@ -306,8 +379,9 @@ under TCG; byte-wise `memcpy` of a 115 KiB kernel is not measurable.
   the kernel cannot write its own read-only mappings by accident.
 - The transient loader W+X pages are a known gap closed by the Phase 2
   VMM.
-- No authenticity check of the kernel file. Secure Boot signing of
-  `BOOTX64.EFI` and a signature check of `kernel.elf` are future work.
+- Verified boot (above): the loader refuses a kernel, archive or command
+  line that does not match the manifest signed by a key in its ring.
+  Secure Boot signing of `BOOTX64.EFI` itself is future work.
 
 ## Known limitations
 

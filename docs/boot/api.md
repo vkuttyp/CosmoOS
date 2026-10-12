@@ -6,7 +6,10 @@ follows constitution section 52.
 
 ## Protocol (`boot/protocol/cosmoboot.h`)
 
-**ABI stability: stable.** Version 7 adds the command line
+**ABI stability: stable.** Version 8 adds verified boot
+(`verify_flags` with `COSMOBOOT_VERIFIED`, `reserved3`,
+`verify_key_id[COSMOBOOT_KEY_ID_SIZE]`) and grows the structure; a
+`VERIFY_BOOT=0` loader writes them zero. Version 7 added the command line
 (`cmdline_phys`, `cmdline_size`, spending `reserved2`), `boot_flags`
 with `COSMOBOOT_BOOT_PARTUUID`, and `boot_partuuid[16]`, and grows the
 structure; `COSMOBOOT_CMDLINE_MAX` is 1023. A loader without a command
@@ -120,6 +123,14 @@ Never NULL.
 (v7) The unique GUID of the GPT partition the loader was read from, in
 on-disk byte order; false when the boot volume had none.
 
+### `bool bootinfo_verified(uint8_t key_id[COSMOBOOT_KEY_ID_SIZE])`
+
+(v8) True when the loader verified kernel, archive and command line
+against the signed manifest, with the signing key's id copied out; false
+for an unverified boot (a `VERIFY_BOOT=0` loader). `bootinfo_init`
+panics on an unknown `verify_flags` bit. Read by the banner, the `boot:`
+log line and the sysctl `kernel.verified_boot` (`yes <id>` / `no`).
+
 ## Loader internals (`boot/uefi/loader.h`)
 
 All run before ExitBootServices unless stated; single-threaded; none may
@@ -143,6 +154,18 @@ Text output. `lprintf` supports `%s %c %d %u %x %X %p %%` with `0` flag,
 width, and `l`/`ll`/`z` modifiers read at their real C width (the loader
 is LLP64: `long` is 32-bit; use `%llx` with `unsigned long long` casts for
 64-bit values). Blocking: polls the UART transmit-empty bit.
+
+### `void verify_manifest(const uint8_t *file, size_t size, uint8_t key_id[8])`, `void verify_file(unsigned which, const uint8_t *data, size_t size)`, `bool verify_complete(void)` (`verify.c`)
+
+Verified boot (design.md, "Verified boot"). `verify_manifest` checks
+`\cosmo\manifest` (NULL when it could not be read): size, trailer, key
+id in the compiled-in ring, Ed25519 signature, payload layout; it fills
+`key_id`. `verify_file` checks one file by its `COSMO_MANIFEST_*` index
+(NULL when it could not be read) against its size and SHA-512. Both
+`die()` with `EFI_SECURITY_VIOLATION` and a line naming the file on any
+failure. `verify_complete` is true when all three were checked. Built
+with `CONFIG_VERIFY_BOOT=0` they check nothing and `verify_complete` is
+false.
 
 ### `void die(const char *what, EFI_STATUS status)` (noreturn)
 

@@ -10,6 +10,7 @@
 #   make test-smp2    the same boot test with two CPUs (the default is four)
 #   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
+#   make test-security roadmap M5: verified boot refuses tampered files; VERIFY_BOOT=0 says so (CI: BUILD=release)
 #   make test-net-login roadmap M4: DHCP, wget by address and by name on the installed system (CI: BUILD=release)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
@@ -33,7 +34,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-entropy test-install test-busybox test-net-login test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-gic test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible compile-commands check-tools check-secrets clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -70,9 +71,31 @@ $(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE
 	$(call log,ARCHIVE,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
 
-$(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(BOOT_ARCHIVE) $(ROOT)/scripts/mkimage.sh $(ROOT)/scripts/mkgpt.py
+# The command line, \cosmo\cmdline (docs/boot/design.md, "The command
+# line"). It is signed with the kernel and the archive, so it is fixed at
+# build time: root=boot-disk names the CosmoOS root partition on the disk
+# the loader was read from, which the live image does not have and the
+# installed disk does (roadmap M5: the installer signs nothing and writes
+# no file on the ESP). Rewritten only when CMDLINE changes.
+CMDLINE ?= root=boot-disk
+CMDLINE_FILE := $(OUT)/cmdline
+FORCE:
+$(CMDLINE_FILE): FORCE
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '%s\n' '$(CMDLINE)' > $@.tmp
+	$(Q)if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+
+# The signed manifest over kernel, archive and command line (scripts/
+# mkmanifest.py, docs/boot/design.md "Verified boot"), with the key that
+# signs modules: the loader trusts the ring the kernel trusts.
+MANIFEST := $(OUT)/manifest
+$(MANIFEST): $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MODSIGN_KEY) $(ROOT)/scripts/mkmanifest.py $(ROOT)/scripts/modsign.py
+	$(call log,MANIFEST,$@)
+	$(Q)$(PYTHON) $(ROOT)/scripts/mkmanifest.py sign --key $(MODSIGN_KEY) --out $@ $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE)
+
+$(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(ROOT)/scripts/mkimage.sh $(ROOT)/scripts/mkgpt.py
 	$(call log,IMAGE,$@)
-	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE)
+	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST)
 
 run: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
@@ -155,7 +178,19 @@ test-busybox: $(IMAGE)
 test-install: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/install_test.py --image $(IMAGE) --workdir $(OUT)/test-install \
-		--timeout $(BOOT_TIMEOUT)
+		--timeout $(BOOT_TIMEOUT) --key $(MODSIGN_KEY)
+
+# Roadmap M5's acceptance test (tests/boot/security_test.py,
+# docs/boot/testing.md, "test-security"): the signed image boots and says
+# so; a copy with one byte of the kernel, the archive or the command line
+# changed, a manifest signed by another key, a forged key id and a missing
+# manifest are each refused by the loader before the kernel runs; the
+# VERIFY_BOOT=0 loader boots the tampered kernel and says UNVERIFIED BOOT.
+# CI: BUILD=release, a job of its own.
+test-security: $(IMAGE) $(LOADER_EFI_NOVERIFY)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/security_test.py --image $(IMAGE) --noverify-loader $(LOADER_EFI_NOVERIFY) \
+		--key $(MODSIGN_KEY) --workdir $(OUT)/test-security --timeout $(BOOT_TIMEOUT)
 
 # Roadmap M4's acceptance test (tests/boot/net_login_test.py,
 # docs/userland/testing.md, "test-net-login"): the installed system on QEMU
