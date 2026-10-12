@@ -133,3 +133,39 @@ line struck. Docs: `docs/userland/design.md` ("The installer"),
 
 The matrix of `AGENTS.md`, local (macOS host, QEMU at default priority),
 both architectures: see the PR description for each step's result.
+
+## PR 2 (as built): the CI image and the reproducible release set
+
+### Decision 7: the CI container
+
+| Was | Now |
+|---|---|
+| every job pulled `debian:trixie` (`debian:sid` for litmus) by tag from ECR Public's mirror and ran `apt-get install` | `ci/Dockerfile` with two targets, `toolchain` (trixie) and `litmus` (sid + herdtools7), both bases pinned by digest (`debian:trixie@sha256:913f6706...`, `debian:sid@sha256:c53e0503...`, resolved from ECR Public on 2026-10-12) |
+| | job `image` runs `scripts/ci-image.sh ghcr.io/vkuttyp/cosmoos-ci`: the tag is the target and the Dockerfile's SHA-256 prefix; it is built and pushed only when that tag is not in the registry, and the job outputs `ghcr.io/vkuttyp/cosmoos-ci@sha256:...` for each target |
+| | every other job `needs: image` and runs in `${{ needs.image.outputs.toolchain }}` (litmus: `litmus`), pulled from this repository's GitHub Container Registry with the job's token; workflow permission `packages: read`, `packages: write` for `image` alone |
+
+The rate-limit failures this ends happened before any code ran: Docker
+Hub (run 37991912859) and ECR Public ("Data limit exceeded", M4). The
+packages inside an image are fixed by its digest, not by the Dockerfile,
+so each image records them in `/usr/share/cosmoos-ci/packages.txt`, and
+the release notes copy the compiler and QEMU versions from there.
+
+### Decision 8, first half: `make release`
+
+`make release` runs `release-set` with `BUILD=release`, and
+`scripts/mkrelease.py` copies the image, loader, kernel, archive,
+command line and manifest into `out/release/<arch>/` as
+`cosmoos-<arch>.img`, `cosmoos-<arch>-BOOTX64.EFI` (`BOOTAA64.EFI`),
+`cosmoos-<arch>-kernel.elf`, `-boot.tar`, `-cmdline`, `-manifest`, with
+`SHA256SUMS` in `sha256sum -c` form. Signed with what `SIGNING` selects;
+the release workflow (PR 5) passes the release key.
+
+`make reproducible` now also builds `image` and `release-set` in both
+trees and compares `cmdline`, `manifest`, `cosmoos.img` and the set's
+`SHA256SUMS`; self-test fixtures absent from both trees of a release
+build are reported `absent`, anything else missing fails. The FAT image
+was already deterministic: `mkimage.sh` gives `mformat` a fixed serial,
+and two runs on the same inputs a minute apart, with the kernel's mtime
+changed between them, gave identical bytes (mtools 4.0.49). CI's new
+`release-set` job runs `make reproducible BUILD=release` and uploads one
+`make release` per architecture.
