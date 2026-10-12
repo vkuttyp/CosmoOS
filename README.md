@@ -20,6 +20,19 @@ observability, security, portability, performance, optimization.
 
 ## What exists
 
+- **A usable system (the 1.0 roadmap, M1-M5):** an installer
+  (`cosmo-install`) that puts the system on a GPT disk with a cosmofs
+  root, which init mounts and switches to, packages included; Linux
+  `fork`, `vfork` and `execve` with copy-on-write; static musl BusyBox
+  1.37 `ash` as the shell with job control on the console and on
+  pseudo-terminals (`/dev/ptmx`, `/dev/pts`); a DHCP client in the
+  kernel and DNS for userland (BusyBox `wget` and `nslookup`, HTTP
+  only); ssh login by key with static dropbear; a verified boot chain
+  (the UEFI loader checks an Ed25519-signed manifest over the kernel,
+  boot archive and command line); user-space ASLR; operation-specific
+  privileges instead of an all-powerful uid 0; and sound randomness
+  (`getrandom` that blocks until the pool is seeded from RDSEED/RDRAND,
+  RNDR or virtio-rng).
 - **Kernel core:** SMP scheduling with per-CPU run queues, migration, a
   pull load balancer and priority inheritance; buddy and slab memory,
   demand paging and file-backed mappings; reference-counted kernel objects
@@ -49,8 +62,8 @@ observability, security, portability, performance, optimization.
   crash-consistency replay. CI boots both architectures and runs the host
   tests and fuzzers.
 
-The path to 1.0 is the [1.0 roadmap](docs/roadmap-1.0.md); what else
-remains open, and why, is in [`docs/plan.md`](docs/plan.md).
+1.0 is the [1.0 roadmap](docs/roadmap-1.0.md) completed; what remains
+open after it, and why, is in [`docs/plan.md`](docs/plan.md).
 
 ## Targets
 
@@ -84,7 +97,8 @@ Each source directory has a `README.md` stating its ownership boundary.
 
 ## Quick start
 
-On an ARM64 or x86-64 Debian/Ubuntu host:
+To run the release images, follow the [user guide](docs/guide/README.md).
+To build from source, on an ARM64 or x86-64 Debian/Ubuntu host:
 
 ```sh
 scripts/setup-dev-linux.sh   # clang/lld/llvm, make, mtools, QEMU + UEFI firmware for both arches
@@ -105,15 +119,30 @@ Pass `ARCH=aarch64` for AArch64 and `BUILD=release` for a release build;
 | [`docs/README.md`](docs/README.md) | Index of subsystem documentation and the per-subsystem convention |
 | [`docs/development.md`](docs/development.md) | Host setup, building, running, testing, CI |
 | [`docs/history/`](docs/history/README.md) | What was built, phase by phase and unit by unit |
+| [`docs/guide/`](docs/guide/README.md) | The user guide: installing, the shell, networking, ssh, packages, privileges, known limitations |
 | [`docs/roadmap-1.0.md`](docs/roadmap-1.0.md) | The 1.0 definition of done and its milestones |
-| [`docs/plan.md`](docs/plan.md) | Remaining work, grouped by area |
+| [`docs/plan.md`](docs/plan.md) | Work after 1.0, grouped by area |
 | [`docs/audit/`](docs/audit/README.md) | Architecture audits, the deferred-work inventory and per-unit reports |
 
 ## Status
 
-The constitution's roadmap (Phases 0-13) and the post-roadmap audit's
-milestones are complete, followed by subsystem units chosen one at a
-time from the [deferred-work inventory](docs/audit/2026-09-deferred-work-inventory.md).
-The latest milestone is lock discipline and lockdep hardening
-(PRs #302-#308). Work now proceeds milestone by milestone along the
-[1.0 roadmap](docs/roadmap-1.0.md), design documents first.
+**CosmoOS 1.0** is the [1.0 roadmap](docs/roadmap-1.0.md) completed: it
+installs to a disk, reboots into it, is used through BusyBox `ash`, keeps
+files across reboots, reaches the network by name, accepts an ssh login,
+and has a verified boot chain and sound randomness, on x86-64 and
+AArch64 under QEMU, all checked by CI. The release images are signed and
+rebuild bit for bit from their tag (`make release`). Start with the
+[user guide](docs/guide/README.md); what was built, milestone by
+milestone, is in [`docs/history/`](docs/history/README.md) and the
+milestone reports in [`docs/audit/`](docs/audit/README.md).
+
+## Not in 1.0
+
+QEMU is the only tested machine: there is no physical hardware matrix,
+no GPU or display beyond a framebuffer console, no hotplug, no NUMA, no
+huge pages, no live migration, no RAID-Z, no eBPF, no more than 64 CPUs,
+and the Intel VMX backend has not run on hardware. There is no KASLR,
+and `wget` speaks HTTP only. The guide's
+[Known limitations](docs/guide/limitations.md) page lists what a user
+will meet; [`docs/plan.md`](docs/plan.md) is the work that remains after
+1.0, by area.
