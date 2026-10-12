@@ -298,10 +298,42 @@ The notes it wrote carry the release key and its id, the toolchain image
 `ghcr.io/vkuttyp/cosmoos-ci@sha256:f6aee147...be385` and litmus image
 `@sha256:c8b16f9c...5a5a9`, clang/lld/llvm 19, QEMU 10.0.13, OVMF and
 AAVMF 2025.02, mtools 4.0.48, the four pinned third-party digests, and
-the limitations page. The fix the dry run needed was none; review of the
-stack after it changed the guide (a wait for dropbear before the first
-ssh), the runner, and `mkrelease.py`/`ci-image.sh`, so a second dry run
-(`v1.0.0-rc2`) ran on the final head before the merge (below).
+the limitations page.
+
+### After review: `v1.0.0-rc2`, `-rc3`, `-rc4`
+
+Review of #372-#374 changed the guide (a wait for dropbear before the
+first ssh, `(no output)`), the runner and `mkrelease.py`/`ci-image.sh`,
+so the dry run was repeated on the final head:
+
+- **rc2** was cancelled and its tag deleted before it finished: CI's
+  Linux AArch64 guide job on #374 had just shown a review change wrong.
+  Restricting exit status 33 to x86-64 QEMU sessions broke AArch64,
+  whose semihosting exit reports a clean power-off as 33 too
+  (`kernel/arch/aarch64/shutdown.c`); fixed, and every QEMU session
+  accepts 0 or 33 again (ssh must end 0).
+- **rc3** (run 38280733354): 19 of 20 jobs green; `guide (macos,
+  aarch64)` failed on the firmware-handover stall, its sixth sighting
+  and the first on AArch64 or macOS (`docs/testing/flakes.md`): edk2
+  never handed over to the loader. The guide runner was the one QEMU
+  launcher without the harnesses' single retry; its QEMU sessions now use
+  `tests/boot/firmware_stall.py` too (checked with a fake QEMU that
+  stalls once: retried after 30 s, the stalled attempt's log kept, the
+  second attempt passes). Its tag stays as the record of the sighting.
+- **rc4** (run 38282688120, the head with every fix), every job green:
+
+| Job | x86-64 | AArch64 |
+|---|---|---|
+| build a / build b (release key) | 199 s / 198 s | 177 s / 219 s |
+| two builds compared | identical, 7 files; image sha256 `6b745997...818f09d9` | identical, 7 files; image sha256 `0dfa1222...4290badee` |
+| test-entropy | pass 208 s | pass 242 s |
+| test-install | pass 181 s | pass 254 s |
+| test-busybox | pass 190 s | pass 244 s |
+| test-net-login | pass 237 s | pass 259 s |
+| test-security | pass 276 s | pass 300 s |
+| guide, Linux | PASS: 12 host blocks, 7 sessions, 20 console blocks | PASS: 13/7/20 |
+| guide, macOS | PASS 72 s | PASS 93 s |
+| GitHub release | pre-release `v1.0.0-rc4`, 13 files | |
 
 M6 is ticked in `docs/roadmap-1.0.md` by this PR; `v1.0.0` is tagged on
 its merge commit once main's CI is green on it, and the README and the
