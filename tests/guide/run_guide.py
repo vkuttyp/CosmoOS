@@ -31,8 +31,10 @@ one is an error, so no command can be left untested.
       `...` matches any text. A command followed by the single line
       `(no output)` must print nothing but the kernel's own log lines
       (`[ INFO] ...`). `exit` (or `poweroff`) ends the session: the process
-      must exit 0, or, for an x86-64 QEMU session, 33 (the debug-exit
-      device's clean power-off).
+      must exit 0, or, for a QEMU session, 33: the status CosmoOS's clean
+      power-off gives QEMU on both machines (x86-64's debug-exit device
+      and AArch64's semihosting exit, docs/development.md "Exit-code
+      contract").
 
 A block whose host or architecture does not match the run is skipped:
 the guide gives x86-64 and AArch64, Linux and macOS variants of the steps
@@ -201,9 +203,10 @@ class Session:
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         threading.Thread(target=self._read, daemon=True).start()
         self.cmd = cmd
-        # 33 is a clean power-off only through x86-64 QEMU's debug-exit
-        # device; any other session (ssh) must end 0.
-        self.ok_status = (0, 33) if cmd.split()[0] == "qemu-system-x86_64" else (0,)
+        # 33 is a clean power-off only from QEMU (both machines: the
+        # debug-exit device and the semihosting exit report the kernel's
+        # success the same way); any other session, ssh, must end 0.
+        self.ok_status = (0, 33) if cmd.split()[0].startswith("qemu-system-") else (0,)
 
     def _read(self):
         while True:
