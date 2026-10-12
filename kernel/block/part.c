@@ -318,12 +318,18 @@ struct blkdev *blk_find_sibling_typed(const uint8_t uuid[16], const uint8_t type
     unsigned n = 0;
     mutex_lock(&g_part_lock);
     struct blkpart *p, *self = NULL;
+    unsigned same = 0;
     list_for_each_entry(p, &g_parts, link) {
         if (memcmp(p->uuid, uuid, 16) == 0) {
             self = p;
-            break;
+            same++;
         }
     }
+    /* Two partitions carrying the loader's GUID (a cloned disk) do not say
+     * which disk the loader came from: no answer rather than the first
+     * one enumerated (PR #368 review). */
+    if (same > 1)
+        self = NULL;
     if (self != NULL) {
         list_for_each_entry(p, &g_parts, link) {
             if (p->disk == self->disk && memcmp(p->type, type, 16) == 0) {

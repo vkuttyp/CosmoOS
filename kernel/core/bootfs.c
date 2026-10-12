@@ -68,7 +68,8 @@ const char *bootfs_root_spec(void)
  * disk by the loader's own partition instead, and the installer, which
  * copies the ESP byte for byte, writes nothing on it (docs/boot/design.md,
  * "Verified boot"). The live image's disk has no root partition: -ENODEV,
- * and the live root stays. More than one: -EEXIST, and so does it.
+ * and the live root stays. More than one, or the loader's GUID on two
+ * disks: -EEXIST / -ENODEV, and so does it.
  */
 static int boot_disk_root(struct blkdev **out)
 {

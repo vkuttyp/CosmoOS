@@ -376,13 +376,20 @@ def stage_fallback(args, results):
         need(log, r"^init: cannot mount vda \(root=vda\): .*; staying on the live root$", "the fallback boot")
         out = b.run("ls /boot && echo live-ok")
         need(out, r"^live-ok$", "the live shell after a failed root")
+        # Its signed command line is not root=boot-disk: an install from it
+        # would not boot its own root, so the installer refuses (M5).
+        out = b.status("cosmo-install vda", "refuse-status")
+        need(out, r"^refuse-status=3$", "cosmo-install from a root=vda image")
+        need(out, r"^cosmo-install: this image's signed command line says root=vda, not root=boot-disk; ",
+             "cosmo-install from a root=vda image")
         rc = b.finish()
         if rc != EXIT_SUCCESS:
             raise Fail(f"fallback boot: QEMU exit code {rc}")
     except Exception:
         b.kill()
         raise
-    results.append(f"fallback: PASS in {b.elapsed():.1f}s (root=vda unmountable: live shell)")
+    results.append(f"fallback: PASS in {b.elapsed():.1f}s (root=vda unmountable: live shell; cosmo-install refuses "
+                   "an image not saying root=boot-disk)")
 
 
 def main():

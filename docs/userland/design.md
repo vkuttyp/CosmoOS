@@ -532,7 +532,9 @@ Roadmap M2. Non-interactive; everything through `/dev/blkctl`
    and says `root=boot-disk`: the CosmoOS root partition on the disk the
    loader was read from, which is partition 2 once the installed disk
    boots (docs/boot/design.md, "Verified boot"). The installer writes
-   nothing on the ESP and signs nothing.
+   nothing on the ESP and signs nothing, and so refuses (exit 3) an image
+   whose signed command line says anything else (`kernel.root` is not
+   `boot-disk`): that disk would not boot its own root.
 5. `FORMAT` partition 2 as cosmofs, mount it at `/mnt/cosmo-install`,
    create `/dev`, `/proc`, `/tmp` (01777), `/mnt`, `/var`, `/var/log`,
    `/boot`, and copy `/bin`, `/sbin`, `/etc` and, when present, `/usr`

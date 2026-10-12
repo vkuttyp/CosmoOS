@@ -319,8 +319,9 @@ NULL. Used to resolve `root=PARTUUID=`.
 
 `struct blkdev *blk_find_sibling_typed(const uint8_t uuid[16], const uint8_t type[16], unsigned *matches)`:
 the one partition of `type` on the disk holding partition `uuid`,
-referenced; NULL when there is none, `uuid` is unknown, or the disk has
-more than one (`*matches` says how many). Used to resolve
+referenced; NULL when there is none, `uuid` is unknown or carried by
+more than one partition (a cloned disk), or the disk has more than one
+of `type` (`*matches` says how many). Used to resolve
 `root=boot-disk` (roadmap M5).
 
 ### `enum gpt_result gpt_parse(uint32_t ss, uint64_t nsectors, gpt_read_fn read, void *ctx, void *scratch, struct gpt_table *out, const char **why)`

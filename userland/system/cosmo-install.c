@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include <cosmo/auxv.h>
+#include <cosmo/sysctl.h>
 #include <kernel/crypto.h>
 #include <kernel/gpt.h>
 #include <uapi/cosmo/blkctl.h>
@@ -405,6 +406,17 @@ static int install(const char *target_name, bool force)
             boot = &g_devs[i];
     if (boot == NULL) {
         fprintf(stderr, "cosmo-install: the loader was not read from a GPT partition; there is no ESP to copy\n");
+        return 3;
+    }
+    /* The ESP is copied with its signed command line (roadmap M5): only
+     * root=boot-disk names the root partition this install makes. An
+     * image built with another CMDLINE would install "successfully" and
+     * then boot some other root, or none (PR #368 review). */
+    char root_spec[160];
+    long rn = sysctl_get("kernel.root", root_spec, sizeof(root_spec));
+    if (rn < 0 || rn >= (long)sizeof(root_spec) || strcmp(root_spec, "boot-disk") != 0) {
+        fprintf(stderr, "cosmo-install: this image's signed command line says root=%s, not root=boot-disk; "
+                "the installed disk would not boot its own root\n", rn >= 0 ? root_spec : "?");
         return 3;
     }
     const struct cosmo_blkctl_dev *t = find_dev(target_name);
