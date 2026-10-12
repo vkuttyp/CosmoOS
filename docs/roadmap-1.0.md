@@ -87,9 +87,15 @@ completed for ACPI, objects, syscalls and cosmofs; a user guide (install,
 use, network, ssh); README status made accurate; tagged reproducible
 release images for both architectures.
 
-- [ ] **Acceptance:** the tagged release images for x86-64 and AArch64
+- [x] **Acceptance:** the tagged release images for x86-64 and AArch64
   rebuild bit-for-bit from the tag, boot, and pass the M1-M5 acceptance
-  tests in CI; the docs and user guide listed above exist.
+  tests in CI; the docs and user guide listed above exist. Done
+  2026-10-12: the release workflow (`.github/workflows/release.yml`)
+  builds each architecture twice from the tag, compares them, runs
+  `test-entropy`, `test-install`, `test-busybox`, `test-net-login`,
+  `test-security` and the user guide's commands against the published
+  bytes, and publishes `v1.0.0` (PRs #371-#375;
+  [report](audit/2026-10-12-m6-release-report.md)).
 
 ## Out of scope for 1.0
 
