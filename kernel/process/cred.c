@@ -10,7 +10,15 @@
 #include <kernel/errno.h>
 #include <kernel/string.h>
 
-const struct credentials cred_kernel = { 0 };
+const struct credentials cred_kernel = { .privs = PRIV_ALL };
+
+void cred_ids_changed(struct credentials *c, uint32_t old_ruid, uint32_t old_euid, uint32_t old_suid)
+{
+    bool had_root = old_ruid == CRED_ROOT_UID || old_euid == CRED_ROOT_UID || old_suid == CRED_ROOT_UID;
+    bool has_root = c->ruid == CRED_ROOT_UID || c->euid == CRED_ROOT_UID || c->suid == CRED_ROOT_UID;
+    if (had_root && !has_root)
+        c->privs = 0;
+}
 
 bool cred_in_group(const struct credentials *c, uint32_t gid)
 {
@@ -50,21 +58,25 @@ static int setres_common(uint32_t *r, uint32_t *e, uint32_t *s, int64_t nr, int6
 
 int cred_setresuid(struct credentials *c, int64_t ruid, int64_t euid, int64_t suid)
 {
-    /* Privilege is judged before the change: a root process may drop to
-     * any ids in one call; a process that is not root may only shuffle. */
-    return setres_common(&c->ruid, &c->euid, &c->suid, ruid, euid, suid, cred_privileged(c));
+    /* Privilege is judged before the change: a PRIV_CRED process may move
+     * to any ids in one call; one without it may only shuffle its own. */
+    uint32_t r = c->ruid, e = c->euid, s = c->suid;
+    int rc = setres_common(&c->ruid, &c->euid, &c->suid, ruid, euid, suid, cred_has(c, PRIV_CRED));
+    if (rc == 0)
+        cred_ids_changed(c, r, e, s);
+    return rc;
 }
 
 int cred_setresgid(struct credentials *c, int64_t rgid, int64_t egid, int64_t sgid)
 {
-    return setres_common(&c->rgid, &c->egid, &c->sgid, rgid, egid, sgid, cred_privileged(c));
+    return setres_common(&c->rgid, &c->egid, &c->sgid, rgid, egid, sgid, cred_has(c, PRIV_CRED));
 }
 
 int cred_setgroups(struct credentials *c, const uint32_t *groups, unsigned n)
 {
     if (n > CRED_NGROUPS_MAX)
         return -EINVAL;
-    if (!cred_privileged(c))
+    if (!cred_has(c, PRIV_CRED))
         return -EPERM;
     c->ngroups = n;
     for (unsigned i = 0; i < n; i++)
@@ -74,7 +86,7 @@ int cred_setgroups(struct credentials *c, const uint32_t *groups, unsigned n)
 
 bool cred_may_signal(const struct credentials *sender, const struct credentials *target)
 {
-    if (cred_privileged(sender))
+    if (cred_has(sender, PRIV_PROC))
         return true;
     return sender->ruid == target->ruid || sender->ruid == target->suid || sender->euid == target->ruid ||
            sender->euid == target->suid;

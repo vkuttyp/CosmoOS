@@ -39,7 +39,7 @@ struct blkctl_open {
 static int blkctl_open_file(struct vnode *vn, struct file *f)
 {
     (void)vn;
-    if (!cred_privileged(cred_current()))
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
         return -EPERM;   /* the mode is 0600 as well; this is the check that cannot be chmod'ed away */
     struct blkctl_open *o = kmalloc(sizeof(*o), KMEM_ZERO);
     if (o == NULL)
@@ -175,7 +175,7 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     struct blkctl_open *o = f->priv;
     if (o == NULL)
         return -EINVAL;
-    if (!cred_privileged(cred_current()))
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
         return -EPERM;   /* the fd may have outlived the privilege that opened it */
     if (len < sizeof(struct cosmo_blkctl))
         return -EINVAL;

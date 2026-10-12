@@ -18,7 +18,11 @@ off one.
 | `/proc/<pid>/limits` | file, 0444 | one `name: value` line per `COSMO_RLIMIT_*` |
 
 `status` holds `name`, `pid`, `ppid`, `state` (`running`, `exiting`,
-`exited`), `uid`, `gid`, `domain`, `threads`, `syscalls`, `cpu_ns`.
+`exited`), `uid`, `gid`, `privs` (roadmap M5: the privileges by name,
+`mount sys_admin net proc cred device` or a subset, `none` when there are
+none), `domain`, `threads`, `syscalls`, `cpu_ns`. No file renders a
+kernel address (an open handle that is not a file or a terminal is named
+by its kind alone).
 `limits` names `as`, `mem`, `nofile`, `nproc` and `vmem`, with
 `unlimited` for `COSMO_RLIM_INFINITY`.
 

@@ -10,40 +10,67 @@ ownership of new files, `setres*` and privilege gates on `mount`,
 This milestone records the decision the audit asked for, adds the
 missing primitive, and bounds what an unprivileged process can consume.
 
-## 1. The privilege model: privilege flows down
+## 1. The privilege model: operation-specific privileges
 
-**Decision.** There are no setuid executables and no capability set in
-this milestone. A process is privileged if and only if its effective uid
-is 0 (`cred_privileged`), and a process becomes privileged only by being
-created by a privileged process. The transition primitive is `spawn`:
-`COSMO_SPAWN_SETCRED` names the credentials the child starts with. A
-privileged caller may name any uid and gid; an unprivileged caller only
-ids it already holds (the `setresuid` rule). The child starts with real,
-effective and saved ids equal to the named ones and **no supplementary
-groups**. The `S_ISUID`/`S_ISGID` mode bits of an executable are stored
-and ignored: `spawn` never raises the child's ids above the caller's.
+**Decision (roadmap M5, replacing the interim `cred_privileged` rule).**
+A process holds a subset of a small fixed set of privileges, a bitmask in
+`struct credentials` (`privs`; `PRIV_*` in `kernel/cred.h`, `COSMO_PRIV_*`
+in the ABI; at most 16 in 1.0):
 
-Why not setuid binaries: they make every setuid program's argument
-parsing, environment handling and file access part of the trusted
-computing base, and the tree has one root-owned service manager (`init`)
-whose job is exactly to start services with the right identity. Why not
-capabilities yet: the boundary is one predicate consulted in nine
-places; a capability set replaces the body of `cred_privileged` and adds
-a mask to `struct credentials` without changing any call site, and the
-decision of which capabilities exist should follow the container work
-(§53) that needs them. Recorded as future work, not done here.
+| Privilege | What it allows |
+|---|---|
+| `PRIV_MOUNT` | `mount`, `umount`, `switch_root`; a new mount namespace and a child's root (`COSMO_SPAWN_NEWMOUNTNS`, `SETROOT`) |
+| `PRIV_SYS_ADMIN` | sysctl writes (`SYS_sysctl_set`, `sethostname`), `/dev/blkctl`, `/dev/fsctl`, `klog`, an unthrottled `log`, a new domain or uts namespace, overriding file permissions, ownership and the sticky bit; module load and unload would be here, but there is no door for them (modules load from the boot archive only) |
+| `PRIV_NET` | `/dev/net/tapctl` (netctl configuration), binding a port below 1024 |
+| `PRIV_PROC` | signalling any process, seeing and inspecting any process (`procinfo`, `/proc`), raising a resource limit |
+| `PRIV_CRED` | spawning with other ids (`SETCRED`), changing uid, gid and groups beyond the POSIX unprivileged rule |
+| `PRIV_DEVICE` | opening raw device nodes: `/dev/net/tap`, `/dev/vmm` (what `vmctl` needs) |
 
-Consequences the code enforces:
+Rules the code enforces:
 
-- `spawn` with `SETCRED` from an unprivileged caller naming a uid or gid
-  outside its real, effective and saved set is `-EPERM`.
-- A child created without `SETCRED` inherits its parent's credentials
-  by copy, as before.
-- `procinfo` shows an unprivileged caller only the processes whose real
-  uid is its own; a privileged caller sees every process. `klog` stays
-  privileged. `log` (the user-to-kernel-log call) is rate limited per
-  process for unprivileged callers: a token bucket of 64 lines that
-  refills at 16 lines per second; over it, `-EAGAIN`.
+- **Every privileged operation names one privilege** and asks
+  `cred_has(c, PRIV_X)`. Effective uid 0 by itself grants nothing:
+  `cred_privileged` is gone. The table of the thirty sites it had, and the
+  privilege each now asks for, is in the M5 report
+  (`docs/audit/2026-10-12-m5-security-baseline-report.md`).
+- **Init starts with all of them**: a kernel-created process takes
+  `cred_kernel`, whose `privs` is `PRIV_ALL`; kernel threads have the same.
+- **Inherited, and only ever dropped.** Fork, spawn and exec copy them.
+  `COSMO_SPAWN_DROPPRIV` with `priv_drop` gives a child fewer; nothing
+  gives one back -- there is no call that adds a privilege, a child's are
+  its parent's less what was dropped, and exec of any file changes
+  nothing (there are no setuid or file privileges). The only other change
+  is the **id rule**: credentials that had a 0 among their real,
+  effective and saved uids and have none after a `setres*uid` or a
+  `SETCRED` spawn lose every privilege (`cred_ids_changed`), as Linux
+  clears capabilities on setuid -- a server that switches to a user's ids
+  leaves that user nothing it held. Changing back to uid 0 adds nothing.
+  No new native call and no Linux `prctl` door were needed: neither
+  BusyBox nor dropbear asks for one; the drop happens at spawn.
+- **Credentials are otherwise the process's own**: uids, gids and groups
+  change only through that process's own `setres*`/`setgroups`, under the
+  POSIX rule without `PRIV_CRED` and freely with it.
+- **Raw devices name their privilege** in `chrdev_ops.open_priv`, checked
+  in `ramfs_chr_open` on top of the node's mode, so `chmod` cannot open
+  them to everyone; handlers that act later (`blkctl`, `fsctl`, `tapctl`
+  writes) check again, since a handle can outlive the privilege that
+  opened it.
+
+The service manager gives each service exactly what its file lists
+(`privileges net cred`, `docs/userland/design.md`, "Services"); a file
+without the line runs the service with the supervisor's. The ssh server
+the installer configures has `net` (port 22) and `cred` (a session's
+`setgid`/`initgroups`/`setuid`) and nothing else, so a root login over ssh
+can neither mount, administer, signal others' processes nor open raw
+devices. `/sbin/priv` shows a process's privileges and runs a command
+with fewer (`priv -d mount -- cmd`, `priv -k mount -- cmd`).
+
+What remains as before: no setuid executables (`S_ISUID`/`S_ISGID` are
+stored and ignored), credentials named at spawn (`COSMO_SPAWN_SETCRED`)
+start with no supplementary groups, `procinfo` shows a viewer without
+`PRIV_PROC` only processes of its own real uid, `log` is a token bucket of
+64 lines refilling at 16 per second for a process without
+`PRIV_SYS_ADMIN`.
 
 ## 1b. Per-process roots
 

@@ -2277,14 +2277,14 @@ static int64_t lx_setuid(struct syscall_args *a)
 {
     const struct credentials *c = cred_current();
     int64_t u = lx_id(a->a[0]);
-    return cred_privileged(c) ? process_setresuid(u, u, u) : process_setresuid(-1, u, -1);
+    return cred_has(c, PRIV_CRED) ? process_setresuid(u, u, u) : process_setresuid(-1, u, -1);
 }
 
 static int64_t lx_setgid(struct syscall_args *a)
 {
     const struct credentials *c = cred_current();
     int64_t g = lx_id(a->a[0]);
-    return cred_privileged(c) ? process_setresgid(g, g, g) : process_setresgid(-1, g, -1);
+    return cred_has(c, PRIV_CRED) ? process_setresgid(g, g, g) : process_setresgid(-1, g, -1);
 }
 
 /* setreuid(r, e): the saved id follows the effective one whenever the

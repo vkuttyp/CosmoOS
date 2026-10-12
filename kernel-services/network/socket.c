@@ -249,7 +249,7 @@ int ksock_bind(struct socket *s, const struct netaddr *addr)
     /* Reserved ports are judged on the caller's credentials at bind time,
      * not on who created the socket: a handle inherited from a privileged
      * process, or kept across setresuid, confers nothing. */
-    if (addr->port != 0 && addr->port < 1024 && !cred_privileged(cred_current()))
+    if (addr->port != 0 && addr->port < 1024 && !cred_has(cred_current(), PRIV_NET))
         return -EPERM;
     mutex_lock(&s->lock);
     int rc;

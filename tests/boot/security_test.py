@@ -33,6 +33,15 @@ varies the same way and the ET_EXEC and native images stay at their link
 address. Every run also reports code on its stack faulting with SIGSEGV
 and a writable-and-executable mmap or mprotect refused with EINVAL.
 
+Stage `priv` (operation-specific privileges, docs/kernel/security/design.md
+§1): one boot runs /boot/tests/security/priv.sh with BusyBox ash as root.
+mount succeeds as root, fails with EPERM without PRIV_MOUNT, still fails
+when the dropped process asks for every privilege back, succeeds with
+PRIV_MOUNT alone, fails for uid 1000; sysctl kernel.hostname=... and
+kill of another user's process (native kill and ash's builtin) behave the
+same with PRIV_SYS_ADMIN and PRIV_PROC; an unprivileged process reads no
+kernel log and no kernel address anywhere in /proc or the sysctls.
+
 The image's files are read and written through mtools at partition 1's
 offset (scripts/mkmanifest.py). Every boot's serial log is kept in the
 work directory. Exit 0 PASS, 1 FAIL.
@@ -331,13 +340,72 @@ def stage_aslr(args, results):
                    "; W^X: stack code SIGSEGV, W+X mmap/mprotect EINVAL")
 
 
+ALL_PRIVS = "mount sys_admin net proc cred device"
+PRIV_EXPECT = {
+    "privs-root": ALL_PRIVS,
+    "mount-root": "0",
+    "umount-root": "0",
+    "mount-dropped": "1",
+    "privs-dropped": "sys_admin net proc cred device",
+    "mount-regain": "1",
+    "privs-regain": "sys_admin net proc cred device",
+    "mount-regain-sh": "1",
+    "mount-granted": "0",
+    "privs-granted": "mount",
+    "umount-granted": "0",
+    "mount-user": "1",
+    "privs-user": "none",
+    "sysctl-root": "0",
+    "sysctl-dropped": "1",
+    "sysctl-granted": "0",
+    "hostname-now": "kernel.hostname = m5-granted",
+    "kill-granted": "0",
+    "victim-gone": "143",   # the victim's sleep, ended by SIGTERM
+    "seen-kernel-addresses": "0",
+}
+PRIV_NONZERO = ("kill-dropped", "kill-dropped-linux", "kill-user", "dmesg-user")
+
+
+def stage_priv(args, results):
+    image = variant(args, "priv")
+    b = Boot("priv", image, args.workdir, {}, args.timeout)
+    try:
+        b.wait_prompt("the first prompt")
+        out = b.run("/bin/sh /boot/tests/security/priv.sh")
+        need(out, r"^priv-done$", "priv.sh")
+        got = dict(re.findall(r"^([a-z-]+)=(.*)$", out, re.M))
+        for k, want in PRIV_EXPECT.items():
+            if got.get(k) != want:
+                raise Fail(f"priv: {k} is {got.get(k)!r}, expected {want!r}")
+        for k in PRIV_NONZERO:
+            if got.get(k) in (None, "0"):
+                raise Fail(f"priv: {k} is {got.get(k)!r}, expected a failure")
+        if int(got.get("seen-bytes", "0")) < 1000:
+            raise Fail(f"priv: the unprivileged reader saw only {got.get('seen-bytes')} bytes")
+        # Each refusal is EPERM, by name: mount twice, the regains, the
+        # user's mount, sysctl, both kills of the dropped and the user's.
+        eperm = out.count("Operation not permitted")
+        if eperm < 9:
+            raise Fail(f"priv: {eperm} 'Operation not permitted' lines, expected at least 9: {out[-1500:]!r}")
+        rc = b.finish()
+        if rc != EXIT_SUCCESS:
+            raise Fail(f"priv boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"priv: PASS in {b.elapsed():.1f}s (mount: root 0, PRIV_MOUNT dropped EPERM, regain refused, "
+                   f"PRIV_MOUNT alone 0, uid 1000 EPERM; sysctl write and kill likewise with PRIV_SYS_ADMIN and "
+                   f"PRIV_PROC; uid 1000 read {got['seen-bytes']} bytes of /proc and sysctls, 0 kernel addresses, "
+                   f"no klog; {eperm} EPERM lines)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
     ap.add_argument("--noverify-loader", required=True)
     ap.add_argument("--key", help="the build's signing key (MODSIGN_KEY); the verify stage alone needs it")
     ap.add_argument("--workdir", required=True)
-    ap.add_argument("--stages", default="verify,aslr")
+    ap.add_argument("--stages", default="verify,aslr,priv")
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
     args = ap.parse_args()
     if "verify" in args.stages.split(",") and not args.key:
@@ -352,6 +420,8 @@ def main():
             stage_verify(args, results)
         if "aslr" in stages:
             stage_aslr(args, results)
+        if "priv" in stages:
+            stage_priv(args, results)
     except Fail as e:
         for r in results:
             print(f"test-security: {r}")

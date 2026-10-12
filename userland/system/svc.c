@@ -59,6 +59,11 @@ struct service {
     uint32_t uid, gid;
     char root[LINE_MAX_LEN];   /* empty: none */
     int mountns, utsns, domain;
+    /* Roadmap M5: `privileges LIST` keeps exactly those (COSMO_PRIV_*) and
+     * drops the rest at the spawn; without the line the service has the
+     * supervisor's. */
+    int has_privs;
+    uint32_t privs;
     struct {
         unsigned resource;
         unsigned long long value;
@@ -232,6 +237,27 @@ static int load(const char *name, struct service *s)
             }
         } else if (strcmp(key, "root") == 0) {
             snprintf(s->root, sizeof(s->root), "%s", val);
+        } else if (strcmp(key, "privileges") == 0) {
+            static const char *const names[COSMO_PRIV_COUNT] = { "mount", "sys_admin", "net", "proc", "cred",
+                                                                 "device" };
+            char buf[LINE_MAX_LEN];
+            snprintf(buf, sizeof(buf), "%s", val);
+            char *cur = buf;
+            s->has_privs = 1;
+            s->privs = 0;
+            for (char *tok = next_word(&cur); tok != NULL; tok = next_word(&cur)) {
+                if (strcmp(tok, "none") == 0)
+                    continue;
+                unsigned i;
+                for (i = 0; i < COSMO_PRIV_COUNT && strcmp(tok, names[i]) != 0; i++)
+                    ;
+                if (i == COSMO_PRIV_COUNT) {
+                    fprintf(stderr, "svc: %s:%d: no privilege called '%s'\n", name, lineno, tok);
+                    bad = 1;   /* never more than the file says, by a typo */
+                    continue;
+                }
+                s->privs |= 1u << i;
+            }
         } else if (strcmp(key, "mountns") == 0 || strcmp(key, "utsns") == 0 || strcmp(key, "domain") == 0) {
             int *field = key[0] == 'm' ? &s->mountns : key[0] == 'u' ? &s->utsns : &s->domain;
             if (yes_no(val, field) != 0) {
@@ -430,6 +456,8 @@ static int supervise(const char *name)
         flags |= COSMO_SPAWN_NEWUTSNS;
     if (s.domain)
         flags |= COSMO_SPAWN_NEWDOMAIN;
+    if (s.has_privs)
+        flags |= COSMO_SPAWN_DROPPRIV;
 
     /* The service's output is its log, and so are the supervisor's own
      * notes: one file per service, which `cat` reads. */
@@ -453,6 +481,7 @@ static int supervise(const char *name)
             .uid = s.uid,
             .gid = s.gid,
             .root = s.root[0] ? s.root : NULL,
+            .priv_drop = COSMO_PRIV_ALL & ~s.privs,
         };
         long pid = cosmo_spawn(&req);
         if (pid < 0) {

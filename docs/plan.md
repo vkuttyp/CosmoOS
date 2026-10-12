@@ -22,7 +22,8 @@
 > progress ([report](audit/2026-10-12-m5-security-baseline-report.md)):
 > PR 1, verified boot (signed manifest checked by the loader,
 > `VERIFY_BOOT=0` override, `root=boot-disk`, `make test-security`);
-> PR 2, user-space ASLR and the W^X check.
+> PR 2, user-space ASLR and the W^X check; PR 3, operation-specific
+> privileges.
 
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.

@@ -592,12 +592,15 @@ stack top (per-CPU block and TSS `rsp0`) and activates
 
 ## kernel/cred.h (Prompt #3 fix pass)
 
-`struct credentials { ruid, euid, suid, rgid, egid, sgid, ngroups, groups[16] }`,
-`cred_privileged(c)` (`euid == 0`; the single privilege predicate),
+`struct credentials { ruid, euid, suid, rgid, egid, sgid, ngroups, groups[16], privs }`,
+`cred_has(c, PRIV_X)` (roadmap M5: whether `c` holds one privilege; every
+privileged operation names the one it needs), `cred_drop(c, mask)` (the
+only change `privs` admits), `cred_ids_changed(c, old r/e/s uid)` (leaving
+every uid 0 drops every privilege),
 `cred_current()` (the process's, or `cred_kernel` on a kernel thread),
 `cred_in_group`, `cred_setresuid`/`cred_setresgid` (POSIX rules, `-1`
 keeps, all or nothing, `-EPERM`/`-EINVAL`), `cred_setgroups`
-(privileged), `cred_may_signal`. Process wrappers taking `process->lock`:
+(`PRIV_CRED`), `cred_may_signal` (`PRIV_PROC` or the POSIX id rule). Process wrappers taking `process->lock`:
 `process_setresuid`, `process_setresgid`, `process_setgroups`. Native
 system calls 50-55: `setresuid`, `setresgid`, `getresuid`, `getresgid`,
 `setgroups`, `getgroups`. Details: `design.md`, "Credentials".

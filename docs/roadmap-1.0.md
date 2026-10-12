@@ -72,9 +72,12 @@ The UEFI loader verifies Ed25519 signatures of `kernel.elf` and
 user-space ASLR (stack, heap, mmap, PIE base); a small fixed set of
 operation-specific privileges replacing the single `cred_privileged()`.
 
-- [ ] **Acceptance:** a tampered kernel or archive is refused; layouts
+- [x] **Acceptance:** a tampered kernel or archive is refused; layouts
   differ across runs; an unprivileged process cannot mount and a granted
-  one can.
+  one can. Done 2026-10-12: `make test-security` in CI on both
+  architectures, with `test-install` and `test-net-login` on the signed,
+  randomised, privilege-checked system (PRs #368, #369, #370;
+  [report](audit/2026-10-12-m5-security-baseline-report.md)).
 
 ### M6 Release
 

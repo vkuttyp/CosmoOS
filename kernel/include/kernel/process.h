@@ -295,6 +295,7 @@ struct process_spawn_attr {
     bool new_session;
     bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
     uint32_t uid, gid;
+    uint32_t priv_drop;                            /* PRIV_* the child does not get (COSMO_SPAWN_DROPPRIV) */
     const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
 };
 
@@ -341,7 +342,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   bool new_domain, bool new_mountns, bool new_utsns, const struct process_spawn_cred *cred,
-                  bool set_pgid, pid_t pgid, bool new_session, pid_t *pid_out);
+                  bool set_pgid, pid_t pgid, bool new_session, uint32_t priv_drop, pid_t *pid_out);
 
 /* A domain identifier nobody has had. Monotonic and never reused, so a
  * live domain's identity cannot be handed to a second set of processes;

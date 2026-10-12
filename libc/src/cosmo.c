@@ -20,3 +20,8 @@ int sysctl_get(const char *name, char *buf, size_t len)
 {
     return (int)__syscall_ret(cosmo_sysctl(name, buf, len));
 }
+
+int sysctl_set(const char *name, const char *value, size_t len)
+{
+    return (int)__syscall_ret(cosmo_sysctl_set(name, value, len));
+}

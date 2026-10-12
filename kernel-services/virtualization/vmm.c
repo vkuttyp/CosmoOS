@@ -3,6 +3,7 @@
  * (docs/kernel-services/virtualization/design.md, "The VM manager").
  */
 
+#include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/faultinject.h>
 #include <kernel/hv.h>
@@ -40,9 +41,12 @@ static int64_t vmm_chr_read(struct vnode *vn, uint64_t off, void *buf, size_t le
     return (int64_t)len;
 }
 
+/* PRIV_DEVICE (roadmap M5): a handle open for writing is what lets a
+ * process create a VM (SYS_vm_create), which is what vmctl does. */
 static const struct chrdev_ops vmm_chr_ops = {
     .read = vmm_chr_read,
     .write = NULL,
+    .open_priv = PRIV_DEVICE,
 };
 
 /*

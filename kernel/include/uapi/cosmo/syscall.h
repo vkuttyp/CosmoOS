@@ -166,7 +166,8 @@
 #define SYS_timer_create 101 /* (uint64_t initial_ns, uint64_t interval_ns) -> handle; a timer as a submittable I/O object (timerfd) */
 #define SYS_switch_root 102 /* (const char *path) -> 0; init alone: the mount at path becomes the root (roadmap M2) */
 #define SYS_exec      103 /* (const char *path, char *const argv[], char *const envp[]) -> no return; the image replaced in place (roadmap M3) */
-#define SYS_COUNT     104
+#define SYS_sysctl_set 104 /* (const char *name, const char *value, size_t len) -> 0; PRIV_SYS_ADMIN (roadmap M5) */
+#define SYS_COUNT     105
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
@@ -285,12 +286,19 @@ struct cosmo_spawn {
      * straight after the spawn cannot miss it. */
     uint32_t pgid;                             /* 0: a group of the child's own, named by its pid */
     uint32_t pgid_pad;
+    /* Added after `pgid` (roadmap M5), and read only when
+     * COSMO_SPAWN_DROPPRIV is set: COSMO_PRIV_* bits the child does not
+     * get. A child never holds a privilege its parent lacks. */
+    uint32_t priv_drop;
+    uint32_t priv_pad;
 };
 
 /* What a caller that predates `root` passes: everything up to it. */
 #define COSMO_SPAWN_SIZE_V1 __builtin_offsetof(struct cosmo_spawn, root)
 /* And what a caller that predates `pgid` passes. */
 #define COSMO_SPAWN_SIZE_V2 __builtin_offsetof(struct cosmo_spawn, pgid)
+/* And one that predates `priv_drop`. */
+#define COSMO_SPAWN_SIZE_V3 __builtin_offsetof(struct cosmo_spawn, priv_drop)
 /* The child starts with real, effective and saved ids `uid`/`gid` and no
  * supplementary groups. A privileged caller names any ids; an unprivileged
  * one only ids it holds (docs/kernel/security/design.md §1). */
@@ -336,6 +344,24 @@ struct cosmo_spawn {
  * group in the foreground -- what getty does for a login shell, before the
  * child's first instruction. Exclusive with SETPGID. */
 #define COSMO_SPAWN_SETSID (1u << 7)
+/* Roadmap M5: the child starts without the privileges in `priv_drop`
+ * (docs/kernel/security/design.md §1). Unprivileged: dropping is always
+ * allowed, and nothing gives a privilege back. */
+#define COSMO_SPAWN_DROPPRIV (1u << 8)
+
+/* Operation-specific privileges (roadmap M5; docs/kernel/security/design.md
+ * §1). A process holds a subset: init all of them, every other process
+ * what its parent held less what was dropped. Effective uid 0 grants
+ * nothing by itself. At most 16 in 1.0. */
+#define COSMO_PRIV_MOUNT     (1u << 0)   /* mount, umount, switch_root, mount namespaces, a child's root */
+#define COSMO_PRIV_SYS_ADMIN (1u << 1)   /* sysctl writes, blkctl, fsctl, klog, domains, uts namespaces,
+                                          * overriding file permissions and ownership */
+#define COSMO_PRIV_NET       (1u << 2)   /* netctl configuration, binding ports below 1024 */
+#define COSMO_PRIV_PROC      (1u << 3)   /* signalling, seeing and inspecting any process; raising rlimits */
+#define COSMO_PRIV_CRED      (1u << 4)   /* spawning with other ids, changing uid, gid and groups */
+#define COSMO_PRIV_DEVICE    (1u << 5)   /* opening raw device nodes (/dev/net/tap, /dev/vmm) */
+#define COSMO_PRIV_COUNT     6u
+#define COSMO_PRIV_ALL       ((1u << COSMO_PRIV_COUNT) - 1u)
 #define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
 #define COSMO_ARG_ENTRIES 128
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */

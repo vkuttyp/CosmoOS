@@ -315,9 +315,14 @@ static int populate(void)
         fprintf(stderr, "cosmo-install: %s: %s\n", d, strerror(errno));
         return -1;
     }
+    /* Roadmap M5: the server holds what it needs and nothing more -- net
+     * for port 22, cred for a session's setgid/initgroups/setuid -- so a
+     * root login over ssh has those two and cannot mount, administer the
+     * machine, signal others' processes or open raw devices. */
     if (write_file("/etc/svc/dropbear",
                    "# The ssh server (roadmap M4): its host key at the first boot, then dropbear.\n"
                    "exec /bin/sh /etc/dropbear/start\n"
+                   "privileges net cred\n"
                    "restart always\n", 0644) < 0)
         return -1;
     return 0;

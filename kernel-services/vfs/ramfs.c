@@ -451,6 +451,8 @@ static int64_t ramfs_chr_write(struct vnode *vn, uint64_t off, const void *buf, 
 static int ramfs_chr_open(struct vnode *vn, struct file *f)
 {
     struct ramfs_node *n = vn->fs_priv;
+    if (n->chr->open_priv && !cred_has(cred_current(), n->chr->open_priv))
+        return -EPERM;   /* a raw device: the mode is not the whole of it (roadmap M5) */
     return n->chr->open ? n->chr->open(vn, f) : 0;
 }
 

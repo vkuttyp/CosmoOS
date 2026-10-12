@@ -55,12 +55,12 @@ static int validate_handles(struct process *cur, const struct process_handle_map
     return 0;
 }
 
-/* COSMO_SPAWN_SETCRED: a privileged caller names any ids; an unprivileged
- * one only ids among its own real, effective and saved set, the setresuid
+/* COSMO_SPAWN_SETCRED: a PRIV_CRED caller names any ids; one without it
+ * only ids among its own real, effective and saved set, the setresuid
  * rule (docs/kernel/security/design.md §1). */
 static bool may_set_cred(const struct credentials *c, uint32_t uid, uint32_t gid)
 {
-    if (cred_privileged(c))
+    if (cred_has(c, PRIV_CRED))
         return true;
     bool u = uid == c->ruid || uid == c->euid || uid == c->suid;
     bool g = gid == c->rgid || gid == c->egid || gid == c->sgid;
@@ -143,7 +143,7 @@ FRAME_EXEMPT_BEGIN(process_spawn)   /* scripts/frame-baseline.txt: 3616 bytes */
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   bool new_domain, bool new_mountns, bool new_utsns, const struct process_spawn_cred *cred,
-                  bool set_pgid, pid_t pgid, bool new_session, pid_t *pid_out)
+                  bool set_pgid, pid_t pgid, bool new_session, uint32_t priv_drop, pid_t *pid_out)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
@@ -156,12 +156,14 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         return -EPERM;
     /* Starting a domain is privileged for the same reason as the rest:
      * it decides what a set of processes can see of the machine. */
-    if (new_domain && !cred_privileged(&cur->cred))
+    if (new_domain && !cred_has(&cur->cred, PRIV_SYS_ADMIN))
         return -EPERM;
     /* And a mount namespace, for the same reason: it decides what
      * filesystems a set of processes can see. A uts namespace decides
-     * what they believe they are running on. */
-    if ((new_mountns || new_utsns) && !cred_privileged(&cur->cred))
+     * what they believe they are running on, as a hostname does. */
+    if (new_mountns && !cred_has(&cur->cred, PRIV_MOUNT))
+        return -EPERM;
+    if (new_utsns && !cred_has(&cur->cred, PRIV_SYS_ADMIN))
         return -EPERM;
     uint32_t domain = 0;
     if (new_domain) {
@@ -201,6 +203,7 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         .set_cred = cred != NULL,
         .uid = cred ? cred->uid : 0,
         .gid = cred ? cred->gid : 0,
+        .priv_drop = priv_drop,
     };
     char cwd_path[sizeof(cur->cwd_path_locked)];
     if (cwd) {
@@ -235,7 +238,7 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
      * chose (docs/kernel/process/design.md, "Per-process roots").
      */
     if (root) {
-        if (!cred_privileged(&cur->cred)) {
+        if (!cred_has(&cur->cred, PRIV_MOUNT)) {
             rc = -EPERM;
             goto out_cwd;
         }

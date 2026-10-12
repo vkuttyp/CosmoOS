@@ -223,6 +223,13 @@ def stage_ssh(args, results, b, port):
         raise Fail(f"ssh: uname -a; echo ok: status {rc}, output {out!r}")
     uname = re.search(r"^Linux .*$", out, re.M).group(0)
     results.append(f"d. ssh: key login as root ({waited:.1f}s to the first login): {uname!r}, ok")
+    # Roadmap M5: the server's service holds net and cred alone, so a root
+    # session over ssh has those two and cannot mount.
+    rc, out = ssh_run(work, port, True, "/sbin/priv; /sbin/mount none /tmp ramfs; echo mount=$?")
+    if not re.search(r"^net cred$", out, re.M) or not re.search(r"^mount=1$", out, re.M) \
+            or "Operation not permitted" not in out:
+        raise Fail(f"ssh: the session's privileges: status {rc}, output {out!r}")
+    results.append("d. ssh: the session holds 'net cred' (the dropbear service's privileges); mount is EPERM")
     marker = "pty-session-done"
     out = ssh_pty_session(work, port, ["tty", "stty size", "sleep 100 &", "jobs", "kill %1",
                                        f"wait; echo {marker} wait=$?"], marker)

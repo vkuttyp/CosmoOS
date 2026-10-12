@@ -133,10 +133,11 @@ pointer). Gap: none.
 
 **V14. Every namespace operation is checked against the caller's
 credentials by `vfs_permission`; `mount`/`umount` need
-`cred_privileged`.** Search on each directory entered, write and search
+`PRIV_MOUNT`.** Search on each directory entered, write and search
 on the parent of a mutation, read/write on an opened file per its mode
-(a just-created file excepted), execute for spawn; root passes all but
-execute without any x bit; new vnodes take their creator's effective
+(a just-created file excepted), execute for spawn; a `PRIV_SYS_ADMIN`
+caller passes all but execute without any x bit (roadmap M5: uid 0 alone
+does not); new vnodes take their creator's effective
 ids. Check: `init --selftest` spawns `init --unpriv-test`, which drops
 to uid 1000 and is refused `/dev/vmm`, a 0700 root directory, writing or
 unlinking a 0644 root file, creating in a 0755 root directory,

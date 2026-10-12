@@ -2820,4 +2820,13 @@ See the [history index](README.md).
     builds walk every new image for W+X or an executable stack
     (`vm_user_wx_violations`). `test-security` stage `aslr`: static musl,
     static-PIE musl and native probes, ten runs each (acceptance c).
+  - PR 3: operation-specific privileges. `struct credentials.privs`, six
+    `PRIV_*` bits; `cred_privileged` deleted and its thirty sites each
+    name their privilege (table in the report); init starts with all,
+    fork/spawn/exec inherit, `COSMO_SPAWN_DROPPRIV` drops, leaving uid 0
+    drops all, nothing adds; raw devices carry `open_priv`;
+    `SYS_sysctl_set` (`kernel.hostname`); `/proc/<pid>/status` `privs:`;
+    `/sbin/priv`; svc `privileges` key, dropbear `net cred`.
+    `test-security` stage `priv` (acceptance d), test-net-login checks
+    the ssh session's set (e). M5 ticked.
   - Report: `docs/audit/2026-10-12-m5-security-baseline-report.md`.

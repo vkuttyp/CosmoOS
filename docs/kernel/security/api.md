@@ -112,7 +112,7 @@ Processes whose real uid is `ruid`, under the table lock (the `NPROC`
 count).
 
 ### `bool process_log_permitted(void)`
-True for a privileged caller; otherwise one token from the process's
+True for a `PRIV_SYS_ADMIN` caller; otherwise one token from the process's
 `sys_log` bucket (64, refilled at 16 per second), false when empty.
 
 ### `struct process_spawn_cred { uint32_t uid, gid; }`

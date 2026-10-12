@@ -467,6 +467,11 @@ struct chrdev_ops {
      * are used instead of read/write and receive the file. */
     int (*open)(struct vnode *vn, struct file *f);
     void (*release)(struct vnode *vn, struct file *f);
+    /* Roadmap M5: the privilege (PRIV_*, kernel/cred.h) an open needs, on
+     * top of the node's mode, or 0. A raw device -- one that configures
+     * the machine rather than reading or writing a stream -- names one, so
+     * root without it cannot open it, and chmod cannot change that. */
+    uint32_t open_priv;
     int64_t (*read_file)(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len);
     int64_t (*write_file)(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len);
     /* Optional readiness (the named-pipes unit): a device whose read_file

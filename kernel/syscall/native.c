@@ -898,7 +898,7 @@ static int64_t sys_fsync(struct syscall_args *a)
 
 static int64_t sys_mount(struct syscall_args *a)
 {
-    if (!cred_privileged(cred_current()))
+    if (!cred_has(cred_current(), PRIV_MOUNT))
         return -EPERM;
     unsigned flags = (unsigned)a->a[3];
     if (flags & ~COSMO_MOUNT_RDONLY)
@@ -932,7 +932,7 @@ static int64_t sys_mount(struct syscall_args *a)
 
 static int64_t sys_umount(struct syscall_args *a)
 {
-    if (!cred_privileged(cred_current()))
+    if (!cred_has(cred_current(), PRIV_MOUNT))
         return -EPERM;
     unsigned flags = (unsigned)a->a[1];
     if (flags & ~COSMO_UMOUNT_FORCE)
@@ -973,7 +973,7 @@ static int64_t sys_exec(struct syscall_args *a)
 static int64_t sys_switch_root(struct syscall_args *a)
 {
     struct process *p = process_current();
-    if (!cred_privileged(cred_current()) || !process_is_init(p))
+    if (!cred_has(cred_current(), PRIV_MOUNT) || !process_is_init(p))
         return -EPERM;
     if (process_count() != 1)
         return -EBUSY;
@@ -1474,14 +1474,20 @@ static int64_t sys_spawn(struct syscall_args *a)
         return -EFAULT;
     if ((req.flags &
          ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT | COSMO_SPAWN_NEWDOMAIN |
-           COSMO_SPAWN_NEWMOUNTNS | COSMO_SPAWN_NEWUTSNS | COSMO_SPAWN_SETPGID | COSMO_SPAWN_SETSID)) ||
+           COSMO_SPAWN_NEWMOUNTNS | COSMO_SPAWN_NEWUTSNS | COSMO_SPAWN_SETPGID | COSMO_SPAWN_SETSID |
+           COSMO_SPAWN_DROPPRIV)) ||
         req.path == NULL || req.argv == NULL)
         return -EINVAL;
     if ((req.flags & COSMO_SPAWN_SETSID) && (req.flags & COSMO_SPAWN_SETPGID))
         return -EINVAL;   /* a new session names its own group */
-    if ((req.flags & (COSMO_SPAWN_SETROOT | COSMO_SPAWN_SETPGID)) &&
-        copy_from_user(&req, a->a[0], (req.flags & COSMO_SPAWN_SETPGID) ? sizeof(req) : COSMO_SPAWN_SIZE_V2))
+    size_t want = (req.flags & COSMO_SPAWN_DROPPRIV)  ? sizeof(req)
+                  : (req.flags & COSMO_SPAWN_SETPGID) ? COSMO_SPAWN_SIZE_V3
+                  : (req.flags & COSMO_SPAWN_SETROOT) ? COSMO_SPAWN_SIZE_V2
+                                                      : COSMO_SPAWN_SIZE_V1;
+    if (want > COSMO_SPAWN_SIZE_V1 && copy_from_user(&req, a->a[0], want))
         return -EFAULT;
+    if ((req.flags & COSMO_SPAWN_DROPPRIV) && (req.priv_drop & ~COSMO_PRIV_ALL))
+        return -EINVAL;
     struct process_spawn_cred cred = { .uid = req.uid, .gid = req.gid };
     if (req.nr_handles > HANDLE_TABLE_SIZE || (req.nr_handles != 0 && req.handles == NULL))
         return -EINVAL;
@@ -1555,7 +1561,8 @@ static int64_t sys_spawn(struct syscall_args *a)
                        (req.flags & COSMO_SPAWN_NEWMOUNTNS) != 0, (req.flags & COSMO_SPAWN_NEWUTSNS) != 0,
                        (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL,
                        (req.flags & COSMO_SPAWN_SETPGID) != 0, (pid_t)req.pgid,
-                       (req.flags & COSMO_SPAWN_SETSID) != 0, &pid);
+                       (req.flags & COSMO_SPAWN_SETSID) != 0,
+                       (req.flags & COSMO_SPAWN_DROPPRIV) ? req.priv_drop : 0, &pid);
 out:
     kfree(sc);
     return rc ? rc : (int64_t)pid;
@@ -2272,7 +2279,7 @@ static int64_t sys_klog(struct syscall_args *a)
 {
     /* The kernel log carries kernel addresses and every process's
      * activity: privileged, like dmesg on a hardened system. */
-    if (!cred_privileged(cred_current()))
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
         return -EPERM;
     size_t len = (size_t)a->a[1];
     if (len > KLOG_RING_SIZE)
@@ -2321,7 +2328,7 @@ static int64_t sys_gethostname(struct syscall_args *a)
  * the machine could make another one's logs say whatever it liked. */
 static int64_t sys_sethostname(struct syscall_args *a)
 {
-    if (!cred_privileged(cred_current()))
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
         return -EPERM;
     size_t len = (size_t)a->a[1];
     if (len >= COSMO_HOST_NAME_MAX)
@@ -2481,7 +2488,7 @@ static int sysctl_value(const char *name, char *out, size_t n)
         /* The read is the system call under test
          * (docs/audit/next-subsystem-wake-preempt.md); it creates a
          * kernel thread, so only a privileged caller may ask. */
-        if (!cred_privileged(cred_current()))
+        if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
             return -EPERM;
         return sched_preempt_probe_sysctl(out, n);
 #else
@@ -2521,6 +2528,36 @@ static int64_t sys_sysctl(struct syscall_args *a)
     if (copy && copy_to_user(a->a[1], value, copy))
         return -EFAULT;
     return vlen;
+}
+
+/*
+ * Roadmap M5: a sysctl write. One name is writable, kernel.hostname (what
+ * sethostname writes, in the caller's uts namespace); writing needs
+ * PRIV_SYS_ADMIN. -ENOENT for an unknown name, -EROFS for one that is
+ * read-only, -EPERM without the privilege.
+ */
+static int64_t sys_sysctl_set(struct syscall_args *a)
+{
+    char name[64];
+    int rc = strncpy_from_user(name, a->a[0], sizeof(name));
+    if (rc < 0)
+        return rc == -ENAMETOOLONG ? -ENOENT : rc;
+    bool known = false;
+    for (size_t i = 0; i < ARRAY_SIZE(sysctl_names); i++)
+        known = known || strcmp(name, sysctl_names[i]) == 0;
+    if (!known)
+        return -ENOENT;
+    if (strcmp(name, "kernel.hostname") != 0)
+        return -EROFS;
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
+        return -EPERM;
+    size_t len = (size_t)a->a[2];
+    if (len >= COSMO_HOST_NAME_MAX)
+        return -EINVAL;
+    char buf[COSMO_HOST_NAME_MAX];
+    if (copy_from_user(buf, a->a[1], len))
+        return -EFAULT;
+    return utsns_sethostname(utsns_current(), buf, len);
 }
 
 static const syscall_fn native_table[SYS_COUNT] = {
@@ -2591,6 +2628,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_sethostname] = sys_sethostname,
     [SYS_klog] = sys_klog,
     [SYS_sysctl] = sys_sysctl,
+    [SYS_sysctl_set] = sys_sysctl_set,
     [SYS_vm_create] = sys_vm_create,
     [SYS_vm_mem] = sys_vm_mem,
     [SYS_vm_mem_rw] = sys_vm_mem_rw,
