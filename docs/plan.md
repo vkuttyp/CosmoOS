@@ -642,6 +642,20 @@ Sources: inventory §§1.3, 1.4, 2.11, 3 and 8 and [device design](kernel/device
   xHCI cancel against a running callback. net-nicbench's eth1 failure
   was the benchmark's hook eating a stack ARP reply, fixed in the test.
   See the [report](audit/2026-10-09-device-lifecycle-unit2-report.md).
+- [x] **Platform discovery and Parallels Desktop (v1.0.1, v1.0.2).**
+  [PR #376](https://github.com/vkuttyp/CosmoOS/pull/376): AArch64 finds
+  its console, GIC, timer and PSCI in the firmware's tables, not at QEMU
+  virt's addresses. [PR #378](https://github.com/vkuttyp/CosmoOS/pull/378)
+  and its successor: the firmware's seed and time (boot protocol v10), a
+  timing-jitter source of last resort, NVMe with one interrupt vector, the
+  legacy virtio-pci transport. Parallels installs, boots the installed
+  system and has a network. Reports:
+  [discovery](audit/2026-10-13-acpi-discovery-report.md),
+  [devices](audit/2026-10-13-parallels-devices-report.md).
+- [ ] **Implementation — devices described only in the DSDT.** Parallels'
+  SATA controller (and other platform devices) is described only in AML;
+  the kernel has no AML interpreter. Either one, or a narrow `_CRS` reader
+  for known device ids.
 - [ ] **Device lifecycle — remaining §8 items.** virtio-blk timeout versus
   late submission, virtio-net probe faults and RX before registration,
   USB storage recovery-state propagation (inventory §8).
