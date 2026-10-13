@@ -482,6 +482,17 @@ and [Linux compatibility API](compat/linux/api.md).
 - [ ] **Implementation/validation — broader Linux environment.** Extend
   Linux-facing `/proc` and `/sys` behavior and validate a real distribution
   userland. Existing syscall subsets do not establish full Linux compatibility.
+- [x] **Everyday commands (v1.0.2).** BusyBox `vi`, `less`, `top`,
+  `free`, `df`, `du`, `uptime`, `whoami`, `clear`, `md5sum`, `dd`, `cmp`,
+  `hexdump`, over what they read on Linux: `/proc/meminfo`, `stat`,
+  `loadavg`, `uptime`, `mounts`, `/proc/<pid>/stat` and `cmdline`,
+  `statfs`, load averages. See the
+  [report](audit/2026-10-14-everyday-commands-report.md).
+- [ ] **Implementation — `ping`, scp and sftp, HTTPS.** The owner's next
+  three after the everyday commands, in that order (`ping` moved ahead of
+  scp and sftp on 2026-10-14, when it was found missing on Parallels): an
+  ICMP echo `ping` over Linux's ping sockets, dropbear's scp and sftp
+  server, and TLS for `wget`.
 
 ## 9. Virtualization
 
