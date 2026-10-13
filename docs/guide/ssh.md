@@ -3,10 +3,12 @@
 An installed system runs the dropbear ssh server (2026.94, static, on
 port 22) as a service. It accepts **root** only, by **public key** only:
 root has no password (its `/etc/passwd` entry is `root:*:...`), and
-password authentication is compiled out of dropbear. Keys are Ed25519;
-the server's host key, `/etc/dropbear/dropbear_ed25519_host_key`, was
-made at the system's first boot and is kept across reboots. There is no
-scp, sftp or port forwarding. The live image runs no ssh server.
+password authentication is compiled out of dropbear. You log in with an
+Ed25519 or an RSA key, so an existing `~/.ssh/id_rsa.pub` works (RSA with
+SHA-256 signatures, `rsa-sha2-256`, which current OpenSSH clients offer;
+not the old SHA-1 `ssh-rsa`). The server's own host key is Ed25519:
+`/etc/dropbear/dropbear_ed25519_host_key`, made at the system's first
+boot and kept across reboots. There is no scp, sftp or port forwarding. The live image runs no ssh server.
 
 ## A key
 

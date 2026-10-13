@@ -242,12 +242,13 @@ networking with no fw_cfg address, so the kernel's DHCP client configures
   30` stopped by `^Z` (`Stopped`), `jobs`, `bg` (`Running`), `kill %1`;
   `readlink /proc/self/fd/0` is `/dev/console`.
 - **d. ssh** (M4 PR 3): the boot forwards a free host port to the guest's
-  22 (`QEMU_NET_HOSTFWD`). The harness makes an Ed25519 key, types its
-  public half into `/root/.ssh/authorized_keys` at the console, and waits
+  22 (`QEMU_NET_HOSTFWD`). The harness makes an Ed25519 key and a
+  3072-bit RSA key, types both public halves into
+  `/root/.ssh/authorized_keys` at the console, and waits
   (120 s at most) for dropbear to answer -- it makes its host key at this
   first boot. The host's OpenSSH client (`BatchMode`, `IdentitiesOnly`, a
-  known_hosts of the run's own, `accept-new`) runs `uname -a; echo ok`;
-  then `ssh -tt` under a host pty of 37 x 101 types `tty` (must print
+  known_hosts of the run's own, `accept-new`) runs `uname -a; echo ok`,
+  and with the RSA key `echo rsa-ok`; then `ssh -tt` under a host pty of 37 x 101 types `tty` (must print
   `/dev/pts/N`), `stty size` (must print `37 101`), `sleep 100 &`, `jobs`
   (Running), `kill %1`, `wait` and a marker.
 - **e. Reboot**: the installed disk boots again; a login with

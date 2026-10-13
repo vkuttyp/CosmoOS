@@ -62,11 +62,26 @@ drawing through it for the life of the boot: `fbcon_init` later sees the
 console ready and returns without mapping it again or replaying. A boot
 that fails before `vmm_init` is then visible on the screen.
 
-The face is 8x8 cells with 5x7 glyphs, drawn in the tree
-(`tools/mkfont.py` generates `kernel/core/font8x8.c` from glyph art in
-the script); copying a font table in is the borrowed artifact "a new
+The face is 8x16 cells, the proportions of a PC or Linux text console:
+glyphs 7 pixels wide in rows 2 to 14 (capitals 10 rows, lowercase 7,
+two-row descenders), so a column and three rows are the spacing. It is
+drawn in the tree (`tools/mkfont.py` generates `kernel/core/font8x16.c`
+from glyph art in the script); until v1.0.2 it was 5x7 glyphs in 8x8
+cells, a dot-matrix look that scaled up badly on Parallels Desktop's
+screen; copying a font table in is the borrowed artifact "a new
 operating system from scratch" excludes. A byte outside 0x20..0x7e draws
 a box, so nothing is silently invisible.
+
+**The scale.** The face is drawn one-to-one up to 1920x1080: Parallels'
+1024x768 (its firmware's only mode) is 128x48 cells, QEMU x86-64's
+1280x800 160x50, QEMU AArch64's 800x600 100x37. A larger screen draws
+each font pixel as an s-by-s block, `s = min(width / 1920, height /
+1080)`, 1 to 4 (`fbcon_scale`), so a 4K screen gets 16x32 cells. Each
+font row is widened once and written `s` times (a division per pixel
+doubled a scroll's cost under TCG). The owner tried 3x the old face and
+2x this one on Parallels before settling on one-to-one. A scroll moves a
+quarter of the screen. The `fbcon:` line says the cell size (`... cells
+of 8x16 pixels ...`).
 
 Two things shape the rest. The sink runs on the panic path, so it
 allocates nothing, sleeps never, and holds no lock of its own --
@@ -77,13 +92,15 @@ once at init), which makes a scroll a memmove of the shadow followed by
 a repaint from it: writes only, no reads of the framebuffer, which are
 several times more expensive uncached.
 
-A scroll moves several rows at once (`rows / 8`) rather than one. The
+A scroll moves several rows at once (`rows / 4`) rather than one. The
 cost of a scroll is a screen repaint and does not depend on how far it
 moves, so scrolling by one row would repaint the screen for every line
-printed; measured on the harness, that is 10.9 ms a line against 1.2 ms
-at eight rows, and a boot prints thousands of lines
-(`docs/kernel/diagnostics/testing.md`, "Benchmarks"). What the chunk
-costs is blank space at the bottom, which the next lines fill.
+printed; measured on the harness with the 8x8 face, that was 10.9 ms a
+line against 1.2 ms at eight rows, and a boot prints thousands of lines
+(`docs/kernel/diagnostics/testing.md`, "Benchmarks"). The 8x16 face
+gives a screen half the rows, so the chunk went from an eighth of the
+screen to a quarter. What the chunk costs is blank space at the bottom,
+which the next lines fill.
 
 ## log.c: levels, prefix, truncation
 

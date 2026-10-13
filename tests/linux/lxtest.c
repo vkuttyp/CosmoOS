@@ -754,12 +754,19 @@ static void busybox_needs(long pid)
     struct lx_timespec tv[2] = { { 0, LX_UTIME_OMIT }, { 1577934240, 5 } };   /* 2020-01-02 03:04:00 */
     CHECKV(sc4(LX_utimensat, LX_AT_FDCWD, "/tmp/lx-umask", tv, 0) == 0, 0);
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lx-umask", &sb, 0) == 0 && sb.st_mtime == 1577934240, sb.st_mtime);
-    /* "Now" is the VFS's clock, the one a new file is stamped with (since
-     * boot: file times are not the wall clock yet; the inventory says so). */
+    /* "Now" is the wall clock, the one a new file is stamped with: between
+     * a CLOCK_REALTIME reading before the create and one after the stat, so
+     * a stall between them cannot fail it (until v1.0.2 it was the time
+     * since boot, so a new file was dated 1970). A second each way for the
+     * whole-second mtime. */
+    struct lx_timespec rt0, rt1;
+    CHECKV(sc2(LX_clock_gettime, LX_CLOCK_REALTIME, &rt0) == 0, 0);
     fd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lx-later", LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, 0644);
     sc1(LX_close, fd);
     struct lx_stat later;
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lx-later", &later, 0) == 0, 0);
+    CHECKV(sc2(LX_clock_gettime, LX_CLOCK_REALTIME, &rt1) == 0, 0);
+    CHECKV(later.st_mtime >= rt0.tv_sec - 1 && later.st_mtime <= rt1.tv_sec + 1, later.st_mtime);
     CHECKV(sc4(LX_utimensat, LX_AT_FDCWD, "/tmp/lx-umask", 0, 0) == 0, 0);   /* now */
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lx-umask", &sb, 0) == 0 && sb.st_mtime != 1577934240 &&
            sb.st_mtime >= later.st_mtime, sb.st_mtime);

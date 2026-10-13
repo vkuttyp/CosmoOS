@@ -49,11 +49,12 @@ static uint32_t read_pixel(const struct fbcon_geometry *g, uint32_t x, uint32_t 
 /* Every pixel of one cell against the glyph the font says it should be. */
 static bool cell_is(const struct fbcon_geometry *g, uint32_t col, uint32_t row, unsigned char ch)
 {
-    const uint8_t *glyph = font8x8[font_index(ch)];
-    for (uint32_t gy = 0; gy < FONT_HEIGHT; gy++) {
-        for (uint32_t gx = 0; gx < FONT_WIDTH; gx++) {
-            uint32_t want = (glyph[gy] & (0x80u >> gx)) ? g->fg : g->bg;
-            uint32_t got = read_pixel(g, col * FONT_WIDTH + gx, row * FONT_HEIGHT + gy);
+    const uint8_t *glyph = font8x16[font_index(ch)];
+    uint32_t s = g->scale, w = FONT_WIDTH * s, h = FONT_HEIGHT * s;
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t want = (glyph[y / s] & (0x80u >> (x / s))) ? g->fg : g->bg;
+            uint32_t got = read_pixel(g, col * w + x, row * h + y);
             if (got != want)
                 return false;
         }

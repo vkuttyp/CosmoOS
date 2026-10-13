@@ -2900,3 +2900,20 @@ See the [history index](README.md).
   overtaken once is now handed the mutex at the next unlock (S33,
   `mutex-handoff`, module ABI 10).
   Report: `docs/audit/2026-10-13-parallels-devices-report.md`.
+- **After 1.0: a readable screen console (2026-10-13, v1.0.2).** A new
+  8x16 face (`tools/mkfont.py`, console proportions) replaces the 5x7
+  dot-matrix glyphs in 8x8 cells, one-to-one up to 1920x1080 (Parallels'
+  1024x768: 128x48) and scaled above it; a scroll moves a quarter of the
+  screen, and 32-bit pixels are written as rows. The loader sets the display mode
+  the EDID prefers when the firmware offers it (Parallels' firmware offers
+  only 1024x768 and no EDID: a virtio-gpu driver is the next unit).
+  `fb-console` checks the scaled pixels.
+- **After 1.0: RSA login keys and wall-clock file times (2026-10-13,
+  v1.0.2).** Found by the owner over ssh on Parallels Desktop. dropbear
+  takes RSA user keys (`DROPBEAR_RSA`, `rsa-sha2-256` signatures only), so an
+  existing `~/.ssh/id_rsa.pub` logs in; the host key stays Ed25519, and
+  `test-net-login` logs in with a 3072-bit RSA key too. `vfs_now_ns` is the
+  wall clock: every new file had been dated 1970 plus the uptime. `lxtest`
+  checks a new file's mtime against `CLOCK_REALTIME`, and
+  `tools/file-times-probe.py --old` fails that check on both architectures.
+  Report: `docs/audit/2026-10-13-console-ssh-times-report.md`.

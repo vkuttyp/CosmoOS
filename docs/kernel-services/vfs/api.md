@@ -210,7 +210,9 @@ release path: unhash, sync dirty pages (regular files), drop the page
 cache, `ops->evict`, free. Release may therefore do block I/O and take
 `mnt->lock`; never drop the last reference with that lock held.
 
-**`uint64_t vfs_now_ns(void)`** The monotonic clock, used for times.
+**`uint64_t vfs_now_ns(void)`** The wall clock (`clock_realtime_ns`,
+nanoseconds since 1970 UTC), what files are stamped with. Until v1.0.2 it
+was the monotonic clock, so a new file was dated 1970 plus the uptime.
 
 ### Symbolic links
 

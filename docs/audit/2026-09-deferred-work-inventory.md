@@ -1067,8 +1067,11 @@ each; none is needed by M2's acceptance test.
   regions only.
 - A fork-like `clone` accepts only `SIGCHLD` as the exit signal (`__WCLONE`
   and other exit signals are not built).
-- File times are the VFS's clock since boot, not the wall clock: `touch -t`
-  sets a wall-clock time and a new file gets a boot-relative one (M3 PR 4).
+- ~~File times are the VFS's clock since boot, not the wall clock: `touch -t`
+  sets a wall-clock time and a new file gets a boot-relative one (M3 PR 4).~~
+  **Fixed in v1.0.2**: `vfs_now_ns` is the wall clock (found over ssh on
+  Parallels Desktop: every new file dated 1970); `lxtest` checks a new
+  file's time against `CLOCK_REALTIME`.
 - No access time is kept; `utimensat` checks `times[0]` and ignores it.
 - The native door has no chmod, utimes or umask; the Linux door's umask is
   not applied to native creation (M3 PR 4).

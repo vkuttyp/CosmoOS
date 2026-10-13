@@ -18,7 +18,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/fbvalid.c \
 	kernel/core/fbcon.c \
 	kernel/core/fbtest.c \
-	kernel/core/font8x8.c \
+	kernel/core/font8x16.c \
 	kernel/core/utsns.c \
 	kernel/core/log.c \
 	kernel/core/panic.c \

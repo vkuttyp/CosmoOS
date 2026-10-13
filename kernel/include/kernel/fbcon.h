@@ -38,6 +38,7 @@ struct fbcon_geometry {
     uint32_t pitch;        /* bytes per pixel row */
     uint32_t bytes_pp;
     uint32_t width, height;
+    uint32_t scale;        /* a font pixel is scale x scale screen pixels */
     uint32_t cols, rows;
     uint32_t fg, bg;       /* packed pixel values the sink draws with */
     uint32_t scroll_rows;  /* cell rows one scroll moves */

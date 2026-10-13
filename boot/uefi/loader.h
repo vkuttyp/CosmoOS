@@ -62,6 +62,15 @@ void acpi_report(void);
  * info->fw_* (protocol v10). Boot services must still be up; call it
  * after the last allocation, just before ExitBootServices. */
 void firmware_gather(struct cosmoboot_info *info);
+
+/* display.c: set the display mode the EDID prefers, when the firmware
+ * offers it with a linear framebuffer; called before the framebuffer is
+ * read for the boot info. */
+void display_choose_mode(void);
+/* The Graphics Output Protocol both of those use, and its handle; NULL if none. */
+EFI_GRAPHICS_OUTPUT_PROTOCOL *display_gop(EFI_HANDLE *handle);
+/* After ExitBootServices, on the serial port: what display_choose_mode saw and did. */
+void display_report(void);
 /* After ExitBootServices, on the serial port: what firmware_gather found. */
 void firmware_report(const struct cosmoboot_info *info);
 

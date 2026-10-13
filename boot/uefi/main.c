@@ -18,6 +18,7 @@
  * sized and allocated in step 4.
  */
 
+#include "display_pick.h"
 #include "loader.h"
 #include "cosmoboot.h"
 #include "cosmomanifest.h"
@@ -147,35 +148,11 @@ static uint64_t find_acpi_rsdp(void)
     return rsdp10;
 }
 
-/* Decode one channel of a PixelBitMask format: the position of the
- * lowest set bit and the number of contiguous bits above it. A mask with
- * holes in it is not a channel, and is refused by returning 0 bits. */
-static void mask_to_field(uint32_t mask, uint8_t *shift, uint8_t *bits)
-{
-    *shift = 0;
-    *bits = 0;
-    if (mask == 0)
-        return;
-    uint32_t sh = 0;
-    while ((mask & 1u) == 0) {
-        mask >>= 1;
-        sh++;
-    }
-    uint32_t n = 0;
-    while (mask & 1u) {
-        mask >>= 1;
-        n++;
-    }
-    if (mask != 0)
-        return;   /* not contiguous */
-    *shift = (uint8_t)sh;
-    *bits = (uint8_t)n;
-}
-
 /*
- * Record the framebuffer the firmware has already configured. The mode is
- * taken as found: SetMode is never called, because the firmware's choice
- * is known to work and choosing modes is a display driver's job.
+ * Record the framebuffer of the GOP's current mode: the firmware's, or the
+ * one display_choose_mode set from the EDID (docs/boot/design.md, "The
+ * display mode"). The pixel layout is display_format's, the same check
+ * display_choose_mode makes of the modes it may pick.
  *
  * Leaves every field zero when there is no Graphics Output Protocol, when
  * the protocol offers no linear framebuffer (PixelBltOnly), or when the
@@ -184,51 +161,20 @@ static void mask_to_field(uint32_t mask, uint8_t *shift, uint8_t *bits)
  */
 static void find_framebuffer(struct cosmoboot_info *info)
 {
-    EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
-
-    EFI_STATUS st = g_bs->LocateProtocol(&gop_guid, NULL, (void **)&gop);
-    if (EFI_ERROR(st) || gop == NULL || gop->Mode == NULL || gop->Mode->Info == NULL) {
+    EFI_HANDLE handle;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = display_gop(&handle);   /* the one display_choose_mode set */
+    if (gop == NULL) {
         lputs("framebuffer: no graphics output protocol; serial console only\n");
         return;
     }
 
     const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = gop->Mode->Info;
-    uint8_t rs = 0, rb = 0, gs = 0, gb = 0, bs = 0, bb = 0;
-    uint32_t bpp = 32;
-
-    switch (mi->PixelFormat) {
-    case PixelRedGreenBlueReserved8BitPerColor:
-        rs = 0; gs = 8; bs = 16;
-        rb = gb = bb = 8;
-        break;
-    case PixelBlueGreenRedReserved8BitPerColor:
-        bs = 0; gs = 8; rs = 16;
-        rb = gb = bb = 8;
-        break;
-    case PixelBitMask: {
-        mask_to_field(mi->PixelInformation.RedMask, &rs, &rb);
-        mask_to_field(mi->PixelInformation.GreenMask, &gs, &gb);
-        mask_to_field(mi->PixelInformation.BlueMask, &bs, &bb);
-        if (rb == 0 || gb == 0 || bb == 0) {
-            lputs("framebuffer: pixel bit mask has no usable channels; ignored\n");
-            return;
-        }
-        uint32_t all = mi->PixelInformation.RedMask | mi->PixelInformation.GreenMask |
-                       mi->PixelInformation.BlueMask | mi->PixelInformation.ReservedMask;
-        uint32_t top = 0;
-        for (uint32_t i = 0; i < 32; i++) {
-            if (all & (1u << i))
-                top = i + 1;
-        }
-        bpp = ALIGN_UP(top, 8);
-        break;
-    }
-    default:
-        lprintf("framebuffer: pixel format %u has no linear buffer; ignored\n",
-                (unsigned)mi->PixelFormat);
+    struct display_format fmt;
+    if (!display_format(mi, &fmt)) {
+        lprintf("framebuffer: pixel format %u has no usable linear buffer; ignored\n", (unsigned)mi->PixelFormat);
         return;
     }
+    uint32_t bpp = fmt.bpp;
 
     uint64_t base = gop->Mode->FrameBufferBase;
     uint64_t size = gop->Mode->FrameBufferSize;
@@ -251,12 +197,12 @@ static void find_framebuffer(struct cosmoboot_info *info)
     info->fb_height = (uint32_t)height;
     info->fb_pitch = (uint32_t)pitch;
     info->fb_bpp = bpp;
-    info->fb_red_shift = rs;
-    info->fb_red_bits = rb;
-    info->fb_green_shift = gs;
-    info->fb_green_bits = gb;
-    info->fb_blue_shift = bs;
-    info->fb_blue_bits = bb;
+    info->fb_red_shift = fmt.red_shift;
+    info->fb_red_bits = fmt.red_bits;
+    info->fb_green_shift = fmt.green_shift;
+    info->fb_green_bits = fmt.green_bits;
+    info->fb_blue_shift = fmt.blue_shift;
+    info->fb_blue_bits = fmt.blue_bits;
 
     lprintf("framebuffer: %ux%u, %u bpp, pitch %u, at 0x%llx (%llu KiB)\n",
             info->fb_width, info->fb_height, info->fb_bpp, info->fb_pitch,
@@ -579,6 +525,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         info->verify_flags |= COSMOBOOT_VERIFIED;
         memcpy(info->verify_key_id, key_id, sizeof(key_id));
     }
+    display_choose_mode();
     find_framebuffer(info);
 
     if (type_fallback)
@@ -650,6 +597,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     acpi_report();
     firmware_report(info);
+    display_report();
     lprintf("memory map: %u entries\n", n);
     for (uint32_t i = 0; i < n; i++) {
         lprintf("  0x%016llx - 0x%016llx %s\n",
