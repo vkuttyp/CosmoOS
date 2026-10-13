@@ -4058,3 +4058,27 @@ changes is on the parent's path between the spawn's return and the loop
 Provisional: a scheduling delay of the parent longer than the child's 20
 ms sleep. Watch for a second sighting; with one, have the probe report
 how long `spawnve` took to return and when the child sent its signal.
+
+## `blk-irq-budget`: the device never had the next completion ready, 2026-10-13
+
+`SELFTEST: blk-irq-budget ... FAIL: check failed: the device had the next
+completion ready under 90% of the time (1043 ms)`, main's merge run for
+#376 (run 38328511404, job 115072723174), x86-64, the two-CPU debug boot
+(`test-smp2`), `boot-test: FAIL after 203.8s`. The test's own lines:
+819 completions in the 1 s storm, 755 resubmitted, **next completion
+ready 0 times and not 755**, at most 2 popped in one handler call, the
+longest tick gap 591 ms on cpu 0, a bystander's longest wait 637 ms
+(both bounds 250). The same boot on the PR's last run passed with 5,322
+completions, the next one ready every time and 32 popped per call.
+
+The whole job ran slow: its `test` and `test-guard` boots passed in
+182.0 s and 180.7 s, against 160.8 s and 161.8 s on the PR's last run
+(38324464909), and `cosmofs-replay` took 32.2 s there against 18.2 s.
+QEMU completed one request at a time while the vCPU went unscheduled for
+over half a second: the storm the test needs (a device that always has
+the next completion waiting) never formed, and the check that guards
+against a vacuous pass refused it. #376 changed no block, virtio-blk or
+interrupt path on x86-64. First sighting of this check. The failed job
+was rerun and passed (job 115083358004); that runner was slow too, its
+boots 171-183 s, so the test's storm can form on a slow runner and this
+one was slower still in the storm's second.
