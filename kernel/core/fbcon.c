@@ -109,6 +109,12 @@ static FBCON_DRAW void fbcon_draw_clear_rows(struct fbcon *c, uint32_t first, ui
     if (y1 > c->height)
         y1 = c->height;
     for (uint32_t y = y0; y < y1; y++) {
+        if (c->bytes_pp == 4) {
+            volatile uint32_t *p = (volatile uint32_t *)(c->base + (size_t)y * c->pitch);
+            for (uint32_t x = 0; x < c->width; x++)
+                p[x] = c->bg;
+            continue;
+        }
         for (uint32_t x = 0; x < c->width; x++)
             put_pixel(c, x, y, c->bg);
     }
@@ -139,6 +145,15 @@ static FBCON_DRAW void fbcon_draw_glyph(struct fbcon *c, uint32_t col, uint32_t 
         }
 #pragma clang loop unroll(disable)
         for (uint32_t k = 0; k < s; k++, y++) {
+            if (c->bytes_pp == 4) {
+                /* The common format: the row as 32-bit stores, without
+                 * put_pixel's switch per pixel. */
+                volatile uint32_t *p = (volatile uint32_t *)(c->base + (size_t)y * c->pitch) + x0;
+#pragma clang loop unroll(disable)
+                for (uint32_t x = 0; x < n; x++)
+                    p[x] = line[x];
+                continue;
+            }
 #pragma clang loop unroll(disable)
             for (uint32_t x = 0; x < n; x++)
                 put_pixel(c, x0 + x, y, line[x]);
@@ -331,11 +346,10 @@ static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, 
 static void fbcon_start(struct fbcon *c)
 {
     memset(c->text, ' ', (size_t)c->cols * c->rows);
-    /* A scroll repaints the screen. With few columns a log line takes
-     * several rows, so a scaled screen moves a quarter of itself at once
-     * rather than an eighth: half the repaints for the same text. */
-    uint32_t part = c->scale > 1 ? 4 : 8;
-    c->scroll_rows = c->rows / part ? c->rows / part : 1;
+    /* A scroll repaints the screen. With 16-row cells a screen holds few
+     * rows, so it moves a quarter of itself at once rather than the eighth
+     * it moved with 8x8 cells: the same repaints per line of text. */
+    c->scroll_rows = c->rows / 4 ? c->rows / 4 : 1;
     c->ready = true;
     fbcon_draw_clear_rows(c, 0, c->rows);
 }

@@ -2657,6 +2657,22 @@ held one report, one probe script and this file. The test itself passed
 is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
+## `sched-restore-loop`: one trip short, 2026-10-13
+
+`SELFTEST: sched-restore-loop ... FAIL: check failed: runs ==
+RESTORE_RUNS && trips >= (uint64_t)RESTORE_RUNS * RESTORE_RUN && longest
+>= RESTORE_RUN at line 980`, local aarch64 debug boot of the console-face
+branch (`fbcon-scale`, on main 74537ed4): `100 runs of 32, 3199 trips
+(longest 32 in one call)`. One trip short of 3200, every run armed and
+spent (`unspent` 0, or the loop would have stopped early). The next two
+boots of the same image passed (3200). A candidate, not established: a
+run arms 32 resumptions (`test_resume_resched`) and then calls
+`sched_yield`; a tick that preempts the thread between the two resumes it
+through the interrupt-return path, where the seam spends one armed
+resumption but `preempt_point_due` cannot be true (interrupts are off in
+that frame's saved state), so that run makes 31 trips. The branch changes
+the screen console, not the scheduler. Not attributed; first sighting.
+
 ## `sched-restore-loop`: the thread count not back in 200 ms, 2026-10-11
 
 `SELFTEST: sched-restore-loop ... FAIL: check failed: threads_settle(before)

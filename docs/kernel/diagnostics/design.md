@@ -78,9 +78,10 @@ min(width / 512, height / 384)`, 1 to 4 (`fbcon_scale`): Parallels'
 cells (64x24 and 80x25), 1920x1080 120x33, and QEMU AArch64's 800x600 the
 face one-to-one (100x37). Each font row is widened once and written `s`
 times (a division per pixel doubled a scroll's cost under TCG). A scaled
-screen writes as many pixels per repaint as an unscaled one, but with
-fewer columns a log line takes more rows, so it scrolls a quarter of the
-screen at a time rather than an eighth. The `fbcon:` line says the cell
+screen writes as many pixels per repaint as an unscaled one. With
+16-row cells a screen holds half the rows the 8x8 face gave it, so a
+scroll moves a quarter of the screen rather than an eighth, keeping the
+repaints per line of text where they were. The `fbcon:` line says the cell
 size (`... cells of 16x32 pixels ...`).
 
 Two things shape the rest. The sink runs on the panic path, so it
@@ -92,13 +93,15 @@ once at init), which makes a scroll a memmove of the shadow followed by
 a repaint from it: writes only, no reads of the framebuffer, which are
 several times more expensive uncached.
 
-A scroll moves several rows at once (`rows / 8`) rather than one. The
+A scroll moves several rows at once (`rows / 4`) rather than one. The
 cost of a scroll is a screen repaint and does not depend on how far it
 moves, so scrolling by one row would repaint the screen for every line
-printed; measured on the harness, that is 10.9 ms a line against 1.2 ms
-at eight rows, and a boot prints thousands of lines
-(`docs/kernel/diagnostics/testing.md`, "Benchmarks"). What the chunk
-costs is blank space at the bottom, which the next lines fill.
+printed; measured on the harness with the 8x8 face, that was 10.9 ms a
+line against 1.2 ms at eight rows, and a boot prints thousands of lines
+(`docs/kernel/diagnostics/testing.md`, "Benchmarks"). The 8x16 face
+gives a screen half the rows, so the chunk went from an eighth of the
+screen to a quarter. What the chunk costs is blank space at the bottom,
+which the next lines fill.
 
 ## log.c: levels, prefix, truncation
 
