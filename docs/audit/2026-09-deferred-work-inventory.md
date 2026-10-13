@@ -538,12 +538,10 @@ tree.
   on that map. Needs the loader to map the console page and
   `map_early_devices` to carry it (found in review of PR #376; no machine
   seen with one).
-- `sched-migrate-stress` on CI's aarch64 PAN boot, twice on 2026-10-13: the
-  second mutex worker READY and unrun for 2 s with the stall detector
-  silent, so most likely on no ready list. Not reproduced locally (120 loaded
-  runs); the failure line now names its list membership
-  (docs/testing/flakes.md). A scheduler investigation of its own if it
-  recurs.
+- ~~`sched-migrate-stress` on CI: the second mutex worker unrun for 2 s.~~
+  **Explained and fixed by the Parallels-devices unit**: mutex starvation
+  by a releaser that re-locks before the woken waiter runs; the mutex now
+  hands off to a waiter overtaken once (S33; docs/testing/flakes.md).
 - PCI enumeration turns each device's memory decoding off while it sizes
   the BARs (`decode_bars`). On Parallels the firmware's framebuffer is
   behind one of them, so a console write in that window -- a log line

@@ -2622,6 +2622,26 @@ the worker, at which level, and whether that level's bitmap bit is set
 (`sched_test_find_queued`), its priority, flags and how long it has been
 READY, so a third sighting names which. The job was rerun.
 
+**The third, the same day, explained** (PR #379's run 38397007470, job
+115294762089; aarch64, the plain debug `test` boot): `mutex worker 25: on
+a ready list (cpu 1, level 32, bitmap bit set), priority 32, flags 0x0,
+ready for 22 ms`, then `thread state 1` (RUNNING), `rounds 1236 (1236 at
+the migrator's stop)`. Not lost, and not short of CPU: queued, visible,
+recently run and running again, yet no round in 2.3 s. A mutex worker
+counts a round only when it holds the mutex, so it was losing the mutex:
+its partner, mutex worker 24, unlocks, waking it, and locks again before
+it runs; 25 finds the mutex taken, blocks, and the cycle repeats. The
+mutex had no handoff, so nothing bounded how often a waiter could lose
+(the earlier "on no ready list" reading of the silent stall detector was
+wrong: a thread that runs every few milliseconds is never READY for a
+second). **Fixed:** a waiter that was woken and finds the mutex taken
+again is made the owner by the next unlock (S33, module ABI 10).
+`mutex-handoff` makes the overtaking deterministic on one CPU and fails
+with the old unlock on both architectures
+(`tools/mutex-handoff-probe.py --old`). Why three sightings in one day
+after none in two weeks is not established; the window depends on when
+the woken worker reaches a CPU relative to its partner's loop.
+
 ## `net-accept-race` over the per-test budget, 2026-09-24
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,

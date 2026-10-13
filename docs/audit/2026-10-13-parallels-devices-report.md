@@ -148,6 +148,24 @@ is the device's to choose; the transport now takes it whole up to 1024,
 virtio-net keeps at most 256 transmits in flight, and `test-smp2` asks
 QEMU for 1024 explicitly so both QEMUs run the same.
 
+**A mutex that let a waiter lose for ever.** #379's CI failed
+`sched-migrate-stress` on aarch64 twice more (it had once on #376). The
+failure line this PR added showed the second mutex worker on a ready
+list, being run, and making no round in 2.3 s: its partner unlocked,
+woke it, and locked again before it ran, every time, and the kernel's
+mutex had nothing to stop that. A waiter that was woken and finds the
+mutex taken again now asks for it, and the next unlock hands it over
+instead of releasing it (`m->handoff`, S33). `struct mutex` grows, so the
+module ABI is 10. `mutex-handoff` reproduces the overtaking
+deterministically on one CPU (the owner yields while it holds the mutex,
+so the woken waiter runs only when the mutex is taken): the waiter gets
+the mutex after the owner's 2nd round, and with the old unlock only
+after its 20th; `tools/mutex-handoff-probe.py --old` shows that on both
+architectures. It is outside this unit's scope, but it failed this PR's
+CI in three runs of four, and merging with it would have turned main
+red, which is the case in which AGENTS.md has a defect found along the
+way fixed rather than recorded.
+
 ## Parallels iteration log
 
 | # | Seen | Cause | Fix |
