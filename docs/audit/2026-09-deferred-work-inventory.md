@@ -523,9 +523,10 @@ tree.
   QEMU's firmware alone.
 - Parallels Desktop on Apple Silicon (found by that unit): its SATA disks
   are not on PCI (a platform AHCI described only in the DSDT would need an
-  AML interpreter); its NVMe controller offers MSI only and `nvme` requires
+  AML interpreter); ~~its NVMe controller offers MSI only and `nvme` requires
   MSI-X; its network adapter is a legacy-only virtio-net and `virtio-pci`
-  is modern-only; ~~it gives the guest no RNDR and no virtio-rng, so the
+  is modern-only~~ (**closed by the Parallels-devices unit**: one-vector
+  NVMe, the legacy virtio transport); ~~it gives the guest no RNDR and no virtio-rng, so the
   pool never seeds; no RTC is found~~ (**closed by the Parallels-devices
   unit**: the firmware's time at boot, boot protocol v10, and a
   timing-jitter source, `docs/audit/2026-10-13-parallels-devices-report.md`).
@@ -537,6 +538,10 @@ tree.
   on that map. Needs the loader to map the console page and
   `map_early_devices` to carry it (found in review of PR #376; no machine
   seen with one).
+- ~~`sched-migrate-stress` on CI: the second mutex worker unrun for 2 s.~~
+  **Explained and fixed by the Parallels-devices unit**: mutex starvation
+  by a releaser that re-locks before the woken waiter runs; the mutex now
+  hands off to a waiter overtaken once (S33; docs/testing/flakes.md).
 - PCI enumeration turns each device's memory decoding off while it sizes
   the BARs (`decode_bars`). On Parallels the firmware's framebuffer is
   behind one of them, so a console write in that window -- a log line

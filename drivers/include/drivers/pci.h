@@ -125,6 +125,13 @@ void pci_enable_device(struct pci_device *pdev, bool bus_master);
 /* Map a memory BAR uncached. 0 if the BAR is absent or an I/O BAR.
  * Sleeps (VMM). Unmap with device_unmap_mmio. */
 vaddr_t pci_map_bar(struct pci_device *pdev, unsigned bar);
+/* An I/O BAR's registers: true when `bar` is an I/O BAR this architecture
+ * can reach (x86-64; never AArch64, arch/pci.h). The read and write are
+ * bounds-checked against the BAR: outside it a read returns all ones and
+ * a write does nothing. width is 1, 2 or 4. Any context. */
+bool pci_io_bar_usable(const struct pci_device *pdev, unsigned bar);
+uint32_t pci_io_read(const struct pci_device *pdev, unsigned bar, uint32_t off, unsigned width);
+void pci_io_write(const struct pci_device *pdev, unsigned bar, uint32_t off, unsigned width, uint32_t v);
 
 /* Offset of the next capability with `id` after `prev` (0 = first), or 0. */
 uint8_t pci_find_capability(const struct pci_device *pdev, uint8_t id, uint8_t prev);

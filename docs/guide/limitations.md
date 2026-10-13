@@ -9,9 +9,9 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 
 - **QEMU is the tested platform.** x86-64 on `q35` and AArch64 on `virt`
   are tested by CI; there is no physical hardware matrix. Since v1.0.1
-  the AArch64 image boots to the live shell on Parallels Desktop 27 on
-  Apple Silicon, without disks or network there
-  ([Tested platforms](platforms.md)). Out of scope for 1.0
+  the AArch64 image boots on Parallels Desktop 27 on Apple Silicon, and
+  since v1.0.2 installs on its NVMe disks and has a network there; its
+  SATA disks are not seen ([Tested platforms](platforms.md)). Out of scope for 1.0
   ([roadmap](../roadmap-1.0.md)): GPU and display (a framebuffer console
   only), hotplug, NUMA, more than 64 CPUs, huge pages, live migration,
   RAID-Z, eBPF, and the Intel VMX backend on hardware.

@@ -7,15 +7,24 @@ over a raw 8 MiB file (`QEMU_NVMEDISK`, a fresh
 `boot-test.log.nvme.img` per harness run) on both `q35` and `virt`. The
 controller reports 256 namespace slots, one active, `MQES` 2047, MSI-X
 with 65 vectors; the driver creates one queue per CPU (four in the
-default run, one with `QEMU_SMP=1`).
+default run, one with `QEMU_SMP=1`). `make test-smp2` appends
+`,msix_qsize=1` (`QEMU_NVME_OPTS`): one MSI-X vector, so the driver runs in
+one-vector mode, one I/O queue sharing the admin queue's vector, and
+every self-test below runs on it, on both architectures.
 
 ## Boot markers (`tests/boot/run_boot_test.py`)
 
 ```text
 [ INFO] module: loaded nvme 1.0
 [ INFO] blk: nvme0n1: 16384 sectors of 512 bytes
-[ INFO] nvme0: ... 1 namespace(s) of N, Q I/O queue(s) of depth 32
+[ INFO] nvme0: ... 1 namespace(s) of N, Q I/O queue(s) of depth 32, ..., MSI-X per queue
 ```
+
+and in `make test-smp2` `... 1 I/O queue(s) of depth 32, ..., one MSI-X
+vector for every queue`. Plain MSI (`one MSI vector for every queue`) has
+no QEMU device; it ran on Parallels Desktop 27's controller (1ab8:4007):
+install to it, boot from it
+(`docs/audit/2026-10-13-parallels-devices-report.md`).
 
 ## Self-test `nvme` (`kernel/device/devtest.c`)
 

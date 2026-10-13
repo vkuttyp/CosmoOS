@@ -54,3 +54,29 @@ void arch_pci_legacy_write(uint8_t bus, uint8_t slot, uint8_t func, uint16_t off
     }
     spin_unlock_irqrestore(&g_lock, s);
 }
+
+/* PCI I/O space: the ports themselves. */
+bool arch_pci_io_available(void)
+{
+    return true;
+}
+
+uint32_t arch_pci_io_limit(void)
+{
+    return 0x10000u;
+}
+
+uint32_t arch_pci_io_read(uint32_t port, unsigned width)
+{
+    return width == 1 ? inb((uint16_t)port) : width == 2 ? inw((uint16_t)port) : inl((uint16_t)port);
+}
+
+void arch_pci_io_write(uint32_t port, unsigned width, uint32_t v)
+{
+    if (width == 1)
+        outb((uint16_t)port, (uint8_t)v);
+    else if (width == 2)
+        outw((uint16_t)port, (uint16_t)v);
+    else
+        outl((uint16_t)port, v);
+}

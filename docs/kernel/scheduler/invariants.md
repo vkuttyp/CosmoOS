@@ -408,3 +408,13 @@ warning forbidden).
   different unit and not a tuning change.
 - No priority inheritance: a high-priority thread blocked on a mutex
   held by a low-priority thread waits for that thread's turn.
+
+**S33. A mutex waiter is overtaken at most once in a row.** A waiter that
+was woken and found the mutex taken again records itself in `m->handoff`
+(the first to ask); the next `mutex_unlock` makes it the owner and wakes
+it instead of releasing the mutex, so no other thread can take it in
+between. Check: `mutex-handoff` (one CPU, an owner that re-locks before
+the woken waiter runs: the waiter gets the mutex after the owner's
+second round; with the old unlock, after its twentieth), and
+`sched-migrate-stress`'s mutex workers, which the old unlock could
+starve for the whole 2 s deadline (three CI sightings, flakes.md).

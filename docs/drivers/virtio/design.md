@@ -50,7 +50,9 @@ probe, the device model lock is re-entered (recursive by design).
 until the device reads 0; ACKNOWLEDGE; DRIVER; read the 64 feature bits;
 refuse without `VIRTIO_F_VERSION_1` (`-ENOTSUP`, status FAILED);
 `features = (offered & wanted) | VERSION_1`; write them; set
-FEATURES_OK; re-read and refuse if the device cleared it. The driver
+FEATURES_OK; re-read and refuse if the device cleared it. On a legacy
+transport (`tr->legacy`) there is no VERSION_1 and no FEATURES_OK step:
+`features = offered & wanted`, 32 bits, written once. The driver
 then allocates queues and calls `virtio_device_ready` (DRIVER_OK).
 `virtio_device_reset` writes 0 and waits; every in-flight buffer is then
 dropped by the device (drivers complete their bookkeeping themselves).
@@ -59,7 +61,12 @@ dropped by the device (drivers complete their bookkeeping themselves).
 
 `virtq_alloc(vdev, index, max, callback, &vq)`: the size is the device's
 maximum for that queue (`queue_max_size`), capped by `max` and
-`VIRTQ_MAX_SIZE` (256), and must be a power of two. One `dma_alloc`
+`VIRTQ_MAX_SIZE` (256), and must be a power of two. A legacy queue's size
+is the device's, which the driver cannot change: it is taken whole up to
+`VIRTQ_LEGACY_MAX_SIZE` (1024; QEMU 10's legacy virtio-net has 1024),
+`max` not applying, and a larger one is refused (`-ENOSPC`, logged).
+virtio-net keeps at most 256 transmits in flight whatever the transmit
+queue's size. One `dma_alloc`
 holds the descriptor table (16 × size), the available ring (6 + 2 ×
 size, immediately after, 16-aligned) and the used ring (6 + 8 × size,
 on the next page boundary), zeroed. Descriptors are chained into a free
@@ -85,7 +92,11 @@ the device set `VIRTQ_USED_F_NO_NOTIFY`. `virtq_pop`: under the lock,
 compare `last_used` with an acquire load of `used->idx`; read the
 element; skip and count (`bad_used`) an `id >= size`, a head that is not
 in flight (never posted, already completed, a duplicate); clamp and
-count a `len` larger than the chain's `in_bytes`; return the chain to
+count a `len` larger than the chain's `in_bytes` -- except that a legacy
+device's `len` for a chain with no device-writable bytes is taken as 0
+without counting it, because legacy devices commonly report the bytes
+they read there (Parallels Desktop's network adapter does for every
+transmit; the spec tells legacy drivers to ignore it, 2.7.8.2); return the chain to
 the free list by walking the shadow for exactly `chain_len` steps; return
 the cookie and `len`. Traversal is bounded by the driver's own record,
 so no descriptor content can make it loop or index outside its arrays.
@@ -99,8 +110,10 @@ walk vendor capabilities (`pci_find_capability(PCI_CAP_ID_VENDOR)`),
 reading `cfg_type` at `+3`, BAR at `+4`, offset at `+8`, length at
 `+12`, and for NOTIFY the multiplier at `+16`; `cap_window` maps each
 referenced BAR once (`pci_map_bar`) and bounds-checks offset + length
-against the BAR size. Without COMMON and NOTIFY the device is legacy
-only and refused (`-ENODEV`). Then `pci_enable_device(bus master)`,
+against the BAR size. A device with no COMMON or NOTIFY capability at
+all and a transitional device id (`0x1000`-`0x103f`) is legacy-only and
+gets the legacy transport (below); one whose modern windows exist but
+could not be mapped, or a `0x1af4` function with another id, is refused. Then `pci_enable_device(bus master)`,
 `pci_msix_enable(VIRTIO_MAX_QUEUES + 1)` (at least 2 vectors required),
 entry 0 bound to the configuration-change handler and written to
 `msix_config`, `device_id = pci device >= 0x1040 ? pci device - 0x1040 :
@@ -120,6 +133,34 @@ polled queue), read it back to confirm the device accepted it, and set
 `notify_base + queue_notify_off × multiplier`, bounds-checked against
 the NOTIFY window. Remove: unregister the virtio device (which runs the
 device driver's remove), status 0, `pci_msix_disable`, unmap BARs.
+
+### The legacy transport (`vleg_transport`, spec 4.1.4.8)
+
+`struct virtio_transport` says it is legacy in its last field, `legacy`,
+so a driver module built before the field existed still finds every
+callback at its offset.
+
+A device without the modern capabilities -- Parallels Desktop 27's
+network adapter, 1af4:1000 -- keeps one register block at the start of
+BAR0: host features `0x00`, guest features `0x04` (32 bits each), queue
+page number `0x08`, queue size `0x0c` (read only), queue select `0x0e`,
+queue notify `0x10`, status `0x12`, ISR `0x13`, and with MSI-X enabled the
+configuration vector `0x14`, the queue vector `0x16` and the device
+configuration from `0x18`. BAR0 is a memory BAR (Parallels; mapped with
+`pci_map_bar`) or an I/O BAR, reached through `pci_io_read`/`pci_io_write`
+where the architecture has PCI I/O space (x86-64's ports; AArch64 has
+none this kernel can reach, so a legacy device in I/O space is refused
+there). The DMA mask is 44 bits: a queue's address is a 32-bit page
+number. Probe enables MSI-X as for modern, writes vector 0 to `0x14` and
+refuses the device if it does not read back. `setup_queue` checks the
+ring is virtqueue.c's layout (it is the legacy one: descriptors, the
+available ring, the used ring at the next 4 KiB boundary), that the
+queue's size is the device's, requests the queue's MSI-X entry, writes
+and reads back the queue vector, and then writes the page number, which
+makes the queue live; `teardown_queue` writes 0 there. `read_config`
+reads byte by byte until two reads agree (legacy has no generation
+counter). The probe's line says `legacy, registers in memory` or `legacy,
+registers in I/O space`.
 
 ## Device drivers
 
@@ -195,8 +236,15 @@ offers neither): with `CSUM` the interface has `NETIF_CAP_TXCSUM` and a
 packet carrying `NET_CSUM_TCP` gets `NEEDS_CSUM`, `csum_start` and
 `csum_offset` in its header; with `GUEST_CSUM` a received `DATA_VALID`
 frame is marked `M_CSUM_OK` and a `NEEDS_CSUM` one is finished with
-`m_csum_complete` first. No `MRG_RXBUF`, so each received frame is one
-buffer with a 12-byte `virtio_net_hdr` in front. Queue 0 receive: 32 mbuf clusters posted
+`m_csum_complete` first. On a modern device no `MRG_RXBUF`: each
+received frame is one buffer with a 12-byte `virtio_net_hdr` in front. A
+legacy device's header is 10 bytes unless `MRG_RXBUF` is negotiated, when
+it is the same 12 bytes, so on a legacy device the driver asks for
+`MRG_RXBUF` and refuses one that does not offer it; a receive buffer is a
+whole cluster, larger than any frame without GSO, so `num_buffers` is
+always 1; a frame that says otherwise is dropped, and so are the
+`num_buffers - 1` used entries that follow it (its continuation, which
+carry no header of their own). Queue 0 receive: 32 mbuf clusters posted
 whole (`data = buf`), `dma_map`ped device-writable; the completion
 callback drops frames shorter than header plus 14 bytes, sets the
 length, strips the header with `m_adj` and hands the mbuf to

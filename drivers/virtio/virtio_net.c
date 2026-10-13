@@ -29,6 +29,7 @@
 #define VIRTIO_NET_F_CSUM       (1ULL << 0)
 #define VIRTIO_NET_F_GUEST_CSUM (1ULL << 1)
 #define VIRTIO_NET_F_MAC        (1ULL << 5)
+#define VIRTIO_NET_F_MRG_RXBUF  (1ULL << 15)
 #define VIRTIO_NET_F_STATUS     (1ULL << 16)
 #define VNET_HDR_LEN            12u
 #define VNET_HDR_F_NEEDS_CSUM   1u
@@ -41,7 +42,7 @@ struct vnet_hdr {
     uint16_t gso_size;
     uint16_t csum_start;    /* from the start of the frame (after this header) */
     uint16_t csum_offset;
-    uint16_t num_buffers;   /* VERSION_1: present without MRG_RXBUF too */
+    uint16_t num_buffers;   /* VERSION_1: present without MRG_RXBUF too; legacy: only with it */
 } __packed;
 _Static_assert(sizeof(struct vnet_hdr) == VNET_HDR_LEN, "virtio_net_hdr is 12 bytes");
 #define VNET_RX_BUFS        32u
@@ -68,6 +69,7 @@ struct vnet {
 #endif
     bool tx_csum, rx_csum;
     uint64_t rx_drops, tx_drops, rx_csum_valid, rx_csum_finished, tx_csum_offloaded;
+    unsigned rx_merged_left;   /* MRG_RXBUF: buffers still to come of a frame being dropped (receive path only) */
 };
 
 /* A seam armed only for the synthetic transport in the removal tests.
@@ -185,7 +187,11 @@ static void vnet_buffer_take(struct mbuf **buffers, unsigned count, struct mbuf 
  * private records; no descriptor API or mbuf layout change is needed. */
 static void vnet_tx_init(struct vnet *v)
 {
-    for (unsigned i = 0; i < v->tx->size; i++) {
+    /* A legacy device's queue may be larger (QEMU 10's is 1024): the
+     * first VIRTQ_MAX_SIZE descriptors' worth of frames in flight is
+     * plenty, and the rest of the ring stays unused. */
+    unsigned n = v->tx->size < ARRAY_SIZE(v->tx_buf) ? v->tx->size : (unsigned)ARRAY_SIZE(v->tx_buf);
+    for (unsigned i = 0; i < n; i++) {
         v->tx_buf[i].next = v->tx_free;
         v->tx_free = &v->tx_buf[i];
     }
@@ -250,6 +256,13 @@ static unsigned vnet_rx_done(struct virtqueue *vq, unsigned budget)
         spin_unlock_irqrestore(&v->lock, s);
         vnet_unmap(v, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
         m->pkt.dma = 0;
+        if (v->rx_merged_left != 0) {
+            /* The rest of a frame spread over several buffers: no header of
+             * its own, dropped with the frame's first buffer. */
+            v->rx_merged_left--;
+            vnet_free_mbuf(v, m);
+            continue;
+        }
         if (len < VNET_HDR_LEN + 14 || len > MCLBYTES) {
             v->rx_drops++;
             vnet_free_mbuf(v, m);
@@ -257,6 +270,15 @@ static unsigned vnet_rx_done(struct virtqueue *vq, unsigned budget)
         }
         struct vnet_hdr hdr;
         memcpy(&hdr, m->data, sizeof(hdr));
+        if (virtio_has_feature(v->vdev, VIRTIO_NET_F_MRG_RXBUF) && hdr.num_buffers != 1) {
+            /* A frame across buffers: never posted for, so not reassembled.
+             * The next num_buffers - 1 used entries are its continuation
+             * and are dropped with it, not read as frames. */
+            v->rx_drops++;
+            v->rx_merged_left = hdr.num_buffers > 1 ? (unsigned)hdr.num_buffers - 1u : 0u;
+            vnet_free_mbuf(v, m);
+            continue;
+        }
         m->len = m->pkt.len = len;
         m_adj(m, (int)VNET_HDR_LEN);
         if (v->rx_csum && (hdr.flags & VNET_HDR_F_NEEDS_CSUM)) {
@@ -451,10 +473,20 @@ static int vnet_probe(struct virtio_device *vdev)
     vdev->priv = v;
     spinlock_init(&v->lock, "virtio-net");
 
+    /* A legacy device's header is 10 bytes unless MRG_RXBUF is
+     * negotiated, when it is the 12 bytes VERSION_1 always has: asked for,
+     * and required, so one header layout serves both. A receive buffer is
+     * a whole cluster, larger than any frame without GSO, so the device
+     * never needs a second buffer for one (num_buffers stays 1). */
     int rc = virtio_device_init(vdev, VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS | VIRTIO_NET_F_CSUM |
-                                          VIRTIO_NET_F_GUEST_CSUM);
+                                          VIRTIO_NET_F_GUEST_CSUM | (vdev->tr->legacy ? VIRTIO_NET_F_MRG_RXBUF : 0));
     if (rc)
         goto fail;
+    if (vdev->tr->legacy && !virtio_has_feature(vdev, VIRTIO_NET_F_MRG_RXBUF)) {
+        kerror("virtio-net: %s: legacy device without MRG_RXBUF (a 10-byte header); refused", vdev->dev.name);
+        rc = -ENOTSUP;
+        goto fail;
+    }
     v->tx_csum = virtio_has_feature(vdev, VIRTIO_NET_F_CSUM);
     v->rx_csum = virtio_has_feature(vdev, VIRTIO_NET_F_GUEST_CSUM);
     if (!virtio_has_feature(vdev, VIRTIO_NET_F_MAC)) {

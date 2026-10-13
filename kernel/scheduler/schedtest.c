@@ -1175,6 +1175,73 @@ static bool wake_bench_one(const char **reason, unsigned nwaiters, uint64_t *unl
     return true;
 }
 
+/* --- mutex-handoff: a waiter overtaken once gets the mutex next (S33) -------
+ *
+ * The releaser re-takes the mutex before the waiter it woke can run, every
+ * time, deterministically: both threads on one CPU at one priority, so the
+ * unlock's wake never preempts the owner, and the owner yields while it
+ * holds the mutex, so the waiter runs only when the mutex is taken. Without
+ * a handoff the waiter fails every retry and gets the mutex only after the
+ * owner's last round; with it, the unlock after the waiter's first failed
+ * retry hands it over, in the owner's second round.
+ */
+#define HANDOFF_ROUNDS 20u
+
+struct handoff_test {
+    struct mutex m;
+    volatile unsigned owner_rounds;   /* rounds the owner completed (unlocked) */
+    volatile unsigned waiter_got_at;  /* owner_rounds when the waiter got the mutex; 0 until then */
+    volatile bool waiter_in;
+};
+
+static void handoff_owner(void *arg)
+{
+    struct handoff_test *h = arg;
+    for (unsigned i = 0; i < HANDOFF_ROUNDS; i++) {
+        mutex_lock(&h->m);
+        while (i == 0 && !__atomic_load_n(&h->waiter_in, __ATOMIC_ACQUIRE))
+            sched_yield();   /* first round: the waiter starts, finds the mutex held, blocks */
+        sched_yield();       /* every round: the waiter runs while the mutex is held */
+        __atomic_store_n(&h->owner_rounds, i + 1, __ATOMIC_RELEASE);
+        mutex_unlock(&h->m);
+    }
+    thread_exit(0);
+}
+
+static void handoff_waiter(void *arg)
+{
+    struct handoff_test *h = arg;
+    __atomic_store_n(&h->waiter_in, true, __ATOMIC_RELEASE);
+    mutex_lock(&h->m);
+    /* The owner holds round 1 until this thread is in, so 0 is impossible. */
+    __atomic_store_n(&h->waiter_got_at, __atomic_load_n(&h->owner_rounds, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
+    mutex_unlock(&h->m);
+    thread_exit(0);
+}
+
+bool selftest_mutex_handoff(const char **reason)
+{
+    unsigned before = thread_count();
+    unsigned here = raw_cpu_id();   /* one CPU for the pair to share; the caller need not stay */
+    static struct handoff_test g_handoff;   /* both threads are joined before this returns */
+    struct handoff_test *h = &g_handoff;
+    memset(h, 0, sizeof(*h));
+    mutex_init(&h->m, "selftest-handoff");
+    struct thread *o = thread_create_on(handoff_owner, h, "handoff-owner", SCHED_PRIO_DEFAULT, CPUMASK_OF(here));
+    CHECK(o != NULL);
+    struct thread *w = thread_create_on(handoff_waiter, h, "handoff-waiter", SCHED_PRIO_DEFAULT, CPUMASK_OF(here));
+    CHECK(w != NULL);
+    thread_join(o);
+    thread_join(w);
+    unsigned got = h->waiter_got_at;
+    kinfo("selftest: mutex-handoff: the waiter got the mutex after the owner's round %u of %u", got, HANDOFF_ROUNDS);
+    /* Round 1's unlock wakes it and round 2 overtakes it; its failed retry
+     * asks, and round 2's unlock hands over. Old code: after round 20. */
+    CHECK(got >= 1 && got <= 2);
+    CHECK(threads_settle(before));
+    return true;
+}
+
 bool selftest_mutex_wake_bench(const char **reason)
 {
     unsigned before = thread_count();

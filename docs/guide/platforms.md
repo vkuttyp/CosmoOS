@@ -14,11 +14,33 @@ serial port -- by `make test-platforms`.
 
 ## Parallels Desktop 27 on Apple Silicon (AArch64)
 
-The AArch64 image boots to the live shell since v1.0.1. To try it:
-create a virtual machine for "Other Linux", ARM64, with UEFI, and put
-`cosmoos-aarch64.img` on a disk of the "plain" (raw) type, as its first
-SATA disk. The kernel finds the machine from its ACPI tables and logs
-one line saying what it found:
+The AArch64 image boots to the live shell since v1.0.1, and since v1.0.2
+it installs, boots the installed system, has a network and ssh, seeds
+its randomness and keeps the right time. To try it: create a virtual
+machine for "Other Linux", ARM64, with UEFI; put `cosmoos-aarch64.img`
+on a disk of the "plain" (raw) type and attach it as an **NVMe** disk,
+and add a second, blank NVMe disk of 1 GiB or more to install on.
+Parallels' SATA disks are not PCI devices, so the kernel would not see
+the live disk and `cosmo-install` would have no ESP to copy. From the
+command line, with `prlctl`, for a VM named `CosmoOS` (these two need
+Parallels, so the guide's own tests do not run them; they were run on
+Parallels Desktop 27.0.3 when this was written):
+
+```text
+prlctl set "CosmoOS" --device-set hdd0 --iface nvme
+prlctl set "CosmoOS" --device-add hdd --type plain --size 1024 --iface nvme
+```
+
+The two disks are two namespaces of one controller: `cosmo-install
+--list` shows the live disk (`nvme0n2`, with the `boot` partition) and
+the blank one (`nvme0n1`); `cosmo-install nvme0n1` installs, `exit`
+powers off, and with the blank disk first in the boot order (or the live
+disk disconnected) the VM boots the installed system. The network
+adapter's default, shared networking, gives it an address by DHCP; ssh
+listens on port 22 of that address.
+
+The kernel finds the machine from its ACPI tables and logs one line
+saying what it found:
 
 ```text
 platform: firmware OEM 'PRLS  '; console PL011 at 0x2110000 (DBG2, polled); GICv3 GICD 0x2010000 GICR 0x2500000 ITS 0x0 MSI frame 0x2250000; timer PPIs 30 (physical) 27 (virtual); PSCI SMC
@@ -26,11 +48,12 @@ platform: firmware OEM 'PRLS  '; console PL011 at 0x2110000 (DBG2, polled); GICv
 
 | | |
 |---|---|
-| Works | verified boot; both CPUs; the console on the screen and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell and every command that needs nothing below; randomness (since v1.0.2: the timing-jitter source seeds the pool in milliseconds, as Parallels offers no other); the wall clock (since v1.0.2: the firmware's time at boot) |
-| Does not work yet | **installing**: Parallels' SATA disks are not on PCI, and its NVMe controller (`--iface nvme`) offers only MSI, which the NVMe driver does not use yet; **networking and ssh**: the network adapter is a legacy virtio-net, which the virtio driver does not drive yet |
+| Works | verified boot; both CPUs; the console on the screen and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell; installing on an NVMe disk and booting it (the controller offers only MSI: one vector for every queue); the network (the adapter is a legacy virtio-net) with DHCP, DNS, `wget` and ssh; randomness (no CPU instruction, firmware generator or virtio-rng: the timing-jitter source seeds the pool in milliseconds); the wall clock (the firmware's time at boot) |
+| Does not work | SATA disks (not on PCI: a platform AHCI described only in the DSDT, which needs an AML interpreter); the sound, USB 2.0 (EHCI), graphics (virtio-gpu, beyond the framebuffer console) and vsock devices have no driver; the debug self-test suite assumes QEMU's machine |
 
 The details, and why, are in
-[`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md).
+[`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)
+and [`docs/audit/2026-10-13-parallels-devices-report.md`](../audit/2026-10-13-parallels-devices-report.md).
 
 ## Other machines
 

@@ -4,7 +4,9 @@
  *
  * One admin queue pair and one I/O queue pair per CPU (as many as the
  * controller grants), each I/O pair with its own MSI-X vector routed to
- * its CPU. A bio's segments become PRP entries without bouncing. Every
+ * its CPU. A controller with fewer than two MSI-X vectors -- one, or none
+ * and plain MSI (Parallels Desktop's) -- runs one I/O pair, and the admin
+ * and I/O queues share its one vector. A bio's segments become PRP entries without bouncing. Every
  * namespace is a struct blkdev named nvme<ctrl>n<nsid>. The block layer's
  * timeout thread drives Abort and, failing that, a controller reset that
  * fails everything in flight and leaves the controller dead.
@@ -107,6 +109,8 @@ struct nvme_ctrl {
     unsigned dstrd;
     unsigned index;                        /* nvme<index> */
     bool admin_polled;                     /* an admin command is being driven by its issuer: the handler leaves the admin queue alone */
+    enum { NVME_IRQ_MSIX, NVME_IRQ_MSIX_ONE, NVME_IRQ_MSI } irq_mode;   /* the last two: one vector for every queue */
+    unsigned irq_ioq;                      /* I/O queues the shared vector serves: published after each is created */
     struct nvme_queue admin;
     struct nvme_queue *ioq[NVME_MAX_IOQ];
     unsigned nr_ioq;
@@ -349,6 +353,29 @@ static void nvme_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
     irq_poll_sched(&q->poll);
 }
 
+/* One vector for every queue: each queue's poll is scheduled and finds
+ * its own completions, or none. An I/O queue is served once the probe
+ * has created it and published irq_ioq (release; read here with
+ * acquire), never while it is being allocated: nr_ioq counts a queue
+ * before that, for the failure path's sake. */
+static void nvme_irq_one(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector;
+    (void)frame;
+    struct nvme_ctrl *c = arg;
+    irq_poll_sched(&c->admin.poll);
+    unsigned n = __atomic_load_n(&c->irq_ioq, __ATOMIC_ACQUIRE);
+    if (n > NVME_MAX_IOQ)
+        n = NVME_MAX_IOQ;   /* the array's bound, whatever the count says */
+    for (unsigned i = 0; i < n; i++)
+        irq_poll_sched(&c->ioq[i]->poll);
+}
+
+static bool one_vector(const struct nvme_ctrl *c)
+{
+    return c->irq_mode != NVME_IRQ_MSIX;
+}
+
 /* --- admin commands ------------------------------------------------------------ */
 
 /* Issue one admin command and wait for it (bounded). Returns the errno of
@@ -452,7 +479,10 @@ static int create_ioq(struct nvme_ctrl *c, struct nvme_queue *q)
     sqe.cdw0 = NVME_ADMIN_CREATE_CQ;
     sqe.prp1 = q->cq_dma;
     sqe.cdw10 = ((uint32_t)(q->depth - 1) << 16) | q->qid;
-    sqe.cdw11 = ((uint32_t)q->qid << 16) | (1u << 1) | 1u;   /* vector = qid, interrupts on, contiguous */
+    /* Interrupt vector qid, or 0 when every queue shares it; interrupts
+     * on, contiguous. */
+    uint32_t iv = one_vector(c) ? 0u : q->qid;
+    sqe.cdw11 = (iv << 16) | (1u << 1) | 1u;
     int rc = admin_cmd(c, &sqe, NULL);
     if (rc)
         return rc;
@@ -833,7 +863,7 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
     dma_set_mask(&pdev->dev, 64);
     c->bar = pci_map_bar(pdev, 0);
     int rc = -EIO;
-    bool msix_enabled = false;
+    bool msix_enabled = false, msi_enabled = false;
     uint8_t *idbuf = NULL;
     dma_addr_t id_dma = 0;
     if (c->bar == 0) {
@@ -875,12 +905,22 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
         want_ioq = NVME_MAX_IOQ;
     int granted = pci_msix_enable(pdev, 1 + want_ioq);
     msix_enabled = granted > 0;
-    if (granted < 2) {
-        kerror("nvme: %s: MSI-X unavailable (%d)", pdev->dev.name, granted);
-        rc = granted < 0 ? granted : -ENODEV;
-        goto fail_disable;
+    if (granted >= 2) {
+        c->irq_mode = NVME_IRQ_MSIX;
+        c->admin.vector = pci_msix_request(pdev, 0, nvme_irq, &c->admin, "nvme-admin", IRQ_CPU_ANY);
+    } else if (granted == 1) {
+        c->irq_mode = NVME_IRQ_MSIX_ONE;
+        c->admin.vector = pci_msix_request(pdev, 0, nvme_irq_one, c, "nvme", IRQ_CPU_ANY);
+    } else {
+        c->irq_mode = NVME_IRQ_MSI;
+        c->admin.vector = pci_msi_enable(pdev, nvme_irq_one, c, "nvme", IRQ_CPU_ANY);
+        msi_enabled = c->admin.vector >= 0;
+        if (!msi_enabled) {
+            kerror("nvme: %s: neither MSI-X (%d) nor MSI (%d)", pdev->dev.name, granted, c->admin.vector);
+            rc = c->admin.vector;
+            goto fail_disable;
+        }
     }
-    c->admin.vector = pci_msix_request(pdev, 0, nvme_irq, &c->admin, "nvme-admin", IRQ_CPU_ANY);
     if (c->admin.vector < 0) {
         rc = c->admin.vector;
         goto fail_msix;
@@ -928,7 +968,9 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
         nr = sq_ok;
     if (nr > cq_ok)
         nr = cq_ok;
-    if (nr > (unsigned)granted - 1)
+    if (one_vector(c))
+        nr = 1;   /* the one vector serves one I/O queue as well as any number */
+    else if (nr > (unsigned)granted - 1)
         nr = (unsigned)granted - 1;
     uint16_t depth = (uint16_t)(NVME_IO_DEPTH < mqes ? NVME_IO_DEPTH : mqes);
     for (unsigned i = 0; i < nr; i++) {
@@ -943,7 +985,7 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
         if (rc)
             goto fail_queues;
         q->cpu = i % cpu_count();
-        q->vector = pci_msix_request(pdev, i + 1, nvme_irq, q, "nvme-ioq", q->cpu);
+        q->vector = one_vector(c) ? c->admin.vector : pci_msix_request(pdev, i + 1, nvme_irq, q, "nvme-ioq", q->cpu);
         if (q->vector < 0) {
             rc = q->vector;
             goto fail_queues;
@@ -953,6 +995,7 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
             kerror("nvme: %s: cannot create I/O queue %u (%d)", pdev->dev.name, i + 1, rc);
             goto fail_queues;
         }
+        __atomic_store_n(&c->irq_ioq, i + 1, __ATOMIC_RELEASE);
     }
 
     /* Namespaces. */
@@ -977,19 +1020,24 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
     idbuf = NULL;
     pdev->dev.drvdata = c;
     g_next_index++;
-    kinfo("nvme%u: %s: %s (%s), %u namespace(s) of %u, %u I/O queue(s) of depth %u, %u KiB per request",
+    kinfo("nvme%u: %s: %s (%s), %u namespace(s) of %u, %u I/O queue(s) of depth %u, %u KiB per request, %s",
           c->index, pdev->dev.name, c->model, c->serial, added, nn, c->nr_ioq, depth,
-          (unsigned)(c->max_pages * PAGE_SIZE / 1024));
+          (unsigned)(c->max_pages * PAGE_SIZE / 1024),
+          c->irq_mode == NVME_IRQ_MSIX       ? "MSI-X per queue"
+          : c->irq_mode == NVME_IRQ_MSIX_ONE ? "one MSI-X vector for every queue"
+                                             : "one MSI vector for every queue");
     return 0;
 
 fail_queues:
-    for (unsigned i = 0; i < c->nr_ioq; i++)
+    for (unsigned i = 0; i < c->nr_ioq && !one_vector(c); i++)
         if (c->ioq[i] && c->ioq[i]->vector >= 0)
             pci_msix_release(pdev, i + 1);
 fail_msix:
 fail_disable:
     if (msix_enabled)
         pci_msix_disable(pdev);
+    if (msi_enabled)
+        pci_msi_disable(pdev);
     /* The probe's own error is what the caller is told either way: the
      * disable's result only decides whether the DMA may be freed. */
     int drc = controller_disable(c);
@@ -1018,14 +1066,19 @@ static void nvme_remove(struct pci_device *pdev)
     list_for_each_entry_safe(ns, tmp, &c->namespaces, link)
         blk_unregister(&ns->bd);   /* no submit is inside the driver after this */
     bool stopped = controller_die(c, "device removed");
-    /* The vectors: released by pci_msix_disable; a handler still running
-     * elsewhere finishes before the queues go (synchronize_irq). */
+    /* The vectors: released by pci_msix_disable (pci_msi_disable for
+     * plain MSI); a handler still running elsewhere finishes before the
+     * queues go (synchronize_irq). One shared vector is synchronized as
+     * often as it is listed, which costs nothing. */
     int vectors[NVME_MAX_IOQ + 1];
     unsigned nv = 0;
     vectors[nv++] = c->admin.vector;
     for (unsigned i = 0; i < c->nr_ioq; i++)
         vectors[nv++] = c->ioq[i]->vector;
-    pci_msix_disable(pdev);
+    if (c->irq_mode == NVME_IRQ_MSI)
+        pci_msi_disable(pdev);
+    else
+        pci_msix_disable(pdev);
     for (unsigned i = 0; i < nv; i++)
         if (vectors[i] >= 0)
             synchronize_irq((unsigned)vectors[i]);

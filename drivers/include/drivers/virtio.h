@@ -39,6 +39,7 @@
 
 #define VIRTIO_MAX_QUEUES 8u
 #define VIRTQ_MAX_SIZE    256u
+#define VIRTQ_LEGACY_MAX_SIZE 1024u   /* a legacy queue is the device's size: QEMU 10's legacy virtio-net has 1024 */
 #define VIRTIO_MSI_NO_VECTOR 0xffffu
 
 struct virtio_device;
@@ -61,6 +62,10 @@ struct virtio_transport {
     /* Mandatory: the last reference to the virtio device dropped, after
      * virtio_device_unregister; free the transport's memory. */
     void     (*release)(struct virtio_device *vdev);
+    /* A legacy (pre-1.0) transport: 32 feature bits, no VERSION_1 and no
+     * FEATURES_OK handshake (virtio_device_init). Last, so the callback
+     * slots keep their offsets for a module built before it. */
+    bool legacy;
 };
 
 struct virtio_device {

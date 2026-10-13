@@ -20,20 +20,31 @@ kernel only through exported symbols, like every driver module.
    (zeroed). `CC` = `IOSQES` 6 (64-byte commands), `IOCQES` 4 (16-byte
    completions), `MPS` 0 (4 KiB), `CSS` NVM, `AMS` round robin, `EN`.
    Wait for `CSTS.RDY` (`TO` bound; `CSTS.CFS` is a fatal failure).
-4. MSI-X: `pci_msix_enable(pdev, 1 + nr_cpus)`; vector 0 is the admin
-   completion queue's, routed to CPU 0.
+4. Interrupts: `pci_msix_enable(pdev, 1 + nr_cpus)`; vector 0 is the
+   admin completion queue's, routed to CPU 0. With fewer than two MSI-X
+   vectors the controller runs in **one-vector mode** (`irq_mode`): one
+   MSI-X vector when exactly one is granted, else single-message MSI
+   (`pci_msi_enable`) -- Parallels Desktop's controller offers only MSI.
+   The one vector's handler, `nvme_irq_one`, schedules the poll of the
+   admin queue and of every I/O queue already created (`irq_ioq`,
+   published with release after each `Create I/O Submission Queue`), and
+   each finds its own completions or none. A controller with neither
+   MSI-X nor MSI is refused.
 5. `Identify Controller` (CNS 1): model, serial, firmware for the log,
    `MDTS` (maximum transfer size as a power-of-two count of 4 KiB pages;
    0 = unlimited, capped by the driver at 128 pages), `NN` (namespaces).
 6. `Set Features` Number of Queues asks for `nr_cpus` I/O pairs; the
    controller answers with what it grants; the driver uses
-   `min(granted, nr_cpus)`.
+   `min(granted, nr_cpus)`, and one in one-vector mode.
 7. For each I/O pair `q` (1-based): `Create I/O Completion Queue`
-   (interrupt vector `q`, physically contiguous, depth
-   `min(MQES + 1, 64)`), then `Create I/O Submission Queue` bound to it.
-   The pair's MSI-X entry is requested on CPU `q − 1`
+   (interrupt vector `q`, 0 in one-vector mode, physically contiguous,
+   depth `min(MQES + 1, 64)`), then `Create I/O Submission Queue` bound to
+   it. The pair's MSI-X entry is requested on CPU `q − 1`
    (`pci_msix_request(pdev, q, nvme_irq, cq, "nvme-ioq", q - 1)`), so a
-   completion is handled on the CPU that submitted it.
+   completion is handled on the CPU that submitted it; in one-vector mode
+   the pair shares the admin queue's vector. The probe's line ends with
+   the mode: `MSI-X per queue`, `one MSI-X vector for every queue` or
+   `one MSI vector for every queue`.
 8. `Identify Active Namespace ID List` (CNS 2), then `Identify Namespace`
    (CNS 0) per id: `NSZE` (blocks), `FLBAS` → `LBADS` (block size, 512
    B to 4 KiB accepted; metadata per block is refused). A `struct nvme_ns`
@@ -149,8 +160,9 @@ at the block layer and by review here.
 ## Removal
 
 `nvme_remove`: `blk_unregister` every namespace (no submit is inside the
-driver afterwards), disable the controller, release the MSI-X vectors
-with `interrupt_unregister_sync` semantics (`pci_msix_disable` after a
+driver afterwards), disable the controller, release the vectors
+with `interrupt_unregister_sync` semantics (`pci_msix_disable`, or
+`pci_msi_disable` for plain MSI, after a
 grace period so a handler still running on another CPU finishes), and
 wait for the queue polls. If disable was acknowledged, in-flight commands
 are completed `-ETIMEDOUT`, queues are freed, namespaces are put (their
@@ -163,7 +175,11 @@ pointer; the controller may still own them.
 ## QEMU
 
 `scripts/qemu-run.sh` adds `-device nvme,drive=nvme0,serial=cosmo-nvme0`
-over a fresh 8 MiB raw file on both machines (q35 and virt). The boot
+over a fresh 8 MiB raw file on both machines (q35 and virt), with
+`QEMU_NVME_OPTS` appended: `make test-smp2` sets `,msix_qsize=1`, one
+MSI-X vector, so every NVMe self-test also runs in one-vector mode on
+both architectures. QEMU's NVMe has no plain MSI; that path has run on
+Parallels Desktop only. The boot
 test requires `module: loaded nvme 1.0` and `blk: nvme0n1: 16384 sectors
 of 512 bytes`. The `nvme` self-test writes and reads the namespace
 through the block layer (single and multi-segment bios), checks that the

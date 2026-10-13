@@ -124,6 +124,16 @@ wait queue, so this exercises `mutex_lock`'s `wait_event` loop under
 contention. `counter == 400` and `violated == false` prove mutual
 exclusion; the lock is free afterwards.
 
+### `mutex-handoff` (S33)
+
+An owner and a waiter on one CPU at one priority; the owner locks, yields
+while holding (so the waiter runs only when the mutex is taken), unlocks
+and locks again, 20 rounds. The unlock's wake never preempts the owner,
+so without a handoff the waiter loses every retry and gets the mutex only
+after the last round. The test requires it after round 1 or 2 and logs
+`selftest: mutex-handoff: the waiter got the mutex after the owner's
+round N of 20` (2 with the handoff).
+
 ### `mutex-wake-bench` (reports only)
 1, 8, 32 and 256 threads block on a mutex the test holds -- enrolled, by
 the mutex queue's own count (`waitqueue_waiting`), before the unlock is

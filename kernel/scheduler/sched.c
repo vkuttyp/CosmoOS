@@ -801,6 +801,30 @@ enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, unsigne
     return r;
 }
 
+#if CONFIG_SELFTEST
+bool sched_test_find_queued(const struct thread *t, unsigned *cpu, int *level, bool *bit_set)
+{
+    for (unsigned c = 0; c < cpu_count(); c++) {
+        struct runqueue *rq = &g_rqs[c];
+        arch_irq_state_t s = spin_lock_irqsave(&rq->lock);
+        for (int p = 0; p < SCHED_PRIO_COUNT; p++) {
+            struct thread *q;
+            list_for_each_entry(q, &rq->ready[p], rq_link) {
+                if (q == t) {
+                    *cpu = c;
+                    *level = p;
+                    *bit_set = (rq->bitmap >> p) & 1u;
+                    spin_unlock_irqrestore(&rq->lock, s);
+                    return true;
+                }
+            }
+        }
+        spin_unlock_irqrestore(&rq->lock, s);
+    }
+    return false;
+}
+#endif
+
 uint64_t sched_migration_count(void)
 {
     return __atomic_load_n(&g_migrations, __ATOMIC_RELAXED);

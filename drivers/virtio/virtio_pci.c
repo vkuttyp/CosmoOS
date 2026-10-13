@@ -1,11 +1,14 @@
 /*
- * virtio_pci.c - The virtio-pci modern transport (VirtIO 1.1 section
- * 4.1) and the `virtio` module's entry points.
+ * virtio_pci.c - The virtio-pci transports (VirtIO 1.1 section 4.1) and
+ * the `virtio` module's entry points.
  *
- * Vendor-specific PCI capabilities locate the common, notify, ISR and
- * device configuration structures in the device's BARs. Every queue
- * gets its own MSI-X vector (entry 0 is the configuration vector);
- * legacy-only devices (no common capability) are refused.
+ * Modern: vendor-specific PCI capabilities locate the common, notify, ISR
+ * and device configuration structures in the device's BARs. Legacy (a
+ * device with no common capability, such as Parallels Desktop's network
+ * adapter; section 4.1.4.8): one register block at the start of BAR0, a
+ * memory BAR or, where the architecture reaches PCI I/O space (x86-64),
+ * an I/O BAR. Either way every queue gets its own MSI-X vector (entry 0
+ * is the configuration vector).
  */
 
 #include <kernel/errno.h>
@@ -55,7 +58,27 @@ struct vpci {
     size_t devcfg_len;
     unsigned msix_vectors;      /* granted */
     spinlock_t lock;            /* queue_select and feature_select are shared registers */
+    /* Legacy only: the register block, in a mapped memory BAR0 (leg_mmio)
+     * or I/O BAR0 (leg_mmio NULL, through pci_io_*), and the size of the
+     * device configuration that follows it. */
+    bool legacy;
+    volatile uint8_t *leg_mmio;
+    size_t leg_cfg_len;
 };
+
+/* Legacy register block (spec 4.1.4.8), with MSI-X enabled: the device
+ * configuration starts at 0x18. */
+#define LEG_HOST_FEATURES   0x00
+#define LEG_GUEST_FEATURES  0x04
+#define LEG_QUEUE_PFN       0x08
+#define LEG_QUEUE_SIZE      0x0c
+#define LEG_QUEUE_SELECT    0x0e
+#define LEG_QUEUE_NOTIFY    0x10
+#define LEG_STATUS          0x12
+#define LEG_MSIX_CONFIG     0x14
+#define LEG_MSIX_QUEUE      0x16
+#define LEG_CONFIG          0x18
+#define LEG_PFN_SHIFT       12
 
 static inline uint8_t rd8(volatile uint8_t *base, unsigned off)
 {
@@ -244,6 +267,158 @@ static const struct virtio_transport vpci_transport = {
     .release = vpci_release,
 };
 
+/* --- legacy transport operations ------------------------------------------ */
+
+static uint32_t lrd(struct vpci *v, unsigned off, unsigned width)
+{
+    if (v->leg_mmio == NULL)
+        return pci_io_read(v->pdev, 0, off, width);
+    return width == 1 ? rd8(v->leg_mmio, off) : width == 2 ? rd16(v->leg_mmio, off) : rd32(v->leg_mmio, off);
+}
+
+static void lwr(struct vpci *v, unsigned off, unsigned width, uint32_t val)
+{
+    if (v->leg_mmio == NULL) {
+        pci_io_write(v->pdev, 0, off, width, val);
+        return;
+    }
+    if (width == 1)
+        wr8(v->leg_mmio, off, (uint8_t)val);
+    else if (width == 2)
+        wr16(v->leg_mmio, off, (uint16_t)val);
+    else
+        wr32(v->leg_mmio, off, val);
+}
+
+static uint64_t vleg_get_features(struct virtio_device *vdev)
+{
+    return lrd(to_vpci(vdev), LEG_HOST_FEATURES, 4);   /* 32 feature bits only */
+}
+
+static void vleg_set_features(struct virtio_device *vdev, uint64_t f)
+{
+    lwr(to_vpci(vdev), LEG_GUEST_FEATURES, 4, (uint32_t)f);
+}
+
+static uint8_t vleg_get_status(struct virtio_device *vdev)
+{
+    return (uint8_t)lrd(to_vpci(vdev), LEG_STATUS, 1);
+}
+
+static void vleg_set_status(struct virtio_device *vdev, uint8_t st)
+{
+    lwr(to_vpci(vdev), LEG_STATUS, 1, st);
+}
+
+static void vleg_read_config(struct virtio_device *vdev, unsigned off, void *buf, size_t len)
+{
+    struct vpci *v = to_vpci(vdev);
+    uint8_t *out = buf;
+    if (off + len > v->leg_cfg_len) {
+        memset(buf, 0, len);
+        return;
+    }
+    /* No generation counter in legacy: read until two reads agree. */
+    uint8_t again[64];
+    for (unsigned attempt = 0; attempt < 8; attempt++) {
+        for (size_t i = 0; i < len; i++)
+            out[i] = (uint8_t)lrd(v, LEG_CONFIG + off + (unsigned)i, 1);
+        if (len > sizeof(again))
+            return;
+        for (size_t i = 0; i < len; i++)
+            again[i] = (uint8_t)lrd(v, LEG_CONFIG + off + (unsigned)i, 1);
+        if (memcmp(again, out, len) == 0)
+            return;
+    }
+}
+
+static unsigned vleg_queue_max_size(struct virtio_device *vdev, unsigned index)
+{
+    struct vpci *v = to_vpci(vdev);
+    arch_irq_state_t s = spin_lock_irqsave(&v->lock);
+    lwr(v, LEG_QUEUE_SELECT, 2, index);
+    unsigned n = lrd(v, LEG_QUEUE_SIZE, 2);
+    spin_unlock_irqrestore(&v->lock, s);
+    return n;
+}
+
+static int vleg_setup_queue(struct virtio_device *vdev, struct virtqueue *vq)
+{
+    struct vpci *v = to_vpci(vdev);
+    /* The legacy layout is virtqueue.c's: descriptors, the available
+     * ring, the used ring at the next 4 KiB boundary, in one allocation
+     * whose address the device takes as a 32-bit page number. Its size is
+     * the device's, which the driver cannot change. */
+    if ((vq->ring_dma & ((1ull << LEG_PFN_SHIFT) - 1)) != 0 || (vq->ring_dma >> LEG_PFN_SHIFT) > 0xffffffffull ||
+        vq->used_dma != vq->ring_dma + ((vq->avail_dma - vq->ring_dma + 6 + 2 * (uint64_t)vq->size + 4095) & ~4095ull))
+        return -EINVAL;
+    if (vleg_queue_max_size(vdev, vq->index) != vq->size) {
+        kerror("virtio-pci: %s: legacy queue %u is %u entries, not %u", vdev->dev.name, vq->index,
+               vleg_queue_max_size(vdev, vq->index), vq->size);
+        return -EINVAL;
+    }
+    int rc = 0;
+    if (vq->callback) {
+        unsigned entry = vq->index + 1;   /* entry 0 is the config vector */
+        if (entry >= v->msix_vectors)
+            return -ENOSPC;
+        vq->msix_index = entry;
+        int vector = pci_msix_request(v->pdev, entry, vpci_queue_irq, vq, "virtio-vq", vq->cpu);
+        if (vector < 0)
+            return vector;
+        vq->vector = vector;
+    }
+    arch_irq_state_t s = spin_lock_irqsave(&v->lock);
+    lwr(v, LEG_QUEUE_SELECT, 2, vq->index);
+    uint16_t want = vq->callback ? (uint16_t)vq->msix_index : (uint16_t)VIRTIO_MSI_NO_VECTOR;
+    lwr(v, LEG_MSIX_QUEUE, 2, want);
+    if (lrd(v, LEG_MSIX_QUEUE, 2) != want)
+        rc = -EIO;
+    else
+        lwr(v, LEG_QUEUE_PFN, 4, (uint32_t)(vq->ring_dma >> LEG_PFN_SHIFT));   /* the queue is live from here */
+    spin_unlock_irqrestore(&v->lock, s);
+    if (rc && vq->vector >= 0) {
+        pci_msix_release(v->pdev, vq->msix_index);
+        vq->vector = -1;
+        kerror("virtio-pci: %s: device refused MSI-X vector for queue %u", vdev->dev.name, vq->index);
+    }
+    return rc;
+}
+
+static void vleg_teardown_queue(struct virtio_device *vdev, struct virtqueue *vq)
+{
+    struct vpci *v = to_vpci(vdev);
+    arch_irq_state_t s = spin_lock_irqsave(&v->lock);
+    lwr(v, LEG_QUEUE_SELECT, 2, vq->index);
+    lwr(v, LEG_QUEUE_PFN, 4, 0);
+    lwr(v, LEG_MSIX_QUEUE, 2, VIRTIO_MSI_NO_VECTOR);
+    spin_unlock_irqrestore(&v->lock, s);
+    if (vq->vector >= 0) {
+        pci_msix_release(v->pdev, vq->msix_index);
+        vq->vector = -1;
+    }
+}
+
+static void vleg_notify(struct virtio_device *vdev, struct virtqueue *vq)
+{
+    lwr(to_vpci(vdev), LEG_QUEUE_NOTIFY, 2, vq->index);
+}
+
+static const struct virtio_transport vleg_transport = {
+    .name = "virtio-pci-legacy",
+    .legacy = true,
+    .get_features = vleg_get_features,
+    .set_features = vleg_set_features,
+    .get_status = vleg_get_status,
+    .set_status = vleg_set_status,
+    .read_config = vleg_read_config,
+    .queue_max_size = vleg_queue_max_size,
+    .setup_queue = vleg_setup_queue,
+    .teardown_queue = vleg_teardown_queue,
+    .notify = vleg_notify,
+    .release = vpci_release,
+};
+
 /* --- PCI driver ------------------------------------------------------------ */
 
 static void vpci_config_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
@@ -296,9 +471,12 @@ static int vpci_probe(struct pci_device *pdev, const struct pci_id *id)
     spinlock_init(&v->lock, "virtio-pci");
 
     /* Walk the vendor capabilities. */
+    bool modern_caps = false;   /* any COMMON or NOTIFY capability, mapped or not */
     for (uint8_t cap = pci_find_capability(pdev, PCI_CAP_ID_VENDOR, 0); cap;
          cap = pci_find_capability(pdev, PCI_CAP_ID_VENDOR, cap)) {
         uint8_t type = pci_cfg_read8(pdev, (uint16_t)(cap + 3));
+        if (type == VIRTIO_PCI_CAP_COMMON || type == VIRTIO_PCI_CAP_NOTIFY)
+            modern_caps = true;
         switch (type) {
         case VIRTIO_PCI_CAP_COMMON:
             if (v->common == NULL)
@@ -322,15 +500,49 @@ static int vpci_probe(struct pci_device *pdev, const struct pci_id *id)
             break;
         }
     }
-    if (v->common == NULL || v->notify == NULL) {
-        kerror("virtio-pci: %s: no modern capabilities (legacy-only device); refused", pdev->dev.name);
+    if ((v->common == NULL || v->notify == NULL) && (modern_caps || pdev->device < 0x1000 || pdev->device > 0x103f)) {
+        /* A modern device whose windows could not be mapped, or a 0x1af4
+         * function that is not a transitional virtio device: not legacy,
+         * and not driven at all. */
+        kerror("virtio-pci: %s: %s; refused", pdev->dev.name,
+               modern_caps ? "a modern capability window could not be mapped" : "not a virtio device id");
         vpci_unmap_all(v);
         kfree(v);
         return -ENODEV;
     }
+    if (v->common == NULL || v->notify == NULL) {
+        /* Legacy-only (no modern capability at all; a transitional id,
+         * 0x1000-0x103f): the register block at the start of BAR0. */
+        vpci_unmap_all(v);
+        v->common = v->notify = v->isr = v->devcfg = NULL;
+        v->legacy = true;
+        struct pci_bar *b0 = &pdev->bar[0];
+        if (b0->size < LEG_CONFIG) {
+            kerror("virtio-pci: %s: legacy device with no register BAR; refused", pdev->dev.name);
+            kfree(v);
+            return -ENODEV;
+        }
+        if (!b0->io) {
+            v->bar_va[0] = pci_map_bar(pdev, 0);
+            v->leg_mmio = (volatile uint8_t *)v->bar_va[0];
+            if (v->leg_mmio == NULL) {
+                kerror("virtio-pci: %s: cannot map legacy BAR0", pdev->dev.name);
+                kfree(v);
+                return -ENOMEM;
+            }
+        } else if (!pci_io_bar_usable(pdev, 0)) {
+            kerror("virtio-pci: %s: legacy registers in I/O space, which this architecture cannot reach; refused",
+                   pdev->dev.name);
+            kfree(v);
+            return -ENODEV;
+        }
+        v->leg_cfg_len = (size_t)(b0->size - LEG_CONFIG);
+    }
 
     pci_enable_device(pdev, true);
-    dma_set_mask(&pdev->dev, 64);   /* the modern transport addresses 64 bits; the virtio device inherits it */
+    /* Modern addresses 64 bits; legacy takes a queue's address as a
+     * 32-bit page number, 44 bits. The virtio device inherits it. */
+    dma_set_mask(&pdev->dev, v->legacy ? 32 + LEG_PFN_SHIFT : 64);
 
     /* Queues + the configuration vector. */
     int granted = pci_msix_enable(pdev, VIRTIO_MAX_QUEUES + 1);
@@ -347,12 +559,25 @@ static int vpci_probe(struct pci_device *pdev, const struct pci_id *id)
         kfree(v);
         return -ENOSPC;
     }
-    wr16(v->common, COMMON_MSIX_CONFIG, 0);
+    if (v->legacy) {
+        /* With MSI-X enabled the configuration starts at 0x18; a device
+         * that cannot take the vector answers NO_VECTOR. */
+        lwr(v, LEG_MSIX_CONFIG, 2, 0);
+        if (lrd(v, LEG_MSIX_CONFIG, 2) != 0) {
+            kerror("virtio-pci: %s: legacy device refused the configuration vector; refused", pdev->dev.name);
+            pci_msix_disable(pdev);
+            vpci_unmap_all(v);
+            kfree(v);
+            return -EIO;
+        }
+    } else {
+        wr16(v->common, COMMON_MSIX_CONFIG, 0);
+    }
 
     /* Transitional devices carry the virtio id in the subsystem id;
      * modern ids are 0x1040 + id. */
     v->vdev.device_id = pdev->device >= 0x1040 ? pdev->device - 0x1040 : pdev->subsys_id;
-    v->vdev.tr = &vpci_transport;
+    v->vdev.tr = v->legacy ? &vleg_transport : &vpci_transport;
     v->vdev.tr_priv = v;
     v->vdev.hw = &pdev->dev;
     pdev->dev.drvdata = v;
@@ -364,8 +589,9 @@ static int vpci_probe(struct pci_device *pdev, const struct pci_id *id)
         kfree(v);
         return rc;
     }
-    kinfo("virtio-pci: %s: virtio device %u as %s (%u MSI-X vectors)", pdev->dev.name, v->vdev.device_id,
-          v->vdev.dev.name, v->msix_vectors);
+    kinfo("virtio-pci: %s: virtio device %u as %s (%u MSI-X vectors%s)", pdev->dev.name, v->vdev.device_id,
+          v->vdev.dev.name, v->msix_vectors,
+          !v->legacy ? "" : v->leg_mmio ? "; legacy, registers in memory" : "; legacy, registers in I/O space");
     return 0;
 }
 
@@ -380,7 +606,7 @@ static void vpci_remove(struct pci_device *pdev)
 {
     struct vpci *v = pdev->dev.drvdata;
     virtio_device_unregister(&v->vdev);   /* runs the virtio driver's remove; drops the bus's reference */
-    vpci_set_status(&v->vdev, 0);
+    v->vdev.tr->set_status(&v->vdev, 0);
     pci_msix_disable(pdev);
     vpci_unmap_all(v);
     device_put(&v->vdev.dev);             /* the creator's reference; release frees v when the last holder is gone */

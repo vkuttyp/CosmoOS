@@ -69,7 +69,7 @@ export (`-EEXIST`); the kernel panics at `ksym_init` on a duplicate.
 
 ### Module ABI v3: the exported symbols
 
-`COSMO_MODULE_ABI_VERSION` is 7. Version 2 (the lifetime pass): `struct
+`COSMO_MODULE_ABI_VERSION` is 10. Version 2 (the lifetime pass): `struct
 kobject` gained `owner`, which moves every field after the embedded
 kobject in `struct device`, `struct blkdev` and `struct netif`, and the
 release callbacks (`struct device.release`, `struct blkdev_ops.release`,
@@ -86,7 +86,12 @@ callback kind of entry, what the `wait_event` macro's stack entry is laid
 out as), `struct waitqueue` lost `wake_gen`, and `struct kobject` gained
 `watched`. Version 7 (the wake_one follow-up): `struct waitqueue` gained
 `callbacks`, a second list, so a wake runs every callback entry and still
-stops at one thread. An older module is refused by `modelf_check_info`.
+stops at one thread. Version 8: `struct blk_test_driver_hooks` gained the
+`pops_*` fields. Version 9 (device lifecycle): `struct device` gained
+`dma_retained`. Version 10 (the Parallels-devices unit): `struct mutex`
+gained `handoff`, the waiter the next unlock hands the mutex to (S33),
+which changes the size of every exported structure embedding one. An
+older module is refused by `modelf_check_info`.
 
 The exports include device, PCI, DMA, block, entropy and console-sink
 interfaces, the mbuf and network-interface surface a NIC driver needs,
@@ -104,7 +109,7 @@ removing or changing one bumps the version.
 | Device model (`kernel/device.h`) | `bus_register`, `bus_find`, `device_setup`, `device_release_static`, `device_add_resource`, `device_resource`, `device_register`, `device_unregister`, `driver_register`, `driver_unregister`, `device_map_mmio`, `device_unmap_mmio`, `device_find`, `device_for_each`, `device_count` |
 | DMA (`kernel/dma.h`) | `dma_alloc`, `dma_free`, `dma_map`, `dma_unmap`, `dma_mappable`, `dma_sync_for_device`, `dma_sync_for_cpu`, `dma_set_mask` |
 | IOMMU (`kernel/iommu.h`) | `iommu_present`, `iommu_get_stats` — a module never maps by itself: the DMA API does it for the device's domain |
-| PCI (`drivers/pci.h`) | `pci_bus`, `pci_register_driver`, `pci_unregister_driver`, `pci_cfg_read8/16/32`, `pci_cfg_write8/16/32`, `pci_enable_device`, `pci_map_bar`, `pci_find_capability`, `pci_msix_enable`, `pci_msix_request`, `pci_msix_release`, `pci_msix_disable`, `pci_msi_enable`, `pci_msi_disable`, `pci_device_count`, `pci_device_at`, `pci_find_device` |
+| PCI (`drivers/pci.h`) | `pci_bus`, `pci_register_driver`, `pci_unregister_driver`, `pci_cfg_read8/16/32`, `pci_cfg_write8/16/32`, `pci_enable_device`, `pci_map_bar`, `pci_io_bar_usable`, `pci_io_read`, `pci_io_write`, `pci_find_capability`, `pci_msix_enable`, `pci_msix_request`, `pci_msix_release`, `pci_msix_disable`, `pci_msi_enable`, `pci_msi_disable`, `pci_device_count`, `pci_device_at`, `pci_find_device` |
 | Block (`kernel/blk.h`) | `blk_register`, `blk_register_named`, `blk_unregister`, `blk_submit`, `bio_complete`, `bio_segment`, `blk_read`, `blk_write`, `blk_write_flags`, `blk_flush`, `blk_find` |
 | Entropy (`kernel/random.h`) | `random_add_entropy`, `random_get_bytes`, `random_u64`, `random_entropy_bits` |
 | Console (`kernel/console.h`) | `console_register`, `console_unregister`, `console_in_panic_mode` (additive; lock-taking sinks must skip their transport during fatal output) |

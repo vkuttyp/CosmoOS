@@ -2878,3 +2878,25 @@ See the [history index](README.md).
   `platforms`); the guide's "Tested platforms". Parallels reaches the live
   shell; disks, network and randomness there are the next unit.
   Report: `docs/audit/2026-10-13-acpi-discovery-report.md`.
+- **After 1.0: Parallels devices (2026-10-13, v1.0.2).** Boot protocol
+  v10: the loader takes a seed from `EFI_RNG_PROTOCOL` and the time from
+  `GetTime`; the kernel absorbs the seed (credited half; QEMU's OVMF and
+  AAVMF offer it over the virtio-rng, so ordinary boots seed from the
+  firmware) and sets the wall clock from the time when there is no RTC. A
+  timing-jitter source of last resort (the owner's decision, reversing
+  M1's): SP 800-90B most-common-value and lag-prediction estimates,
+  repetition count test, at most 1/8 bit per sample; `test-entropy` is
+  one boot per source (the jitter one on AArch64 only: x86-64's TCG
+  timings are sometimes wholly predictable, and refused). NVMe runs with one vector (one MSI-X entry
+  or plain MSI); a legacy-only virtio device gets the legacy transport
+  (BAR0 in memory, or I/O space on x86-64 through `pci_io_*`), virtio-net
+  takes `MRG_RXBUF` there for the 12-byte header, and a legacy transmit's
+  used length is ignored. On Parallels Desktop 27 the image installs to
+  NVMe (the live image attached as NVMe too: SATA is not on PCI), boots
+  the installed system, seeds in milliseconds, has DHCP, DNS, `wget` and
+  ssh. Review found the histogram estimate alone would credit a cycle.
+  The PR's CI found mutex starvation (`sched-migrate-stress`: a releaser
+  that re-locks before the woken waiter runs wins for ever): a waiter
+  overtaken once is now handed the mutex at the next unlock (S33,
+  `mutex-handoff`, module ABI 10).
+  Report: `docs/audit/2026-10-13-parallels-devices-report.md`.

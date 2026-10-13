@@ -173,6 +173,14 @@ struct runqueue *sched_runqueue(unsigned cpu);
 
 /* Diagnostics. */
 void sched_dump(void);
+
+#if CONFIG_SELFTEST
+/* Where `t` is linked: the CPU and level of the ready list that holds it
+ * (each queue locked in turn), and whether that level's bitmap bit is set,
+ * which is what makes pick_next look there. False when no ready list holds
+ * it. For a stranded-thread failure's diagnosis (sched-migrate-stress). */
+bool sched_test_find_queued(const struct thread *t, unsigned *cpu, int *level, bool *bit_set);
+#endif
 /* A subsystem's contribution to sched_dump: printed after the thread
  * table on every dump (the watchdog's, a lockup report's, the panic's).
  * The hook runs in interrupt context with interrupts off and must take

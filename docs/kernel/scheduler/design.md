@@ -550,6 +550,22 @@ epoll by polling, is gone.
   `mutex_lock`: loop { lock; if owner NULL: take, unlock, return; unlock;
   wait_event(wq, owner == NULL) }. `mutex_unlock` asserts ownership,
   clears owner, wakes one. Not usable in interrupt context (asserted).
+  **Handoff (S33).** A releaser may take the mutex back before the waiter
+  it woke runs: an owner that unlocks and locks again in a loop wins
+  every time the waiter is not yet on a CPU, and before this the waiter
+  could lose for ever. `sched-migrate-stress`'s second mutex worker did,
+  on CI, three times on 2026-10-13: on a ready list and being run, its
+  round count still for 2 s while its partner looped. Now a waiter that
+  was woken and finds the mutex taken again asks for it (`m->handoff`,
+  under `m->lock`, first asker wins), and the next `mutex_unlock` does
+  not release the mutex but makes that waiter its owner and wakes it
+  directly (`sched_wake`): no one can take it in between. The heir is
+  blocked in `mutex_lock` or between its prepare and its block, and mutex
+  waits are not interruptible, so it is there to take it. A waiter's
+  first wait asks for nothing, so an uncontended handover costs nothing
+  new; `mutex-handoff` shows it on one CPU, where the old code let the
+  waiter in only after the owner's last round (20) and the new one after
+  its second.
 - `semaphore`: `{ spinlock_t lock; int count; struct waitqueue wq; }`;
   `down` waits for `count > 0`, `up` increments and wakes one. `up` is
   interrupt-safe.

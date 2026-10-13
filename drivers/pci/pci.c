@@ -424,6 +424,31 @@ vaddr_t pci_map_bar(struct pci_device *p, unsigned bar)
     return device_map_mmio(&p->dev, &r);
 }
 
+bool pci_io_bar_usable(const struct pci_device *p, unsigned bar)
+{
+    return bar < PCI_MAX_BARS && p->bar[bar].io && p->bar[bar].size != 0 && arch_pci_io_available() &&
+           p->bar[bar].base + p->bar[bar].size <= arch_pci_io_limit();   /* inside the port space */
+}
+
+static bool io_in_bar(const struct pci_device *p, unsigned bar, uint32_t off, unsigned width)
+{
+    return pci_io_bar_usable(p, bar) && (width == 1 || width == 2 || width == 4) &&
+           (uint64_t)off + width <= p->bar[bar].size;
+}
+
+uint32_t pci_io_read(const struct pci_device *p, unsigned bar, uint32_t off, unsigned width)
+{
+    if (!io_in_bar(p, bar, off, width))
+        return 0xFFFFFFFFu;
+    return arch_pci_io_read((uint32_t)p->bar[bar].base + off, width);
+}
+
+void pci_io_write(const struct pci_device *p, unsigned bar, uint32_t off, unsigned width, uint32_t v)
+{
+    if (io_in_bar(p, bar, off, width))
+        arch_pci_io_write((uint32_t)p->bar[bar].base + off, width, v);
+}
+
 uint8_t pci_find_capability(const struct pci_device *p, uint8_t id, uint8_t prev)
 {
     if ((pci_cfg_read16(p, PCI_STATUS) & PCI_STATUS_CAP_LIST) == 0)
@@ -617,6 +642,9 @@ EXPORT_SYMBOL(pci_cfg_write16);
 EXPORT_SYMBOL(pci_cfg_write32);
 EXPORT_SYMBOL(pci_enable_device);
 EXPORT_SYMBOL(pci_map_bar);
+EXPORT_SYMBOL(pci_io_bar_usable);
+EXPORT_SYMBOL(pci_io_read);
+EXPORT_SYMBOL(pci_io_write);
 EXPORT_SYMBOL(pci_find_capability);
 EXPORT_SYMBOL(pci_msix_enable);
 EXPORT_SYMBOL(pci_msix_request);
