@@ -27,6 +27,11 @@ struct mutex {
     /* (pi, under g_pi_lock in mutex.c) links this mutex into its owner's
      * pi_held list while it has waiters, so the owner inherits their priority. */
     struct list_node pi_link;
+    /* (lock) A waiter that was woken and found the mutex taken again (a
+     * releaser re-took it before the waiter ran): the next unlock hands
+     * the mutex to it instead of releasing it, so no waiter is overtaken
+     * twice in a row (S33). NULL when none has asked. */
+    struct thread *handoff;
 };
 
 void mutex_init(struct mutex *m, const char *name);

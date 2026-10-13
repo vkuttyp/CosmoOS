@@ -17,6 +17,7 @@ void mutex_init(struct mutex *m, const char *name)
     m->name = name;
     m->class = 0;
     m->pi_active = 0;
+    m->handoff = NULL;
     list_init(&m->pi_link);
     waitqueue_init(&m->wq, name);
 }
@@ -99,6 +100,22 @@ static bool try_take(struct mutex *m, struct thread *cur)
     return got;
 }
 
+/* A waiter's attempt: true when the mutex is free (taken now) or was
+ * handed to it by the last unlock. Otherwise, a waiter that has already
+ * been woken once (`overtaken`) asks for the next unlock's handoff, unless
+ * another waiter asked first. */
+static bool waiter_take(struct mutex *m, struct thread *cur, bool overtaken)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&m->lock);
+    bool got = m->owner == NULL || m->owner == cur;
+    if (got)
+        m->owner = cur;
+    else if (overtaken && m->handoff == NULL)
+        m->handoff = cur;
+    spin_unlock_irqrestore(&m->lock, s);
+    return got;
+}
+
 bool mutex_trylock(struct mutex *m)
 {
     struct thread *cur = thread_current();
@@ -132,9 +149,9 @@ static void lock_common(struct mutex *m, unsigned subclass, uintptr_t ip)
          * donation and the block makes sched_block_current return at once. */
         struct wait_entry we;
         wait_entry_init(&we);
-        for (;;) {
+        for (bool overtaken = false;; overtaken = true) {
             waitqueue_prepare(&m->wq, &we);
-            if (try_take(m, cur))
+            if (waiter_take(m, cur, overtaken))
                 break;
             arch_irq_state_t s = spin_lock_irqsave(&g_pi_lock);
             struct thread *o = __atomic_load_n(&m->owner, __ATOMIC_ACQUIRE);
@@ -194,7 +211,13 @@ void mutex_unlock(struct mutex *m)
         panic("mutex_unlock('%s') by '%s' but owner is '%s'", m->name, cur->name,
               m->owner ? m->owner->name : "nobody");
     lockdep_release(m, LOCKDEP_KIND_MUTEX, (uintptr_t)__builtin_return_address(0), false);
-    __atomic_store_n(&m->owner, NULL, __ATOMIC_RELEASE);
+    /* A waiter overtaken once gets the mutex now, rather than a chance at
+     * it: owner it before anyone else can take it (S33). It is blocked in
+     * lock_common, or between its prepare and its block, and cannot leave
+     * (mutex waits are not interruptible), so the pointer is good. */
+    struct thread *heir = m->handoff;
+    m->handoff = NULL;
+    __atomic_store_n(&m->owner, heir, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&m->lock, s);
 
     if (!list_empty(&m->pi_link)) {
@@ -204,7 +227,10 @@ void mutex_unlock(struct mutex *m)
         pi_apply_chain(cur);   /* cur loses this mutex's inherited priority */
     }
     spin_unlock_irqrestore(&g_pi_lock, gs);
-    waitqueue_wake_one(&m->wq);
+    if (heir != NULL)
+        sched_wake(heir);   /* BLOCKED: READY now; still preparing: its block returns at once */
+    else
+        waitqueue_wake_one(&m->wq);
 }
 
 bool mutex_is_locked(struct mutex *m)

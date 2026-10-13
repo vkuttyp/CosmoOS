@@ -69,7 +69,7 @@ export (`-EEXIST`); the kernel panics at `ksym_init` on a duplicate.
 
 ### Module ABI v3: the exported symbols
 
-`COSMO_MODULE_ABI_VERSION` is 7. Version 2 (the lifetime pass): `struct
+`COSMO_MODULE_ABI_VERSION` is 10. Version 2 (the lifetime pass): `struct
 kobject` gained `owner`, which moves every field after the embedded
 kobject in `struct device`, `struct blkdev` and `struct netif`, and the
 release callbacks (`struct device.release`, `struct blkdev_ops.release`,
@@ -86,7 +86,12 @@ callback kind of entry, what the `wait_event` macro's stack entry is laid
 out as), `struct waitqueue` lost `wake_gen`, and `struct kobject` gained
 `watched`. Version 7 (the wake_one follow-up): `struct waitqueue` gained
 `callbacks`, a second list, so a wake runs every callback entry and still
-stops at one thread. An older module is refused by `modelf_check_info`.
+stops at one thread. Version 8: `struct blk_test_driver_hooks` gained the
+`pops_*` fields. Version 9 (device lifecycle): `struct device` gained
+`dma_retained`. Version 10 (the Parallels-devices unit): `struct mutex`
+gained `handoff`, the waiter the next unlock hands the mutex to (S33),
+which changes the size of every exported structure embedding one. An
+older module is refused by `modelf_check_info`.
 
 The exports include device, PCI, DMA, block, entropy and console-sink
 interfaces, the mbuf and network-interface surface a NIC driver needs,
