@@ -54,6 +54,9 @@ ls /tmp/shtest/andor-else 2> /tmp/shtest/andor.probe || FAILS=1
 true && echo x > /tmp/shtest/andor-then2 || echo x > /tmp/shtest/andor-else2
 ls /tmp/shtest/andor-then2 2> /tmp/shtest/andor.probe || FAILS=1
 ls /tmp/shtest/andor-else2 2> /tmp/shtest/andor.probe && FAILS=1
+# `true` first, so a shell that expanded the whole line before running it
+# prints 0 here (tools/sh-status-probe.py reads this line).
+true
 false; echo "status $?"
 # An expansion sees the commands before it on the same line: cosmo-sh once
 # lexed (and so expanded) the whole line before running any of it, so
