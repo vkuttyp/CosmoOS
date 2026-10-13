@@ -45,7 +45,7 @@ Parallels' behaviour for a guest without Parallels Tools, which CosmoOS
 does not have (they talk to Parallels through its own device, which this
 kernel does not drive). Parallels' firmware offers the guest one display
 mode, 1024x768, which Parallels shows in the middle of a larger window;
-the screen console draws a 64x24 text screen in it.
+the screen console draws a 128x48 text screen in it.
 
 The kernel finds the machine from its ACPI tables and logs one line
 saying what it found:

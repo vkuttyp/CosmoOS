@@ -72,17 +72,16 @@ screen; copying a font table in is the borrowed artifact "a new
 operating system from scratch" excludes. A byte outside 0x20..0x7e draws
 a box, so nothing is silently invisible.
 
-**The scale.** Each font pixel is drawn as an s-by-s block, `s =
-min(width / 512, height / 384)`, 1 to 4 (`fbcon_scale`): Parallels'
-1024x768 (its firmware's only mode) and QEMU x86-64's 1280x800 draw 16x32
-cells (64x24 and 80x25), 1920x1080 120x33, and QEMU AArch64's 800x600 the
-face one-to-one (100x37). Each font row is widened once and written `s`
-times (a division per pixel doubled a scroll's cost under TCG). A scaled
-screen writes as many pixels per repaint as an unscaled one. With
-16-row cells a screen holds half the rows the 8x8 face gave it, so a
-scroll moves a quarter of the screen rather than an eighth, keeping the
-repaints per line of text where they were. The `fbcon:` line says the cell
-size (`... cells of 16x32 pixels ...`).
+**The scale.** The face is drawn one-to-one up to 1920x1080: Parallels'
+1024x768 (its firmware's only mode) is 128x48 cells, QEMU x86-64's
+1280x800 160x50, QEMU AArch64's 800x600 100x37. A larger screen draws
+each font pixel as an s-by-s block, `s = min(width / 1920, height /
+1080)`, 1 to 4 (`fbcon_scale`), so a 4K screen gets 16x32 cells. Each
+font row is widened once and written `s` times (a division per pixel
+doubled a scroll's cost under TCG). The owner tried 3x the old face and
+2x this one on Parallels before settling on one-to-one. A scroll moves a
+quarter of the screen. The `fbcon:` line says the cell size (`... cells
+of 8x16 pixels ...`).
 
 Two things shape the rest. The sink runs on the panic path, so it
 allocates nothing, sleeps never, and holds no lock of its own --

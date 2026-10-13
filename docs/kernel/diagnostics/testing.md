@@ -139,19 +139,15 @@ the machine. QEMU TCG, Apple Silicon host, indicative:
 | A scroll (a whole-screen repaint) | 10.6 ms | 9.9 ms |
 | Amortised, at `rows / 8` a scroll | 1.17 ms a line | 1.46 ms a line |
 
-With the 8x16 face (v1.0.2), scaled 2x on x86-64 and one-to-one on
-AArch64, a quarter of the screen a scroll, and 32-bit pixels written as
-rows rather than through `put_pixel`:
+With the 8x16 face (v1.0.2), one-to-one, a quarter of the screen a
+scroll, and 32-bit pixels written as rows rather than through
+`put_pixel`:
 
-| | x86_64, 1280x800 (80x25 cells of 16x32) | AArch64, 800x600 (100x37 cells of 8x16) |
+| | x86_64, 1280x800 (160x50 cells) | AArch64, 800x600 (100x37 cells) |
 |---|---|---|
-| A line of 79 characters | 675 us (8.5 us a glyph) | 558 us (7.1 us a glyph) |
-| A scroll (a whole-screen repaint) | 6.6 ms | 9.6 ms |
-| Amortised, at `rows / 4` a scroll | 1.77 ms a line | 1.63 ms a line |
-
-Before the row writes, the same x86-64 scroll took 13.4 ms and a line
-3.3 ms amortised, and the debug boot 179 s against 153 s with the 8x8
-face; with them, 163 s.
+| A line of 79 characters | 469 us (5.9 us a glyph) | 605 us (7.7 us a glyph) |
+| A scroll (a whole-screen repaint) | 11.3 ms | 9.9 ms |
+| Amortised, at `rows / 4` a scroll | 1.41 ms a line | 1.71 ms a line |
 
 What the numbers decided: **the scroll chunk**. A scroll costs a screen
 repaint whatever distance it moves, so the cost per line is the line

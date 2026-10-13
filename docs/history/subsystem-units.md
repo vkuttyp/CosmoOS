@@ -2902,9 +2902,9 @@ See the [history index](README.md).
   Report: `docs/audit/2026-10-13-parallels-devices-report.md`.
 - **After 1.0: a readable screen console (2026-10-13, v1.0.2).** A new
   8x16 face (`tools/mkfont.py`, console proportions) replaces the 5x7
-  dot-matrix glyphs in 8x8 cells, drawn scaled by `min(width / 512, height
-  / 384)` (1 to 4): 16x32 cells at Parallels' 1024x768 (64x24); a scaled
-  screen scrolls a quarter at a time. The loader sets the display mode
+  dot-matrix glyphs in 8x8 cells, one-to-one up to 1920x1080 (Parallels'
+  1024x768: 128x48) and scaled above it; a scroll moves a quarter of the
+  screen, and 32-bit pixels are written as rows. The loader sets the display mode
   the EDID prefers when the firmware offers it (Parallels' firmware offers
   only 1024x768 and no EDID: a virtio-gpu driver is the next unit).
   `fb-console` checks the scaled pixels.

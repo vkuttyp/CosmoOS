@@ -305,17 +305,14 @@ static bool overlaps_usable_ram(uint64_t pa, uint64_t len)
  * warning, when the mode cannot hold one cell. */
 /*
  * How many screen pixels a font pixel is, each way. The face is 8x16, the
- * proportions of a PC text console; at 1024x768 (Parallels Desktop's only
- * mode) one-to-one it is a character 16 pixels tall in a window shown on
- * a large display, small enough that the owner asked for it bigger
- * (2026-10-13). The scale is min(width / 512, height / 384), 1 to 4:
- * 1024x768 and QEMU x86-64's 1280x800 draw 16x32 cells (64x24, 80x25),
- * 1920x1080 too (120x33), and a mode under 1024x768 the face as it is
- * (800x600: 100x37).
+ * size of a PC or Linux text console, and is drawn one-to-one up to
+ * 1920x1080 (Parallels Desktop's 1024x768: 128x48 cells, the owner's
+ * choice on 2026-10-13 after trying 2x). A screen of twice that each way
+ * (4K) and up draws it larger: min(width / 1920, height / 1080), 1 to 4.
  */
 static uint32_t fbcon_scale(uint32_t width, uint32_t height)
 {
-    uint32_t s = width / 512 < height / 384 ? width / 512 : height / 384;
+    uint32_t s = width / 1920 < height / 1080 ? width / 1920 : height / 1080;
     return s < 1 ? 1 : s > FBCON_SCALE_MAX ? FBCON_SCALE_MAX : s;
 }
 
