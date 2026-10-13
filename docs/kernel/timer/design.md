@@ -38,9 +38,17 @@ and the PIT method works on every machine this project targets.
 set once in `timer_init` from the architecture's RTC (`arch_rtc_read_epoch`:
 x86-64 reads CMOS registers 0x00/0x02/0x04/0x07/0x08/0x09/0x32 twice
 until stable and converts BCD unless status B says binary; AArch64 maps
-the PL031 at `0x09010000`, checks its peripheral id and reads `RTCDR`).
-There is no `settimeofday` and no NTP; the clock is the RTC's second
-plus the monotonic clock's progress since. Consumers: the native
+the PL031 at `0x09010000`, on QEMU's firmware only, checks its peripheral
+id and reads `RTCDR`). With no RTC the offset comes from the firmware's
+`GetTime`, which the loader read just before `ExitBootServices` (boot
+protocol v10, `bootinfo_fw_epoch`), anchored at the monotonic clock's
+zero: `timer: wall clock N s since 1970 from the firmware at boot (no
+RTC)`. It is late by the time between that read and the clock's start,
+well under a second. That is the wall clock on Parallels Desktop, which
+has no RTC this kernel finds. With neither, the offset stays 0 and the
+boot warns. There is no `settimeofday` and no NTP; the clock is the
+RTC's (or the firmware's) second plus the monotonic clock's progress
+since. Consumers: the native
 `clock_ns(COSMO_CLOCK_REALTIME)`, the Linux `CLOCK_REALTIME` family,
 `gettimeofday`, `time`, `FUTEX_CLOCK_REALTIME` and `TIMER_ABSTIME`.
 

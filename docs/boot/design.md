@@ -29,6 +29,7 @@ compiler.
 | `verify_flags`, `verify_key_id[8]` | (v8) `COSMOBOOT_VERIFIED` when the loader checked `kernel.elf`, `boot.tar` and `cmdline` against `\cosmo\manifest` under a signature by a key compiled into it, with that key's id (first 8 bytes of SHA-512 of the public key, the module ring's naming); both zero from a `VERIFY_BOOT=0` loader. See "Verified boot" |
 | `boot_flags`, `boot_partuuid[16]` | (v7) `COSMOBOOT_BOOT_PARTUUID` set when the loader was read from a GPT partition: `boot_partuuid` is that partition's unique GUID in on-disk byte order, from the hard-drive node of the loader's device path. Clear for a volume with no partition table. See "The boot disk" |
 | `console_type`, `console_gsiv`, `console_base`, `console_access`, `console_flags`, `console_stride` | (v9) the serial console the firmware's ACPI tables name, found by the loader (`boot/uefi/acpi.c`): `console_type` is `COSMOBOOT_CONSOLE_NONE` 0, `PL011` 1 (PL011 or SBSA generic UART, MMIO), `16550_MMIO` 2 or `16550_PORT` 3; `console_base` the register block's physical address (an I/O port for `16550_PORT`); `console_access` the width of one register access in bytes and `console_stride` the spacing of the registers in bytes, each 0 when the table leaves it undefined (below); `console_gsiv` the interrupt, 0 for a polled port; `console_flags` `COSMOBOOT_CONSOLE_FROM_DBG2` when the port came from the DBG2 rather than the SPCR. All zero when no table names a port the kernel drives. See "The serial console" |
+| `fw_flags`, `fw_seed_len`, `fw_epoch`, `fw_seed[64]` | (v10) what the firmware offers before `ExitBootServices`: `fw_seed_len` bytes (64, or 0) from `EFI_RNG_PROTOCOL`'s default algorithm, which `bootinfo_init` copies and wipes in place; `fw_epoch` the time from `GetTime` in seconds since 1970 UTC, with `COSMOBOOT_FW_TIME` in `fw_flags`. All zero when the firmware offers neither. See "Firmware seed and time" |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,
 `ACPI_RECLAIMABLE` 3, `ACPI_NVS` 4, `BAD` 5, `LOADER_RECLAIMABLE` 6,
@@ -70,6 +71,8 @@ Keys the kernel reads:
 |---|---|
 | `root=PARTUUID=<guid>` | the root filesystem is on the GPT partition with that unique GUID (any case) |
 | `root=<device>` | the root filesystem is on the named block device (`vda2`); for development, since names depend on probe order |
+| `random.firmware=off` | the kernel neither mixes nor credits the firmware's seed (boot protocol v10): for a machine whose firmware is not trusted to generate, and for the entropy boot that must be seeded by its virtio-rng alone (`make test-entropy`) |
+| `random.jitter=off` | no timing-jitter collection (docs/kernel/security/design.md §6, "Timing jitter"): on a machine with no other source the pool then stays unseeded, which is what the no-source entropy boot tests |
 | `serial=none` | AArch64: no serial console even when the firmware names one (boot protocol v9, "The serial console"): the framebuffer is the console from the first line. Read by the early console before `bootinfo_init`, with the same bounds. For testing the path a machine without a serial port takes (`make test-platforms`) |
 
 The kernel only resolves `root=` (after its partition scan, `root:` log
@@ -230,6 +233,35 @@ The kernel's AArch64 serial console is the same port
 `serial=none` on the command line makes it ignore the record, and with no
 serial console the framebuffer is the console from the first line
 (`docs/kernel/diagnostics/design.md`).
+
+## Firmware seed and time
+
+Boot protocol v10 (`boot/uefi/firmware.c`). Just before
+`ExitBootServices`, after the loader's last allocation, `firmware_gather`
+asks the firmware for two things the kernel cannot get for itself on
+every machine:
+
+- **A seed.** `LocateProtocol(EFI_RNG_PROTOCOL)` and 64 bytes from
+  `GetRNG` with the default algorithm into `fw_seed`, `fw_seed_len` 64.
+  None (`firmware: no EFI_RNG_PROTOCOL: no seed`) or a failed call leaves
+  the length 0. QEMU's OVMF and AAVMF offer the protocol over the
+  virtio-rng (and on the CPU's random instructions); Parallels Desktop
+  27's firmware does not. The kernel absorbs it in `random_init`,
+  credited half (docs/kernel/security/design.md §6), unless the command
+  line says `random.firmware=off`. `bootinfo_init` copies it and wipes the
+  boot info's copy; `random_init` wipes the kernel's.
+- **The time.** `GetTime` through the runtime services table, converted
+  to seconds since 1970 UTC: a `TimeZone` other than unspecified is
+  applied (UEFI: local = UTC − TimeZone minutes); unspecified is taken as
+  UTC. An impossible date is refused. The kernel's wall clock uses it
+  only when the architecture has no RTC it can read (`timer_init`: AArch64
+  machines without QEMU's PL031, such as Parallels), anchored at the
+  monotonic clock's zero, so it is late by the time between `GetTime` and
+  the kernel's clock start, well under a second.
+
+The loader prints both on the firmware console and, after
+`ExitBootServices`, `firmware: seed N bytes; time from GetTime|none` on
+the serial port. Neither is required.
 
 ## Entry state on x86-64
 

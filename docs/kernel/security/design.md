@@ -487,22 +487,63 @@ and only for a read that reported success:
 | AArch64 `RNDRRS` (`ID_AA64ISAR0_EL1.RNDR` ≥ 1) | `kernel/arch/aarch64/rng.c` | 32 bits per successful read (`NZCV` = `0000`) |
 | AArch64 `RNDR` (same field) | same | 4 bits per successful read (`NZCV` = `0000`) |
 | virtio-rng (`drivers/virtio/virtio_rng.c`) | `random_add_entropy` | 4 bits per byte the device wrote |
+| the firmware's seed (`EFI_RNG_PROTOCOL`, boot protocol v10) | `random_init` | 4 bits per byte, 256 for its 64 bytes; none with `random.firmware=off` |
+| timing jitter (`kernel/core/jitter.c`), only with no CPU source and no firmware seed | `random_init` | per batch of 1024 samples, `1024 × min(H, 1) / 8` bits, H the batch's estimated min-entropy per sample; 0 for a batch that fails its health test or estimates under 1/16 bit; none with `random.jitter=off` |
 
 The fractions are the conservative part. The reseeding sources
 (`RDSEED`, `RNDRRS`) are conditioned entropy and are credited half their
 width. The DRBG outputs (`RDRAND`, `RNDR`) are expansions of a seed the
 CPU reseeds on its own schedule, so one of them is credited a sixteenth.
 virtio-rng is the host's `/dev/urandom` across a device the guest cannot
-inspect; it is credited half. A failed hardware read (`CF=0`; `Z=1` on
+inspect; it is credited half. The firmware's seed is the same kind of
+thing -- the platform's or the host's generator behind an interface the
+kernel cannot inspect -- and is credited the same. A failed hardware read (`CF=0`; `Z=1` on
 AArch64, which also returns 0) is retried up to ten times and is never
 credited or mixed. The clock, the stack address, the cycle counter and
 self-test input are mixed and never credited.
 
-`random_init` asks the CPU first. When `RDSEED`/`RNDRRS` work it takes 16
-reads (512 bits credited); otherwise it falls back to 128 DRBG reads; a
-boot on such a CPU is seeded before any driver loads. Without a CPU
-source the pool waits for virtio-rng, whose driver feeds 4096 bytes after
-it loads.
+`random_init` takes the firmware's seed, then asks the CPU. When
+`RDSEED`/`RNDRRS` work it takes 16 reads (512 bits credited); otherwise it
+falls back to 128 DRBG reads; a boot on such a CPU, or on firmware with
+`EFI_RNG_PROTOCOL` (QEMU's OVMF and AAVMF when they have a virtio-rng or
+the CPU instructions), is seeded before any driver loads. With neither,
+it collects timing jitter (below) until the pool seeds or 32 batches
+pass; an entropy device that loads later still adds to the pool, and
+virtio-rng's driver feeds 4096 bytes when it loads.
+
+### Timing jitter
+
+Until v1.0.2 there was no jitter source, by the M1 decision: every
+machine CosmoOS was tested on had a CPU instruction or a virtio-rng.
+Parallels Desktop on Apple Silicon has neither, nor a firmware
+`EFI_RNG_PROTOCOL`, so its pool never seeded and ssh could not make a
+host key. The owner chose a jitter source of last resort (2026-10-13).
+
+**What is sampled.** `jitter_sample` times 1024 runs of a short workload
+on the monotonic counter (`arch_clock_read`: the TSC, the AArch64 system
+counter). The workload walks a 16 KiB buffer with a stride taken from the
+previous run's time and stores into it, so cache and TLB state differ
+run to run; interrupts, the memory system and, under a hypervisor, the
+host's scheduling make the time vary. Each run's raw time difference is
+absorbed; its low byte is what is estimated.
+
+**How much it is credited.** Per batch, SP 800-90B's most-common-value
+estimate (§6.3.1, the 99% upper bound on the commonest value's
+probability) gives H bits of min-entropy per sample. A batch is credited
+`1024 × min(H, 1) / 8` bits: never more than one bit per sample whatever
+the estimate (it measures the samples' spread, not how much of it an
+observer of the machine could predict), and an eighth of that. So a
+batch earns at most 128 bits and the pool needs at least two. A batch
+that fails the repetition count test (one value 32 times in a row) or
+estimates under 1/16 bit per sample is absorbed but not credited. The
+estimator and the health test are pure functions, host-tested
+(`tests/host/test_jitter.c`).
+
+**When it runs.** Only in `random_init`, only with no CPU source and no
+firmware seed, and not with `random.jitter=off`. It is not a background
+source: once seeded, reseeding is the CPU's or the devices' job, as
+before. It logs `random: jitter source: N batches of 1024 samples in T ms,
+B bits credited, R batches refused, lowest estimate H bits per sample`.
 
 ### The construction
 
@@ -606,7 +647,10 @@ still truncated to 256 KiB per call.
 
 - `random: cpu source: rdseed rdrand` (x86-64), `rndrrs rndr`
   (AArch64), or `none`, at `INFO`, from `random_init`.
-- `random: pool seeded after N ms: B bits credited (cpu C, devices D)` at
+- `random: firmware seed: 64 bytes` (or `..., ignored (random.firmware=off)`)
+  and the jitter source's line above, at `INFO`, from `random_init`.
+- `random: pool seeded after N ms: B bits credited (cpu C, firmware F,
+  jitter J, devices D)` at
   `INFO`, once, from whichever input completed the reseed (the time is
   since `random_init`).
 - `random: pool not seeded 5 s after the boot modules loaded: getrandom
@@ -616,10 +660,14 @@ still truncated to 256 KiB per call.
 ### Boot configurations that prove it
 
 The ordinary boots carry a virtio-rng on CPU models without a random
-instruction (`qemu64`, `cortex-a72`), so they are the device-seeded
-configuration; the harness requires the seeded line and forbids the
-`WARN`. `make test-entropy` adds two boots of the same image without the
-virtio-rng (`QEMU_RNG=0`): one on the default CPU model, which has no
-source at all and must show the unseeded behaviour and still complete,
-and one on a CPU model with the random instructions, which must seed
-from the CPU alone (testing.md).
+instruction (`qemu64`, `cortex-a72`); the firmware offers
+`EFI_RNG_PROTOCOL` over it, so they are the firmware-seeded
+configuration. The harness requires the seeded line naming the firmware
+and forbids the `WARN`. `make test-entropy` adds four boots of the same
+image, each with one source (testing.md): no virtio-rng, the default CPU
+model and `random.jitter=off` -- no source at all, which must show the
+unseeded behaviour and still complete; the same without
+`random.jitter=off`, which the jitter source must seed; a CPU model with
+the random instructions, which must seed from the CPU; and the virtio-rng
+with `random.firmware=off random.jitter=off`, which must seed from the
+device.

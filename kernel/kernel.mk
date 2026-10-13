@@ -129,6 +129,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/block/ramblk.c \
 	kernel/block/blktest.c \
 	kernel/block/parttest.c \
+	kernel/core/jitter.c \
 	kernel/core/random.c \
 	kernel/core/crc32c.c \
 	kernel/core/lz4.c \

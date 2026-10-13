@@ -585,6 +585,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         lputs("warning: firmware rejected loader memory types; kernel, bootinfo, page-table and archive "
               "ranges will be retyped from their placements\n");
 
+    firmware_gather(info);
+
     /* --- memory map + ExitBootServices --- */
     UINTN map_size = 0, map_key = 0, desc_size = 0;
     uint32_t desc_ver = 0;
@@ -647,6 +649,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->mem_map_entries = n;
 
     acpi_report();
+    firmware_report(info);
     lprintf("memory map: %u entries\n", n);
     for (uint32_t i = 0; i < n; i++) {
         lprintf("  0x%016llx - 0x%016llx %s\n",

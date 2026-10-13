@@ -525,8 +525,11 @@ tree.
   are not on PCI (a platform AHCI described only in the DSDT would need an
   AML interpreter); its NVMe controller offers MSI only and `nvme` requires
   MSI-X; its network adapter is a legacy-only virtio-net and `virtio-pci`
-  is modern-only; it gives the guest no RNDR and no virtio-rng, so the
-  pool never seeds; no RTC is found. The debug self-test suite assumes
+  is modern-only; ~~it gives the guest no RNDR and no virtio-rng, so the
+  pool never seeds; no RTC is found~~ (**closed by the Parallels-devices
+  unit**: the firmware's time at boot, boot protocol v10, and a
+  timing-jitter source, `docs/audit/2026-10-13-parallels-devices-report.md`).
+  The debug self-test suite assumes
   QEMU's machine (`pci` expects the host bridge at 00:00.0; `net-firewall`,
   `net-tap-release-order`, `blk-submit-unregister` failed there).
 - AArch64: a firmware serial console at or above the loader's 4 GiB
@@ -534,6 +537,12 @@ tree.
   on that map. Needs the loader to map the console page and
   `map_early_devices` to carry it (found in review of PR #376; no machine
   seen with one).
+- PCI enumeration turns each device's memory decoding off while it sizes
+  the BARs (`decode_bars`). On Parallels the firmware's framebuffer is
+  behind one of them, so a console write in that window -- a log line
+  from `decode_bars` itself, or from another CPU if enumeration ever ran
+  with secondaries up -- stalls the CPU on the framebuffer. Nothing logs
+  there today; a scratch print found it (2026-10-13).
 
 ## 4. The quiesce report's remaining risks and debt
 

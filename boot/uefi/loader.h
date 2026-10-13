@@ -58,6 +58,13 @@ void acpi_scan(struct cosmoboot_info *info);
 /* After ExitBootServices: what the MADT, MCFG, GTDT and FADT say. */
 void acpi_report(void);
 
+/* firmware.c: a seed from EFI_RNG_PROTOCOL and the time from GetTime into
+ * info->fw_* (protocol v10). Boot services must still be up; call it
+ * after the last allocation, just before ExitBootServices. */
+void firmware_gather(struct cosmoboot_info *info);
+/* After ExitBootServices, on the serial port: what firmware_gather found. */
+void firmware_report(const struct cosmoboot_info *info);
+
 /* Print a message and stop. Returns to firmware while boot services are
  * available, halts the CPU forever otherwise. */
 void die(const char *what, EFI_STATUS status) __attribute__((noreturn));

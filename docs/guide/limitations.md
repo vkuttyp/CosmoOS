@@ -10,16 +10,21 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 - **QEMU is the tested platform.** x86-64 on `q35` and AArch64 on `virt`
   are tested by CI; there is no physical hardware matrix. Since v1.0.1
   the AArch64 image boots to the live shell on Parallels Desktop 27 on
-  Apple Silicon, without disks, network or randomness there
+  Apple Silicon, without disks or network there
   ([Tested platforms](platforms.md)). Out of scope for 1.0
   ([roadmap](../roadmap-1.0.md)): GPU and display (a framebuffer console
   only), hotplug, NUMA, more than 64 CPUs, huge pages, live migration,
   RAID-Z, eBPF, and the Intel VMX backend on hardware.
-- **Randomness needs a source.** With no virtio-rng and no RDSEED/RDRAND
-  or RNDR instruction the pool never seeds: `getrandom` blocks, the ssh
-  host key is not made, an encrypted cosmofs pool is refused. There is no
-  timing-jitter fallback (M1 report). The commands in this guide add
-  `-device virtio-rng-pci`.
+- **Randomness from the weakest source last.** The pool seeds from the
+  CPU's random instructions, the firmware's `EFI_RNG_PROTOCOL` or a
+  virtio-rng; with none of them (Parallels Desktop) a timing-jitter source
+  seeds it, credited conservatively (docs/kernel/security/design.md §6).
+  `random.jitter=off` on the command line turns that off, and the pool
+  then never seeds there. The commands in this guide add `-device
+  virtio-rng-pci`.
+- **The clock is read once.** The wall clock is set at boot from the RTC
+  or, with none (Parallels), the firmware's time; there is no NTP and no
+  way to set it.
 - **No Wi-Fi, Bluetooth or sound.**
 
 ## Boot and security

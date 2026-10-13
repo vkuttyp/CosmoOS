@@ -167,24 +167,32 @@ else
 		ARCH=$(ARCH) BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-guard.log test
 endif
 
-# M1's acceptance boots (docs/kernel/security/design.md §6): the same
-# image without the virtio-rng, first on the default CPU model, which has
-# no random instruction either -- no entropy source at all: getrandom's
-# NONBLOCK is EAGAIN, INSECURE answers, an encrypted pool is refused and
-# the boot completes -- then on a model with the random instructions,
-# which must seed the pool from the CPU alone. The ordinary `test` boot
-# is the device-seeded configuration. The harness reads QEMU_RNG and
-# QEMU_HWRNG to know which lines to require.
+# M1's acceptance boots (docs/kernel/security/design.md §6), each with
+# one entropy source: the image without the virtio-rng on the default CPU
+# model, which has no random instruction either, and `random.jitter=off`
+# -- no source at all: getrandom's NONBLOCK is EAGAIN, INSECURE answers,
+# an encrypted pool is refused and the boot completes; the same without
+# `random.jitter=off`, which the jitter source must seed; a model with the
+# random instructions, which must seed the pool from the CPU; and the
+# virtio-rng with `random.firmware=off random.jitter=off`, which must
+# seed from the device alone. The ordinary `test` boot is seeded by the
+# firmware (boot protocol v10: OVMF and AAVMF offer EFI_RNG_PROTOCOL over
+# the virtio-rng). The harness reads QEMU_RNG, QEMU_HWRNG, BOOT_FW_SEED
+# and BOOT_JITTER to know which lines to require.
 ifeq ($(ARCH),aarch64)
 HWRNG_CPU ?= neoverse-v1
 else
 HWRNG_CPU ?= qemu64,+nx,+svm,+npt,+rdrand,+rdseed
 endif
 test-entropy:
+	$(Q)QEMU_RNG=0 BOOT_JITTER=0 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		CMDLINE='$(CMDLINE) random.jitter=off' BOOT_LOG=$(OUT)/boot-test-noentropy.log test
 	$(Q)QEMU_RNG=0 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
-		BOOT_LOG=$(OUT)/boot-test-noentropy.log test
+		BOOT_LOG=$(OUT)/boot-test-jitter.log test
 	$(Q)QEMU_RNG=0 QEMU_HWRNG=1 QEMU_CPU='$(HWRNG_CPU)' $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) \
 		BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-cpurng.log test
+	$(Q)BOOT_FW_SEED=0 BOOT_JITTER=0 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		CMDLINE='$(CMDLINE) random.firmware=off random.jitter=off' BOOT_LOG=$(OUT)/boot-test-devrng.log test
 
 # Roadmap M2's acceptance test (tests/boot/install_test.py,
 # docs/userland/testing.md): the live image installs itself on a blank

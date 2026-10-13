@@ -385,4 +385,32 @@ typedef struct {
 #define EFI_ACPI_10_TABLE_GUID \
     { 0xeb9d2d30, 0x2d88, 0x11d3, { 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d } }
 
+/* Runtime services: only GetTime is called, before ExitBootServices; the
+ * table is never used after it. */
+typedef struct {
+    uint32_t Resolution;
+    uint32_t Accuracy;
+    BOOLEAN  SetsToZero;
+} EFI_TIME_CAPABILITIES;
+
+typedef EFI_STATUS (EFIAPI *EFI_GET_TIME)(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities);
+
+typedef struct {
+    EFI_TABLE_HEADER Hdr;
+    EFI_GET_TIME     GetTime;
+} EFI_RUNTIME_SERVICES_HEAD;
+
+#define EFI_UNSPECIFIED_TIMEZONE 0x07FF
+
+/* EFI_RNG_PROTOCOL (UEFI 2.4+). GetRNG with a NULL algorithm is the
+ * firmware's default. */
+#define EFI_RNG_PROTOCOL_GUID \
+    { 0x3152bca5, 0xeade, 0x433d, { 0x86, 0x2e, 0xc0, 0x1c, 0xdc, 0x29, 0x1f, 0x44 } }
+typedef struct EFI_RNG_PROTOCOL EFI_RNG_PROTOCOL;
+struct EFI_RNG_PROTOCOL {
+    void *GetInfo;
+    EFI_STATUS (EFIAPI *GetRNG)(EFI_RNG_PROTOCOL *This, EFI_GUID *RNGAlgorithm, UINTN RNGValueLength,
+                                uint8_t *RNGValue);
+};
+
 #endif /* COSMO_BOOT_EFI_H */

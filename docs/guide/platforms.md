@@ -26,8 +26,8 @@ platform: firmware OEM 'PRLS  '; console PL011 at 0x2110000 (DBG2, polled); GICv
 
 | | |
 |---|---|
-| Works | verified boot; both CPUs; the console on the screen and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell and every command that needs nothing below |
-| Does not work yet | **installing**: Parallels' SATA disks are not on PCI, and its NVMe controller (`--iface nvme`) offers only MSI, which the NVMe driver does not use yet; **networking and ssh**: the network adapter is a legacy virtio-net, which the virtio driver does not drive yet; **randomness**: Parallels gives the guest no RNDR instruction and no virtio-rng, so `getrandom` waits for ever; the wall clock starts at 1970 (no clock device is found) |
+| Works | verified boot; both CPUs; the console on the screen and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell and every command that needs nothing below; randomness (since v1.0.2: the timing-jitter source seeds the pool in milliseconds, as Parallels offers no other); the wall clock (since v1.0.2: the firmware's time at boot) |
+| Does not work yet | **installing**: Parallels' SATA disks are not on PCI, and its NVMe controller (`--iface nvme`) offers only MSI, which the NVMe driver does not use yet; **networking and ssh**: the network adapter is a legacy virtio-net, which the virtio driver does not drive yet |
 
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md).

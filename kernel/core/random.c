@@ -8,7 +8,10 @@
  * first reseed is the transition to seeded, which is sticky.
  */
 
+#include <kernel/bootinfo.h>
+#include <kernel/cmdline.h>
 #include <kernel/crypto.h>
+#include <kernel/jitter.h>
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/random.h>
@@ -27,6 +30,7 @@
 #define HW_RETRIES       10u
 #define HW_SEED_CREDIT   32u    /* RDSEED, RNDRRS: half of 64 */
 #define HW_RANDOM_CREDIT 4u     /* RDRAND, RNDR: a sixteenth of 64 */
+#define FW_SEED_CREDIT   4u     /* per byte of the firmware's seed: half */
 #define RANDOM_BOOT_WAIT_NS (5ull * 1000000000ull)
 
 static uint8_t g_pool[SHA512_DIGEST_SIZE];
@@ -34,7 +38,7 @@ static uint8_t g_key[SHA512_DIGEST_SIZE];
 static uint64_t g_counter;
 static unsigned g_pool_bits;      /* credited since the last reseed */
 static unsigned g_entropy_bits;   /* credited in total, capped */
-static unsigned g_cpu_bits, g_device_bits;
+static unsigned g_cpu_bits, g_fw_bits, g_jitter_bits, g_device_bits;
 static uint64_t g_source_bytes;
 static uint64_t g_init_ns, g_last_reseed_ns;
 static bool g_seeded;
@@ -82,9 +86,10 @@ static bool reseed_locked(uint64_t now)
 
 static void announce_seeded(uint64_t now)
 {
-    kinfo("random: pool seeded after %llu ms: %u bits credited (cpu %u, devices %u)",
+    kinfo("random: pool seeded after %llu ms: %u bits credited (cpu %u, firmware %u, jitter %u, devices %u)",
           (unsigned long long)((now - g_init_ns) / 1000000ull), random_entropy_bits(),
-          __atomic_load_n(&g_cpu_bits, __ATOMIC_RELAXED), __atomic_load_n(&g_device_bits, __ATOMIC_RELAXED));
+          __atomic_load_n(&g_cpu_bits, __ATOMIC_RELAXED), __atomic_load_n(&g_fw_bits, __ATOMIC_RELAXED),
+          __atomic_load_n(&g_jitter_bits, __ATOMIC_RELAXED), __atomic_load_n(&g_device_bits, __ATOMIC_RELAXED));
     waitqueue_wake_all(&g_seed_wq);
 }
 
@@ -116,6 +121,57 @@ static void cpu_collect_locked(unsigned want)
     g_cpu_bits += got;
 }
 
+/*
+ * The source of last resort (jitter.c): only when the CPU has no random
+ * instruction and the firmware gave no seed -- an entropy device may still
+ * come, but nothing says it will. Batches until the pool can seed or
+ * JITTER_MAX_BATCHES; each is health-tested and estimated, and credited
+ * only what the estimate allows. `random.jitter=off` disables it (the
+ * no-source acceptance boot uses that). True when the pool seeded.
+ */
+#define JITTER_MAX_BATCHES 32u
+
+static uint64_t g_jdeltas[JITTER_BATCH];
+static uint8_t g_jlow[JITTER_BATCH];
+
+static bool jitter_collect(void)
+{
+    char opt[8];
+    if (cmdline_get("random.jitter", opt, sizeof(opt)) >= 0 && strcmp(opt, "off") == 0) {
+        kinfo("random: jitter source off (random.jitter=off)");
+        return false;
+    }
+    uint64_t t0 = clock_now_ns();
+    unsigned batches = 0, credited = 0, refused = 0;
+    uint32_t h_min = UINT32_MAX;
+    bool seeded = false;
+    while (!seeded && batches < JITTER_MAX_BATCHES) {
+        jitter_sample(g_jdeltas, g_jlow);
+        batches++;
+        uint32_t h = jitter_mcv_h_q16(g_jlow, JITTER_BATCH);
+        if (h < h_min)
+            h_min = h;
+        unsigned credit = jitter_batch_credit(g_jlow, JITTER_BATCH);
+        if (credit == 0)
+            refused++;
+        arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+        absorb_locked(g_jdeltas, sizeof(g_jdeltas), credit);   /* a refused batch is mixed, not credited */
+        g_jitter_bits += credit;
+        credited += credit;
+        seeded = !g_seeded && g_pool_bits >= SEED_BITS && reseed_locked(clock_now_ns());
+        spin_unlock_irqrestore(&g_lock, s);
+    }
+    for (volatile uint8_t *p = (volatile uint8_t *)g_jdeltas; p < (uint8_t *)g_jdeltas + sizeof(g_jdeltas); p++)
+        *p = 0;
+    for (volatile uint8_t *p = g_jlow; p < g_jlow + sizeof(g_jlow); p++)
+        *p = 0;
+    kinfo("random: jitter source: %u batches of %u samples in %llu ms, %u bits credited, %u batches refused, "
+          "lowest estimate %u.%02u bits per sample",
+          batches, JITTER_BATCH, (unsigned long long)((clock_now_ns() - t0) / 1000000ull), credited, refused,
+          h_min >> 16, (unsigned)(((h_min & 0xffff) * 100u) >> 16));
+    return seeded;
+}
+
 void random_init(void)
 {
     /* The boot's own variation: the clock and a stack address. Mixed
@@ -131,12 +187,36 @@ void random_init(void)
     else
         kinfo("random: cpu source: none");
 
+    /* The firmware's seed (boot protocol v10, EFI_RNG_PROTOCOL), taken
+     * out of the boot info and wiped there: the page outlives this. It is
+     * the host's or the platform's generator across an interface the
+     * kernel cannot inspect, like virtio-rng, and is credited the same,
+     * half of what it delivers. */
+    uint8_t fw[COSMOBOOT_FW_SEED_MAX];
+    unsigned fw_len = bootinfo_take_fw_seed(fw);
+    char opt[8];
+    if (fw_len != 0 && cmdline_get("random.firmware", opt, sizeof(opt)) >= 0 && strcmp(opt, "off") == 0) {
+        /* Not trusted by the command line: neither mixed nor credited. */
+        kinfo("random: firmware seed: %u bytes, ignored (random.firmware=off)", fw_len);
+        fw_len = 0;
+    } else if (fw_len != 0) {
+        kinfo("random: firmware seed: %u bytes", fw_len);
+    }
+
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     g_init_ns = now;
     hash2(g_key, g_key, sizeof(g_key), seed, sizeof(seed), "boot");
+    if (fw_len != 0) {
+        absorb_locked(fw, fw_len, fw_len * FW_SEED_CREDIT);
+        g_fw_bits += fw_len * FW_SEED_CREDIT;
+    }
+    for (volatile uint8_t *p = fw; p < fw + sizeof(fw); p++)
+        *p = 0;   /* the stack copy too: stores the compiler may not drop */
     cpu_collect_locked(POOL_BITS_MAX);
     bool seeded = g_pool_bits >= SEED_BITS && reseed_locked(now);
     spin_unlock_irqrestore(&g_lock, s);
+    if (!seeded && !arch_rng_has_seed() && !arch_rng_has_random() && fw_len == 0)
+        seeded = jitter_collect();
     if (seeded)
         announce_seeded(clock_now_ns());
 }
