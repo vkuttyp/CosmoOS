@@ -22,9 +22,11 @@ on a disk of the "plain" (raw) type and attach it as an **NVMe** disk,
 and add a second, blank NVMe disk of 1 GiB or more to install on.
 Parallels' SATA disks are not PCI devices, so the kernel would not see
 the live disk and `cosmo-install` would have no ESP to copy. From the
-command line, with `prlctl` (the disk images' paths are the VM's):
+command line, with `prlctl`, for a VM named `CosmoOS` (these two need
+Parallels, so the guide's own tests do not run them; they were run on
+Parallels Desktop 27.0.3 when this was written):
 
-```sh
+```text
 prlctl set "CosmoOS" --device-set hdd0 --iface nvme
 prlctl set "CosmoOS" --device-add hdd --type plain --size 1024 --iface nvme
 ```
