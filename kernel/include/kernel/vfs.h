@@ -324,6 +324,7 @@ static inline void vnode_get_n(struct vnode *vn, unsigned n) { kobject_get_n(&vn
  * lock before it falls to zero, so a hashed vnode always has a reference
  * (docs/kernel/lockdep/design.md, "the vnode cache"). */
 void vnode_put(struct vnode *vn);
+/* The wall clock, in nanoseconds since 1970 UTC: what files are stamped with. */
 uint64_t vfs_now_ns(void);
 
 /* --- namespace operations ----------------------------------------------- */

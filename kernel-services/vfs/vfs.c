@@ -34,9 +34,12 @@ struct mount *g_root_mount;
 static unsigned g_nr_mounts;
 static bool g_initialized;
 
+/* The time a file is stamped with: the wall clock (nanoseconds since 1970
+ * UTC). Until v1.0.2 this was the monotonic clock, so every new file was
+ * dated 1970 plus the machine's uptime. */
 uint64_t vfs_now_ns(void)
 {
-    return clock_now_ns();
+    return clock_realtime_ns();
 }
 
 /* --- vnodes -------------------------------------------------------------- */
