@@ -130,7 +130,11 @@ static void cpu_collect_locked(unsigned want)
  * only what the estimate allows. `random.jitter=off` disables it (the
  * no-source acceptance boot uses that). True when the pool seeded.
  */
-#define JITTER_MAX_BATCHES 32u
+/* Enough for a slow source: under QEMU's TCG the lag predictor rates the
+ * timings near 0.01-0.05 bits per sample and refuses half the batches, and
+ * x86-64 needed about 37 batches to seed (about 3 ms each); Parallels
+ * Desktop on Apple Silicon needs 5 or 6. */
+#define JITTER_MAX_BATCHES 128u
 
 static uint64_t g_jdeltas[JITTER_BATCH];
 static uint8_t g_jlow[JITTER_BATCH];

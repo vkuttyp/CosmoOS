@@ -69,6 +69,14 @@ Codex and Qodo, 13 findings. Changed:
   credit takes the lower. The host test shows the cycle refused.
 - **The repetition count test reset at each batch:** its run now
   carries over.
+- **The stricter estimate is stricter under emulation.** QEMU's TCG
+  makes the timings regular enough that the lag predictor rated some
+  batches at 0.01-0.05 bits per sample and refused half of them on
+  x86-64: with the 32-batch limit the jitter-only boot ended at 226 bits,
+  unseeded (AArch64 seeded after 22). The limit is now 128 batches (about
+  0.4 s at that rate), not a looser estimate. Parallels needs 5 or 6
+  batches (12-16 ms), its lowest estimate down from 0.67 to 0.27 bits per
+  sample.
 - **Jitter ran only when the CPU had no random instruction.** It now
   runs when the CPU credited nothing, which also covers an advertised
   instruction whose every read fails.

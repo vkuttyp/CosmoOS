@@ -507,7 +507,7 @@ self-test input are mixed and never credited.
 falls back to 128 DRBG reads; a boot on such a CPU, or on firmware with
 `EFI_RNG_PROTOCOL` (QEMU's OVMF and AAVMF when they have a virtio-rng or
 the CPU instructions), is seeded before any driver loads. With neither,
-it collects timing jitter (below) until the pool seeds or 32 batches
+it collects timing jitter (below) until the pool seeds or 128 batches
 pass; an entropy device that loads later still adds to the pool, and
 virtio-rng's driver feeds 4096 bytes when it loads.
 
