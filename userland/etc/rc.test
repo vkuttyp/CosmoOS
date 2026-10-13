@@ -55,6 +55,12 @@ true && echo x > /tmp/shtest/andor-then2 || echo x > /tmp/shtest/andor-else2
 ls /tmp/shtest/andor-then2 2> /tmp/shtest/andor.probe || FAILS=1
 ls /tmp/shtest/andor-else2 2> /tmp/shtest/andor.probe && FAILS=1
 false; echo "status $?"
+# An expansion sees the commands before it on the same line: cosmo-sh once
+# lexed (and so expanded) the whole line before running any of it, so
+# `false; echo $?` printed 0 and `Z=7; echo $Z` printed nothing. Each
+# exits 0 under that bug, which records the failure.
+false; cosmo-sh -c "exit $?" && FAILS=1
+Z=7; cosmo-sh -c "exit $Z" && FAILS=1
 cat /nonexistent 2> /tmp/shtest/err && FAILS=1
 cat /tmp/shtest/err
 cosmo-sh -c "exit 3"; echo "exit $?"
