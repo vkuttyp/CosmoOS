@@ -82,9 +82,9 @@ Codex and Qodo, 13 findings. Changed:
 - **x86-64 under TCG cannot carry the jitter boot.** With all of that,
   x86-64 debug boots seeded from jitter in 30-69 batches three times in
   four, and in the fourth every one of 128 batches was refused (0 bits):
-  in some boots TCG makes x86-64's timings fully regular (the per-boot
-  modes recorded for the x86 benchmarks, flakes.md), and the estimator
-  refuses them, as it should. `test-entropy` runs the jitter boot on
+  in some boots TCG makes x86-64's timings fully regular, and the
+  estimator refuses them, as it should. Whether this is the per-boot TCG
+  mode recorded for the x86 benchmarks (flakes.md) is not established. `test-entropy` runs the jitter boot on
   AArch64 only, where it seeded in 11-38 batches in all six boots; the
   source's logic is the same code on both and host-tested.
 - **Jitter ran only when the CPU had no random instruction.** It now
