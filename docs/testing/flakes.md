@@ -2600,6 +2600,28 @@ mutex before the woken one runs); the failure line now names that CPU's
 current thread (one of the test's workers by index, the migrator, the
 idle thread or another) and its load. The failed job was rerun.
 
+**The second, 2026-10-13** (PR #379's run 38386284048, job 115258848603;
+aarch64 `test-guard` again, cortex-a76): `mutex worker 25 did not run
+again: entered 96187 us, first round 96198 us, rounds 1 (1 at the
+migrator's stop), thread state 0 on cpu 2; that cpu runs pingpong (worker
+index 18, -1 for none of ours), load 7`. The same worker (the second
+mutex contender) both times. It made one round in the whole stress window
+and none in the 2 s after, READY on a CPU running seven threads, where
+round robin would run it within about 70 ms. **The stall detector
+(`sched_tick`, debug builds) said nothing:** it warns when any thread on
+its CPU's ready lists has waited over a second, so the worker was most
+likely on no ready list at all -- READY and lost, the defect this test
+exists for, not a slow one. The mechanism is not established: reading the
+paths that set READY (wake, preemption, priority-inheritance requeue,
+migration, the woken-before-stopping window of the mutex's slow path)
+found no hole, and 120 runs of the test on cortex-a76 locally, under a
+load of four busy loops beside QEMU, all passed. Both sightings are since
+PR #376 and none in the two weeks before; neither unit changed the
+scheduler. The failure line now also says whether any ready list holds
+the worker, at which level, and whether that level's bitmap bit is set
+(`sched_test_find_queued`), its priority, flags and how long it has been
+READY, so a third sighting names which. The job was rerun.
+
 ## `net-accept-race` over the per-test budget, 2026-09-24
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
