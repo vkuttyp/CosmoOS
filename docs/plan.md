@@ -492,7 +492,9 @@ and [Linux compatibility API](compat/linux/api.md).
   three after the everyday commands, in that order (`ping` moved ahead of
   scp and sftp on 2026-10-14, when it was found missing on Parallels): an
   ICMP echo `ping` over Linux's ping sockets, dropbear's scp and sftp
-  server, and TLS for `wget`.
+  server, and TLS for `wget`. The next release waits for all three and
+  for a test of every new command on Parallels Desktop (the owner,
+  2026-10-14; v1.0.2's release was turned back into a draft).
 
 ## 9. Virtualization
 
