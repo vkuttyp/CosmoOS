@@ -120,6 +120,49 @@ The coverage matrix is therefore:
 | `el2-guest-gicd-probe`, `-gic-config`, `-gic-timer`, `-sgi`, `-gicd-isolated` (a guest has a distributor only where it has a vGIC) | skip | run |
 | `el2-guest-timer-isolated`, `-offset`, `-phys-timer` | run | run |
 
+### `make test-platforms`
+
+Platform discovery (`design.md`, "Platform discovery"; A25). `make
+ARCH=aarch64 test-platforms` runs `tests/boot/platform_test.py` on the
+image under six QEMU configurations, each a copy of the image booted with
+`QEMU_SMP=2` and the virtio console captured, and no fw_cfg options:
+
+| Variant | Environment | Expected beyond the common checks |
+|---|---|---|
+| `gicv2` | `QEMU_GIC=2` | GIC field starts `GICv2 GICD 0x8000000 GICC 0x8010000` |
+| `gicv3` | `QEMU_GIC=3` | GIC field starts `GICv3 GICD 0x8000000 GICR 0x80a0000` |
+| `lowmem` | `QEMU_VIRT_OPTS=,highmem=off` | (no device or RAM above 4 GiB) |
+| `rndr` | `QEMU_CPU=neoverse-v1 QEMU_RNG=0` | `random: cpu source: rndr` |
+| `nornd` | `QEMU_CPU=cortex-a72 QEMU_RNG=0` | `random: cpu source: none` |
+| `noserial` | `QEMU_SERIAL=none`, command line `root=boot-disk serial=none` | `fbcon: no serial console: the framebuffer is the console from the first line`, console field `framebuffer only` |
+
+Common checks on every variant: no `KERNEL PANIC`; the userland ready
+line (and, with a serial port, the `cosmo$ ` prompt, then `exit` typed
+and QEMU's clean-exit status 33); a platform line with OEM `'BOCHS '`
+`(QEMU)`, timer PPIs 30/27, PSCI `HVC` or `SMC`, and, with a serial
+port, `console PL011 at 0x9000000 (SPCR, IRQ 33)`; and no `timer: GTDT
+absent|unusable` line. `noserial` writes its command line into the image
+copy's ESP and re-signs the manifest with the build's key (`--key
+$(MODSIGN_KEY)`), since QEMU always provides an SPCR and the command line
+is what makes it a machine without a serial console; it reads the
+kernel log from the virtio console, whose driver replays the log ring
+when it registers, and is killed once the userland is up. Every boot's
+`serial.log` and `vcon.log` stay in `$(OUT)/test-platforms/<variant>/`.
+On x86-64 the target prints that it is AArch64 only and succeeds. CI
+runs it in the `platforms` job (`BUILD=release`).
+
+QEMU's memory map is fixed, so these variants prove the tables are read
+and agree with what the kernel drives, not that a different map works:
+the non-QEMU paths (no `VIRT_*` fallback, a DBG2 or 16550 console, no
+PSCI) are not run here.
+
+The gicv3 variant is also the proof that the GTDT is read at its timer
+offsets (56 and 64): `tools/acpi-discovery-probe.py gtdt --old` reads 80
+and 88 again and the variant fails on its timer PPIs. The ISB after
+`arch_mmu_map`'s stores has no QEMU test; `tools/acpi-discovery-probe.py
+isb` boots a Parallels Desktop VM N times and counts panics, with and
+without it (docs/audit/2026-10-13-acpi-discovery-report.md).
+
 ### Sixteen CPUs
 
 `QEMU_GIC=3 QEMU_SMP=16` boots and brings all sixteen CPUs online --
@@ -270,7 +313,9 @@ in the `debian:trixie` container (QEMU 10, `qemu-system-arm`,
 `qemu-efi-aarch64`), the same steps for both: `check-tools`, debug
 `all` + `test`, release `all test`, `host-test`, `analyze`,
 `reproducible`, `test-crash`; serial logs and images are uploaded per
-architecture.
+architecture. The `platforms` job builds the AArch64 release image and
+runs `make ARCH=aarch64 BUILD=release test-platforms`, uploading the
+boots' logs on failure.
 
 ## Bugs the tests caught during bring-up
 
@@ -303,7 +348,8 @@ Recorded so their symptoms are recognisable:
 
 ## Not tested
 
-Real hardware, GICv3, KVM/HVF acceleration (the CI machine has none for
+Real hardware and any firmware but QEMU's (the platform-discovery
+fallbacks and errors, A25; the `isb` in `arch_mmu_map`, A26), GICv3, KVM/HVF acceleration (the CI machine has none for
 AArch64 and the macOS host would need `virtualization=on`, which the
 loader refuses today), `-cpu max` in CI, big-endian, AArch32 EL0, SVE
 (a machine with it runs the FP/SIMD state fine; the wider registers are

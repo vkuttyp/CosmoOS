@@ -107,7 +107,9 @@ the last row), and `fb-console` (what is drawn is where it should be).
 It allocates nothing, sleeps never, and takes no lock: `console.c`
 serialises sinks and drops its lock in panic mode, and this sink relies
 on exactly that, as the serial sinks do. Its one allocation -- the text
-shadow -- happens once, in `fbcon_init`, before the sink is registered.
+shadow -- happens once, in `fbcon_init`, before the sink is registered;
+the early console (`fbcon_early_init`) allocates nothing, using a static
+shadow.
 
 **Checked by** review, and by the panic run (`make test-crash`), where
 the report is drawn after the other CPUs have been halted.

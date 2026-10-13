@@ -207,12 +207,18 @@ panics. See `docs/kernel/object/api.md`.
   (`irq_request` leaves it masked). Logs `serial: console input on IRQ
   4`. Without a UART, or when the request or enable fails (logged at
   WARN), the console tty never receives input and reads block for ever.
-- AArch64 (`kernel/arch/aarch64/pl011.c`): the PL011's receive interrupt
-  (the SPCR table's GSIV, or `virt`'s default), level triggered, requested
-  with `rx_irq`, which **clears the receive and receive-timeout
+- AArch64 (`kernel/arch/aarch64/pl011.c`): the serial console's receive
+  interrupt (`console_gsiv` from the boot info, which the loader took
+  from the SPCR), level triggered, requested
+  with `rx_irq`, which for a PL011 **clears the receive and receive-timeout
   interrupts (ICR) and then drains the FIFO** into the console tty, one
-  `tty_input` per byte (invariant T16). Anything already in the FIFO is
-  discarded before `IMSC_RXIM | IMSC_RTIM` is set and the line enabled.
+  `tty_input` per byte (invariant T16); a 16550 is drained while its
+  line status says data is ready. Anything already in the FIFO is
+  discarded before `IMSC_RXIM | IMSC_RTIM` (16550: `IER_RDI`) is set and
+  the line enabled. With no interrupt named (a DBG2 port) or when the
+  request or enable fails, a kernel timer runs the same drain every
+  10 ms (`serial: console input polled every 10 ms`). With no serial
+  console there is no serial input.
 - Concurrency: boot CPU, once.
 
 ## Failure modes

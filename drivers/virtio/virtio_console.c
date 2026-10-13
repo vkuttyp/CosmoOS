@@ -142,6 +142,17 @@ static int vcon_probe(struct virtio_device *vdev)
     c->sink.name = "virtio-console";
     c->sink.write = vcon_write;
     g_vcon = c;
+    /* What was logged before this driver loaded -- the platform line, the
+     * early console's choice -- so this log is the whole boot, as the
+     * framebuffer console replays it too. Without it a machine with no
+     * serial console had no record of its first lines anywhere a test can
+     * read (make test-platforms, variant noserial). */
+    char *ring = kmalloc(KLOG_RING_SIZE, 0);
+    if (ring != NULL) {
+        size_t n = klog_copy(ring, KLOG_RING_SIZE);
+        vcon_write(&c->sink, ring, n);
+        kfree(ring);
+    }
     console_register(&c->sink);
     kinfo("virtio-console: %s: registered as a console sink", vdev->dev.name);
     return 0;

@@ -8,9 +8,12 @@ overrides; `max` adds PAN and is also supported), 4 CPUs, 256 MiB of RAM
 at 0x40000000, EDK2 firmware (`AAVMF`/`QEMU_EFI`) in a 64 MiB pflash
 (smaller images are padded into `$(OUT)`), the same virtio-pci devices as
 x86, `-serial stdio` on the PL011, fw_cfg over MMIO, semihosting enabled
-for the exit status. The machine's fixed addresses are only defaults;
-ACPI tables (MADT, GTDT, SPCR, MCFG, FADT) are the source of truth as on
-x86.
+for the exit status. The map below is QEMU's, not the kernel's: every
+device address comes from the boot info's console record (the SPCR or
+DBG2, boot protocol v9) and the ACPI tables (MADT, GTDT, MCFG, FADT,
+IORT), as on x86. Virt's fixed addresses (`VIRT_*`) are used only when
+the firmware is QEMU's and a table leaves the device out; see "Platform
+discovery".
 
 ```text
 0x0800_0000  GICD           0x0801_0000  GICC          0x0802_0000  GICv2m frame (INTIDs 80..143 on QEMU: base 80, 64 SPIs)
@@ -70,6 +73,7 @@ void cpu_finish(void);        /* after ExitBootServices: x86-64 enables NX and W
 void cpu_halt(void) __noreturn;
 void cpu_jump_to_kernel(const struct paging_ctx *pg, uint64_t stack_top, uint64_t info, uint64_t entry) __noreturn;
 void arch_serial_init(void); bool arch_serial_present(void); void arch_serial_putc(char c);
+void arch_serial_configure(const struct cosmoboot_info *info);   /* AArch64: the SPCR/DBG2 port (v9); x86-64: nothing */
 #define LOADER_ELF_MACHINE / LOADER_ELF_MACHINE_NAME / COSMOBOOT_ARCH_NATIVE   /* 183 "AArch64" / 62 "x86-64" */
 ```
 
@@ -108,9 +112,10 @@ non-x86 targets since AAPCS64 is the UEFI calling convention there.
 `.bss`, `msr vbar_el1, vectors`, clear `x29`, `bl aarch64_start`.
 `aarch64_start`: record `info->hhdm_base` in `aarch64_hhdm_base` (the
 direct-map base the early device code uses before the PMM publishes its
-own), `arch_console_early_init` (PL011 through the direct map, whose
+own) and `info` in `aarch64_boot_info`, `arch_console_early_init` (the
+serial port the boot info records, through the direct map, whose
 device page the loader's tables provide and `map_early_devices` later
-carries into the kernel's own root), `percpu_init_boot` (the static boot
+carries into the kernel's own root; none when there is no record), `percpu_init_boot` (the static boot
 block into `TPIDR_EL1`),
 `aarch64_cpu_init` (MIDR/MPIDR, `ID_AA64MMFR1.PAN`, `ID_AA64PFR0.GIC`,
 `CNTFRQ`), `arch_syscall_init_cpu` (nothing to program: SVC is a vector),
@@ -385,8 +390,10 @@ it.
 Clock: `CNTPCT_EL0` (after an `isb`) at `CNTFRQ_EL0` Hz (62.5 MHz on
 QEMU), name `"arch-timer"`; no calibration needed: `arch_timer_calibrate`
 reads the frequency (panics outside 1 MHz–10 GHz), reads the GTDT for
-the non-secure EL1 and virtual timer GSIVs (offsets 80 and 88; defaults
-30 and 27 with a warning when the table is absent), allocates the tick
+the non-secure EL1 and virtual timer GSIVs (`aarch64_timer_gtdt`, then `read_gtdt`:
+offsets 56 and 64; both must be PPIs, else the `virt` 30 and 27 with a
+warning on QEMU's firmware and a panic elsewhere; see "Platform
+discovery"), allocates the tick
 vector and binds it to the physical-timer PPI. Tick: `start_tick(hz)`
 computes the period in counter ticks and arms `CNTP_CVAL_EL0` with an
 **absolute** compare, `now + period`; on every tick `aarch64_timer_ack`
@@ -434,11 +441,22 @@ restrictions (`APTable`/`PXNTable` zero) so the leaf decides, like x86.
 permits (`arch_mmu_large_page_sizes` = 2 MiB). `protect` rewrites leaf
 attribute bits keeping the output address; splitting a block is refused
 (`-EEXIST`), as on x86. `query` walks and reports the leaf's page size.
+`arch_mmu_map` ends with `dsb ishst` (the table stores reach the walker)
+and `isb` (this CPU's later accesses translate through them). The `isb`
+was missing until the platform-discovery change: TCG never showed it, but
+an Apple CPU under Parallels Desktop faulted on the first read of a
+freshly mapped xHCI register page (4 of 6 boots), the access having been
+walked against the old, invalid entry.
 
 `activate(kernel)`: first `map_early_devices` — the generic VMM builds
-the direct map for RAM only, so the PL011 and fw_cfg pages at the `virt`
-default addresses are mapped device-type into the kernel root if
-`query` finds them absent (the first boot of the port hung silently at
+the direct map for RAM only, so what the kernel still reaches through
+the loader's direct map is mapped uncached into the kernel root, at the
+same direct-map address, wherever `query` finds a page absent: the
+serial console page the boot info names (`aarch64_console_serial`), the
+framebuffer's range (the early framebuffer console draws there), and
+fw_cfg's page only when the firmware is QEMU's
+(`acpi_platform_is_qemu`); each range is clipped to `hhdm_size`. No
+address is assumed (the first boot of the port hung silently at
 takeover because the console page vanished); then `TTBR1_EL1` = root,
 `TTBR0_EL1` = `g_empty_root` (an empty table allocated with the first
 context so no stale user mapping is reachable from kernel context),
@@ -540,10 +558,13 @@ parser used the wrong offsets and reported three CPUs with a garbage GICC
 base, which is why the layout is spelled out in the parser's comment.
 
 `arch_smp_start_cpu(cpu, hw_id, stack_top)` first installs the
-trampoline once: `psci_probe` decides the conduit (HVC when the FADT's
-ARM boot flags say `PSCI_USE_HVC`, when the FADT is absent or when it
-does not declare PSCI; SMC otherwise — `virt` without EL2 uses HVC) and
-logs the PSCI version; then a temporary user context (`g_tramp_ctx`,
+trampoline once: `psci_probe` takes the conduit from
+`aarch64_psci_conduit`: when the FADT's ARM boot flags declare
+`PSCI_COMPLIANT`, HVC if they say `PSCI_USE_HVC` and SMC otherwise; when
+they do not (or there is no FADT), HVC on QEMU's firmware only, and
+anywhere else no PSCI: `smp: the FADT declares no PSCI and this firmware
+is not QEMU's: no secondary CPUs` and every `arch_smp_start_cpu` returns
+`-ENODEV`. It then logs the PSCI version; then a temporary user context (`g_tramp_ctx`,
 `arch_mmu_context_init_user`) identity-maps **only the trampoline's
 page** RX. The mailbox (`struct aarch64_ap_mailbox {ttbr0, ttbr1, mair,
 tcr, sctlr, stack_top, entry, cpu}`, 64-byte aligned, a static per-CPU
@@ -576,32 +597,103 @@ initialises the GIC CPU interface (`arch_irqc_init_cpu`), records
 `hw_id`, calls `timer_init_cpu` and enters `sched_start_cpu` like the
 x86 secondary entry.
 
+## Platform discovery
+
+The kernel assumes no device address. Everything comes from the boot
+info and the firmware's ACPI tables; QEMU `virt`'s fixed addresses
+(`VIRT_*` in `include/aarch64/platform.h`) are fallbacks for QEMU's own
+firmware only, used when its tables leave a device out.
+
+**Which firmware.** `acpi_rsdp_oem` (`drivers/acpi/acpi.c`) reads the
+RSDP's six-byte OEM id with byte reads through the loader's direct map,
+once, the first time it is asked (before the kernel's own tables, whose
+direct map covers RAM only), and keeps it. `acpi_platform_is_qemu` is
+true when that id is `"BOCHS "`, the id QEMU builds its tables with.
+Neither sleeps, allocates nor takes a lock.
+
+**Where each device comes from, and what happens without it:**
+
+| Device | Source | QEMU firmware, source missing | Other firmware, source missing |
+|---|---|---|---|
+| Serial console | boot info `console_*` (the loader's SPCR, else DBG2) | no serial console | no serial console; framebuffer console from the first line |
+| GIC distributor / CPU interface | MADT (`acpi_madt_gic`) | `VIRT_GICD_BASE`, `VIRT_GICC_BASE` (a warning when the MADT has no GIC entry at all) | panic: `gic: the MADT describes no GIC distributor, and this firmware is not QEMU's` (`irqc.c`), or a GICD/GICC base of 0 (`gic.c`, `gicv3.c`) |
+| Timer PPIs | GTDT, offsets 56 and 64 | 30 and 27, warning | panic: `timer: the GTDT gives no usable timer interrupts ...` |
+| PSCI conduit | FADT ARM boot flags | HVC | none: no secondary CPUs (`kerror`) |
+| SMMUv3 interrupts | IORT GSIVs | `VIRT_SMMU_EVENTQ_INTID` 106, `VIRT_SMMU_GERROR_INTID` 109 | the SMMU is not used (`kwarn`): 0 would be an SGI, accepted by `irq_request` and never delivered, so its event queue would never drain |
+| fw_cfg | QEMU only, `VIRT_FWCFG_BASE` | — | absent: `opt/cosmo/` keys unset |
+| RTC | QEMU only, `VIRT_PL031_BASE` | — | `arch_rtc_read_epoch` returns false |
+| Emulator exit | QEMU only, semihosting | — | `arch_emulator_exit` returns |
+
+The GTDT offsets were wrong until this change: the timer read 80 and 88
+(`CntReadBase` and the platform timer count), which never passed the PPI
+range check, so every boot took virt's 30/27 and was right only because
+they are QEMU's numbers too.
+
+**The platform line.** `aarch64_platform_report` (`platform.c`), called
+first in `arch_irqc_init`, logs one line before anything is driven from
+the tables: the OEM id (and `(QEMU)`), the console with its source and
+interrupt or `polled` (or `framebuffer only`, or `none`), the GIC with
+its bases, the timer PPIs and the PSCI conduit (`HVC`, `SMC` or `none`).
+On QEMU:
+
+```text
+platform: firmware OEM 'BOCHS ' (QEMU); console PL011 at 0x9000000 (SPCR, IRQ 33); GICv2 GICD 0x8000000 GICC 0x8010000 MSI frame 0x8020000; timer PPIs 30 (physical) 27 (virtual); PSCI SMC
+```
+
+On Parallels Desktop 27 (Apple silicon):
+
+```text
+platform: firmware OEM 'PRLS  '; console PL011 at 0x2110000 (DBG2, polled); GICv3 GICD 0x2010000 GICR 0x2500000 ITS 0x0 MSI frame 0x2250000; timer PPIs 30 (physical) 27 (virtual); PSCI SMC
+```
+
+`make test-platforms` (`testing.md`) checks it under six QEMU
+configurations.
+
 ## Console, fw_cfg, PCI, shutdown
 
-- **PL011** (`pl011.c`): `arch_console_early_init` uses the `virt`
-  default base (0x09000000) through the direct map, resets the mask and
-  pending bits, sets 8N1 with FIFOs and enables TX/RX, and registers the
-  `pl011` console sink; that page is one of the two `map_early_devices`
-  keeps alive across takeover. `arch_console_input_init` reads the SPCR
-  (interface type 3 or 0x0E, base at 44, GSIV at 54; a different base is
-  mapped with `vm_map_phys`; a missing table or a foreign type keeps the
-  defaults with a warning), requests the GSIV (33 on `virt`) level
-  triggered with the generic `irq_request`, drains the FIFO, enables
-  `RXIM|RTIM` and feeds `tty_input` from the handler as the 16550 driver
-  does.
+- **Serial console** (`pl011.c`): `arch_console_early_init` takes the
+  port from the boot info (`aarch64_boot_info`, protocol v9;
+  `docs/boot/design.md`, "The serial console"): `COSMOBOOT_CONSOLE_PL011`
+  or `16550_MMIO` at `console_base`, reached through the direct map. It
+  does nothing, leaving no serial console, when the boot info is of
+  another version, the type is another, the base is 0 or beyond
+  `hhdm_size`, or the command line carries `serial=none` (read here,
+  before `bootinfo_init`, with the same bounds). A PL011's mask and
+  pending bits are reset, 8N1 with FIFOs set and TX/RX enabled; a 16550's
+  interrupts are disabled, FIFOs enabled and cleared and 8N1 set, the
+  firmware's baud rate kept, the registers `console_stride` apart and
+  accessed `console_access` bytes wide, by the loader's rule for either
+  left undefined (docs/boot/design.md, "The serial console"). A console
+  at or above `hhdm_size` is not used: the early console runs on the
+  loader's direct map, which ends there, and `arch_console_input_init`
+  then logs `serial: the firmware's console at ... is above the bootstrap
+  direct map; not used`. It registers the `serial` console sink; that page
+  is one `map_early_devices` keeps alive across takeover.
+  `arch_console_input_init` requests `console_gsiv` (33 on `virt`) level
+  triggered with the generic `irq_request`, drains the FIFO, enables the
+  receive interrupt (`RXIM|RTIM`, or the 16550's `IER_RDI`) and feeds
+  `tty_input` from the handler; when the record names no interrupt (a
+  DBG2 port) or the request fails, a kernel timer reads the FIFO every
+  10 ms (`POLL_NS`). With no serial console `kernel_main` brings up the
+  framebuffer console before its first line (`fbcon_early_init`,
+  `docs/kernel/diagnostics/design.md`).
 - **fw_cfg** (`fwcfg.c`): the MMIO register block (`virt`: 0x09020000;
   selector at +8 big-endian 16-bit, data at +0 read a byte at a time),
-  presence by the `QEMU` signature, a spinlock around every transaction;
-  the same file-directory walk as x86. The second early device page.
+  probed only when the firmware is QEMU's, presence by the `QEMU`
+  signature, a spinlock around every transaction; the same
+  file-directory walk as x86. Anywhere else there is no fw_cfg and every
+  `opt/cosmo/` key reads as unset.
 - **PCI**: `arch_pci_legacy_available` = false; ECAM from the MCFG (the
   `virt` high ECAM at 0x4010000000 is mapped with `vm_map_phys`, which
   handles addresses beyond the direct map); BARs as programmed by the
-  firmware, including 64-bit BARs above 4 GiB; MSI-X through GICv2m.
+  firmware, including 64-bit BARs above 4 GiB, sized by the lowest set
+  bit of the mask (`docs/drivers/pci/design.md`); MSI-X through GICv2m.
 - **Shutdown** (`shutdown.c`): `arch_emulator_exit(code)` issues
   semihosting `SYS_EXIT_EXTENDED` (`hlt #0xF000`, `w0 = 0x20`, `x1` → {
   `ADP_Stopped_ApplicationExit`, `(code << 1) | 1` }) so QEMU's exit
   status matches what the harness already decodes for the x86
-  isa-debug-exit device.
+  isa-debug-exit device; only on QEMU's firmware, since elsewhere
+  `hlt #0xF000` is an undefined instruction, not an exit.
 - **DMA**: `dma_sync_for_device/for_cpu` call the new `arch_dma_barrier()`
   (`dsb sy` here, a store fence on x86). The `virt` PCI bus is
   DMA-coherent; cache maintenance for non-coherent devices is out of
@@ -662,10 +754,15 @@ without the lock (an INTID is only ever routed once while enabled). The
 MMU code uses the generic VMM's locks as on x86 and never sleeps. PSCI
 calls are made from the boot CPU during SMP bring-up. The mailbox is a
 static per-CPU array in the image. Per-CPU GIC interface and timer
-initialisation run on the CPU itself. Errors follow the contract: a
-missing GTDT or SPCR is a warning plus the `virt` default; a missing
-MADT GIC entry falls back to the `virt` addresses with a warning; a
-missing MADT panics as on x86.
+initialisation run on the CPU itself. Errors follow the contract (see
+"Platform discovery"): on QEMU's firmware a missing or unusable GTDT, a
+missing MADT GIC entry or base, or IORT SMMU GSIVs of zero fall back to
+the `virt` values (with a warning for the GTDT and a missing GIC
+entry); on any other firmware the GIC and GTDT
+cases panic naming the table and an SMMU without both interrupts is
+not used. No SPCR
+or DBG2 port means no serial console, not an error. A missing MADT
+panics as on x86.
 
 ## Testing strategy
 

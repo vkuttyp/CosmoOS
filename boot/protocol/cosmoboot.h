@@ -65,8 +65,11 @@
  *      from (boot_partuuid); the structure grows
  *   8  + verified boot (verify_flags, verify_key_id): whether the loader
  *      checked kernel, archive and command line against the signed
- *      manifest, and with which key; the structure grows */
-#define COSMOBOOT_VERSION 8
+ *      manifest, and with which key; the structure grows
+ *   9  + the serial console the firmware describes (ACPI SPCR), found by
+ *      the loader while it can still read any table: console_type,
+ *      console_base, console_gsiv, console_access; the structure grows */
+#define COSMOBOOT_VERSION 9
 
 /* ELF note carried by the kernel so the loader can verify protocol version.
  * Name "COSMO\0", type COSMOBOOT_NOTE_TYPE, desc = uint32_t version. */
@@ -108,6 +111,18 @@
 
 /* v7 boot_flags. */
 #define COSMOBOOT_BOOT_PARTUUID 1u   /* boot_partuuid names a GPT partition */
+
+/* v9 console_type: the serial port ACPI's SPCR names, as the loader
+ * found it, or, when there is no SPCR, the DBG2's debug serial port
+ * (which names no interrupt: console_gsiv 0). NONE when neither table
+ * names a port, it is of another kind, or its base is zero: the kernel
+ * then has no serial console. */
+#define COSMOBOOT_CONSOLE_NONE        0u
+#define COSMOBOOT_CONSOLE_PL011       1u   /* ARM PL011 or SBSA generic UART, MMIO */
+#define COSMOBOOT_CONSOLE_16550_MMIO  2u   /* 16550-compatible, memory mapped */
+#define COSMOBOOT_CONSOLE_16550_PORT  3u   /* 16550-compatible, x86 I/O port */
+/* v9 console_flags. */
+#define COSMOBOOT_CONSOLE_FROM_DBG2   1u   /* no SPCR: the port is the DBG2's debug serial port */
 
 /* v8 verify_flags. */
 #define COSMOBOOT_VERIFIED 1u        /* every file matched a manifest signed by verify_key_id */
@@ -219,6 +234,25 @@ struct cosmoboot_info {
     uint32_t verify_flags;    /* COSMOBOOT_VERIFIED */
     uint32_t reserved3;
     uint8_t  verify_key_id[COSMOBOOT_KEY_ID_SIZE];
+
+    /* v9: the serial console the firmware describes (ACPI SPCR; docs/boot/
+     * design.md, "The serial console"). console_base is the register
+     * block's physical address (an I/O port for 16550_PORT);
+     * console_access the width of one register access in bytes, from the
+     * address descriptor's access size (1, 2, 4 or 8; 0 when it says
+     * "undefined"); console_stride the spacing of the registers in bytes,
+     * from the descriptor's register bit width (0 when it says nothing):
+     * the two differ on a 16550 read a byte at a time from 32-bit-spaced
+     * registers. console_gsiv the interrupt, 0 when the port is polled.
+     * The loader writes its own output after ExitBootServices to this port
+     * and to nothing else. */
+    uint32_t console_type;    /* COSMOBOOT_CONSOLE_* */
+    uint32_t console_gsiv;
+    uint64_t console_base;
+    uint32_t console_access;
+    uint32_t console_flags;   /* COSMOBOOT_CONSOLE_FROM_DBG2 */
+    uint32_t console_stride;
+    uint32_t reserved4;
 };
 
 #endif /* __ASSEMBLER__ */

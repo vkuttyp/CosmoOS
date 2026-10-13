@@ -138,4 +138,5 @@ void kprintf(const char *fmt, ...)
 EXPORT_SYMBOL(klog);
 EXPORT_SYMBOL(kvlog);
 EXPORT_SYMBOL(kprintf);
+EXPORT_SYMBOL(klog_copy);
 EXPORT_SYMBOL(kvprintf);

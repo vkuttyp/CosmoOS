@@ -55,7 +55,17 @@ command register for the duration; for each BAR the original value is
 saved, all ones written, the mask read back, the original restored. Bit
 0 selects I/O (`size = ~(mask & ~3) + 1` within 16 bits); for memory
 BARs bits 1-2 select 64-bit (the next BAR holds the upper half and is
-probed the same way), bit 3 prefetchable, `size = ~(mask & ~0xf) + 1`.
+probed the same way), bit 3 prefetchable, and the size is the lowest
+set bit of the 64-bit mask `m` (`mask & ~0xf`, the upper half's mask
+above it, or all ones above bit 31 for a 32-bit BAR): `size = m & ~(m -
+1)`. The bits a device decodes are writable and the ones below its size
+read zero, so the lowest writable bit is the size whatever the upper
+bits do. The earlier `~m + 1` assumed every bit above the size was
+writable; a 64-bit BAR whose upper half is hard-wired to zero (a device
+that decodes below 4 GiB only) then came out about 16 EiB -- Parallels
+Desktop's NVMe controller's 16 KiB BAR -- and could not be mapped. For a
+BAR whose upper bits are writable, every one QEMU offers, the two
+formulas agree.
 Each implemented BAR becomes a `RES_MMIO`/`RES_IO` resource with the BAR
 index in `flags`.
 

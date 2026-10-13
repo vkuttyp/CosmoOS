@@ -49,3 +49,10 @@ void arch_serial_putc(char c)
         ;
     outb(COM1 + 0, (uint8_t)c);
 }
+
+/* The SPCR record (boot protocol v9) changes nothing here: the loader's
+ * x86-64 output stays on COM1, as before. */
+void arch_serial_configure(const struct cosmoboot_info *info)
+{
+    (void)info;
+}

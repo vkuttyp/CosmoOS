@@ -56,6 +56,26 @@ static int64_t psci_call(uint32_t fn, uint64_t a0, uint64_t a1, uint64_t a2)
     return (int64_t)x0;
 }
 
+/*
+ * The PSCI conduit, from the FADT's ARM boot flags: PSCI compliant, and
+ * HVC or SMC. Nothing is guessed: QEMU's firmware alone, whose virt
+ * machine answers on HVC, keeps that default when its FADT says nothing
+ * (docs/kernel/arch/aarch64/design.md, "Platform discovery"). Returns 1
+ * for HVC, 0 for SMC, -1 when there is no PSCI to call.
+ */
+int aarch64_psci_conduit(void)
+{
+    const struct acpi_sdt_header *fadt = acpi_find_table("FACP");
+    uint16_t flags = 0;
+    if (fadt && fadt->length >= 131)
+        memcpy(&flags, (const uint8_t *)fadt + 129, 2);
+    if (flags & FADT_ARM_PSCI_COMPLIANT)
+        return (flags & FADT_ARM_PSCI_USE_HVC) ? 1 : 0;
+    return acpi_platform_is_qemu() ? 1 : -1;
+}
+
+static bool g_have_psci;
+
 static void psci_probe(void)
 {
     static bool probed;
@@ -63,13 +83,13 @@ static void psci_probe(void)
         return;
     probed = true;
     el2_init(bootinfo_get());   /* before any AP starts: they need the stub's address */
-    const struct acpi_sdt_header *fadt = acpi_find_table("FACP");
-    uint16_t flags = 0;
-    if (fadt && fadt->length >= 131)
-        memcpy(&flags, (const uint8_t *)fadt + 129, 2);
-    if (fadt && !(flags & FADT_ARM_PSCI_COMPLIANT))
-        kwarn("smp: FADT does not declare PSCI; trying the HVC conduit anyway");
-    g_use_hvc = fadt == NULL || (flags & FADT_ARM_PSCI_USE_HVC) != 0 || !(flags & FADT_ARM_PSCI_COMPLIANT);
+    int conduit = aarch64_psci_conduit();
+    if (conduit < 0) {
+        kerror("smp: the FADT declares no PSCI and this firmware is not QEMU's: no secondary CPUs");
+        return;
+    }
+    g_use_hvc = conduit == 1;
+    g_have_psci = true;
     int64_t ver = psci_call(PSCI_FN_VERSION, 0, 0, 0);
     kdebug("smp: PSCI %lld.%lld via %s", (long long)(ver >> 16), (long long)(ver & 0xFFFF), g_use_hvc ? "HVC" : "SMC");
 }
@@ -118,6 +138,8 @@ int arch_smp_start_cpu(unsigned cpu, uint32_t hw_id, uintptr_t stack_top)
 {
     KASSERT(cpu > 0 && cpu < CONFIG_MAX_CPUS);
     trampoline_install();
+    if (!g_have_psci)
+        return -ENODEV;   /* psci_probe said why, once */
     struct aarch64_ap_mailbox *mb = &g_mailbox[cpu];
     mb->ttbr0 = g_tramp_ctx.root;
     mb->ttbr1 = kernel_space.mmu.root;

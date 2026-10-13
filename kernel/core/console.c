@@ -39,6 +39,11 @@ void console_unregister(struct console_sink *sink)
     spin_unlock_irqrestore(&g_console_lock, st);
 }
 
+bool console_any_sink(void)
+{
+    return g_sinks != NULL;
+}
+
 bool console_has_sink(const char *name)
 {
     for (struct console_sink *k = g_sinks; k != NULL; k = k->next) {

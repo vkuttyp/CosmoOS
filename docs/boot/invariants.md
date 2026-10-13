@@ -87,7 +87,8 @@ Every `die()` reason is a distinct string; the loader prints the loaded
 image geometry, page-table pool usage, the translated memory map, and
 the jump target before handing over. While boot services are up, output
 goes only through `ConOut` (firmware mirrors it to serial where
-configured); afterwards only through COM1. Writing both would duplicate
+configured); afterwards only through the serial port (COM1 on x86-64,
+the firmware's port on AArch64, BT16). Writing both would duplicate
 characters on firmware that mirrors.
 
 ## BT11. The kernel entry is a jump with fixed register roles, not a call
@@ -156,3 +157,21 @@ test-security` (each file tampered, another key, a forged key id, no
 manifest; the override), and the boot harness's required `verified boot`
 lines and forbidden `UNVERIFIED BOOT` on every boot. Gap: the loader is
 not itself signed for UEFI Secure Boot, so replacing it defeats the check.
+
+## BT16. After `ExitBootServices` the loader writes only to the port the firmware names
+
+On AArch64 the loader's output after `ExitBootServices` goes to the
+serial port the SPCR (else the DBG2) names, recorded in `console_*`
+(protocol v9) by `acpi_scan` while boot services are up, and to nothing
+else: `boot/uefi/arch/aarch64/serial.c` holds no device address, and
+with `console_type` `NONE` `arch_serial_putc` writes nothing. A fixed
+address is a store to whatever another machine has there, and a fault
+with no handler left to report it. x86-64 keeps COM1, which its loader
+probes. Check: `make test-platforms` (every serial variant reads the
+loader's and kernel's output on QEMU's SPCR port; `noserial` boots with
+`-serial none`), and every AArch64 `make test` boot, whose
+`jumping to kernel entry` marker is printed after `ExitBootServices` and
+so reaches the harness only through the recorded port. Gap: no automated
+test runs a machine whose SPCR names a 16550 or whose only port is a
+DBG2's; the DBG2 path has run on Parallels Desktop 27 only
+(`docs/kernel/arch/aarch64/design.md`, "Platform discovery").

@@ -32,6 +32,8 @@ struct console_sink {
 void console_register(struct console_sink *sink);
 void console_unregister(struct console_sink *sink);
 bool console_has_sink(const char *name);
+/* True once any sink is registered: false means nothing printed is seen. */
+bool console_any_sink(void);
 
 void console_write(const char *s, size_t len);
 void console_puts(const char *s);

@@ -2695,12 +2695,31 @@ bool selftest_sched_migrate_stress(const char **reason)
             if (run->w[i].rounds > snap[i])
                 continue;
             struct stress_worker *w = &run->w[i];
+            int cpu = run->t[i] ? run->t[i]->cpu : -1;
+            /* What that CPU runs instead (2026-10-13 sighting: a mutex
+             * worker READY on cpu 3 for the whole 2 s). Compared by
+             * pointer only: a thread that is none of ours may be gone. */
+            const char *runs = "?";
+            int runs_idx = -1;
+            unsigned load = 0;
+            if (cpu >= 0 && (unsigned)cpu < cpu_count()) {
+                struct percpu *pc = percpu_get((unsigned)cpu);
+                struct thread *cur = __atomic_load_n(&pc->current, __ATOMIC_RELAXED);
+                runs = cur == pc->idle ? "its idle thread" : cur == run->mig_t ? "the migrator" : "another thread";
+                for (unsigned j = 0; j < STRESS_WORKERS; j++)
+                    if (cur == run->t[j]) {
+                        runs = run->kind[j];
+                        runs_idx = (int)j;
+                    }
+                load = sched_cpu_load((unsigned)cpu);
+            }
             kerror("selftest: sched-migrate-stress: %s worker %u did not run again: entered %lld us, first round "
-                   "%lld us, rounds %llu (%llu at the migrator's stop), thread state %d on cpu %d%s",
+                   "%lld us, rounds %llu (%llu at the migrator's stop), thread state %d on cpu %d%s; "
+                   "that cpu runs %s (worker index %d, -1 for none of ours), load %u",
                    run->kind[i], i, w->entered_ns ? (long long)((w->entered_ns - t0) / 1000) : -1ll,
                    w->first_ns ? (long long)((w->first_ns - t0) / 1000) : -1ll, (unsigned long long)w->rounds,
-                   (unsigned long long)snap[i], run->t[i] ? (int)run->t[i]->state : -1,
-                   run->t[i] ? run->t[i]->cpu : -1, run->timed[i] ? ", a timed sleeper" : "");
+                   (unsigned long long)snap[i], run->t[i] ? (int)run->t[i]->state : -1, cpu,
+                   run->timed[i] ? ", a timed sleeper" : "", runs, runs_idx, load);
         }
     }
 

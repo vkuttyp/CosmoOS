@@ -137,6 +137,11 @@ const struct bootinfo_framebuffer *bootinfo_framebuffer(void)
     return g_have_fb ? &g_fb : NULL;
 }
 
+bool bootinfo_ready(void)
+{
+    return g_info != NULL;
+}
+
 const struct cosmoboot_info *bootinfo_get(void)
 {
     KASSERT(g_info != NULL);

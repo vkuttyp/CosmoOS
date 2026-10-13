@@ -21,6 +21,9 @@
 void bootinfo_init(const struct cosmoboot_info *info);
 
 const struct cosmoboot_info *bootinfo_get(void);
+/* True once bootinfo_init has accepted the structure: before it, nothing
+ * here may be asked (bootinfo_get asserts). Any context. */
+bool bootinfo_ready(void);
 
 /* Memory map array and entry count. */
 const struct cosmoboot_mem_entry *bootinfo_mem_map(uint32_t *count);

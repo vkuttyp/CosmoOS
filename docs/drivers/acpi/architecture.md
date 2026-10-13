@@ -37,8 +37,13 @@ direct map covers all RAM after `vmm_init`), and through a read-only
 
 AML, FADT power fields, HPET, MCFG (PCIe, Phase 6), SRAT (NUMA, later).
 The AArch64 backend reads its own tables through `acpi_find_table`
-(GTDT for the timer interrupts, SPCR for the console, the FADT's ARM
-boot flags for the PSCI conduit); this driver only locates them.
+(GTDT for the timer interrupts, the FADT's ARM boot flags for the PSCI
+conduit); this driver only locates them. The console's SPCR (or DBG2) is
+read by the loader (`boot/uefi/acpi.c`) and reaches the kernel in the
+boot info (protocol v9). The driver also reports the RSDP's OEM id
+(`acpi_rsdp_oem`, `acpi_platform_is_qemu`), which decides whether QEMU
+`virt`'s fixed addresses may stand in for a missing table
+(`docs/kernel/arch/aarch64/design.md`, "Platform discovery").
 
 ## Interfaces
 

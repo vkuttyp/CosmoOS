@@ -43,12 +43,13 @@ Linux table, an EL2 backend) are later phases.
         user.c        arch/user.h: ERET to EL0, PAN windows when present, TLS base
         smp.c         arch/smp.h: PSCI CPU_ON through SMC or HVC, the per-CPU mailbox, secondary bring-up
         trampoline.S  the MMU-off secondary entry (position independent, identity-mapped page)
-        pl011.c       arch/console.h: the UART from SPCR (default 0x09000000), RX interrupt into the tty
-        fwcfg.c       arch/fwcfg.h: the MMIO fw_cfg interface of the virt machine
+        pl011.c       arch/console.h: the serial port the boot info records (PL011 or MMIO 16550; none without a record), RX interrupt or 10 ms poll into the tty
+        platform.c    the boot-time platform line (firmware OEM, console, GIC, timer PPIs, PSCI conduit)
+        fwcfg.c       arch/fwcfg.h: the MMIO fw_cfg interface of the virt machine (QEMU firmware only)
         pci.c         arch/pci.h: no legacy configuration mechanism
         modreloc.c    arch/module.h: R_AARCH64 relocations for kernel modules
         backtrace.c   arch/backtrace.h: the x29 frame chain
-        shutdown.c    arch/shutdown.h: semihosting exit with the harness's status encoding
+        shutdown.c    arch/shutdown.h: semihosting exit with the harness's status encoding (QEMU firmware only)
         hv.c          arch/hv.h: no backend (present = false)
         linker.ld     the same image layout as x86-64 at 0xFFFFFFFF80000000
         include/aarch64/ private headers: system registers, GIC, PL011, PSCI, descriptors
@@ -87,14 +88,18 @@ contract is generalized, not special-cased.
   TTBR0: the identity map the loader itself runs on), program
   MAIR/TCR/SCTLR with the MMU kept on, switch tables and jump to the
   kernel at its virtual address with the handoff stack and the bootinfo
-  pointer. The loader's own serial output is the PL011 at the `virt`
-  address.
+  pointer. The loader's own serial output after `ExitBootServices` is
+  the port the firmware's SPCR (else DBG2) names, which it records in the
+  boot info (protocol v9; `docs/boot/design.md`, "The serial console");
+  none without one.
 - **Kernel backend** (`kernel/arch/aarch64/`): everything listed above,
   behind the unchanged headers.
 - **ACPI** (`drivers/acpi/`): decode the GIC entries of the MADT (CPU
   interfaces with MPIDRs, the distributor, the MSI frame) and the PSCI
-  flags of the FADT; the GTDT and SPCR for the timer interrupt and the
-  console. The x86 build ignores the new entries; the AArch64 build has no
+  flags of the FADT; the GTDT for the timer interrupts; the RSDP's OEM id
+  (`acpi_platform_is_qemu`), which alone permits QEMU `virt`'s fixed
+  addresses as fallbacks (`design.md`, "Platform discovery"). The SPCR is
+  read by the loader, not here. The x86 build ignores the new entries; the AArch64 build has no
   local APIC.
 - **Userland ABI** (`libc/`): the same system-call numbers and structures;
   the instruction is `svc #0` with the number in `x8`, arguments in
@@ -112,7 +117,10 @@ contract is generalized, not special-cased.
   the two `skipped` lines on AArch64; `rc.test` runs the Linux section
   only when `/boot/tests/linux/lxhello` exists and the virtualization
   test reports itself skipped when `/dev/vmm` is absent. CI gains an
-  `aarch64` matrix entry in the same container.
+  `aarch64` matrix entry in the same container. `QEMU_VIRT_OPTS` (appended
+  to `-machine virt`) and `QEMU_SERIAL` (the `-serial` backend) let
+  `make test-platforms` (`tests/boot/platform_test.py`, CI job
+  `platforms`) boot configurations that differ from virt's defaults.
 
 ## Non-responsibilities
 
@@ -120,10 +128,13 @@ contract is generalized, not special-cased.
   differ from x86-64's; the personality is selected but every call is
   unknown), no virtualization backend (EL2 with stage-2 translation is a
   later phase), no big-endian, no 32-bit EL0, no device tree
-  (ACPI only, as on x86), no GICv3/ITS (GICv2 + GICv2m is what the
-  `virt` machine offers with `gic-version=2`; a GICv3 backend fits the
-  same `arch/irqc.h` later), no real hardware beyond QEMU `virt`, no KVM
-  acceleration in CI.
+  (ACPI only, as on x86), no tested platform beyond QEMU `virt` in CI
+  (the kernel takes its devices from the firmware tables; since v1.0.1
+  the release image reaches the live shell on Parallels Desktop 27, run
+  by hand, `design.md`, "Platform discovery"; nothing on real hardware
+  or another hypervisor runs in CI), no KVM acceleration in CI. Both
+  GICv2 (with a GICv2m frame) and GICv3 (with redistributors and an ITS)
+  are driven, whichever the MADT describes.
 - The generic kernel does not learn anything about ARM: no `#ifdef
   ARCH_AARCH64` outside `kernel/arch/`, the loader's arch directory, the
   ELF machine constant and the two stubs.

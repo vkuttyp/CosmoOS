@@ -14,6 +14,7 @@
 #include <kernel/bootarchive.h>
 #include <kernel/blk.h>
 #include <kernel/bootinfo.h>
+#include <kernel/console.h>
 #include <kernel/fbcon.h>
 #include <kernel/bootfs.h>
 #include <kernel/cosmofs.h>
@@ -154,6 +155,11 @@ static void log_memory_map(void)
 void kernel_main(const struct cosmoboot_info *info)
 {
     bootinfo_init(info);
+    /* No serial console (the firmware names none: boot protocol v9): the
+     * framebuffer is the console from this line on, so a boot that fails
+     * is seen. x86-64 always has COM1 by now and never takes this. */
+    if (!console_any_sink())
+        fbcon_early_init();
     print_banner();
     char vb[96];
     verified_boot_line(vb, sizeof(vb), false);

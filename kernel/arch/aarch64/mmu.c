@@ -13,6 +13,8 @@
  * tables are not reclaimed on unmap (the same documented gap as x86).
  */
 
+#include <kernel/bootinfo.h>
+#include <kernel/acpi.h>
 #include <kernel/errno.h>
 #include <kernel/page.h>
 #include <kernel/panic.h>
@@ -245,7 +247,15 @@ int arch_mmu_map(struct arch_mmu_context *ctx, vaddr_t va, paddr_t pa, size_t le
         va += level_size[level];
         pa += level_size[level];
     }
+    /* The stores reach the table walker (DSB), and this CPU's later
+     * accesses translate through them (ISB): without the ISB the access
+     * that follows a new mapping in program order may still be walked
+     * against the old, invalid entry and fault. TCG never showed it; an
+     * Apple CPU under Parallels did, on the first read of a freshly
+     * mapped xHCI register page (docs/audit/2026-10-13-acpi-discovery-
+     * report.md). Linux pairs the two the same way for kernel mappings. */
     dsb_ishst();
+    isb();
     return 0;
 }
 
@@ -378,21 +388,40 @@ bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
 }
 
 /*
- * The early console and fw_cfg are reached through the direct map, which
- * the generic VMM builds for RAM only. Their pages are carried into the
- * kernel root before it is activated so output never stops (the
- * addresses are the virt defaults the early console already uses; a
- * console moved by the SPCR gets its own mapping from vm_map_phys).
+ * What the kernel reaches through the loader's direct map before it has
+ * mapped anything itself: the serial console the boot info names, the
+ * framebuffer (the early framebuffer console draws there when there is no
+ * serial one), and on QEMU fw_cfg. The generic VMM builds the direct map
+ * for RAM only, so these ranges are carried into the kernel root before
+ * it is activated and output never stops. No address here is assumed:
+ * each comes from the boot info or, for fw_cfg, from the firmware being
+ * QEMU's (docs/kernel/arch/aarch64/design.md, "Platform discovery").
  */
-static void map_early_devices(const struct arch_mmu_context *ctx)
+static void map_early_range(const struct arch_mmu_context *ctx, paddr_t pa, size_t len)
 {
     struct arch_mmu_context tmp = { .root = ctx->root };   /* the same root; the tables are what changes */
-    static const paddr_t pages[] = { VIRT_PL011_BASE, VIRT_FWCFG_BASE };
-    for (unsigned i = 0; i < 2; i++) {
-        vaddr_t va = (vaddr_t)(aarch64_hhdm_base + pages[i]);
+    const struct cosmoboot_info *info = bootinfo_get();
+    paddr_t lo = pa & ~(paddr_t)(PAGE_SIZE - 1);
+    paddr_t hi = (pa + len + PAGE_SIZE - 1) & ~(paddr_t)(PAGE_SIZE - 1);
+    for (paddr_t p = lo; p < hi && p < info->hhdm_size; p += PAGE_SIZE) {
+        vaddr_t va = (vaddr_t)(aarch64_hhdm_base + p);
         if (!arch_mmu_query(ctx, va, NULL, NULL, NULL, NULL))
-            (void)arch_mmu_map(&tmp, va, pages[i], PAGE_SIZE, VM_PROT_RW, VM_CACHE_UC, 0);
+            (void)arch_mmu_map(&tmp, va, p, PAGE_SIZE, VM_PROT_RW, VM_CACHE_UC, 0);
     }
+}
+
+static void map_early_devices(const struct arch_mmu_context *ctx)
+{
+    paddr_t base;
+    unsigned intid;
+    const char *kind;
+    if (aarch64_console_serial(&base, &intid, &kind))
+        map_early_range(ctx, base, PAGE_SIZE);
+    const struct bootinfo_framebuffer *fb = bootinfo_framebuffer();
+    if (fb != NULL)
+        map_early_range(ctx, fb->phys, fb->size);
+    if (acpi_platform_is_qemu())
+        map_early_range(ctx, VIRT_FWCFG_BASE, PAGE_SIZE);
 }
 
 static uint64_t g_activate_flushes[CONFIG_MAX_CPUS];

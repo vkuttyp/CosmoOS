@@ -513,6 +513,28 @@ tree.
   `handle.h` comment says every function is non-blocking but
   `handle_close` can block in the last put.
 
+- ~~AArch64 assumed QEMU virt's memory map before reading any table: the
+  loader's output after ExitBootServices and the kernel's first output
+  went to a PL011 at 0x09000000, and the GIC, timer, fw_cfg, PL031, SMMU
+  and semihosting exit fell back to virt's addresses anywhere. v1.0.0 did
+  not boot on Parallels Desktop.~~ **Closed by the platform-discovery
+  unit (v1.0.1, `docs/audit/2026-10-13-acpi-discovery-report.md`)**: boot
+  protocol v9 carries the SPCR/DBG2 console; virt's addresses are used on
+  QEMU's firmware alone.
+- Parallels Desktop on Apple Silicon (found by that unit): its SATA disks
+  are not on PCI (a platform AHCI described only in the DSDT would need an
+  AML interpreter); its NVMe controller offers MSI only and `nvme` requires
+  MSI-X; its network adapter is a legacy-only virtio-net and `virtio-pci`
+  is modern-only; it gives the guest no RNDR and no virtio-rng, so the
+  pool never seeds; no RTC is found. The debug self-test suite assumes
+  QEMU's machine (`pci` expects the host bridge at 00:00.0; `net-firewall`,
+  `net-tap-release-order`, `blk-submit-unregister` failed there).
+- AArch64: a firmware serial console at or above the loader's 4 GiB
+  direct map is not used (logged at input setup): the early console runs
+  on that map. Needs the loader to map the console page and
+  `map_early_devices` to carry it (found in review of PR #376; no machine
+  seen with one).
+
 ## 4. The quiesce report's remaining risks and debt
 
 The 2026-10-03 renewed lock-discipline audit found two defects in the

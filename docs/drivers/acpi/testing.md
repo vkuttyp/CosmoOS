@@ -31,8 +31,10 @@ Marker: `SELFTEST: acpi` (name padded to 16 columns) `... ok (N ms)`.
 - **Every boot**, debug or release: `acpi_init` panics without a valid
   RSDP, root table and MADT, and the interrupt controllers, SMP
   bring-up, PCI ECAM (`MCFG`), the IOMMU drivers (`DMAR`, `IORT`) and,
-  on AArch64, the timer (`GTDT`), console (`SPCR`) and PSCI conduit
-  (`FACP`) all depend on its output. The boot log carries one summary
+  on AArch64, the timer (`GTDT`) and PSCI conduit (`FACP`) all depend
+  on its output; `make test-platforms` checks on AArch64 that the
+  platform line identifies QEMU's firmware by its RSDP OEM id and takes
+  the timer PPIs from the GTDT. The boot log carries one summary
   line, for example
   `acpi: XSDT rev 2, 6 tables, LAPIC at 0xfee00000, 1 CPUs, 1 IOAPICs, 5 overrides`
   (from `docs/development.md`); `tests/boot/run_boot_test.py` does not

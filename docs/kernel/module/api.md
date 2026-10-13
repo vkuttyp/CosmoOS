@@ -95,7 +95,7 @@ removing or changing one bumps the version.
 
 | Area | Symbols |
 |---|---|
-| Logging | `klog`, `kvlog`, `kprintf`, `kvprintf`, `ksnprintf`, `kvsnprintf`, `panic` |
+| Logging | `klog`, `kvlog`, `kprintf`, `kvprintf`, `ksnprintf`, `kvsnprintf`, `klog_copy`, `panic` |
 | Heap | `kmalloc`, `kzalloc`, `krealloc`, `kfree`, `kmem_cache_create`, `kmem_cache_destroy`, `kmem_cache_alloc`, `kmem_cache_free` |
 | Strings | `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strchr`, `strstr`, `strlcpy` |
 | Locks | `spinlock_init`, `spin_lock`, `spin_lock_nested`, `spin_unlock`, `spin_trylock`, `spin_lock_irqsave`, `spin_lock_irqsave_nested`, `spin_unlock_irqrestore`, `mutex_init`, `mutex_lock`, `mutex_lock_nested`, `mutex_trylock`, `mutex_unlock` |

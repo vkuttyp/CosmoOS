@@ -5,7 +5,9 @@
 `console_register` prepends a `struct console_sink` to a singly linked
 list; `console_write` walks the list under the console spinlock and
 calls each sink's `write`. Since Phase 6 the list can change after boot:
-the `virtio_console` module registers a sink when it loads and
+the `virtio_console` module registers a sink when it loads (first
+writing the log ring's current contents to its port, `klog_copy`, so its
+log holds the whole boot, as the framebuffer console's replay does) and
 `console_unregister` unlinks it on unload under the console lock, so a
 concurrent writer never sees a half-removed list; registration prepends
 without the lock (a single pointer store, safe against readers).
@@ -41,6 +43,24 @@ with whichever line happened to be next. Older lines are not replayed,
 because scrolling them through an uncached framebuffer costs hundreds of
 megabytes of bus traffic to draw frames nobody sees, and `dmesg` has the
 whole ring either way.
+
+**With no serial console** the display is the console from the first
+line instead. `kernel_main` calls `fbcon_early_init` straight after
+`bootinfo_init` when `console_any_sink()` is false -- on AArch64 when the
+firmware names no serial port (boot protocol v9;
+`docs/boot/design.md`, "The serial console") or the command line says
+`serial=none`; x86-64 always has COM1 by then and never takes it. There
+is no heap and no `vm_map_phys` yet, so it draws through the loader's
+direct map at `bootinfo_phys_to_virt(fb->phys)` with a static text
+shadow of 65536 cells (`FBCON_EARLY_CELLS`; a larger mode uses its top
+rows), after the same refusals: no framebuffer, a range beyond
+`hhdm_size`, or one overlapping usable RAM. The mapping survives the
+kernel's takeover because the architecture carries that range into its
+own root (AArch64: `map_early_devices`, uncached, at the same direct-map
+address; `docs/kernel/arch/aarch64/design.md`, "MMU"), so the sink keeps
+drawing through it for the life of the boot: `fbcon_init` later sees the
+console ready and returns without mapping it again or replaying. A boot
+that fails before `vmm_init` is then visible on the screen.
 
 The face is 8x8 cells with 5x7 glyphs, drawn in the tree
 (`tools/mkfont.py` generates `kernel/core/font8x8.c` from glyph art in

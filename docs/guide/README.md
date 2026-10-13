@@ -19,6 +19,8 @@ the pages in order: each one continues where the one before it stopped.
 6. [Privileges](privileges.md): the privilege set, dropping privileges,
    and what an ssh session holds.
 7. [Known limitations](limitations.md).
+8. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
+   Apple Silicon.
 
 Commands for your computer are shown as plain blocks; commands typed on
 CosmoOS are shown after its prompt, `cosmo$ ` on the console and

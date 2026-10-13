@@ -60,10 +60,15 @@ and the module loader's per-section permissions.
 
 ## A7: The early device pages survive takeover
 
-Every kernel root activated by `arch_mmu_activate` contains the PL011 and
-fw_cfg pages at `hhdm_base + 0x09000000/0x09020000` as device memory
-(`map_early_devices`). **Checked by** any boot: console output after
-`vmm_init` proves it (the first port hung silently here).
+Every kernel root activated by `arch_mmu_activate` contains, as
+uncached memory at `hhdm_base + pa`, every page the kernel reached
+through the loader's direct map before it: the serial console page the
+boot info names, the framebuffer's range when there is one, and fw_cfg's
+page on QEMU's firmware (`map_early_devices`; each clipped to
+`hhdm_size`). **Checked by** any boot: console output after `vmm_init`
+proves it for the serial console (the first port hung silently here),
+and `make test-platforms`' `noserial` variant for the framebuffer (its
+`fbcon` line and the rest of the log reach the virtio console).
 
 ## A8: RAM and device memory never share an attribute
 
@@ -256,3 +261,30 @@ lock, and each vCPU's run thread places at its own entry. **Checked by**
 `el2-guest-gicd-isolated` (the host's bit, the second VM), `el2-guest-sgi`
 (routed to one vCPU and not another), `el2-guest-gicd-probe` (each vCPU
 finds its own frame by the MPIDR it reads).
+
+## A25: No device address is assumed outside QEMU's own firmware
+
+Every device address and interrupt the kernel drives comes from the boot
+info (the serial console, protocol v9) or an ACPI table (MADT, GTDT, FADT,
+MCFG, IORT). A `VIRT_*` constant (`include/aarch64/platform.h`) and the
+SMMU's `VIRT_SMMU_*_INTID` are used only when `acpi_platform_is_qemu()`
+(the RSDP's OEM id is `"BOCHS "`) and the table that should describe the
+device does not; fw_cfg, the PL031 RTC and the semihosting exit are
+touched only then. On any other firmware a missing GIC or GTDT
+description is a panic naming the table, a missing PSCI declaration means
+no secondary CPUs, and a missing serial record means no serial console
+(`design.md`, "Platform discovery"). **Checked by** `make
+test-platforms` (each variant's platform line names `(QEMU)` and the
+timer PPIs from the GTDT, and a `timer: GTDT absent|unusable` line fails
+it) and by review of every use `grep -rn VIRT_ kernel/arch/aarch64
+drivers/iommu` lists. The non-QEMU paths are not run in CI.
+
+## A26: A new mapping is followed by DSB and ISB
+
+`arch_mmu_map` ends with `dsb ishst` then `isb`: the table stores are
+visible to the walker, and this CPU's next access in program order is
+translated through them rather than against the old, invalid entry. An
+Apple CPU under Parallels Desktop faulted on the first read of a freshly
+mapped xHCI register page without the `isb` (4 of 6 boots); TCG never
+showed it. **Checked by review**: no QEMU configuration reproduces the
+fault, so no test fails without the `isb`.

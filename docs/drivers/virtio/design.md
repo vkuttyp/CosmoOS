@@ -174,8 +174,14 @@ alone (overwriting it would race the device for the bounce buffer) and
 the next write waits for it again, so a host that stalls under load
 loses a line instead of every line after it. Dropped bytes are counted
 and reported at removal. A single sink instance is allowed (`-EBUSY`
-for a second console device). Remove unregisters the sink, resets,
-frees.
+for a second console device). Before registering the sink, probe
+writes the log ring's current contents (`klog_copy` into a
+`KLOG_RING_SIZE` buffer from `kmalloc`, freed after; skipped if the
+allocation fails) to the port, so the virtio console's log is the whole
+boot, including the platform line and the console choice made before
+the module loaded; on a machine with no serial console it is the only
+record a test can read (`make test-platforms`, variant `noserial`).
+Remove unregisters the sink, resets, frees.
 In irreversible console panic mode, this sink returns before taking its
 device or queue locks. It cannot safely use the normal polled transport
 when an interrupted or stopped CPU may own those locks; fatal output

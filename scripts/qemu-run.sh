@@ -18,6 +18,10 @@
 #   QEMU_WRAP   a command QEMU is run through, word-split (for example
 #               `taskpolicy -b` on macOS to pin the whole process to the
 #               efficiency cores; docs/development.md, "Benchmark runs")
+#   QEMU_SERIAL the -serial backend (default stdio; `none` leaves the machine
+#               with no serial console attached: make test-platforms)
+#   QEMU_VIRT_OPTS  appended to AArch64's -machine virt options (for example
+#               `,highmem=off`; make test-platforms)
 #   OVMF_CODE   firmware image override
 #
 # The isa-debug-exit device lets the kernel terminate QEMU with an exit
@@ -254,7 +258,7 @@ if [ "$arch" = aarch64 ]; then
     el2_machine=""
     [ "${QEMU_EL2:-1}" != "0" ] && el2_machine=",virtualization=on"
     exec ${QEMU_WRAP:-} qemu-system-aarch64 \
-        -machine "virt,gic-version=${QEMU_GIC:-2}${gic_msi}${iommu_machine}${el2_machine},accel=${QEMU_ACCEL:-tcg}" \
+        -machine "virt,gic-version=${QEMU_GIC:-2}${gic_msi}${iommu_machine}${el2_machine}${QEMU_VIRT_OPTS:-},accel=${QEMU_ACCEL:-tcg}" \
         -cpu "${QEMU_CPU:-cortex-a72}" \
         -smp "${QEMU_SMP:-4}" \
         -m "${QEMU_MEM:-256M}" \
@@ -276,7 +280,7 @@ if [ "$arch" = aarch64 ]; then
         $fwcfg \
         $pcap \
         -semihosting-config enable=on,target=native \
-        -serial stdio \
+        -serial "${QEMU_SERIAL:-stdio}" \
         -display none \
         -monitor none \
         -no-reboot \
@@ -310,7 +314,7 @@ exec ${QEMU_WRAP:-} qemu-system-x86_64 \
     $fwcfg \
     $pcap \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    -serial stdio \
+    -serial "${QEMU_SERIAL:-stdio}" \
     -display none \
     -monitor none \
     -no-reboot \

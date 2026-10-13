@@ -94,8 +94,21 @@ found. The caller casts to the table's own layout and must bound every
 read by `hdr.length`. Linear scan of at most 64 entries.
 Callers: `drivers/pci/pci.c` (`MCFG`), `drivers/iommu/intel_vtd.c`
 (`DMAR`), `drivers/iommu/arm_smmuv3.c` (`IORT`),
-`kernel/arch/aarch64/timer.c` (`GTDT`), `pl011.c` (`SPCR`), `smp.c`
-(`FACP`).
+`kernel/arch/aarch64/timer.c` (`GTDT`), `smp.c` (`FACP`). The SPCR
+is read by the loader, not here (`docs/boot/design.md`, "The serial
+console").
+
+### `bool acpi_rsdp_oem(char out[7])` / `bool acpi_platform_is_qemu(void)`
+
+`acpi_rsdp_oem` copies the RSDP's six-byte OEM id, NUL terminated with
+trailing spaces kept, read with byte reads through the loader's direct
+map the first time it is called and cached; usable from `bootinfo_init`
+on, before `acpi_init`. False when there is no RSDP or its signature is
+wrong. `acpi_platform_is_qemu` is true when that id is `"BOCHS "`, the
+id QEMU builds its tables with: the one firmware on which the AArch64
+kernel may use `virt`'s fixed addresses for a device the tables leave
+out (`docs/kernel/arch/aarch64/design.md`, "Platform discovery").
+Neither sleeps, allocates nor takes a lock.
 
 ### `paddr_t acpi_madt_lapic_base(void)`
 The local APIC physical base: MADT `lapic_address`, or the 64-bit

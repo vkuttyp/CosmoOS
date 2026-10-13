@@ -7,6 +7,7 @@
  * x86 port-based version.
  */
 
+#include <kernel/acpi.h>
 #include <kernel/errno.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
@@ -55,8 +56,14 @@ static void skip_bytes(size_t len)
         (void)*data;
 }
 
+/* fw_cfg is QEMU's device, at virt's fixed address: probed only when the
+ * firmware is QEMU's. Anywhere else there is no fw_cfg, and every
+ * opt/cosmo/ key reads as unset (docs/kernel/arch/aarch64/design.md,
+ * "Platform discovery"). */
 static bool present(void)
 {
+    if (!acpi_platform_is_qemu())
+        return false;
     char sig[4];
     select_key(FW_CFG_SIGNATURE);
     read_bytes(sig, 4);

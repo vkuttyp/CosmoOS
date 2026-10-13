@@ -15,6 +15,7 @@
 #include <kernel/iommu.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
+#include <kernel/pci_bar.h>
 #include <kernel/printf.h>
 #include <kernel/string.h>
 #include <kernel/vmm.h>
@@ -252,7 +253,7 @@ static void decode_bars(struct pci_device *p)
                 m |= 0xffffffff00000000ULL;
             }
             b->base = base;
-            b->size = ~m + 1;
+            b->size = pci_bar_mem_size(m);   /* the mask's lowest set bit */
         }
         if (b->size)
             device_add_resource(&p->dev, b->io ? RES_IO : RES_MMIO, b->base, b->size, i);

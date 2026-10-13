@@ -6,7 +6,15 @@ follows constitution section 52.
 
 ## Protocol (`boot/protocol/cosmoboot.h`)
 
-**ABI stability: stable.** Version 8 adds verified boot
+**ABI stability: stable.** Version 9 adds the serial console the
+firmware names (`console_type`, `console_gsiv`, `console_base`,
+`console_access`, `console_flags`, `console_stride`) and grows the structure; a loader
+that finds no port writes them zero (`COSMOBOOT_CONSOLE_NONE`). The
+`console_type` values are `COSMOBOOT_CONSOLE_NONE` 0,
+`COSMOBOOT_CONSOLE_PL011` 1, `COSMOBOOT_CONSOLE_16550_MMIO` 2 and
+`COSMOBOOT_CONSOLE_16550_PORT` 3; `console_flags` has
+`COSMOBOOT_CONSOLE_FROM_DBG2` 1 (design.md, "The serial console").
+Version 8 added verified boot
 (`verify_flags` with `COSMOBOOT_VERIFIED`, `reserved3`,
 `verify_key_id[COSMOBOOT_KEY_ID_SIZE]`) and grows the structure; a
 `VERIFY_BOOT=0` loader writes them zero. Version 7 added the command line
@@ -28,7 +36,7 @@ Additions use `reserved1` and bump the version. Field meanings are in
 
 Constants a loader must honour: `COSMOBOOT_MAGIC`, `COSMOBOOT_VERSION`,
 `COSMOBOOT_NOTE_NAME`/`COSMOBOOT_NOTE_TYPE`, the `COSMOBOOT_MEM_*`,
-`COSMOBOOT_ARCH_*`, `COSMOBOOT_FIRMWARE_*` values, and
+`COSMOBOOT_ARCH_*`, `COSMOBOOT_FIRMWARE_*`, `COSMOBOOT_CONSOLE_*` values, and
 `COSMOBOOT_LOADER_NAME_MAX` (32, NUL included).
 
 Entry-state obligations for a loader (all architectures): boot services
@@ -145,7 +153,8 @@ failure `die()` returns `EFI_LOAD_ERROR`-class statuses to the firmware.
 
 ### `void console_init(void)`, `void console_firmware_gone(void)`
 
-Probe COM1 and record whether `ConOut` exists; after
+Probe the serial port (`arch_serial_init`: COM1 on x86-64, nothing on
+AArch64) and record whether `ConOut` exists; after
 `console_firmware_gone()` output goes to the UART only. Neither allocates.
 
 ### `void lputs(const char *)`, `void lprintf(const char *fmt, ...)`
@@ -243,10 +252,22 @@ with `RDI = info`. AArch64: mask DAIF, program `MAIR_EL1`, `TCR_EL1`,
 set `sp`, zero `x29`/`x30`, `br entry` with `x0 = info`. Must be called
 only after ExitBootServices and `cpu_finish`.
 
-### `void arch_serial_init(void)`, `bool arch_serial_present(void)`, `void arch_serial_putc(char)`
+### `void acpi_scan(struct cosmoboot_info *info)`, `void acpi_report(void)` (`acpi.c`)
+
+`acpi_scan` walks the tables from `info->acpi_rsdp`, prints the OEM id
+and table signatures, and records the SPCR's serial port (else the
+DBG2's) in `info->console_*`; it must run while boot services are up.
+`acpi_report` runs after `ExitBootServices` and prints what the MADT,
+MCFG, GTDT and FADT say; it prints nothing when `acpi_scan` found no
+tables. Neither allocates (design.md, "The serial console").
+
+### `void arch_serial_init(void)`, `void arch_serial_configure(const struct cosmoboot_info *info)`, `bool arch_serial_present(void)`, `void arch_serial_putc(char)`
 
 The loader's own serial output after the firmware console is gone: COM1
-(probed) on x86-64, the PL011 at 0x09000000 (assumed present) on AArch64.
+(probed) on x86-64, where `arch_serial_configure` does nothing; on
+AArch64 the port `acpi_scan` recorded (`COSMOBOOT_CONSOLE_PL011` or
+`16550_MMIO` at `console_base`), set by `arch_serial_configure`, and no
+output at all when there is none (`arch_serial_present` false).
 
 ### `LOADER_ELF_MACHINE`, `LOADER_ELF_MACHINE_NAME`, `COSMOBOOT_ARCH_NATIVE`
 

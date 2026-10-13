@@ -28,6 +28,31 @@ virtual and physical placement, the page-table pool usage, `NX on|unsupported`,
 and the full translated memory map. These are not asserted but are in
 `out/<arch>-<build>/boot-test.log` for inspection.
 
+On AArch64 the markers after `ExitBootServices` (`jumping to kernel
+entry` onwards) reach the harness only through the serial port the
+firmware's SPCR names (QEMU virt's PL011, recorded by `acpi_scan`;
+design.md, "The serial console"), so every AArch64 boot also checks that
+the record is right. The log holds the loader's `acpi:` lines: the OEM
+and table list and the `SPCR:` verdict before `ExitBootServices`, the
+MADT, MCFG, GTDT and FADT summary after it.
+
+## Firmware discovery: `make test-platforms` (AArch64)
+
+```sh
+make ARCH=aarch64 test-platforms
+```
+
+`tests/boot/platform_test.py` boots the image under six QEMU
+configurations (`gicv2`, `gicv3`, `lowmem`, `rndr`, `nornd`, `noserial`)
+and requires each to reach the userland and print the kernel's platform
+line. On the boot side it checks that the serial console came from the
+SPCR (`console PL011 at 0x9000000 (SPCR, IRQ 33)` in every serial
+variant), and in `noserial` (`QEMU_SERIAL=none`, the command line
+`root=boot-disk serial=none` written into the image copy, which is then
+re-signed with the build's key, `--key`) that a boot with no serial
+console still reaches the userland, read through the virtio console.
+Details are in `docs/kernel/arch/aarch64/testing.md`. A no-op on x86-64.
+
 ## In-kernel self-test `bootinfo` (`kernel/core/selftest.c`)
 
 Runs in debug builds after the banner and checks properties
@@ -154,3 +179,6 @@ BOOT` (`run_boot_test.py`), so CI boots only verified images.
 - Real hardware and Parallels. QEMU/OVMF is the defined test platform;
   a hardware boot is a later milestone and will be a manual test until a
   serial-capture rig exists.
+- An SPCR naming a 16550, and the DBG2 fallback: QEMU's SPCR always
+  names its PL011, so only `COSMOBOOT_CONSOLE_PL011` from the SPCR runs
+  in CI. The DBG2 path has run only on Parallels Desktop 27 by hand.

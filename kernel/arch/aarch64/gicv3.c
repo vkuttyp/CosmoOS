@@ -258,7 +258,9 @@ static void gicv3_init_cpu(void);
 
 static void gicv3_init(const struct acpi_gic *acpi)
 {
-    g_gicd_pa = acpi->gicd_base ? acpi->gicd_base : VIRT_GICD_BASE;
+    if (acpi->gicd_base == 0 && !acpi_platform_is_qemu())
+        panic("gic: the MADT gives no GICD base for a GICv3, and this firmware is not QEMU's");
+    g_gicd_pa = acpi->gicd_base ? acpi->gicd_base : VIRT_GICD_BASE;   /* QEMU only, checked above */
     g_gicd = (volatile uint32_t *)map(g_gicd_pa, 0x10000, "GICD");
 
     /* Firmware describes the redistributors either as one window to walk
