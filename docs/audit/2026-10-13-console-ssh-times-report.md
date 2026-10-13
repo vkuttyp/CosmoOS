@@ -11,8 +11,8 @@ the roadmap's M1–M6 are done (v1.0.0).
 |---|---|---|
 | console face | an 8x16 face drawn in-tree (`tools/mkfont.py`, glyphs 7 wide in rows 2–14) replaces the 5x7 glyphs in 8x8 cells | `kernel/core/font8x16.c`, `kernel/include/kernel/font.h` |
 | console scale | the face one-to-one up to 1920x1080 (Parallels' 1024x768: 128x48 cells, the owner's choice), scaled only above | `kernel/core/fbcon.c` |
-| console scroll | a scroll moves a quarter of the screen; 32-bit pixels are written as rows (a scroll 13.4 → 6.6 ms on x86-64) | `kernel/core/fbcon.c` |
-| display mode | the loader reads the EDID and sets the preferred mode when the firmware offers it, and reports what it saw on serial (Parallels offers one mode and no EDID) | `boot/uefi/display.c` |
+| console scroll | a scroll moves a quarter of the screen; 32-bit pixels are written as rows. Measured by the console benchmark (`docs/kernel/diagnostics/testing.md`), x86-64 at 1280x800: a whole-screen repaint 10.6 ms with the 8x8 face, 11.3 ms with the 8x16 one, so 1.17 → 1.41 ms a line amortised | `kernel/core/fbcon.c` |
+| display mode | the loader reads the EDID of the output it sets a mode on (the same GOP handle the framebuffer handoff uses) and sets the preferred mode when the firmware offers it, and reports what it saw on serial. Neither QEMU firmware nor Parallels offers an EDID, so no tested platform changes mode | `boot/uefi/display.c`, `boot/uefi/main.c` |
 | ssh | RSA user keys with rsa-sha2-256/512 (`DROPBEAR_RSA 1`, `DROPBEAR_RSA_SHA1 0`); the service still names only its Ed25519 host key | `ports/dropbear/localoptions.h` |
 | file times | `vfs_now_ns` returns `clock_realtime_ns`, not `clock_now_ns` | `kernel-services/vfs/vfs.c` |
 

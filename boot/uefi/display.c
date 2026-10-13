@@ -74,12 +74,41 @@ static bool edid_preferred(const uint8_t *e, uint32_t len, uint32_t *w, uint32_t
     return *w != 0 && *h != 0;
 }
 
-static bool find_edid(uint32_t *w, uint32_t *h)
+/* The Graphics Output Protocol the loader sets a mode on and hands over:
+ * the first handle carrying one with a mode, and that handle in *handle,
+ * so the EDID read is the same output's. Both display_choose_mode and the
+ * framebuffer handoff take it from here, so they agree when the firmware
+ * has more than one display. NULL when there is none. */
+EFI_GRAPHICS_OUTPUT_PROTOCOL *display_gop(EFI_HANDLE *handle)
+{
+    EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    EFI_HANDLE *handles = NULL;
+    UINTN count = 0;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *found = NULL;
+    *handle = NULL;
+    if (EFI_ERROR(g_bs->LocateHandleBuffer(ByProtocol, &gop_guid, NULL, &count, &handles)) || handles == NULL)
+        return NULL;
+    for (UINTN i = 0; i < count && found == NULL; i++) {
+        EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
+        if (!EFI_ERROR(g_bs->HandleProtocol(handles[i], &gop_guid, (void **)&gop)) && gop != NULL &&
+            gop->Mode != NULL && gop->Mode->Info != NULL) {
+            found = gop;
+            *handle = handles[i];
+        }
+    }
+    g_bs->FreePool(handles);
+    return found;
+}
+
+/* The EDID of the output on `handle`, active (what the output was set up
+ * with) before discovered (what the display reported). An EDID on another
+ * handle describes another output, and is not looked at. */
+static bool find_edid(EFI_HANDLE handle, uint32_t *w, uint32_t *h)
 {
     EFI_GUID guids[2] = { EFI_EDID_ACTIVE_PROTOCOL_GUID, EFI_EDID_DISCOVERED_PROTOCOL_GUID };
     for (unsigned i = 0; i < 2; i++) {
         EFI_EDID_PROTOCOL *edid = NULL;
-        if (!EFI_ERROR(g_bs->LocateProtocol(&guids[i], NULL, (void **)&edid)) && edid != NULL &&
+        if (!EFI_ERROR(g_bs->HandleProtocol(handle, &guids[i], (void **)&edid)) && edid != NULL &&
             edid_preferred(edid->Edid, edid->SizeOfEdid, w, h))
             return true;
     }
@@ -88,14 +117,13 @@ static bool find_edid(uint32_t *w, uint32_t *h)
 
 void display_choose_mode(void)
 {
-    EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
-    if (EFI_ERROR(g_bs->LocateProtocol(&gop_guid, NULL, (void **)&gop)) || gop == NULL || gop->Mode == NULL ||
-        gop->Mode->Info == NULL || gop->QueryMode == NULL || gop->SetMode == NULL)
+    EFI_HANDLE handle;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = display_gop(&handle);
+    if (gop == NULL || gop->QueryMode == NULL || gop->SetMode == NULL)
         return;
     uint32_t cur_w = gop->Mode->Info->HorizontalResolution, cur_h = gop->Mode->Info->VerticalResolution;
     uint32_t want_w = 0, want_h = 0;
-    bool have_edid = find_edid(&want_w, &want_h);
+    bool have_edid = find_edid(handle, &want_w, &want_h);
 
     /* Every mode the firmware offers, for the record; the preferred one, if
      * it is there with a linear framebuffer. */

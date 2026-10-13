@@ -184,11 +184,9 @@ static void mask_to_field(uint32_t mask, uint8_t *shift, uint8_t *bits)
  */
 static void find_framebuffer(struct cosmoboot_info *info)
 {
-    EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
-
-    EFI_STATUS st = g_bs->LocateProtocol(&gop_guid, NULL, (void **)&gop);
-    if (EFI_ERROR(st) || gop == NULL || gop->Mode == NULL || gop->Mode->Info == NULL) {
+    EFI_HANDLE handle;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = display_gop(&handle);   /* the one display_choose_mode set */
+    if (gop == NULL) {
         lputs("framebuffer: no graphics output protocol; serial console only\n");
         return;
     }

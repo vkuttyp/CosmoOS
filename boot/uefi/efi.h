@@ -148,6 +148,9 @@ typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(EFI_HANDLE ImageHandle, UINT
 typedef EFI_STATUS (EFIAPI *EFI_STALL)(UINTN Microseconds);
 typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER)(UINTN Timeout, uint64_t WatchdogCode, UINTN DataSize, CHAR16 *WatchdogData);
 typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(EFI_GUID *Protocol, void *Registration, void **Interface);
+typedef enum { AllHandles, ByRegisterNotify, ByProtocol } EFI_LOCATE_SEARCH_TYPE;
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_HANDLE_BUFFER)(EFI_LOCATE_SEARCH_TYPE SearchType, EFI_GUID *Protocol,
+                                                     void *SearchKey, UINTN *NoHandles, EFI_HANDLE **Buffer);
 typedef EFI_STATUS (EFIAPI *EFI_IMAGE_EXIT)(EFI_HANDLE ImageHandle, EFI_STATUS ExitStatus, UINTN ExitDataSize, CHAR16 *ExitData);
 
 typedef struct {
@@ -197,7 +200,7 @@ typedef struct {
     void *OpenProtocolInformation;
 
     void *ProtocolsPerHandle;
-    void *LocateHandleBuffer;
+    EFI_LOCATE_HANDLE_BUFFER LocateHandleBuffer;
     EFI_LOCATE_PROTOCOL LocateProtocol;
     void *InstallMultipleProtocolInterfaces;
     void *UninstallMultipleProtocolInterfaces;

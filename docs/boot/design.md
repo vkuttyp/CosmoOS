@@ -237,10 +237,13 @@ serial console the framebuffer is the console from the first line
 ## The display mode
 
 `display_choose_mode` (`boot/uefi/display.c`), before the framebuffer is
-read for the boot info: the display's preferred mode is the first
-detailed timing of its EDID (`EFI_EDID_ACTIVE_PROTOCOL`, else
-`EFI_EDID_DISCOVERED_PROTOCOL`; the block's header and checksum are
-checked). When the firmware offers that resolution with a linear
+read for the boot info. Both take the Graphics Output Protocol from
+`display_gop`: the first handle carrying one with a mode. The display's
+preferred mode is the first detailed timing of the EDID on that same
+handle (`EFI_EDID_ACTIVE_PROTOCOL`, else `EFI_EDID_DISCOVERED_PROTOCOL`;
+the block's header and checksum are checked); an EDID on another handle
+describes another output and is not read, so with two displays the mode
+set and the framebuffer handed over are the same output's. When the firmware offers that resolution with a linear
 framebuffer the loader sets it with `SetMode`; with no EDID, a mode the
 firmware does not offer or a failed `SetMode`, the firmware's mode stays,
 as before this was written. After `ExitBootServices` the serial port gets
