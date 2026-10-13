@@ -63,7 +63,7 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 - IPv6 is link-local; there is no IPv6 routing beyond the link, no IP
   fragmentation, and no TCP SACK, window scaling or timestamps
   (inventory 2.5).
-- ssh is dropbear with **Ed25519 keys only, key login only, root only**;
+- ssh is dropbear with **key login only (Ed25519 or RSA), root only**;
   no scp, sftp or port forwarding ([ssh](ssh.md)).
 
 ## Storage

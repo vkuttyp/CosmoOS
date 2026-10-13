@@ -25,7 +25,8 @@ port 22 forwarded to a host port:
 
   d. The host's OpenSSH client logs in as root with a key made for this
      run (its public half typed into /root/.ssh/authorized_keys at the
-     console), runs `uname -a; echo ok`; then a session with a PTY
+     console), runs `uname -a; echo ok`, and logs in with an RSA key
+     (3072 bits) put there beside it; then a session with a PTY
      (ssh -tt, under a host pty of a known size) where `tty` names
      /dev/pts/N, `stty size` is the client's window, and job control works
      (sleep 100 &, jobs, kill %1, wait).
@@ -123,16 +124,17 @@ def free_port():
     return port
 
 
-def ssh_base(work, port, strict):
-    return ["ssh", "-i", os.path.join(work, "id_ed25519"), "-p", str(port), "-o", "IdentitiesOnly=yes",
+def ssh_base(work, port, strict, key="id_ed25519"):
+    return ["ssh", "-i", os.path.join(work, key), "-p", str(port), "-o", "IdentitiesOnly=yes",
             "-o", "BatchMode=yes", "-o", "UserKnownHostsFile=" + os.path.join(work, "known_hosts"),
             "-o", "StrictHostKeyChecking=" + ("yes" if strict else "accept-new"), "-o", "ConnectTimeout=20",
             "-o", "LogLevel=ERROR", "root@127.0.0.1"]
 
 
-def ssh_run(work, port, strict, command, timeout=60):
+def ssh_run(work, port, strict, command, timeout=60, key="id_ed25519"):
     """`command` over ssh; (exit status, output)."""
-    p = subprocess.run(ssh_base(work, port, strict) + [command], capture_output=True, text=True, timeout=timeout)
+    p = subprocess.run(ssh_base(work, port, strict, key) + [command], capture_output=True, text=True,
+                       timeout=timeout)
     return p.returncode, p.stdout + p.stderr
 
 
@@ -210,19 +212,30 @@ def _pty_session(p, master, lines, marker, timeout):
 def stage_ssh(args, results, b, port):
     work = args.workdir
     key = os.path.join(work, "id_ed25519")
-    for f in (key, key + ".pub", os.path.join(work, "known_hosts")):
+    rsa = os.path.join(work, "id_rsa")
+    for f in (key, key + ".pub", rsa, rsa + ".pub", os.path.join(work, "known_hosts")):
         if os.path.exists(f):
             os.unlink(f)
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "net-login-test", "-f", key], check=True)
+    # An RSA key too, as most people already have one (id_rsa.pub): the
+    # server takes rsa-sha2-256/512 signatures for logins, not SHA-1.
+    subprocess.run(["ssh-keygen", "-q", "-t", "rsa", "-b", "3072", "-N", "", "-C", "net-login-test-rsa", "-f", rsa],
+                   check=True)
     pub = open(key + ".pub").read().strip()
-    out = b.run(f"echo '{pub}' > /root/.ssh/authorized_keys && cat /root/.ssh/authorized_keys | wc -l")
-    need(out, r"^1$", "root's authorized_keys")
+    rsa_pub = open(rsa + ".pub").read().strip()
+    out = b.run(f"echo '{pub}' > /root/.ssh/authorized_keys && echo '{rsa_pub}' >> /root/.ssh/authorized_keys && "
+                "cat /root/.ssh/authorized_keys | wc -l")
+    need(out, r"^2$", "root's authorized_keys")
     waited = ssh_wait(work, port, strict=False)
     rc, out = ssh_run(work, port, True, "uname -a; echo ok")
     if rc != 0 or not re.search(r"^ok$", out, re.M) or not re.search(r"^Linux \S+ ", out, re.M):
         raise Fail(f"ssh: uname -a; echo ok: status {rc}, output {out!r}")
     uname = re.search(r"^Linux .*$", out, re.M).group(0)
     results.append(f"d. ssh: key login as root ({waited:.1f}s to the first login): {uname!r}, ok")
+    rc, out = ssh_run(work, port, True, "echo rsa-ok", key="id_rsa")
+    if rc != 0 or not re.search(r"^rsa-ok$", out, re.M):
+        raise Fail(f"ssh with an RSA key: status {rc}, output {out!r}")
+    results.append("d. ssh: an RSA key (3072 bits) logs in too")
     # Roadmap M5: the server's service holds net and cred alone, so a root
     # session over ssh has those two and cannot mount.
     rc, out = ssh_run(work, port, True, "/sbin/priv; /sbin/mount none /tmp ramfs; echo mount=$?")

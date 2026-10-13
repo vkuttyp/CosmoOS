@@ -4,11 +4,13 @@
  * before the build; each line overrides src/default_options.h.
  *
  * Public-key authentication only: password authentication is compiled
- * out, not merely refused. One key type, Ed25519, for the host key --
- * generated at the installed system's first boot (dropbearkey, from the
- * seeded pool), the one OpenSSH clients prefer -- and for the keys users
- * log in with: the RSA and ECDSA switches below govern both, so a key in
- * authorized_keys must be an ssh-ed25519 one. What an ssh login needs and nothing
+ * out, not merely refused. The host key is Ed25519 -- generated at the
+ * installed system's first boot (dropbearkey, from the seeded pool), the
+ * one OpenSSH clients prefer, and the only one the service names (-r).
+ * Users log in with Ed25519 or RSA keys: RSA is on so that an existing
+ * ~/.ssh/id_rsa.pub works (the owner's request, 2026-10-13), with
+ * rsa-sha2-256/512 signatures only (DROPBEAR_RSA_SHA1 stays 0). The switch
+ * also builds RSA host-key support, which the service does not use. What an ssh login needs and nothing
  * else: no forwarding of any kind, no sftp server (scp/sftp are outside
  * M4), no X11, no MOTD, no inetd mode.
  */
@@ -17,7 +19,8 @@
 #define DROPBEAR_SVR_PUBKEY_AUTH 1
 #define DROPBEAR_SVR_PUBKEY_OPTIONS 1
 
-#define DROPBEAR_RSA 0
+#define DROPBEAR_RSA 1
+#define DROPBEAR_RSA_SHA1 0
 #define DROPBEAR_DSS 0
 #define DROPBEAR_ECDSA 0
 #define DROPBEAR_ED25519 1

@@ -39,6 +39,23 @@ disk disconnected) the VM boots the installed system. The network
 adapter's default, shared networking, gives it an address by DHCP; ssh
 listens on port 22 of that address.
 
+**ssh from the Mac.** Parallels' shared network puts the Mac at
+10.211.55.2 and the VM at the address its boot log names (`eth0: bound
+10.211.55.N/24 ...`); there is no port forwarding to set up. On the
+installed system, put your public key (an existing `~/.ssh/id_rsa.pub`
+or an Ed25519 one) in root's `authorized_keys` by serving it from the
+Mac -- `python3 -m http.server 8000 --bind 10.211.55.2` in `~/.ssh` --
+and fetching it at the VM's prompt:
+
+```text
+mkdir -p /root/.ssh
+wget -q -O /root/.ssh/authorized_keys http://10.211.55.2:8000/id_rsa.pub
+chmod 600 /root/.ssh/authorized_keys
+```
+
+then `ssh root@10.211.55.N` from the Mac. (A `text` block: the guide's
+tests cannot run Parallels.)
+
 Clicking into the VM's window gives it the keyboard and the pointer, and
 they stay there: **press Control+Option to get them back**. That is
 Parallels' behaviour for a guest without Parallels Tools, which CosmoOS
