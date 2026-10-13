@@ -23,7 +23,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SUBJECT = "vfs: stamp files with the wall clock, not the time since boot"
 SOURCE = "kernel-services/vfs/vfs.c"
-OLD_LINE = "LINUXTEST: FAIL later.st_mtime >= rt.tv_sec - 5"
+OLD_LINE = "LINUXTEST: FAIL later.st_mtime >= rt0.tv_sec - 1"
 
 
 def main():

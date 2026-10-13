@@ -2910,7 +2910,7 @@ See the [history index](README.md).
   `fb-console` checks the scaled pixels.
 - **After 1.0: RSA login keys and wall-clock file times (2026-10-13,
   v1.0.2).** Found by the owner over ssh on Parallels Desktop. dropbear
-  takes RSA user keys (`DROPBEAR_RSA`, SHA-2 signatures only), so an
+  takes RSA user keys (`DROPBEAR_RSA`, `rsa-sha2-256` signatures only), so an
   existing `~/.ssh/id_rsa.pub` logs in; the host key stays Ed25519, and
   `test-net-login` logs in with a 3072-bit RSA key too. `vfs_now_ns` is the
   wall clock: every new file had been dated 1970 plus the uptime. `lxtest`

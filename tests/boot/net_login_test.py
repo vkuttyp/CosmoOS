@@ -218,7 +218,7 @@ def stage_ssh(args, results, b, port):
             os.unlink(f)
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "net-login-test", "-f", key], check=True)
     # An RSA key too, as most people already have one (id_rsa.pub): the
-    # server takes rsa-sha2-256/512 signatures for logins, not SHA-1.
+    # server takes rsa-sha2-256 signatures for logins (dropbear has no rsa-sha2-512), not SHA-1.
     subprocess.run(["ssh-keygen", "-q", "-t", "rsa", "-b", "3072", "-N", "", "-C", "net-login-test-rsa", "-f", rsa],
                    check=True)
     pub = open(key + ".pub").read().strip()

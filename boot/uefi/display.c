@@ -10,6 +10,7 @@
  * loader sets it. Otherwise the current mode stays, as before.
  */
 
+#include "display_pick.h"
 #include "loader.h"
 
 /* What was found, for display_report after ExitBootServices: the lines
@@ -51,27 +52,6 @@ void display_report(void)
 {
     if (g_report_len)
         lprintf("display: %s\n", g_report);
-}
-
-/* The first detailed timing descriptor (EDID 1.3/1.4, bytes 54-71):
- * horizontal active pixels in bytes 56 and the high nibble of 58, vertical
- * in 59 and the high nibble of 61. False without a valid EDID or timing. */
-static bool edid_preferred(const uint8_t *e, uint32_t len, uint32_t *w, uint32_t *h)
-{
-    static const uint8_t magic[8] = { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
-    if (e == NULL || len < 128 || memcmp(e, magic, sizeof(magic)) != 0)
-        return false;
-    uint8_t sum = 0;
-    for (unsigned i = 0; i < 128; i++)
-        sum = (uint8_t)(sum + e[i]);
-    if (sum != 0)
-        return false;
-    const uint8_t *d = e + 54;
-    if (d[0] == 0 && d[1] == 0)
-        return false;   /* not a timing: a display descriptor */
-    *w = d[2] | ((uint32_t)(d[4] >> 4) << 8);
-    *h = d[5] | ((uint32_t)(d[7] >> 4) << 8);
-    return *w != 0 && *h != 0;
 }
 
 /* The Graphics Output Protocol the loader sets a mode on and hands over:
@@ -121,6 +101,7 @@ void display_choose_mode(void)
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = display_gop(&handle);
     if (gop == NULL || gop->QueryMode == NULL || gop->SetMode == NULL)
         return;
+    uint32_t cur_mode = gop->Mode->Mode;
     uint32_t cur_w = gop->Mode->Info->HorizontalResolution, cur_h = gop->Mode->Info->VerticalResolution;
     uint32_t want_w = 0, want_h = 0;
     bool have_edid = find_edid(handle, &want_w, &want_h);
@@ -139,8 +120,9 @@ void display_choose_mode(void)
         lprintf("%s %ux%u%s", m == 0 ? ":" : ",", w, h, linear ? "" : " (blt only)");
         note(m == 0 ? "modes " : " ");
         note_mode(w, h);
-        if (have_edid && linear && w == want_w && h == want_h && pick == UINT32_MAX)
-            pick = m;
+        const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *one[1] = { info };
+        if (have_edid && pick == UINT32_MAX && display_pick(one, 1, want_w, want_h) == 0)
+            pick = m;   /* the first offered whose pixels the handoff can describe */
         g_bs->FreePool(info);
     }
     lputs("\n");
@@ -171,6 +153,20 @@ void display_choose_mode(void)
         note(": SetMode failed, kept");
         lprintf("display: setting %ux%u failed (0x%llx); the firmware's mode stays\n", want_w, want_h,
                 (unsigned long long)st);
+        return;
+    }
+    /* What the handoff will check (find_framebuffer): a mode whose memory
+     * the firmware does not describe big enough is no use to the kernel,
+     * so the firmware's mode is put back rather than handing over none. */
+    struct display_format f;
+    const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = gop->Mode->Info;
+    uint64_t per_line = mi && mi->PixelsPerScanLine ? mi->PixelsPerScanLine : want_w;
+    if (mi == NULL || !display_format(mi, &f) || gop->Mode->FrameBufferBase == 0 ||
+        per_line * (f.bpp / 8) * mi->VerticalResolution > gop->Mode->FrameBufferSize) {
+        gop->SetMode(gop, cur_mode);
+        note(": unusable once set, restored");
+        lprintf("display: %ux%u set but its framebuffer is unusable; back to %ux%u\n", want_w, want_h, cur_w,
+                cur_h);
         return;
     }
     note(": set");

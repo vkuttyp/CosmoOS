@@ -300,9 +300,6 @@ static bool overlaps_usable_ram(uint64_t pa, uint64_t len)
     return false;
 }
 
-/* Fill in the console over an already-mapped framebuffer at `base`, with
- * `text` (cols * rows cells) as its character buffer. False, with a
- * warning, when the mode cannot hold one cell. */
 /*
  * How many screen pixels a font pixel is, each way. The face is 8x16, the
  * size of a PC or Linux text console, and is drawn one-to-one up to
@@ -316,6 +313,9 @@ static uint32_t fbcon_scale(uint32_t width, uint32_t height)
     return s < 1 ? 1 : s > FBCON_SCALE_MAX ? FBCON_SCALE_MAX : s;
 }
 
+/* Fill in the console over an already-mapped framebuffer at `base`, with
+ * `text` (cols * rows cells) as its character buffer. False, with a
+ * warning, when the mode cannot hold one cell. */
 static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, volatile uint8_t *base)
 {
     c->base = base;

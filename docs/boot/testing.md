@@ -165,6 +165,22 @@ The files are changed through mtools at the ESP's offset
 test also requires the `verified boot` lines and forbids `UNVERIFIED
 BOOT` (`run_boot_test.py`), so CI boots only verified images.
 
+## The display mode: host test `test_display`
+
+`tests/host/test_display.c` (`make host-test`) runs the loader's display
+mode decisions (`boot/uefi/display_pick.c`) natively under ASan/UBSan,
+because no firmware the boots use offers an EDID (QEMU's OVMF and AAVMF,
+Parallels Desktop 27): an EDID 1.3 or 1.4 block's first timing is read,
+1.0-1.2's only with the preferred-timing feature bit; a short block, a
+bad header or checksum, EDID 2.0, a display descriptor in the timing's
+place and a zero size are refused. Pixel layouts: both 8-bit orders and a
+5:6:5 bit mask are decoded, a mask with a hole or a missing channel and
+`PixelBltOnly` refused. The pick is the first offered mode of the wanted
+size that the framebuffer handoff can describe: blt-only and broken-mask
+modes ahead of it are passed over. The firmware calls around them
+(`display_gop`, `SetMode`, putting the firmware's mode back when the new
+one's memory does not fit) run only on firmware with an EDID.
+
 ## Not yet tested
 
 - Host-side fuzzing of `elf_load()` and `parse_notes()` with malformed
@@ -176,6 +192,8 @@ BOOT` (`run_boot_test.py`), so CI boots only verified images.
 - Machines with more than 4 GiB of RAM (QEMU runs use 256 MiB). The
   loader is expected to work, with the memory above 4 GiB reported in
   the map but not mapped.
+- Setting a mode from an EDID on a running firmware: none of the tested
+  ones offers an EDID, so every boot logs `no EDID: kept`.
 - Real hardware and Parallels. QEMU/OVMF is the defined test platform;
   a hardware boot is a later milestone and will be a manual test until a
   serial-capture rig exists.

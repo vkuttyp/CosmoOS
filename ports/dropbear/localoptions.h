@@ -9,8 +9,9 @@
  * one OpenSSH clients prefer, and the only one the service names (-r).
  * Users log in with Ed25519 or RSA keys: RSA is on so that an existing
  * ~/.ssh/id_rsa.pub works (the owner's request, 2026-10-13), with
- * rsa-sha2-256/512 signatures only (DROPBEAR_RSA_SHA1 stays 0). The switch
- * also builds RSA host-key support, which the service does not use. What an ssh login needs and nothing
+ * rsa-sha2-256 signatures only (DROPBEAR_RSA_SHA1 stays 0; dropbear has no
+ * rsa-sha2-512). The switch also builds RSA host-key support, which the
+ * service does not use. What an ssh login needs and nothing
  * else: no forwarding of any kind, no sftp server (scp/sftp are outside
  * M4), no X11, no MOTD, no inetd mode.
  */
