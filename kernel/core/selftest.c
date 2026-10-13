@@ -493,6 +493,7 @@ static const struct selftest tests[] = {
     { "sleep",           selftest_sleep },
     { "wait-timeout",    selftest_wait_timeout },
     { "mutex",           selftest_mutex },
+    { "mutex-handoff",   selftest_mutex_handoff },
     { "mutex-wake-bench", selftest_mutex_wake_bench },
     { "semaphore",       selftest_semaphore },
     { "completion",      selftest_completion },
