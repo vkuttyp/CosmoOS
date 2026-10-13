@@ -330,7 +330,10 @@ if HWRNG:
 else:
     REQUIRED_MARKERS += [r"^\[ INFO\] random: cpu source: none$"]
 SEEDED_LINE = r"^\[ INFO\] random: pool seeded after \d+ ms: \d+ bits credited "
-if HWRNG and not RNG:
+if HWRNG and not RNG and not FW_SEED:
+    REQUIRED_MARKERS += [r"^\[ INFO\] random: firmware seed: 64 bytes, ignored \(random.firmware=off\)$",
+                         SEEDED_LINE + r"\(cpu [1-9]\d*, firmware 0, jitter 0, devices 0\)$"]
+elif HWRNG and not RNG:
     REQUIRED_MARKERS += [SEEDED_LINE + r"\(cpu [1-9]\d*, firmware \d+, jitter 0, devices 0\)$"]
 elif RNG and not HWRNG and FW_SEED:
     REQUIRED_MARKERS += [r"^\[ INFO\] random: firmware seed: 64 bytes$",

@@ -147,7 +147,7 @@ BOOT_TIMEOUT ?= 240
 BUSYBOX_TIMEOUT ?= 900
 test: $(IMAGE)
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
-		BOOT_CMDLINE='$(CMDLINE)' $(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --timeout $(BOOT_TIMEOUT) --image $(IMAGE) --log $(BOOT_LOG) \
+		BOOT_CMDLINE="$$(cat $(CMDLINE_FILE))" $(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --timeout $(BOOT_TIMEOUT) --image $(IMAGE) --log $(BOOT_LOG) \
 		--kernel $(KERNEL_ELF) --symbolizer $(LLVM_PREFIX)llvm-symbolizer \
 		$(if $(filter release,$(BUILD)),--shell-burst)
 
@@ -173,7 +173,9 @@ endif
 # -- no source at all: getrandom's NONBLOCK is EAGAIN, INSECURE answers,
 # an encrypted pool is refused and the boot completes; the same without
 # `random.jitter=off`, which the jitter source must seed; a model with the
-# random instructions, which must seed the pool from the CPU; and the
+# random instructions and `random.firmware=off` (OVMF and AAVMF offer the
+# CPU's instructions as EFI_RNG_PROTOCOL), which must seed the pool from
+# the CPU alone; and the
 # virtio-rng with `random.firmware=off random.jitter=off`, which must
 # seed from the device alone. The ordinary `test` boot is seeded by the
 # firmware (boot protocol v10: OVMF and AAVMF offer EFI_RNG_PROTOCOL over
@@ -181,18 +183,21 @@ endif
 # and BOOT_JITTER to know which lines to require.
 ifeq ($(ARCH),aarch64)
 HWRNG_CPU ?= neoverse-v1
+NORNG_CPU := cortex-a72
 else
 HWRNG_CPU ?= qemu64,+nx,+svm,+npt,+rdrand,+rdseed
+NORNG_CPU := qemu64,+nx,+svm,+npt
 endif
 test-entropy:
-	$(Q)QEMU_RNG=0 BOOT_JITTER=0 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
-		CMDLINE='$(CMDLINE) random.jitter=off' BOOT_LOG=$(OUT)/boot-test-noentropy.log test
-	$(Q)QEMU_RNG=0 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
-		BOOT_LOG=$(OUT)/boot-test-jitter.log test
-	$(Q)QEMU_RNG=0 QEMU_HWRNG=1 QEMU_CPU='$(HWRNG_CPU)' $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) \
-		BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-cpurng.log test
-	$(Q)BOOT_FW_SEED=0 BOOT_JITTER=0 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
-		CMDLINE='$(CMDLINE) random.firmware=off random.jitter=off' BOOT_LOG=$(OUT)/boot-test-devrng.log test
+	$(Q)QEMU_RNG=0 QEMU_HWRNG=0 QEMU_CPU='$(NORNG_CPU)' BOOT_JITTER=0 $(MAKE) --no-print-directory -C $(ROOT) \
+		ARCH=$(ARCH) BUILD=$(BUILD) CMDLINE='$(CMDLINE) random.jitter=off' BOOT_LOG=$(OUT)/boot-test-noentropy.log test
+	$(Q)QEMU_RNG=0 QEMU_HWRNG=0 QEMU_CPU='$(NORNG_CPU)' $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) \
+		BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-jitter.log test
+	$(Q)QEMU_RNG=0 QEMU_HWRNG=1 QEMU_CPU='$(HWRNG_CPU)' BOOT_FW_SEED=0 $(MAKE) --no-print-directory -C $(ROOT) \
+		ARCH=$(ARCH) BUILD=$(BUILD) CMDLINE='$(CMDLINE) random.firmware=off' BOOT_LOG=$(OUT)/boot-test-cpurng.log test
+	$(Q)QEMU_HWRNG=0 QEMU_CPU='$(NORNG_CPU)' BOOT_FW_SEED=0 BOOT_JITTER=0 $(MAKE) --no-print-directory -C $(ROOT) \
+		ARCH=$(ARCH) BUILD=$(BUILD) CMDLINE='$(CMDLINE) random.firmware=off random.jitter=off' \
+		BOOT_LOG=$(OUT)/boot-test-devrng.log test
 
 # Roadmap M2's acceptance test (tests/boot/install_test.py,
 # docs/userland/testing.md): the live image installs itself on a blank

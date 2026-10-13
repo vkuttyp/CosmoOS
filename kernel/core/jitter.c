@@ -7,9 +7,10 @@
  * seeds. The source times a short memory-walking workload on the
  * monotonic counter; caches, TLBs, interrupts and the host's scheduling
  * make the time vary. How much it varies is measured, not assumed: each
- * batch is estimated (SP 800-90B's most-common-value estimator over the
- * low byte of each time) and health-tested (the repetition count test),
- * and credited at most an eighth of a bit per sample.
+ * batch is estimated (the lower of SP 800-90B's most-common-value and
+ * lag-prediction estimates over the low byte of each time) and
+ * health-tested (the repetition count test, its run carried across
+ * batches), and credited at most an eighth of a bit per sample.
  */
 
 #include <kernel/jitter.h>
@@ -52,6 +53,27 @@ static uint32_t log2_q16(uint64_t x)
     return (ip << 16) | frac;
 }
 
+/* -log2 of the 99% upper bound on a probability estimated as hits / n
+ * (SP 800-90B: p + 2.576 sqrt(p (1 - p) / (n - 1))), in bits as Q16;
+ * floor is the smallest probability the samples allow (1/256 for bytes). */
+static uint32_t h_from_rate(unsigned hits, unsigned n, uint64_t floor_q32)
+{
+    uint64_t one = 1ull << 32;
+    uint64_t p = ((uint64_t)hits << 32) / n;
+    uint64_t var = ((p * (one - p)) >> 32) / (n - 1);   /* Q32 */
+    /* sqrt of a Q32 value, in Q32: isqrt(var << 32). var <= 2^30, so
+     * the shift fits. */
+    uint64_t sd = isqrt64(var << 32);
+    uint64_t pu = p + (sd * 2576) / 1000;
+    if (pu < floor_q32)
+        pu = floor_q32;
+    if (pu >= one)
+        return 0;
+    /* H = -log2(pu / 2^32) = 32 - log2(pu). */
+    uint32_t l = log2_q16(pu);
+    return l >= (32u << 16) ? 0 : (32u << 16) - l;
+}
+
 uint32_t jitter_mcv_h_q16(const uint8_t *samples, unsigned n)
 {
     if (n < 2)
@@ -61,38 +83,81 @@ uint32_t jitter_mcv_h_q16(const uint8_t *samples, unsigned n)
     for (unsigned i = 0; i < n; i++)
         if (++count[samples[i]] > mode)
             mode = count[samples[i]];
-    /* p = mode / n and the upper bound p + 2.576 sqrt(p (1 - p) / (n - 1)),
-     * in Q32. */
-    uint64_t one = 1ull << 32;
-    uint64_t p = ((uint64_t)mode << 32) / n;
-    uint64_t var = ((p * (one - p)) >> 32) / (n - 1);   /* Q32 */
-    /* sqrt of a Q32 value, in Q32: isqrt(var << 32). var <= 2^30, so
-     * the shift fits. */
-    uint64_t sd = isqrt64(var << 32);
-    uint64_t pu = p + (sd * 2576) / 1000;
-    if (pu >= one)
-        return 0;
-    /* H = -log2(pu / 2^32) = 32 - log2(pu). */
-    uint32_t l = log2_q16(pu);
-    return l >= (32u << 16) ? 0 : (32u << 16) - l;
+    return h_from_rate(mode, n, 0);
 }
 
-bool jitter_rct_ok(const uint8_t *samples, unsigned n, unsigned cutoff)
+uint32_t jitter_lag_h_q16(const uint8_t *samples, unsigned n)
 {
-    unsigned run = 1;
+    if (n < 3)
+        return 0;
+    /* Each sample is predicted to equal the one `winner` lags back, the
+     * lag that has predicted best so far; every lag's score is kept. */
+    unsigned score[JITTER_LAG_MAX] = { 0 };
+    unsigned winner = 0, predictions = 0, correct = 0, run = 0, longest = 0;
     for (unsigned i = 1; i < n; i++) {
-        run = samples[i] == samples[i - 1] ? run + 1 : 1;
-        if (run >= cutoff)
-            return false;
+        unsigned lag = winner + 1;
+        if (i >= lag) {
+            predictions++;
+            if (samples[i] == samples[i - lag]) {
+                correct++;
+                if (++run > longest)
+                    longest = run;
+            } else {
+                run = 0;
+            }
+        }
+        unsigned dmax = i < JITTER_LAG_MAX ? i : JITTER_LAG_MAX;
+        for (unsigned d = 1; d <= dmax; d++) {
+            if (samples[i] == samples[i - d]) {
+                score[d - 1]++;
+                if (score[d - 1] >= score[winner])
+                    winner = d - 1;
+            }
+        }
     }
-    return n == 0 || cutoff > 1;
+    if (predictions < 2)
+        return 0;
+    /* Global: the rate of correct predictions over the batch. */
+    uint32_t global = h_from_rate(correct, predictions, (1ull << 32) / 256);
+    /* Local: the longest run of correct predictions. A run of r among n
+     * predictions is about what a success probability p with
+     * p^(r + 1) = 1/n would give, so H = log2(n) / (r + 1). It catches a
+     * pattern the predictor locked onto late in the batch, which the
+     * global rate dilutes (SP 800-90B §6.3.8's local estimate, solved
+     * here in this closed form rather than its series). */
+    uint32_t local = log2_q16(predictions) / (longest + 1);
+    return local < global ? local : global;
 }
 
-unsigned jitter_batch_credit(const uint8_t *samples, unsigned n)
+void jitter_rct_init(struct jitter_rct *rct)
 {
-    if (!jitter_rct_ok(samples, n, JITTER_RCT_CUTOFF))
+    rct->run = 0;
+    rct->last = 0;
+}
+
+bool jitter_rct_ok(struct jitter_rct *rct, const uint8_t *samples, unsigned n, unsigned cutoff)
+{
+    bool ok = true;
+    for (unsigned i = 0; i < n; i++) {
+        rct->run = rct->run != 0 && samples[i] == rct->last ? rct->run + 1 : 1;
+        rct->last = samples[i];
+        if (rct->run >= cutoff)
+            ok = false;
+    }
+    return ok;
+}
+
+unsigned jitter_batch_credit(struct jitter_rct *rct, const uint8_t *samples, unsigned n)
+{
+    if (!jitter_rct_ok(rct, samples, n, JITTER_RCT_CUTOFF))
         return 0;
+    /* The lower of two estimates: the most common value's (the spread)
+     * and the lag predictor's (catches a cycle or a repeating pattern,
+     * which the histogram cannot see). */
     uint32_t h = jitter_mcv_h_q16(samples, n);
+    uint32_t hl = jitter_lag_h_q16(samples, n);
+    if (hl < h)
+        h = hl;
     if (h < JITTER_MIN_H_Q16)
         return 0;
     if (h > (1u << 16))

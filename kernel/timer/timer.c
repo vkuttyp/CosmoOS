@@ -747,7 +747,7 @@ void timer_init(void)
     if (arch_rtc_read_epoch(&epoch)) {
         g_realtime_offset_ns = epoch * NS_PER_SEC - clock_now_ns();
         kinfo("timer: wall clock %llu s since 1970 from the RTC", (unsigned long long)epoch);
-    } else if (bootinfo_fw_epoch(&fw_epoch) && fw_epoch > 0) {
+    } else if (bootinfo_fw_epoch(&fw_epoch) && fw_epoch > 0 && (uint64_t)fw_epoch <= UINT64_MAX / NS_PER_SEC) {
         /* No clock of its own: the firmware's time as the loader read it,
          * just before ExitBootServices (boot protocol v10), anchored at
          * the monotonic clock's zero. Late by the time between that read

@@ -488,7 +488,7 @@ and only for a read that reported success:
 | AArch64 `RNDR` (same field) | same | 4 bits per successful read (`NZCV` = `0000`) |
 | virtio-rng (`drivers/virtio/virtio_rng.c`) | `random_add_entropy` | 4 bits per byte the device wrote |
 | the firmware's seed (`EFI_RNG_PROTOCOL`, boot protocol v10) | `random_init` | 4 bits per byte, 256 for its 64 bytes; none with `random.firmware=off` |
-| timing jitter (`kernel/core/jitter.c`), only with no CPU source and no firmware seed | `random_init` | per batch of 1024 samples, `1024 × min(H, 1) / 8` bits, H the batch's estimated min-entropy per sample; 0 for a batch that fails its health test or estimates under 1/16 bit; none with `random.jitter=off` |
+| timing jitter (`kernel/core/jitter.c`), only when the CPU credited nothing and there is no firmware seed | `random_init` | per batch of 1024 samples, `1024 × min(H, 1) / 8` bits, H the lower of the batch's two min-entropy estimates per sample; 0 for a batch that fails its health test or estimates under 1/16 bit; none with `random.jitter=off` |
 
 The fractions are the conservative part. The reseeding sources
 (`RDSEED`, `RNDRRS`) are conditioned entropy and are credited half their
@@ -527,20 +527,32 @@ run to run; interrupts, the memory system and, under a hypervisor, the
 host's scheduling make the time vary. Each run's raw time difference is
 absorbed; its low byte is what is estimated.
 
-**How much it is credited.** Per batch, SP 800-90B's most-common-value
-estimate (§6.3.1, the 99% upper bound on the commonest value's
-probability) gives H bits of min-entropy per sample. A batch is credited
+**How much it is credited.** Per batch, two SP 800-90B estimates of
+min-entropy per sample, and H is the lower:
+- the most-common-value estimate (§6.3.1, the 99% upper bound on the
+  commonest value's probability), which sees how widely the values
+  spread but not their order;
+- the lag-prediction estimate (§6.3.8, lags 1 to 256), which predicts each
+  sample to repeat the one at the lag that has predicted best so far and
+  takes the lower of a global figure (the 99% upper bound on the rate of
+  correct predictions) and a local one from the longest run of them
+  (`log2(n) / (run + 1)`). A cycle or other repeating pattern, which the
+  histogram would call several bits, scores near 0 here.
+
+A batch is credited
 `1024 × min(H, 1) / 8` bits: never more than one bit per sample whatever
 the estimate (it measures the samples' spread, not how much of it an
 observer of the machine could predict), and an eighth of that. So a
 batch earns at most 128 bits and the pool needs at least two. A batch
-that fails the repetition count test (one value 32 times in a row) or
-estimates under 1/16 bit per sample is absorbed but not credited. The
+that fails the repetition count test (one value 32 times in a row, the
+run carried from one batch into the next) or estimates under 1/16 bit
+per sample is absorbed but not credited. The
 estimator and the health test are pure functions, host-tested
 (`tests/host/test_jitter.c`).
 
-**When it runs.** Only in `random_init`, only with no CPU source and no
-firmware seed, and not with `random.jitter=off`. It is not a background
+**When it runs.** Only in `random_init`, only when the CPU credited
+nothing -- it has no random instruction, or every read of one failed --
+and there is no firmware seed, and not with `random.jitter=off`. It is not a background
 source: once seeded, reseeding is the CPU's or the devices' job, as
 before. It logs `random: jitter source: N batches of 1024 samples in T ms,
 B bits credited, R batches refused, lowest estimate H bits per sample`.
@@ -668,6 +680,8 @@ image, each with one source (testing.md): no virtio-rng, the default CPU
 model and `random.jitter=off` -- no source at all, which must show the
 unseeded behaviour and still complete; the same without
 `random.jitter=off`, which the jitter source must seed; a CPU model with
-the random instructions, which must seed from the CPU; and the virtio-rng
+the random instructions and `random.firmware=off` (OVMF and AAVMF offer
+those instructions as `EFI_RNG_PROTOCOL` too), which must seed from the
+CPU alone; and the virtio-rng
 with `random.firmware=off random.jitter=off`, which must seed from the
 device.

@@ -22,6 +22,13 @@ static int64_t days_from_civil(int64_t y, unsigned m, unsigned d)
     return era * 146097 + (int64_t)doe - 719468;
 }
 
+static unsigned days_in_month(unsigned y, unsigned m)
+{
+    static const uint8_t days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    return m == 2 && leap ? 29u : days[m - 1];
+}
+
 static void fw_time(struct cosmoboot_info *info)
 {
     EFI_RUNTIME_SERVICES_HEAD *rt = g_st->RuntimeServices;
@@ -31,8 +38,10 @@ static void fw_time(struct cosmoboot_info *info)
         lprintf("firmware: no time (GetTime %s)\n", rt == NULL || rt->GetTime == NULL ? "absent" : "failed");
         return;
     }
-    if (t.Year < 1970 || t.Year > 9999 || t.Month < 1 || t.Month > 12 || t.Day < 1 || t.Day > 31 ||
-        t.Hour > 23 || t.Minute > 59 || t.Second > 59) {
+    /* Up to 2500: the kernel keeps the wall clock in 64-bit nanoseconds,
+     * which end in 2554. */
+    if (t.Year < 1970 || t.Year > 2500 || t.Month < 1 || t.Month > 12 || t.Day < 1 ||
+        t.Day > days_in_month(t.Year, t.Month) || t.Hour > 23 || t.Minute > 59 || t.Second > 59) {
         lprintf("firmware: GetTime gave an impossible date %u-%u-%u %u:%u:%u; not used\n", t.Year, t.Month, t.Day,
                 t.Hour, t.Minute, t.Second);
         return;

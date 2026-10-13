@@ -57,3 +57,34 @@ On Parallels the release image now logs `timer: wall clock 1791869029 s
 since 1970 from the firmware at boot (no RTC)` and `random: pool seeded
 after 6 ms: 316 bits credited (cpu 0, firmware 0, jitter 316, devices
 0)`, and reaches the shell.
+
+## Review of PR 1 (#378)
+
+Codex and Qodo, 13 findings. Changed:
+- **The jitter credit trusted the histogram.** The most-common-value
+  estimate sees only how widely the values spread, so a cycle through
+  every byte value would have been credited the full bit per sample.
+  `jitter_lag_h_q16` (SP 800-90B's lag predictor, lags 1-256, global
+  rate and longest correct run) is now the second estimate, and the
+  credit takes the lower. The host test shows the cycle refused.
+- **The repetition count test reset at each batch:** its run now
+  carries over.
+- **Jitter ran only when the CPU had no random instruction.** It now
+  runs when the CPU credited nothing, which also covers an advertised
+  instruction whose every read fails.
+- **Firmware time:** an impossible day for its month (leap years
+  counted) and any year after 2500 are refused by the loader, and
+  `timer_init` checks the nanosecond product.
+- **`test-entropy`'s CPU boot** also refuses the firmware seed: OVMF and
+  AAVMF offer the CPU's instructions as `EFI_RNG_PROTOCOL`, so it was not
+  proving the CPU alone. The source-less boots pin their CPU model. The
+  harness reads the expected command line from the built file, so a
+  quote in `CMDLINE` cannot break the shell.
+- **`docs/boot/design.md`** still said version 9.
+
+Not changed:
+- **The firmware clock starts behind** by the time between `GetTime` and
+  the kernel's clock start. `GetTime` gives whole seconds on most
+  firmware, so the error is under a second either way, as the design
+  says.
+- **The plan and history entries** come in the unit's last PR.

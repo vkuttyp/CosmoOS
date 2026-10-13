@@ -10,7 +10,7 @@ compiler.
 | Field | Meaning |
 |---|---|
 | `magic` | `COSMOBOOT_MAGIC` = `0x3154424F4D534F43` ("COSMOBT1") |
-| `version` | `COSMOBOOT_VERSION` = 9 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub; 6: the framebuffer; 7: the command line and the boot partition; 8: verified boot; 9: the serial console the firmware names) |
+| `version` | `COSMOBOOT_VERSION` = 10 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub; 6: the framebuffer; 7: the command line and the boot partition; 8: verified boot; 9: the serial console the firmware names; 10: the firmware's seed and time) |
 | `size` | `sizeof(struct cosmoboot_info)` as written by the loader; lets a newer kernel detect an older loader |
 | `arch` | `COSMOBOOT_ARCH_X86_64` = 1, `COSMOBOOT_ARCH_AARCH64` = 2 |
 | `firmware` | `COSMOBOOT_FIRMWARE_UEFI` = 1 |
@@ -253,7 +253,10 @@ every machine:
 - **The time.** `GetTime` through the runtime services table, converted
   to seconds since 1970 UTC: a `TimeZone` other than unspecified is
   applied (UEFI: local = UTC − TimeZone minutes); unspecified is taken as
-  UTC. An impossible date is refused. The kernel's wall clock uses it
+  UTC. An impossible date (a day past its month's length, leap years
+  counted) and any year after 2500 are refused: the kernel keeps the wall
+  clock in 64-bit nanoseconds, which end in 2554 (`timer_init` checks the
+  product too). The kernel's wall clock uses it
   only when the architecture has no RTC it can read (`timer_init`: AArch64
   machines without QEMU's PL031, such as Parallels), anchored at the
   monotonic clock's zero, so it is late by the time between `GetTime` and

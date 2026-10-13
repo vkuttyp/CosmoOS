@@ -122,8 +122,9 @@ static void cpu_collect_locked(unsigned want)
 }
 
 /*
- * The source of last resort (jitter.c): only when the CPU has no random
- * instruction and the firmware gave no seed -- an entropy device may still
+ * The source of last resort (jitter.c): only when the CPU credited nothing
+ * (no random instruction, or one whose every read failed) and the firmware
+ * gave no seed -- an entropy device may still
  * come, but nothing says it will. Batches until the pool can seed or
  * JITTER_MAX_BATCHES; each is health-tested and estimated, and credited
  * only what the estimate allows. `random.jitter=off` disables it (the
@@ -145,13 +146,18 @@ static bool jitter_collect(void)
     unsigned batches = 0, credited = 0, refused = 0;
     uint32_t h_min = UINT32_MAX;
     bool seeded = false;
+    struct jitter_rct rct;
+    jitter_rct_init(&rct);
     while (!seeded && batches < JITTER_MAX_BATCHES) {
         jitter_sample(g_jdeltas, g_jlow);
         batches++;
         uint32_t h = jitter_mcv_h_q16(g_jlow, JITTER_BATCH);
+        uint32_t hl = jitter_lag_h_q16(g_jlow, JITTER_BATCH);
+        if (hl < h)
+            h = hl;
         if (h < h_min)
             h_min = h;
-        unsigned credit = jitter_batch_credit(g_jlow, JITTER_BATCH);
+        unsigned credit = jitter_batch_credit(&rct, g_jlow, JITTER_BATCH);
         if (credit == 0)
             refused++;
         arch_irq_state_t s = spin_lock_irqsave(&g_lock);
@@ -215,7 +221,7 @@ void random_init(void)
     cpu_collect_locked(POOL_BITS_MAX);
     bool seeded = g_pool_bits >= SEED_BITS && reseed_locked(now);
     spin_unlock_irqrestore(&g_lock, s);
-    if (!seeded && !arch_rng_has_seed() && !arch_rng_has_random() && fw_len == 0)
+    if (!seeded && g_cpu_bits == 0 && fw_len == 0)
         seeded = jitter_collect();
     if (seeded)
         announce_seeded(clock_now_ns());
