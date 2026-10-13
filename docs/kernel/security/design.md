@@ -521,7 +521,7 @@ host key. The owner chose a jitter source of last resort (2026-10-13).
 
 **What is sampled.** `jitter_sample` times 1024 runs of a short workload
 on the monotonic counter (`arch_clock_read`: the TSC, the AArch64 system
-counter). The workload walks a 16 KiB buffer with a stride taken from the
+counter). The workload takes 256 steps through a 64 KiB buffer with a stride taken from the
 previous run's time and stores into it, so cache and TLB state differ
 run to run; interrupts, the memory system and, under a hypervisor, the
 host's scheduling make the time vary. Each run's raw time difference is

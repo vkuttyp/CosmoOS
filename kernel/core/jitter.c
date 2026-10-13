@@ -170,7 +170,7 @@ unsigned jitter_batch_credit(struct jitter_rct *rct, const uint8_t *samples, uns
 #ifndef JITTER_HOST_TEST
 #include <arch/timer.h>
 
-#define WALK_BYTES 16384u
+#define WALK_BYTES 65536u
 
 static uint8_t g_walk[WALK_BYTES];
 
@@ -182,8 +182,11 @@ void jitter_sample(uint64_t deltas[JITTER_BATCH], uint8_t low[JITTER_BATCH])
         uint64_t t0 = arch_clock_read();
         /* A walk whose stride depends on the previous time, so cache and
          * TLB state differ run to run; the stores keep it from being
-         * folded away. */
-        for (unsigned k = 0; k < 64; k++) {
+         * folded away. 256 steps over 64 KiB: with 64 over 16 KiB, QEMU's
+         * TCG made the times regular enough that the lag predictor refused
+         * most batches on x86-64; with 256 a boot seeds in 8-17 batches
+         * there. */
+        for (unsigned k = 0; k < 256; k++) {
             idx = (idx + 64u * (1u + ((unsigned)prev & 7u)) + k) & (WALK_BYTES - 1);
             g_walk[idx] = (uint8_t)(g_walk[idx] + (uint8_t)k + (uint8_t)prev);
         }
