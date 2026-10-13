@@ -411,7 +411,7 @@ if DISPLAY not in ("0", "virtio") and not (DISPLAY == "bochs" and ARCH == "aarch
     REQUIRED_MARKERS += [
         r"^framebuffer: \d+x\d+, \d+ bpp, pitch \d+, at 0x[0-9a-f]+",
         r"^\[ INFO\] framebuffer: \d+x\d+, \d+ bpp, pitch \d+, at phys 0x[0-9a-f]+",
-        r"^\[ INFO\] fbcon: \d+x\d+ cells of 8x8 pixels at 0x[0-9a-f]+, scrolling \d+ rows at a time",
+        r"^\[ INFO\] fbcon: \d+x\d+ cells of (8x8|16x16|24x24|32x32) pixels at 0x[0-9a-f]+, scrolling \d+ rows at a time",
     ]
 else:
     # No linear framebuffer: the loader says so and the kernel keeps the

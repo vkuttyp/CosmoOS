@@ -3,7 +3,8 @@
  *
  * The loader reports the Graphics Output Protocol's current mode (boot
  * protocol v6); this file maps that memory once the VMM can, draws
- * characters into it with the generated 8x8 face, and registers itself as
+ * characters into it with the generated 8x8 face, each of its pixels an
+ * s-by-s block for a large mode (fbcon_scale), and registers itself as
  * a second console sink beside the serial port. It never sets a mode,
  * allocates a scanout, or talks to a display device: the pixels it writes
  * are the ones the firmware is already scanning out. Choosing modes is a
@@ -33,6 +34,8 @@ struct fbcon {
     uint32_t pitch;              /* bytes per row */
     uint32_t bytes_pp;
     uint32_t width, height;      /* pixels */
+    uint32_t scale;              /* each font pixel is scale x scale screen pixels */
+    uint32_t cell_w, cell_h;     /* FONT_WIDTH * scale, FONT_HEIGHT * scale */
     uint32_t cols, rows;         /* cells */
     uint32_t cx, cy;             /* cursor, in cells */
     uint32_t fg, bg;             /* packed pixel values */
@@ -73,6 +76,7 @@ static uint32_t pack(const struct bootinfo_framebuffer *fb, unsigned r, unsigned
  * test that logs much (docs/testing/flakes.md, syscall-fuzz, 2026-10-10).
  */
 #define FBCON_DRAW_ALIGN 256
+#define FBCON_SCALE_MAX 4u
 #define FBCON_DRAW __page_local(FBCON_DRAW_ALIGN)
 
 static inline void put_pixel(struct fbcon *c, uint32_t x, uint32_t y, uint32_t value)
@@ -99,8 +103,8 @@ static inline void put_pixel(struct fbcon *c, uint32_t x, uint32_t y, uint32_t v
 /* Fill whole cell rows [first, first + count) with the background. */
 static FBCON_DRAW void fbcon_draw_clear_rows(struct fbcon *c, uint32_t first, uint32_t count)
 {
-    uint32_t y0 = first * FONT_HEIGHT;
-    uint32_t y1 = y0 + count * FONT_HEIGHT;
+    uint32_t y0 = first * c->cell_h;
+    uint32_t y1 = y0 + count * c->cell_h;
     if (y1 > c->height)
         y1 = c->height;
     for (uint32_t y = y0; y < y1; y++) {
@@ -112,14 +116,31 @@ static FBCON_DRAW void fbcon_draw_clear_rows(struct fbcon *c, uint32_t first, ui
 static FBCON_DRAW void fbcon_draw_glyph(struct fbcon *c, uint32_t col, uint32_t row, unsigned char ch)
 {
     const uint8_t *glyph = font8x8[font_index(ch)];
-    uint32_t x0 = col * FONT_WIDTH;
-    uint32_t y0 = row * FONT_HEIGHT;
+    uint32_t s = c->scale;
+    uint32_t x0 = col * c->cell_w;
+    uint32_t y = row * c->cell_h;
+    uint32_t line[FONT_WIDTH * FBCON_SCALE_MAX];   /* one font row, widened */
 
+    /* Each font row is widened once into `line` and written `s` times: no
+     * division per pixel, which under TCG doubled a repaint's cost. */
+    /* Not unrolled: the function must fit its aligned block (above), and
+     * clang unrolled these loops past a page in a release build. */
+#pragma clang loop unroll(disable)
     for (uint32_t gy = 0; gy < FONT_HEIGHT; gy++) {
         uint8_t bits = glyph[gy];
+        uint32_t n = 0;
+#pragma clang loop unroll(disable)
         for (uint32_t gx = 0; gx < FONT_WIDTH; gx++) {
             uint32_t value = (bits & (0x80u >> gx)) ? c->fg : c->bg;
-            put_pixel(c, x0 + gx, y0 + gy, value);
+#pragma clang loop unroll(disable)
+            for (uint32_t k = 0; k < s; k++)
+                line[n++] = value;
+        }
+#pragma clang loop unroll(disable)
+        for (uint32_t k = 0; k < s; k++, y++) {
+#pragma clang loop unroll(disable)
+            for (uint32_t x = 0; x < n; x++)
+                put_pixel(c, x0 + x, y, line[x]);
         }
     }
     c->stats.glyphs++;
@@ -266,6 +287,21 @@ static bool overlaps_usable_ram(uint64_t pa, uint64_t len)
 /* Fill in the console over an already-mapped framebuffer at `base`, with
  * `text` (cols * rows cells) as its character buffer. False, with a
  * warning, when the mode cannot hold one cell. */
+/*
+ * How many screen pixels a font pixel is, each way. The face is 8x8, which
+ * at 1024x768 (Parallels Desktop's mode) is a character a few millimetres
+ * high on the screen: unreadable. The scale is the largest integer that
+ * keeps the mode at least 512x384 cells' worth of pixels per scale step,
+ * so 1024x768 and 1920x1080 draw 16-pixel characters (64x48 and 120x67
+ * cells), 2560x1600 draws 32-pixel ones (80x50), and anything under
+ * 1024x768 keeps the 8x8 cell. At most 4.
+ */
+static uint32_t fbcon_scale(uint32_t width, uint32_t height)
+{
+    uint32_t s = width / 512 < height / 384 ? width / 512 : height / 384;
+    return s < 1 ? 1 : s > FBCON_SCALE_MAX ? FBCON_SCALE_MAX : s;
+}
+
 static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, volatile uint8_t *base)
 {
     c->base = base;
@@ -273,8 +309,11 @@ static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, 
     c->bytes_pp = fb->bpp / 8;
     c->width = fb->width;
     c->height = fb->height;
-    c->cols = fb->width / FONT_WIDTH;
-    c->rows = fb->height / FONT_HEIGHT;
+    c->scale = fbcon_scale(fb->width, fb->height);
+    c->cell_w = FONT_WIDTH * c->scale;
+    c->cell_h = FONT_HEIGHT * c->scale;
+    c->cols = fb->width / c->cell_w;
+    c->rows = fb->height / c->cell_h;
     c->cx = c->cy = 0;
     c->fg = pack(fb, 0xd0, 0xd0, 0xd0);
     c->bg = pack(fb, 0x00, 0x00, 0x00);
@@ -370,7 +409,7 @@ void fbcon_init(void)
     replay_log(c);
     console_register(&c->sink);
     kinfo("fbcon: %ux%u cells of %ux%u pixels at %p, scrolling %u rows at a time", c->cols, c->rows,
-          FONT_WIDTH, FONT_HEIGHT, (void *)(uintptr_t)c->base, c->scroll_rows);
+          c->cell_w, c->cell_h, (void *)(uintptr_t)c->base, c->scroll_rows);
 }
 
 bool fbcon_present(void)
@@ -392,6 +431,7 @@ bool fbcon_geometry(struct fbcon_geometry *out)
     out->bytes_pp = g_fbcon.bytes_pp;
     out->width = g_fbcon.width;
     out->height = g_fbcon.height;
+    out->scale = g_fbcon.scale;
     out->cols = g_fbcon.cols;
     out->rows = g_fbcon.rows;
     out->fg = g_fbcon.fg;
