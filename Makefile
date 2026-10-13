@@ -147,7 +147,7 @@ BOOT_TIMEOUT ?= 240
 BUSYBOX_TIMEOUT ?= 900
 test: $(IMAGE)
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --timeout $(BOOT_TIMEOUT) --image $(IMAGE) --log $(BOOT_LOG) \
+		BOOT_CMDLINE='$(CMDLINE)' $(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --timeout $(BOOT_TIMEOUT) --image $(IMAGE) --log $(BOOT_LOG) \
 		--kernel $(KERNEL_ELF) --symbolizer $(LLVM_PREFIX)llvm-symbolizer \
 		$(if $(filter release,$(BUILD)),--shell-burst)
 

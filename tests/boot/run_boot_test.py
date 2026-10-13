@@ -300,7 +300,9 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     # has no root partition, so the live root stays (docs/boot/design.md).
     r"^boot volume: a GPT partition$",
     r"^\[ INFO\] part: \S+1: \S+ partition 1, sectors 2048-\d+, type esp, partuuid [0-9a-f-]{36}$",
-    r"^\[ INFO\] cmdline: root=boot-disk *$",
+    # The image's command line as the build signed it (BOOT_CMDLINE, the
+    # Makefile's CMDLINE: test-entropy adds random.* keys).
+    r"^\[ INFO\] cmdline: " + re.escape(os.environ.get("BOOT_CMDLINE", "root=boot-disk")) + r" *$",
     r"^\[ INFO\] root: root=boot-disk: the boot disk has no CosmoOS root partition; the live root stays$",
     r"^init: the boot disk has no CosmoOS root partition; the live root stays$",
     # Roadmap M5: the loader checked the manifest's signature and every
