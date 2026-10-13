@@ -171,8 +171,11 @@ endif
 # one entropy source: the image without the virtio-rng on the default CPU
 # model, which has no random instruction either, and `random.jitter=off`
 # -- no source at all: getrandom's NONBLOCK is EAGAIN, INSECURE answers,
-# an encrypted pool is refused and the boot completes; the same without
-# `random.jitter=off`, which the jitter source must seed; a model with the
+# an encrypted pool is refused and the boot completes; on AArch64 the same
+# without `random.jitter=off`, which the jitter source must seed (not on
+# x86-64: under QEMU's TCG its timings are, in some boots, regular enough
+# that the estimator refuses every batch, as it should; the AArch64
+# machine that needs the source is Parallels Desktop); a model with the
 # random instructions and `random.firmware=off` (OVMF and AAVMF offer the
 # CPU's instructions as EFI_RNG_PROTOCOL), which must seed the pool from
 # the CPU alone; and the
@@ -191,8 +194,10 @@ endif
 test-entropy:
 	$(Q)QEMU_RNG=0 QEMU_HWRNG=0 QEMU_CPU='$(NORNG_CPU)' BOOT_JITTER=0 $(MAKE) --no-print-directory -C $(ROOT) \
 		ARCH=$(ARCH) BUILD=$(BUILD) CMDLINE='$(CMDLINE) random.jitter=off' BOOT_LOG=$(OUT)/boot-test-noentropy.log test
+ifeq ($(ARCH),aarch64)
 	$(Q)QEMU_RNG=0 QEMU_HWRNG=0 QEMU_CPU='$(NORNG_CPU)' $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) \
 		BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-jitter.log test
+endif
 	$(Q)QEMU_RNG=0 QEMU_HWRNG=1 QEMU_CPU='$(HWRNG_CPU)' BOOT_FW_SEED=0 $(MAKE) --no-print-directory -C $(ROOT) \
 		ARCH=$(ARCH) BUILD=$(BUILD) CMDLINE='$(CMDLINE) random.firmware=off' BOOT_LOG=$(OUT)/boot-test-cpurng.log test
 	$(Q)QEMU_HWRNG=0 QEMU_CPU='$(NORNG_CPU)' BOOT_FW_SEED=0 BOOT_JITTER=0 $(MAKE) --no-print-directory -C $(ROOT) \

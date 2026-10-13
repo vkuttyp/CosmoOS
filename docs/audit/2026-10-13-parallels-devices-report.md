@@ -74,9 +74,19 @@ Codex and Qodo, 13 findings. Changed:
   batches at 0.01-0.05 bits per sample and refused half of them on
   x86-64: with the 32-batch limit the jitter-only boot ended at 226 bits,
   unseeded (AArch64 seeded after 22). The limit is now 128 batches (about
-  0.4 s at that rate), not a looser estimate. Parallels needs 5 or 6
-  batches (12-16 ms), its lowest estimate down from 0.67 to 0.27 bits per
-  sample.
+  0.4 s at that rate), not a looser estimate, and each sample's workload
+  is heavier (256 steps through 64 KiB, not 64 through 16 KiB), which
+  brought x86-64 release boots from 18-43 batches to 8-17. Parallels
+  needs 5 or 6 batches (12-16 ms), its lowest estimate down from 0.67 to
+  0.27 bits per sample.
+- **x86-64 under TCG cannot carry the jitter boot.** With all of that,
+  x86-64 debug boots seeded from jitter in 30-69 batches three times in
+  four, and in the fourth every one of 128 batches was refused (0 bits):
+  in some boots TCG makes x86-64's timings fully regular (the per-boot
+  modes recorded for the x86 benchmarks, flakes.md), and the estimator
+  refuses them, as it should. `test-entropy` runs the jitter boot on
+  AArch64 only, where it seeded in 11-38 batches in all six boots; the
+  source's logic is the same code on both and host-tested.
 - **Jitter ran only when the CPU had no random instruction.** It now
   runs when the CPU credited nothing, which also covers an advertised
   instruction whose every read fails.

@@ -675,11 +675,14 @@ The ordinary boots carry a virtio-rng on CPU models without a random
 instruction (`qemu64`, `cortex-a72`); the firmware offers
 `EFI_RNG_PROTOCOL` over it, so they are the firmware-seeded
 configuration. The harness requires the seeded line naming the firmware
-and forbids the `WARN`. `make test-entropy` adds four boots of the same
+and forbids the `WARN`. `make test-entropy` adds boots of the same
 image, each with one source (testing.md): no virtio-rng, the default CPU
 model and `random.jitter=off` -- no source at all, which must show the
-unseeded behaviour and still complete; the same without
-`random.jitter=off`, which the jitter source must seed; a CPU model with
+unseeded behaviour and still complete; on AArch64 the same without
+`random.jitter=off`, which the jitter source must seed (not on x86-64,
+where QEMU's TCG makes the timings, in some boots, regular enough that
+every batch is refused -- 128 of 128 in one of four debug boots -- which
+is the estimator working); a CPU model with
 the random instructions and `random.firmware=off` (OVMF and AAVMF offer
 those instructions as `EFI_RNG_PROTOCOL` too), which must seed from the
 CPU alone; and the virtio-rng

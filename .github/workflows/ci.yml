@@ -237,7 +237,8 @@ jobs:
   # model without RDSEED/RDRAND or RNDR, `random.jitter=off`) the pool
   # must stay unseeded -- getrandom NONBLOCK is EAGAIN, INSECURE answers,
   # an encrypted pool is refused -- and the boot complete; the jitter
-  # source alone, the CPU alone and the virtio-rng alone must each seed it.
+  # source alone (AArch64), the CPU alone and the virtio-rng alone must
+  # each seed it.
   # The build job's boots are seeded by the firmware. A job of its
   # own: the two boots (about 7 minutes) inside build-and-boot took the
   # aarch64 job past its 40-minute limit (run 37984006846, every boot
