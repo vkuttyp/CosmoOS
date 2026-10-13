@@ -4072,11 +4072,13 @@ longest tick gap 591 ms on cpu 0, a bystander's longest wait 637 ms
 completions, the next one ready every time and 32 popped per call.
 
 The whole job ran slow: its `test` and `test-guard` boots passed in
-182.0 s and 180.7 s, against 151-155 s for x86-64 debug boots on CI so
-far, and `cosmofs-replay` took 32.2 s (16.2 s on a quiet local host).
+182.0 s and 180.7 s, against 160.8 s and 161.8 s on the PR's last run
+(38324464909), and `cosmofs-replay` took 32.2 s there against 18.2 s.
 QEMU completed one request at a time while the vCPU went unscheduled for
 over half a second: the storm the test needs (a device that always has
 the next completion waiting) never formed, and the check that guards
 against a vacuous pass refused it. #376 changed no block, virtio-blk or
-interrupt path on x86-64. First sighting of this check; the failed job
-was rerun.
+interrupt path on x86-64. First sighting of this check. The failed job
+was rerun and passed (job 115083358004); that runner was slow too, its
+boots 171-183 s, so the test's storm can form on a slow runner and this
+one was slower still in the storm's second.
