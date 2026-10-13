@@ -21,7 +21,8 @@ the roadmap's M1–M6 are done (v1.0.0).
 - `fb-console` checks the scaled pixels.
 - `test-net-login` logs in with a 3072-bit RSA key as well as Ed25519,
   on both architectures.
-- `lxtest` requires a new file's mtime within 5 s of `CLOCK_REALTIME`.
+- `lxtest` requires a new file's mtime between a `CLOCK_REALTIME` reading
+  before the create and one after the stat, a second each way.
   `tools/file-times-probe.py`: fixed mode `LINUXTEST: PASS`, `--old` fails
   that check (mtime 132 s on x86-64, 131 s on AArch64: the uptime), at 74eb98f0.
 
