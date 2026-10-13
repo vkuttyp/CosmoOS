@@ -2908,3 +2908,12 @@ See the [history index](README.md).
   the EDID prefers when the firmware offers it (Parallels' firmware offers
   only 1024x768 and no EDID: a virtio-gpu driver is the next unit).
   `fb-console` checks the scaled pixels.
+- **After 1.0: RSA login keys and wall-clock file times (2026-10-13,
+  v1.0.2).** Found by the owner over ssh on Parallels Desktop. dropbear
+  takes RSA user keys (`DROPBEAR_RSA`, SHA-2 signatures only), so an
+  existing `~/.ssh/id_rsa.pub` logs in; the host key stays Ed25519, and
+  `test-net-login` logs in with a 3072-bit RSA key too. `vfs_now_ns` is the
+  wall clock: every new file had been dated 1970 plus the uptime. `lxtest`
+  checks a new file's mtime against `CLOCK_REALTIME`, and
+  `tools/file-times-probe.py --old` fails that check on both architectures.
+  Report: `docs/audit/2026-10-13-console-ssh-times-report.md`.

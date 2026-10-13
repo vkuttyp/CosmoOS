@@ -2714,6 +2714,27 @@ DHCP client, ARP and route fixes) is not on the irq-poll or scheduler
 path. Not attributed; two sightings, both x86-64 CI, both 290 ms. The
 failed job was rerun.
 
+**Third and fourth sightings, 2026-10-13:** local, x86-64 debug, the
+full matrix on `fbcon-scale` 6d7fac74 (the v1.0.2 console, ssh and
+file-times branch): `test-smp2` (`264 calls of the poll, longest gap
+290 ms`, the check at 302 ms) and `test-crash` (the check at 305 ms);
+the same matrix's `test-smp1`, `test-smp4`, `test-smp2t`, `test-chaos`,
+`test-harness-retry` and `test-guard` boots passed it. Both failing boots
+overlapped other work on the host that the matrix did not start: an
+aarch64 debug build and boot of another branch during `test-smp2`, and
+a probe's build during `test-crash`. That load is recorded as a
+confound, not a cause: four sightings now give the same 290 ms -- the
+spinner's whole run less the worker's first hold, the worker never raised
+-- where a host stall would leave gaps of any length, and the raise is a
+timer callback run from the tick interrupt (`run_expired`), not from a
+thread the spinner could hold off. Not attributed. The two boots were
+rerun on an idle host after the matrix (QEMU at nice 0, nothing else
+running), twice each in the order `test-smp2`, `test-crash`: all four
+passed. A passing boot keeps no serial log, so their gaps are not
+known; the matrix's passing x86-64 and AArch64 boots measured 13 to
+14 ms. The gaps are either about 14 ms or 290 ms, with nothing between:
+the worker is raised by its timer, or not at all.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
