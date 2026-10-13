@@ -2900,3 +2900,8 @@ See the [history index](README.md).
   overtaken once is now handed the mutex at the next unlock (S33,
   `mutex-handoff`, module ABI 10).
   Report: `docs/audit/2026-10-13-parallels-devices-report.md`.
+- **After 1.0: a readable screen console (2026-10-13, v1.0.2).** The 8x8
+  face is drawn scaled, `min(width / 320, height / 240)` (1 to 4): 24-pixel
+  characters at Parallels' 1024x768, 16-pixel at QEMU's 800x600; a scaled
+  screen scrolls a quarter at a time. `fb-console` checks the scaled
+  pixels.
