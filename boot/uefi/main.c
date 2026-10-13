@@ -579,6 +579,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         info->verify_flags |= COSMOBOOT_VERIFIED;
         memcpy(info->verify_key_id, key_id, sizeof(key_id));
     }
+    display_choose_mode();
     find_framebuffer(info);
 
     if (type_fallback)
@@ -650,6 +651,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     acpi_report();
     firmware_report(info);
+    display_report();
     lprintf("memory map: %u entries\n", n);
     for (uint32_t i = 0; i < n; i++) {
         lprintf("  0x%016llx - 0x%016llx %s\n",

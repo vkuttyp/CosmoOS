@@ -11,6 +11,7 @@ LOADER_SRCS := \
 	boot/uefi/main.c \
 	boot/uefi/acpi.c \
 	boot/uefi/firmware.c \
+	boot/uefi/display.c \
 	boot/uefi/console.c \
 	boot/uefi/string.c \
 	boot/uefi/memory.c \

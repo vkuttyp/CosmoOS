@@ -332,8 +332,9 @@ typedef struct {
     CHAR16   FileName[1];
 } EFI_FILE_INFO;
 
-/* Graphics Output Protocol (UEFI 2.x §12.9). The loader reads the current
- * mode and never sets one. */
+/* Graphics Output Protocol (UEFI 2.x §12.9). The loader sets the mode the
+ * display prefers (EDID) when the firmware offers it, else keeps the
+ * current one (boot/uefi/display.c). */
 #define EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID \
     { 0x9042a9de, 0x23dc, 0x4a38, { 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a } }
 
@@ -370,14 +371,26 @@ typedef struct {
     UINTN                                 FrameBufferSize;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
 
-/* QueryMode, SetMode and Blt are never called; their slots keep the
- * layout right. */
-typedef struct {
-    void                              *QueryMode;
-    void                              *SetMode;
+/* Blt is never called; its slot keeps the layout right. */
+typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL EFI_GRAPHICS_OUTPUT_PROTOCOL;
+struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
+    EFI_STATUS (EFIAPI *QueryMode)(EFI_GRAPHICS_OUTPUT_PROTOCOL *This, uint32_t ModeNumber, UINTN *SizeOfInfo,
+                                   EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **Info);
+    EFI_STATUS (EFIAPI *SetMode)(EFI_GRAPHICS_OUTPUT_PROTOCOL *This, uint32_t ModeNumber);
     void                              *Blt;
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
-} EFI_GRAPHICS_OUTPUT_PROTOCOL;
+};
+
+/* EDID (UEFI 2.x §12.9.3): the active display's, else the one discovered
+ * on the connector. The preferred mode is the first detailed timing. */
+#define EFI_EDID_ACTIVE_PROTOCOL_GUID \
+    { 0xbd8c1056, 0x9f36, 0x44ec, { 0x92, 0xa8, 0xa6, 0x33, 0x7f, 0x81, 0x79, 0x86 } }
+#define EFI_EDID_DISCOVERED_PROTOCOL_GUID \
+    { 0x1c0c34f6, 0xd380, 0x41fa, { 0xa0, 0x49, 0x8a, 0xd0, 0x6c, 0x1a, 0x66, 0xaa } }
+typedef struct {
+    uint32_t SizeOfEdid;
+    uint8_t *Edid;
+} EFI_EDID_PROTOCOL;
 
 /* Configuration table GUIDs. */
 #define EFI_ACPI_20_TABLE_GUID \

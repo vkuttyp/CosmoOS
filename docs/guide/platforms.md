@@ -43,8 +43,9 @@ Clicking into the VM's window gives it the keyboard and the pointer, and
 they stay there: **press Control+Option to get them back**. That is
 Parallels' behaviour for a guest without Parallels Tools, which CosmoOS
 does not have (they talk to Parallels through its own device, which this
-kernel does not drive). The screen console draws 24-pixel characters at
-the window's 1024x768 (42 columns), so long log lines wrap.
+kernel does not drive). Parallels' firmware offers the guest one display
+mode, 1024x768, which Parallels shows in the middle of a larger window;
+the screen console draws a 64x24 text screen in it.
 
 The kernel finds the machine from its ACPI tables and logs one line
 saying what it found:

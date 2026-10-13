@@ -24,7 +24,7 @@ compiler.
 | `archive_phys`, `archive_size` | (v3) the boot archive `\cosmo\boot.tar`, a ustar archive holding `init` and the boot-time kernel modules (`modules/<name>.ko`) and test fixtures (`tests/*.ko`), in `COSMOBOOT_MEM_ARCHIVE` memory below 4 GiB; both zero when the file is absent. Written by `scripts/mkbootarchive.py`, parsed by `kernel/core/bootarchive.c` |
 | `boot_pagetable_root_user` | (v4) the second bootstrap root for architectures with split roots: the TTBR0 identity table on AArch64, 0 on x86-64. The kernel does not read it today; its pages are `COSMOBOOT_MEM_BOOT_PAGETABLES` and go with the rest at takeover |
 | `el2_stub_phys` | (v5, AArch64) the page holding the EL2 stub the loader installed before dropping to EL1, in memory of type `COSMOBOOT_MEM_EL2_STUB` (never freed). 0 when firmware handed over at EL1, when the machine has no EL2, or when the page could not be reserved — the kernel then reports no EL2 and boots exactly as before (`docs/kernel/arch/aarch64/design.md`, "Exception level 2") |
-| `fb_phys`, `fb_size`, `fb_width`, `fb_height`, `fb_pitch`, `fb_bpp`, and three (shift, bits) pairs | (v6) the framebuffer the firmware had already configured when the loader ran: the Graphics Output Protocol's *current* mode, never one the loader set. All zero when there is none, which is not an error. The pixel format is three (shift, bits) pairs rather than an enumeration, so a bit-mask format is described exactly like the two common ones. The range is not RAM: it is `EfiMemoryMappedIO` on a PCI display and `EfiReservedMemoryType` for a `ramfb`, and either way the PMM never hands it out |
+| `fb_phys`, `fb_size`, `fb_width`, `fb_height`, `fb_pitch`, `fb_bpp`, and three (shift, bits) pairs | (v6) the framebuffer the firmware had already configured when the loader ran: the Graphics Output Protocol's current mode: the one the display's EDID prefers when the firmware offers it (the loader sets it, `boot/uefi/display.c`, "The display mode"), else the firmware's own. All zero when there is none, which is not an error. The pixel format is three (shift, bits) pairs rather than an enumeration, so a bit-mask format is described exactly like the two common ones. The range is not RAM: it is `EfiMemoryMappedIO` on a PCI display and `EfiReservedMemoryType` for a `ramfb`, and either way the PMM never hands it out |
 | `cmdline_phys`, `cmdline_size` | (v7, spending `reserved2`) the text of `\cosmo\cmdline` up to its first NUL, NUL terminated, at most `COSMOBOOT_CMDLINE_MAX` (1023) bytes, in the last of the bootinfo pages (`COSMOBOOT_MEM_BOOTINFO`); both zero when the file is absent or empty. See "The command line" |
 | `verify_flags`, `verify_key_id[8]` | (v8) `COSMOBOOT_VERIFIED` when the loader checked `kernel.elf`, `boot.tar` and `cmdline` against `\cosmo\manifest` under a signature by a key compiled into it, with that key's id (first 8 bytes of SHA-512 of the public key, the module ring's naming); both zero from a `VERIFY_BOOT=0` loader. See "Verified boot" |
 | `boot_flags`, `boot_partuuid[16]` | (v7) `COSMOBOOT_BOOT_PARTUUID` set when the loader was read from a GPT partition: `boot_partuuid` is that partition's unique GUID in on-disk byte order, from the hard-drive node of the loader's device path. Clear for a volume with no partition table. See "The boot disk" |
@@ -233,6 +233,21 @@ The kernel's AArch64 serial console is the same port
 `serial=none` on the command line makes it ignore the record, and with no
 serial console the framebuffer is the console from the first line
 (`docs/kernel/diagnostics/design.md`).
+
+## The display mode
+
+`display_choose_mode` (`boot/uefi/display.c`), before the framebuffer is
+read for the boot info: the display's preferred mode is the first
+detailed timing of its EDID (`EFI_EDID_ACTIVE_PROTOCOL`, else
+`EFI_EDID_DISCOVERED_PROTOCOL`; the block's header and checksum are
+checked). When the firmware offers that resolution with a linear
+framebuffer the loader sets it with `SetMode`; with no EDID, a mode the
+firmware does not offer or a failed `SetMode`, the firmware's mode stays,
+as before this was written. After `ExitBootServices` the serial port gets
+one line saying what it saw: `display: modes 1024x768; firmware's
+1024x768; no EDID: kept` on Parallels Desktop 27, whose firmware offers
+one mode and no EDID. The kernel never sets a mode; that is a display
+driver's job.
 
 ## Firmware seed and time
 

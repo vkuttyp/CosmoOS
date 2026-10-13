@@ -3,9 +3,10 @@
  *
  * The loader reports the Graphics Output Protocol's current mode (boot
  * protocol v6); this file maps that memory once the VMM can, draws
- * characters into it with the generated 8x8 face, each of its pixels an
+ * characters into it with the generated 8x16 face, each of its pixels an
  * s-by-s block for a large mode (fbcon_scale), and registers itself as
- * a second console sink beside the serial port. It never sets a mode,
+ * a second console sink beside the serial port. It never sets a mode (the
+ * loader may have chosen one the display prefers, boot/uefi/display.c),
  * allocates a scanout, or talks to a display device: the pixels it writes
  * are the ones the firmware is already scanning out. Choosing modes is a
  * display driver's job (constitution section 60, "GPU later").
@@ -115,7 +116,7 @@ static FBCON_DRAW void fbcon_draw_clear_rows(struct fbcon *c, uint32_t first, ui
 
 static FBCON_DRAW void fbcon_draw_glyph(struct fbcon *c, uint32_t col, uint32_t row, unsigned char ch)
 {
-    const uint8_t *glyph = font8x8[font_index(ch)];
+    const uint8_t *glyph = font8x16[font_index(ch)];
     uint32_t s = c->scale;
     uint32_t x0 = col * c->cell_w;
     uint32_t y = row * c->cell_h;
@@ -288,17 +289,18 @@ static bool overlaps_usable_ram(uint64_t pa, uint64_t len)
  * `text` (cols * rows cells) as its character buffer. False, with a
  * warning, when the mode cannot hold one cell. */
 /*
- * How many screen pixels a font pixel is, each way. The face is 8x8, which
- * at 1024x768 (Parallels Desktop's mode) is a character a few millimetres
- * high on the screen: unreadable, and at twice that still small (the
- * owner, 2026-10-13). The scale is min(width / 320, height / 240), 1 to
- * 4: 1024x768 draws 24-pixel characters (42x32 cells), 1280x800 too
- * (53x33), 800x600 16-pixel ones (50x37), 1920x1080 and up 32-pixel ones;
- * only a mode under 640x480 keeps the 8x8 cell.
+ * How many screen pixels a font pixel is, each way. The face is 8x16, the
+ * proportions of a PC text console; at 1024x768 (Parallels Desktop's only
+ * mode) one-to-one it is a character 16 pixels tall in a window shown on
+ * a large display, small enough that the owner asked for it bigger
+ * (2026-10-13). The scale is min(width / 512, height / 384), 1 to 4:
+ * 1024x768 and QEMU x86-64's 1280x800 draw 16x32 cells (64x24, 80x25),
+ * 1920x1080 too (120x33), and a mode under 1024x768 the face as it is
+ * (800x600: 100x37).
  */
 static uint32_t fbcon_scale(uint32_t width, uint32_t height)
 {
-    uint32_t s = width / 320 < height / 240 ? width / 320 : height / 240;
+    uint32_t s = width / 512 < height / 384 ? width / 512 : height / 384;
     return s < 1 ? 1 : s > FBCON_SCALE_MAX ? FBCON_SCALE_MAX : s;
 }
 

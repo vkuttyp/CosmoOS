@@ -62,25 +62,26 @@ drawing through it for the life of the boot: `fbcon_init` later sees the
 console ready and returns without mapping it again or replaying. A boot
 that fails before `vmm_init` is then visible on the screen.
 
-The face is 8x8 cells with 5x7 glyphs, drawn in the tree
-(`tools/mkfont.py` generates `kernel/core/font8x8.c` from glyph art in
-the script); copying a font table in is the borrowed artifact "a new
+The face is 8x16 cells, the proportions of a PC or Linux text console:
+glyphs 7 pixels wide in rows 2 to 14 (capitals 10 rows, lowercase 7,
+two-row descenders), so a column and three rows are the spacing. It is
+drawn in the tree (`tools/mkfont.py` generates `kernel/core/font8x16.c`
+from glyph art in the script); until v1.0.2 it was 5x7 glyphs in 8x8
+cells, a dot-matrix look that scaled up badly on Parallels Desktop's
+screen; copying a font table in is the borrowed artifact "a new
 operating system from scratch" excludes. A byte outside 0x20..0x7e draws
 a box, so nothing is silently invisible.
 
-**The scale.** An 8-pixel character on a 1024x768 screen is a few
-millimetres high; on Parallels Desktop it was unreadable, and at twice
-that still small (the owner chose a third size, 2026-10-13). Each font
-pixel is drawn as an s-by-s block, `s = min(width / 320, height / 240)`,
-1 to 4 (`fbcon_scale`): 1024x768 draws 24-pixel characters in 42x32
-cells, QEMU x86-64's 1280x800 53x33, QEMU AArch64's 800x600 16-pixel
-characters in 50x37, 1920x1080 and up 32-pixel ones; only a mode under
-640x480 keeps the 8x8 cell. Each font row is widened once and written `s`
+**The scale.** Each font pixel is drawn as an s-by-s block, `s =
+min(width / 512, height / 384)`, 1 to 4 (`fbcon_scale`): Parallels'
+1024x768 (its firmware's only mode) and QEMU x86-64's 1280x800 draw 16x32
+cells (64x24 and 80x25), 1920x1080 120x33, and QEMU AArch64's 800x600 the
+face one-to-one (100x37). Each font row is widened once and written `s`
 times (a division per pixel doubled a scroll's cost under TCG). A scaled
 screen writes as many pixels per repaint as an unscaled one, but with
-few columns a log line takes several rows, so it scrolls a quarter of
-the screen at a time rather than an eighth. The `fbcon:` line says the
-cell size (`... cells of 24x24 pixels ...`).
+fewer columns a log line takes more rows, so it scrolls a quarter of the
+screen at a time rather than an eighth. The `fbcon:` line says the cell
+size (`... cells of 16x32 pixels ...`).
 
 Two things shape the rest. The sink runs on the panic path, so it
 allocates nothing, sleeps never, and holds no lock of its own --

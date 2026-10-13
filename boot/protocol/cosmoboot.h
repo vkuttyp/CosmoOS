@@ -196,9 +196,10 @@ struct cosmoboot_info {
      * loader could not reserve the page: EL1 then has no way up. */
     uint64_t el2_stub_phys;
 
-    /* v6: the framebuffer the firmware had already configured when the
-     * loader ran (UEFI: the Graphics Output Protocol's current mode). The
-     * loader never sets a mode; it reports the one it found. All zero
+    /* v6: the framebuffer as the loader leaves it (UEFI: the Graphics
+     * Output Protocol's current mode, which the loader sets to the one
+     * the display's EDID prefers when the firmware offers it, else leaves
+     * as the firmware set it; boot/uefi/display.c). All zero
      * when the firmware offered no linear framebuffer, and the kernel
      * then has no display, which is not an error.
      *
