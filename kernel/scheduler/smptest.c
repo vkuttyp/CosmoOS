@@ -2713,6 +2713,17 @@ bool selftest_sched_migrate_stress(const char **reason)
                     }
                 load = sched_cpu_load((unsigned)cpu);
             }
+            /* And whether it is on a ready list at all, and visible there
+             * (2026-10-13, second sighting: READY on a CPU of load 7 and
+             * not run for 2 s -- stranded, or invisible to pick_next). */
+            unsigned qcpu = 0;
+            int qlevel = -1;
+            bool qbit = false, queued = run->t[i] && sched_test_find_queued(run->t[i], &qcpu, &qlevel, &qbit);
+            kerror("selftest: sched-migrate-stress: %s worker %u: %s (cpu %u, level %d, bitmap bit %s), priority %d, "
+                   "flags 0x%x, ready for %lld ms",
+                   run->kind[i], i, queued ? "on a ready list" : "on no ready list", qcpu, qlevel, qbit ? "set" : "clear",
+                   run->t[i] ? run->t[i]->priority : -1, run->t[i] ? run->t[i]->flags : 0u,
+                   run->t[i] ? (long long)((clock_now_ns() - run->t[i]->ready_since_ns) / 1000000) : -1ll);
             kerror("selftest: sched-migrate-stress: %s worker %u did not run again: entered %lld us, first round "
                    "%lld us, rounds %llu (%llu at the migrator's stop), thread state %d on cpu %d%s; "
                    "that cpu runs %s (worker index %d, -1 for none of ours), load %u",
