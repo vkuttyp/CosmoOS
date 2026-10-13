@@ -144,8 +144,22 @@ struct vnode {
 struct cosmofs_check_report;
 struct cosmofs_scrub_stats;
 
+/* What statfs reports about the filesystem a vnode is on (Linux's
+ * struct statfs, which df reads). Sizes are in `bsize` units; 0 blocks
+ * means the filesystem has no fixed size to report (ramfs with no page
+ * budget, procfs), as on Linux. */
+struct vfs_statfs {
+    uint32_t magic;           /* Linux's f_type for this kind of filesystem */
+    uint32_t bsize;
+    uint64_t blocks, bfree, bavail;
+    uint64_t files, ffree;    /* 0: not counted */
+    uint32_t namelen;
+    unsigned flags;           /* MOUNT_RDONLY */
+};
+
 struct fs_type {
     const char *name;
+    uint32_t magic;           /* statfs's f_type: Linux's value where Linux has this kind of filesystem */
     int (*mount)(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount *mnt);
     int (*unmount)(struct mount *mnt);
     int (*sync)(struct mount *mnt);
@@ -165,6 +179,11 @@ struct fs_type {
     /* Optional: make an empty filesystem on `bdev`, which is not mounted
      * (vfs_format checks). Reached from /dev/blkctl (roadmap M2). */
     int (*format)(struct blkdev *bdev);
+    /* Optional: fill blocks/bfree/bavail (and files/ffree) of `out`, which
+     * the VFS has set up with its defaults. Without it a mount whose page
+     * cache is its store reports its page budget, and any other reports
+     * no size. */
+    int (*statfs)(struct mount *mnt, struct vfs_statfs *out);
     struct list_node link;
 };
 
@@ -410,6 +429,13 @@ int vfs_truncate(struct vnode *start, const char *path, uint64_t size);
  * a directory, -EINVAL for a non-regular vnode, -ETXTBSY, -ENOTSUP. */
 int vfs_ftruncate(struct vnode *vn, uint64_t size);
 int vfs_stat(struct vnode *start, const char *path, struct cosmo_stat *st);
+/* statfs(2): about the filesystem `path` (or the held vnode `vn`) is on. */
+int vfs_statfs(struct vnode *start, const char *path, struct vfs_statfs *out);
+int vnode_statfs(struct vnode *vn, struct vfs_statfs *out);
+/* /proc/mounts: one Linux-format line per mount the caller's namespace
+ * sees, the root first ("<source> <path> <fstype> <rw|ro> 0 0"), into
+ * `out`; returns the length, cut at a whole line short of `n`. */
+int vfs_mounts_render(char *out, size_t n);
 /* stat without following a link named by the last component. */
 int vfs_lstat(struct vnode *start, const char *path, struct cosmo_stat *st);
 /* Create `path` as a symbolic link to `target`. -EEXIST, -EPERM where

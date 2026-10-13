@@ -1098,14 +1098,78 @@ static void watchdog_check(uint64_t now, struct arch_trap_frame *frame)
     }
 }
 
+/*
+ * Load averages, as Linux computes them (kernel/sched/loadavg.c): every
+ * five seconds CPU 0's tick counts the runnable threads on every CPU and
+ * folds the count into three exponential averages, 11-bit fixed point,
+ * with Linux's constants for 1, 5 and 15 minutes. A sample a quiet CPU 0
+ * missed is folded in with the count it finds when it next ticks.
+ * Written by CPU 0 alone; a reader takes each average whole and may see
+ * one from a sample older than the next.
+ */
+#define LOAD_FSHIFT    11
+#define LOAD_FIXED_1   (1ul << LOAD_FSHIFT)
+#define LOAD_PERIOD_NS (5ull * NS_PER_SEC)
+static const unsigned long g_load_exp[3] = { 1884, 2014, 2037 };
+static unsigned long g_avenrun[3];
+static uint64_t g_load_next_ns;
+
+static void load_sample(uint64_t now_ns)
+{
+    if (now_ns < g_load_next_ns)
+        return;
+    unsigned long active = 0;
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
+        if (cpu_online(c))
+            active += sched_cpu_load(c);
+    active *= LOAD_FIXED_1;
+    for (unsigned missed = 0; now_ns >= g_load_next_ns && missed < 64; missed++) {
+        for (unsigned i = 0; i < 3; i++) {
+            unsigned long a = g_avenrun[i] * g_load_exp[i] + active * (LOAD_FIXED_1 - g_load_exp[i]);
+            if (active >= g_avenrun[i])
+                a += LOAD_FIXED_1 - 1;   /* round up while rising, as Linux does */
+            __atomic_store_n(&g_avenrun[i], a / LOAD_FIXED_1, __ATOMIC_RELAXED);
+        }
+        g_load_next_ns += LOAD_PERIOD_NS;
+    }
+    if (now_ns >= g_load_next_ns)
+        g_load_next_ns = now_ns + LOAD_PERIOD_NS;   /* away longer than 64 periods: the averages are the count */
+}
+
+void sched_loadavg(unsigned long out[3], unsigned shift)
+{
+    for (unsigned i = 0; i < 3; i++) {
+        unsigned long v = __atomic_load_n(&g_avenrun[i], __ATOMIC_RELAXED);
+        out[i] = shift >= LOAD_FSHIFT ? v << (shift - LOAD_FSHIFT) : v >> (LOAD_FSHIFT - shift);
+    }
+}
+
+uint64_t sched_cpu_idle_ns(unsigned cpu, uint64_t now_ns)
+{
+    if (cpu >= CONFIG_MAX_CPUS || !cpu_online(cpu))
+        return 0;
+    struct runqueue *rq = &g_rqs[cpu];
+    arch_irq_state_t s = spin_lock_irqsave(&rq->lock);
+    uint64_t idle = 0;
+    if (rq->idle != NULL) {
+        idle = rq->idle->run_time_ns;
+        if (rq->current == rq->idle)
+            idle += clock_delta_ns(now_ns, rq->idle->last_start_ns);
+    }
+    spin_unlock_irqrestore(&rq->lock, s);
+    return idle;
+}
+
 void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
 {
     struct percpu *pc = this_cpu();
     struct runqueue *rq = pc->rq;
     if (rq == NULL)
         return;
-    if (pc->cpu_id == 0)
+    if (pc->cpu_id == 0) {
         watchdog_check(now_ns, frame);
+        load_sample(now_ns);
+    }
     lockup_tick(frame, now_ns);
 
     spin_lock(&rq->lock);

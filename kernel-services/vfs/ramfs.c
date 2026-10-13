@@ -701,6 +701,7 @@ static int ramfs_unmount(struct mount *mnt)
 }
 
 struct fs_type ramfs_fs_type = {
+    .magic = 0x858458f6u,   /* Linux's RAMFS_MAGIC */
     .name = "ramfs",
     .mount = ramfs_mount,
     .unmount = ramfs_unmount,

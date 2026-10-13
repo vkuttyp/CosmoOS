@@ -2954,6 +2954,22 @@ static int cosmofs_sync_counted(struct mount *mnt, bool writeback)
     return rc;
 }
 
+/* statfs: the pool's blocks; what a file may still take is what is free
+ * beyond the metadata reserve (cfs_alloc_run's rule for data). Read
+ * without the filesystem's lock: a moment's figures, as df wants. */
+static int cosmofs_statfs(struct mount *mnt, struct vfs_statfs *out)
+{
+    struct cfs *fs = mnt->fs_priv;
+    uint64_t total = __atomic_load_n(&fs->nblocks, __ATOMIC_RELAXED);
+    uint64_t free = __atomic_load_n(&fs->free_blocks, __ATOMIC_RELAXED);
+    uint64_t reserve = __atomic_load_n(&fs->reserve, __ATOMIC_RELAXED);
+    out->bsize = CFS_BLOCK;
+    out->blocks = total;
+    out->bfree = free;
+    out->bavail = free > reserve ? free - reserve : 0;
+    return 0;
+}
+
 static int cosmofs_sync(struct mount *mnt)
 {
     return cosmofs_sync_counted(mnt, false);
@@ -3197,6 +3213,8 @@ void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms)
 
 struct fs_type cosmofs_fs_type = {
     .name = "cosmofs",
+    .magic = 0x4d534643u,   /* "CFSM", the metadata header's magic: Linux has no number for this one */
+    .statfs = cosmofs_statfs,
     .mount = cosmofs_mount,
     .unmount = cosmofs_unmount,
     .sync = cosmofs_sync,

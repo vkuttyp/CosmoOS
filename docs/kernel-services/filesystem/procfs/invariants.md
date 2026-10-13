@@ -19,16 +19,16 @@ domain in `/proc`. Confirmed against the bug: with the filter dropped
 from the lookup, the unprivileged process opens the root-owned
 directory and the assertion fails.
 
-**P2. `/proc` holds facts about processes and nothing else.** System
-wide values stay in `sysctl`, whose names are a curated list; the log
-stays in `dmesg`; device nodes stay in `/dev`. A second spelling of a
-fact that already has a home is how a namespace becomes the dumping
-ground section 56 forbids.
+**P2. `/proc` holds facts about processes and the system files of P4,
+nothing else.** System wide values stay in `sysctl`, whose names are a
+curated list; the log stays in `dmesg`; device nodes stay in `/dev`. A
+second spelling of a fact that already has a home is how a namespace
+becomes the dumping ground section 56 forbids.
 
-Check: the filesystem synthesises exactly `<pid>/status`, `<pid>/limits`
-and `self`, and the self-test requires an unknown name under `/proc` and
-under `/proc/<pid>` to be `ENOENT`, so a file appears only when someone
-adds it deliberately.
+Check: the filesystem synthesises exactly the names in the API's table,
+and the self-test requires an unknown name under `/proc` (`cpuinfo`) and
+under `/proc/<pid>` (`environ`) to be `ENOENT`, so a file appears only
+when someone adds it deliberately.
 
 **P3. A file's length and its text come from the same rendering.** Each
 open renders once and every read of that handle returns that text. The
@@ -47,3 +47,20 @@ Check: the self-test reads `/proc/self/status` and requires the length
 it gets to match what the file reported; and it opens the `status` of a
 child that has exited and been reaped, requiring `ESRCH` rather than
 stale text.
+
+**P4. A system file is one Linux programs read by that path, in Linux's
+format.** `meminfo`, `stat`, `loadavg`, `uptime` and `mounts` are on a
+fixed list (`g_system_files`) because a Linux program here opens each
+(`free`, `top`, `df`, `uptime`). Each says only what this kernel
+measures, in the fields and units Linux's file uses; a field with no
+figure is 0 or absent (design.md, "Layout"), never an estimate made to
+look like a measurement. `<pid>/stat` and `<pid>/cmdline` hold the same
+promise for a process.
+
+Check: the user-mode self-test reads each and requires Linux's shape --
+`MemTotal:` first, `cpu  ` then `cpu0 ` and `btime` in `stat`, three
+two-decimal averages, `running/all` and the last pid in `loadavg`, `/`
+and `/proc procfs` in `mounts`, its own pid and `(init)` in
+`<pid>/stat`, a NUL-terminated `cmdline` naming it -- and BusyBox's
+scripted test runs the programs that read them (`free`, `df`, `uptime`,
+`top -b`).

@@ -26,6 +26,8 @@
 typedef uint32_t pid_t;
 
 #define PROCESS_NAME_MAX 32
+/* What /proc/<pid>/cmdline keeps of argv: the first this many bytes. */
+#define PROCESS_CMDLINE_MAX 256
 
 /* User address-space layout (the canonical lower half on both targets, page aligned).
  * Since roadmap M5 every exec randomises four of these, Linux-style
@@ -240,6 +242,12 @@ struct process {
     struct thread *main_thread;        /* the first thread; its Linux tid is the pid */
     uint64_t interp_base, exec_entry;  /* dynamic executables: the interpreter's bias, the program's entry */
     char exec_path[128];               /* AT_EXECFN */
+    /* argv as exec gave it, each string NUL-terminated, back to back and
+     * cut at PROCESS_CMDLINE_MAX: what /proc/<pid>/cmdline reads. Set
+     * with exec_path, under `lock` at exec; a fork child inherits it. */
+    char cmdline[PROCESS_CMDLINE_MAX];
+    uint16_t cmdline_len;
+    uint64_t start_ns;                 /* clock_now_ns when made (spawn or fork); exec keeps it */
     /* vfork (docs/kernel/process/design.md, "fork"): the parent waits on
      * vfork_wq until the child stops borrowing its space -- it execs or
      * its last thread is gone -- and process_vfork_release sets this. */
@@ -621,6 +629,8 @@ static inline void process_put(struct process *p) { kobject_put(&p->obj); }
 void process_last_thread_gone(struct process *p);
 
 unsigned process_count(void);
+/* The pid most recently given out (/proc/loadavg); 0 before the first. */
+pid_t process_last_pid(void);
 void process_dump_all(void);
 
 extern const struct personality personality_native;

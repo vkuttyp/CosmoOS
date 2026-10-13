@@ -17,10 +17,12 @@
  * That is what keeps the VFS from depending on one of its filesystems.
  */
 
+#include <kernel/blk.h>
 #include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/mutex.h>
+#include <kernel/printf.h>
 #include <kernel/log.h>
 #include <kernel/mountns.h>
 #include <kernel/string.h>
@@ -152,6 +154,78 @@ static int64_t fsctl_list(struct fsctl_open *o)
     hdr->bytes = sizeof(struct cosmo_fsctl_mount);
     fsctl_set_result(o, buf, sizeof(*hdr) + (size_t)n * sizeof(struct cosmo_fsctl_mount));
     return 0;
+}
+
+/* One field of a /proc/mounts line, escaped as Linux escapes it: a space,
+ * tab, newline or backslash as \ooo, so a reader splitting on blanks
+ * gets the path back whole. */
+static size_t mounts_field(char *out, size_t n, const char *s)
+{
+    size_t used = 0;
+    for (; *s != '\0'; s++) {
+        bool esc = *s == ' ' || *s == '\t' || *s == '\n' || *s == '\\';
+        size_t need = esc ? 4 : 1;
+        if (used + need >= n)
+            break;
+        if (esc)
+            used += (size_t)ksnprintf(out + used, n - used, "\\%03o", (unsigned)(unsigned char)*s);
+        else
+            out[used++] = *s;
+    }
+    if (used < n)
+        out[used] = '\0';
+    return used;
+}
+
+static int mounts_line(char *out, size_t n, const struct mount *mnt, const char *path)
+{
+    char src[BLKDEV_NAME_MAX + 8], dir[VFS_PATH_MAX];
+    if (mnt->bdev != NULL)
+        ksnprintf(src, sizeof(src), "/dev/%s", mnt->bdev->name);
+    else
+        strlcpy(src, mnt->fs->name, sizeof(src));
+    mounts_field(dir, sizeof(dir), path);
+    return ksnprintf(out, n, "%s %s %s %s 0 0\n", src, dir, mnt->fs->name,
+                     (mnt->flags & MOUNT_RDONLY) ? "ro" : "rw");
+}
+
+/* The walk fsctl_list makes, printed as /proc/mounts (vfs.h). A line that
+ * does not fit is left out whole, and so is every line after it. Under
+ * g_mount_list_lock alone: procfs calls this from its lookup, holding the
+ * directory's vnode lock, and g_mounts_lock is taken before vnode locks
+ * (vfs_internal.h). */
+int vfs_mounts_render(char *out, size_t n)
+{
+    int used = 0;
+    bool full = false;
+    char line[VFS_PATH_MAX + 96];
+    spin_lock(&g_mount_list_lock);
+    struct mount_ns *ns = mountns_current();
+    if (g_root_mount != NULL) {
+        int len = mounts_line(line, sizeof(line), g_root_mount, "/");
+        if ((size_t)used + (size_t)len < n) {
+            memcpy(out + used, line, (size_t)len);
+            used += len;
+        } else {
+            full = true;
+        }
+    }
+    struct mount_ns_ref *r;
+    list_for_each_entry(r, &ns->mounts, ns_link) {
+        if (full || r->mnt == g_root_mount)
+            continue;
+        int len = mounts_line(line, sizeof(line), r->mnt, r->path);
+        if ((size_t)used + (size_t)len >= n) {
+            full = true;
+            continue;
+        }
+        memcpy(out + used, line, (size_t)len);
+        used += len;
+    }
+    spin_unlock(&g_mount_list_lock);
+    if ((size_t)used < n)
+        out[used] = '\0';
+    return used;
 }
 
 /*

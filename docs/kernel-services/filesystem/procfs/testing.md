@@ -7,9 +7,19 @@ covers what the files say and what the namespace refuses:
   `/proc/self/limits` names a limit — `self` resolves to the caller.
 - The same facts appear under the caller's own pid, so `self` is not a
   special case with its own answer.
-- `/proc/meminfo`, `/proc/self/cmdline`, `/proc/0`, `/proc/01` and
+- `/proc/self/cmdline` is NUL-terminated and names init, and
+  `/proc/self/stat` starts with its pid and `(init)`.
+- The system files (P4) have Linux's shape: `meminfo` starts with
+  `MemTotal:` and has `MemAvailable:`; `stat` has the `cpu` total, a
+  `cpu0` line and `btime`; `loadavg` is three two-decimal averages,
+  `running/all` with at least this thread running, and a last pid no
+  smaller than init's; `uptime` is a number; `mounts` has `/` and
+  `/proc procfs`; `/proc` lists `meminfo` and `mounts`.
+- `/proc/cpuinfo`, `/proc/self/environ`, `/proc/0`, `/proc/01` and
   `/proc/99999` are all `ENOENT`. `01` matters: a name that is not a
   pid must miss rather than be rounded into one.
+- BusyBox's scripted test (`tests/busybox/ash.sh`) runs the programs
+  that read these files: `free`, `df /`, `uptime`, `top -b -n 1`.
 - A child that has exited and been reaped answers a read with `ESRCH`
   rather than stale text.
 

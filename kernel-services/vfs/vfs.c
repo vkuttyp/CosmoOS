@@ -28,6 +28,7 @@
 #include "vfs_internal.h"
 
 struct mutex g_mounts_lock;
+spinlock_t g_mount_list_lock = SPINLOCK_INIT("mount-list");
 static LIST_HEAD(g_fs_types);
 LIST_HEAD(g_mounts);
 struct mount *g_root_mount;
@@ -686,7 +687,9 @@ int vfs_mount_at(struct vnode *start, const char *path, const char *fsname, stru
     ref->ns = ns;
     strlcpy(ref->path, path, sizeof(ref->path));   /* where this namespace holds it */
     list_push_back(&mnt->ns_refs, &ref->mnt_link);
+    spin_lock(&g_mount_list_lock);
     list_push_back(&ns->mounts, &ref->ns_link);
+    spin_unlock(&g_mount_list_lock);
     mutex_unlock(&dir->lock);
     list_push_back(&g_mounts, &mnt->link);
     g_nr_mounts++;
@@ -814,7 +817,9 @@ int vfs_umount_at(struct vnode *start, const char *path, unsigned flags)
     if (seen > 1) {
         list_remove(&myref->mnt_link);
         mutex_unlock(&mp->lock);
+        spin_lock(&g_mount_list_lock);
         list_remove(&myref->ns_link);
+        spin_unlock(&g_mount_list_lock);
         mutex_unlock(&g_mounts_lock);
         kfree(myref);
         kinfo("vfs: %s: dropped from this mount namespace; %u still see it", path, seen - 1);
@@ -877,7 +882,9 @@ int vfs_umount_at(struct vnode *start, const char *path, unsigned flags)
             mutex_unlock(&g_mounts_lock);
             return -EINVAL;   /* someone else dropped this namespace's view */
         }
+        spin_lock(&g_mount_list_lock);
         list_remove(&myref->ns_link);
+        spin_unlock(&g_mount_list_lock);
         mutex_unlock(&g_mounts_lock);
         kfree(myref);
         kinfo("vfs: %s: dropped from this mount namespace; %u still see it (gained during the drain)",
@@ -922,7 +929,9 @@ int vfs_umount_at(struct vnode *start, const char *path, unsigned flags)
     list_init(&mnt->cover_link);
     list_remove(&myref->mnt_link);
     mutex_unlock(&mp->lock);
+    spin_lock(&g_mount_list_lock);
     list_remove(&myref->ns_link);
+    spin_unlock(&g_mount_list_lock);
     kfree(myref);
     list_remove(&mnt->link);
     g_nr_mounts--;
@@ -1117,15 +1126,22 @@ int vfs_switch_root(struct vnode *start, const char *path, struct mount **old_ou
     list_remove(&m->cover_link);
     list_init(&m->cover_link);
     struct mount_ns_ref *ref, *tmp;
+    struct list_node dead;
+    list_init(&dead);
+    spin_lock(&g_mount_list_lock);
     list_for_each_entry_safe(ref, tmp, &m->ns_refs, mnt_link) {
-        list_remove(&ref->mnt_link);
         list_remove(&ref->ns_link);
+        list_push_back(&dead, &ref->ns_link);   /* freed below, outside the leaf lock */
+    }
+    g_root_mount = m;
+    spin_unlock(&g_mount_list_lock);
+    list_for_each_entry_safe(ref, tmp, &dead, ns_link) {
+        list_remove(&ref->mnt_link);
         kfree(ref);
     }
     mutex_unlock(&m_old_mp->lock);
     m->mountpoint = NULL;
     m->parent = NULL;
-    g_root_mount = m;
     /* The old root is reachable from nowhere now: no mountpoint, no
      * namespace. It stays on g_mounts until vfs_release_old_root. */
     r->unmounting = true;
@@ -2763,6 +2779,36 @@ int vfs_stat(struct vnode *start, const char *path, struct cosmo_stat *st)
     return 0;
 }
 
+int vnode_statfs(struct vnode *vn, struct vfs_statfs *out)
+{
+    struct mount *mnt = vn->mnt;
+    memset(out, 0, sizeof(*out));
+    out->magic = mnt->fs->magic;
+    out->bsize = PAGE_SIZE;
+    out->namelen = VFS_NAME_MAX;
+    out->flags = mnt->flags & MOUNT_RDONLY;
+    if (mnt->fs->statfs != NULL)
+        return mnt->fs->statfs(mnt, out);
+    uint64_t limit = __atomic_load_n(&mnt->cache_limit_pages, __ATOMIC_RELAXED);
+    if ((mnt->flags & MOUNT_CACHE_IS_STORE) && limit != 0) {
+        uint64_t used = __atomic_load_n(&mnt->cache_pages, __ATOMIC_RELAXED);
+        out->blocks = limit;
+        out->bfree = out->bavail = used < limit ? limit - used : 0;
+    }
+    return 0;
+}
+
+int vfs_statfs(struct vnode *start, const char *path, struct vfs_statfs *out)
+{
+    struct vnode *vn;
+    int rc = vfs_lookup(start, path, &vn);
+    if (rc)
+        return rc;
+    rc = vnode_statfs(vn, out);
+    vnode_put(vn);
+    return rc;
+}
+
 int vfs_lstat(struct vnode *start, const char *path, struct cosmo_stat *st)
 {
     struct vnode *vn;
@@ -2876,7 +2922,9 @@ int vfs_mount_root(const char *fsname, struct blkdev *bdev, unsigned flags)
     if (rc)
         return rc;
     mutex_lock(&g_mounts_lock);
+    spin_lock(&g_mount_list_lock);
     g_root_mount = root;
+    spin_unlock(&g_mount_list_lock);
     list_push_back(&g_mounts, &root->link);
     g_nr_mounts = 1;
     mutex_unlock(&g_mounts_lock);

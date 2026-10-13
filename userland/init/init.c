@@ -3840,8 +3840,9 @@ static int lists(const char *dir, const char *name)
 }
 
 /*
- * /proc (docs/kernel-services/filesystem/procfs/, P1-P3). What it holds
- * is facts about processes, and what it shows is exactly what procinfo
+ * /proc (docs/kernel-services/filesystem/procfs/, P1-P4). What it holds
+ * is facts about processes and a fixed list of Linux's system files, and
+ * what it shows of processes is exactly what procinfo
  * would -- including in the listing, since names alone say which pids
  * exist.
  */
@@ -3865,10 +3866,53 @@ static void proc_fs_selftest(void)
     CHECK(slurp(path, buf2, sizeof(buf2)) > 0);
     CHECK(strstr(buf2, want) != NULL);
 
+    /* argv as exec gave it, NUL-separated; and Linux's one-line record,
+     * which starts with the pid and the name in parentheses. */
+    ssize_t cl = slurp("/proc/self/cmdline", buf2, sizeof(buf2));
+    CHECK(cl > 0 && buf2[cl - 1] == '\0' && strstr(buf2, "init") != NULL);
+    snprintf(want, sizeof(want), "%d (init) ", getpid());
+    CHECK(slurp("/proc/self/stat", buf2, sizeof(buf2)) > 0);
+    CHECK(strncmp(buf2, want, strlen(want)) == 0);
+
+    /* P4: the fixed list of Linux system files, in Linux's formats. */
+    CHECK(slurp("/proc/meminfo", buf2, sizeof(buf2)) > 0);
+    CHECK(strncmp(buf2, "MemTotal: ", 10) == 0 && strstr(buf2, "\nMemAvailable: ") != NULL);
+    CHECK(slurp("/proc/stat", buf2, sizeof(buf2)) > 0);
+    CHECK(strncmp(buf2, "cpu  ", 5) == 0 && strstr(buf2, "\ncpu0 ") != NULL && strstr(buf2, "\nbtime ") != NULL);
+    {
+        /* "A.AA B.BB C.CC running/all last" */
+        CHECK(slurp("/proc/loadavg", buf2, sizeof(buf2)) > 0);
+        char *q = buf2;
+        for (int i = 0; i < 3; i++) {
+            char *e;
+            (void)strtoul(q, &e, 10);
+            CHECK(e > q && *e == '.');
+            q = e + 1;
+            (void)strtoul(q, &e, 10);
+            CHECK(e == q + 2 && *e == ' ');
+            q = e + 1;
+        }
+        char *e;
+        unsigned long run = strtoul(q, &e, 10);
+        CHECK(e > q && *e == '/');
+        q = e + 1;
+        unsigned long all = strtoul(q, &e, 10);
+        CHECK(e > q && *e == ' ');
+        q = e + 1;
+        unsigned long last = strtoul(q, &e, 10);
+        CHECK(e > q && *e == '\n');
+        CHECK(run >= 1 && run <= all && last >= (unsigned long)getpid());   /* this thread is running */
+    }
+    CHECK(slurp("/proc/uptime", buf2, sizeof(buf2)) > 0);
+    CHECK(buf2[0] >= '0' && buf2[0] <= '9' && strchr(buf2, '.') != NULL);
+    CHECK(slurp("/proc/mounts", buf2, sizeof(buf2)) > 0);
+    CHECK(strstr(buf2, " / ") != NULL && strstr(buf2, " /proc procfs ") != NULL);
+    CHECK(lists("/proc", "meminfo") && lists("/proc", "mounts"));
+
     /* P2: nothing appears here that nobody added. */
     struct stat pst;
-    CHECK(stat("/proc/meminfo", &pst) < 0 && errno == ENOENT);
-    CHECK(stat("/proc/self/cmdline", &pst) < 0 && errno == ENOENT);
+    CHECK(stat("/proc/cpuinfo", &pst) < 0 && errno == ENOENT);
+    CHECK(stat("/proc/self/environ", &pst) < 0 && errno == ENOENT);
     CHECK(stat("/proc/0", &pst) < 0 && errno == ENOENT);
     CHECK(stat("/proc/01", &pst) < 0 && errno == ENOENT);   /* not a pid, not rounded into one */
     CHECK(stat("/proc/99999", &pst) < 0 && errno == ENOENT);

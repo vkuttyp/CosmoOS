@@ -8,18 +8,29 @@ became a dumping ground did so one reasonable-looking file at a time.
 
 ## What `/proc` is for, and what it is not for
 
-**`/proc` holds facts about processes. Everything else stays where it
-already lives.** That is the whole rule, and it is enforceable because
-the name says it: a file belongs here only if it describes a process.
+**`/proc` holds facts about processes, and a fixed list of Linux's own
+system files. Everything else stays where it already lives.** A file
+belongs here if it describes a process, or if it is on that list.
 
 There is already a curated place for system-wide values -- `sysctl`,
 whose names are a list in one array (`kernel.*`, `hw.*`, `vm.*`, `hv.*`,
 `net.*`) and whose contents somebody had to add deliberately. `dmesg`
 reads the log ring. `/dev` holds device nodes that drivers create. None
-of those move here, and `/proc/meminfo` and `/proc/cpuinfo` are not
-added, because `sysctl vm.pages_free` and `sysctl hw.ncpu` already
-answer those and a second spelling of the same fact is how a namespace
-starts to rot.
+of those move here.
+
+The list (revised in v1.0.2, the everyday commands): `meminfo`, `stat`,
+`loadavg`, `uptime` and `mounts`. This reverses the first design, which
+left `/proc/meminfo` out because `sysctl vm.pages_free` already answered
+it. That holds for programs written for this system; it does not hold
+for the Linux programs it runs, which find these facts by these paths in
+these formats and nowhere else -- BusyBox's `free` opens
+`/proc/meminfo`, `top` opens `stat`, `meminfo` and `loadavg`, and `df`
+reads `/proc/mounts` through `getmntent`. A file earns a place on the
+list by being one a Linux program here opens; it is written in Linux's
+format and holds nothing Linux's file does not (P4). The list is in one
+array (`g_system_files`), as sysctl's names are, so adding to it is a
+deliberate act. `/proc/cpuinfo` is still not added: nothing here reads
+it.
 
 What `/proc` adds that no existing interface does is **addressability**:
 a process's facts at a path, so that `cat`, the shell and any program
@@ -32,12 +43,28 @@ is readable by anything.
 ```text
   /proc/<pid>/status     one `key: value` line per fact
   /proc/<pid>/limits     one line per resource limit
+  /proc/<pid>/fd/        a link per open handle (roadmap M4)
+  /proc/<pid>/stat       Linux's one-line record (top, ps)
+  /proc/<pid>/cmdline    argv, NUL-separated
   /proc/self             a link to the reader's own directory
+  /proc/meminfo, stat, loadavg, uptime, mounts   the system files (P4)
 ```
 
-Three files rather than thirty. Each new file is a promise to keep
-producing that text, so the bar for adding one is that something needs
-it and nothing else offers it.
+Each new file is a promise to keep producing that text, so the bar for
+adding one is that something needs it and nothing else offers it.
+
+The Linux-format files say what this kernel measures and no more, in the
+places Linux's readers look. A field the kernel has no figure for is 0
+where readers expect the field and absent where they tolerate its
+absence: no user/system split is kept, so all busy time is user time;
+page faults are not counted; a CPU's idle time is its idle thread's run
+time (`sched_cpu_idle_ns`) and the rest is busy; the load averages are
+Linux's (`sched_loadavg`: runnable threads every five seconds, the same
+constants); MemAvailable is MemFree, because the page cache gives pages
+back only past its own limit and not when memory runs short. A
+process's memory sizes in `<pid>/stat` are 0: its address space can be
+torn down under a reader (the process layer's P34), and nothing reads it
+from here until that read has a reference (inventory).
 
 `status` carries what `procinfo` already returns -- pid, ppid, name,
 state, uid, gid, threads, syscalls, cpu time -- and `domain`, which
@@ -103,8 +130,8 @@ zero-length read that looks like an idle process.
 there is nothing to put in it that `sysctl` does not already hold with a
 curated name list; a second empty namespace is not observability.
 
-Also absent, each because the kernel does not keep the fact: a process's
-argument vector (`argv` is copied into the new address space and not
-retained), its open handles as a directory (the handle table has no
-names for its entries), its memory map, and anything that would require
-holding a lock across a read of user-controlled length.
+Also absent, each because the kernel does not keep the fact or cannot
+read it safely: a process's environment, its memory map and sizes, and
+anything that would require holding a lock across a read of
+user-controlled length. The argument vector is kept, cut at 256 bytes
+(`PROCESS_CMDLINE_MAX`), at spawn and exec, and inherited by a fork.
