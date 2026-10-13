@@ -403,6 +403,28 @@ static void test_readonly_chain_length(void)
     virtq_free(vq);
 }
 
+/* A legacy queue is the device's size, up to VIRTQ_LEGACY_MAX_SIZE (QEMU
+ * 10's legacy virtio-net has 1024); a modern one is capped at
+ * VIRTQ_MAX_SIZE. */
+static void test_legacy_queue_size(void)
+{
+    struct virtqueue *vq = NULL;
+    memset(&g_vdev, 0, sizeof(g_vdev));
+    strcpy(g_vdev.dev.name, "fake0");
+    g_vdev.tr = &g_tr_legacy;
+    g_max_size = 1024;
+    EXPECT(virtq_alloc(&g_vdev, 0, 0, NULL, &vq) == 0 && vq != NULL && vq->size == 1024);
+    virtq_free(vq);
+    g_vdev.vq[0] = NULL;
+    vq = NULL;
+    g_max_size = 2048;
+    EXPECT(virtq_alloc(&g_vdev, 0, 0, NULL, &vq) == -ENOSPC);
+    g_vdev.tr = &g_tr;
+    g_max_size = 1024;
+    EXPECT(virtq_alloc(&g_vdev, 0, 0, NULL, &vq) == 0 && vq != NULL && vq->size == VIRTQ_MAX_SIZE);
+    virtq_free(vq);
+}
+
 static const struct host_test tests[] = {
     { "virtq-alloc-free", test_alloc_free },
     { "virtq-normal-chain", test_normal_chain },
@@ -411,6 +433,7 @@ static const struct host_test tests[] = {
     { "virtq-hostile-used", test_hostile_used_ring },
     { "virtq-churn", test_churn },
     { "virtq-readonly-chain-length", test_readonly_chain_length },
+    { "virtq-legacy-queue-size", test_legacy_queue_size },
 };
 
 int main(void)

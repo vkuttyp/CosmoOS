@@ -14,10 +14,10 @@
 | Network device: receive posting, transmit chains, header handling | Phase 8 `net-arp` (ARP through `eth0`) and `net-harness` (TCP and UDP echo with the host over QEMU user-mode networking); boot marker `virtio-net: virtioN is eth0` |
 | Network removal: completed and outstanding buffer ownership, map balance, RX accounting, reset-time callbacks | `vnet-remove-pending`, `vnet-remove-late`: debug synthetic transport over real queues, DMA and irq_poll; `tools/vnet-remove-probe.py --old --arch=<arch>` restores main's removal body in a throwaway worktree |
 | Persistent RNG callback after reset | `VRNG-RESET-REPOST`: `vrng_completed` reaches the real post gate after the stopping boundary; `tools/virtio-rng-repost-probe.py --old --arch=<arch>` restores the old gate in a throwaway worktree |
-| Legacy transport through an I/O BAR, the legacy net header (`MRG_RXBUF`) | x86-64 `make test-smp2`: a legacy-only virtio-net (`QEMU_VNET_OPTS=,disable-modern=on`) is eth0 and the whole network suite runs over it; the harness requires `virtio-pci: ...: virtio device 1 as virtioN (N MSI-X vectors; legacy, registers in I/O space)` |
+| Legacy transport through an I/O BAR, the legacy net header (`MRG_RXBUF`), a 1024-entry legacy queue | x86-64 `make test-smp2`: a legacy-only virtio-net with a 1024-entry receive queue (`QEMU_VNET_OPTS=,disable-modern=on,rx_queue_size=1024`) is eth0 and the whole network suite runs over it; the harness requires `virtio-pci: ...: virtio device 1 as virtioN (N MSI-X vectors; legacy, registers in I/O space)` |
 | Legacy transport through a memory BAR | Parallels Desktop 27 only (its network adapter): DHCP, DNS and `wget` on the live and the installed system (`docs/audit/2026-10-13-parallels-devices-report.md`); no QEMU device puts legacy registers in memory |
 | Module dependency handling | boot: the four drivers declare `deps = "virtio"` and load after it |
-| Split-ring logic against a hostile device | `tests/host/test_virtq.c` (`make host-test`, ASan/UBSan): the real `virtqueue.c` over a fake transport; the test acts as the peer and writes descriptor links that self-loop, form a two-element loop, point out of range or at a free descriptor; used elements with an id out of range, never posted, not a head, completed twice; lengths beyond the buffers, and a legacy device's length on a read-only chain ignored (`virtq-readonly-chain-length`); empty, oversized, full-table (boundary descriptor) and normal multi-descriptor chains; 500 rounds of out-of-order completions |
+| Split-ring logic against a hostile device | `tests/host/test_virtq.c` (`make host-test`, ASan/UBSan): the real `virtqueue.c` over a fake transport; the test acts as the peer and writes descriptor links that self-loop, form a two-element loop, point out of range or at a free descriptor; used elements with an id out of range, never posted, not a head, completed twice; lengths beyond the buffers, a legacy device's length on a read-only chain ignored (`virtq-readonly-chain-length`), legacy queues of the device's size up to 1024 (`virtq-legacy-queue-size`); empty, oversized, full-table (boundary descriptor) and normal multi-descriptor chains; 500 rounds of out-of-order completions |
 
 Details of the self-tests are in `docs/kernel/device/testing.md`.
 
@@ -49,7 +49,7 @@ To try a different device set, append to `QEMU_EXTRA`, for example
 ## Gaps
 
 - No negative tests on the target: a legacy device without
-  `MRG_RXBUF` or with a queue larger than 256, a legacy device in I/O
+  `MRG_RXBUF` or with a queue larger than 1024, a legacy device in I/O
   space on AArch64, feature rejection, notify offsets outside the window, probe failure inside a
   driver, console dead state (the ring logic itself is covered on the
   host by `test_virtq`). ~~Unload with requests in flight~~ is covered

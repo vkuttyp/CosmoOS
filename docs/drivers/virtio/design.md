@@ -62,8 +62,11 @@ dropped by the device (drivers complete their bookkeeping themselves).
 `virtq_alloc(vdev, index, max, callback, &vq)`: the size is the device's
 maximum for that queue (`queue_max_size`), capped by `max` and
 `VIRTQ_MAX_SIZE` (256), and must be a power of two. A legacy queue's size
-is the device's, which the driver cannot change: one larger than `max`
-or 256 is refused (`-ENOSPC`, logged). One `dma_alloc`
+is the device's, which the driver cannot change: it is taken whole up to
+`VIRTQ_LEGACY_MAX_SIZE` (1024; QEMU 10's legacy virtio-net has 1024),
+`max` not applying, and a larger one is refused (`-ENOSPC`, logged).
+virtio-net keeps at most 256 transmits in flight whatever the transmit
+queue's size. One `dma_alloc`
 holds the descriptor table (16 × size), the available ring (6 + 2 ×
 size, immediately after, 16-aligned) and the used ring (6 + 8 × size,
 on the next page boundary), zeroed. Descriptors are chained into a free

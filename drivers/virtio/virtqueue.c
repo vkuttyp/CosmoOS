@@ -83,17 +83,20 @@ int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, vir
         return -ENOENT;
     unsigned size = devmax;
     if (vdev->tr->legacy) {
-        /* A legacy queue is the device's size; the driver cannot shrink it. */
-        if (devmax > VIRTQ_MAX_SIZE || (max && max < devmax)) {
+        /* A legacy queue is the device's size; the driver cannot shrink
+         * it, so it is taken whole up to VIRTQ_LEGACY_MAX_SIZE and `max`
+         * does not apply (a driver uses as much of it as it needs). */
+        if (devmax > VIRTQ_LEGACY_MAX_SIZE) {
             kerror("virtio: %s: legacy queue %u has %u entries, more than this driver takes (%u)", vdev->dev.name,
-                   index, devmax, max && max < VIRTQ_MAX_SIZE ? max : VIRTQ_MAX_SIZE);
+                   index, devmax, VIRTQ_LEGACY_MAX_SIZE);
             return -ENOSPC;
         }
+    } else {
+        if (max && max < size)
+            size = max;
+        if (size > VIRTQ_MAX_SIZE)
+            size = VIRTQ_MAX_SIZE;
     }
-    if (max && max < size)
-        size = max;
-    if (size > VIRTQ_MAX_SIZE)
-        size = VIRTQ_MAX_SIZE;
     if ((size & (size - 1)) != 0)
         return -EINVAL;   /* the spec requires a power of two */
 

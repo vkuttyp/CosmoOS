@@ -39,6 +39,7 @@
 
 #define VIRTIO_MAX_QUEUES 8u
 #define VIRTQ_MAX_SIZE    256u
+#define VIRTQ_LEGACY_MAX_SIZE 1024u   /* a legacy queue is the device's size: QEMU 10's legacy virtio-net has 1024 */
 #define VIRTIO_MSI_NO_VECTOR 0xffffu
 
 struct virtio_device;

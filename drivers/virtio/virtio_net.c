@@ -186,7 +186,11 @@ static void vnet_buffer_take(struct mbuf **buffers, unsigned count, struct mbuf 
  * private records; no descriptor API or mbuf layout change is needed. */
 static void vnet_tx_init(struct vnet *v)
 {
-    for (unsigned i = 0; i < v->tx->size; i++) {
+    /* A legacy device's queue may be larger (QEMU 10's is 1024): the
+     * first VIRTQ_MAX_SIZE descriptors' worth of frames in flight is
+     * plenty, and the rest of the ring stays unused. */
+    unsigned n = v->tx->size < ARRAY_SIZE(v->tx_buf) ? v->tx->size : (unsigned)ARRAY_SIZE(v->tx_buf);
+    for (unsigned i = 0; i < n; i++) {
         v->tx_buf[i].next = v->tx_free;
         v->tx_free = &v->tx_buf[i];
     }

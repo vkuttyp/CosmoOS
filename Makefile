@@ -255,11 +255,13 @@ test-net-login: $(IMAGE)
 # It also runs two devices in their other modes (docs/drivers/nvme/design.md,
 # docs/drivers/virtio/design.md): the NVMe controller with one MSI-X
 # vector, the driver's one-vector mode, and on x86-64 a legacy-only
-# virtio-net, the legacy transport through an I/O BAR (AArch64 cannot
+# virtio-net with a 1024-entry receive queue (CI's QEMU 10 makes it so by
+# default, Homebrew's QEMU makes it 256; set here so both run the same),
+# the legacy transport through an I/O BAR (AArch64 cannot
 # reach PCI I/O space; Parallels Desktop's memory-BAR legacy device is
 # the other half).
 ifeq ($(ARCH),x86_64)
-SMP2_VNET_OPTS := ,disable-modern=on
+SMP2_VNET_OPTS := ,disable-modern=on,rx_queue_size=1024
 endif
 test-smp2:
 	$(Q)QEMU_NVME_OPTS=,msix_qsize=1 QEMU_VNET_OPTS='$(SMP2_VNET_OPTS)' $(MAKE) --no-print-directory -C $(ROOT) \

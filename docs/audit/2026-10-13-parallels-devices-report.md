@@ -139,6 +139,15 @@ copy`). With both disks NVMe they are two namespaces of one controller,
 `nvme0n2` (live, with the `boot` partition) and `nvme0n1` (blank). The
 guide's Parallels section says to set the VM up that way.
 
+**A legacy queue of 1024 on CI.** #379's first CI run failed x86-64's
+`test-smp2`: CI's QEMU (10, the Debian trixie container) gives the legacy
+virtio-net 1024-entry queues where Homebrew's gives 256, and the
+transport refused anything over 256, so eth0 was the e1000e on the other
+network and the harness could not reach the guest. A legacy queue's size
+is the device's to choose; the transport now takes it whole up to 1024,
+virtio-net keeps at most 256 transmits in flight, and `test-smp2` asks
+QEMU for 1024 explicitly so both QEMUs run the same.
+
 ## Parallels iteration log
 
 | # | Seen | Cause | Fix |
