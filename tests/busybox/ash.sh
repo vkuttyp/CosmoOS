@@ -143,6 +143,40 @@ expect id 0 "$(id -u)"
 expect sha256sum ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad "$(printf abc | sha256sum | cut -d' ' -f1)"
 expect which /bin/ls "$(which ls)"
 
+# --- v1.0.2's everyday commands, and the /proc files they read ----------------
+expect md5sum 900150983cd24fb0d6963f7d28e17f72 "$(printf abc | md5sum | cut -d' ' -f1)"
+dd if=/dev/zero of=z bs=512 count=3 2> /dev/null
+expect dd 1536 "$(stat -c %s z)"
+cmp d1 d1
+expect cmp-same 0 "$?"
+cmp d1 d2 > /dev/null
+expect cmp-differ 1 "$?"
+expect hexdump "00000000  41 42" "$(printf AB | hexdump -C | head -n 1 | cut -c1-15)"
+expect du ft "$(du -s ft | cut -f2)"
+expect whoami root "$(whoami)"
+clear > cl
+if [ -s cl ]; then ok clear; else bad clear "wrote nothing"; fi
+expect less "x y" "$(printf 'x\ny\n' | less | xargs)"   # not a terminal: less copies
+expect uptime 1 "$(uptime | grep -c 'load average: [0-9]*\.[0-9][0-9], ')"
+expect free 1 "$(free | awk '/^Mem:/ { print ($2 > 0 && $4 > 0 && $4 <= $2) }')"
+expect df / "$(df / | tail -n 1 | awk '{ print $NF }')"
+expect proc-mounts / "$(awk '$2 == "/" { print $2 }' /proc/mounts)"
+expect proc-cmdline 1 "$(tr '\0' ' ' < /proc/$$/cmdline | grep -c 'ash.sh')"
+expect proc-stat "$$" "$(cut -d' ' -f1 /proc/$$/stat)"
+top -b -n 1 > top.txt
+expect top-mem 1 "$(grep -c '^Mem: ' top.txt)"
+expect top-load 1 "$(grep -c '^Load average: ' top.txt)"
+expect top-self 1 "$(grep -c 'top -b -n 1' top.txt)"
+# Keystrokes through a pipe, as a terminal would send them. A pipe has no
+# window size: without $LINES and $COLUMNS vi asks the terminal for its
+# cursor position (ESC [ 6 n) and reads the answer from stdin, eating the
+# first keystroke. After an ESC, vi reads on until 50 ms pass with no
+# input, to tell a lone ESC from an escape sequence; a pipe already at
+# end of file answers that read with EOF, which vi takes as its input
+# gone (as on Linux), so the writer stays open past the ESC.
+{ printf 'ihello\033'; sleep 1; printf ':wq\r'; } | LINES=24 COLUMNS=80 vi v.txt > /dev/null 2>&1
+expect vi hello "$(cat v.txt)"
+
 cd /
 rm -rf "$T"
 echo "BBTEST: $n checks, $fails failed"

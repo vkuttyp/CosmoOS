@@ -73,11 +73,12 @@ cosmo$ ls /bin
 ...wget...
 ```
 
-The applets are `sh` (ash) and `[ awk basename cat chmod cp cut date
-diff dirname echo env expr false find grep gunzip gzip head id ln ls
-mkdir mv nslookup printf pwd readlink rm rmdir sed seq sha256sum sleep
-sort stat stty tail tar tee test touch tr true tty uname uniq wc wget
-which xargs` (`ports/busybox/applets`); `/sbin` holds CosmoOS's own
+The applets are `sh` (ash) and `[ awk basename cat chmod clear cmp cp
+cut date dd df diff dirname du echo env expr false find free grep gunzip
+gzip head hexdump id less ln ls md5sum mkdir mv nslookup printf pwd
+readlink rm rmdir sed seq sha256sum sleep sort stat stty tail tar tee
+test top touch tr true tty uname uniq uptime vi wc wget which whoami
+xargs` (`ports/busybox/applets`); `/sbin` holds CosmoOS's own
 `cosmo-install`, `dmesg`, `fsctl`, `hostname`, `kill`, `mount`, `netcfg`,
 `pkg`, `priv`, `ps`, `svc`, `sysctl`, `umount` and `vmctl`.
 
@@ -112,8 +113,8 @@ cosmo$ jobs
 ## What is missing compared with Linux
 
 The shell and its applets behave as on Linux, but the system around them
-is smaller. Among what you will notice: no `ping`, `dd`, `md5sum`,
-`less` or `vi`; no hard links (`ln` without `-s`); no `/sys`; `wget` speaks HTTP only; one
+is smaller. Among what you will notice: no `ping`; `top` shows no
+process memory sizes; no hard links (`ln` without `-s`); no `/sys`; `wget` speaks HTTP only; one
 user, root; no swap. [Known limitations](limitations.md) has the full
 list.
 

@@ -279,14 +279,18 @@ console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
   `awk` (integers and `%.2f`), `find -type f`, `xargs -n 1`, `tar` and
   `tar -z`, `gzip`, `gunzip`, `diff` (both statuses), `basename`,
   `dirname`, `expr`, `tee`, `stat -c %s`, `uname -s` (Linux), `id -u`,
-  `sha256sum` of `abc`, `which ls`.
+  `sha256sum` of `abc`, `which ls`. Then v1.0.2's everyday commands:
+  `md5sum` of `abc`, `dd` of three blocks, `cmp` (both statuses),
+  `hexdump -C`, `du -s`, `whoami` (root, from the image's `/etc/passwd`),
+  `clear`, `less` writing to a pipe, `uptime`'s load averages, `free`,
+  `df /`, the `/proc` files they read (`mounts`, `<pid>/cmdline`,
+  `<pid>/stat`), `top -b -n 1` (its memory and load lines and its own
+  command line), and `vi` driven by keystrokes from a pipe.
 - **`suite.sh`, BusyBox's testsuite**: the files decision 8 names -- cut,
   sed, grep, tr, sort, uniq, head, tail, expr, seq, basename, dirname, wc,
   xargs, tar -- each through runtest, from a copy of the testsuite (a
   reproducible `testsuite.tgz` of BusyBox's own directory) under `/tmp`
-  with the binary and `.config` beside it. testing.sh compares with
-  `cmp`, which is not an M3 applet; `suite.sh` puts a two-line stand-in on
-  runtest's PATH that answers with cmp's status through `diff`. Every
+  with the binary and `.config` beside it. Every
   case must PASS, be SKIPPED or UNTESTED by runtest itself (a feature
   the configuration leaves out), or be one of the exclusions below; each
   file must pass at least one case.
@@ -296,13 +300,8 @@ console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
 | sed | sed embedded NUL | fails the same way under Linux (arm64 container, this binary and testsuite): this build's behaviour, not the kernel's |
 | sed | sed NUL in command | the same |
 | sed | sed nonexistent label | the same |
-| tail | tail: -c +N with largish N | needs `dd`, not an M3 applet |
-| xargs | xargs-works | needs `md5sum`, not an M3 applet |
 | tar | tar_with_link_with_size | needs `bunzip2`, not an M3 applet |
 | tar | tar_with_prefix_fields | needs `bunzip2` |
-| tar | tar Two zeroed blocks is a ('truncated') empty tarball | needs `dd` |
-| tar | tar Twenty zeroed blocks is an empty tarball | needs `dd` |
-| tar | tar extract tgz | needs `dd` |
 | tar | tar Symlink attack: create symlink and then write through it | needs `uudecode`, not an M3 applet |
 | tar | tar hardlinks and repeated files | makes a hard link; hard links are outside M3 |
 | tar | tar hardlinks mode | makes a hard link |

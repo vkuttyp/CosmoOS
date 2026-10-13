@@ -45,8 +45,10 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 ## Shell and commands
 
 - The commands are the BusyBox applets listed in [the shell
-  page](shell.md): no `ping`, `dd`, `md5sum`, `less`, `vi`, `bunzip2`;
-  no hard links; no `/sys`.
+  page](shell.md): no `ping`, `bunzip2`; no hard links; no `/sys`.
+- `/proc` has the process directories and a fixed set of system files
+  (`meminfo`, `stat`, `loadavg`, `uptime`, `mounts`). A process's
+  memory sizes read as 0, so `top` shows none (inventory, v1.0.2).
 - The terminal driver honours the common modes (canonical input, echo,
   signals, raw mode, window size); most other termios flags and control
   characters are accepted and ignored (inventory 1.4).

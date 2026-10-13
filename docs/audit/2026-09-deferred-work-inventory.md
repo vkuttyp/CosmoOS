@@ -1077,10 +1077,14 @@ each; none is needed by M2's acceptance test.
   not applied to native creation (M3 PR 4).
 - Linux `nanosleep` interrupted by a stop is restarted with its whole
   duration, not the remainder (the core's restart re-executes the call).
-- BusyBox's testsuite compares with `cmp`, which is not an M3 applet;
-  `tests/busybox/suite.sh` supplies a stand-in over `diff`.
+- ~~BusyBox's testsuite compares with `cmp`, which is not an M3 applet;
+  `tests/busybox/suite.sh` supplies a stand-in over `diff`.~~ **Closed by
+  v1.0.2's everyday commands**: `cmp` is an applet and the stand-in is gone.
 - ~~ash job control (`ASH_JOB_CONTROL`) is off: an installed system's
   console has no `^Z`, `jobs` or `fg` until PTYs and job control for ash.~~
   **Closed by M4 PR 2** (PTYs, controlling terminals, job control in ash
   on the console and on a pty; `docs/audit/2026-10-11-m4-interactive-networked-report.md`).
-
+- `/proc/<pid>/stat` reports VSZ and RSS as 0, so `top` and `ps` show no
+  process memory: reading another process's space needs a reference on it,
+  and exit drops the space (`vm_space_put`, P34) without `p->lock`
+  (v1.0.2's everyday commands).

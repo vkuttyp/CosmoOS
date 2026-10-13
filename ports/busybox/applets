@@ -53,3 +53,18 @@ wget
 nslookup
 stty
 tty
+# v1.0.2's everyday commands: an editor and a pager, what the machine is
+# doing, and the small tools a shell session reaches for.
+vi
+less
+top
+free
+df
+du
+uptime
+whoami
+clear
+md5sum
+dd
+cmp
+hexdump
