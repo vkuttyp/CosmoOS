@@ -2718,7 +2718,10 @@ bool selftest_sched_migrate_stress(const char **reason)
              * not run for 2 s -- stranded, or invisible to pick_next). */
             unsigned qcpu = 0;
             int qlevel = -1;
-            bool qbit = false, queued = run->t[i] && sched_test_find_queued(run->t[i], &qcpu, &qlevel, &qbit);
+            bool qbit = false, queued = false;
+#if CONFIG_SELFTEST
+            queued = run->t[i] && sched_test_find_queued(run->t[i], &qcpu, &qlevel, &qbit);
+#endif
             kerror("selftest: sched-migrate-stress: %s worker %u: %s (cpu %u, level %d, bitmap bit %s), priority %d, "
                    "flags 0x%x, ready for %lld ms",
                    run->kind[i], i, queued ? "on a ready list" : "on no ready list", qcpu, qlevel, qbit ? "set" : "clear",
