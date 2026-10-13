@@ -69,19 +69,18 @@ operating system from scratch" excludes. A byte outside 0x20..0x7e draws
 a box, so nothing is silently invisible.
 
 **The scale.** An 8-pixel character on a 1024x768 screen is a few
-millimetres high, and on Parallels Desktop it was unreadable. Each font
-pixel is drawn as an s-by-s block, s the largest integer with at least
-512x384 pixels of the mode per step (`fbcon_scale`: `min(width / 512,
-height / 384)`, 1 to 4): 1024x768 and QEMU's 1280x800 draw 16-pixel
-characters (64x48 and 80x50 cells), 1920x1080 120x67, 2560x1600 32-pixel
-ones in 80x50, and a mode under 1024x768 keeps the 8x8 cell. A scaled
-screen has a quarter of the cells, each four times the pixels, so a
-repaint or a scroll writes as many pixels as before; each font row is
-widened once and written `s` times (a division per pixel doubled a
-scroll's cost under TCG). What does cost more is that lines wrap at
-fewer columns, so the screen scrolls more often: `fb-bench` on x86-64's
-1280x800 went from 1.3 ms to 2.7 ms an amortised line. The `fbcon:` line
-says the cell size (`... cells of 16x16 pixels ...`).
+millimetres high; on Parallels Desktop it was unreadable, and at twice
+that still small (the owner chose a third size, 2026-10-13). Each font
+pixel is drawn as an s-by-s block, `s = min(width / 320, height / 240)`,
+1 to 4 (`fbcon_scale`): 1024x768 draws 24-pixel characters in 42x32
+cells, QEMU x86-64's 1280x800 53x33, QEMU AArch64's 800x600 16-pixel
+characters in 50x37, 1920x1080 and up 32-pixel ones; only a mode under
+640x480 keeps the 8x8 cell. Each font row is widened once and written `s`
+times (a division per pixel doubled a scroll's cost under TCG). A scaled
+screen writes as many pixels per repaint as an unscaled one, but with
+few columns a log line takes several rows, so it scrolls a quarter of
+the screen at a time rather than an eighth. The `fbcon:` line says the
+cell size (`... cells of 24x24 pixels ...`).
 
 Two things shape the rest. The sink runs on the panic path, so it
 allocates nothing, sleeps never, and holds no lock of its own --

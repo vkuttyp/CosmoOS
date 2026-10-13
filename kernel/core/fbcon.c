@@ -290,15 +290,15 @@ static bool overlaps_usable_ram(uint64_t pa, uint64_t len)
 /*
  * How many screen pixels a font pixel is, each way. The face is 8x8, which
  * at 1024x768 (Parallels Desktop's mode) is a character a few millimetres
- * high on the screen: unreadable. The scale is the largest integer that
- * keeps the mode at least 512x384 cells' worth of pixels per scale step,
- * so 1024x768 and 1920x1080 draw 16-pixel characters (64x48 and 120x67
- * cells), 2560x1600 draws 32-pixel ones (80x50), and anything under
- * 1024x768 keeps the 8x8 cell. At most 4.
+ * high on the screen: unreadable, and at twice that still small (the
+ * owner, 2026-10-13). The scale is min(width / 320, height / 240), 1 to
+ * 4: 1024x768 draws 24-pixel characters (42x32 cells), 1280x800 too
+ * (53x33), 800x600 16-pixel ones (50x37), 1920x1080 and up 32-pixel ones;
+ * only a mode under 640x480 keeps the 8x8 cell.
  */
 static uint32_t fbcon_scale(uint32_t width, uint32_t height)
 {
-    uint32_t s = width / 512 < height / 384 ? width / 512 : height / 384;
+    uint32_t s = width / 320 < height / 240 ? width / 320 : height / 240;
     return s < 1 ? 1 : s > FBCON_SCALE_MAX ? FBCON_SCALE_MAX : s;
 }
 
@@ -329,7 +329,11 @@ static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, 
 static void fbcon_start(struct fbcon *c)
 {
     memset(c->text, ' ', (size_t)c->cols * c->rows);
-    c->scroll_rows = c->rows / 8 ? c->rows / 8 : 1;
+    /* A scroll repaints the screen. With few columns a log line takes
+     * several rows, so a scaled screen moves a quarter of itself at once
+     * rather than an eighth: half the repaints for the same text. */
+    uint32_t part = c->scale > 1 ? 4 : 8;
+    c->scroll_rows = c->rows / part ? c->rows / part : 1;
     c->ready = true;
     fbcon_draw_clear_rows(c, 0, c->rows);
 }
