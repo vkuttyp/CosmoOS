@@ -2895,4 +2895,8 @@ See the [history index](README.md).
   NVMe (the live image attached as NVMe too: SATA is not on PCI), boots
   the installed system, seeds in milliseconds, has DHCP, DNS, `wget` and
   ssh. Review found the histogram estimate alone would credit a cycle.
+  The PR's CI found mutex starvation (`sched-migrate-stress`: a releaser
+  that re-locks before the woken waiter runs wins for ever): a waiter
+  overtaken once is now handed the mutex at the next unlock (S33,
+  `mutex-handoff`, module ABI 10).
   Report: `docs/audit/2026-10-13-parallels-devices-report.md`.
