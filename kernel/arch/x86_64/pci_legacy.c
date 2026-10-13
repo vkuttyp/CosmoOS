@@ -61,6 +61,11 @@ bool arch_pci_io_available(void)
     return true;
 }
 
+uint32_t arch_pci_io_limit(void)
+{
+    return 0x10000u;
+}
+
 uint32_t arch_pci_io_read(uint32_t port, unsigned width)
 {
     return width == 1 ? inb((uint16_t)port) : width == 2 ? inw((uint16_t)port) : inl((uint16_t)port);

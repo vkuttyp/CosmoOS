@@ -471,9 +471,12 @@ static int vpci_probe(struct pci_device *pdev, const struct pci_id *id)
     spinlock_init(&v->lock, "virtio-pci");
 
     /* Walk the vendor capabilities. */
+    bool modern_caps = false;   /* any COMMON or NOTIFY capability, mapped or not */
     for (uint8_t cap = pci_find_capability(pdev, PCI_CAP_ID_VENDOR, 0); cap;
          cap = pci_find_capability(pdev, PCI_CAP_ID_VENDOR, cap)) {
         uint8_t type = pci_cfg_read8(pdev, (uint16_t)(cap + 3));
+        if (type == VIRTIO_PCI_CAP_COMMON || type == VIRTIO_PCI_CAP_NOTIFY)
+            modern_caps = true;
         switch (type) {
         case VIRTIO_PCI_CAP_COMMON:
             if (v->common == NULL)
@@ -497,8 +500,19 @@ static int vpci_probe(struct pci_device *pdev, const struct pci_id *id)
             break;
         }
     }
+    if ((v->common == NULL || v->notify == NULL) && (modern_caps || pdev->device < 0x1000 || pdev->device > 0x103f)) {
+        /* A modern device whose windows could not be mapped, or a 0x1af4
+         * function that is not a transitional virtio device: not legacy,
+         * and not driven at all. */
+        kerror("virtio-pci: %s: %s; refused", pdev->dev.name,
+               modern_caps ? "a modern capability window could not be mapped" : "not a virtio device id");
+        vpci_unmap_all(v);
+        kfree(v);
+        return -ENODEV;
+    }
     if (v->common == NULL || v->notify == NULL) {
-        /* Legacy-only: the register block at the start of BAR0. */
+        /* Legacy-only (no modern capability at all; a transitional id,
+         * 0x1000-0x103f): the register block at the start of BAR0. */
         vpci_unmap_all(v);
         v->common = v->notify = v->isr = v->devcfg = NULL;
         v->legacy = true;

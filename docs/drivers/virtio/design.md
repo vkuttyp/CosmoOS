@@ -110,8 +110,10 @@ walk vendor capabilities (`pci_find_capability(PCI_CAP_ID_VENDOR)`),
 reading `cfg_type` at `+3`, BAR at `+4`, offset at `+8`, length at
 `+12`, and for NOTIFY the multiplier at `+16`; `cap_window` maps each
 referenced BAR once (`pci_map_bar`) and bounds-checks offset + length
-against the BAR size. Without COMMON and NOTIFY the device is legacy
-only and gets the legacy transport (below). Then `pci_enable_device(bus master)`,
+against the BAR size. A device with no COMMON or NOTIFY capability at
+all and a transitional device id (`0x1000`-`0x103f`) is legacy-only and
+gets the legacy transport (below); one whose modern windows exist but
+could not be mapped, or a `0x1af4` function with another id, is refused. Then `pci_enable_device(bus master)`,
 `pci_msix_enable(VIRTIO_MAX_QUEUES + 1)` (at least 2 vectors required),
 entry 0 bound to the configuration-change handler and written to
 `msix_config`, `device_id = pci device >= 0x1040 ? pci device - 0x1040 :
@@ -133,6 +135,10 @@ the NOTIFY window. Remove: unregister the virtio device (which runs the
 device driver's remove), status 0, `pci_msix_disable`, unmap BARs.
 
 ### The legacy transport (`vleg_transport`, spec 4.1.4.8)
+
+`struct virtio_transport` says it is legacy in its last field, `legacy`,
+so a driver module built before the field existed still finds every
+callback at its offset.
 
 A device without the modern capabilities -- Parallels Desktop 27's
 network adapter, 1af4:1000 -- keeps one register block at the start of
@@ -236,7 +242,9 @@ legacy device's header is 10 bytes unless `MRG_RXBUF` is negotiated, when
 it is the same 12 bytes, so on a legacy device the driver asks for
 `MRG_RXBUF` and refuses one that does not offer it; a receive buffer is a
 whole cluster, larger than any frame without GSO, so `num_buffers` is
-always 1, and a frame that says otherwise is dropped. Queue 0 receive: 32 mbuf clusters posted
+always 1; a frame that says otherwise is dropped, and so are the
+`num_buffers - 1` used entries that follow it (its continuation, which
+carry no header of their own). Queue 0 receive: 32 mbuf clusters posted
 whole (`data = buf`), `dma_map`ped device-writable; the completion
 callback drops frames shorter than header plus 14 bytes, sets the
 length, strips the header with `m_adj` and hands the mbuf to

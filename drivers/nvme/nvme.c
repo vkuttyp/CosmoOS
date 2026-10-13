@@ -365,6 +365,8 @@ static void nvme_irq_one(unsigned vector, struct arch_trap_frame *frame, void *a
     struct nvme_ctrl *c = arg;
     irq_poll_sched(&c->admin.poll);
     unsigned n = __atomic_load_n(&c->irq_ioq, __ATOMIC_ACQUIRE);
+    if (n > NVME_MAX_IOQ)
+        n = NVME_MAX_IOQ;   /* the array's bound, whatever the count says */
     for (unsigned i = 0; i < n; i++)
         irq_poll_sched(&c->ioq[i]->poll);
 }

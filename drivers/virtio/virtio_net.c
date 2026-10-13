@@ -69,6 +69,7 @@ struct vnet {
 #endif
     bool tx_csum, rx_csum;
     uint64_t rx_drops, tx_drops, rx_csum_valid, rx_csum_finished, tx_csum_offloaded;
+    unsigned rx_merged_left;   /* MRG_RXBUF: buffers still to come of a frame being dropped (receive path only) */
 };
 
 /* A seam armed only for the synthetic transport in the removal tests.
@@ -255,6 +256,13 @@ static unsigned vnet_rx_done(struct virtqueue *vq, unsigned budget)
         spin_unlock_irqrestore(&v->lock, s);
         vnet_unmap(v, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
         m->pkt.dma = 0;
+        if (v->rx_merged_left != 0) {
+            /* The rest of a frame spread over several buffers: no header of
+             * its own, dropped with the frame's first buffer. */
+            v->rx_merged_left--;
+            vnet_free_mbuf(v, m);
+            continue;
+        }
         if (len < VNET_HDR_LEN + 14 || len > MCLBYTES) {
             v->rx_drops++;
             vnet_free_mbuf(v, m);
@@ -263,7 +271,11 @@ static unsigned vnet_rx_done(struct virtqueue *vq, unsigned budget)
         struct vnet_hdr hdr;
         memcpy(&hdr, m->data, sizeof(hdr));
         if (virtio_has_feature(v->vdev, VIRTIO_NET_F_MRG_RXBUF) && hdr.num_buffers != 1) {
-            v->rx_drops++;   /* a frame across buffers: never posted for, so not reassembled */
+            /* A frame across buffers: never posted for, so not reassembled.
+             * The next num_buffers - 1 used entries are its continuation
+             * and are dropped with it, not read as frames. */
+            v->rx_drops++;
+            v->rx_merged_left = hdr.num_buffers > 1 ? (unsigned)hdr.num_buffers - 1u : 0u;
             vnet_free_mbuf(v, m);
             continue;
         }

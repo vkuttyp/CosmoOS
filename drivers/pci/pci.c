@@ -426,7 +426,8 @@ vaddr_t pci_map_bar(struct pci_device *p, unsigned bar)
 
 bool pci_io_bar_usable(const struct pci_device *p, unsigned bar)
 {
-    return bar < PCI_MAX_BARS && p->bar[bar].io && p->bar[bar].size != 0 && arch_pci_io_available();
+    return bar < PCI_MAX_BARS && p->bar[bar].io && p->bar[bar].size != 0 && arch_pci_io_available() &&
+           p->bar[bar].base + p->bar[bar].size <= arch_pci_io_limit();   /* inside the port space */
 }
 
 static bool io_in_bar(const struct pci_device *p, unsigned bar, uint32_t off, unsigned width)

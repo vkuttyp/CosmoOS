@@ -41,7 +41,8 @@ mapping failure. Sleeps (VMM). Unmap with `device_unmap_mmio`.
 Purpose: an I/O BAR's registers. `pci_io_bar_usable` is true for an I/O
 BAR the architecture can reach (`arch_pci_io_available`: x86-64's port
 instructions; AArch64 never, its I/O window being described only in the
-DSDT). The read and write take a width of 1, 2 or 4 and check
+DSDT) and that ends inside the port space (`arch_pci_io_limit`, 0x10000
+on x86-64). The read and write take a width of 1, 2 or 4 and check
 `off + width` against the BAR: outside it, or on an unusable BAR, a read
 returns all ones and a write does nothing. Any context. Used by the
 legacy virtio transport (docs/drivers/virtio/design.md).

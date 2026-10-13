@@ -24,6 +24,11 @@ bool arch_pci_io_available(void)
     return false;
 }
 
+uint32_t arch_pci_io_limit(void)
+{
+    return 0;
+}
+
 uint32_t arch_pci_io_read(uint32_t port, unsigned width)
 {
     (void)port; (void)width;

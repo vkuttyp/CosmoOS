@@ -21,6 +21,9 @@ void arch_pci_legacy_write(uint8_t bus, uint8_t slot, uint8_t func, uint16_t off
  * described only in the DSDT, which this kernel does not interpret); the
  * read and write are then never called. width is 1, 2 or 4. */
 bool arch_pci_io_available(void);
+/* The end of the port space: an I/O BAR must end at or below it (x86-64:
+ * 0x10000, 16-bit ports). */
+uint32_t arch_pci_io_limit(void);
 uint32_t arch_pci_io_read(uint32_t port, unsigned width);
 void arch_pci_io_write(uint32_t port, unsigned width, uint32_t v);
 

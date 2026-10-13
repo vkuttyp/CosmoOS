@@ -47,9 +47,6 @@ struct virtqueue;
 
 struct virtio_transport {
     const char *name;
-    /* A legacy (pre-1.0) transport: 32 feature bits, no VERSION_1 and no
-     * FEATURES_OK handshake (virtio_device_init). */
-    bool legacy;
     uint64_t (*get_features)(struct virtio_device *vdev);
     void     (*set_features)(struct virtio_device *vdev, uint64_t features);
     uint8_t  (*get_status)(struct virtio_device *vdev);
@@ -65,6 +62,10 @@ struct virtio_transport {
     /* Mandatory: the last reference to the virtio device dropped, after
      * virtio_device_unregister; free the transport's memory. */
     void     (*release)(struct virtio_device *vdev);
+    /* A legacy (pre-1.0) transport: 32 feature bits, no VERSION_1 and no
+     * FEATURES_OK handshake (virtio_device_init). Last, so the callback
+     * slots keep their offsets for a module built before it. */
+    bool legacy;
 };
 
 struct virtio_device {
