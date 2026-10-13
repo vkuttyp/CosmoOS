@@ -175,3 +175,16 @@ so reaches the harness only through the recorded port. Gap: no automated
 test runs a machine whose SPCR names a 16550 or whose only port is a
 DBG2's; the DBG2 path has run on Parallels Desktop 27 only
 (`docs/kernel/arch/aarch64/design.md`, "Platform discovery").
+
+## BT17. The firmware's seed has one live copy once the kernel runs
+
+The loader writes it into the boot info (protocol v10); `bootinfo_init`
+copies it into the kernel and wipes the boot info's copy before
+anything else can read the page, and `bootinfo_take_fw_seed` hands it to
+`random_init` once and wipes the kernel's copy, which `random_init`
+wipes again from its stack after absorbing it. The boot info page stays
+mapped for the boot's life; a seed left in it would be a secret any later
+reader of the page could recompute the pool's first state from. Check:
+review of `bootinfo.c` and `random.c` (the wipes use volatile stores);
+the ordinary boots log `random: firmware seed: 64 bytes` once. Gap: no
+test reads the page back after `bootinfo_init`.

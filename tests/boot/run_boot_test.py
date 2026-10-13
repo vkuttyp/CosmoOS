@@ -249,7 +249,17 @@ GUARD = os.environ.get("QEMU_GUARD", "0") != "0"
 # with neither has no source at all and must show the unseeded behaviour.
 RNG = os.environ.get("QEMU_RNG", "1") != "0"
 HWRNG = os.environ.get("QEMU_HWRNG", "0") != "0"
-SEEDED = RNG or HWRNG
+# The firmware's seed (boot protocol v10): QEMU's OVMF and AAVMF offer
+# EFI_RNG_PROTOCOL over the virtio-rng, so with one the firmware seeds the
+# pool before any driver loads. BOOT_FW_SEED=0 says the image's command
+# line has random.firmware=off: the seed is ignored, and the virtio-rng
+# must seed the pool on its own.
+FW_SEED = os.environ.get("BOOT_FW_SEED", "1") != "0"
+# The jitter source (docs/kernel/security/design.md §6, "Timing jitter")
+# runs when there is no CPU source and no firmware seed. BOOT_JITTER=0
+# says the command line has random.jitter=off.
+JITTER = os.environ.get("BOOT_JITTER", "1") != "0"
+SEEDED = RNG or HWRNG or JITTER
 
 BOOT_MARKERS = [
     r"^cosmoboot-uefi v\d+",
@@ -290,7 +300,9 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     # has no root partition, so the live root stays (docs/boot/design.md).
     r"^boot volume: a GPT partition$",
     r"^\[ INFO\] part: \S+1: \S+ partition 1, sectors 2048-\d+, type esp, partuuid [0-9a-f-]{36}$",
-    r"^\[ INFO\] cmdline: root=boot-disk *$",
+    # The image's command line as the build signed it (BOOT_CMDLINE, the
+    # Makefile's CMDLINE: test-entropy adds random.* keys).
+    r"^\[ INFO\] cmdline: " + re.escape(os.environ.get("BOOT_CMDLINE", "root=boot-disk")) + r" *$",
     r"^\[ INFO\] root: root=boot-disk: the boot disk has no CosmoOS root partition; the live root stays$",
     r"^init: the boot disk has no CosmoOS root partition; the live root stays$",
     # Roadmap M5: the loader checked the manifest's signature and every
@@ -317,10 +329,21 @@ if HWRNG:
     REQUIRED_MARKERS += [r"^\[ INFO\] random: cpu source: " + ("rndrrs rndr$" if ARCH == "aarch64" else "rdseed rdrand$")]
 else:
     REQUIRED_MARKERS += [r"^\[ INFO\] random: cpu source: none$"]
-if HWRNG and not RNG:
-    REQUIRED_MARKERS += [r"^\[ INFO\] random: pool seeded after \d+ ms: \d+ bits credited \(cpu [1-9]\d*, devices 0\)$"]
+SEEDED_LINE = r"^\[ INFO\] random: pool seeded after \d+ ms: \d+ bits credited "
+if HWRNG and not RNG and not FW_SEED:
+    REQUIRED_MARKERS += [r"^\[ INFO\] random: firmware seed: 64 bytes, ignored \(random.firmware=off\)$",
+                         SEEDED_LINE + r"\(cpu [1-9]\d*, firmware 0, jitter 0, devices 0\)$"]
+elif HWRNG and not RNG:
+    REQUIRED_MARKERS += [SEEDED_LINE + r"\(cpu [1-9]\d*, firmware \d+, jitter 0, devices 0\)$"]
+elif RNG and not HWRNG and FW_SEED:
+    REQUIRED_MARKERS += [r"^\[ INFO\] random: firmware seed: 64 bytes$",
+                         SEEDED_LINE + r"\(cpu 0, firmware [1-9]\d*, jitter 0, devices 0\)$"]
 elif RNG and not HWRNG:
-    REQUIRED_MARKERS += [r"^\[ INFO\] random: pool seeded after \d+ ms: \d+ bits credited \(cpu 0, devices [1-9]\d*\)$"]
+    REQUIRED_MARKERS += [r"^\[ INFO\] random: firmware seed: 64 bytes, ignored \(random.firmware=off\)$",
+                         SEEDED_LINE + r"\(cpu 0, firmware 0, jitter 0, devices [1-9]\d*\)$"]
+elif JITTER:
+    REQUIRED_MARKERS += [r"^\[ INFO\] random: jitter source: \d+ batches of \d+ samples in \d+ ms, [1-9]\d* bits credited",
+                         SEEDED_LINE + r"\(cpu 0, firmware 0, jitter [1-9]\d*, devices 0\)$"]
 elif not SEEDED:
     REQUIRED_MARKERS += [r"^\[ WARN\] random: pool not seeded 5 s after the boot modules loaded: "]
 # The loader kept EL2 and the kernel can reach it.

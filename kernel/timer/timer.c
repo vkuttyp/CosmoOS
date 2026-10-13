@@ -2,6 +2,7 @@
  * timer.c - Clock, tick, and per-CPU timer queues.
  */
 
+#include <kernel/bootinfo.h>
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
 #include <kernel/log.h>
@@ -742,9 +743,17 @@ void timer_init(void)
     /* The wall clock: whole seconds from the platform's RTC, anchored to
      * the monotonic clock now. Sub-second phase starts at zero. */
     uint64_t epoch = 0;
+    int64_t fw_epoch = 0;
     if (arch_rtc_read_epoch(&epoch)) {
         g_realtime_offset_ns = epoch * NS_PER_SEC - clock_now_ns();
         kinfo("timer: wall clock %llu s since 1970 from the RTC", (unsigned long long)epoch);
+    } else if (bootinfo_fw_epoch(&fw_epoch) && fw_epoch > 0 && (uint64_t)fw_epoch <= UINT64_MAX / NS_PER_SEC) {
+        /* No clock of its own: the firmware's time as the loader read it,
+         * just before ExitBootServices (boot protocol v10), anchored at
+         * the monotonic clock's zero. Late by the time between that read
+         * and the clock's start, well under a second. */
+        g_realtime_offset_ns = (uint64_t)fw_epoch * NS_PER_SEC;
+        kinfo("timer: wall clock %lld s since 1970 from the firmware at boot (no RTC)", (long long)fw_epoch);
     } else {
         kwarn("timer: no real-time clock; the wall clock starts at 1970");
     }

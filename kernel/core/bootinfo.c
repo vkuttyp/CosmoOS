@@ -25,6 +25,17 @@ static bool g_have_boot_partuuid;
 /* v8: verified boot, as the loader reported it. */
 static uint8_t g_verify_key_id[COSMOBOOT_KEY_ID_SIZE];
 static bool g_verified;
+static uint8_t g_fw_seed[COSMOBOOT_FW_SEED_MAX];
+static unsigned g_fw_seed_len;
+static int64_t g_fw_epoch;
+static bool g_have_fw_epoch;
+
+/* Stores the compiler may not drop: the bytes are a secret. */
+static void wipe(volatile uint8_t *p, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        p[i] = 0;
+}
 
 void bootinfo_init(const struct cosmoboot_info *info)
 {
@@ -85,6 +96,23 @@ void bootinfo_init(const struct cosmoboot_info *info)
         g_verified = true;
     }
 
+    /* v10: what the firmware offered. The seed is copied and the loader's
+     * copy wiped: the boot info page is readable to the end of the boot
+     * (its fields are read on demand), and a seed is a secret. A length
+     * past the field is a loader bug. */
+    if (info->fw_flags & ~COSMOBOOT_FW_TIME)
+        panic("bootinfo: unknown fw_flags 0x%x", info->fw_flags);
+    if (info->fw_seed_len > COSMOBOOT_FW_SEED_MAX)
+        panic("bootinfo: firmware seed of %u bytes, at most %u", info->fw_seed_len, COSMOBOOT_FW_SEED_MAX);
+    g_fw_seed_len = info->fw_seed_len;
+    for (unsigned i = 0; i < g_fw_seed_len; i++)
+        g_fw_seed[i] = info->fw_seed[i];
+    wipe((volatile uint8_t *)(uintptr_t)info->fw_seed, sizeof(info->fw_seed));
+    if (info->fw_flags & COSMOBOOT_FW_TIME) {
+        g_fw_epoch = info->fw_epoch;
+        g_have_fw_epoch = true;
+    }
+
     g_info = info;
     g_map = (const struct cosmoboot_mem_entry *)(uintptr_t)(info->hhdm_base + info->mem_map_phys);
     g_map_count = info->mem_map_entries;
@@ -120,6 +148,24 @@ bool bootinfo_boot_partuuid(uint8_t out[16])
         return false;
     for (unsigned i = 0; i < 16; i++)
         out[i] = g_boot_partuuid[i];
+    return true;
+}
+
+unsigned bootinfo_take_fw_seed(uint8_t out[COSMOBOOT_FW_SEED_MAX])
+{
+    unsigned n = g_fw_seed_len;
+    for (unsigned i = 0; i < n; i++)
+        out[i] = g_fw_seed[i];
+    wipe(g_fw_seed, sizeof(g_fw_seed));
+    g_fw_seed_len = 0;
+    return n;
+}
+
+bool bootinfo_fw_epoch(int64_t *epoch)
+{
+    if (!g_have_fw_epoch)
+        return false;
+    *epoch = g_fw_epoch;
     return true;
 }
 

@@ -68,8 +68,11 @@
  *      manifest, and with which key; the structure grows
  *   9  + the serial console the firmware describes (ACPI SPCR), found by
  *      the loader while it can still read any table: console_type,
- *      console_base, console_gsiv, console_access; the structure grows */
-#define COSMOBOOT_VERSION 9
+ *      console_base, console_gsiv, console_access; the structure grows
+ *   10 + what the firmware offers before ExitBootServices: a seed from
+ *      EFI_RNG_PROTOCOL (fw_seed, fw_seed_len) and the time from GetTime
+ *      (fw_epoch); the structure grows */
+#define COSMOBOOT_VERSION 10
 
 /* ELF note carried by the kernel so the loader can verify protocol version.
  * Name "COSMO\0", type COSMOBOOT_NOTE_TYPE, desc = uint32_t version. */
@@ -123,6 +126,10 @@
 #define COSMOBOOT_CONSOLE_16550_PORT  3u   /* 16550-compatible, x86 I/O port */
 /* v9 console_flags. */
 #define COSMOBOOT_CONSOLE_FROM_DBG2   1u   /* no SPCR: the port is the DBG2's debug serial port */
+
+/* v10 fw_flags. */
+#define COSMOBOOT_FW_TIME      1u   /* fw_epoch holds GetTime's answer */
+#define COSMOBOOT_FW_SEED_MAX  64u
 
 /* v8 verify_flags. */
 #define COSMOBOOT_VERIFIED 1u        /* every file matched a manifest signed by verify_key_id */
@@ -253,6 +260,19 @@ struct cosmoboot_info {
     uint32_t console_flags;   /* COSMOBOOT_CONSOLE_FROM_DBG2 */
     uint32_t console_stride;
     uint32_t reserved4;
+
+    /* v10: what the firmware offers before ExitBootServices (docs/boot/
+     * design.md, "Firmware seed and time"). fw_seed holds fw_seed_len
+     * bytes (0: the firmware has no EFI_RNG_PROTOCOL, or it failed) from
+     * the firmware's default RNG; the kernel absorbs them and zeroes the
+     * field. fw_epoch is GetTime's answer in seconds since 1970 UTC
+     * (local time corrected by its time zone when it names one), read
+     * just before ExitBootServices, with COSMOBOOT_FW_TIME in fw_flags;
+     * the kernel uses it only when it has no clock of its own. */
+    uint32_t fw_flags;        /* COSMOBOOT_FW_* */
+    uint32_t fw_seed_len;
+    int64_t  fw_epoch;
+    uint8_t  fw_seed[COSMOBOOT_FW_SEED_MAX];
 };
 
 #endif /* __ASSEMBLER__ */

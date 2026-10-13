@@ -55,6 +55,16 @@ bool bootinfo_boot_partuuid(uint8_t out[16]);
  * loader built with VERIFY_BOOT=0). */
 bool bootinfo_verified(uint8_t key_id[COSMOBOOT_KEY_ID_SIZE]);
 
+/* v10: the firmware's seed (EFI_RNG_PROTOCOL), handed over once: copies
+ * it to out, wipes the kernel's copy and returns its length (0 when the
+ * firmware gave none, or on a second call). The loader's copy in the boot
+ * info was wiped by bootinfo_init. */
+unsigned bootinfo_take_fw_seed(uint8_t out[COSMOBOOT_FW_SEED_MAX]);
+
+/* v10: the firmware's time at the loader's last moment (GetTime), in
+ * seconds since 1970 UTC; false when it gave none. */
+bool bootinfo_fw_epoch(int64_t *epoch);
+
 /* True for types that are RAM (usable, reclaimable, kernel, boot data,
  * ACPI, firmware runtime), false for MMIO, reserved, bad, persistent. */
 bool bootinfo_mem_type_is_ram(uint32_t type);

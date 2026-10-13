@@ -70,9 +70,10 @@ Constants: `CONFIG_HZ` = 250, `NS_PER_SEC`, `TICK_NS` = 4 000 000.
   plus an offset `timer_init` computed once from `arch_rtc_read_epoch`
   (x86-64: the CMOS RTC, BCD or binary per status register B, the
   century by heuristic; AArch64: the PL031 of the `virt` machine). Whole
-  seconds at boot, then it advances with the monotonic clock; a
-  machine without a readable RTC logs a warning and the offset stays 0
-  (the wall clock then reads as time since boot).
+  seconds at boot, then it advances with the monotonic clock. A
+  machine without a readable RTC takes the firmware's `GetTime` at boot
+  (boot protocol v10) instead; with neither it logs a warning and the
+  offset stays 0 (the wall clock then reads as time since boot).
 - **Concurrency**: lock-free, interrupt context yes. Not settable.
 
 ### `bool arch_rtc_read_epoch(uint64_t *seconds)` (`arch/timer.h`)

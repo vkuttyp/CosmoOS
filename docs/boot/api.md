@@ -6,7 +6,11 @@ follows constitution section 52.
 
 ## Protocol (`boot/protocol/cosmoboot.h`)
 
-**ABI stability: stable.** Version 9 adds the serial console the
+**ABI stability: stable.** Version 10 adds what the firmware offers
+before `ExitBootServices` (`fw_flags` with `COSMOBOOT_FW_TIME` 1,
+`fw_seed_len`, `fw_epoch`, `fw_seed[COSMOBOOT_FW_SEED_MAX]`, 64 bytes) and
+grows the structure; a firmware offering neither leaves them zero
+(design.md, "Firmware seed and time"). Version 9 added the serial console the
 firmware names (`console_type`, `console_gsiv`, `console_base`,
 `console_access`, `console_flags`, `console_stride`) and grows the structure; a loader
 that finds no port writes them zero (`COSMOBOOT_CONSOLE_NONE`). The
@@ -139,12 +143,36 @@ for an unverified boot (a `VERIFY_BOOT=0` loader). `bootinfo_init`
 panics on an unknown `verify_flags` bit. Read by the banner, the `boot:`
 log line and the sysctl `kernel.verified_boot` (`yes <id>` / `no`).
 
+### `unsigned bootinfo_take_fw_seed(uint8_t out[COSMOBOOT_FW_SEED_MAX])`
+
+(v10) The firmware's seed, handed over once: copies it to `out`, wipes
+the kernel's copy and returns its length, 0 when the firmware gave none
+or on a second call. `bootinfo_init` already wiped the boot info's copy,
+and panics on an unknown `fw_flags` bit or a length over 64. Called by
+`random_init`, which wipes `out` after absorbing it. Boot CPU, thread
+context.
+
+### `bool bootinfo_fw_epoch(int64_t *epoch)`
+
+(v10) The firmware's time at the loader's last moment, in seconds since
+1970 UTC; false when `GetTime` gave none. Read by `timer_init` when the
+architecture has no RTC.
+
 ## Loader internals (`boot/uefi/loader.h`)
 
 All run before ExitBootServices unless stated; single-threaded; none may
 be called from an interrupt (the loader has none). Errors are
 `EFI_STATUS` values or, where noted, `die()`. **ABI stability: internal
 to the loader; free to change.**
+
+### `void firmware_gather(struct cosmoboot_info *info)` and `void firmware_report(const struct cosmoboot_info *info)`
+
+(`boot/uefi/firmware.c`, v10) `firmware_gather` fills `fw_seed` from
+`EFI_RNG_PROTOCOL` and `fw_epoch` from `GetTime`, printing each result on
+the firmware console; called after the last allocation, just before the
+memory map is read for `ExitBootServices`. Neither failing is an error.
+`firmware_report`, after `ExitBootServices`, prints `firmware: seed N
+bytes; time from GetTime|none` on the serial port.
 
 ### `EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)`
 

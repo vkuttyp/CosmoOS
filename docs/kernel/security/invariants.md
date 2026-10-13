@@ -323,7 +323,14 @@ credit per source is the table in design.md §6, nothing else credits,
 and self-test input credits 0. Check: review of `arch_rng_seed64` /
 `arch_rng_random64` (each returns the instruction's own flag) and of
 every `random_add_entropy` call (`git grep`); the no-entropy boot, where
-nothing may credit, stays unseeded to the end (`make test-entropy`).
+nothing may credit, stays unseeded to the end (`make test-entropy`). The
+firmware's seed is credited only when the loader's `GetRNG` succeeded
+(`fw_seed_len` 0 otherwise); a jitter batch only when it passes the
+repetition count test (its run carried across batches) and the lower of
+its most-common-value and lag-prediction estimates is at least 1/16 bit
+per sample, and then at most 1/8 bit per sample (`jitter_batch_credit`,
+host-tested by `test_jitter`, which shows a cycle the histogram alone
+would credit refused).
 
 **S18. A must-be-seeded caller never draws from an unseeded pool.**
 `getrandom` without `GRND_INSECURE` draws only after `random_ready()` or
