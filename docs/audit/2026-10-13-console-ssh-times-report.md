@@ -23,7 +23,7 @@ the roadmap's M1–M6 are done (v1.0.0).
   on both architectures.
 - `lxtest` requires a new file's mtime within 5 s of `CLOCK_REALTIME`.
   `tools/file-times-probe.py`: fixed mode `LINUXTEST: PASS`, `--old` fails
-  that check (mtime 139 s, the uptime), on x86-64 and AArch64.
+  that check (mtime 132 s on x86-64, 131 s on AArch64: the uptime), at 74eb98f0.
 
 ## Validation
 
