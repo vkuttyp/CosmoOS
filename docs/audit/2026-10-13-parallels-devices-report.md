@@ -106,3 +106,48 @@ Not changed:
   firmware, so the error is under a second either way, as the design
   says.
 - **The plan and history entries** come in the unit's last PR.
+## PR 2: NVMe with one vector, and the legacy virtio transport
+
+| Area | Change | Files |
+|---|---|---|
+| NVMe | with fewer than two MSI-X vectors, one-vector mode: one MSI-X vector or, with none, plain MSI; one I/O queue; `nvme_irq_one` schedules the admin queue's and every created I/O queue's poll (`irq_ioq`, published after each queue is created); queues created with interrupt vector 0; teardown disables MSI or MSI-X as it enabled; the probe line names the mode | `drivers/nvme/nvme.c` |
+| PCI | `pci_io_bar_usable`, `pci_io_read`, `pci_io_write` (exported): an I/O BAR's registers, bounds-checked, through `arch_pci_io_*` (x86-64 ports; AArch64 none) | `drivers/pci/pci.c`, `kernel/include/arch/pci.h`, `kernel/arch/*/pci*.c` |
+| virtio | the legacy transport (spec 4.1.4.8): BAR0's register block in memory or I/O space, MSI-X, a 32-bit queue page number (44-bit DMA mask), queues of the device's size; `virtio_device_init` skips VERSION_1 and FEATURES_OK on it; a legacy device's length on a read-only chain is ignored | `drivers/virtio/virtio_pci.c`, `virtio.c`, `virtqueue.c`, `drivers/include/drivers/virtio.h` |
+| virtio-net | on a legacy device asks for `MRG_RXBUF`, which makes the header the 12 bytes VERSION_1 has, and refuses a device without it; drops a frame whose `num_buffers` is not 1 | `drivers/virtio/virtio_net.c` |
+| Tests | `make test-smp2` runs the NVMe with one MSI-X vector (`QEMU_NVME_OPTS=,msix_qsize=1`, both architectures) and on x86-64 a legacy-only virtio-net (`QEMU_VNET_OPTS=,disable-modern=on`); the harness requires the modes' lines; host test `virtq-readonly-chain-length` | `Makefile`, `scripts/qemu-run.sh`, `tests/boot/run_boot_test.py`, `tests/host/test_virtq.c` |
+
+**What QEMU can and cannot show.** QEMU's NVMe has only MSI-X, so its
+one-vector MSI-X mode is the CI test and plain MSI has run on Parallels
+only. QEMU's legacy virtio devices put their registers in an I/O BAR,
+which x86-64 reaches with port instructions and AArch64 cannot; so CI
+tests the legacy transport through I/O space on x86-64, and the memory
+BAR path (Parallels') has run on Parallels only.
+
+**A legacy device reports transmit lengths.** On the first Parallels boot
+with the transport, every transmit completed with `device wrote 354 bytes
+into a 0-byte chain`: Parallels' adapter puts the frame's length in the
+used ring for a buffer it may only read. The spec (2.7.8.2) says legacy
+devices commonly do this and legacy drivers should ignore the length
+where they can; `virtq_pop` now does, on a legacy transport, for a chain
+with no device-writable bytes only.
+
+**Installing needs the live image on NVMe too.** `cosmo-install` copies
+the ESP from the partition the loader was read from. Parallels' SATA disk
+is invisible to the kernel, so with the live image on SATA it refused
+(`the loader was not read from a GPT partition; there is no ESP to
+copy`). With both disks NVMe they are two namespaces of one controller,
+`nvme0n2` (live, with the `boot` partition) and `nvme0n1` (blank). The
+guide's Parallels section says to set the VM up that way.
+
+## Parallels iteration log
+
+| # | Seen | Cause | Fix |
+|---|---|---|---|
+| 1 | `random: cpu source: none`, pool never seeded | no RNDR, no virtio-rng, no `EFI_RNG_PROTOCOL` (`firmware: seed 0 bytes`) | the jitter source (owner's decision) |
+| 2 | wall clock 1970 | no RTC in the tables | `GetTime` at boot, protocol v10 |
+| 3 | a scratch BAR print hung the boot after PCI enumeration | the framebuffer is behind a BAR whose decoding `decode_bars` turns off while sizing it | the print removed; recorded in the inventory |
+| 4 | `nvme0: ... one MSI vector for every queue`, `nvme0n1` 1 GiB | -- | one-vector mode |
+| 5 | `virtio device 1 as virtio0 (3 MSI-X vectors; legacy, registers in memory)`, DHCP bound | -- | the legacy transport |
+| 6 | `device wrote 354 bytes into a 0-byte chain` per transmit | legacy length on a read-only chain | ignored on legacy (spec 2.7.8.2) |
+| 7 | `cosmo-install`: no ESP to copy | the live SATA disk is not visible | the live image on NVMe (guide) |
+| 8 | installed on `nvme0n1`; the installed system boots (`root=boot-disk is nvme0n1p2`), seeds in 12 ms, DHCP, `wget http://example.com/`, dropbear makes its key and answers on port 22 | -- | -- |

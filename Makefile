@@ -252,9 +252,18 @@ test-net-login: $(IMAGE)
 # `sched-migrate` and others) skip here with their reason, and the
 # four-CPU boots run them. One CPU is covered by `QEMU_SMP=1 make test`
 # locally.
+# It also runs two devices in their other modes (docs/drivers/nvme/design.md,
+# docs/drivers/virtio/design.md): the NVMe controller with one MSI-X
+# vector, the driver's one-vector mode, and on x86-64 a legacy-only
+# virtio-net, the legacy transport through an I/O BAR (AArch64 cannot
+# reach PCI I/O space; Parallels Desktop's memory-BAR legacy device is
+# the other half).
+ifeq ($(ARCH),x86_64)
+SMP2_VNET_OPTS := ,disable-modern=on
+endif
 test-smp2:
-	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) QEMU_SMP=2 \
-		BOOT_LOG=$(OUT)/boot-test-smp2.log test
+	$(Q)QEMU_NVME_OPTS=,msix_qsize=1 QEMU_VNET_OPTS='$(SMP2_VNET_OPTS)' $(MAKE) --no-print-directory -C $(ROOT) \
+		ARCH=$(ARCH) BUILD=$(BUILD) QEMU_SMP=2 BOOT_LOG=$(OUT)/boot-test-smp2.log test
 
 # QEMU's virt machine defaults to gic-version=2, so `test` exercises one
 # of the two AArch64 interrupt controllers and never the other. This runs

@@ -106,8 +106,18 @@ int virtio_device_init(struct virtio_device *vdev, uint64_t wanted)
     tr->set_status(vdev, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
 
     vdev->device_features = tr->get_features(vdev);
+    if (tr->legacy) {
+        /* A legacy device (spec 4.1.4.8): 32 feature bits, written once;
+         * no FEATURES_OK step. VERSION_1 cannot be offered. */
+        uint64_t features = vdev->device_features & wanted & 0xffffffffull;
+        tr->set_features(vdev, features);
+        vdev->features = features;
+        kdebug("virtio: %s: id %u, legacy, features offered 0x%llx, negotiated 0x%llx", vdev->dev.name,
+               vdev->device_id, (unsigned long long)vdev->device_features, (unsigned long long)features);
+        return 0;
+    }
     if ((vdev->device_features & VIRTIO_F_VERSION_1) == 0) {
-        kerror("virtio: %s: legacy device (no VERSION_1); refused", vdev->dev.name);
+        kerror("virtio: %s: no VERSION_1 on the modern transport; refused", vdev->dev.name);
         tr->set_status(vdev, VIRTIO_STATUS_FAILED);
         return -ENOTSUP;
     }

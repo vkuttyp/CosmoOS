@@ -123,6 +123,15 @@ static const struct virtio_transport g_tr = {
     .notify = tr_notify,
 };
 
+static const struct virtio_transport g_tr_legacy = {
+    .name = "fake-legacy",
+    .legacy = true,
+    .queue_max_size = tr_queue_max_size,
+    .setup_queue = tr_setup_queue,
+    .teardown_queue = tr_teardown_queue,
+    .notify = tr_notify,
+};
+
 static struct virtio_device g_vdev;
 
 static struct virtqueue *make_queue(unsigned size)
@@ -361,6 +370,39 @@ static void test_churn(void)
     virtq_free(vq);
 }
 
+/* A device-readable-only chain (a transmit) completed with a length: a
+ * modern device that claims to have written into it is counted bad; a
+ * legacy one, which commonly reports the bytes it read (Parallels Desktop's
+ * network adapter, every transmit), is not, and the length is 0 either way. */
+static void test_readonly_chain_length(void)
+{
+    for (int legacy = 0; legacy <= 1; legacy++) {
+        struct virtqueue *vq = make_queue(8);
+        if (legacy)
+            g_vdev.tr = &g_tr_legacy;
+        int cookie = 1;
+        struct virtq_sg sg[1] = { sg_of(0x1000, 354) };
+        EXPECT(virtq_add(vq, sg, 1, 0, &cookie) == 0);
+        device_complete(vq, 0, 354);
+        uint32_t len = 99;
+        EXPECT(virtq_pop(vq, &len) == &cookie);
+        EXPECT(len == 0);
+        EXPECT(vq->bad_used == (legacy ? 0u : 1u));
+        virtq_free(vq);
+    }
+    /* A writable chain overstated is bad on a legacy device too. */
+    struct virtqueue *vq = make_queue(8);
+    g_vdev.tr = &g_tr_legacy;
+    int cookie = 2;
+    struct virtq_sg sg[1] = { sg_of(0x1000, 100) };
+    EXPECT(virtq_add(vq, sg, 0, 1, &cookie) == 0);
+    device_complete(vq, 0, 200);
+    uint32_t len = 0;
+    EXPECT(virtq_pop(vq, &len) == &cookie);
+    EXPECT(len == 100 && vq->bad_used == 1);
+    virtq_free(vq);
+}
+
 static const struct host_test tests[] = {
     { "virtq-alloc-free", test_alloc_free },
     { "virtq-normal-chain", test_normal_chain },
@@ -368,6 +410,7 @@ static const struct host_test tests[] = {
     { "virtq-hostile-links", test_hostile_descriptor_links },
     { "virtq-hostile-used", test_hostile_used_ring },
     { "virtq-churn", test_churn },
+    { "virtq-readonly-chain-length", test_readonly_chain_length },
 };
 
 int main(void)

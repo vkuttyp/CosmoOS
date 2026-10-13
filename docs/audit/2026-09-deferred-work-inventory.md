@@ -523,9 +523,10 @@ tree.
   QEMU's firmware alone.
 - Parallels Desktop on Apple Silicon (found by that unit): its SATA disks
   are not on PCI (a platform AHCI described only in the DSDT would need an
-  AML interpreter); its NVMe controller offers MSI only and `nvme` requires
+  AML interpreter); ~~its NVMe controller offers MSI only and `nvme` requires
   MSI-X; its network adapter is a legacy-only virtio-net and `virtio-pci`
-  is modern-only; ~~it gives the guest no RNDR and no virtio-rng, so the
+  is modern-only~~ (**closed by the Parallels-devices unit**: one-vector
+  NVMe, the legacy virtio transport); ~~it gives the guest no RNDR and no virtio-rng, so the
   pool never seeds; no RTC is found~~ (**closed by the Parallels-devices
   unit**: the firmware's time at boot, boot protocol v10, and a
   timing-jitter source, `docs/audit/2026-10-13-parallels-devices-report.md`).

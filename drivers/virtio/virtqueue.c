@@ -82,6 +82,14 @@ int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, vir
     if (devmax == 0)
         return -ENOENT;
     unsigned size = devmax;
+    if (vdev->tr->legacy) {
+        /* A legacy queue is the device's size; the driver cannot shrink it. */
+        if (devmax > VIRTQ_MAX_SIZE || (max && max < devmax)) {
+            kerror("virtio: %s: legacy queue %u has %u entries, more than this driver takes (%u)", vdev->dev.name,
+                   index, devmax, max && max < VIRTQ_MAX_SIZE ? max : VIRTQ_MAX_SIZE);
+            return -ENOSPC;
+        }
+    }
     if (max && max < size)
         size = max;
     if (size > VIRTQ_MAX_SIZE)
@@ -267,7 +275,13 @@ void *virtq_pop(struct virtqueue *vq, uint32_t *len)
         uint16_t head = (uint16_t)e.id;
         void *cookie = vq->cookies[head];
         uint32_t written = e.len;
-        if (written > vq->in_bytes[head]) {
+        if (written > vq->in_bytes[head] && vq->in_bytes[head] == 0 && vq->vdev->tr != NULL && vq->vdev->tr->legacy) {
+            /* A legacy device may report the bytes it read from a chain it
+             * may only read (Parallels Desktop's network adapter does, for
+             * every transmit); the spec tells legacy drivers to ignore the
+             * length where they can (2.7.8.2). Nothing was written. */
+            written = 0;
+        } else if (written > vq->in_bytes[head]) {
             /* The device claims more than the chain could hold: count it
              * and report what the buffers can actually contain. */
             vq->bad_used++;

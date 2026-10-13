@@ -37,6 +37,15 @@ otherwise any context.
 Purpose: map a memory BAR uncached; 0 for an absent or I/O BAR or on
 mapping failure. Sleeps (VMM). Unmap with `device_unmap_mmio`.
 
+### `bool pci_io_bar_usable(const struct pci_device *pdev, unsigned bar)`, `uint32_t pci_io_read(const struct pci_device *pdev, unsigned bar, uint32_t off, unsigned width)`, `void pci_io_write(const struct pci_device *pdev, unsigned bar, uint32_t off, unsigned width, uint32_t v)` *(exported)*
+Purpose: an I/O BAR's registers. `pci_io_bar_usable` is true for an I/O
+BAR the architecture can reach (`arch_pci_io_available`: x86-64's port
+instructions; AArch64 never, its I/O window being described only in the
+DSDT). The read and write take a width of 1, 2 or 4 and check
+`off + width` against the BAR: outside it, or on an unusable BAR, a read
+returns all ones and a write does nothing. Any context. Used by the
+legacy virtio transport (docs/drivers/virtio/design.md).
+
 ### `uint8_t pci_find_capability(const struct pci_device *pdev, uint8_t id, uint8_t prev)` *(exported)*
 Purpose: offset of the next capability with `id` after `prev` (0 =
 first), or 0. Bounded walk (48 entries). Any context.

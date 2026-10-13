@@ -323,6 +323,19 @@ if GUARD:
     else:
         REQUIRED_MARKERS += [r"^\[ INFO\] hardening: x86-64: nx smep smap umip$", r"^usertest: umip: enforced$"]
     REQUIRED_MARKERS += [r"^\[ INFO\] selftest: uaccess-guard: guard live"]
+# NVMe: one MSI-X vector (QEMU_NVME_OPTS=,msix_qsize=1; make test-smp2)
+# is the driver's one-vector mode, one I/O queue sharing the admin
+# queue's vector (docs/drivers/nvme/design.md); otherwise a vector per
+# queue.
+# virtio-net: a legacy-only device (QEMU_VNET_OPTS=,disable-modern=on;
+# x86-64's make test-smp2) is bound by the legacy transport through its
+# I/O BAR; the network suite then runs over it.
+if "disable-modern=on" in os.environ.get("QEMU_VNET_OPTS", ""):
+    REQUIRED_MARKERS += [r"^\[ INFO\] virtio-pci: pci:\S+: virtio device 1 as virtio\d+ \(\d+ MSI-X vectors; legacy, registers in I/O space\)$"]
+if "msix_qsize=1" in os.environ.get("QEMU_NVME_OPTS", ""):
+    REQUIRED_MARKERS += [r"^\[ INFO\] nvme0: .* 1 I/O queue\(s\) of depth 32, .*, one MSI-X vector for every queue$"]
+else:
+    REQUIRED_MARKERS += [r"^\[ INFO\] nvme0: .*, MSI-X per queue$"]
 # Entropy: the CPU source the boot reports is the one the configuration
 # has, and the pool is seeded by the source the configuration has.
 if HWRNG:

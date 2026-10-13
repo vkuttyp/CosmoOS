@@ -61,6 +61,8 @@ vcon=${QEMU_VCON:-$outdir/vcon.log}
 : > "$vcon"
 # Milestone 9: an NVMe controller with one 8 MiB namespace (the nvme
 # self-test writes to it; the harness gives it a fresh file per run).
+# QEMU_NVME_OPTS is appended to its -device options (",msix_qsize=1":
+# one MSI-X vector, the driver's one-vector mode; make test-smp2).
 nvmedisk=${QEMU_NVMEDISK:-$outdir/nvme.img}
 nvme_devs=""
 if [ "$nvmedisk" != 0 ]; then
@@ -68,7 +70,7 @@ if [ "$nvmedisk" != 0 ]; then
         dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 status=none 2>/dev/null \
             || dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 2>/dev/null
     fi
-    nvme_devs="-drive if=none,id=nvme0,format=raw,file=$nvmedisk -device nvme,drive=nvme0,serial=cosmo-nvme0"
+    nvme_devs="-drive if=none,id=nvme0,format=raw,file=$nvmedisk -device nvme,drive=nvme0,serial=cosmo-nvme0${QEMU_NVME_OPTS:-}"
 fi
 
 # Phase 8: QEMU user-mode networking on a virtio-net NIC. The harness
@@ -102,11 +104,15 @@ fi
 # before the e1000e driver), or e1000e (the Intel NIC alone, on n0, so it
 # is eth0 and the default interface and the whole network suite runs over
 # it). Port forwards and the pcap filter are on n0 whichever device it is.
+# QEMU_VNET_OPTS is appended to the virtio-net device's options
+# (",disable-modern=on": a legacy-only device, registers in an I/O BAR;
+# x86-64's make test-smp2).
 nic=${QEMU_NIC:-both}
+vnet="virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05${QEMU_VNET_OPTS:-}"
 case "$nic" in
-virtio) nic_devs="-netdev $netdev -device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05" ;;
+virtio) nic_devs="-netdev $netdev -device $vnet" ;;
 e1000e) nic_devs="-netdev $netdev -device e1000e,netdev=n0,mac=52:54:00:c0:5f:06" ;;
-*) nic_devs="-netdev $netdev -device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05 -netdev user,id=n1,ipv4=on,ipv6=on -device e1000e,netdev=n1,mac=52:54:00:c0:5f:06" ;;
+*) nic_devs="-netdev $netdev -device $vnet -netdev user,id=n1,ipv4=on,ipv6=on -device e1000e,netdev=n1,mac=52:54:00:c0:5f:06" ;;
 esac
 # USB (docs/drivers/usb/api.md): an xHCI controller with a mass-storage
 # device on it, backed by an 8 MiB image beside the other disks (the
