@@ -44,8 +44,11 @@ listens on port 22 of that address.
 10.211.55.N/24 ...`); there is no port forwarding to set up. On the
 installed system, put your public key (an existing `~/.ssh/id_rsa.pub`
 or an Ed25519 one) in root's `authorized_keys` by serving it from the
-Mac -- `python3 -m http.server 8000 --bind 10.211.55.2` in `~/.ssh` --
-and fetching it at the VM's prompt:
+Mac and fetching it at the VM's prompt. Serve a directory holding only
+the public key, never `~/.ssh` itself, which would offer your private
+keys to the network too:
+`mkdir /tmp/pubkey && cp ~/.ssh/id_rsa.pub /tmp/pubkey/ && cd /tmp/pubkey
+&& python3 -m http.server 8000 --bind 10.211.55.2`, then in the VM:
 
 ```text
 mkdir -p /root/.ssh
