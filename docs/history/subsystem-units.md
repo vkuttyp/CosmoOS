@@ -2886,7 +2886,8 @@ See the [history index](README.md).
   timing-jitter source of last resort (the owner's decision, reversing
   M1's): SP 800-90B most-common-value and lag-prediction estimates,
   repetition count test, at most 1/8 bit per sample; `test-entropy` is
-  four boots, one source each. NVMe runs with one vector (one MSI-X entry
+  one boot per source (the jitter one on AArch64 only: x86-64's TCG
+  timings are sometimes wholly predictable, and refused). NVMe runs with one vector (one MSI-X entry
   or plain MSI); a legacy-only virtio device gets the legacy transport
   (BAR0 in memory, or I/O space on x86-64 through `pci_io_*`), virtio-net
   takes `MRG_RXBUF` there for the 12-byte header, and a legacy transmit's
