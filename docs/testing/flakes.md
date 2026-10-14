@@ -2691,6 +2691,14 @@ resumption but `preempt_point_due` cannot be true (interrupts are off in
 that frame's saved state), so that run makes 31 trips. The branch changes
 the screen console, not the scheduler. Not attributed; first sighting.
 
+**Second sighting, 2026-10-14:** CI, `build, boot, analyze (aarch64)` on
+PR #381 (the everyday commands, run 38494533125, job 115627236425): the
+same line, `100 runs of 32, 3199 trips (longest 32 in one call)`, the
+check at 895 ms. The branch touches the scheduler only to read a thread's
+run time (`sched_thread_run_ns`) and to delay the first load-average fold,
+neither on the resumption path. The candidate above still fits: one run
+one trip short. Not attributed; the job was rerun by the next push.
+
 ## `sched-restore-loop`: the thread count not back in 200 ms, 2026-10-11
 
 `SELFTEST: sched-restore-loop ... FAIL: check failed: threads_settle(before)
