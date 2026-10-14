@@ -68,3 +68,6 @@ md5sum
 dd
 cmp
 hexdump
+# ping: IPv4 echo over a raw ICMP socket (PRIV_NET; the kernel's network
+# design, "Raw ICMP sockets"). No ping6.
+ping

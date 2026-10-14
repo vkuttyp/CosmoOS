@@ -172,6 +172,20 @@ with `tcp_set_fin_wait2(100 ms)` a client connects and closes while the
 server holds its end: the orphaned FIN_WAIT_2 is reaped
 (`fin_wait2_timeouts` +1) within 2 s. Both hooks are restored.
 
+**`net-raw-icmp`** (N31, the ping unit): a raw ICMP socket refuses
+`IPPROTO_UDP`, IPv6, `bind`, `connect` and a send with no address; an
+echo it sends to `127.0.0.1` is read back twice -- the request as the
+stack received it and the reply -- each behind a 20-byte IPv4 header
+(`0x45`, protocol 1), from `127.0.0.1` port 0, its id, payload and
+length intact; the host's `icmp_echo_rcvd` and `icmp_echo_replied`
+still rise. The echo is resent, a new sequence each time, until a reply
+comes, because `net-icmp-limit` before it may have spent the rate
+limiter's window. Then 64 echoes fill the unread queue, and one more is
+taken by the stack (`icmp_echo_rcvd` rises) while its copy is dropped
+(`raw_stats.rx_queue_full` rises; the queue stays at 64). The refusal
+without `PRIV_NET` is tested from user mode, where privileges can be
+dropped: `tests/busybox/ash.sh`, `priv -d net ping`.
+
 **`net-icmp-limit`**: first the limiter's window is made known -- a
 burst of 100 echoes fills it and one echo probes it, again until a probe
 is refused (a window that rolled inside a fill is of unknown age), then

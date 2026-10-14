@@ -194,6 +194,11 @@ expect top-self 1 "$(grep -c 'top -b -n 1' top.txt)"
 # gone (as on Linux), so the writer stays open past the ESC.
 { printf 'ihello\033'; sleep 1; printf ':wq\r'; } | LINES=24 COLUMNS=80 vi v.txt > /dev/null 2>&1
 expect vi hello "$(cat v.txt)"
+# ping (the ping unit): an echo to the loopback address over a raw ICMP
+# socket, and the socket refused without PRIV_NET (as Linux refuses one
+# without CAP_NET_RAW).
+expect ping-lo 1 "$(ping -c 1 127.0.0.1 | grep -c '1 packets transmitted, 1 packets received')"
+expect ping-noperm 1 "$(priv -d net ping -c 1 127.0.0.1 2>&1 | grep -c 'permission denied')"
 
 cd /
 rm -rf "$T"

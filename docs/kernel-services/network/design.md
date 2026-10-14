@@ -162,6 +162,46 @@ of 64 datagrams per socket, each mbuf carrying the sender's address in
 its packet header (`pkt.src`). Ephemeral ports 49152 to 65535. Checksum
 mandatory on v6, generated on v4.
 
+### Raw ICMP sockets (`raw.c`)
+
+What `ping` needs (the owner's choice after v1.0.2): BusyBox 1.37's
+`ping` opens `socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)` and nothing else,
+and parses each reply behind its IPv4 header, so the kernel offers
+Linux's raw-socket semantics for ICMP over IPv4 rather than Linux's
+unprivileged "ping sockets" (`SOCK_DGRAM`, `IPPROTO_ICMP`), which would
+need BusyBox patched.
+
+- **Creating one** (`ksock_create_raw`, type `COSMO_SOCK_RAW`) needs
+  `PRIV_NET`, judged on the caller's credentials then, as a reserved
+  port is at bind (Linux's `CAP_NET_RAW`): a raw socket sees every ICMP
+  message the host receives. IPv4 and `IPPROTO_ICMP` only; any other
+  family or protocol is `-EPROTONOSUPPORT`.
+- **Receiving.** `struct raw_pcb` (allocated, `s->raw`) sits on a
+  global list under a spinlock, as UDP's do. `icmp_input` hands every
+  message that passed its checksum and the host firewall's quiet check
+  to `raw_icmp_input` before it acts on it (the echo reply is built in
+  place, in the same mbuf): each raw socket gets a copy with the IPv4
+  header put back in front -- what a Linux raw socket reads -- on a
+  queue of 64 messages, its sender in `pkt.src` with port 0. A full
+  queue drops the copy, never the original.
+- **Sending.** `ksock_sendto` takes the ICMP message as the caller built
+  it (type, code, id, sequence, checksum: the kernel does not rewrite
+  them) and sends it with `ipv4_output` to the address given, which a
+  raw socket must always name (`-EDESTADDRREQ` otherwise): the host
+  firewall's output verdict records an echo's id like any other, so its
+  reply is admitted. At most 65515 bytes, the IPv4 payload limit; no
+  fragmentation, so beyond the path MTU `ipv4_output` refuses.
+- **Not built:** `bind`, `connect` and `listen` (`-EOPNOTSUPP`), so
+  `ping -I`; `IP_HDRINCL`, `ICMP_FILTER`, `IP_TTL` and the other socket
+  options (`setsockopt` is `-ENOPROTOOPT` for every option, as before);
+  raw IPv6 (`ping6` also needs `recvmsg` ancillary data).
+
+The Linux door now reads `socket`'s protocol argument: 0 or the type's
+own protocol (TCP for a stream, UDP for a datagram, `PF_UNIX` for a unix
+socket), `IPPROTO_ICMP` with `SOCK_RAW`, and `-EPROTONOSUPPORT` for
+anything else. It used to ignore it, so `socket(AF_INET, SOCK_DGRAM,
+IPPROTO_ICMP)` -- a ping socket -- silently made a UDP socket.
+
 ### TCP (`tcp.c`)
 
 ```c

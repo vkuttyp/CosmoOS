@@ -14,6 +14,7 @@
 #include <arch/cpu.h>
 #include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/raw.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
 #include <kernel/net/tcp.h>
@@ -446,6 +447,9 @@ void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
         m_freem(m);
         return;
     }
+    /* Raw ICMP sockets get a copy of what the stack accepted, before the
+     * echo reply below rewrites this mbuf in place (N31). */
+    raw_icmp_input(m, iph);
     if (ic->type == ICMP_DEST_UNREACH) {
         icmp_unreach(m, ic);   /* a connected UDP flow's, or nothing */
         m_freem(m);

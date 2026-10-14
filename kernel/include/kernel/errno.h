@@ -37,9 +37,11 @@
 #define ENOSYS    38  /* not implemented */
 #define ENOTEMPTY 39  /* directory not empty */
 #define ELOOP     40  /* too many levels */
+#define EDESTADDRREQ 89 /* a raw socket's send names no address */
 #define EMSGSIZE  90  /* message too long */
 #define EPROTOTYPE 91 /* a unix name of the other socket type */
 #define ENOPROTOOPT 92 /* protocol option not available */
+#define EPROTONOSUPPORT 93 /* protocol not supported by this socket type */
 #define ENOTSUP   95  /* operation not supported */
 #define EOPNOTSUPP 95 /* alias */
 #define ESOCKTNOSUPPORT 94 /* socket type not supported by this family */

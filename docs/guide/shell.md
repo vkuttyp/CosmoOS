@@ -75,7 +75,7 @@ cosmo$ ls /bin
 
 The applets are `sh` (ash) and `[ awk basename cat chmod clear cmp cp
 cut date dd df diff dirname du echo env expr false find free grep gunzip
-gzip head hexdump id less ln ls md5sum mkdir mv nslookup printf pwd
+gzip head hexdump id less ln ls md5sum mkdir mv nslookup ping printf pwd
 readlink rm rmdir sed seq sha256sum sleep sort stat stty tail tar tee
 test top touch tr true tty uname uniq uptime vi wc wget which whoami
 xargs` (`ports/busybox/applets`); `/sbin` holds CosmoOS's own
@@ -113,7 +113,7 @@ cosmo$ jobs
 ## What is missing compared with Linux
 
 The shell and its applets behave as on Linux, but the system around them
-is smaller. Among what you will notice: no `ping`; `top` shows no
+is smaller. Among what you will notice: no `ping6`; `top` shows no
 process memory sizes; no hard links (`ln` without `-s`); no `/sys`; `wget` speaks HTTP only; one
 user, root; no swap. [Known limitations](limitations.md) has the full
 list.

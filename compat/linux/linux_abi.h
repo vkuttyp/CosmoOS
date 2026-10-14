@@ -292,6 +292,10 @@ struct lx_winsize {
 #define LX_AF_INET6 10
 #define LX_SOCK_STREAM 1
 #define LX_SOCK_DGRAM 2
+#define LX_SOCK_RAW 3
+#define LX_IPPROTO_ICMP 1
+#define LX_IPPROTO_TCP 6
+#define LX_IPPROTO_UDP 17
 #define LX_SOCK_SEQPACKET 5
 #define LX_SO_PEERCRED 17
 #define LX_SCM_RIGHTS 1

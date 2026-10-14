@@ -3277,14 +3277,15 @@ static int64_t lx_sock_send(struct socket *s, uint64_t ubuf, size_t len, const s
         return -EAFNOSUPPORT;
     if (!un && h != NULL && h->nr > 0)
         return -EINVAL;
-    size_t cap = s->type == COSMO_SOCK_DGRAM ? (len ? len : 1) : SOCK_CHUNK;
+    bool dgram = s->type != COSMO_SOCK_STREAM;   /* a datagram or a raw socket: one message per call */
+    size_t cap = dgram ? (len ? len : 1) : SOCK_CHUNK;
     if (cap > SOCK_CHUNK * 16)
         return -EMSGSIZE;
     uint8_t *tmp = kmalloc(cap, 0);
     if (tmp == NULL)
         return -ENOMEM;
     int64_t done = 0, rc = 0;
-    if (s->type == COSMO_SOCK_DGRAM) {
+    if (dgram) {
         if (copy_from_user(tmp, ubuf, len))
             rc = -EFAULT;
         else if (un)
@@ -3321,14 +3322,24 @@ static int64_t lx_socket(struct syscall_args *a)
     int family = (int)a->a[0];
     bool nonblock = ((unsigned)a->a[1] & LX_SOCK_NONBLOCK) != 0;
     unsigned type = (unsigned)a->a[1] & ~(unsigned)(LX_SOCK_NONBLOCK | LX_SOCK_CLOEXEC);
+    int proto = (int)a->a[2];
     if (family != LX_AF_INET && family != LX_AF_INET6 && family != LX_AF_UNIX)
         return -EAFNOSUPPORT;
-    if (type != LX_SOCK_STREAM && type != LX_SOCK_DGRAM)
-        return type >= 1 && type <= 10 ? -ESOCKTNOSUPPORT : -EINVAL;   /* a known type this family lacks (SEQPACKET, RAW, RDM, DCCP, PACKET), or no type at all: Linux's two answers */
+    int cfamily = family == LX_AF_INET ? COSMO_AF_INET : family == LX_AF_INET6 ? COSMO_AF_INET6 : COSMO_AF_UNIX;
     struct socket *s;
-    int rc = ksock_create(family == LX_AF_INET ? COSMO_AF_INET : family == LX_AF_INET6 ? COSMO_AF_INET6 : COSMO_AF_UNIX,
-                          type == LX_SOCK_STREAM ? COSMO_SOCK_STREAM : COSMO_SOCK_DGRAM, process_current()->cred.euid,
-                          &s);
+    int rc;
+    if (type == LX_SOCK_RAW && family != LX_AF_UNIX) {
+        /* Raw ICMP over IPv4, what ping opens (PRIV_NET; design.md, "Raw
+         * ICMP sockets"); any other protocol or IPv6 is -EPROTONOSUPPORT. */
+        rc = family == LX_AF_INET && proto == LX_IPPROTO_ICMP
+                 ? ksock_create_raw(cfamily, LX_IPPROTO_ICMP /* IPPROTO_ICMP's number */, process_current()->cred.euid, &s)
+                 : -EPROTONOSUPPORT;
+    } else if (type != LX_SOCK_STREAM && type != LX_SOCK_DGRAM) {
+        return type >= 1 && type <= 10 ? -ESOCKTNOSUPPORT : -EINVAL;   /* a known type this family lacks (SEQPACKET, RAW, RDM, DCCP, PACKET), or no type at all: Linux's two answers */
+    } else {
+        rc = ksock_create(cfamily, type == LX_SOCK_STREAM ? COSMO_SOCK_STREAM : COSMO_SOCK_DGRAM,
+                          process_current()->cred.euid, &s);
+    }
     if (rc)
         return rc;
     if (nonblock)
@@ -3640,8 +3651,8 @@ static int64_t lx_sendmsg(struct syscall_args *a)
     if (rc == 0 && s->family != COSMO_AF_UNIX && hs.nr > 0)
         rc = -EINVAL;
     bool dontwait = (flags & LX_MSG_DONTWAIT) != 0;
-    if (rc == 0 && s->type == COSMO_SOCK_DGRAM) {
-        /* Gathered into one buffer and sent once, handles and all. */
+    if (rc == 0 && s->type != COSMO_SOCK_STREAM) {
+        /* Gathered into one buffer and sent once, handles and all (a datagram or raw socket). */
         size_t total = 0;
         for (uint64_t i = 0; i < m.msg_iovlen && rc == 0; i++) {
             struct lx_iovec iov;

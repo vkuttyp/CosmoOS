@@ -171,6 +171,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/fw.c \
 	kernel-services/network/ipv6.c \
 	kernel-services/network/udp.c \
+	kernel-services/network/raw.c \
 	kernel-services/network/tcp.c \
 	kernel-services/network/socket.c \
 	kernel-services/network/nettest.c \

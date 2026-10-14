@@ -16,6 +16,7 @@
 #include <kernel/object.h>
 #include <kernel/wait.h>
 
+struct raw_pcb;
 struct tcp_pcb;
 struct unix_sock;
 
@@ -31,10 +32,11 @@ enum socket_state {
 struct socket {
     struct kobject obj;
     int family;                 /* COSMO_AF_INET / COSMO_AF_INET6 / COSMO_AF_UNIX */
-    int type;                   /* COSMO_SOCK_STREAM / COSMO_SOCK_DGRAM */
+    int type;                   /* COSMO_SOCK_STREAM / COSMO_SOCK_DGRAM / COSMO_SOCK_RAW */
     enum socket_state state;
     struct udp_pcb udp;         /* SOCK_DGRAM, inet */
     struct tcp_pcb *tcp;        /* SOCK_STREAM, inet */
+    struct raw_pcb *raw;        /* SOCK_RAW: ICMP over IPv4 (net/raw.h) */
     struct unix_sock *un;       /* COSMO_AF_UNIX: the transport in kernel/ipc/unix.c; every ksock_* dispatches on the family */
     struct waitqueue wait;
     /* Pending asynchronous error, delivered once (invariant N21). Written
@@ -58,6 +60,11 @@ struct socket {
 
 void socket_init(void);
 int ksock_create(int family, int type, uint32_t uid, struct socket **out);
+/* A raw socket (COSMO_SOCK_RAW): COSMO_AF_INET and IPPROTO_ICMP only
+ * (-EPROTONOSUPPORT otherwise), and only for a caller holding PRIV_NET
+ * (-EPERM), judged on the current credentials (design.md, "Raw ICMP
+ * sockets"). bind, connect and listen are -EOPNOTSUPP on one. */
+int ksock_create_raw(int family, int proto, uint32_t uid, struct socket **out);
 /* The inet entry points below refuse a unix socket with -EAFNOSUPPORT (an
  * inet address cannot name it); the doors call the unix_* entry points
  * of kernel/unix.h for a unix address. The address-free ones -- listen,

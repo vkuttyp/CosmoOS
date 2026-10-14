@@ -636,3 +636,16 @@ exchange (`xid` and `chaddr`), with a valid UDP checksum, in a state that
 expects it. **Checked by** `net-dhcp-client`: the fixture's address is the
 ACK's after binding and after a renewal, `0.0.0.0` after the lease's end
 and after a NAK, and an OFFER for another `xid` changes nothing.
+
+**N31. A raw socket sees ICMP only as the stack accepted it, and never
+changes what the stack does with it.** `raw_icmp_input` runs after
+`icmp_input`'s checksum and the host firewall's quiet check, so a raw
+socket reads nothing the stack itself would have refused, and it
+delivers copies: the original goes on to the echo reply, the
+unreachable handling or the free exactly as without raw sockets, and a
+full or absent raw queue costs the stack nothing. Creating one needs
+`PRIV_NET` at the time of the call. Check: `net-raw-icmp` (an echo to
+the loopback address read back with its IPv4 header; the host still
+answers it; a queue left full drops copies while the stack's own echo
+replies continue; creation without `PRIV_NET` is `-EPERM`), and
+`lxtest`'s protocol checks.

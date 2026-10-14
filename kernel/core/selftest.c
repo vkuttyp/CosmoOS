@@ -800,6 +800,7 @@ static const struct selftest tests[] = {
     { "net-tcp-reorder", selftest_net_tcp_reorder },
     { "net-tcp-keepalive", selftest_net_tcp_keepalive },
     { "net-icmp-limit",  selftest_net_icmp_limit },
+    { "net-raw-icmp",    selftest_net_raw_icmp },
     { "net-nonblock",    selftest_net_nonblock },
     { "net-sockerr-udp", selftest_net_sockerr_udp },
     { "net-sockerr-spoof", selftest_net_sockerr_spoof },
