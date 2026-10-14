@@ -138,7 +138,8 @@ void netif_test_worker_hooks_set(netif_test_worker_hook_fn input, netif_test_wor
 /* Stack -> driver: takes the packet. Thread context; -ENETUNREACH when
  * down, -ENODEV once unregistered. */
 int netif_transmit(struct netif *nif, struct mbuf *m);
-/* Test hook: -1, or the number of queued receive packets from `nif`. */
+/* Test hook: the number of receive packets from `nif` waiting in the
+ * per-CPU queues (other interfaces' are not counted). */
 unsigned netif_rxq_count(const struct netif *nif);
 /* The driver's view of its transmit ring: `tx_pending` when the driver
  * has one and the interface is not GONE, else false. A statistic; read
