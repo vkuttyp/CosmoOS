@@ -819,6 +819,21 @@ enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, unsigne
 }
 
 #if CONFIG_SELFTEST
+bool sched_test_repair_blocked_queued(void)
+{
+    arch_irq_state_t s = arch_irq_save();
+    struct percpu *pc = this_cpu();
+    struct runqueue *rq = pc->rq;
+    struct thread *cur = pc->current;
+    spin_lock(&rq->lock);
+    bool bad = cur->state == THREAD_BLOCKED && !list_empty(&cur->rq_link);
+    if (bad)
+        cur->state = THREAD_READY;   /* what the wake made it: finish then dequeues it */
+    spin_unlock(&rq->lock);
+    arch_irq_restore(s);
+    return bad;
+}
+
 bool sched_test_find_queued(const struct thread *t, unsigned *cpu, int *level, bool *bit_set)
 {
     for (unsigned c = 0; c < cpu_count(); c++) {

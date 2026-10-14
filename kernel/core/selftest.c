@@ -500,6 +500,7 @@ static const struct selftest tests[] = {
     { "completion-race", selftest_completion_race },
     { "completion-timeout", selftest_completion_timeout },
     { "waitqueue",       selftest_waitqueue },
+    { "wait-multi-prepare", selftest_wait_multi_prepare },
     { "smp-online",      selftest_smp_online },
     { "smp-affinity",    selftest_smp_affinity },
     { "smp-parallel",    selftest_smp_parallel },

@@ -193,6 +193,10 @@ void sched_dump(void);
  * (each queue locked in turn), and whether that level's bitmap bit is set,
  * which is what makes pick_next look there. False when no ready list holds
  * it. For a stranded-thread failure's diagnosis (sched-migrate-stress). */
+/* The current thread BLOCKED while still on a run queue (S34's breach):
+ * says so and puts it back to READY, so the caller's waitqueue_finish takes
+ * it off the queue and nothing is left corrupt (wait-multi-prepare). */
+bool sched_test_repair_blocked_queued(void);
 bool sched_test_find_queued(const struct thread *t, unsigned *cpu, int *level, bool *bit_set);
 #endif
 /* A subsystem's contribution to sched_dump: printed after the thread
