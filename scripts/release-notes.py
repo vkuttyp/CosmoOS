@@ -60,6 +60,7 @@ def main():
     bb = mk_vars("ports/busybox/busybox.mk")
     db = mk_vars("ports/dropbear/dropbear.mk")
     ossh = mk_vars("ports/openssh/openssh.mk")
+    tls = mk_vars("ports/mbedtls/mbedtls.mk")
     lim = open(os.path.join(ROOT, "docs", "guide", "limitations.md"), encoding="utf-8").read()
     lim = lim.split("\n", 1)[1].strip()   # drop the page title
     lim = lim.replace("](../", "](https://github.com/vkuttyp/CosmoOS/blob/" + a.tag + "/docs/")
@@ -93,13 +94,15 @@ def main():
     n.append("")
     n.append("## Third-party sources\n")
     n.append("Fetched and checked against these SHA-256 digests (`ports/busybox/busybox.mk`, "
-             "`ports/dropbear/dropbear.mk`, `ports/openssh/openssh.mk`):\n")
+             "`ports/dropbear/dropbear.mk`, `ports/openssh/openssh.mk`, `ports/mbedtls/mbedtls.mk`):\n")
     n.append("| Source | Version | SHA-256 |\n|---|---|---|")
     n.append(f"| BusyBox | {bb['BUSYBOX_VERSION']} | `{bb['BUSYBOX_SHA256']}` |")
     n.append(f"| musl | {bb['MUSL_VERSION']} | `{bb['MUSL_SHA256']}` |")
     n.append(f"| compiler-rt | {bb['CRT_VERSION']} | `{bb['CRT_SHA256']}` |")
     n.append(f"| dropbear | {db['DROPBEAR_VERSION']} | `{db['DROPBEAR_SHA256']}` |")
-    n.append(f"| OpenSSH portable (sftp-server only) | {ossh['OPENSSH_VERSION']} | `{ossh['OPENSSH_SHA256']}` |\n")
+    n.append(f"| OpenSSH portable (sftp-server only) | {ossh['OPENSSH_VERSION']} | `{ossh['OPENSSH_SHA256']}` |")
+    n.append(f"| mbedTLS | {tls['MBEDTLS_VERSION']} | `{tls['MBEDTLS_SHA256']}` |")
+    n.append(f"| CA certificates (curl's extract of Mozilla's) | {tls['CACERT_DATE']} | `{tls['CACERT_SHA256']}` |\n")
     n.append("## Reproducibility\n")
     n.append(f"Each architecture was built twice from the tag `{a.tag}`, in two fresh containers of the toolchain "
              "image above, with the release key; every file below was identical in both:\n")

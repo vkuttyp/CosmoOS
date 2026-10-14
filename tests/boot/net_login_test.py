@@ -17,7 +17,13 @@ configures it:
      the guest is the file's.
   c. By name: `nslookup example.com` answers through slirp's resolver, and
      `wget -O - http://example.com/` returns a body with "Example Domain"
-     -- up to three attempts, since this needs the runner's internet.
+     -- up to three attempts, since this needs the runner's internet;
+     and `wget -O - https://example.com/` the same, its certificate
+     checked against the installed CA bundle.
+  f. https (the https unit): wget fetches the 1 MiB file over https from
+     this harness, its certificate from a test CA made for the run, and
+     refuses an untrusted, an expired and a wrongly named certificate,
+     ssl_client naming why; --no-check-certificate fetches anyway.
 
 And on the same boot, job control in ash on the console (PR 2 of M4):
 `&`, `jobs`, `kill %1`, `^Z` and `bg`. Then ssh (PR 3), with the guest's
@@ -37,6 +43,7 @@ Exit 0 PASS, 1 FAIL.
 """
 
 import argparse
+import datetime
 import fcntl
 import hashlib
 import http.server
@@ -47,6 +54,7 @@ import select
 import shutil
 import socket
 import socketserver
+import ssl
 import struct
 import subprocess
 import sys
@@ -74,6 +82,124 @@ def start_http(directory):
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, srv.server_address[1]
+
+
+def find_openssl():
+    """An openssl that can write a certificate valid only in the past
+    (`x509 -not_after`, OpenSSL 3.4 and later): $OPENSSL, the one on PATH,
+    or Homebrew's (macOS's own is LibreSSL)."""
+    for o in (os.environ.get("OPENSSL"), shutil.which("openssl"), "/opt/homebrew/opt/openssl@3/bin/openssl",
+              "/usr/local/opt/openssl@3/bin/openssl"):
+        if not o or not os.path.exists(o):
+            continue
+        r = subprocess.run([o, "x509", "-help"], capture_output=True, text=True)
+        if "-not_after" in r.stdout + r.stderr:
+            return o
+    raise Fail("the https step needs OpenSSL 3.4 or later (x509 -not_after); set OPENSSL to one")
+
+
+def make_test_certs(d):
+    """A test CA and three server certificates it signs, made for this run
+    in `d` (no key is kept in the tree): `server` for 10.0.2.2 and
+    cosmo-test.invalid, valid from yesterday for 30 days; `expired`, the same names, valid in
+    2020 only; `wrongname`, for other.invalid only. Each NAME.pem with
+    NAME-key.pem; the CA is ca.pem."""
+    o = find_openssl()
+    os.makedirs(d, exist_ok=True)
+
+    def run(*argv):
+        r = subprocess.run([o, *argv], cwd=d, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise Fail(f"openssl {argv[0]}: {r.stderr.strip()[-400:]}")
+
+    ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes"]
+    # Valid from a day ago, as CAs backdate: the guest's clock, read from
+    # the RTC at boot, can be a little behind this host's, and a
+    # certificate made a moment ago would then start in its future.
+    now = datetime.datetime.now(datetime.timezone.utc)
+    valid = ["-not_before", (now - datetime.timedelta(days=1)).strftime("%Y%m%d%H%M%SZ"),
+             "-not_after", (now + datetime.timedelta(days=30)).strftime("%Y%m%d%H%M%SZ")]
+    run("req", "-x509", *ec, "-keyout", "ca-key.pem", "-out", "ca.pem", *valid,
+        "-subj", "/CN=CosmoOS test CA (this run only)",
+        "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+    for serial, (name, cn, san, when) in enumerate((
+            ("server", "cosmo-test.invalid", "IP:10.0.2.2,DNS:cosmo-test.invalid", valid),
+            ("expired", "cosmo-test.invalid", "IP:10.0.2.2,DNS:cosmo-test.invalid",
+             ["-not_before", "20200101000000Z", "-not_after", "20210101000000Z"]),
+            ("wrongname", "other.invalid", "DNS:other.invalid", valid)), start=1):
+        with open(os.path.join(d, name + ".ext"), "w") as f:
+            f.write(f"subjectAltName={san}\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n")
+        run("req", "-new", *ec, "-keyout", name + "-key.pem", "-out", name + ".csr", "-subj", "/CN=" + cn)
+        run("x509", "-req", "-in", name + ".csr", "-CA", "ca.pem", "-CAkey", "ca-key.pem",
+            "-set_serial", str(serial), "-extfile", name + ".ext", "-out", name + ".pem", *when)
+
+
+def start_https(directory, tls, name):
+    """An HTTPS server on 127.0.0.1 serving `directory` with the test
+    certificate `name` from make_test_certs' directory `tls`. A client
+    that refuses the certificate fails the handshake in accept, which
+    socketserver drops, as an OSError, before serving."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(os.path.join(tls, name + ".pem"), os.path.join(tls, name + "-key.pem"))
+    handler = lambda *a, **k: QuietHandler(*a, directory=directory, **k)  # noqa: E731
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), handler)
+    srv.daemon_threads = True
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+def stage_https(b, results, port, www, want, work):
+    """wget over https (the https unit): /bin/ssl_client checks the server's
+    certificate. The harness serves three test certificates, all for
+    10.0.2.2 but one, from a test CA the guest fetches over http and names
+    in SSL_CERT_FILE: the good one passes; with the installed bundle
+    (/etc/ssl/certs/ca-certificates.crt, no test CA), the expired one, and
+    the one for another name, wget fails and ssl_client names the reason;
+    --no-check-certificate passes the expired one, saying it did not
+    check."""
+    tls = os.path.join(work, "tls")
+    make_test_certs(tls)
+    shutil.copy(os.path.join(tls, "ca.pem"), os.path.join(www, "testca.pem"))
+    servers = {n: start_https(www, tls, n) for n in ("server", "expired", "wrongname")}
+    try:
+        out = b.status(f"wget -q -O /tmp/testca.pem http://10.0.2.2:{port}/testca.pem", "wget-ca")
+        need(out, r"^wget-ca=0$", "fetching the test CA over http")
+        ca = "env SSL_CERT_FILE=/tmp/testca.pem"
+
+        sport = servers["server"][1]
+        out = b.status(f"{ca} wget -q -O /tmp/blob-s.bin https://10.0.2.2:{sport}/blob.bin", "https-ok")
+        need(out, r"^https-ok=0$", "wget https with the test CA")
+        out = b.run("sha256sum /tmp/blob-s.bin")
+        got = need(out, r"^([0-9a-f]{64})\s+/tmp/blob-s\.bin$", "sha256sum of the https file").group(1)
+        if got != want:
+            raise Fail(f"the file fetched over https has SHA-256 {got}, the served file's {want}")
+
+        refused = []
+        for what, env, name, reason in (
+                ("the installed bundle", "", "server", r"not correctly signed by the trusted CA"),
+                ("an expired certificate", ca + " ", "expired", r"validity has expired"),
+                ("a certificate for another name", ca + " ", "wrongname", r"Common Name \(CN\) does not match")):
+            sp = servers[name][1]
+            out = b.status(f"{env}wget -q -O /tmp/refused https://10.0.2.2:{sp}/blob.bin", "https-refused")
+            if re.search(r"^https-refused=0$", out, re.M):
+                raise Fail(f"wget https accepted {what}:\n{out.strip()[-600:]}")
+            need(out, r"^ssl_client: 10\.0\.2\.2: the server's certificate is not accepted:$",
+                 f"ssl_client's refusal of {what}")
+            need(out, reason, f"the reason for refusing {what}")
+            refused.append(what)
+
+        sp = servers["expired"][1]
+        out = b.status(f"wget -q --no-check-certificate -O /tmp/blob-k.bin https://10.0.2.2:{sp}/blob.bin",
+                       "https-k")
+        need(out, r"^https-k=0$", "wget --no-check-certificate")
+        need(out, r"^ssl_client: 10\.0\.2\.2: the server's certificate was not checked \(-k\)$",
+             "ssl_client's notice that it did not check")
+    finally:
+        for srv, _ in servers.values():
+            srv.shutdown()
+    results.append(f"f. https: 1 MiB from 10.0.2.2:{sport} with the test CA, SHA-256 matches; refused "
+                   f"{', '.join(refused)}; --no-check-certificate fetches past an expired certificate")
 
 
 def console_jobs(b, results):
@@ -394,16 +520,21 @@ def stage_net(args, results, inst):
             out2 = b.status("wget -q -O - http://example.com/ > /tmp/ex.html", "wget-name")
             out2 += b.run("grep -c 'Example Domain' /tmp/ex.html")
             body_ok = re.search(r"^wget-name=0$", out2, re.M) and re.search(r"^[1-9]\d*$", out2, re.M)
-            if ns_ok and body_ok:
+            # The same over https, checked against the installed bundle.
+            out3 = b.status("wget -q -O - https://example.com/ > /tmp/exs.html", "wget-https")
+            out3 += b.run("grep -c 'Example Domain' /tmp/exs.html")
+            tls_ok = re.search(r"^wget-https=0$", out3, re.M) and re.search(r"^[1-9]\d*$", out3, re.M)
+            if ns_ok and body_ok and tls_ok:
                 addr = re.search(r"^Address: (\d+\.\d+\.\d+\.\d+)$", out, re.M).group(1)
-                results.append(f"c. by name: nslookup example.com -> {addr}; wget http://example.com/ has "
-                               f"'Example Domain' (attempt {attempt})")
+                results.append(f"c. by name: nslookup example.com -> {addr}; wget http://example.com/ and "
+                               f"https://example.com/ have 'Example Domain' (attempt {attempt})")
                 break
-            last = (out + out2).strip()[-400:]
+            last = (out + out2 + out3).strip()[-600:]
             time.sleep(2)
         else:
             raise Fail(f"by name: three attempts failed; the last said:\n{last}")
 
+        stage_https(b, results, port, www, want, work)
         console_jobs(b, results)
         stage_ssh(args, results, b, ssh_port)
 

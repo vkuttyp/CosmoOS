@@ -114,7 +114,7 @@ cosmo$ jobs
 
 The shell and its applets behave as on Linux, but the system around them
 is smaller. Among what you will notice: no `ping6`; `top` shows no
-process memory sizes; no hard links (`ln` without `-s`); no `/sys`; `wget` speaks HTTP only; one
+process memory sizes; no hard links (`ln` without `-s`); no `/sys`; one
 user, root; no swap. [Known limitations](limitations.md) has the full
 list.
 

@@ -12,7 +12,7 @@ the pages in order: each one continues where the one before it stopped.
    `ash`, the commands there are, job control, and what is missing
    compared with Linux.
 3. [Networking](networking.md): DHCP, `/etc/resolv.conf`, `netcfg`, and
-   `wget` (HTTP only, and why).
+   `wget` over HTTP and HTTPS.
 4. [ssh](ssh.md): a key, the dropbear server, logging in as root.
 5. [Packages](packages.md): `pkg` and the repository on the installed
    disk.
