@@ -14,7 +14,7 @@ serial port -- by `make test-platforms`.
 
 ## Parallels Desktop 27 on Apple Silicon (AArch64)
 
-The AArch64 image boots to the live shell since v1.0.1, and since v1.0.2
+The AArch64 image boots to the live shell since v1.0.1, and since v1.0.3
 it installs, boots the installed system, has a network and ssh, seeds
 its randomness and keeps the right time. To try it: create a virtual
 machine for "Other Linux", ARM64, with UEFI; put `cosmoos-aarch64.img`
