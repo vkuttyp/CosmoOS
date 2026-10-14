@@ -4,7 +4,11 @@
  * ignored entries. The realtime clock's test lives here too (milestone 10).
  */
 
+#include <arch/cpu.h>
+#include <kernel/percpu.h>
+#include <kernel/smp.h>
 #include <kernel/errno.h>
+#include <kernel/log.h>
 #include <kernel/object.h>
 #include <kernel/pipe.h>
 #include <kernel/poll.h>
@@ -119,4 +123,112 @@ bool selftest_realtime(const char **reason)
      * tolerance ten times tighter. */
     CHECK(drt <= dm + CLOCK_PAIR_NS && dm <= drt + CLOCK_PAIR_NS);
     return true;
+}
+
+/*
+ * poll-timer-outlives: io_poll's timer and its argument live in io_poll's
+ * frame, and the callback runs on the CPU that armed it; io_poll must not
+ * return while that callback still runs, or the callback writes into a
+ * frame that is gone. The callback is held (after it marks the alarm
+ * fired) on CPU A; a write wakes the poller and it is moved to CPU B, where
+ * it finds the pipe readable and returns -- and must wait there, in the
+ * timer's synchronous cancel, until the callback is let go. It used to
+ * return at once: the cancel did not wait for a running callback, and
+ * under scp and sftp traffic that corrupted the run queue. Needs three
+ * CPUs: this test's, A and B (the poller spins in the cancel, so B cannot
+ * be this test's CPU). The poller spins without calls once io_poll has
+ * returned, so the dead frame below it is not reused while the old code
+ * is shown failing.
+ */
+#if CONFIG_SELFTEST
+struct pto {
+    struct kobject *r;
+    volatile int started, returned, release, rc;
+    volatile unsigned done_at_return;
+};
+
+static void pto_poller(void *arg)
+{
+    struct pto *p = arg;
+    struct io_pollfd fd = { .obj = p->r, .events = COSMO_IO_READABLE };
+    p->started = 1;
+    p->rc = io_poll(&fd, 1, 20 * 1000000ull);
+    p->done_at_return = poll_test_alarm_done();
+    p->returned = 1;
+    while (!p->release)
+        arch_cpu_relax();
+}
+
+static unsigned other_cpu(unsigned not_a, unsigned not_b)
+{
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
+        if (cpu_online(c) && c != not_a && c != not_b)
+            return c;
+    return CONFIG_MAX_CPUS;
+}
+#endif
+
+bool selftest_poll_timer_outlives(const char **reason)
+{
+#if !CONFIG_SELFTEST
+    (void)reason;
+    return true;
+#else
+    cpumask_t was = thread_pin_self();
+    unsigned x = arch_cpu_id();
+    unsigned a = other_cpu(x, x);
+    unsigned b = a < CONFIG_MAX_CPUS ? other_cpu(x, a) : CONFIG_MAX_CPUS;
+    if (b >= CONFIG_MAX_CPUS) {
+        thread_set_affinity_self(was);
+        kinfo("selftest: poll-timer-outlives: needs three online CPUs; skipping");
+        return true;
+    }
+    struct kobject *r, *w;
+    CHECK(pipe_create(&r, &w) == 0);
+    static struct pto p;
+    p = (struct pto){ .r = r };
+    poll_test_alarm_hold(true);
+    struct thread *t = thread_create_on(pto_poller, &p, "poll-outlives", SCHED_PRIO_DEFAULT, (cpumask_t)1 << a);
+    CHECK(t != NULL);
+    thread_get(t);
+    uint64_t until = clock_now_ns() + 2000000000ull;
+    while (poll_test_alarm_in() == 0 && clock_now_ns() < until)
+        thread_sleep_ms(1);
+    bool held = poll_test_alarm_in() == 1;
+    enum sched_migrate_result mr = SCHED_MIGRATE_RESULT_COUNT;
+    bool early = false;
+    if (held) {
+        /* Wake the poller (READY on A, whose CPU is held in the callback)
+         * and move it to B, where it can run and return. */
+        thread_set_affinity(t, ((cpumask_t)1 << a) | ((cpumask_t)1 << b));
+        kobject_io_of(w)->write(w, "x", 1);
+        for (int i = 0; i < 100 && mr != SCHED_MIGRATED; i++) {
+            mr = sched_migrate(t, b);
+            if (mr != SCHED_MIGRATED)
+                thread_sleep_ms(1);
+        }
+        /* With the callback still held, the poller must not have returned. */
+        uint64_t look = clock_now_ns() + 30000000ull;
+        while (clock_now_ns() < look && !p.returned)
+            thread_sleep_ms(1);
+        early = p.returned != 0;
+    }
+    poll_test_alarm_hold(false);
+    until = clock_now_ns() + 2000000000ull;
+    while (!p.returned && clock_now_ns() < until)
+        thread_sleep_ms(1);
+    p.release = 1;
+    thread_join(t);
+    thread_put(t);
+    kobject_put(r);
+    kobject_put(w);
+    thread_set_affinity_self(was);
+    CHECK(held);
+    CHECK(mr == SCHED_MIGRATED);
+    CHECK(!early);                      /* io_poll waited for the callback it had armed */
+    CHECK(p.returned && p.done_at_return == 1);
+    CHECK(p.rc == 1);                   /* the pipe was readable */
+    kinfo("selftest: poll-timer-outlives: the poller on cpu %u waited for its timer's callback on cpu %u", b, a);
+    return true;
+#endif
 }

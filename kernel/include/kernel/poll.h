@@ -26,4 +26,12 @@ struct io_pollfd {
 #define IO_POLL_FOREVER (~0ull)
 int io_poll(struct io_pollfd *fds, unsigned n, uint64_t timeout_ns);
 
+#if CONFIG_SELFTEST
+/* poll-timer-outlives: hold the timeout callback (after it marks the alarm
+ * fired) until released; how many held callbacks entered, and finished. */
+void poll_test_alarm_hold(bool on);
+unsigned poll_test_alarm_in(void);
+unsigned poll_test_alarm_done(void);
+#endif
+
 #endif /* KERNEL_POLL_H */

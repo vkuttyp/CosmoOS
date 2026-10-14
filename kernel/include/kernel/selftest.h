@@ -157,6 +157,7 @@ bool selftest_sched_migrate_stress(const char **reason); /* 200 ms of workers un
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */
+bool selftest_poll_timer_outlives(const char **reason);   /* kernel/io/polltest.c: io_poll waits out its timer's callback */
 bool selftest_realtime(const char **reason);   /* kernel/io/polltest.c: the wall clock */
 bool selftest_epoll_close(const char **reason);   /* kernel/io/epolltest.c: a member's last close removes its registrations (A9) */
 bool selftest_epoll_scale(const char **reason);   /* kernel/io/epolltest.c: a wait costs the ready members, not the registered ones (A10) */

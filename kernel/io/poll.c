@@ -9,6 +9,7 @@
  * a kill or a deliverable signal makes the wait -EINTR.
  */
 
+#include <arch/cpu.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/object.h>
@@ -24,12 +25,43 @@ struct poll_alarm {
     bool fired;
 };
 
+#if CONFIG_SELFTEST
+/* poll-timer-outlives' seam: a held callback waits, after marking the alarm
+ * fired, until the test lets it go, so the poller can return on another CPU
+ * meanwhile. Unarmed, the callback reads one word and nothing more. */
+static int g_alarm_hold;
+static unsigned g_alarm_in, g_alarm_done;
+
+void poll_test_alarm_hold(bool on)
+{
+    if (on) {
+        __atomic_store_n(&g_alarm_in, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_alarm_done, 0, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&g_alarm_hold, on ? 1 : 0, __ATOMIC_RELEASE);
+}
+unsigned poll_test_alarm_in(void) { return __atomic_load_n(&g_alarm_in, __ATOMIC_ACQUIRE); }
+unsigned poll_test_alarm_done(void) { return __atomic_load_n(&g_alarm_done, __ATOMIC_ACQUIRE); }
+#endif
+
 static void alarm_fired(struct timer *t, void *arg)
 {
     (void)t;
     struct poll_alarm *a = arg;
     __atomic_store_n(&a->fired, true, __ATOMIC_RELEASE);
-    sched_wake(a->thread);
+#if CONFIG_SELFTEST
+    bool held = __atomic_load_n(&g_alarm_hold, __ATOMIC_ACQUIRE) != 0;
+    if (held) {
+        __atomic_fetch_add(&g_alarm_in, 1u, __ATOMIC_RELEASE);
+        while (__atomic_load_n(&g_alarm_hold, __ATOMIC_ACQUIRE))
+            arch_cpu_relax();
+    }
+#endif
+    sched_wake(a->thread);   /* `a` is the poller's stack: io_poll waits for this callback before it returns */
+#if CONFIG_SELFTEST
+    if (held)
+        __atomic_fetch_add(&g_alarm_done, 1u, __ATOMIC_RELEASE);
+#endif
 }
 
 /* revents for every entry; the count of entries with something set. */

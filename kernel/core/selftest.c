@@ -850,6 +850,7 @@ static const struct selftest tests[] = {
     { "unix-close-race", selftest_unix_close_race },
     { "unix-poll",       selftest_unix_poll },
     { "io-poll",         selftest_io_poll },
+    { "poll-timer-outlives", selftest_poll_timer_outlives },
     { "epoll-close",     selftest_epoll_close },
     { "epoll-scale",     selftest_epoll_scale },
     { "epoll-wake-race", selftest_epoll_wake_race },
