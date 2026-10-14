@@ -29,6 +29,7 @@ one, so raw sockets, which need no patch to BusyBox, were built instead.
 | interval timer | one kernel timer per process, `SIGALRM` from its callback (interrupt context, as ^C's), re-armed by the interval; setters cancel synchronously under `itimer_lock`; fork disarmed, exec kept, exit cancels | `kernel/process/itimer.c`, `process.h`, `process.c` |
 | Linux syscalls | `setitimer`, `getitimer` (x86-64 38/36, AArch64 103/102), `alarm` (x86-64 37) | `compat/linux/` |
 | errnos | `EDESTADDRREQ` 89, `EPROTONOSUPPORT` 93 (kernel, native ABI, libc) | |
+| mbuf | `m_free` panics on a double free in debug builds; `tap_transmit` and `rxq_purge` no longer free after a failed enqueue | `mbuf.c`, `tap.c`, `netif.c` |
 
 ## Tests
 
@@ -49,6 +50,26 @@ one, so raw sockets, which need no patch to BusyBox, were built instead.
   the protocol check and lxtest fails on it, the ping socket being
   descriptor 3 (a UDP socket), on x86-64 and AArch64 (run at 1fbf134e).
 
+## Found on the way: three double frees, and a check that sees them
+
+The first full matrix failed one boot: `net-raw-icmp` on x86-64 at two
+CPUs (1 of 8 boots that ran it), its last step seeing neither the
+stack's count of the extra echo nor its copy dropped as full within 5 s.
+`raw_icmp_input` freed a copy after a failed `mbufq_enqueue`, which had
+already freed it (`mbuf.h`; N2). The second `m_free` usually did nothing
+-- the count was 0 -- and harmed only when another CPU had reused the
+mbuf in between: it then freed a live packet, here the extra echo.
+
+`m_free` now panics, in debug builds, on an mbuf with no reference left
+(the slab's own double-free check never saw it: nothing reached the
+slab). The first boot with it panicked in `selftest_tap`: `tap_transmit`
+has freed after a failed enqueue since the tap was written, and the tap
+self-test fills that queue every boot; `rxq_purge` did the same twice.
+All three are fixed in one commit; `tools/mbuf-double-free-probe.py
+--old` reverses it, keeping the check, and the boot panics with it. With
+only the raw socket's free restored, both architectures panicked in
+`net-raw-icmp` on the first boot rather than one in eight.
+
 ## On Parallels Desktop 27
 
 The AArch64 release image, live and installed on NVMe: `ping -c 3` to the
@@ -60,9 +81,18 @@ more: that is how the missing interval timer was found.
 
 ## Validation
 
-Local: debug `make test` and `make test-busybox` pass on x86-64 and
-AArch64 (scripted test 93 checks), release images and `make fuzz` build
-and pass. The full matrix is run before the PR.
+- **Matrix**, local, at e4f0c186: all 38 steps pass on both
+  architectures (build, host-test, analyze, the debug boots at 1, 2 and 4
+  CPUs, smp2t, chaos, harness-retry, crash, wxn, guard, entropy,
+  security, release, install, gic, the reproducible release; x86-64 fuzz,
+  AArch64 platforms). The first matrix, before the double-free fix, failed
+  x86-64 `test-smp2` in `net-raw-icmp` (above) and was stopped.
+- **`make test-busybox`**: passes on both architectures (scripted test, 93
+  checks, `ping-lo` and `ping-noperm` among them).
+- **`tools/sock-proto-probe.py`**: as above, both modes on both
+  architectures.
+- **`tools/mbuf-double-free-probe.py`**: fixed, the boot passes; `--old`,
+  it panics on the double free; on x86-64 and AArch64 (at e4f0c186).
 
 ## Not done here
 
