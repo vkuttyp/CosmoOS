@@ -105,6 +105,12 @@ framebuffer at all, gets a console too.
   screen under its command; on x86-64 the crash-test kernel's
   `KERNEL PANIC: page fault: ...` line is on the screen.
 - **`make BUILD=release test-net-login`** passes on both architectures.
+- **After the review fixes**, at `aee66f2e`: the matrix again, 38 of 38
+  steps on both architectures (the debug boots run `vm-direct-ranges`,
+  the network harness passing in each; reproducible on both), and
+  `test-display` and `test-net-login` on both. `make BUILD=release
+  DISPLAY_SIZE=3840x2160 test-display` passes on x86-64, read in 16x32
+  cells.
 
 ## Review (PR #387)
 
