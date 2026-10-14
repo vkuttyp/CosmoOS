@@ -69,7 +69,7 @@ export (`-EEXIST`); the kernel panics at `ksym_init` on a duplicate.
 
 ### Module ABI v3: the exported symbols
 
-`COSMO_MODULE_ABI_VERSION` is 10. Version 2 (the lifetime pass): `struct
+`COSMO_MODULE_ABI_VERSION` is 11. Version 2 (the lifetime pass): `struct
 kobject` gained `owner`, which moves every field after the embedded
 kobject in `struct device`, `struct blkdev` and `struct netif`, and the
 release callbacks (`struct device.release`, `struct blkdev_ops.release`,
@@ -90,8 +90,10 @@ stops at one thread. Version 8: `struct blk_test_driver_hooks` gained the
 `pops_*` fields. Version 9 (device lifecycle): `struct device` gained
 `dma_retained`. Version 10 (the Parallels-devices unit): `struct mutex`
 gained `handoff`, the waiter the next unlock hands the mutex to (S33),
-which changes the size of every exported structure embedding one. An
-older module is refused by `modelf_check_info`.
+which changes the size of every exported structure embedding one.
+Version 11 (the virtio-gpu unit): `struct virtio_transport` gained
+`write_config32` after `read_config`, which moves every callback after
+it. An older module is refused by `modelf_check_info`.
 
 The exports include device, PCI, DMA, block, entropy and console-sink
 interfaces, the mbuf and network-interface surface a NIC driver needs,

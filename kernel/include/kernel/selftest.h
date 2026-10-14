@@ -28,6 +28,7 @@ bool selftest_asid_destroy_reuse(const char **reason); /* a tag freed at destroy
 bool selftest_asid_race(const char **reason);       /* two CPUs may not both tag one space */
 bool selftest_asid_quiet(const char **reason);       /* the switch path performs no full flush at all */
 bool selftest_asid_paranoid(const char **reason);   /* the isolation rule holds when every switch flushes */
+bool selftest_vm_direct_ranges(const char **reason);   /* kernel/memory/memtest.c: a multi-range view is pages, so it unmaps */
 bool selftest_vm_teardown_absent(const char **reason);   /* a dying space walks what was populated, not what was reserved */
 bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */
 bool selftest_vm_fork(const char **reason);    /* kernel/memory/forktest.c: copy-on-write duplication of a user space (M3) */

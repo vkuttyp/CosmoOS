@@ -495,8 +495,10 @@ vaddr_t vm_map_direct_ranges(void *const *va_in, const size_t *size, unsigned n,
     }
     vaddr_t va = base;
     for (unsigned i = 0; i < n; i++) {
-        int rc = arch_mmu_map(&kernel_space.mmu, va, pa[i], size[i], prot, cache,
-                              ARCH_MMU_MAP_LARGE | ARCH_MMU_MAP_GLOBAL);
+        /* Pages, never blocks: vm_unmap_phys tears down 128 KiB at a
+         * time, and neither MMU splits a block (selftest
+         * vm-direct-ranges). */
+        int rc = arch_mmu_map(&kernel_space.mmu, va, pa[i], size[i], prot, cache, ARCH_MMU_MAP_GLOBAL);
         if (rc) {
             arch_mmu_unmap(&kernel_space.mmu, base, total);
             list_remove(&r->link);

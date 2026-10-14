@@ -65,6 +65,7 @@
 #define VGPU_TICK_MS    16u
 #define VGPU_CMD_TIMEOUT_NS  (2ull * 1000000000ull)
 #define VGPU_PANIC_POLL_NS   (200ull * 1000000ull)
+#define VGPU_RESIZE_RETRY_NS (1000ull * 1000000ull)
 
 struct vgpu_hdr {
     uint32_t type;
@@ -152,6 +153,15 @@ struct vgpu_buf {
     dma_addr_t req_dma, resp_dma;
 };
 
+/* DMA memory a timed-out command may have left the device: freed only
+ * after the reset in vgpu_teardown. */
+struct vgpu_retained {
+    struct vgpu_retained *next;
+    void *va;
+    dma_addr_t dma;
+    size_t len;
+};
+
 struct vgpu {
     struct virtio_device *vdev;
     struct virtqueue *vq;
@@ -164,6 +174,14 @@ struct vgpu {
     struct thread *thread;
     bool stopping;
     bool broken;                     /* a command timed out: none is sent again */
+    bool panic_dead;                 /* a panic command was not answered: none is sent again */
+    struct vgpu_retained *retained;  /* under cmd_lock */
+    /* Under cmd_lock, the thread's: a display change not yet followed
+     * (retried every VGPU_RESIZE_RETRY_NS), and rows taken from fbcon
+     * whose flush failed (retried every tick). */
+    bool resize_pending, resize_warned;
+    uint64_t resize_retry_at;
+    uint32_t pend_y0, pend_y1;
     uint64_t flushes, transfers_bytes, resizes, panic_flushes;
 };
 
@@ -290,6 +308,21 @@ static int vgpu_set_scanout(struct vgpu *g, uint32_t resource_id, uint32_t w, ui
     return vgpu_cmd(g, sizeof(*s), sizeof(struct vgpu_hdr), VGPU_RESP_OK_NODATA);
 }
 
+/* Free DMA memory now, or, once a command has timed out (the device may
+ * still own it), keep it for vgpu_teardown to free after the reset. */
+static void vgpu_dma_release(struct vgpu *g, size_t len, void *va, dma_addr_t dma)
+{
+    if (!g->broken) {
+        dma_free(&g->vdev->dev, len, va, dma);
+        return;
+    }
+    struct vgpu_retained *r = kmalloc(sizeof(*r), 0);
+    if (r == NULL)
+        return;   /* leaked: never handed back while the device may own it */
+    *r = (struct vgpu_retained){ g->retained, va, dma, len };
+    g->retained = r;
+}
+
 /* Drop a frame: its host resource (detached first, as the spec asks
  * before the memory goes), its view and its memory. Not attached to fbcon. */
 static void vgpu_frame_free(struct vgpu *g, struct vgpu_frame *f)
@@ -306,21 +339,31 @@ static void vgpu_frame_free(struct vgpu *g, struct vgpu_frame *f)
     }
     if (f->view)
         vm_unmap_phys(f->view);
-    /* A command that timed out may leave the device holding the memory:
-     * keep it rather than hand the device someone else's pages. */
-    if (!g->broken)
-        for (unsigned i = 0; i < f->nchunks; i++)
-            dma_free(&g->vdev->dev, f->chunk_len[i], f->chunk[i], f->chunk_dma[i]);
+    for (unsigned i = 0; i < f->nchunks; i++)
+        vgpu_dma_release(g, f->chunk_len[i], f->chunk[i], f->chunk_dma[i]);
     kfree(f);
 }
 
 static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1);
+
+/* Scanout 0 back on the frame fbcon draws, all of it flushed (or off when
+ * there is none): after a new frame was put on it and then given up. */
+static void vgpu_restore_scanout(struct vgpu *g)
+{
+    if (g->frame == NULL) {
+        (void)vgpu_set_scanout(g, 0, 0, 0);
+        return;
+    }
+    if (vgpu_set_scanout(g, g->frame->resource_id, g->frame->width, g->frame->height) == 0)
+        (void)vgpu_transfer_flush(g, g->frame, 0, g->frame->height);
+}
 
 /* A frame of w x h on the device and in memory, shown on scanout 0 with
  * its whole area flushed. Not yet attached to fbcon. */
 static struct vgpu_frame *vgpu_frame_new(struct vgpu *g, uint32_t w, uint32_t h, int *rc_out)
 {
     int rc = -ENOMEM;
+    bool shown = false;   /* scanout 0 was given this frame */
     struct vgpu_frame *f = kzalloc(sizeof(*f));
     if (f == NULL)
         goto fail;
@@ -375,10 +418,10 @@ static struct vgpu_frame *vgpu_frame_new(struct vgpu *g, uint32_t w, uint32_t h,
     a->nr_entries = (uint32_t)entries;
     rc = vgpu_cmd_at(g, a, g->cmd.req_dma, sizeof(struct vgpu_attach), edma, entries * sizeof(*ent),
                      sizeof(struct vgpu_hdr), VGPU_RESP_OK_NODATA);
-    if (!g->broken)   /* a command that timed out may leave it the device's */
-        dma_free(&g->vdev->dev, elen, ent, edma);
+    vgpu_dma_release(g, elen, ent, edma);
     if (rc)
         goto fail;
+    shown = true;
     rc = vgpu_set_scanout(g, f->resource_id, w, h);
     if (rc)
         goto fail;
@@ -394,6 +437,8 @@ static struct vgpu_frame *vgpu_frame_new(struct vgpu *g, uint32_t w, uint32_t h,
     return f;
 
 fail:
+    if (shown)
+        vgpu_restore_scanout(g);   /* before the resource goes */
     if (f)
         vgpu_frame_free(g, f);
     *rc_out = rc;
@@ -410,19 +455,21 @@ static int vgpu_show(struct vgpu *g, uint32_t w, uint32_t h)
         return rc;
     rc = fbcon_attach(&f->surface);
     if (rc) {
-        if (g->frame)
-            (void)vgpu_set_scanout(g, g->frame->resource_id, g->frame->width, g->frame->height);
+        vgpu_restore_scanout(g);
         vgpu_frame_free(g, f);
         return rc;
     }
     struct vgpu_frame *old = g->frame;
     g->frame = f;
+    g->pend_y0 = g->pend_y1 = 0;   /* the old frame's rows; the new one is all flushed */
     if (old)
         vgpu_frame_free(g, old);
     /* The console's first screen, drawn by fbcon_attach. */
     uint32_t y0, y1;
-    if (fbcon_take_damage(&f->surface, &y0, &y1))
-        (void)vgpu_transfer_flush(g, f, y0, y1);
+    if (fbcon_take_damage(&f->surface, &y0, &y1) && vgpu_transfer_flush(g, f, y0, y1) != 0) {
+        g->pend_y0 = y0;   /* the thread retries it */
+        g->pend_y1 = y1;
+    }
     kinfo("virtio-gpu: %s: scanout 0 %ux%u, resource %u in %u chunk(s)", g->vdev->dev.name, w, h,
           f->resource_id, f->nchunks);
     return 0;
@@ -438,20 +485,46 @@ static void vgpu_thread(void *arg)
             mutex_unlock(&g->cmd_lock);
             continue;
         }
+        /* Cleared before the size is read: a change after the read
+         * raises the event again. */
         if (virtio_read_config32(g->vdev, VGPU_CFG_EVENTS_READ) & VGPU_EVENT_DISPLAY) {
             virtio_write_config32(g->vdev, VGPU_CFG_EVENTS_CLEAR, VGPU_EVENT_DISPLAY);
+            g->resize_pending = true;
+            g->resize_warned = false;
+            g->resize_retry_at = 0;
+        }
+        if (g->resize_pending && clock_now_ns() >= g->resize_retry_at) {
             uint32_t w, h;
-            if (vgpu_display_size(g, &w, &h) == 0 && (w != g->frame->width || h != g->frame->height)) {
-                if (vgpu_show(g, w, h) == 0)
-                    g->resizes++;
-                else
-                    kwarn("virtio-gpu: %s: cannot change to %ux%u; staying at %ux%u", g->vdev->dev.name, w, h,
-                          g->frame->width, g->frame->height);
+            int rc = vgpu_display_size(g, &w, &h);
+            if (rc == 0 && w == g->frame->width && h == g->frame->height)
+                g->resize_pending = false;
+            else if (rc == 0 && (rc = vgpu_show(g, w, h)) == 0) {
+                g->resize_pending = false;
+                g->resizes++;
+            }
+            if (g->resize_pending) {
+                /* Kept and retried (an allocation may succeed later);
+                 * a timeout ends it with every other command. */
+                if (!g->resize_warned)
+                    kwarn("virtio-gpu: %s: cannot follow the display (%d); staying at %ux%u, retrying",
+                          g->vdev->dev.name, rc, g->frame->width, g->frame->height);
+                g->resize_warned = true;
+                g->resize_retry_at = clock_now_ns() + VGPU_RESIZE_RETRY_NS;
             }
         }
+        /* Rows whose flush failed stay pending, merged with new ones. */
         uint32_t y0, y1;
-        if (fbcon_take_damage(&g->frame->surface, &y0, &y1))
-            (void)vgpu_transfer_flush(g, g->frame, y0, y1);
+        if (fbcon_take_damage(&g->frame->surface, &y0, &y1)) {
+            if (g->pend_y0 == g->pend_y1) {
+                g->pend_y0 = y0;
+                g->pend_y1 = y1;
+            } else {
+                g->pend_y0 = y0 < g->pend_y0 ? y0 : g->pend_y0;
+                g->pend_y1 = y1 > g->pend_y1 ? y1 : g->pend_y1;
+            }
+        }
+        if (g->pend_y0 != g->pend_y1 && vgpu_transfer_flush(g, g->frame, g->pend_y0, g->pend_y1) == 0)
+            g->pend_y0 = g->pend_y1 = 0;
         mutex_unlock(&g->cmd_lock);
     }
 }
@@ -467,7 +540,7 @@ static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
 {
     struct vgpu *g = arg;
     struct vgpu_frame *f = g->frame;
-    if (f == NULL || g->broken || !spin_trylock(&g->vq->lock))
+    if (f == NULL || g->broken || g->panic_dead || !spin_trylock(&g->vq->lock))
         return;
     spin_unlock(&g->vq->lock);
     uint32_t types[2] = { VGPU_CMD_TRANSFER_TO_HOST_2D, VGPU_CMD_RESOURCE_FLUSH };
@@ -502,8 +575,12 @@ static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
             else if (cookie == &g->cmd)
                 complete(&g->done);   /* a thread's command, answered meanwhile */
         }
-        if (!seen)
+        if (!seen) {
+            /* Not again: each later panic line would wait as long,
+             * and the serial sink after this one with it. */
+            g->panic_dead = true;
             return;
+        }
     }
     g->panic_flushes++;
 }
@@ -536,10 +613,18 @@ static void vgpu_teardown(struct vgpu *g)
     virtio_device_reset(g->vdev);
     if (g->vq)
         virtq_free(g->vq);
-    if (!g->broken) {
-        vgpu_buf_free(g, &g->cmd);
-        vgpu_buf_free(g, &g->panic);
+    /* After a timeout the device may own the buffers until the reset
+     * takes: freed only once it has (status reads 0). */
+    if (g->broken && g->vdev->tr->get_status(g->vdev) != 0)
+        return;
+    while (g->retained != NULL) {
+        struct vgpu_retained *r = g->retained;
+        g->retained = r->next;
+        dma_free(&g->vdev->dev, r->len, r->va, r->dma);
+        kfree(r);
     }
+    vgpu_buf_free(g, &g->cmd);
+    vgpu_buf_free(g, &g->panic);
 }
 
 static int vgpu_probe(struct virtio_device *vdev)
@@ -567,11 +652,12 @@ static int vgpu_probe(struct virtio_device *vdev)
 
     uint32_t w, h;
     mutex_lock(&g->cmd_lock);
+    /* Cleared before the size is read: a change after the read raises
+     * the event again, and the thread follows it. */
+    virtio_write_config32(vdev, VGPU_CFG_EVENTS_CLEAR, VGPU_EVENT_DISPLAY);
     rc = vgpu_display_size(g, &w, &h);
     if (rc == 0)
         rc = vgpu_show(g, w, h);
-    /* A display change before now is in that size already. */
-    virtio_write_config32(vdev, VGPU_CFG_EVENTS_CLEAR, VGPU_EVENT_DISPLAY);
     mutex_unlock(&g->cmd_lock);
     if (rc)
         goto fail;

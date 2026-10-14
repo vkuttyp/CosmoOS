@@ -461,6 +461,7 @@ static const struct selftest tests[] = {
     { "pmm",             selftest_pmm },
     { "vmm",             selftest_vmm },
     { "user-vmm",        selftest_user_vmm },
+    { "vm-direct-ranges", selftest_vm_direct_ranges },
     { "vm-teardown-absent", selftest_vm_teardown_absent },
     { "vm-replace",      selftest_vm_replace },
     { "vm-fork",         selftest_vm_fork },

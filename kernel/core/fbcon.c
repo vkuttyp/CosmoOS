@@ -519,11 +519,15 @@ void fbcon_cursor(uint32_t *col, uint32_t *row)
 }
 
 /*
- * A display driver's surface (fbcon.h). The new text buffer and the log's
- * newest screenful are taken first, in thread context; the switch itself
- * is one hold of the console lock, so no sink write sees half of it. The
- * boot framebuffer's console is kept for fbcon_detach and keeps its
- * mapping; a previous surface's text buffer is freed after the switch.
+ * A display driver's surface (fbcon.h). The new text buffer is allocated
+ * first, in thread context. The switch, the copy of the log's newest
+ * screenful and its replay are one hold of the console lock (the ring's
+ * lock nests inside it), so no line written meanwhile is lost: every
+ * line is either in the copy or written after the release onto the new
+ * surface. A line put in the ring whose sink write is waiting for the
+ * lock is drawn twice. A first surface's sink is registered in the same
+ * hold. The boot framebuffer's console is kept for fbcon_detach and keeps
+ * its mapping; a previous surface's text buffer is freed after the switch.
  */
 int fbcon_attach(const struct fbcon_surface *s)
 {
@@ -544,7 +548,6 @@ int fbcon_attach(const struct fbcon_surface *s)
     if (next.text == NULL)
         return -ENOMEM;
     char *log = kmalloc(KLOG_RING_SIZE, 0);
-    size_t log_len = log ? klog_copy(log, KLOG_RING_SIZE) : 0;
 
     struct fbcon *c = &g_fbcon;
     arch_irq_state_t st = console_hold();
@@ -564,10 +567,14 @@ int fbcon_attach(const struct fbcon_surface *s)
     c->sink.write = fbcon_write;
     c->surface = s;
     fbcon_start(c);
-    console_release(st);
+    if (!c->registered) {
+        console_register(&c->sink);   /* writers walk the list under this lock */
+        c->registered = true;
+    }
 
     /* The newest screenful, as fbcon_init shows it. */
     if (log != NULL) {
+        size_t log_len = klog_copy(log, KLOG_RING_SIZE);
         size_t start = log_len;
         unsigned lines = 0;
         while (start > 0 && lines < c->rows) {
@@ -577,15 +584,10 @@ int fbcon_attach(const struct fbcon_surface *s)
                 break;
             }
         }
-        st = console_hold();
         fbcon_write(&c->sink, log + start, log_len - start);
-        console_release(st);
-        kfree(log);
     }
-    if (!registered) {
-        console_register(&c->sink);
-        c->registered = true;
-    }
+    console_release(st);
+    kfree(log);
     kfree(old_text);
     kinfo("fbcon: %ux%u cells of %ux%u pixels on a %ux%u surface, scrolling %u rows at a time", c->cols, c->rows,
           c->cell_w, c->cell_h, c->width, c->height, c->scroll_rows);

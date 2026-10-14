@@ -12,7 +12,8 @@ screen is one the kernel's virtio_gpu module had the device show; and
 behind the firmware's own framebuffer (QEMU_DISPLAY=both, Parallels
 Desktop's shape), where fbcon starts on that framebuffer and moves. At the shell prompt
 the test echoes a marker line, then takes QEMU's `screendump` and reads
-the screen back as text: each 8x16 cell is matched against the kernel's
+the screen back as text: each cell (8x16, or 16x32 at 3840x2160, the
+size fbcon reports) is matched against the kernel's
 own face (tools/mkfont.py), ink being any channel above half. It requires:
 
   a. the driver's line `virtio-gpu: ...: scanout 0 WxH` for the size asked,
@@ -91,18 +92,22 @@ def read_ppm(path):
     return w, h, data[m.end():]
 
 
-def decode(w, h, px, face):
-    """The screen as text lines; '\\0' for a cell that matches no glyph."""
+def decode(w, h, px, face, scale=1):
+    """The screen as text lines; '\\0' for a cell that matches no glyph.
+    At `scale` each font pixel is a scale x scale block (fbcon_scale); its
+    top-left pixel is read."""
     lines = []
-    for row in range(h // 16):
+    cw, ch = 8 * scale, 16 * scale
+    for row in range(h // ch):
         chars = []
-        for col in range(w // 8):
+        for col in range(w // cw):
             rows = []
             for y in range(16):
                 bits = 0
-                base = ((row * 16 + y) * w + col * 8) * 3
+                base = ((row * ch + y * scale) * w + col * cw) * 3
                 for x in range(8):
-                    if max(px[base + 3 * x:base + 3 * x + 3]) > 0x80:
+                    p = base + 3 * x * scale
+                    if max(px[p:p + 3]) > 0x80:
                         bits |= 0x80 >> x
                 rows.append(bits)
             chars.append(face.get(tuple(rows), "\0"))
@@ -110,12 +115,25 @@ def decode(w, h, px, face):
     return lines
 
 
-def screen(sock, path, face, w, h):
+def cell_scale(log, w, h):
+    """fbcon's cell size on the WxH surface, from its own line, as a
+    multiple of the 8x16 face (fbcon_scale: 2 at 3840x2160)."""
+    cells = re.findall(r"^\[ INFO\] fbcon: \d+x\d+ cells of (\d+)x(\d+) pixels on a (\d+)x(\d+) surface", log, re.M)
+    sizes = [(int(cw), int(ch)) for cw, ch, sw, sh in cells if (int(sw), int(sh)) == (w, h)]
+    if not sizes:
+        raise Fail(f"no fbcon line for a {w}x{h} surface")
+    cw, ch = sizes[-1]
+    if cw % 8 or ch != 2 * cw:
+        raise Fail(f"fbcon's cells are {cw}x{ch}, not a multiple of the 8x16 face")
+    return cw // 8
+
+
+def screen(sock, path, face, w, h, scale):
     qmp(sock, "screendump", {"filename": path, "device": "gpu0"})   # the virtio-gpu (qemu-run.sh), not the VGA
     sw, sh, px = read_ppm(path)
     if (sw, sh) != (w, h):
         raise Fail(f"the screen is {sw}x{sh}, not {w}x{h}")
-    return decode(sw, sh, px, face)
+    return decode(sw, sh, px, face, scale)
 
 
 def panic_screen(args, face):
@@ -132,7 +150,7 @@ def panic_screen(args, face):
             time.sleep(0.2)
         need(b.text(), r"^\[ INFO\] virtio-gpu: \S+: scanout 0 ", "the virtio-gpu driver before the panic")
         time.sleep(1.0)   # nothing should change now; the panic flushed as it wrote
-        lines = screen(sock, os.path.join(args.workdir, "panic.ppm"), face, w, h)
+        lines = screen(sock, os.path.join(args.workdir, "panic.ppm"), face, w, h, cell_scale(b.text(), w, h))
         hit = [ln for ln in lines if "KERNEL PANIC" in ln]
         if not hit:
             raise Fail("the panic is not on the screen; its last rows:\n" + "\n".join(lines[-12:]))
@@ -201,7 +219,8 @@ def check_shape(args, face, shape, want_w, want_h, results):
         out = b.run(f"echo '{marker}'")
         need(out, "^" + re.escape(marker) + "$", "the marker on the serial console")
         time.sleep(1.0)   # the driver flushes every 16 ms
-        lines = screen(sock, shot, face, want_w, want_h)
+        scale = cell_scale(log, want_w, want_h)
+        lines = screen(sock, shot, face, want_w, want_h, scale)
 
         bad = [(i, ln) for i, ln in enumerate(lines) if "\0" in ln]
         if bad:
@@ -215,7 +234,7 @@ def check_shape(args, face, shape, want_w, want_h, results):
             raise Fail(f"{shape}: the command line is not above the marker: {lines[max(0, at - 2):at]!r}")
         used = sum(1 for ln in lines if ln)
         results.append(f"{shape}: {first}{m.group(1)} scanout 0 {args.size} in {m.group(4)} chunk(s); the "
-                       f"{want_w}x{want_h} screendump reads back as text ({used} non-blank rows of {len(lines)}), "
+                       f"{want_w}x{want_h} screendump reads back as text in {8 * scale}x{16 * scale} cells ({used} non-blank rows of {len(lines)}), "
                        f"the marker at row {at} under its command, and on the serial console")
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
