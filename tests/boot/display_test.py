@@ -142,7 +142,7 @@ def screen(sock, path, face, w, h, scale):
     return decode(sw, sh, px, face, scale)
 
 
-def panic_screen(args, face, image, name, what):
+def panic_screen(args, face, image, name, what, message):
     w, h = (int(v) for v in args.size.split("x"))
     sock = os.path.join(args.workdir, f"qmp-{name}.sock")
     b = Boot(name, image, args.workdir,
@@ -157,7 +157,8 @@ def panic_screen(args, face, image, name, what):
         need(b.text(), r"^\[ INFO\] virtio-gpu: \S+: scanout 0 ", "the virtio-gpu driver before the panic")
         time.sleep(1.0)   # nothing should change now; the panic flushed as it wrote
         lines = screen(sock, os.path.join(args.workdir, f"{name}.ppm"), face, w, h, cell_scale(b.text(), w, h))
-        hit = [ln for ln in lines if "KERNEL PANIC" in ln]
+        need(b.text(), r"^KERNEL PANIC: " + re.escape(message), f"{name}: the crash test's own panic")
+        hit = [ln for ln in lines if ln.startswith("KERNEL PANIC: " + message)]
         if not hit:
             raise Fail(f"{name}: the panic is not on the screen; its last rows:\n" + "\n".join(lines[-12:]))
         return f"{what} is on the screen: {hit[0].strip()[:80]!r}"
@@ -184,10 +185,12 @@ def main():
         for shape in ("virtio", "both"):
             check_shape(args, face, shape, want_w, want_h, results)
         if args.panic_image:
-            results.append(panic_screen(args, face, args.panic_image, "panic", "d. the crash-test kernel's panic"))
+            results.append(panic_screen(args, face, args.panic_image, "panic", "d. the crash-test kernel's panic",
+                                        "page fault: kernel write at 0xffff900000000000"))
         if args.panic_lockdep_image:
             results.append(panic_screen(args, face, args.panic_lockdep_image, "panic-lockdep",
-                                        "e. with lockdep's lock held by another CPU, the panic"))
+                                        "e. with lockdep's lock held by another CPU, the panic",
+                                        "crash test: lockdep's lock is held by another CPU"))
     except Fail as e:
         for r in results:
             print(f"test-display: {r}")
