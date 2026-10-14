@@ -95,9 +95,13 @@ several times more expensive uncached.
 **A display driver's surface** (the virtio-gpu unit). `fbcon_attach`
 moves the console onto memory a display driver owns (`struct
 fbcon_surface`: base, size, pitch, the pixel format, and `panic_flush`).
-The text buffer and the newest screenful of the log are taken first, in
-thread context. The switch is one hold of the console lock: the new
-geometry, a cleared surface, the screenful replayed. The sink itself,
+The text buffer is allocated first, in thread context. The switch is
+one hold of the console lock: the new geometry, a cleared surface, the
+newest screenful of the log copied (the ring's lock nests inside the
+console's) and replayed, and, for a first surface, the sink registered.
+A line written meanwhile is in the copy or drawn after the release, never
+lost; one put in the ring while its sink write waits for the lock is
+drawn twice. The sink itself,
 which is on the console's list, stays as it is. The first build copied
 the whole console structure and with it the sink's `next`, which cut
 every sink after fbcon off the list: on Parallels Desktop the serial

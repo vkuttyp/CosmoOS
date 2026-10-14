@@ -279,8 +279,9 @@ MSI-X vectors, the configuration's and one queue's).
   context), from one request and one response page, each waiting up to
   2 s for its response. A response other than the one expected fails the
   operation with its type logged. A command that times out marks the
-  device broken: nothing is sent again, and buffers the device may still
-  hold are never freed.
+  device broken: nothing is sent again. Buffers the device may still own
+  are kept on a list and freed only after the reset at removal, and only
+  when the status reads 0.
 - **`RESOURCE_ATTACH_BACKING`** sends its entries as a second descriptor
   after the 32-byte command, as Linux's driver does. Parallels Desktop
   answers 0x1205 (invalid parameter) to the entries in the command's own
@@ -289,18 +290,26 @@ MSI-X vectors, the configuration's and one queue's).
   rectangle `GET_DISPLAY_INFO` reports, capped at 3840x2160; 1024x768 when
   none). Its memory is `dma_alloc` chunks of at most 4 MiB, the page
   allocator's largest block (1920x1080 is two). `vm_map_direct_ranges`
-  maps them back to back, write-back, as one linear view. The frame is
+  maps them back to back, write-back, as one linear view, in pages:
+  `vm_unmap_phys` tears a region down 128 KiB at a time and neither MMU
+  splits a 2 MiB block (selftest `vm-direct-ranges`). The frame is
   set on the scanout, flushed whole, then handed to fbcon as a
   `struct fbcon_surface` (`fbcon_attach`; `docs/kernel/diagnostics/design.md`).
 - **The `vgpu` thread**, every 16 ms:
   - takes the band fbcon drew (`fbcon_take_damage`) and sends
-    `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` for those rows;
+    `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` for those rows. Rows whose
+    flush fails stay pending, merged with the next band;
   - reads the configuration's `events_read`. On `VIRTIO_GPU_EVENT_DISPLAY`
     (Parallels resizes the scanout with its window) it clears the event
     (`virtio_write_config32`, new with this driver), asks for the size
     again, and moves the console to a new frame of that size. The new
     frame is complete and on the scanout before fbcon leaves the old one,
-    which is then detached, unreferenced and freed.
+    which is then detached, unreferenced and freed. A change it cannot
+    follow (an allocation or a command failed) stays pending and is
+    retried every second, with one warning. A new frame given up after
+    `SET_SCANOUT` puts the old frame back on the scanout before its
+    resource goes. The probe clears the event before its first size
+    query, so a change after that query raises it again.
   - The configuration interrupt is not used for this: polling from the
     thread needs no callback that could race a driver unbind in interrupt
     context.
@@ -308,7 +317,9 @@ MSI-X vectors, the configuration's and one queue's).
   sends the transfer and flush from its own pair of pages and polls
   `virtq_pop` for each, at most 200 ms. When `controlq`'s lock is held (by
   a CPU the panic stopped) it sends nothing; the serial console has the
-  panic either way.
+  panic either way. A command not answered in time ends the panic
+  flushes: every later line would wait as long, and the serial sink after
+  fbcon's with it.
 - **Remove:** stop and join the thread, `fbcon_detach` (the console
   returns to the boot framebuffer, or to the serial port alone), turn the
   scanout off (resource 0), drop the frame, reset the device.

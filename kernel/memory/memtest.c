@@ -376,11 +376,13 @@ static unsigned online_cpus(void)
 /*
  * vm_map_direct_ranges (the virtio-gpu unit's frames) at a 2 MiB-aligned
  * view of 2 MiB-aligned memory, the one placement where a 2 MiB leaf
- * could be made. vm_unmap_phys tears a region down 128 KiB at a time and
- * both MMUs refuse to split a block, so the view must be pages: with a
- * block, the unmap below panics (PR #387's review). The arena is first
- * fit; a filler the size of the misalignment moves the next view along
- * until it lands aligned.
+ * could be asked for (PR #387's review). Both MMUs answer -EEXIST to a
+ * block where the slot already holds a page table (kept, M19): the map
+ * fails, as it does here with the old flag, the earlier try having left
+ * one. Where no table was, the block is made, and vm_unmap_phys, which
+ * tears down 128 KiB at a time, panics on the split both MMUs refuse. So
+ * the view is pages. The arena is first fit; a filler the size of the
+ * misalignment moves the next view along until it lands aligned.
  */
 #define DR_FILLERS 64u
 bool selftest_vm_direct_ranges(const char **reason)

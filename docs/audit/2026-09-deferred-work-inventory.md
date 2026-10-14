@@ -1120,3 +1120,14 @@ each; none is needed by M2's acceptance test.
 - `prctl` is the dumpable flag alone (`PR_SET_DUMPABLE`/`PR_GET_DUMPABLE`,
   recorded and reported; nothing reads it, there being no core dumps or
   ptrace); every other option is `-EINVAL` (the scp-sftp unit).
+- `vm_map_phys` maps with `ARCH_MMU_MAP_LARGE` and `vm_unmap_phys`
+  tears down 128 KiB at a time, which neither MMU allows across a 2 MiB
+  block: unmapping a 2 MiB-aligned mapping of 2 MiB or more panics, and
+  mapping one where the slot keeps a page table fails with `-EEXIST`.
+  Its 14 callers were not audited for sizes; no test maps one; `vm_map_direct_ranges` maps pages for this
+  reason (the virtio-gpu unit, selftest `vm-direct-ranges`).
+- On Parallels Desktop, `wget` refusing a bad certificate ends with
+  "Resource temporarily unavailable" after mbedTLS's message (cause not
+  investigated); seen in the post-1.0 Parallels test, 2026-10-14.
+- `sftp`'s `ls -l` shows `?` for the link count (cause not
+  investigated); seen in the same test.

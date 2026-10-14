@@ -106,6 +106,53 @@ framebuffer at all, gets a console too.
   `KERNEL PANIC: page fault: ...` line is on the screen.
 - **`make BUILD=release test-net-login`** passes on both architectures.
 
+## Review (PR #387)
+
+Qodo, Codex and CosmoReview reviewed `b776cb2e`. Fixed in `de63fd92`:
+
+- **A frame could be asked for in 2 MiB blocks** (Qodo, high).
+  `vm_map_direct_ranges` passed `ARCH_MMU_MAP_LARGE`. For a view placed
+  2 MiB-aligned over 2 MiB-aligned chunks, both MMUs make a block where
+  the slot has no page table, and `vm_unmap_phys`, which unmaps 128 KiB
+  at a time under a `KASSERT`, would panic on the old frame after a
+  resize (neither MMU splits a block). Where the slot keeps a table from
+  an earlier mapping (M19), the map fails with `-EEXIST` and the frame is
+  refused. It maps pages now. The selftest `vm-direct-ranges` places such
+  a view (filling the arena until it lands aligned), requires a 4 KiB
+  leaf and unmaps it. With the old flag (`vmm.c` reverted in a worktree
+  of `de63fd92`) it fails on both architectures at the map, the
+  `-EEXIST` case: `check failed: view != 0`. The panic case needs a slot
+  never mapped, which the test cannot choose; it follows from the two
+  refusals above.
+- **A display change not followed was dropped** (Qodo). It stays pending
+  and is retried every second, with one warning.
+- **Rows whose flush failed were dropped** (Qodo). They stay pending,
+  merged with the next band.
+- **A new frame given up after `SET_SCANOUT` left the scanout on a freed
+  resource** (Qodo, Codex). The old frame goes back on the scanout and is
+  flushed whole before the new resource is dropped.
+- **A panic flush that timed out was tried again for every line**
+  (Qodo), delaying the serial sink behind it. It is not tried again.
+- **Memory a timed-out command may own was never freed** (Qodo). It is
+  kept on a list and freed after the reset at removal, when the status
+  reads 0.
+- **The probe cleared display events after its size query** (Codex),
+  so a change in between was lost. It clears them first.
+- **`fbcon_attach` copied the log before the switch and registered the
+  sink after the replay** (Qodo, Codex): a line in either window could
+  miss the new screen. Copy, switch, replay and registration are one hold
+  of the console lock now.
+- **`struct virtio_transport` changed layout without an ABI bump**
+  (Qodo, Codex). `COSMO_MODULE_ABI_VERSION` is 11.
+- **`test-display` assumed 8x16 cells** (Codex); fbcon draws 16x32 at
+  3840x2160. The test reads the cell size from fbcon's line.
+
+Not changed: CosmoReview's "blocking call under spinlock" in
+`vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with
+`kmem_cache_alloc`, which takes only the cache's spinlock and grows from
+`pmm_alloc_pages` (`kernel/memory/slab.c`); it does not sleep.
+`vm_map_phys` does the same under the same lock.
+
 ## Not done here
 
 - Any display interface for programs (a framebuffer device, mode setting
