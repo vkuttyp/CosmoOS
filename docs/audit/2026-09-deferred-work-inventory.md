@@ -1100,3 +1100,11 @@ each; none is needed by M2's acceptance test.
   `test-install` on both architectures and Parallels, since before
   v1.0.2's everyday commands): the superblock's free count is not
   brought up to date by the installer's last commit.
+- No `ping6` and no raw IPv6 socket (also needs `recvmsg` ancillary data
+  and `ICMP6_FILTER`); a raw ICMP socket has no `bind` (so no `ping -I`),
+  `connect`, `IP_HDRINCL` or `ICMP_FILTER` (the ping unit, 2026-10-14).
+- `ITIMER_VIRTUAL` and `ITIMER_PROF` are `-EINVAL`; only `ITIMER_REAL` is
+  built (the ping unit).
+- `ports/busybox/README.md`'s config regeneration fails at `make
+  defconfig` on the macOS build host (exit 2, no `.config`); the ping
+  unit set `CONFIG_PING` and `CONFIG_FEATURE_FANCY_PING` by hand.
