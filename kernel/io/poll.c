@@ -105,7 +105,8 @@ int io_poll(struct io_pollfd *fds, unsigned n, uint64_t timeout_ns)
         }
     }
     if (armed)
-        timer_cancel(&timer);
+        timer_cancel_sync(&timer);   /* the timer and `alarm` are this frame's: wait out a callback running on
+                                        the CPU that armed it before they go (T14; epoll and aio already did) */
     kfree(we);
     kfree(wqs);
     return rc;
