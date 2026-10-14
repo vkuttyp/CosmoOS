@@ -1108,3 +1108,9 @@ each; none is needed by M2's acceptance test.
 - `ports/busybox/README.md`'s config regeneration fails at `make
   defconfig` on the macOS build host (exit 2, no `.config`); the ping
   unit set `CONFIG_PING` and `CONFIG_FEATURE_FANCY_PING` by hand.
+- `mbufq_enqueue` returns `false` both when it freed the packet (a full
+  queue) and when it did not touch it (already on a queue, `M_QUEUED`):
+  a caller cannot tell which, and every caller assumes the first, so the
+  second leaks. Three callers had freed again after a full queue (the
+  ping unit fixed them, N2); an interface that says which would remove
+  the guess.

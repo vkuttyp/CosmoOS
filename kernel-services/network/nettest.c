@@ -4135,8 +4135,23 @@ bool selftest_net_raw_icmp(const char **reason)
     ipv4_get_stats(&a);
     raw_get_stats(&r0);
     CHECK(raw_send_echo(s, 200) > 0);
-    { struct raw_seen t = { .base = &a, .rbase = &r0 };
-      CHECK(wait_until(raw_stack_and_drop, &t, 5000)); }
+    struct raw_seen t = { .base = &a, .rbase = &r0 };
+    if (!wait_until(raw_stack_and_drop, &t, 5000)) {
+        /* Which half did not happen, and what the raw path did instead. */
+        struct ip_stats i1;
+        struct raw_stats r1;
+        ipv4_get_stats(&i1);
+        raw_get_stats(&r1);
+        kinfo("selftest: net-raw-icmp: the extra echo: echo_rcvd %llu -> %llu, rx_queue_full %llu -> %llu, "
+              "rx_nomem %llu -> %llu, rx_delivered %llu -> %llu, queue %u",
+              (unsigned long long)a.icmp_echo_rcvd, (unsigned long long)i1.icmp_echo_rcvd,
+              (unsigned long long)r0.rx_queue_full, (unsigned long long)r1.rx_queue_full,
+              (unsigned long long)r0.rx_nomem, (unsigned long long)r1.rx_nomem,
+              (unsigned long long)r0.rx_delivered, (unsigned long long)r1.rx_delivered,
+              mbufq_len(&s->raw->rxq));
+        *reason = "the extra echo: the stack did not count it, or its copy was not dropped as full";
+        return false;
+    }
     CHECK(mbufq_len(&s->raw->rxq) == RAW_RXQ_MAX);
     kinfo("selftest: net-raw-icmp: request and reply read raw with their IPv4 header; a full queue drops the copy");
     return true;
