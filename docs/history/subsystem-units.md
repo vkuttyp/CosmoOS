@@ -2955,3 +2955,19 @@ See the [history index](README.md).
   CPU, writing into the dead frame (`poll-timer-outlives`); a stress of
   sftp sessions went from a panic at round 4 to none in 800 rounds.
   Report: `docs/audit/2026-10-14-scp-sftp-report.md`.
+- **After 1.0: HTTPS for wget (2026-10-14).** `wget` fetches `https://`
+  URLs with the server's certificate checked. A new pinned port builds
+  mbedTLS 3.6.7 and `ssl_client` on it (`/bin/ssl_client`), which requires
+  the chain to end in curl's pinned copy of Mozilla's CA list
+  (`/etc/ssl/certs/ca-certificates.crt`, or `SSL_CERT_FILE`), the URL's
+  host name, and validity at the wall clock; entropy is `getrandom`, since
+  there is no `/dev/urandom`. The BusyBox port's first patch makes `wget`
+  exec it rather than BusyBox's own TLS, which checks nothing.
+  `test-net-login` serves HTTPS with test certificates: a good one passes,
+  and an untrusted, an expired and a wrongly named one are refused with
+  the reason; `https://example.com/` works against the bundle. The PR's
+  CI found `netif_rxq_count` counting every interface's queued packets
+  against its own header (`net-netif-lifetime` failed under traffic); it
+  counts one interface's now (`netif-rxq-count`,
+  `tools/netif-rxq-count-probe.py`).
+  Report: `docs/audit/2026-10-14-https-report.md`.

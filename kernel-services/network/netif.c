@@ -238,12 +238,20 @@ static unsigned rxq_purge(struct netif *nif)
     return dropped;
 }
 
+/* Only `nif`'s packets: every interface shares these queues, and a count
+ * of all of them moves with whatever else the machine receives (an
+ * interface's own test asserted on it and failed under CI traffic). */
 unsigned netif_rxq_count(const struct netif *nif)
 {
-    (void)nif;
     unsigned n = 0;
-    for (unsigned i = 0; i < g_ncpu; i++)
-        n += mbufq_len(&g_cpu[i].rxq);
+    for (unsigned i = 0; i < g_ncpu; i++) {
+        struct mbufq *q = &g_cpu[i].rxq;
+        arch_irq_state_t s = spin_lock_irqsave(&q->lock);
+        for (const struct mbuf *m = q->head; m != NULL; m = m->nextpkt)
+            if (m->pkt.rcvif == nif)
+                n++;
+        spin_unlock_irqrestore(&q->lock, s);
+    }
     return n;
 }
 

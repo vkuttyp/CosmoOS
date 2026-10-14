@@ -1,0 +1,66 @@
+--- a/networking/wget.c
++++ b/networking/wget.c
+@@ -152,7 +152,7 @@
+ //usage:     "\n	--header STR	Add STR (of form 'header: value') to headers"
+ //usage:     "\n	--post-data STR	Send STR using POST method"
+ //usage:     "\n	--post-file FILE	Send FILE using POST method"
+-//usage:	IF_FEATURE_WGET_OPENSSL(
++//usage:	IF_FEATURE_WGET_HTTPS(
+ //usage:     "\n	--no-check-certificate	Don't validate the server's certificate"
+ //usage:	)
+ //usage:	)
+@@ -693,7 +693,7 @@
+ 	strrchr(servername, ':')[0] = '\0';
+ 
+ 	fflush_all();
+-	pid = xvfork();
++	pid = BB_MMU ? xfork() : xvfork();
+ 	if (pid == 0) {
+ 		/* Child */
+ 		char *argv[13];
+@@ -772,11 +772,8 @@
+ 	int pid;
+ 	char *servername, *p;
+ 
+-	if (!(option_mask32 & WGET_OPT_NO_CHECK_CERT)) {
+-		option_mask32 |= WGET_OPT_NO_CHECK_CERT;
+-		bb_simple_error_msg("note: TLS certificate validation not implemented");
+-	}
+-
++	/* CosmoOS: always the external ssl_client (ports/mbedtls), which
++	 * checks the certificate; BusyBox's own TLS checks none. */
+ 	servername = xstrdup(host);
+ 	p = strrchr(servername, ':');
+ 	if (p) *p = '\0';
+@@ -792,14 +789,9 @@
+ 		close(sp[0]);
+ 		xmove_fd(sp[1], 0);
+ 		xdup2(0, 1);
+-		if (BB_MMU) {
+-			tls_state_t *tls = new_tls_state();
+-			tls->ifd = tls->ofd = network_fd;
+-			tls_handshake(tls, servername);
+-			tls_run_copy_loop(tls, flags);
+-			exit(0);
+-		} else {
+-			char *argv[6];
++		{
++			char *argv[7];
++			int i = 4;
+ 
+ 			xmove_fd(network_fd, 3);
+ 			argv[0] = (char*)"ssl_client";
+@@ -807,8 +799,11 @@
+ 			//TODO: if (!is_ip_address(servername))...
+ 			argv[2] = (char*)"-n";
+ 			argv[3] = servername;
+-			argv[4] = (flags & TLSLOOP_EXIT_ON_LOCAL_EOF ? (char*)"-e" : NULL);
+-			argv[5] = NULL;
++			if (flags & TLSLOOP_EXIT_ON_LOCAL_EOF)
++				argv[i++] = (char*)"-e";
++			if (option_mask32 & WGET_OPT_NO_CHECK_CERT)
++				argv[i++] = (char*)"-k";
++			argv[i] = NULL;
+ 			BB_EXECVP(argv[0], argv);
+ 			bb_perror_msg_and_die("can't execute '%s'", argv[0]);
+ 		}

@@ -37,6 +37,11 @@ BB_BUILTINS := $(BB_DIR)/rt/libclang_rt.builtins.a
 BB_CC       := $(BB_DIR)/cc
 BUSYBOX_ELF := $(BB_DIR)/busybox
 BUSYBOX_CONFIG := $(ROOT)/ports/busybox/busybox.config
+# Applied to the source in this order (ports/busybox/README.md, "Patches"),
+# with git apply: the CI image has git and no patch. GIT_CEILING_DIRECTORIES
+# keeps git from taking bb-src for part of this checkout, which would make
+# the patch's paths relative to the checkout's top.
+BUSYBOX_PATCHES := $(ROOT)/ports/busybox/wget-ssl-client.patch
 BUSYBOX_APPLETS := $(shell grep -v '^\#' $(ROOT)/ports/busybox/applets)
 
 # compiler-rt's generic builtins, each file of lib/builtins that is not an
@@ -88,11 +93,13 @@ $(BB_CC): $(ROOT)/ports/busybox/cc.in $(ROOT)/ports/busybox/busybox.mk
 # answer the default may not change it, or the build would not be the
 # configuration the tree records. KCONFIG_NOTIMESTAMP keeps the build
 # time out of the configuration and the binary (make reproducible).
-$(BUSYBOX_ELF): $(BUSYBOX_TAR) $(BUSYBOX_CONFIG) $(BB_LIBC) $(BB_BUILTINS) $(BB_CC)
+$(BUSYBOX_ELF): $(BUSYBOX_TAR) $(BUSYBOX_CONFIG) $(BUSYBOX_PATCHES) $(BB_LIBC) $(BB_BUILTINS) $(BB_CC)
 	$(call log,BUSYBOX,$(BUSYBOX_VERSION) $(BB_TARGET))
 	$(Q)rm -rf $(BB_DIR)/bb-src $(BB_DIR)/bb-build
 	$(Q)mkdir -p $(BB_DIR)/bb-src $(BB_DIR)/bb-build
 	$(Q)tar -xjf $(BUSYBOX_TAR) -C $(BB_DIR)/bb-src --strip-components=1
+	$(Q)for p in $(BUSYBOX_PATCHES); do \
+		(cd $(BB_DIR)/bb-src && GIT_CEILING_DIRECTORIES=$(BB_DIR) git apply -p1 $$p) || exit 1; done
 	$(Q)cp $(BUSYBOX_CONFIG) $(BB_DIR)/bb-build/.config
 	$(Q)yes "" | KCONFIG_NOTIMESTAMP=1 $(MAKE) -s -C $(BB_DIR)/bb-src O=$(BB_DIR)/bb-build HOSTCC="$(CC)" oldconfig \
 		> $(BB_DIR)/oldconfig.log 2>&1

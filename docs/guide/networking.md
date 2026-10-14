@@ -55,7 +55,7 @@ to set an address by hand while the system runs; the address is DHCP's.
 
 ## Fetching files
 
-BusyBox `wget` fetches over HTTP. Serve this directory from your computer
+BusyBox `wget` fetches over HTTP and HTTPS. Serve this directory from your computer
 on port 8000 (QEMU's user network reaches your computer's `127.0.0.1` as
 `10.0.2.2`):
 
@@ -84,12 +84,37 @@ cosmo$ wget -q -O - http://example.com/
 ...Example Domain...
 ```
 
-**HTTP only.** `wget` cannot fetch `https://` URLs. BusyBox's own TLS
-code checks no certificate, so it would encrypt a connection to whoever
-answers -- which looks secure and is not -- and there is no TLS library
-in CosmoOS to do it properly. TLS was compiled out by decision rather
-than shipped unverified. Use HTTP from hosts you trust, and check what
-you fetch (`sha256sum` is there).
+HTTPS works the same way, and the server's certificate is checked:
+
+<!-- test: console -->
+```console
+cosmo$ wget -q -O - https://example.com/
+...Example Domain...
+```
+
+`wget` hands the connection to `/bin/ssl_client` (mbedTLS), which
+accepts a certificate only if it chains to one of the certificate
+authorities in `/etc/ssl/certs/ca-certificates.crt` (Mozilla's list, as
+curl publishes it, fixed when the image was built), names the host in
+the URL, and is valid at the system's time. Otherwise the fetch fails
+and `ssl_client` says why:
+
+```text
+cosmo$ wget -q -O /tmp/x https://10.0.2.2:8443/
+ssl_client: 10.0.2.2: the server's certificate is not accepted:
+  The certificate is not correctly signed by the trusted CA
+wget: error getting response
+```
+
+- Another set of certificate authorities, such as your own: name its
+  PEM file in `SSL_CERT_FILE` (`env SSL_CERT_FILE=/root/my-ca.pem wget ...`).
+- `wget --no-check-certificate` skips the check, and `ssl_client` prints
+  a line saying so. The connection is then encrypted to whoever answers.
+- The validity check uses the wall clock, which comes from the RTC or
+  firmware at boot (there is no NTP): with a clock far off, every
+  certificate looks expired or not yet valid.
+- BusyBox's own TLS code checks no certificate; this `wget` does not use
+  it.
 
 `ping` sends ICMP echo requests (IPv4 only; no `ping6`). QEMU's user
 network answers a ping to its gateway itself; whether a ping to the

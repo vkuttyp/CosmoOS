@@ -810,6 +810,7 @@ static const struct selftest tests[] = {
     { "net-steer",       selftest_net_steer },
     { "net-rxhook-grace", selftest_net_rxhook_grace },
     { "netif-remove-worker", selftest_netif_remove_worker },
+    { "netif-rxq-count", selftest_netif_rxq_count },
     { "net-csum-offload", selftest_net_csum_offload },
     { "net-bench",       selftest_net_bench },
     { "blk-bench",       selftest_blk_bench },

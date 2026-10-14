@@ -18,16 +18,16 @@ b="$root/out/repro-b"
 rm -rf "$a" "$b"
 
 # BusyBox, dropbear and OpenSSH's sftp-server too, in each tree (BB_DIR,
-# DB_DIR, OSSH_DIR: by default one per architecture, shared by both trees,
+# DB_DIR, OSSH_DIR, MBEDTLS_DIR: by default one per architecture, shared by both trees,
 # which would hide a build-path leak).
 for t in "$a" "$b"; do
-    make -C "$root" ARCH="$arch" BUILD="$build" OUT="$t" BB_DIR="$t/busybox" DB_DIR="$t/dropbear" OSSH_DIR="$t/openssh" \
+    make -C "$root" ARCH="$arch" BUILD="$build" OUT="$t" BB_DIR="$t/busybox" DB_DIR="$t/dropbear" OSSH_DIR="$t/openssh" MBEDTLS_DIR="$t/mbedtls" \
         RELEASE_DIR="$t/release" all image release-set >/dev/null
 done
 
 status=0
 case "$arch" in aarch64) loader=boot/BOOTAA64.EFI ;; *) loader=boot/BOOTX64.EFI ;; esac
-for f in kernel/kernel.elf $loader boot.tar modules/hello.ko modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko userland/init.elf userland/sh.elf userland/ls.elf userland/pkg.elf busybox/busybox busybox/testsuite.tgz dropbear/scp openssh/sftp-server libc/libc.a pkg/repo/INDEX pkg/repo/hello-1.1.cpk pkg/repo/fortune-1.0.cpk cmdline manifest cosmoos.img release/SHA256SUMS; do
+for f in kernel/kernel.elf $loader boot.tar modules/hello.ko modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko userland/init.elf userland/sh.elf userland/ls.elf userland/pkg.elf busybox/busybox busybox/testsuite.tgz dropbear/scp openssh/sftp-server mbedtls/ssl_client libc/libc.a pkg/repo/INDEX pkg/repo/hello-1.1.cpk pkg/repo/fortune-1.0.cpk cmdline manifest cosmoos.img release/SHA256SUMS; do
     if cmp -s "$a/$f" "$b/$f"; then
         printf '  same     %s\n' "$f"
     else

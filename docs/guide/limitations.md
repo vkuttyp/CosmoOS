@@ -56,7 +56,9 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 
 ## Networking
 
-- **`wget` is HTTP only**: TLS is compiled out of BusyBox, by decision
+- **`wget`'s certificate authorities are fixed** in the image
+  (`/etc/ssl/certs/ca-certificates.crt`, as built); nothing updates them,
+  and there is no certificate revocation check
   ([Networking](networking.md)).
 - The address comes from DHCP. There is no runtime tool to set one by
   hand; `/etc/resolv.conf` is written once per boot, not on lease

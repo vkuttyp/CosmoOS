@@ -262,8 +262,11 @@ shutdown, classless static routes (option 121), and rewriting
 `/etc/resolv.conf` when a renewal changes the DNS servers (`netcfg` runs once
 per boot). An interface's IPv4 configuration is published field by field
 (the address last, withdrawn first; PR #351 review) and read by the packet
-paths with plain loads: a snapshot they read consistently is open. BusyBox
-`wget` is built without https: its TLS validates no certificate (M4).
+paths with plain loads: a snapshot they read consistently is open. ~~BusyBox
+`wget` is built without https: its TLS validates no certificate (M4).~~
+Closed by the https unit (2026-10-14): `wget` runs `ssl_client` on mbedTLS,
+which checks the certificate; the CA bundle is fixed at build time and
+nothing checks revocation.
 
 A read whose copy to user memory faults loses what the object took from
 its source, except for signalfd (`kobject_io_type.read_undo`): pipes, the

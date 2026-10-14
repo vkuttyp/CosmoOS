@@ -146,8 +146,7 @@ v1.0.2 installs and networks there: [Tested platforms](docs/guide/platforms.md))
 there is no physical hardware matrix,
 no GPU or display beyond a framebuffer console, no hotplug, no NUMA, no
 huge pages, no live migration, no RAID-Z, no eBPF, no more than 64 CPUs,
-and the Intel VMX backend has not run on hardware. There is no KASLR,
-and `wget` speaks HTTP only. The guide's
+and the Intel VMX backend has not run on hardware. There is no KASLR. The guide's
 [Known limitations](docs/guide/limitations.md) page lists what a user
 will meet; [`docs/plan.md`](docs/plan.md) is the work that remains after
 1.0, by area.
