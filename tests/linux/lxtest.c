@@ -2715,6 +2715,27 @@ int main(int argc, char **argv)
     CHECKV(sc6(LX_getsockopt, ce, LX_SOL_SOCKET, LX_SO_ERROR, &err, &elen, 0) == 0, 0);
     CHECKV(err == 111, err);                                        /* positive, as POSIX asks */
     CHECKV(sc1(LX_close, ce) == 0, 0);
+    /* --- socket()'s protocol: 0 or the type's own, and raw ICMP over IPv4
+     * (the ping unit; docs/kernel-services/network/design.md, "Raw ICMP
+     * sockets"). A ping socket (DGRAM, ICMP) is not built and must not
+     * quietly become a UDP one, as it did while the protocol was ignored. */
+    CHECKV(sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM, LX_IPPROTO_ICMP) == -93, 0);   /* EPROTONOSUPPORT */
+    CHECKV(sc3(LX_socket, LX_AF_INET, LX_SOCK_STREAM, LX_IPPROTO_UDP) == -93, 0);
+    {
+        long pu = sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM, LX_IPPROTO_UDP);
+        CHECKV(pu >= 3, pu);
+        sc1(LX_close, pu);
+        long pt = sc3(LX_socket, LX_AF_INET, LX_SOCK_STREAM, LX_IPPROTO_TCP);
+        CHECKV(pt >= 3, pt);
+        sc1(LX_close, pt);
+    }
+    CHECKV(sc3(LX_socket, LX_AF_INET, LX_SOCK_RAW, LX_IPPROTO_TCP) == -93, 0);
+    CHECKV(sc3(LX_socket, LX_AF_INET6, LX_SOCK_RAW, 58) == -93, 0);   /* raw ICMPv6: not built */
+    {
+        long rs = sc3(LX_socket, LX_AF_INET, LX_SOCK_RAW, LX_IPPROTO_ICMP);   /* lxtest holds PRIV_NET */
+        CHECKV(rs >= 3, rs);
+        sc1(LX_close, rs);
+    }
     /* --- unix domain sockets: a name, a pair, a handle in a message --- */
     CHECKV(sc3(LX_socket, LX_AF_UNIX, LX_SOCK_SEQPACKET, 0) == -94, 0);   /* ESOCKTNOSUPPORT */
     (void)sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lx-ux", 0);

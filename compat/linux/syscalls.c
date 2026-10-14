@@ -3337,6 +3337,11 @@ static int64_t lx_socket(struct syscall_args *a)
     } else if (type != LX_SOCK_STREAM && type != LX_SOCK_DGRAM) {
         return type >= 1 && type <= 10 ? -ESOCKTNOSUPPORT : -EINVAL;   /* a known type this family lacks (SEQPACKET, RAW, RDM, DCCP, PACKET), or no type at all: Linux's two answers */
     } else {
+        /* The protocol is 0 or the type's own: a ping socket (SOCK_DGRAM,
+         * IPPROTO_ICMP) is not built, and must not become a UDP one. */
+        int own = family == LX_AF_UNIX ? 1 /* PF_UNIX */ : type == LX_SOCK_STREAM ? LX_IPPROTO_TCP : LX_IPPROTO_UDP;
+        if (proto != 0 && proto != own)
+            return -EPROTONOSUPPORT;
         rc = ksock_create(cfamily, type == LX_SOCK_STREAM ? COSMO_SOCK_STREAM : COSMO_SOCK_DGRAM,
                           process_current()->cred.euid, &s);
     }
