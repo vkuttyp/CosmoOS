@@ -70,9 +70,25 @@ is what they parse. The list is closed; a new file is a design change.
 
 ## Validation
 
-Local, on the branch head: debug `make test` and `make test-busybox` pass
-on x86-64 and AArch64 (scripted test 91 checks), release images build on
-both. The full matrix and the probe's results are added before the PR.
+- **Matrix**, local, at 0dc6bbf2 (the later commits change documents
+  only): all 38 steps pass. On both architectures: build, host-test,
+  analyze, the debug boots at 1, 2 and 4 CPUs, smp2t, chaos,
+  harness-retry, crash, wxn, guard, entropy, security, release, install,
+  gic and the reproducible release; on x86-64 also fuzz, on AArch64 also
+  platforms. The run was stopped after AArch64's harness-retry step, to
+  try the branch on Parallels; its remaining nine steps ran afterwards on
+  the same tree.
+- **`make test-busybox`**: passes on both architectures (scripted test,
+  91 checks; testsuite `tail` 4, `xargs` 12, `tar` 22 pass).
+- **`tools/sh-status-probe.py`**: fixed `status 1, SHTEST: PASS` and
+  `--old` `status 0`, SHTEST failing, on x86-64 and AArch64.
+- **Parallels Desktop 27** (AArch64 release image, installed on NVMe, over
+  ssh): `vi`, `less`, `top` and `clear` on a pty; `whoami`, `id`,
+  `uptime`, `free`, `df`, `du`, `md5sum`, `dd`, `cmp`, `hexdump -C` and
+  `/proc`. It found three gaps, now in the inventory: no AArch64
+  power-off off QEMU, 64 KiB reads of `/dev/zero`, and cosmofs's free
+  count after an install (the last also on QEMU, from before this
+  branch).
 
 ## Not done here
 
