@@ -95,6 +95,14 @@ wrote, or NULL when nothing is pending; corrupt entries from the device
 are logged and skipped as NULL. Any context; the interrupt callback and
 polling sinks call it.
 
+### `int virtq_add_panic(...)`, `void *virtq_pop_panic(struct virtqueue *vq, uint32_t *len)` *(exported)*
+The same from panic context: the queue's lock is tried once, untracked
+(`spin_trylock_panic`), so lockdep's own lock, which a CPU the panic
+stopped may own, is never waited for. `virtq_add_panic` answers `-EBUSY`
+and `virtq_pop_panic` NULL when the queue's lock is held. `virtq_kick`
+takes no lock: modern virtio-pci reads each queue's notify offset at
+setup. The virtio-gpu panic flush is the user.
+
 ### `unsigned virtq_free_count(struct virtqueue *vq)` *(exported)*
 Free descriptors right now (advisory).
 

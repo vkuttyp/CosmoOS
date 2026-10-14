@@ -153,6 +153,30 @@ Qodo, Codex and CosmoReview reviewed `b776cb2e`. Fixed in `de63fd92`:
 - **`test-display` assumed 8x16 cells** (Codex); fbcon draws 16x32 at
   3840x2160. The test reads the cell size from fbcon's line.
 
+Codex's second review, of `8fca562e`, fixed in `cf18d2b2` and
+`06c92421`:
+
+- **The panic flush took tracked locks** (P1). In debug builds every
+  spinlock operation takes lockdep's own lock, which a CPU the panic
+  stopped may own; `spin_trylock`, `virtq_add`, `virtq_pop` and the
+  modern transport's notify (which selected the queue under the
+  transport's lock) would wait for it forever, before the serial sink,
+  which follows fbcon's on the list, printed the panic. Now
+  `spin_trylock_panic` and `virtq_add_panic`/`virtq_pop_panic` take the
+  queue's lock word untracked, and virtio-pci reads each queue's notify
+  offset at setup, so notify takes no lock. `test-display`'s check e
+  boots a debug `CRASH_TEST=3` kernel that leaves lockdep's lock owned by
+  another CPU and panics: the panic must be on the serial console and the
+  screen. With the driver side of `cf18d2b2` reverted in a worktree, the
+  serial log stops at `crash test: panicking with lockdep's lock held
+  elsewhere, on purpose` and check e fails (no `halting.`); with it, it
+  passes. The first version of the seam read `arch_cpu_id()` from a
+  thread and tripped the per-CPU check's own panic, which reached the
+  screen and passed check e for the wrong reason; it reads `raw_cpu_id()`
+  and check e requires the crash test's own message.
+- **The boot test's virtio-gpu marker assumed 8x16 cells** (P2): it
+  accepts 16x32 and up, as the firmware framebuffer's marker does.
+
 Not changed: CosmoReview's "blocking call under spinlock" in
 `vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with
 `kmem_cache_alloc`, which takes only the cache's spinlock and grows from

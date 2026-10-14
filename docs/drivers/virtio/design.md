@@ -315,9 +315,13 @@ MSI-X vectors, the configuration's and one queue's).
     context.
 - **In panic mode** fbcon calls `vgpu_panic_flush` after each write. It
   sends the transfer and flush from its own pair of pages and polls
-  `virtq_pop` for each, at most 200 ms. When `controlq`'s lock is held (by
-  a CPU the panic stopped) it sends nothing; the serial console has the
-  panic either way. A command not answered in time ends the panic
+  for each, at most 200 ms, through `virtq_add_panic` and
+  `virtq_pop_panic`, which take the queue's lock untracked: in debug
+  builds a tracked lock operation takes lockdep's own lock, which a CPU
+  the panic stopped may own, and the flush would wait for it forever
+  ahead of the serial sink (`make test-display`'s check e, `CRASH_TEST=3`).
+  When `controlq`'s lock is held (by a CPU the panic stopped) it sends
+  nothing; the serial console has the panic either way. A command not answered in time ends the panic
   flushes: every later line would wait as long, and the serial sink after
   fbcon's with it.
 - **Remove:** stop and join the thread, `fbcon_detach` (the console
