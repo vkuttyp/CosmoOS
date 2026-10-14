@@ -222,6 +222,17 @@ readable and writable; objects without `poll_wq` can only be re-checked
 by another entry's wake or the timeout. Linux `poll`/`ppoll` translate
 onto it; a native `poll` can be added the same way.
 
+Two rules the multi-queue wait depends on (both found under scp and sftp
+traffic, 2026-10-14). Arming the queues one after another, a wake from an
+earlier one can make the thread READY before the next is armed; arming
+never turns that back to BLOCKED (the scheduler's S34). And the timeout's
+timer and the alarm it writes live in `io_poll`'s frame while the callback
+runs on the CPU that armed it, so `io_poll` cancels it with
+`timer_cancel_sync` before returning, as epoll and the ring's wait do: a
+plain `timer_cancel` let a poller moved to another CPU return while the
+callback ran, which then wrote into the dead frame and woke a thread
+through a pointer read from it.
+
 ## epoll (stage 3; the epoll, EPOLLET, epoll-close and epoll-callback units)
 
 `kernel/io/epoll.c` is an interest set: a kobject holding items keyed by

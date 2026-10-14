@@ -2947,4 +2947,11 @@ See the [history index](README.md).
   run without `prctl(PR_SET_DUMPABLE)`, which the Linux door now has.
   `test-net-login` copies 256 KiB each way in both protocols and runs an
   `sftp` batch; the ssh guide page does both.
+  The unit's guide test found a scheduler corruption on main, older than
+  it: a thread queued twice under sftp traffic. Two causes, each with a
+  self-test and a probe: a multi-queue wait's later `waitqueue_prepare`
+  wrote BLOCKED over a READY thread (S34, `wait-multi-prepare`), and
+  `io_poll` returned while its timeout's callback still ran on another
+  CPU, writing into the dead frame (`poll-timer-outlives`); a stress of
+  sftp sessions went from a panic at round 4 to none in 800 rounds.
   Report: `docs/audit/2026-10-14-scp-sftp-report.md`.

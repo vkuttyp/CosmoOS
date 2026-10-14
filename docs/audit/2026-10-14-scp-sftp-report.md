@@ -23,6 +23,40 @@ in both of its protocols, and `sftp` work against the installed system.
 | Linux door | `prctl` with `PR_SET_DUMPABLE`/`PR_GET_DUMPABLE` (x86-64 157, AArch64 167), the flag kept on the process (fork inherits it, exec resets it) and reported; every other option `-EINVAL`. `sftp-server` makes itself undumpable at start and exited 255 ("unable to make the process undumpable: Function not implemented") without it | `compat/linux/syscalls.c`, `process.h`, `process.c` |
 | release and CI | the port in the CI cache keys, `check-reproducible.sh` (both trees, `scp` and `sftp-server` compared), the release notes' pinned-source table | `.github/workflows/ci.yml`, `scripts/` |
 
+## Found on the way: a scheduler corruption, two causes
+
+The aarch64 user guide on macOS panicked at the ssh page's sftp step:
+`assertion failed: list_empty(&t->rq_link)` in `rr_enqueue`, a thread
+queued twice -- dropbear, preempted while it released an exited
+`sftp-server`. A stress script (install, then sftp batches and `scp -O`
+in a loop against the installed AArch64 system) reproduced it at the
+fourth round; 200 rounds of plain ssh commands did not, so the data
+relaying in dropbear's `select` loop is what exposes it. Both causes are
+on main, older than this unit.
+
+| Stress (AArch64, sftp + scp per round) | First panic |
+|---|---|
+| neither fix | round 4 |
+| `waitqueue_prepare` fixed (S34) | round 170; round 29 |
+| `poll` fixed | round 25 |
+| both | none in 800 rounds (two runs of 400) |
+
+- **S34.** `poll` arms one wait queue per descriptor; a wake from one
+  armed earlier made the thread READY and queued it, and the next
+  `waitqueue_prepare` wrote BLOCKED over that: a BLOCKED thread on a run
+  queue, queued again by the next wake or preemption.
+  `sched_prepare_block_current` now leaves READY alone, under the
+  run-queue lock. `wait-multi-prepare` checks it; `tools/wait-ready-probe.py`.
+- **`io_poll`'s timer.** The timer and its alarm live in `io_poll`'s
+  frame; `timer_cancel` did not wait for a callback running on the CPU
+  that armed it, so a poller moved elsewhere returned while it ran, and
+  the callback wrote into the dead frame and woke a thread through a
+  pointer read from it. `timer_cancel_sync` now, as epoll and the aio
+  ring's wait already did. `poll-timer-outlives` checks it;
+  `tools/poll-timer-probe.py` (with the fix reverted, AArch64 faulted in
+  `alarm_fired` on a NULL thread read from the dead frame before the test
+  ran -- the race itself).
+
 ## Tests
 
 - `tests/boot/net_login_test.py` (`make BUILD=release test-net-login`,
