@@ -10,7 +10,7 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 - **QEMU is the tested platform.** x86-64 on `q35` and AArch64 on `virt`
   are tested by CI; there is no physical hardware matrix. Since v1.0.1
   the AArch64 image boots on Parallels Desktop 27 on Apple Silicon, and
-  since v1.0.2 installs on its NVMe disks and has a network there; its
+  since v1.0.3 installs on its NVMe disks and has a network there; its
   SATA disks are not seen ([Tested platforms](platforms.md)). Out of scope for 1.0
   ([roadmap](../roadmap-1.0.md)): GPU and display (a framebuffer console
   only), hotplug, NUMA, more than 64 CPUs, huge pages, live migration,
@@ -48,7 +48,7 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
   page](shell.md): no `bunzip2`, no `ping6`; no hard links; no `/sys`.
 - `/proc` has the process directories and a fixed set of system files
   (`meminfo`, `stat`, `loadavg`, `uptime`, `mounts`). A process's
-  memory sizes read as 0, so `top` shows none (inventory, v1.0.2).
+  memory sizes read as 0, so `top` shows none (inventory, v1.0.3).
 - The terminal driver honours the common modes (canonical input, echo,
   signals, raw mode, window size); most other termios flags and control
   characters are accepted and ignored (inventory 1.4).

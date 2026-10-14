@@ -142,7 +142,7 @@ milestone reports in [`docs/audit/`](docs/audit/README.md).
 
 QEMU is the tested platform (since v1.0.1 the AArch64 image also boots
 to the live shell on Parallels Desktop on Apple Silicon, and since
-v1.0.2 installs and networks there: [Tested platforms](docs/guide/platforms.md));
+v1.0.3 installs and networks there: [Tested platforms](docs/guide/platforms.md));
 there is no physical hardware matrix,
 no GPU or display beyond a framebuffer console, no hotplug, no NUMA, no
 huge pages, no live migration, no RAID-Z, no eBPF, no more than 64 CPUs,
