@@ -25,7 +25,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SUBJECT = "compat: socket() reads its protocol: 0 or the type's own, else -EPROTONOSUPPORT"
 SOURCE = "compat/linux/syscalls.c"
-OLD_LINE = "LINUXTEST: FAIL sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM, LX_IPPROTO_ICMP) == -93"
+OLD_LINE = "LINUXTEST: FAIL ping_sock == -93"
 
 
 def main():

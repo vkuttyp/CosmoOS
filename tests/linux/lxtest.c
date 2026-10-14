@@ -2762,7 +2762,8 @@ int main(int argc, char **argv)
      * (the ping unit; docs/kernel-services/network/design.md, "Raw ICMP
      * sockets"). A ping socket (DGRAM, ICMP) is not built and must not
      * quietly become a UDP one, as it did while the protocol was ignored. */
-    CHECKV(sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM, LX_IPPROTO_ICMP) == -93, 0);   /* EPROTONOSUPPORT */
+    long ping_sock = sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM, LX_IPPROTO_ICMP);
+    CHECKV(ping_sock == -93, ping_sock);   /* EPROTONOSUPPORT; the value is the descriptor if one was made */
     CHECKV(sc3(LX_socket, LX_AF_INET, LX_SOCK_STREAM, LX_IPPROTO_UDP) == -93, 0);
     {
         long pu = sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM, LX_IPPROTO_UDP);
