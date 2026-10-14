@@ -44,7 +44,9 @@ struct mount_ns_ref {
      */
     char path[VFS_PATH_MAX];
     struct list_node mnt_link;   /* on mount->ns_refs, under the mountpoint's lock */
-    struct list_node ns_link;    /* on mount_ns->mounts, under g_mounts_lock */
+    /* On mount_ns->mounts, under g_mounts_lock, and also under
+     * g_mount_list_lock while the namespace is visible (vfs_internal.h). */
+    struct list_node ns_link;
 };
 
 struct mount_ns {

@@ -927,10 +927,17 @@ static int64_t sys_mount(struct syscall_args *a)
     }
     /* A relative target from the caller's directory, as every other path
      * call resolves one (P27); it used to be resolved from the root. */
-    struct vnode *cwd = process_cwd_get();
-    rc = vfs_mount_at(cwd, target, fstype, bd, flags);
+    char *cwdname = kmalloc(VFS_PATH_MAX, 0);   /* its name, which the mount records (P32); off the frame */
+    if (cwdname == NULL) {
+        if (bd)
+            blkdev_put(bd);
+        return -ENOMEM;
+    }
+    struct vnode *cwd = process_cwd_snapshot(cwdname, VFS_PATH_MAX);
+    rc = vfs_mount_at(cwd, cwd ? cwdname : NULL, target, fstype, bd, flags);
     if (cwd)
         vnode_put(cwd);
+    kfree(cwdname);
     if (bd)
         blkdev_put(bd);   /* the mount took its own reference */
     return rc;

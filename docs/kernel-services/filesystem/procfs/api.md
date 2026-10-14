@@ -9,13 +9,20 @@ off one.
 
 | Path | Type | Contents |
 | --- | --- | --- |
-| `/proc` | dir | `.`, `..`, `self`, and one directory per visible pid |
+| `/proc` | dir | `.`, `..`, `self`, the system files, and one directory per visible pid |
 | `/proc/self` | symbolic link | to the reading process's directory: `readlink` answers its pid, relative |
-| `/proc/<pid>` | dir | `.`, `..` (which a walk can take: `/proc`), `status`, `limits`, `fd` |
+| `/proc/<pid>` | dir, owned by the process's effective user and group | `.`, `..` (which a walk can take: `/proc`), `status`, `limits`, `fd`, `stat`, `cmdline` |
 | `/proc/<pid>/fd` | dir, 0500 | one symbolic link per open handle, named by its number (roadmap M4) |
 | `/proc/<pid>/fd/<n>` | symbolic link | what the handle is: a terminal by its path (`/dev/console`, `/dev/tty`, `/dev/ptmx`, `/dev/pts/N`), a directory by the path it was opened by, else `file:[ino]` or `<kind>:[address]` |
 | `/proc/<pid>/status` | file, 0444 | `key: value` lines, below |
 | `/proc/<pid>/limits` | file, 0444 | one `name: value` line per `COSMO_RLIMIT_*` |
+| `/proc/<pid>/stat` | file, 0444 | Linux's record (proc(5)) through field 44: pid, `(name)`, state `R`, `S` or `Z`, ppid, pgid, sid, utime (all cpu time; stime 0), num_threads, starttime, processor; times in 1/100 s; page faults, vsize and rss 0 |
+| `/proc/<pid>/cmdline` | file, 0444 | argv, each string NUL-terminated, the first 256 bytes |
+| `/proc/meminfo` | file, 0444 | `MemTotal`, `MemFree`, `MemAvailable` (= MemFree), `Buffers` (0), `Cached` (the page cache), `SwapTotal`, `SwapFree` (0), `SReclaimable` (0), in kB |
+| `/proc/stat` | file, 0444 | `cpu` and `cpuN` lines (user = busy, idle; the other columns 0) in 1/100 s, `ctxt`, `btime`, `processes` (the last pid), `procs_running`, `procs_blocked` (0) |
+| `/proc/loadavg` | file, 0444 | the 1, 5 and 15 minute averages, `running/threads`, the last pid |
+| `/proc/uptime` | file, 0444 | seconds since boot and the CPUs' idle seconds summed, to 1/100 s |
+| `/proc/mounts` | file, 0444 | one line per mount the reader's namespace sees, root first: source (`/dev/<disk>` or the filesystem's name), path (space, tab, newline and backslash as `\ooo`), type, `rw` or `ro`, `0 0` |
 
 `status` holds `name`, `pid`, `ppid`, `state` (`running`, `exiting`,
 `exited`), `uid`, `gid`, `privs` (roadmap M5: the privileges by name,
@@ -39,7 +46,7 @@ pid that fails it is `ENOENT` rather than `EACCES`.
 
 | Error | When |
 | --- | --- |
-| `ENOENT` | a name that is not `self`, a decimal pid, `status` or `limits`; a pid that does not exist or that the caller may not see |
+| `ENOENT` | a name not in the table above; a pid that does not exist or that the caller may not see |
 | `ESRCH` | opening a file of a process that has already exited |
 | `EINVAL` | mounting with a block device |
 | `ENOMEM` | no memory for a vnode or a listing |
@@ -50,9 +57,8 @@ the VFS.
 
 ## What is deliberately absent
 
-`/proc/meminfo`, `/proc/cpuinfo` and anything else system-wide: those
+`/proc/cpuinfo` and anything else system-wide not on P4's list: those
 are `sysctl` names, which is a curated list, and a second spelling of a
-fact is how a namespace rots (invariant P2). A process's argument
-vector, its open handles and its memory map: the kernel does not keep
-the first, the handle table has no names for the second, and the third
-would need a lock held across a read. `/sys` is not created.
+fact is how a namespace rots (invariant P2). A process's environment and
+memory map: the kernel does not keep the first, and the second would
+need a lock held across a read. `/sys` is not created.

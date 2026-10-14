@@ -80,6 +80,8 @@ USER_ARCHIVE_ENTRIES := \
 	$(foreach p,$(USER_BIN_PROGRAMS),bin/$(call native_bin_name,$(p))=$(call prog_elf,$(p))) \
 	$(foreach p,$(USER_SBIN_PROGRAMS),sbin/$(p)=$(call prog_elf,$(p))) \
 	etc/rc=$(ROOT)/userland/etc/rc \
+	etc/passwd=$(ROOT)/userland/etc/passwd \
+	etc/group=$(ROOT)/userland/etc/group \
 	etc/svc/hello=$(ROOT)/userland/etc/svc/hello \
 	etc/svc/greeter=$(ROOT)/userland/etc/svc/greeter \
 	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf \
@@ -89,7 +91,7 @@ USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(
 	$(foreach p,$(USER_TEST_PROGRAMS),tests/native/$(p)=$(call prog_elf,$(p)))
 endif
 USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
-	$(ROOT)/userland/etc/pkg/repos.conf $(PKG_TRUST_PUB) \
+	$(ROOT)/userland/etc/pkg/repos.conf $(PKG_TRUST_PUB) $(ROOT)/userland/etc/passwd $(ROOT)/userland/etc/group \
 	$(ROOT)/userland/etc/svc/hello $(ROOT)/userland/etc/svc/greeter
 
 .PHONY: userland

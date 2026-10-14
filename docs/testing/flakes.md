@@ -132,6 +132,24 @@ same runner type for `v1.0.0-rc1` an hour earlier, and locally. The guide
 runner (`tests/guide/run_guide.py`, roadmap M6) was the one QEMU launcher
 without the retry; its QEMU sessions now use `firmware_stall` too.
 
+**Seventh sighting, 2026-10-14, both attempts:** CI, the release
+workflow's `guide (macos, aarch64)` job on `v1.0.2` (run 38482108384,
+attempt 1; Homebrew QEMU 11.1.1, `edk2-stable202408`), session 3
+(`networking.md:28`): the first stall and the retry both printed the
+same lines as the sixth sighting -- `ArmTrngLib`, the five `Image at ...
+start failed`, the `Tpm2` lines, `Image type X64 can't be loaded on
+AARCH64 UEFI system` -- then the screen-clear sequences and no loader
+banner within 30 s, so the job failed. Sessions 1 (the install, from the
+live image) and 2 (the installed disk) passed in the same job. Session 3
+boots the same installed disk as session 2; what it adds is a
+`virtio-net-pci` on QEMU's user network (whether the sixth sighting's
+session had one is not recorded). A hypothesis, not yet tested: with a NIC the firmware tries a
+network boot (the X64 line is QEMU's x86 iPXE option ROM refused) before
+the disk, and on a slow runner that outlasts the 30 s bound. To test
+locally with the same QEMU and firmware: time to the loader banner with
+and without the NIC, and with `romfile=` empty. The failed job was
+rerun.
+
 **The retry, everywhere (2026-10-11).** The rule moved into
 `tests/boot/firmware_stall.py` and every harness boot uses it --
 `run_boot_test.py` (which had its own copy) and `install_test.Boot`
@@ -2672,6 +2690,14 @@ through the interrupt-return path, where the seam spends one armed
 resumption but `preempt_point_due` cannot be true (interrupts are off in
 that frame's saved state), so that run makes 31 trips. The branch changes
 the screen console, not the scheduler. Not attributed; first sighting.
+
+**Second sighting, 2026-10-14:** CI, `build, boot, analyze (aarch64)` on
+PR #381 (the everyday commands, run 38494533125, job 115627236425): the
+same line, `100 runs of 32, 3199 trips (longest 32 in one call)`, the
+check at 895 ms. The branch touches the scheduler only to read a thread's
+run time (`sched_thread_run_ns`) and to delay the first load-average fold,
+neither on the resumption path. The candidate above still fits: one run
+one trip short. Not attributed; the job was rerun by the next push.
 
 ## `sched-restore-loop`: the thread count not back in 200 ms, 2026-10-11
 

@@ -12,12 +12,21 @@
 
 #include <kernel/list.h>
 #include <kernel/mutex.h>
+#include <kernel/spinlock.h>
 #include <kernel/vfs.h>
 
 /* The mount table: every mount, in the order they were made. Under
  * g_mounts_lock, which is taken before any vnode lock. */
 extern struct mutex g_mounts_lock;
 extern struct list_node g_mounts;
+
+/* A visible namespace's `mounts` list and `g_root_mount` change under
+ * this as well as g_mounts_lock, and /proc/mounts reads them under this
+ * alone: procfs renders a file in its lookup, with the directory's vnode
+ * lock held, where g_mounts_lock (taken before any vnode lock) may not be.
+ * A leaf: nothing is taken under it. A namespace being built or torn down
+ * is visible to no reader and changes under g_mounts_lock only. */
+extern spinlock_t g_mount_list_lock;
 
 /* The root filesystem. Every namespace has it and none may unmount it,
  * which is why it carries no visibility refs. */

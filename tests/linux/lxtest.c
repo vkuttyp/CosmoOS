@@ -1529,8 +1529,12 @@ int main(int argc, char **argv)
         CHECKV(si.uptime >= 0 && si.uptime < 86400, (long)si.uptime);   /* plausible seconds, not poison */
         CHECKV(si.totalram > 0 && si.freeram < si.totalram, (long)(si.totalram >> 20));   /* some RAM is always in use */
         CHECKV(si.procs >= 1, (long)si.procs);
+        /* The load averages (v1.0.2), fixed point with 16 fraction bits:
+         * written, not the poison, and under 1024 -- whether one is nonzero
+         * at this moment is not deterministic. */
+        CHECKV(si.loads[0] < (1024ul << 16) && si.loads[1] < (1024ul << 16) && si.loads[2] < (1024ul << 16),
+               (long)(si.loads[0] >> 16));
         /* every field with no backing reads zero (the struct was poisoned) */
-        CHECKV(si.loads[0] == 0 && si.loads[1] == 0 && si.loads[2] == 0, 0);
         CHECKV(si.sharedram == 0 && si.bufferram == 0, 0);
         CHECKV(si.totalswap == 0 && si.freeswap == 0, 0);
         CHECKV(si.totalhigh == 0 && si.freehigh == 0 && si.pad == 0, 0);

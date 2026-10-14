@@ -210,7 +210,9 @@ annotated `VNODE_NESTED_PARENT2`; the "directory under itself" walk runs
 under `rename_lock` with no parent locked. Order: `g_mounts_lock` →
 `rename_lock` → `vnode->lock` (parent, second parent, child) →
 `pagecache.lock` → filesystem private locks → block layer; `mount->lock`
-is a spinlock leaf under any of them; `file->lock` is taken alone before
+is a spinlock leaf under any of them, and so is `g_mount_list_lock`, under
+which a visible namespace's mount list and `g_root_mount` also change, so
+that `/proc/mounts` can read them from a lookup holding a vnode lock; `file->lock` is taken alone before
 `vnode->lock`; `sync_lock` is taken alone before filesystem locks. The
 debug-build lock-order checker (`docs/kernel/lockdep/`) verifies this on
 every boot. `vfs_sync` no longer holds `g_mounts_lock` across a commit: it

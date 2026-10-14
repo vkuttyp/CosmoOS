@@ -86,6 +86,8 @@
 #define LX_gettimeofday 96
 #define LX_getrlimit 97
 #define LX_sysinfo 99
+#define LX_statfs 137
+#define LX_fstatfs 138
 #define LX_getuid 102
 #define LX_getgid 104
 #define LX_setuid 105

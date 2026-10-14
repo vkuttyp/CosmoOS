@@ -2917,3 +2917,13 @@ See the [history index](README.md).
   checks a new file's mtime against `CLOCK_REALTIME`, and
   `tools/file-times-probe.py --old` fails that check on both architectures.
   Report: `docs/audit/2026-10-13-console-ssh-times-report.md`.
+- **After 1.0: everyday commands (2026-10-14, v1.0.2).** BusyBox `vi`,
+  `less`, `top`, `free`, `df`, `du`, `uptime`, `whoami`, `clear`,
+  `md5sum`, `dd`, `cmp` and `hexdump`, over what they read on Linux: procfs
+  gains a fixed list of Linux system files (`meminfo`, `stat`, `loadavg`,
+  `uptime`, `mounts`; P4) and `<pid>/stat`, `<pid>/cmdline`; `statfs`
+  and `fstatfs`; load averages sampled on CPU 0's tick, also in
+  `sysinfo`. cosmo-sh expands `$?` per pipeline. The first boot's lockdep
+  panic: `/proc/mounts` read the mount table under a vnode lock; a leaf
+  `g_mount_list_lock` now guards what it reads (V7). VSZ and RSS read 0.
+  Report: `docs/audit/2026-10-14-everyday-commands-report.md`.

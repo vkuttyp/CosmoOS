@@ -515,13 +515,29 @@ struct lx_timeval {
     int64_t tv_usec;
 };
 
+/* statfs(2)'s struct statfs: the LP64 layout, identical on x86-64 and
+ * AArch64 (120 bytes). */
+struct lx_statfs {
+    int64_t  f_type;
+    int64_t  f_bsize;
+    uint64_t f_blocks, f_bfree, f_bavail;
+    uint64_t f_files, f_ffree;
+    int32_t  f_fsid[2];
+    int64_t  f_namelen;
+    int64_t  f_frsize;
+    int64_t  f_flags;
+    int64_t  f_spare[4];
+};
+_Static_assert(sizeof(struct lx_statfs) == 120, "struct statfs is 120 bytes on both LP64 Linux ABIs");
+#define LX_ST_RDONLY 1u
+
 /* sysinfo(2): the LP64 layout, identical on x86-64 and AArch64 (so no arch
  * packing). The compiler inserts the same padding before `totalhigh` (after
  * the two shorts) and at the tail as glibc's struct sysinfo, so sizeof agrees
  * on both sides. */
 struct lx_sysinfo {
     int64_t  uptime;        /* seconds since boot */
-    uint64_t loads[3];      /* 1/5/15-min load average (fixed point); 0 here */
+    uint64_t loads[3];      /* 1/5/15-min load average, 16 fraction bits (SI_LOAD_SHIFT) */
     uint64_t totalram;      /* in units of mem_unit */
     uint64_t freeram;
     uint64_t sharedram;

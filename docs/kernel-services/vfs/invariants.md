@@ -67,6 +67,11 @@ inode's slot is zeroed. Check: review. Gap: none needed while the
 `VNODE_NESTED_PARENT2`, address order only for two unrelated directories)
 → `pagecache.lock` → `cfs->lock` → block layer. `mount->lock` is a spinlock
 protecting only the vnode hash and is a leaf under any of them.
+`g_mount_list_lock` is a spinlock leaf too: a visible namespace's mount
+list and `g_root_mount` change under it as well as `g_mounts_lock`, and
+`/proc/mounts`, rendered by procfs's lookup with the directory's
+`vnode->lock` held, reads them under it alone (v1.0.2: reading them under
+`g_mounts_lock` there inverted this order, which the checker caught).
 `file->lock` is taken alone before any vnode lock; `mount->sync_lock` is
 taken alone before filesystem locks. `vnode_put` unhashes under
 `mount->lock` before the last reference drops, so `vnode_release` takes no

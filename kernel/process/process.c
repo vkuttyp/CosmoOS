@@ -371,7 +371,25 @@ struct image_build {
     const struct personality *pers;
     struct vm_space *space;
     uint64_t entry, sp, image_end, interp_base;
+    char cmdline[PROCESS_CMDLINE_MAX];
+    uint16_t cmdline_len;
 };
+
+/* argv joined as /proc/<pid>/cmdline shows it; a string the cap cuts
+ * keeps a terminating NUL, so the last one shown is whole or shortened. */
+static void cmdline_join(const char *const argv[], struct image_build *ib)
+{
+    size_t used = 0;
+    for (unsigned i = 0; argv && argv[i] && used < sizeof(ib->cmdline); i++) {
+        size_t n = strlen(argv[i]) + 1;
+        if (n > sizeof(ib->cmdline) - used)
+            n = sizeof(ib->cmdline) - used;
+        memcpy(ib->cmdline + used, argv[i], n - 1);
+        ib->cmdline[used + n - 1] = '\0';
+        used += n;
+    }
+    ib->cmdline_len = (uint16_t)used;
+}
 
 static int image_build(struct process *p, const struct process_image *exe, const struct process_image *interp,
                        const char *name, bool kernel_created, const char *const argv[], const char *const envp[],
@@ -380,6 +398,7 @@ static int image_build(struct process *p, const struct process_image *exe, const
     struct elf_info *info = &ib->info, *iinfo = &ib->iinfo;
     const char *why = NULL;
     name = name ? name : "?";
+    cmdline_join(argv, ib);
     int rc = elf_validate(exe->data, exe->size, USER_LO, USER_HI, info, &why);
     if (rc) {
         kwarn("process: '%s' rejected: %s", name, why ? why : "?");
@@ -604,6 +623,7 @@ static struct process *process_alloc(const char *name)
         return NULL;
     kobject_init(&p->obj, &process_type);
     strlcpy(p->name, name ? name : "?", sizeof(p->name));
+    p->start_ns = clock_now_ns();
     list_init(&p->threads);
     list_init(&p->all_link);
     list_init(&p->children);
@@ -916,6 +936,8 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     p->exec_entry = ib->info.entry;
     p->interp_base = ib->interp_base;
     strlcpy(p->exec_path, exe->path, sizeof(p->exec_path));
+    memcpy(p->cmdline, ib->cmdline, ib->cmdline_len);
+    p->cmdline_len = ib->cmdline_len;
     uint64_t entry = ib->entry, sp = ib->sp, info_entry = ib->info.entry;
     unsigned nr_segments = ib->info.nr_segments;
     if (p->pers->init != NULL)
@@ -1035,6 +1057,8 @@ static void fork_inherit(struct process *p, struct process *parent)
     p->interp_base = parent->interp_base;
     p->exec_entry = parent->exec_entry;
     strlcpy(p->exec_path, parent->exec_path, sizeof(p->exec_path));
+    memcpy(p->cmdline, parent->cmdline, parent->cmdline_len);
+    p->cmdline_len = parent->cmdline_len;
 }
 
 int process_fork(const struct process_fork_args *a, struct process **out)
@@ -1223,6 +1247,8 @@ int process_exec_images(const struct process_image *exe, const struct process_im
     p->exec_entry = ib->info.entry;
     p->interp_base = ib->interp_base;
     strlcpy(p->exec_path, execfn, sizeof(p->exec_path));
+    memcpy(p->cmdline, ib->cmdline, ib->cmdline_len);
+    p->cmdline_len = ib->cmdline_len;
     p->main_thread = self;
     self->user_tid = p->pid;   /* the exec'ing thread becomes the first: its tid is the pid */
     __atomic_store_n(&p->exec_thread, NULL, __ATOMIC_RELEASE);
@@ -2215,6 +2241,11 @@ struct process *process_lookup(pid_t pid)
 unsigned process_count(void)
 {
     return g_process_count;
+}
+
+pid_t process_last_pid(void)
+{
+    return __atomic_load_n(&g_next_pid, __ATOMIC_RELAXED) - 1;   /* written under the table lock; read alone */
 }
 
 /*

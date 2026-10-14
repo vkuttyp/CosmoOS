@@ -254,15 +254,22 @@ static size_t expand_dollar(const char *p, struct sbuf *out)
     return consumed;
 }
 
-static int lex(const char *line, struct token *toks, int max, int *ntoks, int *had_assign_word)
+/*
+ * Lex `line` into toks. With `rest` non-NULL, stop after the first list
+ * operator (; & && ||) and point *rest past it: run_line lexes and runs
+ * one pipeline at a time, so a `$?` or `$X` is expanded after the
+ * commands before it on the line have run (`false; echo $?` prints 1).
+ */
+static int lex(const char *line, struct token *toks, int max, int *ntoks, const char **rest)
 {
     int n = 0;
     const char *p = line;
-    (void)had_assign_word;
     while (*p) {
         while (*p == ' ' || *p == '\t')
             p++;
-        if (*p == '\0' || *p == '#')
+        if (*p == '#')
+            p += strlen(p);
+        if (*p == '\0')
             break;
         if (n >= max - 1)
             return -1;
@@ -346,10 +353,14 @@ static int lex(const char *line, struct token *toks, int max, int *ntoks, int *h
             t->text = b.s ? b.s : strdup("");
         }
         n++;
+        if (rest && (t->type == T_SEMI || t->type == T_AMP || t->type == T_AND_IF || t->type == T_OR_IF))
+            break;
     }
     toks[n].type = T_END;
     toks[n].text = NULL;
     *ntoks = n;
+    if (rest)
+        *rest = p;
     return 0;
 }
 
@@ -818,15 +829,9 @@ static int run_pipeline(struct pipeline *pl)
 static int run_line(const char *line)
 {
     struct token toks[TOKENS_MAX];
-    int ntoks = 0, dummy = 0;
-    if (lex(line, toks, TOKENS_MAX, &ntoks, &dummy) < 0) {
-        g_last_status = 2;
-        return -1;
-    }
-    int pos = 0;
     int rc = 0;
     /*
-     * 0: run, 1: skip until next ';', 2: skip because && failed / || succeeded.
+     * 0: run, 2: skip because && failed / || succeeded.
      *
      * An AND-OR list is LEFT-associative: `A && B || C` is
      * `(A && B) || C`, so a failing A must still reach C. This loop
@@ -839,46 +844,68 @@ static int run_line(const char *line)
      * fix. Found in /etc/rc.test, whose verdict line is exactly this
      * shape, so `SHTEST: FAIL n` could never print and a failing run
      * was reported only by the absence of `SHTEST: PASS`.
+     *
+     * Each pipeline is lexed just before it runs (lex's `rest` mode),
+     * so its expansions see what the pipelines before it did.
      */
     int skip = 0;
-    while (toks[pos].type != T_END) {
-        struct pipeline pl;
-        if (toks[pos].type == T_SEMI || toks[pos].type == T_AMP) {
-            pos++;
-            skip = 0;
-            continue;
-        }
-        if (parse_pipeline(toks, &pos, &pl) < 0) {
-            fprintf(stderr, "sh: syntax error near '%s'\n", toks[pos].text ? toks[pos].text : "");
+    /* The whole line is lexed once first, and thrown away: an unclosed
+     * quote or too many tokens anywhere on it refuses the line before any
+     * of it runs, as it did when the line was lexed whole. That pass's
+     * expansions are discarded (lexing runs nothing: there is no command
+     * substitution), and each pipeline is lexed again below. */
+    {
+        int ntoks = 0;
+        int lrc = lex(line, toks, TOKENS_MAX, &ntoks, NULL);
+        for (int i = 0; i < ntoks; i++)
+            free(toks[i].text);
+        if (lrc < 0) {
             g_last_status = 2;
-            rc = -1;
-            break;
-        }
-        if (!skip) {
-            g_last_status = run_pipeline(&pl);
-            if (g_opt_errexit && g_last_status != 0 && toks[pos].type != T_AND_IF && toks[pos].type != T_OR_IF) {
-                fflush(stdout);
-                exit(g_last_status);
-            }
-        }
-        if (toks[pos].type == T_AND_IF) {
-            pos++;
-            skip = g_last_status != 0 ? 2 : 0;
-        } else if (toks[pos].type == T_OR_IF) {
-            pos++;
-            skip = g_last_status == 0 ? 2 : 0;
-        } else if (toks[pos].type == T_SEMI) {
-            pos++;
-            skip = 0;
-        } else if (toks[pos].type != T_END) {
-            fprintf(stderr, "sh: syntax error near '%s'\n", toks[pos].text ? toks[pos].text : "");
-            g_last_status = 2;
-            rc = -1;
-            break;
+            return -1;
         }
     }
-    for (int i = 0; i < ntoks; i++)
-        free(toks[i].text);
+    const char *p = line;
+    while (*p) {
+        int ntoks = 0, pos = 0;
+        if (lex(p, toks, TOKENS_MAX, &ntoks, &p) < 0) {
+            g_last_status = 2;
+            return -1;
+        }
+        if (ntoks == 0)
+            break;
+        struct pipeline pl;
+        if (toks[0].type == T_SEMI || toks[0].type == T_AMP) {
+            skip = 0;
+        } else if (parse_pipeline(toks, &pos, &pl) < 0) {
+            fprintf(stderr, "sh: syntax error near '%s'\n", toks[pos].text ? toks[pos].text : "");
+            g_last_status = 2;
+            rc = -1;
+        } else {
+            if (!skip) {
+                g_last_status = run_pipeline(&pl);
+                if (g_opt_errexit && g_last_status != 0 && toks[pos].type != T_AND_IF &&
+                    toks[pos].type != T_OR_IF) {
+                    fflush(stdout);
+                    exit(g_last_status);
+                }
+            }
+            if (toks[pos].type == T_AND_IF)
+                skip = g_last_status != 0 ? 2 : 0;
+            else if (toks[pos].type == T_OR_IF)
+                skip = g_last_status == 0 ? 2 : 0;
+            else if (toks[pos].type == T_SEMI || toks[pos].type == T_AMP || toks[pos].type == T_END)
+                skip = 0;
+            else {
+                fprintf(stderr, "sh: syntax error near '%s'\n", toks[pos].text ? toks[pos].text : "");
+                g_last_status = 2;
+                rc = -1;
+            }
+        }
+        for (int i = 0; i < ntoks; i++)
+            free(toks[i].text);
+        if (rc < 0)
+            break;
+    }
     return rc;
 }
 

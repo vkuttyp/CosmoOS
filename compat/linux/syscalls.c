@@ -2492,6 +2492,64 @@ static __maybe_unused int64_t lx_time(struct syscall_args *a)
     return t;
 }
 
+/* statfs(2) and fstatfs(2) over vnode_statfs (df). The fsid is the
+ * mount's id, which names one mount for as long as it is mounted. */
+static int put_statfs(uint64_t ubuf, struct vnode *vn)
+{
+    struct vfs_statfs sf;
+    int rc = vnode_statfs(vn, &sf);
+    if (rc)
+        return rc;
+    struct lx_statfs st;
+    memset(&st, 0, sizeof(st));
+    st.f_type = sf.magic;
+    st.f_bsize = st.f_frsize = sf.bsize;
+    st.f_blocks = sf.blocks;
+    st.f_bfree = sf.bfree;
+    st.f_bavail = sf.bavail;
+    st.f_files = sf.files;
+    st.f_ffree = sf.ffree;
+    st.f_fsid[0] = (int32_t)vn->mnt->id;
+    st.f_fsid[1] = (int32_t)(vn->mnt->id >> 32);
+    st.f_namelen = sf.namelen;
+    st.f_flags = (sf.flags & MOUNT_RDONLY) ? LX_ST_RDONLY : 0;
+    return copy_to_user(ubuf, &st, sizeof(st)) ? -EFAULT : 0;
+}
+
+static int64_t lx_statfs(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = strncpy_from_user(path, a->a[0], VFS_PATH_MAX);
+    if (rc < 0)
+        return rc;
+    if (path[0] == '\0')
+        return -ENOENT;
+    struct vnode *start, *vn;
+    rc = at_base(LX_AT_FDCWD, path, HANDLE_RIGHT_READ, &start, NULL, 0, NULL);
+    if (rc)
+        return rc;
+    rc = vfs_lookup(start, path, &vn);
+    vnode_put(start);
+    if (rc)
+        return rc;
+    rc = put_statfs(a->a[1], vn);
+    vnode_put(vn);
+    return rc;
+}
+
+static int64_t lx_fstatfs(struct syscall_args *a)
+{
+    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
+    if (obj == NULL)
+        return -EBADF;
+    struct file *f = file_from_kobject(obj);
+    /* A pipe, socket or other object is on no filesystem here (Linux
+     * answers with pipefs's or sockfs's figures). */
+    int rc = f != NULL && f->vn != NULL ? put_statfs(a->a[1], f->vn) : -EINVAL;
+    kobject_put(obj);
+    return rc;
+}
+
 /* sysinfo(2): uptime and a coarse memory/process snapshot, marshalled from the
  * stats the kernel already keeps. See docs/audit/next-subsystem-sysinfo.md. */
 static int64_t lx_sysinfo(struct syscall_args *a)
@@ -2499,8 +2557,12 @@ static int64_t lx_sysinfo(struct syscall_args *a)
     struct pmm_stats st;
     pmm_get_stats(&st);
     struct lx_sysinfo si;
-    memset(&si, 0, sizeof(si));   /* loads, swap, shared/buffer, high, pad: none here, so zero */
+    memset(&si, 0, sizeof(si));   /* swap, shared/buffer, high, pad: none here, so zero */
     si.uptime = (int64_t)(clock_now_ns() / 1000000000ull);
+    unsigned long loads[3];
+    sched_loadavg(loads, 16);   /* Linux's SI_LOAD_SHIFT */
+    for (unsigned i = 0; i < 3; i++)
+        si.loads[i] = loads[i];
     si.mem_unit = 1;              /* report bytes */
     si.totalram = st.total_pages * PAGE_SIZE;
     si.freeram = st.free_pages * PAGE_SIZE;
@@ -3935,6 +3997,8 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_gettimeofday] = lx_gettimeofday,
     [LX_getrlimit] = lx_getrlimit,
     [LX_sysinfo] = lx_sysinfo,
+    [LX_statfs] = lx_statfs,
+    [LX_fstatfs] = lx_fstatfs,
     [LX_getuid] = lx_getuid,
     [LX_getgid] = lx_getgid,
     [LX_geteuid] = lx_geteuid,

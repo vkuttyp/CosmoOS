@@ -1077,10 +1077,26 @@ each; none is needed by M2's acceptance test.
   not applied to native creation (M3 PR 4).
 - Linux `nanosleep` interrupted by a stop is restarted with its whole
   duration, not the remainder (the core's restart re-executes the call).
-- BusyBox's testsuite compares with `cmp`, which is not an M3 applet;
-  `tests/busybox/suite.sh` supplies a stand-in over `diff`.
+- ~~BusyBox's testsuite compares with `cmp`, which is not an M3 applet;
+  `tests/busybox/suite.sh` supplies a stand-in over `diff`.~~ **Closed by
+  v1.0.2's everyday commands**: `cmp` is an applet and the stand-in is gone.
 - ~~ash job control (`ASH_JOB_CONTROL`) is off: an installed system's
   console has no `^Z`, `jobs` or `fg` until PTYs and job control for ash.~~
   **Closed by M4 PR 2** (PTYs, controlling terminals, job control in ash
   on the console and on a pty; `docs/audit/2026-10-11-m4-interactive-networked-report.md`).
-
+- `/proc/<pid>/stat` reports VSZ and RSS as 0, so `top` and `ps` show no
+  process memory: reading another process's space needs a reference on it,
+  and exit drops the space (`vm_space_put`, P34) without `p->lock`
+  (v1.0.2's everyday commands).
+- AArch64 has no power-off off QEMU: `arch_emulator_exit` is QEMU's
+  semihosting only and nothing calls PSCI `SYSTEM_OFF`, so on Parallels
+  Desktop `exit` ends in `shutdown: halting CPU` and the VM stays running
+  until stopped (found 2026-10-14, testing the everyday commands there).
+- A read of `/dev/zero` returns at most 64 KiB, where Linux fills the
+  request: `dd if=/dev/zero bs=1M count=32` copies 32 partial records,
+  2 MiB (POSIX allows the short read; found on Parallels, 2026-10-14).
+- Every mount of a freshly installed cosmofs warns `free block count N
+  differs from the superblock's N-4..7; using the bitmap` (QEMU's
+  `test-install` on both architectures and Parallels, since before
+  v1.0.2's everyday commands): the superblock's free count is not
+  brought up to date by the installer's last commit.

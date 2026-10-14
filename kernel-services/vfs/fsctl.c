@@ -17,10 +17,12 @@
  * That is what keeps the VFS from depending on one of its filesystems.
  */
 
+#include <kernel/blk.h>
 #include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/mutex.h>
+#include <kernel/printf.h>
 #include <kernel/log.h>
 #include <kernel/mountns.h>
 #include <kernel/string.h>
@@ -152,6 +154,91 @@ static int64_t fsctl_list(struct fsctl_open *o)
     hdr->bytes = sizeof(struct cosmo_fsctl_mount);
     fsctl_set_result(o, buf, sizeof(*hdr) + (size_t)n * sizeof(struct cosmo_fsctl_mount));
     return 0;
+}
+
+/* Text appended to /proc/mounts' buffer: `len` grows while it fits; past
+ * the end `over` is set and nothing more is written. */
+struct mounts_out {
+    char *buf;
+    size_t n, len;
+    bool over;
+};
+
+static void mo_put(struct mounts_out *o, const char *s, size_t k)
+{
+    if (o->over || o->len + k >= o->n) {   /* one byte stays for the NUL */
+        o->over = true;
+        return;
+    }
+    memcpy(o->buf + o->len, s, k);
+    o->len += k;
+}
+
+static void mo_str(struct mounts_out *o, const char *s)
+{
+    mo_put(o, s, strlen(s));
+}
+
+/* A path, escaped as Linux escapes /proc/mounts: a space, tab, newline or
+ * backslash as \ooo, so a reader splitting on blanks gets it back whole.
+ * Written straight into the output, so no intermediate buffer can cut a
+ * path whose escapes make it longer than VFS_PATH_MAX. */
+static void mo_path(struct mounts_out *o, const char *s)
+{
+    for (; *s != '\0'; s++) {
+        if (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\\') {
+            char e[5];
+            ksnprintf(e, sizeof(e), "\\%03o", (unsigned)(unsigned char)*s);
+            mo_put(o, e, 4);
+        } else {
+            mo_put(o, s, 1);
+        }
+    }
+}
+
+/* One line, whole or not at all: a line that does not fit is taken back,
+ * and `over` stays set so no later line is written either. */
+static void mounts_line(struct mounts_out *o, const struct mount *mnt, const char *path)
+{
+    size_t start = o->len;
+    if (mnt->bdev != NULL) {
+        mo_str(o, "/dev/");
+        mo_str(o, mnt->bdev->name);
+    } else {
+        mo_str(o, mnt->fs->name);
+    }
+    mo_str(o, " ");
+    mo_path(o, path);
+    mo_str(o, " ");
+    mo_str(o, mnt->fs->name);
+    mo_str(o, (mnt->flags & MOUNT_RDONLY) ? " ro 0 0\n" : " rw 0 0\n");
+    if (o->over)
+        o->len = start;
+}
+
+/* The walk fsctl_list makes, printed as /proc/mounts (vfs.h). A line that
+ * does not fit is left out whole, and so is every line after it. Under
+ * g_mount_list_lock alone: procfs calls this from its lookup, holding the
+ * directory's vnode lock, and g_mounts_lock is taken before vnode locks
+ * (vfs_internal.h). */
+int vfs_mounts_render(char *out, size_t n)
+{
+    struct mounts_out o = { .buf = out, .n = n, .len = 0, .over = n == 0 };
+    spin_lock(&g_mount_list_lock);
+    struct mount_ns *ns = mountns_current();
+    if (g_root_mount != NULL)
+        mounts_line(&o, g_root_mount, "/");
+    struct mount_ns_ref *r;
+    list_for_each_entry(r, &ns->mounts, ns_link) {
+        if (o.over)
+            break;
+        if (r->mnt != g_root_mount)
+            mounts_line(&o, r->mnt, r->path);
+    }
+    spin_unlock(&g_mount_list_lock);
+    if (n > 0)
+        out[o.len] = '\0';
+    return (int)o.len;
 }
 
 /*

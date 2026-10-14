@@ -33,8 +33,10 @@ prlctl set "CosmoOS" --device-add hdd --type plain --size 1024 --iface nvme
 
 The two disks are two namespaces of one controller: `cosmo-install
 --list` shows the live disk (`nvme0n2`, with the `boot` partition) and
-the blank one (`nvme0n1`); `cosmo-install nvme0n1` installs, `exit`
-powers off, and with the blank disk first in the boot order (or the live
+the blank one (`nvme0n1`); `cosmo-install nvme0n1` installs, and `exit`
+shuts the system down, though on Parallels the VM then stays running
+until you stop it (there is no power-off there yet: the kernel halts).
+With the blank disk first in the boot order (or the live
 disk disconnected) the VM boots the installed system. The network
 adapter's default, shared networking, gives it an address by DHCP; ssh
 listens on port 22 of that address.

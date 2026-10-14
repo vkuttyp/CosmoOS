@@ -3,10 +3,13 @@
  * (docs/kernel-services/filesystem/procfs/design.md, invariants P1-P3).
  *
  * The rule that keeps this from becoming the dumping ground the
- * constitution's section 56 warns about is in the name: a file belongs
- * here only if it describes a process. System-wide values stay in
- * sysctl, whose names are a curated list; the log stays in dmesg;
- * device nodes stay in /dev.
+ * constitution's section 56 warns about: a file belongs here if it
+ * describes a process, or if it is one of a fixed list of Linux's own
+ * system files that Linux programs read by that path (meminfo, stat,
+ * loadavg, uptime, mounts: what free, top, df and uptime open), in
+ * Linux's format (P4). Anything else system-wide stays in sysctl, whose
+ * names are a curated list; the log stays in dmesg; device nodes stay
+ * in /dev.
  *
  * What this adds that procinfo does not is addressability -- a
  * process's facts at a path, readable by anything that reads files,
@@ -18,10 +21,15 @@
 #include <kernel/handle.h>
 #include <kernel/tty.h>
 #include <kernel/kmalloc.h>
+#include <kernel/percpu.h>
+#include <kernel/pagecache.h>
+#include <kernel/pmm.h>
 #include <kernel/printf.h>
 #include <kernel/process.h>
+#include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <kernel/vfs.h>
 
 /*
@@ -31,7 +39,9 @@
  * table.
  */
 enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS = 3, PROC_SELF = 4,
-                 PROC_FD_DIR = 5, PROC_FD_LINK = 6 };
+                 PROC_FD_DIR = 5, PROC_FD_LINK = 6, PROC_PID_STAT = 7, PROC_CMDLINE = 8,
+                 /* The system files (P4), under pid 0. */
+                 PROC_MEMINFO = 9, PROC_STAT = 10, PROC_LOADAVG = 11, PROC_UPTIME = 12, PROC_MOUNTS = 13 };
 
 /* An fd link carries its handle number above the pid as well. */
 #define PROC_INO(pid, kind) (((uint64_t)(pid) << 8) | (uint64_t)(kind))
@@ -42,9 +52,10 @@ enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS =
 #define PROC_ROOT_INO       PROC_INO(0, PROC_ROOT)
 #define PROC_SELF_INO       PROC_INO(0, PROC_SELF)
 
-/* Rendered text is at most this; a status block is a few hundred bytes
- * and a limits block is one line per resource. */
-#define PROC_TEXT_MAX 1024
+/* Rendered text is at most this, one page: a status block is a few
+ * hundred bytes, /proc/stat a line per CPU, /proc/mounts a line per
+ * mount (a listing longer than this ends at the last whole line). */
+#define PROC_TEXT_MAX PAGE_SIZE
 
 static const struct vnode_ops proc_root_ops;
 static const struct vnode_ops proc_fd_dir_ops;
@@ -154,12 +165,193 @@ static int render_limits(struct process *p, char *out, size_t n)
     return used;
 }
 
+/* Linux's clock tick for /proc times (USER_HZ): what every reader divides by. */
+#define PROC_USER_HZ 100u
+static unsigned long long proc_ticks(uint64_t ns)
+{
+    return (unsigned long long)(ns / (1000000000ull / PROC_USER_HZ));
+}
+
+/*
+ * /proc/<pid>/stat, Linux's one-line record (proc(5)) through field 44,
+ * which is as far as top and ps read. What this kernel does not keep
+ * reads as Linux's "none": no page faults are counted, no user/system
+ * split is kept (all of cpu_ns is utime), and the memory sizes are 0 --
+ * a process's space may be torn down under a reader (P34), and nothing
+ * reads it from here (inventory).
+ */
+static int render_pid_stat(struct process *p, char *out, size_t n)
+{
+    unsigned nr_threads, live = 0;
+    int cpu = 0;
+    uint64_t run_ns = 0, now = clock_now_ns();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    nr_threads = p->nr_threads;
+    bool stopped = p->stopped;
+    struct thread *t;
+    list_for_each_entry(t, &p->threads, proc_link) {
+        run_ns += sched_thread_run_ns(t, now);   /* the running stretch too: rq->lock nests inside p->lock */
+        if (t->state == THREAD_RUNNING || t->state == THREAD_READY)
+            live++;
+        if (t == p->main_thread)
+            cpu = t->cpu;
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+    /* Under g_process_table_lock, as every other reader takes them. */
+    pid_t pgid = 0, sid = 0;
+    (void)process_getpgid(p->pid, &pgid);
+    (void)process_getsid(p->pid, &sid);
+    const char *state = p->state == PROCESS_EXITED ? "Z" : stopped ? "T" : (live ? "R" : "S");
+    return ksnprintf(out, n,
+                     "%u (%s) %s %u %d %d 0 -1 0 0 0 0 0 %llu 0 0 0 20 0 %u 0 %llu 0 0 "
+                     "18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 %d 0 0 0 0 0\n",
+                     p->pid, p->name, state, p->parent_pid, pgid, sid, proc_ticks(run_ns), nr_threads,
+                     proc_ticks(p->start_ns), cpu < 0 ? 0 : cpu);
+}
+
+/* argv as exec gave it (process.h, `cmdline`): NUL-separated, as Linux's. */
+static int render_cmdline(struct process *p, char *out, size_t n)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    size_t len = p->cmdline_len < n ? p->cmdline_len : n;
+    memcpy(out, p->cmdline, len);
+    spin_unlock_irqrestore(&p->lock, s);
+    return (int)len;
+}
+
+/* --- the system files (P4) --------------------------------------------------
+ *
+ * Linux's formats, for the programs that parse them. A field this kernel
+ * has no figure for is left out when Linux readers tolerate its absence
+ * and written as 0 when they expect it.
+ */
+
+/*
+ * Memory in kB. The page cache gives back pages only past its own limit,
+ * not when the allocator runs short, so nothing it holds is counted as
+ * available: MemAvailable is MemFree. There is no swap.
+ */
+static int render_meminfo(char *out, size_t n)
+{
+    struct pmm_stats st;
+    pmm_get_stats(&st);
+    struct pagecache_stats pc;
+    pagecache_get_stats(&pc);
+    unsigned long long kb = PAGE_SIZE / 1024;
+    return ksnprintf(out, n,
+                     "MemTotal:       %8llu kB\n"
+                     "MemFree:        %8llu kB\n"
+                     "MemAvailable:   %8llu kB\n"
+                     "Buffers:        %8llu kB\n"
+                     "Cached:         %8llu kB\n"
+                     "SwapTotal:      %8llu kB\n"
+                     "SwapFree:       %8llu kB\n"
+                     "SReclaimable:   %8llu kB\n",
+                     (unsigned long long)st.total_pages * kb, (unsigned long long)st.free_pages * kb,
+                     (unsigned long long)st.free_pages * kb, 0ull, (unsigned long long)pc.pages * kb, 0ull, 0ull,
+                     0ull);
+}
+
+/*
+ * CPU time in USER_HZ ticks: a CPU's idle is its idle thread's run time
+ * (sched_cpu_idle_ns), and the rest of its time since boot is busy. No
+ * user/system split is kept, so busy time is all "user"; iowait, irq
+ * and steal are not measured and read 0.
+ */
+static int render_stat(char *out, size_t n)
+{
+    /* Two passes: the total line comes first, so it is summed before the
+     * per-CPU lines are written. A CPU's second reading is the later one,
+     * so each line still only grows from one open to the next. */
+    uint64_t now = clock_now_ns();
+    unsigned long long busy_all = 0, idle_all = 0, ctxt = 0;
+    unsigned running = 0;
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++) {
+        if (!cpu_online(c))
+            continue;
+        uint64_t idle = sched_cpu_idle_ns(c, now);
+        busy_all += proc_ticks(now > idle ? now - idle : 0);
+        idle_all += proc_ticks(idle);
+        ctxt += sched_switch_count(c);
+        running += sched_cpu_load(c);
+    }
+    int used = ksnprintf(out, n, "cpu  %llu 0 0 %llu 0 0 0 0 0 0\n", busy_all, idle_all);
+    now = clock_now_ns();
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS && (size_t)used < n; c++) {
+        if (!cpu_online(c))
+            continue;
+        uint64_t idle = sched_cpu_idle_ns(c, now);
+        used += ksnprintf(out + used, n - (size_t)used, "cpu%u %llu 0 0 %llu 0 0 0 0 0 0\n", c,
+                          proc_ticks(now > idle ? now - idle : 0), proc_ticks(idle));
+    }
+    uint64_t rt = clock_realtime_ns();
+    unsigned long long btime = rt > now ? (rt - now) / 1000000000ull : 0;
+    if ((size_t)used < n)
+        used += ksnprintf(out + used, n - (size_t)used,
+                          "ctxt %llu\n"
+                          "btime %llu\n"
+                          "processes %u\n"
+                          "procs_running %u\n"
+                          "procs_blocked 0\n",
+                          ctxt, btime, (unsigned)process_last_pid(), running);
+    return used;
+}
+
+/* The 1, 5 and 15 minute averages (sched_loadavg), runnable/all threads,
+ * and the last pid given out. */
+static int render_loadavg(char *out, size_t n)
+{
+    unsigned long l[3];
+    sched_loadavg(l, 11);
+    unsigned running = 0;
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
+        if (cpu_online(c))
+            running += sched_cpu_load(c);
+    /* Rounded to two places, as Linux's /proc/loadavg rounds them
+     * (FIXED_1/200 added first), so this agrees with sysinfo's readers. */
+    for (unsigned i = 0; i < 3; i++)
+        l[i] += (1ul << 11) / 200;
+#define LOAD_INT(x)  ((x) >> 11)
+#define LOAD_FRAC(x) ((((x) & ((1ul << 11) - 1)) * 100) >> 11)
+    return ksnprintf(out, n, "%lu.%02lu %lu.%02lu %lu.%02lu %u/%u %u\n", LOAD_INT(l[0]), LOAD_FRAC(l[0]),
+                     LOAD_INT(l[1]), LOAD_FRAC(l[1]), LOAD_INT(l[2]), LOAD_FRAC(l[2]), running, thread_count(),
+                     (unsigned)process_last_pid());
+#undef LOAD_INT
+#undef LOAD_FRAC
+}
+
+/* Seconds since boot, and the idle time of every CPU summed. */
+static int render_uptime(char *out, size_t n)
+{
+    uint64_t now = clock_now_ns(), idle = 0;
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
+        if (cpu_online(c))
+            idle += sched_cpu_idle_ns(c, now);
+    return ksnprintf(out, n, "%llu.%02llu %llu.%02llu\n", (unsigned long long)(now / 1000000000ull),
+                     (unsigned long long)(now / 10000000ull % 100), (unsigned long long)(idle / 1000000000ull),
+                     (unsigned long long)(idle / 10000000ull % 100));
+}
+
 static int render(uint64_t ino, char *out, size_t n)
 {
+    switch (PROC_INO_KIND(ino)) {
+    case PROC_MEMINFO: return render_meminfo(out, n);
+    case PROC_STAT:    return render_stat(out, n);
+    case PROC_LOADAVG: return render_loadavg(out, n);
+    case PROC_UPTIME:  return render_uptime(out, n);
+    case PROC_MOUNTS:  return vfs_mounts_render(out, n);
+    default:           break;
+    }
     struct process *p = proc_get_visible(PROC_INO_PID(ino));
     if (p == NULL)
         return -ESRCH;   /* the path resolved; the process did not (P3) */
-    int len = PROC_INO_KIND(ino) == PROC_STATUS ? render_status(p, out, n) : render_limits(p, out, n);
+    int len;
+    switch (PROC_INO_KIND(ino)) {
+    case PROC_STATUS:   len = render_status(p, out, n); break;
+    case PROC_PID_STAT: len = render_pid_stat(p, out, n); break;
+    case PROC_CMDLINE:  len = render_cmdline(p, out, n); break;
+    default:            len = render_limits(p, out, n); break;
+    }
     process_put(p);
     return len;
 }
@@ -217,7 +409,7 @@ static int proc_file(struct mount *mnt, pid_t pid, enum proc_kind kind, struct v
         kfree(t);
         return len;
     }
-    t->len = (size_t)len;
+    t->len = (size_t)len < sizeof(t->text) ? (size_t)len : sizeof(t->text) - 1;   /* ksnprintf returns what it wanted */
     struct vnode *vn = proc_vnode(mnt, ino, VNODE_REG, 0444, &proc_file_ops);
     if (vn == NULL) {
         kfree(t);
@@ -396,6 +588,10 @@ static int proc_pid_lookup(struct vnode *dir, const char *name, size_t len, stru
         return proc_file(dir->mnt, pid, PROC_STATUS, out);
     if (len == 6 && memcmp(name, "limits", 6) == 0)
         return proc_file(dir->mnt, pid, PROC_LIMITS, out);
+    if (len == 4 && memcmp(name, "stat", 4) == 0)
+        return proc_file(dir->mnt, pid, PROC_PID_STAT, out);
+    if (len == 7 && memcmp(name, "cmdline", 7) == 0)
+        return proc_file(dir->mnt, pid, PROC_CMDLINE, out);
     if (len == 2 && memcmp(name, "fd", 2) == 0)
         return proc_fd_dir(dir->mnt, pid, out);
     return -ENOENT;   /* a file appears here only when somebody adds one (P2) */
@@ -407,7 +603,8 @@ static int proc_pid_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, 
     static const struct {
         const char *name;
         enum proc_kind kind;
-    } files[] = { { "status", PROC_STATUS }, { "limits", PROC_LIMITS }, { "fd", PROC_FD_DIR } };
+    } files[] = { { "status", PROC_STATUS }, { "limits", PROC_LIMITS }, { "fd", PROC_FD_DIR },
+                  { "stat", PROC_PID_STAT }, { "cmdline", PROC_CMDLINE } };
 
     while (*pos < 2 + sizeof(files) / sizeof(files[0])) {
         uint64_t i = *pos;
@@ -436,10 +633,15 @@ static int proc_pid_dir(struct mount *mnt, pid_t pid, struct vnode **out)
     struct process *p = proc_get_visible(pid);
     if (p == NULL)
         return -ENOENT;   /* not EACCES: that would confirm the pid exists (P1) */
+    uint32_t uid = p->cred.euid, gid = p->cred.egid;
     process_put(p);
     struct vnode *vn = proc_vnode(mnt, PROC_INO(pid, PROC_PID_DIR), VNODE_DIR, 0555, &proc_pid_dir_ops);
     if (vn == NULL)
         return -ENOMEM;
+    /* Owned by the process's user, as on Linux: top and ps name a
+     * process's user by stat'ing its directory. */
+    vn->uid = uid;
+    vn->gid = gid;
     *out = vn;
     return 0;
 }
@@ -490,8 +692,22 @@ static const struct vnode_ops proc_self_ops = {
     .readlink = proc_self_readlink,
 };
 
+/* The system files (P4): a fixed list, by Linux's names. */
+static const struct {
+    const char *name;
+    size_t len;
+    enum proc_kind kind;
+} g_system_files[] = {
+    { "meminfo", 7, PROC_MEMINFO }, { "stat", 4, PROC_STAT },     { "loadavg", 7, PROC_LOADAVG },
+    { "uptime", 6, PROC_UPTIME },   { "mounts", 6, PROC_MOUNTS },
+};
+#define NR_SYSTEM_FILES (sizeof(g_system_files) / sizeof(g_system_files[0]))
+
 static int proc_root_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
+    for (size_t i = 0; i < NR_SYSTEM_FILES; i++)
+        if (len == g_system_files[i].len && memcmp(name, g_system_files[i].name, len) == 0)
+            return proc_file(dir->mnt, 0, g_system_files[i].kind, out);
     if (len == 4 && memcmp(name, "self", 4) == 0) {
         struct process *me = process_current();
         if (me == NULL)
@@ -543,6 +759,13 @@ static int proc_root_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb,
             return rc;
         (*pos)++;
     }
+    while (*pos < nr_fixed + NR_SYSTEM_FILES) {
+        size_t i = (size_t)(*pos - nr_fixed);
+        int rc = cb(arg, g_system_files[i].name, g_system_files[i].len, PROC_INO(0, g_system_files[i].kind), VNODE_REG);
+        if (rc)
+            return rc;
+        (*pos)++;
+    }
 
     pid_t *pids = kmalloc(PROC_MAX_PIDS * sizeof(*pids), 0);
     if (pids == NULL)
@@ -551,7 +774,7 @@ static int proc_root_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb,
     if (total > PROC_MAX_PIDS)
         total = PROC_MAX_PIDS;
     int rc = 0;
-    for (unsigned i = (unsigned)(*pos - nr_fixed); i < total; i++) {
+    for (unsigned i = (unsigned)(*pos - nr_fixed - NR_SYSTEM_FILES); i < total; i++) {
         char name[12];
         int n = ksnprintf(name, sizeof(name), "%u", (unsigned)pids[i]);
         rc = cb(arg, name, (size_t)n, PROC_INO(pids[i], PROC_PID_DIR), VNODE_DIR);
@@ -591,6 +814,7 @@ static int procfs_unmount(struct mount *mnt)
 }
 
 struct fs_type procfs_fs_type = {
+    .magic = 0x9fa0u,   /* Linux's PROC_SUPER_MAGIC */
     .name = "procfs",
     .mount = procfs_mount,
     .unmount = procfs_unmount,
