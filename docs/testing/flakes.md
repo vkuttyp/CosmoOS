@@ -4225,3 +4225,20 @@ stays queued, and a second interface must count 0;
 `tools/netif-rxq-count-probe.py --old` reverts the count and the second
 interface counts 1, on both architectures. Fixed in the https unit (PR
 #384), since it turned that PR red.
+
+## An AArch64 entropy boot over the 240 s budget on a slow runner, 2026-10-14
+
+`boot-test: FAIL after 246.5s`, `timed out after 240s`, PR #384's
+AArch64 entropy boots (run 38580469942, job 115908817943), with the
+shell's closing markers missing. Every one of the 475 self-tests passed,
+and the network harness served 100 of 100 rounds. The serial log ends in
+the scripted shell session, after `pkg` listed `hello 1.1`: still
+running, not hung.
+
+The whole boot ran slow: the self-tests took 183,070 ms against 111,303
+on this host's x86-64 debug boot of the same tree and 122,640 on the PR's
+earlier x86-64 entropy boot; `cosmofs-replay` took 31,053 ms (14,623 to
+16,328 elsewhere); the network harness was ready at 163.1 s, against
+98.3 s locally. The commit under test added one self-test of 10-14 ms
+(`netif-rxq-count`). First sighting for this job; the failed job was
+rerun.
