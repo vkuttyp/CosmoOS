@@ -94,7 +94,17 @@ framebuffer at all, gets a console too.
 
 ## Validation
 
-MATRIX
+- **Matrix**, local, at `af33b68f`: 38 of 38 steps pass on x86-64 and
+  AArch64 (host tests, fuzz, analyze, debug boots at 1, 2 and 4 CPUs with
+  the network harness passing in each, `test-smp2`, chaos, harness retry,
+  crash, wxn, guard, entropy, security, release boot, install, platforms,
+  gic, and `make BUILD=release reproducible`, where `cosmoos.img`, which
+  carries `virtio_gpu.ko`, is the same in both trees).
+- **`make BUILD=release test-display`** passes on both architectures:
+  `virtio` and `both` at 1920x1080 in 2 chunks each, the marker on the
+  screen under its command; on x86-64 the crash-test kernel's
+  `KERNEL PANIC: page fault: ...` line is on the screen.
+- **`make BUILD=release test-net-login`** passes on both architectures.
 
 ## Not done here
 
