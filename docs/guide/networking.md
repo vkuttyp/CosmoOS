@@ -98,10 +98,10 @@ those as its own ICMP, which some hosts do not allow:
 
 <!-- test: console -->
 ```console
-cosmo$ ping -c 1 10.0.2.2
+cosmo$ ping -c 3 10.0.2.2
 PING 10.0.2.2 (10.0.2.2): 56 data bytes
 64 bytes from 10.0.2.2: seq=0 ttl=...
-...1 packets transmitted, 1 packets received, 0% packet loss...
+...3 packets transmitted, 3 packets received, 0% packet loss...
 ```
 
 Stop the file server and power off:

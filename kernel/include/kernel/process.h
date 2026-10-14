@@ -17,8 +17,10 @@
 #include <kernel/rlimit.h>
 #include <kernel/handle.h>
 #include <kernel/list.h>
+#include <kernel/mutex.h>
 #include <kernel/object.h>
 #include <kernel/spinlock.h>
+#include <kernel/timer.h>
 #include <kernel/types.h>
 #include <kernel/vmm.h>
 #include <kernel/wait.h>
@@ -248,6 +250,15 @@ struct process {
     char cmdline[PROCESS_CMDLINE_MAX];
     uint16_t cmdline_len;
     uint64_t start_ns;                 /* clock_now_ns when made (spawn or fork); exec keeps it */
+    /* ITIMER_REAL (setitimer, alarm; kernel/process/itimer.c): SIGALRM at
+     * expiry, re-armed by the interval. itimer_lock serialises the setters;
+     * the callback reads the two words atomically. A fork starts disarmed;
+     * exec keeps it, as POSIX does; exit cancels it before the process can
+     * be freed. */
+    struct timer itimer;
+    struct mutex itimer_lock;
+    uint64_t itimer_expires_ns;        /* clock_now_ns deadline, 0 = disarmed (atomic) */
+    uint64_t itimer_interval_ns;       /* atomic */
     /* vfork (docs/kernel/process/design.md, "fork"): the parent waits on
      * vfork_wq until the child stops borrowing its space -- it execs or
      * its last thread is gone -- and process_vfork_release sets this. */
@@ -631,6 +642,15 @@ void process_last_thread_gone(struct process *p);
 unsigned process_count(void);
 /* The pid most recently given out (/proc/loadavg); 0 before the first. */
 pid_t process_last_pid(void);
+/* ITIMER_REAL (kernel/process/itimer.c). set: `value` 0 disarms (and the
+ * interval with it); the previous remaining time and interval come back in
+ * `old_value`/`old_interval` when non-NULL. get: the remaining time (0 when
+ * disarmed) and the interval. stop: at exit, synchronously. */
+void process_itimer_init(struct process *p);
+void process_itimer_set(struct process *p, uint64_t value_ns, uint64_t interval_ns, uint64_t *old_value,
+                        uint64_t *old_interval);
+void process_itimer_get(struct process *p, uint64_t *value, uint64_t *interval);
+void process_itimer_stop(struct process *p);
 void process_dump_all(void);
 
 extern const struct personality personality_native;

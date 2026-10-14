@@ -1519,6 +1519,49 @@ int main(int argc, char **argv)
         CHECKV(sc1(LX_close, lfd) == 0 && sc1(LX_close, lep) == 0, 0);
 #endif
     }
+    /* setitimer/getitimer/alarm: ITIMER_REAL only (kernel/process/itimer.c;
+     * the ping unit -- BusyBox ping sends each echo after the first from
+     * SIGALRM, and stopped after one reply while these were ENOSYS). */
+    {
+        struct lx_itimerval cur, nv, old;
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0,
+               cur.it_value.tv_sec);
+        CHECKV(sc2(LX_getitimer, 1, &cur) == -22, 0);   /* ITIMER_VIRTUAL: not built */
+        nv = (struct lx_itimerval){ .it_interval = { 2, 0 }, .it_value = { 10, 0 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == 0, 0);
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec >= 9 && cur.it_value.tv_sec <= 10 &&
+               cur.it_interval.tv_sec == 2 && cur.it_interval.tv_usec == 0, cur.it_value.tv_sec);
+        nv = (struct lx_itimerval){ .it_interval = { 0, 0 }, .it_value = { 0, 0 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, &old) == 0 && old.it_value.tv_sec >= 9 && old.it_interval.tv_sec == 2,
+               old.it_value.tv_sec);
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0 &&
+               cur.it_interval.tv_sec == 0, cur.it_value.tv_sec);
+        nv.it_value.tv_usec = 1000000;
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == -22, 0);
+        /* It fires: SIGALRM blocked, a 20 ms timer, pending within 2 s, and
+         * a one-shot is disarmed after. */
+        uint64_t m14 = 1ull << 13, before = 0, pend = 0;
+        CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_BLOCK, &m14, &before, 8) == 0, 0);
+        nv = (struct lx_itimerval){ .it_interval = { 0, 0 }, .it_value = { 0, 20000 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == 0, 0);
+        for (int i = 0; i < 200 && !(pend & m14); i++) {
+            struct lx_timespec t = { 0, 10000000 };
+            sc2(LX_nanosleep, &t, 0);
+            sc2(LX_rt_sigpending, &pend, 8);
+        }
+        CHECKV(pend & m14, pend);
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0,
+               cur.it_value.tv_usec);
+#ifdef LX_alarm
+        CHECKV(sc1(LX_alarm, 5) == 0, 0);
+        CHECKV(sc1(LX_alarm, 0) == 5, 0);   /* 4.99... s left rounds to 5, as Linux rounds */
+#endif
+        /* Drop the pending SIGALRM: ignored while unblocked, then default again. */
+        struct lx_sigaction ign = { .handler = 1 }, dfl = { .handler = 0 };
+        CHECKV(sc4(LX_rt_sigaction, 14, &ign, 0, 8) == 0, 0);
+        CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &before, 0, 8) == 0, 0);
+        CHECKV(sc4(LX_rt_sigaction, 14, &dfl, 0, 8) == 0, 0);
+    }
     /* sysinfo (docs/audit/next-subsystem-sysinfo.md) */
     {
         struct lx_sysinfo si;

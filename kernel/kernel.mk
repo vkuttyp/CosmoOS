@@ -103,6 +103,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/process/elf.c \
 	kernel/process/cred.c \
 	kernel/process/process.c \
+	kernel/process/itimer.c \
 	kernel/process/spawn.c \
 	kernel/process/signal.c \
 	kernel/process/native_signal.c \

@@ -249,6 +249,8 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 228 | `clock_gettime` | `CLOCK_REALTIME` (0) and `REALTIME_COARSE` (5): `clock_realtime_ns` (the RTC at boot plus the monotonic clock, milestone 10); every other id `0..7`: `clock_now_ns` | id above 7 `-EINVAL` |
 | 96 | `gettimeofday` | wall-clock time as `timeval` | timezone argument ignored |
 | 201 | `time` | wall-clock seconds | |
+| 36, 38 (AArch64 102, 103) | `getitimer`, `setitimer` | `process_itimer_get`/`_set`: `ITIMER_REAL` only, `SIGALRM` at expiry, re-armed by the interval (the ping unit) | `ITIMER_VIRTUAL`/`ITIMER_PROF` `-EINVAL`; a negative field or `tv_usec` of 10^6 or more `-EINVAL`; a remaining time rounds up to the microsecond, so an armed timer never reads 0 |
+| 37 (x86-64 only) | `alarm` | `process_itimer_set` with no interval; the previous alarm's seconds, rounded up from half a second and never 0 while armed | musl's AArch64 `alarm` is `setitimer` |
 | 35 | `nanosleep` | `thread_sleep_ns_killable` | a bad `tv_nsec` or negative fields `-EINVAL`; values beyond 2^62 ns clamp there ("never"); on `-EINTR` the remainder is written as 0 |
 | 230 | `clock_nanosleep` | as `nanosleep`; `TIMER_ABSTIME` (1) is taken relative to the named clock | clock ids `0..7` |
 | 318 | `getrandom` | waits for a seeded pool (`random_wait_ready`), then `random_get_bytes` in 256-byte pieces | Linux flags: blocks until seeded (`-EINTR` on a signal); `GRND_NONBLOCK` `-EAGAIN` while unseeded; `GRND_INSECURE` never waits; `GRND_RANDOM` is the default; `INSECURE|RANDOM` or an unknown bit `-EINVAL`; at most 256 KiB per call (docs/kernel/security/design.md §6) |

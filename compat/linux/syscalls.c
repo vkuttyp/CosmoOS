@@ -3317,6 +3317,74 @@ static int64_t lx_sock_send(struct socket *s, uint64_t ubuf, size_t len, const s
     return done > 0 ? done : rc;
 }
 
+/* --- interval timers: ITIMER_REAL only (kernel/process/itimer.c) --------- */
+
+static bool itv_to_ns(const struct lx_timeval *tv, uint64_t *ns)
+{
+    if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= 1000000 || (uint64_t)tv->tv_sec > UINT64_MAX / 2000000000ull)
+        return false;
+    *ns = (uint64_t)tv->tv_sec * 1000000000ull + (uint64_t)tv->tv_usec * 1000ull;
+    return true;
+}
+
+static void ns_to_itv(uint64_t ns, struct lx_timeval *tv)
+{
+    /* Rounded up to the microsecond: a timer still armed never reads 0. */
+    uint64_t us = (ns + 999) / 1000;
+    tv->tv_sec = (int64_t)(us / 1000000);
+    tv->tv_usec = (int64_t)(us % 1000000);
+}
+
+static int64_t lx_setitimer(struct syscall_args *a)
+{
+    if ((int)a->a[0] != LX_ITIMER_REAL)
+        return -EINVAL;   /* ITIMER_VIRTUAL and ITIMER_PROF are not built */
+    struct lx_itimerval nv;
+    uint64_t value = 0, interval = 0, ov, oi;
+    if (a->a[1] != 0) {
+        if (copy_from_user(&nv, a->a[1], sizeof(nv)))
+            return -EFAULT;
+        if (!itv_to_ns(&nv.it_value, &value) || !itv_to_ns(&nv.it_interval, &interval))
+            return -EINVAL;
+    }
+    process_itimer_set(process_current(), value, interval, &ov, &oi);
+    if (a->a[2] != 0) {
+        struct lx_itimerval old;
+        ns_to_itv(ov, &old.it_value);
+        ns_to_itv(oi, &old.it_interval);
+        if (copy_to_user(a->a[2], &old, sizeof(old)))
+            return -EFAULT;
+    }
+    return 0;
+}
+
+static int64_t lx_getitimer(struct syscall_args *a)
+{
+    if ((int)a->a[0] != LX_ITIMER_REAL)
+        return -EINVAL;
+    uint64_t v, i;
+    process_itimer_get(process_current(), &v, &i);
+    struct lx_itimerval cur;
+    ns_to_itv(v, &cur.it_value);
+    ns_to_itv(i, &cur.it_interval);
+    return copy_to_user(a->a[1], &cur, sizeof(cur)) ? -EFAULT : 0;
+}
+
+#ifdef LX_alarm
+/* alarm(2), x86-64 only (musl's alarm is setitimer on AArch64): the seconds
+ * the previous alarm had left, rounded as Linux rounds them -- up from half
+ * a second, and never 0 for one still armed. */
+static int64_t lx_alarm(struct syscall_args *a)
+{
+    uint64_t ov;
+    process_itimer_set(process_current(), (uint64_t)(unsigned)a->a[0] * 1000000000ull, 0, &ov, NULL);
+    uint64_t sec = ov / 1000000000ull, rem = ov % 1000000000ull;
+    if (rem >= 500000000ull || (sec == 0 && rem != 0))
+        sec++;
+    return (int64_t)sec;
+}
+#endif
+
 static int64_t lx_socket(struct syscall_args *a)
 {
     int family = (int)a->a[0];
@@ -4014,6 +4082,11 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_getrlimit] = lx_getrlimit,
     [LX_sysinfo] = lx_sysinfo,
     [LX_statfs] = lx_statfs,
+    [LX_setitimer] = lx_setitimer,
+    [LX_getitimer] = lx_getitimer,
+#ifdef LX_alarm
+    [LX_alarm] = lx_alarm,
+#endif
     [LX_fstatfs] = lx_fstatfs,
     [LX_getuid] = lx_getuid,
     [LX_getgid] = lx_getgid,

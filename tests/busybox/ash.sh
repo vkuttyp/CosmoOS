@@ -197,7 +197,8 @@ expect vi hello "$(cat v.txt)"
 # ping (the ping unit): an echo to the loopback address over a raw ICMP
 # socket, and the socket refused without PRIV_NET (as Linux refuses one
 # without CAP_NET_RAW).
-expect ping-lo 1 "$(ping -c 1 127.0.0.1 | grep -c '1 packets transmitted, 1 packets received')"
+# Three echoes: ping sends each after the first from SIGALRM (setitimer).
+expect ping-lo 1 "$(ping -c 3 127.0.0.1 | grep -c '3 packets transmitted, 3 packets received')"
 expect ping-noperm 1 "$(priv -d net ping -c 1 127.0.0.1 2>&1 | grep -c 'permission denied')"
 
 cd /

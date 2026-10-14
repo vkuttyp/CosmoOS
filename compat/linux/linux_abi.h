@@ -519,6 +519,14 @@ struct lx_timeval {
     int64_t tv_usec;
 };
 
+/* setitimer(2)/getitimer(2): ITIMER_REAL (0) is the one built. */
+struct lx_itimerval {
+    struct lx_timeval it_interval;
+    struct lx_timeval it_value;
+};
+_Static_assert(sizeof(struct lx_itimerval) == 32, "struct itimerval is 32 bytes on LP64");
+#define LX_ITIMER_REAL 0
+
 /* statfs(2)'s struct statfs: the LP64 layout, identical on x86-64 and
  * AArch64 (120 bytes). */
 struct lx_statfs {
