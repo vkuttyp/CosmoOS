@@ -183,13 +183,27 @@ bool selftest_poll_timer_outlives(const char **reason)
         kinfo("selftest: poll-timer-outlives: needs three online CPUs; skipping");
         return true;
     }
+    /* Every early exit undoes what was set up before it: the pin, the
+     * pipe, and above all the hold, which would otherwise make the next
+     * timed io_poll anywhere spin in its callback for ever. */
     struct kobject *r, *w;
-    CHECK(pipe_create(&r, &w) == 0);
+    if (pipe_create(&r, &w) != 0) {
+        thread_set_affinity_self(was);
+        *reason = "pipe_create failed";
+        return false;
+    }
     static struct pto p;
     p = (struct pto){ .r = r };
     poll_test_alarm_hold(true);
     struct thread *t = thread_create_on(pto_poller, &p, "poll-outlives", SCHED_PRIO_DEFAULT, (cpumask_t)1 << a);
-    CHECK(t != NULL);
+    if (t == NULL) {
+        poll_test_alarm_hold(false);
+        kobject_put(r);
+        kobject_put(w);
+        thread_set_affinity_self(was);
+        *reason = "thread_create_on failed";
+        return false;
+    }
     thread_get(t);
     uint64_t until = clock_now_ns() + 2000000000ull;
     while (poll_test_alarm_in() == 0 && clock_now_ns() < until)
