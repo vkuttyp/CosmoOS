@@ -118,9 +118,10 @@ void raw_icmp_input(const struct mbuf *m, const struct ipv4_hdr *iph)
                 STAT(rx_delivered);
                 sock_wake(socks[i]);
             } else {
+                /* mbufq_enqueue freed it (mbuf.h): freeing it here too was a
+                 * double free, found by net-raw-icmp failing one boot in eight. */
                 socks[i]->raw->rx_dropped++;
                 STAT(rx_queue_full);
-                m_freem(c);
             }
         }
         sock_wake_unref(socks[i]);
