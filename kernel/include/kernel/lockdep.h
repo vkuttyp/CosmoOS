@@ -137,6 +137,11 @@ bool lockdep_snapshot_held_cpu(unsigned cpu, struct lockdep_held *out, unsigned 
 bool lockdep_snapshot_held_thread(const struct thread *t, struct lockdep_held *out, unsigned *count);
 /* Print another CPU's spinlock stack (the lockup report, for a CPU that does not answer). */
 void lockdep_dump_held_cpu(unsigned cpu);
+#if CONFIG_CRASH_TEST == 3
+/* make test-display only: leave the checker's own lock owned by another
+ * CPU, as a CPU the panic stops can. */
+void lockdep_crash_hold_raw(void);
+#endif
 
 /* One instant of counters under the graph raw lock. Normal diagnostics
  * only; not a panic/NMI API or a snapshot of CPU/thread held stacks. */

@@ -53,6 +53,9 @@ struct vpci {
     volatile uint8_t *notify;
     uint32_t notify_multiplier;
     size_t notify_len;
+    /* Each queue's notify offset, read at setup: notify takes no lock, so
+     * a panic flush (virtio_gpu) never waits on one. */
+    uint32_t notify_off[VIRTIO_MAX_QUEUES];
     volatile uint8_t *isr;
     volatile uint8_t *devcfg;
     size_t devcfg_len;
@@ -224,6 +227,7 @@ static int vpci_setup_queue(struct virtio_device *vdev, struct virtqueue *vq)
         rc = -EIO;
     else
         wr16(v->common, COMMON_QUEUE_ENABLE, 1);
+    v->notify_off[vq->index] = (uint32_t)rd16(v->common, COMMON_QUEUE_NOTIFY_OFF) * v->notify_multiplier;
     spin_unlock_irqrestore(&v->lock, s);
 
     if (rc && vq->vector >= 0) {
@@ -251,10 +255,7 @@ static void vpci_teardown_queue(struct virtio_device *vdev, struct virtqueue *vq
 static void vpci_notify(struct virtio_device *vdev, struct virtqueue *vq)
 {
     struct vpci *v = to_vpci(vdev);
-    arch_irq_state_t s = spin_lock_irqsave(&v->lock);
-    wr16(v->common, COMMON_QUEUE_SELECT, (uint16_t)vq->index);
-    uint32_t off = (uint32_t)rd16(v->common, COMMON_QUEUE_NOTIFY_OFF) * v->notify_multiplier;
-    spin_unlock_irqrestore(&v->lock, s);
+    uint32_t off = v->notify_off[vq->index];
     if ((size_t)off + 2 <= v->notify_len)
         wr16(v->notify, off, (uint16_t)vq->index);
 }

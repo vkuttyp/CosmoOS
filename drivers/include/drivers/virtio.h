@@ -220,6 +220,12 @@ void virtq_kick(struct virtqueue *vq);
 /* Next completed chain's cookie, with the bytes the device wrote, or
  * NULL when nothing has completed. Any context. */
 void *virtq_pop(struct virtqueue *vq, uint32_t *len);
+/* The same from panic context: the queue's lock is tried once, untracked
+ * (spin_trylock_panic), so lockdep's own lock, which a CPU the panic
+ * stopped may hold, is never waited for. virtq_add_panic answers -EBUSY
+ * and virtq_pop_panic NULL when the lock is held. */
+int virtq_add_panic(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie);
+void *virtq_pop_panic(struct virtqueue *vq, uint32_t *len);
 unsigned virtq_free_count(struct virtqueue *vq);
 #if CONFIG_DEBUG
 /* Finished by the device, not yet popped: a test seam, debug builds only. */

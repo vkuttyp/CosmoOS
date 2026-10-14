@@ -82,6 +82,13 @@ static arch_irq_state_t raw_lock(void)
     return s;
 }
 
+#if CONFIG_CRASH_TEST == 3
+void lockdep_crash_hold_raw(void)
+{
+    __atomic_store_n(&g_raw, arch_cpu_id() + 2u, __ATOMIC_RELEASE);   /* owner: another CPU's id + 1 */
+}
+#endif
+
 static void raw_unlock(arch_irq_state_t s)
 {
     __atomic_store_n(&g_raw, 0u, __ATOMIC_RELEASE);

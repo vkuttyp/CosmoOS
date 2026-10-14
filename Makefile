@@ -252,15 +252,20 @@ test-net-login: $(IMAGE)
 # On x86-64 it also boots the crash-test kernel (CRASH_TEST=1, as
 # test-crash builds it) without the exit device and reads the panic off
 # the screen; AArch64's exit is semihosting, which cannot be left out.
+# And a debug kernel built with CRASH_TEST=3, which panics with lockdep's
+# own lock owned by another CPU: the panic flush must not wait for it.
 DISPLAY_SIZE ?= 1920x1080
 test-display: $(IMAGE)
 ifeq ($(ARCH),x86_64)
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) CRASH_TEST=1 OUT=$(OUT)-crash image
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug CRASH_TEST=3 \
+		OUT=$(ROOT)/out/$(ARCH)-debug-paniclock image
 endif
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/display_test.py --image $(IMAGE) --workdir $(OUT)/test-display \
 		--size $(DISPLAY_SIZE) --timeout $(BOOT_TIMEOUT) \
-		$(if $(filter x86_64,$(ARCH)),--panic-image $(OUT)-crash/cosmoos.img)
+		$(if $(filter x86_64,$(ARCH)),--panic-image $(OUT)-crash/cosmoos.img \
+		--panic-lockdep-image $(ROOT)/out/$(ARCH)-debug-paniclock/cosmoos.img)
 
 # The same boot test with two CPUs. Every other boot here uses the
 # default four, and a test that needs a third CPU without saying so passes

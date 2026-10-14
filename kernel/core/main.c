@@ -56,6 +56,7 @@
 #include <arch/cpu.h>
 #include <arch/mmu.h>
 #include <kernel/page.h>
+#include <kernel/lockdep.h>
 #include <kernel/panic.h>
 #include <arch/irq.h>
 
@@ -257,6 +258,15 @@ void kernel_main(const struct cosmoboot_info *info)
      * network configured (kernel/include/kernel/net/dhcp.h). */
     dhcp_boot_wait();
     faultinject_init();   /* opt/cosmo/faultinject, if the boot asked for injected faults */
+#if CONFIG_CRASH_TEST == 3 && CONFIG_LOCKDEP
+    /* make test-display (x86-64, a debug build): a panic while another
+     * CPU owns lockdep's own lock. The drivers are in; the screen must get
+     * the panic without a tracked lock (virtq_add_panic), which would wait
+     * for that owner forever. */
+    kinfo("crash test: panicking with lockdep's lock held elsewhere, on purpose");
+    lockdep_crash_hold_raw();
+    panic("crash test: lockdep's lock is held by another CPU");
+#endif
 #if CONFIG_SELFTEST
     failed += selftest_run_all();
 #else

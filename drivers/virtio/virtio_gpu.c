@@ -540,9 +540,8 @@ static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
 {
     struct vgpu *g = arg;
     struct vgpu_frame *f = g->frame;
-    if (f == NULL || g->broken || g->panic_dead || !spin_trylock(&g->vq->lock))
+    if (f == NULL || g->broken || g->panic_dead)
         return;
-    spin_unlock(&g->vq->lock);
     uint32_t types[2] = { VGPU_CMD_TRANSFER_TO_HOST_2D, VGPU_CMD_RESOURCE_FLUSH };
     for (unsigned k = 0; k < 2; k++) {
         if (types[k] == VGPU_CMD_TRANSFER_TO_HOST_2D) {
@@ -562,14 +561,14 @@ static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
               .len = k == 0 ? sizeof(struct vgpu_transfer) : sizeof(struct vgpu_flush) },
             { .addr = g->panic.resp_dma, .len = sizeof(struct vgpu_hdr) },
         };
-        if (virtq_add(g->vq, sg, 1, 1, &g->panic) != 0)
+        if (virtq_add_panic(g->vq, sg, 1, 1, &g->panic) != 0)
             return;
         virtq_kick(g->vq);
         uint64_t deadline = clock_now_ns() + VGPU_PANIC_POLL_NS;
         bool seen = false;
         while (!seen && clock_now_ns() < deadline) {
             uint32_t len;
-            void *cookie = virtq_pop(g->vq, &len);
+            void *cookie = virtq_pop_panic(g->vq, &len);
             if (cookie == &g->panic)
                 seen = true;
             else if (cookie == &g->cmd)

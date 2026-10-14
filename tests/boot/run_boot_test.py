@@ -422,7 +422,7 @@ else:
 # virtio_gpu module moves the console onto it (docs/drivers/virtio/).
 if DISPLAY in ("virtio", "both"):
     REQUIRED_MARKERS += [
-        r"^\[ INFO\] fbcon: \d+x\d+ cells of 8x16 pixels on a \d+x\d+ surface, scrolling \d+ rows at a time$",
+        r"^\[ INFO\] fbcon: \d+x\d+ cells of (8x16|16x32|24x48|32x64) pixels on a \d+x\d+ surface, scrolling \d+ rows at a time$",
         r"^\[ INFO\] virtio-gpu: virtio\d+: scanout 0 \d+x\d+, resource \d+ in \d+ chunk\(s\)$",
     ]
 

@@ -140,6 +140,20 @@ bool spin_trylock(spinlock_t *lock)
     return got;
 }
 
+bool spin_trylock_panic(spinlock_t *lock)
+{
+    if (!try_acquire(lock))
+        return false;
+    __atomic_store_n(&lock->owner_cpu, arch_cpu_id(), __ATOMIC_RELAXED);
+    return true;
+}
+
+void spin_unlock_panic(spinlock_t *lock)
+{
+    __atomic_store_n(&lock->owner_cpu, SPINLOCK_NO_OWNER, __ATOMIC_RELAXED);
+    __atomic_store_n(&lock->locked, 0u, __ATOMIC_RELEASE);
+}
+
 static void spin_unlock_common(spinlock_t *lock, bool irqrestore)
 {
     KASSERT(__atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0);
@@ -200,5 +214,7 @@ EXPORT_SYMBOL(spin_lock_nested);
 EXPORT_SYMBOL(spin_lock_irqsave_nested);
 EXPORT_SYMBOL(spin_unlock);
 EXPORT_SYMBOL(spin_trylock);
+EXPORT_SYMBOL(spin_trylock_panic);
+EXPORT_SYMBOL(spin_unlock_panic);
 EXPORT_SYMBOL(spin_lock_irqsave);
 EXPORT_SYMBOL(spin_unlock_irqrestore);

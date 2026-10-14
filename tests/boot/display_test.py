@@ -32,6 +32,12 @@ leaves the exit device out so a panic halts with QEMU running):
      on the serial console the decoded screen has the `KERNEL PANIC` line,
      which only fbcon's panic flush can have sent (no thread runs then).
 
+With --panic-lockdep-image (a debug CRASH_TEST=3 image, x86-64):
+
+  e. the same for a panic raised while another CPU owns lockdep's own
+     lock: the flush uses no tracked lock (virtq_add_panic), so it neither
+     waits for that owner nor keeps the serial sink after it waiting.
+
 Exit 0 PASS, 1 FAIL.
 """
 
@@ -136,25 +142,25 @@ def screen(sock, path, face, w, h, scale):
     return decode(sw, sh, px, face, scale)
 
 
-def panic_screen(args, face):
+def panic_screen(args, face, image, name, what):
     w, h = (int(v) for v in args.size.split("x"))
-    sock = os.path.join(args.workdir, "qmp-panic.sock")
-    b = Boot("panic", args.panic_image, args.workdir,
+    sock = os.path.join(args.workdir, f"qmp-{name}.sock")
+    b = Boot(name, image, args.workdir,
              {"QEMU_DISPLAY": "virtio", "QEMU_GPU_SIZE": args.size, "QEMU_QMP": sock, "QEMU_DEBUG_EXIT": "0"},
              args.timeout)
     try:
         deadline = time.monotonic() + args.timeout
         while not re.search(r"^halting\.", b.text(), re.M):
             if time.monotonic() > deadline:
-                raise Fail("the crash-test kernel did not panic (no `halting.` on the serial console)")
+                raise Fail(f"{name}: the crash-test kernel did not panic (no `halting.` on the serial console)")
             time.sleep(0.2)
         need(b.text(), r"^\[ INFO\] virtio-gpu: \S+: scanout 0 ", "the virtio-gpu driver before the panic")
         time.sleep(1.0)   # nothing should change now; the panic flushed as it wrote
-        lines = screen(sock, os.path.join(args.workdir, "panic.ppm"), face, w, h, cell_scale(b.text(), w, h))
+        lines = screen(sock, os.path.join(args.workdir, f"{name}.ppm"), face, w, h, cell_scale(b.text(), w, h))
         hit = [ln for ln in lines if "KERNEL PANIC" in ln]
         if not hit:
-            raise Fail("the panic is not on the screen; its last rows:\n" + "\n".join(lines[-12:]))
-        return f"d. the crash-test kernel's panic is on the screen: {hit[0].strip()[:80]!r}"
+            raise Fail(f"{name}: the panic is not on the screen; its last rows:\n" + "\n".join(lines[-12:]))
+        return f"{what} is on the screen: {hit[0].strip()[:80]!r}"
     finally:
         b.kill()
 
@@ -166,6 +172,8 @@ def main():
     ap.add_argument("--size", default="1920x1080")
     ap.add_argument("--timeout", type=float, default=180.0)
     ap.add_argument("--panic-image", help="a CRASH_TEST=1 image: check the panic reaches the screen")
+    ap.add_argument("--panic-lockdep-image",
+                    help="a debug CRASH_TEST=3 image: the same with lockdep's own lock owned by another CPU")
     args = ap.parse_args()
     shutil.rmtree(args.workdir, ignore_errors=True)
     os.makedirs(args.workdir)
@@ -176,7 +184,10 @@ def main():
         for shape in ("virtio", "both"):
             check_shape(args, face, shape, want_w, want_h, results)
         if args.panic_image:
-            results.append(panic_screen(args, face))
+            results.append(panic_screen(args, face, args.panic_image, "panic", "d. the crash-test kernel's panic"))
+        if args.panic_lockdep_image:
+            results.append(panic_screen(args, face, args.panic_lockdep_image, "panic-lockdep",
+                                        "e. with lockdep's lock held by another CPU, the panic"))
     except Fail as e:
         for r in results:
             print(f"test-display: {r}")
