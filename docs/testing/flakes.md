@@ -4240,5 +4240,20 @@ on this host's x86-64 debug boot of the same tree and 122,640 on the PR's
 earlier x86-64 entropy boot; `cosmofs-replay` took 31,053 ms (14,623 to
 16,328 elsewhere); the network harness was ready at 163.1 s, against
 98.3 s locally. The commit under test added one self-test of 10-14 ms
-(`netif-rxq-count`). First sighting for this job; the failed job was
-rerun.
+(`netif-rxq-count`).
+
+Second sighting, the next push's run (38582055596, job 115914317166):
+`FAIL after 246.5s` again, self-tests 182,609 ms, `cosmofs-replay` 30,806
+ms, the harness ready at 161.9 s. The rerun of that job passed (job
+115942165102): its four boots took 227.6, 219.3, 203.5 and 198.2 s,
+self-tests 175,548 ms in the slowest. Main's merge run for #383
+(38557054214) had the same job's four boots at 221.6, 207.8, 215.7 and
+214.8 s, and #382's (38517879919) at 210.7 to 197.9 s: the job's slowest
+boot runs 12 to 30 s inside its 240 s budget on a normal runner.
+
+Not the PR: three alternated local AArch64 debug boots each, main
+`7977f092` against the PR's tree, took 156.2, 169.6 and 174.7 s against
+168.5, 166.6 and 167.0 s (self-tests 121.8-133.6 s against 127.4-131.5
+s). The budget stays as it is; a third sighting, or main's slowest boot
+in this job above 230 s, is the evidence to restate or widen it under
+the rule above.
