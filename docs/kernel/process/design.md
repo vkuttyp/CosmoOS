@@ -1055,14 +1055,17 @@ the first from `SIGALRM`, and stopped after one reply while they were
 `-ENOSYS`). One kernel `struct timer` per process: its callback runs in
 interrupt context, re-arms by the interval and sends `SIGALRM` with
 `signal_send`, which takes only the process's spinlock and wakes -- what
-the terminal's ^C already does from `tty_input`. The deadline and the
-interval are atomic words the callback reads; `itimer_lock` (a mutex)
+the terminal's ^C already does from `tty_input`. The deadline (in
+`clock_deadline_ns`'s domain, which a migration between arming and
+`getitimer` does not change) and the interval are atomic words the
+callback reads; `itimer_lock` (a mutex)
 serialises the setters, which cancel with `timer_cancel_sync` before
 re-arming, since a second `timer_start` on a pending timer is a panic. A
 fork starts disarmed, exec keeps it (POSIX), and the last thread's exit
 cancels it synchronously (again at release, for a process that never
 ran), so no callback can reach a freed process. Only `ITIMER_REAL`:
-`ITIMER_VIRTUAL` and `ITIMER_PROF` are `-EINVAL`.
+`ITIMER_VIRTUAL` and `ITIMER_PROF` are `-EINVAL`. A time beyond 2^62 ns
+clamps there, as Linux accepts "never".
 
 ### The wall clock
 

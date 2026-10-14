@@ -484,6 +484,8 @@ int64_t ksock_sendto(struct socket *s, const void *buf, size_t len, const struct
 
 int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *from)
 {
+    if (from)
+        memset(from, 0, sizeof(*from));   /* defined on every return: the doors copy it out even for 0 */
     if (s->family == COSMO_AF_UNIX) {
         if (from)
             memset(from, 0, sizeof(*from));

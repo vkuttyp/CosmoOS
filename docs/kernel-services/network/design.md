@@ -180,10 +180,16 @@ need BusyBox patched.
   global list under a spinlock, as UDP's do. `icmp_input` hands every
   message that passed its checksum and the host firewall's quiet check
   to `raw_icmp_input` before it acts on it (the echo reply is built in
-  place, in the same mbuf): each raw socket gets a copy with the IPv4
-  header put back in front -- what a Linux raw socket reads -- on a
-  queue of 64 messages, its sender in `pkt.src` with port 0. A full
-  queue drops the copy, never the original.
+  place, in the same mbuf), and a fragmentation-needed message the
+  firewall did not quiet before path-MTU discovery takes it: each raw
+  socket gets a copy with the IPv4 header put back in front -- what a
+  Linux raw socket reads -- on a queue of 64 messages, its sender in
+  `pkt.src` with port 0. A full queue drops the copy, never the
+  original. Delivery takes sixteen sockets' references at a time under
+  the list lock, makes their copies after it, and continues from the last
+  pcb id it visited, so any number of raw sockets each get one; the pcb
+  travels with its socket's reference, and `s->raw` is set before the pcb
+  is published.
 - **Sending.** `ksock_sendto` takes the ICMP message as the caller built
   it (type, code, id, sequence, checksum: the kernel does not rewrite
   them) and sends it with `ipv4_output` to the address given, which a

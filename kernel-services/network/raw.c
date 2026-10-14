@@ -18,10 +18,11 @@ static struct raw_stats g_stats;
 
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
 
-/* At most this many raw sockets get one message; any more are counted as
- * full. The references are taken under the list lock and the copies made
- * after it, so nothing allocates under a spinlock with interrupts off. */
+/* Raw sockets are taken this many at a time: their references under the
+ * list lock, the copies after it, so nothing allocates under a spinlock
+ * with interrupts off. */
 #define RAW_DELIVER_MAX 16
+static uint64_t g_next_id = 1;   /* under g_lock: the list stays in id order */
 
 struct raw_pcb *raw_pcb_new(struct socket *sock, uint8_t proto)
 {
@@ -32,7 +33,9 @@ struct raw_pcb *raw_pcb_new(struct socket *sock, uint8_t proto)
     pcb->sock = sock;
     mbufq_init(&pcb->rxq, RAW_RXQ_MAX, "raw-rxq");
     list_init(&pcb->link);
+    sock->raw = pcb;   /* set before anything can find it on the list */
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    pcb->id = g_next_id++;
     list_push_back(&g_pcbs, &pcb->link);
     spin_unlock_irqrestore(&g_lock, s);
     return pcb;
@@ -83,48 +86,64 @@ struct mbuf *raw_recv(struct raw_pcb *pcb)
 
 void raw_icmp_input(const struct mbuf *m, const struct ipv4_hdr *iph)
 {
-    struct socket *socks[RAW_DELIVER_MAX];
-    unsigned n = 0;
-    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    struct raw_pcb *pcb;
-    list_for_each_entry(pcb, &g_pcbs, link) {
-        if (pcb->proto != IPPROTO_ICMP)
-            continue;
-        if (n == RAW_DELIVER_MAX) {
-            STAT(rx_queue_full);
-            continue;
-        }
-        /* A tryget: a release clears pcb->sock under this lock but starts
-         * at count zero, as UDP's does (design.md, "UDP"). */
-        struct socket *sock = sock_wake_ref(pcb->sock);
-        if (sock)
-            socks[n++] = sock;
-    }
-    spin_unlock_irqrestore(&g_lock, s);
-
     uint32_t hlen = IPV4_HDR_LEN(iph);
-    for (unsigned i = 0; i < n; i++) {
-        struct mbuf *c = m_copypacket(m);
-        if (c != NULL)
-            c = m_prepend(c, hlen);
-        if (c == NULL) {
-            STAT(rx_nomem);
-        } else {
-            memcpy(c->data, iph, hlen);
-            memset(&c->pkt.src, 0, sizeof(c->pkt.src));
-            c->pkt.src.family = COSMO_AF_INET;
-            c->pkt.src.v4 = iph->src;
-            if (mbufq_enqueue(&socks[i]->raw->rxq, c)) {
-                STAT(rx_delivered);
-                sock_wake(socks[i]);
-            } else {
-                /* mbufq_enqueue freed it (mbuf.h): freeing it here too was a
-                 * double free, found by net-raw-icmp failing one boot in eight. */
-                socks[i]->raw->rx_dropped++;
-                STAT(rx_queue_full);
+    uint64_t after = 0;   /* the last pcb id visited: the list is in id order */
+    for (;;) {
+        /* A batch of references under the lock, the copies after it; then
+         * the next batch from where this one stopped, so every raw socket
+         * gets its copy however many there are. The pcb travels with its
+         * socket's reference: the socket's release frees it, so it lives as
+         * long as that reference, and delivery never reads s->raw. */
+        struct socket *socks[RAW_DELIVER_MAX];
+        struct raw_pcb *pcbs[RAW_DELIVER_MAX];
+        unsigned n = 0;
+        bool more = false;
+        arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+        struct raw_pcb *pcb;
+        list_for_each_entry(pcb, &g_pcbs, link) {
+            if (pcb->id <= after || pcb->proto != IPPROTO_ICMP)
+                continue;
+            if (n == RAW_DELIVER_MAX) {
+                more = true;
+                break;
+            }
+            after = pcb->id;
+            /* A tryget: a release clears pcb->sock under this lock but
+             * starts at count zero, as UDP's does (design.md, "UDP"). */
+            struct socket *sock = sock_wake_ref(pcb->sock);
+            if (sock) {
+                socks[n] = sock;
+                pcbs[n] = pcb;
+                n++;
             }
         }
-        sock_wake_unref(socks[i]);
+        spin_unlock_irqrestore(&g_lock, s);
+
+        for (unsigned i = 0; i < n; i++) {
+            struct mbuf *c = m_copypacket(m);
+            if (c != NULL)
+                c = m_prepend(c, hlen);
+            if (c == NULL) {
+                STAT(rx_nomem);
+            } else {
+                memcpy(c->data, iph, hlen);
+                memset(&c->pkt.src, 0, sizeof(c->pkt.src));
+                c->pkt.src.family = COSMO_AF_INET;
+                c->pkt.src.v4 = iph->src;
+                if (mbufq_enqueue(&pcbs[i]->rxq, c)) {
+                    STAT(rx_delivered);
+                    sock_wake(socks[i]);
+                } else {
+                    /* mbufq_enqueue freed it (mbuf.h): freeing it here too
+                     * was a double free (net-raw-icmp, one boot in eight). */
+                    __atomic_fetch_add(&pcbs[i]->rx_dropped, 1, __ATOMIC_RELAXED);
+                    STAT(rx_queue_full);
+                }
+            }
+            sock_wake_unref(socks[i]);
+        }
+        if (!more)
+            break;
     }
 }
 

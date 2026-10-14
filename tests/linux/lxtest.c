@@ -1538,6 +1538,12 @@ int main(int argc, char **argv)
                cur.it_interval.tv_sec == 0, cur.it_value.tv_sec);
         nv.it_value.tv_usec = 1000000;
         CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == -22, 0);
+        /* "Never" is accepted, as Linux accepts it (clamped), then cleared. */
+        nv = (struct lx_itimerval){ .it_interval = { 0, 0 }, .it_value = { 0x7fffffffffffffffll, 0 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == 0, 0);
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec > 1000000000ll, cur.it_value.tv_sec);
+        nv = (struct lx_itimerval){ .it_interval = { 0, 0 }, .it_value = { 0, 0 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == 0, 0);
         /* It fires: SIGALRM blocked, a 20 ms timer, pending within 2 s, and
          * a one-shot is disarmed after. */
         uint64_t m14 = 1ull << 13, before = 0, pend = 0;

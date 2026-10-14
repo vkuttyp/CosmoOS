@@ -653,6 +653,9 @@ unreachable handling or the free exactly as without raw sockets, and a
 full or absent raw queue costs the stack nothing. Creating one needs
 `PRIV_NET` at the time of the call. Check: `net-raw-icmp` (an echo to
 the loopback address read back with its IPv4 header; the host still
-answers it; a queue left full drops copies while the stack's own echo
-replies continue; creation without `PRIV_NET` is `-EPERM`), and
-`lxtest`'s protocol checks.
+answers it; twenty raw sockets, more than a delivery batch, each get a
+copy; a queue left full drops copies while the stack still takes the
+message), `ash.sh`'s `priv -d net ping` (creation without `PRIV_NET`
+is refused), and `lxtest`'s protocol checks. Gap: the
+fragmentation-needed copy is not exercised (nothing on loopback sends
+one).

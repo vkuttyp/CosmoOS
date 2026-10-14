@@ -4068,6 +4068,17 @@ static bool raw_queue_at(void *arg)
     return mbufq_len(&f->s->raw->rxq) >= f->want;
 }
 
+#define RAW_TEST_MANY 20   /* more than a delivery batch (RAW_DELIVER_MAX, 16) */
+struct raw_all { struct socket **s; unsigned n; };
+static bool raw_all_have(void *arg)
+{
+    const struct raw_all *t = arg;
+    for (unsigned i = 0; i < t->n; i++)
+        if (mbufq_len(&t->s[i]->raw->rxq) == 0)
+            return false;
+    return true;
+}
+
 struct raw_seen { const struct ip_stats *base; const struct raw_stats *rbase; };
 static bool raw_stack_and_drop(void *arg)
 {
@@ -4122,6 +4133,31 @@ bool selftest_net_raw_icmp(const char **reason)
     CHECK(got_req && got_reply);
     ipv4_get_stats(&b);
     CHECK(b.icmp_echo_rcvd > a.icmp_echo_rcvd && b.icmp_echo_replied > a.icmp_echo_replied);
+
+    /* Every raw socket gets its copy, however many there are: more of them
+     * than one delivery batch holds. (Sixteen used to be a ceiling: the
+     * seventeenth never received anything.) */
+    {
+        static struct socket *many[RAW_TEST_MANY];
+        for (unsigned i = 0; i < RAW_TEST_MANY; i++) {
+            CHECK(nt_ksock_create_raw(COSMO_AF_INET, IPPROTO_ICMP, &many[i]) == 0);
+            ksock_set_nonblock(many[i], true);
+        }
+        CHECK(raw_send_echo(many[0], 300) > 0);
+        struct raw_all all = { .s = many, .n = RAW_TEST_MANY };
+        CHECK(wait_until(raw_all_have, &all, 5000));
+    }
+    /* A read-shut raw socket returns 0, and the source address is defined
+     * (zero), not whatever the caller's buffer held. */
+    {
+        struct socket *shut;
+        CHECK(nt_ksock_create_raw(COSMO_AF_INET, IPPROTO_ICMP, &shut) == 0);
+        CHECK(ksock_shutdown(shut, COSMO_SHUT_RD) == 0);
+        struct netaddr f;
+        memset(&f, 0xab, sizeof(f));
+        CHECK(ksock_recvfrom(shut, buf, sizeof(buf), &f) == 0);
+        CHECK(f.family == 0 && f.port == 0 && f.v4 == 0);
+    }
 
     /* Fill the queue with requests nobody reads, then one more echo: the
      * stack takes it and the raw copy is dropped. */

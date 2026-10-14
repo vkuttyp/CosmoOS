@@ -433,6 +433,8 @@ void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
         return;
     struct icmp_hdr *ic = (struct icmp_hdr *)m->data;
     if (ic->type == ICMP_DEST_UNREACH && ic->code == ICMP_UNREACH_NEEDFRAG) {
+        if (!(m->flags & M_FW_QUIET))
+            raw_icmp_input(m, iph);   /* raw sockets see it as they see any accepted message (N31) */
         icmp_needfrag(m, ic);   /* admits nothing TCP does not confirm, and answers nothing */
         m_freem(m);
         return;

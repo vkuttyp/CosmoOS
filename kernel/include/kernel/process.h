@@ -257,7 +257,7 @@ struct process {
      * be freed. */
     struct timer itimer;
     struct mutex itimer_lock;
-    uint64_t itimer_expires_ns;        /* clock_now_ns deadline, 0 = disarmed (atomic) */
+    uint64_t itimer_expires_ns;        /* clock_deadline_ns deadline, 0 = disarmed (atomic) */
     uint64_t itimer_interval_ns;       /* atomic */
     /* vfork (docs/kernel/process/design.md, "fork"): the parent waits on
      * vfork_wq until the child stops borrowing its space -- it execs or

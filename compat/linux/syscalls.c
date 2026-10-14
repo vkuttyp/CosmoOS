@@ -3319,11 +3319,18 @@ static int64_t lx_sock_send(struct socket *s, uint64_t ubuf, size_t len, const s
 
 /* --- interval timers: ITIMER_REAL only (kernel/process/itimer.c) --------- */
 
+/* A timeval as nanoseconds: -EINVAL only for a negative field or tv_usec
+ * of 10^6 or more, as Linux checks; a time beyond 2^62 ns (about 146
+ * years) clamps there, as nanosleep's does -- "never", not an error. */
+#define ITV_NS_MAX (1ull << 62)
 static bool itv_to_ns(const struct lx_timeval *tv, uint64_t *ns)
 {
-    if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= 1000000 || (uint64_t)tv->tv_sec > UINT64_MAX / 2000000000ull)
+    if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= 1000000)
         return false;
-    *ns = (uint64_t)tv->tv_sec * 1000000000ull + (uint64_t)tv->tv_usec * 1000ull;
+    if ((uint64_t)tv->tv_sec >= ITV_NS_MAX / 1000000000ull)
+        *ns = ITV_NS_MAX;
+    else
+        *ns = (uint64_t)tv->tv_sec * 1000000000ull + (uint64_t)tv->tv_usec * 1000ull;
     return true;
 }
 

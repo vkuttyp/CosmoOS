@@ -16,6 +16,7 @@
 struct socket;
 
 struct raw_pcb {
+    uint64_t id;                /* increasing; the list is in id order (delivery's batches) */
     uint8_t proto;              /* IPPROTO_ICMP */
     struct mbufq rxq;           /* copies, each with its IPv4 header; pkt.src the sender */
     struct socket *sock;        /* cleared under the list lock at release */
@@ -23,7 +24,8 @@ struct raw_pcb {
     uint64_t rx_dropped;
 };
 
-/* A pcb for `proto` on the list, or NULL without memory. */
+/* A pcb for `proto` on the list, or NULL without memory. Sets sock->raw
+ * before the pcb is published. */
 struct raw_pcb *raw_pcb_new(struct socket *sock, uint8_t proto);
 /* Off the list, its queue freed; the pcb with it. */
 void raw_pcb_free(struct raw_pcb *pcb);
