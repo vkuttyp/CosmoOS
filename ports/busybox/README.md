@@ -51,8 +51,8 @@ attached to that release in the PR that pins it.
 
 ## Patches
 
-`BUSYBOX_PATCHES` in `busybox.mk`, applied with `patch -p1` to the
-unpacked source in order:
+`BUSYBOX_PATCHES` in `busybox.mk`, applied with `git apply -p1` (the CI
+image has no `patch`) to the unpacked source in order:
 
 - `wget-ssl-client.patch`: `wget` execs `ssl_client` (`ports/mbedtls`)
   for every https and FTPS connection, which checks the server's
