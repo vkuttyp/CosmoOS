@@ -64,7 +64,14 @@ constants); MemAvailable is MemFree, because the page cache gives pages
 back only past its own limit and not when memory runs short. A
 process's memory sizes in `<pid>/stat` are 0: its address space can be
 torn down under a reader (the process layer's P34), and nothing reads it
-from here until that read has a reference (inventory).
+from here until that read has a reference (inventory). A process's state
+is `Z` once exited, `T` while job control has it stopped, `R` with a
+thread running or ready, else `S`; its CPU time counts each thread's
+current running stretch too (`sched_thread_run_ns`), which the scheduler
+charges only at a switch-out; its group and session are read under the
+process table's lock, as every other reader reads them. The first load
+average fold is one whole period after the first tick, and the figures
+are rounded to two places as Linux rounds them.
 
 `status` carries what `procinfo` already returns -- pid, ppid, name,
 state, uid, gid, threads, syscalls, cpu time -- and `domain`, which

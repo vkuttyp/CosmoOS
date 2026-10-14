@@ -163,6 +163,24 @@ expect df / "$(df / | tail -n 1 | awk '{ print $NF }')"
 expect proc-mounts / "$(awk '$2 == "/" { print $2 }' /proc/mounts)"
 expect proc-cmdline 1 "$(tr '\0' ' ' < /proc/$$/cmdline | grep -c 'ash.sh')"
 expect proc-stat "$$" "$(cut -d' ' -f1 /proc/$$/stat)"
+# /proc/mounts names a mount by the directory the walk reached (a relative
+# target is not recorded as typed) and escapes a space as Linux does.
+mkdir "sp ace" rel
+mount none "sp ace" ramfs && mount none rel ramfs
+expect mounts-escaped 1 "$(grep -c " $T/sp\\\\040ace ramfs " /proc/mounts)"
+expect mounts-relative 1 "$(grep -c " $T/rel ramfs " /proc/mounts)"
+umount "sp ace"
+umount rel
+# A stopped process is T in its stat.
+sleep 30 &
+sp=$!
+kill -STOP $sp
+st=
+for i in 1 2 3 4 5 6 7 8 9 10; do st=$(cut -d' ' -f3 /proc/$sp/stat); [ "$st" = T ] && break; sleep 0.1; done
+expect proc-stat-stopped T "$st"
+kill -CONT $sp
+kill $sp
+wait $sp 2>/dev/null
 top -b -n 1 > top.txt
 expect top-mem 1 "$(grep -c '^Mem: ' top.txt)"
 expect top-load 1 "$(grep -c '^Load average: ' top.txt)"

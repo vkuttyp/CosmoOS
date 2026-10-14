@@ -628,25 +628,42 @@ static void undo_mount(struct mount *mnt, struct blkdev *bdev)
 
 int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)
 {
-    return vfs_mount_at(NULL, path, fsname, bdev, flags);
+    return vfs_mount_at(NULL, NULL, path, fsname, bdev, flags);
 }
 
 /* `path` resolves from `start` as at every other entry point: a relative
  * target names what the caller's own directory names
  * (docs/audit/next-subsystem-mount-rel.md). */
-int vfs_mount_at(struct vnode *start, const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)
+int vfs_mount_at(struct vnode *start, const char *startname, const char *path, const char *fsname,
+                 struct blkdev *bdev, unsigned flags)
 {
     KASSERT(g_initialized);
     struct fs_type *fs = vfs_find_fs(fsname);
     if (fs == NULL)
         return -ENODEV;
 
+    /* The namespace's record first: the walk writes the name it reached
+     * into ref->path (P32), so a relative target is recorded as the
+     * directory it named, not as typed. */
+    struct mount_ns *ns = mountns_current();
+    struct mount_ns_ref *ref = kmalloc(sizeof(*ref), KMEM_ZERO);
+    if (ref == NULL)
+        return -ENOMEM;
     struct vnode *dir;
-    int rc = vfs_lookup(start, path, &dir);
-    if (rc)
+    int rc;
+    if (path[0] == '/' || startname != NULL) {
+        rc = vfs_lookup_named(start, startname, path, &dir, ref->path, sizeof(ref->path));
+    } else {
+        rc = vfs_lookup(start, path, &dir);   /* a kernel caller's relative path, with no name to start from */
+        strlcpy(ref->path, path, sizeof(ref->path));
+    }
+    if (rc) {
+        kfree(ref);
         return rc;
+    }
     if (dir->type != VNODE_DIR) {
         vnode_put(dir);
+        kfree(ref);
         return -ENOTDIR;
     }
 
@@ -654,15 +671,8 @@ int vfs_mount_at(struct vnode *start, const char *path, const char *fsname, stru
     rc = do_mount(fs, bdev, flags, &mnt);
     if (rc) {
         vnode_put(dir);
+        kfree(ref);
         return rc;
-    }
-
-    struct mount_ns *ns = mountns_current();
-    struct mount_ns_ref *ref = kmalloc(sizeof(*ref), KMEM_ZERO);
-    if (ref == NULL) {
-        undo_mount(mnt, bdev);
-        vnode_put(dir);
-        return -ENOMEM;
     }
 
     mutex_lock(&g_mounts_lock);
@@ -685,7 +695,6 @@ int vfs_mount_at(struct vnode *start, const char *path, const char *fsname, stru
     /* Visible in the namespace that made it, and in no other. */
     ref->mnt = mnt;
     ref->ns = ns;
-    strlcpy(ref->path, path, sizeof(ref->path));   /* where this namespace holds it */
     list_push_back(&mnt->ns_refs, &ref->mnt_link);
     spin_lock(&g_mount_list_lock);
     list_push_back(&ns->mounts, &ref->ns_link);

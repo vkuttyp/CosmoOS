@@ -139,12 +139,17 @@ filesystem, `-ENOENT`/`-ENOTDIR` for the target, `-EBUSY` if the target
 is already covered or is a mount root (no stacking) or is `/`, or the
 filesystem's own error (`-EIO` for an unformatted device, `-EINVAL` for
 a ramfs given a device or a cosmofs given none). Logs `vfs: mounted`.
-`path` resolves from the caller's root: it is `vfs_mount_at(NULL, ...)`.
+`path` resolves from the caller's root: it is `vfs_mount_at(NULL, NULL, ...)`.
 
-**`int vfs_mount_at(struct vnode *start, const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)`**
+**`int vfs_mount_at(struct vnode *start, const char *startname, const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)`**
 and **`int vfs_umount_at(struct vnode *start, const char *path, unsigned flags)`**
 (the mount-rel unit) The same, with `path` resolved from `start` (NULL:
 the caller's root), as every other entry point resolves its path. The
+mount records the name the walk reached (`vfs_lookup_named`, P32), with
+`startname` naming `start` -- what `/proc/mounts` and `fsctl list` show
+-- so a relative target is recorded as the directory it named, not as
+typed (v1.0.2's everyday commands; a kernel caller's relative path with
+no `startname` is recorded as given). The
 `mount` and `umount` system calls pass the caller's working directory,
 so a relative target names what the caller's own directory names; they
 passed nothing until this unit, and from `/tmp` a mount on `mrel`

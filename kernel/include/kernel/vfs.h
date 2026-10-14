@@ -315,8 +315,11 @@ int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigne
 int vfs_umount2(const char *path, unsigned flags);
 /* vfs_mount / vfs_umount2 with `path` resolved from `start` (NULL: the
  * caller's root), as every other entry point resolves its path. The
- * system calls pass the caller's working directory. */
-int vfs_mount_at(struct vnode *start, const char *path, const char *fsname, struct blkdev *bdev, unsigned flags);
+ * system calls pass the caller's working directory, and to the mount its
+ * name (`startname`), so the mount records the name the walk reached (P32)
+ * -- what /proc/mounts and fsctl list show -- not a relative spelling. */
+int vfs_mount_at(struct vnode *start, const char *startname, const char *path, const char *fsname,
+                 struct blkdev *bdev, unsigned flags);
 int vfs_umount_at(struct vnode *start, const char *path, unsigned flags);
 static inline int vfs_umount(const char *path) { return vfs_umount2(path, 0); }
 int vfs_sync(void);

@@ -849,6 +849,21 @@ static int run_line(const char *line)
      * so its expansions see what the pipelines before it did.
      */
     int skip = 0;
+    /* The whole line is lexed once first, and thrown away: an unclosed
+     * quote or too many tokens anywhere on it refuses the line before any
+     * of it runs, as it did when the line was lexed whole. That pass's
+     * expansions are discarded (lexing runs nothing: there is no command
+     * substitution), and each pipeline is lexed again below. */
+    {
+        int ntoks = 0;
+        int lrc = lex(line, toks, TOKENS_MAX, &ntoks, NULL);
+        for (int i = 0; i < ntoks; i++)
+            free(toks[i].text);
+        if (lrc < 0) {
+            g_last_status = 2;
+            return -1;
+        }
+    }
     const char *p = line;
     while (*p) {
         int ntoks = 0, pos = 0;

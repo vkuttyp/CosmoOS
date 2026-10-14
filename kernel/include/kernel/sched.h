@@ -178,6 +178,10 @@ void sched_loadavg(unsigned long out[3], unsigned shift);
  * reports as idle. Taken under that CPU's run-queue lock, so successive
  * reads never go backwards. 0 for a CPU that is not online. */
 uint64_t sched_cpu_idle_ns(unsigned cpu, uint64_t now_ns);
+/* A thread's CPU time: what it was charged at its switch-outs, and its
+ * current stretch if it is running now (on a migration in flight, the
+ * stretch is missed once). */
+uint64_t sched_thread_run_ns(struct thread *t, uint64_t now_ns);
 
 struct runqueue *sched_runqueue(unsigned cpu);
 

@@ -1116,6 +1116,10 @@ static uint64_t g_load_next_ns;
 
 static void load_sample(uint64_t now_ns)
 {
+    if (g_load_next_ns == 0) {
+        g_load_next_ns = now_ns + LOAD_PERIOD_NS;   /* the first fold one whole period after the first tick */
+        return;
+    }
     if (now_ns < g_load_next_ns)
         return;
     unsigned long active = 0;
@@ -1142,6 +1146,20 @@ void sched_loadavg(unsigned long out[3], unsigned shift)
         unsigned long v = __atomic_load_n(&g_avenrun[i], __ATOMIC_RELAXED);
         out[i] = shift >= LOAD_FSHIFT ? v << (shift - LOAD_FSHIFT) : v >> (LOAD_FSHIFT - shift);
     }
+}
+
+uint64_t sched_thread_run_ns(struct thread *t, uint64_t now_ns)
+{
+    int cpu = __atomic_load_n(&t->cpu, __ATOMIC_RELAXED);
+    if (cpu < 0 || (unsigned)cpu >= CONFIG_MAX_CPUS)
+        return __atomic_load_n(&t->run_time_ns, __ATOMIC_RELAXED);
+    struct runqueue *rq = &g_rqs[cpu];
+    arch_irq_state_t s = spin_lock_irqsave(&rq->lock);
+    uint64_t ns = t->run_time_ns;
+    if (rq->current == t)
+        ns += clock_delta_ns(now_ns, t->last_start_ns);   /* charged only at switch-out */
+    spin_unlock_irqrestore(&rq->lock, s);
+    return ns;
 }
 
 uint64_t sched_cpu_idle_ns(unsigned cpu, uint64_t now_ns)

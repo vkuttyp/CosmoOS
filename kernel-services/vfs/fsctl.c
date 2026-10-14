@@ -156,37 +156,64 @@ static int64_t fsctl_list(struct fsctl_open *o)
     return 0;
 }
 
-/* One field of a /proc/mounts line, escaped as Linux escapes it: a space,
- * tab, newline or backslash as \ooo, so a reader splitting on blanks
- * gets the path back whole. */
-static size_t mounts_field(char *out, size_t n, const char *s)
+/* Text appended to /proc/mounts' buffer: `len` grows while it fits; past
+ * the end `over` is set and nothing more is written. */
+struct mounts_out {
+    char *buf;
+    size_t n, len;
+    bool over;
+};
+
+static void mo_put(struct mounts_out *o, const char *s, size_t k)
 {
-    size_t used = 0;
-    for (; *s != '\0'; s++) {
-        bool esc = *s == ' ' || *s == '\t' || *s == '\n' || *s == '\\';
-        size_t need = esc ? 4 : 1;
-        if (used + need >= n)
-            break;
-        if (esc)
-            used += (size_t)ksnprintf(out + used, n - used, "\\%03o", (unsigned)(unsigned char)*s);
-        else
-            out[used++] = *s;
+    if (o->over || o->len + k >= o->n) {   /* one byte stays for the NUL */
+        o->over = true;
+        return;
     }
-    if (used < n)
-        out[used] = '\0';
-    return used;
+    memcpy(o->buf + o->len, s, k);
+    o->len += k;
 }
 
-static int mounts_line(char *out, size_t n, const struct mount *mnt, const char *path)
+static void mo_str(struct mounts_out *o, const char *s)
 {
-    char src[BLKDEV_NAME_MAX + 8], dir[VFS_PATH_MAX];
-    if (mnt->bdev != NULL)
-        ksnprintf(src, sizeof(src), "/dev/%s", mnt->bdev->name);
-    else
-        strlcpy(src, mnt->fs->name, sizeof(src));
-    mounts_field(dir, sizeof(dir), path);
-    return ksnprintf(out, n, "%s %s %s %s 0 0\n", src, dir, mnt->fs->name,
-                     (mnt->flags & MOUNT_RDONLY) ? "ro" : "rw");
+    mo_put(o, s, strlen(s));
+}
+
+/* A path, escaped as Linux escapes /proc/mounts: a space, tab, newline or
+ * backslash as \ooo, so a reader splitting on blanks gets it back whole.
+ * Written straight into the output, so no intermediate buffer can cut a
+ * path whose escapes make it longer than VFS_PATH_MAX. */
+static void mo_path(struct mounts_out *o, const char *s)
+{
+    for (; *s != '\0'; s++) {
+        if (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\\') {
+            char e[5];
+            ksnprintf(e, sizeof(e), "\\%03o", (unsigned)(unsigned char)*s);
+            mo_put(o, e, 4);
+        } else {
+            mo_put(o, s, 1);
+        }
+    }
+}
+
+/* One line, whole or not at all: a line that does not fit is taken back,
+ * and `over` stays set so no later line is written either. */
+static void mounts_line(struct mounts_out *o, const struct mount *mnt, const char *path)
+{
+    size_t start = o->len;
+    if (mnt->bdev != NULL) {
+        mo_str(o, "/dev/");
+        mo_str(o, mnt->bdev->name);
+    } else {
+        mo_str(o, mnt->fs->name);
+    }
+    mo_str(o, " ");
+    mo_path(o, path);
+    mo_str(o, " ");
+    mo_str(o, mnt->fs->name);
+    mo_str(o, (mnt->flags & MOUNT_RDONLY) ? " ro 0 0\n" : " rw 0 0\n");
+    if (o->over)
+        o->len = start;
 }
 
 /* The walk fsctl_list makes, printed as /proc/mounts (vfs.h). A line that
@@ -196,36 +223,22 @@ static int mounts_line(char *out, size_t n, const struct mount *mnt, const char 
  * (vfs_internal.h). */
 int vfs_mounts_render(char *out, size_t n)
 {
-    int used = 0;
-    bool full = false;
-    char line[VFS_PATH_MAX + 96];
+    struct mounts_out o = { .buf = out, .n = n, .len = 0, .over = n == 0 };
     spin_lock(&g_mount_list_lock);
     struct mount_ns *ns = mountns_current();
-    if (g_root_mount != NULL) {
-        int len = mounts_line(line, sizeof(line), g_root_mount, "/");
-        if ((size_t)used + (size_t)len < n) {
-            memcpy(out + used, line, (size_t)len);
-            used += len;
-        } else {
-            full = true;
-        }
-    }
+    if (g_root_mount != NULL)
+        mounts_line(&o, g_root_mount, "/");
     struct mount_ns_ref *r;
     list_for_each_entry(r, &ns->mounts, ns_link) {
-        if (full || r->mnt == g_root_mount)
-            continue;
-        int len = mounts_line(line, sizeof(line), r->mnt, r->path);
-        if ((size_t)used + (size_t)len >= n) {
-            full = true;
-            continue;
-        }
-        memcpy(out + used, line, (size_t)len);
-        used += len;
+        if (o.over)
+            break;
+        if (r->mnt != g_root_mount)
+            mounts_line(&o, r->mnt, r->path);
     }
     spin_unlock(&g_mount_list_lock);
-    if ((size_t)used < n)
-        out[used] = '\0';
-    return used;
+    if (n > 0)
+        out[o.len] = '\0';
+    return (int)o.len;
 }
 
 /*

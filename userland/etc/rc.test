@@ -63,6 +63,10 @@ false; echo "status $?"
 # `false; echo $?` printed 0 and `Z=7; echo $Z` printed nothing. Each
 # exits 0 under that bug, which records the failure.
 false; cosmo-sh -c "exit $?" && FAILS=1
+# ... but a line with an unclosed quote anywhere runs none of itself, as
+# when the whole line was lexed before anything ran.
+cosmo-sh -c 'touch /tmp/shtest/q1; echo "open' 2> /tmp/shtest/q.err
+ls /tmp/shtest/q1 > /tmp/shtest/q.probe 2>&1 && FAILS=1
 Z=7; cosmo-sh -c "exit $Z" && FAILS=1
 cat /nonexistent 2> /tmp/shtest/err && FAILS=1
 cat /tmp/shtest/err

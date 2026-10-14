@@ -184,20 +184,24 @@ static int render_pid_stat(struct process *p, char *out, size_t n)
 {
     unsigned nr_threads, live = 0;
     int cpu = 0;
-    uint64_t run_ns = 0;
+    uint64_t run_ns = 0, now = clock_now_ns();
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     nr_threads = p->nr_threads;
+    bool stopped = p->stopped;
     struct thread *t;
     list_for_each_entry(t, &p->threads, proc_link) {
-        run_ns += t->run_time_ns;
+        run_ns += sched_thread_run_ns(t, now);   /* the running stretch too: rq->lock nests inside p->lock */
         if (t->state == THREAD_RUNNING || t->state == THREAD_READY)
             live++;
         if (t == p->main_thread)
             cpu = t->cpu;
     }
-    pid_t pgid = p->pgid, sid = p->sid;
     spin_unlock_irqrestore(&p->lock, s);
-    const char *state = p->state == PROCESS_EXITED ? "Z" : (live ? "R" : "S");
+    /* Under g_process_table_lock, as every other reader takes them. */
+    pid_t pgid = 0, sid = 0;
+    (void)process_getpgid(p->pid, &pgid);
+    (void)process_getsid(p->pid, &sid);
+    const char *state = p->state == PROCESS_EXITED ? "Z" : stopped ? "T" : (live ? "R" : "S");
     return ksnprintf(out, n,
                      "%u (%s) %s %u %d %d 0 -1 0 0 0 0 0 %llu 0 0 0 20 0 %u 0 %llu 0 0 "
                      "18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 %d 0 0 0 0 0\n",
@@ -303,6 +307,10 @@ static int render_loadavg(char *out, size_t n)
     for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
         if (cpu_online(c))
             running += sched_cpu_load(c);
+    /* Rounded to two places, as Linux's /proc/loadavg rounds them
+     * (FIXED_1/200 added first), so this agrees with sysinfo's readers. */
+    for (unsigned i = 0; i < 3; i++)
+        l[i] += (1ul << 11) / 200;
 #define LOAD_INT(x)  ((x) >> 11)
 #define LOAD_FRAC(x) ((((x) & ((1ul << 11) - 1)) * 100) >> 11)
     return ksnprintf(out, n, "%lu.%02lu %lu.%02lu %lu.%02lu %u/%u %u\n", LOAD_INT(l[0]), LOAD_FRAC(l[0]),
