@@ -1114,3 +1114,6 @@ each; none is needed by M2's acceptance test.
   second leaks. Three callers had freed again after a full queue (the
   ping unit fixed them, N2); an interface that says which would remove
   the guess.
+- `prctl` is the dumpable flag alone (`PR_SET_DUMPABLE`/`PR_GET_DUMPABLE`,
+  recorded and reported; nothing reads it, there being no core dumps or
+  ptrace); every other option is `-EINVAL` (the scp-sftp unit).

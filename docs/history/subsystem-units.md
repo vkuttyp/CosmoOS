@@ -2938,3 +2938,13 @@ See the [history index](README.md).
   `ITIMER_REAL` came with it. `net-raw-icmp`; the networking guide pings
   QEMU's gateway three times.
   Report: `docs/audit/2026-10-14-ping-report.md`.
+- **After 1.0: scp and sftp (2026-10-14).** dropbear's `scp` is built
+  beside the server (`/bin/scp`), and a new pinned port builds OpenSSH
+  portable 10.6p1's `sftp-server` alone (`/usr/libexec/sftp-server`), so
+  `scp -O`, the SFTP-based `scp` of current OpenSSH, and `sftp` all work.
+  Two things the first build found: the boot archive put `usr/` entries
+  under `/boot` (they keep their path now), and `sftp-server` refuses to
+  run without `prctl(PR_SET_DUMPABLE)`, which the Linux door now has.
+  `test-net-login` copies 256 KiB each way in both protocols and runs an
+  `sftp` batch; the ssh guide page does both.
+  Report: `docs/audit/2026-10-14-scp-sftp-report.md`.

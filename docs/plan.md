@@ -491,10 +491,11 @@ and [Linux compatibility API](compat/linux/api.md).
 - [x] **`ping`.** Raw ICMP sockets over IPv4 (BusyBox's `ping` opens
   no other kind), the Linux door reading `socket`'s protocol, and
   `ITIMER_REAL`. See the [report](audit/2026-10-14-ping-report.md).
-- [ ] **Implementation — scp and sftp, HTTPS.** The owner's next two
-  after `ping` (moved ahead of them on 2026-10-14, when it was found
-  missing on Parallels): dropbear's scp and sftp server, and TLS for
-  `wget`. The next release waits for all three and
+- [x] **scp and sftp.** dropbear's `scp` and OpenSSH's `sftp-server` (a
+  new pinned port), so both of `scp`'s protocols and `sftp` work. See the
+  [report](audit/2026-10-14-scp-sftp-report.md).
+- [ ] **Implementation — HTTPS.** The owner's last of the four after
+  `ping` and scp/sftp: TLS for `wget`. The next release waits for all three and
   for a test of every new command on Parallels Desktop (the owner,
   2026-10-14; v1.0.2's release was turned back into a draft).
 

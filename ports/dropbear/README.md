@@ -26,22 +26,26 @@ syslog, and no login records (`--disable-lastlog --disable-utmp
 --disable-utmpx --disable-wtmp --disable-wtmpx --disable-loginfunc
 --disable-pututline --disable-pututxline`). Hardening is off because its
 `-pie` would ask for a static-pie, which the wrapper's fixed image base
-rules out. `make PROGRAMS="dropbear dropbearkey" STATIC=1`; both stripped
-with `llvm-objcopy`. `-ffile-prefix-map` keeps the build directory out of
+rules out. `make PROGRAMS="dropbear dropbearkey scp" STATIC=1` (scp since
+the scp-sftp unit); all three stripped with `llvm-objcopy`. `-ffile-prefix-map` keeps the build directory out of
 the binaries (`make reproducible`).
 
 `localoptions.h` is the configuration, each line with its reason:
 public-key authentication only -- password authentication is compiled
 out, not refused; an Ed25519 host key, the only one the service names
 (`-r`); user keys Ed25519 or RSA (RSA on since v1.0.2 so an existing
-`id_rsa.pub` works, with `rsa-sha2-256`/`512` signatures only,
-`DROPBEAR_RSA_SHA1 0`; ECDSA and DSS compiled out); no TCP or agent forwarding, no
-X11, no sftp server (scp and sftp are outside M4), no MOTD, no inetd mode.
+`id_rsa.pub` works, with `rsa-sha2-256` signatures only -- dropbear has
+no `rsa-sha2-512` -- `DROPBEAR_RSA_SHA1 0`; ECDSA and DSS compiled out);
+no TCP or agent forwarding, no X11, no MOTD, no inetd mode. Files (the
+scp-sftp unit): the `sftp` subsystem is on (`DROPBEAR_SFTPSERVER 1`) and
+runs `SFTPSERVER_PATH`, `/usr/libexec/sftp-server` -- OpenSSH's, from
+`ports/openssh`, dropbear providing none -- and scp's classic protocol
+runs this source's `scp` from `/bin` through the session's shell.
 
 ## On the system
 
-The image carries `/sbin/dropbear`, `/sbin/dropbearkey` and
-`/etc/dropbear/start`. `cosmo-install` adds what the installed root needs:
+The image carries `/sbin/dropbear`, `/sbin/dropbearkey`, `/bin/scp` and
+`/etc/dropbear/start` (and `ports/openssh` adds `/usr/libexec/sftp-server`). `cosmo-install` adds what the installed root needs:
 `/etc/passwd` (`root:*:0:0:root:/root:/bin/sh`: one user, no password to
 check), `/etc/group`, `/root/.ssh/authorized_keys` (empty, 0600, in a
 0700 directory) and `/etc/svc/dropbear` (`exec /bin/sh /etc/dropbear/start`,
