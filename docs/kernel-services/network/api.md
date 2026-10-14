@@ -683,6 +683,20 @@ spinlock held.
 not INET/INET6), `-EINVAL` (type not STREAM/DGRAM), `-ENOMEM`. The
 socket is returned with one reference.
 
+**`int ksock_create_raw(family, proto, uid, out)`** A raw ICMP socket
+(`COSMO_SOCK_RAW`, `raw` pcb; design.md, "Raw ICMP sockets"):
+`-EPROTONOSUPPORT` unless `COSMO_AF_INET` and `IPPROTO_ICMP`, `-EPERM`
+without `PRIV_NET` in the caller's current credentials, `-ENOMEM`. On
+one, `ksock_bind`, `ksock_connect` and `ksock_listen` are
+`-EOPNOTSUPP`; `ksock_sendto` sends the caller's ICMP message unchanged
+to `to` (`-EDESTADDRREQ` without one, `-EAFNOSUPPORT` for IPv6,
+`-EMSGSIZE` over 65515 bytes, `-ENETUNREACH`); `ksock_recvfrom` returns
+one received ICMP message behind its IPv4 header, the sender's address
+with port 0 in `from`; `ksock_getsockname` is the IPv4 wildcard and
+`ksock_getpeername` `-ENOTCONN`. (`kernel/include/kernel/net/raw.h`:
+`raw_pcb_new`, `raw_pcb_free`, `raw_sendto`, `raw_recv`,
+`raw_icmp_input`, `raw_get_stats`; `RAW_RXQ_MAX` 64.)
+
 **`int ksock_bind(s, addr)`** `-EAFNOSUPPORT` (family mismatch),
 `-EPERM` (port 1..1023 with `uid != 0`), `-EINVAL` (already bound,
 listening or connected), plus `udp_bind`/`tcp_bind` errors.

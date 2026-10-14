@@ -292,6 +292,10 @@ struct lx_winsize {
 #define LX_AF_INET6 10
 #define LX_SOCK_STREAM 1
 #define LX_SOCK_DGRAM 2
+#define LX_SOCK_RAW 3
+#define LX_IPPROTO_ICMP 1
+#define LX_IPPROTO_TCP 6
+#define LX_IPPROTO_UDP 17
 #define LX_SOCK_SEQPACKET 5
 #define LX_SO_PEERCRED 17
 #define LX_SCM_RIGHTS 1
@@ -514,6 +518,14 @@ struct lx_timeval {
     int64_t tv_sec;
     int64_t tv_usec;
 };
+
+/* setitimer(2)/getitimer(2): ITIMER_REAL (0) is the one built. */
+struct lx_itimerval {
+    struct lx_timeval it_interval;
+    struct lx_timeval it_value;
+};
+_Static_assert(sizeof(struct lx_itimerval) == 32, "struct itimerval is 32 bytes on LP64");
+#define LX_ITIMER_REAL 0
 
 /* statfs(2)'s struct statfs: the LP64 layout, identical on x86-64 and
  * AArch64 (120 bytes). */

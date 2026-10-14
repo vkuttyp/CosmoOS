@@ -91,7 +91,20 @@ in CosmoOS to do it properly. TLS was compiled out by decision rather
 than shipped unverified. Use HTTP from hosts you trust, and check what
 you fetch (`sha256sum` is there).
 
-There is no `ping`. Stop the file server and power off:
+`ping` sends ICMP echo requests (IPv4 only; no `ping6`). QEMU's user
+network answers a ping to its gateway itself; whether a ping to the
+internet gets through depends on your computer, since QEMU forwards
+those as its own ICMP, which some hosts do not allow:
+
+<!-- test: console -->
+```console
+cosmo$ ping -c 3 10.0.2.2
+PING 10.0.2.2 (10.0.2.2): 56 data bytes
+64 bytes from 10.0.2.2: seq=0 ttl=...
+...3 packets transmitted, 3 packets received, 0% packet loss...
+```
+
+Stop the file server and power off:
 
 <!-- test: host -->
 ```sh

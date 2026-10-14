@@ -14,6 +14,7 @@
 #include <arch/cpu.h>
 #include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/raw.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
 #include <kernel/net/tcp.h>
@@ -432,6 +433,8 @@ void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
         return;
     struct icmp_hdr *ic = (struct icmp_hdr *)m->data;
     if (ic->type == ICMP_DEST_UNREACH && ic->code == ICMP_UNREACH_NEEDFRAG) {
+        if (!(m->flags & M_FW_QUIET))
+            raw_icmp_input(m, iph);   /* raw sockets see it as they see any accepted message (N31) */
         icmp_needfrag(m, ic);   /* admits nothing TCP does not confirm, and answers nothing */
         m_freem(m);
         return;
@@ -446,6 +449,9 @@ void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
         m_freem(m);
         return;
     }
+    /* Raw ICMP sockets get a copy of what the stack accepted, before the
+     * echo reply below rewrites this mbuf in place (N31). */
+    raw_icmp_input(m, iph);
     if (ic->type == ICMP_DEST_UNREACH) {
         icmp_unreach(m, ic);   /* a connected UDP flow's, or nothing */
         m_freem(m);

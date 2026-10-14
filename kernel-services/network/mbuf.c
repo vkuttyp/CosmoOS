@@ -72,7 +72,17 @@ struct mbuf *m_free(struct mbuf *m)
     if (m == NULL)
         return NULL;
     struct mbuf *next = m->next;
-    if (__atomic_fetch_sub(&m->refcount, 1, __ATOMIC_ACQ_REL) != 1)
+    uint32_t refs = __atomic_fetch_sub(&m->refcount, 1, __ATOMIC_ACQ_REL);
+#if CONFIG_DEBUG
+    /* A second free of the same mbuf finds no reference left. It used to
+     * pass silently -- the count only wrapped -- and did harm only when
+     * another CPU had reused the mbuf in between, so the second free took
+     * a live packet: one boot in eight (the ping unit's raw queue). The
+     * slab's own check cannot see it, since nothing reaches the slab. */
+    if (refs == 0)
+        panic("m_free: mbuf %p freed with no reference left (a double free)", (void *)m);
+#endif
+    if (refs != 1)
         return next;
     if (m->flags & M_EXT) {
         if (__atomic_fetch_sub(&m->cl->refcount, 1, __ATOMIC_ACQ_REL) == 1) {

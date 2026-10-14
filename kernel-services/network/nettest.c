@@ -17,6 +17,7 @@
 #include <kernel/net/ip.h>
 #include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/raw.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/dhcp.h>
 #include <uapi/cosmo/netctl.h>
@@ -4017,6 +4018,178 @@ bool selftest_net_icmp_limit(const char **reason)
     CHECK(srv.done && srv.result == 0);
     kinfo("selftest: net-icmp-limit: %llu echo replies sent, %llu suppressed; MSS lowered to 1460 by PMTUD",
           (unsigned long long)sent, (unsigned long long)limited);
+    return true;
+}
+
+/*
+ * net-raw-icmp (N31; design.md, "Raw ICMP sockets"): what ping does, at the
+ * socket. A raw ICMP socket refuses another protocol, IPv6, bind, connect
+ * and an addressless send; an echo it sends to the loopback address comes
+ * back to it twice -- the request as the stack received it and the reply --
+ * each behind its IPv4 header, from 127.0.0.1, port 0. The stack answers
+ * as it would with no raw socket. A full raw queue drops the copy, and the
+ * stack still takes the message (icmp_echo_rcvd). The rate limiter can
+ * withhold a reply (net-icmp-limit may have spent the window), so the echo
+ * is sent again, a new sequence each time, until one is answered.
+ */
+static int nt_ksock_create_raw(int family, int proto, struct socket **out)
+{
+    int rc = ksock_create_raw(family, proto, 0, out);
+    if (rc == 0 && !selftest_defer(nt_rel_sock, *out)) {
+        ksock_put(*out);
+        *out = NULL;
+        return -ENOMEM;
+    }
+    return rc;
+}
+
+#define RAW_TEST_ID 0x7261
+
+static int64_t raw_send_echo(struct socket *s, uint16_t seq)
+{
+    struct {
+        struct icmp_hdr ic;
+        char data[4];
+    } __packed e;
+    memset(&e, 0, sizeof(e));
+    e.ic.type = ICMP_ECHO;
+    e.ic.id = htons(RAW_TEST_ID);
+    e.ic.seq = htons(seq);
+    memcpy(e.data, "raw!", 4);
+    e.ic.cksum = in_cksum(&e, sizeof(e));
+    struct netaddr to = v4addr(INADDR_LOOPBACK_N, 0);
+    return ksock_sendto(s, &e, sizeof(e), &to);
+}
+
+struct raw_fill { struct socket *s; unsigned want; };
+static bool raw_queue_at(void *arg)
+{
+    const struct raw_fill *f = arg;
+    return mbufq_len(&f->s->raw->rxq) >= f->want;
+}
+
+#define RAW_TEST_MANY 20   /* more than a delivery batch (RAW_DELIVER_MAX, 16) */
+struct raw_all { struct socket **s; unsigned n; };
+static bool raw_all_have(void *arg)
+{
+    const struct raw_all *t = arg;
+    for (unsigned i = 0; i < t->n; i++)
+        if (mbufq_len(&t->s[i]->raw->rxq) == 0)
+            return false;
+    return true;
+}
+
+struct raw_seen { const struct ip_stats *base; const struct raw_stats *rbase; };
+static bool raw_stack_and_drop(void *arg)
+{
+    const struct raw_seen *t = arg;
+    struct ip_stats i;
+    struct raw_stats r;
+    ipv4_get_stats(&i);
+    raw_get_stats(&r);
+    return i.icmp_echo_rcvd > t->base->icmp_echo_rcvd && r.rx_queue_full > t->rbase->rx_queue_full;
+}
+
+bool selftest_net_raw_icmp(const char **reason)
+{
+    struct socket *s;
+    CHECK(ksock_create_raw(COSMO_AF_INET, IPPROTO_UDP, 0, &s) == -EPROTONOSUPPORT);
+    CHECK(ksock_create_raw(COSMO_AF_INET6, IPPROTO_ICMP, 0, &s) == -EPROTONOSUPPORT);
+    CHECK(nt_ksock_create_raw(COSMO_AF_INET, IPPROTO_ICMP, &s) == 0);
+    ksock_set_nonblock(s, true);
+    struct netaddr any = v4addr(0, 0);
+    CHECK(ksock_bind(s, &any) == -EOPNOTSUPP && ksock_connect(s, &any) == -EOPNOTSUPP);
+    CHECK(ksock_sendto(s, "x", 1, NULL) == -EDESTADDRREQ);
+    CHECK(ksock_recvfrom(s, NULL, 0, NULL) == -EAGAIN);
+
+    static uint8_t buf[256];   /* static: see selftest_net_mbuf */
+    bool got_req = false, got_reply = false;
+    struct ip_stats a, b;
+    ipv4_get_stats(&a);
+    for (uint16_t seq = 1; seq <= 15 && !got_reply; seq++) {
+        CHECK(raw_send_echo(s, seq) == (int64_t)sizeof(struct icmp_hdr) + 4);
+        uint64_t until = clock_now_ns() + 200000000ull;
+        while (!got_reply && clock_now_ns() < until) {
+            struct netaddr from;
+            int64_t n = ksock_recvfrom(s, buf, sizeof(buf), &from);
+            if (n == -EAGAIN) {
+                thread_sleep_ms(1);
+                sched_watchdog_kick();
+                continue;
+            }
+            CHECK(n >= 20 + (int64_t)sizeof(struct icmp_hdr));
+            CHECK(buf[0] == 0x45 && buf[9] == IPPROTO_ICMP);   /* the IPv4 header, no options */
+            CHECK(from.family == COSMO_AF_INET && from.v4 == INADDR_LOOPBACK_N && from.port == 0);
+            const struct icmp_hdr *ic = (const struct icmp_hdr *)(buf + 20);
+            if (ntohs(ic->id) != RAW_TEST_ID)
+                continue;
+            CHECK(n == 20 + (int64_t)sizeof(struct icmp_hdr) + 4 && memcmp(buf + 28, "raw!", 4) == 0);
+            if (ic->type == ICMP_ECHO && ntohs(ic->seq) == 1)
+                got_req = true;
+            if (ic->type == ICMP_ECHO_REPLY)
+                got_reply = true;
+        }
+    }
+    CHECK(got_req && got_reply);
+    ipv4_get_stats(&b);
+    CHECK(b.icmp_echo_rcvd > a.icmp_echo_rcvd && b.icmp_echo_replied > a.icmp_echo_replied);
+
+    /* Every raw socket gets its copy, however many there are: more of them
+     * than one delivery batch holds. (Sixteen used to be a ceiling: the
+     * seventeenth never received anything.) */
+    {
+        static struct socket *many[RAW_TEST_MANY];
+        for (unsigned i = 0; i < RAW_TEST_MANY; i++) {
+            CHECK(nt_ksock_create_raw(COSMO_AF_INET, IPPROTO_ICMP, &many[i]) == 0);
+            ksock_set_nonblock(many[i], true);
+        }
+        CHECK(raw_send_echo(many[0], 300) > 0);
+        struct raw_all all = { .s = many, .n = RAW_TEST_MANY };
+        CHECK(wait_until(raw_all_have, &all, 5000));
+    }
+    /* A read-shut raw socket returns 0, and the source address is defined
+     * (zero), not whatever the caller's buffer held. */
+    {
+        struct socket *shut;
+        CHECK(nt_ksock_create_raw(COSMO_AF_INET, IPPROTO_ICMP, &shut) == 0);
+        CHECK(ksock_shutdown(shut, COSMO_SHUT_RD) == 0);
+        struct netaddr f;
+        memset(&f, 0xab, sizeof(f));
+        CHECK(ksock_recvfrom(shut, buf, sizeof(buf), &f) == 0);
+        CHECK(f.family == 0 && f.port == 0 && f.v4 == 0);
+    }
+
+    /* Fill the queue with requests nobody reads, then one more echo: the
+     * stack takes it and the raw copy is dropped. */
+    while (ksock_recvfrom(s, buf, sizeof(buf), NULL) > 0)
+        ;
+    for (uint16_t seq = 100; seq < 100 + RAW_RXQ_MAX; seq++)
+        CHECK(raw_send_echo(s, seq) > 0);
+    { struct raw_fill f = { .s = s, .want = RAW_RXQ_MAX };
+      CHECK(wait_until(raw_queue_at, &f, 5000)); }
+    struct raw_stats r0;
+    ipv4_get_stats(&a);
+    raw_get_stats(&r0);
+    CHECK(raw_send_echo(s, 200) > 0);
+    struct raw_seen t = { .base = &a, .rbase = &r0 };
+    if (!wait_until(raw_stack_and_drop, &t, 5000)) {
+        /* Which half did not happen, and what the raw path did instead. */
+        struct ip_stats i1;
+        struct raw_stats r1;
+        ipv4_get_stats(&i1);
+        raw_get_stats(&r1);
+        kinfo("selftest: net-raw-icmp: the extra echo: echo_rcvd %llu -> %llu, rx_queue_full %llu -> %llu, "
+              "rx_nomem %llu -> %llu, rx_delivered %llu -> %llu, queue %u",
+              (unsigned long long)a.icmp_echo_rcvd, (unsigned long long)i1.icmp_echo_rcvd,
+              (unsigned long long)r0.rx_queue_full, (unsigned long long)r1.rx_queue_full,
+              (unsigned long long)r0.rx_nomem, (unsigned long long)r1.rx_nomem,
+              (unsigned long long)r0.rx_delivered, (unsigned long long)r1.rx_delivered,
+              mbufq_len(&s->raw->rxq));
+        *reason = "the extra echo: the stack did not count it, or its copy was not dropped as full";
+        return false;
+    }
+    CHECK(mbufq_len(&s->raw->rxq) == RAW_RXQ_MAX);
+    kinfo("selftest: net-raw-icmp: request and reply read raw with their IPv4 header; a full queue drops the copy");
     return true;
 }
 

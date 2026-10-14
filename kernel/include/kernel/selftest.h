@@ -454,6 +454,7 @@ bool selftest_net_tcp_syncache(const char **reason);   /* milestone 8: SYN cache
 bool selftest_net_tcp_rfc5961(const char **reason);    /* blind RST/SYN/ACK earn challenge ACKs */
 bool selftest_net_tcp_reorder(const char **reason);    /* out-of-order segments are reassembled */
 bool selftest_net_tcp_keepalive(const char **reason);  /* keepalive timeout, orphaned FIN_WAIT_2 */
+bool selftest_net_raw_icmp(const char **reason);      /* raw ICMP sockets (N31) */
 bool selftest_net_icmp_limit(const char **reason);     /* ICMP rate limit, path MTU discovery */
 bool selftest_net_nonblock(const char **reason);       /* non-blocking mode and readiness */
 bool selftest_net_steer(const char **reason);          /* unit 11: per-CPU receive queues and flow steering */

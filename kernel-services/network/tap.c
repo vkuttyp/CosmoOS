@@ -64,14 +64,14 @@ struct tap {
 };
 
 /* Stack -> tap: the stack is sending a frame out the interface. Queue it for
- * the far end; drop (freeing) when the queue is full, as a NIC drops when it
- * has nowhere to put a frame. Runs in a read-side section: no sleeping. */
+ * the far end; drop when the queue is full, as a NIC drops when it has
+ * nowhere to put a frame -- mbufq_enqueue frees it then (mbuf.h). This freed
+ * it a second time, which on two CPUs could free another holder's packet
+ * (found by m_free's debug check). Runs in a read-side section: no sleeping. */
 static int tap_transmit(struct netif *nif, struct mbuf *m)
 {
     struct tap *t = container_of(nif, struct tap, nif);
-    if (!mbufq_enqueue(&t->txq, m))
-        m_freem(m);        /* "sent" and dropped */
-    else
+    if (mbufq_enqueue(&t->txq, m))   /* "sent", and dropped (freed) when the queue is full */
         waitqueue_wake_all(&t->rx_wait);   /* a reader blocked, a poller, the ring: a frame waits (no sleeping lock) */
     return 0;
 }

@@ -1519,6 +1519,55 @@ int main(int argc, char **argv)
         CHECKV(sc1(LX_close, lfd) == 0 && sc1(LX_close, lep) == 0, 0);
 #endif
     }
+    /* setitimer/getitimer/alarm: ITIMER_REAL only (kernel/process/itimer.c;
+     * the ping unit -- BusyBox ping sends each echo after the first from
+     * SIGALRM, and stopped after one reply while these were ENOSYS). */
+    {
+        struct lx_itimerval cur, nv, old;
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0,
+               cur.it_value.tv_sec);
+        CHECKV(sc2(LX_getitimer, 1, &cur) == -22, 0);   /* ITIMER_VIRTUAL: not built */
+        nv = (struct lx_itimerval){ .it_interval = { 2, 0 }, .it_value = { 10, 0 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == 0, 0);
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec >= 9 && cur.it_value.tv_sec <= 10 &&
+               cur.it_interval.tv_sec == 2 && cur.it_interval.tv_usec == 0, cur.it_value.tv_sec);
+        nv = (struct lx_itimerval){ .it_interval = { 0, 0 }, .it_value = { 0, 0 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, &old) == 0 && old.it_value.tv_sec >= 9 && old.it_interval.tv_sec == 2,
+               old.it_value.tv_sec);
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0 &&
+               cur.it_interval.tv_sec == 0, cur.it_value.tv_sec);
+        nv.it_value.tv_usec = 1000000;
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == -22, 0);
+        /* "Never" is accepted, as Linux accepts it (clamped), then cleared. */
+        nv = (struct lx_itimerval){ .it_interval = { 0, 0 }, .it_value = { 0x7fffffffffffffffll, 0 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == 0, 0);
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec > 1000000000ll, cur.it_value.tv_sec);
+        nv = (struct lx_itimerval){ .it_interval = { 0, 0 }, .it_value = { 0, 0 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == 0, 0);
+        /* It fires: SIGALRM blocked, a 20 ms timer, pending within 2 s, and
+         * a one-shot is disarmed after. */
+        uint64_t m14 = 1ull << 13, before = 0, pend = 0;
+        CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_BLOCK, &m14, &before, 8) == 0, 0);
+        nv = (struct lx_itimerval){ .it_interval = { 0, 0 }, .it_value = { 0, 20000 } };
+        CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == 0, 0);
+        for (int i = 0; i < 200 && !(pend & m14); i++) {
+            struct lx_timespec t = { 0, 10000000 };
+            sc2(LX_nanosleep, &t, 0);
+            sc2(LX_rt_sigpending, &pend, 8);
+        }
+        CHECKV(pend & m14, pend);
+        CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0,
+               cur.it_value.tv_usec);
+#ifdef LX_alarm
+        CHECKV(sc1(LX_alarm, 5) == 0, 0);
+        CHECKV(sc1(LX_alarm, 0) == 5, 0);   /* 4.99... s left rounds to 5, as Linux rounds */
+#endif
+        /* Drop the pending SIGALRM: ignored while unblocked, then default again. */
+        struct lx_sigaction ign = { .handler = 1 }, dfl = { .handler = 0 };
+        CHECKV(sc4(LX_rt_sigaction, 14, &ign, 0, 8) == 0, 0);
+        CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &before, 0, 8) == 0, 0);
+        CHECKV(sc4(LX_rt_sigaction, 14, &dfl, 0, 8) == 0, 0);
+    }
     /* sysinfo (docs/audit/next-subsystem-sysinfo.md) */
     {
         struct lx_sysinfo si;
@@ -2715,6 +2764,28 @@ int main(int argc, char **argv)
     CHECKV(sc6(LX_getsockopt, ce, LX_SOL_SOCKET, LX_SO_ERROR, &err, &elen, 0) == 0, 0);
     CHECKV(err == 111, err);                                        /* positive, as POSIX asks */
     CHECKV(sc1(LX_close, ce) == 0, 0);
+    /* --- socket()'s protocol: 0 or the type's own, and raw ICMP over IPv4
+     * (the ping unit; docs/kernel-services/network/design.md, "Raw ICMP
+     * sockets"). A ping socket (DGRAM, ICMP) is not built and must not
+     * quietly become a UDP one, as it did while the protocol was ignored. */
+    long ping_sock = sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM, LX_IPPROTO_ICMP);
+    CHECKV(ping_sock == -93, ping_sock);   /* EPROTONOSUPPORT; the value is the descriptor if one was made */
+    CHECKV(sc3(LX_socket, LX_AF_INET, LX_SOCK_STREAM, LX_IPPROTO_UDP) == -93, 0);
+    {
+        long pu = sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM, LX_IPPROTO_UDP);
+        CHECKV(pu >= 3, pu);
+        sc1(LX_close, pu);
+        long pt = sc3(LX_socket, LX_AF_INET, LX_SOCK_STREAM, LX_IPPROTO_TCP);
+        CHECKV(pt >= 3, pt);
+        sc1(LX_close, pt);
+    }
+    CHECKV(sc3(LX_socket, LX_AF_INET, LX_SOCK_RAW, LX_IPPROTO_TCP) == -93, 0);
+    CHECKV(sc3(LX_socket, LX_AF_INET6, LX_SOCK_RAW, 58) == -93, 0);   /* raw ICMPv6: not built */
+    {
+        long rs = sc3(LX_socket, LX_AF_INET, LX_SOCK_RAW, LX_IPPROTO_ICMP);   /* lxtest holds PRIV_NET */
+        CHECKV(rs >= 3, rs);
+        sc1(LX_close, rs);
+    }
     /* --- unix domain sockets: a name, a pair, a handle in a message --- */
     CHECKV(sc3(LX_socket, LX_AF_UNIX, LX_SOCK_SEQPACKET, 0) == -94, 0);   /* ESOCKTNOSUPPORT */
     (void)sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lx-ux", 0);

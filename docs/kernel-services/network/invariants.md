@@ -27,8 +27,15 @@ compares `mbufs_alive` and `clusters_alive` before and after; every
 network self-test leaves `socket_count()` where it started, which
 frees every queued datagram; the loopback loss test drops packets
 through the filter (freed by the caller) and the counters stay
-balanced. Gap: no leak check across the harness test or across a
-boot, and no debug-mode poisoning of freed mbufs.
+balanced. In debug builds `m_free` panics on an mbuf with no reference
+left (the ping unit, 2026-10-14): a second free used to pass silently
+and harm only when another CPU had reused the mbuf in between, which is
+how three callers that freed after a failed `mbufq_enqueue` went unseen
+-- `tap_transmit` and `rxq_purge`'s two re-queues, and the new raw
+socket's delivery, whose `net-raw-icmp` failed one 2-CPU boot in eight.
+Gap: no leak check across the harness test or across a boot; the check
+sees a double free only while the slab has not reused the memory for
+an mbuf whose count is 1 again, and a freed mbuf is not poisoned.
 
 **N3. No header is read before it is known to be inside the buffer.**
 Every layer calls `m_pullup(m, sizeof header)` before casting, then
@@ -636,3 +643,19 @@ exchange (`xid` and `chaddr`), with a valid UDP checksum, in a state that
 expects it. **Checked by** `net-dhcp-client`: the fixture's address is the
 ACK's after binding and after a renewal, `0.0.0.0` after the lease's end
 and after a NAK, and an OFFER for another `xid` changes nothing.
+
+**N31. A raw socket sees ICMP only as the stack accepted it, and never
+changes what the stack does with it.** `raw_icmp_input` runs after
+`icmp_input`'s checksum and the host firewall's quiet check, so a raw
+socket reads nothing the stack itself would have refused, and it
+delivers copies: the original goes on to the echo reply, the
+unreachable handling or the free exactly as without raw sockets, and a
+full or absent raw queue costs the stack nothing. Creating one needs
+`PRIV_NET` at the time of the call. Check: `net-raw-icmp` (an echo to
+the loopback address read back with its IPv4 header; the host still
+answers it; twenty raw sockets, more than a delivery batch, each get a
+copy; a queue left full drops copies while the stack still takes the
+message), `ash.sh`'s `priv -d net ping` (creation without `PRIV_NET`
+is refused), and `lxtest`'s protocol checks. Gap: the
+fragmentation-needed copy is not exercised (nothing on loopback sends
+one).

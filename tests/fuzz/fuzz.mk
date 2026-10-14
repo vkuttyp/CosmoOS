@@ -59,7 +59,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 # The network stack on the host (docs/verification/design.md, "The network
 # targets"): the protocol layers unchanged, over tests/fuzz/shim_net.c.
 FUZZ_NET_STACK := kernel-services/network/ether.c kernel-services/network/arp.c kernel-services/network/ipv4.c \
-	kernel-services/network/ipv6.c kernel-services/network/udp.c kernel-services/network/tcp.c \
+	kernel-services/network/ipv6.c kernel-services/network/udp.c kernel-services/network/raw.c kernel-services/network/tcp.c \
 	kernel-services/network/nat.c kernel-services/network/fw.c kernel-services/network/mbuf.c \
 	kernel-services/network/cksum.c kernel-services/network/inet.c kernel-services/network/dhcp.c
 FUZZ_NET_FRAME_SRCS := tests/fuzz/fuzz_net_frame.c tests/fuzz/shim_net.c $(FUZZ_NET_STACK) $(FUZZ_COMMON)

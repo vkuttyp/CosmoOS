@@ -505,6 +505,7 @@ struct cosmo_procinfo {
 #define COSMO_AF_INET6 10
 #define COSMO_SOCK_STREAM 1
 #define COSMO_SOCK_DGRAM  2
+#define COSMO_SOCK_RAW    3   /* raw ICMP over IPv4, made only by the Linux door (PRIV_NET) */
 #define COSMO_SOCK_NONBLOCK 0x800   /* ORed into the type: the socket starts non-blocking */
 
 /*
@@ -738,9 +739,11 @@ struct cosmo_dirent {
 #define COSMO_ENAMETOOLONG 36
 #define COSMO_ELOOP   40   /* too many symbolic links in one resolution */
 #define COSMO_EPIPE   32
+#define COSMO_EDESTADDRREQ 89 /* a raw socket's send names no address */
 #define COSMO_EMSGSIZE 90
 #define COSMO_EPROTOTYPE 91 /* connect/sendto: a unix name whose socket is of the other type */
 #define COSMO_EOPNOTSUPP 95
+#define COSMO_EPROTONOSUPPORT 93 /* socket(): a protocol this type does not carry */
 #define COSMO_ESOCKTNOSUPPORT 94 /* socket(): a type this family does not have (SOCK_SEQPACKET on AF_UNIX) */
 #define COSMO_EAFNOSUPPORT 97
 #define COSMO_EADDRINUSE 98

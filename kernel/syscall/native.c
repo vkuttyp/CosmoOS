@@ -1160,7 +1160,7 @@ static int64_t sock_send_bytes(struct socket *s, uint64_t ubuf, size_t len, cons
     if (tmp == NULL)
         return -ENOMEM;
     int64_t done = 0, rc = 0;
-    if (s->type == COSMO_SOCK_DGRAM) {
+    if (s->type != COSMO_SOCK_STREAM) {   /* a datagram, or a raw socket handed over from the Linux door */
         if (len > SOCK_IO_CHUNK * 16) {
             rc = -EMSGSIZE;
         } else {

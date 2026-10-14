@@ -228,14 +228,12 @@ static unsigned rxq_purge(struct netif *nif)
             if (m->pkt.rcvif == nif) {
                 m_freem(m);
                 dropped++;
-            } else if (!mbufq_enqueue(&keep, m)) {
-                m_freem(m);
+            } else {
+                (void)mbufq_enqueue(&keep, m);   /* frees it when full (mbuf.h); it was freed again here */
             }
         }
-        while ((m = mbufq_dequeue(&keep)) != NULL) {
-            if (!mbufq_enqueue(q, m))
-                m_freem(m);
-        }
+        while ((m = mbufq_dequeue(&keep)) != NULL)
+            (void)mbufq_enqueue(q, m);   /* likewise: a packet that no longer fits is freed by the enqueue */
     }
     return dropped;
 }

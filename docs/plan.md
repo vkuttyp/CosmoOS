@@ -488,11 +488,13 @@ and [Linux compatibility API](compat/linux/api.md).
   `loadavg`, `uptime`, `mounts`, `/proc/<pid>/stat` and `cmdline`,
   `statfs`, load averages. See the
   [report](audit/2026-10-14-everyday-commands-report.md).
-- [ ] **Implementation — `ping`, scp and sftp, HTTPS.** The owner's next
-  three after the everyday commands, in that order (`ping` moved ahead of
-  scp and sftp on 2026-10-14, when it was found missing on Parallels): an
-  ICMP echo `ping` over Linux's ping sockets, dropbear's scp and sftp
-  server, and TLS for `wget`. The next release waits for all three and
+- [x] **`ping`.** Raw ICMP sockets over IPv4 (BusyBox's `ping` opens
+  no other kind), the Linux door reading `socket`'s protocol, and
+  `ITIMER_REAL`. See the [report](audit/2026-10-14-ping-report.md).
+- [ ] **Implementation — scp and sftp, HTTPS.** The owner's next two
+  after `ping` (moved ahead of them on 2026-10-14, when it was found
+  missing on Parallels): dropbear's scp and sftp server, and TLS for
+  `wget`. The next release waits for all three and
   for a test of every new command on Parallels Desktop (the owner,
   2026-10-14; v1.0.2's release was turned back into a draft).
 

@@ -7,6 +7,7 @@
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/net/raw.h>
 #include <kernel/net/tcp.h>
 #include <kernel/sched.h>
 #include <kernel/socket.h>
@@ -34,6 +35,9 @@ static void socket_release(struct kobject *obj)
     struct socket *s = container_of(obj, struct socket, obj);
     if (s->family == COSMO_AF_UNIX) {
         unix_release(s);
+    } else if (s->type == COSMO_SOCK_RAW) {
+        raw_pcb_free(s->raw);   /* off the list first: no delivery can reach it after */
+        s->raw = NULL;
     } else if (s->type == COSMO_SOCK_DGRAM) {
         s->udp.sock = NULL;
         udp_unbind(&s->udp);
@@ -150,6 +154,24 @@ int ksock_create(int family, int type, uint32_t uid, struct socket **out)
     return 0;
 }
 
+int ksock_create_raw(int family, int proto, uint32_t uid, struct socket **out)
+{
+    if (family != COSMO_AF_INET || proto != IPPROTO_ICMP)
+        return -EPROTONOSUPPORT;
+    if (!cred_has(cred_current(), PRIV_NET))
+        return -EPERM;
+    struct socket *s = alloc_socket(family, COSMO_SOCK_RAW, uid);
+    if (s == NULL)
+        return -ENOMEM;
+    s->raw = raw_pcb_new(s, (uint8_t)proto);
+    if (s->raw == NULL) {
+        ksock_put(s);
+        return -ENOMEM;
+    }
+    *out = s;
+    return 0;
+}
+
 void sock_wake(struct socket *s)
 {
     waitqueue_wake_all(&s->wait);
@@ -246,6 +268,8 @@ int ksock_bind(struct socket *s, const struct netaddr *addr)
 {
     if (addr->family != s->family || s->family == COSMO_AF_UNIX)
         return -EAFNOSUPPORT;
+    if (s->type == COSMO_SOCK_RAW)
+        return -EOPNOTSUPP;
     /* Reserved ports are judged on the caller's credentials at bind time,
      * not on who created the socket: a handle inherited from a privileged
      * process, or kept across setresuid, confers nothing. */
@@ -334,6 +358,8 @@ int ksock_connect(struct socket *s, const struct netaddr *addr)
 {
     if (addr->family != s->family || s->family == COSMO_AF_UNIX)
         return -EAFNOSUPPORT;
+    if (s->type == COSMO_SOCK_RAW)
+        return -EOPNOTSUPP;
     mutex_lock(&s->lock);
     int rc;
     if (s->type == COSMO_SOCK_DGRAM) {
@@ -407,6 +433,10 @@ int64_t ksock_sendto(struct socket *s, const void *buf, size_t len, const struct
     }
     if (s->shut & 2)
         return -EPIPE;
+    if (s->type == COSMO_SOCK_RAW) {
+        int rc = raw_sendto(s->raw, buf, len, to);   /* -EDESTADDRREQ without `to` */
+        return rc ? rc : (int64_t)len;
+    }
     if (s->type == COSMO_SOCK_DGRAM) {
         const struct netaddr *dst = to;
         if (dst == NULL) {
@@ -454,10 +484,33 @@ int64_t ksock_sendto(struct socket *s, const void *buf, size_t len, const struct
 
 int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *from)
 {
+    if (from)
+        memset(from, 0, sizeof(*from));   /* defined on every return: the doors copy it out even for 0 */
     if (s->family == COSMO_AF_UNIX) {
         if (from)
             memset(from, 0, sizeof(*from));
         return unix_recv(s, buf, len, NULL, NULL, NULL, false);
+    }
+    if (s->type == COSMO_SOCK_RAW) {
+        struct mbuf *m;
+        for (;;) {
+            m = raw_recv(s->raw);
+            if (m)
+                break;
+            if (s->shut & 1)
+                return 0;
+            if (io_nonblocking(s->nonblock))
+                return -EAGAIN;
+            int w = wait_event_killable(&s->wait, mbufq_len(&s->raw->rxq) > 0 || (s->shut & 1));
+            if (w)
+                return w;
+        }
+        uint32_t n = m->pkt.len < len ? m->pkt.len : (uint32_t)len;
+        m_copydata(m, 0, n, buf);
+        if (from)
+            *from = m->pkt.src;
+        m_freem(m);
+        return (int64_t)n;
     }
     if (s->type == COSMO_SOCK_DGRAM) {
         if (s->udp.local.port == 0)
@@ -535,6 +588,11 @@ int ksock_getsockname(struct socket *s, struct netaddr *out)
 {
     if (s->family == COSMO_AF_UNIX)
         return -EAFNOSUPPORT;   /* unix_getsockname */
+    if (s->type == COSMO_SOCK_RAW) {
+        memset(out, 0, sizeof(*out));
+        out->family = (uint16_t)s->family;   /* never bound: the wildcard, port 0 */
+        return 0;
+    }
     *out = s->type == COSMO_SOCK_DGRAM ? s->udp.local : s->tcp->local;
     return 0;
 }
@@ -543,7 +601,7 @@ int ksock_getpeername(struct socket *s, struct netaddr *out)
 {
     if (s->family == COSMO_AF_UNIX)
         return -EAFNOSUPPORT;   /* unix_getpeername */
-    if (s->state != SS_CONNECTED)
+    if (s->type == COSMO_SOCK_RAW || s->state != SS_CONNECTED)
         return -ENOTCONN;
     *out = s->type == COSMO_SOCK_DGRAM ? s->udp.remote : s->tcp->remote;
     return 0;
@@ -559,7 +617,11 @@ unsigned ksock_ready(struct socket *s)
     if (s->family == COSMO_AF_UNIX)
         return unix_ready(s);
     unsigned r = 0;
-    if (s->type == COSMO_SOCK_DGRAM) {
+    if (s->type == COSMO_SOCK_RAW) {
+        if (mbufq_len(&s->raw->rxq) > 0)
+            r |= COSMO_IO_READABLE;
+        r |= COSMO_IO_WRITABLE;
+    } else if (s->type == COSMO_SOCK_DGRAM) {
         if (mbufq_len(&s->udp.rxq) > 0)
             r |= COSMO_IO_READABLE;
         r |= COSMO_IO_WRITABLE;

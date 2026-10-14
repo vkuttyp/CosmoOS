@@ -2927,3 +2927,14 @@ See the [history index](README.md).
   panic: `/proc/mounts` read the mount table under a vnode lock; a leaf
   `g_mount_list_lock` now guards what it reads (V7). VSZ and RSS read 0.
   Report: `docs/audit/2026-10-14-everyday-commands-report.md`.
+- **After 1.0: ping (2026-10-14).** BusyBox `ping` opens only a
+  raw ICMP socket and parses the IPv4 header, so the kernel has raw ICMP
+  sockets over IPv4 (`PRIV_NET`): every ICMP message the stack accepted
+  is copied to them with its header, before the stack acts on it (N31).
+  The Linux door's `socket` now reads its protocol (a ping socket used to
+  become a UDP one; `tools/sock-proto-probe.py`). On Parallels the first
+  build got one reply and stopped: `ping` sends each later echo from
+  `SIGALRM`, and `setitimer`, `getitimer` and `alarm` were `ENOSYS`, so
+  `ITIMER_REAL` came with it. `net-raw-icmp`; the networking guide pings
+  QEMU's gateway three times.
+  Report: `docs/audit/2026-10-14-ping-report.md`.

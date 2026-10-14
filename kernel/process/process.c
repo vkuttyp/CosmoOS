@@ -74,6 +74,7 @@ static void process_release(struct kobject *obj)
     KASSERT(p->state == PROCESS_EXITED);
     KASSERT(p->nr_threads == 0);
 
+    process_itimer_stop(p);   /* stopped at exit already; a process that never ran gets here too */
     handle_table_destroy(&p->handles);
     if (p->space != NULL)
         vm_space_put(p->space);
@@ -624,6 +625,7 @@ static struct process *process_alloc(const char *name)
     kobject_init(&p->obj, &process_type);
     strlcpy(p->name, name ? name : "?", sizeof(p->name));
     p->start_ns = clock_now_ns();
+    process_itimer_init(p);
     list_init(&p->threads);
     list_init(&p->all_link);
     list_init(&p->children);
@@ -1474,6 +1476,7 @@ static void reap_hold_at(struct process *p, unsigned point);
 
 void process_last_thread_gone(struct process *p)
 {
+    process_itimer_stop(p);   /* no SIGALRM for a process with no thread to take it */
     /*
      * The address space goes first: before any lock, and before the
      * state that waitpid reaps on (EXITED) is published. So by the time
