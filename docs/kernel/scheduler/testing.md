@@ -175,6 +175,16 @@ round; then a wait on a completion nobody completes returns false at its
 deadline. It fails when the timeout wait drops its handshake (the lock is
 still held on return).
 
+### `wait-multi-prepare` (S34, the scp-sftp unit)
+Pinned: prepare on queue A, wake A (the thread is READY and queued while
+it still runs), prepare on queue B; the thread must still be READY, not
+BLOCKED on a run queue (`sched_test_repair_blocked_queued` says so and
+repairs it, so a failure leaves nothing corrupt). Both waits finish with
+the thread RUNNING and off the queue. A run counts only when this CPU
+switched no thread inside the sequence (up to 50 tries).
+`tools/wait-ready-probe.py --old` restores the unconditional BLOCKED: the
+test fails `!breached` on both architectures.
+
 ### `waitqueue`
 Two threads `wait_event` on `go != 0`. After 5 ms the queue is non-empty
 and nobody has woken. `waitqueue_wake_all` with `go` still 0 returns 2

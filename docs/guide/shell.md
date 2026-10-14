@@ -55,7 +55,7 @@ uid=0(root) gid=0(root)...
 cosmo$ uname -s -m
 Linux ...
 cosmo$ ls /
-bin   boot  dev   etc   mnt   proc  root  run   sbin  tmp   var
+bin   boot  dev   etc   mnt   proc  root  run   sbin  tmp   usr   var
 ```
 
 `uname` says `Linux`: BusyBox is a static Linux program, and CosmoOS

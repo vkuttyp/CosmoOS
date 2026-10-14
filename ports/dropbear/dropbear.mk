@@ -15,6 +15,7 @@ DROPBEAR_TAR     := $(PORTS_CACHE)/dropbear-$(DROPBEAR_VERSION).tar.bz2
 DB_DIR          ?= $(dir $(OUT))dropbear-$(ARCH)
 DROPBEAR_ELF    := $(DB_DIR)/dropbear
 DROPBEARKEY_ELF := $(DB_DIR)/dropbearkey
+DB_SCP_ELF      := $(DB_DIR)/scp
 DROPBEAR_LOCALOPTS := $(ROOT)/ports/dropbear/localoptions.h
 
 $(DROPBEAR_TAR):
@@ -29,7 +30,7 @@ $(DROPBEAR_TAR):
 # which svc keeps in the service's log).
 # -ffile-prefix-map keeps the build directory out of the binary (make
 # reproducible).
-$(DROPBEAR_ELF) $(DROPBEARKEY_ELF) &: $(DROPBEAR_TAR) $(DROPBEAR_LOCALOPTS) $(BB_LIBC) $(BB_BUILTINS) $(BB_CC) \
+$(DROPBEAR_ELF) $(DROPBEARKEY_ELF) $(DB_SCP_ELF) &: $(DROPBEAR_TAR) $(DROPBEAR_LOCALOPTS) $(BB_LIBC) $(BB_BUILTINS) $(BB_CC) \
 		$(ROOT)/ports/dropbear/dropbear.mk
 	$(call log,DROPBEAR,$(DROPBEAR_VERSION) $(BB_TARGET))
 	$(Q)rm -rf $(DB_DIR)/src
@@ -42,17 +43,21 @@ $(DROPBEAR_ELF) $(DROPBEARKEY_ELF) &: $(DROPBEAR_TAR) $(DROPBEAR_LOCALOPTS) $(BB
 		--disable-utmpx --disable-wtmp --disable-wtmpx --disable-loginfunc --disable-pututline \
 		--disable-pututxline --enable-bundled-libtom > $(DB_DIR)/configure.log 2>&1 \
 		|| { tail -40 $(DB_DIR)/configure.log; exit 1; }
-	$(Q)$(MAKE) -s -C $(DB_DIR)/src PROGRAMS="dropbear dropbearkey" STATIC=1 > $(DB_DIR)/build.log 2>&1 \
+	$(Q)$(MAKE) -s -C $(DB_DIR)/src PROGRAMS="dropbear dropbearkey scp" STATIC=1 > $(DB_DIR)/build.log 2>&1 \
 		|| { tail -40 $(DB_DIR)/build.log; exit 1; }
 	$(Q)$(OBJCOPY) --strip-all --remove-section=.note --remove-section=.comment $(DB_DIR)/src/dropbear $(DROPBEAR_ELF)
 	$(Q)$(OBJCOPY) --strip-all --remove-section=.note --remove-section=.comment $(DB_DIR)/src/dropbearkey \
 		$(DROPBEARKEY_ELF)
+	$(Q)$(OBJCOPY) --strip-all --remove-section=.note --remove-section=.comment $(DB_DIR)/src/scp $(DB_SCP_ELF)
 
 .PHONY: dropbear
 dropbear: $(DROPBEAR_ELF)
 
-# /sbin/dropbear and /sbin/dropbearkey, and the start script the installed
-# system's service runs (cosmo-install writes /etc/svc/dropbear there).
+# /sbin/dropbear and /sbin/dropbearkey, the start script the installed
+# system's service runs (cosmo-install writes /etc/svc/dropbear there), and
+# /bin/scp: an scp client asking for the classic protocol runs `scp -t` or
+# `scp -f` through the session's shell, which finds it on the PATH
+# localoptions.h sets.
 DROPBEAR_ARCHIVE_ENTRIES := sbin/dropbear=$(DROPBEAR_ELF) sbin/dropbearkey=$(DROPBEARKEY_ELF) \
-	etc/dropbear/start=$(ROOT)/ports/dropbear/start
-DROPBEAR_ARCHIVE_DEPS := $(DROPBEAR_ELF) $(DROPBEARKEY_ELF) $(ROOT)/ports/dropbear/start
+	bin/scp=$(DB_SCP_ELF) etc/dropbear/start=$(ROOT)/ports/dropbear/start
+DROPBEAR_ARCHIVE_DEPS := $(DROPBEAR_ELF) $(DROPBEARKEY_ELF) $(DB_SCP_ELF) $(ROOT)/ports/dropbear/start

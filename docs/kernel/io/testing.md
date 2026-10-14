@@ -77,6 +77,19 @@ HANGUP` even though only `READABLE` was asked for. About 50 ms. The Linux
 `poll`/`ppoll` checks in `lxtest` cover the translation
 (`docs/compat/linux/testing.md`).
 
+### `poll-timer-outlives` (`kernel/io/polltest.c`, the scp-sftp unit)
+
+`io_poll` does not return while its timeout's callback runs. With three
+CPUs (else skipped): a `CONFIG_SELFTEST` hold keeps the callback, after it
+marks the alarm fired, on CPU A; the test writes to the pipe the poller
+waits on (READY on A, whose CPU is held) and moves it to CPU B with
+`sched_migrate`. For 30 ms the poller must not have returned; once the
+hold is let go it returns 1 (the pipe was readable) with the callback
+finished. The poller spins without calls after returning, so the frame
+below it is not reused. `tools/poll-timer-probe.py --old` restores the
+plain cancel: the test fails `!early` on x86-64, and AArch64 faults first
+in `alarm_fired` on the dead frame's pointer, the race itself.
+
 ### `epoll-close` (`kernel/io/epolltest.c`, the epoll-close unit)
 
 Drives the kernel API with a handle table of its own (invariant A9). A

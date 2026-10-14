@@ -189,6 +189,10 @@ struct runqueue *sched_runqueue(unsigned cpu);
 void sched_dump(void);
 
 #if CONFIG_SELFTEST
+/* The current thread BLOCKED while still on a run queue (S34's breach):
+ * says so and puts it back to READY, so the caller's waitqueue_finish takes
+ * it off the queue and nothing is left corrupt (wait-multi-prepare). */
+bool sched_test_repair_blocked_queued(void);
 /* Where `t` is linked: the CPU and level of the ready list that holds it
  * (each queue locked in turn), and whether that level's bitmap bit is set,
  * which is what makes pick_next look there. False when no ready list holds

@@ -418,3 +418,21 @@ the woken waiter runs: the waiter gets the mutex after the owner's
 second round; with the old unlock, after its twentieth), and
 `sched-migrate-stress`'s mutex workers, which the old unlock could
 starve for the whole 2 s deadline (three CI sightings, flakes.md).
+
+**S34. Arming a wait never turns a READY thread back to BLOCKED.** A wait
+that arms several queues -- `poll`, one per descriptor, and the aio
+ring's wait -- calls `waitqueue_prepare` once per queue, and a wake from
+a queue armed earlier can make the thread READY and put it on its run
+queue before the next prepare runs. `waitqueue_prepare` changes the state
+through `sched_prepare_block_current`, under the CPU's run-queue lock,
+the lock the waker set READY under: BLOCKED from RUNNING, and READY left
+as it is (the scheduler's "woken before blocking" path then takes it off
+the queue, S25). It used to write BLOCKED unconditionally, which left a
+BLOCKED thread on a run queue: the next wake or preemption queued it a
+second time and `rr_enqueue`'s assertion stopped the kernel (found
+2026-10-14 under scp and sftp traffic on AArch64: the guide's sftp step,
+then a stress at the fourth round). Check: `wait-multi-prepare` (woken
+from the first of two queues, the second prepare leaves the thread READY;
+a breach is repaired by `sched_test_repair_blocked_queued` before the
+waits finish, so a failure leaves nothing corrupt).
+

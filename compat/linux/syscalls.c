@@ -3317,6 +3317,27 @@ static int64_t lx_sock_send(struct socket *s, uint64_t ubuf, size_t len, const s
     return done > 0 ? done : rc;
 }
 
+/* prctl: PR_SET_DUMPABLE and PR_GET_DUMPABLE (OpenSSH's sftp-server makes
+ * itself undumpable and refuses to run when it cannot). The flag is kept on
+ * the process and reported back; nothing reads it, there being no core
+ * dumps or ptrace. Linux's answer for an option it does not know is
+ * -EINVAL, and so is this one's for every other option. */
+static int64_t lx_prctl(struct syscall_args *a)
+{
+    struct process *p = process_current();
+    switch ((int)a->a[0]) {
+    case LX_PR_GET_DUMPABLE:
+        return __atomic_load_n(&p->dumpable, __ATOMIC_RELAXED);
+    case LX_PR_SET_DUMPABLE:
+        if (a->a[1] > 1)
+            return -EINVAL;   /* 2 (SUID_DUMP_ROOT) is not settable on Linux either */
+        __atomic_store_n(&p->dumpable, (uint8_t)a->a[1], __ATOMIC_RELAXED);
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
 /* --- interval timers: ITIMER_REAL only (kernel/process/itimer.c) --------- */
 
 /* A timeval as nanoseconds: -EINVAL only for a negative field or tv_usec
@@ -4090,6 +4111,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_sysinfo] = lx_sysinfo,
     [LX_statfs] = lx_statfs,
     [LX_setitimer] = lx_setitimer,
+    [LX_prctl] = lx_prctl,
     [LX_getitimer] = lx_getitimer,
 #ifdef LX_alarm
     [LX_alarm] = lx_alarm,

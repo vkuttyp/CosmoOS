@@ -632,6 +632,23 @@ void sched_reprioritize(struct thread *t, int prio)
     spin_unlock_irqrestore(&rq->lock, s);
 }
 
+void sched_prepare_block_current(void)
+{
+    /* Interrupts are already off (the wait queue's lock is held), so this
+     * CPU's queue is the one a waker would put this thread on (S25). */
+    struct percpu *pc = raw_this_cpu();
+    struct runqueue *rq = pc->rq;
+    struct thread *cur = pc->current;
+    spin_lock(&rq->lock);
+    /* READY is a wake that already queued this thread: from a queue armed
+     * earlier in the same wait (poll arms one per descriptor). Writing
+     * BLOCKED over it left a BLOCKED thread on a run queue, which the next
+     * wake or preemption queued again (S34). */
+    if (cur->state != THREAD_READY)
+        cur->state = THREAD_BLOCKED;
+    spin_unlock(&rq->lock);
+}
+
 void sched_set_running_current(void)
 {
     /* Interrupts off before the block is read, as in schedule_internal:
@@ -802,6 +819,21 @@ enum sched_migrate_result sched_migrate_from(unsigned from, unsigned to, unsigne
 }
 
 #if CONFIG_SELFTEST
+bool sched_test_repair_blocked_queued(void)
+{
+    arch_irq_state_t s = arch_irq_save();
+    struct percpu *pc = this_cpu();
+    struct runqueue *rq = pc->rq;
+    struct thread *cur = pc->current;
+    spin_lock(&rq->lock);
+    bool bad = cur->state == THREAD_BLOCKED && !list_empty(&cur->rq_link);
+    if (bad)
+        cur->state = THREAD_READY;   /* what the wake made it: finish then dequeues it */
+    spin_unlock(&rq->lock);
+    arch_irq_restore(s);
+    return bad;
+}
+
 bool sched_test_find_queued(const struct thread *t, unsigned *cpu, int *level, bool *bit_set)
 {
     for (unsigned c = 0; c < cpu_count(); c++) {

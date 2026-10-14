@@ -1568,6 +1568,15 @@ int main(int argc, char **argv)
         CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &before, 0, 8) == 0, 0);
         CHECKV(sc4(LX_rt_sigaction, 14, &dfl, 0, 8) == 0, 0);
     }
+    /* prctl: the dumpable flag (the scp-sftp unit: OpenSSH's sftp-server
+     * clears it and refuses to run when it cannot); every other option is
+     * -EINVAL. */
+    CHECKV(sc2(LX_prctl, LX_PR_GET_DUMPABLE, 0) == 1, 0);
+    CHECKV(sc2(LX_prctl, LX_PR_SET_DUMPABLE, 0) == 0, 0);
+    CHECKV(sc2(LX_prctl, LX_PR_GET_DUMPABLE, 0) == 0, 0);
+    CHECKV(sc2(LX_prctl, LX_PR_SET_DUMPABLE, 2) == -22, 0);
+    CHECKV(sc2(LX_prctl, LX_PR_SET_DUMPABLE, 1) == 0, 0);
+    CHECKV(sc2(LX_prctl, 9999, 0) == -22, 0);
     /* sysinfo (docs/audit/next-subsystem-sysinfo.md) */
     {
         struct lx_sysinfo si;

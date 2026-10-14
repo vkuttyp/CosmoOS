@@ -131,6 +131,18 @@ def ssh_base(work, port, strict, key="id_ed25519"):
             "-o", "LogLevel=ERROR", "root@127.0.0.1"]
 
 
+def xfer_base(prog, work, port, key="id_ed25519"):
+    """scp or sftp with ssh_base's options: -P names the port for both."""
+    return [prog, "-i", os.path.join(work, key), "-P", str(port), "-o", "IdentitiesOnly=yes",
+            "-o", "BatchMode=yes", "-o", "UserKnownHostsFile=" + os.path.join(work, "known_hosts"),
+            "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=20", "-o", "LogLevel=ERROR"]
+
+
+def xfer(argv, timeout=120):
+    p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    return p.returncode, p.stdout + p.stderr
+
+
 def ssh_run(work, port, strict, command, timeout=60, key="id_ed25519"):
     """`command` over ssh; (exit status, output)."""
     p = subprocess.run(ssh_base(work, port, strict, key) + [command], capture_output=True, text=True,
@@ -257,6 +269,61 @@ def stage_ssh(args, results, b, port):
         raise Fail(f"ssh -tt: the session's wait did not succeed: {out[-600:]!r}")
     results.append(f"d. ssh -tt: tty {m.group(1)}, stty size {WIN_ROWS} {WIN_COLS}, sleep 100 & / jobs / "
                    "kill %1 / wait")
+    stage_files(work, port, results)
+
+
+def stage_files(work, port, results):
+    """scp both ways, in both protocols, and an sftp session: the scp-sftp
+    unit. `scp -O` is the classic protocol, which runs /bin/scp (dropbear's)
+    through the session's shell; plain scp (OpenSSH 9.0 and later) and sftp
+    use the sftp subsystem, which runs /usr/libexec/sftp-server (OpenSSH's).
+    Each file is compared by SHA-256 on both sides."""
+    data = os.urandom(256 * 1024)
+    want = hashlib.sha256(data).hexdigest()
+    src = os.path.join(work, "xfer-src.bin")
+    with open(src, "wb") as f:
+        f.write(data)
+
+    def remote_sum(path):
+        rc, out = ssh_run(work, port, True, f"sha256sum {path}")
+        m = re.search(r"^([0-9a-f]{64})\s", out, re.M)
+        if rc != 0 or not m:
+            raise Fail(f"sha256sum {path}: status {rc}, output {out!r}")
+        return m.group(1)
+
+    def local_sum(path):
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    for mode, extra, name in (("classic", ["-O"], "up-classic.bin"), ("sftp", [], "up-sftp.bin")):
+        rc, out = xfer(xfer_base("scp", work, port) + extra + [src, f"root@127.0.0.1:/root/{name}"])
+        if rc != 0:
+            raise Fail(f"scp ({mode}) to the guest: status {rc}, output {out!r}")
+        if remote_sum(f"/root/{name}") != want:
+            raise Fail(f"scp ({mode}) to the guest: /root/{name} differs")
+        back = os.path.join(work, f"down-{mode}.bin")
+        if os.path.exists(back):
+            os.unlink(back)
+        rc, out = xfer(xfer_base("scp", work, port) + extra + [f"root@127.0.0.1:/root/{name}", back])
+        if rc != 0 or local_sum(back) != want:
+            raise Fail(f"scp ({mode}) from the guest: status {rc}, output {out!r}")
+    results.append(f"d. scp: 256 KiB to the guest and back, classic (scp -O, /bin/scp) and sftp protocol, "
+                   f"SHA-256 {want[:16]}... on both sides")
+
+    got = os.path.join(work, "down-sftp-session.bin")
+    if os.path.exists(got):
+        os.unlink(got)
+    batch = os.path.join(work, "sftp.batch")
+    with open(batch, "w") as f:
+        f.write(f"mkdir /root/sftp-dir\ncd /root/sftp-dir\nput {src} s.bin\nls -l\n"
+                f"get s.bin {got}\nrename s.bin t.bin\nls\nrm t.bin\ncd /root\nrmdir /root/sftp-dir\n")
+    rc, out = xfer(xfer_base("sftp", work, port) + ["-b", batch, "root@127.0.0.1"])
+    if rc != 0 or "t.bin" not in out or local_sum(got) != want:
+        raise Fail(f"sftp -b: status {rc}, output {out[-800:]!r}")
+    rc, out = ssh_run(work, port, True, "ls /root/sftp-dir 2>&1; echo gone=$?")
+    if not re.search(r"^gone=1$", out, re.M):
+        raise Fail(f"sftp: rmdir left /root/sftp-dir: {out!r}")
+    results.append("d. sftp: mkdir, put, ls -l, get (SHA-256 matches), rename, rm, rmdir in one batch")
 
 
 def stage_reboot_ssh(args, results, inst, port):

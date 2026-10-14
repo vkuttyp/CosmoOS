@@ -1366,6 +1366,66 @@ static void waiter_entry(void *arg)
     wt->woke++;
 }
 
+/*
+ * wait-multi-prepare (S34): a wait that arms two queues, woken from the
+ * first before it arms the second, as poll is when a descriptor becomes
+ * ready while the rest are still being armed. The wake makes this thread
+ * READY and puts it on its run queue while it still runs; the second
+ * prepare must leave it READY. It used to write BLOCKED over it: a BLOCKED
+ * thread on a run queue, which the next wake or preemption queued a second
+ * time (rr_enqueue's assertion; found under scp and sftp traffic). A
+ * breach is repaired before the waits are finished, so a failure leaves
+ * nothing corrupt. waitqueue_prepare may sleep, so preemption stays on: a
+ * switch inside the sequence (a tick) would leave nothing to observe, so
+ * a run decides only when this CPU switched no thread meanwhile.
+ */
+bool selftest_wait_multi_prepare(const char **reason)
+{
+#if !CONFIG_SELFTEST
+    /* The breach's repair is a CONFIG_SELFTEST seam; without it a failure
+     * would leave the run queue corrupt, so the check does not run. */
+    (void)reason;
+    kinfo("selftest: wait-multi-prepare: needs CONFIG_SELFTEST; skipping");
+    return true;
+#else
+    struct thread *self = thread_current();
+    cpumask_t was = thread_pin_self();   /* the CPU and its switch count are read here (S25) */
+    for (unsigned attempt = 0; attempt < 50; attempt++) {
+        struct waitqueue a, b;
+        waitqueue_init(&a, "wmp-a");
+        waitqueue_init(&b, "wmp-b");
+        struct wait_entry ea, eb;
+        wait_entry_init(&ea);
+        wait_entry_init(&eb);
+        unsigned cpu = arch_cpu_id();
+        uint64_t switches = sched_switch_count(cpu);
+
+        waitqueue_prepare(&a, &ea);               /* BLOCKED, still running */
+        unsigned woke = waitqueue_wake_all(&a);   /* READY, and queued: a wake from the first queue */
+        waitqueue_prepare(&b, &eb);               /* the second queue armed */
+        bool breached = sched_test_repair_blocked_queued();
+        bool still_ready = __atomic_load_n(&self->state, __ATOMIC_ACQUIRE) == THREAD_READY;
+        waitqueue_finish(&b, &eb);
+        waitqueue_finish(&a, &ea);                /* off the run queue, RUNNING */
+        bool running = self->state == THREAD_RUNNING && list_empty(&self->rq_link);
+
+        if (sched_switch_count(cpu) != switches)
+            continue;   /* switched out inside the sequence: nothing to observe */
+        thread_set_affinity_self(was);
+        CHECK(woke == 1);
+        CHECK(!breached);
+        CHECK(still_ready);
+        CHECK(running);
+        kinfo("selftest: wait-multi-prepare: woken from the first of two queues, the second prepare left it "
+              "READY (attempt %u)", attempt + 1);
+        return true;
+    }
+    thread_set_affinity_self(was);
+    *reason = "50 attempts each switched out inside the sequence";
+    return false;
+#endif
+}
+
 bool selftest_waitqueue(const char **reason)
 {
     unsigned before = thread_count();

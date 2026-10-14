@@ -37,8 +37,10 @@ void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e)
         list_push_back(&wq->waiters, &e->link);
     cur->waiting_on = wq;
     /* Under the wait-queue lock so a concurrent waker sees either the
-     * BLOCKED state and enqueues us, or runs after we finish. */
-    cur->state = THREAD_BLOCKED;
+     * BLOCKED state and enqueues us, or runs after we finish -- and never
+     * over a READY one: a wait that arms several queues (poll) may already
+     * have been woken from an earlier one and queued (S34). */
+    sched_prepare_block_current();
     spin_unlock_irqrestore(&wq->lock, s);
 }
 

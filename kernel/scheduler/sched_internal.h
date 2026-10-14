@@ -22,6 +22,10 @@ void thread_reaper_start(void);
 /* sched.c */
 void sched_finish_switch(void);
 void sched_enqueue_new(struct thread *t);
+/* waitqueue_prepare's state change: BLOCKED, unless a wake from a queue
+ * armed earlier in the same wait already made the thread READY and queued
+ * it (S34). Under this CPU's run-queue lock; interrupts off. */
+void sched_prepare_block_current(void);
 /* After a wait completes: if a wake already queued us, dequeue; mark RUNNING. */
 void sched_set_running_current(void);
 

@@ -11,9 +11,12 @@
  * ~/.ssh/id_rsa.pub works (the owner's request, 2026-10-13), with
  * rsa-sha2-256 signatures only (DROPBEAR_RSA_SHA1 stays 0; dropbear has no
  * rsa-sha2-512). The switch also builds RSA host-key support, which the
- * service does not use. What an ssh login needs and nothing
- * else: no forwarding of any kind, no sftp server (scp/sftp are outside
- * M4), no X11, no MOTD, no inetd mode.
+ * service does not use. What an ssh login and file transfer need and
+ * nothing else: no forwarding of any kind, no X11, no MOTD, no inetd
+ * mode. Files: scp's classic protocol runs /bin/scp (built from this
+ * source) through the session's shell; the sftp subsystem, which current
+ * OpenSSH scp uses too, runs OpenSSH's sftp-server (ports/openssh), as
+ * dropbear itself provides none (the scp-sftp unit, 2026-10-14).
  */
 #define DROPBEAR_SVR_PASSWORD_AUTH 0
 #define DROPBEAR_SVR_PAM_AUTH 0
@@ -35,7 +38,8 @@
 #define DROPBEAR_CLI_LOCALTCPFWD 0
 #define DROPBEAR_CLI_REMOTETCPFWD 0
 #define DROPBEAR_CLI_AGENTFWD 0
-#define DROPBEAR_SFTPSERVER 0
+#define DROPBEAR_SFTPSERVER 1
+#define SFTPSERVER_PATH "/usr/libexec/sftp-server"
 #define DO_MOTD 0
 #define INETD_MODE 0
 

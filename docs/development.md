@@ -563,7 +563,8 @@ requires the two `SHA256SUMS` to be equal before it publishes.
 5. `publish`: one `SHA256SUMS` for both architectures, the notes
    (`scripts/release-notes.py`: the release key and its id, the CI image
    digests and the compiler and QEMU versions in them, BusyBox, musl,
-   compiler-rt and dropbear with their pinned SHA-256, the
+   compiler-rt, dropbear and OpenSSH portable (sftp-server) with their
+   pinned SHA-256, the
    reproducibility lines, every file's SHA-256, the guide's known
    limitations), and `gh release create`; a tag with a hyphen is a
    pre-release.
