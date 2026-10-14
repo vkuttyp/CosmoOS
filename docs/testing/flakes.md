@@ -2675,6 +2675,21 @@ held one report, one probe script and this file. The test itself passed
 is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
+## `lxpty` check 35: a continued job's read returned, 2026-10-14
+
+`lxpty: FAIL the session child ended early, status 8960` (exit 35: the
+job stopped by ^Z and continued was expected to die of the `SIGKILL` that
+followed, and `wait4` found it had exited 0), local aarch64 `test-chaos`
+in the scp-sftp unit's matrix (that branch at 5e5beaf0, on main
+ae94d281). The job's `J_READ` exits 0 when its read of the terminal
+returns 0 or more: a whole line, a hangup, or `VMIN` 0 -- and the parent
+writes only ^C and ^Z to the master, neither of which ends a line in
+canonical mode. So the read returned without a reason this test can name.
+The branch changes how a multi-queue wait treats a wake (S34) and
+`io_poll`'s timer; a killable tty read is neither. Four reruns of the same
+step on the branch and four on main passed. Not attributed; first
+sighting.
+
 ## `sched-restore-loop`: one trip short, 2026-10-13
 
 `SELFTEST: sched-restore-loop ... FAIL: check failed: runs ==

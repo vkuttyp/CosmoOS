@@ -71,8 +71,20 @@ on main, older than this unit.
 
 ## Validation
 
-`make BUILD=release test-net-login` passes on x86-64 and AArch64. The rest
-is filled in before the PR.
+- **Matrix**, local, at 5e5beaf0: 36 of 38 steps pass. AArch64
+  `test-entropy` failed before the kernel ran (QEMU could not bind its
+  host-forwarding port: the collision `flakes.md` records) and passed on
+  rerun. AArch64 `test-chaos` failed once in `lxpty` check 35 (recorded
+  in `flakes.md`, not attributed) and passed four reruns, as main did
+  four times.
+- **`make BUILD=release test-net-login`** passes on both architectures.
+- **The user guide on macOS**, both architectures: the ssh page's `scp`
+  and `sftp` steps included (AArch64 panicked there before S34 and the
+  `poll` fix).
+- **Stress**, AArch64, sftp batch and `scp -O` per round: 1,200 rounds in
+  three runs, no panic (round 4 before the fixes).
+- **Probes**: `wait-ready-probe` and `poll-timer-probe`, both modes, both
+  architectures.
 
 ## Not done here
 
