@@ -46,8 +46,8 @@ one, so raw sockets, which need no patch to BusyBox, were built instead.
 - The networking guide (a tested page, CI on both architectures and from
   macOS): `ping -c 3 10.0.2.2`, which QEMU's user network answers itself.
 - `tools/sock-proto-probe.py`: fixed `LINUXTEST: PASS`; `--old` reverses
-  the protocol check and lxtest fails on it, the ping socket being a
-  descriptor, on both architectures.
+  the protocol check and lxtest fails on it, the ping socket being
+  descriptor 3 (a UDP socket), on x86-64 and AArch64 (run at 1fbf134e).
 
 ## On Parallels Desktop 27
 
