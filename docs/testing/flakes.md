@@ -4202,3 +4202,26 @@ interrupt path on x86-64. First sighting of this check. The failed job
 was rerun and passed (job 115083358004); that runner was slow too, its
 boots 171-183 s, so the test's storm can form on a slow runner and this
 one was slower still in the storm's second.
+
+## `net-netif-lifetime`: a queue count of every interface, 2026-10-14
+
+`SELFTEST: net-netif-lifetime ... FAIL: check failed:
+netif_rxq_count(found) == q0 at line 2963 (3 ms)`, PR #384's x86-64
+entropy boots (run 38573864739, job 115885848702), `boot-test: FAIL
+after 154.6s`, 1 of 474. The PR changed no kernel file. First sighting.
+
+Mechanism, from the code and not a timing story: `netif_rxq_count`'s
+header says "the number of queued receive packets from `nif`", but it
+summed every CPU's receive queue, every interface's packets
+(`(void)nif`). The test read it, sent a packet to its unregistered
+interface (which is freed, not queued), and read it again; a packet of
+any other interface arriving at or leaving a queue between the reads
+moves the count. An entropy boot has live network traffic. The count now
+walks each queue under its lock and counts only `nif`'s packets, and the
+test requires 0 before and after (unregister purged its one queued
+packet). `netif-rxq-count` makes the old behaviour fail every time: CPU
+0's worker is parked on a decoy interface's first packet, its second
+stays queued, and a second interface must count 0;
+`tools/netif-rxq-count-probe.py --old` reverts the count and the second
+interface counts 1, on both architectures. Fixed in the https unit (PR
+#384), since it turned that PR red.

@@ -27,6 +27,20 @@ the guide's "HTTP only" paragraph). BusyBox 1.37.0 has three ways to do TLS:
 | release and CI | the port in the CI cache keys, `check-reproducible.sh` (`ssl_client` compared), the release notes' pinned-source table; the two new archives, and OpenSSH's (missed by the scp-sftp unit), attached to the `pinned-sources` release | `.github/workflows/ci.yml`, `scripts/` |
 | test certificates | made by the test for each run with `openssl` (3.4 or later, for `x509 -not_after`: the CI image's, pulled in by `ca-certificates`; Homebrew's on macOS), a test CA and three server certificates, so no private key is in the tree. The first push checked them in, and GitGuardian failed the PR on the keys; the branch was rewritten without them | `tests/boot/net_login_test.py` |
 
+## Found on the way: a queue count of every interface
+
+PR #384's x86-64 entropy boots failed `net-netif-lifetime` at
+`netif_rxq_count(found) == q0` (the PR changed no kernel file).
+`netif_rxq_count` is documented as the count of `nif`'s queued receive
+packets, but summed every CPU's queue, all interfaces' packets, so the
+test's two reads moved with any other traffic. It now counts only
+`nif`'s packets, under each queue's lock, and the test requires 0 before
+and after the dropped packet. `netif-rxq-count` (debug boots) parks CPU
+0's worker on a decoy interface's first packet so its second stays
+queued, and requires another interface to count 0; with the old count it
+fails every time (`tools/netif-rxq-count-probe.py --old`, both
+architectures). Recorded in `flakes.md`.
+
 ## Tests
 
 - `tests/boot/net_login_test.py` (`make BUILD=release test-net-login`, CI
@@ -54,6 +68,11 @@ the guide's "HTTP only" paragraph). BusyBox 1.37.0 has three ways to do TLS:
   crash, wxn, guard, entropy, security, release boot, install, platforms,
   gic, and `make BUILD=release reproducible`, where `mbedtls/ssl_client`
   is the same in both trees).
+- **`netif-rxq-count`**, at `7afd8517`: debug boots pass on both
+  architectures (`NETIF-RXQ-COUNT: PASS decoy=1 other=0`), and
+  `tools/netif-rxq-count-probe.py` shows both modes on both: `--old`
+  fails with `decoy=1 other=1`, the fixed tree passes (one CPU). The
+  matrix above predates this kernel change; CI's boots cover it.
 - **`make BUILD=release test-net-login`** passes on both architectures,
   steps c and f included.
 

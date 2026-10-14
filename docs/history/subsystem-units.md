@@ -2965,5 +2965,9 @@ See the [history index](README.md).
   exec it rather than BusyBox's own TLS, which checks nothing.
   `test-net-login` serves HTTPS with test certificates: a good one passes,
   and an untrusted, an expired and a wrongly named one are refused with
-  the reason; `https://example.com/` works against the bundle.
+  the reason; `https://example.com/` works against the bundle. The PR's
+  CI found `netif_rxq_count` counting every interface's queued packets
+  against its own header (`net-netif-lifetime` failed under traffic); it
+  counts one interface's now (`netif-rxq-count`,
+  `tools/netif-rxq-count-probe.py`).
   Report: `docs/audit/2026-10-14-https-report.md`.
