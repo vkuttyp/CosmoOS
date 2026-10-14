@@ -102,6 +102,7 @@ removing or changing one bumps the version.
 |---|---|
 | Logging | `klog`, `kvlog`, `kprintf`, `kvprintf`, `ksnprintf`, `kvsnprintf`, `klog_copy`, `panic` |
 | Heap | `kmalloc`, `kzalloc`, `krealloc`, `kfree`, `kmem_cache_create`, `kmem_cache_destroy`, `kmem_cache_alloc`, `kmem_cache_free` |
+| Kernel mappings (`kernel/vmm.h`, the virtio-gpu unit) | `vm_map_direct_ranges` (direct-map buffers back to back as one view: a frame in 4 MiB chunks), `vm_unmap_phys` |
 | Strings | `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strchr`, `strstr`, `strlcpy` |
 | Locks | `spinlock_init`, `spin_lock`, `spin_lock_nested`, `spin_unlock`, `spin_trylock`, `spin_lock_irqsave`, `spin_lock_irqsave_nested`, `spin_unlock_irqrestore`, `mutex_init`, `mutex_lock`, `mutex_lock_nested`, `mutex_trylock`, `mutex_unlock` |
 | Scheduling and time | `thread_create`, `thread_exit`, `thread_join`, `thread_sleep_ns`, `sched_yield`, `sched_block_current` (with `waitqueue_init`, `waitqueue_prepare`, `waitqueue_finish`, `waitqueue_wake_all`: what the `wait_event` macro expands to, exported for the xhci port worker), `arch_percpu_get` (what `this_cpu()` and `preemptible()` inline to: usb_storage asks whether a submit may run recovery), `clock_now_ns`, `ndelay`, `udelay`, `timer_setup`, `timer_start`, `timer_cancel`, `timer_cancel_sync`, and since milestone 9 `completion_init`, `complete`, `completion_done`, `wait_for_completion`, `cpu_count`, `arch_cpu_id` |
@@ -112,17 +113,18 @@ removing or changing one bumps the version.
 | PCI (`drivers/pci.h`) | `pci_bus`, `pci_register_driver`, `pci_unregister_driver`, `pci_cfg_read8/16/32`, `pci_cfg_write8/16/32`, `pci_enable_device`, `pci_map_bar`, `pci_io_bar_usable`, `pci_io_read`, `pci_io_write`, `pci_find_capability`, `pci_msix_enable`, `pci_msix_request`, `pci_msix_release`, `pci_msix_disable`, `pci_msi_enable`, `pci_msi_disable`, `pci_device_count`, `pci_device_at`, `pci_find_device` |
 | Block (`kernel/blk.h`) | `blk_register`, `blk_register_named`, `blk_unregister`, `blk_submit`, `bio_complete`, `bio_segment`, `blk_read`, `blk_write`, `blk_write_flags`, `blk_flush`, `blk_find` |
 | Entropy (`kernel/random.h`) | `random_add_entropy`, `random_get_bytes`, `random_u64`, `random_entropy_bits` |
-| Console (`kernel/console.h`) | `console_register`, `console_unregister`, `console_in_panic_mode` (additive; lock-taking sinks must skip their transport during fatal output) |
+| Console (`kernel/console.h`, `kernel/fbcon.h`) | `console_register`, `console_unregister`, `console_in_panic_mode` (additive; lock-taking sinks must skip their transport during fatal output); since the virtio-gpu unit `fbcon_attach`, `fbcon_detach`, `fbcon_take_damage` (a display driver's surface for the screen console) |
 | Packet buffers (`kernel/mbuf.h`) | `m_get`, `m_getcl`, `m_free`, `m_freem`, `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`, `m_length`, `m_copypacket` |
 | Network interfaces (`kernel/netif.h`) | `netif_register`, `netif_unregister`, `netif_release_static`, `netif_rx`, `netif_rx_on`, `net_flow_hash`, `netif_set_ipv4`, `netif_set_up`; `m_csum_complete` (`kernel/net/cksum.h`) |
 
-Modules export too: the `virtio` module provides 15 symbols
+Modules export too: the `virtio` module provides 17 symbols
 (`virtio_bus`, `virtio_register_driver`, `virtio_unregister_driver`,
 `virtio_device_init`, `virtio_device_ready`, `virtio_device_reset`,
 `virtio_read_config`, `virtio_read_config32`, `virtio_read_config64`,
-`virtq_alloc`, `virtq_alloc_on`, `virtq_free`, `virtq_add`, `virtq_kick`, `virtq_pop`,
-`virtq_free_count`) that `virtio_blk`, `virtio_rng`, `virtio_console`
-and `virtio_net` resolve by declaring `deps = "virtio"`; the loader
+`virtio_write_config32`, `virtq_alloc`, `virtq_alloc_on`, `virtq_free`,
+`virtq_add`, `virtq_kick`, `virtq_pop`, `virtq_free_count`) that
+`virtio_blk`, `virtio_rng`, `virtio_console`, `virtio_net` and
+`virtio_gpu` resolve by declaring `deps = "virtio"`; the loader
 resolves a foreign symbol only from a declared dependency (invariant
 M3), and a module cannot be unloaded while a dependant holds it. In
 total the tree carries 150 `EXPORT_SYMBOL` records.

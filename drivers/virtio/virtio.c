@@ -167,6 +167,12 @@ uint64_t virtio_read_config64(struct virtio_device *vdev, unsigned off)
     return v;
 }
 
+void virtio_write_config32(struct virtio_device *vdev, unsigned off, uint32_t val)
+{
+    if (vdev->tr->write_config32 != NULL)   /* the test transports have none */
+        vdev->tr->write_config32(vdev, off, val);
+}
+
 EXPORT_SYMBOL(virtio_bus);
 EXPORT_SYMBOL(virtio_register_driver);
 EXPORT_SYMBOL(virtio_unregister_driver);
@@ -176,3 +182,4 @@ EXPORT_SYMBOL(virtio_device_reset);
 EXPORT_SYMBOL(virtio_read_config);
 EXPORT_SYMBOL(virtio_read_config32);
 EXPORT_SYMBOL(virtio_read_config64);
+EXPORT_SYMBOL(virtio_write_config32);

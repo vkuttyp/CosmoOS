@@ -92,6 +92,32 @@ once at init), which makes a scroll a memmove of the shadow followed by
 a repaint from it: writes only, no reads of the framebuffer, which are
 several times more expensive uncached.
 
+**A display driver's surface** (the virtio-gpu unit). `fbcon_attach`
+moves the console onto memory a display driver owns (`struct
+fbcon_surface`: base, size, pitch, the pixel format, and `panic_flush`).
+The text buffer and the newest screenful of the log are taken first, in
+thread context. The switch is one hold of the console lock: the new
+geometry, a cleared surface, the screenful replayed. The sink itself,
+which is on the console's list, stays as it is. The first build copied
+the whole console structure and with it the sink's `next`, which cut
+every sink after fbcon off the list: on Parallels Desktop the serial
+console went silent (`make test-display`'s `both` shape checks it).
+
+Such a surface is not scanned out as it is written. The sink records the
+pixel rows it drew as one band, and the driver's thread takes it
+(`fbcon_take_damage`) and flushes it. In panic mode no thread runs, so
+the sink calls the surface's `panic_flush` with the band after each
+write. `fbcon_detach` goes back to the boot framebuffer (kept, mapped,
+not drawn while the surface was), or to no screen console. The boot
+framebuffer is uncached and scanned out directly; a surface is
+write-back memory the device reads.
+
+The drawing loops are aligned to 512 bytes (`FBCON_DRAW_ALIGN`), so none
+crosses a page. They are 124 to 457 bytes, and the 256 they had before
+kept them inside a page only by placement: this unit's AArch64 release
+link put `fbcon_draw_clear_rows` (272 bytes) at 0x...2f00, and
+`check-kernel-elf.sh` refused the kernel.
+
 A scroll moves several rows at once (`rows / 4`) rather than one. The
 cost of a scroll is a screen repaint and does not depend on how far it
 moves, so scrolling by one row would repaint the screen for every line

@@ -9,7 +9,8 @@
  * loader may have chosen one the display prefers, boot/uefi/display.c),
  * allocates a scanout, or talks to a display device: the pixels it writes
  * are the ones the firmware is already scanning out. Choosing modes is a
- * display driver's job (constitution section 60, "GPU later").
+ * display driver's job: the virtio_gpu module, which moves the console
+ * onto its own memory (fbcon_attach, below).
  *
  * Concurrency and context: console.c serialises sink writes under its own
  * IRQ-safe lock and drops that lock for good in panic mode, so this sink
@@ -17,11 +18,19 @@
  * here is bounded, allocation-free and sleep-free, because it runs from
  * interrupt and panic context.
  *
+ * A display driver can move the console onto memory of its own
+ * (fbcon_attach, the virtio-gpu unit): the device scans that memory out
+ * only when told to, so the sink records the pixel rows it drew as one
+ * damaged band and the driver's thread takes it (fbcon_take_damage) and
+ * flushes. In panic mode no thread runs, and the sink calls the
+ * surface's panic_flush itself after each write.
+ *
  * See docs/kernel/diagnostics/design.md, "The framebuffer console".
  */
 
 #include <kernel/bootinfo.h>
 #include <kernel/console.h>
+#include <kernel/errno.h>
 #include <kernel/fbcon.h>
 #include <kernel/font.h>
 #include <kernel/kmalloc.h>
@@ -43,11 +52,39 @@ struct fbcon {
     char *text;                  /* cols * rows cells, the screen as characters */
     uint32_t scroll_rows;        /* cell rows moved by one scroll */
     bool ready;
+    bool registered;             /* the sink is on the console's list */
+    /* A driver's surface (fbcon_attach), or NULL for the boot framebuffer. */
+    const struct fbcon_surface *surface;
+    uint32_t dmg_y0, dmg_y1;     /* drawn and not yet taken: pixel rows [y0, y1), empty when equal */
     struct console_sink sink;
     struct fbcon_stats stats;
 };
 
 static struct fbcon g_fbcon;
+/* The boot framebuffer's console, kept while a surface is attached so
+ * fbcon_detach can go back to it (ready false: there was none). */
+static struct fbcon g_boot_fbcon;
+
+/* Pixel rows [y0, y1) were drawn: widen the damaged band. Only a surface
+ * needs it; the boot framebuffer is scanned out as it is written. */
+static void damage(struct fbcon *c, uint32_t y0, uint32_t y1)
+{
+    if (c->surface == NULL)
+        return;
+    if (y1 > c->height)
+        y1 = c->height;
+    if (y0 >= y1)
+        return;
+    if (c->dmg_y0 == c->dmg_y1) {
+        c->dmg_y0 = y0;
+        c->dmg_y1 = y1;
+        return;
+    }
+    if (y0 < c->dmg_y0)
+        c->dmg_y0 = y0;
+    if (y1 > c->dmg_y1)
+        c->dmg_y1 = y1;
+}
 
 /* An eight-bit intensity in a channel of `bits` bits. Deeper channels
  * exist (ten bits a colour is a real mode) and the validator allows them,
@@ -76,7 +113,11 @@ static uint32_t pack(const struct bootinfo_framebuffer *fb, unsigned r, unsigned
  * scroll against 10.9 ms for the same code 64 bytes earlier), slowing every
  * test that logs much (docs/testing/flakes.md, syscall-fuzz, 2026-10-10).
  */
-#define FBCON_DRAW_ALIGN 256
+/* 512: the functions are 124 to 457 bytes (fbcon_draw_glyph the largest),
+ * so an alignment of 256 kept them inside a page only where the linker
+ * happened to put them -- the virtio-gpu branch's layout put
+ * fbcon_draw_clear_rows (272 bytes) at 0x...2f00 on AArch64. */
+#define FBCON_DRAW_ALIGN 512
 #define FBCON_SCALE_MAX 4u
 #define FBCON_DRAW __page_local(FBCON_DRAW_ALIGN)
 
@@ -197,6 +238,7 @@ static void scroll(struct fbcon *c)
     memmove(c->text, c->text + (size_t)n * c->cols, keep);
     memset(c->text + keep, ' ', (size_t)n * c->cols);
     fbcon_draw_repaint(c);
+    damage(c, 0, c->rows * c->cell_h);
     c->stats.scrolls++;
 }
 
@@ -241,6 +283,7 @@ static void putc(struct fbcon *c, char ch)
         newline(c);
     c->text[c->cy * c->cols + c->cx] = (char)b;
     fbcon_draw_glyph(c, c->cx, c->cy, b);
+    damage(c, c->cy * c->cell_h, (c->cy + 1) * c->cell_h);
     c->cx++;
 }
 
@@ -252,6 +295,13 @@ static void fbcon_write(struct console_sink *sink, const char *s, size_t len)
     for (size_t i = 0; i < len; i++)
         putc(c, s[i]);
     c->stats.bytes += len;
+    /* No thread will flush during a panic: the surface does it now. */
+    if (c->surface != NULL && c->surface->panic_flush != NULL && c->dmg_y0 != c->dmg_y1 &&
+        console_in_panic_mode()) {
+        uint32_t y0 = c->dmg_y0, y1 = c->dmg_y1;
+        c->dmg_y0 = c->dmg_y1 = 0;
+        c->surface->panic_flush(c->surface->arg, y0, y1);
+    }
 }
 
 /*
@@ -349,6 +399,7 @@ static void fbcon_start(struct fbcon *c)
     c->scroll_rows = c->rows / 4 ? c->rows / 4 : 1;
     c->ready = true;
     fbcon_draw_clear_rows(c, 0, c->rows);
+    damage(c, 0, c->height);
 }
 
 /*
@@ -380,6 +431,7 @@ void fbcon_early_init(void)
     c->text = g_early_text;
     fbcon_start(c);
     console_register(&c->sink);
+    c->registered = true;
     kinfo("fbcon: no serial console: the framebuffer is the console from the first line (%ux%u cells)", c->cols,
           c->rows);
 }
@@ -425,6 +477,7 @@ void fbcon_init(void)
     fbcon_start(c);
     replay_log(c);
     console_register(&c->sink);
+    c->registered = true;
     kinfo("fbcon: %ux%u cells of %ux%u pixels at %p, scrolling %u rows at a time", c->cols, c->rows,
           c->cell_w, c->cell_h, (void *)(uintptr_t)c->base, c->scroll_rows);
 }
@@ -464,3 +517,125 @@ void fbcon_cursor(uint32_t *col, uint32_t *row)
     if (row)
         *row = g_fbcon.cy;
 }
+
+/*
+ * A display driver's surface (fbcon.h). The new text buffer and the log's
+ * newest screenful are taken first, in thread context; the switch itself
+ * is one hold of the console lock, so no sink write sees half of it. The
+ * boot framebuffer's console is kept for fbcon_detach and keeps its
+ * mapping; a previous surface's text buffer is freed after the switch.
+ */
+int fbcon_attach(const struct fbcon_surface *s)
+{
+    if (s == NULL || s->base == NULL || s->bpp != 32 || s->width == 0 || s->height == 0 ||
+        s->pitch < s->width * 4u)
+        return -EINVAL;
+    struct bootinfo_framebuffer fb = {
+        .width = s->width, .height = s->height, .pitch = s->pitch, .bpp = s->bpp,
+        .red_shift = s->red_shift, .red_bits = s->red_bits,
+        .green_shift = s->green_shift, .green_bits = s->green_bits,
+        .blue_shift = s->blue_shift, .blue_bits = s->blue_bits,
+    };
+    struct fbcon next;
+    memset(&next, 0, sizeof(next));
+    if (!fbcon_setup(&next, &fb, (volatile uint8_t *)s->base))
+        return -EINVAL;
+    next.text = kmalloc((size_t)next.cols * next.rows, 0);
+    if (next.text == NULL)
+        return -ENOMEM;
+    char *log = kmalloc(KLOG_RING_SIZE, 0);
+    size_t log_len = log ? klog_copy(log, KLOG_RING_SIZE) : 0;
+
+    struct fbcon *c = &g_fbcon;
+    arch_irq_state_t st = console_hold();
+    char *old_text = c->surface != NULL ? c->text : NULL;
+    if (c->surface == NULL)
+        g_boot_fbcon = *c;   /* the boot framebuffer's console, or none (ready false) */
+    /* The sink is on the console's list (its `next` links the sinks after
+     * it): it stays as it is, whatever else is replaced. */
+    struct console_sink sink = c->sink;
+    struct fbcon_stats stats = c->stats;
+    bool registered = c->registered;
+    *c = next;
+    c->sink = sink;
+    c->stats = stats;
+    c->registered = registered;
+    c->sink.name = "fbcon";
+    c->sink.write = fbcon_write;
+    c->surface = s;
+    fbcon_start(c);
+    console_release(st);
+
+    /* The newest screenful, as fbcon_init shows it. */
+    if (log != NULL) {
+        size_t start = log_len;
+        unsigned lines = 0;
+        while (start > 0 && lines < c->rows) {
+            start--;
+            if (log[start] == '\n' && ++lines == c->rows) {
+                start++;
+                break;
+            }
+        }
+        st = console_hold();
+        fbcon_write(&c->sink, log + start, log_len - start);
+        console_release(st);
+        kfree(log);
+    }
+    if (!registered) {
+        console_register(&c->sink);
+        c->registered = true;
+    }
+    kfree(old_text);
+    kinfo("fbcon: %ux%u cells of %ux%u pixels on a %ux%u surface, scrolling %u rows at a time", c->cols, c->rows,
+          c->cell_w, c->cell_h, c->width, c->height, c->scroll_rows);
+    return 0;
+}
+
+void fbcon_detach(const struct fbcon_surface *s)
+{
+    struct fbcon *c = &g_fbcon;
+    arch_irq_state_t st = console_hold();
+    if (c->surface != s) {
+        console_release(st);
+        return;
+    }
+    char *old_text = c->text;
+    struct console_sink sink = c->sink;   /* on the console's list: kept (fbcon_attach) */
+    struct fbcon_stats stats = c->stats;
+    bool registered = c->registered;
+    *c = g_boot_fbcon;   /* the boot framebuffer again, or no console (ready false) */
+    c->sink = sink;
+    c->stats = stats;
+    c->registered = registered;
+    c->sink.name = "fbcon";
+    c->sink.write = fbcon_write;
+    if (c->ready) {
+        /* The boot framebuffer was not drawn while the surface was. */
+        memset(c->text, ' ', (size_t)c->cols * c->rows);
+        c->cx = c->cy = 0;
+        fbcon_draw_clear_rows(c, 0, c->rows);
+    }
+    console_release(st);
+    kfree(old_text);
+}
+
+bool fbcon_take_damage(const struct fbcon_surface *s, uint32_t *y0, uint32_t *y1)
+{
+    struct fbcon *c = &g_fbcon;
+    arch_irq_state_t st = console_hold();
+    bool any = c->surface == s && c->dmg_y0 != c->dmg_y1;
+    if (any) {
+        *y0 = c->dmg_y0;
+        *y1 = c->dmg_y1;
+        c->dmg_y0 = c->dmg_y1 = 0;
+    }
+    console_release(st);
+    return any;
+}
+
+/* Module ABI exports (docs/kernel/module/api.md): the display drivers'. */
+#include <kernel/module.h>
+EXPORT_SYMBOL(fbcon_attach);
+EXPORT_SYMBOL(fbcon_detach);
+EXPORT_SYMBOL(fbcon_take_damage);

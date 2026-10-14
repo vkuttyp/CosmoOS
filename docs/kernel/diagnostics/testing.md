@@ -123,7 +123,12 @@ a machine with no display: the loader says so, the kernel keeps the
 serial console, and the `fb-` tests skip. `QEMU_DISPLAY=virtio` is a
 `virtio-gpu-pci`, whose edk2 driver offers a Blt-only mode with no
 linear buffer: the loader names the format and ignores it, which is the
-refusal path. `QEMU_DISPLAY=bochs` is a framebuffer on x86 and, on
+refusal path; the `virtio_gpu` module then moves the console onto the
+device (`QEMU_GPU_SIZE=WxH` sets its size). `QEMU_DISPLAY=both` is the
+firmware's framebuffer and a `virtio-gpu-pci` together, Parallels
+Desktop's shape: the console starts on the first and moves to the
+second. `make test-display` boots both and reads the screen back
+(`docs/drivers/virtio/testing.md`). `QEMU_DISPLAY=bochs` is a framebuffer on x86 and, on
 AArch64, no Graphics Output Protocol at all -- the firmware there
 carries no driver for it.
 

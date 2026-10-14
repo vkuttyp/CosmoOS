@@ -168,6 +168,14 @@ static void vpci_read_config(struct virtio_device *vdev, unsigned off, void *buf
     }
 }
 
+static void vpci_write_config32(struct virtio_device *vdev, unsigned off, uint32_t val)
+{
+    struct vpci *v = to_vpci(vdev);
+    if (v->devcfg == NULL || (off & 3) != 0 || off + 4 > v->devcfg_len)
+        return;
+    wr32(v->devcfg, off, val);
+}
+
 static unsigned vpci_queue_max_size(struct virtio_device *vdev, unsigned index)
 {
     struct vpci *v = to_vpci(vdev);
@@ -260,6 +268,7 @@ static const struct virtio_transport vpci_transport = {
     .get_status = vpci_get_status,
     .set_status = vpci_set_status,
     .read_config = vpci_read_config,
+    .write_config32 = vpci_write_config32,
     .queue_max_size = vpci_queue_max_size,
     .setup_queue = vpci_setup_queue,
     .teardown_queue = vpci_teardown_queue,
@@ -308,6 +317,14 @@ static uint8_t vleg_get_status(struct virtio_device *vdev)
 static void vleg_set_status(struct virtio_device *vdev, uint8_t st)
 {
     lwr(to_vpci(vdev), LEG_STATUS, 1, st);
+}
+
+static void vleg_write_config32(struct virtio_device *vdev, unsigned off, uint32_t val)
+{
+    struct vpci *v = to_vpci(vdev);
+    if ((off & 3) != 0 || off + 4 > v->leg_cfg_len)
+        return;
+    lwr(v, LEG_CONFIG + off, 4, val);
 }
 
 static void vleg_read_config(struct virtio_device *vdev, unsigned off, void *buf, size_t len)
@@ -412,6 +429,7 @@ static const struct virtio_transport vleg_transport = {
     .get_status = vleg_get_status,
     .set_status = vleg_set_status,
     .read_config = vleg_read_config,
+    .write_config32 = vleg_write_config32,
     .queue_max_size = vleg_queue_max_size,
     .setup_queue = vleg_setup_queue,
     .teardown_queue = vleg_teardown_queue,

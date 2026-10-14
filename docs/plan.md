@@ -699,7 +699,11 @@ Sources: inventory §§1.3, 1.4, 2.11, 3 and 8 and [device design](kernel/device
   feature discovery and errata policy rather than adding scattered assumptions.
 - [ ] **Conditional/deferred — display and wireless hardware.** Add a mode-setting
   display driver, GPU drivers, Wi-Fi and Bluetooth when suitable hardware and a
-  bounded initial use case are available. The framebuffer console already exists.
+  bounded initial use case are available. The framebuffer console already exists,
+  and since the virtio-gpu unit (2026-10-14) a 2D virtio-gpu driver gives it the
+  display's own size and follows a resize (Parallels Desktop); there is still no
+  display interface for programs, cursor or 3D
+  ([report](audit/2026-10-14-virtio-gpu-report.md)).
 
 ## 14. Packaging, platform tooling and async I/O
 

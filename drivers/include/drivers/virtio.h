@@ -23,6 +23,7 @@
 #define VIRTIO_ID_BLOCK   2u
 #define VIRTIO_ID_CONSOLE 3u
 #define VIRTIO_ID_RNG     4u
+#define VIRTIO_ID_GPU     16u
 
 /* Device status (spec 2.1). */
 #define VIRTIO_STATUS_ACKNOWLEDGE 1u
@@ -52,6 +53,9 @@ struct virtio_transport {
     uint8_t  (*get_status)(struct virtio_device *vdev);
     void     (*set_status)(struct virtio_device *vdev, uint8_t status);
     void     (*read_config)(struct virtio_device *vdev, unsigned off, void *buf, size_t len);
+    /* One 32-bit field of the device configuration (virtio-gpu's
+     * events_clear); a write outside it is dropped. */
+    void     (*write_config32)(struct virtio_device *vdev, unsigned off, uint32_t val);
     /* Query the device's maximum size for queue `index`; 0 if absent. */
     unsigned (*queue_max_size)(struct virtio_device *vdev, unsigned index);
     /* Program addresses and the interrupt for an allocated queue and
@@ -191,6 +195,7 @@ static inline bool virtio_has_feature(const struct virtio_device *vdev, uint64_t
 void virtio_read_config(struct virtio_device *vdev, unsigned off, void *buf, size_t len);
 uint32_t virtio_read_config32(struct virtio_device *vdev, unsigned off);
 uint64_t virtio_read_config64(struct virtio_device *vdev, unsigned off);
+void virtio_write_config32(struct virtio_device *vdev, unsigned off, uint32_t val);
 
 /* --- virtqueues --------------------------------------------------------- */
 

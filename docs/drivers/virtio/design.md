@@ -269,6 +269,50 @@ frees the queues, and reclaims entries whether or not the device put them
 in the used ring. RX mappings use `MCLBYTES`; TX mappings use each
 segment's length. Interface unregister alone does not stop these callbacks.
 
+**virtio_gpu** (`virtio_gpu.c`, the virtio-gpu unit, 2026-10-14): 2D
+only, scanout 0, the screen console at the size the display asks for.
+No features negotiated. Queue 0 (`controlq`) only, interrupt driven;
+`cursorq` is never set up (no cursor drawn; Parallels Desktop grants two
+MSI-X vectors, the configuration's and one queue's).
+
+- **Commands** go one at a time under `cmd_lock` (a mutex: thread
+  context), from one request and one response page, each waiting up to
+  2 s for its response. A response other than the one expected fails the
+  operation with its type logged. A command that times out marks the
+  device broken: nothing is sent again, and buffers the device may still
+  hold are never freed.
+- **`RESOURCE_ATTACH_BACKING`** sends its entries as a second descriptor
+  after the 32-byte command, as Linux's driver does. Parallels Desktop
+  answers 0x1205 (invalid parameter) to the entries in the command's own
+  descriptor, which QEMU accepts. The entries are a page each.
+- **A frame** is a B8G8R8X8 resource of the scanout's size (the enabled
+  rectangle `GET_DISPLAY_INFO` reports, capped at 3840x2160; 1024x768 when
+  none). Its memory is `dma_alloc` chunks of at most 4 MiB, the page
+  allocator's largest block (1920x1080 is two). `vm_map_direct_ranges`
+  maps them back to back, write-back, as one linear view. The frame is
+  set on the scanout, flushed whole, then handed to fbcon as a
+  `struct fbcon_surface` (`fbcon_attach`; `docs/kernel/diagnostics/design.md`).
+- **The `vgpu` thread**, every 16 ms:
+  - takes the band fbcon drew (`fbcon_take_damage`) and sends
+    `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` for those rows;
+  - reads the configuration's `events_read`. On `VIRTIO_GPU_EVENT_DISPLAY`
+    (Parallels resizes the scanout with its window) it clears the event
+    (`virtio_write_config32`, new with this driver), asks for the size
+    again, and moves the console to a new frame of that size. The new
+    frame is complete and on the scanout before fbcon leaves the old one,
+    which is then detached, unreferenced and freed.
+  - The configuration interrupt is not used for this: polling from the
+    thread needs no callback that could race a driver unbind in interrupt
+    context.
+- **In panic mode** fbcon calls `vgpu_panic_flush` after each write. It
+  sends the transfer and flush from its own pair of pages and polls
+  `virtq_pop` for each, at most 200 ms. When `controlq`'s lock is held (by
+  a CPU the panic stopped) it sends nothing; the serial console has the
+  panic either way.
+- **Remove:** stop and join the thread, `fbcon_detach` (the console
+  returns to the boot framebuffer, or to the serial port alone), turn the
+  scanout off (resource 0), drop the frame, reset the device.
+
 ## Ownership and lifetime
 
 ### Removal, reset and partial probe cleanup

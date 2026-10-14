@@ -459,12 +459,20 @@ jobs:
       - name: DHCP, wget by address and by name, ssh login and a PTY session on the installed system (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release test-net-login
 
+      # The virtio-gpu unit's acceptance (docs/drivers/virtio/testing.md):
+      # the console on a virtio-gpu, read back from QEMU's screendump; in this
+      # job because it needs the same release image and is short (~20 s).
+      - name: The console on a virtio-gpu, read back from the screen (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-display
+
       - name: Upload the boots' serial logs (on failure)
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-net-login-${{ matrix.arch }}
-          path: out/${{ matrix.arch }}-release/test-net-login/*.log
+          path: |
+            out/${{ matrix.arch }}-release/test-net-login/*.log
+            out/${{ matrix.arch }}-release/test-display/*
           if-no-files-found: ignore
 
   # Milestone M3's acceptance (docs/roadmap-1.0.md; docs/userland/testing.md,

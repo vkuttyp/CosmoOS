@@ -418,6 +418,13 @@ else:
     # serial console alone. virtio-gpu offers a Blt-only mode, which is
     # the refusal this shape exercises.
     REQUIRED_MARKERS += [r"^\[ INFO\] framebuffer: none; the console is the serial port alone$"]
+# A virtio-gpu (alone, or behind the firmware's framebuffer): the
+# virtio_gpu module moves the console onto it (docs/drivers/virtio/).
+if DISPLAY in ("virtio", "both"):
+    REQUIRED_MARKERS += [
+        r"^\[ INFO\] fbcon: \d+x\d+ cells of 8x16 pixels on a \d+x\d+ surface, scrolling \d+ rows at a time$",
+        r"^\[ INFO\] virtio-gpu: virtio\d+: scanout 0 \d+x\d+, resource \d+ in \d+ chunk\(s\)$",
+    ]
 
 # The AHCI driver loads on every boot; the disk registers when QEMU was
 # given one (QEMU_SATA disk; docs/drivers/ahci/), an ATAPI device is

@@ -26,6 +26,8 @@
 #
 # The isa-debug-exit device lets the kernel terminate QEMU with an exit
 # status: QEMU exits with (value << 1) | 1 for a write of `value`.
+# QEMU_DEBUG_EXIT=0 (x86-64) leaves it out, so a panic halts with QEMU
+# still running and the screen can be read (make test-display).
 set -eu
 
 image=$1
@@ -199,10 +201,15 @@ fi
 # QEMU_DISPLAY: on (default -- q35 keeps QEMU's built-in VGA at 1280x800;
 # virt gets a ramfb at 800x600, since edk2 for AArch64 carries the ramfb
 # driver), virtio (a virtio-gpu-pci: edk2's driver offers a Blt-only mode
-# with no linear buffer, which the loader refuses), bochs (a
-# bochs-display: a framebuffer on x86, and no GOP at all under AAVMF), or
+# with no linear buffer, which the loader refuses; the kernel's virtio_gpu
+# module then gives the console the device's own size), bochs (a
+# bochs-display: a framebuffer on x86, and no GOP at all under AAVMF),
+# both (the firmware's framebuffer and a virtio-gpu-pci, as Parallels
+# Desktop has them: the console starts on the first and moves), or
 # 0 (no display device: the kernel keeps the serial console alone).
 # There is never a window: -display none is always passed.
+debug_exit="-device isa-debug-exit,iobase=0xf4,iosize=0x04"
+[ "${QEMU_DEBUG_EXIT:-1}" = 0 ] && debug_exit=""
 display=${QEMU_DISPLAY:-on}
 display_dev_x86=""
 display_dev_a64=""
@@ -210,8 +217,21 @@ case "$display" in
 0)      display_dev_x86="-vga none" ;;
 bochs)  display_dev_x86="-vga none -device bochs-display"
         display_dev_a64="-device bochs-display" ;;
-virtio) display_dev_x86="-vga none -device virtio-gpu-pci"
-        display_dev_a64="-device virtio-gpu-pci" ;;
+virtio|both) gpu="virtio-gpu-pci,id=gpu0"   # id: the display test screendumps it by name
+        # QEMU_GPU_SIZE=WxH: the size the device reports for scanout 0
+        # (QEMU's default 1280x800), which the virtio-gpu driver takes.
+        if [ -n "${QEMU_GPU_SIZE:-}" ]; then
+            gpu="$gpu,xres=${QEMU_GPU_SIZE%x*},yres=${QEMU_GPU_SIZE#*x}"
+        fi
+        if [ "$display" = both ]; then
+            # The firmware's framebuffer first (q35's VGA, virt's ramfb),
+            # then the virtio-gpu takes the console: Parallels' shape.
+            display_dev_x86="-device $gpu"
+            display_dev_a64="-device ramfb -device $gpu"
+        else
+            display_dev_x86="-vga none -device $gpu"
+            display_dev_a64="-device $gpu"
+        fi ;;
 *)      display_dev_a64="-device ramfb" ;;
 esac
 # QEMU_PCAP=file.pcap records every frame on the guest NIC (debugging).
@@ -319,7 +339,7 @@ exec ${QEMU_WRAP:-} qemu-system-x86_64 \
     $qmp \
     $fwcfg \
     $pcap \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    $debug_exit \
     -serial "${QEMU_SERIAL:-stdio}" \
     -display none \
     -monitor none \

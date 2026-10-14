@@ -44,6 +44,13 @@ Inline test on the negotiated features.
 Device-specific configuration, read under the generation check;
 out-of-range requests return zeros. Any context.
 
+### `void virtio_write_config32(struct virtio_device *, unsigned off, uint32_t val)` *(exported, the virtio-gpu unit)*
+
+Write one 32-bit field of the device configuration at a 4-byte-aligned
+`off` (virtio-gpu's `events_clear`). A write outside the configuration
+is dropped, as is one on a transport without the operation (the test
+transports).
+
 ## Virtqueues
 
 ### `int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, virtq_callback_fn callback, unsigned cpu, struct virtqueue **out)` *(exported, network unit 11)*
