@@ -625,6 +625,7 @@ static struct process *process_alloc(const char *name)
     kobject_init(&p->obj, &process_type);
     strlcpy(p->name, name ? name : "?", sizeof(p->name));
     p->start_ns = clock_now_ns();
+    p->dumpable = 1;
     process_itimer_init(p);
     list_init(&p->threads);
     list_init(&p->all_link);
@@ -1061,6 +1062,7 @@ static void fork_inherit(struct process *p, struct process *parent)
     strlcpy(p->exec_path, parent->exec_path, sizeof(p->exec_path));
     memcpy(p->cmdline, parent->cmdline, parent->cmdline_len);
     p->cmdline_len = parent->cmdline_len;
+    p->dumpable = __atomic_load_n(&parent->dumpable, __ATOMIC_RELAXED);
 }
 
 int process_fork(const struct process_fork_args *a, struct process **out)
@@ -1251,6 +1253,7 @@ int process_exec_images(const struct process_image *exe, const struct process_im
     strlcpy(p->exec_path, execfn, sizeof(p->exec_path));
     memcpy(p->cmdline, ib->cmdline, ib->cmdline_len);
     p->cmdline_len = ib->cmdline_len;
+    __atomic_store_n(&p->dumpable, 1, __ATOMIC_RELAXED);
     p->main_thread = self;
     self->user_tid = p->pid;   /* the exec'ing thread becomes the first: its tid is the pid */
     __atomic_store_n(&p->exec_thread, NULL, __ATOMIC_RELEASE);

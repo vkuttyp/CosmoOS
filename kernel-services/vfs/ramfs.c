@@ -758,16 +758,20 @@ void ramfs_populate_boot(void)
     for (unsigned i = 0; i < bootarchive_count(); i++) {
         const struct bootarchive_entry *e = bootarchive_entry(i);
         char path[VFS_PATH_MAX];
-        /* The bootstrap namespace: bin/, sbin/ and etc/ entries are the
-         * installed system (docs/userland/); everything else is /boot. */
+        /* The bootstrap namespace: bin/, sbin/, etc/ and usr/ entries are
+         * the installed system (docs/userland/); everything else is /boot.
+         * usr/ since the scp-sftp unit: /usr/libexec/sftp-server, where
+         * dropbear runs it, which /boot/usr/... was not. */
         uint32_t mode = 0644;
         if (strcmp(e->name, "init") == 0) {
             ksnprintf(path, sizeof(path), "/boot/%s", e->name);
             mode = 0755;   /* the program the kernel starts; its self-test respawns it */
-        } else if (strncmp(e->name, "bin/", 4) == 0 || strncmp(e->name, "sbin/", 5) == 0) {
+        } else if (strncmp(e->name, "bin/", 4) == 0 || strncmp(e->name, "sbin/", 5) == 0 ||
+                   strncmp(e->name, "usr/bin/", 8) == 0 || strncmp(e->name, "usr/sbin/", 9) == 0 ||
+                   strncmp(e->name, "usr/libexec/", 12) == 0) {
             ksnprintf(path, sizeof(path), "/%s", e->name);
             mode = 0755;
-        } else if (strncmp(e->name, "etc/", 4) == 0) {
+        } else if (strncmp(e->name, "etc/", 4) == 0 || strncmp(e->name, "usr/", 4) == 0) {
             ksnprintf(path, sizeof(path), "/%s", e->name);
         } else {
             ksnprintf(path, sizeof(path), "/boot/%s", e->name);

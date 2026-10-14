@@ -250,6 +250,11 @@ struct process {
     char cmdline[PROCESS_CMDLINE_MAX];
     uint16_t cmdline_len;
     uint64_t start_ns;                 /* clock_now_ns when made (spawn or fork); exec keeps it */
+    /* Linux's "dumpable" (prctl PR_SET_DUMPABLE/PR_GET_DUMPABLE): recorded
+     * and reported, nothing more -- there are no core dumps and no ptrace
+     * here for it to govern. 1 when made, inherited by fork, 1 again at
+     * exec (as Linux, for a program that does not change ids). Atomic. */
+    uint8_t dumpable;
     /* ITIMER_REAL (setitimer, alarm; kernel/process/itimer.c): SIGALRM at
      * expiry, re-armed by the interval. itimer_lock serialises the setters;
      * the callback reads the two words atomically. A fork starts disarmed;

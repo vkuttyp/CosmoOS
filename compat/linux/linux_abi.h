@@ -104,6 +104,10 @@ struct lx_rlimit {
 #define LX_MS_INVALIDATE 2
 #define LX_MS_SYNC 4
 
+/* --- prctl: the dumpable flag only (sftp-server's platform_disable_tracing) --- */
+#define LX_PR_GET_DUMPABLE 3
+#define LX_PR_SET_DUMPABLE 4
+
 /* --- arch_prctl --- */
 #define LX_ARCH_SET_GS 0x1001
 #define LX_ARCH_SET_FS 0x1002

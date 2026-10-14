@@ -22,8 +22,10 @@ by that name) and is also visible at `/boot/init`.
 
 The kernel's boot namespace (`ramfs_populate_boot`) creates `/bin`,
 `/sbin`, `/etc` and places archive entries whose first component is
-one of those there with mode 0755 (`bin/`, `sbin/`) or 0644 (`etc/`);
-all other entries go under `/boot` as before. The rule is the
+one of those, or `usr`, there: mode 0755 for `bin/`, `sbin/`,
+`usr/bin/`, `usr/sbin/` and `usr/libexec/` (the last since the scp-sftp
+unit, for `/usr/libexec/sftp-server`), 0644 for `etc/` and the rest of
+`usr/`; all other entries go under `/boot` as before. The rule is the
 bootstrap namespace policy of the archive (an initramfs-like
 convention), documented in `docs/kernel/module/` (the archive) and
 `docs/kernel-services/vfs/` (ramfs).

@@ -428,9 +428,11 @@ a handle's kobject, or NULL for another object kind (the console).
 
 **`void ramfs_populate_boot(void)`** Creates `/boot`, `/boot/modules`,
 `/boot/tests`, `/tmp`, `/mnt`, `/dev`, `/bin`, `/sbin`, `/etc` and copies
-every boot archive entry into the namespace: entries named `bin/...` and
-`sbin/...` become `/bin/...` and `/sbin/...` with mode 0755, `etc/...`
-becomes `/etc/...` with mode 0644, everything else goes to
+every boot archive entry into the namespace: entries named `bin/...`,
+`sbin/...`, `usr/bin/...`, `usr/sbin/...` and `usr/libexec/...` keep
+their path with mode 0755, `etc/...` and any other `usr/...` with mode
+0644 (`usr/` since the scp-sftp unit: `/usr/libexec/sftp-server`),
+everything else goes to
 `/boot/<name>` with mode 0644 (the bootstrap namespace policy of the
 archive, `docs/userland/`). Entry names may be nested
 (`etc/pkg/keys/dev.pub`, `repo/hello-1.1.cpk`): the intermediate
