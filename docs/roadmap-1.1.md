@@ -30,8 +30,9 @@ merged. Each entry's detail is in
 Also merged: two test-budget records (#377, the AArch64 `blk` IRQ
 budget; #385, the AArch64 entropy boots near 240 s) and #386 (the guide
 names v1.0.3). v1.0.2 (tag at `7a87291b`, through #380) was published and
-then returned to a draft; v1.0.3 (`6011a5ec`, through #386) replaces it
-and is the first published release with the Parallels install, network
+then returned to a draft; [v1.0.3](https://github.com/vkuttyp/CosmoOS/releases/tag/v1.0.3)
+(`6011a5ec`, through #386, published 2026-10-15) replaces it and is the
+first published release with the Parallels install, network
 and ssh.
 
 ## Recorded since 1.0, not done
