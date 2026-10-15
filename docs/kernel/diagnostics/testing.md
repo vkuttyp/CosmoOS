@@ -92,7 +92,8 @@ five-millisecond deadline and the `lockup-sample-busy` checks are unchanged.
 ### The framebuffer console
 
 **`fb-console`** (both architectures, whenever the machine has a
-display). Everything is checked by reading the pixels back through the
+display; skipped, as `fb-bench` is, when a display driver's surface holds
+the console, which a display change can free under a pixel read). Everything is checked by reading the pixels back through the
 same mapping the console draws through and comparing them against the
 font table, in both colours -- which is what makes a display testable
 under `-display none` with no screenshot, and what makes a wrong pixel

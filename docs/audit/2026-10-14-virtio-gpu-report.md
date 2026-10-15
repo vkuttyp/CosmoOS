@@ -122,6 +122,13 @@ framebuffer at all, gets a console too.
   the network harness ready in each debug boot (1, 2 and 4 CPUs,
   `test-smp2`, chaos, harness retry), reproducible on both;
   `test-display` and `test-net-login` on both.
+- **At `dc1c4f50`**, the matrix: 38 of 38 steps on both architectures,
+  the network harness ready in each debug boot, reproducible on both;
+  `test-display` (checks a to f) and `test-net-login` on both. Its CI
+  failed `irqpoll-boost` on x86-64 twice (the same 290 ms gap as the
+  four earlier sightings, `docs/testing/flakes.md`), on a runner whose
+  self-tests ran 141-147 s against 117-123 s in the run before; the
+  branch's local totals are unchanged (106-128 s before, 109-125 s after).
 - **At `93ccddb8`**: debug `make test` on both architectures (477
   self-tests, `fb-switch`, the network harness ready), and `test-display`
   with check f on both.
@@ -349,6 +356,16 @@ Codex's security review and CosmoReview's review of `d4b3d0ab`:
   `fbcon_init` on the boot console before its sink is registered, before
   `tty_init` and `smp_init` (one CPU, no reader), and from
   `fbcon_attach` inside its hold, on the slot not yet published.
+
+Codex's review of `dc1c4f50`:
+
+- **`fb-console` and `fb-bench` read pixels through a `base` a display
+  change could free** (Codex): they skip when a display driver's surface
+  holds the console. The boot framebuffer's mapping is never freed, so a
+  test started on it stays safe if a surface is attached meanwhile.
+- **The unit is outside the current milestone** (Codex): not changed.
+  The 1.0 roadmap is complete (v1.0.0, M6); this is the last item of the
+  post-1.0 queue the project owner set.
 
 Not changed: CosmoReview's "blocking call under spinlock" in
 `vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with

@@ -512,8 +512,9 @@ bool fbcon_present(void)
 
 /* The readers below take the console lock: a surface switch publishes
  * another console, and a copy made across it would mix two screens. The
- * pixels at `base` stay the owner's (fbcon_geometry's users are the
- * self-tests, which fb-switch's switches do not run beside). */
+ * pixels at `base` stay the owner's: the boot framebuffer's mapping is
+ * never freed, a driver's surface may be at any display change, so the
+ * self-tests that read pixels skip when a surface holds the console. */
 void fbcon_get_stats(struct fbcon_stats *out)
 {
     arch_irq_state_t st = console_hold();

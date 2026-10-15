@@ -92,6 +92,14 @@ bool selftest_fb_console(const char **reason)
         kinfo("selftest: fb-console: no framebuffer on this machine; skipped");
         return true;
     }
+    /* The pixels are read through `base` without the console lock. The
+     * boot framebuffer's mapping is never freed, even when a surface is
+     * attached meanwhile; a display driver's surface can be replaced and
+     * freed by a display change at any time (Codex, PR #387). */
+    if (fbcon_on_surface()) {
+        kinfo("selftest: fb-console: a display driver's surface holds the console; skipped");
+        return true;
+    }
     struct fbcon_geometry geom;
     CHECK(fbcon_geometry(&geom));
     const struct fbcon_geometry *g = &geom;
@@ -198,6 +206,14 @@ bool selftest_fb_bench(const char **reason)
     (void)reason;
     if (!fbcon_present()) {
         kinfo("selftest: fb-bench: no framebuffer on this machine; skipped");
+        return true;
+    }
+    /* The pixels are read through `base` without the console lock. The
+     * boot framebuffer's mapping is never freed, even when a surface is
+     * attached meanwhile; a display driver's surface can be replaced and
+     * freed by a display change at any time (Codex, PR #387). */
+    if (fbcon_on_surface()) {
+        kinfo("selftest: fb-bench: a display driver's surface holds the console; skipped");
         return true;
     }
     struct fbcon_geometry geom;
