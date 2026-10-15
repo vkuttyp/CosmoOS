@@ -342,7 +342,9 @@ static void vgpu_dma_release(struct vgpu *g, size_t len, void *va, dma_addr_t dm
 /* Drop a frame: its host resource (detached first, as the spec asks
  * before the memory goes), its view and its memory. Not attached to fbcon.
  * A detach the device refused (an error response; a timeout sets broken)
- * leaves the backing attached: the memory is kept as after a timeout. */
+ * leaves the backing attached: the memory is kept as after a timeout, and
+ * no UNREF follows (after a timeout g->cmd.req may still be the device's;
+ * the reset drops the resource). */
 static void vgpu_frame_free(struct vgpu *g, struct vgpu_frame *f)
 {
     bool keep = false;
@@ -355,10 +357,11 @@ static void vgpu_frame_free(struct vgpu *g, struct vgpu_frame *f)
             keep = true;
             kwarn("virtio-gpu: %s: resource %u's backing not detached: its %u KiB kept until a reset",
                   g->vdev->dev.name, f->resource_id, (unsigned)((size_t)f->pitch * f->height >> 10));
+        } else {
+            hdr_init(u, VGPU_CMD_RESOURCE_UNREF);
+            u->resource_id = f->resource_id;
+            (void)vgpu_cmd(g, sizeof(*u), sizeof(struct vgpu_hdr), VGPU_RESP_OK_NODATA);
         }
-        hdr_init(u, VGPU_CMD_RESOURCE_UNREF);
-        u->resource_id = f->resource_id;
-        (void)vgpu_cmd(g, sizeof(*u), sizeof(struct vgpu_hdr), VGPU_RESP_OK_NODATA);
     }
     if (f->view)
         vm_unmap_phys(f->view);
@@ -568,7 +571,8 @@ static void vgpu_thread(void *arg)
  * inside (virtq_pop_panic's report of a bad used entry) comes back through
  * fbcon: it is not flushed, so g->panic.req is not rewritten in flight;
  * false leaves its rows pending for the next line's flush. True: the
- * band is on the screen.
+ * band is on the screen, both commands answered OK_NODATA (the response
+ * is cleared before each, as vgpu_cmd_at clears its own).
  */
 static bool vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
 {
@@ -592,6 +596,7 @@ static bool vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
             fl->r = (struct vgpu_rect){ 0, y0, f->width, y1 - y0 };
             fl->resource_id = f->resource_id;
         }
+        memset(g->panic.resp, 0, sizeof(struct vgpu_hdr));
         struct virtq_sg sg[2] = {
             { .addr = g->panic.req_dma,
               .len = k == 0 ? sizeof(struct vgpu_transfer) : sizeof(struct vgpu_flush) },
@@ -612,6 +617,8 @@ static bool vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
             g->panic_dead = true;
             goto out;
         }
+        if (((struct vgpu_hdr *)g->panic.resp)->type != VGPU_RESP_OK_NODATA)
+            goto out;   /* refused: the band stays pending */
     }
     g->panic_flushes++;
     done = true;

@@ -278,6 +278,18 @@ Qodo's review of `d8e77cfc`:
   an unloaded module. `virtq_quiesce`, `virtq_free`'s first half, stops
   both and keeps the ring; `vdev->priv` is cleared before `kfree`.
 
+Codex's review of `d8e77cfc`:
+
+- **`RESOURCE_UNREF` was built after a timed-out detach** (Codex), over
+  the request page the device may still read. No UNREF follows a failed
+  detach; the reset drops the resource.
+- **The panic flush took an error response as success** (Codex). The
+  response is cleared before each command and must read `OK_NODATA`;
+  otherwise the band stays pending.
+- **The `CRASH_TEST=3` seam built into a release kernel with `LOCKDEP=1`**
+  (Codex). `lockdep.c` refuses that configuration (`#error` without
+  `CONFIG_DEBUG`); `make test-display` builds it with `BUILD=debug`.
+
 Not changed: CosmoReview's "blocking call under spinlock" in
 `vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with
 `kmem_cache_alloc`, which takes only the cache's spinlock and grows from

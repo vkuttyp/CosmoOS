@@ -281,7 +281,9 @@ MSI-X vectors, the configuration's and one queue's).
   operation with its type logged. A command that times out marks the
   device broken: nothing is sent again. Buffers the device may still own
   are kept on a list, as is a frame's memory whose
-  `RESOURCE_DETACH_BACKING` the device refused (Codex, PR #387). They,
+  `RESOURCE_DETACH_BACKING` the device refused (Codex, PR #387); no
+  `RESOURCE_UNREF` is built after it, since after a timeout the request
+  page may still be the device's. They,
   the queue and the request pages are freed only after the reset at
   removal, and only when the status reads 0; otherwise all of it is
   kept, the queue's interrupt stopped (`virtq_quiesce`, so `vgpu_done`
@@ -334,7 +336,8 @@ MSI-X vectors, the configuration's and one queue's).
   logged from inside the flush (`virtq_pop_panic` reporting a bad used
   entry) comes back through fbcon and is not flushed, so the request in
   flight is not rewritten; it returns false, and fbcon keeps those rows
-  for the next line's flush. A command not answered in time ends the panic
+  for the next line's flush. So does a command answered with anything
+  but `OK_NODATA` (the response is cleared before each command). A command not answered in time ends the panic
   flushes: every later line would wait as long, and the serial sink after
   fbcon's with it.
 - **After a timeout** (`broken`) no request is built in `g->cmd`, which
