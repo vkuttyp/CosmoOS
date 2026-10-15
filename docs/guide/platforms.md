@@ -66,8 +66,8 @@ they stay there: **press Control+Option to get them back**. That is
 Parallels' behaviour for a guest without Parallels Tools, which CosmoOS
 does not have (they talk to Parallels through its own device, which this
 kernel does not drive). Parallels' firmware offers the guest one display
-mode, 1024x768; once the virtio-gpu driver loads, the screen console
-takes the size Parallels gives the display and follows the VM's window
+mode, 1024x768, where v1.0.3 draws a 128x48 text screen. With the
+virtio-gpu driver (merged after v1.0.3) the screen console takes the size Parallels gives the display and follows the VM's window
 when it is resized (wider: 175x48 cells at 1407x768). Parallels keeps
 the height at 768 pixels.
 

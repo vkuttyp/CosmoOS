@@ -383,6 +383,21 @@ Not changed: CosmoReview's "blocking call under spinlock" in
 `pmm_alloc_pages` (`kernel/memory/slab.c`); it does not sleep.
 `vm_map_phys` does the same under the same lock.
 
+**After the merge, 2026-10-15: the last commit's review.** `e64b9180`
+(`screen_until`) merged unreviewed and was read against its parent: the
+three screen checks' assertions are unchanged, and each predicate is the
+check that follows it (the marker row, or a `KERNEL PANIC:` row), so a
+screen without the text still fails after 10 s. It also dropped the 1 s
+settle before the resized screendump, where `screen()` fails rather than
+retries on a size other than the new one; that is safe because
+`vgpu_show` logs its `scanout 0 WxH` line only after the synchronous
+`SET_SCANOUT` and the first flush (`drivers/virtio/virtio_gpu.c`), and
+QEMU replaces the surface while it handles that command. `make
+BUILD=release test-display` on main `37b356d6` passed 6 of 6 on each
+architecture (x86-64 25.4-27.2 s with the two panic checks, one run 56.6
+s after the harness's firmware-stall retry; AArch64 19.6-20.0 s). Clean;
+nothing changed.
+
 ## Not done here
 
 - Any display interface for programs (a framebuffer device, mode setting

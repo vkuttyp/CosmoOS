@@ -6,11 +6,14 @@ Read the governing [prompts](prompts/) before acting. Follow the
 
 ## Scope rules
 
-The [1.0 roadmap](docs/roadmap-1.0.md) sets the work. These rules take
+The [1.1 roadmap](docs/roadmap-1.1.md) sets the work; the
+[1.0 roadmap](docs/roadmap-1.0.md) is complete. These rules take
 precedence over the inventory and plan when choosing what to do.
 
-- Work only on the current roadmap milestone. A defect found along the way
-  is fixed only if it blocks that milestone's acceptance test or turns
+- Work only on the current roadmap unit: one the project owner has chosen
+  from the 1.1 roadmap's proposed units. With none chosen, propose; do not
+  start one. A defect found along the way
+  is fixed only if it blocks that unit's acceptance test or turns
   main red. Otherwise add one line to the
   [inventory](docs/audit/2026-09-deferred-work-inventory.md) and move on.
   Do not propose loose ends as the next unit.
@@ -18,9 +21,9 @@ precedence over the inventory and plan when choosing what to do.
   convention applies to defect fixes, not to new features.
 - Run the full validation matrix once per PR before opening it, and not
   again after documentation-only commits.
-- At most 5 PRs per milestone. If more seem needed, stop and report why.
-- A milestone is done when its acceptance test is green on main; tick its
-  box in [docs/roadmap-1.0.md](docs/roadmap-1.0.md) in the same PR.
+- At most 5 PRs per unit. If more seem needed, stop and report why.
+- A unit is done when its acceptance test is green on main; tick its
+  box in [docs/roadmap-1.1.md](docs/roadmap-1.1.md) in the same PR.
 
 ## Project conventions
 
