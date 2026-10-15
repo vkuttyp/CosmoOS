@@ -73,14 +73,15 @@ cosmo$ ls /bin
 ...wget...
 ```
 
-The applets are `sh` (ash) and `[ awk basename cat chmod clear cmp cp
-cut date dd df diff dirname du echo env expr false find free grep gunzip
-gzip head hexdump id less ln ls md5sum mkdir mv nslookup ping poweroff printf pwd
-readlink rm rmdir sed seq sha256sum sleep sort stat stty tail tar tee
-test top touch tr true tty uname uniq uptime vi wc wget which whoami
-xargs` (`ports/busybox/applets`); `/sbin` holds CosmoOS's own
-`cosmo-install`, `dmesg`, `fsctl`, `hostname`, `kill`, `mount`, `netcfg`,
-`pkg`, `priv`, `ps`, `svc`, `sysctl`, `umount` and `vmctl`.
+The applets are `sh` (ash) and `[ arp awk basename cat chmod clear cmp
+cp cut date dd df diff dirname du echo env expr false find free grep
+gunzip gzip head hexdump hostname id ifconfig less ln ls md5sum mkdir mv
+netstat nslookup ping poweroff printf pwd readlink rm rmdir route sed seq
+sha256sum sleep sort stat stty tail tar tee test top touch tr true tty
+uname uniq uptime vi wc wget which whoami xargs` (`ports/busybox/applets`);
+`/sbin` holds CosmoOS's own `cosmo-install`, `dmesg`, `fsctl`,
+`hostname`, `ip`, `kill`, `mount`, `netcfg`, `pkg`, `priv`, `ps`, `svc`,
+`sysctl`, `umount` and `vmctl`.
 
 Files you write are on the disk and stay there:
 

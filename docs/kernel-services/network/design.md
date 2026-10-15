@@ -1035,6 +1035,8 @@ another process. No new system call. `vmctl port-forward add|del|list` drives
 it; exposing and hiding a guest service on a running Linux guest is the
 `QEMU_MEM=2G` reproduction. The channel is designed to carry the tap's other
 settings (forwarding/masquerade toggles, the resolver) in later units.
+Version 7 added the DHCP leases and version 8 the machine's interfaces,
+IPv4 routes and ARP table (read-only; "Inspecting the stack").
 
 ## A forwarding firewall (`fw.c`; audit unit "a stateful packet-filter firewall for the guest taps")
 
@@ -1718,10 +1720,75 @@ once.
 
 **Out.** The lease reaches user space through the netctl snapshot's
 lease section (version 7) and `netcfg`, which writes `/etc/resolv.conf`
-for musl's resolver; there is no in-kernel resolver. Not done: the
+for musl's resolver; there is no in-kernel resolver. Since shell
+completeness S1 the request asks for option 12 (host name) too, and an
+ACK's name is kept when it is 1-63 letters, digits, `-` and `.` (any
+other is dropped whole: the name lands in `/etc/hostname` and at the
+prompt, and a server is not trusted with what goes there); the lease
+section (version 8) carries it and `netcfg` writes `/etc/hostname` and
+sets the uts name from it. Not done: the
 address-conflict check (ARP probe and DECLINE), INIT-REBOOT of a
 remembered lease, RELEASE at shutdown, classless static routes (option
 121), DHCPv6.
+
+## Inspecting the stack (`procnet.c`, the listings; shell completeness S1)
+
+Linux programs learn the network's state from four places this kernel
+did not have: `/proc/net/*` (BusyBox's `netstat`, `route`, `arp`, and
+`ifconfig`'s counters), the interface ioctls (`ifconfig`), netlink
+(`ip`) and `sethostname`. S1 adds the first two and `sethostname`, and a
+native `ip` over the netctl snapshot in place of netlink. One rule
+makes all of them agree: **every view is rendered from the same five
+listings, each a copy taken under its table's own lock and formatted
+after the lock is released.**
+
+| Listing | Lock | What it copies |
+|---|---|---|
+| `netif_list`, `netif_info_by_name`/`_by_index` (`netif.c`) | the registry's | name, index, flags, MTU, MAC, the IPv4 triple, the link-local address, the counters |
+| `ipv4_route_list` (`ipv4.c`) | none of its own (a `netif_list` copy) | the routes `ipv4_route` decides: the default, then each subnet |
+| `arp_list` (`arp.c`) | the ARP table's | address, MAC, complete or not, the interface's name |
+| `tcp_list` (`tcp.c`) | the TCP table's | every pcb in the table: ends, state, queue lengths |
+| `udp_list` (`udp.c`) | the UDP list's | every bound pcb: ends, queued datagrams, drops |
+
+Each field is read as its writers publish it: the flag word and the IPv4
+address with acquire loads (the packet paths' rule, `netif_set_ipv4`), the
+counters relaxed. `tcp_list` holds only the table lock -- a pcb's lock
+comes first in the order, so it cannot be taken there -- and so reads a
+pcb's queue lengths relaxed, as a statistic, and its remote end only once
+its state is past `CLOSED` (acquire): `tcp_connect` writes the remote end
+before the state that publishes it, and never again. A `CLOSED` pcb
+(bound, not connected) is listed with its remote end zero.
+
+**There is no routing table**, so `ipv4_route_list` lists what
+`ipv4_route` does: the default (through `netif_default_ipv4`'s
+interface to its gateway) when it has a gateway, then the subnet of each
+up, addressed interface that is not `lo`. The route a listing shows is
+the route a packet takes.
+
+**`/proc/net`** (`procnet.c`; procfs owns the paths, P4): `dev`, `route`,
+`arp`, `tcp`, `tcp6`, `udp`, `udp6` and `if_inet6` in Linux 6.x's layouts,
+field for field and padded as Linux pads them, because BusyBox parses
+them with `sscanf`. What the stack does not have is written as Linux
+writes its absence: the FIFO, frame, compression, multicast, collision
+and carrier counters are 0; every socket's uid and inode are 0 (a pcb
+records no owner, a socket no inode); UDP's receive queue is in
+datagrams, where Linux counts bytes. A file is up to 64 KiB
+(`PROCNET_TEXT_MAX`, 400 sockets at `tcp`'s 150 bytes a line), ending at
+its last whole line beyond that.
+
+**The interface ioctls** are the Linux personality's
+(`compat/linux/netioctl.c`; `docs/compat/linux/design.md`, "Interface
+ioctls"): the getters translate `netif_info`; the setters are
+`PRIV_NET`'s and call `netif_set_up` and `netif_set_ipv4`, as the DHCP
+client does. An address set by hand on a DHCP-managed interface stays
+until the lease changes (an ACK that renews the same lease does not
+reapply it).
+
+**netctl version 8** carries the same listings to native programs: the
+interface, route and neighbour sections after the lease section, and a
+host name in each lease. `/sbin/ip` prints them in iproute2's format. Netlink
+is not added: `ip` is the substitute until it is. IPv6's neighbours and
+routes beyond the link are not listed (there are none of the latter).
 
 ## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
 

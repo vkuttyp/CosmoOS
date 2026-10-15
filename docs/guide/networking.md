@@ -50,8 +50,41 @@ nameserver 10.0.2.3
 server, how long the lease runs and when it renews. `netcfg` alone (what
 `/etc/rc` runs) waits up to ten seconds for a lease (`--wait S` changes
 that) and rewrites `/etc/resolv.conf`, once per boot: a lease renewed
-later with other DNS servers does not update the file. There is no tool
-to set an address by hand while the system runs; the address is DHCP's.
+later with other DNS servers does not update the file.
+
+`ip` shows the interfaces, routes and neighbours as Linux's iproute2 does,
+and BusyBox's `ifconfig`, `route`, `netstat` and `arp` read the same
+state:
+
+<!-- test: console -->
+```console
+cosmo$ ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65535 state UNKNOWN
+    inet 127.0.0.1/8 scope host lo
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP
+    link/ether ... brd ff:ff:ff:ff:ff:ff
+    inet 10.0.2.15/24 brd 10.0.2.255 scope global dynamic eth0
+cosmo$ ip r
+default via 10.0.2.2 dev eth0 proto dhcp src 10.0.2.15
+10.0.2.0/24 dev eth0 proto kernel scope link src 10.0.2.15
+cosmo$ route -n
+Kernel IP routing table
+0.0.0.0         10.0.2.2        0.0.0.0         UG    0      0        0 eth0
+cosmo$ netstat -tln
+tcp        0     16 0.0.0.0:22              0.0.0.0:*               LISTEN...
+cosmo$ hostname
+cosmo
+```
+
+`ip` only shows: it is CosmoOS's own, because BusyBox's `ip` needs
+netlink, which the kernel does not have. `ifconfig eth0 down` and
+`ifconfig eth0 up` take the link down and up again, and `ifconfig eth0
+10.0.2.20 netmask 255.255.255.0` sets an address by hand until the DHCP
+lease changes; each needs the `net` privilege (see
+[Privileges](privileges.md)). The machine is called `cosmo` until a DHCP
+server names it: `netcfg` then writes that name to `/etc/hostname`, which
+the next boot keeps. `hostname NAME` renames it until the next boot; put
+the name in `/etc/hostname` to keep it.
 
 ## Fetching files
 

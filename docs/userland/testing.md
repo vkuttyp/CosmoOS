@@ -227,9 +227,10 @@ networking with no fw_cfg address, so the kernel's DHCP client configures
 `eth0`; the log must show `dhcp: eth0: bound to 10.0.2.15 ... first
 10.0.2.3`.
 
-- **a. DHCP**: `netcfg show` reports `eth0: bound 10.0.2.15/24 gateway
-  10.0.2.2 server 10.0.2.2 ... dns 10.0.2.3`, and `/etc/resolv.conf`
-  holds `nameserver 10.0.2.3`.
+- **a. DHCP**: the boot's slirp names the machine (`QEMU_NET_HOSTNAME`,
+  DHCP option 12); `netcfg show` reports `eth0: bound 10.0.2.15/24 gateway
+  10.0.2.2 server 10.0.2.2 ... dns 10.0.2.3 hostname cosmo-s1`, and
+  `/etc/resolv.conf` holds `nameserver 10.0.2.3`.
 - **b. By address**: the harness serves a fresh random 1 MiB file over
   HTTP on the host's 127.0.0.1 (the guest's 10.0.2.2); `wget` fetches it
   and the guest's `sha256sum` must equal the file's.
@@ -251,9 +252,26 @@ networking with no fw_cfg address, so the kernel's DHCP client configures
   and with the RSA key `echo rsa-ok`; then `ssh -tt` under a host pty of 37 x 101 types `tty` (must print
   `/dev/pts/N`), `stty size` (must print `37 101`), `sleep 100 &`, `jobs`
   (Running), `kill %1`, `wait` and a marker.
-- **e. Reboot**: the installed disk boots again; a login with
-  `StrictHostKeyChecking=yes` against the first boot's known_hosts must
-  pass, so the host key was kept.
+- **g. Network inspection** (shell completeness S1), at the end of the
+  same boot: `ip a` shows `lo` and `eth0` (`<BROADCAST,MULTICAST,UP,LOWER_UP>
+  mtu 1500 state UP`, its MAC, `inet 10.0.2.15/24 brd 10.0.2.255 scope
+  global dynamic eth0` with the lease's lifetime, the link-local address);
+  `ip -4 a` prints no `link/` or `inet6` line; `ip r` the default via
+  10.0.2.2 `proto dhcp` and the subnet; `ip neigh` the gateway
+  `REACHABLE`; `ip addr add` is refused (exit 2). BusyBox: `ifconfig`
+  (eth0's MAC, address, broadcast, mask, flags and a non-zero RX count,
+  and `lo`), `route -n` (the default `UG` and the subnet `U`), `netstat
+  -tuln` (dropbear on `0.0.0.0:22` and `:::22`, no "bogus data"), `arp -a`
+  (the gateway at the MAC `ip neigh` gave), `hostname`, `hostname -s` and
+  `/etc/hostname` (`cosmo-s1`). `priv -d net -- ifconfig eth0 down` must
+  fail with `SIOCSIFFLAGS: Operation not permitted` and leave eth0 up;
+  `ifconfig eth0 down` as root must show `state DOWN` in `ip link` and no
+  `UP` in `ifconfig eth0`; `ifconfig eth0 up` must bring it back, and a
+  ping of the gateway must answer.
+- **e. Reboot**: the installed disk boots again, its slirp naming no
+  host; a login with `StrictHostKeyChecking=yes` against the first boot's
+  known_hosts must pass, so the host key was kept, and `hostname` must
+  still print `cosmo-s1` (`/etc/rc` applied `/etc/hostname`).
 
 ## `make test-busybox` (`tests/boot/busybox_test.py`)
 

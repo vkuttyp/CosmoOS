@@ -882,7 +882,9 @@ for an interface with a client and returns true; anything else is
 untouched (false).
 **`unsigned dhcp_lease_list(struct dhcp_lease_info *out, unsigned max)`**
 copies every client (state, address, mask, router, server, up to three
-DNS servers, the granted lease/T1/T2 and the milliseconds left to each).
+DNS servers, the granted lease/T1/T2 and the milliseconds left to each,
+and since S1 the host name the ACK named, option 12, kept only when it is
+1-63 letters, digits, `-` and `.`).
 **`void dhcp_boot_wait(void)`** (`main.c`, after `random_boot_wait`):
 waits at most `DHCP_BOOT_WAIT_NS` (10 s) for every client to be bound.
 **`dhcp_get_stats`**: discovers, requests, offers, acks, naks, renews,
@@ -894,8 +896,57 @@ earlier ones) to now and runs the client; `dhcp_test_state`.
 after the flow section, a `struct cosmo_netctl_lease_list` and one
 `struct cosmo_netctl_lease` per client (`ifname`, `state`
 `COSMO_NETCTL_DHCP_*`, `addr`, `mask`, `router`, `server`, `dns[3]` and
-`dns_count`, `lease_s`/`t1_s`/`t2_s`, `remaining_ms`/`t1_ms`/`t2_ms`).
+`dns_count`, `lease_s`/`t1_s`/`t2_s`, `remaining_ms`/`t1_ms`/`t2_ms`,
+and from version 8 `hostname[64]`, the record growing to 128 bytes).
 `netcfg` reads it (docs/userland).
+
+## The listings (shell completeness S1; design.md, "Inspecting the stack")
+
+Each copies one table under that table's lock into the caller's array,
+writes at most `max` and returns how many there are (more than `max`
+means some were left out); the caller formats with no lock held (N32).
+
+**`unsigned netif_list(struct netif_info *out, unsigned max)`**,
+**`bool netif_info_by_name(const char *name, struct netif_info *out)`**,
+**`bool netif_info_by_index(unsigned index, struct netif_info *out)`**
+(`netif.h`): name, index, `NETIF_*` flags, MTU, MAC, the IPv4 address,
+mask and gateway, the link-local address (`lo`'s is `::1`) and the
+counters. Any context.
+**`unsigned ipv4_route_list(struct ipv4_route_info *out, unsigned max)`**
+(`ip.h`): the default route (`IPV4_RTF_UP | IPV4_RTF_GATEWAY`, through
+`netif_default_ipv4`'s interface to its gateway) when it has a gateway,
+then each up, addressed, non-loopback interface's subnet
+(`IPV4_RTF_UP`), with the source the stack picks; at most
+`IPV4_ROUTES_MAX` (17); returns how many it wrote, 0 without memory.
+Thread context.
+**`unsigned arp_list(struct arp_info *out, unsigned max)`** (`ether.h`):
+address, MAC (zero while resolving), `complete`, the interface's name.
+**`unsigned tcp_list(struct tcp_sock_info *out, unsigned max)`**
+(`tcp.h`): every pcb in the table, its ends (the remote end zero while
+`CLOSED`), state, and queue lengths (bytes unacknowledged and unread; a
+listener's backlog and queued children), read relaxed under the table
+lock alone.
+**`unsigned udp_list(struct udp_sock_info *out, unsigned max)`**
+(`udp.h`): every bound pcb, its ends (remote port 0: not connected),
+queued datagrams and drops.
+
+**`int procnet_render(enum procnet_file f, char *out, size_t n)`**
+(`kernel/net/procnet.h`): `/proc/net/<procnet_names[f]>` in Linux's
+format into `out`, ending at the last whole line within `n`
+(`PROCNET_TEXT_MAX`, 64 KiB, is what procfs gives it); returns the
+length, or `-ENOMEM`. Thread context. procfs calls it at the open.
+
+**netctl version 8** (`uapi/cosmo/netctl.h`): after the lease section, a
+`struct cosmo_netctl_if_list` and that many `struct cosmo_netctl_if`
+(name, index, `COSMO_NETCTL_IF_*` flags, MTU, MAC, address, mask, the
+link-local address, eight counters; 120 bytes), a
+`struct cosmo_netctl_route_list` and that many `struct cosmo_netctl_route`
+(interface, destination, mask, gateway, source, `COSMO_NETCTL_RT_GATEWAY`;
+32 bytes), and a `struct cosmo_netctl_neigh_list` and that many
+`struct cosmo_netctl_neigh` (interface, address, MAC,
+`COSMO_NETCTL_NEIGH_INCOMPLETE` or `_REACHABLE`; 20 bytes). Bounds
+`COSMO_NETCTL_MAX_IFS` (16), `_MAX_ROUTES` (17), `_MAX_NEIGH` (64), in
+`COSMO_NETCTL_SNAPSHOT_MAX`. `ip` reads them (docs/userland).
 
 ## Boot parameters (`kernel/include/kernel/fwcfg.h`, `kernel/include/arch/fwcfg.h`)
 

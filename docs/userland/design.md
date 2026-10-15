@@ -35,7 +35,9 @@ convention), documented in `docs/kernel/module/` (the archive) and
 The Linux userland is static musl BusyBox, built from source with the
 system (`ports/busybox/README.md`). `/bin/busybox` and one symbolic
 link per applet of `ports/busybox/applets` -- the 48 of M3's decision
-7, `/bin/sh` among them, and M4's `wget`, `nslookup`, `stty` and `tty` -- come from the boot archive
+7, `/bin/sh` among them, M4's `wget`, `nslookup`, `stty` and `tty`, and
+the later units' (S1's `ifconfig`, `route`, `netstat`, `arp` and
+`hostname` among them) -- come from the boot archive
 (`mkbootarchive.py`'s `NAME@TARGET` entries, ustar type 2; the kernel
 makes them with `vfs_symlink` in `ramfs_populate_boot`). A native program
 whose name an applet takes is installed as `/bin/cosmo-<name>`
@@ -43,7 +45,9 @@ whose name an applet takes is installed as `/bin/cosmo-<name>`
 `/bin/cosmo-sh`, and `cosmo-echo`, `cosmo-cat`, `cosmo-ls`, `cosmo-cp`,
 `cosmo-mv`, `cosmo-rm`, `cosmo-mkdir`, `cosmo-rmdir`, `cosmo-pwd`,
 `cosmo-true`, `cosmo-false` and `cosmo-sleep` likewise; `mkfifo`, `sync`
-and the `/sbin` programs keep their names. init's self-tests and the
+and the `/sbin` programs keep their names (`/sbin/hostname` beside
+BusyBox's `/bin/hostname`, which `PATH` finds first and which also takes
+`-s`, `-F` and `-f`). init's self-tests and the
 native test scripts name the `cosmo-` programs, because what they test
 is the native side.
 
@@ -348,9 +352,40 @@ which BusyBox's `wget` reaches through `getaddrinfo`, reads that file;
 BusyBox's `nslookup` reads it too. No lease with a DNS server (an
 interface configured from fw_cfg, or no DHCP server) leaves the file as
 it was and exits 1. `netcfg show` prints the leases: state, address and
-prefix, gateway, server, lease, T1/T2 and the time left, DNS servers.
+prefix, gateway, server, lease, T1/T2 and the time left, DNS servers,
+and the host name a lease carries.
 The file is written once per boot: a renewal that changed the servers is
 picked up at the next boot (or another `netcfg`).
+
+**The host name** (shell completeness S1). A lease whose server named the
+machine (DHCP option 12, netctl version 8; the kernel keeps only a name of
+letters, digits, `-` and `.`) names it here too: `netcfg` writes the first
+held lease's name to `/etc/hostname` (`--hostname`), the same
+write-and-rename way, and sets it with `sethostname`. `/etc/rc` applies
+`/etc/hostname` with BusyBox's `hostname -F` before `netcfg` runs, so a
+name a server gave once is kept by a later boot whose server names none,
+and a name written there by hand is the machine's until a server names
+another.
+
+## ip (`userland/system/ip.c`; shell completeness S1)
+
+`/sbin/ip` shows the machine's addresses, links, IPv4 routes and ARP
+neighbours in iproute2's format: `ip a`, `ip addr`, `ip link`, `ip r`,
+`ip route`, `ip neigh`, each with `show [dev] NAME` and `-4`/`-6`,
+abbreviated as iproute2 allows. BusyBox's `ip` speaks only netlink, which
+the kernel does not have; this one reads `/dev/net/tapctl`'s snapshot
+(netctl version 8: the interface, route and neighbour sections, and the
+lease section for which addresses are DHCP's, shown `dynamic` with the
+lease's time left and `proto dhcp`). It is the deliberate substitute until
+netlink exists, and read-only: any command that would change something
+(`add`, `del`, `set`, `flush`) is refused with exit 2, and BusyBox's
+`ifconfig` and `route` configure (under `PRIV_NET`). Its lines follow
+iproute2's field for field and leave out what the kernel does not report
+(qdisc, group, qlen, a link mode), as iproute2 does when a kernel omits an
+attribute; IPv6 shows each link-local address and route, and no
+neighbours. Reading the snapshot takes `PRIV_NET`, as every netctl read
+does, so an unprivileged `ip` is refused where Linux's would answer
+(inventory).
 
 ## Test script (`userland/etc/rc.test`)
 
