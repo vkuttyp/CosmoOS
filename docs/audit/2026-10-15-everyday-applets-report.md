@@ -39,7 +39,32 @@ history kept across sessions.
 
 ## Validation
 
-(filled in from the validation matrix run)
+- **The validation matrix**, on `07ca164f` (every step) and `0a62251b`
+  (the boots again, after the fix below), every step PASS; the boot times
+  are the harness's own lines:
+
+  | Step | x86-64 | AArch64 |
+  |---|---|---|
+  | `host-test`, `fuzz`, `analyze` | pass | pass |
+  | debug `test`, `QEMU_SMP=1` / `2` / `4` | 141.5 / 144.5 / 145.0 s | 137.3 / 158.1 / 159.8 s |
+  | `test-smp2` | 143.9 s | 149.8 s |
+  | `test-chaos` | 146.0 s | 165.4 s |
+  | `test-harness-retry` | 145.8 s | 153.3 s |
+  | `BUILD=release test` | 18.2 s | 21.7 s |
+  | `BUILD=release test-busybox` | 44.3 s (129 checks, history) | 54.8 s |
+  | `BUILD=release test-net-login` | 64.3 s | 74.3 s |
+  | `BUILD=release test-install` | 25.6 s | 39.9 s |
+
+  The network harness passed in every debug boot (the boot test requires
+  it). The first run's debug boots all failed one self-test,
+  `process-user`: `a process it spawned outlived it (P33)`, leaving `svc`
+  and `syslogd`. init's `svc` test runs `svc boot` over the image's own
+  services and stops each it knows (`hello`, `greeter`), all of which had
+  exited by themselves; `syslogd` runs until stopped. The test now stops
+  it too (`0a62251b`), and `/etc/rc`'s `svc boot` starts it again for the
+  real boot. The scripted test's first run also failed two of its own new
+  checks (`watch` counted redraws; `paste` used an `xargs -d` this build
+  lacks), corrected before the matrix.
 
 ## Not done here (inventory §12)
 
