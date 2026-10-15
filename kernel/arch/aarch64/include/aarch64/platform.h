@@ -84,6 +84,9 @@ bool aarch64_console_serial(paddr_t *base, unsigned *intid, const char **kind);
 
 /* --- smp.c: the PSCI conduit from the FADT; 1 HVC, 0 SMC, -1 none --- */
 int aarch64_psci_conduit(void);
+/* PSCI SYSTEM_OFF through that conduit; returns only when there is no
+ * PSCI or the firmware refused (logged). */
+void aarch64_psci_system_off(void);
 
 /* --- platform.c: the boot-time platform line (after acpi_init) --- */
 void aarch64_platform_report(void);

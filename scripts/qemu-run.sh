@@ -22,6 +22,9 @@
 #               with no serial console attached: make test-platforms)
 #   QEMU_VIRT_OPTS  appended to AArch64's -machine virt options (for example
 #               `,highmem=off`; make test-platforms)
+#   QEMU_SEMIHOSTING  0 leaves AArch64's semihosting out: the kernel's exit
+#               is then a PSCI SYSTEM_OFF and QEMU exits 0 whatever the
+#               boot's result (make test-platforms)
 #   OVMF_CODE   firmware image override
 #
 # The isa-debug-exit device lets the kernel terminate QEMU with an exit
@@ -283,6 +286,8 @@ if [ "$arch" = aarch64 ]; then
     # "Exception level 2"). QEMU_EL2=0 boots at EL1 as before.
     el2_machine=""
     [ "${QEMU_EL2:-1}" != "0" ] && el2_machine=",virtualization=on"
+    semihosting="-semihosting-config enable=on,target=native"
+    [ "${QEMU_SEMIHOSTING:-1}" = "0" ] && semihosting=""
     exec ${QEMU_WRAP:-} qemu-system-aarch64 \
         -machine "virt,gic-version=${QEMU_GIC:-2}${gic_msi}${iommu_machine}${el2_machine}${QEMU_VIRT_OPTS:-},accel=${QEMU_ACCEL:-tcg}" \
         -cpu "${QEMU_CPU:-cortex-a72}" \
@@ -305,7 +310,7 @@ if [ "$arch" = aarch64 ]; then
         $qmp \
         $fwcfg \
         $pcap \
-        -semihosting-config enable=on,target=native \
+        $semihosting \
         -serial "${QEMU_SERIAL:-stdio}" \
         -display none \
         -monitor none \

@@ -74,6 +74,20 @@ int aarch64_psci_conduit(void)
     return acpi_platform_is_qemu() ? 1 : -1;
 }
 
+void aarch64_psci_system_off(void)
+{
+    /* The conduit afresh: a one-CPU boot never ran psci_probe. */
+    int conduit = aarch64_psci_conduit();
+    if (conduit < 0) {
+        kinfo("shutdown: no PSCI to power off with");
+        return;
+    }
+    g_use_hvc = conduit == 1;
+    kinfo("shutdown: power off through PSCI SYSTEM_OFF (%s)", g_use_hvc ? "HVC" : "SMC");
+    int64_t rc = psci_call(PSCI_FN_SYSTEM_OFF, 0, 0, 0);
+    kerror("shutdown: PSCI SYSTEM_OFF returned %lld", (long long)rc);
+}
+
 static bool g_have_psci;
 
 static void psci_probe(void)

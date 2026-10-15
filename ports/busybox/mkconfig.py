@@ -20,7 +20,7 @@ HEAD TAIL WC SORT UNIQ CUT TR GREP SED AWK FIND XARGS TAR GZIP GUNZIP DIFF BASEN
 READLINK UNAME ID SHA256SUM WHICH BUSYBOX
 WGET NSLOOKUP STTY TTY
 VI LESS TOP FREE DF DU UPTIME WHOAMI CLEAR MD5SUM DD CMP HEXDUMP
-PING""".split())   # M4 (decision 5); v1.0.2's everyday commands; ping over raw ICMP sockets
+PING POWEROFF""".split())   # M4 (decision 5); v1.0.2's everyday commands; ping over raw ICMP sockets; poweroff
 
 FORCE = {
     "STATIC": "y",                 # decision 6: a static binary

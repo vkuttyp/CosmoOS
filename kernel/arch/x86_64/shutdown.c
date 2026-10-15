@@ -17,3 +17,9 @@ void arch_emulator_exit(unsigned code)
 {
     outl(QEMU_DEBUG_EXIT_PORT, code);
 }
+
+/* ACPI S5 needs the SLP_TYP values of the DSDT's \_S5 object, which
+ * needs an AML interpreter: nothing to do yet, and the caller halts. */
+void arch_power_off(void)
+{
+}

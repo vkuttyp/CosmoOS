@@ -14,6 +14,9 @@ the shell and print the platform line with what that configuration has.
   lowmem     highmem=off: no device or RAM above 4 GiB
   rndr       a CPU with RNDR (neoverse-v1): the pool seeds from the CPU
   nornd      no virtio-rng and a CPU without RNDR: unseeded, still boots
+  psci-exit  no semihosting: `exit` ends the boot with PSCI SYSTEM_OFF,
+             and QEMU exits 0 by itself
+  psci-poweroff  the same, ended by BusyBox `poweroff` (init's SIGUSR2)
   noserial   -serial none and `serial=none` on the command line (the image
              signed again with the build's key, --key): QEMU's SPCR is
              always there, so the command line is what makes this the
@@ -22,9 +25,10 @@ the shell and print the platform line with what that configuration has.
              the log ring is where the test reads it
 
 No variant passes fw_cfg options (opt/cosmo/*): absent configuration is the
-normal case. A serial variant ends by typing `exit` and requires QEMU's
-clean-exit status; noserial is stopped once the virtio console shows the
-userland. Exit 0 PASS, 1 FAIL; every boot's logs stay in DIR.
+normal case. A serial variant ends by typing `exit` (or `poweroff`) and
+requires QEMU's clean-exit status -- the semihosting one, or 0 from a PSCI
+power-off without semihosting; noserial is stopped once the virtio
+console shows the userland. Exit 0 PASS, 1 FAIL; every boot's logs stay in DIR.
 """
 
 import argparse
@@ -55,6 +59,11 @@ VARIANTS = {
     "rndr": dict(env={"QEMU_CPU": "neoverse-v1", "QEMU_RNG": "0"}, want={"log": r"random: cpu source: rndr"}),
     "nornd": dict(env={"QEMU_CPU": "cortex-a72", "QEMU_RNG": "0"},
                   want={"log": r"random: cpu source: none"}),
+    "psci-exit": dict(env={"QEMU_SEMIHOSTING": "0"}, rc=0,
+                      want={"log": r"shutdown: exit status 0[\s\S]*shutdown: power off through PSCI SYSTEM_OFF \((HVC|SMC)\)"}),
+    "psci-poweroff": dict(env={"QEMU_SEMIHOSTING": "0"}, rc=0, end=b"poweroff\n",
+                          want={"log": r"init: power off requested[\s\S]*shutdown: exit status 0[\s\S]*"
+                                       r"shutdown: power off through PSCI SYSTEM_OFF \((HVC|SMC)\)"}),
     "noserial": dict(env={"QEMU_SERIAL": "none"}, serial=False, cmdline=b"root=boot-disk serial=none\n",
                      want={"log": r"fbcon: no serial console: the framebuffer is the console from the first line",
                            "console": r"^framebuffer only$"}),
@@ -150,11 +159,15 @@ def boot(name, image, work, spec, timeout, key):
         else:
             raise Fail(f"{name}: no userland within {timeout:.0f}s")
         if serial:
-            proc.stdin.write(b"exit\n")
+            proc.stdin.write(spec.get("end", b"exit\n"))
             proc.stdin.flush()
-            rc = proc.wait(timeout=60)
-            if rc != EXIT_SUCCESS:
-                raise Fail(f"{name}: QEMU exit status {rc}, expected {EXIT_SUCCESS}")
+            try:
+                rc = proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                raise Fail(f"{name}: QEMU still running 60 s after {spec.get('end', b'exit').strip().decode()!r}")
+            want_rc = spec.get("rc", EXIT_SUCCESS)
+            if rc != want_rc:
+                raise Fail(f"{name}: QEMU exit status {rc}, expected {want_rc}")
         else:
             proc.kill()
             proc.wait()

@@ -16,10 +16,13 @@ void kernel_shutdown(enum kernel_exit_status status)
     smp_stop_others();
     arch_irq_disable();
 
-    /* An emulator may honour this asynchronously, so the halt below is
-     * reached either way; on hardware it is the only effect. */
+    /* An emulator's exit carries the status to the test harness; it
+     * returns where there is none (hardware, Parallels Desktop, a QEMU
+     * without the device). Then the firmware's power-off, and the halt
+     * below only where there is neither. */
     arch_emulator_exit(status == KERNEL_EXIT_SUCCESS ? ARCH_EMULATOR_EXIT_SUCCESS
                                                      : ARCH_EMULATOR_EXIT_FAILURE);
+    arch_power_off();
 
     kinfo("shutdown: halting CPU");
     arch_cpu_halt_forever();

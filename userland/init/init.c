@@ -5603,6 +5603,22 @@ static void console_shell(char *out, size_t n)
         snprintf(out, n, "%s", buf);
 }
 
+/*
+ * `poweroff` (BusyBox's, which signals init as its own init would want):
+ * SIGUSR2 ends the boot as the console shell's exit does -- a sync, then
+ * init's own exit, after which the kernel powers the machine off
+ * (kernel_shutdown). Done in the handler, with system calls only, so no
+ * signal can land between a flag's check and the wait it should end.
+ */
+static void poweroff_signal(int sig)
+{
+    (void)sig;
+    static const char msg[] = "init: power off requested\n";
+    write(1, msg, sizeof(msg) - 1);
+    sync();
+    _exit(0);
+}
+
 static const char *const g_shell_env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", "HOME=/", "PS1=cosmo$ ", NULL };
 
 /* `session`: the console shell leads a session whose controlling terminal
@@ -5982,6 +5998,9 @@ int main(int argc, char **argv)
 
     printf("init: CosmoOS userland, pid %d\n", getpid());   /* pid 1 outside self-test builds */
     fflush(stdout);
+    struct sigaction pa = { 0 };
+    pa.sa_handler = poweroff_signal;
+    sigaction(SIGUSR2, &pa, NULL);
     setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin", 1);
     setenv("HOME", "/", 1);
     bool disk_root = switch_to_disk_root();
