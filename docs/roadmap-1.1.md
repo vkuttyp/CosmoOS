@@ -213,7 +213,7 @@ the inventory.
   `comm`, `cksum`, `base64`, `unzip`, `bzip2`, `bunzip2`, `xz`, `unxz`,
   `zcat`, `mktemp`, `logger` (to the console log) and `setsid`; `ash`'s
   command history saved to `/root/.ash_history` (the console shell's
-  `HOME` is `/` today). **Acceptance:** a scripted test runs each with
+  `HOME` was `/` before this unit). **Acceptance:** a scripted test runs each with
   known input and requires its known output; `pgrep`, `pkill`, `killall`
   and `pidof` find a background `sleep` through `/proc` and act on it;
   a uniquely tagged `logger` message appears in the kernel's log; a

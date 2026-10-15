@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -35,7 +36,7 @@
 static const char *const g_levels[8] = { "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug" };
 static const char *const g_facilities[24] = {
     "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv", "ftp",
-    "16", "17", "18", "19", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7",
+    "12", "13", "14", "15", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7",
 };
 
 /* "Mmm dd hh:mm:ss " at `s`: syslog(3)'s timestamp. */
@@ -47,6 +48,38 @@ static int is_stamp(const char *s, size_t n)
         if ((s[i] < 'A' || s[i] > 'Z') && (s[i] < 'a' || s[i] > 'z'))
             return 0;
     return 1;
+}
+
+/* Clear the way for the bind: nothing at `path`, or a socket node no one
+ * answers on (an earlier run's). Anything else is refused and left alone:
+ * a file is not ours to delete, and a socket someone is bound to is a
+ * running syslogd, which unlinking would cut off from its senders (a unix
+ * socket is found by its node). 0, or -1 with a message. */
+static int clear_stale(const char *path, const struct sockaddr_un *sa)
+{
+    struct stat st;
+    if (lstat(path, &st) < 0)
+        return errno == ENOENT ? 0 : (fprintf(stderr, "syslogd: %s: %s\n", path, strerror(errno)), -1);
+    if (!S_ISSOCK(st.st_type)) {
+        fprintf(stderr, "syslogd: %s exists and is not a socket; left as it is\n", path);
+        return -1;
+    }
+    int probe = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (probe < 0) {
+        fprintf(stderr, "syslogd: socket: %s\n", strerror(errno));
+        return -1;
+    }
+    int live = connect(probe, (const struct sockaddr *)sa, sizeof(*sa)) == 0;
+    close(probe);
+    if (live) {
+        fprintf(stderr, "syslogd: %s is already served (another syslogd is running)\n", path);
+        return -1;
+    }
+    if (unlink(path) < 0) {
+        fprintf(stderr, "syslogd: unlink %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 /* One datagram, `n` bytes, into the kernel's log. 0 when it was written,
@@ -102,7 +135,8 @@ int main(int argc, char **argv)
         return 1;
     }
     strcpy(sa.sun_path, path);
-    unlink(path);   /* a node left by an earlier run would refuse the bind */
+    if (clear_stale(path, &sa) < 0)
+        return 1;
     if (bind(fd, (const struct sockaddr *)&sa, sizeof(sa)) < 0) {
         fprintf(stderr, "syslogd: bind %s: %s\n", path, strerror(errno));
         return 1;

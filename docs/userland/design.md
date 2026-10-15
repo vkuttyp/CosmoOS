@@ -83,7 +83,7 @@ main(argc, argv):
   --block    → pipe(h); read(h[0], &c, 1); exit(5)        (a killable read nothing but the kill ends, for the kernel test)
   --spin     → for (;;) ;                                 (a CPU-bound loop, for the kernel test)
   print "init: CosmoOS userland, pid N"                   (N is 1 only when no self-tests ran first)
-  setenv PATH=/bin:/sbin:/usr/bin:/usr/sbin HOME=/
+  setenv PATH=/bin:/sbin:/usr/bin:/usr/sbin HOME=/root; mkdir /root (after the root is chosen)
   sigaction(SIGUSR2): print "init: power off requested"; sync(); _exit(0)
                                                           (BusyBox poweroff's signal; in the handler,
                                                            so it cannot fall between a check and the wait)
@@ -383,7 +383,10 @@ always`) binds it and writes each message with `SYS_log` as `syslog:
 [FACILITY.LEVEL] TAG: TEXT`: the priority by name, the timestamp dropped
 (the kernel's line has its own), control characters blanked, the line cut
 to what one log line takes (199 bytes). `dmesg` and the console show it;
-nothing is written to a file. With no privileges the kernel's rate limit
+nothing is written to a file. At its start it clears the path only of
+a socket node no one answers on (an earlier run's): a file there, or a
+socket another `syslogd` is bound to, is refused and left alone. With no
+privileges the kernel's rate limit
 for an unprivileged writer applies to it as to any process: a burst past
 it is dropped, and the next line that gets through says how many were.
 The socket's node is the kernel's 0755, owned by root (the native ABI has

@@ -272,6 +272,21 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.2
 done
 expect logger 1 "$got"
+# A second syslogd leaves the running one's /dev/log alone (a unix socket
+# is found by its node; unlinking it would cut the first off), and never
+# deletes a file at its path.
+expect syslogd-served 1 "$(/sbin/syslogd 2>&1 | grep -c 'already served')"
+logger -t "$tag" "still served"
+got=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    got=$(dmesg | grep -c "syslog: \[user.notice\] $tag: still served")
+    [ "$got" = 1 ] && break
+    sleep 0.2
+done
+expect syslogd-still-served 1 "$got"
+echo keep > notasock
+/sbin/syslogd "$T/notasock" > sd.out 2>&1
+expect syslogd-file "1 keep" "$(grep -c 'is not a socket' sd.out) $(cat notasock)"
 
 cd /
 rm -rf "$T"
