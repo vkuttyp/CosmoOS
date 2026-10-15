@@ -3022,3 +3022,19 @@ See the [history index](README.md).
   BusyBox `ifconfig`, `route`, `netstat`, `arp` and `hostname` are on.
   `test-net-login`'s stage g runs all of them on the installed system.
   Report: `docs/audit/2026-10-15-network-inspection-report.md`.
+- **After 1.0: everyday applets (2026-10-15, roadmap-1.1 S2).** BusyBox
+  gains 33 applets: `more`, `nl`, `od`, `strings`, `rev`, `tac`, `yes`,
+  `cal`, `time`, `timeout`, `watch`, `nohup`, `killall`, `pgrep`, `pkill`,
+  `pidof`, `install`, `realpath`, `split`, `fold`, `paste`, `comm`,
+  `cksum`, `base64`, `unzip`, `bzip2`, `bunzip2`, `xz` (decompress only),
+  `unxz`, `zcat`, `mktemp`, `logger` and `setsid`. A native `syslogd`
+  service binds `/dev/log` and copies what `logger` and `syslog(3)` send
+  into the kernel's log, unprivileged and so under its rate limit. The
+  console shell's `HOME` is `/root` (init makes it on the live image), so
+  ash keeps `/root/.ash_history`. `test-busybox` runs every new applet with
+  known input and output, finds and ends a background `sleep` with `pgrep`,
+  `pidof`, `pkill` and `killall`, reads a tagged `logger` line back from
+  `dmesg`, and checks that one ash's command is recalled by the next; two
+  `tar` testsuite cases excluded for want of `bunzip2` now pass and are no
+  longer excluded.
+  Report: `docs/audit/2026-10-15-everyday-applets-report.md`.

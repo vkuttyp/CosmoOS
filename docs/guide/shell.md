@@ -73,15 +73,20 @@ cosmo$ ls /bin
 ...wget...
 ```
 
-The applets are `sh` (ash) and `[ arp awk basename cat chmod clear cmp
-cp cut date dd df diff dirname du echo env expr false find free grep
-gunzip gzip head hexdump hostname id ifconfig less ln ls md5sum mkdir mv
-netstat nslookup ping poweroff printf pwd readlink rm rmdir route sed seq
-sha256sum sleep sort stat stty tail tar tee test top touch tr true tty
-uname uniq uptime vi wc wget which whoami xargs` (`ports/busybox/applets`);
+The applets are `sh` (ash) and `[ arp awk base64 basename bunzip2 bzip2
+cal cat chmod cksum clear cmp comm cp cut date dd df diff dirname du echo
+env expr false find fold free grep gunzip gzip head hexdump hostname id
+ifconfig install killall less ln logger ls md5sum mkdir mktemp more mv
+netstat nl nohup nslookup od paste pgrep pidof ping pkill poweroff printf
+pwd readlink realpath rev rm rmdir route sed seq setsid sha256sum sleep
+sort split stat strings stty tac tail tar tee test time timeout top touch
+tr true tty uname uniq unxz unzip uptime vi watch wc wget which whoami
+xargs xz yes zcat` (`ports/busybox/applets`; `xz` decompresses only);
 `/sbin` holds CosmoOS's own `cosmo-install`, `dmesg`, `fsctl`,
 `hostname`, `ip`, `kill`, `mount`, `netcfg`, `pkg`, `priv`, `ps`, `svc`,
-`sysctl`, `umount` and `vmctl`.
+`syslogd`, `sysctl`, `umount` and `vmctl`. ash keeps your command history
+in `/root/.ash_history`, and `logger` writes to the kernel's log, which
+`dmesg` shows.
 
 Files you write are on the disk and stay there:
 

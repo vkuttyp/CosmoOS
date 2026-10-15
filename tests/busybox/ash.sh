@@ -201,6 +201,96 @@ expect vi hello "$(cat v.txt)"
 expect ping-lo 1 "$(ping -c 3 127.0.0.1 | grep -c '3 packets transmitted, 3 packets received')"
 expect ping-noperm 1 "$(priv -d net ping -c 1 127.0.0.1 2>&1 | grep -c 'permission denied')"
 
+# --- shell completeness S2: the everyday applets --------------------------------
+printf 'one\ntwo\nthree\n' > l3
+expect more "one two three" "$(more l3 | xargs)"   # not a terminal: more copies
+expect nl "1	one" "$(nl l3 | head -n 1 | sed 's/^ *//')"
+expect od "0000000 141 142 012" "$(printf 'ab\n' | od -b | head -n 1 | tr -s ' ')"
+printf 'xx\001visible-text\002yy' > bin.dat
+expect strings visible-text "$(strings bin.dat)"
+expect rev cba "$(echo abc | rev)"
+expect tac "three two one" "$(tac l3 | xargs)"
+expect yes "y y y" "$(yes | head -n 3 | xargs)"
+expect cal "February 2024" "$(cal 2 2024 | head -n 1 | sed 's/^ *//; s/ *$//')"
+# /bin/time, the applet: ash parses a bare `time` as its own reserved word.
+expect time 1 "$( { /bin/time -p sleep 0.2; } 2>&1 | grep -c '^real ')"
+timeout 1 sleep 10
+expect timeout 143 "$?"
+# watch redraws every second until timeout ends it: the line at least once.
+expect watch 1 "$(timeout 3 watch -n 1 echo watched-line 2>&1 | grep -m 1 -c watched-line)"
+nohup sh -c 'echo nohup-ran' > nohup.out 2>&1
+expect nohup nohup-ran "$(cat nohup.out)"
+install -m 0640 l3 inst.txt
+expect install "640 three" "$(stat -c %a inst.txt) $(tail -n 1 inst.txt)"
+mkdir rp
+expect realpath "$T/l3" "$(realpath ./rp/../l3)"
+seq 1 10 > ten
+split -l 4 ten part.
+expect split "4 4 2" "$(wc -l < part.aa | tr -d ' ') $(wc -l < part.ab | tr -d ' ') $(wc -l < part.ac | tr -d ' ')"
+expect fold "abc def gh" "$(echo abcdefgh | fold -w 3 | xargs)"
+printf '1\n2\n' > c1; printf 'a\nb\n' > c2
+expect paste "1+a 2+b" "$(paste c1 c2 | tr '\t' '+' | xargs)"
+printf 'a\nb\nc\n' > s1; printf 'b\nc\nd\n' > s2
+expect comm "b c" "$(comm -12 s1 s2 | xargs)"
+expect cksum "4182447022 12" "$(printf 'hello cksum\n' | cksum)"
+expect base64 aGVsbG8= "$(printf hello | base64)"
+expect base64-d hello "$(echo aGVsbG8= | base64 -d)"
+echo '/Td6WFoAAATm1rRGBMANCSEBHAAAAAAAAAAAAJbfEfMBAAhoZWxsbyB4egoAAAAAwUk6+mNSFFoAASkJZJIcHR+2830BAAAAAARZWg==' | base64 -d > h.xz
+expect unxz "hello xz" "$(unxz -c h.xz)"
+expect xz-d "hello xz" "$(xz -dc h.xz)"
+echo 'UEsDBAoAAAAAACirT12sADrHBwAAAAcAAAAFAAAAei50eHR6aXBwZWQKUEsBAh4DCgAAAAAAKKtPXawAOscHAAAABwAAAAUAAAAAAAAAAQAAAKSBAAAAAHoudHh0UEsFBgAAAAABAAEAMwAAACoAAAAAAA==' | base64 -d > z.zip
+mkdir uz && (cd uz && unzip -q ../z.zip)
+expect unzip zipped "$(cat uz/z.txt)"
+seq 1 1000 > big
+bzip2 -k big
+expect bzip2 "$(cat big | md5sum)" "$(bunzip2 -c big.bz2 | md5sum)"
+gzip -c big > big.gz
+expect zcat "$(cat big | md5sum)" "$(zcat big.gz | md5sum)"
+mt=$(mktemp)
+expect mktemp 1 "$( [ -f "$mt" ] && case "$mt" in /tmp/tmp.*) echo 1;; esac)"
+rm -f "$mt"
+expect setsid 1 "$(setsid sh -c 'ps_sid=$(cut -d" " -f6 /proc/$$/stat); [ "$ps_sid" = "$$" ] && echo 1')"
+# pgrep, pkill, killall and pidof find a background sleep through /proc.
+sleep 61 &
+sp=$!
+expect pgrep "$sp" "$(pgrep -f 'sleep 61')"
+expect pidof 1 "$(pidof sleep | tr ' ' '\n' | grep -c "^$sp\$")"
+pkill -f 'sleep 61'
+wait $sp
+expect pkill 143 "$?"
+sleep 62 &
+sp=$!
+killall sleep
+wait $sp
+expect killall 143 "$?"
+# logger: /dev/log, through syslogd, into the kernel's log.
+tag=bbtest-$$
+logger -t "$tag" "logged through syslogd"
+got=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    got=$(dmesg | grep -c "syslog: \[user.notice\] $tag: logged through syslogd")
+    [ "$got" = 1 ] && break
+    sleep 0.2
+done
+expect logger 1 "$got"
+# A second syslogd leaves the running one's /dev/log alone (a unix socket
+# is found by its node; unlinking it would cut the first off), and never
+# deletes a file at its path.
+expect syslogd-served 1 "$(/sbin/syslogd 2>&1 | grep -c 'already served (another syslogd holds it)')"
+# The same endpoint by another spelling is the same instance.
+expect syslogd-alias 1 "$(/sbin/syslogd /dev/../dev/log 2>&1 | grep -c 'already served (another syslogd holds it)')"
+logger -t "$tag" "still served"
+got=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    got=$(dmesg | grep -c "syslog: \[user.notice\] $tag: still served")
+    [ "$got" = 1 ] && break
+    sleep 0.2
+done
+expect syslogd-still-served 1 "$got"
+echo keep > notasock
+/sbin/syslogd "$T/notasock" > sd.out 2>&1
+expect syslogd-file "1 keep" "$(grep -c 'is not a socket' sd.out) $(cat notasock)"
+
 cd /
 rm -rf "$T"
 echo "BBTEST: $n checks, $fails failed"

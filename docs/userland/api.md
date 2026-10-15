@@ -26,7 +26,7 @@ root and everything else under `/boot`.
 
 | Invocation | Behaviour | Exit status |
 |---|---|---|
-| `init` | prints `init: CosmoOS userland, pid N`; sets `PATH=/bin:/sbin:/usr/bin:/usr/sbin`, `HOME=/`; if `/etc/rc` exists runs `sh /etc/rc`, waits, prints `init: rc exited with status N`; runs `sh` on the console (handles 0, 1, 2 inherited), waits, prints `init: shell exited with status N` | the shell's status (the kernel treats init's exit as the end of the boot) |
+| `init` | prints `init: CosmoOS userland, pid N`; sets `PATH=/bin:/sbin:/usr/bin:/usr/sbin`, `HOME=/root` (and makes `/root`, 0700, on the root in use; `/` before shell completeness S2); if `/etc/rc` exists runs `sh /etc/rc`, waits, prints `init: rc exited with status N`; runs `sh` on the console (handles 0, 1, 2 inherited), waits, prints `init: shell exited with status N` | the shell's status (the kernel treats init's exit as the end of the boot) |
 | `init --selftest` | `fs_selftest`, `net_selftest`, `proc_selftest`, then the Phase 4 checks; prints `USERTEST: PASS` or `USERTEST: FAIL (n checks)` | 0 or 1 |
 | `init --crash` | prints `init: crashing on purpose` and writes to address 0 | 139 (fault) |
 | `init --block` | reads one byte from a pipe of its own and exits 5 (until the epoll-callback unit it read handle 0, and a key the HID harness typed ended it) | 128 + sig when killed; 5 if the read returns; 6 if the pipe cannot be made |

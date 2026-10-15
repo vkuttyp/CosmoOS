@@ -207,18 +207,21 @@ the inventory.
   architectures); on Parallels Desktop 27.0.3 the installed system showed
   the same and `ifconfig eth0 down`/`up` worked
   ([report](audit/2026-10-15-network-inspection-report.md)).
-- [ ] **S2 Applets.** `more`, `nl`, `od`, `strings`, `rev`, `tac`, `yes`,
+- [x] **S2 Applets.** `more`, `nl`, `od`, `strings`, `rev`, `tac`, `yes`,
   `cal`, `time`, `timeout`, `watch`, `nohup`, `killall`, `pgrep`,
   `pkill`, `pidof`, `install`, `realpath`, `split`, `fold`, `paste`,
   `comm`, `cksum`, `base64`, `unzip`, `bzip2`, `bunzip2`, `xz`, `unxz`,
   `zcat`, `mktemp`, `logger` (to the console log) and `setsid`; `ash`'s
   command history saved to `/root/.ash_history` (the console shell's
-  `HOME` is `/` today). **Acceptance:** a scripted test runs each with
+  `HOME` was `/` before this unit). **Acceptance:** a scripted test runs each with
   known input and requires its known output; `pgrep`, `pkill`, `killall`
   and `pidof` find a background `sleep` through `/proc` and act on it;
   a uniquely tagged `logger` message appears in the kernel's log; a
   command typed in an interactive `ash` is in `/root/.ash_history` after
-  that shell exits and a new one recalls it.
+  that shell exits and a new one recalls it. Done 2026-10-15:
+  `test-busybox` in CI (job `busybox`, both architectures); `logger`
+  through a native `syslogd`, BusyBox's `xz` decompressing only
+  ([report](audit/2026-10-15-everyday-applets-report.md)).
 - [ ] **S3 Process tools on `/proc`** (widens P2). `/proc/<pid>/stat`
   with the fields BusyBox `ps` and `top` read (state, ppid, pgrp,
   session, tty_nr, utime, stime, priority, nice, num_threads, starttime,
