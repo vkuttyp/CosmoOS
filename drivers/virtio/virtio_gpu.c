@@ -176,7 +176,7 @@ struct vgpu {
     struct vgpu_frame *frame;        /* attached to fbcon */
     struct thread *thread;
     bool stopping;
-    bool broken;                     /* a command timed out: none is sent again */
+    bool broken;                     /* a command timed out, or a detach was refused: none is sent again */
     bool panic_dead;                 /* a panic command was not answered: none is sent again */
     bool panic_busy;                 /* vgpu_panic_flush is running: a line it logs is not flushed */
     struct vgpu_retained *retained;  /* under cmd_lock */
@@ -344,7 +344,9 @@ static void vgpu_dma_release(struct vgpu *g, size_t len, void *va, dma_addr_t dm
  * A detach the device refused (an error response; a timeout sets broken)
  * leaves the backing attached: the memory is kept as after a timeout, and
  * no UNREF follows (after a timeout g->cmd.req may still be the device's;
- * the reset drops the resource). */
+ * the reset drops the resource). The device is then broken too: no
+ * command, and no resize, follows, so a device that refuses every detach
+ * gets one frame kept, not one per retry (Codex). */
 static void vgpu_frame_free(struct vgpu *g, struct vgpu_frame *f)
 {
     bool keep = false;
@@ -355,7 +357,9 @@ static void vgpu_frame_free(struct vgpu *g, struct vgpu_frame *f)
         u->padding = 0;
         if (vgpu_cmd(g, sizeof(*u), sizeof(struct vgpu_hdr), VGPU_RESP_OK_NODATA) != 0) {
             keep = true;
-            kwarn("virtio-gpu: %s: resource %u's backing not detached: its %u KiB kept until a reset",
+            g->broken = true;
+            kwarn("virtio-gpu: %s: resource %u's backing not detached: its %u KiB kept until a reset, "
+                  "and no command is sent again",
                   g->vdev->dev.name, f->resource_id, (unsigned)((size_t)f->pitch * f->height >> 10));
         } else {
             hdr_init(u, VGPU_CMD_RESOURCE_UNREF);
@@ -525,6 +529,8 @@ static void vgpu_thread(void *arg)
             g->resize_warned = false;
             g->resize_retry_at = 0;
         }
+        if (g->broken)
+            g->resize_pending = false;   /* nothing can be sent: no retry, no frame allocated */
         if (g->resize_pending && clock_deadline_passed(g->resize_retry_at)) {
             uint32_t w, h;
             int rc = vgpu_display_size(g, &w, &h);

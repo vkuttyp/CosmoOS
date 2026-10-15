@@ -281,7 +281,9 @@ MSI-X vectors, the configuration's and one queue's).
   operation with its type logged. A command that times out marks the
   device broken: nothing is sent again. Buffers the device may still own
   are kept on a list, as is a frame's memory whose
-  `RESOURCE_DETACH_BACKING` the device refused (Codex, PR #387); no
+  `RESOURCE_DETACH_BACKING` the device refused (Codex, PR #387), which
+  marks the device broken as a timeout does, so a device refusing every
+  detach gets one frame kept rather than one per resize retry; no
   `RESOURCE_UNREF` is built after it, since after a timeout the request
   page may still be the device's. They,
   the queue and the request pages are freed only after the reset at

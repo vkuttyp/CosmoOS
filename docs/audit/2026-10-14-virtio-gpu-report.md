@@ -338,6 +338,18 @@ Qodo's review of `d4b3d0ab`:
 - **A VNC socket error escaped as a traceback** (Qodo): `OSError` in
   the client is the test's own failure, with the socket's path.
 
+Codex's security review and CosmoReview's review of `d4b3d0ab`:
+
+- **A device refusing every detach could make the driver keep a frame
+  per resize retry** (Codex security), up to 32 MiB a second. A refused
+  detach now marks the device broken, as a timeout does: no command and
+  no resize follow, and at most one frame is kept.
+- **`fbcon_start` writes `ready` without the console lock**
+  (CosmoReview): not changed. It runs from `fbcon_early_init` and
+  `fbcon_init` on the boot console before its sink is registered, before
+  `tty_init` and `smp_init` (one CPU, no reader), and from
+  `fbcon_attach` inside its hold, on the slot not yet published.
+
 Not changed: CosmoReview's "blocking call under spinlock" in
 `vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with
 `kmem_cache_alloc`, which takes only the cache's spinlock and grows from
