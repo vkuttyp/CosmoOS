@@ -63,7 +63,8 @@ observability, security, portability, performance, optimization.
   tests and fuzzers.
 
 1.0 is the [1.0 roadmap](docs/roadmap-1.0.md) completed; what remains
-open after it, and why, is in [`docs/plan.md`](docs/plan.md).
+open after it, and why, is in [`docs/plan.md`](docs/plan.md); the units
+proposed next are in the [1.1 roadmap](docs/roadmap-1.1.md).
 
 ## Targets
 
@@ -121,6 +122,7 @@ Pass `ARCH=aarch64` for AArch64 and `BUILD=release` for a release build;
 | [`docs/history/`](docs/history/README.md) | What was built, phase by phase and unit by unit |
 | [`docs/guide/`](docs/guide/README.md) | The user guide: installing, the shell, networking, ssh, packages, privileges, known limitations |
 | [`docs/roadmap-1.0.md`](docs/roadmap-1.0.md) | The 1.0 definition of done and its milestones |
+| [`docs/roadmap-1.1.md`](docs/roadmap-1.1.md) | What merged after 1.0, the gaps recorded since, and the proposed next units |
 | [`docs/plan.md`](docs/plan.md) | Work after 1.0, grouped by area |
 | [`docs/audit/`](docs/audit/README.md) | Architecture audits, the deferred-work inventory and per-unit reports |
 

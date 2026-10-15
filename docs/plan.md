@@ -11,6 +11,8 @@
 > is promised for a date. The roadmap's out-of-scope list (VMX on
 > hardware, NUMA, huge pages, live migration, GPU and display, RAID-Z,
 > hotplug, eBPF, more than 64 CPUs, a hardware matrix) is part of it.
+> The units merged after 1.0 and those proposed next are in the
+> [1.1 roadmap](roadmap-1.1.md).
 
 Status snapshot: 2026-10-05, after merging [PR #308](https://github.com/vkuttyp/CosmoOS/pull/308);
 §2's two-CPU items updated by the two-CPU validation increment the same day.

@@ -13,6 +13,7 @@ wins and the document is wrong.
 |---|---|
 | `development.md` | Setting up a development host, building, running, testing, CI |
 | `roadmap-1.0.md` | The 1.0 definition of done, its milestones M1-M6 and their acceptance tests |
+| `roadmap-1.1.md` | The units merged after 1.0, the gaps recorded since, and the proposed next units with their acceptance tests |
 | `guide/` | The user guide (roadmap M6): installing, the shell, networking, ssh, packages, privileges, known limitations; every command in it is run by CI (`tests/guide/run_guide.py`) |
 | `plan.md` | Remaining work grouped by area, with suggested next increments |
 | `history/` | What was built, phase by phase and unit by unit (formerly the README's Status section); indexed in [`history/README.md`](history/README.md) |
