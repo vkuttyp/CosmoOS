@@ -144,8 +144,14 @@ BOOT_LOG ?= $(OUT)/boot-test.log
 # boot); on the slow kind the suite had grown to within 5 s of 180, and the
 # merge of PR #325 timed out its test-harness-retry boot at 184 s with every
 # self-test passed (run 37653536848). The same 240 s on both.
+# AArch64 300 s from 2026-10-15: over the last 40 CI runs its entropy job's
+# 146 boots took a median of 212 s and its passing ones at most 235.7 s, and
+# six timed out at 240 s with every self-test passed, all six the
+# no-entropy boot, whose self-test time puts their whole boot at 240-246 s
+# (docs/testing/flakes.md). The build job's 261 AArch64 boots: p95 217 s,
+# at most 228.8 s.
 # The shell, network and key harnesses derive their deadlines from it.
-BOOT_TIMEOUT ?= 240
+BOOT_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),300,240)
 # test-busybox: one boot that runs the scripted test and fifteen testsuite files.
 BUSYBOX_TIMEOUT ?= 900
 test: $(IMAGE)

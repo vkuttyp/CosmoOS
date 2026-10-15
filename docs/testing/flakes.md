@@ -4291,3 +4291,20 @@ boots at **235.7**, 226.9, 212.6 and 213.5 s, self-tests 182,100 ms in
 the slowest. Both conditions named above are now met -- a third
 sighting, and main's slowest boot in this job above 230 s -- so the
 budget is due to be restated or widened under the rule, as its own unit.
+
+**Widened, 2026-10-15: AArch64's `BOOT_TIMEOUT` is 300 s** (Makefile).
+Kept as a hang guard, not restated: no observable stands in for "the boot
+finished". Over the last 40 CI runs (38424256780 to 38694717149), this
+job's 146 AArch64 boots took a median of 212 s, p90 226 s; its 140
+passing boots took at most 235.7 s; and there were **six** timeouts, not
+three -- also on `virtio-gpu` (38598541665), `release-1.0.3-docs`
+(38595664115) and this entry's own branch (38593051550) -- every one the
+first, no-entropy boot, with all 475 self-tests passed. That boot runs
+about 9 s behind its three siblings (median 220 s against 208-213 s), and
+over its 34 passing runs its time is 1.341 x its self-test time - 4.7 s,
+to within 3.8 s; the six timed-out boots' self-tests (182.6-187.0 s)
+put them at 240-246 s. The runners are of two speeds (a boot of about
+150 s or about 210 s), and the build job, on the same runners, has the
+same spread: its 261 AArch64 boots took a p95 of 217 s and at most 228.8
+s. 300 s is 1.22 x the slowest estimated boot, as #314's 240 s was 1.39 x
+that day's p95; a real hang is caught 60 s later on AArch64.

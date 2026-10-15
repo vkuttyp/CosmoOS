@@ -1133,7 +1133,8 @@ each; none is needed by M2's acceptance test.
   investigated); seen in the post-1.0 Parallels test, 2026-10-14.
 - `sftp`'s `ls -l` shows `?` for the link count (cause not
   investigated); seen in the same test.
-- The AArch64 entropy boots' 240 s budget is due to be restated or
+- ~~The AArch64 entropy boots' 240 s budget is due to be restated or
   widened (`docs/testing/flakes.md`: a third sighting on main's #386
   merge, and main's slowest boot in that job at 235.7 s on its rerun);
-  found by the virtio-gpu unit, 2026-10-15.
+  found by the virtio-gpu unit, 2026-10-15.~~ **Widened to 300 s on
+  AArch64, 2026-10-15** (`docs/testing/flakes.md`).
