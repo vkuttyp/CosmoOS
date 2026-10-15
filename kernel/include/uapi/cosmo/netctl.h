@@ -36,8 +36,13 @@
  * the lease section (roadmap M4): a fourth section after the flow section,
  * read-only, listing the machine's own DHCP clients and their leases
  * (address, mask, router, DNS servers, lease times), which netcfg turns into
- * /etc/resolv.conf. No command changes. */
-#define COSMO_NETCTL_VERSION 7
+ * /etc/resolv.conf. No command changes. Version 8 (shell completeness S1)
+ * gives a lease record the host name the server named (DHCP option 12),
+ * which netcfg writes to /etc/hostname -- the record grows from 64 to 128
+ * bytes -- and appends three read-only sections after the lease section,
+ * what `ip` prints: the interfaces, IPv4's routes and the ARP table. No
+ * command changes. */
+#define COSMO_NETCTL_VERSION 8
 /* A lease section time that is finite but beyond what 32 bits of
  * milliseconds hold (0xffffffff is an infinite lease). */
 #define COSMO_NETCTL_LEASE_MS_MAX 0xfffffffeu
@@ -299,6 +304,87 @@ struct cosmo_netctl_lease {
                                     * a finite time over 0xfffffffe ms reads 0xfffffffe,
                                     * COSMO_NETCTL_LEASE_MS_MAX; likewise t1_ms, t2_ms) */
     uint32_t t1_ms, t2_ms;         /* to T1 and T2 from the read, 0 once passed */
+    char     hostname[64];         /* version 8: the lease's option 12, NUL-terminated, or empty; only
+                                    * letters, digits, '-' and '.' (the kernel drops any other name) */
+};
+
+/*
+ * The interface section (version 8), after the lease section: a header,
+ * then `count` interfaces in registration order (lo first), each copied
+ * under the registry's lock (one instant for the list; the counters are
+ * each a whole value, not one instant together).
+ */
+#define COSMO_NETCTL_IF_UP       0x1
+#define COSMO_NETCTL_IF_LOOPBACK 0x2
+#define COSMO_NETCTL_IF_NOARP    0x4
+#define COSMO_NETCTL_IF_TAP      0x8   /* a guest's tap: never the default route */
+
+#define COSMO_NETCTL_MAX_IFS     32    /* interfaces listed: the registry's capacity, so all of them */
+
+struct cosmo_netctl_if_list {
+    uint16_t version;              /* COSMO_NETCTL_VERSION */
+    uint16_t count;                /* struct cosmo_netctl_if following */
+    uint32_t reserved;
+};
+
+struct cosmo_netctl_if {
+    char     name[8];              /* NUL-terminated */
+    uint32_t index;                /* from 1, lo's */
+    uint32_t flags;                /* COSMO_NETCTL_IF_* */
+    uint32_t mtu;
+    uint8_t  mac[6];               /* zero on lo */
+    uint16_t reserved;
+    uint32_t addr, mask;           /* network byte order; 0 without an IPv4 address */
+    uint8_t  ip6_ll[16];           /* the IPv6 link-local address; lo's is ::1 */
+    uint32_t reserved2;
+    uint64_t rx_packets, rx_bytes, rx_dropped, rx_errors;
+    uint64_t tx_packets, tx_bytes, tx_dropped, tx_errors;
+};
+
+/*
+ * The route section (version 8), after the interface section: IPv4's
+ * routes as the stack decides them -- there is no routing table: the
+ * default through the first up, addressed interface that is not lo or a
+ * tap, to its gateway, then each up, addressed interface's subnet on the
+ * link (docs/kernel-services/network/design.md, "Inspecting the stack").
+ */
+#define COSMO_NETCTL_RT_GATEWAY 0x2    /* through `gateway` (Linux's RTF_GATEWAY) */
+#define COSMO_NETCTL_MAX_ROUTES 33     /* a default and one subnet per interface */
+
+struct cosmo_netctl_route_list {
+    uint16_t version;              /* COSMO_NETCTL_VERSION */
+    uint16_t count;                /* struct cosmo_netctl_route following */
+    uint32_t reserved;
+};
+
+struct cosmo_netctl_route {
+    char     ifname[8];            /* NUL-terminated */
+    uint32_t dst, mask, gateway;   /* network byte order; the default is 0/0 */
+    uint32_t src;                  /* network byte order: the source the stack picks on it */
+    uint32_t flags;                /* COSMO_NETCTL_RT_* */
+    uint32_t reserved;
+};
+
+/*
+ * The neighbour section (version 8), after the route section: the ARP
+ * table, copied under its lock. IPv6's neighbours are not listed.
+ */
+#define COSMO_NETCTL_NEIGH_INCOMPLETE 1   /* resolution in progress; mac zero */
+#define COSMO_NETCTL_NEIGH_REACHABLE  2
+#define COSMO_NETCTL_MAX_NEIGH        64  /* ARP_TABLE_SIZE */
+
+struct cosmo_netctl_neigh_list {
+    uint16_t version;              /* COSMO_NETCTL_VERSION */
+    uint16_t count;                /* struct cosmo_netctl_neigh following */
+    uint32_t reserved;
+};
+
+struct cosmo_netctl_neigh {
+    char     ifname[8];            /* NUL-terminated */
+    uint32_t addr;                 /* network byte order */
+    uint8_t  mac[6];
+    uint8_t  state;                /* COSMO_NETCTL_NEIGH_* */
+    uint8_t  reserved;
 };
 
 /* The snapshot's bounds, so a reader can size its buffer for every valid
@@ -318,6 +404,9 @@ struct cosmo_netctl_lease {
      COSMO_NETCTL_MAX_POLICIES * COSMO_NETCTL_MAX_RULES_PER_GUEST * sizeof(struct cosmo_netctl_filter_rule) + \
      sizeof(struct cosmo_netctl_flow_list) + \
      (COSMO_NETCTL_MAX_NAT_FLOWS + COSMO_NETCTL_MAX_FW_FLOWS) * sizeof(struct cosmo_netctl_flow) + \
-     sizeof(struct cosmo_netctl_lease_list) + COSMO_NETCTL_MAX_LEASES * sizeof(struct cosmo_netctl_lease))
+     sizeof(struct cosmo_netctl_lease_list) + COSMO_NETCTL_MAX_LEASES * sizeof(struct cosmo_netctl_lease) + \
+     sizeof(struct cosmo_netctl_if_list) + COSMO_NETCTL_MAX_IFS * sizeof(struct cosmo_netctl_if) + \
+     sizeof(struct cosmo_netctl_route_list) + COSMO_NETCTL_MAX_ROUTES * sizeof(struct cosmo_netctl_route) + \
+     sizeof(struct cosmo_netctl_neigh_list) + COSMO_NETCTL_MAX_NEIGH * sizeof(struct cosmo_netctl_neigh))
 
 #endif /* UAPI_COSMO_NETCTL_H */

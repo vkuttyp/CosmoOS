@@ -38,6 +38,16 @@ port 22 forwarded to a host port:
      (sleep 100 &, jobs, kill %1, wait).
   e. The installed system reboots; the second login passes the client's
      known_hosts check (StrictHostKeyChecking=yes): the host key was kept.
+     It also keeps the host name (g), from /etc/hostname: this boot's
+     DHCP server names nothing.
+  g. Network inspection (shell completeness S1), on the net boot, whose
+     DHCP server names the machine (option 12, QEMU_NET_HOSTNAME): `ip a`
+     shows eth0 with its DHCP address, `ip r` the default and the subnet,
+     `ip neigh` the gateway; BusyBox `ifconfig`, `route -n`, `netstat
+     -tuln` (dropbear on :22), `arp -a` (the gateway) and `hostname` print
+     the same machine; `ifconfig eth0 down` fails with EPERM with PRIV_NET
+     dropped, then works as root, and `up` brings the link back (a ping of
+     the gateway answers).
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -68,6 +78,8 @@ import install_test  # noqa: E402  (Boot, Fail, need, stage_install)
 from install_test import Boot, Fail, need  # noqa: E402
 
 BLOB_SIZE = 1 << 20
+HOSTNAME = "cosmo-s1"   # what slirp's DHCP server names the machine on the net boot (option 12)
+MAC = "52:54:00:c0:5f:05"   # scripts/qemu-run.sh's virtio-net
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -452,6 +464,123 @@ def stage_files(work, port, results):
     results.append("d. sftp: mkdir, put, ls -l, get (SHA-256 matches), rename, rm, rmdir in one batch")
 
 
+def stage_inspect(b, results):
+    """g: what the machine's networking looks like, through the native ip
+    (netctl's version-8 sections) and BusyBox's ifconfig, route, netstat,
+    arp and hostname (the interface ioctls and /proc/net)."""
+    out = b.run("ip a")
+    need(out, r"^1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65535 state UNKNOWN$", "ip a: lo")
+    need(out, r"^    inet 127\.0\.0\.1/8 scope host lo$", "ip a: lo's address")
+    need(out, r"^2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP$", "ip a: eth0")
+    need(out, rf"^    link/ether {MAC} brd ff:ff:ff:ff:ff:ff$", "ip a: eth0's MAC")
+    need(out, r"^    inet 10\.0\.2\.15/24 brd 10\.0\.2\.255 scope global dynamic eth0$", "ip a: eth0's DHCP address")
+    need(out, r"^       valid_lft \d+sec preferred_lft \d+sec$", "ip a: the lease's lifetime")
+    need(out, r"^    inet6 fe80::5054:ff:fec0:5f05/64 scope link$", "ip a: eth0's link-local address")
+    out = b.run("ip -4 a")
+    need(out, r"^    inet 10\.0\.2\.15/24 ", "ip -4 a: eth0's address")
+    if re.search(r"link/|inet6", out):
+        raise Fail(f"ip -4 a printed more than IPv4: {out!r}")
+    out = b.run("ip r")
+    need(out, r"^default via 10\.0\.2\.2 dev eth0 proto dhcp src 10\.0\.2\.15$", "ip r: the default route")
+    need(out, r"^10\.0\.2\.0/24 dev eth0 proto kernel scope link src 10\.0\.2\.15$", "ip r: the subnet")
+    out = b.run("ip -6 r")
+    # IPv6 routes the link through the default interface alone (ipv6_route);
+    # eth1 is up too, and must not be listed.
+    need(out, r"^fe80::/64 dev eth0 proto kernel metric 256 pref medium$", "ip -6 r: eth0's link-local route")
+    if "dev eth1" in out:
+        raise Fail(f"ip -6 r lists eth1, which IPv6 never routes through: {out!r}")
+    out = b.run("ip neigh")
+    gw_mac = need(out, r"^10\.0\.2\.2 dev eth0 lladdr ([0-9a-f:]{17}) REACHABLE$", "ip neigh: the gateway").group(1)
+    out = b.status("ip addr add 10.0.2.99/24 dev eth0", "ip-add")
+    need(out, r"this ip only shows", "ip refusing a change")
+    need(out, r"^ip-add=2$", "ip addr add's status")
+    results.append(f"g. ip: eth0 10.0.2.15/24 dynamic, {MAC}, fe80::5054:ff:fec0:5f05; default via 10.0.2.2 "
+                   f"proto dhcp; neigh 10.0.2.2 {gw_mac}; ip addr add refused")
+
+    out = b.run("ifconfig")
+    need(out, rf"^eth0\s+Link encap:Ethernet\s+HWaddr {MAC.upper()}\s*$", "ifconfig: eth0")
+    need(out, r"^\s+inet addr:10\.0\.2\.15\s+Bcast:10\.0\.2\.255\s+Mask:255\.255\.255\.0$", "ifconfig: eth0's address")
+    need(out, r"^\s+UP BROADCAST RUNNING MULTICAST\s+MTU:1500\s+Metric:1$", "ifconfig: eth0's flags")
+    need(out, r"^\s+RX packets:[1-9]\d* ", "ifconfig: eth0's counters (/proc/net/dev)")
+    need(out, r"^lo\s+Link encap:Local Loopback\s*$", "ifconfig: lo")
+    out = b.run("route -n")
+    need(out, r"^0\.0\.0\.0\s+10\.0\.2\.2\s+0\.0\.0\.0\s+UG\s+0\s+0\s+0\s+eth0$", "route -n: the default")
+    need(out, r"^10\.0\.2\.0\s+0\.0\.0\.0\s+255\.255\.255\.0\s+U\s+0\s+0\s+0\s+eth0$", "route -n: the subnet")
+    out = b.run("netstat -tuln")
+    # A listener's Send-Q is its backlog, as Linux shows it (16, TCP_MAX_BACKLOG).
+    need(out, r"^tcp\s+0\s+\d+\s+0\.0\.0\.0:22\s+0\.0\.0\.0:\*\s+LISTEN\s*$", "netstat -tuln: dropbear on :22")
+    need(out, r"^tcp\s+0\s+\d+\s+:::22\s+:::\*\s+LISTEN\s*$", "netstat -tuln: dropbear on [::]:22 (/proc/net/tcp6)")
+    if "bogus data" in out or "can't open" in out:
+        raise Fail(f"netstat -tuln could not read /proc/net: {out!r}")
+    out = b.run("arp -a")
+    need(out, rf"^\? \(10\.0\.2\.2\) at {gw_mac} \[ether\]\s+on eth0$", "arp -a: the gateway")
+    out = b.run("hostname; hostname -s; cat /etc/hostname")
+    if out.count(HOSTNAME) < 3:
+        raise Fail(f"hostname, hostname -s and /etc/hostname should each say {HOSTNAME}: {out!r}")
+    results.append(f"g. busybox: ifconfig eth0 10.0.2.15 Bcast 10.0.2.255 Mask 255.255.255.0; route -n default "
+                   f"UG and subnet U; netstat -tuln dropbear on 0.0.0.0:22 and :::22; arp -a 10.0.2.2 {gw_mac}; hostname {HOSTNAME} "
+                   f"(DHCP option 12, /etc/hostname)")
+
+    out = b.status("priv -d net -- ifconfig eth0 down", "down-noprv")
+    need(out, r"SIOCSIFFLAGS: Operation not permitted", "ifconfig eth0 down without PRIV_NET")
+    if re.search(r"^down-noprv=0$", out, re.M):
+        raise Fail(f"ifconfig eth0 down succeeded without PRIV_NET: {out!r}")
+    out = b.run("ip link show eth0")
+    need(out, r"^2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP$", "eth0 after the refused down")
+    out = b.status("ifconfig eth0 down", "down")
+    need(out, r"^down=0$", "ifconfig eth0 down as root")
+    out = b.run("ip link show eth0; ifconfig eth0")
+    need(out, r"^2: eth0: <BROADCAST,MULTICAST> mtu 1500 state DOWN$", "ip link after ifconfig eth0 down")
+    if re.search(r"^\s+UP ", out, re.M):
+        raise Fail(f"ifconfig still shows eth0 up after the down: {out!r}")
+    out = b.status("ifconfig eth0 up", "up")
+    need(out, r"^up=0$", "ifconfig eth0 up as root")
+    out = b.status("ping -c 1 -W 5 10.0.2.2", "ping")
+    need(out, r"^ping=0$", "a ping of the gateway after ifconfig eth0 up")
+    out = b.run("ip link show eth0")
+    need(out, r"^2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP$", "ip link after ifconfig eth0 up")
+    results.append("g. ifconfig eth0 down: EPERM with PRIV_NET dropped (eth0 stays UP); as root DOWN, then up and "
+                   "the gateway answers a ping")
+
+    # Every other setter family, on eth1 (the harness's second NIC, which
+    # nothing else here uses): once with PRIV_NET dropped, which must be
+    # EPERM and change nothing, then as root.
+    for args, ioctl in (("10.0.3.15", "SIOCSIFADDR"), ("netmask 255.255.0.0", "SIOCSIFNETMASK"),
+                        ("broadcast 10.0.2.255", "SIOCSIFBRDADDR"), ("mtu 1500", "SIOCSIFMTU"),
+                        ("hw ether 52:54:00:c0:5f:06", "SIOCSIFHWADDR")):
+        out = b.status(f"priv -d net -- ifconfig eth1 {args}", "set-noprv")
+        need(out, rf"{ioctl}: Operation not permitted", f"ifconfig eth1 {args} without PRIV_NET")
+        if re.search(r"^set-noprv=0$", out, re.M):
+            raise Fail(f"ifconfig eth1 {args} succeeded without PRIV_NET: {out!r}")
+    out = b.run("ip -4 a show eth1")
+    need(out, r"^    inet 10\.0\.2\.15/24 brd 10\.0\.2\.255 ", "eth1 untouched by the refused setters")
+    out = b.status("ifconfig eth1 10.0.3.15 netmask 255.255.255.0", "set-addr")
+    need(out, r"^set-addr=0$", "ifconfig eth1 10.0.3.15 netmask 255.255.255.0 as root")
+    out = b.run("ip -4 a show eth1; ip r; ifconfig eth1")
+    # Set by hand, so not the lease's: no "dynamic", no lease lifetime.
+    need(out, r"^    inet 10\.0\.3\.15/24 brd 10\.0\.3\.255 scope global eth1$", "ip a: eth1's new address, static")
+    need(out, r"^10\.0\.3\.0/24 dev eth1 proto kernel scope link src 10\.0\.3\.15$", "ip r: eth1's new subnet")
+    need(out, r"^default via 10\.0\.2\.2 dev eth0 ", "ip r: the default still through eth0")
+    need(out, r"^\s+inet addr:10\.0\.3\.15\s+Bcast:10\.0\.3\.255\s+Mask:255\.255\.255\.0$", "ifconfig eth1")
+    for args, ok, ioctl in (("broadcast 10.0.3.255", True, None), ("broadcast 10.0.3.1", False, "SIOCSIFBRDADDR"),
+                            ("mtu 1500", True, None), ("mtu 1400", False, "SIOCSIFMTU"),
+                            ("hw ether 52:54:00:c0:5f:06", True, None),
+                            ("hw ether 52:54:00:00:00:01", False, "SIOCSIFHWADDR")):
+        out = b.status(f"ifconfig eth1 {args}", "set")
+        if ok:
+            need(out, r"^set=0$", f"ifconfig eth1 {args} (the value it has)")
+        else:
+            need(out, rf"{ioctl}: (Invalid argument|Not supported)", f"ifconfig eth1 {args} refused")
+            if re.search(r"^set=0$", out, re.M):
+                raise Fail(f"ifconfig eth1 {args} succeeded: {out!r}")
+    out = b.run("ifconfig eth1")
+    need(out, r"^eth1\s+Link encap:Ethernet\s+HWaddr 52:54:00:C0:5F:06\s*$", "eth1's MAC unchanged")
+    need(out, r"^\s+UP BROADCAST RUNNING MULTICAST\s+MTU:1500\s+Metric:1$", "eth1's MTU unchanged")
+    results.append("g. setters: address, netmask, broadcast, MTU and MAC each EPERM without PRIV_NET (eth1 "
+                   "unchanged); as root eth1 10.0.3.15/24 (ip a, ip r, ifconfig); the broadcast and MTU and MAC it "
+                   "has accepted, others refused (EINVAL, EOPNOTSUPP)")
+
+
 def stage_reboot_ssh(args, results, inst, port):
     """e: the second boot; the client's known_hosts must still match."""
     b = Boot("reboot", inst["target"], args.workdir,
@@ -462,13 +591,16 @@ def stage_reboot_ssh(args, results, inst, port):
         rc, out = ssh_run(args.workdir, port, True, "echo again")
         if rc != 0 or not re.search(r"^again$", out, re.M):
             raise Fail(f"ssh after the reboot: status {rc}, output {out!r}")
+        out = b.run("hostname")
+        need(out, rf"^{HOSTNAME}$", "the host name after a boot whose DHCP server names none (/etc/hostname)")
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
             raise Fail(f"reboot boot: QEMU exit code {rc}")
     except Exception:
         b.kill()
         raise
-    results.append(f"e. reboot: the host key was kept (StrictHostKeyChecking=yes passed), PASS in {b.elapsed():.1f}s")
+    results.append(f"e. reboot: the host key was kept (StrictHostKeyChecking=yes passed), the host name "
+                   f"{HOSTNAME} too (/etc/hostname), PASS in {b.elapsed():.1f}s")
 
 
 def stage_net(args, results, inst):
@@ -482,7 +614,8 @@ def stage_net(args, results, inst):
     srv, port = start_http(www)
     ssh_port = free_port()   # after the HTTP server has its port, so the two cannot be the same
     b = Boot("net", inst["target"], work,
-             {"QEMU_DISKS": "boot", "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{ssh_port}-:22"}, args.timeout)
+             {"QEMU_DISKS": "boot", "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{ssh_port}-:22",
+              "QEMU_NET_HOSTNAME": HOSTNAME}, args.timeout)
     try:
         b.wait_prompt("the first prompt")
         log = b.text()
@@ -496,7 +629,7 @@ def stage_net(args, results, inst):
         out = b.run("netcfg show; cat /etc/resolv.conf; echo a-done")
         need(out, r"^a-done$", "netcfg show")
         m = need(out, r"^eth0: bound 10\.0\.2\.15/24 gateway 10\.0\.2\.2 server 10\.0\.2\.2 lease (\d+) s .* "
-                      r"dns 10\.0\.2\.3$", "eth0's lease (netcfg show)")
+                      rf"dns 10\.0\.2\.3 hostname {HOSTNAME}$", "eth0's lease (netcfg show)")
         need(out, r"^nameserver 10\.0\.2\.3$", "/etc/resolv.conf")
         results.append(f"a. DHCP: eth0 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.3, lease {m.group(1)} s; "
                        "/etc/resolv.conf names 10.0.2.3")
@@ -537,6 +670,7 @@ def stage_net(args, results, inst):
         stage_https(b, results, port, www, want, work)
         console_jobs(b, results)
         stage_ssh(args, results, b, ssh_port)
+        stage_inspect(b, results)
 
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:

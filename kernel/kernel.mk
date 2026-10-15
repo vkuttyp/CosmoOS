@@ -91,6 +91,7 @@ KERNEL_GENERIC_SRCS := \
 	compat/linux/convert.c \
 	compat/linux/syscalls.c \
 	compat/linux/signal.c \
+	compat/linux/netioctl.c \
 	kernel-services/virtualization/vmm.c \
 	kernel-services/virtualization/vm.c \
 	kernel-services/virtualization/guestmem.c \
@@ -167,6 +168,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/dhcp.c \
 	kernel-services/network/ether.c \
 	kernel-services/network/arp.c \
+	kernel-services/network/procnet.c \
 	kernel-services/network/ipv4.c \
 	kernel-services/network/nat.c \
 	kernel-services/network/fw.c \

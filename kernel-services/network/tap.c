@@ -559,8 +559,109 @@ static int64_t tap_ctl_leases(uint8_t *p, size_t room)
         };
         memcpy(o.ifname, l[i].ifname, sizeof(o.ifname));
         memcpy(o.dns, l[i].dns, sizeof(o.dns));
+        strlcpy(o.hostname, l[i].hostname, sizeof(o.hostname));
         memcpy(q, &o, sizeof(o));
     }
+    return (int64_t)need;
+}
+
+/* The interface, route and neighbour sections (version 8), from the
+ * stack's listings (design.md, "Inspecting the stack"): what `ip` prints.
+ * Each returns the bytes written or -EMSGSIZE. */
+_Static_assert(COSMO_NETCTL_MAX_ROUTES == IPV4_ROUTES_MAX && COSMO_NETCTL_MAX_NEIGH == ARP_TABLE_SIZE &&
+               COSMO_NETCTL_MAX_IFS == NETIF_MAX, "the version-8 sections' bounds are the listings', whole");
+_Static_assert(sizeof(struct cosmo_netctl_lease) == 128 && sizeof(struct cosmo_netctl_if) == 120 &&
+               sizeof(struct cosmo_netctl_route) == 32 && sizeof(struct cosmo_netctl_neigh) == 20,
+               "the version-8 records' sizes are the ABI");
+static int64_t tap_ctl_ifs(uint8_t *p, size_t room)
+{
+    struct netif_info *f = kmalloc(COSMO_NETCTL_MAX_IFS * sizeof(*f), 0);
+    if (f == NULL)
+        return -ENOMEM;
+    unsigned n = netif_list(f, COSMO_NETCTL_MAX_IFS);
+    if (n > COSMO_NETCTL_MAX_IFS)
+        n = COSMO_NETCTL_MAX_IFS;
+    size_t need = sizeof(struct cosmo_netctl_if_list) + (size_t)n * sizeof(struct cosmo_netctl_if);
+    if (room < need) {
+        kfree(f);
+        return -EMSGSIZE;
+    }
+    struct cosmo_netctl_if_list h = { .version = COSMO_NETCTL_VERSION, .count = (uint16_t)n };
+    memcpy(p, &h, sizeof(h));
+    uint8_t *q = p + sizeof(h);
+    for (unsigned i = 0; i < n; i++, q += sizeof(struct cosmo_netctl_if)) {
+        struct cosmo_netctl_if o = {
+            .index = f[i].index, .mtu = f[i].mtu, .addr = f[i].addr, .mask = f[i].mask,
+            .flags = ((f[i].flags & NETIF_UP) ? COSMO_NETCTL_IF_UP : 0) |
+                     ((f[i].flags & NETIF_LOOPBACK) ? COSMO_NETCTL_IF_LOOPBACK : 0) |
+                     ((f[i].flags & NETIF_NOARP) ? COSMO_NETCTL_IF_NOARP : 0) |
+                     ((f[i].flags & NETIF_NODEFAULT) ? COSMO_NETCTL_IF_TAP : 0),
+            .rx_packets = f[i].stats.rx_packets, .rx_bytes = f[i].stats.rx_bytes,
+            .rx_dropped = f[i].stats.rx_dropped, .rx_errors = f[i].stats.rx_errors,
+            .tx_packets = f[i].stats.tx_packets, .tx_bytes = f[i].stats.tx_bytes,
+            .tx_dropped = f[i].stats.tx_dropped, .tx_errors = f[i].stats.tx_errors,
+        };
+        memcpy(o.name, f[i].name, sizeof(o.name));
+        memcpy(o.mac, f[i].mac, sizeof(o.mac));
+        memcpy(o.ip6_ll, f[i].ip6_ll.s6_addr, sizeof(o.ip6_ll));
+        memcpy(q, &o, sizeof(o));
+    }
+    kfree(f);
+    return (int64_t)need;
+}
+
+static int64_t tap_ctl_routes(uint8_t *p, size_t room)
+{
+    struct ipv4_route_info *r = kmalloc(IPV4_ROUTES_MAX * sizeof(*r), 0);
+    if (r == NULL)
+        return -ENOMEM;
+    unsigned n = ipv4_route_list(r, IPV4_ROUTES_MAX);
+    size_t need = sizeof(struct cosmo_netctl_route_list) + (size_t)n * sizeof(struct cosmo_netctl_route);
+    if (room < need) {
+        kfree(r);
+        return -EMSGSIZE;
+    }
+    struct cosmo_netctl_route_list h = { .version = COSMO_NETCTL_VERSION, .count = (uint16_t)n };
+    memcpy(p, &h, sizeof(h));
+    uint8_t *q = p + sizeof(h);
+    for (unsigned i = 0; i < n; i++, q += sizeof(struct cosmo_netctl_route)) {
+        struct cosmo_netctl_route o = {
+            .dst = r[i].dst, .mask = r[i].mask, .gateway = r[i].gateway, .src = r[i].src,
+            .flags = (r[i].flags & IPV4_RTF_GATEWAY) ? COSMO_NETCTL_RT_GATEWAY : 0,
+        };
+        memcpy(o.ifname, r[i].ifname, sizeof(o.ifname));
+        memcpy(q, &o, sizeof(o));
+    }
+    kfree(r);
+    return (int64_t)need;
+}
+
+static int64_t tap_ctl_neighs(uint8_t *p, size_t room)
+{
+    struct arp_info *a = kmalloc(ARP_TABLE_SIZE * sizeof(*a), 0);
+    if (a == NULL)
+        return -ENOMEM;
+    unsigned n = arp_list(a, ARP_TABLE_SIZE);
+    if (n > ARP_TABLE_SIZE)
+        n = ARP_TABLE_SIZE;
+    size_t need = sizeof(struct cosmo_netctl_neigh_list) + (size_t)n * sizeof(struct cosmo_netctl_neigh);
+    if (room < need) {
+        kfree(a);
+        return -EMSGSIZE;
+    }
+    struct cosmo_netctl_neigh_list h = { .version = COSMO_NETCTL_VERSION, .count = (uint16_t)n };
+    memcpy(p, &h, sizeof(h));
+    uint8_t *q = p + sizeof(h);
+    for (unsigned i = 0; i < n; i++, q += sizeof(struct cosmo_netctl_neigh)) {
+        struct cosmo_netctl_neigh o = {
+            .addr = a[i].ip,
+            .state = a[i].complete ? COSMO_NETCTL_NEIGH_REACHABLE : COSMO_NETCTL_NEIGH_INCOMPLETE,
+        };
+        memcpy(o.ifname, a[i].ifname, sizeof(o.ifname));
+        memcpy(o.mac, a[i].mac, sizeof(o.mac));
+        memcpy(q, &o, sizeof(o));
+    }
+    kfree(a);
     return (int64_t)need;
 }
 
@@ -570,9 +671,9 @@ static int64_t tap_ctl_leases(uint8_t *p, size_t room)
  * the attached guests' policies; then every rule in evaluation order, the
  * host's first), then the flow section (version 6: a struct
  * cosmo_netctl_flow_list and every live flow), then the lease section
- * (version 7: a struct cosmo_netctl_lease_list and every DHCP client) --
- * or -EMSGSIZE if the buffer
- * is too small. */
+ * (version 7: a struct cosmo_netctl_lease_list and every DHCP client),
+ * then the interface, route and neighbour sections (version 8) -- or
+ * -EMSGSIZE if the buffer is too small. */
 static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
 {
     (void)vn; (void)off;
@@ -643,8 +744,15 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
         return rc;
     p += rc;
     room -= (size_t)rc;
-    rc = tap_ctl_leases(p, room);
-    return rc < 0 ? rc : (int64_t)(p - (uint8_t *)buf) + rc;
+    int64_t (*const tail[])(uint8_t *, size_t) = { tap_ctl_leases, tap_ctl_ifs, tap_ctl_routes, tap_ctl_neighs };
+    for (unsigned i = 0; i < ARRAY_SIZE(tail); i++) {
+        rc = tail[i](p, room);
+        if (rc < 0)
+            return rc;
+        p += rc;
+        room -= (size_t)rc;
+    }
+    return (int64_t)(p - (uint8_t *)buf);
 }
 
 /* netctl configuration is PRIV_NET's (roadmap M5): at the open, and again

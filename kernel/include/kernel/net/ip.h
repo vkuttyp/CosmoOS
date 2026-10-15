@@ -80,6 +80,25 @@ void ipv6_source_for(const struct in6_addr *dst, struct in6_addr *src);
 /* The interface a destination is sent through, or NULL. */
 struct netif *ipv4_route(uint32_t dst);
 struct netif *ipv6_route(const struct in6_addr *dst);
+/* IPv4's routes as ipv4_route decides them, for the listings (/proc/net/
+ * route, netctl's route section; design.md, "Inspecting the stack"). There
+ * is no routing table: a route is the default -- through the first up,
+ * addressed, non-loopback, non-tap interface (netif_default_ipv4) to its
+ * gateway -- or the subnet of an up, addressed, non-loopback interface,
+ * on the link. The default first, when there is one, then the subnets in
+ * registration order. */
+#define IPV4_RTF_UP      0x0001     /* Linux's RTF_UP */
+#define IPV4_RTF_GATEWAY 0x0002     /* RTF_GATEWAY: through `gateway` */
+struct ipv4_route_info {
+    char ifname[8];
+    uint32_t dst, mask, gateway;   /* network byte order */
+    uint32_t src;                  /* the interface's address: what ipv4_source_for picks */
+    unsigned flags;                /* IPV4_RTF_* */
+};
+#define IPV4_ROUTES_MAX (NETIF_MAX + 1)   /* a default and a subnet for each interface */
+/* Writes at most `max` and returns how many it wrote (0 without memory).
+ * Thread context. */
+unsigned ipv4_route_list(struct ipv4_route_info *out, unsigned max);
 
 void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph);
 void icmp_send_unreach(struct mbuf *orig, const struct ipv4_hdr *iph, uint8_t code);   /* borrows orig */

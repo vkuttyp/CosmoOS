@@ -210,8 +210,10 @@ returns the monotonic clock (there is no wall clock; recorded),
 sleep, and an interrupted one writes the time it did not sleep into
 `rem` (roadmap M3: it wrote 0, and BusyBox `sleep`, which sleeps again
 for the remainder, ended early after `^Z` and `fg`); `getrandom` → `random_get_bytes` after waiting for a seeded pool, with Linux's `GRND_NONBLOCK`/`GRND_INSECURE`/`GRND_RANDOM` semantics (docs/kernel/security/design.md §6); `uname` fills
-`struct utsname` (six 65-byte fields: `Linux`, `cosmo`, `6.0.0-cosmo`,
-the build id, `x86_64`, `(none)`); `sysinfo` `-ENOSYS`.
+`struct utsname` (six 65-byte fields: `Linux`, the uts name, `6.0.0-cosmo`,
+the build id, `x86_64`, `(none)`); `sethostname` sets the uts name under
+`PRIV_SYS_ADMIN`, as the native call does (shell completeness S1:
+BusyBox's `hostname`); `sysinfo` `-ENOSYS`.
 
 ### Open flags on AArch64 (roadmap M3)
 
@@ -241,6 +243,41 @@ length honoured, full size reported). `setsockopt` returns 0 for
 `epoll_*` `-ENOSYS` (`poll`, `ppoll`, `select` and `pselect6` are built); `sendmsg`/`recvmsg`/`socketpair`
 are built since the unix-sockets unit (with `AF_UNIX` and `SCM_RIGHTS`).
 `getsockopt(SO_PEERCRED)` answers on a connected unix stream socket.
+
+### Interface ioctls (`netioctl.c`; shell completeness S1)
+
+BusyBox's `ifconfig` asks about interfaces through netdevice(7)'s
+`SIOCGIF*` requests on any socket and configures them through `SIOCSIF*`;
+`route` and `arp` use `SIOCGIFINDEX` and `SIOCGIFHWADDR`. `lx_ioctl`
+hands a request on a socket to `lx_ioctl_net`. Every getter translates
+the network stack's `netif_info` (`netif_info_by_name`, by index for
+`SIOCGIFNAME`, `netif_list` for `SIOCGIFCONF`), the same copy `/proc/net`
+and netctl show (the network invariants' N32), so `ifconfig` and `ip`
+cannot disagree. `RUNNING` follows `UP`: no driver here reports a carrier
+of its own. A broadcast address is not stored; it is the address's
+(`addr | ~mask`), and `lo` has none.
+
+The setters are `PRIV_NET`'s, as netctl's configuration is (roadmap M5),
+and the privilege is checked before the interface is looked up, as Linux
+checks `CAP_NET_ADMIN`. `SIOCSIFFLAGS` changes `UP` alone -- `netif_set_up`,
+which flushes the interface's neighbours on the way down and kicks its
+DHCP client on the way up -- and refuses a request to change any other
+flag rather than pretend to honour it. `SIOCSIFADDR` and
+`SIOCSIFNETMASK` call `netif_set_ipv4`, as the DHCP client does: a new
+address takes its class's mask, as Linux gives it, and keeps the gateway
+while the gateway is still on the link; a change drops the interface's
+neighbours, as the DHCP client's does. A hand-set address on an
+interface the DHCP client manages lasts until the lease changes.
+
+Two setters exist only to answer. `SIOCSIFMTU` takes the MTU the
+interface has and refuses any other with `-EOPNOTSUPP`: IPv4 output
+never fragments (`output_on` refuses a datagram over the MTU) and TCP's
+segment size is a per-family constant, so a smaller MTU would fail every
+full-sized send instead of shrinking them. `SIOCSIFHWADDR` likewise: the
+address a NIC filters on is the device's, and the link-local address is
+derived from it at registration. Both are in the inventory. `route add`
+(`SIOCADDRT`) and `arp -s` (`SIOCSARP`) are `-ENOTTY`: there is no routing
+table and no static neighbour entry to put them in.
 
 ## Stage 2 (audit milestone 10)
 

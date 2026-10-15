@@ -39,6 +39,10 @@ bool udp_port_in_use(uint16_t family, uint16_t port, const struct netaddr *addr)
 /* Bind; port 0 picks an ephemeral one. -EADDRINUSE, -EADDRNOTAVAIL. */
 int udp_bind(struct udp_pcb *pcb, const struct netaddr *local);
 void udp_unbind(struct udp_pcb *pcb);
+/* Connect: the peer every send defaults to and every receive must come
+ * from, written under the list lock that input's lookup and udp_list read
+ * it under -- a multi-word address, which an unlocked write could tear. */
+void udp_set_remote(struct udp_pcb *pcb, const struct netaddr *remote);
 /* Build and send a datagram. Binds an ephemeral port if needed. */
 int udp_sendto(struct udp_pcb *pcb, const void *data, size_t len, const struct netaddr *to);
 /* Dequeue one datagram (or NULL). The mbuf's pkt.src is the sender. */
@@ -56,5 +60,17 @@ struct udp_stats {
     uint64_t quiet_dropped;   /* M_FW_QUIET datagrams with no socket connected to the sender: freed, no ICMP */
 };
 void udp_get_stats(struct udp_stats *out);
+
+/* One bound socket as udp_list copies it (/proc/net/udp and udp6),
+ * under the list lock, which every writer of these fields holds
+ * (udp_bind, udp_unbind, udp_set_remote). */
+struct udp_sock_info {
+    struct netaddr local, remote;  /* remote port 0: not connected */
+    unsigned rxq;                  /* datagrams queued (Linux counts bytes) */
+    uint64_t drops;
+};
+/* Every bound pcb of `family`, chosen under the lock; writes at most `max`
+ * and returns how many there are. */
+unsigned udp_list(struct udp_sock_info *out, unsigned max, uint16_t family);
 
 #endif /* KERNEL_NET_UDP_H */

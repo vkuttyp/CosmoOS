@@ -659,3 +659,26 @@ message), `ash.sh`'s `priv -d net ping` (creation without `PRIV_NET`
 is refused), and `lxtest`'s protocol checks. Gap: the
 fragmentation-needed copy is not exercised (nothing on loopback sends
 one).
+
+**N32. Every view of the stack's state is rendered from one listing's
+copy, taken under that table's lock and formatted outside it.**
+`/proc/net/*`, the Linux interface ioctls and netctl's version-8
+sections all read `netif_list` (or one interface of it),
+`ipv4_route_list`, `arp_list`, `tcp_list` and `udp_list`
+(design.md, "Inspecting the stack"); none walks a table of its own, so
+`ip`, `ifconfig`, `route`, `arp` and `netstat` cannot disagree about
+what one table held, and no lock is held while text is formatted or
+copied to a user. A listing reads each field as its writers publish it
+(acquire for the flags and the IPv4 address, relaxed for counters and
+queue lengths), and `tcp_list` reads a pcb's remote end only past
+`CLOSED`. `ipv4_route_list` lists the routes `ipv4_route` takes and no
+others. A listing is whole: the registry holds at most `NETIF_MAX`
+interfaces and every interface listing is sized to it; a socket listing
+chooses its family under the lock. **Checked by** `net-tapctl` (the interface section lists `lo`
+first, index 1, up, at 127.0.0.1/8) and `test-net-login` stage g: `ip`
+(netctl), `ifconfig` (the ioctls and `/proc/net/dev`), `route -n`
+(`/proc/net/route`), `netstat -tuln` (`/proc/net/tcp`), `arp -a`
+(`/proc/net/arp`) and `ip neigh` show the same eth0, routes, listener
+and gateway. Gap: the copies race the tables' writers by design -- a
+socket opened during a read may or may not be listed -- and nothing
+checks a listing under concurrent change.

@@ -34,4 +34,7 @@ int64_t lx_set_tid_address(struct syscall_args *a);
 int64_t lx_exit(struct syscall_args *a);
 int64_t lx_exit_group(struct syscall_args *a);
 
+/* netioctl.c: the interface ioctls (SIOCGIF*, SIOCSIF*) on a socket. */
+int64_t lx_ioctl_net(unsigned req, uint64_t arg);
+
 #endif /* COMPAT_LINUX_INTERNAL_H */

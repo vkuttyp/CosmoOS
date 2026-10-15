@@ -3006,3 +3006,19 @@ See the [history index](README.md).
   (`psci-exit`, `psci-poweroff`) and requires QEMU to exit by itself; on
   Parallels Desktop 27.0.3 both commands stopped the VM in 1.1 s.
   Report: `docs/audit/2026-10-15-aarch64-poweroff-report.md`.
+- **After 1.0: network inspection (2026-10-15, roadmap-1.1 S1).** The
+  stack gains five listings (`netif_list`, `ipv4_route_list`, `arp_list`,
+  `tcp_list`, `udp_list`), each a copy under its table's lock, and every
+  view is rendered from them (N32): `/proc/net`'s `dev`, `route`, `arp`,
+  `tcp`, `tcp6`, `udp`, `udp6` and `if_inet6` in Linux's layouts; the
+  Linux personality's interface ioctls (`SIOCGIFCONF` and the `SIOCGIF*`
+  getters; `SIOCSIFFLAGS`, `SIOCSIFADDR`, `SIOCSIFNETMASK` and
+  `SIOCSIFBRDADDR` under `PRIV_NET`, the MTU and MAC setters taking only
+  the current value); and netctl version 8's interface, route and
+  neighbour sections, which the new native `/sbin/ip` prints in
+  iproute2's format (BusyBox's `ip` is netlink-only). The DHCP client
+  keeps option 12; `netcfg` writes it to `/etc/hostname` and `/etc/rc`
+  applies that file at boot; `sethostname` is in the Linux personality.
+  BusyBox `ifconfig`, `route`, `netstat`, `arp` and `hostname` are on.
+  `test-net-login`'s stage g runs all of them on the installed system.
+  Report: `docs/audit/2026-10-15-network-inspection-report.md`.

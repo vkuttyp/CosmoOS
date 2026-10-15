@@ -3,8 +3,13 @@ echo "CosmoOS userland ready"
 # Services, in dependency order. Their output goes to /var/log/svc/<name>
 # and `svc status` says what is running (docs/userland/design.md).
 svc boot
+# The machine's name as last kept: netcfg writes /etc/hostname when a
+# DHCP lease names the machine (shell completeness S1), and a later boot
+# whose server names nothing keeps it.
+ls /etc/hostname > /tmp/.rc.probe 2>&1 && hostname -F /etc/hostname
 # The DHCP lease's DNS servers into /etc/resolv.conf, which musl's
-# resolver reads (roadmap M4; docs/userland/design.md, "netcfg").
+# resolver reads (roadmap M4; docs/userland/design.md, "netcfg"), and its
+# host name, if it has one, into /etc/hostname.
 netcfg
 # The shell test script exists only in self-test builds (SELFTEST=1).
 ls /etc/rc.test 2> /tmp/.rc.probe && cosmo-sh /etc/rc.test

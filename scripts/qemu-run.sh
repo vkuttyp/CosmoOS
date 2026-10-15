@@ -88,6 +88,11 @@ if [ -n "${QEMU_NET_HOSTFWD:-}" ]; then
         netdev="$netdev,hostfwd=$rule"
     done
 fi
+# Shell completeness S1: the host name slirp's DHCP server hands out
+# (option 12), which netcfg writes to /etc/hostname (QEMU_NET_HOSTNAME).
+if [ -n "${QEMU_NET_HOSTNAME:-}" ]; then
+    netdev="$netdev,hostname=$QEMU_NET_HOSTNAME"
+fi
 fwcfg=""
 if [ -n "${QEMU_FWCFG_NETTEST:-}" ]; then
     fwcfg="-fw_cfg name=opt/cosmo/nettest,string=$QEMU_FWCFG_NETTEST"

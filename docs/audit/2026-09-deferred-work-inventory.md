@@ -1117,7 +1117,10 @@ each; none is needed by M2's acceptance test.
   built (the ping unit).
 - `ports/busybox/README.md`'s config regeneration fails at `make
   defconfig` on the macOS build host (exit 2, no `.config`); the ping
-  unit set `CONFIG_PING` and `CONFIG_FEATURE_FANCY_PING` by hand.
+  unit set `CONFIG_PING` and `CONFIG_FEATURE_FANCY_PING` by hand. S1
+  turned its applets on in the checked-in file, dropped their features'
+  "is not set" lines and ran `oldconfig` (which works on macOS) so each
+  feature took its default, as defconfig would.
 - `mbufq_enqueue` returns `false` both when it freed the packet (a full
   queue) and when it did not touch it (already on a queue, `M_QUEUED`):
   a caller cannot tell which, and every caller assumes the first, so the
@@ -1145,3 +1148,35 @@ each; none is needed by M2's acceptance test.
   merge, and main's slowest boot in that job at 235.7 s on its rerun);
   found by the virtio-gpu unit, 2026-10-15.~~ **Widened to 300 s on
   AArch64, 2026-10-15** (`docs/testing/flakes.md`).
+
+## 11. Shell completeness S1 follow-ups (2026-10-15)
+
+- No netlink: BusyBox's `ip` (netlink-only) stays off and `/sbin/ip` is a
+  native, read-only substitute over netctl's version-8 sections. Netlink
+  (`AF_NETLINK`, `RTM_GETLINK`/`RTM_GETADDR`/`RTM_GETROUTE`) would let
+  Linux programs that enumerate interfaces that way run.
+- `SIOCSIFMTU` and `SIOCSIFHWADDR` accept only the current value
+  (`-EOPNOTSUPP` otherwise): IPv4 output never fragments and TCP's MSS is a
+  per-family constant, so a smaller MTU would fail full-sized sends; a MAC
+  change needs the device's filter and the link-local address re-derived.
+- `route add`/`del` (`SIOCADDRT`/`SIOCDELRT`) and `arp -s`/`-d`
+  (`SIOCSARP`/`SIOCDARP`) are `-ENOTTY`: there is no routing table (the
+  routes are the default interface's gateway and the connected subnets)
+  and no static neighbour entry.
+- `ip` needs `PRIV_NET`, because it reads `/dev/net/tapctl`, whose open is
+  `PRIV_NET`'s for every reader; Linux's `ip a` works unprivileged. A
+  read-only view of the interface sections without the privilege would
+  need its own node or a split of the snapshot.
+- IPv6's neighbours are in no listing (`ip -6 neigh` prints nothing,
+  `/proc/net` has no `ipv6_route`), and `if_inet6` lists only the
+  link-local addresses (there are no others).
+- `/proc/net/tcp` and `udp` report uid 0 and inode 0 for every socket (a
+  pcb records no owner, a socket no inode), so `netstat -p` names no
+  program; UDP's receive queue is in datagrams, Linux's in bytes.
+- `SIOCSIFFLAGS` changes `UP` alone; a request to change any other flag
+  (`PROMISC`, `ALLMULTI`, `NOARP`) is `-EINVAL`.
+- The Parallels guide (`docs/guide/platforms.md`) does not say the live
+  image's plain disk must be the image's own size: on a larger disk the
+  GPT's backup header is not on the last sector, the kernel refuses the
+  table and `cosmo-install` finds no ESP to copy (seen by S1's Parallels
+  test with a 128 MiB disk).

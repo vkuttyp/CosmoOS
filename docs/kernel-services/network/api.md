@@ -882,7 +882,9 @@ for an interface with a client and returns true; anything else is
 untouched (false).
 **`unsigned dhcp_lease_list(struct dhcp_lease_info *out, unsigned max)`**
 copies every client (state, address, mask, router, server, up to three
-DNS servers, the granted lease/T1/T2 and the milliseconds left to each).
+DNS servers, the granted lease/T1/T2 and the milliseconds left to each,
+and since S1 the host name the ACK named, option 12, kept only when it is
+1-63 letters, digits, `-` and `.`).
 **`void dhcp_boot_wait(void)`** (`main.c`, after `random_boot_wait`):
 waits at most `DHCP_BOOT_WAIT_NS` (10 s) for every client to be bound.
 **`dhcp_get_stats`**: discovers, requests, offers, acks, naks, renews,
@@ -894,8 +896,63 @@ earlier ones) to now and runs the client; `dhcp_test_state`.
 after the flow section, a `struct cosmo_netctl_lease_list` and one
 `struct cosmo_netctl_lease` per client (`ifname`, `state`
 `COSMO_NETCTL_DHCP_*`, `addr`, `mask`, `router`, `server`, `dns[3]` and
-`dns_count`, `lease_s`/`t1_s`/`t2_s`, `remaining_ms`/`t1_ms`/`t2_ms`).
+`dns_count`, `lease_s`/`t1_s`/`t2_s`, `remaining_ms`/`t1_ms`/`t2_ms`,
+and from version 8 `hostname[64]`, the record growing to 128 bytes).
 `netcfg` reads it (docs/userland).
+
+## The listings (shell completeness S1; design.md, "Inspecting the stack")
+
+Each copies one table under that table's lock into the caller's array,
+writes at most `max` and returns how many there are (more than `max`
+means some were left out); the caller formats with no lock held (N32).
+
+**`unsigned netif_list(struct netif_info *out, unsigned max)`**,
+**`bool netif_info_by_name(const char *name, struct netif_info *out)`**,
+**`bool netif_info_by_index(unsigned index, struct netif_info *out)`**
+(`netif.h`): name, index, `NETIF_*` flags, MTU, MAC, the IPv4 address,
+mask and gateway, the link-local address (`lo`'s is `::1`) and the
+counters. Any context. The registry holds at most `NETIF_MAX` (32;
+`netif_register` refuses another with `-ENOSPC`), so a `NETIF_MAX` array
+takes every interface and no listing leaves one out.
+**`unsigned ipv4_route_list(struct ipv4_route_info *out, unsigned max)`**
+(`ip.h`): the default route (`IPV4_RTF_UP | IPV4_RTF_GATEWAY`, through
+`netif_default_ipv4`'s interface to its gateway) when it has a gateway,
+then each up, addressed, non-loopback interface's subnet
+(`IPV4_RTF_UP`), with the source the stack picks; at most
+`IPV4_ROUTES_MAX` (`NETIF_MAX + 1`); returns how many it wrote, 0 without memory.
+Thread context.
+**`unsigned arp_list(struct arp_info *out, unsigned max)`** (`ether.h`):
+address, MAC (zero while resolving), `complete`, the interface's name.
+**`unsigned tcp_list(struct tcp_sock_info *out, unsigned max, uint16_t family)`**
+(`tcp.h`): every pcb of that family in the table (chosen under the lock,
+so another family's cannot crowd it out of `max`), its ends (the remote end zero while
+`CLOSED`), state, and queue lengths (bytes unacknowledged and unread; a
+listener's backlog and queued children), read relaxed under the table
+lock alone.
+**`unsigned udp_list(struct udp_sock_info *out, unsigned max, uint16_t family)`**
+(`udp.h`): every bound pcb of that family, its ends (remote port 0: not connected),
+queued datagrams and drops.
+
+**`int procnet_render(enum procnet_file f, char **out)`**
+(`kernel/net/procnet.h`): `/proc/net/<procnet_names[f]>` in Linux's
+format, in a buffer that starts at a page and doubles as the text needs,
+up to `PROCNET_TEXT_MAX` (64 KiB less 64 bytes; a longer listing ends at
+its last whole line); sets `*out` (the caller's to `kfree`) and returns
+the length, or `-ENOMEM` (also when the buffer could not grow, rather
+than serve a listing cut short). Thread context. procfs calls it at the
+open and keeps a copy of the text at its own length.
+
+**netctl version 8** (`uapi/cosmo/netctl.h`): after the lease section, a
+`struct cosmo_netctl_if_list` and that many `struct cosmo_netctl_if`
+(name, index, `COSMO_NETCTL_IF_*` flags, MTU, MAC, address, mask, the
+link-local address, eight counters; 120 bytes), a
+`struct cosmo_netctl_route_list` and that many `struct cosmo_netctl_route`
+(interface, destination, mask, gateway, source, `COSMO_NETCTL_RT_GATEWAY`;
+32 bytes), and a `struct cosmo_netctl_neigh_list` and that many
+`struct cosmo_netctl_neigh` (interface, address, MAC,
+`COSMO_NETCTL_NEIGH_INCOMPLETE` or `_REACHABLE`; 20 bytes). Bounds
+`COSMO_NETCTL_MAX_IFS` (32, `NETIF_MAX`), `_MAX_ROUTES` (33), `_MAX_NEIGH` (64), in
+`COSMO_NETCTL_SNAPSHOT_MAX`. `ip` reads them (docs/userland).
 
 ## Boot parameters (`kernel/include/kernel/fwcfg.h`, `kernel/include/arch/fwcfg.h`)
 

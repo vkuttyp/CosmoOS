@@ -32,6 +32,15 @@ array (`g_system_files`), as sysctl's names are, so adding to it is a
 deliberate act. `/proc/cpuinfo` is still not added: nothing here reads
 it.
 
+Shell completeness S1 adds a directory of them, `/proc/net`: `dev`,
+`route`, `arp`, `tcp`, `tcp6`, `udp`, `udp6` and `if_inet6`, which
+BusyBox's `ifconfig`, `route`, `netstat` and `arp` open. The same bar
+applies -- each is opened by a program here, in Linux's format -- and
+the list is again one array, the network stack's `procnet_names`. procfs
+owns the paths and the snapshot at the open; the stack owns the text
+(`kernel/net/procnet.h`; the network design's "Inspecting the stack"),
+because the formats are about its tables, not about processes.
+
 What `/proc` adds that no existing interface does is **addressability**:
 a process's facts at a path, so that `cat`, the shell and any program
 that reads files can get at them without a system call of their own.
@@ -48,7 +57,16 @@ is readable by anything.
   /proc/<pid>/cmdline    argv, NUL-separated
   /proc/self             a link to the reader's own directory
   /proc/meminfo, stat, loadavg, uptime, mounts   the system files (P4)
+  /proc/net/dev, route, arp, tcp, tcp6, udp, udp6, if_inet6
+                         the network stack's tables (P4, shell completeness S1)
 ```
+
+A file's text is at most a page, except a `/proc/net` file's: a line
+per socket, up to just under 64 KiB (`PROCNET_TEXT_MAX`), served a page at
+a time from the text rendered at the open. The stack renders it into a
+buffer that starts at a page and doubles as the text needs, and procfs
+keeps the text at its own length, so a short file holds a short buffer for
+as long as it is open.
 
 Each new file is a promise to keep producing that text, so the bar for
 adding one is that something needs it and nothing else offers it.

@@ -55,7 +55,10 @@ fixed list (`g_system_files`) because a Linux program here opens each
 measures, in the fields and units Linux's file uses; a field with no
 figure is 0 or absent (design.md, "Layout"), never an estimate made to
 look like a measurement. `<pid>/stat` and `<pid>/cmdline` hold the same
-promise for a process.
+promise for a process. The `/proc/net` files are a second fixed list
+(the network stack's `procnet_names`, shell completeness S1) under the
+same rule, rendered by the stack from its listings (the network
+invariants' N32).
 
 Check: the user-mode self-test reads each and requires Linux's shape --
 `MemTotal:` first, `cpu  ` then `cpu0 ` and `btime` in `stat`, three
@@ -63,4 +66,6 @@ two-decimal averages, `running/all` and the last pid in `loadavg`, `/`
 and `/proc procfs` in `mounts`, its own pid and `(init)` in
 `<pid>/stat`, a NUL-terminated `cmdline` naming it -- and BusyBox's
 scripted test runs the programs that read them (`free`, `df`, `uptime`,
-`top -b`).
+`top -b`); `test-net-login` runs the ones that read `/proc/net`
+(`ifconfig`, `route -n`, `netstat -tuln`, `arp -a`) and requires
+eth0's counters, both routes, dropbear's listener and the gateway.

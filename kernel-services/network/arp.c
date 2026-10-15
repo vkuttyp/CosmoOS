@@ -283,6 +283,32 @@ void arp_flush(struct netif *nif)
     spin_unlock_irqrestore(&g_lock, s);
 }
 
+unsigned arp_list(struct arp_info *out, unsigned max)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    for (unsigned i = 0; i < ARP_TABLE_SIZE; i++) {
+        const struct arp_entry *e = &g_table[i];
+        if (e->state == ARP_FREE)
+            continue;
+        if (n < max) {
+            /* An entry's interface outlives it: the flush at unregister
+             * empties its entries under this lock before the registry
+             * lets go (N25). */
+            struct arp_info *o = &out[n];
+            memset(o, 0, sizeof(*o));
+            o->ip = e->ip;
+            o->complete = e->state == ARP_REACHABLE;
+            if (o->complete)
+                memcpy(o->mac, e->mac, ETH_ALEN);
+            strlcpy(o->ifname, e->nif->name, sizeof(o->ifname));
+        }
+        n++;
+    }
+    spin_unlock_irqrestore(&g_lock, s);
+    return n;
+}
+
 void arp_delete(const struct netif *nif, uint32_t ip)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);

@@ -196,6 +196,64 @@ struct lx_pollfd {
 #define LX_TCOFLUSH  1
 #define LX_TCIOFLUSH 2
 
+/* The interface ioctls on a socket (shell completeness S1; netdevice(7)):
+ * what BusyBox's ifconfig, route and arp ask of the kernel. A struct
+ * lx_ifreq names the interface and carries one value; SIOCGIFCONF fills a
+ * caller's array of them. */
+#define LX_SIOCGIFNAME    0x8910   /* by ifr_ifindex */
+#define LX_SIOCGIFCONF    0x8912
+#define LX_SIOCGIFFLAGS   0x8913
+#define LX_SIOCSIFFLAGS   0x8914
+#define LX_SIOCGIFADDR    0x8915
+#define LX_SIOCSIFADDR    0x8916
+#define LX_SIOCGIFBRDADDR 0x8919
+#define LX_SIOCSIFBRDADDR 0x891a
+#define LX_SIOCGIFNETMASK 0x891b
+#define LX_SIOCSIFNETMASK 0x891c
+#define LX_SIOCGIFMETRIC  0x891d
+#define LX_SIOCGIFMTU     0x8921
+#define LX_SIOCSIFMTU     0x8922
+#define LX_SIOCSIFHWADDR  0x8924
+#define LX_SIOCGIFHWADDR  0x8927
+#define LX_SIOCGIFINDEX   0x8933
+
+#define LX_IFF_UP          0x1
+#define LX_IFF_BROADCAST   0x2
+#define LX_IFF_LOOPBACK    0x8
+#define LX_IFF_RUNNING     0x40
+#define LX_IFF_NOARP       0x80
+#define LX_IFF_MULTICAST   0x1000
+
+#define LX_ARPHRD_ETHER    1
+#define LX_ARPHRD_LOOPBACK 772
+
+#define LX_IFNAMSIZ 16
+
+struct lx_ifreq {                /* 40 bytes */
+    char ifr_name[LX_IFNAMSIZ];
+    union {
+        struct {                 /* SIOC[GS]IF{ADDR,NETMASK,BRDADDR}: a struct sockaddr_in */
+            uint16_t family;
+            uint16_t port;
+            uint32_t addr;       /* network order */
+            uint8_t zero[8];
+        } ifr_addr;
+        struct {                 /* SIOC[GS]IFHWADDR: a struct sockaddr, ARPHRD_* in the family */
+            uint16_t family;
+            uint8_t data[14];
+        } ifr_hwaddr;
+        int16_t ifr_flags;
+        int32_t ifr_ivalue;      /* ifindex, metric, mtu */
+        uint8_t ifr_pad[24];
+    };
+};
+
+struct lx_ifconf {               /* 16 bytes */
+    int32_t ifc_len;             /* in: the buffer's bytes; out: the bytes written (or, with no buffer, needed) */
+    uint32_t pad;
+    uint64_t ifc_buf;            /* struct lx_ifreq[], or 0 to ask the length */
+};
+
 #define LX_NCCS 19
 #define LX_VINTR    0
 #define LX_VQUIT    1
