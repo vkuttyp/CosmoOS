@@ -168,6 +168,11 @@ def boot(name, image, work, spec, timeout, key):
             want_rc = spec.get("rc", EXIT_SUCCESS)
             if rc != want_rc:
                 raise Fail(f"{name}: QEMU exit status {rc}, expected {want_rc}")
+            state["reader"].join(timeout=5)
+            # A panic after the command can still end in the expected
+            # status (semihosting's failure exit is 35, a PSCI power-off 0).
+            if b"KERNEL PANIC" in text():
+                raise Fail(f"{name}: kernel panic after {spec.get('end', b'exit').strip().decode()!r}")
         else:
             proc.kill()
             proc.wait()
