@@ -27,12 +27,15 @@ const char *const procnet_names[PROCNET_COUNT] = {
 
 #define SOCKS_MAX 400u    /* sockets listed per file: what PROCNET_TEXT_MAX holds */
 
-/* The text so far; a line is appended whole or not at all. */
+/* The text so far; a line is appended whole or not at all. The buffer
+ * starts at a page and doubles up to PROCNET_TEXT_MAX as lines need it. */
 struct text {
     char *buf;
     size_t n, len;
-    bool full;
+    bool full, nomem;
 };
+
+#define TEXT_FIRST 4096u
 
 static void line(struct text *t, const char *fmt, ...) __printf(2, 3);
 static void line(struct text *t, const char *fmt, ...)
@@ -44,9 +47,25 @@ static void line(struct text *t, const char *fmt, ...)
     va_start(ap, fmt);
     int k = kvsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
-    if (k < 0 || (size_t)k >= sizeof(tmp) || t->len + (size_t)k >= t->n) {
-        t->full = true;   /* the listing ends at its last whole line */
+    if (k < 0 || (size_t)k >= sizeof(tmp)) {
+        t->full = true;
         return;
+    }
+    while (t->len + (size_t)k >= t->n) {
+        if (t->n >= PROCNET_TEXT_MAX) {
+            t->full = true;   /* the listing ends at its last whole line */
+            return;
+        }
+        size_t n = t->n * 2 < PROCNET_TEXT_MAX ? t->n * 2 : PROCNET_TEXT_MAX;
+        char *b = kmalloc(n, 0);
+        if (b == NULL) {
+            t->full = t->nomem = true;
+            return;
+        }
+        memcpy(b, t->buf, t->len + 1);
+        kfree(t->buf);
+        t->buf = b;
+        t->n = n;
     }
     memcpy(t->buf + t->len, tmp, (size_t)k);
     t->len += (size_t)k;
@@ -242,11 +261,12 @@ static int render_if_inet6(struct text *t)
     return 0;
 }
 
-int procnet_render(enum procnet_file f, char *out, size_t n)
+int procnet_render(enum procnet_file f, char **out)
 {
-    struct text t = { .buf = out, .n = n, .len = 0, .full = n == 0 };
-    if (n)
-        out[0] = '\0';
+    struct text t = { .buf = kmalloc(TEXT_FIRST, 0), .n = TEXT_FIRST };
+    if (t.buf == NULL)
+        return -ENOMEM;
+    t.buf[0] = '\0';
     int rc = 0;
     switch (f) {
     case PROCNET_DEV:      rc = render_dev(&t); break;
@@ -257,7 +277,14 @@ int procnet_render(enum procnet_file f, char *out, size_t n)
     case PROCNET_UDP:      rc = render_udp(&t, COSMO_AF_INET); break;
     case PROCNET_UDP6:     rc = render_udp(&t, COSMO_AF_INET6); break;
     case PROCNET_IF_INET6: rc = render_if_inet6(&t); break;
-    default:               return -ENOENT;
+    default:               rc = -ENOENT; break;
     }
-    return rc < 0 ? rc : (int)t.len;
+    if (rc == 0 && t.nomem)
+        rc = -ENOMEM;   /* a listing cut short for want of memory is not served as whole */
+    if (rc < 0) {
+        kfree(t.buf);
+        return rc;
+    }
+    *out = t.buf;
+    return (int)t.len;
 }

@@ -933,11 +933,14 @@ lock alone.
 (`udp.h`): every bound pcb of that family, its ends (remote port 0: not connected),
 queued datagrams and drops.
 
-**`int procnet_render(enum procnet_file f, char *out, size_t n)`**
+**`int procnet_render(enum procnet_file f, char **out)`**
 (`kernel/net/procnet.h`): `/proc/net/<procnet_names[f]>` in Linux's
-format into `out`, ending at the last whole line within `n`
-(`PROCNET_TEXT_MAX`, 64 KiB, is what procfs gives it); returns the
-length, or `-ENOMEM`. Thread context. procfs calls it at the open.
+format, in a buffer that starts at a page and doubles as the text needs,
+up to `PROCNET_TEXT_MAX` (64 KiB less 64 bytes; a longer listing ends at
+its last whole line); sets `*out` (the caller's to `kfree`) and returns
+the length, or `-ENOMEM` (also when the buffer could not grow, rather
+than serve a listing cut short). Thread context. procfs calls it at the
+open and keeps a copy of the text at its own length.
 
 **netctl version 8** (`uapi/cosmo/netctl.h`): after the lease section, a
 `struct cosmo_netctl_if_list` and that many `struct cosmo_netctl_if`

@@ -483,6 +483,12 @@ def stage_inspect(b, results):
     out = b.run("ip r")
     need(out, r"^default via 10\.0\.2\.2 dev eth0 proto dhcp src 10\.0\.2\.15$", "ip r: the default route")
     need(out, r"^10\.0\.2\.0/24 dev eth0 proto kernel scope link src 10\.0\.2\.15$", "ip r: the subnet")
+    out = b.run("ip -6 r")
+    # IPv6 routes the link through the default interface alone (ipv6_route);
+    # eth1 is up too, and must not be listed.
+    need(out, r"^fe80::/64 dev eth0 proto kernel metric 256 pref medium$", "ip -6 r: eth0's link-local route")
+    if "dev eth1" in out:
+        raise Fail(f"ip -6 r lists eth1, which IPv6 never routes through: {out!r}")
     out = b.run("ip neigh")
     gw_mac = need(out, r"^10\.0\.2\.2 dev eth0 lladdr ([0-9a-f:]{17}) REACHABLE$", "ip neigh: the gateway").group(1)
     out = b.status("ip addr add 10.0.2.99/24 dev eth0", "ip-add")

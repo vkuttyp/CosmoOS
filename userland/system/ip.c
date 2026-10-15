@@ -219,12 +219,17 @@ static int show_addr(int family, const char *dev, bool addresses)
 static int show_route(int family, const char *dev)
 {
     if (family == 6) {
-        /* IPv6 routes only the link: each link-local subnet. */
+        /* IPv6 routes only the link, and only through the default
+         * interface (ipv6_route: netif_default, the first up interface that
+         * is neither lo nor a tap, in registration order -- the snapshot's
+         * order): its link-local subnet is the one route there is. */
         for (unsigned i = 0; i < g_nifs; i++) {
             const struct cosmo_netctl_if *f = &g_ifs[i];
-            if ((f->flags & COSMO_NETCTL_IF_LOOPBACK) || !(f->flags & COSMO_NETCTL_IF_UP) || !name_is(f, dev))
+            if ((f->flags & (COSMO_NETCTL_IF_LOOPBACK | COSMO_NETCTL_IF_TAP)) || !(f->flags & COSMO_NETCTL_IF_UP))
                 continue;
-            printf("fe80::/64 dev %.8s proto kernel metric 256 pref medium\n", f->name);
+            if (name_is(f, dev))
+                printf("fe80::/64 dev %.8s proto kernel metric 256 pref medium\n", f->name);
+            break;
         }
         return 0;
     }

@@ -384,8 +384,9 @@ netlink exists, and read-only: any command that would change something
 `ifconfig` and `route` configure (under `PRIV_NET`). Its lines follow
 iproute2's field for field and leave out what the kernel does not report
 (qdisc, group, qlen, a link mode), as iproute2 does when a kernel omits an
-attribute; IPv6 shows each link-local address and route, and no
-neighbours. Reading the snapshot takes `PRIV_NET`, as every netctl read
+attribute; IPv6 shows each link-local address, the one link-local route
+there is (through the default interface, which `ipv6_route` sends every
+link-local destination to) and no neighbours. Reading the snapshot takes `PRIV_NET`, as every netctl read
 does, so an unprivileged `ip` is refused where Linux's would answer
 (inventory).
 

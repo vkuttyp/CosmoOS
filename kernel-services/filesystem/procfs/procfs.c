@@ -379,7 +379,7 @@ static int render(uint64_t ino, char *out, size_t n)
  */
 struct proc_text {
     size_t len;
-    char text[];   /* PROC_TEXT_MAX, or PROCNET_TEXT_MAX for a /proc/net file */
+    char text[];   /* PROC_TEXT_MAX, or a /proc/net file's own length */
 };
 
 static int proc_readpage(struct vnode *vn, uint64_t index, void *buf)
@@ -404,20 +404,44 @@ static const struct vnode_ops proc_file_ops = {
     .evict = proc_evict,
 };
 
+/* A /proc/net file's text, kept at its own length: the stack renders it
+ * into a buffer that grew as it needed, and only the text is kept. */
+static int net_text(enum procnet_file f, struct proc_text **out)
+{
+    char *buf;
+    int len = procnet_render(f, &buf);
+    if (len < 0)
+        return len;
+    struct proc_text *t = kmalloc(sizeof(*t) + (size_t)len + 1, 0);
+    if (t != NULL) {
+        memcpy(t->text, buf, (size_t)len + 1);
+        t->len = (size_t)len;
+    }
+    kfree(buf);
+    *out = t;
+    return t != NULL ? 0 : -ENOMEM;
+}
+
 /* Instantiate one of a process's files, rendering it now. */
 static int proc_file(struct mount *mnt, pid_t pid, enum proc_kind kind, struct vnode **out)
 {
-    size_t cap = kind == PROC_NET_FILE ? PROCNET_TEXT_MAX : PROC_TEXT_MAX;
-    struct proc_text *t = kmalloc(sizeof(*t) + cap, 0);
-    if (t == NULL)
-        return -ENOMEM;
     uint64_t ino = PROC_INO(pid, kind);
-    int len = kind == PROC_NET_FILE ? procnet_render((enum procnet_file)pid, t->text, cap) : render(ino, t->text, cap);
-    if (len < 0) {
-        kfree(t);
-        return len;
+    struct proc_text *t;
+    if (kind == PROC_NET_FILE) {
+        int rc = net_text((enum procnet_file)pid, &t);
+        if (rc)
+            return rc;
+    } else {
+        t = kmalloc(sizeof(*t) + PROC_TEXT_MAX, 0);
+        if (t == NULL)
+            return -ENOMEM;
+        int len = render(ino, t->text, PROC_TEXT_MAX);
+        if (len < 0) {
+            kfree(t);
+            return len;
+        }
+        t->len = (size_t)len < PROC_TEXT_MAX ? (size_t)len : PROC_TEXT_MAX - 1;   /* ksnprintf returns what it wanted */
     }
-    t->len = (size_t)len < cap ? (size_t)len : cap - 1;   /* ksnprintf returns what it wanted */
     struct vnode *vn = proc_vnode(mnt, ino, VNODE_REG, 0444, &proc_file_ops);
     if (vn == NULL) {
         kfree(t);

@@ -1781,9 +1781,11 @@ them with `sscanf`. What the stack does not have is written as Linux
 writes its absence: the FIFO, frame, compression, multicast, collision
 and carrier counters are 0; every socket's uid and inode are 0 (a pcb
 records no owner, a socket no inode); UDP's receive queue is in
-datagrams, where Linux counts bytes. A file is up to 64 KiB
+datagrams, where Linux counts bytes. A file is up to just under 64 KiB
 (`PROCNET_TEXT_MAX`, 400 sockets at `tcp`'s 150 bytes a line), ending at
-its last whole line beyond that.
+its last whole line beyond that; it is rendered into a buffer that grows
+from a page, and procfs keeps only the text, so a short file costs a short
+allocation for as long as it is held open.
 
 **The interface ioctls** are the Linux personality's
 (`compat/linux/netioctl.c`; `docs/compat/linux/design.md`, "Interface

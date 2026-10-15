@@ -27,12 +27,15 @@ enum procnet_file {
 extern const char *const procnet_names[PROCNET_COUNT];
 
 /* The most one file renders: a listing longer than this ends at its last
- * whole line, as /proc/mounts does. Sixteen pages: 400 sockets at
- * /proc/net/tcp's 150 bytes a line. */
-#define PROCNET_TEXT_MAX (64u * 1024u)
+ * whole line, as /proc/mounts does. Just under sixteen pages (400 sockets
+ * at /proc/net/tcp's 150 bytes a line), so the text and procfs's header
+ * stay inside one 64 KiB allocation. */
+#define PROCNET_TEXT_MAX (64u * 1024u - 64u)
 
-/* Render `f` into out[0..n); returns the length (< n), or -ENOMEM.
- * Thread context. */
-int procnet_render(enum procnet_file f, char *out, size_t n);
+/* Render `f` into a buffer that starts at a page and doubles as the text
+ * needs, up to PROCNET_TEXT_MAX, so a short file costs a short buffer.
+ * Returns the length and sets *out (NUL-terminated, the caller's to
+ * kfree), or -ENOMEM. Thread context. */
+int procnet_render(enum procnet_file f, char **out);
 
 #endif /* KERNEL_NET_PROCNET_H */

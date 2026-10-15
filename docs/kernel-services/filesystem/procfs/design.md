@@ -62,8 +62,11 @@ is readable by anything.
 ```
 
 A file's text is at most a page, except a `/proc/net` file's: a line
-per socket, up to 64 KiB (`PROCNET_TEXT_MAX`), served a page at a time
-from the text rendered at the open.
+per socket, up to just under 64 KiB (`PROCNET_TEXT_MAX`), served a page at
+a time from the text rendered at the open. The stack renders it into a
+buffer that starts at a page and doubles as the text needs, and procfs
+keeps the text at its own length, so a short file holds a short buffer for
+as long as it is open.
 
 Each new file is a promise to keep producing that text, so the bar for
 adding one is that something needs it and nothing else offers it.
