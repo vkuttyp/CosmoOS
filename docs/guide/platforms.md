@@ -34,8 +34,8 @@ prlctl set "CosmoOS" --device-add hdd --type plain --size 1024 --iface nvme
 The two disks are two namespaces of one controller: `cosmo-install
 --list` shows the live disk (`nvme0n2`, with the `boot` partition) and
 the blank one (`nvme0n1`); `cosmo-install nvme0n1` installs, and `exit`
-shuts the system down, though on Parallels the VM then stays running
-until you stop it (there is no power-off there yet: the kernel halts).
+or `poweroff` shuts the system down and the VM stops (a PSCI power-off;
+v1.0.3 halts instead, and its VM stays running until you stop it).
 With the blank disk first in the boot order (or the live
 disk disconnected) the VM boots the installed system. The network
 adapter's default, shared networking, gives it an address by DHCP; ssh
@@ -80,7 +80,7 @@ platform: firmware OEM 'PRLS  '; console PL011 at 0x2110000 (DBG2, polled); GICv
 
 | | |
 |---|---|
-| Works | verified boot; both CPUs; the console on the screen, at the window's size (the virtio-gpu adapter) and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell; installing on an NVMe disk and booting it (the controller offers only MSI: one vector for every queue); the network (the adapter is a legacy virtio-net) with DHCP, DNS, `wget` and ssh; randomness (no CPU instruction, firmware generator or virtio-rng: the timing-jitter source seeds the pool in milliseconds); the wall clock (the firmware's time at boot) |
+| Works | verified boot; both CPUs; the console on the screen, at the window's size (the virtio-gpu adapter) and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell; installing on an NVMe disk and booting it (the controller offers only MSI: one vector for every queue); the network (the adapter is a legacy virtio-net) with DHCP, DNS, `wget` and ssh; randomness (no CPU instruction, firmware generator or virtio-rng: the timing-jitter source seeds the pool in milliseconds); the wall clock (the firmware's time at boot); power-off (`exit`, `poweroff`: PSCI) |
 | Does not work | SATA disks (not on PCI: a platform AHCI described only in the DSDT, which needs an AML interpreter); the sound, USB 2.0 (EHCI) and vsock devices have no driver, and the graphics adapter (virtio-gpu) only carries the text console (no 3D, cursor or display interface for programs); the debug self-test suite assumes QEMU's machine |
 
 The details, and why, are in

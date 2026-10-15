@@ -1091,10 +1091,17 @@ each; none is needed by M2's acceptance test.
   process memory: reading another process's space needs a reference on it,
   and exit drops the space (`vm_space_put`, P34) without `p->lock`
   (v1.0.2's everyday commands).
-- AArch64 has no power-off off QEMU: `arch_emulator_exit` is QEMU's
+- ~~AArch64 has no power-off off QEMU: `arch_emulator_exit` is QEMU's
   semihosting only and nothing calls PSCI `SYSTEM_OFF`, so on Parallels
   Desktop `exit` ends in `shutdown: halting CPU` and the VM stays running
-  until stopped (found 2026-10-14, testing the everyday commands there).
+  until stopped (found 2026-10-14, testing the everyday commands there).~~
+  **Closed by the AArch64 power-off unit (P1, 2026-10-15)**: PSCI
+  `SYSTEM_OFF` after the emulator exit, and BusyBox `poweroff` through
+  init (`docs/audit/2026-10-15-aarch64-poweroff-report.md`).
+- No `poweroff -f`, `halt` or `reboot`: the Linux personality has no
+  `reboot(2)` and the kernel no reboot path (PSCI `SYSTEM_RESET` would be
+  AArch64's); x86-64 off QEMU still halts, since ACPI S5 needs the DSDT's
+  `\_S5` values and so AML (the power-off unit, 2026-10-15).
 - A read of `/dev/zero` returns at most 64 KiB, where Linux fills the
   request: `dd if=/dev/zero bs=1M count=32` copies 32 partial records,
   2 MiB (POSIX allows the short read; found on Parallels, 2026-10-14).

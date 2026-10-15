@@ -524,6 +524,14 @@ the copy, a `PROT_NONE` page, a read-only destination, or an exhausted
 allocator all become `-EFAULT` from the system call, never a panic and
 never a process kill (finding #11, #19).
 
+One entry is not a user access: AArch64's semihosting exit
+(`hlt #0xF000`, `kernel/arch/aarch64/shutdown.c`), which a QEMU without
+semihosting takes as an undefined instruction. The AArch64 trap handler
+offers a kernel-mode undefined instruction the same lookup before it
+dispatches, and the fixup is the instruction after the HLT, so the exit
+returns and the caller powers off (`docs/kernel/arch/aarch64/invariants.md`,
+A27).
+
 Two hardening rules ride along. A **user-mode** fault at a kernel
 address goes straight to the fatal hook: it used to select
 `kernel_space` and could populate a lazily mapped kernel region on an

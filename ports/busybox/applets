@@ -71,3 +71,7 @@ hexdump
 # ping: IPv4 echo over a raw ICMP socket (PRIV_NET; the kernel's network
 # design, "Raw ICMP sockets"). No ping6.
 ping
+# poweroff: signals init (SIGUSR2), which syncs and exits; the kernel then
+# powers off (PSCI SYSTEM_OFF on AArch64). `-f` calls reboot(2), which the
+# Linux personality does not have.
+poweroff

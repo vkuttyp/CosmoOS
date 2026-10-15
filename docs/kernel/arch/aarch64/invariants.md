@@ -288,3 +288,21 @@ Apple CPU under Parallels Desktop faulted on the first read of a freshly
 mapped xHCI register page without the `isb` (4 of 6 boots); TCG never
 showed it. **Checked by review**: no QEMU configuration reproduces the
 fault, so no test fails without the `isb`.
+
+## A27: A clean end of the boot turns the machine off where it can
+
+`kernel_shutdown` offers the exit to the emulator first (semihosting
+`SYS_EXIT_EXTENDED`, which carries the status to the harness) and, when
+that returns, calls PSCI `SYSTEM_OFF` through the FADT's conduit; it
+halts only when there is no PSCI or the firmware refused (logged). The
+semihosting `hlt #0xF000` is in the exception table, and an EL1
+undefined instruction is offered the fixup before anything else, so a
+QEMU without semihosting resumes after it rather than panicking (it did,
+before this: `unhandled exception 1027 (undefined instruction)`). A
+panic does not power off: its message stays on the screen. **Checked
+by** `make test-platforms`' `psci-exit` and `psci-poweroff`, which boot
+without semihosting and require QEMU to exit 0 by itself, with the
+`shutdown: power off through PSCI SYSTEM_OFF` line; without the fixup
+`psci-exit` panics and QEMU is still running 60 s later. On Parallels
+Desktop (no semihosting, not QEMU's firmware) by hand: the report.
+

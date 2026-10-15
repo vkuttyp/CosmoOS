@@ -45,9 +45,9 @@ area. None is scheduled; a proposed unit below names the ones it closes.
 
 - SATA disks are not seen: Parallels' AHCI is a platform device described
   only in the DSDT, which needs an AML interpreter.
-- No power-off off QEMU: `arch_emulator_exit` is semihosting only and
+- ~~No power-off off QEMU: `arch_emulator_exit` is semihosting only and
   nothing calls PSCI `SYSTEM_OFF`, so `exit` halts and the VM stays
-  running.
+  running.~~ Closed by P1.
 - The debug self-test suite assumes QEMU's machine (`pci`,
   `net-firewall`, `net-tap-release-order`, `blk-submit-unregister` fail on
   Parallels).
@@ -100,7 +100,7 @@ For the owner to choose from; none is started. Each names its acceptance
 test, which is the unit's proof under the scope rules (green on main, box
 ticked in the same PR).
 
-- [ ] **P1 Power-off on AArch64.** A `poweroff` command (BusyBox's
+- [x] **P1 Power-off on AArch64.** A `poweroff` command (BusyBox's
   `CONFIG_POWEROFF` is off today and nothing else provides one) and
   init's shutdown call PSCI `SYSTEM_OFF` when semihosting is absent (the
   conduit is already read from the FADT). Closes the "no power-off" line.
@@ -109,7 +109,11 @@ ticked in the same PR).
   test-platforms` variant with semihosting disabled boots twice, once
   ending with `poweroff` and once with `exit` from the login shell, and
   QEMU exits by itself within the boot budget each time; on Parallels
-  Desktop the VM stops (manual, recorded in the report).
+  Desktop the VM stops (manual, recorded in the report). Done
+  2026-10-15: `make test-platforms`' `psci-exit` and `psci-poweroff` in
+  CI (job `platforms`); on Parallels Desktop 27.0.3 both stopped the VM
+  1.1 s after the command
+  ([report](audit/2026-10-15-aarch64-poweroff-report.md)).
 - [ ] **P2 Process memory in procfs.** `/proc/<pid>/stat` reports VSZ
   and RSS, and `/proc/<pid>/status` gains `VmSize` and `VmRSS`, from a
   reference on the target's space taken under the rule exit already

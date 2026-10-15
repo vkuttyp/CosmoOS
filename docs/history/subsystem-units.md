@@ -2995,3 +2995,14 @@ See the [history index](README.md).
   boot). `test-chaos` keeps 240 s (at most 217.9 s), and the boot probes
   under `tools/` pass the per-architecture value. The record is
   `docs/testing/flakes.md`'s entry for the 240 s budget.
+- **After 1.0: AArch64 power-off (2026-10-15, roadmap-1.1 P1).** When the
+  emulator exit returns, `kernel_shutdown` calls `arch_power_off`: PSCI
+  `SYSTEM_OFF` through the FADT's conduit on AArch64 (none yet on x86-64,
+  where ACPI S5 needs AML). The semihosting HLT is in the exception table
+  and an EL1 undefined instruction is offered the fixup first, so a QEMU
+  without semihosting no longer panics at the end of the boot (A27).
+  BusyBox `poweroff` sends init SIGUSR2, and init syncs and exits from the
+  handler. `make test-platforms` boots twice without semihosting
+  (`psci-exit`, `psci-poweroff`) and requires QEMU to exit by itself; on
+  Parallels Desktop 27.0.3 both commands stopped the VM in 1.1 s.
+  Report: `docs/audit/2026-10-15-aarch64-poweroff-report.md`.

@@ -94,6 +94,10 @@ static void handle_sync(struct arch_trap_frame *frame, bool from_user)
         return_to_user_check(frame);
         return;
     }
+    /* A kernel instruction that may be undefined and has a way on: the
+     * semihosting exit under a QEMU without semihosting (shutdown.c). */
+    if (!from_user && ec == ESR_EC_UNKNOWN && arch_trap_fixup(frame))
+        return;
     enum arch_trap_kind kind = classify(frame->esr);
     frame->vector = VEC_SYNC_BASE + (unsigned)kind;
     uint64_t elr = frame->elr;

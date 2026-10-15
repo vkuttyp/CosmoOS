@@ -2,7 +2,7 @@
  * extable.c - Exception fixup table lookup (docs/kernel/memory/design.md §6.1).
  *
  * The table is small (one entry per faulting instruction in the user
- * copy primitives), so a linear scan on the fault path costs less than
+ * copy primitives, and AArch64's semihosting exit), so a linear scan on the fault path costs less than
  * keeping it sorted at link time would be worth.
  */
 

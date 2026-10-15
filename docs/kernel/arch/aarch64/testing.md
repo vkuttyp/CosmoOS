@@ -124,7 +124,7 @@ The coverage matrix is therefore:
 
 Platform discovery (`design.md`, "Platform discovery"; A25). `make
 ARCH=aarch64 test-platforms` runs `tests/boot/platform_test.py` on the
-image under six QEMU configurations, each a copy of the image booted with
+image under eight QEMU configurations, each a copy of the image booted with
 `QEMU_SMP=2` and the virtio console captured, and no fw_cfg options:
 
 | Variant | Environment | Expected beyond the common checks |
@@ -134,11 +134,15 @@ image under six QEMU configurations, each a copy of the image booted with
 | `lowmem` | `QEMU_VIRT_OPTS=,highmem=off` | (no device or RAM above 4 GiB) |
 | `rndr` | `QEMU_CPU=neoverse-v1 QEMU_RNG=0` | `random: cpu source: rndr` |
 | `nornd` | `QEMU_CPU=cortex-a72 QEMU_RNG=0` | `random: cpu source: none` |
+| `psci-exit` | `QEMU_SEMIHOSTING=0` | `exit`: `shutdown: exit status 0` then `shutdown: power off through PSCI SYSTEM_OFF (HVC\|SMC)`, and QEMU's exit status 0 |
+| `psci-poweroff` | `QEMU_SEMIHOSTING=0` | `poweroff` (BusyBox, init's SIGUSR2): `init: power off requested`, then the same two lines and status 0 |
 | `noserial` | `QEMU_SERIAL=none`, command line `root=boot-disk serial=none` | `fbcon: no serial console: the framebuffer is the console from the first line`, console field `framebuffer only` |
 
 Common checks on every variant: no `KERNEL PANIC`; the userland ready
 line (and, with a serial port, the `cosmo$ ` prompt, then `exit` typed
-and QEMU's clean-exit status 33); a platform line with OEM `'BOCHS '`
+and QEMU's clean-exit status 33, or 0 for the two variants without
+semihosting, whose exit is a PSCI power-off; QEMU still running 60 s
+after the command fails it); a platform line with OEM `'BOCHS '`
 `(QEMU)`, timer PPIs 30/27, PSCI `HVC` or `SMC`, and, with a serial
 port, `console PL011 at 0x9000000 (SPCR, IRQ 33)`; and no `timer: GTDT
 absent|unusable` line. `noserial` writes its command line into the image
