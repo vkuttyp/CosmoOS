@@ -536,6 +536,43 @@ def stage_inspect(b, results):
     results.append("g. ifconfig eth0 down: EPERM with PRIV_NET dropped (eth0 stays UP); as root DOWN, then up and "
                    "the gateway answers a ping")
 
+    # Every other setter family, on eth1 (the harness's second NIC, which
+    # nothing else here uses): once with PRIV_NET dropped, which must be
+    # EPERM and change nothing, then as root.
+    for args, ioctl in (("10.0.3.15", "SIOCSIFADDR"), ("netmask 255.255.0.0", "SIOCSIFNETMASK"),
+                        ("broadcast 10.0.2.255", "SIOCSIFBRDADDR"), ("mtu 1500", "SIOCSIFMTU"),
+                        ("hw ether 52:54:00:c0:5f:06", "SIOCSIFHWADDR")):
+        out = b.status(f"priv -d net -- ifconfig eth1 {args}", "set-noprv")
+        need(out, rf"{ioctl}: Operation not permitted", f"ifconfig eth1 {args} without PRIV_NET")
+        if re.search(r"^set-noprv=0$", out, re.M):
+            raise Fail(f"ifconfig eth1 {args} succeeded without PRIV_NET: {out!r}")
+    out = b.run("ip -4 a show eth1")
+    need(out, r"^    inet 10\.0\.2\.15/24 brd 10\.0\.2\.255 ", "eth1 untouched by the refused setters")
+    out = b.status("ifconfig eth1 10.0.3.15 netmask 255.255.255.0", "set-addr")
+    need(out, r"^set-addr=0$", "ifconfig eth1 10.0.3.15 netmask 255.255.255.0 as root")
+    out = b.run("ip -4 a show eth1; ip r; ifconfig eth1")
+    need(out, r"^    inet 10\.0\.3\.15/24 brd 10\.0\.3\.255 scope global ", "ip a: eth1's new address")
+    need(out, r"^10\.0\.3\.0/24 dev eth1 proto kernel scope link src 10\.0\.3\.15$", "ip r: eth1's new subnet")
+    need(out, r"^default via 10\.0\.2\.2 dev eth0 ", "ip r: the default still through eth0")
+    need(out, r"^\s+inet addr:10\.0\.3\.15\s+Bcast:10\.0\.3\.255\s+Mask:255\.255\.255\.0$", "ifconfig eth1")
+    for args, ok, ioctl in (("broadcast 10.0.3.255", True, None), ("broadcast 10.0.3.1", False, "SIOCSIFBRDADDR"),
+                            ("mtu 1500", True, None), ("mtu 1400", False, "SIOCSIFMTU"),
+                            ("hw ether 52:54:00:c0:5f:06", True, None),
+                            ("hw ether 52:54:00:00:00:01", False, "SIOCSIFHWADDR")):
+        out = b.status(f"ifconfig eth1 {args}", "set")
+        if ok:
+            need(out, r"^set=0$", f"ifconfig eth1 {args} (the value it has)")
+        else:
+            need(out, rf"{ioctl}: (Invalid argument|Not supported)", f"ifconfig eth1 {args} refused")
+            if re.search(r"^set=0$", out, re.M):
+                raise Fail(f"ifconfig eth1 {args} succeeded: {out!r}")
+    out = b.run("ifconfig eth1")
+    need(out, r"^eth1\s+Link encap:Ethernet\s+HWaddr 52:54:00:C0:5F:06\s*$", "eth1's MAC unchanged")
+    need(out, r"^\s+UP BROADCAST RUNNING MULTICAST\s+MTU:1500\s+Metric:1$", "eth1's MTU unchanged")
+    results.append("g. setters: address, netmask, broadcast, MTU and MAC each EPERM without PRIV_NET (eth1 "
+                   "unchanged); as root eth1 10.0.3.15/24 (ip a, ip r, ifconfig); the broadcast and MTU and MAC it "
+                   "has accepted, others refused (EINVAL, EOPNOTSUPP)")
+
 
 def stage_reboot_ssh(args, results, inst, port):
     """e: the second boot; the client's known_hosts must still match."""

@@ -267,7 +267,14 @@ networking with no fw_cfg address, so the kernel's DHCP client configures
   fail with `SIOCSIFFLAGS: Operation not permitted` and leave eth0 up;
   `ifconfig eth0 down` as root must show `state DOWN` in `ip link` and no
   `UP` in `ifconfig eth0`; `ifconfig eth0 up` must bring it back, and a
-  ping of the gateway must answer.
+  ping of the gateway must answer. Then each other setter on `eth1` (the
+  second NIC, otherwise unused): address, netmask, broadcast, MTU and MAC
+  each fail with `Operation not permitted` with `PRIV_NET` dropped and
+  leave `eth1` as it was; as root `ifconfig eth1 10.0.3.15 netmask
+  255.255.255.0` shows in `ip a`, `ip r` (the subnet; the default still
+  through eth0) and `ifconfig`; the broadcast, MTU and MAC it has are
+  accepted, and `broadcast 10.0.3.1` (EINVAL), `mtu 1400` and another MAC
+  (EOPNOTSUPP) refused, its MAC and MTU unchanged.
 - **e. Reboot**: the installed disk boots again, its slirp naming no
   host; a login with `StrictHostKeyChecking=yes` against the first boot's
   known_hosts must pass, so the host key was kept, and `hostname` must
