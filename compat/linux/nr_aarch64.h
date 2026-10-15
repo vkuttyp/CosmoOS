@@ -62,6 +62,7 @@
 #define LX_wait4 260
 #define LX_kill 129
 #define LX_uname 160
+#define LX_sethostname 161
 #define LX_fcntl 25
 #define LX_fsync 82
 #define LX_fdatasync 83

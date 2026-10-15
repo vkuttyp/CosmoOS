@@ -38,6 +38,7 @@ struct mbuf;
 #define OPT_SUBNET     1
 #define OPT_ROUTER     3
 #define OPT_DNS        6
+#define OPT_HOSTNAME   12   /* RFC 2132 §3.14: the client's host name (shell completeness S1) */
 #define OPT_REQIP      50
 #define OPT_LEASE      51
 #define OPT_MSGTYPE    53
@@ -104,6 +105,7 @@ enum dhcp_state {
 
 #define DHCP_MAX_CLIENTS 4
 #define DHCP_MAX_DNS     3
+#define DHCP_HOSTNAME_MAX 64   /* a kept option 12, NUL included: COSMO_HOST_NAME_MAX */
 /* The first DISCOVER/REQUEST retransmission; doubled per retry up to 64 s
  * (RFC 2131 §4.1 starts at 4 s; a lost packet at boot costs half that). */
 #define DHCP_RETX_FIRST_NS (2ull * 1000000000ull)
@@ -124,6 +126,7 @@ struct dhcp_lease_info {
     uint32_t lease_s, t1_s, t2_s;
     uint32_t remaining_ms;         /* to the end of the lease (BOUND/RENEWING/REBINDING) */
     uint32_t t1_ms, t2_ms;         /* to T1 and T2 from the read, 0 once passed */
+    char hostname[DHCP_HOSTNAME_MAX];   /* the lease's option 12, or empty */
 };
 
 struct dhcp_stats {

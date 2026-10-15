@@ -21,6 +21,7 @@
 #include <kernel/handle.h>
 #include <kernel/tty.h>
 #include <kernel/kmalloc.h>
+#include <kernel/net/procnet.h>
 #include <kernel/percpu.h>
 #include <kernel/pagecache.h>
 #include <kernel/pmm.h>
@@ -41,7 +42,10 @@
 enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS = 3, PROC_SELF = 4,
                  PROC_FD_DIR = 5, PROC_FD_LINK = 6, PROC_PID_STAT = 7, PROC_CMDLINE = 8,
                  /* The system files (P4), under pid 0. */
-                 PROC_MEMINFO = 9, PROC_STAT = 10, PROC_LOADAVG = 11, PROC_UPTIME = 12, PROC_MOUNTS = 13 };
+                 PROC_MEMINFO = 9, PROC_STAT = 10, PROC_LOADAVG = 11, PROC_UPTIME = 12, PROC_MOUNTS = 13,
+                 /* /proc/net (S1): the directory, and its files with the
+                  * file's enum procnet_file where a pid would be. */
+                 PROC_NET_DIR = 14, PROC_NET_FILE = 15 };
 
 /* An fd link carries its handle number above the pid as well. */
 #define PROC_INO(pid, kind) (((uint64_t)(pid) << 8) | (uint64_t)(kind))
@@ -54,7 +58,9 @@ enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS =
 
 /* Rendered text is at most this, one page: a status block is a few
  * hundred bytes, /proc/stat a line per CPU, /proc/mounts a line per
- * mount (a listing longer than this ends at the last whole line). */
+ * mount (a listing longer than this ends at the last whole line). A
+ * /proc/net file is the exception: a line per socket, up to
+ * PROCNET_TEXT_MAX. */
 #define PROC_TEXT_MAX PAGE_SIZE
 
 static const struct vnode_ops proc_root_ops;
@@ -373,16 +379,17 @@ static int render(uint64_t ino, char *out, size_t n)
  */
 struct proc_text {
     size_t len;
-    char text[PROC_TEXT_MAX];
+    char text[];   /* PROC_TEXT_MAX, or PROCNET_TEXT_MAX for a /proc/net file */
 };
 
 static int proc_readpage(struct vnode *vn, uint64_t index, void *buf)
 {
     memset(buf, 0, PAGE_SIZE);
     const struct proc_text *t = vn->fs_priv;
-    if (index != 0 || t == NULL)
-        return 0;   /* nothing here is longer than a page */
-    memcpy(buf, t->text, t->len < PAGE_SIZE ? t->len : PAGE_SIZE);
+    if (t == NULL || index * PAGE_SIZE >= t->len)
+        return 0;
+    size_t off = (size_t)index * PAGE_SIZE, n = t->len - off;
+    memcpy(buf, t->text + off, n < PAGE_SIZE ? n : PAGE_SIZE);
     return 0;
 }
 
@@ -400,16 +407,17 @@ static const struct vnode_ops proc_file_ops = {
 /* Instantiate one of a process's files, rendering it now. */
 static int proc_file(struct mount *mnt, pid_t pid, enum proc_kind kind, struct vnode **out)
 {
-    struct proc_text *t = kmalloc(sizeof(*t), 0);
+    size_t cap = kind == PROC_NET_FILE ? PROCNET_TEXT_MAX : PROC_TEXT_MAX;
+    struct proc_text *t = kmalloc(sizeof(*t) + cap, 0);
     if (t == NULL)
         return -ENOMEM;
     uint64_t ino = PROC_INO(pid, kind);
-    int len = render(ino, t->text, sizeof(t->text));
+    int len = kind == PROC_NET_FILE ? procnet_render((enum procnet_file)pid, t->text, cap) : render(ino, t->text, cap);
     if (len < 0) {
         kfree(t);
         return len;
     }
-    t->len = (size_t)len < sizeof(t->text) ? (size_t)len : sizeof(t->text) - 1;   /* ksnprintf returns what it wanted */
+    t->len = (size_t)len < cap ? (size_t)len : cap - 1;   /* ksnprintf returns what it wanted */
     struct vnode *vn = proc_vnode(mnt, ino, VNODE_REG, 0444, &proc_file_ops);
     if (vn == NULL) {
         kfree(t);
@@ -646,6 +654,51 @@ static int proc_pid_dir(struct mount *mnt, pid_t pid, struct vnode **out)
     return 0;
 }
 
+/* --- /proc/net (S1) --------------------------------------------------------
+ *
+ * The network stack's tables in Linux's formats, what BusyBox's ifconfig,
+ * route, netstat and arp read (P4's system files, a directory of them).
+ * The stack renders them (kernel/net/procnet.h); this is only their
+ * paths, rendered at the open like every other file here (P3).
+ */
+static int proc_net_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
+{
+    if (len == 2 && name[0] == '.' && name[1] == '.') {
+        vnode_get(dir->mnt->root);
+        *out = dir->mnt->root;
+        return 0;
+    }
+    for (unsigned i = 0; i < PROCNET_COUNT; i++)
+        if (len == strlen(procnet_names[i]) && memcmp(name, procnet_names[i], len) == 0)
+            return proc_file(dir->mnt, (pid_t)i, PROC_NET_FILE, out);
+    return -ENOENT;
+}
+
+static int proc_net_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg)
+{
+    while (*pos < 2 + PROCNET_COUNT) {
+        uint64_t i = *pos;
+        int rc;
+        if (i == 0)
+            rc = cb(arg, ".", 1, dir->ino, VNODE_DIR);
+        else if (i == 1)
+            rc = cb(arg, "..", 2, PROC_ROOT_INO, VNODE_DIR);
+        else
+            rc = cb(arg, procnet_names[i - 2], strlen(procnet_names[i - 2]), PROC_INO(i - 2, PROC_NET_FILE), VNODE_REG);
+        if (rc)
+            return rc;
+        (*pos)++;
+    }
+    return 0;
+}
+
+static const struct vnode_ops proc_net_dir_ops = {
+    .lookup = proc_net_lookup,
+    .readdir = proc_net_readdir,
+};
+
+#define PROC_NET_INO PROC_INO(0, PROC_NET_DIR)
+
 /* --- /proc itself ----------------------------------------------------------- */
 
 /* A decimal pid, or -1. Strict: "01" and "1x" are not pids, and a name
@@ -708,6 +761,13 @@ static int proc_root_lookup(struct vnode *dir, const char *name, size_t len, str
     for (size_t i = 0; i < NR_SYSTEM_FILES; i++)
         if (len == g_system_files[i].len && memcmp(name, g_system_files[i].name, len) == 0)
             return proc_file(dir->mnt, 0, g_system_files[i].kind, out);
+    if (len == 3 && memcmp(name, "net", 3) == 0) {
+        struct vnode *vn = proc_vnode(dir->mnt, PROC_NET_INO, VNODE_DIR, 0555, &proc_net_dir_ops);
+        if (vn == NULL)
+            return -ENOMEM;
+        *out = vn;
+        return 0;
+    }
     if (len == 4 && memcmp(name, "self", 4) == 0) {
         struct process *me = process_current();
         if (me == NULL)
@@ -748,13 +808,14 @@ static int proc_root_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb,
     static const struct {
         const char *name;
         size_t len;
-    } fixed[] = { { ".", 1 }, { "..", 2 }, { "self", 4 } };
+    } fixed[] = { { ".", 1 }, { "..", 2 }, { "self", 4 }, { "net", 3 } };
     const uint64_t nr_fixed = sizeof(fixed) / sizeof(fixed[0]);
 
     while (*pos < nr_fixed) {
         uint64_t i = *pos;
-        int rc = i == 2 ? cb(arg, fixed[i].name, fixed[i].len, PROC_SELF_INO, VNODE_LNK)
-                        : cb(arg, fixed[i].name, fixed[i].len, dir->ino, VNODE_DIR);
+        int rc = i == 2   ? cb(arg, fixed[i].name, fixed[i].len, PROC_SELF_INO, VNODE_LNK)
+                 : i == 3 ? cb(arg, fixed[i].name, fixed[i].len, PROC_NET_INO, VNODE_DIR)
+                          : cb(arg, fixed[i].name, fixed[i].len, dir->ino, VNODE_DIR);
         if (rc)
             return rc;
         (*pos)++;

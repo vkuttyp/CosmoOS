@@ -7642,8 +7642,17 @@ static size_t netctl_leases_off(const uint8_t *buf, unsigned pf_rules)
     return off + sizeof(lh) + (size_t)lh.count * sizeof(struct cosmo_netctl_flow);
 }
 
-/* The byte length the whole snapshot should have: the four sections, the
- * flow and lease sections' counts read from their own headers. */
+/* Where the interface section (version 8) starts: after the lease section. */
+static size_t netctl_ifs_off(const uint8_t *buf, unsigned pf_rules)
+{
+    size_t off = netctl_leases_off(buf, pf_rules);
+    struct cosmo_netctl_lease_list ll;
+    memcpy(&ll, buf + off, sizeof(ll));
+    return off + sizeof(ll) + (size_t)ll.count * sizeof(struct cosmo_netctl_lease);
+}
+
+/* The byte length the whole snapshot should have: the seven sections, each
+ * section's count read from its own header, each header's version checked. */
 static int64_t netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules)
 {
     size_t off = netctl_leases_off(buf, pf_rules);
@@ -7651,7 +7660,19 @@ static int64_t netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules)
     memcpy(&ll, buf + off, sizeof(ll));
     if (ll.version != COSMO_NETCTL_VERSION)
         return -1;
-    return (int64_t)(off + sizeof(ll) + (size_t)ll.count * sizeof(struct cosmo_netctl_lease));
+    off = netctl_ifs_off(buf, pf_rules);
+    struct cosmo_netctl_if_list ih;
+    memcpy(&ih, buf + off, sizeof(ih));
+    off += sizeof(ih) + (size_t)ih.count * sizeof(struct cosmo_netctl_if);
+    struct cosmo_netctl_route_list rh;
+    memcpy(&rh, buf + off, sizeof(rh));
+    off += sizeof(rh) + (size_t)rh.count * sizeof(struct cosmo_netctl_route);
+    struct cosmo_netctl_neigh_list nh;
+    memcpy(&nh, buf + off, sizeof(nh));
+    off += sizeof(nh) + (size_t)nh.count * sizeof(struct cosmo_netctl_neigh);
+    if (ih.version != COSMO_NETCTL_VERSION || rh.version != COSMO_NETCTL_VERSION || nh.version != COSMO_NETCTL_VERSION)
+        return -1;
+    return (int64_t)off;
 }
 
 bool selftest_net_tapctl(const char **reason)
@@ -7697,6 +7718,21 @@ bool selftest_net_tapctl(const char **reason)
     struct cosmo_netctl_rule *r0 = (struct cosmo_netctl_rule *)(rbuf + sizeof(*hdr));
     CHECK(r0->proto == COSMO_NETCTL_PROTO_TCP && r0->host_port == 8080 &&
           r0->guest_port == 80 && r0->guest_addr == guest);
+    /* Version 8: the interface section lists lo first, index 1, loopback
+     * and up, at 127.0.0.1/8 -- registered at net_init, before anything a
+     * test adds. */
+    {
+        size_t io = netctl_ifs_off(rbuf, 1);
+        struct cosmo_netctl_if_list ih;
+        memcpy(&ih, rbuf + io, sizeof(ih));
+        CHECK(ih.count >= 1);
+        struct cosmo_netctl_if lo;
+        memcpy(&lo, rbuf + io + sizeof(ih), sizeof(lo));
+        CHECK(strcmp(lo.name, "lo") == 0 && lo.index == 1 &&
+              (lo.flags & (COSMO_NETCTL_IF_LOOPBACK | COSMO_NETCTL_IF_UP)) ==
+                  (COSMO_NETCTL_IF_LOOPBACK | COSMO_NETCTL_IF_UP) &&
+              lo.addr == INADDR_LOOPBACK_N && lo.mask == htonl(0xff000000u));
+    }
 
     /* (3) a client SYN to the host port is DNAT'd to the guest (the rule took
      * effect through the device). */

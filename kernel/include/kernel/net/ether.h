@@ -50,6 +50,18 @@ void arp_flush(struct netif *nif);
 void arp_delete(const struct netif *nif, uint32_t ip);
 /* Test hook: run the ageing pass as if `now_ns` had passed. */
 void arp_age(uint64_t now_ns);
+/* One entry as arp_list copies it (/proc/net/arp, netctl's neighbour
+ * section). `complete`: the MAC is known (an incomplete entry is a
+ * resolution in progress, its MAC zero). */
+struct arp_info {
+    uint32_t ip;                   /* network byte order */
+    uint8_t mac[ETH_ALEN];
+    bool complete;
+    char ifname[8];
+};
+/* Every entry in table order; writes at most `max` and returns how many
+ * there are (at most ARP_TABLE_SIZE). Any context. */
+unsigned arp_list(struct arp_info *out, unsigned max);
 struct arp_stats {
     uint64_t requests_sent, replies_sent, requests_rcvd, replies_rcvd, entries, pending_dropped, timeouts;
     uint64_t unsolicited;   /* replies that answered no request of ours */

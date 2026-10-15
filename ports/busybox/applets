@@ -75,3 +75,11 @@ ping
 # powers off (PSCI SYSTEM_OFF on AArch64). `-f` calls reboot(2), which the
 # Linux personality does not have.
 poweroff
+# Shell completeness S1: network inspection over the interface ioctls and
+# /proc/net (docs/compat/linux/design.md, "Interface ioctls"). BusyBox's
+# ip speaks only netlink, which the kernel lacks; /sbin/ip is native.
+ifconfig
+route
+netstat
+arp
+hostname

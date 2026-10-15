@@ -259,6 +259,21 @@ struct tcp_stats {
                                * with data unacknowledged, to its fire: what senders spent waiting on it */
 };
 void tcp_get_stats(struct tcp_stats *out);
+
+/* One connection or listener as tcp_list copies it (/proc/net/tcp and
+ * tcp6). A statistic: the table lock is held, never a pcb's (the order is
+ * pcb, then table), so the queue lengths are relaxed reads of fields a
+ * pcb's lock guards, each a whole value. The remote end is read only
+ * once the state is past CLOSED (acquire), after which connect never
+ * writes it again; a CLOSED pcb is listed with its remote end zero. */
+struct tcp_sock_info {
+    struct netaddr local, remote;
+    enum tcp_state state;
+    uint32_t txq, rxq;   /* bytes not yet acknowledged, bytes not yet read; a listener's backlog and queued children */
+};
+/* Every pcb in the table (bound, listening or connected, TIME_WAIT
+ * included); writes at most `max` and returns how many there are. */
+unsigned tcp_list(struct tcp_sock_info *out, unsigned max);
 #if CONFIG_SELFTEST
 void tcp_test_reset_rto_backoff_max(void);   /* net-bench: the maximum per round */
 #endif

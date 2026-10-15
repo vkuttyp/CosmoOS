@@ -94,6 +94,29 @@ struct netif *netif_default(void);            /* the non-loopback interface that
 struct netif *netif_default_ipv4(void);
 struct netif *netif_connected(uint32_t dst);  /* the up interface whose subnet holds dst, longest prefix; referenced or NULL */
 struct netif *netif_loopback(void);
+
+/* One interface as the listings copy it (/proc/net, the Linux interface
+ * ioctls, netctl's interface section; design.md, "Inspecting the
+ * stack"): a copy, so a reader formats it with no lock held. The IPv4
+ * triple is read as the packet paths read it (netif_set_ipv4): an
+ * address with a mask and gateway that went with an address. */
+struct netif_info {
+    char name[8];
+    unsigned index;
+    unsigned flags;                     /* NETIF_* */
+    uint32_t mtu;
+    uint8_t mac[6];
+    uint32_t addr, mask, gateway;       /* network byte order; 0 = unset */
+    struct in6_addr ip6_ll;             /* the link-local address; lo's is ::1 */
+    struct netif_stats stats;           /* counters, each a whole value, not one instant together */
+};
+/* Every registered interface in registration order (lo first); writes at
+ * most `max` and returns how many there are. Any context. */
+unsigned netif_list(struct netif_info *out, unsigned max);
+/* One interface by name or by index; false when there is none. */
+bool netif_info_by_name(const char *name, struct netif_info *out);
+bool netif_info_by_index(unsigned index, struct netif_info *out);
+
 static inline void netif_get(struct netif *nif) { kobject_get(&nif->obj); }
 static inline void netif_put(struct netif *nif) { kobject_put(&nif->obj); }
 void netif_set_ipv4(struct netif *nif, uint32_t addr, uint32_t mask, uint32_t gateway);

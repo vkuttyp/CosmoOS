@@ -1009,6 +1009,60 @@ static void netif_dump_cpus(void)
     }
 }
 
+/* g_netif_lock held. The fields a listing shows, read as their writers
+ * publish them: the flag word and the address with acquire loads, the
+ * counters relaxed (the paths that bump them are atomic). */
+static void info_of(const struct netif *n, struct netif_info *o)
+{
+    memset(o, 0, sizeof(*o));
+    strlcpy(o->name, n->name, sizeof(o->name));
+    o->index = n->index;
+    o->flags = __atomic_load_n(&n->flags, __ATOMIC_ACQUIRE);
+    o->mtu = n->mtu;
+    memcpy(o->mac, n->mac, sizeof(o->mac));
+    o->addr = __atomic_load_n(&n->ip4.addr, __ATOMIC_ACQUIRE);
+    o->mask = __atomic_load_n(&n->ip4.mask, __ATOMIC_ACQUIRE);
+    o->gateway = __atomic_load_n(&n->ip4.gateway, __ATOMIC_ACQUIRE);
+    o->ip6_ll = n->ip6_ll;
+#define LOAD(f) o->stats.f = __atomic_load_n(&n->stats.f, __ATOMIC_RELAXED)
+    LOAD(rx_packets); LOAD(rx_bytes); LOAD(rx_dropped); LOAD(rx_errors);
+    LOAD(tx_packets); LOAD(tx_bytes); LOAD(tx_dropped); LOAD(tx_errors);
+#undef LOAD
+}
+
+unsigned netif_list(struct netif_info *out, unsigned max)
+{
+    unsigned count = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
+    struct netif *n;
+    list_for_each_entry(n, &g_netifs, link) {
+        if (count < max)
+            info_of(n, &out[count]);
+        count++;
+    }
+    spin_unlock_irqrestore(&g_netif_lock, s);
+    return count;
+}
+
+static bool info_find(const char *name, unsigned index, struct netif_info *out)
+{
+    bool found = false;
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
+    struct netif *n;
+    list_for_each_entry(n, &g_netifs, link) {
+        if (name != NULL ? strcmp(n->name, name) == 0 : n->index == index) {
+            info_of(n, out);
+            found = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_netif_lock, s);
+    return found;
+}
+
+bool netif_info_by_name(const char *name, struct netif_info *out) { return info_find(name, 0, out); }
+bool netif_info_by_index(unsigned index, struct netif_info *out) { return info_find(NULL, index, out); }
+
 void netif_dump(void)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);

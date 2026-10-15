@@ -1,6 +1,7 @@
 /* netcfg - the machine's DHCP leases, and /etc/resolv.conf from them
  *
- *   netcfg [--wait SECONDS] [--resolv PATH]   write PATH (/etc/resolv.conf)
+ *   netcfg [--wait SECONDS] [--resolv PATH] [--hostname PATH]
+ *                                            write PATH (/etc/resolv.conf)
  *   netcfg show                              print each lease
  *
  * The kernel's DHCP client (docs/kernel-services/network/design.md, "The
@@ -13,6 +14,12 @@
  * resolver reads that file, and uses the first three. The file is written
  * beside the target and renamed over it, so a reader never sees half of
  * it. No lease with a DNS server leaves the file as it was (exit 1).
+ *
+ * A lease that names the machine (DHCP option 12, netctl version 8; shell
+ * completeness S1) also names it here: the first held lease's name is
+ * written to /etc/hostname, the same way, and set with sethostname.
+ * /etc/rc applies /etc/hostname at the next boot before netcfg runs, so a
+ * name a server gave once is kept by a boot whose server gives none.
  */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -113,14 +120,62 @@ static void show(const struct cosmo_netctl_lease *l)
         }
         if (l->dns_count == 0)
             printf(" none");
+        if (l->hostname[0] != '\0')
+            printf(" hostname %.63s", l->hostname);
     }
     printf("\n");
+}
+
+/* Write `len` bytes to `path` beside it and rename over it, so a reader
+ * never sees half a file. 0, or -1 with a message. */
+static int write_whole(const char *path, const char *text, size_t len)
+{
+    char tmp[256];
+    if ((size_t)snprintf(tmp, sizeof(tmp), "%s.netcfg", path) >= sizeof(tmp)) {
+        fprintf(stderr, "netcfg: %s: the path is too long\n", path);
+        return -1;
+    }
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, text, len) != (ssize_t)len || close(fd) < 0 || rename(tmp, path) < 0) {
+        fprintf(stderr, "netcfg: writing %s: %s\n", path, strerror(errno));
+        if (fd >= 0)
+            unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+/* The first held lease's host name into `path` and the kernel's uts name.
+ * 0 when there is none to set or it was set; 1 on a failure. */
+static int apply_hostname(const struct cosmo_netctl_lease *l, int n, const char *path)
+{
+    for (int i = 0; i < n; i++) {
+        if (!held(&l[i]) || l[i].hostname[0] == '\0')
+            continue;
+        char name[sizeof(l[i].hostname)];
+        memcpy(name, l[i].hostname, sizeof(name));
+        name[sizeof(name) - 1] = '\0';
+        size_t len = strlen(name);
+        char text[sizeof(name) + 1];
+        memcpy(text, name, len);
+        text[len] = '\n';
+        if (write_whole(path, text, len + 1) < 0)
+            return 1;
+        if (sethostname(name, len) < 0) {
+            fprintf(stderr, "netcfg: sethostname %s: %s\n", name, strerror(errno));
+            return 1;
+        }
+        printf("netcfg: %s: %s (from %s's lease)\n", path, name, l[i].ifname);
+        return 0;
+    }
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
     unsigned wait_s = 10;
     const char *path = "/etc/resolv.conf";
+    const char *host_path = "/etc/hostname";
     int show_only = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "show") == 0)
@@ -136,8 +191,10 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argv[i], "--resolv") == 0 && i + 1 < argc)
             path = argv[++i];
+        else if (strcmp(argv[i], "--hostname") == 0 && i + 1 < argc)
+            host_path = argv[++i];
         else {
-            fprintf(stderr, "usage: netcfg [show] [--wait SECONDS] [--resolv PATH]\n");
+            fprintf(stderr, "usage: netcfg [show] [--wait SECONDS] [--resolv PATH] [--hostname PATH]\n");
             return 2;
         }
     }
@@ -168,6 +225,8 @@ int main(int argc, char **argv)
         usleep(100000);
     }
 
+    int host_rc = apply_hostname(l, n, host_path);
+
     char text[512];
     size_t len = (size_t)snprintf(text, sizeof(text), "# written by netcfg from the DHCP lease\n");
     unsigned servers = 0;
@@ -192,19 +251,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "netcfg: no lease names a DNS server; %s left as it was\n", path);
         return 1;
     }
-
-    char tmp[256];
-    if ((size_t)snprintf(tmp, sizeof(tmp), "%s.netcfg", path) >= sizeof(tmp)) {
-        fprintf(stderr, "netcfg: %s: the path is too long\n", path);
+    if (write_whole(path, text, len) < 0)
         return 1;
-    }
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0 || write(fd, text, len) != (ssize_t)len || close(fd) < 0 || rename(tmp, path) < 0) {
-        fprintf(stderr, "netcfg: writing %s: %s\n", path, strerror(errno));
-        if (fd >= 0)
-            unlink(tmp);
-        return 1;
-    }
     printf("netcfg: %s: %u nameserver(s)\n", path, servers);
-    return 0;
+    return host_rc;
 }

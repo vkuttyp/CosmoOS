@@ -20,7 +20,9 @@ HEAD TAIL WC SORT UNIQ CUT TR GREP SED AWK FIND XARGS TAR GZIP GUNZIP DIFF BASEN
 READLINK UNAME ID SHA256SUM WHICH BUSYBOX
 WGET NSLOOKUP STTY TTY
 VI LESS TOP FREE DF DU UPTIME WHOAMI CLEAR MD5SUM DD CMP HEXDUMP
-PING POWEROFF""".split())   # M4 (decision 5); v1.0.2's everyday commands; ping over raw ICMP sockets; poweroff
+PING POWEROFF
+IFCONFIG ROUTE NETSTAT ARP HOSTNAME""".split())   # M4 (decision 5); v1.0.2's everyday commands; ping over raw ICMP
+                                                 # sockets; poweroff; shell completeness S1's network inspection
 
 FORCE = {
     "STATIC": "y",                 # decision 6: a static binary
@@ -48,6 +50,9 @@ FORCE = {
     # AArch64 does not, and every applet with a G struct read it as NULL
     # (faults at 0x4). libbb.h names this switch for such toolchains.
     "EXTRA_CFLAGS": '"-DBB_GLOBAL_CONST="',
+    # ifconfig's SLIP options include <linux/if_slip.h>, a kernel header
+    # the musl sysroot does not carry; there is no SLIP line discipline.
+    "FEATURE_IFCONFIG_SLIP": "n",
 }
 
 

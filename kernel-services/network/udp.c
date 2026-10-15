@@ -324,3 +324,22 @@ void udp_get_stats(struct udp_stats *out)
 {
     *out = g_stats;
 }
+
+unsigned udp_list(struct udp_sock_info *out, unsigned max)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    struct udp_pcb *p;
+    list_for_each_entry(p, &g_pcbs, link) {
+        if (n < max) {
+            struct udp_sock_info *o = &out[n];
+            o->local = p->local;
+            o->remote = p->remote;
+            o->rxq = __atomic_load_n(&p->rxq.len, __ATOMIC_RELAXED);
+            o->drops = p->rx_dropped;   /* bumped under this lock (udp_input) */
+        }
+        n++;
+    }
+    spin_unlock_irqrestore(&g_lock, s);
+    return n;
+}

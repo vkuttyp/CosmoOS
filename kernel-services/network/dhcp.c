@@ -53,6 +53,7 @@ struct dhcp_client {
     uint32_t addr, mask, router;
     uint32_t dns[DHCP_MAX_DNS];
     uint8_t ndns;
+    char hostname[DHCP_HOSTNAME_MAX];   /* option 12 as the ACK named it, or empty */
     uint32_t lease_s, t1_s, t2_s;
     uint64_t t1_at, t2_at, end_at; /* absolute, clock_now_ns */
     struct timer timer;
@@ -159,7 +160,7 @@ static void dhcp_send(struct netif *nif, const struct dhcp_tx *tx)
         o = put_opt(o, OPT_REQIP, 4, &tx->reqip);
     if (tx->server_opt)
         o = put_opt(o, OPT_SERVERID, 4, &tx->server_opt);
-    static const uint8_t params[] = { OPT_SUBNET, OPT_ROUTER, OPT_DNS, OPT_LEASE, OPT_T1, OPT_T2 };
+    static const uint8_t params[] = { OPT_SUBNET, OPT_ROUTER, OPT_DNS, OPT_HOSTNAME, OPT_LEASE, OPT_T1, OPT_T2 };
     o = put_opt(o, OPT_PARAMS, sizeof(params), params);
     *o++ = OPT_END;
     while ((o - dh) < 300)          /* BOOTP's minimum message, which some relays still expect */
@@ -255,6 +256,7 @@ static void lose_lease(struct dhcp_client *c)
 {
     c->addr = c->mask = c->router = 0;
     c->ndns = 0;
+    c->hostname[0] = '\0';
     c->lease_s = c->t1_s = c->t2_s = 0;
     netif_set_ipv4(c->nif, 0, 0, 0);
     arp_flush(c->nif);
@@ -394,6 +396,28 @@ static uint32_t class_mask(uint32_t addr)
     return htonl(a < 0x80000000u ? 0xff000000u : a < 0xc0000000u ? 0xffff0000u : 0xffffff00u);
 }
 
+/* Option 12, kept only when it is a name sethostname and a file can take
+ * as it is: 1-63 letters, digits, '-' and '.', no NUL (RFC 1123's host
+ * name characters; RFC 2132 allows a trailing NUL, which is dropped).
+ * Anything else is ignored: the name is written to /etc/hostname and
+ * shown at prompts, and a server is not trusted with what lands there. */
+static void take_hostname(struct dhcp_client *c, const uint8_t *v, uint8_t l)
+{
+    if (l > 0 && v[l - 1] == '\0')
+        l--;
+    if (l == 0 || l >= DHCP_HOSTNAME_MAX)
+        return;
+    for (unsigned i = 0; i < l; i++) {
+        uint8_t ch = v[i];
+        bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' ||
+                  ch == '.';
+        if (!ok)
+            return;
+    }
+    memcpy(c->hostname, v, l);
+    c->hostname[l] = '\0';
+}
+
 /* An ACK: take the lease (under c->lock). False when it is unusable. */
 static bool bind_lease(struct dhcp_client *c, const uint8_t *dh, const uint8_t *opts, uint32_t optlen, uint64_t now)
 {
@@ -416,6 +440,9 @@ static bool bind_lease(struct dhcp_client *c, const uint8_t *dh, const uint8_t *
         for (unsigned i = 0; i + 4 <= l && ndns < DHCP_MAX_DNS; i += 4)
             memcpy(&c->dns[ndns++], v + i, 4);
     c->ndns = ndns;
+    c->hostname[0] = '\0';
+    if ((v = dhcp_opt(opts, optlen, OPT_HOSTNAME, &l)) != NULL)
+        take_hostname(c, v, l);
     /* T1 and T2: the server's when they are ordered (T1 < T2 < lease),
      * else the RFC's 0.5 and 0.875 of the lease -- in nanoseconds, so a
      * lease of a second or two still has a T1 before its T2. 0xffffffff
@@ -641,6 +668,7 @@ int dhcp_client_start(struct netif *nif)
     c->offer_addr = c->server = c->addr = c->mask = c->router = 0;
     memset(c->dns, 0, sizeof(c->dns));
     c->ndns = 0;
+    c->hostname[0] = '\0';
     c->lease_s = c->t1_s = c->t2_s = 0;
     c->t1_at = c->t2_at = c->end_at = 0;
     timer_setup(&c->timer, dhcp_timer, c);
@@ -723,6 +751,7 @@ unsigned dhcp_lease_list(struct dhcp_lease_info *out, unsigned max)
             o->lease_s = c->lease_s;
             o->t1_s = c->t1_s;
             o->t2_s = c->t2_s;
+            strlcpy(o->hostname, c->hostname, sizeof(o->hostname));
 /* 0xffffffff is an infinite lease; a finite time beyond 49.7 days
  * saturates one below it (COSMO_NETCTL_LEASE_MS_MAX). */
 #define MS_TO(at) ((at) == UINT64_MAX ? UINT32_MAX : (at) <= now ? 0u \

@@ -5,6 +5,7 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/net/dhcp.h>
 #include <kernel/net/cksum.h>
@@ -149,6 +150,40 @@ struct netif *ipv4_route(uint32_t dst)
     if (nif != NULL)
         return nif;
     return netif_default_ipv4();
+}
+
+unsigned ipv4_route_list(struct ipv4_route_info *out, unsigned max)
+{
+    const unsigned cap = IPV4_ROUTES_MAX - 1;
+    struct netif_info *ifs = kmalloc(cap * sizeof(*ifs), 0);
+    if (ifs == NULL)
+        return 0;
+    unsigned nif = netif_list(ifs, cap);
+    if (nif > cap)
+        nif = cap;
+    unsigned n = 0;
+    struct netif *def = netif_default_ipv4();
+    if (def != NULL) {
+        for (unsigned i = 0; i < nif && n < max; i++) {
+            if (ifs[i].index != def->index || ifs[i].addr == 0 || ifs[i].gateway == 0)
+                continue;   /* the copy is the one listed; a default without a gateway routes nothing off-link */
+            out[n++] = (struct ipv4_route_info){ .dst = 0, .mask = 0, .gateway = ifs[i].gateway, .src = ifs[i].addr,
+                                                 .flags = IPV4_RTF_UP | IPV4_RTF_GATEWAY };
+            strlcpy(out[n - 1].ifname, ifs[i].name, sizeof(out[n - 1].ifname));
+        }
+        netif_put(def);
+    }
+    for (unsigned i = 0; i < nif && n < max; i++) {
+        const struct netif_info *f = &ifs[i];
+        if ((f->flags & NETIF_LOOPBACK) || !(f->flags & NETIF_UP) || f->addr == 0 || f->mask == 0)
+            continue;   /* netif_connected's rule */
+        out[n] = (struct ipv4_route_info){ .dst = f->addr & f->mask, .mask = f->mask, .gateway = 0,
+                                           .src = f->addr, .flags = IPV4_RTF_UP };
+        strlcpy(out[n].ifname, f->name, sizeof(out[n].ifname));
+        n++;
+    }
+    kfree(ifs);
+    return n;
 }
 
 uint32_t ipv4_source_for(uint32_t dst)

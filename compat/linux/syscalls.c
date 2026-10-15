@@ -1614,7 +1614,8 @@ static int64_t lx_fcntl(struct syscall_args *a)
 }
 
 /*
- * `ioctl`, for what a terminal needs and nothing else.
+ * `ioctl`, for what a terminal needs, and on a socket the interface
+ * requests (netioctl.c, shell completeness S1).
  * Until the terminal-modes unit every request answered -ENOTTY, and the
  * cost was not fidelity but correctness: a libc told the console is not a
  * terminal fully buffers its output, so a hosted program's prompt does not
@@ -1769,7 +1770,9 @@ static int64_t lx_ioctl(struct syscall_args *a)
         return -EBADF;
     struct tty *t = tty_of_open(obj);   /* the console object, an open /dev/tty, a pty's master or slave */
     struct file *f = file_from_kobject(obj);
-    int64_t rc = t != NULL ? lx_ioctl_tty(t, f, req, a->a[2]) : -ENOTTY;
+    int64_t rc = t != NULL ? lx_ioctl_tty(t, f, req, a->a[2])
+                 : socket_from_kobject(obj) != NULL ? lx_ioctl_net(req, a->a[2])   /* netioctl.c */
+                                                    : -ENOTTY;
     if (t != NULL)
         tty_put(t);
     kobject_put(obj);
@@ -2662,6 +2665,25 @@ static int64_t lx_uname(struct syscall_args *a)
     strlcpy(u.machine, LX_MACHINE, sizeof(u.machine));
     strlcpy(u.domainname, "(none)", sizeof(u.domainname));
     return copy_to_user(a->a[0], &u, sizeof(u)) ? -EFAULT : 0;
+}
+
+/* sethostname (shell completeness S1): the caller's uts namespace's name,
+ * as the native call sets it and under its rule (PRIV_SYS_ADMIN: a name is
+ * not a secret, but who can rename the machine can make another's logs say
+ * what it likes). Linux has no gethostname call on these architectures:
+ * musl reads the name from uname's nodename. Linux takes a name of up to
+ * 64 bytes (__NEW_UTS_LEN); this kernel keeps 63 and a NUL. */
+static int64_t lx_sethostname(struct syscall_args *a)
+{
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
+        return -EPERM;
+    size_t len = (size_t)a->a[1];
+    if (len >= COSMO_HOST_NAME_MAX)
+        return -EINVAL;
+    char buf[COSMO_HOST_NAME_MAX];
+    if (copy_from_user(buf, a->a[0], len))
+        return -EFAULT;
+    return utsns_sethostname(utsns_current(), buf, len);
 }
 
 static int64_t lx_futex(struct syscall_args *a)
@@ -4079,6 +4101,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_wait4] = lx_wait4,
     [LX_kill] = lx_kill,
     [LX_uname] = lx_uname,
+    [LX_sethostname] = lx_sethostname,
     [LX_fcntl] = lx_fcntl,
     [LX_fsync] = lx_fsync,
     [LX_fdatasync] = lx_fsync,

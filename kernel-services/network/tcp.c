@@ -2429,6 +2429,37 @@ void tcp_test_reset_rto_backoff_max(void)
 }
 #endif
 
+unsigned tcp_list(struct tcp_sock_info *out, unsigned max)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_table_lock);
+    for (unsigned b = 0; b < TCP_HASH_SIZE; b++) {
+        struct tcp_pcb *p;
+        list_for_each_entry(p, &g_hash[b], hash_link) {
+            if (n < max) {
+                struct tcp_sock_info *o = &out[n];
+                memset(o, 0, sizeof(*o));
+                o->state = state_of(p);
+                o->local = p->local;   /* written under this lock (table_bind) */
+                if (o->state == TCP_CLOSED)
+                    o->remote.family = p->local.family;
+                else
+                    o->remote = p->remote;
+                if (o->state == TCP_LISTEN) {
+                    o->rxq = __atomic_load_n(&p->nr_queued, __ATOMIC_RELAXED);
+                    o->txq = __atomic_load_n(&p->backlog, __ATOMIC_RELAXED);
+                } else {
+                    o->rxq = __atomic_load_n(&p->rcvbuf.len, __ATOMIC_RELAXED);
+                    o->txq = __atomic_load_n(&p->sndbuf.len, __ATOMIC_RELAXED);
+                }
+            }
+            n++;
+        }
+    }
+    spin_unlock_irqrestore(&g_table_lock, s);
+    return n;
+}
+
 void tcp_get_stats(struct tcp_stats *out)
 {
     *out = g_stats;

@@ -57,4 +57,14 @@ struct udp_stats {
 };
 void udp_get_stats(struct udp_stats *out);
 
+/* One bound socket as udp_list copies it (/proc/net/udp and udp6),
+ * under the list lock, as lookup reads the same fields. */
+struct udp_sock_info {
+    struct netaddr local, remote;  /* remote port 0: not connected */
+    unsigned rxq;                  /* datagrams queued (Linux counts bytes) */
+    uint64_t drops;
+};
+/* Every bound pcb; writes at most `max` and returns how many there are. */
+unsigned udp_list(struct udp_sock_info *out, unsigned max);
+
 #endif /* KERNEL_NET_UDP_H */
