@@ -180,7 +180,7 @@ BusyBox's `ip` speaks only netlink (`RTM_GETLINK`/`RTM_GETADDR` over
 deliberate substitute until netlink exists, and S1 records netlink in
 the inventory.
 
-- [ ] **S1 Network inspection.** The Linux personality's interface
+- [x] **S1 Network inspection.** The Linux personality's interface
   ioctls: `SIOCGIFCONF`, and the getters `SIOCGIFNAME`, `SIOCGIFINDEX`,
   `SIOCGIFFLAGS`, `SIOCGIFADDR`, `SIOCGIFNETMASK`, `SIOCGIFBRDADDR`,
   `SIOCGIFHWADDR` and `SIOCGIFMTU`, with their `SIOCS*` setters under
@@ -202,7 +202,11 @@ the inventory.
   work as root and fail with `EPERM` when `PRIV_NET` is dropped; and each
   other setter is exercised once as root (an address and netmask set and
   read back, a broadcast and an MTU accepted or refused as documented)
-  and once with `PRIV_NET` dropped (`EPERM`).
+  and once with `PRIV_NET` dropped (`EPERM`). Done 2026-10-15:
+  `test-net-login`'s stage g in CI (job `net-login`, both
+  architectures); on Parallels Desktop 27.0.3 the installed system showed
+  the same and `ifconfig eth0 down`/`up` worked
+  ([report](audit/2026-10-15-network-inspection-report.md)).
 - [ ] **S2 Applets.** `more`, `nl`, `od`, `strings`, `rev`, `tac`, `yes`,
   `cal`, `time`, `timeout`, `watch`, `nohup`, `killall`, `pgrep`,
   `pkill`, `pidof`, `install`, `realpath`, `split`, `fold`, `paste`,
