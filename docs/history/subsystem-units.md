@@ -2986,3 +2986,12 @@ See the [history index](README.md).
   x86-64; fbcon's drawing loops are aligned to 512 (they were inside a
   page by placement only).
   Report: `docs/audit/2026-10-14-virtio-gpu-report.md`.
+- **After 1.0: the AArch64 whole-boot timeout is 300 s (2026-10-15).**
+  `BOOT_TIMEOUT` per architecture: 300 s on AArch64, 240 s on x86-64. Over
+  the last 40 CI runs the AArch64 entropy job's 146 boots had a median of
+  212 s, its passing ones at most 235.7 s, and six timed out at 240 s with
+  every self-test passed, all the no-entropy boot, which its self-test time
+  puts at 240-246 s; the runners are of two speeds (about 150 s or 210 s a
+  boot). `test-chaos` keeps 240 s (at most 217.9 s), and the boot probes
+  under `tools/` pass the per-architecture value. The record is
+  `docs/testing/flakes.md`'s entry for the 240 s budget.

@@ -113,7 +113,7 @@ def main():
         harness = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(harness)
         log_path = out / 'boot.log'
-        sys.argv = ['census-wake-ref-probe', '--timeout', '240', '--image', str(out / 'cosmoos.img'),
+        sys.argv = ['census-wake-ref-probe', '--timeout', '300' if args.arch == 'aarch64' else '240', '--image', str(out / 'cosmoos.img'),
                     '--log', str(log_path), '--kernel', str(out / 'kernel/kernel.elf')]
         if args.chaos:
             sys.argv.append('--chaos')

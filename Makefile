@@ -337,8 +337,9 @@ endif
 # added 11 s of self-test work and exhausted the shell's 170 s deadline
 # under the then-default 180 s total. 240 s for this heavier full boot;
 # individual self-test watchdogs and shell signal-latency checks remain.
-# (Ordinary boots on both architectures have 240 s too since BOOT_TIMEOUT,
-# above, so this no longer lengthens anything; it stays explicit.)
+# (Ordinary x86-64 boots have 240 s too since BOOT_TIMEOUT, above, and
+# AArch64's 300 s since 2026-10-15; chaos keeps 240 s on both: its 39
+# AArch64 CI boots over the 40 runs measured then took at most 217.9 s.)
 test-chaos:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
 		SCHED_CHAOS=1 OUT=$(OUT)-chaos image
