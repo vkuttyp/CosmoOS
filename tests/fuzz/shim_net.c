@@ -630,6 +630,32 @@ struct netif *netif_default_ipv4(void)
     return NULL;
 }
 
+/* The listing ipv4_route_list reads (S1): lo, then the fixtures, as the
+ * kernel's registry lists them. */
+unsigned netif_list(struct netif_info *out, unsigned max)
+{
+    unsigned count = 0;
+    for (unsigned i = 0; i <= g_nifs; i++) {
+        const struct netif *n = i == 0 ? &g_lo : &g_ifs[i - 1]->nif;
+        if (count < max) {
+            struct netif_info *o = &out[count];
+            memset(o, 0, sizeof(*o));
+            strlcpy(o->name, n->name, sizeof(o->name));
+            o->index = n->index;
+            o->flags = n->flags;
+            o->mtu = n->mtu;
+            memcpy(o->mac, n->mac, sizeof(o->mac));
+            o->addr = n->ip4.addr;
+            o->mask = n->ip4.mask;
+            o->gateway = n->ip4.gateway;
+            o->ip6_ll = n->ip6_ll;
+            o->stats = n->stats;
+        }
+        count++;
+    }
+    return count;
+}
+
 struct netif *netif_connected(uint32_t dst)
 {
     struct netif *best = NULL;
