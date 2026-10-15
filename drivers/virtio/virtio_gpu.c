@@ -134,8 +134,11 @@ struct vgpu_attach {
  * to entries of 4 MiB, the chunks as allocated. */
 #define VGPU_ENTRY_BYTES PAGE_SIZE
 
+struct vgpu;
+
 /* One frame: a host resource and the guest memory behind it. */
 struct vgpu_frame {
+    struct vgpu *g;                  /* its surface's panic_flush argument is the frame */
     uint32_t resource_id;
     uint32_t width, height, pitch;
     unsigned nchunks;
@@ -175,6 +178,7 @@ struct vgpu {
     bool stopping;
     bool broken;                     /* a command timed out: none is sent again */
     bool panic_dead;                 /* a panic command was not answered: none is sent again */
+    bool panic_busy;                 /* vgpu_panic_flush is running: a line it logs is not flushed */
     struct vgpu_retained *retained;  /* under cmd_lock */
     /* Under cmd_lock, the thread's: a display change not yet followed
      * (retried every VGPU_RESIZE_RETRY_NS), and rows taken from fbcon
@@ -256,6 +260,8 @@ static int vgpu_cmd(struct vgpu *g, size_t req_len, size_t resp_len, uint32_t wa
 /* Scanout 0's size: its enabled rectangle, capped, or the default. */
 static int vgpu_display_size(struct vgpu *g, uint32_t *w, uint32_t *h)
 {
+    if (g->broken)
+        return -EIO;   /* g->cmd.req may still be the device's: not written */
     hdr_init(g->cmd.req, VGPU_CMD_GET_DISPLAY_INFO);
     int rc = vgpu_cmd(g, sizeof(struct vgpu_hdr), sizeof(struct vgpu_display_info), VGPU_RESP_OK_DISPLAY_INFO);
     if (rc)
@@ -276,6 +282,8 @@ static int vgpu_display_size(struct vgpu *g, uint32_t *w, uint32_t *h)
 
 static int vgpu_transfer_flush(struct vgpu *g, struct vgpu_frame *f, uint32_t y0, uint32_t y1)
 {
+    if (g->broken)
+        return -EIO;
     struct vgpu_transfer *t = g->cmd.req;
     hdr_init(t, VGPU_CMD_TRANSFER_TO_HOST_2D);
     t->r = (struct vgpu_rect){ 0, y0, f->width, y1 - y0 };
@@ -300,6 +308,8 @@ static int vgpu_transfer_flush(struct vgpu *g, struct vgpu_frame *f, uint32_t y0
 
 static int vgpu_set_scanout(struct vgpu *g, uint32_t resource_id, uint32_t w, uint32_t h)
 {
+    if (g->broken)
+        return -EIO;
     struct vgpu_set_scanout *s = g->cmd.req;
     hdr_init(s, VGPU_CMD_SET_SCANOUT);
     s->r = (struct vgpu_rect){ 0, 0, w, h };
@@ -367,6 +377,7 @@ static struct vgpu_frame *vgpu_frame_new(struct vgpu *g, uint32_t w, uint32_t h,
     struct vgpu_frame *f = kzalloc(sizeof(*f));
     if (f == NULL)
         goto fail;
+    f->g = g;
     f->width = w;
     f->height = h;
     f->pitch = w * 4u;
@@ -385,6 +396,9 @@ static struct vgpu_frame *vgpu_frame_new(struct vgpu *g, uint32_t w, uint32_t h,
     if (f->view == 0)
         goto fail;
 
+    rc = -EIO;
+    if (g->broken)
+        goto fail;
     f->resource_id = ++g->next_resource;
     struct vgpu_create_2d *c = g->cmd.req;
     hdr_init(c, VGPU_CMD_RESOURCE_CREATE_2D);
@@ -432,7 +446,7 @@ static struct vgpu_frame *vgpu_frame_new(struct vgpu *g, uint32_t w, uint32_t h,
     f->surface = (struct fbcon_surface){
         .base = (void *)f->view, .width = w, .height = h, .pitch = f->pitch, .bpp = 32,
         .red_shift = 16, .red_bits = 8, .green_shift = 8, .green_bits = 8, .blue_shift = 0, .blue_bits = 8,
-        .panic_flush = vgpu_panic_flush, .arg = g,
+        .panic_flush = vgpu_panic_flush, .arg = f,
     };
     return f;
 
@@ -531,17 +545,23 @@ static void vgpu_thread(void *arg)
 
 /*
  * From fbcon in panic mode: no thread runs and console.c holds no lock.
- * The two commands go on controlq from vgpu_panic's own buffers and are
- * polled for, each for at most VGPU_PANIC_POLL_NS. The queue's lock may be
- * held by a CPU the panic stopped: then nothing is sent (the serial
- * console has the panic either way).
+ * `arg` is the frame fbcon draws on, which g->frame names only once
+ * fbcon_attach has returned. The two commands go on controlq from
+ * vgpu_panic's own buffers and are polled for, each for at most
+ * VGPU_PANIC_POLL_NS. The queue's lock may be held by a CPU the panic
+ * stopped: then nothing is sent (the serial console has the panic either
+ * way). Nothing here takes a tracked lock: a thread's command answered
+ * meanwhile is dropped (its waiter never runs again). A line logged from
+ * inside (virtq_pop_panic's report of a bad used entry) comes back through
+ * fbcon: it is not flushed, so g->panic.req is not rewritten in flight.
  */
 static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
 {
-    struct vgpu *g = arg;
-    struct vgpu_frame *f = g->frame;
-    if (f == NULL || g->broken || g->panic_dead)
+    struct vgpu_frame *f = arg;
+    struct vgpu *g = f->g;
+    if (g->broken || g->panic_dead || g->panic_busy)
         return;
+    g->panic_busy = true;
     uint32_t types[2] = { VGPU_CMD_TRANSFER_TO_HOST_2D, VGPU_CMD_RESOURCE_FLUSH };
     for (unsigned k = 0; k < 2; k++) {
         if (types[k] == VGPU_CMD_TRANSFER_TO_HOST_2D) {
@@ -562,26 +582,24 @@ static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
             { .addr = g->panic.resp_dma, .len = sizeof(struct vgpu_hdr) },
         };
         if (virtq_add_panic(g->vq, sg, 1, 1, &g->panic) != 0)
-            return;
+            goto out;
         virtq_kick(g->vq);
         uint64_t deadline = clock_now_ns() + VGPU_PANIC_POLL_NS;
         bool seen = false;
         while (!seen && clock_now_ns() < deadline) {
             uint32_t len;
-            void *cookie = virtq_pop_panic(g->vq, &len);
-            if (cookie == &g->panic)
-                seen = true;
-            else if (cookie == &g->cmd)
-                complete(&g->done);   /* a thread's command, answered meanwhile */
+            seen = virtq_pop_panic(g->vq, &len) == &g->panic;
         }
         if (!seen) {
             /* Not again: each later panic line would wait as long,
              * and the serial sink after this one with it. */
             g->panic_dead = true;
-            return;
+            goto out;
         }
     }
     g->panic_flushes++;
+out:
+    g->panic_busy = false;
 }
 
 static int vgpu_buf_alloc(struct vgpu *g, struct vgpu_buf *b)

@@ -411,8 +411,11 @@ bool selftest_vm_direct_ranges(const char **reason)
     size_t leaf = 0;
     paddr_t pa = 0;
     bool mapped = vm_query(view + PAGE_2M_SIZE + PAGE_SIZE, &pa, NULL, NULL, &leaf);
-    *(volatile uint32_t *)(view + PAGE_2M_SIZE + 8) = 0x5a5aa5a5;
-    uint32_t seen = *(volatile uint32_t *)(mem + PAGE_2M_SIZE + 8);
+    uint32_t seen = 0;
+    if (mapped) {   /* else a check below fails; the store would fault */
+        *(volatile uint32_t *)(view + PAGE_2M_SIZE + PAGE_SIZE + 8) = 0x5a5aa5a5;
+        seen = *(volatile uint32_t *)(mem + PAGE_2M_SIZE + PAGE_SIZE + 8);
+    }
     if (leaf == PAGE_SIZE)
         vm_unmap_phys(view);   /* with a block leaf: KASSERT in region_teardown */
     for (unsigned i = 0; i < nf; i++)

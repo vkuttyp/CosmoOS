@@ -119,17 +119,20 @@ removing or changing one bumps the version.
 | Packet buffers (`kernel/mbuf.h`) | `m_get`, `m_getcl`, `m_free`, `m_freem`, `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`, `m_length`, `m_copypacket` |
 | Network interfaces (`kernel/netif.h`) | `netif_register`, `netif_unregister`, `netif_release_static`, `netif_rx`, `netif_rx_on`, `net_flow_hash`, `netif_set_ipv4`, `netif_set_up`; `m_csum_complete` (`kernel/net/cksum.h`) |
 
-Modules export too: the `virtio` module provides 17 symbols
+Modules export too: the `virtio` module provides 19 symbols
 (`virtio_bus`, `virtio_register_driver`, `virtio_unregister_driver`,
 `virtio_device_init`, `virtio_device_ready`, `virtio_device_reset`,
 `virtio_read_config`, `virtio_read_config32`, `virtio_read_config64`,
 `virtio_write_config32`, `virtq_alloc`, `virtq_alloc_on`, `virtq_free`,
-`virtq_add`, `virtq_kick`, `virtq_pop`, `virtq_free_count`) that
+`virtq_add`, `virtq_kick`, `virtq_pop`, `virtq_free_count`, and the
+panic path's `virtq_add_panic` and `virtq_pop_panic`; debug builds add
+`virtq_unconsumed`) that
 `virtio_blk`, `virtio_rng`, `virtio_console`, `virtio_net` and
 `virtio_gpu` resolve by declaring `deps = "virtio"`; the loader
 resolves a foreign symbol only from a declared dependency (invariant
 M3), and a module cannot be unloaded while a dependant holds it. In
-total the tree carries 150 `EXPORT_SYMBOL` records.
+total the tree carries 251 `EXPORT_SYMBOL` lines
+(`git grep '^EXPORT_SYMBOL(' -- '*.c'`, debug-only ones included).
 
 Semantics are those of the headers the symbols come from
 (`docs/kernel/diagnostics/api.md`, `memory/api.md`, `scheduler/api.md`,

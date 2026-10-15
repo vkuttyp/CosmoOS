@@ -57,6 +57,7 @@
 #include <arch/mmu.h>
 #include <kernel/page.h>
 #include <kernel/lockdep.h>
+#include <kernel/percpu.h>
 #include <kernel/panic.h>
 #include <arch/irq.h>
 
@@ -264,8 +265,12 @@ void kernel_main(const struct cosmoboot_info *info)
      * the panic without a tracked lock (virtq_add_panic), which would wait
      * for that owner forever. */
     kinfo("crash test: panicking with lockdep's lock held elsewhere, on purpose");
-    lockdep_crash_hold_raw();
-    panic("crash test: lockdep's lock is held by another CPU");
+    /* Nothing may print between the hold and the panic (a print takes
+     * that lock): the word read back goes in the panic's own message, and
+     * the test requires it to name a CPU other than this one. */
+    unsigned this_cpu = raw_cpu_id();
+    unsigned owner = lockdep_crash_hold_raw();
+    panic("crash test: lockdep's lock is held by another CPU (owner word %u, this CPU's %u)", owner, this_cpu + 1u);
 #endif
 #if CONFIG_SELFTEST
     failed += selftest_run_all();

@@ -139,8 +139,9 @@ bool lockdep_snapshot_held_thread(const struct thread *t, struct lockdep_held *o
 void lockdep_dump_held_cpu(unsigned cpu);
 #if CONFIG_CRASH_TEST == 3
 /* make test-display only: leave the checker's own lock owned by another
- * CPU, as a CPU the panic stops can. */
-void lockdep_crash_hold_raw(void);
+ * CPU, as a CPU the panic stops can. Returns the owner word read back
+ * (an owner is its CPU's id + 1; 0 is free), for the panic message. */
+unsigned lockdep_crash_hold_raw(void);
 #endif
 
 /* One instant of counters under the graph raw lock. Normal diagnostics

@@ -37,6 +37,7 @@
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/string.h>
+#include <kernel/tty.h>
 #include <kernel/vmm.h>
 
 struct fbcon {
@@ -510,6 +511,13 @@ bool fbcon_geometry(struct fbcon_geometry *out)
     return true;
 }
 
+#if CONFIG_SELFTEST
+bool fbcon_on_surface(void)
+{
+    return g_fbcon.surface != NULL;
+}
+#endif
+
 void fbcon_cursor(uint32_t *col, uint32_t *row)
 {
     if (col)
@@ -519,15 +527,40 @@ void fbcon_cursor(uint32_t *col, uint32_t *row)
 }
 
 /*
+ * The screen a switch replaces, onto `c` (just started, blank): its rows
+ * up to the cursor's, the newest at the bottom when they do not all fit,
+ * each cut or padded to c's width, and the cursor where it was on its
+ * row. What a program wrote to the terminal (tty.c writes the sinks, not
+ * the log ring) and a line being typed stay on the screen. Not reflowed:
+ * a row wider than the new screen loses its end.
+ */
+static void carry_text(struct fbcon *c, const struct fbcon *prev)
+{
+    uint32_t used = prev->cy < prev->rows ? prev->cy + 1 : prev->rows;
+    uint32_t n = used < c->rows ? used : c->rows;
+    uint32_t first = used - n;
+    uint32_t w = prev->cols < c->cols ? prev->cols : c->cols;
+    for (uint32_t i = 0; i < n; i++)
+        memcpy(c->text + (size_t)i * c->cols, prev->text + (size_t)(first + i) * prev->cols, w);
+    c->cy = n - 1;
+    c->cx = prev->cx < c->cols ? prev->cx : c->cols;
+    fbcon_draw_repaint(c);
+    damage(c, 0, c->height);
+}
+
+/*
  * A display driver's surface (fbcon.h). The new text buffer is allocated
- * first, in thread context. The switch, the copy of the log's newest
- * screenful and its replay are one hold of the console lock (the ring's
- * lock nests inside it), so no line written meanwhile is lost: every
- * line is either in the copy or written after the release onto the new
- * surface. A line put in the ring whose sink write is waiting for the
- * lock is drawn twice. A first surface's sink is registered in the same
- * hold. The boot framebuffer's console is kept for fbcon_detach and keeps
- * its mapping; a previous surface's text buffer is freed after the switch.
+ * first, in thread context. The switch and the new screen's first
+ * contents are one hold of the console lock, so no line written meanwhile
+ * is lost. Those contents are the screen it replaces (carry_text) when
+ * fbcon was drawing one, else the log's newest screenful (the ring's lock
+ * nests inside the console's): every line is either in that copy or
+ * written after the release onto the new surface, and a line put in the
+ * ring whose sink write is waiting for the lock is drawn twice. A first
+ * surface's sink is registered in the same hold. The boot framebuffer's
+ * console is kept for fbcon_detach and keeps its mapping; a previous
+ * surface's text buffer is freed after the switch. A new cell grid is the
+ * console terminal's new size (tty_console_resized: SIGWINCH).
  */
 int fbcon_attach(const struct fbcon_surface *s)
 {
@@ -554,6 +587,7 @@ int fbcon_attach(const struct fbcon_surface *s)
     char *old_text = c->surface != NULL ? c->text : NULL;
     if (c->surface == NULL)
         g_boot_fbcon = *c;   /* the boot framebuffer's console, or none (ready false) */
+    struct fbcon prev = *c;   /* read only; its text is freed after the release */
     /* The sink is on the console's list (its `next` links the sinks after
      * it): it stays as it is, whatever else is replaced. */
     struct console_sink sink = c->sink;
@@ -572,8 +606,10 @@ int fbcon_attach(const struct fbcon_surface *s)
         c->registered = true;
     }
 
-    /* The newest screenful, as fbcon_init shows it. */
-    if (log != NULL) {
+    if (prev.ready) {
+        carry_text(c, &prev);
+    } else if (log != NULL) {
+        /* No screen before: the newest screenful, as fbcon_init shows it. */
         size_t log_len = klog_copy(log, KLOG_RING_SIZE);
         size_t start = log_len;
         unsigned lines = 0;
@@ -586,9 +622,12 @@ int fbcon_attach(const struct fbcon_surface *s)
         }
         fbcon_write(&c->sink, log + start, log_len - start);
     }
+    bool resized = !prev.ready || prev.cols != c->cols || prev.rows != c->rows;
     console_release(st);
     kfree(log);
     kfree(old_text);
+    if (resized)
+        tty_console_resized();
     kinfo("fbcon: %ux%u cells of %ux%u pixels on a %ux%u surface, scrolling %u rows at a time", c->cols, c->rows,
           c->cell_w, c->cell_h, c->width, c->height, c->scroll_rows);
     return 0;
@@ -603,6 +642,7 @@ void fbcon_detach(const struct fbcon_surface *s)
         return;
     }
     char *old_text = c->text;
+    struct fbcon prev = *c;   /* read only; its text is freed after the release */
     struct console_sink sink = c->sink;   /* on the console's list: kept (fbcon_attach) */
     struct fbcon_stats stats = c->stats;
     bool registered = c->registered;
@@ -613,13 +653,16 @@ void fbcon_detach(const struct fbcon_surface *s)
     c->sink.name = "fbcon";
     c->sink.write = fbcon_write;
     if (c->ready) {
-        /* The boot framebuffer was not drawn while the surface was. */
+        /* The boot framebuffer was not drawn while the surface was: it
+         * gets the surface's screen. */
         memset(c->text, ' ', (size_t)c->cols * c->rows);
-        c->cx = c->cy = 0;
-        fbcon_draw_clear_rows(c, 0, c->rows);
+        carry_text(c, &prev);
     }
+    bool resized = !c->ready || prev.cols != c->cols || prev.rows != c->rows;
     console_release(st);
     kfree(old_text);
+    if (resized)
+        tty_console_resized();
 }
 
 bool fbcon_take_damage(const struct fbcon_surface *s, uint32_t *y0, uint32_t *y1)

@@ -151,6 +151,10 @@ int tty_drain_output(struct tty *t);
 unsigned tty_queued(struct tty *t);
 /* TIOCSWINSZ: a change raises SIGWINCH on the foreground group. */
 void tty_set_size(struct tty *t, const struct cosmo_ttysize *in);
+/* The framebuffer console's cell grid changed (fbcon_attach/fbcon_detach):
+ * the console's size is the framebuffer's again, a size set by TIOCSWINSZ
+ * dropped, and SIGWINCH goes to the foreground group. Thread context. */
+void tty_console_resized(void);
 /* The far side has gone (a pty's master closed): SIGHUP and SIGCONT to
  * the controlling session's foreground group and its leader, the session
  * lets go of the terminal, readers see end of file and writers -EIO. */

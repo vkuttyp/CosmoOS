@@ -17,10 +17,12 @@
 #include <kernel/console.h>
 #include <kernel/fbcon.h>
 #include <kernel/font.h>
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
+#include <kernel/tty.h>
 
 #define CHECK(cond)                                                                          \
     do {                                                                                     \
@@ -238,5 +240,97 @@ bool selftest_fb_bench(const char **reason)
           (unsigned long long)(per_line / (width - 1)), g->scroll_rows,
           (unsigned long long)(per_scroll / 1000),
           (unsigned long long)((per_line + per_scroll / g->scroll_rows) / 1000));
+    return true;
+}
+
+/*
+ * A display driver's switch to a surface of another size (fbcon_attach,
+ * the virtio-gpu unit's resize): the screen goes with it, and the console
+ * terminal's size is the new grid. Two surfaces in memory, 60x17 cells
+ * then 40x12, over whatever fbcon had (the debug boots' firmware
+ * framebuffer, or none). Lines written through the sinks (console_puts,
+ * the path tty.c's output takes, never the log ring) must be on the
+ * second surface, the cursor after them: fbcon_attach's own log line
+ * continues the unfinished one at column 15 (a scroll may since have
+ * moved the rows, so they are looked for). A size set by
+ * TIOCSWINSZ in between must give way to 40x12 (tty_console_resized,
+ * which also raises SIGWINCH). Detaching gives back the console there was,
+ * at its size. Not run over a display driver's surface: detaching would
+ * leave the device's screen.
+ */
+#define SW_ATTEMPTS 3u
+bool selftest_fb_switch(const char **reason)
+{
+    if (fbcon_on_surface()) {
+        kinfo("selftest: fb-switch: a display driver holds the console; not replaced");
+        return true;
+    }
+    struct fbcon_geometry g0 = { 0 };
+    bool present0 = fbcon_geometry(&g0);
+    static const struct fbcon_surface proto = {
+        .bpp = 32, .red_shift = 16, .red_bits = 8, .green_shift = 8, .green_bits = 8,
+        .blue_shift = 0, .blue_bits = 8,
+    };
+    struct fbcon_surface a = proto, b = proto;
+    a.width = 480, a.height = 272, a.pitch = 480 * 4;
+    b.width = 320, b.height = 200, b.pitch = 320 * 4;
+    a.base = kmalloc((size_t)a.pitch * a.height, 0);
+    b.base = kmalloc((size_t)b.pitch * b.height, 0);
+    struct tty *con = tty_console();
+    struct cosmo_ttysize sz;
+    bool attached = false, kept = false, sized = false;
+    uint32_t row = 0;
+    if (a.base == NULL || b.base == NULL) {
+        *reason = "fbcon: no memory for the surfaces";
+        goto out;
+    }
+    for (unsigned attempt = 0; attempt < SW_ATTEMPTS && !(kept && sized); attempt++) {
+        if (fbcon_attach(&a) != 0) {
+            *reason = "fbcon: fbcon_attach(60x17) failed";
+            goto out;
+        }
+        attached = true;
+        console_puts("\nfb-switch kept\nfb-switch typed");
+        tty_set_size(con, &(struct cosmo_ttysize){ .cols = 7, .rows = 3 });
+        if (fbcon_attach(&b) != 0) {
+            *reason = "fbcon: fbcon_attach(40x12) failed";
+            goto out;
+        }
+        struct fbcon_geometry g;
+        if (!fbcon_geometry(&g) || g.cols != 40 || g.rows != 12) {
+            *reason = "fbcon: the second surface is not 40x12 cells";
+            goto out;
+        }
+        /* Another CPU's line between ours and the switch's: tried again. */
+        kept = false;
+        for (row = 1; row < g.rows && !kept; row++)
+            kept = cells_are(&g, 0, row, "fb-switch typed[ INFO] fbcon: ") &&
+                   cells_are(&g, 0, row - 1, "fb-switch kept");
+        tty_get_size(con, &sz);
+        sized = sz.cols == 40 && sz.rows == 12;
+        console_puts("\n");
+    }
+    if (!kept)
+        *reason = "fbcon: the lines written before the switch are not on the new surface";
+    else if (!sized)
+        *reason = "fbcon: the console's size is not the new surface's 40x12";
+out:
+    if (attached) {
+        fbcon_detach(&b);   /* not attached: ignored */
+        fbcon_detach(&a);
+    }
+    struct fbcon_geometry g1 = { 0 };
+    bool present1 = fbcon_geometry(&g1);
+    tty_get_size(con, &sz);
+    kfree(a.base);
+    kfree(b.base);
+    if (!(kept && sized))
+        return false;
+    CHECK(present1 == present0 && !fbcon_on_surface());
+    CHECK(g1.cols == g0.cols && g1.rows == g0.rows);
+    CHECK(sz.cols == g0.cols && sz.rows == g0.rows);
+    kinfo("selftest: fb-switch: %ux%u, then 60x17 to 40x12 cells: the screen moved (row %u), the cursor "
+          "with it, the terminal's size followed, and %ux%u is back",
+          g0.cols, g0.rows, row - 1, g1.cols, g1.rows);
     return true;
 }

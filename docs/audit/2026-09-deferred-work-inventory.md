@@ -1124,8 +1124,10 @@ each; none is needed by M2's acceptance test.
   tears down 128 KiB at a time, which neither MMU allows across a 2 MiB
   block: unmapping a 2 MiB-aligned mapping of 2 MiB or more panics, and
   mapping one where the slot keeps a page table fails with `-EEXIST`.
-  Its 14 callers were not audited for sizes; no test maps one; `vm_map_direct_ranges` maps pages for this
-  reason (the virtio-gpu unit, selftest `vm-direct-ranges`).
+  Its 14 callers were not audited for sizes, and no test maps a 2 MiB-aligned
+  range through `vm_map_phys`. `vm_map_direct_ranges` maps pages for this
+  reason, and its own selftest, `vm-direct-ranges`, covers it alone (the
+  virtio-gpu unit).
 - On Parallels Desktop, `wget` refusing a bad certificate ends with
   "Resource temporarily unavailable" after mbedTLS's message (cause not
   investigated); seen in the post-1.0 Parallels test, 2026-10-14.

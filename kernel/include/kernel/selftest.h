@@ -264,6 +264,7 @@ bool selftest_tty_pty(const char **reason);        /* /dev/ptmx and /dev/pts/N: 
  * pixels back, and what it costs. */
 bool selftest_fb_console(const char **reason);
 bool selftest_fb_bench(const char **reason);
+bool selftest_fb_switch(const char **reason);      /* kernel/core/fbtest.c: a surface switch keeps the screen, resizes the terminal */
 
 /* kernel/device/hidtest.c: keys typed at the emulated keyboard reach the
  * console tty (the harness types them over QMP). */

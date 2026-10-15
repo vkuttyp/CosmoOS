@@ -597,6 +597,17 @@ void tty_set_size(struct tty *t, const struct cosmo_ttysize *in)
         tty_signal_group(t, fg, SIGWINCH);
 }
 
+void tty_console_resized(void)
+{
+    struct tty *t = tty_console();
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    t->size_set = false;   /* tty_get_size asks fbcon again: the window decides, as a terminal emulator's does */
+    pid_t fg = t->fg_pgid;
+    spin_unlock_irqrestore(&t->lock, s);
+    if (fg != 0)
+        tty_signal_group(t, fg, SIGWINCH);
+}
+
 void tty_get_size(struct tty *t, struct cosmo_ttysize *out)
 {
     memset(out, 0, sizeof(*out));

@@ -142,7 +142,19 @@ def screen(sock, path, face, w, h, scale):
     return decode(sw, sh, px, face, scale)
 
 
-def panic_screen(args, face, image, name, what, message):
+def lockdep_held_elsewhere(line):
+    """The seam's word, read back after its store: not free, and not this
+    CPU's (an owner is its CPU's id + 1). Without the hold the panic is an
+    ordinary one and check e would test nothing new."""
+    m = re.search(r"\(owner word (\d+), this CPU's (\d+)\)", line)
+    if not m:
+        raise Fail(f"panic-lockdep: the panic does not report lockdep's owner word: {line!r}")
+    owner, this = int(m.group(1)), int(m.group(2))
+    if owner == 0 or owner == this:
+        raise Fail(f"panic-lockdep: lockdep's lock was not held by another CPU (owner word {owner}, this CPU's {this})")
+
+
+def panic_screen(args, face, image, name, what, message, check=None):
     w, h = (int(v) for v in args.size.split("x"))
     sock = os.path.join(args.workdir, f"qmp-{name}.sock")
     b = Boot(name, image, args.workdir,
@@ -157,7 +169,9 @@ def panic_screen(args, face, image, name, what, message):
         need(b.text(), r"^\[ INFO\] virtio-gpu: \S+: scanout 0 ", "the virtio-gpu driver before the panic")
         time.sleep(1.0)   # nothing should change now; the panic flushed as it wrote
         lines = screen(sock, os.path.join(args.workdir, f"{name}.ppm"), face, w, h, cell_scale(b.text(), w, h))
-        need(b.text(), r"^KERNEL PANIC: " + re.escape(message), f"{name}: the crash test's own panic")
+        line = need(b.text(), r"^KERNEL PANIC: " + re.escape(message) + r".*$", f"{name}: the crash test's own panic")
+        if check is not None:
+            check(line.group(0))
         hit = [ln for ln in lines if ln.startswith("KERNEL PANIC: " + message)]
         if not hit:
             raise Fail(f"{name}: the panic is not on the screen; its last rows:\n" + "\n".join(lines[-12:]))
@@ -190,7 +204,8 @@ def main():
         if args.panic_lockdep_image:
             results.append(panic_screen(args, face, args.panic_lockdep_image, "panic-lockdep",
                                         "e. with lockdep's lock held by another CPU, the panic",
-                                        "crash test: lockdep's lock is held by another CPU"))
+                                        "crash test: lockdep's lock is held by another CPU",
+                                        check=lockdep_held_elsewhere))
     except Fail as e:
         for r in results:
             print(f"test-display: {r}")
@@ -229,11 +244,16 @@ def check_shape(args, face, shape, want_w, want_h, results):
         if (int(m.group(2)), int(m.group(3))) != (want_w, want_h):
             raise Fail(f"{shape}: the driver set {m.group(2)}x{m.group(3)}, the device offered {args.size}")
 
+        # The marker and its command line each fit one row, so neither
+        # wraps at a narrow size (40 columns at 320x200): the prompt, `echo '`
+        # and the closing quote take 14 of them.
+        scale = cell_scale(log, want_w, want_h)
+        cols = want_w // (8 * scale)
         marker = f"display-check {shape} {os.getpid() % 100000:05d}: the quick brown fox jumps over 0123456789"
+        marker = marker[:max(16, min(len(marker), cols - 15))].rstrip()
         out = b.run(f"echo '{marker}'")
         need(out, "^" + re.escape(marker) + "$", "the marker on the serial console")
         time.sleep(1.0)   # the driver flushes every 16 ms
-        scale = cell_scale(log, want_w, want_h)
         lines = screen(sock, shot, face, want_w, want_h, scale)
 
         bad = [(i, ln) for i, ln in enumerate(lines) if "\0" in ln]
