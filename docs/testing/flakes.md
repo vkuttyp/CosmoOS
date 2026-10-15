@@ -2714,6 +2714,13 @@ run time (`sched_thread_run_ns`) and to delay the first load-average fold,
 neither on the resumption path. The candidate above still fits: one run
 one trip short. Not attributed; the job was rerun by the next push.
 
+**Third sighting, 2026-10-14:** CI on main, `build, boot, analyze
+(aarch64)` of #386's merge (`6011a5ec`, a documentation-only release
+note; run 38595676023, job 115961772279): `100 runs of 32, 3199 trips
+(longest 32 in one call)`, the check at 555 ms, 1 failure of 475. The
+same one trip short. The job's rerun passed (job 116270734364). Not
+attributed; three sightings, all `3199`, all AArch64.
+
 ## `sched-restore-loop`: the thread count not back in 200 ms, 2026-10-11
 
 `SELFTEST: sched-restore-loop ... FAIL: check failed: threads_settle(before)
@@ -4274,3 +4281,13 @@ Not the PR: three alternated local AArch64 debug boots each, main
 s). The budget stays as it is; a third sighting, or main's slowest boot
 in this job above 230 s, is the evidence to restate or widen it under
 the rule above.
+
+**Third sighting, 2026-10-14:** main, #386's merge (`6011a5ec`, a
+documentation-only release note; run 38595676023, job 115961772131):
+`FAIL after 246.5s`, `timed out after 240s`, self-tests 186,970 ms
+(`cosmofs-replay` 31,106 ms), every one of the 475 passing, the harness
+ready at 165.9 s. The job's rerun passed (job 116270734185), its four
+boots at **235.7**, 226.9, 212.6 and 213.5 s, self-tests 182,100 ms in
+the slowest. Both conditions named above are now met -- a third
+sighting, and main's slowest boot in this job above 230 s -- so the
+budget is due to be restated or widened under the rule, as its own unit.
