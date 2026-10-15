@@ -51,7 +51,7 @@ static int is_stamp(const char *s, size_t n)
 }
 
 /* Clear the way for the bind: nothing at `path`, or a socket node no one
- * answers on (an earlier run's). Anything else is refused and left alone:
+ * is bound to (an earlier run's; the probe's ECONNREFUSED says so). Anything else is refused and left alone:
  * a file is not ours to delete, and a socket someone is bound to is a
  * running syslogd, which unlinking would cut off from its senders (a unix
  * socket is found by its node). 0, or -1 with a message. */
@@ -69,10 +69,18 @@ static int clear_stale(const char *path, const struct sockaddr_un *sa)
         fprintf(stderr, "syslogd: socket: %s\n", strerror(errno));
         return -1;
     }
-    int live = connect(probe, (const struct sockaddr *)sa, sizeof(*sa)) == 0;
+    /* Only ECONNREFUSED says no socket is bound to the node: a live one
+     * can refuse the probe for other reasons (EACCES, a node it may not
+     * write; EPROTOTYPE, a stream socket), and those are not ours to
+     * unlink either. */
+    int rc = connect(probe, (const struct sockaddr *)sa, sizeof(*sa)) == 0 ? 0 : errno;
     close(probe);
-    if (live) {
+    if (rc == 0) {
         fprintf(stderr, "syslogd: %s is already served (another syslogd is running)\n", path);
+        return -1;
+    }
+    if (rc != ECONNREFUSED) {
+        fprintf(stderr, "syslogd: %s: a socket that may be in use (%s); left as it is\n", path, strerror(rc));
         return -1;
     }
     if (unlink(path) < 0) {

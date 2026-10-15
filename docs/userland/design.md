@@ -384,8 +384,10 @@ always`) binds it and writes each message with `SYS_log` as `syslog:
 (the kernel's line has its own), control characters blanked, the line cut
 to what one log line takes (199 bytes). `dmesg` and the console show it;
 nothing is written to a file. At its start it clears the path only of
-a socket node no one answers on (an earlier run's): a file there, or a
-socket another `syslogd` is bound to, is refused and left alone. With no
+a socket node no one is bound to (an earlier run's: a probe `connect`
+fails with `ECONNREFUSED`, the one error that says so): a file there, a
+socket another `syslogd` serves, or one the probe cannot judge (any other
+error) is refused and left alone. With no
 privileges the kernel's rate limit
 for an unprivileged writer applies to it as to any process: a burst past
 it is dropped, and the next line that gets through says how many were.
