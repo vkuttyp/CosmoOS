@@ -363,6 +363,11 @@ Codex's review of `dc1c4f50`:
   change could free** (Codex): they skip when a display driver's surface
   holds the console. The boot framebuffer's mapping is never freed, so a
   test started on it stays safe if a surface is attached meanwhile.
+- **The skip itself raced** (Qodo, on `ecfef59f`): `fbcon_on_surface()`
+  and `fbcon_geometry()` were two holds, so a surface attached between
+  them went unseen. The flag is now part of the snapshot
+  (`fbcon_geometry`'s `surface`, read in the hold that reads `base`), and
+  `fbcon_on_surface` is gone; `fb-switch` uses the same field.
 - **The unit is outside the current milestone** (Codex): not changed.
   The 1.0 roadmap is complete (v1.0.0, M6); this is the last item of the
   post-1.0 queue the project owner set.

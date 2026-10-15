@@ -542,6 +542,7 @@ bool fbcon_geometry(struct fbcon_geometry *out)
     out->fg = g_fb->fg;
     out->bg = g_fb->bg;
     out->scroll_rows = g_fb->scroll_rows;
+    out->surface = g_fb->surface != NULL;
     console_release(st);
     return true;
 }
@@ -551,15 +552,6 @@ uint32_t fbcon_switches(void)
     return __atomic_load_n(&g_switches, __ATOMIC_ACQUIRE);
 }
 
-#if CONFIG_SELFTEST
-bool fbcon_on_surface(void)
-{
-    arch_irq_state_t st = console_hold();
-    bool on = g_fb->surface != NULL;
-    console_release(st);
-    return on;
-}
-#endif
 
 void fbcon_cursor(uint32_t *col, uint32_t *row)
 {

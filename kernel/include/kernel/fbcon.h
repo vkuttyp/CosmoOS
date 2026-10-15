@@ -42,6 +42,10 @@ struct fbcon_geometry {
     uint32_t cols, rows;
     uint32_t fg, bg;       /* packed pixel values the sink draws with */
     uint32_t scroll_rows;  /* cell rows one scroll moves */
+    /* `base` is a display driver's surface (fbcon_attach), which a display
+     * change may free at any time; false: the boot framebuffer, whose
+     * mapping is never freed. Read in the same hold as `base`. */
+    bool surface;
 };
 
 /* False when there is no framebuffer console. */
@@ -53,16 +57,6 @@ void fbcon_cursor(uint32_t *col, uint32_t *row);
  * fbcon_detach), counted in the console lock's hold that made each: what
  * a size set by TIOCSWINSZ is newer than (tty_console_resized). */
 uint32_t fbcon_switches(void);
-/* fb-switch: a display driver's surface holds the console (fbcon_attach).
- * Without self-tests, true: fb-switch, never run there, would skip. */
-#if CONFIG_SELFTEST
-bool fbcon_on_surface(void);
-#else
-static inline bool fbcon_on_surface(void)
-{
-    return true;
-}
-#endif
 
 /*
  * A display driver's memory for the console (the virtio-gpu unit). The

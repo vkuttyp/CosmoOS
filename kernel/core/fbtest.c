@@ -92,16 +92,17 @@ bool selftest_fb_console(const char **reason)
         kinfo("selftest: fb-console: no framebuffer on this machine; skipped");
         return true;
     }
+    struct fbcon_geometry geom;
+    CHECK(fbcon_geometry(&geom));
     /* The pixels are read through `base` without the console lock. The
      * boot framebuffer's mapping is never freed, even when a surface is
      * attached meanwhile; a display driver's surface can be replaced and
-     * freed by a display change at any time (Codex, PR #387). */
-    if (fbcon_on_surface()) {
+     * freed by a display change at any time (Codex, PR #387). `surface`
+     * comes from the same hold as `base` (Qodo). */
+    if (geom.surface) {
         kinfo("selftest: fb-console: a display driver's surface holds the console; skipped");
         return true;
     }
-    struct fbcon_geometry geom;
-    CHECK(fbcon_geometry(&geom));
     const struct fbcon_geometry *g = &geom;
     CHECK(g->cols >= 40 && g->rows >= 8);
     CHECK(g->fg != g->bg);
@@ -208,17 +209,13 @@ bool selftest_fb_bench(const char **reason)
         kinfo("selftest: fb-bench: no framebuffer on this machine; skipped");
         return true;
     }
-    /* The pixels are read through `base` without the console lock. The
-     * boot framebuffer's mapping is never freed, even when a surface is
-     * attached meanwhile; a display driver's surface can be replaced and
-     * freed by a display change at any time (Codex, PR #387). */
-    if (fbcon_on_surface()) {
-        kinfo("selftest: fb-bench: a display driver's surface holds the console; skipped");
-        return true;
-    }
     struct fbcon_geometry geom;
     if (!fbcon_geometry(&geom))
         return true;
+    if (geom.surface) {   /* as in fb-console: base may be freed under the reads */
+        kinfo("selftest: fb-bench: a display driver's surface holds the console; skipped");
+        return true;
+    }
     const struct fbcon_geometry *g = &geom;
     char line[81];
     unsigned width = g->cols < 80 ? g->cols : 80;
@@ -278,12 +275,12 @@ bool selftest_fb_bench(const char **reason)
 #define SW_ATTEMPTS 3u
 bool selftest_fb_switch(const char **reason)
 {
-    if (fbcon_on_surface()) {
+    struct fbcon_geometry g0 = { 0 };
+    bool present0 = fbcon_geometry(&g0);
+    if (g0.surface) {
         kinfo("selftest: fb-switch: a display driver holds the console; not replaced");
         return true;
     }
-    struct fbcon_geometry g0 = { 0 };
-    bool present0 = fbcon_geometry(&g0);
     static const struct fbcon_surface proto = {
         .bpp = 32, .red_shift = 16, .red_bits = 8, .green_shift = 8, .green_bits = 8,
         .blue_shift = 0, .blue_bits = 8,
@@ -354,7 +351,7 @@ out:
     kfree(b.base);
     if (!(kept && sized && late))
         return false;
-    CHECK(present1 == present0 && !fbcon_on_surface());
+    CHECK(present1 == present0 && !g1.surface);
     CHECK(g1.cols == g0.cols && g1.rows == g0.rows);
     CHECK(sz.cols == g0.cols && sz.rows == g0.rows);
     kinfo("selftest: fb-switch: %ux%u, then 60x17 to 40x12 cells: the screen moved (row %u), the cursor "
