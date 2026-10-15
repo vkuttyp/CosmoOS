@@ -307,7 +307,8 @@ MSI-X vectors, the configuration's and one queue's).
     `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` for those rows. Rows whose
     flush fails stay pending, merged with the next band;
   - reads the configuration's `events_read`. On `VIRTIO_GPU_EVENT_DISPLAY`
-    (Parallels resizes the scanout with its window) it clears the event
+    (Parallels resizes the scanout with its window; QEMU raises it for a
+    VNC client's SetDesktopSize, `make test-display`'s check f) it clears the event
     (`virtio_write_config32`, new with this driver), asks for the size
     again, and moves the console to a new frame of that size. The new
     frame is complete and on the scanout before fbcon leaves the old one,

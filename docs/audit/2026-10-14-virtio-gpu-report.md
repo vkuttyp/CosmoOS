@@ -122,6 +122,9 @@ framebuffer at all, gets a console too.
   the network harness ready in each debug boot (1, 2 and 4 CPUs,
   `test-smp2`, chaos, harness retry), reproducible on both;
   `test-display` and `test-net-login` on both.
+- **At `93ccddb8`**: debug `make test` on both architectures (477
+  self-tests, `fb-switch`, the network harness ready), and `test-display`
+  with check f on both.
 - **At `b729944e`** (the fourth round, below): debug `make test` passes
   on both architectures (477 self-tests, `fb-switch` with the late
   notice, the network harness ready) and `test-display` on both.
@@ -290,6 +293,33 @@ Codex's review of `d8e77cfc`:
   (Codex). `lockdep.c` refuses that configuration (`#error` without
   `CONFIG_DEBUG`); `make test-display` builds it with `BUILD=debug`.
 
+Codex's and CosmoReview's reviews of `a8270905`:
+
+- **No test drove a display change** (Codex): `fb-switch` calls
+  `fbcon_attach` itself, so the driver's event polling, clearing and
+  retry were checked on Parallels only, and the report said QEMU could
+  not resize a headless display. It can: its VNC server takes a client's
+  SetDesktopSize and hands it to the device as `VIRTIO_GPU_EVENT_DISPLAY`.
+  `test-display`'s check f does that in the `virtio` shape (1920x1080 to
+  1024x768) and requires the driver's new scanout line and the marker on
+  the new screen. It passes on both architectures; with the event check
+  disabled (a worktree of `93ccddb8`) it fails on both, "the driver did
+  not follow the display to 1024x768 in 30 s".
+- **A panic during a switch could walk a half-copied console** (Codex):
+  `fbcon_attach` and `fbcon_detach` assigned the whole structure, the
+  sink's list link included, which a CPU in panic mode reads without the
+  console lock. The boot console and two surface slots are now whole
+  consoles; a switch builds the one not shown and publishes it with one
+  store, and the sink and the counters live outside them.
+- **The resize retry compared `clock_now_ns() + delay` across a possible
+  migration** (Codex): `clock_deadline_ns` and `clock_deadline_passed`.
+  The panic flush's 200 ms poll stays on `clock_now_ns`: nothing migrates
+  in a panic, and the machine-wide tick the deadline helpers fall back to
+  may not run.
+- **`ent` leaked on `vgpu_frame_new`'s failure path** (CosmoReview): not
+  so. `vgpu_dma_release` hands the entries back before the only `goto
+  fail` that follows their allocation.
+
 Not changed: CosmoReview's "blocking call under spinlock" in
 `vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with
 `kmem_cache_alloc`, which takes only the cache's spinlock and grows from
@@ -301,8 +331,6 @@ Not changed: CosmoReview's "blocking call under spinlock" in
 - Any display interface for programs (a framebuffer device, mode setting
   from user space), a cursor, 3D (virgl), blob resources, more than one
   scanout.
-- A resize test under QEMU, which has no way to resize a headless
-  display: Parallels is the only check of the display-change path.
 - The panic on the screen under AArch64 QEMU: its exit is semihosting,
   which cannot be left out; the flush code is the same on both.
 - The Bochs adapter and `ramfb` mode setting.

@@ -115,11 +115,20 @@ the release, drops a size set by `TIOCSWINSZ` before the switch (the
 switch's number, `fbcon_switches`, is taken in the hold) and raises
 SIGWINCH on the foreground group (`docs/kernel/tty/design.md`). The
 readers (`fbcon_geometry`, `fbcon_cursor`, `fbcon_get_stats`) take the
-console lock, so a copy never mixes two screens (Codex, PR #387). The sink itself,
-which is on the console's list, stays as it is. The first build copied
-the whole console structure and with it the sink's `next`, which cut
-every sink after fbcon off the list: on Parallels Desktop the serial
-console went silent (`make test-display`'s `both` shape checks it).
+console lock, so a copy never mixes two screens (Codex, PR #387).
+
+The consoles are three whole structures: the boot framebuffer's and two
+surface slots. A switch builds the new console in the slot not shown (or,
+for `fbcon_detach`, redraws the boot console, which was left as it was)
+and then publishes it with one store of the pointer the sink draws
+through. A CPU in panic mode writes without the console lock and sees
+the old console or the new one, never one half-copied (Codex, PR #387).
+The sink and the counters are outside them: the sink is on the
+console's list, and its `next` links every sink after it. The first
+build copied the whole console structure and with it the sink's `next`,
+which cut every sink after fbcon off the list: on Parallels Desktop the
+serial console went silent (`make test-display`'s `both` shape checks
+it).
 
 Such a surface is not scanned out as it is written. The sink records the
 pixel rows it drew as one band, and the driver's thread takes it
