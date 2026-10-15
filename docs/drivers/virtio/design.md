@@ -284,7 +284,9 @@ MSI-X vectors, the configuration's and one queue's).
   `RESOURCE_DETACH_BACKING` the device refused (Codex, PR #387). They,
   the queue and the request pages are freed only after the reset at
   removal, and only when the status reads 0; otherwise all of it is
-  kept and `device_retain_dma` keeps any driver off the device (U14).
+  kept, the queue's interrupt stopped (`virtq_quiesce`, so `vgpu_done`
+  never runs on the freed driver state or an unloaded module), and
+  `device_retain_dma` keeps any driver off the device (U14).
 - **`RESOURCE_ATTACH_BACKING`** sends its entries as a second descriptor
   after the 32-byte command, as Linux's driver does. Parallels Desktop
   answers 0x1205 (invalid parameter) to the entries in the command's own

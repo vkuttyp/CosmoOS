@@ -231,7 +231,7 @@ The rest of that review and Qodo's of `8fca562e` and `3804c9ad`, fixed in
   400x300 on x86-64 print nothing before the loader).
 - **`vm-direct-ranges` wrote through a view it had not found mapped**
   (Qodo). The store follows the query.
-- **Docs** (Qodo): the virtio module's 19 exports, and an inventory line
+- **Docs** (Qodo): the virtio module's exports (20 since `virtq_quiesce`), and an inventory line
   that read as if no test mapped a direct range.
 - **Found by the matrix**: `test_virtq` and `fuzz_virtq` did not link
   (the host shim lacked the panic pair), and CI's "build, boot, analyze"
@@ -269,6 +269,14 @@ Qodo's and Codex's reviews of `8ea7dc56`, fixed in `b729944e`:
   reachable with QEMU's device, which always acknowledges.
 - **Docs promised `DISPLAY_SIZE` down to 320x200** (Qodo): the testing
   row now says 640x480 is the smallest tested.
+
+Qodo's review of `d8e77cfc`:
+
+- **The kept queue's interrupt outlived the driver** (Qodo). With the
+  reset unacknowledged, `vgpu_teardown` kept the queue and with it its
+  vector and irq_poll, and `vgpu_done` could run on the freed `vgpu` or
+  an unloaded module. `virtq_quiesce`, `virtq_free`'s first half, stops
+  both and keeps the ring; `vdev->priv` is cleared before `kfree`.
 
 Not changed: CosmoReview's "blocking call under spinlock" in
 `vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with

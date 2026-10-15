@@ -75,7 +75,10 @@ MSI-X entry left), `-EIO` (device refused the vector). Sleeps (DMA
 allocation). Ownership: the driver, until `virtq_free` *(exported)*,
 which disables the queue, releases the vector, then the deferred
 completion work (`irq_poll_disable`: no callback runs after it returns),
-and the ring memory.
+and the ring memory. `virtq_quiesce` *(exported, the virtio-gpu unit)*
+is its first half, the ring kept: for a device whose reset was not
+acknowledged, which may still read the ring; that queue is never freed
+or used again (U14).
 
 ### `int virtq_add(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie)` *(exported)*
 Purpose: queue one chain: `out` device-readable segments followed by

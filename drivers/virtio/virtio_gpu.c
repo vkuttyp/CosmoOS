@@ -648,10 +648,14 @@ static void vgpu_teardown(struct vgpu *g)
     virtio_device_reset(g->vdev);
     /* Until the reset takes (status reads 0) the device may still read the
      * queue and, after a timeout or a refused detach, the kept buffers:
-     * none of it is freed, and no driver binds the device again (U14). */
+     * none of it is freed, and no driver binds the device again (U14).
+     * The queue's interrupt goes all the same: vgpu_done must not run
+     * once `g` is freed, nor after the module is unloaded. */
     if (g->vdev->tr->get_status(g->vdev) != 0) {
         kwarn("virtio-gpu: %s: the reset was not acknowledged: its queue and buffers are kept",
               g->vdev->dev.name);
+        if (g->vq)
+            virtq_quiesce(g->vq);
         device_retain_dma(&g->vdev->dev);
         return;
     }
@@ -714,8 +718,8 @@ static int vgpu_probe(struct virtio_device *vdev)
 fail:
     kwarn("virtio-gpu: %s: not used (%d)", vdev->dev.name, rc);
     vgpu_teardown(g);
-    kfree(g);
     vdev->priv = NULL;
+    kfree(g);
     return rc;
 }
 
@@ -727,8 +731,8 @@ static void vgpu_remove(struct virtio_device *vdev)
     vgpu_teardown(g);
     kinfo("virtio-gpu: %s: removed after %llu flushes, %llu resizes", vdev->dev.name,
           (unsigned long long)g->flushes, (unsigned long long)g->resizes);
-    kfree(g);
     vdev->priv = NULL;
+    kfree(g);
 }
 
 static const uint32_t vgpu_ids[] = { VIRTIO_ID_GPU, 0 };

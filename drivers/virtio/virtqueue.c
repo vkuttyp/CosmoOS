@@ -163,12 +163,18 @@ int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, vir
     return 0;
 }
 
-void virtq_free(struct virtqueue *vq)
+void virtq_quiesce(struct virtqueue *vq)
 {
     struct virtio_device *vdev = vq->vdev;
     vdev->tr->teardown_queue(vdev, vq);   /* the interrupt: masked, released, synchronize_irq'd */
     irq_poll_disable(&vq->poll);          /* and what it deferred: nothing runs or is queued after this */
     vdev->vq[vq->index] = NULL;
+}
+
+void virtq_free(struct virtqueue *vq)
+{
+    struct virtio_device *vdev = vq->vdev;
+    virtq_quiesce(vq);
     dma_free(&vdev->dev, vq->ring_bytes, vq->ring_mem, vq->ring_dma);
     vq_release(vq);
 }
@@ -369,6 +375,7 @@ void virtq_interrupt(struct virtqueue *vq)
 EXPORT_SYMBOL(virtq_alloc);
 EXPORT_SYMBOL(virtq_alloc_on);
 EXPORT_SYMBOL(virtq_free);
+EXPORT_SYMBOL(virtq_quiesce);
 EXPORT_SYMBOL(virtq_add);
 EXPORT_SYMBOL(virtq_kick);
 EXPORT_SYMBOL(virtq_pop);

@@ -211,6 +211,10 @@ int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, vir
  * transport), then its deferred completion work (irq_poll_disable), then
  * the memory. On return no callback is running or will run. Sleeps. */
 void virtq_free(struct virtqueue *vq);
+/* virtq_free's first half: no callback runs after it returns, and the
+ * ring stays. For a device whose reset was not acknowledged and may still
+ * read the ring: the queue is never freed or used again. Sleeps. */
+void virtq_quiesce(struct virtqueue *vq);
 
 /* Add a chain: `out` device-readable segments then `in` device-writable
  * ones. -ENOSPC when the ring is full. Any context (IRQ-safe lock). */
