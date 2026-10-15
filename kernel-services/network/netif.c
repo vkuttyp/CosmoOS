@@ -159,11 +159,17 @@ int netif_register(struct netif *nif)
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n;
+    unsigned count = 0;
     list_for_each_entry(n, &g_netifs, link) {
         if (strcmp(n->name, nif->name) == 0) {
             spin_unlock_irqrestore(&g_netif_lock, s);
             return -EEXIST;   /* the object is untouched: no kobject, no owner count; the caller frees its storage */
         }
+        count++;
+    }
+    if (count >= NETIF_MAX) {
+        spin_unlock_irqrestore(&g_netif_lock, s);
+        return -ENOSPC;       /* as untouched as -EEXIST leaves it */
     }
     /* Accepted: only now does the object exist (reference 1 to the
      * creator, the owner module's live-object count raised). A failed

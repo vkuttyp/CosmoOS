@@ -672,7 +672,9 @@ copied to a user. A listing reads each field as its writers publish it
 (acquire for the flags and the IPv4 address, relaxed for counters and
 queue lengths), and `tcp_list` reads a pcb's remote end only past
 `CLOSED`. `ipv4_route_list` lists the routes `ipv4_route` takes and no
-others. **Checked by** `net-tapctl` (the interface section lists `lo`
+others. A listing is whole: the registry holds at most `NETIF_MAX`
+interfaces and every interface listing is sized to it; a socket listing
+chooses its family under the lock. **Checked by** `net-tapctl` (the interface section lists `lo`
 first, index 1, up, at 127.0.0.1/8) and `test-net-login` stage g: `ip`
 (netctl), `ifconfig` (the ioctls and `/proc/net/dev`), `route -n`
 (`/proc/net/route`), `netstat -tuln` (`/proc/net/tcp`), `arp -a`

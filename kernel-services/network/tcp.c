@@ -2429,13 +2429,15 @@ void tcp_test_reset_rto_backoff_max(void)
 }
 #endif
 
-unsigned tcp_list(struct tcp_sock_info *out, unsigned max)
+unsigned tcp_list(struct tcp_sock_info *out, unsigned max, uint16_t family)
 {
     unsigned n = 0;
     arch_irq_state_t s = spin_lock_irqsave(&g_table_lock);
     for (unsigned b = 0; b < TCP_HASH_SIZE; b++) {
         struct tcp_pcb *p;
         list_for_each_entry(p, &g_hash[b], hash_link) {
+            if (p->local.family != family)
+                continue;
             if (n < max) {
                 struct tcp_sock_info *o = &out[n];
                 memset(o, 0, sizeof(*o));

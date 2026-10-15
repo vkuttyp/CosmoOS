@@ -70,10 +70,17 @@ struct netif {
 void net_init(void);          /* mbufs, CPU 0's worker, loopback, protocols */
 void net_start_workers(void); /* after SMP bring-up: one pinned worker per online CPU (unit 11) */
 
+/* The registry's capacity: every listing (netif_list's readers, the
+ * routes, netctl's interface section) is sized to it, so none can leave an
+ * interface out (N32). lo, the NICs and a tap per guest (at most 8) fit
+ * with room to spare. */
+#define NETIF_MAX 32
+
 /* Register an interface prepared by the driver (name, mac, mtu, ops with
  * transmit and release). Assigns index and the IPv6 link-local address;
  * the registry takes its own reference, the creator keeps reference 1.
- * -EINVAL (bad fields, no release), -EEXIST on a duplicate name. */
+ * -EINVAL (bad fields, no release), -EEXIST on a duplicate name, -ENOSPC
+ * with NETIF_MAX registered. */
 int netif_register(struct netif *nif);
 /* Take the interface down for good: no transmit or receive after this
  * returns, no packet of its left in the receive queue or on the worker,
@@ -111,7 +118,8 @@ struct netif_info {
     struct netif_stats stats;           /* counters, each a whole value, not one instant together */
 };
 /* Every registered interface in registration order (lo first); writes at
- * most `max` and returns how many there are. Any context. */
+ * most `max` and returns how many there are (at most NETIF_MAX, so a
+ * NETIF_MAX array holds them all). Any context. */
 unsigned netif_list(struct netif_info *out, unsigned max);
 /* One interface by name or by index; false when there is none. */
 bool netif_info_by_name(const char *name, struct netif_info *out);

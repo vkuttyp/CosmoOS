@@ -319,7 +319,7 @@ struct cosmo_netctl_lease {
 #define COSMO_NETCTL_IF_NOARP    0x4
 #define COSMO_NETCTL_IF_TAP      0x8   /* a guest's tap: never the default route */
 
-#define COSMO_NETCTL_MAX_IFS     16    /* interfaces listed */
+#define COSMO_NETCTL_MAX_IFS     32    /* interfaces listed: the registry's capacity, so all of them */
 
 struct cosmo_netctl_if_list {
     uint16_t version;              /* COSMO_NETCTL_VERSION */
@@ -349,7 +349,7 @@ struct cosmo_netctl_if {
  * link (docs/kernel-services/network/design.md, "Inspecting the stack").
  */
 #define COSMO_NETCTL_RT_GATEWAY 0x2    /* through `gateway` (Linux's RTF_GATEWAY) */
-#define COSMO_NETCTL_MAX_ROUTES 17     /* a default and one subnet per interface */
+#define COSMO_NETCTL_MAX_ROUTES 33     /* a default and one subnet per interface */
 
 struct cosmo_netctl_route_list {
     uint16_t version;              /* COSMO_NETCTL_VERSION */

@@ -104,16 +104,27 @@ static unsigned prefix_of(uint32_t mask)
 }
 
 /* The lease DHCP holds for this interface, or NULL (an address from
- * fw_cfg, or none yet). */
-static const struct cosmo_netctl_lease *lease_of(const char *ifname)
+ * fw_cfg, or none yet) -- only while the interface still has the lease's
+ * address and mask: one set by hand since (ifconfig) is not the lease's,
+ * and is shown as static. */
+static const struct cosmo_netctl_lease *lease_of(const char *ifname, uint32_t addr, uint32_t mask)
 {
     for (unsigned i = 0; i < g_nleases; i++) {
         const struct cosmo_netctl_lease *l = &g_leases[i];
         bool held = l->state == COSMO_NETCTL_DHCP_BOUND || l->state == COSMO_NETCTL_DHCP_RENEWING ||
                     l->state == COSMO_NETCTL_DHCP_REBINDING;
-        if (held && strncmp(l->ifname, ifname, sizeof(l->ifname)) == 0)
+        if (held && strncmp(l->ifname, ifname, sizeof(l->ifname)) == 0 && l->addr == addr && l->mask == mask)
             return l;
     }
+    return NULL;
+}
+
+/* The interface named `ifname` in the snapshot, or NULL. */
+static const struct cosmo_netctl_if *if_named(const char *ifname)
+{
+    for (unsigned i = 0; i < g_nifs; i++)
+        if (strncmp(g_ifs[i].name, ifname, sizeof(g_ifs[i].name)) == 0)
+            return &g_ifs[i];
     return NULL;
 }
 
@@ -146,7 +157,7 @@ static void inet_lines(const struct cosmo_netctl_if *f)
     char a[16], b[16];
     inet_ntop(AF_INET, &f->addr, a, sizeof(a));
     bool lo = f->flags & COSMO_NETCTL_IF_LOOPBACK;
-    const struct cosmo_netctl_lease *l = lo ? NULL : lease_of(f->name);
+    const struct cosmo_netctl_lease *l = lo ? NULL : lease_of(f->name, f->addr, f->mask);
     if (lo) {
         printf("    inet %s/%u scope host %.8s\n", a, prefix_of(f->mask), f->name);
     } else {
@@ -225,8 +236,13 @@ static int show_route(int family, const char *dev)
         inet_ntop(AF_INET, &r->dst, d, sizeof(d));
         inet_ntop(AF_INET, &r->gateway, g, sizeof(g));
         inet_ntop(AF_INET, &r->src, s, sizeof(s));
-        if (r->flags & COSMO_NETCTL_RT_GATEWAY)
-            printf("default via %s dev %.8s proto %s src %s\n", g, r->ifname, lease_of(r->ifname) ? "dhcp" : "static", s);
+        if (r->flags & COSMO_NETCTL_RT_GATEWAY) {
+            /* DHCP's while the interface holds the lease and the lease names this router. */
+            const struct cosmo_netctl_if *f = if_named(r->ifname);
+            const struct cosmo_netctl_lease *l = f ? lease_of(r->ifname, f->addr, f->mask) : NULL;
+            printf("default via %s dev %.8s proto %s src %s\n", g, r->ifname,
+                   l != NULL && l->router == r->gateway ? "dhcp" : "static", s);
+        }
         else
             printf("%s/%u dev %.8s proto kernel scope link src %s\n", d, prefix_of(r->mask), r->ifname, s);
     }

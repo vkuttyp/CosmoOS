@@ -265,7 +265,8 @@ DHCP client on the way up -- and refuses a request to change any other
 flag rather than pretend to honour it. `SIOCSIFADDR` and
 `SIOCSIFNETMASK` call `netif_set_ipv4`, as the DHCP client does: a new
 address takes its class's mask, as Linux gives it, and keeps the gateway
-while the gateway is still on the link. A hand-set address on an
+while the gateway is still on the link; a change drops the interface's
+neighbours, as the DHCP client's does. A hand-set address on an
 interface the DHCP client manages lasts until the lease changes.
 
 Two setters exist only to answer. `SIOCSIFMTU` takes the MTU the

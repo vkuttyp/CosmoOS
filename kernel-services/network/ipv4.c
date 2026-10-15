@@ -154,7 +154,7 @@ struct netif *ipv4_route(uint32_t dst)
 
 unsigned ipv4_route_list(struct ipv4_route_info *out, unsigned max)
 {
-    const unsigned cap = IPV4_ROUTES_MAX - 1;
+    const unsigned cap = NETIF_MAX;
     struct netif_info *ifs = kmalloc(cap * sizeof(*ifs), 0);
     if (ifs == NULL)
         return 0;

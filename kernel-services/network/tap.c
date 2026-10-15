@@ -569,7 +569,7 @@ static int64_t tap_ctl_leases(uint8_t *p, size_t room)
  * stack's listings (design.md, "Inspecting the stack"): what `ip` prints.
  * Each returns the bytes written or -EMSGSIZE. */
 _Static_assert(COSMO_NETCTL_MAX_ROUTES == IPV4_ROUTES_MAX && COSMO_NETCTL_MAX_NEIGH == ARP_TABLE_SIZE &&
-               COSMO_NETCTL_MAX_IFS == IPV4_ROUTES_MAX - 1, "the version-8 sections' bounds are the listings'");
+               COSMO_NETCTL_MAX_IFS == NETIF_MAX, "the version-8 sections' bounds are the listings', whole");
 _Static_assert(sizeof(struct cosmo_netctl_lease) == 128 && sizeof(struct cosmo_netctl_if) == 120 &&
                sizeof(struct cosmo_netctl_route) == 32 && sizeof(struct cosmo_netctl_neigh) == 20,
                "the version-8 records' sizes are the ABI");
@@ -612,11 +612,15 @@ static int64_t tap_ctl_ifs(uint8_t *p, size_t room)
 
 static int64_t tap_ctl_routes(uint8_t *p, size_t room)
 {
-    struct ipv4_route_info r[IPV4_ROUTES_MAX];
+    struct ipv4_route_info *r = kmalloc(IPV4_ROUTES_MAX * sizeof(*r), 0);
+    if (r == NULL)
+        return -ENOMEM;
     unsigned n = ipv4_route_list(r, IPV4_ROUTES_MAX);
     size_t need = sizeof(struct cosmo_netctl_route_list) + (size_t)n * sizeof(struct cosmo_netctl_route);
-    if (room < need)
+    if (room < need) {
+        kfree(r);
         return -EMSGSIZE;
+    }
     struct cosmo_netctl_route_list h = { .version = COSMO_NETCTL_VERSION, .count = (uint16_t)n };
     memcpy(p, &h, sizeof(h));
     uint8_t *q = p + sizeof(h);
@@ -628,6 +632,7 @@ static int64_t tap_ctl_routes(uint8_t *p, size_t room)
         memcpy(o.ifname, r[i].ifname, sizeof(o.ifname));
         memcpy(q, &o, sizeof(o));
     }
+    kfree(r);
     return (int64_t)need;
 }
 

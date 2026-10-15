@@ -363,7 +363,7 @@ int ksock_connect(struct socket *s, const struct netaddr *addr)
     mutex_lock(&s->lock);
     int rc;
     if (s->type == COSMO_SOCK_DGRAM) {
-        s->udp.remote = *addr;
+        udp_set_remote(&s->udp, addr);   /* under the list lock input's lookup reads it with */
         s->state = SS_CONNECTED;
         rc = 0;
     } else if (s->state == SS_CONNECTED) {

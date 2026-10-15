@@ -1750,6 +1750,15 @@ after the lock is released.**
 | `tcp_list` (`tcp.c`) | the TCP table's | every pcb in the table: ends, state, queue lengths |
 | `udp_list` (`udp.c`) | the UDP list's | every bound pcb: ends, queued datagrams, drops |
 
+**Every listing is whole.** The registry holds at most `NETIF_MAX` (32)
+interfaces -- `lo`, the NICs and a tap per guest (at most 8) fit with room
+to spare, and `netif_register` refuses another with `-ENOSPC` -- and every
+interface listing, the routes and netctl's interface section are sized to
+it, so none leaves an interface out. The socket listings choose their
+family under the table lock, so one family's sockets cannot crowd the
+other's out of a file; a file still ends at its last whole line within
+64 KiB.
+
 Each field is read as its writers publish it: the flag word and the IPv4
 address with acquire loads (the packet paths' rule, `netif_set_ipv4`), the
 counters relaxed. `tcp_list` holds only the table lock -- a pcb's lock
@@ -1780,9 +1789,15 @@ its last whole line beyond that.
 (`compat/linux/netioctl.c`; `docs/compat/linux/design.md`, "Interface
 ioctls"): the getters translate `netif_info`; the setters are
 `PRIV_NET`'s and call `netif_set_up` and `netif_set_ipv4`, as the DHCP
-client does. An address set by hand on a DHCP-managed interface stays
-until the lease changes (an ACK that renews the same lease does not
-reapply it).
+client does, and like it they drop the interface's neighbours when the
+configuration changes. An address set by hand on a DHCP-managed interface
+stays until the lease changes (an ACK that renews the same lease does not
+reapply it); `ip` then shows it static, not the lease's.
+
+UDP's remote end is written under the list lock (`udp_set_remote`, from
+`ksock_connect`), which `udp_input`'s lookup and `udp_list` read it under:
+a multi-word address an unlocked write could tear. (The lookup had read it
+so before S1, against a write under the socket's mutex alone.)
 
 **netctl version 8** carries the same listings to native programs: the
 interface, route and neighbour sections after the lease section, and a

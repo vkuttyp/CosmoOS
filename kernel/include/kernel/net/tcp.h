@@ -271,9 +271,11 @@ struct tcp_sock_info {
     enum tcp_state state;
     uint32_t txq, rxq;   /* bytes not yet acknowledged, bytes not yet read; a listener's backlog and queued children */
 };
-/* Every pcb in the table (bound, listening or connected, TIME_WAIT
- * included); writes at most `max` and returns how many there are. */
-unsigned tcp_list(struct tcp_sock_info *out, unsigned max);
+/* Every pcb of `family` in the table (bound, listening or connected,
+ * TIME_WAIT included), chosen under the lock so another family's cannot
+ * crowd it out of `max`; writes at most `max` and returns how many there
+ * are. */
+unsigned tcp_list(struct tcp_sock_info *out, unsigned max, uint16_t family);
 #if CONFIG_SELFTEST
 void tcp_test_reset_rto_backoff_max(void);   /* net-bench: the maximum per round */
 #endif

@@ -376,7 +376,9 @@ abbreviated as iproute2 allows. BusyBox's `ip` speaks only netlink, which
 the kernel does not have; this one reads `/dev/net/tapctl`'s snapshot
 (netctl version 8: the interface, route and neighbour sections, and the
 lease section for which addresses are DHCP's, shown `dynamic` with the
-lease's time left and `proto dhcp`). It is the deliberate substitute until
+lease's time left and `proto dhcp` -- while the interface still has the
+lease's address and mask, and the default route the lease's router; an
+address set by hand is shown static). It is the deliberate substitute until
 netlink exists, and read-only: any command that would change something
 (`add`, `del`, `set`, `flush`) is refused with exit 2, and BusyBox's
 `ifconfig` and `route` configure (under `PRIV_NET`). Its lines follow

@@ -20,6 +20,7 @@
 #include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/net/ether.h>
 #include <kernel/net/inet.h>
 #include <kernel/netif.h>
 #include <kernel/string.h>
@@ -30,7 +31,6 @@
 _Static_assert(sizeof(struct lx_ifreq) == 40, "struct ifreq is 40 bytes on both 64-bit ABIs");
 _Static_assert(sizeof(struct lx_ifconf) == 16, "struct ifconf is 16 bytes on both 64-bit ABIs");
 
-#define IFCONF_MAX 16u   /* interfaces SIOCGIFCONF lists */
 
 /* The flags Linux would report for this interface. RUNNING (the carrier)
  * follows UP: no driver here reports a link state of its own. */
@@ -81,12 +81,10 @@ static int64_t ifconf(uint64_t arg)
     struct lx_ifconf c;
     if (copy_from_user(&c, arg, sizeof(c)))
         return -EFAULT;
-    struct netif_info *ifs = kmalloc(IFCONF_MAX * sizeof(*ifs), 0);
+    struct netif_info *ifs = kmalloc(NETIF_MAX * sizeof(*ifs), 0);
     if (ifs == NULL)
         return -ENOMEM;
-    unsigned n = netif_list(ifs, IFCONF_MAX);
-    if (n > IFCONF_MAX)
-        n = IFCONF_MAX;
+    unsigned n = netif_list(ifs, NETIF_MAX);   /* every interface: the registry holds no more */
     int32_t used = 0;
     int64_t rc = 0;
     for (unsigned i = 0; i < n; i++) {
@@ -111,6 +109,18 @@ static int64_t ifconf(uint64_t arg)
         return rc;
     c.ifc_len = used;
     return copy_to_user(arg, &c, sizeof(c)) ? -EFAULT : 0;
+}
+
+/* A new IPv4 configuration, as the DHCP client applies one: a change of
+ * address, mask or gateway also drops the interface's neighbours, which
+ * were learned under the old one (a reused address or a router kept on the
+ * link must be resolved afresh, not sent to a remembered MAC). */
+static void set_ipv4(struct netif *nif, const struct netif_info *f, uint32_t a, uint32_t m, uint32_t g)
+{
+    if (a == f->addr && m == f->mask && g == f->gateway)
+        return;
+    netif_set_ipv4(nif, a, m, g);
+    arp_flush(nif);
 }
 
 /* SIOCSIF{FLAGS,ADDR,NETMASK,BRDADDR,MTU,HWADDR}, PRIV_NET checked. */
@@ -154,14 +164,10 @@ static int64_t set_one(unsigned req, const struct lx_ifreq *r, const struct neti
             break;
         }
         uint32_t a = r->ifr_addr.addr;
-        if (a == 0) {
-            netif_set_ipv4(nif, 0, 0, 0);   /* Linux: address 0 removes it */
-            break;
-        }
-        uint32_t m = class_mask(a);
+        uint32_t m = a == 0 ? 0 : class_mask(a);   /* Linux: address 0 removes it */
         /* The gateway stays while it is still on the link. */
-        uint32_t g = ((f->gateway ^ a) & m) == 0 ? f->gateway : 0;
-        netif_set_ipv4(nif, a, m, g);
+        uint32_t g = a != 0 && ((f->gateway ^ a) & m) == 0 ? f->gateway : 0;
+        set_ipv4(nif, f, a, m, g);
         break;
     }
     case LX_SIOCSIFNETMASK: {
@@ -175,7 +181,7 @@ static int64_t set_one(unsigned req, const struct lx_ifreq *r, const struct neti
             break;
         }
         uint32_t g = ((f->gateway ^ f->addr) & m) == 0 ? f->gateway : 0;
-        netif_set_ipv4(nif, f->addr, m, g);
+        set_ipv4(nif, f, f->addr, m, g);
         break;
     }
     default:

@@ -111,6 +111,13 @@ void udp_unbind(struct udp_pcb *pcb)
     mbufq_drain(&pcb->rxq);
 }
 
+void udp_set_remote(struct udp_pcb *pcb, const struct netaddr *remote)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    pcb->remote = *remote;
+    spin_unlock_irqrestore(&g_lock, s);
+}
+
 int udp_sendto(struct udp_pcb *pcb, const void *data, size_t len, const struct netaddr *to)
 {
     if (to->family != pcb->local.family)
@@ -325,12 +332,14 @@ void udp_get_stats(struct udp_stats *out)
     *out = g_stats;
 }
 
-unsigned udp_list(struct udp_sock_info *out, unsigned max)
+unsigned udp_list(struct udp_sock_info *out, unsigned max, uint16_t family)
 {
     unsigned n = 0;
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     struct udp_pcb *p;
     list_for_each_entry(p, &g_pcbs, link) {
+        if (p->local.family != family)
+            continue;
         if (n < max) {
             struct udp_sock_info *o = &out[n];
             o->local = p->local;

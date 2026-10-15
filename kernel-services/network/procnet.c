@@ -25,7 +25,6 @@ const char *const procnet_names[PROCNET_COUNT] = {
     [PROCNET_TCP6] = "tcp6", [PROCNET_UDP] = "udp",     [PROCNET_UDP6] = "udp6", [PROCNET_IF_INET6] = "if_inet6",
 };
 
-#define IFS_MAX   16u     /* interfaces listed (ipv4_route_list's bound) */
 #define SOCKS_MAX 400u    /* sockets listed per file: what PROCNET_TEXT_MAX holds */
 
 /* The text so far; a line is appended whole or not at all. */
@@ -76,12 +75,10 @@ static void ipv4_text(uint32_t a, char *out, size_t n)
 
 static int render_dev(struct text *t)
 {
-    struct netif_info *ifs = kmalloc(IFS_MAX * sizeof(*ifs), 0);
+    struct netif_info *ifs = kmalloc(NETIF_MAX * sizeof(*ifs), 0);
     if (ifs == NULL)
         return -ENOMEM;
-    unsigned n = netif_list(ifs, IFS_MAX);
-    if (n > IFS_MAX)
-        n = IFS_MAX;
+    unsigned n = netif_list(ifs, NETIF_MAX);   /* every interface: the registry holds no more */
     line(t, "Inter-|   Receive                                                |  Transmit\n");
     line(t, " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls "
             "carrier compressed\n");
@@ -98,9 +95,11 @@ static int render_dev(struct text *t)
 }
 
 /* Linux pads every line of /proc/net/route to 127 characters. */
-static void render_route(struct text *t)
+static int render_route(struct text *t)
 {
-    struct ipv4_route_info r[IPV4_ROUTES_MAX];
+    struct ipv4_route_info *r = kmalloc(IPV4_ROUTES_MAX * sizeof(*r), 0);
+    if (r == NULL)
+        return -ENOMEM;
     unsigned n = ipv4_route_list(r, IPV4_ROUTES_MAX);
     line(t, "%-127s\n", "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT");
     for (unsigned i = 0; i < n; i++) {
@@ -109,6 +108,8 @@ static void render_route(struct text *t)
                   r[i].gateway, r[i].flags, 0, 0u, 0, r[i].mask, 0, 0u, 0u);
         line(t, "%-127s\n", body);
     }
+    kfree(r);
+    return 0;
 }
 
 static int render_arp(struct text *t)
@@ -176,14 +177,13 @@ static int render_tcp(struct text *t, uint16_t family)
     struct tcp_sock_info *s = kmalloc(SOCKS_MAX * sizeof(*s), 0);
     if (s == NULL)
         return -ENOMEM;
-    unsigned n = tcp_list(s, SOCKS_MAX);
+    unsigned n = tcp_list(s, SOCKS_MAX, family);   /* this family's alone, chosen under the lock */
     if (n > SOCKS_MAX)
         n = SOCKS_MAX;
     line(t, "%-149s\n", "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode");
     unsigned sl = 0;
     for (unsigned i = 0; i < n; i++)
-        if (s[i].local.family == family)
-            sock_line(t, sl++, &s[i].local, &s[i].remote, linux_tcp_state(s[i].state), s[i].txq, s[i].rxq, true, 0);
+        sock_line(t, sl++, &s[i].local, &s[i].remote, linux_tcp_state(s[i].state), s[i].txq, s[i].rxq, true, 0);
     kfree(s);
     return 0;
 }
@@ -193,15 +193,13 @@ static int render_udp(struct text *t, uint16_t family)
     struct udp_sock_info *s = kmalloc(SOCKS_MAX * sizeof(*s), 0);
     if (s == NULL)
         return -ENOMEM;
-    unsigned n = udp_list(s, SOCKS_MAX);
+    unsigned n = udp_list(s, SOCKS_MAX, family);   /* this family's alone, chosen under the lock */
     if (n > SOCKS_MAX)
         n = SOCKS_MAX;
     line(t, "%-127s\n", "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout "
                        "inode ref pointer drops");
     unsigned sl = 0;
     for (unsigned i = 0; i < n; i++) {
-        if (s[i].local.family != family)
-            continue;
         /* 01 (ESTABLISHED) once connected, else 07 (CLOSE), as Linux shows a UDP socket. */
         unsigned st = s[i].remote.port != 0 ? 0x01 : 0x07;
         struct netaddr r = s[i].remote;
@@ -216,12 +214,10 @@ static int render_udp(struct text *t, uint16_t family)
  * (0x80 permanent), all hex, then the name right-aligned in eight. */
 static int render_if_inet6(struct text *t)
 {
-    struct netif_info *ifs = kmalloc(IFS_MAX * sizeof(*ifs), 0);
+    struct netif_info *ifs = kmalloc(NETIF_MAX * sizeof(*ifs), 0);
     if (ifs == NULL)
         return -ENOMEM;
-    unsigned n = netif_list(ifs, IFS_MAX);
-    if (n > IFS_MAX)
-        n = IFS_MAX;
+    unsigned n = netif_list(ifs, NETIF_MAX);   /* every interface: the registry holds no more */
     for (unsigned i = 0; i < n; i++) {
         struct in6_addr a;
         unsigned prefix, scope;
@@ -254,7 +250,7 @@ int procnet_render(enum procnet_file f, char *out, size_t n)
     int rc = 0;
     switch (f) {
     case PROCNET_DEV:      rc = render_dev(&t); break;
-    case PROCNET_ROUTE:    render_route(&t); break;
+    case PROCNET_ROUTE:    rc = render_route(&t); break;
     case PROCNET_ARP:      rc = render_arp(&t); break;
     case PROCNET_TCP:      rc = render_tcp(&t, COSMO_AF_INET); break;
     case PROCNET_TCP6:     rc = render_tcp(&t, COSMO_AF_INET6); break;

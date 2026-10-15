@@ -551,7 +551,8 @@ def stage_inspect(b, results):
     out = b.status("ifconfig eth1 10.0.3.15 netmask 255.255.255.0", "set-addr")
     need(out, r"^set-addr=0$", "ifconfig eth1 10.0.3.15 netmask 255.255.255.0 as root")
     out = b.run("ip -4 a show eth1; ip r; ifconfig eth1")
-    need(out, r"^    inet 10\.0\.3\.15/24 brd 10\.0\.3\.255 scope global ", "ip a: eth1's new address")
+    # Set by hand, so not the lease's: no "dynamic", no lease lifetime.
+    need(out, r"^    inet 10\.0\.3\.15/24 brd 10\.0\.3\.255 scope global eth1$", "ip a: eth1's new address, static")
     need(out, r"^10\.0\.3\.0/24 dev eth1 proto kernel scope link src 10\.0\.3\.15$", "ip r: eth1's new subnet")
     need(out, r"^default via 10\.0\.2\.2 dev eth0 ", "ip r: the default still through eth0")
     need(out, r"^\s+inet addr:10\.0\.3\.15\s+Bcast:10\.0\.3\.255\s+Mask:255\.255\.255\.0$", "ifconfig eth1")

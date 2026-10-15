@@ -911,23 +911,26 @@ means some were left out); the caller formats with no lock held (N32).
 **`bool netif_info_by_index(unsigned index, struct netif_info *out)`**
 (`netif.h`): name, index, `NETIF_*` flags, MTU, MAC, the IPv4 address,
 mask and gateway, the link-local address (`lo`'s is `::1`) and the
-counters. Any context.
+counters. Any context. The registry holds at most `NETIF_MAX` (32;
+`netif_register` refuses another with `-ENOSPC`), so a `NETIF_MAX` array
+takes every interface and no listing leaves one out.
 **`unsigned ipv4_route_list(struct ipv4_route_info *out, unsigned max)`**
 (`ip.h`): the default route (`IPV4_RTF_UP | IPV4_RTF_GATEWAY`, through
 `netif_default_ipv4`'s interface to its gateway) when it has a gateway,
 then each up, addressed, non-loopback interface's subnet
 (`IPV4_RTF_UP`), with the source the stack picks; at most
-`IPV4_ROUTES_MAX` (17); returns how many it wrote, 0 without memory.
+`IPV4_ROUTES_MAX` (`NETIF_MAX + 1`); returns how many it wrote, 0 without memory.
 Thread context.
 **`unsigned arp_list(struct arp_info *out, unsigned max)`** (`ether.h`):
 address, MAC (zero while resolving), `complete`, the interface's name.
-**`unsigned tcp_list(struct tcp_sock_info *out, unsigned max)`**
-(`tcp.h`): every pcb in the table, its ends (the remote end zero while
+**`unsigned tcp_list(struct tcp_sock_info *out, unsigned max, uint16_t family)`**
+(`tcp.h`): every pcb of that family in the table (chosen under the lock,
+so another family's cannot crowd it out of `max`), its ends (the remote end zero while
 `CLOSED`), state, and queue lengths (bytes unacknowledged and unread; a
 listener's backlog and queued children), read relaxed under the table
 lock alone.
-**`unsigned udp_list(struct udp_sock_info *out, unsigned max)`**
-(`udp.h`): every bound pcb, its ends (remote port 0: not connected),
+**`unsigned udp_list(struct udp_sock_info *out, unsigned max, uint16_t family)`**
+(`udp.h`): every bound pcb of that family, its ends (remote port 0: not connected),
 queued datagrams and drops.
 
 **`int procnet_render(enum procnet_file f, char *out, size_t n)`**
@@ -945,7 +948,7 @@ link-local address, eight counters; 120 bytes), a
 32 bytes), and a `struct cosmo_netctl_neigh_list` and that many
 `struct cosmo_netctl_neigh` (interface, address, MAC,
 `COSMO_NETCTL_NEIGH_INCOMPLETE` or `_REACHABLE`; 20 bytes). Bounds
-`COSMO_NETCTL_MAX_IFS` (16), `_MAX_ROUTES` (17), `_MAX_NEIGH` (64), in
+`COSMO_NETCTL_MAX_IFS` (32, `NETIF_MAX`), `_MAX_ROUTES` (33), `_MAX_NEIGH` (64), in
 `COSMO_NETCTL_SNAPSHOT_MAX`. `ip` reads them (docs/userland).
 
 ## Boot parameters (`kernel/include/kernel/fwcfg.h`, `kernel/include/arch/fwcfg.h`)

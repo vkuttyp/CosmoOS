@@ -95,7 +95,7 @@ struct ipv4_route_info {
     uint32_t src;                  /* the interface's address: what ipv4_source_for picks */
     unsigned flags;                /* IPV4_RTF_* */
 };
-#define IPV4_ROUTES_MAX 17          /* a default and a subnet for each of 16 interfaces */
+#define IPV4_ROUTES_MAX (NETIF_MAX + 1)   /* a default and a subnet for each interface */
 /* Writes at most `max` and returns how many it wrote (0 without memory).
  * Thread context. */
 unsigned ipv4_route_list(struct ipv4_route_info *out, unsigned max);
