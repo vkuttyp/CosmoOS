@@ -120,10 +120,12 @@ unfinished. On the 40x12 surface the two must be on consecutive rows,
 the second continued at column 15 by `fbcon_attach`'s own log line,
 which shows the cursor moved with the screen. A size set by
 `TIOCSWINSZ` before the second switch must have given way to 40x12
-(`tty_console_resized`). Detaching must give back the first console at
+(`tty_console_resized`), and one set after it must survive that
+switch's notice delivered late (9x4 kept). Detaching must give back the first console at
 its size, and the terminal's size with it. It fails with the log replay
 `fbcon_attach` did before (the lines are not there) and without
-`tty_console_resized` (the size stays 7x3), each on both architectures.
+`tty_console_resized` (the size stays 7x3), each on both architectures,
+and with the notice dropping every stored size (the 9x4 is lost).
 
 **`fb-geometry`** is not a boot test: the validator is a pure function,
 so it is a host test (`tests/host/test_fbvalid.c`, ASan/UBSan) and a

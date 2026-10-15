@@ -254,7 +254,8 @@ bool selftest_fb_bench(const char **reason)
  * continues the unfinished one at column 15 (a scroll may since have
  * moved the rows, so they are looked for). A size set by
  * TIOCSWINSZ in between must give way to 40x12 (tty_console_resized,
- * which also raises SIGWINCH). Detaching gives back the console there was,
+ * which also raises SIGWINCH); one set after the switch must survive that
+ * switch's notice arriving late. Detaching gives back the console there was,
  * at its size. Not run over a display driver's surface: detaching would
  * leave the device's screen.
  */
@@ -278,7 +279,7 @@ bool selftest_fb_switch(const char **reason)
     b.base = kmalloc((size_t)b.pitch * b.height, 0);
     struct tty *con = tty_console();
     struct cosmo_ttysize sz;
-    bool attached = false, kept = false, sized = false;
+    bool attached = false, kept = false, sized = false, late = false;
     uint32_t row = 0;
     if (a.base == NULL || b.base == NULL) {
         *reason = "fbcon: no memory for the surfaces";
@@ -314,6 +315,17 @@ bool selftest_fb_switch(const char **reason)
         *reason = "fbcon: the lines written before the switch are not on the new surface";
     else if (!sized)
         *reason = "fbcon: the console's size is not the new surface's 40x12";
+    else {
+        /* fbcon_attach's notice reaching the terminal after a program
+         * set its size: the program's is newer and stays. */
+        uint32_t gen = fbcon_switches();
+        tty_set_size(con, &(struct cosmo_ttysize){ .cols = 9, .rows = 4 });
+        tty_console_resized(gen);
+        tty_get_size(con, &sz);
+        late = sz.cols == 9 && sz.rows == 4;
+        if (!late)
+            *reason = "fbcon: a size set after the switch was dropped by its late notice";
+    }
 out:
     if (attached) {
         fbcon_detach(&b);   /* not attached: ignored */
@@ -324,13 +336,13 @@ out:
     tty_get_size(con, &sz);
     kfree(a.base);
     kfree(b.base);
-    if (!(kept && sized))
+    if (!(kept && sized && late))
         return false;
     CHECK(present1 == present0 && !fbcon_on_surface());
     CHECK(g1.cols == g0.cols && g1.rows == g0.rows);
     CHECK(sz.cols == g0.cols && sz.rows == g0.rows);
     kinfo("selftest: fb-switch: %ux%u, then 60x17 to 40x12 cells: the screen moved (row %u), the cursor "
-          "with it, the terminal's size followed, and %ux%u is back",
+          "with it, the terminal's size followed (a newer one kept), and %ux%u is back",
           g0.cols, g0.rows, row - 1, g1.cols, g1.rows);
     return true;
 }

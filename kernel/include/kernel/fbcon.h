@@ -49,6 +49,10 @@ bool fbcon_geometry(struct fbcon_geometry *out);
 
 /* The cursor, in cells. */
 void fbcon_cursor(uint32_t *col, uint32_t *row);
+/* Surface switches that changed the cell grid so far (fbcon_attach,
+ * fbcon_detach), counted in the console lock's hold that made each: what
+ * a size set by TIOCSWINSZ is newer than (tty_console_resized). */
+uint32_t fbcon_switches(void);
 /* fb-switch: a display driver's surface holds the console (fbcon_attach).
  * Without self-tests, true: fb-switch, never run there, would skip. */
 #if CONFIG_SELFTEST
@@ -67,7 +71,10 @@ static inline bool fbcon_on_surface(void)
  * records what it drew, the driver takes that band with fbcon_take_damage
  * from a thread and flushes it. In panic mode the sink calls panic_flush
  * itself, with the band, after each write: from panic context, with no
- * lock, interrupts in any state and no thread to hand to.
+ * lock, interrupts in any state and no thread to hand to. It returns
+ * whether the band reached the device; when not (a flush already running
+ * below it, a dead device), the band stays pending and the next write's
+ * call covers it.
  */
 struct fbcon_surface {
     void *base;              /* first pixel, kernel virtual, write-back memory */
@@ -77,12 +84,12 @@ struct fbcon_surface {
     uint8_t red_shift, red_bits;
     uint8_t green_shift, green_bits;
     uint8_t blue_shift, blue_bits;
-    void (*panic_flush)(void *arg, uint32_t y0, uint32_t y1);
+    bool (*panic_flush)(void *arg, uint32_t y0, uint32_t y1);
     void *arg;
 };
 
-/* Move the console onto `s`: cleared, then the newest screenful of the
- * log. The previous surface, if any, is dropped (its owner frees it after
+/* Move the console onto `s`: the screen it replaces, or with none before
+ * the newest screenful of the log. The previous surface, if any, is dropped (its owner frees it after
  * this returns). Thread context. 0, -EINVAL (not a usable surface) or
  * -ENOMEM. */
 int fbcon_attach(const struct fbcon_surface *s);

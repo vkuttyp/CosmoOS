@@ -65,6 +65,8 @@ static struct fbcon g_fbcon;
 /* The boot framebuffer's console, kept while a surface is attached so
  * fbcon_detach can go back to it (ready false: there was none). */
 static struct fbcon g_boot_fbcon;
+/* fbcon_switches(): bumped in the hold that changes the cell grid. */
+static uint32_t g_switches;
 
 /* Pixel rows [y0, y1) were drawn: widen the damaged band. Only a surface
  * needs it; the boot framebuffer is scanned out as it is written. */
@@ -301,7 +303,8 @@ static void fbcon_write(struct console_sink *sink, const char *s, size_t len)
         console_in_panic_mode()) {
         uint32_t y0 = c->dmg_y0, y1 = c->dmg_y1;
         c->dmg_y0 = c->dmg_y1 = 0;
-        c->surface->panic_flush(c->surface->arg, y0, y1);
+        if (!c->surface->panic_flush(c->surface->arg, y0, y1))
+            damage(c, y0, y1);   /* not sent: the next line's flush covers it */
     }
 }
 
@@ -488,15 +491,26 @@ bool fbcon_present(void)
     return g_fbcon.ready;
 }
 
+/* The readers below take the console lock: a surface switch replaces
+ * g_fbcon whole, and a copy made meanwhile would mix two screens. The
+ * pixels at `base` stay the owner's (fbcon_geometry's users are the
+ * self-tests, which fb-switch's switches do not run beside). */
 void fbcon_get_stats(struct fbcon_stats *out)
 {
+    arch_irq_state_t st = console_hold();
     *out = g_fbcon.stats;
+    console_release(st);
 }
 
 bool fbcon_geometry(struct fbcon_geometry *out)
 {
-    if (!g_fbcon.ready || out == NULL)
+    if (out == NULL)
         return false;
+    arch_irq_state_t st = console_hold();
+    if (!g_fbcon.ready) {
+        console_release(st);
+        return false;
+    }
     out->base = (volatile void *)g_fbcon.base;
     out->pitch = g_fbcon.pitch;
     out->bytes_pp = g_fbcon.bytes_pp;
@@ -508,7 +522,13 @@ bool fbcon_geometry(struct fbcon_geometry *out)
     out->fg = g_fbcon.fg;
     out->bg = g_fbcon.bg;
     out->scroll_rows = g_fbcon.scroll_rows;
+    console_release(st);
     return true;
+}
+
+uint32_t fbcon_switches(void)
+{
+    return __atomic_load_n(&g_switches, __ATOMIC_ACQUIRE);
 }
 
 #if CONFIG_SELFTEST
@@ -520,10 +540,12 @@ bool fbcon_on_surface(void)
 
 void fbcon_cursor(uint32_t *col, uint32_t *row)
 {
+    arch_irq_state_t st = console_hold();
     if (col)
         *col = g_fbcon.cx;
     if (row)
         *row = g_fbcon.cy;
+    console_release(st);
 }
 
 /*
@@ -623,11 +645,12 @@ int fbcon_attach(const struct fbcon_surface *s)
         fbcon_write(&c->sink, log + start, log_len - start);
     }
     bool resized = !prev.ready || prev.cols != c->cols || prev.rows != c->rows;
+    uint32_t gen = resized ? __atomic_add_fetch(&g_switches, 1, __ATOMIC_RELEASE) : 0;
     console_release(st);
     kfree(log);
     kfree(old_text);
     if (resized)
-        tty_console_resized();
+        tty_console_resized(gen);
     kinfo("fbcon: %ux%u cells of %ux%u pixels on a %ux%u surface, scrolling %u rows at a time", c->cols, c->rows,
           c->cell_w, c->cell_h, c->width, c->height, c->scroll_rows);
     return 0;
@@ -659,10 +682,11 @@ void fbcon_detach(const struct fbcon_surface *s)
         carry_text(c, &prev);
     }
     bool resized = !c->ready || prev.cols != c->cols || prev.rows != c->rows;
+    uint32_t gen = resized ? __atomic_add_fetch(&g_switches, 1, __ATOMIC_RELEASE) : 0;
     console_release(st);
     kfree(old_text);
     if (resized)
-        tty_console_resized();
+        tty_console_resized(gen);
 }
 
 bool fbcon_take_damage(const struct fbcon_surface *s, uint32_t *y0, uint32_t *y1)

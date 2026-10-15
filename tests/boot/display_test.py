@@ -245,8 +245,9 @@ def check_shape(args, face, shape, want_w, want_h, results):
             raise Fail(f"{shape}: the driver set {m.group(2)}x{m.group(3)}, the device offered {args.size}")
 
         # The marker and its command line each fit one row, so neither
-        # wraps at a narrow size (40 columns at 320x200): the prompt, `echo '`
-        # and the closing quote take 14 of them.
+        # wraps at a narrow size (80 columns at 640x480, the smallest
+        # QEMU's firmware boots): the prompt, `echo '` and the closing
+        # quote take 14 of them.
         scale = cell_scale(log, want_w, want_h)
         cols = want_w // (8 * scale)
         marker = f"display-check {shape} {os.getpid() % 100000:05d}: the quick brown fox jumps over 0123456789"

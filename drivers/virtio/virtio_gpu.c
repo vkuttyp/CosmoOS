@@ -318,11 +318,12 @@ static int vgpu_set_scanout(struct vgpu *g, uint32_t resource_id, uint32_t w, ui
     return vgpu_cmd(g, sizeof(*s), sizeof(struct vgpu_hdr), VGPU_RESP_OK_NODATA);
 }
 
-/* Free DMA memory now, or, once a command has timed out (the device may
- * still own it), keep it for vgpu_teardown to free after the reset. */
-static void vgpu_dma_release(struct vgpu *g, size_t len, void *va, dma_addr_t dma)
+/* Free DMA memory now, or, once a command has timed out or when `keep`
+ * (the device may still own it), keep it for vgpu_teardown to free after
+ * a reset the device acknowledged. */
+static void vgpu_dma_keep(struct vgpu *g, bool keep, size_t len, void *va, dma_addr_t dma)
 {
-    if (!g->broken) {
+    if (!g->broken && !keep) {
         dma_free(&g->vdev->dev, len, va, dma);
         return;
     }
@@ -333,16 +334,28 @@ static void vgpu_dma_release(struct vgpu *g, size_t len, void *va, dma_addr_t dm
     g->retained = r;
 }
 
+static void vgpu_dma_release(struct vgpu *g, size_t len, void *va, dma_addr_t dma)
+{
+    vgpu_dma_keep(g, false, len, va, dma);
+}
+
 /* Drop a frame: its host resource (detached first, as the spec asks
- * before the memory goes), its view and its memory. Not attached to fbcon. */
+ * before the memory goes), its view and its memory. Not attached to fbcon.
+ * A detach the device refused (an error response; a timeout sets broken)
+ * leaves the backing attached: the memory is kept as after a timeout. */
 static void vgpu_frame_free(struct vgpu *g, struct vgpu_frame *f)
 {
+    bool keep = false;
     if (f->host_resource && !g->broken) {
         struct vgpu_unref *u = g->cmd.req;
         hdr_init(u, VGPU_CMD_RESOURCE_DETACH_BACKING);
         u->resource_id = f->resource_id;
         u->padding = 0;
-        (void)vgpu_cmd(g, sizeof(*u), sizeof(struct vgpu_hdr), VGPU_RESP_OK_NODATA);
+        if (vgpu_cmd(g, sizeof(*u), sizeof(struct vgpu_hdr), VGPU_RESP_OK_NODATA) != 0) {
+            keep = true;
+            kwarn("virtio-gpu: %s: resource %u's backing not detached: its %u KiB kept until a reset",
+                  g->vdev->dev.name, f->resource_id, (unsigned)((size_t)f->pitch * f->height >> 10));
+        }
         hdr_init(u, VGPU_CMD_RESOURCE_UNREF);
         u->resource_id = f->resource_id;
         (void)vgpu_cmd(g, sizeof(*u), sizeof(struct vgpu_hdr), VGPU_RESP_OK_NODATA);
@@ -350,11 +363,11 @@ static void vgpu_frame_free(struct vgpu *g, struct vgpu_frame *f)
     if (f->view)
         vm_unmap_phys(f->view);
     for (unsigned i = 0; i < f->nchunks; i++)
-        vgpu_dma_release(g, f->chunk_len[i], f->chunk[i], f->chunk_dma[i]);
+        vgpu_dma_keep(g, keep, f->chunk_len[i], f->chunk[i], f->chunk_dma[i]);
     kfree(f);
 }
 
-static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1);
+static bool vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1);
 
 /* Scanout 0 back on the frame fbcon draws, all of it flushed (or off when
  * there is none): after a new frame was put on it and then given up. */
@@ -553,15 +566,18 @@ static void vgpu_thread(void *arg)
  * way). Nothing here takes a tracked lock: a thread's command answered
  * meanwhile is dropped (its waiter never runs again). A line logged from
  * inside (virtq_pop_panic's report of a bad used entry) comes back through
- * fbcon: it is not flushed, so g->panic.req is not rewritten in flight.
+ * fbcon: it is not flushed, so g->panic.req is not rewritten in flight;
+ * false leaves its rows pending for the next line's flush. True: the
+ * band is on the screen.
  */
-static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
+static bool vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
 {
     struct vgpu_frame *f = arg;
     struct vgpu *g = f->g;
     if (g->broken || g->panic_dead || g->panic_busy)
-        return;
+        return false;
     g->panic_busy = true;
+    bool done = false;
     uint32_t types[2] = { VGPU_CMD_TRANSFER_TO_HOST_2D, VGPU_CMD_RESOURCE_FLUSH };
     for (unsigned k = 0; k < 2; k++) {
         if (types[k] == VGPU_CMD_TRANSFER_TO_HOST_2D) {
@@ -598,8 +614,10 @@ static void vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
         }
     }
     g->panic_flushes++;
+    done = true;
 out:
     g->panic_busy = false;
+    return done;
 }
 
 static int vgpu_buf_alloc(struct vgpu *g, struct vgpu_buf *b)
@@ -628,12 +646,17 @@ static void vgpu_teardown(struct vgpu *g)
         mutex_unlock(&g->cmd_lock);
     }
     virtio_device_reset(g->vdev);
+    /* Until the reset takes (status reads 0) the device may still read the
+     * queue and, after a timeout or a refused detach, the kept buffers:
+     * none of it is freed, and no driver binds the device again (U14). */
+    if (g->vdev->tr->get_status(g->vdev) != 0) {
+        kwarn("virtio-gpu: %s: the reset was not acknowledged: its queue and buffers are kept",
+              g->vdev->dev.name);
+        device_retain_dma(&g->vdev->dev);
+        return;
+    }
     if (g->vq)
         virtq_free(g->vq);
-    /* After a timeout the device may own the buffers until the reset
-     * takes: freed only once it has (status reads 0). */
-    if (g->broken && g->vdev->tr->get_status(g->vdev) != 0)
-        return;
     while (g->retained != NULL) {
         struct vgpu_retained *r = g->retained;
         g->retained = r->next;

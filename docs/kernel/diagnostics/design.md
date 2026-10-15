@@ -111,8 +111,11 @@ With no screen before, the contents are the newest screenful of the log
 is in the copy or drawn after the release, never lost; one put in the
 ring while its sink write waits for the lock is drawn twice. A new cell
 grid is the console terminal's new size: `tty_console_resized`, after
-the release, drops a size set by `TIOCSWINSZ` and raises SIGWINCH on
-the foreground group (`docs/kernel/tty/design.md`). The sink itself,
+the release, drops a size set by `TIOCSWINSZ` before the switch (the
+switch's number, `fbcon_switches`, is taken in the hold) and raises
+SIGWINCH on the foreground group (`docs/kernel/tty/design.md`). The
+readers (`fbcon_geometry`, `fbcon_cursor`, `fbcon_get_stats`) take the
+console lock, so a copy never mixes two screens (Codex, PR #387). The sink itself,
 which is on the console's list, stays as it is. The first build copied
 the whole console structure and with it the sink's `next`, which cut
 every sink after fbcon off the list: on Parallels Desktop the serial
@@ -122,7 +125,10 @@ Such a surface is not scanned out as it is written. The sink records the
 pixel rows it drew as one band, and the driver's thread takes it
 (`fbcon_take_damage`) and flushes it. In panic mode no thread runs, so
 the sink calls the surface's `panic_flush` with the band after each
-write; the callback's argument is the surface's own, set before the
+write. It returns whether the band reached the device; when not (a flush
+already running below it, or a dead device) the band is merged back, so
+the next line's flush covers the rows, a scroll's included (Qodo,
+PR #387). The callback's argument is the surface's own, set before the
 switch, so a panic during `fbcon_attach` flushes the surface fbcon is
 drawing. `fbcon_detach` goes back to the boot framebuffer (kept, mapped,
 not drawn while the surface was), which gets the surface's screen the

@@ -280,8 +280,11 @@ MSI-X vectors, the configuration's and one queue's).
   2 s for its response. A response other than the one expected fails the
   operation with its type logged. A command that times out marks the
   device broken: nothing is sent again. Buffers the device may still own
-  are kept on a list and freed only after the reset at removal, and only
-  when the status reads 0.
+  are kept on a list, as is a frame's memory whose
+  `RESOURCE_DETACH_BACKING` the device refused (Codex, PR #387). They,
+  the queue and the request pages are freed only after the reset at
+  removal, and only when the status reads 0; otherwise all of it is
+  kept and `device_retain_dma` keeps any driver off the device (U14).
 - **`RESOURCE_ATTACH_BACKING`** sends its entries as a second descriptor
   after the 32-byte command, as Linux's driver does. Parallels Desktop
   answers 0x1205 (invalid parameter) to the entries in the command's own
@@ -328,7 +331,8 @@ MSI-X vectors, the configuration's and one queue's).
   would take tracked locks, and its waiter never runs again. A line
   logged from inside the flush (`virtq_pop_panic` reporting a bad used
   entry) comes back through fbcon and is not flushed, so the request in
-  flight is not rewritten. A command not answered in time ends the panic
+  flight is not rewritten; it returns false, and fbcon keeps those rows
+  for the next line's flush. A command not answered in time ends the panic
   flushes: every later line would wait as long, and the serial sink after
   fbcon's with it.
 - **After a timeout** (`broken`) no request is built in `g->cmd`, which
