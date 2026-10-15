@@ -85,9 +85,10 @@ area. None is scheduled; a proposed unit below names the ones it closes.
   across a 2 MiB block; its 14 callers are not audited for sizes.
 - `ports/busybox/README.md`'s config regeneration fails at `make
   defconfig` on the macOS build host.
-- The AArch64 boots' 240 s whole-boot timeout: six timeouts in 40 CI runs,
-  all in the entropy job's first boot (`docs/testing/flakes.md`; being
-  widened in its own PR).
+- The AArch64 boots' 240 s whole-boot timeout: three timeouts recorded
+  in `docs/testing/flakes.md`; PR #389 measures six in the last 40 CI
+  runs, all the entropy job's first boot, records them there, and widens
+  the timeout to 300 s.
 
 The 1.0 out-of-scope list ([roadmap-1.0](roadmap-1.0.md#out-of-scope-for-10))
 stands, less "GPU and display", which the virtio-gpu unit began (a text
@@ -99,20 +100,27 @@ For the owner to choose from; none is started. Each names its acceptance
 test, which is the unit's proof under the scope rules (green on main, box
 ticked in the same PR).
 
-- [ ] **P1 Power-off on AArch64.** `poweroff` and init's shutdown call
-  PSCI `SYSTEM_OFF` when semihosting is absent (the conduit is already
-  read from the FADT). Closes the "no power-off" line. (x86-64 has only
-  QEMU's `isa-debug-exit` too; ACPI S5 needs the DSDT's `\_S5` values,
-  so it waits for AML.) **Acceptance:** a `make test-platforms` variant
-  with semihosting disabled boots, runs `exit`, and QEMU exits by itself
-  within the boot budget; on Parallels Desktop the VM stops (manual,
-  recorded in the report).
-- [ ] **P2 Process memory in procfs.** `/proc/<pid>/stat` and
-  `/proc/<pid>/status` report VSZ and RSS from a reference on the target's
-  space taken under the rule exit already follows (P34). **Acceptance:**
-  `test-busybox` runs `ps -o pid,vsz,rss` and `top -b -n 1` and requires a
-  non-zero VSZ and RSS for a running `sleep`; a self-test reads a
-  process's stat while it exits, many times, with no fault or leak.
+- [ ] **P1 Power-off on AArch64.** A `poweroff` command (BusyBox's
+  `CONFIG_POWEROFF` is off today and nothing else provides one) and
+  init's shutdown call PSCI `SYSTEM_OFF` when semihosting is absent (the
+  conduit is already read from the FADT). Closes the "no power-off" line.
+  (x86-64 has only QEMU's `isa-debug-exit` too; ACPI S5 needs the DSDT's
+  `\_S5` values, so it waits for AML.) **Acceptance:** a `make
+  test-platforms` variant with semihosting disabled boots twice, once
+  ending with `poweroff` and once with `exit` from the login shell, and
+  QEMU exits by itself within the boot budget each time; on Parallels
+  Desktop the VM stops (manual, recorded in the report).
+- [ ] **P2 Process memory in procfs.** `/proc/<pid>/stat` reports VSZ
+  and RSS, and `/proc/<pid>/status` gains `VmSize` and `VmRSS`, from a
+  reference on the target's space taken under the rule exit already
+  follows (P34). `/bin/ps` is the native `userland/system/ps.c`, which
+  takes no options and prints no memory: the unit gives it VSZ and RSS
+  columns (or enables BusyBox's `ps`, `CONFIG_PS`, now off).
+  **Acceptance:** `test-busybox` runs `ps` and `top -b -n 1` and requires
+  a non-zero VSZ and RSS for a running `sleep`, and reads that process's
+  `status` for non-zero `VmSize` and `VmRSS`; a self-test reads a
+  process's `stat` and `status` while it exits, many times, with no fault
+  or leak.
 - [ ] **P3 The Parallels-test residue.** The four small defects the
   post-1.0 tests found: `wget`'s bad-certificate exit message, `sftp`'s
   link count, `/dev/zero`'s 64 KiB short read, and the installer's stale
@@ -128,16 +136,21 @@ ticked in the same PR).
   dynamically linked test program using `dlopen`) passes the M3 scripted
   test on both architectures.
 - [ ] **P5 Setting the clock.** `settimeofday`/`clock_settime` under a
-  privilege, and BusyBox `ntpd`. **Acceptance:** `test-net-login` serves
-  NTP from the host harness with a time a day ahead; `ntpd -q` sets
-  `CLOCK_REALTIME` to within 1 s of it, an unprivileged `date -s` is
-  refused, and a privileged one is applied.
+  new operation privilege (`PRIV_TIME`; uid 0 alone grants nothing,
+  `docs/kernel/security/design.md`), and BusyBox `ntpd`.
+  **Acceptance:** `test-net-login` serves NTP from the host harness with
+  a time a day ahead; `ntpd -q` sets `CLOCK_REALTIME` to within 1 s of
+  it; `date -s` is refused both for a non-root user and for root with the
+  bit dropped (`priv -d time -- date -s ...`), and applied with it.
 - [ ] **P6 A network package repository.** `pkg` fetches an index and
   packages over HTTPS from a configured URL, checking the index's and each
-  package's signature against the key ring. **Acceptance:** a test serves
-  a signed repository from the host harness; `pkg update && pkg install`
-  installs from it, and a tampered package and an index signed by another
-  key are refused.
+  package's signature against the key ring, over the same certificate
+  checks as `wget`. **Acceptance:** a test serves a signed repository
+  from the host harness; `pkg update && pkg install` installs from it; a
+  tampered package and an index signed by another key are refused; and
+  the same repository behind an untrusted, an expired and a wrongly named
+  certificate is refused before any index is read (a signature does not
+  stop the replay of an older signed index, `docs/pkg/invariants.md`).
 
 Larger items, not proposed as one unit until scoped: SATA on Parallels
 (an AML interpreter, or a DSDT-described AHCI path with no generic AML),
