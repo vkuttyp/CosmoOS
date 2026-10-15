@@ -70,10 +70,30 @@ fails: `QEMU still running 60 s after 'exit'`, the log ending
 - Local debug boots on the branch: x86-64 PASS in 149.2 s, AArch64 PASS in
   166.0 s; `make host-test` passes; the x86-64 and AArch64 release builds
   compile.
-- CI on the PR: the full workflow (the matrix's boots on both
-  architectures, `platforms`, the guide). The local matrix was not run:
-  the kernel change is the shutdown path's end and one early return in
-  the AArch64 trap handler for a PC in the exception table.
+- **The validation matrix**, on `7d6b53b3` (the review's commit), every
+  step PASS; the boot times are the harness's own lines:
+
+  | Step | x86-64 | AArch64 |
+  |---|---|---|
+  | `host-test`, `fuzz`, `analyze` | pass | pass |
+  | debug `test`, `QEMU_SMP=1` / `2` / `4` | 135.3 / 150.9 / 153.2 s | 149.9 / 149.4 / 163.3 s |
+  | `test-smp2` | 155.7 s | 158.9 s |
+  | `test-chaos` | 154.1 s | 151.4 s |
+  | `test-harness-retry` | 155.9 s | 154.1 s |
+  | `BUILD=release test` | 18.1 s | 21.5 s |
+  | `test-platforms` (8 variants) | -- | pass |
+
+  The network harness passed in every debug boot (the boot test requires
+  it).
+- **`tools/semihost-undef-probe.py`** (AArch64 only: x86-64's exit is an
+  I/O port write, which no machine takes as undefined): `--old`
+  reverse-applies the fix commit's `kernel/arch/aarch64/trap.c` in a
+  throwaway worktree and `psci-exit` fails with the undefined-instruction
+  panic (`PROBE: PASS arch=aarch64 mode=old`); without `--old` it passes
+  through PSCI (`mode=fixed`).
+- Review (Qodo): test-platforms now also fails on a `KERNEL PANIC` after
+  the closing command, which a semihosting failure exit (35) would
+  otherwise only report as a status.
 
 ## Not done here
 
