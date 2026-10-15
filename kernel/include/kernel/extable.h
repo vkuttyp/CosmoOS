@@ -2,7 +2,8 @@
  * extable.h - The exception fixup table (docs/kernel/memory/design.md §6.1).
  *
  * An instruction that may fault on a user address and has a recovery
- * path is listed here by the assembly that contains it:
+ * path is listed here by the assembly that contains it (and one that may
+ * be undefined: AArch64's semihosting exit, arch/aarch64/shutdown.c):
  *
  *     1:  <access>
  *     .pushsection .ex_table, "a"

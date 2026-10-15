@@ -622,7 +622,8 @@ Neither sleeps, allocates nor takes a lock.
 | SMMUv3 interrupts | IORT GSIVs | `VIRT_SMMU_EVENTQ_INTID` 106, `VIRT_SMMU_GERROR_INTID` 109 | the SMMU is not used (`kwarn`): 0 would be an SGI, accepted by `irq_request` and never delivered, so its event queue would never drain |
 | fw_cfg | QEMU only, `VIRT_FWCFG_BASE` | — | absent: `opt/cosmo/` keys unset |
 | RTC | QEMU only, `VIRT_PL031_BASE` | — | `arch_rtc_read_epoch` returns false |
-| Emulator exit | QEMU only, semihosting | — | `arch_emulator_exit` returns |
+| Emulator exit | QEMU only, semihosting | — | `arch_emulator_exit` returns (also on a QEMU without semihosting: the HLT's exception-table entry) |
+| Power-off | PSCI `SYSTEM_OFF`, the FADT's conduit | HVC on QEMU's firmware when the FADT says nothing | `shutdown: no PSCI to power off with`, then the halt |
 
 The GTDT offsets were wrong until this change: the timer read 80 and 88
 (`CntReadBase` and the platform timer count), which never passed the PPI
@@ -693,7 +694,14 @@ configurations.
   `ADP_Stopped_ApplicationExit`, `(code << 1) | 1` }) so QEMU's exit
   status matches what the harness already decodes for the x86
   isa-debug-exit device; only on QEMU's firmware, since elsewhere
-  `hlt #0xF000` is an undefined instruction, not an exit.
+  `hlt #0xF000` may enter an external debugger. A QEMU started without
+  `-semihosting-config` takes it as an undefined instruction: the HLT is
+  in the exception table, `handle_sync` offers an EL1 undefined
+  instruction the fixup first, and execution resumes after it. When the
+  exit returns, `kernel_shutdown` calls `arch_power_off`, here PSCI
+  `SYSTEM_OFF` (`aarch64_psci_system_off`, `smp.c`, the conduit read
+  afresh since a one-CPU boot never probes it), and halts only if that
+  returns (A27). The panic path does not power off.
 - **DMA**: `dma_sync_for_device/for_cpu` call the new `arch_dma_barrier()`
   (`dsb sy` here, a store fence on x86). The `virt` PCI bus is
   DMA-coherent; cache maintenance for non-coherent devices is out of

@@ -74,6 +74,9 @@ main(argc, argv):
   --spin     → for (;;) ;                                 (a CPU-bound loop, for the kernel test)
   print "init: CosmoOS userland, pid N"                   (N is 1 only when no self-tests ran first)
   setenv PATH=/bin:/sbin:/usr/bin:/usr/sbin HOME=/
+  sigaction(SIGUSR2): print "init: power off requested"; sync(); _exit(0)
+                                                          (BusyBox poweroff's signal; in the handler,
+                                                           so it cannot fall between a check and the wait)
   if stat("/etc/rc") ok: pid = spawnvp("/bin/sh", {"sh", "/etc/rc"}); waitpid(pid); print "init: rc exited N"
   for (;;)
       pid = spawnvp("/bin/sh", {"sh"}, NULL, 0)          (inherits 0,1,2)

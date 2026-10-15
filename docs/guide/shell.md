@@ -75,7 +75,7 @@ cosmo$ ls /bin
 
 The applets are `sh` (ash) and `[ awk basename cat chmod clear cmp cp
 cut date dd df diff dirname du echo env expr false find free grep gunzip
-gzip head hexdump id less ln ls md5sum mkdir mv nslookup ping printf pwd
+gzip head hexdump id less ln ls md5sum mkdir mv nslookup ping poweroff printf pwd
 readlink rm rmdir sed seq sha256sum sleep sort stat stty tail tar tee
 test top touch tr true tty uname uniq uptime vi wc wget which whoami
 xargs` (`ports/busybox/applets`); `/sbin` holds CosmoOS's own
@@ -118,7 +118,8 @@ process memory sizes; no hard links (`ln` without `-s`); no `/sys`; one
 user, root; no swap. [Known limitations](limitations.md) has the full
 list.
 
-Power off with `exit`; QEMU exits once the disk is synced:
+Power off with `exit` (or `poweroff`, which works from any shell); QEMU
+exits once the disk is synced:
 
 <!-- test: console -->
 ```console

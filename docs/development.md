@@ -451,6 +451,14 @@ or `cosmoboot: FATAL`. A non-zero exit status from `init` makes the
 kernel report failure through the same port. On hardware or an emulator without the device the port
 write is ignored and the kernel simply halts.
 
+AArch64 carries the same values through semihosting (`SYS_EXIT_EXTENDED`,
+so QEMU exits 33 or 35 there too). Where semihosting is absent -- a QEMU
+without `-semihosting-config` (`QEMU_SEMIHOSTING=0`), Parallels Desktop,
+other firmware -- the kernel powers off through PSCI `SYSTEM_OFF` and
+QEMU exits **0** whatever the boot's result, so a harness without
+semihosting reads the outcome from the log (`shutdown: exit status N`;
+`make test-platforms`' `psci-exit` and `psci-poweroff`).
+
 ## Benchmark runs
 
 A debug boot's benchmark lines (`net-nicbench`, `irqrestore-bench`,
