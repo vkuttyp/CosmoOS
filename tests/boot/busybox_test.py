@@ -6,7 +6,8 @@
 
 One boot of the image. At the console, /bin/sh -- BusyBox ash -- runs
 tests/busybox/ash.sh, the scripted test of every applet and of the
-shell's features, which must end "BBTEST: PASS"; then
+shell's features, which must end "BBTEST: PASS"; then an interactive ash
+whose command must be in /root/.ash_history and recalled by the next; then
 tests/busybox/suite.sh, BusyBox's own testsuite for the files decision 8
 names. Every testsuite case must PASS, be SKIPPED or UNTESTED by
 runtest itself (a feature the configuration leaves out), or be in
@@ -35,8 +36,6 @@ EXCLUDED = {
     ("sed", "sed embedded NUL"): _ON_LINUX,
     ("sed", "sed NUL in command"): _ON_LINUX,
     ("sed", "sed nonexistent label"): _ON_LINUX,
-    ("tar", "tar_with_link_with_size"): "needs bunzip2, not an M3 applet",
-    ("tar", "tar_with_prefix_fields"): "needs bunzip2, not an M3 applet",
     ("tar", "tar Symlink attack: create symlink and then write through it"): "needs uudecode, not an M3 applet",
     ("tar", "tar hardlinks and repeated files"): _HARDLINK,
     ("tar", "tar hardlinks mode"): _HARDLINK,
@@ -94,6 +93,22 @@ def main():
         if not m or "BBTEST: PASS" not in script or failed:
             raise Fail("scripted test: " + ("; ".join(failed) if failed else "no verdict line"))
         lines.append(f"scripted test: PASS, {m.group(1)} checks")
+        # ash's history (shell completeness S2): an interactive ash on the
+        # console keeps each command in $HOME/.ash_history (HOME=/root), and
+        # a new ash reads it back.
+        marker = f"echo bbhist-{os.getpid()}"
+        b.run("sh")
+        b.run(marker)
+        b.run("exit")
+        out = b.run("cat /root/.ash_history")
+        if not re.search(rf"^{re.escape(marker)}$", out, re.M):
+            raise Fail(f"ash history: /root/.ash_history lacks {marker!r}: {out[-400:]!r}")
+        b.run("sh")
+        out = b.run("history")
+        b.run("exit")
+        if not re.search(rf"^\s*\d+\s+{re.escape(marker)}$", out, re.M):
+            raise Fail(f"ash history: a new ash does not recall {marker!r}: {out[-400:]!r}")
+        lines.append(f"ash history: {marker!r} in /root/.ash_history, recalled by a new ash")
         t1 = time.monotonic()
         out = b.run("/bin/sh -c 'BBSUITE_VERBOSE=1 /bin/sh /boot/tests/busybox/suite.sh'" if args.verbose
                     else "/bin/sh /boot/tests/busybox/suite.sh")

@@ -1,0 +1,6 @@
+# /dev/log into the kernel's log (shell completeness S2): what logger and
+# syslog(3) send, so dmesg and the console show it. No privileges: the
+# kernel's rate limit for an unprivileged writer applies to it.
+exec /sbin/syslogd
+privileges none
+restart always

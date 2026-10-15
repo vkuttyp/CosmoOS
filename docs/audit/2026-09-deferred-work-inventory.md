@@ -1180,3 +1180,16 @@ each; none is needed by M2's acceptance test.
   GPT's backup header is not on the last sector, the kernel refuses the
   table and `cosmo-install` finds no ESP to copy (seen by S1's Parallels
   test with a 128 MiB disk).
+
+## 12. Shell completeness S2 follow-ups (2026-10-15)
+
+- `/dev/log` is writable by root alone: a unix socket's node is made 0755
+  and owned by the binder (`kernel/ipc/unix.c`), and the native ABI has no
+  `chmod` for `syslogd` to open it up, so `logger` from another uid is
+  refused. Every login here is root's today.
+- BusyBox's `xz` decompresses only (`xz -d`, `-c`); there is no `xz`
+  compressor in the image.
+- `syslogd` writes no file and keeps no ring of its own: the kernel's log
+  is the record, and an unprivileged writer's rate limit drops a burst
+  (counted on the next line through).
+

@@ -8,7 +8,7 @@ USER_LD := $(ROOT)/userland/user.ld
 
 # name := directory
 USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir mkfifo rmdir pwd true false sleep sync
-USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl cosmo-install netcfg priv ip
+USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl cosmo-install netcfg priv ip syslogd
 
 PROG_DIR_sh     := shell
 PROG_DIR_echo   := coreutils
@@ -36,6 +36,7 @@ PROG_EXTRA_SRCS_vmctl := tools/fdt/fdt.c tools/fdt/fdt_read.c userland/system/vq
 PROG_DIR_hostname := system
 PROG_DIR_netcfg := system
 PROG_DIR_ip := system
+PROG_DIR_syslogd := system
 PROG_DIR_priv := system
 PROG_DIR_svc    := system
 PROG_DIR_fsctl  := system
@@ -85,6 +86,7 @@ USER_ARCHIVE_ENTRIES := \
 	etc/group=$(ROOT)/userland/etc/group \
 	etc/svc/hello=$(ROOT)/userland/etc/svc/hello \
 	etc/svc/greeter=$(ROOT)/userland/etc/svc/greeter \
+	etc/svc/syslogd=$(ROOT)/userland/etc/svc/syslogd \
 	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf \
 	etc/pkg/keys/$(notdir $(PKG_TRUST_PUB))=$(PKG_TRUST_PUB)
 ifeq ($(SELFTEST),1)
@@ -93,7 +95,7 @@ USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(
 endif
 USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
 	$(ROOT)/userland/etc/pkg/repos.conf $(PKG_TRUST_PUB) $(ROOT)/userland/etc/passwd $(ROOT)/userland/etc/group \
-	$(ROOT)/userland/etc/svc/hello $(ROOT)/userland/etc/svc/greeter
+	$(ROOT)/userland/etc/svc/hello $(ROOT)/userland/etc/svc/greeter $(ROOT)/userland/etc/svc/syslogd
 
 .PHONY: userland
 userland: $(USER_ELFS)

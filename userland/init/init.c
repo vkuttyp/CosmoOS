@@ -5619,7 +5619,10 @@ static void poweroff_signal(int sig)
     _exit(0);
 }
 
-static const char *const g_shell_env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", "HOME=/", "PS1=cosmo$ ", NULL };
+/* HOME is root's home, as /etc/passwd and an ssh session name it (shell
+ * completeness S2): ash keeps its history in $HOME/.ash_history, and `cd`
+ * alone goes there. It was "/", where history would land in /. */
+static const char *const g_shell_env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", "HOME=/root", "PS1=cosmo$ ", NULL };
 
 /* `session`: the console shell leads a session whose controlling terminal
  * is the console, with its group in the foreground (COSMO_SPAWN_SETSID),
@@ -6002,8 +6005,12 @@ int main(int argc, char **argv)
     pa.sa_handler = poweroff_signal;
     sigaction(SIGUSR2, &pa, NULL);
     setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin", 1);
-    setenv("HOME", "/", 1);
+    setenv("HOME", "/root", 1);
     bool disk_root = switch_to_disk_root();
+    /* Root's home on whichever root is in use: an installed disk has it
+     * (cosmo-install makes it), the live image's ramfs root does not. */
+    if (mkdir("/root", 0700) < 0 && errno != EEXIST)
+        fprintf(stderr, "init: mkdir /root: %s\n", strerror(errno));
     fflush(stdout);
     struct stat st;
     char shell[128];

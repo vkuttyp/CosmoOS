@@ -310,7 +310,22 @@ console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
   `clear`, `less` writing to a pipe, `uptime`'s load averages, `free`,
   `df /`, the `/proc` files they read (`mounts`, `<pid>/cmdline`,
   `<pid>/stat`), `top -b -n 1` (its memory and load lines and its own
-  command line), and `vi` driven by keystrokes from a pipe.
+  command line), and `vi` driven by keystrokes from a pipe. Then shell
+  completeness S2's applets, each with known input and output: `more` and
+  `nl` and `tac` on three lines, `od -b`, `strings` of a binary file, `rev`,
+  `yes | head`, `cal 2 2024`'s title, `time -p`'s `real` line, `timeout 1
+  sleep 10` (143), `watch` under `timeout`, `nohup`, `install -m 0640`,
+  `realpath` through `..`, `split -l 4` of ten lines (4 4 2), `fold -w 3`,
+  `paste`, `comm -12`, `cksum` of a known line, `base64` both ways, `unxz`
+  and `xz -dc` of a fixture made on the host (BusyBox's `xz` decompresses
+  only), `unzip` of a fixture, `bzip2`/`bunzip2` and `gzip`/`zcat` round
+  trips, `mktemp`, `setsid` (the child leads its session); `pgrep -f` and
+  `pidof` find a background `sleep`, `pkill -f` and `killall` end one (its
+  status 143); and `logger -t TAG` reaches the kernel's log through
+  `syslogd` (`dmesg` shows `syslog: [user.notice] TAG: ...`).
+- **ash's history** (shell completeness S2): `sh` at the console, a
+  command unique to the run, `exit`; `/root/.ash_history` must hold it,
+  and a second `sh`'s `history` must list it.
 - **`suite.sh`, BusyBox's testsuite**: the files decision 8 names -- cut,
   sed, grep, tr, sort, uniq, head, tail, expr, seq, basename, dirname, wc,
   xargs, tar -- each through runtest, from a copy of the testsuite (a
@@ -325,8 +340,6 @@ console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
 | sed | sed embedded NUL | fails the same way under Linux (arm64 container, this binary and testsuite): this build's behaviour, not the kernel's |
 | sed | sed NUL in command | the same |
 | sed | sed nonexistent label | the same |
-| tar | tar_with_link_with_size | needs `bunzip2`, not an M3 applet |
-| tar | tar_with_prefix_fields | needs `bunzip2` |
 | tar | tar Symlink attack: create symlink and then write through it | needs `uudecode`, not an M3 applet |
 | tar | tar hardlinks and repeated files | makes a hard link; hard links are outside M3 |
 | tar | tar hardlinks mode | makes a hard link |

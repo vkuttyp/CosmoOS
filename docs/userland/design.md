@@ -37,7 +37,7 @@ system (`ports/busybox/README.md`). `/bin/busybox` and one symbolic
 link per applet of `ports/busybox/applets` -- the 48 of M3's decision
 7, `/bin/sh` among them, M4's `wget`, `nslookup`, `stty` and `tty`, and
 the later units' (S1's `ifconfig`, `route`, `netstat`, `arp` and
-`hostname` among them) -- come from the boot archive
+`hostname`, S2's 33 everyday applets) -- come from the boot archive
 (`mkbootarchive.py`'s `NAME@TARGET` entries, ustar type 2; the kernel
 makes them with `vfs_symlink` in `ramfs_populate_boot`). A native program
 whose name an applet takes is installed as `/bin/cosmo-<name>`
@@ -62,8 +62,14 @@ in the foreground, so ash's job control (`ASH_JOB_CONTROL`, on since
 roadmap M4: `jobs`, `fg`, `bg`, `^Z`) finds the terminal its own; `/etc/rc`
 runs without, so what it starts in the background does not hear the
 console hang up when rc exits. init gives the shell
-`PATH=/bin:/sbin:/usr/bin:/usr/sbin`, `HOME=/` and `PS1=cosmo$ `, so
-either shell shows the prompt the harnesses wait for. `/etc/rc` runs
+`PATH=/bin:/sbin:/usr/bin:/usr/sbin`, `HOME=/root` and `PS1=cosmo$ `, so
+either shell shows the prompt the harnesses wait for. `HOME` was `/`
+until shell completeness S2; it is root's home now, as `/etc/passwd` and
+an ssh session name it, so ash keeps its history in
+`/root/.ash_history` (each command as it is entered,
+`FEATURE_EDITING_SAVE_ON_EXIT` being off) and `cd` alone goes there. init
+makes `/root` (0700) after choosing the root, since the live image's
+ramfs root has none. `/etc/rc` runs
 `/etc/rc.test` with `cosmo-sh`, and `rc.test` runs its inner shells as
 `cosmo-sh -c`: it is the native shell's test. Its commands (`cat`, `ls`,
 `cp`, ...) are BusyBox's now.
@@ -366,6 +372,23 @@ write-and-rename way, and sets it with `sethostname`. `/etc/rc` applies
 name a server gave once is kept by a later boot whose server names none,
 and a name written there by hand is the machine's until a server names
 another.
+
+## syslogd (`userland/system/syslogd.c`; shell completeness S2)
+
+`/dev/log` into the kernel's log. musl's `syslog(3)` -- BusyBox's
+`logger`, and any program that logs -- sends each message as a datagram to
+the unix socket `/dev/log` as `<PRI>Mmm dd hh:mm:ss TAG: TEXT`. The
+`syslogd` service (`/etc/svc/syslogd`, `privileges none`, `restart
+always`) binds it and writes each message with `SYS_log` as `syslog:
+[FACILITY.LEVEL] TAG: TEXT`: the priority by name, the timestamp dropped
+(the kernel's line has its own), control characters blanked, the line cut
+to what one log line takes (199 bytes). `dmesg` and the console show it;
+nothing is written to a file. With no privileges the kernel's rate limit
+for an unprivileged writer applies to it as to any process: a burst past
+it is dropped, and the next line that gets through says how many were.
+The socket's node is the kernel's 0755, owned by root (the native ABI has
+no `chmod`), so only root's processes can send to it; every login here
+is root's (inventory).
 
 ## ip (`userland/system/ip.c`; shell completeness S1)
 

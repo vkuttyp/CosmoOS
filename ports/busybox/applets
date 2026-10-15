@@ -83,3 +83,39 @@ route
 netstat
 arp
 hostname
+# Shell completeness S2: the everyday applets a shell session reaches for.
+# xz is BusyBox's, which decompresses only (xz -d, -c); logger writes to
+# /dev/log, which /sbin/syslogd copies into the kernel's log.
+more
+nl
+od
+strings
+rev
+tac
+yes
+cal
+time
+timeout
+watch
+nohup
+killall
+pgrep
+pkill
+pidof
+install
+realpath
+split
+fold
+paste
+comm
+cksum
+base64
+unzip
+bzip2
+bunzip2
+xz
+unxz
+zcat
+mktemp
+logger
+setsid
