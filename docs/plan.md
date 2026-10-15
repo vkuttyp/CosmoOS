@@ -626,7 +626,10 @@ Sources: inventory §§2.10, 2.11 and 3,
   passing, on runners of two speeds (about 125 s and about 165 s a boot);
   the suite had grown to within 5 s of the budget on the slow kind, and
   the merge of PR #325 timed out its `test-harness-retry` boot at 184 s
-  with every self-test passed. `BOOT_TIMEOUT` is 240 s on both.
+  with every self-test passed. `BOOT_TIMEOUT` was then 240 s on both.
+  *2026-10-15:* AArch64 300 s: over the last 40 CI runs its entropy job's
+  146 boots had a median of 212 s, its passing ones at most 235.7 s, and
+  six no-entropy boots timed out at 240 s (estimated 240-246 s whole).
 - [ ] **Validation — physical hardware matrix.** Establish repeatable AMD, Intel
   and Apple Silicon testing where supported; state which firmware/device paths
   are actually exercised rather than inferring hardware success from QEMU.
