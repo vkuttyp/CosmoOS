@@ -368,6 +368,11 @@ Codex's review of `dc1c4f50`:
   them went unseen. The flag is now part of the snapshot
   (`fbcon_geometry`'s `surface`, read in the hold that reads `base`), and
   `fbcon_on_surface` is gone; `fb-switch` uses the same field.
+- **One screendump a fixed second after the serial line** (CosmoReview,
+  on `6c2da20b`): the screen trails the serial console by the driver's
+  16 ms flush, and a fixed settle is the flaky shape. Each screen check
+  now takes screendumps until its text is there, for at most 10 s
+  (`screen_until`); the assertions are unchanged.
 - **The unit is outside the current milestone** (Codex): not changed.
   The 1.0 roadmap is complete (v1.0.0, M6); this is the last item of the
   post-1.0 queue the project owner set.

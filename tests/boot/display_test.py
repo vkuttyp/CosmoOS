@@ -214,6 +214,20 @@ def screen(sock, path, face, w, h, scale):
     return decode(sw, sh, px, face, scale)
 
 
+def screen_until(sock, path, face, w, h, scale, shown, budget=10.0):
+    """Screendumps until `shown(lines)` holds or `budget` seconds pass;
+    the last screen either way, for the caller's verdict. The serial
+    console leads the screen: the driver's thread flushes what fbcon drew
+    every 16 ms, so one screendump right after a serial line can be early
+    (CosmoReview, PR #387)."""
+    deadline = time.monotonic() + budget
+    while True:
+        lines = screen(sock, path, face, w, h, scale)
+        if shown(lines) or time.monotonic() > deadline:
+            return lines
+        time.sleep(0.25)
+
+
 def lockdep_held_elsewhere(line):
     """The seam's word, read back after its store: not free, and not this
     CPU's (an owner is its CPU's id + 1). Without the hold the panic is an
@@ -239,8 +253,9 @@ def panic_screen(args, face, image, name, what, message, check=None):
                 raise Fail(f"{name}: the crash-test kernel did not panic (no `halting.` on the serial console)")
             time.sleep(0.2)
         need(b.text(), r"^\[ INFO\] virtio-gpu: \S+: scanout 0 ", "the virtio-gpu driver before the panic")
-        time.sleep(1.0)   # nothing should change now; the panic flushed as it wrote
-        lines = screen(sock, os.path.join(args.workdir, f"{name}.ppm"), face, w, h, cell_scale(b.text(), w, h))
+        # The panic flushed as it wrote; nothing changes after `halting.`.
+        lines = screen_until(sock, os.path.join(args.workdir, f"{name}.ppm"), face, w, h, cell_scale(b.text(), w, h),
+                             lambda ls: any(ln.startswith("KERNEL PANIC: " + message) for ln in ls))
         line = need(b.text(), r"^KERNEL PANIC: " + re.escape(message) + r".*$", f"{name}: the crash test's own panic")
         if check is not None:
             check(line.group(0))
@@ -330,8 +345,7 @@ def check_shape(args, face, shape, want_w, want_h, results):
         marker = marker[:max(16, min(len(marker), cols - 15))].rstrip()
         out = b.run(f"echo '{marker}'")
         need(out, "^" + re.escape(marker) + "$", "the marker on the serial console")
-        time.sleep(1.0)   # the driver flushes every 16 ms
-        lines = screen(sock, shot, face, want_w, want_h, scale)
+        lines = screen_until(sock, shot, face, want_w, want_h, scale, lambda ls: marker in ls)
 
         bad = [(i, ln) for i, ln in enumerate(lines) if "\0" in ln]
         if bad:
@@ -370,10 +384,9 @@ def check_resize(args, face, b, sock, vnc, w0, h0, marker, results):
             raise Fail(f"resize: the driver did not follow the display to {w}x{h} in 30 s")
         time.sleep(0.2)
     m = want.search(b.text())
-    time.sleep(1.0)   # the driver flushes every 16 ms
     shot = os.path.join(args.workdir, "screen-resized.ppm")
     scale = cell_scale(b.text(), w, h)
-    lines = screen(sock, shot, face, w, h, scale)
+    lines = screen_until(sock, shot, face, w, h, scale, lambda ls: marker in ls)
     bad = [(i, ln) for i, ln in enumerate(lines) if "\0" in ln]
     if bad:
         raise Fail(f"resize: {len(bad)} screen row(s) hold a cell that is no glyph, the first row {bad[0][0]}")
