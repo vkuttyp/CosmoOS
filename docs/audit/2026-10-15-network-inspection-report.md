@@ -73,7 +73,53 @@ step of stage g fails at its first command (`ip: not found`).
 
 ## Validation
 
-(filled in from the validation matrix run)
+- `make test-net-login` on the branch: x86-64 PASS in 68.0 s, AArch64
+  PASS in 72.9 s (stage g as above, every line of it; the reboot keeps
+  `cosmo-s1`).
+- **The validation matrix**, on `781c122d` (the boots) and `b8cf3fc4`
+  (`fuzz`, `analyze` and `host-test` again, after the fuzz shim gained
+  `netif_list`), every step PASS; the boot times are the harness's own
+  lines:
+
+  | Step | x86-64 | AArch64 |
+  |---|---|---|
+  | `host-test`, `fuzz`, `analyze` | pass | pass |
+  | debug `test`, `QEMU_SMP=1` / `2` / `4` | 142.6 / 151.2 / 154.4 s | 137.3 / 148.0 / 160.6 s |
+  | `test-smp2` | 144.0 s | 172.6 s |
+  | `test-chaos` | 145.5 s | 164.7 s |
+  | `test-harness-retry` | 152.4 s | 155.2 s |
+  | `BUILD=release test` | 18.2 s | 21.7 s |
+  | `BUILD=release test-busybox` | 36.1 s | 42.3 s |
+
+  The network harness passed in every debug boot (the boot test requires
+  it). The first `fuzz` run failed to link: the shim had no
+  `netif_list`, which `ipv4_route_list` reads. The first `analyze` run
+  refused to judge: the boots were built with swiftly's clang (first on
+  `PATH`), for which there is no reviewed baseline; `analyze` was then
+  run with Apple's clang, which the baseline covers.
+- **Parallels Desktop 27.0.3, by hand** (`prl_s1.py` over the VM's serial
+  socket), in a VM made for this (`CosmoOS S1 network`: the branch's
+  AArch64 release image on a 66 MiB plain NVMe disk, a blank 512 MiB NVMe
+  disk, 2 CPUs, shared network): `cosmo-install nvme0n2` installed, the
+  installed disk booted (`switched to the disk root nvme0n2p2`), and on
+  it: `netcfg show` `eth0: bound 10.211.55.11/24 gateway 10.211.55.1`; `ip
+  a` eth0 `00:1c:42:e1:a7:d1`, `inet 10.211.55.11/24 brd 10.211.55.255
+  scope global dynamic eth0`, `valid_lft 1799sec`, the link-local address;
+  `ip -4 a`, `ip link`; `ip r` `default via 10.211.55.1 dev eth0 proto
+  dhcp src 10.211.55.11` and the subnet; `ifconfig`; `route -n`; `netstat
+  -tuln` dropbear on `0.0.0.0:22` and `:::22`; `/proc/net/dev` and
+  `route`; `priv -d net -- ifconfig eth0 down` `SIOCSIFFLAGS: Operation
+  not permitted`, eth0 still up; `ifconfig eth0 down` (`state DOWN`) and
+  `up`, then the gateway answered two pings and `wget http://example.com/`
+  worked; `ip neigh` `10.211.55.1 dev eth0 lladdr 00:1c:42:00:00:18
+  REACHABLE`, `arp -a` the same entry (named `prl-local-ns-server.shared`
+  by Parallels' DNS); `poweroff` stopped the VM. Parallels' DHCP sends no
+  option 12, so the name stayed `cosmo` and no `/etc/hostname` was
+  written, as designed. Seen on the way: the first attempt put the image
+  on a 128 MiB disk, and the kernel refused the live disk's GPT (`backup
+  header is not on the last sector`), so `cosmo-install` had no ESP to
+  copy; the guide does not say the disk must be the image's size
+  (inventory).
 
 ## Not done here (inventory §11)
 

@@ -1175,3 +1175,8 @@ each; none is needed by M2's acceptance test.
   program; UDP's receive queue is in datagrams, Linux's in bytes.
 - `SIOCSIFFLAGS` changes `UP` alone; a request to change any other flag
   (`PROMISC`, `ALLMULTI`, `NOARP`) is `-EINVAL`.
+- The Parallels guide (`docs/guide/platforms.md`) does not say the live
+  image's plain disk must be the image's own size: on a larger disk the
+  GPT's backup header is not on the last sector, the kernel refuses the
+  table and `cosmo-install` finds no ESP to copy (seen by S1's Parallels
+  test with a 128 MiB disk).
