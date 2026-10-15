@@ -313,7 +313,9 @@ MSI-X vectors, the configuration's and one queue's).
   - The configuration interrupt is not used for this: polling from the
     thread needs no callback that could race a driver unbind in interrupt
     context.
-- **In panic mode** fbcon calls `vgpu_panic_flush` after each write. It
+- **In panic mode** fbcon calls `vgpu_panic_flush` after each write,
+  with the frame the surface belongs to (not `g->frame`, which names a
+  new frame only after `fbcon_attach` returns). It
   sends the transfer and flush from its own pair of pages and polls
   for each, at most 200 ms, through `virtq_add_panic` and
   `virtq_pop_panic`, which take the queue's lock untracked: in debug
@@ -321,9 +323,17 @@ MSI-X vectors, the configuration's and one queue's).
   the panic stopped may own, and the flush would wait for it forever
   ahead of the serial sink (`make test-display`'s check e, `CRASH_TEST=3`).
   When `controlq`'s lock is held (by a CPU the panic stopped) it sends
-  nothing; the serial console has the panic either way. A command not answered in time ends the panic
+  nothing; the serial console has the panic either way. A thread's
+  command answered meanwhile is dropped, not completed: completing it
+  would take tracked locks, and its waiter never runs again. A line
+  logged from inside the flush (`virtq_pop_panic` reporting a bad used
+  entry) comes back through fbcon and is not flushed, so the request in
+  flight is not rewritten. A command not answered in time ends the panic
   flushes: every later line would wait as long, and the serial sink after
   fbcon's with it.
+- **After a timeout** (`broken`) no request is built in `g->cmd`, which
+  the device may still be reading: each command's builder returns
+  `-EIO` first, including the scanout restore on a failed resize.
 - **Remove:** stop and join the thread, `fbcon_detach` (the console
   returns to the boot framebuffer, or to the serial port alone), turn the
   scanout off (resource 0), drop the frame, reset the device.

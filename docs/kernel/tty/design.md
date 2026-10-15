@@ -377,7 +377,11 @@ an exit would.
 
 **SIGWINCH.** `TIOCSWINSZ` stores the size; a change raises SIGWINCH on
 the foreground group. Until a size is set, the console answers the
-framebuffer's geometry and a pty 0x0.
+framebuffer's geometry and a pty 0x0. When the framebuffer console's
+cell grid changes (a display driver's surface attached or resized,
+`fbcon_attach`), `tty_console_resized` drops the console's stored size,
+so it answers the new geometry, and raises SIGWINCH on the foreground
+group: the window decides, as a terminal emulator's does.
 
 **TOSTOP.** With `TOSTOP` set, a write from a background group of the
 controlling session stops it with SIGTTOU (`tty_write`), as a background

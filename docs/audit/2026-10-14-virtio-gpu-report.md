@@ -111,6 +111,13 @@ framebuffer at all, gets a console too.
   `test-display` and `test-net-login` on both. `make BUILD=release
   DISPLAY_SIZE=3840x2160 test-display` passes on x86-64, read in 16x32
   cells.
+- **At `3804c9ad`**, the matrix: 39 of 42 steps passed, the network
+  harness ready in each debug boot and reproducible on both
+  architectures; host tests and fuzz failed to link (fixed in
+  `37ee42e6`, then passing on both). `test-display` and `test-net-login`
+  passed on both.
+- **At `e7c32a81`**: `test-display` passes on both architectures (check e
+  reports owner word 2 for CPU 1), and at 640x480 on x86-64.
 
 ## Review (PR #387)
 
@@ -176,6 +183,55 @@ Codex's second review, of `8fca562e`, fixed in `cf18d2b2` and
   and check e requires the crash test's own message.
 - **The boot test's virtio-gpu marker assumed 8x16 cells** (P2): it
   accepts 16x32 and up, as the firmware framebuffer's marker does.
+
+The rest of that review and Qodo's of `8fca562e` and `3804c9ad`, fixed in
+`37ee42e6`, `9286bba2` and `e7c32a81`:
+
+- **The panic flush flushed `g->frame`** (Codex), which names a new frame
+  only after `fbcon_attach` returns: a panic during the switch flushed the
+  old resource, or nothing. The surface's argument is now its own frame.
+- **The panic flush completed the thread's command** (Qodo), taking the
+  completion's tracked lock, the hang its first fix removed. A thread's
+  command answered meanwhile is dropped; its waiter never runs again.
+- **A line logged inside the panic flush re-entered it** (Qodo):
+  `virtq_pop_panic` reporting a bad used entry writes the console, which
+  called the flush again over the request in flight. It is not re-entered.
+- **A failed resize rebuilt a request after a timeout** (Qodo):
+  `vgpu_restore_scanout` wrote `g->cmd.req`, which the device may still
+  read, before `vgpu_cmd_at` refused to send. Every builder returns `-EIO`
+  first once `broken` is set.
+- **A resize replaced the screen with old log lines** (Codex). Program
+  output reaches the sinks without the log ring, so the shell's screen,
+  and a half-typed line, were lost. `fbcon_attach` and `fbcon_detach`
+  carry the screen they replace (rows up to the cursor's, cut or padded,
+  not reflowed); the log is replayed only for a first console.
+- **A resize sent no SIGWINCH** (Codex). A new cell grid calls
+  `tty_console_resized`: the console's stored size is dropped, so it
+  answers the new geometry, and the foreground group gets SIGWINCH.
+  Selftest `fb-switch` attaches 60x17 and then 40x12 surfaces over the
+  boot framebuffer (100x37 on x86-64, 160x50 on AArch64) and restores it.
+  It fails, on both architectures, with the old log replay ("the lines
+  written before the switch are not on the new surface") and without
+  `tty_console_resized` ("the console's size is not the new surface's
+  40x12"); each run's only failure of 477.
+- **Check e could pass without the hold** (Qodo). The panic reports
+  lockdep's owner word, read back after the store, and the check requires
+  another CPU's. With the seam's call removed (a worktree of `e7c32a81`)
+  it fails: `owner word 0, this CPU's 1`.
+- **The display marker wrapped on narrow screens** (Codex). It is cut to
+  the screen's columns. `DISPLAY_SIZE=640x480` passes on x86-64; below
+  that QEMU's firmware does not boot (320x200 on both architectures and
+  400x300 on x86-64 print nothing before the loader).
+- **`vm-direct-ranges` wrote through a view it had not found mapped**
+  (Qodo). The store follows the query.
+- **Docs** (Qodo): the virtio module's 19 exports, and an inventory line
+  that read as if no test mapped a direct range.
+- **Found by the matrix**: `test_virtq` and `fuzz_virtq` did not link
+  (the host shim lacked the panic pair), and CI's "build, boot, analyze"
+  jobs failed on it. The shim has them now (`37ee42e6`). A release build
+  failed on `fb-switch`'s query, which is selftest-only; it has a stub
+  (`e7c32a81`), and neither release kernel carries a seam symbol
+  (`llvm-nm`).
 
 Not changed: CosmoReview's "blocking call under spinlock" in
 `vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with

@@ -109,6 +109,22 @@ which also says the repaint draws what the text shadow holds. Each check
 retries up to three times, because the screen is shared with everything
 else that prints and a self-test run is quiet but not silent.
 
+**`fb-switch`** (both architectures; skipped when a display driver's
+surface holds the console, which detaching would leave). It attaches two
+surfaces in memory over whatever fbcon had (in the debug boots the
+firmware's framebuffer, 100x37 cells on x86-64 and 160x50 on AArch64):
+60x17 cells, then 40x12, the shape of a display resize. Two lines are
+written between them with `console_puts`, which reaches the sinks
+without the log ring as a program's output does, the second left
+unfinished. On the 40x12 surface the two must be on consecutive rows,
+the second continued at column 15 by `fbcon_attach`'s own log line,
+which shows the cursor moved with the screen. A size set by
+`TIOCSWINSZ` before the second switch must have given way to 40x12
+(`tty_console_resized`). Detaching must give back the first console at
+its size, and the terminal's size with it. It fails with the log replay
+`fbcon_attach` did before (the lines are not there) and without
+`tty_console_resized` (the size stays 7x3), each on both architectures.
+
 **`fb-geometry`** is not a boot test: the validator is a pure function,
 so it is a host test (`tests/host/test_fbvalid.c`, ASan/UBSan) and a
 fuzz target (`tests/fuzz/fuzz_fbvalid.c`). The host test names the

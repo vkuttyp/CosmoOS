@@ -96,12 +96,23 @@ several times more expensive uncached.
 moves the console onto memory a display driver owns (`struct
 fbcon_surface`: base, size, pitch, the pixel format, and `panic_flush`).
 The text buffer is allocated first, in thread context. The switch is
-one hold of the console lock: the new geometry, a cleared surface, the
-newest screenful of the log copied (the ring's lock nests inside the
-console's) and replayed, and, for a first surface, the sink registered.
-A line written meanwhile is in the copy or drawn after the release, never
-lost; one put in the ring while its sink write waits for the lock is
-drawn twice. The sink itself,
+one hold of the console lock: the new geometry, a cleared surface, its
+first contents, and, for a first surface, the sink registered. When
+fbcon was drawing a screen (the boot framebuffer, or the surface before
+a resize), the contents are that screen (`carry_text`): its rows up to
+the cursor's, the newest at the bottom when they do not all fit, each
+cut or padded to the new width, and the cursor where it was on its row.
+Program output and echo reach the sinks from `tty.c` without passing
+through the log ring, so a replay of the log would replace a shell's
+screen, and a half-typed line, with old kernel lines (Codex, PR #387).
+Rows are not reflowed: a row wider than the new screen loses its end.
+With no screen before, the contents are the newest screenful of the log
+(the ring's lock nests inside the console's). A line written meanwhile
+is in the copy or drawn after the release, never lost; one put in the
+ring while its sink write waits for the lock is drawn twice. A new cell
+grid is the console terminal's new size: `tty_console_resized`, after
+the release, drops a size set by `TIOCSWINSZ` and raises SIGWINCH on
+the foreground group (`docs/kernel/tty/design.md`). The sink itself,
 which is on the console's list, stays as it is. The first build copied
 the whole console structure and with it the sink's `next`, which cut
 every sink after fbcon off the list: on Parallels Desktop the serial
@@ -111,8 +122,11 @@ Such a surface is not scanned out as it is written. The sink records the
 pixel rows it drew as one band, and the driver's thread takes it
 (`fbcon_take_damage`) and flushes it. In panic mode no thread runs, so
 the sink calls the surface's `panic_flush` with the band after each
-write. `fbcon_detach` goes back to the boot framebuffer (kept, mapped,
-not drawn while the surface was), or to no screen console. The boot
+write; the callback's argument is the surface's own, set before the
+switch, so a panic during `fbcon_attach` flushes the surface fbcon is
+drawing. `fbcon_detach` goes back to the boot framebuffer (kept, mapped,
+not drawn while the surface was), which gets the surface's screen the
+same way, or to no screen console. The boot
 framebuffer is uncached and scanned out directly; a surface is
 write-back memory the device reads.
 
