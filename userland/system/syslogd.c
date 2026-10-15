@@ -50,6 +50,38 @@ static int is_stamp(const char *s, size_t n)
     return 1;
 }
 
+/* One syslogd per path, for as long as it runs: an abstract unix name
+ * ("syslogd:" and the path) bound to a socket held open for the process's
+ * life. Binding a taken abstract name fails with EADDRINUSE, atomically,
+ * and the kernel lets the name go with the socket when the process ends,
+ * however it ends -- so no lock outlives its holder. Taken before the
+ * stale-node check, it keeps two starts from both judging one node stale
+ * and the second unlinking the node the first has just bound. 0, or -1
+ * with a message. */
+static int hold_instance(const char *path)
+{
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        fprintf(stderr, "syslogd: socket: %s\n", strerror(errno));
+        return -1;
+    }
+    struct sockaddr_un la = { .sun_family = AF_UNIX };
+    int n = snprintf(la.sun_path + 1, sizeof(la.sun_path) - 1, "syslogd:%s", path);
+    if (n < 0 || (size_t)n >= sizeof(la.sun_path) - 1) {
+        fprintf(stderr, "syslogd: %s: the path is too long\n", path);
+        return -1;
+    }
+    /* A leading NUL: the abstract namespace, its length the name's bytes. */
+    if (bind(fd, (const struct sockaddr *)&la, (socklen_t)(2 + 1 + n)) < 0) {
+        if (errno == EADDRINUSE)
+            fprintf(stderr, "syslogd: %s is already served (another syslogd holds it)\n", path);
+        else
+            fprintf(stderr, "syslogd: bind the instance name: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;   /* fd stays open, and the name held, until exit */
+}
+
 /* Clear the way for the bind: nothing at `path`, or a socket node no one
  * is bound to (an earlier run's; the probe's ECONNREFUSED says so). Anything else is refused and left alone:
  * a file is not ours to delete, and a socket someone is bound to is a
@@ -143,7 +175,7 @@ int main(int argc, char **argv)
         return 1;
     }
     strcpy(sa.sun_path, path);
-    if (clear_stale(path, &sa) < 0)
+    if (hold_instance(path) < 0 || clear_stale(path, &sa) < 0)
         return 1;
     if (bind(fd, (const struct sockaddr *)&sa, sizeof(sa)) < 0) {
         fprintf(stderr, "syslogd: bind %s: %s\n", path, strerror(errno));

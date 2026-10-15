@@ -387,7 +387,11 @@ nothing is written to a file. At its start it clears the path only of
 a socket node no one is bound to (an earlier run's: a probe `connect`
 fails with `ECONNREFUSED`, the one error that says so): a file there, a
 socket another `syslogd` serves, or one the probe cannot judge (any other
-error) is refused and left alone. With no
+error) is refused and left alone. Before that check it binds the
+abstract unix name `syslogd:` and the path, held for its whole life: a
+second start fails there (`EADDRINUSE`), so two starts cannot both judge
+one node stale and the second unlink what the first has just bound, and
+the name goes with the process however it ends. With no
 privileges the kernel's rate limit
 for an unprivileged writer applies to it as to any process: a burst past
 it is dropped, and the next line that gets through says how many were.

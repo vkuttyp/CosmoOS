@@ -212,7 +212,8 @@ expect rev cba "$(echo abc | rev)"
 expect tac "three two one" "$(tac l3 | xargs)"
 expect yes "y y y" "$(yes | head -n 3 | xargs)"
 expect cal "February 2024" "$(cal 2 2024 | head -n 1 | sed 's/^ *//; s/ *$//')"
-expect time 1 "$( { time -p sleep 0.2; } 2>&1 | grep -c '^real ')"
+# /bin/time, the applet: ash parses a bare `time` as its own reserved word.
+expect time 1 "$( { /bin/time -p sleep 0.2; } 2>&1 | grep -c '^real ')"
 timeout 1 sleep 10
 expect timeout 143 "$?"
 # watch redraws every second until timeout ends it: the line at least once.
@@ -275,7 +276,7 @@ expect logger 1 "$got"
 # A second syslogd leaves the running one's /dev/log alone (a unix socket
 # is found by its node; unlinking it would cut the first off), and never
 # deletes a file at its path.
-expect syslogd-served 1 "$(/sbin/syslogd 2>&1 | grep -c 'already served')"
+expect syslogd-served 1 "$(/sbin/syslogd 2>&1 | grep -c 'already served (another syslogd holds it)')"
 logger -t "$tag" "still served"
 got=0
 for i in 1 2 3 4 5 6 7 8 9 10; do
