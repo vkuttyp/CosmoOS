@@ -3,9 +3,11 @@
 Written 2026-10-15, after v1.0.3. The [1.0 roadmap](roadmap-1.0.md) is
 complete (M1-M6, v1.0.0 on 2026-10-12). This document records what was
 merged after 1.0, the gaps recorded since, and the units proposed next.
-**No unit below is chosen yet**: the project owner picks the next unit
-from the proposed list, and [`AGENTS.md`](../AGENTS.md#scope-rules)'s
-scope rules then apply to it as they did to a 1.0 milestone.
+The project owner picks the next unit from the proposed list, and
+[`AGENTS.md`](../AGENTS.md#scope-rules)'s scope rules then apply to it as
+they did to a 1.0 milestone. P1 is done; the owner chose the
+[shell-completeness track](#s-shell-completeness) on 2026-10-15, S1 and
+then S2 first.
 [`plan.md`](plan.md) and the
 [deferred-work inventory](audit/2026-09-deferred-work-inventory.md)
 remain the record of everything else.
@@ -114,17 +116,18 @@ ticked in the same PR).
   CI (job `platforms`); on Parallels Desktop 27.0.3 both stopped the VM
   1.1 s after the command
   ([report](audit/2026-10-15-aarch64-poweroff-report.md)).
-- [ ] **P2 Process memory in procfs.** `/proc/<pid>/stat` reports VSZ
-  and RSS, and `/proc/<pid>/status` gains `VmSize` and `VmRSS`, from a
-  reference on the target's space taken under the rule exit already
-  follows (P34). `/bin/ps` is the native `userland/system/ps.c`, which
-  takes no options and prints no memory: the unit gives it VSZ and RSS
-  columns (or enables BusyBox's `ps`, `CONFIG_PS`, now off).
-  **Acceptance:** `test-busybox` runs `ps` and `top -b -n 1` and requires
-  a non-zero VSZ and RSS for a running `sleep`, and reads that process's
-  `status` for non-zero `VmSize` and `VmRSS`; a self-test reads a
-  process's `stat` and `status` while it exits, many times, with no fault
-  or leak.
+- [ ] **P2 Process memory in procfs** (widened by
+  [S3](#s-shell-completeness), which does it with the rest of `/proc`).
+  `/proc/<pid>/stat` reports VSZ and RSS, and `/proc/<pid>/status` gains
+  `VmSize` and `VmRSS`, from a reference on the target's space taken under
+  the rule exit already follows (P34). `/bin/ps` is the native
+  `userland/system/ps.c`, which takes no options and prints no memory: the
+  unit gives it VSZ and RSS columns (or enables BusyBox's `ps`,
+  `CONFIG_PS`, now off). **Acceptance:** `test-busybox` runs `ps` and `top
+  -b -n 1` and requires a non-zero VSZ and RSS for a running `sleep`, and
+  reads that process's `status` for non-zero `VmSize` and `VmRSS`; a
+  self-test reads a process's `stat` and `status` while it exits, many
+  times, with no fault or leak.
 - [ ] **P3 The Parallels-test residue.** The four small defects the
   post-1.0 tests found: `wget`'s bad-certificate exit message, `sftp`'s
   link count, `/dev/zero`'s 64 KiB short read, and the installer's stale
@@ -139,13 +142,12 @@ ticked in the same PR).
   **Acceptance:** a dynamically linked musl BusyBox (and a small
   dynamically linked test program using `dlopen`) passes the M3 scripted
   test on both architectures.
-- [ ] **P5 Setting the clock.** `settimeofday`/`clock_settime` under a
-  new operation privilege (`PRIV_TIME`; uid 0 alone grants nothing,
-  `docs/kernel/security/design.md`), and BusyBox `ntpd`.
-  **Acceptance:** `test-net-login` serves NTP from the host harness with
-  a time a day ahead; `ntpd -q` sets `CLOCK_REALTIME` to within 1 s of
-  it; `date -s` is refused both for a non-root user and for root with the
-  bit dropped (`priv -d time -- date -s ...`), and applied with it.
+- [ ] **P5 Setting the clock.** Absorbed by
+  [S5](#s-shell-completeness), which carries its scope (`settimeofday`,
+  `clock_settime`, BusyBox `ntpd`) and its acceptance, with one change:
+  the operation privilege is `PRIV_SYS_ADMIN`, in place of the
+  `PRIV_TIME` this entry proposed (uid 0 alone still grants nothing,
+  `docs/kernel/security/design.md`).
 - [ ] **P6 A network package repository.** `pkg` fetches an index and
   packages over HTTPS from a configured URL, checking the index's and each
   package's signature against the key ring, over the same certificate
@@ -155,6 +157,136 @@ ticked in the same PR).
   the same repository behind an untrusted, an expired and a wrongly named
   certificate is refused before any index is read (a signature does not
   stop the replay of an older signed index, `docs/pkg/invariants.md`).
+
+## S: shell completeness
+
+Testing the installed system on Parallels Desktop found everyday
+commands missing or failing. `clear` is built since v1.0.2, but an
+installed system does not update itself (S7). `ip`, `ifconfig`,
+`hostname -s`, BusyBox `ps` and `top`, `chown`, `reboot`, `mount` and
+`date -s` fail because the Linux personality lacks the interfaces they
+use: no `SIOCGIF*` ioctls or netlink, a sparse `/proc`, and no `chown`,
+`reboot`, `mount` or `settimeofday` system calls.
+
+The owner chose this track on 2026-10-15. Its units are taken in the
+order S1, S2, S3, S4, S5, S6, S7. Each is a roadmap unit under
+[`AGENTS.md`](../AGENTS.md#scope-rules)'s scope rules: one at a time, at
+most 5 PRs, proven by its acceptance test (in `make test-busybox` or a
+`make test-shell`, run in CI on both architectures), and done when that
+test is green on main with its box ticked here in the same PR.
+
+BusyBox's `ip` speaks only netlink (`RTM_GETLINK`/`RTM_GETADDR` over
+`AF_NETLINK`). Netlink is not in S1: the native `ip` front end is the
+deliberate substitute until netlink exists, and S1 records netlink in
+the inventory.
+
+- [ ] **S1 Network inspection.** The Linux personality's interface
+  ioctls: `SIOCGIFCONF`, and the getters `SIOCGIFNAME`, `SIOCGIFINDEX`,
+  `SIOCGIFFLAGS`, `SIOCGIFADDR`, `SIOCGIFNETMASK`, `SIOCGIFBRDADDR`,
+  `SIOCGIFHWADDR` and `SIOCGIFMTU`, with their `SIOCS*` setters under
+  `PRIV_NET`. `/proc/net/dev`, `/proc/net/route`, `/proc/net/arp`,
+  `/proc/net/tcp` and `/proc/net/udp` in Linux's formats. The
+  `sethostname` system call (Linux has no `gethostname` call on these
+  architectures: libc reads the name from `uname`, which already gives
+  the uts name), and `/etc/hostname` set from DHCP option 12 (host name)
+  when the server sends one. BusyBox
+  `ifconfig`, `route`, `netstat`, `arp` and `hostname`. A native `ip`
+  front end, read-only, printing iproute2's output format from `netctl`:
+  `ip a`, `ip addr`, `ip link`, `ip r`, `ip route`, `ip -4 ...` and
+  `ip neigh`. Netlink stays out and is recorded. **Acceptance:** on the
+  installed system, `ip a` shows `eth0` with its DHCP address, and `ip
+  link`, `ip -4 a`, `ip r` (the default route and the subnet) and `ip
+  neigh` (the gateway) each print what they promise; `ifconfig`, `route
+  -n`, `netstat -tuln` (dropbear on `:22`), `arp -a` (the gateway) and
+  `hostname` print the machine's state; `ifconfig eth0 down` and `up`
+  work as root and fail with `EPERM` when `PRIV_NET` is dropped; and each
+  other setter is exercised once as root (an address and netmask set and
+  read back, a broadcast and an MTU accepted or refused as documented)
+  and once with `PRIV_NET` dropped (`EPERM`).
+- [ ] **S2 Applets.** `more`, `nl`, `od`, `strings`, `rev`, `tac`, `yes`,
+  `cal`, `time`, `timeout`, `watch`, `nohup`, `killall`, `pgrep`,
+  `pkill`, `pidof`, `install`, `realpath`, `split`, `fold`, `paste`,
+  `comm`, `cksum`, `base64`, `unzip`, `bzip2`, `bunzip2`, `xz`, `unxz`,
+  `zcat`, `mktemp`, `logger` (to the console log) and `setsid`; `ash`'s
+  command history saved to `/root/.ash_history` (the console shell's
+  `HOME` is `/` today). **Acceptance:** a scripted test runs each with
+  known input and requires its known output; `pgrep`, `pkill`, `killall`
+  and `pidof` find a background `sleep` through `/proc` and act on it;
+  a uniquely tagged `logger` message appears in the kernel's log; a
+  command typed in an interactive `ash` is in `/root/.ash_history` after
+  that shell exits and a new one recalls it.
+- [ ] **S3 Process tools on `/proc`** (widens P2). `/proc/<pid>/stat`
+  with the fields BusyBox `ps` and `top` read (state, ppid, pgrp,
+  session, tty_nr, utime, stime, priority, nice, num_threads, starttime,
+  vsize, rss); `/proc/<pid>/status` (`Name`, `State`, `Pid`, `PPid`,
+  `Uid`, `Gid`, `VmSize`, `VmRSS`, `Threads`); the `/proc/<pid>/cwd`,
+  `exe` and `root` links; `/proc/<pid>/environ`; `/proc/meminfo` with
+  `MemTotal`, `MemFree`, `MemAvailable`, `Buffers`, `Cached`, `SwapTotal`
+  and `SwapFree`; `/proc/stat`'s `cpu` lines and `btime`;
+  `/proc/loadavg`, `/proc/version` and `/proc/cpuinfo`. BusyBox `ps`,
+  `top`, `free`, `uptime` and `kill -l`. The unit settles two rules
+  first: who may read another process's `environ` (procfs leaves
+  environments out because they cannot yet be read safely; a process
+  that cleared `PR_SET_DUMPABLE` must not have its environment read
+  without `PRIV_PROC`), and the revision of procfs's P4 that admits
+  `version` and `cpuinfo`, which no program here reads today.
+  **Acceptance:** `ps` lists init, sshd and the shell with their correct
+  PIDs and states; `top -bn1` runs; `free` matches `sysctl`'s figures;
+  P2's checks -- a non-zero VSZ and RSS for a running `sleep` in `ps`,
+  `top` and its `status`, and a self-test reading a process's `stat` and
+  `status` while it exits, many times, with no fault or leak; and a
+  cross-user or non-dumpable `environ` read refused.
+- [ ] **S4 Ownership.** `chown`, `fchown`, `fchownat`, `lchown` and
+  `chroot`; BusyBox `chown`, `chgrp` and `su` (one user, root: `su` to
+  root is a no-op that works, `su` to another uid needs `PRIV_CRED`).
+  **Acceptance:** a `chown` on cosmofs persists across a reboot; an
+  unprivileged process gets `EPERM`; `fchown`, `fchownat`, `lchown` on a
+  symbolic link (the link changes, its target does not) and `chroot` are
+  each exercised; `chgrp` changes the group; `su` to root works, and `su`
+  to another uid is refused with `PRIV_CRED` dropped.
+- [ ] **S5 Power and clock** (absorbs P5). `reboot(2)` with
+  `LINUX_REBOOT_CMD_RESTART`, `HALT`, `POWER_OFF`, `CAD_ON` and `CAD_OFF`;
+  PSCI `SYSTEM_RESET` on AArch64, the keyboard-controller and ACPI reset
+  register paths on x86-64. Power-off on x86-64 stays QEMU-only
+  (`isa-debug-exit`) until an AML interpreter can read `\_S5`.
+  `reboot(2)` needs `PRIV_SYS_ADMIN`. `settimeofday` and `clock_settime`
+  under `PRIV_SYS_ADMIN` (in place of P5's proposed `PRIV_TIME`); the RTC
+  read at boot on both machines (PL031 on virt, CMOS on q35) and written
+  by `hwclock`. BusyBox `reboot`, `halt`, `poweroff -f`, `date -s`,
+  `hwclock` and P5's `ntpd`. **Acceptance:** `reboot` restarts the
+  installed system under QEMU on both architectures and on Parallels
+  Desktop (run by the owner, recorded in the report), and is refused with
+  `sys_admin` dropped; `date -s` then `hwclock -w` persists across the
+  reboot where the machine has an RTC; `date -s` is refused for an
+  unprivileged process and for root with `sys_admin` dropped; and P5's
+  check: the harness serves NTP a day ahead and `ntpd -q` sets
+  `CLOCK_REALTIME` to within 1 s of it.
+- [ ] **S6 Mounting.** The Linux `mount` and `umount2` doors (cosmofs,
+  ramfs and procfs, with the flags the native mount supports), each under
+  `PRIV_MOUNT` as the native calls are; `/etc/fstab` and `mount -a` from
+  `/etc/rc`; BusyBox `mount`, `umount`, `lsblk` (from `/sys/block` or a
+  procfs equivalent naming the GPT partitions) and `blkid` (the
+  `PARTUUID` and the cosmofs label). **Acceptance:** a second cosmofs on
+  the blank disk is mounted by `/etc/fstab` at boot and survives a
+  reboot; a ramfs and a procfs mount and unmount by hand; `lsblk` names
+  the GPT partitions and `blkid` the root's `PARTUUID` and label; `mount`
+  and `umount` are refused with `PRIV_MOUNT` dropped.
+- [ ] **S7 Updating an installed system** (after P6). `pkg upgrade` for
+  the userland, and `cosmo-upgrade`, which replaces the ESP's contents
+  (loader, kernel, `boot.tar`, manifest) from a release: it checks the
+  manifest's signature before writing anything and keeps the previous set
+  under `\cosmo\prev` for fallback. Two questions its design settles
+  first: how an interrupted replacement stays bootable (the loader reads
+  only the fixed `\cosmo` paths today, so either the switch is atomic or
+  the loader can boot `\cosmo\prev`), and whether `--rollback` returns
+  the packages `pkg upgrade` changed too (`docs/pkg/invariants.md`: a
+  package upgrade cannot be rolled back today) or promises the boot set
+  alone. **Acceptance:** an installed v1.0.3 system is upgraded to the
+  current build without reinstalling and reboots into it, and
+  `cosmo-upgrade --rollback` returns it to v1.0.3 (as far as the design
+  promises); a tampered manifest and one signed by another key are
+  refused with the ESP byte-for-byte unchanged; an update interrupted
+  mid-replacement still boots.
 
 Larger items, not proposed as one unit until scoped: SATA on Parallels
 (an AML interpreter, or a DSDT-described AHCI path with no generic AML),

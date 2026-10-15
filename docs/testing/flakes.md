@@ -2813,6 +2813,20 @@ terminal's size and a display driver, not the irq-poll or scheduler
 path. Not attributed; the first sightings two in a row, both on a slow
 runner.
 
+**Seventh sighting, 2026-10-15, the first on AArch64:** CI, PR #391 (the
+shell-completeness roadmap, a change to `docs/roadmap-1.1.md` alone) at
+`d230df4e`, run 38754362663, job 116488840570, the `test-harness-retry`
+boot (`Boot test with the harness's first attempt broken`): `cpu 1, a
+spinner above the default for 300 ms: 266 calls of the poll, longest gap
+290 ms (bound 100)`, the check at 303 ms. The job's other five debug boots
+passed (165.4-177.3 s each). This runner was not slow: the same boots of
+the parent commit's green run (38749799455, job 116473026684, `fb51891c`,
+which differs from `d230df4e` only in that document) took 198.6-222.9 s,
+and the failing boot's `cosmofs-replay` took 18,769 ms. So the slow-runner
+correlation of the fifth and sixth sightings does not hold. The same
+290 ms on a second architecture: the worker not raised before the spinner
+ended. Not attributed; CI ran again on the commit that records it.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
