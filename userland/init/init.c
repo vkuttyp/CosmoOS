@@ -3783,7 +3783,10 @@ static void svc_selftest(void)
     static const char *const written[] = { "typo",     "flap",    "broken",  "dependent", "loop-a",
                                            "loop-b",   "sleeper", "baduser", "badnum",    "badlimit",
                                            "missing",  "oneshot", "hugeuser", "unprivsvc" };
-    static const char *const shipped[] = { "hello", "greeter" };
+    /* The image's own services, which `svc boot` above started: syslogd
+     * (shell completeness S2) runs until stopped, and holds /dev/log's
+     * socket; /etc/rc's `svc boot` starts it again for the real boot. */
+    static const char *const shipped[] = { "hello", "greeter", "syslogd" };
     for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++)
         (void)svc_run("stop", written[i]);
     for (size_t i = 0; i < sizeof(shipped) / sizeof(shipped[0]); i++)
