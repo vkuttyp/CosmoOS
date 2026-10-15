@@ -24,6 +24,13 @@ own face (tools/mkfont.py), ink being any channel above half. It requires:
   c. the marker line, and the prompt that echoed it, in the decoded text,
      and no cell that matches no glyph; and the marker on the serial
      console.
+  f. in `virtio`, a display change: a VNC client on the GPU's display
+     (QEMU_EXTRA's -vnc) asks for another size (SetDesktopSize), which
+     QEMU passes to the device as VIRTIO_GPU_EVENT_DISPLAY, as Parallels
+     does when its window is resized. The driver must follow it (its
+     `scanout 0 WxH` line for the new size), and the new WxH screen must
+     read back with the marker and its command still on it (fbcon carries
+     the screen across the switch).
 
 With --panic-image (a CRASH_TEST=1 image; x86-64, where QEMU_DEBUG_EXIT=0
 leaves the exit device out so a panic halts with QEMU running):
@@ -87,6 +94,64 @@ def qmp(path, command, arguments=None):
         if "error" in reply:
             raise Fail(f"QMP {cmd['execute']}: {reply['error']}")
     s.close()
+
+
+def vnc_resize(path, w, h):
+    """Ask QEMU's VNC server for a w x h display (RFB 3.8, no
+    authentication, the ExtendedDesktopSize extension's SetDesktopSize).
+    QEMU hands it to the display's device as its UI size; for virtio-gpu
+    that is the display-change event. Returns QEMU's status for it."""
+    import struct
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(30)
+    s.connect(path)
+
+    def recv(n):
+        b = b""
+        while len(b) < n:
+            chunk = s.recv(n - len(b))
+            if not chunk:
+                raise Fail("VNC: the server closed the connection")
+            b += chunk
+        return b
+
+    try:
+        if not recv(12).startswith(b"RFB 003."):
+            raise Fail("VNC: not an RFB server")
+        s.sendall(b"RFB 003.008\n")
+        types = recv(recv(1)[0])
+        if 1 not in types:
+            raise Fail(f"VNC: no 'None' security type in {list(types)}")
+        s.sendall(b"\x01")
+        if struct.unpack(">I", recv(4))[0] != 0:
+            raise Fail("VNC: security handshake failed")
+        s.sendall(b"\x01")   # ClientInit: shared
+        recv(20)
+        recv(struct.unpack(">I", recv(4))[0])   # the desktop's name
+        # SetEncodings: raw, and the ExtendedDesktopSize pseudo-encoding
+        # (-308), without which SetDesktopSize is not accepted.
+        s.sendall(struct.pack(">BxHii", 2, 2, 0, -308))
+        # SetDesktopSize: one screen, id 0, at 0,0.
+        s.sendall(struct.pack(">BxHHBx", 251, w, h, 1) + struct.pack(">IHHHHI", 0, 0, 0, w, h, 0))
+        # The answer is a FramebufferUpdate with one ExtendedDesktopSize
+        # rectangle (encoding -308): its y is the status, 0 or 4 when the
+        # request was taken (4: forwarded to the device).
+        while True:
+            kind = recv(1)[0]
+            if kind != 0:
+                raise Fail(f"VNC: unexpected server message {kind}")
+            recv(1)
+            for _ in range(struct.unpack(">H", recv(2))[0]):
+                x, y, rw, rh, enc = struct.unpack(">HHHHi", recv(12))
+                if enc == -308:
+                    n = recv(4)[0]
+                    recv(n * 16)
+                    return y
+                if enc != 0:
+                    raise Fail(f"VNC: unexpected rectangle encoding {enc}")
+                raise Fail("VNC: pixels before the resize's answer")   # none were asked for
+    finally:
+        s.close()
 
 
 def read_ppm(path):
@@ -224,8 +289,11 @@ def check_shape(args, face, shape, want_w, want_h, results):
     console must keep working past the move."""
     sock = os.path.join(args.workdir, f"qmp-{shape}.sock")
     shot = os.path.join(args.workdir, f"screen-{shape}.ppm")
-    b = Boot(shape, args.image, args.workdir,
-             {"QEMU_DISPLAY": shape, "QEMU_GPU_SIZE": args.size, "QEMU_QMP": sock}, args.timeout)
+    vnc = os.path.join(args.workdir, f"vnc-{shape}.sock")
+    env = {"QEMU_DISPLAY": shape, "QEMU_GPU_SIZE": args.size, "QEMU_QMP": sock}
+    if shape == "virtio":
+        env["QEMU_EXTRA"] = f"-vnc unix:{vnc},display=gpu0"   # check f's display change
+    b = Boot(shape, args.image, args.workdir, env, args.timeout)
     try:
         b.wait_prompt("the first prompt")
         log = b.text()
@@ -271,12 +339,44 @@ def check_shape(args, face, shape, want_w, want_h, results):
         results.append(f"{shape}: {first}{m.group(1)} scanout 0 {args.size} in {m.group(4)} chunk(s); the "
                        f"{want_w}x{want_h} screendump reads back as text in {8 * scale}x{16 * scale} cells ({used} non-blank rows of {len(lines)}), "
                        f"the marker at row {at} under its command, and on the serial console")
+        if shape == "virtio":
+            check_resize(args, face, b, sock, vnc, want_w, want_h, marker, results)
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
             raise Fail(f"{shape}: QEMU exit code {rc}")
     except BaseException:
         b.kill()
         raise
+
+
+def check_resize(args, face, b, sock, vnc, w0, h0, marker, results):
+    """f: a display change through QEMU's VNC server, followed."""
+    w, h = (1024, 768) if (w0, h0) != (1024, 768) else (800, 600)
+    status = vnc_resize(vnc, w, h)
+    if status not in (0, 4):
+        raise Fail(f"resize: QEMU refused SetDesktopSize {w}x{h} (status {status})")
+    want = re.compile(rf"^\[ INFO\] virtio-gpu: (\S+): scanout 0 {w}x{h}, resource (\d+) in \d+ chunk\(s\)$", re.M)
+    deadline = time.monotonic() + 30
+    while not want.search(b.text()):
+        if time.monotonic() > deadline:
+            raise Fail(f"resize: the driver did not follow the display to {w}x{h} in 30 s")
+        time.sleep(0.2)
+    m = want.search(b.text())
+    time.sleep(1.0)   # the driver flushes every 16 ms
+    shot = os.path.join(args.workdir, "screen-resized.ppm")
+    scale = cell_scale(b.text(), w, h)
+    lines = screen(sock, shot, face, w, h, scale)
+    bad = [(i, ln) for i, ln in enumerate(lines) if "\0" in ln]
+    if bad:
+        raise Fail(f"resize: {len(bad)} screen row(s) hold a cell that is no glyph, the first row {bad[0][0]}")
+    if marker not in lines:
+        text = "\n".join(lines[-12:])
+        raise Fail(f"resize: the marker did not move to the {w}x{h} screen; its last rows:\n{text}")
+    at = lines.index(marker)
+    if not any(marker in ln for ln in lines[max(0, at - 2):at]):
+        raise Fail(f"resize: the command line is not above the marker: {lines[max(0, at - 2):at]!r}")
+    results.append(f"virtio: a VNC SetDesktopSize {w}x{h} (QEMU status {status}) followed by {m.group(1)}: "
+                   f"resource {m.group(2)}, the {w}x{h} screendump has the marker at row {at} under its command")
 
 
 if __name__ == "__main__":

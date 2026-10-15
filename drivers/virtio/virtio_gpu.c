@@ -523,7 +523,7 @@ static void vgpu_thread(void *arg)
             g->resize_warned = false;
             g->resize_retry_at = 0;
         }
-        if (g->resize_pending && clock_now_ns() >= g->resize_retry_at) {
+        if (g->resize_pending && clock_deadline_passed(g->resize_retry_at)) {
             uint32_t w, h;
             int rc = vgpu_display_size(g, &w, &h);
             if (rc == 0 && w == g->frame->width && h == g->frame->height)
@@ -539,7 +539,7 @@ static void vgpu_thread(void *arg)
                     kwarn("virtio-gpu: %s: cannot follow the display (%d); staying at %ux%u, retrying",
                           g->vdev->dev.name, rc, g->frame->width, g->frame->height);
                 g->resize_warned = true;
-                g->resize_retry_at = clock_now_ns() + VGPU_RESIZE_RETRY_NS;
+                g->resize_retry_at = clock_deadline_ns(VGPU_RESIZE_RETRY_NS);   /* the thread may migrate */
             }
         }
         /* Rows whose flush failed stay pending, merged with new ones. */
@@ -605,6 +605,8 @@ static bool vgpu_panic_flush(void *arg, uint32_t y0, uint32_t y1)
         if (virtq_add_panic(g->vq, sg, 1, 1, &g->panic) != 0)
             goto out;
         virtq_kick(g->vq);
+        /* Not clock_deadline_ns: nothing migrates in a panic, and the
+         * machine-wide tick it falls back to may not run. */
         uint64_t deadline = clock_now_ns() + VGPU_PANIC_POLL_NS;
         bool seen = false;
         while (!seen && clock_now_ns() < deadline) {

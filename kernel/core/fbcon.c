@@ -53,18 +53,27 @@ struct fbcon {
     char *text;                  /* cols * rows cells, the screen as characters */
     uint32_t scroll_rows;        /* cell rows moved by one scroll */
     bool ready;
-    bool registered;             /* the sink is on the console's list */
     /* A driver's surface (fbcon_attach), or NULL for the boot framebuffer. */
     const struct fbcon_surface *surface;
     uint32_t dmg_y0, dmg_y1;     /* drawn and not yet taken: pixel rows [y0, y1), empty when equal */
-    struct console_sink sink;
-    struct fbcon_stats stats;
 };
 
-static struct fbcon g_fbcon;
-/* The boot framebuffer's console, kept while a surface is attached so
- * fbcon_detach can go back to it (ready false: there was none). */
+/* The boot framebuffer's console (ready false: there is none), left as it
+ * is while a surface is shown so fbcon_detach can go back to it. */
 static struct fbcon g_boot_fbcon;
+/* A driver's surface's console: fbcon_attach fills the one not shown. */
+static struct fbcon g_surface_fbcon[2];
+/* The console drawn, one of the three. A switch fills another whole and
+ * then publishes it with this one store, under the console lock: a CPU in
+ * panic mode, which writes without the lock, sees the old console or the
+ * new one, never one half-copied (Codex, PR #387). */
+static struct fbcon *g_fb = &g_boot_fbcon;
+static struct fbcon_stats g_stats;
+static void fbcon_write(struct console_sink *sink, const char *s, size_t len);
+/* The sink, outside the consoles a switch replaces: its `next` links
+ * every sink after it on the console's list. */
+static struct console_sink g_sink = { .name = "fbcon", .write = fbcon_write };
+static bool g_registered;   /* g_sink is on the console's list */
 /* fbcon_switches(): bumped in the hold that changes the cell grid. */
 static uint32_t g_switches;
 
@@ -203,7 +212,7 @@ static FBCON_DRAW void fbcon_draw_glyph(struct fbcon *c, uint32_t col, uint32_t 
                 put_pixel(c, x0 + x, y, line[x]);
         }
     }
-    c->stats.glyphs++;
+    g_stats.glyphs++;
 }
 
 /* Draw every cell from the text shadow. Writes only: reading an uncached
@@ -215,7 +224,7 @@ static FBCON_DRAW void fbcon_draw_repaint(struct fbcon *c)
         for (uint32_t col = 0; col < c->cols; col++)
             fbcon_draw_glyph(c, col, row, (unsigned char)c->text[row * c->cols + col]);
     }
-    c->stats.repaints++;
+    g_stats.repaints++;
 }
 
 /*
@@ -242,7 +251,7 @@ static void scroll(struct fbcon *c)
     memset(c->text + keep, ' ', (size_t)n * c->cols);
     fbcon_draw_repaint(c);
     damage(c, 0, c->rows * c->cell_h);
-    c->stats.scrolls++;
+    g_stats.scrolls++;
 }
 
 static void newline(struct fbcon *c)
@@ -290,14 +299,13 @@ static void putc(struct fbcon *c, char ch)
     c->cx++;
 }
 
-static void fbcon_write(struct console_sink *sink, const char *s, size_t len)
+static void fbcon_put(struct fbcon *c, const char *s, size_t len)
 {
-    struct fbcon *c = container_of(sink, struct fbcon, sink);
     if (!c->ready)
         return;
     for (size_t i = 0; i < len; i++)
         putc(c, s[i]);
-    c->stats.bytes += len;
+    g_stats.bytes += len;
     /* No thread will flush during a panic: the surface does it now. */
     if (c->surface != NULL && c->surface->panic_flush != NULL && c->dmg_y0 != c->dmg_y1 &&
         console_in_panic_mode()) {
@@ -306,6 +314,12 @@ static void fbcon_write(struct console_sink *sink, const char *s, size_t len)
         if (!c->surface->panic_flush(c->surface->arg, y0, y1))
             damage(c, y0, y1);   /* not sent: the next line's flush covers it */
     }
+}
+
+static void fbcon_write(struct console_sink *sink, const char *s, size_t len)
+{
+    (void)sink;
+    fbcon_put(__atomic_load_n(&g_fb, __ATOMIC_ACQUIRE), s, len);
 }
 
 /*
@@ -333,7 +347,7 @@ static void replay_log(struct fbcon *c)
             break;
         }
     }
-    fbcon_write(&c->sink, buf + start, n - start);
+    fbcon_put(c, buf + start, n - start);
     kfree(buf);
 }
 
@@ -385,8 +399,6 @@ static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, 
     c->cx = c->cy = 0;
     c->fg = pack(fb, 0xd0, 0xd0, 0xd0);
     c->bg = pack(fb, 0x00, 0x00, 0x00);
-    c->sink.name = "fbcon";
-    c->sink.write = fbcon_write;
     if (c->cols == 0 || c->rows == 0) {
         kwarn("fbcon: %ux%u is smaller than one character cell", c->width, c->height);
         return false;
@@ -424,7 +436,7 @@ void fbcon_early_init(void)
     const struct cosmoboot_info *info = bootinfo_get();
     if (fb == NULL || fb->phys + fb->size > info->hhdm_size || overlaps_usable_ram(fb->phys, fb->size))
         return;
-    struct fbcon *c = &g_fbcon;
+    struct fbcon *c = &g_boot_fbcon;
     if (!fbcon_setup(c, fb, (volatile uint8_t *)bootinfo_phys_to_virt(fb->phys)))
         return;
     if ((size_t)c->cols * c->rows > FBCON_EARLY_CELLS) {
@@ -434,15 +446,15 @@ void fbcon_early_init(void)
     }
     c->text = g_early_text;
     fbcon_start(c);
-    console_register(&c->sink);
-    c->registered = true;
+    console_register(&g_sink);
+    g_registered = true;
     kinfo("fbcon: no serial console: the framebuffer is the console from the first line (%ux%u cells)", c->cols,
           c->rows);
 }
 
 void fbcon_init(void)
 {
-    if (g_fbcon.ready)
+    if (g_boot_fbcon.ready)
         return;   /* fbcon_early_init has it, through a mapping that stays */
     const struct bootinfo_framebuffer *fb = bootinfo_framebuffer();
     if (fb == NULL)
@@ -464,7 +476,7 @@ void fbcon_init(void)
         return;
     }
 
-    struct fbcon *c = &g_fbcon;
+    struct fbcon *c = &g_boot_fbcon;
     if (!fbcon_setup(c, fb, (volatile uint8_t *)(va + (vaddr_t)offset))) {
         vm_unmap_phys(va);
         return;
@@ -480,25 +492,25 @@ void fbcon_init(void)
     }
     fbcon_start(c);
     replay_log(c);
-    console_register(&c->sink);
-    c->registered = true;
+    console_register(&g_sink);
+    g_registered = true;
     kinfo("fbcon: %ux%u cells of %ux%u pixels at %p, scrolling %u rows at a time", c->cols, c->rows,
           c->cell_w, c->cell_h, (void *)(uintptr_t)c->base, c->scroll_rows);
 }
 
 bool fbcon_present(void)
 {
-    return g_fbcon.ready;
+    return __atomic_load_n(&g_fb, __ATOMIC_ACQUIRE)->ready;
 }
 
-/* The readers below take the console lock: a surface switch replaces
- * g_fbcon whole, and a copy made meanwhile would mix two screens. The
+/* The readers below take the console lock: a surface switch publishes
+ * another console, and a copy made across it would mix two screens. The
  * pixels at `base` stay the owner's (fbcon_geometry's users are the
  * self-tests, which fb-switch's switches do not run beside). */
 void fbcon_get_stats(struct fbcon_stats *out)
 {
     arch_irq_state_t st = console_hold();
-    *out = g_fbcon.stats;
+    *out = g_stats;
     console_release(st);
 }
 
@@ -507,21 +519,21 @@ bool fbcon_geometry(struct fbcon_geometry *out)
     if (out == NULL)
         return false;
     arch_irq_state_t st = console_hold();
-    if (!g_fbcon.ready) {
+    if (!g_fb->ready) {
         console_release(st);
         return false;
     }
-    out->base = (volatile void *)g_fbcon.base;
-    out->pitch = g_fbcon.pitch;
-    out->bytes_pp = g_fbcon.bytes_pp;
-    out->width = g_fbcon.width;
-    out->height = g_fbcon.height;
-    out->scale = g_fbcon.scale;
-    out->cols = g_fbcon.cols;
-    out->rows = g_fbcon.rows;
-    out->fg = g_fbcon.fg;
-    out->bg = g_fbcon.bg;
-    out->scroll_rows = g_fbcon.scroll_rows;
+    out->base = (volatile void *)g_fb->base;
+    out->pitch = g_fb->pitch;
+    out->bytes_pp = g_fb->bytes_pp;
+    out->width = g_fb->width;
+    out->height = g_fb->height;
+    out->scale = g_fb->scale;
+    out->cols = g_fb->cols;
+    out->rows = g_fb->rows;
+    out->fg = g_fb->fg;
+    out->bg = g_fb->bg;
+    out->scroll_rows = g_fb->scroll_rows;
     console_release(st);
     return true;
 }
@@ -534,7 +546,10 @@ uint32_t fbcon_switches(void)
 #if CONFIG_SELFTEST
 bool fbcon_on_surface(void)
 {
-    return g_fbcon.surface != NULL;
+    arch_irq_state_t st = console_hold();
+    bool on = g_fb->surface != NULL;
+    console_release(st);
+    return on;
 }
 #endif
 
@@ -542,9 +557,9 @@ void fbcon_cursor(uint32_t *col, uint32_t *row)
 {
     arch_irq_state_t st = console_hold();
     if (col)
-        *col = g_fbcon.cx;
+        *col = g_fb->cx;
     if (row)
-        *row = g_fbcon.cy;
+        *row = g_fb->cy;
     console_release(st);
 }
 
@@ -572,16 +587,16 @@ static void carry_text(struct fbcon *c, const struct fbcon *prev)
 
 /*
  * A display driver's surface (fbcon.h). The new text buffer is allocated
- * first, in thread context. The switch and the new screen's first
- * contents are one hold of the console lock, so no line written meanwhile
- * is lost. Those contents are the screen it replaces (carry_text) when
+ * first, in thread context. The new console is built whole in the surface
+ * slot not shown and then published (g_fb); the build and the publish are
+ * one hold of the console lock, so no line written meanwhile is lost. Those contents are the screen it replaces (carry_text) when
  * fbcon was drawing one, else the log's newest screenful (the ring's lock
  * nests inside the console's): every line is either in that copy or
  * written after the release onto the new surface, and a line put in the
  * ring whose sink write is waiting for the lock is drawn twice. A first
  * surface's sink is registered in the same hold. The boot framebuffer's
- * console is kept for fbcon_detach and keeps its mapping; a previous
- * surface's text buffer is freed after the switch. A new cell grid is the
+ * console is left as it is for fbcon_detach and keeps its mapping; a
+ * previous surface's text buffer is freed after the switch. A new cell grid is the
  * console terminal's new size (tty_console_resized: SIGWINCH).
  */
 int fbcon_attach(const struct fbcon_surface *s)
@@ -602,86 +617,67 @@ int fbcon_attach(const struct fbcon_surface *s)
     next.text = kmalloc((size_t)next.cols * next.rows, 0);
     if (next.text == NULL)
         return -ENOMEM;
+    next.surface = s;
     char *log = kmalloc(KLOG_RING_SIZE, 0);
 
-    struct fbcon *c = &g_fbcon;
     arch_irq_state_t st = console_hold();
-    char *old_text = c->surface != NULL ? c->text : NULL;
-    if (c->surface == NULL)
-        g_boot_fbcon = *c;   /* the boot framebuffer's console, or none (ready false) */
-    struct fbcon prev = *c;   /* read only; its text is freed after the release */
-    /* The sink is on the console's list (its `next` links the sinks after
-     * it): it stays as it is, whatever else is replaced. */
-    struct console_sink sink = c->sink;
-    struct fbcon_stats stats = c->stats;
-    bool registered = c->registered;
-    *c = next;
-    c->sink = sink;
-    c->stats = stats;
-    c->registered = registered;
-    c->sink.name = "fbcon";
-    c->sink.write = fbcon_write;
-    c->surface = s;
-    fbcon_start(c);
-    if (!c->registered) {
-        console_register(&c->sink);   /* writers walk the list under this lock */
-        c->registered = true;
-    }
-
-    if (prev.ready) {
-        carry_text(c, &prev);
+    struct fbcon *prev = g_fb;
+    struct fbcon *n = prev == &g_surface_fbcon[0] ? &g_surface_fbcon[1] : &g_surface_fbcon[0];
+    *n = next;   /* not shown: no writer, in panic mode or not, reads it */
+    fbcon_start(n);
+    if (prev->ready) {
+        carry_text(n, prev);
     } else if (log != NULL) {
         /* No screen before: the newest screenful, as fbcon_init shows it. */
         size_t log_len = klog_copy(log, KLOG_RING_SIZE);
         size_t start = log_len;
         unsigned lines = 0;
-        while (start > 0 && lines < c->rows) {
+        while (start > 0 && lines < n->rows) {
             start--;
-            if (log[start] == '\n' && ++lines == c->rows) {
+            if (log[start] == '\n' && ++lines == n->rows) {
                 start++;
                 break;
             }
         }
-        fbcon_write(&c->sink, log + start, log_len - start);
+        fbcon_put(n, log + start, log_len - start);
     }
-    bool resized = !prev.ready || prev.cols != c->cols || prev.rows != c->rows;
+    __atomic_store_n(&g_fb, n, __ATOMIC_RELEASE);
+    if (!g_registered) {
+        console_register(&g_sink);   /* writers walk the list under this lock */
+        g_registered = true;
+    }
+    char *old_text = prev->surface != NULL ? prev->text : NULL;
+    bool resized = !prev->ready || prev->cols != n->cols || prev->rows != n->rows;
     uint32_t gen = resized ? __atomic_add_fetch(&g_switches, 1, __ATOMIC_RELEASE) : 0;
+    uint32_t cols = n->cols, rows = n->rows, cell_w = n->cell_w, cell_h = n->cell_h, scroll = n->scroll_rows;
     console_release(st);
     kfree(log);
     kfree(old_text);
     if (resized)
         tty_console_resized(gen);
-    kinfo("fbcon: %ux%u cells of %ux%u pixels on a %ux%u surface, scrolling %u rows at a time", c->cols, c->rows,
-          c->cell_w, c->cell_h, c->width, c->height, c->scroll_rows);
+    kinfo("fbcon: %ux%u cells of %ux%u pixels on a %ux%u surface, scrolling %u rows at a time", cols, rows,
+          cell_w, cell_h, s->width, s->height, scroll);
     return 0;
 }
 
 void fbcon_detach(const struct fbcon_surface *s)
 {
-    struct fbcon *c = &g_fbcon;
     arch_irq_state_t st = console_hold();
-    if (c->surface != s) {
+    struct fbcon *prev = g_fb;
+    if (prev->surface != s) {
         console_release(st);
         return;
     }
-    char *old_text = c->text;
-    struct fbcon prev = *c;   /* read only; its text is freed after the release */
-    struct console_sink sink = c->sink;   /* on the console's list: kept (fbcon_attach) */
-    struct fbcon_stats stats = c->stats;
-    bool registered = c->registered;
-    *c = g_boot_fbcon;   /* the boot framebuffer again, or no console (ready false) */
-    c->sink = sink;
-    c->stats = stats;
-    c->registered = registered;
-    c->sink.name = "fbcon";
-    c->sink.write = fbcon_write;
+    struct fbcon *c = &g_boot_fbcon;   /* the boot framebuffer again, or no console (ready false) */
     if (c->ready) {
         /* The boot framebuffer was not drawn while the surface was: it
-         * gets the surface's screen. */
+         * gets the surface's screen before it is shown again. */
         memset(c->text, ' ', (size_t)c->cols * c->rows);
-        carry_text(c, &prev);
+        carry_text(c, prev);
     }
-    bool resized = !c->ready || prev.cols != c->cols || prev.rows != c->rows;
+    __atomic_store_n(&g_fb, c, __ATOMIC_RELEASE);
+    char *old_text = prev->text;
+    bool resized = !c->ready || prev->cols != c->cols || prev->rows != c->rows;
     uint32_t gen = resized ? __atomic_add_fetch(&g_switches, 1, __ATOMIC_RELEASE) : 0;
     console_release(st);
     kfree(old_text);
@@ -691,8 +687,8 @@ void fbcon_detach(const struct fbcon_surface *s)
 
 bool fbcon_take_damage(const struct fbcon_surface *s, uint32_t *y0, uint32_t *y1)
 {
-    struct fbcon *c = &g_fbcon;
     arch_irq_state_t st = console_hold();
+    struct fbcon *c = g_fb;
     bool any = c->surface == s && c->dmg_y0 != c->dmg_y1;
     if (any) {
         *y0 = c->dmg_y0;
