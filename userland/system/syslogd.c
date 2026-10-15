@@ -50,23 +50,44 @@ static int is_stamp(const char *s, size_t n)
     return 1;
 }
 
-/* One syslogd per path, for as long as it runs: an abstract unix name
- * ("syslogd:" and the path) bound to a socket held open for the process's
- * life. Binding a taken abstract name fails with EADDRINUSE, atomically,
- * and the kernel lets the name go with the socket when the process ends,
- * however it ends -- so no lock outlives its holder. Taken before the
- * stale-node check, it keeps two starts from both judging one node stale
- * and the second unlinking the node the first has just bound. 0, or -1
- * with a message. */
+/* One syslogd per endpoint, for as long as it runs: an abstract unix name
+ * bound to a socket held open for the process's life. Binding a taken
+ * abstract name fails with EADDRINUSE, atomically, and the kernel lets
+ * the name go with the socket when the process ends, however it ends -- so
+ * no lock outlives its holder. Taken before the stale-node check, it keeps
+ * two starts from both judging one node stale and the second unlinking the
+ * node the first has just bound.
+ *
+ * The name is the endpoint's identity, not its spelling: the inode of the
+ * directory that holds it and its last component, so /tmp/log,
+ * /tmp/../tmp/log and a path through a symbolic link are one lock. (stat
+ * gives no device number, so two directories on different filesystems with
+ * one inode number share a lock: a start is refused that need not be,
+ * never the reverse.) 0, or -1 with a message. */
 static int hold_instance(const char *path)
 {
+    const char *slash = strrchr(path, '/');
+    const char *base = slash ? slash + 1 : path;
+    char dir[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    if (slash == NULL)
+        snprintf(dir, sizeof(dir), ".");
+    else if (slash == path)
+        snprintf(dir, sizeof(dir), "/");
+    else
+        snprintf(dir, sizeof(dir), "%.*s", (int)(slash - path), path);
+    struct stat st;
+    if (*base == '\0' || stat(dir, &st) < 0) {
+        fprintf(stderr, "syslogd: %s: %s\n", path, *base == '\0' ? "names no socket" : strerror(errno));
+        return -1;
+    }
     int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (fd < 0) {
         fprintf(stderr, "syslogd: socket: %s\n", strerror(errno));
         return -1;
     }
     struct sockaddr_un la = { .sun_family = AF_UNIX };
-    int n = snprintf(la.sun_path + 1, sizeof(la.sun_path) - 1, "syslogd:%s", path);
+    int n = snprintf(la.sun_path + 1, sizeof(la.sun_path) - 1, "syslogd:%llu:%s",
+                     (unsigned long long)st.st_ino, base);
     if (n < 0 || (size_t)n >= sizeof(la.sun_path) - 1) {
         fprintf(stderr, "syslogd: %s: the path is too long\n", path);
         return -1;

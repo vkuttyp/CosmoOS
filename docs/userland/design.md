@@ -388,10 +388,14 @@ a socket node no one is bound to (an earlier run's: a probe `connect`
 fails with `ECONNREFUSED`, the one error that says so): a file there, a
 socket another `syslogd` serves, or one the probe cannot judge (any other
 error) is refused and left alone. Before that check it binds the
-abstract unix name `syslogd:` and the path, held for its whole life: a
-second start fails there (`EADDRINUSE`), so two starts cannot both judge
-one node stale and the second unlink what the first has just bound, and
-the name goes with the process however it ends. With no
+abstract unix name `syslogd:`, the inode of the directory holding the
+socket and its last component -- the endpoint's identity, so every
+spelling of the path is one name -- held for its whole life: a second
+start fails there (`EADDRINUSE`), so two starts cannot both judge one node
+stale and the second unlink what the first has just bound, and the name
+goes with the process however it ends. (stat gives no device number, so
+two directories with one inode number on different filesystems share a
+name: a start can be refused that need not be, never the reverse.) With no
 privileges the kernel's rate limit
 for an unprivileged writer applies to it as to any process: a burst past
 it is dropped, and the next line that gets through says how many were.

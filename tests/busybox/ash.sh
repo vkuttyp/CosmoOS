@@ -277,6 +277,8 @@ expect logger 1 "$got"
 # is found by its node; unlinking it would cut the first off), and never
 # deletes a file at its path.
 expect syslogd-served 1 "$(/sbin/syslogd 2>&1 | grep -c 'already served (another syslogd holds it)')"
+# The same endpoint by another spelling is the same instance.
+expect syslogd-alias 1 "$(/sbin/syslogd /dev/../dev/log 2>&1 | grep -c 'already served (another syslogd holds it)')"
 logger -t "$tag" "still served"
 got=0
 for i in 1 2 3 4 5 6 7 8 9 10; do
