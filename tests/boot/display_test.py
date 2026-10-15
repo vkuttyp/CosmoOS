@@ -102,9 +102,15 @@ def vnc_resize(path, w, h):
     QEMU hands it to the display's device as its UI size; for virtio-gpu
     that is the display-change event. Returns QEMU's status for it."""
     import struct
+    try:
+        return vnc_resize_on(path, w, h, struct)
+    except OSError as e:   # no socket, a reset, a timeout: the test's own failure
+        raise Fail(f"VNC on {path}: {e}") from e
+
+
+def vnc_resize_on(path, w, h, struct):
     s = socket.socket(socket.AF_UNIX)
     s.settimeout(30)
-    s.connect(path)
 
     def recv(n):
         b = b""
@@ -116,6 +122,7 @@ def vnc_resize(path, w, h):
         return b
 
     try:
+        s.connect(path)
         if not recv(12).startswith(b"RFB 003."):
             raise Fail("VNC: not an RFB server")
         s.sendall(b"RFB 003.008\n")
@@ -292,7 +299,8 @@ def check_shape(args, face, shape, want_w, want_h, results):
     vnc = os.path.join(args.workdir, f"vnc-{shape}.sock")
     env = {"QEMU_DISPLAY": shape, "QEMU_GPU_SIZE": args.size, "QEMU_QMP": sock}
     if shape == "virtio":
-        env["QEMU_EXTRA"] = f"-vnc unix:{vnc},display=gpu0"   # check f's display change
+        # check f's display change, after whatever the caller passes
+        env["QEMU_EXTRA"] = f"{os.environ.get('QEMU_EXTRA', '')} -vnc unix:{vnc},display=gpu0".strip()
     b = Boot(shape, args.image, args.workdir, env, args.timeout)
     try:
         b.wait_prompt("the first prompt")

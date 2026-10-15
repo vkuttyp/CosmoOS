@@ -288,7 +288,10 @@ MSI-X vectors, the configuration's and one queue's).
   removal, and only when the status reads 0; otherwise all of it is
   kept, the queue's interrupt stopped (`virtq_quiesce`, so `vgpu_done`
   never runs on the freed driver state or an unloaded module), and
-  `device_retain_dma` keeps any driver off the device (U14).
+  `device_retain_dma` keeps any driver off the device (U14). In panic
+  mode a frame fbcon replaced or left is not freed, and removal tears
+  nothing down: a panic's writer may still draw on it and flush it
+  through `controlq` (`fbcon.h`).
 - **`RESOURCE_ATTACH_BACKING`** sends its entries as a second descriptor
   after the 32-byte command, as Linux's driver does. Parallels Desktop
   answers 0x1205 (invalid parameter) to the entries in the command's own

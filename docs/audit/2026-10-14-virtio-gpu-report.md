@@ -320,6 +320,24 @@ Codex's and CosmoReview's reviews of `a8270905`:
   so. `vgpu_dma_release` hands the entries back before the only `goto
   fail` that follows their allocation.
 
+Qodo's review of `d4b3d0ab`:
+
+- **A panic's writer could draw on a console a switch freed** (Qodo,
+  high). `smp_stop_others` gives up on a CPU with interrupts off (one
+  holding the console lock in a switch), and lockdep's report enters
+  panic mode before any stop, so a lockless writer can load the old
+  console just before the publish. A switch now refuses to start in
+  panic mode and, after its publish, fences and looks again: a panic
+  seen then keeps the old text, and the driver, which reads the same
+  flag after `fbcon_attach`/`fbcon_detach`, keeps the old frame (removal
+  tears nothing down). The writer fences before loading the pointer, so
+  when the switch sees no panic the writer sees the new console. Not
+  reachable in a test: panic mode does not end.
+- **`QEMU_EXTRA` from the caller was replaced in the `virtio` boot**
+  (Qodo): check f's `-vnc` is appended to it.
+- **A VNC socket error escaped as a traceback** (Qodo): `OSError` in
+  the client is the test's own failure, with the socket's path.
+
 Not changed: CosmoReview's "blocking call under spinlock" in
 `vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with
 `kmem_cache_alloc`, which takes only the cache's spinlock and grows from

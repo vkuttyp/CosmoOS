@@ -492,7 +492,9 @@ static int vgpu_show(struct vgpu *g, uint32_t w, uint32_t h)
     struct vgpu_frame *old = g->frame;
     g->frame = f;
     g->pend_y0 = g->pend_y1 = 0;   /* the old frame's rows; the new one is all flushed */
-    if (old)
+    /* In panic mode a writer without the lock may still draw on the old
+     * frame and flush it (fbcon.h): kept. */
+    if (old && !console_in_panic_mode())
         vgpu_frame_free(g, old);
     /* The console's first screen, drawn by fbcon_attach. */
     uint32_t y0, y1;
@@ -644,10 +646,15 @@ static void vgpu_buf_free(struct vgpu *g, struct vgpu_buf *b)
         dma_free(&g->vdev->dev, PAGE_SIZE, b->resp, b->resp_dma);
 }
 
-static void vgpu_teardown(struct vgpu *g)
+/* False when `g` must outlive this: a panic has begun, and its writer,
+ * which takes no lock, may still draw on the frame and flush it through
+ * g's queue (fbcon.h). Then nothing is torn down. */
+static bool vgpu_teardown(struct vgpu *g)
 {
     if (g->frame) {
         fbcon_detach(&g->frame->surface);
+        if (console_in_panic_mode())
+            return false;
         mutex_lock(&g->cmd_lock);
         (void)vgpu_set_scanout(g, 0, 0, 0);   /* resource 0: scanout off */
         vgpu_frame_free(g, g->frame);
@@ -666,7 +673,7 @@ static void vgpu_teardown(struct vgpu *g)
         if (g->vq)
             virtq_quiesce(g->vq);
         device_retain_dma(&g->vdev->dev);
-        return;
+        return true;
     }
     if (g->vq)
         virtq_free(g->vq);
@@ -678,6 +685,7 @@ static void vgpu_teardown(struct vgpu *g)
     }
     vgpu_buf_free(g, &g->cmd);
     vgpu_buf_free(g, &g->panic);
+    return true;
 }
 
 static int vgpu_probe(struct virtio_device *vdev)
@@ -726,9 +734,10 @@ static int vgpu_probe(struct virtio_device *vdev)
 
 fail:
     kwarn("virtio-gpu: %s: not used (%d)", vdev->dev.name, rc);
-    vgpu_teardown(g);
-    vdev->priv = NULL;
-    kfree(g);
+    if (vgpu_teardown(g)) {
+        vdev->priv = NULL;
+        kfree(g);
+    }
     return rc;
 }
 
@@ -737,7 +746,8 @@ static void vgpu_remove(struct virtio_device *vdev)
     struct vgpu *g = vdev->priv;
     __atomic_store_n(&g->stopping, true, __ATOMIC_RELEASE);
     thread_join(g->thread);
-    vgpu_teardown(g);
+    if (!vgpu_teardown(g))
+        return;   /* a panic is drawing through it */
     kinfo("virtio-gpu: %s: removed after %llu flushes, %llu resizes", vdev->dev.name,
           (unsigned long long)g->flushes, (unsigned long long)g->resizes);
     vdev->priv = NULL;

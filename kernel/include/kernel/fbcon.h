@@ -89,13 +89,17 @@ struct fbcon_surface {
 };
 
 /* Move the console onto `s`: the screen it replaces, or with none before
- * the newest screenful of the log. The previous surface, if any, is dropped (its owner frees it after
- * this returns). Thread context. 0, -EINVAL (not a usable surface) or
- * -ENOMEM. */
+ * the newest screenful of the log. The previous surface, if any, is
+ * dropped: its owner frees it after this returns, unless
+ * console_in_panic_mode() then reads true. A panic's writer takes no lock
+ * and may still be drawing on it (and calling its panic_flush), so it is
+ * never freed. Thread context. 0, -EINVAL (not a usable surface), -ENOMEM,
+ * or -EBUSY (in panic mode: no switch). */
 int fbcon_attach(const struct fbcon_surface *s);
-/* Leave `s` (no effect if it is not the one attached): back to the boot
- * framebuffer, or to no screen console when there was none. On return no
- * sink write touches `s`. Thread context. */
+/* Leave `s` (no effect if it is not the one attached, or in panic mode):
+ * back to the boot framebuffer, or to no screen console when there was
+ * none. On return no sink write touches `s`, unless console_in_panic_mode()
+ * reads true, as for fbcon_attach. Thread context. */
 void fbcon_detach(const struct fbcon_surface *s);
 /* The pixel rows [y0, y1) drawn on `s` since the last call, cleared;
  * false when there are none (or `s` is not attached). Thread context. */

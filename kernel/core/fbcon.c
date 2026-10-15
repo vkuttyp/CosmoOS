@@ -319,6 +319,13 @@ static void fbcon_put(struct fbcon *c, const char *s, size_t len)
 static void fbcon_write(struct console_sink *sink, const char *s, size_t len)
 {
     (void)sink;
+    /* In panic mode there is no lock, and a switch on a CPU the panic
+     * did not stop (interrupts off, or lockdep's report, which prints
+     * before any stop) may be publishing. The fence pairs with the
+     * switch's (switch_done): either it sees panic mode and keeps the
+     * console it replaced, or this load sees the new one. */
+    if (console_in_panic_mode())
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
     fbcon_put(__atomic_load_n(&g_fb, __ATOMIC_ACQUIRE), s, len);
 }
 
@@ -586,6 +593,19 @@ static void carry_text(struct fbcon *c, const struct fbcon *prev)
 }
 
 /*
+ * After a switch's publish, under the console lock: whether a panic has
+ * begun. Then a writer without the lock may hold the console replaced,
+ * which is kept (its text, and by its owner its surface: fbcon.h); else
+ * every later lockless writer sees the new one (fbcon_write's fence).
+ * Panic mode never ends, so no switch follows and no slot is reused.
+ */
+static bool switch_done(void)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return console_in_panic_mode();
+}
+
+/*
  * A display driver's surface (fbcon.h). The new text buffer is allocated
  * first, in thread context. The new console is built whole in the surface
  * slot not shown and then published (g_fb); the build and the publish are
@@ -621,6 +641,12 @@ int fbcon_attach(const struct fbcon_surface *s)
     char *log = kmalloc(KLOG_RING_SIZE, 0);
 
     arch_irq_state_t st = console_hold();
+    if (console_in_panic_mode()) {
+        console_release(st);
+        kfree(log);
+        kfree(next.text);
+        return -EBUSY;
+    }
     struct fbcon *prev = g_fb;
     struct fbcon *n = prev == &g_surface_fbcon[0] ? &g_surface_fbcon[1] : &g_surface_fbcon[0];
     *n = next;   /* not shown: no writer, in panic mode or not, reads it */
@@ -642,11 +668,12 @@ int fbcon_attach(const struct fbcon_surface *s)
         fbcon_put(n, log + start, log_len - start);
     }
     __atomic_store_n(&g_fb, n, __ATOMIC_RELEASE);
+    bool panicking = switch_done();
     if (!g_registered) {
         console_register(&g_sink);   /* writers walk the list under this lock */
         g_registered = true;
     }
-    char *old_text = prev->surface != NULL ? prev->text : NULL;
+    char *old_text = prev->surface != NULL && !panicking ? prev->text : NULL;
     bool resized = !prev->ready || prev->cols != n->cols || prev->rows != n->rows;
     uint32_t gen = resized ? __atomic_add_fetch(&g_switches, 1, __ATOMIC_RELEASE) : 0;
     uint32_t cols = n->cols, rows = n->rows, cell_w = n->cell_w, cell_h = n->cell_h, scroll = n->scroll_rows;
@@ -664,7 +691,7 @@ void fbcon_detach(const struct fbcon_surface *s)
 {
     arch_irq_state_t st = console_hold();
     struct fbcon *prev = g_fb;
-    if (prev->surface != s) {
+    if (prev->surface != s || console_in_panic_mode()) {
         console_release(st);
         return;
     }
@@ -676,7 +703,7 @@ void fbcon_detach(const struct fbcon_surface *s)
         carry_text(c, prev);
     }
     __atomic_store_n(&g_fb, c, __ATOMIC_RELEASE);
-    char *old_text = prev->text;
+    char *old_text = switch_done() ? NULL : prev->text;
     bool resized = !c->ready || prev->cols != c->cols || prev->rows != c->rows;
     uint32_t gen = resized ? __atomic_add_fetch(&g_switches, 1, __ATOMIC_RELEASE) : 0;
     console_release(st);

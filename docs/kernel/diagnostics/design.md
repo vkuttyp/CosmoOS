@@ -123,6 +123,13 @@ for `fbcon_detach`, redraws the boot console, which was left as it was)
 and then publishes it with one store of the pointer the sink draws
 through. A CPU in panic mode writes without the console lock and sees
 the old console or the new one, never one half-copied (Codex, PR #387).
+Such a writer can run beside a switch: `smp_stop_others` gives up on a
+CPU with interrupts off, and lockdep's report enters panic mode before
+any stop. So a switch refuses to start in panic mode (`-EBUSY`), and
+after its publish a full fence and a second look decide: a panic seen
+then keeps the replaced console (its text, and by its owner the surface
+and what its `panic_flush` uses); otherwise the writer's own fence, before
+it loads the pointer, makes it see the new one (Qodo, PR #387).
 The sink and the counters are outside them: the sink is on the
 console's list, and its `next` links every sink after it. The first
 build copied the whole console structure and with it the sink's `next`,
