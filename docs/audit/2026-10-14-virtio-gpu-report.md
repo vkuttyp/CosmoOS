@@ -118,6 +118,13 @@ framebuffer at all, gets a console too.
   passed on both.
 - **At `e7c32a81`**: `test-display` passes on both architectures (check e
   reports owner word 2 for CPU 1), and at 640x480 on x86-64.
+- **At `8ea7dc56`**, the matrix: 38 of 38 steps on both architectures,
+  the network harness ready in each debug boot (1, 2 and 4 CPUs,
+  `test-smp2`, chaos, harness retry), reproducible on both;
+  `test-display` and `test-net-login` on both.
+- **At `b729944e`** (the fourth round, below): debug `make test` passes
+  on both architectures (477 self-tests, `fb-switch` with the late
+  notice, the network harness ready) and `test-display` on both.
 
 ## Review (PR #387)
 
@@ -209,7 +216,7 @@ The rest of that review and Qodo's of `8fca562e` and `3804c9ad`, fixed in
   `tty_console_resized`: the console's stored size is dropped, so it
   answers the new geometry, and the foreground group gets SIGWINCH.
   Selftest `fb-switch` attaches 60x17 and then 40x12 surfaces over the
-  boot framebuffer (100x37 on x86-64, 160x50 on AArch64) and restores it.
+  boot framebuffer (160x50 on x86-64, 100x37 on AArch64) and restores it.
   It fails, on both architectures, with the old log replay ("the lines
   written before the switch are not on the new surface") and without
   `tty_console_resized` ("the console's size is not the new surface's
@@ -232,6 +239,36 @@ The rest of that review and Qodo's of `8fca562e` and `3804c9ad`, fixed in
   failed on `fb-switch`'s query, which is selftest-only; it has a stub
   (`e7c32a81`), and neither release kernel carries a seam symbol
   (`llvm-nm`).
+
+Qodo's and Codex's reviews of `8ea7dc56`, fixed in `b729944e`:
+
+- **A late resize notice dropped a newer size** (Qodo).
+  `tty_console_resized` runs after the console lock's release, and a
+  `TIOCSWINSZ` in between was cleared with the old one. Each grid change
+  is numbered in the hold that makes it (`fbcon_switches`), `TIOCSWINSZ`
+  records the number it saw, and the notice drops only an older size.
+  `fb-switch` sets 9x4 after the switch and delivers its notice late; with
+  the notice dropping every size (a worktree of `b729944e`) it fails on
+  both architectures, "a size set after the switch was dropped by its
+  late notice", each run's only failure of 477.
+- **A line logged inside the panic flush lost its rows** (Qodo): fbcon
+  cleared the band before the call, and the re-entered call returned
+  without sending it, a scroll's repaint included. `panic_flush` returns
+  whether the band reached the device, and fbcon merges an unsent band
+  back for the next line's flush. Not reachable with QEMU's device.
+- **fbcon's readers raced a switch** (Codex): `fbcon_geometry`,
+  `fbcon_cursor` and `fbcon_get_stats` copied `g_fbcon` without the lock
+  it is replaced under. They take it. The pixels at `base` stay the
+  owner's; their only readers are the self-tests.
+- **A refused detach freed attached memory** (Codex): an error response
+  to `RESOURCE_DETACH_BACKING` does not set `broken`, and the chunks were
+  freed. They are kept until a reset the device acknowledges.
+- **The queue was freed before the reset was acknowledged** (Codex).
+  `vgpu_teardown` checks the status first; when it is not 0 nothing is
+  freed and `device_retain_dma` keeps drivers off the device (U14). Not
+  reachable with QEMU's device, which always acknowledges.
+- **Docs promised `DISPLAY_SIZE` down to 320x200** (Qodo): the testing
+  row now says 640x480 is the smallest tested.
 
 Not changed: CosmoReview's "blocking call under spinlock" in
 `vm_map_direct_ranges`. `region_new` allocates from `g_region_cache` with

@@ -112,7 +112,7 @@ else that prints and a self-test run is quiet but not silent.
 **`fb-switch`** (both architectures; skipped when a display driver's
 surface holds the console, which detaching would leave). It attaches two
 surfaces in memory over whatever fbcon had (in the debug boots the
-firmware's framebuffer, 100x37 cells on x86-64 and 160x50 on AArch64):
+firmware's framebuffer, 160x50 cells on x86-64 and 100x37 on AArch64):
 60x17 cells, then 40x12, the shape of a display resize. Two lines are
 written between them with `console_puts`, which reaches the sinks
 without the log ring as a program's output does, the second left
