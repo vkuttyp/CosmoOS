@@ -589,11 +589,27 @@ void tty_set_size(struct tty *t, const struct cosmo_ttysize *in)
     t->size.cols = in->cols;
     t->size.rows = in->rows;
     t->size_set = true;
+    t->size_gen = fbcon_switches();
     pid_t fg = t->fg_pgid;
     spin_unlock_irqrestore(&t->lock, s);
     /* A program drawing the whole screen redraws on SIGWINCH; one that
      * set the same size again has nothing to redraw. */
     if (changed && fg != 0)
+        tty_signal_group(t, fg, SIGWINCH);
+}
+
+void tty_console_resized(uint32_t gen)
+{
+    struct tty *t = tty_console();
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    /* tty_get_size asks fbcon again: the window decides, as a terminal
+     * emulator's does. A size set after the switch read `gen` (or a later
+     * one) and is newer than it: kept. */
+    if ((int32_t)(t->size_gen - gen) < 0)
+        t->size_set = false;
+    pid_t fg = t->fg_pgid;
+    spin_unlock_irqrestore(&t->lock, s);
+    if (fg != 0)
         tty_signal_group(t, fg, SIGWINCH);
 }
 

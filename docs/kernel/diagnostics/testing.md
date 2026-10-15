@@ -92,7 +92,8 @@ five-millisecond deadline and the `lockup-sample-busy` checks are unchanged.
 ### The framebuffer console
 
 **`fb-console`** (both architectures, whenever the machine has a
-display). Everything is checked by reading the pixels back through the
+display; skipped, as `fb-bench` is, when a display driver's surface holds
+the console, which a display change can free under a pixel read). Everything is checked by reading the pixels back through the
 same mapping the console draws through and comparing them against the
 font table, in both colours -- which is what makes a display testable
 under `-display none` with no screenshot, and what makes a wrong pixel
@@ -109,6 +110,24 @@ which also says the repaint draws what the text shadow holds. Each check
 retries up to three times, because the screen is shared with everything
 else that prints and a self-test run is quiet but not silent.
 
+**`fb-switch`** (both architectures; skipped when a display driver's
+surface holds the console, which detaching would leave). It attaches two
+surfaces in memory over whatever fbcon had (in the debug boots the
+firmware's framebuffer, 160x50 cells on x86-64 and 100x37 on AArch64):
+60x17 cells, then 40x12, the shape of a display resize. Two lines are
+written between them with `console_puts`, which reaches the sinks
+without the log ring as a program's output does, the second left
+unfinished. On the 40x12 surface the two must be on consecutive rows,
+the second continued at column 15 by `fbcon_attach`'s own log line,
+which shows the cursor moved with the screen. A size set by
+`TIOCSWINSZ` before the second switch must have given way to 40x12
+(`tty_console_resized`), and one set after it must survive that
+switch's notice delivered late (9x4 kept). Detaching must give back the first console at
+its size, and the terminal's size with it. It fails with the log replay
+`fbcon_attach` did before (the lines are not there) and without
+`tty_console_resized` (the size stays 7x3), each on both architectures,
+and with the notice dropping every stored size (the 9x4 is lost).
+
 **`fb-geometry`** is not a boot test: the validator is a pure function,
 so it is a host test (`tests/host/test_fbvalid.c`, ASan/UBSan) and a
 fuzz target (`tests/fuzz/fuzz_fbvalid.c`). The host test names the
@@ -123,7 +142,12 @@ a machine with no display: the loader says so, the kernel keeps the
 serial console, and the `fb-` tests skip. `QEMU_DISPLAY=virtio` is a
 `virtio-gpu-pci`, whose edk2 driver offers a Blt-only mode with no
 linear buffer: the loader names the format and ignores it, which is the
-refusal path. `QEMU_DISPLAY=bochs` is a framebuffer on x86 and, on
+refusal path; the `virtio_gpu` module then moves the console onto the
+device (`QEMU_GPU_SIZE=WxH` sets its size). `QEMU_DISPLAY=both` is the
+firmware's framebuffer and a `virtio-gpu-pci` together, Parallels
+Desktop's shape: the console starts on the first and moves to the
+second. `make test-display` boots both and reads the screen back
+(`docs/drivers/virtio/testing.md`). `QEMU_DISPLAY=bochs` is a framebuffer on x86 and, on
 AArch64, no Graphics Output Protocol at all -- the firmware there
 carries no driver for it.
 

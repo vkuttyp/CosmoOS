@@ -12,8 +12,9 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
   the AArch64 image boots on Parallels Desktop 27 on Apple Silicon, and
   since v1.0.3 installs on its NVMe disks and has a network there; its
   SATA disks are not seen ([Tested platforms](platforms.md)). Out of scope for 1.0
-  ([roadmap](../roadmap-1.0.md)): GPU and display (a framebuffer console
-  only), hotplug, NUMA, more than 64 CPUs, huge pages, live migration,
+  ([roadmap](../roadmap-1.0.md)): GPU and display beyond a text console (on
+  the firmware's framebuffer, or a virtio-gpu adapter at the display's
+  own size: no 3D, cursor or display interface for programs), hotplug, NUMA, more than 64 CPUs, huge pages, live migration,
   RAID-Z, eBPF, and the Intel VMX backend on hardware.
 - **Randomness from the weakest source last.** The pool seeds from the
   CPU's random instructions, the firmware's `EFI_RNG_PROTOCOL` or a

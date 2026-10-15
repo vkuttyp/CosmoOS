@@ -2971,3 +2971,18 @@ See the [history index](README.md).
   counts one interface's now (`netif-rxq-count`,
   `tools/netif-rxq-count-probe.py`).
   Report: `docs/audit/2026-10-14-https-report.md`.
+- **After 1.0: virtio-gpu (2026-10-14).** A 2D `virtio_gpu` module gives
+  the screen console the size the display asks for: a resource of the
+  scanout's size in 4 MiB `dma_alloc` chunks that `vm_map_direct_ranges`
+  maps as one frame, fbcon moved onto it (`fbcon_attach`; the sink records
+  the drawn rows, a thread flushes them every 16 ms, a polled flush in
+  panic mode), and a new frame when Parallels resizes the scanout with its
+  window (1024x768 to 1407x768 and back on Parallels Desktop). Parallels
+  answered 0x1205 until the backing entries went in a descriptor of their
+  own, as Linux sends them; the first attach copied the console sink's
+  list link and silenced the serial console there. `make test-display`
+  reads QEMU's screendump back as text with the kernel's own face, alone
+  and behind the firmware's framebuffer, and the crash-test panic on
+  x86-64; fbcon's drawing loops are aligned to 512 (they were inside a
+  page by placement only).
+  Report: `docs/audit/2026-10-14-virtio-gpu-report.md`.

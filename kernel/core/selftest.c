@@ -461,6 +461,7 @@ static const struct selftest tests[] = {
     { "pmm",             selftest_pmm },
     { "vmm",             selftest_vmm },
     { "user-vmm",        selftest_user_vmm },
+    { "vm-direct-ranges", selftest_vm_direct_ranges },
     { "vm-teardown-absent", selftest_vm_teardown_absent },
     { "vm-replace",      selftest_vm_replace },
     { "vm-fork",         selftest_vm_fork },
@@ -822,6 +823,7 @@ static const struct selftest tests[] = {
     { "console-rx-clear", selftest_console_rx_clear },
     { "fb-console",      selftest_fb_console },
     { "fb-bench",        selftest_fb_bench },
+    { "fb-switch",       selftest_fb_switch },
     /* After the hotplug tests: unplugging the hub takes the keyboard
      * with it, and keys typed while it is gone are gone too. */
     { "usb-hub-unplug",  selftest_usb_hub_unplug },

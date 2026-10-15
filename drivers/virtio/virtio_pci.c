@@ -53,6 +53,9 @@ struct vpci {
     volatile uint8_t *notify;
     uint32_t notify_multiplier;
     size_t notify_len;
+    /* Each queue's notify offset, read at setup: notify takes no lock, so
+     * a panic flush (virtio_gpu) never waits on one. */
+    uint32_t notify_off[VIRTIO_MAX_QUEUES];
     volatile uint8_t *isr;
     volatile uint8_t *devcfg;
     size_t devcfg_len;
@@ -168,6 +171,14 @@ static void vpci_read_config(struct virtio_device *vdev, unsigned off, void *buf
     }
 }
 
+static void vpci_write_config32(struct virtio_device *vdev, unsigned off, uint32_t val)
+{
+    struct vpci *v = to_vpci(vdev);
+    if (v->devcfg == NULL || (off & 3) != 0 || off + 4 > v->devcfg_len)
+        return;
+    wr32(v->devcfg, off, val);
+}
+
 static unsigned vpci_queue_max_size(struct virtio_device *vdev, unsigned index)
 {
     struct vpci *v = to_vpci(vdev);
@@ -216,6 +227,7 @@ static int vpci_setup_queue(struct virtio_device *vdev, struct virtqueue *vq)
         rc = -EIO;
     else
         wr16(v->common, COMMON_QUEUE_ENABLE, 1);
+    v->notify_off[vq->index] = (uint32_t)rd16(v->common, COMMON_QUEUE_NOTIFY_OFF) * v->notify_multiplier;
     spin_unlock_irqrestore(&v->lock, s);
 
     if (rc && vq->vector >= 0) {
@@ -243,10 +255,7 @@ static void vpci_teardown_queue(struct virtio_device *vdev, struct virtqueue *vq
 static void vpci_notify(struct virtio_device *vdev, struct virtqueue *vq)
 {
     struct vpci *v = to_vpci(vdev);
-    arch_irq_state_t s = spin_lock_irqsave(&v->lock);
-    wr16(v->common, COMMON_QUEUE_SELECT, (uint16_t)vq->index);
-    uint32_t off = (uint32_t)rd16(v->common, COMMON_QUEUE_NOTIFY_OFF) * v->notify_multiplier;
-    spin_unlock_irqrestore(&v->lock, s);
+    uint32_t off = v->notify_off[vq->index];
     if ((size_t)off + 2 <= v->notify_len)
         wr16(v->notify, off, (uint16_t)vq->index);
 }
@@ -260,6 +269,7 @@ static const struct virtio_transport vpci_transport = {
     .get_status = vpci_get_status,
     .set_status = vpci_set_status,
     .read_config = vpci_read_config,
+    .write_config32 = vpci_write_config32,
     .queue_max_size = vpci_queue_max_size,
     .setup_queue = vpci_setup_queue,
     .teardown_queue = vpci_teardown_queue,
@@ -308,6 +318,14 @@ static uint8_t vleg_get_status(struct virtio_device *vdev)
 static void vleg_set_status(struct virtio_device *vdev, uint8_t st)
 {
     lwr(to_vpci(vdev), LEG_STATUS, 1, st);
+}
+
+static void vleg_write_config32(struct virtio_device *vdev, unsigned off, uint32_t val)
+{
+    struct vpci *v = to_vpci(vdev);
+    if ((off & 3) != 0 || off + 4 > v->leg_cfg_len)
+        return;
+    lwr(v, LEG_CONFIG + off, 4, val);
 }
 
 static void vleg_read_config(struct virtio_device *vdev, unsigned off, void *buf, size_t len)
@@ -412,6 +430,7 @@ static const struct virtio_transport vleg_transport = {
     .get_status = vleg_get_status,
     .set_status = vleg_set_status,
     .read_config = vleg_read_config,
+    .write_config32 = vleg_write_config32,
     .queue_max_size = vleg_queue_max_size,
     .setup_queue = vleg_setup_queue,
     .teardown_queue = vleg_teardown_queue,

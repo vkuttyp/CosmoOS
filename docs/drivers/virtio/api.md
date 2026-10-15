@@ -44,6 +44,13 @@ Inline test on the negotiated features.
 Device-specific configuration, read under the generation check;
 out-of-range requests return zeros. Any context.
 
+### `void virtio_write_config32(struct virtio_device *, unsigned off, uint32_t val)` *(exported, the virtio-gpu unit)*
+
+Write one 32-bit field of the device configuration at a 4-byte-aligned
+`off` (virtio-gpu's `events_clear`). A write outside the configuration
+is dropped, as is one on a transport without the operation (the test
+transports).
+
 ## Virtqueues
 
 ### `int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, virtq_callback_fn callback, unsigned cpu, struct virtqueue **out)` *(exported, network unit 11)*
@@ -68,7 +75,10 @@ MSI-X entry left), `-EIO` (device refused the vector). Sleeps (DMA
 allocation). Ownership: the driver, until `virtq_free` *(exported)*,
 which disables the queue, releases the vector, then the deferred
 completion work (`irq_poll_disable`: no callback runs after it returns),
-and the ring memory.
+and the ring memory. `virtq_quiesce` *(exported, the virtio-gpu unit)*
+is its first half, the ring kept: for a device whose reset was not
+acknowledged, which may still read the ring; that queue is never freed
+or used again (U14).
 
 ### `int virtq_add(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie)` *(exported)*
 Purpose: queue one chain: `out` device-readable segments followed by
@@ -87,6 +97,14 @@ Purpose: the next completed chain's cookie and the bytes the device
 wrote, or NULL when nothing is pending; corrupt entries from the device
 are logged and skipped as NULL. Any context; the interrupt callback and
 polling sinks call it.
+
+### `int virtq_add_panic(...)`, `void *virtq_pop_panic(struct virtqueue *vq, uint32_t *len)` *(exported)*
+The same from panic context: the queue's lock is tried once, untracked
+(`spin_trylock_panic`), so lockdep's own lock, which a CPU the panic
+stopped may own, is never waited for. `virtq_add_panic` answers `-EBUSY`
+and `virtq_pop_panic` NULL when the queue's lock is held. `virtq_kick`
+takes no lock: modern virtio-pci reads each queue's notify offset at
+setup. The virtio-gpu panic flush is the user.
 
 ### `unsigned virtq_free_count(struct virtqueue *vq)` *(exported)*
 Free descriptors right now (advisory).

@@ -66,8 +66,10 @@ they stay there: **press Control+Option to get them back**. That is
 Parallels' behaviour for a guest without Parallels Tools, which CosmoOS
 does not have (they talk to Parallels through its own device, which this
 kernel does not drive). Parallels' firmware offers the guest one display
-mode, 1024x768, which Parallels shows in the middle of a larger window;
-the screen console draws a 128x48 text screen in it.
+mode, 1024x768; once the virtio-gpu driver loads, the screen console
+takes the size Parallels gives the display and follows the VM's window
+when it is resized (wider: 175x48 cells at 1407x768). Parallels keeps
+the height at 768 pixels.
 
 The kernel finds the machine from its ACPI tables and logs one line
 saying what it found:
@@ -78,8 +80,8 @@ platform: firmware OEM 'PRLS  '; console PL011 at 0x2110000 (DBG2, polled); GICv
 
 | | |
 |---|---|
-| Works | verified boot; both CPUs; the console on the screen and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell; installing on an NVMe disk and booting it (the controller offers only MSI: one vector for every queue); the network (the adapter is a legacy virtio-net) with DHCP, DNS, `wget` and ssh; randomness (no CPU instruction, firmware generator or virtio-rng: the timing-jitter source seeds the pool in milliseconds); the wall clock (the firmware's time at boot) |
-| Does not work | SATA disks (not on PCI: a platform AHCI described only in the DSDT, which needs an AML interpreter); the sound, USB 2.0 (EHCI), graphics (virtio-gpu, beyond the framebuffer console) and vsock devices have no driver; the debug self-test suite assumes QEMU's machine |
+| Works | verified boot; both CPUs; the console on the screen, at the window's size (the virtio-gpu adapter) and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell; installing on an NVMe disk and booting it (the controller offers only MSI: one vector for every queue); the network (the adapter is a legacy virtio-net) with DHCP, DNS, `wget` and ssh; randomness (no CPU instruction, firmware generator or virtio-rng: the timing-jitter source seeds the pool in milliseconds); the wall clock (the firmware's time at boot) |
+| Does not work | SATA disks (not on PCI: a platform AHCI described only in the DSDT, which needs an AML interpreter); the sound, USB 2.0 (EHCI) and vsock devices have no driver, and the graphics adapter (virtio-gpu) only carries the text console (no 3D, cursor or display interface for programs); the debug self-test suite assumes QEMU's machine |
 
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)

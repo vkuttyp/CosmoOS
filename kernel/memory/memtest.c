@@ -374,6 +374,63 @@ static unsigned online_cpus(void)
 }
 
 /*
+ * vm_map_direct_ranges (the virtio-gpu unit's frames) at a 2 MiB-aligned
+ * view of 2 MiB-aligned memory, the one placement where a 2 MiB leaf
+ * could be asked for (PR #387's review). Both MMUs answer -EEXIST to a
+ * block where the slot already holds a page table (kept, M19): the map
+ * fails, as it does here with the old flag, the earlier try having left
+ * one. Where no table was, the block is made, and vm_unmap_phys, which
+ * tears down 128 KiB at a time, panics on the split both MMUs refuse. So
+ * the view is pages. The arena is first fit; a filler the size of the
+ * misalignment moves the next view along until it lands aligned.
+ */
+#define DR_FILLERS 64u
+bool selftest_vm_direct_ranges(const char **reason)
+{
+    struct page *blk = pmm_alloc_pages(10, PMM_FLAGS_ZERO);   /* 4 MiB, aligned to its size */
+    CHECK(blk != NULL);
+    uint8_t *mem = page_to_virt(blk);
+    CHECK((page_to_phys(blk) & (PAGE_2M_SIZE - 1)) == 0);
+    void *va[2] = { mem, mem + PAGE_2M_SIZE };
+    size_t len[2] = { PAGE_2M_SIZE, PAGE_2M_SIZE };
+    vaddr_t filler[DR_FILLERS];
+    unsigned nf = 0;
+    vaddr_t view = 0;
+    for (;;) {
+        view = vm_map_direct_ranges(va, len, 2, VM_PROT_RW, VM_CACHE_WB);
+        CHECK(view != 0);
+        if ((view & (PAGE_2M_SIZE - 1)) == 0 || nf == DR_FILLERS)
+            break;
+        size_t gap = ALIGN_UP(view, PAGE_2M_SIZE) - view;
+        vm_unmap_phys(view);
+        filler[nf] = vm_map_phys(page_to_phys(blk), gap, VM_PROT_READ, VM_CACHE_WB);
+        CHECK(filler[nf] != 0);
+        nf++;
+    }
+    bool aligned = (view & (PAGE_2M_SIZE - 1)) == 0;
+    size_t leaf = 0;
+    paddr_t pa = 0;
+    bool mapped = vm_query(view + PAGE_2M_SIZE + PAGE_SIZE, &pa, NULL, NULL, &leaf);
+    uint32_t seen = 0;
+    if (mapped) {   /* else a check below fails; the store would fault */
+        *(volatile uint32_t *)(view + PAGE_2M_SIZE + PAGE_SIZE + 8) = 0x5a5aa5a5;
+        seen = *(volatile uint32_t *)(mem + PAGE_2M_SIZE + PAGE_SIZE + 8);
+    }
+    if (leaf == PAGE_SIZE)
+        vm_unmap_phys(view);   /* with a block leaf: KASSERT in region_teardown */
+    for (unsigned i = 0; i < nf; i++)
+        vm_unmap_phys(filler[i]);
+    CHECK(aligned);
+    CHECK(mapped && pa == page_to_phys(blk) + PAGE_2M_SIZE + PAGE_SIZE);
+    CHECK(seen == 0x5a5aa5a5);
+    CHECK(leaf == PAGE_SIZE);
+    pmm_free_pages(blk, 10);
+    kinfo("selftest: vm-direct-ranges: a 2 MiB-aligned view of 2 MiB-aligned memory (after %u filler(s)) is "
+          "mapped in pages and unmaps", nf);
+    return true;
+}
+
+/*
  * A dying space's teardown walks what was populated, not what was
  * reserved (docs/audit/next-subsystem-exit-space.md). An 8 MB region
  * never touched -- the shape of a process's stack reservation -- and four

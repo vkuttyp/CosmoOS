@@ -86,6 +86,7 @@ struct tty {
     bool size_set;                 /* `size` was set: the console otherwise asks the framebuffer */
     bool hungup;                   /* the far side is gone: reads return 0, writes -EIO; under `lock` */
     struct list_node link;         /* the registry (tty_register), for the controlling-terminal lookup */
+    uint32_t size_gen;             /* fbcon_switches() when `size` was set; under `lock` */
 };
 
 /* Set up a tty (echo and CR->NL on). */
@@ -151,6 +152,12 @@ int tty_drain_output(struct tty *t);
 unsigned tty_queued(struct tty *t);
 /* TIOCSWINSZ: a change raises SIGWINCH on the foreground group. */
 void tty_set_size(struct tty *t, const struct cosmo_ttysize *in);
+/* The framebuffer console's cell grid changed (fbcon_attach/fbcon_detach),
+ * in the switch that made fbcon_switches() `gen`: the console's size is the
+ * framebuffer's again, a size TIOCSWINSZ set before that switch dropped
+ * (one set after it, while this call was on its way, is kept), and SIGWINCH
+ * goes to the foreground group. Thread context. */
+void tty_console_resized(uint32_t gen);
 /* The far side has gone (a pty's master closed): SIGHUP and SIGCONT to
  * the controlling session's foreground group and its leader, the session
  * lets go of the terminal, readers see end of file and writers -EIO. */

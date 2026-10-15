@@ -28,6 +28,7 @@ bool selftest_asid_destroy_reuse(const char **reason); /* a tag freed at destroy
 bool selftest_asid_race(const char **reason);       /* two CPUs may not both tag one space */
 bool selftest_asid_quiet(const char **reason);       /* the switch path performs no full flush at all */
 bool selftest_asid_paranoid(const char **reason);   /* the isolation rule holds when every switch flushes */
+bool selftest_vm_direct_ranges(const char **reason);   /* kernel/memory/memtest.c: a multi-range view is pages, so it unmaps */
 bool selftest_vm_teardown_absent(const char **reason);   /* a dying space walks what was populated, not what was reserved */
 bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */
 bool selftest_vm_fork(const char **reason);    /* kernel/memory/forktest.c: copy-on-write duplication of a user space (M3) */
@@ -263,6 +264,7 @@ bool selftest_tty_pty(const char **reason);        /* /dev/ptmx and /dev/pts/N: 
  * pixels back, and what it costs. */
 bool selftest_fb_console(const char **reason);
 bool selftest_fb_bench(const char **reason);
+bool selftest_fb_switch(const char **reason);      /* kernel/core/fbtest.c: a surface switch keeps the screen, resizes the terminal */
 
 /* kernel/device/hidtest.c: keys typed at the emulated keyboard reach the
  * console tty (the harness types them over QMP). */

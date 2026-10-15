@@ -91,6 +91,7 @@ the object. `LIST_HEAD(name)`, `list_init`, `list_empty`,
 | `spin_lock(lock)` | Acquire, spinning. Panics if the calling CPU already holds it. Does not touch interrupt state: use only for locks never taken from interrupt context. |
 | `spin_unlock(lock)` | Release. `KASSERT`s the lock is held. |
 | `spin_trylock(lock)` | One attempt; `true` if acquired. |
+| `spin_trylock_panic(lock)` / `spin_unlock_panic(lock)` | Panic context only: one attempt on the lock word, untracked (no lockdep, no preemption count); excludes the tracked operations on the same lock. |
 | `spin_lock_irqsave(lock)` | Disable interrupts, acquire; returns the state for restore. The form every memory lock uses. |
 | `spin_unlock_irqrestore(lock, state)` | Release, then restore interrupts. |
 | `spin_is_held(lock)` | `true` if the calling CPU holds it. Used by `KASSERT` in the buddy core. |

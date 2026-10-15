@@ -51,6 +51,28 @@ bool spin_trylock(spinlock_t *lock)
     return true;
 }
 
+/* The panic path's pair takes the lock word untracked, as the kernel's does:
+ * it is kept off the held-lock stack, so it may nest anywhere. */
+bool spin_trylock_panic(spinlock_t *lock)
+{
+    if (lock->locked)
+        return false;
+    lock->locked = 1;
+    lock->owner_cpu = 0;
+    return true;
+}
+
+void spin_unlock_panic(spinlock_t *lock)
+{
+    if (!lock->locked) {
+        fprintf(stderr, "host spinlock '%s' panic-unlocked while free\n",
+                lock->name ? lock->name : "?");
+        abort();
+    }
+    lock->owner_cpu = SPINLOCK_NO_OWNER;
+    lock->locked = 0;
+}
+
 void spin_unlock(spinlock_t *lock)
 {
     if (!lock->locked || g_nheld == 0 || g_held[g_nheld - 1] != lock) {

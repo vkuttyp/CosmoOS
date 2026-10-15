@@ -269,6 +269,90 @@ frees the queues, and reclaims entries whether or not the device put them
 in the used ring. RX mappings use `MCLBYTES`; TX mappings use each
 segment's length. Interface unregister alone does not stop these callbacks.
 
+**virtio_gpu** (`virtio_gpu.c`, the virtio-gpu unit, 2026-10-14): 2D
+only, scanout 0, the screen console at the size the display asks for.
+No features negotiated. Queue 0 (`controlq`) only, interrupt driven;
+`cursorq` is never set up (no cursor drawn; Parallels Desktop grants two
+MSI-X vectors, the configuration's and one queue's).
+
+- **Commands** go one at a time under `cmd_lock` (a mutex: thread
+  context), from one request and one response page, each waiting up to
+  2 s for its response. A response other than the one expected fails the
+  operation with its type logged. A command that times out marks the
+  device broken: nothing is sent again. Buffers the device may still own
+  are kept on a list, as is a frame's memory whose
+  `RESOURCE_DETACH_BACKING` the device refused (Codex, PR #387), which
+  marks the device broken as a timeout does, so a device refusing every
+  detach gets one frame kept rather than one per resize retry; no
+  `RESOURCE_UNREF` is built after it, since after a timeout the request
+  page may still be the device's. They,
+  the queue and the request pages are freed only after the reset at
+  removal, and only when the status reads 0; otherwise all of it is
+  kept, the queue's interrupt stopped (`virtq_quiesce`, so `vgpu_done`
+  never runs on the freed driver state or an unloaded module), and
+  `device_retain_dma` keeps any driver off the device (U14). In panic
+  mode a frame fbcon replaced or left is not freed, and removal tears
+  nothing down: a panic's writer may still draw on it and flush it
+  through `controlq` (`fbcon.h`).
+- **`RESOURCE_ATTACH_BACKING`** sends its entries as a second descriptor
+  after the 32-byte command, as Linux's driver does. Parallels Desktop
+  answers 0x1205 (invalid parameter) to the entries in the command's own
+  descriptor, which QEMU accepts. The entries are a page each.
+- **A frame** is a B8G8R8X8 resource of the scanout's size (the enabled
+  rectangle `GET_DISPLAY_INFO` reports, capped at 3840x2160; 1024x768 when
+  none). Its memory is `dma_alloc` chunks of at most 4 MiB, the page
+  allocator's largest block (1920x1080 is two). `vm_map_direct_ranges`
+  maps them back to back, write-back, as one linear view, in pages:
+  `vm_unmap_phys` tears a region down 128 KiB at a time and neither MMU
+  splits a 2 MiB block (selftest `vm-direct-ranges`). The frame is
+  set on the scanout, flushed whole, then handed to fbcon as a
+  `struct fbcon_surface` (`fbcon_attach`; `docs/kernel/diagnostics/design.md`).
+- **The `vgpu` thread**, every 16 ms:
+  - takes the band fbcon drew (`fbcon_take_damage`) and sends
+    `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH` for those rows. Rows whose
+    flush fails stay pending, merged with the next band;
+  - reads the configuration's `events_read`. On `VIRTIO_GPU_EVENT_DISPLAY`
+    (Parallels resizes the scanout with its window; QEMU raises it for a
+    VNC client's SetDesktopSize, `make test-display`'s check f) it clears the event
+    (`virtio_write_config32`, new with this driver), asks for the size
+    again, and moves the console to a new frame of that size. The new
+    frame is complete and on the scanout before fbcon leaves the old one,
+    which is then detached, unreferenced and freed. A change it cannot
+    follow (an allocation or a command failed) stays pending and is
+    retried every second, with one warning. A new frame given up after
+    `SET_SCANOUT` puts the old frame back on the scanout before its
+    resource goes. The probe clears the event before its first size
+    query, so a change after that query raises it again.
+  - The configuration interrupt is not used for this: polling from the
+    thread needs no callback that could race a driver unbind in interrupt
+    context.
+- **In panic mode** fbcon calls `vgpu_panic_flush` after each write,
+  with the frame the surface belongs to (not `g->frame`, which names a
+  new frame only after `fbcon_attach` returns). It
+  sends the transfer and flush from its own pair of pages and polls
+  for each, at most 200 ms, through `virtq_add_panic` and
+  `virtq_pop_panic`, which take the queue's lock untracked: in debug
+  builds a tracked lock operation takes lockdep's own lock, which a CPU
+  the panic stopped may own, and the flush would wait for it forever
+  ahead of the serial sink (`make test-display`'s check e, `CRASH_TEST=3`).
+  When `controlq`'s lock is held (by a CPU the panic stopped) it sends
+  nothing; the serial console has the panic either way. A thread's
+  command answered meanwhile is dropped, not completed: completing it
+  would take tracked locks, and its waiter never runs again. A line
+  logged from inside the flush (`virtq_pop_panic` reporting a bad used
+  entry) comes back through fbcon and is not flushed, so the request in
+  flight is not rewritten; it returns false, and fbcon keeps those rows
+  for the next line's flush. So does a command answered with anything
+  but `OK_NODATA` (the response is cleared before each command). A command not answered in time ends the panic
+  flushes: every later line would wait as long, and the serial sink after
+  fbcon's with it.
+- **After a timeout** (`broken`) no request is built in `g->cmd`, which
+  the device may still be reading: each command's builder returns
+  `-EIO` first, including the scanout restore on a failed resize.
+- **Remove:** stop and join the thread, `fbcon_detach` (the console
+  returns to the boot framebuffer, or to the serial port alone), turn the
+  scanout off (resource 0), drop the frame, reset the device.
+
 ## Ownership and lifetime
 
 ### Removal, reset and partial probe cleanup

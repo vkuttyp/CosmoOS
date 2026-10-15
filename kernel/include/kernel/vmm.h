@@ -447,6 +447,13 @@ int vm_kernel_protect(vaddr_t base, vm_prot_t prot);
 /* Map physical [pa, pa+size) (page aligned) into the arena, for MMIO.
  * Returns the virtual base or 0. */
 vaddr_t vm_map_phys(paddr_t pa, size_t size, vm_prot_t prot, vm_cache_t cache);
+/* Map `n` direct-map buffers (each page aligned: dma_alloc's, page
+ * frames) back to back into the arena: one contiguous second view of
+ * memory allocated in pieces (a display driver's frame, the virtio-gpu
+ * unit). At most VM_MAP_RANGES_MAX pieces. Returns the base or 0; unmap
+ * with vm_unmap_phys, which leaves the memory itself to its owner. */
+#define VM_MAP_RANGES_MAX 16u
+vaddr_t vm_map_direct_ranges(void *const *va, const size_t *size, unsigned n, vm_prot_t prot, vm_cache_t cache);
 void vm_unmap_phys(vaddr_t base);
 
 /* Look up the region containing va in the kernel space. Returns NULL if

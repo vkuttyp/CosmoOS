@@ -82,6 +82,17 @@ static arch_irq_state_t raw_lock(void)
     return s;
 }
 
+#if CONFIG_CRASH_TEST == 3
+#if !CONFIG_DEBUG
+#error "CRASH_TEST=3 (make test-display's check e) is a debug seam: build it with BUILD=debug"
+#endif
+unsigned lockdep_crash_hold_raw(void)
+{
+    __atomic_store_n(&g_raw, raw_cpu_id() + 2u, __ATOMIC_RELEASE);   /* owner: another CPU's id + 1 */
+    return __atomic_load_n(&g_raw, __ATOMIC_ACQUIRE);
+}
+#endif
+
 static void raw_unlock(arch_irq_state_t s)
 {
     __atomic_store_n(&g_raw, 0u, __ATOMIC_RELEASE);

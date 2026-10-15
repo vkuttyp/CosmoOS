@@ -461,6 +461,57 @@ vaddr_t vm_map_phys(paddr_t pa, size_t size, vm_prot_t prot, vm_cache_t cache)
     return base;
 }
 
+vaddr_t vm_map_direct_ranges(void *const *va_in, const size_t *size, unsigned n, vm_prot_t prot, vm_cache_t cache)
+{
+    KASSERT(g_initialized);
+    paddr_t pa[VM_MAP_RANGES_MAX];
+    size_t total = 0;
+    if (n == 0 || n > VM_MAP_RANGES_MAX || prot == VM_PROT_NONE)
+        return 0;
+    for (unsigned i = 0; i < n; i++) {
+        vaddr_t v = (vaddr_t)va_in[i];
+        if (v < pmm_hhdm_base || size[i] == 0 || !is_page_aligned(v) || !is_page_aligned(size[i]))
+            return 0;
+        pa[i] = virt_to_phys(va_in[i]);
+        if (pa[i] + size[i] > pmm_hhdm_limit || pa[i] + size[i] < pa[i])
+            return 0;   /* not all in the direct map */
+        total += size[i];
+    }
+
+    arch_irq_state_t s = spin_lock_irqsave(&kernel_space.lock);
+    vaddr_t base = arena_find_free(&kernel_space, total);
+    if (base == 0) {
+        spin_unlock_irqrestore(&kernel_space.lock, s);
+        return 0;
+    }
+    /* One region; its recorded address is the first range's (teardown
+     * unmaps by virtual range and never reads it). */
+    struct vm_region *r = region_new(base, total, prot, cache, VM_REGION_PHYS, 0, pa[0], "direct-ranges");
+    if (r == NULL || space_insert(&kernel_space, r)) {
+        if (r)
+            kmem_cache_free(g_region_cache, r);
+        spin_unlock_irqrestore(&kernel_space.lock, s);
+        return 0;
+    }
+    vaddr_t va = base;
+    for (unsigned i = 0; i < n; i++) {
+        /* Pages, never blocks: vm_unmap_phys tears down 128 KiB at a
+         * time, and neither MMU splits a block (selftest
+         * vm-direct-ranges). */
+        int rc = arch_mmu_map(&kernel_space.mmu, va, pa[i], size[i], prot, cache, ARCH_MMU_MAP_GLOBAL);
+        if (rc) {
+            arch_mmu_unmap(&kernel_space.mmu, base, total);
+            list_remove(&r->link);
+            kmem_cache_free(g_region_cache, r);
+            spin_unlock_irqrestore(&kernel_space.lock, s);
+            return 0;
+        }
+        va += size[i];
+    }
+    spin_unlock_irqrestore(&kernel_space.lock, s);
+    return base;
+}
+
 void vm_unmap_phys(vaddr_t base)
 {
     KASSERT(g_initialized);
@@ -3177,3 +3228,9 @@ void vm_dump(struct vm_space *space)
     }
     spin_unlock_irqrestore(&space->lock, s);
 }
+
+/* Module ABI exports (docs/kernel/module/api.md): a display driver maps its
+ * frame (the virtio-gpu unit). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(vm_map_direct_ranges);
+EXPORT_SYMBOL(vm_unmap_phys);

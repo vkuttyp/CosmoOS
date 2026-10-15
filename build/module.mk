@@ -24,7 +24,7 @@ $(MODSIGN_KEY) $(SIGNING_PUB) &: $(ROOT)/scripts/devkey.sh $(ROOT)/scripts/modsi
 	$(Q)PYTHON=$(PYTHON) $(ROOT)/scripts/devkey.sh ensure $(COSMO_KEYDIR)
 endif
 
-MODULES := hello virtio virtio_blk virtio_rng virtio_console virtio_net nvme e1000e xhci usb_storage usb_hid usb_hub ahci cosmotest cosmotest_dep cosmotest_fail
+MODULES := hello virtio virtio_blk virtio_rng virtio_console virtio_net virtio_gpu nvme e1000e xhci usb_storage usb_hid usb_hub ahci cosmotest cosmotest_dep cosmotest_fail
 
 MODULE_hello_SRCS          := modules/hello/hello.c
 MODULE_virtio_SRCS         := drivers/virtio/virtio.c drivers/virtio/virtqueue.c drivers/virtio/virtio_pci.c
@@ -32,6 +32,7 @@ MODULE_virtio_blk_SRCS     := drivers/virtio/virtio_blk.c
 MODULE_virtio_rng_SRCS     := drivers/virtio/virtio_rng.c
 MODULE_virtio_console_SRCS := drivers/virtio/virtio_console.c
 MODULE_virtio_net_SRCS     := drivers/virtio/virtio_net.c
+MODULE_virtio_gpu_SRCS     := drivers/virtio/virtio_gpu.c
 MODULE_nvme_SRCS           := drivers/nvme/nvme.c
 MODULE_e1000e_SRCS         := drivers/network/e1000e.c
 MODULE_xhci_SRCS           := drivers/usb/usb.c drivers/usb/usb_desc.c drivers/usb/xhci.c
@@ -51,6 +52,7 @@ MODULE_ARCHIVE_ENTRIES := \
 	modules/virtio_rng.ko=$(MODULE_OUT)/virtio_rng.ko \
 	modules/virtio_console.ko=$(MODULE_OUT)/virtio_console.ko \
 	modules/virtio_net.ko=$(MODULE_OUT)/virtio_net.ko \
+	modules/virtio_gpu.ko=$(MODULE_OUT)/virtio_gpu.ko \
 	modules/nvme.ko=$(MODULE_OUT)/nvme.ko \
 	modules/e1000e.ko=$(MODULE_OUT)/e1000e.ko \
 	modules/xhci.ko=$(MODULE_OUT)/xhci.ko \

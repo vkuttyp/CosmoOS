@@ -163,27 +163,28 @@ int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, vir
     return 0;
 }
 
-void virtq_free(struct virtqueue *vq)
+void virtq_quiesce(struct virtqueue *vq)
 {
     struct virtio_device *vdev = vq->vdev;
     vdev->tr->teardown_queue(vdev, vq);   /* the interrupt: masked, released, synchronize_irq'd */
     irq_poll_disable(&vq->poll);          /* and what it deferred: nothing runs or is queued after this */
     vdev->vq[vq->index] = NULL;
+}
+
+void virtq_free(struct virtqueue *vq)
+{
+    struct virtio_device *vdev = vq->vdev;
+    virtq_quiesce(vq);
     dma_free(&vdev->dev, vq->ring_bytes, vq->ring_mem, vq->ring_dma);
     vq_release(vq);
 }
 
-int virtq_add(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie)
+/* Lock held. */
+static int add_locked(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie)
 {
     unsigned total = out + in;
-    if (total == 0 || total > vq->size || cookie == NULL)
-        return -EINVAL;
-
-    arch_irq_state_t s = spin_lock_irqsave(&vq->lock);
-    if (vq->num_free < total) {
-        spin_unlock_irqrestore(&vq->lock, s);
+    if (vq->num_free < total)
         return -ENOSPC;
-    }
     uint16_t head = vq->free_head;
     uint16_t i = head;
     uint32_t in_bytes = 0;
@@ -212,8 +213,31 @@ int virtq_add(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, uns
     vq->avail->ring[idx % vq->size] = head;
     wmb();
     vq->avail->idx = (uint16_t)(idx + 1);
-    spin_unlock_irqrestore(&vq->lock, s);
     return 0;
+}
+
+int virtq_add(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie)
+{
+    unsigned total = out + in;
+    if (total == 0 || total > vq->size || cookie == NULL)
+        return -EINVAL;
+    arch_irq_state_t s = spin_lock_irqsave(&vq->lock);
+    int rc = add_locked(vq, sg, out, in, cookie);
+    spin_unlock_irqrestore(&vq->lock, s);
+    return rc;
+}
+
+/* Panic context (virtio.h): the queue's lock taken untracked, once. */
+int virtq_add_panic(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie)
+{
+    unsigned total = out + in;
+    if (total == 0 || total > vq->size || cookie == NULL)
+        return -EINVAL;
+    if (!spin_trylock_panic(&vq->lock))
+        return -EBUSY;
+    int rc = add_locked(vq, sg, out, in, cookie);
+    spin_unlock_panic(&vq->lock);
+    return rc;
 }
 
 void virtq_kick(struct virtqueue *vq)
@@ -242,9 +266,9 @@ static void reclaim_chain(struct virtqueue *vq, uint16_t head)
     vq->cookies[head] = NULL;
 }
 
-void *virtq_pop(struct virtqueue *vq, uint32_t *len)
+/* Lock held. */
+static void *pop_locked(struct virtqueue *vq, uint32_t *len)
 {
-    arch_irq_state_t s = spin_lock_irqsave(&vq->lock);
     for (unsigned skipped = 0;; skipped++) {
         /* A device that keeps posting bad entries is skipped a ring's
          * worth per call, not for as long as it posts them: NULL here
@@ -252,7 +276,6 @@ void *virtq_pop(struct virtqueue *vq, uint32_t *len)
         if (vq->last_used == read_le16(&vq->used->idx) || skipped >= vq->size) {
             if (skipped >= vq->size && vq->last_used != read_le16(&vq->used->idx))
                 vq->skip_capped = true;   /* not empty: virtq_poll defers the rest */
-            spin_unlock_irqrestore(&vq->lock, s);
             return NULL;
         }
         rmb();
@@ -293,11 +316,28 @@ void *virtq_pop(struct virtqueue *vq, uint32_t *len)
             written = vq->in_bytes[head];
         }
         reclaim_chain(vq, head);
-        spin_unlock_irqrestore(&vq->lock, s);
         if (len)
             *len = written;
         return cookie;
     }
+}
+
+void *virtq_pop(struct virtqueue *vq, uint32_t *len)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&vq->lock);
+    void *cookie = pop_locked(vq, len);
+    spin_unlock_irqrestore(&vq->lock, s);
+    return cookie;
+}
+
+/* Panic context (virtio.h): NULL when the lock is held, as when empty. */
+void *virtq_pop_panic(struct virtqueue *vq, uint32_t *len)
+{
+    if (!spin_trylock_panic(&vq->lock))
+        return NULL;
+    void *cookie = pop_locked(vq, len);
+    spin_unlock_panic(&vq->lock);
+    return cookie;
 }
 
 unsigned virtq_free_count(struct virtqueue *vq)
@@ -335,7 +375,10 @@ void virtq_interrupt(struct virtqueue *vq)
 EXPORT_SYMBOL(virtq_alloc);
 EXPORT_SYMBOL(virtq_alloc_on);
 EXPORT_SYMBOL(virtq_free);
+EXPORT_SYMBOL(virtq_quiesce);
 EXPORT_SYMBOL(virtq_add);
 EXPORT_SYMBOL(virtq_kick);
 EXPORT_SYMBOL(virtq_pop);
+EXPORT_SYMBOL(virtq_add_panic);
+EXPORT_SYMBOL(virtq_pop_panic);
 EXPORT_SYMBOL(virtq_free_count);

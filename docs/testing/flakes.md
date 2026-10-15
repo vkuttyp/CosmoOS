@@ -2714,6 +2714,13 @@ run time (`sched_thread_run_ns`) and to delay the first load-average fold,
 neither on the resumption path. The candidate above still fits: one run
 one trip short. Not attributed; the job was rerun by the next push.
 
+**Third sighting, 2026-10-14:** CI on main, `build, boot, analyze
+(aarch64)` of #386's merge (`6011a5ec`, a documentation-only release
+note; run 38595676023, job 115961772279): `100 runs of 32, 3199 trips
+(longest 32 in one call)`, the check at 555 ms, 1 failure of 475. The
+same one trip short. The job's rerun passed (job 116270734364). Not
+attributed; three sightings, all `3199`, all AArch64.
+
 ## `sched-restore-loop`: the thread count not back in 200 ms, 2026-10-11
 
 `SELFTEST: sched-restore-loop ... FAIL: check failed: threads_settle(before)
@@ -2775,6 +2782,23 @@ passed. A passing boot keeps no serial log, so their gaps are not
 known; the matrix's passing x86-64 and AArch64 boots measured 13 to
 14 ms. The gaps are either about 14 ms or 290 ms, with nothing between:
 the worker is raised by its timer, or not at all.
+
+**Fifth and sixth sightings, 2026-10-15:** x86-64 CI, PR #387 (the
+virtio-gpu unit) at `dc1c4f50`, run 38682566862, both attempts of
+`build, boot, analyze (x86_64)`: the `test-crash` boot (job 116250208542,
+`cpu 3 ... 277 calls of the poll, longest gap 290 ms`, the check at
+326 ms), then on the rerun the `test-guard` boot (job 116265439164,
+`288 calls`, `290 ms`, 325 ms); every other boot of both attempts passed
+it. The same 290 ms, now on CPU 3. Both attempts ran slow: the passing
+boots' self-tests took 141,307 to 147,312 ms and `cosmofs-replay` 23,079
+to 25,064 ms, against 117,074 to 123,372 ms and 14,948 to 16,946 ms in the
+branch's previous green run (38666304514, `8ea7dc56`). The branch's own
+22 local x86-64 and AArch64 debug boots of `dc1c4f50` measured gaps of
+12 to 14 ms, and their self-test totals match the previous commit's
+(109-125 s against 106-128 s). The branch touches the screen console, the
+terminal's size and a display driver, not the irq-poll or scheduler
+path. Not attributed; the first sightings two in a row, both on a slow
+runner.
 
 ## `net-neigh-down-race` step 2, 2026-10-10
 
@@ -4257,3 +4281,13 @@ Not the PR: three alternated local AArch64 debug boots each, main
 s). The budget stays as it is; a third sighting, or main's slowest boot
 in this job above 230 s, is the evidence to restate or widen it under
 the rule above.
+
+**Third sighting, 2026-10-14:** main, #386's merge (`6011a5ec`, a
+documentation-only release note; run 38595676023, job 115961772131):
+`FAIL after 246.5s`, `timed out after 240s`, self-tests 186,970 ms
+(`cosmofs-replay` 31,106 ms), every one of the 475 passing, the harness
+ready at 165.9 s. The job's rerun passed (job 116270734185), its four
+boots at **235.7**, 226.9, 212.6 and 213.5 s, self-tests 182,100 ms in
+the slowest. Both conditions named above are now met -- a third
+sighting, and main's slowest boot in this job above 230 s -- so the
+budget is due to be restated or widened under the rule, as its own unit.

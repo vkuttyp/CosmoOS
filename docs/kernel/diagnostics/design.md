@@ -92,6 +92,72 @@ once at init), which makes a scroll a memmove of the shadow followed by
 a repaint from it: writes only, no reads of the framebuffer, which are
 several times more expensive uncached.
 
+**A display driver's surface** (the virtio-gpu unit). `fbcon_attach`
+moves the console onto memory a display driver owns (`struct
+fbcon_surface`: base, size, pitch, the pixel format, and `panic_flush`).
+The text buffer is allocated first, in thread context. The switch is
+one hold of the console lock: the new geometry, a cleared surface, its
+first contents, and, for a first surface, the sink registered. When
+fbcon was drawing a screen (the boot framebuffer, or the surface before
+a resize), the contents are that screen (`carry_text`): its rows up to
+the cursor's, the newest at the bottom when they do not all fit, each
+cut or padded to the new width, and the cursor where it was on its row.
+Program output and echo reach the sinks from `tty.c` without passing
+through the log ring, so a replay of the log would replace a shell's
+screen, and a half-typed line, with old kernel lines (Codex, PR #387).
+Rows are not reflowed: a row wider than the new screen loses its end.
+With no screen before, the contents are the newest screenful of the log
+(the ring's lock nests inside the console's). A line written meanwhile
+is in the copy or drawn after the release, never lost; one put in the
+ring while its sink write waits for the lock is drawn twice. A new cell
+grid is the console terminal's new size: `tty_console_resized`, after
+the release, drops a size set by `TIOCSWINSZ` before the switch (the
+switch's number, `fbcon_switches`, is taken in the hold) and raises
+SIGWINCH on the foreground group (`docs/kernel/tty/design.md`). The
+readers (`fbcon_geometry`, `fbcon_cursor`, `fbcon_get_stats`) take the
+console lock, so a copy never mixes two screens (Codex, PR #387).
+
+The consoles are three whole structures: the boot framebuffer's and two
+surface slots. A switch builds the new console in the slot not shown (or,
+for `fbcon_detach`, redraws the boot console, which was left as it was)
+and then publishes it with one store of the pointer the sink draws
+through. A CPU in panic mode writes without the console lock and sees
+the old console or the new one, never one half-copied (Codex, PR #387).
+Such a writer can run beside a switch: `smp_stop_others` gives up on a
+CPU with interrupts off, and lockdep's report enters panic mode before
+any stop. So a switch refuses to start in panic mode (`-EBUSY`), and
+after its publish a full fence and a second look decide: a panic seen
+then keeps the replaced console (its text, and by its owner the surface
+and what its `panic_flush` uses); otherwise the writer's own fence, before
+it loads the pointer, makes it see the new one (Qodo, PR #387).
+The sink and the counters are outside them: the sink is on the
+console's list, and its `next` links every sink after it. The first
+build copied the whole console structure and with it the sink's `next`,
+which cut every sink after fbcon off the list: on Parallels Desktop the
+serial console went silent (`make test-display`'s `both` shape checks
+it).
+
+Such a surface is not scanned out as it is written. The sink records the
+pixel rows it drew as one band, and the driver's thread takes it
+(`fbcon_take_damage`) and flushes it. In panic mode no thread runs, so
+the sink calls the surface's `panic_flush` with the band after each
+write. It returns whether the band reached the device; when not (a flush
+already running below it, or a dead device) the band is merged back, so
+the next line's flush covers the rows, a scroll's included (Qodo,
+PR #387). The callback's argument is the surface's own, set before the
+switch, so a panic during `fbcon_attach` flushes the surface fbcon is
+drawing. `fbcon_detach` goes back to the boot framebuffer (kept, mapped,
+not drawn while the surface was), which gets the surface's screen the
+same way, or to no screen console. The boot
+framebuffer is uncached and scanned out directly; a surface is
+write-back memory the device reads.
+
+The drawing loops are aligned to 512 bytes (`FBCON_DRAW_ALIGN`), so none
+crosses a page. They are 124 to 457 bytes, and the 256 they had before
+kept them inside a page only by placement: this unit's AArch64 release
+link put `fbcon_draw_clear_rows` (272 bytes) at 0x...2f00, and
+`check-kernel-elf.sh` refused the kernel.
+
 A scroll moves several rows at once (`rows / 4`) rather than one. The
 cost of a scroll is a screen repaint and does not depend on how far it
 moves, so scrolling by one row would repaint the screen for every line

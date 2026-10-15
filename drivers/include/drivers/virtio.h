@@ -23,6 +23,7 @@
 #define VIRTIO_ID_BLOCK   2u
 #define VIRTIO_ID_CONSOLE 3u
 #define VIRTIO_ID_RNG     4u
+#define VIRTIO_ID_GPU     16u
 
 /* Device status (spec 2.1). */
 #define VIRTIO_STATUS_ACKNOWLEDGE 1u
@@ -52,6 +53,9 @@ struct virtio_transport {
     uint8_t  (*get_status)(struct virtio_device *vdev);
     void     (*set_status)(struct virtio_device *vdev, uint8_t status);
     void     (*read_config)(struct virtio_device *vdev, unsigned off, void *buf, size_t len);
+    /* One 32-bit field of the device configuration (virtio-gpu's
+     * events_clear); a write outside it is dropped. */
+    void     (*write_config32)(struct virtio_device *vdev, unsigned off, uint32_t val);
     /* Query the device's maximum size for queue `index`; 0 if absent. */
     unsigned (*queue_max_size)(struct virtio_device *vdev, unsigned index);
     /* Program addresses and the interrupt for an allocated queue and
@@ -191,6 +195,7 @@ static inline bool virtio_has_feature(const struct virtio_device *vdev, uint64_t
 void virtio_read_config(struct virtio_device *vdev, unsigned off, void *buf, size_t len);
 uint32_t virtio_read_config32(struct virtio_device *vdev, unsigned off);
 uint64_t virtio_read_config64(struct virtio_device *vdev, unsigned off);
+void virtio_write_config32(struct virtio_device *vdev, unsigned off, uint32_t val);
 
 /* --- virtqueues --------------------------------------------------------- */
 
@@ -206,6 +211,10 @@ int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, vir
  * transport), then its deferred completion work (irq_poll_disable), then
  * the memory. On return no callback is running or will run. Sleeps. */
 void virtq_free(struct virtqueue *vq);
+/* virtq_free's first half: no callback runs after it returns, and the
+ * ring stays. For a device whose reset was not acknowledged and may still
+ * read the ring: the queue is never freed or used again. Sleeps. */
+void virtq_quiesce(struct virtqueue *vq);
 
 /* Add a chain: `out` device-readable segments then `in` device-writable
  * ones. -ENOSPC when the ring is full. Any context (IRQ-safe lock). */
@@ -215,6 +224,12 @@ void virtq_kick(struct virtqueue *vq);
 /* Next completed chain's cookie, with the bytes the device wrote, or
  * NULL when nothing has completed. Any context. */
 void *virtq_pop(struct virtqueue *vq, uint32_t *len);
+/* The same from panic context: the queue's lock is tried once, untracked
+ * (spin_trylock_panic), so lockdep's own lock, which a CPU the panic
+ * stopped may hold, is never waited for. virtq_add_panic answers -EBUSY
+ * and virtq_pop_panic NULL when the lock is held. */
+int virtq_add_panic(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie);
+void *virtq_pop_panic(struct virtqueue *vq, uint32_t *len);
 unsigned virtq_free_count(struct virtqueue *vq);
 #if CONFIG_DEBUG
 /* Finished by the device, not yet popped: a test seam, debug builds only. */

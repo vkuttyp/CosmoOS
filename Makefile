@@ -13,6 +13,7 @@
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
 #   make test-security roadmap M5: verified boot refuses tampered files; VERIFY_BOOT=0 says so (CI: BUILD=release)
 #   make test-net-login roadmap M4: DHCP, wget by address and by name on the installed system (CI: BUILD=release)
+#   make test-display  virtio-gpu: the console on the display's own size, read back from a screendump (CI: BUILD=release)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
@@ -37,7 +38,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -243,6 +244,28 @@ test-net-login: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/net_login_test.py --image $(IMAGE) --workdir $(OUT)/test-net-login \
 		--timeout $(BOOT_TIMEOUT)
+
+# The virtio-gpu unit's acceptance test (tests/boot/display_test.py,
+# docs/drivers/virtio/testing.md, "virtio-gpu"): the console on a
+# virtio-gpu-pci of DISPLAY_SIZE, read back from QEMU's screendump. CI:
+# BUILD=release.
+# On x86-64 it also boots the crash-test kernel (CRASH_TEST=1, as
+# test-crash builds it) without the exit device and reads the panic off
+# the screen; AArch64's exit is semihosting, which cannot be left out.
+# And a debug kernel built with CRASH_TEST=3, which panics with lockdep's
+# own lock owned by another CPU: the panic flush must not wait for it.
+DISPLAY_SIZE ?= 1920x1080
+test-display: $(IMAGE)
+ifeq ($(ARCH),x86_64)
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) CRASH_TEST=1 OUT=$(OUT)-crash image
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug CRASH_TEST=3 \
+		OUT=$(ROOT)/out/$(ARCH)-debug-paniclock image
+endif
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/display_test.py --image $(IMAGE) --workdir $(OUT)/test-display \
+		--size $(DISPLAY_SIZE) --timeout $(BOOT_TIMEOUT) \
+		$(if $(filter x86_64,$(ARCH)),--panic-image $(OUT)-crash/cosmoos.img \
+		--panic-lockdep-image $(ROOT)/out/$(ARCH)-debug-paniclock/cosmoos.img)
 
 # The same boot test with two CPUs. Every other boot here uses the
 # default four, and a test that needs a third CPU without saying so passes

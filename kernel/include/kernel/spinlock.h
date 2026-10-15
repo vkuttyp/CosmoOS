@@ -59,6 +59,13 @@ arch_irq_state_t spin_lock_irqsave_nested(spinlock_t *lock, unsigned subclass);
 /* Try once; true if acquired. */
 bool spin_trylock(spinlock_t *lock);
 
+/* Panic context only: try once, untracked -- no lockdep (whose own lock
+ * a CPU the panic stopped may hold) and no preemption count. Excludes the
+ * tracked operations on the same lock all the same. Release with
+ * spin_unlock_panic. */
+bool spin_trylock_panic(spinlock_t *lock);
+void spin_unlock_panic(spinlock_t *lock);
+
 /* Disable interrupts, acquire; restore on unlock. */
 arch_irq_state_t spin_lock_irqsave(spinlock_t *lock);
 void spin_unlock_irqrestore(spinlock_t *lock, arch_irq_state_t state);
