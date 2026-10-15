@@ -4335,3 +4335,25 @@ put them at 240-246 s. The runners are of two speeds (a boot of about
 same spread: its 261 AArch64 boots took a p95 of 217 s and at most 228.8
 s. 300 s is 1.22 x the slowest estimated boot, as #314's 240 s was 1.39 x
 that day's p95; a real hang is caught 60 s later on AArch64.
+
+## `wait-multi-prepare`: the same thread picked again, 2026-10-16
+
+`SELFTEST: wait-multi-prepare ... FAIL: check failed: still_ready at
+line 1417 (1 ms)`, AArch64 CI, PR #393 (S2, userland and tests only) at
+`75eef764`, run 38809548008, job 116679074015, the `Boot test on a
+protection-capable CPU` boot; the job's other debug boots passed it, and
+the runner was slow (its boots 229-251 s). Only `still_ready` failed:
+`woke`, `!breached` and `running` held, so the thread was not left BLOCKED
+on a run queue (S34, what the test is for). Mechanism, from the source:
+after the wake the test thread is READY and on its own CPU's run queue,
+and a `schedule()` there -- a tick, or a preemption point inside the
+second `waitqueue_prepare` -- can pick it again: the `next == prev` path
+(`kernel/scheduler/sched.c`, `schedule_internal`) dequeues it and sets it
+RUNNING but does not count a switch (`rq->switches` is bumped only for a
+real switch). The test's guard, "this CPU switched no thread meanwhile",
+misses that pass, and judges a state the scheduler has legitimately
+changed. Every other path to RUNNING (`sched_set_running_current`, from
+`waitqueue_finish`) runs after the check. A test defect, not a scheduler
+one; not confirmed by a run (inventory). First sighting; CI ran again on
+the commit that records it.
+

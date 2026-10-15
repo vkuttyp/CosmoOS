@@ -1192,4 +1192,10 @@ each; none is needed by M2's acceptance test.
 - `syslogd` writes no file and keeps no ring of its own: the kernel's log
   is the record, and an unprivileged writer's rate limit drops a burst
   (counted on the next line through).
+- `wait-multi-prepare`'s guard counts switches, and `schedule()` picking
+  the running thread again (`next == prev`) is not one: a tick or a
+  preemption point between the wake and the check makes the thread
+  RUNNING and fails `still_ready` with no fault (flakes.md, 2026-10-16;
+  seen once, AArch64 CI). The guard needs a count that includes that pass
+  (or a per-thread schedule count).
 
