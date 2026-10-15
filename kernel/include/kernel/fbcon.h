@@ -49,9 +49,15 @@ bool fbcon_geometry(struct fbcon_geometry *out);
 
 /* The cursor, in cells. */
 void fbcon_cursor(uint32_t *col, uint32_t *row);
+/* fb-switch: a display driver's surface holds the console (fbcon_attach).
+ * Without self-tests, true: fb-switch, never run there, would skip. */
 #if CONFIG_SELFTEST
-/* fb-switch: a display driver's surface holds the console (fbcon_attach). */
 bool fbcon_on_surface(void);
+#else
+static inline bool fbcon_on_surface(void)
+{
+    return true;
+}
 #endif
 
 /*
