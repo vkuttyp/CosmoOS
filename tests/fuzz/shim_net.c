@@ -640,7 +640,7 @@ unsigned netif_list(struct netif_info *out, unsigned max)
         if (count < max) {
             struct netif_info *o = &out[count];
             memset(o, 0, sizeof(*o));
-            strlcpy(o->name, n->name, sizeof(o->name));
+            snprintf(o->name, sizeof(o->name), "%s", n->name);   /* not strlcpy: glibc's headers hide it here */
             o->index = n->index;
             o->flags = n->flags;
             o->mtu = n->mtu;
