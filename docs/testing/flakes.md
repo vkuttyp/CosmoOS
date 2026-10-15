@@ -2690,6 +2690,19 @@ The branch changes how a multi-queue wait treats a wake (S34) and
 step on the branch and four on main passed. Not attributed; first
 sighting.
 
+**Second sighting, 2026-10-15:** CI, `build, boot, analyze (aarch64)`'s
+`test-harness-retry` boot on PR #388 (documentation only, on main
+`37b356d6`; run 38714753683, job 116354686163): the same line, `status
+8960`, after `lxpty: pty ok`. The session child (pid 351) forked the job
+twice: the first (352) exited 130, the second (353) -- the one stopped by
+^Z, continued and killed -- exited 0 after 5 system calls, so its read
+returned again. Every one of the 477 self-tests passed, the network
+harness served 100 of 100, and the job's five earlier boots of the same
+tree (`test`, `test-gic`, `test-guard`, `test-smp2`, `test-chaos`) passed
+it; `SHTEST: FAIL 1` and the missing `lxpty` markers are this one check.
+Not attributed; two sightings, both AArch64, both under a test-only
+kernel variant (`test-chaos`, the harness-retry kernel).
+
 ## `sched-restore-loop`: one trip short, 2026-10-13
 
 `SELFTEST: sched-restore-loop ... FAIL: check failed: runs ==
