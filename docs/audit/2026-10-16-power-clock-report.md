@@ -148,8 +148,22 @@ Checked against their bugs by mutation:
 
 New features are proven by their acceptance test; no probe (AGENTS.md).
 
-The restart on Parallels Desktop is the owner's to run (the roadmap
-entry); it is recorded below when run.
+**On Parallels Desktop** (the roadmap leaves the restart to the owner;
+this is the developer's run, 2026-10-17, the AArch64 release image of
+`d5094d4a`, the same code as `afb80f37`, installed on a blank NVMe disk by
+`cosmo-install`): `reboot` from the installed system's console restarts the
+VM through PSCI `SYSTEM_RESET` (SMC) and is back at the installed
+system's prompt 1.8 s later (`/proc/uptime` 0 s); `reboot` and
+`reboot -f` with `sys_admin` dropped exit 1, and `date -s` says
+"Operation not permitted"; an ssh session (dropbear's `net cred`) is
+refused `date -s` too. There is no `/dev/rtc0` and `hwclock` fails, as
+recorded (no RTC this kernel finds there; inventory §15). `date -s` a day
+ahead, then `ntpd -q -n -p time.cloudflare.com -p time.google.com` set
+the clock back by 86398.9 s, to 0.25 s from the host's. A first try
+against `pool.ntp.org` got one reply from the one server it resolved to
+and then timeouts until BusyBox's `-q` alarm ended `ntpd` (status 142);
+two other servers answered every query, so that server was not
+investigated further.
 
 ## Validation
 
