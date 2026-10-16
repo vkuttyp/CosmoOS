@@ -23,9 +23,10 @@ VI LESS TOP FREE DF DU UPTIME WHOAMI CLEAR MD5SUM DD CMP HEXDUMP
 PING POWEROFF
 IFCONFIG ROUTE NETSTAT ARP HOSTNAME
 MORE NL OD STRINGS REV TAC YES CAL TIME TIMEOUT WATCH NOHUP KILLALL PGREP PKILL PIDOF INSTALL REALPATH SPLIT
-FOLD PASTE COMM CKSUM BASE64 UNZIP BZIP2 BUNZIP2 XZ UNXZ ZCAT MKTEMP LOGGER SETSID""".split())
+FOLD PASTE COMM CKSUM BASE64 UNZIP BZIP2 BUNZIP2 XZ UNXZ ZCAT MKTEMP LOGGER SETSID
+PS KILL""".split())
 # M4 (decision 5); v1.0.2's everyday commands; ping over raw ICMP sockets; poweroff; shell completeness S1's
-# network inspection and S2's applets
+# network inspection, S2's applets and S3's process tools
 
 FORCE = {
     "STATIC": "y",                 # decision 6: a static binary

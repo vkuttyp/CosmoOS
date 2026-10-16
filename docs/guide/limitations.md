@@ -46,10 +46,14 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 ## Shell and commands
 
 - The commands are the BusyBox applets listed in [the shell
-  page](shell.md): no `bunzip2`, no `ping6`; no hard links; no `/sys`.
+  page](shell.md): no `ping6`; no hard links; no `/sys`.
 - `/proc` has the process directories and a fixed set of system files
-  (`meminfo`, `stat`, `loadavg`, `uptime`, `mounts`). A process's
-  memory sizes read as 0, so `top` shows none (inventory, v1.0.3).
+  (`meminfo`, `stat`, `loadavg`, `uptime`, `mounts`, `version`,
+  `cpuinfo`). A process has no nice value and no user/system split of its
+  CPU time; `ps`'s `TT` column is a pair of Linux device numbers (`5,1`
+  for the console), since devices here have none of their own; and a
+  process's `environ` is what exec gave it, not what it has since written
+  over (inventory §13).
 - The terminal driver honours the common modes (canonical input, echo,
   signals, raw mode, window size); most other termios flags and control
   characters are accepted and ignored (inventory 1.4).

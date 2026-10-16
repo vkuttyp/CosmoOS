@@ -216,6 +216,7 @@ bool selftest_process_gone_order(const char **reason);    /* a leftover released
 bool selftest_process_leftover_named(const char **reason); /* the runner names a process a test left (P33) */
 bool selftest_p33_once(const char **reason);               /* a process already blamed is not blamed again (P33) */
 bool selftest_exit_space_order(const char **reason);       /* the address space goes before EXITED is published */
+bool selftest_proc_exit_read(const char **reason);         /* /proc reads a process's sizes across its exit (P38) */
 /* kernel/core/selftest.c: the runner's P33 check, waiting up to `wait_ns`
  * for the process table to empty; returns how many are left, and writes
  * up to `max` of their pids, *named (if not NULL) saying how many. */

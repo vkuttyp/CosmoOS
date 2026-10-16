@@ -3856,10 +3856,14 @@ static void proc_fs_selftest(void)
     /* P3: self is the caller, resolved at lookup. */
     CHECK(slurp("/proc/self/status", buf2, sizeof(buf2)) > 0);
     char want[32];
-    snprintf(want, sizeof(want), "pid: %d\n", getpid());
+    snprintf(want, sizeof(want), "\nPid:\t%d\n", getpid());
     CHECK(strstr(buf2, want) != NULL);
-    CHECK(strstr(buf2, "name: init") != NULL);
-    CHECK(strstr(buf2, "state: running") != NULL);
+    CHECK(strncmp(buf2, "Name:\tinit\n", 11) == 0);
+    CHECK(strstr(buf2, "\nState:\tR (running)\n") != NULL);
+    /* Linux's ids (real, effective, saved, filesystem) and, with a space,
+     * its sizes (shell completeness S3). */
+    CHECK(strstr(buf2, "\nUid:\t0\t0\t0\t0\n") != NULL);
+    CHECK(strstr(buf2, "\nVmSize:\t") != NULL && strstr(buf2, "\nVmRSS:\t") != NULL);
     CHECK(slurp("/proc/self/limits", buf2, sizeof(buf2)) > 0);
     CHECK(strstr(buf2, "nofile: ") != NULL);
 
@@ -3876,6 +3880,34 @@ static void proc_fs_selftest(void)
     snprintf(want, sizeof(want), "%d (init) ", getpid());
     CHECK(slurp("/proc/self/stat", buf2, sizeof(buf2)) > 0);
     CHECK(strncmp(buf2, want, strlen(want)) == 0);
+    {
+        /* vsize (field 23) and rss (24) are this space's, so neither is 0
+         * for a running process (S3). */
+        char *q = strrchr(buf2, ')');
+        CHECK(q != NULL);
+        q += 2;   /* field 3 */
+        for (int f = 3; f < 23 && q != NULL; f++) {
+            q = strchr(q, ' ');
+            q = q ? q + 1 : NULL;
+        }
+        CHECK(q != NULL);
+        char *e;
+        unsigned long long vsize = strtoull(q, &e, 10), rss = strtoull(e, &e, 10);
+        CHECK(vsize > 0 && vsize % 4096 == 0 && rss > 0 && rss * 4096 <= vsize);
+    }
+
+    /* S3: where it stands and what it runs. init was started from the
+     * boot archive, which names no file, so `exe` is absent; its own
+     * environment is readable and its cwd and root are links. */
+    {
+        char lnk[256];
+        ssize_t n = readlink("/proc/self/cwd", lnk, sizeof(lnk) - 1);
+        CHECK(n > 0 && lnk[0] == '/');
+        n = readlink("/proc/self/root", lnk, sizeof(lnk) - 1);
+        CHECK(n == 1 && lnk[0] == '/');
+        CHECK(slurp("/proc/self/environ", buf2, sizeof(buf2)) >= 0);
+        CHECK(lists("/proc/self", "environ") && lists("/proc/self", "exe"));
+    }
 
     /* P4: the fixed list of Linux system files, in Linux's formats. */
     CHECK(slurp("/proc/meminfo", buf2, sizeof(buf2)) > 0);
@@ -3911,11 +3943,16 @@ static void proc_fs_selftest(void)
     CHECK(slurp("/proc/mounts", buf2, sizeof(buf2)) > 0);
     CHECK(strstr(buf2, " / ") != NULL && strstr(buf2, " /proc procfs ") != NULL);
     CHECK(lists("/proc", "meminfo") && lists("/proc", "mounts"));
+    /* P4's revision (S3): the two the shell's users read by name. */
+    CHECK(slurp("/proc/version", buf2, sizeof(buf2)) > 0);
+    CHECK(strncmp(buf2, "Linux version 6.0.0-cosmo ", 26) == 0);
+    CHECK(slurp("/proc/cpuinfo", buf2, sizeof(buf2)) > 0);
+    CHECK(strncmp(buf2, "processor\t: 0\n", 14) == 0);
 
     /* P2: nothing appears here that nobody added. */
     struct stat pst;
-    CHECK(stat("/proc/cpuinfo", &pst) < 0 && errno == ENOENT);
-    CHECK(stat("/proc/self/environ", &pst) < 0 && errno == ENOENT);
+    CHECK(stat("/proc/kallsyms", &pst) < 0 && errno == ENOENT);
+    CHECK(stat("/proc/self/maps", &pst) < 0 && errno == ENOENT);
     CHECK(stat("/proc/0", &pst) < 0 && errno == ENOENT);
     CHECK(stat("/proc/01", &pst) < 0 && errno == ENOENT);   /* not a pid, not rounded into one */
     CHECK(stat("/proc/99999", &pst) < 0 && errno == ENOENT);

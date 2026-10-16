@@ -16,6 +16,13 @@ const char *arch_name(void);
 /* Human-readable processor description, NUL-terminated, truncated to len. */
 void arch_cpu_brand_string(char *buf, size_t len);
 
+/* /proc/cpuinfo's lines for one CPU, after its "processor" line (shell
+ * completeness S3): the boot CPU's identification in Linux's field names
+ * for this architecture, one "name\t: value" line each. Every CPU is
+ * described by the boot CPU's identification. Returns what ksnprintf
+ * returns. */
+int arch_cpu_info(char *buf, size_t len);
+
 /* Logical CPU index of the caller. Always 0 until SMP bring-up.
  *
  * `arch_cpu_id_raw` is the architecture's read, unchecked. `arch_cpu_id`

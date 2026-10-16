@@ -7,7 +7,7 @@ The project owner picks the next unit from the proposed list, and
 [`AGENTS.md`](../AGENTS.md#scope-rules)'s scope rules then apply to it as
 they did to a 1.0 milestone. P1 is done; the owner chose the
 [shell-completeness track](#s-shell-completeness) on 2026-10-15, S1 and
-then S2 first.
+then S2 first; S1, S2 and S3 are done.
 [`plan.md`](plan.md) and the
 [deferred-work inventory](audit/2026-09-deferred-work-inventory.md)
 remain the record of everything else.
@@ -116,7 +116,7 @@ ticked in the same PR).
   CI (job `platforms`); on Parallels Desktop 27.0.3 both stopped the VM
   1.1 s after the command
   ([report](audit/2026-10-15-aarch64-poweroff-report.md)).
-- [ ] **P2 Process memory in procfs** (widened by
+- [x] **P2 Process memory in procfs** (widened by
   [S3](#s-shell-completeness), which does it with the rest of `/proc`).
   `/proc/<pid>/stat` reports VSZ and RSS, and `/proc/<pid>/status` gains
   `VmSize` and `VmRSS`, from a reference on the target's space taken under
@@ -127,7 +127,8 @@ ticked in the same PR).
   -b -n 1` and requires a non-zero VSZ and RSS for a running `sleep`, and
   reads that process's `status` for non-zero `VmSize` and `VmRSS`; a
   self-test reads a process's `stat` and `status` while it exits, many
-  times, with no fault or leak.
+  times, with no fault or leak. Done 2026-10-16 by S3, with BusyBox's
+  `ps` (below).
 - [ ] **P3 The Parallels-test residue.** The four small defects the
   post-1.0 tests found: `wget`'s bad-certificate exit message, `sftp`'s
   link count, `/dev/zero`'s 64 KiB short read, and the installer's stale
@@ -222,7 +223,7 @@ the inventory.
   `test-busybox` in CI (job `busybox`, both architectures); `logger`
   through a native `syslogd`, BusyBox's `xz` decompressing only
   ([report](audit/2026-10-15-everyday-applets-report.md)).
-- [ ] **S3 Process tools on `/proc`** (widens P2). `/proc/<pid>/stat`
+- [x] **S3 Process tools on `/proc`** (widens P2). `/proc/<pid>/stat`
   with the fields BusyBox `ps` and `top` read (state, ppid, pgrp,
   session, tty_nr, utime, stime, priority, nice, num_threads, starttime,
   vsize, rss); `/proc/<pid>/status` (`Name`, `State`, `Pid`, `PPid`,
@@ -242,7 +243,14 @@ the inventory.
   P2's checks -- a non-zero VSZ and RSS for a running `sleep` in `ps`,
   `top` and its `status`, and a self-test reading a process's `stat` and
   `status` while it exits, many times, with no fault or leak; and a
-  cross-user or non-dumpable `environ` read refused.
+  cross-user or non-dumpable `environ` read refused. Done 2026-10-16:
+  `test-busybox` in CI (job `busybox`, both architectures), and
+  `test-net-login`'s stage h for `ps` naming init, dropbear and the shell
+  on the installed system (job `net-login`, both architectures);
+  `proc-exit-read` and `lxtest`'s inspection section in every debug
+  boot. The two rules: Linux's ptrace read check (procfs P5), and P4
+  admitting the files the shell's users read by name
+  ([report](audit/2026-10-16-process-tools-report.md)).
 - [ ] **S4 Ownership.** `chown`, `fchown`, `fchownat`, `lchown` and
   `chroot`; BusyBox `chown`, `chgrp` and `su` (one user, root: `su` to
   root is a no-op that works, `su` to another uid needs `PRIV_CRED`).

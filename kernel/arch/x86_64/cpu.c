@@ -6,6 +6,7 @@
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
+#include <kernel/printf.h>
 #include <kernel/string.h>
 
 #include <arch/cpu.h>
@@ -174,6 +175,19 @@ const char *arch_name(void)
 void arch_cpu_brand_string(char *buf, size_t len)
 {
     strlcpy(buf, g_cpu.brand[0] ? g_cpu.brand : "(unidentified)", len);
+}
+
+/* Linux's x86 names for what CPUID leaves 0, 1 and 0x80000002-4 said. */
+int arch_cpu_info(char *buf, size_t len)
+{
+    return ksnprintf(buf, len,
+                     "vendor_id\t: %s\n"
+                     "cpu family\t: %u\n"
+                     "model\t\t: %u\n"
+                     "model name\t: %s\n"
+                     "stepping\t: %u\n",
+                     g_cpu.vendor, (unsigned)g_cpu.family, (unsigned)g_cpu.model,
+                     g_cpu.brand[0] ? g_cpu.brand : "(unidentified)", (unsigned)g_cpu.stepping);
 }
 
 /* arch_cpu_id lives in percpu.c: it reads the per-CPU block through GS. */

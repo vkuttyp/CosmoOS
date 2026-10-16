@@ -30,6 +30,35 @@ typedef uint32_t pid_t;
 #define PROCESS_NAME_MAX 32
 /* What /proc/<pid>/cmdline keeps of argv: the first this many bytes. */
 #define PROCESS_CMDLINE_MAX 256
+/* What /proc/<pid>/environ keeps of envp: the first this many bytes, a
+ * page less the byte procfs keeps for a terminator (shell completeness S3). */
+#define PROCESS_ENVIRON_MAX 4095
+
+/*
+ * What exec recorded for /proc (shell completeness S3; process design,
+ * "The exec record"): the executable's traversed name and the
+ * environment it was given. Made once per exec (and spawn), never
+ * written after, and shared by reference: a fork child takes a reference
+ * to its parent's rather than a copy. `p->exec_rec` is read and replaced
+ * under `p->lock`; a reader takes a reference there and copies outside.
+ * The kernel keeps these because it cannot read them back safely from
+ * the process's memory: the space can be torn down under the reader (P34).
+ */
+struct exec_record {
+    uint32_t refs;      /* atomic */
+    uint16_t exe_len;   /* 0: no name (an image from the boot archive) */
+    uint16_t env_len;
+    char data[];        /* the name, its NUL, then env_len bytes of NUL-terminated strings */
+};
+static inline const char *exec_record_exe(const struct exec_record *r)
+{
+    return r->data;
+}
+static inline const char *exec_record_env(const struct exec_record *r)
+{
+    return r->data + r->exe_len + 1;
+}
+void exec_record_put(struct exec_record *r);
 
 /* User address-space layout (the canonical lower half on both targets, page aligned).
  * Since roadmap M5 every exec randomises four of these, Linux-style
@@ -255,6 +284,9 @@ struct process {
      * here for it to govern. 1 when made, inherited by fork, 1 again at
      * exec (as Linux, for a program that does not change ids). Atomic. */
     uint8_t dumpable;
+    /* What the last exec recorded (above); under `lock`, referenced. NULL
+     * for a process made before this existed in its build. */
+    struct exec_record *exec_rec;
     /* ITIMER_REAL (setitimer, alarm; kernel/process/itimer.c): SIGALRM at
      * expiry, re-armed by the interval. itimer_lock serialises the setters;
      * the callback reads the two words atomically. A fork starts disarmed;
@@ -349,6 +381,10 @@ struct process_image {
     const void *data;
     size_t size;
     const char *path;
+    /* The file's traversed name (vfs_lookup_named, P32), kmalloc'd by
+     * whoever read the file; NULL for the boot archive's images. The
+     * exec record keeps it for /proc/<pid>/exe. */
+    char *name;
     /* The file the bytes came from, when there is one, referenced by
      * the caller for the load's duration. The loader maps segments from
      * its page cache instead of copying them
@@ -445,6 +481,28 @@ struct vnode *process_cwd_get(void);
  * that in this unit's design, before it was built.
  */
 struct vnode *process_cwd_snapshot(char *path, size_t len);
+/* `p`'s working directory's path, normalised and absolute in `p`'s own
+ * root (/proc/<pid>/cwd; shell completeness S3). */
+void process_cwd_path(struct process *p, char *path, size_t len);
+
+/*
+ * Another process's memory sizes, for /proc (shell completeness S3):
+ * the pages its regions cover and the frames resident in them. False,
+ * with both 0, for a process with no space -- one whose last thread has
+ * gone (P34). Read under `p->lock`, which is what every change of
+ * `p->space` on a published process holds (P38): the space cannot be
+ * torn down under the read.
+ */
+bool process_space_usage(struct process *p, uint64_t *mapped_pages, uint64_t *resident_pages);
+
+/* `p`'s exec record, referenced (exec_record_put), or NULL. */
+struct exec_record *process_exec_record(struct process *p);
+
+#if CONFIG_DEBUG
+/* Test-only, debug builds: exec records alive now (the proc-exit-read
+ * self-test's leak check). */
+unsigned exec_record_live(void);
+#endif
 
 /* Credentials of the calling process (kernel/cred.h rules; -1 keeps an id). */
 int process_setresuid(int64_t ruid, int64_t euid, int64_t suid);

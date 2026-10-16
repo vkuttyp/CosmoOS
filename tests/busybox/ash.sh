@@ -291,6 +291,60 @@ echo keep > notasock
 /sbin/syslogd "$T/notasock" > sd.out 2>&1
 expect syslogd-file "1 keep" "$(grep -c 'is not a socket' sd.out) $(cat notasock)"
 
+# --- shell completeness S3: process tools on /proc ------------------------------
+# ps and top name a running sleep with non-zero sizes (vsize and rss in its
+# stat), and its status carries them (VmSize, VmRSS).
+sleep 63 &
+sp=$!
+expect ps-sleep "$sp S 1" "$(ps -o pid,stat,vsz,rss | awk -v p=$sp '$1 == p { print $1, substr($2, 1, 1), ($3 > 0 && $4 > 0) }')"
+expect ps-ruser root "$(ps -o pid,ruser | awk -v p=$sp '$1 == p { print $2 }')"   # status's Uid:
+# init is the console shell's parent (this script's grandparent; init is
+# not pid 1 in a self-test build, whose tests spawn processes first).
+ip=$(ps -o pid,ppid | awk -v p=$PPID '$1 == p { print $2 }')
+expect ps-init "${ip:-none} S init" "$(ps -o pid,stat,comm | awk '$3 == "init" { print $1, substr($2, 1, 1), $3 }')"
+expect ps-shell "$$ S" "$(ps -o pid,stat | awk -v p=$$ '$1 == p { print $1, substr($2, 1, 1) }')"
+top -bn1 > top3.txt
+expect top-sleep 1 "$(awk -v p=$sp '$1 == p { print ($5 + 0 > 0) }' top3.txt)"
+expect status-vm "1 1" "$(awk '/^VmSize:/ { s = ($2 > 0) } /^VmRSS:/ { r = ($2 > 0) } END { print s, r }' /proc/$sp/status)"
+expect status-state "S (sleeping)" "$(sed -n 's/^State:\t//p' /proc/$sp/status)"
+kill $sp
+wait $sp 2>/dev/null
+# free says what sysctl says: the same total, and a free figure within
+# 2 MiB of one read just before it (the two are separate processes, and
+# memory moves between them).
+kb=$(( $(sysctl vm.page_size | awk '{ print $NF }') / 1024 ))
+pt=$(sysctl vm.pages_total | awk '{ print $NF }')
+pf=$(sysctl vm.pages_free | awk '{ print $NF }')
+expect free-total $((pt * kb)) "$(free | awk '/^Mem:/ { print $2 }')"
+ff=$(free | awk '/^Mem:/ { print $4 }')
+d=$((ff - pf * kb))
+echo "BBTEST: note free-free: free $ff kB, sysctl $((pf * kb)) kB just before"
+if [ "${d#-}" -le 2048 ]; then ok free-free; else bad free-free "free ${ff} kB, sysctl $((pf * kb)) kB"; fi
+expect uptime-up 1 "$(uptime | grep -c ' up ')"
+expect kill-l KILL "$(/bin/kill -l 9)"
+expect kill-l-list 1 "$(/bin/kill -l | grep -c 'HUP')"
+# A process's own environment, cwd, root and executable.
+expect environ 1 "$(env S3TAG=s3 cat /proc/self/environ | tr '\0' '\n' | grep -c '^S3TAG=s3$')"
+expect exe /bin/busybox "$(readlink /proc/self/exe)"
+expect cwd /tmp "$(cd /tmp && readlink /proc/self/cwd)"
+expect root / "$(readlink /proc/self/root)"
+# Another user's process does not exist for an unprivileged one (P1), so
+# neither does its environment.
+expect environ-cross 1 "$(priv -u 1000 -- cat /proc/1/environ 2>&1 | grep -c 'No such file')"
+# PRIV_PROC is the rule (P5), not PRIV_SYS_ADMIN: root without sys_admin
+# reads a uid-1000 process's environment, and without proc too it cannot.
+priv -u 1000 -- sleep 64 &
+pp=$!   # priv, which spawns the sleep as its child
+up=
+for i in 1 2 3 4 5 6 7 8 9 10; do up=$(pgrep -P $pp); [ -n "$up" ] && break; sleep 0.1; done
+expect environ-privproc 1 "$(priv -d sys_admin -- cat /proc/$up/environ | tr '\0' '\n' | grep -c '^PATH=')"
+expect environ-noprivproc 0 "$(priv -d sys_admin,proc -- cat /proc/$up/environ 2>/dev/null | wc -c)"
+kill $up
+wait
+# version and cpuinfo: uname's release, a block per CPU.
+expect version "$(uname -r)" "$(cut -d' ' -f3 /proc/version)"
+expect cpuinfo "$(sysctl hw.ncpu | awk '{ print $NF }')" "$(grep -c '^processor' /proc/cpuinfo)"
+
 cd /
 rm -rf "$T"
 echo "BBTEST: $n checks, $fails failed"

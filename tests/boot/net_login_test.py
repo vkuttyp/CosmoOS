@@ -48,6 +48,11 @@ port 22 forwarded to a host port:
      the same machine; `ifconfig eth0 down` fails with EPERM with PRIV_NET
      dropped, then works as root, and `up` brings the link back (a ping of
      the gateway answers).
+  h. Process tools on /proc (shell completeness S3), on the same boot:
+     BusyBox `ps` lists init, the ssh server and the console shell with
+     their pids and states, each pid known without /proc -- the shell's
+     $$, init as its parent ($PPID), and dropbear as the child of the
+     supervisor `svc status` names -- and ps itself running.
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -581,6 +586,20 @@ def stage_inspect(b, results):
                    "has accepted, others refused (EINVAL, EOPNOTSUPP)")
 
 
+def stage_processes(b, results):
+    """h: BusyBox ps over /proc/<pid>/stat (shell completeness S3)."""
+    out = b.run("echo shell=$$ parent=$PPID; svc status dropbear")
+    m = need(out, r"^shell=(\d+) parent=(\d+)$", "the console shell's pid and its parent's")
+    sh_pid, init_pid = m.group(1), m.group(2)
+    sup = need(out, r"^dropbear\s+running \(supervisor (\d+)\)$", "svc status dropbear").group(1)
+    out = b.run("ps -o pid,ppid,stat,comm")
+    need(out, rf"^\s*{init_pid}\s+0\s+S\s+init$", "ps: init, sleeping, no parent")
+    sshd = need(out, rf"^\s*(\d+)\s+{sup}\s+S\s+dropbear$", "ps: the ssh server, its supervisor's child").group(1)
+    need(out, rf"^\s*{sh_pid}\s+{init_pid}\s+S\s+sh$", "ps: this shell, waiting for ps")
+    need(out, rf"^\s*\d+\s+{sh_pid}\s+R\s+ps$", "ps: ps itself, running")
+    results.append(f"h. ps: init {init_pid} S, dropbear {sshd} S (supervisor {sup}), the shell {sh_pid} S, ps R")
+
+
 def stage_reboot_ssh(args, results, inst, port):
     """e: the second boot; the client's known_hosts must still match."""
     b = Boot("reboot", inst["target"], args.workdir,
@@ -671,6 +690,7 @@ def stage_net(args, results, inst):
         console_jobs(b, results)
         stage_ssh(args, results, b, ssh_port)
         stage_inspect(b, results)
+        stage_processes(b, results)
 
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:

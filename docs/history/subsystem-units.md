@@ -3051,3 +3051,23 @@ See the [history index](README.md).
   hold on. `tools/crash-lockdep-owner-probe.py --old` shows the old word
   failing under that race on both architectures.
   Report: `docs/audit/2026-10-16-crash-lockdep-owner-report.md`.
+- **After 1.0: process tools on /proc (2026-10-16, roadmap-1.1 S3, with
+  P2).** BusyBox's `ps` and `kill` join the applets, ahead of the native
+  `/sbin/ps` and `/sbin/kill` in `PATH`. `/proc/<pid>/stat` gains the
+  space's vsize and rss, the controlling terminal (Linux's numbers) and
+  its foreground group; `status` is Linux's `Key:\tvalue` format with
+  `VmSize`, `VmRSS` and the real, effective and saved ids, then this
+  kernel's privileges, domain and counts. New: `/proc/<pid>/environ` and
+  the `cwd`, `root` and `exe` links, under Linux's ptrace read check
+  (procfs P5: the process, `PRIV_PROC`, or the same ids while dumpable),
+  read from an exec record the kernel keeps per exec (envp and the
+  executable's traversed name) rather than from the process's memory;
+  `/proc/version` and `/proc/cpuinfo`, after P4 was revised to admit the
+  files the shell's users read by name. The sizes are read under
+  `p->lock`, which exit and exec now hold to change `p->space` (P38).
+  `test-busybox` checks `ps`, `top -bn1`, `free` against `sysctl`, `kill
+  -l` and the new files; `test-net-login`'s stage h finds init, dropbear
+  and the shell in `ps` on the installed system; the `proc-exit-read`
+  self-test reads 64 exits from another CPU, and `lxtest` refuses a
+  non-dumpable process's environment to its own user.
+  Report: `docs/audit/2026-10-16-process-tools-report.md`.

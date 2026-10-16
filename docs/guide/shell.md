@@ -76,15 +76,17 @@ cosmo$ ls /bin
 The applets are `sh` (ash) and `[ arp awk base64 basename bunzip2 bzip2
 cal cat chmod cksum clear cmp comm cp cut date dd df diff dirname du echo
 env expr false find fold free grep gunzip gzip head hexdump hostname id
-ifconfig install killall less ln logger ls md5sum mkdir mktemp more mv
-netstat nl nohup nslookup od paste pgrep pidof ping pkill poweroff printf
-pwd readlink realpath rev rm rmdir route sed seq setsid sha256sum sleep
-sort split stat strings stty tac tail tar tee test time timeout top touch
-tr true tty uname uniq unxz unzip uptime vi watch wc wget which whoami
-xargs xz yes zcat` (`ports/busybox/applets`; `xz` decompresses only);
-`/sbin` holds CosmoOS's own `cosmo-install`, `dmesg`, `fsctl`,
-`hostname`, `ip`, `kill`, `mount`, `netcfg`, `pkg`, `priv`, `ps`, `svc`,
-`syslogd`, `sysctl`, `umount` and `vmctl`. ash keeps your command history
+ifconfig install kill killall less ln logger ls md5sum mkdir mktemp more
+mv netstat nl nohup nslookup od paste pgrep pidof ping pkill poweroff
+printf ps pwd readlink realpath rev rm rmdir route sed seq setsid
+sha256sum sleep sort split stat strings stty tac tail tar tee test time
+timeout top touch tr true tty uname uniq unxz unzip uptime vi watch wc
+wget which whoami xargs xz yes zcat` (`ports/busybox/applets`; `xz`
+decompresses only); `/sbin` holds CosmoOS's own `cosmo-install`, `dmesg`,
+`fsctl`, `hostname`, `ip`, `kill`, `mount`, `netcfg`, `pkg`, `priv`,
+`ps`, `svc`, `syslogd`, `sysctl`, `umount` and `vmctl` (`/bin` comes
+first in `PATH`, so `ps`, `kill` and `hostname` are BusyBox's unless
+named by path). ash keeps your command history
 in `/root/.ash_history`, and `logger` writes to the kernel's log, which
 `dmesg` shows.
 
@@ -119,9 +121,8 @@ cosmo$ jobs
 ## What is missing compared with Linux
 
 The shell and its applets behave as on Linux, but the system around them
-is smaller. Among what you will notice: no `ping6`; `top` shows no
-process memory sizes; no hard links (`ln` without `-s`); no `/sys`; one
-user, root; no swap. [Known limitations](limitations.md) has the full
+is smaller. Among what you will notice: no `ping6`; no hard links (`ln`
+without `-s`); no `/sys`; one user, root; no swap. [Known limitations](limitations.md) has the full
 list.
 
 Power off with `exit` (or `poweroff`, which works from any shell); QEMU

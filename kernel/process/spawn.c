@@ -75,13 +75,36 @@ static bool may_set_cred(const struct credentials *c, uint32_t uid, uint32_t gid
  * `process_cwd_get()` instead, which is the calling process by
  * definition and hands back a *reference* -- so the parameter is gone
  * rather than left unused. */
-static int read_executable(const char *path, struct process_image *img)
+static int read_executable_named(const char *path, struct process_image *img)
 {
     struct vnode *exe;
-    struct vnode *cwd = process_cwd_get();
-    int rc = vfs_lookup(cwd, path, &exe);
+    /* The walk names what it reached (P32): /proc/<pid>/exe is that name,
+     * links replaced by where they led, as Linux's is the file's path. */
+    char *names = kmalloc(2 * VFS_PATH_MAX, 0);
+    if (names == NULL)
+        return -ENOMEM;
+    char *cwd_name = names, *exe_name = names + VFS_PATH_MAX;
+    exe_name[0] = '\0';
+    struct vnode *cwd = process_cwd_snapshot(cwd_name, VFS_PATH_MAX);
+    int rc = vfs_lookup_named(cwd, cwd_name, path, &exe, exe_name, VFS_PATH_MAX);
     if (cwd)
         vnode_put(cwd);
+    if (rc == -ENAMETOOLONG) {
+        /* A name that does not fit a path: the file is still the file, it
+         * has no name to give (and a path too long fails again here). */
+        exe_name[0] = '\0';
+        struct vnode *cwd2 = process_cwd_get();
+        rc = vfs_lookup(cwd2, path, &exe);
+        if (cwd2)
+            vnode_put(cwd2);
+    }
+    if (rc == 0 && exe_name[0] == '/') {
+        size_t n = strlen(exe_name) + 1;
+        img->name = kmalloc(n, 0);
+        if (img->name != NULL)
+            memcpy(img->name, exe_name, n);
+    }
+    kfree(names);
     if (rc)
         return rc;
     if (exe->type != VNODE_REG) {
@@ -137,6 +160,19 @@ static int read_executable(const char *path, struct process_image *img)
                       * on every path out, whether or not the loader shared
                       * anything: a mapping that shares takes its own. */
     return 0;
+}
+
+/* The same, with no name left behind on failure: the walk's name is
+ * allocated as soon as the lookup succeeds, before the checks that can
+ * still refuse the file. */
+static int read_executable(const char *path, struct process_image *img)
+{
+    int rc = read_executable_named(path, img);
+    if (rc) {
+        kfree(img->name);
+        img->name = NULL;
+    }
+    return rc;
 }
 
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
@@ -332,10 +368,12 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         vm_kernel_free((vaddr_t)interp.data);
     if (interp.vn)
         vnode_put(interp.vn);
+    kfree(interp.name);
 out_exe:
     vm_kernel_free((vaddr_t)exe.data);
     if (exe.vn)
         vnode_put(exe.vn);
+    kfree(exe.name);
 out_cwd:
     if (attr.cwd)
         vnode_put(attr.cwd);
@@ -491,6 +529,7 @@ int process_execve(struct exec_args *ea, void *syscall_frame)
             break;
         vm_kernel_free((vaddr_t)exe.data);
         vnode_put(exe.vn);
+        kfree(exe.name);
         if (depth + 1 >= EXEC_SCRIPT_DEPTH)
             return -ELOOP;
         path = next;
@@ -532,9 +571,11 @@ int process_execve(struct exec_args *ea, void *syscall_frame)
         vm_kernel_free((vaddr_t)interp.data);
     if (interp.vn)
         vnode_put(interp.vn);
+    kfree(interp.name);
 out_exe:
     vm_kernel_free((vaddr_t)exe.data);
     if (exe.vn)
         vnode_put(exe.vn);
+    kfree(exe.name);
     return rc;
 }
