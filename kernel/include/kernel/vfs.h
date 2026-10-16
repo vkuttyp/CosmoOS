@@ -421,9 +421,11 @@ int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart,
  * which refuses it rather than invent one. Before the file is shared. */
 void file_set_dir_path(struct file *f, const char *name);
 
+#if CONFIG_DEBUG
 /* procfs, debug builds: the texts it has rendered for opens and not yet
  * freed (the proc-exit-read self-test's leak check). */
 unsigned procfs_texts_live(void);
+#endif
 /* Set a regular file's length, dropping what is above it and reading as
  * zeros below a length it grew to. O_TRUNC is this with a size of zero;
  * this is the rest of it, which a filesystem that stores several blocks

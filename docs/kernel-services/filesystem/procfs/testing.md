@@ -48,7 +48,15 @@ covers what the files say and what the namespace refuses:
   `exec_record_live` and `procfs_texts_live`, debug builds). The kill
   waits for the reader's first read, so a round cannot read nothing; a
   first version killed first and read 0 times in 64 rounds while passing.
-- `lxtest`'s inspection section (P5).
+- `lxtest`'s inspection section (P5): a target that drops from root to
+  uid 1000 must find its dumpable flag cleared and be refused to an
+  unprivileged uid-1000 reader; one that sets the flag again is readable.
+  Each target reports its outcome on a pipe, so a failure is a
+  `LINUXTEST: FAIL` line rather than a hang. With the clearing removed
+  from `process_setresuid` (a mutation), the first target reports `3`.
+  `ash.sh`'s `environ-privproc` reads another uid's `environ` with
+  `sys_admin` dropped; with the file's mode back at 0400 (a mutation) it
+  reads nothing.
 - A child that has exited and been reaped answers a read with `ESRCH`
   rather than stale text.
 

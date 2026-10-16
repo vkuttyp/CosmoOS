@@ -386,11 +386,6 @@ unsigned exec_record_live(void)
 {
     return __atomic_load_n(&g_exec_records, __ATOMIC_RELAXED);
 }
-#else
-unsigned exec_record_live(void)
-{
-    return 0;
-}
 #endif
 
 /* The executable's name and the environment, envp joined as
@@ -1157,20 +1152,23 @@ static void fork_inherit(struct process *p, struct process *parent)
     if (p->cwd_locked)
         vnode_get(p->cwd_locked);
     strlcpy(p->cwd_path_locked, parent->cwd_path_locked, sizeof(p->cwd_path_locked));
-    spin_unlock_irqrestore(&parent->lock, s);
-    p->handles.limit = p->rlim.v[COSMO_RLIMIT_NOFILE] < HANDLE_TABLE_SIZE ? (unsigned)p->rlim.v[COSMO_RLIMIT_NOFILE]
-                                                                        : HANDLE_TABLE_SIZE;
-    p->log_tokens = LOG_BUCKET;
-    p->log_refill_ns = clock_now_ns();
-    inherit_syscall_mask(p, parent);
-    /* The image the space holds: the same program at the same place. */
+    /* The image the space holds: the same program at the same place. In
+     * the same hold as the exec record, which exec publishes with them
+     * under this lock: a fork racing another thread's exec takes one
+     * image's fields, never a mixture (/proc shows them). */
     p->image_end = parent->image_end;
     p->interp_base = parent->interp_base;
     p->exec_entry = parent->exec_entry;
     strlcpy(p->exec_path, parent->exec_path, sizeof(p->exec_path));
     memcpy(p->cmdline, parent->cmdline, parent->cmdline_len);
     p->cmdline_len = parent->cmdline_len;
-    p->exec_rec = process_exec_record(parent);   /* shared, never copied: nothing writes one */
+    p->exec_rec = exec_record_get(parent->exec_rec);   /* shared, never copied: nothing writes one */
+    spin_unlock_irqrestore(&parent->lock, s);
+    p->handles.limit = p->rlim.v[COSMO_RLIMIT_NOFILE] < HANDLE_TABLE_SIZE ? (unsigned)p->rlim.v[COSMO_RLIMIT_NOFILE]
+                                                                        : HANDLE_TABLE_SIZE;
+    p->log_tokens = LOG_BUCKET;
+    p->log_refill_ns = clock_now_ns();
+    inherit_syscall_mask(p, parent);
     p->dumpable = __atomic_load_n(&parent->dumpable, __ATOMIC_RELAXED);
 }
 
@@ -2312,11 +2310,26 @@ bool process_log_permitted(void)
  * now, so there can be several writers as well as readers on other CPUs:
  * the lock -- which was taken for that day -- is what keeps the update
  * atomic. */
+/*
+ * A change of the effective uid or gid clears the dumpable flag, as
+ * Linux's commit_creds does (with suid_dumpable 0): what the process
+ * held under its old ids -- its exec-time environment above all -- must
+ * not become readable by its new user through /proc (procfs P5). The
+ * process may set the flag again (PR_SET_DUMPABLE), and exec does.
+ */
+static void ids_changed_locked(struct process *p, uint32_t old_euid, uint32_t old_egid)
+{
+    if (p->cred.euid != old_euid || p->cred.egid != old_egid)
+        __atomic_store_n(&p->dumpable, 0, __ATOMIC_RELAXED);
+}
+
 int process_setresuid(int64_t ruid, int64_t euid, int64_t suid)
 {
     struct process *p = process_current();
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    uint32_t old_euid = p->cred.euid, old_egid = p->cred.egid;
     int rc = cred_setresuid(&p->cred, ruid, euid, suid);
+    ids_changed_locked(p, old_euid, old_egid);
     spin_unlock_irqrestore(&p->lock, s);
     return rc;
 }
@@ -2325,7 +2338,9 @@ int process_setresgid(int64_t rgid, int64_t egid, int64_t sgid)
 {
     struct process *p = process_current();
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    uint32_t old_euid = p->cred.euid, old_egid = p->cred.egid;
     int rc = cred_setresgid(&p->cred, rgid, egid, sgid);
+    ids_changed_locked(p, old_euid, old_egid);
     spin_unlock_irqrestore(&p->lock, s);
     return rc;
 }

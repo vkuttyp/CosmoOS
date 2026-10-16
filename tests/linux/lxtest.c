@@ -730,17 +730,27 @@ static void proc_path(char *buf, long pid, const char *file)
     *o = '\0';
 }
 
-/* A child that becomes uid and gid 1000 (which clears its privileges),
- * sets its dumpable flag, says so on `ready` and waits until every write
- * end of `go` is closed (it closes its own copy, `go_w`, first). */
+/* A child that becomes uid and gid 1000 (which clears its privileges and,
+ * the effective ids changing, its dumpable flag), sets the flag when
+ * `dumpable` is 0 or 1 (-1 leaves it as the change left it), says so on
+ * `ready` and waits until every write end of `go` is closed (it closes
+ * its own copy, `go_w`, first). */
 static long uid1000_target(int dumpable, int ready, int go, int go_w)
 {
     long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
     if (c == 0) {
         sc1(LX_close, go_w);
-        CHILD_CHECK(sc3(LX_setresgid, 1000, 1000, 1000) == 0 && sc3(LX_setresuid, 1000, 1000, 1000) == 0, 2);
-        CHILD_CHECK(sc2(LX_prctl, LX_PR_SET_DUMPABLE, dumpable) == 0, 3);
-        CHILD_CHECK(sc3(LX_write, ready, "r", 1) == 1, 4);
+        /* The outcome goes on `ready` whatever it is: a target that died
+         * silently would leave the parent waiting for its byte forever. */
+        char res = 'r';
+        if (sc3(LX_setresgid, 1000, 1000, 1000) != 0 || sc3(LX_setresuid, 1000, 1000, 1000) != 0)
+            res = '2';
+        else if (dumpable < 0 ? sc2(LX_prctl, LX_PR_GET_DUMPABLE, 0) != 0   /* cleared by the change, as Linux's */
+                              : sc2(LX_prctl, LX_PR_SET_DUMPABLE, dumpable) != 0)
+            res = '3';
+        CHILD_CHECK(sc3(LX_write, ready, &res, 1) == 1, 4);
+        if (res != 'r')
+            lx_exit(res - '0');
         char x;
         sc3(LX_read, go, &x, 1);   /* until the parent closes it */
         lx_exit(0);
@@ -751,9 +761,10 @@ static long uid1000_target(int dumpable, int ready, int go, int go_w)
 /*
  * Shell completeness S3: who may look inside another process -- its
  * environ, and its cwd, root and exe links (procfs P5, Linux's ptrace read
- * check). A reader of uid 1000 without privileges is refused a
- * non-dumpable uid-1000 process's environment and cwd (EACCES) and reads a
- * dumpable one's; a root process is not even visible to it (ENOENT, P1).
+ * check). A reader of uid 1000 without privileges is refused the
+ * environment and cwd of a process that dropped from root to uid 1000
+ * (the change cleared its dumpable flag: EACCES), and reads those of one
+ * that set the flag again; a root process is not even visible to it (ENOENT, P1).
  * The process itself always may.
  */
 static void inspect_tests(long pid)
@@ -765,11 +776,12 @@ static void inspect_tests(long pid)
     CHECKV(sc4(LX_readlinkat, LX_AT_FDCWD, "/proc/self/exe", lnk, sizeof(lnk)) > 0, 0);
     int ready[2], go[2];
     CHECKV(sc2(LX_pipe2, ready, 0) == 0 && sc2(LX_pipe2, go, 0) == 0, 0);
-    long hidden = uid1000_target(0, ready[1], go[0], go[1]);
+    long hidden = uid1000_target(-1, ready[1], go[0], go[1]);   /* dropped from root, flag untouched */
     long open_ = uid1000_target(1, ready[1], go[0], go[1]);
     CHECKV(hidden > 0 && open_ > 0, hidden);
     char x[2];
     CHECKV(sc3(LX_read, ready[0], x, 1) == 1 && sc3(LX_read, ready[0], x + 1, 1) == 1, 0);
+    CHECKV(x[0] == 'r' && x[1] == 'r', (x[0] << 8) | x[1]);   /* both set up; '3': the flag was not as wanted */
     long r = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
     if (r == 0) {
         sc1(LX_close, go[1]);

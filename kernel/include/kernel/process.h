@@ -498,9 +498,11 @@ bool process_space_usage(struct process *p, uint64_t *mapped_pages, uint64_t *re
 /* `p`'s exec record, referenced (exec_record_put), or NULL. */
 struct exec_record *process_exec_record(struct process *p);
 
+#if CONFIG_DEBUG
 /* Test-only, debug builds: exec records alive now (the proc-exit-read
  * self-test's leak check). */
 unsigned exec_record_live(void);
+#endif
 
 /* Credentials of the calling process (kernel/cred.h rules; -1 keeps an id). */
 int process_setresuid(int64_t ruid, int64_t euid, int64_t suid);

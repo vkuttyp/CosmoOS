@@ -82,21 +82,24 @@ eth0's counters, both routes, dropbear's listener and the gateway.
 process's `environ`, and its `cwd`, `root` and `exe` links, are read by
 the process itself, by a holder of `PRIV_PROC`, or by a reader whose
 effective uid and gid are all three of the target's ids while the target
-is dumpable (`PR_SET_DUMPABLE`); anyone else who can see the process (P1)
+is dumpable (`PR_SET_DUMPABLE`, which a change of the effective uid or
+gid clears, as on Linux); anyone else who can see the process (P1)
 is refused with `EACCES` -- at the open for `environ`, which stays listed
 and `stat`able, and at `readlink` for the links. (Shell completeness S3.)
 What is read is the kernel's own record (the exec record: envp and the
 executable's traversed name), never the process's memory, which can be
 torn down under a reader.
 
-Check: `lxtest`'s inspection section forks two processes of uid 1000, one
-non-dumpable and one dumpable, and a reader of uid 1000 without
-privileges: the non-dumpable one's `environ` is `EACCES` and its `cwd`
-link `EACCES` while its `status` opens, the dumpable one's `environ` and
-`cwd` read, and root's `environ` is `ENOENT` (P1); then the root parent,
-with `PRIV_PROC`, opens the non-dumpable one's `environ`. BusyBox's
-scripted test reads a process's own `environ` (a variable `env` set),
-`exe` (`/bin/busybox`), `cwd` and `root`, and requires `priv -u 1000 cat
-/proc/1/environ` to fail. Confirmed against the bug: with the dumpable
+Check: `lxtest`'s inspection section forks two processes that drop from
+root to uid 1000 -- one leaving the flag as the change left it (it must
+read 0), one setting it again -- and a reader of uid 1000 without
+privileges: the first one's `environ` is `EACCES` and its `cwd` link
+`EACCES` while its `status` opens, the second one's `environ` and `cwd`
+read, and root's `environ` is `ENOENT` (P1); then the root parent, with
+`PRIV_PROC`, opens the first one's `environ`. BusyBox's scripted test
+reads a process's own `environ` (a variable `env` set), `exe`
+(`/bin/busybox`), `cwd` and `root`, requires `priv -u 1000 cat
+/proc/1/environ` to fail, and reads a uid-1000 `sleep`'s `environ` as root
+with `sys_admin` dropped (and nothing with `proc` dropped too). Confirmed against the bug: with the dumpable
 test removed from the rule, the reader's `EACCES` check fails (its exit
 status 3) and `LINUXTEST: FAIL`.

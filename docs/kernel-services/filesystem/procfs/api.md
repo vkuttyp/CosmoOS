@@ -18,7 +18,7 @@ off one.
 | `/proc/<pid>/limits` | file, 0444 | one `name: value` line per `COSMO_RLIMIT_*` |
 | `/proc/<pid>/stat` | file, 0444 | Linux's record (proc(5)) through field 44: pid, `(name)`, state `R`, `S`, `T` or `Z`, ppid, pgid, sid, tty_nr (Linux's number for the session's controlling terminal: the console 5,1, `/dev/pts/N` 136,N; 0 for none), tpgid (its foreground group, -1 for none), utime (all cpu time; stime 0), priority 20, nice 0, num_threads, starttime, vsize (bytes) and rss (pages) of the process's space (0 once it is gone), processor; times in 1/100 s; page faults 0 |
 | `/proc/<pid>/cmdline` | file, 0444 | argv, each string NUL-terminated, the first 256 bytes |
-| `/proc/<pid>/environ` | file, 0400, the process's own | envp as exec gave it, each string NUL-terminated, the first 4095 bytes; opened only under P5 (`EACCES` otherwise); its size is 0 until opened |
+| `/proc/<pid>/environ` | file, 0444, the process's own (P5 at the open is the rule) | envp as exec gave it, each string NUL-terminated, the first 4095 bytes; opened only under P5 (`EACCES` otherwise); its size is 0 until opened |
 | `/proc/<pid>/cwd` | symbolic link | the working directory's path; under P5 (`EACCES`); `ENOENT` for an exited process or one whose root or mounts are not the reader's |
 | `/proc/<pid>/root` | symbolic link | `/`; the same rules |
 | `/proc/<pid>/exe` | symbolic link | the executable's traversed name from its exec (`/bin/sh` is `/bin/busybox`); the same rules, and `ENOENT` for an image from the boot archive |
@@ -27,7 +27,7 @@ off one.
 | `/proc/loadavg` | file, 0444 | the 1, 5 and 15 minute averages, `running/threads`, the last pid |
 | `/proc/uptime` | file, 0444 | seconds since boot and the CPUs' idle seconds summed, to 1/100 s |
 | `/proc/version` | file, 0444 | `Linux version`, uname's release (`6.0.0-cosmo`), the compiler in parentheses, then uname's version (`CosmoOS`, its version, the build) (shell completeness S3) |
-| `/proc/cpuinfo` | file, 0444 | a block per online CPU: `processor\t: N`, then the boot CPU's identification in Linux's names -- x86-64 `vendor_id`, `cpu family`, `model`, `model name`, `stepping`; AArch64 `CPU implementer`, `CPU architecture`, `CPU variant`, `CPU part`, `CPU revision` -- and a blank line |
+| `/proc/cpuinfo` | file, 0444, beyond a page on a machine of more than a few dozen CPUs | a block per online CPU: `processor\t: N`, then the boot CPU's identification in Linux's names -- x86-64 `vendor_id`, `cpu family`, `model`, `model name`, `stepping`; AArch64 `CPU implementer`, `CPU architecture`, `CPU variant`, `CPU part`, `CPU revision` -- and a blank line |
 | `/proc/mounts` | file, 0444 | one line per mount the reader's namespace sees, root first: source (`/dev/<disk>` or the filesystem's name), path (space, tab, newline and backslash as `\ooo`), type, `rw` or `ro`, `0 0` |
 | `/proc/net` | dir, 0555 | `.`, `..` (`/proc`), and the files below (shell completeness S1) |
 | `/proc/net/dev` | file, 0444 | Linux's two header lines, then one line per interface: received bytes, packets, errors, drops, then 0 for fifo, frame, compressed and multicast; the same for transmit (colls, carrier, compressed 0) |
@@ -71,7 +71,7 @@ pid that fails it is `ENOENT` rather than `EACCES`.
 | `EINVAL` | mounting with a block device |
 | `ENOMEM` | no memory for a vnode or a listing |
 
-Nothing here is writable: the files are `0444` (`environ` `0400`) and the directories have
+Nothing here is writable: the files are `0444` and the directories have
 no `create`, `mkdir`, `unlink` or `rename`, so a write is `ENOTSUP` from
 the VFS.
 

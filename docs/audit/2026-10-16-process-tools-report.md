@@ -91,8 +91,10 @@ The acceptance, in CI on both architectures:
   non-zero `VmSize` and `VmRSS`; `free`'s total is `sysctl`'s exactly and
   its free figure within 2 MiB of `sysctl vm.pages_free` read just before;
   `uptime`; `/bin/kill -l`; a process's own `environ`, `exe`, `cwd` and
-  `root`; `priv -u 1000 -- cat /proc/1/environ` refused; `version` against
-  `uname -r` and `cpuinfo` against `hw.ncpu`. 152 checks in all.
+  `root`; `priv -u 1000 -- cat /proc/1/environ` refused; a uid-1000
+  process's `environ` read with `sys_admin` dropped and refused with `proc`
+  dropped too; `version` against `uname -r` and `cpuinfo` against
+  `hw.ncpu`. 154 checks in all (152 before review).
 - **`test-net-login` stage h** (job `net-login`): on the installed system,
   `ps -o pid,ppid,stat,comm` lists init, `dropbear` and the console shell
   with the pids and states known without `/proc` (`$$`, `$PPID`, and the
@@ -154,6 +156,29 @@ New features are proven by their acceptance test; no probe (AGENTS.md).
   read) returned without freeing it. `c15afcbe` frees it on every failure,
   and the matrix was run again in full.
 - **Branch CI**: pending at the time of writing; the PR records the run.
+
+## Review
+
+Qodo and Codex, on `74ce9a95`; all seven distinct findings were real, and
+the review commit fixes them:
+
+| Finding | Fix |
+|---|---|
+| A change of the effective uid or gid left the dumpable flag set, so a root process that dropped to uid N was readable by every uid-N process, root-time environment included (both reviewers; my test hid it by setting the flag after the change) | `process_setresuid`/`setresgid` clear it, as Linux's `commit_creds` does; `lxtest`'s first target now leaves the flag alone and must read 0 |
+| `environ`'s 0400 mode had the VFS refuse a `PRIV_PROC` holder of another uid without `PRIV_SYS_ADMIN` before the open hook (both) | mode 0444; the hook is the whole rule; `ash.sh`'s `environ-privproc` |
+| The inspection rule read the target's ids without its lock | read with the flag under `p->lock` |
+| `exec_record_live` had a release stub, a test seam in release builds | declaration and definition under `CONFIG_DEBUG` (and `procfs_texts_live`'s declaration); `llvm-nm`: in the debug kernel, absent from the release one |
+| `cpuinfo` was cut at a page, about two dozen CPUs | rendered into 512 bytes per online CPU past a page |
+| `status` read `umask` non-atomically beside atomic writers | an atomic load |
+| An explicit global root was not the same root as the implicit one, so the links were `ENOENT` | both sides compared as the vnode and namespace they resolve against |
+| fork took the exec record in a second hold of the parent's lock, after its image fields | one hold, as exec publishes them |
+
+Both new tests were checked against their bugs: with the flag clearing
+removed, `lxtest` reports the first target's `3` (`LINUXTEST: FAIL x[0]
+== 'r' && x[1] == 'r'`), and with the mode back at 0400,
+`environ-privproc` reads nothing. The mutation of the clearing first hung
+`lxtest` (the failing target exited before writing its byte, 240 s
+timeout); the targets now report every outcome.
 
 ## Recorded instead of done
 

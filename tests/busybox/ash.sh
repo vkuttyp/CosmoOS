@@ -331,6 +331,16 @@ expect root / "$(readlink /proc/self/root)"
 # Another user's process does not exist for an unprivileged one (P1), so
 # neither does its environment.
 expect environ-cross 1 "$(priv -u 1000 -- cat /proc/1/environ 2>&1 | grep -c 'No such file')"
+# PRIV_PROC is the rule (P5), not PRIV_SYS_ADMIN: root without sys_admin
+# reads a uid-1000 process's environment, and without proc too it cannot.
+priv -u 1000 -- sleep 64 &
+pp=$!   # priv, which spawns the sleep as its child
+up=
+for i in 1 2 3 4 5 6 7 8 9 10; do up=$(pgrep -P $pp); [ -n "$up" ] && break; sleep 0.1; done
+expect environ-privproc 1 "$(priv -d sys_admin -- cat /proc/$up/environ | tr '\0' '\n' | grep -c '^PATH=')"
+expect environ-noprivproc 0 "$(priv -d sys_admin,proc -- cat /proc/$up/environ 2>/dev/null | wc -c)"
+kill $up
+wait
 # version and cpuinfo: uname's release, a block per CPU.
 expect version "$(uname -r)" "$(cut -d' ' -f3 /proc/version)"
 expect cpuinfo "$(sysctl hw.ncpu | awk '{ print $NF }')" "$(grep -c '^processor' /proc/cpuinfo)"

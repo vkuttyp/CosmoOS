@@ -293,7 +293,7 @@ Roadmap M3's acceptance: BusyBox ash is the shell. One boot of the image
 (release builds in CI, job `busybox`, both architectures); at the
 console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
 
-- **`ash.sh`, the scripted test**: 152 checks, each `BBTEST: ok NAME` or
+- **`ash.sh`, the scripted test**: 154 checks, each `BBTEST: ok NAME` or
   `BBTEST: FAIL NAME: want [..] got [..]`, ending `BBTEST: PASS`. The
   shell's features: a pipeline, `>`/`>>`/`<`, `2>` and `2>&1`, command
   substitution nested and with backquotes, a subshell's variables, `$?`
@@ -342,7 +342,9 @@ console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
   `KILL` and `kill -l` lists `HUP`; `env S3TAG=s3 cat /proc/self/environ`
   holds the variable, `/proc/self/exe` of `readlink` is `/bin/busybox`,
   `cwd` is `/tmp` after `cd /tmp`, `root` is `/`; `priv -u 1000 -- cat
-  /proc/1/environ` says `No such file` (P1); `/proc/version`'s third word
+  /proc/1/environ` says `No such file` (P1); a uid-1000 `sleep` (under
+  `priv -u 1000`)'s `environ` is read as root with `sys_admin` dropped
+  (`PRIV_PROC` is the rule) and is empty with `proc` dropped too; `/proc/version`'s third word
   is `uname -r`, and `/proc/cpuinfo` has `hw.ncpu` `processor` lines.
 - **ash's history** (shell completeness S2): `sh` at the console, a
   command unique to the run, `exit`; `/root/.ash_history` must hold it,

@@ -22,6 +22,7 @@
 #include <kernel/handle.h>
 #include <kernel/tty.h>
 #include <kernel/kmalloc.h>
+#include <kernel/mountns.h>
 #include <kernel/net/procnet.h>
 #include <kernel/percpu.h>
 #include <kernel/pagecache.h>
@@ -66,9 +67,10 @@ enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS =
 
 /* Rendered text is at most this, one page: a status block is a few
  * hundred bytes, /proc/stat a line per CPU, /proc/mounts a line per
- * mount (a listing longer than this ends at the last whole line). A
- * /proc/net file is the exception: a line per socket, up to
- * PROCNET_TEXT_MAX. */
+ * mount (a listing longer than this ends at the last whole line). Two
+ * exceptions: a /proc/net file, a line per socket, up to
+ * PROCNET_TEXT_MAX; and cpuinfo, a block per online CPU
+ * (proc_text_cap). */
 #define PROC_TEXT_MAX PAGE_SIZE
 
 static const struct vnode_ops proc_root_ops;
@@ -226,7 +228,7 @@ static int render_status(struct process *p, char *out, size_t n)
                          "PPid:\t%u\n"
                          "Uid:\t%u\t%u\t%u\t%u\n"
                          "Gid:\t%u\t%u\t%u\t%u\n",
-                         p->name, (unsigned)p->umask, state, word, p->pid, p->pid, p->parent_pid, c->ruid, c->euid,
+                         p->name, (unsigned)__atomic_load_n(&p->umask, __ATOMIC_RELAXED), state, word, p->pid, p->pid, p->parent_pid, c->ruid, c->euid,
                          c->suid, c->euid, c->rgid, c->egid, c->sgid, c->egid);
     if (space && used >= 0 && (size_t)used < n)
         used += ksnprintf(out + used, n - (size_t)used,
@@ -547,6 +549,20 @@ static int net_text(enum procnet_file f, struct proc_text **out)
     return t != NULL ? 0 : -ENOMEM;
 }
 
+/* The buffer a file renders into: a page, except cpuinfo, a block per
+ * online CPU that a page does not hold past about two dozen of them. */
+#define PROC_CPUINFO_BLOCK 512u   /* one CPU's block: x86-64's is about 170 bytes */
+static size_t proc_text_cap(enum proc_kind kind)
+{
+    if (kind != PROC_CPUINFO)
+        return PROC_TEXT_MAX;
+    size_t online = 0;
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
+        if (cpu_online(c))
+            online++;
+    return online * PROC_CPUINFO_BLOCK > PROC_TEXT_MAX ? online * PROC_CPUINFO_BLOCK : PROC_TEXT_MAX;
+}
+
 /* Instantiate one of a process's files, rendering it now. */
 static int proc_file(struct mount *mnt, pid_t pid, enum proc_kind kind, struct vnode **out)
 {
@@ -557,15 +573,16 @@ static int proc_file(struct mount *mnt, pid_t pid, enum proc_kind kind, struct v
         if (rc)
             return rc;
     } else {
-        t = kmalloc(sizeof(*t) + PROC_TEXT_MAX, 0);
+        size_t cap = proc_text_cap(kind);
+        t = kmalloc(sizeof(*t) + cap, 0);
         if (t == NULL)
             return -ENOMEM;
-        int len = render(ino, t->text, PROC_TEXT_MAX);
+        int len = render(ino, t->text, cap);
         if (len < 0) {
             kfree(t);
             return len;
         }
-        t->len = (size_t)len < PROC_TEXT_MAX ? (size_t)len : PROC_TEXT_MAX - 1;   /* ksnprintf returns what it wanted */
+        t->len = (size_t)len < cap ? (size_t)len : cap - 1;   /* ksnprintf returns what it wanted */
     }
     struct vnode *vn = proc_vnode(mnt, ino, VNODE_REG, 0444, &proc_file_ops);
     if (vn == NULL) {
@@ -596,10 +613,16 @@ static bool proc_may_inspect(struct process *p)
     const struct credentials *c = cred_current();
     if (cred_has(c, PRIV_PROC))
         return true;
+    /* The target's ids and its flag from one hold of its lock, which is
+     * what setresuid and setresgid change them under (and the flag with
+     * them): never a tuple that did not exist. */
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     const struct credentials *t = &p->cred;
     bool ids = c->euid == t->ruid && c->euid == t->euid && c->euid == t->suid && c->egid == t->rgid &&
                c->egid == t->egid && c->egid == t->sgid;
-    return ids && __atomic_load_n(&p->dumpable, __ATOMIC_RELAXED) != 0;
+    bool dumpable = __atomic_load_n(&p->dumpable, __ATOMIC_RELAXED) != 0;
+    spin_unlock_irqrestore(&p->lock, s);
+    return ids && dumpable;
 }
 
 /*
@@ -656,10 +679,14 @@ static int proc_environ(struct mount *mnt, pid_t pid, struct vnode **out)
         return -ESRCH;
     uint32_t uid = p->cred.euid, gid = p->cred.egid;
     process_put(p);
-    struct vnode *vn = proc_vnode(mnt, PROC_INO(pid, PROC_ENVIRON), VNODE_REG, 0400, &proc_environ_ops);
+    /* 0444, not Linux's 0400: the VFS checks the mode before the open
+     * hook, and a 0400 file would refuse a PRIV_PROC holder of another
+     * uid there (without PRIV_SYS_ADMIN) before P5 could admit it. The
+     * hook is the whole rule. */
+    struct vnode *vn = proc_vnode(mnt, PROC_INO(pid, PROC_ENVIRON), VNODE_REG, 0444, &proc_environ_ops);
     if (vn == NULL)
         return -ENOMEM;
-    vn->uid = uid;   /* the process's own, 0400, as Linux's */
+    vn->uid = uid;   /* the process's own, as Linux's */
     vn->gid = gid;
     *out = vn;
     return 0;
@@ -671,7 +698,15 @@ static int proc_environ(struct mount *mnt, pid_t pid, struct vnode **out)
 static bool proc_same_root(const struct process *p)
 {
     const struct process *me = process_current();
-    return (me ? me->root : NULL) == p->root && (me ? me->mntns : NULL) == p->mntns;
+    /* A NULL root is the global root and a NULL namespace the initial
+     * one (process.h): compare what each resolves against, so an
+     * explicit global root is the same as the implicit one. */
+    struct vnode *global = vfs_root();
+    const struct vnode *mine = me && me->root ? me->root : global, *theirs = p->root ? p->root : global;
+    vnode_put(global);   /* pinned by the root mount: only its address is compared */
+    const struct mount_ns *myns = me && me->mntns ? me->mntns : mountns_initial();
+    const struct mount_ns *theirns = p->mntns ? p->mntns : mountns_initial();
+    return mine == theirs && myns == theirns;
 }
 
 /*

@@ -162,12 +162,22 @@ its ptrace read check; there is no ptrace here, and the rule is that
 check's (P5): the process itself; a holder of `PRIV_PROC`; or a reader
 whose effective uid and gid are all three of the target's ids, while the
 target is dumpable. A process that cleared `PR_SET_DUMPABLE` -- OpenSSH's
-`sftp-server` does -- keeps these from its own user. P1 has already
+`sftp-server` does -- keeps these from its own user, and so does one that
+changed its effective uid or gid: the change clears the flag, as Linux's
+`commit_creds` does, so a daemon that started as root and dropped to a
+user does not hand its root-time environment to that user (found in
+review). P1 has already
 decided whether the process is visible at all, so another user's process
 is `ENOENT` to an unprivileged reader, and a refusal of a visible one is
 `EACCES`. `environ` is checked when it is opened (the vnode's `open`), so
-it is listed and `stat`'ed like Linux's (0400, the process's own) and only
-reading it is refused; a link's `readlink` is.
+it is listed and `stat`'ed like Linux's (the process's own) and only
+reading it is refused; a link's `readlink` is. Its mode is 0444 where
+Linux's is 0400: the VFS checks the mode before the open hook, and 0400
+would turn away a `PRIV_PROC` holder of another uid that lacks
+`PRIV_SYS_ADMIN` before P5 could admit it (found in review). The hook is
+the whole rule, and the target's ids and flag are read under its lock,
+which is what the id changes hold. `cpuinfo` is rendered into a block per
+online CPU (512 bytes each) where it outgrows a page.
 
 The environment is the one exec gave the process, cut at 4095 bytes
 (`PROCESS_ENVIRON_MAX`), and the executable is the name the exec's walk

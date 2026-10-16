@@ -1527,6 +1527,13 @@ a program rewriting its own stack strings changes Linux's file and not
 this one. An image from the boot archive (init, and what the kernel's own
 tests start) names no file, and its record's name is empty.
 
+**The dumpable flag** (`struct process.dumpable`, Linux's
+`PR_SET_DUMPABLE`) is 1 when a process is made and at exec, inherited by
+fork, and cleared by `process_setresuid` and `process_setresgid` when the
+effective uid or gid changes, as Linux's `commit_creds` clears it with
+`suid_dumpable` 0 (shell completeness S3, found in review): procfs P5
+lets a reader of the target's ids look inside only while it is set.
+
 **A process's memory sizes**, for `/proc` (`process_space_usage`): the
 pages its regions cover (`mapped_pages`, which `COSMO_RLIMIT_AS` counts)
 and the frames resident in them (`anon_pages + file_pages`), read under
