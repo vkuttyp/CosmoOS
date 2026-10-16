@@ -289,7 +289,11 @@ the inventory.
   refusals; `test-busybox` (job `busybox`) the rest, both architectures;
   `lxtest`'s power and clock section in every debug boot. A signal to init
   needs `PRIV_SYS_ADMIN` too (security S20), since BusyBox's `reboot`
-  and `halt` signal init
+  and `halt` signal init. On Parallels Desktop (the developer's run, as
+  P1's was) `reboot` restarted the installed system through PSCI
+  `SYSTEM_RESET`, back at its prompt in 1.8 s, and was refused with
+  `sys_admin` dropped; that machine has no RTC this kernel finds, so
+  `hwclock` does not apply there
   ([report](audit/2026-10-16-power-clock-report.md)).
 - [ ] **S6 Mounting.** The Linux `mount` and `umount2` doors (cosmofs,
   ramfs and procfs, with the flags the native mount supports), each under

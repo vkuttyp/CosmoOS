@@ -14,7 +14,7 @@ subsystems they translate to; the rules are in `invariants.md`.
 | `kernel/arch/aarch64/vectors.S`, `trap.c`, `user.c` | `el0_sync` vector, `handle_sync` → `handle_syscall`; PAN window; `arch_user_regs_restart_syscall` |
 | `kernel/arch/*/uaccess.S` | `arch_copy_user_raw`, the copy whose user-touching instructions carry exception-table entries |
 | `kernel/syscall/syscall.c` | `syscall_dispatch`, `syscall_allowed`, `syscall_filter_install`, the global counters |
-| `kernel/syscall/native.c` | the native table `native_table[SYS_COUNT]`, `personality_native`, 91 of its 105 handlers, the bounce, the shared `syscall_handle_*`/`syscall_obj_*` I/O bodies |
+| `kernel/syscall/native.c` | the native table `native_table[SYS_COUNT]`, `personality_native`, 92 of its 106 handlers, the bounce, the shared `syscall_handle_*`/`syscall_obj_*` I/O bodies |
 | `kernel/syscall/personality.c` | `personality_for_elf`: the list of personalities and the selection rule |
 | `kernel/syscall/uaccess.c` | `user_range_ok`, `copy_from_user`, `copy_to_user`, `strncpy_from_user` |
 | `kernel/syscall/uaccesstest.c` | self-tests `uaccess`, `uaccess-guard` |
@@ -22,8 +22,9 @@ subsystems they translate to; the rules are in `invariants.md`.
 | `kernel/process/native_signal.c` | the four native signal handlers and `native_signal_frame` |
 | `compat/linux/syscalls.c` | `personality_linux` and its table (`docs/compat/linux/`) |
 
-The native table has an entry for every number below `SYS_COUNT` (105
-designated initialisers for 105 numbers as of roadmap M5).
+The native table has an entry for every number below `SYS_COUNT` (106
+designated initialisers for 106 numbers as of shell completeness S5,
+which added `SYS_reboot`).
 
 ## Data structures
 
@@ -41,7 +42,7 @@ M3 lifecycle and initial-stack hooks (`claims_elf`, `init`, `release`,
 | | `personality_native` | `personality_linux` |
 |---|---|---|
 | Table | `static const native_table[SYS_COUNT]`, compile-time | `static g_table[LX_NR_MAX]` (512), filled from `linux_table` on the first Linux process, empty slots `lx_unknown` |
-| `count` | `SYS_COUNT` (105) | `LX_NR_MAX` (512) |
+| `count` | `SYS_COUNT` (106) | `LX_NR_MAX` (512) |
 | Always allowed | `SYS_exit`, `SYS_sigreturn`, `SYS_thread_exit`, `SYS_set_tls` | `LX_exit`, `LX_exit_group`, `LX_rt_sigreturn` |
 | Selected by | the CosmoOS ELF note, or a kernel-created process | every other ELF |
 

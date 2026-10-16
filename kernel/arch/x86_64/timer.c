@@ -6,6 +6,7 @@
  * 0xFFFFFFFF) are sampled before and after. Both frequencies follow.
  */
 
+#include <kernel/acpi.h>
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
@@ -185,19 +186,43 @@ static void cmos_write(uint8_t reg, uint8_t v)
     outb(CMOS_DATA, v);
 }
 
+/* The FADT's CENTURY (offset 108): the CMOS index of the century register,
+ * 0 for none (ACPI); QEMU's q35 names 0x32. With no FADT, none. A century
+ * written to a register the firmware did not name could overwrite its
+ * settings (found in review), so the write skips it as the read does. */
+static uint8_t cmos_century_reg(void)
+{
+    const struct acpi_sdt_header *fadt = acpi_find_table("FACP");
+    if (fadt == NULL || fadt->length <= 108)
+        return 0;
+    uint8_t r = ((const uint8_t *)fadt)[108];
+    return r >= 0x0e && r < 0x80 ? r : 0;   /* past the clock's own registers, inside the bank */
+}
+
+/* IAPC_BOOT_ARCH (offset 109) bit 5, ACPI 5.0a's "CMOS RTC not present". */
+bool arch_rtc_present(void)
+{
+    const struct acpi_sdt_header *fadt = acpi_find_table("FACP");
+    uint16_t flags = 0;
+    if (fadt != NULL && fadt->length >= 111)
+        memcpy(&flags, (const uint8_t *)fadt + 109, 2);
+    return !(flags & (1u << 5));
+}
+
 /* The index register makes every access two port writes: one CPU at a
  * time, from boot's read to hwclock's (shell completeness S5). */
 static spinlock_t g_cmos_lock = SPINLOCK_INIT("cmos");
 
 bool arch_rtc_read_epoch(uint64_t *seconds)
 {
+    const uint8_t century_reg = cmos_century_reg();
     arch_irq_state_t irq = spin_lock_irqsave(&g_cmos_lock);
     /* Wait for an update cycle to end (bit 7 of status A), then read twice
      * until the two reads agree. */
     for (unsigned spin = 0; spin < 100000 && (cmos_read(0x0a) & 0x80); spin++)
         arch_cpu_relax();
     uint8_t raw[7], again[7];
-    static const uint8_t regs[7] = { 0x00, 0x02, 0x04, 0x07, 0x08, 0x09, 0x32 };
+    const uint8_t regs[7] = { 0x00, 0x02, 0x04, 0x07, 0x08, 0x09, century_reg ? century_reg : 0x09 };
     for (unsigned tries = 0; tries < 8; tries++) {
         for (unsigned i = 0; i < 7; i++)
             raw[i] = cmos_read(regs[i]);
@@ -216,7 +241,7 @@ bool arch_rtc_read_epoch(uint64_t *seconds)
     unsigned day = binary ? raw[3] : from_bcd(raw[3]);
     unsigned mon = binary ? raw[4] : from_bcd(raw[4]);
     unsigned year = binary ? raw[5] : from_bcd(raw[5]);
-    unsigned century = binary ? raw[6] : from_bcd(raw[6]);
+    unsigned century = century_reg == 0 ? 0 : binary ? raw[6] : from_bcd(raw[6]);
     if (!hour24) {
         hour %= 12;
         if (pm)
@@ -233,7 +258,7 @@ bool arch_rtc_read_epoch(uint64_t *seconds)
 
 /* The MC146818's SET bit (status B bit 7) holds the update cycle off while
  * the fields are written, in the encoding status B names, as the read
- * decodes them; the century register is QEMU's and the PC's 0x32. */
+ * decodes them; the century goes where the FADT says, or nowhere. */
 int arch_rtc_write_epoch(uint64_t seconds)
 {
     int64_t y;
@@ -242,6 +267,7 @@ int arch_rtc_write_epoch(uint64_t seconds)
     unsigned rem = (unsigned)(seconds % 86400), hour = rem / 3600, min = rem / 60 % 60, sec = rem % 60;
     if (y < 1970 || y > 2299)
         return -EINVAL;
+    const uint8_t century_reg = cmos_century_reg();
     arch_irq_state_t irq = spin_lock_irqsave(&g_cmos_lock);
     uint8_t status_b = cmos_read(0x0b);
     bool binary = (status_b & 0x04) != 0, hour24 = (status_b & 0x02) != 0;
@@ -252,9 +278,9 @@ int arch_rtc_write_epoch(uint64_t seconds)
         h = hour % 12 == 0 ? 12 : hour % 12;
     }
     const unsigned vals[7] = { sec, min, h, day, mon, (unsigned)(y % 100), (unsigned)(y / 100) };
-    static const uint8_t regs[7] = { 0x00, 0x02, 0x04, 0x07, 0x08, 0x09, 0x32 };
+    const uint8_t regs[7] = { 0x00, 0x02, 0x04, 0x07, 0x08, 0x09, century_reg };
     cmos_write(0x0b, (uint8_t)(status_b | 0x80));
-    for (unsigned i = 0; i < 7; i++) {
+    for (unsigned i = 0; i < (century_reg ? 7u : 6u); i++) {
         uint8_t v = binary ? (uint8_t)vals[i] : to_bcd(vals[i]);
         if (i == 2 && pm)
             v |= 0x80;

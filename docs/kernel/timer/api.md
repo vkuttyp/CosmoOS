@@ -89,8 +89,14 @@ Constants: `CONFIG_HZ` = 250, `NS_PER_SEC`, `TICK_NS` = 4 000 000.
 
 ### `int arch_rtc_write_epoch(uint64_t seconds)` (`arch/timer.h`, S5)
 - Set the RTC: 0, `-ENODEV` with no RTC, `-EINVAL` for a time it cannot
-  hold (x86-64: 1970..2299; AArch64: 32 bits of seconds). Thread context;
-  serialised with `arch_rtc_read_epoch`.
+  hold (x86-64: 1970..2299, the century only to the FADT's register;
+  AArch64: 32 bits of seconds). Thread context; serialised with
+  `arch_rtc_read_epoch`.
+
+### `bool arch_rtc_present(void)` (`arch/timer.h`, S5)
+- Is there an RTC, whatever date it holds: x86-64 unless the FADT's
+  `IAPC_BOOT_ARCH` bit 5 ("CMOS RTC not present") is set; AArch64 where
+  the PL031 answers at QEMU virt's address. `/dev/rtc0` exists when true.
 
 ### `bool arch_rtc_read_epoch(uint64_t *seconds)` (`arch/timer.h`)
 - The architecture's one-shot RTC read; false when there is none.

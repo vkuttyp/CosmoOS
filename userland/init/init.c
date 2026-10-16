@@ -6057,6 +6057,12 @@ int main(int argc, char **argv)
     fflush(stdout);
     struct sigaction pa = { 0 };
     pa.sa_handler = shutdown_signal;
+    /* One request runs to its end: another arriving during its sync must
+     * not turn a restart into a power off (found in review). */
+    sigemptyset(&pa.sa_mask);
+    sigaddset(&pa.sa_mask, SIGTERM);
+    sigaddset(&pa.sa_mask, SIGUSR1);
+    sigaddset(&pa.sa_mask, SIGUSR2);
     sigaction(SIGUSR2, &pa, NULL);
     sigaction(SIGTERM, &pa, NULL);
     sigaction(SIGUSR1, &pa, NULL);

@@ -28,6 +28,10 @@ bool arch_rtc_read_epoch(uint64_t *seconds);
  * Thread context. arch_rtc_read_epoch may be called again after boot (the
  * device's RTC_RD_TIME); the two are serialised by the architecture. */
 int arch_rtc_write_epoch(uint64_t seconds);
+/* Is there an RTC, whatever it holds (S5's /dev/rtc0, which must exist to
+ * repair an RTC that reads an invalid date): x86-64 unless the FADT says
+ * "CMOS RTC not present"; AArch64 where the PL031 is found. */
+bool arch_rtc_present(void);
 /* Monotonic counter (TSC on x86-64) and its frequency. */
 uint64_t arch_clock_read(void);
 uint64_t arch_clock_hz(void);

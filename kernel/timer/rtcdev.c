@@ -7,9 +7,11 @@
  * (arch_rtc_read_epoch) and RTC_SET_TIME sets it (arch_rtc_write_epoch),
  * both as a struct rtc_time in UTC. Setting needs PRIV_SYS_ADMIN, the
  * privilege that sets the system clock, and is -EACCES without it, as
- * Linux's CAP_SYS_TIME check is. The node exists only where boot found an
- * RTC: QEMU's q35 and virt; not Parallels Desktop's AArch64 machine,
- * whose wall clock comes from the firmware.
+ * Linux's CAP_SYS_TIME check is. The node exists where there is an RTC
+ * (arch_rtc_present), whatever date it holds, so an RTC reading an invalid
+ * date can still be set (found in review): QEMU's q35 and virt; not
+ * Parallels Desktop's AArch64 machine, whose wall clock comes from the
+ * firmware.
  */
 
 #include <kernel/cred.h>
@@ -44,7 +46,7 @@ static int rtc_get(struct lx_rtc_time *tm)
 {
     uint64_t s;
     if (!arch_rtc_read_epoch(&s))
-        return -EIO;
+        return -EINVAL;   /* not a valid date, as Linux's rtc_read_time says */
     int64_t days = (int64_t)(s / 86400), y;
     unsigned m, d, rem = (unsigned)(s % 86400);
     time_civil_from_days(days, &y, &m, &d);
@@ -121,11 +123,9 @@ static const struct chrdev_ops rtc_ops = { .read = rtc_read, .write = rtc_write,
 
 void rtcdev_init(void)
 {
-    uint64_t s;
-    if (!arch_rtc_read_epoch(&s))
+    if (!arch_rtc_present())
         return;   /* no RTC: no node, and hwclock says it cannot open one */
-    struct vnode *vn;
-    int rc = ramfs_mkchr("/dev/rtc0", 0600, &rtc_ops, NULL, &vn);
+    int rc = ramfs_mkchr("/dev/rtc0", 0600, &rtc_ops, NULL, NULL);
     if (rc)
         kerror("rtc: /dev/rtc0: %d", rc);
     else

@@ -242,6 +242,14 @@ static vaddr_t pl031_map(void)
     return va;
 }
 
+bool arch_rtc_present(void)
+{
+    vaddr_t va = pl031_map();
+    if (va != 0)
+        vm_unmap_phys(va);
+    return va != 0;
+}
+
 /* RTCLR (offset 0x08), the load register: RTCDR counts on from what is
  * written. 32 bits of seconds: until 2106. */
 int arch_rtc_write_epoch(uint64_t seconds)

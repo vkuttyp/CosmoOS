@@ -725,14 +725,20 @@ def stage_power_clock(args, results, b):
     out = b.run("hwclock -u")
     need(out, r"\d\d:\d\d:\d\d", "hwclock -u reads the RTC back")
     start = len(b.text())
+    with b.lock:
+        raw_start = len(b.buf)
     b.proc.stdin.write(b"reboot\n")
     b.proc.stdin.flush()
     wait_text(b, r"reboot: restarting system", start, "the kernel's restart line")
     how = wait_text(b, r"reboot: restart through (.*)$", start, "the restart's method").group(1)
     b.deadline = time.monotonic() + args.timeout   # a second boot inside the same QEMU
     banner = wait_text(b, r"CosmoOS kernel", start, "a second kernel banner after reboot")
+    # Prompts before the second banner are the old boot's (its shell may
+    # print one after `reboot` returns); the new boot's first prompt may
+    # already be in, so count only up to the banner (found in review).
     with b.lock:
-        b.prompts_seen = b.buf.count(install_test.PROMPT)   # prompts before the restart are the old boot's
+        pos = b.buf.find(b"CosmoOS kernel", raw_start)
+        b.prompts_seen = b.buf[:pos].count(install_test.PROMPT)
     b.wait_prompt("the first prompt after reboot")
     after = b.text()[banner.start():]
     need(after, r"switched to the disk root", "the installed system again after reboot")

@@ -165,6 +165,27 @@ and then timeouts until BusyBox's `-q` alarm ended `ntpd` (status 142);
 two other servers answered every query, so that server was not
 investigated further.
 
+## Review
+
+Codex and Qodo, on `d5094d4a`. Fixed:
+
+| Finding | Fix |
+|---|---|
+| `ipi_halt` published `online = false` before its EOI, and `smp_stop_others` takes that as the answer and may reset at once: the reset could still find the IPI active (Codex) | the EOI first |
+| The century was written to CMOS register 0x32 whatever the FADT names, which on another machine could overwrite a firmware setting (Codex) | the FADT's `CENTURY` register for the read and the write; none when it is 0 |
+| `/dev/rtc0` was made only when the RTC read a valid date, so an RTC with a reset date could not be set (Codex) | made when `arch_rtc_present` says there is an RTC; `RTC_RD_TIME` of an invalid date is `-EINVAL` |
+| The reboot stage could discard the new boot's first prompt if it arrived before the count was taken (both) | the prompts counted up to the second banner only |
+| init's three shutdown signals did not mask each other, so a power off during a restart's sync could win (Qodo) | each blocks the other two while it runs |
+| `rtcdev_init` kept a vnode reference it never used (Qodo) | none asked for |
+| `docs/kernel/syscall/design.md` and `docs/libc/architecture.md` still said 105 calls and no wall clock (Qodo) | updated |
+
+Answered: an absolute `CLOCK_REALTIME` deadline already armed does not
+move when the clock is set (Qodo) -- recorded in inventory §15 before the
+review, not changed here. Codex asked that S5 stay unticked until the
+Parallels run is recorded; it is recorded above (the developer's run, as
+P1's was), and the box stays ticked. CosmoReview's "interrupts disabled
+and not restored" in `kernel_reboot` and its callers: it never returns.
+
 ## Validation
 
 - **The validation matrix**, on `afb80f37`, every step PASS; the boot
