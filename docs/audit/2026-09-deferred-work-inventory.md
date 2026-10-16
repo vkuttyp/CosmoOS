@@ -1251,3 +1251,12 @@ each; none is needed by M2's acceptance test.
 - `chroot` is refused to a process of more than one thread (P39), where
   Linux allows it; a threaded program that chroots must do it before its
   first `clone`.
+- A confined walk checks once, at its start, that it stands under its
+  root (`within_root`); a process outside the root that renames a
+  directory out from under a walk in progress can still let that walk's
+  `..` climb past the root. Linux's `chroot` has the same race; closing it
+  needs a per-mount rename sequence count that the walk re-checks and
+  retries on, as Linux's `openat2(RESOLVE_IN_ROOT)` does.
+- `fchown` (and `fchownat` with `AT_EMPTY_PATH`) on a pipe, socket or
+  other descriptor that is not a VFS file is `EBADF`; Linux changes the
+  anonymous inode's owner.

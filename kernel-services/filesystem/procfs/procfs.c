@@ -693,7 +693,7 @@ static int proc_environ(struct mount *mnt, pid_t pid, struct vnode **out)
 }
 
 /*
- * The `cwd` link's or the `root` link's target, if the reader stands where
+ * The `cwd`, `root` or `exe` link's target, if the reader stands where
  * `p` does -- the same root and the same mounts, so a path `p` holds names
  * the same file for the reader -- else -ENOENT. The root check and the
  * copy are one hold of `p->lock`, which chroot changes the root and the
@@ -713,7 +713,17 @@ static int proc_root_relative(struct process *p, enum proc_kind kind, char *buf,
     bool same = mine == (p->root ? p->root : global) && myns == theirns;
     if (kind == PROC_EXE && p->chrooted_since_exec)
         same = false;   /* the exec record's name was resolved in the root before the chroot */
-    if (same && kind == PROC_CWD)
+    /* exe: the record is read in the same hold as the root and the flag,
+     * so a chroot and an exec between them cannot pair the old root with
+     * the new record (found in review). exec swaps the record under the
+     * lock and puts the old one after it, so it is whole here. */
+    if (same && kind == PROC_EXE) {
+        const struct exec_record *r = p->exec_rec;
+        if (r != NULL && r->exe_len != 0)
+            strlcpy(buf, exec_record_exe(r), n);
+        else
+            same = false;
+    } else if (same && kind == PROC_CWD)
         strlcpy(buf, p->cwd_path_locked, n);
     else if (same)
         strlcpy(buf, "/", n);
@@ -745,15 +755,7 @@ static int link_target(enum proc_kind kind, pid_t pid, char *buf, size_t n)
     else if (kind == PROC_CWD || kind == PROC_ROOT_LINK)
         rc = proc_root_relative(p, kind, buf, n);
     else if (proc_root_relative(p, PROC_EXE, buf, n) != 0)
-        rc = -ENOENT;   /* exe: a name in another root names nothing here (the exec record is fixed per exec) */
-    else {
-        struct exec_record *r = process_exec_record(p);
-        if (r != NULL && r->exe_len != 0)
-            strlcpy(buf, exec_record_exe(r), n);
-        else
-            rc = -ENOENT;
-        exec_record_put(r);
-    }
+        rc = -ENOENT;   /* exe: a name in another root names nothing here, nor does an image without one */
     process_put(p);
     return rc != 0 ? rc : (int)strlen(buf);
 }

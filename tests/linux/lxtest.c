@@ -870,6 +870,14 @@ static void ownership_tests(void)
     CHECKV(sc5(LX_fchownat, LX_AT_FDCWD, "/tmp/lxown", 0, 0, 0x8000) == -22, 0);   /* an unknown flag */
     /* Linux's flags are an int: the register's upper half is not read. */
     CHECKV(sc5(LX_fchownat, LX_AT_FDCWD, "/tmp/lxown", -1, -1, 1L << 32) == 0, 0);
+    /* A chown that changes neither id still clears the set-id bits, as
+     * Linux's chown_common; set-group-ID without group execute stays. */
+    struct lx_stat ms;
+    CHECKV(sc2(LX_fchmod, fd, 06755) == 0 && sc3(LX_fchown, fd, -1, -1) == 0, 0);
+    CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxown", &ms, 0) == 0 && (ms.st_mode & 07777) == 0755, ms.st_mode);
+    CHECKV(sc2(LX_fchmod, fd, 06745) == 0 && sc3(LX_fchown, fd, -1, -1) == 0, 0);
+    CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxown", &ms, 0) == 0 && (ms.st_mode & 07777) == 02745, ms.st_mode);
+    CHECKV(sc2(LX_fchmod, fd, 0644) == 0, 0);
     /* A trailing slash enters the link's directory even with NOFOLLOW. */
     sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxodir.lnk", 0);
     sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/lxodir", 0755);

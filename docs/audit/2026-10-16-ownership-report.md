@@ -148,6 +148,21 @@ Its third pass found four more, all real:
 | P29's census and security S10 still said the root was fixed at spawn | both rewritten |
 | `lchown` on a link in a cosmofs snapshot reached `inode_sync` and failed `EIO` after changing the cached inode | `cfs_vnode_setattr` refuses a snapshot or `.snapshots` vnode with `EROFS`, as its writes are refused (and `vfs_chown` restores the vnode) |
 
+Its fourth pass, on `6f10b282`, found five. Three are fixed:
+
+| Finding | Fix |
+|---|---|
+| `/proc/<pid>/exe` checked the root and the chroot flag in one hold of the process's lock and fetched the exec record in another, so a chroot and an exec between them paired the old root with the new name | the record is read in the same hold (`proc_root_relative`); exec swaps it under the lock and puts the old one after |
+| `chown(path, -1, -1)` kept the set-id bits; Linux's `chown_common` clears them for every successful chown of a non-directory | cleared whatever the ids (set-group-ID without group execute still stays); `lxtest` |
+| `fchown` and `fchownat`'s `AT_EMPTY_PATH` changed the owner through a handle with no rights at all, so a handle delegated without `MANAGE` could still change it | both need `MANAGE` (`-EPERM` without it, as `setnonblock`), and so does `fchmod`, which had the same gap; every Linux open grants it |
+
+Two are recorded (inventory §14): a confined walk checks that it starts
+inside its root but a rename by a process outside can still move a
+directory out from under a walk in progress (Linux's `chroot` has the
+same race; `openat2`'s `RESOLVE_IN_ROOT` closes it with a rename
+sequence count and a retry); and `fchown` on a pipe or socket is `EBADF`
+where Linux changes the anonymous inode's owner.
+
 `vfs_setattr` (chmod) has the same check-before-lock and no-rollback
 shape; it is recorded (inventory §14), not changed here.
 
@@ -156,4 +171,6 @@ shape; it is recorded (inventory §14), not changed here.
 Inventory §14: no native `chown`/`chroot`; `chown` on procfs or devfs
 reads back only until the vnode is evicted (as `chmod`); `fchownat`
 through a directory descriptor needs its write right (as `fchmodat`); no
-`useradd`; supplementary groups only from `setgroups`.
+`useradd`; supplementary groups only from `setgroups`; `chroot` refused
+to a threaded process; a walk in progress racing a rename from outside
+the root; `fchown` on a pipe or socket.

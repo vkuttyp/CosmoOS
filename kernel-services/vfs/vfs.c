@@ -1348,9 +1348,10 @@ int vfs_chown(struct vnode *vn, uint32_t uid, uint32_t gid)
         vn->uid = uid;
     if (gid != VFS_ID_KEEP)
         vn->gid = gid;
-    /* Linux's ATTR_KILL_SUID and ATTR_KILL_SGID: a program's set-id bits
-     * do not follow it to a new owner or group. */
-    if ((uid != VFS_ID_KEEP || gid != VFS_ID_KEEP) && vn->type == VNODE_REG) {
+    /* Linux's ATTR_KILL_SUID and ATTR_KILL_SGID, which chown_common sets
+     * for every successful chown of a non-directory, -1, -1 included
+     * (found in review): a program's set-id bits do not survive a chown. */
+    if (vn->type == VNODE_REG) {
         vn->mode &= ~04000u;
         if (vn->mode & 0010u)
             vn->mode &= ~02000u;

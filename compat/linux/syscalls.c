@@ -342,6 +342,27 @@ static struct file *file_of(int h, unsigned rights)
     return f;
 }
 
+/*
+ * A file whose metadata the caller changes through a descriptor (fchmod,
+ * fchown, fchownat's AT_EMPTY_PATH): the handle needs MANAGE -- a change of
+ * how the object behaves, not of what it holds -- so a handle delegated
+ * without it cannot change the mode or the owner (found in review). Every
+ * Linux open grants MANAGE (HANDLE_RIGHT_OWNER). *err is -EPERM for a
+ * handle without the right, as sys_setnonblock, else -EBADF.
+ */
+static struct file *file_of_manage(int h, int *err)
+{
+    bool no_rights;
+    struct kobject *obj = handle_lookup_rights(&process_current()->handles, h, HANDLE_RIGHT_MANAGE, &no_rights);
+    *err = no_rights ? -EPERM : -EBADF;
+    if (obj == NULL)
+        return NULL;
+    struct file *f = file_from_kobject(obj);
+    if (f == NULL)
+        kobject_put(obj);
+    return f;
+}
+
 static struct socket *sock_of(int h, unsigned rights)
 {
     struct kobject *obj = handle_lookup(&process_current()->handles, h, rights);
@@ -1327,9 +1348,10 @@ static int64_t lx_fchmodat2(struct syscall_args *a)
 
 static int64_t lx_fchmod(struct syscall_args *a)
 {
-    struct file *f = file_of((int)a->a[0], 0);
+    int err;
+    struct file *f = file_of_manage((int)a->a[0], &err);
     if (f == NULL)
-        return -EBADF;
+        return err;
     int rc = vfs_setattr(f->vn, VFS_SET_MODE, (uint32_t)a->a[1], 0);
     file_put(f);
     return rc;
@@ -1372,9 +1394,9 @@ static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t
             vnode_put(cwd);
             return rc;
         }
-        struct file *f = file_of((int)dirfd, 0);
+        struct file *f = file_of_manage((int)dirfd, &rc);
         if (f == NULL)
-            return -EBADF;
+            return rc;
         rc = vfs_chown(f->vn, lx_owner_id(uid), lx_owner_id(gid));
         file_put(f);
         return rc;
@@ -1404,9 +1426,10 @@ static int64_t lx_lchown(struct syscall_args *a)
 
 static int64_t lx_fchown(struct syscall_args *a)
 {
-    struct file *f = file_of((int)a->a[0], 0);
+    int err;
+    struct file *f = file_of_manage((int)a->a[0], &err);
     if (f == NULL)
-        return -EBADF;
+        return err;
     int rc = vfs_chown(f->vn, lx_owner_id(a->a[1]), lx_owner_id(a->a[2]));
     file_put(f);
     return rc;
