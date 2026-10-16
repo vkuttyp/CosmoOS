@@ -388,9 +388,15 @@ cp group.keep /etc/group
 # this machine here.
 expect kill-init-noadmin 1 "$(priv -d sys_admin -- kill -TERM $ip 2>&1 | grep -c 'Operation not permitted')"
 expect kill-init-probe 0 "$(priv -d sys_admin -- kill -0 $ip 2>&1 | wc -l)"
-expect reboot-noadmin 1 "$(priv -d sys_admin -- reboot 2>&1 | grep -c 'Operation not permitted')"
 expect reboot-f-noadmin 1 "$(priv -d sys_admin -- reboot -f 2>&1 | grep -c 'Operation not permitted')"
-expect halt-noadmin 1 "$(priv -d sys_admin -- halt 2>&1 | grep -c 'Operation not permitted')"
+# reboot and halt without -f signal pid 1, which is init except in a
+# self-test build (CI's test-busybox is a release build).
+if [ "$ip" = 1 ]; then
+    expect reboot-noadmin 1 "$(priv -d sys_admin -- reboot 2>&1 | grep -c 'Operation not permitted')"
+    expect halt-noadmin 1 "$(priv -d sys_admin -- halt 2>&1 | grep -c 'Operation not permitted')"
+else
+    echo "BBTEST: note reboot-noadmin, halt-noadmin: init is pid $ip, not 1 (a self-test build); not run"
+fi
 # date -s: refused (BusyBox reports it and exits 0) without sys_admin and
 # to uid 1000, the clock unmoved; as root a day ahead and back.
 now=$(date +%s)

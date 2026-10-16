@@ -3085,3 +3085,18 @@ See the [history index](README.md).
   `test-net-login` reads a file's and a link's owners back after the
   reboot; `lxtest` exercises `fchown`, `fchownat` and `chroot`.
   Report: `docs/audit/2026-10-16-ownership-report.md`.
+- **After 1.0: power and clock (2026-10-16, roadmap-1.1 S5, absorbing
+  P5).** `kernel_reboot` restarts, halts or powers off the machine: PSCI
+  `SYSTEM_RESET` on AArch64; on x86-64 the FADT reset register, then
+  0xCF9, the keyboard controller and a triple fault. The Linux `reboot(2)`
+  and a native `SYS_reboot` reach it under `PRIV_SYS_ADMIN`, and init
+  restarts on SIGTERM and halts on SIGUSR1 (BusyBox `reboot`, `halt`),
+  which only a holder of `PRIV_SYS_ADMIN` may send it (security S20).
+  `settimeofday` and `clock_settime` set the wall clock; `/dev/rtc0`
+  reads and writes the RTC (CMOS, PL031) for `hwclock`; BusyBox `ntpd -q`
+  steps the clock. Restarting with CPUs parked found that the halt IPI
+  was never EOId, which hung QEMU's AArch64 firmware after the reset.
+  `test-net-login` stage j restarts the installed system inside one QEMU
+  (`QEMU_REBOOT=1`) and checks the RTC's time after it, `ntpd -q` against
+  the harness a day ahead, and the refusals; `test-busybox` and `lxtest`
+  check the rest. Report: `docs/audit/2026-10-16-power-clock-report.md`.
