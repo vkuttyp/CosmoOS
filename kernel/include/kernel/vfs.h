@@ -378,6 +378,20 @@ int vfs_permission(const struct vnode *vn, unsigned mask);
 #define VFS_SET_MTIME_NOW 4u
 int vfs_setattr(struct vnode *vn, unsigned what, uint32_t mode, uint64_t mtime_ns);
 
+/*
+ * chown (shell completeness S4): set `vn`'s owner and/or group;
+ * VFS_ID_KEEP for either leaves it. Linux's rule: a new owner needs
+ * PRIV_SYS_ADMIN (CAP_CHOWN's place: the privilege that overrides
+ * ownership); the owner may give the node one of its own groups, and may
+ * name the owner and group it already has. A regular file's set-user-id
+ * bit, and its set-group-id bit when group-executable, are cleared by any
+ * change asked for, as Linux clears them. The change time becomes now.
+ * -EPERM otherwise, -EROFS on a read-only mount, or the filesystem's error
+ * from storing them.
+ */
+#define VFS_ID_KEEP 0xffffffffu
+int vfs_chown(struct vnode *vn, uint32_t uid, uint32_t gid);
+
 /* Resolve `path` (absolute, or relative to `start` when not NULL) to a
  * referenced vnode. Follows mounts, and symbolic links -- including one
  * named by the last component. An absolute target restarts at the

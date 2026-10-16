@@ -282,10 +282,15 @@ networking with no fw_cfg address, so the kernel's DHCP client configures
   `S`, `dropbear` as the supervisor's child in `S`, the shell with init as
   its parent in `S`, and `ps` itself in `R`. Every pid it is checked
   against is known without `/proc`.
+- **i. Ownership** (shell completeness S4), at the end of the same boot:
+  `/root/s4own` chowned to 1000:1000 and a link to it, `/root/s4lnk`,
+  chowned with `-h` to 1001:1001, then `sync`; `stat` must show both.
 - **e. Reboot**: the installed disk boots again, its slirp naming no
   host; a login with `StrictHostKeyChecking=yes` against the first boot's
-  known_hosts must pass, so the host key was kept, and `hostname` must
-  still print `cosmo-s1` (`/etc/rc` applied `/etc/hostname`).
+  known_hosts must pass, so the host key was kept, `hostname` must
+  still print `cosmo-s1` (`/etc/rc` applied `/etc/hostname`), and `stat`
+  must still show i's owners on cosmofs (the file 1000:1000, the link
+  1001:1001).
 
 ## `make test-busybox` (`tests/boot/busybox_test.py`)
 
@@ -293,7 +298,7 @@ Roadmap M3's acceptance: BusyBox ash is the shell. One boot of the image
 (release builds in CI, job `busybox`, both architectures); at the
 console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
 
-- **`ash.sh`, the scripted test**: 154 checks, each `BBTEST: ok NAME` or
+- **`ash.sh`, the scripted test**: 165 checks, each `BBTEST: ok NAME` or
   `BBTEST: FAIL NAME: want [..] got [..]`, ending `BBTEST: PASS`. The
   shell's features: a pipeline, `>`/`>>`/`<`, `2>` and `2>&1`, command
   substitution nested and with backquotes, a subshell's variables, `$?`
@@ -346,6 +351,15 @@ console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
   `priv -u 1000`)'s `environ` is read as root with `sys_admin` dropped
   (`PRIV_PROC` is the rule) and is empty with `proc` dropped too; `/proc/version`'s third word
   is `uname -r`, and `/proc/cpuinfo` has `hw.ncpu` `processor` lines.
+  Then shell completeness S4's ownership: `chown 1000:1000` and `chgrp 0`
+  read back by `stat -c '%u %g'`; `chown -h` changes a link and not its
+  target, and `chown` through a link changes the target; `chown 0` of a
+  6755 file leaves 755 (the set-id bits cleared); `chown` is `Operation
+  not permitted` to uid 1000 and to root with `sys_admin` dropped, and the
+  file is unchanged; with a `tester` (uid 1000) added to `/etc/passwd` and
+  `/etc/group` for the test, `su -c 'id -u'` is 0, `su -c ... tester`
+  runs as 1000:1000, and with `cred` dropped `su` to `tester` is `not
+  permitted`.
 - **ash's history** (shell completeness S2): `sh` at the console, a
   command unique to the run, `exit`; `/root/.ash_history` must hold it,
   and a second `sh`'s `history` must list it.

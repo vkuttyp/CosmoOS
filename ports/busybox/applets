@@ -124,3 +124,8 @@ setsid
 # /sbin/ps and /sbin/kill in PATH.
 ps
 kill
+# Shell completeness S4: ownership (fchownat and fchown in the Linux
+# personality) and su, which needs PRIV_CRED to become another uid.
+chown
+chgrp
+su

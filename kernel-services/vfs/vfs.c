@@ -1326,6 +1326,35 @@ int vfs_setattr(struct vnode *vn, unsigned what, uint32_t mode, uint64_t mtime_n
     return rc;
 }
 
+int vfs_chown(struct vnode *vn, uint32_t uid, uint32_t gid)
+{
+    const struct credentials *c = cred_current();
+    bool admin = cred_has(c, PRIV_SYS_ADMIN);
+    bool owner = c->euid == vn->uid;
+    if (uid != VFS_ID_KEEP && !admin && !(owner && uid == vn->uid))
+        return -EPERM;
+    if (gid != VFS_ID_KEEP && !admin && !(owner && (gid == vn->gid || cred_in_group(c, gid))))
+        return -EPERM;
+    if (vn->mnt != NULL && (vn->mnt->flags & MOUNT_RDONLY))
+        return -EROFS;
+    mutex_lock(&vn->lock);
+    if (uid != VFS_ID_KEEP)
+        vn->uid = uid;
+    if (gid != VFS_ID_KEEP)
+        vn->gid = gid;
+    /* Linux's ATTR_KILL_SUID and ATTR_KILL_SGID: a program's set-id bits
+     * do not follow it to a new owner or group. */
+    if ((uid != VFS_ID_KEEP || gid != VFS_ID_KEEP) && vn->type == VNODE_REG) {
+        vn->mode &= ~04000u;
+        if (vn->mode & 0010u)
+            vn->mode &= ~02000u;
+    }
+    vn->ctime_ns = vfs_now_ns();
+    int rc = vn->ops->setattr != NULL ? vn->ops->setattr(vn) : 0;
+    mutex_unlock(&vn->lock);
+    return rc;
+}
+
 /* Search permission on a directory being entered; consumes `dir` on failure. */
 static int may_search(struct vnode *dir)
 {

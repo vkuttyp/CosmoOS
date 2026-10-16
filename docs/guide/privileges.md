@@ -6,8 +6,8 @@ six:
 
 | Privilege | Allows |
 |---|---|
-| `mount` | `mount`, `umount`, `switch_root`, mount namespaces, giving a child its own root |
-| `sys_admin` | `sysctl` writes, the block and filesystem control devices (`/dev/blkctl`, `/dev/fsctl`), the kernel log, domains and uts namespaces, overriding file permissions and ownership |
+| `mount` | `mount`, `umount`, `switch_root`, mount namespaces, giving a child its own root, `chroot` |
+| `sys_admin` | `sysctl` writes, the block and filesystem control devices (`/dev/blkctl`, `/dev/fsctl`), the kernel log, domains and uts namespaces, overriding file permissions and ownership (`chown` to another owner) |
 | `net` | network configuration (`/dev/net/netctl`) and binding ports below 1024 |
 | `proc` | signalling, seeing and inspecting any process; raising resource limits |
 | `cred` | starting a process with other ids; changing uid, gid and groups |

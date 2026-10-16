@@ -19,8 +19,8 @@ in the ABI; at most 16 in 1.0):
 
 | Privilege | What it allows |
 |---|---|
-| `PRIV_MOUNT` | `mount`, `umount`, `switch_root`; a new mount namespace and a child's root (`COSMO_SPAWN_NEWMOUNTNS`, `SETROOT`) |
-| `PRIV_SYS_ADMIN` | sysctl writes (`SYS_sysctl_set`, `sethostname`), `/dev/blkctl`, `/dev/fsctl`, `klog`, an unthrottled `log`, a new domain or uts namespace, overriding file permissions, ownership and the sticky bit, and a SysV shared memory segment's permissions and removal (`kernel/ipc/shm.c`, which tested `euid == 0` directly); module load and unload would be here, but there is no door for them (modules load from the boot archive only) |
+| `PRIV_MOUNT` | `mount`, `umount`, `switch_root`; a new mount namespace and a child's root (`COSMO_SPAWN_NEWMOUNTNS`, `SETROOT`); `chroot` (shell completeness S4) |
+| `PRIV_SYS_ADMIN` | sysctl writes (`SYS_sysctl_set`, `sethostname`), `/dev/blkctl`, `/dev/fsctl`, `klog`, an unthrottled `log`, a new domain or uts namespace, overriding file permissions, ownership and the sticky bit (and so giving a file a new owner: `chown`, shell completeness S4), and a SysV shared memory segment's permissions and removal (`kernel/ipc/shm.c`, which tested `euid == 0` directly); module load and unload would be here, but there is no door for them (modules load from the boot archive only) |
 | `PRIV_NET` | `/dev/net/tapctl` (netctl configuration), binding a port below 1024 |
 | `PRIV_PROC` | signalling any process, seeing and inspecting any process (`procinfo`, `/proc`), raising a resource limit |
 | `PRIV_CRED` | spawning with other ids (`SETCRED`), changing uid, gid and groups beyond the POSIX unprivileged rule |
@@ -150,6 +150,18 @@ inside or outside the root by its path. The user-mode jail test
 asserts both: a rooted child's connect to the parent's abstract name is
 `ECONNREFUSED`, and to the parent's path `ENOENT`, while an unjailed
 connect to the same abstract name succeeds.
+
+**`chroot`** (shell completeness S4) gives the calling process a root
+after it was made, under `PRIV_MOUNT`, the privilege that gives a child
+one. The directory is found in the caller's own root, so a root still
+only tightens. The working directory moves to the new root with it, for
+the reason a rooted child starts at its root: Linux leaves it where it
+was, outside, where every relative path reaches out and `..` never meets
+the root -- the classic chroot escape, which here cannot start. The root
+changes under the process lock, with the working directory, and is read
+only through `vfs_current_root`, which takes its reference under the same
+lock (the process layer's P39): a walk on another thread holds the old
+root it began with, never a freed one.
 
 ## 1c. Process domains
 

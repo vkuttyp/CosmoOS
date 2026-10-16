@@ -345,6 +345,42 @@ wait
 expect version "$(uname -r)" "$(cut -d' ' -f3 /proc/version)"
 expect cpuinfo "$(sysctl hw.ncpu | awk '{ print $NF }')" "$(grep -c '^processor' /proc/cpuinfo)"
 
+# --- shell completeness S4: ownership and su ------------------------------------
+echo own > own.txt
+chown 1000:1000 own.txt
+expect chown "1000 1000" "$(stat -c '%u %g' own.txt)"
+chgrp 0 own.txt
+expect chgrp "1000 0" "$(stat -c '%u %g' own.txt)"
+# chown -h changes the link itself; its target keeps its owner.
+ln -s own.txt own.lnk
+chown -h 1001:1001 own.lnk
+expect chown-h "1001 1001 1000 0" "$(stat -c '%u %g' own.lnk) $(stat -L -c '%u %g' own.lnk)"
+# Through a link without -h, the target changes. (Both ids named: given an
+# owner alone, BusyBox's chown fills in the group from its stat of the name,
+# which for a link is the link's.)
+chown 1002:0 own.lnk
+expect chown-follow "1001 1002" "$(stat -c '%u' own.lnk) $(stat -L -c '%u' own.lnk)"
+# A change of owner clears a program's set-user-id bit, and its
+# set-group-id bit when it is group-executable, as Linux does.
+chmod 6755 own.txt
+chown 0 own.txt
+expect chown-setid 755 "$(stat -c %a own.txt)"
+# Refused: a process of another uid, and root without sys_admin.
+expect chown-user 1 "$(priv -u 1000 -- chown 1000 own.txt 2>&1 | grep -c 'Operation not permitted')"
+expect chown-noadmin 1 "$(priv -d sys_admin -- chown 5 own.txt 2>&1 | grep -c 'Operation not permitted')"
+expect chown-unchanged "0 0" "$(stat -c '%u %g' own.txt)"
+# su: to root, a no-op that works; to another uid with PRIV_CRED, and
+# refused without it. The user exists for this test only.
+cp /etc/passwd passwd.keep
+cp /etc/group group.keep
+echo 'tester:x:1000:1000:tester:/tmp:/bin/sh' >> /etc/passwd
+echo 'tester:x:1000:' >> /etc/group
+expect su-root 0 "$(su -c 'id -u')"
+expect su-other "1000 1000" "$(su -c 'echo $(id -u) $(id -g)' tester)"
+expect su-nocred 1 "$(priv -d cred -- su -c 'id -u' tester 2>&1 | grep -c 'not permitted')"
+cp passwd.keep /etc/passwd
+cp group.keep /etc/group
+
 cd /
 rm -rf "$T"
 echo "BBTEST: $n checks, $fails failed"

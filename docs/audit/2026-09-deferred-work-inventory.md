@@ -1229,3 +1229,18 @@ each; none is needed by M2's acceptance test.
   options S2 left as they were (`FEATURE_SYSLOG_INFO`, `BZIP2_SMALL` 0
   rather than 8, `FEATURE_WAIT_FOR_INIT`). S3 changed only its own four
   (`PS`, `FEATURE_PS_TIME`, `FEATURE_PS_ADDITIONAL_COLUMNS`, `KILL`).
+
+## 14. Shell completeness S4 follow-ups (2026-10-16)
+
+- The native door has no `chown` or `chroot` (nor `chmod`): only the
+  Linux personality changes ownership or takes a new root after spawn.
+- `chown` on a filesystem without a `setattr` operation (procfs, devfs)
+  changes the vnode in hand and nothing behind it, so it reads back until
+  the vnode is evicted, as `chmod` already did there.
+- `fchownat` through a directory descriptor needs the handle's write
+  right, as `fchmodat` does (`lookup_at`); Linux needs none.
+- There is no `useradd`: a second user exists only by editing
+  `/etc/passwd` and `/etc/group`, as `test-busybox` does for `su`.
+- Supplementary groups are only what `setgroups` (`PRIV_CRED`) sets, so
+  the owner's "one of its own groups" rule in `chown` is in practice its
+  effective group.

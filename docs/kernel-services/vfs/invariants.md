@@ -149,8 +149,13 @@ unlinking a 0644 root file, creating in a 0755 root directory,
 executing a 0600 file, `mount`, `umount`, signalling root's process, and
 the kernel log, while creating its own files in `/tmp` (owned 1000:1000)
 and running `/bin/true` succeed, and root's entry in the sticky `/tmp`
-cannot be unlinked or renamed by it. Gap: `chmod`/`chown`; no
-group-permission test (no process holds a supplementary group yet).
+cannot be unlinked or renamed by it. `chown` (shell completeness S4,
+`vfs_chown`): a new owner needs `PRIV_SYS_ADMIN`, the owner may choose
+among its own groups, and a change clears a regular file's set-user-id
+bit (and set-group-id when group-executable); `test-busybox` refuses it to
+uid 1000 and to root without `sys_admin`, and `lxtest` to uid 1000. Gap:
+`chmod`; no group-permission test (no process holds a supplementary group
+yet).
 
 **V14a. ramfs is bounded and the page cache is bounded.** The rules S6
 and S7 of `docs/kernel/security/invariants.md`: a mount's cached pages

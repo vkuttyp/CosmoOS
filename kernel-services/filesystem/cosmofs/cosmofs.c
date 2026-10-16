@@ -896,7 +896,8 @@ static int inode_sync(struct cfs *fs, struct vnode *vn)
     in->size = vn->size;
     in->mtime_ns = vn->mtime_ns;
     in->ctime_ns = vn->ctime_ns;
-    in->mode = CFS_MODE(vn->type == VNODE_DIR ? CFS_TYPE_DIR : CFS_TYPE_REG, vn->mode);
+    in->mode = CFS_MODE(vn->type == VNODE_DIR ? CFS_TYPE_DIR : vn->type == VNODE_LNK ? CFS_TYPE_LNK : CFS_TYPE_REG,
+                        vn->type == VNODE_LNK ? 0777u : vn->mode);
     in->uid = vn->uid;
     in->gid = vn->gid;
     return cfs_inode_write(fs, vn->ino, in);
@@ -2023,9 +2024,10 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
     return rc;
 }
 
-/* The VFS `setattr` operation (chmod, utimensat): the vnode's new mode and
- * times go into the inode, as a write's new size does. Directories and
- * files only: inode_sync writes one of those two types. */
+/* The VFS `setattr` operation (chmod, utimensat, chown): the vnode's new
+ * mode, times and owner go into the inode, as a write's new size does.
+ * Directories, files and -- for chown, shell completeness S4 -- links,
+ * whose inode keeps its type and its 0777. */
 static int cfs_vnode_setattr(struct vnode *vn)
 {
     struct cfs *fs = cfs_of(vn->mnt);
@@ -2124,4 +2126,5 @@ static const struct vnode_ops cfs_file_ops = {
 static const struct vnode_ops cfs_lnk_ops = {
     .readlink = cfs_readlink,
     .evict = cfs_evict,
+    .setattr = cfs_vnode_setattr,   /* lchown */
 };

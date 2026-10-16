@@ -1324,6 +1324,94 @@ static int64_t lx_fchmod(struct syscall_args *a)
     return rc;
 }
 
+/* --- ownership and the root (shell completeness S4) ----------------------------- */
+
+/* Linux's uid_t and gid_t -1, "leave it": the VFS's VFS_ID_KEEP. */
+static uint32_t lx_owner_id(uint64_t v)
+{
+    return (uint32_t)v == 0xffffffffu ? VFS_ID_KEEP : (uint32_t)v;
+}
+
+/*
+ * fchownat(dirfd, path, uid, gid, flags), and chown, lchown and fchown
+ * through it: vfs_chown's rule (PRIV_SYS_ADMIN for a new owner; the owner
+ * may choose among its own groups). AT_SYMLINK_NOFOLLOW changes a link
+ * itself, which is lchown; AT_EMPTY_PATH with an empty path changes the
+ * open file `dirfd`.
+ */
+static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t gid, unsigned flags)
+{
+    if (flags & ~(unsigned)(LX_AT_SYMLINK_NOFOLLOW | LX_AT_EMPTY_PATH))
+        return -EINVAL;
+    /* Only whether the path is empty: lookup_at copies it in again, and two
+     * path buffers would not fit the kernel stack's frame limit. */
+    char first;
+    if (copy_from_user(&first, upath, 1))
+        return -EFAULT;
+    int rc;
+    if (first == '\0') {
+        if (!(flags & LX_AT_EMPTY_PATH))
+            return -ENOENT;
+        struct file *f = file_of((int)dirfd, 0);
+        if (f == NULL)
+            return -EBADF;
+        rc = vfs_chown(f->vn, lx_owner_id(uid), lx_owner_id(gid));
+        file_put(f);
+        return rc;
+    }
+    struct vnode *vn;
+    rc = lookup_at(dirfd, upath, (flags & LX_AT_SYMLINK_NOFOLLOW) != 0, &vn);
+    if (rc)
+        return rc;
+    rc = vfs_chown(vn, lx_owner_id(uid), lx_owner_id(gid));
+    vnode_put(vn);
+    return rc;
+}
+
+static int64_t lx_fchownat(struct syscall_args *a)
+{
+    return do_fchownat((int64_t)a->a[0], a->a[1], a->a[2], a->a[3], (unsigned)a->a[4]);
+}
+#ifdef LX_chown
+static int64_t lx_chown(struct syscall_args *a) { return do_fchownat(LX_AT_FDCWD, a->a[0], a->a[1], a->a[2], 0); }
+#endif
+#ifdef LX_lchown
+static int64_t lx_lchown(struct syscall_args *a)
+{
+    return do_fchownat(LX_AT_FDCWD, a->a[0], a->a[1], a->a[2], LX_AT_SYMLINK_NOFOLLOW);
+}
+#endif
+
+static int64_t lx_fchown(struct syscall_args *a)
+{
+    struct file *f = file_of((int)a->a[0], 0);
+    if (f == NULL)
+        return -EBADF;
+    int rc = vfs_chown(f->vn, lx_owner_id(a->a[1]), lx_owner_id(a->a[2]));
+    file_put(f);
+    return rc;
+}
+
+/* chroot(path): process_chroot's rule (PRIV_MOUNT; the working directory
+ * moves to the new root). */
+static int64_t lx_chroot(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    struct vnode *start = process_cwd_get();
+    struct vnode *dir;
+    rc = vfs_lookup(start, path, &dir);
+    if (start)
+        vnode_put(start);
+    if (rc)
+        return rc;
+    rc = process_chroot(dir);
+    vnode_put(dir);
+    return rc;
+}
+
 /*
  * utimensat(dirfd, path, times[2], flags): the modification time, times[1]
  * (the access time is not kept: times[0] is checked and ignored).
@@ -2267,12 +2355,12 @@ static int64_t lx_prlimit64(struct syscall_args *a)
 
 static int64_t lx_setresuid(struct syscall_args *a)
 {
-    return process_setresuid(lx_id(a->a[0]), lx_id(a->a[1]), lx_id(a->a[2]));
+    return process_setresuid(lx_id(a->a[0]), lx_owner_id(a->a[1]), lx_owner_id(a->a[2]));
 }
 
 static int64_t lx_setresgid(struct syscall_args *a)
 {
-    return process_setresgid(lx_id(a->a[0]), lx_id(a->a[1]), lx_id(a->a[2]));
+    return process_setresgid(lx_id(a->a[0]), lx_owner_id(a->a[1]), lx_owner_id(a->a[2]));
 }
 
 /* setuid(u): root sets all three; anyone else sets the effective id to a
@@ -2297,7 +2385,7 @@ static int64_t lx_setgid(struct syscall_args *a)
 static int64_t lx_setreuid(struct syscall_args *a)
 {
     const struct credentials *c = cred_current();
-    int64_t r = lx_id(a->a[0]), e = lx_id(a->a[1]);
+    int64_t r = lx_id(a->a[0]), e = lx_owner_id(a->a[1]);
     int64_t s = (r != -1 || (e != -1 && (uint32_t)e != c->ruid)) ? (e != -1 ? e : (int64_t)c->euid) : -1;
     return process_setresuid(r, e, s);
 }
@@ -2305,7 +2393,7 @@ static int64_t lx_setreuid(struct syscall_args *a)
 static int64_t lx_setregid(struct syscall_args *a)
 {
     const struct credentials *c = cred_current();
-    int64_t r = lx_id(a->a[0]), e = lx_id(a->a[1]);
+    int64_t r = lx_id(a->a[0]), e = lx_owner_id(a->a[1]);
     int64_t s = (r != -1 || (e != -1 && (uint32_t)e != c->rgid)) ? (e != -1 ? e : (int64_t)c->egid) : -1;
     return process_setresgid(r, e, s);
 }
@@ -4210,6 +4298,15 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_epoll_wait] = lx_epoll_wait,
 #endif
     [LX_unlinkat] = lx_unlinkat,
+#ifdef LX_chown
+    [LX_chown] = lx_chown,
+#endif
+#ifdef LX_lchown
+    [LX_lchown] = lx_lchown,
+#endif
+    [LX_fchown] = lx_fchown,
+    [LX_fchownat] = lx_fchownat,
+    [LX_chroot] = lx_chroot,
 #ifdef LX_chmod
     [LX_chmod] = lx_chmod,
 #endif

@@ -693,20 +693,26 @@ static int proc_environ(struct mount *mnt, pid_t pid, struct vnode **out)
 }
 
 /* Whether the reader stands where `p` does: the same root and the same
- * mounts, so a path `p` holds names the same file for the reader. Both
- * are fixed at spawn (process.h), so reading them needs no lock. */
-static bool proc_same_root(const struct process *p)
+ * mounts, so a path `p` holds names the same file for the reader. The
+ * namespaces are fixed at spawn; a root changes under its process's
+ * lock (chroot, P39), so `p`'s is read there and the reader's through
+ * vfs_current_root. Only addresses are compared. */
+static bool proc_same_root(struct process *p)
 {
     const struct process *me = process_current();
     /* A NULL root is the global root and a NULL namespace the initial
      * one (process.h): compare what each resolves against, so an
      * explicit global root is the same as the implicit one. */
-    struct vnode *global = vfs_root();
-    const struct vnode *mine = me && me->root ? me->root : global, *theirs = p->root ? p->root : global;
-    vnode_put(global);   /* pinned by the root mount: only its address is compared */
+    struct vnode *global = vfs_root(), *mine = vfs_current_root();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    const struct vnode *theirs = p->root ? p->root : global;
+    bool same = mine == theirs;
+    spin_unlock_irqrestore(&p->lock, s);
+    vnode_put(mine);
+    vnode_put(global);
     const struct mount_ns *myns = me && me->mntns ? me->mntns : mountns_initial();
     const struct mount_ns *theirns = p->mntns ? p->mntns : mountns_initial();
-    return mine == theirs && myns == theirns;
+    return same && myns == theirns;
 }
 
 /*

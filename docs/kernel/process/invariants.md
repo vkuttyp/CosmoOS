@@ -718,6 +718,18 @@ teardown after `EXITED` was published. *Checked by*: `proc-exit-read`
 memory lines; 64 exits each read throughout by a thread on another CPU,
 every text whole, no exec record or rendered text left over).
 
+**P39. A process's root changes only under `p->lock`, and is read only
+through `vfs_current_root`.** (Shell completeness S4.) `chroot`
+(`process_chroot`) replaces `root` and the working directory together
+under the lock and puts the old ones after it; `vfs_current_root` takes
+its reference under the same lock, and procfs reads another process's
+root there. Until S4 the root was fixed at spawn and read without a lock.
+*Checked by*: `lxtest`'s ownership section (a child's `chroot`: `/marker`
+inside opens, the same file by its outer path is `ENOENT`, `../../marker`
+stops at the root, `getcwd` is `/`; the parent's root is unchanged;
+refused to uid 1000). With the working directory left where it was (a
+mutation), `../../marker` from outside the root fails.
+
 ## Gaps (documented, not invariants)
 
 - **The cwd race is not proved by a test**, only by construction, and the
