@@ -98,7 +98,15 @@ static arch_irq_state_t raw_lock(void)
 #endif
 unsigned lockdep_crash_hold_raw(void)
 {
-    __atomic_store_n(&g_raw, raw_cpu_id() + 2u, __ATOMIC_RELEASE);   /* owner: another CPU's id + 1 */
+    /* An owner no CPU is: CPU CONFIG_MAX_CPUS's word. It used to be the
+     * next CPU's (this CPU's id + 2), a CPU that is running: one that
+     * entered lockdep between this store and the panic -- an interrupt
+     * taking a tracked lock -- found its own word there and panicked first
+     * with "graph raw lock re-entry", and the crash test reported that
+     * panic instead of its own (main's CI, 2026-10-16). With no such CPU,
+     * one that enters spins, as on a lock a stopped CPU holds, until the
+     * panic stops it. */
+    __atomic_store_n(&g_raw, (uint32_t)CONFIG_MAX_CPUS + 1u, __ATOMIC_RELEASE);
     return __atomic_load_n(&g_raw, __ATOMIC_ACQUIRE);
 }
 
