@@ -96,7 +96,24 @@ New features are proven by their acceptance test; no probe (AGENTS.md).
 
 ## Validation
 
-MATRIX
+- **The validation matrix**, on `7743b724`, every step PASS; the boot
+  times are the harness's own lines:
+
+  | Step | x86-64 | AArch64 |
+  |---|---|---|
+  | `host-test`, `fuzz`, `analyze` | pass | pass |
+  | debug `test`, `QEMU_SMP=1` / `2` / `4` | 138.3 / 156.4 / 160.6 s | 141.8 / 162.1 / 157.3 s |
+  | `test-smp2` | 157.1 s | 164.3 s |
+  | `test-chaos` | 148.1 s | 172.6 s |
+  | `test-harness-retry` | 150.5 s | 170.4 s |
+  | `BUILD=release test` | 17.6 s | 21.1 s |
+  | `BUILD=release test-busybox` | 47.1 s (165 checks) | 56.2 s |
+  | `BUILD=release test-net-login` | 67.0 s | 78.1 s |
+  | `BUILD=release test-install` | 28.0 s | 41.1 s |
+
+  The network harness passed in every debug boot (the boot test requires
+  it).
+- **Branch CI**: recorded in the PR.
 
 ## Recorded instead of done
 
