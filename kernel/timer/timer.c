@@ -8,6 +8,7 @@
 #include <kernel/log.h>
 #include <kernel/thread.h>
 #include <kernel/sched.h>
+#include <kernel/spinlock.h>
 #include <kernel/kmalloc.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -24,6 +25,13 @@ static struct timer_queue g_queues[CONFIG_MAX_CPUS];
 static uint64_t g_clock_base;
 static uint64_t g_clock_hz;
 static uint64_t g_realtime_offset_ns;   /* wall time at monotonic zero */
+/* The offset's sequence count (shell completeness S5): odd while it
+ * changes, so a reader that sampled the offset and the counter across a
+ * change samples again (found in review); the writers are serialised, with
+ * interrupts off so an interrupted writer cannot leave a reader on its CPU
+ * spinning. */
+static uint32_t g_realtime_seq;
+static spinlock_t g_realtime_lock = SPINLOCK_INIT("realtime");
 static uint64_t g_ns_mult;   /* (1e9 << CLOCK_SHIFT) / hz */
 static timer_tick_hook_fn g_tick_hook;
 static bool g_initialized;
@@ -303,14 +311,34 @@ void clock_test_force_uncommon(bool on)
 
 uint64_t clock_realtime_ns(void)
 {
-    return __atomic_load_n(&g_realtime_offset_ns, __ATOMIC_RELAXED) + clock_now_ns();
+    for (;;) {
+        uint32_t seq = __atomic_load_n(&g_realtime_seq, __ATOMIC_ACQUIRE);
+        if (seq & 1u) {
+            arch_cpu_relax();
+            continue;
+        }
+        uint64_t ns = __atomic_load_n(&g_realtime_offset_ns, __ATOMIC_RELAXED) + clock_now_ns();
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g_realtime_seq, __ATOMIC_RELAXED) == seq)
+            return ns;
+    }
+}
+
+static void realtime_store_offset(uint64_t off)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_realtime_lock);
+    __atomic_store_n(&g_realtime_seq, g_realtime_seq + 1u, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&g_realtime_offset_ns, off, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_realtime_seq, g_realtime_seq + 1u, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_realtime_lock, s);
 }
 
 /* Unsigned: a wall time earlier than the monotonic clock's reading makes
  * the offset wrap, and the sum in clock_realtime_ns wraps back. */
 void clock_set_realtime_ns(uint64_t ns)
 {
-    __atomic_store_n(&g_realtime_offset_ns, ns - clock_now_ns(), __ATOMIC_RELAXED);
+    realtime_store_offset(ns - clock_now_ns());
 }
 
 /* Howard Hinnant's days_from_civil and civil_from_days. */
@@ -783,7 +811,7 @@ void timer_init(void)
          * just before ExitBootServices (boot protocol v10), anchored at
          * the monotonic clock's zero. Late by the time between that read
          * and the clock's start, well under a second. */
-        __atomic_store_n(&g_realtime_offset_ns, (uint64_t)fw_epoch * NS_PER_SEC, __ATOMIC_RELAXED);
+        realtime_store_offset((uint64_t)fw_epoch * NS_PER_SEC);
         kinfo("timer: wall clock %lld s since 1970 from the firmware at boot (no RTC)", (long long)fw_epoch);
     } else {
         kwarn("timer: no real-time clock; the wall clock starts at 1970");

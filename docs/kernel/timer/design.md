@@ -52,9 +52,12 @@ boot warns. The clock is the RTC's (or the firmware's) second plus the
 monotonic clock's progress since, until something sets it.
 
 Shell completeness S5 sets it: `clock_set_realtime_ns(ns)` stores
-`ns - clock_now_ns()` as the offset in one relaxed atomic store, which
-`clock_realtime_ns` reads with one atomic load, so a reader sees the old
-wall clock or the new one and never a torn offset. The offset is
+`ns - clock_now_ns()` as the offset under a sequence count (odd while it
+changes; the writers serialised by the `realtime` spinlock with
+interrupts off), and `clock_realtime_ns` samples the offset and the
+counter again if the count moved between its two loads, so a reader sees
+the old wall clock or the new one, never the old offset added to a
+counter read after the change (found in review). The offset is
 unsigned: a wall time earlier than the monotonic reading wraps it, and
 the sum wraps back. Its callers -- the Linux `settimeofday` and
 `clock_settime`, through which BusyBox's `date -s` and `ntpd` reach it
@@ -65,7 +68,8 @@ a monotonic deadline when it was armed, so it fires at the old wall time
 `arch_rtc_write_epoch` (x86-64: status B's SET bit holds the update off
 while the fields are written in status B's encoding, under the
 `cmos` spinlock that also covers a read, since every access is an
-index write then a data access; AArch64: the PL031's load register
+index write then a data access, and without a century register refusing
+a year past 2069, which the read would take for 19xx; AArch64: the PL031's load register
 `RTCLR`, 32 bits of seconds), which `/dev/rtc0`'s `RTC_SET_TIME`
 (`kernel/timer/rtcdev.c`) calls for `hwclock -w`; the century is written
 only to the register the FADT names. `/dev/rtc0` exists where

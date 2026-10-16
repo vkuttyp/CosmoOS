@@ -186,6 +186,14 @@ Parallels run is recorded; it is recorded above (the developer's run, as
 P1's was), and the box stays ticked. CosmoReview's "interrupts disabled
 and not restored" in `kernel_reboot` and its callers: it never returns.
 
+Codex's second pass, on `996eb098`, found three more, all fixed:
+
+| Finding | Fix |
+|---|---|
+| Without a century register, a year past 2069 was written and read back as 19xx | refused (`-EINVAL`) without a century register |
+| A PL031 reading 0 -- 1970-01-01, which `RTC_SET_TIME` may store -- was taken for no RTC | valid; presence is the peripheral id's |
+| A realtime read racing a clock set could add the old offset to a counter read after the change | the offset under a sequence count: a reader that straddles a change samples again |
+
 ## Validation
 
 - **The validation matrix**, on `afb80f37`, every step PASS; the boot

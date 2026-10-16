@@ -239,8 +239,8 @@ void clock_test_set_tick_owner(unsigned cpu);
 uint64_t clock_realtime_ns(void);
 /* Set the wall clock to `ns` since 1970 (shell completeness S5:
  * settimeofday, clock_settime, the RTC device's callers check
- * PRIV_SYS_ADMIN). One store of the offset: a reader sees the old wall
- * clock or the new one. The monotonic clock, and every deadline on it --
+ * PRIV_SYS_ADMIN). Under a sequence count: a reader sees the old wall
+ * clock or the new one, never the old offset with a later counter. The monotonic clock, and every deadline on it --
  * an absolute CLOCK_REALTIME timer was converted when armed -- do not move
  * (inventory). */
 void clock_set_realtime_ns(uint64_t ns);

@@ -265,9 +265,11 @@ int arch_rtc_write_epoch(uint64_t seconds)
     unsigned mon, day;
     time_civil_from_days((int64_t)(seconds / 86400), &y, &mon, &day);
     unsigned rem = (unsigned)(seconds % 86400), hour = rem / 3600, min = rem / 60 % 60, sec = rem % 60;
-    if (y < 1970 || y > 2299)
-        return -EINVAL;
     const uint8_t century_reg = cmos_century_reg();
+    /* Without a century register the read guesses 1970..2069: a year it
+     * would read back wrong is refused (found in review). */
+    if (y < 1970 || y > (century_reg ? 2299 : 2069))
+        return -EINVAL;
     arch_irq_state_t irq = spin_lock_irqsave(&g_cmos_lock);
     uint8_t status_b = cmos_read(0x0b);
     bool binary = (status_b & 0x04) != 0, hour24 = (status_b & 0x02) != 0;

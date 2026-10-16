@@ -268,16 +268,16 @@ bool arch_rtc_read_epoch(uint64_t *seconds)
 {
     /* QEMU's virt describes the PL031 in its DSDT (ARMH0011), which this
      * kernel does not interpret; the machine's memory map is fixed, so the
-     * register is read at its known address and validated: a machine
-     * without the device reads zero (or faults on nothing: the range is
-     * device memory on every virt variant). */
+     * register is read at its known address and validated by its
+     * peripheral id (pl031_map; the range is device memory on every virt
+     * variant). */
     vaddr_t va = pl031_map();
     if (va == 0)
         return false;
     uint32_t dr = *(volatile uint32_t *)va;        /* RTCDR */
     vm_unmap_phys(va);
-    if (dr == 0)
-        return false;
+    /* Zero is 1970-01-01, a time RTC_SET_TIME may store (found in
+     * review): the device's presence is the peripheral id's. */
     *seconds = dr;
     return true;
 }
