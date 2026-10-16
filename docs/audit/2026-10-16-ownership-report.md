@@ -118,7 +118,7 @@ New features are proven by their acceptance test; no probe (AGENTS.md).
 ## Review
 
 Qodo and Codex, on `daa57c67`: twelve comments, eight distinct findings,
-all real. The review commit fixes them:
+all real. `03dd868c` fixes them:
 
 | Finding | Fix |
 |---|---|
