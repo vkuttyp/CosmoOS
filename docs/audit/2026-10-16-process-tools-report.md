@@ -160,7 +160,7 @@ New features are proven by their acceptance test; no probe (AGENTS.md).
 ## Review
 
 Qodo and Codex, on `74ce9a95`; all seven distinct findings were real, and
-the review commit fixes them:
+`5c72b6c5` fixes them:
 
 | Finding | Fix |
 |---|---|
