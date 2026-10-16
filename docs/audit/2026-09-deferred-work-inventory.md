@@ -1244,3 +1244,9 @@ each; none is needed by M2's acceptance test.
 - Supplementary groups are only what `setgroups` (`PRIV_CRED`) sets, so
   the owner's "one of its own groups" rule in `chown` is in practice its
   effective group.
+- `vfs_setattr` (chmod, utimensat) still checks the owner before taking
+  the vnode's lock and keeps the new mode in the vnode when the
+  filesystem fails to store it; S4's review found both in `vfs_chown` and
+  fixed them there.
+- A path walk's single root (P39) is by construction only: no test races
+  a nested `chroot` against a walk on another thread.

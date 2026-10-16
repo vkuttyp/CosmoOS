@@ -259,6 +259,13 @@ struct file {
      * stale after a rename of the directory or of any ancestor, as the
      * cwd's own name is (P27). */
     char *dir_path;
+    /* A directory file's opener's root, referenced (shell completeness
+     * S4); NULL for anything else. The file is a lookup base -- an *at
+     * call's directory, fchdir's target -- only for a process with that
+     * root (file_dir_base_ok): a directory opened before a chroot, or
+     * handed to a process with a narrower root, does not reach outside
+     * that process's root (P39). Set at the open, never changed. */
+    struct vnode *dir_root;
 };
 
 /* --- lifecycle ---------------------------------------------------------- */
@@ -434,6 +441,9 @@ int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart,
  * or an allocation failure: the file then has no name to give fchdir,
  * which refuses it rather than invent one. Before the file is shared. */
 void file_set_dir_path(struct file *f, const char *name);
+/* Whether the caller may resolve from directory file `f`: its root is the
+ * root `f` was opened under (struct file, dir_root). */
+bool file_dir_base_ok(const struct file *f);
 
 #if CONFIG_DEBUG
 /* procfs, debug builds: the texts it has rendered for opens and not yet

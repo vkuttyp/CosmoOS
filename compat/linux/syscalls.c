@@ -317,6 +317,12 @@ static int at_base(int64_t dirfd, const char *path, unsigned rights, struct vnod
         file_put(f);
         return -ENOTDIR;
     }
+    /* Opened under another root -- before a chroot, or by a process with
+     * a wider one: not a way out of this process's root (P39). */
+    if (!file_dir_base_ok(f)) {
+        file_put(f);
+        return -EACCES;
+    }
     vnode_get(f->vn);
     *out = f->vn;
     if (basepath)
@@ -1283,6 +1289,11 @@ static int lookup_at(int64_t dirfd, uint64_t upath, bool nofollow, struct vnode 
     rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
     if (rc)
         return rc;
+    /* A trailing slash makes the last component a directory to enter, so
+     * a link there is followed even under AT_SYMLINK_NOFOLLOW, as Linux. */
+    size_t plen = strlen(path);
+    if (nofollow && plen > 0 && path[plen - 1] == '/')
+        nofollow = false;
     rc = nofollow ? vfs_lookup_nofollow(start, path, out) : vfs_lookup(start, path, out);
     vnode_put(start);
     return rc;
@@ -1339,9 +1350,9 @@ static uint32_t lx_owner_id(uint64_t v)
  * itself, which is lchown; AT_EMPTY_PATH with an empty path changes the
  * open file `dirfd`.
  */
-static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t gid, unsigned flags)
+static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t gid, uint64_t flags)
 {
-    if (flags & ~(unsigned)(LX_AT_SYMLINK_NOFOLLOW | LX_AT_EMPTY_PATH))
+    if (flags & ~(uint64_t)(LX_AT_SYMLINK_NOFOLLOW | LX_AT_EMPTY_PATH))   /* the whole argument, not its low half */
         return -EINVAL;
     /* Only whether the path is empty: lookup_at copies it in again, and two
      * path buffers would not fit the kernel stack's frame limit. */
@@ -1352,6 +1363,12 @@ static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t
     if (first == '\0') {
         if (!(flags & LX_AT_EMPTY_PATH))
             return -ENOENT;
+        if ((int)dirfd == LX_AT_FDCWD) {   /* the working directory itself, as Linux */
+            struct vnode *cwd = process_cwd_get();
+            rc = vfs_chown(cwd, lx_owner_id(uid), lx_owner_id(gid));
+            vnode_put(cwd);
+            return rc;
+        }
         struct file *f = file_of((int)dirfd, 0);
         if (f == NULL)
             return -EBADF;
@@ -1370,7 +1387,7 @@ static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t
 
 static int64_t lx_fchownat(struct syscall_args *a)
 {
-    return do_fchownat((int64_t)a->a[0], a->a[1], a->a[2], a->a[3], (unsigned)a->a[4]);
+    return do_fchownat((int64_t)a->a[0], a->a[1], a->a[2], a->a[3], a->a[4]);
 }
 #ifdef LX_chown
 static int64_t lx_chown(struct syscall_args *a) { return do_fchownat(LX_AT_FDCWD, a->a[0], a->a[1], a->a[2], 0); }
@@ -1553,7 +1570,8 @@ static int64_t lx_fchdir(struct syscall_args *a)
         kobject_put(obj);
         return -ENOTDIR;
     }
-    int rc = process_fchdir(f->vn, f->dir_path);
+    int rc = f->vn->type == VNODE_DIR && !file_dir_base_ok(f) ? -EACCES   /* P39, as at_base */
+                                                                : process_fchdir(f->vn, f->dir_path);
     file_put(f);
     return rc;
 }
@@ -2355,12 +2373,12 @@ static int64_t lx_prlimit64(struct syscall_args *a)
 
 static int64_t lx_setresuid(struct syscall_args *a)
 {
-    return process_setresuid(lx_id(a->a[0]), lx_owner_id(a->a[1]), lx_owner_id(a->a[2]));
+    return process_setresuid(lx_id(a->a[0]), lx_id(a->a[1]), lx_id(a->a[2]));
 }
 
 static int64_t lx_setresgid(struct syscall_args *a)
 {
-    return process_setresgid(lx_id(a->a[0]), lx_owner_id(a->a[1]), lx_owner_id(a->a[2]));
+    return process_setresgid(lx_id(a->a[0]), lx_id(a->a[1]), lx_id(a->a[2]));
 }
 
 /* setuid(u): root sets all three; anyone else sets the effective id to a
@@ -2385,7 +2403,7 @@ static int64_t lx_setgid(struct syscall_args *a)
 static int64_t lx_setreuid(struct syscall_args *a)
 {
     const struct credentials *c = cred_current();
-    int64_t r = lx_id(a->a[0]), e = lx_owner_id(a->a[1]);
+    int64_t r = lx_id(a->a[0]), e = lx_id(a->a[1]);
     int64_t s = (r != -1 || (e != -1 && (uint32_t)e != c->ruid)) ? (e != -1 ? e : (int64_t)c->euid) : -1;
     return process_setresuid(r, e, s);
 }
@@ -2393,7 +2411,7 @@ static int64_t lx_setreuid(struct syscall_args *a)
 static int64_t lx_setregid(struct syscall_args *a)
 {
     const struct credentials *c = cred_current();
-    int64_t r = lx_id(a->a[0]), e = lx_owner_id(a->a[1]);
+    int64_t r = lx_id(a->a[0]), e = lx_id(a->a[1]);
     int64_t s = (r != -1 || (e != -1 && (uint32_t)e != c->rgid)) ? (e != -1 ? e : (int64_t)c->egid) : -1;
     return process_setresgid(r, e, s);
 }

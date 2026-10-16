@@ -858,6 +858,14 @@ static void ownership_tests(void)
     CHECKV(owner_of("/tmp/lxown", 0) == OWNER(4000, 1000), owner_of("/tmp/lxown", 0));
     CHECKV(sc5(LX_fchownat, fd, "", 4000, -1, 0) == -2, 0);                 /* an empty path needs the flag */
     CHECKV(sc5(LX_fchownat, LX_AT_FDCWD, "/tmp/lxown", 0, 0, 0x8000) == -22, 0);   /* an unknown flag */
+    CHECKV(sc5(LX_fchownat, LX_AT_FDCWD, "/tmp/lxown", 0, 0, 1L << 32) == -22, 0);  /* one above 32 bits */
+    /* A trailing slash enters the link's directory even with NOFOLLOW. */
+    sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxodir.lnk", 0);
+    sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/lxodir", 0755);
+    CHECKV(sc3(LX_symlinkat, "lxodir", LX_AT_FDCWD, "/tmp/lxodir.lnk") == 0, 0);
+    CHECKV(sc5(LX_fchownat, LX_AT_FDCWD, "/tmp/lxodir.lnk/", 6000, -1, LX_AT_SYMLINK_NOFOLLOW) == 0, 0);
+    CHECKV((owner_of("/tmp/lxodir", 0) >> 32) == 6000 && (owner_of("/tmp/lxodir.lnk", 1) >> 32) == 0,
+           owner_of("/tmp/lxodir", 0));
 
     /* chroot: a child stands at the new root and names only what is under
      * it; the parent's root is unchanged. */
@@ -868,7 +876,16 @@ static void ownership_tests(void)
     CHECKV(sc1(LX_chroot, "/tmp/lxown") == -20, 0);   /* ENOTDIR */
     long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
     if (c == 0) {
+        /* fchownat(AT_FDCWD, "", AT_EMPTY_PATH) is the working directory. */
+        CHILD_CHECK(sc1(LX_chdir, "/tmp/lxodir") == 0, 8);
+        CHILD_CHECK(sc5(LX_fchownat, LX_AT_FDCWD, "", 7000, -1, LX_AT_EMPTY_PATH) == 0, 9);
+        CHILD_CHECK((owner_of("/tmp/lxodir", 0) >> 32) == 7000, 10);
+        /* A directory opened before the chroot is not a way back out. */
+        long outer = sc4(LX_openat, LX_AT_FDCWD, "/tmp", LINUX_O_DIRECTORY, 0);
+        CHILD_CHECK(outer >= 0, 11);
         CHILD_CHECK(sc1(LX_chroot, "/tmp/lxroot") == 0, 2);
+        CHILD_CHECK(sc4(LX_openat, outer, "lxown", 0, 0) == -13, 12);   /* EACCES: opened under the old root */
+        CHILD_CHECK(sc1(LX_fchdir, outer) == -13, 13);
         long m = sc4(LX_openat, LX_AT_FDCWD, "/marker", 0, 0);
         CHILD_CHECK(m >= 0, 3);
         CHILD_CHECK(sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxroot/marker", 0, 0) == -2, 4);   /* outside: gone */
@@ -897,6 +914,26 @@ static void ownership_tests(void)
     sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxown", 0);
     sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxroot/marker", 0);
     sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxroot", LX_AT_REMOVEDIR);
+    sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxodir.lnk", 0);
+    sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxodir", LX_AT_REMOVEDIR);
+
+    /* -1 keeps an id in the set*id calls (a regression of this unit's
+     * first build, found in review: it reached them as 4294967295). */
+    c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        uint32_t r = 9, e = 9, sv = 9;
+        CHILD_CHECK(sc3(LX_setresuid, -1, -1, -1) == 0, 2);
+        CHILD_CHECK(sc3(LX_setresgid, -1, 1000, -1) == 0, 3);
+        CHILD_CHECK(sc3(LX_getresgid, &r, &e, &sv) == 0 && r == 0 && e == 1000 && sv == 0, 4);
+        CHILD_CHECK(sc2(LX_setregid, -1, 0) == 0, 5);
+        CHILD_CHECK(sc3(LX_getresgid, &r, &e, &sv) == 0 && r == 0 && e == 0, 6);
+        CHILD_CHECK(sc3(LX_setresuid, -1, 1000, -1) == 0, 7);   /* musl's seteuid */
+        CHILD_CHECK(sc3(LX_getresuid, &r, &e, &sv) == 0 && r == 0 && e == 1000 && sv == 0, 8);
+        CHILD_CHECK(sc2(LX_setreuid, -1, 0) == 0, 9);
+        CHILD_CHECK(sc3(LX_getresuid, &r, &e, &sv) == 0 && r == 0 && e == 0 && sv == 0, 10);
+        lx_exit(0);
+    }
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
 }
 
 static void busybox_needs(long pid)

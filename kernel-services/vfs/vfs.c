@@ -1330,14 +1330,20 @@ int vfs_chown(struct vnode *vn, uint32_t uid, uint32_t gid)
 {
     const struct credentials *c = cred_current();
     bool admin = cred_has(c, PRIV_SYS_ADMIN);
-    bool owner = c->euid == vn->uid;
-    if (uid != VFS_ID_KEEP && !admin && !(owner && uid == vn->uid))
-        return -EPERM;
-    if (gid != VFS_ID_KEEP && !admin && !(owner && (gid == vn->gid || cred_in_group(c, gid))))
-        return -EPERM;
     if (vn->mnt != NULL && (vn->mnt->flags & MOUNT_RDONLY))
         return -EROFS;
+    /* The rule reads the owner and group under the lock the change is
+     * made under: checked outside it, a group change could be authorised
+     * by an owner another chown had already replaced (found in review). */
     mutex_lock(&vn->lock);
+    bool owner = c->euid == vn->uid;
+    if ((uid != VFS_ID_KEEP && !admin && !(owner && uid == vn->uid)) ||
+        (gid != VFS_ID_KEEP && !admin && !(owner && (gid == vn->gid || cred_in_group(c, gid))))) {
+        mutex_unlock(&vn->lock);
+        return -EPERM;
+    }
+    const uint32_t old_uid = vn->uid, old_gid = vn->gid, old_mode = vn->mode;
+    const uint64_t old_ctime = vn->ctime_ns;
     if (uid != VFS_ID_KEEP)
         vn->uid = uid;
     if (gid != VFS_ID_KEEP)
@@ -1351,6 +1357,14 @@ int vfs_chown(struct vnode *vn, uint32_t uid, uint32_t gid)
     }
     vn->ctime_ns = vfs_now_ns();
     int rc = vn->ops->setattr != NULL ? vn->ops->setattr(vn) : 0;
+    if (rc) {
+        /* Not stored: the vnode says what the inode says, not what was
+         * asked, or a later write-back would store it after all. */
+        vn->uid = old_uid;
+        vn->gid = old_gid;
+        vn->mode = old_mode;
+        vn->ctime_ns = old_ctime;
+    }
     mutex_unlock(&vn->lock);
     return rc;
 }
@@ -1364,9 +1378,13 @@ static int may_search(struct vnode *dir)
     return rc;
 }
 
+struct walk;
+static struct vnode *walk_root(struct walk *w);
+
 /* One component from `dir` (referenced, consumed). Returns a referenced
- * child. Entering a directory needs search permission on it. */
-static int step(struct vnode *dir, const char *name, size_t len, struct vnode **out)
+ * child. Entering a directory needs search permission on it. `..` stops
+ * at the walk's root (walk_root). */
+static int step(struct walk *w, struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
     if (len == 1 && name[0] == '.') {
         int rc = may_search(dir);
@@ -1385,9 +1403,10 @@ static int step(struct vnode *dir, const char *name, size_t len, struct vnode **
          * a different vnode, no longer equal to the root, and the walk
          * would climb out of the very mount it was confined to.
          */
-        struct vnode *proot = vfs_current_root();
-        bool at_root = dir == proot;
-        vnode_put(proot);
+        /* The root this walk began with, not the process's root now: a
+         * chroot on another thread (P39) must not move the boundary under
+         * a walk already past it. */
+        bool at_root = dir == walk_root(w);
         if (at_root) {
             int prc = may_search(dir);
             if (prc)
@@ -1456,12 +1475,29 @@ struct walk {
     char *buf;      /* 2 * VFS_PATH_MAX, or NULL */
     char *cur;      /* the half holding the path being walked */
     char *alt;      /* the other half */
+    /* The caller's root, referenced, captured at the walk's first need of
+     * it and used for all of it: an absolute start, an absolute link
+     * target and every `..` boundary (shell completeness S4, P39 -- the
+     * root became mutable with chroot, and a walk that re-read it at each
+     * `..` could see a nested chroot move the boundary below where it
+     * already stood, and climb past both). */
+    struct vnode *root;
 };
+
+static struct vnode *walk_root(struct walk *w)
+{
+    if (w->root == NULL)
+        w->root = vfs_current_root();
+    return w->root;
+}
 
 static void walk_fini(struct walk *w)
 {
     kfree(w->buf);
     w->buf = NULL;
+    if (w->root != NULL)
+        vnode_put(w->root);
+    w->root = NULL;
 }
 
 /*
@@ -1574,7 +1610,10 @@ static int walk_parent(struct vnode *start, const char *path, struct walk *w, ch
         /* Absolute means absolute *to this process*: a process given a
          * root below the global one cannot name its way out with a
          * leading slash. */
-        cur = vfs_current_root();
+        cur = walk_root(w);
+        if (cur == NULL)
+            return -ENOENT;   /* no root mounted yet: nothing is absolute */
+        vnode_get(cur);
         name_reset(w);
     } else {
         /* The one line every relative walk from every caller shares, and
@@ -1635,7 +1674,7 @@ static int walk_parent(struct vnode *start, const char *path, struct walk *w, ch
         struct vnode *linkdir = cur;
         vnode_get(linkdir);
         struct vnode *child;
-        int rc = step(cur, path, len, &child);
+        int rc = step(w, cur, path, len, &child);
         if (rc) {
             vnode_put(linkdir);
             return rc;
@@ -1651,7 +1690,10 @@ static int walk_parent(struct vnode *start, const char *path, struct walk *w, ch
             }
             if (absolute) {
                 vnode_put(linkdir);
-                cur = vfs_current_root();
+                cur = walk_root(w);
+                if (cur == NULL)
+                    return -ENOENT;
+                vnode_get(cur);
                 name_reset(w);
             } else {
                 cur = linkdir;   /* keeps linkdir's reference; the name stays the directory's */
@@ -1721,7 +1763,7 @@ static int resolve(struct vnode *start, const char *path, struct walk *w, unsign
         struct vnode *vn;
         if (dot_name(name, len)) {
             vnode_get(parent);
-            rc = step(parent, name, len, &vn);   /* consumes that reference */
+            rc = step(w, parent, name, len, &vn);   /* consumes that reference */
         } else {
             rc = lookup_in(parent, name, len, &vn);
         }
@@ -1821,6 +1863,8 @@ static void file_release(struct kobject *obj)
     }
     if (f->dir_path)
         kfree(f->dir_path);
+    if (f->dir_root)
+        vnode_put(f->dir_root);
     vnode_put(f->vn);
     kfree(f);
 }
@@ -1963,7 +2007,19 @@ static struct file *file_alloc(struct vnode *vn, unsigned flags)
     f->flags = flags;
     mutex_init(&f->lock, "file");
     f->wb_seq_seen = pagecache_wb_seq(&vn->pc);   /* a failure before this open is not this file's */
+    if (vn->type == VNODE_DIR)
+        f->dir_root = vfs_current_root();   /* the opener's: see file_dir_base_ok */
     return f;
+}
+
+bool file_dir_base_ok(const struct file *f)
+{
+    if (f->dir_root == NULL)
+        return true;
+    struct vnode *root = vfs_current_root();
+    bool ok = root == f->dir_root;
+    vnode_put(root);
+    return ok;
 }
 
 /* vfs_open's walk, which keeps the traversed name when `w` asks for one. */
@@ -2015,7 +2071,7 @@ static int open_walk(struct vnode *start, const char *path, unsigned flags, uint
             goto out;
         }
         if (dot_name(last, len)) {
-            rc = step(parent, last, len, &vn);   /* consumes the reference */
+            rc = step(w, parent, last, len, &vn);   /* consumes the reference */
             if (rc)
                 goto out;
             name_step(w, last, len);

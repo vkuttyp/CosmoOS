@@ -723,11 +723,23 @@ through `vfs_current_root`.** (Shell completeness S4.) `chroot`
 (`process_chroot`) replaces `root` and the working directory together
 under the lock and puts the old ones after it; `vfs_current_root` takes
 its reference under the same lock, and procfs reads another process's
-root there. Until S4 the root was fixed at spawn and read without a lock.
+root there. A path walk takes the root once, at its first need of it, and
+uses that one for its absolute start, absolute link targets and every
+`..` boundary (`struct walk`'s `root`): re-read at each `..`, a nested
+chroot on another thread could move the boundary below where the walk
+already stood and let it climb past both roots (found in review). A
+directory file records its opener's root (`dir_root`) and is a lookup
+base -- an `*at` call's directory, `fchdir`'s target -- only for a process
+with that root (`file_dir_base_ok`, `-EACCES` otherwise): a directory
+opened before a chroot, or handed to a process with a narrower root, is
+not a way out (found in review; Linux allows both). Until S4 the root was
+fixed at spawn and read without a lock.
 *Checked by*: `lxtest`'s ownership section (a child's `chroot`: `/marker`
 inside opens, the same file by its outer path is `ENOENT`, `../../marker`
-stops at the root, `getcwd` is `/`; the parent's root is unchanged;
-refused to uid 1000). With the working directory left where it was (a
+stops at the root, `getcwd` is `/`, and `/tmp` opened before the chroot
+is `EACCES` to `openat` and `fchdir`; the parent's root is unchanged;
+refused to uid 1000). The walk's single root is by construction: no test
+races a nested chroot against a walk. With the working directory left where it was (a
 mutation), `../../marker` from outside the root fails.
 
 ## Gaps (documented, not invariants)

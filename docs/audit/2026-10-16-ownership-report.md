@@ -115,6 +115,26 @@ New features are proven by their acceptance test; no probe (AGENTS.md).
   it).
 - **Branch CI**: recorded in the PR.
 
+## Review
+
+Qodo and Codex, on `daa57c67`: twelve comments, eight distinct findings,
+all real. The review commit fixes them:
+
+| Finding | Fix |
+|---|---|
+| The `setresuid`, `setresgid`, `setreuid` and `setregid` doors passed `-1` ("keep") as 4294967295 (both reviewers). A `sed` that renamed this unit's id helper also rewrote the credential calls' uses of the old one; no test passed `-1` there. | restored to `lx_id`; `lxtest` now checks `-1` in each (`setresuid(-1, 1000, -1)` is musl's `seteuid`) |
+| A directory handle opened before `chroot`, or handed to a process with a narrower root, reached outside the root through `openat` or `fchdir` (both) | a directory file records its opener's root; it is a lookup base only for a process with that root (`-EACCES`); `lxtest` |
+| A walk re-read the root at every `..`, so a nested `chroot` on another thread could move the boundary below the walk and let it climb past both | a walk takes the root once (`struct walk`'s `root`) for all its boundary checks and absolute restarts |
+| `vfs_chown` checked the owner before taking the vnode's lock (both) | the check is under the lock |
+| `vfs_chown` kept the new owner in the vnode when the filesystem failed to store it | the old owner, group, mode and time restored on failure |
+| `fchownat`'s flags were checked after truncation to 32 bits | checked whole; `lxtest` passes `1 << 32` |
+| `fchownat(AT_FDCWD, "", ..., AT_EMPTY_PATH)` was `EBADF` | the working directory, as Linux; `lxtest` |
+| `fchownat` with `AT_SYMLINK_NOFOLLOW` on `link/` changed nothing (`ENOTDIR`) | a trailing slash follows the link, as Linux (in `lookup_at`, so `fchmodat` too); `lxtest` |
+
+`vfs_setattr` (chmod) has the same check-before-lock and no-rollback
+shape; it is recorded (inventory §14), not changed here. The walk's
+single root is by construction: no test races a nested chroot.
+
 ## Recorded instead of done
 
 Inventory §14: no native `chown`/`chroot`; `chown` on procfs or devfs
