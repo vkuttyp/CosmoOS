@@ -67,4 +67,19 @@ for both architectures, and for a fallback to the subject search (`--fix`).
 
 ## Validation
 
-(filled in from the run)
+The validation matrix on `192446b7`, every step PASS (the boot times are
+the harness's own lines):
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| `host-test`, `fuzz`, `analyze` | pass | pass |
+| debug `test`, `QEMU_SMP=1` / `2` / `4` | 134.1 / 151.9 / 145.2 s | 147.8 / 151.7 / 161.6 s |
+| `test-smp2` | 149.1 s | 159.8 s |
+| `test-chaos` | 154.2 s (the firmware stalled once; the harness's retry booted) | 150.8 s |
+| `test-harness-retry` | 152.3 s | 163.9 s |
+| `BUILD=release test` | 17.5 s | 21.0 s |
+| `BUILD=release test-display` | 26.2 s (checks d and e) | 19.8 s |
+
+The network harness passed in every debug boot. The change compiles only
+into `CRASH_TEST=3` builds (and `display_test.py`'s check e); every other
+build is unchanged.
