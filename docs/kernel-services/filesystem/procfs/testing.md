@@ -32,7 +32,7 @@ covers what the files say and what the namespace refuses:
   the console shell's parent, `S`; the script's shell, `S`), `top`'s VSZ
   for the same `sleep`, its `status` (`VmSize`, `VmRSS`, `State:\tS
   (sleeping)`), `free` against `sysctl` (the same total; the free figure
-  within 2 MiB of one read just before -- 8 to 80 kB apart in the runs
+  within 2 MiB of one read just before -- 8 to 764 kB apart in the runs
   that added it), `kill -l`, a process's own `environ`, `exe`, `cwd` and
   `root`, `version` against `uname -r` and `cpuinfo`'s blocks against
   `hw.ncpu`. `test-net-login`'s stage h runs `ps` on the installed system
