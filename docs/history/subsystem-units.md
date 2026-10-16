@@ -3038,3 +3038,16 @@ See the [history index](README.md).
   `tar` testsuite cases excluded for want of `bunzip2` now pass and are no
   longer excluded.
   Report: `docs/audit/2026-10-15-everyday-applets-report.md`.
+- **After 1.0: the crash test's lockdep owner (2026-10-16).** Main went
+  red at #393's merge: `test-display`'s panic-lockdep boot showed
+  "lockdep: graph raw lock re-entry on CPU 1" instead of its own panic.
+  The `CRASH_TEST=3` seam faked lockdep's raw lock as held by the next
+  CPU, a running one, which entered lockdep from an interrupt before the
+  panic stopped it. The word now names CPU `CONFIG_MAX_CPUS`, which no CPU
+  is; the seam makes the race certain and observed (a thread pinned to the
+  next CPU takes a tracked lock after the hold every run, and the panic
+  waits until lockdep's raw lock has seen it waiting, naming it in the
+  line check e requires), with interrupts off on the panicking CPU from the
+  hold on. `tools/crash-lockdep-owner-probe.py --old` shows the old word
+  failing under that race on both architectures.
+  Report: `docs/audit/2026-10-16-crash-lockdep-owner-report.md`.
