@@ -837,6 +837,16 @@ static long owner_of(const char *path, int nofollow)
  * lchown -- and AT_EMPTY_PATH) and chroot, as root and refused to a
  * process of uid 1000 (which has no privileges).
  */
+static int chroot_sleeper(void *arg)
+{
+    (void)arg;
+    for (;;) {   /* a second thread, until the process ends */
+        struct lx_timespec nap = { 1, 0 };
+        sc2(LX_nanosleep, &nap, 0);
+    }
+    return 0;
+}
+
 static void ownership_tests(void)
 {
     sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxown.lnk", 0);
@@ -858,7 +868,8 @@ static void ownership_tests(void)
     CHECKV(owner_of("/tmp/lxown", 0) == OWNER(4000, 1000), owner_of("/tmp/lxown", 0));
     CHECKV(sc5(LX_fchownat, fd, "", 4000, -1, 0) == -2, 0);                 /* an empty path needs the flag */
     CHECKV(sc5(LX_fchownat, LX_AT_FDCWD, "/tmp/lxown", 0, 0, 0x8000) == -22, 0);   /* an unknown flag */
-    CHECKV(sc5(LX_fchownat, LX_AT_FDCWD, "/tmp/lxown", 0, 0, 1L << 32) == -22, 0);  /* one above 32 bits */
+    /* Linux's flags are an int: the register's upper half is not read. */
+    CHECKV(sc5(LX_fchownat, LX_AT_FDCWD, "/tmp/lxown", -1, -1, 1L << 32) == 0, 0);
     /* A trailing slash enters the link's directory even with NOFOLLOW. */
     sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxodir.lnk", 0);
     sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/lxodir", 0755);
@@ -897,6 +908,19 @@ static void ownership_tests(void)
     int32_t st = -1;
     CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
     CHECKV(owner_of("/tmp/lxroot/marker", 0) >= 0, 0);   /* the parent's root is its own */
+
+    /* Refused in a process of two threads (EINVAL): another thread could
+     * be mid-walk under the old root. */
+    c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        static int32_t ptid, ctid;   /* THREAD_FLAGS writes both words */
+        long t = lx_clone(chroot_sleeper, g_stacks[0] + sizeof(g_stacks[0]), 0, THREAD_FLAGS, &ptid, &ctid, g_tcb);
+        CHILD_CHECK(t > 0, 2);
+        CHILD_CHECK(sc1(LX_chroot, "/tmp/lxroot") == -22, 3);
+        CHILD_CHECK(sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxroot/marker", 0, 0) >= 0, 4);   /* the root is unchanged */
+        lx_exit(0);
+    }
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
 
     /* Refused to uid 1000: another's file, and chroot (PRIV_MOUNT). */
     c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);

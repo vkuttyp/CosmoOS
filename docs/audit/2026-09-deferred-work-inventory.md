@@ -1248,5 +1248,6 @@ each; none is needed by M2's acceptance test.
   the vnode's lock and keeps the new mode in the vnode when the
   filesystem fails to store it; S4's review found both in `vfs_chown` and
   fixed them there.
-- A path walk's single root (P39) is by construction only: no test races
-  a nested `chroot` against a walk on another thread.
+- `chroot` is refused to a process of more than one thread (P39), where
+  Linux allows it; a threaded program that chroots must do it before its
+  first `clone`.

@@ -721,7 +721,12 @@ every text whole, no exec record or rendered text left over).
 **P39. A process's root changes only under `p->lock`, and is read only
 through `vfs_current_root`.** (Shell completeness S4.) `chroot`
 (`process_chroot`) replaces `root` and the working directory together
-under the lock and puts the old ones after it; `vfs_current_root` takes
+under the lock and puts the old ones after it, and only in a process of
+one live thread (`-EINVAL` otherwise, as Linux refuses `unshare(CLONE_FS)`
+to a threaded process): with no other thread, no walk or open can have
+taken the old working directory and meet the new root, in either order
+(found in review; the root is never shared between processes, since
+`CLONE_FS` is refused); `vfs_current_root` takes
 its reference under the same lock, and procfs reads another process's
 root there. A path walk takes the root once, at its first need of it, and
 uses that one for its absolute start, absolute link targets and every
@@ -738,8 +743,9 @@ fixed at spawn and read without a lock.
 inside opens, the same file by its outer path is `ENOENT`, `../../marker`
 stops at the root, `getcwd` is `/`, and `/tmp` opened before the chroot
 is `EACCES` to `openat` and `fchdir`; the parent's root is unchanged;
-refused to uid 1000). The walk's single root is by construction: no test
-races a nested chroot against a walk. With the working directory left where it was (a
+refused to uid 1000; and refused, `EINVAL`, to a process with a second
+thread, its root unchanged). The walk's single root is by construction:
+with chroot single-threaded, no walk can race one. With the working directory left where it was (a
 mutation), `../../marker` from outside the root fails.
 
 ## Gaps (documented, not invariants)

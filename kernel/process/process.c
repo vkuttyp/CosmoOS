@@ -1941,14 +1941,6 @@ struct vnode *process_cwd_snapshot(char *path, size_t len)
     return vn;
 }
 
-/* Another process's working directory's path (/proc/<pid>/cwd). */
-void process_cwd_path(struct process *p, char *path, size_t len)
-{
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    strlcpy(path, p->cwd_path_locked, len);
-    spin_unlock_irqrestore(&p->lock, s);
-}
-
 static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpath);
 static int chdir_inner(struct process *cur, const char *path);
 
@@ -2039,7 +2031,13 @@ static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpat
  *
  * P39: `root` changes only under `p->lock`, with the working directory,
  * and the old ones are put after it; vfs_current_root takes its
- * reference under the same lock.
+ * reference under the same lock. And only in a process of one thread
+ * (-EINVAL otherwise, as Linux refuses unshare(CLONE_FS) to a threaded
+ * one): no other thread can be in a walk, or an open, that took the old
+ * working directory and would meet the new root -- every order of those
+ * two reads against the swap is then the caller's own, before or after
+ * (found in review). The root is never shared between processes
+ * (CLONE_FS is refused), so the calling thread is the only reader.
  */
 int process_chroot(struct vnode *dir)
 {
@@ -2055,6 +2053,12 @@ int process_chroot(struct vnode *dir)
     vnode_get(dir);   /* the root's */
     vnode_get(dir);   /* the working directory's */
     arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
+    if (cur->nr_live != 1) {   /* under the lock a clone counts a new thread under */
+        spin_unlock_irqrestore(&cur->lock, s);
+        vnode_put(dir);
+        vnode_put(dir);
+        return -EINVAL;
+    }
     struct vnode *old_root = cur->root, *old_cwd = cur->cwd_locked;
     cur->root = dir;
     cur->cwd_locked = dir;

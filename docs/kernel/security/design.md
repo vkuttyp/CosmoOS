@@ -162,7 +162,9 @@ changes under the process lock, with the working directory, and is read
 only through `vfs_current_root`, which takes its reference under the same
 lock (the process layer's P39): a walk on another thread holds the old
 root it began with, never a freed one, and uses that one root for the
-whole walk. A directory handle opened before the chroot -- or handed to
+whole walk; and `chroot` is refused to a process of more than one live
+thread, so no other thread can be resolving a path across the change. A
+directory handle opened before the chroot -- or handed to
 a process with a narrower root -- is refused as a lookup base (`openat`
 relative to it, `fchdir` into it: `-EACCES`), so open handles are not a
 way out either; Linux allows both, which is why its chroot is not a

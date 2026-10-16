@@ -488,9 +488,6 @@ struct vnode *process_cwd_snapshot(char *path, size_t len);
 /* chroot (shell completeness S4): `dir` becomes the caller's root and its
  * working directory. PRIV_MOUNT; -ENOTDIR; search permission (-EACCES). */
 int process_chroot(struct vnode *dir);
-/* `p`'s working directory's path, normalised and absolute in `p`'s own
- * root (/proc/<pid>/cwd; shell completeness S3). */
-void process_cwd_path(struct process *p, char *path, size_t len);
 
 /*
  * Another process's memory sizes, for /proc (shell completeness S3):

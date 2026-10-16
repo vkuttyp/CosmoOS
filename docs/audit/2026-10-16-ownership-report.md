@@ -127,13 +127,20 @@ all real. `03dd868c` fixes them:
 | A walk re-read the root at every `..`, so a nested `chroot` on another thread could move the boundary below the walk and let it climb past both | a walk takes the root once (`struct walk`'s `root`) for all its boundary checks and absolute restarts |
 | `vfs_chown` checked the owner before taking the vnode's lock (both) | the check is under the lock |
 | `vfs_chown` kept the new owner in the vnode when the filesystem failed to store it | the old owner, group, mode and time restored on failure |
-| `fchownat`'s flags were checked after truncation to 32 bits | checked whole; `lxtest` passes `1 << 32` |
+| `fchownat`'s flags were checked after truncation to 32 bits (Qodo) | first checked whole; Codex's re-review then showed Linux declares the argument an `int` and truncates it, so the truncation is Linux's and stays; `lxtest` passes `1 << 32` and expects success |
 | `fchownat(AT_FDCWD, "", ..., AT_EMPTY_PATH)` was `EBADF` | the working directory, as Linux; `lxtest` |
 | `fchownat` with `AT_SYMLINK_NOFOLLOW` on `link/` changed nothing (`ENOTDIR`) | a trailing slash follows the link, as Linux (in `lookup_at`, so `fchmodat` too); `lxtest` |
 
+Codex's re-review of the fixes found three more, all real:
+
+| Finding | Fix |
+|---|---|
+| The walk captured its root lazily, so a chroot on another thread between the caller's working-directory snapshot and the walk's first `..` gave a walk standing outside the new root that root as its boundary | `chroot` is refused to a process of more than one live thread (`-EINVAL`, as Linux refuses `unshare(CLONE_FS)` there): no other thread can be in a walk across the change, whatever order it read the two in; `lxtest` |
+| An open racing a chroot could stamp an outside directory with the new root | the same rule |
+| procfs checked "same root" and copied the link in two holds of the process's lock | one hold (`proc_root_relative`) |
+
 `vfs_setattr` (chmod) has the same check-before-lock and no-rollback
-shape; it is recorded (inventory §14), not changed here. The walk's
-single root is by construction: no test races a nested chroot.
+shape; it is recorded (inventory §14), not changed here.
 
 ## Recorded instead of done
 

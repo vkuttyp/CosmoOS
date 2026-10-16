@@ -1350,9 +1350,12 @@ static uint32_t lx_owner_id(uint64_t v)
  * itself, which is lchown; AT_EMPTY_PATH with an empty path changes the
  * open file `dirfd`.
  */
-static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t gid, uint64_t flags)
+static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t gid, unsigned flags)
 {
-    if (flags & ~(uint64_t)(LX_AT_SYMLINK_NOFOLLOW | LX_AT_EMPTY_PATH))   /* the whole argument, not its low half */
+    /* `flags` is Linux's `int`: the register's upper half is not part of
+     * it, as Linux's entry truncates it (review: a first fix checked all 64
+     * bits, which Linux does not). */
+    if (flags & ~(unsigned)(LX_AT_SYMLINK_NOFOLLOW | LX_AT_EMPTY_PATH))
         return -EINVAL;
     /* Only whether the path is empty: lookup_at copies it in again, and two
      * path buffers would not fit the kernel stack's frame limit. */
@@ -1387,7 +1390,7 @@ static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t
 
 static int64_t lx_fchownat(struct syscall_args *a)
 {
-    return do_fchownat((int64_t)a->a[0], a->a[1], a->a[2], a->a[3], a->a[4]);
+    return do_fchownat((int64_t)a->a[0], a->a[1], a->a[2], a->a[3], (unsigned)a->a[4]);
 }
 #ifdef LX_chown
 static int64_t lx_chown(struct syscall_args *a) { return do_fchownat(LX_AT_FDCWD, a->a[0], a->a[1], a->a[2], 0); }
