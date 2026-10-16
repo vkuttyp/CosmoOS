@@ -711,6 +711,8 @@ static int proc_root_relative(struct process *p, enum proc_kind kind, char *buf,
     struct vnode *global = vfs_root(), *mine = vfs_current_root();
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     bool same = mine == (p->root ? p->root : global) && myns == theirns;
+    if (kind == PROC_EXE && p->chrooted_since_exec)
+        same = false;   /* the exec record's name was resolved in the root before the chroot */
     if (same && kind == PROC_CWD)
         strlcpy(buf, p->cwd_path_locked, n);
     else if (same)
@@ -742,7 +744,7 @@ static int link_target(enum proc_kind kind, pid_t pid, char *buf, size_t n)
         rc = -ENOENT;
     else if (kind == PROC_CWD || kind == PROC_ROOT_LINK)
         rc = proc_root_relative(p, kind, buf, n);
-    else if (proc_root_relative(p, PROC_ROOT_LINK, buf, n) != 0)
+    else if (proc_root_relative(p, PROC_EXE, buf, n) != 0)
         rc = -ENOENT;   /* exe: a name in another root names nothing here (the exec record is fixed per exec) */
     else {
         struct exec_record *r = process_exec_record(p);

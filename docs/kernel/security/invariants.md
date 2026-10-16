@@ -138,12 +138,26 @@ through any relative path without trying; a root and an explicit working
 directory are refused together, since the cwd would have to be resolved
 in the child's namespace to know it is inside.
 
-A root is set only at `spawn`, with `COSMO_SPAWN_SETROOT`, and the path
-is resolved **in the caller's own namespace** — so a process already
-confined can only name a directory inside its own root, and confinement
-tightens but never loosens. It is privileged, like setting credentials:
-a process that could root itself anywhere could root itself at a
-directory whose contents it chose. Privilege flows down and never up.
+A root is set at `spawn`, with `COSMO_SPAWN_SETROOT`, or since shell
+completeness S4 by `chroot` (`PRIV_MOUNT`, in a process of one live
+thread, its working directory moved to the new root; the process layer's
+P39), and the path is resolved **in the caller's own namespace** — so a
+process already confined can only name a directory inside its own root,
+and confinement tightens but never loosens. It is privileged, like
+setting credentials: a process that could root itself anywhere could root
+itself at a directory whose contents it chose. Privilege flows down and
+never up.
+
+Two more ways out are closed since S4, both found in its review. A
+directory handle is a lookup base only for a process whose root is the
+one it was opened under (`file_dir_base_ok`): one opened before a chroot,
+or handed to a process with a narrower root, is `EACCES`. And a confined
+walk starts only from a directory that lies under its root
+(`within_root`, climbing the filesystem's own `..`): a directory renamed
+out from under the root after it was entered or opened -- the working
+directory or a handle -- would otherwise be a base whose `..` never meets
+the root, which a root given at spawn allowed too. Each walk uses the one
+root it began with.
 
 The executable is found in the *caller's* namespace before the child
 exists, so a confined child needs no copy of its own program — but
@@ -155,7 +169,11 @@ seen from outside, and exits nonzero when it tries to reach a directory
 that exists only outside; and a child rooted at a *mounted* filesystem
 cannot climb out through it -- checked by trying to enter a directory
 that exists only outside the mount, since `pwd` alone cannot tell an
-escape from confinement when both print `/`).
+escape from confinement when both print `/`); and `lxtest`'s ownership
+section (a `chroot`ed child's handle opened before the chroot is `EACCES`
+to `openat` and `fchdir`; its handle on a directory the parent renames out
+of the jail is `EACCES` as a base, and so is a walk from it after `fchdir`;
+`chroot` with a second thread is `EINVAL`).
 
 **S11. A process sees and signals only its own domain, unless it is in
 the one the system booted in.** Every process belongs to a domain,

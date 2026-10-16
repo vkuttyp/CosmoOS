@@ -909,6 +909,50 @@ static void ownership_tests(void)
     CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
     CHECKV(owner_of("/tmp/lxroot/marker", 0) >= 0, 0);   /* the parent's root is its own */
 
+    /* A directory moved out from under the root is not a way out: a child
+     * chrooted at /tmp/lxjail opens /in; the parent, outside, renames it to
+     * /tmp/lxout; from it `..` would reach /tmp, so the walk is refused. */
+    {
+        sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/lxjail", 0755);
+        sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/lxjail/in", 0755);
+        long m2 = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxjail/m2", LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, 0644);
+        long lm = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxmark", LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, 0644);
+        CHECKV(m2 >= 0 && lm >= 0, m2);
+        sc1(LX_close, m2);
+        sc1(LX_close, lm);
+        int ready[2], moved[2];
+        CHECKV(sc2(LX_pipe2, ready, 0) == 0 && sc2(LX_pipe2, moved, 0) == 0, 0);
+        c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+        if (c == 0) {
+            CHILD_CHECK(sc1(LX_chroot, "/tmp/lxjail") == 0, 2);
+            long in = sc4(LX_openat, LX_AT_FDCWD, "/in", LINUX_O_DIRECTORY, 0);
+            CHILD_CHECK(in >= 0, 3);
+            long ok = sc4(LX_openat, in, "../m2", 0, 0);   /* inside: the control */
+            CHILD_CHECK(ok >= 0, 4);
+            sc1(LX_close, ok);
+            CHILD_CHECK(sc3(LX_write, ready[1], "r", 1) == 1, 5);
+            char b;
+            CHILD_CHECK(sc3(LX_read, moved[0], &b, 1) == 1, 6);
+            CHILD_CHECK(sc4(LX_openat, in, "../lxmark", 0, 0) == -13, 7);   /* EACCES: /tmp is outside */
+            CHILD_CHECK(sc1(LX_fchdir, in) == 0, 8);                          /* entering it is not the escape */
+            CHILD_CHECK(sc4(LX_openat, LX_AT_FDCWD, "../lxmark", 0, 0) == -13, 9);   /* walking from it is */
+            lx_exit(0);
+        }
+        char b;
+        CHECKV(c > 0 && sc3(LX_read, ready[0], &b, 1) == 1, c);
+        CHECKV(sc4(LX_renameat, LX_AT_FDCWD, "/tmp/lxjail/in", LX_AT_FDCWD, "/tmp/lxout") == 0, 0);
+        CHECKV(sc3(LX_write, moved[1], "m", 1) == 1, 0);
+        CHECKV(sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
+        for (int i = 0; i < 2; i++) {
+            sc1(LX_close, ready[i]);
+            sc1(LX_close, moved[i]);
+        }
+        sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxout", LX_AT_REMOVEDIR);
+        sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxjail/m2", 0);
+        sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxjail", LX_AT_REMOVEDIR);
+        sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxmark", 0);
+    }
+
     /* Refused in a process of two threads (EINVAL): another thread could
      * be mid-walk under the old root. */
     c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);

@@ -562,7 +562,8 @@ The census, so that the next field added is classified when it is added:
 | field | mutable after spawn? | how it is read |
 | --- | --- | --- |
 | `cwd_locked`, `cwd_path_locked` | **yes**, by `chdir` from any thread | `process_cwd_get()` / `process_cwd_snapshot()` — a *reference*, and the path from the same acquisition |
-| `root`, `mntns`, `utsns` | no — set at spawn, inherited | read directly; sound, and stays sound only while they remain immutable |
+| `root` | **yes** since shell completeness S4, by `chroot`, only in a process of one live thread, with the working directory | `vfs_current_root()` — a *reference* taken under `p->lock` (P39); procfs reads another process's under its lock |
+| `mntns`, `utsns` | no — set at spawn, inherited | read directly; sound, and stays sound only while they remain immutable |
 | `handles` | yes | its own table lock; `handle_lookup` returns a referenced object the caller releases |
 | `space` | not swapped | its own lock |
 | `syscall_mask` | narrows only | read without the lock, **but not for the reason the comment used to give**: writes take `p->lock` and are per-word atomic stores, this is a per-word atomic load, and a reader sees one whole word |

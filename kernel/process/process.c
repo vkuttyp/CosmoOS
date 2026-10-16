@@ -1163,6 +1163,7 @@ static void fork_inherit(struct process *p, struct process *parent)
     memcpy(p->cmdline, parent->cmdline, parent->cmdline_len);
     p->cmdline_len = parent->cmdline_len;
     p->exec_rec = exec_record_get(parent->exec_rec);   /* shared, never copied: nothing writes one */
+    p->chrooted_since_exec = parent->chrooted_since_exec;
     spin_unlock_irqrestore(&parent->lock, s);
     p->handles.limit = p->rlim.v[COSMO_RLIMIT_NOFILE] < HANDLE_TABLE_SIZE ? (unsigned)p->rlim.v[COSMO_RLIMIT_NOFILE]
                                                                         : HANDLE_TABLE_SIZE;
@@ -1366,6 +1367,7 @@ int process_exec_images(const struct process_image *exe, const struct process_im
     p->cmdline_len = ib->cmdline_len;
     struct exec_record *old_rec = p->exec_rec;
     p->exec_rec = ib->rec;
+    p->chrooted_since_exec = false;   /* this exec's name is in the current root */
     __atomic_store_n(&p->dumpable, 1, __ATOMIC_RELAXED);
     p->main_thread = self;
     self->user_tid = p->pid;   /* the exec'ing thread becomes the first: its tid is the pid */
@@ -2062,6 +2064,7 @@ int process_chroot(struct vnode *dir)
     struct vnode *old_root = cur->root, *old_cwd = cur->cwd_locked;
     cur->root = dir;
     cur->cwd_locked = dir;
+    cur->chrooted_since_exec = true;
     strlcpy(cur->cwd_path_locked, "/", sizeof(cur->cwd_path_locked));   /* paths are the process's own root's */
     spin_unlock_irqrestore(&cur->lock, s);
     /* Safe to be the last references: a walk that began under the old

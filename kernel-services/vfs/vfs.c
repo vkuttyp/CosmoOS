@@ -1447,6 +1447,47 @@ static int step(struct walk *w, struct vnode *dir, const char *name, size_t len,
     return follow_mount(out);
 }
 
+/*
+ * Whether `dir` lies under `root`: climbing `..` as step() climbs it -- out
+ * of a mount through its mountpoint, then the filesystem's own entry --
+ * meets `root` before the top of the tree. Free for an unconfined walk
+ * (`root` is the global root, which everything is under); for a confined
+ * one it costs a lookup per level, bounded by the depth a path can name.
+ */
+#define WITHIN_ROOT_MAX_DEPTH (VFS_PATH_MAX / 2)
+static bool within_root(struct vnode *dir, struct vnode *root)
+{
+    if (root == NULL || root == g_root_mount->root)
+        return true;
+    struct vnode *cur = dir;
+    vnode_get(cur);
+    for (unsigned depth = 0; depth < WITHIN_ROOT_MAX_DEPTH; depth++) {
+        if (cur == root) {
+            vnode_put(cur);
+            return true;
+        }
+        if (cur->mnt->root == cur) {
+            if (cur->mnt->mountpoint == NULL)
+                break;   /* the top of the tree, and the root was not on the way */
+            struct vnode *mp = cur->mnt->mountpoint;
+            vnode_get(mp);
+            vnode_put(cur);
+            cur = mp;
+            continue;   /* the covered directory, then its own `..` */
+        }
+        struct vnode *parent = NULL;
+        mutex_lock(&cur->lock);
+        int rc = (cur->flags & VNODE_DEAD) ? -ENOENT : cur->ops->lookup(cur, "..", 2, &parent);
+        mutex_unlock(&cur->lock);
+        vnode_put(cur);
+        if (rc)
+            return false;   /* removed, or a filesystem that cannot say: not shown to be inside */
+        cur = parent;
+    }
+    vnode_put(cur);
+    return false;
+}
+
 static bool dot_name(const char *name, size_t len)
 {
     return (len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.');
@@ -1623,6 +1664,13 @@ static int walk_parent(struct vnode *start, const char *path, struct walk *w, ch
         int hrc = cwd_hold_walk(start);
         if (hrc)
             return hrc;
+        /* A confined walk starts only from inside its root: a directory
+         * renamed out from under the root after it was entered or opened
+         * would otherwise be a base whose `..` never meets the root (P39;
+         * found in review, and older than chroot -- a root given at spawn
+         * had it too). */
+        if (!within_root(start, walk_root(w)))
+            return -EACCES;
         cur = start;
         vnode_get(cur);
     }

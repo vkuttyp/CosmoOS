@@ -291,6 +291,11 @@ struct process {
     /* What the last exec recorded (above); under `lock`, referenced. NULL
      * for a process made before this existed in its build. */
     struct exec_record *exec_rec;
+    /* chroot since the last exec (shell completeness S4): the exec
+     * record's name was resolved in another root, so /proc/<pid>/exe
+     * names nothing. Under `lock`; set by chroot, cleared by exec,
+     * inherited by fork. */
+    bool chrooted_since_exec;
     /* ITIMER_REAL (setitimer, alarm; kernel/process/itimer.c): SIGALRM at
      * expiry, re-armed by the interval. itimer_lock serialises the setters;
      * the callback reads the two words atomically. A fork starts disarmed;

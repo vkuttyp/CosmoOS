@@ -2033,6 +2033,8 @@ static int cfs_vnode_setattr(struct vnode *vn)
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL)
         return 0;
+    if (is_snapdir(vn) || snap_tag_of(vn))
+        return -EROFS;   /* a snapshot's metadata is what it was, as its data is (the caller restores the vnode) */
     mutex_lock(&fs->lock);
     int rc = inode_sync(fs, vn);
     mutex_unlock(&fs->lock);

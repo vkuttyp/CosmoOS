@@ -139,6 +139,15 @@ Codex's re-review of the fixes found three more, all real:
 | An open racing a chroot could stamp an outside directory with the new root | the same rule |
 | procfs checked "same root" and copied the link in two holds of the process's lock | one hold (`proc_root_relative`) |
 
+Its third pass found four more, all real:
+
+| Finding | Fix |
+|---|---|
+| A directory renamed out from under a confined process's root (by a process outside) stayed a lookup base, its `..` never meeting the root -- for the working directory too, and for a root given at spawn as much as one from chroot | a confined walk starts only from a directory under its root (`within_root`, climbing the filesystem's own `..`; free for an unconfined walk); `lxtest` renames a chrooted child's open directory out of its jail |
+| `/proc/<pid>/exe` kept the name from before a chroot, which in the new root may name another file | `chrooted_since_exec` (set by chroot, cleared by exec, inherited by fork) makes it `ENOENT` |
+| P29's census and security S10 still said the root was fixed at spawn | both rewritten |
+| `lchown` on a link in a cosmofs snapshot reached `inode_sync` and failed `EIO` after changing the cached inode | `cfs_vnode_setattr` refuses a snapshot or `.snapshots` vnode with `EROFS`, as its writes are refused (and `vfs_chown` restores the vnode) |
+
 `vfs_setattr` (chmod) has the same check-before-lock and no-rollback
 shape; it is recorded (inventory §14), not changed here.
 
