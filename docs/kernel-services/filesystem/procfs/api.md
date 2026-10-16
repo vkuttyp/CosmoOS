@@ -71,7 +71,7 @@ pid that fails it is `ENOENT` rather than `EACCES`.
 | `EINVAL` | mounting with a block device |
 | `ENOMEM` | no memory for a vnode or a listing |
 
-Nothing here is writable: the files are `0444` and the directories have
+Nothing here is writable: the files are `0444` (`environ` `0400`) and the directories have
 no `create`, `mkdir`, `unlink` or `rename`, so a write is `ENOTSUP` from
 the VFS.
 

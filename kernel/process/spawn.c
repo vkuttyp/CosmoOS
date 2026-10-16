@@ -75,7 +75,7 @@ static bool may_set_cred(const struct credentials *c, uint32_t uid, uint32_t gid
  * `process_cwd_get()` instead, which is the calling process by
  * definition and hands back a *reference* -- so the parameter is gone
  * rather than left unused. */
-static int read_executable(const char *path, struct process_image *img)
+static int read_executable_named(const char *path, struct process_image *img)
 {
     struct vnode *exe;
     /* The walk names what it reached (P32): /proc/<pid>/exe is that name,
@@ -160,6 +160,19 @@ static int read_executable(const char *path, struct process_image *img)
                       * on every path out, whether or not the loader shared
                       * anything: a mapping that shares takes its own. */
     return 0;
+}
+
+/* The same, with no name left behind on failure: the walk's name is
+ * allocated as soon as the lookup succeeds, before the checks that can
+ * still refuse the file. */
+static int read_executable(const char *path, struct process_image *img)
+{
+    int rc = read_executable_named(path, img);
+    if (rc) {
+        kfree(img->name);
+        img->name = NULL;
+    }
+    return rc;
 }
 
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
