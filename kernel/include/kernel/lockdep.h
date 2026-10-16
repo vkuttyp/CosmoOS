@@ -138,10 +138,16 @@ bool lockdep_snapshot_held_thread(const struct thread *t, struct lockdep_held *o
 /* Print another CPU's spinlock stack (the lockup report, for a CPU that does not answer). */
 void lockdep_dump_held_cpu(unsigned cpu);
 #if CONFIG_CRASH_TEST == 3
-/* make test-display only: leave the checker's own lock owned by another
- * CPU, as a CPU the panic stops can. Returns the owner word read back
- * (an owner is its CPU's id + 1; 0 is free), for the panic message. */
+/* make test-display only: leave the checker's own lock owned by a CPU
+ * that will never release it, as a CPU the panic stops can -- CPU
+ * CONFIG_MAX_CPUS, which no CPU is, so a running CPU that enters lockdep
+ * meanwhile spins rather than taking the word for its own. Returns the
+ * owner word read back (an owner is its CPU's id + 1; 0 is free), for the
+ * panic message. */
 unsigned lockdep_crash_hold_raw(void);
+/* The CPU (id + 1) that has waited on that held word in lockdep's raw
+ * lock, or 0 while none has: proof the race was run. */
+unsigned lockdep_crash_waiter(void);
 #endif
 
 /* One instant of counters under the graph raw lock. Normal diagnostics

@@ -4357,3 +4357,29 @@ changed. Every other path to RUNNING (`sched_set_running_current`, from
 one; not confirmed by a run (inventory). First sighting; CI ran again on
 the commit that records it.
 
+## `test-display`'s panic-lockdep: another CPU's re-entry panic first, 2026-10-16
+
+Main's CI at `621f7f78` (#393's merge; the same tree as `166a2ef3`, whose
+run passed), run 38819564952, job 116712603881 (`net-login test
+(x86_64)`), step `make test-display`: `FAIL: panic-lockdep: the crash
+test's own panic: no line matching "^KERNEL PANIC: crash\ test: ..."`.
+The boot's serial log (the job's `test-net-login-x86_64` artifact): after
+`crash test: panicking with lockdep's lock held elsewhere, on purpose`,
+`KERNEL PANIC: lockdep: graph raw lock re-entry on CPU 1`, `context:
+interrupt  thread: 6 'idle'`. Mechanism, from the source: the
+`CRASH_TEST=3` seam (`lockdep_crash_hold_raw`) wrote lockdep's raw-lock
+owner word as the next CPU's (this CPU's id + 2), a CPU that is running;
+CPU 1 took a tracked lock in an interrupt between that store and the
+panic's stop, found its own word in `raw_lock` and panicked first. A
+defect in the test seam, timing-dependent, so it passed on the PR's head
+and failed on the identical merge. **Fixed, not a flake:** the word now
+names CPU `CONFIG_MAX_CPUS` (no CPU), and the seam makes the race certain
+and observed -- a thread pinned to the next CPU takes a tracked lock after
+the hold every run, lockdep's raw lock records the CPU waiting on the held
+word, and the crash path waits for that waiter -- with interrupts off on
+the panicking CPU from the hold on. `tools/crash-lockdep-owner-probe.py
+--old --arch {x86_64,aarch64}` restores the old word under the certain race
+and the re-entry panic comes first on both architectures; without `--old`
+the crash test's own panic names a waiting CPU
+(docs/audit/2026-10-16-crash-lockdep-owner-report.md).
+

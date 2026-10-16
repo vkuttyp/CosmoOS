@@ -230,14 +230,18 @@ def screen_until(sock, path, face, w, h, scale, shown, budget=10.0):
 
 def lockdep_held_elsewhere(line):
     """The seam's word, read back after its store: not free, and not this
-    CPU's (an owner is its CPU's id + 1). Without the hold the panic is an
-    ordinary one and check e would test nothing new."""
-    m = re.search(r"\(owner word (\d+), this CPU's (\d+)\)", line)
+    CPU's (an owner is its CPU's id + 1); and another CPU (id + 1) seen
+    waiting on it in lockdep's raw lock. Without the hold the panic is an
+    ordinary one and check e would test nothing new; without the waiter the
+    race it guards against was not run."""
+    m = re.search(r"\(owner word (\d+), this CPU's (\d+), CPU (\d+) waiting on it\)", line)
     if not m:
-        raise Fail(f"panic-lockdep: the panic does not report lockdep's owner word: {line!r}")
-    owner, this = int(m.group(1)), int(m.group(2))
+        raise Fail(f"panic-lockdep: the panic does not report lockdep's owner word and its waiter: {line!r}")
+    owner, this, waiter = int(m.group(1)), int(m.group(2)), int(m.group(3))
     if owner == 0 or owner == this:
         raise Fail(f"panic-lockdep: lockdep's lock was not held by another CPU (owner word {owner}, this CPU's {this})")
+    if waiter in (0, this, owner):
+        raise Fail(f"panic-lockdep: no other CPU waited on lockdep's lock (CPU {waiter})")
 
 
 def panic_screen(args, face, image, name, what, message, check=None):
