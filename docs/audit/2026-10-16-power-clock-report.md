@@ -134,9 +134,43 @@ magic number or the kexec command is `EINVAL` and `CAD_OFF` succeeds;
 month 13 is `EINVAL`, another request `ENOTTY` and a read `EINVAL`; and
 to uid 1000 `reboot`, `clock_settime` and `settimeofday` are `EPERM`.
 
+Checked against their bugs by mutation:
+
+- `process_may_signal` without the init rule: `test-busybox`'s
+  `kill -TERM` to init with `sys_admin` dropped restarted the machine
+  (`init: restart requested`, then the ACPI reset register), and QEMU,
+  under `-no-reboot`, exited mid-script.
+- The x86-64 `arch_rtc_write_epoch` returning 0 without writing:
+  `test-net-login` stage j failed after the reboot, the guest two days
+  short of what `hwclock -w` had written.
+- `ipi_halt` without its EOI: the AArch64 restart hung in the firmware,
+  four times in four (above).
+
+New features are proven by their acceptance test; no probe (AGENTS.md).
+
 The restart on Parallels Desktop is the owner's to run (the roadmap
 entry); it is recorded below when run.
 
 ## Validation
 
-To be filled in from the matrix run.
+- **The validation matrix**, on `afb80f37`, every step PASS; the boot
+  times are the harness's own lines:
+
+  | Step | x86-64 | AArch64 |
+  |---|---|---|
+  | `host-test`, `fuzz`, `analyze` | pass | pass |
+  | debug `test`, `QEMU_SMP=1` / `2` / `4` | 147.3 (rerun, below) / 161.1 / 159.1 s | 152.3 / 164.4 / 174.3 s |
+  | `test-smp2` | 154.4 s | 161.0 s |
+  | `test-chaos` | 149.0 s | 159.2 s |
+  | `test-harness-retry` | 159.5 s | 160.0 s |
+  | `BUILD=release test` | 18.6 s | 21.2 s |
+  | `BUILD=release test-busybox` | 47.6 s (176 checks) | 57.8 s (176 checks) |
+  | `BUILD=release test-net-login` | 76.3 s | 91.3 s |
+  | `BUILD=release test-install` | 26.4 s | 40.8 s |
+
+  The x86-64 `QEMU_SMP=1` boot first failed with the firmware-handover
+  stall on both attempts -- the firmware never handed over, so no kernel
+  ran -- and passed on the rerun; recorded as the stall's eighth sighting
+  (`docs/testing/flakes.md`). The network harness passed in every debug
+  boot (the boot test requires it).
+- **Branch CI**: recorded in the PR.
