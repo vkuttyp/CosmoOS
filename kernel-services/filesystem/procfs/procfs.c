@@ -692,21 +692,45 @@ static int proc_environ(struct mount *mnt, pid_t pid, struct vnode **out)
     return 0;
 }
 
-/* Whether the reader stands where `p` does: the same root and the same
- * mounts, so a path `p` holds names the same file for the reader. Both
- * are fixed at spawn (process.h), so reading them needs no lock. */
-static bool proc_same_root(const struct process *p)
+/*
+ * The `cwd`, `root` or `exe` link's target, if the reader stands where
+ * `p` does -- the same root and the same mounts, so a path `p` holds names
+ * the same file for the reader -- else -ENOENT. The root check and the
+ * copy are one hold of `p->lock`, which chroot changes the root and the
+ * working directory under (P39): checked and copied in two, a chroot
+ * between them could hand back the new root's path to a reader that no
+ * longer shares it (found in review). The namespaces are fixed at spawn.
+ * A NULL root is the global root and a NULL namespace the initial one
+ * (process.h): each side is compared as what it resolves against.
+ */
+static int proc_root_relative(struct process *p, enum proc_kind kind, char *buf, size_t n)
 {
     const struct process *me = process_current();
-    /* A NULL root is the global root and a NULL namespace the initial
-     * one (process.h): compare what each resolves against, so an
-     * explicit global root is the same as the implicit one. */
-    struct vnode *global = vfs_root();
-    const struct vnode *mine = me && me->root ? me->root : global, *theirs = p->root ? p->root : global;
-    vnode_put(global);   /* pinned by the root mount: only its address is compared */
     const struct mount_ns *myns = me && me->mntns ? me->mntns : mountns_initial();
     const struct mount_ns *theirns = p->mntns ? p->mntns : mountns_initial();
-    return mine == theirs && myns == theirns;
+    struct vnode *global = vfs_root(), *mine = vfs_current_root();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    bool same = mine == (p->root ? p->root : global) && myns == theirns;
+    if (kind == PROC_EXE && p->chrooted_since_exec)
+        same = false;   /* the exec record's name was resolved in the root before the chroot */
+    /* exe: the record is read in the same hold as the root and the flag,
+     * so a chroot and an exec between them cannot pair the old root with
+     * the new record (found in review). exec swaps the record under the
+     * lock and puts the old one after it, so it is whole here. */
+    if (same && kind == PROC_EXE) {
+        const struct exec_record *r = p->exec_rec;
+        if (r != NULL && r->exe_len != 0)
+            strlcpy(buf, exec_record_exe(r), n);
+        else
+            same = false;
+    } else if (same && kind == PROC_CWD)
+        strlcpy(buf, p->cwd_path_locked, n);
+    else if (same)
+        strlcpy(buf, "/", n);
+    spin_unlock_irqrestore(&p->lock, s);
+    vnode_put(mine);
+    vnode_put(global);
+    return same ? 0 : -ENOENT;
 }
 
 /*
@@ -726,20 +750,12 @@ static int link_target(enum proc_kind kind, pid_t pid, char *buf, size_t n)
     int rc = 0;
     if (!proc_may_inspect(p))
         rc = -EACCES;
-    else if (p->state == PROCESS_EXITED || !proc_same_root(p))
+    else if (p->state == PROCESS_EXITED)
         rc = -ENOENT;
-    else if (kind == PROC_CWD)
-        process_cwd_path(p, buf, n);
-    else if (kind == PROC_ROOT_LINK)
-        strlcpy(buf, "/", n);
-    else {
-        struct exec_record *r = process_exec_record(p);
-        if (r != NULL && r->exe_len != 0)
-            strlcpy(buf, exec_record_exe(r), n);
-        else
-            rc = -ENOENT;
-        exec_record_put(r);
-    }
+    else if (kind == PROC_CWD || kind == PROC_ROOT_LINK)
+        rc = proc_root_relative(p, kind, buf, n);
+    else if (proc_root_relative(p, PROC_EXE, buf, n) != 0)
+        rc = -ENOENT;   /* exe: a name in another root names nothing here, nor does an image without one */
     process_put(p);
     return rc != 0 ? rc : (int)strlen(buf);
 }

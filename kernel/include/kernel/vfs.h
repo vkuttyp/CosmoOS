@@ -259,6 +259,13 @@ struct file {
      * stale after a rename of the directory or of any ancestor, as the
      * cwd's own name is (P27). */
     char *dir_path;
+    /* A directory file's opener's root, referenced (shell completeness
+     * S4); NULL for anything else. The file is a lookup base -- an *at
+     * call's directory, fchdir's target -- only for a process with that
+     * root (file_dir_base_ok): a directory opened before a chroot, or
+     * handed to a process with a narrower root, does not reach outside
+     * that process's root (P39). Set at the open, never changed. */
+    struct vnode *dir_root;
 };
 
 /* --- lifecycle ---------------------------------------------------------- */
@@ -378,6 +385,20 @@ int vfs_permission(const struct vnode *vn, unsigned mask);
 #define VFS_SET_MTIME_NOW 4u
 int vfs_setattr(struct vnode *vn, unsigned what, uint32_t mode, uint64_t mtime_ns);
 
+/*
+ * chown (shell completeness S4): set `vn`'s owner and/or group;
+ * VFS_ID_KEEP for either leaves it. Linux's rule: a new owner needs
+ * PRIV_SYS_ADMIN (CAP_CHOWN's place: the privilege that overrides
+ * ownership); the owner may give the node one of its own groups, and may
+ * name the owner and group it already has. A regular file's set-user-id
+ * bit, and its set-group-id bit when group-executable, are cleared by any
+ * change asked for, as Linux clears them. The change time becomes now.
+ * -EPERM otherwise, -EROFS on a read-only mount, or the filesystem's error
+ * from storing them.
+ */
+#define VFS_ID_KEEP 0xffffffffu
+int vfs_chown(struct vnode *vn, uint32_t uid, uint32_t gid);
+
 /* Resolve `path` (absolute, or relative to `start` when not NULL) to a
  * referenced vnode. Follows mounts, and symbolic links -- including one
  * named by the last component. An absolute target restarts at the
@@ -420,6 +441,9 @@ int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart,
  * or an allocation failure: the file then has no name to give fchdir,
  * which refuses it rather than invent one. Before the file is shared. */
 void file_set_dir_path(struct file *f, const char *name);
+/* Whether the caller may resolve from directory file `f`: its root is the
+ * root `f` was opened under (struct file, dir_root). */
+bool file_dir_base_ok(const struct file *f);
 
 #if CONFIG_DEBUG
 /* procfs, debug builds: the texts it has rendered for opens and not yet

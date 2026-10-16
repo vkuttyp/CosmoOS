@@ -3071,3 +3071,17 @@ See the [history index](README.md).
   self-test reads 64 exits from another CPU, and `lxtest` refuses a
   non-dumpable process's environment to its own user.
   Report: `docs/audit/2026-10-16-process-tools-report.md`.
+- **After 1.0: ownership (2026-10-16, roadmap-1.1 S4).** The Linux
+  personality gains `chown`, `lchown` (x86-64), `fchown`, `fchownat` and
+  `chroot`; BusyBox gains `chown`, `chgrp` and `su`. `vfs_chown` is
+  Linux's rule: a new owner needs `PRIV_SYS_ADMIN`, the owner may choose
+  among its own groups, and a change clears a regular file's set-id bits.
+  cosmofs links gain `setattr`, and `inode_sync` keeps a link a link, so
+  `chown -h` persists. `chroot` needs `PRIV_MOUNT` and moves the working
+  directory to the new root (Linux leaves it outside, the classic escape);
+  the root is now changed under the process lock and read only through
+  `vfs_current_root` (P39). `test-busybox` runs `chown`, `chgrp`, `chown
+  -h` and `su` (to root, to another uid, refused without `cred`);
+  `test-net-login` reads a file's and a link's owners back after the
+  reboot; `lxtest` exercises `fchown`, `fchownat` and `chroot`.
+  Report: `docs/audit/2026-10-16-ownership-report.md`.

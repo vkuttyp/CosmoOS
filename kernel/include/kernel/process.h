@@ -193,7 +193,9 @@ struct process {
      * Inherited by children, and only ever tightened -- the caller of
      * spawn names the child's root in its own namespace, so a confined
      * process can only confine further (docs/kernel/security/design.md,
-     * "Per-process roots"). */
+     * "Per-process roots"). Since shell completeness S4 `chroot` changes
+     * it, under `lock` with the working directory (P39): read it through
+     * vfs_current_root, which takes its reference under the lock. */
     /* The process domain this belongs to: 0 is the one the system boots
      * in. A process in a domain other than 0 sees and may signal only
      * processes of the same domain; domain 0 sees all of them, which is
@@ -224,9 +226,11 @@ struct process {
      * read directly** -- use `process_cwd_get` or `process_cwd_snapshot`
      * (docs/audit/next-subsystem-cwd-ref.md).
      *
-     * The name is ugly on purpose. These are the only *mutable* per-process
-     * pointers a system call resolves against: `root`, `mntns` and `utsns`
-     * are fixed at spawn, `handles` has its own table lock and hands out
+     * The name is ugly on purpose. These were the only *mutable* per-process
+     * pointers a system call resolves against: `mntns` and `utsns` are
+     * fixed at spawn, `root` changes since shell completeness S4 under the
+     * same lock and is read only through vfs_current_root (P39), `handles`
+     * has its own table lock and hands out
      * referenced objects, and `space` carries its own. Until this unit,
      * sixteen call sites read `cwd` with no lock and no reference and
      * passed it into a path walk, while another thread's `chdir` swapped
@@ -287,6 +291,11 @@ struct process {
     /* What the last exec recorded (above); under `lock`, referenced. NULL
      * for a process made before this existed in its build. */
     struct exec_record *exec_rec;
+    /* chroot since the last exec (shell completeness S4): the exec
+     * record's name was resolved in another root, so /proc/<pid>/exe
+     * names nothing. Under `lock`; set by chroot, cleared by exec,
+     * inherited by fork. */
+    bool chrooted_since_exec;
     /* ITIMER_REAL (setitimer, alarm; kernel/process/itimer.c): SIGALRM at
      * expiry, re-armed by the interval. itimer_lock serialises the setters;
      * the callback reads the two words atomically. A fork starts disarmed;
@@ -481,9 +490,9 @@ struct vnode *process_cwd_get(void);
  * that in this unit's design, before it was built.
  */
 struct vnode *process_cwd_snapshot(char *path, size_t len);
-/* `p`'s working directory's path, normalised and absolute in `p`'s own
- * root (/proc/<pid>/cwd; shell completeness S3). */
-void process_cwd_path(struct process *p, char *path, size_t len);
+/* chroot (shell completeness S4): `dir` becomes the caller's root and its
+ * working directory. PRIV_MOUNT; -ENOTDIR; search permission (-EACCES). */
+int process_chroot(struct vnode *dir);
 
 /*
  * Another process's memory sizes, for /proc (shell completeness S3):

@@ -53,6 +53,10 @@ port 22 forwarded to a host port:
      their pids and states, each pid known without /proc -- the shell's
      $$, init as its parent ($PPID), and dropbear as the child of the
      supervisor `svc status` names -- and ps itself running.
+  i. Ownership on cosmofs (shell completeness S4), on the same boot: a
+     file chowned to 1000:1000 and a link to it chowned with -h to
+     1001:1001 (the target keeps its owner), then synced; on the reboot
+     (e) both owners are still there.
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -600,6 +604,25 @@ def stage_processes(b, results):
     results.append(f"h. ps: init {init_pid} S, dropbear {sshd} S (supervisor {sup}), the shell {sh_pid} S, ps R")
 
 
+OWN_CHECK = "stat -c '%n %u %g' /root/s4own; stat -c '%n %u %g' /root/s4lnk"
+
+
+def own_lines(out, what):
+    """i: the owners chown gave the file and the link, by the stat lines."""
+    need(out, r"^/root/s4own 1000 1000$", f"{what}: /root/s4own owned by 1000:1000")
+    need(out, r"^/root/s4lnk 1001 1001$", f"{what}: the link /root/s4lnk owned by 1001:1001 (chown -h)")
+
+
+def stage_ownership(b, results):
+    """i: chown and chown -h on the installed system's cosmofs root; the
+    reboot (e) reads them back."""
+    b.run("rm -f /root/s4own /root/s4lnk; touch /root/s4own; ln -s s4own /root/s4lnk")
+    out = b.status("chown 1000:1000 /root/s4own && chown -h 1001:1001 /root/s4lnk && sync", "chown")
+    need(out, r"^chown=0$", "chown and chown -h as root")
+    own_lines(b.run(OWN_CHECK), "before the reboot")
+    results.append("i. chown 1000:1000 on a cosmofs file, chown -h 1001:1001 on a link to it; synced")
+
+
 def stage_reboot_ssh(args, results, inst, port):
     """e: the second boot; the client's known_hosts must still match."""
     b = Boot("reboot", inst["target"], args.workdir,
@@ -612,6 +635,7 @@ def stage_reboot_ssh(args, results, inst, port):
             raise Fail(f"ssh after the reboot: status {rc}, output {out!r}")
         out = b.run("hostname")
         need(out, rf"^{HOSTNAME}$", "the host name after a boot whose DHCP server names none (/etc/hostname)")
+        own_lines(b.run(OWN_CHECK), "after the reboot")
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
             raise Fail(f"reboot boot: QEMU exit code {rc}")
@@ -619,7 +643,8 @@ def stage_reboot_ssh(args, results, inst, port):
         b.kill()
         raise
     results.append(f"e. reboot: the host key was kept (StrictHostKeyChecking=yes passed), the host name "
-                   f"{HOSTNAME} too (/etc/hostname), PASS in {b.elapsed():.1f}s")
+                   f"{HOSTNAME} too (/etc/hostname), and the owners of i (1000:1000, the link's 1001:1001); "
+                   f"PASS in {b.elapsed():.1f}s")
 
 
 def stage_net(args, results, inst):
@@ -691,6 +716,7 @@ def stage_net(args, results, inst):
         stage_ssh(args, results, b, ssh_port)
         stage_inspect(b, results)
         stage_processes(b, results)
+        stage_ownership(b, results)
 
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:

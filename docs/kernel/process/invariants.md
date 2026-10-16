@@ -562,7 +562,8 @@ The census, so that the next field added is classified when it is added:
 | field | mutable after spawn? | how it is read |
 | --- | --- | --- |
 | `cwd_locked`, `cwd_path_locked` | **yes**, by `chdir` from any thread | `process_cwd_get()` / `process_cwd_snapshot()` — a *reference*, and the path from the same acquisition |
-| `root`, `mntns`, `utsns` | no — set at spawn, inherited | read directly; sound, and stays sound only while they remain immutable |
+| `root` | **yes** since shell completeness S4, by `chroot`, only in a process of one live thread, with the working directory | `vfs_current_root()` — a *reference* taken under `p->lock` (P39); procfs reads another process's under its lock |
+| `mntns`, `utsns` | no — set at spawn, inherited | read directly; sound, and stays sound only while they remain immutable |
 | `handles` | yes | its own table lock; `handle_lookup` returns a referenced object the caller releases |
 | `space` | not swapped | its own lock |
 | `syscall_mask` | narrows only | read without the lock, **but not for the reason the comment used to give**: writes take `p->lock` and are per-word atomic stores, this is a per-word atomic load, and a reader sees one whole word |
@@ -717,6 +718,36 @@ teardown after `EXITED` was published. *Checked by*: `proc-exit-read`
 (at the exiting hold, `stat` reads vsize 0 and rss 0 and `status` has no
 memory lines; 64 exits each read throughout by a thread on another CPU,
 every text whole, no exec record or rendered text left over).
+
+**P39. A process's root changes only under `p->lock`, and is read only
+through `vfs_current_root`.** (Shell completeness S4.) `chroot`
+(`process_chroot`) replaces `root` and the working directory together
+under the lock and puts the old ones after it, and only in a process of
+one live thread (`-EINVAL` otherwise, as Linux refuses `unshare(CLONE_FS)`
+to a threaded process): with no other thread, no walk or open can have
+taken the old working directory and meet the new root, in either order
+(found in review; the root is never shared between processes, since
+`CLONE_FS` is refused); `vfs_current_root` takes
+its reference under the same lock, and procfs reads another process's
+root there. A path walk takes the root once, at its first need of it, and
+uses that one for its absolute start, absolute link targets and every
+`..` boundary (`struct walk`'s `root`): re-read at each `..`, a nested
+chroot on another thread could move the boundary below where the walk
+already stood and let it climb past both roots (found in review). A
+directory file records its opener's root (`dir_root`) and is a lookup
+base -- an `*at` call's directory, `fchdir`'s target -- only for a process
+with that root (`file_dir_base_ok`, `-EACCES` otherwise): a directory
+opened before a chroot, or handed to a process with a narrower root, is
+not a way out (found in review; Linux allows both). Until S4 the root was
+fixed at spawn and read without a lock.
+*Checked by*: `lxtest`'s ownership section (a child's `chroot`: `/marker`
+inside opens, the same file by its outer path is `ENOENT`, `../../marker`
+stops at the root, `getcwd` is `/`, and `/tmp` opened before the chroot
+is `EACCES` to `openat` and `fchdir`; the parent's root is unchanged;
+refused to uid 1000; and refused, `EINVAL`, to a process with a second
+thread, its root unchanged). The walk's single root is by construction:
+with chroot single-threaded, no walk can race one. With the working directory left where it was (a
+mutation), `../../marker` from outside the root fails.
 
 ## Gaps (documented, not invariants)
 

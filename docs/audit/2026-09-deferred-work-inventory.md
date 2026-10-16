@@ -1229,3 +1229,34 @@ each; none is needed by M2's acceptance test.
   options S2 left as they were (`FEATURE_SYSLOG_INFO`, `BZIP2_SMALL` 0
   rather than 8, `FEATURE_WAIT_FOR_INIT`). S3 changed only its own four
   (`PS`, `FEATURE_PS_TIME`, `FEATURE_PS_ADDITIONAL_COLUMNS`, `KILL`).
+
+## 14. Shell completeness S4 follow-ups (2026-10-16)
+
+- The native door has no `chown` or `chroot` (nor `chmod`): only the
+  Linux personality changes ownership or takes a new root after spawn.
+- `chown` on a filesystem without a `setattr` operation (procfs, devfs)
+  changes the vnode in hand and nothing behind it, so it reads back until
+  the vnode is evicted, as `chmod` already did there.
+- `fchownat` through a directory descriptor needs the handle's write
+  right, as `fchmodat` does (`lookup_at`); Linux needs none.
+- There is no `useradd`: a second user exists only by editing
+  `/etc/passwd` and `/etc/group`, as `test-busybox` does for `su`.
+- Supplementary groups are only what `setgroups` (`PRIV_CRED`) sets, so
+  the owner's "one of its own groups" rule in `chown` is in practice its
+  effective group.
+- `vfs_setattr` (chmod, utimensat) still checks the owner before taking
+  the vnode's lock and keeps the new mode in the vnode when the
+  filesystem fails to store it; S4's review found both in `vfs_chown` and
+  fixed them there.
+- `chroot` is refused to a process of more than one thread (P39), where
+  Linux allows it; a threaded program that chroots must do it before its
+  first `clone`.
+- A confined walk checks once, at its start, that it stands under its
+  root (`within_root`); a process outside the root that renames a
+  directory out from under a walk in progress can still let that walk's
+  `..` climb past the root. Linux's `chroot` has the same race; closing it
+  needs a per-mount rename sequence count that the walk re-checks and
+  retries on, as Linux's `openat2(RESOLVE_IN_ROOT)` does.
+- `fchown` (and `fchownat` with `AT_EMPTY_PATH`) on a pipe, socket or
+  other descriptor that is not a VFS file is `EBADF`; Linux changes the
+  anonymous inode's owner.

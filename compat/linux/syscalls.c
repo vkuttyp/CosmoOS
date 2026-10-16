@@ -317,6 +317,12 @@ static int at_base(int64_t dirfd, const char *path, unsigned rights, struct vnod
         file_put(f);
         return -ENOTDIR;
     }
+    /* Opened under another root -- before a chroot, or by a process with
+     * a wider one: not a way out of this process's root (P39). */
+    if (!file_dir_base_ok(f)) {
+        file_put(f);
+        return -EACCES;
+    }
     vnode_get(f->vn);
     *out = f->vn;
     if (basepath)
@@ -328,6 +334,27 @@ static int at_base(int64_t dirfd, const char *path, unsigned rights, struct vnod
 static struct file *file_of(int h, unsigned rights)
 {
     struct kobject *obj = handle_lookup(&process_current()->handles, h, rights);
+    if (obj == NULL)
+        return NULL;
+    struct file *f = file_from_kobject(obj);
+    if (f == NULL)
+        kobject_put(obj);
+    return f;
+}
+
+/*
+ * A file whose metadata the caller changes through a descriptor (fchmod,
+ * fchown, fchownat's AT_EMPTY_PATH): the handle needs MANAGE -- a change of
+ * how the object behaves, not of what it holds -- so a handle delegated
+ * without it cannot change the mode or the owner (found in review). Every
+ * Linux open grants MANAGE (HANDLE_RIGHT_OWNER). *err is -EPERM for a
+ * handle without the right, as sys_setnonblock, else -EBADF.
+ */
+static struct file *file_of_manage(int h, int *err)
+{
+    bool no_rights;
+    struct kobject *obj = handle_lookup_rights(&process_current()->handles, h, HANDLE_RIGHT_MANAGE, &no_rights);
+    *err = no_rights ? -EPERM : -EBADF;
     if (obj == NULL)
         return NULL;
     struct file *f = file_from_kobject(obj);
@@ -1283,6 +1310,11 @@ static int lookup_at(int64_t dirfd, uint64_t upath, bool nofollow, struct vnode 
     rc = at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
     if (rc)
         return rc;
+    /* A trailing slash makes the last component a directory to enter, so
+     * a link there is followed even under AT_SYMLINK_NOFOLLOW, as Linux. */
+    size_t plen = strlen(path);
+    if (nofollow && plen > 0 && path[plen - 1] == '/')
+        nofollow = false;
     rc = nofollow ? vfs_lookup_nofollow(start, path, out) : vfs_lookup(start, path, out);
     vnode_put(start);
     return rc;
@@ -1316,11 +1348,110 @@ static int64_t lx_fchmodat2(struct syscall_args *a)
 
 static int64_t lx_fchmod(struct syscall_args *a)
 {
-    struct file *f = file_of((int)a->a[0], 0);
+    int err;
+    struct file *f = file_of_manage((int)a->a[0], &err);
     if (f == NULL)
-        return -EBADF;
+        return err;
     int rc = vfs_setattr(f->vn, VFS_SET_MODE, (uint32_t)a->a[1], 0);
     file_put(f);
+    return rc;
+}
+
+/* --- ownership and the root (shell completeness S4) ----------------------------- */
+
+/* Linux's uid_t and gid_t -1, "leave it": the VFS's VFS_ID_KEEP. */
+static uint32_t lx_owner_id(uint64_t v)
+{
+    return (uint32_t)v == 0xffffffffu ? VFS_ID_KEEP : (uint32_t)v;
+}
+
+/*
+ * fchownat(dirfd, path, uid, gid, flags), and chown, lchown and fchown
+ * through it: vfs_chown's rule (PRIV_SYS_ADMIN for a new owner; the owner
+ * may choose among its own groups). AT_SYMLINK_NOFOLLOW changes a link
+ * itself, which is lchown; AT_EMPTY_PATH with an empty path changes the
+ * open file `dirfd`.
+ */
+static int64_t do_fchownat(int64_t dirfd, uint64_t upath, uint64_t uid, uint64_t gid, unsigned flags)
+{
+    /* `flags` is Linux's `int`: the register's upper half is not part of
+     * it, as Linux's entry truncates it (review: a first fix checked all 64
+     * bits, which Linux does not). */
+    if (flags & ~(unsigned)(LX_AT_SYMLINK_NOFOLLOW | LX_AT_EMPTY_PATH))
+        return -EINVAL;
+    /* Only whether the path is empty: lookup_at copies it in again, and two
+     * path buffers would not fit the kernel stack's frame limit. */
+    char first;
+    if (copy_from_user(&first, upath, 1))
+        return -EFAULT;
+    int rc;
+    if (first == '\0') {
+        if (!(flags & LX_AT_EMPTY_PATH))
+            return -ENOENT;
+        if ((int)dirfd == LX_AT_FDCWD) {   /* the working directory itself, as Linux */
+            struct vnode *cwd = process_cwd_get();
+            rc = vfs_chown(cwd, lx_owner_id(uid), lx_owner_id(gid));
+            vnode_put(cwd);
+            return rc;
+        }
+        struct file *f = file_of_manage((int)dirfd, &rc);
+        if (f == NULL)
+            return rc;
+        rc = vfs_chown(f->vn, lx_owner_id(uid), lx_owner_id(gid));
+        file_put(f);
+        return rc;
+    }
+    struct vnode *vn;
+    rc = lookup_at(dirfd, upath, (flags & LX_AT_SYMLINK_NOFOLLOW) != 0, &vn);
+    if (rc)
+        return rc;
+    rc = vfs_chown(vn, lx_owner_id(uid), lx_owner_id(gid));
+    vnode_put(vn);
+    return rc;
+}
+
+static int64_t lx_fchownat(struct syscall_args *a)
+{
+    return do_fchownat((int64_t)a->a[0], a->a[1], a->a[2], a->a[3], (unsigned)a->a[4]);
+}
+#ifdef LX_chown
+static int64_t lx_chown(struct syscall_args *a) { return do_fchownat(LX_AT_FDCWD, a->a[0], a->a[1], a->a[2], 0); }
+#endif
+#ifdef LX_lchown
+static int64_t lx_lchown(struct syscall_args *a)
+{
+    return do_fchownat(LX_AT_FDCWD, a->a[0], a->a[1], a->a[2], LX_AT_SYMLINK_NOFOLLOW);
+}
+#endif
+
+static int64_t lx_fchown(struct syscall_args *a)
+{
+    int err;
+    struct file *f = file_of_manage((int)a->a[0], &err);
+    if (f == NULL)
+        return err;
+    int rc = vfs_chown(f->vn, lx_owner_id(a->a[1]), lx_owner_id(a->a[2]));
+    file_put(f);
+    return rc;
+}
+
+/* chroot(path): process_chroot's rule (PRIV_MOUNT; the working directory
+ * moves to the new root). */
+static int64_t lx_chroot(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    struct vnode *start = process_cwd_get();
+    struct vnode *dir;
+    rc = vfs_lookup(start, path, &dir);
+    if (start)
+        vnode_put(start);
+    if (rc)
+        return rc;
+    rc = process_chroot(dir);
+    vnode_put(dir);
     return rc;
 }
 
@@ -1465,7 +1596,8 @@ static int64_t lx_fchdir(struct syscall_args *a)
         kobject_put(obj);
         return -ENOTDIR;
     }
-    int rc = process_fchdir(f->vn, f->dir_path);
+    int rc = f->vn->type == VNODE_DIR && !file_dir_base_ok(f) ? -EACCES   /* P39, as at_base */
+                                                                : process_fchdir(f->vn, f->dir_path);
     file_put(f);
     return rc;
 }
@@ -4210,6 +4342,15 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_epoll_wait] = lx_epoll_wait,
 #endif
     [LX_unlinkat] = lx_unlinkat,
+#ifdef LX_chown
+    [LX_chown] = lx_chown,
+#endif
+#ifdef LX_lchown
+    [LX_lchown] = lx_lchown,
+#endif
+    [LX_fchown] = lx_fchown,
+    [LX_fchownat] = lx_fchownat,
+    [LX_chroot] = lx_chroot,
 #ifdef LX_chmod
     [LX_chmod] = lx_chmod,
 #endif

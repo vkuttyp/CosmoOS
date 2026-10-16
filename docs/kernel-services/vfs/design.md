@@ -908,7 +908,8 @@ a racer start its walker only once the swapper is provably ahead of it.
   next commit and excluding its blocks from `pending_free`.
 - Data checksums: `csum_root` → a tree keyed by block number.
 - Multiple pool members and allocation groups behind `pool_*`.
-- Hard links, `chmod`/`chown`, the sticky bit, memory-pressure
+- Hard links, the sticky bit (`chmod` and `utimensat` since roadmap M3,
+  `chown` since shell completeness S4: `vfs_chown`), memory-pressure
   eviction of *mapped* pages, a dentry cache, a host `mkfs`. Symbolic
   links are built (this document, "Symbolic links and the walk");
   `mmap` of files is built, over the frames the cache already owned

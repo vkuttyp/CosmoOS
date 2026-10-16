@@ -143,6 +143,9 @@
 /* Modes and times (roadmap M3: BusyBox chmod and touch). */
 #define LX_fchmod 52
 #define LX_fchmodat 53
+#define LX_fchownat 54
+#define LX_fchown 55
+#define LX_chroot 51
 #define LX_utimensat 88
 #define LX_fchmodat2 452
 

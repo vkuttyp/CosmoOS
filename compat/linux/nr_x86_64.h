@@ -167,6 +167,11 @@
 #define LX_chmod 90
 #define LX_fchmod 91
 #define LX_fchmodat 268
+#define LX_chown 92
+#define LX_fchown 93
+#define LX_lchown 94
+#define LX_chroot 161
+#define LX_fchownat 260
 #define LX_utimensat 280
 #define LX_fchmodat2 452
 

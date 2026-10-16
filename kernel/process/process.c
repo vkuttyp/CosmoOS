@@ -1163,6 +1163,7 @@ static void fork_inherit(struct process *p, struct process *parent)
     memcpy(p->cmdline, parent->cmdline, parent->cmdline_len);
     p->cmdline_len = parent->cmdline_len;
     p->exec_rec = exec_record_get(parent->exec_rec);   /* shared, never copied: nothing writes one */
+    p->chrooted_since_exec = parent->chrooted_since_exec;
     spin_unlock_irqrestore(&parent->lock, s);
     p->handles.limit = p->rlim.v[COSMO_RLIMIT_NOFILE] < HANDLE_TABLE_SIZE ? (unsigned)p->rlim.v[COSMO_RLIMIT_NOFILE]
                                                                         : HANDLE_TABLE_SIZE;
@@ -1366,6 +1367,7 @@ int process_exec_images(const struct process_image *exe, const struct process_im
     p->cmdline_len = ib->cmdline_len;
     struct exec_record *old_rec = p->exec_rec;
     p->exec_rec = ib->rec;
+    p->chrooted_since_exec = false;   /* this exec's name is in the current root */
     __atomic_store_n(&p->dumpable, 1, __ATOMIC_RELAXED);
     p->main_thread = self;
     self->user_tid = p->pid;   /* the exec'ing thread becomes the first: its tid is the pid */
@@ -1941,14 +1943,6 @@ struct vnode *process_cwd_snapshot(char *path, size_t len)
     return vn;
 }
 
-/* Another process's working directory's path (/proc/<pid>/cwd). */
-void process_cwd_path(struct process *p, char *path, size_t len)
-{
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    strlcpy(path, p->cwd_path_locked, len);
-    spin_unlock_irqrestore(&p->lock, s);
-}
-
 static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpath);
 static int chdir_inner(struct process *cur, const char *path);
 
@@ -2024,6 +2018,61 @@ static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpat
     if (old)
         vnode_put(old);
     vfs_cwd_hold_after_put(old);
+    return 0;
+}
+
+/*
+ * chroot (shell completeness S4): `dir` becomes the calling process's
+ * root -- and its working directory, as a child given a root at spawn
+ * starts at it (the security design, "Per-process roots"). Linux leaves
+ * the working directory where it was, outside the new root, where `..`
+ * climbs past the root without meeting it; here the root is somewhere a
+ * process stands, not only a place absolute paths start. PRIV_MOUNT, the
+ * privilege that gives a child a root. `dir` was found in the caller's
+ * root, so a root only ever tightens.
+ *
+ * P39: `root` changes only under `p->lock`, with the working directory,
+ * and the old ones are put after it; vfs_current_root takes its
+ * reference under the same lock. And only in a process of one thread
+ * (-EINVAL otherwise, as Linux refuses unshare(CLONE_FS) to a threaded
+ * one): no other thread can be in a walk, or an open, that took the old
+ * working directory and would meet the new root -- every order of those
+ * two reads against the swap is then the caller's own, before or after
+ * (found in review). The root is never shared between processes
+ * (CLONE_FS is refused), so the calling thread is the only reader.
+ */
+int process_chroot(struct vnode *dir)
+{
+    struct process *cur = process_current();
+    KASSERT(cur != NULL);
+    if (!cred_has(&cur->cred, PRIV_MOUNT))
+        return -EPERM;
+    if (dir->type != VNODE_DIR)
+        return -ENOTDIR;
+    int rc = vfs_permission(dir, VFS_MAY_EXEC);
+    if (rc)
+        return rc;
+    vnode_get(dir);   /* the root's */
+    vnode_get(dir);   /* the working directory's */
+    arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
+    if (cur->nr_live != 1) {   /* under the lock a clone counts a new thread under */
+        spin_unlock_irqrestore(&cur->lock, s);
+        vnode_put(dir);
+        vnode_put(dir);
+        return -EINVAL;
+    }
+    struct vnode *old_root = cur->root, *old_cwd = cur->cwd_locked;
+    cur->root = dir;
+    cur->cwd_locked = dir;
+    cur->chrooted_since_exec = true;
+    strlcpy(cur->cwd_path_locked, "/", sizeof(cur->cwd_path_locked));   /* paths are the process's own root's */
+    spin_unlock_irqrestore(&cur->lock, s);
+    /* Safe to be the last references: a walk that began under the old
+     * root or directory took its own. */
+    if (old_root)
+        vnode_put(old_root);
+    if (old_cwd)
+        vnode_put(old_cwd);
     return 0;
 }
 
@@ -2236,9 +2285,16 @@ const struct credentials *cred_current(void)
 struct vnode *vfs_current_root(void)
 {
     struct process *p = process_current();
-    if (p && p->root) {
-        vnode_get(p->root);
-        return p->root;
+    if (p != NULL) {
+        /* Under the lock chroot swaps it under (P39): the reference is
+         * taken before another thread's chroot can put the old root. */
+        arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+        struct vnode *root = p->root;
+        if (root)
+            vnode_get(root);
+        spin_unlock_irqrestore(&p->lock, s);
+        if (root)
+            return root;
     }
     return vfs_root();
 }

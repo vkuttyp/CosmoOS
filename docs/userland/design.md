@@ -37,8 +37,8 @@ system (`ports/busybox/README.md`). `/bin/busybox` and one symbolic
 link per applet of `ports/busybox/applets` -- the 48 of M3's decision
 7, `/bin/sh` among them, M4's `wget`, `nslookup`, `stty` and `tty`, and
 the later units' (S1's `ifconfig`, `route`, `netstat`, `arp` and
-`hostname`, S2's 33 everyday applets, S3's `ps` and `kill`) -- come from
-the boot archive
+`hostname`, S2's 33 everyday applets, S3's `ps` and `kill`, S4's `chown`, `chgrp` and `su`) -- come
+from the boot archive
 (`mkbootarchive.py`'s `NAME@TARGET` entries, ustar type 2; the kernel
 makes them with `vfs_symlink` in `ramfs_populate_boot`). A native program
 whose name an applet takes is installed as `/bin/cosmo-<name>`

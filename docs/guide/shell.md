@@ -74,14 +74,14 @@ cosmo$ ls /bin
 ```
 
 The applets are `sh` (ash) and `[ arp awk base64 basename bunzip2 bzip2
-cal cat chmod cksum clear cmp comm cp cut date dd df diff dirname du echo
-env expr false find fold free grep gunzip gzip head hexdump hostname id
-ifconfig install kill killall less ln logger ls md5sum mkdir mktemp more
-mv netstat nl nohup nslookup od paste pgrep pidof ping pkill poweroff
+cal cat chgrp chmod chown cksum clear cmp comm cp cut date dd df diff
+dirname du echo env expr false find fold free grep gunzip gzip head
+hexdump hostname id ifconfig install kill killall less ln logger ls md5sum
+mkdir mktemp more mv netstat nl nohup nslookup od paste pgrep pidof ping pkill poweroff
 printf ps pwd readlink realpath rev rm rmdir route sed seq setsid
-sha256sum sleep sort split stat strings stty tac tail tar tee test time
-timeout top touch tr true tty uname uniq unxz unzip uptime vi watch wc
-wget which whoami xargs xz yes zcat` (`ports/busybox/applets`; `xz`
+sha256sum sleep sort split stat strings stty su tac tail tar tee test
+time timeout top touch tr true tty uname uniq unxz unzip uptime vi watch
+wc wget which whoami xargs xz yes zcat` (`ports/busybox/applets`; `xz`
 decompresses only); `/sbin` holds CosmoOS's own `cosmo-install`, `dmesg`,
 `fsctl`, `hostname`, `ip`, `kill`, `mount`, `netcfg`, `pkg`, `priv`,
 `ps`, `svc`, `syslogd`, `sysctl`, `umount` and `vmctl` (`/bin` comes

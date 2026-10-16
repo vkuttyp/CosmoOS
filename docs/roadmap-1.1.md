@@ -7,7 +7,7 @@ The project owner picks the next unit from the proposed list, and
 [`AGENTS.md`](../AGENTS.md#scope-rules)'s scope rules then apply to it as
 they did to a 1.0 milestone. P1 is done; the owner chose the
 [shell-completeness track](#s-shell-completeness) on 2026-10-15, S1 and
-then S2 first; S1, S2 and S3 are done.
+then S2 first; S1 to S4 are done.
 [`plan.md`](plan.md) and the
 [deferred-work inventory](audit/2026-09-deferred-work-inventory.md)
 remain the record of everything else.
@@ -251,14 +251,20 @@ the inventory.
   boot. The two rules: Linux's ptrace read check (procfs P5), and P4
   admitting the files the shell's users read by name
   ([report](audit/2026-10-16-process-tools-report.md)).
-- [ ] **S4 Ownership.** `chown`, `fchown`, `fchownat`, `lchown` and
+- [x] **S4 Ownership.** `chown`, `fchown`, `fchownat`, `lchown` and
   `chroot`; BusyBox `chown`, `chgrp` and `su` (one user, root: `su` to
   root is a no-op that works, `su` to another uid needs `PRIV_CRED`).
   **Acceptance:** a `chown` on cosmofs persists across a reboot; an
   unprivileged process gets `EPERM`; `fchown`, `fchownat`, `lchown` on a
   symbolic link (the link changes, its target does not) and `chroot` are
   each exercised; `chgrp` changes the group; `su` to root works, and `su`
-  to another uid is refused with `PRIV_CRED` dropped.
+  to another uid is refused with `PRIV_CRED` dropped. Done 2026-10-16:
+  `test-busybox` (job `busybox`) and `test-net-login`'s stages i and e
+  (the owners after the reboot; job `net-login`), both architectures;
+  `lxtest`'s ownership section in every debug boot. `chown` to another
+  owner is `PRIV_SYS_ADMIN`'s, `chroot` `PRIV_MOUNT`'s and moves the
+  working directory to the new root
+  ([report](audit/2026-10-16-ownership-report.md)).
 - [ ] **S5 Power and clock** (absorbs P5). `reboot(2)` with
   `LINUX_REBOOT_CMD_RESTART`, `HALT`, `POWER_OFF`, `CAD_ON` and `CAD_OFF`;
   PSCI `SYSTEM_RESET` on AArch64, the keyboard-controller and ACPI reset
