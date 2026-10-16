@@ -57,6 +57,15 @@ port 22 forwarded to a host port:
      file chowned to 1000:1000 and a link to it chowned with -h to
      1001:1001 (the target keeps its owner), then synced; on the reboot
      (e) both owners are still there.
+  j. Power and clock (shell completeness S5), on the reboot boot (e), which
+     QEMU runs with QEMU_REBOOT=1 so a guest reset restarts the machine:
+     with sys_admin dropped, `reboot` (a signal to init), `reboot -f`
+     (reboot(2)), `date -s` and `hwclock -w` are each refused, and
+     `date -s` too for uid 1000; `ntpd -q` against this harness's NTP
+     server, which answers a day ahead, sets the clock to within 1 s of
+     it; then `date -s` two days ahead, `hwclock -w` and `reboot`, and
+     the machine restarts in the same QEMU, and after it the wall clock
+     is the RTC's (to 2 s, the read keeps whole seconds).
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -623,10 +632,124 @@ def stage_ownership(b, results):
     results.append("i. chown 1000:1000 on a cosmofs file, chown -h 1001:1001 on a link to it; synced")
 
 
+NTP_EPOCH = 2208988800   # 1900 to 1970
+
+
+def start_ntp(offset_s):
+    """j: an NTP server on 127.0.0.1 (10.0.2.2 to the guest) whose clock is
+    the host's plus offset_s: stratum 1, version 4, mode 4, each reply's
+    originate the request's transmit time (ntpd drops anything else)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    s.settimeout(0.5)
+    stop = threading.Event()
+
+    def ts(t):
+        return (int(t) + NTP_EPOCH) << 32 | int((t % 1) * (1 << 32))
+
+    def serve():
+        while not stop.is_set():
+            try:
+                req, peer = s.recvfrom(512)
+            except socket.timeout:
+                continue
+            if len(req) < 48:
+                continue
+            now = time.time() + offset_s
+            reply = struct.pack("!BBbbII4sQ", 0x24, 1, req[2], -20, 0, 1 << 10, b"LOCL", ts(now)) + req[40:48] \
+                + struct.pack("!QQ", ts(now), ts(time.time() + offset_s))
+            s.sendto(reply, peer)
+        s.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return s.getsockname()[1], stop
+
+
+def wait_text(b, pattern, start, what):
+    """The first match of `pattern` in the serial log after `start`."""
+    while time.monotonic() < b.deadline:
+        m = re.compile(pattern, re.M).search(b.text(), start)
+        if m:
+            return m
+        if b.proc.poll() is not None:
+            raise Fail(f"{b.name}: QEMU exited (code {b.proc.returncode}) waiting for {what}")
+        time.sleep(0.1)
+    raise Fail(f"{b.name}: no {what} before the deadline")
+
+
+def guest_epoch(b, what):
+    """`date +%s` on the guest, and the host's time around the reading."""
+    h0 = time.time()
+    out = b.run("date +%s")
+    h1 = time.time()
+    return int(need(out, r"^(\d{9,})$", what).group(1)), h0, h1
+
+
+def stage_power_clock(args, results, b):
+    """j: refusals, ntpd -q a day ahead, date -s + hwclock -w across a
+    reboot inside this QEMU."""
+    out = b.status("priv -d sys_admin -- reboot", "rb")
+    need(out, r"^rb=[1-9]\d*$", "reboot refused with sys_admin dropped (init's signal)")
+    out = b.status("priv -d sys_admin -- reboot -f", "rbf")
+    need(out, r"^rbf=[1-9]\d*$", "reboot -f refused with sys_admin dropped (reboot(2))")
+    need(out, r"Operation not permitted", "reboot -f: EPERM")
+    future = int(time.time()) + 3 * 86400
+    # BusyBox's date reports a refused set and exits 0, as on Linux: the
+    # message, and the clock below, are the check.
+    out = b.run(f"priv -d sys_admin -- date -s @{future}")
+    need(out, r"can't set date: Operation not permitted", "date -s refused with sys_admin dropped (EPERM)")
+    out = b.run(f"priv -u 1000 -- date -s @{future}")
+    need(out, r"can't set date: Operation not permitted", "date -s refused to uid 1000 (EPERM)")
+    out = b.status("priv -d sys_admin -- hwclock -w", "hw")
+    need(out, r"^hw=[1-9]\d*$", "hwclock -w refused with sys_admin dropped")
+    need(out, r"Permission denied", "hwclock -w: EACCES, as Linux's RTC_SET_TIME")
+    g, h0, h1 = guest_epoch(b, "the clock after the refusals")
+    if g > h1 + 5 or g >= future - 86400:
+        raise Fail(f"a refused date -s moved the clock: guest {g}, host {h1:.0f}")
+
+    port, stop = start_ntp(86400)
+    try:
+        out = b.status(f"ntpd -q -n -p 10.0.2.2:{port}", "ntp")
+    finally:
+        stop.set()
+    need(out, r"^ntp=0$", "ntpd -q against the harness's server")
+    g, h0, h1 = guest_epoch(b, "the clock after ntpd -q")
+    if not (h0 + 86400 - 1 <= g <= h1 + 86400 + 1):
+        raise Fail(f"ntpd -q: the guest reads {g}, the server's clock was {h0 + 86400:.1f}..{h1 + 86400:.1f}")
+    ntp_off = g - (h0 + h1) / 2
+
+    target = int(time.time()) + 2 * 86400
+    out = b.status(f"date -s @{target} >/dev/null && hwclock -w", "hw")
+    t_set = time.time()
+    need(out, r"^hw=0$", "date -s and hwclock -w as root")
+    out = b.run("hwclock -u")
+    need(out, r"\d\d:\d\d:\d\d", "hwclock -u reads the RTC back")
+    start = len(b.text())
+    b.proc.stdin.write(b"reboot\n")
+    b.proc.stdin.flush()
+    wait_text(b, r"reboot: restarting system", start, "the kernel's restart line")
+    how = wait_text(b, r"reboot: restart through (.*)$", start, "the restart's method").group(1)
+    b.deadline = time.monotonic() + args.timeout   # a second boot inside the same QEMU
+    banner = wait_text(b, r"CosmoOS kernel", start, "a second kernel banner after reboot")
+    with b.lock:
+        b.prompts_seen = b.buf.count(install_test.PROMPT)   # prompts before the restart are the old boot's
+    b.wait_prompt("the first prompt after reboot")
+    after = b.text()[banner.start():]
+    need(after, r"switched to the disk root", "the installed system again after reboot")
+    g, h0, h1 = guest_epoch(b, "the clock after reboot")
+    lo, hi = target + (h0 - t_set) - 2, target + (h1 - t_set) + 2
+    if not (lo <= g <= hi):
+        raise Fail(f"after reboot the guest reads {g}, the RTC should read {lo:.0f}..{hi:.0f}")
+    results.append(f"j. reboot, reboot -f, date -s and hwclock -w refused without sys_admin (date -s for uid "
+                   f"1000 too); ntpd -q a day ahead: {ntp_off - 86400:+.1f}s from the server; date -s + "
+                   f"hwclock -w + reboot ({how}): the restarted system reads the RTC's time")
+
+
 def stage_reboot_ssh(args, results, inst, port):
     """e: the second boot; the client's known_hosts must still match."""
     b = Boot("reboot", inst["target"], args.workdir,
-             {"QEMU_DISKS": "boot", "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{port}-:22"}, args.timeout)
+             {"QEMU_DISKS": "boot", "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{port}-:22", "QEMU_REBOOT": "1"},
+             args.timeout)
     try:
         b.wait_prompt("the first prompt")
         ssh_wait(args.workdir, port, strict=True)
@@ -636,6 +759,7 @@ def stage_reboot_ssh(args, results, inst, port):
         out = b.run("hostname")
         need(out, rf"^{HOSTNAME}$", "the host name after a boot whose DHCP server names none (/etc/hostname)")
         own_lines(b.run(OWN_CHECK), "after the reboot")
+        stage_power_clock(args, results, b)
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
             raise Fail(f"reboot boot: QEMU exit code {rc}")

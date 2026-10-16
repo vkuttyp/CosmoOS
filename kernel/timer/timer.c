@@ -303,7 +303,38 @@ void clock_test_force_uncommon(bool on)
 
 uint64_t clock_realtime_ns(void)
 {
-    return g_realtime_offset_ns + clock_now_ns();
+    return __atomic_load_n(&g_realtime_offset_ns, __ATOMIC_RELAXED) + clock_now_ns();
+}
+
+/* Unsigned: a wall time earlier than the monotonic clock's reading makes
+ * the offset wrap, and the sum in clock_realtime_ns wraps back. */
+void clock_set_realtime_ns(uint64_t ns)
+{
+    __atomic_store_n(&g_realtime_offset_ns, ns - clock_now_ns(), __ATOMIC_RELAXED);
+}
+
+/* Howard Hinnant's days_from_civil and civil_from_days. */
+int64_t time_days_from_civil(int64_t y, unsigned m, unsigned d)
+{
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (int64_t)doe - 719468;
+}
+
+void time_civil_from_days(int64_t days, int64_t *y, unsigned *m, unsigned *d)
+{
+    days += 719468;
+    int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+    unsigned doe = (unsigned)(days - era * 146097);
+    unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    unsigned mp = (5 * doy + 2) / 153;
+    *d = doy - (153 * mp + 2) / 5 + 1;
+    *m = mp < 10 ? mp + 3 : mp - 9;
+    *y = (int64_t)yoe + era * 400 + (*m <= 2);
 }
 
 uint64_t clock_hz(void)
@@ -745,14 +776,14 @@ void timer_init(void)
     uint64_t epoch = 0;
     int64_t fw_epoch = 0;
     if (arch_rtc_read_epoch(&epoch)) {
-        g_realtime_offset_ns = epoch * NS_PER_SEC - clock_now_ns();
+        clock_set_realtime_ns(epoch * NS_PER_SEC);
         kinfo("timer: wall clock %llu s since 1970 from the RTC", (unsigned long long)epoch);
     } else if (bootinfo_fw_epoch(&fw_epoch) && fw_epoch > 0 && (uint64_t)fw_epoch <= UINT64_MAX / NS_PER_SEC) {
         /* No clock of its own: the firmware's time as the loader read it,
          * just before ExitBootServices (boot protocol v10), anchored at
          * the monotonic clock's zero. Late by the time between that read
          * and the clock's start, well under a second. */
-        g_realtime_offset_ns = (uint64_t)fw_epoch * NS_PER_SEC;
+        __atomic_store_n(&g_realtime_offset_ns, (uint64_t)fw_epoch * NS_PER_SEC, __ATOMIC_RELAXED);
         kinfo("timer: wall clock %lld s since 1970 from the firmware at boot (no RTC)", (long long)fw_epoch);
     } else {
         kwarn("timer: no real-time clock; the wall clock starts at 1970");

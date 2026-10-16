@@ -466,7 +466,7 @@ int64_t lx_sigaltstack(struct syscall_args *a)
 static int64_t send_to_process(struct process *target, int sig, enum signal_source src)
 {
     struct process *cur = process_current();
-    if (!cred_may_signal(&cur->cred, &target->cred))
+    if (!process_may_signal(cur, target, sig))
         return -EPERM;
     if (sig == 0)
         return 0;
@@ -526,7 +526,7 @@ int64_t lx_kill(struct syscall_args *a)
 static int64_t send_to_thread(struct process *target, uint32_t tid, int sig)
 {
     struct process *cur = process_current();
-    if (!cred_may_signal(&cur->cred, &target->cred))
+    if (!process_may_signal(cur, target, sig))
         return -EPERM;
     struct thread *t = process_find_thread(target, tid);
     if (t == NULL)

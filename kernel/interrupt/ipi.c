@@ -63,9 +63,15 @@ static void ipi_tlb_flush(unsigned vector, struct arch_trap_frame *frame, void *
 
 static void ipi_halt(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
-    (void)vector; (void)frame; (void)arg;
+    (void)frame; (void)arg;
     count(IPI_HALT);
     __atomic_store_n(&this_cpu()->online, false, __ATOMIC_RELEASE);
+    /* This handler never returns, so the dispatcher's EOI never comes:
+     * end the interrupt here, as Linux does before it parks a CPU. Left
+     * active on the parked CPUs, the IPI made QEMU's AArch64 firmware hang
+     * after kernel_reboot's PSCI SYSTEM_RESET (shell completeness S5: four
+     * resets in four with SMP 4, none with SMP 1 or with this EOI). */
+    arch_irqc_eoi(vector);
     arch_cpu_halt_forever();
 }
 

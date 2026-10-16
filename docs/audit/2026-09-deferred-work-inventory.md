@@ -1260,3 +1260,30 @@ each; none is needed by M2's acceptance test.
 - `fchown` (and `fchownat` with `AT_EMPTY_PATH`) on a pipe, socket or
   other descriptor that is not a VFS file is `EBADF`; Linux changes the
   anonymous inode's owner.
+
+## 15. Shell completeness S5 follow-ups (2026-10-16)
+
+- Power-off on x86-64 is still QEMU's `isa-debug-exit` alone: ACPI S5
+  needs the DSDT's `\_S5` values, which need an AML interpreter. Linux's
+  `reboot(LINUX_REBOOT_CMD_POWER_OFF)` there halts, as it does here.
+- A memory-space FADT reset register is not written (the restart runs
+  with interrupts off, after the other CPUs stop, and would need a
+  mapping made then); the 0xCF9, keyboard-controller and triple-fault
+  paths follow it. QEMU's q35 uses system I/O.
+- Setting the wall clock does not move a deadline already armed: an
+  absolute `CLOCK_REALTIME` sleep, futex wait or timer was converted to
+  the monotonic clock when armed and fires at the old wall time. Linux
+  re-arms them, and cancels a `TFD_TIMER_CANCEL_ON_SET` timerfd.
+- `adjtimex` and `clock_adjtime` are `-ENOSYS`: no slewing, no kernel
+  PLL. `ntpd` without `-q` exits on its first `adjtimex` after the step.
+- No time zone: `settimeofday`'s is checked and kept nowhere, and
+  `gettimeofday` reports none.
+- `CAD_ON` and `CAD_OFF` succeed and change nothing: no device reports
+  Ctrl-Alt-Del to the kernel.
+- `/dev/rtc0` answers `RTC_RD_TIME` and `RTC_SET_TIME` alone: no
+  alarms, no update interrupts (a read is `-EINVAL`), and no node where
+  boot found no RTC (Parallels Desktop's AArch64 machine, whose wall
+  clock is the firmware's at boot; the PL031 is found only at QEMU
+  virt's fixed address, since the DSDT is not read).
+- Halt stops the CPUs and leaves the machine on, as Linux's halt does;
+  under QEMU the harness would wait for its timeout, so no test halts.

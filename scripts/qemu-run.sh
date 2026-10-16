@@ -22,6 +22,8 @@
 #               with no serial console attached: make test-platforms)
 #   QEMU_VIRT_OPTS  appended to AArch64's -machine virt options (for example
 #               `,highmem=off`; make test-platforms)
+#   QEMU_REBOOT 1 lets a guest reset restart the machine (default: QEMU
+#               exits on a reset, -no-reboot)
 #   QEMU_SEMIHOSTING  0 leaves AArch64's semihosting out: the kernel's exit
 #               is then a PSCI SYSTEM_OFF and QEMU exits 0 whatever the
 #               boot's result (make test-platforms)
@@ -36,6 +38,11 @@ set -eu
 image=$1
 here=$(cd "$(dirname "$0")" && pwd)
 arch=${QEMU_ARCH:-x86_64}
+# A guest reset ends QEMU (-no-reboot), so a boot that resets by mistake
+# fails rather than starting over; QEMU_REBOOT=1 lets it restart the
+# machine instead (shell completeness S5: test-net-login's reboot stage).
+no_reboot="-no-reboot"
+[ "${QEMU_REBOOT:-0}" = "1" ] && no_reboot=""
 firmware=$("$here/find-firmware.sh" "$arch")
 
 # Phase 6 devices: a scratch virtio-blk disk (8 MiB, created next to the
@@ -319,7 +326,7 @@ if [ "$arch" = aarch64 ]; then
         -serial "${QEMU_SERIAL:-stdio}" \
         -display none \
         -monitor none \
-        -no-reboot \
+        $no_reboot \
         ${QEMU_EXTRA:-}
 fi
 
@@ -353,5 +360,5 @@ exec ${QEMU_WRAP:-} qemu-system-x86_64 \
     -serial "${QEMU_SERIAL:-stdio}" \
     -display none \
     -monitor none \
-    -no-reboot \
+    $no_reboot \
     ${QEMU_EXTRA:-}

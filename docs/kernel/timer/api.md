@@ -74,7 +74,23 @@ Constants: `CONFIG_HZ` = 250, `NS_PER_SEC`, `TICK_NS` = 4 000 000.
   machine without a readable RTC takes the firmware's `GetTime` at boot
   (boot protocol v10) instead; with neither it logs a warning and the
   offset stays 0 (the wall clock then reads as time since boot).
-- **Concurrency**: lock-free, interrupt context yes. Not settable.
+- **Concurrency**: lock-free, interrupt context yes. Set by
+  `clock_set_realtime_ns`.
+
+### `void clock_set_realtime_ns(uint64_t ns)` (shell completeness S5)
+- **Purpose**: set the wall clock to `ns` since 1970: the offset becomes
+  `ns - clock_now_ns()`. The caller checks `PRIV_SYS_ADMIN`.
+- **Concurrency**: one atomic store; any context. The monotonic clock and
+  its deadlines do not move.
+
+### `int64_t time_days_from_civil(...)`, `void time_civil_from_days(...)`
+- Days since 1970-01-01 for a proleptic Gregorian date, and back: the
+  RTC drivers' and `/dev/rtc0`'s calendar arithmetic.
+
+### `int arch_rtc_write_epoch(uint64_t seconds)` (`arch/timer.h`, S5)
+- Set the RTC: 0, `-ENODEV` with no RTC, `-EINVAL` for a time it cannot
+  hold (x86-64: 1970..2299; AArch64: 32 bits of seconds). Thread context;
+  serialised with `arch_rtc_read_epoch`.
 
 ### `bool arch_rtc_read_epoch(uint64_t *seconds)` (`arch/timer.h`)
 - The architecture's one-shot RTC read; false when there is none.

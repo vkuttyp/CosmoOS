@@ -5650,13 +5650,27 @@ static void console_shell(char *out, size_t n)
  * (kernel_shutdown). Done in the handler, with system calls only, so no
  * signal can land between a flag's check and the wait it should end.
  */
-static void poweroff_signal(int sig)
+/*
+ * BusyBox's poweroff, reboot and halt (without -f) signal init, as they
+ * signal any init that is not BusyBox's own: SIGUSR2 powers off, SIGTERM
+ * restarts (shell completeness S5), SIGUSR1 halts. Each syncs first. Power
+ * off is init's exit, which ends the boot as it always has (the harness
+ * reads the emulator's exit); restart and halt are SYS_reboot. Only a
+ * holder of PRIV_SYS_ADMIN may send them (security S20).
+ */
+static void shutdown_signal(int sig)
 {
-    (void)sig;
-    static const char msg[] = "init: power off requested\n";
-    write(1, msg, sizeof(msg) - 1);
+    static const char off[] = "init: power off requested\n", re[] = "init: restart requested\n",
+                      halt[] = "init: halt requested\n";
+    const char *msg = sig == SIGTERM ? re : sig == SIGUSR1 ? halt : off;
+    size_t len = sig == SIGTERM ? sizeof(re) - 1 : sig == SIGUSR1 ? sizeof(halt) - 1 : sizeof(off) - 1;
+    write(1, msg, len);
     sync();
-    _exit(0);
+    if (sig == SIGTERM)
+        cosmo_reboot(COSMO_REBOOT_RESTART);
+    else if (sig == SIGUSR1)
+        cosmo_reboot(COSMO_REBOOT_HALT);
+    _exit(0);   /* power off, or a refused restart or halt: the boot ends as a power off does */
 }
 
 /* HOME is root's home, as /etc/passwd and an ssh session name it (shell
@@ -6042,8 +6056,10 @@ int main(int argc, char **argv)
     printf("init: CosmoOS userland, pid %d\n", getpid());   /* pid 1 outside self-test builds */
     fflush(stdout);
     struct sigaction pa = { 0 };
-    pa.sa_handler = poweroff_signal;
+    pa.sa_handler = shutdown_signal;
     sigaction(SIGUSR2, &pa, NULL);
+    sigaction(SIGTERM, &pa, NULL);
+    sigaction(SIGUSR1, &pa, NULL);
     setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin", 1);
     setenv("HOME", "/root", 1);
     bool disk_root = switch_to_disk_root();

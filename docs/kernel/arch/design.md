@@ -306,6 +306,18 @@ its `rip` and the walk starts from its `rbp`.
 status `(code << 1) | 1`; codes `0x10`/`0x11` map to 33/35. Current QEMU
 processes the request asynchronously, so the instruction returns and the
 caller must still halt; on hardware the write is simply ignored.
+`arch_power_off` is empty: ACPI S5 needs the DSDT's `\_S5` values, which
+need AML.
+
+`arch_restart` (shell completeness S5, `kernel_reboot`'s restart) tries
+what Linux's x86 reboot tries, about 50 ms each (writes to port 0x80):
+the FADT's reset register when flag `RESET_REG_SUP` (bit 10) is set and
+it is in system I/O space (QEMU's q35: port 0xCF9, value 0x0F); the PCI
+reset control, 0x02 then 0x06 to 0xCF9; the keyboard controller's pulse
+(0xFE to port 0x64, after its input buffer empties); and a triple fault
+(an empty IDT, then `int3`). Each logs `reboot: restart through ...`. A
+memory-space reset register is not written (it would need a mapping
+made with interrupts off; inventory).
 
 ## linker.ld: image layout
 

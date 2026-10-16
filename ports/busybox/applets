@@ -72,8 +72,8 @@ hexdump
 # design, "Raw ICMP sockets"). No ping6.
 ping
 # poweroff: signals init (SIGUSR2), which syncs and exits; the kernel then
-# powers off (PSCI SYSTEM_OFF on AArch64). `-f` calls reboot(2), which the
-# Linux personality does not have.
+# powers off (PSCI SYSTEM_OFF on AArch64). `-f` syncs and calls reboot(2)
+# itself (shell completeness S5).
 poweroff
 # Shell completeness S1: network inspection over the interface ioctls and
 # /proc/net (docs/compat/linux/design.md, "Interface ioctls"). BusyBox's
@@ -129,3 +129,11 @@ kill
 chown
 chgrp
 su
+# Shell completeness S5: power and clock. reboot and halt signal init
+# (SIGTERM, SIGUSR1) or, with -f, call reboot(2); hwclock reads and sets
+# /dev/rtc0; ntpd -q steps the clock with settimeofday. Each change needs
+# PRIV_SYS_ADMIN.
+reboot
+halt
+hwclock
+ntpd

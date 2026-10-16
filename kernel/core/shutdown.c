@@ -27,3 +27,17 @@ void kernel_shutdown(enum kernel_exit_status status)
     kinfo("shutdown: halting CPU");
     arch_cpu_halt_forever();
 }
+
+void kernel_reboot(enum kernel_reboot_cmd cmd)
+{
+    if (cmd == KERNEL_REBOOT_POWER_OFF)
+        kernel_shutdown(KERNEL_EXIT_SUCCESS);
+    kinfo(cmd == KERNEL_REBOOT_RESTART ? "reboot: restarting system" : "reboot: system halted");
+    smp_stop_others();
+    arch_irq_disable();
+    if (cmd == KERNEL_REBOOT_RESTART) {
+        arch_restart();
+        kerror("reboot: no way to restart this machine; halting");
+    }
+    arch_cpu_halt_forever();
+}

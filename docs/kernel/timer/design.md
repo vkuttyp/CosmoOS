@@ -46,9 +46,26 @@ zero: `timer: wall clock N s since 1970 from the firmware at boot (no
 RTC)`. It is late by the time between that read and the clock's start,
 well under a second. That is the wall clock on Parallels Desktop, which
 has no RTC this kernel finds. With neither, the offset stays 0 and the
-boot warns. There is no `settimeofday` and no NTP; the clock is the
-RTC's (or the firmware's) second plus the monotonic clock's progress
-since. Consumers: the native
+boot warns. The clock is the RTC's (or the firmware's) second plus the
+monotonic clock's progress since, until something sets it.
+
+Shell completeness S5 sets it: `clock_set_realtime_ns(ns)` stores
+`ns - clock_now_ns()` as the offset in one relaxed atomic store, which
+`clock_realtime_ns` reads with one atomic load, so a reader sees the old
+wall clock or the new one and never a torn offset. The offset is
+unsigned: a wall time earlier than the monotonic reading wraps it, and
+the sum wraps back. Its callers -- the Linux `settimeofday` and
+`clock_settime`, through which BusyBox's `date -s` and `ntpd` reach it
+-- check `PRIV_SYS_ADMIN`. The monotonic clock and every deadline on it
+stay where they were: an absolute `CLOCK_REALTIME` wait was converted to
+a monotonic deadline when it was armed, so it fires at the old wall time
+(Linux re-arms it; inventory). The RTC is written back by
+`arch_rtc_write_epoch` (x86-64: status B's SET bit holds the update off
+while the fields are written in status B's encoding, under the
+`cmos` spinlock that also covers a read, since every access is an
+index write then a data access; AArch64: the PL031's load register
+`RTCLR`, 32 bits of seconds), which `/dev/rtc0`'s `RTC_SET_TIME`
+(`kernel/timer/rtcdev.c`) calls for `hwclock -w`. Consumers: the native
 `clock_ns(COSMO_CLOCK_REALTIME)`, the Linux `CLOCK_REALTIME` family,
 `gettimeofday`, `time`, `FUTEX_CLOCK_REALTIME` and `TIMER_ABSTIME`.
 

@@ -229,6 +229,33 @@ void arch_test_periodic_irq_stop(void)
 
 /* --- the PL031 real-time clock of the virt machine ------------------------- */
 
+/* One register read or write each: a PL031 access needs no lock. */
+static vaddr_t pl031_map(void)
+{
+    if (!acpi_platform_is_qemu())
+        return 0;   /* the fixed address is QEMU virt's; elsewhere there is no RTC this kernel finds */
+    vaddr_t va = vm_map_phys((paddr_t)VIRT_PL031_BASE, PAGE_SIZE, VM_PROT_RW, VM_CACHE_UC);
+    if (va != 0 && (*(volatile uint32_t *)(va + 0xfe0) & 0xff) != 0x31) {   /* PeriphID0: 0x31 for a PL031 */
+        vm_unmap_phys(va);
+        return 0;
+    }
+    return va;
+}
+
+/* RTCLR (offset 0x08), the load register: RTCDR counts on from what is
+ * written. 32 bits of seconds: until 2106. */
+int arch_rtc_write_epoch(uint64_t seconds)
+{
+    if (seconds > UINT32_MAX)
+        return -EINVAL;
+    vaddr_t va = pl031_map();
+    if (va == 0)
+        return -ENODEV;
+    *(volatile uint32_t *)(va + 0x08) = (uint32_t)seconds;
+    vm_unmap_phys(va);
+    return 0;
+}
+
 bool arch_rtc_read_epoch(uint64_t *seconds)
 {
     /* QEMU's virt describes the PL031 in its DSDT (ARMH0011), which this
@@ -236,15 +263,12 @@ bool arch_rtc_read_epoch(uint64_t *seconds)
      * register is read at its known address and validated: a machine
      * without the device reads zero (or faults on nothing: the range is
      * device memory on every virt variant). */
-    if (!acpi_platform_is_qemu())
-        return false;   /* the fixed address is QEMU virt's; elsewhere there is no RTC this kernel finds */
-    vaddr_t va = vm_map_phys((paddr_t)VIRT_PL031_BASE, PAGE_SIZE, VM_PROT_RW, VM_CACHE_UC);
+    vaddr_t va = pl031_map();
     if (va == 0)
         return false;
     uint32_t dr = *(volatile uint32_t *)va;        /* RTCDR */
-    uint32_t pid0 = *(volatile uint32_t *)(va + 0xfe0);   /* PeriphID0: 0x31 for a PL031 */
     vm_unmap_phys(va);
-    if ((pid0 & 0xff) != 0x31 || dr == 0)
+    if (dr == 0)
         return false;
     *seconds = dr;
     return true;

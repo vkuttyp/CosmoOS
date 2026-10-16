@@ -91,6 +91,11 @@ main(argc, argv):
   sigaction(SIGUSR2): print "init: power off requested"; sync(); _exit(0)
                                                           (BusyBox poweroff's signal; in the handler,
                                                            so it cannot fall between a check and the wait)
+  sigaction(SIGTERM): print "init: restart requested"; sync(); SYS_reboot(COSMO_REBOOT_RESTART)
+  sigaction(SIGUSR1): print "init: halt requested"; sync(); SYS_reboot(COSMO_REBOOT_HALT)
+                                                          (BusyBox reboot's and halt's, shell completeness
+                                                           S5; only PRIV_SYS_ADMIN may send any of the
+                                                           three, security S20)
   if stat("/etc/rc") ok: pid = spawnvp("/bin/sh", {"sh", "/etc/rc"}); waitpid(pid); print "init: rc exited N"
   for (;;)
       pid = spawnvp("/bin/sh", {"sh"}, NULL, 0)          (inherits 0,1,2)

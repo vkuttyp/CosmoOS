@@ -9,7 +9,9 @@
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
+#include <kernel/spinlock.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 
 #include <arch/cpu.h>
 #include <arch/irqc.h>
@@ -172,19 +174,24 @@ static unsigned from_bcd(uint8_t v)
     return (unsigned)((v >> 4) * 10 + (v & 0x0f));
 }
 
-/* Days since 1970-01-01 for a proleptic Gregorian date. */
-static uint64_t days_from_civil(int64_t y, unsigned m, unsigned d)
+static uint8_t to_bcd(unsigned v)
 {
-    y -= m <= 2;
-    int64_t era = (y >= 0 ? y : y - 399) / 400;
-    unsigned yoe = (unsigned)(y - era * 400);
-    unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return (uint64_t)(era * 146097 + (int64_t)doe - 719468);
+    return (uint8_t)(((v / 10) << 4) | (v % 10));
 }
+
+static void cmos_write(uint8_t reg, uint8_t v)
+{
+    outb(CMOS_ADDR, (uint8_t)(0x80 | reg));
+    outb(CMOS_DATA, v);
+}
+
+/* The index register makes every access two port writes: one CPU at a
+ * time, from boot's read to hwclock's (shell completeness S5). */
+static spinlock_t g_cmos_lock = SPINLOCK_INIT("cmos");
 
 bool arch_rtc_read_epoch(uint64_t *seconds)
 {
+    arch_irq_state_t irq = spin_lock_irqsave(&g_cmos_lock);
     /* Wait for an update cycle to end (bit 7 of status A), then read twice
      * until the two reads agree. */
     for (unsigned spin = 0; spin < 100000 && (cmos_read(0x0a) & 0x80); spin++)
@@ -200,6 +207,7 @@ bool arch_rtc_read_epoch(uint64_t *seconds)
             break;
     }
     uint8_t status_b = cmos_read(0x0b);
+    spin_unlock_irqrestore(&g_cmos_lock, irq);
     bool binary = (status_b & 0x04) != 0, hour24 = (status_b & 0x02) != 0;
     unsigned sec = binary ? raw[0] : from_bcd(raw[0]);
     unsigned min = binary ? raw[1] : from_bcd(raw[1]);
@@ -219,6 +227,40 @@ bool arch_rtc_read_epoch(uint64_t *seconds)
     int64_t full_year = (int64_t)century * 100 + year;
     if (mon < 1 || mon > 12 || day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59 || full_year < 1970)
         return false;
-    *seconds = days_from_civil(full_year, mon, day) * 86400ull + hour * 3600ull + min * 60ull + sec;
+    *seconds = (uint64_t)time_days_from_civil(full_year, mon, day) * 86400ull + hour * 3600ull + min * 60ull + sec;
     return true;
+}
+
+/* The MC146818's SET bit (status B bit 7) holds the update cycle off while
+ * the fields are written, in the encoding status B names, as the read
+ * decodes them; the century register is QEMU's and the PC's 0x32. */
+int arch_rtc_write_epoch(uint64_t seconds)
+{
+    int64_t y;
+    unsigned mon, day;
+    time_civil_from_days((int64_t)(seconds / 86400), &y, &mon, &day);
+    unsigned rem = (unsigned)(seconds % 86400), hour = rem / 3600, min = rem / 60 % 60, sec = rem % 60;
+    if (y < 1970 || y > 2299)
+        return -EINVAL;
+    arch_irq_state_t irq = spin_lock_irqsave(&g_cmos_lock);
+    uint8_t status_b = cmos_read(0x0b);
+    bool binary = (status_b & 0x04) != 0, hour24 = (status_b & 0x02) != 0;
+    unsigned h = hour;
+    bool pm = false;
+    if (!hour24) {
+        pm = hour >= 12;
+        h = hour % 12 == 0 ? 12 : hour % 12;
+    }
+    const unsigned vals[7] = { sec, min, h, day, mon, (unsigned)(y % 100), (unsigned)(y / 100) };
+    static const uint8_t regs[7] = { 0x00, 0x02, 0x04, 0x07, 0x08, 0x09, 0x32 };
+    cmos_write(0x0b, (uint8_t)(status_b | 0x80));
+    for (unsigned i = 0; i < 7; i++) {
+        uint8_t v = binary ? (uint8_t)vals[i] : to_bcd(vals[i]);
+        if (i == 2 && pm)
+            v |= 0x80;
+        cmos_write(regs[i], v);
+    }
+    cmos_write(0x0b, status_b);
+    spin_unlock_irqrestore(&g_cmos_lock, irq);
+    return 0;
 }

@@ -38,6 +38,7 @@
 #include <kernel/pty.h>
 #include <kernel/tty.h>
 #include <kernel/thread.h>
+#include <kernel/shutdown.h>
 #include <kernel/timer.h>
 #include <kernel/uaccess.h>
 #include <kernel/version.h>
@@ -1902,7 +1903,10 @@ static int64_t lx_ioctl(struct syscall_args *a)
         return -EBADF;
     struct tty *t = tty_of_open(obj);   /* the console object, an open /dev/tty, a pty's master or slave */
     struct file *f = file_from_kobject(obj);
+    /* A character device with requests of its own (/dev/rtc0). */
+    const struct chrdev_ops *chr = t == NULL && f != NULL ? ramfs_chr_ops_of(f->vn) : NULL;
     int64_t rc = t != NULL ? lx_ioctl_tty(t, f, req, a->a[2])
+                 : chr != NULL && chr->ioctl != NULL ? chr->ioctl(f->vn, f, req, a->a[2])
                  : socket_from_kobject(obj) != NULL ? lx_ioctl_net(req, a->a[2])   /* netioctl.c */
                                                     : -ENOTTY;
     if (t != NULL)
@@ -2617,6 +2621,97 @@ static int64_t lx_gettimeofday(struct syscall_args *a)
             return -EFAULT;
     }
     return 0;
+}
+
+/* --- setting the clock and rebooting (shell completeness S5) -------------- */
+
+/* Linux's order: the value's validity (-EINVAL), then the privilege
+ * (-EPERM; PRIV_SYS_ADMIN, which sets the clock in place of Linux's
+ * CAP_SYS_TIME). A wall time before 1970 is refused, as Linux's
+ * timespec64_valid_settod does. */
+static int set_wall_clock(const struct lx_timespec *ts)
+{
+    if (ts != NULL && (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000 ||
+                       (uint64_t)ts->tv_sec > (UINT64_MAX - 999999999ull) / 1000000000ull))
+        return -EINVAL;
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
+        return -EPERM;
+    if (ts != NULL)
+        clock_set_realtime_ns((uint64_t)ts->tv_sec * 1000000000ull + (uint64_t)ts->tv_nsec);
+    return 0;
+}
+
+/* settimeofday(tv, tz): `tz` is checked as Linux checks it and kept
+ * nowhere -- this kernel has no time zone (gettimeofday reports none). */
+static int64_t lx_settimeofday(struct syscall_args *a)
+{
+    struct lx_timespec ts;
+    if (a->a[0]) {
+        struct lx_timeval tv;
+        if (copy_from_user(&tv, a->a[0], sizeof(tv)))
+            return -EFAULT;
+        if (tv.tv_usec < 0 || tv.tv_usec >= 1000000)
+            return -EINVAL;
+        ts = (struct lx_timespec){ .tv_sec = tv.tv_sec, .tv_nsec = tv.tv_usec * 1000 };
+    }
+    if (a->a[1]) {
+        int32_t tz[2];   /* tz_minuteswest, tz_dsttime */
+        if (copy_from_user(tz, a->a[1], sizeof(tz)))
+            return -EFAULT;
+        if (tz[0] > 15 * 60 || tz[0] < -15 * 60)
+            return -EINVAL;
+    }
+    return set_wall_clock(a->a[0] ? &ts : NULL);
+}
+
+/* clock_settime: CLOCK_REALTIME alone is settable, as Linux's. */
+static int64_t lx_clock_settime(struct syscall_args *a)
+{
+    if ((unsigned)a->a[0] != LX_CLOCK_REALTIME)
+        return -EINVAL;
+    struct lx_timespec ts;
+    if (copy_from_user(&ts, a->a[1], sizeof(ts)))
+        return -EFAULT;
+    return set_wall_clock(&ts);
+}
+
+#define LX_REBOOT_MAGIC1         0xfee1deadu
+#define LX_REBOOT_CMD_RESTART    0x01234567u
+#define LX_REBOOT_CMD_HALT       0xcdef0123u
+#define LX_REBOOT_CMD_POWER_OFF  0x4321fedcu
+#define LX_REBOOT_CMD_CAD_ON     0x89abcdefu
+#define LX_REBOOT_CMD_CAD_OFF    0x00000000u
+#define LX_REBOOT_CMD_RESTART2   0xa1b2c3d4u
+
+/*
+ * reboot(magic1, magic2, cmd, arg): Linux's order -- the privilege
+ * (PRIV_SYS_ADMIN in place of CAP_SYS_BOOT, -EPERM), the magic numbers
+ * (-EINVAL), the command (-EINVAL for kexec, suspend and anything else).
+ * RESTART2's argument string is not read: the restart is the same.
+ * CAD_ON and CAD_OFF succeed and change nothing: no device here reports
+ * Ctrl-Alt-Del (inventory). Nothing is synced first, as on Linux.
+ */
+static int64_t lx_reboot(struct syscall_args *a)
+{
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
+        return -EPERM;
+    uint32_t m1 = (uint32_t)a->a[0], m2 = (uint32_t)a->a[1], cmd = (uint32_t)a->a[2];
+    if (m1 != LX_REBOOT_MAGIC1 || (m2 != 672274793u && m2 != 85072278u && m2 != 369367448u && m2 != 537993216u))
+        return -EINVAL;
+    switch (cmd) {
+    case LX_REBOOT_CMD_RESTART:
+    case LX_REBOOT_CMD_RESTART2:
+        kernel_reboot(KERNEL_REBOOT_RESTART);
+    case LX_REBOOT_CMD_HALT:
+        kernel_reboot(KERNEL_REBOOT_HALT);
+    case LX_REBOOT_CMD_POWER_OFF:
+        kernel_reboot(KERNEL_REBOOT_POWER_OFF);
+    case LX_REBOOT_CMD_CAD_ON:
+    case LX_REBOOT_CMD_CAD_OFF:
+        return 0;
+    default:
+        return -EINVAL;
+    }
 }
 
 static __maybe_unused int64_t lx_time(struct syscall_args *a)
@@ -4351,6 +4446,9 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_fchown] = lx_fchown,
     [LX_fchownat] = lx_fchownat,
     [LX_chroot] = lx_chroot,
+    [LX_settimeofday] = lx_settimeofday,
+    [LX_clock_settime] = lx_clock_settime,
+    [LX_reboot] = lx_reboot,
 #ifdef LX_chmod
     [LX_chmod] = lx_chmod,
 #endif
