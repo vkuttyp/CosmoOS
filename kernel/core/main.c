@@ -63,6 +63,25 @@
 
 #include <drivers/pci.h>
 
+#if CONFIG_CRASH_TEST == 3 && CONFIG_LOCKDEP
+/* The crash test's other CPU (make test-display, check e): it waits for
+ * the hold, then takes a tracked lock, so lockdep's raw lock is entered
+ * on another CPU while the panic is on its way, every run. */
+static spinlock_t g_crash3_lock = SPINLOCK_INIT("crash3-other");
+static int g_crash3_ready, g_crash3_go;
+
+static void crash3_other(void *arg)
+{
+    (void)arg;
+    __atomic_store_n(&g_crash3_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_crash3_go, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+    spin_lock(&g_crash3_lock);   /* lockdep's raw lock: spins on the held word until the panic stops this CPU */
+    for (;;)
+        arch_cpu_relax();
+}
+#endif
+
 static const char *firmware_name(uint32_t firmware)
 {
     switch (firmware) {
@@ -265,12 +284,42 @@ void kernel_main(const struct cosmoboot_info *info)
      * the panic without a tracked lock (virtq_add_panic), which would wait
      * for that owner forever. */
     kinfo("crash test: panicking with lockdep's lock held elsewhere, on purpose");
+    /* Another CPU enters lockdep after the hold, every time: a thread
+     * pinned to the next CPU spins until `go`, then takes a tracked lock.
+     * Before the hold named a CPU no CPU is, that CPU found its own word
+     * and panicked first ("graph raw lock re-entry"), which an interrupt
+     * did by chance on main's CI; now it spins until the panic stops it,
+     * and the panic below is the one the screen must show. */
+    unsigned this_cpu = raw_cpu_id();
+    unsigned other = (this_cpu + 1u) % cpu_count();
+    if (other == this_cpu || !(cpu_online_mask() & CPUMASK_OF(other)))
+        panic("crash test: no other CPU online to enter lockdep (this CPU's %u)", this_cpu + 1u);
+    if (thread_create_on(crash3_other, NULL, "crash3-other", SCHED_PRIO_DEFAULT + 4, CPUMASK_OF(other)) == NULL)
+        panic("crash test: the thread for the other CPU was not created");
+    for (unsigned i = 0; i < 2000 && !__atomic_load_n(&g_crash3_ready, __ATOMIC_ACQUIRE); i++)
+        udelay(1000);   /* until it spins on `go` on the other CPU */
+    if (!__atomic_load_n(&g_crash3_ready, __ATOMIC_ACQUIRE))
+        panic("crash test: the other CPU's thread did not start in 2 s");
     /* Nothing may print between the hold and the panic (a print takes
      * that lock): the word read back goes in the panic's own message, and
-     * the test requires it to name a CPU other than this one. */
-    unsigned this_cpu = raw_cpu_id();
+     * the test requires it to name a CPU other than this one. Nor may an
+     * interrupt run here: its handler's tracked locks would spin on the
+     * held word with nothing to end it, so interrupts are off from the
+     * hold on (the panic turns them off anyway; the wait is a busy-wait
+     * on the raw clock). */
+    (void)arch_irq_save();
     unsigned owner = lockdep_crash_hold_raw();
-    panic("crash test: lockdep's lock is held by another CPU (owner word %u, this CPU's %u)", owner, this_cpu + 1u);
+    __atomic_store_n(&g_crash3_go, 1, __ATOMIC_RELEASE);
+    /* Until the other CPU is seen waiting on the held word in lockdep's
+     * raw lock -- the race run, not merely started -- or, if it never is,
+     * a panic the check does not accept. */
+    for (unsigned i = 0; i < 2000 && lockdep_crash_waiter() == 0; i++)
+        udelay(1000);
+    unsigned waiter = lockdep_crash_waiter();
+    if (waiter == 0)
+        panic("crash test: no other CPU entered lockdep in 2 s (owner word %u)", owner);
+    panic("crash test: lockdep's lock is held by another CPU (owner word %u, this CPU's %u, CPU %u waiting on it)",
+          owner, this_cpu + 1u, waiter);
 #endif
 #if CONFIG_SELFTEST
     failed += selftest_run_all();

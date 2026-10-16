@@ -65,6 +65,13 @@ static unsigned g_expected_hits[CONFIG_MAX_CPUS];
  * would leave a window in which an NMI could wait on its interrupted CPU. */
 static uint32_t g_raw;
 
+#if CONFIG_CRASH_TEST == 3
+/* make test-display only: the CPU (id + 1) that found the crash test's
+ * held word here and waited on it -- the crash path's proof that another
+ * CPU entered lockdep while the panic was on its way. */
+static uint32_t g_crash3_waiter;
+#endif
+
 static arch_irq_state_t raw_lock(void)
 {
     arch_irq_state_t s = arch_irq_save();
@@ -77,6 +84,9 @@ static arch_irq_state_t raw_lock(void)
             break;
         if (expected == owner)
             panic("lockdep: graph raw lock re-entry on CPU %u", cpu);
+#if CONFIG_CRASH_TEST == 3
+        __atomic_store_n(&g_crash3_waiter, owner, __ATOMIC_RELEASE);
+#endif
         arch_cpu_relax();
     }
     return s;
@@ -90,6 +100,11 @@ unsigned lockdep_crash_hold_raw(void)
 {
     __atomic_store_n(&g_raw, raw_cpu_id() + 2u, __ATOMIC_RELEASE);   /* owner: another CPU's id + 1 */
     return __atomic_load_n(&g_raw, __ATOMIC_ACQUIRE);
+}
+
+unsigned lockdep_crash_waiter(void)
+{
+    return __atomic_load_n(&g_crash3_waiter, __ATOMIC_ACQUIRE);
 }
 #endif
 

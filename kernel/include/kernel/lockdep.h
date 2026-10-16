@@ -142,6 +142,9 @@ void lockdep_dump_held_cpu(unsigned cpu);
  * CPU, as a CPU the panic stops can. Returns the owner word read back
  * (an owner is its CPU's id + 1; 0 is free), for the panic message. */
 unsigned lockdep_crash_hold_raw(void);
+/* The CPU (id + 1) that has waited on that held word in lockdep's raw
+ * lock, or 0 while none has: proof the race was run. */
+unsigned lockdep_crash_waiter(void);
 #endif
 
 /* One instant of counters under the graph raw lock. Normal diagnostics
