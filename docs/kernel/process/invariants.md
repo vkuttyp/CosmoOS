@@ -650,9 +650,9 @@ the same pid, 19 in one boot. *Checked by*: `p33-once`.
 
 **P34. An exited process has no address space.** (The exit-space unit,
 `docs/audit/next-subsystem-exit-space.md`.) `process_last_thread_gone`
-tears the space down first -- before it takes a lock, and before it
-publishes `EXITED`, the state `waitpid` reaps on -- and sets `p->space`
-to `NULL`. Whoever learns that a process has exited (its waiter, its
+tears the space down first -- before it takes the table lock, and before
+it publishes `EXITED`, the state `waitpid` reaps on -- having set
+`p->space` to `NULL` under `p->lock` (P38). Whoever learns that a process has exited (its waiter, its
 parent, `kill(pid, 0)`) learns it after the process's frames are free and
 its text no longer holds its program busy. It used to go only at
 release, when the last reference dropped: a program that waited for a
@@ -704,6 +704,19 @@ test-security` stage `aslr` (ten runs each of a static musl, a static
 PIE musl and a native program: every value distinct, the varying bits
 inside and nearly filling the designed range, the static load address
 fixed); `lxdyn`/`lxinterp` accept any page in their ranges.
+
+**P38. On a published process, `p->space` changes only under `p->lock`,
+and the old space is put after the lock is dropped.** (Shell
+completeness S3.) Exec's swap stores the new space under the lock; the
+exit's teardown (P34) clears the pointer under the lock and puts the
+space after it. So a space seen under `p->lock` is whole until the lock
+is dropped, and `process_space_usage` -- what `/proc/<pid>/stat` and
+`status` read a process's sizes through -- needs no reference of its
+own; a reference would let the reader be the last user and run the
+teardown after `EXITED` was published. *Checked by*: `proc-exit-read`
+(at the exiting hold, `stat` reads vsize 0 and rss 0 and `status` has no
+memory lines; 64 exits each read throughout by a thread on another CPU,
+every text whole, no exec record or rendered text left over).
 
 ## Gaps (documented, not invariants)
 

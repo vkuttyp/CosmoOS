@@ -14,6 +14,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/object.h>
+#include <kernel/percpu.h>
 #include <kernel/pmm.h>
 #include <kernel/printf.h>
 #include <kernel/process.h>
@@ -2422,4 +2423,237 @@ bool selftest_dirfd_rights(const char **reason)
     CHECK(wide == 0);     /* the control: the same changes succeed with WRITE */
     kinfo("selftest: dirfd-rights: a read-only directory handle stays read-only through the *at calls");
     return true;
+}
+
+#if CONFIG_DEBUG
+/* /proc/<pid>/<file> into `buf`, NUL-terminated: its length, or the open's error. */
+static int proc_read(pid_t pid, const char *file, char *buf, size_t n)
+{
+    char path[48];
+    ksnprintf(path, sizeof(path), "/proc/%u/%s", (unsigned)pid, file);
+    struct file *f = NULL;
+    int rc = vfs_open(NULL, path, COSMO_O_RDONLY, 0, &f);
+    if (rc)
+        return rc;
+    int64_t got = file_pread(f, buf, n - 1, 0);
+    file_put(f);
+    if (got < 0)
+        return (int)got;
+    buf[got] = '\0';
+    return (int)got;
+}
+
+/* A decimal at `q`; `*end` just past it. */
+static uint64_t parse_dec(const char *q, const char **end)
+{
+    uint64_t v = 0;
+    while (*q >= '0' && *q <= '9')
+        v = v * 10 + (uint64_t)(*q++ - '0');
+    *end = q;
+    return v;
+}
+
+/* stat's state letter and fields 23 and 24 (vsize, rss), or false. */
+static bool stat_fields(const char *text, pid_t pid, char *state, uint64_t *vsize, uint64_t *rss)
+{
+    char want[24];
+    ksnprintf(want, sizeof(want), "%u (init) ", (unsigned)pid);
+    if (strncmp(text, want, strlen(want)) != 0)
+        return false;
+    const char *q = text + strlen(want);
+    *state = *q;
+    for (int f = 3; f < 23; f++) {   /* q is at field f */
+        q = strchr(q, ' ');
+        if (q == NULL)
+            return false;
+        q++;
+    }
+    const char *e;
+    *vsize = parse_dec(q, &e);
+    if (e == q || *e != ' ')
+        return false;
+    q = e + 1;
+    *rss = parse_dec(q, &e);
+    return e > q && *e == ' ';
+}
+
+struct exit_reader {
+    pid_t pid;
+    bool killed;            /* set once the kill is posted (atomic) */
+    unsigned reads, bad;
+    unsigned after_kill;    /* reads begun after it: reported, not required -- the race is the scheduler's */
+    const char *why;
+};
+
+/* Read the process's stat and status until neither opens: every text read
+ * is whole and agrees with itself, whichever side of the exit it saw. */
+static void exit_reader_main(void *arg)
+{
+    struct exit_reader *r = arg;
+    static char buf[PAGE_SIZE];   /* one reader at a time: the test joins it before the next */
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (!clock_deadline_passed(deadline)) {
+        bool killed = __atomic_load_n(&r->killed, __ATOMIC_ACQUIRE);
+        int a = proc_read(r->pid, "stat", buf, sizeof(buf));
+        if (a > 0 && killed)
+            r->after_kill++;
+        if (a > 0) {
+            char st;
+            uint64_t vsize, rss;
+            __atomic_add_fetch(&r->reads, 1u, __ATOMIC_RELEASE);   /* the test kills after the first */
+            if (!stat_fields(buf, r->pid, &st, &vsize, &rss) || !strchr("RSTZ", st) || (vsize == 0) != (rss == 0)) {
+                r->bad++;
+                r->why = "a stat text was not whole, or its sizes disagreed";
+            }
+        }
+        int b = proc_read(r->pid, "status", buf, sizeof(buf));
+        if (b > 0) {
+            __atomic_add_fetch(&r->reads, 1u, __ATOMIC_RELEASE);
+            if (strncmp(buf, "Name:\tinit\n", 11) != 0 || (strstr(buf, "\nVmSize:\t") != NULL) !=
+                                                               (strstr(buf, "\nVmRSS:\t") != NULL)) {
+                r->bad++;
+                r->why = "a status text was not whole, or had one size without the other";
+            }
+        }
+        if (a < 0 && b < 0)
+            return;   /* gone: ESRCH at the open, then ENOENT once it leaves the table */
+    }
+    r->bad++;
+    r->why = "the process was still readable after 2 s";
+}
+
+/* The CPU to read from: another online one when there is one, so the
+ * reads run beside the exit rather than between its steps. */
+static cpumask_t reader_cpus(void)
+{
+    unsigned self = raw_cpu_id();   /* a preference only: any other CPU will do */
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
+        if (c != self && cpu_online(c))
+            return CPUMASK_OF(c);
+    return CPUMASK_OF(self);
+}
+
+static bool wait_gone(pid_t pid)
+{
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (process_present(pid) && !clock_deadline_passed(deadline))
+        thread_sleep_ms(1);
+    return !process_present(pid);
+}
+#endif
+
+/*
+ * Shell completeness S3's P2 check: /proc/<pid>/stat and status read a
+ * process's memory sizes under the rule exit and exec follow (P38), so a
+ * reader racing an exit sees the space whole or not at all. First the
+ * certain case: held where the exit has torn the space down and not yet
+ * published EXITED, stat says 0 and 0 and status has no sizes. Then 64
+ * exits, each read throughout by a thread on another CPU. Nothing faults,
+ * every text is whole, and no exec record or rendered text is left over.
+ */
+bool selftest_proc_exit_read(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: proc-exit-read: no test hooks in this build; skipping");
+    return true;
+#else
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    static const char *const argv[] = { "init", "--spin", NULL };
+    static char buf[PAGE_SIZE];
+    unsigned recs0 = exec_record_live(), texts0 = procfs_texts_live();
+
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    pid_t pid = p->pid;
+    char st;
+    uint64_t vsize = 0, rss = 0;
+    bool live_ok = proc_read(pid, "stat", buf, sizeof(buf)) > 0 && stat_fields(buf, pid, &st, &vsize, &rss) &&
+                   vsize > 0 && rss > 0;
+    process_test_hold_exiting(pid);
+    process_kill(p, COSMO_SIGKILL);
+    uint64_t deadline = clock_deadline_ns(2000000000ULL);
+    while (!process_test_reap_held() && !clock_deadline_passed(deadline))
+        thread_sleep_ms(1);
+    bool held = process_test_reap_held();
+    bool gone_ok = false, status_ok = false;
+    if (held) {
+        gone_ok = proc_read(pid, "stat", buf, sizeof(buf)) > 0 && stat_fields(buf, pid, &st, &vsize, &rss) &&
+                  vsize == 0 && rss == 0;
+        status_ok = proc_read(pid, "status", buf, sizeof(buf)) > 0 && strstr(buf, "\nVmSize:") == NULL &&
+                    strstr(buf, "\nThreads:\t") != NULL;
+    }
+    process_test_release_reap();
+    process_wait_exit(p);
+    process_put(p);
+    if (!live_ok) {
+        *reason = "a running process's stat did not give a vsize and an rss";
+        return false;
+    }
+    if (!held) {
+        *reason = "the reaper never reached the exiting hold";
+        return false;
+    }
+    if (!gone_ok || !status_ok) {
+        kerror("selftest: proc-exit-read: at the hold: %s", buf);
+        *reason = "with the space gone, stat or status still gave sizes";
+        return false;
+    }
+    CHECK(wait_gone(pid));
+
+    unsigned reads = 0, after = 0;
+    for (unsigned round = 0; round < 64; round++) {
+        p = NULL;
+        CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+        struct exit_reader r = { .pid = p->pid };
+        struct thread *t = thread_create_on(exit_reader_main, &r, "proc-reader", SCHED_PRIO_DEFAULT, reader_cpus());
+        if (t == NULL) {
+            process_kill(p, COSMO_SIGKILL);
+            process_wait_exit(p);
+            process_put(p);
+            *reason = "no reader thread";
+            return false;
+        }
+        /* The exit begins only once the reader is reading: killed
+         * first, it could finish before the reader's first open, and
+         * the round would read nothing at all. */
+        deadline = clock_deadline_ns(2000000000ULL);
+        while (__atomic_load_n(&r.reads, __ATOMIC_ACQUIRE) == 0 && !clock_deadline_passed(deadline))
+            sched_yield();
+        bool reading = __atomic_load_n(&r.reads, __ATOMIC_ACQUIRE) != 0;
+        process_kill(p, COSMO_SIGKILL);
+        __atomic_store_n(&r.killed, true, __ATOMIC_RELEASE);
+        process_wait_exit(p);
+        pid_t rpid = p->pid;
+        process_put(p);
+        thread_join(t);
+        if (r.bad) {
+            *reason = r.why;
+            return false;
+        }
+        if (!reading) {
+            *reason = "the reader read nothing before the exit began";
+            return false;
+        }
+        reads += r.reads;
+        after += r.after_kill;
+        CHECK(wait_gone(rpid));
+    }
+    unsigned recs1 = exec_record_live(), texts1 = procfs_texts_live();
+    if (recs1 != recs0 || texts1 != texts0) {
+        kerror("selftest: proc-exit-read: exec records %u -> %u, procfs texts %u -> %u", recs0, recs1, texts0,
+               texts1);
+        *reason = "an exec record or a rendered text outlived its process";
+        return false;
+    }
+    kinfo("selftest: proc-exit-read: sizes 0 at the exiting hold; 64 exits read %u times (%u after a kill); "
+          "nothing left over",
+          reads, after);
+    return true;
+#endif
 }

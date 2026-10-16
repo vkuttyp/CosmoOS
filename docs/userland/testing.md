@@ -275,6 +275,13 @@ networking with no fw_cfg address, so the kernel's DHCP client configures
   through eth0) and `ifconfig`; the broadcast, MTU and MAC it has are
   accepted, and `broadcast 10.0.3.1` (EINVAL), `mtu 1400` and another MAC
   (EOPNOTSUPP) refused, its MAC and MTU unchanged.
+- **h. Process tools** (shell completeness S3), at the end of the same
+  boot: `echo $$ $PPID` gives the console shell's pid and init's (its
+  parent), and `svc status dropbear` the ssh server's supervisor; `ps -o
+  pid,ppid,stat,comm` must list init with that pid, parent 0 and state
+  `S`, `dropbear` as the supervisor's child in `S`, the shell with init as
+  its parent in `S`, and `ps` itself in `R`. Every pid it is checked
+  against is known without `/proc`.
 - **e. Reboot**: the installed disk boots again, its slirp naming no
   host; a login with `StrictHostKeyChecking=yes` against the first boot's
   known_hosts must pass, so the host key was kept, and `hostname` must
@@ -286,7 +293,7 @@ Roadmap M3's acceptance: BusyBox ash is the shell. One boot of the image
 (release builds in CI, job `busybox`, both architectures); at the
 console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
 
-- **`ash.sh`, the scripted test**: 72 checks, each `BBTEST: ok NAME` or
+- **`ash.sh`, the scripted test**: 152 checks, each `BBTEST: ok NAME` or
   `BBTEST: FAIL NAME: want [..] got [..]`, ending `BBTEST: PASS`. The
   shell's features: a pipeline, `>`/`>>`/`<`, `2>` and `2>&1`, command
   substitution nested and with backquotes, a subshell's variables, `$?`
@@ -322,7 +329,21 @@ console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
   trips, `mktemp`, `setsid` (the child leads its session); `pgrep -f` and
   `pidof` find a background `sleep`, `pkill -f` and `killall` end one (its
   status 143); and `logger -t TAG` reaches the kernel's log through
-  `syslogd` (`dmesg` shows `syslog: [user.notice] TAG: ...`).
+  `syslogd` (`dmesg` shows `syslog: [user.notice] TAG: ...`). Then shell
+  completeness S3's process tools: `ps -o pid,stat,vsz,rss` lists a
+  background `sleep` by its pid, `S`, with non-zero VSZ and RSS, and `ps -o
+  pid,ruser` its user (`root`, from `status`'s `Uid:`); `ps` lists init as
+  the console shell's parent in `S` and the script's own shell in `S`;
+  `top -bn1`'s line for the `sleep` has a non-zero VSZ; its `status` has
+  non-zero `VmSize` and `VmRSS` and `State:\tS (sleeping)`; `free`'s total
+  is `sysctl`'s pages times the page size, and its free figure within 2
+  MiB of `sysctl vm.pages_free` read just before (the two readings are
+  printed as a `BBTEST: note`); `uptime` says `up`; `/bin/kill -l 9` is
+  `KILL` and `kill -l` lists `HUP`; `env S3TAG=s3 cat /proc/self/environ`
+  holds the variable, `/proc/self/exe` of `readlink` is `/bin/busybox`,
+  `cwd` is `/tmp` after `cd /tmp`, `root` is `/`; `priv -u 1000 -- cat
+  /proc/1/environ` says `No such file` (P1); `/proc/version`'s third word
+  is `uname -r`, and `/proc/cpuinfo` has `hw.ncpu` `processor` lines.
 - **ash's history** (shell completeness S2): `sh` at the console, a
   command unique to the run, `exit`; `/root/.ash_history` must hold it,
   and a second `sh`'s `history` must list it.

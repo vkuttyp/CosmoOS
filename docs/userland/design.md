@@ -37,7 +37,8 @@ system (`ports/busybox/README.md`). `/bin/busybox` and one symbolic
 link per applet of `ports/busybox/applets` -- the 48 of M3's decision
 7, `/bin/sh` among them, M4's `wget`, `nslookup`, `stty` and `tty`, and
 the later units' (S1's `ifconfig`, `route`, `netstat`, `arp` and
-`hostname`, S2's 33 everyday applets) -- come from the boot archive
+`hostname`, S2's 33 everyday applets, S3's `ps` and `kill`) -- come from
+the boot archive
 (`mkbootarchive.py`'s `NAME@TARGET` entries, ustar type 2; the kernel
 makes them with `vfs_symlink` in `ramfs_populate_boot`). A native program
 whose name an applet takes is installed as `/bin/cosmo-<name>`
@@ -47,7 +48,10 @@ whose name an applet takes is installed as `/bin/cosmo-<name>`
 `cosmo-true`, `cosmo-false` and `cosmo-sleep` likewise; `mkfifo`, `sync`
 and the `/sbin` programs keep their names (`/sbin/hostname` beside
 BusyBox's `/bin/hostname`, which `PATH` finds first and which also takes
-`-s`, `-F` and `-f`). init's self-tests and the
+`-s`, `-F` and `-f`; likewise `/sbin/ps` and `/sbin/kill` beside
+BusyBox's, which since shell completeness S3 are what `ps` and `kill`
+run: `ps` reads `/proc/<pid>/stat` and `status`, and shows sizes and
+states the native one does not). init's self-tests and the
 native test scripts name the `cosmo-` programs, because what they test
 is the native side.
 

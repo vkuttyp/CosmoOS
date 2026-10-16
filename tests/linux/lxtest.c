@@ -709,6 +709,106 @@ static int vfork_exec_child(void *arg)
 static volatile int g_usr1_seen;
 static void usr1_handler(int sig) { (void)sig; g_usr1_seen = 1; }
 
+/* "/proc/<pid>/<file>" into `buf`. */
+static void proc_path(char *buf, long pid, const char *file)
+{
+    char digits[24];
+    int n = 0;
+    do {
+        digits[n++] = (char)('0' + pid % 10);
+        pid /= 10;
+    } while (pid > 0);
+    const char *pre = "/proc/";
+    char *o = buf;
+    while (*pre)
+        *o++ = *pre++;
+    while (n > 0)
+        *o++ = digits[--n];
+    *o++ = '/';
+    while (*file)
+        *o++ = *file++;
+    *o = '\0';
+}
+
+/* A child that becomes uid and gid 1000 (which clears its privileges),
+ * sets its dumpable flag, says so on `ready` and waits until every write
+ * end of `go` is closed (it closes its own copy, `go_w`, first). */
+static long uid1000_target(int dumpable, int ready, int go, int go_w)
+{
+    long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        sc1(LX_close, go_w);
+        CHILD_CHECK(sc3(LX_setresgid, 1000, 1000, 1000) == 0 && sc3(LX_setresuid, 1000, 1000, 1000) == 0, 2);
+        CHILD_CHECK(sc2(LX_prctl, LX_PR_SET_DUMPABLE, dumpable) == 0, 3);
+        CHILD_CHECK(sc3(LX_write, ready, "r", 1) == 1, 4);
+        char x;
+        sc3(LX_read, go, &x, 1);   /* until the parent closes it */
+        lx_exit(0);
+    }
+    return c;
+}
+
+/*
+ * Shell completeness S3: who may look inside another process -- its
+ * environ, and its cwd, root and exe links (procfs P5, Linux's ptrace read
+ * check). A reader of uid 1000 without privileges is refused a
+ * non-dumpable uid-1000 process's environment and cwd (EACCES) and reads a
+ * dumpable one's; a root process is not even visible to it (ENOENT, P1).
+ * The process itself always may.
+ */
+static void inspect_tests(long pid)
+{
+    char path[48], lnk[64];
+    long fd = sc4(LX_openat, LX_AT_FDCWD, "/proc/self/environ", 0, 0);
+    CHECKV(fd >= 0, fd);
+    sc1(LX_close, fd);
+    CHECKV(sc4(LX_readlinkat, LX_AT_FDCWD, "/proc/self/exe", lnk, sizeof(lnk)) > 0, 0);
+    int ready[2], go[2];
+    CHECKV(sc2(LX_pipe2, ready, 0) == 0 && sc2(LX_pipe2, go, 0) == 0, 0);
+    long hidden = uid1000_target(0, ready[1], go[0], go[1]);
+    long open_ = uid1000_target(1, ready[1], go[0], go[1]);
+    CHECKV(hidden > 0 && open_ > 0, hidden);
+    char x[2];
+    CHECKV(sc3(LX_read, ready[0], x, 1) == 1 && sc3(LX_read, ready[0], x + 1, 1) == 1, 0);
+    long r = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (r == 0) {
+        sc1(LX_close, go[1]);
+        CHILD_CHECK(sc3(LX_setresgid, 1000, 1000, 1000) == 0 && sc3(LX_setresuid, 1000, 1000, 1000) == 0, 2);
+        proc_path(path, hidden, "environ");
+        CHILD_CHECK(sc4(LX_openat, LX_AT_FDCWD, path, 0, 0) == -13, 3);   /* non-dumpable: EACCES */
+        proc_path(path, hidden, "cwd");
+        CHILD_CHECK(sc4(LX_readlinkat, LX_AT_FDCWD, path, lnk, sizeof(lnk)) == -13, 4);
+        proc_path(path, hidden, "status");
+        long sfd = sc4(LX_openat, LX_AT_FDCWD, path, 0, 0);   /* still visible: only looking inside is refused */
+        CHILD_CHECK(sfd >= 0, 5);
+        sc1(LX_close, sfd);
+        proc_path(path, open_, "environ");
+        long efd = sc4(LX_openat, LX_AT_FDCWD, path, 0, 0);   /* the control: dumpable, same ids */
+        CHILD_CHECK(efd >= 0, 6);
+        sc1(LX_close, efd);
+        proc_path(path, open_, "cwd");
+        CHILD_CHECK(sc4(LX_readlinkat, LX_AT_FDCWD, path, lnk, sizeof(lnk)) > 0, 7);
+        proc_path(path, pid, "environ");   /* root's: another user's process does not exist for it */
+        CHILD_CHECK(sc4(LX_openat, LX_AT_FDCWD, path, 0, 0) == -2, 8);
+        lx_exit(0);
+    }
+    CHECKV(r > 0, r);
+    int32_t st = -1;
+    CHECKV(sc4(LX_wait4, r, &st, 0, 0) == r && st == 0, st);
+    /* This process, root with every privilege, may: the rule is the
+     * privilege (PRIV_PROC), not the user. */
+    proc_path(path, hidden, "environ");
+    fd = sc4(LX_openat, LX_AT_FDCWD, path, 0, 0);
+    CHECKV(fd >= 0, fd);
+    sc1(LX_close, fd);
+    sc1(LX_close, go[1]);   /* the targets' reads end */
+    CHECKV(sc4(LX_wait4, hidden, &st, 0, 0) == hidden && st == 0, st);
+    CHECKV(sc4(LX_wait4, open_, &st, 0, 0) == open_ && st == 0, st);
+    sc1(LX_close, go[0]);
+    sc1(LX_close, ready[0]);
+    sc1(LX_close, ready[1]);
+}
+
 static void busybox_needs(long pid)
 {
     struct lx_sigaction h = { .handler = (uint64_t)(uintptr_t)usr1_handler, .flags = LX_SA_RESTORER,
@@ -2267,6 +2367,7 @@ int main(int argc, char **argv)
     CHECKV(sc2(LX_kill, pid, 65) == -22, 0);
     CHECKV(sc2(LX_kill, pid, 17) == 0, 0);                      /* SIGCHLD: the default ignores it */
     fork_tests(pid);
+    inspect_tests(pid);
     exec_tests(pid);
     busybox_needs(pid);
     CHECKV(sc0(LX_sched_yield) == 0, 0);

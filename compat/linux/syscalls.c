@@ -2660,7 +2660,7 @@ static int64_t lx_uname(struct syscall_args *a)
      * machine its name must be told its container's
      * (docs/kernel/security/design.md §1e). */
     utsns_gethostname(utsns_current(), u.nodename, sizeof(u.nodename));
-    strlcpy(u.release, "6.0.0-cosmo", sizeof(u.release));
+    strlcpy(u.release, KERNEL_LINUX_RELEASE, sizeof(u.release));
     ksnprintf(u.version, sizeof(u.version), "%s %s %s", KERNEL_NAME, KERNEL_VERSION, COSMO_BUILD_ID);
     strlcpy(u.machine, LX_MACHINE, sizeof(u.machine));
     strlcpy(u.domainname, "(none)", sizeof(u.domainname));

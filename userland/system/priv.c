@@ -81,7 +81,7 @@ static int show(void)
     char line[256];
     int rc = 125;
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "privs: ", 7) == 0) {
+        if (strncmp(line, "Privs:\t", 7) == 0) {
             fputs(line + 7, stdout);
             rc = 0;
         }

@@ -78,6 +78,7 @@ static void process_release(struct kobject *obj)
     handle_table_destroy(&p->handles);
     if (p->space != NULL)
         vm_space_put(p->space);
+    exec_record_put(p->exec_rec);
     if (p->cwd_locked)
         vnode_put(p->cwd_locked);
     if (p->root)
@@ -374,7 +375,107 @@ struct image_build {
     uint64_t entry, sp, image_end, interp_base;
     char cmdline[PROCESS_CMDLINE_MAX];
     uint16_t cmdline_len;
+    struct exec_record *rec;
 };
+
+/* --- the exec record (process.h; shell completeness S3) --- */
+
+#if CONFIG_DEBUG
+static unsigned g_exec_records;   /* alive now: the proc-exit-read self-test's leak check */
+unsigned exec_record_live(void)
+{
+    return __atomic_load_n(&g_exec_records, __ATOMIC_RELAXED);
+}
+#else
+unsigned exec_record_live(void)
+{
+    return 0;
+}
+#endif
+
+/* The executable's name and the environment, envp joined as
+ * /proc/<pid>/environ shows it: cut at PROCESS_ENVIRON_MAX, a string the
+ * cut shortens keeping its terminating NUL, as cmdline_join does. */
+static struct exec_record *exec_record_make(const char *exe, const char *const envp[])
+{
+    size_t exe_len = exe != NULL ? strlen(exe) : 0, env_len = 0;
+    if (exe_len > UINT16_MAX - 1)
+        exe_len = 0;   /* not a path this kernel walked: no name rather than a cut one */
+    for (unsigned i = 0; envp && envp[i] && env_len < PROCESS_ENVIRON_MAX; i++) {
+        size_t n = strlen(envp[i]) + 1;
+        env_len += n < PROCESS_ENVIRON_MAX - env_len ? n : PROCESS_ENVIRON_MAX - env_len;
+    }
+    struct exec_record *r = kmalloc(sizeof(*r) + exe_len + 1 + env_len, 0);
+    if (r == NULL)
+        return NULL;
+    r->refs = 1;
+    r->exe_len = (uint16_t)exe_len;
+    r->env_len = (uint16_t)env_len;
+    memcpy(r->data, exe_len ? exe : "", exe_len);
+    r->data[exe_len] = '\0';
+    char *env = r->data + exe_len + 1;
+    size_t used = 0;
+    for (unsigned i = 0; envp && envp[i] && used < env_len; i++) {
+        size_t n = strlen(envp[i]) + 1;
+        if (n > env_len - used)
+            n = env_len - used;
+        memcpy(env + used, envp[i], n - 1);
+        env[used + n - 1] = '\0';
+        used += n;
+    }
+#if CONFIG_DEBUG
+    __atomic_add_fetch(&g_exec_records, 1u, __ATOMIC_RELAXED);
+#endif
+    return r;
+}
+
+static struct exec_record *exec_record_get(struct exec_record *r)
+{
+    if (r != NULL)
+        __atomic_add_fetch(&r->refs, 1u, __ATOMIC_RELAXED);
+    return r;
+}
+
+void exec_record_put(struct exec_record *r)
+{
+    if (r == NULL || __atomic_sub_fetch(&r->refs, 1u, __ATOMIC_ACQ_REL) != 0)
+        return;
+#if CONFIG_DEBUG
+    __atomic_sub_fetch(&g_exec_records, 1u, __ATOMIC_RELAXED);
+#endif
+    kfree(r);
+}
+
+struct exec_record *process_exec_record(struct process *p)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    struct exec_record *r = exec_record_get(p->exec_rec);
+    spin_unlock_irqrestore(&p->lock, s);
+    return r;
+}
+
+/*
+ * P38: on a published process, `p->space` changes only under `p->lock`
+ * (exec's swap, the exit's teardown), and the old space is put after
+ * the lock is dropped. So a space seen under the lock stays whole until
+ * the lock is dropped, and this read needs no reference of its own --
+ * which matters, because a reference would let a reader be the one to
+ * tear the space down, after the exit published EXITED (P34).
+ */
+bool process_space_usage(struct process *p, uint64_t *mapped_pages, uint64_t *resident_pages)
+{
+    *mapped_pages = *resident_pages = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    struct vm_space *space = p->space;
+    if (space != NULL) {
+        arch_irq_state_t vs = spin_lock_irqsave(&space->lock);   /* process.lock -> vm_space.lock */
+        *mapped_pages = space->mapped_pages;
+        *resident_pages = space->anon_pages + space->file_pages;
+        spin_unlock_irqrestore(&space->lock, vs);
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+    return space != NULL;
+}
 
 /* argv joined as /proc/<pid>/cmdline shows it; a string the cap cuts
  * keeps a terminating NUL, so the last one shown is whole or shortened. */
@@ -540,6 +641,11 @@ static int image_build(struct process *p, const struct process_image *exe, const
         panic("process: '%s': a writable and executable mapping, or an executable stack, at 0x%llx", name,
               (unsigned long long)bad);
 #endif
+    ib->rec = exec_record_make(exe->name, envp);
+    if (ib->rec == NULL) {
+        rc = -ENOMEM;
+        goto fail;
+    }
     return 0;
 
 fail:
@@ -652,6 +758,7 @@ static void process_unbuild(struct process *p)
     handle_table_destroy(&p->handles);
     if (p->space)
         vm_space_put(p->space);
+    exec_record_put(p->exec_rec);
     if (p->cwd_locked)
         vnode_put(p->cwd_locked);
     if (p->root)
@@ -941,6 +1048,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     strlcpy(p->exec_path, exe->path, sizeof(p->exec_path));
     memcpy(p->cmdline, ib->cmdline, ib->cmdline_len);
     p->cmdline_len = ib->cmdline_len;
+    p->exec_rec = ib->rec;   /* not yet published: no lock needed */
     uint64_t entry = ib->entry, sp = ib->sp, info_entry = ib->info.entry;
     unsigned nr_segments = ib->info.nr_segments;
     if (p->pers->init != NULL)
@@ -1062,6 +1170,7 @@ static void fork_inherit(struct process *p, struct process *parent)
     strlcpy(p->exec_path, parent->exec_path, sizeof(p->exec_path));
     memcpy(p->cmdline, parent->cmdline, parent->cmdline_len);
     p->cmdline_len = parent->cmdline_len;
+    p->exec_rec = process_exec_record(parent);   /* shared, never copied: nothing writes one */
     p->dumpable = __atomic_load_n(&parent->dumpable, __ATOMIC_RELAXED);
 }
 
@@ -1221,8 +1330,10 @@ int process_exec_images(const struct process_image *exe, const struct process_im
     int rc = image_build(p, exe, interp, name, false, argv, envp, execfn, ib);
     if (rc == 0) {
         rc = exec_single_thread(p, self);
-        if (rc)
+        if (rc) {
             vm_space_destroy(ib->space);   /* never active */
+            exec_record_put(ib->rec);
+        }
     }
     if (rc) {
         kfree(ib);
@@ -1233,12 +1344,14 @@ int process_exec_images(const struct process_image *exe, const struct process_im
     /* The old image's CHILD_CLEARTID word is cleared and woken while that
      * image is still mapped (Linux's mm_release at exec). */
     thread_clear_tid(self);
+    /* Under the lock, and the old space put after it (P38): a /proc
+     * reader holding the lock sees the old space whole or the new one. */
     struct vm_space *old = p->space;
-    arch_irq_state_t is = arch_irq_save();
+    arch_irq_state_t is = spin_lock_irqsave(&p->lock);
     __atomic_store_n(&p->space, ib->space, __ATOMIC_RELEASE);
     vm_space_switch(this_cpu()->cur_space, ib->space);
     this_cpu()->cur_space = ib->space;
-    arch_irq_restore(is);
+    spin_unlock_irqrestore(&p->lock, is);
     vm_space_put(old);   /* a vfork parent's space only loses this user */
     process_vfork_release(p);
     handle_close_on_exec(&p->handles);
@@ -1253,11 +1366,14 @@ int process_exec_images(const struct process_image *exe, const struct process_im
     strlcpy(p->exec_path, execfn, sizeof(p->exec_path));
     memcpy(p->cmdline, ib->cmdline, ib->cmdline_len);
     p->cmdline_len = ib->cmdline_len;
+    struct exec_record *old_rec = p->exec_rec;
+    p->exec_rec = ib->rec;
     __atomic_store_n(&p->dumpable, 1, __ATOMIC_RELAXED);
     p->main_thread = self;
     self->user_tid = p->pid;   /* the exec'ing thread becomes the first: its tid is the pid */
     __atomic_store_n(&p->exec_thread, NULL, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&p->lock, s);
+    exec_record_put(old_rec);
     self->set_child_tid = 0;
     self->tls_base = 0;
     arch_set_tls_base(0);
@@ -1481,8 +1597,8 @@ void process_last_thread_gone(struct process *p)
 {
     process_itimer_stop(p);   /* no SIGALRM for a process with no thread to take it */
     /*
-     * The address space goes first: before any lock, and before the
-     * state that waitpid reaps on (EXITED) is published. So by the time
+     * The address space goes first: before the table lock, and before
+     * the state that waitpid reaps on (EXITED) is published. So by the time
      * anyone can learn that this process has exited -- its waiter, its
      * parent, a kill(pid, 0) -- its frames are free and its text no
      * longer holds its program busy (-ETXTBSY). It used to go only at
@@ -1492,12 +1608,16 @@ void process_last_thread_gone(struct process *p)
      * Placed after EXITED is set, a parent already looking still reaped
      * mid-teardown. Nothing reads a zombie's space: its threads are
      * gone, every syscall uses the caller's own, and release and
-     * thread_clear_tid accept NULL.
+     * thread_clear_tid accept NULL. /proc reads its sizes (P38): so the
+     * pointer is cleared under `p->lock` and the space put after it, and
+     * a reader holding the lock sees the space whole or not at all.
      */
-    if (p->space != NULL) {
-        vm_space_put(p->space);
-        p->space = NULL;
-    }
+    arch_irq_state_t ss = spin_lock_irqsave(&p->lock);
+    struct vm_space *space = p->space;
+    p->space = NULL;
+    spin_unlock_irqrestore(&p->lock, ss);
+    if (space != NULL)
+        vm_space_put(space);
     process_vfork_release(p);   /* a vfork parent stops waiting once nothing runs on its space */
 #if CONFIG_DEBUG
     reap_hold_at(p, 1);   /* the space is gone and EXITED not yet published */
@@ -1821,6 +1941,14 @@ struct vnode *process_cwd_snapshot(char *path, size_t len)
     strlcpy(path, p->cwd_path_locked, len);
     spin_unlock_irqrestore(&p->lock, s);
     return vn;
+}
+
+/* Another process's working directory's path (/proc/<pid>/cwd). */
+void process_cwd_path(struct process *p, char *path, size_t len)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    strlcpy(path, p->cwd_path_locked, len);
+    spin_unlock_irqrestore(&p->lock, s);
 }
 
 static int cwd_publish(struct process *cur, struct vnode *vn, const char *newpath);

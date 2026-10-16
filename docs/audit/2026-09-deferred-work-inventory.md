@@ -1087,10 +1087,13 @@ each; none is needed by M2's acceptance test.
   console has no `^Z`, `jobs` or `fg` until PTYs and job control for ash.~~
   **Closed by M4 PR 2** (PTYs, controlling terminals, job control in ash
   on the console and on a pty; `docs/audit/2026-10-11-m4-interactive-networked-report.md`).
-- `/proc/<pid>/stat` reports VSZ and RSS as 0, so `top` and `ps` show no
+- ~~`/proc/<pid>/stat` reports VSZ and RSS as 0, so `top` and `ps` show no
   process memory: reading another process's space needs a reference on it,
   and exit drops the space (`vm_space_put`, P34) without `p->lock`
-  (v1.0.2's everyday commands).
+  (v1.0.2's everyday commands).~~ **Closed by shell completeness S3**: exit
+  and exec change `p->space` under `p->lock` and put the old space after
+  it (P38), and `/proc` reads the sizes under the lock
+  (`docs/audit/2026-10-16-process-tools-report.md`).
 - ~~AArch64 has no power-off off QEMU: `arch_emulator_exit` is QEMU's
   semihosting only and nothing calls PSCI `SYSTEM_OFF`, so on Parallels
   Desktop `exit` ends in `shutdown: halting CPU` and the VM stays running
@@ -1199,3 +1202,30 @@ each; none is needed by M2's acceptance test.
   seen once, AArch64 CI). The guard needs a count that includes that pass
   (or a per-thread schedule count).
 
+## 13. Shell completeness S3 follow-ups (2026-10-16)
+
+- Devices have no numbers: `st_rdev` is 0 for every node, so
+  `/proc/<pid>/stat`'s `tty_nr` is Linux's number for the same terminal
+  (the console 5,1, `/dev/pts/N` 136,N) and BusyBox's `ps` prints it as
+  `5,1` rather than a name, since it finds no node with that number.
+- No nice value and no scheduling-priority calls in the Linux personality
+  (`setpriority`, `nice`): `stat`'s priority is 20 and nice 0 for every
+  process, and `ps -o nice` is 0.
+- No user/system split of CPU time: all of it is `utime`, `stime` is 0
+  (as since v1.0.2).
+- `/proc/<pid>/environ` is the environment exec gave the process, kept by
+  the kernel (the exec record, cut at 4095 bytes), not read from the
+  process's memory: a program that rewrites its own environment strings
+  in place changes Linux's file and not this one.
+- `/proc/<pid>/cwd` and `root` are `ENOENT` to a reader whose root or
+  mount namespace differs from the process's: the kernel keeps a confined
+  process's paths in its own root and does not know where that root lies
+  in the reader's tree.
+- `/proc/cpuinfo` describes every CPU with the boot CPU's identification
+  (`arch_cpu_info`), and carries no feature flags (`flags`, `Features`) or
+  BogoMIPS.
+- `ports/busybox/busybox.config` is not quite what its README's recipe
+  makes: regenerated from 1.37.0's defconfig it would differ in three
+  options S2 left as they were (`FEATURE_SYSLOG_INFO`, `BZIP2_SMALL` 0
+  rather than 8, `FEATURE_WAIT_FOR_INIT`). S3 changed only its own four
+  (`PS`, `FEATURE_PS_TIME`, `FEATURE_PS_ADDITIONAL_COLUMNS`, `KILL`).

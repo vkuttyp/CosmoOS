@@ -29,8 +29,21 @@ reads `/proc/mounts` through `getmntent`. A file earns a place on the
 list by being one a Linux program here opens; it is written in Linux's
 format and holds nothing Linux's file does not (P4). The list is in one
 array (`g_system_files`), as sysctl's names are, so adding to it is a
-deliberate act. `/proc/cpuinfo` is still not added: nothing here reads
-it.
+deliberate act.
+
+Shell completeness S3 revises the bar once more, for two files no program
+here opens: `version` and `cpuinfo`. They are what a person at the shell
+reads by name -- `cat /proc/version` to learn what is running, `cat
+/proc/cpuinfo` to learn on what -- and the shell is the user interface of
+this system. So a file also earns a place by being one the shell's users
+read by that name, which the roadmap must name (S3 names these two); it is
+held to the same format rule. `version` says what `uname` says (the
+release, `KERNEL_LINUX_RELEASE`, and the version), with the compiler and
+without a builder nobody recorded. `cpuinfo` is a block per online CPU in
+Linux's field names for the architecture: x86-64's vendor, family, model,
+name and stepping from CPUID; AArch64's implementer, architecture,
+variant, part and revision from MIDR_EL1. Every CPU is described by the
+boot CPU's identification (`arch_cpu_info`).
 
 Shell completeness S1 adds a directory of them, `/proc/net`: `dev`,
 `route`, `arp`, `tcp`, `tcp6`, `udp`, `udp6` and `if_inet6`, which
@@ -55,8 +68,11 @@ is readable by anything.
   /proc/<pid>/fd/        a link per open handle (roadmap M4)
   /proc/<pid>/stat       Linux's one-line record (top, ps)
   /proc/<pid>/cmdline    argv, NUL-separated
+  /proc/<pid>/environ    envp as exec gave it (shell completeness S3)
+  /proc/<pid>/cwd, root, exe   links: where it stands and what it runs (S3)
   /proc/self             a link to the reader's own directory
-  /proc/meminfo, stat, loadavg, uptime, mounts   the system files (P4)
+  /proc/meminfo, stat, loadavg, uptime, mounts, version, cpuinfo
+                         the system files (P4)
   /proc/net/dev, route, arp, tcp, tcp6, udp, udp6, if_inet6
                          the network stack's tables (P4, shell completeness S1)
 ```
@@ -80,9 +96,20 @@ time (`sched_cpu_idle_ns`) and the rest is busy; the load averages are
 Linux's (`sched_loadavg`: runnable threads every five seconds, the same
 constants); MemAvailable is MemFree, because the page cache gives pages
 back only past its own limit and not when memory runs short. A
-process's memory sizes in `<pid>/stat` are 0: its address space can be
-torn down under a reader (the process layer's P34), and nothing reads it
-from here until that read has a reference (inventory). A process's state
+process's memory sizes (`vsize` and `rss` in `<pid>/stat`, `VmSize` and
+`VmRSS` in `status`) are its space's own counts -- the pages its regions
+cover, and the anonymous and page-cache frames resident in them -- read
+under the process's lock, which every change of the process's space
+holds (the process layer's P38): exit tears the space down (P34) and
+exec replaces it, and a reader holding the lock sees the old space whole
+or the new one, never one being freed. A reference on the space would
+have been the other way, and the wrong one: the reader could then be
+the last user, and the teardown would run after the exit had published
+`EXITED`. Once the space is gone the sizes are 0 and `status` leaves its
+memory lines out, as Linux's does for a zombie. There is no nice value,
+so `priority` is 20 and `nice` 0. The controlling terminal (`tty_nr`) is
+Linux's number for the same terminal (the console 5,1, `/dev/pts/N`
+136,N), because this kernel numbers no devices. A process's state
 is `Z` once exited, `T` while job control has it stopped, `R` with a
 thread running or ready, else `S`; its CPU time counts each thread's
 current running stretch too (`sched_thread_run_ns`), which the scheduler
@@ -91,9 +118,12 @@ process table's lock, as every other reader reads them. The first load
 average fold is one whole period after the first tick, and the figures
 are rounded to two places as Linux rounds them.
 
-`status` carries what `procinfo` already returns -- pid, ppid, name,
-state, uid, gid, threads, syscalls, cpu time -- and `domain`, which
-`procinfo` uses to decide visibility but does not report. `limits` is
+`status` is in Linux's `Key:\tvalue` format since shell completeness S3,
+because BusyBox's `ps` reads it (`Uid:` and `Gid:`, for the real ids): `Name`,
+`Umask`, `State`, `Tgid`, `Pid`, `PPid`, `Uid` and `Gid` (real,
+effective, saved, filesystem), `VmSize`, `VmRSS`, `Threads`, then what
+this kernel adds -- `Privs`, `Domain` (which `procinfo` uses to decide
+visibility but does not report), `Syscalls` and `Cpu_ns`. `limits` is
 the `COSMO_RLIMIT_*` set by name, which is otherwise only reachable a
 value at a time through `getrlimit` and only for oneself.
 
@@ -123,6 +153,38 @@ its own (the cwd-name unit, P32). As a link the walk names it by pid.
 A process directory answers `..` with `/proc`, which its listing always
 named; until the same unit the lookup refused it, so `chdir("..")` from
 one was `ENOENT`.
+
+## Looking inside a process
+
+A process's environment, and where its working directory, root and
+executable are, say more than whether it exists. Linux guards them with
+its ptrace read check; there is no ptrace here, and the rule is that
+check's (P5): the process itself; a holder of `PRIV_PROC`; or a reader
+whose effective uid and gid are all three of the target's ids, while the
+target is dumpable. A process that cleared `PR_SET_DUMPABLE` -- OpenSSH's
+`sftp-server` does -- keeps these from its own user. P1 has already
+decided whether the process is visible at all, so another user's process
+is `ENOENT` to an unprivileged reader, and a refusal of a visible one is
+`EACCES`. `environ` is checked when it is opened (the vnode's `open`), so
+it is listed and `stat`'ed like Linux's (0400, the process's own) and only
+reading it is refused; a link's `readlink` is.
+
+The environment is the one exec gave the process, cut at 4095 bytes
+(`PROCESS_ENVIRON_MAX`), and the executable is the name the exec's walk
+gave the file (P32: links replaced by where they led, so `/bin/sh` is
+`/bin/busybox`). Both are kept by the kernel in the process's **exec
+record** (the process design), rather than read back from the process's
+memory as Linux reads them: that read is what could not be done safely,
+because the space can be torn down under the reader. The difference is
+small -- a program that rewrites its own stack strings changes Linux's
+file and not this one -- and is recorded. An image the kernel started
+from the boot archive has no file, so its `exe` is absent (`ENOENT`, as
+for Linux's kernel threads). `cwd` is the process's own working
+directory path and `root` is `/`, for a reader that stands where the
+process does -- the same root and mounts. For any other reader both are
+`ENOENT`: the process's paths do not name the reader's files, and this
+kernel cannot say where the process's root lies in the reader's tree
+(inventory).
 
 ## Each open is a snapshot
 
@@ -156,7 +218,6 @@ there is nothing to put in it that `sysctl` does not already hold with a
 curated name list; a second empty namespace is not observability.
 
 Also absent, each because the kernel does not keep the fact or cannot
-read it safely: a process's environment, its memory map and sizes, and
-anything that would require holding a lock across a read of
-user-controlled length. The argument vector is kept, cut at 256 bytes
+read it safely: a process's memory map, and anything that would require
+holding a lock across a read of user-controlled length. The argument vector is kept, cut at 256 bytes
 (`PROCESS_CMDLINE_MAX`), at spawn and exec, and inherited by a fork.

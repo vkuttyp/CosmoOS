@@ -119,3 +119,8 @@ zcat
 mktemp
 logger
 setsid
+# Shell completeness S3: process tools over /proc (docs/kernel-services/
+# filesystem/procfs/api.md). /bin/ps and /bin/kill come before the native
+# /sbin/ps and /sbin/kill in PATH.
+ps
+kill

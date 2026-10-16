@@ -420,6 +420,10 @@ int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart,
  * or an allocation failure: the file then has no name to give fchdir,
  * which refuses it rather than invent one. Before the file is shared. */
 void file_set_dir_path(struct file *f, const char *name);
+
+/* procfs, debug builds: the texts it has rendered for opens and not yet
+ * freed (the proc-exit-read self-test's leak check). */
+unsigned procfs_texts_live(void);
 /* Set a regular file's length, dropping what is above it and reading as
  * zeros below a length it grew to. O_TRUNC is this with a size of zero;
  * this is the rest of it, which a filesystem that stores several blocks

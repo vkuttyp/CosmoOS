@@ -26,9 +26,10 @@ second spelling of a fact that already has a home is how a namespace
 becomes the dumping ground section 56 forbids.
 
 Check: the filesystem synthesises exactly the names in the API's table,
-and the self-test requires an unknown name under `/proc` (`cpuinfo`) and
-under `/proc/<pid>` (`environ`) to be `ENOENT`, so a file appears only
-when someone adds it deliberately.
+and the self-test requires an unknown name under `/proc` (`kallsyms`) and
+under `/proc/<pid>` (`maps`) to be `ENOENT`, so a file appears only
+when someone adds it deliberately. (They were `cpuinfo` and `environ`
+until shell completeness S3 added both.)
 
 **P3. A file's length and its text come from the same rendering.** Each
 open renders once and every read of that handle returns that text. The
@@ -48,14 +49,18 @@ it gets to match what the file reported; and it opens the `status` of a
 child that has exited and been reaped, requiring `ESRCH` rather than
 stale text.
 
-**P4. A system file is one Linux programs read by that path, in Linux's
-format.** `meminfo`, `stat`, `loadavg`, `uptime` and `mounts` are on a
-fixed list (`g_system_files`) because a Linux program here opens each
-(`free`, `top`, `df`, `uptime`). Each says only what this kernel
+**P4. A system file is one Linux programs read by that path, or one the
+shell's users read by that name, in Linux's format.** `meminfo`, `stat`,
+`loadavg`, `uptime` and `mounts` are on a fixed list (`g_system_files`)
+because a Linux program here opens each (`free`, `top`, `df`,
+`uptime`); `version` and `cpuinfo` are on it because the roadmap names
+them as what a person at the shell reads (shell completeness S3, which
+revised this invariant: nothing here opens either). Each says only what this kernel
 measures, in the fields and units Linux's file uses; a field with no
 figure is 0 or absent (design.md, "Layout"), never an estimate made to
-look like a measurement. `<pid>/stat` and `<pid>/cmdline` hold the same
-promise for a process. The `/proc/net` files are a second fixed list
+look like a measurement. `<pid>/stat`, `<pid>/status` (Linux's
+`Key:\tvalue` lines, then this kernel's own), `<pid>/cmdline` and
+`<pid>/environ` hold the same promise for a process. The `/proc/net` files are a second fixed list
 (the network stack's `procnet_names`, shell completeness S1) under the
 same rule, rendered by the stack from its listings (the network
 invariants' N32).
@@ -64,8 +69,34 @@ Check: the user-mode self-test reads each and requires Linux's shape --
 `MemTotal:` first, `cpu  ` then `cpu0 ` and `btime` in `stat`, three
 two-decimal averages, `running/all` and the last pid in `loadavg`, `/`
 and `/proc procfs` in `mounts`, its own pid and `(init)` in
-`<pid>/stat`, a NUL-terminated `cmdline` naming it -- and BusyBox's
-scripted test runs the programs that read them (`free`, `df`, `uptime`,
-`top -b`); `test-net-login` runs the ones that read `/proc/net`
+`<pid>/stat` with a non-zero vsize and rss, `Name:\tinit` and its ids in
+`status`, a NUL-terminated `cmdline` naming it, `Linux version
+6.0.0-cosmo` first in `version` and `processor\t: 0` in `cpuinfo` -- and
+BusyBox's scripted test runs the programs that read them (`free`, `df`,
+`uptime`, `top -b`, `ps`, with `free` agreeing with `sysctl`), and reads
+`version` (uname's release) and `cpuinfo` (a block per CPU); `test-net-login` runs the ones that read `/proc/net`
 (`ifconfig`, `route -n`, `netstat -tuln`, `arp -a`) and requires
 eth0's counters, both routes, dropbear's listener and the gateway.
+
+**P5. Looking inside a process is Linux's ptrace read check.** A
+process's `environ`, and its `cwd`, `root` and `exe` links, are read by
+the process itself, by a holder of `PRIV_PROC`, or by a reader whose
+effective uid and gid are all three of the target's ids while the target
+is dumpable (`PR_SET_DUMPABLE`); anyone else who can see the process (P1)
+is refused with `EACCES` -- at the open for `environ`, which stays listed
+and `stat`able, and at `readlink` for the links. (Shell completeness S3.)
+What is read is the kernel's own record (the exec record: envp and the
+executable's traversed name), never the process's memory, which can be
+torn down under a reader.
+
+Check: `lxtest`'s inspection section forks two processes of uid 1000, one
+non-dumpable and one dumpable, and a reader of uid 1000 without
+privileges: the non-dumpable one's `environ` is `EACCES` and its `cwd`
+link `EACCES` while its `status` opens, the dumpable one's `environ` and
+`cwd` read, and root's `environ` is `ENOENT` (P1); then the root parent,
+with `PRIV_PROC`, opens the non-dumpable one's `environ`. BusyBox's
+scripted test reads a process's own `environ` (a variable `env` set),
+`exe` (`/bin/busybox`), `cwd` and `root`, and requires `priv -u 1000 cat
+/proc/1/environ` to fail. Confirmed against the bug: with the dumpable
+test removed from the rule, the reader's `EACCES` check fails (its exit
+status 3) and `LINUXTEST: FAIL`.

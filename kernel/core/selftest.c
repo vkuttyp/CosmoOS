@@ -921,6 +921,7 @@ static const struct selftest tests[] = {
     { "process-leftover-named", selftest_process_leftover_named },
     { "p33-once",        selftest_p33_once },
     { "exit-space-order", selftest_exit_space_order },
+    { "proc-exit-read",  selftest_proc_exit_read },
     { "signal-group",    selftest_signal_group },
     { "signal-setsid",   selftest_signal_setsid },
     { "signal-stop",     selftest_signal_stop },

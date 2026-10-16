@@ -1493,17 +1493,50 @@ point of no return:
 | Step | |
 |---|---|
 | the old image's `CHILD_CLEARTID` word | cleared and woken while that image is still mapped |
-| the space | the new one installed and switched to on this CPU; the old one `vm_space_put` -- destroyed, or for a vfork child returned to its parent, which `process_vfork_release` then lets run |
+| the space | the new one installed under `p->lock` and switched to on this CPU; the old one `vm_space_put` after the lock is dropped (P38) -- destroyed, or for a vfork child returned to its parent, which `process_vfork_release` then lets run |
 | handles | `handle_close_on_exec` |
 | signals | caught ones back to `SIG_DFL`, ignored stay ignored, the alternate stack gone; mask and pending kept (`signal_exec_reset`) |
 | personality | the new image's: the same one's `exec` hook, or the old one's `release` and the new one's `init` |
-| the process | name (the path's last component), `exec_path` (AT_EXECFN: the path asked for, also for a script), image fields; the calling thread becomes `main_thread` with the pid as its tid |
+| the process | name (the path's last component), `exec_path` (AT_EXECFN: the path asked for, also for a script), image fields, the exec record (below); the calling thread becomes `main_thread` with the pid as its tid |
 | the thread | thread pointer 0, FP/SIMD reset (`arch_fpu_reset_current`), `set_child_tid` 0, the syscall frame rewritten to enter the new image with the frame's stack pointer |
 
 A failure of the personality's state after that point ends the process
 (`128 + SIGKILL`); nothing else can fail there. Credentials, limits,
 directories, namespaces, the domain, the syscall filter, the umask, the
 pid, the parent and the children are unchanged.
+
+**The exec record** (shell completeness S3; `struct exec_record`,
+`process.h`) is what `/proc/<pid>/environ` and `/proc/<pid>/exe` read:
+the executable's traversed name -- the name the exec's own lookup gave
+the file (`vfs_lookup_named`, P32: `read_executable` asks for it, links
+replaced by where they led, so `/bin/sh` is `/bin/busybox`; for a script,
+its interpreter, which is what runs) -- and envp, joined NUL-terminated
+and cut at `PROCESS_ENVIRON_MAX` (4095 bytes, a page less procfs's
+terminator) as `cmdline` is at 256. `image_build` makes it with
+everything else that can fail, so an exec that fails leaves the old one
+(P36); spawn installs it before the process is published, exec swaps it
+under `p->lock` and puts the old one after, a fork child takes a
+reference to its parent's (nothing writes one, so sharing is a copy), and
+release puts it. A reader takes a reference under `p->lock`
+(`process_exec_record`) and copies outside. The kernel keeps these
+because the alternative, Linux's, is to read them back from the
+process's memory, and that is what could not be done safely: the space
+can be torn down under the reader (P34). The cost is the environment's
+bytes once per exec, not per fork, and the difference from Linux is that
+a program rewriting its own stack strings changes Linux's file and not
+this one. An image from the boot archive (init, and what the kernel's own
+tests start) names no file, and its record's name is empty.
+
+**A process's memory sizes**, for `/proc` (`process_space_usage`): the
+pages its regions cover (`mapped_pages`, which `COSMO_RLIMIT_AS` counts)
+and the frames resident in them (`anon_pages + file_pages`), read under
+`p->lock` and the space's lock. Every change of `p->space` on a
+published process holds `p->lock` -- exec's swap, and the exit's
+teardown, which clears the pointer under the lock and puts the space
+after it -- so a space seen under the lock stays whole until it is
+dropped (P38). The reader takes no reference: one would let a reader be
+the space's last user, and the teardown would then run after the exit
+had published `EXITED`, which is what P34 forbids.
 
 **The umask** (`struct process.umask`, roadmap M3) is 022 for a process
 the kernel starts and the parent's for a child of spawn or fork; the

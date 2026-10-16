@@ -6,8 +6,9 @@
  * constitution's section 56 warns about: a file belongs here if it
  * describes a process, or if it is one of a fixed list of Linux's own
  * system files that Linux programs read by that path (meminfo, stat,
- * loadavg, uptime, mounts: what free, top, df and uptime open), in
- * Linux's format (P4). Anything else system-wide stays in sysctl, whose
+ * loadavg, uptime, mounts: what free, top, df and uptime open) or that
+ * the shell's users read by name (version, cpuinfo), in Linux's format
+ * (P4). Anything else system-wide stays in sysctl, whose
  * names are a curated list; the log stays in dmesg; device nodes stay
  * in /dev.
  *
@@ -31,7 +32,10 @@
 #include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
+#include <kernel/version.h>
 #include <kernel/vfs.h>
+
+#include <arch/cpu.h>
 
 /*
  * The inode number carries what the vnode is: a pid and which of its
@@ -45,7 +49,11 @@ enum proc_kind { PROC_ROOT = 0, PROC_PID_DIR = 1, PROC_STATUS = 2, PROC_LIMITS =
                  PROC_MEMINFO = 9, PROC_STAT = 10, PROC_LOADAVG = 11, PROC_UPTIME = 12, PROC_MOUNTS = 13,
                  /* /proc/net (S1): the directory, and its files with the
                   * file's enum procnet_file where a pid would be. */
-                 PROC_NET_DIR = 14, PROC_NET_FILE = 15 };
+                 PROC_NET_DIR = 14, PROC_NET_FILE = 15,
+                 /* Shell completeness S3: a process's environment and
+                  * links, and two more system files. */
+                 PROC_ENVIRON = 16, PROC_CWD = 17, PROC_EXE = 18, PROC_ROOT_LINK = 19,
+                 PROC_VERSION = 20, PROC_CPUINFO = 21 };
 
 /* An fd link carries its handle number above the pid as well. */
 #define PROC_INO(pid, kind) (((uint64_t)(pid) << 8) | (uint64_t)(kind))
@@ -110,8 +118,6 @@ static struct vnode *proc_vnode(struct mount *mnt, uint64_t ino, enum vnode_type
  * buffer, and nothing is kept between calls (P3).
  */
 
-static const char *const g_states[] = { "running", "exiting", "exited" };
-
 /* The privileges by name (roadmap M5), "none" when there are none. */
 static void render_privs(uint32_t privs, char *out, size_t n)
 {
@@ -125,36 +131,119 @@ static void render_privs(uint32_t privs, char *out, size_t n)
         ksnprintf(out, n, "none");
 }
 
+/* What `stat` and `status` both say about a process's threads, from one
+ * hold of its lock. Its CPU time counts each thread's current running
+ * stretch too (sched_thread_run_ns), which the scheduler charges only at
+ * a switch-out; rq->lock nests inside p->lock. */
+struct proc_threads {
+    unsigned nr_threads, live;
+    int cpu;
+    bool stopped;
+    uint64_t run_ns;
+};
+
+static void proc_threads(struct process *p, struct proc_threads *out)
+{
+    uint64_t now = clock_now_ns();
+    *out = (struct proc_threads){ 0 };
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    out->nr_threads = p->nr_threads;
+    out->stopped = p->stopped;
+    struct thread *t;
+    list_for_each_entry(t, &p->threads, proc_link) {
+        out->run_ns += sched_thread_run_ns(t, now);
+        if (t->state == THREAD_RUNNING || t->state == THREAD_READY)
+            out->live++;
+        if (t == p->main_thread)
+            out->cpu = t->cpu;
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+}
+
+/* Linux's state letter: `Z` once exited, `T` while job control has it
+ * stopped, `R` with a thread running or ready, else `S`. */
+static char proc_state(const struct process *p, const struct proc_threads *t)
+{
+    return p->state == PROCESS_EXITED ? 'Z' : t->stopped ? 'T' : (t->live ? 'R' : 'S');
+}
+
+/*
+ * The session's controlling terminal as proc(5)'s tty_nr, and its
+ * foreground group (tpgid, -1 for none). This kernel numbers no devices
+ * (st_rdev is 0; inventory), so the number is Linux's for the same
+ * terminal: the console is 5,1 and /dev/pts/N is 136,N.
+ */
+static void proc_tty(pid_t sid, unsigned *nr, int *tpgid)
+{
+    *nr = 0;
+    *tpgid = -1;
+    struct tty *t = tty_controlling(sid);
+    if (t == NULL)
+        return;
+    unsigned major = 0, minor = 0;
+    if (strcmp(t->name, "console") == 0) {
+        major = 5;
+        minor = 1;
+    } else if (strncmp(t->name, "pts/", 4) == 0) {
+        major = 136;
+        for (const char *c = t->name + 4; *c >= '0' && *c <= '9'; c++)
+            minor = minor * 10 + (unsigned)(*c - '0');
+    }
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    pid_t fg = t->fg_pgid;
+    spin_unlock_irqrestore(&t->lock, s);
+    tty_put(t);
+    if (major != 0)
+        *nr = (major << 8) | (minor & 0xffu) | ((minor & ~0xffu) << 12);
+    if (fg != 0)
+        *tpgid = (int)fg;
+}
+
+/*
+ * Linux's `key:\tvalue` lines (proc(5)), which BusyBox's ps reads for the
+ * real ids (`Uid:`, `Gid:`), followed by what this kernel adds: the
+ * privileges, the domain, the system call count and the CPU time in
+ * nanoseconds. The memory lines are there while the process has a space
+ * (P38), and absent after, as Linux leaves them out of a zombie's.
+ */
 static int render_status(struct process *p, char *out, size_t n)
 {
-    unsigned nr_threads;
-    uint64_t run_ns = 0;
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    nr_threads = p->nr_threads;
-    struct thread *t;
-    list_for_each_entry(t, &p->threads, proc_link)
-        run_ns += t->run_time_ns;
-    spin_unlock_irqrestore(&p->lock, s);
-
-    unsigned st = (unsigned)p->state;
+    struct proc_threads th;
+    proc_threads(p, &th);
+    uint64_t mapped, resident;
+    bool space = process_space_usage(p, &mapped, &resident);
+    const struct credentials *c = &p->cred;
     char privs[64];
-    render_privs(__atomic_load_n(&p->cred.privs, __ATOMIC_RELAXED), privs, sizeof(privs));
-    return ksnprintf(out, n,
-                     "name: %s\n"
-                     "pid: %u\n"
-                     "ppid: %u\n"
-                     "state: %s\n"
-                     "uid: %u\n"
-                     "gid: %u\n"
-                     "privs: %s\n"
-                     "domain: %u\n"
-                     "threads: %u\n"
-                     "syscalls: %llu\n"
-                     "cpu_ns: %llu\n",
-                     p->name, p->pid, p->parent_pid,
-                     st < sizeof(g_states) / sizeof(g_states[0]) ? g_states[st] : "?", p->cred.euid,
-                     p->cred.egid, privs, p->domain, nr_threads, (unsigned long long)p->syscalls,
-                     (unsigned long long)run_ns);
+    render_privs(__atomic_load_n(&c->privs, __ATOMIC_RELAXED), privs, sizeof(privs));
+    char state = proc_state(p, &th);
+    const char *word = state == 'Z' ? "zombie" : state == 'T' ? "stopped" : state == 'R' ? "running" : "sleeping";
+    int used = ksnprintf(out, n,
+                         "Name:\t%s\n"
+                         "Umask:\t%04o\n"
+                         "State:\t%c (%s)\n"
+                         "Tgid:\t%u\n"
+                         "Pid:\t%u\n"
+                         "PPid:\t%u\n"
+                         "Uid:\t%u\t%u\t%u\t%u\n"
+                         "Gid:\t%u\t%u\t%u\t%u\n",
+                         p->name, (unsigned)p->umask, state, word, p->pid, p->pid, p->parent_pid, c->ruid, c->euid,
+                         c->suid, c->euid, c->rgid, c->egid, c->sgid, c->egid);
+    if (space && used >= 0 && (size_t)used < n)
+        used += ksnprintf(out + used, n - (size_t)used,
+                          "VmSize:\t%8llu kB\n"
+                          "VmRSS:\t%8llu kB\n",
+                          (unsigned long long)mapped * (PAGE_SIZE / 1024),
+                          (unsigned long long)resident * (PAGE_SIZE / 1024));
+    if (used >= 0 && (size_t)used < n)
+        used += ksnprintf(out + used, n - (size_t)used,
+                          "Threads:\t%u\n"
+                          "Privs:\t%s\n"
+                          "Domain:\t%u\n"
+                          "Syscalls:\t%llu\n"
+                          "Cpu_ns:\t%llu\n",
+                          th.nr_threads, privs, p->domain, (unsigned long long)p->syscalls,
+                          (unsigned long long)th.run_ns);
+    return used;
 }
 
 static int render_limits(struct process *p, char *out, size_t n)
@@ -182,37 +271,31 @@ static unsigned long long proc_ticks(uint64_t ns)
  * /proc/<pid>/stat, Linux's one-line record (proc(5)) through field 44,
  * which is as far as top and ps read. What this kernel does not keep
  * reads as Linux's "none": no page faults are counted, no user/system
- * split is kept (all of cpu_ns is utime), and the memory sizes are 0 --
- * a process's space may be torn down under a reader (P34), and nothing
- * reads it from here (inventory).
+ * split is kept (all of cpu_ns is utime), and there is no nice value
+ * (priority 20, nice 0). The memory sizes are the space's own counts,
+ * read under the rule exit and exec follow (P38): vsize in bytes, rss in
+ * pages, both 0 once the space is gone.
  */
 static int render_pid_stat(struct process *p, char *out, size_t n)
 {
-    unsigned nr_threads, live = 0;
-    int cpu = 0;
-    uint64_t run_ns = 0, now = clock_now_ns();
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    nr_threads = p->nr_threads;
-    bool stopped = p->stopped;
-    struct thread *t;
-    list_for_each_entry(t, &p->threads, proc_link) {
-        run_ns += sched_thread_run_ns(t, now);   /* the running stretch too: rq->lock nests inside p->lock */
-        if (t->state == THREAD_RUNNING || t->state == THREAD_READY)
-            live++;
-        if (t == p->main_thread)
-            cpu = t->cpu;
-    }
-    spin_unlock_irqrestore(&p->lock, s);
+    struct proc_threads th;
+    proc_threads(p, &th);
+    uint64_t mapped, resident;
+    (void)process_space_usage(p, &mapped, &resident);
     /* Under g_process_table_lock, as every other reader takes them. */
     pid_t pgid = 0, sid = 0;
     (void)process_getpgid(p->pid, &pgid);
     (void)process_getsid(p->pid, &sid);
-    const char *state = p->state == PROCESS_EXITED ? "Z" : stopped ? "T" : (live ? "R" : "S");
+    unsigned tty_nr;
+    int tpgid;
+    proc_tty(sid, &tty_nr, &tpgid);
     return ksnprintf(out, n,
-                     "%u (%s) %s %u %d %d 0 -1 0 0 0 0 0 %llu 0 0 0 20 0 %u 0 %llu 0 0 "
+                     "%u (%s) %c %u %d %d %u %d 0 0 0 0 0 %llu 0 0 0 20 0 %u 0 %llu %llu %llu "
                      "18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 %d 0 0 0 0 0\n",
-                     p->pid, p->name, state, p->parent_pid, pgid, sid, proc_ticks(run_ns), nr_threads,
-                     proc_ticks(p->start_ns), cpu < 0 ? 0 : cpu);
+                     p->pid, p->name, proc_state(p, &th), p->parent_pid, pgid, sid, tty_nr, tpgid,
+                     proc_ticks(th.run_ns), th.nr_threads, proc_ticks(p->start_ns),
+                     (unsigned long long)mapped * PAGE_SIZE, (unsigned long long)resident,
+                     th.cpu < 0 ? 0 : th.cpu);
 }
 
 /* argv as exec gave it (process.h, `cmdline`): NUL-separated, as Linux's. */
@@ -338,9 +421,37 @@ static int render_uptime(char *out, size_t n)
                      (unsigned long long)(idle / 10000000ull % 100));
 }
 
+/* Linux's first line, with what uname says: the release, the compiler,
+ * then uname's version (shell completeness S3). Nobody here built it at
+ * a known user@host, so that part of Linux's line is not invented. */
+static int render_version(char *out, size_t n)
+{
+    return ksnprintf(out, n, "Linux version %s (clang %s) %s %s %s\n", KERNEL_LINUX_RELEASE, __clang_version__,
+                     KERNEL_NAME, KERNEL_VERSION, COSMO_BUILD_ID);
+}
+
+/* A block per online CPU: its index, then the architecture's lines
+ * (arch_cpu_info, the boot CPU's identification), then a blank line. */
+static int render_cpuinfo(char *out, size_t n)
+{
+    int used = 0;
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS && (size_t)used < n; c++) {
+        if (!cpu_online(c))
+            continue;
+        used += ksnprintf(out + used, n - (size_t)used, "processor\t: %u\n", c);
+        if ((size_t)used < n)
+            used += arch_cpu_info(out + used, n - (size_t)used);
+        if ((size_t)used < n)
+            used += ksnprintf(out + used, n - (size_t)used, "\n");
+    }
+    return used;
+}
+
 static int render(uint64_t ino, char *out, size_t n)
 {
     switch (PROC_INO_KIND(ino)) {
+    case PROC_VERSION: return render_version(out, n);
+    case PROC_CPUINFO: return render_cpuinfo(out, n);
     case PROC_MEMINFO: return render_meminfo(out, n);
     case PROC_STAT:    return render_stat(out, n);
     case PROC_LOADAVG: return render_loadavg(out, n);
@@ -393,8 +504,22 @@ static int proc_readpage(struct vnode *vn, uint64_t index, void *buf)
     return 0;
 }
 
+#if CONFIG_DEBUG
+/* Rendered texts alive now: the proc-exit-read self-test's leak check. */
+static unsigned g_proc_texts;
+unsigned procfs_texts_live(void)
+{
+    return __atomic_load_n(&g_proc_texts, __ATOMIC_RELAXED);
+}
+#define PROC_TEXT_COUNT(d) __atomic_add_fetch(&g_proc_texts, (unsigned)(d), __ATOMIC_RELAXED)
+#else
+#define PROC_TEXT_COUNT(d) ((void)0)
+#endif
+
 static void proc_evict(struct vnode *vn)
 {
+    if (vn->fs_priv != NULL)
+        PROC_TEXT_COUNT(-1);
     kfree(vn->fs_priv);
     vn->fs_priv = NULL;
 }
@@ -448,7 +573,175 @@ static int proc_file(struct mount *mnt, pid_t pid, enum proc_kind kind, struct v
         return -ENOMEM;
     }
     vn->fs_priv = t;
+    PROC_TEXT_COUNT(1);
     vn->size = t->len;
+    *out = vn;
+    return 0;
+}
+
+/* --- looking inside a process (shell completeness S3) -----------------------
+ *
+ * The environment, and where a process's working directory, root and
+ * executable are. Linux guards these with its ptrace read check; with no
+ * ptrace here the rule is that check's (P5): the process itself; a holder
+ * of PRIV_PROC; or a reader whose effective ids are all three of the
+ * target's ids, while the target is dumpable -- a process that cleared
+ * PR_SET_DUMPABLE keeps these from its own user. P1 has already decided
+ * whether the process is visible at all.
+ */
+static bool proc_may_inspect(struct process *p)
+{
+    if (process_current() == p)
+        return true;
+    const struct credentials *c = cred_current();
+    if (cred_has(c, PRIV_PROC))
+        return true;
+    const struct credentials *t = &p->cred;
+    bool ids = c->euid == t->ruid && c->euid == t->euid && c->euid == t->suid && c->egid == t->rgid &&
+               c->egid == t->egid && c->egid == t->sgid;
+    return ids && __atomic_load_n(&p->dumpable, __ATOMIC_RELAXED) != 0;
+}
+
+/*
+ * The environment exec gave the process, from its exec record (process.h):
+ * the kernel keeps the copy because reading the process's memory back is
+ * not safe -- its space can be torn down under the reader (P34). The
+ * rule is checked at the open, not the lookup, so the file is listed and
+ * stat'ed like Linux's and only reading it is refused (EACCES), and the
+ * text is rendered there (P3); until then the file is empty.
+ */
+static int proc_environ_open(struct vnode *vn, struct file *f)
+{
+    (void)f;
+    struct process *p = proc_get_visible(PROC_INO_PID(vn->ino));
+    if (p == NULL)
+        return -ESRCH;   /* the path resolved; the process did not (P3) */
+    if (!proc_may_inspect(p)) {
+        process_put(p);
+        return -EACCES;
+    }
+    struct exec_record *r = process_exec_record(p);
+    process_put(p);
+    size_t len = r != NULL ? r->env_len : 0;
+    struct proc_text *t = kmalloc(sizeof(*t) + len + 1, 0);
+    if (t == NULL) {
+        exec_record_put(r);
+        return -ENOMEM;
+    }
+    if (len)
+        memcpy(t->text, exec_record_env(r), len);
+    t->text[len] = '\0';
+    t->len = len;
+    exec_record_put(r);
+    if (vn->fs_priv != NULL) {   /* a second open of the same vnode keeps the first one's text */
+        kfree(t);
+        return 0;
+    }
+    vn->fs_priv = t;
+    PROC_TEXT_COUNT(1);
+    vn->size = len;
+    return 0;
+}
+
+static const struct vnode_ops proc_environ_ops = {
+    .readpage = proc_readpage,
+    .evict = proc_evict,
+    .open = proc_environ_open,
+};
+
+static int proc_environ(struct mount *mnt, pid_t pid, struct vnode **out)
+{
+    struct process *p = proc_get_visible(pid);
+    if (p == NULL)
+        return -ESRCH;
+    uint32_t uid = p->cred.euid, gid = p->cred.egid;
+    process_put(p);
+    struct vnode *vn = proc_vnode(mnt, PROC_INO(pid, PROC_ENVIRON), VNODE_REG, 0400, &proc_environ_ops);
+    if (vn == NULL)
+        return -ENOMEM;
+    vn->uid = uid;   /* the process's own, 0400, as Linux's */
+    vn->gid = gid;
+    *out = vn;
+    return 0;
+}
+
+/* Whether the reader stands where `p` does: the same root and the same
+ * mounts, so a path `p` holds names the same file for the reader. Both
+ * are fixed at spawn (process.h), so reading them needs no lock. */
+static bool proc_same_root(const struct process *p)
+{
+    const struct process *me = process_current();
+    return (me ? me->root : NULL) == p->root && (me ? me->mntns : NULL) == p->mntns;
+}
+
+/*
+ * A link's target: `cwd` the working directory's path, `root` "/", `exe`
+ * the executable's traversed name from the exec record. -EACCES when the
+ * reader may not look inside (P5); -ENOENT for an exited process, for an
+ * image that has no name (the boot archive's), and for a process whose
+ * root or mounts differ from the reader's -- its paths do not name the
+ * reader's files, and this kernel cannot say where its root is in the
+ * reader's tree (inventory).
+ */
+static int link_target(enum proc_kind kind, pid_t pid, char *buf, size_t n)
+{
+    struct process *p = proc_get_visible(pid);
+    if (p == NULL)
+        return -ENOENT;
+    int rc = 0;
+    if (!proc_may_inspect(p))
+        rc = -EACCES;
+    else if (p->state == PROCESS_EXITED || !proc_same_root(p))
+        rc = -ENOENT;
+    else if (kind == PROC_CWD)
+        process_cwd_path(p, buf, n);
+    else if (kind == PROC_ROOT_LINK)
+        strlcpy(buf, "/", n);
+    else {
+        struct exec_record *r = process_exec_record(p);
+        if (r != NULL && r->exe_len != 0)
+            strlcpy(buf, exec_record_exe(r), n);
+        else
+            rc = -ENOENT;
+        exec_record_put(r);
+    }
+    process_put(p);
+    return rc != 0 ? rc : (int)strlen(buf);
+}
+
+static int proc_link_readlink(struct vnode *vn, char *buf, size_t len)
+{
+    char tmp[VFS_PATH_MAX];
+    int n = link_target(PROC_INO_KIND(vn->ino), PROC_INO_PID(vn->ino), tmp, sizeof(tmp));
+    if (n < 0)
+        return n;
+    if ((size_t)n > len)
+        n = (int)len;
+    memcpy(buf, tmp, (size_t)n);
+    return n;
+}
+
+static const struct vnode_ops proc_link_ops = {
+    .readlink = proc_link_readlink,
+};
+
+/* The link is there for any process the reader may see, as Linux lists
+ * it; reading it is what the rule decides (a refused link's size is 0). */
+static int proc_link(struct mount *mnt, pid_t pid, enum proc_kind kind, struct vnode **out)
+{
+    struct process *p = proc_get_visible(pid);
+    if (p == NULL)
+        return -ENOENT;
+    uint32_t uid = p->cred.euid, gid = p->cred.egid;
+    process_put(p);
+    char tmp[VFS_PATH_MAX];
+    int n = link_target(kind, pid, tmp, sizeof(tmp));
+    struct vnode *vn = proc_vnode(mnt, PROC_INO(pid, kind), VNODE_LNK, 0777, &proc_link_ops);
+    if (vn == NULL)
+        return -ENOMEM;
+    vn->uid = uid;
+    vn->gid = gid;
+    vn->size = n > 0 ? (uint64_t)n : 0;
     *out = vn;
     return 0;
 }
@@ -626,6 +919,14 @@ static int proc_pid_lookup(struct vnode *dir, const char *name, size_t len, stru
         return proc_file(dir->mnt, pid, PROC_CMDLINE, out);
     if (len == 2 && memcmp(name, "fd", 2) == 0)
         return proc_fd_dir(dir->mnt, pid, out);
+    if (len == 7 && memcmp(name, "environ", 7) == 0)
+        return proc_environ(dir->mnt, pid, out);
+    if (len == 3 && memcmp(name, "cwd", 3) == 0)
+        return proc_link(dir->mnt, pid, PROC_CWD, out);
+    if (len == 3 && memcmp(name, "exe", 3) == 0)
+        return proc_link(dir->mnt, pid, PROC_EXE, out);
+    if (len == 4 && memcmp(name, "root", 4) == 0)
+        return proc_link(dir->mnt, pid, PROC_ROOT_LINK, out);
     return -ENOENT;   /* a file appears here only when somebody adds one (P2) */
 }
 
@@ -635,8 +936,12 @@ static int proc_pid_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, 
     static const struct {
         const char *name;
         enum proc_kind kind;
-    } files[] = { { "status", PROC_STATUS }, { "limits", PROC_LIMITS }, { "fd", PROC_FD_DIR },
-                  { "stat", PROC_PID_STAT }, { "cmdline", PROC_CMDLINE } };
+        enum vnode_type type;
+    } files[] = { { "status", PROC_STATUS, VNODE_REG }, { "limits", PROC_LIMITS, VNODE_REG },
+                  { "fd", PROC_FD_DIR, VNODE_DIR },       { "stat", PROC_PID_STAT, VNODE_REG },
+                  { "cmdline", PROC_CMDLINE, VNODE_REG }, { "environ", PROC_ENVIRON, VNODE_REG },
+                  { "cwd", PROC_CWD, VNODE_LNK },         { "exe", PROC_EXE, VNODE_LNK },
+                  { "root", PROC_ROOT_LINK, VNODE_LNK } };
 
     while (*pos < 2 + sizeof(files) / sizeof(files[0])) {
         uint64_t i = *pos;
@@ -647,7 +952,7 @@ static int proc_pid_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, 
             rc = cb(arg, "..", 2, PROC_ROOT_INO, VNODE_DIR);
         else
             rc = cb(arg, files[i - 2].name, strlen(files[i - 2].name), PROC_INO(pid, files[i - 2].kind),
-                    files[i - 2].kind == PROC_FD_DIR ? VNODE_DIR : VNODE_REG);
+                    files[i - 2].type);
         if (rc)
             return rc;
         (*pos)++;
@@ -775,8 +1080,9 @@ static const struct {
     size_t len;
     enum proc_kind kind;
 } g_system_files[] = {
-    { "meminfo", 7, PROC_MEMINFO }, { "stat", 4, PROC_STAT },     { "loadavg", 7, PROC_LOADAVG },
-    { "uptime", 6, PROC_UPTIME },   { "mounts", 6, PROC_MOUNTS },
+    { "meminfo", 7, PROC_MEMINFO }, { "stat", 4, PROC_STAT },       { "loadavg", 7, PROC_LOADAVG },
+    { "uptime", 6, PROC_UPTIME },   { "mounts", 6, PROC_MOUNTS },   { "version", 7, PROC_VERSION },
+    { "cpuinfo", 7, PROC_CPUINFO },
 };
 #define NR_SYSTEM_FILES (sizeof(g_system_files) / sizeof(g_system_files[0]))
 

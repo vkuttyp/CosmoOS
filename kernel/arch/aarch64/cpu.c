@@ -117,6 +117,19 @@ void arch_cpu_brand_string(char *buf, size_t len)
     strlcpy(buf, g_cpu.brand[0] ? g_cpu.brand : "AArch64", len);
 }
 
+/* Linux's arm64 names for the fields of MIDR_EL1. */
+int arch_cpu_info(char *buf, size_t len)
+{
+    return ksnprintf(buf, len,
+                     "CPU implementer\t: 0x%02x\n"
+                     "CPU architecture: 8\n"
+                     "CPU variant\t: 0x%x\n"
+                     "CPU part\t: 0x%03x\n"
+                     "CPU revision\t: %u\n",
+                     (unsigned)((g_cpu.midr >> 24) & 0xFF), (unsigned)((g_cpu.midr >> 20) & 0xF),
+                     (unsigned)((g_cpu.midr >> 4) & 0xFFF), (unsigned)(g_cpu.midr & 0xF));
+}
+
 void arch_cpu_relax(void)
 {
     yield_hint();
