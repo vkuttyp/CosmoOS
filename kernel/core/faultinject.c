@@ -45,6 +45,8 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_XHCI_STOP_EP_ACK] = "xhci-stop-ep-ack",
     [FI_XHCI_DISABLE_SLOT_ACK] = "xhci-disable-slot-ack",
     [FI_XHCI_HALT_ACK] = "xhci-halt-ack",
+    [FI_COSMOFS_EXTENT_NOMEM] = "cosmofs-extent-nomem",
+    [FI_COSMOFS_EXTENT_FBIG] = "cosmofs-extent-fbig",
 };
 
 const char *faultinject_kind_name(enum fi_kind kind)

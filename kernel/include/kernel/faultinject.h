@@ -41,6 +41,8 @@ enum fi_kind {
     FI_XHCI_STOP_EP_ACK, /* xHCI: Stop Endpoint does not acknowledge */
     FI_XHCI_DISABLE_SLOT_ACK, /* xHCI: Disable Slot does not acknowledge */
     FI_XHCI_HALT_ACK, /* xHCI: USBCMD.RS clear does not set USBSTS.HCH */
+    FI_COSMOFS_EXTENT_NOMEM, /* cosmofs: set_extent fails with -ENOMEM before it changes the map */
+    FI_COSMOFS_EXTENT_FBIG,  /* cosmofs: set_extent fails with -EFBIG before it changes the map */
     FI_KIND_COUNT,
 };
 

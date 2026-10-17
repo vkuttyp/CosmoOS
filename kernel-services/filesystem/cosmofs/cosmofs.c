@@ -8,7 +8,9 @@
  * blocks; the previous block goes on the deferred free list.
  */
 
+#include <kernel/cosmofs.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/cred.h>
@@ -274,6 +276,19 @@ static unsigned extents_merge(struct cfs_extent *ext, unsigned n)
     return w;
 }
 
+/* The test seam at the top of set_extent (cosmofs-extent-fail): an armed
+ * rule makes it fail as it can before it changes anything, -ENOMEM (an
+ * allocation) or -EFBIG (a map that would not fit). One load per kind
+ * when nothing is armed; nothing in a release build. */
+static int faultinject_set_extent(void)
+{
+    if (faultinject_should_fail(FI_COSMOFS_EXTENT_NOMEM))
+        return -ENOMEM;
+    if (faultinject_should_fail(FI_COSMOFS_EXTENT_FBIG))
+        return -EFBIG;
+    return 0;
+}
+
 /*
  * Put `ne` into the map, displacing whatever covered its logical range.
  * A plain run that overlaps is split; a compressed record that overlaps
@@ -289,12 +304,15 @@ static unsigned extents_merge(struct cfs_extent *ext, unsigned n)
  */
 static int set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne, uint64_t *old)
 {
+    int rc = faultinject_set_extent();
+    if (rc)
+        return rc;
     uint64_t lblk = ne.lblk, count = cfs_ext_count(&ne);
     if (lblk + count > 0x100000000ull)
         return -EFBIG;
     struct cfs_extent *ext;
     unsigned n;
-    int rc = extents_load(fs, in, &ext, &n);
+    rc = extents_load(fs, in, &ext, &n);
     if (rc)
         return rc;
     if (old)
@@ -1898,6 +1916,35 @@ static int read_logical_block(struct cfs *fs, struct cfs_inode *in, uint64_t lbl
         memcpy(buf, rec + (size_t)(lblk - e.lblk) * CFS_BLOCK, CFS_BLOCK);
     kfree(rec);
     return rc;
+}
+
+/* Test hook (CF16): every block below the file's size, read through the
+ * map and checksums its open inode holds -- what the next commit would
+ * publish -- and verified. `*bad` counts the blocks that fail. */
+int cosmofs_test_verify_file(struct vnode *vn, uint64_t *bad)
+{
+    struct cfs *fs = cfs_of(vn->mnt);
+    if (fs == NULL)
+        return -EINVAL;
+    uint8_t *buf = kmalloc(CFS_BLOCK, 0);
+    if (buf == NULL)
+        return -ENOMEM;
+    *bad = 0;
+    mutex_lock(&fs->lock);
+    uint64_t nblocks = (vn->size + CFS_BLOCK - 1) / CFS_BLOCK;
+    for (uint64_t lblk = 0; lblk < nblocks; lblk++) {
+        int rc = read_logical_block(fs, cfs_inode_of(vn), lblk, buf);
+        if (rc == -ENOMEM) {
+            mutex_unlock(&fs->lock);
+            kfree(buf);
+            return rc;
+        }
+        if (rc < 0)
+            (*bad)++;
+    }
+    mutex_unlock(&fs->lock);
+    kfree(buf);
+    return 0;
 }
 
 static int cfs_readpage(struct vnode *vn, uint64_t index, void *buf)
