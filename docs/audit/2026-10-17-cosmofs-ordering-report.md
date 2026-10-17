@@ -245,4 +245,14 @@ removed before the second run (`8e870b58`, a change to the test alone),
 `test-upgrade` passes: 86.7 s on x86-64, 115.6 s on AArch64. The rest of
 the matrix was not repeated.
 
-Branch CI: recorded in the PR.
+Review (PR #400, on `514d3bff`), fixed in `1f167ad2`: Codex found
+`cosmofs_test_verify_file` in release kernels (now under `CONFIG_DEBUG`;
+`llvm-nm` shows it in neither release kernel); Codex security found the
+tag expanded by the workflow into the shell step that holds the release key
+(now `env: TAG`, checked against `vX.Y.Z[-rcN]`, and the key file removed
+after signing); Qodo found an rc tag packaged as version `0` (now
+`X.Y.Z-0`). Qodo's `st_size` narrowing was answered without a change
+(LP64, `uint64_t`).
+
+Branch CI: run 39043900425 on `1f167ad2`, every job passed on both
+architectures, including the upgrade and release-set jobs.
