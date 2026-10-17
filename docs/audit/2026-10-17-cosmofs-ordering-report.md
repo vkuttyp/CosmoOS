@@ -211,3 +211,38 @@ on x86-64:
 | M6: `set_check_sums` returns 0 at once (no signature, no digests) | refuse: no `SHA256SUMS: unknown signing key ec28a00bf331f50b` line |
 | M7: the rollback refusal removed (`if (false && ...)`) | hold: `cosmo-upgrade --rollback` exit 0, want 3 (it rolled back, set first) |
 | M8: `hold_lock` returns 0 without binding | hold: no `another cosmo-upgrade is running` line |
+
+M8 was run again after the lock check changed (`8e870b58`): caught, no
+`another cosmo-upgrade is running` line. An intermediate version, the
+ring's link still in place for the second run, caught it only by a hang
+at the boot's deadline (the unlocked second run waited on the FIFO); the
+link is now removed first.
+
+## Validation
+
+The AGENTS.md matrix on `fee69346`, each step's first run:
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| `host-test` | PASS | PASS |
+| `fuzz` | PASS | PASS |
+| `analyze` | clean (7 baselined, 0 unexpected) | clean (7 baselined, 0 unexpected) |
+| debug `test`, `QEMU_SMP=1/2/4` | 139.4 / 161.8 / 161.6 s | 143.9 / 172.9 / 162.8 s |
+| `test-smp2` | 158.2 s | 151.8 s |
+| `test-chaos` | 147.6 s | 164.4 s |
+| `test-harness-retry` | 158.3 s | 163.0 s |
+| release `test` | 19.9 s | 21.3 s |
+| `test-busybox` | 54.1 s | 59.6 s |
+| `test-net-login` | 79.5 s | 92.5 s |
+| `test-install` | 27.5 s | 41.3 s |
+| `test-upgrade` | FAIL: the lock check | FAIL: the lock check |
+
+Both `test-upgrade` failures were the test's (above): on x86-64 the
+probe loop took the lock first; on AArch64, which ran after the first fix,
+`mkfifo` in `/etc/pkg/keys` was refused (`Operation not supported`:
+cosmofs has no FIFOs). With the ring's entry a link to a FIFO in `/tmp`,
+removed before the second run (`8e870b58`, a change to the test alone),
+`test-upgrade` passes: 86.7 s on x86-64, 115.6 s on AArch64. The rest of
+the matrix was not repeated.
+
+Branch CI: recorded in the PR.
