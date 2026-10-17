@@ -81,14 +81,16 @@ package's signature, and every file in it, against that key.
 `pkg install -n` does the check and installs nothing. Only if it prints
 `pkg: installing cosmo-upgrade-...`, unpack the two programs from the
 package you just checked and run the new `cosmo-upgrade`. It then checks
-`SHA256SUMS.sig` and the rest of the release:
+`SHA256SUMS.sig` and the rest of the release. (v1.0.4's package names
+itself `1.0.3-123`, the build ID its release build recorded; the
+signature check is what matters.)
 
 ```text
 cosmo$ mkdir /tmp/up && cd /tmp/up
 cosmo$ for f in kernel.elf boot.tar cmdline manifest cosmo-upgrade.cpk; do wget -q http://10.0.2.2:8000/cosmoos-x86_64-$f || break; done
 cosmo$ wget -q http://10.0.2.2:8000/SHA256SUMS && wget -q http://10.0.2.2:8000/SHA256SUMS.sig
 cosmo$ pkg install -n ./cosmoos-x86_64-cosmo-upgrade.cpk
-pkg: installing cosmo-upgrade-1.0.4 (2 files)
+pkg: installing cosmo-upgrade-1.0.3-123 (2 files)
 cosmo$ tar -xf cosmoos-x86_64-cosmo-upgrade.cpk sbin/cosmo-upgrade sbin/cosmo-verify
 cosmo$ ./sbin/cosmo-upgrade /tmp/up
 cosmo-upgrade: verified SHA256SUMS, signed by key 36ae7bb4947896ab in /etc/pkg/keys, and the set's four files against it

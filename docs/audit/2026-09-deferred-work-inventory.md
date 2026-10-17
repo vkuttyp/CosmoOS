@@ -1368,3 +1368,9 @@ each; none is needed by M2's acceptance test.
   for `test-display`: the directory holds the boots' QMP sockets
   (`Error: entry not supported`), so a failing panic check keeps no serial
   log (main's run 39048054390).
+- Published releases record the previous tag in their build ID: v1.0.4's
+  kernel says `v1.0.3-123-g1ec37307` and its package `cosmo-upgrade-1.0.3-123`,
+  v1.0.3's kernel `v1.0.2-45-g6011a5ec`. `actions/checkout` on a tag push
+  re-fetches the tag as the bare commit (`+1ec37307...:refs/tags/v1.0.4`,
+  release run 39073532390), a lightweight tag, and `BUILD_ID`
+  (`build/config.mk`) runs `git describe` without `--tags`.

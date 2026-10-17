@@ -450,7 +450,7 @@ def stage_new(args, results, keyid, nonce):
                    f"/etc/passwd and repos.conf; pkg upgrade took hello 1.0 to 1.1; --rollback; PASS in {b.elapsed():.1f}s")
 
 
-def stage_back(args, results, port, base, new, nonce):
+def stage_back(args, results, port, keyid, base, new, new_loader, nonce):
     check_set(args.target, base, "::/cosmo", "after the rollback")
     for p in (f"::/EFI/BOOT/{loader_name(args.arch)}", f"::/cosmo/{loader_name(args.arch)}"):
         if esp_file(args.target, p) != base["loader"]:
@@ -470,17 +470,35 @@ def stage_back(args, results, port, base, new, nonce):
         need(out, r"^hello, world \(hello 1\.1\)$", "the package pkg upgrade changed, after the rollback")
         need(out, r"^0$", "v1.0.3's /etc/rc")
         need(out, rf"^{nonce}$", "the operator's /root/keep after the rollback")
-        # Forward again with the build's binary: v1.0.3's loader lacks the
-        # build's key, \cosmo\prev's loader trusts v1.0.3's, so the loader
-        # goes first.
+        # Forward again with the set's binary. A build's set: v1.0.3's
+        # loader lacks the build's key, \cosmo\prev's loader trusts
+        # v1.0.3's, so the loader goes first. A published set: v1.0.3's
+        # loader trusts the release key, so the set goes first, and the
+        # loader is switched after it only if the set's differs (v1.0.4's
+        # is v1.0.3's, byte for byte).
         cpk = cpk_name(args.arch)
         out = sh(b, f"mkdir -p {UP} && cd {UP} && wget -q http://10.0.2.2:{port}/{cpk} && pkg install -n ./{cpk}; "
                     "echo pkgn=$?; cd /", "fetchtool")
         need(out, r"^pkgn=0$", "v1.0.3's pkg checking the package after the rollback")
         unpack(b, args.arch)
         out = sh(b, f"{TOOL} --rollback", "again")
-        need(out, rf"^cosmo-upgrade: loader switched: \\EFI\\BOOT\\{loader_name(args.arch)} is \\cosmo\\prev's, "
-                  r"which starts both sets$", "the second rollback's loader switch")
+        lname = loader_name(args.arch)
+        prev_first = (rf"^cosmo-upgrade: loader switched: \\EFI\\BOOT\\{lname} is \\cosmo\\prev's, "
+                      r"which starts both sets$")
+        set_own = rf"^cosmo-upgrade: loader switched: \\EFI\\BOOT\\{lname} is the set's own$"
+        if keyid != RELEASE_KEY:
+            need(out, prev_first, "the second rollback's loader switch")
+            order = "loader first"
+        else:
+            if re.search(prev_first, out, re.M):
+                raise Fail("the second rollback switched the loader first, but v1.0.3's loader trusts the release key")
+            if new_loader != base["loader"]:
+                need(out, set_own, "the second rollback's loader switch, after the set")
+                order = "set first, then the loader"
+            elif re.search(set_own, out, re.M):
+                raise Fail("the second rollback switched to a loader identical to v1.0.3's")
+            else:
+                order = "set first, the loader v1.0.3's already"
         need(out, r"^cosmo-upgrade: rolled back; reboot to run it$", "the second rollback")
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
@@ -489,7 +507,7 @@ def stage_back(args, results, port, base, new, nonce):
         b.kill()
         raise
     results.append(f"back: v1.0.3 booted again with {RELEASE_KEY}, its loader and base system back, /root/keep "
-                   f"and hello 1.1 kept; the build's cosmo-upgrade rolled back again, loader first; PASS in "
+                   f"and hello 1.1 kept; the set's cosmo-upgrade rolled back again, {order}; PASS in "
                    f"{b.elapsed():.1f}s")
 
 
@@ -623,7 +641,7 @@ def main():
         stage_upgrade(args, results, port, base, new, new_loader, nonce)
         stage_hold(args, results, keyid, new_loader, uloader)
         stage_new(args, results, keyid, nonce)
-        stage_back(args, results, port, base, new, nonce)
+        stage_back(args, results, port, keyid, base, new, new_loader, nonce)
         stage_forward(args, results, keyid, base, new, new_loader)
     except Fail as e:
         for r in results:
