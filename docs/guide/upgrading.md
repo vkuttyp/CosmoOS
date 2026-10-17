@@ -18,15 +18,22 @@ That is why these blocks are shown as text.
 
 ## What is checked before anything is written
 
-`cosmo-upgrade` checks the new release's manifest against the keys in
-`/etc/pkg/keys`. These are the keys `pkg` trusts, and on a release
-system they include the release key. It checks the signature, then
-that `kernel.elf`, `boot.tar` and `cmdline` match the manifest. The
-loader is checked through `boot.tar`, which carries it. Anything else is
-refused with exit status 3, and nothing on the disk changes:
+Every release from v1.0.4 on publishes `SHA256SUMS.sig`, a detached
+Ed25519 signature of `SHA256SUMS` with the release key. `cosmo-upgrade`
+checks it against the keys in `/etc/pkg/keys` before it uses any file of
+the release. These are the keys `pkg` trusts, and on a release system
+they include the release key. Then it checks `kernel.elf`, `boot.tar`,
+`cmdline` and `manifest` against `SHA256SUMS`. Then it checks the
+manifest's own signature against the same keys, and that `kernel.elf`,
+`boot.tar` and `cmdline` match the manifest. The loader is checked
+through `boot.tar`, which carries it. Anything else is refused with exit
+status 3, and nothing on the disk changes:
 
 ```text
-cosmo-upgrade: /tmp/up: manifest: unknown signing key ... (not in /etc/pkg/keys); nothing written
+cosmo-upgrade: /tmp/up: SHA256SUMS: unknown signing key ... (not in /etc/pkg/keys); nothing written
+cosmo-upgrade: /tmp/up: SHA256SUMS: bad signature (key release-2026.pub); nothing written
+cosmo-upgrade: /tmp/up: cosmoos-x86_64-kernel.elf does not match SHA256SUMS; nothing written
+cosmo-upgrade: /tmp/up: /tmp/up/SHA256SUMS.sig: No such file or directory (a release is checked against its signed SHA256SUMS); nothing written
 cosmo-upgrade: /tmp/up: manifest: bad signature (key release-2026.pub); nothing written
 cosmo-upgrade: /tmp/up: boot.tar does not match the manifest (SHA-512); nothing written
 ```
@@ -38,30 +45,53 @@ key that signed its own set, or the key that signed the set you are
 running (the new loader starts that set if the upgrade is interrupted).
 Only one `cosmo-upgrade` runs at a time; a second is refused.
 
+`cosmo-verify FILE SUMS SIG` checks any one file of a release the same
+way: `SUMS` against its signature `SIG` and `/etc/pkg/keys`, then `FILE`
+against the line `SUMS` gives its name.
+
+```text
+cosmo$ cosmo-verify cosmoos-x86_64-boot.tar SHA256SUMS SHA256SUMS.sig
+cosmo-verify: cosmoos-x86_64-boot.tar: OK (SHA-256 ..., in SHA256SUMS signed by key 36ae7bb4947896ab, release-2026.pub in /etc/pkg/keys)
+```
+
+On your computer, a checkout of the repository checks the same signature
+with `python3 scripts/modsign.py verify-detached --pub
+tools/keys/release-2026.pub --in SHA256SUMS --sig SHA256SUMS.sig`.
+
 ## Upgrading
 
-On your computer, download the new release set for your architecture and
-its `SHA256SUMS` ([Installing](installing.md)). Serve that directory to
-the guest, for example with `python3 -m http.server 8000`. QEMU's user
-network reaches your computer at 10.0.2.2.
+On your computer, download the new release set for your architecture
+(`kernel.elf`, `boot.tar`, `cmdline`, `manifest` and
+`cosmo-upgrade.cpk`), its `SHA256SUMS` and `SHA256SUMS.sig`
+([Installing](installing.md)). Serve that directory to the guest, for
+example with `python3 -m http.server 8000`. QEMU's user network reaches
+your computer at 10.0.2.2.
 
-On CosmoOS, fetch the files into `/tmp`, check them, and run the new
-release's `cosmo-upgrade` (v1.0.3 has none of its own). Use `/tmp`
-(memory), not the disk: v1.0.3's filesystem can lose a large file while
-writing it, a defect fixed in later releases.
+On CosmoOS, fetch the files into `/tmp`. Use `/tmp` (memory), not the
+disk: v1.0.3's filesystem can lose a large file while writing it, a
+defect fixed in v1.0.4.
 
-The downloaded `cosmo-upgrade` is the one file v1.0.3 cannot check with
-a signature: it runs before anything verifies it, and `SHA256SUMS` only
-shows the download is the file the release page lists. Get both over
-HTTPS from the release page you trust. From then on the system has its
-own `/sbin/cosmo-upgrade`, which came inside the signed `boot.tar`.
+### From v1.0.3
+
+v1.0.3 has no `cosmo-upgrade` of its own and no `cosmo-verify`, so the
+new release's must be checked before they run. They come in
+`cosmoos-ARCH-cosmo-upgrade.cpk`, a package signed with the release
+key. v1.0.3 shipped that key in `/etc/pkg/keys`, and its `pkg` checks a
+package's signature, and every file in it, against that key.
+`pkg install -n` does the check and installs nothing. Only if it prints
+`pkg: installing cosmo-upgrade-...`, unpack the two programs from the
+package you just checked and run the new `cosmo-upgrade`. It then checks
+`SHA256SUMS.sig` and the rest of the release:
 
 ```text
 cosmo$ mkdir /tmp/up && cd /tmp/up
-cosmo$ for f in kernel.elf boot.tar cmdline manifest cosmo-upgrade; do wget -q http://10.0.2.2:8000/cosmoos-x86_64-$f || break; done
-cosmo$ wget -q http://10.0.2.2:8000/SHA256SUMS && grep -e '-kernel.elf' -e '-boot.tar' -e '-cmdline' -e '-manifest' -e '-cosmo-upgrade' SHA256SUMS | grep x86_64 | sha256sum -c
-cosmo$ mv cosmoos-x86_64-cosmo-upgrade cosmo-upgrade && chmod 755 cosmo-upgrade
-cosmo$ ./cosmo-upgrade /tmp/up
+cosmo$ for f in kernel.elf boot.tar cmdline manifest cosmo-upgrade.cpk; do wget -q http://10.0.2.2:8000/cosmoos-x86_64-$f || break; done
+cosmo$ wget -q http://10.0.2.2:8000/SHA256SUMS && wget -q http://10.0.2.2:8000/SHA256SUMS.sig
+cosmo$ pkg install -n ./cosmoos-x86_64-cosmo-upgrade.cpk
+pkg: installing cosmo-upgrade-1.0.4 (2 files)
+cosmo$ tar -xf cosmoos-x86_64-cosmo-upgrade.cpk sbin/cosmo-upgrade sbin/cosmo-verify
+cosmo$ ./sbin/cosmo-upgrade /tmp/up
+cosmo-upgrade: verified SHA256SUMS, signed by key 36ae7bb4947896ab in /etc/pkg/keys, and the set's four files against it
 cosmo-upgrade: verified kernel.elf, boot.tar and cmdline against the manifest, signed by key ... in /etc/pkg/keys, and the loader in boot.tar
 cosmo-upgrade: written: the new set, its loader and \cosmo\prev's directory, in free clusters of ...
 cosmo-upgrade: loader switched: \EFI\BOOT\BOOTX64.EFI is the new one
@@ -70,6 +100,19 @@ cosmo-upgrade: root: ... files replaced, ... added, ... removed, ... unchanged, 
 cosmo-upgrade: upgraded; reboot to run it, then pkg update && pkg upgrade
 cosmo$ exit
 ```
+
+A package that is not the one the release key signed is refused, and
+then nothing of it has run:
+
+```text
+pkg: ./cosmoos-x86_64-cosmo-upgrade.cpk: bad signature (key release-2026.pub)
+```
+
+### From v1.0.4 and later
+
+The system's own `/sbin/cosmo-upgrade` came inside the signed `boot.tar`.
+Fetch the set and both `SHA256SUMS` files as above (the package is not
+needed) and run `cosmo-upgrade /tmp/up`.
 
 On AArch64 the names say `aarch64` and the loader is `BOOTAA64.EFI`. Boot
 again. The banner shows the new release. Then upgrade the packages from
@@ -108,7 +151,8 @@ cannot be rolled back ([Known limitations](limitations.md)).
 
 Rolling back again moves forward again. After a rollback to v1.0.3 the
 system has no `cosmo-upgrade` of its own, so fetch the newer release's
-into `/tmp` as above and run `/tmp/up/cosmo-upgrade --rollback`. Its
+package into `/tmp/up`, check and unpack it as above, and run
+`/tmp/up/sbin/cosmo-upgrade --rollback`. Its
 first step makes the newer loader the one the firmware starts, since
 v1.0.3's loader does not trust the newer key:
 

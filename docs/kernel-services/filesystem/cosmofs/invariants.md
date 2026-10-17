@@ -260,6 +260,49 @@ and repairs a real cosmofs), `unpriv_test` in `init` (an open as uid
 `PRIV_SYS_ADMIN` is asked). Gap: the
 refusal of an undefined flag bit is checked by review only.
 
+**CF16. A mapped block's stored checksum is always the checksum of the
+data at that block.** A block's checksum entry (`cfs_csum_put`, or
+`cfs_aead_put` on an encrypted pool) is stored before the mapping that
+makes the block readable (`set_extent`), so the entry it replaces is kept
+first (`csum_save`) and put back when the mapping fails (`csum_restore`):
+the old block is still mapped then, and keeps its own checksum. This holds
+for a plain block (`data_write_block`) and for a compressed record's
+physical blocks (`record_write`), whose entries are replaced together. A
+put-back that fails abandons the transaction (`cfs_fail`). Before this
+rule a failed mapping left the old data under the new checksum and every
+read of it failed ("no copy matches its checksum"; inventory section 17,
+after shell completeness S7). Check: `cosmofs-extent-fail` fails one
+`set_extent` of a write-back with `-ENOMEM` and with `-EFBIG`
+(`FI_COSMOFS_EXTENT_NOMEM`, `FI_COSMOFS_EXTENT_FBIG`) over plain blocks,
+over a compressed record and on an encrypted pool, and reads every block
+the open inode maps (`cosmofs_test_verify_file`);
+`tools/cosmofs-extent-fail-probe.py --old` fails at `bad == 0` on both
+architectures.
+
+**CF17. A failed mutation leaves the in-memory state a commit could
+publish consistent, or abandons the transaction.** The `Errors` rule of
+`design.md` made concrete: whatever a failed operation changed in the
+open inode, the dirty buffers or the superblock fields either describes
+what is on disk and in the map, or the operation calls `cfs_fail` and no
+commit runs again until unmount. The sites: `extents_store` failing after
+it has started rewriting the map; `inode_sync` failing after the change it
+describes (a block mapped and its predecessor queued free, an entry, a
+link count); a compressed record dropped by `record_write`'s plain
+fallback or by `truncate_record` and then only partly rewritten (its
+unwritten blocks would be holes); the checker's orphan repair after
+`cfs_truncate_blocks` queued the frees; and a commit failing after
+`cfs_snapshot_fill` added deadlist entries (a retry would add them again).
+Undone instead: create and symlink give back the inode number and clear
+the slot they wrote, and the symlink undo frees the checksum tree its
+block grew; a failed commit gives back the bitmap blocks it reserved and
+did not write. The scrub that found them is in
+`docs/audit/2026-10-17-cosmofs-ordering-report.md`. Check:
+`cosmofs-extent-fail` (a record dropped and then failing on its third
+block: the transaction is abandoned and the committed record reads back
+after a remount; before CF17 the retry committed holes). Gap: the
+`inode_sync`, `extents_store`, checker, create, symlink, bitmap and
+deadlist sites are checked by review, not by a test.
+
 ## 3. Rules stated in `design.md` and not checked
 
 - The commit's flush before and after the root assumes the device honours

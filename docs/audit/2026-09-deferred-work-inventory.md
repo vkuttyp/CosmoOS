@@ -1311,28 +1311,32 @@ each; none is needed by M2's acceptance test.
 
 ## 17. Shell completeness S7 follow-ups (2026-10-17)
 
-- `data_write_block` (cosmofs.c) stores a block's checksum before it maps
+- ~~`data_write_block` (cosmofs.c) stores a block's checksum before it maps
   the block. When `set_extent` then fails (`-ENOMEM`, `-EFBIG`, a record it
   will not cut), the old block stays mapped under the new checksum and
-  reads fail. The record fallback no longer gets there (S7), but any other
-  failure of the mapping still does. Fix: restore the old entry on failure,
-  or store the checksum after the mapping and undo the mapping if that
-  fails.
-- v1.0.3 (and every release before S7) has the record-fallback defect. An
-  installed v1.0.3 should not write large files to its disk before it is
-  upgraded; the upgrading guide says to fetch the release into `/tmp`.
+  reads fail.~~ **Closed 2026-10-17** (`docs/audit/2026-10-17-cosmofs-ordering-report.md`):
+  the replaced entry is kept and put back when the mapping fails, for plain
+  blocks and compressed records (CF16; `cosmofs-extent-fail`,
+  `tools/cosmofs-extent-fail-probe.py`), and the scrub of the other write
+  paths fixed six more sites of the shape (CF17).
+- v1.0.3 (and every release before v1.0.4) has the record-fallback defect
+  and the checksum order above. An installed v1.0.3 should not write large
+  files to its disk before it is upgraded; the upgrading guide says to
+  fetch the release into `/tmp`. Data already lost is not repaired by the
+  upgrade.
 - `cosmo-upgrade` reads a release from a directory. Fetching one over
   HTTPS with a freshness check is roadmap P6's to do (a signed index
   replays: docs/pkg/invariants.md PK9).
-- The first upgrade from v1.0.3 runs a downloaded `cosmo-upgrade` that
-  nothing verifies before it runs: `SHA256SUMS` is unsigned, and the
-  manifest covers the copy inside `boot.tar`, not the release asset.
-  Later upgrades run the installed `/sbin/cosmo-upgrade`, which came in
-  the signed archive. Fix: ship it as a package signed into v1.0.3's
-  trusted index, or have the loader-verified kernel check it.
-- `cosmo-upgrade --rollback`'s refusal when neither loader trusts the
-  other set's key has no test (both orders are tested, the refusal is
-  not); nor does the lock against a second run.
+- ~~The first upgrade from v1.0.3 runs a downloaded `cosmo-upgrade` that
+  nothing verifies before it runs.~~ **Closed 2026-10-17**: `SHA256SUMS`
+  is signed (`SHA256SUMS.sig`), `cosmo-upgrade` and
+  `tools/fetch-release.py` check it before using any file, and the tool
+  comes in `cosmo-upgrade.cpk`, signed with the release key, which
+  v1.0.3's `pkg install -n` checks before anything of it runs;
+  `cosmo-verify` checks a release file on v1.0.4 and later.
+- ~~`cosmo-upgrade --rollback`'s refusal when neither loader trusts the
+  other set's key has no test; nor does the lock against a second run.~~
+  **Closed 2026-10-17**: `test-upgrade`'s boot `hold`.
 - A rerun after `--stop-after=set` (the pending marker's finish path) and
   an interruption inside a FAT-chain write are covered by the design's
   order, not by a test. One-sector write atomicity is the device's.
@@ -1343,3 +1347,20 @@ each; none is needed by M2's acceptance test.
 - `--rollback` does not return the packages `pkg upgrade` changed, and an
   `/etc` file the new release added stays after a rollback (nothing in
   `/etc` is removed).
+- CF17's answer to most of the failures the scrub found is to abandon the
+  transaction (`cfs_fail`): everything written since the last commit is
+  lost with an I/O error, and the mount answers `-EIO` until it is
+  unmounted, for a failure (an allocation, a full metadata reserve) a
+  retry might have survived. `extents_store` allocating its chain blocks
+  before it touches the inode, and `inode_sync` writing the inode before
+  the deferred frees it describes, would let those two fail cleanly.
+- CF17's `inode_sync`, `extents_store`, checker, create, symlink, bitmap
+  and deadlist sites are checked by review; `cosmofs-extent-fail` drives
+  `set_extent` only.
+- `SHA256SUMS.sig` covers releases from v1.0.4 on. v1.0.3 and earlier
+  have only an unsigned `SHA256SUMS`, whose digest `tools/fetch-release.py`
+  pins for v1.0.3 alone.
+- A v1.0.3 operator who runs `pkg install` without `-n` on
+  `cosmo-upgrade.cpk` installs it as a package; the upgrade then replaces
+  `/sbin/cosmo-upgrade` with the archive's identical copy, and a rollback
+  to v1.0.3 removes it while `pkg` still lists the package.

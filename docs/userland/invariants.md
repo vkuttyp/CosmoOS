@@ -153,9 +153,13 @@ bug. Gap: no test of a list longer than three terms, and none mixing
 `&&`/`||` with `&`.
 
 **U12. An upgrade writes nothing it has not verified, and every state it
-can be interrupted in boots.** `cosmo-upgrade` checks the manifest, all
-three files and the loader inside the archive against `/etc/pkg/keys`
-before its first write. It changes what the loader reads only by
+can be interrupted in boots.** `cosmo-upgrade` checks the release's
+`SHA256SUMS` against its signature `SHA256SUMS.sig` and `/etc/pkg/keys`,
+the set's four files against `SHA256SUMS`, and the manifest, all three
+files and the loader inside the archive against `/etc/pkg/keys`, before
+its first write. The first upgrade from v1.0.3 runs a `cosmo-upgrade`
+that v1.0.3's `pkg install -n` has checked against the release key
+(the signed `cosmo-upgrade.cpk`). It changes what the loader reads only by
 one-sector writes to directory entries, after everything those entries
 will name is written and flushed: first `\EFI\BOOT`'s loader entry, then
 `\cosmo`'s, which moves the set and the loader it came with together.
@@ -167,9 +171,13 @@ time. A set's own loader always lives beside it (in
 `\cosmo` or `\cosmo\prev`), so no sweep after an interruption can lose
 it, and a pending marker on the root makes a rerun finish an interrupted
 run rather than start another (docs/userland/design.md, "Updating").
-Check: `test-upgrade` refuses a tampered manifest, one signed by a key
-outside the ring and a tampered archive, with the ESP byte for byte
-unchanged; it stops an upgrade after `written` and after `loader`, kills
+Check: `test-upgrade` refuses a package with one byte changed (v1.0.3's
+`pkg`), a kernel.elf with one byte changed (`cosmo-verify` and
+`cosmo-upgrade`), a `SHA256SUMS` with one digest changed and a set with no
+`SHA256SUMS.sig`, a tampered manifest, one signed by a key outside the
+ring and a tampered archive, with the ESP byte for byte unchanged; it
+refuses a second run while one holds the lock and a rollback neither
+loader allows (boot `hold`); it stops an upgrade after `written` and after `loader`, kills
 the machine and boots each state verified; it refuses a set whose loader
 does not trust v1.0.3's key; it upgrades v1.0.3, checks `\cosmo\prev`
 holds v1.0.3's set and loader, rolls back (set first) and rolls forward

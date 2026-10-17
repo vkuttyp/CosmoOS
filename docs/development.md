@@ -540,8 +540,12 @@ host dimension.
 `cosmoos-<arch>-kernel.elf`, `cosmoos-<arch>-boot.tar`,
 `cosmoos-<arch>-cmdline`, `cosmoos-<arch>-manifest`,
 `cosmoos-<arch>-cosmo-upgrade` (the release's `cosmo-upgrade`, which an
-installed system runs to move to it; shell completeness S7) and
-`SHA256SUMS` (`sha256sum -c` format). It is signed with whatever `SIGNING` selects:
+installed system runs to move to it; shell completeness S7),
+`cosmoos-<arch>-cosmo-upgrade.cpk` (a package of `cosmo-upgrade` and
+`cosmo-verify` signed with `PKGSIGN_KEY`, which v1.0.3's `pkg install -n`
+checks; version from the build id), `SHA256SUMS` (`sha256sum -c` format)
+and `SHA256SUMS.sig` (its detached signature with `MODSIGN_KEY`: the
+`COSMOSIG` trailer alone, `scripts/modsign.py sign-detached`). It is signed with whatever `SIGNING` selects:
 the developer key by default; the release workflow passes
 `SIGNING=release MODSIGN_KEY=<the release key> KEYRING_PUBS=tools/keys/<release>.pub`.
 
@@ -570,7 +574,10 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    set's, so the images tested are the bytes published; then runs the
    test with `BUILD=release`. `guide-macos` runs the guide on macOS
    against the published set.
-5. `publish`: one `SHA256SUMS` for both architectures, the notes
+5. `publish`: one `SHA256SUMS` for both architectures, signed with the
+   release key (`SHA256SUMS.sig`, checked against `tools/keys/*.pub`
+   before publishing), the notes (`docs/releases/<tag>.md` first when the
+   tag has one), then the generated part
    (`scripts/release-notes.py`: the release key and its id, the CI image
    digests and the compiler and QEMU versions in them, BusyBox, musl,
    compiler-rt, dropbear and OpenSSH portable (sftp-server) with their
