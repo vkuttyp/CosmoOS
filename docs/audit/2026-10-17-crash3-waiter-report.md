@@ -84,9 +84,8 @@ harness's own lines):
 
 The network harness passed in every debug boot.
 
-Branch CI. The first two runs each failed one job in a boot that runs
-main's code (neither builds `CRASH_TEST=3`), each recorded in
-`docs/testing/flakes.md`:
+Branch CI. The first three runs each failed in boots that run main's code (none
+builds `CRASH_TEST=3`), each recorded in `docs/testing/flakes.md`:
 
 - Run 39056570530 (`9ddc330b`): the AArch64 chaos boot timed out at 247 s
   with every self-test passed. `test-chaos` had kept its own 240 s when
@@ -97,6 +96,11 @@ main's code (neither builds `CRASH_TEST=3`), each recorded in
   `ARCH=aarch64 test-chaos` PASS in 158.1 s with `timeout 300s`.
 - Run 39057108969 (`c60f6e58`): `irqpoll-boost`'s eighth sighting, the
   same 290 ms gap, in x86-64's `test-crash` boot.
+- Run 39061354017 (`7545bc1a`): `wait-multi-prepare`'s second sighting
+  (AArch64 entropy job), and the AArch64 build job cancelled at its
+  55-minute limit with every boot passed. Over 52 passing AArch64 build
+  jobs of the last 60 runs: median 51.7, p95 54.0, at most 54.2 minutes.
+  The limit is now 70, widened and labelled in `ci.yml`.
 
 Review: Codex found that `--old` would not build after a squashed merge
 (fixed, above); Qodo asked for a compile-time bound on

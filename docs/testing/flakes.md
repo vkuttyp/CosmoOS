@@ -4382,6 +4382,14 @@ changed. Every other path to RUNNING (`sched_set_running_current`, from
 one; not confirmed by a run (inventory). First sighting; CI ran again on
 the commit that records it.
 
+**Second sighting, 2026-10-17:** AArch64 CI, PR #401 (the crash test's
+lockdep waiter, compiled only into `CRASH_TEST=3` builds) at `7545bc1a`,
+run 39061354017, job 117479852315 (`entropy boots (aarch64)`, the boot
+with the virtio-rng device): the same line, `still_ready at line 1417 (1
+ms)`, and only it. The runner was slow (that run's AArch64 chaos boot took
+243.5 s and its crash boot 178.1 s of 180). The same mechanism, not
+confirmed by a run; CI ran again on the commit that records it.
+
 ## `test-display`'s panic-lockdep: another CPU's re-entry panic first, 2026-10-16
 
 Main's CI at `621f7f78` (#393's merge; the same tree as `166a2ef3`, whose
@@ -4445,4 +4453,15 @@ itself when the other AArch64 boots moved to 300 s (2026-10-15).
 **Widened and labelled:** `test-chaos` takes `BOOT_TIMEOUT` (300 s on
 AArch64, 240 s on x86-64 unchanged), a hang guard, not a performance
 budget; each self-test keeps its own budget (Makefile comment).
+
+## The AArch64 build job over its 55-minute limit, 2026-10-17
+
+CI, PR #401 at `7545bc1a`, run 39061354017, job 117479852429 (`build,
+boot, analyze (aarch64)`): cancelled at 55.1 minutes, after its last boot
+(`Panic path test`, PASS in 178.1 s) with every boot passed; its chaos
+boot passed in 243.5 s under the 300 s it had just been given. Over 52
+passing AArch64 build jobs of the last 60 runs: median 51.7 minutes, p95
+54.0, at most 54.2 (main's `d4bf1e79`). **Widened and labelled:** the
+job's `timeout-minutes` is 70 (`.github/workflows/ci.yml`), a hang guard;
+each boot keeps its own timeout.
 
