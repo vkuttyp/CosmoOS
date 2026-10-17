@@ -1374,3 +1374,7 @@ each; none is needed by M2's acceptance test.
   re-fetches the tag as the bare commit (`+1ec37307...:refs/tags/v1.0.4`,
   release run 39073532390), a lightweight tag, and `BUILD_ID`
   (`build/config.mk`) runs `git describe` without `--tags`.
+- On Parallels Desktop 27.0.3 with 4096 MB the AArch64 kernel prints
+  nothing after the loader's `jumping to kernel entry` line (memory map up
+  to 0x140000000), on the published v1.0.3 and v1.0.4 alike, every boot;
+  with 2048 MB it boots. The guide's Tested platforms page says 2 GB.
