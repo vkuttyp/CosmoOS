@@ -278,7 +278,11 @@ when the bitmap is exhausted or an inode number would exceed the map;
 `-ENOTEMPTY`, `-EEXIST`, `-ENOENT` as the VFS expects. A failed
 mutation may leave buffers dirty for the open transaction but never
 touches the committed root; a later commit publishes whatever
-consistent state the in-memory structures hold.
+consistent state the in-memory structures hold. So a failed mutation
+leaves them consistent, or abandons the transaction with `cfs_fail` and
+the last committed root stays current until unmount (invariant CF17). In
+particular a block's checksum entry, which is stored before the mapping
+that names the block, is put back when the mapping fails (CF16).
 
 ## Format version 8: symbolic links
 

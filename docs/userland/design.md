@@ -724,20 +724,36 @@ reinstalling it, and back.
 
 DIR holds a release's boot set: `kernel.elf`, `boot.tar`, `cmdline` and
 `manifest`, under those names or as the release assets name them
-(`cosmoos-ARCH-kernel.elf`, ...). How it got there is the operator's
+(`cosmoos-ARCH-kernel.elf`, ...), with the release's `SHA256SUMS` and
+`SHA256SUMS.sig`. How it got there is the operator's
 business: `wget`, `scp`, a mounted disk (S6). Nothing is fetched (the
 network repository is roadmap P6). On v1.0.3 the files belong in `/tmp`
 (ramfs): v1.0.3's cosmofs can lose a large file being written (the record
 fallback, fixed since; `docs/kernel-services/filesystem/cosmofs/design.md`). The release's `cosmo-upgrade` runs the
 upgrade: a v1.0.3 system has none, so the first upgrade is started with
-the release's binary (`cosmoos-ARCH-cosmo-upgrade`, checked against
-`SHA256SUMS` as the guide describes).
+the release's binary. It comes in `cosmoos-ARCH-cosmo-upgrade.cpk`, a
+package of `sbin/cosmo-upgrade` and `sbin/cosmo-verify` signed with the
+release key (`scripts/mkrelease.py`, `pkgbuild.py pack`), which v1.0.3's
+`pkg install -n` checks against the key v1.0.3 shipped in
+`/etc/pkg/keys`, writing nothing; BusyBox `tar` then unpacks the checked
+file into `/tmp`. Nothing older than the package can check an Ed25519
+signature on v1.0.3: its `pkg` is the only verifier it has.
 
 ### Trust
 
-Before anything is written, the manifest is checked against the running
-system's key ring, `/etc/pkg/keys`, the same trust root as `pkg`
-(PK9): its size, the `COSMOSIG` trailer, a key in the ring, the Ed25519
+Before anything of the release is used, its `SHA256SUMS` is checked
+against `SHA256SUMS.sig` and the running system's key ring,
+`/etc/pkg/keys`, the same trust root as `pkg` (PK9; `relsig.c`). The
+signature is the `COSMOSIG` trailer of `scripts/modsign.py` on its own (88
+bytes: signature, key id, version, algorithm, magic) over the file's
+bytes; `make release` signs each architecture's `SHA256SUMS` with the
+build's key, and the release workflow signs the published one, which
+joins both, with the release key. The four files are then checked against
+the lines `SHA256SUMS` gives `cosmoos-ARCH-<name>`; a missing signature,
+a key outside the ring, a bad signature and a file that does not match
+are each refused, exit 3. `cosmo-verify FILE SUMS SIG` is the same check
+for one file, by its base name. Then the manifest is checked against the
+ring: its size, the `COSMOSIG` trailer, a key in the ring, the Ed25519
 signature, the magic, version and file names, and each file's size and
 SHA-512. The loader is not in the manifest. It travels inside `boot.tar`
 (`efi/BOOTX64.EFI` or `efi/BOOTAA64.EFI`, since S7), so the signature

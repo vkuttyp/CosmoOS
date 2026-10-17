@@ -921,6 +921,8 @@ static int repair(struct check *ck)
             if (fs->sb.inode_count > 0)
                 fs->sb.inode_count--;
             ck->rep->orphan.repaired++;
+        } else {
+            cfs_fail(fs, rc);   /* the frees are queued and the slot still names them (CF17) */
         }
     }
 

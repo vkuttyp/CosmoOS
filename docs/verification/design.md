@@ -147,6 +147,9 @@ The `xhci-stop-ep-ack` and `xhci-disable-slot-ack` rules make the named
 command completion fail in the synthetic xHCI teardown fixture.
 The `xhci-halt-ack` rule leaves `USBCMD.RS` set in the synthetic
 controller fixture, so the `USBSTS.HCH` acknowledgement does not arrive.
+The `cosmofs-extent-nomem` and `cosmofs-extent-fbig` rules make cosmofs's
+`set_extent` fail with `-ENOMEM` or `-EFBIG` before it changes the map,
+as an allocation or a full map can (`cosmofs-extent-fail`, invariant CF16).
 `sysctl("debug.faultinject")` reports each kind's rule and counters. There
 is no write path through `sysctl`: the audit's phrase "behind a debug
 sysctl" is honoured for observation; making `sysctl` writable is a

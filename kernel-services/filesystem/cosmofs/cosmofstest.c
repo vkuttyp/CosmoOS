@@ -1531,6 +1531,191 @@ cleanup:
 }
 
 /*
+ * CF16: a mapped block's stored checksum is the checksum of the data at
+ * that block. A block's entry is stored before the mapping that names
+ * it, so a mapping that fails must put the old entry back: before that
+ * rule, set_extent failing left the old block mapped under the new
+ * block's checksum, and every read of it failed (inventory section 17,
+ * after shell completeness S7). And a record the plain fallback dropped
+ * must not lose its unwritten blocks to a failure partway (CF17).
+ *
+ * Each case writes a file, commits it, rewrites it, and fails one
+ * set_extent of the write-back with the rule's errno. Then: every block
+ * the open inode maps verifies; the pages the failure left dirty are
+ * written by the next sync; and after a remount the file reads back
+ * whole, with no checksum failure and a clean scrub.
+ */
+#if CONFIG_FAULTINJECT
+enum extent_fail_layout {
+    EF_PLAIN,     /* plain blocks over plain blocks: data_write_block */
+    EF_RECORD,    /* a compressed record over a compressed record: record_write */
+    EF_DROPPED,   /* one page that leaves a record incompressible: dropped, then plain */
+    EF_CRYPT,     /* EF_PLAIN on an encrypted pool: authenticated entries */
+};
+
+static const char *const extent_fail_names[] = { "plain", "record", "dropped", "crypt" };
+
+#define EF_PAGES 16u   /* two records */
+
+static bool extent_fail_case(enum fi_kind kind, enum extent_fail_layout layout, const char **reason)
+{
+    static const char key[] = "extent fail key";
+    const size_t len = (size_t)EF_PAGES * 4096;
+    struct blkdev *bd = NULL;
+    struct file *f = NULL;
+    uint8_t *a = kmalloc(len, 0), *b = kmalloc(len, 0);
+    bool mounted = false;
+#define EF_CHECK(cond)                                                        \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto fail;                                                       \
+        }                                                                     \
+    } while (0)
+    EF_CHECK(a != NULL && b != NULL);
+    if (layout == EF_CRYPT) {
+        (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+        bd = ramblk_create(1024);
+        EF_CHECK(bd != NULL);
+        EF_CHECK(cosmofs_format_encrypted(bd, key, sizeof(key) - 1) == 0);
+        int mk = vfs_mkdir(NULL, ENG, 0755);
+        EF_CHECK(mk == 0 || mk == -EEXIST);
+        EF_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+        cosmofs_test_set_writeback(mount_of(ENG), false);
+        EF_CHECK(cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == 0);
+    } else {
+        EF_CHECK(engine_mount(&bd, 1024, reason));
+    }
+    mounted = true;
+
+    /* The old contents and the new, and which set_extent of the
+     * write-back fails. */
+    size_t off = 0, wlen = len;
+    unsigned every = 5;   /* the fifth block of the first record */
+    switch (layout) {
+    case EF_PLAIN:
+    case EF_CRYPT:
+        fill_incompressible(a, len, 0x1234567u);
+        fill_incompressible(b, len, 0x7654321u);
+        break;
+    case EF_RECORD:
+        for (size_t i = 0; i < len; i++) {
+            a[i] = (uint8_t)(i % 61);
+            b[i] = (uint8_t)(i * 7 % 59 + 1);
+        }
+        every = 1;   /* the first record's own mapping */
+        break;
+    case EF_DROPPED:
+        /* Six incompressible pages and two of zeros compress into seven
+         * blocks; one more incompressible page does not, so the record
+         * is dropped and written again as eight plain blocks, of which
+         * the third fails. */
+        memset(a, 0, len);
+        for (unsigned r = 0; r < EF_PAGES / 8; r++)
+            fill_incompressible(a + (size_t)r * 8 * 4096, 6 * 4096, 0x5150u + r);
+        memcpy(b, a, len);
+        fill_incompressible(b + 7 * 4096, 4096, 0xfeedu);
+        off = 7 * 4096;
+        wlen = 4096;
+        every = 3;
+        break;
+    }
+
+    EF_CHECK(write_file(ENG "/f", a, len));
+    EF_CHECK(vfs_sync() == 0);
+    EF_CHECK(vfs_open(NULL, ENG "/f", COSMO_O_RDWR, 0, &f) == 0);
+    EF_CHECK(file_pwrite(f, b + off, wlen, off) == (int64_t)wlen);
+    faultinject_set(kind, every, 1, thread_current());
+    int src = file_sync(f);
+    struct fi_stats fst;
+    faultinject_stats(kind, &fst);
+    faultinject_clear(kind);
+    kinfo("selftest: cosmofs-extent-fail: %s %s: sync %d, hits %llu", faultinject_kind_name(kind),
+          extent_fail_names[layout], src, (unsigned long long)fst.hits);
+    EF_CHECK(fst.hits == 1);
+    EF_CHECK(src == (kind == FI_COSMOFS_EXTENT_NOMEM ? -ENOMEM : -EFBIG));
+
+    if (layout == EF_DROPPED) {
+        /* The record is gone from the open map and only part of it was
+         * written again, so the transaction is abandoned and the
+         * committed record is what the disk keeps. Before CF17 the retry
+         * wrote the one dirty page and committed: the record's other
+         * unwritten blocks were holes. */
+        int retry = file_sync(f);
+        kinfo("selftest: cosmofs-extent-fail: dropped record: retry %d", retry);
+        file_put(f);
+        f = NULL;
+        (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+        EF_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+        cosmofs_test_set_writeback(mount_of(ENG), false);
+        /* Either the old contents or the new, whole: never the record's
+         * unwritten blocks read back as holes. */
+        EF_CHECK(read_matches(ENG "/f", a, len) || read_matches(ENG "/f", b, len));
+    } else {
+        /* CF16 on what the next commit would publish. */
+        uint64_t bad = 0;
+        EF_CHECK(cosmofs_test_verify_file(f->vn, &bad) == 0);
+        if (bad)
+            kerror("cosmofs-extent-fail: %llu block(s) mapped under a checksum not their own",
+                   (unsigned long long)bad);
+        EF_CHECK(bad == 0);
+        /* The failed pages stayed dirty; the next sync writes them. */
+        EF_CHECK(file_sync(f) == 0);
+        file_put(f);
+        f = NULL;
+        EF_CHECK(vfs_umount(ENG) == 0);
+        EF_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+        cosmofs_test_set_writeback(mount_of(ENG), false);
+        if (layout == EF_CRYPT)
+            EF_CHECK(cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == 0);
+        EF_CHECK(read_matches(ENG "/f", b, len));
+    }
+    struct cosmofs_stats st;
+    EF_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures == 0);
+    struct cosmofs_scrub_stats sc;
+    EF_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    kfree(a);
+    kfree(b);
+    return engine_unmount(bd, reason);
+
+fail:
+    faultinject_clear(kind);
+    if (f)
+        file_put(f);
+    kfree(a);
+    kfree(b);
+    if (mounted)
+        (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    if (bd)
+        ramblk_destroy(bd);
+    return false;
+#undef EF_CHECK
+}
+#endif
+
+bool selftest_cosmofs_extent_fail(const char **reason)
+{
+#if CONFIG_FAULTINJECT
+    static const enum fi_kind kinds[] = { FI_COSMOFS_EXTENT_NOMEM, FI_COSMOFS_EXTENT_FBIG };
+    unsigned cases = 0;
+    for (unsigned k = 0; k < 2; k++) {
+        for (unsigned l = EF_PLAIN; l <= EF_CRYPT; l++) {
+            if (l == EF_CRYPT && !random_ready())
+                continue;   /* the no-entropy boot formats no encrypted pool (S18) */
+            if (!extent_fail_case(kinds[k], (enum extent_fail_layout)l, reason))
+                return false;
+            cases++;
+        }
+    }
+    kinfo("selftest: cosmofs-extent-fail: %u cases, every mapped block under its own checksum", cases);
+#else
+    (void)reason;
+#endif
+    return true;
+}
+
+/*
  * Encryption. The claims worth checking are that the plaintext is not on
  * the disk, that a wrong key is refused rather than believed, that a
  * mount without the key still works for everything that is not a file's

@@ -226,11 +226,23 @@ Release builds in CI (job `upgrade`, both architectures). The starting
 point is the published v1.0.3: `tools/fetch-release.py` downloads
 `cosmoos-ARCH.img` and its set (with `gh`, or the API and `GH_TOKEN`) and
 checks each file against the release's `SHA256SUMS`; `.cache/releases/` is
-the cache. The build's own set comes from `make release-set` into
-`$(OUT)/test-upgrade-set`. The host serves it over HTTP under the
-release's names, with this build's public key (`trust.pub`), a manifest
-with one byte changed, one signed by a throwaway key and an archive with
-one byte changed. Every boot of v1.0.3 that needs the files fetches them
+the cache. `tools/fetch-release.py` checks `SHA256SUMS` before it uses any file: a
+release from v1.0.4 on against `SHA256SUMS.sig` and `tools/keys/*.pub`,
+v1.0.3 (published before the signature) against the SHA-256 pinned in
+the script. The set upgraded to comes from `make release-set` into
+`$(OUT)/test-upgrade-set`, or, with `UPGRADE_SET_TAG=v1.0.4`, is that
+published release fetched the same way. The host serves it over HTTP
+under the release's names (the set, `cosmo-upgrade.cpk`, `SHA256SUMS`
+and `SHA256SUMS.sig`), with the set's public key (`trust.pub`) and the
+refused variants: the package with one byte changed, a kernel.elf with
+one byte changed under the set's own `SHA256SUMS`, a `SHA256SUMS` with
+one digest changed under the set's signature, a set with no signature,
+and, under a `SHA256SUMS` signed by a throwaway variant key, a manifest
+with one byte changed, one signed by a second throwaway key, an archive
+with one byte changed and a set whose loader does not trust the release
+key. Every boot of v1.0.3 checks `cosmo-upgrade.cpk` with `pkg install
+-n` and unpacks `sbin/cosmo-upgrade` and `sbin/cosmo-verify` with `tar`, as
+the guide does. Every boot of v1.0.3 that needs the files fetches them
 into `/tmp` (ramfs): v1.0.3's cosmofs has the record-fallback defect
 (docs/kernel-services/filesystem/cosmofs/design.md), which wget hit in
 1 of 16 downloads of a 12 MB file on v1.0.3 (and 1 of 24 on this build's
@@ -240,9 +252,16 @@ kernel before the fix). Serial logs in
 - **install**: v1.0.3's live image boots verified with the release key
   (`36ae7bb4947896ab`) and installs itself on a blank 256 MiB disk.
 - **refuse**: the installed v1.0.3 boots verified with the release key.
-  `cosmo-upgrade DIR` exits 3 with `unknown signing key <build key>`
-  before that key is in `/etc/pkg/keys`. After `cp trust.pub
-  /etc/pkg/keys/`, the changed manifest exits 3 with `bad signature`,
+  Before the build's key is in `/etc/pkg/keys`, `pkg install -n` refuses
+  the package (exit 3, `unknown signing key <build key>`) and `cosmo-upgrade
+  DIR` exits 3 with `SHA256SUMS: unknown signing key <build key>` (a
+  published set's key is in the ring already, and this part is skipped).
+  After `cp trust.pub /etc/pkg/keys/`, `pkg install -n` checks the package
+  and refuses the changed one (`bad signature`); `cosmo-verify` passes a
+  release file and refuses the changed kernel.elf; `cosmo-upgrade` refuses
+  the changed kernel.elf (`does not match SHA256SUMS`), the changed
+  `SHA256SUMS` (`bad signature`) and the set without `SHA256SUMS.sig`.
+  With the variant key in the ring, the changed manifest exits 3 with `bad signature`,
   the foreign one with `unknown signing key <its id>`, and the changed
   archive with `boot.tar does not match the manifest (SHA-512)`. Then a
   set signed by a throwaway key the guest adds to the ring, whose loader
@@ -264,6 +283,19 @@ kernel before the fix). Serial logs in
   print the loader and set switches, the root pass and `upgraded`. On the
   host `\cosmo` holds the new set and its loader, `\cosmo\prev` v1.0.3's
   set and loader, and `\EFI\BOOT` the new loader.
+- **hold**: on the host `\EFI\BOOT`'s loader is replaced by the build's
+  loader with the release key's ring entry replaced by a throwaway key's
+  (it starts the build's set and not v1.0.3's). The build boots verified
+  with its own key. A first `cosmo-upgrade` takes the lock, then reads
+  the key ring, where `lk.pub` is a link to a FIFO in `/tmp` (cosmofs has
+  no FIFOs): the test's write to it
+  returns only once that run has opened it, so the lock is held; the run
+  then blocks on a FIFO in place of its `kernel.elf`, and a second exits 3
+  with `another cosmo-upgrade is running`. `--rollback` exits 3 with `neither
+  \EFI\BOOT\... trusts key 36ae7bb4947896ab, ... nor \cosmo\prev's loader
+  key <build key>`. The ESP is unchanged, sector for sector, and the host
+  puts the new loader back. With a published set (one key for both sets)
+  only the lock is checked.
 - **new**: the build boots verified with its own key. Checked:
   `/sbin/mkfs.cosmofs` (absent from v1.0.3), the new `/etc/rc` (`mount
   -a`, replaced because the install left it unchanged), `/root/keep`, the

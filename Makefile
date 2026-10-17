@@ -111,8 +111,9 @@ $(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST
 
 # Roadmap M6 (docs/development.md, "Releases"): one architecture's release
 # set -- the signed live image, the loader, kernel.elf, boot.tar, the
-# command line, the manifest, cosmo-upgrade (S7) and SHA256SUMS -- copied by scripts/
-# mkrelease.py into RELEASE_DIR under the names the GitHub release carries.
+# command line, the manifest, cosmo-upgrade (S7), the signed package of
+# cosmo-upgrade and cosmo-verify, SHA256SUMS and its signature -- made by
+# scripts/mkrelease.py in RELEASE_DIR under the names the GitHub release carries.
 # Always a release build: `make release` runs release-set with
 # BUILD=release. Signed with whatever key SIGNING selects: the developer
 # key by default, the release key in the release workflow (SIGNING=release
@@ -122,10 +123,12 @@ release:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=release RELEASE_DIR=$(RELEASE_DIR) release-set
 
 UPGRADE_ELF = $(call prog_elf,cosmo-upgrade)
-release-set: $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(UPGRADE_ELF) $(ROOT)/scripts/mkrelease.py
+VERIFY_ELF = $(call prog_elf,cosmo-verify)
+release-set: $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(UPGRADE_ELF) $(VERIFY_ELF) \
+		$(ROOT)/scripts/mkrelease.py $(ROOT)/tools/pkgbuild.py $(ROOT)/scripts/modsign.py
 	$(call log,RELEASE,$(RELEASE_DIR))
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkrelease.py $(ARCH) $(RELEASE_DIR) $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) \
-		$(BOOT_ARCHIVE) $(MANIFEST) $(CMDLINE_FILE) $(UPGRADE_ELF)
+		$(BOOT_ARCHIVE) $(MANIFEST) $(CMDLINE_FILE) $(UPGRADE_ELF) $(VERIFY_ELF) $(MODSIGN_KEY) $(PKGSIGN_KEY) $(BUILD_ID)
 
 run: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
@@ -238,14 +241,27 @@ test-install: $(IMAGE)
 # docs/userland/testing.md, "test-upgrade"): the published v1.0.3, fetched
 # and checked against its SHA256SUMS (tools/fetch-release.py; .cache/ is the
 # cache), installed, upgraded to this build's release set and rolled back.
+# UPGRADE_SET_TAG=v1.0.4 upgrades to that published release instead of this
+# build's set: fetched the same way (its SHA256SUMS.sig checked against
+# tools/keys), signed by the release key.
 UPGRADE_BASE_TAG := v1.0.3
 UPGRADE_BASE_DIR := $(ROOT)/.cache/releases/$(UPGRADE_BASE_TAG)
-test-upgrade: RELEASE_DIR = $(OUT)/test-upgrade-set
+UPGRADE_SET_TAG ?=
+ifeq ($(UPGRADE_SET_TAG),)
+UPGRADE_SET_DIR := $(OUT)/test-upgrade-set
+UPGRADE_SET_PUB = $(PKG_TRUST_PUB)
+test-upgrade: RELEASE_DIR = $(UPGRADE_SET_DIR)
 test-upgrade: release-set
+else
+UPGRADE_SET_DIR := $(ROOT)/.cache/releases/$(UPGRADE_SET_TAG)
+UPGRADE_SET_PUB = $(firstword $(wildcard $(ROOT)/tools/keys/*.pub))
+endif
+test-upgrade:
 	$(Q)$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(UPGRADE_BASE_TAG) --arch $(ARCH) --dest $(UPGRADE_BASE_DIR)
+	$(Q)$(if $(UPGRADE_SET_TAG),$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(UPGRADE_SET_TAG) --arch $(ARCH) --dest $(UPGRADE_SET_DIR),true)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/upgrade_test.py --base $(UPGRADE_BASE_DIR)/cosmoos-$(ARCH).img \
-		--set $(OUT)/test-upgrade-set --pub $(PKG_TRUST_PUB) --arch $(ARCH) --workdir $(OUT)/test-upgrade \
+		--set $(UPGRADE_SET_DIR) --pub $(UPGRADE_SET_PUB) --arch $(ARCH) --workdir $(OUT)/test-upgrade \
 		--timeout $(BOOT_TIMEOUT)
 
 # Roadmap M5's acceptance test (tests/boot/security_test.py,

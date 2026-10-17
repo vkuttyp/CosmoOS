@@ -3139,3 +3139,22 @@ See the [history index](README.md).
   `record_write` now drops the record first
   (`tools/cosmofs-record-fallback-probe.py`). Report:
   `docs/audit/2026-10-17-upgrade-report.md`.
+- **Before v1.0.4: cosmofs write ordering and a verified upgrade from
+  v1.0.3 (2026-10-17, outside the roadmap: correctness blockers).** A
+  failed `set_extent` no longer leaves the old data mapped under the new
+  data's checksum: `data_write_block` and `record_write` keep the entries
+  they replace and put them back (cosmofs CF16; `cosmofs-extent-fail`,
+  driven by two new fault kinds; `tools/cosmofs-extent-fail-probe.py`). A
+  scrub of every other write path for "a value stored before the
+  operation it describes succeeded" fixed nine more sites, most by
+  abandoning the transaction (`inode_sync`, `extents_store`, a dropped
+  record rewritten partway, the checker's orphan repair, a commit failing
+  after its deadlist fill), some by undoing (create, symlink, the bitmap
+  reservation) (CF17). Releases sign `SHA256SUMS` (`SHA256SUMS.sig`, the
+  `COSMOSIG` trailer alone), `cosmo-upgrade` and `fetch-release.py` check
+  it before using a file, `cosmo-verify FILE SUMS SIG` is in the image, and
+  the first upgrade from v1.0.3 runs a `cosmo-upgrade` that v1.0.3's own
+  `pkg install -n` has checked against the release key, from the signed
+  `cosmoos-ARCH-cosmo-upgrade.cpk`. `test-upgrade` gains those refusals
+  and a boot that refuses a second run and a rollback neither loader
+  allows. Report: `docs/audit/2026-10-17-cosmofs-ordering-report.md`.

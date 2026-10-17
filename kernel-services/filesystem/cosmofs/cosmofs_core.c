@@ -868,6 +868,7 @@ static int commit_member_bitmap(struct cfs *fs, unsigned v, uint64_t *reserved)
         if (slots[c])
             cfs_free_block_deferred(fs, slots[c]);
         slots[c] = reserved[gc];
+        reserved[gc] = 0;   /* used: commit_bitmap gives back only the rest */
         fs->bitmap_dirty[gc] = 0;
     }
     /* Re-seal the index (it was CoW'd or dirtied above). */
@@ -929,6 +930,15 @@ static int commit_bitmap(struct cfs *fs)
         rc = commit_member_bitmap(fs, v, reserved);
     if (rc == 0)
         rc = cfs_members_store(fs);
+    if (rc) {
+        /* Reserved and never written: nothing names these blocks, and
+         * left allocated they are a leak the next commit's bitmap makes
+         * durable. Given back deferred, like every rolled-back
+         * allocation (CF17). */
+        for (unsigned gc = 0; gc < fs->nr_chunks; gc++)
+            if (reserved[gc] != 0)
+                cfs_free_block_deferred(fs, reserved[gc]);
+    }
     kfree(reserved);
     return rc;
 }
@@ -1505,6 +1515,20 @@ static int orphan_replay(struct cfs *fs)
 }
 
 /*
+ * A commit that fails after cfs_snapshot_fill added deadlist entries
+ * cannot be retried: the entries stay in the open transaction, and the
+ * next attempt's fill would add the same blocks to the same list again
+ * (cfs_snapshot_deadlist_dups). The transaction is abandoned instead,
+ * as the fill itself does when it fails partway (CF17).
+ */
+static int commit_unfilled(struct cfs *fs, int rc, unsigned appended)
+{
+    if (appended > 0)
+        cfs_fail(fs, rc);
+    return rc;
+}
+
+/*
  * `published` (optional) says whether *this call* put a new root on
  * disk. It is not derivable from the generation number: a commit that
  * fails after `fs->sb.generation = fs->gen` -- at the label update, the
@@ -1555,6 +1579,7 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
     int rc = 0;
     struct cfs_res res = { .blk = NULL, .n = 0, .used = 0 };
     bool *held = NULL;
+    unsigned appended = 0;   /* deadlist entries this attempt added: a retry would add them again */
     unsigned held_n = 0;
     if (record_frees) {
         rc = freelog_release_previous(fs);
@@ -1593,7 +1618,7 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
         if (held == NULL)
             rc = -ENOMEM;
         else
-            rc = cfs_snapshot_fill(fs, &res, held, held_n);
+            rc = cfs_snapshot_fill(fs, &res, held, held_n, &appended);
         if (rc == 0 && fs->nr_pending != held_n) {
             /* Nothing in the fill defers a free, so this cannot move.
              * If it ever does, the record would name a block a snapshot
@@ -1653,7 +1678,7 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
     kfree(res.blk);
     if (rc) {
         kfree(held);
-        return rc;
+        return commit_unfilled(fs, rc, appended);
     }
 
     /* Every dirty metadata block, re-sealed with its final contents. */
@@ -1666,7 +1691,7 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
         rc = pool_write(fs->pool, b->blkno, b->data);
         if (rc) {
             kfree(held);
-            return rc;
+            return commit_unfilled(fs, rc, appended);
         }
     }
 
@@ -1684,7 +1709,7 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
     rc = cfs_labels_update(fs);
     if (rc) {
         kfree(held);
-        return rc;
+        return commit_unfilled(fs, rc, appended);
     }
     /* Now make all of it stable, on every device. The root write's own
      * preflush reaches only the devices carrying the superblock, which
@@ -1695,13 +1720,13 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
     rc = pool_flush(fs->pool);
     if (rc) {
         kfree(held);
-        return rc;
+        return commit_unfilled(fs, rc, appended);
     }
     unsigned slot = fs->sb_slot == CFS_SUPER_A ? CFS_SUPER_B : CFS_SUPER_A;
     rc = super_write(fs, slot, BIO_PREFLUSH | BIO_FUA);
     if (rc) {
         kfree(held);
-        return rc;
+        return commit_unfilled(fs, rc, appended);
     }
     fs->sb_slot = slot;
     fs->commits++;

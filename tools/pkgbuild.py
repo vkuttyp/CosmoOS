@@ -4,6 +4,7 @@
   pkgbuild.py build --port DIR --out REPO --cc CC --cflags "..." --ld LD --ldflags "..."
                     --ldscript user.ld --crt0 crt0.o --libc libc.a --sign-key KEY [--test-fixtures]
   pkgbuild.py index --repo REPO --sign-key KEY
+  pkgbuild.py pack  --name N --version V --summary S --file DEST=SRC [--file ...] --sign-key KEY --out F.cpk
 
 A recipe (`port`) is `key: value` lines: name, version, summary, prefix,
 depends (repeatable), program (destination then C sources; compiled with
@@ -207,6 +208,27 @@ def cmd_build(args):
     return 0
 
 
+def pack(name, version, summary, files, key_path):
+    """A package of built files: `files` is [(destination, mode, data)],
+    destinations relative to /. The same archive cmd_build makes."""
+    if not NAME_RE.match(name) or not VERSION_RE.match(version):
+        die(f"bad name or version '{name}' '{version}'")
+    rec = {"name": name, "version": version, "summary": summary, "depends": []}
+    ordered = sorted((dest_path("/", d), mode, data) for d, mode, data in files)
+    manifest = manifest_text(rec, ordered)
+    return sign(tar_archive([("+MANIFEST", 0o644, manifest)] + ordered), key_path)
+
+
+def cmd_pack(args):
+    files = []
+    for spec in args.file:
+        dest, _, src = spec.partition("=")
+        with open(src, "rb") as f:
+            files.append((dest, 0o755, f.read()))
+    write_atomic(args.out, pack(args.name, args.version, args.summary, files, args.sign_key))
+    return 0
+
+
 # --- index -------------------------------------------------------------------
 
 def read_manifest_from_package(path):
@@ -271,6 +293,14 @@ def main(argv):
     b.add_argument("--sign-key", required=True)
     b.add_argument("--test-fixtures", action="store_true")
     b.set_defaults(fn=cmd_build)
+    pk = sub.add_parser("pack")
+    pk.add_argument("--name", required=True)
+    pk.add_argument("--version", required=True)
+    pk.add_argument("--summary", required=True)
+    pk.add_argument("--file", action="append", required=True)
+    pk.add_argument("--sign-key", required=True)
+    pk.add_argument("--out", required=True)
+    pk.set_defaults(fn=cmd_pack)
     i = sub.add_parser("index")
     i.add_argument("--repo", required=True)
     i.add_argument("--sign-key", required=True)
