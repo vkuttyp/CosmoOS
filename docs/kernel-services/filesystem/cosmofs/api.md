@@ -42,7 +42,7 @@ Common to every kernel entry point below:
 | `sync` | `cosmofs_sync` | commit the open transaction |
 | `check` | `cosmofs_check` | the structural check, reached from `/dev/fsctl` |
 | `scrub` | `cosmofs_scrub` | the scrub, reached from `/dev/fsctl` |
-| `format` | `cosmofs_format` | one device, unencrypted; reached from `/dev/blkctl` `COSMO_BLKCTL_FORMAT` through `vfs_format` |
+| `format` | `cosmofs_format_label` | one device, unencrypted, named or not; reached from `/dev/blkctl` `COSMO_BLKCTL_FORMAT` through `vfs_format` |
 
 ### `void cosmofs_init(void)`
 Registers `cosmofs_fs_type` with `vfs_register_fs`. Called once from
@@ -156,6 +156,13 @@ any write inside a snapshot or in `.snapshots`.
   mounted; `vfs_format` refuses a mounted device with `-EBUSY` (V36 in
   `docs/kernel-services/vfs/invariants.md`). The superblock is written
   last with `BIO_PREFLUSH | BIO_FUA`.
+
+#### `int cosmofs_format_label(struct blkdev *bd, const char *label)`
+- Purpose: `cosmofs_format`, with the superblock's `label` set to `label`
+  (shell completeness S6): up to `CFS_LABEL_MAX` (16) bytes, NUL-padded;
+  NULL or `""` leaves it zero. The VFS's `format` for cosmofs.
+- Results: as `cosmofs_format`, and `-EINVAL` for a longer label. What
+  characters a label may hold is `/dev/blkctl`'s rule, not this one's.
 
 #### `int cosmofs_format_pool(struct blkdev **bd, unsigned n)` / `int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies)`
 `n` members (1..`CFS_MAX_MEMBERS`, 255), each of `copies` devices
@@ -319,8 +326,11 @@ is not the ABI; `fsctl_run` copies it field by field.
   switch (`root=` on the command line, `docs/kernel-services/vfs/`) reach
   `cosmofs_mount` through the VFS.
 - `/dev/blkctl` `COSMO_BLKCTL_FORMAT` with `fstype` `"cosmofs"` reaches
-  `cosmofs_format` through `vfs_format`; `cosmo-install`
-  (`userland/system/cosmo-install.c`) uses it to make partition 2.
+  `cosmofs_format_label` through `vfs_format`; `cosmo-install`
+  (`userland/system/cosmo-install.c`) uses it to make partition 2, named
+  `cosmo-root`, and `mkfs.cosmofs` (shell completeness S6) any device.
+- The label is read by no call: `blkid` reads it from the raw superblock
+  (`cfs_super.label`, offset 136).
 - Snapshots: `mkdir` and `rmdir` under `<mount>/.snapshots`, reading
   under `<mount>/.snapshots/<name>/`.
 - There is no system call for keys, compression policy, rekeying or

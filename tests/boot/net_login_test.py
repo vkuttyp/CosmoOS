@@ -66,6 +66,14 @@ port 22 forwarded to a host port:
      it; then `date -s` two days ahead, `hwclock -w` and `reboot`, and
      the machine restarts in the same QEMU, and after it the wall clock
      is the RTC's (to 2 s, the read keeps whole seconds).
+  k. Mounting (shell completeness S6), on the net boot, which has a second,
+     blank disk: `lsblk` names the installed disk's GPT partitions (the
+     root at /) and the blank disk; `blkid` names the root's PARTUUID (the
+     installer's) and its label, cosmo-root; `mkfs.cosmofs -L s6data` on
+     the blank disk, a line for it in /etc/fstab and `mount -a` mount it
+     at /data, where a file is written and synced; `umount` of it is
+     refused with mount dropped. On the reboot (e), /etc/rc's `mount -a`
+     has mounted it again, and the file is there.
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -751,13 +759,89 @@ def stage_power_clock(args, results, b):
                    f"hwclock -w + reboot ({how}): the restarted system reads the RTC's time")
 
 
+BLANK_MIB = 16
+
+
+def blank_disk_env(work):
+    """k: a blank disk beside the installed one, the same file on both boots."""
+    path = os.path.join(work, "blank.img")
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.truncate(BLANK_MIB << 20)
+    return (os.environ.get("QEMU_EXTRA", "") +
+            f" -drive if=none,id=blank,format=raw,file={path} -device virtio-blk-pci,drive=blank").strip()
+
+
+def lsblk_rows(out):
+    """k: lsblk's rows as (tree prefix, name, size, ro, type, mountpoint)."""
+    rows = []
+    for line in out.splitlines():
+        m = re.match(r"^(\|-|`-)?(\S+)\s+(\S+)\s+([01])\s+(disk|part)\s*(\S*)$", line)
+        if m:
+            rows.append(m.groups(""))
+    return rows
+
+
+def stage_mounting(b, results, inst):
+    """k: lsblk, blkid, and a blank disk made a cosmofs and mounted by
+    /etc/fstab; the reboot (e) checks it came back."""
+    out = b.run("awk '$2 == \"/\" { print $1 }' /proc/mounts")
+    root = need(out, r"^/dev/(\S+)$", "the root's device in /proc/mounts").group(1)
+    out = b.run("lsblk")
+    need(out, r"^NAME\s+SIZE\s+RO\s+TYPE\s+MOUNTPOINTS$", "lsblk's header")
+    rows = lsblk_rows(out)
+    disks = [r for r in rows if r[4] == "disk"]
+    parts = [r for r in rows if r[4] == "part"]
+    rootrow = [r for r in parts if r[1] == root]
+    if len(rootrow) != 1 or rootrow[0][0] != "`-" or rootrow[0][5] != "/":
+        raise Fail(f"lsblk: the root {root} is not the last partition, mounted at /:\n{out}")
+    if not [r for r in parts if r[0] == "|-" and r[1] != root]:
+        raise Fail(f"lsblk: no ESP row before the root's:\n{out}")
+    blank = [r for r in disks if r[2] == f"{BLANK_MIB}M" and not root.startswith(r[1])]
+    if len(blank) != 1:
+        raise Fail(f"lsblk: want one {BLANK_MIB}M disk besides the installed one:\n{out}")
+    blank = blank[0][1]
+    out = b.run(f"blkid /dev/{root}")
+    need(out, rf'^/dev/{root}: LABEL="cosmo-root" UUID="[0-9a-f-]{{36}}" TYPE="cosmofs" '
+              rf'PARTUUID="{inst["partuuid"]}"$', "blkid: the root's label, type and PARTUUID")
+    out = b.status(f"mkfs.cosmofs -L s6data /dev/{blank}", "mkfs")
+    need(out, r"^mkfs=0$", f"mkfs.cosmofs on {blank}")
+    out = b.status(f"mkdir -p /data && echo '/dev/{blank} /data cosmofs defaults 0 0' >> /etc/fstab && mount -a",
+                   "mnta")
+    need(out, r"^mnta=0$", "mount -a with the new /etc/fstab line")
+    out = b.run("grep ' /data ' /proc/mounts; lsblk; blkid")
+    need(out, rf"^/dev/{blank} /data cosmofs rw 0 0$", "/proc/mounts: the blank disk at /data")
+    if not [r for r in lsblk_rows(out) if r[1] == blank and r[5] == "/data"]:
+        raise Fail(f"lsblk: {blank} is not shown at /data:\n{out}")
+    need(out, rf'^/dev/{blank}: LABEL="s6data" UUID="[0-9a-f-]{{36}}" TYPE="cosmofs"$', "blkid: the new label")
+    out = b.status("priv -d mount -- umount /data", "umnt")
+    need(out, r"^umnt=[1-9]\d*$", "umount refused with mount dropped")
+    out = b.status(f"echo {inst['nonce']} > /data/s6 && sync && grep -c ' /data ' /proc/mounts", "wr")
+    need(out, r"^1$", "/data still mounted after the refused umount")
+    need(out, r"^wr=0$", "a file written to /data and synced")
+    results.append(f"k. lsblk: {root} under its disk at /, the blank {blank}; blkid: {root} LABEL cosmo-root, "
+                   f"PARTUUID {inst['partuuid']}; mkfs.cosmofs -L s6data {blank}, /etc/fstab + mount -a at /data; "
+                   f"umount refused with mount dropped")
+    return blank
+
+
+def mounted_again(b, inst, results):
+    """k, after the reboot: /etc/rc's mount -a mounted the blank disk again."""
+    out = b.run("grep ' /data ' /proc/mounts; cat /data/s6")
+    need(out, rf"^/dev/{inst['blank']} /data cosmofs rw 0 0$", "/data mounted by /etc/fstab after the reboot")
+    need(out, rf"^{inst['nonce']}$", "the file written to /data before the reboot")
+    results.append(f"k. after the reboot /etc/rc's mount -a mounted {inst['blank']} at /data again, the file there")
+
+
 def stage_reboot_ssh(args, results, inst, port):
     """e: the second boot; the client's known_hosts must still match."""
     b = Boot("reboot", inst["target"], args.workdir,
-             {"QEMU_DISKS": "boot", "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{port}-:22", "QEMU_REBOOT": "1"},
+             {"QEMU_DISKS": "boot", "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{port}-:22", "QEMU_REBOOT": "1",
+              "QEMU_EXTRA": blank_disk_env(args.workdir)},
              args.timeout)
     try:
         b.wait_prompt("the first prompt")
+        mounted_again(b, inst, results)
         ssh_wait(args.workdir, port, strict=True)
         rc, out = ssh_run(args.workdir, port, True, "echo again")
         if rc != 0 or not re.search(r"^again$", out, re.M):
@@ -789,7 +873,7 @@ def stage_net(args, results, inst):
     ssh_port = free_port()   # after the HTTP server has its port, so the two cannot be the same
     b = Boot("net", inst["target"], work,
              {"QEMU_DISKS": "boot", "QEMU_NET_HOSTFWD": f"tcp:127.0.0.1:{ssh_port}-:22",
-              "QEMU_NET_HOSTNAME": HOSTNAME}, args.timeout)
+              "QEMU_NET_HOSTNAME": HOSTNAME, "QEMU_EXTRA": blank_disk_env(work)}, args.timeout)
     try:
         b.wait_prompt("the first prompt")
         log = b.text()
@@ -847,6 +931,8 @@ def stage_net(args, results, inst):
         stage_inspect(b, results)
         stage_processes(b, results)
         stage_ownership(b, results)
+        inst["nonce"] = os.urandom(8).hex()
+        inst["blank"] = stage_mounting(b, results, inst)
 
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:

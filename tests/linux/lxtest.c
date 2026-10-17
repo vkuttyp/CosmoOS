@@ -900,6 +900,48 @@ static void power_clock_tests(void)
 }
 
 /*
+ * Shell completeness S6: mount(2) and umount2(2). A ramfs mounted and
+ * written, read-only refusing a create, the flags and options the native
+ * mount has not refused, the source path rules; uid 1000 (no PRIV_MOUNT)
+ * refused both.
+ */
+static void mount_tests(void)
+{
+    sc3(LX_mkdirat, LX_AT_FDCWD, "/tmp/lxmnt", 0755);
+    CHECKV(sc5(LX_mount, "none", "/tmp/lxmnt", "ramfs", 0, 0) == 0, 0);
+    long fd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxmnt/f", LX_O_WRONLY | LX_O_CREAT, 0644);
+    CHECKV(fd >= 0, fd);
+    sc1(LX_close, fd);
+    CHECKV(sc2(LX_umount2, "/tmp/lxmnt", 0) == 0, 0);
+    CHECKV(sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxmnt/f", LX_O_RDONLY, 0) == -2, 0);   /* the ramfs went with it */
+    /* MS_RDONLY, with BusyBox's MS_SILENT and the old magic. */
+    CHECKV(sc5(LX_mount, "none", "/tmp/lxmnt", "ramfs", 0xc0ed0000L | 32768 | 1, 0) == 0, 0);
+    CHECKV(sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxmnt/f", LX_O_WRONLY | LX_O_CREAT, 0644) == -30, 0);   /* EROFS */
+    CHECKV(sc2(LX_umount2, "/tmp/lxmnt", 2) == -22, 0);   /* MNT_DETACH */
+    CHECKV(sc2(LX_umount2, "/tmp/lxmnt", 1) == 0, 0);     /* MNT_FORCE */
+    CHECKV(sc5(LX_mount, "none", "/tmp/lxmnt", "ramfs", 32, 0) == -22, 0);           /* MS_REMOUNT */
+    CHECKV(sc5(LX_mount, "none", "/tmp/lxmnt", "ramfs", 2, 0) == -22, 0);            /* MS_NOSUID */
+    CHECKV(sc5(LX_mount, "none", "/tmp/lxmnt", "ramfs", 0, "size=1m") == -22, 0);    /* options */
+    CHECKV(sc5(LX_mount, "/dev/nosuch", "/tmp/lxmnt", "cosmofs", 0, 0) == -2, 0);    /* no such device */
+    CHECKV(sc5(LX_mount, "/tmp/x", "/tmp/lxmnt", "ramfs", 0, 0) == -2, 0);          /* not under /dev */
+    CHECKV(sc5(LX_mount, "none", "/tmp/lxmnt", "nosuchfs", 0, 0) == -19, 0);         /* ENODEV */
+    CHECKV(sc5(LX_mount, 0, "/tmp/lxmnt", "proc", 0, "") == 0, 0);                    /* no source; proc */
+    fd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxmnt/uptime", LX_O_RDONLY, 0);
+    CHECKV(fd >= 0, fd);
+    sc1(LX_close, fd);
+    CHECKV(sc2(LX_umount2, "/tmp/lxmnt", 0) == 0, 0);
+    long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        CHILD_CHECK(sc3(LX_setresgid, 1000, 1000, 1000) == 0 && sc3(LX_setresuid, 1000, 1000, 1000) == 0, 2);
+        CHILD_CHECK(sc5(LX_mount, "none", "/tmp/lxmnt", "ramfs", 0, 0) == -1, 3);
+        CHILD_CHECK(sc2(LX_umount2, "/", 0) == -1, 4);
+        lx_exit(0);
+    }
+    int32_t st = -1;
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
+}
+
+/*
  * Shell completeness S4: fchown, fchownat (by path, AT_SYMLINK_NOFOLLOW --
  * lchown -- and AT_EMPTY_PATH) and chroot, as root and refused to a
  * process of uid 1000 (which has no privileges).
@@ -2640,6 +2682,7 @@ int main(int argc, char **argv)
     inspect_tests(pid);
     ownership_tests();
     power_clock_tests();
+    mount_tests();
     exec_tests(pid);
     busybox_needs(pid);
     CHECKV(sc0(LX_sched_yield) == 0, 0);

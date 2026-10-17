@@ -25,12 +25,16 @@
 #define COSMO_BLKCTL_WRITE  3   /* `count` sectors at `sector`, the data after the struct */
 #define COSMO_BLKCTL_FLUSH  4   /* the device's volatile cache to stable media */
 #define COSMO_BLKCTL_RESCAN 5   /* re-read a disk's partition table: struct cosmo_blkctl_rescan */
-#define COSMO_BLKCTL_FORMAT 6   /* make an empty filesystem of type `fstype` on the device */
+#define COSMO_BLKCTL_FORMAT 6   /* make an empty filesystem of type `fstype` on the device; the
+                                 * data after the struct, if any, is its label (S6): at most
+                                 * COSMO_BLKCTL_LABEL bytes of printable ASCII: no blank,
+                                 * '"' or '\\', and no NUL */
 
 /* The most data one READ or WRITE carries. */
 #define COSMO_BLKCTL_IO_MAX (32u * 1024u)
 
 #define COSMO_BLKCTL_NAME 16u
+#define COSMO_BLKCTL_LABEL 16u
 
 struct cosmo_blkctl {
     uint16_t version;

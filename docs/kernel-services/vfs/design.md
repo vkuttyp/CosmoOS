@@ -619,14 +619,14 @@ and a failed command leaves none.
 | `WRITE` | `count` sectors at `sector`; `-EBUSY` while `vfs_bdev_mounted` | none |
 | `FLUSH` | `blk_flush` | none |
 | `RESCAN` | `blk_part_scan` (`-EBUSY` while a partition is in use) | `struct cosmo_blkctl_rescan` |
-| `FORMAT` | `vfs_format(fstype, device)`: `fs_type.format`, refused (`-EBUSY`) while mounted | none |
+| `FORMAT` | `vfs_format(fstype, device, label)`: `fs_type.format`, refused (`-EBUSY`) while mounted. The data after the struct, if any, is the label (S6): at most `COSMO_BLKCTL_LABEL` (16) bytes of printable ASCII with no blank, `"` or `\`, else `-EINVAL` | none |
 
 It sits in the VFS rather than the block layer because two of its
 answers are about mounts (D8). `vfs_bdev_mounted` answers for the device,
 the disk it is a partition of, and its partitions; a cosmofs pool member
 other than a mount's named device is not seen (the installer does not
-make multi-device pools). cosmofs's `format` is `cosmofs_format`: a
-single-device, unencrypted pool.
+make multi-device pools). cosmofs's `format` is `cosmofs_format_label`: a
+single-device, unencrypted pool, named or not.
 
 ## Per-open character devices
 

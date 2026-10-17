@@ -178,5 +178,8 @@
 #define LX_settimeofday 164
 #define LX_clock_settime 227
 #define LX_reboot 169
+/* Mounting (shell completeness S6). */
+#define LX_mount 165
+#define LX_umount2 166
 
 #endif /* COMPAT_LINUX_NR_X86_64_H */

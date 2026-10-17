@@ -260,7 +260,7 @@ def stage_install(args, results):
         out = b.status(f"cosmo-install {dev}", "again-status")
         need(out, r"^again-status=3$", "a second install without --force")
         need(out, r"already has a partition table; --force replaces it", "a second install without --force")
-        out = b.run(f"mkdir /mnt/v && mount {root_dev} /mnt/v cosmofs && ls -1 /mnt/v/sbin && ls -1 /mnt/v && "
+        out = b.run(f"mkdir /mnt/v && mount -t cosmofs /dev/{root_dev} /mnt/v && ls -1 /mnt/v/sbin && ls -1 /mnt/v && "
                     "cat /mnt/v/etc/rc && cat /mnt/v/etc/pkg/repos.conf && ls -1 /mnt/v/var/lib/pkg/repo")
         out += b.status(f"cosmo-install --force {dev}", "busy-status")
         out += b.run("umount /mnt/v && echo look-ok")

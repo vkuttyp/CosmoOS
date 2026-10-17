@@ -166,7 +166,7 @@ expect proc-stat "$$" "$(cut -d' ' -f1 /proc/$$/stat)"
 # /proc/mounts names a mount by the directory the walk reached (a relative
 # target is not recorded as typed) and escapes a space as Linux does.
 mkdir "sp ace" rel
-mount none "sp ace" ramfs && mount none rel ramfs
+mount -t ramfs none "sp ace" && mount -t ramfs none rel
 expect mounts-escaped 1 "$(grep -c " $T/sp\\\\040ace ramfs " /proc/mounts)"
 expect mounts-relative 1 "$(grep -c " $T/rel ramfs " /proc/mounts)"
 umount "sp ace"
@@ -412,6 +412,42 @@ if [ "$d" -ge 86400 ] && [ "$d" -le 86405 ]; then ok date-set; else bad date-set
 # (EACCES, as Linux's RTC_SET_TIME).
 expect hwclock-read 1 "$(hwclock -u | grep -c '[0-9][0-9]:[0-9][0-9]:[0-9][0-9]')"
 expect hwclock-noadmin 1 "$(priv -d sys_admin -- hwclock -w 2>&1 | grep -c 'Permission denied')"
+
+# --- shell completeness S6: mounting ----------------------------------------------
+# BusyBox mount and umount over the Linux mount(2) and umount2(2) doors: a
+# ramfs and a procfs by hand, a read-only mount, the refusals; mkfs.cosmofs,
+# blkid and lsblk on the NVMe scratch disk the harness gives each run.
+mkdir m1 m2 m3 m4
+mount -t ramfs none m1 && echo in > m1/f
+expect mount-ramfs "in 1" "$(cat m1/f) $(grep -c " $T/m1 ramfs rw " /proc/mounts)"
+expect mount-list 1 "$(mount | grep -c "^ramfs on $T/m1 type ramfs (rw)$")"
+mount -t proc proc m2
+expect mount-proc "$$" "$(cut -d' ' -f1 m2/$$/stat)"
+mount -t ramfs -o ro none m3
+expect mount-ro 1 "$( (touch m3/f) 2>&1 | grep -c 'Read-only file system')"
+expect mount-noprv 1 "$(priv -d mount -- mount -t ramfs none m4 2>&1 | grep -c 'ermission denied')"
+expect mount-noprv-none 0 "$(grep -c " $T/m4 " /proc/mounts)"
+expect umount-noprv 1 "$(priv -d mount -- umount m1 2>&1 | grep -c 'Operation not permitted')"
+expect umount-noprv-kept 1 "$(grep -c " $T/m1 " /proc/mounts)"
+expect mount-remount 1 "$(mount -o remount,ro m1 2>&1 | grep -c 'Invalid argument')"
+expect mount-nofs 1 "$(mount -t nosuchfs none m4 2>&1 | grep -c 'No such device')"
+expect mount-nodev 1 "$(mount -t cosmofs /dev/nosuchdisk m4 2>&1 | grep -c 'No such file or directory')"
+umount m1 && umount m2 && umount m3
+expect umount-all 0 "$(grep -c " $T/m[123] " /proc/mounts)"
+expect umount-gone "" "$(ls m1)"
+if lsblk | grep -q '^nvme0n1 '; then
+    mkfs.cosmofs -L s6scratch /dev/nvme0n1 > /dev/null
+    expect blkid-label 1 "$(blkid /dev/nvme0n1 | grep -c '^/dev/nvme0n1: LABEL="s6scratch" UUID="[0-9a-f-]*" TYPE="cosmofs"$')"
+    mount -t cosmofs /dev/nvme0n1 m4 && echo kept > m4/f && umount m4 && mount -t cosmofs -o ro /dev/nvme0n1 m4
+    expect mount-cosmofs "kept 1" "$(cat m4/f) $(grep -c "^/dev/nvme0n1 $T/m4 cosmofs ro " /proc/mounts)"
+    expect lsblk-mounted 1 "$(lsblk | grep -c "^nvme0n1 .* disk $T/m4$")"
+    expect mkfs-busy 1 "$(mkfs.cosmofs /dev/nvme0n1 2>&1 | grep -c 'busy')"
+    umount m4
+    expect mkfs-badlabel 2 "$(mkfs.cosmofs -L 'a-label-of-17-chr' /dev/nvme0n1 > /dev/null 2>&1; echo $?)"
+else
+    echo "BBTEST: note blkid-label, mount-cosmofs, lsblk-mounted, mkfs-busy: no nvme0n1 here; not run"
+fi
+expect lsblk-root-disk 1 "$(lsblk | grep -c '^NAME  *SIZE RO TYPE MOUNTPOINTS$')"
 
 cd /
 rm -rf "$T"

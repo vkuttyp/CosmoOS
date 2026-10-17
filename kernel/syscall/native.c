@@ -903,6 +903,45 @@ static int64_t sys_fsync(struct syscall_args *a)
     return rc;
 }
 
+int syscall_mount(const char *device, const char *target, const char *fstype, unsigned flags)
+{
+    if (!cred_has(cred_current(), PRIV_MOUNT))
+        return -EPERM;
+    struct blkdev *bd = NULL;
+    if (device != NULL) {
+        bd = blk_find(device);
+        if (bd == NULL)
+            return -ENODEV;
+    }
+    /* A relative target from the caller's directory, as every other path
+     * call resolves one (P27); it used to be resolved from the root. */
+    char *cwdname = kmalloc(VFS_PATH_MAX, 0);   /* its name, which the mount records (P32); off the frame */
+    if (cwdname == NULL) {
+        if (bd)
+            blkdev_put(bd);
+        return -ENOMEM;
+    }
+    struct vnode *cwd = process_cwd_snapshot(cwdname, VFS_PATH_MAX);
+    int rc = vfs_mount_at(cwd, cwd ? cwdname : NULL, target, fstype, bd, flags);
+    if (cwd)
+        vnode_put(cwd);
+    kfree(cwdname);
+    if (bd)
+        blkdev_put(bd);   /* the mount took its own reference */
+    return rc;
+}
+
+int syscall_umount(const char *target, unsigned flags)
+{
+    if (!cred_has(cred_current(), PRIV_MOUNT))
+        return -EPERM;
+    struct vnode *cwd = process_cwd_get();   /* as syscall_mount (P27) */
+    int rc = vfs_umount_at(cwd, target, flags);
+    if (cwd)
+        vnode_put(cwd);
+    return rc;
+}
+
 static int64_t sys_mount(struct syscall_args *a)
 {
     if (!cred_has(cred_current(), PRIV_MOUNT))
@@ -920,28 +959,8 @@ static int64_t sys_mount(struct syscall_args *a)
     rc = strncpy_from_user(fstype, a->a[2], sizeof(fstype));
     if (rc < 0)
         return rc;
-    struct blkdev *bd = NULL;
-    if (source[0] != '\0' && strcmp(source, "none") != 0) {
-        bd = blk_find(source);
-        if (bd == NULL)
-            return -ENODEV;
-    }
-    /* A relative target from the caller's directory, as every other path
-     * call resolves one (P27); it used to be resolved from the root. */
-    char *cwdname = kmalloc(VFS_PATH_MAX, 0);   /* its name, which the mount records (P32); off the frame */
-    if (cwdname == NULL) {
-        if (bd)
-            blkdev_put(bd);
-        return -ENOMEM;
-    }
-    struct vnode *cwd = process_cwd_snapshot(cwdname, VFS_PATH_MAX);
-    rc = vfs_mount_at(cwd, cwd ? cwdname : NULL, target, fstype, bd, flags);
-    if (cwd)
-        vnode_put(cwd);
-    kfree(cwdname);
-    if (bd)
-        blkdev_put(bd);   /* the mount took its own reference */
-    return rc;
+    bool none = source[0] == '\0' || strcmp(source, "none") == 0;
+    return syscall_mount(none ? NULL : source, target, fstype, flags);
 }
 
 static int64_t sys_umount(struct syscall_args *a)
@@ -955,11 +974,7 @@ static int64_t sys_umount(struct syscall_args *a)
     int rc = get_path(a->a[0], target);
     if (rc)
         return rc;
-    struct vnode *cwd = process_cwd_get();   /* as sys_mount (P27) */
-    rc = vfs_umount_at(cwd, target, flags ? VFS_UMOUNT_FORCE : 0);
-    if (cwd)
-        vnode_put(cwd);
-    return rc;
+    return syscall_umount(target, flags ? VFS_UMOUNT_FORCE : 0);
 }
 
 /*

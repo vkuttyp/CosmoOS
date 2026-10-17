@@ -7,7 +7,7 @@
  *
  * The disk becomes: a GPT, partition 1 a copy of the EFI System Partition
  * the loader was read from (the same loader, kernel and boot archive),
- * partition 2 a cosmofs filesystem holding the running system's /bin,
+ * partition 2 a cosmofs filesystem named cosmo-root holding the running system's /bin,
  * /sbin, /etc and package database, and the image's package repository
  * at /var/lib/pkg/repo, which the installed /etc/pkg/repos.conf names. The ESP is copied byte for byte: its
  * signed command line says root=boot-disk, the CosmoOS root partition on
@@ -43,6 +43,7 @@
 #define CHUNK COSMO_BLKCTL_IO_MAX
 #define ALIGN_BYTES (1024u * 1024u)          /* partitions start on 1 MiB */
 #define MIN_ROOT_BYTES (32u * 1024u * 1024u)
+#define ROOT_LABEL "cosmo-root"            /* the root filesystem's name, as blkid prints it (S6) */
 
 static int g_ctl = -1;
 static uint8_t g_io[sizeof(struct cosmo_blkctl) + CHUNK];
@@ -552,8 +553,8 @@ static int install(const char *target_name, bool force)
             return fail("copying the EFI system partition", rc);
     }
 
-    /* Partition 2: an empty cosmofs, then the system. */
-    rc = (int)ctl(COSMO_BLKCTL_FORMAT, root->name, 0, 0, NULL, 0, "cosmofs");
+    /* Partition 2: an empty cosmofs named ROOT_LABEL, then the system. */
+    rc = (int)ctl(COSMO_BLKCTL_FORMAT, root->name, 0, 0, ROOT_LABEL, strlen(ROOT_LABEL), "cosmofs");
     if (rc < 0)
         return fail("making the cosmofs root", rc);
     if (mkdir(MNT, 0755) < 0 && errno != EEXIST)

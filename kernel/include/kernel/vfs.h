@@ -177,8 +177,10 @@ struct fs_type {
     int (*check)(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
     int (*scrub)(struct mount *mnt, struct cosmofs_scrub_stats *out);
     /* Optional: make an empty filesystem on `bdev`, which is not mounted
-     * (vfs_format checks). Reached from /dev/blkctl (roadmap M2). */
-    int (*format)(struct blkdev *bdev);
+     * (vfs_format checks), named `label` (NULL: none; a filesystem with
+     * no names refuses a non-empty one). Reached from /dev/blkctl
+     * (roadmap M2; the label, shell completeness S6). */
+    int (*format)(struct blkdev *bdev, const char *label);
     /* Optional: fill blocks/bfree/bavail (and files/ffree) of `out`, which
      * the VFS has set up with its defaults. Without it a mount whose page
      * cache is its store reports its page budget, and any other reports
@@ -589,7 +591,7 @@ bool vfs_bdev_mounted(const struct blkdev *bd);
 /* Make an empty `fsname` filesystem on `bd`: -ENODEV for an unknown
  * type, -EOPNOTSUPP for one that cannot format, -EBUSY when
  * vfs_bdev_mounted. */
-int vfs_format(const char *fsname, struct blkdev *bd);
+int vfs_format(const char *fsname, struct blkdev *bd, const char *label);
 
 /*
  * Name a mount for an operation that acts on one filesystem rather than

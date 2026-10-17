@@ -3100,7 +3100,7 @@ bool vfs_bdev_mounted(const struct blkdev *bd)
     return found;
 }
 
-int vfs_format(const char *fsname, struct blkdev *bd)
+int vfs_format(const char *fsname, struct blkdev *bd, const char *label)
 {
     struct fs_type *fs = vfs_find_fs(fsname);
     if (fs == NULL)
@@ -3109,9 +3109,10 @@ int vfs_format(const char *fsname, struct blkdev *bd)
         return -EOPNOTSUPP;
     if (vfs_bdev_mounted(bd))
         return -EBUSY;
-    int rc = fs->format(bd);
+    int rc = fs->format(bd, label);
     if (rc == 0)
-        kinfo("vfs: made an empty %s on %s", fsname, bd->name);
+        kinfo("vfs: made an empty %s on %s%s%s", fsname, bd->name, label && label[0] ? ", named " : "",
+              label && label[0] ? label : "");
     return rc;
 }
 

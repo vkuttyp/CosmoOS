@@ -78,9 +78,11 @@ root already.
 disk or one of its partitions is a mount's device right now (a
 snapshot).
 
-**`int vfs_format(const char *fsname, struct blkdev *bd)`** An empty
-`fsname` filesystem through `fs_type.format`: `-ENODEV` unknown type,
-`-EOPNOTSUPP` no `format`, `-EBUSY` mounted.
+**`int vfs_format(const char *fsname, struct blkdev *bd, const char *label)`** An empty
+`fsname` filesystem through `fs_type.format(bd, label)`, named `label`
+(NULL or `""`: none; shell completeness S6): `-ENODEV` unknown type,
+`-EOPNOTSUPP` no `format`, `-EBUSY` mounted, `-EINVAL` a label the
+filesystem cannot hold.
 
 **`void blkctl_dev_init(void)`** Creates `/dev/blkctl` (after the ramfs
 root and `/dev` exist); the ABI is `uapi/cosmo/blkctl.h`, described in

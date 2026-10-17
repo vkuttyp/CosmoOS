@@ -37,7 +37,8 @@ system (`ports/busybox/README.md`). `/bin/busybox` and one symbolic
 link per applet of `ports/busybox/applets` -- the 48 of M3's decision
 7, `/bin/sh` among them, M4's `wget`, `nslookup`, `stty` and `tty`, and
 the later units' (S1's `ifconfig`, `route`, `netstat`, `arp` and
-`hostname`, S2's 33 everyday applets, S3's `ps` and `kill`, S4's `chown`, `chgrp` and `su`) -- come
+`hostname`, S2's 33 everyday applets, S3's `ps` and `kill`, S4's `chown`, `chgrp` and `su`, S5's
+`reboot`, `halt`, `hwclock` and `ntpd`, S6's `mount` and `umount`) -- come
 from the boot archive
 (`mkbootarchive.py`'s `NAME@TARGET` entries, ustar type 2; the kernel
 makes them with `vfs_symlink` in `ramfs_populate_boot`). A native program
@@ -51,7 +52,10 @@ BusyBox's `/bin/hostname`, which `PATH` finds first and which also takes
 `-s`, `-F` and `-f`; likewise `/sbin/ps` and `/sbin/kill` beside
 BusyBox's, which since shell completeness S3 are what `ps` and `kill`
 run: `ps` reads `/proc/<pid>/stat` and `status`, and shows sizes and
-states the native one does not). init's self-tests and the
+states the native one does not; and since S6 `/sbin/mount` and
+`/sbin/umount` beside BusyBox's, whose `mount -t TYPE SOURCE DIR` is what
+`mount` runs, while the native `mount SOURCE DIR TYPE` stays for the
+scripts that name `/sbin/mount`). init's self-tests and the
 native test scripts name the `cosmo-` programs, because what they test
 is the native side.
 
@@ -435,6 +439,48 @@ link-local destination to) and no neighbours. Reading the snapshot takes `PRIV_N
 does, so an unprivileged `ip` is refused where Linux's would answer
 (inventory).
 
+## Mounting (shell completeness S6)
+
+`mount` and `umount` are BusyBox's, over the Linux personality's
+`mount(2)` and `umount2(2)` (docs/compat/linux/design.md, "Mounting"):
+`mount -t cosmofs /dev/vdb /data`, `mount -t ramfs none DIR`, `mount -t
+proc proc DIR`, `-o ro`, `umount [-f] DIR`, and `mount` alone listing
+`/proc/mounts`. Each needs `PRIV_MOUNT`, as the native calls do. A device
+is `/dev/NAME`, the name `lsblk` shows and `/proc/mounts` prints, though
+`/dev` holds no block device nodes: the door reads the name. BusyBox's
+`LABEL=` and `UUID=` sources need its `volume_id`, which knows no cosmofs
+(off: `FEATURE_MOUNT_LABEL`); so do loop devices, NFS and CIFS, and an
+`/etc/mtab` (the mount table is `/proc/mounts`).
+
+**`/etc/fstab`** is read by `mount -a`, which `/etc/rc` runs before the
+services start; the image's lists nothing (the root is init's, from the
+command line), and a line a user adds -- `/dev/vdb /data cosmofs defaults
+0 0` -- is mounted at every boot after. A line that fails is reported on
+the console and the rest still mount. The installer copies `/etc`, so an
+installed system starts with the same empty table.
+
+**`lsblk`** (`userland/system/lsblk.c`) prints util-linux's default
+listing from `/dev/blkctl`'s device list and `/proc/mounts`: each disk,
+its partitions under it in table order (`|-`, and `` `- `` for the last),
+size in powers of 1024, read-only, type and mount point. It leaves out
+`MAJ:MIN` (no device numbers here) and `RM`. BusyBox has no `lsblk`.
+
+**`blkid`** (`userland/system/blkid.c`) prints util-linux's line per
+device: `/dev/vda2: LABEL="cosmo-root" UUID="..." TYPE="cosmofs"
+PARTUUID="..."`. It reads the device's first block through `/dev/blkctl`
+-- a cosmofs superblock's label and pool uuid, or a disk's GPT header
+(`PTUUID`, `PTTYPE="gpt"`) -- and takes a partition's `PARTUUID` from the
+kernel's partition list. A partition holding anything else shows its
+`PARTUUID` alone; the ESP's FAT is not identified. BusyBox's `blkid`
+knows no cosmofs and prints no `PARTUUID`, and opens `/dev` nodes this
+kernel does not make.
+
+**`mkfs.cosmofs [-L LABEL] DEVICE`** (`userland/system/mkfs.cosmofs.c`)
+makes an empty single-device cosmofs with `/dev/blkctl`'s `FORMAT`, which
+carries the label (up to 16 printable characters, no blank, quote or
+backslash). The installer names the root it makes `cosmo-root` the same
+way. The three tools need `/dev/blkctl`, which is root's.
+
 ## Test script (`userland/etc/rc.test`)
 
 Straight-line shell (no control flow exists): every check is a command
@@ -643,7 +689,8 @@ Roadmap M2. Non-interactive; everything through `/dev/blkctl`
    nothing on the ESP and signs nothing, and so refuses (exit 3) an image
    whose signed command line says anything else (`kernel.root` is not
    `boot-disk`): that disk would not boot its own root.
-5. `FORMAT` partition 2 as cosmofs, mount it at `/mnt/cosmo-install`,
+5. `FORMAT` partition 2 as cosmofs named `cosmo-root` (what `blkid`
+   prints; shell completeness S6), mount it at `/mnt/cosmo-install`,
    create `/dev`, `/proc`, `/tmp` (01777), `/mnt`, `/var`, `/var/log`,
    `/var/lib/pkg`, `/boot`, and copy `/bin`, `/sbin`, `/etc` and, when
    present, `/usr` and `/var/db` (files with their modes, directories,
