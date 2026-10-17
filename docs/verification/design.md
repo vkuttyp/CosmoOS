@@ -315,8 +315,10 @@ the phase is a 500 ms window, so the host's cost lowers the reported rate
 and no longer lengthens the test, and it is back on the default
 (`docs/audit/2026-10-06-flake-triage-report.md`).
 
-`make test-chaos` gives the complete boot 240 s, including 230 s for the
-shell harness. Ordinary boots use `BOOT_TIMEOUT`: 240 s on x86-64 since
+`make test-chaos` gives the complete boot `BOOT_TIMEOUT` (its own 240 s
+until 2026-10-17, when an AArch64 chaos boot timed out at 247 s with every
+self-test passed and 57 CI chaos boots measured a p95 of 228.3 s and at
+most 236.9 s passing). Ordinary boots use `BOOT_TIMEOUT` too: 240 s on x86-64 since
 one of its CI boots exceeded 180 s (2026-10-07), and on AArch64 240 s
 since its CI boots were measured to exceed 180 s on slow runners
 (2026-10-06), then 300 s since its entropy boots timed out at 240 s six

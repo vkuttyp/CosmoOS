@@ -2842,6 +2842,16 @@ correlation of the fifth and sixth sightings does not hold. The same
 290 ms on a second architecture: the worker not raised before the spinner
 ended. Not attributed; CI ran again on the commit that records it.
 
+**Eighth sighting, 2026-10-17:** x86-64 CI, PR #401 (the crash test's
+lockdep waiter) at `c60f6e58`, run 39057108969, job
+117467250033, the `test-crash` boot (`Panic path test`, `CRASH_TEST=1`):
+`cpu 3, a spinner above the default for 300 ms: 114 calls of the poll,
+longest gap 290 ms (bound 100)`, the check at 325 ms. The job's five other
+debug boots passed (185.0-205.6 s); the failing boot's self-tests took
+144,065 ms and `cosmofs-replay` 23,340 ms. The branch's change compiles only
+into `CRASH_TEST=3` builds, so this boot ran main's code. The same 290 ms.
+Not attributed; CI ran again on the commit that records it.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
@@ -4416,3 +4426,23 @@ other CPU enters 10 ms after the hold). `tools/crash3-waiter-probe.py --old
 --arch {x86_64,aarch64}` names this CPU as the waiter on both
 architectures; without `--old` another CPU
 (docs/audit/2026-10-17-crash3-waiter-report.md).
+
+## An AArch64 chaos boot over its 240 s timeout, 2026-10-17
+
+CI, PR #401 (the crash test's lockdep waiter) at `9ddc330b`, run
+39056570530, job 117465662455, `Boot test under a chaos migrator
+(debug)`: `boot-test: FAIL after 247.0s`, `timed out after 240s`, in the
+shell harness at command 17 (`jobs`). All 479 self-tests passed, in
+189,152 ms (`cosmofs-replay` 34,045 ms); the job's other AArch64 debug
+boots passed in 201.8-219.9 s, and main's run before it (39048054390,
+`d4bf1e79`) took 171,586 ms of self-tests and passed its chaos boot in
+222.2 s. The branch's change compiles only into `CRASH_TEST=3` builds, so
+this boot ran main's code on a slow runner. Over 57 AArch64 chaos boots
+of the last 60 CI runs: median 209.7 s, p95 228.3 s, at most 236.9 s
+passing (`241176b3`, #400), and this one timeout. Mechanism: the suite
+has grown to within a few seconds of the 240 s that `test-chaos` kept for
+itself when the other AArch64 boots moved to 300 s (2026-10-15).
+**Widened and labelled:** `test-chaos` takes `BOOT_TIMEOUT` (300 s on
+AArch64, 240 s on x86-64 unchanged), a hang guard, not a performance
+budget; each self-test keeps its own budget (Makefile comment).
+

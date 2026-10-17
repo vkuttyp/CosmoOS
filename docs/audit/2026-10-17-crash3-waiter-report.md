@@ -84,4 +84,21 @@ harness's own lines):
 
 The network harness passed in every debug boot.
 
-Branch CI: recorded in the PR.
+Branch CI. The first two runs each failed one job in a boot that runs
+main's code (neither builds `CRASH_TEST=3`), each recorded in
+`docs/testing/flakes.md`:
+
+- Run 39056570530 (`9ddc330b`): the AArch64 chaos boot timed out at 247 s
+  with every self-test passed. `test-chaos` had kept its own 240 s when
+  the other AArch64 boots moved to 300 s; over 57 AArch64 chaos boots of
+  the last 60 CI runs the p95 is 228.3 s and the slowest pass 236.9 s.
+  It now takes `BOOT_TIMEOUT` (300 s on AArch64, 240 s on x86-64
+  unchanged), widened and labelled in the Makefile comment; local
+  `ARCH=aarch64 test-chaos` PASS in 158.1 s with `timeout 300s`.
+- Run 39057108969 (`c60f6e58`): `irqpoll-boost`'s eighth sighting, the
+  same 290 ms gap, in x86-64's `test-crash` boot.
+
+Review: Codex found that `--old` would not build after a squashed merge
+(fixed, above); Qodo asked for a compile-time bound on
+`g_crash3_waited` (answered: the bound is on a run-time CPU id, enforced
+at SMP bring-up, as for lockdep's other per-CPU tables).
