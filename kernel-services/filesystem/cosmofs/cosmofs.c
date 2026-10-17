@@ -140,8 +140,14 @@ static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_
             if (rc == 0)
                 *slot = b->blkno;
         }
-        if (rc)
+        if (rc) {
+            /* The direct runs and the chain blocks before this one hold
+             * the new map, the rest the old: runs missing or overlapping,
+             * and the caller frees what the new map displaced. No commit
+             * may publish that (CF17). */
+            cfs_fail(fs, rc);
             return rc;
+        }
         struct cfs_extent_block *eb = (struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
         uint64_t next = eb->next;
         unsigned take = left < CFS_EXTENTS_PER_BLOCK ? left : CFS_EXTENTS_PER_BLOCK;
@@ -481,6 +487,8 @@ static int truncate_record(struct cfs *fs, struct cfs_inode *in, uint64_t keep)
         unsigned survives = (unsigned)(keep - e.lblk);
         for (unsigned i = 0; i < survives && rc == 0; i++)
             rc = data_write_block(fs, in, e.lblk + i, rec + (size_t)i * CFS_BLOCK, CFS_ALLOC_DATA);
+        if (rc)
+            cfs_fail(fs, rc);   /* as in record_write: the dropped record's survivors would read as holes */
     }
     kfree(rec);
     return rc;
@@ -906,7 +914,12 @@ int cfs_vnode_get(struct cfs *fs, uint64_t ino, struct vnode **out)
     return 0;
 }
 
-/* Push the vnode's public fields into its inode and write it through. */
+/* Push the vnode's public fields into its inode and write it through.
+ * Every caller has already changed what the inode describes -- a block
+ * mapped and its predecessor queued free, an entry added or removed, a
+ * link count -- so a write that fails leaves the inode slot naming
+ * blocks the next commit would release: the transaction is abandoned
+ * (CF17). */
 static int inode_sync(struct cfs *fs, struct vnode *vn)
 {
     struct cfs_inode *in = cfs_inode_of(vn);
@@ -918,7 +931,10 @@ static int inode_sync(struct cfs *fs, struct vnode *vn)
                         vn->type == VNODE_LNK ? 0777u : vn->mode);
     in->uid = vn->uid;
     in->gid = vn->gid;
-    return cfs_inode_write(fs, vn->ino, in);
+    int rc = cfs_inode_write(fs, vn->ino, in);
+    if (rc)
+        cfs_fail(fs, rc);
+    return rc;
 }
 
 /* --- directories ---------------------------------------------------------------- */
@@ -996,6 +1012,40 @@ static int seal_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const
     return 0;
 }
 
+/*
+ * A checksum entry a write is about to replace (CF16). A block's entry is
+ * stored before the mapping that names the block, so when the mapping
+ * fails the old block is still mapped and must get its own entry back.
+ * An entry never stored (-ENOENT) has nothing to put back: no block was
+ * mapped there, since a mapped block without one is a damaged tree.
+ */
+struct csum_saved {
+    bool have, aead;
+    uint32_t crc;
+    struct cfs_csum_aead entry;
+};
+
+static int csum_save(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, bool aead, struct csum_saved *s)
+{
+    int rc = aead ? cfs_aead_get(fs, in, lblk, &s->entry) : cfs_csum_get(fs, in, lblk, &s->crc);
+    s->have = rc == 0;
+    s->aead = aead;
+    return rc == -ENOENT ? 0 : rc;
+}
+
+/* Put a saved entry back. The put lands in a CSUM block this transaction
+ * already copied; if it fails anyway, a mapped block is left under a
+ * checksum that is not its own, which no commit may publish, so the
+ * transaction is abandoned. */
+static void csum_restore(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const struct csum_saved *s)
+{
+    if (!s->have)
+        return;
+    int rc = s->aead ? cfs_aead_put(fs, in, lblk, &s->entry) : cfs_csum_put(fs, in, lblk, s->crc);
+    if (rc)
+        cfs_fail(fs, rc);
+}
+
 static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *buf,
                             enum cfs_alloc_class cls)
 {
@@ -1018,12 +1068,21 @@ static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk,
         kfree(cipher);
         return rc;
     }
+    /* The entry is stored before the mapping (the mapping is what makes
+     * the block readable), so the one it replaces is kept: a mapping that
+     * fails leaves the old block mapped, under its own checksum (CF16). */
+    struct csum_saved prev;
     rc = cfs_data_write(fs, nblk, buf);
+    if (rc == 0)
+        rc = csum_save(fs, in, lblk, cipher != NULL, &prev);
     if (rc == 0)
         rc = cipher ? cfs_aead_put(fs, in, lblk, &entry) : cfs_csum_put(fs, in, lblk, crc32c(buf, CFS_BLOCK));
     kfree(cipher);
-    if (rc == 0)
+    if (rc == 0) {
         rc = cfs_set_block(fs, in, lblk, nblk, &old);
+        if (rc)
+            csum_restore(fs, in, lblk, &prev);
+    }
     if (rc) {
         cfs_free_block_deferred(fs, nblk);
         return rc;
@@ -1082,6 +1141,13 @@ static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, co
                     if (cipher == NULL)
                         rc = -ENOMEM;
                 }
+                /* The record's entries replace the ones its range holds
+                 * now, which are still the map's until set_extent below
+                 * succeeds: kept, and put back on any failure (CF16). */
+                struct csum_saved prev[CFS_RECORD_BLOCKS];
+                uint32_t saved = 0;   /* csum_save marks a failed save as nothing to restore */
+                for (; saved < psize && rc == 0; saved++)
+                    rc = csum_save(fs, in, lblk0 + saved, cipher != NULL, &prev[saved]);
                 for (uint32_t i = 0; i < psize && rc == 0; i++) {
                     const uint8_t *blk = packed + (size_t)i * CFS_BLOCK;
                     if (cipher) {
@@ -1103,6 +1169,8 @@ static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, co
                     rc = set_extent(fs, in, ne, NULL);
                 }
                 if (rc) {
+                    for (uint32_t i = 0; i < saved; i++)
+                        csum_restore(fs, in, lblk0 + i, &prev[i]);
                     for (uint32_t i = 0; i < psize; i++)
                         cfs_free_block_deferred(fs, start + i);
                 } else {
@@ -1119,8 +1187,8 @@ static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, co
     }
     /* Plain blocks. A record covering this range goes first, whole: the
      * first block alone cannot displace it -- set_extent refuses a
-     * one-block range that would cut a record, and data_write_block has
-     * stored that block's checksum over the record's by then, leaving the
+     * one-block range that would cut a record, and data_write_block then
+     * left that block's checksum over the record's (until CF16), leaving the
      * record unreadable (found in shell completeness S7: a record written
      * while its last page was part empty, rewritten once that page was
      * filled and no longer compressed). Records are aligned and so is
@@ -1129,15 +1197,24 @@ static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, co
     int mrc = cfs_map_ext(fs, in, lblk0, &cur);
     if (mrc < 0)
         return mrc;
+    bool dropped = false;
     if (mrc == 1 && cfs_ext_compressed(&cur)) {
         int rc = drop_range(fs, in, cur.lblk, cfs_ext_count(&cur));
         if (rc)
             return rc;
+        dropped = true;
     }
     for (unsigned i = 0; i < n; i++) {
         int rc = data_write_block(fs, in, lblk0 + i, data + (size_t)i * CFS_BLOCK, CFS_ALLOC_DATA);
-        if (rc)
+        if (rc) {
+            /* The record is out of the map and its blocks are on the
+             * deferred list: what is not yet rewritten would read back as
+             * a hole. The committed record is the only good copy, so the
+             * transaction is abandoned rather than publish the holes. */
+            if (dropped)
+                cfs_fail(fs, rc);
             return rc;
+        }
     }
     return 0;
 }
@@ -1371,6 +1448,17 @@ static int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vn
     return rc;
 }
 
+/* Zero the slot of an inode a failed creation wrote and no entry names,
+ * so the number the creation gives back is not an orphan with a link to
+ * the checker. Best effort: the slot is at the number the next creation
+ * takes, and that creation writes it whole. */
+static void inode_slot_clear(struct cfs *fs, uint64_t ino)
+{
+    struct cfs_inode zero;
+    memset(&zero, 0, sizeof(zero));
+    (void)cfs_inode_write(fs, ino, &zero);
+}
+
 static int cfs_create_common(struct vnode *dir, const char *name, size_t len, uint32_t mode, unsigned type,
                              struct vnode **out)
 {
@@ -1412,11 +1500,17 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     in.compress_algo = type == CFS_TYPE_REG ? CFS_COMPRESS_LZ4 : CFS_COMPRESS_NONE;
     in.mtime_ns = in.ctime_ns = vfs_now_ns();
     rc = cfs_inode_write(fs, ino, &in);
-    if (rc)
+    if (rc == 0) {
+        rc = dir_add(fs, dir, name, len, ino, type, block);
+        if (rc)
+            inode_slot_clear(fs, ino);
+    }
+    if (rc) {
+        /* No entry names the inode: the number and the count go back
+         * (CF17), as they do for a symlink. */
+        cfs_inode_discard(fs, ino);
         goto out;
-    rc = dir_add(fs, dir, name, len, ino, type, block);
-    if (rc)
-        goto out;
+    }
     if (type == CFS_TYPE_DIR) {
         dir->nlink++;
         rc = inode_sync(fs, dir);
@@ -1487,14 +1581,18 @@ static int cfs_symlink(struct vnode *dir, const char *name, size_t len, const ch
     memset(block, 0, CFS_BLOCK);
     memcpy(block, target, tlen);
     rc = data_write_block(fs, &in, 0, block, CFS_ALLOC_META);
-    if (rc)
+    if (rc) {
+        cfs_csum_free(fs, &in);   /* the entry may have been stored before the mapping failed */
         goto out;
+    }
     rc = cfs_inode_write(fs, ino, &in);
     if (rc)
         goto undo;
     rc = dir_add(fs, dir, name, len, ino, CFS_TYPE_LNK, block);
-    if (rc)
+    if (rc) {
+        inode_slot_clear(fs, ino);
         goto undo;
+    }
     /* The entry names the inode from here on, so the number is not this
      * call's to give back whatever happens next: rolling it back would
      * hand the next creation an inode a directory already points at. */
@@ -1506,6 +1604,7 @@ undo:
      * directory never named either, so nothing else can find them. */
     if (cfs_ext_count(&in.direct[0]) != 0)
         cfs_free_block_deferred(fs, in.direct[0].start);
+    cfs_csum_free(fs, &in);
     cfs_inode_discard(fs, ino);
     ino_taken = false;
 out:
@@ -1804,7 +1903,7 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         if (rb) {
             /* Neither state can be reached: drop the whole transaction. */
             cfs_fail(fs, rb);
-        } else {
+        } else if (!fs->failed) {   /* a failed inode write abandoned it already (inode_sync) */
             kerror("cosmofs: rename of %.*s failed (%d); namespace restored", (int)olen, oname, rc);
         }
         goto out;

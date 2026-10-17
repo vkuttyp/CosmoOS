@@ -230,9 +230,10 @@ unsigned cfs_snapshot_exempt_bound(struct cfs *fs);
  * The commit's append, run *before* the root with blocks from `res`.
  * `held[i]` comes back true for every `pending_free[i]` a snapshot still
  * names, which is the verdict the record and the release loop both use:
- * one walk of the list per block, not one each.
+ * one walk of the list per block, not one each. `*appended` is how many
+ * entries it added: a commit that fails after any cannot be retried.
  */
-int cfs_snapshot_fill(struct cfs *fs, struct cfs_res *res, bool *held, unsigned n);
+int cfs_snapshot_fill(struct cfs *fs, struct cfs_res *res, bool *held, unsigned n, unsigned *appended);
 /* Does this snapshot's tree still occupy `blk`? One lookup in the
  * allocation bitmap the snapshot recorded. */
 bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint64_t blk);

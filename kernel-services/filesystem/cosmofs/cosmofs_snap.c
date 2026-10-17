@@ -658,8 +658,9 @@ unsigned cfs_snapshot_exempt_bound(struct cfs *fs)
  * already gives to a snapshot change it cannot publish whole
  * (snap_abandon).
  */
-int cfs_snapshot_fill(struct cfs *fs, struct cfs_res *res, bool *held, unsigned n)
+int cfs_snapshot_fill(struct cfs *fs, struct cfs_res *res, bool *held, unsigned n, unsigned *appended_out)
 {
+    *appended_out = 0;
     for (unsigned i = 0; i < n; i++)
         held[i] = false;
     if (fs->snap_count == 0)
@@ -701,6 +702,7 @@ int cfs_snapshot_fill(struct cfs *fs, struct cfs_res *res, bool *held, unsigned 
                 sb->snap[ix].deadlist = head;
                 cfs_buf_mark_dirty(fs, b);
                 appended++;
+                *appended_out = appended;
             }
             cfs_buf_put(fs, b);
         }
