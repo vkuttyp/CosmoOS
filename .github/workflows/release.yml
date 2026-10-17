@@ -9,7 +9,9 @@
 # published ones; and only then publishes a GitHub release with the files,
 # one SHA256SUMS signed with the release key (SHA256SUMS.sig), and notes naming the toolchain image digests, the
 # third-party source digests, the release key and the known limitations.
-# A tag with a hyphen (v1.0.0-rc1) is published as a pre-release.
+# The kernel's build id, the set's names, the package version and the
+# notes must all say the tag (scripts/check-release-version.py), or the
+# release stops. A tag with a hyphen (v1.0.0-rc1) is published as a pre-release.
 #
 # Secret: COSMOOS_RELEASE_KEY, the Ed25519 seed (64 hex characters) whose
 # public half is the one tools/keys/*.pub file. Nothing else is signed with
@@ -107,6 +109,11 @@ jobs:
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - name: The tag as pushed (annotated), so git describe names it
+        env:
+          TAG: ${{ github.ref_name }}
+        run: scripts/release-tag.sh "$TAG"
+
       - name: The release key
         env:
           KEY: ${{ secrets.COSMOOS_RELEASE_KEY }}
@@ -114,6 +121,11 @@ jobs:
 
       - name: make release (release key)
         run: make ARCH=${{ matrix.arch }} SIGNING=release MODSIGN_KEY="$COSMO_RELEASE_KEY_FILE" KEYRING_PUBS="$(ls "$PWD"/tools/keys/*.pub)" release
+
+      - name: The set says the tag (kernel build id, file names, package version)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python3 scripts/check-release-version.py --tag "$TAG" out/release/${{ matrix.arch }}
 
       - name: Upload the release set
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -172,6 +184,11 @@ jobs:
 
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: The tag as pushed (annotated), so git describe names it
+        env:
+          TAG: ${{ github.ref_name }}
+        run: scripts/release-tag.sh "$TAG"
 
       - name: The release key
         env:
@@ -291,6 +308,7 @@ jobs:
             --repro "${{ needs.reproducible.outputs.x86_64 }}" --repro "${{ needs.reproducible.outputs.aarch64 }}" \
             $lead --out notes.md
           cat notes.md
+          python3 scripts/check-release-version.py --tag "$TAG" --notes notes.md sets/release-x86_64-a sets/release-aarch64-a
 
       - name: Publish
         env:
