@@ -3115,3 +3115,27 @@ See the [history index](README.md).
   until the filesystem is done with it (vfs V38,
   `tools/mount-claim-probe.py`). Report:
   `docs/audit/2026-10-17-mounting-report.md`.
+- **After 1.0: updating an installed system (2026-10-17, roadmap-1.1
+  S7).** `cosmo-upgrade DIR` checks a release set against
+  `/etc/pkg/keys`, including the loader, which `boot.tar` now carries as
+  `efi/<loader>`. It replaces the ESP's boot set through its own FAT32
+  writer over `/dev/blkctl`, by one-sector switches of directory entries:
+  `\EFI\BOOT`'s loader first, then `\cosmo`, where the set and the loader
+  it came with move together and `\cosmo\prev` keeps the previous pair. It
+  then brings the root's `bin/`, `sbin/`, `usr/` and `etc/` (configuration
+  someone changed is kept, with `FILE.new` beside it) and the package
+  repository from the old archive to the new one. `--rollback` switches
+  back, set or loader first, whichever order keeps both states bootable.
+  Before writing it checks that the loader the firmware will start trusts
+  both sets' keys (review, PR #399), and one run holds a lock. A pending
+  marker makes a rerun finish an interrupted run. The
+  release set gains `cosmoos-ARCH-cosmo-upgrade`. `make test-upgrade` (CI
+  job `upgrade`) starts from the published v1.0.3, refuses untrusted and
+  tampered sets and one whose loader does not trust v1.0.3's key with the
+  ESP unchanged, interrupts two upgrades and boots each state, upgrades,
+  rolls back (a package `pkg upgrade` changed stays) and forward again. Its first runs found a cosmofs
+  defect older than S7: a compressed record whose rewrite no longer
+  compressed was left unreadable (about one 12 MB `wget` in twenty);
+  `record_write` now drops the record first
+  (`tools/cosmofs-record-fallback-probe.py`). Report:
+  `docs/audit/2026-10-17-upgrade-report.md`.

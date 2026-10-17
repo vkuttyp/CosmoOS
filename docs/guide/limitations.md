@@ -90,9 +90,13 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 
 ## Packages
 
-- The repository is the one the image was built with, on the installed
-  disk; there is no network repository and no fetcher (`docs/pkg/`).
-- No rollback of a completed upgrade.
+- The repository is the one the installed release came with, on the
+  installed disk. `cosmo-upgrade` replaces it with a newer release's
+  ([Upgrading](upgrading.md)). There is no network repository and no
+  fetcher (`docs/pkg/`).
+- No rollback of a completed package upgrade. `cosmo-upgrade --rollback`
+  returns the boot set, the programs and the repository, but not the
+  packages `pkg upgrade` changed.
 
 ## Linux programs
 

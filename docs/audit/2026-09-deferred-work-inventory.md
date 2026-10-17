@@ -1308,3 +1308,38 @@ each; none is needed by M2's acceptance test.
 - A cosmofs label is set at format time and cannot be changed after (no
   `tune2fs -L` equivalent), and `mkfs.cosmofs` makes single-device,
   unencrypted pools only.
+
+## 17. Shell completeness S7 follow-ups (2026-10-17)
+
+- `data_write_block` (cosmofs.c) stores a block's checksum before it maps
+  the block. When `set_extent` then fails (`-ENOMEM`, `-EFBIG`, a record it
+  will not cut), the old block stays mapped under the new checksum and
+  reads fail. The record fallback no longer gets there (S7), but any other
+  failure of the mapping still does. Fix: restore the old entry on failure,
+  or store the checksum after the mapping and undo the mapping if that
+  fails.
+- v1.0.3 (and every release before S7) has the record-fallback defect. An
+  installed v1.0.3 should not write large files to its disk before it is
+  upgraded; the upgrading guide says to fetch the release into `/tmp`.
+- `cosmo-upgrade` reads a release from a directory. Fetching one over
+  HTTPS with a freshness check is roadmap P6's to do (a signed index
+  replays: docs/pkg/invariants.md PK9).
+- The first upgrade from v1.0.3 runs a downloaded `cosmo-upgrade` that
+  nothing verifies before it runs: `SHA256SUMS` is unsigned, and the
+  manifest covers the copy inside `boot.tar`, not the release asset.
+  Later upgrades run the installed `/sbin/cosmo-upgrade`, which came in
+  the signed archive. Fix: ship it as a package signed into v1.0.3's
+  trusted index, or have the loader-verified kernel check it.
+- `cosmo-upgrade --rollback`'s refusal when neither loader trusts the
+  other set's key has no test (both orders are tested, the refusal is
+  not); nor does the lock against a second run.
+- A rerun after `--stop-after=set` (the pending marker's finish path) and
+  an interruption inside a FAT-chain write are covered by the design's
+  order, not by a test. One-sector write atomicity is the device's.
+- The FAT32 writer handles what `mkimage.sh` makes: 8.3 names, no
+  long-name entries in `\cosmo`, one sector of `\cosmo` entries. An ESP
+  copied from elsewhere or edited by another tool is refused, not
+  converted. FAT12/16 are refused.
+- `--rollback` does not return the packages `pkg upgrade` changed, and an
+  `/etc` file the new release added stays after a rollback (nothing in
+  `/etc` is removed).

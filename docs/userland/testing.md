@@ -218,6 +218,70 @@ typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
   `cannot mount vda ... staying on the live root`, and the live shell
   answers.
 
+## `make test-upgrade` (`tests/boot/upgrade_test.py`)
+
+Shell completeness S7's acceptance: an installed v1.0.3 system is
+upgraded to the build under test without reinstalling, and rolled back.
+Release builds in CI (job `upgrade`, both architectures). The starting
+point is the published v1.0.3: `tools/fetch-release.py` downloads
+`cosmoos-ARCH.img` and its set (with `gh`, or the API and `GH_TOKEN`) and
+checks each file against the release's `SHA256SUMS`; `.cache/releases/` is
+the cache. The build's own set comes from `make release-set` into
+`$(OUT)/test-upgrade-set`. The host serves it over HTTP under the
+release's names, with this build's public key (`trust.pub`), a manifest
+with one byte changed, one signed by a throwaway key and an archive with
+one byte changed. Every boot of v1.0.3 that needs the files fetches them
+into `/tmp` (ramfs): v1.0.3's cosmofs has the record-fallback defect
+(docs/kernel-services/filesystem/cosmofs/design.md), which wget hit in
+1 of 16 downloads of a 12 MB file on v1.0.3 (and 1 of 24 on this build's
+kernel before the fix). Serial logs in
+`$(OUT)/test-upgrade/`.
+
+- **install**: v1.0.3's live image boots verified with the release key
+  (`36ae7bb4947896ab`) and installs itself on a blank 256 MiB disk.
+- **refuse**: the installed v1.0.3 boots verified with the release key.
+  `cosmo-upgrade DIR` exits 3 with `unknown signing key <build key>`
+  before that key is in `/etc/pkg/keys`. After `cp trust.pub
+  /etc/pkg/keys/`, the changed manifest exits 3 with `bad signature`,
+  the foreign one with `unknown signing key <its id>`, and the changed
+  archive with `boot.tar does not match the manifest (SHA-512)`. Then a
+  set signed by a throwaway key the guest adds to the ring, whose loader
+  has the release key's ring entry (`{ id, pub }`) replaced by the
+  throwaway key's, exits 3 with `its loader does not trust key
+  36ae7bb4947896ab, which signed the current set`. Each says `nothing
+  written`. `--check` says it would replace the set. On
+  the host the ESP after power-off equals, sector for sector, the ESP read
+  once the first prompt was up (x86 firmware writes `\NvVars` at every
+  boot before that).
+- **written**: `--stop-after=written` exits 4, then QEMU is killed. On the
+  host (mtools) `\cosmo`'s four files and `\EFI\BOOT`'s loader are still
+  v1.0.3's, byte for byte.
+- **loader**: v1.0.3 boots verified; `--stop-after=loader`, killed. The
+  loader is the new one, `\cosmo` still v1.0.3's.
+- **upgrade**: the new loader boots v1.0.3's set verified with the
+  release key. A file is written to `/root/keep` and `pkg install
+  hello=1.0` installs the older hello. The full upgrade must
+  print the loader and set switches, the root pass and `upgraded`. On the
+  host `\cosmo` holds the new set and its loader, `\cosmo\prev` v1.0.3's
+  set and loader, and `\EFI\BOOT` the new loader.
+- **new**: the build boots verified with its own key. Checked:
+  `/sbin/mkfs.cosmofs` (absent from v1.0.3), the new `/etc/rc` (`mount
+  -a`, replaced because the install left it unchanged), `/root/keep`, the
+  installer's `/etc/passwd` and `repos.conf`, kept. `--status` names the
+  build's key and the release key for `prev`. `pkg update && pkg upgrade`
+  prints `1 package upgraded` and `hello` says 1.1. `--rollback` verifies `\cosmo\prev` with the release key and
+  rolls back.
+- **back**: on the host `\cosmo` and both loaders are v1.0.3's again and
+  `\cosmo\prev` is the build's set. v1.0.3 boots verified with the release
+  key, without `mkfs.cosmofs` or `cosmo-upgrade`, with its own `/etc/rc`;
+  `/root/keep` and hello 1.1 are still there. The build's `cosmo-upgrade`,
+  fetched into `/tmp`, runs `--rollback` again: v1.0.3's loader does not
+  trust the build's key, so it must print `loader switched: ... is
+  \cosmo\prev's` before the set switch.
+- **forward**: on the host `\cosmo` and both loaders are the build's and
+  `\cosmo\prev` is v1.0.3's again. The build boots verified with its own
+  key, with `/sbin/cosmo-upgrade` and hello 1.1.
+
 ## `make test-net-login` (`tests/boot/net_login_test.py`)
 
 Roadmap M4's acceptance. Release builds in CI (job `net-login`, both

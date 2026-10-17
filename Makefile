@@ -10,6 +10,7 @@
 #   make test-guard   the same boot test on a CPU model with SMEP/SMAP/UMIP (x86-64) or PAN (AArch64)
 #   make test-smp2    the same boot test with two CPUs (the default is four)
 #   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
+#   make test-upgrade shell completeness S7: upgrade an installed v1.0.3 to this build, roll back (CI: BUILD=release)
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
 #   make test-security roadmap M5: verified boot refuses tampered files; VERIFY_BOOT=0 says so (CI: BUILD=release)
 #   make test-net-login roadmap M4: DHCP, wget by address and by name on the installed system (CI: BUILD=release)
@@ -38,7 +39,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-security test-busybox test-net-login test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-upgrade test-security test-busybox test-net-login test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -70,11 +71,13 @@ image: $(IMAGE)
 
 # The boot archive: init plus the boot-time and test modules, in the
 # order the kernel loads them (dependencies first). See
-# scripts/mkbootarchive.py and docs/kernel/module/.
+# scripts/mkbootarchive.py and docs/kernel/module/. The loader rides in it
+# (efi/, shell completeness S7): the manifest signs the archive, so
+# cosmo-upgrade installs a loader the signature covers.
 BOOT_ARCHIVE := $(OUT)/boot.tar
-BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) $(DROPBEAR_ARCHIVE_ENTRIES) $(OPENSSH_ARCHIVE_ENTRIES) $(MBEDTLS_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(SECURITY_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
+BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) $(DROPBEAR_ARCHIVE_ENTRIES) $(OPENSSH_ARCHIVE_ENTRIES) $(MBEDTLS_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(SECURITY_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES) efi/$(LOADER_EFI_NAME)=$(LOADER_EFI)
 
-$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE_DEPS) $(OPENSSH_ARCHIVE_DEPS) $(MBEDTLS_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(SECURITY_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
+$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE_DEPS) $(OPENSSH_ARCHIVE_DEPS) $(MBEDTLS_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(SECURITY_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(LOADER_EFI) $(ROOT)/scripts/mkbootarchive.py
 	$(call log,ARCHIVE,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
 
@@ -108,7 +111,7 @@ $(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST
 
 # Roadmap M6 (docs/development.md, "Releases"): one architecture's release
 # set -- the signed live image, the loader, kernel.elf, boot.tar, the
-# command line, the manifest and SHA256SUMS -- copied by scripts/
+# command line, the manifest, cosmo-upgrade (S7) and SHA256SUMS -- copied by scripts/
 # mkrelease.py into RELEASE_DIR under the names the GitHub release carries.
 # Always a release build: `make release` runs release-set with
 # BUILD=release. Signed with whatever key SIGNING selects: the developer
@@ -118,10 +121,11 @@ RELEASE_DIR ?= $(ROOT)/out/release/$(ARCH)
 release:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=release RELEASE_DIR=$(RELEASE_DIR) release-set
 
-release-set: $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(ROOT)/scripts/mkrelease.py
+UPGRADE_ELF = $(call prog_elf,cosmo-upgrade)
+release-set: $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(UPGRADE_ELF) $(ROOT)/scripts/mkrelease.py
 	$(call log,RELEASE,$(RELEASE_DIR))
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkrelease.py $(ARCH) $(RELEASE_DIR) $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) \
-		$(BOOT_ARCHIVE) $(MANIFEST) $(CMDLINE_FILE)
+		$(BOOT_ARCHIVE) $(MANIFEST) $(CMDLINE_FILE) $(UPGRADE_ELF)
 
 run: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
@@ -229,6 +233,20 @@ test-install: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/install_test.py --image $(IMAGE) --workdir $(OUT)/test-install \
 		--timeout $(BOOT_TIMEOUT) --key $(MODSIGN_KEY)
+
+# Shell completeness S7's acceptance test (tests/boot/upgrade_test.py,
+# docs/userland/testing.md, "test-upgrade"): the published v1.0.3, fetched
+# and checked against its SHA256SUMS (tools/fetch-release.py; .cache/ is the
+# cache), installed, upgraded to this build's release set and rolled back.
+UPGRADE_BASE_TAG := v1.0.3
+UPGRADE_BASE_DIR := $(ROOT)/.cache/releases/$(UPGRADE_BASE_TAG)
+test-upgrade: RELEASE_DIR = $(OUT)/test-upgrade-set
+test-upgrade: release-set
+	$(Q)$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(UPGRADE_BASE_TAG) --arch $(ARCH) --dest $(UPGRADE_BASE_DIR)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/upgrade_test.py --base $(UPGRADE_BASE_DIR)/cosmoos-$(ARCH).img \
+		--set $(OUT)/test-upgrade-set --pub $(PKG_TRUST_PUB) --arch $(ARCH) --workdir $(OUT)/test-upgrade \
+		--timeout $(BOOT_TIMEOUT)
 
 # Roadmap M5's acceptance test (tests/boot/security_test.py,
 # docs/boot/testing.md, "test-security"): the signed image boots and says

@@ -315,7 +315,9 @@ the inventory.
   S1's `ip`); the label is a new cosmofs superblock field, set by the new
   `mkfs.cosmofs -L` and by the installer (`cosmo-root`)
   ([report](audit/2026-10-17-mounting-report.md)).
-- [ ] **S7 Updating an installed system** (after P6). `pkg upgrade` for
+- [x] **S7 Updating an installed system** (taken before P6 on the owner's
+  choice, 2026-10-17: the release is read from a directory the operator
+  fills, by `wget`, `scp` or a mounted disk; P6 adds fetching). `pkg upgrade` for
   the userland, and `cosmo-upgrade`, which replaces the ESP's contents
   (loader, kernel, `boot.tar`, manifest) from a release: it checks the
   manifest's signature before writing anything and keeps the previous set
@@ -331,6 +333,24 @@ the inventory.
   promises); a tampered manifest and one signed by another key are
   refused with the ESP byte-for-byte unchanged; an update interrupted
   mid-replacement still boots.
+  Done 2026-10-17: `make test-upgrade` (job `upgrade`, both
+  architectures) installs the published v1.0.3, refuses a set before its
+  key is in `/etc/pkg/keys`, then a tampered manifest, one signed by
+  another key, a tampered archive and a set whose loader does not trust
+  v1.0.3's key, with the ESP sector for sector unchanged; stops an upgrade after its writes and after its loader
+  switch, kills the machine and boots each state verified; upgrades to the
+  build (the new base system, the operator's files and changed `/etc`
+  kept, `pkg upgrade` taking hello 1.0 to 1.1), rolls back to v1.0.3
+  (hello 1.1 kept) and forward again. The two
+  questions: the switch is atomic (one-sector writes of directory
+  entries, the loader's first, each set's loader kept beside it), so the
+  loader is unchanged; `--rollback` returns the boot set, the base system
+  and the repository, not the packages `pkg upgrade` changed. The loader
+  now travels in `boot.tar`, so the manifest's signature covers the one
+  `cosmo-upgrade` installs. The test found a cosmofs defect older than
+  S7, fixed here: a compressed record whose rewrite no longer compressed
+  was left unreadable, hitting about one 12 MB `wget` download in twenty
+  ([report](audit/2026-10-17-upgrade-report.md)).
 
 Larger items, not proposed as one unit until scoped: SATA on Parallels
 (an AML interpreter, or a DSDT-described AHCI path with no generic AML),

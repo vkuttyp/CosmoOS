@@ -2,7 +2,7 @@
 #
 # A tag v* builds, for each architecture, the release set (`make release`:
 # the signed live image, loader, kernel.elf, boot.tar, cmdline, manifest,
-# SHA256SUMS) twice, in two fresh containers, with the release key, and
+# cosmo-upgrade, SHA256SUMS) twice, in two fresh containers, with the release key, and
 # requires the two to be identical; runs the M1-M5 acceptance tests and
 # every command of the user guide against images that hash the same as the
 # published ones; and only then publishes a GitHub release with the files,
