@@ -287,7 +287,8 @@ kernel before the fix). Serial logs in
   loader with the release key's ring entry replaced by a throwaway key's
   (it starts the build's set and not v1.0.3's). The build boots verified
   with its own key. A first `cosmo-upgrade` takes the lock, then reads
-  the key ring, where a FIFO `lk.pub` stands: the test's write to it
+  the key ring, where `lk.pub` is a link to a FIFO in `/tmp` (cosmofs has
+  no FIFOs): the test's write to it
   returns only once that run has opened it, so the lock is held; the run
   then blocks on a FIFO in place of its `kernel.elf`, and a second exits 3
   with `another cosmo-upgrade is running`. `--rollback` exits 3 with `neither

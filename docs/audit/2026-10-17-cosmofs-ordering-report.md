@@ -158,7 +158,8 @@ ring entry is a throwaway key's, so it starts the build's set but not
 v1.0.3's, and `\cosmo\prev`'s loader (v1.0.3's) does not trust the
 build's key. `cosmo-upgrade --rollback` is refused (`neither ... nor
 ...`), exit 3. The lock: a first run takes it, then opens each `/etc/pkg/keys/*.pub`;
-one of them is a FIFO (`lk.pub`), and the test's write to it returns only
+one of them (`lk.pub`) is a link to a FIFO in `/tmp`, since cosmofs has
+no FIFOs, and the test's write to it returns only
 once the run has opened it, after binding the lock. The run then blocks on
 a FIFO in place of its `kernel.elf`, lock held, and a second run is
 refused, exit 3. (The first version probed with a second run in a loop,

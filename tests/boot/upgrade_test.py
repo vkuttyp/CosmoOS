@@ -379,8 +379,9 @@ def stage_hold(args, results, keyid, new_loader, uloader):
         # writing to it returns once the run has opened it, which it does
         # only after binding the lock. It then blocks on a second FIFO in
         # place of its kernel.elf, lock held, while a second run is refused.
-        out = sh(b, "mkdir -p /tmp/lk && mkfifo /tmp/lk/kernel.elf /etc/pkg/keys/lk.pub && "
-                    "{ cosmo-upgrade /tmp/lk > /tmp/lk.out 2>&1 & } && echo x > /etc/pkg/keys/lk.pub && "
+        # (cosmofs has no FIFOs: the ring's entry is a link to one in /tmp.)
+        out = sh(b, "mkdir -p /tmp/lk && mkfifo /tmp/lk/kernel.elf /tmp/lk/key && ln -s /tmp/lk/key /etc/pkg/keys/lk.pub && "
+                    "{ cosmo-upgrade /tmp/lk > /tmp/lk.out 2>&1 & } && echo x > /tmp/lk/key && "
                     "cosmo-upgrade /tmp/none; echo second=$?", "lock")
         need(out, r"^cosmo-upgrade: another cosmo-upgrade is running; nothing written$", "a second run")
         need(out, r"^second=3$", "a second run")
