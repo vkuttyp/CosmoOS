@@ -69,7 +69,9 @@ static uint32_t g_raw;
 #if CONFIG_CRASH_TEST == 3
 /* make test-display only: the CPU (id + 1) that found the crash test's
  * held word here and waited on it -- the crash path's proof that another
- * CPU entered lockdep while the panic was on its way. */
+ * CPU entered lockdep while the panic was on its way. Only that word: a
+ * wait on an ordinary owner, before the hold, is not the race (it was
+ * recorded too, and a stale one named this CPU on main's CI). */
 static uint32_t g_crash3_waiter;
 /* Every CPU that has waited here, on whatever word, and whether the
  * crash path's other CPU holds this lock for its pre-hold wait
@@ -91,7 +93,8 @@ static arch_irq_state_t raw_lock(void)
         if (expected == owner)
             panic("lockdep: graph raw lock re-entry on CPU %u", cpu);
 #if CONFIG_CRASH_TEST == 3
-        __atomic_store_n(&g_crash3_waiter, owner, __ATOMIC_RELEASE);
+        if (expected == (uint32_t)CONFIG_MAX_CPUS + 1u)
+            __atomic_store_n(&g_crash3_waiter, owner, __ATOMIC_RELEASE);
         __atomic_store_n(&g_crash3_waited[cpu], 1, __ATOMIC_RELEASE);
 #endif
         arch_cpu_relax();

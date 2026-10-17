@@ -146,7 +146,8 @@ void lockdep_dump_held_cpu(unsigned cpu);
  * panic message. */
 unsigned lockdep_crash_hold_raw(void);
 /* The CPU (id + 1) that has waited on that held word in lockdep's raw
- * lock, or 0 while none has: proof the race was run. */
+ * lock, or 0 while none has: proof the race was run. A wait on any other
+ * owner word is not counted. */
 unsigned lockdep_crash_waiter(void);
 /* The pre-hold wait: hold the checker's lock until CPU `cpu` has waited
  * on it (2 s at most), whether the holder is (holding), and whether a CPU
