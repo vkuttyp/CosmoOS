@@ -672,3 +672,22 @@ not seen. **Checked by** `make test-install`: with the new root mounted,
 `cosmo-install --force` on its disk is refused because LIST flags the
 disk `MOUNTED` (the same `vfs_bdev_mounted` the WRITE consults). Gap: no
 test sends a WRITE to a mounted device on purpose.
+
+**V38. A block device is one mount's at a time.** A mount claims its
+device -- with the disk it belongs to and that disk's partitions --
+before the filesystem reads it (`bdev_claim` in `do_mount`), and gives
+it back only after `fs->unmount` has finished with it
+(`mount_put_bdev`, on every path that drops the mount's device
+reference: unmount, a namespace's last reference, a mount undone, the
+old root). A second mount of a claimed device is `-EBUSY` before the
+filesystem has seen it. Until shell completeness S6's review nothing
+claimed a device: `mount -t cosmofs /dev/nvme0n1` at two directories
+gave two independent filesystem instances writing one disk. The claim
+outlives the mount's place on `g_mounts`, which an unmount leaves before
+the filesystem is done, so `vfs_bdev_mounted` (V36) reads the claims
+too. Pool members other than a mount's named device are not claimed.
+**Checked by** `make test-busybox` (`mount-twice`: the NVMe scratch disk
+mounted, a second mount of it refused with "Resource
+busy", the first still there);
+`tools/mount-claim-probe.py --old` shows both mounts succeeding without
+the claim.

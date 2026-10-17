@@ -216,6 +216,10 @@ struct mount {
     struct mutex sync_lock;   /* fs->sync against fs->unmount */
     struct list_node link;
     struct list_node cover_link;   /* on its mountpoint's `covers` list */
+    /* On the device claims (vfs.c, g_claims) while `bdev` is this
+     * mount's: from before fs->mount reads it until after fs->unmount
+     * has finished with it (V38; found in S6's review). */
+    struct list_node claim_link;
     /* The namespaces that can see this mount, as struct mount_ns_ref.
      * Under the mountpoint's lock, the same lock as cover_link: where a
      * mount is attached and who can see it are one question, and a

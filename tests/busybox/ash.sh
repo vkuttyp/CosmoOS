@@ -441,11 +441,15 @@ if lsblk | grep -q '^nvme0n1 '; then
     mount -t cosmofs /dev/nvme0n1 m4 && echo kept > m4/f && umount m4 && mount -t cosmofs -o ro /dev/nvme0n1 m4
     expect mount-cosmofs "kept 1" "$(cat m4/f) $(grep -c "^/dev/nvme0n1 $T/m4 cosmofs ro " /proc/mounts)"
     expect lsblk-mounted 1 "$(lsblk | grep -c "^nvme0n1 .* disk $T/m4$")"
+    # A device is one mount's at a time (vfs V38): the second mount is
+    # refused before cosmofs reads it, and the first is still there.
+    mkdir m5
+    expect mount-twice "1 0 1" "$(mount -t cosmofs /dev/nvme0n1 m5 2>&1 | grep -c 'busy') $(grep -c " $T/m5 " /proc/mounts) $(grep -c " $T/m4 cosmofs" /proc/mounts)"
     expect mkfs-busy 1 "$(mkfs.cosmofs /dev/nvme0n1 2>&1 | grep -c 'busy')"
     umount m4
     expect mkfs-badlabel 2 "$(mkfs.cosmofs -L 'a-label-of-17-chr' /dev/nvme0n1 > /dev/null 2>&1; echo $?)"
 else
-    echo "BBTEST: note blkid-label, mount-cosmofs, lsblk-mounted, mkfs-busy: no nvme0n1 here; not run"
+    echo "BBTEST: note blkid-label, mount-cosmofs, lsblk-mounted, mount-twice, mkfs-busy: no nvme0n1 here; not run"
 fi
 expect lsblk-root-disk 1 "$(lsblk | grep -c '^NAME  *SIZE RO TYPE MOUNTPOINTS$')"
 
