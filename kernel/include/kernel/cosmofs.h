@@ -205,11 +205,13 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
 /* Test hook: where an inode's logical block actually lives, as a DVA;
  * -ENOENT for a hole. Lets a test rot the disk under a known block. */
 int cosmofs_test_block_of(struct mount *mnt, uint64_t ino, uint64_t lblk, uint64_t *dva);
+#if CONFIG_DEBUG
 /* Test hook (CF16): read and verify every block of an open file through
  * the map and checksums its in-memory inode holds; `*bad` counts the
- * failures. */
+ * failures. Debug builds only. */
 struct vnode;
 int cosmofs_test_verify_file(struct vnode *vn, uint64_t *bad);
+#endif
 /* Test hook: free blocks on one member, or UINT64_MAX past the last. */
 uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev);
 void cosmofs_test_mount_writeback(struct mount *mnt, uint64_t *dirty_notes, uint64_t *early);

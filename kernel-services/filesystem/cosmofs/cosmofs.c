@@ -2017,9 +2017,11 @@ static int read_logical_block(struct cfs *fs, struct cfs_inode *in, uint64_t lbl
     return rc;
 }
 
+#if CONFIG_DEBUG
 /* Test hook (CF16): every block below the file's size, read through the
  * map and checksums its open inode holds -- what the next commit would
- * publish -- and verified. `*bad` counts the blocks that fail. */
+ * publish -- and verified. `*bad` counts the blocks that fail. Debug
+ * builds only, as the self-test that calls it. */
 int cosmofs_test_verify_file(struct vnode *vn, uint64_t *bad)
 {
     struct cfs *fs = cfs_of(vn->mnt);
@@ -2045,6 +2047,7 @@ int cosmofs_test_verify_file(struct vnode *vn, uint64_t *bad)
     kfree(buf);
     return 0;
 }
+#endif
 
 static int cfs_readpage(struct vnode *vn, uint64_t index, void *buf)
 {

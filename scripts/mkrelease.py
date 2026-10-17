@@ -46,11 +46,14 @@ import pkgbuild  # noqa: E402
 
 
 def package_version(build_id):
-    """v1.0.4 -> 1.0.4; v1.0.3-12-gabc -> 1.0.3-12; anything else 0."""
-    m = re.match(r"^v(\d+(?:\.\d+)*)(?:-(\d+)-g[0-9a-f]+)?(?:-dirty)?$", build_id)
+    """v1.0.4 -> 1.0.4; v1.0.4-rc1 -> 1.0.4-0 (before 1.0.4 in pkg's order);
+    v1.0.3-12-gabc -> 1.0.3-12; a build with no tag (a bare hash, unknown) 0."""
+    m = re.match(r"^v(\d+(?:\.\d+)*)(-rc\d+)?(?:-(\d+)-g[0-9a-f]+)?(?:-dirty)?$", build_id)
     if not m:
         return "0"
-    return m.group(1) + (f"-{m.group(2)}" if m.group(2) else "")
+    if m.group(2):
+        return m.group(1) + "-0"
+    return m.group(1) + (f"-{m.group(3)}" if m.group(3) else "")
 
 
 def main():
