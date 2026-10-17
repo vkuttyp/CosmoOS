@@ -336,11 +336,12 @@ the inventory.
   Done 2026-10-17: `make test-upgrade` (job `upgrade`, both
   architectures) installs the published v1.0.3, refuses a set before its
   key is in `/etc/pkg/keys`, then a tampered manifest, one signed by
-  another key and a tampered archive, with the ESP sector for sector
-  unchanged; stops an upgrade after its writes and after its loader
+  another key, a tampered archive and a set whose loader does not trust
+  v1.0.3's key, with the ESP sector for sector unchanged; stops an upgrade after its writes and after its loader
   switch, kills the machine and boots each state verified; upgrades to the
   build (the new base system, the operator's files and changed `/etc`
-  kept, `pkg update && pkg upgrade`) and rolls back to v1.0.3. The two
+  kept, `pkg upgrade` taking hello 1.0 to 1.1), rolls back to v1.0.3
+  (hello 1.1 kept) and forward again. The two
   questions: the switch is atomic (one-sector writes of directory
   entries, the loader's first, each set's loader kept beside it), so the
   loader is unchanged; `--rollback` returns the boot set, the base system

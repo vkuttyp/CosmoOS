@@ -32,7 +32,11 @@ cosmo-upgrade: /tmp/up: boot.tar does not match the manifest (SHA-512); nothing 
 ```
 
 At the next boot the new loader checks the new set against its own keys,
-as it always does ([Installing](installing.md), "Verified boot").
+as it always does ([Installing](installing.md), "Verified boot"). So
+`cosmo-upgrade` also refuses a release whose loader does not trust the
+key that signed its own set, or the key that signed the set you are
+running (the new loader starts that set if the upgrade is interrupted).
+Only one `cosmo-upgrade` runs at a time; a second is refused.
 
 ## Upgrading
 
@@ -45,6 +49,12 @@ On CosmoOS, fetch the files into `/tmp`, check them, and run the new
 release's `cosmo-upgrade` (v1.0.3 has none of its own). Use `/tmp`
 (memory), not the disk: v1.0.3's filesystem can lose a large file while
 writing it, a defect fixed in later releases.
+
+The downloaded `cosmo-upgrade` is the one file v1.0.3 cannot check with
+a signature: it runs before anything verifies it, and `SHA256SUMS` only
+shows the download is the file the release page lists. Get both over
+HTTPS from the release page you trust. From then on the system has its
+own `/sbin/cosmo-upgrade`, which came inside the signed `boot.tar`.
 
 ```text
 cosmo$ mkdir /tmp/up && cd /tmp/up
@@ -94,7 +104,19 @@ cosmo-upgrade: rolled back; reboot to run it
 
 The previous boot set, its loader, its programs and its repository come
 back. Packages that `pkg upgrade` changed stay changed. A package upgrade
-cannot be rolled back ([Known limitations](limitations.md)). Rolling back
-again moves forward again.
+cannot be rolled back ([Known limitations](limitations.md)).
+
+Rolling back again moves forward again. After a rollback to v1.0.3 the
+system has no `cosmo-upgrade` of its own, so fetch the newer release's
+into `/tmp` as above and run `/tmp/up/cosmo-upgrade --rollback`. Its
+first step makes the newer loader the one the firmware starts, since
+v1.0.3's loader does not trust the newer key:
+
+```text
+cosmo-upgrade: verified \cosmo\prev, signed by key ... in /etc/pkg/keys
+cosmo-upgrade: loader switched: \EFI\BOOT\BOOTX64.EFI is \cosmo\prev's, which starts both sets
+cosmo-upgrade: boot set switched back: ... boots the previous set; the one it replaced is in \cosmo\prev
+cosmo-upgrade: rolled back; reboot to run it
+```
 
 Next: [Privileges](privileges.md).

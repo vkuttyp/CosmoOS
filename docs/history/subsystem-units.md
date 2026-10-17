@@ -3125,11 +3125,15 @@ See the [history index](README.md).
   then brings the root's `bin/`, `sbin/`, `usr/` and `etc/` (configuration
   someone changed is kept, with `FILE.new` beside it) and the package
   repository from the old archive to the new one. `--rollback` switches
-  back. A pending marker makes a rerun finish an interrupted run. The
+  back, set or loader first, whichever order keeps both states bootable.
+  Before writing it checks that the loader the firmware will start trusts
+  both sets' keys (review, PR #399), and one run holds a lock. A pending
+  marker makes a rerun finish an interrupted run. The
   release set gains `cosmoos-ARCH-cosmo-upgrade`. `make test-upgrade` (CI
   job `upgrade`) starts from the published v1.0.3, refuses untrusted and
-  tampered sets with the ESP unchanged, interrupts two upgrades and boots
-  each state, upgrades and rolls back. Its first runs found a cosmofs
+  tampered sets and one whose loader does not trust v1.0.3's key with the
+  ESP unchanged, interrupts two upgrades and boots each state, upgrades,
+  rolls back (a package `pkg upgrade` changed stays) and forward again. Its first runs found a cosmofs
   defect older than S7: a compressed record whose rewrite no longer
   compressed was left unreadable (about one 12 MB `wget` in twenty);
   `record_write` now drops the record first

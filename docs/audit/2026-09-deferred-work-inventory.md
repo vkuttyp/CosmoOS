@@ -1324,10 +1324,15 @@ each; none is needed by M2's acceptance test.
 - `cosmo-upgrade` reads a release from a directory. Fetching one over
   HTTPS with a freshness check is roadmap P6's to do (a signed index
   replays: docs/pkg/invariants.md PK9).
-- The new loader with the old set boots only if the new loader trusts the
-  old set's key. Builds of this tree all carry `tools/keys/*.pub`. An
-  operator's own key is trusted across an upgrade only if both builds'
-  rings include it. Nothing checks this before the loader switch.
+- The first upgrade from v1.0.3 runs a downloaded `cosmo-upgrade` that
+  nothing verifies before it runs: `SHA256SUMS` is unsigned, and the
+  manifest covers the copy inside `boot.tar`, not the release asset.
+  Later upgrades run the installed `/sbin/cosmo-upgrade`, which came in
+  the signed archive. Fix: ship it as a package signed into v1.0.3's
+  trusted index, or have the loader-verified kernel check it.
+- `cosmo-upgrade --rollback`'s refusal when neither loader trusts the
+  other set's key has no test (both orders are tested, the refusal is
+  not); nor does the lock against a second run.
 - A rerun after `--stop-after=set` (the pending marker's finish path) and
   an interruption inside a FAT-chain write are covered by the design's
   order, not by a test. One-sector write atomicity is the device's.

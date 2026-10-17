@@ -20,21 +20,30 @@ Boots, each of the installed disk alone after the first:
             key); with it, a manifest with one byte changed (bad
             signature), one signed by another key (unknown signing key) and
             an archive with one byte changed (SHA-512) are refused, each
-            exit 3. Power off: the ESP is byte for byte what it was.
+            exit 3; so is a set, signed by a key the ring holds, whose
+            loader trusts that key but not v1.0.3's (the release key's
+            entry in its table replaced). Power off: the ESP is byte for
+            byte what it was.
   written   --stop-after=written, then the machine is killed. The ESP's
             loader and set are still v1.0.3's, byte for byte.
   loader    v1.0.3 boots verified; --stop-after=loader, killed. The
             loader is the new one, the set still v1.0.3's.
-  upgrade   The new loader boots v1.0.3's set verified (release key). The
-            full upgrade; power off. The ESP holds the new set,
+  upgrade   The new loader boots v1.0.3's set verified (release key).
+            pkg install hello=1.0; the full upgrade; power off. The ESP holds the new set,
             \\cosmo\\prev v1.0.3's set and loader.
   new       This build boots verified with its own key; the base system
             is the new one (mkfs.cosmofs, the new /etc/rc), the
             installer's /etc/passwd and a file of the operator's are kept;
-            pkg update && pkg upgrade; then cosmo-upgrade --rollback.
+            pkg update && pkg upgrade takes hello to 1.1; then
+            cosmo-upgrade --rollback.
   back      v1.0.3 boots verified with the release key; its base system
-            is back (no mkfs.cosmofs, its /etc/rc), the operator's file is
-            still there.
+            is back (no mkfs.cosmofs or cosmo-upgrade, its /etc/rc), the
+            operator's file is still there, and so is hello 1.1. The
+            build's cosmo-upgrade, fetched into /tmp, rolls back again:
+            v1.0.3's loader does not trust the build's key, so the loader
+            (\\cosmo\\prev's) switches first.
+  forward   This build boots verified with its own key again; the ESP
+            holds the new set and loader, \\cosmo\\prev v1.0.3's.
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -142,10 +151,16 @@ def fetch_all(b, port, arch, variants=False):
           f"mv cosmoos-{arch}-cosmo-upgrade cosmo-upgrade && chmod 755 cosmo-upgrade && cd /", "fetch")
     if not variants:
         return
-    # The refused variants: links to the good files, one file replaced.
-    for d, bad in (("badsig", "manifest"), ("otherkey", "manifest"), ("badtar", "boot.tar")):
-        links = " && ".join(f"ln -s {UP}/cosmoos-{arch}-{f} /tmp/{d}/{f}" for f in SET if f != bad)
-        sh(b, f"mkdir -p /tmp/{d} && {links} && wget -q -O /tmp/{d}/{bad} {url}/{d}/{bad}", f"get{d}")
+    # The refused variants: links to the good files, the rest replaced.
+    for d, bad in VARIANTS:
+        links = " && ".join(f"ln -s {UP}/cosmoos-{arch}-{f} /tmp/{d}/{f}" for f in SET if f not in bad)
+        gets = " && ".join(f"wget -q -O /tmp/{d}/{f} {url}/{d}/{f}" for f in bad)
+        sh(b, f"mkdir -p /tmp/{d} && {links} && {gets}", f"get{d}")
+    sh(b, f"wget -q -O /tmp/untrusting.pub {url}/untrusting.pub", "getuntrustingpub")
+
+
+VARIANTS = (("badsig", ("manifest",)), ("otherkey", ("manifest",)), ("badtar", ("boot.tar",)),
+            ("untrusting", ("boot.tar", "manifest")))
 
 
 def stage_refuse(args, results, port, keyid, otherid):
@@ -174,6 +189,12 @@ def stage_refuse(args, results, port, keyid, otherid):
         out = sh(b, f"{UP}/cosmo-upgrade /tmp/badtar", "badtar", 3)
         need(out, r"^cosmo-upgrade: /tmp/badtar: boot\.tar does not match the manifest \(SHA-512\); nothing written$",
              "an archive with one byte changed")
+        out = sh(b, "cp /tmp/untrusting.pub /etc/pkg/keys/untrusting.pub && sync && "
+                    f"{UP}/cosmo-upgrade /tmp/untrusting", "untrusting", 3)
+        need(out, rf"^cosmo-upgrade: /tmp/untrusting: its loader does not trust key {RELEASE_KEY}, which signed the "
+                  r"current set: an interruption after the loader switch would leave nothing that boots; nothing "
+                  r"written$", "a set whose loader does not trust the current set's key")
+        sh(b, "rm /etc/pkg/keys/untrusting.pub && sync", "untrust")
         out = sh(b, f"{UP}/cosmo-upgrade --check {UP}", "check")
         need(out, r"^cosmo-upgrade: check: it would replace the current set; ", "--check")
         rc = b.finish()
@@ -187,8 +208,8 @@ def stage_refuse(args, results, port, keyid, otherid):
     if diff:
         raise Fail(f"the refusals' boot changed {len(diff)} ESP sectors (first {diff[0] // 512}), expected none")
     results.append(f"refuse: v1.0.3 booted with {RELEASE_KEY}; refused before the build's key {keyid} was trusted, "
-                   f"then a manifest with one byte changed (bad signature), one signed by {otherid} and an archive "
-                   f"with one byte changed, each exit 3; the ESP byte for byte unchanged; PASS in {b.elapsed():.1f}s")
+                   f"then a manifest with one byte changed (bad signature), one signed by {otherid}, an archive "
+                   f"with one byte changed and a set whose loader does not trust {RELEASE_KEY}, each exit 3; the ESP byte for byte unchanged; PASS in {b.elapsed():.1f}s")
 
 
 def stage_stop(args, results, port, step, base, new_loader, expect_key):
@@ -223,6 +244,8 @@ def stage_upgrade(args, results, port, base, new, new_loader, nonce):
             raise Fail(f"the new loader with v1.0.3's set booted with key {k}")
         fetch_all(b, port, args.arch)
         sh(b, f"echo {nonce} > /root/keep && sync", "keep")
+        out = sh(b, "pkg update && pkg install hello=1.0 && hello", "hello")
+        need(out, r"^hello, world \(hello 1\.0\)$", "pkg install hello=1.0 on v1.0.3")
         t0 = time.monotonic()
         out = sh(b, f"{UP}/cosmo-upgrade {UP}", "up")
         up_s = time.monotonic() - t0
@@ -269,8 +292,9 @@ def stage_new(args, results, keyid, nonce):
              "cosmo-upgrade --status")
         need(out, rf"^cosmo-upgrade: prev: kernel\.elf \d+ bytes, boot\.tar \d+ bytes, key {RELEASE_KEY}$",
              "cosmo-upgrade --status")
-        out = sh(b, "pkg update && pkg upgrade", "pkg")
-        need(out, r"^pkg: \d+ packages? upgraded$", "pkg upgrade from the new repository")
+        out = sh(b, "pkg update && pkg upgrade && hello", "pkg")
+        need(out, r"^pkg: 1 package upgraded$", "pkg upgrade from the new repository")
+        need(out, r"^hello, world \(hello 1\.1\)$", "hello after pkg upgrade")
         out = sh(b, "cosmo-upgrade --rollback", "back")
         need(out, rf"^cosmo-upgrade: verified \\cosmo\\prev, signed by key {RELEASE_KEY} in /etc/pkg/keys$",
              "the rollback")
@@ -282,10 +306,10 @@ def stage_new(args, results, keyid, nonce):
         b.kill()
         raise
     results.append(f"new: this build booted with its key {keyid}; the new base system, /root/keep, the installer's "
-                   f"/etc/passwd and repos.conf; pkg update && pkg upgrade; --rollback; PASS in {b.elapsed():.1f}s")
+                   f"/etc/passwd and repos.conf; pkg upgrade took hello 1.0 to 1.1; --rollback; PASS in {b.elapsed():.1f}s")
 
 
-def stage_back(args, results, base, new, nonce):
+def stage_back(args, results, port, base, new, nonce):
     check_set(args.target, base, "::/cosmo", "after the rollback")
     for p in (f"::/EFI/BOOT/{loader_name(args.arch)}", f"::/cosmo/{loader_name(args.arch)}"):
         if esp_file(args.target, p) != base["loader"]:
@@ -297,11 +321,23 @@ def stage_back(args, results, base, new, nonce):
         k = verified_key(b, "the rolled-back system")
         if k != RELEASE_KEY:
             raise Fail(f"the rolled-back system booted with key {k}, not {RELEASE_KEY}")
-        out = b.run("ls /sbin/mkfs.cosmofs; grep -c 'mount -a' /etc/rc; cat /root/keep")
+        out = b.run("ls /sbin/mkfs.cosmofs; ls /sbin/cosmo-upgrade; grep -c 'mount -a' /etc/rc; cat /root/keep; hello")
         need(out, r"mkfs\.cosmofs: No such file or directory|can't access '/sbin/mkfs\.cosmofs'",
              "v1.0.3's base system (no mkfs.cosmofs)")
+        need(out, r"cosmo-upgrade: No such file or directory|can't access '/sbin/cosmo-upgrade'",
+             "v1.0.3's base system (no cosmo-upgrade)")
+        need(out, r"^hello, world \(hello 1\.1\)$", "the package pkg upgrade changed, after the rollback")
         need(out, r"^0$", "v1.0.3's /etc/rc")
         need(out, rf"^{nonce}$", "the operator's /root/keep after the rollback")
+        # Forward again with the build's binary: v1.0.3's loader lacks the
+        # build's key, \cosmo\prev's loader trusts v1.0.3's, so the loader
+        # goes first.
+        sh(b, f"mkdir -p {UP} && wget -q -O {UP}/cosmo-upgrade http://10.0.2.2:{port}/cosmoos-{args.arch}-cosmo-upgrade "
+              f"&& chmod 755 {UP}/cosmo-upgrade", "fetchtool")
+        out = sh(b, f"{UP}/cosmo-upgrade --rollback", "again")
+        need(out, rf"^cosmo-upgrade: loader switched: \\EFI\\BOOT\\{loader_name(args.arch)} is \\cosmo\\prev's, "
+                  r"which starts both sets$", "the second rollback's loader switch")
+        need(out, r"^cosmo-upgrade: rolled back; reboot to run it$", "the second rollback")
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
             raise Fail(f"back boot: QEMU exit code {rc}")
@@ -309,7 +345,35 @@ def stage_back(args, results, base, new, nonce):
         b.kill()
         raise
     results.append(f"back: v1.0.3 booted again with {RELEASE_KEY}, its loader and base system back, /root/keep "
-                   f"kept; PASS in {b.elapsed():.1f}s")
+                   f"and hello 1.1 kept; the build's cosmo-upgrade rolled back again, loader first; PASS in "
+                   f"{b.elapsed():.1f}s")
+
+
+def stage_forward(args, results, keyid, base, new, new_loader):
+    check_set(args.target, new, "::/cosmo", "after the second rollback")
+    check_set(args.target, base, "::/cosmo/prev", "after the second rollback")
+    for p in (f"::/EFI/BOOT/{loader_name(args.arch)}", f"::/cosmo/{loader_name(args.arch)}"):
+        if esp_file(args.target, p) != new_loader:
+            raise Fail(f"after the second rollback: {p} is not the new loader")
+    if esp_file(args.target, f"::/cosmo/prev/{loader_name(args.arch)}") != base["loader"]:
+        raise Fail("after the second rollback: \\cosmo\\prev's loader is not v1.0.3's")
+    b = boot_disk("forward", args)
+    try:
+        b.wait_prompt("the first prompt")
+        k = verified_key(b, "the system rolled forward")
+        if k != keyid:
+            raise Fail(f"the system rolled forward booted with key {k}, not the build's {keyid}")
+        out = sh(b, "ls -1 /sbin/mkfs.cosmofs /sbin/cosmo-upgrade && hello", "fwd")
+        need(out, r"^/sbin/cosmo-upgrade$", "the build's base system again")
+        need(out, r"^hello, world \(hello 1\.1\)$", "hello 1.1 after rolling forward")
+        rc = b.finish()
+        if rc != install_test.EXIT_SUCCESS:
+            raise Fail(f"forward boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"forward: this build booted again with {keyid}; the ESP holds the new set and loader, "
+                   f"\\cosmo\\prev v1.0.3's; its base system and hello 1.1; PASS in {b.elapsed():.1f}s")
 
 
 def main():
@@ -343,7 +407,7 @@ def main():
         for n, path in rel.items():
             shutil.copyfile(path, os.path.join(www, os.path.basename(path)))
         shutil.copyfile(args.pub, os.path.join(www, "trust.pub"))
-        for d in ("badsig", "otherkey", "badtar"):
+        for d, _ in VARIANTS:
             os.makedirs(os.path.join(www, d))
         bad = bytearray(new["manifest"])
         bad[100] ^= 1   # inside the payload: the signature no longer matches
@@ -355,6 +419,23 @@ def main():
         badtar = bytearray(new["boot.tar"])
         badtar[len(badtar) // 2] ^= 1
         open(os.path.join(www, "badtar", "boot.tar"), "wb").write(badtar)
+        # A loader that trusts a throwaway key in place of the release key:
+        # its ring's entry { id, pub } (kernel/keyring.h) overwritten, its
+        # set signed by that key.
+        useed = os.urandom(32)
+        upub = modsign.secret_to_public(useed)
+        rid = bytes.fromhex(RELEASE_KEY)
+        if new_loader.count(rid) != 1:
+            raise Fail(f"the new loader holds the release key id {new_loader.count(rid)} times, expected once")
+        at = new_loader.index(rid)
+        uloader = new_loader[:at] + modsign.key_id(upub) + upub + new_loader[at + 40:]
+        with tarfile.open(rel["boot.tar"]) as t:
+            off = t.getmember(f"efi/{lname}").offset_data
+        utar = new["boot.tar"][:off] + uloader + new["boot.tar"][off + len(uloader):]
+        open(os.path.join(www, "untrusting", "boot.tar"), "wb").write(utar)
+        open(os.path.join(www, "untrusting", "manifest"), "wb").write(
+            mkmanifest.sign(useed, [new["kernel.elf"], utar, new["cmdline"]]))
+        open(os.path.join(www, "untrusting.pub"), "w").write(upub.hex() + "\n")
         srv, port = net_login_test.start_http(www)
         nonce = f"s7-kept-{os.getpid()}-{int(time.time())}"
 
@@ -364,7 +445,8 @@ def main():
         stage_stop(args, results, port, "loader", base, new_loader, RELEASE_KEY)
         stage_upgrade(args, results, port, base, new, new_loader, nonce)
         stage_new(args, results, keyid, nonce)
-        stage_back(args, results, base, new, nonce)
+        stage_back(args, results, port, base, new, nonce)
+        stage_forward(args, results, keyid, base, new, new_loader)
     except Fail as e:
         for r in results:
             print(f"test-upgrade: {r}")

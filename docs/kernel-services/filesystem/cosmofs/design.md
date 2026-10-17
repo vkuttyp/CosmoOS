@@ -1198,7 +1198,7 @@ would cut a record, and `data_write_block` had already stored that
 block's checksum over the record's. The write-back failed and the record
 stayed mapped under a checksum that no longer matched it, unreadable.
 wget filling a file a few kilobytes at a time hit it about once in twenty
-12 MB downloads. v1.0.3 and earlier have the defect.
+12 MB downloads (1 of 16 on v1.0.3, 1 of 24 on this build's kernel). v1.0.3 and earlier have the defect.
 
 ### What this costs, said plainly
 

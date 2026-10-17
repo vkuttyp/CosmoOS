@@ -58,6 +58,13 @@ static bool valid(const struct fat *f, uint32_t c)
     return c >= 2 && c < f->nclusters + 2;
 }
 
+/* 0x0FFFFFF0-0x0FFFFFF6 (reserved) and 0x0FFFFFF7 (bad): a cluster no
+ * one's, which neither the sweep nor a free gives back. */
+static bool reserved(uint32_t n)
+{
+    return n >= 0x0FFFFFF0u && n <= FAT_BAD;
+}
+
 static uint32_t next_of(const struct fat *f, uint32_t c)
 {
     return f->fat[c] & FAT_MASK;
@@ -284,7 +291,7 @@ int fat_read_file(struct fat *f, uint32_t cluster, uint32_t size, uint8_t **out)
         }
         /* A run of consecutive clusters is one read. */
         uint32_t run = 1;
-        while ((uint64_t)(run + 1) * cb <= size - done && next_of(f, c + run - 1) == c + run)
+        while ((uint64_t)(run + 1) * cb <= size - done && next_of(f, c + run - 1) == c + run && valid(f, c + run))
             run++;
         uint32_t whole = (size - done) / cb < run ? (size - done) / cb : run;
         if (whole) {
@@ -328,7 +335,7 @@ void fat_free_chain(struct fat *f, uint32_t c)
 {
     for (uint32_t hops = 0; valid(f, c) && hops <= f->nclusters; hops++) {
         uint32_t n = next_of(f, c);
-        if (n == 0 || n == FAT_BAD)
+        if (n == 0 || reserved(n))
             return;
         set_next(f, c, 0);
         if (n >= 0x0FFFFFF8u)
@@ -460,7 +467,7 @@ int fat_sweep(struct fat *f)
     if (rc == 0) {
         for (uint32_t c = 2; c < f->nclusters + 2; c++) {
             uint32_t n = next_of(f, c);
-            if (!s.mark[c] && n != 0 && n != FAT_BAD) {
+            if (!s.mark[c] && n != 0 && !reserved(n)) {
                 set_next(f, c, 0);
                 freed++;
             }

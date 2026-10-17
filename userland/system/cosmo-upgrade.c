@@ -26,7 +26,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -158,6 +160,7 @@ static void set_free(struct set *s)
 static int set_verify(const struct set *s, bool ring, char *keyid, char *err, size_t errlen)
 {
     const uint8_t *m = s->file[3];
+    snprintf(keyid, 17, "(none)");   /* until the trailer names one */
     if (s->len[3] != COSMO_MANIFEST_FILE_SIZE) {
         snprintf(err, errlen, "manifest: %zu bytes, not %zu", s->len[3], (size_t)COSMO_MANIFEST_FILE_SIZE);
         return -1;
@@ -289,6 +292,20 @@ static uint64_t octal(const uint8_t *f, size_t n, bool *ok)
     return v;
 }
 
+/* Does `name` have a component that is exactly ".."? */
+static bool has_dotdot(const char *name)
+{
+    for (const char *c = name; *c;) {
+        size_t n = strcspn(c, "/");
+        if (n == 2 && c[0] == '.' && c[1] == '.')
+            return true;
+        c += n;
+        while (*c == '/')
+            c++;
+    }
+    return false;
+}
+
 /* The archive's regular files and links (mkbootarchive.py's ustar). The
  * count, or -1 with `err`. */
 static int archive_index(const uint8_t *buf, size_t len, struct member **out, char *err, size_t errlen)
@@ -330,7 +347,7 @@ static int archive_index(const uint8_t *buf, size_t len, struct member **out, ch
             e->link[100] = '\0';
             e->data = buf + pos + 512;
             e->size = (size_t)size;
-            if (e->name[0] == '/' || strstr(e->name, "..") != NULL) {
+            if (e->name[0] == '/' || has_dotdot(e->name)) {
                 snprintf(err, errlen, "boot.tar: member name refused: %s", e->name);
                 free(m);
                 return -1;
@@ -831,6 +848,22 @@ static const struct member *archive_loader(const struct set *s, struct member **
     return member_find(*idx, n, "efi/" LOADER);
 }
 
+/* Does loader image `ldr` trust the key that signed set `s`? The loader's
+ * ring is a table of { id[8], pub[32], name } (kernel/keyring.h), built
+ * from KEYRING_PUBS with revoked keys refused (scripts/gen-keyring.py), so
+ * an id followed by a public key that verifies the set's manifest is that
+ * key in the loader's ring. */
+static bool loader_trusts(const uint8_t *ldr, size_t len, const struct set *s)
+{
+    struct cosmo_manifest_sig sig;
+    memcpy(&sig, s->file[3] + sizeof(struct cosmo_manifest), sizeof(sig));
+    for (size_t i = 0; i + 8 + 32 <= len; i++)
+        if (ldr[i] == sig.key_id[0] && memcmp(ldr + i, sig.key_id, 8) == 0 &&
+            ed25519_verify(sig.sig, s->file[3], sizeof(struct cosmo_manifest), ldr + i + 8))
+            return true;
+    return false;
+}
+
 /* --- the commands --------------------------------------------------------------------- */
 
 /*
@@ -912,8 +945,14 @@ static int finish(struct esp *e, const struct set *cur)
         free(bl);
     }
     if (!e->prev_whole) {
+        if (pending_is(cur->file[3])) {
+            /* The switch wrote prev with the set; without it the root
+             * pass has nothing to start from. The marker stays. */
+            fprintf(stderr, "cosmo-upgrade: a root pass is pending but \\cosmo\\prev is incomplete; the root is "
+                            "not brought to the current set\n");
+            return EXIT_FAILED;
+        }
         say("no previous set in \\cosmo\\prev: the root is left as it is");
-        pending_clear();
         return EXIT_DONE;
     }
     struct set prev = { 0 };
@@ -980,6 +1019,22 @@ static int upgrade(const char *dir, bool check, const char *stop)
                         "written\n", dir);
         return EXIT_REFUSED;
     }
+    for (int i = 0; i < SET_FILES; i++)
+        if (nw.len[i] > UINT32_MAX) {
+            fprintf(stderr, "cosmo-upgrade: %s: %s is larger than a FAT32 file can be; nothing written\n", dir,
+                    g_set_names[i]);
+            return EXIT_REFUSED;
+        }
+    if (loader->size > UINT32_MAX) {
+        fprintf(stderr, "cosmo-upgrade: %s: efi/" LOADER " is larger than a FAT32 file can be; nothing written\n",
+                dir);
+        return EXIT_REFUSED;
+    }
+    if (!loader_trusts(loader->data, loader->size, &nw)) {
+        fprintf(stderr, "cosmo-upgrade: %s: its loader does not trust key %s, which signed its set; nothing "
+                        "written\n", dir, keyid);
+        return EXIT_REFUSED;
+    }
     say("verified kernel.elf, boot.tar and cmdline against the manifest, signed by key %s in " KEYS_DIR
         ", and the loader in boot.tar", keyid);
     struct esp e;
@@ -993,6 +1048,13 @@ static int upgrade(const char *dir, bool check, const char *stop)
         return EXIT_FAILED;
     if (set_verify(&cur, false, curkey, err, sizeof(err)) < 0) {
         fprintf(stderr, "cosmo-upgrade: the current set on %s: %s; nothing written\n", e.dev->name, err);
+        return EXIT_REFUSED;
+    }
+    /* Between the two switches the new loader starts the current set. */
+    if (!loader_trusts(loader->data, loader->size, &cur)) {
+        fprintf(stderr, "cosmo-upgrade: %s: its loader does not trust key %s, which signed the current set: an "
+                        "interruption after the loader switch would leave nothing that boots; nothing written\n",
+                dir, curkey);
         return EXIT_REFUSED;
     }
     bool same_set = memcmp(cur.file[3], nw.file[3], COSMO_MANIFEST_FILE_SIZE) == 0;
@@ -1156,10 +1218,45 @@ static int rollback(void)
         fprintf(stderr, "cosmo-upgrade: \\cosmo\\prev: %s; nothing written\n", err);
         return EXIT_REFUSED;
     }
+    /* Between the two switches one loader starts the other set. The set
+     * goes first when the loader the firmware starts trusts the previous
+     * set; otherwise the loader does, when the previous set's own loader
+     * trusts the current set (a rollback from v1.0.3 back to a newer
+     * build: v1.0.3's loader lacks the newer key). Neither: refused. */
+    uint8_t *bl, *pl;
+    if (esp_read(&e, &e.boot, &bl) < 0)
+        return EXIT_FAILED;
+    if (esp_read(&e, &e.ploader, &pl) < 0) {
+        free(bl);
+        return EXIT_FAILED;
+    }
+    bool set_first = loader_trusts(bl, e.boot.size, &prev);
+    bool loader_first = !set_first && loader_trusts(pl, e.ploader.size, &cur);
+    free(bl);
+    if (!set_first && !loader_first) {
+        free(pl);
+        fprintf(stderr, "cosmo-upgrade: neither \\EFI\\BOOT\\" LOADER " trusts key %s, which signed \\cosmo\\prev, "
+                        "nor \\cosmo\\prev's loader key %s, which signed the current set: an interruption between "
+                        "the switches would leave nothing that boots; nothing written\n", keyid, curkey);
+        return EXIT_REFUSED;
+    }
     say("verified \\cosmo\\prev, signed by key %s in " KEYS_DIR, keyid);
     int rc = sweep_commit(&e);
-    if (rc < 0)
+    if (rc < 0) {
+        free(pl);
         return fail("sweeping the ESP", rc);
+    }
+    if (loader_first) {
+        rc = switch_boot_loader(&e, pl, e.ploader.size);
+        if (rc == 0)
+            rc = sweep_commit(&e);
+        if (rc < 0) {
+            free(pl);
+            return fail("switching the loader", rc);
+        }
+        say("loader switched: \\EFI\\BOOT\\" LOADER " is \\cosmo\\prev's, which starts both sets");
+    }
+    free(pl);
     /* A new prev naming the current set and its loader; then the set and
      * its loader (the new loader still running boots the old set), then
      * the loader the firmware starts. */
@@ -1188,6 +1285,26 @@ static int rollback(void)
     if (rc == EXIT_DONE)
         say("rolled back; reboot to run it");
     return rc;
+}
+
+/* One run at a time: an abstract unix name bound for the process's life
+ * (syslogd's hold_instance). Two runs would each plan the FAT from their
+ * own snapshot and hand out the same free clusters. The kernel lets the
+ * name go however the process ends, so a killed run leaves no lock. */
+static int hold_lock(void)
+{
+    static const char name[] = "cosmo-upgrade";
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    struct sockaddr_un la = { .sun_family = AF_UNIX };
+    memcpy(la.sun_path + 1, name, sizeof(name) - 1);
+    if (fd < 0 || bind(fd, (const struct sockaddr *)&la, (socklen_t)(2 + 1 + sizeof(name) - 1)) < 0) {
+        if (errno == EADDRINUSE)
+            fprintf(stderr, "cosmo-upgrade: another cosmo-upgrade is running; nothing written\n");
+        else
+            fprintf(stderr, "cosmo-upgrade: the lock: %s; nothing written\n", strerror(errno));
+        return -1;
+    }
+    return 0;   /* fd stays open, and the name held, until exit */
 }
 
 static int usage(void)
@@ -1222,6 +1339,8 @@ int main(int argc, char **argv)
         return usage();
     struct timespec ts;
     g_now = clock_gettime(CLOCK_REALTIME, &ts) == 0 ? ts.tv_sec : 0;
+    if (!stat_only && !check && hold_lock() < 0)
+        return EXIT_REFUSED;
     ring_load();
     if (stat_only)
         return status();

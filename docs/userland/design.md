@@ -749,6 +749,20 @@ a rollback still verifies against the keys that signed the previous set.
 
 The loader is a second, separate check. At boot the new loader verifies
 the new set against the keys compiled into it, and it boots nothing else.
+So before writing, `cosmo-upgrade` also checks that the new loader trusts
+the key that signed its own set and the key that signed the current set,
+which it starts between the two switches; `--rollback` checks that the
+loader the firmware starts trusts the key that signed `\cosmo\prev`. The
+loader's ring is a table of `{ id, pub, name }` (`kernel/keyring.h`) with
+revoked keys refused at build time, so an 8-byte id in the loader image
+followed by a public key that verifies the set's manifest is that key in
+its ring. A loader that fails either check is refused, exit 3.
+
+One run at a time: `cosmo-upgrade` holds an abstract unix socket name
+for its life (as syslogd does), and a second run is refused, exit 3. Two
+runs would each plan the FAT from their own copy and hand out the same
+free clusters. The kernel drops the name however the process ends, so a
+killed run leaves no lock behind.
 
 ### The ESP: FAT32 through `/dev/blkctl`
 
@@ -773,7 +787,8 @@ switch and run again swept v1.0.3's loader away, and `\cosmo\prev` then
 held the new one. The acceptance test found it.)
 
 1. **Sweep.** Clusters marked allocated but reachable from no directory
-   (left by an interrupted run) are freed.
+   (left by an interrupted run) are freed. Entries holding a reserved or
+   bad-cluster value (`0x0FFFFFF0` to `0x0FFFFFF7`) are left alone.
 2. **The set's own loader.** On an ESP no upgrade has touched, `\cosmo`
    has none: a copy of `\EFI\BOOT`'s is written and its entry added to
    `\cosmo`, one sector write. The loader ignores the extra file.
@@ -787,8 +802,9 @@ held the new one. The acceptance test found it.)
 5. **Switch the loader.** `\EFI\BOOT`'s 32-byte entry is rewritten in
    place to name its new copy, one sector write, then FLUSH. The loader
    comes first because the new loader boots the old set (the boot code is
-   unchanged since v1.0.3, and a build's ring includes `tools/keys/*.pub`),
-   while the old loader cannot verify a set signed by a key it lacks.
+   unchanged since v1.0.3, and the check under "Trust" has found the old
+   set's key in its ring), while the old loader cannot verify a set signed
+   by a key it lacks.
 6. **Switch the set.** A pending marker, `/var/lib/cosmo-upgrade/pending`,
    is written on the root naming the new set (its manifest's SHA-512).
    Then one sector write to `\cosmo` changes its four file entries and
@@ -820,10 +836,20 @@ go forward again.
 `--rollback` is the same switch in the other direction. It verifies
 `\cosmo\prev` against the ring, writes a new `prev` directory naming the
 current set and its loader, writes the marker, switches `\cosmo` to the
-previous set and its loader (the set first: the new loader, still the
-one the firmware starts, boots the old set), and then finishes: a fresh
-copy of the previous loader for `\EFI\BOOT`, the sweep, the root pass. A
-second rollback goes forward again.
+previous set and its loader, and then finishes. The set goes first when
+the loader the firmware starts trusts the previous set's key (rolling
+back from a newer build to v1.0.3). Otherwise, when `\cosmo\prev`'s own
+loader trusts the current set's key (rolling forward again from v1.0.3,
+whose loader lacks the newer key), a fresh copy of that loader becomes
+`\EFI\BOOT`'s first, as in an upgrade. When neither holds the rollback is
+refused, exit 3. Finishing is a fresh
+copy of the previous loader for `\EFI\BOOT` (when it is not that loader
+already), the sweep, the root pass. A
+second rollback goes forward again. A rollback to a release without
+`cosmo-upgrade` (v1.0.3) removes `/sbin/cosmo-upgrade` with the rest of
+the newer base system, so the second one is run with the newer release's
+binary, fetched as for the first upgrade. If `\cosmo\prev` cannot be read while a
+root pass is pending, the run fails and the marker stays.
 
 ### The root: the base system
 
@@ -836,7 +862,9 @@ from the old archive to the new one. The old archive is the
 first. The rules:
 
 - `bin/`, `sbin/`, `usr/`: each file and link of the new archive is
-  written to a temporary name beside its target and renamed over it. A
+  written to a temporary name beside its target, `TARGET.cosmo-upgrade`,
+  and renamed over it. The name is the tool's: one an interrupted run
+  left is replaced by the next. A
   file keeps its existing mode; a new one gets the mode the kernel gives
   that archive path (0755 under `bin/`, `sbin/`, `usr/bin/`, `usr/sbin/`,
   `usr/libexec/`, else 0644). A path the old archive had and the new one
@@ -844,8 +872,9 @@ first. The rules:
 - `etc/`: configuration. A file still holding the old archive's bytes is
   replaced. A file the installer or the operator changed (for example
   `/etc/passwd`, `/etc/pkg/repos.conf`) is kept, and the new version is
-  written beside it as `FILE.new` when it differs. A new file is added.
-  Nothing in `/etc` is removed.
+  written beside it as `FILE.new` when it differs. `FILE.new` is the
+  tool's too: an earlier run's is replaced by this release's version. A
+  new file is added. Nothing in `/etc` is removed.
 - `repo/`: `/var/lib/pkg/repo` becomes the new archive's repository, so
   `pkg update && pkg upgrade` then upgrades the installed packages from
   it. Their index is verified against the same ring.
