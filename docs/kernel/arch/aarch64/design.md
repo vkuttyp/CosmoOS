@@ -26,7 +26,8 @@ discovery".
 ## Address space
 
 Identical to x86-64: user `[0x400000, 0x7FFFFFFFF000)` in TTBR0's half
-(48-bit VA, T0SZ = 16), direct map at 0xFFFF800000000000 (4 GiB), the
+(48-bit VA, T0SZ = 16), direct map at 0xFFFF800000000000 (the loader's
+`hhdm_size`, at most 64 TiB; all RAM once `vmm_init` has mapped it), the
 arena at 0xFFFFC00000000000, the kernel image at 0xFFFFFFFF80000000 —
 all inside TTBR1's half (T1SZ = 16). The generic VMM's constants
 therefore stay; only the translation-table format differs.
@@ -84,11 +85,15 @@ unusable, and any range the map does not describe) device nGnRnE;
 mapping MMIO as cacheable is not tolerated the way x86 tolerates it.
 `paging_build` fills two roots with 4 KiB descriptors and 2 MiB blocks
 everywhere except the kernel image: TTBR1 maps the direct map (PA
-0–4 GiB at 0xFFFF800000000000), the kernel segments with their ELF
+0–`hhdm_size` at 0xFFFF800000000000, sized to reach all RAM, the loader
+image, the ACPI tables, the framebuffer and the console: docs/boot/
+design.md, "The direct map"), the kernel segments with their ELF
 permissions (text RX, rodata R, data RW; PXN/UXN as appropriate); TTBR0
-identity-maps the same 0–4 GiB with RAM executable at EL1, because the
-loader itself keeps running on it while the tables are switched. The
-bootinfo and handoff stack are in RAM the direct map covers.
+identity-maps the same range with RAM executable at EL1, because the
+loader itself keeps running on it while the tables are switched. A fixed
+4 GiB map (to v1.0.4) left out a loader the firmware had placed above
+4 GiB, and the instruction after `msr ttbr0_el1` faulted. The bootinfo
+and handoff stack are in RAM the direct map covers.
 
 `cpu_prepare` reads `CurrentEL` and accepts EL1 or EL2 (EL0 is refused).
 The `virt` machine runs EDK2 at EL1 unless `virtualization=on`, which

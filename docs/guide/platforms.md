@@ -10,7 +10,8 @@ on every change, and the release workflow runs the guide's commands
 against the release images ([How this guide is tested](README.md)).
 AArch64 is also booted on QEMU set up unlike virt's defaults -- a GICv3,
 no memory above 4 GiB, a CPU with and without the RNDR instruction, no
-serial port -- by `make test-platforms`.
+serial port -- and both architectures with 1, 4 and 8 GiB of RAM, by
+`make test-platforms`.
 
 ## Parallels Desktop 27 on Apple Silicon (AArch64)
 

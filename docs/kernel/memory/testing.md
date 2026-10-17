@@ -420,9 +420,10 @@ Not tested yet:
 - **Concurrency.** Everything runs on one CPU. Zone, cache, and space
   locks are taken but never contended. Phase 3 SMP must add multi-CPU
   stress and a lock-order checker.
-- **Deferred release with RAM above 4 GiB.** The 256 MiB QEMU guest never
-  produces `PG_DEFERRED` frames; the path is exercised only when
-  `QEMU_MEM` exceeds 4 GiB (`make test QEMU_MEM=5G` runs it manually).
+- **Deferred release.** Since the loader sizes its direct map to all RAM
+  (docs/boot/design.md, "The direct map") no boot produces `PG_DEFERRED`
+  frames; the path runs only under a v1.0.4 or older loader with
+  `QEMU_MEM` above 4 GiB, which nothing in CI boots.
 - **1 GiB pages.** QEMU's `qemu64` CPU lacks `pdpe1gb`, so the 1 GiB leaf
   path in `mmu.c` is compiled but not executed in CI.
 - ~~**`arch_mmu_protect`.** Not called by any current code path or test.~~ Called by `vm_user_protect`, by the FILE fault (a shared page raised to writable) and by `vm_file_map_writeprotect` since the file-regions unit, and exercised by every `mprotect` and `msync` test.

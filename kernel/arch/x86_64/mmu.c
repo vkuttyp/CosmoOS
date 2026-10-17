@@ -3,8 +3,8 @@
  *
  * Tables are reached through the direct map, so every table page must be
  * RAM the direct map covers. That holds by construction: before the VMM
- * takes over only frames below 4 GiB are allocatable, and afterwards the
- * direct map covers all RAM.
+ * takes over only frames below the loader's hhdm_size are allocatable,
+ * and afterwards the direct map covers all RAM.
  *
  * Intermediate entries are always present+writable and never NX; the
  * leaf carries the effective permissions. Large pages are used only when

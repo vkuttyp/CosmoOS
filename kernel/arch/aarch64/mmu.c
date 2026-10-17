@@ -6,8 +6,8 @@
  * TTBR1 holds the kernel context (the higher half), TTBR0 a user context
  * (the lower half). A VA belongs to exactly one context; the other half
  * is refused. Tables are reached through the direct map, so every table
- * page must be RAM the direct map covers (frames below 4 GiB before the
- * VMM takes over, all RAM afterwards). Intermediate entries carry no
+ * page must be RAM the direct map covers (frames below the loader's
+ * hhdm_size before the VMM takes over, all RAM afterwards). Intermediate entries carry no
  * permission restrictions; the leaf decides. 2 MiB blocks are used when
  * the caller allows them and alignment permits. Empty intermediate
  * tables are not reclaimed on unmap (the same documented gap as x86).

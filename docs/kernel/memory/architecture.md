@@ -49,8 +49,9 @@ never calls the VMM or heap. Generic code reaches the MMU only through
   4 MiB), with coalescing on free.
 - Reference counts on pages; reserved-page bookkeeping for the kernel
   image, boot info, boot page tables, firmware, and legacy low memory.
-- Defer frames the bootstrap page tables cannot reach (above 4 GiB) until
-  the VMM has mapped them.
+- Defer frames the bootstrap page tables cannot reach (above the
+  loader's `hhdm_size`: none from a loader that sizes its map, those
+  above 4 GiB from one of v1.0.4 or older) until the VMM has mapped them.
 
 **Virtual memory manager (VMM)**
 - The kernel address space object and its regions (image sections,

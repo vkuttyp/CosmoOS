@@ -155,7 +155,12 @@ struct cosmoboot_info {
     uint32_t reserved0;
 
     /* Higher-half direct map: virtual hhdm_base + p == physical p for
-     * 0 <= p < hhdm_size. */
+     * 0 <= p < hhdm_size. The loader chooses hhdm_size (a GiB multiple):
+     * the UEFI loader covers all RAM and everything it hands over --
+     * kernel, archive, boot info, ACPI tables, framebuffer, the serial
+     * console's registers (docs/boot/design.md, "The direct map"); its
+     * releases up to v1.0.4 mapped a fixed 4 GiB. The kernel assumes no
+     * size, so either loader boots either kernel and the version stays. */
     uint64_t hhdm_base;
     uint64_t hhdm_size;
 

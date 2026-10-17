@@ -347,13 +347,11 @@ test-smp2:
 # test-platforms"): the AArch64 image under each QEMU configuration that
 # differs from virt's defaults -- GICv2 and GICv3, highmem off, a CPU with
 # and without RNDR, no serial port -- must reach the shell and print the
-# platform line with what that machine has. A no-op elsewhere.
+# platform line with what that machine has. On both architectures, 1, 4
+# and 8 GiB of RAM: the loader's direct map reaches the top of RAM and
+# `free` reports it (docs/boot/design.md, "The direct map").
 test-platforms: $(IMAGE)
-ifeq ($(ARCH),aarch64)
-	$(Q)$(PYTHON) $(ROOT)/tests/boot/platform_test.py --image $(IMAGE) --workdir $(OUT)/test-platforms --key $(MODSIGN_KEY)
-else
-	@echo "test-platforms: AArch64 only; nothing to do on $(ARCH)"
-endif
+	$(Q)$(PYTHON) $(ROOT)/tests/boot/platform_test.py --arch $(ARCH) --image $(IMAGE) --workdir $(OUT)/test-platforms --key $(MODSIGN_KEY)
 
 test-gic:
 ifeq ($(ARCH),aarch64)

@@ -7,9 +7,10 @@
  *      then \cosmo\kernel.elf, boot.tar and cmdline, each checked against
  *      it as soon as it is in memory (verified boot, verify.c)
  *   3. validate + load the ELF into low physical memory
- *   4. allocate page-table pool, bootinfo area, and a handoff stack
- *   5. build bootstrap page tables
- *   6. collect ACPI RSDP from the configuration tables
+ *   4. allocate the bootinfo area and a handoff stack
+ *   5. collect ACPI RSDP, the console and the framebuffer
+ *   6. size the direct map (direct_map_size), allocate the page-table
+ *      pool, build bootstrap page tables
  *   7. GetMemoryMap + ExitBootServices (retry once if the map moved)
  *   8. translate the EFI memory map into cosmoboot entries
  *   9. arch finish (x86-64: NX/WP; AArch64: nothing), switch translation tables, jump
@@ -344,6 +345,80 @@ static const char *mem_type_name(uint32_t t)
     }
 }
 
+/*
+ * How far the direct map (and, below it, the bootstrap identity map)
+ * must reach: everything the kernel touches before it maps memory itself
+ * -- all RAM the firmware describes, the loader image the final jump
+ * runs from, the kernel, archive and boot info, the ACPI tables, the
+ * framebuffer and a memory-mapped serial console -- rounded up to a GiB.
+ * Firmware places these where it likes: with 4 GiB of RAM or more the
+ * loader image and the ACPI tables are often above 4 GiB, and a fixed
+ * 4 GiB map left the loader's own PC unmapped at the switch (inventory;
+ * Parallels Desktop at its default 4 GB). Device holes inside the range
+ * are mapped too, with device attributes on AArch64.
+ *
+ * Refuses, while boot services are up and the reason can still be read,
+ * a range this CPU's tables cannot map.
+ */
+struct extent {
+    uint64_t end;
+    const char *what;
+};
+
+static void extent_cover(struct extent *x, uint64_t base, uint64_t len, const char *what)
+{
+    if (len == 0 || base + len <= x->end)
+        return;
+    x->end = base + len;
+    x->what = what;
+}
+
+static uint64_t direct_map_size(const struct cosmoboot_info *info, const struct elf_image *img,
+                                const EFI_LOADED_IMAGE_PROTOCOL *self, const uint8_t *mmap, UINTN mmap_size,
+                                UINTN desc_size, const uint64_t *own, UINTN own_count)
+{
+    struct extent x = { 0, "nothing" };
+    for (UINTN off = 0; off + desc_size <= mmap_size; off += desc_size) {
+        const EFI_MEMORY_DESCRIPTOR *d = (const EFI_MEMORY_DESCRIPTOR *)(mmap + off);
+        switch (d->Type) {
+        case EfiMemoryMappedIO:
+        case EfiMemoryMappedIOPortSpace:
+        case EfiReservedMemoryType:
+        case EfiUnusableMemory:
+            continue;   /* not RAM: the kernel maps what it needs of these */
+        default:
+            extent_cover(&x, d->PhysicalStart, d->NumberOfPages * PAGE_SIZE, "RAM");
+        }
+    }
+    extent_cover(&x, (uint64_t)(uintptr_t)self->ImageBase, self->ImageSize, "the loader image");
+    /* The firmware's stack, which the loader is still on at the switch. */
+    extent_cover(&x, ALIGN_DOWN((uint64_t)(uintptr_t)&x, PAGE_SIZE), PAGE_SIZE, "the firmware stack");
+    extent_cover(&x, img->phys_base, img->virt_end - img->virt_base, "the kernel");
+    extent_cover(&x, info->archive_phys, info->archive_size, "the boot archive");
+    for (UINTN i = 0; i + 1 < own_count; i += 2)
+        extent_cover(&x, own[i], own[i + 1], "the boot info");
+    extent_cover(&x, info->acpi_rsdp, 36, "the ACPI RSDP");
+    extent_cover(&x, 0, acpi_tables_end(), "the ACPI tables");
+    extent_cover(&x, info->fb_phys, info->fb_size, "the framebuffer");
+    if (info->console_type == COSMOBOOT_CONSOLE_PL011 || info->console_type == COSMOBOOT_CONSOLE_16550_MMIO)
+        extent_cover(&x, info->console_base, PAGE_SIZE, "the serial console");
+
+    uint64_t size = ALIGN_UP(x.end, PAGE_1G);
+    if (size == 0)
+        size = PAGE_1G;
+    uint64_t limit = paging_pa_limit();
+    if (limit > BOOT_HHDM_MAX)
+        limit = BOOT_HHDM_MAX;
+    lprintf("direct map: 0x0-0x%llx (%llu GiB), to the end of %s at 0x%llx\n", (unsigned long long)size,
+            (unsigned long long)(size >> 30), x.what, (unsigned long long)x.end);
+    if (size < x.end || size > limit) {   /* the first: rounding up wrapped */
+        lprintf("cosmoboot: %s ends at 0x%llx, beyond the 0x%llx this CPU's page tables can map\n", x.what,
+                (unsigned long long)x.end, (unsigned long long)limit);
+        die("the direct map cannot cover what the kernel needs at entry", EFI_UNSUPPORTED);
+    }
+    return size;
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 {
     EFI_STATUS status;
@@ -451,14 +526,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     status = g_bs->GetMemoryMap(&pre_size, (EFI_MEMORY_DESCRIPTOR *)(uintptr_t)pre_phys, &pre_key, &pre_desc, &pre_ver);
     if (EFI_ERROR(status))
         die("GetMemoryMap failed", status);
-    struct paging_ctx pg;
-    memset(&pg, 0, sizeof(pg));
-    pg.nx = true;
-    pg.pool_pages = paging_pool_size(&img, pre_desc > 0 ? pre_size / pre_desc : 0);
-    status = alloc_pages_low(pg.pool_pages, EFI_MEMORY_TYPE_COSMO_PAGETABLES, &pg.pool_phys, &type_fallback);
-    if (EFI_ERROR(status))
-        die("cannot allocate page-table pool", status);
-
     EFI_PHYSICAL_ADDRESS info_phys;
     status = alloc_pages_low(BOOTINFO_PAGES, EFI_MEMORY_TYPE_COSMO_BOOTINFO, &info_phys, &type_fallback);
     if (EFI_ERROR(status))
@@ -468,15 +535,6 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     status = alloc_pages_low(HANDOFF_STACK_PAGES, EfiLoaderData, &stack_phys, NULL);
     if (EFI_ERROR(status))
         die("cannot allocate handoff stack", status);
-
-    /* --- bootstrap page tables --- */
-    status = paging_build(&pg, &img, (uint64_t)(uintptr_t)self->ImageBase, self->ImageSize,
-                          (const uint8_t *)(uintptr_t)pre_phys, pre_size, pre_desc);
-    if (EFI_ERROR(status))
-        die("cannot build page tables", status);
-    lprintf("paging: root at 0x%llx (user root 0x%llx), %u/%u pool pages used\n",
-            (unsigned long long)pg.root, (unsigned long long)pg.root_user, (unsigned)pg.pool_used,
-            (unsigned)pg.pool_pages);
 
     /* --- bootinfo header --- */
     struct cosmoboot_info *info = (struct cosmoboot_info *)(uintptr_t)info_phys;
@@ -495,12 +553,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     memcpy(info->loader_name, LOADER_NAME, sizeof(LOADER_NAME));
     info->loader_version = LOADER_VERSION;
     info->hhdm_base = BOOT_HHDM_BASE;
-    info->hhdm_size = BOOT_HHDM_SIZE;
     info->kernel_phys_base = img.phys_base;
     info->kernel_virt_base = img.virt_base;
     info->kernel_size = img.virt_end - img.virt_base;
-    info->boot_pagetable_root = pg.root;
-    info->boot_pagetable_root_user = pg.root_user;
     info->el2_stub_phys = cpu_el2_stub();
     info->mem_map_phys = (uint64_t)(uintptr_t)entries;
     info->mem_map_entry_size = sizeof(struct cosmoboot_mem_entry);
@@ -527,6 +582,44 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     }
     display_choose_mode();
     find_framebuffer(info);
+
+    /* --- bootstrap page tables, sized now that the framebuffer and the
+     * console are known (direct_map_size) --- */
+    uint64_t own[] = { info_phys, BOOTINFO_PAGES * PAGE_SIZE, stack_phys, HANDOFF_STACK_PAGES * PAGE_SIZE,
+                       pre_phys, BYTES_TO_PAGES(pre_size) * PAGE_SIZE };
+    info->hhdm_size = direct_map_size(info, &img, self, (const uint8_t *)(uintptr_t)pre_phys, pre_size, pre_desc,
+                                      own, sizeof(own) / sizeof(own[0]));
+    struct paging_ctx pg;
+    memset(&pg, 0, sizeof(pg));
+    pg.nx = true;
+    pg.pool_pages = paging_pool_size(&img, pre_desc > 0 ? pre_size / pre_desc : 0, info->hhdm_size);
+    status = alloc_pages_low(pg.pool_pages, EFI_MEMORY_TYPE_COSMO_PAGETABLES, &pg.pool_phys, &type_fallback);
+    if (EFI_ERROR(status)) {
+        lprintf("cosmoboot: %u pages of page tables for a %llu GiB direct map\n", (unsigned)pg.pool_pages,
+                (unsigned long long)(info->hhdm_size >> 30));
+        die("cannot allocate page-table pool", status);
+    }
+    status = paging_build(&pg, &img, (uint64_t)(uintptr_t)self->ImageBase, self->ImageSize,
+                          (const uint8_t *)(uintptr_t)pre_phys, pre_size, pre_desc, info->hhdm_size);
+    if (EFI_ERROR(status))
+        die("cannot build page tables", status);
+    lprintf("paging: root at 0x%llx (user root 0x%llx), %u/%u pool pages used\n",
+            (unsigned long long)pg.root, (unsigned long long)pg.root_user, (unsigned)pg.pool_used,
+            (unsigned)pg.pool_pages);
+    info->boot_pagetable_root = pg.root;
+    info->boot_pagetable_root_user = pg.root_user;
+    /* The switch itself must survive: the code that loads the new roots
+     * and the stack it runs on are reached through the identity map.
+     * Before the map was sized, a loader above 4 GiB lost its own PC
+     * here on hardware (Parallels, QEMU under hvf) while TCG, which had
+     * the whole sequence translated already, carried on. Said and
+     * stopped while the screen still works. */
+    uint64_t switch_pc = (uint64_t)(uintptr_t)&cpu_jump_to_kernel, switch_sp = (uint64_t)(uintptr_t)&pg;
+    if (switch_pc >= info->hhdm_size || switch_sp >= info->hhdm_size) {
+        lprintf("cosmoboot: the loader runs at 0x%llx (stack 0x%llx), outside the 0x%llx its tables map\n",
+                (unsigned long long)switch_pc, (unsigned long long)switch_sp, (unsigned long long)info->hhdm_size);
+        die("the loader would lose its own code at the table switch", EFI_UNSUPPORTED);
+    }
 
     if (type_fallback)
         lputs("warning: firmware rejected loader memory types; kernel, bootinfo, page-table and archive "
