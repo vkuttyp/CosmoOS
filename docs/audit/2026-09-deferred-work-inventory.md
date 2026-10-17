@@ -1308,3 +1308,33 @@ each; none is needed by M2's acceptance test.
 - A cosmofs label is set at format time and cannot be changed after (no
   `tune2fs -L` equivalent), and `mkfs.cosmofs` makes single-device,
   unencrypted pools only.
+
+## 17. Shell completeness S7 follow-ups (2026-10-17)
+
+- `data_write_block` (cosmofs.c) stores a block's checksum before it maps
+  the block. When `set_extent` then fails (`-ENOMEM`, `-EFBIG`, a record it
+  will not cut), the old block stays mapped under the new checksum and
+  reads fail. The record fallback no longer gets there (S7), but any other
+  failure of the mapping still does. Fix: restore the old entry on failure,
+  or store the checksum after the mapping and undo the mapping if that
+  fails.
+- v1.0.3 (and every release before S7) has the record-fallback defect. An
+  installed v1.0.3 should not write large files to its disk before it is
+  upgraded; the upgrading guide says to fetch the release into `/tmp`.
+- `cosmo-upgrade` reads a release from a directory. Fetching one over
+  HTTPS with a freshness check is roadmap P6's to do (a signed index
+  replays: docs/pkg/invariants.md PK9).
+- The new loader with the old set boots only if the new loader trusts the
+  old set's key. Builds of this tree all carry `tools/keys/*.pub`. An
+  operator's own key is trusted across an upgrade only if both builds'
+  rings include it. Nothing checks this before the loader switch.
+- A rerun after `--stop-after=set` (the pending marker's finish path) and
+  an interruption inside a FAT-chain write are covered by the design's
+  order, not by a test. One-sector write atomicity is the device's.
+- The FAT32 writer handles what `mkimage.sh` makes: 8.3 names, no
+  long-name entries in `\cosmo`, one sector of `\cosmo` entries. An ESP
+  copied from elsewhere or edited by another tool is refused, not
+  converted. FAT12/16 are refused.
+- `--rollback` does not return the packages `pkg upgrade` changed, and an
+  `/etc` file the new release added stays after a rollback (nothing in
+  `/etc` is removed).
