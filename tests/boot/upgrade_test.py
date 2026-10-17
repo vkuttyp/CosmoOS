@@ -382,10 +382,11 @@ def stage_hold(args, results, keyid, new_loader, uloader):
         # (cosmofs has no FIFOs: the ring's entry is a link to one in /tmp.)
         out = sh(b, "mkdir -p /tmp/lk && mkfifo /tmp/lk/kernel.elf /tmp/lk/key && ln -s /tmp/lk/key /etc/pkg/keys/lk.pub && "
                     "{ cosmo-upgrade /tmp/lk > /tmp/lk.out 2>&1 & } && echo x > /tmp/lk/key && "
-                    "cosmo-upgrade /tmp/none; echo second=$?", "lock")
+                    # gone before the second run, which must not wait on it if it got the lock
+                    "rm /etc/pkg/keys/lk.pub && cosmo-upgrade /tmp/none; echo second=$?", "lock")
         need(out, r"^cosmo-upgrade: another cosmo-upgrade is running; nothing written$", "a second run")
         need(out, r"^second=3$", "a second run")
-        out = sh(b, "echo x > /tmp/lk/kernel.elf; sleep 1; rm /etc/pkg/keys/lk.pub; cat /tmp/lk.out", "lockdone")
+        out = sh(b, "echo x > /tmp/lk/kernel.elf; sleep 1; cat /tmp/lk.out", "lockdone")
         need(out, r"^cosmo-upgrade: /tmp/lk/kernel\.elf: Invalid argument$", "the first run, its FIFO opened")
         what = "the lock"
         if swap:
