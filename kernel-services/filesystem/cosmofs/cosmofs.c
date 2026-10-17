@@ -1099,8 +1099,23 @@ static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, co
         }
         kfree(packed);
     }
-    /* Plain blocks. A record that used to cover this range is displaced
-     * by the first of them, which set_extent frees whole. */
+    /* Plain blocks. A record covering this range goes first, whole: the
+     * first block alone cannot displace it -- set_extent refuses a
+     * one-block range that would cut a record, and data_write_block has
+     * stored that block's checksum over the record's by then, leaving the
+     * record unreadable (found in shell completeness S7: a record written
+     * while its last page was part empty, rewritten once that page was
+     * filled and no longer compressed). Records are aligned and so is
+     * this range, so a record here starts at lblk0. */
+    struct cfs_extent cur;
+    int mrc = cfs_map_ext(fs, in, lblk0, &cur);
+    if (mrc < 0)
+        return mrc;
+    if (mrc == 1 && cfs_ext_compressed(&cur)) {
+        int rc = drop_range(fs, in, cur.lblk, cfs_ext_count(&cur));
+        if (rc)
+            return rc;
+    }
     for (unsigned i = 0; i < n; i++) {
         int rc = data_write_block(fs, in, lblk0 + i, data + (size_t)i * CFS_BLOCK, CFS_ALLOC_DATA);
         if (rc)

@@ -1471,6 +1471,20 @@ bool selftest_cosmofs_compress(const char **reason)
     f = NULL;
     COMPRESS_CHECK(read_matches(ENG "/small", sparse_data, len));
 
+    /* Pages that leave a record incompressible: it is written again as
+     * ordinary blocks, and the record goes first, whole. The plain
+     * fallback used to write its first block over the record -- that
+     * block's checksum, then a mapping set_extent refused -- and the
+     * write-back failed with the record left unreadable (shell
+     * completeness S7). */
+    COMPRESS_CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
+    memcpy(sparse_data + 16 * 4096, dense + 16 * 4096, 8 * 4096);
+    COMPRESS_CHECK(file_pwrite(f, sparse_data + 16 * 4096, 8 * 4096, 16 * 4096) == 8 * 4096);
+    COMPRESS_CHECK(file_sync(f) == 0);
+    file_put(f);
+    f = NULL;
+    COMPRESS_CHECK(read_matches(ENG "/small", sparse_data, len));
+
     /* Truncating into the middle of a record: what survives is rewritten
      * as ordinary blocks, and what is past the end must read as zeros
      * when the file grows again -- not as the record's old contents. */
