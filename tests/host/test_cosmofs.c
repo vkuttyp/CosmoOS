@@ -125,8 +125,8 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_super) <= CFS_BLOCK);   /* key_root came out of reserved */
     /*
      * Shell completeness S6: the label takes the next two reserved words,
-     * one stays, and the checksum has not moved. blkid reads the uuid and
-     * the label at these offsets from the raw block (userland/system/blkid.c).
+     * one stays, and the checksum has not moved, so a kernel that predates
+     * the label reads the block it always did.
      */
     EXPECT(offsetof(struct cfs_super, uuid) == 96);
     EXPECT(offsetof(struct cfs_super, label) == offsetof(struct cfs_super, orphan_root) + 8);

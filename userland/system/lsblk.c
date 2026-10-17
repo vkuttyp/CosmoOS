@@ -12,6 +12,7 @@
  * lsblk. Needs /dev/blkctl, which is root's (mode 0600, PRIV_SYS_ADMIN to
  * write a command).
  */
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -28,7 +29,9 @@ static void human(uint64_t bytes, char *out, size_t len)
         unit *= 1024;
         u++;
     }
-    uint64_t tenths = (bytes * 10 + unit / 2) / unit;
+    /* Tenths of the unit, rounded, without forming bytes * 10 (found in
+     * review): the remainder is below the unit, at most 2^60. */
+    uint64_t tenths = bytes / unit * 10 + ((bytes % unit) * 10 + unit / 2) / unit;
     if (u > 0 && tenths % 10 != 0 && tenths < 10240)
         snprintf(out, len, "%llu.%llu%c", (unsigned long long)(tenths / 10), (unsigned long long)(tenths % 10),
                  units[u]);
@@ -36,14 +39,24 @@ static void human(uint64_t bytes, char *out, size_t len)
         snprintf(out, len, "%llu%c", (unsigned long long)((tenths + 5) / 10), units[u]);
 }
 
+/* A device's row; a second mount point and after each on a line of its
+ * own under the first, as util-linux's MOUNTPOINTS. */
 static void row(const struct cosmo_blkctl_dev *d, const char *prefix, int width)
 {
-    char name[64], size[16], mnt[1024] = "";
+    static char mnt[1024];
+    char name[64], size[16];
     snprintf(name, sizeof(name), "%s%s", prefix, d->name);
-    human(d->sectors * d->sector_size, size, sizeof(size));
-    blkdevs_mountpoint(d->name, mnt, sizeof(mnt));
+    /* The size in bytes, saturated: a device past 16 EiB is shown as that
+     * (found in review). */
+    uint64_t bytes = d->sector_size != 0 && d->sectors > UINT64_MAX / d->sector_size
+                         ? UINT64_MAX : d->sectors * d->sector_size;
+    human(bytes, size, sizeof(size));
+    if (!blkdevs_mountpoint(d->name, 0, mnt, sizeof(mnt)))
+        mnt[0] = '\0';
     printf("%-*s %6s %2d %-4s %s\n", width, name, size, (d->flags & COSMO_BLKCTL_RDONLY) ? 1 : 0,
            (d->flags & COSMO_BLKCTL_PART) ? "part" : "disk", mnt);
+    for (unsigned i = 1; blkdevs_mountpoint(d->name, i, mnt, sizeof(mnt)); i++)
+        printf("%-*s %6s %2s %-4s %s\n", width, "", "", "", "", mnt);
 }
 
 int main(int argc, char **argv)
@@ -53,8 +66,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: lsblk\n");
         return 2;
     }
-    if (blkdevs_list() < 0) {
-        perror("lsblk: /dev/blkctl");
+    int rc = blkdevs_list();
+    if (rc < 0) {
+        fprintf(stderr, "lsblk: /dev/blkctl: %s\n", strerror(-rc));
         return 1;
     }
     int width = 4;

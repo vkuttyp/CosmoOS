@@ -69,7 +69,7 @@ port 22 forwarded to a host port:
   k. Mounting (shell completeness S6), on the net boot, which has a second,
      blank disk: `lsblk` names the installed disk's GPT partitions (the
      root at /) and the blank disk; `blkid` names the root's PARTUUID (the
-     installer's) and its label, cosmo-root; `mkfs.cosmofs -L s6data` on
+     installer's) and its label, cosmo-root, and the disk's GPT; `mkfs.cosmofs -L s6data` on
      the blank disk, a line for it in /etc/fstab and `mount -a` mount it
      at /data, where a file is written and synced; `umount` of it is
      refused with mount dropped. On the reboot (e), /etc/rc's `mount -a`
@@ -801,9 +801,11 @@ def stage_mounting(b, results, inst):
     if len(blank) != 1:
         raise Fail(f"lsblk: want one {BLANK_MIB}M disk besides the installed one:\n{out}")
     blank = blank[0][1]
-    out = b.run(f"blkid /dev/{root}")
+    rootdisk = max((r[1] for r in disks if root.startswith(r[1])), key=len)
+    out = b.run(f"blkid /dev/{root} /dev/{rootdisk}")
     need(out, rf'^/dev/{root}: LABEL="cosmo-root" UUID="[0-9a-f-]{{36}}" TYPE="cosmofs" '
               rf'PARTUUID="{inst["partuuid"]}"$', "blkid: the root's label, type and PARTUUID")
+    need(out, rf'^/dev/{rootdisk}: PTUUID="[0-9a-f-]{{36}}" PTTYPE="gpt"$', "blkid: the installed disk's GPT")
     out = b.status(f"mkfs.cosmofs -L s6data /dev/{blank}", "mkfs")
     need(out, r"^mkfs=0$", f"mkfs.cosmofs on {blank}")
     out = b.status(f"mkdir -p /data && echo '/dev/{blank} /data cosmofs defaults 0 0' >> /etc/fstab && mount -a",

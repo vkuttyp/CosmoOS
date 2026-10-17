@@ -5,11 +5,11 @@
  *   blkid [DEVICE...]
  *
  * util-linux's output, one line a device: `/dev/NAME: LABEL="..."
- * UUID="..." TYPE="cosmofs" PARTUUID="..."`, from the device's first
- * block (read through /dev/blkctl) and the partition table the kernel
- * registered. It knows cosmofs -- the superblock's label and pool uuid
- * at the offsets tests/host/test_cosmofs.c pins -- and a disk's GUID
- * Partition Table (PTUUID, PTTYPE="gpt"); a partition holding anything
+ * UUID="..." TYPE="cosmofs" PARTUUID="..."`, read through /dev/blkctl.
+ * It knows cosmofs -- of the two superblock slots, the valid one (magic,
+ * a version this tree knows, CRC32C) with the higher generation, whose
+ * label and pool uuid it takes from cosmofs_format.h -- and a disk's GUID Partition Table, accepted by the kernel's own
+ * parser (gpt_parse: PTUUID, PTTYPE="gpt"). A partition holding anything
  * else shows its PARTUUID alone, and a device with nothing to show is
  * left out. With DEVICEs (NAME or /dev/NAME), only those. Exit 0, or 2
  * when no device had anything to show, as util-linux's. BusyBox's blkid
@@ -19,20 +19,23 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <kernel/crc32c.h>
 #include <kernel/gpt.h>
 
 #include "blkdevs.h"
 
-#define HEAD 4096u   /* one cosmofs block: superblock A */
+#include "../../kernel-services/filesystem/cosmofs/cosmofs_format.h"
 
-/* cosmofs_format.h's superblock, by offset: what is read is the raw block. */
-#define CFS_MAGIC "COSMOFS1"
-#define CFS_OFF_VERSION 8
-#define CFS_OFF_UUID 96
-#define CFS_OFF_LABEL 136
-#define CFS_LABEL_MAX 16
+/* The superblock is read raw, by cosmofs_format.h's offsets. */
+#define CFS_OFF_VERSION offsetof(struct cfs_super, version)
+#define CFS_OFF_GENERATION offsetof(struct cfs_super, generation)
+#define CFS_OFF_UUID offsetof(struct cfs_super, uuid)
+#define CFS_OFF_LABEL offsetof(struct cfs_super, label)
+#define CFS_OFF_CRC offsetof(struct cfs_super, crc)
 
-static uint8_t g_head[HEAD];
+static uint8_t g_slots[2 * CFS_BLOCK];
+static uint8_t g_scratch[GPT_SCRATCH_BYTES];
+static struct gpt_table g_table;
 
 /* A uuid as RFC 4122 writes it, the bytes in order: how util-linux prints
  * a filesystem's (a GPT GUID's first three fields are little-endian
@@ -55,30 +58,68 @@ static bool zero(const uint8_t *p, size_t n)
     return true;
 }
 
+/* cosmofs's superblock check (cfs_super_ok): the magic, a known version,
+ * the CRC32C over the block with the crc field as zero. */
+static bool slot_ok(const uint8_t *b, uint64_t *gen)
+{
+    uint32_t version, crc;
+    memcpy(&version, b + CFS_OFF_VERSION, 4);
+    memcpy(&crc, b + CFS_OFF_CRC, 4);
+    if (memcmp(b, CFS_MAGIC, 8) != 0 || version < CFS_VERSION_MIN || version > CFS_VERSION)
+        return false;
+    static const uint8_t zero4[4] = { 0 };
+    uint32_t c = crc32c(b, CFS_OFF_CRC);
+    c = crc32c_update(c, zero4, 4);
+    c = crc32c_update(c, b + CFS_OFF_CRC + 4, CFS_BLOCK - CFS_OFF_CRC - 4);
+    memcpy(gen, b + CFS_OFF_GENERATION, 8);
+    return c == crc && *gen != 0;
+}
+
+/* The superblock a mount would take, or NULL: both slots are read, since
+ * commits alternate between them and a torn one fails its CRC. */
+static const uint8_t *cosmofs_super(const struct cosmo_blkctl_dev *d)
+{
+    if (d->sector_size == 0 || d->sector_size > CFS_BLOCK || CFS_BLOCK % d->sector_size != 0 ||
+        blkdevs_read(d, 0, 2 * CFS_BLOCK / d->sector_size, g_slots) != 0)
+        return NULL;
+    uint64_t ga = 0, gb = 0;
+    bool a = slot_ok(g_slots, &ga), b = slot_ok(g_slots + CFS_BLOCK, &gb);
+    if (a && (!b || ga >= gb))
+        return g_slots;
+    return b ? g_slots + CFS_BLOCK : NULL;
+}
+
+static int gpt_read(void *ctx, uint64_t lba, uint32_t count, void *buf)
+{
+    return blkdevs_read(ctx, lba, count, buf);
+}
+
 /* Print the device's line; false when it has nothing to show. */
 static bool probe(const struct cosmo_blkctl_dev *d)
 {
     char line[256];
     int n = 0;
-    size_t bytes = d->sector_size > HEAD ? d->sector_size : HEAD;
-    if (bytes <= sizeof(g_head) && blkdevs_read_head(d, g_head, bytes) == 0) {
+    const uint8_t *sb = cosmofs_super(d);
+    if (sb != NULL) {
         uint32_t version;
-        memcpy(&version, g_head + CFS_OFF_VERSION, 4);
-        if (memcmp(g_head, CFS_MAGIC, 8) == 0) {
-            char label[CFS_LABEL_MAX + 1] = "";
-            memcpy(label, g_head + CFS_OFF_LABEL, CFS_LABEL_MAX);
-            if (label[0] != '\0')
-                n += snprintf(line + n, sizeof(line) - (size_t)n, " LABEL=\"%s\"", label);
-            if (version >= 4 && !zero(g_head + CFS_OFF_UUID, 16)) {   /* the pool uuid came with version 4 */
-                char u[37];
-                uuid_text(g_head + CFS_OFF_UUID, u);
-                n += snprintf(line + n, sizeof(line) - (size_t)n, " UUID=\"%s\"", u);
-            }
-            n += snprintf(line + n, sizeof(line) - (size_t)n, " TYPE=\"cosmofs\"");
-        } else if (!(d->flags & COSMO_BLKCTL_PART) && d->sector_size >= 512 &&
-                   bytes >= 2 * d->sector_size && memcmp(g_head + d->sector_size, "EFI PART", 8) == 0) {
+        memcpy(&version, sb + CFS_OFF_VERSION, 4);
+        char label[CFS_LABEL_MAX + 1] = "";
+        memcpy(label, sb + CFS_OFF_LABEL, CFS_LABEL_MAX);
+        if (label[0] != '\0')
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " LABEL=\"%s\"", label);
+        if (version >= 4 && !zero(sb + CFS_OFF_UUID, 16)) {   /* the pool uuid came with version 4 */
+            char u[37];
+            uuid_text(sb + CFS_OFF_UUID, u);
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " UUID=\"%s\"", u);
+        }
+        n += snprintf(line + n, sizeof(line) - (size_t)n, " TYPE=\"cosmofs\"");
+    } else if (!(d->flags & COSMO_BLKCTL_PART)) {
+        const char *why = NULL;
+        static struct cosmo_blkctl_dev disk;   /* the read callback's context, which is not const */
+        disk = *d;
+        if (gpt_parse(d->sector_size, d->sectors, gpt_read, &disk, g_scratch, &g_table, &why) == GPT_OK) {
             char g[GPT_GUID_TEXT];
-            gpt_guid_format(g_head + d->sector_size + 56, g);   /* the header's disk GUID */
+            gpt_guid_format(g_table.disk_guid, g);
             n += snprintf(line + n, sizeof(line) - (size_t)n, " PTUUID=\"%s\" PTTYPE=\"gpt\"", g);
         }
     }
@@ -95,8 +136,9 @@ static bool probe(const struct cosmo_blkctl_dev *d)
 
 int main(int argc, char **argv)
 {
-    if (blkdevs_list() < 0) {
-        perror("blkid: /dev/blkctl");
+    int rc = blkdevs_list();
+    if (rc < 0) {
+        fprintf(stderr, "blkid: /dev/blkctl: %s\n", strerror(-rc));
         return 2;
     }
     bool any = false;

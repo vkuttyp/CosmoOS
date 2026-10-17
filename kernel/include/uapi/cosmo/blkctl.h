@@ -28,7 +28,8 @@
 #define COSMO_BLKCTL_FORMAT 6   /* make an empty filesystem of type `fstype` on the device; the
                                  * data after the struct, if any, is its label (S6): at most
                                  * COSMO_BLKCTL_LABEL bytes of printable ASCII: no blank,
-                                 * '"' or '\\', and no NUL */
+                                 * '"' or '\\', and no NUL. A whole disk with registered
+                                 * partitions is refused (-EBUSY) */
 
 /* The most data one READ or WRITE carries. */
 #define COSMO_BLKCTL_IO_MAX (32u * 1024u)

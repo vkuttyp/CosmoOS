@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -16,12 +17,14 @@ static uint8_t g_res[64 * 1024];
 
 /* One command, its data after the struct; its result into g_res. The
  * result's length or -errno. */
-static long ctl(unsigned op, const char *name, uint32_t count, const char *fstype, const void *data, size_t len)
+static long ctl(unsigned op, const char *name, uint64_t sector, uint32_t count, const char *fstype, const void *data,
+                size_t len)
 {
     struct cosmo_blkctl cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.version = COSMO_BLKCTL_VERSION;
     cmd.op = (uint16_t)op;
+    cmd.sector = sector;
     cmd.count = count;
     if (name)
         strncpy(cmd.name, name, sizeof(cmd.name) - 1);
@@ -45,12 +48,16 @@ int blkdevs_list(void)
         if (g_ctl < 0)
             return -errno;
     }
-    long n = ctl(COSMO_BLKCTL_LIST, NULL, 0, NULL, NULL, 0);
+    long n = ctl(COSMO_BLKCTL_LIST, NULL, 0, 0, NULL, NULL, 0);
     if (n < (long)sizeof(struct cosmo_blkctl_list))
         return n < 0 ? (int)n : -EIO;
     struct cosmo_blkctl_list hdr;
     memcpy(&hdr, g_res, sizeof(hdr));
-    g_nblkdevs = hdr.count < BLKDEVS_MAX ? hdr.count : BLKDEVS_MAX;
+    if (hdr.count > BLKDEVS_MAX)
+        return -E2BIG;   /* not a list with devices silently left out (found in review) */
+    if ((size_t)n < sizeof(hdr) + hdr.count * sizeof(g_blkdevs[0]))
+        return -EIO;
+    g_nblkdevs = hdr.count;
     memcpy(g_blkdevs, g_res + sizeof(hdr), g_nblkdevs * sizeof(g_blkdevs[0]));
     return 0;
 }
@@ -65,16 +72,25 @@ const struct cosmo_blkctl_dev *blkdevs_find(const char *name)
     return NULL;
 }
 
-int blkdevs_read_head(const struct cosmo_blkctl_dev *d, void *buf, size_t bytes)
+int blkdevs_read(const struct cosmo_blkctl_dev *d, uint64_t lba, uint64_t count, void *buf)
 {
-    if (d->sector_size == 0 || bytes % d->sector_size != 0 || bytes / d->sector_size > d->sectors)
+    if (d->sector_size == 0 || d->sector_size > COSMO_BLKCTL_IO_MAX || lba > d->sectors || count > d->sectors - lba)
         return -EINVAL;
-    long rc = ctl(COSMO_BLKCTL_READ, d->name, (uint32_t)(bytes / d->sector_size), NULL, NULL, 0);
-    if (rc < 0)
-        return (int)rc;
-    if ((size_t)rc != bytes)
-        return -EIO;
-    memcpy(buf, g_res, bytes);
+    uint8_t *p = buf;
+    uint32_t per = COSMO_BLKCTL_IO_MAX / d->sector_size;   /* sectors a read may carry: fits the 32-bit count */
+    while (count > 0) {
+        uint32_t n = count < per ? (uint32_t)count : per;
+        size_t bytes = (size_t)n * d->sector_size;
+        long rc = ctl(COSMO_BLKCTL_READ, d->name, lba, n, NULL, NULL, 0);
+        if (rc < 0)
+            return (int)rc;
+        if ((size_t)rc != bytes)
+            return -EIO;
+        memcpy(p, g_res, bytes);
+        p += bytes;
+        lba += n;
+        count -= n;
+    }
     return 0;
 }
 
@@ -82,25 +98,36 @@ int blkdevs_format(const char *name, const char *fstype, const char *label)
 {
     if (strncmp(name, "/dev/", 5) == 0)
         name += 5;
-    long rc = ctl(COSMO_BLKCTL_FORMAT, name, 0, fstype, label, strlen(label));
+    long rc = ctl(COSMO_BLKCTL_FORMAT, name, 0, 0, fstype, label, strlen(label));
     return rc < 0 ? (int)rc : 0;
 }
 
-int blkdevs_mountpoint(const char *name, char *out, size_t len)
+/* A /proc/mounts line: two names of up to VFS_PATH_MAX (1024) bytes, each
+ * byte written as at most four, and the rest. A longer line is skipped. */
+static char g_line[2 * 4 * 1024 + 128];
+
+int blkdevs_mountpoint(const char *name, unsigned which, char *out, size_t len)
 {
     FILE *f = fopen("/proc/mounts", "r");
     if (f == NULL)
         return 0;
-    char line[1200];
     int found = 0;
-    while (!found && fgets(line, sizeof(line), f) != NULL) {
+    bool skipping = false;   /* the rest of a line too long for g_line */
+    while (!found && fgets(g_line, sizeof(g_line), f) != NULL) {
+        bool whole = strchr(g_line, '\n') != NULL || feof(f);
+        if (skipping || !whole) {
+            skipping = !whole;
+            continue;
+        }
         /* "DEVICE DIR TYPE OPTIONS 0 0": the first two fields. */
-        char *dir = strchr(line, ' ');
+        char *dir = strchr(g_line, ' ');
         if (dir == NULL)
             continue;
         *dir++ = '\0';
         char *end = strchr(dir, ' ');
-        if (end == NULL || strncmp(line, "/dev/", 5) != 0 || strcmp(line + 5, name) != 0)
+        if (end == NULL || strncmp(g_line, "/dev/", 5) != 0 || strcmp(g_line + 5, name) != 0)
+            continue;
+        if (which-- != 0)
             continue;
         *end = '\0';
         /* /proc/mounts writes a blank, tab, newline or backslash as \ooo. */

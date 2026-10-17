@@ -46,6 +46,10 @@ void blk_part_remove(struct blkdev *disk);
 
 bool blk_is_partition(const struct blkdev *bd);
 
+/* Whether a scan registered partitions of `disk` that are still
+ * registered (false for a partition). A snapshot. Sleeps. */
+bool blk_part_any(const struct blkdev *disk);
+
 struct blk_part_info {
     char disk[BLKDEV_NAME_MAX];
     uint32_t index;          /* the partition's number in the table, from 1 */

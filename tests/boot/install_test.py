@@ -267,6 +267,13 @@ def stage_install(args, results):
         need(out, r"^busy-status=3$", "an install over a mounted disk")
         need(out, rf"^cosmo-install: {dev} is mounted$", "an install over a mounted disk")
         need(out, r"^look-ok$", "the installed root")
+        # Shell completeness S6: mkfs.cosmofs refuses the installed disk,
+        # which has partitions -- the host check below finds the GPT and
+        # the ESP intact.
+        mk = b.status(f"mkfs.cosmofs /dev/{dev}", "mkfs-status")
+        need(mk, r"^mkfs-status=1$", "mkfs.cosmofs on a disk with partitions")
+        need(mk, rf"^mkfs\.cosmofs: {dev} has partitions \({dev}p?1, \.\.\.\): format one of them$",
+             "mkfs.cosmofs on a disk with partitions")
         need(out, r"^cosmo-install$", "the installed /sbin")
         need(out, r"^svc boot$", "the installed /etc/rc")
         # Roadmap M6: the repository is on the root and repos.conf names it.

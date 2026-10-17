@@ -462,13 +462,16 @@ installed system starts with the same empty table.
 **`lsblk`** (`userland/system/lsblk.c`) prints util-linux's default
 listing from `/dev/blkctl`'s device list and `/proc/mounts`: each disk,
 its partitions under it in table order (`|-`, and `` `- `` for the last),
-size in powers of 1024, read-only, type and mount point. It leaves out
+size in powers of 1024, read-only, type and mount point (a second mount
+point of the same device on a line of its own). It leaves out
 `MAJ:MIN` (no device numbers here) and `RM`. BusyBox has no `lsblk`.
 
 **`blkid`** (`userland/system/blkid.c`) prints util-linux's line per
 device: `/dev/vda2: LABEL="cosmo-root" UUID="..." TYPE="cosmofs"
 PARTUUID="..."`. It reads the device's first block through `/dev/blkctl`
--- a cosmofs superblock's label and pool uuid, or a disk's GPT header
+-- of a cosmofs's two superblock slots the valid one (magic, version,
+CRC32C) with the higher generation, as a mount chooses, for its label and
+pool uuid; or a disk's GPT, accepted by the kernel's own `gpt_parse`
 (`PTUUID`, `PTTYPE="gpt"`) -- and takes a partition's `PARTUUID` from the
 kernel's partition list. A partition holding anything else shows its
 `PARTUUID` alone; the ESP's FAT is not identified. BusyBox's `blkid`
@@ -478,7 +481,9 @@ kernel does not make.
 **`mkfs.cosmofs [-L LABEL] DEVICE`** (`userland/system/mkfs.cosmofs.c`)
 makes an empty single-device cosmofs with `/dev/blkctl`'s `FORMAT`, which
 carries the label (up to 16 printable characters, no blank, quote or
-backslash). The installer names the root it makes `cosmo-root` the same
+backslash). A whole disk with registered partitions is refused, by the
+tool and by `/dev/blkctl`: the partitions would stay over the new
+filesystem, and the backup table would bring them back at the next boot. The installer names the root it makes `cosmo-root` the same
 way. The three tools need `/dev/blkctl`, which is root's.
 
 ## Test script (`userland/etc/rc.test`)

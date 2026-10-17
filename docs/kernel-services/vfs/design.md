@@ -619,7 +619,7 @@ and a failed command leaves none.
 | `WRITE` | `count` sectors at `sector`; `-EBUSY` while `vfs_bdev_mounted` | none |
 | `FLUSH` | `blk_flush` | none |
 | `RESCAN` | `blk_part_scan` (`-EBUSY` while a partition is in use) | `struct cosmo_blkctl_rescan` |
-| `FORMAT` | `vfs_format(fstype, device, label)`: `fs_type.format`, refused (`-EBUSY`) while mounted. The data after the struct, if any, is the label (S6): at most `COSMO_BLKCTL_LABEL` (16) bytes of printable ASCII with no blank, `"` or `\`, else `-EINVAL` | none |
+| `FORMAT` | `vfs_format(fstype, device, label)`: `fs_type.format`, refused (`-EBUSY`) while mounted. The data after the struct, if any, is the label (S6): at most `COSMO_BLKCTL_LABEL` (16) bytes of printable ASCII with no blank, `"` or `\`, else `-EINVAL`. A whole disk with registered partitions is `-EBUSY` (`blk_part_any`): the format would leave them registered over the new filesystem, and the backup table at the disk's end would register them again at the next boot | none |
 
 It sits in the VFS rather than the block layer because two of its
 answers are about mounts (D8). `vfs_bdev_mounted` answers for the device,

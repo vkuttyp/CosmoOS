@@ -241,6 +241,15 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
         break;
     }
     case COSMO_BLKCTL_FORMAT:
+        /* A whole disk with registered partitions is refused (found in
+         * review): the format would overwrite the primary table and leave
+         * those partitions registered over the new filesystem -- and the
+         * backup table at the disk's end would register them again at the
+         * next boot. Format a partition, or a disk without a table. */
+        if (blk_part_any(bd)) {
+            rc = -EBUSY;
+            break;
+        }
         rc = vfs_format(cmd.fstype, bd, label);
         if (rc == 0)
             set_result(o, NULL, 0);

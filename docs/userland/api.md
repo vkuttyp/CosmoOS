@@ -110,7 +110,7 @@ when everything succeeded, 1 otherwise, 2 for usage errors.
 | `umount` | `umount [-f] target` | `-f` is `MNT_FORCE`; BusyBox's `/bin/umount` comes first in `PATH` and takes the same arguments |
 | `lsblk` | `lsblk` | util-linux's default listing without `MAJ:MIN` and `RM`: `NAME SIZE RO TYPE MOUNTPOINTS`, each disk then its partitions as a tree (design.md, "Mounting"; S6) |
 | `blkid` | `blkid [DEVICE...]` | `/dev/NAME: LABEL="..." UUID="..." TYPE="cosmofs" PARTUUID="..."` (a disk with a GPT: `PTUUID`, `PTTYPE="gpt"`); DEVICE is `NAME` or `/dev/NAME`. Exit 0, or 2 when nothing was found (S6) |
-| `mkfs.cosmofs` | `mkfs.cosmofs [-L LABEL] DEVICE` | an empty single-device cosmofs on DEVICE, not mounted; LABEL at most 16 printable characters, no blank, `"` or `\`. Exit 0, 1 failed, 2 usage (S6) |
+| `mkfs.cosmofs` | `mkfs.cosmofs [-L LABEL] DEVICE` | an empty single-device cosmofs on DEVICE, not mounted and not a disk with partitions; LABEL at most 16 printable characters, no blank, `"` or `\`. Exit 0, 1 failed, 2 usage (S6) |
 | `ps` | `ps` | `procinfo`; columns `PID PPID UID S THR SYSCALLS TIME(ms) NAME`; `S` is `R` running, `X` exiting, `Z` zombie; an unprivileged user sees only its own processes |
 | `kill` | `kill [-sig | -s sig] pid...` | `sig` numeric or `KILL`, `TERM` (default), `INT`, `HUP`, with or without `SIG` |
 | `dmesg` | `dmesg` | the newest 32 KiB of kernel log lines |

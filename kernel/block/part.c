@@ -299,6 +299,20 @@ void blk_part_remove(struct blkdev *disk)
     mutex_unlock(&g_part_lock);
 }
 
+bool blk_part_any(const struct blkdev *disk)
+{
+    bool any = false;
+    mutex_lock(&g_part_lock);
+    struct blkpart *p;
+    list_for_each_entry(p, &g_parts, link)
+        if (p->disk == disk) {
+            any = true;
+            break;
+        }
+    mutex_unlock(&g_part_lock);
+    return any;
+}
+
 bool blk_part_info(const struct blkdev *bd, struct blk_part_info *out)
 {
     if (!blk_is_partition(bd))

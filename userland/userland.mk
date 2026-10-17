@@ -47,7 +47,7 @@ PROG_EXTRA_SRCS_cosmo-install := userland/system/install_gpt.c userland/system/i
 PROG_DIR_lsblk := system
 PROG_EXTRA_SRCS_lsblk := userland/system/blkdevs.c
 PROG_DIR_blkid := system
-PROG_EXTRA_SRCS_blkid := userland/system/blkdevs.c userland/system/install_gpt.c
+PROG_EXTRA_SRCS_blkid := userland/system/blkdevs.c userland/system/install_gpt.c userland/system/blkid_crc32c.c
 PROG_DIR_mkfs.cosmofs := system
 PROG_EXTRA_SRCS_mkfs.cosmofs := userland/system/blkdevs.c
 

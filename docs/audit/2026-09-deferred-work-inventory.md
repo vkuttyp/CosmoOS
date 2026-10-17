@@ -1308,3 +1308,10 @@ each; none is needed by M2's acceptance test.
 - A cosmofs label is set at format time and cannot be changed after (no
   `tune2fs -L` equivalent), and `mkfs.cosmofs` makes single-device,
   unencrypted pools only.
+- One block device can be mounted twice -- found in S6's review, true of
+  the native door since the start: `vfs_mount_at` and `cosmofs_mount`
+  claim no device, so `mount -t cosmofs /dev/nvme0n1 a` and again at `b`
+  (one `ro`, one `rw`, seen in a release boot) give two independent
+  filesystem instances writing one disk. Linux shares one superblock
+  between such mounts, or refuses a different type with `-EBUSY`. A
+  refusal while `vfs_bdev_mounted` would close it.

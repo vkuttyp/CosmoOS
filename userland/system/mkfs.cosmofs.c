@@ -4,12 +4,13 @@
  *
  *   mkfs.cosmofs [-L LABEL] DEVICE
  *
- * DEVICE is NAME or /dev/NAME, a whole disk or a partition, not mounted.
+ * DEVICE is NAME or /dev/NAME, a whole disk or a partition, not mounted;
+ * a disk with registered partitions is refused (format a partition).
  * LABEL, up to 16 printable characters with no blank, quote or backslash,
  * is what blkid prints. A single-device pool, unencrypted: the filesystem
  * the installer makes for the root, through the same /dev/blkctl FORMAT
- * (root's: PRIV_SYS_ADMIN). Whatever was on DEVICE is lost; a disk's
- * partition table too. Exit 0 made, 1 failed, 2 usage.
+ * (root's: PRIV_SYS_ADMIN). Whatever was on DEVICE is lost. Exit 0 made,
+ * 1 failed, 2 usage.
  */
 #include <stdio.h>
 #include <string.h>
@@ -34,6 +35,14 @@ int main(int argc, char **argv)
     if (rc == 0 && d == NULL) {
         fprintf(stderr, "mkfs.cosmofs: %s: no such block device\n", argv[i]);
         return 1;
+    }
+    if (rc == 0 && !(d->flags & COSMO_BLKCTL_PART)) {
+        for (unsigned j = 0; j < g_nblkdevs; j++)
+            if ((g_blkdevs[j].flags & COSMO_BLKCTL_PART) && strcmp(g_blkdevs[j].disk, d->name) == 0) {
+                fprintf(stderr, "mkfs.cosmofs: %s has partitions (%s, ...): format one of them\n", d->name,
+                        g_blkdevs[j].name);
+                return 1;
+            }
     }
     if (rc == 0)
         rc = blkdevs_format(d->name, "cosmofs", label);

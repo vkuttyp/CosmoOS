@@ -134,6 +134,42 @@ Each in a throwaway worktree from `4c0d72cc`, x86-64 release:
 | M2: the label not written (`format_at`) | `test-net-login`: `blkid`'s root line (no `LABEL="cosmo-root"`) |
 | M3: no `PRIV_MOUNT` check in the Linux door or the shared body | `test-busybox`: `mount-noprv`, `umount-noprv` and the checks after them |
 
+## Review
+
+Round 1 (Codex 2, Qodo 9 on `1d0a1d60`), each checked against the code:
+
+- **A whole disk with partitions formatted** (Codex P1, Qodo): the
+  partitions stayed registered over the new filesystem, and the backup
+  table at the disk's end would register them again at the next boot.
+  `/dev/blkctl` `FORMAT` now refuses such a disk (`-EBUSY`,
+  `blk_part_any`), and `mkfs.cosmofs` says which partition to format
+  instead; `test-install` runs it on the installed disk, whose GPT and
+  ESP the host then finds intact.
+- **`blkid`**: read two logical sectors, so a 4 KiB-sector disk's GPT
+  header is seen (Codex, Qodo); accept a table only as the kernel's
+  `gpt_parse` does, not on its signature (Qodo); read both superblock
+  slots and take the valid one (magic, version, CRC32C) with the higher
+  generation, as a mount does, so a torn slot hides nothing (Qodo). It
+  takes the superblock's offsets from `cosmofs_format.h` itself, and
+  CRC-32C from `kernel/core/crc32c.c`. `test-net-login` stage k now
+  checks the installed disk's `PTUUID` and `PTTYPE="gpt"` too.
+- **`lsblk`**: the size without overflow (bytes saturated past 16 EiB;
+  tenths of the unit without forming bytes x 10), every mount point of a
+  device, a `/proc/mounts` line read whole (a buffer for two escaped
+  maximum-length names, a longer line skipped) (Qodo).
+- **The shared helpers**: more than 128 devices is an error, not a short
+  list; a read is split into commands of at most `COSMO_BLKCTL_IO_MAX`,
+  so the 32-bit count cannot wrap (Qodo).
+
+The second mount point led to a defect older than this unit: one block
+device can be mounted twice, giving two filesystem instances on one disk
+(seen in a release boot). Neither door claims a device; it is in the
+inventory (§16), not fixed here.
+
+After the fixes: `host-test`, `analyze`, debug `test`, and release
+`test-busybox`, `test-net-login` and `test-install` on both
+architectures, PASS.
+
 ## Validation
 
 - **The validation matrix**, on `4c0d72cc`, every step PASS on the first
