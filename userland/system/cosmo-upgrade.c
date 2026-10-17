@@ -7,8 +7,10 @@
  *   cosmo-upgrade --status
  *
  * DIR holds the release's kernel.elf, boot.tar, cmdline and manifest
- * (or cosmoos-ARCH-<name>). They are checked against /etc/pkg/keys before
- * anything is written, the loader inside boot.tar with them. The ESP is
+ * (or cosmoos-ARCH-<name>), its SHA256SUMS and SHA256SUMS.sig. The sums
+ * are checked against /etc/pkg/keys and the files against the sums, then
+ * the manifest against the ring, before anything is written; the loader
+ * inside boot.tar is checked with them. The ESP is
  * changed by one-sector switches of directory entries, the loader's entry
  * first and then \cosmo's, so every state an interruption can leave boots.
  * The previous set stays in \cosmo\prev. Then the root's base system
@@ -36,13 +38,13 @@
 
 #include "../../boot/protocol/cosmomanifest.h"
 #include "blkdevs.h"
+#include "relsig.h"
 #include "upgrade_fat.h"
 
-#define KEYS_DIR "/etc/pkg/keys"
+#define KEYS_DIR RELSIG_KEYS_DIR
 #define REPO_DIR "/var/lib/pkg/repo"
 #define TMP_SUFFIX ".cosmo-upgrade"
 #define SET_FILES 4   /* kernel.elf, boot.tar, cmdline, manifest */
-#define MAX_KEYS 16
 #define MAX_MEMBERS 4096
 
 #if defined(__x86_64__)
@@ -69,75 +71,6 @@ static void say(const char *fmt, ...)
     fputc('\n', stdout);
     fflush(stdout);
     va_end(ap);
-}
-
-/* --- the key ring (the same trust root as pkg, docs/pkg/invariants.md PK9) ------------ */
-
-struct key {
-    uint8_t id[8];
-    uint8_t pub[32];
-    char name[64];
-};
-
-static struct key g_keys[MAX_KEYS];
-static int g_nkeys;
-
-static int hexval(char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    return -1;
-}
-
-static void hex(const uint8_t *in, size_t n, char *out)
-{
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < n; i++) {
-        out[2 * i] = digits[in[i] >> 4];
-        out[2 * i + 1] = digits[in[i] & 15];
-    }
-    out[2 * n] = '\0';
-}
-
-static void ring_load(void)
-{
-    DIR *d = opendir(KEYS_DIR);
-    if (d == NULL)
-        return;
-    struct dirent *e;
-    while ((e = readdir(d)) != NULL && g_nkeys < MAX_KEYS) {
-        size_t nl = strlen(e->d_name);
-        if (nl < 5 || strcmp(e->d_name + nl - 4, ".pub") != 0)
-            continue;
-        char path[300], text[80];
-        snprintf(path, sizeof(path), "%s/%s", KEYS_DIR, e->d_name);
-        int fd = open(path, O_RDONLY);
-        if (fd < 0)
-            continue;
-        ssize_t n = read(fd, text, sizeof(text) - 1);
-        close(fd);
-        if (n < 64)
-            continue;
-        struct key *k = &g_keys[g_nkeys];
-        bool ok = true;
-        for (int i = 0; i < 32 && ok; i++) {
-            int hi = hexval(text[2 * i]), lo = hexval(text[2 * i + 1]);
-            ok = hi >= 0 && lo >= 0;
-            k->pub[i] = (uint8_t)(hi << 4 | lo);
-        }
-        if (!ok)
-            continue;
-        uint8_t digest[SHA512_DIGEST_SIZE];
-        sha512(k->pub, 32, digest);
-        memcpy(k->id, digest, 8);
-        snprintf(k->name, sizeof(k->name), "%s", e->d_name);
-        g_nkeys++;
-    }
-    closedir(d);
 }
 
 /* --- a boot set --------------------------------------------------------------------- */
@@ -174,12 +107,9 @@ static int set_verify(const struct set *s, bool ring, char *keyid, char *err, si
         snprintf(err, errlen, "manifest: not signed (no COSMOSIG trailer of version 1, Ed25519)");
         return -1;
     }
-    hex(sig.key_id, 8, keyid);
+    relsig_hex(sig.key_id, 8, keyid);
     if (ring) {
-        const struct key *k = NULL;
-        for (int i = 0; i < g_nkeys && k == NULL; i++)
-            if (memcmp(g_keys[i].id, sig.key_id, 8) == 0)
-                k = &g_keys[i];
+        const struct relsig_key *k = relsig_key_find(sig.key_id);
         if (k == NULL) {
             snprintf(err, errlen, "manifest: unknown signing key %s (not in %s)", keyid, KEYS_DIR);
             return -1;
@@ -266,6 +196,49 @@ static int set_read_dir(const char *dir, struct set *s)
         }
     }
     return 0;
+}
+
+/*
+ * The release's SHA256SUMS, signed by a key in the ring (SHA256SUMS.sig,
+ * relsig.h), and the four files of the set against it, under the names
+ * the release gives them. This is what a release asset is checked by
+ * before anything else reads it; the manifest then binds the set to the
+ * key the loader trusts. 0, or -1 with `err`.
+ */
+static int set_check_sums(const char *dir, const struct set *s, char keyid[17], char *err, size_t errlen)
+{
+    snprintf(keyid, 17, "(none)");
+    uint8_t *sums = NULL, *sig = NULL;
+    size_t slen = 0, glen = 0;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/SHA256SUMS", dir);
+    int rc = read_whole(path, &sums, &slen);
+    if (rc == 0) {
+        snprintf(path, sizeof(path), "%s/SHA256SUMS.sig", dir);
+        rc = read_whole(path, &sig, &glen);
+    }
+    if (rc < 0) {
+        snprintf(err, errlen, "%s: %s (a release is checked against its signed SHA256SUMS)", path, strerror(-rc));
+        free(sums);
+        return -1;
+    }
+    int out = relsig_sums_verify(sums, slen, sig, glen, keyid, err, errlen);
+    for (int i = 0; i < SET_FILES && out == 0; i++) {
+        char name[64];
+        uint8_t want[RELSIG_SHA256_SIZE], got[RELSIG_SHA256_SIZE];
+        snprintf(name, sizeof(name), "cosmoos-" ARCH "-%s", g_set_names[i]);
+        out = relsig_sums_lookup(sums, slen, name, want, err, errlen);
+        if (out == 0) {
+            relsig_sha256(s->file[i], s->len[i], got);
+            if (memcmp(got, want, sizeof(got)) != 0) {
+                snprintf(err, errlen, "%s does not match SHA256SUMS", name);
+                out = -1;
+            }
+        }
+    }
+    free(sums);
+    free(sig);
+    return out;
 }
 
 /* --- the archive ---------------------------------------------------------------------- */
@@ -881,7 +854,7 @@ static void manifest_tag(const uint8_t *manifest, char out[129])
 {
     uint8_t d[SHA512_DIGEST_SIZE];
     sha512(manifest, COSMO_MANIFEST_FILE_SIZE, d);
-    hex(d, sizeof(d), out);
+    relsig_hex(d, sizeof(d), out);
 }
 
 static int pending_set(const uint8_t *manifest)
@@ -1008,6 +981,12 @@ static int upgrade(const char *dir, bool check, const char *stop)
     char err[200], keyid[17];
     if (set_read_dir(dir, &nw) < 0)
         return EXIT_FAILED;
+    char sumkey[17];
+    if (set_check_sums(dir, &nw, sumkey, err, sizeof(err)) < 0) {
+        fprintf(stderr, "cosmo-upgrade: %s: %s; nothing written\n", dir, err);
+        return EXIT_REFUSED;
+    }
+    say("verified SHA256SUMS, signed by key %s in " KEYS_DIR ", and the set's four files against it", sumkey);
     if (set_verify(&nw, true, keyid, err, sizeof(err)) < 0) {
         fprintf(stderr, "cosmo-upgrade: %s: %s; nothing written\n", dir, err);
         return EXIT_REFUSED;
@@ -1341,7 +1320,7 @@ int main(int argc, char **argv)
     g_now = clock_gettime(CLOCK_REALTIME, &ts) == 0 ? ts.tv_sec : 0;
     if (!stat_only && !check && hold_lock() < 0)
         return EXIT_REFUSED;
-    ring_load();
+    relsig_ring_load(KEYS_DIR);
     if (stat_only)
         return status();
     if (roll)

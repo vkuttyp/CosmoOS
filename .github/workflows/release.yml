@@ -2,11 +2,12 @@
 #
 # A tag v* builds, for each architecture, the release set (`make release`:
 # the signed live image, loader, kernel.elf, boot.tar, cmdline, manifest,
-# cosmo-upgrade, SHA256SUMS) twice, in two fresh containers, with the release key, and
+# cosmo-upgrade, the signed cosmo-upgrade package, SHA256SUMS) twice, in two
+# fresh containers, with the release key, and
 # requires the two to be identical; runs the M1-M5 acceptance tests and
 # every command of the user guide against images that hash the same as the
 # published ones; and only then publishes a GitHub release with the files,
-# one SHA256SUMS, and notes naming the toolchain image digests, the
+# one SHA256SUMS signed with the release key (SHA256SUMS.sig), and notes naming the toolchain image digests, the
 # third-party source digests, the release key and the known limitations.
 # A tag with a hyphen (v1.0.0-rc1) is published as a pre-release.
 #
@@ -238,7 +239,7 @@ jobs:
   publish:
     name: GitHub release
     runs-on: ubuntu-24.04
-    needs: [image, reproducible, acceptance, guide-macos]
+    needs: [guard, image, reproducible, acceptance, guide-macos]
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
@@ -257,6 +258,11 @@ jobs:
           pattern: release-*-a
           path: sets
 
+      - name: The release key
+        env:
+          KEY: ${{ secrets.COSMOOS_RELEASE_KEY }}
+        run: scripts/release-key.sh "$COSMO_RELEASE_KEY_FILE"
+
       - name: Files, SHA256SUMS and notes
         run: |
           mkdir -p dist
@@ -265,11 +271,17 @@ jobs:
             cat sets/release-$arch-a/SHA256SUMS >> dist/SHA256SUMS
           done
           (cd dist && sha256sum -c SHA256SUMS)
+          # One SHA256SUMS for both architectures, so one signature over it,
+          # checked against the key a v1.0.3 system ships (docs/guide/upgrading.md).
+          python3 scripts/modsign.py sign-detached --key "$COSMO_RELEASE_KEY_FILE" --in dist/SHA256SUMS --out dist/SHA256SUMS.sig
+          python3 scripts/modsign.py verify-detached --pub "$(ls tools/keys/*.pub)" --in dist/SHA256SUMS --sig dist/SHA256SUMS.sig
+          lead=""
+          [ -f "docs/releases/${{ github.ref_name }}.md" ] && lead="--lead docs/releases/${{ github.ref_name }}.md"
           python3 scripts/release-notes.py --tag "${{ github.ref_name }}" \
             --toolchain "${{ needs.image.outputs.toolchain }}" --litmus "${{ needs.image.outputs.litmus }}" \
             --packages /usr/share/cosmoos-ci/packages.txt --pub "$(ls tools/keys/*.pub)" --sums dist/SHA256SUMS \
             --repro "${{ needs.reproducible.outputs.x86_64 }}" --repro "${{ needs.reproducible.outputs.aarch64 }}" \
-            --out notes.md
+            $lead --out notes.md
           cat notes.md
 
       - name: Publish

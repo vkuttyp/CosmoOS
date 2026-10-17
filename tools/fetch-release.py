@@ -3,9 +3,14 @@
 
     fetch-release.py --tag v1.0.3 --arch x86_64 --dest DIR
 
-Downloads SHA256SUMS and every cosmoos-ARCH* asset of the GitHub release
-TAG of this repository into DIR, and checks each against SHA256SUMS.
-Files already in DIR that match are kept, so DIR is a cache. Shell
+Downloads SHA256SUMS, its signature SHA256SUMS.sig and every cosmoos-ARCH*
+asset of the GitHub release TAG of this repository into DIR. SHA256SUMS is
+checked first, before any file is used: against its signature and the
+release keys in tools/keys/*.pub, the keys the images trust; a release
+from before the signature (v1.0.3 and earlier) has no SHA256SUMS.sig, and
+its SHA256SUMS must instead have the SHA-256 pinned below, taken from the
+published release. Then each asset is checked against SHA256SUMS. Files
+already in DIR that match are kept, so DIR is a cache. Shell
 completeness S7's acceptance test (make test-upgrade) starts from the
 release this way: the real, release-signed v1.0.3, not a rebuild.
 
@@ -23,7 +28,35 @@ import sys
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
+import modsign  # noqa: E402
+
 REPO = os.environ.get("GITHUB_REPOSITORY", "vkuttyp/CosmoOS")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# SHA256SUMS of the releases published before SHA256SUMS.sig (v1.0.4), as
+# GitHub serves them (checked 2026-10-17 with `gh release download`).
+PINNED = {
+    "v1.0.3": "6459827dda59751c067c7e34ddd69463e4d6e9fb2cbb73b0b2a23bcc0881eefa",
+}
+
+
+def release_pubs():
+    keys = os.path.join(ROOT, "tools", "keys")
+    return [modsign.read_hex_key(os.path.join(keys, f), "public key") for f in sorted(os.listdir(keys))
+            if f.endswith(".pub")]
+
+
+def check_sums(tag, dest):
+    """None when SHA256SUMS is the release's own, else why not."""
+    sums = open(os.path.join(dest, "SHA256SUMS"), "rb").read()
+    if tag in PINNED:
+        got = hashlib.sha256(sums).hexdigest()
+        return None if got == PINNED[tag] else f"SHA256SUMS is {got}, not the pinned {PINNED[tag]}"
+    sig = os.path.join(dest, "SHA256SUMS.sig")
+    if not os.path.exists(sig):
+        return "no SHA256SUMS.sig and no pinned digest"
+    why = modsign.verify_detached(release_pubs(), sums, open(sig, "rb").read())
+    return f"SHA256SUMS.sig: {why}" if why else None
 
 
 def sha256(path):
@@ -80,8 +113,12 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.dest, exist_ok=True)
     sums_path = os.path.join(a.dest, "SHA256SUMS")
-    if not os.path.exists(sums_path):
-        fetch(a.tag, ["SHA256SUMS"], a.dest)
+    if check_sums(a.tag, a.dest) if os.path.exists(sums_path) else True:
+        fetch(a.tag, ["SHA256SUMS"] if a.tag in PINNED else ["SHA256SUMS", "SHA256SUMS.sig"], a.dest)
+    why = check_sums(a.tag, a.dest)
+    if why:
+        print(f"fetch-release: FAIL: {a.tag}: {why}; nothing used")
+        return 1
     want = {}
     for line in open(sums_path):
         digest, name = line.split()
@@ -97,7 +134,8 @@ def main():
     if bad:
         print(f"fetch-release: FAIL: {', '.join(bad)} do not match {a.tag}'s SHA256SUMS")
         return 1
-    print(f"fetch-release: {a.tag} {a.arch}: {len(want)} files match SHA256SUMS ({a.dest})")
+    how = "pinned" if a.tag in PINNED else "signed by a key in tools/keys"
+    print(f"fetch-release: {a.tag} {a.arch}: {len(want)} files match SHA256SUMS ({how}; {a.dest})")
     return 0
 
 

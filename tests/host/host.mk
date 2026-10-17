@@ -26,6 +26,7 @@ HOST_COMMON_SRCS := \
 HOST_BUDDY_SRCS := $(HOST_COMMON_SRCS) tests/host/test_buddy.c
 HOST_SLAB_SRCS  := $(HOST_COMMON_SRCS) kernel/memory/slab.c kernel/memory/kmalloc.c tests/host/test_slab.c
 HOST_CRYPTO_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c kernel/core/crc32c.c tests/host/test_crypto.c
+HOST_RELSIG_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c userland/system/relsig.c tests/host/test_relsig.c
 HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c tests/host/test_modelf.c
 HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) tests/host/test_cosmofs.c
 HOST_LZ4_SRCS := $(HOST_COMMON_SRCS) kernel/core/lz4.c tests/host/test_lz4.c
@@ -51,7 +52,7 @@ HOST_GPT_SRCS := $(HOST_COMMON_SRCS) kernel/block/gpt.c kernel/core/cmdline.c te
 HOST_PCI_BAR_SRCS := $(HOST_COMMON_SRCS) tests/host/test_pci_bar.c
 HOST_JITTER_SRCS := $(HOST_COMMON_SRCS) kernel/core/jitter.c tests/host/test_jitter.c
 
-HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter
+HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter
 
 $(HOST_OUT)/test_fbvalid: $(addprefix $(ROOT)/,$(HOST_FBVALID_SRCS))
 	$(call log,HOSTCC,$@)
@@ -94,6 +95,12 @@ $(HOST_OUT)/test_crypto: $(addprefix $(ROOT)/,$(HOST_CRYPTO_SRCS))
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
+
+# relsig.c reads the key ring with opendir: POSIX, which glibc hides under -std=c11.
+$(HOST_OUT)/test_relsig: $(addprefix $(ROOT)/,$(HOST_RELSIG_SRCS))
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $^ $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_modelf: $(addprefix $(ROOT)/,$(HOST_MODELF_SRCS))
 	$(call log,HOSTCC,$@)

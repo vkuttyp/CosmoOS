@@ -5,9 +5,10 @@ docs/development.md, "Releases").
     release-notes.py --tag v1.0.0 --toolchain REF --litmus REF
                      --packages packages.txt --pub tools/keys/<release>.pub
                      --sums SHA256SUMS --repro "x86_64: ..." --repro "aarch64: ..."
-                     [--out notes.md]
+                     [--lead docs/releases/TAG.md] [--out notes.md]
 
-Writes Markdown: what the release is, the release signing key and its
+Writes Markdown: the release's own notes (--lead, written for it and
+kept in the tree), what the release is, the release signing key and its
 fingerprint (key id: the first 8 bytes of SHA-512 of the public key, as
 scripts/modsign.py and the loader print it; the full key is the
 fingerprint), the CI image digests the release was built in and the
@@ -44,6 +45,7 @@ def main():
     ap.add_argument("--pub", required=True)
     ap.add_argument("--sums", required=True)
     ap.add_argument("--repro", action="append", default=[])
+    ap.add_argument("--lead", help="this release's own notes, first")
     ap.add_argument("--out")
     a = ap.parse_args()
 
@@ -67,13 +69,18 @@ def main():
     lim = re.sub(r"\]\(([a-z-]+\.md)\)", r"](https://github.com/vkuttyp/CosmoOS/blob/" + a.tag + r"/docs/guide/\1)", lim)
     version = a.tag.lstrip("v")
     n = []
+    if a.lead:
+        n.append(open(a.lead, encoding="utf-8").read().rstrip() + "\n")
+        n.append("## About CosmoOS\n")
     n.append(f"CosmoOS {version}: the [1.0 roadmap](https://github.com/vkuttyp/CosmoOS/blob/{a.tag}/docs/roadmap-1.0.md) "
              "completed. CosmoOS installs to a disk, reboots into it, is used through BusyBox `ash`, keeps files "
              "across reboots, reaches the network by name, accepts an ssh login, and has a verified boot chain and "
              "sound randomness, on x86-64 and AArch64 under QEMU.\n")
     n.append(f"Start with the [user guide](https://github.com/vkuttyp/CosmoOS/blob/{a.tag}/docs/guide/README.md). "
              "Each architecture's files: `cosmoos-ARCH.img` (the signed live image), its UEFI loader, `kernel.elf`, "
-             "`boot.tar`, `cmdline` and the signed `manifest`. Check them with `sha256sum --ignore-missing -c SHA256SUMS`.\n")
+             "`boot.tar`, `cmdline`, the signed `manifest`, `cosmo-upgrade` and its signed package. `SHA256SUMS.sig` is "
+             "`SHA256SUMS`'s detached signature with the release key below (`scripts/modsign.py verify-detached`, or "
+             "`cosmo-verify` on an installed system); check the files with `sha256sum --ignore-missing -c SHA256SUMS`.\n")
     n.append("## Release signing key\n")
     n.append("The loader in these images verifies the kernel, boot archive and command line against this Ed25519 "
              "key (and the kernel trusts it for modules and packages):\n")

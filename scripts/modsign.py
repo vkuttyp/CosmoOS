@@ -5,10 +5,14 @@
   modsign.py sign   --key K.key --in module.ko.unsigned --out module.ko
   modsign.py verify --pub K.pub --in module.ko
   modsign.py keyid  --pub K.pub
+  modsign.py sign-detached   --key K.key --in FILE --out FILE.sig
+  modsign.py verify-detached --pub A.pub [--pub B.pub ...] --in FILE --sig FILE.sig
 
 Trailer format (kernel/include/kernel/modsig.h): sig[64] key_id[8]
 version:u32 algo:u32 magic[8]="COSMOSIG", appended to the ELF. The
-signature covers every byte before the trailer. Ed25519 is implemented
+signature covers every byte before the trailer. A detached signature
+(a release's SHA256SUMS.sig) is the trailer on its own, over the whole
+file it names. Ed25519 is implemented
 here in pure Python straight from RFC 8032 so the build needs nothing
 beyond the standard library; signing a module takes well under a second.
 Key files hold the 32-byte seed / public key as 64 hex characters.
@@ -237,6 +241,50 @@ def cmd_verify(args):
     return 0
 
 
+def detached(seed, payload):
+    """The 88-byte trailer alone: a release's SHA256SUMS.sig."""
+    pub = secret_to_public(seed)
+    sig = ed25519_sign(seed, payload)
+    assert ed25519_verify(pub, payload, sig)
+    return TRAILER.pack(sig, key_id(pub), VERSION, ALGO_ED25519, MAGIC)
+
+
+def verify_detached(pubs, payload, blob):
+    """None when `blob` signs `payload` with one of `pubs`, else why not."""
+    if len(blob) != TRAILER.size or blob[-8:] != MAGIC:
+        return f"not a detached signature ({len(blob)} bytes, want the {TRAILER.size}-byte trailer)"
+    sig, kid, version, algo, _ = TRAILER.unpack(blob)
+    if version != VERSION or algo != ALGO_ED25519:
+        return f"unsupported trailer version {version} / algo {algo}"
+    for pub in pubs:
+        if key_id(pub) == kid:
+            return None if ed25519_verify(pub, payload, sig) else f"bad signature (key {kid.hex()})"
+    return f"unknown signing key {kid.hex()}"
+
+
+def cmd_sign_detached(args):
+    with open(args.infile, "rb") as f:
+        payload = f.read()
+    tmp = args.out + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(detached(read_hex_key(args.key, "secret key"), payload))
+    os.replace(tmp, args.out)
+    return 0
+
+
+def cmd_verify_detached(args):
+    with open(args.infile, "rb") as f:
+        payload = f.read()
+    with open(args.sig, "rb") as f:
+        blob = f.read()
+    why = verify_detached([read_hex_key(p, "public key") for p in args.pub], payload, blob)
+    if why:
+        print(f"modsign: {args.infile}: {why}")
+        return 1
+    print(f"modsign: OK ({args.infile}, {len(payload)} bytes, key {blob[64:72].hex()})")
+    return 0
+
+
 def cmd_keyid(args):
     pub = read_hex_key(args.pub, "public key")
     print(key_id(pub).hex())
@@ -259,6 +307,16 @@ def main(argv):
     v.add_argument("--pub", required=True)
     v.add_argument("--in", dest="infile", required=True)
     v.set_defaults(fn=cmd_verify)
+    sd = sub.add_parser("sign-detached")
+    sd.add_argument("--key", required=True)
+    sd.add_argument("--in", dest="infile", required=True)
+    sd.add_argument("--out", required=True)
+    sd.set_defaults(fn=cmd_sign_detached)
+    vd = sub.add_parser("verify-detached")
+    vd.add_argument("--pub", required=True, action="append")
+    vd.add_argument("--in", dest="infile", required=True)
+    vd.add_argument("--sig", required=True)
+    vd.set_defaults(fn=cmd_verify_detached)
     i = sub.add_parser("keyid")
     i.add_argument("--pub", required=True)
     i.set_defaults(fn=cmd_keyid)
