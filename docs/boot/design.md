@@ -157,7 +157,11 @@ and `root=<device>` still work, for images built with another `CMDLINE`.
 
 What verified boot does not cover: the loader itself (`BOOTX64.EFI` is
 not signed for UEFI Secure Boot), the root filesystem, and measured boot;
-see the inventory.
+see the inventory. Since shell completeness S7 the archive carries a copy
+of the loader, `efi/BOOTX64.EFI` (`efi/BOOTAA64.EFI`), so the manifest's
+signature covers the loader that `cosmo-upgrade` installs
+(docs/userland/design.md, "Updating"); the loader the firmware starts is
+still unchecked at boot.
 
 ## The boot disk
 

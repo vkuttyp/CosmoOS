@@ -129,7 +129,7 @@ writeback thread off so that generation counts are exact.
 | `cosmofs-badmembers` | a member table claiming too many chunks, a member larger than its device, or a first usable block inside the label is refused at mount; restored, it mounts |
 | `cosmofs-mirror` | one rotted copy of a metadata block and of a data block is read from the other copy and repaired; scrub finds rot no read touched; both copies rotted is `-EIO` for that file only; a device one generation old is left out |
 | `cosmofs-mirror-stale` | the stale device is the one labelled copy 0: the mount passes over it and comes up degraded with correct reads |
-| `cosmofs-compress` | 32 compressible blocks stored in fewer, 32 incompressible stored as they are; a page rewritten inside a record; a partial page; truncation into a record and re-extension reading zeros; a clean scrub |
+| `cosmofs-compress` | 32 compressible blocks stored in fewer, 32 incompressible stored as they are; a page rewritten inside a record; a partial page; eight incompressible pages over a record, which then goes whole before plain blocks replace it (S7; `tools/cosmofs-record-fallback-probe.py`); truncation into a record and re-extension reading zeros; a clean scrub |
 | `cosmofs-crypt` | plaintext absent from the disk; wrong key `-EKEYREJECTED`; a bent block refused; a keyless scrub reads and repairs; rotation (`cosmofs_rekey`) keeps files readable; a keyless remount refuses lookups (`-ENOKEY`); eight writes of one block give eight ciphertexts; a block moved to another offset is refused. On an unseeded boot it instead asserts that the encrypted format is `-EAGAIN` and the device untouched |
 
 ### The structural check and `/dev/fsctl`

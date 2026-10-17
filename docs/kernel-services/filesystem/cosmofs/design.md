@@ -1189,6 +1189,17 @@ record is one object. The write path reads the record, replaces the
 page, and compresses again. That is the cost of compression, paid where
 it belongs rather than hidden.
 
+When the rebuilt record no longer compresses (a page that was zeros when
+the record was written now holds data), it is written as plain blocks,
+and the record is dropped whole first (`record_write`, `drop_range`).
+Until shell completeness S7 the first plain block was supposed to
+displace the record, but `set_extent` refuses a one-block range that
+would cut a record, and `data_write_block` had already stored that
+block's checksum over the record's. The write-back failed and the record
+stayed mapped under a checksum that no longer matched it, unreadable.
+wget filling a file a few kilobytes at a time hit it about once in twenty
+12 MB downloads. v1.0.3 and earlier have the defect.
+
 ### What this costs, said plainly
 
 Reading one page of a compressed record decompresses the whole record,

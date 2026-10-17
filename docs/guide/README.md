@@ -16,10 +16,12 @@ the pages in order: each one continues where the one before it stopped.
 4. [ssh](ssh.md): a key, the dropbear server, logging in as root.
 5. [Packages](packages.md): `pkg` and the repository on the installed
    disk.
-6. [Privileges](privileges.md): the privilege set, dropping privileges,
+6. [Upgrading](upgrading.md): `cosmo-upgrade` to a newer release and
+   back.
+7. [Privileges](privileges.md): the privilege set, dropping privileges,
    and what an ssh session holds.
-7. [Known limitations](limitations.md).
-8. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
+8. [Known limitations](limitations.md).
+9. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
    Apple Silicon.
 
 Commands for your computer are shown as plain blocks; commands typed on
@@ -38,3 +40,8 @@ both architectures on every pull request, so a change that makes a
 Linux step wrong fails there; `guide-macos` runs the macOS steps on a
 macOS runner on every push to main; and the release workflow runs both
 against the signed images before it publishes them.
+
+Upgrading's steps are the exception: they need an older release installed
+first, so the runner cannot run them. `make test-upgrade` runs them instead
+(the CI job `upgrade`, on every pull request, on both architectures), and
+the page shows them as text.

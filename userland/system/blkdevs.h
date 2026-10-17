@@ -1,6 +1,7 @@
 /*
- * blkdevs.h - The block devices through /dev/blkctl, for lsblk, blkid and
- * mkfs.cosmofs (shell completeness S6; uapi/cosmo/blkctl.h).
+ * blkdevs.h - The block devices through /dev/blkctl, for lsblk, blkid,
+ * mkfs.cosmofs (shell completeness S6) and cosmo-upgrade (S7;
+ * uapi/cosmo/blkctl.h).
  */
 #ifndef USERLAND_BLKDEVS_H
 #define USERLAND_BLKDEVS_H
@@ -25,6 +26,11 @@ const struct cosmo_blkctl_dev *blkdevs_find(const char *name);
 /* `count` sectors from `lba` into `buf`, in reads of at most
  * COSMO_BLKCTL_IO_MAX. 0 or -errno (-EINVAL past the device's end). */
 int blkdevs_read(const struct cosmo_blkctl_dev *d, uint64_t lba, uint64_t count, void *buf);
+/* `count` sectors from `buf` at `lba`, in writes of at most
+ * COSMO_BLKCTL_IO_MAX. 0 or -errno. */
+int blkdevs_write(const struct cosmo_blkctl_dev *d, uint64_t lba, uint64_t count, const void *buf);
+/* The device's volatile cache to stable media. 0 or -errno. */
+int blkdevs_flush(const struct cosmo_blkctl_dev *d);
 /* A FORMAT of `fstype` named `label` ("" for none). 0 or -errno. */
 int blkdevs_format(const char *name, const char *fstype, const char *label);
 /* The directories `name` is mounted on, from /proc/mounts ("/dev/NAME

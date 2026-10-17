@@ -71,4 +71,4 @@ cosmo$ exit
 ...init: disk root synced
 ```
 
-Next: [Privileges](privileges.md).
+Next: [Upgrading](upgrading.md).

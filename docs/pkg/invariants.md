@@ -108,9 +108,12 @@ the root filesystem.
 
 - No fetcher: repositories are directories (`/boot/repo` from the boot
   archive on the live image, `/var/lib/pkg/repo` on an installed system:
-  the image's repository as the installer copied it, so an installed
-  system has the packages its image was built with and no newer ones).
+  the image's repository as the installer copied it, replaced by the new
+  release's when `cosmo-upgrade` moves the system to it, shell
+  completeness S7; docs/userland/design.md, "Updating").
 - No rollback of a completed upgrade (section 47 "eventually").
+  `cosmo-upgrade --rollback` returns the repository with the boot set and
+  the base system, not the packages `pkg upgrade` changed.
 - Recipes describe in-tree C sources only: no `source:` URL, `checksum:`,
   `patches:` or build steps.
 - No pre/post install scripts, users, groups or file capabilities.

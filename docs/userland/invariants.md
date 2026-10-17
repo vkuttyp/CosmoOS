@@ -151,3 +151,28 @@ asserts both branches of both shapes by their side effects, each
 assertion a two-term list so the assertions themselves survive the
 bug. Gap: no test of a list longer than three terms, and none mixing
 `&&`/`||` with `&`.
+
+**U12. An upgrade writes nothing it has not verified, and every state it
+can be interrupted in boots.** `cosmo-upgrade` checks the manifest, all
+three files and the loader inside the archive against `/etc/pkg/keys`
+before its first write. It changes what the loader reads only by
+one-sector writes to directory entries, after everything those entries
+will name is written and flushed: first `\EFI\BOOT`'s loader entry, then
+`\cosmo`'s, which moves the set and the loader it came with together.
+The states it can leave are the old set, the new loader with the old
+set, and the new set. A set's own loader always lives beside it (in
+`\cosmo` or `\cosmo\prev`), so no sweep after an interruption can lose
+it, and a pending marker on the root makes a rerun finish an interrupted
+run rather than start another (docs/userland/design.md, "Updating").
+Check: `test-upgrade` refuses a tampered manifest, one signed by a key
+outside the ring and a tampered archive, with the ESP byte for byte
+unchanged; it stops an upgrade after `written` and after `loader`, kills
+the machine and boots each state verified; it upgrades v1.0.3, checks
+`\cosmo\prev` holds v1.0.3's set and loader, and rolls back. Gap: the
+atomicity of a one-sector write is the device's, not tested. An
+interruption inside a FAT-chain write is covered by the order (no
+reachable entry names those clusters yet), not by a test, and so is a
+rerun after `--stop-after=set`. The new loader with the old set needs the
+new loader to trust the old set's key. `tools/keys/*.pub` gives that
+between builds of this tree; an operator's own key gives it only if that
+build's ring includes it.

@@ -12,7 +12,7 @@ struct cosmo_blkctl_dev g_blkdevs[BLKDEVS_MAX];
 unsigned g_nblkdevs;
 
 static int g_ctl = -1;
-static uint8_t g_io[sizeof(struct cosmo_blkctl) + COSMO_BLKCTL_LABEL];
+static uint8_t g_io[sizeof(struct cosmo_blkctl) + COSMO_BLKCTL_IO_MAX];   /* a FORMAT's label, a WRITE's data */
 static uint8_t g_res[64 * 1024];
 
 /* One command, its data after the struct; its result into g_res. The
@@ -92,6 +92,31 @@ int blkdevs_read(const struct cosmo_blkctl_dev *d, uint64_t lba, uint64_t count,
         count -= n;
     }
     return 0;
+}
+
+int blkdevs_write(const struct cosmo_blkctl_dev *d, uint64_t lba, uint64_t count, const void *buf)
+{
+    if (d->sector_size == 0 || d->sector_size > COSMO_BLKCTL_IO_MAX || lba > d->sectors || count > d->sectors - lba)
+        return -EINVAL;
+    const uint8_t *p = buf;
+    uint32_t per = COSMO_BLKCTL_IO_MAX / d->sector_size;
+    while (count > 0) {
+        uint32_t n = count < per ? (uint32_t)count : per;
+        size_t bytes = (size_t)n * d->sector_size;
+        long rc = ctl(COSMO_BLKCTL_WRITE, d->name, lba, n, NULL, p, bytes);
+        if (rc < 0)
+            return (int)rc;
+        p += bytes;
+        lba += n;
+        count -= n;
+    }
+    return 0;
+}
+
+int blkdevs_flush(const struct cosmo_blkctl_dev *d)
+{
+    long rc = ctl(COSMO_BLKCTL_FLUSH, d->name, 0, 0, NULL, NULL, 0);
+    return rc < 0 ? (int)rc : 0;
 }
 
 int blkdevs_format(const char *name, const char *fstype, const char *label)

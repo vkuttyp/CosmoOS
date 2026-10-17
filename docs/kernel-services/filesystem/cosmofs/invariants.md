@@ -30,7 +30,7 @@ but that no invariants file carried.
 | V23 | same | a snapshot somebody is reading is not deleted (`-EBUSY`) | `cosmofs-snapshot` |
 | V24 | same | a block is named by the member that holds it; a run lies on one member | `cosmofs-pool2`, `cosmofs-v3`, `cosmofs-badmembers`, `pool`, `test_cosmofs` |
 | V25 | same | a mirror is read with a checker; a copy that missed a commit is not mirrored | `cosmofs-mirror`, `cosmofs-mirror-stale` |
-| V26 | same | a compressed record is one object; its checksums are of the disk bytes | `cosmofs-compress`, `test_lz4`, `fuzz_lz4` |
+| V26 | same | a compressed record is one object; its checksums are of the disk bytes; a record its rewrite cannot compress is dropped whole before plain blocks replace it (S7) | `cosmofs-compress`, `test_lz4`, `fuzz_lz4` |
 | V27 | same | what is encrypted is authenticated; what is not is stated | `cosmofs-crypt`, `test_chacha20` |
 | V30 | same | a mount named by id stays alive for a pass; unmount waits | `vfs-mount-id`, `vfs-mount-pin` |
 | V31 | same | a mount listing is the caller's own namespace | `fsctl-list` |

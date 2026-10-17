@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkrelease.py ARCH DEST IMAGE LOADER KERNEL ARCHIVE MANIFEST CMDLINE
+"""mkrelease.py ARCH DEST IMAGE LOADER KERNEL ARCHIVE MANIFEST CMDLINE UPGRADE
 
 Collect one architecture's release set (roadmap M6; docs/development.md,
 "Releases") into DEST under the names the GitHub release carries. DEST is
@@ -13,6 +13,9 @@ RELEASE_DIR deletes nothing:
     cosmoos-ARCH-boot.tar      \\cosmo\\boot.tar
     cosmoos-ARCH-cmdline       \\cosmo\\cmdline
     cosmoos-ARCH-manifest      \\cosmo\\manifest, signed over the three above
+    cosmoos-ARCH-cosmo-upgrade the release's /sbin/cosmo-upgrade, which an
+                               installed system runs to move to this release
+                               (shell completeness S7)
     SHA256SUMS                 `sha256sum -c` format, the files above
 
 Every file is a copy of a build output; nothing here adds a timestamp,
@@ -25,9 +28,9 @@ import sys
 
 
 def main():
-    if len(sys.argv) != 9:
+    if len(sys.argv) != 10:
         sys.exit(__doc__)
-    arch, dest, image, loader, kernel, archive, manifest, cmdline = sys.argv[1:]
+    arch, dest, image, loader, kernel, archive, manifest, cmdline, upgrade = sys.argv[1:]
     os.makedirs(dest, exist_ok=True)
     stray = [f for f in os.listdir(dest) if not (f.startswith("cosmoos-") or f == "SHA256SUMS")]
     if stray:
@@ -42,6 +45,7 @@ def main():
         (archive, f"cosmoos-{arch}-boot.tar"),
         (cmdline, f"cosmoos-{arch}-cmdline"),
         (manifest, f"cosmoos-{arch}-manifest"),
+        (upgrade, f"cosmoos-{arch}-cosmo-upgrade"),
     ]
     sums = []
     for src, name in files:

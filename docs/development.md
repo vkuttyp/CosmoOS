@@ -538,8 +538,10 @@ host dimension.
 `out/release/<arch>/` (`RELEASE_DIR` overrides): `cosmoos-<arch>.img`
 (the signed live image), `cosmoos-<arch>-BOOTX64.EFI` (`BOOTAA64.EFI`),
 `cosmoos-<arch>-kernel.elf`, `cosmoos-<arch>-boot.tar`,
-`cosmoos-<arch>-cmdline`, `cosmoos-<arch>-manifest` and `SHA256SUMS`
-(`sha256sum -c` format). It is signed with whatever `SIGNING` selects:
+`cosmoos-<arch>-cmdline`, `cosmoos-<arch>-manifest`,
+`cosmoos-<arch>-cosmo-upgrade` (the release's `cosmo-upgrade`, which an
+installed system runs to move to it; shell completeness S7) and
+`SHA256SUMS` (`sha256sum -c` format). It is signed with whatever `SIGNING` selects:
 the developer key by default; the release workflow passes
 `SIGNING=release MODSIGN_KEY=<the release key> KEYRING_PUBS=tools/keys/<release>.pub`.
 
