@@ -14,6 +14,7 @@ below are meant to stay; the exit statuses follow Unix convention.
 | `bin/<name>` | `/bin/<name>` | 0755 | `userland/shell/sh.c`, `userland/coreutils/<name>.c` |
 | `sbin/<name>` | `/sbin/<name>` | 0755 | `userland/system/<name>.c` |
 | `etc/rc` | `/etc/rc` | 0644 | `userland/etc/rc` |
+| `etc/fstab` | `/etc/fstab` (lists nothing; `mount -a` in `/etc/rc` reads it, shell completeness S6) | 0644 | `userland/etc/fstab` |
 | `etc/rc.test` | `/etc/rc.test` (self-test builds only, `SELFTEST=1`; its Linux and virtualization sections report `skipped` when the x86-only fixtures are absent) | 0644 | `userland/etc/rc.test` |
 
 `USER_BIN_PROGRAMS` (sh echo cat ls cp mv rm mkdir mkfifo rmdir pwd
@@ -105,8 +106,11 @@ when everything succeeded, 1 otherwise, 2 for usage errors.
 
 | Program | Usage | Notes |
 |---|---|---|
-| `mount` | `mount [-r] source target fstype` | `-r` is `MS_RDONLY`; `source` is a block device name (`vda`) or `none` |
-| `umount` | `umount [-f] target` | `-f` is `MNT_FORCE` |
+| `mount` | `mount [-r] source target fstype` | `-r` is `MS_RDONLY`; `source` is a block device name (`vda`) or `none`. `PATH` finds BusyBox's `/bin/mount` first (`mount -t fstype source target`, shell completeness S6); this one is run as `/sbin/mount` |
+| `umount` | `umount [-f] target` | `-f` is `MNT_FORCE`; BusyBox's `/bin/umount` comes first in `PATH` and takes the same arguments |
+| `lsblk` | `lsblk` | util-linux's default listing without `MAJ:MIN` and `RM`: `NAME SIZE RO TYPE MOUNTPOINTS`, each disk then its partitions as a tree (design.md, "Mounting"; S6) |
+| `blkid` | `blkid [DEVICE...]` | `/dev/NAME: LABEL="..." UUID="..." TYPE="cosmofs" PARTUUID="..."` (a disk with a GPT: `PTUUID`, `PTTYPE="gpt"`); DEVICE is `NAME` or `/dev/NAME`. Exit 0, or 2 when nothing was found (S6) |
+| `mkfs.cosmofs` | `mkfs.cosmofs [-L LABEL] DEVICE` | an empty single-device cosmofs on DEVICE, not mounted and not a disk with partitions; LABEL at most 16 printable characters, no blank, `"` or `\`. Exit 0, 1 failed, 2 usage (S6) |
 | `ps` | `ps` | `procinfo`; columns `PID PPID UID S THR SYSCALLS TIME(ms) NAME`; `S` is `R` running, `X` exiting, `Z` zombie; an unprivileged user sees only its own processes |
 | `kill` | `kill [-sig | -s sig] pid...` | `sig` numeric or `KILL`, `TERM` (default), `INT`, `HUP`, with or without `SIG` |
 | `dmesg` | `dmesg` | the newest 32 KiB of kernel log lines |
@@ -117,7 +121,8 @@ when everything succeeded, 1 otherwise, 2 for usage errors.
 
 ## Scripts (`/etc`)
 
-`/etc/rc`: prints `CosmoOS userland ready` and, when `/etc/rc.test`
+`/etc/rc`: prints `CosmoOS userland ready`, runs `mount -a` (the
+filesystems `/etc/fstab` lists; shell completeness S6) and, when `/etc/rc.test`
 exists (`ls /etc/rc.test 2> /tmp/.rc.probe && sh /etc/rc.test`; the
 probe file is removed afterwards), runs it. `/etc/rc.test`:
 the shell's own test (`docs/userland/testing.md`), ending with

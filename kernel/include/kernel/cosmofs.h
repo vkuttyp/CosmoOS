@@ -19,6 +19,9 @@ void cosmofs_init(void);
 /* Write a fresh filesystem (generation 1, empty root) over the device.
  * Sleeps. -EINVAL for a device too small (< 64 blocks) or too large. */
 int cosmofs_format(struct blkdev *bd);
+/* The same, with a label of up to 16 bytes (NULL or "": none); -EINVAL
+ * for a longer one. */
+int cosmofs_format_label(struct blkdev *bd, const char *label);
 /* Format `n` devices as one pool: member 0 carries the superblocks and
  * the member table, the rest a label (design.md, "The member table"). */
 int cosmofs_format_pool(struct blkdev **bd, unsigned n);

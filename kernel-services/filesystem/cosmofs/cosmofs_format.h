@@ -21,6 +21,7 @@
 #define CFS_ROOT_INO     1u
 #define CFS_SUPER_A      0u
 #define CFS_SUPER_B      1u
+#define CFS_LABEL_MAX    16u  /* cfs_super.label: bytes, no terminator needed */
 
 enum cfs_kind {
     CFS_KIND_IMAP1 = 1,
@@ -396,7 +397,20 @@ struct cfs_super {
      * only when version >= 10, so below that it is a reserved zero.
      */
     uint64_t orphan_root;
-    uint64_t reserved[3];
+    /*
+     * The filesystem's name, as blkid prints it (shell completeness S6):
+     * up to CFS_LABEL_MAX bytes, NUL-padded, all zero for none. Set at
+     * format time and never changed after.
+     *
+     * The first two words of what was reserved[3]. Not gated on the
+     * version, and the version is not raised for it: every format this
+     * tree has written zeroes these words, so an older filesystem reads
+     * as having no name. Nothing depends on the bytes, and a kernel that
+     * predates the field copies the superblock whole at each commit, so
+     * a named filesystem still mounts there and keeps its name.
+     */
+    char label[CFS_LABEL_MAX];
+    uint64_t reserved[1];
     uint32_t crc;          /* CRC32C over the whole block with this field zero */
     uint32_t pad;
 };

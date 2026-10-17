@@ -177,8 +177,10 @@ struct fs_type {
     int (*check)(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
     int (*scrub)(struct mount *mnt, struct cosmofs_scrub_stats *out);
     /* Optional: make an empty filesystem on `bdev`, which is not mounted
-     * (vfs_format checks). Reached from /dev/blkctl (roadmap M2). */
-    int (*format)(struct blkdev *bdev);
+     * (vfs_format checks), named `label` (NULL: none; a filesystem with
+     * no names refuses a non-empty one). Reached from /dev/blkctl
+     * (roadmap M2; the label, shell completeness S6). */
+    int (*format)(struct blkdev *bdev, const char *label);
     /* Optional: fill blocks/bfree/bavail (and files/ffree) of `out`, which
      * the VFS has set up with its defaults. Without it a mount whose page
      * cache is its store reports its page budget, and any other reports
@@ -214,6 +216,10 @@ struct mount {
     struct mutex sync_lock;   /* fs->sync against fs->unmount */
     struct list_node link;
     struct list_node cover_link;   /* on its mountpoint's `covers` list */
+    /* On the device claims (vfs.c, g_claims) while `bdev` is this
+     * mount's: from before fs->mount reads it until after fs->unmount
+     * has finished with it (V38; found in S6's review). */
+    struct list_node claim_link;
     /* The namespaces that can see this mount, as struct mount_ns_ref.
      * Under the mountpoint's lock, the same lock as cover_link: where a
      * mount is attached and who can see it are one question, and a
@@ -589,7 +595,7 @@ bool vfs_bdev_mounted(const struct blkdev *bd);
 /* Make an empty `fsname` filesystem on `bd`: -ENODEV for an unknown
  * type, -EOPNOTSUPP for one that cannot format, -EBUSY when
  * vfs_bdev_mounted. */
-int vfs_format(const char *fsname, struct blkdev *bd);
+int vfs_format(const char *fsname, struct blkdev *bd, const char *label);
 
 /*
  * Name a mount for an operation that acts on one filesystem rather than

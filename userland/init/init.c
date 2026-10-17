@@ -982,7 +982,7 @@ static void proc_selftest(void)
     struct spawn_handle nmap[] = { { .child = 0, .parent = 0 },
                                    { .child = 1, .parent = np[1] },
                                    { .child = 2, .parent = 2 } };
-    const char *ns_argv[] = { "sh", "-c", "mount none /tmp/nsm ramfs && ls /tmp/nsm", NULL };
+    const char *ns_argv[] = { "sh", "-c", "/sbin/mount none /tmp/nsm ramfs && ls /tmp/nsm", NULL };
     pid_t npid = spawnve_mountns("/bin/cosmo-sh", ns_argv, NULL, nmap, 3);
     CHECK(npid > 1);
     CHECK(close(np[1]) == 0);

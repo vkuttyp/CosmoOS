@@ -137,3 +137,10 @@ reboot
 halt
 hwclock
 ntpd
+# Shell completeness S6: mounting over the Linux mount(2) and umount2(2)
+# doors, under PRIV_MOUNT; mount -a reads /etc/fstab (from /etc/rc).
+# /bin/mount and /bin/umount come before the native /sbin/mount and
+# /sbin/umount in PATH. BusyBox has no lsblk, and its blkid neither knows
+# cosmofs nor prints PARTUUID: /sbin/lsblk and /sbin/blkid are native.
+mount
+umount

@@ -260,13 +260,20 @@ def stage_install(args, results):
         out = b.status(f"cosmo-install {dev}", "again-status")
         need(out, r"^again-status=3$", "a second install without --force")
         need(out, r"already has a partition table; --force replaces it", "a second install without --force")
-        out = b.run(f"mkdir /mnt/v && mount {root_dev} /mnt/v cosmofs && ls -1 /mnt/v/sbin && ls -1 /mnt/v && "
+        out = b.run(f"mkdir /mnt/v && mount -t cosmofs /dev/{root_dev} /mnt/v && ls -1 /mnt/v/sbin && ls -1 /mnt/v && "
                     "cat /mnt/v/etc/rc && cat /mnt/v/etc/pkg/repos.conf && ls -1 /mnt/v/var/lib/pkg/repo")
         out += b.status(f"cosmo-install --force {dev}", "busy-status")
         out += b.run("umount /mnt/v && echo look-ok")
         need(out, r"^busy-status=3$", "an install over a mounted disk")
         need(out, rf"^cosmo-install: {dev} is mounted$", "an install over a mounted disk")
         need(out, r"^look-ok$", "the installed root")
+        # Shell completeness S6: mkfs.cosmofs refuses the installed disk,
+        # which has partitions -- the host check below finds the GPT and
+        # the ESP intact.
+        mk = b.status(f"mkfs.cosmofs /dev/{dev}", "mkfs-status")
+        need(mk, r"^mkfs-status=1$", "mkfs.cosmofs on a disk with partitions")
+        need(mk, rf"^mkfs\.cosmofs: {dev} has partitions \({dev}p?1, \.\.\.\): format one of them$",
+             "mkfs.cosmofs on a disk with partitions")
         need(out, r"^cosmo-install$", "the installed /sbin")
         need(out, r"^svc boot$", "the installed /etc/rc")
         # Roadmap M6: the repository is on the root and repos.conf names it.

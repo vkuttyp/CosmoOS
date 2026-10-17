@@ -8,7 +8,8 @@ USER_LD := $(ROOT)/userland/user.ld
 
 # name := directory
 USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir mkfifo rmdir pwd true false sleep sync
-USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl cosmo-install netcfg priv ip syslogd
+USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl cosmo-install netcfg priv ip syslogd \
+	lsblk blkid mkfs.cosmofs
 
 PROG_DIR_sh     := shell
 PROG_DIR_echo   := coreutils
@@ -42,6 +43,13 @@ PROG_DIR_svc    := system
 PROG_DIR_fsctl  := system
 PROG_DIR_cosmo-install := system
 PROG_EXTRA_SRCS_cosmo-install := userland/system/install_gpt.c userland/system/install_sha512.c
+# Shell completeness S6: the block devices through /dev/blkctl.
+PROG_DIR_lsblk := system
+PROG_EXTRA_SRCS_lsblk := userland/system/blkdevs.c
+PROG_DIR_blkid := system
+PROG_EXTRA_SRCS_blkid := userland/system/blkdevs.c userland/system/install_gpt.c userland/system/blkid_crc32c.c
+PROG_DIR_mkfs.cosmofs := system
+PROG_EXTRA_SRCS_mkfs.cosmofs := userland/system/blkdevs.c
 
 # Test-only programs: built and archived under SELFTEST, so a release
 # image carries none of them.
@@ -59,7 +67,7 @@ PROG_DIR_init := init
 prog_srcs = userland/$(PROG_DIR_$(1))/$(1).c $(PROG_EXTRA_SRCS_$(1))
 prog_elf  = $(OUT)/userland/$(1).elf
 
-USER_SRCS := $(foreach p,$(USER_PROGRAMS),$(call prog_srcs,$(p)))
+USER_SRCS := $(sort $(foreach p,$(USER_PROGRAMS),$(call prog_srcs,$(p))))   # a shared source once
 USER_OBJS := $(call objs_of,$(USER_SRCS))
 $(eval $(call compile_rules,$(USER_OBJS),USER_CFLAGS))
 
@@ -82,6 +90,7 @@ USER_ARCHIVE_ENTRIES := \
 	$(foreach p,$(USER_BIN_PROGRAMS),bin/$(call native_bin_name,$(p))=$(call prog_elf,$(p))) \
 	$(foreach p,$(USER_SBIN_PROGRAMS),sbin/$(p)=$(call prog_elf,$(p))) \
 	etc/rc=$(ROOT)/userland/etc/rc \
+	etc/fstab=$(ROOT)/userland/etc/fstab \
 	etc/passwd=$(ROOT)/userland/etc/passwd \
 	etc/group=$(ROOT)/userland/etc/group \
 	etc/svc/hello=$(ROOT)/userland/etc/svc/hello \
@@ -93,7 +102,7 @@ ifeq ($(SELFTEST),1)
 USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(ROOT)/userland/etc/rc.linux \
 	$(foreach p,$(USER_TEST_PROGRAMS),tests/native/$(p)=$(call prog_elf,$(p)))
 endif
-USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
+USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/fstab $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
 	$(ROOT)/userland/etc/pkg/repos.conf $(PKG_TRUST_PUB) $(ROOT)/userland/etc/passwd $(ROOT)/userland/etc/group \
 	$(ROOT)/userland/etc/svc/hello $(ROOT)/userland/etc/svc/greeter $(ROOT)/userland/etc/svc/syslogd
 

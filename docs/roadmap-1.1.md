@@ -295,7 +295,7 @@ the inventory.
   `sys_admin` dropped; that machine has no RTC this kernel finds, so
   `hwclock` does not apply there
   ([report](audit/2026-10-16-power-clock-report.md)).
-- [ ] **S6 Mounting.** The Linux `mount` and `umount2` doors (cosmofs,
+- [x] **S6 Mounting.** The Linux `mount` and `umount2` doors (cosmofs,
   ramfs and procfs, with the flags the native mount supports), each under
   `PRIV_MOUNT` as the native calls are; `/etc/fstab` and `mount -a` from
   `/etc/rc`; BusyBox `mount`, `umount`, `lsblk` (from `/sys/block` or a
@@ -305,6 +305,16 @@ the inventory.
   reboot; a ramfs and a procfs mount and unmount by hand; `lsblk` names
   the GPT partitions and `blkid` the root's `PARTUUID` and label; `mount`
   and `umount` are refused with `PRIV_MOUNT` dropped.
+  Done 2026-10-17: `test-net-login`'s stage k (job `net-login`) makes the
+  blank disk a cosmofs, mounts it from `/etc/fstab` and finds it mounted
+  with its file after the reboot, and checks `lsblk` and `blkid` on the
+  installed system; `test-busybox` (job `busybox`) the hand mounts and the
+  refusals, both architectures; `lxtest`'s mount section in every debug
+  boot. BusyBox has no `lsblk` and its `blkid` neither knows cosmofs nor
+  prints `PARTUUID`, so `/sbin/lsblk` and `/sbin/blkid` are native (as
+  S1's `ip`); the label is a new cosmofs superblock field, set by the new
+  `mkfs.cosmofs -L` and by the installer (`cosmo-root`)
+  ([report](audit/2026-10-17-mounting-report.md)).
 - [ ] **S7 Updating an installed system** (after P6). `pkg upgrade` for
   the userland, and `cosmo-upgrade`, which replaces the ESP's contents
   (loader, kernel, `boot.tar`, manifest) from a release: it checks the

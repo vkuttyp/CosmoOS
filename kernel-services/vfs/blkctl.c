@@ -184,8 +184,19 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     if (cmd.version != COSMO_BLKCTL_VERSION)
         return -EINVAL;
     size_t extra = len - sizeof(cmd);
-    if (extra != 0 && cmd.op != COSMO_BLKCTL_WRITE)
-        return -EINVAL;   /* only a WRITE carries data */
+    if (extra != 0 && cmd.op != COSMO_BLKCTL_WRITE && cmd.op != COSMO_BLKCTL_FORMAT)
+        return -EINVAL;   /* only a WRITE carries data, and a FORMAT its label */
+    char label[COSMO_BLKCTL_LABEL + 1] = "";
+    if (cmd.op == COSMO_BLKCTL_FORMAT) {
+        if (extra > COSMO_BLKCTL_LABEL)
+            return -EINVAL;
+        const char *l = (const char *)buf + sizeof(cmd);
+        for (size_t i = 0; i < extra; i++)
+            if (l[i] < 0x21 || l[i] > 0x7e || l[i] == '"' || l[i] == '\\')
+                return -EINVAL;   /* printable, no blank: blkid prints it between quotes and
+                                   * fstab fields split on blanks */
+        memcpy(label, l, extra);
+    }
     if (cmd.op == COSMO_BLKCTL_LIST) {
         int64_t rc = blkctl_list(o);
         if (rc)
@@ -230,7 +241,16 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
         break;
     }
     case COSMO_BLKCTL_FORMAT:
-        rc = vfs_format(cmd.fstype, bd);
+        /* A whole disk with registered partitions is refused (found in
+         * review): the format would overwrite the primary table and leave
+         * those partitions registered over the new filesystem -- and the
+         * backup table at the disk's end would register them again at the
+         * next boot. Format a partition, or a disk without a table. */
+        if (blk_part_any(bd)) {
+            rc = -EBUSY;
+            break;
+        }
+        rc = vfs_format(cmd.fstype, bd, label);
         if (rc == 0)
             set_result(o, NULL, 0);
         break;

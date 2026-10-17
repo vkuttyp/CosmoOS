@@ -59,6 +59,13 @@ uint64_t syscall_bounce_fallback_count(void);
 struct cosmo_stat;
 int syscall_handle_stat(int h, struct cosmo_stat *st);
 
+/* Mount and unmount for both doors (shell completeness S6): the
+ * PRIV_MOUNT check, then the target resolved from the caller's directory
+ * (P27). `device` is a block device name or NULL; `flags` are MOUNT_*
+ * and VFS_UMOUNT_*, already translated from the caller's ABI. */
+int syscall_mount(const char *device, const char *target, const char *fstype, unsigned flags);
+int syscall_umount(const char *target, unsigned flags);
+
 /* Diagnostics: calls and unknown numbers seen. */
 uint64_t syscall_count(void);
 uint64_t syscall_unknown_count(void);

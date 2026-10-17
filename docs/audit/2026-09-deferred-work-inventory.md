@@ -1287,3 +1287,24 @@ each; none is needed by M2's acceptance test.
   virt's fixed address, since the DSDT is not read).
 - Halt stops the CPUs and leaves the machine on, as Linux's halt does;
   under QEMU the harness would wait for its timeout, so no test halts.
+
+## 16. Shell completeness S6 follow-ups (2026-10-17)
+
+- `/etc/fstab` names a device by its kernel name (`/dev/vdb`), which
+  follows probe order: BusyBox's `LABEL=` and `UUID=` need its
+  `volume_id`, which has no cosmofs probe and opens `/dev` block nodes
+  this kernel does not make. A cosmofs probe in a port patch, or the
+  native `blkid`'s reading in `mount`, would let a line name the label.
+- There is no `/proc/filesystems`: BusyBox `mount` without `-t` (or with
+  `auto`) has no types to try and fails.
+- `mount(2)` refuses every flag but `MS_RDONLY` (`MS_REMOUNT`, `MS_BIND`,
+  `MS_MOVE`, `nosuid`, `nodev`, `noexec`, `noatime`, ...) and any option
+  string; `umount2` refuses `MNT_DETACH`, `MNT_EXPIRE` and
+  `UMOUNT_NOFOLLOW`. The native mount supports none of them.
+- `lsblk` prints no `MAJ:MIN` (no device numbers) or `RM`, and takes no
+  options (`-f`, `-o`, `-n`). `blkid` identifies cosmofs and a GPT disk
+  only: the ESP's FAT shows its `PARTUUID` alone, and a partition's GPT
+  name (`PARTLABEL`) is not in `/dev/blkctl`'s list.
+- A cosmofs label is set at format time and cannot be changed after (no
+  `tune2fs -L` equivalent), and `mkfs.cosmofs` makes single-device,
+  unencrypted pools only.

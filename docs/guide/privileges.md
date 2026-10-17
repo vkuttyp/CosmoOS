@@ -56,8 +56,8 @@ cosmo$ priv
 mount sys_admin net proc cred device
 cosmo$ priv -d mount -- priv
 sys_admin net proc cred device
-cosmo$ priv -k net -- mount none /mnt ramfs
-mount: Operation not permitted
+cosmo$ priv -k net -- mount -t ramfs none /mnt
+mount: permission denied (are you root?)
 ```
 
 Services get theirs from the `privileges` line of their file in

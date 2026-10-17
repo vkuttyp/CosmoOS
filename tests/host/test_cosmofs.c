@@ -123,6 +123,15 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_keys) <= CFS_PAYLOAD);
     EXPECT(CFS_CSUM_POLY1305 == 2 && CFS_KDF_SHA512 == 1);
     EXPECT(sizeof(struct cfs_super) <= CFS_BLOCK);   /* key_root came out of reserved */
+    /*
+     * Shell completeness S6: the label takes the next two reserved words,
+     * one stays, and the checksum has not moved, so a kernel that predates
+     * the label reads the block it always did.
+     */
+    EXPECT(offsetof(struct cfs_super, uuid) == 96);
+    EXPECT(offsetof(struct cfs_super, label) == offsetof(struct cfs_super, orphan_root) + 8);
+    EXPECT(offsetof(struct cfs_super, label) == 136 && CFS_LABEL_MAX == 16);
+    EXPECT(offsetof(struct cfs_super, crc) == 160);
 }
 
 static void test_inode_indices(void)

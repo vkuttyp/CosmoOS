@@ -8,6 +8,7 @@
  * native process, and nothing native depends on this file.
  */
 
+#include <kernel/blk.h>
 #include <kernel/compiler.h>
 #include <kernel/elf.h>
 #include <kernel/errno.h>
@@ -2714,6 +2715,85 @@ static int64_t lx_reboot(struct syscall_args *a)
     }
 }
 
+/*
+ * mount(2) and umount2(2) (shell completeness S6; docs/compat/linux/
+ * design.md, "Mounting"): the native mount's operation, with its flags
+ * and under PRIV_MOUNT as the native calls are (syscall_mount).
+ *
+ * The source is a path: "/dev/NAME" names the block device NAME, as
+ * /proc/mounts prints it; anything without a slash is the label a
+ * filesystem with no device ignores ("none", "proc", or none at all);
+ * any other path is -ENOENT, since /dev holds no block device nodes. "proc" is Linux's name
+ * for procfs. MS_RDONLY is the one flag a mount takes; MS_SILENT (BusyBox
+ * sets it always) and the old MS_MGC_VAL marker in the top half change
+ * nothing, and every other bit -- a remount, a bind, nosuid -- is
+ * -EINVAL, as an unknown native bit is. No filesystem here takes options,
+ * so a non-empty data string is -EINVAL too.
+ */
+#define LX_MS_RDONLY 1ul
+#define LX_MS_SILENT 32768ul
+#define LX_MS_MGC_VAL 0xc0ed0000ul
+#define LX_MS_MGC_MSK 0xffff0000ul
+#define LX_MNT_FORCE 1u
+
+static int64_t lx_mount(struct syscall_args *a)
+{
+    if (!cred_has(cred_current(), PRIV_MOUNT))
+        return -EPERM;
+    unsigned long flags = (unsigned long)a->a[3];
+    if ((flags & LX_MS_MGC_MSK) == LX_MS_MGC_VAL)
+        flags &= ~LX_MS_MGC_MSK;
+    if (flags & ~(LX_MS_RDONLY | LX_MS_SILENT))
+        return -EINVAL;
+    /* A source longer than any device path or label here is refused
+     * rather than given a second VFS_PATH_MAX on this stack. */
+    char source[64] = "", target[VFS_PATH_MAX], fstype[16];
+    int rc = a->a[0] != 0 ? strncpy_from_user(source, a->a[0], sizeof(source)) : 0;
+    if (rc < 0)
+        return rc;
+    rc = get_path(a->a[1], target);
+    if (rc)
+        return rc;
+    rc = strncpy_from_user(fstype, a->a[2], sizeof(fstype));
+    if (rc < 0)
+        return rc;
+    if (a->a[4] != 0) {
+        char first;   /* only whether the string is empty */
+        if (copy_from_user(&first, a->a[4], 1))
+            return -EFAULT;
+        if (first != '\0')
+            return -EINVAL;
+    }
+    const char *device = NULL;
+    if (strncmp(source, "/dev/", 5) == 0 && source[5] != '\0' && strchr(source + 5, '/') == NULL) {
+        device = source + 5;
+        struct blkdev *bd = blk_find(device);
+        if (bd == NULL)
+            return -ENOENT;   /* no such path, as Linux says; -ENODEV is for an unknown type */
+        blkdev_put(bd);
+    } else if (strchr(source, '/') != NULL) {
+        return -ENOENT;
+    }
+    return syscall_mount(device, target, strcmp(fstype, "proc") == 0 ? "procfs" : fstype,
+                         (flags & LX_MS_RDONLY) ? MOUNT_RDONLY : 0);
+}
+
+/* MNT_FORCE is the native force; MNT_DETACH, MNT_EXPIRE and
+ * UMOUNT_NOFOLLOW are -EINVAL. */
+static int64_t lx_umount2(struct syscall_args *a)
+{
+    if (!cred_has(cred_current(), PRIV_MOUNT))
+        return -EPERM;
+    unsigned flags = (unsigned)a->a[1];
+    if (flags & ~LX_MNT_FORCE)
+        return -EINVAL;
+    char target[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], target);
+    if (rc)
+        return rc;
+    return syscall_umount(target, (flags & LX_MNT_FORCE) ? VFS_UMOUNT_FORCE : 0);
+}
+
 static __maybe_unused int64_t lx_time(struct syscall_args *a)
 {
     int64_t t = (int64_t)(clock_realtime_ns() / 1000000000ull);
@@ -4449,6 +4529,8 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_settimeofday] = lx_settimeofday,
     [LX_clock_settime] = lx_clock_settime,
     [LX_reboot] = lx_reboot,
+    [LX_mount] = lx_mount,
+    [LX_umount2] = lx_umount2,
 #ifdef LX_chmod
     [LX_chmod] = lx_chmod,
 #endif

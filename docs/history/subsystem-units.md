@@ -3100,3 +3100,18 @@ See the [history index](README.md).
   (`QEMU_REBOOT=1`) and checks the RTC's time after it, `ntpd -q` against
   the harness a day ahead, and the refusals; `test-busybox` and `lxtest`
   check the rest. Report: `docs/audit/2026-10-16-power-clock-report.md`.
+- **After 1.0: mounting (2026-10-17, roadmap-1.1 S6).** The Linux
+  personality's `mount(2)` and `umount2(2)` share the native calls' body
+  (`syscall_mount`, `syscall_umount`) under `PRIV_MOUNT`: `/dev/NAME`
+  names a block device, `MS_RDONLY` is the one flag. BusyBox `mount` and
+  `umount`; `/etc/rc` runs `mount -a` over `/etc/fstab`. Native `lsblk`,
+  `blkid` and `mkfs.cosmofs` read and format through `/dev/blkctl`, whose
+  `FORMAT` now carries a label into two of cosmofs's reserved superblock
+  words (no version change); the installer names the root `cosmo-root`.
+  `test-net-login` stage k mounts a blank disk from `/etc/fstab` across
+  the reboot and checks `lsblk` and `blkid`; `test-busybox` and `lxtest`
+  check the hand mounts, flags and refusals. The review found that one
+  block device could be mounted twice; a mount now claims its device
+  until the filesystem is done with it (vfs V38,
+  `tools/mount-claim-probe.py`). Report:
+  `docs/audit/2026-10-17-mounting-report.md`.

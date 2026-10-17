@@ -91,9 +91,18 @@ struct cfs_super {
     uint8_t uuid[16];                /* v4 */
     uint64_t key_root;               /* v7: the wrapped-key block, or 0 */
     uint64_t free_root;              /* v9: head of the free record, or 0 */
-    uint64_t reserved[4]; uint32_t crc; uint32_t pad;
+    uint64_t orphan_root;            /* v10: head of the orphan record, or 0 */
+    char label[16];                  /* S6: the name blkid prints, NUL-padded; all zero for none */
+    uint64_t reserved[1]; uint32_t crc; uint32_t pad;
 };
 ```
+
+The label (shell completeness S6) is set by `cosmofs_format_label` and
+never changed. It took two reserved words without raising the version:
+every format this tree has written zeroes them, so an older filesystem
+reads as unnamed, nothing in the filesystem depends on the bytes, and a
+kernel that predates the field copies the superblock whole at each
+commit, so a named filesystem still mounts there and keeps its name.
 
 Mount reads both, discards any slot whose magic, version, block size,
 total blocks, generation (0 = never written) or CRC is wrong, or whose

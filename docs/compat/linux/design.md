@@ -559,6 +559,34 @@ succeed and change nothing (no device here reports Ctrl-Alt-Del;
 inventory), and kexec, suspend and any other command are `-EINVAL`.
 Nothing is synced, as on Linux: BusyBox's `reboot -f` syncs first.
 
+### Mounting
+
+`mount(2)` and `umount2(2)` (shell completeness S6; x86-64 165 and 166,
+AArch64 40 and 39) are the native `SYS_mount` and `SYS_umount`'s
+operation through one shared body, `syscall_mount` and `syscall_umount`
+in `kernel/syscall/native.c`: `PRIV_MOUNT` first, then the target
+resolved from the caller's directory (P27) and named as the walk reached
+it (P32). Neither door can mount what the other cannot.
+
+The translation is the door's. The source is a path on Linux; here
+`/dev/NAME` names the block device `NAME` (what `/proc/mounts` prints and
+`lsblk` shows), although `/dev` holds no block device nodes, and a
+`/dev/NAME` with no such device is `-ENOENT`, as a missing path is on
+Linux. A source without a slash is the label a filesystem with no device
+ignores -- `none`, `proc`, or no source at all; any other path is
+`-ENOENT`. The type `proc` is Linux's name for procfs. Of the flags,
+`MS_RDONLY` is the one a mount takes (the native `COSMO_MOUNT_RDONLY`);
+`MS_SILENT`, which BusyBox sets on every call, and the old `MS_MGC_VAL`
+marker in the top 16 bits change nothing; every other bit -- a remount, a
+bind, a move, `nosuid`, `noexec`, `noatime` -- is `-EINVAL`, as an
+unknown native bit is. No filesystem here takes options, so a non-empty
+data string is `-EINVAL`. `umount2` takes `MNT_FORCE` (the native force);
+`MNT_DETACH`, `MNT_EXPIRE` and `UMOUNT_NOFOLLOW` are `-EINVAL`. The
+source is copied into 64 bytes, not another `VFS_PATH_MAX` on the kernel
+stack; a longer one is `-ENAMETOOLONG`. There is no `/proc/filesystems`,
+so BusyBox `mount` without `-t` (or with `auto`) has no types to try
+(inventory).
+
 ### The AArch64 table
 
 The system-call numbers move out of `linux_abi.h` into

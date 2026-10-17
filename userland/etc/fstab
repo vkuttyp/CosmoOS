@@ -1,0 +1,11 @@
+# /etc/fstab - filesystems /etc/rc mounts at boot with `mount -a`
+# (shell completeness S6; docs/userland/design.md, "Mounting").
+#
+# device      directory  type     options   dump  pass
+#
+# The root is not listed: init mounts it from the command line's root=.
+# A device is /dev/NAME as lsblk names it; LABEL= and UUID= are not
+# understood (blkid prints both). The types are cosmofs, ramfs and proc;
+# the one option is ro (or rw, defaults). For example:
+#
+# /dev/vdb    /data      cosmofs  defaults  0     0

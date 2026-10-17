@@ -34,6 +34,53 @@ LIST_HEAD(g_mounts);
 struct mount *g_root_mount;
 static unsigned g_nr_mounts;
 static bool g_initialized;
+/*
+ * The block devices mounts hold (invariant V38; shell completeness S6's
+ * review). One device was mountable twice -- two filesystem instances
+ * writing one disk, each sure it was alone. A mount claims its device
+ * before fs->mount reads it and gives it back after fs->unmount is done,
+ * which is longer than it is on g_mounts: an unmount takes the mount off
+ * that list before the filesystem has finished. A leaf lock: nothing is
+ * taken under it.
+ */
+static struct mutex g_claim_lock;
+static LIST_HEAD(g_claims);
+
+static bool bdev_related(const struct blkdev *a, const struct blkdev *b);
+
+/* Claim `mnt`'s device, or -EBUSY: it, its disk or one of its
+ * partitions is another mount's. */
+static int bdev_claim(struct mount *mnt)
+{
+    mutex_lock(&g_claim_lock);
+    struct mount *m;
+    list_for_each_entry(m, &g_claims, claim_link) {
+        if (bdev_related(m->bdev, mnt->bdev)) {
+            mutex_unlock(&g_claim_lock);
+            return -EBUSY;
+        }
+    }
+    list_push_back(&g_claims, &mnt->claim_link);
+    mutex_unlock(&g_claim_lock);
+    return 0;
+}
+
+static void bdev_unclaim(struct mount *mnt)
+{
+    mutex_lock(&g_claim_lock);
+    list_remove(&mnt->claim_link);
+    list_init(&mnt->claim_link);
+    mutex_unlock(&g_claim_lock);
+}
+
+/* A mount is done with its device: the claim, then its reference. */
+static void mount_put_bdev(struct mount *mnt)
+{
+    if (mnt->bdev == NULL)
+        return;
+    bdev_unclaim(mnt);
+    blkdev_put(mnt->bdev);
+}
 
 /* The time a file is stamped with: the wall clock (nanoseconds since 1970
  * UTC). Until v1.0.2 this was the monotonic clock, so every new file was
@@ -522,6 +569,7 @@ static struct mount *mount_alloc(struct fs_type *fs, struct blkdev *bdev, unsign
     waitqueue_init(&mnt->passes_quiet, "mount-passes");
     list_init(&mnt->link);
     list_init(&mnt->cover_link);
+    list_init(&mnt->claim_link);
     list_init(&mnt->ns_refs);
     return mnt;
 }
@@ -539,8 +587,15 @@ static int do_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, str
     struct mount *mnt = mount_alloc(fs, bdev, flags);
     if (mnt == NULL)
         return -ENOMEM;
-    int rc = fs->mount(fs, bdev, flags, mnt);
+    int rc = bdev ? bdev_claim(mnt) : 0;
     if (rc) {
+        kobject_put(&mnt->obj);
+        return rc;
+    }
+    rc = fs->mount(fs, bdev, flags, mnt);
+    if (rc) {
+        if (bdev)
+            bdev_unclaim(mnt);
         kobject_put(&mnt->obj);
         return rc;
     }
@@ -619,10 +674,10 @@ static bool entry_is_mountpoint(struct vnode *vn, struct vnode *held1, struct vn
  * namespace can see it, so there is nothing to detach first. */
 static void undo_mount(struct mount *mnt, struct blkdev *bdev)
 {
+    (void)bdev;   /* mnt->bdev */
     mnt->fs->unmount(mnt);
     vnode_put(mnt->root);
-    if (bdev)
-        blkdev_put(bdev);
+    mount_put_bdev(mnt);
     kobject_put(&mnt->obj);
 }
 
@@ -749,8 +804,7 @@ void vfs_mount_orphaned(struct mount *mnt)
     struct vnode *root_vn = mnt->root;
     mnt->root = NULL;
     vnode_put(root_vn);
-    if (mnt->bdev)
-        blkdev_put(mnt->bdev);
+    mount_put_bdev(mnt);
     if (mnt->mountpoint)
         vnode_put(mnt->mountpoint);
     if (urc)
@@ -957,8 +1011,7 @@ int vfs_umount_at(struct vnode *start, const char *path, unsigned flags)
     struct vnode *root_vn = mnt->root;
     mnt->root = NULL;
     vnode_put(root_vn);
-    if (mnt->bdev)
-        blkdev_put(mnt->bdev);
+    mount_put_bdev(mnt);
     vnode_put(mp);
     if (urc)
         kerror("vfs: %s: the filesystem reported %d while unmounting; uncommitted changes may be lost", path,
@@ -1199,8 +1252,7 @@ int vfs_release_old_root(struct mount *r)
     struct vnode *root_vn = r->root;
     r->root = NULL;
     vnode_put(root_vn);
-    if (r->bdev)
-        blkdev_put(r->bdev);
+    mount_put_bdev(r);
     kinfo("vfs: the old root (%s) is released: %u vnodes", r->fs->name, files);
     kobject_put(&r->obj);
     return urc;
@@ -3032,6 +3084,7 @@ void vfs_init(void)
 {
     KASSERT(!g_initialized);
     mutex_init(&g_mounts_lock, "mounts");
+    mutex_init(&g_claim_lock, "mount-claims");
     g_initialized = true;
     /* The page cache may hold a quarter of RAM before clean pages are
      * reclaimed (docs/kernel/security/design.md §3). */
@@ -3085,22 +3138,24 @@ static bool bdev_related(const struct blkdev *a, const struct blkdev *b)
     return blk_part_info(b, &pi) && strcmp(pi.disk, a->name) == 0;
 }
 
+/* The device claims, not g_mounts: a mount still being set up or still
+ * being torn down holds its device too (V38). */
 bool vfs_bdev_mounted(const struct blkdev *bd)
 {
     bool found = false;
-    mutex_lock(&g_mounts_lock);
+    mutex_lock(&g_claim_lock);
     struct mount *mnt;
-    list_for_each_entry(mnt, &g_mounts, link) {
-        if (mnt->bdev != NULL && bdev_related(mnt->bdev, bd)) {
+    list_for_each_entry(mnt, &g_claims, claim_link) {
+        if (bdev_related(mnt->bdev, bd)) {
             found = true;
             break;
         }
     }
-    mutex_unlock(&g_mounts_lock);
+    mutex_unlock(&g_claim_lock);
     return found;
 }
 
-int vfs_format(const char *fsname, struct blkdev *bd)
+int vfs_format(const char *fsname, struct blkdev *bd, const char *label)
 {
     struct fs_type *fs = vfs_find_fs(fsname);
     if (fs == NULL)
@@ -3109,9 +3164,10 @@ int vfs_format(const char *fsname, struct blkdev *bd)
         return -EOPNOTSUPP;
     if (vfs_bdev_mounted(bd))
         return -EBUSY;
-    int rc = fs->format(bd);
+    int rc = fs->format(bd, label);
     if (rc == 0)
-        kinfo("vfs: made an empty %s on %s", fsname, bd->name);
+        kinfo("vfs: made an empty %s on %s%s%s", fsname, bd->name, label && label[0] ? ", named " : "",
+              label && label[0] ? label : "");
     return rc;
 }
 

@@ -1824,7 +1824,7 @@ int cfs_sync_vnodes(struct cfs *fs)
 static const void *g_format_key;
 static size_t g_format_key_len;
 
-static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned version)
+static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned version, const char *label)
 {
     if (n == 0 || n > CFS_MAX_MEMBERS || copies == 0 || copies > CFS_MAX_COPIES)
         return -EINVAL;
@@ -2001,6 +2001,8 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         tmp.sb.key_root = crypt ? CFS_DVA(0, keys_blk) : 0;
         if (v4)
             memcpy(tmp.sb.uuid, uuid, 16);
+        if (label != NULL)
+            memcpy(tmp.sb.label, label, strnlen(label, CFS_LABEL_MAX));
         memset(block, 0, CFS_BLOCK);
         rc = pool_write(pool, CFS_SUPER_B, block);
         if (rc == 0)
@@ -2017,17 +2019,26 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
 
 int cosmofs_format_pool(struct blkdev **bd, unsigned n)
 {
-    return format_at(bd, n, 1, CFS_VERSION);
+    return format_at(bd, n, 1, CFS_VERSION, NULL);
 }
 
 int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies)
 {
-    return format_at(bd, n, copies, CFS_VERSION);
+    return format_at(bd, n, copies, CFS_VERSION, NULL);
 }
 
 int cosmofs_format(struct blkdev *bd)
 {
-    return format_at(&bd, 1, 1, CFS_VERSION);
+    return format_at(&bd, 1, 1, CFS_VERSION, NULL);
+}
+
+/* A single-device pool named `label` (NULL or "" for none): the fs_type's
+ * format, which /dev/blkctl reaches (shell completeness S6). */
+int cosmofs_format_label(struct blkdev *bd, const char *label)
+{
+    if (label != NULL && strlen(label) > CFS_LABEL_MAX)
+        return -EINVAL;
+    return format_at(&bd, 1, 1, CFS_VERSION, label);
 }
 
 /* Format with encryption: a random master key, wrapped with `key`. */
@@ -2040,7 +2051,7 @@ int cosmofs_format_encrypted(struct blkdev *bd, const void *key, size_t len)
         return rc;
     g_format_key = key;
     g_format_key_len = len;
-    rc = format_at(&bd, 1, 1, CFS_VERSION);
+    rc = format_at(&bd, 1, 1, CFS_VERSION, NULL);
     g_format_key = NULL;
     g_format_key_len = 0;
     return rc;
@@ -2053,7 +2064,7 @@ int cosmofs_test_format_version(struct blkdev *bd, unsigned version)
 {
     if (version < CFS_VERSION_MIN || version > CFS_VERSION)
         return -EINVAL;
-    return format_at(&bd, 1, 1, version);
+    return format_at(&bd, 1, 1, version, NULL);
 }
 
 /*
@@ -3223,8 +3234,8 @@ struct fs_type cosmofs_fs_type = {
     .check = cosmofs_check,
     .scrub = cosmofs_scrub,
     /* A single-device pool, unencrypted: what the installer makes
-     * through /dev/blkctl (roadmap M2). */
-    .format = cosmofs_format,
+     * through /dev/blkctl (roadmap M2), named or not (S6). */
+    .format = cosmofs_format_label,
 };
 
 void cosmofs_init(void)

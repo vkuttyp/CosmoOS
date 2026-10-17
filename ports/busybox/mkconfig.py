@@ -26,9 +26,10 @@ MORE NL OD STRINGS REV TAC YES CAL TIME TIMEOUT WATCH NOHUP KILLALL PGREP PKILL 
 FOLD PASTE COMM CKSUM BASE64 UNZIP BZIP2 BUNZIP2 XZ UNXZ ZCAT MKTEMP LOGGER SETSID
 PS KILL
 CHOWN CHGRP SU
-REBOOT HALT HWCLOCK NTPD""".split())
+REBOOT HALT HWCLOCK NTPD
+MOUNT UMOUNT""".split())
 # M4 (decision 5); v1.0.2's everyday commands; ping over raw ICMP sockets; poweroff; shell completeness S1's
-# network inspection, S2's applets, S3's process tools, S4's ownership and S5's power and clock
+# network inspection, S2's applets, S3's process tools, S4's ownership, S5's power and clock and S6's mounting
 
 FORCE = {
     "STATIC": "y",                 # decision 6: a static binary
@@ -59,6 +60,18 @@ FORCE = {
     # ifconfig's SLIP options include <linux/if_slip.h>, a kernel header
     # the musl sysroot does not carry; there is no SLIP line discipline.
     "FEATURE_IFCONFIG_SLIP": "n",
+    # Shell completeness S6: mount and umount over the Linux mount(2) and
+    # umount2(2) doors. LABEL= and UUID= need BusyBox's volume_id, which
+    # has no cosmofs probe and opens /dev nodes this kernel does not make
+    # (the native /sbin/blkid reads both); there are no loop devices, and
+    # no NFS or CIFS client; /proc/mounts is the mount table.
+    "FEATURE_MOUNT_LABEL": "n",
+    "FEATURE_MOUNT_NFS": "n",
+    "FEATURE_MOUNT_CIFS": "n",
+    "FEATURE_MOUNT_HELPERS": "n",
+    "FEATURE_MOUNT_LOOP": "n",
+    "FEATURE_MOUNT_LOOP_CREATE": "n",
+    "FEATURE_MTAB_SUPPORT": "n",
 }
 
 
