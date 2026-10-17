@@ -4398,3 +4398,21 @@ and the re-entry panic comes first on both architectures; without `--old`
 the crash test's own panic names a waiting CPU
 (docs/audit/2026-10-16-crash-lockdep-owner-report.md).
 
+## `test-display`'s panic-lockdep: a stale waiter named the panicking CPU, 2026-10-17
+
+Main's CI at `d4bf1e79` (#400's merge; #400's run 39043900425 on `1f167ad2`,
+the same code, passed the job), run 39048054390, job 117440707868
+(`net-login test (x86_64)`), step `make test-display`: `FAIL:
+panic-lockdep: no other CPU waited on lockdep's lock (CPU 1)`. The serial
+logs were not uploaded (`Error: entry not supported`). Mechanism, from the
+source: lockdep's raw lock recorded as the crash test's waiter every CPU
+that waited on it, on any owner word, and never cleared the record; a wait
+from boot contention before the hold ended the crash path's wait at once
+and, before the other CPU entered lockdep, the panic named this CPU. A
+defect in the test seam, timing-dependent. **Fixed, not a flake:** only a
+wait on the held word is recorded, and the seam makes the stale wait
+certain (this CPU waits on lockdep's lock before the hold every run; the
+other CPU enters 10 ms after the hold). `tools/crash3-waiter-probe.py --old
+--arch {x86_64,aarch64}` names this CPU as the waiter on both
+architectures; without `--old` another CPU
+(docs/audit/2026-10-17-crash3-waiter-report.md).

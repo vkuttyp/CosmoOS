@@ -1364,3 +1364,7 @@ each; none is needed by M2's acceptance test.
   `cosmo-upgrade.cpk` installs it as a package; the upgrade then replaces
   `/sbin/cosmo-upgrade` with the archive's identical copy, and a rollback
   to v1.0.3 removes it while `pkg` still lists the package.
+- CI's "Upload the boots' serial logs (on failure)" step uploads nothing
+  for `test-display`: the directory holds the boots' QMP sockets
+  (`Error: entry not supported`), so a failing panic check keeps no serial
+  log (main's run 39048054390).
