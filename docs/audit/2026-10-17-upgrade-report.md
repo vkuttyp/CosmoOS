@@ -188,3 +188,41 @@ The AGENTS.md matrix on `384ef5e4`, every step passing on its first run:
 | `test-upgrade` | 88.9 s | 80.5 s |
 
 Branch CI: recorded in the PR.
+
+## Review (PR #399)
+
+The first round (Codex, Qodo; 18 findings) on `1681b22d`, whose branch CI
+passed. Fixed in `b575b9e9`:
+
+| Finding | Fix |
+|---|---|
+| The new loader may not trust the current set's key (a power cut after the loader switch leaves nothing that boots) | `loader_trusts`: the loader image must hold the set's 8-byte key id followed by a public key that verifies its manifest (the ring is `{ id, pub, name }`, revoked keys refused at build time), for the current set and for the new set's own; refused otherwise, exit 3 |
+| A second rollback promised by the guide (Qodo), and with it the order | after a rollback to v1.0.3, `\EFI\BOOT` is v1.0.3's loader, which lacks the build's key: `--rollback` now switches the loader first when the running loader does not trust `\cosmo\prev` but `\cosmo\prev`'s loader trusts the current set, set first in the other case, refused when neither; `/sbin/cosmo-upgrade` is gone after that rollback, so the guide runs the newer binary from `/tmp` |
+| Two runs at once share free clusters | an abstract unix name bound for the run's life; a second run is refused, exit 3 |
+| `finish` cleared the marker with `\cosmo\prev` unreadable | it fails and keeps the marker when a root pass is pending |
+| `keyid` uninitialised on an early `set_verify` failure | `(none)` first |
+| sizes above 4 GiB narrowed; a `..` substring refused | refused; only a `..` component refused |
+| FAT runs coalesced past the last cluster; reserved entries swept | `valid()` per added cluster; `0x0FFFFFF0`-`0x0FFFFFF7` left alone |
+| No package in the rollback test | hello 1.0 on v1.0.3, `1 package upgraded` to 1.1, still 1.1 after the rollback |
+
+Answered without a change: the `MAX_KEYS`/`MAX_MEMBERS` bounds (the table
+and the loop use one constant); a failed plain write after the record is
+dropped (inventory 17's ordering problem; the range was wrong before the
+fix too); `TARGET.cosmo-upgrade` and `FILE.new` are the tool's names (now
+stated in the design); the release cache is named by its tag. The
+downloaded updater on v1.0.3 runs before anything verifies it: the guide
+says so, and the inventory records the fix.
+
+`test-upgrade` gains a refused set whose loader trusts a throwaway key in
+place of the release key, the package, a second rollback with the
+build's binary (loader first) and a ninth boot, `forward`: PASS 70.9 s on
+x86-64, 101.3 s on AArch64. Mutations on `b575b9e9` (x86-64, release):
+
+| Mutation | Caught by |
+|---|---|
+| M4: the current-set loader check deleted | refuse: the untrusting set upgraded, exit 0, want 3 |
+| M5: `--rollback` always switches the set first | back: no `loader switched: ... is \cosmo\prev's` line |
+
+`analyze` (7 baselined, 0 unexpected) and `host-test` pass on both
+architectures; the full matrix was not repeated (the change is
+`cosmo-upgrade`, its FAT code and its test).
