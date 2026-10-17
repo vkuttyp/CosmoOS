@@ -704,6 +704,10 @@ pid_t process_current_sid(void);
 void process_set_init(struct process *p);
 /* Whether `p` is the process process_set_init recorded. */
 bool process_is_init(const struct process *p);
+/* May `sender` send `sig` to `target`: cred_may_signal, and PRIV_SYS_ADMIN
+ * for any signal but 0 to init (security S20). Every user-sent signal
+ * asks this. */
+bool process_may_signal(const struct process *sender, const struct process *target, int sig);
 
 static inline void process_get(struct process *p) { kobject_get(&p->obj); }
 static inline void process_put(struct process *p) { kobject_put(&p->obj); }

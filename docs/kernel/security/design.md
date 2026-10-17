@@ -20,9 +20,9 @@ in the ABI; at most 16 in 1.0):
 | Privilege | What it allows |
 |---|---|
 | `PRIV_MOUNT` | `mount`, `umount`, `switch_root`; a new mount namespace and a child's root (`COSMO_SPAWN_NEWMOUNTNS`, `SETROOT`); `chroot` (shell completeness S4) |
-| `PRIV_SYS_ADMIN` | sysctl writes (`SYS_sysctl_set`, `sethostname`), `/dev/blkctl`, `/dev/fsctl`, `klog`, an unthrottled `log`, a new domain or uts namespace, overriding file permissions, ownership and the sticky bit (and so giving a file a new owner: `chown`, shell completeness S4), and a SysV shared memory segment's permissions and removal (`kernel/ipc/shm.c`, which tested `euid == 0` directly); module load and unload would be here, but there is no door for them (modules load from the boot archive only) |
+| `PRIV_SYS_ADMIN` | sysctl writes (`SYS_sysctl_set`, `sethostname`), `/dev/blkctl`, `/dev/fsctl`, `klog`, an unthrottled `log`, a new domain or uts namespace, overriding file permissions, ownership and the sticky bit (and so giving a file a new owner: `chown`, shell completeness S4), and a SysV shared memory segment's permissions and removal (`kernel/ipc/shm.c`, which tested `euid == 0` directly); module load and unload would be here, but there is no door for them (modules load from the boot archive only); rebooting, halting and powering off (`reboot(2)`, `SYS_reboot`) and any signal to init but the probe (which is how BusyBox's `reboot`, `halt` and `poweroff` ask init), setting the wall clock (`settimeofday`, `clock_settime`) and the RTC (`/dev/rtc0`'s `RTC_SET_TIME`): shell completeness S5, in place of Linux's `CAP_SYS_BOOT` and `CAP_SYS_TIME` |
 | `PRIV_NET` | `/dev/net/tapctl` (netctl configuration), binding a port below 1024 |
-| `PRIV_PROC` | signalling any process, seeing and inspecting any process (`procinfo`, `/proc`), raising a resource limit |
+| `PRIV_PROC` | signalling any process (init also needs `PRIV_SYS_ADMIN`, security S20), seeing and inspecting any process (`procinfo`, `/proc`), raising a resource limit |
 | `PRIV_CRED` | spawning with other ids (`SETCRED`), changing uid, gid and groups beyond the POSIX unprivileged rule |
 | `PRIV_DEVICE` | opening raw device nodes: `/dev/net/tap`, `/dev/vmm` (what `vmctl` needs) |
 

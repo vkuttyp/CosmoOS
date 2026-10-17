@@ -1575,6 +1575,21 @@ bool process_is_init(const struct process *p)
     return is;
 }
 
+/*
+ * Security S20 (shell completeness S5): a signal to init needs
+ * PRIV_SYS_ADMIN on top of cred_may_signal's rule. Init's signals end the
+ * system -- SIGTERM reboots, SIGUSR1 halts, SIGUSR2 powers off, and one it
+ * has no handler for kills it, which ends the boot -- so sending one is
+ * reboot(2)'s act and takes reboot(2)'s privilege. Signal 0, the probe,
+ * changes nothing and keeps the plain rule.
+ */
+bool process_may_signal(const struct process *sender, const struct process *target, int sig)
+{
+    if (!cred_may_signal(&sender->cred, &target->cred))
+        return false;
+    return sig == 0 || !process_is_init(target) || cred_has(&sender->cred, PRIV_SYS_ADMIN);
+}
+
 /* Table lock held: init if it is alive and not `except`. */
 static struct process *find_init_locked(struct process *except)
 {

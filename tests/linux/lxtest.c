@@ -833,6 +833,73 @@ static long owner_of(const char *path, int nofollow)
 #define OWNER(u, g) (((long)(u) << 32) | (long)(g))
 
 /*
+ * Shell completeness S5: settimeofday, clock_settime and reboot, in
+ * Linux's order of checks; /dev/rtc0's two requests. As root the wall
+ * clock moves an hour ahead and back; reboot is only ever called with a
+ * bad magic number, a bad command or CAD_OFF, and to uid 1000 -- each of
+ * which, if its check were missing, would restart this machine.
+ */
+static long realtime_s(void)
+{
+    struct lx_timespec ts;
+    sc2(LX_clock_gettime, LX_CLOCK_REALTIME, &ts);
+    return (long)ts.tv_sec;
+}
+
+static void power_clock_tests(void)
+{
+    struct lx_timespec ts = { .tv_sec = realtime_s(), .tv_nsec = 0 };
+    CHECKV(sc2(LX_clock_settime, LX_CLOCK_MONOTONIC, &ts) == -22, 0);   /* only REALTIME is settable */
+    struct lx_timespec bad = { .tv_sec = ts.tv_sec, .tv_nsec = 1000000000 };
+    CHECKV(sc2(LX_clock_settime, LX_CLOCK_REALTIME, &bad) == -22, 0);
+    bad = (struct lx_timespec){ .tv_sec = -1, .tv_nsec = 0 };
+    CHECKV(sc2(LX_clock_settime, LX_CLOCK_REALTIME, &bad) == -22, 0);
+    struct lx_timeval tv = { .tv_sec = ts.tv_sec, .tv_usec = 1000000 };
+    CHECKV(sc2(LX_settimeofday, &tv, 0) == -22, 0);
+    int32_t tz[2] = { 16 * 60, 0 };
+    CHECKV(sc2(LX_settimeofday, 0, tz) == -22, 0);   /* beyond 15 hours */
+    CHECKV(sc2(LX_settimeofday, 0, 0) == 0, 0);       /* nothing to set: root may */
+    /* An hour ahead, read back, and back again. */
+    long before = realtime_s();
+    struct lx_timespec ahead = { .tv_sec = before + 3600, .tv_nsec = 0 };
+    CHECKV(sc2(LX_clock_settime, LX_CLOCK_REALTIME, &ahead) == 0, 0);
+    long now = realtime_s();
+    tv = (struct lx_timeval){ .tv_sec = now - 3600, .tv_usec = 0 };
+    CHECKV(sc2(LX_settimeofday, &tv, 0) == 0, 0);
+    CHECKV(now >= before + 3600 && now <= before + 3602, now - before);
+    long back = realtime_s() - before;
+    CHECKV(back >= 0 && back <= 2, back);
+    /* reboot: the magic numbers, then the command. */
+    CHECKV(sc4(LX_reboot, 0xfee1deaeL, 672274793L, 0x01234567L, 0) == -22, 0);
+    CHECKV(sc4(LX_reboot, 0xfee1deadL, 12345L, 0x01234567L, 0) == -22, 0);
+    CHECKV(sc4(LX_reboot, 0xfee1deadL, 672274793L, 0x45584543L, 0) == -22, 0);   /* kexec */
+    CHECKV(sc4(LX_reboot, 0xfee1deadL, 672274793L, 0, 0) == 0, 0);               /* CAD_OFF */
+    /* /dev/rtc0: a plausible date, refusals of the rest. */
+    long rtc = sc4(LX_openat, LX_AT_FDCWD, "/dev/rtc0", LX_O_RDWR, 0);
+    CHECKV(rtc >= 0, rtc);
+    int32_t tm[9];
+    CHECKV(sc3(LX_ioctl, rtc, 0x80247009L, tm) == 0, 0);   /* RTC_RD_TIME */
+    CHECKV(tm[5] >= 125 && tm[4] >= 0 && tm[4] <= 11 && tm[3] >= 1 && tm[3] <= 31 && tm[2] <= 23, tm[5]);
+    tm[4] = 12;
+    CHECKV(sc3(LX_ioctl, rtc, 0x4024700aL, tm) == -22, 0);   /* RTC_SET_TIME of month 13 */
+    CHECKV(sc3(LX_ioctl, rtc, 0x7001L, 0) == -25, 0);         /* RTC_AIE_ON: ENOTTY */
+    char b;
+    CHECKV(sc3(LX_read, rtc, &b, 1) == -22, 0);
+    sc1(LX_close, rtc);
+    /* uid 1000: every one EPERM. */
+    long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        CHILD_CHECK(sc3(LX_setresgid, 1000, 1000, 1000) == 0 && sc3(LX_setresuid, 1000, 1000, 1000) == 0, 2);
+        CHILD_CHECK(sc4(LX_reboot, 0xfee1deadL, 672274793L, 0x01234567L, 0) == -1, 3);
+        CHILD_CHECK(sc2(LX_clock_settime, LX_CLOCK_REALTIME, &ahead) == -1, 4);
+        CHILD_CHECK(sc2(LX_settimeofday, 0, 0) == -1, 5);
+        lx_exit(0);
+    }
+    int32_t st = -1;
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c && st == 0, st);
+}
+
+/*
  * Shell completeness S4: fchown, fchownat (by path, AT_SYMLINK_NOFOLLOW --
  * lchown -- and AT_EMPTY_PATH) and chroot, as root and refused to a
  * process of uid 1000 (which has no privileges).
@@ -2572,6 +2639,7 @@ int main(int argc, char **argv)
     fork_tests(pid);
     inspect_tests(pid);
     ownership_tests();
+    power_clock_tests();
     exec_tests(pid);
     busybox_needs(pid);
     CHECKV(sc0(LX_sched_yield) == 0, 0);

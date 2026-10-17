@@ -206,8 +206,8 @@ without effect.
 ### Time and misc
 
 `clock_gettime(CLOCK_REALTIME | CLOCK_MONOTONIC | *_COARSE | BOOTTIME)`
-returns the monotonic clock (there is no wall clock; recorded),
-`gettimeofday` and `time` likewise; `nanosleep` and `clock_nanosleep`
+reads the wall clock or the monotonic clock as named ("Wall clock"
+below), `gettimeofday` and `time` the wall clock; `nanosleep` and `clock_nanosleep`
 (relative; `TIMER_ABSTIME` against the monotonic clock) → the killable
 sleep, and an interrupted one writes the time it did not sleep into
 `rem` (roadmap M3: it wrote 0, and BusyBox `sleep`, which sleeps again
@@ -529,6 +529,35 @@ waited). `epoll` stays stage 3.
 `gettimeofday` and `time` too; `MONOTONIC`, `MONOTONIC_RAW`,
 `MONOTONIC_COARSE` and `BOOTTIME` stay the monotonic clock.
 `clock_nanosleep(TIMER_ABSTIME)` subtracts the named clock's now.
+
+Shell completeness S5 sets it: `clock_settime(CLOCK_REALTIME)` and
+`settimeofday` (whose time zone is checked, `-EINVAL` beyond 15 hours,
+and kept nowhere) call `clock_set_realtime_ns` after Linux's checks in
+Linux's order -- a valid time (`-EINVAL` for a negative second, an
+out-of-range fraction, or any other clock), then the privilege
+(`PRIV_SYS_ADMIN` in place of `CAP_SYS_TIME`, `-EPERM`). The monotonic
+clock does not move, nor does any deadline armed on it: an absolute
+`CLOCK_REALTIME` sleep or timer converted its deadline when armed
+(inventory). `adjtimex` and `clock_adjtime` stay `-ENOSYS`: BusyBox's
+`ntpd -q` steps the clock with `settimeofday` and exits before it would
+slew.
+
+`/dev/rtc0`, where boot found an RTC (QEMU's CMOS and PL031), answers
+two of Linux's requests through the character device's `ioctl` hook,
+which `ioctl` calls for a ramfs character node: `RTC_RD_TIME` and
+`RTC_SET_TIME` (`PRIV_SYS_ADMIN`, else `-EACCES` as Linux's), a `struct
+rtc_time` in UTC; anything else is `-ENOTTY`, and a read or write
+`-EINVAL` (there are no update interrupts). BusyBox's `hwclock` needs no
+more.
+
+`reboot(magic1, magic2, cmd, arg)` checks, as Linux does, the privilege
+(`PRIV_SYS_ADMIN` in place of `CAP_SYS_BOOT`, `-EPERM`), the two magic
+numbers (`-EINVAL`) and the command: `RESTART` and `RESTART2` (its
+string unread) restart the machine, `HALT` halts it, `POWER_OFF` is
+init's exit's power-off (`kernel_reboot`), `CAD_ON` and `CAD_OFF`
+succeed and change nothing (no device here reports Ctrl-Alt-Del;
+inventory), and kexec, suspend and any other command are `-EINVAL`.
+Nothing is synced, as on Linux: BusyBox's `reboot -f` syncs first.
 
 ### The AArch64 table
 

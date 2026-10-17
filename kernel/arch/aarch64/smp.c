@@ -88,6 +88,22 @@ void aarch64_psci_system_off(void)
     kerror("shutdown: PSCI SYSTEM_OFF returned %lld", (long long)rc);
 }
 
+/* Shell completeness S5: the machine restarts (QEMU without -no-reboot
+ * resets; with it, QEMU exits). Returns only where there is no PSCI or
+ * the call failed. */
+void aarch64_psci_system_reset(void)
+{
+    int conduit = aarch64_psci_conduit();
+    if (conduit < 0) {
+        kinfo("reboot: no PSCI to reset with");
+        return;
+    }
+    g_use_hvc = conduit == 1;
+    kinfo("reboot: restart through PSCI SYSTEM_RESET (%s)", g_use_hvc ? "HVC" : "SMC");
+    int64_t rc = psci_call(PSCI_FN_SYSTEM_RESET, 0, 0, 0);
+    kerror("reboot: PSCI SYSTEM_RESET returned %lld", (long long)rc);
+}
+
 static bool g_have_psci;
 
 static void psci_probe(void)

@@ -150,7 +150,22 @@ locally with the same QEMU and firmware: time to the loader banner with
 and without the NIC, and with `romfile=` empty. The failed job was
 rerun.
 
-**The retry, everywhere (2026-10-11).** The rule moved into
+**Eighth sighting, 2026-10-17, both attempts:** local x86-64 debug
+`make QEMU_SMP=1 test`, the first boot step of S5's validation matrix on
+`afb80f37` (QEMU 11.1, this developer's machine): `boot-test: firmware
+stall, retried`, then `FAIL: the firmware did not hand over within 30s,
+twice`. Both serial logs are lost: `run_boot_test.py` keeps no stall log
+of its own, and the matrix's next step (`QEMU_SMP=2`) wrote the same
+`out/x86_64-debug/boot-test.log`. Every other step of the matrix passed,
+eleven x86-64 and thirteen AArch64 boots among them, and the rerun of the
+same step passed (147.3 s). Still unassigned. An aside from the same
+unit, not this stall: QEMU's AArch64 firmware printed this family's lines
+-- `Image type X64 can't be loaded`, the screen clears, nothing -- after
+every guest PSCI `SYSTEM_RESET` with CPUs parked on an un-EOId IPI, and
+never once the IPI was EOId (`docs/audit/2026-10-16-power-clock-report.md`);
+that hang needed a reset inside one QEMU, which no stalled boot here had.
+
+ The rule moved into
 `tests/boot/firmware_stall.py` and every harness boot uses it --
 `run_boot_test.py` (which had its own copy) and `install_test.Boot`
 (test-install, test-busybox, test-net-login, which had none): a boot that

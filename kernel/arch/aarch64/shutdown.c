@@ -51,3 +51,8 @@ void arch_power_off(void)
 {
     aarch64_psci_system_off();
 }
+
+void arch_restart(void)
+{
+    aarch64_psci_system_reset();
+}

@@ -11,6 +11,11 @@
  * SYSTEM_OFF on AArch64. It returns when there is no way to (x86-64 has
  * none yet: ACPI S5 needs the DSDT's \_S5 values, which needs AML); the
  * caller halts.
+ *
+ * arch_restart() resets the machine (shell completeness S5): PSCI
+ * SYSTEM_RESET on AArch64; the FADT reset register, then 0xCF9, the
+ * keyboard controller and a triple fault on x86-64. It returns only where
+ * none of them worked; the caller halts.
  */
 
 #ifndef ARCH_SHUTDOWN_H
@@ -21,5 +26,6 @@
 
 void arch_emulator_exit(unsigned code);
 void arch_power_off(void);
+void arch_restart(void);
 
 #endif /* ARCH_SHUTDOWN_H */

@@ -87,6 +87,7 @@ int aarch64_psci_conduit(void);
 /* PSCI SYSTEM_OFF through that conduit; returns only when there is no
  * PSCI or the firmware refused (logged). */
 void aarch64_psci_system_off(void);
+void aarch64_psci_system_reset(void);
 
 /* --- platform.c: the boot-time platform line (after acpi_init) --- */
 void aarch64_platform_report(void);
@@ -96,6 +97,7 @@ void aarch64_platform_report(void);
 #define PSCI_FN_CPU_ON         0xC4000003u
 #define PSCI_FN_AFFINITY_INFO  0xC4000004u
 #define PSCI_FN_SYSTEM_OFF     0x84000008u
+#define PSCI_FN_SYSTEM_RESET   0x84000009u
 #define PSCI_RET_SUCCESS       0
 #define PSCI_RET_NOT_SUPPORTED (-1)
 #define PSCI_RET_INVALID       (-2)

@@ -239,6 +239,7 @@ void kernel_main(const struct cosmoboot_info *info)
      * "The terminal as a file"). */
     tty_dev_init();
     memdev_init();   /* /dev/null and /dev/zero */
+    rtcdev_init();   /* /dev/rtc0, where there is an RTC */
 
     /* The network stack: mbufs, the worker thread, loopback. NIC drivers
      * are boot modules and register their interfaces when they load. */

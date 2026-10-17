@@ -22,6 +22,16 @@ unsigned arch_timer_vector(void);
  * starts at the epoch). x86-64: the CMOS RTC; AArch64: the PL031 of the
  * `virt` machine. Thread context; may map MMIO. */
 bool arch_rtc_read_epoch(uint64_t *seconds);
+/* Set the real-time clock to `seconds` since 1970 UTC (shell completeness
+ * S5: /dev/rtc0's RTC_SET_TIME, `hwclock -w`). 0, -ENODEV where there is
+ * no RTC arch_rtc_read_epoch finds, -EINVAL for a time it cannot hold.
+ * Thread context. arch_rtc_read_epoch may be called again after boot (the
+ * device's RTC_RD_TIME); the two are serialised by the architecture. */
+int arch_rtc_write_epoch(uint64_t seconds);
+/* Is there an RTC, whatever it holds (S5's /dev/rtc0, which must exist to
+ * repair an RTC that reads an invalid date): x86-64 unless the FADT says
+ * "CMOS RTC not present"; AArch64 where the PL031 is found. */
+bool arch_rtc_present(void);
 /* Monotonic counter (TSC on x86-64) and its frequency. */
 uint64_t arch_clock_read(void);
 uint64_t arch_clock_hz(void);

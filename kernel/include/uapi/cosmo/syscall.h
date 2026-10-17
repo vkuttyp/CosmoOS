@@ -167,7 +167,8 @@
 #define SYS_switch_root 102 /* (const char *path) -> 0; init alone: the mount at path becomes the root (roadmap M2) */
 #define SYS_exec      103 /* (const char *path, char *const argv[], char *const envp[]) -> no return; the image replaced in place (roadmap M3) */
 #define SYS_sysctl_set 104 /* (const char *name, const char *value, size_t len) -> 0; PRIV_SYS_ADMIN (roadmap M5) */
-#define SYS_COUNT     105
+#define SYS_reboot    105 /* (unsigned cmd) -> no return, or -errno; COSMO_REBOOT_*; PRIV_SYS_ADMIN (shell completeness S5) */
+#define SYS_COUNT     106
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
@@ -561,6 +562,12 @@ struct cosmo_ucred {
 /* Clocks (SYS_clock_ns). */
 #define COSMO_CLOCK_MONOTONIC 0
 #define COSMO_CLOCK_REALTIME  1
+
+/* SYS_reboot's commands: restart the machine, halt it, power it off (as
+ * init's own exit does). Nothing is synced: the caller syncs first. */
+#define COSMO_REBOOT_RESTART   1
+#define COSMO_REBOOT_HALT      2
+#define COSMO_REBOOT_POWER_OFF 3
 
 /* Readiness bits (SYS_ioready). */
 #define COSMO_IO_READABLE 1

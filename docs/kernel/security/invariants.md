@@ -369,3 +369,22 @@ in the second case logs the `WARN` once. Check: the boot harness
 requires `random: pool seeded` and forbids `random: pool not seeded` in
 every boot with a source, and requires the `WARN` in the no-entropy
 boot (`make test-entropy`).
+
+**S20. Only a holder of `PRIV_SYS_ADMIN` ends or restarts the system, or
+moves its clock** (shell completeness S5). `reboot(2)` and the native
+`SYS_reboot` check it before anything else, as Linux checks
+`CAP_SYS_BOOT`; so do `settimeofday`, `clock_settime` and `/dev/rtc0`'s
+`RTC_SET_TIME`, in place of `CAP_SYS_TIME`. And a signal to init other
+than the probe (signal 0) needs it on top of the ordinary rule, `PRIV_PROC`
+or a matching uid (`process_may_signal`, which every user-sent signal
+asks): init's signals end the system -- SIGTERM restarts it, SIGUSR1
+halts it, SIGUSR2 powers it off, and one with no handler kills init,
+which ends the boot -- so sending one is `reboot(2)`'s act. Without the
+rule, root with `sys_admin` dropped could reboot through `kill 1`. Linux
+lets any root signal init; this kernel's root holds nothing by its uid.
+Check: `test-net-login` stage j refuses `reboot` (the signal) and
+`reboot -f` (the call) with `sys_admin` dropped, `date -s` and `hwclock -w`
+the same, and `date -s` to uid 1000; `test-busybox` refuses `kill -TERM
+1` with `sys_admin` dropped (the process keeps `PRIV_PROC` and uid 0, so
+only this rule refuses it) and allows `kill -0 1`; `lxtest` refuses
+`reboot`, `settimeofday` and `clock_settime` to uid 1000.

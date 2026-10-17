@@ -25,9 +25,10 @@ IFCONFIG ROUTE NETSTAT ARP HOSTNAME
 MORE NL OD STRINGS REV TAC YES CAL TIME TIMEOUT WATCH NOHUP KILLALL PGREP PKILL PIDOF INSTALL REALPATH SPLIT
 FOLD PASTE COMM CKSUM BASE64 UNZIP BZIP2 BUNZIP2 XZ UNXZ ZCAT MKTEMP LOGGER SETSID
 PS KILL
-CHOWN CHGRP SU""".split())
+CHOWN CHGRP SU
+REBOOT HALT HWCLOCK NTPD""".split())
 # M4 (decision 5); v1.0.2's everyday commands; ping over raw ICMP sockets; poweroff; shell completeness S1's
-# network inspection, S2's applets, S3's process tools and S4's ownership
+# network inspection, S2's applets, S3's process tools, S4's ownership and S5's power and clock
 
 FORCE = {
     "STATIC": "y",                 # decision 6: a static binary

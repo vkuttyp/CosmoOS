@@ -143,12 +143,13 @@ ticked in the same PR).
   **Acceptance:** a dynamically linked musl BusyBox (and a small
   dynamically linked test program using `dlopen`) passes the M3 scripted
   test on both architectures.
-- [ ] **P5 Setting the clock.** Absorbed by
+- [x] **P5 Setting the clock.** Absorbed by
   [S5](#s-shell-completeness), which carries its scope (`settimeofday`,
   `clock_settime`, BusyBox `ntpd`) and its acceptance, with one change:
   the operation privilege is `PRIV_SYS_ADMIN`, in place of the
   `PRIV_TIME` this entry proposed (uid 0 alone still grants nothing,
-  `docs/kernel/security/design.md`).
+  `docs/kernel/security/design.md`). Done 2026-10-17 by S5,
+  with `ntpd -q` in `test-net-login`'s stage j (below).
 - [ ] **P6 A network package repository.** `pkg` fetches an index and
   packages over HTTPS from a configured URL, checking the index's and each
   package's signature against the key ring, over the same certificate
@@ -265,7 +266,7 @@ the inventory.
   owner is `PRIV_SYS_ADMIN`'s, `chroot` `PRIV_MOUNT`'s and moves the
   working directory to the new root
   ([report](audit/2026-10-16-ownership-report.md)).
-- [ ] **S5 Power and clock** (absorbs P5). `reboot(2)` with
+- [x] **S5 Power and clock** (absorbs P5). `reboot(2)` with
   `LINUX_REBOOT_CMD_RESTART`, `HALT`, `POWER_OFF`, `CAD_ON` and `CAD_OFF`;
   PSCI `SYSTEM_RESET` on AArch64, the keyboard-controller and ACPI reset
   register paths on x86-64. Power-off on x86-64 stays QEMU-only
@@ -281,7 +282,19 @@ the inventory.
   reboot where the machine has an RTC; `date -s` is refused for an
   unprivileged process and for root with `sys_admin` dropped; and P5's
   check: the harness serves NTP a day ahead and `ntpd -q` sets
-  `CLOCK_REALTIME` to within 1 s of it.
+  `CLOCK_REALTIME` to within 1 s of it. Done
+  2026-10-17: `test-net-login`'s stage j (job `net-login`) restarts the
+  installed system inside one QEMU and reads the RTC's time after it,
+  steps the clock with `ntpd -q` against the harness, and checks the
+  refusals; `test-busybox` (job `busybox`) the rest, both architectures;
+  `lxtest`'s power and clock section in every debug boot. A signal to init
+  needs `PRIV_SYS_ADMIN` too (security S20), since BusyBox's `reboot`
+  and `halt` signal init. On Parallels Desktop (the developer's run, as
+  P1's was) `reboot` restarted the installed system through PSCI
+  `SYSTEM_RESET`, back at its prompt in 1.8 s, and was refused with
+  `sys_admin` dropped; that machine has no RTC this kernel finds, so
+  `hwclock` does not apply there
+  ([report](audit/2026-10-16-power-clock-report.md)).
 - [ ] **S6 Mounting.** The Linux `mount` and `umount2` doors (cosmofs,
   ramfs and procfs, with the flags the native mount supports), each under
   `PRIV_MOUNT` as the native calls are; `/etc/fstab` and `mount -a` from

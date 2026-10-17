@@ -148,5 +148,9 @@
 #define LX_chroot 51
 #define LX_utimensat 88
 #define LX_fchmodat2 452
+/* Power and clock (shell completeness S5). */
+#define LX_settimeofday 170
+#define LX_clock_settime 112
+#define LX_reboot 142
 
 #endif /* COMPAT_LINUX_NR_AARCH64_H */

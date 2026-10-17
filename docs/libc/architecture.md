@@ -99,8 +99,9 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
   waits in a `while` on its own predicate -- an `if` there is a bug that
   passes every test on an unloaded machine.
 - Floating point, `<math.h>`, locales, wide characters, `time.h`
-  calendar functions (there is no wall clock; `clock_gettime` gives the
-  monotonic clock only).
+  calendar functions (`clock_gettime` gives `CLOCK_MONOTONIC` and the
+  wall clock, `CLOCK_REALTIME`, which the Linux personality's
+  `settimeofday` and `clock_settime` set since shell completeness S5).
 - `fork`, `exec*`, `system`, `popen` (no `fork`), signal handlers
   (`signal`, `sigaction`), `setjmp` (nothing needs it yet), `termios`,
   `getpwnam` (no user database), dynamic linking, `dlopen`.

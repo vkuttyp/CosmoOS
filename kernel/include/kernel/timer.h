@@ -234,9 +234,21 @@ unsigned clock_test_tick_owner(void);
 void clock_test_set_tick_owner(unsigned cpu);
 #endif
 /* Nanoseconds since 1970-01-01 UTC: the monotonic clock plus the offset
- * read from the real-time clock at boot (0 when the platform has none).
- * Lock-free, any context. */
+ * read from the real-time clock at boot (0 when the platform has none),
+ * or set since by clock_set_realtime_ns. Lock-free, any context. */
 uint64_t clock_realtime_ns(void);
+/* Set the wall clock to `ns` since 1970 (shell completeness S5:
+ * settimeofday, clock_settime, the RTC device's callers check
+ * PRIV_SYS_ADMIN). Under a sequence count: a reader sees the old wall
+ * clock or the new one, never the old offset with a later counter. The monotonic clock, and every deadline on it --
+ * an absolute CLOCK_REALTIME timer was converted when armed -- do not move
+ * (inventory). */
+void clock_set_realtime_ns(uint64_t ns);
+
+/* Days since 1970-01-01 for a proleptic Gregorian date (m 1..12, d
+ * 1..31), and back: the RTCs' calendar fields. */
+int64_t time_days_from_civil(int64_t y, unsigned m, unsigned d);
+void time_civil_from_days(int64_t days, int64_t *y, unsigned *m, unsigned *d);
 uint64_t clock_hz(void);
 const char *clock_name(void);
 

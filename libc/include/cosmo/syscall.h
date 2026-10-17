@@ -384,6 +384,13 @@ static inline long cosmo_sysctl_set(const char *name, const char *value, size_t 
     return cosmo_syscall3(SYS_sysctl_set, name, value, len);
 }
 
+/* Shell completeness S5: restart, halt or power off (COSMO_REBOOT_*);
+ * PRIV_SYS_ADMIN. Returns only on failure. */
+static inline long cosmo_reboot(unsigned cmd)
+{
+    return cosmo_syscall1(SYS_reboot, cmd);
+}
+
 /* Credentials: -1 keeps an id. */
 static inline long cosmo_setresuid(long ruid, long euid, long suid)
 {

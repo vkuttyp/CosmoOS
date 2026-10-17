@@ -31,6 +31,7 @@
 #include <kernel/netif.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
+#include <kernel/shutdown.h>
 #include <kernel/signal.h>
 #include <kernel/socket.h>
 #include <kernel/unix.h>
@@ -1618,7 +1619,7 @@ static int kill_one(struct process *target, int sig)
      * thing the domain is meant not to tell it. */
     if (cur->domain != 0 && target->domain != cur->domain)
         return -ESRCH;
-    if (!cred_may_signal(&cur->cred, &target->cred))
+    if (!process_may_signal(cur, target, sig))
         return -EPERM;
     if (sig == 0)
         return 0;   /* it exists and could be signalled; nothing is sent */
@@ -2549,6 +2550,24 @@ static int64_t sys_sysctl(struct syscall_args *a)
  * PRIV_SYS_ADMIN. -ENOENT for an unknown name, -EROFS for one that is
  * read-only, -EPERM without the privilege.
  */
+/* Shell completeness S5: init's door to kernel_reboot (the Linux
+ * personality's reboot(2) is the other). */
+static int64_t sys_reboot(struct syscall_args *a)
+{
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
+        return -EPERM;
+    switch (a->a[0]) {
+    case COSMO_REBOOT_RESTART:
+        kernel_reboot(KERNEL_REBOOT_RESTART);
+    case COSMO_REBOOT_HALT:
+        kernel_reboot(KERNEL_REBOOT_HALT);
+    case COSMO_REBOOT_POWER_OFF:
+        kernel_reboot(KERNEL_REBOOT_POWER_OFF);
+    default:
+        return -EINVAL;
+    }
+}
+
 static int64_t sys_sysctl_set(struct syscall_args *a)
 {
     char name[64];
@@ -2650,6 +2669,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_klog] = sys_klog,
     [SYS_sysctl] = sys_sysctl,
     [SYS_sysctl_set] = sys_sysctl_set,
+    [SYS_reboot] = sys_reboot,
     [SYS_vm_create] = sys_vm_create,
     [SYS_vm_mem] = sys_vm_mem,
     [SYS_vm_mem_rw] = sys_vm_mem_rw,

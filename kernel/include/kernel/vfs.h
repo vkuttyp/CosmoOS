@@ -539,11 +539,17 @@ struct chrdev_ops {
     unsigned (*ready)(struct vnode *vn, struct file *f);
     struct waitqueue *(*poll_wq)(struct vnode *vn, struct file *f, unsigned events);
     int (*set_nonblock)(struct vnode *vn, struct file *f, int on);
+    /* Optional (shell completeness S5): a request in Linux's numbering,
+     * which only the Linux personality's ioctl calls; -ENOTTY for one the
+     * device does not know. /dev/rtc0 sets it. */
+    int64_t (*ioctl)(struct vnode *vn, struct file *f, unsigned req, uint64_t arg);
 };
 int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, void *priv, struct vnode **out);
 /* /dev/null and /dev/zero (kernel-services/vfs/memdev.c), once the ramfs
  * root exists. */
 void memdev_init(void);
+/* /dev/rtc0 where boot found a real-time clock (kernel/timer/rtcdev.c). */
+void rtcdev_init(void);
 
 /* Create an anonymous (unlinked) regular ramfs file -- the backing for a
  * Linux memfd. It has no directory entry: the single reference *out carries is

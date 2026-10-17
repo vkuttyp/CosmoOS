@@ -36,8 +36,10 @@ and the PIT method works on every machine this project targets.
 
 `clock_realtime_ns() = clock_now_ns() + g_realtime_offset_ns`, the offset
 set once in `timer_init` from the architecture's RTC (`arch_rtc_read_epoch`:
-x86-64 reads CMOS registers 0x00/0x02/0x04/0x07/0x08/0x09/0x32 twice
-until stable and converts BCD unless status B says binary; AArch64 maps
+x86-64 reads CMOS registers 0x00/0x02/0x04/0x07/0x08/0x09 and the
+century register the FADT names (its `CENTURY` byte; QEMU's 0x32; none
+when it is 0, and then the century is guessed) twice until stable and
+converts BCD unless status B says binary; AArch64 maps
 the PL031 at `0x09010000`, on QEMU's firmware only, checks its peripheral
 id and reads `RTCDR`). With no RTC the offset comes from the firmware's
 `GetTime`, which the loader read just before `ExitBootServices` (boot
@@ -46,9 +48,35 @@ zero: `timer: wall clock N s since 1970 from the firmware at boot (no
 RTC)`. It is late by the time between that read and the clock's start,
 well under a second. That is the wall clock on Parallels Desktop, which
 has no RTC this kernel finds. With neither, the offset stays 0 and the
-boot warns. There is no `settimeofday` and no NTP; the clock is the
-RTC's (or the firmware's) second plus the monotonic clock's progress
-since. Consumers: the native
+boot warns. The clock is the RTC's (or the firmware's) second plus the
+monotonic clock's progress since, until something sets it.
+
+Shell completeness S5 sets it: `clock_set_realtime_ns(ns)` stores
+`ns - clock_now_ns()` as the offset under a sequence count (odd while it
+changes; the writers serialised by the `realtime` spinlock with
+interrupts off), and `clock_realtime_ns` samples the offset and the
+counter again if the count moved between its two loads, so a reader sees
+the old wall clock or the new one, never the old offset added to a
+counter read after the change (found in review). The offset is
+unsigned: a wall time earlier than the monotonic reading wraps it, and
+the sum wraps back. Its callers -- the Linux `settimeofday` and
+`clock_settime`, through which BusyBox's `date -s` and `ntpd` reach it
+-- check `PRIV_SYS_ADMIN`. The monotonic clock and every deadline on it
+stay where they were: an absolute `CLOCK_REALTIME` wait was converted to
+a monotonic deadline when it was armed, so it fires at the old wall time
+(Linux re-arms it; inventory). The RTC is written back by
+`arch_rtc_write_epoch` (x86-64: status B's SET bit holds the update off
+while the fields are written in status B's encoding, under the
+`cmos` spinlock that also covers a read, since every access is an
+index write then a data access, and without a century register refusing
+a year past 2069, which the read would take for 19xx; AArch64: the PL031's load register
+`RTCLR`, 32 bits of seconds), which `/dev/rtc0`'s `RTC_SET_TIME`
+(`kernel/timer/rtcdev.c`) calls for `hwclock -w`; the century is written
+only to the register the FADT names. `/dev/rtc0` exists where
+`arch_rtc_present` says there is an RTC (x86-64 unless the FADT's
+`IAPC_BOOT_ARCH` says "CMOS RTC not present"; AArch64 where the PL031 is
+found), whatever date it holds, so an RTC reading an invalid date can be
+set; its `RTC_RD_TIME` is then `-EINVAL`. Consumers: the native
 `clock_ns(COSMO_CLOCK_REALTIME)`, the Linux `CLOCK_REALTIME` family,
 `gettimeofday`, `time`, `FUTEX_CLOCK_REALTIME` and `TIMER_ABSTIME`.
 
