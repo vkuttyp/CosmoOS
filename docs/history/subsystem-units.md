@@ -3110,5 +3110,8 @@ See the [history index](README.md).
   words (no version change); the installer names the root `cosmo-root`.
   `test-net-login` stage k mounts a blank disk from `/etc/fstab` across
   the reboot and checks `lsblk` and `blkid`; `test-busybox` and `lxtest`
-  check the hand mounts, flags and refusals. Report:
+  check the hand mounts, flags and refusals. The review found that one
+  block device could be mounted twice; a mount now claims its device
+  until the filesystem is done with it (vfs V38,
+  `tools/mount-claim-probe.py`). Report:
   `docs/audit/2026-10-17-mounting-report.md`.

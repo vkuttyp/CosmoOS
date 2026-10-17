@@ -105,7 +105,7 @@ The acceptance, in CI on both architectures:
   file. The disk names differ by machine and are found, not assumed: on
   x86-64 the installed disk is the SATA `ahci0p0` and the blank one
   `vda`; on AArch64 `vda` and `vdb`.
-- **`test-busybox`** (job `busybox`), 19 checks more (195): a ramfs
+- **`test-busybox`** (job `busybox`), 19 checks more (195; 196 with the review's `mount-twice`): a ramfs
   mounted, written and listed by `mount`; a procfs mounted and read; a
   read-only ramfs refusing a create; `mount` and `umount` refused with
   `mount` dropped, nothing mounted or unmounted; `-o remount` "Invalid
@@ -162,9 +162,22 @@ Round 1 (Codex 2, Qodo 9 on `1d0a1d60`), each checked against the code:
   so the 32-bit count cannot wrap (Qodo).
 
 The second mount point led to a defect older than this unit: one block
-device can be mounted twice, giving two filesystem instances on one disk
-(seen in a release boot). Neither door claims a device; it is in the
-inventory (§16), not fixed here.
+device could be mounted twice -- `mount -t cosmofs /dev/nvme0n1` at two
+directories, one `ro` and one `rw`, seen in a release boot -- giving two
+filesystem instances writing one disk; neither door claimed a device.
+Fixed at the owner's request in `f6fbce9a` (vfs invariant V38): a mount
+claims its device, the disk it belongs to and that disk's partitions
+(`bdev_claim` in `do_mount`) before the filesystem reads it, and gives
+the claim back only after `fs->unmount` has finished (`mount_put_bdev`,
+on all four paths that drop a mount's device reference) -- longer than
+its place on `g_mounts`, which an unmount leaves before the filesystem
+is done. A second mount is `-EBUSY`; `vfs_bdev_mounted`, which
+`/dev/blkctl` consults before a WRITE or FORMAT, reads the claims too.
+`test-busybox`'s `mount-twice` checks it (196 checks), and
+`tools/mount-claim-probe.py` proves it on both architectures: `--old`
+reverses the fix commit's `vfs.c` and `vfs.h` in a throwaway worktree,
+where the second mount is made and `mount-twice` fails; without it the
+check passes.
 
 After the fixes: `host-test`, `analyze`, debug `test`, and release
 `test-busybox`, `test-net-login` and `test-install` on both
@@ -172,21 +185,25 @@ architectures, PASS.
 
 ## Validation
 
-- **The validation matrix**, on `4c0d72cc`, every step PASS on the first
-  run; the boot times are the harness's own lines:
+- **The validation matrix**, first on `4c0d72cc` (before review), every
+  step PASS on the first run, and again on `f6fbce9a` (the review fixes
+  and the device claim), every step PASS on the first run; the boot
+  times are the harness's own lines from the second:
 
   | Step | x86-64 | AArch64 |
   |---|---|---|
   | `host-test`, `fuzz`, `analyze` | pass | pass |
-  | debug `test`, `QEMU_SMP=1` / `2` / `4` | 146.3 / 155.2 / 147.7 s | 140.7 / 149.2 / 160.6 s |
-  | `test-smp2` | 154.2 s | 158.6 s |
-  | `test-chaos` | 157.3 s | 156.5 s |
-  | `test-harness-retry` | 154.7 s | 161.1 s |
-  | `BUILD=release test` | 18.1 s | 21.5 s |
-  | `BUILD=release test-busybox` | 48.7 s (195 checks) | 55.9 s (195 checks) |
-  | `BUILD=release test-net-login` | 78.8 s | 92.4 s |
-  | `BUILD=release test-install` | 25.3 s | 40.6 s |
+  | debug `test`, `QEMU_SMP=1` / `2` / `4` | 147.8 / 146.9 / 155.3 s | 149.3 / 149.3 / 159.8 s |
+  | `test-smp2` | 155.8 s | 151.1 s |
+  | `test-chaos` | 156.1 s | 153.4 s |
+  | `test-harness-retry` | 155.4 s | 173.9 s |
+  | `BUILD=release test` | 18.9 s | 21.6 s |
+  | `BUILD=release test-busybox` | 48.9 s (196 checks) | 63.8 s (196 checks) |
+  | `BUILD=release test-net-login` | 79.9 s | 91.0 s |
+  | `BUILD=release test-install` | 25.5 s | 41.4 s |
 
   The network harness passed in every debug boot (the boot test requires
   it). `analyze`: clean, 7 baselined diagnostics, 0 unexpected.
+- **`tools/mount-claim-probe.py`**: PASS in both modes on both
+  architectures (fixed: the second mount refused; `--old`: made).
 - **Branch CI**: recorded in the PR.
