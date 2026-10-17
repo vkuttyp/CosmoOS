@@ -374,17 +374,17 @@ def stage_hold(args, results, keyid, new_loader, uloader):
         k = verified_key(b, "the upgraded system")
         if k != keyid:
             raise Fail(f"the upgraded system booted with key {k}, not {keyid}")
-        # The first run takes the lock, then blocks opening a FIFO in place
-        # of its kernel.elf. The second asks again until it is refused: a
-        # run that got the lock instead would fail on a missing directory,
-        # having written nothing.
-        out = sh(b, "mkdir -p /tmp/lk && mkfifo /tmp/lk/kernel.elf && "
-                    "{ cosmo-upgrade /tmp/lk > /tmp/lk.out 2>&1 & } && i=0 && "
-                    "while [ $i -lt 100 ] && ! cosmo-upgrade /tmp/none 2>&1 | grep -q 'another cosmo-upgrade'; do "
-                    "i=$((i+1)); sleep 0.1; done; cosmo-upgrade /tmp/none; echo second=$?", "lock")
+        # The first run takes the lock, then reads the key ring and the
+        # set. A FIFO in the ring (lk.pub) tells the test it holds the lock:
+        # writing to it returns once the run has opened it, which it does
+        # only after binding the lock. It then blocks on a second FIFO in
+        # place of its kernel.elf, lock held, while a second run is refused.
+        out = sh(b, "mkdir -p /tmp/lk && mkfifo /tmp/lk/kernel.elf /etc/pkg/keys/lk.pub && "
+                    "{ cosmo-upgrade /tmp/lk > /tmp/lk.out 2>&1 & } && echo x > /etc/pkg/keys/lk.pub && "
+                    "cosmo-upgrade /tmp/none; echo second=$?", "lock")
         need(out, r"^cosmo-upgrade: another cosmo-upgrade is running; nothing written$", "a second run")
         need(out, r"^second=3$", "a second run")
-        out = sh(b, "echo x > /tmp/lk/kernel.elf; sleep 1; cat /tmp/lk.out", "lockdone")
+        out = sh(b, "echo x > /tmp/lk/kernel.elf; sleep 1; rm /etc/pkg/keys/lk.pub; cat /tmp/lk.out", "lockdone")
         need(out, r"^cosmo-upgrade: /tmp/lk/kernel\.elf: Invalid argument$", "the first run, its FIFO opened")
         what = "the lock"
         if swap:

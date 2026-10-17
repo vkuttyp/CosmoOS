@@ -157,10 +157,14 @@ replaces `\EFI\BOOT`'s loader with the build's loader whose release-key
 ring entry is a throwaway key's, so it starts the build's set but not
 v1.0.3's, and `\cosmo\prev`'s loader (v1.0.3's) does not trust the
 build's key. `cosmo-upgrade --rollback` is refused (`neither ... nor
-...`), exit 3. The lock: a first run takes it and blocks opening a FIFO
-in place of its `kernel.elf`; a second is refused, exit 3 (the loop asks
-with a missing directory, so a run that took the lock would write
-nothing). The ESP is unchanged and the host puts the loader back.
+...`), exit 3. The lock: a first run takes it, then opens each `/etc/pkg/keys/*.pub`;
+one of them is a FIFO (`lk.pub`), and the test's write to it returns only
+once the run has opened it, after binding the lock. The run then blocks on
+a FIFO in place of its `kernel.elf`, lock held, and a second run is
+refused, exit 3. (The first version probed with a second run in a loop,
+which could take the lock before the first bound it: the matrix's x86-64
+`test-upgrade` on `fee69346` failed so, the background run refused with
+exit 3 and the probe failing on its missing directory.) The ESP is unchanged and the host puts the loader back.
 
 The refuse boot gains: v1.0.3's `pkg` refusing the package before the
 build's key is trusted, checking it after, and refusing one with a byte
@@ -173,5 +177,36 @@ runs the same test against a published set with no private key.
 
 ## Tests
 
-To be filled in from the runs: `test-upgrade` on both architectures, the
-matrix, branch CI.
+`make test-upgrade` (release builds, `fee69346`), first run on each:
+
+| Boot | x86-64 | AArch64 |
+|---|---|---|
+| install | 8.1 s | 11.7 s |
+| refuse | 17.7 s | 22.6 s |
+| written, loader | pass | pass |
+| upgrade (`cosmo-upgrade` itself) | 2.6 s | 3.3 s |
+| hold | 8.1 s | 11.8 s |
+| new | 10.0 s | 14.0 s |
+| back | 8.5 s | 12.7 s |
+| forward | 5.2 s | 9.1 s |
+| whole test | PASS 85.2 s | PASS 120.1 s |
+
+The first x86-64 run did not boot: a tuple added to a list in the test's
+variant table (`TypeError`), fixed before the run above.
+
+`test_relsig` (host): SHA-256 against FIPS 180-4's examples (empty,
+`abc`, the two-block message, a million `a`), a signature vector made with
+`scripts/modsign.py sign-detached` from RFC 8032 TEST 1's key (verified;
+unknown key; one digit changed; wrong size; bad magic), and the lookup
+(exact name, not a prefix; listed twice; malformed; not hex).
+
+### Mutations
+
+Each in a throwaway worktree of `fee69346`, release build, `test-upgrade`
+on x86-64:
+
+| Mutation | Caught by |
+|---|---|
+| M6: `set_check_sums` returns 0 at once (no signature, no digests) | refuse: no `SHA256SUMS: unknown signing key ec28a00bf331f50b` line |
+| M7: the rollback refusal removed (`if (false && ...)`) | hold: `cosmo-upgrade --rollback` exit 0, want 3 (it rolled back, set first) |
+| M8: `hold_lock` returns 0 without binding | hold: no `another cosmo-upgrade is running` line |

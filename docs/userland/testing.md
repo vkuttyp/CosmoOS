@@ -286,9 +286,11 @@ kernel before the fix). Serial logs in
 - **hold**: on the host `\EFI\BOOT`'s loader is replaced by the build's
   loader with the release key's ring entry replaced by a throwaway key's
   (it starts the build's set and not v1.0.3's). The build boots verified
-  with its own key. A first `cosmo-upgrade` takes the lock and blocks
-  opening a FIFO in place of its `kernel.elf`; a second exits 3 with
-  `another cosmo-upgrade is running`. `--rollback` exits 3 with `neither
+  with its own key. A first `cosmo-upgrade` takes the lock, then reads
+  the key ring, where a FIFO `lk.pub` stands: the test's write to it
+  returns only once that run has opened it, so the lock is held; the run
+  then blocks on a FIFO in place of its `kernel.elf`, and a second exits 3
+  with `another cosmo-upgrade is running`. `--rollback` exits 3 with `neither
   \EFI\BOOT\... trusts key 36ae7bb4947896ab, ... nor \cosmo\prev's loader
   key <build key>`. The ESP is unchanged, sector for sector, and the host
   puts the new loader back. With a published set (one key for both sets)
