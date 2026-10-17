@@ -82,7 +82,12 @@ jobs:
     # the aarch64 job from 38.9 minutes (run 38098643393) past 40, cancelled
     # in its last boot with every earlier one passed (run 38101481703), and
     # the x86_64 job from 25.8 to 36.9 minutes.
-    timeout-minutes: 55
+    # 55 was the limit until 2026-10-17: over 52 passing aarch64 jobs of the
+    # last 60 runs it took a median of 51.7 minutes, a p95 of 54.0 and at
+    # most 54.2, and PR #401's was cancelled at 55.1 in its last step with
+    # every boot passed (run 39061354017). A hang guard; each boot keeps its
+    # own timeout.
+    timeout-minutes: 70
     env:
       # SIGNING=dev generates an ephemeral signing key here on first use; it
       # lives only in this job's filesystem and is never uploaded (the

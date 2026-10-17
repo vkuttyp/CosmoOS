@@ -3158,3 +3158,11 @@ See the [history index](README.md).
   `cosmoos-ARCH-cosmo-upgrade.cpk`. `test-upgrade` gains those refusals
   and a boot that refuses a second run and a rollback neither loader
   allows. Report: `docs/audit/2026-10-17-cosmofs-ordering-report.md`.
+- **The crash test's lockdep waiter (2026-10-17, main red at `d4bf1e79`).**
+  `test-display`'s check e failed when a wait on lockdep's raw lock from
+  before the crash test's hold was reported as the race, naming the
+  panicking CPU. Only a wait on the held word is recorded now, and the
+  seam makes the stale wait certain every run
+  (`tools/crash3-waiter-probe.py`). Report:
+  `docs/audit/2026-10-17-crash3-waiter-report.md`.
+

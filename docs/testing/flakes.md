@@ -2842,6 +2842,16 @@ correlation of the fifth and sixth sightings does not hold. The same
 290 ms on a second architecture: the worker not raised before the spinner
 ended. Not attributed; CI ran again on the commit that records it.
 
+**Eighth sighting, 2026-10-17:** x86-64 CI, PR #401 (the crash test's
+lockdep waiter) at `c60f6e58`, run 39057108969, job
+117467250033, the `test-crash` boot (`Panic path test`, `CRASH_TEST=1`):
+`cpu 3, a spinner above the default for 300 ms: 114 calls of the poll,
+longest gap 290 ms (bound 100)`, the check at 325 ms. The job's five other
+debug boots passed (185.0-205.6 s); the failing boot's self-tests took
+144,065 ms and `cosmofs-replay` 23,340 ms. The branch's change compiles only
+into `CRASH_TEST=3` builds, so this boot ran main's code. The same 290 ms.
+Not attributed; CI ran again on the commit that records it.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
@@ -4372,6 +4382,14 @@ changed. Every other path to RUNNING (`sched_set_running_current`, from
 one; not confirmed by a run (inventory). First sighting; CI ran again on
 the commit that records it.
 
+**Second sighting, 2026-10-17:** AArch64 CI, PR #401 (the crash test's
+lockdep waiter, compiled only into `CRASH_TEST=3` builds) at `7545bc1a`,
+run 39061354017, job 117479852315 (`entropy boots (aarch64)`, the boot
+with the virtio-rng device): the same line, `still_ready at line 1417 (1
+ms)`, and only it. The runner was slow (that run's AArch64 chaos boot took
+243.5 s and its crash boot 178.1 s of 180). The same mechanism, not
+confirmed by a run; CI ran again on the commit that records it.
+
 ## `test-display`'s panic-lockdep: another CPU's re-entry panic first, 2026-10-16
 
 Main's CI at `621f7f78` (#393's merge; the same tree as `166a2ef3`, whose
@@ -4397,4 +4415,53 @@ the panicking CPU from the hold on. `tools/crash-lockdep-owner-probe.py
 and the re-entry panic comes first on both architectures; without `--old`
 the crash test's own panic names a waiting CPU
 (docs/audit/2026-10-16-crash-lockdep-owner-report.md).
+
+## `test-display`'s panic-lockdep: a stale waiter named the panicking CPU, 2026-10-17
+
+Main's CI at `d4bf1e79` (#400's merge; #400's run 39043900425 on `1f167ad2`,
+the same code, passed the job), run 39048054390, job 117440707868
+(`net-login test (x86_64)`), step `make test-display`: `FAIL:
+panic-lockdep: no other CPU waited on lockdep's lock (CPU 1)`. The serial
+logs were not uploaded (`Error: entry not supported`). Mechanism, from the
+source: lockdep's raw lock recorded as the crash test's waiter every CPU
+that waited on it, on any owner word, and never cleared the record; a wait
+from boot contention before the hold ended the crash path's wait at once
+and, before the other CPU entered lockdep, the panic named this CPU. A
+defect in the test seam, timing-dependent. **Fixed, not a flake:** only a
+wait on the held word is recorded, and the seam makes the stale wait
+certain (this CPU waits on lockdep's lock before the hold every run; the
+other CPU enters 10 ms after the hold). `tools/crash3-waiter-probe.py --old
+--arch {x86_64,aarch64}` names this CPU as the waiter on both
+architectures; without `--old` another CPU
+(docs/audit/2026-10-17-crash3-waiter-report.md).
+
+## An AArch64 chaos boot over its 240 s timeout, 2026-10-17
+
+CI, PR #401 (the crash test's lockdep waiter) at `9ddc330b`, run
+39056570530, job 117465662455, `Boot test under a chaos migrator
+(debug)`: `boot-test: FAIL after 247.0s`, `timed out after 240s`, in the
+shell harness at command 17 (`jobs`). All 479 self-tests passed, in
+189,152 ms (`cosmofs-replay` 34,045 ms); the job's other AArch64 debug
+boots passed in 201.8-219.9 s, and main's run before it (39048054390,
+`d4bf1e79`) took 171,586 ms of self-tests and passed its chaos boot in
+222.2 s. The branch's change compiles only into `CRASH_TEST=3` builds, so
+this boot ran main's code on a slow runner. Over 57 AArch64 chaos boots
+of the last 60 CI runs: median 209.7 s, p95 228.3 s, at most 236.9 s
+passing (`241176b3`, #400), and this one timeout. Mechanism: the suite
+has grown to within a few seconds of the 240 s that `test-chaos` kept for
+itself when the other AArch64 boots moved to 300 s (2026-10-15).
+**Widened and labelled:** `test-chaos` takes `BOOT_TIMEOUT` (300 s on
+AArch64, 240 s on x86-64 unchanged), a hang guard, not a performance
+budget; each self-test keeps its own budget (Makefile comment).
+
+## The AArch64 build job over its 55-minute limit, 2026-10-17
+
+CI, PR #401 at `7545bc1a`, run 39061354017, job 117479852429 (`build,
+boot, analyze (aarch64)`): cancelled at 55.1 minutes, after its last boot
+(`Panic path test`, PASS in 178.1 s) with every boot passed; its chaos
+boot passed in 243.5 s under the 300 s it had just been given. Over 52
+passing AArch64 build jobs of the last 60 runs: median 51.7 minutes, p95
+54.0, at most 54.2 (main's `d4bf1e79`). **Widened and labelled:** the
+job's `timeout-minutes` is 70 (`.github/workflows/ci.yml`), a hang guard;
+each boot keeps its own timeout.
 

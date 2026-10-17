@@ -137,8 +137,8 @@ run: $(IMAGE)
 # BOOT_LOG: where the serial log goes; a variant boot names its own so
 # CI's artifact keeps both.
 BOOT_LOG ?= $(OUT)/boot-test.log
-# The whole-boot timeout for test and test-harness-retry, and for test-gic,
-# test-guard and test-smp2 through test; test-chaos sets its own 240 s, and
+# The whole-boot timeout for test, test-harness-retry and test-chaos, and for
+# test-gic, test-guard and test-smp2 through test; and
 # test-crash and test-wxn keep the runner's 180 s (they end in an early
 # panic). A hang guard, not a performance budget (each
 # self-test has its own budget). AArch64 under TCG is the slower guest, and
@@ -157,6 +157,11 @@ BOOT_LOG ?= $(OUT)/boot-test.log
 # no-entropy boot, whose self-test time puts their whole boot at 240-246 s
 # (docs/testing/flakes.md). The build job's 261 AArch64 boots: p95 217 s,
 # at most 228.8 s.
+# test-chaos kept its own 240 s until 2026-10-17: over 57 AArch64 chaos
+# boots of the last 60 CI runs it took a median of 209.7 s, a p95 of
+# 228.3 s and at most 236.9 s passing, and one timed out at 247 s with
+# every self-test passed (run 39056570530; docs/testing/flakes.md). It
+# takes BOOT_TIMEOUT now: 300 s on AArch64, 240 s on x86-64 as before.
 # The shell, network and key harnesses derive their deadlines from it.
 BOOT_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),300,240)
 # test-busybox: one boot that runs the scripted test and fifteen testsuite files.
@@ -378,7 +383,7 @@ test-chaos:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
 		SCHED_CHAOS=1 OUT=$(OUT)-chaos image
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --chaos --timeout 240 \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --chaos --timeout $(BOOT_TIMEOUT) \
 		--image $(OUT)-chaos/cosmoos.img --log $(OUT)-chaos/boot-test-chaos.log \
 		--kernel $(OUT)-chaos/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 

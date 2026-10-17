@@ -72,10 +72,17 @@ static int g_crash3_ready, g_crash3_go;
 
 static void crash3_other(void *arg)
 {
-    (void)arg;
+    /* First the panicking CPU waits on lockdep's lock while this one holds
+     * it, as boot contention can make it do by chance: a wait from before
+     * the hold, which must not count as the race. */
+    lockdep_crash_contend((unsigned)(uintptr_t)arg);
     __atomic_store_n(&g_crash3_ready, 1, __ATOMIC_RELEASE);
     while (!__atomic_load_n(&g_crash3_go, __ATOMIC_ACQUIRE))
         arch_cpu_relax();
+    /* 10 ms after the hold, so what orders this CPU's entry after the
+     * panicking CPU's reads is the crash path's wait for it, not this
+     * CPU's speed. */
+    udelay(10000);
     spin_lock(&g_crash3_lock);   /* lockdep's raw lock: spins on the held word until the panic stops this CPU */
     for (;;)
         arch_cpu_relax();
@@ -295,8 +302,15 @@ void kernel_main(const struct cosmoboot_info *info)
     unsigned other = (this_cpu + 1u) % cpu_count();
     if (other == this_cpu || !(cpu_online_mask() & CPUMASK_OF(other)))
         panic("crash test: no other CPU online to enter lockdep (this CPU's %u)", this_cpu + 1u);
-    if (thread_create_on(crash3_other, NULL, "crash3-other", SCHED_PRIO_DEFAULT + 4, CPUMASK_OF(other)) == NULL)
+    if (thread_create_on(crash3_other, (void *)(uintptr_t)this_cpu, "crash3-other", SCHED_PRIO_DEFAULT + 4,
+                         CPUMASK_OF(other)) == NULL)
         panic("crash test: the thread for the other CPU was not created");
+    for (unsigned i = 0; i < 2000 && !lockdep_crash_holding(); i++)
+        udelay(1000);   /* until the other CPU holds lockdep's lock */
+    struct lockdep_stats stats;
+    lockdep_get_stats(&stats);   /* lockdep's lock: waits until the other CPU sees this one waiting */
+    if (!lockdep_crash_waited(this_cpu))
+        panic("crash test: this CPU did not wait on lockdep's lock before the hold (this CPU's %u)", this_cpu + 1u);
     for (unsigned i = 0; i < 2000 && !__atomic_load_n(&g_crash3_ready, __ATOMIC_ACQUIRE); i++)
         udelay(1000);   /* until it spins on `go` on the other CPU */
     if (!__atomic_load_n(&g_crash3_ready, __ATOMIC_ACQUIRE))
