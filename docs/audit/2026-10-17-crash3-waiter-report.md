@@ -44,9 +44,14 @@ include of `<kernel/timer.h>`).
 
 `tools/crash3-waiter-probe.py [--old] [--arch x86_64|aarch64]` builds the
 debug `CRASH_TEST=3` image in a throwaway worktree, boots it with
-`QEMU_SMP=2` (`make run`) and reads the panic line; `--old`
-reverse-applies `5920f2eb`'s `kernel/core/lockdep.c` (found by its
-subject).
+`QEMU_SMP=2` (`make run`) and reads the panic line; `--old` undoes
+`5920f2eb`'s one code change, the condition on the waiter record in
+`raw_lock`, by text. It first reverse-applied the whole commit's
+`kernel/core/lockdep.c`; review (Codex, PR #401) found that after a
+squashed merge the matching commit's diff also holds the seam's helpers,
+so the build would fail instead. The fixed runs below are unchanged by
+that; `--old` was rerun with the text version on both architectures, with
+the same results as the first version.
 
 - x86-64: fixed `owner word 65, this CPU's 1, waiter 2`; `--old` `this
   CPU's 1, waiter 1` (the stale wait).

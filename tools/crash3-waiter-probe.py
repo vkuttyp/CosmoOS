@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prove the CRASH_TEST=3 panic names a waiter on the held word only.
 
-    crash3-waiter-probe.py [--old] [--arch x86_64|aarch64] [--tree REV] [--fix REV]
+    crash3-waiter-probe.py [--old] [--arch x86_64|aarch64] [--tree REV]
 
 make test-display's check e boots a debug CRASH_TEST=3 kernel that leaves
 lockdep's own raw lock held and panics, and requires the panic to name
@@ -13,11 +13,12 @@ on lockdep's lock while the other CPU holds it, before the hold, and the
 other CPU enters lockdep 10 ms after the hold -- and the fix records only a
 wait on the held word.
 
---old reverse-applies the fix commit's kernel/core/lockdep.c in a
-throwaway worktree: the stale wait is reported and names this CPU. The
+--old undoes the fix's one code change in a throwaway worktree (the
+condition on the waiter record in kernel/core/lockdep.c's raw_lock, by
+text, so a squashed merge works too): the stale wait is reported and names
+this CPU. The
 probe boots the debug CRASH_TEST=3 image on either architecture
-(`make run`) and judges by the serial log. The fix commit is found by its
-subject, or named with --fix.
+(`make run`) and judges by the serial log.
 
 Logs stay under out/crash3-waiter-probe/<arch>-<mode>. Exit 0 when
 the mode shows what it should (fixed: the crash test's own panic naming
@@ -31,8 +32,10 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBJECT = "crash test 3: only a wait on the held word is the race"
 SOURCE = "kernel/core/lockdep.c"
+FIXED = ("        if (expected == (uint32_t)CONFIG_MAX_CPUS + 1u)\n"
+         "            __atomic_store_n(&g_crash3_waiter, owner, __ATOMIC_RELEASE);\n")
+OLD = "        __atomic_store_n(&g_crash3_waiter, owner, __ATOMIC_RELEASE);\n"
 OWN = re.compile(r"^KERNEL PANIC: crash test: lockdep's lock is held by another CPU "
                  r"\(owner word (\d+), this CPU's (\d+), CPU (\d+) waiting on it\)", re.M)
 
@@ -42,7 +45,6 @@ def main():
     ap.add_argument("--old", action="store_true")
     ap.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64")
     ap.add_argument("--tree", default="HEAD")
-    ap.add_argument("--fix", help="the commit that changed the waiter record (default: found by its subject)")
     a = ap.parse_args()
     mode = "old" if a.old else "fixed"
     work = ROOT / "out" / "crash3-waiter-probe" / f"{a.arch}-{mode}"
@@ -57,15 +59,14 @@ def main():
                    stdout=subprocess.DEVNULL)
     try:
         if a.old:
-            sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={SUBJECT}", a.tree],
-                text=True).strip()
-            if not sha:
-                sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}; name it with --fix")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--", SOURCE])
-            if not patch:
-                sys.exit(f"commit {sha[:8]} does not change {SOURCE}")
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            # The fix's one code change, undone by text: reversing the
+            # matching commit's whole diff would, after a squash merge, also
+            # remove the seam's helpers that main.c calls (Codex, PR #401).
+            src = tree / SOURCE
+            text = src.read_text()
+            if text.count(FIXED) != 1:
+                sys.exit(f"{SOURCE} in {a.tree} does not hold the fix's waiter condition exactly once")
+            src.write_text(text.replace(FIXED, OLD))
         make = "gmake" if sys.platform == "darwin" else "make"
         args = [make, "-C", str(tree), "-j8", f"ARCH={a.arch}", "BUILD=debug", "CRASH_TEST=3",
                 f"OUT={tree / 'out' / 'paniclock'}",
