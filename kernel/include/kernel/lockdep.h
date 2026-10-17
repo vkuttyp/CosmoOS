@@ -148,6 +148,12 @@ unsigned lockdep_crash_hold_raw(void);
 /* The CPU (id + 1) that has waited on that held word in lockdep's raw
  * lock, or 0 while none has: proof the race was run. */
 unsigned lockdep_crash_waiter(void);
+/* The pre-hold wait: hold the checker's lock until CPU `cpu` has waited
+ * on it (2 s at most), whether the holder is (holding), and whether a CPU
+ * has ever waited on it (waited). */
+void lockdep_crash_contend(unsigned cpu);
+bool lockdep_crash_holding(void);
+bool lockdep_crash_waited(unsigned cpu);
 #endif
 
 /* One instant of counters under the graph raw lock. Normal diagnostics
