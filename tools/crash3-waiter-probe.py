@@ -79,7 +79,10 @@ def main():
         serial = work / "serial.log"
         with serial.open("w") as log:
             try:
-                subprocess.run(args + ["run"], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                # Two CPUs, as make test-display boots: a third that waits on
+                # lockdep's lock after this CPU's pre-hold wait overwrites
+                # the stale record, and the old record then names it.
+                subprocess.run(args + ["QEMU_SMP=2", "run"], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                timeout=600)
             except subprocess.TimeoutExpired:
                 log.write("\nPROBE: the boot did not end in 600 s\n")
