@@ -536,11 +536,14 @@ tree.
   The debug self-test suite assumes
   QEMU's machine (`pci` expects the host bridge at 00:00.0; `net-firewall`,
   `net-tap-release-order`, `blk-submit-unregister` failed there).
-- AArch64: a firmware serial console at or above the loader's 4 GiB
+- ~~AArch64: a firmware serial console at or above the loader's 4 GiB
   direct map is not used (logged at input setup): the early console runs
   on that map. Needs the loader to map the console page and
   `map_early_devices` to carry it (found in review of PR #376; no machine
-  seen with one).
+  seen with one).~~ **Closed by the direct-map unit**
+  (`docs/audit/2026-10-18-direct-map-report.md`): the loader's direct map
+  reaches the console's register page wherever it is, and
+  `map_early_devices` carries it as before.
 - ~~`sched-migrate-stress` on CI: the second mutex worker unrun for 2 s.~~
   **Explained and fixed by the Parallels-devices unit**: mutex starvation
   by a releaser that re-locks before the woken waiter runs; the mutex now
@@ -1378,3 +1381,19 @@ each; none is needed by M2's acceptance test.
   nothing after the loader's `jumping to kernel entry` line (memory map up
   to 0x140000000), on the published v1.0.3 and v1.0.4 alike, every boot;
   with 2048 MB it boots. The guide's Tested platforms page says 2 GB.
+- The block layer has no bounce buffers: a device whose DMA mask is 32
+  bits (AHCI without S64, an xHCI without AC64's USB disks, the legacy
+  virtio transport's 44 bits) refuses a buffer above its mask with
+  `-EINVAL`, and with RAM above 4 GiB the page cache's pages can lie
+  there. Every device the tested machines have is 64-bit (direct-map
+  unit, 2026-10-18).
+- QEMU with `-accel hvf` on Apple Silicon stops the kernel after the
+  platform line (`Assertion failed: (isv), function hvf_handle_exception`):
+  an MMIO access whose syndrome carries no ISV, which hvf cannot emulate
+  and Parallels does. The direct-map unit used hvf only to show the
+  loader's hang and its fix.
+- The loader allocates only below 4 GiB (`LOADER_ALLOC_LIMIT`); a machine
+  whose RAM all lies above cannot boot it.
+- `direct_map_size` covers the tables the RSDP's root lists, not those
+  reached through the FADT (the DSDT, FACS), which the kernel does not
+  read before it maps memory itself.
