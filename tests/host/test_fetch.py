@@ -217,6 +217,10 @@ def main():
         rc, err, p = run("-m", bad, f"{url}/blob.bin")
         expect(f"-m {bad} (usage)", rc, err, 2, "-m takes a number of bytes")
 
+    r = subprocess.run([fetch, f"{url}/blob.bin", os.path.join(dl, "no-such-dir", "out.bin")], env=env,
+                       capture_output=True, text=True, timeout=60)
+    expect("an output file that cannot be opened (local)", r.returncode, r.stderr, 5, "cannot open")
+
     rc, err, p = run("ftp://127.0.0.1/x")
     expect("not an http(s) URL", rc, err, 2)
     rc, err, p = run("https://cosmo-fetch-test.invalid/x")

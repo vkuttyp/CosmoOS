@@ -12,13 +12,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define FETCH_PROGRAM "/bin/cosmo-fetch"
+#define FETCH_PROGRAM "/bin/cosmo-fetch"   /* or $COSMO_FETCH */
 
 /* cosmo-fetch's exit statuses. */
 #define FETCH_OK      0
 #define FETCH_FAILED  1   /* DNS, connection, a body cut short (the file keeps what arrived) */
 #define FETCH_REFUSED 3   /* certificate, pin, plain HTTP, a redirect elsewhere, too large */
 #define FETCH_HTTP    4   /* the server answered with an HTTP error */
+#define FETCH_LOCAL   5   /* the file could not be written: this system's fault, not the server's */
 
 struct fetch_opts {
     const char *pin;   /* "sha256:HEX", or NULL */

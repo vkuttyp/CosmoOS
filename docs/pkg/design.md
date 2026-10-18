@@ -132,7 +132,10 @@ the transfer is that program's and every check of what arrives is `pkg`'s.
   against the clock and against the serial accepted last from that
   repository (PK10), before any package line is parsed; then it is parsed
   and stored. A refusal leaves the stored index as it was. Every
-  repository is tried; the exit status is the worst (3 refused over 1).
+  repository is tried: a refusal is exit 3, any other failure 1, except
+  that a repository not reached (no network, an HTTP error) is only
+  reported when another was updated, so an offline installed system's
+  `pkg update && pkg install` works from its disk.
 - **`pkg install` and `upgrade`** resolve over the stored indexes, merged
   in `repos.conf`'s order, each entry remembering its repository. A
   package from a network repository is fetched into

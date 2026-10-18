@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkrelease.py ARCH DEST IMAGE LOADER KERNEL ARCHIVE MANIFEST CMDLINE UPGRADE VERIFY KEY PKGKEY BUILD_ID
+"""mkrelease.py ARCH DEST IMAGE LOADER KERNEL ARCHIVE MANIFEST CMDLINE UPGRADE VERIFY FETCH KEY PKGKEY BUILD_ID
 
 Collect one architecture's release set (roadmap M6; docs/development.md,
 "Releases") into DEST under the names the GitHub release carries. DEST is
@@ -17,10 +17,13 @@ RELEASE_DIR deletes nothing:
                                installed system runs to move to this release
                                (shell completeness S7)
     cosmoos-ARCH-cosmo-upgrade.cpk
-                               a package of cosmo-upgrade and cosmo-verify,
-                               signed with PKGKEY, which a v1.0.3 system's
-                               `pkg install -n` checks against the key it
-                               shipped with (docs/guide/upgrading.md)
+                               a package of cosmo-upgrade, cosmo-verify and
+                               cosmo-fetch (FETCH, the HTTPS client
+                               cosmo-upgrade --fetch runs, which a release
+                               before v1.0.6 lacks), signed with PKGKEY,
+                               which a v1.0.3 system's `pkg install -n`
+                               checks against the key it shipped with
+                               (docs/guide/upgrading.md)
     SHA256SUMS                 `sha256sum -c` format, the files above
     SHA256SUMS.sig             its detached signature with KEY: the
                                COSMOSIG trailer of scripts/modsign.py on its
@@ -57,9 +60,10 @@ def package_version(build_id):
 
 
 def main():
-    if len(sys.argv) != 14:
+    if len(sys.argv) != 15:
         sys.exit(__doc__)
-    arch, dest, image, loader, kernel, archive, manifest, cmdline, upgrade, verify, key, pkgkey, build_id = sys.argv[1:]
+    (arch, dest, image, loader, kernel, archive, manifest, cmdline, upgrade, verify, fetch, key, pkgkey,
+     build_id) = sys.argv[1:]
     os.makedirs(dest, exist_ok=True)
     stray = [f for f in os.listdir(dest) if not (f.startswith("cosmoos-") or f in ("SHA256SUMS", "SHA256SUMS.sig"))]
     if stray:
@@ -77,13 +81,13 @@ def main():
         (upgrade, f"cosmoos-{arch}-cosmo-upgrade"),
     ]
     tools = []
-    for src, name in ((upgrade, "cosmo-upgrade"), (verify, "cosmo-verify")):
+    for src, name in ((upgrade, "sbin/cosmo-upgrade"), (verify, "sbin/cosmo-verify"), (fetch, "bin/cosmo-fetch")):
         with open(src, "rb") as f:
-            tools.append((f"sbin/{name}", 0o755, f.read()))
+            tools.append((name, 0o755, f.read()))
     cpk = os.path.join(dest, f"cosmoos-{arch}-cosmo-upgrade.cpk")
     with open(cpk, "wb") as f:
         f.write(pkgbuild.pack("cosmo-upgrade", package_version(build_id),
-                              "cosmo-upgrade and cosmo-verify of this release", tools, pkgkey))
+                              "cosmo-upgrade, cosmo-verify and cosmo-fetch of this release", tools, pkgkey))
     sums = []
     for src, name in files:
         shutil.copyfile(src, os.path.join(dest, name))

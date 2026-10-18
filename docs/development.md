@@ -601,6 +601,23 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    pre-release. Before `gh release create`, `check-release-version.py
    --notes` requires the notes to say "CosmoOS <version>" and no other
    "CosmoOS X.Y.Z", and checks both sets again.
+6. `repository` (a release, not a pre-release; roadmap 1.1 P6): the
+   workflow `.github/workflows/repository.yml` downloads the published
+   release's set files (not the images), and `scripts/publish-repo.py`
+   checks `SHA256SUMS.sig` against `tools/keys/*.pub` and every file
+   against `SHA256SUMS`, takes each architecture's package repository
+   from the `repo/` of its `boot.tar` (its `INDEX` signed by the release
+   key), makes that a network index (`pkgbuild.py publish`: the serial
+   after the published one, a 30-day expiry) signed with the release key,
+   and writes the site: `repo/ARCH/`, `releases/TAG/` (the newest three
+   releases kept) and `releases/LATEST`. The site is pushed as the one
+   commit of the branch `repo`, which GitHub Pages serves at
+   `https://vkuttyp.github.io/CosmoOS/`. The same workflow runs weekly to
+   sign every `INDEX` again with the next serial and a new expiry (an
+   unchanged repository must not expire under the systems using it), and
+   by hand (`gh workflow run repository.yml -f tag=vX.Y.Z`) to publish a
+   release again. Pages serves the branch `repo`, folder `/` (a
+   repository setting, made once).
 
 A release (a tag without a hyphen) must point at a commit on main (job
 `guard`); a pre-release may be any head. The key itself is a repository

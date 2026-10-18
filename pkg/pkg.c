@@ -423,6 +423,10 @@ static void repo_url(const struct repo *r, const char *file, char *out, size_t n
     snprintf(out, n, "%s/%s", r->url, file);
 }
 
+/* update_repo's status for a server that could not be reached or answered
+ * with an error: not a refusal. */
+#define EXIT_UNREACHABLE 10
+
 static int fetch_status(const struct repo *r, const char *what, int st)
 {
     if (st < 0) {
@@ -434,7 +438,9 @@ static int fetch_status(const struct repo *r, const char *what, int st)
         return EXIT_REFUSED;
     }
     fprintf(stderr, "pkg: %s: cannot fetch %s (above)\n", r->name, what);
-    return EXIT_FAILED;
+    /* Only the server's absence is "not reached"; a local write failure
+     * (FETCH_LOCAL) or anything unexpected is a failure. */
+    return st == FETCH_FAILED || st == FETCH_HTTP ? EXIT_UNREACHABLE : EXIT_FAILED;
 }
 
 /*
@@ -531,7 +537,10 @@ static int update_repo(const struct repo *r, int *count)
     return rc;
 }
 
-/* Every repository is tried; the status is the worst (refused over failed). */
+/* Every repository is tried. A refusal is exit 3 and any other failure 1,
+ * except that a repository that could not be reached (no network, an HTTP
+ * error) is only reported when another one was updated: an offline system
+ * still updates from its disk. */
 static int cmd_update(void)
 {
     int nrepos = repos_load();
@@ -541,17 +550,22 @@ static int cmd_update(void)
         fprintf(stderr, "pkg: no repositories configured\n");
         return EXIT_FAILED;
     }
-    int total = 0, ok = 0, worst = 0;
+    int total = 0, ok = 0, worst = 0, unreachable = 0;
     for (int i = 0; i < nrepos; i++) {
         int count = 0;
         int rc = update_repo(&g_repos[i], &count);
         if (rc == 0) {
             total += count;
             ok++;
+        } else if (rc == EXIT_UNREACHABLE) {
+            unreachable++;
+            fprintf(stderr, "pkg: %s: not reached; its last index is kept\n", g_repos[i].name);
         } else if (rc == EXIT_REFUSED || worst == 0) {
             worst = rc;
         }
     }
+    if (unreachable && (ok == 0 || worst) && worst != EXIT_REFUSED)
+        worst = EXIT_FAILED;
     if (total > PKG_MAX_INDEX) {
         /* Each stored, but together more than index_load can merge. */
         fprintf(stderr, "pkg: the repositories hold %d packages together, more than %d\n", total, PKG_MAX_INDEX);
@@ -1092,7 +1106,8 @@ static int install_entry(const struct index_entry *e)
             if (fst != FETCH_OK) {
                 if (fst != FETCH_FAILED)
                     unlink(part);   /* only a cut transfer is worth resuming */
-                return fetch_status(r, e->file, fst);
+                int frc = fetch_status(r, e->file, fst);
+                return frc == EXIT_UNREACHABLE ? EXIT_FAILED : frc;
             }
             if (rename(part, path) < 0) {
                 fprintf(stderr, "pkg: cannot place %s: %s\n", path, strerror(errno));

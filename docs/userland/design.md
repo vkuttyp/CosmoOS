@@ -719,6 +719,8 @@ ESP's bytes.
 reinstalling it, and back.
 
     cosmo-upgrade [--check] [--stop-after=STEP] DIR
+    cosmo-upgrade [--check] [--stop-after=STEP] --fetch TAG|URL
+    cosmo-upgrade --check
     cosmo-upgrade --rollback
     cosmo-upgrade --status
 
@@ -726,8 +728,7 @@ DIR holds a release's boot set: `kernel.elf`, `boot.tar`, `cmdline` and
 `manifest`, under those names or as the release assets name them
 (`cosmoos-ARCH-kernel.elf`, ...), with the release's `SHA256SUMS` and
 `SHA256SUMS.sig`. How it got there is the operator's
-business: `wget`, `scp`, a mounted disk (S6). Nothing is fetched (the
-network repository is roadmap P6). On v1.0.3 the files belong in `/tmp`
+business: `wget`, `scp`, a mounted disk (S6), or `--fetch` (below). On v1.0.3 the files belong in `/tmp`
 (ramfs): v1.0.3's cosmofs can lose a large file being written (the record
 fallback, fixed since; `docs/kernel-services/filesystem/cosmofs/design.md`). The release's `cosmo-upgrade` runs the
 upgrade: a v1.0.3 system has none, so the first upgrade is started with
@@ -737,7 +738,40 @@ release key (`scripts/mkrelease.py`, `pkgbuild.py pack`), which v1.0.3's
 `pkg install -n` checks against the key v1.0.3 shipped in
 `/etc/pkg/keys`, writing nothing; BusyBox `tar` then unpacks the checked
 file into `/tmp`. Nothing older than the package can check an Ed25519
-signature on v1.0.3: its `pkg` is the only verifier it has.
+signature on v1.0.3: its `pkg` is the only verifier it has. From v1.0.6
+the package also carries `bin/cosmo-fetch`, for `--fetch` on a system
+older than it (`COSMO_FETCH` names the copy; `userland/lib/fetch.c`).
+
+### Fetching (roadmap 1.1 P6)
+
+`/etc/cosmo-release.conf` names the release index, `url
+https://vkuttyp.github.io/CosmoOS/releases` (the default when the file is
+absent), and may add `pin sha256:HEX`. The release workflow publishes each
+release's set there (`.github/workflows/repository.yml`,
+`scripts/publish-repo.py`): `TAG/SHA256SUMS`, `TAG/SHA256SUMS.sig` and the
+files under their release names, and `LATEST` (`tag: TAG`, `published:
+T`). Everything is fetched through `/bin/cosmo-fetch` (the certificate
+checked against the CA bundle, same-origin redirects only):
+
+- `--fetch TAG` (or a URL of such a directory) fetches into
+  `/var/cache/cosmo-upgrade/TAG/`: `SHA256SUMS` and its signature first,
+  verified against the ring before anything else is fetched (a refusal
+  is exit 3, `nothing more fetched, nothing written`); then the four set
+  files, each resuming a cut transfer and checked against `SHA256SUMS`
+  (fetched once more from the start if a kept part does not match); then
+  the upgrade proceeds as for `DIR`, every check made again. A completed
+  upgrade removes the fetched files; `--check --fetch` keeps them.
+- `--check` alone fetches `LATEST` and compares its tag with the running
+  kernel's build id (the last word of `/proc/version`, `git describe`'s
+  `vX.Y.Z[-rcN][-N-gHASH]`): `TAG is newer than this system's ID ...:
+  cosmo-upgrade --fetch TAG`, or `this system's ID is up to date: ...`.
+  Both exit 0; a build id that is not a release's is said so.
+
+The index is GitHub Pages rather than GitHub's release assets or its API:
+an asset's URL redirects to another host, which `cosmo-fetch` refuses,
+and the API is rate-limited without a token. Pages serves the files at
+one stable HTTPS URL, and its publication needs no secret but the release
+key.
 
 ### Trust
 

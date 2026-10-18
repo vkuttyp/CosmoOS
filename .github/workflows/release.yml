@@ -319,3 +319,18 @@ jobs:
           case "$TAG" in *-*) pre="--prerelease" ;; esac
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           gh release create "$TAG" dist/* --title "CosmoOS ${TAG#v}" --notes-file notes.md --verify-tag $pre
+
+  # The package repository and the release index on GitHub Pages
+  # (.github/workflows/repository.yml; roadmap 1.1 P6): a release's own,
+  # once it is published. Not for a pre-release.
+  repository:
+    name: package repository and release index
+    needs: [guard, publish]
+    if: ${{ !contains(github.ref_name, '-') }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/repository.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      COSMOOS_RELEASE_KEY: ${{ secrets.COSMOOS_RELEASE_KEY }}
