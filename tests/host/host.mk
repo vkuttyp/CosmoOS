@@ -228,6 +228,8 @@ host-test: $(HOST_TESTS)
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_fetch_pinned.py
 	@echo "== $(ROOT)/tests/host/test_analysis_gate.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_analysis_gate.py
+	@echo "== $(ROOT)/tests/host/test_release_version.py"
+	$(Q)$(PYTHON) $(ROOT)/tests/host/test_release_version.py
 	@echo "== $(ROOT)/tests/boot/test_firmware_stall.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_firmware_stall.py
 	@echo "== $(ROOT)/tests/boot/test_nettest_deadline.py"

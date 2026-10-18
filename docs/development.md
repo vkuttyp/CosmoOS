@@ -577,6 +577,8 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    the tag, the set's file names to be the set's, and the
    `cosmo-upgrade` package's version to be the tag's
    (`package_version`). The acceptance jobs restore the tag the same way.
+   Both scripts are tested on synthetic sets and a local repository by
+   `tests/host/test_release_version.py` (`make host-test`).
 3. `reproducible`: each architecture's two sets compared file by file
    (`scripts/compare-release-sets.sh`).
 4. `acceptance` (each architecture × `test-entropy`, `test-install`,
