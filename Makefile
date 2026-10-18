@@ -20,6 +20,7 @@
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
 #   make test-harness-retry  boot with net-harness's first back-connection broken on purpose
 #   make host-test    native unit tests of kernel algorithms under ASan/UBSan
+#   make host-test-fetch  cosmo-fetch's TLS, redirect and range cases on the host
 #   make litmus       check the quiescence litmus tests against the C11 model (needs herd7)
 #   make fuzz         fuzz the parsers on the host (docs/verification/)
 #   make analyze      clang static analyzer over all target sources

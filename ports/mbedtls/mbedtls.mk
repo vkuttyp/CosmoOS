@@ -5,7 +5,8 @@
 # pinned downloads, fetched once into $(PORTS_CACHE) through
 # scripts/fetch-pinned.py: the mbedTLS release, and the Mozilla CA
 # certificates as curl publishes them, installed as
-# /etc/ssl/certs/ca-certificates.crt.
+# /etc/ssl/certs/ca-certificates.crt. cosmo-fetch, the HTTPS client pkg and
+# cosmo-upgrade run, is built the same way on the same checks.
 
 MBEDTLS_VERSION := 3.6.7
 MBEDTLS_SHA256  := a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
@@ -22,6 +23,9 @@ MBEDTLS_DIR    ?= $(dir $(OUT))mbedtls-$(ARCH)
 MBEDTLS_LIBS   := $(MBEDTLS_DIR)/src/library/libmbedtls.a $(MBEDTLS_DIR)/src/library/libmbedx509.a \
 	$(MBEDTLS_DIR)/src/library/libmbedcrypto.a
 SSL_CLIENT_ELF := $(MBEDTLS_DIR)/ssl_client
+COSMO_FETCH_ELF := $(MBEDTLS_DIR)/cosmo-fetch
+# The certificate checks both programs make (tls_common.c).
+TLS_COMMON := $(ROOT)/ports/mbedtls/tls_common.c $(ROOT)/ports/mbedtls/tls_common.h
 # The library's default configuration, then ours (cosmo_config.h).
 MBEDTLS_CFLAGS := -O2 -ffile-prefix-map=$(MBEDTLS_DIR)=mbedtls -ffile-prefix-map=$(ROOT)=/cosmo \
 	-I$(ROOT)/ports/mbedtls -DMBEDTLS_USER_CONFIG_FILE='<cosmo_config.h>'
@@ -46,16 +50,19 @@ $(MBEDTLS_LIBS) &: $(MBEDTLS_TAR) $(BB_LIBC) $(BB_BUILTINS) $(BB_CC) $(ROOT)/por
 		CFLAGS="$(MBEDTLS_CFLAGS)" libmbedcrypto.a libmbedx509.a libmbedtls.a \
 		> $(MBEDTLS_DIR)/build.log 2>&1 || { tail -40 $(MBEDTLS_DIR)/build.log; exit 1; }
 
-$(SSL_CLIENT_ELF): $(ROOT)/ports/mbedtls/ssl_client.c $(MBEDTLS_LIBS)
-	$(call log,CC,ssl_client $(BB_TARGET))
+$(SSL_CLIENT_ELF) $(COSMO_FETCH_ELF): $(MBEDTLS_DIR)/%: $(ROOT)/ports/mbedtls/%.c $(TLS_COMMON) $(MBEDTLS_LIBS)
+	$(call log,CC,$* $(BB_TARGET))
 	$(Q)$(BB_CC) $(MBEDTLS_CFLAGS) -Wall -Wextra -Werror -I$(MBEDTLS_DIR)/src/include -o $@.unstripped $< \
-		$(MBEDTLS_LIBS)
+		$(ROOT)/ports/mbedtls/tls_common.c $(MBEDTLS_LIBS)
 	$(Q)$(OBJCOPY) --strip-all --remove-section=.note --remove-section=.comment $@.unstripped $@
 
-.PHONY: ssl_client
+.PHONY: ssl_client cosmo-fetch
 ssl_client: $(SSL_CLIENT_ELF)
+cosmo-fetch: $(COSMO_FETCH_ELF)
 
 # /bin/ssl_client, which wget runs for https (ports/busybox/wget-ssl-client.patch),
-# and the certificate authorities it trusts.
-MBEDTLS_ARCHIVE_ENTRIES := bin/ssl_client=$(SSL_CLIENT_ELF) etc/ssl/certs/ca-certificates.crt=$(CACERT_PEM)
-MBEDTLS_ARCHIVE_DEPS := $(SSL_CLIENT_ELF) $(CACERT_PEM)
+# /bin/cosmo-fetch, which pkg and cosmo-upgrade run, and the certificate
+# authorities both trust.
+MBEDTLS_ARCHIVE_ENTRIES := bin/ssl_client=$(SSL_CLIENT_ELF) bin/cosmo-fetch=$(COSMO_FETCH_ELF) \
+	etc/ssl/certs/ca-certificates.crt=$(CACERT_PEM)
+MBEDTLS_ARCHIVE_DEPS := $(SSL_CLIENT_ELF) $(COSMO_FETCH_ELF) $(CACERT_PEM)

@@ -180,6 +180,12 @@ jobs:
       - name: Host unit tests (ASan + UBSan)
         run: make ARCH=${{ matrix.arch }} host-test
 
+      # cosmo-fetch, the HTTPS client pkg and cosmo-upgrade run, built for
+      # the host on the target's mbedTLS and configuration, against local
+      # TLS servers (ports/mbedtls/README.md, "Tested by").
+      - name: cosmo-fetch's certificate, redirect and range cases (host, ASan + UBSan)
+        run: make ARCH=${{ matrix.arch }} host-test-fetch
+
       # The quiescence epoch core under TSan, with its two negative
       # controls (one pairing weakened each) required to report a race.
       - name: Host TSan model of the quiescence protocol
