@@ -82,6 +82,18 @@ for _gib in (1, 4, 8):
 # The loader's line naming the direct map it built (boot/uefi/main.c direct_map_size).
 DIRECT_MAP = re.compile(r"direct map: 0x0-0x([0-9a-f]+) \((\d+) GiB\), to the end of ([^\n]*) at 0x([0-9a-f]+)")
 FREE_MEM = re.compile(r"^Mem:\s+(\d+)\s", re.M)
+# The kernel's banner: the top of RAM from its own reading of the memory
+# map (bootinfo_phys_limit), not from the loader's sizing.
+RAM_ENDS = re.compile(r"RAM ends at (\d+) MiB")
+
+
+def qemu_ram_top(arch, gib):
+    """Where QEMU's RAM ends, from its fixed layouts: virt's RAM starts at
+    1 GiB; q35 keeps at most 2 GiB below 4 GiB once the guest has more
+    than 2.75 GiB, the rest from 4 GiB."""
+    if arch == "aarch64":
+        return (1 + gib) << 30
+    return gib << 30 if gib * 4 <= 11 else (gib + 2) << 30
 
 
 class Fail(Exception):
@@ -212,8 +224,9 @@ def boot(name, image, work, spec, timeout, key, arch):
         klog = bytes(buf).decode("utf-8", "replace") if serial else ""
     if not serial and os.path.exists(vcon):
         klog = open(vcon, "rb").read().decode("utf-8", "replace")
-    if "mem_gib" in spec:
-        return check_memory(name, spec["mem_gib"], klog)
+    mem = check_memory(name, arch, spec["mem_gib"], klog) if "mem_gib" in spec else None
+    if mem and arch != "aarch64":
+        return mem   # the platform line below is AArch64's
     # First, so an unusable GTDT is named as that rather than as a platform
     # line whose timer part ("timer: no usable GTDT (...)") does not parse.
     if re.search(r"timer: GTDT (absent|unusable)", klog):
@@ -234,19 +247,31 @@ def boot(name, image, work, spec, timeout, key, arch):
         hay = {"gic": gic, "console": console}.get(what, klog)
         if not re.search(pat, hay, re.M):
             raise Fail(f"{name}: expected {pat!r} in the {what if what in ('gic', 'console') else 'kernel log'}")
-    return f"{name}: PASS ({m.group(0)})"
+    return mem or f"{name}: PASS ({m.group(0)})"
 
 
-def check_memory(name, gib, klog):
-    """The loader's direct map reaches the top of RAM, and the kernel uses
-    the RAM: `free`'s total is at least 95% of it (the rest is firmware's,
-    the kernel image and its page array)."""
+def check_memory(name, arch, gib, klog):
+    """The loader's direct map reaches the top of RAM -- as QEMU lays it
+    out and as the kernel reads the map, neither of them the loader's own
+    figure -- and the kernel uses the RAM: `free`'s total is at least 95%
+    of it (the rest is firmware's, the kernel image and its page array).
+    `free` alone would not do: after vmm_init the kernel maps all RAM
+    itself, so a loader map that stopped short would still show it."""
     m = DIRECT_MAP.search(klog)
     if not m:
         raise Fail(f"{name}: no 'direct map:' line from the loader")
     size, what, end = int(m.group(1), 16), m.group(3), int(m.group(4), 16)
     if size < end or size % (1 << 30):
         raise Fail(f"{name}: direct map 0x{size:x} does not cover {what} at 0x{end:x}")
+    top = qemu_ram_top(arch, gib)
+    r = RAM_ENDS.search(klog)
+    if not r:
+        raise Fail(f"{name}: no 'RAM ends at' line from the kernel")
+    kernel_top = int(r.group(1)) << 20
+    if kernel_top != top:
+        raise Fail(f"{name}: the kernel says RAM ends at 0x{kernel_top:x}; QEMU's layout puts it at 0x{top:x}")
+    if size < top:
+        raise Fail(f"{name}: direct map 0x{size:x} stops short of the top of RAM at 0x{top:x}")
     f = FREE_MEM.search(klog)
     if not f:
         raise Fail(f"{name}: no 'Mem:' line from free")

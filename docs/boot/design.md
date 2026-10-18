@@ -416,7 +416,11 @@ are mapped like any other device memory. The loader prints
 direct map: 0x0-0x140000000 (5 GiB), to the end of RAM at 0x140000000
 ```
 
-naming what decided the size. If that end is past what this CPU's
+naming what decided the size. A firmware range whose length wraps the
+address space, or a descriptor whose page count overflows, stops the
+loader the same way as one out of reach. The memory map is read again
+after the display mode is chosen, so the attributes come from the map
+the framebuffer is in. If that end is past what this CPU's
 tables can map -- `paging_pa_limit()`, 2^MAXPHYADDR on x86-64
 (CPUID 0x80000008) or 2^PARange on AArch64 (at most 48 bits: these
 tables use the 48-bit descriptor format), and at most `BOOT_HHDM_MAX`
@@ -472,15 +476,17 @@ from the same 2 MiB block for a slab object, and the compiler's
 eight-byte store into a four-byte-aligned field of it raised an
 alignment fault inside `vmm_init` -- before the kernel had installed
 tables of its own. `paging_pool_size` accounts for the extra tables:
-one per root per mixed block, bounded by the number of memory-map
-descriptors, since a mixed block needs a boundary and a boundary needs
-a descriptor.
+one per root per mixed block, bounded by twice the number of memory-map
+descriptors, since a mixed block needs a boundary, a boundary needs a
+descriptor end, and a descriptor has two.
 
 `paging_pool_size(img, descriptors, hhdm_size)` on x86-64 = 1 (PML4) +
 (P + N) (identity PDPTs + one PD per GiB) + (1 + 1 + span/2MiB + 1)
 (kernel PDPT, PD, page tables) + 4 slack; on AArch64 2 × (1 + P + N)
 (L0, L1s, L2s of each root) + (2 + span/2MiB) (kernel L1, L2, L3s) + 4
-slack + 2 × descriptors (mixed blocks). `pool_take()` calls `die()` if
+slack + 4 × descriptors (mixed blocks: up to two per descriptor, one
+at each end, each an L3 table in both roots; Codex on #403 found the
+earlier 2 × too few once sparse RAM above 4 GiB is mapped). `pool_take()` calls `die()` if
 the estimate is ever wrong. AArch64 classifies a block by summing the
 RAM descriptors' overlap with it, not page by page: a direct map tens
 of GiB wide has that many thousand blocks.

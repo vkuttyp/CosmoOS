@@ -36,6 +36,10 @@
 #define L2_INDEX(v) (((v) >> 21) & 0x1FF)
 #define L3_INDEX(v) (((v) >> 12) & 0x1FF)
 
+/* The widest direct map keeps clear of L0 entry 511, the kernel image's. */
+_Static_assert(((BOOT_HHDM_BASE >> 39) & 0x1FF) + (BOOT_HHDM_MAX >> 39) <= 511,
+               "the direct map's L0 entries reach the kernel's");
+
 static const uint8_t *g_mmap;
 static UINTN g_mmap_size, g_desc_size;
 
@@ -166,10 +170,11 @@ UINTN paging_pool_size(const struct elf_image *img, UINTN mem_descriptors, uint6
      * shape, identity. Plus slack.
      *
      * A 2 MiB block that mixes RAM and device memory is mapped as pages
-     * instead, which costs one L3 table in each root. There is at most
-     * one such block per boundary between the two kinds of memory, and a
-     * boundary needs a descriptor, so the map's size bounds them. */
-    return 2 * (1 + l1s + gib) + (2 + kernel_span_2m) + 4 + 2 * mem_descriptors;
+     * instead, which costs one L3 table in each root. A mixed block sits
+     * on a boundary between the two kinds of memory, a boundary needs a
+     * descriptor end, and a descriptor has two: up to two mixed blocks
+     * per descriptor, each an L3 table in both roots. */
+    return 2 * (1 + l1s + gib) + (2 + kernel_span_2m) + 4 + 4 * mem_descriptors;
 }
 
 EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base,

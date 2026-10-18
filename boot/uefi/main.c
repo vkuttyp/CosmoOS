@@ -367,6 +367,13 @@ struct extent {
 
 static void extent_cover(struct extent *x, uint64_t base, uint64_t len, const char *what)
 {
+    /* Firmware's numbers: a range that wraps would size the map short of
+     * it, silently. Refused while the reason can still be read. */
+    if (len > UINT64_MAX - base) {
+        lprintf("cosmoboot: %s at 0x%llx, 0x%llx bytes, wraps the address space\n", what,
+                (unsigned long long)base, (unsigned long long)len);
+        die("the direct map cannot cover what the kernel needs at entry", EFI_UNSUPPORTED);
+    }
     if (len == 0 || base + len <= x->end)
         return;
     x->end = base + len;
@@ -387,6 +394,11 @@ static uint64_t direct_map_size(const struct cosmoboot_info *info, const struct 
         case EfiUnusableMemory:
             continue;   /* not RAM: the kernel maps what it needs of these */
         default:
+            if (d->NumberOfPages > UINT64_MAX / PAGE_SIZE) {
+                lprintf("cosmoboot: a memory-map descriptor at 0x%llx claims 0x%llx pages\n",
+                        (unsigned long long)d->PhysicalStart, (unsigned long long)d->NumberOfPages);
+                die("the direct map cannot cover what the kernel needs at entry", EFI_UNSUPPORTED);
+            }
             extent_cover(&x, d->PhysicalStart, d->NumberOfPages * PAGE_SIZE, "RAM");
         }
     }
@@ -519,6 +531,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     if (status != EFI_BUFFER_TOO_SMALL)
         die("GetMemoryMap size query failed", status);
     pre_size += 8 * pre_desc;
+    UINTN pre_capacity = pre_size;
     EFI_PHYSICAL_ADDRESS pre_phys;
     status = alloc_pages_low(BYTES_TO_PAGES(pre_size), EfiLoaderData, &pre_phys, NULL);
     if (EFI_ERROR(status))
@@ -585,8 +598,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     /* --- bootstrap page tables, sized now that the framebuffer and the
      * console are known (direct_map_size) --- */
+    /* The snapshot again: the allocations since, and a mode switch that
+     * may have moved or retyped the framebuffer's range, are in it now,
+     * and the tables take their RAM and device attributes from it. The
+     * slack of eight descriptors covers the two allocations made since. */
+    pre_size = pre_capacity;
+    status = g_bs->GetMemoryMap(&pre_size, (EFI_MEMORY_DESCRIPTOR *)(uintptr_t)pre_phys, &pre_key, &pre_desc, &pre_ver);
+    if (EFI_ERROR(status))
+        die("GetMemoryMap failed (the snapshot for the page tables)", status);
     uint64_t own[] = { info_phys, BOOTINFO_PAGES * PAGE_SIZE, stack_phys, HANDOFF_STACK_PAGES * PAGE_SIZE,
-                       pre_phys, BYTES_TO_PAGES(pre_size) * PAGE_SIZE };
+                       pre_phys, BYTES_TO_PAGES(pre_capacity) * PAGE_SIZE };
     info->hhdm_size = direct_map_size(info, &img, self, (const uint8_t *)(uintptr_t)pre_phys, pre_size, pre_desc,
                                       own, sizeof(own) / sizeof(own[0]));
     struct paging_ctx pg;

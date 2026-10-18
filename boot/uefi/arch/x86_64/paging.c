@@ -40,6 +40,12 @@
 #define PD_INDEX(v)   (((v) >> 21) & 0x1FF)
 #define PT_INDEX(v)   (((v) >> 12) & 0x1FF)
 
+/* The widest direct map (one PML4 entry per 512 GiB, from BOOT_HHDM_BASE's)
+ * keeps clear of PML4[511], the kernel image's; the identity entries from
+ * 0 stay below the HHDM's. */
+_Static_assert(PML4_INDEX(BOOT_HHDM_BASE) + (BOOT_HHDM_MAX >> 39) <= 511, "the direct map's PML4 entries reach the kernel's");
+_Static_assert((BOOT_HHDM_MAX >> 39) <= PML4_INDEX(BOOT_HHDM_BASE), "the identity entries reach the HHDM's");
+
 static uint64_t *table_at(uint64_t phys)
 {
     /* Loader runs on the firmware identity map, so phys == virt here. */

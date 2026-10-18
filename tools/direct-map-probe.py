@@ -2,7 +2,7 @@
 """Prove the two defects a 4 GiB machine found (docs/boot/design.md, "The
 direct map"; docs/audit/2026-10-18-direct-map-report.md).
 
-    direct-map-probe.py --defect loader|blk [--old] [--arch x86_64|aarch64] [--tree REV] [--fix REV]
+    direct-map-probe.py --defect loader|blk [--old] [--arch x86_64|aarch64] [--tree REV]
 
 Each run builds the debug image in a throwaway worktree and boots it with
 4 GiB of RAM (tests/boot/platform_test.py, variant mem4g).
@@ -20,9 +20,10 @@ loader: the loader mapped a fixed 4 GiB, and with 4 GiB of RAM the firmware
 blk: a block device with no hardware behind it was held to the 32-bit
     default DMA mask, so with RAM above 4 GiB its kmalloc buffers were
     refused and blk-submit-unregister's submitter never landed a bio: the
-    boot hangs at the watchdog. --old reverse-applies the fix commit
-    (kernel/block/blk.c and kernel/device/devtest.c, found by its subject
-    or named with --fix). Fixed: mem4g passes.
+    boot hangs at the watchdog. --old undoes the fix by text, so it works
+    after a squashed merge as before one (Codex on #403): buf_ok's branch
+    for a device with no hardware, and selftest_dma's map on the 64-bit
+    device. Fixed: mem4g passes.
 
 Logs stay under out/direct-map-probe/<defect>-<arch>-<mode>. Exit 0 when the
 mode shows what it should, else 1.
@@ -35,8 +36,16 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BLK_SUBJECT = "blk: a device with no hardware takes any direct-map buffer"
-BLK_SOURCES = ["kernel/block/blk.c", "kernel/device/devtest.c"]
+# The blk fix, undone by text: (file, fixed text, old text).
+BLK_OLD = [
+    ("kernel/block/blk.c",
+     "    if (bd->dev == NULL)\n"
+     "        return len != 0 && virt_is_direct_map((uintptr_t)buf) && virt_is_direct_map((uintptr_t)buf + len - 1);\n",
+     ""),
+    ("kernel/device/devtest.c", "dma_map(&tiny, kb, 256, DMA_TO_DEVICE)", "dma_map(NULL, kb, 256, DMA_TO_DEVICE)"),
+    ("kernel/device/devtest.c", "dma_unmap(&tiny, virt_to_phys(kb), 256, DMA_TO_DEVICE)",
+     "dma_unmap(NULL, virt_to_phys(kb), 256, DMA_TO_DEVICE)"),
+]
 SIZE_LINE = "                                      own, sizeof(own) / sizeof(own[0]));\n"
 OLD_SIZE = SIZE_LINE + "    info->hhdm_size = 4ULL << 30;   /* direct-map-probe --old: the fixed map of v1.0.4 */\n"
 LOADER_STOP = "the loader would lose its own code at the table switch"
@@ -48,7 +57,6 @@ def main():
     ap.add_argument("--old", action="store_true")
     ap.add_argument("--arch", choices=("x86_64", "aarch64"), default="aarch64")
     ap.add_argument("--tree", default="HEAD")
-    ap.add_argument("--fix", help="blk: the fix commit (default: found by its subject)")
     a = ap.parse_args()
     mode = "old" if a.old else "fixed"
     work = ROOT / "out" / "direct-map-probe" / f"{a.defect}-{a.arch}-{mode}"
@@ -69,15 +77,12 @@ def main():
                 sys.exit("boot/uefi/main.c: the direct_map_size call is not where this probe expects it")
             main_c.write_text(text.replace(SIZE_LINE, OLD_SIZE))
         elif a.old:
-            sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={BLK_SUBJECT}",
-                 a.tree], text=True).strip()
-            if not sha:
-                sys.exit(f"no commit '{BLK_SUBJECT}' reachable from {a.tree}; name it with --fix")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + BLK_SOURCES)
-            if not patch:
-                sys.exit(f"commit {sha[:8]} does not change {BLK_SOURCES}")
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            for rel, fixed, old in BLK_OLD:
+                f = tree / rel
+                text = f.read_text()
+                if text.count(fixed) != 1:
+                    sys.exit(f"{rel}: the fixed text is not where this probe expects it: {fixed.strip()[:60]!r}")
+                f.write_text(text.replace(fixed, old))
         make = "gmake" if sys.platform == "darwin" else "make"
         out = tree / "out" / "dbg"
         args = [make, "-C", str(tree), "-j8", f"ARCH={a.arch}", "BUILD=debug", f"OUT={out}",
