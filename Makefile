@@ -79,7 +79,20 @@ image: $(IMAGE)
 BOOT_ARCHIVE := $(OUT)/boot.tar
 BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) $(DROPBEAR_ARCHIVE_ENTRIES) $(OPENSSH_ARCHIVE_ENTRIES) $(MBEDTLS_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(SECURITY_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES) efi/$(LOADER_EFI_NAME)=$(LOADER_EFI)
 
-$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE_DEPS) $(OPENSSH_ARCHIVE_DEPS) $(MBEDTLS_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(SECURITY_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(LOADER_EFI) $(ROOT)/scripts/mkbootarchive.py
+# The archive's list of entries as a file that changes exactly when the
+# list does (an entry added or renamed, not only a file changed), so an
+# existing tree rebuilds the archive then. The repository's entries are
+# left out: they are known only once the repository is built, and its
+# INDEX is a prerequisite already.
+ARCHIVE_STAMP = $(OUT)/gen/archive-entries.stamp
+.PHONY: archive-stamp-force
+archive-stamp-force:
+$(ARCHIVE_STAMP): archive-stamp-force
+	$(Q)mkdir -p $(dir $@)
+	$(Q)printf '%s\n' $(filter-out $(PKG_ARCHIVE_ENTRIES),$(BOOT_ARCHIVE_ENTRIES)) > $@.tmp
+	$(Q)if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+
+$(BOOT_ARCHIVE): $(ARCHIVE_STAMP) $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE_DEPS) $(OPENSSH_ARCHIVE_DEPS) $(MBEDTLS_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(SECURITY_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(LOADER_EFI) $(ROOT)/scripts/mkbootarchive.py
 	$(call log,ARCHIVE,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
 

@@ -83,9 +83,17 @@ endif
 # what the previous identity signed or trusted (PR #368 review).
 SIGNING_STAMP = $(OUT)/gen/signing.stamp
 # Packages and the INDEX are signed with the same key unless overridden; the
-# image ships the first trusted public key as /etc/pkg/keys/<name>.pub.
+# image ships every key the kernel trusts as /etc/pkg/keys/<name>.pub: a
+# developer build its own and the release key, so it accepts the published
+# network repository (roadmap 1.1 P6) as a release does. PKG_TRUST_PUB, the
+# first, is the key the build's own packages verify by (an override of it
+# is shipped too). pkg and cosmo-upgrade read at most 16 keys.
 PKGSIGN_KEY ?= $(MODSIGN_KEY)
 PKG_TRUST_PUB ?= $(firstword $(KEYRING_PUBS))
+PKG_TRUST_PUBS ?= $(PKG_TRUST_PUB) $(filter-out $(PKG_TRUST_PUB),$(KEYRING_PUBS))
+ifneq ($(word 17,$(PKG_TRUST_PUBS)),)
+$(error /etc/pkg/keys would hold $(words $(PKG_TRUST_PUBS)) keys; pkg and cosmo-upgrade read at most 16)
+endif
 
 # CRASH_TEST=1 makes kernel_main fault on purpose after the self-tests so
 # the panic path and the harness's failure detection can be verified.

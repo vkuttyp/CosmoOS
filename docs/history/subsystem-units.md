@@ -3187,3 +3187,17 @@ See the [history index](README.md).
   (`tools/release-version-probe.py`). Dry run `v1.0.5-rc1`, run
   39108809189, published with the right string. Report:
   `docs/audit/2026-10-18-release-version-report.md`.
+- **A network package repository (roadmap 1.1 P6, 2026-10-18; #407,
+  #408, #409 and the PR ticking it).** `pkg` and `cosmo-upgrade` fetch
+  over HTTPS through `/bin/cosmo-fetch`, a program on `ssl_client`'s
+  certificate checks (the native libc has neither a resolver nor TLS),
+  with an optional key pin, same-origin redirects only and range resumes.
+  A network `INDEX` carries `serial`, `published` and `expires`, checked
+  before any package line (PK10). `cosmo-upgrade --fetch TAG|URL` fetches a
+  release set, its signed `SHA256SUMS` first; `--check` reads the release
+  index. The release workflow publishes both on GitHub Pages
+  (`https://vkuttyp.github.io/CosmoOS/`) and re-signs weekly; installed
+  systems name it in `repos.conf`, and every build's `/etc/pkg/keys` now
+  holds the release key. `make test-pkg-net` on both architectures, the
+  real published repository last. Report:
+  `docs/audit/2026-10-18-pkg-net-report.md`.

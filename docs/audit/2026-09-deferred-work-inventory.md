@@ -1414,3 +1414,11 @@ each; none is needed by M2's acceptance test.
   (`priv -u 1000 -g 1000 touch /tmp/f` is `Permission denied`; found by
   P6's review, 2026-10-18). `cosmo-upgrade --check` keeps its file there
   and so works for any uid once that is fixed.
+- ~~The boot archive (`$(BOOT_ARCHIVE)`, `Makefile`) is rebuilt when an
+  entry's file changes but not when the list of entries does: adding
+  `etc/pkg/keys/release-2026.pub` (P6, 2026-10-18) left an existing
+  `boot.tar` with one key until it was removed by hand. A fresh tree
+  (CI, the release) is not affected.~~ **Closed 2026-10-19** (#410): the
+  archive depends on `$(OUT)/gen/archive-entries.stamp`, rewritten only
+  when the list (less the repository's entries) changes.
+

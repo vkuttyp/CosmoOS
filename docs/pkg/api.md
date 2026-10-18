@@ -167,7 +167,7 @@ operation stops. A file owned by another installed package is a conflict
 | Path | Content |
 |---|---|
 | `/etc/pkg/repos.conf` | at most 8 lines `NAME URL [pin sha256:HEX] [insecure]` (at most 8 words a line, one pin) (design.md, "Configuration"); `#` comments; a line that is a directory alone is the file:// repository `local`. The live image ships `/boot/repo`, and `cosmo-install` copies that repository to `/var/lib/pkg/repo` on the installed root and writes this file to name it (roadmap M6) |
-| `/etc/pkg/keys/*.pub` | accepted Ed25519 public keys, 64 hex characters each (the `tools/keys/*.pub` format, at most 16 keys); the image ships the first trusted key, `dev.pub` for a development build (`PKG_TRUST_PUB`) |
+| `/etc/pkg/keys/*.pub` | accepted Ed25519 public keys, 64 hex characters each (the `tools/keys/*.pub` format, at most 16 keys); the image ships every key the kernel trusts (`PKG_TRUST_PUBS`, `KEYRING_PUBS`): a development build its `dev.pub` and the release key, a release build the release key |
 | `/var/lib/pkg/repos/<name>/INDEX` | each repository's last accepted `INDEX` text (trailer stripped); its header's serial is the one PK10 compares with |
 | `/var/cache/pkg/<name>/` | packages being fetched (`FILE.part` until whole), removed once installed or refused |
 | `/var/db/pkg/installed/<name>/MANIFEST` | the installed package's manifest, as extracted |
@@ -221,7 +221,7 @@ header `serial: N`, `published: T` (now, or `--published`) and `expires:`
 | `PKG_REPO` | `$(OUT)/pkg/repo` |
 | `PKGSIGN_KEY` | the signing key, default `MODSIGN_KEY` (the per-machine developer key, or the release key) |
 | `all` | includes `pkg` and `ports` |
-| `image` | the boot archive carries `sbin/pkg`, `etc/pkg/repos.conf`, `etc/pkg/keys/<key>.pub` (`PKG_TRUST_PUB`) and every repository file as `repo/<file>` (`PKG_ARCHIVE_ENTRIES`); `SELFTEST=1` builds add the two fixtures |
+| `image` | the boot archive carries `sbin/pkg`, `etc/pkg/repos.conf`, `etc/pkg/keys/<key>.pub` for each key the kernel trusts (`PKG_TRUST_PUBS`) and every repository file as `repo/<file>` (`PKG_ARCHIVE_ENTRIES`); `SELFTEST=1` builds add the two fixtures |
 | `analyze` | includes `pkg/*.c` (`PKG_ANALYZE`) |
 | `host-test` | includes `test_pkg` |
 | `reproducible` | compares `userland/pkg.elf`, `pkg/repo/INDEX`, `pkg/repo/hello-1.1.cpk`, `pkg/repo/fortune-1.0.cpk` |

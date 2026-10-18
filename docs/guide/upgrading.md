@@ -112,6 +112,8 @@ cosmo$ echo 'cosmoos https://vkuttyp.github.io/CosmoOS/repo/x86_64' >> /etc/pkg/
 cosmo$ pkg update
 ```
 
+On AArch64 the line ends in `repo/aarch64`.
+
 ## Upgrading from a directory
 
 On your computer, download the new release set for your architecture
