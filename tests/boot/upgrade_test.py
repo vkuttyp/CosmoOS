@@ -65,6 +65,16 @@ Boots, each of the installed disk alone after the first:
   forward   This build boots verified with its own key again; the ESP
             holds the new set and loader, \\cosmo\\prev v1.0.3's.
 
+--base-tag v1.0.4 starts from the published v1.0.4 instead (make
+test-upgrade UPGRADE_BASE_TAG=v1.0.4), which has its own cosmo-upgrade and
+takes the guide's "From v1.0.4 and later" path: install; upgrade (the
+installed system's /sbin/cosmo-upgrade on the fetched set, no package);
+new (as above); back (v1.0.4 boots again and rolls forward with its own
+cosmo-upgrade, the loader first only when v1.0.4's loader lacks the set's
+key); forward (as above). The refusals, the interruptions and the hold
+are v1.0.3-based only: they test v1.0.3's tools and the switches, which
+do not depend on the base.
+
 Exit 0 PASS, 1 FAIL.
 """
 
@@ -83,7 +93,8 @@ import mkmanifest  # noqa: E402  (scripts/, on install_test's path)
 import modsign  # noqa: E402
 import net_login_test  # noqa: E402
 
-RELEASE_KEY = "36ae7bb4947896ab"   # tools/keys/release-2026.pub: v1.0.3's signer
+RELEASE_KEY = "36ae7bb4947896ab"   # tools/keys/release-2026.pub: v1.0.3's and v1.0.4's signer
+BASE = "v1.0.3"   # the published release the test starts from (--base-tag)
 SET = ("kernel.elf", "boot.tar", "cmdline", "manifest")
 # v1.0.3's cosmofs loses a large file being written now and then: a
 # compressed record rewritten once its last page fills no longer
@@ -152,20 +163,20 @@ def stage_install(args, results):
     b = Boot("install", image, work, env, args.timeout)
     try:
         b.wait_prompt("the first prompt")
-        need(b.text(), rf"^\[ INFO\] boot: verified boot, key {RELEASE_KEY} ", "the v1.0.3 live image")
+        need(b.text(), rf"^\[ INFO\] boot: verified boot, key {RELEASE_KEY} ", f"the {BASE} live image")
         out = b.run("cosmo-install --list")
         m = need(out, rf"^(\S+)\s+-\s+{(install_test.TARGET_MIB << 20) // install_test.SS}\s+{install_test.SS}\s",
                  "cosmo-install --list")
         dev = m.group(1)
         out = sh(b, f"cosmo-install {dev}", "inst")
-        need(out, rf"^cosmo-install: installed on {dev}: ", "v1.0.3's cosmo-install")
+        need(out, rf"^cosmo-install: installed on {dev}: ", f"{BASE}'s cosmo-install")
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
             raise Fail(f"install boot: QEMU exit code {rc}")
     except Exception:
         b.kill()
         raise
-    results.append(f"install: v1.0.3 (key {RELEASE_KEY}) installed itself on {dev}; PASS in {b.elapsed():.1f}s")
+    results.append(f"install: {BASE} (key {RELEASE_KEY}) installed itself on {dev}; PASS in {b.elapsed():.1f}s")
 
 
 def fetch_all(b, port, arch, variants=False, check=True):
@@ -521,7 +532,7 @@ def stage_forward(args, results, keyid, base, new, new_loader):
         if esp_file(args.target, p) != new_loader:
             raise Fail(f"after the second rollback: {p} is not the new loader")
     if esp_file(args.target, f"::/cosmo/prev/{loader_name(args.arch)}") != base["loader"]:
-        raise Fail("after the second rollback: \\cosmo\\prev's loader is not v1.0.3's")
+        raise Fail(f"after the second rollback: \\cosmo\\prev's loader is not {BASE}'s")
     b = boot_disk("forward", args)
     try:
         b.wait_prompt("the first prompt")
@@ -538,18 +549,120 @@ def stage_forward(args, results, keyid, base, new, new_loader):
         b.kill()
         raise
     results.append(f"forward: this build booted again with {keyid}; the ESP holds the new set and loader, "
-                   f"\\cosmo\\prev v1.0.3's; its base system and hello 1.1; PASS in {b.elapsed():.1f}s")
+                   f"\\cosmo\\prev {BASE}'s; its base system and hello 1.1; PASS in {b.elapsed():.1f}s")
+
+
+class Done(Exception):
+    """The shorter flow from a base with its own cosmo-upgrade has ended."""
+
+
+def fetch_set(b, port, arch):
+    """The set and its signed SHA256SUMS into UP, as the guide's "From
+    v1.0.4 and later" does (no package: the system has cosmo-upgrade)."""
+    url = f"http://10.0.2.2:{port}"
+    files = " ".join(f"cosmoos-{arch}-{n}" for n in SET) + " SHA256SUMS SHA256SUMS.sig"
+    sh(b, f"mkdir -p {UP} && cd {UP} && for f in {files}; do wget -q {url}/$f || exit 1; done && cd /", "fetch")
+
+
+def stage_upgrade_own(args, results, port, keyid, base, new, new_loader, nonce):
+    """The installed base upgrades itself with its own /sbin/cosmo-upgrade."""
+    b = boot_disk("upgrade", args)
+    try:
+        b.wait_prompt("the first prompt")
+        k = verified_key(b, f"the installed {BASE}")
+        if k != RELEASE_KEY:
+            raise Fail(f"the installed {BASE} booted with key {k}, not {RELEASE_KEY}")
+        fetch_set(b, port, args.arch)
+        trusted = keyid == RELEASE_KEY   # a published set: the base shipped its key
+        if not trusted:
+            # A build's set, signed by the build's key: refused until the
+            # operator trusts that key, then accepted.
+            out = sh(b, f"/sbin/cosmo-upgrade {UP}", "untrusted", 3)
+            need(out, rf"^cosmo-upgrade: {UP}: SHA256SUMS: unknown signing key {keyid} \(not in /etc/pkg/keys\); "
+                      r"nothing written$", "the base's cosmo-upgrade before the set's key is trusted")
+            sh(b, f"wget -q -O /etc/pkg/keys/{args.pub_name} http://10.0.2.2:{port}/trust.pub && sync", "trust")
+        sh(b, f"echo {nonce} > /root/keep && sync", "keep")
+        out = sh(b, "pkg update && pkg install hello=1.0 && hello", "hello")
+        need(out, r"^hello, world \(hello 1\.0\)$", f"pkg install hello=1.0 on {BASE}")
+        t0 = time.monotonic()
+        out = sh(b, f"/sbin/cosmo-upgrade {UP}", "up")
+        up_s = time.monotonic() - t0
+        need(out, r"^cosmo-upgrade: boot set switched: ", "the upgrade")
+        if new_loader != base["loader"]:
+            need(out, r"^cosmo-upgrade: loader switched: ", "the upgrade (the set's loader differs)")
+        m = need(out, r"^cosmo-upgrade: root: (\d+) files replaced, (\d+) added, (\d+) removed, (\d+) unchanged, "
+                      r"(\d+) kept as changed here", "the upgrade's root pass")
+        need(out, r"^cosmo-upgrade: upgraded; reboot to run it", "the upgrade")
+        rc = b.finish()
+        if rc != install_test.EXIT_SUCCESS:
+            raise Fail(f"upgrade boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    check_set(args.target, new, "::/cosmo", "after the upgrade")
+    check_set(args.target, base, "::/cosmo/prev", "after the upgrade")
+    if esp_file(args.target, f"::/EFI/BOOT/{loader_name(args.arch)}") != new_loader:
+        raise Fail("after the upgrade: the loader is not the new one")
+    if esp_file(args.target, f"::/cosmo/prev/{loader_name(args.arch)}") != base["loader"]:
+        raise Fail(f"after the upgrade: \\cosmo\\prev's loader is not {BASE}'s")
+    first = "" if trusted else f"refused the set until its key {keyid} was trusted, then "
+    results.append(f"upgrade: {BASE} booted with {k}; its own cosmo-upgrade {first}took {up_s:.1f}s (root: "
+                   f"{m.group(1)} replaced, {m.group(2)} added, {m.group(3)} removed, {m.group(5)} kept); the ESP holds "
+                   f"the new set and loader, \\cosmo\\prev {BASE}'s set and loader")
+
+
+def stage_back_own(args, results, keyid, base, new, new_loader, nonce):
+    """The rolled-back base boots and rolls forward with its own cosmo-upgrade."""
+    check_set(args.target, base, "::/cosmo", "after the rollback")
+    for p in (f"::/EFI/BOOT/{loader_name(args.arch)}", f"::/cosmo/{loader_name(args.arch)}"):
+        if esp_file(args.target, p) != base["loader"]:
+            raise Fail(f"after the rollback: {p} is not {BASE}'s loader")
+    check_set(args.target, new, "::/cosmo/prev", "after the rollback")
+    b = boot_disk("back", args)
+    try:
+        b.wait_prompt("the first prompt")
+        k = verified_key(b, "the rolled-back system")
+        if k != RELEASE_KEY:
+            raise Fail(f"the rolled-back system booted with key {k}, not {RELEASE_KEY}")
+        out = sh(b, "cat /root/keep && hello", "kept")
+        need(out, r"^hello, world \(hello 1\.1\)$", "the package pkg upgrade changed, after the rollback")
+        need(out, rf"^{nonce}$", "the operator's /root/keep after the rollback")
+        out = sh(b, "/sbin/cosmo-upgrade --rollback", "again")
+        lname = loader_name(args.arch)
+        prev_first = (rf"^cosmo-upgrade: loader switched: \\EFI\\BOOT\\{lname} is \\cosmo\\prev's, "
+                      r"which starts both sets$")
+        set_own = rf"^cosmo-upgrade: loader switched: \\EFI\\BOOT\\{lname} is the set's own$"
+        if keyid != RELEASE_KEY:
+            need(out, prev_first, "the second rollback's loader switch")   # the base's loader lacks the key
+            order = "loader first"
+        else:
+            if re.search(prev_first, out, re.M):
+                raise Fail(f"the second rollback switched the loader first, but {BASE}'s loader trusts the release key")
+            need(out, set_own, "the second rollback's loader switch, after the set")
+            order = "set first, then the loader"
+        need(out, r"^cosmo-upgrade: rolled back; reboot to run it$", "the second rollback")
+        rc = b.finish()
+        if rc != install_test.EXIT_SUCCESS:
+            raise Fail(f"back boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"back: {BASE} booted again with {RELEASE_KEY}, its loader back, /root/keep and hello 1.1 kept; "
+                   f"its own cosmo-upgrade rolled forward again, {order}; PASS in {b.elapsed():.1f}s")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", required=True, help="the v1.0.3 live image")
+    ap.add_argument("--base", required=True, help="the published base release's live image")
+    ap.add_argument("--base-tag", choices=("v1.0.3", "v1.0.4"), default="v1.0.3")
     ap.add_argument("--set", required=True, help="this build's release set (make release-set)")
     ap.add_argument("--pub", required=True, help="the public key this build signs with")
     ap.add_argument("--arch", choices=("x86_64", "aarch64"), default=os.environ.get("QEMU_ARCH", "x86_64"))
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
     args = ap.parse_args()
+    global BASE
+    BASE = args.base_tag
     shutil.rmtree(args.workdir, ignore_errors=True)
     os.makedirs(args.workdir)
     args.pub_name = os.path.basename(args.pub)
@@ -638,6 +751,14 @@ def main():
         nonce = f"s7-kept-{os.getpid()}-{int(time.time())}"
 
         stage_install(args, results)
+        if BASE != "v1.0.3":
+            if new_loader == base["loader"]:
+                raise Fail(f"the set's loader is {BASE}'s byte for byte: nothing for this test to switch")
+            stage_upgrade_own(args, results, port, keyid, base, new, new_loader, nonce)
+            stage_new(args, results, keyid, nonce)
+            stage_back_own(args, results, keyid, base, new, new_loader, nonce)
+            stage_forward(args, results, keyid, base, new, new_loader)
+            raise Done()
         stage_refuse(args, results, port, keyid, otherid, vkeyid)
         stage_stop(args, results, port, "written", base, new_loader, RELEASE_KEY)
         stage_stop(args, results, port, "loader", base, new_loader, RELEASE_KEY)
@@ -646,6 +767,8 @@ def main():
         stage_new(args, results, keyid, nonce)
         stage_back(args, results, port, keyid, base, new, new_loader, nonce)
         stage_forward(args, results, keyid, base, new, new_loader)
+    except Done:
+        pass
     except Fail as e:
         for r in results:
             print(f"test-upgrade: {r}")
