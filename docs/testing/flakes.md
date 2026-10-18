@@ -2491,6 +2491,31 @@ Each order happens on every boot, and the test requires it. Restoring
 either half's old assertion now fails every GIC boot, not one in dozens.
 
 
+## `el2-guest-timer`: the heartbeat after the handler read a clock not past the arming
+
+**2026-10-18, aarch64 CI, the GIC boot (`make test-gic`, debug), on
+main's merge of #409 (`bd0594fc`, run 39164437963)**, a change touching
+no kernel or hypervisor code. The check after the handler returns
+(`kernel-services/virtualization/hvtest.c`, `x.hypercall.a0 > armed_at`)
+failed, and the line printed before it for this sighting said:
+
+```text
+[ INFO] selftest: el2-guest-timer: heartbeat after the handler read 5, armed at 470387, CNTVOFF 9455587330
+SELFTEST: el2-guest-timer  ... FAIL: check failed: x.hypercall.a0 > armed_at at line 1515 (25 ms)
+```
+
+The guest's virtual counter went **back**, to 5 ticks, between the
+arming (470387) and the heartbeat after the handler: not a clock that
+stood still. A counter that restarts near zero is what a `CNTVOFF`
+rewritten to about the physical count of that moment would give, so the
+offset changing under a running vCPU (on a reload, or another CPU's
+entry) is the lead to test. That is not established: the line gives the
+offset after the run only. The neighbouring boots of the same run
+(`el2-guest-timer-isolated`, `-offset`, `-ontime`) passed, and so did the
+other aarch64 boots in the job. Next sighting: log `CNTVOFF` at the arming
+too. Count: 1 with values (the check's comment records one earlier
+sighting with nothing to read).
+
 ## `mmu: TLB shootdown acknowledged by 2 of 3 CPUs`
 
 **2026-09-22, x86-64, this developer's machine**, one plain debug boot
