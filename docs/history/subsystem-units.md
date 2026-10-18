@@ -3166,3 +3166,12 @@ See the [history index](README.md).
   (`tools/crash3-waiter-probe.py`). Report:
   `docs/audit/2026-10-17-crash3-waiter-report.md`.
 
+- **The release version string (2026-10-18, the owner's task after
+  v1.0.4).** v1.0.4's kernel said `v1.0.3-123-g1ec37307`: the release
+  checkout leaves the pushed annotated tag lightweight and `git describe`
+  skips it. `scripts/release-tag.sh` restores the tag and requires
+  describe to name it; `scripts/check-release-version.py` stops a release
+  whose kernel, file set, package or notes say anything else
+  (`tools/release-version-probe.py`). Dry run `v1.0.5-rc1`, run
+  39108809189, published with the right string. Report:
+  `docs/audit/2026-10-18-release-version-report.md`.

@@ -55,4 +55,26 @@ check-release-version: cosmoos-aarch64-cosmo-upgrade.cpk: package cosmo-upgrade-
 In the clone above, `release-tag.sh v1.0.4` fetched the annotated tag and
 `git describe` then said `v1.0.4`.
 
-The dry run on a release-candidate tag: below.
+`tools/release-version-probe.py [--old] [--arch A]` makes the release
+checkout's clone of `v1.0.5-rc1` (the tag's commit, the tag lightweight),
+runs `make release` and the check. `--old`, without `release-tag.sh`: on
+both architectures the clone's describe is `v1.0.4-7-g6ee37147` and the
+check fails, `build id v1.0.4-7-g6ee37147, not v1.0.5-rc1` and `package
+cosmo-upgrade-1.0.4-7, not cosmo-upgrade-1.0.5-0`. Fixed: `release-tag:
+v1.0.5-rc1 (annotated); git describe names it`, and the check passes.
+
+## The dry run
+
+`v1.0.5-rc1`, an annotated tag at this branch's `6ee37147`, release run
+39108809189: every job passed. Each `build` job printed `release-tag:
+v1.0.5-rc1 (annotated); git describe names it` and
+`check-release-version: v1.0.5-rc1 in 1 set(s)`; `publish` printed
+`check-release-version: v1.0.5-rc1 in 2 set(s) and the notes` and
+published the pre-release "CosmoOS 1.0.5-rc1" (18 files). Its
+`cosmoos-aarch64-kernel.elf` carries the build id `v1.0.5-rc1`.
+
+## Review
+
+Qodo and Codex on #404: the check accepted a set missing a file and the
+other architecture's loader (it now requires exactly the architecture's
+set), and the defect had no probe (`tools/release-version-probe.py`).
