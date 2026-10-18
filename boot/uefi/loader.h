@@ -24,11 +24,17 @@
 #define CMDLINE_PATH L"\\cosmo\\cmdline"
 #define MANIFEST_PATH L"\\cosmo\\manifest"
 
-/* Everything the loader allocates stays below this so it is covered by the
- * bootstrap identity map and HHDM. */
+/* Everything the loader allocates stays below this (low memory exists on
+ * every machine it has met, and the x86-64 kernel's AP trampoline wants
+ * its root there). What firmware placed elsewhere -- the loader image,
+ * ACPI tables, the framebuffer, RAM itself -- is covered by the direct
+ * map, which the loader sizes from the memory map (direct_map_size). */
 #define LOADER_ALLOC_LIMIT (4ULL << 30)
 #define BOOT_HHDM_BASE     0xFFFF800000000000ULL
-#define BOOT_HHDM_SIZE     (4ULL << 30)
+/* The most the direct map can span: the kernel's arena begins at
+ * 0xFFFFC00000000000 (kernel/memory/vmm.c), 64 TiB above BOOT_HHDM_BASE. */
+#define BOOT_HHDM_MAX      (64ULL << 40)
+#define PAGE_1G            (1ULL << 30)
 
 #define PAGE_SIZE 4096ULL
 #define PAGE_2M   (2ULL << 20)
@@ -55,6 +61,8 @@ void lprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  * offers. Boot services must still be up (the firmware console prints). */
 struct cosmoboot_info;
 void acpi_scan(struct cosmoboot_info *info);
+/* After acpi_scan: the end of the highest table it read (0 when none). */
+uint64_t acpi_tables_end(void);
 /* After ExitBootServices: what the MADT, MCFG, GTDT and FADT say. */
 void acpi_report(void);
 

@@ -329,18 +329,22 @@ address and no calling convention across the boundary.
    in turn opaque bytes for the ELF validators (`elf_validate` for
    `init`, `modelf_validate` for modules).
 4. `elf_load()` (below). Produces `struct elf_image`.
-5. Allocations that must precede ExitBootServices, in order: page-table
-   pool (`paging_pool_size()` pages, type `COSMO_PAGETABLES`), bootinfo
-   (`BOOTINFO_PAGES` = 5 pages, type `COSMO_BOOTINFO`: the struct followed
-   by up to `BOOTINFO_MAX_ENTRIES` map entries), handoff stack
+5. Allocations that must precede ExitBootServices, in order: a snapshot
+   of the memory map, bootinfo (`BOOTINFO_PAGES` = 6 pages, type
+   `COSMO_BOOTINFO`: the struct followed by up to `BOOTINFO_MAX_ENTRIES`
+   map entries, then the command line), handoff stack
    (`HANDOFF_STACK_PAGES` = 4, `EfiLoaderData`).
-6. `paging_build()` (below).
-7. Fill the info header, including `archive_phys`/`archive_size`.
+6. Fill the info header, including `archive_phys`/`archive_size`.
    `find_acpi_rsdp()` scans `ConfigurationTable` for the ACPI 2.0 GUID,
    remembering a 1.0 hit as fallback. Then `acpi_scan(info)` records the
    serial console the tables name in `console_*` (v9) and
    `arch_serial_configure(info)` points the loader's own later output at
-   it (AArch64; x86-64 keeps COM1); see "The serial console".
+   it (AArch64; x86-64 keeps COM1); see "The serial console". The
+   framebuffer is chosen and recorded.
+7. `direct_map_size()` sizes the direct map ("The direct map", below);
+   the page-table pool is allocated (`paging_pool_size()` pages, type
+   `COSMO_PAGETABLES`) and `paging_build()` fills it; the roots go into
+   the info header.
 8. Memory map: `GetMemoryMap(size=0)` to learn the size, add 16
    descriptors of slack, allocate the buffer (`EfiLoaderData`, itself a
    map change the slack absorbs). Then up to two rounds of
@@ -383,16 +387,75 @@ Loading: one `alloc_pages_low()` of `hi - lo` bytes (type `COSMO_KERNEL`)
 gives `phys_base`; each PT_LOAD's `p_filesz` bytes are copied to
 `phys_base + (p_vaddr - lo)`. Gaps and `.bss` are already zero.
 
-## Bootstrap page tables (`boot/uefi/paging.c`)
+## The direct map
 
-Four-level tables built from a pre-sized pool so the walk never allocates.
+`hhdm_size` is the loader's choice, and the kernel assumes none
+(`cosmoboot.h`). `direct_map_size()` (`boot/uefi/main.c`) takes the
+highest end of everything the kernel reaches through the map before it
+builds its own:
+
+- every RAM descriptor of the firmware's memory map (all types but
+  MMIO, MMIO port space, reserved and unusable -- the AArch64 table
+  builder's notion of RAM, so ACPI, runtime-services and boot-services
+  memory count);
+- the loader's own image (`LoadedImage->ImageBase/ImageSize`): the code
+  that switches the tables keeps running from it;
+- the kernel image, the boot archive, the boot-info pages, the handoff
+  stack and the memory-map snapshot;
+- the RSDP and every table `acpi_scan` read (`acpi_tables_end()`);
+- the framebuffer;
+- a memory-mapped serial console's register page (PL011 or 16550 MMIO;
+  closes the inventory line about a console above the 4 GiB map).
+
+The end is rounded up to 1 GiB and mapped from 0 with 2 MiB blocks
+(AArch64: RAM normal, everything else device, mixed blocks as pages;
+x86-64: write-back throughout). Holes between RAM and a device above it
+are mapped like any other device memory. The loader prints
 
 ```
-PML4[0]    → PDPT_low → PD_low[0..3] : 2 MiB pages, phys 0-4 GiB, P|RW|PS|NX
-                                        (loader image pages: P|RW|PS, no NX)
-PML4[256]  → PDPT_low                 : same tables, HHDM at 0xFFFF800000000000
-PML4[511]  → PDPT_k → PD_k → PT_k*    : kernel, 4 KiB pages, P|G, RW from PF_W,
-                                        NX unless PF_X
+direct map: 0x0-0x140000000 (5 GiB), to the end of RAM at 0x140000000
+```
+
+naming what decided the size. A firmware range whose length wraps the
+address space, or a descriptor whose page count overflows, stops the
+loader the same way as one out of reach. The memory map is read again
+after the display mode is chosen, so the attributes come from the map
+the framebuffer is in. If that end is past what this CPU's
+tables can map -- `paging_pa_limit()`, 2^MAXPHYADDR on x86-64
+(CPUID 0x80000008) or 2^PARange on AArch64 (at most 48 bits: these
+tables use the 48-bit descriptor format), and at most `BOOT_HHDM_MAX`
+(64 TiB, where the kernel's arena begins) -- the loader prints what and
+where, and stops (`die`) while boot services are up, so the reason is on
+the screen rather than lost to a silent hang. A pool the firmware cannot
+provide stops it the same way, with the size it asked for.
+
+Why: until 2026-10-18 the map was a fixed 4 GiB. Firmware loads the
+loader where it likes, and with 4 GiB of RAM or more that is often
+above 4 GiB (EDK2 allocates top-down). On AArch64 the TTBR0 identity
+map then lacked the loader's own code, and the instruction after the
+`msr ttbr0_el1` faulted with no handler: nothing after "jumping to
+kernel entry". Parallels Desktop's default 4 GB VM did this on every boot
+of v1.0.0-v1.0.4; QEMU virt with 4 GiB or more is the same machine shape
+(`make test-platforms`, variants `mem4g`, `mem8g`).
+
+Compatibility: no boot-protocol change. A v1.0.4 loader hands a new
+kernel `hhdm_size` = 4 GiB, which it handles as before (frames above it
+deferred until `vmm_init`, a console above it unused and said); a new
+loader hands a v1.0.4 kernel a larger size, which that kernel's code
+already accepted. `cosmo-upgrade` may therefore switch the set or the
+loader first.
+
+## Bootstrap page tables (`boot/uefi/arch/<arch>/paging.c`)
+
+Four-level tables built from a pre-sized pool so the walk never allocates.
+With N = `hhdm_size` / 1 GiB and P = ceil(N / 512) on x86-64:
+
+```
+PML4[0..P)    → PDPT_low[i] → PD_low[0..N) : 2 MiB pages, phys 0-hhdm_size, P|RW|PS|NX
+                                             (loader image pages: P|RW|PS, no NX)
+PML4[256..+P) → PDPT_low[i]                : same tables, HHDM at 0xFFFF800000000000
+PML4[511]     → PDPT_k → PD_k → PT_k*      : kernel, 4 KiB pages, P|G, RW from PF_W,
+                                             NX unless PF_X
 ```
 
 ### AArch64: a 2 MiB block may not mix RAM and device memory
@@ -413,14 +476,20 @@ from the same 2 MiB block for a slab object, and the compiler's
 eight-byte store into a four-byte-aligned field of it raised an
 alignment fault inside `vmm_init` -- before the kernel had installed
 tables of its own. `paging_pool_size` accounts for the extra tables:
-one per root per mixed block, bounded by the number of memory-map
-descriptors, since a mixed block needs a boundary and a boundary needs
-a descriptor.
+one per root per mixed block, bounded by twice the number of memory-map
+descriptors, since a mixed block needs a boundary, a boundary needs a
+descriptor end, and a descriptor has two.
 
-`paging_pool_size(img, descriptors)` = 1 (PML4) + (1 + 4) (identity PDPT + one PD per
-GiB) + (1 + 1 + span/2MiB + 1) (kernel PDPT, PD, page tables) + 4 slack.
-For the current 120 KiB kernel that is 24 pages, of which 13 are used;
-`pool_take()` calls `die()` if the estimate is ever wrong.
+`paging_pool_size(img, descriptors, hhdm_size)` on x86-64 = 1 (PML4) +
+(P + N) (identity PDPTs + one PD per GiB) + (1 + 1 + span/2MiB + 1)
+(kernel PDPT, PD, page tables) + 4 slack; on AArch64 2 × (1 + P + N)
+(L0, L1s, L2s of each root) + (2 + span/2MiB) (kernel L1, L2, L3s) + 4
+slack + 4 × descriptors (mixed blocks: up to two per descriptor, one
+at each end, each an L3 table in both roots; Codex on #403 found the
+earlier 2 × too few once sparse RAM above 4 GiB is mapped). `pool_take()` calls `die()` if
+the estimate is ever wrong. AArch64 classifies a block by summing the
+RAM descriptors' overlap with it, not page by page: a direct map tens
+of GiB wide has that many thousand blocks.
 
 Intermediate entries are always P|RW without NX; only leaves carry
 permissions. `next_level()` creates tables on demand from the pool.
@@ -510,11 +579,10 @@ under TCG; byte-wise `memcpy` of a 115 KiB kernel is not measurable.
 
 ## Known limitations
 
-- Physical memory above 4 GiB is neither mapped nor used by the loader
-  (all allocations are `AllocateMaxAddress` below 4 GiB); the kernel sees
-  it in the map but cannot touch it until the VMM builds a full direct
-  map.
-- MMIO ranges inside the 0-4 GiB identity map are mapped write-back like
+- The loader allocates only below 4 GiB (`AllocateMaxAddress`); a
+  machine with no free RAM there cannot boot. Memory above is mapped
+  ("The direct map") but not allocated from.
+- On x86-64, MMIO ranges inside the identity map are mapped write-back like
   RAM. The kernel must not access device memory through the bootstrap
   tables without remapping it first.
 - No framebuffer or command line; `reserved1` is zero. Exactly one

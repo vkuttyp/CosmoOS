@@ -211,7 +211,7 @@ Prints `cosmoboot: FATAL: <what> (status 0x..)`. With boot services:
 
 ### `EFI_STATUS alloc_pages_low(UINTN pages, uint32_t type, EFI_PHYSICAL_ADDRESS *out, bool *fallback_used)`
 
-Purpose: zeroed pages below 4 GiB.
+Purpose: zeroed pages below 4 GiB (`LOADER_ALLOC_LIMIT`).
 Inputs: page count (>0), EFI memory type (standard or `0x80000000`+),
 optional fallback flag.
 Outputs: physical address in `*out`; `*fallback_used` set if the firmware
@@ -242,12 +242,19 @@ Failure: `EFI_LOAD_ERROR` with a printed reason for every malformed
 input; `EFI_UNSUPPORTED` for a protocol version mismatch; allocation
 status on out-of-memory.
 
-### `UINTN paging_pool_size(const struct elf_image *img)`
+### `uint64_t paging_pa_limit(void)`
 
-Purpose: number of 4 KiB pages `paging_build()` needs, with 4 pages of
-slack. Pure function.
+Purpose: the exclusive end of the physical addresses this CPU's tables
+can map: 2^MAXPHYADDR (x86-64, CPUID 0x80000008, 36 bits without the
+leaf) or 2^PARange (AArch64, at most 48 bits).
 
-### `EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base, uint64_t loader_size, const uint8_t *mmap, UINTN mmap_size, UINTN desc_size)`
+### `UINTN paging_pool_size(const struct elf_image *img, UINTN mem_descriptors, uint64_t hhdm_size)`
+
+Purpose: number of 4 KiB pages `paging_build()` needs for a direct map
+of `hhdm_size` bytes (a GiB multiple) and the kernel image, with 4 pages
+of slack. Pure function.
+
+### `EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base, uint64_t loader_size, const uint8_t *mmap, UINTN mmap_size, UINTN desc_size, uint64_t hhdm_size)`
 
 Purpose: build the bootstrap tables described in `design.md`
 (`boot/uefi/arch/<arch>/paging.c`).

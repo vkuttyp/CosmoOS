@@ -165,6 +165,18 @@ every guest PSCI `SYSTEM_RESET` with CPUs parked on an un-EOId IPI, and
 never once the IPI was EOId (`docs/audit/2026-10-16-power-clock-report.md`);
 that hang needed a reset inside one QEMU, which no stalled boot here had.
 
+**Ninth sighting, 2026-10-18, both attempts:** local x86-64 `make
+BUILD=release test`, the release step of the direct-map unit's matrix on
+`3d01865f` (QEMU 11.1, this developer's machine, a Parallels Windows 11 VM
+running beside it): `firmware stall, retried`, then `FAIL: the firmware
+did not hand over within 30s, twice (no loader banner)`. The second
+attempt's serial log is 87 bytes, screen-clear sequences only (no
+firmware line either); the first's is lost as before. The unit changes
+the loader, but nothing of it runs before its banner, which neither
+attempt printed. The other 21 steps passed, nine x86-64 boots among them
+(the three 1/4/8 GiB release boots right after), and the rerun passed
+(18.9 s). Still unassigned.
+
  The rule moved into
 `tests/boot/firmware_stall.py` and every harness boot uses it --
 `run_boot_test.py` (which had its own copy) and `install_test.Boot`

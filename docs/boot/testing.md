@@ -71,7 +71,8 @@ make test-crash
 ```
 
 The `CRASH_TEST=1` kernel writes to `0xFFFF900000000000`, an address in
-neither the HHDM (`0xFFFF8000...`, 4 GiB) nor the kernel PML4 slot. The
+neither the HHDM (`0xFFFF8000...`, `hhdm_size`: the guest's RAM rounded
+up to a GiB) nor the kernel PML4 slot. The
 expected `#PF` with `CR2=ffff900000000000 (not-present write kernel)`
 confirms that the bootstrap tables map exactly what `design.md` says and
 nothing more, and that NX/WP did not interfere with the report. See
@@ -107,6 +108,7 @@ A triple fault during the handoff shows in QEMU's `-d int` log as a
 | `kernel ELF rejected` preceded by a `cosmoboot: ...` reason | malformed, wrong architecture, W+X segment, overlapping segments, entry outside segments, missing or mismatched protocol note |
 | `cannot allocate page-table pool` / `bootinfo` / `handoff stack` / `memory map buffer` | firmware could not find pages below 4 GiB: less than a few MiB of low RAM, or a firmware that rejects `AllocateMaxAddress` |
 | `page-table pool exhausted` | `paging_pool_size()` under-estimated: a loader bug, usually after changing the identity-map size or kernel layout |
+| `the direct map cannot cover what the kernel needs at entry`, after `<what> ends at 0x..., beyond the 0x... this CPU's page tables can map` | RAM, a table, the framebuffer or the console lies past the CPU's physical-address reach or 64 TiB (design.md, "The direct map") |
 | `GetMemoryMap size query failed` / `GetMemoryMap failed` | firmware fault; not recoverable |
 | `ExitBootServices failed` | the map changed during both attempts; extremely rare, indicates firmware activity during boot |
 | `memory map does not fit in bootinfo` | more than ~630 merged entries; raise `BOOTINFO_PAGES` |
@@ -189,9 +191,11 @@ one's memory does not fit) run only on firmware with an EDID.
   them natively; this is the highest-value next test for this subsystem.
 - Firmware that rejects loader-defined memory types (the fallback path is
   implemented but only exercised by inspection; OVMF accepts them).
-- Machines with more than 4 GiB of RAM (QEMU runs use 256 MiB). The
-  loader is expected to work, with the memory above 4 GiB reported in
-  the map but not mapped.
+- Firmware that places the framebuffer or the ACPI tables above the top
+  of RAM: QEMU's firmware puts both inside RAM, and nothing forces it.
+  `make test-platforms` boots 1, 4 and 8 GiB guests (variants `mem1g`,
+  `mem4g`, `mem8g`), where the loader image and, on AArch64, the ACPI
+  tables sit high in RAM.
 - Setting a mode from an EDID on a running firmware: none of the tested
   ones offers an EDID, so every boot logs `no EDID: kept`.
 - Real hardware and Parallels. QEMU/OVMF is the defined test platform;

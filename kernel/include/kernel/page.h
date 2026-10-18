@@ -72,8 +72,10 @@ static inline struct page *phys_to_page(paddr_t pa)
     return pfn_valid(pfn) ? pfn_to_page(pfn) : NULL;
 }
 
-/* Direct-map conversions. Valid for RAM the direct map covers: below
- * 4 GiB before vmm_init, all RAM after. The VMM sets the bounds. */
+/* Direct-map conversions. Valid for RAM the direct map covers: below the
+ * loader's hhdm_size before vmm_init (all RAM, from a loader that sizes
+ * its map; 4 GiB from one of v1.0.4 or older), all RAM after. The VMM
+ * sets the bounds. */
 extern vaddr_t pmm_hhdm_base;
 extern paddr_t pmm_hhdm_limit;
 

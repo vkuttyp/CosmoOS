@@ -50,14 +50,25 @@ stack, page-table pool, the raw EFI map buffer) is allocated before the
 final `GetMemoryMap`. `g_bs` is set to NULL immediately after exit so an
 accidental call faults rather than corrupting firmware state.
 
-## BT6. Everything handed to the kernel lies below 4 GiB
+## BT6. Everything handed to the kernel lies inside the direct map
 
-`alloc_pages_low()` uses `AllocateMaxAddress` at `LOADER_ALLOC_LIMIT - 1`.
-Consequently every address in `cosmoboot_info` (`mem_map_phys`,
-`kernel_phys_base`, `boot_pagetable_root`, the info struct itself) is
-inside both the identity map and the HHDM (`hhdm_size` = 4 GiB). A loader
-that allocates above the HHDM would hand the kernel pointers it cannot
-dereference.
+`direct_map_size()` (`boot/uefi/main.c`) sets `hhdm_size` to the end of
+the highest of: every RAM descriptor of the firmware's memory map, the
+loader's own image, the kernel, the archive, the boot-info pages, the
+handoff stack, the ACPI tables `acpi_scan` read, the framebuffer and a
+memory-mapped serial console -- rounded up to a GiB. Every address in
+`cosmoboot_info` is therefore inside both the identity map and the HHDM,
+and so is the PC the loader runs at when it switches tables. A range
+past what the CPU's tables can map (`paging_pa_limit()`, at most
+`BOOT_HHDM_MAX`) stops the loader with a message before
+`ExitBootServices`. The loader's own allocations still stay below
+`LOADER_ALLOC_LIMIT` (4 GiB) through `alloc_pages_low()`.
+
+Before 2026-10-18 the map was a fixed 4 GiB and this invariant held only
+for the loader's allocations: with 4 GiB of RAM or more, firmware loads
+the loader image above 4 GiB, and the AArch64 loader lost its own PC at
+the switch (Parallels Desktop's default 4 GB stalled after "jumping to
+kernel entry", v1.0.0-v1.0.4).
 
 ## BT7. NX is enabled before a CR3 that uses it is loaded
 
