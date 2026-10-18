@@ -241,6 +241,37 @@ host-test: $(HOST_TESTS)
 	@echo "== $(ROOT)/tests/boot/test_module_symbols.py"
 	$(Q)COSMO_CC=$(CC) COSMO_SYMBOLIZER=$(LLVM_PREFIX)llvm-symbolizer $(PYTHON) $(ROOT)/tests/boot/test_module_symbols.py
 
+# cosmo-fetch (ports/mbedtls/README.md) built for the host on the same
+# mbedTLS release and configuration, with ASan and UBSan, and run against
+# local TLS servers (tests/host/test_fetch.py): the certificate, pin,
+# redirect, plain-HTTP, range and size cases. Its own target: it needs the
+# pinned mbedTLS archive and OpenSSL 3.4 or later for the test certificates.
+HOST_MBEDTLS := $(HOST_OUT)/mbedtls
+HOST_MBEDTLS_LIBS := $(HOST_MBEDTLS)/library/libmbedtls.a $(HOST_MBEDTLS)/library/libmbedx509.a \
+	$(HOST_MBEDTLS)/library/libmbedcrypto.a
+
+$(HOST_MBEDTLS_LIBS) &: $(MBEDTLS_TAR) $(ROOT)/ports/mbedtls/cosmo_config.h
+	$(call log,HOSTMBEDTLS,$(MBEDTLS_VERSION))
+	$(Q)rm -rf $(HOST_MBEDTLS)
+	$(Q)mkdir -p $(HOST_MBEDTLS)
+	$(Q)tar -xjf $(MBEDTLS_TAR) -C $(HOST_MBEDTLS) --strip-components=1
+	$(Q)$(MAKE) -s -C $(HOST_MBEDTLS)/library CC=$(HOST_CC) \
+		CFLAGS="-O1 -g -I$(ROOT)/ports/mbedtls -DMBEDTLS_USER_CONFIG_FILE='<cosmo_config.h>'" \
+		libmbedcrypto.a libmbedx509.a libmbedtls.a > $(HOST_MBEDTLS)/build.log 2>&1 \
+		|| { tail -40 $(HOST_MBEDTLS)/build.log; exit 1; }
+
+$(HOST_OUT)/cosmo-fetch: $(ROOT)/ports/mbedtls/cosmo-fetch.c $(TLS_COMMON) $(HOST_MBEDTLS_LIBS)
+	$(call log,HOSTCC,$@)
+	$(Q)$(HOST_CC) -std=gnu11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+		-Wall -Wextra -Werror -I$(ROOT)/ports/mbedtls -I$(HOST_MBEDTLS)/include \
+		-DMBEDTLS_USER_CONFIG_FILE='<cosmo_config.h>' $< $(ROOT)/ports/mbedtls/tls_common.c $(HOST_MBEDTLS_LIBS) \
+		$(HOST_LDFLAGS) -o $@
+
+.PHONY: host-test-fetch
+host-test-fetch: $(HOST_OUT)/cosmo-fetch
+	$(Q)ASAN_OPTIONS=detect_leaks=0 $(PYTHON) $(ROOT)/tests/host/test_fetch.py --fetch $(HOST_OUT)/cosmo-fetch \
+		--workdir $(HOST_OUT)/fetch-test
+
 # Keep TSan in a distinct binary: it cannot be combined with ASan.
 $(HOST_OUT)/test_lockdep_threads: $(ROOT)/tests/host/test_lockdep_threads.c $(ROOT)/kernel/include/kernel/lockdep_core.h
 	$(call log,HOSTCC,$@)

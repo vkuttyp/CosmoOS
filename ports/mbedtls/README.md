@@ -5,6 +5,8 @@ https unit, 2026-10-14): mbedTLS, `ssl_client` written here on it, and
 the certificate authorities it trusts. BusyBox's own TLS code checks no
 certificate (its `wget` prints "TLS certificate validation not
 implemented" and goes on), which is why it was compiled out until now.
+`cosmo-fetch`, on the same library and the same checks, is the HTTPS client
+`pkg` and `cosmo-upgrade` run (roadmap 1.1 P6).
 
 | Source | Version | SHA-256 |
 |---|---|---|
@@ -29,8 +31,9 @@ github.com and curl.se, then the copy in this repository's
     other than glibc it reads `/dev/urandom`, which CosmoOS does not have.
   - No server side.
   - TLS 1.2 and 1.3 stay on, as in the default.
-- **`ssl_client`** (`ssl_client.c`). It is linked statically with the
-  three archives, then stripped.
+- **`ssl_client`** (`ssl_client.c`) and **`cosmo-fetch`**
+  (`cosmo-fetch.c`), each with `tls_common.c`, the certificate checks they
+  share. Each is linked statically with the three archives, then stripped.
 - `-ffile-prefix-map` keeps the build directories out of both (`make
   reproducible` builds them in both trees through `MBEDTLS_DIR`).
 
@@ -65,9 +68,49 @@ The end of the server's data ends `ssl_client`, whether or not the server
 sent `close_notify`. Many HTTP servers close without it, and HTTP's own
 length says whether the body is whole, as with BusyBox's `ssl_client`.
 
+## `cosmo-fetch`
+
+```
+cosmo-fetch [-c] [-i] [-p sha256:HEX] [-m MAX] URL FILE
+```
+
+One file over HTTPS into `FILE`, for `pkg` and `cosmo-upgrade`, which run
+it (the native libc they are built on has no resolver and no TLS):
+- The certificate is checked as `ssl_client` checks it (`tls_common.c`):
+  the chain to `$SSL_CERT_FILE`, the validity, the URL's host. With `-p`,
+  the SHA-256 of the server's public key (its DER SubjectPublicKeyInfo)
+  must also be `HEX`. All of it happens in the handshake, before the
+  request is sent: a refused server receives no request.
+- `http://` only with `-i` (a repository marked `insecure`); otherwise it
+  is refused before any connection.
+- Redirects: at most 5, and only to the same scheme, host and port.
+- `-c` resumes: the bytes already in `FILE` are kept and the rest asked for
+  with `Range: bytes=N-`; a server that answers 200 starts the file again,
+  and a 416 for a file already whole leaves it.
+- `-m MAX` refuses a file larger than `MAX` bytes, by `Content-Length` or
+  as a chunked body grows.
+- Bodies with `Content-Length`, chunked, or to the end of the connection.
+  A connection idle for 30 s fails.
+
+It neither renames nor checks `FILE`: the caller compares it with what it
+expects (the index's size and SHA-512, `SHA256SUMS`) and renames it into
+place. Exit statuses:
+
+| Status | Meaning |
+|---|---|
+| 0 | fetched |
+| 1 | failed: a name that does not resolve, a connection, a body cut short (`FILE` keeps what arrived, for `-c`) |
+| 2 | usage, or not an `http://`/`https://` URL |
+| 3 | refused: the certificate, the pin, plain HTTP without `-i`, a redirect elsewhere, larger than `-m` (`FILE` is removed if this run made it) |
+| 4 | the server answered with an HTTP error, which is printed |
+
+Messages are `cosmo-fetch: URL: ...` on standard error; a refused
+certificate prints `cosmo-fetch: HOST: the server's certificate is not
+accepted:` and mbedTLS's reasons, as `ssl_client` does.
+
 ## On the system
 
-- `/bin/ssl_client`, mode 0755.
+- `/bin/ssl_client` and `/bin/cosmo-fetch`, mode 0755.
 - `/etc/ssl/certs/ca-certificates.crt`, mode 0644.
 
 Both come from the boot archive and are copied to the installed root with
@@ -84,6 +127,20 @@ newer one. There is no revocation check (no CRL or OCSP).
   boot from the RTC or firmware; there is no NTP.
 
 ## Tested by
+
+`make host-test-fetch` (`tests/host/test_fetch.py`) builds `cosmo-fetch`
+for the host, on the same mbedTLS release and `cosmo_config.h`, with ASan
+and UBSan, and runs 25 cases against local servers
+(`tests/boot/tlstest.py`) with certificates made for the run: a good
+server; an untrusted CA, an expired certificate and another name, each
+exit 3 with no request received; the pinned key and another one (no
+request); plain HTTP without `-i` (no connection) and with it; same-origin
+redirects (absolute path, relative, full URL), and refused ones to another
+host and from https to http; a redirect loop; 404; resuming by range, from
+a server that ignores ranges and of a file already whole; `-m` by
+`Content-Length` and over a chunked body; a chunked body; a body cut short
+(the part kept) and its resumption; a non-HTTP URL; a name that does not
+resolve. It needs OpenSSL 3.4 or later, as the next test does.
 
 `make BUILD=release test-net-login` (`tests/boot/net_login_test.py`, step
 f) serves a 1 MiB file over HTTPS from the host with test certificates

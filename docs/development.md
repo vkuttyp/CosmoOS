@@ -77,6 +77,7 @@ Notes:
 | `test-platforms` | AArch64 platform discovery (`tests/boot/platform_test.py`; `docs/kernel/arch/aarch64/testing.md`, "make test-platforms"): the image under six QEMU configurations that differ from virt's defaults (`gicv2`, `gicv3`, `lowmem` with `highmem=off`, `rndr` on `neoverse-v1`, `nornd` on `cortex-a72`, both without virtio-rng, and `noserial`: `-serial none` and `serial=none` on a re-signed command line); each must reach the userland and print the platform line with what that machine has. Logs in `$(OUT)/test-platforms/<variant>/`. Prints that it is AArch64 only and succeeds on x86-64. CI job `platforms` (`BUILD=release`) |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
 | `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc, package-parser, Linux-conversion, nested-page-table and AArch64-relocation algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
+| `host-test-fetch` | `cosmo-fetch` (the HTTPS client `pkg` and `cosmo-upgrade` run) built for the host on the target's mbedTLS release and configuration, with ASan/UBSan, and run against local TLS servers: certificate, pin, plain-HTTP, redirect, range and size cases (`tests/host/test_fetch.py`; `ports/mbedtls/README.md`, "Tested by"). Needs the pinned mbedTLS archive and OpenSSL 3.4 or later |
 | `fuzz` | Build the host fuzz targets in `tests/fuzz/` (module ELF, user ELF, package formats, Linux ABI conversions, virtqueue, cosmofs images) under ASan/UBSan and run each over its seeds and `FUZZ_RUNS` (default 20000) seeded mutations; `FUZZ_ENGINE=libfuzzer` links libFuzzer instead; `fuzz-build` builds only (`docs/verification/`) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
 | `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries, the image and the release set |
@@ -620,7 +621,7 @@ Constitution section 66 applies to every subsystem change. In practice:
 2. Work on a feature branch and open a pull request; Greptile reviews every
    PR on the repository.
 3. Before pushing: `make test`, `make BUILD=release test`, `make host-test`,
-   `make fuzz`, `make analyze`, `make reproducible`, `make test-crash`.
+   `make host-test-fetch`, `make fuzz`, `make analyze`, `make reproducible`, `make test-crash`.
 4. Update the subsystem documentation in the same PR.
 
 The virtualization tests need QEMU 9.2 or newer (TCG nested paging for

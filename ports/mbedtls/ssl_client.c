@@ -15,54 +15,27 @@
  * valid at the wall clock's time, and name NAME (a DNS name, or an
  * address in the certificate's IP addresses). -k (wget's
  * --no-check-certificate) skips all three, saying so. Any failure is
- * reported on standard error and the status is 1. */
+ * reported on standard error and the status is 1. The checks are
+ * tls_common.c's, which cosmo-fetch shares. */
 
 #include <errno.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
 #include <unistd.h>
 
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/error.h"
 #include "mbedtls/net_sockets.h"
-#include "mbedtls/ssl.h"
-#include "mbedtls/x509_crt.h"
-#include "psa/crypto.h"
-
-#define CA_FILE_DEFAULT "/etc/ssl/certs/ca-certificates.crt"
+#include "tls_common.h"
 
 static int g_rfd = -1, g_wfd = -1;
 
-/* The strong entropy source (cosmo_config.h, MBEDTLS_ENTROPY_HARDWARE_ALT):
- * getrandom(2), which blocks until the kernel's pool is seeded. Declared
- * in the library's private entropy_poll.h. */
-int mbedtls_hardware_poll(void *data, unsigned char *out, size_t len, size_t *olen);
-int mbedtls_hardware_poll(void *data, unsigned char *out, size_t len, size_t *olen)
-{
-    (void)data;
-    *olen = 0;
-    while (*olen < len) {
-        ssize_t n = getrandom(out + *olen, len - *olen, 0);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
-        }
-        *olen += (size_t)n;
-    }
-    return 0;
-}
-
 static void die(const char *what, int ret)
 {
-    char buf[160];
+    char buf[200];
 
-    mbedtls_strerror(ret, buf, sizeof(buf));
-    fprintf(stderr, "ssl_client: %s: %s (-0x%04x)\n", what, buf, (unsigned)-ret);
+    tls_strerror(ret, buf, sizeof(buf));
+    fprintf(stderr, "ssl_client: %s: %s\n", what, buf);
     exit(1);
 }
 
@@ -200,13 +173,9 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    const char *name = NULL, *ca_file;
+    const char *name = NULL, *what;
     int exit_on_eof = 0, no_check = 0, c, ret;
-    mbedtls_entropy_context entropy;
-    mbedtls_ctr_drbg_context drbg;
-    mbedtls_x509_crt ca;
-    mbedtls_ssl_config conf;
-    mbedtls_ssl_context ssl;
+    static struct tls_client tls;
 
     while ((c = getopt(argc, argv, "eks:r:n:")) != -1) {
         switch (c) {
@@ -227,60 +196,17 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    if (psa_crypto_init() != PSA_SUCCESS) {
-        fprintf(stderr, "ssl_client: PSA crypto did not initialise\n");
-        exit(1);
-    }
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&drbg);
-    mbedtls_x509_crt_init(&ca);
-    mbedtls_ssl_config_init(&conf);
-    mbedtls_ssl_init(&ssl);
-
-    ret = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
-                                (const unsigned char *)"ssl_client", 10);
+    /* The checks cosmo-fetch makes too (tls_common.c). */
+    ret = tls_client_setup(&tls, name, no_check, &what);
     if (ret != 0)
-        die("random generator", ret);
+        die(what, ret);
+    mbedtls_ssl_set_bio(&tls.ssl, NULL, net_send, net_recv, NULL);
 
-    ret = mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
-                                      MBEDTLS_SSL_PRESET_DEFAULT);
-    if (ret != 0)
-        die("configuration", ret);
-    mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
-
-    if (no_check) {
-        mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
-    } else {
-        ca_file = getenv("SSL_CERT_FILE");
-        if (!ca_file || !*ca_file)
-            ca_file = CA_FILE_DEFAULT;
-        /* A positive result counts certificates the file has and the
-         * library cannot parse (an algorithm it lacks): the rest stay. */
-        ret = mbedtls_x509_crt_parse_file(&ca, ca_file);
-        if (ret < 0) {
-            char what[256];
-            snprintf(what, sizeof(what), "the certificate authorities in %s", ca_file);
-            die(what, ret);
-        }
-        mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-        mbedtls_ssl_conf_ca_chain(&conf, &ca, NULL);
-    }
-
-    ret = mbedtls_ssl_setup(&ssl, &conf);
-    if (ret != 0)
-        die("setup", ret);
-    /* The name checked against the certificate, and the one sent as SNI. */
-    if (name && (ret = mbedtls_ssl_set_hostname(&ssl, name)) != 0)
-        die("server name", ret);
-    mbedtls_ssl_set_bio(&ssl, NULL, net_send, net_recv, NULL);
-
-    while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
+    while ((ret = mbedtls_ssl_handshake(&tls.ssl)) != 0) {
         if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
             continue;
         if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
-            char info[512];
-            mbedtls_x509_crt_verify_info(info, sizeof(info), "  ", mbedtls_ssl_get_verify_result(&ssl));
-            fprintf(stderr, "ssl_client: %s: the server's certificate is not accepted:\n%s", name, info);
+            tls_report_verify(&tls, "ssl_client", name);
             exit(1);
         }
         die("handshake", ret);
@@ -289,6 +215,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "ssl_client: %s: the server's certificate was not checked (-k)\n",
                 name ? name : "the server");
 
-    copy_loop(&ssl, exit_on_eof);
+    copy_loop(&tls.ssl, exit_on_eof);
     return 0;
 }
