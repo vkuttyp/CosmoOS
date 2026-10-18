@@ -151,6 +151,11 @@ def stage_pkgnet(args, results, inst):
         need(out, r"^pkg: install needs the sys_admin privilege \(this process lacks it\)$",
              "the privilege refusal")
         del good.requests[:]
+        out = b.status("pkg install -n hello", "dry")
+        need(out, r"^dry=0$", "pkg install -n hello")
+        need(out, r"^pkg: installing hello-1\.0 \(from test, not fetched: -n\)$", "the dry run's plan")
+        if good.requests:
+            raise Fail(f"pkg install -n fetched {good.paths()}; a dry run fetches nothing")
         out = b.status("pkg update && pkg install hello && hello", "inst")
         need(out, r"^inst=0$", "pkg update && pkg install hello && hello")
         need(out, r"^pkg: fetching hello-1\.0\.cpk from test$", "the package fetched")
@@ -158,7 +163,7 @@ def stage_pkgnet(args, results, inst):
         need(out, r"^hello, world \(hello 1\.0\)$", "hello 1.0 runs")
         if good.paths() != ["/repo/INDEX", "/repo/hello-1.0.cpk"]:
             raise Fail(f"the server saw {good.paths()}, expected INDEX then hello-1.0.cpk")
-        results.append("a. update, search and info without sys_admin, install refused without it; "
+        results.append("a. update, search and info without sys_admin, install refused without it; install -n fetched nothing; "
                        "pkg update && pkg install hello fetched INDEX (serial 10) and hello-1.0.cpk, "
                        "'hello, world (hello 1.0)'")
 

@@ -316,8 +316,8 @@ def stanza_field(stanza, key):
 
 
 def cmd_publish(args):
-    if args.serial < 1:
-        die("--serial must be at least 1")
+    if not 1 <= args.serial < 1 << 64:
+        die("--serial must be 1 to 2**64 - 1 (pkg's serial is 64 bits)")
     if not 0 < args.days <= MAX_DAYS:
         die(f"--days must be 1 to {MAX_DAYS} (PK10)")
     published = int(time.time()) if args.published is None else int(

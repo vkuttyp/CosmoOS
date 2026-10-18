@@ -552,6 +552,11 @@ static int cmd_update(void)
             worst = rc;
         }
     }
+    if (total > PKG_MAX_INDEX) {
+        /* Each stored, but together more than index_load can merge. */
+        fprintf(stderr, "pkg: the repositories hold %d packages together, more than %d\n", total, PKG_MAX_INDEX);
+        return EXIT_FAILED;
+    }
     if (g_dry_run)
         printf("%d packages available\n", total);
     else if (ok == nrepos)
@@ -1065,6 +1070,10 @@ static int install_entry(const struct index_entry *e)
             return EXIT_FAILED;
         }
         rc = load_package(path, e, &l);
+    } else if (g_dry_run) {
+        /* -n writes nothing, the cache included: the plan, unfetched. */
+        printf("pkg: installing %s-%s (from %s, not fetched: -n)\n", e->name, e->version, r->name);
+        return 0;
     } else {
         char part[PKG_PATH_MAX + PKG_FILE_MAX + 8], url[PKG_URL_MAX + PKG_FILE_MAX + 2];
         snprintf(path, sizeof(path), PKG_CACHE_DIR "/%s/%s", r->name, e->file);

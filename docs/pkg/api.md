@@ -98,6 +98,8 @@ pkg list | info NAME... | search [TEXT...] | verify [NAME...]
 ```
 
 Options come after the command: `-n` prints the plan without writing
+(and without fetching: a network package is listed `(from NAME, not
+fetched: -n)`, so its checks run only for real)
 (`update -n` prints the package count), `-f` removes despite dependants,
 `--reinstall` ignores an installed version when resolving.
 
