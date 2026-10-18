@@ -553,6 +553,57 @@ jobs:
             out/${{ matrix.arch }}-release/test-display/*
           if-no-files-found: ignore
 
+  # Roadmap 1.1 P6's acceptance (docs/pkg/testing.md, "test-pkg-net"): the
+  # installed system's pkg against repositories this harness serves over
+  # HTTPS -- install and upgrade, and the refusals of untrusted, expired and
+  # misnamed certificates (no request reaching the server), a changed
+  # package, another key, a replayed and an expired index. Release builds,
+  # a job of its own.
+  pkg-net:
+    name: pkg-net test (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 30
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+
+      - name: Build (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release all
+
+      - name: pkg against HTTPS repositories on the installed system (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-pkg-net
+
+      - name: Upload the boots' serial logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-pkg-net-${{ matrix.arch }}
+          path: out/${{ matrix.arch }}-release/test-pkg-net/*.log
+          if-no-files-found: ignore
+
   # Milestone M3's acceptance (docs/roadmap-1.0.md; docs/userland/testing.md,
   # "test-busybox"): BusyBox ash runs the scripted test of every applet and
   # BusyBox's own testsuite for the named files. Release builds, a job of

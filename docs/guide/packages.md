@@ -5,8 +5,9 @@ the repository is `/var/lib/pkg/repo`: the installer copied the live
 image's repository there, and `/etc/pkg/repos.conf` names it. `pkg`
 checks the repository's index and every package against the public keys
 in `/etc/pkg/keys`, and refuses anything signed by another key or whose
-checksum does not match. The repository holds the packages the image was
-built with; there is no network repository in 1.0.
+checksum does not match. That repository holds the packages the image
+was built with; a repository on a server is added with one line of
+`repos.conf` ([Network repositories](#network-repositories) below).
 
 Boot the installed system:
 
@@ -63,12 +64,48 @@ pkg: verify: 0 problems
 `pkg remove` refuses to remove a package another one needs, and `pkg
 verify` checks every installed file against the package database in
 `/var/db/pkg`. The other commands are `pkg upgrade` and `pkg install
-NAME=VERSION`. Power off:
+NAME=VERSION`. Installing, upgrading and removing need the `sys_admin`
+privilege, which the console's shell has; `pkg update`, `search`, `info`,
+`list` and `verify` do not. Power off:
 
 <!-- test: console -->
 ```console
 cosmo$ exit
 ...init: disk root synced
 ```
+
+## Network repositories
+
+A line of `/etc/pkg/repos.conf` is a name, a URL and options:
+
+```text
+# NAME  URL                                   [pin sha256:HEX] [insecure]
+local   file:///var/lib/pkg/repo
+mine    https://packages.example.org/cosmoos/x86_64
+```
+
+`pkg update` fetches each repository's `INDEX` over HTTPS through
+`cosmo-fetch`, which checks the server's certificate as `wget` does,
+against `/etc/ssl/certs/ca-certificates.crt`, before it sends anything.
+`pin sha256:HEX` also requires the server's key to have that SHA-256
+(what `openssl x509 -pubkey -noout -in cert.pem | openssl pkey -pubin
+-outform der | sha256sum` prints for its certificate). Plain `http://` is
+refused unless the line says `insecure`. `pkg install` fetches the
+packages it needs into `/var/cache/pkg` and checks each against the index
+before installing it.
+
+A network repository's index carries a serial number and an expiry date,
+and `pkg update` refuses one older than the last it accepted from that
+repository, or one that has expired:
+
+```text
+pkg: mine: INDEX: serial 10 is older than 11, the last accepted from this repository (a replayed index)
+pkg: mine: INDEX: expired at 2026-11-17T12:00:00Z
+pkg: mine: INDEX: the clock (2000-01-01T00:05:12Z) is before the index was published (2026-10-18T12:00:00Z): set the clock (date -s) and update again
+```
+
+The last means the machine's clock is wrong: set it with `date -s
+'2026-10-18 12:00'` and run `pkg update` again. A refused
+server or index leaves the index `pkg` already had.
 
 Next: [Upgrading](upgrading.md).

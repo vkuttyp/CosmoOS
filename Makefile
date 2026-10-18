@@ -14,6 +14,7 @@
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
 #   make test-security roadmap M5: verified boot refuses tampered files; VERIFY_BOOT=0 says so (CI: BUILD=release)
 #   make test-net-login roadmap M4: DHCP, wget by address and by name on the installed system (CI: BUILD=release)
+#   make test-pkg-net  roadmap 1.1 P6: pkg against HTTPS repositories served by the harness (CI: BUILD=release)
 #   make test-display  virtio-gpu: the console on the display's own size, read back from a screendump (CI: BUILD=release)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
@@ -40,7 +41,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-upgrade test-security test-busybox test-net-login test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -292,6 +293,16 @@ test-net-login: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/net_login_test.py --image $(IMAGE) --workdir $(OUT)/test-net-login \
 		--timeout $(BOOT_TIMEOUT)
+
+# Roadmap 1.1 P6's acceptance test (tests/boot/pkgnet_test.py,
+# docs/pkg/testing.md, "test-pkg-net"): the installed system against
+# package repositories this harness serves over HTTPS -- install, upgrade,
+# refused certificates, packages, keys, replays and expiry. CI:
+# BUILD=release, a job of its own.
+test-pkg-net: $(IMAGE) $(PKG_INDEX)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/pkgnet_test.py --image $(IMAGE) --repo $(PKG_REPO) --sign-key $(PKGSIGN_KEY) \
+		--workdir $(OUT)/test-pkg-net --timeout $(BOOT_TIMEOUT)
 
 # The virtio-gpu unit's acceptance test (tests/boot/display_test.py,
 # docs/drivers/virtio/testing.md, "virtio-gpu"): the console on a
