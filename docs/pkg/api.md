@@ -162,7 +162,7 @@ operation stops. A file owned by another installed package is a conflict
 
 | Path | Content |
 |---|---|
-| `/etc/pkg/repos.conf` | at most 8 lines `NAME URL [pin sha256:HEX] [insecure]` (design.md, "Configuration"); `#` comments; a line that is a directory alone is the file:// repository `local`. The live image ships `/boot/repo`, and `cosmo-install` copies that repository to `/var/lib/pkg/repo` on the installed root and writes this file to name it (roadmap M6) |
+| `/etc/pkg/repos.conf` | at most 8 lines `NAME URL [pin sha256:HEX] [insecure]` (at most 8 words a line, one pin) (design.md, "Configuration"); `#` comments; a line that is a directory alone is the file:// repository `local`. The live image ships `/boot/repo`, and `cosmo-install` copies that repository to `/var/lib/pkg/repo` on the installed root and writes this file to name it (roadmap M6) |
 | `/etc/pkg/keys/*.pub` | accepted Ed25519 public keys, 64 hex characters each (the `tools/keys/*.pub` format, at most 16 keys); the image ships the first trusted key, `dev.pub` for a development build (`PKG_TRUST_PUB`) |
 | `/var/lib/pkg/repos/<name>/INDEX` | each repository's last accepted `INDEX` text (trailer stripped); its header's serial is the one PK10 compares with |
 | `/var/cache/pkg/<name>/` | packages being fetched (`FILE.part` until whole), removed once installed or refused |
@@ -182,7 +182,7 @@ pkgbuild.py build --port DIR --out REPO --cc CC --cflags "..." --ld LD --ldflags
                   --ldscript user.ld --crt0 crt0.o --libc libc.a --sign-key KEY [--test-fixtures]
 pkgbuild.py index --repo REPO --sign-key KEY
 pkgbuild.py publish --index INDEX --sign-key KEY --serial N [--published T] [--days D]
-                    [--only FILE.cpk ...] --out INDEX
+                    [--only FILE.cpk ...] [--input-pub PUB] --out INDEX
 ```
 
 `build` compiles each `program:` source with `CC CFLAGS -c` into
@@ -199,7 +199,9 @@ prints `INDEX N packages`; the `badsig` stanza is synthesised with name
 `badsig`, the `badsum` stanza with name `badsum` and `sha512` of 128
 zeros. Output is deterministic: sorted members, mtime 0, uid/gid 0, a
 deterministic signature. `publish` makes a network repository's `INDEX`
-from a built one: its package stanzas (trailer and any header dropped;
+from a built one, once its signature checks against `--input-pub` (by
+default the signing key's own public half): its package stanzas (trailer
+and any header dropped;
 with `--only`, those files' alone, which must all be there) after the
 header `serial: N`, `published: T` (now, or `--published`) and `expires:`
 `D` days later (1 to 30, default 30), signed with `KEY`; it prints

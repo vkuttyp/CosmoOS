@@ -5,7 +5,7 @@
                     --ldscript user.ld --crt0 crt0.o --libc libc.a --sign-key KEY [--test-fixtures]
   pkgbuild.py index --repo REPO --sign-key KEY
   pkgbuild.py publish --index INDEX --sign-key KEY --serial N [--published T] [--days D]
-                      [--only FILE.cpk ...] --out INDEX
+                      [--only FILE.cpk ...] [--input-pub PUB] --out INDEX
   pkgbuild.py pack  --name N --version V --summary S --file DEST=SRC [--file ...] --sign-key KEY --out F.cpk
 
 A recipe (`port`) is `key: value` lines: name, version, summary, prefix,
@@ -18,8 +18,9 @@ Everything is a pure function of the tree, the flags and the key.
 
 `publish` makes a network repository's INDEX from a built one (PK10,
 docs/pkg/design.md "Network repositories"): the package stanzas of INDEX
-(its trailer and any header dropped; with --only, just the stanzas of those
-files), after a header stanza "serial: N", "published: T" (now, or --published)
+(its signature first checked against --input-pub, or the signing key's own
+public half; its trailer and any header dropped; with --only, just the
+stanzas of those files), after a header stanza "serial: N", "published: T" (now, or --published)
 and "expires: T + D days" (D at most 30, default 30), signed again.
 """
 import argparse
@@ -322,8 +323,21 @@ def cmd_publish(args):
     published = int(time.time()) if args.published is None else int(
         datetime.datetime.strptime(args.published, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=datetime.timezone.utc).timestamp())
+    # pkg's time_parse takes 1970 to 9999
+    if not 0 <= published or published + args.days * 86400 >= 253402300800:
+        die("--published must be from 1970 and expire before the year 10000")
     with open(args.index, "rb") as f:
-        stanzas = index_stanzas(f.read())
+        blob = f.read()
+    # Only an index signed by the key expected is signed again: by default
+    # the publishing key's own, else --input-pub's.
+    pub = (modsign.read_hex_key(args.input_pub, "public key") if args.input_pub
+           else modsign.secret_to_public(modsign.read_hex_key(args.sign_key, "secret key")))
+    if len(blob) < modsign.TRAILER.size:
+        die(f"{args.index}: not signed")
+    why = modsign.verify_detached([pub], blob[:-modsign.TRAILER.size], blob[-modsign.TRAILER.size:])
+    if why:
+        die(f"{args.index}: {why}; not published")
+    stanzas = index_stanzas(blob)
     if args.only:
         missing = set(args.only) - {stanza_field(st, "file") for st in stanzas}
         if missing:
@@ -373,6 +387,7 @@ def main(argv):
     pb.add_argument("--published")
     pb.add_argument("--days", type=int, default=MAX_DAYS)
     pb.add_argument("--only", action="append")
+    pb.add_argument("--input-pub", help="the key INDEX must be signed by (default: --sign-key's)")
     pb.add_argument("--out", required=True)
     pb.set_defaults(fn=cmd_publish)
     args = ap.parse_args(argv[1:])

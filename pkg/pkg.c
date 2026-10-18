@@ -286,6 +286,7 @@ static int keys_load(void)
 
 static struct repo g_repos[PKG_MAX_REPOS];
 static int g_nrepos = -1;
+_Static_assert(sizeof(g_repos) / sizeof(g_repos[0]) == PKG_MAX_REPOS, "repos_load fills at most PKG_MAX_REPOS");
 
 /* /etc/pkg/repos.conf, once. -1 when it cannot be read or a line is bad. */
 static int repos_load(void)
@@ -380,7 +381,12 @@ static int index_load(void)
         index_free(&ix);
     }
     if (found == 0) {
-        fprintf(stderr, "pkg: no index: run 'pkg update' first\n");
+        struct stat st;
+        if (stat(PKG_DB_DIR "/index", &st) == 0)
+            fprintf(stderr, "pkg: no index: run 'pkg update' first (" PKG_DB_DIR "/index is the format before 1.0.6; "
+                            "update stores each repository's under " PKG_REPOS_DIR ")\n");
+        else
+            fprintf(stderr, "pkg: no index: run 'pkg update' first\n");
         return -1;
     }
     g_index_loaded = true;
@@ -440,7 +446,7 @@ static int fetch_status(const struct repo *r, const char *what, int st)
  */
 static int update_repo(const struct repo *r, int *count)
 {
-    char dir[PKG_PATH_MAX], stored[PKG_PATH_MAX], path[PKG_PATH_MAX + 8];
+    char dir[PKG_PATH_MAX], stored[PKG_PATH_MAX], path[PKG_PATH_MAX + 24];
     snprintf(dir, sizeof(dir), PKG_REPOS_DIR "/%s", r->name);
     repo_index_path(r, stored, sizeof(stored));
     if (ensure_parent_dirs(stored, NULL) < 0) {
@@ -454,7 +460,8 @@ static int update_repo(const struct repo *r, int *count)
     } else {
         char url[PKG_URL_MAX + 16];
         repo_url(r, "INDEX", url, sizeof(url));
-        snprintf(path, sizeof(path), "%s.new", stored);
+        /* Per process: `update -n` takes no lock and may run beside a real one. */
+        snprintf(path, sizeof(path), "%s.new.%d", stored, (int)getpid());
         struct fetch_opts o = { .pin = r->pin, .insecure = r->insecure, .max = PKG_INDEX_LIMIT };
         int st = fetch_url(url, path, &o);
         if (st != FETCH_OK) {

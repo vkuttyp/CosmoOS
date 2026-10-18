@@ -1,5 +1,6 @@
 /* manifest.c - Manifest and index parsing (docs/pkg/design.md "Formats"). */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -359,8 +360,9 @@ static int header_scan(const char *text, size_t len, struct index_header *h, siz
         h->present = true;
         if (strcmp(key, "serial") == 0) {
             char *end;
+            errno = 0;
             unsigned long long v = strtoull(value, &end, 10);
-            if (seen_serial || value[0] < '1' || value[0] > '9' || *end || v == 0)
+            if (seen_serial || value[0] < '1' || value[0] > '9' || *end || v == 0 || errno == ERANGE)
                 goto bad;
             h->serial = v;
             seen_serial = true;
@@ -438,11 +440,15 @@ int repo_parse(const char *line, int nlocal, struct repo *r, char *err, size_t e
         return -1;
     }
     strcpy(buf, line);
-    for (char *p = buf; *p && n < 8;) {
+    for (char *p = buf; *p;) {
         while (*p == ' ' || *p == '\t')
             *p++ = '\0';
         if (*p == '\0')
             break;
+        if (n == 8) {
+            snprintf(err, errlen, "more than 8 words");
+            return -1;
+        }
         tok[n++] = p;
         while (*p && *p != ' ' && *p != '\t')
             p++;
@@ -477,6 +483,10 @@ int repo_parse(const char *line, int nlocal, struct repo *r, char *err, size_t e
             r->insecure = true;
         } else if (strcmp(tok[i], "pin") == 0 && i + 1 < n) {
             const char *h = tok[++i];
+            if (r->pin[0]) {
+                snprintf(err, errlen, "a second pin");
+                return -1;
+            }
             if (strncmp(h, "sha256:", 7) != 0 || strlen(h + 7) != 64 || strspn(h + 7, "0123456789abcdef") != 64) {
                 snprintf(err, errlen, "pin takes sha256: and 64 lowercase hex digits");
                 return -1;

@@ -165,6 +165,7 @@ int main(void)
         "serial: 7\nexpires: 2026-10-31T00:00:00Z\n\n",
         "serial: 7\npublished: 2026-10-01T00:00:00Z\nexpires: soon\n\n",
         "serial: 7\nserial: 8\npublished: 2026-10-01T00:00:00Z\nexpires: 2026-10-31T00:00:00Z\n\n",
+        "serial: 99999999999999999999999\npublished: 2026-10-01T00:00:00Z\nexpires: 2026-10-31T00:00:00Z\n\n",
         "serial: 7\npublished: 2026-10-01T00:00:00Z\nexpires: 2026-10-31T00:00:00Z\nname: x\n\n",
     };
     for (size_t i = 0; i < sizeof(hbad) / sizeof(hbad[0]); i++)
@@ -208,6 +209,9 @@ int main(void)
         "x https://h/r pin md5:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
         "x https://h/r verify", "x file:///r insecure", "x", "relative/dir",
         "x http://h/r insecure pin sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        ("x https://h/r pin sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff "
+         "pin sha256:ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"),
+        "x https://h/r insecure insecure insecure insecure insecure insecure insecure",
     };
     for (size_t i = 0; i < sizeof(rbad) / sizeof(rbad[0]); i++)
         CHECK(repo_parse(rbad[i], 0, &rp, err, sizeof(err)) < 0);

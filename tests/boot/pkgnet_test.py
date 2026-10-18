@@ -59,7 +59,17 @@ class Repos:
     def __init__(self, www, built, key):
         self.www, self.built, self.key = www, built, key
 
+    def build_pub(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts"))
+        import modsign
+        p = os.path.join(self.www, "..", "build.pub")
+        with open(p, "w") as f:
+            f.write(modsign.secret_to_public(modsign.read_hex_key(self.key, "secret key")).hex() + "\n")
+        return p
+
     def publish(self, name, serial, only, key=None, published=None, days=30):
+        """`key` signs it instead of the build's; the input is still the
+        build's INDEX, checked against the build key's public half."""
         d = os.path.join(self.www, name)
         os.makedirs(d, exist_ok=True)
         for f in only:
@@ -69,6 +79,8 @@ class Repos:
                 "--out", os.path.join(d, "INDEX")]
         if published is not None:
             argv += ["--published", utc(published)]
+        if key:
+            argv += ["--input-pub", self.build_pub()]
         for f in only:
             argv += ["--only", f]
         r = subprocess.run(argv, capture_output=True, text=True)
