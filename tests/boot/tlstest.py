@@ -22,7 +22,7 @@ set of paths answered 200 whole), .alias[path] = file (served for that
 path when it has a query; a redirect applies only without one),
 .double_length (two different Content-Length headers), .cut_header (the
 status line and half a header, then the close), .bad_range (a 206 from
-the wrong offset). A client that refuses the certificate
+the wrong offset), .early_hints (a 103 answer before the final one). A client that refuses the certificate
 fails the handshake in accept, which socketserver drops before any request.
 """
 import datetime
@@ -114,6 +114,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Len")
             self.close_connection = True
             return
+        if path in srv.early_hints:
+            self.wfile.write(b"HTTP/1.1 103 Early Hints\r\nLink: </x>; rel=preload\r\n\r\n")
         if path in srv.redirect and not query:
             self.send_response(302)
             self.send_header("Location", srv.redirect[path])
@@ -172,6 +174,7 @@ class Server(socketserver.ThreadingTCPServer):
         self.requests, self.connections, self.lock = [], 0, threading.Lock()
         self.redirect, self.truncate, self.chunked, self.ignore_range = {}, {}, set(), set()
         self.alias, self.double_length, self.cut_header, self.bad_range = {}, set(), set(), set()
+        self.early_hints = set()
         handler = lambda *a, **k: _Handler(*a, directory=directory, **k)  # noqa: E731
         super().__init__(("127.0.0.1", 0), handler)
         if tls:

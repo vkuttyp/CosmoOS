@@ -128,6 +128,15 @@ def main():
     same("a query-only redirect keeps the path", p)
     if ("/r/q", None) not in good.requests or good.paths()[-1] != "/r/q":
         raise Fail(f"the query-only redirect asked for {good.paths()[-2:]}")
+    good.redirect["/r/frag"] = "#part"
+    good.alias["/r/frag"] = "blob.bin"
+    rc, err, p = run(f"{url}/r/frag")
+    expect("a fragment-only redirect is the same resource", rc, err, 1, "more than 5 redirects")
+    good.early_hints.add("/hints.bin")
+    shutil.copy(os.path.join(www, "blob.bin"), os.path.join(www, "hints.bin"))
+    rc, err, p = run(f"{url}/hints.bin")
+    expect("a 103 before the 200", rc, err, 0)
+    same("a 103 before the 200", p)
     rc, err, p = run(f"{url}/r/host")
     expect("redirect to another host refused", rc, err, 3, "another host or scheme")
     if other.requests:
@@ -203,6 +212,10 @@ def main():
     expect("-p with http:// (usage)", rc, err, 2, "-p needs an https:// URL")
     if plain.connections != 1:
         raise Fail(f"the plain server saw {plain.connections} connections; -p with http must make none")
+
+    for bad in ("garbage", "0", "-5", "12x"):
+        rc, err, p = run("-m", bad, f"{url}/blob.bin")
+        expect(f"-m {bad} (usage)", rc, err, 2, "-m takes a number of bytes")
 
     rc, err, p = run("ftp://127.0.0.1/x")
     expect("not an http(s) URL", rc, err, 2)

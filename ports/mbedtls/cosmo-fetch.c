@@ -174,6 +174,8 @@ static int url_resolve(const struct url *base, const char *loc, struct url *out)
         snprintf(text, sizeof(text), "%s:%s", base->https ? "https" : "http", loc);
     } else if (loc[0] == '/') {
         snprintf(text, sizeof(text), "%s%s", origin, loc);
+    } else if (loc[0] == '#') {   /* the same resource */
+        snprintf(text, sizeof(text), "%s%s", origin, base->path);
     } else if (loc[0] == '?') {   /* the same path, another query */
         snprintf(text, sizeof(text), "%s%.*s%s", origin, (int)strcspn(base->path, "?"), base->path, loc);
     } else {
@@ -241,13 +243,27 @@ static int tcp_connect(const struct url *u)
         say("cannot resolve %s: %s", u->host, gai_strerror(err));
         exit(FX_FAILED);
     }
+    /* Each address within TIMEOUT_MS: nonblocking, then blocking again
+     * once connected. */
     for (ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) {
             saved = errno;
             continue;
         }
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0)
+        int fl = fcntl(fd, F_GETFL);
+        int rc = fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0 ? -1 : connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (rc < 0 && errno == EINPROGRESS) {
+            int soerr = 0;
+            socklen_t sl = sizeof(soerr);
+            if (wait_fd(fd, POLLOUT) < 0)
+                soerr = errno;
+            else if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) < 0)
+                soerr = errno;
+            rc = soerr ? -1 : 0;
+            errno = soerr;
+        }
+        if (rc == 0 && fcntl(fd, F_SETFL, fl & ~O_NONBLOCK) == 0)
             break;
         saved = errno;
         close(fd);
@@ -646,7 +662,12 @@ int main(int argc, char **argv)
             }
             pin = optarg + 7;
             break;
-        case 'm': g_max = strtoull(optarg, NULL, 10); break;
+        case 'm':
+            if (!number(optarg, &g_max, NULL) || g_max == 0) {
+                fprintf(stderr, "cosmo-fetch: -m takes a number of bytes, at least 1\n");
+                return FX_USAGE;
+            }
+            break;
         default:
             fprintf(stderr, "usage: cosmo-fetch [-c] [-i] [-p sha256:HEX] [-m MAX] URL FILE\n");
             return FX_USAGE;
@@ -703,7 +724,15 @@ int main(int argc, char **argv)
             n += snprintf(req + n, sizeof(req) - (size_t)n, "Range: bytes=%llu-\r\n", (unsigned long long)g_have);
         n += snprintf(req + n, sizeof(req) - (size_t)n, "\r\n");
         conn_write(c, req, (size_t)n);
-        read_headers(c, &r);
+        /* Informational answers (100, 103) come before the final one; a
+         * 101 switch of protocol is not something asked for. */
+        do {
+            read_headers(c, &r);
+            if (r.status == 101) {
+                say("HTTP 101: the server switched protocols, which was not asked for");
+                return FX_FAILED;
+            }
+        } while (r.status >= 100 && r.status < 200);
 
         if (r.status == 301 || r.status == 302 || r.status == 303 || r.status == 307 || r.status == 308) {
             conn_close(c);

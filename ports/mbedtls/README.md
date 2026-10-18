@@ -88,13 +88,15 @@ it (the native libc they are built on has no resolver and no TLS):
   with `Range: bytes=N-`; a server that answers 200 starts the file again,
   and a 416 for a file already whole leaves it. A 206 must be exactly the
   rest (from `N` to its announced total), or the run fails.
-- `-m MAX` refuses a file larger than `MAX` bytes, by `Content-Length` or
+- `-m MAX` (a decimal number, at least 1) refuses a file larger than `MAX` bytes, by `Content-Length` or
   as a chunked body grows.
 - Bodies with `Content-Length` (two different ones are refused), chunked
   (once a `Transfer-Encoding: chunked` is seen), or to the end of the
   connection (a reset there is a failure). A header line the connection
-  cuts is no line. A receive idle for 30 s fails; connecting and sending
-  wait as long as the system's TCP does.
+  cuts is no line. Informational answers (100, 103) before the final one
+  are read past; a 101 fails. Connecting to each address and every receive
+  are bounded by 30 s (the connect nonblocking, then blocking again);
+  sending waits as the system's TCP does.
 
 It neither renames nor checks `FILE`: the caller compares it with what it
 expects (the index's size and SHA-512, `SHA256SUMS`) and renames it into
@@ -134,19 +136,21 @@ newer one. There is no revocation check (no CRL or OCSP).
 
 `make host-test-fetch` (`tests/host/test_fetch.py`) builds `cosmo-fetch`
 for the host, on the same mbedTLS release and `cosmo_config.h`, with ASan
-and UBSan, and runs 30 cases against local servers
+and UBSan, and runs 36 cases against local servers
 (`tests/boot/tlstest.py`) with certificates made for the run: a good
 server; an untrusted CA, an expired certificate and another name, each
 exit 3 with no request received; the pinned key and another one (no
 request); plain HTTP without `-i` (no connection) and with it; same-origin
-redirects (absolute path, relative, full URL, a query alone), and refused
+redirects (absolute path, relative, full URL, a query alone, a fragment alone: the same resource, so a loop),
+and refused
 ones to another host and from https to http; a redirect loop; 404; resuming by range, from
 a server that ignores ranges and of a file already whole; `-m` by
 `Content-Length` and over a chunked body; a chunked body; a body cut short
 (the part kept) and its resumption; a non-HTTP URL; a name that does not
 resolve; two different `Content-Length` headers, a header line cut by the
 close, a 206 from another offset (each exit 1); `-p` with `http://` (exit
-2, no connection). It needs OpenSSL 3.4 or later, as the next test does.
+2, no connection); a 103 before the 200; `-m` of `garbage`, `0`, `-5` and
+`12x` (each exit 2). It needs OpenSSL 3.4 or later, as the next test does.
 
 `make BUILD=release test-net-login` (`tests/boot/net_login_test.py`, step
 f) serves a 1 MiB file over HTTPS from the host with test certificates
