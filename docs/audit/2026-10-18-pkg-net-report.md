@@ -266,9 +266,10 @@ release key alone. Then step g passed on both: `pkg update` accepted
 | `pkg update` against the real published repository, from the installed system | PASS | PASS |
 
 Not done, recorded in the inventory (section 18): the weekly schedule's
-60-day inactivity limit; an installed system's `/tmp` mounted 0755; and a
-boot archive that is not rebuilt when only its list of entries changes
-(found adding the second key: the stale `boot.tar` still held one). Out of
+60-day inactivity limit; an installed system's `/tmp` mounted 0755; . A boot
+archive that was not rebuilt when only its list of entries changed (found
+adding the second key: the stale `boot.tar` still held one) is fixed in
+#410 after review: the archive depends on a stamp of its entry list. Out of
 scope, as the task set: dependency resolution beyond `pkg`'s, delta
 updates, mirrors, several key rings per repository.
 

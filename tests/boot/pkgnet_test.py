@@ -128,6 +128,14 @@ def stage_pkgnet(args, results, inst):
     try:
         b.wait_prompt("the first prompt")
         need(b.text(), r"^init: switched to the disk root \S+ ", "the installed boot")
+        # The shipped configuration, kept for step g, which puts these
+        # very files back rather than writing what it expects.
+        out = b.status("cat /etc/pkg/repos.conf /etc/cosmo-release.conf && "
+                       "cp /etc/pkg/repos.conf /tmp/repos.conf.installed && "
+                       "cp /etc/cosmo-release.conf /tmp/cosmo-release.conf.installed", "keep")
+        need(out, r"^keep=0$", "keeping the installed repos.conf and cosmo-release.conf")
+        need(out, rf"^cosmoos {re.escape(PUBLISHED)}/repo/{args.arch}$", "the installed repos.conf's network line")
+        need(out, rf"^url {re.escape(PUBLISHED)}/releases$", "the installed cosmo-release.conf")
         out = b.status(f"wget -q -O /tmp/testca.pem http://10.0.2.2:{plain.port}/testca.pem && "
                        "cat /tmp/testca.pem >> /etc/ssl/certs/ca-certificates.crt", "ca")
         need(out, r"^ca=0$", "adding the test CA to the installed bundle")
@@ -321,12 +329,12 @@ def stage_upgrade_check(args, b, results, www, url, good):
 def stage_published(args, b, results):
     """g. The real published repository and release index (GitHub Pages),
     through QEMU's user networking and the runner's internet: the
-    installer's repos.conf and the default cosmo-release.conf put back,
+    installed repos.conf and cosmo-release.conf, as kept at the start, put back,
     `pkg update` must accept both repositories (three attempts), and
     `cosmo-upgrade --check` must name the published LATEST."""
-    out = b.status(f"printf 'local file:///var/lib/pkg/repo\\ncosmoos {PUBLISHED}/repo/{args.arch}\\n' "
-                   "> /etc/pkg/repos.conf && rm /etc/cosmo-release.conf", "rc")
-    need(out, r"^rc=0$", "the installer's repos.conf, and no cosmo-release.conf (its default)")
+    out = b.status("cp /tmp/repos.conf.installed /etc/pkg/repos.conf && "
+                   "cp /tmp/cosmo-release.conf.installed /etc/cosmo-release.conf", "rc")
+    need(out, r"^rc=0$", "the installed repos.conf and cosmo-release.conf put back")
     last = ""
     for attempt in range(1, 4):
         out = b.status("pkg update", "upd")
@@ -338,8 +346,12 @@ def stage_published(args, b, results):
     else:
         raise Fail(f"pkg update against {PUBLISHED}: three attempts failed; the last said:\n{last}")
     m = need(out, r"^pkg: cosmoos: serial (\d+), published (\S+), expires (\S+)$", "the published index's header")
-    chk = b.status("cosmo-upgrade --check", "chk")
-    need(chk, r"^chk=0$", "cosmo-upgrade --check against the published release index")
+    for tries in range(1, 4):   # the runner's internet again
+        chk = b.status("cosmo-upgrade --check", "chk")
+        if re.search(r"^chk=0$", chk, re.M):
+            break
+        time.sleep(5)
+    need(chk, r"^chk=0$", "cosmo-upgrade --check against the published release index (three attempts)")
     rel = need(chk, rf"^cosmo-upgrade: (?:(v\S+) is newer than this system's \S+|this system's \S+ is up to date: "
                     rf"the newest release at {re.escape(PUBLISHED)}/releases is (v\S+))", "the published LATEST")
     results.append(f"g. {PUBLISHED}: pkg update accepted repo/{args.arch} (serial {m.group(1)}, published "
