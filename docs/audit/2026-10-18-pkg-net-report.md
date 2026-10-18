@@ -70,3 +70,12 @@ verification made optional failed "untrusted certificate refused" (exit
 On the target, `test-net-login`'s https step now also runs `cosmo-fetch`:
 the 1 MiB file whole with the test CA and the expired certificate refused
 with exit 3 (x86-64 release, 2026-10-18: PASS in 88.3 s).
+
+**Validation (PR 1, 2026-10-18, on `b4a9f188`).** On x86-64 and AArch64:
+`make host-test`, `make host-test-fetch`, `make fuzz`, `make analyze`;
+debug `make test` at `QEMU_SMP=1`, `2` and `4` with the network harness;
+`make test-smp2`, `make test-chaos`, `make test-harness-retry`; `make
+BUILD=release all test`; `make BUILD=release test-net-login` (the
+`cosmo-fetch` lines present on both). `make reproducible` on x86-64:
+`reproducible: yes`, `mbedtls/cosmo-fetch` among the files compared.
+Every step exit 0.
