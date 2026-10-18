@@ -57,8 +57,11 @@ Boots, each of the installed disk alone after the first:
             is back (no mkfs.cosmofs or cosmo-upgrade, its /etc/rc), the
             operator's file is still there, and so is hello 1.1. The
             build's cosmo-upgrade, fetched into /tmp, rolls back again:
-            v1.0.3's loader does not trust the build's key, so the loader
-            (\\cosmo\\prev's) switches first.
+            for a build's set v1.0.3's loader does not trust the build's
+            key, so the loader (\\cosmo\\prev's) switches first; for a
+            published set (UPGRADE_SET_TAG) it trusts the release key, so
+            the set switches first, and a loader identical to v1.0.3's
+            (v1.0.4's) needs no switch.
   forward   This build boots verified with its own key again; the ESP
             holds the new set and loader, \\cosmo\\prev v1.0.3's.
 

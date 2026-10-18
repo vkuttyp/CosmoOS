@@ -307,9 +307,12 @@ kernel before the fix). Serial logs in
   `\cosmo\prev` is the build's set. v1.0.3 boots verified with the release
   key, without `mkfs.cosmofs` or `cosmo-upgrade`, with its own `/etc/rc`;
   `/root/keep` and hello 1.1 are still there. The build's `cosmo-upgrade`,
-  fetched into `/tmp`, runs `--rollback` again: v1.0.3's loader does not
-  trust the build's key, so it must print `loader switched: ... is
-  \cosmo\prev's` before the set switch.
+  fetched into `/tmp`, runs `--rollback` again. For a build's set (signed
+  with the build's key) v1.0.3's loader does not trust that key, so it
+  must print `loader switched: ... is \cosmo\prev's` before the set
+  switch. For a published set (`UPGRADE_SET_TAG`, release-signed) v1.0.3's
+  loader trusts the key, so the set switches first, and a loader the set
+  shares byte for byte with v1.0.3 (v1.0.4's) needs no switch at all.
 - **forward**: on the host `\cosmo` and both loaders are the build's and
   `\cosmo\prev` is v1.0.3's again. The build boots verified with its own
   key, with `/sbin/cosmo-upgrade` and hello 1.1.
