@@ -11,8 +11,10 @@ For each release set (`make release`'s out/release/ARCH):
     describe-shaped string in cosmoos-ARCH-kernel.elf equals it (the live
     image carries the same file, bound to it by the signed manifest; its
     other contents name other versions, BusyBox's among them);
-  - the files are the set's names (cosmoos-ARCH*, SHA256SUMS, its .sig;
-    the names carry no version, so none can name another);
+  - the files are exactly the set's (scripts/mkrelease.py): every one of
+    them present, the loader the architecture's own (BOOTX64.EFI,
+    BOOTAA64.EFI), and nothing else (the names carry no version, so none
+    can name another);
   - the cosmo-upgrade package's version is the one the tag gives
     (scripts/mkrelease.py package_version: v1.0.5 -> 1.0.5).
 
@@ -41,8 +43,9 @@ TAG = re.compile(r"^v\d+\.\d+\.\d+(-rc\d+)?$")
 # tag, or the tag plus a distance and hash, perhaps dirty.
 DESCRIBE = re.compile(rb"(?<![\w.])v\d+\.\d+\.\d+(?:-rc\d+)?(?:-\d+-g[0-9a-f]{7,40})?(?:-dirty)?(?![\w.-])")
 NOTES_VERSION = re.compile(r"CosmoOS (\d+\.\d+\.\d+(?:-rc\d+)?)\b")
-SET_NAMES = ("{a}.img", "{a}-BOOTX64.EFI", "{a}-BOOTAA64.EFI", "{a}-kernel.elf", "{a}-boot.tar", "{a}-cmdline",
-             "{a}-manifest", "{a}-cosmo-upgrade", "{a}-cosmo-upgrade.cpk")
+LOADER = {"x86_64": "BOOTX64.EFI", "aarch64": "BOOTAA64.EFI"}
+SET_NAMES = ("{a}.img", "{a}-{loader}", "{a}-kernel.elf", "{a}-boot.tar", "{a}-cmdline", "{a}-manifest",
+             "{a}-cosmo-upgrade", "{a}-cosmo-upgrade.cpk", "SHA256SUMS", "SHA256SUMS.sig")
 
 
 def build_ids(path):
@@ -53,23 +56,21 @@ def build_ids(path):
 def check_set(tag, d):
     bad = []
     names = sorted(os.listdir(d))
-    arch = None
+    arches = {m.group(1) for m in (re.match(r"^cosmoos-(x86_64|aarch64)", n) for n in names) if m}
+    if len(arches) != 1:
+        return [f"{d}: files of {len(arches)} architectures ({', '.join(sorted(arches)) or 'none'}): "
+                "not one release set"]
+    arch = arches.pop()
+    want = {s.format(a=f"cosmoos-{arch}", loader=LOADER[arch]) for s in SET_NAMES}
     for n in names:
-        m = re.match(r"^cosmoos-(x86_64|aarch64)", n)
-        if m:
-            arch = m.group(1)
-            break
-    if arch is None:
-        return [f"{d}: no cosmoos-ARCH file: not a release set"]
-    allowed = {s.format(a=f"cosmoos-{arch}") for s in SET_NAMES} | {"SHA256SUMS", "SHA256SUMS.sig"}
-    for n in names:
-        if n not in allowed:
-            bad.append(f"{d}: {n} is not a release set's file name")
+        if n not in want:
+            bad.append(f"{d}: {n} is not a file of {arch}'s release set")
+    for n in sorted(want - set(names)):
+        bad.append(f"{d}: {n} missing")
     for f in (f"cosmoos-{arch}-kernel.elf",):
         p = os.path.join(d, f)
         if not os.path.exists(p):
-            bad.append(f"{d}: {f} missing")
-            continue
+            continue   # said above
         ids = build_ids(p)
         if ids != {tag}:
             bad.append(f"{f}: build id {', '.join(sorted(ids)) or '(none)'}, not {tag}")
@@ -80,8 +81,6 @@ def check_set(tag, d):
         if fields.get("name") != "cosmo-upgrade" or fields.get("version") != want:
             bad.append(f"{os.path.basename(cpk)}: package {fields.get('name')}-{fields.get('version')}, "
                        f"not cosmo-upgrade-{want}")
-    else:
-        bad.append(f"{d}: {os.path.basename(cpk)} missing")
     return bad
 
 

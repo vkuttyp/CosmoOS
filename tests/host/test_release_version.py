@@ -8,7 +8,8 @@ check-release-version.py, on synthetic release sets:
 - a kernel with the previous tag's describe (v1.0.4's real defect,
   v1.0.3-123-g1ec37307) fails and the message names it;
 - a package version 1.0.3-123 fails;
-- a file name no set has fails;
+- a file name no set has fails, and so do a missing file and the other
+  architecture's loader;
 - notes that also say another "CosmoOS X.Y.Z", or never say this one, fail.
 
 release-tag.sh, in a clone of a local repository:
@@ -44,7 +45,9 @@ def make_set(d, key, build_id, version, extra=None):
         f.write(b"\x7fELF\0" + b"CosmoOS\0%s kernel %s (build %s)\n\0" + build_id.encode() + b"\0debug\0")
     with open(os.path.join(d, "cosmoos-aarch64-cosmo-upgrade.cpk"), "wb") as f:
         f.write(pkgbuild.pack("cosmo-upgrade", version, "test", [("sbin/cosmo-upgrade", 0o755, b"x")], key))
-    for n in ("cosmoos-aarch64.img", "SHA256SUMS") + ((extra,) if extra else ()):
+    for n in ("cosmoos-aarch64.img", "cosmoos-aarch64-BOOTAA64.EFI", "cosmoos-aarch64-boot.tar",
+              "cosmoos-aarch64-cmdline", "cosmoos-aarch64-manifest", "cosmoos-aarch64-cosmo-upgrade",
+              "SHA256SUMS", "SHA256SUMS.sig") + ((extra,) if extra else ()):
         open(os.path.join(d, n), "wb").close()
     return d
 
@@ -92,6 +95,17 @@ def main():
         extra = make_set(os.path.join(t, "extra"), key, "v1.0.5", "1.0.5", extra="cosmoos-1.0.4-aarch64.img")
         r = run("--tag", "v1.0.5", extra)
         check(r.returncode == 1 and "cosmoos-1.0.4-aarch64.img" in r.stderr, "a file name no set has fails")
+
+        missing = make_set(os.path.join(t, "missing"), key, "v1.0.5", "1.0.5")
+        os.remove(os.path.join(missing, "cosmoos-aarch64-boot.tar"))
+        r = run("--tag", "v1.0.5", missing)
+        check(r.returncode == 1 and "cosmoos-aarch64-boot.tar missing" in r.stderr, "a missing file fails, named")
+
+        wrong = make_set(os.path.join(t, "wrong"), key, "v1.0.5", "1.0.5")
+        os.rename(os.path.join(wrong, "cosmoos-aarch64-BOOTAA64.EFI"), os.path.join(wrong, "cosmoos-aarch64-BOOTX64.EFI"))
+        r = run("--tag", "v1.0.5", wrong)
+        check(r.returncode == 1 and "BOOTX64.EFI is not a file of aarch64's" in r.stderr
+              and "BOOTAA64.EFI missing" in r.stderr, "the other architecture's loader fails")
 
         with open(notes, "w") as f:
             f.write("CosmoOS 1.0.5: ...\n\nAs in CosmoOS 1.0.4, ...\n")
