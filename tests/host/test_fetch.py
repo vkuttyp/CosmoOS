@@ -121,6 +121,13 @@ def main():
         rc, err, p = run(f"{url}{path}")
         expect(f"same-origin redirect {path}", rc, err, 0)
         same(f"same-origin redirect {path}", p)
+    good.redirect["/r/q"] = "?v=2"
+    good.alias["/r/q"] = "blob.bin"
+    rc, err, p = run(f"{url}/r/q")
+    expect("a query-only redirect keeps the path", rc, err, 0)
+    same("a query-only redirect keeps the path", p)
+    if ("/r/q", None) not in good.requests or good.paths()[-1] != "/r/q":
+        raise Fail(f"the query-only redirect asked for {good.paths()[-2:]}")
     rc, err, p = run(f"{url}/r/host")
     expect("redirect to another host refused", rc, err, 3, "another host or scheme")
     if other.requests:
@@ -180,6 +187,22 @@ def main():
     rc, err, p = run("-c", f"{url}/cut.bin", out="cut.bin", keep=True)
     expect("resuming the cut body", rc, err, 0)
     same("resuming the cut body", p)
+
+    for path, mode, text in (("/two.bin", good.double_length, "second, different Content-Length"),
+                             ("/cuthdr.bin", good.cut_header, "closed inside the headers")):
+        mode.add(path)
+        shutil.copy(os.path.join(www, "blob.bin"), os.path.join(www, path[1:]))
+        rc, err, p = run(f"{url}{path}")
+        expect(f"refused: {text}", rc, err, 1, text)
+    good.bad_range.add("/shift.bin")
+    shutil.copy(os.path.join(www, "blob.bin"), os.path.join(www, "shift.bin"))
+    partial(100000)
+    rc, err, p = run("-c", f"{url}/shift.bin", out="part.bin", keep=True)
+    expect("a 206 from another offset", rc, err, 1, "the server sent another range")
+    rc, err, p = run("-i", "-p", pin, f"http://127.0.0.1:{plain.port}/blob.bin")
+    expect("-p with http:// (usage)", rc, err, 2, "-p needs an https:// URL")
+    if plain.connections != 1:
+        raise Fail(f"the plain server saw {plain.connections} connections; -p with http must make none")
 
     rc, err, p = run("ftp://127.0.0.1/x")
     expect("not an http(s) URL", rc, err, 2)

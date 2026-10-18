@@ -47,7 +47,7 @@ licence is new.
 
 **Tests.** `make host-test-fetch` builds `cosmo-fetch` for the host with
 the same mbedTLS release and `cosmo_config.h`, under ASan and UBSan, and
-runs 25 cases against local servers (`tests/boot/tlstest.py`, shared with
+runs 25 cases (30 after review) against local servers (`tests/boot/tlstest.py`, shared with
 `test-net-login`, which takes its certificates from it now):
 
 - the good server;
@@ -79,3 +79,16 @@ BUILD=release all test`; `make BUILD=release test-net-login` (the
 `cosmo-fetch` lines present on both). `make reproducible` on x86-64:
 `reproducible: yes`, `mbedtls/cosmo-fetch` among the files compared.
 Every step exit 0.
+
+**Review (Qodo, 14 findings on `cosmo-fetch.c`).** Fixed: a header line
+cut by the close was returned unterminated; an unchecked `lseek` on resume;
+the size check's addition could wrap; a 416 for a whole file ignored `-m`; a
+206 was not held to the rest of the file; two different `Content-Length`
+headers, a repeated `Transfer-Encoding` and a loose `Content-Range` were
+accepted; a query-only redirect replaced the path; `-p` was ignored on
+http; a reset ended a body of no stated length as a success. Five host
+cases cover them (30 in all). Documented instead: a size refusal removes a
+resumed file too (it is not the file asked for); connecting and sending
+wait as the system's TCP does (only receives have the 30 s bound). Kept: a
+chunked body whose zero chunk arrived but not its final empty line is
+complete (every byte arrived; every caller checks size and digest).

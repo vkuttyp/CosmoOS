@@ -18,7 +18,11 @@ else plain HTTP. It records each connection it accepted and each request
 (`bytes=N-`), and takes per-path behaviour: .redirect[path] = location,
 .truncate[path] = bytes to send of the body before closing (the full
 Content-Length is announced), .chunked (a set of paths), .ignore_range (a
-set of paths answered 200 whole). A client that refuses the certificate
+set of paths answered 200 whole), .alias[path] = file (served for that
+path when it has a query; a redirect applies only without one),
+.double_length (two different Content-Length headers), .cut_header (the
+status line and half a header, then the close), .bad_range (a 206 from
+the wrong offset). A client that refuses the certificate
 fails the handshake in accept, which socketserver drops before any request.
 """
 import datetime
@@ -105,14 +109,19 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         with srv.lock:
             srv.requests.append((path, self.headers.get("Range")))
-        if path in srv.redirect:
+        query = "?" in self.path
+        if path in srv.cut_header:
+            self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Len")
+            self.close_connection = True
+            return
+        if path in srv.redirect and not query:
             self.send_response(302)
             self.send_header("Location", srv.redirect[path])
             self.send_header("Content-Length", "0")
             self.send_header("Connection", "close")
             self.end_headers()
             return
-        local = self.translate_path(path)
+        local = self.translate_path("/" + srv.alias[path] if query and path in srv.alias else path)
         if not os.path.isfile(local):
             self.send_error(404)
             return
@@ -129,6 +138,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 return
             self.send_response(206)
+            if path in srv.bad_range:
+                start = max(0, start - 10)
             self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
         else:
             self.send_response(200)
@@ -137,6 +148,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Transfer-Encoding", "chunked")
         else:
             self.send_header("Content-Length", str(len(body)))
+            if path in srv.double_length:
+                self.send_header("Content-Length", str(len(body) + 1))
         self.send_header("Connection", "close")
         self.end_headers()
         if path in srv.chunked:
@@ -158,6 +171,7 @@ class Server(socketserver.ThreadingTCPServer):
     def __init__(self, directory, tls=None, name=None):
         self.requests, self.connections, self.lock = [], 0, threading.Lock()
         self.redirect, self.truncate, self.chunked, self.ignore_range = {}, {}, set(), set()
+        self.alias, self.double_length, self.cut_header, self.bad_range = {}, set(), set(), set()
         handler = lambda *a, **k: _Handler(*a, directory=directory, **k)  # noqa: E731
         super().__init__(("127.0.0.1", 0), handler)
         if tls:

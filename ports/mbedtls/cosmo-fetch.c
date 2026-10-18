@@ -62,6 +62,7 @@ struct conn {
     unsigned char buf[16384];
     size_t pos, len;
     int eof;
+    int reset;   /* the end was a reset, not a close */
 };
 
 static const char *g_url;
@@ -173,9 +174,13 @@ static int url_resolve(const struct url *base, const char *loc, struct url *out)
         snprintf(text, sizeof(text), "%s:%s", base->https ? "https" : "http", loc);
     } else if (loc[0] == '/') {
         snprintf(text, sizeof(text), "%s%s", origin, loc);
+    } else if (loc[0] == '?') {   /* the same path, another query */
+        snprintf(text, sizeof(text), "%s%.*s%s", origin, (int)strcspn(base->path, "?"), base->path, loc);
     } else {
-        int dir = (int)(strrchr(base->path, '/') - base->path + 1);
-        snprintf(text, sizeof(text), "%s%.*s%s", origin, dir, base->path, loc);
+        char path[2048];
+        snprintf(path, sizeof(path), "%.*s", (int)strcspn(base->path, "?"), base->path);
+        int dir = (int)(strrchr(path, '/') - path + 1);
+        snprintf(text, sizeof(text), "%s%.*s%s", origin, dir, path, loc);
     }
     return url_parse(text, out);
 }
@@ -348,13 +353,17 @@ static int conn_fill(struct conn *c)
             /* Closed without close_notify, as many HTTP servers do: the
              * end, as for ssl_client; HTTP's own length says whether it
              * was all of it. */
+            if (n == MBEDTLS_ERR_NET_CONN_RESET)
+                c->reset = 1;
             if (n == 0 || n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == MBEDTLS_ERR_SSL_CONN_EOF ||
                 n == MBEDTLS_ERR_NET_CONN_RESET)
                 n = 0;
         } else {
             n = bio_recv(&c->fd, c->buf, sizeof(c->buf));
-            if (n == MBEDTLS_ERR_NET_CONN_RESET)
+            if (n == MBEDTLS_ERR_NET_CONN_RESET) {
+                c->reset = 1;
                 n = 0;
+            }
         }
         break;
     }
@@ -377,14 +386,17 @@ static int conn_fill(struct conn *c)
     return 0;
 }
 
-/* One line without its CRLF; -1 at the end of the data. */
+/* One line without its CRLF; -1 at the end of the data, including inside
+ * a line (an unterminated line is not one). */
 static int conn_line(struct conn *c, char *line, size_t cap)
 {
     size_t n = 0;
 
     for (;;) {
-        if (c->pos == c->len && conn_fill(c) < 0)
-            return n ? 0 : -1;
+        if (c->pos == c->len && conn_fill(c) < 0) {
+            line[0] = '\0';
+            return -1;
+        }
         char ch = (char)c->buf[c->pos++];
         if (ch == '\n')
             break;
@@ -415,7 +427,7 @@ static void too_large(void)
 
 static void body_put(const unsigned char *p, size_t len)
 {
-    if (g_max && g_have + len > g_max)
+    if (g_max && (g_have > g_max || len > g_max - g_have))
         too_large();
     while (len > 0) {
         ssize_t n = write(g_fd, p, len);
@@ -500,8 +512,29 @@ struct reply {
     uint64_t length;
     char location[2048];
     int has_range;
-    uint64_t range_start, range_total;   /* range_total 0: unknown */
+    uint64_t range_start, range_end, range_total;   /* range_total 0: unknown */
 };
+
+/* A decimal number at `s`, ending at `*end` (when given) or at the end of
+ * the string; false on no digits or overflow. */
+static int number(const char *s, uint64_t *out, const char **end)
+{
+    uint64_t v = 0;
+    const char *p = s;
+    if (*p < '0' || *p > '9')
+        return 0;
+    for (; *p >= '0' && *p <= '9'; p++) {
+        if (v > (UINT64_MAX - (uint64_t)(*p - '0')) / 10)
+            return 0;
+        v = v * 10 + (uint64_t)(*p - '0');
+    }
+    if (end)
+        *end = p;
+    else if (*p)
+        return 0;
+    *out = v;
+    return 1;
+}
 
 static void read_headers(struct conn *c, struct reply *r)
 {
@@ -535,30 +568,43 @@ static void read_headers(struct conn *c, struct reply *r)
         while (*v == ' ' || *v == '\t')
             v++;
         if (strcasecmp(line, "content-length") == 0) {
-            char *end;
-            errno = 0;
-            r->length = strtoull(v, &end, 10);
-            if (end == v || *end || errno) {
-                say("a bad Content-Length '%.40s'", v);
+            uint64_t len;
+            if (!number(v, &len, NULL) || (r->has_length && len != r->length)) {
+                say("a bad or second, different Content-Length '%.40s'", v);
                 exit(FX_FAILED);
             }
+            r->length = len;
             r->has_length = 1;
         } else if (strcasecmp(line, "transfer-encoding") == 0) {
-            r->chunked = strcasecmp(v, "chunked") == 0;
-            if (!r->chunked && strcasecmp(v, "identity") != 0) {
+            /* chunked once seen stays: a later header does not undo it */
+            if (strcasecmp(v, "chunked") == 0)
+                r->chunked = 1;
+            else if (strcasecmp(v, "identity") != 0) {
                 say("an unsupported Transfer-Encoding '%.40s'", v);
                 exit(FX_FAILED);
             }
         } else if (strcasecmp(line, "location") == 0) {
             snprintf(r->location, sizeof(r->location), "%s", v);
         } else if (strcasecmp(line, "content-range") == 0) {
-            unsigned long long a, b, t;
-            if (sscanf(v, "bytes %llu-%llu/%llu", &a, &b, &t) == 3) {
+            /* "bytes START-END/TOTAL" or "bytes *\/TOTAL" (an asterisk), nothing else */
+            const char *p = v;
+            uint64_t a, b, t;
+            if (strncmp(p, "bytes ", 6) != 0) {
+                say("a bad Content-Range '%.60s'", v);
+                exit(FX_FAILED);
+            }
+            p += 6;
+            if (*p == '*' && p[1] == '/' && number(p + 2, &t, NULL)) {
+                r->range_total = t;
+            } else if (number(p, &a, &p) && *p++ == '-' && number(p, &b, &p) && *p++ == '/' &&
+                       number(p, &t, NULL) && a <= b && b < t) {
                 r->has_range = 1;
                 r->range_start = a;
+                r->range_end = b;
                 r->range_total = t;
-            } else if (sscanf(v, "bytes */%llu", &t) == 1) {
-                r->range_total = t;
+            } else {
+                say("a bad Content-Range '%.60s'", v);
+                exit(FX_FAILED);
             }
         }
     }
@@ -622,6 +668,10 @@ int main(int argc, char **argv)
         say("plain HTTP is refused (only a repository marked insecure is fetched over http)");
         return FX_REFUSED;
     }
+    if (!u.https && pin) {
+        say("-p needs an https:// URL");
+        return FX_USAGE;
+    }
 
     g_wrote_file = !(resume && stat(g_file, &st) == 0);
     g_fd = open(g_file, O_WRONLY | O_CREAT | (resume ? 0 : O_TRUNC), 0644);
@@ -629,13 +679,21 @@ int main(int argc, char **argv)
         say("cannot open %s: %s", g_file, strerror(errno));
         return FX_FAILED;
     }
-    g_have = resume ? (uint64_t)lseek(g_fd, 0, SEEK_END) : 0;
+    g_have = 0;
+    if (resume) {
+        off_t end = lseek(g_fd, 0, SEEK_END);
+        if (end < 0) {
+            say("cannot find the end of %s: %s", g_file, strerror(errno));
+            return FX_FAILED;
+        }
+        g_have = (uint64_t)end;
+    }
 
     for (;;) {
         char req[3072];
         struct reply r;
 
-        conn_open(c, &u, u.https ? pin : NULL);
+        conn_open(c, &u, pin);
         int n = snprintf(req, sizeof(req),
                          "GET %s HTTP/1.1\r\nHost: %s%s%s%s%s\r\nUser-Agent: cosmo-fetch/1\r\n"
                          "Accept-Encoding: identity\r\nConnection: close\r\n",
@@ -670,8 +728,11 @@ int main(int argc, char **argv)
         }
         if (r.status == 416 && g_have > 0) {
             conn_close(c);
-            if (r.range_total == g_have)
+            if (r.range_total == g_have) {
+                if (g_max && g_have > g_max)
+                    too_large();
                 break;   /* it was all there */
+            }
             if (restarted++) {
                 say("HTTP 416 twice");
                 return FX_FAILED;
@@ -688,12 +749,20 @@ int main(int argc, char **argv)
         }
         if (r.status == 200 && g_have > 0)
             file_restart();   /* the whole file again */
-        if (r.status == 206 && (g_have == 0 || !r.has_range || r.range_start != g_have)) {
-            say("asked for bytes from %llu, the server sent another range", (unsigned long long)g_have);
+        /* A part must be the rest of the file: from where FILE ends to the
+         * total, and its length (when given) exactly that. */
+        if (r.status == 206 && (g_have == 0 || !r.has_range || r.range_start != g_have ||
+                                r.range_end + 1 != r.range_total ||
+                                (r.has_length && r.length != r.range_end - r.range_start + 1))) {
+            say("asked for bytes from %llu to the end, the server sent another range", (unsigned long long)g_have);
             conn_close(c);
             return FX_FAILED;
         }
-        if (g_max && r.has_length && g_have + r.length > g_max)
+        if (r.status == 206 && !r.has_length && !r.chunked) {
+            r.length = r.range_end - r.range_start + 1;
+            r.has_length = 1;
+        }
+        if (g_max && r.has_length && (g_have > g_max || r.length > g_max - g_have))
             too_large();
         if (r.chunked) {
             body_chunked(c);
@@ -706,9 +775,20 @@ int main(int argc, char **argv)
                 return FX_FAILED;
             }
         } else {
+            /* No length: the close ends it, a reset is a failure. */
             body_copy(c, UINT64_MAX);
+            if (c->reset) {
+                say("the connection was reset before the end of a body of no stated length");
+                conn_close(c);
+                return FX_FAILED;
+            }
         }
         conn_close(c);
+        if (r.status == 206 && g_have != r.range_total) {
+            say("the part ended at %llu bytes, not the %llu the server announced", (unsigned long long)g_have,
+                (unsigned long long)r.range_total);
+            return FX_FAILED;
+        }
         break;
     }
     if (fsync(g_fd) < 0 && errno != EINVAL && errno != ENOSYS) {
