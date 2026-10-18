@@ -83,9 +83,13 @@ endif
 # what the previous identity signed or trusted (PR #368 review).
 SIGNING_STAMP = $(OUT)/gen/signing.stamp
 # Packages and the INDEX are signed with the same key unless overridden; the
-# image ships the first trusted public key as /etc/pkg/keys/<name>.pub.
+# image ships every key the kernel trusts as /etc/pkg/keys/<name>.pub: a
+# developer build its own and the release key, so it accepts the published
+# network repository (roadmap 1.1 P6) as a release does. PKG_TRUST_PUB, the
+# first, is the build's own.
 PKGSIGN_KEY ?= $(MODSIGN_KEY)
 PKG_TRUST_PUB ?= $(firstword $(KEYRING_PUBS))
+PKG_TRUST_PUBS ?= $(KEYRING_PUBS)
 
 # CRASH_TEST=1 makes kernel_main fault on purpose after the self-tests so
 # the panic path and the harness's failure detection can be verified.

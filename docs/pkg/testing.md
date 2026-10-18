@@ -115,6 +115,8 @@ each step. In order:
 | d | the serial-10 index served again; then serial 12, published 40 days ago, valid 7 | each exit 3: `serial 10 is older than 11 ... (a replayed index)`, `expired at T`; `pkg info hello` still shows 1.1 available |
 | b | repository `tam` whose `hello-1.1.cpk` has one byte changed: `pkg update && pkg install --reinstall hello` | exit 3, `checksum does not match the index`; `hello` still 1.1 and `pkg verify` 0 problems |
 | b | repository `other`, its `INDEX` signed by a key made for the run | `pkg update` exit 3, `unknown signing key ... (not in /etc/pkg/keys)` |
+| e | `cosmo-upgrade --check` against a served `LATEST` (v9.9.9, then the running release), with every privilege dropped too; `--check --fetch` of this build's release set; a set whose `SHA256SUMS` changed | newer, then up to date; the set fetched (`SHA256SUMS`, `.sig`, then the four files) and already current; `bad signature`, nothing more fetched |
+| g | the installer's `repos.conf` and the default release index, against `https://vkuttyp.github.io/CosmoOS/` (three attempts: the runner's internet) | `pkg update` exit 0 `from 2 repositories` with the published header; `cosmo-upgrade --check` names the published `LATEST` |
 
 ## The interactive harness
 

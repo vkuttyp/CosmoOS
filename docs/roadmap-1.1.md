@@ -150,7 +150,7 @@ ticked in the same PR).
   `PRIV_TIME` this entry proposed (uid 0 alone still grants nothing,
   `docs/kernel/security/design.md`). Done 2026-10-17 by S5,
   with `ntpd -q` in `test-net-login`'s stage j (below).
-- [ ] **P6 A network package repository.** `pkg` fetches an index and
+- [x] **P6 A network package repository.** `pkg` fetches an index and
   packages over HTTPS from a configured URL, checking the index's and each
   package's signature against the key ring, over the same certificate
   checks as `wget`. **Acceptance:** a test serves a signed repository
@@ -159,6 +159,23 @@ ticked in the same PR).
   the same repository behind an untrusted, an expired and a wrongly named
   certificate is refused before any index is read (a signature does not
   stop the replay of an older signed index, `docs/pkg/invariants.md`).
+  Done 2026-10-18 (#407, #408, #409 and the PR ticking this):
+  `/bin/cosmo-fetch` on `ssl_client`'s certificate checks (shared in
+  `tls_common.c`), which `pkg` and `cosmo-upgrade` run; `repos.conf` takes
+  `NAME URL [pin sha256:HEX] [insecure]`; a network `INDEX` carries a
+  serial, a publication time and an expiry, checked before any package
+  line (PK10: a lower serial, an expired index and a clock before the
+  publication are refused); `cosmo-upgrade --fetch TAG|URL` and `--check`.
+  The release workflow publishes the repository and the release index on
+  GitHub Pages, `https://vkuttyp.github.io/CosmoOS/` (a `repo` branch;
+  release assets redirect to another host, which the client refuses), and
+  signs every `INDEX` again weekly. `make test-pkg-net` (job `pkg-net`,
+  both architectures): the installed system against repositories the
+  harness serves, the untrusted, expired and misnamed certificates refused
+  with no request reaching the server, a changed package, another key, a
+  replayed and an expired index refused, install and upgrade, `cosmo-upgrade
+  --check` and `--check --fetch`; then the real published repository
+  ([report](audit/2026-10-18-pkg-net-report.md)).
 
 ## S: shell completeness
 

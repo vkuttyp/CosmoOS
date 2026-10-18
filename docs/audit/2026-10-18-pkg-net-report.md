@@ -232,3 +232,43 @@ v1.0.5 set). After that fix and the rebase onto PR 2's review fixes
 A defect found here and recorded, not fixed (not P6's): an installed
 system's `/tmp` is mounted 0755, so no uid but 0 can write it.
 
+## Publication and the closing PR
+
+The repository workflow, run by hand for v1.0.5 after #409 merged
+(2026-10-18, run 39164453884), published `repo/x86_64` and `repo/aarch64`
+(8 packages each, serial 1, expires 2026-11-17T20:41:33Z, signed by the
+release key `36ae7bb4947896ab`), `releases/v1.0.5/` (its `SHA256SUMS`
+checked against `tools/keys/release-2026.pub`) and `LATEST`. Pages serves
+the `repo` branch, folder `/` (set once, 2026-10-18). `cosmo-fetch` on the
+host fetched each file and both `INDEX` signatures verified; the same
+client refused v1.0.5's release-asset URL ("redirected to
+'https://release-assets.githubusercontent.com/...', another host or
+scheme"), the reason for Pages.
+
+`test-pkg-net` step g, against that site, first failed on both
+architectures: a development build's `/etc/pkg/keys` held only its own
+key, so it refused the published `INDEX` (`unknown signing key
+36ae7bb4947896ab`). The image now ships every key the kernel trusts there
+(`PKG_TRUST_PUBS` = `KEYRING_PUBS`): a development build its own and the
+release key, as its loader and kernel already trusted; a release build the
+release key alone. Then step g passed on both: `pkg update` accepted
+`repo/ARCH` serial 1 beside the disk's on the first attempt, and
+`cosmo-upgrade --check` read `LATEST` v1.0.5.
+
+| Acceptance (roadmap) | x86-64 | AArch64 |
+|---|---|---|
+| a signed repository served by the harness; `pkg update && pkg install` installs from it | PASS | PASS |
+| a tampered package and an index signed by another key refused | PASS | PASS |
+| untrusted, expired and misnamed certificates refused before any index is read (no request logged) | PASS | PASS |
+| a replayed older index and an expired one refused (PK10) | PASS | PASS |
+| `cosmo-upgrade --check` against a served release index reports the newer version | PASS | PASS |
+| `pkg upgrade` moves hello 1.0 to 1.1 when the served index changes | PASS | PASS |
+| `pkg update` against the real published repository, from the installed system | PASS | PASS |
+
+Not done, recorded in the inventory (section 18): the weekly schedule's
+60-day inactivity limit; an installed system's `/tmp` mounted 0755; and a
+boot archive that is not rebuilt when only its list of entries changes
+(found adding the second key: the stale `boot.tar` still held one). Out of
+scope, as the task set: dependency resolution beyond `pkg`'s, delta
+updates, mirrors, several key rings per repository.
+

@@ -35,6 +35,10 @@ ca-certificates.crt, for this boot only. Every served INDEX is the build's
      fetches this build's release set (--set) over HTTPS, verifies it and
      finds it already current; a set whose SHA256SUMS has one digest
      changed is refused before any of its files is fetched.
+  g. The real published repository (GitHub Pages): with the installer's
+     repos.conf and the default release index, `pkg update` accepts the
+     network repository beside the disk's (three attempts: this needs the
+     runner's internet), and `cosmo-upgrade --check` reads its LATEST.
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -54,6 +58,7 @@ from install_test import Boot, Fail, need  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PKGBUILD = os.path.join(ROOT, "tools", "pkgbuild.py")
 DAY = 86400
+PUBLISHED = "https://vkuttyp.github.io/CosmoOS"   # the project's (docs/guide/packages.md)
 
 
 def utc(t):
@@ -234,6 +239,7 @@ def stage_pkgnet(args, results, inst):
                        "hello 1.1 still verified), an INDEX signed by another key (unknown signing key)")
 
         stage_upgrade_check(args, b, results, www, url, good)
+        stage_published(args, b, results)
 
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
@@ -310,6 +316,35 @@ def stage_upgrade_check(args, b, results, www, url, good):
                    f"{base.group(1)} up to date; "
                    f"--check --fetch fetched and verified this build's set (already current); a changed "
                    f"SHA256SUMS refused with nothing more fetched")
+
+
+def stage_published(args, b, results):
+    """g. The real published repository and release index (GitHub Pages),
+    through QEMU's user networking and the runner's internet: the
+    installer's repos.conf and the default cosmo-release.conf put back,
+    `pkg update` must accept both repositories (three attempts), and
+    `cosmo-upgrade --check` must name the published LATEST."""
+    out = b.status(f"printf 'local file:///var/lib/pkg/repo\\ncosmoos {PUBLISHED}/repo/{args.arch}\\n' "
+                   "> /etc/pkg/repos.conf && rm /etc/cosmo-release.conf", "rc")
+    need(out, r"^rc=0$", "the installer's repos.conf, and no cosmo-release.conf (its default)")
+    last = ""
+    for attempt in range(1, 4):
+        out = b.status("pkg update", "upd")
+        if re.search(r"^upd=0$", out, re.M) and re.search(r"^pkg: index updated: \d+ packages from 2 repositories$",
+                                                        out, re.M):
+            break
+        last = out.strip()[-800:]
+        time.sleep(5)
+    else:
+        raise Fail(f"pkg update against {PUBLISHED}: three attempts failed; the last said:\n{last}")
+    m = need(out, r"^pkg: cosmoos: serial (\d+), published (\S+), expires (\S+)$", "the published index's header")
+    chk = b.status("cosmo-upgrade --check", "chk")
+    need(chk, r"^chk=0$", "cosmo-upgrade --check against the published release index")
+    rel = need(chk, rf"^cosmo-upgrade: (?:(v\S+) is newer than this system's \S+|this system's \S+ is up to date: "
+                    rf"the newest release at {re.escape(PUBLISHED)}/releases is (v\S+))", "the published LATEST")
+    results.append(f"g. {PUBLISHED}: pkg update accepted repo/{args.arch} (serial {m.group(1)}, published "
+                   f"{m.group(2)}, expires {m.group(3)}) beside the disk's (attempt {attempt}); cosmo-upgrade --check "
+                   f"read LATEST {rel.group(1) or rel.group(2)}")
 
 
 def main():
