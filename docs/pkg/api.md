@@ -75,10 +75,22 @@ the same trailer appended (the signature covers the whole text):
 Every stanza needs `name`, `version`, `file` and `size`. Written by
 `pkgbuild.py index`, verified and stored by `pkg update`.
 
+A network repository's `INDEX` starts with a header stanza (PK10),
+written by `pkgbuild.py publish`; a file:// repository's may omit it:
+
+| Key | Value |
+|---|---|
+| `serial` | a positive decimal integer without leading zeros, higher at every publication |
+| `published` | `YYYY-MM-DDTHH:MM:SSZ` (UTC) |
+| `expires` | the same form, after `published` and at most 30 days after it |
+
+All three, once each, and nothing else in that stanza; a header key in a
+package stanza is an error.
+
 ## `pkg` command line
 
 ```text
-pkg update
+pkg update [-n]
 pkg install [-n] [-f] [--reinstall] NAME[=VERSION]... | FILE.cpk...
 pkg remove  [-n] [-f] NAME...
 pkg upgrade [-n] [NAME...]
@@ -86,13 +98,15 @@ pkg list | info NAME... | search [TEXT...] | verify [NAME...]
 ```
 
 Options come after the command: `-n` prints the plan without writing
+(and without fetching: a network package is listed `(from NAME, not
+fetched: -n)`, so its checks run only for real)
 (`update -n` prints the package count), `-f` removes despite dependants,
 `--reinstall` ignores an installed version when resolving.
 
 | Command | Effect | Output the tests rely on |
 |---|---|---|
-| `update` | For each repository in `repos.conf`: read `INDEX`, verify its trailer against the key ring, parse it; concatenate the verified indexes (a blank line between them) into `/var/db/pkg/index` | `pkg: index updated: N packages from M repository/ies` |
-| `install NAME[=VERSION]...` | Plan all requests together from the stored index (`NAME=VERSION` is the constraint `NAME = VERSION`; every constraint seen on a name, including those of installed packages, must hold; the plan is rebuilt when a later constraint invalidates an earlier choice), then for each package in dependency order: find `file` in a repository, check size and SHA-512 against the index, verify the signature, cross-check the manifest, install | `pkg: installing NAME-VERSION (N files)`; `pkg: NAME will be upgraded from A to B` when a constraint needs a newer installed package; `pkg: constraints on NAME: ...` with an unsatisfiable set |
+| `update` | For each repository in `repos.conf`: read (a directory) or fetch (a URL, through `cosmo-fetch`) `INDEX`, verify its trailer against the key ring, for a URL check its header against the clock and the serial accepted last (PK10), parse it, and store it as `/var/lib/pkg/repos/NAME/INDEX`; every repository is tried, the exit status is the worst | `pkg: index updated: N packages from M repository/ies`, or `from K of M repositories`; `pkg: NAME: serial S, published T, expires T` for an index with a header |
+| `install NAME[=VERSION]...` | Plan all requests together from the stored indexes (`NAME=VERSION` is the constraint `NAME = VERSION`; every constraint seen on a name, including those of installed packages, must hold; the plan is rebuilt when a later constraint invalidates an earlier choice), then for each package in dependency order: read `file` from its repository's directory, or fetch it from its URL into `/var/cache/pkg/NAME/` (`pkg: fetching FILE from NAME`), check size and SHA-512 against the index, verify the signature, cross-check the manifest, install | `pkg: installing NAME-VERSION (N files)`; `pkg: NAME will be upgraded from A to B` when a constraint needs a newer installed package; `pkg: constraints on NAME: ...` with an unsatisfiable set |
 | `install FILE.cpk` | An argument containing `/` is a package file: verified without an index entry; its dependencies must be installed or resolvable from the index | as above |
 | `remove NAME` | Refuse when another installed package depends on it unless `-f`; unlink the manifest's files (already missing is fine); if any could not be removed, rewrite the record to the files still on disk and fail; otherwise `rmdir` the recorded directories deepest first and drop the record | `pkg: NAME: OTHER depends on it`; `pkg: removing NAME-VERSION (N files)`; `pkg: NAME: N files could not be removed; the package stays recorded with them`; `pkg: NAME: cannot update the record (...); dropped it` and `pkg: NAME: /path is left untracked` when the database itself cannot be written; `pkg: NAME: the database cannot be written (...): the record still lists removed files; run 'pkg remove NAME' again ...` when not even the drop works |
 | `upgrade [NAME...]` | For every installed package (or the named ones) with a newer index version: install it; files the new manifest lacks are unlinked after the record is committed, the old recorded directories are removed when empty; an obsolete file that cannot be unlinked stays in the record | `pkg: N packages upgraded`; `pkg: NAME: obsolete file /path cannot be removed: ...`; `pkg: NAME: N obsolete files kept in the record` |
@@ -108,8 +122,29 @@ or replaced)`, `bad signature (key NAME.pub)`, `unknown signing key ID
 (not in /etc/pkg/keys)`, `not signed (no COSMOSIG trailer)`, a malformed
 package or manifest. Messages are `pkg: <what>: <why>` on stderr.
 
-Before any command `pkg` creates `/var/db/pkg/installed` and loads the
-key ring (no keys is a failure). `update`, `install`, `remove` and
+A network repository's refusals (exit 3), as `pkg update` and `install`
+print them, `cosmo-fetch`'s own line first where it made the refusal:
+
+| Case | Messages |
+|---|---|
+| the server's certificate (an untrusted CA, expired, another name) | `cosmo-fetch: HOST: the server's certificate is not accepted:` and mbedTLS's reasons; `pkg: NAME: INDEX refused (above); nothing read from it` |
+| the pin | `cosmo-fetch: URL: HOST: the server's key is sha256:X, not the pinned sha256:Y`; the same `pkg:` line |
+| `INDEX` signed by a key not in the ring | `pkg: NAME: INDEX: unknown signing key ID (not in /etc/pkg/keys)` |
+| `INDEX` changed after signing | `pkg: NAME: INDEX: bad signature (key FILE.pub)` |
+| a replayed index | `pkg: NAME: INDEX: serial S is older than L, the last accepted from this repository (a replayed index)` |
+| an expired index | `pkg: NAME: INDEX: expired at T` |
+| the clock before the publication | `pkg: NAME: INDEX: the clock (T) is before the index was published (T): set the clock (date -s) and update again` |
+| an index without a header, or valid too long | `pkg: NAME: INDEX: no serial and expiry (refused from a network repository)`; `... valid from T to T, not for at most 30 days` |
+| a package that does not match the index | `pkg: /var/cache/pkg/NAME/FILE: checksum does not match the index (corrupt or replaced)` |
+
+A server that cannot be reached, a name that does not resolve or an HTTP
+error is exit 1: `cosmo-fetch`'s line, then `pkg: NAME: cannot fetch
+INDEX (above)`.
+
+`install`, `remove` and `upgrade` without `-n` need the `sys_admin`
+privilege: without it `pkg: COMMAND needs the sys_admin privilege (this
+process lacks it)`, exit 1. Before any command `pkg` creates
+`/var/db/pkg/installed` and loads the key ring (no keys is a failure). `update`, `install`, `remove` and
 `upgrade` without `-n` take the lock file `/var/db/pkg/lock`
 (`O_EXCL`); a second `pkg` reports `another pkg is running` and exits 1;
 a stale lock after a crash is removed by hand.
@@ -129,9 +164,10 @@ operation stops. A file owned by another installed package is a conflict
 
 | Path | Content |
 |---|---|
-| `/etc/pkg/repos.conf` | one repository directory per line; `#` comments; the live image ships `/boot/repo`, and `cosmo-install` copies that repository to `/var/lib/pkg/repo` on the installed root and writes this file to name it (roadmap M6) |
+| `/etc/pkg/repos.conf` | at most 8 lines `NAME URL [pin sha256:HEX] [insecure]` (at most 8 words a line, one pin) (design.md, "Configuration"); `#` comments; a line that is a directory alone is the file:// repository `local`. The live image ships `/boot/repo`, and `cosmo-install` copies that repository to `/var/lib/pkg/repo` on the installed root and writes this file to name it (roadmap M6) |
 | `/etc/pkg/keys/*.pub` | accepted Ed25519 public keys, 64 hex characters each (the `tools/keys/*.pub` format, at most 16 keys); the image ships the first trusted key, `dev.pub` for a development build (`PKG_TRUST_PUB`) |
-| `/var/db/pkg/index` | the last verified `INDEX` text (trailer stripped) |
+| `/var/lib/pkg/repos/<name>/INDEX` | each repository's last accepted `INDEX` text (trailer stripped); its header's serial is the one PK10 compares with |
+| `/var/cache/pkg/<name>/` | packages being fetched (`FILE.part` until whole), removed once installed or refused |
 | `/var/db/pkg/installed/<name>/MANIFEST` | the installed package's manifest, as extracted |
 | `/var/db/pkg/installed/<name>/MANIFEST.new` | the staged record while an operation runs; committed by rename |
 | `/var/db/pkg/lock` | present while a mutating command runs |
@@ -147,6 +183,8 @@ bytes, 128 installed packages listed.
 pkgbuild.py build --port DIR --out REPO --cc CC --cflags "..." --ld LD --ldflags "..."
                   --ldscript user.ld --crt0 crt0.o --libc libc.a --sign-key KEY [--test-fixtures]
 pkgbuild.py index --repo REPO --sign-key KEY
+pkgbuild.py publish --index INDEX --sign-key KEY --serial N [--published T] [--days D]
+                    [--only FILE.cpk ...] [--input-pub PUB] --out INDEX
 ```
 
 `build` compiles each `program:` source with `CC CFLAGS -c` into
@@ -162,7 +200,15 @@ after signing) and `badsum-1.0.cpk` (a copy of the valid package).
 prints `INDEX N packages`; the `badsig` stanza is synthesised with name
 `badsig`, the `badsum` stanza with name `badsum` and `sha512` of 128
 zeros. Output is deterministic: sorted members, mtime 0, uid/gid 0, a
-deterministic signature.
+deterministic signature. `publish` makes a network repository's `INDEX`
+from a built one, once its signature checks against `--input-pub` (by
+default the signing key's own public half): its package stanzas (trailer
+and any header dropped;
+with `--only`, those files' alone, which must all be there) after the
+header `serial: N`, `published: T` (now, or `--published`) and `expires:`
+`D` days later (1 to 30, default 30), signed with `KEY`; it prints
+`PUBLISH FILE: N packages, serial N, expires T`. The release workflow and
+`test-pkg-net` use it.
 
 ## Make targets (`pkg/pkg.mk`, `Makefile`)
 

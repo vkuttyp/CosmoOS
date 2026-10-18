@@ -97,3 +97,47 @@ resource; `-m` is parsed strictly (`garbage` or `0` had meant no limit);
 still waits as the system's TCP does. Kept: a
 chunked body whose zero chunk arrived but not its final empty line is
 complete (every byte arrived; every caller checks size and digest).
+## PR 2: `pkg`'s network repositories and PK10
+
+**Format.** The decision named `INDEX` with per-package SHA-256 and a
+separate `INDEX.sig`. The existing index already carries per-package
+SHA-512 and the COSMOSIG trailer (an Ed25519 signature over the whole
+text, verified against the ring), so the network index is that one format
+with a header stanza added (`serial`, `published`, `expires`); a second
+signature file and a second digest would be two formats for one thing.
+`tools/pkgbuild.py publish` makes it from a built index. The build's own
+index stays headerless, so `make reproducible` is unaffected.
+
+| What | Where |
+|---|---|
+| `repos.conf`: `NAME URL [pin sha256:HEX] [insecure]`; a directory alone is still read (`local`) | `repo_parse` (`pkg/manifest.c`) |
+| `pkg update`: fetch (`userland/lib/fetch.c` runs `cosmo-fetch`), verify, the header alone checked, then parse and store under `/var/lib/pkg/repos/NAME/INDEX` | `update_repo` |
+| PK10: header present, at most 30 days, the clock within it (before publication refused with a message), serial not below the stored one | `index_header_parse`, `index_fresh` |
+| packages fetched into `/var/cache/pkg/NAME/`, resumed, checked by `load_package` as before | `install_entry` |
+| `install`/`upgrade`/`remove` need `sys_admin`; `update`, queries and `-n` do not | `holds_priv`, `main` |
+
+`file://` repositories are exempt from PK10: the system's own disk, and
+`cosmo-upgrade --rollback` puts an older one back on purpose.
+
+**Tests.** `test_pkg` gains the time format, the header grammar, every
+rule of `index_fresh` and `repo_parse`. `make test-pkg-net`
+(`tests/boot/pkgnet_test.py`, CI job `pkg-net`): the installed system
+against repositories served over HTTPS by the harness. Results
+(2026-10-18, release builds):
+
+| Step | x86-64 | AArch64 |
+|---|---|---|
+| c. untrusted CA, expired, another name: exit 3, no request logged | PASS | PASS |
+| a. update/search/info without `sys_admin`, install refused; install hello 1.0 (GET INDEX, GET the package) | PASS | PASS |
+| f. serial 11: `pkg upgrade` hello 1.0 → 1.1 | PASS | PASS |
+| d. serial 10 replayed, serial 12 expired: refused, stored index unchanged | PASS | PASS |
+| b. a package with one byte changed, an INDEX signed by another key: refused | PASS | PASS |
+
+Mutation: the serial rule disabled in `index_fresh`, step d failed ("a
+replayed serial-10 index (exit 3)").
+
+**Validation (PR 2, 2026-10-18, on `b0102276`).** The full matrix as for
+PR 1, plus `make BUILD=release test-pkg-net`, on both architectures:
+every step exit 0, `reproducible: yes`. After the rebase onto PR 1's
+reviewed `cosmo-fetch` (main `bc6ea9f2`), `test-pkg-net` again on both:
+PASS.

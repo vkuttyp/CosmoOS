@@ -3,7 +3,9 @@
  * upgrade, list, info, search, verify. Everything untrusted (packages,
  * the index) is verified before a byte of it is acted on; installation
  * writes through temporary names and rename and rolls one package back
- * on failure; the database is text under /var/db/pkg.
+ * on failure; the database is text under /var/db/pkg. A repository is a
+ * directory or a URL (/etc/pkg/repos.conf); a network one is fetched
+ * through /bin/cosmo-fetch and its index must be fresh (PK10).
  */
 
 #include <dirent.h>
@@ -13,8 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
+#include "../userland/lib/fetch.h"
 #include "pkg.h"
 #include "verify.h"
 
@@ -280,21 +284,109 @@ static int keys_load(void)
     return 0;
 }
 
+static struct repo g_repos[PKG_MAX_REPOS];
+static int g_nrepos = -1;
+_Static_assert(sizeof(g_repos) / sizeof(g_repos[0]) == PKG_MAX_REPOS, "repos_load fills at most PKG_MAX_REPOS");
+
+/* /etc/pkg/repos.conf, once. -1 when it cannot be read or a line is bad. */
+static int repos_load(void)
+{
+    if (g_nrepos >= 0)
+        return g_nrepos;
+    uint8_t *text;
+    size_t len;
+    if (read_whole(PKG_REPOS_CONF, &text, &len, 1 << 16) < 0) {
+        fprintf(stderr, "pkg: cannot read %s: %s\n", PKG_REPOS_CONF, strerror(errno));
+        return -1;
+    }
+    int n = 0, nlocal = 0, lineno = 0;
+    char *save;
+    for (char *l = strtok_r((char *)text, "\n", &save); l; l = strtok_r(NULL, "\n", &save)) {
+        lineno++;
+        while (*l == ' ' || *l == '\t')
+            l++;
+        if (*l == '#' || *l == '\0')
+            continue;
+        if (n == PKG_MAX_REPOS) {
+            fprintf(stderr, "pkg: %s: more than %d repositories\n", PKG_REPOS_CONF, PKG_MAX_REPOS);
+            free(text);
+            return -1;
+        }
+        char err[PKG_ERR_MAX];
+        if (repo_parse(l, nlocal, &g_repos[n], err, sizeof(err)) < 0) {
+            fprintf(stderr, "pkg: %s line %d: %s\n", PKG_REPOS_CONF, lineno, err);
+            free(text);
+            return -1;
+        }
+        for (int k = 0; k < n; k++) {
+            if (strcmp(g_repos[k].name, g_repos[n].name) == 0) {
+                fprintf(stderr, "pkg: %s line %d: a second repository named %s\n", PKG_REPOS_CONF, lineno,
+                        g_repos[n].name);
+                free(text);
+                return -1;
+            }
+        }
+        nlocal += g_repos[n].local && strncmp(l, "/", 1) == 0;
+        n++;
+    }
+    free(text);
+    g_nrepos = n;
+    return n;
+}
+
+static void repo_index_path(const struct repo *r, char *out, size_t n)
+{
+    snprintf(out, n, PKG_REPOS_DIR "/%s/INDEX", r->name);
+}
+
+/* The indexes `pkg update` stored, in repos.conf's order, merged; each
+ * entry remembers its repository. */
 static int index_load(void)
 {
     if (g_index_loaded)
         return 0;
-    uint8_t *text;
-    size_t len;
-    if (read_whole(PKG_DB_INDEX, &text, &len, PKG_INDEX_LIMIT) < 0) {
-        fprintf(stderr, "pkg: no index: run 'pkg update' first\n");
+    if (repos_load() < 0)
+        return -1;
+    g_index.entries = calloc(PKG_MAX_INDEX, sizeof(*g_index.entries));
+    if (g_index.entries == NULL) {
+        fprintf(stderr, "pkg: out of memory\n");
         return -1;
     }
-    char err[PKG_ERR_MAX];
-    int rc = index_parse((const char *)text, len, &g_index, err, sizeof(err));
-    free(text);
-    if (rc) {
-        fprintf(stderr, "pkg: stored index: %s\n", err);
+    int found = 0;
+    for (int i = 0; i < g_nrepos; i++) {
+        char path[PKG_PATH_MAX];
+        repo_index_path(&g_repos[i], path, sizeof(path));
+        uint8_t *text;
+        size_t len;
+        if (read_whole(path, &text, &len, PKG_INDEX_LIMIT) < 0)
+            continue;
+        struct index ix;
+        char err[PKG_ERR_MAX];
+        int rc = index_parse((const char *)text, len, &ix, err, sizeof(err));
+        free(text);
+        if (rc) {
+            fprintf(stderr, "pkg: %s: stored index: %s\n", g_repos[i].name, err);
+            return -1;
+        }
+        found++;
+        for (int k = 0; k < ix.n; k++) {
+            if (g_index.n == PKG_MAX_INDEX) {
+                fprintf(stderr, "pkg: more than %d packages in the repositories\n", PKG_MAX_INDEX);
+                index_free(&ix);
+                return -1;
+            }
+            g_index.entries[g_index.n] = ix.entries[k];
+            g_index.entries[g_index.n++].repo = i;
+        }
+        index_free(&ix);
+    }
+    if (found == 0) {
+        struct stat st;
+        if (stat(PKG_DB_DIR "/index", &st) == 0)
+            fprintf(stderr, "pkg: no index: run 'pkg update' first (" PKG_DB_DIR "/index is the format before 1.0.6; "
+                            "update stores each repository's under " PKG_REPOS_DIR ")\n");
+        else
+            fprintf(stderr, "pkg: no index: run 'pkg update' first\n");
         return -1;
     }
     g_index_loaded = true;
@@ -317,95 +409,161 @@ static struct index_entry *index_best(const char *name, const struct depend *d)
     return best;
 }
 
-/* Repository directories from /etc/pkg/repos.conf. */
-static int repos_load(char repos[][PKG_PATH_MAX], int max)
+static int64_t now_utc(void)
 {
-    uint8_t *text;
-    size_t len;
-    if (read_whole(PKG_REPOS_CONF, &text, &len, 1 << 16) < 0) {
-        fprintf(stderr, "pkg: cannot read %s: %s\n", PKG_REPOS_CONF, strerror(errno));
-        return -1;
-    }
-    int n = 0;
-    char *save;
-    for (char *l = strtok_r((char *)text, "\n", &save); l && n < max; l = strtok_r(NULL, "\n", &save)) {
-        while (*l == ' ')
-            l++;
-        if (*l == '#' || *l == '\0')
-            continue;
-        strlcpy(repos[n++], l, PKG_PATH_MAX);
-    }
-    free(text);
-    return n;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) < 0)
+        return 0;
+    return (int64_t)ts.tv_sec;
 }
 
+/* "<url>/<file>" */
+static void repo_url(const struct repo *r, const char *file, char *out, size_t n)
+{
+    snprintf(out, n, "%s/%s", r->url, file);
+}
+
+static int fetch_status(const struct repo *r, const char *what, int st)
+{
+    if (st < 0) {
+        fprintf(stderr, "pkg: %s: cannot run %s: %s\n", r->name, FETCH_PROGRAM, strerror(errno));
+        return EXIT_FAILED;
+    }
+    if (st == FETCH_REFUSED) {
+        fprintf(stderr, "pkg: %s: %s refused (above); nothing read from it\n", r->name, what);
+        return EXIT_REFUSED;
+    }
+    fprintf(stderr, "pkg: %s: cannot fetch %s (above)\n", r->name, what);
+    return EXIT_FAILED;
+}
+
+/*
+ * One repository: its INDEX read (a directory) or fetched (a URL), the
+ * signature verified against the ring, then for a URL the header alone
+ * checked for freshness against the serial accepted last (PK10), before
+ * any package line is read; then parsed and stored as the repository's
+ * index. *count is its number of packages.
+ */
+static int update_repo(const struct repo *r, int *count)
+{
+    char dir[PKG_PATH_MAX], stored[PKG_PATH_MAX], path[PKG_PATH_MAX + 24];
+    snprintf(dir, sizeof(dir), PKG_REPOS_DIR "/%s", r->name);
+    repo_index_path(r, stored, sizeof(stored));
+    if (ensure_parent_dirs(stored, NULL) < 0) {
+        fprintf(stderr, "pkg: cannot create %s: %s\n", dir, strerror(errno));
+        return EXIT_FAILED;
+    }
+    uint8_t *blob;
+    size_t len, payload;
+    if (r->local) {
+        snprintf(path, sizeof(path), "%s/INDEX", r->dir);
+    } else {
+        char url[PKG_URL_MAX + 16];
+        repo_url(r, "INDEX", url, sizeof(url));
+        /* Per process: `update -n` takes no lock and may run beside a real one. */
+        snprintf(path, sizeof(path), "%s.new.%d", stored, (int)getpid());
+        struct fetch_opts o = { .pin = r->pin, .insecure = r->insecure, .max = PKG_INDEX_LIMIT };
+        int st = fetch_url(url, path, &o);
+        if (st != FETCH_OK) {
+            unlink(path);
+            return fetch_status(r, "INDEX", st);
+        }
+    }
+    int rd = read_whole(path, &blob, &len, PKG_INDEX_LIMIT);
+    if (!r->local)
+        unlink(path);
+    if (rd < 0) {
+        fprintf(stderr, "pkg: %s: %s: %s\n", r->name, path, strerror(errno));
+        return EXIT_FAILED;
+    }
+    char err[PKG_ERR_MAX];
+    if (verify_signed(blob, len, &payload, err, sizeof(err)) < 0) {
+        fprintf(stderr, "pkg: %s: INDEX: %s\n", r->name, err);
+        free(blob);
+        return EXIT_REFUSED;
+    }
+    struct index_header h;
+    if (index_header_parse((const char *)blob, payload, &h, err, sizeof(err)) < 0) {
+        fprintf(stderr, "pkg: %s: INDEX: %s\n", r->name, err);
+        free(blob);
+        return EXIT_REFUSED;
+    }
+    if (!r->local) {
+        /* The serial last accepted: the stored index's header. A stored
+         * index that cannot be read counts as none. */
+        uint64_t last = 0;
+        uint8_t *old;
+        size_t olen;
+        if (read_whole(stored, &old, &olen, PKG_INDEX_LIMIT) == 0) {
+            struct index_header oh;
+            char oerr[PKG_ERR_MAX];
+            if (index_header_parse((const char *)old, olen, &oh, oerr, sizeof(oerr)) == 0 && oh.present)
+                last = oh.serial;
+            free(old);
+        }
+        if (index_fresh(&h, last, now_utc(), err, sizeof(err)) < 0) {
+            fprintf(stderr, "pkg: %s: INDEX: %s\n", r->name, err);
+            free(blob);
+            return EXIT_REFUSED;
+        }
+    }
+    struct index ix;
+    if (index_parse((const char *)blob, payload, &ix, err, sizeof(err)) < 0) {
+        fprintf(stderr, "pkg: %s: INDEX: %s\n", r->name, err);
+        free(blob);
+        return EXIT_REFUSED;
+    }
+    *count = ix.n;
+    index_free(&ix);
+    int rc = 0;
+    if (!g_dry_run && write_atomic(stored, blob, payload, 0644) < 0) {
+        fprintf(stderr, "pkg: cannot write %s: %s\n", stored, strerror(errno));
+        rc = EXIT_FAILED;
+    }
+    free(blob);
+    if (rc == 0 && h.present) {
+        char pub[21], exp[21];
+        time_format(h.published, pub);
+        time_format(h.expires, exp);
+        printf("pkg: %s: serial %llu, published %s, expires %s\n", r->name, (unsigned long long)h.serial, pub,
+               exp);
+    }
+    return rc;
+}
+
+/* Every repository is tried; the status is the worst (refused over failed). */
 static int cmd_update(void)
 {
-    char repos[8][PKG_PATH_MAX];
-    int nrepos = repos_load(repos, 8);
-    if (nrepos <= 0) {
+    int nrepos = repos_load();
+    if (nrepos < 0)
+        return EXIT_FAILED;
+    if (nrepos == 0) {
         fprintf(stderr, "pkg: no repositories configured\n");
         return EXIT_FAILED;
     }
-    int total = 0;
-    /* Phase 10: one repository is the common case; several are
-     * concatenated in configuration order after each is verified. */
-    char *merged = NULL;
-    size_t mlen = 0;
+    int total = 0, ok = 0, worst = 0;
     for (int i = 0; i < nrepos; i++) {
-        char path[PKG_PATH_MAX];
-        snprintf(path, sizeof(path), "%s/INDEX", repos[i]);
-        uint8_t *blob;
-        size_t len, payload;
-        if (read_whole(path, &blob, &len, PKG_INDEX_LIMIT) < 0) {
-            fprintf(stderr, "pkg: %s: %s\n", path, strerror(errno));
-            free(merged);
-            return EXIT_FAILED;
+        int count = 0;
+        int rc = update_repo(&g_repos[i], &count);
+        if (rc == 0) {
+            total += count;
+            ok++;
+        } else if (rc == EXIT_REFUSED || worst == 0) {
+            worst = rc;
         }
-        char err[PKG_ERR_MAX];
-        if (verify_signed(blob, len, &payload, err, sizeof(err)) < 0) {
-            fprintf(stderr, "pkg: %s: %s\n", path, err);
-            free(blob);
-            free(merged);
-            return EXIT_REFUSED;
-        }
-        struct index ix;
-        if (index_parse((const char *)blob, payload, &ix, err, sizeof(err)) < 0) {
-            fprintf(stderr, "pkg: %s: %s\n", path, err);
-            free(blob);
-            free(merged);
-            return EXIT_REFUSED;
-        }
-        total += ix.n;
-        index_free(&ix);
-        char *m = realloc(merged, mlen + payload + 1);
-        if (m == NULL) {
-            free(blob);
-            free(merged);
-            return EXIT_FAILED;
-        }
-        merged = m;
-        if (mlen && merged[mlen - 1] != '\n')
-            merged[mlen++] = '\n';
-        if (mlen)
-            merged[mlen++] = '\n';   /* stanza separator between repositories */
-        memcpy(merged + mlen, blob, payload);
-        mlen += payload;
-        free(blob);
     }
-    if (g_dry_run) {
-        printf("%d packages available\n", total);
-        free(merged);
-        return 0;
-    }
-    if (write_atomic(PKG_DB_INDEX, merged, mlen, 0644) < 0) {
-        fprintf(stderr, "pkg: cannot write %s: %s\n", PKG_DB_INDEX, strerror(errno));
-        free(merged);
+    if (total > PKG_MAX_INDEX) {
+        /* Each stored, but together more than index_load can merge. */
+        fprintf(stderr, "pkg: the repositories hold %d packages together, more than %d\n", total, PKG_MAX_INDEX);
         return EXIT_FAILED;
     }
-    free(merged);
-    printf("pkg: index updated: %d packages from %d repositor%s\n", total, nrepos, nrepos == 1 ? "y" : "ies");
-    return 0;
+    if (g_dry_run)
+        printf("%d packages available\n", total);
+    else if (ok == nrepos)
+        printf("pkg: index updated: %d packages from %d repositor%s\n", total, nrepos, nrepos == 1 ? "y" : "ies");
+    else
+        printf("pkg: index updated: %d packages from %d of %d repositories\n", total, ok, nrepos);
+    return worst;
 }
 
 /* --- loading and checking a package ------------------------------------------ */
@@ -891,27 +1049,77 @@ static int plan_build(struct plan *p, const struct depend *reqs, int nreq)
     return EXIT_FAILED;
 }
 
+/*
+ * A package from its repository: read in place from a directory, or
+ * fetched into PKG_CACHE_DIR/<repository>/ (resuming a partial download,
+ * at most the index's size), then checked against the index by
+ * load_package before anything is installed. A copy that does not match
+ * after a resumed download is fetched once more from the start.
+ */
 static int install_entry(const struct index_entry *e)
 {
-    char repos[8][PKG_PATH_MAX];
-    int nrepos = repos_load(repos, 8);
+    const struct repo *r = &g_repos[e->repo];
+    char path[PKG_PATH_MAX + PKG_FILE_MAX];
     struct loaded l;
-    int rc = EXIT_FAILED;
-    for (int i = 0; i < nrepos; i++) {
-        char path[PKG_PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s", repos[i], e->file);
+    int rc;
+    if (r->local) {
+        snprintf(path, sizeof(path), "%s/%s", r->dir, e->file);
         struct stat st;
-        if (stat(path, &st) < 0)
-            continue;
+        if (stat(path, &st) < 0) {
+            fprintf(stderr, "pkg: %s: not found in repository %s\n", e->file, r->name);
+            return EXIT_FAILED;
+        }
         rc = load_package(path, e, &l);
-        if (rc)
-            return rc;
-        rc = install_loaded(&l);
-        loaded_free(&l);
-        return rc;
+    } else if (g_dry_run) {
+        /* -n writes nothing, the cache included: the plan, unfetched. */
+        printf("pkg: installing %s-%s (from %s, not fetched: -n)\n", e->name, e->version, r->name);
+        return 0;
+    } else {
+        char part[PKG_PATH_MAX + PKG_FILE_MAX + 8], url[PKG_URL_MAX + PKG_FILE_MAX + 2];
+        snprintf(path, sizeof(path), PKG_CACHE_DIR "/%s/%s", r->name, e->file);
+        snprintf(part, sizeof(part), "%s.part", path);
+        repo_url(r, e->file, url, sizeof(url));
+        if (ensure_parent_dirs(path, NULL) < 0) {
+            fprintf(stderr, "pkg: cannot create the cache for %s: %s\n", path, strerror(errno));
+            return EXIT_FAILED;
+        }
+        for (int attempt = 0;; attempt++) {
+            struct stat st;
+            bool resumed = stat(part, &st) == 0 && st.st_size > 0;
+            struct fetch_opts o = { .pin = r->pin, .insecure = r->insecure, .resume = true, .max = e->size };
+            printf("pkg: fetching %s from %s\n", e->file, r->name);
+            int fst = fetch_url(url, part, &o);
+            if (fst != FETCH_OK) {
+                if (fst != FETCH_FAILED)
+                    unlink(part);   /* only a cut transfer is worth resuming */
+                return fetch_status(r, e->file, fst);
+            }
+            if (rename(part, path) < 0) {
+                fprintf(stderr, "pkg: cannot place %s: %s\n", path, strerror(errno));
+                unlink(part);
+                return EXIT_FAILED;
+            }
+            uint8_t sha[SHA512_LEN];
+            uint8_t *blob;
+            size_t len;
+            bool match = read_whole(path, &blob, &len, PKG_PACKAGE_LIMIT) == 0;
+            if (match) {
+                sha512_of(blob, len, sha);
+                match = len == e->size && memcmp(sha, e->sha, SHA512_LEN) == 0;
+                free(blob);
+            }
+            if (match || !resumed || attempt > 0)
+                break;
+            unlink(path);   /* the kept part was not this file's: once more from the start */
+        }
+        rc = load_package(path, e, &l);
+        unlink(path);
     }
-    fprintf(stderr, "pkg: %s: not found in any repository\n", e->file);
-    return EXIT_FAILED;
+    if (rc)
+        return rc;
+    rc = install_loaded(&l);
+    loaded_free(&l);
+    return rc;
 }
 
 static int cmd_install(int argc, char **argv)
@@ -1218,10 +1426,30 @@ static int cmd_verify(int argc, char **argv)
 
 /* --- main -------------------------------------------------------------------- */
 
+/* Whether this process holds the privilege `name` (/proc/self/status's
+ * Privs line, as priv(1) reads it). */
+static bool holds_priv(const char *name)
+{
+    uint8_t *text;
+    size_t len;
+    if (read_whole("/proc/self/status", &text, &len, 1 << 16) < 0)
+        return false;
+    bool held = false;
+    char *line = strstr((char *)text, "Privs:\t");
+    if (line) {
+        line += 7;
+        line[strcspn(line, "\n")] = '\0';
+        for (char *save, *w = strtok_r(line, " ", &save); w && !held; w = strtok_r(NULL, " ", &save))
+            held = strcmp(w, name) == 0;
+    }
+    free(text);
+    return held;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: pkg update\n"
+            "usage: pkg update [-n]\n"
             "       pkg install [-n] [-f] [--reinstall] NAME[=VERSION]... | FILE.cpk...\n"
             "       pkg remove [-n] [-f] NAME...\n"
             "       pkg upgrade [-n] [NAME...]\n"
@@ -1253,6 +1481,13 @@ int main(int argc, char **argv)
 
     bool mutating = strcmp(cmd, "update") == 0 || strcmp(cmd, "install") == 0 || strcmp(cmd, "remove") == 0 ||
                     strcmp(cmd, "upgrade") == 0;
+    /* Changing what is installed is PRIV_SYS_ADMIN's; update, the queries
+     * and -n runs are anyone's. */
+    bool changes = strcmp(cmd, "install") == 0 || strcmp(cmd, "remove") == 0 || strcmp(cmd, "upgrade") == 0;
+    if (changes && !g_dry_run && !holds_priv("sys_admin")) {
+        fprintf(stderr, "pkg: %s needs the sys_admin privilege (this process lacks it)\n", cmd);
+        return EXIT_FAILED;
+    }
     if (db_init() < 0)
         return EXIT_FAILED;
     if (keys_load() < 0)

@@ -90,10 +90,9 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 
 ## Packages
 
-- The repository is the one the installed release came with, on the
-  installed disk. `cosmo-upgrade` replaces it with a newer release's
-  ([Upgrading](upgrading.md)). There is no network repository and no
-  fetcher (`docs/pkg/`).
+- A network repository is fetched whole, file by file: no mirrors, no
+  delta updates. Its index's freshness is only as good as the clock, which
+  has no NTP ([Packages](packages.md#network-repositories)).
 - No rollback of a completed package upgrade. `cosmo-upgrade --rollback`
   returns the boot set, the programs and the repository, but not the
   packages `pkg upgrade` changed.

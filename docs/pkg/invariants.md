@@ -21,7 +21,9 @@ verifies the trailer's signature against `/etc/pkg/keys`, parses the
 manifest, and walks members and manifest lines in lockstep comparing
 name, size, mode and SHA-512, before `install_loaded` writes anything;
 `cmd_update` verifies an `INDEX` before storing it; `install FILE.cpk`
-runs the same path without the index check. Check: `rc.test` installs
+runs the same path without the index check. A package fetched from a
+network repository goes through the same `load_package` from its cache
+file before `install_loaded` sees it. Check: `rc.test` installs
 `badsig` (flipped payload byte, exit 3, `bad signature`) and `badsum`
 (wrong index checksum, exit 3, `checksum does not match the index`);
 `test_pkg` feeds the tar reader and the parsers corrupt input. Gap: the
@@ -99,18 +101,39 @@ the lock for a person to remove; `-n` runs and queries do not lock.
 **PK9. The trust root is the key ring, and only it.** A trailer whose
 key id is not in `/etc/pkg/keys` is `unknown signing key`; a matching
 key whose signature fails is `bad signature`; both exit 3 and nothing
-is written. Check: `badsig` in `rc.test`. Gap: no revocation, no key
-rotation procedure, no freshness (an old signed index replays; there is
-no clock to anchor a date), and the ring directory is trusted content of
-the root filesystem.
+is written. Check: `badsig` in `rc.test`; `test-pkg-net` (b) refuses an
+`INDEX` signed by another key. Gap: no revocation, no key rotation
+procedure, and the ring directory is trusted content of the root
+filesystem. (Replay, this rule's former gap, is PK10's.)
+
+**PK10. A network repository's index is fresh** (roadmap 1.1 P6;
+design.md, "Network repositories"). Before any package line of a fetched
+`INDEX` is parsed, its signature is verified and its header alone read
+(`index_header_parse`), and `index_fresh` requires: a header (`serial`,
+`published`, `expires`); a validity of at most 30 days; the clock at or
+after `published` (a clock before it is refused, saying to set it) and
+before `expires`; and a `serial` no lower than the stored index's, the
+last accepted from that repository name. A refused index leaves the
+stored one as it was. The server is checked first: `cosmo-fetch` makes
+its certificate checks (and the pin) in the handshake, so a server it
+refuses receives no request. Check: `test_pkg` (the header's grammar,
+every rule of `index_fresh`, a broken package line after a good header
+not read by `index_header_parse`); `test-pkg-net` (c) the untrusted,
+expired and misnamed certificates with no request logged by the server,
+(d) a replayed lower serial and an expired index refused, the stored
+index unchanged. Gap: the rule is per repository name, so renaming a
+repository in `repos.conf` forgets its serial; `file://` repositories are
+exempt (the system's own disk, and `--rollback` returns an older one);
+it is only as good as the clock, which has no NTP; an index is trusted for
+as long as it is stored, so `install` after a month without `update`
+uses the month-old one.
 
 ## Gaps (documented, not invariants)
 
-- No fetcher: repositories are directories (`/boot/repo` from the boot
-  archive on the live image, `/var/lib/pkg/repo` on an installed system:
-  the image's repository as the installer copied it, replaced by the new
-  release's when `cosmo-upgrade` moves the system to it, shell
-  completeness S7; docs/userland/design.md, "Updating").
+- Network repositories are fetched whole per file (no mirrors, no delta
+  updates); a directory repository (`/boot/repo` on the live image,
+  `/var/lib/pkg/repo` on an installed system, replaced by the new
+  release's when `cosmo-upgrade` moves the system to it) is read in place.
 - No rollback of a completed upgrade (section 47 "eventually").
   `cosmo-upgrade --rollback` returns the repository with the boot set and
   the base system, not the packages `pkg upgrade` changed.

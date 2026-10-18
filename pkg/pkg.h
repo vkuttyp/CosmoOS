@@ -28,10 +28,14 @@
 
 #define PKG_DB_DIR       "/var/db/pkg"
 #define PKG_DB_INSTALLED PKG_DB_DIR "/installed"
-#define PKG_DB_INDEX     PKG_DB_DIR "/index"
 #define PKG_DB_LOCK      PKG_DB_DIR "/lock"
 #define PKG_REPOS_CONF   "/etc/pkg/repos.conf"
 #define PKG_KEYS_DIR     "/etc/pkg/keys"
+#define PKG_REPOS_DIR    "/var/lib/pkg/repos"   /* <name>/INDEX: each repository's last accepted index */
+#define PKG_CACHE_DIR    "/var/cache/pkg"       /* <name>/<file>: a package being fetched */
+#define PKG_MAX_REPOS    8
+#define PKG_URL_MAX      256
+#define PKG_INDEX_MAX_DAYS 30                    /* PK10: an index is valid for at most 30 days */
 
 /* Exit statuses: 0 ok, 1 failure, 2 usage, 3 refused (verification). */
 #define EXIT_FAILED  1
@@ -95,11 +99,34 @@ struct index_entry {
     int ndepends;
     uint64_t size;
     uint8_t sha[SHA512_LEN];
+    int repo;                     /* which repository (pkg.c; index_parse leaves 0) */
+};
+
+/* An index's header stanza (PK10): "serial: N", "published: T" and
+ * "expires: T", T as YYYY-MM-DDTHH:MM:SSZ. A repository's own disk
+ * (file://) may omit it; a network repository's index must carry it. */
+struct index_header {
+    bool present;
+    uint64_t serial;
+    int64_t published, expires;   /* seconds since 1970, UTC */
 };
 
 struct index {
     struct index_entry *entries;  /* malloc'd */
     int n;
+    struct index_header header;
+};
+
+/* One /etc/pkg/repos.conf line: "NAME URL [pin sha256:HEX] [insecure]",
+ * URL file:///DIR, https://... or (with insecure) http://...; or, the
+ * form before P6, a directory alone, named "local" (then local2...). */
+struct repo {
+    char name[PKG_NAME_MAX];
+    char url[PKG_URL_MAX];        /* without a trailing '/' */
+    char pin[72];                 /* "sha256:HEX" or empty */
+    bool insecure;
+    bool local;                   /* file:// */
+    char dir[PKG_PATH_MAX];       /* the directory, when local */
 };
 
 int manifest_parse(const char *text, size_t len, struct manifest *m, char *err, size_t errlen);
@@ -107,7 +134,19 @@ void manifest_free(struct manifest *m);
 /* Render a manifest (plus "dir:" lines for `dirs`, may be NULL) as text; returns the length or -1 (too small). */
 int manifest_format(const struct manifest *m, const struct dirlist *dirs, char *out, size_t cap);
 int index_parse(const char *text, size_t len, struct index *ix, char *err, size_t errlen);
+/* The header stanza alone, read before any package line (PK10). */
+int index_header_parse(const char *text, size_t len, struct index_header *h, char *err, size_t errlen);
+/* PK10, for a network repository: a header, a validity of at most
+ * PKG_INDEX_MAX_DAYS, `now` within it, and a serial no lower than
+ * `last_serial`, the last one accepted from the repository (0: none). 0, or
+ * -1 with `err`. */
+int index_fresh(const struct index_header *h, uint64_t last_serial, int64_t now, char *err, size_t errlen);
 void index_free(struct index *ix);
+bool time_parse(const char *s, int64_t *t);                   /* YYYY-MM-DDTHH:MM:SSZ */
+void time_format(int64_t t, char out[21]);
+/* Parse a repos.conf line (comments and blank lines are the caller's);
+ * `nlocal` counts the directory-alone lines before it. 0, or -1 with `err`. */
+int repo_parse(const char *line, int nlocal, struct repo *r, char *err, size_t errlen);
 bool path_allowed(const char *path);                          /* relative, no "..", not under boot/dev/tmp/mnt */
 bool hex_decode(const char *hex, uint8_t *out, size_t n);
 void hex_encode(const uint8_t *in, size_t n, char *out);      /* out has 2n+1 bytes */

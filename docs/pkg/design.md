@@ -65,10 +65,26 @@ sha512: <128 hex>
 
 `size` and `sha512` describe the package file including its trailer.
 
+A network repository's index starts with a header stanza (PK10), which
+`tools/pkgbuild.py publish` adds to a built index before signing it again:
+
+```text
+serial: 42
+published: 2026-10-18T12:00:00Z
+expires: 2026-11-17T12:00:00Z
+```
+
+`serial` is a positive integer that increases with every publication;
+the times are UTC, `expires` at most 30 days after `published`. The
+build's own index (`make ports`, the one in the boot archive and on an
+installed system's disk) has no header, so it stays a pure function of
+the tree and the key.
+
 ### The metadata database (`/var/db/pkg/`)
 
 ```text
-/var/db/pkg/index                       the last verified INDEX (trailer stripped)
+/var/lib/pkg/repos/<repo>/INDEX         each repository's last accepted INDEX (trailer stripped)
+/var/cache/pkg/<repo>/<file>            a package being fetched (<file>.part until whole), removed after use
 /var/db/pkg/installed/<name>/MANIFEST   the package's manifest as installed, plus "dir: /path" lines for
                                         the directories this package created (deepest last)
 /var/db/pkg/lock                        present while a mutating pkg runs
@@ -83,10 +99,66 @@ are ignored).
 ### Configuration
 
 ```text
-/etc/pkg/repos.conf     one repository directory per line (the live image: /boot/repo;
-                        an installed system: /var/lib/pkg/repo, written by cosmo-install)
+/etc/pkg/repos.conf     one repository per line: NAME URL [pin sha256:HEX] [insecure]
 /etc/pkg/keys/*.pub     accepted Ed25519 public keys, 64 hex characters (tools/keys/*.pub format)
+/etc/ssl/certs/ca-certificates.crt   the certificate authorities a network repository's server must chain to
 ```
+
+`URL` is `file:///DIR` (a directory: the live image's `/boot/repo`, the
+installed system's `/var/lib/pkg/repo`), `https://...`, or `http://...`
+with `insecure` (refused otherwise). `pin sha256:HEX`, for an https
+repository, also requires the SHA-256 of the server key's DER
+SubjectPublicKeyInfo to be `HEX`. A line that is a directory alone, the
+form before P6, is a `file://` repository named `local` (then `local2`,
+...), so a `repos.conf` an operator kept still works. `#` starts a comment.
+
+## Network repositories (roadmap 1.1 P6)
+
+A network repository is a directory served over HTTPS: `INDEX` (with its
+header) and the `.cpk` files it names. `pkg` fetches through
+`/bin/cosmo-fetch` (`ports/mbedtls/README.md`), which `userland/lib/fetch.c`
+runs: the native libc `pkg` is built on has neither a resolver nor TLS, so
+the transfer is that program's and every check of what arrives is `pkg`'s.
+
+- **The server.** `cosmo-fetch` checks the certificate as `wget`'s
+  `ssl_client` does (`tls_common.c`): the chain to the bundle, validity at
+  the wall clock's time, the URL's host, and the pin when `repos.conf`
+  gives one. All of it in the handshake: a refused server receives no
+  request, so no `INDEX` is read from it. Redirects are followed only to
+  the same scheme, host and port.
+- **`pkg update`**, for each repository in order: `INDEX` is fetched to
+  `/var/lib/pkg/repos/<repo>/INDEX.new` (at most 4 MiB), its signature
+  verified against the ring, then its header alone read and checked
+  against the clock and against the serial accepted last from that
+  repository (PK10), before any package line is parsed; then it is parsed
+  and stored. A refusal leaves the stored index as it was. Every
+  repository is tried; the exit status is the worst (3 refused over 1).
+- **`pkg install` and `upgrade`** resolve over the stored indexes, merged
+  in `repos.conf`'s order, each entry remembering its repository. A
+  package from a network repository is fetched into
+  `/var/cache/pkg/<repo>/<file>.part` (resuming one a cut transfer left,
+  at most the index's size), renamed, and checked by the same
+  `load_package` as before (size and SHA-512 against the index, then the
+  signature, manifest and members), so nothing fetched is installed
+  unverified. A copy that does not match after a resumed transfer is
+  fetched once more from the start; then the file is removed whatever the
+  outcome.
+- **A `file://` repository** is read in place, as before, without the
+  freshness rule: it is the system's own disk, which whoever can write it
+  could fill with a key of their own, and `cosmo-upgrade --rollback`
+  returns an older one on purpose.
+
+**Freshness (PK10).** A signature says who made an index, not when, so
+an attacker between the system and the server (or a stale mirror) could
+serve an old signed index, holding back a security update. The header
+closes that: an index older (by serial) than the last one accepted is
+refused, and so is one past its expiry, which bounds how long a
+withheld update can go unnoticed to 30 days. The publisher re-signs the
+index weekly with a new serial and expiry even when nothing changed. The
+check is only as good as the clock: a clock before the index's
+publication (an RTC never set) is refused with a message saying to set
+the clock, rather than accepted as "not yet expired".
+
 
 ## The builder (`tools/pkgbuild.py`)
 
@@ -296,11 +368,13 @@ The boundary is the package file and the index: both are parsed with
 bounds on every field, sizes are checked against the archive, checksums
 against the index, signatures against the key ring, and paths are
 confined (no `..`, no absolute paths, nothing under `/boot`, `/dev`,
-`/tmp`, `/mnt`). Only uid 0 may install (`pkg` refuses otherwise; the
-filesystem would refuse too once permissions are enforced). The key ring
-directory is trusted content of the root filesystem. Replay (an old
-signed index) is not prevented in this phase: there is no time source to
-anchor an index date, recorded as a gap.
+`/tmp`, `/mnt`). Changing what is installed (`install`, `upgrade`,
+`remove`, unless `-n`) needs the `sys_admin` privilege (roadmap M5),
+which `pkg` reads from `/proc/self/status`; `update` and the queries do
+not. The key ring directory is trusted content of the root filesystem.
+A network repository's server is authenticated by its certificate and its
+index by the signature; replay and withholding are bounded by the index's
+serial and expiry (PK10).
 
 ## Reproducibility
 
@@ -312,14 +386,11 @@ every `pkg/repo/*` file across two builds.
 
 ## Future extensibility
 
-- A fetcher: `repos.conf` entries with a URL, `pkg update` downloading
-  `INDEX` and packages into a cache directory; the verification path is
-  unchanged.
 - Rollback: keep the previous version's package file in
   `/var/cache/pkg` and the previous manifest; `pkg rollback NAME`.
 - Recipe keys `source:` (URL), `checksum:`, `patches:`, `build:` steps,
   and a ports tree of third-party software once a compiler runs on the
   target.
-- Index freshness (a signed date once there is a clock), key rotation
+- Key rotation
   (several keys in the ring already work; revocation lists do not
   exist), delta packages.

@@ -4,6 +4,8 @@
   pkgbuild.py build --port DIR --out REPO --cc CC --cflags "..." --ld LD --ldflags "..."
                     --ldscript user.ld --crt0 crt0.o --libc libc.a --sign-key KEY [--test-fixtures]
   pkgbuild.py index --repo REPO --sign-key KEY
+  pkgbuild.py publish --index INDEX --sign-key KEY --serial N [--published T] [--days D]
+                      [--only FILE.cpk ...] [--input-pub PUB] --out INDEX
   pkgbuild.py pack  --name N --version V --summary S --file DEST=SRC [--file ...] --sign-key KEY --out F.cpk
 
 A recipe (`port`) is `key: value` lines: name, version, summary, prefix,
@@ -13,13 +15,22 @@ The package is a deterministic ustar archive (+MANIFEST first, then the
 files sorted by path, mtime 0, uid/gid 0) followed by the COSMOSIG trailer
 of scripts/modsign.py; INDEX describes the repository the same way.
 Everything is a pure function of the tree, the flags and the key.
+
+`publish` makes a network repository's INDEX from a built one (PK10,
+docs/pkg/design.md "Network repositories"): the package stanzas of INDEX
+(its signature first checked against --input-pub, or the signing key's own
+public half; its trailer and any header dropped; with --only, just the
+stanzas of those files), after a header stanza "serial: N", "published: T" (now, or --published)
+and "expires: T + D days" (D at most 30, default 30), signed again.
 """
 import argparse
+import datetime
 import hashlib
 import os
 import re
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import modsign  # noqa: E402
@@ -277,6 +288,70 @@ def cmd_index(args):
     return 0
 
 
+HEADER_KEYS = ("serial", "published", "expires")
+MAX_DAYS = 30
+
+
+def utc_text(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def index_stanzas(blob):
+    """The package stanzas of a signed INDEX, header dropped."""
+    payload, trailer = modsign.split_trailer(blob)
+    if trailer is None:
+        die("INDEX is not signed")
+    stanzas = [st for st in payload.decode("ascii").split("\n\n") if st.strip()]
+    if stanzas and stanzas[0].split(":", 1)[0] in HEADER_KEYS:
+        stanzas = stanzas[1:]
+    return [st.strip("\n") + "\n" for st in stanzas]
+
+
+def stanza_field(stanza, key):
+    for line in stanza.splitlines():
+        k, _, v = line.partition(": ")
+        if k == key:
+            return v
+    return None
+
+
+def cmd_publish(args):
+    if not 1 <= args.serial < 1 << 64:
+        die("--serial must be 1 to 2**64 - 1 (pkg's serial is 64 bits)")
+    if not 0 < args.days <= MAX_DAYS:
+        die(f"--days must be 1 to {MAX_DAYS} (PK10)")
+    published = int(time.time()) if args.published is None else int(
+        datetime.datetime.strptime(args.published, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc).timestamp())
+    # pkg's time_parse takes 1970 to 9999
+    if not 0 <= published or published + args.days * 86400 >= 253402300800:
+        die("--published must be from 1970 and expire before the year 10000")
+    with open(args.index, "rb") as f:
+        blob = f.read()
+    # Only an index signed by the key expected is signed again: by default
+    # the publishing key's own, else --input-pub's.
+    pub = (modsign.read_hex_key(args.input_pub, "public key") if args.input_pub
+           else modsign.secret_to_public(modsign.read_hex_key(args.sign_key, "secret key")))
+    if len(blob) < modsign.TRAILER.size:
+        die(f"{args.index}: not signed")
+    why = modsign.verify_detached([pub], blob[:-modsign.TRAILER.size], blob[-modsign.TRAILER.size:])
+    if why:
+        die(f"{args.index}: {why}; not published")
+    stanzas = index_stanzas(blob)
+    if args.only:
+        missing = set(args.only) - {stanza_field(st, "file") for st in stanzas}
+        if missing:
+            die(f"--only names files the index lacks: {', '.join(sorted(missing))}")
+        stanzas = [st for st in stanzas if stanza_field(st, "file") in args.only]
+    header = (f"serial: {args.serial}\npublished: {utc_text(published)}\n"
+              f"expires: {utc_text(published + args.days * 86400)}\n")
+    text = "\n".join([header] + stanzas).encode("ascii")
+    write_atomic(args.out, sign(text, args.sign_key))
+    print(f"  PUBLISH  {args.out}: {len(stanzas)} packages, serial {args.serial}, "
+          f"expires {utc_text(published + args.days * 86400)}")
+    return 0
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -305,6 +380,16 @@ def main(argv):
     i.add_argument("--repo", required=True)
     i.add_argument("--sign-key", required=True)
     i.set_defaults(fn=cmd_index)
+    pb = sub.add_parser("publish")
+    pb.add_argument("--index", required=True)
+    pb.add_argument("--sign-key", required=True)
+    pb.add_argument("--serial", type=int, required=True)
+    pb.add_argument("--published")
+    pb.add_argument("--days", type=int, default=MAX_DAYS)
+    pb.add_argument("--only", action="append")
+    pb.add_argument("--input-pub", help="the key INDEX must be signed by (default: --sign-key's)")
+    pb.add_argument("--out", required=True)
+    pb.set_defaults(fn=cmd_publish)
     args = ap.parse_args(argv[1:])
     return args.fn(args)
 
