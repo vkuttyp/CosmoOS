@@ -6,7 +6,8 @@ boot.tar files each carry repo/INDEX and one package. Checked: the first
 publication (serial 1, a 30-day validity from --now, the signature, the
 package, releases/TAG and LATEST); the weekly re-signing (serial 2, the
 same stanzas, the releases kept); two more releases (serial 3 and 4) and
---keep 3 dropping the oldest; and refusals, each exit 1 naming why, of a
+--keep 3 dropping the oldest; an older tag published again (its directory
+only: LATEST and the repository stay the newer release's); and refusals, each exit 1 naming why, of a
 SHA256SUMS with a digest changed (its signature), a file changed, a file
 missing, and a repo/INDEX signed by another key.
 """
@@ -133,6 +134,16 @@ def main():
         check(sorted(os.listdir(os.path.join(site, "releases"))) == ["LATEST", "v1.0.7", "v1.0.8", "v1.0.9"],
               f"--keep 3 left {sorted(os.listdir(os.path.join(site, 'releases')))}")
         check(open(os.path.join(site, "releases", "LATEST")).read().startswith("tag: v1.0.9\n"), "LATEST moved")
+
+        # v1.0.8 published again by hand after v1.0.9: its directory only
+        sold = os.path.join(w, "sold")
+        r = publish(site, sold, key, pub, "--release", os.path.join(w, "v1.0.8"), "--tag", "v1.0.8",
+                    "--published", "2026-10-19T00:00:00Z", "--latest", "--keep", "5")
+        check(r.returncode == 0 and "older than the published v1.0.9" in r.stdout, f"an older tag: {r.stdout}")
+        check(open(os.path.join(sold, "releases", "LATEST")).read().startswith("tag: v1.0.9\n"), "LATEST kept")
+        check(open(os.path.join(sold, "repo", "x86_64", "hello-1.1.cpk"), "rb").read() ==
+              open(os.path.join(site, "repo", "x86_64", "hello-1.1.cpk"), "rb").read(), "the repository kept")
+        check(header(os.path.join(sold, "repo", "x86_64", "INDEX"))["serial"] == "6", "the older tag's serial")
 
         bad = os.path.join(w, "bad")
         for what, change in (("a changed digest", "sums"), ("a changed file", "file"), ("a missing file", "missing"),

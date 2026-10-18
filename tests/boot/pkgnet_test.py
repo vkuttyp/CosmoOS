@@ -261,6 +261,11 @@ def stage_upgrade_check(args, b, results, www, url, good):
     need(out, r"^chk=0$", "cosmo-upgrade --check")
     need(out, rf"^cosmo-upgrade: v9\.9\.9 is newer than this system's {re.escape(running)} \(published \S+\): "
               r"cosmo-upgrade --fetch v9\.9\.9$", "a newer release reported")
+    # No privilege is needed (the inventory records why not a uid other than 0:
+    # an installed system's /tmp is mounted 0755).
+    out = b.status("priv -d all cosmo-upgrade --check", "chk")
+    need(out, r"^chk=0$", "cosmo-upgrade --check with every privilege dropped")
+    need(out, r"^cosmo-upgrade: v9\.9\.9 is newer than ", "a newer release reported without privileges")
     base = re.match(r"^(v\d+\.\d+\.\d+(?:-rc\d+)?)", running)
     if base:
         with open(os.path.join(rel, "LATEST"), "w") as f:
@@ -301,7 +306,8 @@ def stage_upgrade_check(args, b, results, www, url, good):
          "the changed SHA256SUMS refused")
     if any(not p.endswith(("/SHA256SUMS", "/SHA256SUMS.sig")) for p in good.paths()):
         raise Fail(f"files were fetched after a refused SHA256SUMS: {good.paths()}")
-    results.append(f"e. cosmo-upgrade --check: v9.9.9 newer than {running}, {base.group(1)} up to date; "
+    results.append(f"e. cosmo-upgrade --check: v9.9.9 newer than {running} (also with every privilege dropped), "
+                   f"{base.group(1)} up to date; "
                    f"--check --fetch fetched and verified this build's set (already current); a changed "
                    f"SHA256SUMS refused with nothing more fetched")
 

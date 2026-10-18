@@ -1400,3 +1400,17 @@ each; none is needed by M2's acceptance test.
 - `direct_map_size` covers the tables the RSDP's root lists, not those
   reached through the FADT (the DSDT, FACS), which the kernel does not
   read before it maps memory itself.
+## 18. P6 network repository follow-ups (2026-10-18)
+
+- P6 (2026-10-18): the published network INDEX expires 30 days after its
+  last signing, which `.github/workflows/repository.yml` renews weekly;
+  GitHub disables a scheduled workflow after 60 days without repository
+  activity, so a quiet repository needs the job re-enabled (or a run by
+  hand) before its INDEX expires, or every installed system's `pkg
+  update` refuses it.
+- An installed system's `/tmp` is a ramfs mounted at boot whose root is
+  mode 0755 owned by root (`ls -ld /tmp`), not the 01777 `cosmo-install`
+  gives the directory beneath it, so no uid but 0 can write there
+  (`priv -u 1000 -g 1000 touch /tmp/f` is `Permission denied`; found by
+  P6's review, 2026-10-18). `cosmo-upgrade --check` keeps its file there
+  and so works for any uid once that is fixed.

@@ -20,7 +20,8 @@
  * Exit 0 fetched; 1 failed (DNS, connection, a body cut short: FILE keeps
  * what arrived, for -c); 2 usage; 3 refused (the certificate, the pin,
  * plain HTTP without -i, a redirect elsewhere, larger than MAX: FILE is
- * removed if this run wrote it); 4 the server answered with an HTTP error. */
+ * removed if this run wrote it); 4 the server answered with an HTTP error;
+ * 5 FILE could not be written (opened, written, truncated, synced). */
 
 #define _DEFAULT_SOURCE
 #include <ctype.h>
@@ -41,7 +42,7 @@
 #include "mbedtls/net_sockets.h"
 #include "tls_common.h"
 
-enum { FX_FETCHED = 0, FX_FAILED = 1, FX_USAGE = 2, FX_REFUSED = 3, FX_HTTP = 4 };
+enum { FX_FETCHED = 0, FX_FAILED = 1, FX_USAGE = 2, FX_REFUSED = 3, FX_HTTP = 4, FX_LOCAL = 5 };
 
 #define TIMEOUT_MS   30000
 #define MAX_REDIRECT 5
@@ -451,7 +452,7 @@ static void body_put(const unsigned char *p, size_t len)
             if (errno == EINTR)
                 continue;
             say("writing %s: %s", g_file, strerror(errno));
-            exit(FX_FAILED);
+            exit(FX_LOCAL);
         }
         p += n;
         len -= (size_t)n;
@@ -513,7 +514,7 @@ static void file_restart(void)
 {
     if (ftruncate(g_fd, 0) < 0 || lseek(g_fd, 0, SEEK_SET) < 0) {
         say("cannot truncate %s: %s", g_file, strerror(errno));
-        exit(FX_FAILED);
+        exit(FX_LOCAL);
     }
     g_have = 0;
     g_wrote_file = 1;
@@ -698,14 +699,14 @@ int main(int argc, char **argv)
     g_fd = open(g_file, O_WRONLY | O_CREAT | (resume ? 0 : O_TRUNC), 0644);
     if (g_fd < 0) {
         say("cannot open %s: %s", g_file, strerror(errno));
-        return FX_FAILED;
+        return FX_LOCAL;
     }
     g_have = 0;
     if (resume) {
         off_t end = lseek(g_fd, 0, SEEK_END);
         if (end < 0) {
             say("cannot find the end of %s: %s", g_file, strerror(errno));
-            return FX_FAILED;
+            return FX_LOCAL;
         }
         g_have = (uint64_t)end;
     }
@@ -822,11 +823,11 @@ int main(int argc, char **argv)
     }
     if (fsync(g_fd) < 0 && errno != EINVAL && errno != ENOSYS) {
         say("fsync %s: %s", g_file, strerror(errno));
-        return FX_FAILED;
+        return FX_LOCAL;
     }
     if (close(g_fd) < 0) {
         say("closing %s: %s", g_file, strerror(errno));
-        return FX_FAILED;
+        return FX_LOCAL;
     }
     return FX_FETCHED;
 }

@@ -1486,16 +1486,26 @@ static int mkdirs(const char *path)
 static int check_latest(void)
 {
     struct release_src r;
-    if (release_conf(&r) < 0 || mkdirs(FETCH_DIR) < 0)
+    if (release_conf(&r) < 0)
         return EXIT_FAILED;
-    int rc = fetch_to(&r, r.url, "LATEST", FETCH_DIR, false, 4096);
+    /* Anyone may ask: a file of this process's in /tmp, not the cache. */
+    char tmpdir[64], latest_path[96];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cosmo-upgrade-check.%d", (int)getpid());
+    if (mkdir(tmpdir, 0700) < 0) {
+        fprintf(stderr, "cosmo-upgrade: %s: %s\n", tmpdir, strerror(errno));
+        return EXIT_FAILED;
+    }
+    snprintf(latest_path, sizeof(latest_path), "%s/LATEST", tmpdir);
+    int rc = fetch_to(&r, r.url, "LATEST", tmpdir, false, 4096);
+    uint8_t *text = NULL;
+    size_t len = 0;
+    if (rc == EXIT_DONE && read_whole(latest_path, &text, &len) < 0)
+        rc = EXIT_FAILED;
+    unlink(latest_path);
+    rmdir(tmpdir);
     if (rc != EXIT_DONE)
         return rc;
-    uint8_t *text;
-    size_t len;
-    if (read_whole(FETCH_DIR "/LATEST", &text, &len) < 0)
-        return EXIT_FAILED;
-    char latest[64] = "", published[32] = "", running[128];
+    char latest[64] = "", published[32] = "", running[128] = "";
     uint8_t *t = realloc(text, len + 1);
     if (t == NULL) {
         free(text);
@@ -1510,13 +1520,17 @@ static int check_latest(void)
             snprintf(published, sizeof(published), "%s", l + 11);
     }
     free(t);
-    unlink(FETCH_DIR "/LATEST");
     struct tag lt, rt;
     if (!tag_parse(latest, &lt) || lt.after) {
         fprintf(stderr, "cosmo-upgrade: %s/LATEST: no 'tag: vX.Y.Z' line\n", r.url);
         return EXIT_FAILED;
     }
-    if (running_tag(running, sizeof(running)) < 0 || !tag_parse(running, &rt)) {
+    if (running_tag(running, sizeof(running)) < 0) {
+        fprintf(stderr, "cosmo-upgrade: /proc/version cannot be read; the newest release at %s is %s\n", r.url,
+                latest);
+        return EXIT_FAILED;
+    }
+    if (!tag_parse(running, &rt)) {
         say("the newest release at %s is %s%s%s; this system's build (%s) is not a release's", r.url, latest,
             published[0] ? ", published " : "", published, running);
         return EXIT_DONE;
@@ -1587,22 +1601,25 @@ static int fetch_set(const char *arg, bool check, const char *stop)
             break;
         }
         snprintf(path, sizeof(path), "%s/%s", dir, name);
-        for (int attempt = 0; attempt < 2; attempt++) {
+        /* A file kept from before, else fetched resuming a part; a copy
+         * that does not match is fetched once more from byte zero (the
+         * part may have come from another set), and then refused. */
+        for (int attempt = 0;; attempt++) {
             uint8_t *data;
             size_t dlen;
-            if (read_whole(path, &data, &dlen) == 0) {   /* fetched before: kept if whole */
+            if (read_whole(path, &data, &dlen) == 0) {
                 relsig_sha256(data, dlen, got);
                 free(data);
                 if (memcmp(got, want, sizeof(got)) == 0)
                     break;
                 unlink(path);
             }
-            if (attempt == 1) {
+            if (attempt == 2) {
                 fprintf(stderr, "cosmo-upgrade: %s/%s does not match SHA256SUMS; nothing written\n", base, name);
                 rc = EXIT_REFUSED;
                 break;
             }
-            rc = fetch_to(&r, base, name, dir, true, FETCH_MAX);
+            rc = fetch_to(&r, base, name, dir, attempt == 0, FETCH_MAX);
             if (rc != EXIT_DONE)
                 break;
         }

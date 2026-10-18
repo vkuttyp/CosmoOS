@@ -206,3 +206,29 @@ required `(2 files)`; the test now takes 3 (2 for a published v1.0.4 or
 v1.0.5 set). After that fix and the rebase onto PR 2's review fixes
 (`763ef79b`), `test-pkg-net` and `test-upgrade` on both: PASS (`test-upgrade`
 128.9 s x86-64, 118.0 s AArch64).
+
+**Review (Qodo and Codex on #409, 11 comments).** Fixed:
+- `--check` no longer needs `/var` (a file of its own under `/tmp`), and
+  says so when `/proc/version` cannot be read instead of printing an
+  uninitialised buffer;
+- a set file that does not match after a resumed fetch is fetched once
+  more from byte zero before it is refused;
+- `publish-repo.py` publishing a tag older than the site's `LATEST` adds
+  that release's directory alone (the repository and `LATEST` stay);
+- `cosmo-fetch` exits 5 when it cannot write its file, and `pkg` counts
+  only 1 (the server's absence) and 4 (an HTTP error) as "not reached", so
+  a full disk fails the update.
+
+`test-pkg-net` runs `--check` with every privilege dropped;
+`test_publish_repo` publishes an older tag again. Answered instead:
+- migrating an upgraded system's `repos.conf`: `--rollback` keeps a
+  changed `/etc` file and the older `pkg` reads one directory a line, so
+  the guide says to add the line;
+- the weekly job failing after a key rotation is deliberate (it must not
+  vouch for an index it cannot verify);
+- the expiry if the schedule stops is an inventory line, since GitHub
+  disables a schedule after 60 days without activity.
+
+A defect found here and recorded, not fixed (not P6's): an installed
+system's `/tmp` is mounted 0755, so no uid but 0 can write it.
+

@@ -438,7 +438,9 @@ static int fetch_status(const struct repo *r, const char *what, int st)
         return EXIT_REFUSED;
     }
     fprintf(stderr, "pkg: %s: cannot fetch %s (above)\n", r->name, what);
-    return EXIT_UNREACHABLE;
+    /* Only the server's absence is "not reached"; a local write failure
+     * (FETCH_LOCAL) or anything unexpected is a failure. */
+    return st == FETCH_FAILED || st == FETCH_HTTP ? EXIT_UNREACHABLE : EXIT_FAILED;
 }
 
 /*

@@ -101,7 +101,16 @@ cosmo$ tar -xf cosmoos-x86_64-cosmo-upgrade.cpk sbin/cosmo-upgrade bin/cosmo-fet
 cosmo$ COSMO_FETCH=/tmp/up/bin/cosmo-fetch ./sbin/cosmo-upgrade --fetch v1.0.6
 ```
 
-After the reboot the system has its own `cosmo-fetch` and `--fetch`.
+After the reboot the system has its own `cosmo-fetch` and `--fetch`. Its
+`/etc/pkg/repos.conf` is still the one the older installer wrote, naming
+the disk's repository alone (an `/etc` file the system has kept is never
+replaced; the new one is beside it as `repos.conf.new`). Add the network
+repository to it, for your architecture:
+
+```text
+cosmo$ echo 'cosmoos https://vkuttyp.github.io/CosmoOS/repo/x86_64' >> /etc/pkg/repos.conf
+cosmo$ pkg update
+```
 
 ## Upgrading from a directory
 

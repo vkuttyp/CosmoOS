@@ -25,7 +25,9 @@ With --release, DIR holds the GitHub release TAG's assets: SHA256SUMS is
 checked against its signature and PUB, every file used against SHA256SUMS,
 and each architecture's repository is taken from the repo/ of its
 boot.tar (an INDEX signed by PUB's key); --latest also points LATEST at
-it. Without --release, every INDEX on the site is signed again with a new
+it. A --release older than the site's LATEST adds its releases/TAG alone:
+the repository is the newer release's, signed again, and LATEST stays.
+Without --release, every INDEX on the site is signed again with a new
 expiry (the weekly job). Either way each INDEX's serial is the site's one
 plus 1, so it rises with every publication (PK10). Only the newest --keep
 releases (default 3) stay under releases/.
@@ -131,6 +133,17 @@ def main():
     if os.path.exists(a.out):
         shutil.rmtree(a.out)
     os.makedirs(a.out)
+    # A release older than the site's LATEST (republished by hand) adds its
+    # own releases/TAG only: the repository and LATEST stay the newer one's.
+    current = None
+    lp = os.path.join(a.site, "releases", "LATEST")
+    if os.path.exists(lp):
+        for line in open(lp).read().splitlines():
+            if line.startswith("tag: "):
+                current = line[5:]
+    older = bool(a.release and current and tag_key(current) and tag_key(a.tag) < tag_key(current))
+    if older:
+        print(f"publish-repo: {a.tag} is older than the published {current}: only releases/{a.tag} is added")
     rel_dir = os.path.join(a.site, "releases")
     if os.path.isdir(rel_dir):
         shutil.copytree(rel_dir, os.path.join(a.out, "releases"))
@@ -140,7 +153,7 @@ def main():
         serial = site_serial(a.site, arch) + 1
         dest = os.path.join(a.out, "repo", arch)
         os.makedirs(dest)
-        if a.release:
+        if a.release and not older:
             files = repo_from_archive(os.path.join(a.release, f"cosmoos-{arch}-boot.tar"), a.pub)
         else:
             src = os.path.join(a.site, "repo", arch)
@@ -172,7 +185,7 @@ def main():
                                                      for f in SET + (LOADERS[arch],)]:
             shutil.copy(os.path.join(a.release, n), os.path.join(d, n))
         print(f"publish-repo: releases/{a.tag}: SHA256SUMS checked against {os.path.basename(a.pub)}")
-        if a.latest:
+        if a.latest and not older:
             with open(os.path.join(a.out, "releases", "LATEST"), "w") as f:
                 f.write(f"tag: {a.tag}\npublished: {a.published}\n")
             print(f"publish-repo: releases/LATEST: {a.tag}")

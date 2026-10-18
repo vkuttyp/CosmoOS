@@ -109,6 +109,7 @@ place. Exit statuses:
 | 2 | usage, or not an `http://`/`https://` URL, or `-p` with `http://` |
 | 3 | refused: the certificate, the pin, plain HTTP without `-i`, a redirect elsewhere (`FILE` is removed if this run made it); larger than `-m` (`FILE` is removed, a resumed one too: it is not the file asked for) |
 | 4 | the server answered with an HTTP error, which is printed |
+| 5 | `FILE` could not be opened, written, truncated or synced (local, not the server's) |
 
 Messages are `cosmo-fetch: URL: ...` on standard error; a refused
 certificate prints `cosmo-fetch: HOST: the server's certificate is not
@@ -136,7 +137,7 @@ newer one. There is no revocation check (no CRL or OCSP).
 
 `make host-test-fetch` (`tests/host/test_fetch.py`) builds `cosmo-fetch`
 for the host, on the same mbedTLS release and `cosmo_config.h`, with ASan
-and UBSan, and runs 36 cases against local servers
+and UBSan, and runs 37 cases against local servers
 (`tests/boot/tlstest.py`) with certificates made for the run: a good
 server; an untrusted CA, an expired certificate and another name, each
 exit 3 with no request received; the pinned key and another one (no
@@ -150,7 +151,7 @@ a server that ignores ranges and of a file already whole; `-m` by
 resolve; two different `Content-Length` headers, a header line cut by the
 close, a 206 from another offset (each exit 1); `-p` with `http://` (exit
 2, no connection); a 103 before the 200; `-m` of `garbage`, `0`, `-5` and
-`12x` (each exit 2). It needs OpenSSL 3.4 or later, as the next test does.
+`12x` (each exit 2); an output file that cannot be opened (exit 5). It needs OpenSSL 3.4 or later, as the next test does.
 
 `make BUILD=release test-net-login` (`tests/boot/net_login_test.py`, step
 f) serves a 1 MiB file over HTTPS from the host with test certificates
