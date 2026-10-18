@@ -196,3 +196,13 @@ with a key made for the run: the first publication, a re-signing (serial
 already current, the server asked for `SHA256SUMS`, its signature, then
 the four files); a set whose `SHA256SUMS` has one digest changed refused
 with nothing more fetched. PASS on x86-64 and AArch64 (2026-10-18).
+
+**Validation (PR 3, 2026-10-18).** The full matrix on `29df1ab1`, plus
+`test-pkg-net`, `test-install` and `test-upgrade`, on both architectures:
+every step exit 0 (`reproducible: yes`) but `test-upgrade`, which failed on
+both for one reason: v1.0.3's `pkg install -n` of the release package
+printed `(3 files)` (the package now carries `cosmo-fetch`) where the test
+required `(2 files)`; the test now takes 3 (2 for a published v1.0.4 or
+v1.0.5 set). After that fix and the rebase onto PR 2's review fixes
+(`763ef79b`), `test-pkg-net` and `test-upgrade` on both: PASS (`test-upgrade`
+128.9 s x86-64, 118.0 s AArch64).
