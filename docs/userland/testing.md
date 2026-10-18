@@ -332,6 +332,10 @@ the loader first for a build's set (v1.0.4's loader lacks the build's
 key), the set first for a published one. **forward** as above. The
 refusals, the interruptions and the hold run only from v1.0.3. They test
 v1.0.3's tools and the switches, and the switches do not depend on the base.
+Run on 2026-10-18 from the published v1.0.4 to the published v1.0.5
+(`UPGRADE_SET_TAG=v1.0.5`): PASS on x86-64 (59.4 s) and AArch64 (65.5 s),
+the set first on the way forward again; the new boots' banner says
+`build v1.0.5`, v1.0.4's says `v1.0.3-123-g1ec37307`.
 
 ## `make test-net-login` (`tests/boot/net_login_test.py`)
 

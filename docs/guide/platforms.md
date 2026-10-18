@@ -95,14 +95,25 @@ Desktop 27.0.3, 4 CPUs, 2 GB): it installed itself on a 512 MiB NVMe
 disk, and the installed system booted with the release key, had its
 address by DHCP (`ip a`), listed its processes (`ps`), mounted its root
 from `/dev/nvme0n2p2` (`mount`, `df`), took an ssh login from the Mac,
-and booted again after `reboot`. Updating an installed system in place
-(`cosmo-upgrade`, [Upgrading](upgrading.md)) has been run under QEMU,
-from the published v1.0.3 to the published v1.0.4, not on Parallels.
+and booted again after `reboot`.
 
 The image that became v1.0.5 was run on the same VM on 2026-10-18 with
 4096 MB and 8192 MB: it booted to the shell both times, `free` reported
 4133256 KiB and 8294792 KiB, and the network came up by DHCP. With 4096
 MB the installed v1.0.4 still stopped after its loader's last line.
+
+The same installed v1.0.4 was then upgraded in place to the published
+v1.0.5 on 2026-10-18 ([Upgrading](upgrading.md), "From v1.0.4 and
+later"). At 2048 MB it fetched the aarch64 set and both `SHA256SUMS`
+files from the Mac with `wget` into `/tmp/up`, and its own
+`/sbin/cosmo-upgrade /tmp/up` verified them against the release key
+36ae7bb4947896ab, switched the loader (`\EFI\BOOT\BOOTAA64.EFI`) and the
+boot set, and kept v1.0.4's in `\cosmo\prev` (root: 177 files unchanged,
+1 kept as changed here). After `reboot` the banner said `build v1.0.5`
+(`uname -a`: `v1.0.5`). Then the VM was set to 4096 MB, Parallels'
+default, and the upgraded disk booted to the shell (`free`: 4133176 KiB,
+"RAM ends at 5120 MiB"), which needs the loader the upgrade brought;
+at 8192 MB too (`free`: 8294712 KiB, DHCP address 10.211.55.12).
 
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)
