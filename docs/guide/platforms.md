@@ -21,19 +21,24 @@ machine for "Other Linux", ARM64, with UEFI; put `cosmoos-aarch64.img`
 on a disk of the "plain" (raw) type and attach it as an **NVMe** disk,
 and add a second, blank NVMe disk of 1 GiB or more to install on.
 Parallels' SATA disks are not PCI devices, so the kernel would not see
-the live disk and `cosmo-install` would have no ESP to copy. From the
-command line, with `prlctl`, for a VM named `CosmoOS` (these two need
-Parallels, so the guide's own tests do not run them; they were run on
-Parallels Desktop 27.0.3 when this was written):
+the live disk and `cosmo-install` would have no ESP to copy. **Give the
+VM 2 GB of memory, not Parallels' default of 4 GB**: with 4 GB the
+kernel stops at once, after the loader's last line (`jumping to kernel
+entry ...`), on v1.0.3 and v1.0.4 alike. From the command line, with
+`prlctl`, for a VM named `CosmoOS` (these need Parallels, so the guide's
+own tests do not run them; they were run on Parallels Desktop 27.0.3
+when this was written):
 
 ```text
+prlctl set "CosmoOS" --memsize 2048
 prlctl set "CosmoOS" --device-set hdd0 --iface nvme
 prlctl set "CosmoOS" --device-add hdd --type plain --size 1024 --iface nvme
 ```
 
 The two disks are two namespaces of one controller: `cosmo-install
---list` shows the live disk (`nvme0n2`, with the `boot` partition) and
-the blank one (`nvme0n1`); `cosmo-install nvme0n1` installs, and `exit`
+--list` shows the live disk (the one with the `boot` partition) and
+the blank one, numbered in the order the VM lists them (`nvme0n1` and
+`nvme0n2`); `cosmo-install` with the blank one's name installs, and `exit`
 or `poweroff` shuts the system down and the VM stops (a PSCI power-off;
 v1.0.3 halts instead, and its VM stays running until you stop it).
 With the blank disk first in the boot order (or the live
@@ -82,6 +87,15 @@ platform: firmware OEM 'PRLS  '; console PL011 at 0x2110000 (DBG2, polled); GICv
 |---|---|
 | Works | verified boot; both CPUs; the console on the screen, at the window's size (the virtio-gpu adapter) and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell; installing on an NVMe disk and booting it (the controller offers only MSI: one vector for every queue); the network (the adapter is a legacy virtio-net) with DHCP, DNS, `wget` and ssh; randomness (no CPU instruction, firmware generator or virtio-rng: the timing-jitter source seeds the pool in milliseconds); the wall clock (the firmware's time at boot); power-off (`exit`, `poweroff`: PSCI) |
 | Does not work | SATA disks (not on PCI: a platform AHCI described only in the DSDT, which needs an AML interpreter); the sound, USB 2.0 (EHCI) and vsock devices have no driver, and the graphics adapter (virtio-gpu) only carries the text console (no 3D, cursor or display interface for programs); the debug self-test suite assumes QEMU's machine |
+
+v1.0.4, the published image, was run there on 2026-10-18 (Parallels
+Desktop 27.0.3, 4 CPUs, 2 GB): it installed itself on a 512 MiB NVMe
+disk, and the installed system booted with the release key, had its
+address by DHCP (`ip a`), listed its processes (`ps`), mounted its root
+from `/dev/nvme0n2p2` (`mount`, `df`), took an ssh login from the Mac,
+and booted again after `reboot`. Updating an installed system in place
+(`cosmo-upgrade`, [Upgrading](upgrading.md)) has been run under QEMU,
+from the published v1.0.3 to the published v1.0.4, not on Parallels.
 
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)
