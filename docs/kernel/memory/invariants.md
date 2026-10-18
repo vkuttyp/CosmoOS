@@ -80,8 +80,8 @@ Checked by: `KASSERT(!g_sealed)` in `bootmem_alloc`.
 
 **M12. Zeroed allocations are inside the direct map.** `PMM_FLAGS_ZERO`
 writes through `page_to_virt`, so the block must be below
-`pmm_hhdm_limit`. Before `vmm_init` only frames below 4 GiB are in the
-buddy; afterwards the direct map covers all RAM.
+`pmm_hhdm_limit`. Before `vmm_init` only frames below the loader's
+`hhdm_size` are in the buddy; afterwards the direct map covers all RAM.
 Checked by: `KASSERT` in `pmm_alloc_pages`; `table_at` in `mmu.c`
 `KASSERT`s the same for page-table pages.
 

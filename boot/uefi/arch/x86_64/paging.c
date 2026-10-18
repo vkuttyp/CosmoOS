@@ -3,12 +3,14 @@
  *
  * Layout produced (4-level paging, 48-bit):
  *
- *   PML4[0]    -> identity map of [0, BOOT_HHDM_SIZE) with 2 MiB pages,
+ *   PML4[0..]  -> identity map of [0, hhdm_size) with 2 MiB pages,
  *                 RW + NX, except the 2 MiB pages holding the running
  *                 loader image, which stay executable so the final jump
- *                 can execute after CR3 is switched.
- *   PML4[256]  -> the same PDPT: the higher-half direct map at
- *                 BOOT_HHDM_BASE. Sharing the PDPT costs nothing and keeps
+ *                 can execute after CR3 is switched. hhdm_size is the
+ *                 caller's (main.c direct_map_size), one PML4 entry per
+ *                 512 GiB of it.
+ *   PML4[256..] -> the same PDPTs: the higher-half direct map at
+ *                 BOOT_HHDM_BASE. Sharing the PDPTs costs nothing and keeps
  *                 the two views identical by construction.
  *   PML4[511]  -> the kernel image at its ELF link addresses, 4 KiB pages,
  *                 permissions from ELF segment flags (W^X enforced by the
@@ -37,6 +39,12 @@
 #define PDPT_INDEX(v) (((v) >> 30) & 0x1FF)
 #define PD_INDEX(v)   (((v) >> 21) & 0x1FF)
 #define PT_INDEX(v)   (((v) >> 12) & 0x1FF)
+
+/* The widest direct map (one PML4 entry per 512 GiB, from BOOT_HHDM_BASE's)
+ * keeps clear of PML4[511], the kernel image's; the identity entries from
+ * 0 stay below the HHDM's. */
+_Static_assert(PML4_INDEX(BOOT_HHDM_BASE) + (BOOT_HHDM_MAX >> 39) <= 511, "the direct map's PML4 entries reach the kernel's");
+_Static_assert((BOOT_HHDM_MAX >> 39) <= PML4_INDEX(BOOT_HHDM_BASE), "the identity entries reach the HHDM's");
 
 static uint64_t *table_at(uint64_t phys)
 {
@@ -83,20 +91,36 @@ static void map_4k(struct paging_ctx *ctx, uint64_t virt, uint64_t phys, uint64_
     pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | PTE_P | flags;
 }
 
-UINTN paging_pool_size(const struct elf_image *img, UINTN mem_descriptors)
+uint64_t paging_pa_limit(void)
+{
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000000u), "c"(0));
+    if (a < 0x80000008u)
+        return 1ull << 36;   /* no leaf: the architectural minimum for long mode with PAE */
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000008u), "c"(0));
+    unsigned bits = a & 0xFF;
+    if (bits < 36 || bits > 52)
+        bits = 36;
+    return 1ull << bits;
+}
+
+UINTN paging_pool_size(const struct elf_image *img, UINTN mem_descriptors, uint64_t hhdm_size)
 {
     /* x86-64 maps the whole direct map write-back and lets the MTRRs and
      * the PAT sort out device memory, so a mixed block costs nothing. */
     (void)mem_descriptors;
-    /* PML4 + identity (1 PDPT + one PD per GiB) + kernel (1 PDPT + 1 PD +
-     * one PT per 2 MiB of span, plus one for misalignment) + slack. */
-    UINTN identity_gib = BOOT_HHDM_SIZE >> 30;
+    /* PML4 + identity (one PDPT per 512 GiB + one PD per GiB) + kernel
+     * (1 PDPT + 1 PD + one PT per 2 MiB of span, plus one for
+     * misalignment) + slack. */
+    UINTN identity_gib = (UINTN)(hhdm_size >> 30);
+    UINTN identity_pdpts = (UINTN)((hhdm_size + (512ull << 30) - 1) >> 39);
     UINTN kernel_span_2m = (img->virt_end - img->virt_base + PAGE_2M - 1) / PAGE_2M;
-    return 1 + (1 + identity_gib) + (1 + 1 + kernel_span_2m + 1) + 4;
+    return 1 + (identity_pdpts + identity_gib) + (1 + 1 + kernel_span_2m + 1) + 4;
 }
 
 EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base,
-                        uint64_t loader_size, const uint8_t *mmap, UINTN mmap_size, UINTN desc_size)
+                        uint64_t loader_size, const uint8_t *mmap, UINTN mmap_size, UINTN desc_size,
+                        uint64_t hhdm_size)
 {
     (void)mmap;
     (void)mmap_size;
@@ -109,17 +133,18 @@ EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uin
     uint64_t loader_lo = ALIGN_DOWN(loader_base, PAGE_2M);
     uint64_t loader_hi = ALIGN_UP(loader_base + loader_size, PAGE_2M);
 
-    for (uint64_t p = 0; p < BOOT_HHDM_SIZE; p += PAGE_2M) {
+    for (uint64_t p = 0; p < hhdm_size; p += PAGE_2M) {
         bool is_loader = (p >= loader_lo && p < loader_hi);
         uint64_t flags = PTE_RW | (is_loader ? 0 : nx);
         map_2m(ctx, p, p, flags);
     }
 
-    /* HHDM alias: point at the same PDPT. Because the PD tables are shared,
+    /* HHDM alias: point at the same PDPTs. Because the PD tables are shared,
      * the loader's 2 MiB pages are executable through the HHDM as well
      * until the kernel replaces these tables. That is the documented
      * transient W+X exception in docs/boot/invariants.md. */
-    pml4[PML4_INDEX(BOOT_HHDM_BASE)] = pml4[0];
+    for (uint64_t i = 0; i < (hhdm_size + (512ull << 30) - 1) >> 39; i++)
+        pml4[PML4_INDEX(BOOT_HHDM_BASE) + i] = pml4[i];
 
     /* Kernel image with 4 KiB pages and ELF-derived permissions. */
     for (uint32_t i = 0; i < img->segment_count; i++) {

@@ -34,14 +34,21 @@ struct paging_ctx {
     bool     nx;          /* x86-64: NX available and to be set */
 };
 
-/* `mem_descriptors` is the number of entries in the firmware memory map:
- * AArch64 splits a 2 MiB block that mixes RAM and device memory into 4 KiB
- * pages, and there can be one such block per boundary between them. */
-UINTN paging_pool_size(const struct elf_image *img, UINTN mem_descriptors);
+/* The highest physical address (exclusive) this CPU's tables can map:
+ * 2^physical-address-bits (x86-64 CPUID 0x80000008; AArch64
+ * ID_AA64MMFR0_EL1.PARange, at most 48 bits with a 4 KiB granule). */
+uint64_t paging_pa_limit(void);
+/* Pages for tables mapping [0, hhdm_size) (a GiB multiple) and the
+ * kernel image. `mem_descriptors` is the number of entries in the
+ * firmware memory map: AArch64 splits a 2 MiB block that mixes RAM and
+ * device memory into 4 KiB pages, and there can be one such block per
+ * boundary between them. */
+UINTN paging_pool_size(const struct elf_image *img, UINTN mem_descriptors, uint64_t hhdm_size);
 /* `mmap` is a snapshot of the EFI memory map (descriptors of `desc_size`
  * bytes): AArch64 uses it to give RAM and MMIO different attributes. */
 EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base,
-                        uint64_t loader_size, const uint8_t *mmap, UINTN mmap_size, UINTN desc_size);
+                        uint64_t loader_size, const uint8_t *mmap, UINTN mmap_size, UINTN desc_size,
+                        uint64_t hhdm_size);
 
 /* Before anything else: refuse a CPU the kernel cannot run on (x86-64
  * without NX; AArch64 below EL1). On AArch64 at EL2 this also reserves

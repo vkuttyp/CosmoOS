@@ -3166,3 +3166,15 @@ See the [history index](README.md).
   (`tools/crash3-waiter-probe.py`). Report:
   `docs/audit/2026-10-17-crash3-waiter-report.md`.
 
+- **Boot with any amount of RAM (2026-10-18, the owner's task after
+  v1.0.4).** The loader mapped a fixed 4 GiB while firmware loads it
+  above 4 GiB on a 4 GiB machine, so AArch64 lost its own PC at the
+  table switch: Parallels' default 4 GB VM hung after the loader's last
+  line on v1.0.0-v1.0.4 (QEMU under hvf too; TCG does not show it). The
+  loader now sizes the direct map to all RAM, its own image and stack,
+  the ACPI tables, the framebuffer and the console, and stops with a
+  message when it cannot; no protocol change. With the kernel running on
+  4 GiB, a blkdev with no hardware was held to a 32-bit DMA mask and
+  `blk-submit-unregister` hung. `make test-platforms` boots 1, 4 and 8
+  GiB on both architectures (`tools/direct-map-probe.py`). Report:
+  `docs/audit/2026-10-18-direct-map-report.md`.

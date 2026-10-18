@@ -10,6 +10,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
+#include <kernel/page.h>
 #include <kernel/part.h>
 #include <kernel/sched.h>
 #include <kernel/panic.h>
@@ -151,13 +152,25 @@ void bio_segment(const struct bio *bio, unsigned i, struct bio_vec *out)
     *out = bio->vecs[i];
 }
 
+/* A buffer the device can reach. A device with no hardware behind it
+ * (a RAM disk, a self-test's fake) copies with the CPU, so any memory
+ * the direct map covers will do; dma_mappable(NULL, ...) would apply the
+ * 32-bit default mask and refuse every buffer above 4 GiB, which on a
+ * machine with that much RAM is most of them. */
+static bool buf_ok(const struct blkdev *bd, const void *buf, size_t len)
+{
+    if (bd->dev == NULL)
+        return len != 0 && virt_is_direct_map((uintptr_t)buf) && virt_is_direct_map((uintptr_t)buf + len - 1);
+    return dma_mappable(bd->dev, buf, len);
+}
+
 /* The data buffer(s) of a read or write: total length, the segment
  * rules (docs/kernel/device/design.md, "Multi-segment bios"), DMA-able. */
 static bool data_ok(const struct blkdev *bd, const struct bio *bio)
 {
     size_t total = (size_t)bio->nsectors * bd->sector_size;
     if (bio->nr_vecs == 0)
-        return bio->buf != NULL && dma_mappable(bd->dev, bio->buf, total);
+        return bio->buf != NULL && buf_ok(bd, bio->buf, total);
     if (bio->vecs == NULL || bio->nr_vecs > bd->max_segments)
         return false;
     size_t sum = 0;
@@ -169,7 +182,7 @@ static bool data_ok(const struct blkdev *bd, const struct bio *bio)
             return false;   /* every segment but the first starts on a page */
         if (i + 1 < bio->nr_vecs && (((uintptr_t)v->buf + v->len) & (PAGE_SIZE - 1)) != 0)
             return false;   /* every segment but the last ends on one */
-        if (!dma_mappable(bd->dev, v->buf, v->len))
+        if (!buf_ok(bd, v->buf, v->len))
             return false;
         sum += v->len;
     }

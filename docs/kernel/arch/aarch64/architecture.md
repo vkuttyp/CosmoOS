@@ -83,7 +83,7 @@ contract is generalized, not special-cased.
 - **Loader** (`boot/uefi/arch/aarch64/`): require EL1 (the `virt`
   machine hands over at EL1 unless `virtualization=on`; EL2 is refused
   with a message rather than demoted), build the bootstrap translation
-  tables (TTBR1: the higher-half kernel image and the 4 GiB direct map
+  tables (TTBR1: the higher-half kernel image and the direct map, sized to the memory map,
   with RAM and device attributes told apart by the EFI memory map;
   TTBR0: the identity map the loader itself runs on), program
   MAIR/TCR/SCTLR with the MMU kept on, switch tables and jump to the

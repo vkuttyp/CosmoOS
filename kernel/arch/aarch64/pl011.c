@@ -183,7 +183,9 @@ void arch_console_early_init(void)
         return;
     if (info->console_base >= info->hhdm_size) {
         /* The early console runs on the loader's direct map, which ends
-         * at hhdm_size: said once the log can say it (inventory). */
+         * at hhdm_size. A loader that sizes its map covers the console
+         * (boot/uefi/main.c direct_map_size); one of v1.0.4 or older
+         * maps 4 GiB. Said once the log can say it. */
         g_unreached = (paddr_t)info->console_base;
         return;
     }

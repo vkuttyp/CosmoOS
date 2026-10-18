@@ -267,10 +267,12 @@ bool selftest_dma(const char **reason)
     }
     CHECK(dma_set_mask(&tiny, 64) == 0 && tiny.dma_mask == UINT64_MAX);
 
-    /* kmalloc memory maps; arena memory and a stack address do not. */
+    /* kmalloc memory maps; arena memory and a stack address do not. For
+     * the 64-bit device: kmalloc may hand out RAM above 4 GiB, which the
+     * NULL device's 32-bit default mask refuses (test-platforms mem4g). */
     void *kb = kmalloc(256, 0);
-    CHECK(kb != NULL && dma_map(NULL, kb, 256, DMA_TO_DEVICE) == virt_to_phys(kb));
-    dma_unmap(NULL, virt_to_phys(kb), 256, DMA_TO_DEVICE);
+    CHECK(kb != NULL && dma_map(&tiny, kb, 256, DMA_TO_DEVICE) == virt_to_phys(kb));
+    dma_unmap(&tiny, virt_to_phys(kb), 256, DMA_TO_DEVICE);
     kfree(kb);
     vaddr_t arena = vm_kernel_alloc(PAGE_SIZE, VM_KALLOC_POPULATE, VM_PROT_RW);
     CHECK(arena != 0 && dma_map(NULL, (void *)arena, 64, DMA_TO_DEVICE) == 0);

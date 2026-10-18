@@ -54,6 +54,15 @@ static uint64_t rd64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v;
 static const struct sdt *g_tables[MAX_TABLES];
 static unsigned g_ntables;
 static char g_oem[7];
+/* The end of the highest RSDP, root table or table collected: the
+ * direct map must reach it (direct_map_size). */
+static uint64_t g_end;
+
+static void note_end(uint64_t addr, uint64_t len)
+{
+    if (addr + len > g_end)
+        g_end = addr + len;
+}
 
 static void collect(uint64_t rsdp_addr)
 {
@@ -72,9 +81,11 @@ static void collect(uint64_t rsdp_addr)
         root = rd32(rsdp + 16);
         width = 4;
     }
+    note_end(rsdp_addr, width == 8 ? rlen : 20);
     const struct sdt *r = (const struct sdt *)(uintptr_t)root;
     if (r == NULL || r->length < SDT_HDR || r->length > SDT_MAX || !sum_ok(r, r->length))
         return;
+    note_end(root, r->length);
     const uint8_t *e = (const uint8_t *)r + SDT_HDR;
     unsigned n = (r->length - SDT_HDR) / width;
     for (unsigned i = 0; i < n; i++) {
@@ -88,7 +99,13 @@ static void collect(uint64_t rsdp_addr)
             break;
         }
         g_tables[g_ntables++] = t;
+        note_end(a, t->length);
     }
+}
+
+uint64_t acpi_tables_end(void)
+{
+    return g_end;
 }
 
 static const uint8_t *find(const char *sig, uint32_t *len)

@@ -659,16 +659,22 @@ jobs:
   # addresses. The image boots under every configuration QEMU can vary --
   # GICv2 and GICv3, highmem off, a CPU with and without RNDR, no serial
   # port -- and must reach the shell with the platform line to match.
+  # Both architectures boot with 1, 4 and 8 GiB of RAM: the loader's
+  # direct map reaches the top of RAM and `free` reports it.
   platforms:
-    name: platform discovery (aarch64)
+    name: platform discovery (${{ matrix.arch }})
     runs-on: ubuntu-24.04
     needs: image
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    timeout-minutes: 30
+    timeout-minutes: 45 # eleven AArch64 boots; was 30 for eight
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:
@@ -687,17 +693,17 @@ jobs:
           key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
 
       - name: Build (release)
-        run: make ARCH=aarch64 BUILD=release image
+        run: make ARCH=${{ matrix.arch }} BUILD=release image
 
-      - name: Six machines that are not virt's defaults
-        run: make ARCH=aarch64 BUILD=release test-platforms
+      - name: Machines that are not the defaults, and 1, 4 and 8 GiB of RAM
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-platforms
 
       - name: Upload the boots' logs (on failure)
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: test-platforms
-          path: out/aarch64-release/test-platforms/*/*.log
+          name: test-platforms-${{ matrix.arch }}
+          path: out/${{ matrix.arch }}-release/test-platforms/*/*.log
           if-no-files-found: ignore
 
   # Roadmap M6, decision 4: every subsystem directory docs/README.md lists
