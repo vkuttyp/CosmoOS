@@ -22,10 +22,11 @@ machine for "Other Linux", ARM64, with UEFI; put `cosmoos-aarch64.img`
 on a disk of the "plain" (raw) type and attach it as an **NVMe** disk,
 and add a second, blank NVMe disk of 1 GiB or more to install on.
 Parallels' SATA disks are not PCI devices, so the kernel would not see
-the live disk and `cosmo-install` would have no ESP to copy. **Give the
-VM 2 GB of memory, not Parallels' default of 4 GB**: with 4 GB the
-kernel stops at once, after the loader's last line (`jumping to kernel
-entry ...`), on v1.0.3 and v1.0.4 alike. From the command line, with
+the live disk and `cosmo-install` would have no ESP to copy. Any amount
+of memory works since v1.0.5 (run with 2, 4 and 8 GB); **v1.0.4 and
+earlier need 2 GB**: with Parallels' default of 4 GB their loader lost
+its own code at the handover and nothing followed its last line
+(`jumping to kernel entry ...`). From the command line, with
 `prlctl`, for a VM named `CosmoOS` (these need Parallels, so the guide's
 own tests do not run them; they were run on Parallels Desktop 27.0.3
 when this was written):
@@ -97,6 +98,11 @@ from `/dev/nvme0n2p2` (`mount`, `df`), took an ssh login from the Mac,
 and booted again after `reboot`. Updating an installed system in place
 (`cosmo-upgrade`, [Upgrading](upgrading.md)) has been run under QEMU,
 from the published v1.0.3 to the published v1.0.4, not on Parallels.
+
+The image that became v1.0.5 was run on the same VM on 2026-10-18 with
+4096 MB and 8192 MB: it booted to the shell both times, `free` reported
+4133256 KiB and 8294792 KiB, and the network came up by DHCP. With 4096
+MB the installed v1.0.4 still stopped after its loader's last line.
 
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)

@@ -128,10 +128,25 @@ builds the debug image in a throwaway worktree and boots `mem4g`.
 The AGENTS.md matrix on `3d01865f`, both architectures, plus
 `BUILD=release test-platforms`: see the PR.
 
+## Parallels Desktop
+
+The owner's VM "CosmoOS 1.0.4" (Parallels Desktop 27.0.3, 4 CPUs), this
+branch's AArch64 release image (`389f173b`) copied onto its live NVMe
+disk:
+
+- 4096 MB, control first: the installed v1.0.4 prints `jumping to kernel
+  entry 0xffffffff80000000, info at 0xffff8000fed33000` and nothing in 60
+  s.
+- 4096 MB, this image: the shell; `free` 4133256 KiB total; the kernel's
+  summary `Memory: 4044 MiB usable in 29 regions, RAM ends at 5120 MiB`.
+- 8192 MB, this image: the shell; `free` 8294792 KiB total; `ip a`
+  shows the DHCP address 10.211.55.12.
+
+The VM was put back as it was (the published live image, 2048 MB, the
+installed disk first) for v1.0.5's in-place upgrade.
+
 ## Remaining
 
-Parallels at 4 GB and 8 GB (the owner's VM) is run on this branch's
-image before the PR merges and recorded in the guide's Tested
-platforms. New inventory lines: no bounce buffers for 32-bit-DMA block
+New inventory lines: no bounce buffers for 32-bit-DMA block
 devices; hvf's ISV stop; the loader allocates only below 4 GiB; the
 FADT's tables are outside `direct_map_size`.

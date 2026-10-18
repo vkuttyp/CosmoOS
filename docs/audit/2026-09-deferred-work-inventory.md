@@ -1377,10 +1377,13 @@ each; none is needed by M2's acceptance test.
   re-fetches the tag as the bare commit (`+1ec37307...:refs/tags/v1.0.4`,
   release run 39073532390), a lightweight tag, and `BUILD_ID`
   (`build/config.mk`) runs `git describe` without `--tags`.
-- On Parallels Desktop 27.0.3 with 4096 MB the AArch64 kernel prints
+- ~~On Parallels Desktop 27.0.3 with 4096 MB the AArch64 kernel prints
   nothing after the loader's `jumping to kernel entry` line (memory map up
   to 0x140000000), on the published v1.0.3 and v1.0.4 alike, every boot;
-  with 2048 MB it boots. The guide's Tested platforms page says 2 GB.
+  with 2048 MB it boots. The guide's Tested platforms page says 2 GB.~~
+  **Closed by the direct-map unit** (`docs/audit/2026-10-18-direct-map-report.md`):
+  the loader's fixed 4 GiB map left out the loader itself; the image
+  boots there with 4096 and 8192 MB.
 - The block layer has no bounce buffers: a device whose DMA mask is 32
   bits (AHCI without S64, an xHCI without AC64's USB disks, the legacy
   virtio transport's 44 bits) refuses a buffer above its mask with
