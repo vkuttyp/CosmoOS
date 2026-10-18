@@ -135,3 +135,9 @@ against repositories served over HTTPS by the harness. Results
 
 Mutation: the serial rule disabled in `index_fresh`, step d failed ("a
 replayed serial-10 index (exit 3)").
+
+**Validation (PR 2, 2026-10-18, on `b0102276`).** The full matrix as for
+PR 1, plus `make BUILD=release test-pkg-net`, on both architectures:
+every step exit 0, `reproducible: yes`. After the rebase onto PR 1's
+reviewed `cosmo-fetch` (main `bc6ea9f2`), `test-pkg-net` again on both:
+PASS.
