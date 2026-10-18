@@ -566,6 +566,19 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    (`scripts/release-key.sh`, which refuses a key whose public half is
    not the one `tools/keys/*.pub`), then `make SIGNING=release
    MODSIGN_KEY=<it> KEYRING_PUBS=tools/keys/<release>.pub release`.
+   Before building, `scripts/release-tag.sh` fetches the tag's own ref:
+   `actions/checkout` fetches a pushed tag by its commit, which leaves an
+   annotated tag lightweight in the clone, and `git describe` (the
+   build id, `build/config.mk`) skips lightweight tags -- v1.0.4's kernel
+   said `v1.0.3-123-g1ec37307` and its package `1.0.3-123`. The script
+   refuses a lightweight tag and a `git describe` that is not the tag.
+   After building, `scripts/check-release-version.py` requires the
+   kernel's build id (every describe-shaped string in `kernel.elf`) to be
+   the tag, the set's file names to be the set's, and the
+   `cosmo-upgrade` package's version to be the tag's
+   (`package_version`). The acceptance jobs restore the tag the same way.
+   Both scripts are tested on synthetic sets and a local repository by
+   `tests/host/test_release_version.py` (`make host-test`).
 3. `reproducible`: each architecture's two sets compared file by file
    (`scripts/compare-release-sets.sh`).
 4. `acceptance` (each architecture × `test-entropy`, `test-install`,
@@ -584,7 +597,9 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    pinned SHA-256, the
    reproducibility lines, every file's SHA-256, the guide's known
    limitations), and `gh release create`; a tag with a hyphen is a
-   pre-release.
+   pre-release. Before `gh release create`, `check-release-version.py
+   --notes` requires the notes to say "CosmoOS <version>" and no other
+   "CosmoOS X.Y.Z", and checks both sets again.
 
 A release (a tag without a hyphen) must point at a commit on main (job
 `guard`); a pre-release may be any head. The key itself is a repository
