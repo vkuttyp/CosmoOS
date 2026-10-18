@@ -317,6 +317,26 @@ kernel before the fix). Serial logs in
   `\cosmo\prev` is v1.0.3's again. The build boots verified with its own
   key, with `/sbin/cosmo-upgrade` and hello 1.1.
 
+**From v1.0.4** (`UPGRADE_BASE_TAG=v1.0.4`, `--base-tag v1.0.4`): the
+published v1.0.4 has its own `/sbin/cosmo-upgrade`, so the test takes the
+guide's "From v1.0.4 and later" path, with five boots. **install** as
+above. **upgrade**: the installed v1.0.4 fetches the set and its signed
+`SHA256SUMS` (no package) into `/tmp/up`. For a build's set, its
+`cosmo-upgrade` first refuses it (`unknown signing key`), and then the
+build's key is put in `/etc/pkg/keys`. It upgrades itself with its own
+tool (`boot set switched`, `loader switched`), and on the host the ESP
+holds the new set and loader, `\cosmo\prev` v1.0.4's. **new** as above.
+**back**: v1.0.4 boots verified with the release key, with `/root/keep`
+and hello 1.1, and its own `cosmo-upgrade --rollback` rolls forward again:
+the loader first for a build's set (v1.0.4's loader lacks the build's
+key), the set first for a published one. **forward** as above. The
+refusals, the interruptions and the hold run only from v1.0.3. They test
+v1.0.3's tools and the switches, and the switches do not depend on the base.
+Run on 2026-10-18 from the published v1.0.4 to the published v1.0.5
+(`UPGRADE_SET_TAG=v1.0.5`): PASS on x86-64 (59.4 s) and AArch64 (65.5 s),
+the set first on the way forward again; the new boots' banner says
+`build v1.0.5`, v1.0.4's says `v1.0.3-123-g1ec37307`.
+
 ## `make test-net-login` (`tests/boot/net_login_test.py`)
 
 Roadmap M4's acceptance. Release builds in CI (job `net-login`, both

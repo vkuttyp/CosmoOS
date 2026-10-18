@@ -78,3 +78,16 @@ published the pre-release "CosmoOS 1.0.5-rc1" (18 files). Its
 Qodo and Codex on #404: the check accepted a set missing a file and the
 other architecture's loader (it now requires exactly the architecture's
 set), and the defect had no probe (`tools/release-version-probe.py`).
+
+## The release
+
+`v1.0.5`, an annotated tag at main's `b5f2a87c` (CI green), release run
+39125298512: every job passed, with `release-tag: v1.0.5 (annotated)`,
+`check-release-version: v1.0.5 in 1 set(s)` in the build jobs and
+`check-release-version: v1.0.5 in 2 set(s) and the notes` in publish.
+https://github.com/vkuttyp/CosmoOS/releases/tag/v1.0.5 has 18 files; both
+downloaded kernels carry the build id `v1.0.5`, and `SHA256SUMS.sig`
+checks with `tools/keys/release-2026.pub` (key 36ae7bb4947896ab).
+`test-upgrade UPGRADE_BASE_TAG=v1.0.4 UPGRADE_SET_TAG=v1.0.5` passed on
+both architectures, and the Parallels VM was upgraded in place from
+v1.0.4 to v1.0.5 ([platforms](../guide/platforms.md)).

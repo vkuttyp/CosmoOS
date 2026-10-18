@@ -249,7 +249,9 @@ test-install: $(IMAGE)
 # UPGRADE_SET_TAG=v1.0.4 upgrades to that published release instead of this
 # build's set: fetched the same way (its SHA256SUMS.sig checked against
 # tools/keys), signed by the release key.
-UPGRADE_BASE_TAG := v1.0.3
+# UPGRADE_BASE_TAG=v1.0.4 starts from the published v1.0.4, which upgrades
+# itself with its own cosmo-upgrade (upgrade_test.py --base-tag).
+UPGRADE_BASE_TAG ?= v1.0.3
 UPGRADE_BASE_DIR := $(ROOT)/.cache/releases/$(UPGRADE_BASE_TAG)
 UPGRADE_SET_TAG ?=
 ifeq ($(UPGRADE_SET_TAG),)
@@ -265,7 +267,7 @@ test-upgrade:
 	$(Q)$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(UPGRADE_BASE_TAG) --arch $(ARCH) --dest $(UPGRADE_BASE_DIR)
 	$(Q)$(if $(UPGRADE_SET_TAG),$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(UPGRADE_SET_TAG) --arch $(ARCH) --dest $(UPGRADE_SET_DIR),true)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
-		$(PYTHON) $(ROOT)/tests/boot/upgrade_test.py --base $(UPGRADE_BASE_DIR)/cosmoos-$(ARCH).img \
+		$(PYTHON) $(ROOT)/tests/boot/upgrade_test.py --base $(UPGRADE_BASE_DIR)/cosmoos-$(ARCH).img --base-tag $(UPGRADE_BASE_TAG) \
 		--set $(UPGRADE_SET_DIR) --pub $(UPGRADE_SET_PUB) --arch $(ARCH) --workdir $(OUT)/test-upgrade \
 		--timeout $(BOOT_TIMEOUT)
 
