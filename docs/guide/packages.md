@@ -1,13 +1,14 @@
 # Packages
 
-`pkg` installs signed packages from a repository. On an installed system
-the repository is `/var/lib/pkg/repo`: the installer copied the live
-image's repository there, and `/etc/pkg/repos.conf` names it. `pkg`
-checks the repository's index and every package against the public keys
-in `/etc/pkg/keys`, and refuses anything signed by another key or whose
-checksum does not match. That repository holds the packages the image
-was built with; a repository on a server is added with one line of
-`repos.conf` ([Network repositories](#network-repositories) below).
+`pkg` installs signed packages from repositories. An installed system
+has two, named in `/etc/pkg/repos.conf`: `local`, `/var/lib/pkg/repo`,
+where the installer copied the live image's repository (the packages the
+image was built with), and `cosmoos`, the project's network repository,
+`https://vkuttyp.github.io/CosmoOS/repo/ARCH` (`x86_64` or `aarch64`),
+which each release republishes ([Network repositories](#network-repositories)
+below). `pkg` checks every index and every package against the public
+keys in `/etc/pkg/keys`, and refuses anything signed by another key or
+whose checksum does not match.
 
 Boot the installed system:
 
@@ -38,9 +39,10 @@ qemu-system-aarch64 -machine virt -cpu cortex-a72 -smp 2 -m 512M \
 <!-- test: console -->
 ```console
 cosmo$ cat /etc/pkg/repos.conf
-/var/lib/pkg/repo
+local file:///var/lib/pkg/repo
+cosmoos https://vkuttyp.github.io/CosmoOS/repo/...
 cosmo$ pkg update
-pkg: index updated: ... packages from 1 repository...
+pkg: index updated: ... packages from ...
 cosmo$ pkg search
 ...hello...prints a greeting
 cosmo$ pkg install hello
@@ -75,6 +77,13 @@ cosmo$ exit
 ```
 
 ## Network repositories
+
+`pkg update` reads both: the disk's repository needs nothing, the network
+one needs the machine's network (QEMU's user networking is enough) and a
+clock that is right. Without the network it says `pkg: cosmoos: not
+reached; its last index is kept` and `from 1 of 2 repositories`, and goes
+on with the disk's packages (exit 0). A server it refuses (its certificate,
+a signature, an old or expired index) is exit 3.
 
 A line of `/etc/pkg/repos.conf` is a name, a URL and options:
 

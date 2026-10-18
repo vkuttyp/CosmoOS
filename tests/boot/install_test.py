@@ -276,8 +276,11 @@ def stage_install(args, results):
              "mkfs.cosmofs on a disk with partitions")
         need(out, r"^cosmo-install$", "the installed /sbin")
         need(out, r"^svc boot$", "the installed /etc/rc")
-        # Roadmap M6: the repository is on the root and repos.conf names it.
-        need(out, r"^/var/lib/pkg/repo$", "the installed /etc/pkg/repos.conf")
+        # Roadmap M6: the repository is on the root and repos.conf names it,
+        # then (1.1 P6) the project's network repository.
+        need(out, r"^local file:///var/lib/pkg/repo$", "the installed /etc/pkg/repos.conf (the disk's repository)")
+        need(out, r"^cosmoos https://vkuttyp\.github\.io/CosmoOS/repo/(x86_64|aarch64)$",
+             "the installed /etc/pkg/repos.conf (the network repository)")
         need(out, r"^INDEX$", "the installed repository /var/lib/pkg/repo")
         for d in ("bin", "sbin", "etc", "dev", "proc", "tmp", "mnt", "var"):
             need(out, rf"^{d}$", f"the installed root's /{d}")

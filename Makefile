@@ -127,10 +127,12 @@ release:
 UPGRADE_ELF = $(call prog_elf,cosmo-upgrade)
 VERIFY_ELF = $(call prog_elf,cosmo-verify)
 release-set: $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(UPGRADE_ELF) $(VERIFY_ELF) \
+		$(COSMO_FETCH_ELF) \
 		$(ROOT)/scripts/mkrelease.py $(ROOT)/tools/pkgbuild.py $(ROOT)/scripts/modsign.py
 	$(call log,RELEASE,$(RELEASE_DIR))
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkrelease.py $(ARCH) $(RELEASE_DIR) $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) \
-		$(BOOT_ARCHIVE) $(MANIFEST) $(CMDLINE_FILE) $(UPGRADE_ELF) $(VERIFY_ELF) $(MODSIGN_KEY) $(PKGSIGN_KEY) $(BUILD_ID)
+		$(BOOT_ARCHIVE) $(MANIFEST) $(CMDLINE_FILE) $(UPGRADE_ELF) $(VERIFY_ELF) $(COSMO_FETCH_ELF) $(MODSIGN_KEY) $(PKGSIGN_KEY) \
+		$(BUILD_ID)
 
 run: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
@@ -299,10 +301,13 @@ test-net-login: $(IMAGE)
 # package repositories this harness serves over HTTPS -- install, upgrade,
 # refused certificates, packages, keys, replays and expiry. CI:
 # BUILD=release, a job of its own.
-test-pkg-net: $(IMAGE) $(PKG_INDEX)
+# Step e serves this build's release set to cosmo-upgrade --fetch.
+PKGNET_SET_DIR := $(OUT)/test-pkg-net-set
+test-pkg-net: RELEASE_DIR = $(PKGNET_SET_DIR)
+test-pkg-net: $(IMAGE) $(PKG_INDEX) release-set
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/pkgnet_test.py --image $(IMAGE) --repo $(PKG_REPO) --sign-key $(PKGSIGN_KEY) \
-		--workdir $(OUT)/test-pkg-net --timeout $(BOOT_TIMEOUT)
+		--set $(PKGNET_SET_DIR) --arch $(ARCH) --workdir $(OUT)/test-pkg-net --timeout $(BOOT_TIMEOUT)
 
 # The virtio-gpu unit's acceptance test (tests/boot/display_test.py,
 # docs/drivers/virtio/testing.md, "virtio-gpu"): the console on a

@@ -190,7 +190,8 @@ def fetch_all(b, port, arch, variants=False, check=True):
     if check:
         out = sh(b, f"cd {UP} && pkg install -n ./{cpk_name(arch)}; echo pkgn=$?; cd /", "pkgn")
         need(out, r"^pkgn=0$", "v1.0.3's pkg checking the package")
-        need(out, r"^pkg: installing cosmo-upgrade-\S+ \(2 files\)$", "v1.0.3's pkg checking the package")
+        # 3 files from v1.0.6 (cosmo-fetch too), 2 in a published v1.0.4 or v1.0.5 set
+        need(out, r"^pkg: installing cosmo-upgrade-\S+ \([23] files\)$", "v1.0.3's pkg checking the package")
     unpack(b, arch)
     if not variants:
         return

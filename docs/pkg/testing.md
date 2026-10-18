@@ -111,6 +111,7 @@ each step. In order:
 | a | `priv -d sys_admin` `pkg update`, `search`, `info`, then `install` | the first three exit 0 (the header line `serial 10`), `install` exits 1 naming the privilege |
 | a | `pkg update && pkg install hello && hello` (serial 10, hello 1.0 alone) | `pkg: fetching hello-1.0.cpk from test`, `hello, world (hello 1.0)`; the server saw `GET /repo/INDEX` then `/repo/hello-1.0.cpk` |
 | f | serial 11 served (hello 1.0 and 1.1): `pkg update && pkg upgrade && hello` | `pkg: 1 package upgraded`, `hello, world (hello 1.1)` |
+| f | a second repository nothing answers for (port 9) | `pkg update` exit 0, `pkg: gone: not reached; its last index is kept`, `from 1 of 2 repositories` |
 | d | the serial-10 index served again; then serial 12, published 40 days ago, valid 7 | each exit 3: `serial 10 is older than 11 ... (a replayed index)`, `expired at T`; `pkg info hello` still shows 1.1 available |
 | b | repository `tam` whose `hello-1.1.cpk` has one byte changed: `pkg update && pkg install --reinstall hello` | exit 3, `checksum does not match the index`; `hello` still 1.1 and `pkg verify` 0 problems |
 | b | repository `other`, its `INDEX` signed by a key made for the run | `pkg update` exit 3, `unknown signing key ... (not in /etc/pkg/keys)` |

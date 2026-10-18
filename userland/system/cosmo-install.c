@@ -40,6 +40,15 @@
 #define MNT "/mnt/cosmo-install"
 #define PKG_LIVE_REPO "/boot/repo"               /* the boot archive's repo/ */
 #define PKG_INSTALLED_REPO "/var/lib/pkg/repo"   /* where the installed system keeps it */
+/* The project's network repository for this architecture (roadmap 1.1 P6;
+ * docs/guide/packages.md), published by the release workflow. */
+#if defined(__x86_64__)
+#define PKG_NET_REPO "https://vkuttyp.github.io/CosmoOS/repo/x86_64"
+#elif defined(__aarch64__)
+#define PKG_NET_REPO "https://vkuttyp.github.io/CosmoOS/repo/aarch64"
+#else
+#error "cosmo-install: unknown architecture"
+#endif
 #define CHUNK COSMO_BLKCTL_IO_MAX
 #define ALIGN_BYTES (1024u * 1024u)          /* partitions start on 1 MiB */
 #define MIN_ROOT_BYTES (32u * 1024u * 1024u)
@@ -297,7 +306,8 @@ static int populate(void)
      * the installed system's repos.conf names it there. The live system's
      * names /boot/repo, which is the boot archive's and is not on an
      * installed disk. The keys that verify it, /etc/pkg/keys, came with
-     * /etc above.
+     * /etc above. The project's network repository follows it (P6): the
+     * same packages are taken from the disk, newer ones from the network.
      */
     struct stat rst;
     if (stat(PKG_LIVE_REPO, &rst) < 0) {
@@ -305,7 +315,10 @@ static int populate(void)
         return -1;
     }
     if (copy_tree(PKG_LIVE_REPO, MNT PKG_INSTALLED_REPO) < 0 ||
-        write_file("/etc/pkg/repos.conf", PKG_INSTALLED_REPO "\n", 0644) < 0)
+        write_file("/etc/pkg/repos.conf",
+                   "# NAME URL [pin sha256:HEX] [insecure] (docs/guide/packages.md)\n"
+                   "local file://" PKG_INSTALLED_REPO "\n"
+                   "cosmoos " PKG_NET_REPO "\n", 0644) < 0)
         return -1;
     /* The installed system's console shell is BusyBox ash (roadmap M3;
      * init reads this file, docs/userland/design.md, "BusyBox"). */

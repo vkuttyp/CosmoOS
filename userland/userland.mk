@@ -45,7 +45,7 @@ PROG_DIR_cosmo-install := system
 PROG_EXTRA_SRCS_cosmo-install := userland/system/install_gpt.c userland/system/install_sha512.c
 PROG_DIR_cosmo-upgrade := system
 PROG_EXTRA_SRCS_cosmo-upgrade := userland/system/upgrade_fat.c userland/system/blkdevs.c userland/system/install_sha512.c \
-	userland/system/upgrade_ed25519.c userland/system/relsig.c
+	userland/system/upgrade_ed25519.c userland/system/relsig.c userland/lib/fetch.c
 # A release file against its signed SHA256SUMS (the upgrading guide).
 PROG_DIR_cosmo-verify := system
 PROG_EXTRA_SRCS_cosmo-verify := userland/system/install_sha512.c userland/system/upgrade_ed25519.c userland/system/relsig.c
@@ -103,13 +103,14 @@ USER_ARCHIVE_ENTRIES := \
 	etc/svc/greeter=$(ROOT)/userland/etc/svc/greeter \
 	etc/svc/syslogd=$(ROOT)/userland/etc/svc/syslogd \
 	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf \
+	etc/cosmo-release.conf=$(ROOT)/userland/etc/cosmo-release.conf \
 	etc/pkg/keys/$(notdir $(PKG_TRUST_PUB))=$(PKG_TRUST_PUB)
 ifeq ($(SELFTEST),1)
 USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(ROOT)/userland/etc/rc.linux \
 	$(foreach p,$(USER_TEST_PROGRAMS),tests/native/$(p)=$(call prog_elf,$(p)))
 endif
 USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/fstab $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
-	$(ROOT)/userland/etc/pkg/repos.conf $(PKG_TRUST_PUB) $(ROOT)/userland/etc/passwd $(ROOT)/userland/etc/group \
+	$(ROOT)/userland/etc/pkg/repos.conf $(ROOT)/userland/etc/cosmo-release.conf $(PKG_TRUST_PUB) $(ROOT)/userland/etc/passwd $(ROOT)/userland/etc/group \
 	$(ROOT)/userland/etc/svc/hello $(ROOT)/userland/etc/svc/greeter $(ROOT)/userland/etc/svc/syslogd
 
 .PHONY: userland

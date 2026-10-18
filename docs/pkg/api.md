@@ -105,7 +105,7 @@ fetched: -n)`, so its checks run only for real)
 
 | Command | Effect | Output the tests rely on |
 |---|---|---|
-| `update` | For each repository in `repos.conf`: read (a directory) or fetch (a URL, through `cosmo-fetch`) `INDEX`, verify its trailer against the key ring, for a URL check its header against the clock and the serial accepted last (PK10), parse it, and store it as `/var/lib/pkg/repos/NAME/INDEX`; every repository is tried, the exit status is the worst | `pkg: index updated: N packages from M repository/ies`, or `from K of M repositories`; `pkg: NAME: serial S, published T, expires T` for an index with a header |
+| `update` | For each repository in `repos.conf`: read (a directory) or fetch (a URL, through `cosmo-fetch`) `INDEX`, verify its trailer against the key ring, for a URL check its header against the clock and the serial accepted last (PK10), parse it, and store it as `/var/lib/pkg/repos/NAME/INDEX`; every repository is tried; a refusal is exit 3, another failure 1, but a repository not reached (no network, an HTTP error) only `pkg: NAME: not reached; its last index is kept` when another was updated | `pkg: index updated: N packages from M repository/ies`, or `from K of M repositories`; `pkg: NAME: serial S, published T, expires T` for an index with a header |
 | `install NAME[=VERSION]...` | Plan all requests together from the stored indexes (`NAME=VERSION` is the constraint `NAME = VERSION`; every constraint seen on a name, including those of installed packages, must hold; the plan is rebuilt when a later constraint invalidates an earlier choice), then for each package in dependency order: read `file` from its repository's directory, or fetch it from its URL into `/var/cache/pkg/NAME/` (`pkg: fetching FILE from NAME`), check size and SHA-512 against the index, verify the signature, cross-check the manifest, install | `pkg: installing NAME-VERSION (N files)`; `pkg: NAME will be upgraded from A to B` when a constraint needs a newer installed package; `pkg: constraints on NAME: ...` with an unsatisfiable set |
 | `install FILE.cpk` | An argument containing `/` is a package file: verified without an index entry; its dependencies must be installed or resolvable from the index | as above |
 | `remove NAME` | Refuse when another installed package depends on it unless `-f`; unlink the manifest's files (already missing is fine); if any could not be removed, rewrite the record to the files still on disk and fail; otherwise `rmdir` the recorded directories deepest first and drop the record | `pkg: NAME: OTHER depends on it`; `pkg: removing NAME-VERSION (N files)`; `pkg: NAME: N files could not be removed; the package stays recorded with them`; `pkg: NAME: cannot update the record (...); dropped it` and `pkg: NAME: /path is left untracked` when the database itself cannot be written; `pkg: NAME: the database cannot be written (...): the record still lists removed files; run 'pkg remove NAME' again ...` when not even the drop works |
@@ -138,8 +138,10 @@ print them, `cosmo-fetch`'s own line first where it made the refusal:
 | a package that does not match the index | `pkg: /var/cache/pkg/NAME/FILE: checksum does not match the index (corrupt or replaced)` |
 
 A server that cannot be reached, a name that does not resolve or an HTTP
-error is exit 1: `cosmo-fetch`'s line, then `pkg: NAME: cannot fetch
-INDEX (above)`.
+error prints `cosmo-fetch`'s line, `pkg: NAME: cannot fetch INDEX
+(above)` and `pkg: NAME: not reached; its last index is kept`; `update`
+exits 0 when another repository was updated (an offline system updates
+from its disk), else 1. For a package, it is exit 1.
 
 `install`, `remove` and `upgrade` without `-n` need the `sys_admin`
 privilege: without it `pkg: COMMAND needs the sys_admin privilege (this

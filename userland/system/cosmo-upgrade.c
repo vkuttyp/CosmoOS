@@ -3,6 +3,8 @@
  * (shell completeness S7; docs/userland/design.md, "Updating").
  *
  *   cosmo-upgrade [--check] [--stop-after=written|loader|set] DIR
+ *   cosmo-upgrade [--check] [--stop-after=...] --fetch TAG|URL
+ *   cosmo-upgrade --check
  *   cosmo-upgrade --rollback
  *   cosmo-upgrade --status
  *
@@ -16,8 +18,13 @@
  * The previous set stays in \cosmo\prev. Then the root's base system
  * (bin/, sbin/, etc/, usr/ and the package repository) is brought from the
  * old archive to the new one. --rollback is the same in the other
- * direction. Exit 0 done, 1 failed, 2 usage, 3 refused (nothing written),
- * 4 stopped by --stop-after.
+ * direction. --fetch (roadmap 1.1 P6) first fetches the set over HTTPS
+ * through /bin/cosmo-fetch from TAG under the release URL of
+ * /etc/cosmo-release.conf, or from URL: SHA256SUMS and its signature,
+ * checked before anything else is fetched, then the four files; then it
+ * proceeds as with DIR. --check alone says whether that URL's newest
+ * release is newer than the running one. Exit 0 done, 1 failed, 2 usage,
+ * 3 refused (nothing written), 4 stopped by --stop-after.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -37,6 +44,7 @@
 #include <kernel/crypto.h>
 
 #include "../../boot/protocol/cosmomanifest.h"
+#include "../lib/fetch.h"
 #include "blkdevs.h"
 #include "relsig.h"
 #include "upgrade_fat.h"
@@ -1286,9 +1294,344 @@ static int hold_lock(void)
     return 0;   /* fd stays open, and the name held, until exit */
 }
 
+/* --- fetching a release (roadmap 1.1 P6) ------------------------------------------------ */
+
+#define RELEASE_CONF        "/etc/cosmo-release.conf"
+#define RELEASE_URL_DEFAULT "https://vkuttyp.github.io/CosmoOS/releases"
+#define FETCH_DIR           "/var/cache/cosmo-upgrade"
+#define FETCH_MAX           (256ull << 20)
+
+struct release_src {
+    char url[512];   /* without a trailing '/' */
+    char pin[72];    /* "sha256:HEX" or empty */
+};
+
+static void strip_slashes(char *u)
+{
+    size_t n = strlen(u);
+    while (n > 8 && u[n - 1] == '/')
+        u[--n] = '\0';
+}
+
+/* RELEASE_CONF: "url URL" and "pin sha256:HEX" lines, '#' comments; the
+ * project's releases when it is absent. 0, or -1 with a message. */
+static int release_conf(struct release_src *r)
+{
+    snprintf(r->url, sizeof(r->url), "%s", RELEASE_URL_DEFAULT);
+    r->pin[0] = '\0';
+    uint8_t *text;
+    size_t len;
+    int rc = read_whole(RELEASE_CONF, &text, &len);
+    if (rc == -ENOENT)
+        return 0;
+    if (rc < 0) {
+        fprintf(stderr, "cosmo-upgrade: " RELEASE_CONF ": %s\n", strerror(-rc));
+        return -1;
+    }
+    uint8_t *t = realloc(text, len + 1);
+    if (t == NULL) {
+        free(text);
+        return -1;
+    }
+    t[len] = '\0';
+    int lineno = 0, bad = 0;
+    char *save;
+    for (char *l = strtok_r((char *)t, "\n", &save); l && !bad; l = strtok_r(NULL, "\n", &save)) {
+        lineno++;
+        while (*l == ' ' || *l == '\t')
+            l++;
+        if (*l == '#' || *l == '\0')
+            continue;
+        /* "KEY VALUE": the first word after KEY */
+        char *key = l, *value = l + strcspn(l, " \t");
+        if (*value)
+            *value++ = '\0';
+        value += strspn(value, " \t");
+        value[strcspn(value, " \t")] = '\0';
+        if (*value == '\0' || strlen(value) >= sizeof(r->url)) {
+            bad = 1;
+        } else if (strcmp(key, "url") == 0 && strncmp(value, "https://", 8) == 0) {
+            snprintf(r->url, sizeof(r->url), "%s", value);
+            strip_slashes(r->url);
+        } else if (strcmp(key, "pin") == 0 && strncmp(value, "sha256:", 7) == 0 && strlen(value) == 71 &&
+                   strspn(value + 7, "0123456789abcdef") == 64) {
+            snprintf(r->pin, sizeof(r->pin), "%s", value);
+        } else {
+            bad = 1;
+        }
+    }
+    free(t);
+    if (bad) {
+        fprintf(stderr, "cosmo-upgrade: " RELEASE_CONF " line %d: not 'url https://...' or 'pin sha256:HEX'\n",
+                lineno);
+        return -1;
+    }
+    return 0;
+}
+
+/* vMAJOR.MINOR.PATCH[-rcN][-COMMITS-gHASH][-dirty]: git describe's form,
+ * the kernel's build id. rc 0: a release; after: commits past the tag. */
+struct tag {
+    unsigned v[3], rc, after;
+};
+
+static bool tag_parse(const char *s, struct tag *t)
+{
+    memset(t, 0, sizeof(*t));
+    char *end;
+    if (s[0] != 'v')
+        return false;
+    s++;
+    for (int i = 0; i < 3; i++) {
+        if (*s < '0' || *s > '9')
+            return false;
+        t->v[i] = (unsigned)strtoul(s, &end, 10);
+        s = end;
+        if (i < 2 && *s++ != '.')
+            return false;
+    }
+    if (strncmp(s, "-rc", 3) == 0 && s[3] >= '0' && s[3] <= '9') {
+        t->rc = (unsigned)strtoul(s + 3, &end, 10);
+        s = end;
+    }
+    if (*s == '-' && s[1] >= '0' && s[1] <= '9') {
+        t->after = (unsigned)strtoul(s + 1, &end, 10);
+        s = end;
+        if (strncmp(s, "-g", 2) != 0)
+            return false;
+        s += 2 + strspn(s + 2, "0123456789abcdef");
+    }
+    if (strcmp(s, "-dirty") == 0)
+        s += 6;
+    return *s == '\0';
+}
+
+/* Whether release `a` is newer than what `b` runs. */
+static bool tag_newer(const struct tag *a, const struct tag *b)
+{
+    for (int i = 0; i < 3; i++)
+        if (a->v[i] != b->v[i])
+            return a->v[i] > b->v[i];
+    if (a->rc == b->rc)
+        return false;          /* the same release, or b built after it */
+    if (a->rc == 0)
+        return true;           /* the release after b's candidate */
+    if (b->rc == 0)
+        return false;
+    return a->rc > b->rc;
+}
+
+/* The build id this kernel reports: the last word of /proc/version. */
+static int running_tag(char *out, size_t n)
+{
+    uint8_t *text;
+    size_t len;
+    if (read_whole("/proc/version", &text, &len) < 0)
+        return -1;
+    while (len && (text[len - 1] == '\n' || text[len - 1] == ' '))
+        len--;
+    size_t start = len;
+    while (start && text[start - 1] != ' ')
+        start--;
+    snprintf(out, n, "%.*s", (int)(len - start), (const char *)text + start);
+    free(text);
+    return 0;
+}
+
+static int fetch_to(const struct release_src *r, const char *base, const char *name, const char *dir, bool resume,
+                    uint64_t max)
+{
+    char url[1024], path[512], part[520];
+    snprintf(url, sizeof(url), "%s/%s", base, name);
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    snprintf(part, sizeof(part), "%s.part", path);
+    if (!resume)
+        unlink(part);
+    struct fetch_opts o = { .pin = r->pin, .resume = resume, .max = max };
+    int st = fetch_url(url, part, &o);
+    if (st != FETCH_OK) {
+        if (st < 0)
+            fprintf(stderr, "cosmo-upgrade: cannot run " FETCH_PROGRAM ": %s\n", strerror(errno));
+        else
+            fprintf(stderr, "cosmo-upgrade: %s: %s (above)\n", url,
+                    st == FETCH_REFUSED ? "refused" : "cannot be fetched");
+        return st == FETCH_REFUSED ? EXIT_REFUSED : EXIT_FAILED;
+    }
+    if (rename(part, path) < 0) {
+        fprintf(stderr, "cosmo-upgrade: %s: %s\n", path, strerror(errno));
+        return EXIT_FAILED;
+    }
+    return EXIT_DONE;
+}
+
+static int mkdirs(const char *path)
+{
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", path);
+    for (char *p = buf + 1;; p++) {
+        if (*p != '/' && *p != '\0')
+            continue;
+        char c = *p;
+        *p = '\0';
+        if (mkdir(buf, 0755) < 0 && errno != EEXIST)
+            return -1;
+        if (c == '\0')
+            return 0;
+        *p = c;
+    }
+}
+
+/* --check alone: the newest release at the release URL against the
+ * running one. */
+static int check_latest(void)
+{
+    struct release_src r;
+    if (release_conf(&r) < 0 || mkdirs(FETCH_DIR) < 0)
+        return EXIT_FAILED;
+    int rc = fetch_to(&r, r.url, "LATEST", FETCH_DIR, false, 4096);
+    if (rc != EXIT_DONE)
+        return rc;
+    uint8_t *text;
+    size_t len;
+    if (read_whole(FETCH_DIR "/LATEST", &text, &len) < 0)
+        return EXIT_FAILED;
+    char latest[64] = "", published[32] = "", running[128];
+    uint8_t *t = realloc(text, len + 1);
+    if (t == NULL) {
+        free(text);
+        return EXIT_FAILED;
+    }
+    t[len] = '\0';
+    char *save;
+    for (char *l = strtok_r((char *)t, "\n", &save); l; l = strtok_r(NULL, "\n", &save)) {
+        if (strncmp(l, "tag: ", 5) == 0)
+            snprintf(latest, sizeof(latest), "%s", l + 5);
+        else if (strncmp(l, "published: ", 11) == 0)
+            snprintf(published, sizeof(published), "%s", l + 11);
+    }
+    free(t);
+    unlink(FETCH_DIR "/LATEST");
+    struct tag lt, rt;
+    if (!tag_parse(latest, &lt) || lt.after) {
+        fprintf(stderr, "cosmo-upgrade: %s/LATEST: no 'tag: vX.Y.Z' line\n", r.url);
+        return EXIT_FAILED;
+    }
+    if (running_tag(running, sizeof(running)) < 0 || !tag_parse(running, &rt)) {
+        say("the newest release at %s is %s%s%s; this system's build (%s) is not a release's", r.url, latest,
+            published[0] ? ", published " : "", published, running);
+        return EXIT_DONE;
+    }
+    if (tag_newer(&lt, &rt))
+        say("%s is newer than this system's %s (published %s): cosmo-upgrade --fetch %s", latest, running,
+            published[0] ? published : "?", latest);
+    else
+        say("this system's %s is up to date: the newest release at %s is %s", running, r.url, latest);
+    return EXIT_DONE;
+}
+
+/* --fetch: the set into FETCH_DIR/<tag>, SHA256SUMS checked before the
+ * files are fetched, then upgrade() as for a directory. */
+static int fetch_set(const char *arg, bool check, const char *stop)
+{
+    struct release_src r;
+    if (release_conf(&r) < 0)
+        return EXIT_FAILED;
+    char base[1024], dir[512];
+    struct tag t;
+    if (strstr(arg, "://")) {
+        snprintf(base, sizeof(base), "%s", arg);
+        strip_slashes(base);
+        snprintf(dir, sizeof(dir), FETCH_DIR "/url");
+    } else if (tag_parse(arg, &t) && t.after == 0 && strchr(arg, '/') == NULL) {
+        snprintf(base, sizeof(base), "%s/%s", r.url, arg);
+        snprintf(dir, sizeof(dir), FETCH_DIR "/%s", arg);
+    } else {
+        fprintf(stderr, "cosmo-upgrade: --fetch takes a release tag (vX.Y.Z) or an https:// URL, not '%s'\n", arg);
+        return EXIT_USAGE;
+    }
+    if (mkdirs(dir) < 0) {
+        fprintf(stderr, "cosmo-upgrade: %s: %s\n", dir, strerror(errno));
+        return EXIT_FAILED;
+    }
+    say("fetching the " ARCH " set from %s into %s", base, dir);
+    int rc = fetch_to(&r, base, "SHA256SUMS", dir, false, 1 << 20);
+    if (rc == EXIT_DONE)
+        rc = fetch_to(&r, base, "SHA256SUMS.sig", dir, false, 4096);
+    if (rc != EXIT_DONE)
+        return rc;
+    /* The sums first: nothing more is fetched for a set they do not cover. */
+    uint8_t *sums = NULL, *sig = NULL;
+    size_t slen = 0, glen = 0;
+    char path[600], err[200], keyid[17];
+    snprintf(path, sizeof(path), "%s/SHA256SUMS", dir);
+    int r1 = read_whole(path, &sums, &slen);
+    snprintf(path, sizeof(path), "%s/SHA256SUMS.sig", dir);
+    int r2 = r1 == 0 ? read_whole(path, &sig, &glen) : r1;
+    if (r1 < 0 || r2 < 0 || relsig_sums_verify(sums, slen, sig, glen, keyid, err, sizeof(err)) < 0) {
+        if (r1 < 0 || r2 < 0)
+            snprintf(err, sizeof(err), "%s: %s", r1 < 0 ? "SHA256SUMS" : "SHA256SUMS.sig",
+                     strerror(-(r1 < 0 ? r1 : r2)));
+        fprintf(stderr, "cosmo-upgrade: %s: %s; nothing more fetched, nothing written\n", base, err);
+        free(sums);
+        free(sig);
+        return r1 < 0 || r2 < 0 ? EXIT_FAILED : EXIT_REFUSED;
+    }
+    say("verified SHA256SUMS, signed by key %s in " KEYS_DIR, keyid);
+    for (int i = 0; i < SET_FILES && rc == EXIT_DONE; i++) {
+        char name[64];
+        uint8_t want[RELSIG_SHA256_SIZE], got[RELSIG_SHA256_SIZE];
+        snprintf(name, sizeof(name), "cosmoos-" ARCH "-%s", g_set_names[i]);
+        if (relsig_sums_lookup(sums, slen, name, want, err, sizeof(err)) < 0) {
+            fprintf(stderr, "cosmo-upgrade: %s: %s; nothing written\n", base, err);
+            rc = EXIT_REFUSED;
+            break;
+        }
+        snprintf(path, sizeof(path), "%s/%s", dir, name);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            uint8_t *data;
+            size_t dlen;
+            if (read_whole(path, &data, &dlen) == 0) {   /* fetched before: kept if whole */
+                relsig_sha256(data, dlen, got);
+                free(data);
+                if (memcmp(got, want, sizeof(got)) == 0)
+                    break;
+                unlink(path);
+            }
+            if (attempt == 1) {
+                fprintf(stderr, "cosmo-upgrade: %s/%s does not match SHA256SUMS; nothing written\n", base, name);
+                rc = EXIT_REFUSED;
+                break;
+            }
+            rc = fetch_to(&r, base, name, dir, true, FETCH_MAX);
+            if (rc != EXIT_DONE)
+                break;
+        }
+    }
+    free(sums);
+    free(sig);
+    if (rc != EXIT_DONE)
+        return rc;
+    say("fetched the set's four files, each matching SHA256SUMS");
+    rc = upgrade(dir, check, stop);
+    if (rc == EXIT_DONE && !check) {
+        for (int i = 0; i < SET_FILES; i++) {
+            snprintf(path, sizeof(path), "%s/cosmoos-" ARCH "-%s", dir, g_set_names[i]);
+            unlink(path);
+        }
+        snprintf(path, sizeof(path), "%s/SHA256SUMS", dir);
+        unlink(path);
+        snprintf(path, sizeof(path), "%s/SHA256SUMS.sig", dir);
+        unlink(path);
+        rmdir(dir);
+    }
+    return rc;
+}
+
 static int usage(void)
 {
     fprintf(stderr, "usage: cosmo-upgrade [--check] [--stop-after=written|loader|set] DIR\n"
+                    "       cosmo-upgrade [--check] [--stop-after=written|loader|set] --fetch TAG|URL\n"
+                    "       cosmo-upgrade --check\n"
                     "       cosmo-upgrade --rollback\n"
                     "       cosmo-upgrade --status\n");
     return EXIT_USAGE;
@@ -1297,10 +1640,12 @@ static int usage(void)
 int main(int argc, char **argv)
 {
     bool check = false, roll = false, stat_only = false;
-    const char *stop = NULL, *dir = NULL;
+    const char *stop = NULL, *dir = NULL, *fetch = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--check") == 0)
             check = true;
+        else if (strcmp(argv[i], "--fetch") == 0 && i + 1 < argc && fetch == NULL)
+            fetch = argv[++i];
         else if (strcmp(argv[i], "--rollback") == 0)
             roll = true;
         else if (strcmp(argv[i], "--status") == 0)
@@ -1314,15 +1659,23 @@ int main(int argc, char **argv)
     }
     if (stop && strcmp(stop, "written") != 0 && strcmp(stop, "loader") != 0 && strcmp(stop, "set") != 0)
         return usage();
-    if ((roll || stat_only) ? (dir != NULL || check || stop || (roll && stat_only)) : dir == NULL)
+    if (fetch && dir)
         return usage();
+    if ((roll || stat_only) ? (dir != NULL || fetch || check || stop || (roll && stat_only))
+                            : (dir == NULL && fetch == NULL && (!check || stop)))
+        return usage();
+    bool latest = check && dir == NULL && fetch == NULL;
     struct timespec ts;
     g_now = clock_gettime(CLOCK_REALTIME, &ts) == 0 ? ts.tv_sec : 0;
     if (!stat_only && !check && hold_lock() < 0)
         return EXIT_REFUSED;
     relsig_ring_load(KEYS_DIR);
+    if (latest)
+        return check_latest();
     if (stat_only)
         return status();
+    if (fetch)
+        return fetch_set(fetch, check, stop);
     if (roll)
         return rollback();
     return upgrade(dir, check, stop);

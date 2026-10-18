@@ -58,7 +58,52 @@ On your computer, a checkout of the repository checks the same signature
 with `python3 scripts/modsign.py verify-detached --pub
 tools/keys/release-2026.pub --in SHA256SUMS --sig SHA256SUMS.sig`.
 
-## Upgrading
+## Fetching directly (from v1.0.6)
+
+From v1.0.6 `cosmo-upgrade` fetches a release itself, over HTTPS, from
+the project's release index on GitHub Pages,
+`https://vkuttyp.github.io/CosmoOS/releases` (`/etc/cosmo-release.conf`
+names it; the release workflow publishes each release there, without its
+images). The certificate is checked as `wget` checks it, against
+`/etc/ssl/certs/ca-certificates.crt`, so the clock must be right.
+
+```text
+cosmo$ cosmo-upgrade --check
+cosmo-upgrade: v1.0.7 is newer than this system's v1.0.6 (published ...): cosmo-upgrade --fetch v1.0.7
+cosmo$ cosmo-upgrade --fetch v1.0.7
+cosmo-upgrade: fetching the x86_64 set from https://vkuttyp.github.io/CosmoOS/releases/v1.0.7 into /var/cache/cosmo-upgrade/v1.0.7
+cosmo-upgrade: verified SHA256SUMS, signed by key 36ae7bb4947896ab in /etc/pkg/keys
+cosmo-upgrade: fetched the set's four files, each matching SHA256SUMS
+cosmo-upgrade: verified SHA256SUMS, signed by key 36ae7bb4947896ab in /etc/pkg/keys, and the set's four files against it
+...
+cosmo-upgrade: upgraded; reboot to run it, then pkg update && pkg upgrade
+```
+
+`SHA256SUMS` and its signature are fetched and checked first; a release
+they do not cover is refused before anything else is downloaded. Then
+everything is checked again, and written, as for a directory (below).
+`--fetch` also takes a URL, `https://.../DIR`, of a directory holding the
+set under the release's names; `--check --fetch` fetches and checks
+without writing. A transfer that is cut resumes where it stopped when
+the command runs again.
+
+**From v1.0.5 and earlier**, the system has no `cosmo-fetch` and its
+`cosmo-upgrade` cannot fetch. Fetch the new release's package with
+`wget`, check it, and run the programs it carries; `COSMO_FETCH` tells
+the new `cosmo-upgrade` where its `cosmo-fetch` is:
+
+```text
+cosmo$ mkdir /tmp/up && cd /tmp/up
+cosmo$ wget -q https://vkuttyp.github.io/CosmoOS/releases/v1.0.6/cosmoos-x86_64-cosmo-upgrade.cpk
+cosmo$ pkg install -n ./cosmoos-x86_64-cosmo-upgrade.cpk
+pkg: installing cosmo-upgrade-1.0.6 (3 files)
+cosmo$ tar -xf cosmoos-x86_64-cosmo-upgrade.cpk sbin/cosmo-upgrade bin/cosmo-fetch
+cosmo$ COSMO_FETCH=/tmp/up/bin/cosmo-fetch ./sbin/cosmo-upgrade --fetch v1.0.6
+```
+
+After the reboot the system has its own `cosmo-fetch` and `--fetch`.
+
+## Upgrading from a directory
 
 On your computer, download the new release set for your architecture
 (`kernel.elf`, `boot.tar`, `cmdline`, `manifest` and
@@ -91,7 +136,7 @@ cosmo$ mkdir /tmp/up && cd /tmp/up
 cosmo$ for f in kernel.elf boot.tar cmdline manifest cosmo-upgrade.cpk; do wget -q http://10.0.2.2:8000/cosmoos-x86_64-$f || break; done
 cosmo$ wget -q http://10.0.2.2:8000/SHA256SUMS && wget -q http://10.0.2.2:8000/SHA256SUMS.sig
 cosmo$ pkg install -n ./cosmoos-x86_64-cosmo-upgrade.cpk
-pkg: installing cosmo-upgrade-1.0.3-123 (2 files)
+pkg: installing cosmo-upgrade-... (3 files; 2 before v1.0.6)
 cosmo$ tar -xf cosmoos-x86_64-cosmo-upgrade.cpk sbin/cosmo-upgrade sbin/cosmo-verify
 cosmo$ ./sbin/cosmo-upgrade /tmp/up
 cosmo-upgrade: verified SHA256SUMS, signed by key 36ae7bb4947896ab in /etc/pkg/keys, and the set's four files against it
@@ -129,7 +174,8 @@ cosmo-upgrade: prev: kernel.elf ... bytes, boot.tar ... bytes, key 36ae7bb494789
 ```
 
 `cosmo-upgrade --check DIR` checks a release set and says whether it
-would replace the current one, writing nothing.
+would replace the current one, writing nothing; `cosmo-upgrade --check`
+alone says whether a newer release is published.
 
 ## If it is interrupted
 

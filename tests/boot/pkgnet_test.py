@@ -21,12 +21,20 @@ ca-certificates.crt, for this boot only. Every served INDEX is the build's
      the index with serial 10 (hello 1.0 alone) installs and runs it,
      fetched from the server (GET INDEX, then the package).
   f. The served index changes to serial 11 (hello 1.0 and 1.1):
-     `pkg update && pkg upgrade` moves hello from 1.0 to 1.1.
+     `pkg update && pkg upgrade` moves hello from 1.0 to 1.1. With a
+     second repository nothing answers for, `pkg update` reports it and
+     exits 0.
   d. The serial-10 index served again (a replay) is refused, and so is a
      serial-12 index that expired; the stored index is still serial 11.
   b. A repository whose hello-1.1.cpk has one byte changed (its index
      intact) is refused at install, hello 1.1 still verified; one whose
      INDEX is signed by another key is refused at update.
+  e. cosmo-upgrade --check against a served release index (LATEST)
+     naming v9.9.9 reports it newer, and naming the running release
+     reports this system up to date; `cosmo-upgrade --check --fetch URL`
+     fetches this build's release set (--set) over HTTPS, verifies it and
+     finds it already current; a set whose SHA256SUMS has one digest
+     changed is refused before any of its files is fetched.
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -175,7 +183,16 @@ def stage_pkgnet(args, results, inst):
         need(out, r"^pkg: installing hello-1\.1 \(\d+ files?\)$", "hello 1.1 installed")
         need(out, r"^pkg: 1 package upgraded$", "pkg upgrade's count")
         need(out, r"^hello, world \(hello 1\.1\)$", "hello 1.1 runs")
-        results.append("f. serial 11 served: pkg upgrade moved hello 1.0 -> 1.1")
+        # A second repository that cannot be reached (nothing listens on
+        # port 9): reported, and the update still succeeds from the first.
+        out = b.status(f"printf 'test {url}/repo\\ngone https://10.0.2.2:9/repo\\n' > /etc/pkg/repos.conf && "
+                       "pkg update", "upd")
+        need(out, r"^upd=0$", "pkg update with one repository unreachable (exit 0)")
+        need(out, r"^pkg: gone: not reached; its last index is kept$", "the unreachable repository reported")
+        need(out, r"^pkg: index updated: 2 packages from 1 of 2 repositories$", "the reachable one updated")
+        conf(b, f"test {url}/repo")
+        results.append("f. serial 11 served: pkg upgrade moved hello 1.0 -> 1.1; a second, unreachable repository "
+                       "was reported and the update still exited 0")
 
         # d. Freshness: a replay and an expired index.
         repos.publish("repo", 10, ["hello-1.0.cpk"], published=now - DAY)
@@ -216,6 +233,8 @@ def stage_pkgnet(args, results, inst):
         results.append("b. refused: hello-1.1.cpk with one byte changed (checksum does not match the index; "
                        "hello 1.1 still verified), an INDEX signed by another key (unknown signing key)")
 
+        stage_upgrade_check(args, b, results, www, url, good)
+
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
             raise Fail(f"pkgnet boot: QEMU exit code {rc}")
@@ -228,11 +247,72 @@ def stage_pkgnet(args, results, inst):
     results.append(f"pkgnet boot: PASS in {b.elapsed():.1f}s")
 
 
+def stage_upgrade_check(args, b, results, www, url, good):
+    """e. cosmo-upgrade --check and --fetch against what this harness serves."""
+    rel = os.path.join(www, "releases")
+    os.makedirs(rel, exist_ok=True)
+    out = b.status(f"echo 'url {url}/releases' > /etc/cosmo-release.conf", "rc")
+    need(out, r"^rc=0$", "writing /etc/cosmo-release.conf")
+    out = b.run("cat /proc/version")
+    running = need(out, r"^Linux version .* (\S+)$", "/proc/version").group(1)
+    with open(os.path.join(rel, "LATEST"), "w") as f:
+        f.write(f"tag: v9.9.9\npublished: {utc(time.time())}\n")
+    out = b.status("cosmo-upgrade --check", "chk")
+    need(out, r"^chk=0$", "cosmo-upgrade --check")
+    need(out, rf"^cosmo-upgrade: v9\.9\.9 is newer than this system's {re.escape(running)} \(published \S+\): "
+              r"cosmo-upgrade --fetch v9\.9\.9$", "a newer release reported")
+    base = re.match(r"^(v\d+\.\d+\.\d+(?:-rc\d+)?)", running)
+    if base:
+        with open(os.path.join(rel, "LATEST"), "w") as f:
+            f.write(f"tag: {base.group(1)}\npublished: {utc(time.time())}\n")
+        out = b.status("cosmo-upgrade --check", "chk")
+        need(out, r"^chk=0$", "cosmo-upgrade --check (current)")
+        need(out, rf"^cosmo-upgrade: this system's {re.escape(running)} is up to date: the newest release at "
+                  rf"\S+ is {re.escape(base.group(1))}$", "the running release reported up to date")
+    else:
+        raise Fail(f"the running build id '{running}' is not git describe's vX.Y.Z form")
+
+    names = [f"cosmoos-{args.arch}-{n}" for n in ("kernel.elf", "boot.tar", "cmdline", "manifest")]
+    for d, sums_change in (("set", False), ("setbad", True)):
+        os.makedirs(os.path.join(www, d), exist_ok=True)
+        for n in names + ["SHA256SUMS", "SHA256SUMS.sig"]:
+            shutil.copy(os.path.join(args.set, n), os.path.join(www, d, n))
+        if sums_change:
+            p = os.path.join(www, d, "SHA256SUMS")
+            lines = open(p).read().splitlines()
+            lines[0] = ("0" if lines[0][0] != "0" else "1") + lines[0][1:]
+            open(p, "w").write("\n".join(lines) + "\n")
+    del good.requests[:]
+    out = b.status(f"cosmo-upgrade --check --fetch {url}/set", "fetch")
+    need(out, r"^fetch=0$", "cosmo-upgrade --check --fetch")
+    need(out, r"^cosmo-upgrade: verified SHA256SUMS, signed by key [0-9a-f]{16} in /etc/pkg/keys$",
+         "the fetched SHA256SUMS verified")
+    need(out, r"^cosmo-upgrade: fetched the set's four files, each matching SHA256SUMS$", "the set fetched")
+    need(out, r"^cosmo-upgrade: check: this set is already current; the ESP is \S+$", "the fetched set checked")
+    got = good.paths()
+    want = [f"/set/{n}" for n in ["SHA256SUMS", "SHA256SUMS.sig"] + names]
+    if got != want:
+        raise Fail(f"cosmo-upgrade --fetch asked for {got}, expected {want}")
+    del good.requests[:]
+    out = b.status(f"cosmo-upgrade --check --fetch {url}/setbad", "fetch")
+    need(out, r"^fetch=3$", "a set with a changed SHA256SUMS (exit 3)")
+    need(out, r"^cosmo-upgrade: \S+/setbad: SHA256SUMS: bad signature \(key \S+\); nothing more fetched, "
+              r"nothing written$",
+         "the changed SHA256SUMS refused")
+    if any(not p.endswith(("/SHA256SUMS", "/SHA256SUMS.sig")) for p in good.paths()):
+        raise Fail(f"files were fetched after a refused SHA256SUMS: {good.paths()}")
+    results.append(f"e. cosmo-upgrade --check: v9.9.9 newer than {running}, {base.group(1)} up to date; "
+                   f"--check --fetch fetched and verified this build's set (already current); a changed "
+                   f"SHA256SUMS refused with nothing more fetched")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
     ap.add_argument("--repo", required=True, help="the build's package repository (PKG_REPO)")
     ap.add_argument("--sign-key", required=True, help="the key the build signed it with (PKGSIGN_KEY)")
+    ap.add_argument("--set", required=True, help="this build's release set (make release-set)")
+    ap.add_argument("--arch", required=True)
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
     args = ap.parse_args()

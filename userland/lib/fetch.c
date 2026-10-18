@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <spawn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -36,7 +37,10 @@ int fetch_url(const char *url, const char *path, const struct fetch_opts *o)
     const struct spawn_handle map[3] = { { 0, 0, 0, 0 }, { 1, 1, 0, 0 }, { 2, 2, 0, 0 } };
     fflush(stdout);
     fflush(stderr);
-    pid_t pid = spawnve(FETCH_PROGRAM, argv, (const char *const *)environ, map, 3);
+    /* COSMO_FETCH: another copy, as a release's cosmo-upgrade.cpk carries
+     * one for a system older than /bin/cosmo-fetch (docs/guide/upgrading.md). */
+    const char *prog = getenv("COSMO_FETCH");
+    pid_t pid = spawnve(prog && prog[0] ? prog : FETCH_PROGRAM, argv, (const char *const *)environ, map, 3);
     if (pid < 0)
         return -1;
     int status;

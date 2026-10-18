@@ -315,40 +315,59 @@ def stanza_field(stanza, key):
     return None
 
 
+def index_serial(blob):
+    """The header serial of a signed INDEX, 0 without a header."""
+    payload, trailer = modsign.split_trailer(blob)
+    if trailer is None:
+        die("INDEX is not signed")
+    first = payload.decode("ascii").split("\n\n", 1)[0]
+    for line in first.splitlines():
+        k, _, v = line.partition(": ")
+        if k == "serial":
+            return int(v)
+    return 0
+
+
+def published_index(blob, serial, published, days, key_path, only=None, input_pub=None):
+    """A network INDEX (PK10) from the signed INDEX `blob`, once its
+    signature checks against `input_pub` (32 bytes; by default the signing
+    key's own public half): its package stanzas (those of the files in
+    `only`, when given) after the header, signed with the key. Returns
+    (bytes, number of packages, expiry text)."""
+    if not 1 <= serial < 1 << 64:
+        die("the serial must be 1 to 2**64 - 1 (pkg's serial is 64 bits)")
+    if not 0 < days <= MAX_DAYS:
+        die(f"the validity must be 1 to {MAX_DAYS} days (PK10)")
+    # pkg's time_parse takes 1970 to 9999
+    if not 0 <= published or published + days * 86400 >= 253402300800:
+        die("the publication must be from 1970 and expire before the year 10000")
+    pub = input_pub or modsign.secret_to_public(modsign.read_hex_key(key_path, "secret key"))
+    if len(blob) < modsign.TRAILER.size:
+        die("INDEX is not signed")
+    why = modsign.verify_detached([pub], blob[:-modsign.TRAILER.size], blob[-modsign.TRAILER.size:])
+    if why:
+        die(f"INDEX: {why}; not published")
+    stanzas = index_stanzas(blob)
+    if only:
+        missing = set(only) - {stanza_field(st, "file") for st in stanzas}
+        if missing:
+            die(f"--only names files the index lacks: {', '.join(sorted(missing))}")
+        stanzas = [st for st in stanzas if stanza_field(st, "file") in only]
+    expires = utc_text(published + days * 86400)
+    header = f"serial: {serial}\npublished: {utc_text(published)}\nexpires: {expires}\n"
+    text = "\n".join([header] + stanzas).encode("ascii")
+    return sign(text, key_path), len(stanzas), expires
+
+
 def cmd_publish(args):
-    if not 1 <= args.serial < 1 << 64:
-        die("--serial must be 1 to 2**64 - 1 (pkg's serial is 64 bits)")
-    if not 0 < args.days <= MAX_DAYS:
-        die(f"--days must be 1 to {MAX_DAYS} (PK10)")
     published = int(time.time()) if args.published is None else int(
         datetime.datetime.strptime(args.published, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=datetime.timezone.utc).timestamp())
-    # pkg's time_parse takes 1970 to 9999
-    if not 0 <= published or published + args.days * 86400 >= 253402300800:
-        die("--published must be from 1970 and expire before the year 10000")
+    pub = modsign.read_hex_key(args.input_pub, "public key") if args.input_pub else None
     with open(args.index, "rb") as f:
-        blob = f.read()
-    # Only an index signed by the key expected is signed again: by default
-    # the publishing key's own, else --input-pub's.
-    pub = (modsign.read_hex_key(args.input_pub, "public key") if args.input_pub
-           else modsign.secret_to_public(modsign.read_hex_key(args.sign_key, "secret key")))
-    if len(blob) < modsign.TRAILER.size:
-        die(f"{args.index}: not signed")
-    why = modsign.verify_detached([pub], blob[:-modsign.TRAILER.size], blob[-modsign.TRAILER.size:])
-    if why:
-        die(f"{args.index}: {why}; not published")
-    stanzas = index_stanzas(blob)
-    if args.only:
-        missing = set(args.only) - {stanza_field(st, "file") for st in stanzas}
-        if missing:
-            die(f"--only names files the index lacks: {', '.join(sorted(missing))}")
-        stanzas = [st for st in stanzas if stanza_field(st, "file") in args.only]
-    header = (f"serial: {args.serial}\npublished: {utc_text(published)}\n"
-              f"expires: {utc_text(published + args.days * 86400)}\n")
-    text = "\n".join([header] + stanzas).encode("ascii")
-    write_atomic(args.out, sign(text, args.sign_key))
-    print(f"  PUBLISH  {args.out}: {len(stanzas)} packages, serial {args.serial}, "
-          f"expires {utc_text(published + args.days * 86400)}")
+        blob, n, expires = published_index(f.read(), args.serial, published, args.days, args.sign_key, args.only, pub)
+    write_atomic(args.out, blob)
+    print(f"  PUBLISH  {args.out}: {n} packages, serial {args.serial}, expires {expires}")
     return 0
 
 

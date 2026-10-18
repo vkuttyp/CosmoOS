@@ -12,7 +12,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define FETCH_PROGRAM "/bin/cosmo-fetch"
+#define FETCH_PROGRAM "/bin/cosmo-fetch"   /* or $COSMO_FETCH */
 
 /* cosmo-fetch's exit statuses. */
 #define FETCH_OK      0

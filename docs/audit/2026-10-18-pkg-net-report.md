@@ -141,3 +141,58 @@ PR 1, plus `make BUILD=release test-pkg-net`, on both architectures:
 every step exit 0, `reproducible: yes`. After the rebase onto PR 1's
 reviewed `cosmo-fetch` (main `bc6ea9f2`), `test-pkg-net` again on both:
 PASS.
+
+## PR 3: `cosmo-upgrade --fetch` and `--check`, and publishing
+
+**Where the repository is served.** GitHub Pages, from a `repo` branch
+the workflow force-pushes as one commit: `https://vkuttyp.github.io/CosmoOS/`.
+Release assets were the other choice the decision allowed; an asset's
+URL (`github.com/.../releases/download/...`) answers 302 to
+`release-assets.githubusercontent.com` (checked 2026-10-18 on v1.0.5's
+`SHA256SUMS`), another host, which `cosmo-fetch` refuses. The GitHub
+API needs no token but is rate-limited and its asset links redirect the
+same way. Pages needs no secret beyond the release key (the push uses the
+job's `GITHUB_TOKEN`), and the repository is public.
+
+| What | Where |
+|---|---|
+| `--fetch TAG\|URL`: `SHA256SUMS` and its signature first, verified before the set's four files are fetched (resumed, each checked); then the upgrade as for a directory | `fetch_set` (`userland/system/cosmo-upgrade.c`) |
+| `--check` alone: `LATEST`'s tag against `/proc/version`'s build id | `check_latest`, `tag_parse`, `tag_newer` |
+| `/etc/cosmo-release.conf`: `url`, optional `pin` | `release_conf`, `userland/etc/cosmo-release.conf` |
+| the site: `repo/ARCH/` from each `boot.tar`'s `repo/`, a network `INDEX` (serial = the site's + 1); `releases/TAG/` (newest 3); `releases/LATEST` | `scripts/publish-repo.py` |
+| after a release, weekly re-signing, by hand | `.github/workflows/repository.yml`, `release.yml`'s `repository` job |
+| an installed system's `repos.conf`: `local` and `cosmoos https://vkuttyp.github.io/CosmoOS/repo/ARCH` | `cosmo-install.c` |
+| `cosmo-upgrade.cpk` carries `bin/cosmo-fetch`, which `COSMO_FETCH` names, for a system older than v1.0.6 | `scripts/mkrelease.py`, `userland/lib/fetch.c` |
+
+**Serial.** The decision set the serial to the release's run number. The
+weekly re-signing must raise it too, and the repository workflow's runs
+are numbered apart from the release workflow's, so a run number could fall
+below a serial already published, which installed systems would then
+refuse. The serial is the published one plus 1 instead, which rises with
+every publication of either kind.
+
+**An unreachable repository is not a failure of the update.** With the
+network repository in every installed `repos.conf`, PR 2's rule (the
+worst status of any repository) made `pkg update && pkg install hello`
+fail on a system without the network, as `test-install` showed at once
+(its boots have no route to GitHub Pages, and the repository was not yet
+published): `pkg: index updated: 8 packages from 1 of 2 repositories`,
+exit 1. Now a repository not reached (no network, an HTTP error) is
+reported, `pkg: NAME: not reached; its last index is kept`, and the update
+exits 0 when another was updated; a refusal is still exit 3.
+`test-pkg-net` step f covers it.
+
+**Not pinned.** `repos.conf` and `cosmo-release.conf` support `pin`, but
+the project's entries carry none: the key behind `*.github.io` is
+GitHub's to rotate, and a pin would stop every installed system's updates
+on the day it changes.
+
+**Tests.** `test_publish_repo.py` (in `make host-test`) runs the script
+with a key made for the run: the first publication, a re-signing (serial
+2, the same stanzas), three more releases with `--keep 3`, and four refusals.
+`test-pkg-net` gains step e: `cosmo-upgrade --check` against a served
+`LATEST` naming v9.9.9 (newer) and the running release (up to date);
+`--check --fetch` of this build's release set over HTTPS (verified,
+already current, the server asked for `SHA256SUMS`, its signature, then
+the four files); a set whose `SHA256SUMS` has one digest changed refused
+with nothing more fetched. PASS on x86-64 and AArch64 (2026-10-18).

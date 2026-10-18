@@ -1,0 +1,125 @@
+# The package repository and the release index GitHub Pages serves
+# (roadmap 1.1 P6; docs/development.md, "Releases"). scripts/publish-repo.py
+# builds the site from the release's assets or from the site as it stands,
+# and this job pushes it as the one commit of the `repo` branch, which
+# Pages serves at https://vkuttyp.github.io/CosmoOS/:
+#
+#   repo/ARCH/INDEX, *.cpk    what an installed system's pkg update reads
+#   releases/TAG/...          what cosmo-upgrade --fetch TAG reads
+#   releases/LATEST           what cosmo-upgrade --check reads
+#
+# Triggers:
+# - the release workflow, once a release (not a pre-release) is published:
+#   its repository and set, LATEST pointing at it;
+# - weekly: every INDEX signed again with the next serial and a 30-day
+#   expiry (PK10), so installed systems keep accepting an unchanged one;
+# - by hand (workflow_dispatch) with a release tag: publish it again, or
+#   without one: the weekly step now.
+#
+# Secret: COSMOOS_RELEASE_KEY, the release workflow's. Here it signs each
+# INDEX and nothing else, and it never leaves the job's filesystem.
+
+name: Package repository
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+    secrets:
+      COSMOOS_RELEASE_KEY:
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'A release to publish (vX.Y.Z); empty signs the published INDEX files again'
+        required: false
+        default: ''
+  schedule:
+    - cron: '23 5 * * 1'   # Mondays 05:23 UTC
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-repository
+  cancel-in-progress: false
+
+env:
+  COSMO_RELEASE_KEY_FILE: /tmp/cosmo-release/release.key
+
+jobs:
+  publish:
+    name: publish the package repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: The site as published (the repo branch), if there is one
+        run: |
+          if git ls-remote --exit-code origin refs/heads/repo > /dev/null; then
+            git fetch -q --depth=1 origin repo
+            git worktree add -q --detach site FETCH_HEAD
+            rm -rf site/.git
+          else
+            mkdir site
+            echo "repository: no repo branch yet"
+          fi
+
+      - name: The release's files
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          # The tag reaches the shell only as "$TAG", and only in this form.
+          if printf '%s' "$TAG" | grep -Eqv '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "repository: '$TAG' is not a release tag vX.Y.Z (pre-releases are not published here)" >&2; exit 1
+          fi
+          mkdir rel
+          gh release download "$TAG" --dir rel --pattern 'SHA256SUMS*' --pattern 'cosmoos-*-boot.tar' \
+            --pattern 'cosmoos-*-kernel.elf' --pattern 'cosmoos-*-cmdline' --pattern 'cosmoos-*-manifest' \
+            --pattern 'cosmoos-*-cosmo-upgrade' --pattern 'cosmoos-*-cosmo-upgrade.cpk' --pattern 'cosmoos-*-BOOT*.EFI'
+          gh release view "$TAG" --json publishedAt --jq .publishedAt > rel-published
+          ls -l rel
+
+      - name: The release key
+        env:
+          KEY: ${{ secrets.COSMOOS_RELEASE_KEY }}
+        run: scripts/release-key.sh "$COSMO_RELEASE_KEY_FILE"
+
+      - name: Build the site
+        id: site
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          pub=$(ls tools/keys/*.pub)
+          if [ -n "$TAG" ]; then
+            python3 scripts/publish-repo.py --site site --out out --key "$COSMO_RELEASE_KEY_FILE" --pub "$pub" \
+              --release rel --tag "$TAG" --published "$(cat rel-published)" --latest
+            echo "what=$TAG" >> "$GITHUB_OUTPUT"
+          elif [ -d site/repo ]; then
+            python3 scripts/publish-repo.py --site site --out out --key "$COSMO_RELEASE_KEY_FILE" --pub "$pub"
+            echo "what=INDEX signed again" >> "$GITHUB_OUTPUT"
+          else
+            echo "repository: nothing published yet; nothing to sign again"
+          fi
+          rm -f "$COSMO_RELEASE_KEY_FILE"   # signed: nothing after this reads it
+
+      - name: Push the repo branch (one commit, replacing the last)
+        if: steps.site.outputs.what != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WHAT: ${{ steps.site.outputs.what }}
+        run: |
+          cd out
+          git init -q -b repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Package repository: $WHAT (run ${{ github.run_id }})"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" repo
+          git log --stat --oneline -1 | tail -3
