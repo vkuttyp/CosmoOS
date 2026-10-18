@@ -126,7 +126,13 @@ builds the debug image in a throwaway worktree and boots `mem4g`.
 ## Validation
 
 The AGENTS.md matrix on `3d01865f`, both architectures, plus
-`BUILD=release test-platforms`: see the PR.
+`BUILD=release test-platforms`: host-test, fuzz, analyze, debug `test` at
+`QEMU_SMP` 1, 2 and 4, test-smp2, test-chaos, test-harness-retry, the
+release boot and test-platforms (eleven AArch64 variants, three x86-64)
+all PASS by the harness's verdict, with one exception: the x86-64 release
+boot failed once with the firmware stall (both attempts, no loader
+banner; `docs/testing/flakes.md`, ninth sighting) and passed on rerun
+(18.9 s).
 
 ## Parallels Desktop
 
