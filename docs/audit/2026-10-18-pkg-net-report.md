@@ -273,3 +273,45 @@ adding the second key: the stale `boot.tar` still held one) is fixed in
 scope, as the task set: dependency resolution beyond `pkg`'s, delta
 updates, mirrors, several key rings per repository.
 
+
+## The closing PR's validation, v1.0.6, and the Parallels VM
+
+**#410.** The full matrix on `3fea297a`, plus `test-pkg-net`,
+`test-install` and `test-upgrade`, on both architectures: all 31 steps
+exit 0, `reproducible: yes`. After the review fixes, which touch the build
+(the archive-entry stamp, `PKG_TRUST_PUBS`), `test-pkg-net` on both and
+`make reproducible` on `816ebeb7`: PASS, yes. CI green; merged as
+`16dbec8b`, whose main CI passed. That ended the red main of `bd0594fc`,
+whose `test-install` had refused the newly published `INDEX` (`unknown
+signing key 36ae7bb4947896ab`) and whose AArch64 GIC boot showed
+`el2-guest-timer`'s sighting (`docs/testing/flakes.md`).
+
+**v1.0.6** was tagged on `16dbec8b`; release run 39176199026 succeeded,
+all 23 jobs (both builds of both architectures identical, the acceptance
+tests and the guide on the published bytes). Published
+2026-10-18T23:35:20Z at
+https://github.com/vkuttyp/CosmoOS/releases/tag/v1.0.6, 18 assets. Its
+`repository` job republished the site: `repo/x86_64` and `repo/aarch64`
+serial 2, expires 2026-11-17T23:35:31Z; `releases/v1.0.6/`;
+`releases/LATEST` v1.0.6.
+
+**The Parallels VM** ("CosmoOS 1.0.4", AArch64, Parallels Desktop, 4096
+MB, running v1.0.5) was upgraded in place on 2026-10-18 by the guide's
+"From v1.0.5 and earlier" path:
+1. `wget` of `cosmoos-aarch64-cosmo-upgrade.cpk` from Pages, over HTTPS;
+2. v1.0.5's `pkg install -n` checked it (`cosmo-upgrade-1.0.6 (3
+   files)`);
+3. `sbin/cosmo-upgrade` and `bin/cosmo-fetch` were unpacked;
+4. `COSMO_FETCH=/tmp/up/bin/cosmo-fetch ./sbin/cosmo-upgrade --fetch
+   v1.0.6`: `SHA256SUMS` verified (key `36ae7bb4947896ab`), the four files
+   fetched and matched, the loader switched, then the set; root `4 files
+   replaced, 2 added, 0 removed, 173 unchanged, 1 kept as changed here`;
+   exit 0.
+
+After the reboot, `/proc/version` ends in `v1.0.6`. With the network line
+appended to its installer-written `repos.conf` (the old one-path form,
+still read), `pkg update` said `pkg: cosmoos: serial 2, published
+2026-10-18T23:35:31Z, expires 2026-11-17T23:35:31Z` and `16 packages from
+2 repositories`, exit 0. `cosmo-upgrade --check` said `this system's
+v1.0.6 is up to date`. `\cosmo\prev` holds v1.0.5. The VM was powered off
+again.
