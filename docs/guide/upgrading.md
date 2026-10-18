@@ -82,8 +82,9 @@ package's signature, and every file in it, against that key.
 `pkg: installing cosmo-upgrade-...`, unpack the two programs from the
 package you just checked and run the new `cosmo-upgrade`. It then checks
 `SHA256SUMS.sig` and the rest of the release. (v1.0.4's package names
-itself `1.0.3-123`, the build ID its release build recorded; the
-signature check is what matters.)
+itself `1.0.3-123`, the build ID its release build recorded; from v1.0.5
+on the package and the kernel's banner name the release. The signature
+check is what matters.)
 
 ```text
 cosmo$ mkdir /tmp/up && cd /tmp/up
