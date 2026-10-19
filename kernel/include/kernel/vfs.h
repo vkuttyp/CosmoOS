@@ -191,6 +191,7 @@ struct fs_type {
 
 #define MOUNT_RDONLY (1u << 0)
 #define MOUNT_CACHE_IS_STORE (1u << 1)   /* the page cache holds the only copy (ramfs): never reclaimed */
+#define MOUNT_SCRATCH (1u << 2)          /* ramfs: the root is 01777 (COSMO_MOUNT_SCRATCH, a /tmp) */
 
 struct mount {
     struct kobject obj;

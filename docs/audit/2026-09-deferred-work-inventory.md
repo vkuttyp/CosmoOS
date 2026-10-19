@@ -1419,9 +1419,9 @@ each; none is needed by M2's acceptance test.
   (`priv -u 1000 -g 1000 touch /tmp/f` is `Permission denied`; found by
   P6's review, 2026-10-18). `cosmo-upgrade --check` keeps its file there
   and so works for any uid once that is fixed.~~ **Closed 2026-10-19**
-  (the same PR): `/etc/rc` runs `chmod 1777 /tmp` (native init has no
-  chmod); `test-install` requires `1777 0` and a file made by uid 1000
-  (`tools/tmp-mode-probe.py`).
+  (the same PR): init mounts it with `COSMO_MOUNT_SCRATCH`, a ramfs
+  root of 01777; `test-install` requires `1777 0` and a file made by uid
+  1000 (`tools/tmp-mode-probe.py`).
 - ~~The boot archive (`$(BOOT_ARCHIVE)`, `Makefile`) is rebuilt when an
   entry's file changes but not when the list of entries does: adding
   `etc/pkg/keys/release-2026.pub` (P6, 2026-10-18) left an existing

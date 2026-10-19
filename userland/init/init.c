@@ -74,6 +74,15 @@ static void fs_selftest(void)
     CHECK(cosmo_mount("none", "/tmp/flagm", "ramfs", COSMO_MOUNT_RDONLY) == 0);
     CHECK(cosmo_umount2("/tmp/flagm", 1u << 5) == -COSMO_EINVAL);
     CHECK(cosmo_umount2("/tmp/flagm", 0) == 0);
+    /* COSMO_MOUNT_SCRATCH: a ramfs root of 01777, as init mounts /tmp on
+     * a disk root; ramfs's alone. */
+    CHECK(cosmo_mount("none", "/tmp/flagm", "procfs", COSMO_MOUNT_SCRATCH) == -COSMO_EINVAL);
+    CHECK(cosmo_mount("none", "/tmp/flagm", "ramfs", COSMO_MOUNT_SCRATCH) == 0);
+    CHECK(cosmo_stat("/tmp/flagm", &st) == 0 && st.mode == 01777 && st.uid == 0);
+    CHECK(cosmo_umount2("/tmp/flagm", 0) == 0);
+    CHECK(cosmo_mount("none", "/tmp/flagm", "ramfs", 0) == 0);
+    CHECK(cosmo_stat("/tmp/flagm", &st) == 0 && st.mode == 0755);
+    CHECK(cosmo_umount2("/tmp/flagm", 0) == 0);
     CHECK(cosmo_rmdir("/tmp/flagm") == 0);
 
     /* A relative mount target names what the caller's own directory
@@ -5991,8 +6000,9 @@ static bool switch_to_disk_root(void)
         return false;
     }
     chdir("/");
-    /* Its root is made 0755; /etc/rc makes it 01777. */
-    if (mount("none", "/tmp", "ramfs", 0) < 0)
+    /* Everyone's scratch space: COSMO_MOUNT_SCRATCH makes the root 01777
+     * (a ramfs's root is otherwise 0755, which no uid but 0 could write). */
+    if (mount("none", "/tmp", "ramfs", COSMO_MOUNT_SCRATCH) < 0)
         printf("init: /tmp: %s (it stays on the disk)\n", strerror(errno));
     printf("init: switched to the disk root %s (root=%s)\n", dev, spec);
     return true;

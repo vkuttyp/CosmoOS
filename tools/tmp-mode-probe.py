@@ -10,10 +10,12 @@ ramfs on /tmp after switching to the disk root and left that ramfs's root
 at mode 0755, so no uid but 0 could write in /tmp (inventory section 18,
 found in P6's review).
 
---old reverse-applies the fix commit's userland/etc/rc (its `chmod 1777
-/tmp`, and nothing else) in a throwaway worktree, so the write
-is refused and the reboot stage fails. The fix commit is found by its
-subject, or named with --fix. The check runs in a release test-install on
+--old reverse-applies the fix commit's kernel and init changes (the
+COSMO_MOUNT_SCRATCH flag and init's use of it, and nothing else) in a
+throwaway worktree, so the write is refused and the reboot stage fails.
+The fix commit is found by its subject, or named with --fix; when the
+subject is not in --tree's history (a squashed merge), --tree's own
+commit is used if it changes those files. The check runs in a release test-install on
 either architecture.
 
 Logs stay under out/tmp-mode-probe/<arch>-<mode>. Exit 0 when the mode
@@ -27,8 +29,9 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBJECT = "init: an installed system's /tmp is 01777"
-SOURCES = ["userland/etc/rc"]
+SUBJECT = "init: /tmp on a disk root is a scratch ramfs, 01777 from its mount"
+SOURCES = ["kernel/include/uapi/cosmo/syscall.h", "kernel/include/kernel/vfs.h", "kernel/syscall/native.c",
+           "kernel-services/vfs/ramfs.c", "userland/init/init.c"]
 OK = "test-install: PASS"
 FAILED = "test-install: FAIL: uid 1000 writing in the installed system's /tmp: no line matching '^tmp=0$'"
 
@@ -56,6 +59,8 @@ def main():
             sha = a.fix or subprocess.check_output(
                 ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={SUBJECT}", a.tree],
                 text=True).strip()
+            if not sha and subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", a.tree, "--"] + SOURCES):
+                sha = a.tree   # a squashed merge: the tree's own commit is the fix
             if not sha:
                 sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}; name it with --fix")
             patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + SOURCES)

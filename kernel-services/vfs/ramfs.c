@@ -651,7 +651,6 @@ int ramfs_anon_reg(uint32_t mode, struct vnode **out)
 static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount *mnt)
 {
     (void)fs;
-    (void)flags;
     if (bdev != NULL)
         return -EINVAL;
     /* The page cache is this filesystem's store: its pages are never
@@ -659,7 +658,9 @@ static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, 
      * through /tmp (docs/kernel/security/design.md §3). */
     mnt->flags |= MOUNT_CACHE_IS_STORE;
     mnt->cache_limit_pages = RAMFS_MAX_PAGES;
-    struct vnode *root = ramfs_new(mnt, VNODE_DIR, 0755, NULL);
+    /* MOUNT_SCRATCH: everyone's scratch space, a /tmp (init's on a disk
+     * root, roadmap 1.1's index-expiry PR); the sticky bit is recorded. */
+    struct vnode *root = ramfs_new(mnt, VNODE_DIR, (flags & MOUNT_SCRATCH) ? 01777 : 0755, NULL);
     if (root == NULL)
         return -ENOMEM;
     /* The pin doubles as the mount's reference on the root. */

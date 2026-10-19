@@ -51,10 +51,15 @@ reads `INDEX.90`.
 ## /tmp
 
 init mounts a ramfs on `/tmp` after switching to the disk root, and a
-ramfs's root is made 0755. The native interface has no `chmod`, so the
-fix is the first command of `/etc/rc` (BusyBox ash on the live and the
-installed system alike): `chmod 1777 /tmp`. The live root's `/tmp` is
-01777 already (`ramfs_populate_boot`).
+ramfs's root is made 0755. The native interface has no `chmod`; the first
+version of this PR ran `chmod 1777 /tmp` from `/etc/rc`, which Qodo's
+review showed an upgraded system with an edited `/etc/rc` would never get
+(`cosmo-upgrade` keeps an operator's `/etc` files and writes `.new`
+beside them). The mount itself now makes the mode: a native flag,
+`COSMO_MOUNT_SCRATCH`, makes a ramfs root 01777 (`MOUNT_SCRATCH` to
+`ramfs_mount`; any other filesystem is `EINVAL`), and init passes it. init
+travels in the boot archive, which every upgrade replaces. The live
+root's `/tmp` is 01777 already (`ramfs_populate_boot`).
 
 ## Tests
 
@@ -72,10 +77,12 @@ installed system alike): `chmod 1777 /tmp`. The live root's `/tmp` is
 - `test-install` (both architectures): on the installed system `stat -c
   '%a %u' /tmp` prints `1777 0` and `priv -u 1000 -g 1000 touch
   /tmp/u1000` makes a file owned by 1000.
+- init's self-test (every debug boot): a `SCRATCH` ramfs is 01777 and
+  root's, a plain one 0755, and `SCRATCH` with `procfs` is `EINVAL`.
 - `tools/tmp-mode-probe.py [--old] [--arch A]`: `--old` reverse-applies
-  the fix commit's `/etc/rc` in a throwaway worktree; test-install's
-  reboot stage then fails `uid 1000 writing in the installed system's
-  /tmp`.
+  the fix commit's kernel and init changes in a throwaway worktree;
+  test-install's reboot stage then fails `uid 1000 writing in the
+  installed system's /tmp`.
 
 | Probe | x86-64 | AArch64 |
 |---|---|---|

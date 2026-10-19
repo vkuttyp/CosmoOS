@@ -3209,6 +3209,7 @@ See the [history index](README.md).
   every release and pre-release signs again, and the release checklist
   dispatches the job after a quiet month (GitHub disables a schedule
   after 60 days). An expired index is refused with one sentence naming
-  its expiry and serial. `/etc/rc` makes an installed system's `/tmp`
-  01777 (`tools/tmp-mode-probe.py`). Report:
+  its expiry and serial. init mounts an installed system's `/tmp` with
+  the new `COSMO_MOUNT_SCRATCH`, a ramfs root of 01777
+  (`tools/tmp-mode-probe.py`); the publisher always runs from `main`. Report:
   `docs/audit/2026-10-19-index-expiry-report.md`.

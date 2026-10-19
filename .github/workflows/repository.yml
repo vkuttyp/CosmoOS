@@ -64,8 +64,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Check out
+      # main's publisher, whatever started the job: a pre-release (any
+      # head, unguarded) or a dispatch from another branch must not run
+      # unreviewed code with the release key over the live site. A
+      # release's own files come from its assets, checked against its
+      # signed SHA256SUMS, not from this checkout.
+      - name: Check out main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
 
       - name: The site as published (the repo branch), if there is one
         run: |

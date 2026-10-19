@@ -324,7 +324,9 @@ jobs:
   # (.github/workflows/repository.yml; roadmap 1.1 P6): a release's own,
   # once it is published. A pre-release is not published there, but its
   # run signs every INDEX again (an empty tag), so each tag renews the
-  # site's expiry whether or not the weekly schedule still runs.
+  # site's expiry whether or not the weekly schedule still runs. The job
+  # runs main's publisher either way (repository.yml checks out main), so
+  # a pre-release of another head does not run its own.
   repository:
     name: package repository and release index
     needs: [guard, publish]

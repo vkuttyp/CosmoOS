@@ -616,7 +616,9 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    pushed as the one commit of the branch `repo`, which GitHub Pages
    serves at `https://vkuttyp.github.io/CosmoOS/`. For a pre-release the
    job publishes nothing new but signs every `INDEX` again, so every tag
-   renews the expiries. The same workflow runs weekly to sign every
+   renews the expiries. Whatever starts it, the job runs `main`'s
+   publisher (it checks out `main`): a pre-release may be any head, and
+   its own code never runs with the release key over the live site. The same workflow runs weekly to sign every
    `INDEX` again with the next serial and new expiries (an unchanged
    repository must not expire under the systems using it), and by hand
    (`gh workflow run repository.yml -f tag=vX.Y.Z`) to publish a release
