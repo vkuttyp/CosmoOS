@@ -79,6 +79,7 @@ void aarch64_cpu_init(void)
     /* FP/SIMD, for user threads and for the switch that saves them
      * (fpu.c). Every CPU, because CPACR_EL1 is per-CPU state. */
     aarch64_fpu_init_cpu();
+    arch_user_hwcap_note_cpu();   /* the boot CPU; aarch64_ap_entry notes the rest */
 }
 
 void arch_hardening_report(void)
@@ -164,7 +165,7 @@ void arch_dma_barrier(void)
  */
 #define IDF(reg, lsb) ((unsigned)(((reg) >> (lsb)) & 0xF))
 
-uint64_t arch_user_hwcap(void)
+static uint64_t hwcap_this_cpu(void)
 {
     uint64_t pfr0 = READ_SYSREG(id_aa64pfr0_el1), isar0 = READ_SYSREG(id_aa64isar0_el1);
     uint64_t isar1 = READ_SYSREG(S3_0_c0_c6_1) /* ID_AA64ISAR1_EL1 */, mmfr2 = READ_SYSREG(S3_0_c0_c7_2) /* ID_AA64MMFR2_EL1 */;
@@ -204,7 +205,7 @@ uint64_t arch_user_hwcap(void)
     return h;
 }
 
-uint64_t arch_user_hwcap2(void)
+static uint64_t hwcap2_this_cpu(void)
 {
     uint64_t isar0 = READ_SYSREG(id_aa64isar0_el1), isar1 = READ_SYSREG(S3_0_c0_c6_1);   /* ID_AA64ISAR1_EL1 */
     uint64_t h = 0;
@@ -214,5 +215,25 @@ uint64_t arch_user_hwcap2(void)
     if (IDF(isar1, 44) >= 1) h |= 1ull << 14;   /* BF16 */
     if (IDF(isar0, 60) >= 1) h |= 1ull << 16;   /* RNG: RNDR and RNDRRS, which EL0 may read */
     return h;
+}
+
+static uint64_t g_user_hwcap = ~0ull, g_user_hwcap2 = ~0ull;   /* intersections over the CPUs noted; ~0: none yet */
+
+void arch_user_hwcap_note_cpu(void)
+{
+    __atomic_fetch_and(&g_user_hwcap, hwcap_this_cpu(), __ATOMIC_RELAXED);
+    __atomic_fetch_and(&g_user_hwcap2, hwcap2_this_cpu(), __ATOMIC_RELAXED);
+}
+
+uint64_t arch_user_hwcap(void)
+{
+    uint64_t h = __atomic_load_n(&g_user_hwcap, __ATOMIC_RELAXED);
+    return h == ~0ull ? hwcap_this_cpu() : h;
+}
+
+uint64_t arch_user_hwcap2(void)
+{
+    uint64_t h = __atomic_load_n(&g_user_hwcap2, __ATOMIC_RELAXED);
+    return h == ~0ull ? hwcap2_this_cpu() : h;
 }
 #undef IDF

@@ -219,6 +219,7 @@ static int linux_process_exec(struct process *p, const struct elf_info *info)
 static unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x, uint64_t *w,
                     unsigned max)
 {
+    (void)p;   /* the credentials come snapshotted in x */
     unsigned k = 0;
     /* Every pair fits (PERSONALITY_AUXV_WORDS): a pair dropped for room
      * would leave the vector without its AT_NULL. */
@@ -232,7 +233,7 @@ static unsigned linux_auxv(struct process *p, const struct elf_info *info, const
      * credentials (setuid bits are ignored here): the effective ids are
      * not the real ones. musl's dynamic linker then ignores
      * LD_LIBRARY_PATH and LD_PRELOAD (roadmap 1.1 P4). */
-    bool secure = p->cred.euid != p->cred.ruid || p->cred.egid != p->cred.rgid;
+    bool secure = x->euid != x->ruid || x->egid != x->rgid;
     AUX(LX_AT_PHDR, info->phdr_vaddr);
     AUX(LX_AT_PHENT, info->phent);
     AUX(LX_AT_PHNUM, info->phnum);
@@ -242,10 +243,10 @@ static unsigned linux_auxv(struct process *p, const struct elf_info *info, const
     AUX(LX_AT_RANDOM, x->random_addr);
     AUX(LX_AT_EXECFN, x->execfn_addr);
     AUX(LX_AT_PLATFORM, x->platform_addr);
-    AUX(LX_AT_UID, p->cred.ruid);
-    AUX(LX_AT_EUID, p->cred.euid);
-    AUX(LX_AT_GID, p->cred.rgid);
-    AUX(LX_AT_EGID, p->cred.egid);
+    AUX(LX_AT_UID, x->ruid);
+    AUX(LX_AT_EUID, x->euid);
+    AUX(LX_AT_GID, x->rgid);
+    AUX(LX_AT_EGID, x->egid);
     AUX(LX_AT_SECURE, secure ? 1 : 0);
     AUX(LX_AT_HWCAP, arch_user_hwcap());
     AUX(LX_AT_HWCAP2, arch_user_hwcap2());

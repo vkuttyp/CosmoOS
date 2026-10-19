@@ -115,6 +115,10 @@ struct personality_auxv_args {
     uint64_t execfn_addr;    /* the path string on the stack */
     uint64_t platform_addr;  /* the platform string on the stack, 0 when none */
     uint64_t interp_base;    /* the interpreter's bias, 0 without one */
+    /* The credentials the vector reports (AT_UID.., AT_SECURE), read once
+     * under p->lock: a sibling thread may be in setresuid while the image
+     * is built, and the exec checks them again once it is alone. */
+    uint32_t ruid, euid, rgid, egid;
 };
 
 struct personality {

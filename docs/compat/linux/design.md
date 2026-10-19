@@ -507,8 +507,8 @@ not 0: an inode number is unique within one filesystem only.
 | `AT_EXECFN` | the path the caller passed to `execve` |
 | `AT_PLATFORM` | `x86_64` or `aarch64` |
 | `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID` | the credentials' real and effective ids |
-| `AT_SECURE` | 1 when the effective uid or gid is not the real one, as Linux decides for an exec that changes no credentials (setuid bits are ignored here); musl then ignores `LD_LIBRARY_PATH` and `LD_PRELOAD` |
-| `AT_HWCAP`, `AT_HWCAP2` | `arch_user_hwcap()`/`arch_user_hwcap2()`: x86-64 `CPUID.1:EDX` and 0 (`CR4.FSGSBASE` is off); AArch64 the `HWCAP_`/`HWCAP2_` bits of the boot CPU's ID registers, decoded as Linux's `arm64_elf_hwcaps`, for the features usable at EL0 without the kernel's help (not SVE, SME, pointer authentication, BTI, MTE, SSBS, the MRS emulation, the event stream or `DC CVAP`) |
+| `AT_SECURE` | 1 when the effective uid or gid is not the real one, as Linux decides for an exec that changes no credentials (setuid bits are ignored here); musl then ignores `LD_LIBRARY_PATH` and `LD_PRELOAD`. The ids are read once under the process lock while the image is built (`personality_auxv_args`), and again once the exec is alone; an exec whose ids a sibling thread changed in between ends the process, as Linux ends one that fails after `de_thread` |
+| `AT_HWCAP`, `AT_HWCAP2` | `arch_user_hwcap()`/`arch_user_hwcap2()`, the intersection over every CPU brought up (a process may run on any of them; `arch_user_hwcap_note_cpu` on each as it starts): x86-64 `CPUID.1:EDX` and 0 (`CR4.FSGSBASE` is off); AArch64 the `HWCAP_`/`HWCAP2_` bits of the ID registers, decoded as Linux's `arm64_elf_hwcaps`, for the features usable at EL0 without the kernel's help (not SVE, SME, pointer authentication, BTI, MTE, SSBS, the MRS emulation, the event stream or `DC CVAP`) |
 | `AT_CLKTCK` | 100 |
 
 No `AT_SYSINFO_EHDR` (there is no vDSO) and no `AT_FLAGS`. The native

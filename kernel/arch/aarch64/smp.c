@@ -18,6 +18,7 @@
 #include <kernel/string.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
+#include <arch/cpu.h>
 #include <arch/irqc.h>
 #include <arch/el2.h>
 #include <arch/percpu.h>
@@ -226,6 +227,7 @@ void aarch64_ap_entry(unsigned cpu)
         isb();
     }
     aarch64_fpu_init_cpu();   /* CPACR_EL1 is per-CPU: this one traps FP until told otherwise */
+    arch_user_hwcap_note_cpu();
     arch_syscall_init_cpu();
     arch_irqc_init_cpu();
     pc->hw_id = (uint32_t)MPIDR_AFFINITY(READ_SYSREG(mpidr_el1));
