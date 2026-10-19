@@ -16,10 +16,13 @@
              last commit's frees. make test-install requires no warning at
              the installed root's first mount.
 
---old reverse-applies the fix commit's sources (and nothing else) in a
-throwaway worktree, so the check fails; the commit is found by its subject
-(after a squashed merge, --tree's own commit when it changes the sources),
-or named with --fix. Each check runs in a release build on either
+--old reverse-applies, newest first, the defect's commits (the fix, and
+for zero and wget #413's review commit that reworked it) on the defect's
+sources and nothing else, in a throwaway worktree, so the check fails.
+Each commit is found by its subject, which --grep matches anywhere in a
+message (a squashed merge's body lists them); failing that, --tree's own
+commit when it changes the sources; or name them with --fix (repeatable,
+newest first). Each check runs in a release build on either
 architecture. (sftp's "?" link count, P3's fourth item, is OpenSSH's own
 rendering, not a defect: docs/audit/2026-10-19-p3-residue-report.md.)
 
@@ -34,19 +37,22 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+REVIEW = "P3 review: a filled read is one read; wget per connection; sftp's own file"
 DEFECTS = {
     "zero": dict(
-        subject="io: a large read of a file or /dev/zero is filled, not cut at the bounce",
+        subjects=["io: a large read of a file or /dev/zero is filled, not cut at the bounce", REVIEW],
+        # The self-test the review added calls read_filled, so it goes too.
         sources=["kernel/syscall/native.c", "kernel/include/kernel/object.h", "kernel/include/kernel/vfs.h",
-                 "kernel-services/vfs/vfs.c", "kernel-services/vfs/memdev.c"],
+                 "kernel-services/vfs/vfs.c", "kernel-services/vfs/memdev.c", "kernel-services/vfs/vfstest.c",
+                 "kernel/core/selftest.c", "kernel/include/kernel/selftest.h"],
         target="test-busybox", ok="BBTEST: ok dd-zero-1m", failed="BBTEST: FAIL dd-zero-1m: want [4+0 4+0 4194304]"),
     "wget": dict(
-        subject="wget: a refused certificate ends on ssl_client's reason",
+        subjects=["wget: a refused certificate ends on ssl_client's reason", REVIEW],
         sources=["ports/busybox/wget-ssl-client.patch"],
         target="test-net-login", ok="test-net-login: PASS",
         failed="added 'wget: error getting response' after ssl_client's reason"),
     "freecount": dict(
-        subject="cosmofs: compare the free count with the bitmap before the free-log replay",
+        subjects=["cosmofs: compare the free count with the bitmap before the free-log replay"],
         sources=["kernel-services/filesystem/cosmofs/cosmofs_core.c"],
         target="test-install", ok="test-install: PASS",
         failed="the installed root's first mount: the mount warned 'cosmofs: free block count"),
@@ -59,7 +65,7 @@ def main():
     ap.add_argument("--old", action="store_true")
     ap.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64")
     ap.add_argument("--tree", default="HEAD")
-    ap.add_argument("--fix", help="the fix commit (default: found by its subject)")
+    ap.add_argument("--fix", action="append", help="a fix commit, newest first (default: found by subject)")
     a = ap.parse_args()
     d = DEFECTS[a.defect]
     mode = "old" if a.old else "fixed"
@@ -75,18 +81,24 @@ def main():
                    stdout=subprocess.DEVNULL)
     try:
         if a.old:
-            sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={d['subject']}",
-                 a.tree], text=True).strip()
-            if not sha and subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", a.tree, "--"]
-                                                   + d["sources"]):
-                sha = a.tree   # a squashed merge: the tree's own commit is the fix
-            if not sha:
-                sys.exit(f"no commit '{d['subject']}' reachable from {a.tree}; name it with --fix")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + d["sources"])
-            if not patch:
-                sys.exit(f"commit {sha[:8]} does not change {d['sources']}")
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            shas = a.fix
+            if not shas:
+                found = [subprocess.check_output(
+                    ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={subj}",
+                     a.tree], text=True).strip() for subj in d["subjects"]]
+                # Newest first; one commit found for two subjects (a squash) is reversed once.
+                shas = list(dict.fromkeys(sh for sh in reversed(found) if sh))
+            if not shas and subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", a.tree, "--"]
+                                                    + d["sources"]):
+                shas = [a.tree]   # a squashed merge with an edited message: the tree's own commit
+            if not shas:
+                sys.exit(f"no commit {d['subjects']} reachable from {a.tree}; name them with --fix")
+            for sha in shas:
+                patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"]
+                                                + d["sources"])
+                if not patch:
+                    sys.exit(f"commit {sha[:8]} does not change {d['sources']}")
+                subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
         make = "gmake" if sys.platform == "darwin" else "make"
         out = tree / "out" / "rel"
         args = [make, "-C", str(tree), "-j8", f"ARCH={a.arch}", "BUILD=release", f"OUT={out}",
