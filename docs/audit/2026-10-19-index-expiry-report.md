@@ -106,3 +106,9 @@ exit 0 (seconds):
 `INDEX.90` yet: `pkg` fell back to `INDEX` (serial 3, expiring
 2026-11-18T05:34:08Z). The first publication after this merges adds
 `INDEX.90`.
+
+After the review changes (`f1836d4e`: `COSMO_MOUNT_SCRATCH`, the
+publisher from `main`, the probe after a squash), both architectures
+again: debug `make test`, `BUILD=release all test`, `test-install`, the
+probe table above in both modes, and `host-test` (x86-64), every one exit
+0.
