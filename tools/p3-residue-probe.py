@@ -17,7 +17,8 @@
              the installed root's first mount.
 
 --old reverse-applies the fix commit's sources (and nothing else) in a
-throwaway worktree, so the check fails; the commit is found by its subject,
+throwaway worktree, so the check fails; the commit is found by its subject
+(after a squashed merge, --tree's own commit when it changes the sources),
 or named with --fix. Each check runs in a release build on either
 architecture. (sftp's "?" link count, P3's fourth item, is OpenSSH's own
 rendering, not a defect: docs/audit/2026-10-19-p3-residue-report.md.)
@@ -77,6 +78,9 @@ def main():
             sha = a.fix or subprocess.check_output(
                 ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={d['subject']}",
                  a.tree], text=True).strip()
+            if not sha and subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", a.tree, "--"]
+                                                   + d["sources"]):
+                sha = a.tree   # a squashed merge: the tree's own commit is the fix
             if not sha:
                 sys.exit(f"no commit '{d['subject']}' reachable from {a.tree}; name it with --fix")
             patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + d["sources"])
