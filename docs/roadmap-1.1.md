@@ -129,7 +129,7 @@ ticked in the same PR).
   self-test reads a process's `stat` and `status` while it exits, many
   times, with no fault or leak. Done 2026-10-16 by S3, with BusyBox's
   `ps` (below).
-- [ ] **P3 The Parallels-test residue.** The four small defects the
+- [x] **P3 The Parallels-test residue.** The four small defects the
   post-1.0 tests found: `wget`'s bad-certificate exit message, `sftp`'s
   link count, `/dev/zero`'s 64 KiB short read, and the installer's stale
   superblock free count. Each a defect fix with its own failing test and
@@ -140,7 +140,8 @@ ticked in the same PR).
   and requires the server-side count, `stat -c %h`, to be 1);
   `test-busybox` checks `dd if=/dev/zero bs=1M count=4` copies 4 full
   records; `test-install` requires the installed disk's first mount to
-  log no free-count warning.
+  log no free-count warning. Done 2026-10-19
+  (`docs/audit/2026-10-19-p3-residue-report.md`).
 - [ ] **P4 Shared libraries.** musl's dynamic linker as `PT_INTERP`, with
   `libc.so` in the image; until now only a stand-in interpreter has run.
   **Acceptance:** a dynamically linked musl BusyBox (and a small

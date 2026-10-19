@@ -3213,3 +3213,12 @@ See the [history index](README.md).
   the new `COSMO_MOUNT_SCRATCH`, a ramfs root of 01777
   (`tools/tmp-mode-probe.py`); the publisher always runs from `main`. Report:
   `docs/audit/2026-10-19-index-expiry-report.md`.
+- **The Parallels-test residue (roadmap 1.1 P3, 2026-10-19).** A read of
+  a regular file or `/dev/zero` larger than the 64 KiB bounce is filled
+  (`kobject_io_type.read_fills`), so `dd bs=1M` copies whole records.
+  `wget` refusing a certificate ends on `ssl_client`'s reason, not a
+  stale errno. cosmofs compares the superblock's free count with the
+  bitmap before the free-log replay, so a clean mount no longer warns.
+  `sftp`'s `?` link count is OpenSSH's own rendering, recorded with the
+  owner's amended acceptance. `tools/p3-residue-probe.py`. Report:
+  `docs/audit/2026-10-19-p3-residue-report.md`.
