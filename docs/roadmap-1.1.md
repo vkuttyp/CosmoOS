@@ -134,7 +134,10 @@ ticked in the same PR).
   link count, `/dev/zero`'s 64 KiB short read, and the installer's stale
   superblock free count. Each a defect fix with its own failing test and
   probe. **Acceptance:** `test-net-login` requires the refusal to end on
-  mbedTLS's reason alone and `sftp ls -l` to show a numeric link count;
+  mbedTLS's reason alone and `sftp ls -l` to show a numeric link count
+  (amended 2026-10-19 by the owner: the `?` is OpenSSH's own rendering,
+  as on Linux, so the test accepts the client's `?` or `1` for a new file
+  and requires the server-side count, `stat -c %h`, to be 1);
   `test-busybox` checks `dd if=/dev/zero bs=1M count=4` copies 4 full
   records; `test-install` requires the installed disk's first mount to
   log no free-count warning.
