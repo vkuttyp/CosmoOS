@@ -358,7 +358,14 @@ not follow `requires` (a package that needs a library package says so
 with `depends:` as well). `pkg remove` refuses a package that provides a
 library another installed package requires and nothing else provides:
 `pkg: NAME: OTHER requires its library SO` (`-f` overrides, as for
-`depends`). The repository's `busybox-dyn` (`/usr/bin/busybox-dyn`,
+`depends`), and an install that replaces a package with a version that
+no longer provides such a library is refused the same way: `pkg: NAME:
+OTHER requires its library SO, which NAME-VERSION does not provide`
+(`libs_still_required`, before anything is written). The checks read
+every installed record; with more than 128 installed (`PKG_LIB_SCAN`)
+they refuse rather than miss one (`-f` goes on). The builder refuses a
+name `pkg` would not parse (name characters with `.so` in them, at most
+63 bytes) and more than 32 of either kind. The repository's `busybox-dyn` (`/usr/bin/busybox-dyn`,
 BusyBox linked against `libc.so`) requires `libc.so` only.
 
 ### Upgrade

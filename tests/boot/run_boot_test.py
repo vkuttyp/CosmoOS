@@ -492,6 +492,7 @@ PKGTEST_MARKERS = [
     r"^pkg: demo-c requires the library libdemo\.so, which neither ",
     r"^pkg: installing demo-c-1\.0",
     r"^pkg: libdemo: demo-c requires its library libdemo\.so$",
+    r"^pkg: libdemo: demo-c requires its library libdemo\.so, which libdemo-2\.0 does not provide$",
     r"^pkg: installing busybox-dyn-",
     r"^busybox-dyn package ok$",
 ]

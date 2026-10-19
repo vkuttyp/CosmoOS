@@ -1467,6 +1467,11 @@ none is needed by its acceptance test.
   `/etc/pkg/provides` does the same.
 - glibc's dynamic linker has not been tried, and there is no vDSO
   (`AT_SYSINFO_EHDR`).
+- `pkg`'s older whole-database checks (a file owned by another package,
+  `remove`'s `depends`, `list`, `upgrade`) read at most 128 installed
+  records and pass over the rest silently; the library checks refuse
+  past that (`PKG_LIB_SCAN`, #416's review). Found by the review; not
+  needed by P4.
 - `cosmo-upgrade --fetch` brings the root to the new release with the
   running binary's rules, so a release that adds a directory the old one
   does not know (v1.0.7's `lib/`) needs a second run, by the new binary,

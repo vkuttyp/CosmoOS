@@ -194,20 +194,34 @@ static bool installed_load(const char *name, struct manifest *m)
     return true;
 }
 
-static int installed_names(char names[][PKG_NAME_MAX], int max)
+/* The installed packages' names, at most `max`; *more (may be NULL) says
+ * whether there were others. */
+static int installed_names_more(char names[][PKG_NAME_MAX], int max, bool *more)
 {
+    if (more)
+        *more = false;
     DIR *d = opendir(PKG_DB_INSTALLED);
     if (d == NULL)
         return 0;
     int n = 0;
     struct dirent *e;
-    while ((e = readdir(d)) != NULL && n < max) {
+    while ((e = readdir(d)) != NULL) {
         if (e->d_name[0] == '.' || !name_valid(e->d_name))
             continue;
+        if (n == max) {
+            if (more)
+                *more = true;
+            break;
+        }
         strlcpy(names[n++], e->d_name, PKG_NAME_MAX);
     }
     closedir(d);
     return n;
+}
+
+static int installed_names(char names[][PKG_NAME_MAX], int max)
+{
+    return installed_names_more(names, max, NULL);
 }
 
 /*
@@ -740,10 +754,22 @@ static bool owned_by_other(const char *path, const char *self, char *owner, size
  * libraries") ---
  * Minimal dependency checking, no solver: a package's "requires" must each
  * be provided by the base system (PKG_BASE_PROVIDES), by the package
- * itself, or by an installed package other than `skip`; and a package
- * whose library another installed package requires is not removed while
- * nothing else provides it.
+ * itself, or by an installed package other than `skip`; and a library
+ * another installed package requires is not taken away -- by removing
+ * the package that provides it, or by replacing that package with a
+ * version that no longer does -- while nothing else provides it. Both
+ * read every installed record, so with more than PKG_LIB_SCAN installed
+ * they refuse rather than miss a provider or a user (--force goes on).
  */
+#define PKG_LIB_SCAN 128
+
+static bool lib_scan_too_many(const char *name, bool more)
+{
+    if (more)
+        fprintf(stderr, "pkg: %s: more than %d packages are installed, too many to check shared libraries "
+                "against%s\n", name, PKG_LIB_SCAN, g_force ? " (going on anyway)" : "");
+    return more && !g_force;
+}
 static bool base_provides(const char *so)
 {
     FILE *f = fopen(PKG_BASE_PROVIDES, "r");
@@ -771,8 +797,8 @@ static bool lib_in(const char (*libs)[PKG_SONAME_MAX], int n, const char *so)
  * into `who` (may be NULL). */
 static bool installed_provides(const char *so, const char *skip, char *who, size_t whocap)
 {
-    char names[128][PKG_NAME_MAX];
-    int n = installed_names(names, 128);
+    char names[PKG_LIB_SCAN][PKG_NAME_MAX];
+    int n = installed_names(names, PKG_LIB_SCAN);
     for (int i = 0; i < n; i++) {
         if (skip && strcmp(names[i], skip) == 0)
             continue;
@@ -792,6 +818,13 @@ static bool installed_provides(const char *so, const char *skip, char *who, size
 
 static int check_requires(const struct manifest *m)
 {
+    if (m->nrequires > 0) {
+        char names[PKG_LIB_SCAN][PKG_NAME_MAX];
+        bool more;
+        (void)installed_names_more(names, PKG_LIB_SCAN, &more);
+        if (lib_scan_too_many(m->name, more))
+            return EXIT_FAILED;
+    }
     for (int i = 0; i < m->nrequires; i++) {
         const char *so = m->requires[i];
         if (lib_in((const char (*)[PKG_SONAME_MAX])m->provides, m->nprovides, so) || base_provides(so) ||
@@ -804,6 +837,50 @@ static int check_requires(const struct manifest *m)
     return 0;
 }
 
+/*
+ * Libraries `old` (an installed package) provides and `next` (its
+ * replacement; NULL for a removal) does not, that another installed
+ * package requires and neither the base system nor a third package
+ * provides: one line for each such user. EXIT_FAILED when any (unless
+ * --force), else 0.
+ */
+static int libs_still_required(const struct manifest *old, const struct manifest *next)
+{
+    if (old->nprovides == 0)
+        return 0;
+    char names[PKG_LIB_SCAN][PKG_NAME_MAX];
+    bool more;
+    int n = installed_names_more(names, PKG_LIB_SCAN, &more);
+    if (lib_scan_too_many(old->name, more))
+        return EXIT_FAILED;
+    int rc = 0;
+    for (int i = 0; i < old->nprovides; i++) {
+        const char *so = old->provides[i];
+        if ((next && lib_in((const char (*)[PKG_SONAME_MAX])next->provides, next->nprovides, so)) ||
+            base_provides(so) || installed_provides(so, old->name, NULL, 0))
+            continue;
+        for (int k = 0; k < n; k++) {
+            if (strcmp(names[k], old->name) == 0)
+                continue;
+            struct manifest other;
+            if (!installed_load(names[k], &other))
+                continue;
+            if (lib_in((const char (*)[PKG_SONAME_MAX])other.requires, other.nrequires, so)) {
+                if (next)
+                    fprintf(stderr, "pkg: %s: %s requires its library %s, which %s-%s does not provide%s\n",
+                            old->name, names[k], so, next->name, next->version, g_force ? " (replacing anyway)" : "");
+                else
+                    fprintf(stderr, "pkg: %s: %s requires its library %s%s\n", old->name, names[k], so,
+                            g_force ? " (removing anyway)" : "");
+                if (!g_force)
+                    rc = EXIT_FAILED;
+            }
+            manifest_free(&other);
+        }
+    }
+    return rc;
+}
+
 static int install_loaded(struct loaded *l)
 {
     int lrc = check_requires(&l->m);
@@ -811,6 +888,10 @@ static int install_loaded(struct loaded *l)
         return lrc;
     struct manifest old;
     bool had_old = installed_load(l->m.name, &old);
+    if (had_old && (lrc = libs_still_required(&old, &l->m)) != 0) {
+        manifest_free(&old);
+        return lrc;
+    }
     struct dirlist old_dirs = { .n = 0 };
     if (had_old && old.dirs)
         old_dirs = *old.dirs;
@@ -1330,32 +1411,10 @@ static int cmd_remove(int argc, char **argv)
                         blocked = true;
                 }
             }
-            /* A library of this package that `other` requires and nothing
-             * else provides. */
-            for (int j = 0; j < other.nrequires; j++) {
-                const char *so = other.requires[j];
-                if (!lib_in((const char (*)[PKG_SONAME_MAX])m.provides, m.nprovides, so) ||
-                    lib_in((const char (*)[PKG_SONAME_MAX])other.provides, other.nprovides, so) || base_provides(so))
-                    continue;
-                bool elsewhere = false;
-                for (int q = 0; q < n && !elsewhere; q++) {
-                    if (strcmp(names[q], argv[i]) == 0 || strcmp(names[q], names[k]) == 0)
-                        continue;
-                    struct manifest third;
-                    if (!installed_load(names[q], &third))
-                        continue;
-                    elsewhere = lib_in((const char (*)[PKG_SONAME_MAX])third.provides, third.nprovides, so);
-                    manifest_free(&third);
-                }
-                if (!elsewhere) {
-                    fprintf(stderr, "pkg: %s: %s requires its library %s%s\n", argv[i], names[k], so,
-                            g_force ? " (removing anyway)" : "");
-                    if (!g_force)
-                        blocked = true;
-                }
-            }
             manifest_free(&other);
         }
+        if (libs_still_required(&m, NULL))
+            blocked = true;
         if (blocked) {
             manifest_free(&m);
             rc = EXIT_FAILED;

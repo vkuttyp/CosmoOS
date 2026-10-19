@@ -45,6 +45,12 @@ VERSION_RE = re.compile(r"^[0-9]+(\.[0-9]+)*(-[0-9]+)?$")
 DEPEND_RE = re.compile(r"^([a-z0-9][a-z0-9+._-]*)\s*(?:(>=|<=|=|<|>)\s*([0-9]+(?:\.[0-9]+)*(?:-[0-9]+)?))?$")
 FORBIDDEN_PREFIXES = ("boot/", "dev/", "tmp/", "mnt/")
 SONAME_RE = re.compile(r"^[A-Za-z0-9_+-][A-Za-z0-9._+-]*\.so[A-Za-z0-9._+-]*$")   # pkg's soname_valid
+SONAME_MAX = 63    # pkg/pkg.h PKG_SONAME_MAX less the NUL
+MAX_LIBS = 32      # pkg/pkg.h PKG_MAX_LIBS, for provides and for requires
+
+
+def soname_ok(name):
+    return bool(SONAME_RE.match(name)) and len(name) <= SONAME_MAX
 
 
 def die(msg):
@@ -71,8 +77,9 @@ def parse_recipe(path):
                     die(f"{path}:{lineno}: bad dependency '{value}'")
                 rec["depends"].append(re.sub(r"\s+", " ", value))
             elif key in ("provides", "requires"):
-                if not SONAME_RE.match(value):
-                    die(f"{path}:{lineno}: bad soname '{value}'")
+                if not soname_ok(value):
+                    die(f"{path}:{lineno}: bad soname '{value}' (pkg takes {SONAME_MAX} bytes of name "
+                        "characters with .so in them)")
                 rec[key].append(value)
             elif key == "program":
                 parts = value.split()
@@ -240,8 +247,18 @@ def manifest_text(rec, files):
         if soname and soname not in provides:
             provides.append(soname)
         needed += [n for n in libs if n not in needed]
+    requires = [n for n in needed if n not in provides]
+    # What pkg's parser accepts (manifest.c), so pkg never refuses a
+    # package this built: names from an ELF are checked as a recipe's are.
+    for key, names in (("provides", provides), ("requires", requires)):
+        bad = [n for n in names if not soname_ok(n)]
+        if bad:
+            die(f"{rec['name']}: {key} '{bad[0]}' is not a soname pkg accepts (name characters with .so in "
+                f"them, at most {SONAME_MAX} bytes)")
+        if len(names) > MAX_LIBS:
+            die(f"{rec['name']}: {len(names)} {key} entries, more than pkg's {MAX_LIBS}")
     lines += [f"provides: {s}" for s in provides]
-    lines += [f"requires: {n}" for n in needed if n not in provides]
+    lines += [f"requires: {n}" for n in requires]
     for path, mode, data in files:
         lines.append(f"file: {path} {mode:04o} {len(data)} {hashlib.sha512(data).hexdigest()}")
     return ("\n".join(lines) + "\n").encode("ascii")

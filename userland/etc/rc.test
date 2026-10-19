@@ -122,6 +122,8 @@ pkg install libdemo || FAILS=1
 pkg install demo-c || FAILS=1
 pkg remove libdemo 2> /tmp/shtest/librm && FAILS=1
 cat /tmp/shtest/librm
+pkg install /boot/tests/pkg/libdemo-2.0.cpk 2> /tmp/shtest/libup && FAILS=1
+cat /tmp/shtest/libup
 pkg remove demo-c || FAILS=1
 pkg remove libdemo || FAILS=1
 pkg install busybox-dyn || FAILS=1

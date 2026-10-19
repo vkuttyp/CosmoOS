@@ -40,7 +40,7 @@ boot archive put `lib/` under `/boot`.
    below.
 4. W^X (L12) refuses any `PROT_WRITE|PROT_EXEC` mapping or protection.
    A library with text relocations needs exactly that, so its load fails
-   with `EINVAL`, and the kernel logs `linux: pid N: mprotect with
+   with `EINVAL`, and the kernel logs once per exec `linux: pid N: mprotect with
    PROT_WRITE|PROT_EXEC refused (W^X): a library with text relocations
    cannot be loaded here; build it -fPIC` (`lx_wx_refused`). No shipped
    binary has text relocations (`llvm-objdump -p` of `libc.so` and
@@ -92,7 +92,11 @@ manifest. `pkg install` refuses a package whose required library neither
 the base system (`/etc/pkg/provides`: `libc.so`), the package itself nor
 an installed package provides; `pkg remove` refuses to remove a library
 another installed package requires and nothing else provides
-(`--force` overrides, as for files). No solver. `INDEX` carries neither
+(`--force` overrides, as for files), and so does an install that
+replaces a package with a version no longer providing it (#416's review).
+With more than 128 packages installed the checks refuse rather than miss
+one. The builder refuses a name `pkg` would not parse and more than 32
+of either kind. No solver. `INDEX` carries neither
 key, so v1.0.6's `pkg` reads the same index. The repository gains
 `busybox-dyn` and the fixtures `libdemo`, `demo-c` and `demo-d`.
 
@@ -104,7 +108,7 @@ key, so v1.0.6's `pkg` reads the same index. The repository gains
 | the vector against `dladdr`/`dl_iterate_phdr`, layout, RELRO of the executable (and of libc.so on x86-64), W^X, TLS | `dynhello` (debug boot, test-busybox) | `dynhello: ok` | `dynhello: ok` |
 | `dlopen` through `RUNPATH`, `dlsym`, a missing library, a text relocation refused, `LD_LIBRARY_PATH` used (7) and ignored when `AT_SECURE` (42), library ASLR | `dltest` (debug boot, test-busybox) | `dltest: ok` | `dltest: ok` |
 | M3's `ash.sh` and the BusyBox testsuite under `/bin/busybox.dyn`, `/usr/bin` first | `make test-busybox` | PASS | PASS |
-| a required library missing, a library still required, `busybox-dyn` installed and run | `rc.test` (debug boot) | its six lines | its six lines |
+| a required library missing, a library still required (by `remove`, and by an install of `libdemo-2.0.cpk` that drops it), `busybox-dyn` installed and run | `rc.test` (debug boot) | its seven lines | its seven lines |
 | manifest round trip, `elf_libs` of a built library and program | `make host-test` | PASS | PASS |
 
 ASLR, from the debug boots (`dltest` runs `dynhello addr` and `dltest addr` twice each and requires every pair to differ):
@@ -122,6 +126,17 @@ nothing. That path does not depend on the kernel, so musl does the same
 under Linux; it is upstream behaviour, recorded in the inventory. `dynhello` checks libc.so's RELRO on x86-64
 only, and the executable's on both (an 8 KiB relocated table makes its
 RELRO at least a page).
+
+## Review
+
+- #414 (Qodo): the W^X refusal is logged once per exec (a program
+  probing for RWX in a loop flooded the console); `libdltest.so` moved
+  from `/usr/lib/cosmo-test` (every image and installed root) to
+  `/boot/tests/dyn/lib`, beside the tests; the AArch64 marker table names
+  today's markers.
+- #416 (Qodo): replacing a library package checks its dependants; the
+  library checks refuse past 128 installed packages; the builder refuses
+  what `pkg` cannot parse.
 
 ## Validation
 

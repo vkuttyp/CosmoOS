@@ -50,6 +50,23 @@ def main():
         rec2 = dict(rec, provides=["libx.so"], requires=["liby.so"])
         m = pkgbuild.manifest_text(rec2, []).decode()
         check("provides: libx.so\n" in m and "requires: liby.so\n" in m, "a recipe's own provides and requires")
+        # What pkg's parser would refuse is refused here, not shipped.
+        c = link(work, "libc2.so", "int a(void); int c(void) { return a(); }\n",
+                 ["-Wl,-soname,libc2.so", "-Wl,--no-as-needed", os.path.join(work, "liba.so")])
+        bad_needed = c.replace(b"liba.so.1\0", b"libanoso1\0")   # a DT_NEEDED without .so, same length
+        check(pkgbuild.elf_libs(bad_needed)[1] == ["libanoso1"], "a DT_NEEDED rewritten to 'libanoso1'")
+        for what, r, files in (
+                ("a DT_NEEDED pkg would not parse", rec, [("usr/lib/libc2.so", 0o755, bad_needed)]),
+                ("a 64-byte soname", dict(rec, provides=["l" * 61 + ".so"]), []),
+                ("33 provides", dict(rec, provides=[f"lib{i}.so" for i in range(33)]), [])):
+            try:
+                pkgbuild.manifest_text(r, files)
+                refused = False
+            except SystemExit:
+                refused = True
+            check(refused, f"refused: {what}")
+        m = pkgbuild.manifest_text(dict(rec, provides=["l" * 60 + ".so"] + [f"lib{i}.so" for i in range(31)]), [])
+        check(m.decode().count("provides: ") == 32, "accepted: a 63-byte soname, 32 provides")
     print("test_pkgbuild_libs: ok")
 
 

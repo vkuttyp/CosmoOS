@@ -98,11 +98,16 @@ directory and a pin on http.
 `/etc/rc.test` in every debug boot: `pkg install demo-d` (requires
 `libcosmo-missing.so`) is refused; `demo-c` (requires `libdemo.so`) is
 refused, then installed after `libdemo`; `pkg remove libdemo` is refused
-while `demo-c` requires it; both are removed in order; `busybox-dyn` is
+while `demo-c` requires it, and so is `pkg install
+/boot/tests/pkg/libdemo-2.0.cpk` (a package file outside the repository,
+debug builds only: libdemo 2.0, which no longer provides `libdemo.so`);
+both are removed in order; `busybox-dyn` is
 installed from the repository, runs (`busybox-dyn package ok`) and is
 removed. The harness requires each message (`PKGTEST_MARKERS`).
 `test_pkgbuild_libs` (`make host-test`) reads `DT_SONAME` and `DT_NEEDED`
-from a library and a program lld links for the purpose.
+from a library and a program lld links for the purpose, and checks the
+builder refuses what `pkg` would not parse: a `DT_NEEDED` without `.so`,
+a 64-byte soname, 33 `provides` (a 63-byte one and 32 are accepted).
 
 ## `test-pkg-net`
 
