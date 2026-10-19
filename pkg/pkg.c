@@ -465,11 +465,20 @@ static int update_repo(const struct repo *r, int *count)
         snprintf(path, sizeof(path), "%s/INDEX", r->dir);
     } else {
         char url[PKG_URL_MAX + 16];
-        repo_url(r, "INDEX", url, sizeof(url));
         /* Per process: `update -n` takes no lock and may run beside a real one. */
         snprintf(path, sizeof(path), "%s.new.%d", stored, (int)getpid());
         struct fetch_opts o = { .pin = r->pin, .insecure = r->insecure, .max = PKG_INDEX_LIMIT };
+        repo_url(r, PKG_NET_INDEX, url, sizeof(url));
         int st = fetch_url(url, path, &o);
+        if (st == FETCH_HTTP) {
+            /* A publisher before v1.0.7 signs INDEX alone. Both are signed
+             * and checked alike (PK10), so reading this one gains a server
+             * nothing it could not get by serving it as INDEX.90. */
+            unlink(path);
+            fprintf(stderr, "pkg: %s: no " PKG_NET_INDEX "; reading " PKG_NET_INDEX_OLD "\n", r->name);
+            repo_url(r, PKG_NET_INDEX_OLD, url, sizeof(url));
+            st = fetch_url(url, path, &o);
+        }
         if (st != FETCH_OK) {
             unlink(path);
             return fetch_status(r, "INDEX", st);
@@ -507,7 +516,17 @@ static int update_repo(const struct repo *r, int *count)
                 last = oh.serial;
             free(old);
         }
-        if (index_fresh(&h, last, now_utc(), err, sizeof(err)) < 0) {
+        int fr = index_fresh(&h, last, now_utc(), err, sizeof(err));
+        if (fr == -2) {
+            char exp[21];
+            time_format(h.expires, exp);
+            fprintf(stderr, "pkg: %s: the index (serial %llu) expired at %s, so the repository must be signed "
+                    "again by its publisher before pkg update accepts it; the stored index is unchanged\n",
+                    r->name, (unsigned long long)h.serial, exp);
+            free(blob);
+            return EXIT_REFUSED;
+        }
+        if (fr < 0) {
             fprintf(stderr, "pkg: %s: INDEX: %s\n", r->name, err);
             free(blob);
             return EXIT_REFUSED;

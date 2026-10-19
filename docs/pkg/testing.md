@@ -84,8 +84,9 @@ serial of 0, one with a leading zero, a missing `published`, a bad
 `expires`, a repeated `serial`, a package key in the header and a header
 key in a package stanza. `index_fresh`: accepted within the validity with
 no serial before, the same serial and a lower one; refused a higher last
-serial (`older than 8`), the expiry itself, a clock one second before
-publication, a 31-day validity, an empty one, and no header. `repo_parse`:
+serial (`older than 8`), the expiry itself (-2, which `pkg update`
+words as one sentence), a clock one second before publication, a 91-day
+validity (a 90-day one is accepted), an empty one, and no header. `repo_parse`:
 the bare-directory form (`local`, then `local2`, trailing `/` dropped), an
 https URL, a pin, `insecure` on http, a `file:///` URL; refused are http
 without `insecure`, a bad name, `ftp://`, a short pin, a pin of another
@@ -101,22 +102,24 @@ networking. The harness serves repositories over HTTPS from the host
 (`tests/boot/tlstest.py`), with a test CA and certificates made for the
 run; the guest appends the CA, fetched over plain HTTP, to its
 `/etc/ssl/certs/ca-certificates.crt` for this boot only. Each served
-`INDEX` is the build's (`make ports`, signed with `PKGSIGN_KEY`) made into
-a network index by `pkgbuild.py publish`; `repos.conf` is rewritten for
-each step. In order:
+`INDEX.90` and `INDEX` is the build's `INDEX` (`make ports`, signed with
+`PKGSIGN_KEY`) made into a network index by `pkgbuild.py publish`, for 90
+and 30 days with one serial as `scripts/publish-repo.py` makes them;
+`repos.conf` is rewritten for each step. In order:
 
 | Step | What | Required |
 |---|---|---|
 | c | `pkg update` against the same repository behind an untrusted CA's certificate, an expired one and one for another name | exit 3; `cosmo-fetch`'s `the server's certificate is not accepted:` with mbedTLS's reason; `pkg: bad: INDEX refused (above); nothing read from it`; the server logged no request |
-| a | `priv -d sys_admin` `pkg update`, `search`, `info`, then `install` | the first three exit 0 (the header line `serial 10`), `install` exits 1 naming the privilege |
-| a | `pkg update && pkg install hello && hello` (serial 10, hello 1.0 alone) | `pkg: fetching hello-1.0.cpk from test`, `hello, world (hello 1.0)`; the server saw `GET /repo/INDEX` then `/repo/hello-1.0.cpk` |
+| a | `priv -d sys_admin` `pkg update`, `search`, `info`, then `install` | the first three exit 0 (the header line `serial 10`, expiring 90 days after its publication: `INDEX.90`'s), `install` exits 1 naming the privilege |
+| a | `pkg update && pkg install hello && hello` (serial 10, hello 1.0 alone) | `pkg: fetching hello-1.0.cpk from test`, `hello, world (hello 1.0)`; the server saw `GET /repo/INDEX.90` then `/repo/hello-1.0.cpk` |
 | f | serial 11 served (hello 1.0 and 1.1): `pkg update && pkg upgrade && hello` | `pkg: 1 package upgraded`, `hello, world (hello 1.1)` |
 | f | a second repository nothing answers for (port 9) | `pkg update` exit 0, `pkg: gone: not reached; its last index is kept`, `from 1 of 2 repositories` |
-| d | the serial-10 index served again; then serial 12, published 40 days ago, valid 7 | each exit 3: `serial 10 is older than 11 ... (a replayed index)`, `expired at T`; `pkg info hello` still shows 1.1 available |
+| d | the serial-10 index served again; then serial 12, published 40 days ago, valid 7 | each exit 3: `serial 10 is older than 11 ... (a replayed index)`; `the index (serial 12) expired at T, so the repository must be signed again by its publisher before pkg update accepts it; the stored index is unchanged` with T the expiry; `pkg info hello` still shows 1.1 available and the stored index is serial 11 |
+| d | serial 12 as `INDEX` alone (a publisher before v1.0.7) | exit 0, `pkg: test: no INDEX.90; reading INDEX`, the 30-day expiry; the server saw `INDEX.90` (404) then `INDEX` |
 | b | repository `tam` whose `hello-1.1.cpk` has one byte changed: `pkg update && pkg install --reinstall hello` | exit 3, `checksum does not match the index`; `hello` still 1.1 and `pkg verify` 0 problems |
 | b | repository `other`, its `INDEX` signed by a key made for the run | `pkg update` exit 3, `unknown signing key ... (not in /etc/pkg/keys)` |
 | e | `cosmo-upgrade --check` against a served `LATEST` (v9.9.9, then the running release), with every privilege dropped too; `--check --fetch` of this build's release set; a set whose `SHA256SUMS` changed | newer, then up to date; the set fetched (`SHA256SUMS`, `.sig`, then the four files) and already current; `bad signature`, nothing more fetched |
-| g | the installer's `repos.conf` and the default release index, against `https://vkuttyp.github.io/CosmoOS/` (three attempts: the runner's internet) | `pkg update` exit 0 `from 2 repositories` with the published header; `cosmo-upgrade --check` names the published `LATEST` |
+| g | the installer's `repos.conf` and the default release index, against `https://vkuttyp.github.io/CosmoOS/` (three attempts: the runner's internet) | `pkg update` exit 0 `from 2 repositories` with the published header (`INDEX.90` once the site has it; until the first publication after v1.0.7, `INDEX` by the fallback); `cosmo-upgrade --check` names the published `LATEST` |
 
 ## The interactive harness
 

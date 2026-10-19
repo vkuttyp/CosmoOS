@@ -417,7 +417,7 @@ int index_fresh(const struct index_header *h, uint64_t last_serial, int64_t now,
     if (now >= h->expires) {
         time_format(h->expires, a);
         snprintf(err, errlen, "expired at %s", a);
-        return -1;
+        return -2;
     }
     if (h->serial < last_serial) {
         snprintf(err, errlen, "serial %llu is older than %llu, the last accepted from this repository "

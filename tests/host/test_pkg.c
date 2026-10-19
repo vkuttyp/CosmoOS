@@ -179,11 +179,13 @@ int main(void)
     CHECK(index_fresh(&h, 7, pub + day, err, sizeof(err)) == 0);   /* the same index again */
     CHECK(index_fresh(&h, 6, pub + day, err, sizeof(err)) == 0);
     CHECK(index_fresh(&h, 8, pub + day, err, sizeof(err)) < 0 && strstr(err, "older than 8"));
-    CHECK(index_fresh(&h, 0, pub + 30 * day, err, sizeof(err)) < 0 && strstr(err, "expired at 2026-10-31"));
+    CHECK(index_fresh(&h, 0, pub + 30 * day, err, sizeof(err)) == -2 && strstr(err, "expired at 2026-10-31"));
     CHECK(index_fresh(&h, 0, pub - 1, err, sizeof(err)) < 0 && strstr(err, "before the index was published"));
     struct index_header hl = h;
-    hl.expires = h.published + 31 * day;
-    CHECK(index_fresh(&hl, 0, pub + day, err, sizeof(err)) < 0 && strstr(err, "at most 30 days"));
+    hl.expires = h.published + 90 * day;   /* the longest validity (INDEX.90) */
+    CHECK(index_fresh(&hl, 0, pub + 89 * day, err, sizeof(err)) == 0);
+    hl.expires = h.published + 91 * day;
+    CHECK(index_fresh(&hl, 0, pub + day, err, sizeof(err)) == -1 && strstr(err, "at most 90 days"));
     hl.expires = h.published;
     CHECK(index_fresh(&hl, 0, pub, err, sizeof(err)) < 0);
     struct index_header none = { .present = false };

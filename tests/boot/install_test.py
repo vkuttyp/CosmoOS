@@ -344,6 +344,12 @@ def stage_reboot(args, results, inst, nonce):
         need(out, r"^write-ok$", "writing /persist.txt")
         need(out, rf"^{nonce}$", "writing /persist.txt")
         need(out, r"^console$", "the installed system's /dev")
+        # /tmp is everyone's: 01777, and a uid other than 0 writes there.
+        out = b.status("stat -c '%a %u' /tmp && priv -u 1000 -g 1000 touch /tmp/u1000 && "
+                       "stat -c '%u' /tmp/u1000", "tmp")
+        need(out, r"^tmp=0$", "uid 1000 writing in the installed system's /tmp")
+        need(out, r"^1777 0$", "the installed system's /tmp mode (01777, root's)")
+        need(out, r"^1000$", "the file uid 1000 made in /tmp")
         rc = b.finish()
         need(b.text(), r"^init: disk root synced$", "the installed boot's power-off")
         if rc != EXIT_SUCCESS:

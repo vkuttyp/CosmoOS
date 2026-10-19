@@ -289,7 +289,8 @@ def cmd_index(args):
 
 
 HEADER_KEYS = ("serial", "published", "expires")
-MAX_DAYS = 30
+MAX_DAYS = 90       # PK10's bound (pkg.h PKG_INDEX_MAX_DAYS): what INDEX.90 is signed for
+OLD_DAYS = 30       # what INDEX is signed for: pkg before v1.0.7 refuses a longer validity
 
 
 def utc_text(t):

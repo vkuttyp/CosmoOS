@@ -1402,18 +1402,26 @@ each; none is needed by M2's acceptance test.
   read before it maps memory itself.
 ## 18. P6 network repository follow-ups (2026-10-18)
 
-- P6 (2026-10-18): the published network INDEX expires 30 days after its
+- ~~P6 (2026-10-18): the published network INDEX expires 30 days after its
   last signing, which `.github/workflows/repository.yml` renews weekly;
   GitHub disables a scheduled workflow after 60 days without repository
   activity, so a quiet repository needs the job re-enabled (or a run by
   hand) before its INDEX expires, or every installed system's `pkg
-  update` refuses it.
-- An installed system's `/tmp` is a ramfs mounted at boot whose root is
+  update` refuses it.~~ **Closed 2026-10-19** (the index-expiry PR,
+  `docs/audit/2026-10-19-index-expiry-report.md`): PK10's bound is 90
+  days; the publisher signs `INDEX.90` for 90 days and `INDEX` for 30
+  (v1.0.6 and older read it), every release and pre-release signs again,
+  and the release checklist dispatches the job after a quiet month. A
+  system before v1.0.7 still reads the 30-day `INDEX` until it upgrades.
+- ~~An installed system's `/tmp` is a ramfs mounted at boot whose root is
   mode 0755 owned by root (`ls -ld /tmp`), not the 01777 `cosmo-install`
   gives the directory beneath it, so no uid but 0 can write there
   (`priv -u 1000 -g 1000 touch /tmp/f` is `Permission denied`; found by
   P6's review, 2026-10-18). `cosmo-upgrade --check` keeps its file there
-  and so works for any uid once that is fixed.
+  and so works for any uid once that is fixed.~~ **Closed 2026-10-19**
+  (the same PR): init mounts it with `COSMO_MOUNT_SCRATCH`, a ramfs
+  root of 01777; `test-install` requires `1777 0` and a file made by uid
+  1000 (`tools/tmp-mode-probe.py`).
 - ~~The boot archive (`$(BOOT_ARCHIVE)`, `Makefile`) is rebuilt when an
   entry's file changes but not when the list of entries does: adding
   `etc/pkg/keys/release-2026.pub` (P6, 2026-10-18) left an existing

@@ -946,9 +946,11 @@ static int64_t sys_mount(struct syscall_args *a)
 {
     if (!cred_has(cred_current(), PRIV_MOUNT))
         return -EPERM;
-    unsigned flags = (unsigned)a->a[3];
-    if (flags & ~COSMO_MOUNT_RDONLY)
+    unsigned cflags = (unsigned)a->a[3];
+    if (cflags & ~(COSMO_MOUNT_RDONLY | COSMO_MOUNT_SCRATCH))
         return -EINVAL;   /* an unknown flag bit: see sys_mmap */
+    unsigned flags = ((cflags & COSMO_MOUNT_RDONLY) ? MOUNT_RDONLY : 0) |
+                     ((cflags & COSMO_MOUNT_SCRATCH) ? MOUNT_SCRATCH : 0);
     char source[BLKDEV_NAME_MAX], target[VFS_PATH_MAX], fstype[16];
     int rc = strncpy_from_user(source, a->a[0], sizeof(source));
     if (rc < 0)
@@ -959,6 +961,8 @@ static int64_t sys_mount(struct syscall_args *a)
     rc = strncpy_from_user(fstype, a->a[2], sizeof(fstype));
     if (rc < 0)
         return rc;
+    if ((flags & MOUNT_SCRATCH) && strcmp(fstype, "ramfs") != 0)
+        return -EINVAL;   /* a scratch root is ramfs's alone */
     bool none = source[0] == '\0' || strcmp(source, "none") == 0;
     return syscall_mount(none ? NULL : source, target, fstype, flags);
 }

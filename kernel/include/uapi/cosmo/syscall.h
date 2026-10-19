@@ -666,8 +666,11 @@ struct cosmo_dirent {
     char     name[];
 };
 
-/* mount() flags. */
-#define COSMO_MOUNT_RDONLY (1u << 0)
+/* mount() flags. SCRATCH: a ramfs whose root is 01777 and root's, as
+ * /tmp must be (a ramfs's root is otherwise 0755); any other filesystem
+ * refuses it with -EINVAL. */
+#define COSMO_MOUNT_RDONLY  (1u << 0)
+#define COSMO_MOUNT_SCRATCH (1u << 1)
 
 /* umount() flags. FORCE skips the final commit and drops the open
  * transaction (recovery when a commit keeps failing). */

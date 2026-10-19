@@ -110,7 +110,9 @@ filesystem. (Replay, this rule's former gap, is PK10's.)
 design.md, "Network repositories"). Before any package line of a fetched
 `INDEX` is parsed, its signature is verified and its header alone read
 (`index_header_parse`), and `index_fresh` requires: a header (`serial`,
-`published`, `expires`); a validity of at most 30 days; the clock at or
+`published`, `expires`); a validity of at most 90 days (30 before v1.0.7;
+the publisher signs `INDEX.90` for 90 days and `INDEX` for 30, which pkg
+reads only when the server has no `INDEX.90`); the clock at or
 after `published` (a clock before it is refused, saying to set it) and
 before `expires`; and a `serial` no lower than the stored index's, the
 last accepted from that repository name. A refused index leaves the
@@ -120,8 +122,9 @@ refuses receives no request. Check: `test_pkg` (the header's grammar,
 every rule of `index_fresh`, a broken package line after a good header
 not read by `index_header_parse`); `test-pkg-net` (c) the untrusted,
 expired and misnamed certificates with no request logged by the server,
-(d) a replayed lower serial and an expired index refused, the stored
-index unchanged. Gap: the rule is per repository name, so renaming a
+(d) a replayed lower serial and an expired index refused, the expiry
+with one sentence naming its time and serial, the stored index unchanged,
+and `INDEX` read when `INDEX.90` is missing. Gap: the rule is per repository name, so renaming a
 repository in `repos.conf` forgets its serial; `file://` repositories are
 exempt (the system's own disk, and `--rollback` returns an older one);
 it is only as good as the clock, which has no NTP; an index is trusted for
