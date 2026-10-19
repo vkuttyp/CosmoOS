@@ -3201,3 +3201,14 @@ See the [history index](README.md).
   holds the release key. `make test-pkg-net` on both architectures, the
   real published repository last. Report:
   `docs/audit/2026-10-18-pkg-net-report.md`.
+- **The repository's expiry and an installed /tmp (2026-10-19, the
+  owner's blocker before P3).** PK10's bound is 90 days. The publisher
+  signs one serial twice, `INDEX.90` for 90 days (read first by `pkg` from
+  v1.0.7) and `INDEX` for 30 (v1.0.6's `pkg`, which refuses longer, and
+  the fallback after an HTTP error), so v1.0.6 systems need no action;
+  every release and pre-release signs again, and the release checklist
+  dispatches the job after a quiet month (GitHub disables a schedule
+  after 60 days). An expired index is refused with one sentence naming
+  its expiry and serial. `/etc/rc` makes an installed system's `/tmp`
+  01777 (`tools/tmp-mode-probe.py`). Report:
+  `docs/audit/2026-10-19-index-expiry-report.md`.
