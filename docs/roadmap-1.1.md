@@ -142,11 +142,13 @@ ticked in the same PR).
   records; `test-install` requires the installed disk's first mount to
   log no free-count warning. Done 2026-10-19
   (`docs/audit/2026-10-19-p3-residue-report.md`).
-- [ ] **P4 Shared libraries.** musl's dynamic linker as `PT_INTERP`, with
+- [x] **P4 Shared libraries.** musl's dynamic linker as `PT_INTERP`, with
   `libc.so` in the image; until now only a stand-in interpreter has run.
   **Acceptance:** a dynamically linked musl BusyBox (and a small
   dynamically linked test program using `dlopen`) passes the M3 scripted
-  test on both architectures.
+  test on both architectures. Done 2026-10-19: `/bin/busybox.dyn` and
+  `tests/dyn/dltest` in `make test-busybox`; native programs stay static
+  in 1.1 (`docs/audit/2026-10-19-shared-libraries-report.md`).
 - [x] **P5 Setting the clock.** Absorbed by
   [S5](#s-shell-completeness), which carries its scope (`settimeofday`,
   `clock_settime`, BusyBox `ntpd`) and its acceptance, with one change:
