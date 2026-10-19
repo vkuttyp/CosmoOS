@@ -124,3 +124,12 @@ architectures, every step exit 0 (seconds):
 | `test-smp2`, `test-chaos`, `test-harness-retry` | 158, 188, 191 | 152, 186, 195 |
 | `BUILD=release all test` | 20 | 23 |
 | `BUILD=release test-busybox`, `test-install`, `test-net-login` | 49, 28, 86 | 60, 44, 96 |
+
+After #413's review (`24fb1455`, `c19c613c`: `read_filled`, the
+connection's helper pid, sftp's own file, the probe's exit status and its
+two-commit `--old`), on both architectures: `host-test`, `analyze`, debug
+`make test` (`file-read-filled ... ok`), and `BUILD=release` `all`,
+`test-busybox`, `test-net-login` (the server's `stat` of the file sftp
+wrote: 1) and `test-install`, every one exit 0; and the `zero` and `wget`
+probes again in both modes, all eight PASS (the `--old` runs reversing
+the review commit, then the fix).
