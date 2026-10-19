@@ -506,6 +506,19 @@ console, `/bin/sh` runs two scripts from `/boot/tests/busybox`:
 `--verbose` runs runtest with `-v`, so the log holds each failing
 case's commands and diff.
 
+**The dynamic pass** (roadmap 1.1 P4's acceptance): the same boot then
+runs both scripts again under `/bin/busybox.dyn`, BusyBox dynamically
+linked against `/lib/libc.so` (`PT_INTERP` `/lib/ld-musl-<arch>.so.1`),
+with `PATH=/usr/bin:/bin:/sbin:/usr/sbin` so `/usr/bin`'s applet links to
+it come first: first `readlink /proc/$$/exe` must be `/bin/busybox.dyn`
+and `command -v ls` `/usr/bin/ls`; then `ash.sh` with `BBTEST_BIN=/usr/bin`
+and `BBTEST_EXE=/bin/busybox.dyn` (the `/bin/<name>` and
+`/proc/self/exe` checks name the dynamic binary), and `suite.sh` with
+`BBSUITE_BINARY=/bin/busybox.dyn`, with the same exclusions. Last,
+from the dynamic shell, `tests/dyn/dynhello` and `tests/dyn/dltest` (the
+`dlopen` program; `docs/compat/linux/testing.md`, "Shared libraries")
+must print `dynhello: ok` and `dltest: ok`.
+
 The installed system's console is ash too: `make test-install`'s reboot
 and persist stages type their commands at it (`/etc/console-shell`).
 

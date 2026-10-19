@@ -137,8 +137,32 @@ $(BUSYBOX_ELF): $(BUSYBOX_TAR) $(BUSYBOX_CONFIG) $(BUSYBOX_PATCHES) $(BB_LIBC) $
 		OBJCOPY="$(OBJCOPY)" LD="$(LD)" SKIP_STRIP=y > $(BB_DIR)/build.log 2>&1 || { tail -40 $(BB_DIR)/build.log; exit 1; }
 	$(Q)$(OBJCOPY) --strip-all --remove-section=.note --remove-section=.comment $(BB_DIR)/bb-build/busybox_unstripped $@
 
+# The same BusyBox dynamically linked (roadmap 1.1 P4): the checked-in
+# configuration less CONFIG_STATIC, built through cc-dyn in a second build
+# directory from the same patched source. /bin/busybox stays the static
+# one -- the shell must not depend on /lib -- and this is
+# /bin/busybox.dyn, with applet links of its own under /usr/bin.
+BUSYBOX_DYN_ELF := $(BB_DIR)/busybox.dyn
+BUSYBOX_DYN_CONFIG := $(BB_DIR)/busybox-dyn.config
+$(BUSYBOX_DYN_ELF): $(BUSYBOX_ELF) $(BUSYBOX_CONFIG) $(BB_LIBC_SO) $(BB_BUILTINS) $(BB_CC_DYN)
+	$(call log,BUSYBOX,$(BUSYBOX_VERSION) $(BB_TARGET) dynamic)
+	$(Q)rm -rf $(BB_DIR)/bb-build-dyn
+	$(Q)mkdir -p $(BB_DIR)/bb-build-dyn
+	$(Q)sed 's/^CONFIG_STATIC=y$$/# CONFIG_STATIC is not set/' $(BUSYBOX_CONFIG) > $(BUSYBOX_DYN_CONFIG)
+	$(Q)cmp -s $(BUSYBOX_DYN_CONFIG) $(BUSYBOX_CONFIG) && { echo "busybox: CONFIG_STATIC=y not found"; exit 1; } || true
+	$(Q)cp $(BUSYBOX_DYN_CONFIG) $(BB_DIR)/bb-build-dyn/.config
+	$(Q)yes "" | KCONFIG_NOTIMESTAMP=1 $(MAKE) -s -C $(BB_DIR)/bb-src O=$(BB_DIR)/bb-build-dyn HOSTCC="$(CC)" oldconfig \
+		> $(BB_DIR)/oldconfig-dyn.log 2>&1
+	$(Q)cmp -s $(BB_DIR)/bb-build-dyn/.config $(BUSYBOX_DYN_CONFIG) \
+		|| { echo "busybox: the dynamic configuration is incomplete (oldconfig changed it)"; exit 1; }
+	$(Q)KCONFIG_NOTIMESTAMP=1 $(MAKE) -s -C $(BB_DIR)/bb-src O=$(BB_DIR)/bb-build-dyn CC=$(BB_CC_DYN) HOSTCC="$(CC)" \
+		AR="$(AR)" NM="$(NM)" OBJCOPY="$(OBJCOPY)" LD="$(LD)" SKIP_STRIP=y > $(BB_DIR)/build-dyn.log 2>&1 \
+		|| { tail -40 $(BB_DIR)/build-dyn.log; exit 1; }
+	$(Q)$(OBJCOPY) --strip-all --remove-section=.note --remove-section=.comment \
+		$(BB_DIR)/bb-build-dyn/busybox_unstripped $@
+
 .PHONY: busybox
-busybox: $(BUSYBOX_ELF)
+busybox: $(BUSYBOX_ELF) $(BUSYBOX_DYN_ELF)
 
 # BusyBox's own testsuite, packed reproducibly for the image (make test-busybox).
 BUSYBOX_TESTSUITE := $(BB_DIR)/testsuite.tgz
@@ -155,5 +179,9 @@ MUSL_ARCHIVE_DEPS := $(BB_LIBC_SO)
 BUSYBOX_ARCHIVE_ENTRIES := bin/busybox=$(BUSYBOX_ELF) $(foreach a,$(BUSYBOX_APPLETS),bin/$(a)@busybox) \
 	tests/busybox/ash.sh=$(ROOT)/tests/busybox/ash.sh tests/busybox/suite.sh=$(ROOT)/tests/busybox/suite.sh \
 	tests/busybox/testsuite.tgz=$(BUSYBOX_TESTSUITE) tests/busybox/busybox.config=$(BUSYBOX_CONFIG)
-BUSYBOX_ARCHIVE_DEPS := $(BUSYBOX_ELF) $(BUSYBOX_TESTSUITE) $(ROOT)/tests/busybox/ash.sh $(ROOT)/tests/busybox/suite.sh \
+# The dynamic BusyBox and its links (roadmap 1.1 P4): /bin/busybox.dyn,
+# /usr/bin/<applet> -> /bin/busybox.dyn; /bin comes first in every PATH
+# the system sets, so these run only when named or put first.
+BUSYBOX_ARCHIVE_ENTRIES += bin/busybox.dyn=$(BUSYBOX_DYN_ELF) $(foreach a,$(BUSYBOX_APPLETS),usr/bin/$(a)@../../bin/busybox.dyn)
+BUSYBOX_ARCHIVE_DEPS := $(BUSYBOX_DYN_ELF) $(BUSYBOX_ELF) $(BUSYBOX_TESTSUITE) $(ROOT)/tests/busybox/ash.sh $(ROOT)/tests/busybox/suite.sh \
 	$(BUSYBOX_CONFIG) $(ROOT)/ports/busybox/applets

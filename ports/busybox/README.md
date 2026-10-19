@@ -59,6 +59,13 @@ attached to that release in the PR that pins it.
    dynamically linked programs: `-fPIC`, a link `-pie` with `Scrt1.o`,
    `--dynamic-linker=/lib/ld-musl-<arch>.so.1`, `-lc` (libc.so) and the
    builtins; `-shared` builds a library. `tests/dyn/` is built with it.
+3b. **The dynamic BusyBox** (roadmap 1.1 P4): the same source and
+   configuration less `CONFIG_STATIC` (the build stops if the line is
+   missing or `oldconfig` changes the result), built through `cc-dyn` in
+   `bb-build-dyn`: `/bin/busybox.dyn`, with a link per applet under
+   `/usr/bin`. `/bin/busybox` stays static and the shell, and `/bin`
+   comes before `/usr/bin` in every `PATH` the system sets, so these run
+   only when named or put first.
 4. **The testsuite**: BusyBox's `testsuite/` packed by
    `pack-testsuite.py` into a reproducible `testsuite.tgz` for
    `make test-busybox`.

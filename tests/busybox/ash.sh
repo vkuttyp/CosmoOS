@@ -5,6 +5,12 @@
 # -- echo, printf, test, [, true, false, pwd -- through /bin). Each check prints "BBTEST: ok NAME"
 # or "BBTEST: FAIL NAME: what"; the last line is the verdict, which
 # tests/boot/busybox_test.py requires.
+# BBTEST_BIN and BBTEST_EXE: where the applets are and the binary they
+# run, /bin and /bin/busybox by default; test-busybox's second pass runs
+# this script under the dynamically linked BusyBox (roadmap 1.1 P4) with
+# /usr/bin and /bin/busybox.dyn, and PATH starting with /usr/bin.
+B=${BBTEST_BIN:-/bin}
+X=${BBTEST_EXE:-/bin/busybox}
 T=/tmp/bbtest
 rm -rf "$T"
 mkdir -p "$T" && cd "$T" || { echo "BBTEST: FAIL setup"; exit 1; }
@@ -83,13 +89,13 @@ if [ -f t1 ]; then ok touch-create; else bad touch-create "t1 missing"; fi
 touch -t 202001020304 t1
 expect touch-time 2020-01-02 "$(date -r t1 +%Y-%m-%d)"
 expect ls "a lnk" "$(ls | grep -E '^(a|lnk)$' | xargs)"
-expect echo "a b" "$(/bin/echo a b)"   # the applet, not the builtin
-expect printf "07-x" "$(/bin/printf '%02d-%s' 7 x)"
-if /bin/test 3 -gt 2; then ok test; else bad test "3 -gt 2 false"; fi
-if /bin/[ abc = abc ] && /bin/[ ! -e /nonexistent ]; then ok '['; else bad '[' "string or file test"; fi
-if /bin/true; then ok true; else bad true "status"; fi
-if /bin/false; then bad false "status"; else ok false; fi
-expect pwd "$T" "$(/bin/pwd)"
+expect echo "a b" "$($B/echo a b)"   # the applet, not the builtin
+expect printf "07-x" "$($B/printf '%02d-%s' 7 x)"
+if $B/test 3 -gt 2; then ok test; else bad test "3 -gt 2 false"; fi
+if $B/[ abc = abc ] && $B/[ ! -e /nonexistent ]; then ok '['; else bad '[' "string or file test"; fi
+if $B/true; then ok true; else bad true "status"; fi
+if $B/false; then bad false "status"; else ok false; fi
+expect pwd "$T" "$($B/pwd)"
 expect env V=1 "$(V=1 env | grep '^V=')"
 s0=$(date +%s)
 sleep 1
@@ -141,7 +147,7 @@ expect stat 5 "$(stat -c %s s5)"
 expect uname Linux "$(uname -s)"
 expect id 0 "$(id -u)"
 expect sha256sum ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad "$(printf abc | sha256sum | cut -d' ' -f1)"
-expect which /bin/ls "$(which ls)"
+expect which "$B/ls" "$(which ls)"
 
 # --- v1.0.2's everyday commands, and the /proc files they read ----------------
 expect md5sum 900150983cd24fb0d6963f7d28e17f72 "$(printf abc | md5sum | cut -d' ' -f1)"
@@ -218,7 +224,7 @@ expect tac "three two one" "$(tac l3 | xargs)"
 expect yes "y y y" "$(yes | head -n 3 | xargs)"
 expect cal "February 2024" "$(cal 2 2024 | head -n 1 | sed 's/^ *//; s/ *$//')"
 # /bin/time, the applet: ash parses a bare `time` as its own reserved word.
-expect time 1 "$( { /bin/time -p sleep 0.2; } 2>&1 | grep -c '^real ')"
+expect time 1 "$( { $B/time -p sleep 0.2; } 2>&1 | grep -c '^real ')"
 timeout 1 sleep 10
 expect timeout 143 "$?"
 # watch redraws every second until timeout ends it: the line at least once.
@@ -326,11 +332,11 @@ d=$((ff - pf * kb))
 echo "BBTEST: note free-free: free $ff kB, sysctl $((pf * kb)) kB just before"
 if [ "${d#-}" -le 2048 ]; then ok free-free; else bad free-free "free ${ff} kB, sysctl $((pf * kb)) kB"; fi
 expect uptime-up 1 "$(uptime | grep -c ' up ')"
-expect kill-l KILL "$(/bin/kill -l 9)"
-expect kill-l-list 1 "$(/bin/kill -l | grep -c 'HUP')"
+expect kill-l KILL "$($B/kill -l 9)"
+expect kill-l-list 1 "$($B/kill -l | grep -c 'HUP')"
 # A process's own environment, cwd, root and executable.
 expect environ 1 "$(env S3TAG=s3 cat /proc/self/environ | tr '\0' '\n' | grep -c '^S3TAG=s3$')"
-expect exe /bin/busybox "$(readlink /proc/self/exe)"
+expect exe "$X" "$(readlink /proc/self/exe)"
 expect cwd /tmp "$(cd /tmp && readlink /proc/self/cwd)"
 expect root / "$(readlink /proc/self/root)"
 # Another user's process does not exist for an unprivileged one (P1), so

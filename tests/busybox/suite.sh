@@ -5,11 +5,13 @@
 # /tmp. Each file's run is bracketed by BBSUITE lines; runtest's own
 # PASS/FAIL/SKIPPED/UNTESTED lines sit between them, and
 # tests/boot/busybox_test.py reads them against its list of exclusions.
+# BBSUITE_BINARY names the binary under test (default /bin/busybox; the
+# dynamically linked /bin/busybox.dyn in test-busybox's second pass).
 R=/tmp/bbsuite
 rm -rf "$R"
 mkdir -p "$R" && cd "$R" || { echo "BBSUITE: setup failed"; exit 1; }
 tar -xzf /boot/tests/busybox/testsuite.tgz || { echo "BBSUITE: setup failed (tar)"; exit 1; }
-cp /bin/busybox "$R/busybox" && cp /boot/tests/busybox/busybox.config "$R/.config" || { echo "BBSUITE: setup failed (cp)"; exit 1; }
+cp "${BBSUITE_BINARY:-/bin/busybox}" "$R/busybox" && cp /boot/tests/busybox/busybox.config "$R/.config" || { echo "BBSUITE: setup failed (cp)"; exit 1; }
 cd "$R/testsuite" || exit 1
 for f in cut sed grep tr sort uniq head tail expr seq basename dirname wc xargs tar; do
     echo "BBSUITE: begin $f"
