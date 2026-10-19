@@ -93,6 +93,23 @@ without `insecure`, a bad name, `ftp://`, a short pin, a pin of another
 hash, an unknown option, `insecure` on `file://`, a name alone, a relative
 directory and a pin on http.
 
+## Shared libraries (roadmap 1.1 P4)
+
+`/etc/rc.test` in every debug boot: `pkg install demo-d` (requires
+`libcosmo-missing.so`) is refused; `demo-c` (requires `libdemo.so`) is
+refused, `pkg install -n libdemo demo-c` passes (the dry run counts
+libdemo's libraries), then demo-c is installed after `libdemo`; `pkg remove libdemo` is refused
+while `demo-c` requires it, and so is `pkg install
+/boot/tests/pkg/libdemo-2.0.cpk` (a package file outside the repository,
+debug builds only: libdemo 2.0, which no longer provides `libdemo.so`);
+`pkg remove -n demo-c libdemo` passes; both are removed in order; `busybox-dyn` is
+installed from the repository, runs (`busybox-dyn package ok`) and is
+removed. The harness requires each message (`PKGTEST_MARKERS`).
+`test_pkgbuild_libs` (`make host-test`) reads `DT_SONAME` and `DT_NEEDED`
+from a library and a program lld links for the purpose, and checks the
+builder refuses what `pkg` would not parse: a `DT_NEEDED` without `.so`,
+a 64-byte soname, 33 `provides` (a 63-byte one and 32 are accepted).
+
 ## `test-pkg-net`
 
 `tests/boot/pkgnet_test.py` (roadmap 1.1 P6's acceptance; CI job

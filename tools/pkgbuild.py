@@ -10,7 +10,11 @@
 
 A recipe (`port`) is `key: value` lines: name, version, summary, prefix,
 depends (repeatable), program (destination then C sources; compiled with
-the userland toolchain, mode 0755), file (destination, source, mode).
+the userland toolchain, mode 0755), file (destination, source, mode),
+provides and requires (repeatable: a library's soname, roadmap 1.1 P4).
+Every package's manifest lists "provides" for each shared library it
+installs (an ELF's DT_SONAME) and "requires" for each DT_NEEDED of its ELF
+files that it does not provide itself, besides the recipe's own.
 The package is a deterministic ustar archive (+MANIFEST first, then the
 files sorted by path, mtime 0, uid/gid 0) followed by the COSMOSIG trailer
 of scripts/modsign.py; INDEX describes the repository the same way.
@@ -40,6 +44,13 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9+._-]{0,62}$")
 VERSION_RE = re.compile(r"^[0-9]+(\.[0-9]+)*(-[0-9]+)?$")
 DEPEND_RE = re.compile(r"^([a-z0-9][a-z0-9+._-]*)\s*(?:(>=|<=|=|<|>)\s*([0-9]+(?:\.[0-9]+)*(?:-[0-9]+)?))?$")
 FORBIDDEN_PREFIXES = ("boot/", "dev/", "tmp/", "mnt/")
+SONAME_RE = re.compile(r"^[A-Za-z0-9_+-][A-Za-z0-9._+-]*\.so[A-Za-z0-9._+-]*$")   # pkg's soname_valid
+SONAME_MAX = 63    # pkg/pkg.h PKG_SONAME_MAX less the NUL
+MAX_LIBS = 32      # pkg/pkg.h PKG_MAX_LIBS, for provides and for requires
+
+
+def soname_ok(name):
+    return bool(SONAME_RE.match(name)) and len(name) <= SONAME_MAX
 
 
 def die(msg):
@@ -49,7 +60,7 @@ def die(msg):
 # --- recipes -----------------------------------------------------------------
 
 def parse_recipe(path):
-    rec = {"depends": [], "program": [], "file": [], "prefix": "/usr"}
+    rec = {"depends": [], "program": [], "file": [], "prefix": "/usr", "provides": [], "requires": []}
     with open(path) as f:
         for lineno, raw in enumerate(f, 1):
             line = raw.split("#", 1)[0].strip()
@@ -65,6 +76,11 @@ def parse_recipe(path):
                 if not DEPEND_RE.match(value):
                     die(f"{path}:{lineno}: bad dependency '{value}'")
                 rec["depends"].append(re.sub(r"\s+", " ", value))
+            elif key in ("provides", "requires"):
+                if not soname_ok(value):
+                    die(f"{path}:{lineno}: bad soname '{value}' (pkg takes {SONAME_MAX} bytes of name "
+                        "characters with .so in them)")
+                rec[key].append(value)
             elif key == "program":
                 parts = value.split()
                 if len(parts) < 2:
@@ -178,9 +194,71 @@ def compile_program(args, port_dir, work, dest, sources):
         return f.read()
 
 
+def elf_libs(data):
+    """(DT_SONAME or None, [DT_NEEDED...]) of a 64-bit little-endian ELF
+    with a PT_DYNAMIC; (None, []) for anything else."""
+    import struct
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        return None, []
+    phoff, = struct.unpack_from("<Q", data, 32)
+    phentsize, phnum = struct.unpack_from("<HH", data, 54)
+    loads, dyn = [], None
+    for i in range(phnum):
+        o = phoff + i * phentsize
+        if o + 56 > len(data):
+            return None, []
+        p_type, _, p_offset, p_vaddr, _, p_filesz = struct.unpack_from("<IIQQQQ", data, o)
+        if p_type == 1:
+            loads.append((p_vaddr, p_offset, p_filesz))
+        elif p_type == 2:
+            dyn = (p_offset, p_filesz)
+    if dyn is None:
+        return None, []
+
+    def file_off(vaddr):
+        for va, off, sz in loads:
+            if va <= vaddr < va + sz:
+                return off + (vaddr - va)
+        die("an ELF's DT_STRTAB is outside its segments")
+    tags = []
+    for o in range(dyn[0], dyn[0] + dyn[1] - 15, 16):
+        tag, val = struct.unpack_from("<qQ", data, o)
+        if tag == 0:
+            break
+        tags.append((tag, val))
+    strtab = [v for t, v in tags if t == 5]
+    if not strtab:
+        return None, []
+    base = file_off(strtab[0])
+
+    def cstr(off):
+        end = data.index(b"\0", base + off)
+        return data[base + off:end].decode("ascii")
+    soname = next((cstr(v) for t, v in tags if t == 14), None)
+    return soname, [cstr(v) for t, v in tags if t == 1]
+
+
 def manifest_text(rec, files):
     lines = [f"name: {rec['name']}", f"version: {rec['version']}", f"summary: {rec['summary']}"]
     lines += [f"depends: {d}" for d in rec["depends"]]
+    provides, needed = list(rec.get("provides", [])), list(rec.get("requires", []))
+    for _, _, data in files:
+        soname, libs = elf_libs(data)
+        if soname and soname not in provides:
+            provides.append(soname)
+        needed += [n for n in libs if n not in needed]
+    requires = [n for n in needed if n not in provides]
+    # What pkg's parser accepts (manifest.c), so pkg never refuses a
+    # package this built: names from an ELF are checked as a recipe's are.
+    for key, names in (("provides", provides), ("requires", requires)):
+        bad = [n for n in names if not soname_ok(n)]
+        if bad:
+            die(f"{rec['name']}: {key} '{bad[0]}' is not a soname pkg accepts (name characters with .so in "
+                f"them, at most {SONAME_MAX} bytes)")
+        if len(names) > MAX_LIBS:
+            die(f"{rec['name']}: {len(names)} {key} entries, more than pkg's {MAX_LIBS}")
+    lines += [f"provides: {s}" for s in provides]
+    lines += [f"requires: {n}" for n in requires]
     for path, mode, data in files:
         lines.append(f"file: {path} {mode:04o} {len(data)} {hashlib.sha512(data).hexdigest()}")
     return ("\n".join(lines) + "\n").encode("ascii")
@@ -221,7 +299,8 @@ def cmd_build(args):
 
 def pack(name, version, summary, files, key_path):
     """A package of built files: `files` is [(destination, mode, data)],
-    destinations relative to /. The same archive cmd_build makes."""
+    destinations relative to /. The same archive cmd_build makes (its
+    provides and requires read from the ELF files)."""
     if not NAME_RE.match(name) or not VERSION_RE.match(version):
         die(f"bad name or version '{name}' '{version}'")
     rec = {"name": name, "version": version, "summary": summary, "depends": []}

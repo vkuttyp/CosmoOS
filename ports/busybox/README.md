@@ -65,7 +65,9 @@ attached to that release in the PR that pins it.
    `bb-build-dyn`: `/bin/busybox.dyn`, with a link per applet under
    `/usr/bin`. `/bin/busybox` stays static and the shell, and `/bin`
    comes before `/usr/bin` in every `PATH` the system sets, so these run
-   only when named or put first.
+   only when named or put first. The package `busybox-dyn`
+   (`/usr/bin/busybox-dyn`, `pkg/pkg.mk`) is the same binary, requiring
+   `libc.so`.
 4. **The testsuite**: BusyBox's `testsuite/` packed by
    `pack-testsuite.py` into a reproducible `testsuite.tgz` for
    `make test-busybox`.

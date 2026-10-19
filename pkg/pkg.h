@@ -18,6 +18,12 @@
 #define PKG_PATH_MAX     256
 #define PKG_FILE_MAX     128    /* a package file name in the index */
 #define PKG_MAX_DEPENDS  64
+/* Shared libraries (roadmap 1.1 P4): a manifest's "provides: SONAME" (the
+ * libraries it installs, by DT_SONAME) and "requires: SONAME" (what its
+ * programs and libraries name in DT_NEEDED and it does not provide). */
+#define PKG_MAX_LIBS     32
+#define PKG_SONAME_MAX   64
+#define PKG_BASE_PROVIDES "/etc/pkg/provides"   /* the base system's libraries, one soname a line */
 #define PKG_MAX_FILES    4096
 #define PKG_MAX_INDEX    1024
 #define PKG_MAX_DIRS     256
@@ -90,6 +96,10 @@ struct manifest {
     char summary[PKG_SUMMARY_MAX];
     struct depend depends[PKG_MAX_DEPENDS];
     int ndepends;
+    char provides[PKG_MAX_LIBS][PKG_SONAME_MAX];
+    int nprovides;
+    char requires[PKG_MAX_LIBS][PKG_SONAME_MAX];
+    int nrequires;
     struct file_entry *files;     /* malloc'd, nfiles entries */
     int nfiles;
     struct dirlist *dirs;         /* malloc'd when a record carries "dir:" lines (installed records only) */
@@ -136,6 +146,7 @@ struct repo {
 
 int manifest_parse(const char *text, size_t len, struct manifest *m, char *err, size_t errlen);
 void manifest_free(struct manifest *m);
+bool soname_valid(const char *s);                              /* a "provides"/"requires" value */
 /* Render a manifest (plus "dir:" lines for `dirs`, may be NULL) as text; returns the length or -1 (too small). */
 int manifest_format(const struct manifest *m, const struct dirlist *dirs, char *out, size_t cap);
 int index_parse(const char *text, size_t len, struct index *ix, char *err, size_t errlen);

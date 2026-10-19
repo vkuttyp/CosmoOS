@@ -342,6 +342,35 @@ record is stale until `pkg remove` is repeated; otherwise
 `rmdir` the recorded directories deepest first (non-empty ones are left)
 and remove the record.
 
+### Shared libraries (roadmap 1.1 P4)
+
+Minimal dependency checking, no solver. The builder writes `provides:`
+for each shared library a package installs (its `DT_SONAME`) and
+`requires:` for each `DT_NEEDED` of its ELF files that it does not
+provide (`pkgbuild.py`'s `elf_libs`), plus a recipe's own lines.
+`pkg install` (every path, through `install_loaded`) refuses a package
+whose `requires` names a library that neither the base system
+(`/etc/pkg/provides`: `libc.so`, musl's, at `/lib`), nor the package
+itself, nor an installed package provides: `pkg: NAME requires the
+library SO, which neither the base system nor an installed package
+provides; install the package that provides it first`. Resolution does
+not follow `requires` (a package that needs a library package says so
+with `depends:` as well). `pkg remove` refuses a package that provides a
+library another installed package requires and nothing else provides:
+`pkg: NAME: OTHER requires its library SO` (`-f` overrides, as for
+`depends`), and an install that replaces a package with a version that
+no longer provides such a library is refused the same way: `pkg: NAME:
+OTHER requires its library SO, which NAME-VERSION does not provide`
+(`libs_still_required`, before anything is written). The checks read
+one view of the installed packages' libraries, loaded from the records
+once per command and kept current by the command's own installs and
+removals, `-n` included: `pkg install -n libdemo demo-c` passes as the
+real one does. With more than 128 installed (`PKG_LIB_SCAN`) the view is
+incomplete and the checks refuse rather than miss one (`-f` goes on). The builder refuses a
+name `pkg` would not parse (name characters with `.so` in them, at most
+63 bytes) and more than 32 of either kind. The repository's `busybox-dyn` (`/usr/bin/busybox-dyn`,
+BusyBox linked against `libc.so`) requires `libc.so` only.
+
 ### Upgrade
 
 For every installed package whose index has a newer version satisfying

@@ -194,20 +194,34 @@ static bool installed_load(const char *name, struct manifest *m)
     return true;
 }
 
-static int installed_names(char names[][PKG_NAME_MAX], int max)
+/* The installed packages' names, at most `max`; *more (may be NULL) says
+ * whether there were others. */
+static int installed_names_more(char names[][PKG_NAME_MAX], int max, bool *more)
 {
+    if (more)
+        *more = false;
     DIR *d = opendir(PKG_DB_INSTALLED);
     if (d == NULL)
         return 0;
     int n = 0;
     struct dirent *e;
-    while ((e = readdir(d)) != NULL && n < max) {
+    while ((e = readdir(d)) != NULL) {
         if (e->d_name[0] == '.' || !name_valid(e->d_name))
             continue;
+        if (n == max) {
+            if (more)
+                *more = true;
+            break;
+        }
         strlcpy(names[n++], e->d_name, PKG_NAME_MAX);
     }
     closedir(d);
     return n;
+}
+
+static int installed_names(char names[][PKG_NAME_MAX], int max)
+{
+    return installed_names_more(names, max, NULL);
 }
 
 /*
@@ -223,7 +237,10 @@ static int record_stage(const char *name, const struct manifest *m, const struct
     snprintf(dir, sizeof(dir), PKG_DB_INSTALLED "/%s", name);
     if (mkdir(dir, 0755) < 0 && errno != EEXIST)
         return -1;
-    size_t cap = 4096 + (size_t)m->nfiles * (PKG_PATH_MAX + 160) + (dirs ? (size_t)dirs->n * (PKG_PATH_MAX + 8) : 0);
+    /* The fixed lines, each library line ("provides: " or "requires: ",
+     * the name, a newline), each file line and each dir line. */
+    size_t cap = 4096 + (size_t)(m->nprovides + m->nrequires) * (PKG_SONAME_MAX + 12) +
+                 (size_t)m->nfiles * (PKG_PATH_MAX + 160) + (dirs ? (size_t)dirs->n * (PKG_PATH_MAX + 8) : 0);
     char *text = malloc(cap);
     if (text == NULL) {
         errno = ENOMEM;
@@ -735,10 +752,228 @@ static bool owned_by_other(const char *path, const char *self, char *owner, size
     return false;
 }
 
+/*
+ * --- shared libraries (roadmap 1.1 P4; docs/pkg/design.md, "Shared
+ * libraries") ---
+ * Minimal dependency checking, no solver: a package's "requires" must each
+ * be provided by the base system (PKG_BASE_PROVIDES), by the package
+ * itself, or by another installed package; and a library another installed
+ * package requires is not taken away -- by removing the package that
+ * provides it, or by replacing that package with a version that no longer
+ * does -- while nothing else provides it.
+ *
+ * The checks read one view of the installed packages' libraries (g_libs),
+ * loaded from the records once per command and kept current by the
+ * command's own installs and removals, dry runs included: `pkg install -n
+ * libdemo demo-c` sees libdemo's libraries as installed, and a removal
+ * with many users parses each record once (#416's review). With more than
+ * PKG_LIB_SCAN installed the view is incomplete, and the checks refuse
+ * rather than miss a provider or a user (--force goes on).
+ */
+#define PKG_LIB_SCAN 128
+
+struct lib_ent {
+    char name[PKG_NAME_MAX];
+    int nprov, nreq;
+    char (*prov)[PKG_SONAME_MAX], (*req)[PKG_SONAME_MAX];   /* malloc'd; NULL when none */
+};
+
+static struct {
+    bool loaded, more;
+    int n;
+    struct lib_ent e[PKG_LIB_SCAN + 1];   /* one over: a package this command adds */
+} g_libs;
+
+static void lib_ent_clear(struct lib_ent *e)
+{
+    free(e->prov);
+    free(e->req);
+    memset(e, 0, sizeof(*e));
+}
+
+static bool lib_ent_set(struct lib_ent *e, const struct manifest *m)
+{
+    lib_ent_clear(e);
+    strlcpy(e->name, m->name, sizeof(e->name));
+    if (m->nprovides && (e->prov = malloc((size_t)m->nprovides * PKG_SONAME_MAX)) == NULL)
+        return false;
+    if (m->nrequires && (e->req = malloc((size_t)m->nrequires * PKG_SONAME_MAX)) == NULL)
+        return false;
+    if (m->nprovides)
+        memcpy(e->prov, m->provides, (size_t)m->nprovides * PKG_SONAME_MAX);
+    if (m->nrequires)
+        memcpy(e->req, m->requires, (size_t)m->nrequires * PKG_SONAME_MAX);
+    e->nprov = m->nprovides;
+    e->nreq = m->nrequires;
+    return true;
+}
+
+static void libs_load(void)
+{
+    if (g_libs.loaded)
+        return;
+    char (*names)[PKG_NAME_MAX] = malloc((size_t)PKG_LIB_SCAN * PKG_NAME_MAX);
+    if (names == NULL) {
+        g_libs.more = true;   /* unread: as incomplete as too many */
+        g_libs.loaded = true;
+        return;
+    }
+    int n = installed_names_more(names, PKG_LIB_SCAN, &g_libs.more);
+    for (int i = 0; i < n; i++) {
+        struct manifest m;
+        if (!installed_load(names[i], &m))
+            continue;
+        if (!lib_ent_set(&g_libs.e[g_libs.n], &m))
+            g_libs.more = true;
+        g_libs.n++;
+        manifest_free(&m);
+    }
+    free(names);
+    g_libs.loaded = true;
+}
+
+static struct lib_ent *libs_find(const char *name)
+{
+    for (int i = 0; i < g_libs.n; i++)
+        if (strcmp(g_libs.e[i].name, name) == 0)
+            return &g_libs.e[i];
+    return NULL;
+}
+
+/* This command installed (or, with -n, would have installed) `m`. */
+static void libs_note_installed(const struct manifest *m)
+{
+    libs_load();
+    struct lib_ent *e = libs_find(m->name);
+    if (e == NULL) {
+        if (g_libs.n == PKG_LIB_SCAN + 1) {
+            g_libs.more = true;
+            return;
+        }
+        e = &g_libs.e[g_libs.n++];
+    }
+    if (!lib_ent_set(e, m))
+        g_libs.more = true;
+}
+
+/* This command removed (or would have removed) `name`. */
+static void libs_note_removed(const char *name)
+{
+    libs_load();   /* a view loaded later would read the record a dry run left */
+    struct lib_ent *e = libs_find(name);
+    if (e == NULL)
+        return;
+    lib_ent_clear(e);
+    *e = g_libs.e[--g_libs.n];
+    memset(&g_libs.e[g_libs.n], 0, sizeof(g_libs.e[0]));
+}
+
+static bool lib_scan_too_many(const char *name)
+{
+    libs_load();
+    if (g_libs.more)
+        fprintf(stderr, "pkg: %s: more than %d packages are installed, too many to check shared libraries "
+                "against%s\n", name, PKG_LIB_SCAN, g_force ? " (going on anyway)" : "");
+    return g_libs.more && !g_force;
+}
+
+static bool base_provides(const char *so)
+{
+    FILE *f = fopen(PKG_BASE_PROVIDES, "r");
+    if (f == NULL)
+        return false;
+    char line[PKG_SONAME_MAX + 2];
+    bool found = false;
+    while (!found && fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        found = line[0] != '#' && strcmp(line, so) == 0;
+    }
+    fclose(f);
+    return found;
+}
+
+static bool lib_in(const char (*libs)[PKG_SONAME_MAX], int n, const char *so)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(libs[i], so) == 0)
+            return true;
+    return false;
+}
+
+/* An installed package, not named `skip`, that provides `so`. */
+static bool installed_provides(const char *so, const char *skip)
+{
+    libs_load();
+    for (int i = 0; i < g_libs.n; i++)
+        if ((skip == NULL || strcmp(g_libs.e[i].name, skip) != 0) &&
+            lib_in((const char (*)[PKG_SONAME_MAX])g_libs.e[i].prov, g_libs.e[i].nprov, so))
+            return true;
+    return false;
+}
+
+static int check_requires(const struct manifest *m)
+{
+    if (m->nrequires > 0 && lib_scan_too_many(m->name))
+        return EXIT_FAILED;
+    for (int i = 0; i < m->nrequires; i++) {
+        const char *so = m->requires[i];
+        if (lib_in((const char (*)[PKG_SONAME_MAX])m->provides, m->nprovides, so) || base_provides(so) ||
+            installed_provides(so, m->name))
+            continue;
+        fprintf(stderr, "pkg: %s requires the library %s, which neither the base system nor an installed package "
+                "provides; install the package that provides it first\n", m->name, so);
+        return EXIT_FAILED;
+    }
+    return 0;
+}
+
+/*
+ * Libraries `old` (an installed package) provides and `next` (its
+ * replacement; NULL for a removal) does not, that another installed
+ * package requires and neither the base system nor a third package
+ * provides: one line for each such user. EXIT_FAILED when any (unless
+ * --force), else 0.
+ */
+static int libs_still_required(const struct manifest *old, const struct manifest *next)
+{
+    if (old->nprovides == 0)
+        return 0;
+    if (lib_scan_too_many(old->name))
+        return EXIT_FAILED;
+    int rc = 0;
+    for (int i = 0; i < old->nprovides; i++) {
+        const char *so = old->provides[i];
+        if ((next && lib_in((const char (*)[PKG_SONAME_MAX])next->provides, next->nprovides, so)) ||
+            base_provides(so) || installed_provides(so, old->name))
+            continue;
+        for (int k = 0; k < g_libs.n; k++) {
+            const struct lib_ent *e = &g_libs.e[k];
+            if (strcmp(e->name, old->name) == 0 || !lib_in((const char (*)[PKG_SONAME_MAX])e->req, e->nreq, so))
+                continue;
+            if (next)
+                fprintf(stderr, "pkg: %s: %s requires its library %s, which %s-%s does not provide%s\n", old->name,
+                        e->name, so, next->name, next->version, g_force ? " (replacing anyway)" : "");
+            else
+                fprintf(stderr, "pkg: %s: %s requires its library %s%s\n", old->name, e->name, so,
+                        g_force ? " (removing anyway)" : "");
+            if (!g_force)
+                rc = EXIT_FAILED;
+        }
+    }
+    return rc;
+}
+
 static int install_loaded(struct loaded *l)
 {
+    int lrc = check_requires(&l->m);
+    if (lrc)
+        return lrc;
     struct manifest old;
     bool had_old = installed_load(l->m.name, &old);
+    if (had_old && (lrc = libs_still_required(&old, &l->m)) != 0) {
+        manifest_free(&old);
+        return lrc;
+    }
     struct dirlist old_dirs = { .n = 0 };
     if (had_old && old.dirs)
         old_dirs = *old.dirs;
@@ -756,6 +991,7 @@ static int install_loaded(struct loaded *l)
     if (g_dry_run) {
         if (had_old)
             manifest_free(&old);
+        libs_note_installed(&l->m);   /* a later package of this dry run may need its libraries */
         return 0;
     }
     /* Stage the record first: if the database cannot be written, nothing is touched. */
@@ -800,6 +1036,8 @@ static int install_loaded(struct loaded *l)
         fprintf(stderr, "pkg: %s: cannot commit the installation record: %s\n", l->m.name, strerror(errno));
         rc = EXIT_FAILED;
     }
+    if (rc == 0)
+        libs_note_installed(&l->m);
     if (rc) {
         for (int i = 0; i < done; i++) {
             char path[PKG_PATH_MAX], tmp[PKG_PATH_MAX + 16];
@@ -1260,6 +1498,8 @@ static int cmd_remove(int argc, char **argv)
             }
             manifest_free(&other);
         }
+        if (libs_still_required(&m, NULL))
+            blocked = true;
         if (blocked) {
             manifest_free(&m);
             rc = EXIT_FAILED;
@@ -1310,7 +1550,10 @@ static int cmd_remove(int argc, char **argv)
                             strerror(errno));
                     rc = EXIT_FAILED;
                 }
+                libs_note_removed(m.name);   /* its files are gone */
             }
+        } else {
+            libs_note_removed(m.name);   /* a later package of this dry run is checked without it */
         }
         manifest_free(&m);
     }

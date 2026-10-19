@@ -43,6 +43,14 @@ continue; the child returns immediately after `SIGCONT`. In
 NVMe AArch64 boot and an earlier old-behavior boot passed `signal-stop`.
 This is outside Unit 2 and remains an out-of-scope correctness finding,
 not a load-sensitive classification or an assertion change.
+**Second sighting, 2026-10-19:** AArch64 debug at `QEMU_SMP=1`, P4's
+PR 5 matrix (`c3addd75`, no kernel change from PR 4, whose matrix passed
+it), `selftest: signal probe 'signal-stop' failed check 9`, beside P3's
+probe builds and boots on the same host. The rerun on the same commit
+passed. The serial (kept in the matrix's log) has the first sighting's
+signature: the child, pid 243, exited with status 7, then its parent,
+pid 242, with status 9 -- an exit reported before the unreported
+continue, as above. Still out of scope.
 
 **Observed once, x86-64 `module-unload-busy` (2026-10-09):**
 `/tmp/cosmo-unit2-ahci-stop-fixed-x86.result` reports the check
@@ -1949,6 +1957,24 @@ timeout"; the ordinary boots have 240 s). Rerun: see the PR. First
 sighting; if it recurs, the crash boot's timeout is the candidate, under
 the keep / restate / widen-and-label rule above.
 
+**Second sighting, 2026-10-19:** CI on #414 (run 39259310985, head
+`bdcf11ff`), `build, boot, analyze (aarch64)`: `test-crash` `timed out
+after 180s`, all 480 self-tests `ok`, the panic markers missing. Every
+boot of that job was slower than main's: the first debug boot 233.0 s
+against 213.4-216.5 s on main's last three runs (39253511539,
+39246428011, 39233960111). The same job on the stack's other three runs
+passed its crash boot in 172.6-175.8 s. Main's own crash boot now takes
+172.5, 173.8 and 178.8 s on those three runs (159-161 s on 2026-10-12):
+under 1 % from the timeout at its slowest. The candidate named above is
+due, under the keep / restate / widen-and-label rule; it is main's, not
+P4's (P4 adds nothing to that boot's self-tests), and is left to the
+owner. The job was rerun.
+
+**Third sighting, 2026-10-19:** CI on #414 again (run 39268982301, head
+`c19b5712`), the same job, `timed out after 180s` after every self-test;
+its other debug boots took 213.7-235.4 s (main's 200.6-220.1 s), slow
+again. Rerun.
+
 ## An aarch64 boot that reached the self-tests and no further
 
 **2026-09-20, `0814e79`, the same one-document branch** (`make
@@ -3291,6 +3317,13 @@ comparison passed it. Two sightings in nine days, both one boot each,
 neither reproduced. The bound is the half-window lag; the host-time
 explanation above still fits and is still not shown.
 
+**Third sighting, 2026-10-19:** `... (84 ms)`, local x86-64 debug at
+`QEMU_SMP=4`, P4's PR 5 matrix (`c3addd75`, whose changes are `pkg`,
+its fixtures and `rc.test`; the kernel is PR 4's, whose matrix passed
+it at every SMP count). The host was also building and booting P3's
+eight probe runs at the time. The rerun on the same commit passed.
+Recorded, not attributed.
+
 ## `net-nicbench` over the per-test budget, 2026-09-29
 
 **Budget corrected 2026-10-04, PR #307:** the combined two-interface
@@ -4501,4 +4534,39 @@ passing AArch64 build jobs of the last 60 runs: median 51.7 minutes, p95
 54.0, at most 54.2 (main's `d4bf1e79`). **Widened and labelled:** the
 job's `timeout-minutes` is 70 (`.github/workflows/ci.yml`), a hang guard;
 each boot keeps its own timeout.
+
+## A console line split by a kernel log line: `writev` is not one write, 2026-10-19
+
+CI on #415 (run 39259310816, head `15b9ee10`), `pkg-net test (aarch64)`:
+`test-pkg-net: FAIL: the stored index's serial after the refusals: no
+line matching '^serial: 11$'`. The serial log (artifact
+`test-pkg-net-aarch64`, `boot-pkgnet.log`) has the right line with a
+kernel line spliced into it: `serial: 11[ INFO] process: pid 60 'cat'
+exited with status 0 (23 syscalls)`, then the line's end alone. The
+command was `cat .../INDEX | head -1`; `head`, writing to the console,
+flushes its line-buffered stdout through musl's `writev` of the buffered
+text and the new data (`"serial: 11"`, `"\n"`), and the Linux
+personality's `writev` (`rw_vec`, `compat/linux/syscalls.c`) makes one
+`write` per iovec, so the terminal sees two writes and `cat`'s exit,
+logged from another CPU, falls between them. Linux makes a `writev` to a
+terminal one write. Mechanism established from the log and the code; not
+P4's (inventory section 19). The job was rerun.
+
+Second sighting: CI on #415 (run 39291005851, head `aab677a4`), the
+same job and failure, the same splice (`serial: 11[ INFO] process: pid
+60 'cat' exited with status 0 (23 syscalls)`, `boot-pkgnet.log` line
+412). Rerun.
+
+## The firmware stalled on the reset in `test-net-login`'s reboot stage, 2026-10-19
+
+CI on #414 (run 39268982301, head `c19b5712`), `net-login test (x86_64)`:
+`test-net-login: FAIL: reboot: no a second kernel banner after reboot
+before the deadline`. The serial log (artifact `test-net-login-x86_64`,
+`boot-reboot.log`) ends with `reboot: restart through the ACPI reset
+register (port 0xcf9, value 0xf)` and then only the firmware's screen
+clears, five times: OVMF restarted and never reached `BdsDxe` to load the
+loader. The same handover stall as "firmware handover in
+`test-harness-retry`" above, here on a guest-initiated reset inside one
+QEMU process, where the harness has no retry. Recorded, not attributed;
+rerun.
 

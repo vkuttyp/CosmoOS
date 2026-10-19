@@ -1444,3 +1444,46 @@ each; none is needed by M2's acceptance test.
   archive depends on `$(OUT)/gen/archive-entries.stamp`, rewritten only
   when the list (less the repository's entries) changes.
 
+## 19. P4 shared-library follow-ups (2026-10-19)
+
+From roadmap 1.1 P4 (`docs/audit/2026-10-19-shared-libraries-report.md`);
+none is needed by its acceptance test.
+
+- Native CosmoOS programs stay static in 1.1 (the owner's decision): the
+  native libc has no shared build and no native program names
+  `PT_INTERP`, though the loader's path is the personality's common code.
+- On AArch64 musl leaves its own linker's RELRO (libc.so's) writable:
+  `kernel_mapped_dso(&ldso)` (`ldso/dynlink.c`) records it while
+  `PAGE_SIZE`, `libc.page_size`, is still 0, so the range rounds to
+  nothing. Upstream behaviour, the same under Linux; x86-64's
+  `PAGE_SIZE` is a constant. A fix is musl's (or a patch here).
+- `AT_SECURE` follows the credentials only: an exec never changes them
+  (no setuid or setgid bits, no file capabilities), so a program is
+  secure only when its parent ran with differing real and effective ids.
+- `pkg` checks libraries by name only: no versions, no solver, and the
+  INDEX carries no provides/requires, so `pkg install` learns of a
+  missing library only after fetching the package. musl's `libc.so`
+  has no `DT_SONAME`, so programs name it `libc.so`, unversioned, and
+  `/etc/pkg/provides` does the same.
+- glibc's dynamic linker has not been tried, and there is no vDSO
+  (`AT_SYSINFO_EHDR`).
+- `pkg`'s older whole-database checks (a file owned by another package,
+  `remove`'s `depends`, `list`, `upgrade`) read at most 128 installed
+  records and pass over the rest silently; the library checks refuse
+  past that (`PKG_LIB_SCAN`, #416's review). Found by the review; not
+  needed by P4.
+- The Linux personality's `writev` (`rw_vec`) makes one write per iovec,
+  where Linux makes one write of the whole vector to a terminal or pipe:
+  musl's line-buffered stdout flushes a line as two iovecs, so a kernel
+  log line can land inside it on the console (a `test-pkg-net` failure on
+  #415, `docs/testing/flakes.md`), and a pipe reader can see the halves
+  apart. Not needed by P4.
+- `test-crash`'s 180 s timeout: main's crash boot reached 178.8 s on
+  2026-10-19 (second sighting in `docs/testing/flakes.md`); the
+  keep / restate / widen-and-label decision is due.
+- `cosmo-upgrade --fetch` brings the root to the new release with the
+  running binary's rules, so a release that adds a directory the old one
+  does not know (v1.0.7's `lib/`) needs a second run, by the new binary,
+  to finish (`docs/guide/upgrading.md`). Running the fetched release's
+  own `cosmo-upgrade` from its signed package would remove that step; the
+  directory path (`test-upgrade`) already does.

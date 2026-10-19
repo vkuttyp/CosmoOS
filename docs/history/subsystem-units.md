@@ -3222,3 +3222,15 @@ See the [history index](README.md).
   `sftp`'s `?` link count is OpenSSH's own rendering, recorded with the
   owner's amended acceptance. `tools/p3-residue-probe.py`. Report:
   `docs/audit/2026-10-19-p3-residue-report.md`.
+- **Shared libraries (roadmap 1.1 P4, 2026-10-19).** musl is built
+  shared too: `/lib/libc.so`, also the dynamic linker as
+  `/lib/ld-musl-<arch>.so.1`, every dynamic program's `PT_INTERP`; the
+  stand-in interpreter is gone. The Linux vector gains a correct
+  `AT_SECURE`, `AT_HWCAP` and `AT_HWCAP2` and room for 32 pairs; `stat`
+  reports the mount as the device; W^X refusals name text relocations.
+  `/bin/busybox.dyn` (applets under `/usr/bin`) passes M3's scripted test
+  and BusyBox's testsuite, and `dltest` (`dlopen`, `RUNPATH`,
+  `AT_SECURE`, ASLR) passes, on both architectures. `pkg` records the
+  libraries a package provides and requires and refuses an install or a
+  removal that would break one. Native programs stay static in 1.1.
+  Report: `docs/audit/2026-10-19-shared-libraries-report.md`.

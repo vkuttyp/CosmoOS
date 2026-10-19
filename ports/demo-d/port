@@ -1,0 +1,5 @@
+name: demo-d
+version: 1.0
+summary: library test: requires a library nothing provides
+requires: libcosmo-missing.so
+file: share/demo-d/README data/README 0644

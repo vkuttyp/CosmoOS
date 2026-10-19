@@ -121,6 +121,22 @@ static bool split_fields(const char *value, char *fields[], const size_t caps[],
     return *p == '\0';
 }
 
+/* A library's soname: name characters, and ".so" in it (libc.so,
+ * libz.so.1). */
+bool soname_valid(const char *s)
+{
+    size_t n = strlen(s);
+    if (n == 0 || n >= PKG_SONAME_MAX || strstr(s, ".so") == NULL || s[0] == '.')
+        return false;
+    for (const char *p = s; *p; p++) {
+        char c = *p;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+              c == '-' || c == '+'))
+            return false;
+    }
+    return true;
+}
+
 static bool set_str(char *dst, size_t cap, const char *src)
 {
     if (strlen(src) >= cap)
@@ -165,6 +181,14 @@ int manifest_parse(const char *text, size_t len, struct manifest *m, char *err, 
             if (m->ndepends == PKG_MAX_DEPENDS || !depend_parse(value, &m->depends[m->ndepends]))
                 goto bad;
             m->ndepends++;
+        } else if (strcmp(key, "provides") == 0) {
+            if (m->nprovides == PKG_MAX_LIBS || !soname_valid(value))
+                goto bad;
+            strcpy(m->provides[m->nprovides++], value);
+        } else if (strcmp(key, "requires") == 0) {
+            if (m->nrequires == PKG_MAX_LIBS || !soname_valid(value))
+                goto bad;
+            strcpy(m->requires[m->nrequires++], value);
         } else if (strcmp(key, "file") == 0) {
             if (m->nfiles == PKG_MAX_FILES)
                 goto bad;
@@ -242,6 +266,10 @@ int manifest_format(const struct manifest *m, const struct dirlist *dirs, char *
         else
             PUT("depends: %s %s %s\n", m->depends[i].name, op_text(m->depends[i].op), m->depends[i].version);
     }
+    for (int i = 0; i < m->nprovides; i++)
+        PUT("provides: %s\n", m->provides[i]);
+    for (int i = 0; i < m->nrequires; i++)
+        PUT("requires: %s\n", m->requires[i]);
     for (int i = 0; i < m->nfiles; i++) {
         char hex[2 * SHA512_LEN + 1];
         hex_encode(m->files[i].sha, SHA512_LEN, hex);

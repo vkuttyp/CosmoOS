@@ -1,0 +1,5 @@
+# /etc/pkg/provides - the shared libraries the base system provides, one
+# soname a line (roadmap 1.1 P4; docs/pkg/design.md, "Shared libraries").
+# pkg install accepts a package that requires one of these without a
+# library package providing it.
+libc.so

@@ -37,13 +37,20 @@ $(OUT)/pkgprog/%.analyzed: $(ROOT)/%.c analyze-force
 PORT_DIRS := $(sort $(dir $(wildcard $(ROOT)/ports/*/port)))
 PORT_SRCS := $(wildcard $(ROOT)/ports/*/port $(ROOT)/ports/*/src/* $(ROOT)/ports/*/data/* $(ROOT)/ports/*/doc/*)
 PKG_INDEX := $(PKG_REPO)/INDEX
+# A package file outside the repository (roadmap 1.1 P4, #416's review):
+# libdemo 2.0, which no longer provides libdemo.so, for rc.test to try
+# over libdemo 1.0 while demo-c requires it.
+PKG_FIXTURE_DIR := $(OUT)/pkg/fixtures
 ifeq ($(SELFTEST),1)
 PKG_FIXTURES := --test-fixtures
 else
 PKG_FIXTURES :=
 endif
 
-$(PKG_INDEX): $(PORT_SRCS) $(LIBC_A) $(LIBC_CRT0) $(USER_LD) $(ROOT)/tools/pkgbuild.py $(ROOT)/scripts/modsign.py $(PKGSIGN_KEY)
+# The dynamically linked BusyBox as a package too (roadmap 1.1 P4):
+# /usr/bin/busybox-dyn, which requires libc.so (the base system's).
+$(PKG_INDEX): $(PORT_SRCS) $(LIBC_A) $(LIBC_CRT0) $(USER_LD) $(ROOT)/tools/pkgbuild.py $(ROOT)/scripts/modsign.py $(PKGSIGN_KEY) \
+		$(BUSYBOX_DYN_ELF)
 	$(Q)rm -rf $(PKG_REPO)
 	$(Q)mkdir -p $(PKG_REPO)
 	$(Q)for d in $(PORT_DIRS); do \
@@ -51,7 +58,17 @@ $(PKG_INDEX): $(PORT_SRCS) $(LIBC_A) $(LIBC_CRT0) $(USER_LD) $(ROOT)/tools/pkgbu
 			--ld "$(LD)" --ldflags "$(USER_LDFLAGS)" --ldscript $(USER_LD) --crt0 $(LIBC_CRT0) \
 			--libc $(LIBC_A) --sign-key $(PKGSIGN_KEY) $(PKG_FIXTURES) || exit 1; \
 	done
+	$(Q)$(PKGBUILD) pack --name busybox-dyn --version $(BUSYBOX_VERSION) \
+		--summary "BusyBox $(BUSYBOX_VERSION), dynamically linked against musl" \
+		--file usr/bin/busybox-dyn=$(BUSYBOX_DYN_ELF) --sign-key $(PKGSIGN_KEY) \
+		--out $(PKG_REPO)/busybox-dyn-$(BUSYBOX_VERSION).cpk
 	$(Q)$(PKGBUILD) index --repo $(PKG_REPO) --sign-key $(PKGSIGN_KEY)
+ifeq ($(SELFTEST),1)
+	$(Q)mkdir -p $(PKG_FIXTURE_DIR)
+	$(Q)$(PKGBUILD) pack --name libdemo --version 2.0 --summary "library test: libdemo without libdemo.so" \
+		--file usr/share/libdemo/README=$(ROOT)/ports/libdemo/data/libdemo-so.txt --sign-key $(PKGSIGN_KEY) \
+		--out $(PKG_FIXTURE_DIR)/libdemo-2.0.cpk
+endif
 
 .PHONY: ports pkg
 ports: $(PKG_INDEX)
@@ -60,5 +77,8 @@ pkg: $(PKG_ELF)
 # Archive entries: every repository file as repo/<name>; the recipe list
 # is known only after the build, so the archive rule shells out for it.
 PKG_ARCHIVE_ENTRIES = $(foreach f,$(sort $(wildcard $(PKG_REPO)/*)),repo/$(notdir $(f))=$(f))
+ifeq ($(SELFTEST),1)
+PKG_FIXTURE_ARCHIVE_ENTRIES := tests/pkg/libdemo-2.0.cpk=$(PKG_FIXTURE_DIR)/libdemo-2.0.cpk
+endif
 
 -include $(PKG_OBJS:.o=.d)
