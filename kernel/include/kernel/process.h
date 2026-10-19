@@ -104,12 +104,21 @@ struct sigaction_k;
 struct signal_info;
 struct elf_info;
 struct process;
+/* The auxiliary vector's room on the initial stack, in words: 32 pairs.
+ * Linux's vector is 19 pairs here; it was 40 words, which a vector of 20
+ * pairs (its AT_NULL among them) would have overrun. */
+#define PERSONALITY_AUXV_WORDS 64
+
 /* What the initial-stack builder has placed for the auxiliary vector. */
 struct personality_auxv_args {
     uint64_t random_addr;    /* 16 random bytes on the stack */
     uint64_t execfn_addr;    /* the path string on the stack */
     uint64_t platform_addr;  /* the platform string on the stack, 0 when none */
     uint64_t interp_base;    /* the interpreter's bias, 0 without one */
+    /* The credentials the vector reports (AT_UID.., AT_SECURE), read once
+     * under p->lock: a sibling thread may be in setresuid while the image
+     * is built, and the exec checks them again once it is alone. */
+    uint32_t ruid, euid, rgid, egid;
 };
 
 struct personality {

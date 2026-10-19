@@ -92,6 +92,7 @@ void x86_cpu_init(void)
     read_brand_string();
 
     x86_cpu_enable_features();
+    arch_user_hwcap_note_cpu();
 }
 
 void arch_hardening_report(void)
@@ -254,4 +255,29 @@ void arch_irq_disable(void)
 bool arch_irq_enabled(void)
 {
     return (read_rflags() & RFLAGS_IF) != 0;
+}
+
+static uint64_t g_user_hwcap = ~0ull;   /* the intersection over the CPUs noted; ~0: none yet */
+
+static uint64_t hwcap_this_cpu(void)
+{
+    struct cpuid_regs r;
+    cpuid(1, 0, &r);
+    return r.edx;   /* Linux's x86_capability[CPUID_1_EDX] */
+}
+
+void arch_user_hwcap_note_cpu(void)
+{
+    __atomic_fetch_and(&g_user_hwcap, hwcap_this_cpu(), __ATOMIC_RELAXED);
+}
+
+uint64_t arch_user_hwcap(void)
+{
+    uint64_t h = __atomic_load_n(&g_user_hwcap, __ATOMIC_RELAXED);
+    return h == ~0ull ? hwcap_this_cpu() : h;
+}
+
+uint64_t arch_user_hwcap2(void)
+{
+    return 0;   /* HWCAP2_FSGSBASE stays clear: CR4.FSGSBASE is off (above); no RING3MWAIT */
 }

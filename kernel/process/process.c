@@ -243,7 +243,7 @@ static size_t initial_stack_need(const struct personality *pers, const char *con
     for (; envp && envp[envc]; envc++)
         strings += strlen(envp[envc]) + 1;
     strings += strlen(execfn) + 1 + (pers->platform ? strlen(pers->platform) + 1 : 0);
-    size_t words = 1 + (argc + 1) + (envc + 1) + 40;
+    size_t words = 1 + (argc + 1) + (envc + 1) + PERSONALITY_AUXV_WORDS;
     *argc_out = argc;
     *envc_out = envc;
     return strings + 16 + words * 8 + 32 + 64;
@@ -259,14 +259,15 @@ static unsigned initial_stack_pages(size_t need)
  * Lay out argc/argv/envp/auxv and the strings at the top of the user
  * stack of `space`, writing through the direct map into its `pages`
  * populated top pages. The personality `pers` supplies the vector (its
- * auxv hook, reading `p`'s credentials) and AT_PLATFORM. Publishes the
+ * auxv hook, given the credentials `ids` -- ruid, euid, rgid, egid --
+ * snapshotted by the caller) and AT_PLATFORM. Publishes the
  * initial user stack pointer on success; returns -E2BIG when the frame
  * does not fit, -ENOMEM for scratch allocation failure.
  */
 static int build_initial_stack(struct process *p, const struct personality *pers, struct vm_space *space,
                                const struct elf_info *info, uint64_t stack_top, uint64_t sp_offset,
                                const char *const argv[], const char *const envp[], const char *execfn,
-                               uint64_t interp_base, unsigned npages, uint64_t *sp_out)
+                               uint64_t interp_base, const uint32_t ids[4], unsigned npages, uint64_t *sp_out)
 {
     unsigned argc, envc;
     size_t need = initial_stack_need(pers, argv, envp, execfn, &argc, &envc) + sp_offset;
@@ -290,7 +291,8 @@ static int build_initial_stack(struct process *p, const struct personality *pers
     uint64_t sp = stack_top - sp_offset;
     /* The string addresses and the word area, off the kernel stack: spawn
      * and exec already have several caller frames live. */
-    uint64_t *str_addrs = kmalloc(((size_t)argc + envc + 1 + (argc + 1) + (envc + 1) + 40) * sizeof(uint64_t), 0);
+    uint64_t *str_addrs =
+        kmalloc(((size_t)argc + envc + 1 + (argc + 1) + (envc + 1) + PERSONALITY_AUXV_WORDS) * sizeof(uint64_t), 0);
     if (str_addrs == NULL)
         return -ENOMEM;
     for (unsigned i = 0; i < argc + envc; i++) {
@@ -341,8 +343,9 @@ static int build_initial_stack(struct process *p, const struct personality *pers
         w[k++] = str_addrs[argc + i];
     w[k++] = 0;
     struct personality_auxv_args x = { .random_addr = random_addr, .execfn_addr = execfn_addr,
-                                       .platform_addr = platform_addr, .interp_base = interp_base };
-    k += pers->auxv(p, info, &x, w + k, 40);
+                                       .platform_addr = platform_addr, .interp_base = interp_base,
+                                       .ruid = ids[0], .euid = ids[1], .rgid = ids[2], .egid = ids[3] };
+    k += pers->auxv(p, info, &x, w + k, PERSONALITY_AUXV_WORDS);
     size_t words = k;
     sp &= ~0xFULL;
     if (((words * 8) & 0xF) != 0)
@@ -368,11 +371,24 @@ static int build_initial_stack(struct process *p, const struct personality *pers
  * limits and the credentials the vector reports; nothing of `p` is
  * written. On failure nothing is left.
  */
+/* The ids the new image's vector reports, under the lock setresuid and
+ * setresgid take. */
+static void cred_ids_snapshot(struct process *p, uint32_t ids[4])
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    ids[0] = p->cred.ruid;
+    ids[1] = p->cred.euid;
+    ids[2] = p->cred.rgid;
+    ids[3] = p->cred.egid;
+    spin_unlock_irqrestore(&p->lock, s);
+}
+
 struct image_build {
     struct elf_info info, iinfo;   /* the executable's (the personality's init and auxv), the interpreter's */
     const struct personality *pers;
     struct vm_space *space;
     uint64_t entry, sp, image_end, interp_base;
+    uint32_t ids[4];   /* ruid, euid, rgid, egid as the vector reports them (cred_ids_snapshot) */
     char cmdline[PROCESS_CMDLINE_MAX];
     uint16_t cmdline_len;
     struct exec_record *rec;
@@ -624,8 +640,9 @@ static int image_build(struct process *p, const struct process_image *exe, const
         }
         space->anon_pages++;
     }
+    cred_ids_snapshot(p, ib->ids);
     rc = build_initial_stack(p, ib->pers, space, info, stack_top, sp_offset, argv, envp, execfn, ib->interp_base,
-                             npages, &ib->sp);
+                             ib->ids, npages, &ib->sp);
     if (rc)
         goto fail;
 #if CONFIG_DEBUG
@@ -1337,6 +1354,24 @@ int process_exec_images(const struct process_image *exe, const struct process_im
     if (rc) {
         kfree(ib);
         return rc;
+    }
+    /* Alone now. The vector's ids were read before the other threads
+     * were gone; one of them may have changed the credentials since, and
+     * then the vector (AT_SECURE among it) describes ids the image will
+     * not run with. Past the point of no return -- the other threads have
+     * exited -- so the process ends, as Linux ends one whose exec fails
+     * after de_thread. */
+    uint32_t now[4];
+    cred_ids_snapshot(p, now);
+    if (memcmp(now, ib->ids, sizeof(now)) != 0) {
+        kwarn("process: pid %u exec: a thread changed the credentials during the exec; ending the process", p->pid);
+        arch_irq_state_t xs = spin_lock_irqsave(&p->lock);
+        __atomic_store_n(&p->exec_thread, NULL, __ATOMIC_RELEASE);
+        spin_unlock_irqrestore(&p->lock, xs);
+        vm_space_destroy(ib->space);
+        exec_record_put(ib->rec);
+        kfree(ib);
+        process_exit(128 + SIGKILL);
     }
 
     /* --- the point of no return: only this thread is left --- */

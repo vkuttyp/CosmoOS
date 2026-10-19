@@ -401,4 +401,4 @@ loads the incoming one's (milestone 10). A clone's thread pointer is
 | `compat/linux/signal.c`, `linux_internal.h` | signals: the frame builders, `rt_sigreturn`, the trampoline page, the exit hook, `kill`/`tgkill`/`tkill`, `exit`/`exit_group`, `gettid`/`set_tid_address` (milestone 10) |
 | `kernel/ipc/futex.c`, `kernel/include/kernel/futex.h` | the futex primitive |
 | `kernel/io/poll.c`, `kernel/include/kernel/poll.h` | `io_poll`, behind `poll`/`ppoll` and `select`/`pselect6` |
-| `tests/linux/linux.mk` | `make linux-tests` (both architectures): `lxhello`, `lxtest`, `lxsig`, the PIE pair `lxinterp`/`lxdyn`, and `hello_musl` on x86-64 when `MUSL_GCC` is set or `musl-gcc` is found; `HAVE_MUSL` (0/1) is passed to the boot harness by `make test` |
+| `tests/linux/linux.mk` | `make linux-tests` (both architectures): `lxhello`, `lxtest`, `lxsig`, `lxnointerp` (a `PT_INTERP` naming no file), and `hello_musl` on x86-64 when `MUSL_GCC` is set or `musl-gcc` is found; `HAVE_MUSL` (0/1) is passed to the boot harness by `make test` |

@@ -748,6 +748,7 @@ void ramfs_populate_boot(void)
         { "/boot", 0755 }, { "/boot/modules", 0755 }, { "/boot/tests", 0755 },
         { "/tmp", 01777 },   /* world-writable scratch space (the sticky bit is recorded, not yet enforced) */
         { "/mnt", 0755 },  { "/dev", 0755 }, { "/bin", 0755 }, { "/sbin", 0755 }, { "/etc", 0755 },
+        { "/lib", 0755 },   /* musl's libc.so and the dynamic linker (roadmap 1.1 P4) */
         { "/proc", 0555 },
     };
     for (size_t i = 0; i < ARRAY_SIZE(dirs); i++) {
@@ -762,14 +763,17 @@ void ramfs_populate_boot(void)
         /* The bootstrap namespace: bin/, sbin/, etc/ and usr/ entries are
          * the installed system (docs/userland/); everything else is /boot.
          * usr/ since the scp-sftp unit: /usr/libexec/sftp-server, where
-         * dropbear runs it, which /boot/usr/... was not. */
+         * dropbear runs it, which /boot/usr/... was not. lib/ and
+         * usr/lib/ since 1.1 P4: shared objects, 0755 as on Linux, the
+         * dynamic linker among them (an interpreter needs the x bit). */
         uint32_t mode = 0644;
         if (strcmp(e->name, "init") == 0) {
             ksnprintf(path, sizeof(path), "/boot/%s", e->name);
             mode = 0755;   /* the program the kernel starts; its self-test respawns it */
         } else if (strncmp(e->name, "bin/", 4) == 0 || strncmp(e->name, "sbin/", 5) == 0 ||
                    strncmp(e->name, "usr/bin/", 8) == 0 || strncmp(e->name, "usr/sbin/", 9) == 0 ||
-                   strncmp(e->name, "usr/libexec/", 12) == 0) {
+                   strncmp(e->name, "usr/libexec/", 12) == 0 || strncmp(e->name, "lib/", 4) == 0 ||
+                   strncmp(e->name, "usr/lib/", 8) == 0) {
             ksnprintf(path, sizeof(path), "/%s", e->name);
             mode = 0755;
         } else if (strncmp(e->name, "etc/", 4) == 0 || strncmp(e->name, "usr/", 4) == 0) {

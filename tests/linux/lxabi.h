@@ -124,7 +124,7 @@ __asm__(".text\n"
 #endif
 
 /* The program entry: the stack has argc at sp; main(argc, argv). A program
- * with its own entry (lxinterp) defines LXABI_NO_START. */
+ * with its own entry defines LXABI_NO_START. */
 #ifndef LXABI_NO_START
 int main(int argc, char **argv);
 #if defined(__x86_64__)

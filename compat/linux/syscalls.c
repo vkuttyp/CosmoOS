@@ -8,6 +8,7 @@
  * native process, and nothing native depends on this file.
  */
 
+#include <arch/cpu.h>
 #include <kernel/blk.h>
 #include <kernel/compiler.h>
 #include <kernel/elf.h>
@@ -20,6 +21,7 @@
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/panic.h>
 #include <kernel/object.h>
 #include <kernel/percpu.h>
 #include <kernel/pipe.h>
@@ -72,6 +74,7 @@ struct lx_shm_attach {
 struct linux_state {
     uint64_t brk_start, brk;
     unsigned unknown_syscalls;
+    bool wx_logged;   /* lx_wx_refused has said why, once per exec */
     struct lx_shm_attach *shm_attaches;   /* singly linked; head insert */
     spinlock_t shm_lock;                  /* guards shm_attaches (threads share it) */
 };
@@ -216,14 +219,21 @@ static int linux_process_exec(struct process *p, const struct elf_info *info)
 static unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x, uint64_t *w,
                     unsigned max)
 {
+    (void)p;   /* the credentials come snapshotted in x */
     unsigned k = 0;
+    /* Every pair fits (PERSONALITY_AUXV_WORDS): a pair dropped for room
+     * would leave the vector without its AT_NULL. */
 #define AUX(t, v)                                                                        \
     do {                                                                                 \
-        if (k + 2 <= max) {                                                              \
-            w[k++] = (t);                                                                \
-            w[k++] = (v);                                                                \
-        }                                                                                \
+        KASSERT(k + 2 <= max);                                                           \
+        w[k++] = (t);                                                                    \
+        w[k++] = (v);                                                                    \
     } while (0)
+    /* AT_SECURE, as Linux decides it for an exec that changes no
+     * credentials (setuid bits are ignored here): the effective ids are
+     * not the real ones. musl's dynamic linker then ignores
+     * LD_LIBRARY_PATH and LD_PRELOAD (roadmap 1.1 P4). */
+    bool secure = x->euid != x->ruid || x->egid != x->rgid;
     AUX(LX_AT_PHDR, info->phdr_vaddr);
     AUX(LX_AT_PHENT, info->phent);
     AUX(LX_AT_PHNUM, info->phnum);
@@ -233,13 +243,13 @@ static unsigned linux_auxv(struct process *p, const struct elf_info *info, const
     AUX(LX_AT_RANDOM, x->random_addr);
     AUX(LX_AT_EXECFN, x->execfn_addr);
     AUX(LX_AT_PLATFORM, x->platform_addr);
-    AUX(LX_AT_UID, p->cred.ruid);
-    AUX(LX_AT_EUID, p->cred.euid);
-    AUX(LX_AT_GID, p->cred.rgid);
-    AUX(LX_AT_EGID, p->cred.egid);
-    AUX(LX_AT_SECURE, 0);
-    AUX(LX_AT_HWCAP, 0);
-    AUX(LX_AT_HWCAP2, 0);
+    AUX(LX_AT_UID, x->ruid);
+    AUX(LX_AT_EUID, x->euid);
+    AUX(LX_AT_GID, x->rgid);
+    AUX(LX_AT_EGID, x->egid);
+    AUX(LX_AT_SECURE, secure ? 1 : 0);
+    AUX(LX_AT_HWCAP, arch_user_hwcap());
+    AUX(LX_AT_HWCAP2, arch_user_hwcap2());
     AUX(LX_AT_CLKTCK, 100);
     AUX(LX_AT_NULL, 0);
 #undef AUX
@@ -1960,6 +1970,24 @@ static int64_t lx_brk(struct syscall_args *a)
     return (int64_t)want;
 }
 
+/*
+ * W^X (decision 4): no page is writable and executable at once, so a
+ * mapping or a protection asking for both is -EINVAL. The one program that
+ * asks in earnest is a dynamic linker relocating a library with text
+ * relocations (musl's mprotect(PROT_READ|PROT_WRITE|PROT_EXEC) for
+ * DT_TEXTREL): its dlopen fails with EINVAL, and this line says why --
+ * once per exec, so a program probing for RWX in a loop (a JIT) cannot
+ * flood the console and the dmesg ring (#414's review).
+ */
+static int64_t lx_wx_refused(const char *call)
+{
+    struct linux_state *ls = lx();
+    if (ls && !__atomic_exchange_n(&ls->wx_logged, true, __ATOMIC_RELAXED))
+        kinfo("linux: pid %u: %s with PROT_WRITE|PROT_EXEC refused (W^X): a library with text relocations cannot "
+              "be loaded here; build it -fPIC", process_current()->pid, call);
+    return -EINVAL;
+}
+
 static int64_t lx_mmap(struct syscall_args *a)
 {
     uint64_t hint = a->a[0];
@@ -1974,7 +2002,7 @@ static int64_t lx_mmap(struct syscall_args *a)
     if (lx_prot(prot, &nprot) < 0)
         return -EINVAL;
     if ((nprot & COSMO_PROT_WRITE) && (nprot & COSMO_PROT_EXEC))
-        return -EINVAL;   /* W^X */
+        return lx_wx_refused("mmap");
     vm_prot_t vprot = 0;
     if (nprot & COSMO_PROT_READ)
         vprot |= VM_PROT_READ;
@@ -2298,7 +2326,7 @@ static int64_t lx_mprotect(struct syscall_args *a)
     if (!is_page_aligned(addr) || len == 0 || lx_prot((unsigned)a->a[2], &nprot) < 0)
         return -EINVAL;
     if ((nprot & COSMO_PROT_WRITE) && (nprot & COSMO_PROT_EXEC))
-        return -EINVAL;
+        return lx_wx_refused("mprotect");
     vm_prot_t vprot = 0;
     if (nprot & COSMO_PROT_READ)
         vprot |= VM_PROT_READ;

@@ -1,0 +1,24 @@
+#!/bin/sh
+# The C compiler for dynamically linked programs (roadmap 1.1 P4;
+# ports/busybox/README.md, "Shared libraries"): cc.in's compiler, but a
+# link is position-independent and dynamic, against the sysroot's
+# libc.so, with musl's dynamic linker @LDSO@ as PT_INTERP (/lib on the
+# system) and the compiler-rt builtins linked in, since libc.so does not
+# export them. -shared builds a library instead. Code is compiled -fPIC.
+# Generated from ports/busybox/cc-dyn.in.
+link=1
+shared=0
+for a in "$@"; do
+    case "$a" in -c|-S|-E|-M|-MM) link=0 ;; -shared) shared=1 ;; esac
+done
+if [ "$link" = 1 ] && [ "$shared" = 1 ]; then
+    exec @CC@ --target=@TARGET@ -nostdinc -isystem @SYSROOT@/include -isystem @RESOURCE@ -ffile-prefix-map=@BBDIR@=busybox \
+        -fPIC -fuse-ld=lld -Wl,--build-id=none -Wl,-z,max-page-size=4096 -nostdlib \
+        @SYSROOT@/lib/crti.o "$@" -L@SYSROOT@/lib -lc @BUILTINS@ @SYSROOT@/lib/crtn.o
+fi
+if [ "$link" = 1 ]; then
+    exec @CC@ --target=@TARGET@ -nostdinc -isystem @SYSROOT@/include -isystem @RESOURCE@ -ffile-prefix-map=@BBDIR@=busybox \
+        -fPIE -pie -fuse-ld=lld -Wl,--build-id=none -Wl,-z,max-page-size=4096 -Wl,--dynamic-linker=@LDSO@ -nostdlib \
+        @SYSROOT@/lib/Scrt1.o @SYSROOT@/lib/crti.o "$@" -L@SYSROOT@/lib -lc @BUILTINS@ @SYSROOT@/lib/crtn.o
+fi
+exec @CC@ --target=@TARGET@ -nostdinc -isystem @SYSROOT@/include -isystem @RESOURCE@ -ffile-prefix-map=@BBDIR@=busybox -fPIC "$@"

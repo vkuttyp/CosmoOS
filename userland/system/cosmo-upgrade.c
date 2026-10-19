@@ -652,7 +652,7 @@ struct counts {
 static bool target_of(const char *name, char *out, size_t len)
 {
     if (strncmp(name, "bin/", 4) == 0 || strncmp(name, "sbin/", 5) == 0 || strncmp(name, "etc/", 4) == 0 ||
-        strncmp(name, "usr/", 4) == 0) {
+        strncmp(name, "usr/", 4) == 0 || strncmp(name, "lib/", 4) == 0) {
         snprintf(out, len, "/%s", name);
         return true;
     }
@@ -667,7 +667,8 @@ static bool target_of(const char *name, char *out, size_t len)
 static unsigned archive_mode(const char *name)
 {
     if (strncmp(name, "bin/", 4) == 0 || strncmp(name, "sbin/", 5) == 0 || strncmp(name, "usr/bin/", 8) == 0 ||
-        strncmp(name, "usr/sbin/", 9) == 0 || strncmp(name, "usr/libexec/", 12) == 0)
+        strncmp(name, "usr/sbin/", 9) == 0 || strncmp(name, "usr/libexec/", 12) == 0 || strncmp(name, "lib/", 4) == 0 ||
+        strncmp(name, "usr/lib/", 8) == 0)
         return 0755;
     return 0644;
 }

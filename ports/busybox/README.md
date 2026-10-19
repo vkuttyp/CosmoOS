@@ -26,15 +26,25 @@ attached to that release in the PR that pins it.
 
 ## The build (`busybox.mk`)
 
-1. **musl**: `configure --target=<arch>-linux-musl --disable-shared` with
-   the project's clang, `llvm-ar`; installed into `$(BB_DIR)/sysroot` (`BB_DIR`: `out/busybox-<arch>` beside the build trees, one per architecture, which every build variant shares).
-2. **compiler-rt builtins**: every `lib/builtins/*.c` compiled for the
-   target against the musl headers into `libclang_rt.builtins.a`, except,
+1. **musl headers**: `configure --target=<arch>-linux-musl --prefix=/
+   --syslibdir=/lib --enable-shared` with the project's clang, lld and
+   `llvm-ar`, `LIBCC` naming the builtins of step 2; `install-headers`
+   into `$(BB_DIR)/sysroot` (`BB_DIR`: `out/busybox-<arch>` beside the
+   build trees, one per architecture, which every build variant shares).
+2. **compiler-rt builtins**: every `lib/builtins/*.c` compiled `-fPIC`
+   for the target against the musl headers into
+   `libclang_rt.builtins.a`, except,
    on AArch64, the twelve x87 80-bit `long double` routines (`*xf*`,
    `divxc3`, `mulxc3`, `powixf2`), which are x86-only. AArch64 needs the
    128-bit `long double` routines (`__addtf3`, `__multf3`,
    `__trunctfdf2`, ...): musl's printf and strtod use them, and the
-   host's clang has no Linux builtins to offer.
+   host's clang has no Linux builtins to offer. Position-independent
+   since roadmap 1.1 P4: `libc.so` and every dynamic program link them.
+2a. **musl libraries** (`install-libs`): `libc.a` and the start files,
+   and since roadmap 1.1 P4 `libc.so`, linked with the builtins, which is
+   also the dynamic linker; the system has it as `/lib/libc.so` and
+   `/lib/ld-musl-<arch>.so.1`, a link to it (`MUSL_ARCHIVE_ENTRIES`), the
+   path every dynamic program's `PT_INTERP` names.
 3. **BusyBox** with `busybox.config`, its source patched first (below), through `cc` (from `cc.in`): clang
    for the target with the musl headers; a link is static, with musl's
    `crt1.o crti.o ... -lc builtins crtn.o` in that order, and the image
@@ -45,6 +55,10 @@ attached to that release in the PR that pins it.
    build time out, and `-ffile-prefix-map` the build directory, so the
    binary is reproducible (`make reproducible`). The binary is stripped with
    `llvm-objcopy` (`SKIP_STRIP=y`: BusyBox wants `strip`).
+3a. **`cc-dyn`** (from `cc-dyn.in`, roadmap 1.1 P4): the same compiler for
+   dynamically linked programs: `-fPIC`, a link `-pie` with `Scrt1.o`,
+   `--dynamic-linker=/lib/ld-musl-<arch>.so.1`, `-lc` (libc.so) and the
+   builtins; `-shared` builds a library. `tests/dyn/` is built with it.
 4. **The testsuite**: BusyBox's `testsuite/` packed by
    `pack-testsuite.py` into a reproducible `testsuite.tgz` for
    `make test-busybox`.

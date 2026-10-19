@@ -622,6 +622,90 @@ static long put_file(const char *path, const char *text, unsigned mode)
     return n == (long)lx_strlen(text) ? 0 : -5;
 }
 
+/*
+ * --- the auxiliary vector (roadmap 1.1 P4; docs/compat/linux/design.md,
+ * "The auxiliary vector") ---
+ * After envp's NULL. lxtest is static, so AT_BASE is 0; a dynamic
+ * program's vector is checked by tests/dyn/dynhello.
+ */
+extern char _start[] __attribute__((visibility("hidden")));
+
+static uint64_t auxv_get(char **argv, int argc, uint64_t type, int *found)
+{
+    char **e = argv + argc + 1;
+    while (*e)
+        e++;
+    for (uint64_t *a = (uint64_t *)(e + 1); a[0] != LX_AT_NULL; a += 2) {
+        if (a[0] == type) {
+            *found = 1;
+            return a[1];
+        }
+    }
+    *found = 0;
+    return 0;
+}
+
+static uint64_t expect_hwcap(void)
+{
+#if defined(__x86_64__)
+    uint32_t a = 1, b, c = 0, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    return d;   /* CPUID.1:EDX, which user mode reads as the kernel does */
+#else
+    return 3;   /* FP and ASIMD: every core this runs on (the rest is the ID registers', EL1's to read) */
+#endif
+}
+
+/* 0, or the number of the first check that failed; `secure` is what
+ * AT_SECURE must be. */
+static int auxv_check(int argc, char **argv, uint64_t secure)
+{
+    int f;
+    if (auxv_get(argv, argc, LX_AT_PAGESZ, &f) != 4096 || !f)
+        return 30;
+    if (auxv_get(argv, argc, LX_AT_BASE, &f) != 0 || !f)
+        return 31;   /* no interpreter */
+    if (auxv_get(argv, argc, LX_AT_ENTRY, &f) != (uint64_t)(uintptr_t)_start || !f)
+        return 32;
+    if (auxv_get(argv, argc, LX_AT_PHENT, &f) != 56 || !f || auxv_get(argv, argc, LX_AT_PHNUM, &f) == 0 || !f)
+        return 33;
+    /* AT_PHDR is this image's header table: an executable PT_LOAD among
+     * its AT_PHNUM entries holds _start. */
+    const uint8_t *ph = (const uint8_t *)(uintptr_t)auxv_get(argv, argc, LX_AT_PHDR, &f);
+    uint64_t phnum = auxv_get(argv, argc, LX_AT_PHNUM, &f), entry = (uint64_t)(uintptr_t)_start;
+    int text = 0;
+    for (uint64_t i = 0; ph != 0 && i < phnum; i++) {
+        const uint8_t *h = ph + i * 56;
+        uint64_t vaddr = *(const uint64_t *)(h + 16), memsz = *(const uint64_t *)(h + 40);
+        if (*(const uint32_t *)h == 1 && (*(const uint32_t *)(h + 4) & 1) && entry >= vaddr && entry < vaddr + memsz)
+            text = 1;   /* PT_LOAD, PF_X */
+    }
+    if (!text)
+        return 34;
+    if (auxv_get(argv, argc, LX_AT_RANDOM, &f) == 0 || !f)
+        return 35;
+    const char *fn = (const char *)(uintptr_t)auxv_get(argv, argc, LX_AT_EXECFN, &f);
+    if (!f || fn == 0 || !streq(fn, LXTEST_PATH))
+        return 36;
+    if (auxv_get(argv, argc, LX_AT_SECURE, &f) != secure || !f)
+        return 37;
+    uint64_t hw = auxv_get(argv, argc, LX_AT_HWCAP, &f);
+#if defined(__x86_64__)
+    if (!f || hw != expect_hwcap())
+        return 38;
+#else
+    if (!f || (hw & expect_hwcap()) != expect_hwcap())
+        return 38;
+#endif
+    (void)auxv_get(argv, argc, LX_AT_HWCAP2, &f);
+    if (!f)
+        return 39;
+    if (auxv_get(argv, argc, LX_AT_UID, &f) != (uint64_t)sc0(LX_getuid) ||
+        auxv_get(argv, argc, LX_AT_EUID, &f) != (uint64_t)sc0(LX_geteuid))
+        return 40;
+    return 0;
+}
+
 /* The checking modes, in the image an exec started. */
 static int exec_mode(int argc, char **argv)
 {
@@ -654,6 +738,8 @@ static int exec_mode(int argc, char **argv)
             return 10;
         return 0;
     }
+    if (streq(argv[1], "exec-auxv"))
+        return auxv_check(argc, argv, 1);   /* ruid 1000, euid 0: AT_SECURE */
     if (streq(argv[1], "exec-script")) {
         /* "#! /boot/tests/linux/lxtest  exec-script " run as lx-script a1 */
         if (argc != 4 || !streq(argv[0], LXTEST_PATH) || !streq(argv[2], "/tmp/lx-script") || !streq(argv[3], "a1"))
@@ -1285,6 +1371,36 @@ static void exec_tests(long pid)
                                                          "/tmp/lx-script", 0 };
          *f; f++)
         sc3(LX_unlinkat, LX_AT_FDCWD, *f, 0);
+}
+
+static void auxv_tests(int argc, char **argv)
+{
+    CHECKV(auxv_check(argc, argv, 0) == 0, auxv_check(argc, argv, 0));
+    /* AT_SECURE across an exec whose effective uid is not the real one. */
+    int32_t st = -1;
+    long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        CHILD_CHECK(sc3(LX_setresuid, 1000, 0, 0) == 0, 20);
+        const char *const av[] = { LXTEST_PATH, "exec-auxv", 0 };
+        sc3(LX_execve, LXTEST_PATH, av, g_exec_env);
+        lx_exit(25);
+    }
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c, c);
+    CHECKV(st == 0, st);
+    /* A program whose PT_INTERP names no file: ENOENT, and the caller,
+     * with nothing of the new image, goes on (here: it runs a check and
+     * exits with the status the parent reads). */
+    c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        const char *const av[] = { "lxnointerp", 0 };
+        long r = sc3(LX_execve, "/boot/tests/linux/lxnointerp", av, g_exec_env);
+        CHILD_CHECK(r == -2, 21);   /* ENOENT: the interpreter's */
+        CHILD_CHECK(auxv_check(argc, argv, 0) == 0, 22);   /* the vector it started with is still there */
+        lx_exit(0);
+    }
+    CHECKV(c > 0 && sc4(LX_wait4, c, &st, 0, 0) == c, c);
+    CHECKV(st == 0, st);
+    lx_puts("lxtest: auxv ok\n");
 }
 
 int main(int argc, char **argv)
@@ -2684,6 +2800,7 @@ int main(int argc, char **argv)
     power_clock_tests();
     mount_tests();
     exec_tests(pid);
+    auxv_tests(argc, argv);
     busybox_needs(pid);
     CHECKV(sc0(LX_sched_yield) == 0, 0);
 

@@ -59,8 +59,9 @@ The initial stack for a Linux process is built by the same
 `build_initial_stack` with a personality flag: the auxiliary vector
 becomes the Linux one (`AT_PHDR`, `AT_PHENT` 56, `AT_PHNUM`, `AT_PAGESZ`
 4096, `AT_ENTRY`, `AT_RANDOM` pointing at 16 random bytes placed among
-the strings, `AT_UID/EUID/GID/EGID` from the credentials, `AT_SECURE` 0,
-`AT_HWCAP` 0, `AT_CLKTCK` 100, `AT_NULL`). The string and pointer area
+the strings, `AT_UID/EUID/GID/EGID` from the credentials, `AT_SECURE`,
+`AT_HWCAP` and `AT_HWCAP2`, `AT_CLKTCK` 100, `AT_NULL`; the whole table
+is under "The auxiliary vector" below). The string and pointer area
 now spans two populated pages (`INITIAL_STACK_PAGES` 2, written byte by
 byte through the direct map since the two frames need not be adjacent)
 so that `COSMO_ARG_MAX` arguments fit with the larger vector; the 16
@@ -164,7 +165,7 @@ does not).
 | `readv`, `writev` | loop over up to 1024 iovecs (each validated), stop at the first short transfer |
 | `open`, `openat(AT_FDCWD, ...)`, `creat` | Linux `O_*` (octal Linux values) mapped to `COSMO_O_*`, `O_NONBLOCK` included since the named-pipes unit (a FIFO's open rules and per-open mode); `O_CLOEXEC` marks the handle close-on-exec (roadmap M3), `O_NOCTTY`, `O_LARGEFILE` accepted and dropped; a `dirfd` other than `AT_FDCWD` is `-ENOSYS` |
 | `close`, `lseek`, `dup`, `dup2`, `dup3`, `pipe`, `pipe2` | direct; `pipe2(O_NONBLOCK)` sets both ends non-blocking, `O_CLOEXEC` marks both close-on-exec; `dup3` takes `O_CLOEXEC` (any other flag `-EINVAL`); `dup` and `dup2` start without it |
-| `fstat`, `stat`, `lstat`, `newfstatat` | `struct cosmo_stat` → Linux `struct stat` (144 bytes: `st_dev` 0, `st_ino`, `st_nlink`, `st_mode` = type bits (`S_IFREG` 0100000, `S_IFDIR` 040000, `S_IFCHR` 020000, `S_IFIFO` 010000, `S_IFSOCK` 0140000) or permission bits, uid, gid, `st_size`, `st_blksize` 4096, `st_blocks`, times as `timespec` from `mtime_ns`/`ctime_ns`); `AT_EMPTY_PATH` with an fd is `fstat` |
+| `fstat`, `stat`, `lstat`, `newfstatat` | `struct cosmo_stat` → Linux `struct stat` (144 bytes: `st_dev` the mount's id as `makedev(0, id)` (roadmap 1.1 P4), `st_ino`, `st_nlink`, `st_mode` = type bits (`S_IFREG` 0100000, `S_IFDIR` 040000, `S_IFCHR` 020000, `S_IFIFO` 010000, `S_IFSOCK` 0140000) or permission bits, uid, gid, `st_size`, `st_blksize` 4096, `st_blocks`, times as `timespec` from `mtime_ns`/`ctime_ns`); `AT_EMPTY_PATH` with an fd is `fstat` |
 | `getdents64` | native `getdents` records → `linux_dirent64` (`d_ino`, `d_off`, `d_reclen`, `d_type`, `d_name`), through two kernel buffers; the native name starts at byte 12 of its record (`offsetof(struct cosmo_dirent, name)`, not `sizeof`, which is 16), `d_type` is mapped to Linux's `DT_*` values (`DT_REG` 8, `DT_DIR` 4, `DT_CHR` 2, `DT_FIFO` 1, `DT_SOCK` 12), each output record is the 19-byte header plus the NUL-terminated name padded to 8 bytes, and `d_off` is the offset of the next record in the buffer |
 | `mkdir`, `mkdirat`, `mknodat` (`S_IFIFO` only, the named-pipes unit; `S_IFSOCK` `-EINVAL`, the rest `-EPERM`), `rmdir`, `unlink`, `unlinkat` (`AT_REMOVEDIR`), `rename`, `renameat`, `chdir`, `getcwd`, `access`, `faccessat`, `fsync`, `fdatasync`, `sync`, `umask` | direct or trivial (`access` is a `stat`); `umask` sets the process's own mask and returns the old one, inherited by fork and spawn, applied by `open(O_CREAT)`, `mkdir` and `mknod` here (roadmap M3; it returned 022 before and nothing applied it); `mkdir` of `.` or `..` is `-EEXIST` (roadmap M3) |
 | `chmod` (x86-64), `fchmod`, `fchmodat`, `fchmodat2` (roadmap M3) | `vfs_setattr(VFS_SET_MODE)` on the node the path names from the directory descriptor (a symbolic link with `AT_SYMLINK_NOFOLLOW` is `-EOPNOTSUPP`, as Linux) or on the descriptor's file, whose handle needs `MANAGE` (`-EPERM` without it) |
@@ -471,6 +472,49 @@ first free range at or above the space's random mmap base and
 starts the process at the interpreter's entry with `AT_BASE` = its bias,
 `AT_ENTRY` = the program's entry, `AT_PHDR`/`AT_PHNUM` = the program's
 table, `AT_EXECFN` = the path and `AT_PLATFORM` = the machine string.
+An interpreter that is missing is the lookup's `-ENOENT`, before
+anything of the caller changes. Since roadmap 1.1 P4 the interpreter is
+musl's dynamic linker, `/lib/ld-musl-$ARCH.so.1` (a link to
+`/lib/libc.so`, which is the linker too): the kernel maps it as Linux
+does, and it maps the program's libraries itself through `mmap` --
+`MAP_PRIVATE` file mappings over a reservation with `MAP_FIXED`, then
+`mprotect` of the RELRO range to read-only, the TLS pointer through
+`arch_prctl(ARCH_SET_FS)` (x86-64) or `TPIDR_EL0` (AArch64), as for
+static programs. Libraries land among the mappings above the random
+mmap base, so their addresses move with it from one run to the next.
+The stand-in interpreter that ran before (`lxinterp`, which applied
+`RELATIVE` relocations only) is gone. A library with text relocations
+asks for a writable and executable text, which W^X refuses (L12): its
+`dlopen` fails with `EINVAL`, and the kernel logs, once per exec, `linux: pid N:
+mprotect with PROT_WRITE|PROT_EXEC refused (W^X): a library with text
+relocations cannot be loaded here; build it -fPIC`. musl tells two
+libraries apart by `st_dev` and `st_ino`, so `stat` reports the
+mount's id as the device (`makedev(0, id)`, the native `cosmo_stat.dev`),
+not 0: an inode number is unique within one filesystem only.
+
+#### The auxiliary vector
+
+`linux_auxv`, after envp's NULL, in this order (room for 32 pairs,
+`PERSONALITY_AUXV_WORDS`; every pair fits, the null one last):
+
+| Entry | Value |
+|---|---|
+| `AT_PHDR`, `AT_PHENT`, `AT_PHNUM` | the executable's program headers (biased), 56, their number |
+| `AT_PAGESZ` | 4096 |
+| `AT_BASE` | the interpreter's bias, 0 without one |
+| `AT_ENTRY` | the executable's entry (biased) |
+| `AT_RANDOM` | 16 random bytes on the stack |
+| `AT_EXECFN` | the path the caller passed to `execve` |
+| `AT_PLATFORM` | `x86_64` or `aarch64` |
+| `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID` | the credentials' real and effective ids |
+| `AT_SECURE` | 1 when the effective uid or gid is not the real one, as Linux decides for an exec that changes no credentials (setuid bits are ignored here); musl then ignores `LD_LIBRARY_PATH` and `LD_PRELOAD`. The ids are read once under the process lock while the image is built (`personality_auxv_args`), and again once the exec is alone; an exec whose ids a sibling thread changed in between ends the process, as Linux ends one that fails after `de_thread` |
+| `AT_HWCAP`, `AT_HWCAP2` | `arch_user_hwcap()`/`arch_user_hwcap2()`, the intersection over every CPU brought up (a process may run on any of them; `arch_user_hwcap_note_cpu` on each as it starts): x86-64 `CPUID.1:EDX` and 0 (`CR4.FSGSBASE` is off); AArch64 the `HWCAP_`/`HWCAP2_` bits of the ID registers, decoded as Linux's `arm64_elf_hwcaps`, for the features usable at EL0 without the kernel's help (not SVE, SME, pointer authentication, BTI, MTE, SSBS, the MRS emulation, the event stream or `DC CVAP`) |
+| `AT_CLKTCK` | 100 |
+
+No `AT_SYSINFO_EHDR` (there is no vDSO) and no `AT_FLAGS`. The native
+personality's vector (`native_auxv`) is unchanged, and native programs
+stay static in 1.1: the interpreter path is the same code, but no native
+program names one.
 `mmap` with a file maps a `VM_REGION_FILE` region over the file's page
 cache (the file-regions unit, `docs/kernel/memory/design.md` §7): the
 pages are demand-paged, `MAP_SHARED` maps the cache's own frames so a

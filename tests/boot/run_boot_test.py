@@ -493,8 +493,12 @@ LINUXTEST_MARKERS = [
     r"^LINUXTEST: PASS$",
     # getrandom's flags: which kind of pool lxtest found (design.md §6).
     r"^lxtest: getrandom: " + ("seeded" if SEEDED else "unseeded") + "$",
-    r"^lxinterp: ok$",
-    r"^lxdyn: ok$",
+    r"^lxtest: auxv ok$",
+    # Shared libraries (roadmap 1.1 P4; tests/dyn/).
+    r"^dynhello: ok$",
+    r"^dltest: libtextrel\.so refused: ",
+    r"^dltest: aslr: ",
+    r"^dltest: ok$",
     # lxsig (docs/compat/linux/testing.md): each mode dies by its signal.
     r"^lxsig term: 143$",
     r"^lxsig segv: 139$",

@@ -28,27 +28,22 @@ $(LINUX_TEST_OUT)/$(1).elf: $(ROOT)/tests/linux/$(1).c $(ROOT)/tests/linux/lxabi
 endef
 $(foreach p,$(LINUX_TEST_PROGRAMS),$(eval $(call linux_test_rule,$(p))))
 
-# Position-independent programs (milestone 10): lxinterp is an ET_DYN
-# interpreter without PT_INTERP; lxdyn is an ET_DYN executable whose
-# PT_INTERP names lxinterp. Both are freestanding; lld lays them out
-# (no user.ld), -z norelro keeps the relocated data writable.
+# lxnointerp (roadmap 1.1 P4): a position-independent executable whose
+# PT_INTERP names a file that does not exist; lxtest requires its execve
+# to fail with ENOENT. Freestanding, laid out by lld (no user.ld). The
+# stand-in interpreter that ran before musl's (lxinterp, lxdyn) is gone:
+# tests/dyn/ holds the dynamically linked programs.
 LINUX_PIE_LDFLAGS := -pie -z max-page-size=0x1000 -z noexecstack -z separate-code -z norelro \
 	--build-id=none --gc-sections
-$(LINUX_TEST_OUT)/lxinterp.elf: $(ROOT)/tests/linux/lxinterp.c $(ROOT)/tests/linux/lxabi.h $(ROOT)/compat/linux/linux_abi.h
+$(LINUX_TEST_OUT)/lxnointerp.elf: $(ROOT)/tests/linux/lxnointerp.c $(ROOT)/tests/linux/lxabi.h $(ROOT)/compat/linux/linux_abi.h
 	$(call log,CC,$<)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(CC) $(LINUX_TEST_CFLAGS) -fPIE -c $< -o $@.o
 	$(call log,LD,$@)
-	$(Q)$(LD) $(LINUX_PIE_LDFLAGS) --no-dynamic-linker -o $@ $@.o
-$(LINUX_TEST_OUT)/lxdyn.elf: $(ROOT)/tests/linux/lxdyn.c $(ROOT)/tests/linux/lxabi.h $(ROOT)/compat/linux/linux_abi.h
-	$(call log,CC,$<)
-	$(Q)mkdir -p $(dir $@)
-	$(Q)$(CC) $(LINUX_TEST_CFLAGS) -fPIE -c $< -o $@.o
-	$(call log,LD,$@)
-	$(Q)$(LD) $(LINUX_PIE_LDFLAGS) --dynamic-linker=/boot/tests/linux/lxinterp -o $@ $@.o
+	$(Q)$(LD) $(LINUX_PIE_LDFLAGS) --dynamic-linker=/lib/ld-cosmo-missing.so.1 -o $@ $@.o
 
-LINUX_TEST_ELFS := $(foreach p,$(LINUX_TEST_PROGRAMS) lxinterp lxdyn,$(LINUX_TEST_OUT)/$(p).elf)
-LINUX_TEST_ARCHIVE_ENTRIES := $(foreach p,$(LINUX_TEST_PROGRAMS) lxinterp lxdyn,tests/linux/$(p)=$(LINUX_TEST_OUT)/$(p).elf)
+LINUX_TEST_ELFS := $(foreach p,$(LINUX_TEST_PROGRAMS) lxnointerp,$(LINUX_TEST_OUT)/$(p).elf)
+LINUX_TEST_ARCHIVE_ENTRIES := $(foreach p,$(LINUX_TEST_PROGRAMS) lxnointerp,tests/linux/$(p)=$(LINUX_TEST_OUT)/$(p).elf)
 
 ifneq ($(MUSL_GCC),)
 $(LINUX_TEST_OUT)/hello_musl: $(ROOT)/tests/linux/hello_musl.c

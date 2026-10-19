@@ -10,7 +10,7 @@ struct stat {
     uint32_t st_nlink;
     uint32_t st_uid;
     uint32_t st_gid;
-    uint32_t st_pad;
+    uint32_t st_dev;       /* the mount's id */
     uint64_t st_size;
     uint64_t st_mtime_ns;
     uint64_t st_ctime_ns;

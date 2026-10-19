@@ -55,7 +55,7 @@ uid=0(root) gid=0(root)...
 cosmo$ uname -s -m
 Linux ...
 cosmo$ ls /
-bin   boot  dev   etc   mnt   proc  root  run   sbin  tmp   usr   var
+bin   boot  dev   etc   lib   mnt   proc  root  run   sbin  tmp   usr   var
 ```
 
 `uname` says `Linux`: BusyBox is a static Linux program, and CosmoOS
@@ -65,7 +65,8 @@ kernel also logs each program it starts and the status it exits with
 between the lines the programs print.
 
 The commands are BusyBox applets, linked in `/bin`, and CosmoOS's own
-tools in `/sbin`. The full list:
+tools in `/sbin`. `/lib` holds musl's `libc.so` and its dynamic linker,
+for dynamically linked Linux programs. The full list:
 
 <!-- test: console -->
 ```console

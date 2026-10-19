@@ -491,6 +491,10 @@ void vnode_stat(struct vnode *vn, struct cosmo_stat *st)
     st->nlink = vn->nlink;
     st->uid = vn->uid;
     st->gid = vn->gid;
+    /* The mount's id: an inode number is unique within one filesystem
+     * only, and musl's dynamic linker tells two libraries apart by
+     * st_dev and st_ino (roadmap 1.1 P4). */
+    st->dev = vn->mnt ? (uint32_t)vn->mnt->id : 0;
     st->size = vn->size;
     st->mtime_ns = vn->mtime_ns;
     st->ctime_ns = vn->ctime_ns;
