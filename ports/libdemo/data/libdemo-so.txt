@@ -1,0 +1,1 @@
+not an ELF: the resolver tests need only the name

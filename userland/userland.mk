@@ -102,7 +102,7 @@ USER_ARCHIVE_ENTRIES := \
 	etc/svc/hello=$(ROOT)/userland/etc/svc/hello \
 	etc/svc/greeter=$(ROOT)/userland/etc/svc/greeter \
 	etc/svc/syslogd=$(ROOT)/userland/etc/svc/syslogd \
-	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf \
+	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf etc/pkg/provides=$(ROOT)/userland/etc/pkg/provides \
 	etc/cosmo-release.conf=$(ROOT)/userland/etc/cosmo-release.conf \
 	$(foreach k,$(PKG_TRUST_PUBS),etc/pkg/keys/$(notdir $(k))=$(k))
 ifeq ($(SELFTEST),1)
@@ -110,7 +110,7 @@ USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(
 	$(foreach p,$(USER_TEST_PROGRAMS),tests/native/$(p)=$(call prog_elf,$(p)))
 endif
 USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/fstab $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
-	$(ROOT)/userland/etc/pkg/repos.conf $(ROOT)/userland/etc/cosmo-release.conf $(PKG_TRUST_PUBS) $(ROOT)/userland/etc/passwd $(ROOT)/userland/etc/group \
+	$(ROOT)/userland/etc/pkg/repos.conf $(ROOT)/userland/etc/pkg/provides $(ROOT)/userland/etc/cosmo-release.conf $(PKG_TRUST_PUBS) $(ROOT)/userland/etc/passwd $(ROOT)/userland/etc/group \
 	$(ROOT)/userland/etc/svc/hello $(ROOT)/userland/etc/svc/greeter $(ROOT)/userland/etc/svc/syslogd
 
 .PHONY: userland

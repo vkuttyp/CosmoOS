@@ -735,8 +735,80 @@ static bool owned_by_other(const char *path, const char *self, char *owner, size
     return false;
 }
 
+/*
+ * --- shared libraries (roadmap 1.1 P4; docs/pkg/design.md, "Shared
+ * libraries") ---
+ * Minimal dependency checking, no solver: a package's "requires" must each
+ * be provided by the base system (PKG_BASE_PROVIDES), by the package
+ * itself, or by an installed package other than `skip`; and a package
+ * whose library another installed package requires is not removed while
+ * nothing else provides it.
+ */
+static bool base_provides(const char *so)
+{
+    FILE *f = fopen(PKG_BASE_PROVIDES, "r");
+    if (f == NULL)
+        return false;
+    char line[PKG_SONAME_MAX + 2];
+    bool found = false;
+    while (!found && fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        found = line[0] != '#' && strcmp(line, so) == 0;
+    }
+    fclose(f);
+    return found;
+}
+
+static bool lib_in(const char (*libs)[PKG_SONAME_MAX], int n, const char *so)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(libs[i], so) == 0)
+            return true;
+    return false;
+}
+
+/* An installed package, not named `skip`, that provides `so`: its name
+ * into `who` (may be NULL). */
+static bool installed_provides(const char *so, const char *skip, char *who, size_t whocap)
+{
+    char names[128][PKG_NAME_MAX];
+    int n = installed_names(names, 128);
+    for (int i = 0; i < n; i++) {
+        if (skip && strcmp(names[i], skip) == 0)
+            continue;
+        struct manifest m;
+        if (!installed_load(names[i], &m))
+            continue;
+        bool hit = lib_in((const char (*)[PKG_SONAME_MAX])m.provides, m.nprovides, so);
+        manifest_free(&m);
+        if (hit) {
+            if (who)
+                snprintf(who, whocap, "%s", names[i]);
+            return true;
+        }
+    }
+    return false;
+}
+
+static int check_requires(const struct manifest *m)
+{
+    for (int i = 0; i < m->nrequires; i++) {
+        const char *so = m->requires[i];
+        if (lib_in((const char (*)[PKG_SONAME_MAX])m->provides, m->nprovides, so) || base_provides(so) ||
+            installed_provides(so, m->name, NULL, 0))
+            continue;
+        fprintf(stderr, "pkg: %s requires the library %s, which neither the base system nor an installed package "
+                "provides; install the package that provides it first\n", m->name, so);
+        return EXIT_FAILED;
+    }
+    return 0;
+}
+
 static int install_loaded(struct loaded *l)
 {
+    int lrc = check_requires(&l->m);
+    if (lrc)
+        return lrc;
     struct manifest old;
     bool had_old = installed_load(l->m.name, &old);
     struct dirlist old_dirs = { .n = 0 };
@@ -1254,6 +1326,30 @@ static int cmd_remove(int argc, char **argv)
             for (int j = 0; j < other.ndepends; j++) {
                 if (strcmp(other.depends[j].name, argv[i]) == 0) {
                     fprintf(stderr, "pkg: %s: %s depends on it%s\n", argv[i], names[k], g_force ? " (removing anyway)" : "");
+                    if (!g_force)
+                        blocked = true;
+                }
+            }
+            /* A library of this package that `other` requires and nothing
+             * else provides. */
+            for (int j = 0; j < other.nrequires; j++) {
+                const char *so = other.requires[j];
+                if (!lib_in((const char (*)[PKG_SONAME_MAX])m.provides, m.nprovides, so) ||
+                    lib_in((const char (*)[PKG_SONAME_MAX])other.provides, other.nprovides, so) || base_provides(so))
+                    continue;
+                bool elsewhere = false;
+                for (int q = 0; q < n && !elsewhere; q++) {
+                    if (strcmp(names[q], argv[i]) == 0 || strcmp(names[q], names[k]) == 0)
+                        continue;
+                    struct manifest third;
+                    if (!installed_load(names[q], &third))
+                        continue;
+                    elsewhere = lib_in((const char (*)[PKG_SONAME_MAX])third.provides, third.nprovides, so);
+                    manifest_free(&third);
+                }
+                if (!elsewhere) {
+                    fprintf(stderr, "pkg: %s: %s requires its library %s%s\n", argv[i], names[k], so,
+                            g_force ? " (removing anyway)" : "");
                     if (!g_force)
                         blocked = true;
                 }

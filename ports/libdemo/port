@@ -1,0 +1,5 @@
+name: libdemo
+version: 1.0
+summary: library test: provides libdemo.so
+provides: libdemo.so
+file: lib/libdemo.so data/libdemo-so.txt 0644

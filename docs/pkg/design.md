@@ -342,6 +342,25 @@ record is stale until `pkg remove` is repeated; otherwise
 `rmdir` the recorded directories deepest first (non-empty ones are left)
 and remove the record.
 
+### Shared libraries (roadmap 1.1 P4)
+
+Minimal dependency checking, no solver. The builder writes `provides:`
+for each shared library a package installs (its `DT_SONAME`) and
+`requires:` for each `DT_NEEDED` of its ELF files that it does not
+provide (`pkgbuild.py`'s `elf_libs`), plus a recipe's own lines.
+`pkg install` (every path, through `install_loaded`) refuses a package
+whose `requires` names a library that neither the base system
+(`/etc/pkg/provides`: `libc.so`, musl's, at `/lib`), nor the package
+itself, nor an installed package provides: `pkg: NAME requires the
+library SO, which neither the base system nor an installed package
+provides; install the package that provides it first`. Resolution does
+not follow `requires` (a package that needs a library package says so
+with `depends:` as well). `pkg remove` refuses a package that provides a
+library another installed package requires and nothing else provides:
+`pkg: NAME: OTHER requires its library SO` (`-f` overrides, as for
+`depends`). The repository's `busybox-dyn` (`/usr/bin/busybox-dyn`,
+BusyBox linked against `libc.so`) requires `libc.so` only.
+
 ### Upgrade
 
 For every installed package whose index has a newer version satisfying

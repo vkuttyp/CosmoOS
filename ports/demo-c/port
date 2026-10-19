@@ -1,0 +1,5 @@
+name: demo-c
+version: 1.0
+summary: library test: requires libdemo.so
+requires: libdemo.so
+file: share/demo-c/README data/README 0644

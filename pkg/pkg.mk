@@ -43,7 +43,10 @@ else
 PKG_FIXTURES :=
 endif
 
-$(PKG_INDEX): $(PORT_SRCS) $(LIBC_A) $(LIBC_CRT0) $(USER_LD) $(ROOT)/tools/pkgbuild.py $(ROOT)/scripts/modsign.py $(PKGSIGN_KEY)
+# The dynamically linked BusyBox as a package too (roadmap 1.1 P4):
+# /usr/bin/busybox-dyn, which requires libc.so (the base system's).
+$(PKG_INDEX): $(PORT_SRCS) $(LIBC_A) $(LIBC_CRT0) $(USER_LD) $(ROOT)/tools/pkgbuild.py $(ROOT)/scripts/modsign.py $(PKGSIGN_KEY) \
+		$(BUSYBOX_DYN_ELF)
 	$(Q)rm -rf $(PKG_REPO)
 	$(Q)mkdir -p $(PKG_REPO)
 	$(Q)for d in $(PORT_DIRS); do \
@@ -51,6 +54,10 @@ $(PKG_INDEX): $(PORT_SRCS) $(LIBC_A) $(LIBC_CRT0) $(USER_LD) $(ROOT)/tools/pkgbu
 			--ld "$(LD)" --ldflags "$(USER_LDFLAGS)" --ldscript $(USER_LD) --crt0 $(LIBC_CRT0) \
 			--libc $(LIBC_A) --sign-key $(PKGSIGN_KEY) $(PKG_FIXTURES) || exit 1; \
 	done
+	$(Q)$(PKGBUILD) pack --name busybox-dyn --version $(BUSYBOX_VERSION) \
+		--summary "BusyBox $(BUSYBOX_VERSION), dynamically linked against musl" \
+		--file usr/bin/busybox-dyn=$(BUSYBOX_DYN_ELF) --sign-key $(PKGSIGN_KEY) \
+		--out $(PKG_REPO)/busybox-dyn-$(BUSYBOX_VERSION).cpk
 	$(Q)$(PKGBUILD) index --repo $(PKG_REPO) --sign-key $(PKGSIGN_KEY)
 
 .PHONY: ports pkg

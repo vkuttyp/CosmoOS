@@ -486,6 +486,14 @@ PKGTEST_MARKERS = [
     r"^pkg: verify: 0 problems",
     r"^installed: 2\.5$",
     r"^2\.5$",
+    # Shared libraries (roadmap 1.1 P4): requires against provides.
+    r"^pkg: demo-d requires the library libcosmo-missing\.so, which neither the base system nor an installed "
+    r"package provides; install the package that provides it first$",
+    r"^pkg: demo-c requires the library libdemo\.so, which neither ",
+    r"^pkg: installing demo-c-1\.0",
+    r"^pkg: libdemo: demo-c requires its library libdemo\.so$",
+    r"^pkg: installing busybox-dyn-",
+    r"^busybox-dyn package ok$",
 ]
 # Phase 11: Linux programs run from /etc/rc.test; hello_musl only when the build had musl-gcc.
 LINUXTEST_MARKERS = [

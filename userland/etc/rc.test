@@ -112,6 +112,21 @@ pkg remove demo-a demo-b demolib || FAILS=1
 pkg install demo-b demo-a || FAILS=1
 cat /usr/share/demolib/VERSION
 pkg remove demo-b demo-a demolib || FAILS=1
+# Shared libraries (roadmap 1.1 P4): a package's "requires" against the
+# base system's and the installed packages' "provides"; no solver.
+pkg install demo-d 2> /tmp/shtest/libmiss && FAILS=1
+cat /tmp/shtest/libmiss
+pkg install demo-c 2> /tmp/shtest/libneed && FAILS=1
+cat /tmp/shtest/libneed
+pkg install libdemo || FAILS=1
+pkg install demo-c || FAILS=1
+pkg remove libdemo 2> /tmp/shtest/librm && FAILS=1
+cat /tmp/shtest/librm
+pkg remove demo-c || FAILS=1
+pkg remove libdemo || FAILS=1
+pkg install busybox-dyn || FAILS=1
+/usr/bin/busybox-dyn echo busybox-dyn package ok || FAILS=1
+pkg remove busybox-dyn || FAILS=1
 pkg list
 # Linux programs (docs/compat/linux/testing.md): no CosmoOS note, so the kernel runs them as Linux.
 # Both architectures carry them (milestone 10); a build without them reports the section skipped.

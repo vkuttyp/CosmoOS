@@ -25,6 +25,7 @@ build.
 | `depends` | yes | `name` or `name OP version`, OP one of `= >= <= < >`, spaces optional | normalised to single spaces |
 | `program` | yes | `destination source.c [more.c ...]` | sources relative to the port directory, no `/`-leading or `..` components; compiled with the userland toolchain, installed with mode 0755 |
 | `file` | yes | `destination source [mode]` | mode octal, default 0644 |
+| `provides`, `requires` | yes | a library's soname (`[A-Za-z0-9_+-][A-Za-z0-9._+-]*`, `.so` in it) | added to what the builder reads from the ELF files (roadmap 1.1 P4) |
 
 `destination` is relative to `prefix`; the resulting path (`usr/bin/x`)
 must not start with `boot/`, `dev/`, `tmp/` or `mnt/` and must fit the
@@ -53,6 +54,8 @@ Manifest text (`+MANIFEST`), `key: value` lines, parsed by
 | `version` | no | as in the recipe; required |
 | `summary` | no | text (at most 127 bytes) |
 | `depends` | yes | constraint as in the recipe (at most 64) |
+| `provides` | yes | a shared library the package installs, by soname (`DT_SONAME`, or the recipe's); at most 32 (roadmap 1.1 P4) |
+| `requires` | yes | a shared library the package's ELF files name in `DT_NEEDED` (or the recipe names) and it does not provide; at most 32. `pkg` before v1.0.7 refuses a manifest with either key; `INDEX` carries neither, so its `update` is unaffected |
 | `file` | yes | `path mode size sha512`: path relative to `/` (at most 255 bytes, `path_allowed`), octal mode, decimal size, 128 hex digits (at most 4096 files) |
 
 A malformed line (no `:`, oversize field, bad value) is a parse error
