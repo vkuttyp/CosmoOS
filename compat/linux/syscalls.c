@@ -493,7 +493,7 @@ static int64_t rw_at(struct syscall_args *a, bool write)
 static int64_t lx_pread64(struct syscall_args *a) { return rw_at(a, false); }
 static int64_t lx_pwrite64(struct syscall_args *a) { return rw_at(a, true); }
 
-static int64_t rw_vec(struct syscall_args *a, bool write)
+static int64_t lx_readv(struct syscall_args *a)
 {
     int h = (int)a->a[0];
     uint64_t uiov = a->a[1];
@@ -507,8 +507,7 @@ static int64_t rw_vec(struct syscall_args *a, bool write)
             return done ? done : -EFAULT;
         if (iov.iov_len == 0)
             continue;
-        int64_t rc = write ? syscall_handle_write(h, iov.iov_base, (size_t)iov.iov_len)
-                           : syscall_handle_read(h, iov.iov_base, (size_t)iov.iov_len);
+        int64_t rc = syscall_handle_read(h, iov.iov_base, (size_t)iov.iov_len);
         if (rc < 0)
             return done ? done : rc;
         done += rc;
@@ -518,8 +517,106 @@ static int64_t rw_vec(struct syscall_args *a, bool write)
     return done;
 }
 
-static int64_t lx_readv(struct syscall_args *a) { return rw_vec(a, false); }
-static int64_t lx_writev(struct syscall_args *a) { return rw_vec(a, true); }
+/* Hands the gathered bytes to the object; false when writev must stop
+ * (an error in *rc, or a short write). */
+static bool writev_flush(const struct kobject_io_type *io, struct kobject *obj, const char *buf,
+                         size_t *fill, int64_t *done, int64_t *rc)
+{
+    if (*fill == 0)
+        return true;
+    *rc = io->write(obj, buf, *fill);
+    if (*rc < 0)
+        return false;
+    KASSERT(*rc <= (int64_t)*fill);
+    *done += *rc;
+    bool whole = (size_t)*rc == *fill;
+    *fill = 0;
+    return whole;
+}
+
+/* writev is one write, as on Linux: the vector is gathered into the
+ * syscall layer's bounce and handed to the object whole, so a datagram
+ * socket sends one datagram, and a terminal or pipe gets the pieces of a
+ * line in one call, with no other writer's line between them. A vector
+ * longer than the bounce (64 KiB) goes in bounce-sized calls, as one
+ * long write does. */
+static int64_t lx_writev(struct syscall_args *a)
+{
+    int h = (int)a->a[0];
+    uint64_t uiov = a->a[1];
+    int64_t cnt = (int64_t)a->a[2];
+    if (cnt < 0 || cnt > IOV_MAX)
+        return -EINVAL;
+    struct kobject *obj = handle_lookup(&process_current()->handles, h, HANDLE_RIGHT_WRITE);
+    if (obj == NULL)
+        return -EBADF;
+    const struct kobject_io_type *io = kobject_io_of(obj);
+    if (io == NULL || io->write == NULL) {
+        kobject_put(obj);
+        return -EBADF;
+    }
+    /* The vector is copied in once, as Linux imports it: the total that
+     * sizes the bounce and the entries gathered are the same snapshot,
+     * whatever another thread does to the user array meanwhile. A short
+     * vector (Linux's UIO_FASTIOV, 8) stays on the stack. */
+    struct lx_iovec fast[8];
+    struct lx_iovec *vec = fast;
+    if (cnt > (int64_t)(sizeof(fast) / sizeof(fast[0]))) {
+        vec = kmalloc((size_t)cnt * sizeof(*vec), 0);
+        if (vec == NULL) {
+            kobject_put(obj);
+            return -ENOMEM;
+        }
+    }
+    int64_t done = 0, rc = 0;
+    size_t total = 0;
+    if (cnt > 0 && copy_from_user(vec, uiov, (size_t)cnt * sizeof(*vec)))
+        rc = -EFAULT;
+    for (int64_t i = 0; i < cnt && rc == 0; i++) {
+        if (vec[i].iov_len > (uint64_t)INT64_MAX - total)
+            rc = -EINVAL;
+        else
+            total += (size_t)vec[i].iov_len;
+    }
+    if (rc) {
+        if (vec != fast)
+            kfree(vec);
+        kobject_put(obj);
+        return rc;
+    }
+    char stack[IO_CHUNK];
+    struct io_bounce b;
+    syscall_bounce_get(&b, stack, total);
+    size_t fill = 0;
+    bool more = true;
+    for (int64_t i = 0; i < cnt && more; i++) {
+        struct lx_iovec iov = vec[i];
+        for (uint64_t off = 0; off < iov.iov_len && more;) {
+            size_t n = iov.iov_len - off < b.cap - fill ? (size_t)(iov.iov_len - off) : b.cap - fill;
+            if (!user_range_ok(iov.iov_base + off, n) || copy_from_user(b.buf + fill, iov.iov_base + off, n)) {
+                rc = -EFAULT;
+                more = false;
+                break;
+            }
+            fill += n;
+            off += n;
+            if (fill == b.cap)
+                more = writev_flush(io, obj, b.buf, &fill, &done, &rc);
+        }
+    }
+    /* What was gathered before a fault is still written, as Linux writes
+     * what it copied. */
+    if (rc >= 0 || rc == -EFAULT) {
+        int64_t gathered = rc;
+        if (writev_flush(io, obj, b.buf, &fill, &done, &rc))
+            rc = gathered;
+    }
+    syscall_bounce_put(&b);
+    if (vec != fast)
+        kfree(vec);
+    kobject_put(obj);
+    return done > 0 ? done : rc;
+}
 
 /* The three path buffers (3 KiB) live on the heap, not the 16 KiB kernel
  * stack (scripts/frame-baseline.txt). */

@@ -1541,6 +1541,14 @@ int main(int argc, char **argv)
     CHECKV(sc3(LX_read, fd, buf, 8) == 0, 0);                  /* EOF */
     CHECKV(sc1(LX_close, fd) == 0, 0);
     CHECKV(sc1(LX_close, fd) == -9, 0);                        /* EBADF */
+    /* writev is one write: on a datagram socket the vector is one
+     * datagram (on a terminal, no other line lands inside it). */
+    int32_t dsv[2] = { -1, -1 };
+    CHECKV(sc4(LX_socketpair, LX_AF_UNIX, LX_SOCK_DGRAM, 0, dsv) == 0, 0);
+    CHECKV(sc3(LX_writev, dsv[0], iov, 2) == 12, 0);
+    long dn = sc3(LX_read, dsv[1], buf, sizeof(buf));
+    CHECKV(dn == 12 && memeq(buf, "second line\n", 12), dn);
+    CHECKV(sc1(LX_close, dsv[0]) == 0 && sc1(LX_close, dsv[1]) == 0, 0);
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxtest.txt", &st, 0) == 0 && st.st_size == 22, 0);
     /* statx returns the same fields as fstat/newfstatat for the file, with a
      * mask that reports exactly what the kernel supplies -- and not atime or
