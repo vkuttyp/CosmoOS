@@ -224,7 +224,11 @@ structure the root itself names. `load_bitmap` replays the record at
 mount (`freelog_replay`, before the bitmap is trusted for allocation),
 and the replay does not clear it: the record is retired by the next
 commit's step 2, so a mount that replays and goes away without
-committing leaves the filesystem exactly as it found it.
+committing leaves the filesystem exactly as it found it. The superblock's
+`free_blocks` is the bitmap's count as that commit wrote it, so the mount
+compares the two before the replay (a mismatch warns `free block count N
+differs from the superblock's M`); compared after it, as until roadmap
+1.1 P3, every mount following an unmount warned by the replayed blocks.
 
 Commit is triggered by `vfs_sync` (`cosmofs_sync`: first
 `cfs_sync_vnodes` writes back every dirty regular file **without**

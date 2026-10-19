@@ -2336,3 +2336,85 @@ bool selftest_vfs_umount_once(const char **reason)
     kinfo("selftest: vfs-umount-once: a second unmount from inside the mount was refused while the first drained");
     return true;
 }
+
+/*
+ * kobject_io_type.read_filled (roadmap 1.1 P3, #413's review): a large
+ * read of a regular file is one read across its pieces -- the open file's
+ * position lock is held while each piece is handed over, so no seek or
+ * second reader on the same open file lands between two pieces -- and the
+ * position moves by what was accepted, so a fault after a piece returns
+ * that piece and the next read starts after it. /dev/zero fills too
+ * (without a position); /dev/null does not, and is read one call at a
+ * time.
+ */
+struct filled_ctx {
+    struct file *f;
+    uint8_t *dst;
+    size_t done;
+    unsigned pieces, fail_at;
+    bool unlocked;   /* a piece was handed over without the position lock */
+};
+
+static int filled_put(void *ctx, const void *piece, size_t n)
+{
+    struct filled_ctx *c = ctx;
+    if (c->f->vn->type == VNODE_REG && !mutex_is_locked(&c->f->lock))
+        c->unlocked = true;
+    if (++c->pieces == c->fail_at)
+        return -EFAULT;
+    memcpy(c->dst + c->done, piece, n);
+    c->done += n;
+    return 0;
+}
+
+bool selftest_file_read_filled(const char **reason)
+{
+    enum { SZ = 5 * PAGE_SIZE + 100, CAP = 2 * PAGE_SIZE };
+    static uint8_t src[SZ], dst[SZ], bounce[CAP];
+    for (size_t i = 0; i < SZ; i++)
+        src[i] = (uint8_t)(i * 7 + i / PAGE_SIZE);
+    struct file *f;
+    CHECK(vfs_open(NULL, "/tmp/filled-test", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0600, &f) == 0);
+    CHECK(file_write(f, src, SZ) == SZ);
+    const struct kobject_io_type *io = kobject_io_of(&f->obj);
+    CHECK(io != NULL && io->read_filled != NULL);
+
+    /* From offset 100 to the end, in pieces of two pages: 8192, 8192, then
+     * 4096 at the end of file; contiguous, each under the lock. */
+    CHECK(file_seek(f, 100, COSMO_SEEK_SET) == 100);
+    struct filled_ctx c = { .f = f, .dst = dst };
+    CHECK(io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == SZ - 100);
+    CHECK(c.pieces == 3 && !c.unlocked && c.done == SZ - 100);
+    CHECK(memcmp(dst, src + 100, SZ - 100) == 0);
+    CHECK(file_seek(f, 0, COSMO_SEEK_CUR) == SZ);
+    CHECK(!mutex_is_locked(&f->lock));
+
+    /* The second piece faults: the first piece's bytes, the position after them. */
+    CHECK(file_seek(f, 0, COSMO_SEEK_SET) == 0);
+    c = (struct filled_ctx){ .f = f, .dst = dst, .fail_at = 2 };
+    CHECK(io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == CAP);
+    CHECK(file_seek(f, 0, COSMO_SEEK_CUR) == CAP);
+    /* The first piece faults: -EFAULT, the position where it was. */
+    c = (struct filled_ctx){ .f = f, .dst = dst, .fail_at = 1 };
+    CHECK(io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == -EFAULT);
+    CHECK(file_seek(f, 0, COSMO_SEEK_CUR) == CAP);
+    file_put(f);
+    CHECK(vfs_unlink(NULL, "/tmp/filled-test") == 0);
+
+    /* /dev/zero: three whole pieces of zeros; /dev/null: one call at a time. */
+    CHECK(vfs_open(NULL, "/dev/zero", COSMO_O_RDONLY, 0, &f) == 0);
+    memset(dst, 0xff, sizeof(dst));
+    c = (struct filled_ctx){ .f = f, .dst = dst };
+    int64_t z = io->read_filled(&f->obj, bounce, CAP, 3 * CAP, filled_put, &c);
+    bool zero = true;
+    for (size_t i = 0; i < 3 * CAP; i++)
+        zero = zero && dst[i] == 0;
+    file_put(f);
+    CHECK(z == 3 * CAP && c.pieces == 3 && zero);
+    CHECK(vfs_open(NULL, "/dev/null", COSMO_O_RDONLY, 0, &f) == 0);
+    c = (struct filled_ctx){ .f = f, .dst = dst };
+    z = io->read_filled(&f->obj, bounce, CAP, 3 * CAP, filled_put, &c);
+    file_put(f);
+    CHECK(z == -EOPNOTSUPP && c.pieces == 0);
+    return true;
+}

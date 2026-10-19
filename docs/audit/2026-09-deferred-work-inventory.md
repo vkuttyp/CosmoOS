@@ -1108,14 +1108,21 @@ each; none is needed by M2's acceptance test.
   `reboot(2)` and the kernel no reboot path (PSCI `SYSTEM_RESET` would be
   AArch64's); x86-64 off QEMU still halts, since ACPI S5 needs the DSDT's
   `\_S5` values and so AML (the power-off unit, 2026-10-15).
-- A read of `/dev/zero` returns at most 64 KiB, where Linux fills the
+- ~~A read of `/dev/zero` returns at most 64 KiB, where Linux fills the
   request: `dd if=/dev/zero bs=1M count=32` copies 32 partial records,
-  2 MiB (POSIX allows the short read; found on Parallels, 2026-10-14).
-- Every mount of a freshly installed cosmofs warns `free block count N
+  2 MiB (POSIX allows the short read; found on Parallels, 2026-10-14).~~
+  **Closed by P3 (2026-10-19,
+  `docs/audit/2026-10-19-p3-residue-report.md`)**: a read of a regular
+  file or of `/dev/zero` is filled a bounce at a time
+  (`kobject_io_type.read_filled`).
+- ~~Every mount of a freshly installed cosmofs warns `free block count N
   differs from the superblock's N-4..7; using the bitmap` (QEMU's
   `test-install` on both architectures and Parallels, since before
   v1.0.2's everyday commands): the superblock's free count is not
-  brought up to date by the installer's last commit.
+  brought up to date by the installer's last commit.~~ **Closed by P3**:
+  not the installer's. Every mount after an unmount warned: the count
+  was compared after the free-log replay had freed the last commit's
+  released blocks; it is compared before.
 - No `ping6` and no raw IPv6 socket (also needs `recvmsg` ancillary data
   and `ICMP6_FILTER`); a raw ICMP socket has no `bind` (so no `ping -I`),
   `connect`, `IP_HDRINCL` or `ICMP_FILTER` (the ping unit, 2026-10-14).
@@ -1144,11 +1151,18 @@ each; none is needed by M2's acceptance test.
   range through `vm_map_phys`. `vm_map_direct_ranges` maps pages for this
   reason, and its own selftest, `vm-direct-ranges`, covers it alone (the
   virtio-gpu unit).
-- On Parallels Desktop, `wget` refusing a bad certificate ends with
+- ~~On Parallels Desktop, `wget` refusing a bad certificate ends with
   "Resource temporarily unavailable" after mbedTLS's message (cause not
-  investigated); seen in the post-1.0 Parallels test, 2026-10-14.
-- `sftp`'s `ls -l` shows `?` for the link count (cause not
-  investigated); seen in the same test.
+  investigated); seen in the post-1.0 Parallels test, 2026-10-14.~~
+  **Closed by P3**: wget's "error getting response" with a stale errno
+  (the resolver's EAGAIN after a name lookup); wget now exits quietly
+  after `ssl_client` gave its reason.
+- `sftp`'s `ls -l` shows `?` for the link count: **not a defect** (P3).
+  An OpenSSH 9.1+ client renders the listing itself when the server
+  offers `users-groups-by-id@openssh.com`, and SFTP v3 attributes carry
+  no link count (`sftp-common.c` `ls_file`, `remote`); Linux with
+  OpenSSH's server shows the same. The server's own long name has the
+  count (`lstat`'s `st_nlink`).
 - ~~The AArch64 entropy boots' 240 s budget is due to be restated or
   widened (`docs/testing/flakes.md`: a third sighting on main's #386
   merge, and main's slowest boot in that job at 235.7 s on its rerun);

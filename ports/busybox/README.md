@@ -60,7 +60,12 @@ image has no `patch`) to the unpacked source in order:
   child, which checks none; it prints "TLS certificate validation not
   implemented" and turns `--no-check-certificate` on. The patch also
   passes `-k` to `ssl_client` for `--no-check-certificate`, and shows that
-  option in the usage text when https is in.
+  option in the usage text when https is in. Since roadmap 1.1 P3, when
+  the response cannot be read wget waits for the `ssl_client` serving the
+  connection and, if it exited non-zero (it refused the server and said
+  why), exits 1 with nothing more: unpatched, wget added "error getting
+  response" and whatever errno an earlier call left (after a name
+  lookup, the resolver's EAGAIN, "Resource temporarily unavailable").
 
 ## The configuration
 

@@ -183,6 +183,17 @@ def need(text, pattern, what):
     return m
 
 
+FREE_WARNING = r"cosmofs: free block count \d+ differs from the superblock's \d+"
+
+
+def no_free_warning(text, what):
+    """Roadmap 1.1 P3: a cleanly unmounted cosmofs mounts with its
+    superblock's free count matching its bitmap."""
+    m = re.search(FREE_WARNING + r".*$", text, re.M)
+    if m:
+        raise Fail(f"{what}: the mount warned '{m.group(0)}'")
+
+
 # --- reading a GPT on the host ----------------------------------------------------
 
 def parse_gpt(data):
@@ -267,6 +278,11 @@ def stage_install(args, results):
         need(out, r"^busy-status=3$", "an install over a mounted disk")
         need(out, rf"^cosmo-install: {dev} is mounted$", "an install over a mounted disk")
         need(out, r"^look-ok$", "the installed root")
+        # The installed disk's first mount after cosmo-install unmounted it.
+        mnt = b.text()
+        mnt = mnt[mnt.index("mount -t cosmofs /dev/"):]
+        need(mnt, rf"vfs: mounted cosmofs on /mnt/v from {re.escape(root_dev)}$", "the installed root's first mount")
+        no_free_warning(mnt[:mnt.index("vfs: mounted cosmofs on /mnt/v")], "the installed root's first mount")
         # Shell completeness S6: mkfs.cosmofs refuses the installed disk,
         # which has partitions -- the host check below finds the GPT and
         # the ESP intact.
@@ -333,6 +349,7 @@ def stage_reboot(args, results, inst, nonce):
         need(log, r"^\[ INFO\] vfs: root switched to cosmofs on \S+; [1-9]\d* mount\(s\) moved onto it$",
              "the installed boot")
         need(log, r"^CosmoOS userland ready$", "the installed /etc/rc")
+        no_free_warning(log, "the installed boot's root mount")
         # Roadmap M3: the installed system's console -- and its /etc/rc --
         # is BusyBox ash (/etc/console-shell), which the kernel names 'sh';
         # the native shell would be 'cosmo-sh'.
@@ -366,6 +383,7 @@ def stage_persist(args, results, inst, nonce):
     try:
         b.wait_prompt("the first prompt")
         need(b.text(), r"^init: switched to the disk root \S+ ", "the second installed boot")
+        no_free_warning(b.text(), "the second installed boot's root mount")
         out = b.run("cat /persist.txt && echo read-ok")
         need(out, r"^read-ok$", "reading /persist.txt")
         need(out, rf"^{nonce}$", "reading /persist.txt")

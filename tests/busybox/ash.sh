@@ -147,6 +147,11 @@ expect which /bin/ls "$(which ls)"
 expect md5sum 900150983cd24fb0d6963f7d28e17f72 "$(printf abc | md5sum | cut -d' ' -f1)"
 dd if=/dev/zero of=z bs=512 count=3 2> /dev/null
 expect dd 1536 "$(stat -c %s z)"
+# A read larger than the kernel's 64 KiB bounce: four whole 1 MiB records
+# from /dev/zero, then the same four from a regular file (roadmap 1.1 P3).
+expect dd-zero-1m "4+0 4+0 4194304" "$(dd if=/dev/zero of=z1m bs=1M count=4 2>&1 | sed -n 's/ records.*//p' | tr '\n' ' ')$(stat -c %s z1m)"
+expect dd-file-1m "4+0 4+0" "$(dd if=z1m of=/dev/null bs=1M 2>&1 | sed -n 's/ records.*//p' | tr '\n' ' ' | sed 's/ $//')"
+rm -f z1m
 cmp d1 d1
 expect cmp-same 0 "$?"
 cmp d1 d2 > /dev/null

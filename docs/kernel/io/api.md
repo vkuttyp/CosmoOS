@@ -127,6 +127,13 @@ returns `-EAGAIN` under it when no line waits.
 
 ### `int64_t syscall_obj_read(struct kobject *obj, uint64_t ubuf, size_t len)`, `syscall_obj_write(...)` (`kernel/include/kernel/syscall.h`)
 The bodies of `read`/`write` on an object the caller already holds: the
-object's operation through the 1024-byte bounce buffer, `-EBADF` for an
-object without it. `syscall_handle_read/write` look the handle up and
+object's operation through the bounce buffer (1 KiB on the stack, up to
+64 KiB from the heap), `-EBADF` for an object without it. A read is one
+call, except that a read larger than the bounce of an object with
+`read_filled` (a regular file, `/dev/zero`) is handed to it whole: it
+reads a bounce at a time, each piece copied out through a callback, until
+the request is filled, a piece comes back short or a copy faults (roadmap
+1.1 P3). A regular file holds its position lock across the whole read
+and moves the position by what was copied, so a fault after some pieces
+returns those bytes, as Linux does; a fault before any is `-EFAULT`. `syscall_handle_read/write` look the handle up and
 call them.
