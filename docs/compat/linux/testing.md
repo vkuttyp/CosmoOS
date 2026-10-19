@@ -108,20 +108,45 @@ the shell collected, and the harness requires each line:
 | `lastthread` | the main thread `exit`s; the other thread `exit_group(5)`s | `lxsig lastthread: 5` |
 | `session` | `setsid`, `getsid`, `getpgid` and `setpgid` answer for real rather than as the stubs they were before the kernel had process groups: a second `setsid` and a session leader's `setpgid` are both `EPERM` | `lxsig session: 0` |
 
-`lxinterp` and `lxdyn` (milestone 10): `lxdyn` is an `ET_DYN` executable
-(linked `-pie -z norelro`, no `user.ld`) whose `PT_INTERP` names
-`/boot/tests/linux/lxinterp`, itself an `ET_DYN` image without an
-interpreter. The kernel loads both, starts `lxinterp` at the
-randomised mmap base or above (roadmap M5) with the original stack; `lxinterp` checks
-the auxiliary vector (`AT_BASE` is its own `__ehdr_start`, `AT_PHDR`/
-`AT_PHNUM`/`AT_ENTRY` describe `lxdyn` page aligned in the randomised
-range `[USER_PIE_BASE, +2^40)`, `AT_EXECFN` is
-the path, `AT_PLATFORM` the machine, `AT_RANDOM` and `AT_PAGESZ` present),
-applies `lxdyn`'s `R_X86_64_RELATIVE`/`R_AARCH64_RELATIVE` relocations
-from `PT_DYNAMIC` (at least one must exist), prints `lxinterp: ok` and
-jumps to `AT_ENTRY`; `lxdyn` checks that it sits in that range, that
-a relocated pointer table and function pointer are right, that `argv`
-arrived, makes a system call and prints `lxdyn: ok`.
+`lxtest`'s auxiliary-vector section (roadmap 1.1 P4): its own vector
+(static, so `AT_BASE` 0; `AT_PAGESZ` 4096, `AT_ENTRY` its `_start`, an
+executable `PT_LOAD` holding it among `AT_PHDR`'s `AT_PHNUM` entries,
+`AT_PHENT` 56, `AT_RANDOM`, `AT_EXECFN` its path, `AT_SECURE` 0,
+`AT_HWCAP` `CPUID.1:EDX` on x86-64 and at least FP and ASIMD on AArch64,
+`AT_HWCAP2` present, `AT_UID`/`AT_EUID` the ids); a child with real uid
+1000 and effective uid 0 execs `lxtest exec-auxv`, whose `AT_SECURE` is 1;
+and a child execs `lxnointerp`, whose `PT_INTERP` names
+`/lib/ld-cosmo-missing.so.1`: `ENOENT`, and the child, still the old
+image with its vector, exits 0. Prints `lxtest: auxv ok`.
+
+## Shared libraries
+
+`tests/dyn/` (roadmap 1.1 P4), built with `ports/busybox`'s `cc-dyn`
+against musl's `libc.so`, `PT_INTERP` `/lib/ld-musl-$ARCH.so.1`, run by
+`/etc/rc.linux` in every debug boot on both architectures:
+
+- `dynhello`: the vector against what the program sees for itself
+  (`AT_BASE` is `dladdr(printf)`'s base -- libc.so is the linker --,
+  `AT_ENTRY` its `_start`, `AT_PHDR`/`AT_PHNUM` `dl_iterate_phdr`'s first
+  object, `AT_EXECFN` `argv[0]`, `AT_SECURE` 0, `AT_HWCAP`, `AT_HWCAP2`
+  present); the executable page aligned in `[USER_PIE_BASE, +2^40)` and
+  libc.so above `USER_MMAP_BASE`; a write to the executable's RELRO page
+  (an 8 KiB relocated table makes it at least a page) and, on x86-64, to
+  libc.so's (the range musl protects; on AArch64 musl leaves the linker's
+  own empty, `PAGE_SIZE` being 0 when it records it) kills a child with
+  `SIGSEGV`; an RWX `mmap` and an RWX `mprotect` of its text are
+  `EINVAL`; a second thread's `__thread` variable is its own. Prints
+  `dynhello: ok`.
+- `dltest`: `dlopen("libdltest.so")` finds `/usr/lib/cosmo-test/
+  libdltest.so` through its `RUNPATH`; `dlsym` of a function (42) and of
+  data, `dlclose`; a missing library is `NULL` with `dlerror` naming it;
+  `libtextrel.so` (an absolute address in `.text`, linked `-z notext`)
+  is refused, its `dlerror` printed (`dltest: libtextrel.so refused:
+  ...`); with `LD_LIBRARY_PATH` naming a shadow library (answer 7) a run
+  finds it, and a run with real uid 1000 and effective uid 0 (`AT_SECURE`
+  1) finds the shipped one; two runs each of `dynhello addr` and `dltest
+  addr` place libc.so, the executable and libdltest.so at different
+  addresses (`dltest: aslr: ...`). Prints `dltest: ok`.
 
 `hello_musl` (`tests/linux/hello_musl.c`): `uname`, `malloc`,
 `strcpy`, `printf`, `free`, and prints `hello from musl on Linux x86_64
@@ -182,7 +207,7 @@ walker on `debug.cwd_hold`, and a Linux program has no sysctl. Prints
 
 After the package section, `rc.test` runs `/etc/rc.linux` when
 `/boot/tests/linux/lxhello` exists (both architectures since milestone
-10): `lxhello || exit 1`, `lxtest || exit 1`, `lxdyn || exit 1`, the
+10): `lxhello || exit 1`, `lxtest || exit 1`, `dynhello || exit 1`, `dltest || exit 1`, the
 eight `lxsig` modes each followed by `echo "lxsig <mode>: $?"`, then,
 in an inner `sh -c` that exits 0 when `hello_musl` is absent, `hello_musl`
 and `epoll_musl`, each failing the section when it fails. A failing
@@ -194,7 +219,8 @@ The harness requires in self-test builds (`LINUXTEST_MARKERS`):
 |---|---|
 | `^hello from linux abi$` | `lxhello` |
 | `^LINUXTEST: PASS$` | `lxtest` |
-| `^lxinterp: ok$`, `^lxdyn: ok$` | the PIE pair |
+| `^lxtest: auxv ok$` | the vector, `AT_SECURE`, a missing interpreter |
+| `^dynhello: ok$`, `^dltest: libtextrel\.so refused: `, `^dltest: aslr: `, `^dltest: ok$` | shared libraries (`tests/dyn/`) |
 | `^lxsig <mode>: <status>$` (eight lines) | `lxsig` through `rc.linux` |
 | `^hello from musl on Linux x86_64 \(pid \d+\)$` (`MUSL_MARKER`) | `hello_musl`; required only when the environment has `HAVE_MUSL=1`, which `make test` sets from `tests/linux/linux.mk` |
 | `^epoll musl: auto-removal ok$` (`EPOLL_MUSL_MARKER`) | `epoll_musl` (`tests/linux/epoll_musl.c`, built and run as `hello_musl` is): an event loop's assumption through musl's wrappers -- a pipe's reader registered in an epoll set and closed without `EPOLL_CTL_DEL` leaves the writer with `EPIPE` (`SIGPIPE` ignored), a socket pair's registered end closed leaves its peer at end-of-file, a `dup` keeps the registration until the last close (the epoll-close unit, invariant A9); then a set in a set: the outer sees the inner's member become readable and adding the outer to the inner is `ELOOP` (the epoll-callback unit) |
@@ -264,5 +290,5 @@ signal, of `SIGKILL` against a thread blocked in `futex_wait`, or of
 `AVX` state across a handler. `hello_musl` is the only foreign-toolchain
 binary and runs only where `musl-gcc` exists (CI, x86-64); a larger
 program (a shell, `busybox`) is the natural next fixture once
-`execve` exists (fork arrived with roadmap M3). `lxinterp` applies `RELATIVE` relocations only;
-no real `ld.so` has been run.
+`execve` exists (fork arrived with roadmap M3). Since roadmap 1.1 P4 the interpreter is musl's own
+(`tests/dyn/`); there is no vDSO.

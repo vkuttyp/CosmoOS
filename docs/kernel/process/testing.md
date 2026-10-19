@@ -230,7 +230,7 @@ The user-mode trap tests now expect each exception's own signal:
 (`SIGTRAP`); the native `kill` goes through the signal core (a
 default-ignore signal such as `SIGCHLD` no longer terminates). The
 Linux-side coverage of threads, signals, frames and the return guards is
-in `docs/compat/linux/testing.md` (`lxtest`, `lxsig`, `lxdyn`).
+in `docs/compat/linux/testing.md` (`lxtest`, `lxsig`; the dynamic programs of `tests/dyn/`).
 
 ### `process-reaped`
 

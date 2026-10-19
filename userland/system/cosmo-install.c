@@ -276,7 +276,7 @@ static int write_file(const char *path, const char *text, uint32_t mode)
  * filesystems the kernel provides get empty mountpoints. */
 static int populate(void)
 {
-    static const char *const trees[] = { "/bin", "/sbin", "/etc", "/usr", "/var/db" };
+    static const char *const trees[] = { "/bin", "/sbin", "/lib", "/etc", "/usr", "/var/db" };
     static const struct { const char *path; uint32_t mode; } dirs[] = {
         { "/dev", 0755 }, { "/proc", 0555 }, { "/tmp", 01777 }, { "/mnt", 0755 },
         { "/var", 0755 }, { "/var/log", 0755 }, { "/var/lib", 0755 }, { "/var/lib/pkg", 0755 },

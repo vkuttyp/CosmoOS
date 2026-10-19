@@ -40,9 +40,19 @@ int lx_open_flags(unsigned lx, unsigned *native)
     return 0;
 }
 
+/* Linux's makedev (glibc's and musl's encoding): the minor's low byte, the
+ * major's twelve bits, then the minor's rest. A file's device is
+ * makedev(0, its mount's id). */
+static uint64_t lx_makedev(uint32_t major, uint32_t minor)
+{
+    return ((uint64_t)(major & 0xFFFFF000u) << 32) | ((uint64_t)(major & 0xFFFu) << 8) |
+           ((uint64_t)(minor & 0xFFFFFF00u) << 12) | (minor & 0xFFu);
+}
+
 void lx_stat_from_native(const struct cosmo_stat *st, struct lx_stat *out)
 {
     memset(out, 0, sizeof(*out));
+    out->st_dev = lx_makedev(0, st->dev);
     out->st_ino = st->ino;
     out->st_nlink = st->nlink;
     uint32_t type;
@@ -88,6 +98,8 @@ void lx_statx_from_native(const struct cosmo_stat *st, uint32_t mask, struct lx_
     out->stx_uid = st->uid;
     out->stx_gid = st->gid;
     out->stx_ino = st->ino;
+    out->stx_dev_major = 0;
+    out->stx_dev_minor = st->dev;   /* makedev(0, dev): what st_dev says */
     out->stx_size = st->size;
     out->stx_blksize = 4096;
     out->stx_blocks = (st->size + 511) / 512;

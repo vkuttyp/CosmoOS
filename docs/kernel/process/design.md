@@ -91,7 +91,10 @@ attributes):
    program headers in bounds, each `PT_LOAD` in bounds, no W+X segment,
    no two segments sharing a page, entry inside an executable segment,
    all segment vaddrs inside `[USER_LO, USER_HI)`; `PT_GNU_STACK` with X
-   refused; `PT_INTERP` refused (static only).
+   refused; `PT_INTERP` recorded (an interpreter of at most 255 bytes'
+   path, loaded by `image_build` at the random mmap base: musl's dynamic
+   linker for a Linux program since roadmap 1.1 P4, none for a native
+   one, which stays static in 1.1).
 2. Allocate `struct process`, `vm_space_create_user(&space)` (fresh MMU
    context whose kernel half copies the kernel root's PML4 entries
    256–511, see §5).

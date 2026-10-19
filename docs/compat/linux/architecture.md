@@ -104,9 +104,9 @@ what Linux is.
 
 ## Non-responsibilities
 
-- `execve`, `fork`, `vfork`, `clone3`: `-ENOSYS` (`clone` creates
-  threads only); a real `ld.so` has not been run (the tree has no
-  shared objects), though `PT_INTERP` loading and file `mmap` exist.
+- `clone3` (`execve`, `fork` and `vfork` arrived with roadmap M3;
+  musl's dynamic linker, `/lib/ld-musl-$ARCH.so.1`, with roadmap 1.1
+  P4).
 - Real-time signal queues. (Job control arrived with the job-control
   unit: the stop signals stop, and `wait4` takes `WUNTRACED` and
   `WCONTINUED`.)

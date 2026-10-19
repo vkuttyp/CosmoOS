@@ -3,7 +3,10 @@
 # exit status of this script is the section's verdict.
 /boot/tests/linux/lxhello || exit 1
 /boot/tests/linux/lxtest || exit 1
-/boot/tests/linux/lxdyn || exit 1
+# Dynamically linked musl programs (roadmap 1.1 P4): musl's dynamic
+# linker as PT_INTERP, dlopen.
+/boot/tests/dyn/dynhello || exit 1
+/boot/tests/dyn/dltest || exit 1
 # Expected deaths (lxsig.c): the status is the shell's view, 128 + the signal.
 /boot/tests/linux/lxsig term
 echo "lxsig term: $?"

@@ -16,9 +16,11 @@
 
 /* 64 was enough while the archive held programs and two config files.
  * A service directory is inherently many small files, so this became
- * the cap on how many services can ship; at ~112 bytes an entry the
- * table is still under 15 KiB. */
-#define BOOTARCHIVE_MAX_ENTRIES 256
+ * the cap on how many services can ship. 256 until roadmap 1.1 P4, whose
+ * /lib and dynamic test programs took the AArch64 archive past it, and
+ * whose dynamic BusyBox adds an applet link each; at 224 bytes an entry
+ * the table is 224 KiB of .bss. */
+#define BOOTARCHIVE_MAX_ENTRIES 1024
 #define BOOTARCHIVE_NAME_MAX    100  /* ustar name field, NUL included */
 
 struct bootarchive_entry {

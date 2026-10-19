@@ -177,11 +177,14 @@ review. Gap: no hostile-pointer sweep over the Linux table like `init
 --selftest`'s over the native one.
 
 **L12. W^X holds for Linux mappings.** `mmap` and `mprotect` refuse
-`PROT_WRITE|PROT_EXEC` with `-EINVAL` before reaching the VMM; the
-loader's rules (W^X segments, no executable stack, `PT_INTERP`
-refused) apply to Linux images unchanged. Check: `lxtest` requests an
-RWX anonymous mapping and gets `-EINVAL`; the loader tests in
-`docs/kernel/process/testing.md`. Gap: a program that maps RW, writes
+`PROT_WRITE|PROT_EXEC` with `-EINVAL` before reaching the VMM, and log
+it naming text relocations, the one case a dynamic linker asks; the
+loader's rules (W^X segments, no executable stack) apply to Linux images
+and their interpreter unchanged. Check: `lxtest` requests an RWX
+anonymous mapping and gets `-EINVAL`; `dynhello` (roadmap 1.1 P4) an RWX
+`mmap` and an RWX `mprotect` of its own text, and finds its RELRO pages
+and libc.so's read-only; `dltest`'s `dlopen` of `libtextrel.so` fails;
+the loader tests in `docs/kernel/process/testing.md`. Gap: a program that maps RW, writes
 code and `mprotect`s to RX (a JIT) works, as on Linux; nothing prevents
 it, by design — and since the native `mprotect` unit the kernel
 synchronises the instruction stream when a range becomes executable
@@ -224,9 +227,10 @@ succeeds and both directions are coherent; `msync` with `MS_SYNC|MS_ASYNC`
 or an undefined bit `-EINVAL`; a read-only `MAP_SHARED` sees a later
 `pwrite`; a read-only fd is `-EACCES` for a shared writable mapping and
 for `mprotect(PROT_WRITE)` of its shared mapping; an unaligned offset
-`-EINVAL`, a bad fd `-EBADF`); `lxdyn` loads through the loader, not
-`mmap`. Gap: a real dynamic linker's `mmap` of a shared object is not
-exercised (no `ld.so` in the tree).
+`-EINVAL`, a bad fd `-EBADF`); since roadmap 1.1 P4 musl's dynamic
+linker maps every shared object of `dynhello` and `dltest` through
+`mmap` (`MAP_PRIVATE` over a reservation, `MAP_FIXED`), and `dltest`
+opens and closes one with `dlopen`.
 
 **L15. The two number tables never disagree on a shared call's
 meaning.** Every `LX_*` name in `nr_aarch64.h` has the same name in

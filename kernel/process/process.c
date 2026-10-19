@@ -243,7 +243,7 @@ static size_t initial_stack_need(const struct personality *pers, const char *con
     for (; envp && envp[envc]; envc++)
         strings += strlen(envp[envc]) + 1;
     strings += strlen(execfn) + 1 + (pers->platform ? strlen(pers->platform) + 1 : 0);
-    size_t words = 1 + (argc + 1) + (envc + 1) + 40;
+    size_t words = 1 + (argc + 1) + (envc + 1) + PERSONALITY_AUXV_WORDS;
     *argc_out = argc;
     *envc_out = envc;
     return strings + 16 + words * 8 + 32 + 64;
@@ -290,7 +290,8 @@ static int build_initial_stack(struct process *p, const struct personality *pers
     uint64_t sp = stack_top - sp_offset;
     /* The string addresses and the word area, off the kernel stack: spawn
      * and exec already have several caller frames live. */
-    uint64_t *str_addrs = kmalloc(((size_t)argc + envc + 1 + (argc + 1) + (envc + 1) + 40) * sizeof(uint64_t), 0);
+    uint64_t *str_addrs =
+        kmalloc(((size_t)argc + envc + 1 + (argc + 1) + (envc + 1) + PERSONALITY_AUXV_WORDS) * sizeof(uint64_t), 0);
     if (str_addrs == NULL)
         return -ENOMEM;
     for (unsigned i = 0; i < argc + envc; i++) {
@@ -342,7 +343,7 @@ static int build_initial_stack(struct process *p, const struct personality *pers
     w[k++] = 0;
     struct personality_auxv_args x = { .random_addr = random_addr, .execfn_addr = execfn_addr,
                                        .platform_addr = platform_addr, .interp_base = interp_base };
-    k += pers->auxv(p, info, &x, w + k, 40);
+    k += pers->auxv(p, info, &x, w + k, PERSONALITY_AUXV_WORDS);
     size_t words = k;
     sp &= ~0xFULL;
     if (((words * 8) & 0xF) != 0)

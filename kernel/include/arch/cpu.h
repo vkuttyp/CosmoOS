@@ -54,4 +54,12 @@ void arch_dma_barrier(void);
  * kernel's own page tables are active, since that is when WXN is set. */
 void arch_hardening_report(void);
 
+/* What user code may use of this CPU, as Linux's AT_HWCAP and AT_HWCAP2
+ * report it (roadmap 1.1 P4; docs/compat/linux/design.md, "The auxiliary
+ * vector"): x86-64 CPUID.1:EDX and 0; AArch64 the HWCAP_ and HWCAP2_ bits
+ * of the boot CPU's ID registers for the features this kernel leaves
+ * usable at EL0 (none it would have to enable or emulate). */
+uint64_t arch_user_hwcap(void);
+uint64_t arch_user_hwcap2(void);
+
 #endif /* ARCH_CPU_H */

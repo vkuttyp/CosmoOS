@@ -651,7 +651,7 @@ struct cosmo_stat {
     uint32_t nlink;
     uint32_t uid;
     uint32_t gid;
-    uint32_t pad;
+    uint32_t dev;       /* the mount's id (its low 32 bits): two files are one file when ino and dev match */
     uint64_t size;
     uint64_t mtime_ns;
     uint64_t ctime_ns;

@@ -33,8 +33,15 @@ BB_DIR      ?= $(dir $(OUT))busybox-$(ARCH)
 BB_TARGET   := $(ARCH)-linux-musl
 BB_SYSROOT  := $(BB_DIR)/sysroot
 BB_LIBC     := $(BB_SYSROOT)/lib/libc.a
+# Roadmap 1.1 P4: musl shared as well, libc.so being its dynamic linker
+# too, at /lib/ld-musl-$(ARCH).so.1 on the system (PT_INTERP's path).
+BB_LIBC_SO  := $(BB_SYSROOT)/lib/libc.so
+BB_HEADERS  := $(BB_DIR)/musl-headers.stamp
+LDSO_NAME   := ld-musl-$(ARCH).so.1
+LDSO_PATH   := /lib/$(LDSO_NAME)
 BB_BUILTINS := $(BB_DIR)/rt/libclang_rt.builtins.a
 BB_CC       := $(BB_DIR)/cc
+BB_CC_DYN   := $(BB_DIR)/cc-dyn
 BUSYBOX_ELF := $(BB_DIR)/busybox
 BUSYBOX_CONFIG := $(ROOT)/ports/busybox/busybox.config
 # Applied to the source in this order (ports/busybox/README.md, "Patches"),
@@ -58,19 +65,33 @@ $(MUSL_TAR):
 $(CRT_TAR):
 	$(Q)$(PYTHON) $(ROOT)/scripts/fetch-pinned.py $@ $(CRT_SHA256) $(CRT_URL) $(PINNED_MIRROR)/$(notdir $(CRT_TAR))
 
-$(BB_LIBC): $(MUSL_TAR) $(ROOT)/ports/busybox/busybox.mk
-	$(call log,MUSL,$(MUSL_VERSION) $(BB_TARGET))
+# musl in two steps around the builtins: its headers (configured, and
+# installed into the sysroot), which the builtins compile against; then
+# the libraries, static and shared, libc.so linked with the builtins
+# (LIBCC; AArch64's long double needs the quad routines). One configure
+# serves both steps.
+$(BB_HEADERS): $(MUSL_TAR) $(ROOT)/ports/busybox/busybox.mk
+	$(call log,MUSL,$(MUSL_VERSION) $(BB_TARGET) headers)
 	$(Q)rm -rf $(BB_DIR)/musl-src $(BB_DIR)/musl-build $(BB_SYSROOT)
 	$(Q)mkdir -p $(BB_DIR)/musl-src $(BB_DIR)/musl-build
 	$(Q)tar -xzf $(MUSL_TAR) -C $(BB_DIR)/musl-src --strip-components=1
-	$(Q)cd $(BB_DIR)/musl-build && $(BB_DIR)/musl-src/configure --target=$(BB_TARGET) --prefix=/ --disable-shared \
-		CC="$(CC)" CFLAGS="--target=$(BB_TARGET) -O2 -ffile-prefix-map=$(BB_DIR)=busybox" AR="$(AR)" RANLIB="$(AR) s" \
+	$(Q)cd $(BB_DIR)/musl-build && $(BB_DIR)/musl-src/configure --target=$(BB_TARGET) --prefix=/ --syslibdir=/lib \
+		--enable-shared CC="$(CC)" CFLAGS="--target=$(BB_TARGET) -O2 -ffile-prefix-map=$(BB_DIR)=busybox" \
+		LDFLAGS="-fuse-ld=lld -Wl,--build-id=none" LIBCC="$(BB_BUILTINS)" AR="$(AR)" RANLIB="$(AR) s" \
 		> configure.log 2>&1 \
 		|| { cat configure.log; exit 1; }
-	$(Q)$(MAKE) -s -C $(BB_DIR)/musl-build > $(BB_DIR)/musl-build/make.log 2>&1 || { tail -40 $(BB_DIR)/musl-build/make.log; exit 1; }
-	$(Q)$(MAKE) -s -C $(BB_DIR)/musl-build DESTDIR=$(BB_SYSROOT) install > /dev/null
+	$(Q)$(MAKE) -s -C $(BB_DIR)/musl-build DESTDIR=$(BB_SYSROOT) install-headers > /dev/null
+	$(Q)touch $@
 
-$(BB_BUILTINS): $(CRT_TAR) $(BB_LIBC) $(ROOT)/ports/busybox/busybox.mk
+$(BB_LIBC) $(BB_LIBC_SO) &: $(BB_HEADERS) $(BB_BUILTINS)
+	$(call log,MUSL,$(MUSL_VERSION) $(BB_TARGET))
+	$(Q)$(MAKE) -s -C $(BB_DIR)/musl-build > $(BB_DIR)/musl-build/make.log 2>&1 || { tail -40 $(BB_DIR)/musl-build/make.log; exit 1; }
+	$(Q)$(MAKE) -s -C $(BB_DIR)/musl-build DESTDIR=$(BB_SYSROOT) install-libs > /dev/null
+	$(Q)touch $(BB_LIBC) $(BB_LIBC_SO)
+
+# The builtins are position-independent: libc.so and every dynamic
+# program link them (a static link takes PIC code as it is).
+$(BB_BUILTINS): $(CRT_TAR) $(BB_HEADERS) $(ROOT)/ports/busybox/busybox.mk
 	$(call log,BUILTINS,compiler-rt $(CRT_VERSION) $(BB_TARGET))
 	$(Q)rm -rf $(BB_DIR)/rt
 	$(Q)mkdir -p $(BB_DIR)/rt/src
@@ -79,7 +100,7 @@ $(BB_BUILTINS): $(CRT_TAR) $(BB_LIBC) $(ROOT)/ports/busybox/busybox.mk
 		b=$$(basename $$f .c); \
 		case " $(BB_RT_EXCLUDE_$(ARCH)) " in *" $$b "*) continue ;; esac; \
 		$(CC) --target=$(BB_TARGET) -nostdinc -isystem $(BB_SYSROOT)/include -isystem $(CLANG_RESOURCE_INC) \
-			-O2 -fno-builtin -fvisibility=hidden -ffile-prefix-map=$(BB_DIR)=busybox -w -c $$f -o $$b.o || exit 1; \
+			-O2 -fPIC -fno-builtin -fvisibility=hidden -ffile-prefix-map=$(BB_DIR)=busybox -w -c $$f -o $$b.o || exit 1; \
 	done
 	$(Q)$(AR) rcs $@ $(BB_DIR)/rt/*.o
 
@@ -87,6 +108,13 @@ $(BB_CC): $(ROOT)/ports/busybox/cc.in $(ROOT)/ports/busybox/busybox.mk
 	$(Q)mkdir -p $(dir $@)
 	$(Q)sed -e 's|@CC@|$(CC)|g' -e 's|@TARGET@|$(BB_TARGET)|g' -e 's|@SYSROOT@|$(BB_SYSROOT)|g' \
 		-e 's|@RESOURCE@|$(CLANG_RESOURCE_INC)|g' -e 's|@BUILTINS@|$(BB_BUILTINS)|g' -e 's|@BBDIR@|$(BB_DIR)|g' $< > $@
+	$(Q)chmod +x $@
+
+$(BB_CC_DYN): $(ROOT)/ports/busybox/cc-dyn.in $(ROOT)/ports/busybox/busybox.mk
+	$(Q)mkdir -p $(dir $@)
+	$(Q)sed -e 's|@CC@|$(CC)|g' -e 's|@TARGET@|$(BB_TARGET)|g' -e 's|@SYSROOT@|$(BB_SYSROOT)|g' \
+		-e 's|@RESOURCE@|$(CLANG_RESOURCE_INC)|g' -e 's|@BUILTINS@|$(BB_BUILTINS)|g' -e 's|@BBDIR@|$(BB_DIR)|g' \
+		-e 's|@LDSO@|$(LDSO_PATH)|g' $< > $@
 	$(Q)chmod +x $@
 
 # The checked-in configuration must be complete: `oldconfig` with every
@@ -116,6 +144,11 @@ busybox: $(BUSYBOX_ELF)
 BUSYBOX_TESTSUITE := $(BB_DIR)/testsuite.tgz
 $(BUSYBOX_TESTSUITE): $(BUSYBOX_ELF) $(ROOT)/ports/busybox/pack-testsuite.py
 	$(Q)$(PYTHON) $(ROOT)/ports/busybox/pack-testsuite.py $(BB_DIR)/bb-src/testsuite $@
+
+# musl's shared libc and its dynamic linker, a link to it (roadmap 1.1 P4):
+# /lib/libc.so and /lib/ld-musl-$(ARCH).so.1, the path PT_INTERP names.
+MUSL_ARCHIVE_ENTRIES := lib/libc.so=$(BB_LIBC_SO) lib/$(LDSO_NAME)@libc.so
+MUSL_ARCHIVE_DEPS := $(BB_LIBC_SO)
 
 # /bin/busybox and a symbolic link per applet (mkbootarchive's NAME@TARGET),
 # and the acceptance test's scripts and data under /boot/tests/busybox.

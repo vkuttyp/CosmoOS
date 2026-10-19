@@ -58,6 +58,7 @@ include $(ROOT)/pkg/pkg.mk
 # The Linux ABI test programs and the virtualization guests both build
 # for the architecture in hand; the guests live in tests/hv/$(ARCH)/.
 include $(ROOT)/tests/linux/linux.mk
+include $(ROOT)/tests/dyn/dyn.mk
 include $(ROOT)/tests/security/security.mk
 include $(ROOT)/tests/hv/hv.mk
 ARCH_TEST_TARGETS := hv-guests linux-tests
@@ -77,7 +78,7 @@ image: $(IMAGE)
 # (efi/, shell completeness S7): the manifest signs the archive, so
 # cosmo-upgrade installs a loader the signature covers.
 BOOT_ARCHIVE := $(OUT)/boot.tar
-BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) $(DROPBEAR_ARCHIVE_ENTRIES) $(OPENSSH_ARCHIVE_ENTRIES) $(MBEDTLS_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(SECURITY_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES) efi/$(LOADER_EFI_NAME)=$(LOADER_EFI)
+BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(MUSL_ARCHIVE_ENTRIES) $(DYN_TEST_ARCHIVE_ENTRIES) $(BUSYBOX_ARCHIVE_ENTRIES) $(DROPBEAR_ARCHIVE_ENTRIES) $(OPENSSH_ARCHIVE_ENTRIES) $(MBEDTLS_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(SECURITY_TEST_ARCHIVE_ENTRIES) $(HV_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES) efi/$(LOADER_EFI_NAME)=$(LOADER_EFI)
 
 # The archive's list of entries as a file that changes exactly when the
 # list does (an entry added or renamed, not only a file changed), so an
@@ -92,7 +93,7 @@ $(ARCHIVE_STAMP): archive-stamp-force
 	$(Q)printf '%s\n' $(filter-out $(PKG_ARCHIVE_ENTRIES),$(BOOT_ARCHIVE_ENTRIES)) > $@.tmp
 	$(Q)if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
 
-$(BOOT_ARCHIVE): $(ARCHIVE_STAMP) $(USER_ARCHIVE_DEPS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE_DEPS) $(OPENSSH_ARCHIVE_DEPS) $(MBEDTLS_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(SECURITY_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(LOADER_EFI) $(ROOT)/scripts/mkbootarchive.py
+$(BOOT_ARCHIVE): $(ARCHIVE_STAMP) $(USER_ARCHIVE_DEPS) $(MUSL_ARCHIVE_DEPS) $(DYN_TEST_ELFS) $(BUSYBOX_ARCHIVE_DEPS) $(DROPBEAR_ARCHIVE_DEPS) $(OPENSSH_ARCHIVE_DEPS) $(MBEDTLS_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(SECURITY_TEST_ELFS) $(HV_GUEST_BINS) $(MODULE_KOS) $(LOADER_EFI) $(ROOT)/scripts/mkbootarchive.py
 	$(call log,ARCHIVE,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
 

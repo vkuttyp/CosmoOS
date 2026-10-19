@@ -255,3 +255,15 @@ bool arch_irq_enabled(void)
 {
     return (read_rflags() & RFLAGS_IF) != 0;
 }
+
+uint64_t arch_user_hwcap(void)
+{
+    struct cpuid_regs r;
+    cpuid(1, 0, &r);
+    return r.edx;   /* Linux's x86_capability[CPUID_1_EDX] */
+}
+
+uint64_t arch_user_hwcap2(void)
+{
+    return 0;   /* HWCAP2_FSGSBASE stays clear: CR4.FSGSBASE is off (above); no RING3MWAIT */
+}

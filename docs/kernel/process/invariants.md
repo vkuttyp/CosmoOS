@@ -704,7 +704,7 @@ ranges cannot overlap (static asserts in `process.h`). Check: `make
 test-security` stage `aslr` (ten runs each of a static musl, a static
 PIE musl and a native program: every value distinct, the varying bits
 inside and nearly filling the designed range, the static load address
-fixed); `lxdyn`/`lxinterp` accept any page in their ranges.
+fixed); `dynhello` (roadmap 1.1 P4) accepts any page in the PIE and mmap ranges.
 
 **P38. On a published process, `p->space` changes only under `p->lock`,
 and the old space is put after the lock is dropped.** (Shell
