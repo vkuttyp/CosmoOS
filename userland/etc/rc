@@ -1,5 +1,9 @@
 # /etc/rc - run by init before the console shell (docs/userland/).
 echo "CosmoOS userland ready"
+# /tmp is everyone's scratch space. On a disk root it is the ramfs init
+# mounts there, whose root a ramfs makes 0755 (the native interface has no
+# chmod); the live root's /tmp is 01777 already.
+chmod 1777 /tmp
 # The filesystems /etc/fstab lists (shell completeness S6), before the
 # services that may use them. BusyBox mount; one that fails is reported
 # and the rest still mount.

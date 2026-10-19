@@ -117,7 +117,9 @@ Roadmap M2. Before `/etc/rc`, init reads `kernel.root` and
 it, init mounts `kernel.rootdev` as cosmofs at `/sysroot`, calls
 `cosmo_switch_root("/sysroot")` (retrying `-EBUSY` for up to a second, a
 process the kernel started may still be leaving), changes to `/`, mounts
-a fresh ramfs on `/tmp`, and prints `init: switched to the disk root DEV
+a fresh ramfs on `/tmp` (whose root a ramfs makes 0755; `/etc/rc`'s
+`chmod 1777 /tmp` makes it everyone's, and uid 1000 writing there is
+`test-install`'s check), and prints `init: switched to the disk root DEV
 (root=SPEC)`. `/etc/rc` and the shell are then the installed system's.
 Every failure -- `root=` naming no device, a mount refused, the switch
 refused -- prints one line ending `staying on the live root`, undoes what

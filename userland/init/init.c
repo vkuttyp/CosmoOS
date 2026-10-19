@@ -5991,6 +5991,7 @@ static bool switch_to_disk_root(void)
         return false;
     }
     chdir("/");
+    /* Its root is made 0755; /etc/rc makes it 01777. */
     if (mount("none", "/tmp", "ramfs", 0) < 0)
         printf("init: /tmp: %s (it stays on the disk)\n", strerror(errno));
     printf("init: switched to the disk root %s (root=%s)\n", dev, spec);
