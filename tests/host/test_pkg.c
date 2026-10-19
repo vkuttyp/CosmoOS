@@ -116,6 +116,22 @@ int main(void)
                              "name: x\nversion: 1.0\nrequires: lib c.so\n", "name: x\nversion: 1.0\nprovides: a/b.so\n" };
     for (size_t i = 0; i < sizeof(badlib) / sizeof(badlib[0]); i++)
         CHECK(manifest_parse(badlib[i], strlen(badlib[i]), &m, err, sizeof(err)) < 0);
+    /* The most library lines a manifest may hold -- 32 of each, every name
+     * 63 bytes -- fit the room pkg's record_stage gives them
+     * (PKG_SONAME_MAX + 12 per line beyond its 4096; #416's review). */
+    {
+        static char big[8192], fmt[8192];
+        size_t n = (size_t)snprintf(big, sizeof(big), "name: x\nversion: 1.0\nsummary: s\n");
+        for (int i = 0; i < 2 * PKG_MAX_LIBS; i++)
+            n += (size_t)snprintf(big + n, sizeof(big) - n, "%s: %0*d.so\n", i < PKG_MAX_LIBS ? "provides" : "requires",
+                                  PKG_SONAME_MAX - 4, i);
+        CHECK(manifest_parse(big, n, &m, err, sizeof(err)) == 0 && m.nprovides == PKG_MAX_LIBS &&
+              m.nrequires == PKG_MAX_LIBS && strlen(m.provides[0]) == PKG_SONAME_MAX - 1);
+        size_t room = 4096 + (size_t)(m.nprovides + m.nrequires) * (PKG_SONAME_MAX + 12);
+        int flen2 = manifest_format(&m, NULL, fmt, room);
+        CHECK(flen2 > 4096 && (size_t)flen2 < room && strcmp(fmt, big) == 0);
+        manifest_free(&m);
+    }
     const char *bad7 = "name: fortune\nversion: 1.0\ndir: relative\n";
     CHECK(manifest_parse(bad7, strlen(bad7), &m, err, sizeof(err)) < 0);
 

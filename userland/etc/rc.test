@@ -118,12 +118,15 @@ pkg install demo-d 2> /tmp/shtest/libmiss && FAILS=1
 cat /tmp/shtest/libmiss
 pkg install demo-c 2> /tmp/shtest/libneed && FAILS=1
 cat /tmp/shtest/libneed
+# A dry run counts the libraries of the packages before it in the same request.
+pkg install -n libdemo demo-c || FAILS=1
 pkg install libdemo || FAILS=1
 pkg install demo-c || FAILS=1
 pkg remove libdemo 2> /tmp/shtest/librm && FAILS=1
 cat /tmp/shtest/librm
 pkg install /boot/tests/pkg/libdemo-2.0.cpk 2> /tmp/shtest/libup && FAILS=1
 cat /tmp/shtest/libup
+pkg remove -n demo-c libdemo || FAILS=1
 pkg remove demo-c || FAILS=1
 pkg remove libdemo || FAILS=1
 pkg install busybox-dyn || FAILS=1

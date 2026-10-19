@@ -362,8 +362,11 @@ library another installed package requires and nothing else provides:
 no longer provides such a library is refused the same way: `pkg: NAME:
 OTHER requires its library SO, which NAME-VERSION does not provide`
 (`libs_still_required`, before anything is written). The checks read
-every installed record; with more than 128 installed (`PKG_LIB_SCAN`)
-they refuse rather than miss one (`-f` goes on). The builder refuses a
+one view of the installed packages' libraries, loaded from the records
+once per command and kept current by the command's own installs and
+removals, `-n` included: `pkg install -n libdemo demo-c` passes as the
+real one does. With more than 128 installed (`PKG_LIB_SCAN`) the view is
+incomplete and the checks refuse rather than miss one (`-f` goes on). The builder refuses a
 name `pkg` would not parse (name characters with `.so` in them, at most
 63 bytes) and more than 32 of either kind. The repository's `busybox-dyn` (`/usr/bin/busybox-dyn`,
 BusyBox linked against `libc.so`) requires `libc.so` only.

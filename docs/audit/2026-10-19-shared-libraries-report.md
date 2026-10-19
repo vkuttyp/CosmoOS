@@ -70,8 +70,8 @@ pairs; a `KASSERT` checks each pair fits with the null one after it:
 | `AT_EXECFN` | the path passed to `execve` |
 | `AT_PLATFORM` | `x86_64` or `aarch64` |
 | `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID` | the credentials' real and effective ids |
-| `AT_SECURE` | 1 when the effective uid or gid is not the real one (setuid bits are ignored here) |
-| `AT_HWCAP` | x86-64 `CPUID.1:EDX`; AArch64 the `HWCAP_` bits decoded from the boot CPU's ID registers as Linux's `arm64_elf_hwcaps`, for what EL0 may use unaided |
+| `AT_SECURE` | 1 when the effective uid or gid is not the real one (setuid bits are ignored here); the ids read under the process lock, and checked again once the exec is alone |
+| `AT_HWCAP` | the intersection over every CPU brought up: x86-64 `CPUID.1:EDX`; AArch64 the `HWCAP_` bits decoded from the ID registers as Linux's `arm64_elf_hwcaps`, for what EL0 may use unaided |
 | `AT_HWCAP2` | x86-64 0 (`CR4.FSGSBASE` is off); AArch64 the `HWCAP2_` bits likewise |
 | `AT_CLKTCK` | 100 |
 
@@ -137,6 +137,16 @@ RELRO at least a page).
 - #416 (Qodo): replacing a library package checks its dependants; the
   library checks refuse past 128 installed packages; the builder refuses
   what `pkg` cannot parse.
+- #414 (Codex): `AT_HWCAP`/`AT_HWCAP2` are the intersection over every CPU
+  brought up, not the exec'ing CPU's; the vector's ids are read under the
+  process lock and checked again once the exec is alone (a sibling's
+  `setresuid` in between ends the process). The log flood, as above.
+- #416 (Codex): the record's buffer has room for 32 maximum-length lines
+  of each library kind (`test_pkg`); the checks read one view of the
+  installed libraries per command, kept current by its own installs and
+  removals, so a dry run counts the packages before it and a removal
+  parses each record once. The replacement check and the builder's
+  limits, as above.
 
 ## Validation
 
