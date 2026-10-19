@@ -485,7 +485,7 @@ mmap base, so their addresses move with it from one run to the next.
 The stand-in interpreter that ran before (`lxinterp`, which applied
 `RELATIVE` relocations only) is gone. A library with text relocations
 asks for a writable and executable text, which W^X refuses (L12): its
-`dlopen` fails with `EINVAL`, and the kernel logs `linux: pid N:
+`dlopen` fails with `EINVAL`, and the kernel logs, once per exec, `linux: pid N:
 mprotect with PROT_WRITE|PROT_EXEC refused (W^X): a library with text
 relocations cannot be loaded here; build it -fPIC`. musl tells two
 libraries apart by `st_dev` and `st_ino`, so `stat` reports the

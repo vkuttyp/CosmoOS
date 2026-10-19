@@ -68,7 +68,7 @@ Architecture-dependent markers:
 
 | Marker | x86-64 | AArch64 |
 |---|---|---|
-| Linux ABI (`hello from linux abi`, `LINUXTEST: PASS`, `lxinterp: ok`, `lxdyn: ok`, the seven `lxsig` lines) | required | **required** (milestone 10: the personality's AArch64 table) |
+| Linux ABI (`hello from linux abi`, `LINUXTEST: PASS`, `lxtest: auxv ok`, `dynhello: ok`, `dltest: ok` and its refusal and ASLR lines, the `lxsig` lines; `lxinterp` and `lxdyn` until roadmap 1.1 P4) | required | **required** (milestone 10: the personality's AArch64 table) |
 | musl line | required when `HAVE_MUSL=1` | not built (x86-64 machine code) |
 | Virtualization (`HVTEST: PASS`, `hv-*` self-tests) | required; `HVTEST: skipped` and `selftest: hv: skipped` forbidden | not checked |
 | `HVTEST: skipped` | forbidden | **required** (the x86-only section must report itself skipped, proving `rc.test` reached it) |

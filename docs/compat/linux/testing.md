@@ -137,7 +137,7 @@ against musl's `libc.so`, `PT_INTERP` `/lib/ld-musl-$ARCH.so.1`, run by
   `SIGSEGV`; an RWX `mmap` and an RWX `mprotect` of its text are
   `EINVAL`; a second thread's `__thread` variable is its own. Prints
   `dynhello: ok`.
-- `dltest`: `dlopen("libdltest.so")` finds `/usr/lib/cosmo-test/
+- `dltest`: `dlopen("libdltest.so")` finds `/boot/tests/dyn/lib/
   libdltest.so` through its `RUNPATH`; `dlsym` of a function (42) and of
   data, `dlclose`; a missing library is `NULL` with `dlerror` naming it;
   `libtextrel.so` (an absolute address in `.text`, linked `-z notext`)
@@ -258,6 +258,10 @@ binary is about 200 KiB, static, with a `PT_GNU_STACK` and four
 `PT_LOAD` segments; the kernel's loader accepts it as it is.
 
 ## Results as of milestone 10 (2026-09-06)
+
+A record of that date. `lxinterp` and `lxdyn` were removed by roadmap
+1.1 P4; today's markers are `dynhello: ok` and `dltest: ok` ("Shared
+libraries", above).
 
 | Configuration | Result |
 |---|---|

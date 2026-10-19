@@ -1,7 +1,7 @@
 /*
  * dltest.c - dlopen, dlsym and dlclose (roadmap 1.1 P4;
  * docs/compat/linux/testing.md, "Shared libraries"). Linked with a
- * RUNPATH of /usr/lib/cosmo-test, where the shipped test library is.
+ * RUNPATH of /boot/tests/dyn/lib, where the test library is.
  *
  *   dltest              the checks, then "dltest: ok":
  *     - libdltest.so found through RUNPATH: dltest_answer() is 42, its
@@ -102,7 +102,7 @@ int main(int argc, char **argv)
         if (f && counter) {
             CHECK(f() == 42 && *counter == 2);
             Dl_info di;
-            CHECK(dladdr((void *)f, &di) != 0 && strcmp(di.dli_fname, "/usr/lib/cosmo-test/libdltest.so") == 0);
+            CHECK(dladdr((void *)f, &di) != 0 && strcmp(di.dli_fname, DIR "/lib/libdltest.so") == 0);
         }
         CHECK(dlsym(h, "no_such_symbol") == NULL && dlerror() != NULL);
         CHECK(dlclose(h) == 0);

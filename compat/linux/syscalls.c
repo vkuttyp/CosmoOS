@@ -74,6 +74,7 @@ struct lx_shm_attach {
 struct linux_state {
     uint64_t brk_start, brk;
     unsigned unknown_syscalls;
+    bool wx_logged;   /* lx_wx_refused has said why, once per exec */
     struct lx_shm_attach *shm_attaches;   /* singly linked; head insert */
     spinlock_t shm_lock;                  /* guards shm_attaches (threads share it) */
 };
@@ -1973,12 +1974,16 @@ static int64_t lx_brk(struct syscall_args *a)
  * mapping or a protection asking for both is -EINVAL. The one program that
  * asks in earnest is a dynamic linker relocating a library with text
  * relocations (musl's mprotect(PROT_READ|PROT_WRITE|PROT_EXEC) for
- * DT_TEXTREL): its dlopen fails with EINVAL, and this line says why.
+ * DT_TEXTREL): its dlopen fails with EINVAL, and this line says why --
+ * once per exec, so a program probing for RWX in a loop (a JIT) cannot
+ * flood the console and the dmesg ring (#414's review).
  */
 static int64_t lx_wx_refused(const char *call)
 {
-    kinfo("linux: pid %u: %s with PROT_WRITE|PROT_EXEC refused (W^X): a library with text relocations cannot be "
-          "loaded here; build it -fPIC", process_current()->pid, call);
+    struct linux_state *ls = lx();
+    if (ls && !__atomic_exchange_n(&ls->wx_logged, true, __ATOMIC_RELAXED))
+        kinfo("linux: pid %u: %s with PROT_WRITE|PROT_EXEC refused (W^X): a library with text relocations cannot "
+              "be loaded here; build it -fPIC", process_current()->pid, call);
     return -EINVAL;
 }
 
