@@ -1957,6 +1957,19 @@ timeout"; the ordinary boots have 240 s). Rerun: see the PR. First
 sighting; if it recurs, the crash boot's timeout is the candidate, under
 the keep / restate / widen-and-label rule above.
 
+**Second sighting, 2026-10-19:** CI on #414 (run 39259310985, head
+`bdcf11ff`), `build, boot, analyze (aarch64)`: `test-crash` `timed out
+after 180s`, all 480 self-tests `ok`, the panic markers missing. Every
+boot of that job was slower than main's: the first debug boot 233.0 s
+against 213.4-216.5 s on main's last three runs (39253511539,
+39246428011, 39233960111). The same job on the stack's other three runs
+passed its crash boot in 172.6-175.8 s. Main's own crash boot now takes
+172.5, 173.8 and 178.8 s on those three runs (159-161 s on 2026-10-12):
+under 1 % from the timeout at its slowest. The candidate named above is
+due, under the keep / restate / widen-and-label rule; it is main's, not
+P4's (P4 adds nothing to that boot's self-tests), and is left to the
+owner. The job was rerun.
+
 ## An aarch64 boot that reached the self-tests and no further
 
 **2026-09-20, `0814e79`, the same one-document branch** (`make
@@ -4516,4 +4529,21 @@ passing AArch64 build jobs of the last 60 runs: median 51.7 minutes, p95
 54.0, at most 54.2 (main's `d4bf1e79`). **Widened and labelled:** the
 job's `timeout-minutes` is 70 (`.github/workflows/ci.yml`), a hang guard;
 each boot keeps its own timeout.
+
+## A console line split by a kernel log line: `writev` is not one write, 2026-10-19
+
+CI on #415 (run 39259310816, head `15b9ee10`), `pkg-net test (aarch64)`:
+`test-pkg-net: FAIL: the stored index's serial after the refusals: no
+line matching '^serial: 11$'`. The serial log (artifact
+`test-pkg-net-aarch64`, `boot-pkgnet.log`) has the right line with a
+kernel line spliced into it: `serial: 11[ INFO] process: pid 60 'cat'
+exited with status 0 (23 syscalls)`, then the line's end alone. The
+command was `cat .../INDEX | head -1`; `head`, writing to the console,
+flushes its line-buffered stdout through musl's `writev` of the buffered
+text and the new data (`"serial: 11"`, `"\n"`), and the Linux
+personality's `writev` (`rw_vec`, `compat/linux/syscalls.c`) makes one
+`write` per iovec, so the terminal sees two writes and `cat`'s exit,
+logged from another CPU, falls between them. Linux makes a `writev` to a
+terminal one write. Mechanism established from the log and the code; not
+P4's (inventory section 19). The job was rerun.
 
