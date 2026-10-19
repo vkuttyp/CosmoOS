@@ -140,25 +140,45 @@ int64_t syscall_obj_read(struct kobject *obj, uint64_t ubuf, size_t len)
         return -EBADF;
     /* One object call, as large as the request up to the bounce: what
      * one call returns is what the read returns, so a pipe or a tty that
-     * has 300 bytes returns 300 and a file fills up to 64 KiB. */
+     * has 300 bytes returns 300. An object whose full reads can go on at
+     * once (read_fills: a regular file, /dev/zero) is called again, a
+     * bounce at a time, until the request is filled or a call returns
+     * less, so a 1 MiB read of a file returns 1 MiB, not 64 KiB. */
     char stack[IO_CHUNK];
     struct io_bounce b;
     syscall_bounce_get(&b, stack, len);
-    size_t n = len < b.cap ? len : b.cap;
-    int64_t rc = io->read(obj, b.buf, n);
-    /* An object may never report more than it was offered; the count
-     * bounds the copy out of the kernel buffer. */
-    KASSERT(rc <= (int64_t)n);
-    if (rc > (int64_t)n)
-        rc = -EIO;
-    if (rc > 0 && copy_to_user(ubuf, b.buf, (size_t)rc)) {
-        /* The copy to user faulted after the object already removed what it
-         * returned from its source. The read delivered nothing (an -EFAULT
-         * read's buffer is unspecified, so a caller cannot trust the bytes
-         * that did land); let the object put back what it took, if it can. */
-        if (io->read_undo)
-            io->read_undo(obj);
-        rc = -EFAULT;
+    bool fills = io->read_fills && len > b.cap && io->read_fills(obj);
+    size_t done = 0;
+    int64_t rc;
+    for (;;) {
+        size_t n = len - done < b.cap ? len - done : b.cap;
+        rc = io->read(obj, b.buf, n);
+        /* An object may never report more than it was offered; the count
+         * bounds the copy out of the kernel buffer. */
+        KASSERT(rc <= (int64_t)n);
+        if (rc > (int64_t)n)
+            rc = -EIO;
+        if (rc > 0 && copy_to_user(ubuf + done, b.buf, (size_t)rc)) {
+            /* The copy to user faulted after the object already removed
+             * what it returned from its source. The read delivered nothing
+             * (an -EFAULT read's buffer is unspecified, so a caller cannot
+             * trust the bytes that did land, earlier chunks' included); let
+             * the object put back what it took, if it can. */
+            if (io->read_undo)
+                io->read_undo(obj);
+            rc = -EFAULT;
+            break;
+        }
+        if (rc <= 0) {
+            if (done > 0)
+                rc = (int64_t)done;   /* an error after data: the data, as a short read */
+            break;
+        }
+        done += (size_t)rc;
+        if (!fills || (size_t)rc < n || done == len) {
+            rc = (int64_t)done;
+            break;
+        }
     }
     syscall_bounce_put(&b);
     return rc;

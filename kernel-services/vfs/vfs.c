@@ -2025,9 +2025,21 @@ static int file_obj_set_nonblock(struct kobject *obj, int on)
     return f->vn->ops->set_nonblock ? f->vn->ops->set_nonblock(f->vn, f, on) : -EOPNOTSUPP;
 }
 
+/* A regular file, or a device whose reads are always whole (/dev/zero):
+ * a full read may go on at once (kobject_io_type.read_fills). */
+static bool file_obj_read_fills(struct kobject *obj)
+{
+    struct file *f = container_of(obj, struct file, obj);
+    if (f->vn->type == VNODE_REG)
+        return true;
+    const struct chrdev_ops *chr = f->vn->type == VNODE_CHR ? ramfs_chr_ops_of(f->vn) : NULL;
+    return chr != NULL && chr->fills;
+}
+
 static const struct kobject_io_type file_type = {
     .base = { .name = "file", .release = file_release, .flags = KOBJECT_TYPE_IO },
     .read = file_obj_read,
+    .read_fills = file_obj_read_fills,
     .write = file_obj_write,
     .flush = file_obj_flush,
     .ready = file_obj_ready,

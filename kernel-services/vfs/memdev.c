@@ -35,7 +35,7 @@ static int64_t zero_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
 }
 
 static const struct chrdev_ops null_ops = { .read = null_read, .write = sink_write };
-static const struct chrdev_ops zero_ops = { .read = zero_read, .write = sink_write };
+static const struct chrdev_ops zero_ops = { .read = zero_read, .write = sink_write, .fills = true };
 
 void memdev_init(void)
 {

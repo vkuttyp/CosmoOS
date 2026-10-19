@@ -143,6 +143,14 @@ struct kobject_io_type {
      * -EFAULT: the object kept nothing removable, or accepts the loss (the
      * eventfd/timerfd counter, re-derivable from the next event). */
     void (*read_undo)(struct kobject *obj);
+    /* Optional. True when a read that returned all it was offered can be
+     * continued at once, without blocking, for more of the same stream: a
+     * regular file, /dev/zero. syscall_obj_read then calls `read` again,
+     * a bounce at a time, until the request is filled or a call returns
+     * less (a 1 MiB read of a file returns 1 MiB, as on Linux, where it
+     * returned the bounce's 64 KiB). NULL means one call per read: what a
+     * pipe, a tty or a socket returns at once is what the read returns. */
+    bool (*read_fills)(struct kobject *obj);
 };
 
 struct waitqueue;
