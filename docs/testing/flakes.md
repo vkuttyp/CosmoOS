@@ -4552,6 +4552,11 @@ logged from another CPU, falls between them. Linux makes a `writev` to a
 terminal one write. Mechanism established from the log and the code; not
 P4's (inventory section 19). The job was rerun.
 
+Second sighting: CI on #415 (run 39291005851, head `aab677a4`), the
+same job and failure, the same splice (`serial: 11[ INFO] process: pid
+60 'cat' exited with status 0 (23 syscalls)`, `boot-pkgnet.log` line
+412). Rerun.
+
 ## The firmware stalled on the reset in `test-net-login`'s reboot stage, 2026-10-19
 
 CI on #414 (run 39268982301, head `c19b5712`), `net-login test (x86_64)`:
