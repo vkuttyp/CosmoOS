@@ -3234,3 +3234,10 @@ See the [history index](README.md).
   libraries a package provides and requires and refuses an install or a
   removal that would break one. Native programs stay static in 1.1.
   Report: `docs/audit/2026-10-19-shared-libraries-report.md`.
+- **writev is one write (2026-10-20).** Main turned red on #416's merge:
+  a kernel log line landed inside a console line, because the Linux
+  personality's `writev` made one write per iovec and musl flushes a
+  line as two. `lx_writev` gathers the vector into the syscall bounce and
+  writes it in one call, as Linux does; a datagram socket now gets one
+  datagram (lxtest), `tools/writev-probe.py`. Report:
+  `docs/audit/2026-10-20-writev-report.md`.
