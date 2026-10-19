@@ -188,6 +188,13 @@ def stage_https(b, results, port, www, want, work):
             need(out, r"^ssl_client: 10\.0\.2\.2: the server's certificate is not accepted:$",
                  f"ssl_client's refusal of {what}")
             need(out, reason, f"the reason for refusing {what}")
+            # Roadmap 1.1 P3: the refusal ends on mbedTLS's reason; wget adds
+            # nothing (it said "error getting response", with a stale errno
+            # after a name lookup: "Resource temporarily unavailable").
+            need(out, r"^https-refused=1$", f"wget's exit status refusing {what}")
+            extra = re.search(r"^wget: .*$", out, re.M)
+            if extra:
+                raise Fail(f"wget refusing {what} added '{extra.group(0)}' after ssl_client's reason")
             refused.append(what)
 
         # cosmo-fetch (pkg's and cosmo-upgrade's client, the same checks):
@@ -462,10 +469,26 @@ def stage_files(work, port, results):
     rc, out = xfer(xfer_base("sftp", work, port) + ["-b", batch, "root@127.0.0.1"])
     if rc != 0 or "t.bin" not in out or local_sum(got) != want:
         raise Fail(f"sftp -b: status {rc}, output {out[-800:]!r}")
+    # The long listing. An OpenSSH 9.1+ client renders it itself when the
+    # server offers users-groups-by-id@openssh.com (OpenSSH's sftp-server
+    # does, on Linux too), and SFTP v3 carries no link count, so it prints
+    # "?" there (sftp-common.c ls_file, remote=1); an older client prints
+    # the server's long name, whose count is lstat's (roadmap 1.1 P3).
+    m = re.search(r"^-rw\S*\s+(\?|\d+)\s+\S+\s+\S+\s+%d\s.*\ss\.bin$" % os.path.getsize(src), out, re.M)
+    if not m:
+        raise Fail(f"sftp ls -l: no long line for s.bin in {out[-800:]!r}")
+    links = m.group(1)
+    if links not in ("?", "1"):
+        raise Fail(f"sftp ls -l: s.bin's link count is {links}, not 1 (or the client's '?')")
+    # The count the server's long name is made from: lstat's st_nlink.
+    rc, nl = ssh_run(work, port, True, "touch /root/nl1 && stat -c 'nlink=%h' /root/nl1; rm -f /root/nl1")
+    if not re.search(r"^nlink=1$", nl, re.M):
+        raise Fail(f"stat -c %h of a new file over ssh: {nl!r}")
     rc, out = ssh_run(work, port, True, "ls /root/sftp-dir 2>&1; echo gone=$?")
     if not re.search(r"^gone=1$", out, re.M):
         raise Fail(f"sftp: rmdir left /root/sftp-dir: {out!r}")
-    results.append("d. sftp: mkdir, put, ls -l, get (SHA-256 matches), rename, rm, rmdir in one batch")
+    results.append(f"d. sftp: mkdir, put, ls -l (link count shown as '{links}'), get (SHA-256 matches), rename, "
+                   "rm, rmdir in one batch")
 
 
 def stage_inspect(b, results):
