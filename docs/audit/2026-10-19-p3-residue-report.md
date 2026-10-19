@@ -87,8 +87,9 @@ All twelve at `9276c3f4`.
 
 ## Validation
 
-The device-lifecycle matrix at `9276c3f4`, both architectures, every step
-exit 0 (seconds):
+The device-lifecycle matrix at `9276c3f4` (on `f7107c2c`, before the
+rebase onto #412's merge `32a89711`, which had no conflict in code), both
+architectures, every step exit 0 (seconds):
 
 | Step | x86-64 | AArch64 |
 |---|---|---|
