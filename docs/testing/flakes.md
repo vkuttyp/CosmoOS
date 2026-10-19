@@ -43,6 +43,14 @@ continue; the child returns immediately after `SIGCONT`. In
 NVMe AArch64 boot and an earlier old-behavior boot passed `signal-stop`.
 This is outside Unit 2 and remains an out-of-scope correctness finding,
 not a load-sensitive classification or an assertion change.
+**Second sighting, 2026-10-19:** AArch64 debug at `QEMU_SMP=1`, P4's
+PR 5 matrix (`c3addd75`, no kernel change from PR 4, whose matrix passed
+it), `selftest: signal probe 'signal-stop' failed check 9`, beside P3's
+probe builds and boots on the same host. The rerun on the same commit
+passed. The serial (kept in the matrix's log) has the first sighting's
+signature: the child, pid 243, exited with status 7, then its parent,
+pid 242, with status 9 -- an exit reported before the unreported
+continue, as above. Still out of scope.
 
 **Observed once, x86-64 `module-unload-busy` (2026-10-09):**
 `/tmp/cosmo-unit2-ahci-stop-fixed-x86.result` reports the check
@@ -3290,6 +3298,13 @@ ran on the host: the boots are sequential. The other seven boots of the
 comparison passed it. Two sightings in nine days, both one boot each,
 neither reproduced. The bound is the half-window lag; the host-time
 explanation above still fits and is still not shown.
+
+**Third sighting, 2026-10-19:** `... (84 ms)`, local x86-64 debug at
+`QEMU_SMP=4`, P4's PR 5 matrix (`c3addd75`, whose changes are `pkg`,
+its fixtures and `rc.test`; the kernel is PR 4's, whose matrix passed
+it at every SMP count). The host was also building and booting P3's
+eight probe runs at the time. The rerun on the same commit passed.
+Recorded, not attributed.
 
 ## `net-nicbench` over the per-test budget, 2026-09-29
 
