@@ -129,8 +129,11 @@ returns `-EAGAIN` under it when no line waits.
 The bodies of `read`/`write` on an object the caller already holds: the
 object's operation through the bounce buffer (1 KiB on the stack, up to
 64 KiB from the heap), `-EBADF` for an object without it. A read is one
-call, except for an object whose `read_fills` says a full read can go on
-at once (a regular file, `/dev/zero`): it is read again, a bounce at a
-time, until the request is filled or a call returns less (roadmap 1.1
-P3); a copy that faults is `-EFAULT` for the whole read. `syscall_handle_read/write` look the handle up and
+call, except that a read larger than the bounce of an object with
+`read_filled` (a regular file, `/dev/zero`) is handed to it whole: it
+reads a bounce at a time, each piece copied out through a callback, until
+the request is filled, a piece comes back short or a copy faults (roadmap
+1.1 P3). A regular file holds its position lock across the whole read
+and moves the position by what was copied, so a fault after some pieces
+returns those bytes, as Linux does; a fault before any is `-EFAULT`. `syscall_handle_read/write` look the handle up and
 call them.

@@ -1114,7 +1114,7 @@ each; none is needed by M2's acceptance test.
   **Closed by P3 (2026-10-19,
   `docs/audit/2026-10-19-p3-residue-report.md`)**: a read of a regular
   file or of `/dev/zero` is filled a bounce at a time
-  (`kobject_io_type.read_fills`).
+  (`kobject_io_type.read_filled`).
 - ~~Every mount of a freshly installed cosmofs warns `free block count N
   differs from the superblock's N-4..7; using the bitmap` (QEMU's
   `test-install` on both architectures and Parallels, since before

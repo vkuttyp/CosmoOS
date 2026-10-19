@@ -542,7 +542,7 @@ struct chrdev_ops {
     int64_t (*read_file)(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len);
     int64_t (*write_file)(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len);
     /* Every read returns all it was offered at once (/dev/zero): a large
-     * read is filled by several calls (kobject_io_type.read_fills). */
+     * read is filled by several calls (kobject_io_type.read_filled). */
     bool fills;
     /* Optional readiness (the named-pipes unit): a device whose read_file
      * can block may say so. No existing device sets them yet. */

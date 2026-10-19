@@ -97,13 +97,15 @@ def main():
             args.append(f"BB_DIR={ROOT / 'out' / f'busybox-{a.arch}'}")
         log_path = work / "make.log"
         with log_path.open("w") as log:
-            subprocess.run(args + [d["target"]], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                           timeout=3600)
+            rc = subprocess.run(args + [d["target"]], stdin=subprocess.DEVNULL, stdout=log,
+                                stderr=subprocess.STDOUT, timeout=3600).returncode
         text = log_path.read_text(errors="replace")
         for f in (out / d["target"]).glob("boot-*.log"):
             (work / f.name).write_text(f.read_text(errors="replace"))
             text += f.read_text(errors="replace")
-        ok = (d["failed"] if a.old else d["ok"]) in text
+        # Fixed: the target's own verdict and exit status both. Old: the
+        # named check's failure (the target then exits non-zero too).
+        ok = (rc != 0 and d["failed"] in text) if a.old else (rc == 0 and d["ok"] in text)
         seen = (f"the check failed as the defect predicts" if a.old else f"{d['target']} passed") if ok else \
             "not what the mode predicts"
         print(f"PROBE: {'PASS' if ok else 'FAIL'} defect={a.defect} arch={a.arch} mode={mode}: {seen} ({work})")

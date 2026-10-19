@@ -3215,7 +3215,7 @@ See the [history index](README.md).
   `docs/audit/2026-10-19-index-expiry-report.md`.
 - **The Parallels-test residue (roadmap 1.1 P3, 2026-10-19).** A read of
   a regular file or `/dev/zero` larger than the 64 KiB bounce is filled
-  (`kobject_io_type.read_fills`), so `dd bs=1M` copies whole records.
+  (`kobject_io_type.read_filled`, one read under the position's lock), so `dd bs=1M` copies whole records.
   `wget` refusing a certificate ends on `ssl_client`'s reason, not a
   stale errno. cosmofs compares the superblock's free count with the
   bitmap before the free-log replay, so a clean mount no longer warns.

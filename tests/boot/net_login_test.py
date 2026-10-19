@@ -465,7 +465,7 @@ def stage_files(work, port, results):
     batch = os.path.join(work, "sftp.batch")
     with open(batch, "w") as f:
         f.write(f"mkdir /root/sftp-dir\ncd /root/sftp-dir\nput {src} s.bin\nls -l\n"
-                f"get s.bin {got}\nrename s.bin t.bin\nls\nrm t.bin\ncd /root\nrmdir /root/sftp-dir\n")
+                f"get s.bin {got}\nrename s.bin t.bin\nls\n")
     rc, out = xfer(xfer_base("sftp", work, port) + ["-b", batch, "root@127.0.0.1"])
     if rc != 0 or "t.bin" not in out or local_sum(got) != want:
         raise Fail(f"sftp -b: status {rc}, output {out[-800:]!r}")
@@ -480,15 +480,21 @@ def stage_files(work, port, results):
     links = m.group(1)
     if links not in ("?", "1"):
         raise Fail(f"sftp ls -l: s.bin's link count is {links}, not 1 (or the client's '?')")
-    # The count the server's long name is made from: lstat's st_nlink.
-    rc, nl = ssh_run(work, port, True, "touch /root/nl1 && stat -c 'nlink=%h' /root/nl1; rm -f /root/nl1")
+    # The count the server's long name is made from: lstat's st_nlink, of
+    # the file sftp wrote (s.bin, renamed t.bin: the same inode).
+    rc, nl = ssh_run(work, port, True, "stat -c 'nlink=%h' /root/sftp-dir/t.bin")
     if not re.search(r"^nlink=1$", nl, re.M):
-        raise Fail(f"stat -c %h of a new file over ssh: {nl!r}")
+        raise Fail(f"stat -c %h over ssh of the file sftp wrote: {nl!r}")
+    with open(batch, "w") as f:
+        f.write("cd /root/sftp-dir\nrm t.bin\ncd /root\nrmdir /root/sftp-dir\n")
+    rc, out = xfer(xfer_base("sftp", work, port) + ["-b", batch, "root@127.0.0.1"])
+    if rc != 0:
+        raise Fail(f"sftp -b (rm, rmdir): status {rc}, output {out[-800:]!r}")
     rc, out = ssh_run(work, port, True, "ls /root/sftp-dir 2>&1; echo gone=$?")
     if not re.search(r"^gone=1$", out, re.M):
         raise Fail(f"sftp: rmdir left /root/sftp-dir: {out!r}")
-    results.append(f"d. sftp: mkdir, put, ls -l (link count shown as '{links}'), get (SHA-256 matches), rename, "
-                   "rm, rmdir in one batch")
+    results.append(f"d. sftp: mkdir, put, ls -l (link count shown as '{links}'; the server's stat says 1), "
+                   "get (SHA-256 matches), rename, then rm and rmdir in a second batch")
 
 
 def stage_inspect(b, results):

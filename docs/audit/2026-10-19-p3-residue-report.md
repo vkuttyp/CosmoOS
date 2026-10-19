@@ -13,15 +13,28 @@ count=4` copied four partial records, 256 KiB. POSIX allows the short
 read, but Linux fills a read of a regular file or of `/dev/zero`, and
 programs count on it.
 
-A `kobject_io_type` may now say its reads fill (`read_fills`):
-`syscall_obj_read` then calls `read` a bounce at a time until the request
-is met, a call gives less than it was asked (end of file), or an error;
-an error after data returns the data as a short read, and a fault in the
-copy-out is `-EFAULT`. A file's `read_fills` (`file_obj_read_fills`,
-`kernel-services/vfs/vfs.c`) is true for a regular file and for a
-character device whose `chrdev_ops.fills` is set; `/dev/zero` sets it
-(`memdev.c`). A pipe, socket, terminal or other device still returns what
-one call gives.
+A `kobject_io_type` may now fill a large read itself (`read_filled`):
+`syscall_obj_read` hands a read larger than the bounce to it with the
+bounce and a callback that copies a piece out, and the object reads a
+bounce at a time until the request is met, a piece comes back short (end
+of file), or the copy faults. A file's (`file_obj_read_filled`,
+`kernel-services/vfs/vfs.c`) fills for a regular file and for a character
+device whose `chrdev_ops.fills` is set; `/dev/zero` sets it (`memdev.c`).
+A pipe, socket, terminal or other device still returns what one call
+gives.
+
+It is one read. The first version looped in `syscall_obj_read`, a call
+per bounce, and #413's review (Codex, Qodo) showed what that lost: each
+call took and released the open file's lock, so a second reader or a
+seek on the same open file could land between two pieces and the read
+return bytes from two places, and a fault on a later piece returned
+`-EFAULT` although the earlier pieces had been copied and the position
+had moved past them. A regular file now holds `f->lock`, its position's
+lock, across every piece and its copy, as Linux holds `f_pos_lock` (the
+order is `f->lock` before `vn->lock`, and no fault path takes an open
+file's lock), and moves the position by what was copied: a fault after
+some pieces returns those bytes, as Linux does, and one before any is
+`-EFAULT` with the position unchanged.
 
 ## wget's bad-certificate message
 
@@ -34,7 +47,10 @@ getting response")`, whose errno was whatever the last failing call left
 unavailable" on Parallels; QEMU's slirp names the host by address and
 left none). `wget` now records `ssl_client`'s pid and, when the response
 read finds end of file, waits for it: a non-zero exit ends `wget` quietly
-(`xfunc_die`, exit 1), `ssl_client`'s reason the last line.
+(`xfunc_die`, exit 1), `ssl_client`'s reason the last line. Every new
+connection (`open_socket`) clears the pid first, so an https URL
+redirected to http never waits for the old connection's helper (#413's
+review, Qodo).
 
 ## sftp's link count: not a defect
 
@@ -44,8 +60,9 @@ offers `users-groups-by-id@openssh.com`, and SFTP v3 attributes carry no
 link count, so it prints `?` (`sftp-common.c` `ls_file` with `remote`
 set). Linux with OpenSSH's own server shows the same. The server's long
 name has `lstat`'s `st_nlink`. `test-net-login` now accepts the client's
-`?` or `1` for a new file and requires `ssh ... stat -c 'nlink=%h'` on
-the same file to print `nlink=1`. On both architectures the host's
+`?` or `1` for the file sftp wrote and requires `ssh ... stat -c
+'nlink=%h'` on that same file (renamed, the same inode) to print
+`nlink=1`; a second sftp batch then removes it and its directory. On both architectures the host's
 client printed `?`.
 
 ## The installer's free count
@@ -69,10 +86,19 @@ commit's frees. It compares before the replay
   reason; sftp's listing and the server's `stat` as above.
 - `test-install`: no free-count warning at the installed root's first
   mount, nor in either installed boot.
+- The self-test `file-read-filled` (every debug boot): a regular file
+  read from offset 100 in two-page pieces is contiguous, each piece
+  handed over with the open file's lock held, the position at the end;
+  a fault at the second piece returns the first piece and leaves the
+  position after it, a fault at the first is `-EFAULT` with the position
+  unchanged; `/dev/zero` fills three pieces of zeros; `/dev/null` reads
+  one call at a time (`-EOPNOTSUPP` from `read_filled`).
 - `tools/p3-residue-probe.py --defect zero|wget|freecount [--old] [--arch
   A]`: `--old` reverse-applies the fix commit's sources (found by
   subject) in a throwaway worktree and runs the target in a release
-  build; `wget` builds BusyBox from that tree.
+  build; `wget` builds BusyBox from that tree. A fixed run passes only
+  when the target exits 0 and prints its PASS; an old one only when the
+  target exits non-zero with the named check's failure.
 
 | Probe | x86-64 | AArch64 |
 |---|---|---|

@@ -2026,20 +2026,56 @@ static int file_obj_set_nonblock(struct kobject *obj, int on)
 }
 
 /* A regular file, or a device whose reads are always whole (/dev/zero):
- * a full read may go on at once (kobject_io_type.read_fills). */
-static bool file_obj_read_fills(struct kobject *obj)
+ * a large read is filled as one read (kobject_io_type.read_filled). A
+ * regular file's position lock, f->lock, is held across every piece and
+ * its copy to the caller, as Linux holds f_pos_lock, so a second reader
+ * or a seek on the same open file waits for the whole read; the order is
+ * f->lock before vn->lock (file_pread) and before what a fault in `put`
+ * takes, and no fault path takes an open file's lock. The position moves
+ * by what `put` accepted: a fault after some pieces returns those bytes,
+ * as Linux does, and the next read starts after them. A device has no
+ * position and no lock (file_read). */
+static int64_t file_obj_read_filled(struct kobject *obj, void *buf, size_t cap, size_t len,
+                                    int (*put)(void *ctx, const void *piece, size_t n), void *ctx)
 {
     struct file *f = container_of(obj, struct file, obj);
-    if (f->vn->type == VNODE_REG)
-        return true;
-    const struct chrdev_ops *chr = f->vn->type == VNODE_CHR ? ramfs_chr_ops_of(f->vn) : NULL;
-    return chr != NULL && chr->fills;
+    bool reg = f->vn->type == VNODE_REG;
+    if (!reg) {
+        const struct chrdev_ops *chr = f->vn->type == VNODE_CHR ? ramfs_chr_ops_of(f->vn) : NULL;
+        if (chr == NULL || !chr->fills)
+            return -EOPNOTSUPP;
+    }
+    if (reg)
+        mutex_lock(&f->lock);
+    size_t done = 0;
+    int64_t rc = 0;
+    while (done < len) {
+        size_t n = len - done < cap ? len - done : cap;
+        rc = reg ? file_pread(f, buf, n, f->pos + done) : file_read(f, buf, n);
+        KASSERT(rc <= (int64_t)n);
+        if (rc > (int64_t)n)
+            rc = -EIO;
+        if (rc <= 0)
+            break;
+        if (put(ctx, buf, (size_t)rc)) {
+            rc = -EFAULT;
+            break;
+        }
+        done += (size_t)rc;
+        if ((size_t)rc < n)
+            break;
+    }
+    if (reg) {
+        f->pos += done;
+        mutex_unlock(&f->lock);
+    }
+    return done > 0 ? (int64_t)done : rc;
 }
 
 static const struct kobject_io_type file_type = {
     .base = { .name = "file", .release = file_release, .flags = KOBJECT_TYPE_IO },
     .read = file_obj_read,
-    .read_fills = file_obj_read_fills,
+    .read_filled = file_obj_read_filled,
     .write = file_obj_write,
     .flush = file_obj_flush,
     .ready = file_obj_ready,

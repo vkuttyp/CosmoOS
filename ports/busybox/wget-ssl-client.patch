@@ -9,18 +9,35 @@
  //usage:     "\n	--no-check-certificate	Don't validate the server's certificate"
  //usage:	)
  //usage:	)
-@@ -474,6 +474,29 @@
- 	return s;
+@@ -434,11 +434,23 @@
  }
+ #endif
  
 +#if ENABLE_FEATURE_WGET_HTTPS
 +/* CosmoOS: the ssl_client serving this connection, 0 for none. When it
 + * refused the server (a certificate, a handshake), it has said why and
 + * exited non-zero; wget then adds nothing, where it said "error getting
 + * response" with whatever errno an earlier call left (the resolver's
-+ * EAGAIN, "Resource temporarily unavailable", for a URL with a name). */
++ * EAGAIN, "Resource temporarily unavailable", for a URL with a name).
++ * Every new connection starts with none (an https URL redirected to http
++ * must not wait for the old one's helper); spawn_ssl_client sets it. */
 +static pid_t ssl_client_pid;
++#endif
 +
+ static FILE *open_socket(len_and_sockaddr *lsa)
+ {
+ 	int fd;
+ 	FILE *fp;
+ 
++	IF_FEATURE_WGET_HTTPS(ssl_client_pid = 0;)
+ 	set_alarm();
+ 	fd = xconnect_stream(lsa);
+ 	clear_alarm();
+@@ -474,6 +486,22 @@
+ 	return s;
+ }
+ 
++#if ENABLE_FEATURE_WGET_HTTPS
 +static void die_if_ssl_client_refused(void)
 +{
 +	int status;
@@ -39,7 +56,7 @@
  /* Returns '\n' if it was seen, else '\0'. Trims at first '\r' or '\n' */
  static char fgets_trim_sanitize(FILE *fp, const char *fmt)
  {
-@@ -481,8 +504,10 @@
+@@ -481,8 +509,10 @@
  	char *buf_ptr;
  
  	set_alarm();
@@ -51,7 +68,7 @@
  	clear_alarm();
  
  	buf_ptr = strchrnul(G.wget_buf, '\n');
-@@ -693,7 +718,7 @@
+@@ -693,7 +723,7 @@
  	strrchr(servername, ':')[0] = '\0';
  
  	fflush_all();
@@ -60,7 +77,7 @@
  	if (pid == 0) {
  		/* Child */
  		char *argv[13];
-@@ -772,11 +797,8 @@
+@@ -772,11 +802,8 @@
  	int pid;
  	char *servername, *p;
  
@@ -74,7 +91,7 @@
  	servername = xstrdup(host);
  	p = strrchr(servername, ':');
  	if (p) *p = '\0';
-@@ -792,14 +814,9 @@
+@@ -792,14 +819,9 @@
  		close(sp[0]);
  		xmove_fd(sp[1], 0);
  		xdup2(0, 1);
@@ -92,7 +109,7 @@
  
  			xmove_fd(network_fd, 3);
  			argv[0] = (char*)"ssl_client";
-@@ -807,8 +824,11 @@
+@@ -807,8 +829,11 @@
  			//TODO: if (!is_ip_address(servername))...
  			argv[2] = (char*)"-n";
  			argv[3] = servername;
@@ -106,7 +123,7 @@
  			BB_EXECVP(argv[0], argv);
  			bb_perror_msg_and_die("can't execute '%s'", argv[0]);
  		}
-@@ -816,6 +836,7 @@
+@@ -816,6 +841,7 @@
  	}
  
  	/* Parent */

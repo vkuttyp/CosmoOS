@@ -143,14 +143,22 @@ struct kobject_io_type {
      * -EFAULT: the object kept nothing removable, or accepts the loss (the
      * eventfd/timerfd counter, re-derivable from the next event). */
     void (*read_undo)(struct kobject *obj);
-    /* Optional. True when a read that returned all it was offered can be
-     * continued at once, without blocking, for more of the same stream: a
-     * regular file, /dev/zero. syscall_obj_read then calls `read` again,
-     * a bounce at a time, until the request is filled or a call returns
-     * less (a 1 MiB read of a file returns 1 MiB, as on Linux, where it
-     * returned the bounce's 64 KiB). NULL means one call per read: what a
-     * pipe, a tty or a socket returns at once is what the read returns. */
-    bool (*read_fills)(struct kobject *obj);
+    /* Optional: a read larger than the bounce that fills the request, for
+     * an object whose reads can go on at once without blocking (a regular
+     * file, /dev/zero): a 1 MiB read of a file returns 1 MiB, as on Linux,
+     * where one call returned the bounce's 64 KiB. The object reads at
+     * most `cap` bytes at a time into `buf` and hands each piece to `put`
+     * (the system-call layer's copy to the caller; 0 or -EFAULT), until
+     * `len` bytes are handed over, a piece comes back short (end of file)
+     * or `put` fails. It is one read: an object with a position holds the
+     * position's lock throughout, so two readers sharing the open file
+     * each get one contiguous range, and advances it by what `put`
+     * accepted. Returns the bytes accepted, or the error when there were
+     * none. -EOPNOTSUPP (or NULL): this object reads one call at a time --
+     * what a pipe, a tty or a socket returns at once is what the read
+     * returns. */
+    int64_t (*read_filled)(struct kobject *obj, void *buf, size_t cap, size_t len,
+                           int (*put)(void *ctx, const void *piece, size_t n), void *ctx);
 };
 
 struct waitqueue;

@@ -133,6 +133,21 @@ static int64_t sys_write(struct syscall_args *a)
     return syscall_handle_write((int)a->a[0], a->a[1], (size_t)a->a[2]);
 }
 
+/* read_filled's `put`: each piece to the caller's buffer after the last. */
+struct put_user {
+    uint64_t ubuf;
+    uint64_t done;
+};
+
+static int put_user_piece(void *ctx, const void *piece, size_t n)
+{
+    struct put_user *pu = ctx;
+    if (copy_to_user(pu->ubuf + pu->done, piece, n))
+        return -EFAULT;
+    pu->done += n;
+    return 0;
+}
+
 int64_t syscall_obj_read(struct kobject *obj, uint64_t ubuf, size_t len)
 {
     const struct kobject_io_type *io = kobject_io_of(obj);
@@ -140,44 +155,37 @@ int64_t syscall_obj_read(struct kobject *obj, uint64_t ubuf, size_t len)
         return -EBADF;
     /* One object call, as large as the request up to the bounce: what
      * one call returns is what the read returns, so a pipe or a tty that
-     * has 300 bytes returns 300. An object whose full reads can go on at
-     * once (read_fills: a regular file, /dev/zero) is called again, a
-     * bounce at a time, until the request is filled or a call returns
-     * less, so a 1 MiB read of a file returns 1 MiB, not 64 KiB. */
+     * has 300 bytes returns 300. An object whose reads fill (read_filled:
+     * a regular file, /dev/zero) is handed a larger request whole and
+     * reads it a bounce at a time as one read, so a 1 MiB read of a file
+     * returns 1 MiB, not 64 KiB. */
     char stack[IO_CHUNK];
     struct io_bounce b;
     syscall_bounce_get(&b, stack, len);
-    bool fills = io->read_fills && len > b.cap && io->read_fills(obj);
-    size_t done = 0;
-    int64_t rc;
-    for (;;) {
-        size_t n = len - done < b.cap ? len - done : b.cap;
+    int64_t rc = -EOPNOTSUPP;
+    if (io->read_filled && len > b.cap) {
+        struct put_user pu = { .ubuf = ubuf, .done = 0 };
+        rc = io->read_filled(obj, b.buf, b.cap, len, put_user_piece, &pu);
+        /* What the object reports is what landed in the caller's buffer. */
+        KASSERT(rc == -EOPNOTSUPP || (rc < 0 && pu.done == 0) || (rc >= 0 && (uint64_t)rc == pu.done));
+    }
+    if (rc == -EOPNOTSUPP) {
+        size_t n = len < b.cap ? len : b.cap;
         rc = io->read(obj, b.buf, n);
         /* An object may never report more than it was offered; the count
          * bounds the copy out of the kernel buffer. */
         KASSERT(rc <= (int64_t)n);
         if (rc > (int64_t)n)
             rc = -EIO;
-        if (rc > 0 && copy_to_user(ubuf + done, b.buf, (size_t)rc)) {
+        if (rc > 0 && copy_to_user(ubuf, b.buf, (size_t)rc)) {
             /* The copy to user faulted after the object already removed
              * what it returned from its source. The read delivered nothing
              * (an -EFAULT read's buffer is unspecified, so a caller cannot
-             * trust the bytes that did land, earlier chunks' included); let
-             * the object put back what it took, if it can. */
+             * trust the bytes that did land); let the object put back what
+             * it took, if it can. */
             if (io->read_undo)
                 io->read_undo(obj);
             rc = -EFAULT;
-            break;
-        }
-        if (rc <= 0) {
-            if (done > 0)
-                rc = (int64_t)done;   /* an error after data: the data, as a short read */
-            break;
-        }
-        done += (size_t)rc;
-        if (!fills || (size_t)rc < n || done == len) {
-            rc = (int64_t)done;
-            break;
         }
     }
     syscall_bounce_put(&b);
