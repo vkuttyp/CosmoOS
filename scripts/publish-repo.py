@@ -9,10 +9,12 @@
 --site is the branch as it stands (empty the first time), --out the new
 site, written from scratch. The site:
 
-    repo/ARCH/INDEX, *.cpk      the package repository of each architecture:
-                                INDEX made a network index (PK10:
+    repo/ARCH/INDEX.90, INDEX,  the package repository of each architecture:
+      *.cpk                     its INDEX made a network index (PK10:
                                 serial, published, expires) and signed
-                                with KEY
+                                with KEY twice, for 90 days as INDEX.90
+                                (pkg from v1.0.7) and for 30 as INDEX
+                                (the systems before it)
     releases/TAG/...            each release's SHA256SUMS, SHA256SUMS.sig
                                 and the files cosmo-upgrade --fetch reads
                                 (kernel.elf, boot.tar, cmdline, manifest),
@@ -48,6 +50,7 @@ import modsign  # noqa: E402
 import pkgbuild  # noqa: E402
 
 ARCHES = ("x86_64", "aarch64")
+INDEXES = {"INDEX.90": pkgbuild.MAX_DAYS, "INDEX": pkgbuild.OLD_DAYS}   # name: validity in days
 SET = ("kernel.elf", "boot.tar", "cmdline", "manifest", "cosmo-upgrade", "cosmo-upgrade.cpk")
 LOADERS = {"x86_64": "BOOTX64.EFI", "aarch64": "BOOTAA64.EFI"}
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:-rc(\d+))?$")
@@ -161,20 +164,23 @@ def main():
                 raise Fail(f"the site has no repo/{arch} to sign again")
             files = {f: open(os.path.join(src, f), "rb").read() for f in os.listdir(src)}
         for name, data in files.items():
-            if name != "INDEX":
+            if name not in INDEXES:
                 with open(os.path.join(dest, name), "wb") as f:
                     f.write(data)
-        blob, n, expires = pkgbuild.published_index(files["INDEX"], serial, now, pkgbuild.MAX_DAYS, a.key)
-        with open(os.path.join(dest, "INDEX"), "wb") as f:
-            f.write(blob)
+        # The one serial, two validities: INDEX.90 for pkg from v1.0.7, INDEX
+        # for the systems before it (docs/pkg/design.md, "Network repositories").
+        for name, days in INDEXES.items():
+            blob, n, expires = pkgbuild.published_index(files["INDEX"], serial, now, days, a.key)
+            with open(os.path.join(dest, name), "wb") as f:
+                f.write(blob)
+            print(f"publish-repo: repo/{arch}/{name}: {n} packages, serial {serial}, expires {expires}")
         listed = {pkgbuild.stanza_field(st, "file") for st in pkgbuild.index_stanzas(blob)}
         for name in os.listdir(dest):
-            if name != "INDEX" and name not in listed:
+            if name not in INDEXES and name not in listed:
                 os.remove(os.path.join(dest, name))
         missing = listed - set(os.listdir(dest))
         if missing:
             raise Fail(f"repo/{arch}/INDEX names files the repository lacks: {', '.join(sorted(missing))}")
-        print(f"publish-repo: repo/{arch}: {n} packages, serial {serial}, expires {expires}")
 
     if a.release:
         d = os.path.join(a.out, "releases", a.tag)

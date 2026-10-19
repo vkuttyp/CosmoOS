@@ -35,7 +35,12 @@
 #define PKG_CACHE_DIR    "/var/cache/pkg"       /* <name>/<file>: a package being fetched */
 #define PKG_MAX_REPOS    8
 #define PKG_URL_MAX      256
-#define PKG_INDEX_MAX_DAYS 30                    /* PK10: an index is valid for at most 30 days */
+#define PKG_INDEX_MAX_DAYS 90                    /* PK10: an index is valid for at most 90 days */
+/* A network repository's index: INDEX.90, signed for 90 days, and beside it
+ * INDEX, signed for 30, which pkg before v1.0.7 reads (it refused a longer
+ * validity). pkg reads INDEX when the server has no INDEX.90. */
+#define PKG_NET_INDEX     "INDEX.90"
+#define PKG_NET_INDEX_OLD "INDEX"
 
 /* Exit statuses: 0 ok, 1 failure, 2 usage, 3 refused (verification). */
 #define EXIT_FAILED  1
@@ -139,7 +144,7 @@ int index_header_parse(const char *text, size_t len, struct index_header *h, cha
 /* PK10, for a network repository: a header, a validity of at most
  * PKG_INDEX_MAX_DAYS, `now` within it, and a serial no lower than
  * `last_serial`, the last one accepted from the repository (0: none). 0, or
- * -1 with `err`. */
+ * -1 with `err`; -2 when the index has expired (`err` names the time). */
 int index_fresh(const struct index_header *h, uint64_t last_serial, int64_t now, char *err, size_t errlen);
 void index_free(struct index *ix);
 bool time_parse(const char *s, int64_t *t);                   /* YYYY-MM-DDTHH:MM:SSZ */

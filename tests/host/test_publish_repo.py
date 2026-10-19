@@ -103,6 +103,13 @@ def main():
               f"the first header {h}")
         blob = open(idx, "rb").read()
         check(modsign.verify_detached([pubbytes], blob[:-88], blob[-88:]) is None, "the INDEX signature")
+        idx90 = os.path.join(s1, "repo", "x86_64", "INDEX.90")
+        h90 = header(idx90)
+        check(h90 == {"serial": "1", "published": "2026-10-18T12:34:56Z", "expires": "2027-01-16T12:34:56Z"},
+              f"the first INDEX.90 header {h90}")
+        b90 = open(idx90, "rb").read()
+        check(modsign.verify_detached([pubbytes], b90[:-88], b90[-88:]) is None, "the INDEX.90 signature")
+        check(pkgbuild.index_stanzas(b90) == pkgbuild.index_stanzas(blob), "INDEX.90 lists what INDEX does")
         check(open(os.path.join(s1, "repo", "aarch64", "hello-1.1.cpk"), "rb").read().startswith(b"aarch64 hello"),
               "aarch64's package")
         check(open(os.path.join(s1, "releases", "LATEST")).read() == "tag: v1.0.6\npublished: 2026-10-18T12:00:00Z\n",
@@ -117,6 +124,8 @@ def main():
         check(r.returncode == 0, f"re-signing: {r.stderr.strip()}")
         h2 = header(os.path.join(s2, "repo", "x86_64", "INDEX"))
         check(h2["serial"] == "2" and h2["expires"] == "2026-11-24T12:34:56Z", f"the re-signed header {h2}")
+        h2 = header(os.path.join(s2, "repo", "x86_64", "INDEX.90"))
+        check(h2["serial"] == "2" and h2["expires"] == "2027-01-23T12:34:56Z", f"the re-signed INDEX.90 {h2}")
         check(pkgbuild.index_stanzas(open(os.path.join(s2, "repo", "x86_64", "INDEX"), "rb").read()) ==
               pkgbuild.index_stanzas(blob), "the re-signed stanzas")
         check(os.path.exists(os.path.join(s2, "releases", "v1.0.6", "SHA256SUMS")) and

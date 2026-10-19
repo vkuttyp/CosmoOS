@@ -75,7 +75,8 @@ expires: 2026-11-17T12:00:00Z
 ```
 
 `serial` is a positive integer that increases with every publication;
-the times are UTC, `expires` at most 30 days after `published`. The
+the times are UTC, `expires` at most 90 days after `published`
+(`PKG_INDEX_MAX_DAYS`). The
 build's own index (`make ports`, the one in the boot archive and on an
 installed system's disk) has no header, so it stays a pure function of
 the tree and the key.
@@ -156,8 +157,22 @@ an attacker between the system and the server (or a stale mirror) could
 serve an old signed index, holding back a security update. The header
 closes that: an index older (by serial) than the last one accepted is
 refused, and so is one past its expiry, which bounds how long a
-withheld update can go unnoticed to 30 days. The publisher re-signs the
-index weekly with a new serial and expiry even when nothing changed. The
+withheld update can go unnoticed to 90 days. The publisher re-signs the
+index weekly with a new serial and expiry even when nothing changed; the
+bound is what a lapse of that schedule costs (GitHub disables a schedule
+after 60 days without repository activity, so 30 days, the bound before
+v1.0.7, could expire every system's index while nobody watched).
+
+A network repository therefore holds two signings of one index, with one
+serial: `INDEX.90`, valid for 90 days, which `pkg` fetches first, and
+`INDEX`, valid for 30, which `pkg` before v1.0.7 reads (it refuses a
+longer validity) and which `pkg` reads after an HTTP error for
+`INDEX.90` (a publisher before v1.0.7). Both are checked alike, so the
+fallback gives a server nothing it could not have by serving the 30-day
+signing as `INDEX.90`. An expired index is refused with one sentence:
+`pkg: NAME: the index (serial S) expired at T, so the repository must be
+signed again by its publisher before pkg update accepts it; the stored
+index is unchanged`, and `update` exits 3. The
 check is only as good as the clock: a clock before the index's
 publication (an RTC never set) is refused with a message saying to set
 the clock, rather than accepted as "not yet expired".

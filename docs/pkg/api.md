@@ -82,7 +82,7 @@ written by `pkgbuild.py publish`; a file:// repository's may omit it:
 |---|---|
 | `serial` | a positive decimal integer without leading zeros, higher at every publication |
 | `published` | `YYYY-MM-DDTHH:MM:SSZ` (UTC) |
-| `expires` | the same form, after `published` and at most 30 days after it |
+| `expires` | the same form, after `published` and at most 90 days after it |
 
 All three, once each, and nothing else in that stanza; a header key in a
 package stanza is an error.
@@ -132,9 +132,9 @@ print them, `cosmo-fetch`'s own line first where it made the refusal:
 | `INDEX` signed by a key not in the ring | `pkg: NAME: INDEX: unknown signing key ID (not in /etc/pkg/keys)` |
 | `INDEX` changed after signing | `pkg: NAME: INDEX: bad signature (key FILE.pub)` |
 | a replayed index | `pkg: NAME: INDEX: serial S is older than L, the last accepted from this repository (a replayed index)` |
-| an expired index | `pkg: NAME: INDEX: expired at T` |
+| an expired index | `pkg: NAME: the index (serial S) expired at T, so the repository must be signed again by its publisher before pkg update accepts it; the stored index is unchanged` |
 | the clock before the publication | `pkg: NAME: INDEX: the clock (T) is before the index was published (T): set the clock (date -s) and update again` |
-| an index without a header, or valid too long | `pkg: NAME: INDEX: no serial and expiry (refused from a network repository)`; `... valid from T to T, not for at most 30 days` |
+| an index without a header, or valid too long | `pkg: NAME: INDEX: no serial and expiry (refused from a network repository)`; `... valid from T to T, not for at most 90 days` |
 | a package that does not match the index | `pkg: /var/cache/pkg/NAME/FILE: checksum does not match the index (corrupt or replaced)` |
 
 A server that cannot be reached, a name that does not resolve or an HTTP
@@ -208,9 +208,10 @@ default the signing key's own public half): its package stanzas (trailer
 and any header dropped;
 with `--only`, those files' alone, which must all be there) after the
 header `serial: N`, `published: T` (now, or `--published`) and `expires:`
-`D` days later (1 to 30, default 30), signed with `KEY`; it prints
-`PUBLISH FILE: N packages, serial N, expires T`. The release workflow and
-`test-pkg-net` use it.
+`D` days later (1 to 90, default 90), signed with `KEY`; it prints
+`PUBLISH FILE: N packages, serial N, expires T`. The release workflow
+(`scripts/publish-repo.py`) and `test-pkg-net` use it twice per
+repository: `INDEX.90` with `--days 90` and `INDEX` with `--days 30`.
 
 ## Make targets (`pkg/pkg.mk`, `Makefile`)
 

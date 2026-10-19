@@ -109,11 +109,14 @@ repository, or one that has expired:
 
 ```text
 pkg: mine: INDEX: serial 10 is older than 11, the last accepted from this repository (a replayed index)
-pkg: mine: INDEX: expired at 2026-11-17T12:00:00Z
+pkg: mine: the index (serial 12) expired at 2027-01-16T12:00:00Z, so the repository must be signed again by its publisher before pkg update accepts it; the stored index is unchanged
 pkg: mine: INDEX: the clock (2000-01-01T00:05:12Z) is before the index was published (2026-10-18T12:00:00Z): set the clock (date -s) and update again
 ```
 
-The last means the machine's clock is wrong: set it with `date -s
+An expired index is the publisher's to fix: an index is signed for 90
+days and the project's is signed again every week and at every release,
+so an expiry means that has stopped (for the project's repository, open
+an issue). The last means the machine's clock is wrong: set it with `date -s
 '2026-10-18 12:00'` and run `pkg update` again. A refused
 server or index leaves the index `pkg` already had.
 

@@ -601,23 +601,50 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    pre-release. Before `gh release create`, `check-release-version.py
    --notes` requires the notes to say "CosmoOS <version>" and no other
    "CosmoOS X.Y.Z", and checks both sets again.
-6. `repository` (a release, not a pre-release; roadmap 1.1 P6): the
+6. `repository` (roadmap 1.1 P6): for a release, the
    workflow `.github/workflows/repository.yml` downloads the published
    release's set files (not the images), and `scripts/publish-repo.py`
    checks `SHA256SUMS.sig` against `tools/keys/*.pub` and every file
    against `SHA256SUMS`, takes each architecture's package repository
    from the `repo/` of its `boot.tar` (its `INDEX` signed by the release
-   key), makes that a network index (`pkgbuild.py publish`: the serial
-   after the published one, a 30-day expiry) signed with the release key,
-   and writes the site: `repo/ARCH/`, `releases/TAG/` (the newest three
-   releases kept) and `releases/LATEST`. The site is pushed as the one
-   commit of the branch `repo`, which GitHub Pages serves at
-   `https://vkuttyp.github.io/CosmoOS/`. The same workflow runs weekly to
-   sign every `INDEX` again with the next serial and a new expiry (an
-   unchanged repository must not expire under the systems using it), and
-   by hand (`gh workflow run repository.yml -f tag=vX.Y.Z`) to publish a
-   release again. Pages serves the branch `repo`, folder `/` (a
-   repository setting, made once).
+   key), makes that a network index twice (`pkgbuild.py publish`: the
+   serial after the published one; `INDEX.90` with a 90-day expiry, which
+   `pkg` reads from v1.0.7, and `INDEX` with a 30-day one for the systems
+   before it, whose `pkg` refuses a longer validity), each signed with
+   the release key, and writes the site: `repo/ARCH/`, `releases/TAG/`
+   (the newest three releases kept) and `releases/LATEST`. The site is
+   pushed as the one commit of the branch `repo`, which GitHub Pages
+   serves at `https://vkuttyp.github.io/CosmoOS/`. For a pre-release the
+   job publishes nothing new but signs every `INDEX` again, so every tag
+   renews the expiries. The same workflow runs weekly to sign every
+   `INDEX` again with the next serial and new expiries (an unchanged
+   repository must not expire under the systems using it), and by hand
+   (`gh workflow run repository.yml -f tag=vX.Y.Z`) to publish a release
+   again, or with no tag to sign again now. Pages serves the branch
+   `repo`, folder `/` (a repository setting, made once).
+
+**The repository's expiry.** GitHub disables a scheduled workflow after
+60 days without activity in the repository. `INDEX.90` then expires 90
+days after its last signing and `INDEX` 30 days after it, and every
+installed system's `pkg update` refuses the expired index with one
+sentence naming its expiry and serial (the stored index is kept). Every
+release and pre-release signs again by itself; the checklist below
+covers the quiet months between them.
+
+**The release checklist.**
+
+1. The repository job: if nothing has been pushed for a month, or its
+   last scheduled run is older than a week (`gh run list -w
+   repository.yml -L 3`), run it by hand (`gh workflow run
+   repository.yml`) and re-enable the schedule in the Actions tab if
+   GitHub disabled it.
+2. CI green on main's head; `docs/releases/<tag>.md` written, saying
+   "CosmoOS <version>".
+3. An annotated tag on that commit (`git tag -a vX.Y.Z -m ...`; a
+   lightweight one is refused by `scripts/release-tag.sh`), pushed.
+4. When the workflow ends: the release's assets, the site's
+   `releases/LATEST` and both indexes' new serial
+   (`https://vkuttyp.github.io/CosmoOS/repo/<arch>/INDEX.90`).
 
 A release (a tag without a hyphen) must point at a commit on main (job
 `guard`); a pre-release may be any head. The key itself is a repository

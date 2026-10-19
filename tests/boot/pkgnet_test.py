@@ -9,9 +9,10 @@ the installed system then boots on QEMU user networking, and this harness
 serves package repositories over HTTPS from 127.0.0.1 (the guest's
 10.0.2.2) with test certificates made for the run (tests/boot/tlstest.py).
 The test CA is appended to the installed bundle, /etc/ssl/certs/
-ca-certificates.crt, for this boot only. Every served INDEX is the build's
-(--repo, signed with --sign-key) made into a network one by
-`pkgbuild.py publish` (a serial, a publication time, an expiry).
+ca-certificates.crt, for this boot only. Every served INDEX.90 and INDEX is
+the build's INDEX (--repo, signed with --sign-key) made into a network one
+by `pkgbuild.py publish` (a serial, a publication time, an expiry), as
+scripts/publish-repo.py does.
 
   c. The repository behind an untrusted CA's certificate, an expired one
      and one for another name: `pkg update` exits 3, cosmo-fetch names the
@@ -25,7 +26,9 @@ ca-certificates.crt, for this boot only. Every served INDEX is the build's
      second repository nothing answers for, `pkg update` reports it and
      exits 0.
   d. The serial-10 index served again (a replay) is refused, and so is a
-     serial-12 index that expired; the stored index is still serial 11.
+     serial-12 index that expired, with one sentence naming its expiry and
+     serial; the stored index is still serial 11. Then a server with INDEX
+     alone (a publisher before v1.0.7) is read after INDEX.90's 404.
   b. A repository whose hello-1.1.cpk has one byte changed (its index
      intact) is refused at install, hello 1.1 still verified; one whose
      INDEX is signed by another key is refused at update.
@@ -80,25 +83,32 @@ class Repos:
             f.write(modsign.secret_to_public(modsign.read_hex_key(self.key, "secret key")).hex() + "\n")
         return p
 
-    def publish(self, name, serial, only, key=None, published=None, days=30):
-        """`key` signs it instead of the build's; the input is still the
-        build's INDEX, checked against the build key's public half."""
+    def publish(self, name, serial, only, key=None, published=None, days=90, old_only=False):
+        """As scripts/publish-repo.py does: INDEX.90 valid for `days` and
+        INDEX for at most 30 of them, one serial; with `old_only`, INDEX
+        alone (a publisher before v1.0.7). `key` signs them instead of the
+        build's; the input is still the build's INDEX, checked against the
+        build key's public half."""
         d = os.path.join(self.www, name)
         os.makedirs(d, exist_ok=True)
         for f in only:
             shutil.copy(os.path.join(self.built, f), os.path.join(d, f))
-        argv = [sys.executable, PKGBUILD, "publish", "--index", os.path.join(self.built, "INDEX"),
-                "--sign-key", key or self.key, "--serial", str(serial), "--days", str(days),
-                "--out", os.path.join(d, "INDEX")]
-        if published is not None:
-            argv += ["--published", utc(published)]
-        if key:
-            argv += ["--input-pub", self.build_pub()]
-        for f in only:
-            argv += ["--only", f]
-        r = subprocess.run(argv, capture_output=True, text=True)
-        if r.returncode != 0:
-            raise Fail(f"pkgbuild.py publish: {r.stderr.strip()[-400:]}")
+        if old_only and os.path.exists(os.path.join(d, "INDEX.90")):
+            os.remove(os.path.join(d, "INDEX.90"))
+        for out, valid in ((("INDEX", min(days, 30)),) if old_only else
+                           (("INDEX.90", days), ("INDEX", min(days, 30)))):
+            argv = [sys.executable, PKGBUILD, "publish", "--index", os.path.join(self.built, "INDEX"),
+                    "--sign-key", key or self.key, "--serial", str(serial), "--days", str(valid),
+                    "--out", os.path.join(d, out)]
+            if published is not None:
+                argv += ["--published", utc(published)]
+            if key:
+                argv += ["--input-pub", self.build_pub()]
+            for f in only:
+                argv += ["--only", f]
+            r = subprocess.run(argv, capture_output=True, text=True)
+            if r.returncode != 0:
+                raise Fail(f"pkgbuild.py publish: {r.stderr.strip()[-400:]}")
         return d
 
 
@@ -162,7 +172,9 @@ def stage_pkgnet(args, results, inst):
         conf(b, f"test {url}/repo")
         out = b.status("priv -d sys_admin pkg update", "upd")
         need(out, r"^upd=0$", "pkg update without sys_admin")
-        need(out, r"^pkg: test: serial 10, published \S+, expires \S+$", "the accepted index's header")
+        m = need(out, r"^pkg: test: serial 10, published (\S+), expires (\S+)$", "the accepted index's header")
+        if m.group(2) != utc(now - DAY + 90 * DAY):
+            raise Fail(f"the accepted index expires {m.group(2)}, not INDEX.90's {utc(now - DAY + 90 * DAY)}")
         need(out, r"^pkg: index updated: 1 packages from 1 repository$", "pkg update's count")
         out = b.status("priv -d sys_admin pkg search hello && priv -d sys_admin pkg info hello", "q")
         need(out, r"^q=0$", "pkg search and info without sys_admin")
@@ -182,10 +194,10 @@ def stage_pkgnet(args, results, inst):
         need(out, r"^pkg: fetching hello-1\.0\.cpk from test$", "the package fetched")
         need(out, r"^pkg: installing hello-1\.0 \(\d+ files?\)$", "hello 1.0 installed")
         need(out, r"^hello, world \(hello 1\.0\)$", "hello 1.0 runs")
-        if good.paths() != ["/repo/INDEX", "/repo/hello-1.0.cpk"]:
-            raise Fail(f"the server saw {good.paths()}, expected INDEX then hello-1.0.cpk")
+        if good.paths() != ["/repo/INDEX.90", "/repo/hello-1.0.cpk"]:
+            raise Fail(f"the server saw {good.paths()}, expected INDEX.90 then hello-1.0.cpk")
         results.append("a. update, search and info without sys_admin, install refused without it; install -n fetched nothing; "
-                       "pkg update && pkg install hello fetched INDEX (serial 10) and hello-1.0.cpk, "
+                       "pkg update && pkg install hello fetched INDEX.90 (serial 10, 90 days) and hello-1.0.cpk, "
                        "'hello, world (hello 1.0)'")
 
         # f. A newer index: upgrade.
@@ -216,11 +228,27 @@ def stage_pkgnet(args, results, inst):
         repos.publish("repo", 12, ["hello-1.0.cpk", "hello-1.1.cpk"], published=now - 40 * DAY, days=7)
         out = b.status("pkg update", "upd")
         need(out, r"^upd=3$", "an expired serial-12 index (exit 3)")
-        m = need(out, r"^pkg: test: INDEX: expired at (\S+)$", "the expired index's refusal")
-        out = b.status("pkg info hello", "info")
+        m = need(out, r"^pkg: test: the index \(serial 12\) expired at (\S+), so the repository must be signed "
+                      r"again by its publisher before pkg update accepts it; the stored index is unchanged$",
+                 "the expired index's refusal, one sentence")
+        if m.group(1) != utc(now - 40 * DAY + 7 * DAY):
+            raise Fail(f"the refusal names {m.group(1)}, not the expiry {utc(now - 40 * DAY + 7 * DAY)}")
+        out = b.status("pkg info hello && cat /var/lib/pkg/repos/test/INDEX | head -1", "info")
         need(out, r"^available: 1\.1 \(hello-1\.1\.cpk, \d+ bytes\)$", "the stored index after the refusals")
+        need(out, r"^serial: 11$", "the stored index's serial after the refusals")
         results.append(f"d. refused: the serial-10 index replayed after 11, a serial-12 index expired at "
-                       f"{m.group(1)}; the stored index stayed serial 11")
+                       f"{m.group(1)} (the one-sentence refusal); the stored index stayed serial 11")
+        # A publisher before v1.0.7: INDEX alone, read when INDEX.90 is not there.
+        repos.publish("repo", 12, ["hello-1.0.cpk", "hello-1.1.cpk"], published=now - DAY, old_only=True)
+        del good.requests[:]
+        out = b.status("pkg update", "upd")
+        need(out, r"^upd=0$", "pkg update from INDEX alone")
+        need(out, r"^pkg: test: no INDEX\.90; reading INDEX$", "the fallback named")
+        need(out, rf"^pkg: test: serial 12, published \S+, expires {re.escape(utc(now - DAY + 30 * DAY))}$",
+             "INDEX's 30-day header accepted")
+        if good.paths() != ["/repo/INDEX.90", "/repo/INDEX"]:
+            raise Fail(f"the server saw {good.paths()}, expected INDEX.90 (missing) then INDEX")
+        results.append("d. with INDEX alone on the server (a publisher before v1.0.7) pkg read it after INDEX.90's 404")
 
         # b. A changed package and an index signed by another key.
         tam = repos.publish("tam", 1, ["hello-1.1.cpk"], published=now - DAY)

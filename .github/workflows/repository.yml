@@ -4,15 +4,23 @@
 # and this job pushes it as the one commit of the `repo` branch, which
 # Pages serves at https://vkuttyp.github.io/CosmoOS/:
 #
-#   repo/ARCH/INDEX, *.cpk    what an installed system's pkg update reads
+#   repo/ARCH/INDEX.90        what an installed system's pkg update reads
+#                             (from v1.0.7), signed for 90 days
+#   repo/ARCH/INDEX, *.cpk    INDEX for the systems before v1.0.7, signed
+#                             for 30 days; the packages
 #   releases/TAG/...          what cosmo-upgrade --fetch TAG reads
 #   releases/LATEST           what cosmo-upgrade --check reads
 #
 # Triggers:
-# - the release workflow, once a release (not a pre-release) is published:
-#   its repository and set, LATEST pointing at it;
-# - weekly: every INDEX signed again with the next serial and a 30-day
-#   expiry (PK10), so installed systems keep accepting an unchanged one;
+# - the release workflow, once a release is published: its repository
+#   and set, LATEST pointing at it; for a pre-release, every INDEX signed
+#   again (an empty tag) and nothing else;
+# - weekly: every INDEX signed again with the next serial and new expiries
+#   (PK10), so installed systems keep accepting an unchanged one. GitHub
+#   disables a schedule after 60 days without repository activity, and
+#   INDEX.90 then lasts 90 days from its last signing: dispatch this job by
+#   hand before a release if the repository has been quiet (the release
+#   checklist, docs/development.md, "Releases");
 # - by hand (workflow_dispatch) with a release tag: publish it again, or
 #   without one: the weekly step now.
 #
@@ -26,7 +34,8 @@ on:
     inputs:
       tag:
         type: string
-        required: true
+        required: false
+        default: ''
     secrets:
       COSMOOS_RELEASE_KEY:
         required: true
