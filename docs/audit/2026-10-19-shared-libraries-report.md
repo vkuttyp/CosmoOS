@@ -124,3 +124,34 @@ only, and the executable's on both (an 8 KiB relocated table makes its
 RELRO at least a page).
 
 ## Validation
+
+The device-lifecycle matrix once per PR, both architectures, on base
+`f7107c2c` (seconds; every step exit 0 unless noted). The branch was then
+rebased onto main `fe6d9830` (#412 and #413 merged) with conflicts in the
+roadmap and history only: PR 3 is `2cf4a3d4`, PR 4 `f4fbd48c`, PR 5
+`ad5d701e` and the documentation after it.
+
+| Step | PR 3 `2b7e1867` x86-64 / AArch64 | PR 4 `65db8911` | PR 5 `c3addd75` |
+|---|---|---|---|
+| `host-test`, `fuzz`, `analyze` | 66, 20, 236 / 66, 19, 212 | 64, 18, 202 / 65, 17, 211 | 66, 21, 255 / 64, 17, 205 |
+| debug `test` at `QEMU_SMP=1`, `2`, `4` (network harness in each) | 324, 159, 159 / 344, 160, 156 | 359, 154, 153 / 376, 161, 169 | 146, 154, 154 (a) / 162 (b), 159, 166 |
+| `test-smp2`, `test-chaos`, `test-harness-retry` | 158, 179, 188 / 171, 190, 190 | 153, 156, 156 / 153, 168, 161 | 167, 162, 159 / 161, 160, 172 |
+| `BUILD=release all test` | 44 / 44 | 21 / 26 | 21 / 24 |
+| `BUILD=release` extra targets | `test-install` 28, `test-upgrade` 98, `test-busybox` 51 / 45, 123, 56 | `test-busybox` 114 / 140 | `test-pkg-net` 61, `test-install` 29 / 69, 45 |
+
+PR 5's first run stopped at the debug build: `ports/libdemo/data/libdemo.so`,
+the fixture's placeholder, had been kept out of the commit by
+`.gitignore`'s `*.so`; it is `libdemo-so.txt` now. The second run had two
+failures, each in a kernel self-test that PR 5 does not touch (the
+kernel is PR 4's), while P3's probes were building and booting beside it:
+
+- (a) x86-64 `QEMU_SMP=4`: `SELFTEST: timer ... FAIL: the tick count
+  lagged the clock by more than half the window (84 ms)`;
+- (b) AArch64 `QEMU_SMP=1`: `signal-stop` check 9, the child exiting 7
+  before its parent's 9, the mechanism recorded on 2026-10-09.
+
+Both are in `docs/testing/flakes.md` (a third and a second sighting), and
+both boots passed when re-run on `c3addd75` (146.1 s, 161.2 s). `make
+test-busybox` was re-run with `dynhello`/`dltest` added to it (`65db8911`):
+PASS on both, `dynamic programs: dynhello and dltest (dlopen) passed under
+the dynamic shell`.
