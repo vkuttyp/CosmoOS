@@ -1970,6 +1970,11 @@ due, under the keep / restate / widen-and-label rule; it is main's, not
 P4's (P4 adds nothing to that boot's self-tests), and is left to the
 owner. The job was rerun.
 
+**Third sighting, 2026-10-19:** CI on #414 again (run 39268982301, head
+`c19b5712`), the same job, `timed out after 180s` after every self-test;
+its other debug boots took 213.7-235.4 s (main's 200.6-220.1 s), slow
+again. Rerun.
+
 ## An aarch64 boot that reached the self-tests and no further
 
 **2026-09-20, `0814e79`, the same one-document branch** (`make
@@ -4546,4 +4551,17 @@ personality's `writev` (`rw_vec`, `compat/linux/syscalls.c`) makes one
 logged from another CPU, falls between them. Linux makes a `writev` to a
 terminal one write. Mechanism established from the log and the code; not
 P4's (inventory section 19). The job was rerun.
+
+## The firmware stalled on the reset in `test-net-login`'s reboot stage, 2026-10-19
+
+CI on #414 (run 39268982301, head `c19b5712`), `net-login test (x86_64)`:
+`test-net-login: FAIL: reboot: no a second kernel banner after reboot
+before the deadline`. The serial log (artifact `test-net-login-x86_64`,
+`boot-reboot.log`) ends with `reboot: restart through the ACPI reset
+register (port 0xcf9, value 0xf)` and then only the firmware's screen
+clears, five times: OVMF restarted and never reached `BdsDxe` to load the
+loader. The same handover stall as "firmware handover in
+`test-harness-retry`" above, here on a guest-initiated reset inside one
+QEMU process, where the harness has no retry. Recorded, not attributed;
+rerun.
 
