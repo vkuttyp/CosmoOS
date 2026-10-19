@@ -2699,6 +2699,14 @@ static int load_bitmap(struct cfs *fs)
     if (rc)
         return rc;
     fs->free_blocks = free;
+    /* The superblock's count is the bitmap's as that commit wrote it, so
+     * the two are compared now, before the replay below frees the blocks
+     * the commit released after its root was durable: compared after it,
+     * every mount following an unmount warned by the last commit's frees
+     * (4-7 blocks, roadmap 1.1 P3). */
+    if (fs->free_blocks != fs->sb.free_blocks)
+        kwarn("cosmofs: free block count %llu differs from the superblock's %llu; using the bitmap",
+              (unsigned long long)fs->free_blocks, (unsigned long long)fs->sb.free_blocks);
 
     /*
      * Finish what the last commit started. It cleared these blocks' bits
@@ -2716,10 +2724,6 @@ static int load_bitmap(struct cfs *fs)
     rc = freelog_replay(fs);
     if (rc)
         return rc;
-
-    if (fs->free_blocks != fs->sb.free_blocks)
-        kwarn("cosmofs: free block count %llu differs from the superblock's %llu; using the bitmap",
-              (unsigned long long)fs->free_blocks, (unsigned long long)fs->sb.free_blocks);
     return 0;
 }
 
