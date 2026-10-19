@@ -87,6 +87,26 @@ set under the release's names; `--check --fetch` fetches and checks
 without writing. A transfer that is cut resumes where it stopped when
 the command runs again.
 
+**From v1.0.6 to v1.0.7 or later, run `--fetch` twice.** The running
+`cosmo-upgrade` brings the root to the new release, and v1.0.6's does not
+know `/lib`, which v1.0.7 adds (`libc.so` and the dynamic linker,
+`ld-musl-ARCH.so.1`): the first run installs everything else, the new
+`cosmo-upgrade` among it. The second run is the new one; it finds the
+set already current and finishes, adding `/lib`:
+
+```text
+cosmo$ cosmo-upgrade --fetch v1.0.7
+...
+cosmo-upgrade: upgraded; reboot to run it, then pkg update && pkg upgrade
+cosmo$ cosmo-upgrade --fetch v1.0.7
+...
+cosmo-upgrade: the boot set on nvme0n1 is already this one: finishing
+cosmo-upgrade: upgraded; reboot to run it, then pkg update && pkg upgrade
+```
+
+Without the second run the system works, but `/bin/busybox.dyn` and the
+other dynamically linked programs fail to start (no interpreter).
+
 **From v1.0.5 and earlier**, the system has no `cosmo-fetch` and its
 `cosmo-upgrade` cannot fetch. Fetch the new release's package with
 `wget`, check it, and run the programs it carries; `COSMO_FETCH` tells

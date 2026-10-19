@@ -1467,3 +1467,9 @@ none is needed by its acceptance test.
   `/etc/pkg/provides` does the same.
 - glibc's dynamic linker has not been tried, and there is no vDSO
   (`AT_SYSINFO_EHDR`).
+- `cosmo-upgrade --fetch` brings the root to the new release with the
+  running binary's rules, so a release that adds a directory the old one
+  does not know (v1.0.7's `lib/`) needs a second run, by the new binary,
+  to finish (`docs/guide/upgrading.md`). Running the fetched release's
+  own `cosmo-upgrade` from its signed package would remove that step; the
+  directory path (`test-upgrade`) already does.
