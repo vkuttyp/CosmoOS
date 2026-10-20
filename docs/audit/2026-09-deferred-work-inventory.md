@@ -119,7 +119,7 @@ manager -- the tooling does not), eBPF, advanced graphics, a desktop
 environment, Wayland, Docker or Kubernetes compatibility, full Linux
 compatibility, NUMA, live migration, nested virtualization. USB and
 AHCI are the two entries from that list now built.
-*2026-10-20: open; [backlog](../backlog.md) DRV-16, BLK-8, CFS-16, SEC-11, OBS-5, LX-11, MEM-5, VIRT-5, VIRT-6.*
+*2026-10-20: open; [backlog](../backlog.md) DRV-16, BLK-8, CFS-16, SEC-11, OBS-5, LX-11, MEM-5, VIRT-5, VIRT-9.*
 
 ### 2.2 Memory (constitution §13-15; Prompt #2 §8)
 
@@ -317,7 +317,7 @@ read undo).*
   recorded name with its vnode (invariant **P31**). Measured first by
   `tools/dirfd-probe.py`: all nine `*at` calls and `fchdir` answered
   `ENOSYS` to a real descriptor, both architectures. All three are now
-  built. *2026-10-20: open; [backlog](../backlog.md) LX-7, LX-8, LX-19.*
+  built. *2026-10-20: everything else here is built; still open: `rseq`, netlink and `setsockopt`; [backlog](../backlog.md) LX-19, LX-7, LX-8.*
 - `/proc` and `/sys` compatibility for Linux binaries (the native `/proc`
   holds process facts only); running a real distribution userland
   (phase 4). *2026-10-20: open; [backlog](../backlog.md) LX-11.*

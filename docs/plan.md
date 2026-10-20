@@ -302,7 +302,7 @@ Sources: inventory §§1.2 and 2.2, [memory design](kernel/memory/design.md),
 and the [mprotect report](audit/next-subsystem-mprotect.md).
 
 - [ ] **Implementation — ASLR/KASLR.** Define randomized executable, stack,
-  heap and kernel placement together with an adequate entropy strategy. *2026-10-20: open; [backlog](backlog.md) BOOT-1.*
+  heap and kernel placement together with an adequate entropy strategy. *2026-10-20: open; [backlog](backlog.md) BOOT-1, SEC-5.*
 - [ ] **Conditional/deferred — user huge pages.** Extend mapping, fault,
   protection and teardown semantics with tests for mixed page sizes. *2026-10-20: open; [backlog](backlog.md) MEM-4.*
 - [ ] **Conditional/deferred — NUMA.** Add topology discovery, node-aware
@@ -534,7 +534,7 @@ Sources: inventory §§1.2, 1.3 and 2.7 and
 - [ ] **Conditional/deferred — device passthrough.** Establish DMA and interrupt
   isolation, assignment lifetime and reset behavior on appropriate hardware. *2026-10-20: open; [backlog](backlog.md) VIRT-6.*
 - [ ] **Conditional/deferred — nested virtualization.** Requires a separately
-  scoped guest/host virtualization model; it is outside the current milestone. *2026-10-20: open; [backlog](backlog.md) VIRT-6.*
+  scoped guest/host virtualization model; it is outside the current milestone. *2026-10-20: open; [backlog](backlog.md) VIRT-9.*
 
 ## 10. Security and isolation
 
@@ -690,7 +690,7 @@ Sources: inventory §§1.3, 1.4, 2.11, 3 and 8 and [device design](kernel/device
   for known device ids. *2026-10-20: open; [backlog](backlog.md) DRV-4.*
 - [ ] **Device lifecycle — remaining §8 items.** virtio-blk timeout versus
   late submission, virtio-net probe faults and RX before registration,
-  USB storage recovery-state propagation (inventory §8). *2026-10-20: open; [backlog](backlog.md) BLK-1, BLK-2, NET-3.*
+  USB storage recovery-state propagation (inventory §8). *2026-10-20: open; [backlog](backlog.md) BLK-1, BLK-2, NET-3, TEST-17.*
 
 - [ ] **Implementation/validation — non-coherent DMA.** Audit device-written
   rings/buffers and submission synchronization in VirtIO, e1000e, AHCI and xHCI.
@@ -706,7 +706,7 @@ Sources: inventory §§1.3, 1.4, 2.11, 3 and 8 and [device design](kernel/device
   SMMUs additionally need the appropriate concatenated level-1 root layout. *2026-10-20: open; [backlog](backlog.md) DRV-8.*
 - [ ] **Implementation/validation — AArch64 portability.** Address host device-tree
   boot support, PSCI variations, UAO/E0PD/BTI/PAC and pseudo-NMI delivery as
-  separately scoped architecture work. *2026-10-20: open; [backlog](backlog.md) DRV-5, DRV-9, SEC-7.*
+  separately scoped architecture work. *2026-10-20: open; [backlog](backlog.md) DRV-5, DRV-9, SEC-7, TEST-11.*
 - [ ] **Validation/implementation — asynchronous hardware errors.** Use RAS
   records for causal attribution and decide whether EL1 should unmask asynchronous
   aborts. Corrected-error handling is already built; delivery context alone cannot
@@ -749,12 +749,12 @@ their deferred status here; this section does not schedule them for implementati
 |---|---|
 | Advanced graphics, desktop environment and Wayland | Require a display/input architecture and a concrete product scope beyond the existing console; GPU work is in §13. *2026-10-20: open; [backlog](backlog.md) DRV-16.* |
 | Distributed filesystem | A separate consistency, failure and network-storage project; local storage follow-ups are in §6. *2026-10-20: open; [backlog](backlog.md) CFS-16.* |
-| ~~Full Linux compatibility~~ | Pursue specific applications and semantics incrementally through §8; do not promise arbitrary distribution compatibility from syscall counts. *2026-10-20: obsolete: policy statement, not a deliverable; incremental Linux compatibility tracked in §8 (P045).* |
+| ~~Full Linux compatibility~~ | Pursue specific applications and semantics incrementally through §8; do not promise arbitrary distribution compatibility from syscall counts. *2026-10-20: obsolete: policy statement, not a deliverable; incremental Linux compatibility is §8's Linux-environment item (backlog LX-11).* |
 | Docker/Kubernetes compatibility | Requires much broader Linux and container semantics than current primitives/tooling; §14 is a smaller prerequisite. *2026-10-20: open; [backlog](backlog.md) SEC-11.* |
 | Full NVMe feature set | Extend the functioning driver for demonstrated device/workload requirements, rather than implementing the entire specification in advance. *2026-10-20: open; [backlog](backlog.md) BLK-8.* |
 | eBPF and eBPF-like tracing | Needs a security and lifetime model; tracing infrastructure in §11 is a prerequisite. *2026-10-20: open; [backlog](backlog.md) OBS-5.* |
 | NUMA, huge pages, memory compression/deduplication | Memory projects in §5 remain deferred until a workload and test infrastructure justify them. *2026-10-20: open; [backlog](backlog.md) MEM-4, MEM-5, MEM-6.* |
-| Live migration and nested virtualization | Require the state/UAPI and execution-model work in §9. *2026-10-20: open; [backlog](backlog.md) VIRT-5, VIRT-6.* |
+| Live migration and nested virtualization | Require the state/UAPI and execution-model work in §9. *2026-10-20: open; [backlog](backlog.md) VIRT-5, VIRT-9.* |
 | Device multiqueue, TSO/LRO, jumbo frames and zero-copy sockets | The inventory requires measured benefit and notes the limits of the current QEMU network backend; see §7. *2026-10-20: open; [backlog](backlog.md) NET-19.* |
 | AHCI NCQ | Existing measurements reached about 87% of NVMe aggregate throughput with four streams; revisit with evidence from a real disk. *2026-10-20: open; [backlog](backlog.md) BLK-6.* |
 | e1000e checksum offload | Prior measurement suggested roughly a 2% benefit; establish a worthwhile workload before adding complexity. *2026-10-20: open; [backlog](backlog.md) NET-22.* |

@@ -32,7 +32,7 @@ than one unit.
 | | correctness | security | usability | nice-to-have | total |
 |---|---|---|---|---|---|
 | Block devices | 3 | 0 | 2 | 3 | 8 |
-| Boot chain and verified boot | 0 | 5 | 1 | 2 | 8 |
+| Boot chain and verified boot | 0 | 5 | 2 | 1 | 8 |
 | Build and tooling | 0 | 2 | 0 | 4 | 6 |
 | cosmofs and storage | 6 | 1 | 4 | 5 | 16 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
@@ -49,8 +49,8 @@ than one unit.
 | Testing and CI | 8 | 0 | 0 | 9 | 17 |
 | Commands | 0 | 0 | 4 | 1 | 5 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
-| Virtualisation | 3 | 0 | 0 | 5 | 8 |
-| **all** | **41** | **21** | **45** | **88** | **195** |
+| Virtualisation | 3 | 0 | 0 | 6 | 9 |
+| **all** | **41** | **21** | **46** | **88** | **196** |
 
 ## Block devices
 
@@ -71,7 +71,7 @@ than one unit.
 - **BOOT-4** security, L. The installed root filesystem is not verified (no dm-verity-like tree); verification ends at the boot archive.
 - **BOOT-5** security, M. No anti-rollback: any boot manifest or module ever signed by a trusted key verifies forever; needs signature versions and a recovery-safe policy.
 - **BOOT-6** usability, S. init does not wait for a `root=` disk that registers late (USB storage); it stays on the live root.
-- **BOOT-7** nice-to-have, S. The loader allocates below 4 GiB only (`LOADER_ALLOC_LIMIT`); a machine with all RAM above cannot boot.
+- **BOOT-7** usability, S. The loader allocates below 4 GiB only (`LOADER_ALLOC_LIMIT`); a machine with all RAM above cannot boot.
 - **BOOT-8** nice-to-have, S. `direct_map_size` covers the RSDP's tables, not those reached through the FADT (DSDT, FACS).
 
 ## Build and tooling
@@ -194,9 +194,9 @@ than one unit.
 - **NET-16** nice-to-have, M. Filter: per-interface host chains, rate-limit and log targets, full TCP state tracking.
 - **NET-17** nice-to-have, L. IPv6 NAT and DNAT, hairpin NAT, an L2 bridge, per-guest limits beyond the NAT quota.
 - **NET-18** nice-to-have, L. A DHCP server, caching resolver, DHCPv6, DNS over TCP, DNSSEC.
-- **NET-19** nice-to-have, L. Faster data paths (zero-copy, multiqueue, TSO/LRO, jumbo, NAPI, moderation), only with measured benefit.
+- **NET-19** nice-to-have, L. Faster data paths (zero-copy, multiqueue, TSO/LRO, jumbo, NAPI, interrupt moderation, busy polling), only with measured benefit.
 - **NET-20** nice-to-have, M. Routing and protocol lookups on the epoch read side (constitution §22).
-- **NET-21** nice-to-have, S. Small forwarding and listing gaps: route tie between two interfaces, UDP length mismatch relayed, IP id/options rebuilt, IPv6 neighbours unlisted, `SIOCSIFFLAGS` only `UP`, `/proc/net` uid/inode 0.
+- **NET-21** nice-to-have, S. Small forwarding and listing gaps: route tie between two interfaces, UDP length mismatch relayed, IP id/options rebuilt, IPv6 neighbours unlisted, `SIOCSIFFLAGS` only `UP`, `/proc/net` uid/inode 0 and UDP receive queues in datagrams, not bytes.
 - **NET-22** nice-to-have, S. e1000e checksum offload (measured at about 2 %).
 
 ## Observability
@@ -206,8 +206,8 @@ than one unit.
 - **OBS-3** nice-to-have, M. Kernel-side symbolisation and crash-state preservation (host-side resolution exists).
 - **OBS-4** nice-to-have, M. Per-CPU structured tracing and performance counters, and operator tools over them (`ktrace`, `kstat`, `cosmo-prof`).
 - **OBS-5** nice-to-have, L. eBPF-like tracing (verification, isolation, attachment lifetime).
-- **OBS-6** nice-to-have, M. Benchmarks for kmalloc, page faults, IPI round trip, fsync, metadata and VM exits, and baseline-versus-change tracking.
-- **OBS-7** nice-to-have, S. `/proc` fidelity: `environ` from exec's record not memory, `cpuinfo` the boot CPU's for all, no user/system CPU split.
+- **OBS-6** nice-to-have, M. Benchmarks for kmalloc, page faults, `mmap`, IPI round trip, fsync, metadata and VM exits, and baseline-versus-change tracking.
+- **OBS-7** nice-to-have, S. `/proc` fidelity: `environ` from exec's record not memory, `cpuinfo` the boot CPU's for all with no `flags`/`Features` or BogoMIPS, no user/system CPU split.
 
 ## Packages and upgrade
 
@@ -269,7 +269,7 @@ than one unit.
 - **TEST-14** nice-to-have, M. The slirp defect behind the network harness's retry (outside this kernel).
 - **TEST-15** nice-to-have, M. The debug suite assumes QEMU's machine (`pci`, `net-firewall`, `net-tap-release-order`, `blk-submit-unregister` fail on Parallels).
 - **TEST-16** nice-to-have, M. Paths proved by review only: retained-DMA sites, `nvme_probe` after `CC.EN`, the usb-hub worker, CF17's other sites, cosmofs chain cycles.
-- **TEST-17** nice-to-have, S. Untested refusals and paths: `switch_root`, partitions removed with bios in flight, halt, `cosmo-upgrade` rerun after `--stop-after=set`, virtio-net probe faults.
+- **TEST-17** nice-to-have, S. Untested refusals and paths: `switch_root`, partitions removed with bios in flight, halt, `cosmo-upgrade` rerun after `--stop-after=set` and an interruption inside a FAT-chain write, virtio-net probe faults.
 
 ## Commands
 
@@ -285,7 +285,7 @@ than one unit.
 - **VFS-2** correctness, S. `chown`/`chmod` on procfs or devfs changes only the cached vnode.
 - **VFS-3** correctness, M. A read whose copy-out faults loses what the object took from its source (pipes, console, pty), except signalfd.
 - **VFS-4** usability, M. No hard links (`link`/`linkat`).
-- **VFS-5** usability, M. Mount options: `mount(2)` takes `MS_RDONLY` only (no remount, bind, move, `nosuid`...) and no option string; no overlay.
+- **VFS-5** usability, M. Mount options: `mount(2)` takes `MS_RDONLY` only (no remount, bind, move, `nosuid`...) and no option string; `umount2` refuses `MNT_DETACH`, `MNT_EXPIRE`, `UMOUNT_NOFOLLOW`; no overlay.
 - **VFS-6** usability, S. The native ABI has no `chmod`, `chown`, `chroot`, `utimes` or `umask`; the Linux umask is not applied to native creation.
 - **VFS-7** usability, M. Devices have no numbers (`st_rdev` 0), so `ps` cannot name a terminal and `lsblk` has no `MAJ:MIN`.
 - **VFS-8** usability, S. No `/proc/filesystems` (BusyBox `mount` without `-t` fails).
@@ -300,6 +300,7 @@ than one unit.
 - **VIRT-3** correctness, M. The device models are tested with one guest vCPU only.
 - **VIRT-4** nice-to-have, L. Dirty tracking and ballooning.
 - **VIRT-5** nice-to-have, L. Full vCPU and device state in the UAPI, then VM snapshots and live migration.
-- **VIRT-6** nice-to-have, L. Device passthrough; nested virtualisation.
+- **VIRT-6** nice-to-have, L. Device passthrough, with IOMMU DMA and interrupt isolation, assignment lifetime and reset.
+- **VIRT-9** nice-to-have, L. Nested virtualisation (after the VM state UAPI, VIRT-5).
 - **VIRT-7** nice-to-have, M. VM operations as submittable async-I/O.
 - **VIRT-8** nice-to-have, M. vGIC on GICv2 hosts.
