@@ -1,5 +1,12 @@
 # After 1.0: remaining work
 
+> **2026-10-20: this plan is the historical record.** Its open items,
+> with the inventory's, are consolidated in [`backlog.md`](backlog.md), one
+> line each with a severity and a size; that is the working list. Every
+> item here carries its status as of 2026-10-20: done (with the PR),
+> superseded, obsolete (why), or open with the backlog line that holds it;
+> done and obsolete items are struck through.
+
 > **This is post-1.0 work.** CosmoOS 1.0 is the
 > [1.0 roadmap](roadmap-1.0.md) completed: milestones M1-M6 (sound
 > randomness, a persistent installed system, the real process model,
@@ -67,10 +74,10 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
 - [ ] **Implementation/validation — NMI/#MC writers and cross-CPU waits.**
   Establish safe validator behavior for general NMI/machine-check writer
   entry and cross-CPU raw-lock wait cycles. Existing same-CPU re-entry
-  fail-stop behavior and bounded NMI reader tests cover narrower contracts.
+  fail-stop behavior and bounded NMI reader tests cover narrower contracts. *2026-10-20: open; [backlog](backlog.md) LOCK-1.*
 - [ ] **Implementation — global held-state snapshots.** Provide a defined
   consistency model across CPU spinlock stacks and thread mutex stacks;
-  separately consistent snapshots do not form one simultaneous global view.
+  separately consistent snapshots do not form one simultaneous global view. *2026-10-20: open; [backlog](backlog.md) LOCK-2.*
 - [x] **Implementation — callback-wait dependencies.** Extend coverage beyond
   locks learned from observed active timer callbacks, including other
   synchronous callback waits and paths not yet observed.
@@ -126,14 +133,14 @@ Sources: [inventory §7](audit/2026-09-deferred-work-inventory.md#7-lockdep-mile
   `arch_irq_disable` are outside this item. See the [raw-pairing report](audit/2026-10-06-lockdep-irq-pairing-report.md).
 - [ ] **Validation — interrupt and callback interleavings.** Broaden actual
   kernel entry/concurrency coverage beyond host graph models, publication
-  tests, writer/IPI regressions and bounded x86 NMI reader tests.
+  tests, writer/IPI regressions and bounded x86 NMI reader tests. *2026-10-20: open; [backlog](backlog.md) LOCK-3.*
 - [ ] **Validation — performance and scaling.** Measure broader spin/mutex
   contention, priority-inheritance waits, first-acquisition graph-size
   sweeps, worst-case wall-clock search latency and native-hardware costs.
-  Current controlled acquisition times include owner hold and observer cost.
+  Current controlled acquisition times include owner hold and observer cost. *2026-10-20: open; [backlog](backlog.md) LOCK-4.*
 - [ ] **Conditional/deferred — stopped-owner spin waits.** Decide whether a
   separately scoped diagnostic or recovery contract is needed. Test-side
-  guards do not bound a primitive spin wait when its owner stops progressing.
+  guards do not bound a primitive spin wait when its owner stops progressing. *2026-10-20: open; [backlog](backlog.md) LOCK-5.*
 
 ## 2. Immediate suite failures and timing investigations
 
@@ -164,7 +171,7 @@ Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.m
   the spin increment. An unchanged-image retry passed; that does not explain
   the slowdown or justify weakening the assertions.
   *2026-10-05: not reproduced* — 3,545–3,921 ms in 35 AArch64 boots at one to
-  four CPUs, boots run one at a time; cause still unestablished ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13).
+  four CPUs, boots run one at a time; cause still unestablished ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13). *2026-10-20: open; [backlog](backlog.md) TEST-6.*
 - [x] **Flake triage — `net-nicbench`'s UDP rate, the sync lower bounds, the
   shootdown report.** *Completed 2026-10-06*
   ([report](audit/2026-10-06-flake-triage-report.md)). The UDP rate is
@@ -184,12 +191,12 @@ Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.m
   *2026-10-05:* `thrtest`'s counts are workload sizes with clock-deadline
   waits; `cwdtest --held` still bounds seam waits by 200,000 yields (a count
   standing in for a duration), not failing in 68 boots; `net-bench` took
-  1.2–3.5 s throughout ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13).
+  1.2–3.5 s throughout ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13). *2026-10-20: open; [backlog](backlog.md) TEST-7.*
 - [ ] **Validation — slirp connection resets.** The guest-side network test
   now makes up to three attempts and the host harness records each exchange, but the specific slirp defect remains unidentified.
   Continue with host-loopback capture or slirp source investigation; do not
   relabel the existing diagnosis as a kernel send-path defect. See the
-  [network retry report](audit/next-subsystem-nettest-retry.md).
+  [network retry report](audit/next-subsystem-nettest-retry.md). *2026-10-20: open; [backlog](backlog.md) TEST-14.*
 - [x] **Validation/fix — a completion handler refilled while it runs.**
   CI's 184 s `virtio-remove-inflight` hold, with one CPU 22 s without a
   tick in `vblk_done` (PR #330, run 37698731544). *Completed 2026-10-08*
@@ -207,7 +214,7 @@ Sources: [October 4 validation report](audit/2026-10-04-spin-contention-report.m
 - [ ] **Validation — AArch64 virtio-console output loss.** Explain the
   historical missing final console line while the serial log was complete.
   This remains an unexplained observation, not a demonstrated root cause.
-  *2026-10-05: not reproduced* in 35 AArch64 captures ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13).
+  *2026-10-05: not reproduced* in 35 AArch64 captures ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md), §13). *2026-10-20: open; [backlog](backlog.md) TEST-6.*
 
 ## 3. Lifetime and quiescence
 
@@ -229,16 +236,16 @@ Sources: [inventory §4](audit/2026-09-deferred-work-inventory.md#4-the-quiesce-
 - [ ] **Validation — scaling and long disabled regions.** Measure at higher
   CPU counts and identify long preemption-disabled sections, including VM
   population loops. Recheck what later VMM work already shortened before
-  proposing preemption points. Counts beyond 64 require separate CPU-mask work.
+  proposing preemption points. Counts beyond 64 require separate CPU-mask work. *2026-10-20: open; [backlog](backlog.md) MEM-3, QUI-1.*
 - [ ] **Validation — straggler-kick attribution.** Widen the sample and
   identify which execution contexts benefit from kick IPIs; per-CPU counts of
   kick-driven publications already exist. Preserve the
   distinction between an IPI sent and a publication that advances the epoch.
-  See the [straggler-kick report](audit/next-subsystem-straggler-kick.md).
+  See the [straggler-kick report](audit/next-subsystem-straggler-kick.md). *2026-10-20: open; [backlog](backlog.md) QUI-2.*
 - [ ] **Conditional/deferred — further grace-period latency reduction.**
   The polling delay was removed; the remaining idle-CPU tick floor is a
   different problem. Any further change needs measurements and a compatible
-  quiescent-point design. See the [wake report](audit/next-subsystem-quiesce-wake.md).
+  quiescent-point design. See the [wake report](audit/next-subsystem-quiesce-wake.md). *2026-10-20: open; [backlog](backlog.md) QUI-3.*
 
 ## 4. Scheduler, synchronization and SMP
 
@@ -248,17 +255,17 @@ and [SMP design](kernel/smp/design.md).
 - [ ] **Conditional/deferred — additional scheduling policies.** Define
   requirements for fairness, real-time, deadline and interactive policies,
   plus CPU isolation, beyond the existing fixed-priority round-robin policy.
-  Its 64 priority levels have no user-facing priority or policy syscalls.
+  Its 64 priority levels have no user-facing priority or policy syscalls. *2026-10-20: open; [backlog](backlog.md) SMP-1.*
 - [ ] **Conditional/deferred — placement and idle-balance policy quality.**
   Two policy observations from the [two-CPU report](audit/2026-10-05-two-cpu-validation-report.md) (§§8–9), within documented rules:
   `pick_cpu`'s tie rotation favours the CPU after a busy creator's (2:1 at
   three CPUs), and a CPU whose own sleeper expires on every tick never
-  balances as idle. Change only with workload measurements.
+  balances as idle. Change only with workload measurements. *2026-10-20: open; [backlog](backlog.md) SMP-5.*
 - [ ] **Validation/implementation — user-mode preempted-thread migration.**
   Assess relaxing the restriction for threads preempted in user mode, where
   interrupted kernel per-CPU accesses are absent. Existing measurements did
   not establish a persistently stranded user-thread pair. See the
-  [balance-movable report](audit/next-subsystem-balance-movable.md).
+  [balance-movable report](audit/next-subsystem-balance-movable.md). *2026-10-20: open; [backlog](backlog.md) SMP-4.*
 - [x] **Implementation — bounded preempt-at-restore recursion.** Done
   2026-10-06 ([restore-loop report](audit/2026-10-06-sched-restore-loop-report.md)).
   `schedule()` takes a reschedule pending at its restore by another pass
@@ -277,13 +284,13 @@ and [SMP design](kernel/smp/design.md).
   ([flakes.md](testing/flakes.md), "`irqrestore-bench` and `fpu-bench` read
   two per-boot modes on x86-64"). What sets a boot's mode is not known.
 - [ ] **Conditional/deferred — kernel rwlocks.** Introduce a reader/writer
-  primitive only with a concrete workload, ownership rules and lockdep model.
+  primitive only with a concrete workload, ownership rules and lockdep model. *2026-10-20: open; [backlog](backlog.md) LOCK-6.*
 - [ ] **Implementation — quiescent lookup structures.** Assess extending the
   existing epoch abstraction to routing/protocol lookups where the original
-  architecture requested it; lifetime use alone does not implement those paths.
+  architecture requested it; lifetime use alone does not implement those paths. *2026-10-20: open; [backlog](backlog.md) NET-20.*
 - [ ] **Conditional/deferred — CPU scalability.** Address the 64-bit CPU mask
   ceiling, x2APIC, the single cross-call slot and broader IRQ affinity;
-  evaluate ticket/MCS locks and parallel AP bring-up only with measurements.
+  evaluate ticket/MCS locks and parallel AP bring-up only with measurements. *2026-10-20: open; [backlog](backlog.md) LOCK-7, SMP-2.*
 
 Priority inheritance, migration and a pull balancer already exist. The open
 PI item here is measurement in §1, not implementation of donation itself.
@@ -295,17 +302,17 @@ Sources: inventory §§1.2 and 2.2, [memory design](kernel/memory/design.md),
 and the [mprotect report](audit/next-subsystem-mprotect.md).
 
 - [ ] **Implementation — ASLR/KASLR.** Define randomized executable, stack,
-  heap and kernel placement together with an adequate entropy strategy.
+  heap and kernel placement together with an adequate entropy strategy. *2026-10-20: open; [backlog](backlog.md) BOOT-1, SEC-5.*
 - [ ] **Conditional/deferred — user huge pages.** Extend mapping, fault,
-  protection and teardown semantics with tests for mixed page sizes.
+  protection and teardown semantics with tests for mixed page sizes. *2026-10-20: open; [backlog](backlog.md) MEM-4.*
 - [ ] **Conditional/deferred — NUMA.** Add topology discovery, node-aware
-  allocation and placement; the present single-node abstraction is a foundation.
+  allocation and placement; the present single-node abstraction is a foundation. *2026-10-20: open; [backlog](backlog.md) MEM-5.*
 - [ ] **Conditional/deferred — swap, compression and deduplication.** Treat
   these as separate memory-management projects with reclaim, lifetime and
-  accounting contracts, rather than flags on current allocation paths.
+  accounting contracts, rather than flags on current allocation paths. *2026-10-20: open; [backlog](backlog.md) MEM-6.*
 - [ ] **Conditional/deferred — thread guard-page setup.** Consider mapping
   read/write and protecting the guard page instead of reserve-and-replace.
-  The current sequence is tested; changing a cold path needs its own benefit.
+  The current sequence is tested; changing a cold path needs its own benefit. *2026-10-20: open; [backlog](backlog.md) MEM-8.*
 
 File-backed shared mappings, shared futexes, shared ELF text, memfd and
 System V shared memory are built. Their remaining compatibility extensions
@@ -319,23 +326,23 @@ Sources: inventory §§2.4 and 3 and the
 - [ ] **Implementation — VFS lookup and identity.** Add a name (dentry) cache
   and a defined inode/generation identity where needed, with invalidation and
   lifetime rules. A per-mount vnode cache keyed by inode number exists, but
-  every lookup still calls the filesystem.
+  every lookup still calls the filesystem. *2026-10-20: open; [backlog](backlog.md) VFS-9.*
 - [ ] **Implementation — VFS namespace features.** Add hard links, mount
   options beyond read-only, bind mounts and overlay stacking as independently
-  validated units.
+  validated units. *2026-10-20: open; [backlog](backlog.md) VFS-4, VFS-5.*
 - [ ] **Implementation — snapshot derivatives.** Extend existing snapshots
-  to writable clones, rollback and boot environments with explicit crash semantics.
+  to writable clones, rollback and boot environments with explicit crash semantics. *2026-10-20: open; [backlog](backlog.md) CFS-8.*
 - [ ] **Implementation — incremental send/receive.** Define the stream format,
-  ancestry validation and interruption/recovery behavior for snapshot transfer.
+  ancestry validation and interruption/recovery behavior for snapshot transfer. *2026-10-20: open; [backlog](backlog.md) CFS-12.*
 - [ ] **Implementation — pool layouts.** Add fixed-width striping and
   RAID-Z-like parity with failure, replay and repair coverage beyond existing
-  mirrors. Multi-member pools already spread allocations to the emptiest member.
+  mirrors. Multi-member pools already spread allocations to the emptiest member. *2026-10-20: open; [backlog](backlog.md) CFS-13.*
 - [ ] **Implementation — pool maintenance.** Support device replacement,
   resilvering and hot spares; a member that missed commits currently needs a
-  mechanism to catch up before rejoining the mirror.
+  mechanism to catch up before rejoining the mirror. *2026-10-20: open; [backlog](backlog.md) CFS-9.*
 - [ ] **Conditional/deferred — storage deduplication and metadata authentication.**
   Evaluate their separate space, integrity, key-management and recovery costs.
-  Existing checksums and encryption do not establish authenticated metadata.
+  Existing checksums and encryption do not establish authenticated metadata. *2026-10-20: open; [backlog](backlog.md) CFS-7, CFS-14.*
 
 ## 7. Networking
 
@@ -343,19 +350,19 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
 [network design](kernel-services/network/design.md).
 
 - [ ] **Implementation — filter scope and actions.** Add per-interface host
-  chains, rate-limit/logging targets, IPv6 filtering and fuller TCP state tracking.
+  chains, rate-limit/logging targets, IPv6 filtering and fuller TCP state tracking. *2026-10-20: open; [backlog](backlog.md) NET-5, NET-16.*
 - [ ] **Implementation — translation and guest connectivity.** Add IPv6 NAT
   and DNAT, hairpin/NAT reflection, an L2 bridge, and guest limits beyond NAT
   quotas. IPv4 masquerade and port-forward DNAT, with control-channel rules,
-  already exist.
+  already exist. *2026-10-20: open; [backlog](backlog.md) NET-17.*
 - [ ] **Implementation — runtime controls.** Expose the remaining forwarding,
-  masquerade, resolver and tap up/down settings through the control channel.
+  masquerade, resolver and tap up/down settings through the control channel. *2026-10-20: open; [backlog](backlog.md) NET-14.*
 - [ ] **Implementation — DHCP/DNS extensions.** Evaluate a general DHCP server,
-  caching resolver, DHCPv6, DNS-over-TCP and DNSSEC beyond the present proxy service.
+  caching resolver, DHCPv6, DNS-over-TCP and DNSSEC beyond the present proxy service. *2026-10-20: open; [backlog](backlog.md) NET-18.*
 - [ ] **Implementation — TCP/IP extensions.** Add window scaling, SACK,
   timestamps, ECN, fast recovery and Nagle behavior; three-duplicate-ACK fast
   retransmit already exists. Implement IP fragmentation and reassembly with
-  resource bounds and hostile-input tests; IPv4 fragments are currently dropped.
+  resource bounds and hostile-input tests; IPv4 fragments are currently dropped. *2026-10-20: open; [backlog](backlog.md) NET-8, NET-9.*
 - [x] **Measurement — the delayed acknowledgement against a Nagle peer.**
   The tidy-up's correction (b76e4536) made the delayed ACK fire for the
   first time, and a peer with Nagle on that does write-write-read holds
@@ -375,7 +382,7 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
 - [ ] **Implementation/validation — IPv6 beyond the local link.** Implement
   global routing (the route lookup returns none beyond loopback, link-local and
   multicast) and router discovery, then exercise neighbor discovery against a
-  real peer. Link-local neighbor discovery exists.
+  real peer. Link-local neighbor discovery exists. *2026-10-20: open; [backlog](backlog.md) NET-10.*
 - [x] **Fix — neighbour entries keyed by (interface, address).** The ARP
   table and the ND cache matched the address alone, so the second of two
   interfaces resolving a shared address found the first's entry, sent no
@@ -425,24 +432,24 @@ Sources: inventory §§1.1, 1.4 and 2.5 and
   question is whether UDP should queue behind the ring (a per-socket send
   buffer with a wait, as TCP's send path already has) or keep the refusal
   as the honest answer of a stack without a qdisc; decide with a
-  compatibility test against both personalities before implementing.
+  compatibility test against both personalities before implementing. *2026-10-20: open; [backlog](backlog.md) NET-1.*
 - [ ] **Conditional/deferred — faster data paths.** Measure the case for
   zero-copy buffers, device multiqueue (software flow steering to per-CPU
   receive queues exists), TSO/LRO, jumbo frames, NAPI-style
   polling, interrupt moderation and busy polling. QEMU's user-mode backend
-  constrains what can be demonstrated; complexity must earn its place.
+  constrains what can be demonstrated; complexity must earn its place. *2026-10-20: open; [backlog](backlog.md) NET-19.*
 
 ## 8. Linux compatibility and event/IPC objects
 
 Sources: [inventory §2.6](audit/2026-09-deferred-work-inventory.md#26-linux-compatibility-constitution-40-phases-3-4-prompt-2-30)
 and [Linux compatibility API](compat/linux/api.md).
 
-- [ ] **Conditional/deferred — execve.** Replacing a process image requires
-  an architectural extension to the native spawn model, not just a syscall-table entry.
+- [x] ~~**Conditional/deferred — execve.** Replacing a process image requires
+  an architectural extension to the native spawn model, not just a syscall-table entry.~~ *2026-10-20: done (#345, #346, #347).*
 - [ ] **Implementation — rseq and netlink.** These need, respectively,
-  per-thread registration/abort semantics and a new socket-family protocol surface.
+  per-thread registration/abort semantics and a new socket-family protocol surface. *2026-10-20: open; [backlog](backlog.md) LX-7, LX-19.*
 - [ ] **Implementation — socket options.** Add backing behavior for supported
-  options; preserve explicit errors for options whose semantics remain unimplemented.
+  options; preserve explicit errors for options whose semantics remain unimplemented. *2026-10-20: open; [backlog](backlog.md) LX-8.*
 - [x] **Implementation — epoll lifetime, readiness by callback, nesting.**
   Removal on the final descriptor close is built; nested sets with loop
   detection are built on readiness by callback (below). Edge-triggered
@@ -472,18 +479,18 @@ and [Linux compatibility API](compat/linux/api.md).
   [callback report](audit/2026-10-07-epoll-callback-report.md).
 - [ ] **Implementation — mremap extensions.** Support relocation and separately
   define fixed, file-backed and sub-range cases beyond whole anonymous
-  in-place resizing. See the [mremap report](audit/next-subsystem-mremap.md).
+  in-place resizing. See the [mremap report](audit/next-subsystem-mremap.md). *2026-10-20: open; [backlog](backlog.md) LX-9.*
 - [ ] **Implementation — memfd extensions.** Add sealing and the associated
   fcntl semantics; huge-page support depends on the memory work in §5.
-  See the [memfd report](audit/next-subsystem-memfd.md).
+  See the [memfd report](audit/next-subsystem-memfd.md). *2026-10-20: open; [backlog](backlog.md) LX-10.*
 - [ ] **Implementation — System V shared-memory extensions.** Address address
   rounding/remapping, huge pages, IPC_SET, locking/info operations, separate
   owner and creator identities and IPC namespaces. Mode-bit permission checks
   and creator-or-root removal exist. See the
-  [shared-memory report](audit/next-subsystem-shm.md), Risks.
+  [shared-memory report](audit/next-subsystem-shm.md), Risks. *2026-10-20: open; [backlog](backlog.md) LX-18.*
 - [ ] **Implementation/validation — broader Linux environment.** Extend
   Linux-facing `/proc` and `/sys` behavior and validate a real distribution
-  userland. Existing syscall subsets do not establish full Linux compatibility.
+  userland. Existing syscall subsets do not establish full Linux compatibility. *2026-10-20: open; [backlog](backlog.md) LX-11.*
 - [x] **Everyday commands (v1.0.2).** BusyBox `vi`, `less`, `top`,
   `free`, `df`, `du`, `uptime`, `whoami`, `clear`, `md5sum`, `dd`, `cmp`,
   `hexdump`, over what they read on Linux: `/proc/meminfo`, `stat`,
@@ -496,10 +503,10 @@ and [Linux compatibility API](compat/linux/api.md).
 - [x] **scp and sftp.** dropbear's `scp` and OpenSSH's `sftp-server` (a
   new pinned port), so both of `scp`'s protocols and `sftp` work. See the
   [report](audit/2026-10-14-scp-sftp-report.md).
-- [ ] **Implementation — HTTPS.** The owner's last of the four after
+- [x] ~~**Implementation — HTTPS.** The owner's last of the four after
   `ping` and scp/sftp: TLS for `wget`. The next release waits for all three and
   for a test of every new command on Parallels Desktop (the owner,
-  2026-10-14; v1.0.2's release was turned back into a draft).
+  2026-10-14; v1.0.2's release was turned back into a draft).~~ *2026-10-20: done (#384).*
 
 ## 9. Virtualization
 
@@ -507,72 +514,72 @@ Sources: inventory §§1.2, 1.3 and 2.7 and
 [post-roadmap audit §11](audit/2026-09-post-roadmap-audit.md).
 
 - [ ] **Validation — VMX execution.** Run the existing backend on suitable
-  Intel hardware or KVM infrastructure; pure host logic tests do not prove VM entry.
+  Intel hardware or KVM infrastructure; pure host logic tests do not prove VM entry. *2026-10-20: open; [backlog](backlog.md) VIRT-1.*
 - [ ] **Validation — guest concurrency.** Exercise device models with multiple
   guest CPUs using an appropriate guest-side VirtIO driver. Multi-vCPU AArch64
   guests already run under `vmctl run --machine -c`; the VirtIO test guests
-  are single-vCPU.
+  are single-vCPU. *2026-10-20: open; [backlog](backlog.md) VIRT-3.*
 - [ ] **Validation — reproducible Linux guest demonstrations.** Make guest
   image/root-filesystem provisioning reproducible and suitable for CI; demonstrate
-  a guest reaching the external network through the host's real NIC.
+  a guest reaching the external network through the host's real NIC. *2026-10-20: open; [backlog](backlog.md) TEST-13.*
 - [ ] **Implementation — x86 guest fidelity.** Resolve documented interception,
   string-I/O, TSC virtualization, debug-register and remaining CPUID-exposure
   gaps, including WBINVD/RDPMC/RDTSCP behavior. CPUID leaves are already
-  filtered; VMX enables MOV-DR and RDPMC exits that it does not yet handle.
+  filtered; VMX enables MOV-DR and RDPMC exits that it does not yet handle. *2026-10-20: open; [backlog](backlog.md) VIRT-2.*
 - [ ] **Implementation — dirty tracking and ballooning.** Define memory ownership,
-  guest coordination and accounting needed for these services.
+  guest coordination and accounting needed for these services. *2026-10-20: open; [backlog](backlog.md) VIRT-4.*
 - [ ] **Conditional/deferred — VM snapshots and live migration.** Extend the
   UAPI to capture/restore complete vCPU and device state before attempting
-  snapshot or transfer; vCPU register get/set already exists.
+  snapshot or transfer; vCPU register get/set already exists. *2026-10-20: open; [backlog](backlog.md) VIRT-5.*
 - [ ] **Conditional/deferred — device passthrough.** Establish DMA and interrupt
-  isolation, assignment lifetime and reset behavior on appropriate hardware.
+  isolation, assignment lifetime and reset behavior on appropriate hardware. *2026-10-20: open; [backlog](backlog.md) VIRT-6.*
 - [ ] **Conditional/deferred — nested virtualization.** Requires a separately
-  scoped guest/host virtualization model; it is outside the current milestone.
+  scoped guest/host virtualization model; it is outside the current milestone. *2026-10-20: open; [backlog](backlog.md) VIRT-9.*
 
 ## 10. Security and isolation
 
 Sources: inventory §§2.9 and 3 and [security design](kernel/security/design.md).
 
 - [ ] **Implementation — secure/measured boot.** Establish trust for the kernel
-  and boot archive; module signing alone starts from an unverified boot image.
+  and boot archive; module signing alone starts from an unverified boot image. *2026-10-20: open; [backlog](backlog.md) BOOT-2, BOOT-3, BOOT-4.*
 - [ ] **Implementation — audit logging.** Define security events, access controls,
-  storage/transport and behavior under resource pressure.
+  storage/transport and behavior under resource pressure. *2026-10-20: open; [backlog](backlog.md) SEC-2.*
 - [ ] **Implementation — stronger isolation/accounting.** Extend capabilities
   beyond handle rights, add network namespaces and cgroups-style accounting
   beyond current rlimits; coordinate IPC namespaces with §8. Mount and UTS
-  namespaces and process domains already exist.
+  namespaces and process domains already exist. *2026-10-20: open; [backlog](backlog.md) SEC-10.*
 - [ ] **Implementation/validation — stack and memory hardening.** Evaluate kernel
   stack protection, broader interrupt-stack isolation and kernel sanitizer builds.
   x86-64 already uses IST stacks for double fault, NMI, machine check and
-  debug; AArch64 takes EL1 exceptions on the current stack.
+  debug; AArch64 takes EL1 exceptions on the current stack. *2026-10-20: open; [backlog](backlog.md) BUILD-1, BUILD-4, DRV-2.*
 - [x] **Implementation — entropy sources.** Done by roadmap milestone M1
   (2026-10-09, [report](audit/2026-10-09-m1-randomness-report.md)): RDSEED/RDRAND
   and RNDRRS/RNDR alongside virtio-rng, a seeded state with Linux `getrandom`
   semantics, and a no-entropy boot in CI. Source health tests (SP 800-90B
   repetition and adaptive-proportion) remain open in the inventory §2.9.
 - [ ] **Implementation/validation — speculative-execution policy.** Document
-  supported CPUs, threat assumptions and the mitigations that must be enabled/tested.
+  supported CPUs, threat assumptions and the mitigations that must be enabled/tested. *2026-10-20: open; [backlog](backlog.md) SEC-8.*
 - [ ] **Implementation — module anti-rollback.** Add signature versioning and
-  policy for rejecting obsolete signed modules without breaking recovery workflows.
+  policy for rejecting obsolete signed modules without breaking recovery workflows. *2026-10-20: open; [backlog](backlog.md) BOOT-5.*
 
 ## 11. Observability
 
 Sources: inventory §2.8 and [diagnostics design](kernel/diagnostics/design.md).
 
 - [ ] **Implementation — kernel debugging.** Add a defined debugger/GDB remote
-  workflow appropriate to supported architectures and execution contexts.
+  workflow appropriate to supported architectures and execution contexts. *2026-10-20: open; [backlog](backlog.md) OBS-2.*
 - [ ] **Implementation — crash dumps and symbols.** Preserve useful crash state
   and improve kernel-side symbolization; host postprocessing is a separate capability.
   *Host side, 2026-10-08:* the boot harness resolves module text too, from the
   loader's `module: base` line and the `.ko` files ([irqpoll-lockdep report](audit/2026-10-08-irqpoll-lockdep-report.md) §3).
-  Kernel-side symbolization and crash-state preservation remain.
+  Kernel-side symbolization and crash-state preservation remain. *2026-10-20: open; [backlog](backlog.md) OBS-3.*
 - [ ] **Implementation — tracing and counters.** Build structured per-CPU tracing
-  and performance-counter support with bounded overhead and safe diagnostic readers.
+  and performance-counter support with bounded overhead and safe diagnostic readers. *2026-10-20: open; [backlog](backlog.md) OBS-4.*
 - [ ] **Implementation — operator tools.** Provide transports and interfaces for
   `ktrace`, `kstat`, `cosmo-top` and `cosmo-prof`-style inspection beyond existing
-  sysctl values and self-test output.
+  sysctl values and self-test output. *2026-10-20: open; [backlog](backlog.md) OBS-4.*
 - [ ] **Conditional/deferred — eBPF-like tracing.** Treat program verification,
-  execution isolation and attachment lifetime as prerequisites, not just a tracing UI.
+  execution isolation and attachment lifetime as prerequisites, not just a tracing UI. *2026-10-20: open; [backlog](backlog.md) OBS-5.*
 
 ## 12. Verification, CI and performance evidence
 
@@ -600,19 +607,19 @@ Sources: inventory §§2.10, 2.11 and 3,
   ([report](audit/2026-10-07-net-fuzz-report.md)). Not fuzzable on the host and
   left: the virtio-net and e1000e receive descriptors (a device model's
   shape), the tap device file, `netif.c`'s worker and steering. PCI, ACPI
-  and VFS-path fuzzing remain.
+  and VFS-path fuzzing remain. *2026-10-20: open; [backlog](backlog.md) TEST-9.*
 - [ ] **Implementation/validation — remaining fault injection.** Cover CPU
   starvation, device-reset faults and VM-exit storms. Generic device reset and
-  packet-duplication injection already exist; these are broader failure scenarios.
+  packet-duplication injection already exist; these are broader failure scenarios. *2026-10-20: open; [backlog](backlog.md) TEST-10.*
 - [ ] **Implementation — coverage and LTO builds.** Add useful coverage collection
-  and assess LTO as a separate configuration with its own build/boot validation.
+  and assess LTO as a separate configuration with its own build/boot validation. *2026-10-20: open; [backlog](backlog.md) BUILD-3.*
 - [ ] **Validation — CPU and firmware matrices.** Expand routine CPU-count
   coverage, include the two-CPU prerequisites in §2, and test AArch64 firmware
   variants or document a supported minimum EDK2/AAVMF version.
   *2026-10-05:* the two-CPU prerequisites are done; full suites pass locally
   at one to four CPUs on both architectures ([two-CPU report](audit/2026-10-05-two-cpu-validation-report.md)).
   CI now also boots the debug suite with two CPUs on both architectures
-  (`make test-smp2`). One- and three-CPU boots remain local-only.
+  (`make test-smp2`). One- and three-CPU boots remain local-only. *2026-10-20: open; [backlog](backlog.md) TEST-11.*
 - [x] **Validation — AArch64 CI boot-time margin.** `main`'s AArch64 CI
   boots range from about 120 s to 173 s against the harness's 180 s
   whole-boot timeout; a debug boot of the raw-pairing branch exceeded it
@@ -638,12 +645,12 @@ Sources: inventory §§2.10, 2.11 and 3,
   (estimated 193 s whole); x86-64 keeps 180 s (at most 158.6 s).
 - [ ] **Validation — physical hardware matrix.** Establish repeatable AMD, Intel
   and Apple Silicon testing where supported; state which firmware/device paths
-  are actually exercised rather than inferring hardware success from QEMU.
+  are actually exercised rather than inferring hardware success from QEMU. *2026-10-20: open; [backlog](backlog.md) TEST-12.*
 - [ ] **Implementation/validation — broader benchmarks.** Measure allocation,
   page faults, mmap, IPI round trips, fsync, filesystem metadata and VM exits,
   and build baseline-versus-change regression tracking. Existing network, block,
   FPU/context-switch, futex wakeup, IPC round-trip, VFS read/write, balancer
-  and lockdep measurements remain useful baselines.
+  and lockdep measurements remain useful baselines. *2026-10-20: open; [backlog](backlog.md) OBS-6.*
 
 ## 13. Devices, architecture and portability
 
@@ -680,39 +687,39 @@ Sources: inventory §§1.3, 1.4, 2.11, 3 and 8 and [device design](kernel/device
 - [ ] **Implementation — devices described only in the DSDT.** Parallels'
   SATA controller (and other platform devices) is described only in AML;
   the kernel has no AML interpreter. Either one, or a narrow `_CRS` reader
-  for known device ids.
+  for known device ids. *2026-10-20: open; [backlog](backlog.md) DRV-4.*
 - [ ] **Device lifecycle — remaining §8 items.** virtio-blk timeout versus
   late submission, virtio-net probe faults and RX before registration,
-  USB storage recovery-state propagation (inventory §8).
+  USB storage recovery-state propagation (inventory §8). *2026-10-20: open; [backlog](backlog.md) BLK-1, BLK-2, NET-3, TEST-17.*
 
 - [ ] **Implementation/validation — non-coherent DMA.** Audit device-written
   rings/buffers and submission synchronization in VirtIO, e1000e, AHCI and xHCI.
-  Coherent QEMU success cannot prove the required cache-maintenance behavior.
+  Coherent QEMU success cannot prove the required cache-maintenance behavior. *2026-10-20: open; [backlog](backlog.md) DRV-1.*
 - [ ] **Implementation — hotplug and power management.** Add CPU hotplug, PCI
-  rescan and power-management lifecycles beyond existing device-removal support.
+  rescan and power-management lifecycles beyond existing device-removal support. *2026-10-20: open; [backlog](backlog.md) DRV-6, SMP-3.*
 - [ ] **Implementation — independent bind/unbind.** Expose per-device operations
   without requiring registration or removal of the whole driver. Per-device
-  test bind/unbind hooks exist only in debug builds.
+  test bind/unbind hooks exist only in debug builds. *2026-10-20: open; [backlog](backlog.md) DRV-7.*
 - [ ] **Conditional/deferred — IOMMU variants.** Extend interrupt remapping,
   AMD-Vi, huge pages, IOVA caching, PASID/ATS, larger stream IDs and bridge
   requester aliases only with a target and validation path. Small-output-width
-  SMMUs additionally need the appropriate concatenated level-1 root layout.
+  SMMUs additionally need the appropriate concatenated level-1 root layout. *2026-10-20: open; [backlog](backlog.md) DRV-8.*
 - [ ] **Implementation/validation — AArch64 portability.** Address host device-tree
   boot support, PSCI variations, UAO/E0PD/BTI/PAC and pseudo-NMI delivery as
-  separately scoped architecture work.
+  separately scoped architecture work. *2026-10-20: open; [backlog](backlog.md) DRV-5, DRV-9, SEC-7, TEST-11.*
 - [ ] **Validation/implementation — asynchronous hardware errors.** Use RAS
   records for causal attribution and decide whether EL1 should unmask asynchronous
   aborts. Corrected-error handling is already built; delivery context alone cannot
-  identify a guilty process. See the [async-error report](audit/next-subsystem-async-error.md).
+  identify a guilty process. See the [async-error report](audit/next-subsystem-async-error.md). *2026-10-20: open; [backlog](backlog.md) DRV-10.*
 - [ ] **Implementation — CPU feature and errata framework.** Centralize supported
-  feature discovery and errata policy rather than adding scattered assumptions.
+  feature discovery and errata policy rather than adding scattered assumptions. *2026-10-20: open; [backlog](backlog.md) DRV-11.*
 - [ ] **Conditional/deferred — display and wireless hardware.** Add a mode-setting
   display driver, GPU drivers, Wi-Fi and Bluetooth when suitable hardware and a
   bounded initial use case are available. The framebuffer console already exists,
   and since the virtio-gpu unit (2026-10-14) a 2D virtio-gpu driver gives it the
   display's own size and follows a resize (Parallels Desktop); there is still no
   display interface for programs, cursor or 3D
-  ([report](audit/2026-10-14-virtio-gpu-report.md)).
+  ([report](audit/2026-10-14-virtio-gpu-report.md)). *2026-10-20: open; [backlog](backlog.md) DRV-16.*
 
 ## 14. Packaging, platform tooling and async I/O
 
@@ -720,18 +727,18 @@ Sources: inventory §§2.1, 2.10 and 2.11 and [package design](pkg/design.md).
 
 - [ ] **Implementation — package provenance and reproducibility.** Add SBOMs,
   dependency locking, build sandboxing and multiarchitecture package handling.
-  Package archives are already built deterministically.
+  Package archives are already built deterministically. *2026-10-20: open; [backlog](backlog.md) PKG-7.*
 - [ ] **Implementation — upgrade rollback.** Define multi-package transactions,
   recovery of interrupted installs and the relationship to filesystem boot
   environments. A single package install already stages files and commits its
-  record before renaming them into place.
+  record before renaming them into place. *2026-10-20: open; [backlog](backlog.md) PKG-3.*
 - [ ] **Implementation — container tooling.** Build usable tooling over the
   existing primitives. The service manager already composes roots, mount/UTS
   namespaces, domains, rlimits and handle rights per service; syscall filtering
-  is not yet part of it. Broader isolation gaps are listed in §10.
+  is not yet part of it. Broader isolation gaps are listed in §10. *2026-10-20: open; [backlog](backlog.md) SEC-11.*
 - [ ] **Implementation/validation — async VM operations.** Define and exercise
   submittable VM operations through the async-I/O interface; existing file,
-  socket, device and timer readiness does not demonstrate this contract.
+  socket, device and timer readiness does not demonstrate this contract. *2026-10-20: open; [backlog](backlog.md) VIRT-7.*
 
 ## 15. Deliberate deferrals and decisions to revisit only with evidence
 
@@ -740,25 +747,25 @@ their deferred status here; this section does not schedule them for implementati
 
 | Deferred item or decision | Condition or rationale for revisiting |
 |---|---|
-| Advanced graphics, desktop environment and Wayland | Require a display/input architecture and a concrete product scope beyond the existing console; GPU work is in §13. |
-| Distributed filesystem | A separate consistency, failure and network-storage project; local storage follow-ups are in §6. |
-| Full Linux compatibility | Pursue specific applications and semantics incrementally through §8; do not promise arbitrary distribution compatibility from syscall counts. |
-| Docker/Kubernetes compatibility | Requires much broader Linux and container semantics than current primitives/tooling; §14 is a smaller prerequisite. |
-| Full NVMe feature set | Extend the functioning driver for demonstrated device/workload requirements, rather than implementing the entire specification in advance. |
-| eBPF and eBPF-like tracing | Needs a security and lifetime model; tracing infrastructure in §11 is a prerequisite. |
-| NUMA, huge pages, memory compression/deduplication | Memory projects in §5 remain deferred until a workload and test infrastructure justify them. |
-| Live migration and nested virtualization | Require the state/UAPI and execution-model work in §9. |
-| Device multiqueue, TSO/LRO, jumbo frames and zero-copy sockets | The inventory requires measured benefit and notes the limits of the current QEMU network backend; see §7. |
-| AHCI NCQ | Existing measurements reached about 87% of NVMe aggregate throughput with four streams; revisit with evidence from a real disk. |
-| e1000e checksum offload | Prior measurement suggested roughly a 2% benefit; establish a worthwhile workload before adding complexity. |
-| x86 PCID | The inventory records no usable TCG CPU model for validation; obtain a hardware or virtualization test path first. |
-| vGIC on GICv2 hosts | Existing virtual GIC support is GICv3-only and advertises that capability; add GICv2 support only for a supported target. |
-| Remaining termios flags/control characters | Unsupported settings are currently masked off silently. Implement actual semantics when needed, or report them as unsupported. |
-| Native `/sys` | Previously deferred because sysctl held the available information; Linux `/sys` compatibility is a distinct requirement in §8. |
-| PID renumbering | The process-domain design deliberately avoids it; reopening requires an architectural argument, not merely a missing-feature label. |
-| Lazy FPU switching | Eager switching was measured as a modest part of context-switch cost; revisit with new performance evidence and security analysis. |
-| Rust or C#/.NET adoption | These were optional language/tooling directions, not missing kernel capabilities; introduce another language only for a concrete benefit. |
-| SQLite package metadata | A text database was chosen; SQLite is an alternative to reassess if requirements outgrow that decision, not an outstanding deliverable. |
+| Advanced graphics, desktop environment and Wayland | Require a display/input architecture and a concrete product scope beyond the existing console; GPU work is in §13. *2026-10-20: open; [backlog](backlog.md) DRV-16.* |
+| Distributed filesystem | A separate consistency, failure and network-storage project; local storage follow-ups are in §6. *2026-10-20: open; [backlog](backlog.md) CFS-16.* |
+| ~~Full Linux compatibility~~ | Pursue specific applications and semantics incrementally through §8; do not promise arbitrary distribution compatibility from syscall counts. *2026-10-20: obsolete: policy statement, not a deliverable; incremental Linux compatibility is §8's Linux-environment item (backlog LX-11).* |
+| Docker/Kubernetes compatibility | Requires much broader Linux and container semantics than current primitives/tooling; §14 is a smaller prerequisite. *2026-10-20: open; [backlog](backlog.md) SEC-11.* |
+| Full NVMe feature set | Extend the functioning driver for demonstrated device/workload requirements, rather than implementing the entire specification in advance. *2026-10-20: open; [backlog](backlog.md) BLK-8.* |
+| eBPF and eBPF-like tracing | Needs a security and lifetime model; tracing infrastructure in §11 is a prerequisite. *2026-10-20: open; [backlog](backlog.md) OBS-5.* |
+| NUMA, huge pages, memory compression/deduplication | Memory projects in §5 remain deferred until a workload and test infrastructure justify them. *2026-10-20: open; [backlog](backlog.md) MEM-4, MEM-5, MEM-6.* |
+| Live migration and nested virtualization | Require the state/UAPI and execution-model work in §9. *2026-10-20: open; [backlog](backlog.md) VIRT-5, VIRT-9.* |
+| Device multiqueue, TSO/LRO, jumbo frames and zero-copy sockets | The inventory requires measured benefit and notes the limits of the current QEMU network backend; see §7. *2026-10-20: open; [backlog](backlog.md) NET-19.* |
+| AHCI NCQ | Existing measurements reached about 87% of NVMe aggregate throughput with four streams; revisit with evidence from a real disk. *2026-10-20: open; [backlog](backlog.md) BLK-6.* |
+| e1000e checksum offload | Prior measurement suggested roughly a 2% benefit; establish a worthwhile workload before adding complexity. *2026-10-20: open; [backlog](backlog.md) NET-22.* |
+| x86 PCID | The inventory records no usable TCG CPU model for validation; obtain a hardware or virtualization test path first. *2026-10-20: open; [backlog](backlog.md) MEM-7.* |
+| vGIC on GICv2 hosts | Existing virtual GIC support is GICv3-only and advertises that capability; add GICv2 support only for a supported target. *2026-10-20: open; [backlog](backlog.md) VIRT-8.* |
+| Remaining termios flags/control characters | Unsupported settings are currently masked off silently. Implement actual semantics when needed, or report them as unsupported. *2026-10-20: open; [backlog](backlog.md) LX-12.* |
+| Native `/sys` | Previously deferred because sysctl held the available information; Linux `/sys` compatibility is a distinct requirement in §8. *2026-10-20: open; [backlog](backlog.md) VFS-11.* |
+| ~~PID renumbering~~ | The process-domain design deliberately avoids it; reopening requires an architectural argument, not merely a missing-feature label. *2026-10-20: obsolete: decision taken: process domains deliberately avoid PID renumbering; not a work item.* |
+| Lazy FPU switching | Eager switching was measured as a modest part of context-switch cost; revisit with new performance evidence and security analysis. *2026-10-20: open; [backlog](backlog.md) SMP-6.* |
+| ~~Rust or C#/.NET adoption~~ | These were optional language/tooling directions, not missing kernel capabilities; introduce another language only for a concrete benefit. *2026-10-20: obsolete: optional language direction, explicitly not a deliverable; decision recorded.* |
+| ~~SQLite package metadata~~ | A text database was chosen; SQLite is an alternative to reassess if requirements outgrow that decision, not an outstanding deliverable. *2026-10-20: obsolete: decision taken: text package database chosen; SQLite explicitly not a deliverable.* |
 
 ## Suggested next increments
 
