@@ -157,7 +157,7 @@ run: $(IMAGE)
 BOOT_LOG ?= $(OUT)/boot-test.log
 # The whole-boot timeout for test, test-harness-retry and test-chaos, and for
 # test-gic, test-guard and test-smp2 through test; and
-# test-crash and test-wxn keep the runner's 180 s (they end in an early
+# test-crash and test-wxn have CRASH_TIMEOUT (below; they end in an early
 # panic). A hang guard, not a performance budget (each
 # self-test has its own budget). AArch64 under TCG is the slower guest, and
 # over 257 CI boots (40 runs, 2026-10-06) it took a median of 154 s, p95 173 s,
@@ -182,6 +182,16 @@ BOOT_LOG ?= $(OUT)/boot-test.log
 # takes BOOT_TIMEOUT now: 300 s on AArch64, 240 s on x86-64 as before.
 # The shell, network and key harnesses derive their deadlines from it.
 BOOT_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),300,240)
+# test-crash and test-wxn (the whole debug suite, then an early panic):
+# AArch64 240 s from 2026-10-20. Over the last 40 CI runs (39155230078 to
+# 39347750738) its 40 crash boots took a median of 172.4 s, a p95 of
+# 177.1 s and at most 179.4 s passing (main's latest), and two timed out
+# at 180 s with every self-test passed; their self-test totals (175.1 and
+# 175.5 s) put the whole boot at 192.5-192.9 s (boot = 1.115 x self-test
+# time - 2.8 s over the 38 passing ones, within 0.8 s). Its 38 WXN boots:
+# median 170.3 s, at most 177.8 s. x86-64's 41 crash boots: median 153.2 s,
+# at most 158.6 s; it keeps the runner's 180 s.
+CRASH_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),240,180)
 # test-busybox: one boot that runs the scripted test and fifteen testsuite files.
 BUSYBOX_TIMEOUT ?= 900
 test: $(IMAGE)
@@ -436,7 +446,7 @@ test-crash:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
 		CRASH_TEST=1 OUT=$(OUT)-crash image
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic fault \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic fault --timeout $(CRASH_TIMEOUT) \
 		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log \
 		--kernel $(OUT)-crash/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
@@ -449,7 +459,7 @@ ifeq ($(ARCH),aarch64)
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
 		CRASH_TEST=2 OUT=$(OUT)-wxn image
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic wxn \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic wxn --timeout $(CRASH_TIMEOUT) \
 		--image $(OUT)-wxn/cosmoos.img --log $(OUT)-wxn/boot-test-wxn.log \
 		--kernel $(OUT)-wxn/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 else

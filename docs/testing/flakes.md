@@ -1975,6 +1975,20 @@ owner. The job was rerun.
 its other debug boots took 213.7-235.4 s (main's 200.6-220.1 s), slow
 again. Rerun.
 
+**Widened, 2026-10-20** (the owner's call): AArch64 `test-crash` and
+`test-wxn` take `CRASH_TIMEOUT`, 240 s; x86-64 keeps 180 s. Over the
+last 40 CI runs (39155230078 to 39347750738, every attempt) the 40
+AArch64 crash boots took a median of 172.4 s, a p95 of 177.1 s and at
+most 179.4 s passing -- main's own latest (39347750738), 0.6 s from the
+timeout -- and two timed out (the second and third sightings above). Their
+self-test totals, 175.1 and 175.5 s, put the whole boot at 192.5-192.9 s:
+over the 38 passing crash boots, boot time = 1.115 x self-test time -
+2.8 s, within 0.8 s. The 38 AArch64 WXN boots, the same suite before a
+different panic: median 170.3 s, at most 177.8 s. x86-64's 41 crash boots:
+median 153.2 s, at most 158.6 s. 240 s is 1.24 x the slowest estimated
+boot (#389 took 1.22 x); the cost is a real hang in these two boots
+caught 60 s later. Each self-test keeps its own budget.
+
 ## An aarch64 boot that reached the self-tests and no further
 
 **2026-09-20, `0814e79`, the same one-document branch** (`make
