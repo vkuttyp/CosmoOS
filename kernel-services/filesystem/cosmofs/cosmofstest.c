@@ -5557,6 +5557,22 @@ bool selftest_cosmofs_clone(const char **reason)
     CHECK(write_file(ENG "/a", "live2", 5));
     CHECK(read_matches(ENG "/.snapshots/c/a", "clone", 5));
     CHECK(read_matches(ENG "/.snapshots/o/a", "orig", 4));
+    /* An fsync is the vnode's own tree's: a clone file's inode goes to the
+     * clone, a snapshot file's nowhere -- neither onto the live inode of
+     * the same number. */
+    CHECK(vfs_open(NULL, ENG "/.snapshots/c/a", COSMO_O_RDWR, 0, &f) == 0);
+    CHECK(file_write(f, "fsync", 5) == 5);
+    CHECK(file_sync(f) == 0);
+    file_put(f);
+    f = NULL;
+    CHECK(vfs_open(NULL, ENG "/.snapshots/o/a", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(file_sync(f) == 0);
+    file_put(f);
+    f = NULL;
+    CHECK(read_matches(ENG "/a", "live2", 5));
+    CHECK(read_matches(ENG "/.snapshots/c/a", "fsync", 5));
+    CHECK(read_matches(ENG "/.snapshots/o/a", "orig", 4));
+    CHECK(write_file(ENG "/.snapshots/c/a", "clone", 5));
     CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
     CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
     uint64_t free_written = st.free_blocks;

@@ -269,6 +269,16 @@ int cfs_clone_create(struct cfs *fs, const char *origin, const char *name, struc
     return rc;
 }
 
+/* The origin's set, built before a deletion changes anything: -ENOMEM or
+ * -EIO from here leaves the transaction untouched. */
+int cfs_clone_ready(struct cfs *fs, uint64_t id)
+{
+    struct cfs_clone *c = cfs_clone_by_id(fs, id);
+    if (c == NULL)
+        return -EIO;
+    return origin_reach(fs, c) != NULL ? 0 : -ENOMEM;
+}
+
 /* Deleting a clone: every block its tree reaches and its origin's does
  * not goes back, exempt (no snapshot's tree reaches one), in the
  * transaction that removes the entry. */

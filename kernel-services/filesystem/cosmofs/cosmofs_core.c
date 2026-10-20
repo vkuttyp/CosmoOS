@@ -801,6 +801,16 @@ int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
 
 int cfs_inode_write(struct cfs *fs, uint64_t ino, const struct cfs_inode *in)
 {
+    /* A tagged number names one tree: it is written only while that tree
+     * is the one entered. An untagged one is the entered tree's own. A
+     * snapshot's vnode, or a clone's written outside its clone, would
+     * otherwise land on the live inode with the same number. */
+    unsigned tag = CFS_SNAP_TAG(ino);
+    if (tag != 0 && (fs->cur_clone == NULL || fs->cur_clone->id != tag)) {
+        kerror("cosmofs: inode %llu of tree %u written outside that tree; refused",
+               (unsigned long long)CFS_INO_OF(ino), tag);
+        return -EROFS;
+    }
     ino = CFS_INO_OF(ino);
     struct cfs_buf *ib;
     int rc = inode_block(fs, ino, true, true, &ib);

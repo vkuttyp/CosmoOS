@@ -1600,7 +1600,7 @@ commit allocates).
 paths the live tree is: an operation on a clone's vnode takes the mount's
 lock and *enters* the clone, which swaps the clone's `imap_root`,
 `next_ino` and `inode_count` into the in-memory superblock, and *leaves*
-it before the lock goes, keeping what moved (`cfs_lock_tree`). Every
+it before the lock goes, keeping what moved (`cfs_lock_tree_w`). Every
 inode, extent and allocation path then writes the clone without knowing
 it. A clone's vnodes carry its id as their tag, as a snapshot's do; the
 inode paths and directory entries take the number without it. A commit

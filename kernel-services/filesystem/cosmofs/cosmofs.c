@@ -1414,13 +1414,29 @@ static bool tree_readonly(struct cfs *fs, struct vnode *vn)
     return !clone;
 }
 
-static void cfs_lock_tree(struct cfs *fs, struct vnode *vn)
+/*
+ * The tree an operation that writes on `vn` takes, under the one hold
+ * that enters the clone; -EROFS (and the lock not held) for a vnode whose
+ * tree is not writable -- .snapshots, a snapshot, or a clone deleted since the vnode
+ * was found. Deciding it here and not before taking the lock is what
+ * keeps a write racing a clone's deletion off the live tree, whose inode
+ * numbers a clone's share.
+ */
+static int cfs_lock_tree_w(struct cfs *fs, struct vnode *vn)
 {
+    if (is_snapdir(vn))
+        return -EROFS;
     mutex_lock(&fs->lock);
     unsigned tag = snap_tag_of(vn);
-    struct cfs_clone *c = tag ? cfs_clone_by_id(fs, tag) : NULL;
-    if (c != NULL)
-        cfs_clone_enter(fs, c);
+    if (tag == 0)
+        return 0;
+    struct cfs_clone *c = cfs_clone_by_id(fs, tag);
+    if (c == NULL) {
+        mutex_unlock(&fs->lock);
+        return -EROFS;
+    }
+    cfs_clone_enter(fs, c);
+    return 0;
 }
 
 static void cfs_unlock_tree(struct cfs *fs)
@@ -1570,7 +1586,11 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
         return -ENOMEM;
-    cfs_lock_tree(fs, dir);
+    int lrc = cfs_lock_tree_w(fs, dir);
+    if (lrc) {
+        kfree(block);
+        return lrc;
+    }
     uint64_t lblk;
     unsigned slot;
     int rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
@@ -1652,7 +1672,11 @@ static int cfs_symlink(struct vnode *dir, const char *name, size_t len, const ch
     if (block == NULL)
         return -ENOMEM;
 
-    cfs_lock_tree(fs, dir);
+    int lrc = cfs_lock_tree_w(fs, dir);
+    if (lrc) {
+        kfree(block);
+        return lrc;
+    }
     uint64_t lblk;
     unsigned slot;
     uint64_t ino = 0;
@@ -1792,7 +1816,11 @@ static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, st
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
         return -ENOMEM;
-    cfs_lock_tree(fs, dir);
+    int lrc = cfs_lock_tree_w(fs, dir);
+    if (lrc) {
+        kfree(block);
+        return lrc;
+    }
     uint64_t lblk;
     unsigned slot;
     int rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
@@ -1935,7 +1963,11 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
         return -ENOMEM;
-    cfs_lock_tree(fs, odir);
+    int lrc = cfs_lock_tree_w(fs, odir);
+    if (lrc) {
+        kfree(block);
+        return lrc;
+    }
     uint64_t lblk;
     unsigned slot;
     int rc = dir_find(fs, odir, oname, olen, block, &lblk, &slot);
@@ -2202,8 +2234,10 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
-    cfs_lock_tree(fs, vn);
-    int rc = write_one_page(fs, cfs_inode_of(vn), index, buf);
+    int rc = cfs_lock_tree_w(fs, vn);
+    if (rc)
+        return rc;
+    rc = write_one_page(fs, cfs_inode_of(vn), index, buf);
     if (rc == 0)
         rc = inode_sync(fs, vn);
     cfs_unlock_tree(fs);
@@ -2223,9 +2257,10 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;
-    cfs_lock_tree(fs, vn);
+    int rc = cfs_lock_tree_w(fs, vn);
+    if (rc)
+        return rc;
     struct cfs_inode *in = cfs_inode_of(vn);
-    int rc;
     if (index % CFS_RECORD_BLOCKS == 0 && n >= CFS_RECORD_BLOCKS && in->compress_algo != CFS_COMPRESS_NONE) {
         /* Gather the record; the pages are separate frames. */
         uint8_t *rec = kmalloc((size_t)CFS_RECORD_BLOCKS * CFS_BLOCK, 0);
@@ -2258,7 +2293,9 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
     pagecache_truncate(vn, size);
-    cfs_lock_tree(fs, vn);
+    int lrc = cfs_lock_tree_w(fs, vn);
+    if (lrc)
+        return lrc;
     uint64_t keep = (size + CFS_BLOCK - 1) / CFS_BLOCK;
     int rc = cfs_truncate_blocks(fs, cfs_inode_of(vn), keep);
     /* The last block may now be partial. What is past the new end has to
@@ -2305,8 +2342,10 @@ static int cfs_vnode_setattr(struct vnode *vn)
         return 0;
     if (tree_readonly(fs, vn))
         return -EROFS;   /* a snapshot's metadata is what it was, as its data is (the caller restores the vnode) */
-    cfs_lock_tree(fs, vn);
-    int rc = inode_sync(fs, vn);
+    int rc = cfs_lock_tree_w(fs, vn);
+    if (rc)
+        return rc;
+    rc = inode_sync(fs, vn);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -2320,11 +2359,15 @@ static int cfs_vnode_sync(struct vnode *vn)
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL)
         return 0;
-    mutex_lock(&fs->lock);
-    int rc = inode_sync(fs, vn);
+    /* In the vnode's own tree: a clone's inode is the clone's, and the
+     * commit leaves the clone first. A snapshot's has nothing to write. */
+    int rc = cfs_lock_tree_w(fs, vn);
+    if (rc)
+        return rc == -EROFS ? 0 : rc;
+    rc = inode_sync(fs, vn);
     if (rc == 0)
         rc = cfs_commit(fs);
-    mutex_unlock(&fs->lock);
+    cfs_unlock_tree(fs);
     return rc;
 }
 
@@ -2344,8 +2387,10 @@ static void cfs_evict(struct vnode *vn)
     if (fs && cv && vn->nlink == 0 && !other_tree) {
         /* The last link and the last reference are gone: release the
          * data blocks and the inode slot. */
-        cfs_lock_tree(fs, vn);
-        int trc = cfs_truncate_blocks(fs, &cv->inode, 0);
+        int trc = cfs_lock_tree_w(fs, vn);
+        if (trc != 0)
+            goto gone;   /* its clone went since the check above: nothing here is the live tree's */
+        trc = cfs_truncate_blocks(fs, &cv->inode, 0);
         if (trc != 0) {
             /* The same hazard as a failed slot write, one step earlier:
              * the truncate frees every extent before storing the
@@ -2374,6 +2419,7 @@ static void cfs_evict(struct vnode *vn)
         }
         cfs_unlock_tree(fs);
     }
+gone:
     kfree(cv);
     vn->fs_priv = NULL;
 }

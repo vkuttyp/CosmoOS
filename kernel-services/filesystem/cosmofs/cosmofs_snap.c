@@ -1326,7 +1326,12 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
     }
     if (doomed.flags & CFS_SNAP_F_CLONE) {
         kfree(remaining);
-        int crc = snap_cow(fs, NULL);
+        /* What can fail without a change fails first: a deletion refused
+         * for want of memory leaves the mount as it was, to try again. */
+        int crc = cfs_clone_ready(fs, doomed.id);
+        if (crc)
+            return crc;
+        crc = snap_cow(fs, NULL);
         if (crc)
             return crc;
         uint64_t cfreed = 0;

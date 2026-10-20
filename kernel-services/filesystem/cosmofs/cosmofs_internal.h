@@ -293,6 +293,7 @@ int cfs_clones_load(struct cfs *fs);
 void cfs_clones_free(struct cfs *fs);
 int cfs_clones_publish(struct cfs *fs);
 int cfs_clone_create(struct cfs *fs, const char *origin, const char *name, struct cfs_snapshot *out);
+int cfs_clone_ready(struct cfs *fs, uint64_t id);
 int cfs_clone_delete(struct cfs *fs, const struct cfs_snapshot *doomed, uint64_t *freed);
 bool cfs_snapshot_has_clones(struct cfs *fs, uint64_t id);
 int cfs_snapshot_list_cow(struct cfs *fs);

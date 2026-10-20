@@ -237,7 +237,7 @@ As built:
   each commit before it allocates (`cfs_clones_publish`). An operation on
   a clone's vnode enters the clone under the mount's lock, swapping its
   `imap_root`, `next_ino` and `inode_count` into the in-memory
-  superblock, and leaves it before the lock goes (`cfs_lock_tree`,
+  superblock, and leaves it before the lock goes (`cfs_lock_tree_w`,
   `cfs_unlock_tree` on create, symlink, unlink, rename, writepage(s),
   truncate, evict and setattr); a commit from inside a clone leaves it
   first. Vnodes in a clone carry its id as their tag; inode numbers are
@@ -283,3 +283,29 @@ Measured (2026-10-20):
   test-snapshot` PASS on x86-64 (95.0 s) and AArch64 (139.2 s), every
   stage -- install, identity, rollback, crash, clone; `make analyze` clean;
   `make host-test` PASS.
+
+### Review of the third pull request (#423, 2026-10-20)
+
+Qodo and Codex (one of them Codex's security review):
+
+- `fsync` on a file in a clone, or in a snapshot, wrote its inode
+  through the live tree's inode map: `cfs_vnode_sync` took the plain
+  lock, and this pull request's masking of tagged inode numbers turned
+  the vnode's number into the live inode's. A reader of a snapshot could
+  replace a live inode, the root directory's included. Fixed: every
+  write path takes `cfs_lock_tree_w`, which enters the vnode's clone or
+  refuses (`-EROFS`; `fsync` of a snapshot file writes nothing and
+  returns 0), and `cfs_inode_write` refuses a tagged number whose tree
+  is not the one entered. `cosmofs-clone` fsyncs a clone file and a
+  snapshot file and checks the live file of the same number, also after
+  a remount. With the old `cfs_vnode_sync` and without the guard (a
+  throwaway worktree, x86-64 debug boot) it fails at that check:
+  `read_matches(ENG "/a", "live2", 5)`.
+- A write racing a clone's deletion could fall through to the live
+  tree: the tree is now decided under the same hold that enters it.
+- A clone deletion that cannot build its origin's set fails before the
+  list is copied, leaving the mount writable.
+
+Measured after the fixes: x86-64 debug `make test` PASS 154.4 s; AArch64
+debug PASS 169.1 s; release `make test-snapshot` PASS x86-64 95.1 s,
+AArch64 138.8 s; `make analyze` clean on both.
