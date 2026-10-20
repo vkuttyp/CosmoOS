@@ -986,8 +986,32 @@ static int status(void)
 }
 
 /*
+ * Whether the running kernel's /dev/fsctl is older than version 3: it
+ * takes the 16-byte command of versions 1 and 2. Version 3 came with
+ * format 12, so such a kernel reads format 11 at most -- and since it
+ * mounted the root, the root is not 12.
+ */
+static bool fsctl_predates_v3(int fd)
+{
+    struct {
+        uint16_t version, op;
+        uint32_t flags;
+        uint64_t mount_id;
+    } old;
+    for (uint16_t v = 1; v <= 2; v++) {
+        memset(&old, 0, sizeof(old));
+        old.version = v;
+        old.op = COSMO_FSCTL_LIST;
+        if (write(fd, &old, sizeof(old)) == (long)sizeof(old))
+            return true;
+    }
+    return false;
+}
+
+/*
  * The cosmofs format the root is at: 0 when the root is not a cosmofs
- * with snapshots (the live image), -1 when it cannot be told. A pool is
+ * with snapshots (the live image) or the running kernel predates format
+ * 12, -1 when it cannot be told. A pool is
  * raised from 11 to 12 by its first snapshot
  * (docs/kernel-services/filesystem/cosmofs/design.md, "Format version
  * 12"), and a kernel that reads 11 at most cannot mount it; the gate
@@ -1010,8 +1034,18 @@ static int root_format(void)
         free(buf);
         size_t cap = sizeof(struct cosmo_fsctl_result) + room * sizeof(struct cosmo_fsctl_mount);
         buf = malloc(cap);
-        if (buf == NULL || write(fd, &cmd, sizeof(cmd)) != (long)sizeof(cmd))
+        if (buf == NULL)
             break;
+        if (write(fd, &cmd, sizeof(cmd)) != (long)sizeof(cmd)) {
+            int e = errno;
+            if (e == EINVAL && fsctl_predates_v3(fd)) {
+                free(buf);
+                close(fd);
+                return 0;
+            }
+            errno = e;
+            break;
+        }
         n = read(fd, buf, cap);
         if (n >= 0 || errno != ERANGE)
             break;

@@ -98,7 +98,13 @@ Review (Qodo, Codex), each fixed:
   whole (grown on `-ERANGE`, never read past what came back), in
   `cosmo-snap` and `cosmo-upgrade`.
 - `cosmo-upgrade`'s format gate fails closed: a root format it cannot
-  read refuses the switch.
+  read refuses the switch. A running kernel whose `/dev/fsctl` takes only
+  the 16-byte command of versions 1 and 2 predates format 12 and mounted
+  the root, so the root is not 12 and the gate passes: CI's `upgrade
+  test` runs this build's `cosmo-upgrade` on an installed v1.0.3, and the
+  first fail-closed push refused there (run 39413879230, both
+  architectures). `make BUILD=release test-upgrade` x86-64 PASS 156.9 s
+  with the fix.
 - `SNAP_LIST` pages: `struct cosmo_fsctl` gains `cursor` (88 bytes),
   1024 records a page from the id after it; `cosmo-snap list` follows.
 - Sizes count the allocation maps and the deadlist blocks a snapshot
