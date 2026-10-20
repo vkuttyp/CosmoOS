@@ -19,10 +19,16 @@
 #include <unistd.h>
 
 #include "../userland/lib/fetch.h"
+#include "../userland/lib/rootsnap.h"
 #include "pkg.h"
 #include "verify.h"
 
 static bool g_dry_run, g_force, g_reinstall;
+/* --stop-after=N (test-upgrade's PKG-3 stages): after N packages are in
+ * place the transaction stops where it is, its writes on disk, and waits
+ * to be killed -- an interruption between two packages, made exact. */
+static int g_stop_after = -1;
+static int g_committed;
 static struct index g_index;
 static bool g_index_loaded;
 
@@ -963,7 +969,279 @@ static int libs_still_required(const struct manifest *old, const struct manifest
     return rc;
 }
 
+/* --- transactions (PKG-3; docs/pkg/design.md, "Transactions") ------------------- *
+ *
+ * install, remove, upgrade and rollback each take a snapshot of the root,
+ * pkg-tx-<seconds>, before their first change, and delete it when they
+ * finish. One that is killed leaves it behind; init, at the next boot,
+ * rolls the root back to it and reboots once (init.c, pkg_recover), so a
+ * multi-package request is all or nothing across an interruption. One
+ * that fails -- a refusal, a full disk -- is not undone: what completed
+ * stays, as before, and the snapshot goes; rolling the whole root back on
+ * an error would undo whatever else happened since.
+ *
+ * A root that keeps no snapshots (the live image, an older format) has no
+ * transactions, and says so.
+ */
+struct tx {
+    bool on;
+    struct rootsnap rs;
+    char name[COSMO_FSCTL_NAME_MAX + 1];
+};
+static struct tx g_tx;
+
+/* Room for the snapshot's own blocks and the directories the packages'
+ * files change under it, beyond the files themselves. */
+#define TX_MARGIN (512u * 1024u)
+
+/* The transaction, before anything changes; `need` is what the packages'
+ * files take (they are written beside the old ones, and the old ones stay
+ * the snapshot's). Refused for want of room before anything is written. */
+/* The record's value: "none", or a format number; anything else (or no
+ * record) is the strictest answer, 0. */
+static unsigned oldest_format(void)
+{
+    uint8_t *rec = NULL;
+    size_t len = 0;
+    if (read_whole(PKG_OLDEST_FORMAT, &rec, &len, 64) < 0)
+        return 0;
+    while (len && (rec[len - 1] == '\n' || rec[len - 1] == ' '))
+        len--;
+    unsigned v = 0;
+    if (len == 4 && memcmp(rec, "none", 4) == 0) {
+        v = ~0u;
+    } else if (len >= 1 && len <= 3) {
+        for (size_t i = 0; i < len; i++) {
+            if (rec[i] < '0' || rec[i] > '9') {
+                v = 0;
+                break;
+            }
+            v = v * 10 + (unsigned)(rec[i] - '0');
+        }
+    }
+    free(rec);
+    return v;
+}
+
+static int tx_begin(const char *what, uint64_t need)
+{
+    if (g_dry_run || g_tx.on)
+        return 0;
+    if (rootsnap_open(&g_tx.rs, "/") < 0) {
+        if (errno == EOPNOTSUPP) {
+            printf("pkg: / keeps no snapshots: no transaction (an interrupted %s is not undone)\n", what);
+            return 0;
+        }
+        /* Snapshots exist here but cannot be reached: refused, rather than
+         * a change an interruption could not undo. */
+        fprintf(stderr, "pkg: the root's snapshots cannot be reached (/dev/fsctl: %s); nothing changed\n",
+                strerror(errno));
+        return EXIT_FAILED;
+    }
+    struct cosmo_fsctl_snap_pool pool;
+    if (rootsnap_list(&g_tx.rs, &pool, NULL, NULL) < 0) {
+        fprintf(stderr, "pkg: cannot read the root's snapshots: %s; nothing changed\n", strerror(errno));
+        rootsnap_close(&g_tx.rs);
+        return EXIT_FAILED;
+    }
+    /* A format-11 root is raised to 12 by its first snapshot (B1), which a
+     * kernel reading 11 at most cannot mount: not while a boot set kept on
+     * the ESP has such a kernel, or the way back to it would be gone.
+     * cosmo-upgrade and cosmo-install record the oldest format a kept set
+     * reads; without the record (an upgrade by v1.0.7 or older), or with
+     * one that does not read, no raise. */
+    if (pool.format < 12 && oldest_format() < 12) {
+        printf("pkg: no transaction: its snapshot would raise / to format 12, which a release kept for "
+               "cosmo-upgrade --rollback cannot mount (an interrupted %s is not undone)\n", what);
+        rootsnap_close(&g_tx.rs);
+        return 0;
+    }
+    /* The packages are kept for pkg rollback, so each is on disk twice. */
+    uint64_t want = 2 * need + TX_MARGIN;
+    if (pool.free_bytes < want) {
+        if (need == 0) {
+            /* A removal gives room back, and its snapshot would hold the
+             * files until it ends: on a full root it runs without one. */
+            printf("pkg: not enough space for a transaction (%llu KiB free): this %s is not undone if "
+                   "interrupted\n", (unsigned long long)(pool.free_bytes / 1024), what);
+            rootsnap_close(&g_tx.rs);
+            return 0;
+        }
+        fprintf(stderr,
+                "pkg: not enough space for this %s: about %llu KiB needed (the packages, a copy kept for "
+                "pkg rollback, and the transaction's snapshot), %llu KiB free; nothing changed\n",
+                what, (unsigned long long)((want + 1023) / 1024), (unsigned long long)(pool.free_bytes / 1024));
+        rootsnap_close(&g_tx.rs);
+        return EXIT_FAILED;
+    }
+    snprintf(g_tx.name, sizeof(g_tx.name), PKG_TX_PREFIX "%lld", (long long)now_utc());
+    struct cosmo_fsctl_snap s;
+    if (rootsnap_create(&g_tx.rs, g_tx.name, &s) < 0) {
+        int e = errno;
+        if (e == ENOSPC)
+            fprintf(stderr, "pkg: not enough space for the transaction's snapshot (%llu KiB free); nothing changed\n",
+                    (unsigned long long)(pool.free_bytes / 1024));
+        else
+            fprintf(stderr, "pkg: cannot take the transaction's snapshot %s: %s; nothing changed\n", g_tx.name,
+                    strerror(e));
+        rootsnap_close(&g_tx.rs);
+        return EXIT_FAILED;
+    }
+    /* The live tree names its open transaction, after the snapshot (which
+     * so does not): init undoes only the snapshot this names, and only
+     * while it does -- not an operator's snapshot of that name, not one a
+     * finished command failed to delete (init.c, pkg_recover). */
+    char line[COSMO_FSCTL_NAME_MAX + 2];
+    int ll = snprintf(line, sizeof(line), "%s\n", g_tx.name);
+    if (write_atomic(PKG_TX_ACTIVE, line, (size_t)ll, 0644) < 0) {
+        fprintf(stderr, "pkg: cannot record the transaction (%s): %s; nothing changed\n", PKG_TX_ACTIVE,
+                strerror(errno));
+        (void)rootsnap_delete(&g_tx.rs, g_tx.name);
+        rootsnap_close(&g_tx.rs);
+        return EXIT_FAILED;
+    }
+    sync();
+    g_tx.on = true;
+    return 0;
+}
+
+/* The transaction is over, done or failed: its snapshot goes, then the
+ * record naming it. Stopped between the two, the record names a
+ * snapshot that is gone, which init clears. */
+static void tx_end(void)
+{
+    if (!g_tx.on)
+        return;
+    sync();   /* what it did is on disk before the way back is removed */
+    if (rootsnap_delete(&g_tx.rs, g_tx.name) < 0)
+        fprintf(stderr, "pkg: cannot delete the transaction's snapshot %s: %s; it is not undone, and the snapshot "
+                        "stays (cosmo-snap delete %s)\n", g_tx.name, strerror(errno), g_tx.name);
+    (void)unlink(PKG_TX_ACTIVE);
+    sync();
+    rootsnap_close(&g_tx.rs);
+    g_tx.on = false;
+}
+
+/* After each package is in place: the test stop (--stop-after). */
+static void tx_package_done(void)
+{
+    g_committed++;
+    if (g_stop_after >= 0 && g_committed >= g_stop_after) {
+        sync();
+        printf("pkg: test stop after %d package(s): waiting to be killed\n", g_committed);
+        fflush(stdout);
+        for (;;)
+            sleep(3600);
+    }
+}
+
+/* --- kept packages (pkg rollback) ------------------------------------------------- *
+ *
+ * Each package installed is kept under PKG_KEPT_DIR/<name>/, its file as
+ * fetched, with ORDER listing the kept files newest first: the version
+ * installed and the one before it, no more. pkg rollback NAME installs the
+ * one before.
+ */
+static void kept_order_path(const char *name, char *out, size_t n)
+{
+    snprintf(out, n, PKG_KEPT_DIR "/%s/ORDER", name);
+}
+
+static int kept_read(const char *name, char files[][PKG_FILE_MAX], int max)
+{
+    char path[PKG_PATH_MAX];
+    kept_order_path(name, path, sizeof(path));
+    uint8_t *text;
+    size_t len;
+    if (read_whole(path, &text, &len, 4096) < 0)
+        return 0;
+    int n = 0;
+    char *s = (char *)text, *end = s + len;
+    while (s < end && n < max) {
+        char *nl = memchr(s, '\n', (size_t)(end - s));
+        size_t l = nl ? (size_t)(nl - s) : (size_t)(end - s);
+        if (l > 0 && l < PKG_FILE_MAX && memchr(s, '/', l) == NULL) {
+            memcpy(files[n], s, l);
+            files[n][l] = 0;
+            n++;
+        }
+        s += l + 1;
+    }
+    free(text);
+    return n;
+}
+
+/* `l`'s file kept, before it is installed: a copy that cannot be written
+ * refuses the install with nothing changed (pkg rollback depends on it). */
+static int kept_stage(const struct loaded *l)
+{
+    char path[PKG_PATH_MAX + PKG_FILE_MAX];
+    snprintf(path, sizeof(path), PKG_KEPT_DIR "/%s/%s-%s.cpk", l->m.name, l->m.name, l->m.version);
+    if (ensure_parent_dirs(path, NULL) < 0 || write_atomic(path, l->blob, l->len, 0644) < 0) {
+        fprintf(stderr, "pkg: %s: cannot keep %s-%s for pkg rollback: %s; nothing changed\n", l->m.name,
+                l->m.name, l->m.version, strerror(errno));
+        return EXIT_FAILED;
+    }
+    return 0;
+}
+
+/* `l` is installed, replacing `prev` (or nothing): ORDER names it first and
+ * the version it replaced second -- that version's file when it is kept,
+ * its name alone when it is not (installed before pkg kept copies), which
+ * pkg rollback then takes from the index -- and nothing else is kept. */
+static int kept_commit(const struct loaded *l, const char *prev)
+{
+    char file[PKG_FILE_MAX], before[PKG_FILE_MAX] = "", dir[PKG_PATH_MAX];
+    snprintf(file, sizeof(file), "%s-%s.cpk", l->m.name, l->m.version);
+    if (prev && strcmp(prev, l->m.version) != 0)
+        snprintf(before, sizeof(before), "%s-%s.cpk", l->m.name, prev);
+    snprintf(dir, sizeof(dir), PKG_KEPT_DIR "/%s", l->m.name);
+    char old[4][PKG_FILE_MAX];
+    int n = kept_read(l->m.name, old, 4);
+    char order[2 * (PKG_FILE_MAX + 1) + 1];
+    int len = snprintf(order, sizeof(order), "%s\n", file);
+    if (before[0])
+        len += snprintf(order + len, sizeof(order) - (size_t)len, "%s\n", before);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(old[i], file) == 0 || strcmp(old[i], before) == 0)
+            continue;
+        char gone[PKG_PATH_MAX + PKG_FILE_MAX];
+        snprintf(gone, sizeof(gone), "%s/%s", dir, old[i]);
+        unlink(gone);
+    }
+    char opath[PKG_PATH_MAX];
+    kept_order_path(l->m.name, opath, sizeof(opath));
+    if (write_atomic(opath, order, (size_t)len, 0644) < 0) {
+        fprintf(stderr, "pkg: %s: installed, but the kept versions could not be recorded (%s): pkg rollback %s "
+                        "may not find the one before\n", l->m.name, strerror(errno), l->m.name);
+        return EXIT_FAILED;
+    }
+    return 0;
+}
+
+static int install_loaded_files(struct loaded *l);
+
+/* One package into place: kept first, then installed, then recorded as
+ * kept, and counted toward the test stop. */
 static int install_loaded(struct loaded *l)
+{
+    char prev[PKG_VERSION_MAX] = "";
+    struct manifest inst;
+    if (installed_load(l->m.name, &inst)) {
+        strlcpy(prev, inst.version, sizeof(prev));
+        manifest_free(&inst);
+    }
+    int rc = g_dry_run ? 0 : kept_stage(l);
+    if (rc == 0)
+        rc = install_loaded_files(l);
+    if (rc == 0 && !g_dry_run) {
+        rc = kept_commit(l, prev[0] ? prev : NULL);
+        tx_package_done();
+    }
+    return rc;
+}
+
+static int install_loaded_files(struct loaded *l)
 {
     int lrc = check_requires(&l->m);
     if (lrc)
@@ -1405,41 +1683,46 @@ static int cmd_install(int argc, char **argv)
     struct depend reqs[64];
     int nreq = 0;
     int rc = 0;
-    /* Package files first: each is loaded, its missing dependencies planned from the index. */
+    /* The whole request is planned before anything changes -- the files
+     * named, each loaded and checked, their missing dependencies and the
+     * names asked for, with every dependency the index adds -- so the
+     * transaction's room is the plan's, not a guess (tx_begin). */
+    struct loaded *files = calloc((size_t)argc, sizeof(*files));
+    int nfiles = 0;
+    if (files == NULL)
+        return EXIT_FAILED;
     for (int i = 0; i < argc && rc == 0; i++) {
         if (strchr(argv[i], '/') == NULL)
             continue;
-        struct loaded l;
-        rc = load_package(argv[i], NULL, &l);
+        struct loaded *l = &files[nfiles];
+        rc = load_package(argv[i], NULL, l);
         if (rc)
-            return rc;
-        int ndeps = 0;
-        struct depend deps[PKG_MAX_DEPENDS];
-        for (int k = 0; k < l.m.ndepends; k++) {
+            break;
+        nfiles++;
+        for (int k = 0; k < l->m.ndepends && rc == 0; k++) {
             struct manifest inst;
-            bool ok = installed_load(l.m.depends[k].name, &inst);
+            bool ok = installed_load(l->m.depends[k].name, &inst);
             if (ok) {
-                ok = depend_satisfied(&l.m.depends[k], inst.version);
+                ok = depend_satisfied(&l->m.depends[k], inst.version);
                 manifest_free(&inst);
             }
-            if (!ok)
-                deps[ndeps++] = l.m.depends[k];
+            if (ok)
+                continue;
+            if (nreq == 64) {
+                fprintf(stderr, "pkg: too many packages in one request\n");
+                rc = EXIT_USAGE;
+            } else {
+                reqs[nreq++] = l->m.depends[k];
+            }
         }
-        if (ndeps) {
-            rc = index_load() ? EXIT_FAILED : plan_build(&p, deps, ndeps);
-            for (int k = 0; k < p.n && rc == 0; k++)
-                rc = install_entry(p.entries[k]);
-        }
-        if (rc == 0)
-            rc = install_loaded(&l);
-        loaded_free(&l);
     }
     for (int i = 0; i < argc && rc == 0; i++) {
         if (strchr(argv[i], '/'))
             continue;
         if (nreq == 64) {
             fprintf(stderr, "pkg: too many packages in one request\n");
-            return EXIT_USAGE;
+            rc = EXIT_USAGE;
+            break;
         }
         char spec[PKG_NAME_MAX + PKG_VERSION_MAX + 4];
         const char *eq = strchr(argv[i], '=');
@@ -1449,17 +1732,29 @@ static int cmd_install(int argc, char **argv)
             strlcpy(spec, argv[i], sizeof(spec));
         if (!depend_parse(spec, &reqs[nreq])) {
             fprintf(stderr, "pkg: bad package specification '%s'\n", argv[i]);
-            return EXIT_USAGE;
+            rc = EXIT_USAGE;
+            break;
         }
         nreq++;
     }
     if (rc == 0 && nreq) {
-        if (index_load())
-            return EXIT_FAILED;
-        rc = plan_build(&p, reqs, nreq);
-        for (int k = 0; k < p.n && rc == 0; k++)
-            rc = install_entry(p.entries[k]);
+        rc = index_load() ? EXIT_FAILED : plan_build(&p, reqs, nreq);
     }
+    uint64_t need = 0;
+    for (int i = 0; i < nfiles; i++)
+        need += files[i].len;
+    for (int k = 0; k < p.n; k++)
+        need += p.entries[k]->size;
+    if (rc == 0)
+        rc = tx_begin("install", need);
+    /* Dependencies first (the plan's order), then the files named. */
+    for (int k = 0; k < p.n && rc == 0; k++)
+        rc = install_entry(p.entries[k]);
+    for (int i = 0; i < nfiles && rc == 0; i++)
+        rc = install_loaded(&files[i]);
+    for (int i = 0; i < nfiles; i++)
+        loaded_free(&files[i]);
+    free(files);
     return rc;
 }
 
@@ -1471,7 +1766,9 @@ static int cmd_remove(int argc, char **argv)
         fprintf(stderr, "usage: pkg remove [-f] NAME...\n");
         return EXIT_USAGE;
     }
-    int rc = 0;
+    int rc = tx_begin("removal", 0);
+    if (rc)
+        return rc;
     for (int i = 0; i < argc; i++) {
         struct manifest m;
         if (!installed_load(argv[i], &m)) {
@@ -1551,6 +1848,7 @@ static int cmd_remove(int argc, char **argv)
                     rc = EXIT_FAILED;
                 }
                 libs_note_removed(m.name);   /* its files are gone */
+                tx_package_done();
             }
         } else {
             libs_note_removed(m.name);   /* a later package of this dry run is checked without it */
@@ -1568,14 +1866,18 @@ static int cmd_upgrade(int argc, char **argv)
         return EXIT_FAILED;
     char names[128][PKG_NAME_MAX];
     int n = argc ? argc : installed_names(names, 128);
-    int rc = 0, upgraded = 0;
-    for (int i = 0; i < n && rc == 0; i++) {
+    int rc = 0;
+    /* Every package with a newer version, planned at once with what they
+     * need, before anything changes: the plan sizes the transaction. */
+    struct depend reqs[128];
+    int nreq = 0;
+    for (int i = 0; i < n && nreq < 128; i++) {
         const char *name = argc ? argv[i] : names[i];
         struct manifest inst;
         if (!installed_load(name, &inst)) {
             if (argc) {
                 fprintf(stderr, "pkg: %s is not installed\n", name);
-                rc = EXIT_FAILED;
+                return EXIT_FAILED;
             }
             continue;
         }
@@ -1584,19 +1886,157 @@ static int cmd_upgrade(int argc, char **argv)
         manifest_free(&inst);
         if (!newer)
             continue;
-        struct plan p;
-        p.n = 0;
         struct depend d = { .op = OP_EQ };
         strlcpy(d.name, name, sizeof(d.name));
         strlcpy(d.version, best->version, sizeof(d.version));
-        rc = plan_build(&p, &d, 1);
-        for (int k = 0; k < p.n && rc == 0; k++)
-            rc = install_entry(p.entries[k]);
+        reqs[nreq++] = d;
+    }
+    if (nreq == 0) {
+        printf("pkg: 0 packages upgraded\n");
+        return 0;   /* nothing to change: no transaction */
+    }
+    struct plan p;
+    p.n = 0;
+    rc = plan_build(&p, reqs, nreq);
+    uint64_t need = 0;
+    for (int k = 0; k < p.n; k++)
+        need += p.entries[k]->size;
+    if (rc == 0)
+        rc = tx_begin("upgrade", need);
+    for (int k = 0; k < p.n && rc == 0; k++)
+        rc = install_entry(p.entries[k]);
+    if (rc == 0)
+        printf("pkg: %d package%s upgraded\n", nreq, nreq == 1 ? "" : "s");
+    return rc;
+}
+
+/* --- rollback ---------------------------------------------------------------- */
+
+/* Would `name` at `version` (needing `deps`) keep every installed package
+ * satisfied, and is every package it needs installed at a version it
+ * accepts? 0, or EXIT_FAILED with each conflict named (-f overrides). */
+static int rollback_fits(const char *name, const char *version, const struct depend *deps, int ndeps)
+{
+    char names[128][PKG_NAME_MAX];
+    int n = installed_names(names, 128);
+    int bad = 0;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(names[i], name) == 0)
+            continue;
+        struct manifest m;
+        if (!installed_load(names[i], &m))
+            continue;
+        for (int k = 0; k < m.ndepends; k++)
+            if (strcmp(m.depends[k].name, name) == 0 && !depend_satisfied(&m.depends[k], version)) {
+                fprintf(stderr, "pkg: %s %s needs %s %s %s, which %s is not\n", m.name, m.version, name,
+                        op_text(m.depends[k].op), m.depends[k].version, version);
+                bad++;
+            }
+        manifest_free(&m);
+    }
+    for (int k = 0; k < ndeps; k++) {
+        struct manifest m;
+        bool ok = installed_load(deps[k].name, &m);
+        if (ok) {
+            ok = depend_satisfied(&deps[k], m.version);
+            manifest_free(&m);
+        }
+        if (!ok) {
+            fprintf(stderr, "pkg: %s %s needs %s %s %s, which is not installed\n", name, version, deps[k].name,
+                    op_text(deps[k].op), deps[k].version);
+            bad++;
+        }
+    }
+    if (bad && !g_force) {
+        fprintf(stderr, "pkg: rollback of %s refused (-f to roll back anyway); nothing changed\n", name);
+        return EXIT_FAILED;
+    }
+    return 0;
+}
+
+/* pkg rollback NAME: the version installed before the current one, back in
+ * place with its files, in a transaction of its own: from its kept copy
+ * (kept_stage), or -- for a version installed before pkg kept copies --
+ * from the repositories. */
+static int cmd_rollback(int argc, char **argv)
+{
+    if (argc != 1) {
+        fprintf(stderr, "usage: pkg rollback NAME\n");
+        return EXIT_USAGE;
+    }
+    const char *name = argv[0];
+    struct manifest inst;
+    if (!installed_load(name, &inst)) {
+        fprintf(stderr, "pkg: %s is not installed\n", name);
+        return EXIT_FAILED;
+    }
+    char cur[PKG_FILE_MAX];
+    snprintf(cur, sizeof(cur), "%s-%s.cpk", inst.name, inst.version);
+    char ver[PKG_VERSION_MAX];
+    strlcpy(ver, inst.version, sizeof(ver));
+    manifest_free(&inst);
+    char files[4][PKG_FILE_MAX];
+    int n = kept_read(name, files, 4);
+    const char *prev = NULL;
+    for (int i = 0; i < n && prev == NULL; i++)
+        if (strcmp(files[i], cur) != 0)
+            prev = files[i];
+    if (prev == NULL) {
+        fprintf(stderr, "pkg: %s: no earlier version is recorded (only the installed %s); nothing changed\n", name,
+                ver);
+        return EXIT_FAILED;
+    }
+    /* The version from the file's name: NAME-VERSION.cpk. */
+    char pver[PKG_VERSION_MAX];
+    size_t nl = strlen(name), pl = strlen(prev);
+    if (pl <= nl + 5 || strncmp(prev, name, nl) != 0 || prev[nl] != '-' || strcmp(prev + pl - 4, ".cpk") != 0) {
+        fprintf(stderr, "pkg: %s: the kept record names %s; nothing changed\n", name, prev);
+        return EXIT_FAILED;
+    }
+    snprintf(pver, sizeof(pver), "%.*s", (int)(pl - nl - 5), prev + nl + 1);
+    char path[PKG_PATH_MAX + PKG_FILE_MAX];
+    snprintf(path, sizeof(path), PKG_KEPT_DIR "/%s/%s", name, prev);
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        struct loaded l;
+        int rc = load_package(path, NULL, &l);   /* its signature checked again, as any package file's */
+        if (rc)
+            return rc;
+        if (strcmp(l.m.name, name) != 0 || strcmp(l.m.version, pver) != 0) {
+            fprintf(stderr, "pkg: %s: the kept %s is %s-%s; nothing changed\n", name, prev, l.m.name, l.m.version);
+            loaded_free(&l);
+            return EXIT_FAILED;
+        }
+        rc = rollback_fits(name, pver, l.m.depends, l.m.ndepends);
+        if (rc == 0) {
+            printf("pkg: rolling %s back from %s to %s\n", name, ver, pver);
+            rc = tx_begin("rollback", (uint64_t)st.st_size);
+        }
         if (rc == 0)
-            upgraded++;
+            rc = install_loaded(&l);
+        loaded_free(&l);
+        return rc;
+    }
+    /* Not kept: the repositories' copy of that version, checked against the
+     * index and its signature as an install's. */
+    if (index_load())
+        return EXIT_FAILED;
+    struct depend d = { .op = OP_EQ };
+    strlcpy(d.name, name, sizeof(d.name));
+    strlcpy(d.version, pver, sizeof(d.version));
+    struct index_entry *e = index_best(name, &d);
+    if (e == NULL) {
+        fprintf(stderr, "pkg: %s: %s was not kept and no repository has it; nothing changed\n", name, pver);
+        return EXIT_FAILED;
+    }
+    int rc = rollback_fits(name, pver, e->depends, e->ndepends);
+    if (rc == 0) {
+        printf("pkg: rolling %s back from %s to %s (from %s: no copy was kept)\n", name, ver, pver,
+               g_repos[e->repo].name);
+        rc = tx_begin("rollback", e->size);
     }
     if (rc == 0)
-        printf("pkg: %d package%s upgraded\n", upgraded, upgraded == 1 ? "" : "s");
+        rc = install_entry(e);
     return rc;
 }
 
@@ -1730,6 +2170,7 @@ static void usage(void)
             "       pkg install [-n] [-f] [--reinstall] NAME[=VERSION]... | FILE.cpk...\n"
             "       pkg remove [-n] [-f] NAME...\n"
             "       pkg upgrade [-n] [NAME...]\n"
+            "       pkg rollback NAME\n"
             "       pkg list | info NAME... | search [TEXT...] | verify [NAME...]\n");
 }
 
@@ -1748,6 +2189,8 @@ int main(int argc, char **argv)
             g_force = true;
         else if (strcmp(argv[i], "--reinstall") == 0)
             g_reinstall = true;
+        else if (strncmp(argv[i], "--stop-after=", 13) == 0)
+            g_stop_after = atoi(argv[i] + 13);
         else {
             usage();
             return EXIT_USAGE;
@@ -1757,10 +2200,11 @@ int main(int argc, char **argv)
     argv += i;
 
     bool mutating = strcmp(cmd, "update") == 0 || strcmp(cmd, "install") == 0 || strcmp(cmd, "remove") == 0 ||
-                    strcmp(cmd, "upgrade") == 0;
+                    strcmp(cmd, "upgrade") == 0 || strcmp(cmd, "rollback") == 0;
     /* Changing what is installed is PRIV_SYS_ADMIN's; update, the queries
      * and -n runs are anyone's. */
-    bool changes = strcmp(cmd, "install") == 0 || strcmp(cmd, "remove") == 0 || strcmp(cmd, "upgrade") == 0;
+    bool changes = strcmp(cmd, "install") == 0 || strcmp(cmd, "remove") == 0 || strcmp(cmd, "upgrade") == 0 ||
+                   strcmp(cmd, "rollback") == 0;
     if (changes && !g_dry_run && !holds_priv("sys_admin")) {
         fprintf(stderr, "pkg: %s needs the sys_admin privilege (this process lacks it)\n", cmd);
         return EXIT_FAILED;
@@ -1780,6 +2224,8 @@ int main(int argc, char **argv)
         rc = cmd_remove(argc, argv);
     else if (strcmp(cmd, "upgrade") == 0)
         rc = cmd_upgrade(argc, argv);
+    else if (strcmp(cmd, "rollback") == 0)
+        rc = cmd_rollback(argc, argv);
     else if (strcmp(cmd, "list") == 0)
         rc = cmd_list();
     else if (strcmp(cmd, "info") == 0)
@@ -1792,6 +2238,7 @@ int main(int argc, char **argv)
         usage();
         rc = EXIT_USAGE;
     }
+    tx_end();   /* done or failed: either way not undone at the next boot */
     if (mutating && !g_dry_run)
         lock_release();
     fflush(stdout);

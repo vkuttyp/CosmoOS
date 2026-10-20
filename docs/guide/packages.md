@@ -76,6 +76,50 @@ cosmo$ exit
 ...init: disk root synced
 ```
 
+## If pkg is interrupted
+
+Installing, upgrading, removing and rolling back are each one
+transaction: `pkg` takes a snapshot of the root first and deletes it when
+it is done. If the machine stops in the middle -- `pkg install a b` with
+`a` in place and `b` not -- the next boot undoes it before anything else
+starts, and reboots once to do so:
+
+```text
+init: pkg: undoing the interrupted package transaction pkg-tx-1792512345: the root rolls back to it, and the tree it replaces is kept as pkg-undone-1792512400; rebooting once
+...
+init: pkg: the interrupted package transaction pkg-tx-1792512345 is undone: the root is as it was before it
+```
+
+The whole root goes back to the moment the transaction began, not only
+the packages: anything else written in between goes with it. A command
+that fails without being interrupted -- a refusal, a full disk -- is not
+undone: what completed stays. `pkg` refuses before it changes anything
+when the root lacks the room (`not enough space for this install: about
+N KiB needed ..., M KiB free; nothing changed`). The first transaction
+on a root still at format 11 would raise it to 12, as the first snapshot
+does ([Snapshots](snapshots.md)), and v1.0.7 and older cannot mount a
+format-12 root: so while `cosmo-upgrade --rollback` could still return to
+such a release, `pkg` takes no snapshot and says so (`no transaction:
+...`), and an interrupted command is not undone.
+
+These snapshots are `pkg`'s own: `cosmo-snap list` leaves them out
+(`cosmo-snap list --all` shows them).
+
+## Rolling one package back
+
+`pkg rollback NAME` returns a package to the version installed before
+the current one, with its files; `pkg` keeps the last two versions of
+each package in `/var/cache/pkg/kept` for that. Rolling back again goes
+forward again.
+
+```text
+cosmo$ pkg rollback hello
+pkg: rolling hello back from 1.1 to 1.0
+pkg: installing hello-1.0 (1 files)
+cosmo$ hello
+hello, world (hello 1.0)
+```
+
 ## Network repositories
 
 `pkg update` reads both: the disk's repository needs nothing, the network

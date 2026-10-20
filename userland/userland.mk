@@ -69,6 +69,7 @@ ifeq ($(SELFTEST),1)
 USER_PROGRAMS += $(USER_TEST_PROGRAMS)
 endif
 PROG_DIR_init := init
+PROG_EXTRA_SRCS_init := userland/lib/rootsnap.c
 
 # A program is one file, plus whatever PROG_EXTRA_SRCS_<name> lists.
 prog_srcs = userland/$(PROG_DIR_$(1))/$(1).c $(PROG_EXTRA_SRCS_$(1))

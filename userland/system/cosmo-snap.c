@@ -4,7 +4,7 @@
  * docs/guide/snapshots.md).
  *
  *   cosmo-snap [-m MOUNTPOINT] create NAME
- *   cosmo-snap [-m MOUNTPOINT] list
+ *   cosmo-snap [-m MOUNTPOINT] list [--all]
  *   cosmo-snap [-m MOUNTPOINT] delete NAME
  *   cosmo-snap [-m MOUNTPOINT] diff A B
  *   cosmo-snap [-m MOUNTPOINT] rollback [--no-reboot] NAME
@@ -25,6 +25,11 @@
  * removed (-) or changed (M) -- by type, mode, owner, size, link target
  * or contents; it compares no blocks.
  *
+ * `list` leaves out the snapshots programs take on the operator's behalf --
+ * pkg's transactions (pkg-*) and cosmo-upgrade's boot environments (be-*,
+ * which `cosmo-upgrade --list` shows) -- and says how many; `--all` shows
+ * them too.
+ *
  * Exit status: 0 done, 1 refused or failed, 2 usage.
  */
 #include <dirent.h>
@@ -44,7 +49,7 @@ static const char *g_mp = "/";
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: cosmo-snap [-m MOUNTPOINT] create NAME | list | delete NAME | diff A B |\n"
+    fprintf(stderr, "usage: cosmo-snap [-m MOUNTPOINT] create NAME | list [--all] | delete NAME | diff A B |\n"
                     "       rollback [--no-reboot] NAME | rollback --cancel | clone NAME CLONE\n");
     exit(2);
 }
@@ -191,8 +196,15 @@ static int cmd_create(int fd, unsigned long long id, const char *name)
     return 0;
 }
 
-static int cmd_list(int fd, unsigned long long id)
+/* A snapshot a program took on the operator's behalf, hidden by default. */
+static int programs_own(const char *name)
 {
+    return strncmp(name, "pkg-", 4) == 0 || strncmp(name, "be-", 3) == 0;
+}
+
+static int cmd_list(int fd, unsigned long long id, int all)
+{
+    unsigned hidden = 0;
     size_t cap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_snap_pool) +
                  COSMO_FSCTL_SNAP_PAGE * sizeof(struct cosmo_fsctl_snap);
     char *buf = malloc(cap);
@@ -212,9 +224,15 @@ static int cmd_list(int fd, unsigned long long id)
         printf("cosmo-snap: %s: format %u%s%s\n", g_mp, p->format,
                (p->flags & COSMO_FSCTL_POOL_F_PENDING) ? ", a rollback is pending" : "",
                (p->flags & COSMO_FSCTL_POOL_F_HELD) ? ", held after a rollback until this boot completes" : "");
+        printf("cosmo-snap: %s: %llu KiB free of %llu KiB\n", g_mp, (unsigned long long)(p->free_bytes / 1024),
+               (unsigned long long)(p->total_bytes / 1024));
         printf("%-20s %5s %-20s %10s %10s %-36s %s\n", "NAME", "ID", "CREATED", "REFER", "UNIQUE", "UUID", "FLAGS");
     }
     for (unsigned i = 0; i < h->count; i++) {
+        if (!all && programs_own(s[i].name)) {
+            hidden++;
+            continue;
+        }
         char u[37], t[24], flags[64] = "";
         uuid_str(s[i].uuid, u);
         time_str(s[i].created_ns, t);
@@ -227,6 +245,8 @@ static int cmd_list(int fd, unsigned long long id)
             strncat(flags, "rollback-safety ", sizeof(flags) - strlen(flags) - 1);
         if (s[i].flags & COSMO_FSCTL_SNAP_F_HELD)
             strncat(flags, "held ", sizeof(flags) - strlen(flags) - 1);
+        if (s[i].flags & COSMO_FSCTL_SNAP_F_LIVE)
+            strncat(flags, "rolled-back-to ", sizeof(flags) - strlen(flags) - 1);
         printf("%-20s %5llu %-20s %9lluK %9lluK %-36s %s\n", s[i].name, (unsigned long long)s[i].id, t,
                (unsigned long long)(s[i].referenced / 1024), (unsigned long long)(s[i].unique / 1024), u,
                flags[0] ? flags : "-");
@@ -236,6 +256,8 @@ static int cmd_list(int fd, unsigned long long id)
         break;
     cursor = s[h->count - 1].id;
     }
+    if (hidden)
+        printf("cosmo-snap: %u snapshot(s) taken by pkg or cosmo-upgrade not shown (list --all)\n", hidden);
     free(buf);
     return 0;
 }
@@ -551,13 +573,25 @@ int main(int argc, char **argv)
             fprintf(stderr, "cosmo-snap: create %s: a snapshot's name cannot start with '-'\n", argv[i]);
             return 1;
         }
+        if (programs_own(argv[i])) {
+            fprintf(stderr, "cosmo-snap: create %s: names starting pkg- or be- are pkg's and cosmo-upgrade's\n",
+                    argv[i]);
+            return 1;
+        }
         return cmd_create(fd, id, argv[i]);
     }
     if (strcmp(op, "list") == 0 && argc - i == 0)
-        return cmd_list(fd, id);
+        return cmd_list(fd, id, 0);
+    if (strcmp(op, "list") == 0 && argc - i == 1 && strcmp(argv[i], "--all") == 0)
+        return cmd_list(fd, id, 1);
     if (strcmp(op, "delete") == 0 && argc - i == 1)
         return cmd_delete(fd, id, argv[i]);
     if (strcmp(op, "clone") == 0 && argc - i == 2) {
+        if (programs_own(argv[i + 1])) {
+            fprintf(stderr, "cosmo-snap: clone %s: names starting pkg- or be- are pkg's and cosmo-upgrade's\n",
+                    argv[i + 1]);
+            return 1;
+        }
         if (argv[i + 1][0] == '-') {
             fprintf(stderr, "cosmo-snap: clone %s: a clone's name cannot start with '-'\n", argv[i + 1]);
             return 1;

@@ -377,6 +377,84 @@ For every installed package whose index has a newer version satisfying
 the constraints of the other installed packages: install it (the
 "previous version" path above). `pkg upgrade NAME...` restricts the set.
 
+### Transactions (roadmap 1.2 B4, PKG-3)
+
+`install`, `remove`, `upgrade` and `rollback` are each one transaction
+over the root filesystem. Each plans its whole change first -- the files
+named, and every package the index adds for them -- and then, before the
+first change, takes a cosmofs snapshot of the root, `pkg-tx-<seconds>`
+(`tx_begin`, through `userland/lib/rootsnap.c` and `/dev/fsctl`), and
+records its name in `/var/db/pkg/tx-active`, synced (the snapshot does not
+hold the record). When the command ends, done or failed, it syncs,
+deletes the snapshot, then the record (`tx_end`). So a record naming a
+snapshot still there is exactly a transaction cut short: an operator
+cannot name a snapshot `pkg-*` (`cosmo-snap` refuses the prefix), and a
+snapshot a finished command failed to delete has no record naming it.
+
+- **Interrupted** -- killed, the power cut: the snapshot and its record
+  are left on the root. At the next boot init finds them before any
+  service starts (`pkg_recover`), asks for a rollback to the snapshot at
+  the next mount -- B1's pending-rollback record, the tree it replaces
+  kept as `pkg-undone-<seconds>` -- and reboots once. That boot's mount
+  makes the snapshot the live tree (which has no record: it is older than
+  it); init sees the snapshot's `LIVE` flag, while the rollback's hold
+  lasts, deletes it, notes the `pkg-undone-*` it made, and boots on; when
+  the boot completes the hold goes and init deletes that one. Any other
+  `pkg-tx-*` is said and left. Every boot removes `pkg`'s lock, which no
+  `pkg` outlives. A request for several packages is so
+  all or nothing across an interruption. A rollback the mount did not
+  apply (the record refused, no room; backlog CFS-20) is the loop guard:
+  init says so and boots on instead of rebooting again.
+- **Failed** -- a refusal, an error writing: not undone. What completed
+  stays, as it did before transactions, and the snapshot goes. Rolling the
+  whole root back on an error would undo whatever else had changed on it.
+- **Room**: before the snapshot, the root's free space (SNAP_LIST's pool
+  record) must hold twice what the plan's packages take -- they are
+  written beside the old files, and kept for `pkg rollback` -- plus 512
+  KiB for the snapshot's own blocks; else `not enough space for this
+  install: about N KiB needed ..., M KiB free; nothing changed`, and
+  nothing is. A removal on a root that lacks that room runs without a
+  transaction, saying so: it gives the room back. A plan with nothing to
+  do takes none.
+- **No snapshots**: a root that keeps none (the live image's ramfs, a
+  pool older than format 11, a kernel older than snapshots) has no
+  transactions, and `pkg` says so. Snapshots that exist but cannot be
+  reached refuse the command, with nothing changed.
+- **Format 12**: the first snapshot taken on a format-11 root raises it
+  to 12 (B1, "Format version 12"), which a release reading 11 at most
+  (v1.0.7 and older) cannot mount. A transaction must not take away the
+  way back to such a release, so on a format-11 root `pkg` takes one only
+  when every boot set kept on the ESP reads 12:
+  `/var/lib/cosmo-upgrade/oldest-format`, which `cosmo-install` writes as
+  `none` (a fresh install keeps no other set) and `cosmo-upgrade` rewrites
+  after each switch (the least of what the current set's and
+  `\cosmo\prev`'s kernels read). Without it -- a root upgraded by v1.0.7
+  or older -- or naming 11, `pkg` says `no transaction: its snapshot would
+  raise / to format 12, which a release kept for cosmo-upgrade --rollback
+  cannot mount` and runs as it did before transactions.
+- `--stop-after=N` stops a transaction once N packages are in place,
+  synced, and waits to be killed: the harness's exact interruption
+  (`test-pkgtx`).
+
+Snapshots named `pkg-*` are the program's: `cosmo-snap list` leaves them
+out unless given `--all`.
+
+### Rollback (`pkg rollback NAME`)
+
+Every package installed is kept, its signed file as fetched, in
+`/var/cache/pkg/kept/NAME/`, written before the package is installed (a
+copy that cannot be written refuses the install), with `ORDER` naming
+the version installed and the one it replaced, no more (`kept_stage`,
+`kept_commit`). A replaced version installed before `pkg` kept copies is
+named without a file. `pkg rollback NAME` loads the one before -- its
+kept copy, signature checked again, or else that version from the
+repositories, checked against the index as an install's -- refuses it if
+it would leave an installed dependant's constraint unmet or needs a
+package not installed at a version it accepts (`-f` overrides), and
+installs it as an upgrade would, in a transaction of its own: its files
+back, the newer version's extra files removed. Rolling back again returns
+to the newer one.
+
 ### Verify
 
 Recompute SHA-512 of every installed file against the recorded manifest;
@@ -394,8 +472,10 @@ limit is a constant in `pkg.h` and a clear error message.
 ## Concurrency
 
 None: one `pkg` at a time is assumed. A lock file (`/var/db/pkg/lock`
-created with `O_EXCL`) refuses a second concurrent run; a stale lock
-after a crash is removed by hand (`pkg` says so). Records are written
+created with `O_EXCL`) refuses a second concurrent run. A transaction cut
+short leaves it; init's recovery removes it with the transaction
+("Transactions"). Without a transaction (a root that keeps no snapshots)
+a stale lock after a crash is removed by hand (`pkg` says so). Records are written
 through `rename`, so the database is never half-written.
 
 ## Error handling

@@ -406,6 +406,8 @@ static int64_t fsctl_snap(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
         p->format = req.format;
         p->flags = ((req.pool_flags & COSMOFS_POOL_PENDING) ? COSMO_FSCTL_POOL_F_PENDING : 0u) |
                    ((req.pool_flags & COSMOFS_POOL_HELD) ? COSMO_FSCTL_POOL_F_HELD : 0u);
+        p->free_bytes = req.free_bytes;
+        p->total_bytes = req.total_bytes;
     }
     struct cosmo_fsctl_snap *rec = (struct cosmo_fsctl_snap *)(buf + sizeof(*hdr) + pool);
     for (unsigned i = 0; i < req.count; i++) {
@@ -419,7 +421,8 @@ static int64_t fsctl_snap(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
         rec[i].flags = ((info[i].flags & COSMOFS_SNAP_I_CLONE) ? COSMO_FSCTL_SNAP_F_CLONE : 0u) |
                        ((info[i].flags & COSMOFS_SNAP_I_TARGET) ? COSMO_FSCTL_SNAP_F_TARGET : 0u) |
                        ((info[i].flags & COSMOFS_SNAP_I_SAFETY) ? COSMO_FSCTL_SNAP_F_SAFETY : 0u) |
-                       ((info[i].flags & COSMOFS_SNAP_I_HELD) ? COSMO_FSCTL_SNAP_F_HELD : 0u);
+                       ((info[i].flags & COSMOFS_SNAP_I_HELD) ? COSMO_FSCTL_SNAP_F_HELD : 0u) |
+                       ((info[i].flags & COSMOFS_SNAP_I_LIVE) ? COSMO_FSCTL_SNAP_F_LIVE : 0u);
         rec[i].format = info[i].format;
         strlcpy(rec[i].name, info[i].name, sizeof(rec[i].name));
     }

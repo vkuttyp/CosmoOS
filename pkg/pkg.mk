@@ -10,7 +10,7 @@ PKG_ELF  := $(OUT)/userland/pkg.elf
 PKG_REPO := $(OUT)/pkg/repo
 PKGBUILD := $(PYTHON) $(ROOT)/tools/pkgbuild.py
 
-PKG_SRCS := pkg/pkg.c pkg/manifest.c pkg/version.c pkg/tar.c pkg/verify.c userland/lib/fetch.c \
+PKG_SRCS := pkg/pkg.c pkg/manifest.c pkg/version.c pkg/tar.c pkg/verify.c userland/lib/fetch.c userland/lib/rootsnap.c \
 	kernel/security/sha512.c kernel/security/ed25519.c
 PKG_OBJS := $(addprefix $(OUT)/pkgprog/,$(patsubst %.c,%.o,$(PKG_SRCS)))
 

@@ -13,6 +13,7 @@ bad).
 | Target, interactive | the harness types `pkg install hello && hello && pkg list` at the prompt (every build) | `make test`, `make BUILD=release test` |
 | Serial-log markers | `PKGTEST_MARKERS` in `tests/boot/run_boot_test.py` (self-test builds) | `make test` |
 | Host, the HTTPS client | `cosmo-fetch` against local TLS servers (`ports/mbedtls/README.md`, "Tested by") | `make host-test-fetch` |
+| Target, transactions | an install and an upgrade killed between two packages, `pkg rollback`, the space refusal, on the installed system (below) | `make BUILD=release test-pkgtx` (run by `test-upgrade`) |
 | Target, network repositories | the installed system against repositories this harness serves over HTTPS (below) | `make BUILD=release test-pkg-net` |
 
 ## `test_pkg`
@@ -166,3 +167,17 @@ during installation (PK4's rollback is reviewed, not exercised). No test
 of several repositories in `repos.conf`, of `--reinstall`, of `search`,
 or of `install FILE.cpk` with an unmet dependency. Timing of `pkg` is
 not measured.
+
+## `test-pkgtx`
+
+Roadmap 1.2 B4's package transactions (PK11, PK12;
+`tests/boot/pkgtx_test.py`, run by `make test-upgrade` and so by CI's
+upgrade job on both architectures), on this build's installed system:
+
+| Stage | Asserts |
+|---|---|
+| `tx-install` | `pkg install --stop-after=1 hello fortunes`, the machine killed once the first is on disk; the next boot's init rolls the root back to the transaction's snapshot and reboots once; then neither package is installed, `fsctl check` is clean, no `pkg-*` snapshot is left after the boot completes, and `pkg install` works (the lock went) |
+| `tx-upgrade` | hello 1.0 and demolib 2.5, `pkg upgrade --stop-after=1` killed after the first of two: after the recovery both at their old versions; then a full upgrade takes both |
+| `rollback` | `pkg rollback hello`: 1.1 back to 1.0, `pkg verify` clean, the two last versions kept |
+| `space` | the root filled with `dd`: `pkg install fortune` refused, naming the KiB needed and free, nothing changed; installed once the room is back |
+

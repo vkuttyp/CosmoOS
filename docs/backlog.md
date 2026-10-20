@@ -40,11 +40,11 @@ Open lines (struck lines are not counted):
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 3 | 0 | 2 | 11 | 16 |
 | Linux personality | 6 | 0 | 11 | 6 | 23 |
-| Lock validator and concurrency | 1 | 0 | 0 | 7 | 8 |
-| Memory | 1 | 0 | 1 | 6 | 8 |
+| Lock validator and concurrency | 2 | 0 | 0 | 7 | 9 |
+| Memory | 2 | 0 | 1 | 6 | 9 |
 | Network | 4 | 3 | 8 | 7 | 22 |
 | Observability | 1 | 0 | 0 | 6 | 7 |
-| Packages and upgrade | 2 | 0 | 4 | 2 | 8 |
+| Packages and upgrade | 2 | 0 | 3 | 2 | 7 |
 | Quiescence | 0 | 0 | 0 | 3 | 3 |
 | Scheduler and SMP | 0 | 0 | 1 | 5 | 6 |
 | Security and isolation | 0 | 10 | 1 | 2 | 13 |
@@ -52,7 +52,7 @@ Open lines (struck lines are not counted):
 | Commands | 1 | 0 | 4 | 1 | 6 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **41** | **21** | **49** | **90** | **201** |
+| **all** | **43** | **21** | **48** | **90** | **202** |
 
 ## Block devices
 
@@ -169,6 +169,7 @@ Open lines (struck lines are not counted):
 - **LOCK-6** nice-to-have, M. Kernel rwlock, only with a workload, ownership rules and a lockdep model.
 - **LOCK-7** nice-to-have, M. Ticket or MCS spinlocks, only with measurements.
 - **LOCK-8** nice-to-have, M. Completion edges not modelled: a signaller taking a mutex before `complete()`, one blocked in another wait, the network worker's barrier.
+- **LOCK-9** correctness, S. Release boots warn `mutex PI: donation chain cycle -- a lock-order violation` (`mutex.c`) while `/etc/rc` starts services (`svc` starting `greeter`), in some boots of the installed system on both architectures since at least the B1 branches (2026-10-20); unattributed, no backtrace in release; a debug boot of the installed system would name the chain.
 
 ## Memory
 
@@ -180,6 +181,7 @@ Open lines (struck lines are not counted):
 - **MEM-6** nice-to-have, L. Swap, compression and deduplication.
 - **MEM-7** nice-to-have, M. x86-64 PCID, once a test path exists (TCG has none).
 - **MEM-8** nice-to-have, S. Thread guard page by map-then-protect instead of reserve-and-replace (no benefit shown).
+- **MEM-9** correctness, M. Dirty page-cache pages are not bounded by memory or by the filesystem's free space: `dd` to a file on a 256 MiB root wrote ~470 MB before it was killed by a fault, and every spawn after was `ENOMEM` (test-pkgtx's first fill, 2026-10-20). A write should meet `ENOSPC` when the pool cannot hold it, and writeback should throttle a writer.
 
 ## Network
 
@@ -220,7 +222,7 @@ Open lines (struck lines are not counted):
 
 - **PKG-1** correctness, S. `pkg`'s whole-database checks (ownership, `depends`, `list`, `upgrade`) pass over installed records beyond 128 silently.
 - **PKG-2** correctness, S. On v1.0.3, `pkg install` of `cosmo-upgrade.cpk` without `-n` leaves a package a rollback then removes.
-- **PKG-3** usability, M. No multi-package transactions, interrupted-install recovery or per-package rollback.
+- ~~**PKG-3** usability, M. No multi-package transactions, interrupted-install recovery or per-package rollback.~~ Done by roadmap 1.2 B4's first PR: each command a root snapshot undone by init after an interruption, `pkg rollback NAME` (PK11, PK12).
 - **PKG-4** usability, M. `cosmo-upgrade --rollback` keeps the packages `pkg upgrade` changed and `/etc` files the new release added.
 - **PKG-5** usability, S. `cosmo-upgrade --fetch` runs the old binary's rules; a new directory (`lib/`) needs a second run.
 - **PKG-6** usability, L. Libraries by name only: no versions, no provides/requires in the INDEX, no solver.
