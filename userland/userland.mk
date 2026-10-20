@@ -46,7 +46,8 @@ PROG_DIR_cosmo-install := system
 PROG_EXTRA_SRCS_cosmo-install := userland/system/install_gpt.c userland/system/install_sha512.c
 PROG_DIR_cosmo-upgrade := system
 PROG_EXTRA_SRCS_cosmo-upgrade := userland/system/upgrade_fat.c userland/system/blkdevs.c userland/system/install_sha512.c \
-	userland/system/upgrade_ed25519.c userland/system/relsig.c userland/lib/fetch.c
+	userland/system/upgrade_ed25519.c userland/system/relsig.c userland/lib/fetch.c userland/lib/rootsnap.c \
+	userland/system/upgrade_be.c
 # A release file against its signed SHA256SUMS (the upgrading guide).
 PROG_DIR_cosmo-verify := system
 PROG_EXTRA_SRCS_cosmo-verify := userland/system/install_sha512.c userland/system/upgrade_ed25519.c userland/system/relsig.c

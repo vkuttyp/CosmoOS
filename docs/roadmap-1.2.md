@@ -237,7 +237,7 @@ and that snapshot together, so the packages `pkg upgrade` changed and the
 `/etc` files the new release added are returned too. Absorbs PKG-4,
 PKG-3 (a package transaction is a snapshot), PKG-5.
 
-- [ ] **Acceptance:** `test-upgrade` gains: upgrade, `pkg upgrade` and a
+- [x] **Acceptance:** `test-upgrade` gains: upgrade, `pkg upgrade` and a
   changed `/etc` file, `cosmo-upgrade --rollback`, reboot; packages,
   `/etc` and the base system are byte for byte the pre-upgrade
   snapshot's, the operator's files written after the upgrade kept in a
@@ -245,7 +245,11 @@ PKG-3 (a package transaction is a snapshot), PKG-5.
   For PKG-3, outside an upgrade: `pkg install a b` killed between the two
   packages leaves, at the next boot, both or neither installed; `pkg
   upgrade` interrupted the same way likewise; `pkg rollback NAME` returns
-  one package to its previous version and its files.
+  one package to its previous version and its files. Done 2026-10-20, PRs
+  #425 (package transactions) and the boot-environment PR; report
+  `docs/audit/2026-10-20-b4-boot-environments-report.md`. PKG-5 is not
+  absorbed: it needs two releases whose `cosmo-upgrade` differ to test,
+  and stays in the backlog.
 
 ### B5 Encrypted root
 

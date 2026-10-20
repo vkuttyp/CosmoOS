@@ -742,8 +742,8 @@ reinstalling it, and back.
     cosmo-upgrade [--check] [--stop-after=STEP] DIR
     cosmo-upgrade [--check] [--stop-after=STEP] --fetch TAG|URL
     cosmo-upgrade --check
-    cosmo-upgrade --rollback
-    cosmo-upgrade --status
+    cosmo-upgrade --rollback [--stop-after=intent|record|set]
+    cosmo-upgrade --list | --status | --repair | --prune
 
 DIR holds a release's boot set: `kernel.elf`, `boot.tar`, `cmdline` and
 `manifest`, under those names or as the release assets name them
@@ -762,6 +762,73 @@ file into `/tmp`. Nothing older than the package can check an Ed25519
 signature on v1.0.3: its `pkg` is the only verifier it has. From v1.0.6
 the package also carries `bin/cosmo-fetch`, for `--fetch` on a system
 older than it (`COSMO_FETCH` names the copy; `userland/lib/fetch.c`).
+
+### Boot environments (roadmap 1.2 B4)
+
+A boot environment is a snapshot of the root paired with the boot set it
+ran on. It is what lets `--rollback` return the root as well as the set:
+the packages `pkg upgrade` changed, the `/etc` files the newer release
+added, the base system byte for byte. It is built on B1's snapshots and
+its pending rollback (`docs/kernel-services/filesystem/cosmofs/design.md`,
+"Rollback"); nothing in the loader or the manifest changes.
+
+- **The pairing file, `\cosmo\be`** (`upgrade_be.c`): text, `cosmo-be
+  1`, an `intent` line and up to eight `env NAME UUID SET` lines, where
+  SET is the SHA-512 of a set's manifest (as the pending marker names a
+  set) and NAME and UUID are a root snapshot's. The loader never reads it
+  and nothing signs it; it only names, and what it names is checked: a
+  snapshot by name with its uuid compared (the kernel checks a snapshot's
+  identity, CF18), a set by reading and verifying it from the ESP. `\cosmo`
+  gains one entry, still in its one sector.
+- **The root's own record, `/var/lib/cosmo-upgrade/root-set`**: the set
+  whose base system the root holds, written by the base pass, and before
+  an environment is taken when it is missing (a fresh install). A snapshot
+  carries the record of its moment, which is how a mixed state is told.
+- **Upgrade.** Before anything is written: the room (the new `boot.tar`'s
+  size and 1 MiB; else `not enough space on the root for the boot
+  environment: about N KiB needed ..., M KiB free; nothing written`), then
+  the snapshot `be-<release>` (the running build's id, a suffix when
+  taken). An earlier run's unpaired `be-*` is deleted first. The new
+  `\cosmo\be` -- the environment paired with the current set, the intent
+  the new set, at most `BE_KEEP` (2) environments -- is written to free
+  clusters and switched in the same one-sector write as the set, so the
+  pairing and the set move together. The environments let go are deleted
+  after the switch.
+- **Rollback.** When `\cosmo\be` pairs `\cosmo\prev`'s set with an
+  environment the root still has: (1) the intent -- `\cosmo\be` naming the
+  previous set -- in a one-sector switch of its own; (2) the root's
+  pending rollback to the environment, the tree it replaces kept as
+  `be-<release>`; (3) the set switch, which also pairs that tree with the
+  current set in `\cosmo\be`. No base pass and no pending marker: the
+  root is replaced whole at the next mount. `--stop-after=intent|record|
+  set` stops after each, for the tests. Without such an environment (a
+  set installed by v1.0.7 or older, a root without snapshots) the
+  rollback is the set and the base system, as before, and says so.
+- **The rule for an interruption.** `\cosmo\be`'s intent says which
+  pairing was meant; `--repair` restores it: when the root's record is
+  not the intent, it asks for the root's rollback to the intended
+  environment (unless one is pending); when the ESP's set is not the
+  intent and `\cosmo\prev` is, it switches the set alone. Both mixed
+  states boot -- the newer kernel on the older root (killed after the
+  record) and the older kernel on the newer root (the root's rollback
+  withdrawn or refused) -- because consecutive releases read each other's
+  roots; `--repair` ends them. A rollback a mount refuses (no room: backlog
+  CFS-20) is said at boot by init and by `--status`.
+- **The operator's files.** At the first boot after an environment
+  rollback, before any service, init runs `cosmo-upgrade --after-rollback`:
+  B1's `cosmo-snap diff` of the environment and the tree it replaced, and
+  every regular file added or changed under `/root`, `/home` and
+  `/var/log` copied from that tree to `/var/lib/cosmo/rollback/<its
+  name>/`, once (`.done`). Nothing else is preserved.
+- **Retention.** An upgrade keeps the newest two environments;
+  `--prune` deletes any beyond them and any unpaired ones; the hold B1
+  puts on the tree a rollback replaced keeps it until that boot completes.
+- **`--list`** shows the environments, which set each pairs with, and
+  whether its snapshot is on the root; `--status` adds the pairing and a
+  pending rollback.
+
+`cosmo-snap list` leaves `be-*` out unless given `--all`; `cosmo-upgrade
+--list` is where they are shown.
 
 ### Fetching (roadmap 1.1 P6)
 

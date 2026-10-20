@@ -6269,6 +6269,34 @@ static void pkg_undone_prune(void)
     rootsnap_close(&rs);
 }
 
+/* The first boot after cosmo-upgrade rolled the root back to a boot
+ * environment (the live tree a held rollback's be-* target): before any
+ * service, cosmo-upgrade copies the operator's files the replaced tree
+ * had under /root, /home and /var/log (roadmap 1.2 B4; it does nothing
+ * on any other boot, and once per rollback). */
+static void be_after_rollback(void)
+{
+    struct rootsnap rs;
+    if (rootsnap_open(&rs, "/") < 0)
+        return;
+    struct cosmo_fsctl_snap *v = NULL;
+    unsigned n = 0;
+    bool env = false;
+    if (rootsnap_list(&rs, NULL, &v, &n) == 0)
+        for (unsigned i = 0; i < n; i++)
+            env = env || ((v[i].flags & COSMO_FSCTL_SNAP_F_LIVE) && strncmp(v[i].name, "be-", 3) == 0);
+    free(v);
+    rootsnap_close(&rs);
+    if (!env)
+        return;
+    const char *argv[] = { "cosmo-upgrade", "--after-rollback", NULL };
+    pid_t pid = spawnve("/sbin/cosmo-upgrade", argv, NULL, NULL, 0);
+    int st = -1;
+    if (pid <= 0 || waitpid(pid, &st, 0) != pid || st != 0)
+        printf("init: cosmo-upgrade --after-rollback failed; the files written after the upgrade are still in the "
+               "snapshot of the tree the rollback replaced\n");
+}
+
 static void boot_complete(void)
 {
     int fd = open("/dev/fsctl", O_RDWR);
@@ -6398,8 +6426,10 @@ int main(int argc, char **argv)
     struct stat st;
     char shell[128];
     console_shell(shell, sizeof(shell));
-    if (disk_root)
-        pkg_recover();   /* before any service starts */
+    if (disk_root) {
+        pkg_recover();         /* before any service starts */
+        be_after_rollback();
+    }
     if (stat("/etc/rc", &st) == 0) {
         const char *rc_argv[] = { "sh", "/etc/rc", NULL };
         int status = run_and_wait("/etc/rc", shell, rc_argv, false);

@@ -158,3 +158,74 @@ After the fixes: x86-64 release `make test-upgrade` (with `test-pkgtx`)
 PASS, debug `make test` PASS 154.1 s, `make analyze` clean, `make
 host-test` PASS; AArch64 release `make test-upgrade` PASS (after the link),
 debug `make test` PASS 159.8 s, `make analyze` clean.
+
+## Second pull request: boot environments (PKG-4)
+
+As built:
+
+- `userland/system/upgrade_be.{c,h}` (new): the pairing file `\cosmo\be`,
+  text: `cosmo-be 1`, an `intent <set>` line and at most eight `env NAME
+  UUID SET` lines, a set named by its manifest's SHA-512. Parsing refuses
+  any other line, a name `cosmo-snap` would refuse, and a short or
+  upper-case digest; `be_name` makes `be-<tag>` with a `-N` suffix when
+  taken. `tests/host/test_upgrade_be.c` checks the grammar.
+- `cosmo-upgrade.c`: an upgrade, before writing anything, deletes an
+  earlier run's unpaired `be-*`, checks the room (the new `boot.tar`'s
+  size and 1 MiB) and refuses naming it, writes
+  `/var/lib/cosmo-upgrade/root-set` when missing, takes `be-<running
+  build>`, and stages the new `\cosmo\be` (the environment paired with
+  the current set, the intent the new set, the newest two kept) into the
+  set's one-sector switch; environments let go are deleted after it. A
+  rollback to a set an environment pairs with writes the intent, then the
+  root's pending rollback (B1) keeping the replaced tree as
+  `be-<running build>`, then the set switch; no base pass and no pending
+  marker. `--list`, `--prune`, `--repair` (the root and the set made the
+  intent's, by the same steps), `--after-rollback`, and `--status` naming
+  the environments and a pending rollback the boot's mount did not apply.
+  A set without an environment (installed by v1.0.7 or older) rolls back
+  as before, and says so.
+- `init.c`: after `pkg_recover`, when the root came from a `be-*`
+  rollback, runs `cosmo-upgrade --after-rollback` before any service:
+  `cosmo-snap diff` between the environment and the held replaced tree,
+  and copies the files it added or changed under `/root`, `/home` and
+  `/var/log` to `/var/lib/cosmo/rollback/<that tree>/`.
+- `tests/boot/be_test.py` (in `test-upgrade`): builds a second set B from
+  this build's set A (one added file, re-signed with the build key),
+  installs A, upgrades to B, runs a `pkg upgrade` and changes `/etc`,
+  rolls back, and checks the root byte for byte against the environment
+  over the returned trees; then kills `cosmo-upgrade` after each step and
+  boots the older kernel on the newer root.
+- Docs: userland design ("Boot environments"), U13, `upgrading.md`
+  ("Boot environments", "Rolling back"), `limitations.md`, testing.
+- Not built: PKG-5 (the base pass could run the new set's own
+  `cosmo-upgrade`), which only two releases whose tools differ can test;
+  it stays in the backlog.
+
+Validation (2026-10-21, local, both architectures): `make host-test`,
+`make analyze`, debug `make test` at `QEMU_SMP=1`, `2` and `4` with the
+network harness passing in each (x86-64 148.3 s, 151.1 s, 155.2 s; AArch64
+145.5 s, 166.3 s, 158.6 s), `make test-smp2`, `make test-chaos`, `make
+test-harness-retry`, release build and boot (x86-64 18.9 s, AArch64
+21.0 s), all PASS; `make fuzz` PASS (a host build, run once). Release
+`make test-snapshot` PASS (x86-64 157 s, AArch64 176 s); release `make
+test-upgrade` PASS (x86-64 610 s, AArch64 597 s), its boot-environment
+stages:
+
+```text
+test-be: upgrade: A -> B, environment be-... taken before anything was written
+test-be: new: B ran hello 1.1 (a transaction) and changed /etc; --rollback recorded the intent, the root's rollback to be-... (keeping be-...-2) and the set
+test-be: back: A on be-...'s root: hello 1.0, /etc and the base system byte for byte be-...'s; 8 operator file(s) kept in /var/lib/cosmo/rollback/be-...-2; --repair: nothing to do
+test-be: crash-record: killed after the root's record: A's kernel booted B's root; --repair switched the set; then B, B
+test-be: mixed-old: A's kernel booted B's root (the root's rollback withdrawn); --repair asked for it again; then A, A
+test-be: crash-intent: killed after the intent: A, A booted; --repair rolled both; then B, B
+test-be: crash-set: killed after the set switch: the next boot was A, A
+test-be: space: a full root refused the upgrade (16134 KiB needed, 284 KiB free); the ESP byte for byte unchanged
+test-be: PASS in 349.3s (AArch64 316.1s; 16540 KiB needed, 64 KiB free)
+```
+
+On Parallels Desktop (2026-10-21), main after the first pull request
+(`cceff596`) installed from its live image on a new VM, booted the
+installed disk, reboots and powers off; `pkg install hello fortune` left no
+transaction behind, and `pkg install -f hello=1.0`, `pkg upgrade`, `pkg
+rollback hello` went 1.0, 1.1, 1.0 with `pkg verify` clean. The message for
+that downgrade says "upgraded" (PKG-9).

@@ -98,9 +98,13 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
   delta updates. Its index's freshness is only as good as the clock, which
   is stepped by hand or by `ntpd -q`, with no NTP daemon
   ([Packages](packages.md#network-repositories)).
-- No rollback of a completed package upgrade. `cosmo-upgrade --rollback`
-  returns the boot set, the programs and the repository, but not the
-  packages `pkg upgrade` changed.
+- `cosmo-upgrade --rollback` returns packages and `/etc` only to a boot
+  environment, which upgrades made by v1.0.8's `cosmo-upgrade` and later
+  take; past an upgrade made by v1.0.7 or older it returns the boot set and
+  the base system only ([Upgrading](upgrading.md#boot-environments)). Only
+  files under `/root`, `/home` and `/var/log` written after the upgrade
+  are kept across a rollback; the root is rolled back at the next boot,
+  never while it runs; one pool.
 
 ## Linux programs
 

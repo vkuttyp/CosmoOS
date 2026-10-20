@@ -3293,3 +3293,22 @@ See the [history index](README.md).
   `sync_after_write` stores the inode either way (CF17).
   `cosmofs-extent-fail`'s `evict` case, `tools/cosmofs-partial-write-probe.py`.
   Report: `docs/audit/2026-10-21-partial-write-report.md`.
+- **Boot environments and package transactions (roadmap 1.2 B4,
+  2026-10-20, PRs #425 and the boot-environment PR).** `pkg install`,
+  `remove` and `upgrade` take a root snapshot `pkg-tx-<time>` before
+  changing anything, record it in `/var/db/pkg/tx-active`, and delete it
+  on success; init rolls a recorded leftover back before any service and
+  reboots once, with a loop guard (PK11). `pkg rollback NAME` reinstalls
+  the previous version from `/var/cache/pkg/kept`, which keeps the last
+  two (PK12). A transaction raises a format-11 root to 12 only when every
+  boot set kept on the ESP reads 12. `cosmo-upgrade` takes the root's
+  snapshot `be-<release>` before an upgrade's first write and pairs it
+  with the set it ran on in `\cosmo\be` (text; the loader never reads it),
+  switched with the set in one sector; `--rollback` writes the intent,
+  then the root's pending rollback (B1), then the set, so packages, `/etc`
+  and the base system return byte for byte, and init copies the files
+  the replaced tree added under `/root`, `/home` and `/var/log` to
+  `/var/lib/cosmo/rollback/<snapshot>/`. A crash after each step boots,
+  and `--repair` restores the intent's pairing (U13). `--list`,
+  `--prune`, `--status`. `test-pkgtx` and `be_test.py`, both in
+  `test-upgrade`. Report: `docs/audit/2026-10-20-b4-boot-environments-report.md`.

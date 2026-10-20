@@ -223,11 +223,12 @@ Open lines (struck lines are not counted):
 - **PKG-1** correctness, S. `pkg`'s whole-database checks (ownership, `depends`, `list`, `upgrade`) pass over installed records beyond 128 silently.
 - **PKG-2** correctness, S. On v1.0.3, `pkg install` of `cosmo-upgrade.cpk` without `-n` leaves a package a rollback then removes.
 - ~~**PKG-3** usability, M. No multi-package transactions, interrupted-install recovery or per-package rollback.~~ Done by roadmap 1.2 B4's first PR: each command a root snapshot undone by init after an interruption, `pkg rollback NAME` (PK11, PK12).
-- **PKG-4** usability, M. `cosmo-upgrade --rollback` keeps the packages `pkg upgrade` changed and `/etc` files the new release added.
-- **PKG-5** usability, S. `cosmo-upgrade --fetch` runs the old binary's rules; a new directory (`lib/`) needs a second run.
+- ~~**PKG-4** usability, M. `cosmo-upgrade --rollback` keeps the packages `pkg upgrade` changed and `/etc` files the new release added.~~ Done by roadmap 1.2 B4: boot environments (`cosmo-upgrade --rollback` returns the root's snapshot with the set) for upgrades from v1.0.8's tool on.
+- **PKG-5** usability, S. `cosmo-upgrade --fetch` runs the old binary's rules; a new directory (`lib/`) needs a second run. (Roadmap 1.2 B4 named it but did not take it: the base pass could run the new set's own `cosmo-upgrade`, which only two releases whose tools differ can test.)
 - **PKG-6** usability, L. Libraries by name only: no versions, no provides/requires in the INDEX, no solver.
 - **PKG-7** nice-to-have, M. SBOMs, dependency locking, build sandboxing, multi-architecture packages.
 - **PKG-8** nice-to-have, M. `cosmo-upgrade`'s FAT writer refuses long names, a multi-sector `\cosmo` and FAT12/16.
+- **PKG-9** usability, S. `pkg install -f NAME=VERSION` to an older version says `NAME will be upgraded from 1.1 to 1.0`; a downgrade should say so (seen on Parallels, 2026-10-21).
 
 ## Quiescence
 

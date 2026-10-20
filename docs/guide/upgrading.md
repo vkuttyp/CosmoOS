@@ -229,18 +229,80 @@ leaves either the old set, the new loader with the old set, or the new
 set, and each of them boots. Run the same `cosmo-upgrade` again
 afterwards: it finishes what the interrupted run started.
 
+## Boot environments
+
+From the first upgrade made by v1.0.8's `cosmo-upgrade`, an upgrade can be
+fully undone. Before it writes anything, `cosmo-upgrade` takes a
+snapshot of the root -- a **boot environment**, `be-<release>` -- and
+pairs it with the boot set it ran on:
+
+```text
+cosmo$ cosmo-upgrade /tmp/up
+...
+cosmo-upgrade: boot environment be-v1.0.8: the root as it is now, paired with the current set
+...
+cosmo-upgrade: upgraded; reboot to run it, then pkg update && pkg upgrade; --rollback returns to be-v1.0.8
+cosmo$ cosmo-upgrade --list
+ENVIRONMENT              SET       SET-ID        SNAPSHOT
+be-v1.0.8                previous  3f2a9c0d1e5b  on the root
+cosmo-upgrade: the root's base system is the current set's
+```
+
+The two newest environments are kept; `cosmo-upgrade --prune` deletes any
+older ones. An upgrade refuses to start, writing nothing, when the root
+lacks the room for one (`not enough space on the root for the boot
+environment: about N KiB needed ..., M KiB free`). Upgrades made by
+v1.0.7 or older took no environment: rolling back past them returns the
+set and the base system only, as below.
+
 ## Rolling back
+
+With a boot environment for the previous set, `--rollback` returns both
+halves -- the boot set now, and the root at the next boot:
 
 ```text
 cosmo$ cosmo-upgrade --rollback
 cosmo-upgrade: verified \cosmo\prev, signed by key ... in /etc/pkg/keys
+cosmo-upgrade: intent recorded: \cosmo\be names the previous set and be-v1.0.8
+cosmo-upgrade: the root rolls back to be-v1.0.8 at the next boot; the tree it replaces is kept as be-v1.0.9
+cosmo-upgrade: boot set switched back: ... boots the previous set; the one it replaced is in \cosmo\prev
+cosmo-upgrade: rolled back: the boot set now, and the root -- packages, /etc and the base system as they were in be-v1.0.8 -- at the next boot; reboot to run it
+```
+
+After the reboot the packages, `/etc` and the base system are exactly
+what they were when the environment was taken. Anything else written
+since is gone from the live root -- with one exception: files added or
+changed under `/root`, `/home` and `/var/log` are copied, before any
+service starts, into `/var/lib/cosmo/rollback/<the replaced tree's
+name>/`:
+
+```text
+cosmo-upgrade: 3 file(s) written under /root, /home and /var/log after be-v1.0.8 was taken are kept in /var/lib/cosmo/rollback/be-v1.0.9
+```
+
+The whole replaced tree also stays, as the environment `be-v1.0.9`:
+rolling back again goes forward to it.
+
+If the machine stops in the middle, the system still boots -- possibly
+the newer kernel on the older root, or the older kernel on the newer one
+-- and `cosmo-upgrade --repair` finishes what was meant, which
+`\cosmo\be` records before anything moves; reboot after it.
+`cosmo-upgrade --status` says when a repair is needed, and when a rollback
+of the root is pending but the last boot did not apply it (init says so
+on the console too).
+
+Without a boot environment for the previous set -- it was installed by
+v1.0.7 or older -- the previous boot set, its loader, its programs and its
+repository come back, and packages that `pkg upgrade` changed stay
+changed:
+
+```text
+cosmo$ cosmo-upgrade --rollback
+cosmo-upgrade: verified \cosmo\prev, signed by key ... in /etc/pkg/keys
+cosmo-upgrade: no boot environment pairs \cosmo\prev with a snapshot of the root ...
 cosmo-upgrade: boot set switched back: ... boots the previous set; the one it replaced is in \cosmo\prev
 cosmo-upgrade: rolled back; reboot to run it
 ```
-
-The previous boot set, its loader, its programs and its repository come
-back. Packages that `pkg upgrade` changed stay changed. A package upgrade
-cannot be rolled back ([Known limitations](limitations.md)).
 
 Rolling back again moves forward again. After a rollback to v1.0.3 the
 system has no `cosmo-upgrade` of its own, so fetch the newer release's
