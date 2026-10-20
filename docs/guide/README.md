@@ -18,10 +18,12 @@ the pages in order: each one continues where the one before it stopped.
    disk.
 6. [Upgrading](upgrading.md): `cosmo-upgrade` to a newer release and
    back.
-7. [Privileges](privileges.md): the privilege set, dropping privileges,
+7. [Snapshots and rollback](snapshots.md): `cosmo-snap`, what a snapshot
+   keeps, and rolling the system back to one.
+8. [Privileges](privileges.md): the privilege set, dropping privileges,
    and what an ssh session holds.
-8. [Known limitations](limitations.md).
-9. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
+9. [Known limitations](limitations.md).
+10. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
    Apple Silicon.
 
 Commands for your computer are shown as plain blocks; commands typed on
@@ -44,4 +46,5 @@ against the signed images before it publishes them.
 Upgrading's steps are the exception: they need an older release installed
 first, so the runner cannot run them. `make test-upgrade` runs them instead
 (the CI job `upgrade`, on every pull request, on both architectures), and
-the page shows them as text.
+the page shows them as text. Snapshots and rollback's are the other: a rollback reboots
+the machine. `make test-snapshot` runs them (the CI job `install`).

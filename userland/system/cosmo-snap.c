@@ -7,7 +7,13 @@
  *   cosmo-snap [-m MOUNTPOINT] list
  *   cosmo-snap [-m MOUNTPOINT] delete NAME
  *   cosmo-snap [-m MOUNTPOINT] diff A B
+ *   cosmo-snap [-m MOUNTPOINT] rollback [--no-reboot] NAME
+ *   cosmo-snap [-m MOUNTPOINT] rollback --cancel
  *
+ * `rollback` makes snapshot NAME the live tree at the next mount, keeping
+ * the tree it replaces as snapshot pre-rollback-<seconds>; for the root
+ * that mount is the next boot, and cosmo-snap reboots unless told not to.
+ * Both snapshots are kept until the boot after the rollback completes.
  * MOUNTPOINT is `/` unless given. The operations go through /dev/fsctl
  * against the mount found at that path in this namespace's listing.
  * `diff` names the paths that differ between two snapshots (`-` for the
@@ -18,6 +24,7 @@
  * Exit status: 0 done, 1 refused or failed, 2 usage.
  */
 #include <dirent.h>
+#include <signal.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <fcntl.h>
@@ -33,7 +40,8 @@ static const char *g_mp = "/";
 
 static void usage(void)
 {
-    fprintf(stderr, "usage: cosmo-snap [-m MOUNTPOINT] create NAME | list | delete NAME | diff A B\n");
+    fprintf(stderr, "usage: cosmo-snap [-m MOUNTPOINT] create NAME | list | delete NAME | diff A B |\n"
+                    "       rollback [--no-reboot] NAME | rollback --cancel\n");
     exit(2);
 }
 
@@ -123,8 +131,12 @@ static void fail(const char *what, const char *name)
     if (e == EOPNOTSUPP)
         fprintf(stderr, "cosmo-snap: %s %s: this filesystem's format is older than 11 and has no snapshot identity\n",
                 what, name ? name : "");
+    else if (e == EBUSY && strcmp(what, "rollback") == 0)
+        fprintf(stderr, "cosmo-snap: rollback %s: a rollback is already pending (rollback --cancel withdraws it)\n",
+                name ? name : "");
     else if (e == EBUSY)
-        fprintf(stderr, "cosmo-snap: %s %s: in use (something inside it is open)\n", what, name ? name : "");
+        fprintf(stderr, "cosmo-snap: %s %s: in use (something inside it is open, or a rollback keeps it until "
+                        "the boot after it completes)\n", what, name ? name : "");
     else
         fprintf(stderr, "cosmo-snap: %s %s: %s\n", what, name ? name : "", strerror(e));
     exit(1);
@@ -230,6 +242,46 @@ static int cmd_delete(int fd, unsigned long long id, const char *name)
     if (run(fd, COSMO_FSCTL_SNAP_DELETE, id, 0, name, NULL, buf, sizeof(buf)) < 0)
         fail("delete", name);
     printf("cosmo-snap: deleted %s\n", name);
+    return 0;
+}
+
+static int cmd_rollback(int fd, unsigned long long id, const char *name, int reboot)
+{
+    char buf[sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_snap)];
+    if (run(fd, COSMO_FSCTL_SNAP_ROLLBACK, id, 0, name, NULL, buf, sizeof(buf)) < 0)
+        fail("rollback", name);
+    struct cosmo_fsctl_snap *s = (struct cosmo_fsctl_snap *)(buf + sizeof(struct cosmo_fsctl_result));
+    printf("cosmo-snap: rollback to %s pending; the tree it replaces is kept as snapshot %s\n", name, s->name);
+    if (strcmp(g_mp, "/") != 0) {
+        printf("cosmo-snap: it applies at the next mount of %s (unmount it and mount it again)\n", g_mp);
+        return 0;
+    }
+    if (!reboot) {
+        printf("cosmo-snap: it applies at the next boot\n");
+        return 0;
+    }
+    printf("cosmo-snap: rebooting to apply it\n");
+    fflush(stdout);
+    sync();
+    /* init restarts on SIGTERM, as BusyBox's reboot asks it to. */
+    if (kill(1, SIGTERM) != 0) {
+        perror("cosmo-snap: reboot");
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_cancel(int fd, unsigned long long id)
+{
+    char buf[sizeof(struct cosmo_fsctl_result)];
+    if (run(fd, COSMO_FSCTL_SNAP_CANCEL, id, 0, NULL, NULL, buf, sizeof(buf)) < 0) {
+        if (errno == ENOENT) {
+            fprintf(stderr, "cosmo-snap: no rollback is pending\n");
+            exit(1);
+        }
+        fail("rollback --cancel", NULL);
+    }
+    printf("cosmo-snap: the pending rollback is withdrawn\n");
     return 0;
 }
 
@@ -489,6 +541,14 @@ int main(int argc, char **argv)
         return cmd_list(fd, id);
     if (strcmp(op, "delete") == 0 && argc - i == 1)
         return cmd_delete(fd, id, argv[i]);
+    if (strcmp(op, "rollback") == 0) {
+        if (argc - i == 1 && strcmp(argv[i], "--cancel") == 0)
+            return cmd_cancel(fd, id);
+        if (argc - i == 2 && strcmp(argv[i], "--no-reboot") == 0)
+            return cmd_rollback(fd, id, argv[i + 1], 0);
+        if (argc - i == 1 && argv[i][0] != '-')
+            return cmd_rollback(fd, id, argv[i], 1);
+    }
     usage();
     return 2;
 }

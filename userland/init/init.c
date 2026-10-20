@@ -6008,6 +6008,63 @@ static bool switch_to_disk_root(void)
     return true;
 }
 
+/*
+ * The boot completed: /etc/rc ran to a 0 status. Tell every filesystem
+ * that keeps snapshots, so one rolled back at this boot's mount releases
+ * the hold on the tree it was rolled back from (roadmap 1.2 B1;
+ * docs/kernel-services/filesystem/cosmofs/design.md, "Rollback"). A boot
+ * that does not get here -- a rollback to a tree that does not boot --
+ * keeps the hold, and the operator can roll back again.
+ */
+static void boot_complete(void)
+{
+    int fd = open("/dev/fsctl", O_RDWR);
+    if (fd < 0)
+        return;
+    struct cosmo_fsctl cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_FSCTL_VERSION;
+    cmd.op = COSMO_FSCTL_LIST;
+    /* The listing is read whole or not at all (-ERANGE), so the buffer
+     * grows until it fits: a namespace with many mounts must not keep
+     * the hold. */
+    char *buf = NULL;
+    long n = -1;
+    for (size_t room = 64, tries = 0; tries < 12; tries++, room *= 2) {
+        free(buf);
+        size_t cap = sizeof(struct cosmo_fsctl_result) + room * sizeof(struct cosmo_fsctl_mount);
+        buf = malloc(cap);
+        if (buf == NULL || write(fd, &cmd, sizeof(cmd)) != (long)sizeof(cmd))
+            break;
+        n = read(fd, buf, cap);
+        if (n >= 0 || errno != ERANGE)
+            break;
+    }
+    if (buf == NULL || n < (long)sizeof(struct cosmo_fsctl_result)) {
+        printf("init: boot complete, but the mounts could not be listed; a rollback hold stays\n");
+        free(buf);
+        close(fd);
+        return;
+    }
+    const struct cosmo_fsctl_result *h = (const struct cosmo_fsctl_result *)buf;
+    struct cosmo_fsctl_mount *m = (struct cosmo_fsctl_mount *)(buf + sizeof(*h));
+    /* Never past what was read, whatever the header says. */
+    size_t fits = ((size_t)n - sizeof(*h)) / sizeof(*m);
+    unsigned count = h->count < fits ? h->count : (unsigned)fits;
+    for (unsigned i = 0; i < count; i++) {
+        if (!(m[i].caps & COSMO_FSCTL_CAP_SNAP) || (m[i].flags & 1u))   /* MOUNT_RDONLY */
+            continue;
+        struct cosmo_fsctl_result r;
+        cmd.op = COSMO_FSCTL_BOOT_OK;
+        cmd.mount_id = m[i].id;
+        if (write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd) && read(fd, &r, sizeof(r)) == (long)sizeof(r) &&
+            r.total == 1)
+            printf("init: boot complete: released the rollback hold on %s\n", m[i].path);
+    }
+    free(buf);
+    close(fd);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--crash") == 0) {
@@ -6093,6 +6150,8 @@ int main(int argc, char **argv)
         int status = run_and_wait("/etc/rc", shell, rc_argv, false);
         printf("init: rc exited with status %d\n", status);
         fflush(stdout);
+        if (status == 0)
+            boot_complete();
     }
     const char *sh_argv[] = { "sh", NULL };
     int status = run_and_wait("the shell", shell, sh_argv, true);

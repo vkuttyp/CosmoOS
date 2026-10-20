@@ -102,7 +102,20 @@ struct cfs {
 #if CONFIG_DEBUG
     /* Test hook: no raise to version 12; snapshots taken are version 11's. */
     bool test_no_raise;
+    /* Test hook: while armed, `test_commits_left` more commits are
+     * published and the next one abandons the transaction, as if the
+     * machine stopped there; the unmount then drops what is open. */
+    bool test_commit_armed;
+    unsigned test_commits_left;
 #endif
+    /* A rollback switch whose transaction failed was abandoned, and the
+     * mount loads the current tree again without trying it (design.md,
+     * "Rollback"). */
+    bool rollback_off;
+    bool rollback_failed;
+    /* The switch's commit is in progress: the seam CONFIG_COSMOFS_STOP
+     * stops there, before its root (test-snapshot's crash point). */
+    bool switching;
     /* Walks of the snapshot list, since mount. The verdict used to be
      * taken twice per freed block -- once for the record, once by the
      * release loop -- and is now taken once; this is how that is
@@ -213,6 +226,33 @@ void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b);
 int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uint64_t ino,
                       struct cfs_inode *out);
 int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct cfs_snapshot *out);
+int cfs_snapshot_create_ex(struct cfs *fs, const char *name, bool identity, bool commit, const uint8_t *uuid,
+                           struct cfs_snapshot *out);
+bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
+/* The same, telling "not there" (-ENOENT) from "the list does not read"
+ * (-EIO, a cycle included), which only the first may act on. */
+int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
+int cfs_snapshot_deadlists_filter(struct cfs *fs, bool (*live)(void *arg, uint64_t dva), void *arg,
+                                  uint64_t *dropped);
+/*
+ * Rollback (cosmofs_rollback.c; design.md, "Rollback"). The record is
+ * read and checked by cfs_rollback_read (-ENOENT: none; -EIO: it does not
+ * check out). A request writes a PENDING record and a safety snapshot in
+ * one transaction; the mount's switch applies it and leaves a HELD
+ * record; BOOT_OK clears that.
+ */
+int cfs_rollback_read(struct cfs *fs, struct cfs_rollback *out);
+/* The record's bytes alone: seal sets magic, version and crc; parse
+ * copies a block's payload out and checks all three and the state
+ * (-EIO when any is wrong). */
+void cfs_rollback_seal(struct cfs_rollback *r);
+int cfs_rollback_parse(const void *payload, struct cfs_rollback *out);
+int cfs_rollback_request(struct cfs *fs, const char *target, const char *safety_name, struct cfs_snapshot *safety);
+int cfs_rollback_cancel(struct cfs *fs);
+int cfs_rollback_drop(struct cfs *fs);
+int cfs_rollback_boot_ok(struct cfs *fs, bool *released);
+bool cfs_rollback_protects(struct cfs *fs, const struct cfs_snapshot *s);
+int cfs_rollback_at_mount(struct cfs *fs, bool *switched);
 int cfs_snapshot_delete(struct cfs *fs, const char *name);
 int cfs_snapshot_list(struct cfs *fs, struct cfs_snapshot *out, unsigned max, unsigned *count);
 bool cfs_snapshot_find(struct cfs *fs, const char *name, struct cfs_snapshot *out);
@@ -223,7 +263,6 @@ bool cfs_has_snapshots(struct cfs *fs);
  * (design.md, "Format version 12"). */
 /* The checker's repair for a version-12 list's identity faults. */
 int cfs_snapshot_fix_identity(struct cfs *fs, unsigned *fixed);
-bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
 /* A uuid no snapshot on the list, and none of `also`, has (CF18). */
 void cfs_snapshot_new_uuid(struct cfs *fs, uint8_t out[16], const uint8_t (*also)[16], unsigned nalso);
 uint32_t cfs_snaplist_kind(const struct cfs *fs);

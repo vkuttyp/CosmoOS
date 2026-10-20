@@ -36,7 +36,7 @@ Open lines (struck lines are not counted):
 | Block devices | 3 | 0 | 2 | 3 | 8 |
 | Boot chain and verified boot | 0 | 5 | 2 | 1 | 8 |
 | Build and tooling | 0 | 2 | 0 | 4 | 6 |
-| cosmofs and storage | 5 | 1 | 7 | 5 | 18 |
+| cosmofs and storage | 5 | 1 | 7 | 6 | 19 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 3 | 0 | 2 | 11 | 16 |
 | Linux personality | 6 | 0 | 11 | 6 | 23 |
@@ -52,7 +52,7 @@ Open lines (struck lines are not counted):
 | Commands | 0 | 0 | 4 | 1 | 5 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **40** | **21** | **49** | **88** | **198** |
+| **all** | **40** | **21** | **49** | **89** | **199** |
 
 ## Block devices
 
@@ -106,6 +106,7 @@ Open lines (struck lines are not counted):
 - **CFS-17** usability, M. Rollback of a mounted root takes effect at the next mount (a reboot for the root); a live rollback of a mounted tree is not built (out of B1's scope, roadmap 1.2).
 - **CFS-18** usability, S. No scheduled snapshots (taken on a timer and pruned by age); `cosmo-snap` is run by hand (out of B1's scope).
 - **CFS-19** usability, M. No quotas: neither per snapshot nor per directory tree (out of B1's scope).
+- **CFS-20** nice-to-have, S. A rollback's switch rebuilds every deadlist into new blocks while the old chains stay allocated until its commit, so a nearly full pool with long deadlists can refuse a rollback that would need no net space; the switch is abandoned and logged and the record stays pending (Qodo on #422).
 
 ## Documentation
 

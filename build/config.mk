@@ -99,6 +99,11 @@ endif
 # the panic path and the harness's failure detection can be verified.
 # Never enable in a build you intend to run for real.
 CRASH_TEST ?= 0
+# COSMOFS_STOP=1 builds a kernel that stops a cosmofs rollback's switch
+# after its blocks are written and before its root (test-snapshot's crash
+# point "during the switch"; docs/kernel-services/filesystem/cosmofs/
+# testing.md). Like CRASH_TEST, only in a sibling output tree.
+COSMOFS_STOP ?= 0
 
 # PERCPU_WARN=1 turns the debug builds' per-CPU claim check (S25) from a
 # panic into a once-per-site warning, so one boot lists every site that

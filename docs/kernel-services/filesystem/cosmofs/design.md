@@ -1382,9 +1382,9 @@ Roadmap 1.2 B1 (`docs/roadmap-1.2.md`): snapshots and rollback as shell
 commands. Version 3's snapshots are trees an operator can read through
 `.snapshots` and delete; nothing could say what one was worth, roll the
 live tree back to one, or write to a copy of one. This section is the
-design for all three. The identity half (below, to "Sizes") is built by
-B1's first pull request; rollback and clones are built by its second and
-third, and each subsection says which.
+design for all three. Identity and sizes are built by B1's first pull
+request, rollback by its second, clones by its third; each subsection
+says which.
 
 ### Identity
 
@@ -1473,49 +1473,117 @@ mount's lock, and two walks per snapshot: `list` is an operator's
 command, not something the system runs on its own. `-F NO_SIZES` skips
 the walks for a caller that wants the pool record alone.
 
-### Rollback (B1's second pull request)
+### Rollback
 
-`rollback NAME` does not change the mounted root. It writes a
-**pending-rollback record** -- `CFS_KIND_ROLLBACK`, named by the
+Built by B1's second pull request (`cosmofs_rollback.c`).
+
+`rollback NAME` does not change the mounted tree. It writes a
+**pending-rollback record** -- a `CFS_KIND_ROLLBACK` block named by the
 superblock's last reserved word, `rollback_root` (`struct cfs_rollback`:
-state, the target's and a safety snapshot's uuids, the live root's
-generation, its own CRC32C) -- in the same transaction as a **safety
-snapshot** of the live tree, `pre-rollback-<seconds>`. The next mount
-finds the record and, if it checks out and both snapshots exist, makes
-the target's tree the live tree in its first transaction, replacing the
-record with a **hold** naming both snapshots, and logs it. A record that
-does not check out, or names a snapshot that is gone, is refused: the
-mount logs why, clears nothing and mounts the current tree. `rollback
---cancel` removes a pending record. The root's rollback is followed by a
-reboot (`--no-reboot` skips it); another pool's applies at its next
-mount.
+state, flags, the target's and a safety snapshot's uuids and ids, the
+live root's generation, the request's time, its own CRC32C over the
+struct; 120 bytes)
+-- in the same transaction as a **safety snapshot** of the live tree,
+`pre-rollback-<seconds>` (or a name the caller gives). The open work is
+committed first -- dirty pages included, which the request writes back
+before it takes the lock, as `create` does -- so the safety snapshot
+names a durable tree; then the
+snapshot entry and the record join one transaction and one commit
+publishes both. The safety snapshot's uuid is drawn before either is
+written, so the record can name it whichever order the two are put in
+the transaction. A second request while one is pending is `-EBUSY`;
+`rollback --cancel` removes a pending record (the safety snapshot stays,
+an ordinary snapshot again). While a hold is in place (below) the only
+request taken is one back to the held snapshot, which becomes its
+target, so the hold's snapshot stays kept; the record carries
+`CFS_ROLLBACK_F_FROM_HELD`, and cancelling it puts the hold back. Any
+other request then is `-EBUSY`. A clone cannot be a target: it is not a
+point in the live tree's history.
 
-The safety snapshot is what makes a bad rollback undoable, so neither it
-nor the target can be deleted while the hold lasts: until the next boot
-has completed, which init says with BOOT_OK after `/etc/rc`. A rollback
-to a tree that does not boot leaves the hold in place, and the operator
-rolls back to the safety snapshot.
+**The mount applies it** (`cfs_rollback_at_mount`, from `load_root` after
+the bitmap and the free record's replay, before the orphan replay). It
+reads the record; if the record does not check out (its block's header,
+its own CRC, or its meaning: a known state and flags, a safety uuid, and
+for a pending record a target uuid that is not the safety's), or names a
+target or a safety snapshot that is not on the list, or a target whose
+root inode is not a directory, or the mount is read-only, the mount logs
+why, changes nothing and mounts the current tree. Otherwise, in its first
+transaction:
 
-**The switch has to repair the deadlists.** A commit asks only the
-newest snapshot whether it still names a freed block, which is exact
-while the live tree is newer than every snapshot. A rollback breaks
-that: the live tree becomes an older one. So the switch, walking the
-old live tree and the target, (1) appends to the safety snapshot's
-deadlist every block the old live tree reached and the target does not
--- the safety snapshot now holds them and nothing else does, and without
-the entry deleting it would leak them -- and (2) takes off every
-deadlist each block the new live tree reaches: a block on a deadlist is
-one the allocator may hand out when that snapshot goes, and these are
-live again. The old live tree's orphan record goes with it: its inodes
-are the safety snapshot's.
+1. **Walk the target's tree** into a set of blocks (`cfs_tree_walk`).
+2. **Release what the old live tree reached and the target does not**: a
+   deferred free of each, exactly as a commit releases what the live
+   tree drops. The commit then asks the newest snapshot -- the safety
+   snapshot, unless one was taken since -- whether it still names the
+   block, and holds it on that snapshot's deadlist or frees it. So a
+   file written after the request, which no snapshot names, is freed;
+   what the old tree had is the safety snapshot's.
+3. **Take the target's blocks off every deadlist**
+   (`cfs_snapshot_deadlists_filter`). A deadlist entry is a block the
+   allocator gets back when its snapshot goes, and these are live again.
+   This is what keeps the rule "a commit asks the newest snapshot alone"
+   sound after the live tree has become an older one: every block on a
+   deadlist is one the live tree does not reach.
+4. **Make the target's tree the live tree**: `imap_root`, `next_ino` and
+   `inode_count` from its entry. The old tree's orphan record goes with
+   it -- its inodes are the safety snapshot's -- and the commit retires
+   the chain. The target's own orphans take its place: a snapshot keeps an
+   inode that was unlinked and open when it was taken, but not the orphan
+   record naming it, so the switch puts every inode of the target with no
+   link on the record it commits, and the mount's orphan replay, which
+   runs after the switch, releases them.
+5. **Replace the record with a hold** naming the same two snapshots, and
+   commit. The kernel logs `cosmofs: <dev>: rolled back: the live tree is
+   snapshot '<target>' (generation G); the tree before it is snapshot
+   '<safety>', held until this boot completes; N block(s) released, M
+   deadlist entr(ies) live again`.
 
-**Crash safety** (the invariant B1 writes as CF19): at every instant the
-superblock names exactly one live root and at most one rollback record,
-both through committed transactions, so a crash leaves the mount able
-to pick one consistent tree -- before the record's commit, the old
-state; after it, the switch at the next mount; during the switch, the
-previous root still names the pending record and the switch is redone
-from scratch; after it, the hold.
+**Why the newest snapshot still answers.** After the switch the live
+tree is older than the snapshots taken since its target, so a block it
+drops can be one the target (or a snapshot between) names and the
+safety snapshot's tree does not. The commit still asks the newest
+snapshot alone, and the answer is right, because a snapshot is asked
+with its *bitmap* -- whether the block was allocated when it was taken
+-- not with its tree. Such a block was on a deadlist when the safety
+snapshot was taken, so allocated in its bitmap: the commit holds it on
+the safety snapshot's deadlist, and the deletion that settles that list
+asks every remaining snapshot (`deadlist_settle`). `cosmofs-rollback-shared`
+rewrites and drops such a file after a rollback, churns the allocator,
+and reads the target's copy back intact.
+
+A failure anywhere in that transaction abandons it: the mount resets to
+the root it read, loads it again with the switch off and says so. Nothing
+of a failed switch was published, so the record is still pending and the
+next mount tries again.
+
+**The hold.** While a rollback is pending, neither its target nor its
+safety snapshot can be deleted (`-EBUSY`); once applied, the safety
+snapshot -- the tree the live one was rolled back from -- stays undeletable
+until the boot after the rollback completes. Init says so: after
+`/etc/rc` exits 0 it sends BOOT_OK to every mount that keeps snapshots,
+and the filesystem clears the hold (`init: boot complete: released the
+rollback hold on /`). A rollback to a tree that does not boot leaves the
+hold in place, so the way back is always there.
+
+For the root, `cosmo-snap rollback` reboots after the request (init's
+restart, as BusyBox's `reboot` asks it); `--no-reboot` leaves it for the
+next boot. Another pool's rollback applies at its next mount.
+
+**Crash safety** (CF19): at every instant the superblock names one live
+root and at most one rollback record, both through committed
+transactions. A crash before the request's commit leaves neither the
+record nor the safety snapshot; after it, both, and the next mount
+switches; during the switch -- whose blocks are written before its root,
+like every commit's -- the previous root still names the pending record,
+and the next mount redoes the switch from the start (every step above
+is computed afresh from that root); after it, the hold, which the next
+completed boot releases.
+
+**The checker** claims the record's block, and names a record that does
+not check out or names a missing snapshot (`rollback_record`), and a hold
+whose safety snapshot is missing (`hold`). Its repair removes the record:
+the mount would refuse it anyway, and a record nothing can apply only
+keeps a snapshot from being deleted. The scrub reads the block.
 
 ### Clones (B1's third pull request)
 

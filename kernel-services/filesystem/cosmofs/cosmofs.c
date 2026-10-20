@@ -2403,10 +2403,30 @@ static void snap_info_fill(struct cfs *fs, struct cosmofs_snap_info *o, const st
  * and the ones whose count is one. Under the mount's lock, as the check
  * is. Oldest first.
  */
+/* What a rollback record says about one snapshot, for the listing. */
+static uint32_t snap_rollback_flags(const struct cfs_rollback *r, bool have, const struct cfs_snapshot *s)
+{
+    if (!have)
+        return 0;
+    uint32_t f = 0;
+    bool target = memcmp(r->target_uuid, s->uuid, 16) == 0, safety = memcmp(r->safety_uuid, s->uuid, 16) == 0;
+    if (r->state == CFS_ROLLBACK_PENDING) {
+        f |= target ? COSMOFS_SNAP_I_TARGET : 0u;
+        f |= safety ? COSMOFS_SNAP_I_SAFETY : 0u;
+    } else if (safety) {
+        f |= COSMOFS_SNAP_I_HELD;
+    }
+    return f;
+}
+
 static int snap_list_sized(struct cfs *fs, struct cosmofs_snap_req *req)
 {
     req->format = fs->sb.version;
     req->pool_flags = 0;
+    struct cfs_rollback rb;
+    bool have_rb = cfs_rollback_read(fs, &rb) == 0;
+    if (have_rb)
+        req->pool_flags = rb.state == CFS_ROLLBACK_PENDING ? COSMOFS_POOL_PENDING : COSMOFS_POOL_HELD;
     unsigned total = 0;
     int rc = cfs_snapshot_list(fs, NULL, 0, &total);
     if (rc)
@@ -2430,9 +2450,12 @@ static int snap_list_sized(struct cfs *fs, struct cosmofs_snap_req *req)
             all[j - 1] = tmp;
         }
     if (req->no_sizes) {
-        for (unsigned i = 0; rc == 0 && i < n && req->count < req->max; i++)
-            if (all[i].id > req->after)
-                snap_info_fill(fs, &req->out[req->count++], &all[i]);
+        for (unsigned i = 0; rc == 0 && i < n && req->count < req->max; i++) {
+            if (all[i].id <= req->after)
+                continue;
+            snap_info_fill(fs, &req->out[req->count], &all[i]);
+            req->out[req->count++].flags |= snap_rollback_flags(&rb, have_rb, &all[i]);
+        }
         kfree(all);
         return rc;
     }
@@ -2478,6 +2501,7 @@ static int snap_list_sized(struct cfs *fs, struct cosmofs_snap_req *req)
             rc = cfs_snapshot_walk_held(fs, &all[i], once_mark, &o1);
         struct cosmofs_snap_info *o = &req->out[req->count++];
         snap_info_fill(fs, o, &all[i]);
+        o->flags |= snap_rollback_flags(&rb, have_rb, &all[i]);
         o->referenced = sz.referenced * CFS_BLOCK;
         o->unique = sz.unique * CFS_BLOCK;
     }
@@ -2513,6 +2537,11 @@ int cosmofs_snapctl(struct mount *mnt, struct cosmofs_snap_req *req)
     switch (req->op) {
     case COSMOFS_SNAP_CREATE: {
         rc = snap_name_ok(req->name);
+        if (rc)
+            return rc;
+        /* What has been written is in the snapshot: dirty pages are the
+         * page cache's until written, and a commit alone does not. */
+        rc = cfs_sync_vnodes(fs);
         if (rc)
             return rc;
         struct cfs_snapshot s;
@@ -2555,6 +2584,43 @@ int cosmofs_snapctl(struct mount *mnt, struct cosmofs_snap_req *req)
         mutex_unlock(&fs->lock);
         if (rc == 0)
             kinfo("cosmofs: snapshot '%s' deleted", req->name);
+        return rc;
+    }
+    case COSMOFS_SNAP_ROLLBACK: {
+        rc = snap_name_ok(req->name);
+        if (rc == 0 && req->name2 != NULL)
+            rc = snap_name_ok(req->name2);
+        if (rc)
+            return rc;
+        /* The safety snapshot is the tree as written so far, dirty pages
+         * included; what is written after the request is not in it, and
+         * the switch replaces it with the target (design.md, "Rollback"). */
+        rc = cfs_sync_vnodes(fs);
+        if (rc)
+            return rc;
+        struct cfs_snapshot s;
+        mutex_lock(&fs->lock);
+        rc = cfs_rollback_request(fs, req->name, req->name2, &s);
+        mutex_unlock(&fs->lock);
+        if (rc == 0 && req->out != NULL && req->max > 0) {
+            snap_info_fill(fs, &req->out[0], &s);
+            req->out[0].flags |= COSMOFS_SNAP_I_SAFETY;
+            req->count = 1;
+        }
+        return rc;
+    }
+    case COSMOFS_SNAP_CANCEL:
+        mutex_lock(&fs->lock);
+        rc = cfs_rollback_cancel(fs);
+        mutex_unlock(&fs->lock);
+        return rc;
+    case COSMOFS_SNAP_BOOT_OK: {
+        bool released = false;
+        mutex_lock(&fs->lock);
+        rc = cfs_rollback_boot_ok(fs, &released);
+        mutex_unlock(&fs->lock);
+        req->count = 0;
+        req->total = released ? 1 : 0;   /* fsctl does not report it; a test reads it */
         return rc;
     }
     default:

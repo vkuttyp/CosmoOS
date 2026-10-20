@@ -1552,6 +1552,16 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
         if (!any)
             return 0;
     }
+#if CONFIG_DEBUG
+    /* Test hook: the machine "stops" at this commit. */
+    if (fs->test_commit_armed) {
+        if (fs->test_commits_left == 0) {
+            cfs_fail(fs, -EIO);
+            return -EIO;
+        }
+        fs->test_commits_left--;
+    }
+#endif
     /*
      * The record of what this transaction frees
      * (docs/audit/next-subsystem-unmount-leak.md). The order below is
@@ -1722,6 +1732,16 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
         kfree(held);
         return commit_unfilled(fs, rc, appended);
     }
+#if CONFIG_COSMOFS_STOP
+    /* test-snapshot's crash point "during the switch": every block of the
+     * rollback's transaction is written and flushed, its root is not. A
+     * build with COSMOFS_STOP=1 only; the harness kills the machine here. */
+    if (fs->switching) {
+        kinfo("cosmofs: test stop: the rollback switch's blocks are written and its root is not");
+        for (;;)
+            thread_sleep_ms(1000);
+    }
+#endif
     unsigned slot = fs->sb_slot == CFS_SUPER_A ? CFS_SUPER_B : CFS_SUPER_A;
     rc = super_write(fs, slot, BIO_PREFLUSH | BIO_FUA);
     if (rc) {
@@ -2206,6 +2226,7 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         case COSMOFS_CORRUPT_COUNTER:
         case COSMOFS_CORRUPT_SNAP_MEMBERS:
         case COSMOFS_CORRUPT_SNAP_UUID:
+        case COSMOFS_CORRUPT_ROLLBACK_CRC:
             memset(&in, 0, sizeof(in));
             break;
         default:
@@ -2622,6 +2643,23 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         cfs_buf_put(fs, b);
         break;
     }
+    case COSMOFS_CORRUPT_ROLLBACK_CRC: {
+        if (fs->sb.version < 12 || fs->sb.rollback_root == 0) {
+            rc = -ENOENT;
+            break;
+        }
+        struct cfs_buf *b;
+        rc = cfs_buf_get(fs, fs->sb.rollback_root, CFS_KIND_ROLLBACK, &b);
+        if (rc)
+            break;
+        /* The record's own CRC, not the block header's: the block still
+         * verifies and what it says does not. */
+        ((struct cfs_rollback *)(b->data + CFS_MHDR_SIZE))->crc ^= 0x5Au;
+        cfs_buf_mark_dirty(fs, b);
+        cfs_buf_put(fs, b);
+        token = fs->sb.rollback_root;
+        break;
+    }
     case COSMOFS_CORRUPT_COUNTER:
         /* Both of them, in opposite directions: the check must report one
          * finding per counter rather than one for "the superblock". */
@@ -2862,6 +2900,23 @@ static int load_root(struct cfs *fs, struct vnode **root)
      * away. After the bitmap and after the snapshot count, because the
      * frees this does go through both (docs/audit/next-subsystem-orphan.md).
      */
+    /*
+     * A pending rollback (design.md, "Rollback"): before the orphan
+     * replay, because a switch makes another tree live and the old one's
+     * orphans are the safety snapshot's to keep. A switch that fails is
+     * reported, and the mount abandons it and loads this root again
+     * without trying (cosmofs_mount).
+     */
+    bool switched = false;
+    if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && !fs->rollback_off) {
+        rc = cfs_rollback_at_mount(fs, &switched);
+        if (rc) {
+            fs->rollback_failed = true;
+            return rc;
+        }
+    }
+    /* After a switch the record is the target's own orphans, which the
+     * switch's commit wrote (cosmofs_rollback.c). */
     rc = orphan_replay(fs);
     if (rc)
         return rc;
@@ -2948,6 +3003,15 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     mnt->fs_priv = fs;
     struct vnode *root = NULL;
     rc = load_root(fs, &root);
+    if (rc && fs->rollback_failed) {
+        /* The rollback's switch failed: nothing of it was published, so
+         * the same root is loaded again with the switch off. */
+        cfs_reset_root(fs);
+        fs->sb = fs->sb_slot == CFS_SUPER_A ? a : b;   /* the switch changed the in-memory root */
+        fs->rollback_failed = false;
+        fs->rollback_off = true;
+        rc = load_root(fs, &root);
+    }
     if (rc && rother == 0) {
         kwarn("cosmofs: %s: generation %llu does not load (%d); falling back to generation %llu", bdev->name,
               (unsigned long long)fs->sb.generation, rc, (unsigned long long)(other == CFS_SUPER_A ? a : b).generation);
@@ -3148,6 +3212,16 @@ uint64_t cosmofs_test_snap_verdicts(struct mount *mnt)
 }
 
 #if CONFIG_DEBUG
+void cosmofs_test_commit_budget(struct mount *mnt, bool armed, unsigned left)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs == NULL)
+        return;
+    mutex_lock(&fs->lock);
+    fs->test_commit_armed = armed;
+    fs->test_commits_left = left;
+    mutex_unlock(&fs->lock);
+}
 void cosmofs_test_snap_no_raise(struct mount *mnt, bool on)
 {
     struct cfs *fs = cfs_of(mnt);

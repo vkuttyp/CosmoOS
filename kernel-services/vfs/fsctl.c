@@ -427,7 +427,8 @@ static int64_t fsctl_snap(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
     hdr->version = COSMO_FSCTL_VERSION;
     hdr->kind = cmd->op;
     hdr->count = req.count;
-    hdr->total = cmd->op == COSMO_FSCTL_SNAP_LIST ? req.total : req.count;
+    /* BOOT_OK's total is 1 when it released a hold, 0 when there was none. */
+    hdr->total = (cmd->op == COSMO_FSCTL_SNAP_LIST || cmd->op == COSMO_FSCTL_BOOT_OK) ? req.total : req.count;
     hdr->bytes = sizeof(struct cosmo_fsctl_snap);
     fsctl_set_result(o, buf, bytes);
     return 0;

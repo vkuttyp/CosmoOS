@@ -123,3 +123,107 @@ the known signature, recorded in flakes.md as its fourth sighting;
 release `make test-snapshot` PASS 32.5 s; `make analyze` clean; `make
 host-test` PASS. AArch64 debug `make test` PASS 157.6 s; release `make
 test-snapshot` PASS 43.0 s; `make analyze` clean.
+
+## Second pull request: rollback at the next mount
+
+As built:
+
+- The record (`cosmofs_format.h`): `struct cfs_rollback`, 120 bytes in a
+  `CFS_KIND_ROLLBACK` block named by `cfs_super.rollback_root` -- magic
+  `CFRB`, version 1, state (`PENDING` 1, `HELD` 2), the target's and the
+  safety snapshot's uuids, their ids (for the log), the live root's
+  generation, the request time, and a CRC32C over the struct with the crc
+  field zero. `cfs_rollback_seal` and `cfs_rollback_parse` are the bytes
+  alone; `cfs_rollback_read` is parse over the block.
+- `cosmofs_rollback.c` (new). `cfs_rollback_request` draws the safety
+  snapshot's uuid first (`cfs_snapshot_new_uuid`; a raise from 11 gives no
+  converted entry the same one), puts the safety snapshot
+  `pre-rollback-<seconds>` into the open transaction without committing
+  it, writes the PENDING record beside it and commits once (CF19). One
+  pending rollback at a time (`-EBUSY`); a clone is not a target.
+  `cfs_rollback_cancel` removes a pending record (the safety snapshot
+  stays); `cfs_rollback_boot_ok` removes a held one.
+- The mount (`cfs_rollback_at_mount`, from `load_root`): a record that
+  does not parse, or names a target or safety snapshot not on the list,
+  is refused and logged and the current tree mounted, nothing cleared; a
+  read-only mount leaves it pending. Otherwise, in the mount's first
+  transaction: walk the target's tree into a set; free every block the
+  old live tree reaches and the target does not (the commit's
+  newest-snapshot rule puts each on the safety snapshot's deadlist); take
+  the target's blocks off every deadlist (`cfs_snapshot_deadlists_filter`,
+  they are live again); drop the old tree's orphan record; make the
+  target's roots the live roots; write the record back as HELD; commit.
+  A failed switch is abandoned and the mount reloads the current tree
+  with the rollback off.
+- The hold: while PENDING, the target and the safety snapshot cannot be
+  deleted; while HELD, the safety snapshot cannot (`cfs_rollback_protects`,
+  `-EBUSY`). `init` sends `COSMO_FSCTL_BOOT_OK` to every writable
+  snapshot-capable mount once `/etc/rc` exits 0, which releases it.
+- The checker: `rollback_record` (a record that does not parse, or a
+  pending one naming a missing snapshot) and `hold` (a held record naming
+  a missing safety snapshot); the repair for both removes the record
+  (`cfs_rollback_drop`). Scrub reads the record block.
+- `cosmo-snap rollback [--no-reboot] NAME`, `rollback --cancel`; a root
+  rollback reboots (`kill(1, SIGTERM)` after `sync`).
+- Tests: self-tests `cosmofs-rollback` (a pool that is not the root),
+  `cosmofs-rollback-atomic` (the machine stopped after each commit the
+  request crosses, `cosmofs_test_commit_budget`), and
+  `cosmofs-rollback-record` (the parse and checksum on bytes: 960
+  single-bit changes over the 120 bytes refused; a wrong magic, version
+  or state refused under a matching crc). `test-snapshot` stages
+  `rollback` (break `/bin` and `/etc/rc`, roll back, reboot into the
+  snapshot, the hold released at boot complete, check clean) and `crash`
+  (QEMU killed after the record's commit, inside the switch -- a
+  `COSMOFS_STOP=1` kernel stops in the switch's commit with its blocks
+  written and its root not -- and after the release; `fsctl check` clean
+  after each). Probe `tools/b1-rollback-probe.py --old` commits the
+  record alone before the safety snapshot.
+- Docs: design.md "Rollback", CF19, testing.md, api.md, the guide's
+  [Snapshots and rollback](../guide/snapshots.md), upgrading.md's format
+  12 section.
+
+Measured (2026-10-20):
+
+- Probe `--old`: FAIL as designed on both architectures (x86-64 and
+  AArch64): stops after commits 0, 1 and 2 of the split request each
+  left a record whose safety snapshot did not exist, and
+  `cosmofs-rollback-atomic` failed at `rep.rollback_record.count == 0 &&
+  rep.hold.count == 0` (logs `out/b1-rollback-probe/<arch>-old`).
+- x86-64: debug `make test` PASS 156.0 s (163.2 s with the record test);
+  `make test-entropy` PASS (175.0, 161.7, 164.7 s); release `make
+  test-snapshot` PASS 87.7 s (identity, rollback, crash); `make analyze`
+  clean.
+- AArch64: debug `make test` PASS 169.3 s; release `make test-snapshot`
+  PASS 152.8 s; `make analyze` clean.
+
+### Review of the second pull request (#422, 2026-10-20)
+
+Qodo and Codex, fourteen comments; each fixed or answered on the PR:
+
+- `init`'s BOOT_OK listing grows on `-ERANGE` and never reads past what
+  came back; a failure says the hold stays.
+- A rollback while a hold is in place is refused unless it is back to
+  the held snapshot; that record carries `CFS_ROLLBACK_F_FROM_HELD` (the
+  old `pad` word), and cancelling it restores the hold.
+- `cfs_rollback_protects` fails closed on a record that does not read.
+- The record is checked for meaning: a safety uuid, and for a pending
+  record a target uuid that is not the safety's; known flags only.
+- `rb_write` frees the old record block only when it reads as one.
+- The switch refuses a target whose root inode is not a directory,
+  before changing anything; it puts the target's unlinked inodes on the
+  orphan record it commits, and the orphan replay now runs after a switch.
+- `snap_walk` is bounded; `cfs_snapshot_lookup_uuid` tells a missing
+  snapshot from a list that does not read, and the checker condemns a
+  record only for the first.
+- Snapshot creation and the rollback request write dirty pages first.
+- Answered, not changed: the newest-snapshot verdict stays exact after a
+  rollback, because a snapshot is asked with its bitmap
+  (design.md, "Why the newest snapshot still answers"); now asserted by
+  `cosmofs-rollback-shared`. Recorded: CFS-20, a nearly full pool can
+  refuse the switch (abandoned, logged, still pending).
+
+Measured after the fixes: x86-64 debug `make test` PASS 164.4 s
+(`cosmofs-rollback-shared` ok: 74 blocks released, 74 deadlist entries
+live again, 1 orphan of the target released); AArch64 debug PASS 168.8 s;
+release `make test-snapshot` PASS x86-64 83.2 s, AArch64 120.6 s; `make
+host-test` PASS; `make analyze` clean on both.

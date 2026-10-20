@@ -322,6 +322,28 @@ and a remount; a version-10 pool refuses identity and keeps its version;
 a zeroed uuid is named and repaired); `test-snapshot`'s identity stage on
 the installed root.
 
+**CF19. A rollback never leaves the filesystem between trees.** At every
+instant the superblock names exactly one live root and at most one
+rollback record, both reached through committed transactions: a pending
+record and the safety snapshot it names are published by one commit, so
+a record whose safety snapshot is missing is never durable; the mount's
+switch is one transaction, computed afresh from the root it read, so a
+crash inside it leaves the pending record for the next mount to apply
+from the start; and while a rollback is pending its target and its
+safety snapshot cannot be deleted, nor the safety snapshot after it is
+applied until the boot after it completes (BOOT_OK). After a switch no
+deadlist names a block the live tree reaches (`design.md`, "Rollback").
+Check: `cosmofs-rollback-atomic` stops the machine at every commit the
+request crosses and requires neither or both with a clean checker
+(`tools/b1-rollback-probe.py --old` commits the record alone first and
+fails it on both architectures); `cosmofs-rollback` (request, cancel,
+switch at a remount, hold until BOOT_OK, every snapshot deleted after
+the switch with the filesystem clean -- the deadlists' repair -- and a
+record with a bad checksum refused, named and repaired);
+`test-snapshot`'s `rollback` and `crash` stages (a stop after the
+record's commit, inside the switch through a `COSMOFS_STOP=1` kernel, and
+after the hold's release, each followed by a clean `fsctl check`).
+
 ## 3. Rules stated in `design.md` and not checked
 
 - The commit's flush before and after the root assumes the device honours

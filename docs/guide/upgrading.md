@@ -16,6 +16,19 @@ upgrades it to the build under test, and rolls it back. The guide's own
 runner cannot do this: it would need an older release installed first.
 That is why these blocks are shown as text.
 
+## A root raised to format 12
+
+A snapshot of the root raises its filesystem to format 12
+([Snapshots and rollback](snapshots.md)), which a kernel of v1.0.7 or
+older cannot mount. `cosmo-upgrade` reads the newest format each
+release's kernel can mount from the kernel itself, and refuses to switch
+to one -- an upgrade to an older release, or `--rollback` to the set in
+`\cosmo\prev` -- that could not mount the root:
+
+```text
+cosmo-upgrade: \cosmo\prev's kernel reads cosmofs format 11 at most, and the root is format 12 (a snapshot raised it): that kernel could not mount the root; nothing written
+```
+
 ## What is checked before anything is written
 
 Every release from v1.0.4 on publishes `SHA256SUMS.sig`, a detached

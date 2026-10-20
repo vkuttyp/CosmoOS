@@ -119,6 +119,10 @@ writeback thread off so that generation counts are exact.
 | `cosmofs-snap-reserved` | more frees than one deadlist block holds: every block the list gained is in the published bitmap |
 | `cosmofs-snap-rollback` | a deadlist fill that fails partway abandons the transaction and returns the reservation |
 | `cosmofs-snap-onewalk` | one snapshot verdict per freed block (walks minus verdicts) |
+| `cosmofs-rollback` | B1's rollback on a pool that is not the root (CF19): the request takes a `pre-rollback-` safety snapshot; while pending the pool and both snapshots carry their flags, both are undeletable and a second request is `-EBUSY`; `--cancel` withdraws it; a second request names its safety snapshot `keep-me`, a file written after it is in neither snapshot; at the remount the live tree is the target's, the old tree is `keep-me`'s, the pool is held and `keep-me` undeletable until BOOT_OK (which reports one release, then none); deleting every snapshot after the switch leaves the checker clean and the live files intact after a remount; a record whose own CRC is wrong (`COSMOFS_CORRUPT_ROLLBACK_CRC`) is refused at the mount, named by `rollback_record` and removed by the repair |
+| `cosmofs-rollback-atomic` | CF19's same-transaction rule: the machine stopped at each commit the request crosses (`cosmofs_test_commit_budget`, budgets 0-3) and the pool mounted again leaves either neither the record nor the safety snapshot, or both (then switched and held), with no `rollback_record` or `hold` finding; both outcomes seen. `tools/b1-rollback-probe.py --old` commits the record before the snapshot and fails it |
+| `cosmofs-rollback-record` | the rollback record on bytes alone (`cfs_rollback_seal`, `cfs_rollback_parse`): a sealed PENDING or HELD record parses back field for field; every single-bit change over its 120 bytes is refused; a wrong magic, version or state, a pending record whose safety uuid is its target's, and one with no safety uuid are refused under a crc that matches them |
+| `cosmofs-rollback-shared` | after a rollback to `t`: a file the live tree deleted after `t` is live again, and rewriting and deleting it and writing 8 files of churn leave `t`'s copy intact (the bitmap answer, design.md "Why the newest snapshot still answers"); an inode unlinked and open when `t` was taken is released at the switch (no orphan, no leak); while held, a rollback to another snapshot is `-EBUSY` and one back to the safety snapshot is taken, and cancelling it restores the hold; clean after every snapshot is deleted and a remount |
 | `cosmofs-snap-identity` | format version 12 (CF18): a pool formatted at 11 stays 11 until a snapshot raises it, converting a version-11 entry (`cosmofs_test_snap_no_raise` builds one) that stays readable; every snapshot gets a distinct uuid through `cosmofs_snapctl`; an id is not reused after a delete and a remount; `list`'s sizes: a snapshot holding a 32-block incompressible file the live tree removed has at least that much unique, one taken before the file has less, and the list is oldest first; a zeroed uuid (`COSMOFS_CORRUPT_SNAP_UUID`) is named by `snap_identity` and repaired; a version-10 pool refuses `create` with `-EOPNOTSUPP` and keeps its version |
 
 ### Pools, mirrors, compression, encryption (versions 4 to 7)
@@ -223,8 +227,28 @@ the uuid; a second `base` is refused; after the live tree changes,
 directory; the snapshot still reads the old contents; `list` shows base
 with its uuid and non-zero sizes; `fsctl check` of the root is clean and
 counts one snapshot; then a delete, a new snapshot, a power-off, and on
-the next boot the ids rise across the delete and the remount. Rollback
-and clone stages arrive with B1's later pull requests.
+the next boot the ids rise across the delete and the remount.
+
+Stage `rollback`: the root is snapshotted as `good`, then broken --
+`/bin` removed, `/etc/rc` made to `exit 7`, a file rewritten -- and
+`cosmo-snap rollback good` reboots the same QEMU. The next boot's log
+must hold the switch's line, `/etc/rc` exiting 0 and init releasing the
+hold; `/bin/sh` is back, the file has its old contents and the safety
+snapshot the broken one; `fsctl check` is clean; both snapshots are then
+deleted, clean again.
+
+Stage `crash`, CF19's three points, each a killed QEMU and a clean
+`fsctl check` on the next boot: after the record's commit (`rollback
+--no-reboot`, then the kill: the next boot switches); inside the switch
+(the installed disk's `kernel.elf` and `boot.tar` replaced by a build with
+`COSMOFS_STOP=1`, the set signed again with the build's key, the boot
+killed at the kernel's `test stop` line after the switch's blocks and
+before its root; then the ordinary set again, which redoes the switch);
+and after the hold's release (the kill once the boot completed: the next
+boot applies nothing). `make test-snapshot` builds the `COSMOFS_STOP=1`
+image in `$(OUT)-stop`, as `test-crash` builds its own.
+
+Clone stages arrive with B1's third pull request.
 
 ## Installed system (`make test-install`)
 
@@ -258,6 +282,12 @@ markers. A host binary can be run directly as
 one case).
 
 ## Probes
+
+- `tools/b1-rollback-probe.py [--old] [--arch ...]`: `--old` commits a
+  rollback's record on its own before its safety snapshot, in a
+  throwaway worktree; `cosmofs-rollback-atomic` then fails at its
+  `rollback_record` check (a stop between the two left a record naming a
+  safety snapshot that does not exist).
 
 - `tools/cosmofs-metadata-csum-probe.py` demonstrated, on the tree
   before format version 11, that a metadata header recorded no checksum

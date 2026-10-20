@@ -84,9 +84,10 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
   `EFBIG`.
 - A read-only mount still writes the replay of an interrupted free or
   orphan record, as a journalling filesystem replays its journal.
-- No cosmofs rollback to a snapshot from the running system, no clones,
-  no RAID-Z, no resilvering (inventory 2.4); a deleted newest snapshot's
-  id can be reused after a remount.
+- A rollback to a snapshot takes effect at the next boot (or the next
+  mount of another filesystem), not in the running system
+  ([Snapshots and rollback](snapshots.md)); no clones, no RAID-Z, no
+  resilvering (backlog CFS-8, CFS-9, CFS-13).
 - A root disk that appears late (USB storage) is not waited for: init
   stays on the live root and says so.
 
