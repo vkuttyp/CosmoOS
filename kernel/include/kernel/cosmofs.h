@@ -182,6 +182,7 @@ struct cosmofs_snap_req {
     struct cosmofs_snap_info *out;  /* LIST: up to `max` records; CREATE/ROLLBACK: the one made */
     unsigned max;
     bool no_sizes;                  /* LIST: skip the walks; sizes are 0 */
+    uint64_t after;                 /* LIST: only snapshots with an id above this (a page's cursor) */
     unsigned count;                 /* filled in */
     unsigned total;                 /* LIST: how many there were */
     unsigned format;                /* LIST: the filesystem's format version */
@@ -291,7 +292,9 @@ uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of);
 /* Test hook: snapshots taken while on are the version-11 kind, so a pool
  * at 11 is not raised -- how a test builds the list an older kernel left
  * behind, for the raise to convert (design.md, "Format version 12"). */
+#if CONFIG_DEBUG
 void cosmofs_test_snap_no_raise(struct mount *mnt, bool on);
+#endif
 
 #if CONFIG_DEBUG
 /* The checker's duplicate-name hash. Only `cosmofs-check-dup-name`

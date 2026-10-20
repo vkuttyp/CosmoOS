@@ -99,8 +99,10 @@ struct cfs {
     /* Test hook: orphan_fill returns -EIO, so a commit fails with the
      * record's blocks reserved (docs/audit/next-subsystem-orphan.md). */
     bool test_fail_orphan;
+#if CONFIG_DEBUG
     /* Test hook: no raise to version 12; snapshots taken are version 11's. */
     bool test_no_raise;
+#endif
     /* Walks of the snapshot list, since mount. The verdict used to be
      * taken twice per freed block -- once for the record, once by the
      * release loop -- and is now taken once; this is how that is
@@ -221,6 +223,9 @@ bool cfs_has_snapshots(struct cfs *fs);
  * (design.md, "Format version 12"). */
 /* The checker's repair for a version-12 list's identity faults. */
 int cfs_snapshot_fix_identity(struct cfs *fs, unsigned *fixed);
+bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
+/* A uuid no snapshot on the list, and none of `also`, has (CF18). */
+void cfs_snapshot_new_uuid(struct cfs *fs, uint8_t out[16], const uint8_t (*also)[16], unsigned nalso);
 uint32_t cfs_snaplist_kind(const struct cfs *fs);
 unsigned cfs_snaplist_slots(const struct cfs *fs);
 uint64_t cfs_snaplist_next(const struct cfs_buf *b);
@@ -236,6 +241,12 @@ void cfs_snaplist_set(const struct cfs *fs, struct cfs_buf *b, unsigned i, const
  */
 int cfs_tree_walk(struct cfs *fs, uint64_t imap_root, uint64_t next_ino,
                   void (*mark)(void *arg, uint64_t lin), void *arg);
+/* The allocation maps a root names (a member table, or before version 4
+ * an index) and, for a snapshot, its deadlist: what the listing's sizes
+ * add to a tree's walk (cosmofs_snap.c). */
+int cfs_alloc_walk(struct cfs *fs, uint64_t root, void (*mark)(void *arg, uint64_t lin), void *arg);
+int cfs_snapshot_walk_held(struct cfs *fs, const struct cfs_snapshot *s, void (*mark)(void *arg, uint64_t lin),
+                           void *arg);
 /* Commit-time: hold `blk` for the newest snapshot instead of freeing it.
  * False when no snapshot exists and the caller should free it. */
 

@@ -22,6 +22,7 @@ prompt as test-install drives it (tests/boot/install_test.py). Exit 0 PASS,
 """
 
 import argparse
+import math
 import os
 import re
 import shutil
@@ -135,6 +136,8 @@ def main():
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
     args = ap.parse_args()
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        ap.error(f"--timeout must be a finite number of seconds above 0, not {args.timeout}")
     shutil.rmtree(args.workdir, ignore_errors=True)
     os.makedirs(args.workdir)
     results = []

@@ -3147,12 +3147,14 @@ uint64_t cosmofs_test_snap_verdicts(struct mount *mnt)
     return fs ? fs->snap_verdicts : 0;
 }
 
+#if CONFIG_DEBUG
 void cosmofs_test_snap_no_raise(struct mount *mnt, bool on)
 {
     struct cfs *fs = cfs_of(mnt);
     if (fs != NULL)
         fs->test_no_raise = on;
 }
+#endif
 
 void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)
 {

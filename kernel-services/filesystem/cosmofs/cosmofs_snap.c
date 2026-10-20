@@ -169,6 +169,68 @@ static int snap_walk(struct cfs *fs, bool (*fn)(struct cfs_snapshot *s, void *ar
     return 0;
 }
 
+struct uuid_ctx {
+    const uint8_t *uuid;
+    struct cfs_snapshot found;
+    bool ok;
+};
+
+static bool find_uuid(struct cfs_snapshot *s, void *arg)
+{
+    struct uuid_ctx *c = arg;
+    if (memcmp(s->uuid, c->uuid, sizeof(s->uuid)) != 0)
+        return true;
+    c->found = *s;
+    c->ok = true;
+    return false;
+}
+
+/* The snapshot with this uuid (version 12), or false. A zero uuid names
+ * nothing. */
+bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out)
+{
+    static const uint8_t zero[16];
+    if (fs->sb.version < 12 || memcmp(uuid, zero, 16) == 0)
+        return false;
+    struct uuid_ctx c = { .uuid = uuid, .ok = false };
+    if (snap_walk(fs, find_uuid, &c, false))
+        return false;
+    if (c.ok && out)
+        *out = c.found;
+    return c.ok;
+}
+
+/*
+ * A new snapshot uuid (CF18). What it must be is unique on this
+ * filesystem, which is checked, not hoped for: the bytes are drawn,
+ * mixed with the wall clock and a counter, and drawn again while any
+ * snapshot on the list -- or any of `also`, the ones a batch has handed
+ * out but not yet written -- has them. So a uuid needs no seeded pool:
+ * a boot with no entropy source (Parallels without jitter, the CI
+ * no-entropy boot) takes snapshots as before, with uuids that are unique
+ * here though not unpredictable, which nothing asks of them.
+ */
+void cfs_snapshot_new_uuid(struct cfs *fs, uint8_t out[16], const uint8_t (*also)[16], unsigned nalso)
+{
+    static uint64_t counter;
+    static const uint8_t zero[16];
+    for (;;) {
+        random_get_bytes(out, 16);
+        uint64_t mix = clock_realtime_ns() ^ (++counter * 0x9E3779B97F4A7C15ull);
+        for (unsigned k = 0; k < 8; k++)
+            out[k] ^= (uint8_t)(mix >> (8 * k));
+        out[6] = (uint8_t)((out[6] & 0x0Fu) | 0x40u);   /* RFC 4122 version 4 */
+        out[8] = (uint8_t)((out[8] & 0x3Fu) | 0x80u);
+        bool taken = memcmp(out, zero, 16) == 0;
+        for (unsigned k = 0; k < nalso && !taken; k++)
+            taken = memcmp(also[k], out, 16) == 0;
+        if (!taken && fs->sb.version >= 12)
+            taken = cfs_snapshot_find_uuid(fs, out, NULL);
+        if (!taken)
+            return;
+    }
+}
+
 struct find_ctx {
     const char *name;
     struct cfs_snapshot found;
@@ -927,11 +989,8 @@ static int snap_raise(struct cfs *fs)
         return 0;
     if (fs->sb.version < 11)
         return -EOPNOTSUPP;
-    int rc = cfs_need_seeded("give snapshots an identity");
-    if (rc)
-        return rc;
     unsigned total = 0;
-    rc = cfs_snapshot_list(fs, NULL, 0, &total);
+    int rc = cfs_snapshot_list(fs, NULL, 0, &total);
     if (rc)
         return rc;
     struct cfs_snapshot *all = total ? kmalloc((size_t)total * sizeof(*all), 0) : NULL;
@@ -947,9 +1006,20 @@ static int snap_raise(struct cfs *fs)
     for (unsigned i = 0; i < n; i++) {
         if (all[i].id > max_id)
             max_id = all[i].id;
-        random_get_bytes(all[i].uuid, sizeof(all[i].uuid));
-        all[i].uuid[6] = (uint8_t)((all[i].uuid[6] & 0x0Fu) | 0x40u);   /* RFC 4122 version 4 */
-        all[i].uuid[8] = (uint8_t)((all[i].uuid[8] & 0x3Fu) | 0x80u);
+        /* Unique among those this raise has given so far; the list has
+         * none yet (it is version 11's). Copied out, since `all` is the
+         * array the helper reads. */
+        uint8_t u[16];
+        uint8_t (*given)[16] = kmalloc((size_t)(i ? i : 1) * 16u, 0);
+        if (given == NULL) {
+            kfree(all);
+            return -ENOMEM;
+        }
+        for (unsigned k = 0; k < i; k++)
+            memcpy(given[k], all[k].uuid, 16);
+        cfs_snapshot_new_uuid(fs, u, (const uint8_t (*)[16])given, i);
+        kfree(given);
+        memcpy(all[i].uuid, u, 16);
     }
 
     /* From here the transaction holds the change. The old chain is named
@@ -1076,12 +1146,11 @@ int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct 
     int rc = cfs_commit(fs);
     if (rc)
         return rc;
+#if CONFIG_DEBUG
     bool raise = fs->sb.version == 11 && !fs->test_no_raise;
-    if (raise) {
-        rc = cfs_need_seeded("take a snapshot");
-        if (rc)
-            return rc;
-    }
+#else
+    bool raise = fs->sb.version == 11;
+#endif
 
     /* An id no snapshot has had on this filesystem: the tag this
      * snapshot's vnodes carry. Before version 12 "on this filesystem"
@@ -1127,11 +1196,8 @@ int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct 
     s.inode_count = fs->sb.inode_count;
     s.created_ns = clock_realtime_ns();
     strlcpy(s.name, name, sizeof(s.name));
-    if (fs->sb.version >= 12) {
-        random_get_bytes(s.uuid, sizeof(s.uuid));
-        s.uuid[6] = (uint8_t)((s.uuid[6] & 0x0Fu) | 0x40u);
-        s.uuid[8] = (uint8_t)((s.uuid[8] & 0x3Fu) | 0x80u);
-    }
+    if (fs->sb.version >= 12)
+        cfs_snapshot_new_uuid(fs, s.uuid, NULL, 0);
 
     rc = snaplist_insert(fs, &s);
     if (rc == 0)
@@ -1288,18 +1354,26 @@ int cfs_snapshot_fix_identity(struct cfs *fs, unsigned *fixed)
     *fixed = 0;
     if (fs->sb.version < 12 || fs->sb.snap_root == 0)
         return 0;
-    int rc = cfs_need_seeded("repair snapshot identity");
+    /* The highest id first: a repeated id is given one above it. */
+    uint64_t max_id = 0, live = 0;
+    unsigned nlive = 0;
+    int rc = snap_max_id(fs, &live, &nlive);
     if (rc)
         return rc;
+    max_id = live > snaplist_max_id(fs) ? live : snaplist_max_id(fs);
     rc = snap_cow(fs, NULL);
     if (rc)
         return rc;
     static const uint8_t zero[16];
-    uint8_t (*seen)[16] = kmalloc((size_t)(fs->snap_count + 8) * 16u, 0);
-    if (seen == NULL)
+    unsigned cap = nlive + 8, nseen = 0;
+    uint8_t (*seen)[16] = kmalloc((size_t)cap * 16u, 0);
+    uint64_t *ids = kmalloc((size_t)cap * sizeof(*ids), 0);
+    if (seen == NULL || ids == NULL) {
+        kfree(seen);
+        kfree(ids);
         return -ENOMEM;
-    unsigned nseen = 0, cap = fs->snap_count + 8;
-    uint64_t max_id = 0, blkno = fs->sb.snap_root;
+    }
+    uint64_t blkno = fs->sb.snap_root;
     unsigned guard = 0;
     while (blkno && rc == 0 && guard++ < CFS_SNAP_MAX_CHAIN) {
         struct cfs_buf *b;
@@ -1311,26 +1385,30 @@ int cfs_snapshot_fix_identity(struct cfs *fs, unsigned *fixed)
             struct cfs_snapshot s;
             if (!cfs_snaplist_get(fs, b, i, &s))
                 continue;
-            if (s.id > max_id)
-                max_id = s.id;
-            bool bad = memcmp(s.uuid, zero, 16) == 0;
-            for (unsigned k = 0; k < nseen && !bad; k++)
-                bad = memcmp(seen[k], s.uuid, 16) == 0;
-            if (bad) {
-                random_get_bytes(s.uuid, sizeof(s.uuid));
-                s.uuid[6] = (uint8_t)((s.uuid[6] & 0x0Fu) | 0x40u);
-                s.uuid[8] = (uint8_t)((s.uuid[8] & 0x3Fu) | 0x80u);
+            bool bad_uuid = memcmp(s.uuid, zero, 16) == 0, bad_id = false;
+            for (unsigned k = 0; k < nseen; k++) {
+                bad_uuid = bad_uuid || memcmp(seen[k], s.uuid, 16) == 0;
+                bad_id = bad_id || ids[k] == s.id;
+            }
+            if (bad_uuid)
+                cfs_snapshot_new_uuid(fs, s.uuid, (const uint8_t (*)[16])seen, nseen);
+            if (bad_id && max_id < CFS_SNAP_ID_MAX)
+                s.id = ++max_id;   /* a vnode tag of its own (design.md, "Reading a snapshot") */
+            if (bad_uuid || bad_id) {
                 cfs_snaplist_set(fs, b, i, &s);
                 cfs_buf_mark_dirty(fs, b);
                 (*fixed)++;
             }
-            if (nseen < cap)
-                memcpy(seen[nseen++], s.uuid, 16);
+            if (nseen < cap) {
+                memcpy(seen[nseen], s.uuid, 16);
+                ids[nseen++] = s.id;
+            }
         }
         cfs_buf_put(fs, b);
         blkno = next;
     }
     kfree(seen);
+    kfree(ids);
     if (rc == 0 && max_id > snaplist_max_id(fs)) {
         rc = snaplist_set_max_id(fs, max_id);
         if (rc == 0)
@@ -1338,5 +1416,90 @@ int cfs_snapshot_fix_identity(struct cfs *fs, unsigned *fixed)
     }
     if (max_id > fs->snap_max_id)
         fs->snap_max_id = max_id;
+    return rc;
+}
+
+/*
+ * The allocation maps a root names -- from version 4 its member table and
+ * each member's index and bitmap blocks, before it the one index and its
+ * bitmaps -- for the listing's sizes: a snapshot pins the maps of its
+ * generation, and deleting it gives back those no other root still uses.
+ */
+static void alloc_index_walk(struct cfs *fs, uint64_t idx, void (*mark)(void *arg, uint64_t lin), void *arg, int *rc)
+{
+    uint64_t lin = cfs_dva_lin(fs, idx);
+    if (idx == 0 || lin == CFS_DVA_NONE)
+        return;
+    mark(arg, lin);
+    struct cfs_buf *b;
+    if (cfs_buf_get(fs, idx, CFS_KIND_ALLOCIDX, &b)) {
+        *rc = -EIO;
+        return;
+    }
+    const uint64_t *slot = (const uint64_t *)(b->data + CFS_MHDR_SIZE);
+    for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++) {
+        uint64_t l = slot[i] ? cfs_dva_lin(fs, slot[i]) : CFS_DVA_NONE;
+        if (l != CFS_DVA_NONE)
+            mark(arg, l);
+    }
+    cfs_buf_put(fs, b);
+}
+
+int cfs_alloc_walk(struct cfs *fs, uint64_t root, void (*mark)(void *arg, uint64_t lin), void *arg)
+{
+    int rc = 0;
+    if (root == 0)
+        return 0;
+    if (fs->sb.version < 4) {
+        alloc_index_walk(fs, root, mark, arg, &rc);
+        return rc;
+    }
+    uint64_t lin = cfs_dva_lin(fs, root);
+    if (lin == CFS_DVA_NONE)
+        return -EIO;
+    mark(arg, lin);
+    struct cfs_buf *mb;
+    if (cfs_buf_get(fs, root, CFS_KIND_MEMBERS, &mb))
+        return -EIO;
+    const struct cfs_member_block *t = (const struct cfs_member_block *)(mb->data + CFS_MHDR_SIZE);
+    unsigned n = t->count <= CFS_MEMBERS_PER_BLOCK ? (unsigned)t->count : CFS_MEMBERS_PER_BLOCK;
+    uint64_t roots[CFS_MAX_MEMBERS < 64 ? CFS_MAX_MEMBERS : 64];
+    unsigned nr = n < sizeof(roots) / sizeof(roots[0]) ? n : (unsigned)(sizeof(roots) / sizeof(roots[0]));
+    for (unsigned v = 0; v < nr; v++)
+        roots[v] = t->m[v].alloc_root;
+    cfs_buf_put(fs, mb);
+    for (unsigned v = 0; v < nr && rc == 0; v++)
+        alloc_index_walk(fs, roots[v], mark, arg, &rc);
+    return rc;
+}
+
+/* What a snapshot holds beyond its tree: its allocation maps and its
+ * deadlist, the chain and the blocks it names. */
+int cfs_snapshot_walk_held(struct cfs *fs, const struct cfs_snapshot *s, void (*mark)(void *arg, uint64_t lin),
+                           void *arg)
+{
+    int rc = cfs_alloc_walk(fs, s->alloc_root, mark, arg);
+    uint64_t at = s->deadlist;
+    unsigned guard = 0;
+    while (at && rc == 0) {
+        if (guard++ > CFS_SNAP_MAX_CHAIN)
+            return -EIO;
+        uint64_t lin = cfs_dva_lin(fs, at);
+        if (lin == CFS_DVA_NONE)
+            return -EIO;
+        mark(arg, lin);
+        struct cfs_buf *db;
+        if (cfs_buf_get(fs, at, CFS_KIND_DEADLIST, &db))
+            return -EIO;
+        const struct cfs_dead_block *d = dead_payload(db);
+        uint64_t n = d->count < CFS_DEAD_PER_BLOCK ? d->count : CFS_DEAD_PER_BLOCK;
+        for (uint64_t k = 0; k < n; k++) {
+            uint64_t l = cfs_dva_lin(fs, d->blk[k]);
+            if (l != CFS_DVA_NONE)
+                mark(arg, l);
+        }
+        at = d->next;
+        cfs_buf_put(fs, db);
+    }
     return rc;
 }

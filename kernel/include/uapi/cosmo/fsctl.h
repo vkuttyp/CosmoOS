@@ -70,7 +70,14 @@ struct cosmo_fsctl {
     /* Version 3: NUL-terminated; zero for the operations that take none. */
     char name[COSMO_FSCTL_NAME_MAX + 1];
     char name2[COSMO_FSCTL_NAME_MAX + 1];
+    /* Version 3, SNAP_LIST: only snapshots with an id above this. A
+     * listing returns at most COSMO_FSCTL_SNAP_PAGE records, oldest
+     * (lowest id) first, and `total` says how many there are; a reader
+     * asks again with the last id it got until it has them all. */
+    uint64_t cursor;
 };
+
+#define COSMO_FSCTL_SNAP_PAGE 1024
 
 /* SNAP_ROLLBACK only: leave the safety snapshot's name to the caller
  * (`name2`) instead of pre-rollback-<seconds>. */

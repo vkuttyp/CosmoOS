@@ -280,7 +280,7 @@ boot, release included.
 ### Protocol
 - `open`: `-EPERM` without `PRIV_SYS_ADMIN`. Each open file owns its own
   result buffer (`struct fsctl_open`, its own mutex).
-- `write`: exactly `sizeof(struct cosmo_fsctl)` bytes (80), else
+- `write`: exactly `sizeof(struct cosmo_fsctl)` bytes (88), else
   `-EINVAL`. `PRIV_SYS_ADMIN` is checked again (`-EPERM`). `version` must
   equal `COSMO_FSCTL_VERSION` (3), else `-EINVAL`. `flags` may contain
   only `COSMO_FSCTL_F_REPAIR` for `CHECK`, `COSMO_FSCTL_F_NO_SIZES` for
@@ -301,8 +301,8 @@ boot, release included.
 | `COSMO_FSCTL_LIST` (1) | `count` records of `struct cosmo_fsctl_mount` (id, namespace id, flags, `caps`, fstype, path): the root mount first at `/`, then the caller's mount namespace; `total` larger than `count` means the list changed while it was built | `-ENOMEM` |
 | `COSMO_FSCTL_CHECK` (2) | one `struct cosmo_fsctl_check`: `nclasses` (16), `COSMO_FSCTL_R_PARTIAL`/`_CLEAN`/`_REPAIR_REFUSED`, the walk totals, and `class[16]` in the fixed index order of `fsctl.h` | `-EINVAL` for id 0; `-ENOENT` for an id this namespace does not hold; `-EBUSY` for a mount being unmounted; `-EOPNOTSUPP` for a filesystem without `check`; any error of `cosmofs_check` |
 | `COSMO_FSCTL_SCRUB` (3) | one `struct cosmo_fsctl_scrub` (`blocks_read`, `inodes`, `repaired`, `unrecoverable`) | as CHECK, and any error of `cosmofs_scrub` |
-| `COSMO_FSCTL_SNAP_CREATE` (4) | one `struct cosmo_fsctl_snap`: the snapshot `name` taken (id, uuid, generation); raises a format-11 pool to 12 | as CHECK; `-EOPNOTSUPP` below format 11 or for a filesystem without `snapctl`; `-EEXIST`; `-EINVAL`/`-ENAMETOOLONG` for a bad name; `-EROFS`; `-EAGAIN` with an unseeded entropy pool |
-| `COSMO_FSCTL_SNAP_LIST` (5) | one `struct cosmo_fsctl_snap_pool` (the format; a pending or held rollback), then `count` `struct cosmo_fsctl_snap` oldest first, with `referenced` and `unique` bytes (0 with `F_NO_SIZES`) | as CHECK; `-EIO` when a tree does not walk |
+| `COSMO_FSCTL_SNAP_CREATE` (4) | one `struct cosmo_fsctl_snap`: the snapshot `name` taken (id, uuid, generation); raises a format-11 pool to 12 | as CHECK; `-EOPNOTSUPP` below format 11 or for a filesystem without `snapctl`; `-EEXIST`; `-EINVAL`/`-ENAMETOOLONG` for a bad name; `-EROFS` (a snapshot's uuid does not wait for a seeded entropy pool: `cfs_snapshot_new_uuid` makes it unique by checking the list) |
+| `COSMO_FSCTL_SNAP_LIST` (5) | one `struct cosmo_fsctl_snap_pool` (the format; a pending or held rollback), then `count` `struct cosmo_fsctl_snap` oldest first -- at most `COSMO_FSCTL_SNAP_PAGE` (1024), only those with an id above the command's `cursor`, so a full page is followed by one more from its last id -- with `referenced` and `unique` bytes (0 with `F_NO_SIZES`) | as CHECK; `-EIO` when a tree does not walk |
 | `COSMO_FSCTL_SNAP_DELETE` (6) | none (`count` 0) | as CREATE; `-ENOENT`; `-EBUSY` while anything inside it is in use |
 | `COSMO_FSCTL_SNAP_ROLLBACK` (7), `_CANCEL` (8), `_CLONE` (9), `COSMO_FSCTL_BOOT_OK` (10) | B1's later pull requests (`design.md`, "Format version 12"); `-EOPNOTSUPP` until then | |
 

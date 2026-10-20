@@ -2304,7 +2304,7 @@ static const struct vnode_ops cfs_lnk_ops = {
 
 /* A byte per block, saturating: how many trees reach it. Chunked like
  * the checker's maps, so a large pool does not need one large allocation. */
-#define TALLY_CHUNK 65536u
+#define TALLY_CHUNK 4096u   /* a page each: no large allocation, however big the pool */
 
 struct tally {
     uint8_t **chunk;
@@ -2365,6 +2365,24 @@ static void tally_size(void *arg, uint64_t lin)
         s->unique++;
 }
 
+/* A mark called once per block per root: `seen` is cleared per root. */
+struct once {
+    struct tally *t;
+    uint8_t *seen;
+    void (*fn)(void *arg, uint64_t lin);
+    void *arg;
+};
+
+static void once_mark(void *arg, uint64_t lin)
+{
+    struct once *o = arg;
+    uint8_t bit = (uint8_t)(1u << (lin % 8));
+    if (o->seen[lin / 8] & bit)
+        return;
+    o->seen[lin / 8] |= bit;
+    o->fn(o->arg, lin);
+}
+
 static void snap_info_fill(struct cfs *fs, struct cosmofs_snap_info *o, const struct cfs_snapshot *s)
 {
     memset(o, 0, sizeof(*o));
@@ -2413,31 +2431,57 @@ static int snap_list_sized(struct cfs *fs, struct cosmofs_snap_req *req)
         }
     if (req->no_sizes) {
         for (unsigned i = 0; rc == 0 && i < n && req->count < req->max; i++)
-            snap_info_fill(fs, &req->out[req->count++], &all[i]);
+            if (all[i].id > req->after)
+                snap_info_fill(fs, &req->out[req->count++], &all[i]);
         kfree(all);
         return rc;
     }
+    /* Each root counted once per block, whatever reaches the block twice
+     * inside it (a deadlist names blocks its own tree reaches). */
     struct tally t = { 0 };
+    struct once o1 = { .t = &t };
     if (rc == 0)
         rc = tally_alloc(&t, fs->nblocks);
     if (rc == 0) {
-        rc = cfs_tree_walk(fs, fs->sb.imap_root, fs->sb.next_ino, tally_count, &t);
+        o1.seen = kmalloc((size_t)((fs->nblocks + 7) / 8), 0);
+        if (o1.seen == NULL)
+            rc = -ENOMEM;
+    }
+    size_t seen_bytes = (size_t)((fs->nblocks + 7) / 8);
+    if (rc == 0) {
+        memset(o1.seen, 0, seen_bytes);
+        o1.fn = tally_count;
+        o1.arg = &t;
+        rc = cfs_tree_walk(fs, fs->sb.imap_root, fs->sb.next_ino, once_mark, &o1);
+        if (rc == 0)
+            rc = cfs_alloc_walk(fs, fs->sb.version >= 4 ? fs->sb.members : fs->mem[0].alloc_root, once_mark, &o1);
         if (rc)
             kwarn("cosmofs: snapshot sizes: the live tree does not walk (%d)", rc);
     }
     for (unsigned i = 0; rc == 0 && i < n; i++) {
-        rc = cfs_tree_walk(fs, all[i].imap_root, all[i].next_ino, tally_count, &t);
+        memset(o1.seen, 0, seen_bytes);
+        rc = cfs_tree_walk(fs, all[i].imap_root, all[i].next_ino, once_mark, &o1);
+        if (rc == 0)
+            rc = cfs_snapshot_walk_held(fs, &all[i], once_mark, &o1);
         if (rc)
             kwarn("cosmofs: snapshot sizes: snapshot '%s' does not walk (%d)", all[i].name, rc);
     }
     for (unsigned i = 0; rc == 0 && i < n && req->count < req->max; i++) {
+        if (all[i].id <= req->after)
+            continue;   /* the caller's cursor: listed in an earlier page */
         struct tally_size sz = { .t = &t };
-        rc = cfs_tree_walk(fs, all[i].imap_root, all[i].next_ino, tally_size, &sz);
+        memset(o1.seen, 0, seen_bytes);
+        o1.fn = tally_size;
+        o1.arg = &sz;
+        rc = cfs_tree_walk(fs, all[i].imap_root, all[i].next_ino, once_mark, &o1);
+        if (rc == 0)
+            rc = cfs_snapshot_walk_held(fs, &all[i], once_mark, &o1);
         struct cosmofs_snap_info *o = &req->out[req->count++];
         snap_info_fill(fs, o, &all[i]);
         o->referenced = sz.referenced * CFS_BLOCK;
         o->unique = sz.unique * CFS_BLOCK;
     }
+    kfree(o1.seen);
     tally_free(&t);
     kfree(all);
     return rc;

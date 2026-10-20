@@ -12,7 +12,9 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/string.h>
 
 #include "cosmofs_internal.h"
 
@@ -86,11 +88,27 @@ static void reach_inode(struct reach *r, const struct cfs_inode *in)
         reach_mark(r, in->csum_root);
         struct cfs_buf *idx;
         if (reach_get(r, in->csum_root, CFS_KIND_CSUMIDX, &idx) == 0) {
-            const uint64_t *slot = (const uint64_t *)(idx->data + CFS_MHDR_SIZE);
-            for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++)
-                if (slot[i] != 0)
-                    reach_mark(r, slot[i]);
+            /* Copied out (on the heap: a block's worth): reading a leaf may
+             * evict the index's buffer. */
+            uint64_t *slots = kmalloc(CFS_PTRS_PER_BLOCK * sizeof(*slots), 0);
+            if (slots == NULL) {
+                cfs_buf_put(r->fs, idx);
+                reach_fail(r, in->csum_root, "out of memory");
+                return;
+            }
+            memcpy(slots, idx->data + CFS_MHDR_SIZE, CFS_PTRS_PER_BLOCK * sizeof(*slots));
             cfs_buf_put(r->fs, idx);
+            for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++) {
+                if (slots[i] == 0)
+                    continue;
+                reach_mark(r, slots[i]);
+                /* Read, not only counted: a walk that says it reached a
+                 * leaf has read it, or it says it could not. */
+                struct cfs_buf *leaf;
+                if (reach_get(r, slots[i], CFS_KIND_CSUM, &leaf) == 0)
+                    cfs_buf_put(r->fs, leaf);
+            }
+            kfree(slots);
         }
     }
 }

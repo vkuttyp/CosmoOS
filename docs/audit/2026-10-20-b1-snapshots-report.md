@@ -78,3 +78,41 @@ Measured (2026-10-20, this branch):
   format 11; `create base` raised it; `diff base -` named the four changes
   under `/snapdemo` and one outside it, `/root/.ash_history`, the shell's
   own; ids 1 < 2 < 3 across a delete and a remount).
+
+### Review and CI of the first pull request (2026-10-20)
+
+CI's `entropy boots` job failed on both architectures: the no-entropy boot
+waited 5 s in `cfs_need_seeded` for every snapshot and 16 self-tests failed
+(`cosmofs-replay`, `cosmofs-snapshot`, `cosmofs-snap-identity`, ...).
+A snapshot's uuid now needs no seeded pool: `cfs_snapshot_new_uuid` mixes
+the random bytes with the clock and a counter and draws again while the
+list (or the batch) already has them, so CF18's uniqueness is checked
+rather than hoped for. The raise, `create` and the identity repair use it.
+
+Review (Qodo, Codex), each fixed:
+
+- `cosmo-snap` refuses a name over 31 bytes (it reached the kernel cut
+  short and could delete another snapshot) and a `create` name starting
+  with `-`; `diff` fails on a file or directory it cannot read instead of
+  reporting a change or an empty directory; the mount listing is read
+  whole (grown on `-ERANGE`, never read past what came back), in
+  `cosmo-snap` and `cosmo-upgrade`.
+- `cosmo-upgrade`'s format gate fails closed: a root format it cannot
+  read refuses the switch.
+- `SNAP_LIST` pages: `struct cosmo_fsctl` gains `cursor` (88 bytes),
+  1024 records a page from the id after it; `cosmo-snap list` follows.
+- Sizes count the allocation maps and the deadlist blocks a snapshot
+  holds, each block once per root; the tally is allocated in 4096-block
+  chunks.
+- The checker: identity repair after the counter repair; a repeated id is
+  a `snap_identity` finding, repaired with a fresh id; the reach walk
+  reads every checksum leaf.
+- The no-raise test hook is compiled only under `CONFIG_DEBUG`.
+
+Measured after the fixes: x86-64 debug `make test` PASS 162.1 s; `make
+test-entropy` PASS (no-entropy 162.0 s, cpurng 153.5 s, devrng 160.3 s) on
+the second run -- the first failed `sched-restore-loop` one trip short,
+the known signature, recorded in flakes.md as its fourth sighting;
+release `make test-snapshot` PASS 32.5 s; `make analyze` clean; `make
+host-test` PASS. AArch64 debug `make test` PASS 157.6 s; release `make
+test-snapshot` PASS 43.0 s; `make analyze` clean.

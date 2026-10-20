@@ -307,7 +307,8 @@ deadlist sites are checked by review, not by a test.
 snapshot has a uuid no other snapshot of the filesystem has, and no id
 is handed out twice, across remounts included.** The uuid is drawn when
 the snapshot is taken (or when the raise from 11 converts an older
-entry) and never changed; the list head's `max_id` is the highest id
+entry) and never changed, and redrawn while the list already has it, so
+uniqueness does not depend on a seeded entropy pool; the list head's `max_id` is the highest id
 ever used, every new id is above it and above every id on the list, and
 the head is rewritten in the transaction that takes the snapshot. A pool
 is raised from 11 to 12 only by a snapshot, in that snapshot's

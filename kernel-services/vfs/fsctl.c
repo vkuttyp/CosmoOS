@@ -370,7 +370,7 @@ static int64_t fsctl_snap(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
     }
     /* Room for every snapshot a list can hold (CFS_SNAP_ID_MAX is the
      * id space; a list this long is not one anyone has). */
-    unsigned max = cmd->op == COSMO_FSCTL_SNAP_LIST ? 1024u : 1u;
+    unsigned max = cmd->op == COSMO_FSCTL_SNAP_LIST ? COSMO_FSCTL_SNAP_PAGE : 1u;
     struct cosmofs_snap_info *info = kzalloc((size_t)max * sizeof(*info));
     if (info == NULL) {
         vfs_mount_release(mnt);
@@ -384,6 +384,7 @@ static int64_t fsctl_snap(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
         .out = info,
         .max = max,
         .no_sizes = (cmd->flags & COSMO_FSCTL_F_NO_SIZES) != 0,
+        .after = cmd->op == COSMO_FSCTL_SNAP_LIST ? cmd->cursor : 0,
     };
     rc = mnt->fs->snapctl(mnt, &req);
     vfs_mount_release(mnt);

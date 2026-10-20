@@ -197,6 +197,7 @@ struct check {
     /* The uuids walk_snapshots has seen, for the duplicate test; sized
      * up front from the snapshot count, like every other map here. */
     uint8_t (*uuids)[16];
+    uint64_t *ids;         /* beside them: two snapshots must not share an id either (a vnode tag) */
     unsigned nuuids, uuid_cap;
 };
 
@@ -502,15 +503,17 @@ static void check_identity(struct check *ck, const struct cfs_snapshot *s, uint6
     static const uint8_t zero[16];
     bool bad = memcmp(s->uuid, zero, sizeof(zero)) == 0 || s->id > max_id;
     for (unsigned k = 0; k < ck->nuuids && !bad; k++)
-        bad = memcmp(ck->uuids[k], s->uuid, 16) == 0;
+        bad = memcmp(ck->uuids[k], s->uuid, 16) == 0 || ck->ids[k] == s->id;
     if (bad) {
         name_it(&ck->rep->snap_identity, s->id);
         return;
     }
-    if (ck->nuuids < ck->uuid_cap)
-        memcpy(ck->uuids[ck->nuuids++], s->uuid, 16);
-    else
+    if (ck->nuuids < ck->uuid_cap) {
+        memcpy(ck->uuids[ck->nuuids], s->uuid, 16);
+        ck->ids[ck->nuuids++] = s->id;
+    } else {
         ck->rep->partial = true;
+    }
 }
 
 static void walk_snapshots(struct check *ck)
@@ -985,15 +988,6 @@ static int repair(struct check *ck)
             ck->rep->nlink_wrong.repaired++;
     }
 
-    /* A snapshot with no uuid or a shared one gets a fresh one, and the
-     * high-water mark rises to the highest id: both have one right
-     * answer and neither is an argument from absence. */
-    if (rc == 0 && ck->rep->snap_identity.count != 0) {
-        unsigned fixed = 0;
-        rc = cfs_snapshot_fix_identity(fs, &fixed);
-        ck->rep->snap_identity.repaired += fixed;
-    }
-
     /*
      * The totals, and only the ones the comparison disagreed with. The
      * repairs above move both counters themselves -- freeing a leaked
@@ -1010,6 +1004,18 @@ static int repair(struct check *ck)
     if (rc == 0 && ck->inodes_wrong) {
         fs->sb.inode_count = ck->rep->counted_inodes;
         ck->rep->counter_wrong.repaired++;
+    }
+    /*
+     * A snapshot with no uuid, a shared uuid or a shared id gets a fresh
+     * one, and the high-water mark rises to the highest id: each has one
+     * right answer and none is an argument from absence. After the
+     * totals, because it copies the list, which allocates -- the free
+     * count written back above is the walk's, from before that.
+     */
+    if (rc == 0 && ck->rep->snap_identity.count != 0) {
+        unsigned fixed = 0;
+        rc = cfs_snapshot_fix_identity(fs, &fixed);
+        ck->rep->snap_identity.repaired += fixed;
     }
     return rc;
 }
@@ -1078,7 +1084,8 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         ck.dup_cmp = kmalloc(CFS_BLOCK, 0);
         ck.uuid_cap = fs->snap_count + 8;
         ck.uuids = kmalloc((size_t)ck.uuid_cap * 16u, 0);
-        if (ck.name_seen == NULL || ck.dup_blk == NULL || ck.dup_cmp == NULL || ck.uuids == NULL)
+        ck.ids = kzalloc((size_t)ck.uuid_cap * sizeof(*ck.ids));
+        if (ck.name_seen == NULL || ck.dup_blk == NULL || ck.dup_cmp == NULL || ck.uuids == NULL || ck.ids == NULL)
             rc = -ENOMEM;
     }
     if (rc) {
@@ -1093,6 +1100,7 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         kfree(ck.dup_blk);
         kfree(ck.dup_cmp);
         kfree(ck.uuids);
+        kfree(ck.ids);
         kfree(rep);
         return rc;   /* -ENOMEM before the walk, never half way through it */
     }
@@ -1163,6 +1171,7 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     kfree(ck.dup_blk);
     kfree(ck.dup_cmp);
     kfree(ck.uuids);
+    kfree(ck.ids);
 
     rep->clean = report_clean(rep);
     rep->elapsed_ns = clock_since_ns(t0);

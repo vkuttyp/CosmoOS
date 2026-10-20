@@ -36,9 +36,19 @@ static void usage(void)
     exit(2);
 }
 
+/* A name the filesystem can hold, or exit: a longer one would reach the
+ * kernel cut short and could name another snapshot. */
+static void check_name(const char *name)
+{
+    if (strlen(name) > COSMO_FSCTL_NAME_MAX) {
+        fprintf(stderr, "cosmo-snap: %s: longer than %d bytes\n", name, COSMO_FSCTL_NAME_MAX);
+        exit(1);
+    }
+}
+
 /* One command, whole; the result read back from the same file. */
-static long run(int fd, unsigned op, unsigned long long id, unsigned flags, const char *name, const char *name2,
-                void *buf, size_t cap)
+static long run_at(int fd, unsigned op, unsigned long long id, unsigned flags, const char *name, const char *name2,
+                   unsigned long long cursor, void *buf, size_t cap)
 {
     struct cosmo_fsctl cmd;
     memset(&cmd, 0, sizeof(cmd));
@@ -46,27 +56,54 @@ static long run(int fd, unsigned op, unsigned long long id, unsigned flags, cons
     cmd.op = (unsigned short)op;
     cmd.flags = flags;
     cmd.mount_id = id;
-    if (name != NULL)
-        strncpy(cmd.name, name, sizeof(cmd.name) - 1);
-    if (name2 != NULL)
-        strncpy(cmd.name2, name2, sizeof(cmd.name2) - 1);
+    cmd.cursor = cursor;
+    if (name != NULL) {
+        check_name(name);
+        memcpy(cmd.name, name, strlen(name));
+    }
+    if (name2 != NULL) {
+        check_name(name2);
+        memcpy(cmd.name2, name2, strlen(name2));
+    }
     if (write(fd, &cmd, sizeof(cmd)) != (long)sizeof(cmd))
         return -1;
     return read(fd, buf, cap);
 }
 
-/* The mount id at `g_mp`, or exit. */
+static long run(int fd, unsigned op, unsigned long long id, unsigned flags, const char *name, const char *name2,
+                void *buf, size_t cap)
+{
+    return run_at(fd, op, id, flags, name, name2, 0, buf, cap);
+}
+
+/* The mount id at `g_mp`, or exit. The listing is read whole: a buffer
+ * too small for it is -ERANGE, and the next try is twice the size. */
 static unsigned long long mount_id(int fd)
 {
-    static char buf[sizeof(struct cosmo_fsctl_result) + 128 * sizeof(struct cosmo_fsctl_mount)];
-    long n = run(fd, COSMO_FSCTL_LIST, 0, 0, NULL, NULL, buf, sizeof(buf));
-    if (n < (long)sizeof(struct cosmo_fsctl_result)) {
+    size_t room = 64;
+    char *buf = NULL;
+    long n = -1;
+    for (int tries = 0; tries < 12; tries++, room *= 2) {
+        free(buf);
+        size_t cap = sizeof(struct cosmo_fsctl_result) + room * sizeof(struct cosmo_fsctl_mount);
+        buf = malloc(cap);
+        if (buf == NULL)
+            break;
+        n = run(fd, COSMO_FSCTL_LIST, 0, 0, NULL, NULL, buf, cap);
+        if (n >= 0 || errno != ERANGE)
+            break;
+    }
+    if (buf == NULL || n < (long)sizeof(struct cosmo_fsctl_result)) {
         perror("cosmo-snap: list mounts");
         exit(1);
     }
     struct cosmo_fsctl_result *h = (struct cosmo_fsctl_result *)buf;
     struct cosmo_fsctl_mount *m = (struct cosmo_fsctl_mount *)(buf + sizeof(*h));
-    for (unsigned i = 0; i < h->count; i++) {
+    unsigned count = h->count;
+    size_t fits = ((size_t)n - sizeof(*h)) / sizeof(*m);
+    if (count > fits)
+        count = (unsigned)fits;   /* never past what was read */
+    for (unsigned i = 0; i < count; i++) {
         if (strcmp(m[i].path, g_mp) != 0)
             continue;
         if (!(m[i].caps & COSMO_FSCTL_CAP_SNAP)) {
@@ -140,22 +177,26 @@ static int cmd_create(int fd, unsigned long long id, const char *name)
 static int cmd_list(int fd, unsigned long long id)
 {
     size_t cap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_snap_pool) +
-                 1024 * sizeof(struct cosmo_fsctl_snap);
+                 COSMO_FSCTL_SNAP_PAGE * sizeof(struct cosmo_fsctl_snap);
     char *buf = malloc(cap);
     if (buf == NULL) {
         fprintf(stderr, "cosmo-snap: out of memory\n");
         return 1;
     }
-    long n = run(fd, COSMO_FSCTL_SNAP_LIST, id, 0, NULL, NULL, buf, cap);
+    unsigned long long cursor = 0;
+    for (int page = 0;; page++) {
+    long n = run_at(fd, COSMO_FSCTL_SNAP_LIST, id, 0, NULL, NULL, cursor, buf, cap);
     if (n < (long)(sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_snap_pool)))
         fail("list", NULL);
     struct cosmo_fsctl_result *h = (struct cosmo_fsctl_result *)buf;
     struct cosmo_fsctl_snap_pool *p = (struct cosmo_fsctl_snap_pool *)(buf + sizeof(*h));
     struct cosmo_fsctl_snap *s = (struct cosmo_fsctl_snap *)(buf + sizeof(*h) + sizeof(*p));
-    printf("cosmo-snap: %s: format %u%s%s\n", g_mp, p->format,
-           (p->flags & COSMO_FSCTL_POOL_F_PENDING) ? ", a rollback is pending" : "",
-           (p->flags & COSMO_FSCTL_POOL_F_HELD) ? ", held after a rollback until this boot completes" : "");
-    printf("%-20s %5s %-20s %10s %10s %-36s %s\n", "NAME", "ID", "CREATED", "REFER", "UNIQUE", "UUID", "FLAGS");
+    if (page == 0) {
+        printf("cosmo-snap: %s: format %u%s%s\n", g_mp, p->format,
+               (p->flags & COSMO_FSCTL_POOL_F_PENDING) ? ", a rollback is pending" : "",
+               (p->flags & COSMO_FSCTL_POOL_F_HELD) ? ", held after a rollback until this boot completes" : "");
+        printf("%-20s %5s %-20s %10s %10s %-36s %s\n", "NAME", "ID", "CREATED", "REFER", "UNIQUE", "UUID", "FLAGS");
+    }
     for (unsigned i = 0; i < h->count; i++) {
         char u[37], t[24], flags[64] = "";
         uuid_str(s[i].uuid, u);
@@ -173,8 +214,11 @@ static int cmd_list(int fd, unsigned long long id)
                (unsigned long long)(s[i].referenced / 1024), (unsigned long long)(s[i].unique / 1024), u,
                flags[0] ? flags : "-");
     }
-    if (h->total > h->count)
-        printf("cosmo-snap: %u of %u snapshots shown\n", h->count, h->total);
+    /* A full page may have more after it: ask from the last id. */
+    if (h->count < COSMO_FSCTL_SNAP_PAGE || h->count == 0)
+        break;
+    cursor = s[h->count - 1].id;
+    }
     free(buf);
     return 0;
 }
@@ -248,15 +292,26 @@ static void names_free(char **v, unsigned n)
     free(v);
 }
 
-/* Same contents, byte for byte. */
+/* Same contents, byte for byte; a file that cannot be read is not a
+ * difference but a failure, and diff says so rather than guess. */
+static void unreadable(const char *path)
+{
+    fprintf(stderr, "cosmo-snap: diff: cannot read %s: %s\n", path, strerror(errno));
+    exit(1);
+}
+
 static int same_file(const char *a, const char *b)
 {
     int fa = open(a, O_RDONLY), fb = open(b, O_RDONLY);
-    int same = fa >= 0 && fb >= 0;
+    if (fa < 0 || fb < 0)
+        unreadable(fa < 0 ? a : b);
+    int same = 1;
     static char ba[4096], bb[4096];
     while (same) {
         long na = read(fa, ba, sizeof(ba)), nb = read(fb, bb, sizeof(bb));
-        if (na != nb || na < 0 || memcmp(ba, bb, (size_t)na) != 0)
+        if (na < 0 || nb < 0)
+            unreadable(na < 0 ? a : b);
+        if (na != nb || memcmp(ba, bb, (size_t)na) != 0)
             same = 0;
         else if (na == 0)
             break;
@@ -285,13 +340,14 @@ static void report_tree(char kind, const char *root, const char *rel, uint32_t d
         return;
     unsigned n;
     char **v = names_of(path, &n);
-    for (unsigned i = 0; v != NULL && i < n; i++) {
+    if (v == NULL)
+        unreadable(path);   /* its descendants would go unreported */
+    for (unsigned i = 0; i < n; i++) {
         char sub[1024];
         snprintf(sub, sizeof(sub), "%s/%s", rel, v[i]);
         report_tree(kind, root, sub, dev);
     }
-    if (v != NULL)
-        names_free(v, n);
+    names_free(v, n);
 }
 
 static void diff_dir(const char *ra, const char *rb, const char *rel)
@@ -405,8 +461,15 @@ int main(int argc, char **argv)
         return 1;
     }
     unsigned long long id = mount_id(fd);
-    if (strcmp(op, "create") == 0 && argc - i == 1)
+    if (strcmp(op, "create") == 0 && argc - i == 1) {
+        /* `-` is diff's name for the live tree, and a leading `-` reads
+         * as an option: neither names a snapshot. */
+        if (argv[i][0] == '-') {
+            fprintf(stderr, "cosmo-snap: create %s: a snapshot's name cannot start with '-'\n", argv[i]);
+            return 1;
+        }
         return cmd_create(fd, id, argv[i]);
+    }
     if (strcmp(op, "list") == 0 && argc - i == 0)
         return cmd_list(fd, id);
     if (strcmp(op, "delete") == 0 && argc - i == 1)

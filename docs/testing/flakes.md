@@ -2826,6 +2826,15 @@ note; run 38595676023, job 115961772279): `100 runs of 32, 3199 trips
 same one trip short. The job's rerun passed (job 116270734364). Not
 attributed; three sightings, all `3199`, all AArch64.
 
+**Fourth sighting, 2026-10-20, the first on x86-64:** local `make
+test-entropy` (the no-entropy boot, `QEMU_SMP` default) of the B1
+snapshot branch (`b1-snap-identity`, on main 01c85167): `100 runs of 32,
+3199 trips (longest 32 in one call), 8470 ns a trip`, the check at 40 ms,
+1 failure of 481. The branch changes cosmofs, `/dev/fsctl` and two
+userland tools, nothing on the scheduler's path. The same image's debug
+`make test` passed just before it. Still the candidate above, now on both
+architectures; not attributed. The rerun of `make test-entropy` passed all three boots.
+
 ## `sched-restore-loop`: the thread count not back in 200 ms, 2026-10-11
 
 `SELFTEST: sched-restore-loop ... FAIL: check failed: threads_settle(before)

@@ -1397,7 +1397,11 @@ that named a snapshot by either could name the wrong one.
 
 Version 12 gives every snapshot a **uuid**, drawn at random when it is
 taken and never changed, beside its creation time and the generation it
-captured (both already there). The entry grows from 96 to 128 bytes
+captured (both already there). Unique is the promise, and it is
+checked rather than hoped for: `cfs_snapshot_new_uuid` mixes the random
+bytes with the wall clock and a counter and draws again while any
+snapshot on the list has them, so a boot with no seeded entropy pool
+takes snapshots as before. The entry grows from 96 to 128 bytes
 (`struct cfs_snapshot`: `uuid[16]`, `origin_id`, `flags`) in a list kind
 of its own, `CFS_KIND_SNAPLIST2`, whose blocks also carry `max_id`: the
 highest id ever handed out. The head block's is the one read, so the

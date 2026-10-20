@@ -987,41 +987,63 @@ static int status(void)
 
 /*
  * The cosmofs format the root is at: 0 when the root is not a cosmofs
- * (the live image). A pool is raised from 11 to 12 by its first snapshot
+ * with snapshots (the live image), -1 when it cannot be told. A pool is
+ * raised from 11 to 12 by its first snapshot
  * (docs/kernel-services/filesystem/cosmofs/design.md, "Format version
- * 12"), and a kernel that reads 11 at most cannot mount it.
+ * 12"), and a kernel that reads 11 at most cannot mount it; the gate
+ * fails closed, so not knowing refuses the switch.
  */
-static unsigned root_format(void)
+static int root_format(void)
 {
     int fd = open("/dev/fsctl", O_RDWR);
     if (fd < 0)
-        return 0;
-    static uint8_t buf[sizeof(struct cosmo_fsctl_result) + 128 * sizeof(struct cosmo_fsctl_mount)];
+        return -1;
     struct cosmo_fsctl cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.version = COSMO_FSCTL_VERSION;
     cmd.op = COSMO_FSCTL_LIST;
-    unsigned format = 0;
-    if (write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd) &&
-        read(fd, buf, sizeof(buf)) >= (long)sizeof(struct cosmo_fsctl_result)) {
+    /* The listing is read whole: a buffer too small is -ERANGE, and the
+     * next try is twice the size. */
+    uint8_t *buf = NULL;
+    long n = -1;
+    for (size_t room = 64, tries = 0; tries < 12; tries++, room *= 2) {
+        free(buf);
+        size_t cap = sizeof(struct cosmo_fsctl_result) + room * sizeof(struct cosmo_fsctl_mount);
+        buf = malloc(cap);
+        if (buf == NULL || write(fd, &cmd, sizeof(cmd)) != (long)sizeof(cmd))
+            break;
+        n = read(fd, buf, cap);
+        if (n >= 0 || errno != ERANGE)
+            break;
+    }
+    int format = -1;
+    if (buf != NULL && n >= (long)sizeof(struct cosmo_fsctl_result)) {
         const struct cosmo_fsctl_result *h = (const struct cosmo_fsctl_result *)buf;
         const struct cosmo_fsctl_mount *m = (const struct cosmo_fsctl_mount *)(buf + sizeof(*h));
-        for (unsigned i = 0; i < h->count; i++) {
+        unsigned count = h->count;
+        size_t fits = ((size_t)n - sizeof(*h)) / sizeof(*m);
+        if (count > fits)
+            count = (unsigned)fits;   /* never past what was read */
+        format = 0;
+        for (unsigned i = 0; i < count; i++) {
             if (strcmp(m[i].path, "/") != 0 || !(m[i].caps & COSMO_FSCTL_CAP_SNAP))
                 continue;
             cmd.op = COSMO_FSCTL_SNAP_LIST;
             cmd.flags = COSMO_FSCTL_F_NO_SIZES;
             cmd.mount_id = m[i].id;
+            /* Only the pool record is wanted: a page of one snapshot. */
             size_t cap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_snap_pool) +
-                         1024 * sizeof(struct cosmo_fsctl_snap);
+                         COSMO_FSCTL_SNAP_PAGE * sizeof(struct cosmo_fsctl_snap);
             uint8_t *lb = malloc(cap);
+            format = -1;
             if (lb != NULL && write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd) &&
                 read(fd, lb, cap) >= (long)(sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_snap_pool)))
-                format = ((const struct cosmo_fsctl_snap_pool *)(lb + sizeof(struct cosmo_fsctl_result)))->format;
+                format = (int)((const struct cosmo_fsctl_snap_pool *)(lb + sizeof(struct cosmo_fsctl_result)))->format;
             free(lb);
             break;
         }
     }
+    free(buf);
     close(fd);
     return format;
 }
@@ -1047,11 +1069,17 @@ static unsigned kernel_reads(const uint8_t *elf, size_t len)
  * price, design.md, "Format version 12"). */
 static int format_gate(const struct set *s, const char *what)
 {
-    unsigned rf = root_format(), kr = kernel_reads(s->file[0], s->len[0]);
-    if (rf <= kr)
+    int rf = root_format();
+    unsigned kr = kernel_reads(s->file[0], s->len[0]);
+    if (rf < 0) {
+        fprintf(stderr, "cosmo-upgrade: the root's cosmofs format could not be read from /dev/fsctl: %s; "
+                        "%s's kernel might not mount it, so nothing written\n", strerror(errno), what);
+        return EXIT_REFUSED;
+    }
+    if ((unsigned)rf <= kr)
         return 0;
     fprintf(stderr, "cosmo-upgrade: %s's kernel reads cosmofs format %u at most, and the root is format %u (a "
-                    "snapshot raised it): that kernel could not mount the root; nothing written\n", what, kr, rf);
+                    "snapshot raised it): that kernel could not mount the root; nothing written\n", what, kr, (unsigned)rf);
     return EXIT_REFUSED;
 }
 
