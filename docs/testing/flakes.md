@@ -2835,6 +2835,27 @@ userland tools, nothing on the scheduler's path. The same image's debug
 `make test` passed just before it. Still the candidate above, now on both
 architectures; not attributed. The rerun of `make test-entropy` passed all three boots.
 
+**Fifth sighting, 2026-10-20, CI on main, and the mechanism:** `build,
+boot, analyze (x86_64)`, the two-CPU debug boot of #425's merge
+(`cceff596`; run 39505882310, job 118914646833): `100 runs of 32, 3199
+trips (longest 32 in one call), 8358 ns a trip`, the check at 29 ms, 1
+failure of 487; the job's other boots of the tree passed it. The
+candidate above is the mechanism: forced once in the test -- a
+`sched_preempt()` with interrupts off between the arming and the yield,
+as a trap's return makes it -- the seam spends one armed resumption in
+that preemption's pass, where `preempt_point_due` is false, and the run
+makes 31 trips (instrumented on x86-64: `left 31 need_resched 1 trips 0`
+after the preemption, 31 trips in all). A test defect, not a scheduler
+one: the seam spent a resumption the loop it tests cannot take. Fixed
+(2026-10-21): the seam spends only when the state `schedule()` restores
+has interrupts on, and the test's first run is preempted that way every
+boot and asserts all 32 left. The trips check alone (at least 3200) does
+not catch the old seam deterministically -- the forced run on x86-64
+passed it once, a stray reschedule elsewhere adding the missing trip --
+so the probe asks for the direct check: `tools/sched-restore-trap-probe.py
+--old` fails it with 31 of 32 left on both architectures
+(`docs/audit/2026-10-21-restore-trap-report.md`).
+
 ## `sched-restore-loop`: the thread count not back in 200 ms, 2026-10-11
 
 `SELFTEST: sched-restore-loop ... FAIL: check failed: threads_settle(before)

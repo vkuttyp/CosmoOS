@@ -906,7 +906,10 @@ bool selftest_irqrestore_bench(const char **reason)
  * this function's own frame, it is never inside `schedule()` twice, and
  * every armed resumption was a trip. tools/sched-restore-loop-probe.py
  * shows the first claim fails on the recursive structure with one link
- * forced to be a call and holds for the loop under the same link.
+ * forced to be a call and holds for the loop under the same link. The
+ * first run is preempted once from the trap path before its yield, as a
+ * tick between the arming and the yield does: it must still make all its
+ * trips (tools/sched-restore-trap-probe.py).
  */
 enum {
     RESTORE_RUNS = 100,
@@ -952,9 +955,21 @@ static bool selftest_sched_restore_loop_pinned(const char **reason)
     uint32_t longest = 0;
     size_t worst = 0;
     unsigned runs = 0, unspent = 0;
+    uint32_t trap_left = 0;
     uint64_t t0 = clock_now_ns();
     for (; runs < RESTORE_RUNS; runs++) {
         self->test_resume_resched = RESTORE_RUN;
+        if (runs == 0) {
+            /* A tick's preemption, made here: a trap's return calls
+             * sched_preempt with interrupts off, and the partner runs.
+             * Read before the restore, with nothing else on this CPU: the
+             * resumption it ended with is not one the loop can take, so
+             * it must not have spent an armed one. */
+            arch_irq_state_t x = arch_irq_save();
+            sched_preempt();
+            trap_left = self->test_resume_resched;
+            arch_irq_restore(x);
+        }
         sched_yield();
         unspent = self->test_resume_resched;
         worst = self->sched_depth_max;
@@ -970,13 +985,15 @@ static bool selftest_sched_restore_loop_pinned(const char **reason)
 
     uint64_t trips = self->sched_trips - trips0;
     kinfo("selftest: sched-restore-loop: %u runs of %u, %llu trips (longest %u in one call), %llu ns a trip; "
-          "deepest entry %zu bytes above this frame (bound %u), nesting %u; partner yielded %llu times",
+          "deepest entry %zu bytes above this frame (bound %u), nesting %u; partner yielded %llu times; "
+          "%u of %u armed left after a trap's preemption",
           runs, (unsigned)RESTORE_RUN, (unsigned long long)trips, longest,
           (unsigned long long)(trips ? dt / trips : 0), worst > base ? worst - base : 0, (unsigned)RESTORE_BOUND,
-          self->sched_nest_max, (unsigned long long)p.yields);
+          self->sched_nest_max, (unsigned long long)p.yields, trap_left, (unsigned)RESTORE_RUN);
     CHECK(worst <= base + RESTORE_BOUND);
     CHECK(self->sched_nest_max == 1);
     CHECK(unspent == 0);
+    CHECK(trap_left == RESTORE_RUN);
     CHECK(runs == RESTORE_RUNS && trips >= (uint64_t)RESTORE_RUNS * RESTORE_RUN && longest >= RESTORE_RUN);
     CHECK(threads_settle(before));
     return true;
