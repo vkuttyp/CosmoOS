@@ -1,12 +1,15 @@
-# CosmoOS 1.2 roadmap (proposal)
+# CosmoOS 1.2 roadmap
 
 Written 2026-10-20 at v1.0.7, after the [1.1 roadmap](roadmap-1.1.md)
-completed (13 units in ten days, 2026-10-13 to 2026-10-20). **Nothing
-here is adopted.** The owner chooses one direction (or none); the chosen
-one then becomes the 1.2 roadmap, and [`AGENTS.md`](../AGENTS.md#scope-rules)'s
-scope rules apply to its milestones as they did to 1.0's: worked in
-order, each done when its acceptance test is green on main, its box
-ticked in the same PR, at most five PRs a milestone.
+completed (13 units in ten days, 2026-10-13 to 2026-10-20), as three
+candidate directions. **Adopted 2026-10-20: the owner chose
+[B, storage depth](#b-storage-depth-chosen).** Its milestones are the 1.2
+roadmap; A and C stay below as deferred directions, not scheduled.
+[`AGENTS.md`](../AGENTS.md#scope-rules)'s scope rules apply to B's
+milestones as they did to 1.0's: one at a time, the owner choosing the
+next (B1 first; B2 or B4 after it), each done when its acceptance test is
+green on main, its box ticked in the same PR, at most five PRs a
+milestone.
 
 Backlog references (`CFS-8`, `LX-7`, ...) are lines of
 [`backlog.md`](backlog.md). Sizes are relative to 1.1 (1.0x = about ten
@@ -36,7 +39,9 @@ flakes that have already reached CI, and none waits on a feature.
 
 About two to three days of work, or one unit of at most five PRs.
 
-## A. Self-hosting software
+## A. Self-hosting software (deferred)
+
+Not chosen for 1.2 (2026-10-20); kept as written for a later roadmap.
 
 **Definition of done.** CosmoOS rebuilds BusyBox from source on itself,
 on both architectures, with a C compiler and `make` that run on the
@@ -159,7 +164,7 @@ whatever correctness lines the five suites turn up.
 porting-and-test-suite work whose length is set by how many Linux
 personality gaps the suites find.
 
-## B. Storage depth
+## B. Storage depth (chosen)
 
 **Definition of done.** On the installed system, from the shell:
 snapshots are taken, listed and rolled back to; a broken system is
@@ -277,7 +282,9 @@ CFS-14 (deduplication).
 (snapshots, mirrors, checker, encryption, the upgrade's switch), all
 testable under QEMU in CI.
 
-## C. Platform depth
+## C. Platform depth (deferred)
+
+Not chosen for 1.2 (2026-10-20); kept as written for a later roadmap.
 
 **Definition of done.** The VMX backend runs guests in CI (a nested-virt
 or hardware-in-the-loop job); the kernel loads at a random address;
@@ -397,7 +404,7 @@ the AArch64 machine needs device tree.
 **Size.** About 1.5-2x 1.1 for the work in the tree, plus an unbounded
 wait on hardware and runner setup.
 
-## Recommendation
+## Recommendation (as proposed; B was chosen)
 
 B, storage depth. A and B are both testable under QEMU in CI, but B's
 tests are boots of a few minutes where A's are builds and external test

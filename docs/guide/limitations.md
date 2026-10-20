@@ -23,9 +23,11 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
   `random.jitter=off` on the command line turns that off, and the pool
   then never seeds there. The commands in this guide add `-device
   virtio-rng-pci`.
-- **The clock is read once.** The wall clock is set at boot from the RTC
-  or, with none (Parallels), the firmware's time; there is no NTP and no
-  way to set it.
+- **The clock is stepped, not slewed.** The wall clock is set at boot
+  from the RTC or, with none (Parallels), the firmware's time. Since
+  v1.0.4 root can set it (`date -s`, `hwclock -w` where there is an RTC)
+  and `ntpd -q` steps it once from a server; there is no NTP daemon,
+  because `adjtimex` is not implemented, and no time zone.
 - **No Wi-Fi, Bluetooth or sound.**
 
 ## Boot and security
@@ -92,7 +94,8 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 
 - A network repository is fetched whole, file by file: no mirrors, no
   delta updates. Its index's freshness is only as good as the clock, which
-  has no NTP ([Packages](packages.md#network-repositories)).
+  is stepped by hand or by `ntpd -q`, with no NTP daemon
+  ([Packages](packages.md#network-repositories)).
 - No rollback of a completed package upgrade. `cosmo-upgrade --rollback`
   returns the boot set, the programs and the repository, but not the
   packages `pkg upgrade` changed.
