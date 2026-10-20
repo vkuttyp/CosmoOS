@@ -233,6 +233,14 @@ process groups"). `pid` 0 means the caller in each of these.
   becomes the session's controlling terminal with the child's group in
   the foreground (`tty_claim_for`), before its first instruction. init
   starts the console shell so (`spawnve_session`).
+- `bool foreground` (`COSMO_SPAWN_FOREGROUND`; only with `SETPGID`,
+  `-EINVAL` otherwise): when the caller's group is the foreground of its
+  session's controlling terminal, the child's group takes it
+  (`tty_hand_foreground`) before the child's first instruction; from a
+  caller in the background nothing changes. `cosmo-sh` spawns a
+  foreground job's last stage so (`spawnvp_pgrp_fg`; tty invariant T21).
+  The groups are read and the terminal handed over under the process
+  table lock, as `setpgid` changes them.
 
 ### `kernel/signal.h` (milestone 10)
 The signal core, `kernel/process/signal.c`; `docs/kernel/process/design.md`

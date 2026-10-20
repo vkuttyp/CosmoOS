@@ -367,6 +367,14 @@ number: the program that knows the detail is gone by then).
   in a group of its own (which is also what makes that group
   non-orphaned), and the kernel types the keystroke. The job must stop
   rather than die, and then continue and be killable.
+- **`spawn-foreground`** -- tty invariant T21. The probe claims the
+  console and spawns a job with `COSMO_SPAWN_FOREGROUND`, and never calls
+  `tcsetpgrp` itself: the race a shell can lose, lost every time. The
+  job's first act is `tcgetpgrp(0) == getpgrp()`, answered by its exit
+  status. The control spawns it without the flag and must find it in the
+  background; a third case spawns from the background and must hand
+  nothing over. `tools/spawn-foreground-probe.py --old` removes the
+  hand-over and the test fails at its check 7.
 - **`tty-ttin`** -- all three ways the rule can go, in one probe. A
   child in its own group with a live parent is stopped with `SIGTTIN`;
   a real orphan -- a grandchild whose parent exits, reporting through a

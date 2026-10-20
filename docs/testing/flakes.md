@@ -4599,3 +4599,32 @@ loader. The same handover stall as "firmware handover in
 QEMU process, where the harness has no retry. Recorded, not attributed;
 rerun.
 
+
+## ash history: the nested shell stopped, 2026-10-18 and 2026-10-20
+
+`test-busybox: FAIL: busybox: QEMU exited (code 33|35) waiting for 'exit'`,
+after `scripted test: PASS`. The serial log: the harness types `sh` at
+`cosmo-sh` for the ash-history step and gets `[1]+  Stopped  sh` at once;
+what it types next goes to `cosmo-sh` (which has no `history`), and its
+`exit` ends the boot.
+
+- 2026-10-18, CI `busybox test (aarch64)` on `v1.0.5-notes` (run
+  39114435454): the first nested `sh` stopped; QEMU exit 33.
+- 2026-10-20, CI `busybox test (x86_64)` on main's #420 merge (01c85167,
+  documentation only; run 39397473633, job 118543818694): the second
+  nested `sh` stopped; QEMU exit 35. Main red.
+
+Mechanism, established: a local loop starting and leaving a nested `sh`
+at the console stopped 1 in 300 (x86-64 release image of main). With
+logging of every `tcsetpgrp`, `tcgetpgrp` and stop signal, 2 in 400: in
+each, the new ash's `tcgetpgrp` (its job-control start, `setjobctl`)
+answered `cosmo-sh`'s group, *before* `cosmo-sh`'s `tcsetpgrp` to the
+child's group, and the child sent itself `SIGTTIN`. `cosmo-sh` spawned the
+job and only then handed it the terminal, so the job could run first.
+
+Fixed by `COSMO_SPAWN_FOREGROUND` (tty invariant T21): the last stage of
+a foreground job -- a lone command's only one -- takes the terminal for
+the job's group as it is spawned. The same loop: 0 in
+400. Deterministic check `spawn-foreground`;
+`tools/spawn-foreground-probe.py --old` fails it on both architectures.
+Report: `docs/audit/2026-10-20-spawn-foreground-report.md`.

@@ -1116,6 +1116,27 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         }
     }
 
+    /* COSMO_SPAWN_FOREGROUND: a shell's job takes the terminal before its
+     * first instruction, as the getty case above does. Handed over after
+     * the spawn, by the shell's tcsetpgrp, the job could run first: an
+     * interactive ash asks tcgetpgrp at its start, finds the shell's
+     * group and stops itself with SIGTTIN (docs/testing/flakes.md,
+     * "ash history: the nested shell stopped"). Only from a caller that
+     * is the foreground now; any other still asks with tcsetpgrp. The
+     * groups are read, and the terminal handed over, under the table
+     * lock setpgid takes: a group changed by another of the caller's
+     * threads lands wholly before or wholly after. Nothing can fail past
+     * here, so the terminal is never left with a child that did not start. */
+    if (attr && attr->foreground && attr->parent != NULL) {
+        struct tty *tt = tty_controlling(p->sid);   /* the child's session cannot change before it runs */
+        if (tt != NULL) {
+            arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
+            (void)tty_hand_foreground(tt, p->sid, attr->parent->pgid, p->pgid);
+            spin_unlock_irqrestore(&g_process_table_lock, ts);
+            tty_put(tt);
+        }
+    }
+
     kinfo("process: pid %u '%s' created, entry %p, %u segments", p->pid, p->name, (void *)info_entry, nr_segments);
     process_get(p); /* the table's reference */
     sched_enqueue_new(t);

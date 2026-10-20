@@ -180,6 +180,19 @@ raises SIGTTOU on a writer in a background group of the controlling
 session when `TOSTOP` is set, and on nothing else. Check: `lxpty` (a
 background writer is stopped with TOSTOP and writes without it).
 
+**T21. A foreground job has the terminal from its first instruction.**
+A spawn with `COSMO_SPAWN_FOREGROUND` (and `SETPGID`) by a caller whose
+group is the terminal's foreground makes the child's group the
+foreground before the child runs (`tty_hand_foreground`, in the same
+step as the group is set); a caller in the background changes nothing
+and asks with `tcsetpgrp`. A job that asks `tcgetpgrp` at its start --
+an interactive ash does, and stops itself with `SIGTTIN` when the answer
+is another group -- cannot lose a race with its shell. Check:
+`spawn-foreground` (the spawner never calls `tcsetpgrp`, and the job
+finds itself the foreground; without the flag it does not; from the
+background nothing is handed over); `tools/spawn-foreground-probe.py
+--old` removes the hand-over and fails it.
+
 ## Gaps (documented, not invariants)
 
 - **The raw *read* branch is not distinguishable by any test here.**

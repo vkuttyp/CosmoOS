@@ -192,6 +192,12 @@ int tty_set_controlling(struct tty *t);
 /* The same on behalf of a just-created process (COSMO_SPAWN_SETSID), and
  * only when `t` is nobody's: false otherwise, which is not an error. */
 bool tty_claim_for(struct tty *t, pid_t sid, pid_t pgid);
+/* COSMO_SPAWN_FOREGROUND: `t`, session `sid`'s terminal, passes from the
+ * foreground group `from` (the caller's) to `to` (the job just spawned),
+ * before the job's first instruction. False -- and nothing changes --
+ * when `t` is not the session's or `from` is not its foreground group:
+ * a caller in the background asks with tcsetpgrp, and the SIGTTOU rule. */
+bool tty_hand_foreground(struct tty *t, pid_t sid, pid_t from, pid_t to);
 /* TIOCNOTTY: a session leader gives its terminal up (SIGHUP and SIGCONT to
  * the foreground group, as at its exit); any other member of the session
  * may ask and nothing changes, since control is the session's. -ENOTTY

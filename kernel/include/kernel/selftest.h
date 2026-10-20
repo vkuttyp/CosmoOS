@@ -197,6 +197,7 @@ bool selftest_dev_tty_none(const char **reason);       /* ... and ENXIO without 
 bool selftest_tty_intr(const char **reason);           /* ^C to the terminal's foreground group */
 bool selftest_tty_stop(const char **reason);           /* ^Z stops it rather than killing it */
 bool selftest_tty_ttin(const char **reason);           /* a background reader is refused the line */
+bool selftest_spawn_foreground(const char **reason);   /* a job has the terminal at its first instruction */
 bool selftest_process_efault(const char **reason);    /* -EFAULT through the fixup path, never a kill */
 bool selftest_process_protnone(const char **reason);  /* a PROT_NONE touch is fatal */
 bool selftest_process_oom(const char **reason);       /* injected demand-page failures */

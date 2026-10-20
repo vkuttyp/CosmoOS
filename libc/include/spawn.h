@@ -25,6 +25,14 @@ pid_t spawnvp(const char *file, const char *const argv[], const struct spawn_han
 pid_t spawnve_pgrp(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
                    size_t nh, pid_t pgid);
 pid_t spawnvp_pgrp(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh, pid_t pgid);
+/* The same, and the group becomes the foreground of the caller's
+ * controlling terminal before the child's first instruction, when the
+ * caller's group is the foreground now (COSMO_SPAWN_FOREGROUND): a
+ * shell's foreground job, which must not run before it has the terminal. */
+pid_t spawnve_pgrp_fg(const char *path, const char *const argv[], const char *const envp[],
+                      const struct spawn_handle *h, size_t nh, pid_t pgid);
+pid_t spawnvp_pgrp_fg(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh,
+                      pid_t pgid);
 /* spawnve with COSMO_SPAWN_SETROOT: the child's root is `root`, resolved
  * in the caller's own namespace, and the child cannot name anything
  * outside it -- absolute paths start there and ".." stops there.
