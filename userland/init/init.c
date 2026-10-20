@@ -6021,19 +6021,36 @@ static void boot_complete(void)
     int fd = open("/dev/fsctl", O_RDWR);
     if (fd < 0)
         return;
-    static char buf[sizeof(struct cosmo_fsctl_result) + 64 * sizeof(struct cosmo_fsctl_mount)];
     struct cosmo_fsctl cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.version = COSMO_FSCTL_VERSION;
     cmd.op = COSMO_FSCTL_LIST;
-    long n = write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd) ? read(fd, buf, sizeof(buf)) : -1;
-    if (n < (long)sizeof(struct cosmo_fsctl_result)) {
+    /* The listing is read whole or not at all (-ERANGE), so the buffer
+     * grows until it fits: a namespace with many mounts must not keep
+     * the hold. */
+    char *buf = NULL;
+    long n = -1;
+    for (size_t room = 64, tries = 0; tries < 12; tries++, room *= 2) {
+        free(buf);
+        size_t cap = sizeof(struct cosmo_fsctl_result) + room * sizeof(struct cosmo_fsctl_mount);
+        buf = malloc(cap);
+        if (buf == NULL || write(fd, &cmd, sizeof(cmd)) != (long)sizeof(cmd))
+            break;
+        n = read(fd, buf, cap);
+        if (n >= 0 || errno != ERANGE)
+            break;
+    }
+    if (buf == NULL || n < (long)sizeof(struct cosmo_fsctl_result)) {
+        printf("init: boot complete, but the mounts could not be listed; a rollback hold stays\n");
+        free(buf);
         close(fd);
         return;
     }
     const struct cosmo_fsctl_result *h = (const struct cosmo_fsctl_result *)buf;
-    unsigned count = h->count < 64 ? h->count : 64;
     struct cosmo_fsctl_mount *m = (struct cosmo_fsctl_mount *)(buf + sizeof(*h));
+    /* Never past what was read, whatever the header says. */
+    size_t fits = ((size_t)n - sizeof(*h)) / sizeof(*m);
+    unsigned count = h->count < fits ? h->count : (unsigned)fits;
     for (unsigned i = 0; i < count; i++) {
         if (!(m[i].caps & COSMO_FSCTL_CAP_SNAP) || (m[i].flags & 1u))   /* MOUNT_RDONLY */
             continue;
@@ -6044,6 +6061,7 @@ static void boot_complete(void)
             r.total == 1)
             printf("init: boot complete: released the rollback hold on %s\n", m[i].path);
     }
+    free(buf);
     close(fd);
 }
 

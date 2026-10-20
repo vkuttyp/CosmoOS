@@ -2915,11 +2915,11 @@ static int load_root(struct cfs *fs, struct vnode **root)
             return rc;
         }
     }
-    if (!switched) {
-        rc = orphan_replay(fs);
-        if (rc)
-            return rc;
-    }
+    /* After a switch the record is the target's own orphans, which the
+     * switch's commit wrote (cosmofs_rollback.c). */
+    rc = orphan_replay(fs);
+    if (rc)
+        return rc;
     return cfs_vnode_get(fs, CFS_ROOT_INO, root);
 }
 

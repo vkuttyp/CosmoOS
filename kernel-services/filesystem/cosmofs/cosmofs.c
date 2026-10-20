@@ -2539,6 +2539,11 @@ int cosmofs_snapctl(struct mount *mnt, struct cosmofs_snap_req *req)
         rc = snap_name_ok(req->name);
         if (rc)
             return rc;
+        /* What has been written is in the snapshot: dirty pages are the
+         * page cache's until written, and a commit alone does not. */
+        rc = cfs_sync_vnodes(fs);
+        if (rc)
+            return rc;
         struct cfs_snapshot s;
         mutex_lock(&fs->lock);
         rc = cfs_snapshot_create(fs, req->name, true, &s);
@@ -2585,6 +2590,12 @@ int cosmofs_snapctl(struct mount *mnt, struct cosmofs_snap_req *req)
         rc = snap_name_ok(req->name);
         if (rc == 0 && req->name2 != NULL)
             rc = snap_name_ok(req->name2);
+        if (rc)
+            return rc;
+        /* The safety snapshot is the tree as written so far, dirty pages
+         * included; what is written after the request is not in it, and
+         * the switch replaces it with the target (design.md, "Rollback"). */
+        rc = cfs_sync_vnodes(fs);
         if (rc)
             return rc;
         struct cfs_snapshot s;

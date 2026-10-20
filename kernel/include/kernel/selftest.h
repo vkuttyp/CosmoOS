@@ -346,6 +346,7 @@ bool selftest_cosmofs_snap_identity(const char **reason);         /* format 12: 
 bool selftest_cosmofs_rollback(const char **reason);              /* B1: request, switch, hold */
 bool selftest_cosmofs_rollback_atomic(const char **reason);       /* CF19: record and safety, one commit */
 bool selftest_cosmofs_rollback_record(const char **reason);       /* the record's parse and checksum */
+bool selftest_cosmofs_rollback_shared(const char **reason);       /* after a rollback: shared blocks, orphans, holds */
 bool selftest_cosmofs_pool2(const char **reason);                 /* a pool of two members */
 bool selftest_cosmofs_v3(const char **reason);
 bool selftest_cosmofs_freelog_format(const char **reason);

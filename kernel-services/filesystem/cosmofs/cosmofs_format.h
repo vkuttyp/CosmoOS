@@ -293,19 +293,24 @@ struct cfs_snap_block2 {
  *
  * PENDING: `rollback NAME` asked for the live tree to become `target`'s
  * at the next mount, and took `safety` -- a snapshot of the live tree --
- * in the same transaction. HELD: a mount did that, and until the next
- * boot completes neither snapshot may be deleted, so a bad rollback can be
- * undone (design.md, "Rollback").
+ * in the same transaction; neither may be deleted. HELD: a mount did
+ * that, and until the next boot completes the safety snapshot may not be
+ * deleted, so a bad rollback can be undone (design.md, "Rollback").
+ *
+ * CFS_ROLLBACK_F_FROM_HELD marks a PENDING record asked for while a hold
+ * was in place -- the one rollback allowed then, back to the held
+ * snapshot, which is its target: cancelling it puts the hold back.
  */
 #define CFS_ROLLBACK_MAGIC   0x42524643u   /* "CFRB" */
 #define CFS_ROLLBACK_PENDING 1u
 #define CFS_ROLLBACK_HELD    2u
+#define CFS_ROLLBACK_F_FROM_HELD 1u
 
 struct cfs_rollback {
     uint32_t magic;
     uint32_t version;          /* 1 */
     uint32_t state;            /* CFS_ROLLBACK_* */
-    uint32_t pad;
+    uint32_t flags;            /* CFS_ROLLBACK_F_* */
     uint8_t target_uuid[16];
     uint8_t safety_uuid[16];
     uint64_t target_id;        /* the ids when the record was written, for the log */

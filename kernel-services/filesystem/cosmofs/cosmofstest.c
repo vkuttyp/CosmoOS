@@ -5261,6 +5261,109 @@ bool selftest_cosmofs_rollback(const char **reason)
 }
 
 /*
+ * After a rollback the live tree is an older one, and what it shares
+ * with the snapshots is not the line of history the free path assumes.
+ * Here the target `t` holds a file the live tree deleted after it
+ * (`gone`, on t's deadlist when the safety snapshot was taken) and an
+ * inode that was unlinked and open when it was taken (`orph`, whose
+ * orphan record was the live tree's, not t's). After the switch:
+ * `gone` is live again; rewriting and deleting it, then writing enough
+ * to reuse any block given back, leaves t's copy intact (a block freed
+ * because only the safety snapshot was asked would be overwritten here);
+ * the checker finds no orphan and no leak (the switch put t's orphan on
+ * the record and the mount released it). While held, a rollback to
+ * anything but the safety snapshot is refused -- it would drop the hold
+ * -- and one back to the safety snapshot is taken.
+ */
+bool selftest_cosmofs_rollback_shared(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 2048, reason))
+        return false;
+    static struct cosmofs_snap_info info[1];
+    static struct cosmofs_check_report rep;
+    static char big[32 * 4096], other[32 * 4096];
+    uint64_t x = 0x9E3779B97F4A7C15ull;
+    for (unsigned i = 0; i < sizeof(big); i++) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        big[i] = (char)x;
+        other[i] = (char)~x;
+    }
+    unsigned n = 0;
+    struct file *f = NULL;
+
+    CHECK(write_file(ENG "/keep", big, sizeof(big)));
+    CHECK(write_file(ENG "/gone", big, sizeof(big)));
+    CHECK(write_file(ENG "/orph", other, sizeof(other)));
+    CHECK(vfs_open(NULL, ENG "/orph", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/orph") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "t", info, 1, &n) == 0);
+    file_put(f);
+    CHECK(vfs_unlink(NULL, ENG "/gone") == 0);
+    CHECK(write_file(ENG "/x", other, sizeof(other)));
+    CHECK(vfs_sync() == 0);
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "m", info, 1, &n) == 0);
+    CHECK(write_file(ENG "/y", other, sizeof(other)));
+    CHECK(vfs_sync() == 0);
+
+    CHECK(rollback_req("t", "s", info) == 0);
+    CHECK(remount_eng(bd, reason));
+    CHECK(read_matches(ENG "/gone", big, sizeof(big)));
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    if (!rep.clean)
+        kinfo("selftest: cosmofs-rollback-shared: after the switch: %llu orphan(s), %llu leaked, %llu free-in-use",
+              (unsigned long long)rep.orphan.count, (unsigned long long)rep.alloc_not_seen.count,
+              (unsigned long long)rep.seen_not_alloc.count);
+    CHECK(rep.clean);
+
+    /* Held: only back to the tree it replaced. */
+    CHECK(pool_flags_now() == COSMOFS_POOL_HELD);
+    CHECK(rollback_req("m", NULL, info) == -EBUSY);
+
+    /* The live tree rewrites and drops what it shares with t, then the
+     * allocator is made to hand out everything it was given back. */
+    CHECK(write_file(ENG "/gone", other, sizeof(other)));
+    CHECK(vfs_unlink(NULL, ENG "/keep") == 0);
+    CHECK(vfs_sync() == 0);
+    char path[32];
+    for (unsigned i = 0; i < 8; i++) {
+        ksnprintf(path, sizeof(path), ENG "/churn%u", i);
+        CHECK(write_file(path, other, sizeof(other)));
+        CHECK(vfs_sync() == 0);
+    }
+    CHECK(read_matches(ENG "/.snapshots/t/gone", big, sizeof(big)));
+    CHECK(read_matches(ENG "/.snapshots/t/keep", big, sizeof(big)));
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+
+    /* Back to the safety snapshot while held: allowed; withdrawn, the
+     * hold is back until BOOT_OK. */
+    CHECK(rollback_req("s", NULL, info) == 0);
+    CHECK(pool_flags_now() == COSMOFS_POOL_PENDING);
+    CHECK(snapctl(COSMOFS_SNAP_CANCEL, NULL, NULL, 0, NULL) == 0);
+    CHECK(pool_flags_now() == COSMOFS_POOL_HELD);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "s", NULL, 0, NULL) == -EBUSY);
+    struct cosmofs_snap_req ok = { .op = COSMOFS_SNAP_BOOT_OK };
+    CHECK(cosmofs_snapctl(mount_of(ENG), &ok) == 0 && ok.total == 1);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, info[0].name, NULL, 0, NULL) == 0);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "s", NULL, 0, NULL) == 0);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "m", NULL, 0, NULL) == 0);
+    CHECK(read_matches(ENG "/.snapshots/t/gone", big, sizeof(big)));
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "t", NULL, 0, NULL) == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+    CHECK(remount_eng(bd, reason));
+    CHECK(read_matches(ENG "/gone", other, sizeof(other)));
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+    kinfo("selftest: cosmofs-rollback-shared: the target's copy survived the live tree rewriting and dropping "
+          "what it shares and 8 files of churn; its orphan released at the switch; a second rollback refused while "
+          "held, one back to the safety snapshot taken; clean after every snapshot went");
+    return engine_unmount(bd, reason);
+}
+
+/*
  * CF19's same-transaction rule: a rollback's record and its safety
  * snapshot reach the disk in one commit. The machine is stopped at every
  * commit boundary the request crosses (cosmofs_test_commit_budget) and
@@ -5364,6 +5467,16 @@ bool selftest_cosmofs_rollback_record(const char **reason)
         cfs_rollback_seal(&bad);
         CHECK(cfs_rollback_parse(&bad, &back) == -EIO);
     }
+    /* A pending record whose safety snapshot is its target, or with no
+     * safety snapshot, keeps nothing of the tree it replaces. */
+    bad = r;
+    memcpy(bad.safety_uuid, bad.target_uuid, 16);
+    cfs_rollback_seal(&bad);
+    CHECK(cfs_rollback_parse(&bad, &back) == -EIO);
+    bad = r;
+    memset(bad.safety_uuid, 0, 16);
+    cfs_rollback_seal(&bad);
+    CHECK(cfs_rollback_parse(&bad, &back) == -EIO);
     /* HELD is the other state a record may be in. */
     bad = r;
     bad.state = CFS_ROLLBACK_HELD;
@@ -5381,4 +5494,5 @@ bool selftest_cosmofs_snap_identity(const char **reason) { (void)reason; return 
 bool selftest_cosmofs_rollback(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_rollback_atomic(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_rollback_record(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_rollback_shared(const char **reason) { (void)reason; return true; }
 #endif

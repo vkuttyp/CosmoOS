@@ -41,9 +41,19 @@ void cfs_rollback_seal(struct cfs_rollback *r)
 
 int cfs_rollback_parse(const void *payload, struct cfs_rollback *out)
 {
+    static const uint8_t zero[16];
     memcpy(out, payload, sizeof(*out));
     if (out->magic != CFS_ROLLBACK_MAGIC || out->version != 1 || rb_crc(out) != out->crc ||
-        (out->state != CFS_ROLLBACK_PENDING && out->state != CFS_ROLLBACK_HELD))
+        (out->state != CFS_ROLLBACK_PENDING && out->state != CFS_ROLLBACK_HELD) ||
+        (out->flags & ~CFS_ROLLBACK_F_FROM_HELD) != 0 ||
+        (out->state == CFS_ROLLBACK_HELD && out->flags != 0))
+        return -EIO;
+    /* Checked for meaning too, not only for damage: a record whose safety
+     * snapshot is its target keeps nothing of the tree it replaces. */
+    if (memcmp(out->safety_uuid, zero, 16) == 0)
+        return -EIO;
+    if (out->state == CFS_ROLLBACK_PENDING &&
+        (memcmp(out->target_uuid, zero, 16) == 0 || memcmp(out->target_uuid, out->safety_uuid, 16) == 0))
         return -EIO;
     return 0;
 }
@@ -62,11 +72,22 @@ int cfs_rollback_read(struct cfs *fs, struct cfs_rollback *out)
 
 /* Replace the record (NULL: remove it), in the open transaction. The old
  * block is named by the superblock alone, which no snapshot preserves:
- * exempt. Allocates, so before a commit's fixpoint only. */
+ * exempt -- but only when it reads as a rollback block. A damaged
+ * pointer can name a block something else owns, and freeing that would
+ * hand live metadata to the allocator; such a block is let go of, and a
+ * leak is what the checker finds and repairs. Allocates, so before a
+ * commit's fixpoint only. */
 static int rb_write(struct cfs *fs, const struct cfs_rollback *r)
 {
     if (fs->sb.rollback_root != 0) {
-        cfs_free_block_exempt(fs, fs->sb.rollback_root);
+        struct cfs_buf *old;
+        if (cfs_buf_get(fs, fs->sb.rollback_root, CFS_KIND_ROLLBACK, &old) == 0) {
+            cfs_buf_put(fs, old);
+            cfs_free_block_exempt(fs, fs->sb.rollback_root);
+        } else {
+            kwarn("cosmofs: the rollback record's block %llu is not one; dropped without freeing it",
+                  (unsigned long long)fs->sb.rollback_root);
+        }
         fs->sb.rollback_root = 0;
     }
     if (r == NULL)
@@ -99,8 +120,11 @@ static int rb_commit(struct cfs *fs)
 bool cfs_rollback_protects(struct cfs *fs, const struct cfs_snapshot *s)
 {
     struct cfs_rollback r;
-    if (cfs_rollback_read(fs, &r) != 0)
+    int rc = cfs_rollback_read(fs, &r);
+    if (rc == -ENOENT)
         return false;
+    if (rc != 0)
+        return true;   /* a record that does not read may still name it: keep it until the checker decides */
     bool safety = memcmp(r.safety_uuid, s->uuid, 16) == 0;
     bool target = memcmp(r.target_uuid, s->uuid, 16) == 0;
     return r.state == CFS_ROLLBACK_PENDING ? (safety || target) : safety;
@@ -118,8 +142,15 @@ int cfs_rollback_request(struct cfs *fs, const char *target, const char *safety_
     if (t.flags & CFS_SNAP_F_CLONE)
         return -EINVAL;   /* a clone is not a point in the live tree's history (design.md, "Clones") */
     struct cfs_rollback cur;
-    if (cfs_rollback_read(fs, &cur) == 0 && cur.state == CFS_ROLLBACK_PENDING)
+    int cur_rc = cfs_rollback_read(fs, &cur);
+    if (cur_rc == 0 && cur.state == CFS_ROLLBACK_PENDING)
         return -EBUSY;    /* one at a time: cancel the pending one first */
+    /* While the boot after a rollback has not completed, the tree it
+     * replaced is held; the only rollback then is back to that tree,
+     * which the new record names as its target and so keeps. Any other
+     * would drop the hold before that boot completed. */
+    if (cur_rc == 0 && cur.state == CFS_ROLLBACK_HELD && memcmp(cur.safety_uuid, t.uuid, 16) != 0)
+        return -EBUSY;
 
     char name[CFS_SNAP_NAME_MAX + 1];
     if (safety_name != NULL) {
@@ -148,6 +179,8 @@ int cfs_rollback_request(struct cfs *fs, const char *target, const char *safety_
     struct cfs_rollback r;
     memset(&r, 0, sizeof(r));
     r.state = CFS_ROLLBACK_PENDING;
+    if (cur_rc == 0 && cur.state == CFS_ROLLBACK_HELD)
+        r.flags = CFS_ROLLBACK_F_FROM_HELD;   /* its target is the held snapshot: a cancel holds it again */
     /* The safety snapshot's uuid, drawn here so the record can name it:
      * unique against the list now, and a raise below gives no converted
      * entry the same one. */
@@ -198,16 +231,31 @@ int cfs_rollback_cancel(struct cfs *fs)
     int rc = cfs_rollback_read(fs, &r);
     if (rc == -ENOENT || (rc == 0 && r.state != CFS_ROLLBACK_PENDING))
         return -ENOENT;
+    bool sound = rc == 0;
     /* A record that does not check out is withdrawn too: it would only
      * be refused at the next mount. */
     rc = cfs_commit(fs);
     if (rc)
         return rc;
-    rc = rb_write(fs, NULL);
+    /* One asked for while a hold was in place goes back to that hold: its
+     * target is the snapshot the hold kept, and the boot that would
+     * release it has still not completed. */
+    struct cfs_rollback held;
+    bool rehold = sound && (r.flags & CFS_ROLLBACK_F_FROM_HELD);
+    if (rehold) {
+        memset(&held, 0, sizeof(held));
+        held.state = CFS_ROLLBACK_HELD;
+        memcpy(held.safety_uuid, r.target_uuid, 16);
+        held.safety_id = r.target_id;
+        held.generation = fs->sb.generation;
+        held.requested_ns = r.requested_ns;
+    }
+    rc = rb_write(fs, rehold ? &held : NULL);
     if (rc == 0)
         rc = rb_commit(fs);
     if (rc == 0)
-        kinfo("cosmofs: the pending rollback is withdrawn (its safety snapshot stays)");
+        kinfo("cosmofs: the pending rollback is withdrawn (its safety snapshot stays)%s",
+              rehold ? "; the hold it was asked under is back" : "");
     return rc;
 }
 
@@ -293,12 +341,13 @@ int cfs_rollback_at_mount(struct cfs *fs, bool *switched)
     if (r.state != CFS_ROLLBACK_PENDING)
         return 0;   /* a hold: BOOT_OK clears it */
     struct cfs_snapshot t, s;
-    if (!cfs_snapshot_find_uuid(fs, r.target_uuid, &t)) {
-        kerror("cosmofs: %s: rollback refused: its target snapshot (id %llu) is not on the list; the current tree "
-               "is mounted", dev, (unsigned long long)r.target_id);
+    rc = cfs_snapshot_lookup_uuid(fs, r.target_uuid, &t);
+    if (rc) {
+        kerror("cosmofs: %s: rollback refused: its target snapshot (id %llu) %s; the current tree is mounted", dev,
+               (unsigned long long)r.target_id, rc == -ENOENT ? "is not on the list" : "could not be looked up");
         return 0;
     }
-    if (!cfs_snapshot_find_uuid(fs, r.safety_uuid, &s)) {
+    if (cfs_snapshot_lookup_uuid(fs, r.safety_uuid, &s) != 0) {
         kerror("cosmofs: %s: rollback refused: its safety snapshot (id %llu) is not on the list, so the tree "
                "before it could not be kept; the current tree is mounted", dev, (unsigned long long)r.safety_id);
         return 0;
@@ -306,6 +355,26 @@ int cfs_rollback_at_mount(struct cfs *fs, bool *switched)
     if (fs->mnt && (fs->mnt->flags & MOUNT_RDONLY)) {
         kwarn("cosmofs: %s: a rollback to snapshot '%s' is pending; not applied on a read-only mount", dev, t.name);
         return 0;
+    }
+
+    /* The target must be a tree the mount can open: its root a directory.
+     * Asked with its roots in place and nothing changed, so a refusal
+     * leaves everything as it was. */
+    {
+        uint64_t imap = fs->sb.imap_root, next = fs->sb.next_ino, count = fs->sb.inode_count;
+        fs->sb.imap_root = t.imap_root;
+        fs->sb.next_ino = t.next_ino;
+        fs->sb.inode_count = t.inode_count;
+        struct cfs_inode root;
+        int rrc = t.imap_root == 0 ? -ENOENT : cfs_inode_read(fs, CFS_ROOT_INO, &root);
+        fs->sb.imap_root = imap;
+        fs->sb.next_ino = next;
+        fs->sb.inode_count = count;
+        if (rrc != 0 || CFS_MODE_TYPE(root.mode) != CFS_TYPE_DIR) {
+            kerror("cosmofs: %s: rollback refused: snapshot '%s' has no root directory (%d); the current tree is "
+                   "mounted", dev, t.name, rrc);
+            return 0;
+        }
     }
 
     /* From here the transaction changes; a failure is reported to the
@@ -319,6 +388,7 @@ int cfs_rollback_at_mount(struct cfs *fs, bool *switched)
     if (rc == 0)
         rc = cfs_tree_walk(fs, fs->sb.imap_root, fs->sb.next_ino, release_unless_target, &set);
     uint64_t revived = 0;
+    unsigned orphans = 0;
     if (rc == 0)
         rc = cfs_snapshot_deadlists_filter(fs, target_reaches, &set, &revived);
     if (rc == 0) {
@@ -328,6 +398,31 @@ int cfs_rollback_at_mount(struct cfs *fs, bool *switched)
         fs->sb.imap_root = t.imap_root;
         fs->sb.next_ino = t.next_ino;
         fs->sb.inode_count = t.inode_count;
+        /* The target's own orphans: a snapshot keeps an inode that was
+         * unlinked and still open when it was taken, but not the orphan
+         * record naming it (that is the live superblock's). Nothing has
+         * it open now, so each goes on the record this commit writes,
+         * and the mount's orphan replay releases it. */
+        for (uint64_t ino = CFS_ROOT_INO + 1; rc == 0 && ino < t.next_ino; ino++) {
+            struct cfs_inode in;
+            int irc = cfs_inode_read_raw(fs, ino, &in);
+            if (irc == -ENOENT)
+                continue;
+            if (irc) {
+                rc = irc;
+                break;
+            }
+            if (in.nlink != 0 || in.mode == 0)
+                continue;
+            if (!cfs_orphan_reserve(fs)) {
+                rc = -ENOMEM;
+                break;
+            }
+            cfs_orphan_add(fs, ino);
+            orphans++;
+        }
+    }
+    if (rc == 0) {
         struct cfs_rollback held = r;
         held.state = CFS_ROLLBACK_HELD;
         held.generation = fs->gen;
@@ -347,8 +442,9 @@ int cfs_rollback_at_mount(struct cfs *fs, bool *switched)
     }
     *switched = true;
     kinfo("cosmofs: %s: rolled back: the live tree is snapshot '%s' (generation %llu); the tree before it is "
-          "snapshot '%s', held until this boot completes; %llu block(s) released, %llu deadlist entr(ies) live again",
+          "snapshot '%s', held until this boot completes; %llu block(s) released, %llu deadlist entr(ies) live again, %u "
+          "orphan(s) of the snapshot to release",
           dev, t.name, (unsigned long long)t.generation, s.name, (unsigned long long)set.released,
-          (unsigned long long)revived);
+          (unsigned long long)revived, orphans);
     return 0;
 }

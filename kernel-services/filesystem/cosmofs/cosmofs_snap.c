@@ -139,11 +139,16 @@ static struct cfs_dead_block *dead_payload(struct cfs_buf *b)
 
 /* Walk the list, calling `fn` for every live entry until it returns
  * false. `fn` may modify the entry; the block is marked dirty then. */
+#define CFS_SNAP_MAX_CHAIN 4096u   /* no sound list is this long */
+
 static int snap_walk(struct cfs *fs, bool (*fn)(struct cfs_snapshot *s, void *arg), void *arg, bool write)
 {
     uint64_t blkno = fs->sb.snap_root;
     unsigned slots = cfs_snaplist_slots(fs);
+    unsigned guard = 0;
     while (blkno) {
+        if (guard++ > CFS_SNAP_MAX_CHAIN)
+            return -EIO;   /* a cycle: the checker names it (chain_cycle) */
         struct cfs_buf *b;
         int rc = cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b);
         if (rc)
@@ -187,17 +192,25 @@ static bool find_uuid(struct cfs_snapshot *s, void *arg)
 
 /* The snapshot with this uuid (version 12), or false. A zero uuid names
  * nothing. */
-bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out)
+int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out)
 {
     static const uint8_t zero[16];
     if (fs->sb.version < 12 || memcmp(uuid, zero, 16) == 0)
-        return false;
+        return -ENOENT;
     struct uuid_ctx c = { .uuid = uuid, .ok = false };
-    if (snap_walk(fs, find_uuid, &c, false))
-        return false;
-    if (c.ok && out)
+    int rc = snap_walk(fs, find_uuid, &c, false);
+    if (rc)
+        return rc;
+    if (!c.ok)
+        return -ENOENT;
+    if (out)
         *out = c.found;
-    return c.ok;
+    return 0;
+}
+
+bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out)
+{
+    return cfs_snapshot_lookup_uuid(fs, uuid, out) == 0;
 }
 
 /*
@@ -358,7 +371,6 @@ bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint6
     return set;
 }
 
-#define CFS_SNAP_MAX_CHAIN 4096u   /* no sound list is this long */
 
 /* --- copying the list ------------------------------------------------------
  *

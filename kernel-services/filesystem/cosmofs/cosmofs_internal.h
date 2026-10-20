@@ -229,6 +229,9 @@ int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct 
 int cfs_snapshot_create_ex(struct cfs *fs, const char *name, bool identity, bool commit, const uint8_t *uuid,
                            struct cfs_snapshot *out);
 bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
+/* The same, telling "not there" (-ENOENT) from "the list does not read"
+ * (-EIO, a cycle included), which only the first may act on. */
+int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
 int cfs_snapshot_deadlists_filter(struct cfs *fs, bool (*live)(void *arg, uint64_t dva), void *arg,
                                   uint64_t *dropped);
 /*
@@ -260,7 +263,6 @@ bool cfs_has_snapshots(struct cfs *fs);
  * (design.md, "Format version 12"). */
 /* The checker's repair for a version-12 list's identity faults. */
 int cfs_snapshot_fix_identity(struct cfs *fs, unsigned *fixed);
-bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
 /* A uuid no snapshot on the list, and none of `also`, has (CF18). */
 void cfs_snapshot_new_uuid(struct cfs *fs, uint8_t out[16], const uint8_t (*also)[16], unsigned nalso);
 uint32_t cfs_snaplist_kind(const struct cfs *fs);

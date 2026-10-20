@@ -617,12 +617,16 @@ static void check_rollback(struct check *ck)
         ck->bad_rollback = true;
         return;
     }
+    /* Only a snapshot known to be absent condemns the record: a list
+     * that does not read (a cycle, a bad block) is its own finding, and
+     * dropping the record over it would lose a rollback that is sound. */
     if (r.state == CFS_ROLLBACK_PENDING) {
-        if (!cfs_snapshot_find_uuid(fs, r.target_uuid, NULL) || !cfs_snapshot_find_uuid(fs, r.safety_uuid, NULL)) {
+        if (cfs_snapshot_lookup_uuid(fs, r.target_uuid, NULL) == -ENOENT ||
+            cfs_snapshot_lookup_uuid(fs, r.safety_uuid, NULL) == -ENOENT) {
             name_it(&ck->rep->rollback_record, fs->sb.rollback_root);
             ck->bad_rollback = true;
         }
-    } else if (!cfs_snapshot_find_uuid(fs, r.safety_uuid, NULL)) {
+    } else if (cfs_snapshot_lookup_uuid(fs, r.safety_uuid, NULL) == -ENOENT) {
         name_it(&ck->rep->hold, fs->sb.rollback_root);
         ck->bad_rollback = true;
     }

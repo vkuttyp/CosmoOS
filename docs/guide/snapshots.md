@@ -95,7 +95,13 @@ The tree you rolled back from is kept as `pre-rollback-<seconds>`. If the
 rolled-back system is not what you wanted, roll back to that one. It
 cannot be deleted until a boot after the rollback has completed (`/etc/rc`
 ran to the end), so a rollback to a tree that does not boot can always be
-undone from the live image.
+undone from the live image. Until then it is also the only snapshot you
+can roll back to: a rollback to any other is refused, because it would
+let go of the one way back.
+
+What you write after `cosmo-snap rollback` -- with `--no-reboot`, or on
+another filesystem before its next mount -- is in neither snapshot: the
+switch replaces the live tree with the target, and those writes go.
 
 `cosmo-snap rollback --no-reboot good` records the rollback and leaves
 the reboot to you; `cosmo-snap rollback --cancel` withdraws a pending

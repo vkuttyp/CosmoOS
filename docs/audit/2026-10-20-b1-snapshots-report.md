@@ -195,3 +195,35 @@ Measured (2026-10-20):
   clean.
 - AArch64: debug `make test` PASS 169.3 s; release `make test-snapshot`
   PASS 152.8 s; `make analyze` clean.
+
+### Review of the second pull request (#422, 2026-10-20)
+
+Qodo and Codex, fourteen comments; each fixed or answered on the PR:
+
+- `init`'s BOOT_OK listing grows on `-ERANGE` and never reads past what
+  came back; a failure says the hold stays.
+- A rollback while a hold is in place is refused unless it is back to
+  the held snapshot; that record carries `CFS_ROLLBACK_F_FROM_HELD` (the
+  old `pad` word), and cancelling it restores the hold.
+- `cfs_rollback_protects` fails closed on a record that does not read.
+- The record is checked for meaning: a safety uuid, and for a pending
+  record a target uuid that is not the safety's; known flags only.
+- `rb_write` frees the old record block only when it reads as one.
+- The switch refuses a target whose root inode is not a directory,
+  before changing anything; it puts the target's unlinked inodes on the
+  orphan record it commits, and the orphan replay now runs after a switch.
+- `snap_walk` is bounded; `cfs_snapshot_lookup_uuid` tells a missing
+  snapshot from a list that does not read, and the checker condemns a
+  record only for the first.
+- Snapshot creation and the rollback request write dirty pages first.
+- Answered, not changed: the newest-snapshot verdict stays exact after a
+  rollback, because a snapshot is asked with its bitmap
+  (design.md, "Why the newest snapshot still answers"); now asserted by
+  `cosmofs-rollback-shared`. Recorded: CFS-20, a nearly full pool can
+  refuse the switch (abandoned, logged, still pending).
+
+Measured after the fixes: x86-64 debug `make test` PASS 164.4 s
+(`cosmofs-rollback-shared` ok: 74 blocks released, 74 deadlist entries
+live again, 1 orphan of the target released); AArch64 debug PASS 168.8 s;
+release `make test-snapshot` PASS x86-64 83.2 s, AArch64 120.6 s; `make
+host-test` PASS; `make analyze` clean on both.

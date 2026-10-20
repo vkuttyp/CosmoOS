@@ -1480,25 +1480,34 @@ Built by B1's second pull request (`cosmofs_rollback.c`).
 `rollback NAME` does not change the mounted tree. It writes a
 **pending-rollback record** -- a `CFS_KIND_ROLLBACK` block named by the
 superblock's last reserved word, `rollback_root` (`struct cfs_rollback`:
-state, the target's and a safety snapshot's uuids and ids, the live
-root's generation, the request's time, its own CRC32C over the struct)
+state, flags, the target's and a safety snapshot's uuids and ids, the
+live root's generation, the request's time, its own CRC32C over the
+struct; 120 bytes)
 -- in the same transaction as a **safety snapshot** of the live tree,
 `pre-rollback-<seconds>` (or a name the caller gives). The open work is
-committed first, so the safety snapshot names a durable tree; then the
+committed first -- dirty pages included, which the request writes back
+before it takes the lock, as `create` does -- so the safety snapshot
+names a durable tree; then the
 snapshot entry and the record join one transaction and one commit
 publishes both. The safety snapshot's uuid is drawn before either is
 written, so the record can name it whichever order the two are put in
 the transaction. A second request while one is pending is `-EBUSY`;
 `rollback --cancel` removes a pending record (the safety snapshot stays,
-an ordinary snapshot again). A clone cannot be a target: it is not a
+an ordinary snapshot again). While a hold is in place (below) the only
+request taken is one back to the held snapshot, which becomes its
+target, so the hold's snapshot stays kept; the record carries
+`CFS_ROLLBACK_F_FROM_HELD`, and cancelling it puts the hold back. Any
+other request then is `-EBUSY`. A clone cannot be a target: it is not a
 point in the live tree's history.
 
 **The mount applies it** (`cfs_rollback_at_mount`, from `load_root` after
 the bitmap and the free record's replay, before the orphan replay). It
-reads the record; if the record does not check out (its block's header
-or its own CRC), or names a target or a safety snapshot that is not on
-the list, or the mount is read-only, the mount logs why, changes
-nothing and mounts the current tree. Otherwise, in its first
+reads the record; if the record does not check out (its block's header,
+its own CRC, or its meaning: a known state and flags, a safety uuid, and
+for a pending record a target uuid that is not the safety's), or names a
+target or a safety snapshot that is not on the list, or a target whose
+root inode is not a directory, or the mount is read-only, the mount logs
+why, changes nothing and mounts the current tree. Otherwise, in its first
 transaction:
 
 1. **Walk the target's tree** into a set of blocks (`cfs_tree_walk`).
@@ -1518,12 +1527,29 @@ transaction:
 4. **Make the target's tree the live tree**: `imap_root`, `next_ino` and
    `inode_count` from its entry. The old tree's orphan record goes with
    it -- its inodes are the safety snapshot's -- and the commit retires
-   the chain.
+   the chain. The target's own orphans take its place: a snapshot keeps an
+   inode that was unlinked and open when it was taken, but not the orphan
+   record naming it, so the switch puts every inode of the target with no
+   link on the record it commits, and the mount's orphan replay, which
+   runs after the switch, releases them.
 5. **Replace the record with a hold** naming the same two snapshots, and
    commit. The kernel logs `cosmofs: <dev>: rolled back: the live tree is
    snapshot '<target>' (generation G); the tree before it is snapshot
    '<safety>', held until this boot completes; N block(s) released, M
    deadlist entr(ies) live again`.
+
+**Why the newest snapshot still answers.** After the switch the live
+tree is older than the snapshots taken since its target, so a block it
+drops can be one the target (or a snapshot between) names and the
+safety snapshot's tree does not. The commit still asks the newest
+snapshot alone, and the answer is right, because a snapshot is asked
+with its *bitmap* -- whether the block was allocated when it was taken
+-- not with its tree. Such a block was on a deadlist when the safety
+snapshot was taken, so allocated in its bitmap: the commit holds it on
+the safety snapshot's deadlist, and the deletion that settles that list
+asks every remaining snapshot (`deadlist_settle`). `cosmofs-rollback-shared`
+rewrites and drops such a file after a rollback, churns the allocator,
+and reads the target's copy back intact.
 
 A failure anywhere in that transaction abandons it: the mount resets to
 the root it read, loads it again with the switch off and says so. Nothing
