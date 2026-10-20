@@ -491,6 +491,16 @@ bool tty_claim_for(struct tty *t, pid_t sid, pid_t pgid)
     return ok;
 }
 
+bool tty_hand_foreground(struct tty *t, pid_t sid, pid_t from, pid_t to)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    bool ok = sid != 0 && t->sid == sid && !t->hungup && t->fg_pgid == from;
+    if (ok)
+        t->fg_pgid = to;
+    spin_unlock_irqrestore(&t->lock, s);
+    return ok;
+}
+
 int tty_disassociate(struct tty *t)
 {
     struct process *self = process_current();

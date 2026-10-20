@@ -851,6 +851,7 @@ static const struct selftest tests[] = {
     { "tty-intr",        selftest_tty_intr },
     { "tty-stop",        selftest_tty_stop },
     { "tty-ttin",        selftest_tty_ttin },
+    { "spawn-foreground", selftest_spawn_foreground },
     { "hid-arm",         selftest_hid_arm },
     { "ipc-pipe",        selftest_ipc_pipe },
     { "ipc-fifo",        selftest_ipc_fifo },

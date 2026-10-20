@@ -219,12 +219,19 @@ commands still run, they just share the shell's group and its signals:
    here to print a prompt when the job dies of the interrupt.
 
 Then every pipeline is one job and therefore one process group: the
-first stage is spawned with `spawnvp_pgrp(..., 0)` -- a group named by
-its own pid -- and the rest name that group, so `^C` interrupts the
-whole pipeline rather than whichever stage happened to be reading. The
-shell hands the terminal to the job with `tcsetpgrp` before waiting and
-takes it back afterwards; both calls may fail on a job that has already
-exited, and neither failure changes what happens next.
+first stage is spawned in a group named by its own pid and the rest
+name that group, so `^C` interrupts the whole pipeline rather than
+whichever stage happened to be reading. A foreground job's last stage is
+spawned with `spawnvp_pgrp_fg`, which makes the group the terminal's
+foreground before that stage's first instruction, once the group holds
+every stage; a lone command is its own last. Handed over after the
+spawn instead, the job could run first: an interactive ash asks
+`tcgetpgrp` at its start, and finding the shell's group there it stops
+itself with `SIGTTIN` (`docs/testing/flakes.md`, "ash history: the
+nested shell stopped"). The shell still calls `tcsetpgrp` before waiting
+(for a job whose last stage did not start) and takes the terminal back
+afterwards; both calls may fail on a job that has already exited, and
+neither failure changes what happens next.
 
 (Until job control existed, nothing observable distinguished a per-job
 group from the shell's own group. It does now: a background job is in a

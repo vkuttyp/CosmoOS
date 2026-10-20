@@ -41,6 +41,12 @@ pid_t spawnve_pgrp(const char *path, const char *const argv[], const char *const
     return spawn_req(path, argv, envp, h, nh, COSMO_SPAWN_SETPGID, pgid);
 }
 
+pid_t spawnve_pgrp_fg(const char *path, const char *const argv[], const char *const envp[],
+                      const struct spawn_handle *h, size_t nh, pid_t pgid)
+{
+    return spawn_req(path, argv, envp, h, nh, COSMO_SPAWN_SETPGID | COSMO_SPAWN_FOREGROUND, pgid);
+}
+
 pid_t spawnve_in(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
                  size_t nh, const char *root)
 {
@@ -222,6 +228,12 @@ pid_t spawnvp(const char *file, const char *const argv[], const struct spawn_han
 pid_t spawnvp_pgrp(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh, pid_t pgid)
 {
     return spawnvp_flags(file, argv, h, nh, COSMO_SPAWN_SETPGID, pgid);
+}
+
+pid_t spawnvp_pgrp_fg(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh,
+                      pid_t pgid)
+{
+    return spawnvp_flags(file, argv, h, nh, COSMO_SPAWN_SETPGID | COSMO_SPAWN_FOREGROUND, pgid);
 }
 
 pid_t waitpid(pid_t pid, int *status, int options)

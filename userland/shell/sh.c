@@ -747,8 +747,19 @@ static int run_pipeline(struct pipeline *pl)
             pids[i] = -1;
             last_status = 1;
         } else {
-            pids[i] = g_job_control ? spawnvp_pgrp(c->words[0], (const char *const *)c->words, map, 3, job_pgrp)
-                                    : spawnvp(c->words[0], (const char *const *)c->words, map, 3);
+            /* A foreground job's last stage takes the terminal for the
+             * job's group as it is spawned, before its first instruction:
+             * handed over after, by the tcsetpgrp below, the job could run
+             * first, find the shell's group in the foreground and stop
+             * itself -- an interactive ash does exactly that at its start.
+             * The last, so the group the terminal signals (^C, ^Z) already
+             * holds every stage; a lone command, the interactive case, is
+             * its own last. Stages before it start in the background for
+             * the moment the spawns take (docs/backlog.md USR-6). */
+            int hand = !pl->background && i == pl->ncmds - 1;
+            pids[i] = !g_job_control ? spawnvp(c->words[0], (const char *const *)c->words, map, 3)
+                      : hand ? spawnvp_pgrp_fg(c->words[0], (const char *const *)c->words, map, 3, job_pgrp)
+                             : spawnvp_pgrp(c->words[0], (const char *const *)c->words, map, 3, job_pgrp);
             if (pids[i] > 0 && job_pgrp == 0)
                 job_pgrp = pids[i];
             if (pids[i] < 0) {
@@ -790,8 +801,11 @@ static int run_pipeline(struct pipeline *pl)
     }
 
     /* Hand the terminal to the job while it runs, and take it back
-     * afterwards. Both may fail -- a job that has already exited is no
-     * longer a group -- and neither failure changes what happens next.
+     * afterwards. The last stage's spawn has normally handed it over
+     * already; this covers a job whose last stage did not start, and is
+     * the same answer otherwise. Both may fail -- a job that has already
+     * exited is no longer a group -- and neither failure changes what
+     * happens next.
      * Taking it back is done from the background, which is a SIGTTOU;
      * the shell ignores that signal, which is what makes it legal. */
     if (g_job_control && job_pgrp != 0)

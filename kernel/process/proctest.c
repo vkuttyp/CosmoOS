@@ -530,6 +530,39 @@ bool selftest_tty_stop(const char **reason)
     return true;
 }
 
+/*
+ * COSMO_SPAWN_FOREGROUND: a job spawned with it finds its own group in
+ * the foreground at its first instruction, with no tcsetpgrp from the
+ * spawner; without it, it does not; and a spawner in the background
+ * hands nothing over (init --probe spawn-foreground). The race this
+ * closes stopped an interactive ash started from cosmo-sh
+ * (docs/testing/flakes.md, "ash history: the nested shell stopped").
+ */
+bool selftest_spawn_foreground(const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    static const char *const argv[] = { "init", "--probe", "spawn-foreground", NULL };
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    int status = process_wait_exit(p);
+    process_put(p);
+    if (status != 0) {
+        kwarn("selftest: spawn-foreground: the probe failed check %d", status);
+        *reason = status == 7 ? "the job spawned to the foreground found another group there"
+                              : "the foreground spawn probe failed";
+        return false;
+    }
+    CHECK(tty_foreground_pgrp(tty_console()) == 0);
+    kinfo("selftest: spawn-foreground: the job had the terminal at its first instruction with no tcsetpgrp; "
+          "without the flag it did not; a spawner in the background handed nothing over");
+    return true;
+}
+
 bool selftest_tty_ttin(const char **reason)
 {
     const void *image;

@@ -3265,3 +3265,13 @@ See the [history index](README.md).
   architectures) snapshots the root, breaks the system, rolls back,
   reboots, kills QEMU at three points of a rollback, and writes and
   deletes a clone. Report: `docs/audit/2026-10-20-b1-snapshots-report.md`.
+- **A foreground job has the terminal at its spawn (2026-10-20).** Main
+  turned red on #420's merge (documentation only): BusyBox's history
+  step started an interactive `sh` from `cosmo-sh` and it stopped itself
+  with `SIGTTIN`, because `cosmo-sh` spawned the job and only then made
+  its group the foreground, and the job asked first. A second sighting
+  (AArch64, 2026-10-18) had not been recorded. `COSMO_SPAWN_FOREGROUND`
+  hands the terminal over before the child's first instruction when the
+  caller is the foreground (T21); `cosmo-sh` uses it for a foreground
+  job's last stage. `spawn-foreground`, `tools/spawn-foreground-probe.py`.
+  Report: `docs/audit/2026-10-20-spawn-foreground-report.md`.

@@ -375,6 +375,16 @@ shell with job control (BusyBox ash) finds the terminal its own when it
 asks `tcgetpgrp`. `TIOCNOTTY` from the leader gives the terminal up as
 an exit would.
 
+**A job's foreground, at its spawn.** The same is needed one level down:
+a shell's foreground job must have the terminal when it starts, because
+a job with job control of its own asks `tcgetpgrp` first thing and stops
+itself with `SIGTTIN` when its group is not the answer. A fork-based
+shell hands the terminal over in the child before `exec`; `cosmo-sh`
+spawns, so the spawn does it: `COSMO_SPAWN_FOREGROUND` (with `SETPGID`)
+moves the foreground from the caller's group to the child's before the
+child's first instruction, when the caller's group has it
+(`tty_hand_foreground`; T21).
+
 **SIGWINCH.** `TIOCSWINSZ` stores the size; a change raises SIGWINCH on
 the foreground group. Until a size is set, the console answers the
 framebuffer's geometry and a pty 0x0. When the framebuffer console's

@@ -2829,6 +2829,96 @@ static int probe_signal_tty_stop(void)
 }
 
 /*
+ * A shell's foreground job has the terminal from its first instruction
+ * (COSMO_SPAWN_FOREGROUND). This side claims the terminal and spawns the
+ * job, and never hands the terminal over itself: the race a shell's
+ * tcsetpgrp after the spawn can lose, lost every time. The job asks at
+ * its start whether its group is the foreground, as an interactive ash
+ * does, and answers by its exit status. The control: the same job
+ * spawned without the flag must find itself in the background, or the
+ * question could not tell the two apart.
+ */
+static int probe_spawn_foreground(void)
+{
+    struct sigaction ign;
+    memset(&ign, 0, sizeof(ign));
+    ign.sa_handler = SIG_IGN;
+    if (sigaction(SIGTTOU, &ign, NULL) != 0)   /* taking it back is done from the background */
+        return 2;
+    if (tcsetpgrp(0, getpgrp()) != 0)
+        return 3;
+    const char *argv[] = { "init", "--probe", "spawn-foreground-job", NULL };
+    int st = -1;
+    pid_t c = spawnve_pgrp_fg("/boot/init", argv, NULL, NULL, 0, 0);
+    if (c <= 0)
+        return 4;
+    if (waitpid(c, &st, WUNTRACED) != c)
+        return 5;
+    if (WIFSTOPPED(st)) {
+        (void)kill(-c, SIGKILL);
+        (void)waitpid(c, &st, 0);
+        return 6;
+    }
+    if (st != 0)
+        return 7;   /* the job found another group in the foreground */
+    if (tcsetpgrp(0, getpgrp()) != 0)
+        return 8;
+    /* The control: without the flag the job's group is not the foreground. */
+    c = spawnve_pgrp("/boot/init", argv, NULL, NULL, 0, 0);
+    if (c <= 0)
+        return 9;
+    if (waitpid(c, &st, WUNTRACED) != c)
+        return 10;
+    if (WIFSTOPPED(st)) {
+        (void)kill(-c, SIGKILL);
+        (void)waitpid(c, &st, 0);
+        return 11;
+    }
+    if (st != 1)
+        return 12;
+    /* And a caller that is not the foreground hands nothing over: it
+     * asks with tcsetpgrp, under the SIGTTOU rule. */
+    pid_t other = spawnve_pgrp("/boot/init", (const char *[]){ "init", "--probe", "spawn-foreground-hold", NULL },
+                               NULL, NULL, 0, 0);
+    if (other <= 0)
+        return 13;
+    if (tcsetpgrp(0, other) != 0)
+        return 14;
+    c = spawnve_pgrp_fg("/boot/init", argv, NULL, NULL, 0, 0);
+    if (c <= 0)
+        return 15;
+    if (waitpid(c, &st, WUNTRACED) != c)
+        return 16;
+    int bg_ok = !WIFSTOPPED(st) && st == 1;
+    if (WIFSTOPPED(st)) {
+        (void)kill(-c, SIGKILL);
+        (void)waitpid(c, &st, 0);
+    }
+    int fg_still_other = 0;
+    pid_t now = tcgetpgrp(0);
+    fg_still_other = now == other;
+    (void)kill(-other, SIGKILL);
+    (void)waitpid(other, &st, 0);
+    (void)tcsetpgrp(0, getpgrp());
+    if (!bg_ok)
+        return 17;
+    return fg_still_other ? 0 : 18;
+}
+
+/* The job: its first act asks whether its own group has the terminal. */
+static int probe_spawn_foreground_job(void)
+{
+    return tcgetpgrp(0) == getpgrp() ? 0 : 1;
+}
+
+/* A group that holds the foreground while the probe spawns from the background. */
+static int probe_spawn_foreground_hold(void)
+{
+    sleep(10);
+    return 0;
+}
+
+/*
  * Reading the terminal from the background, both halves of the rule at
  * once. The child is in its own group with this process as its parent,
  * so its group is *not* orphaned and it is stopped with SIGTTIN. This
@@ -3396,6 +3486,12 @@ static int signal_probe(const char *kind)
         return probe_signal_tty_stop();
     if (strcmp(kind, "signal-tty-background") == 0)
         return probe_signal_tty_background();
+    if (strcmp(kind, "spawn-foreground") == 0)
+        return probe_spawn_foreground();
+    if (strcmp(kind, "spawn-foreground-job") == 0)
+        return probe_spawn_foreground_job();
+    if (strcmp(kind, "spawn-foreground-hold") == 0)
+        return probe_spawn_foreground_hold();
     if (strcmp(kind, "signal-job") == 0)
         return probe_signal_job();
     if (strcmp(kind, "signal-job-read") == 0)

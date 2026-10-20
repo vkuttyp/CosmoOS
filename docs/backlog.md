@@ -49,10 +49,10 @@ Open lines (struck lines are not counted):
 | Scheduler and SMP | 0 | 0 | 1 | 5 | 6 |
 | Security and isolation | 0 | 10 | 1 | 2 | 13 |
 | Testing and CI | 8 | 0 | 0 | 9 | 17 |
-| Commands | 0 | 0 | 4 | 1 | 5 |
+| Commands | 1 | 0 | 4 | 1 | 6 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **40** | **21** | **49** | **90** | **200** |
+| **all** | **41** | **21** | **49** | **90** | **201** |
 
 ## Block devices
 
@@ -285,6 +285,7 @@ Open lines (struck lines are not counted):
 - **USR-3** usability, S. No `useradd`; a second user is made by editing `/etc/passwd`.
 - **USR-4** usability, S. `/etc/fstab` cannot name `LABEL=` or `UUID=`.
 - **USR-5** nice-to-have, S. No `xz` compressor; `syslogd` keeps no file or ring; `lsblk` has no `MAJ:MIN` or options; `blkid` knows no FAT or `PARTLABEL`.
+- **USR-6** correctness, S. `cosmo-sh` hands the terminal to a foreground job as its last stage is spawned (COSMO_SPAWN_FOREGROUND), so the group holds every stage when it takes ^C; the earlier stages of a pipeline start in the background for the moment the spawns take, and one that checks the terminal at its first instruction can still stop itself. A start barrier (spawn stopped, continue the group) would close it (Codex on #424).
 
 ## VFS
 

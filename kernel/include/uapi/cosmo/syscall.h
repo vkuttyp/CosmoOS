@@ -349,6 +349,15 @@ struct cosmo_spawn {
  * (docs/kernel/security/design.md §1). Unprivileged: dropping is always
  * allowed, and nothing gives a privilege back. */
 #define COSMO_SPAWN_DROPPRIV (1u << 8)
+/* With COSMO_SPAWN_SETPGID: the child's group becomes the foreground of
+ * the caller's controlling terminal before the child's first
+ * instruction, when the caller's group is the foreground now -- what a
+ * shell does for a foreground job. Done after the spawn instead, by the
+ * shell's tcsetpgrp, the job could run first and find itself in the
+ * background. A caller that is not the foreground changes nothing here
+ * (it asks with tcsetpgrp, under the SIGTTOU rule). -EINVAL without
+ * SETPGID. Unprivileged. */
+#define COSMO_SPAWN_FOREGROUND (1u << 9)
 
 /* Operation-specific privileges (roadmap M5; docs/kernel/security/design.md
  * §1). A process holds a subset: init all of them, every other process

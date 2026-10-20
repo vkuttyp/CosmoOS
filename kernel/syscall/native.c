@@ -1536,11 +1536,13 @@ static int64_t sys_spawn(struct syscall_args *a)
     if ((req.flags &
          ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT | COSMO_SPAWN_NEWDOMAIN |
            COSMO_SPAWN_NEWMOUNTNS | COSMO_SPAWN_NEWUTSNS | COSMO_SPAWN_SETPGID | COSMO_SPAWN_SETSID |
-           COSMO_SPAWN_DROPPRIV)) ||
+           COSMO_SPAWN_DROPPRIV | COSMO_SPAWN_FOREGROUND)) ||
         req.path == NULL || req.argv == NULL)
         return -EINVAL;
     if ((req.flags & COSMO_SPAWN_SETSID) && (req.flags & COSMO_SPAWN_SETPGID))
         return -EINVAL;   /* a new session names its own group */
+    if ((req.flags & COSMO_SPAWN_FOREGROUND) && !(req.flags & COSMO_SPAWN_SETPGID))
+        return -EINVAL;   /* the foreground is a group's: the child must be put in one */
     size_t want = (req.flags & COSMO_SPAWN_DROPPRIV)  ? sizeof(req)
                   : (req.flags & COSMO_SPAWN_SETPGID) ? COSMO_SPAWN_SIZE_V3
                   : (req.flags & COSMO_SPAWN_SETROOT) ? COSMO_SPAWN_SIZE_V2
@@ -1622,7 +1624,7 @@ static int64_t sys_spawn(struct syscall_args *a)
                        (req.flags & COSMO_SPAWN_NEWMOUNTNS) != 0, (req.flags & COSMO_SPAWN_NEWUTSNS) != 0,
                        (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL,
                        (req.flags & COSMO_SPAWN_SETPGID) != 0, (pid_t)req.pgid,
-                       (req.flags & COSMO_SPAWN_SETSID) != 0,
+                       (req.flags & COSMO_SPAWN_SETSID) != 0, (req.flags & COSMO_SPAWN_FOREGROUND) != 0,
                        (req.flags & COSMO_SPAWN_DROPPRIV) ? req.priv_drop : 0, &pid);
 out:
     kfree(sc);
