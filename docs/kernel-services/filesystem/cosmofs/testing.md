@@ -123,6 +123,7 @@ writeback thread off so that generation counts are exact.
 | `cosmofs-rollback-atomic` | CF19's same-transaction rule: the machine stopped at each commit the request crosses (`cosmofs_test_commit_budget`, budgets 0-3) and the pool mounted again leaves either neither the record nor the safety snapshot, or both (then switched and held), with no `rollback_record` or `hold` finding; both outcomes seen. `tools/b1-rollback-probe.py --old` commits the record before the snapshot and fails it |
 | `cosmofs-rollback-record` | the rollback record on bytes alone (`cfs_rollback_seal`, `cfs_rollback_parse`): a sealed PENDING or HELD record parses back field for field; every single-bit change over its 120 bytes is refused; a wrong magic, version or state, a pending record whose safety uuid is its target's, and one with no safety uuid are refused under a crc that matches them |
 | `cosmofs-rollback-shared` | after a rollback to `t`: a file the live tree deleted after `t` is live again, and rewriting and deleting it and writing 8 files of churn leave `t`'s copy intact (the bitmap answer, design.md "Why the newest snapshot still answers"); an inode unlinked and open when `t` was taken is released at the switch (no orphan, no leak); while held, a rollback to another snapshot is `-EBUSY` and one back to the safety snapshot is taken, and cancelling it restores the hold; clean after every snapshot is deleted and a remount |
+| `cosmofs-clone` | CF20: a clone of snapshot `o` starts as `o`; a file rewritten, a 16-block incompressible file added, a directory made and a file removed in it are seen neither in `o` nor the live tree, and a live write not in the clone; `o` cannot be deleted (`-EBUSY`), the clone is no rollback target and cannot be cloned (`-EINVAL`), a rename out of it is `-EXDEV`, a symlink or rename inside `o` is `-EROFS` and a symlink in the clone works; after a remount its writes are there; deletion is `-EBUSY` while a file in it is open; after it at least 16 blocks are back and the checker is clean, and again after `o` goes and a remount |
 | `cosmofs-snap-identity` | format version 12 (CF18): a pool formatted at 11 stays 11 until a snapshot raises it, converting a version-11 entry (`cosmofs_test_snap_no_raise` builds one) that stays readable; every snapshot gets a distinct uuid through `cosmofs_snapctl`; an id is not reused after a delete and a remount; `list`'s sizes: a snapshot holding a 32-block incompressible file the live tree removed has at least that much unique, one taken before the file has less, and the list is oldest first; a zeroed uuid (`COSMOFS_CORRUPT_SNAP_UUID`) is named by `snap_identity` and repaired; a version-10 pool refuses `create` with `-EOPNOTSUPP` and keeps its version |
 
 ### Pools, mirrors, compression, encryption (versions 4 to 7)
@@ -248,7 +249,12 @@ and after the hold's release (the kill once the boot completed: the next
 boot applies nothing). `make test-snapshot` builds the `COSMOFS_STOP=1`
 image in `$(OUT)-stop`, as `test-crash` builds its own.
 
-Clone stages arrive with B1's third pull request.
+Stage `clone`: a clone of a snapshot of the installed root is written
+(a file changed, a directory made, a directory removed) and the live tree
+is changed; each tree reads only its own; `cosmo-snap list` marks the
+clone `clone-of:`; the origin's deletion is refused (exit 1); `fsctl
+check` is clean after the writes, after the clone's deletion and after
+the origin's.
 
 ## Installed system (`make test-install`)
 

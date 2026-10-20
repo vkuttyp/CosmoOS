@@ -1382,9 +1382,8 @@ Roadmap 1.2 B1 (`docs/roadmap-1.2.md`): snapshots and rollback as shell
 commands. Version 3's snapshots are trees an operator can read through
 `.snapshots` and delete; nothing could say what one was worth, roll the
 live tree back to one, or write to a copy of one. This section is the
-design for all three. Identity and sizes are built by B1's first pull
-request, rollback by its second, clones by its third; each subsection
-says which.
+design for all three, as built: identity and sizes by B1's first pull
+request, rollback by its second, clones by its third.
 
 ### Identity
 
@@ -1585,19 +1584,57 @@ whose safety snapshot is missing (`hold`). Its repair removes the record:
 the mount would refuse it anyway, and a record nothing can apply only
 keeps a snapshot from being deleted. The scrub reads the block.
 
-### Clones (B1's third pull request)
+### Clones
+
+Built by B1's third pull request (`cosmofs_clone.c`).
 
 `clone NAME CLONE` makes a writable tree that starts as snapshot NAME's
-and shares its blocks, mounted under `.snapshots/CLONE` as a snapshot is.
-It is an entry in the snapshot list with `CFS_SNAP_F_CLONE` and
-`origin_id`, its roots advanced by each commit. Deleting it frees exactly
-the blocks only it reaches. The deadlists cannot say which those are --
-a snapshot's bitmap is the pool's, so "set in a bitmap" cannot tell a
-clone's block from its origin's -- so the rules are: a clone's frees are
-tested against its origin's tree, an origin cannot be deleted while it
-has a clone, a clone cannot be snapshotted, and deleting a clone walks
-the clone's tree and its origin's and frees the difference. The checker's
-counts are the test's oracle.
+and shares its blocks, read and written at `.snapshots/CLONE`. It is an
+entry in the snapshot list with `CFS_SNAP_F_CLONE` and `origin_id`,
+holding the clone's roots as of the last commit; the open transaction's
+are in a table in memory (`struct cfs_clone`), which each commit
+publishes into the entries (`cfs_clones_publish`, before anything in the
+commit allocates).
+
+**One code path for two trees.** A clone is written through exactly the
+paths the live tree is: an operation on a clone's vnode takes the mount's
+lock and *enters* the clone, which swaps the clone's `imap_root`,
+`next_ino` and `inode_count` into the in-memory superblock, and *leaves*
+it before the lock goes, keeping what moved (`cfs_lock_tree_w`). Every
+inode, extent and allocation path then writes the clone without knowing
+it. A clone's vnodes carry its id as their tag, as a snapshot's do; the
+inode paths and directory entries take the number without it. A commit
+publishes the live tree's roots, so one called from inside a clone
+(`fsync`) leaves it first. The live tree's orphan record is not the
+clone's: an inode unlinked in a clone while open is not recorded, and
+its blocks are the clone's until the clone is deleted.
+
+**What a clone owns is exact.** The deadlists cannot say which blocks a
+clone owns: a snapshot's bitmap is the pool's, and "set in a bitmap" does
+not tell a clone's block from its origin's. So a clone's frees bypass
+them. A block a clone frees is either its origin's -- the origin's tree
+reaches it, and the origin keeps it -- or one the clone was born with,
+freed outright (exempt: no snapshot's tree reaches it, since snapshots
+are of the live tree, which never reaches a clone's block). The test is
+the origin's tree itself, walked once into a set the first time it is
+needed: the origin is a snapshot and does not change. Three rules keep
+the set true: an origin cannot be deleted while it has a clone
+(`-EBUSY`), a clone cannot be cloned or made a rollback target
+(`-EINVAL`), and a clone is never the "newest snapshot" a live free is
+offered to, nor a keeper of a deleted snapshot's deadlist. Deleting a
+clone walks its tree and frees every block the origin's set does not
+hold, in the transaction that removes its entry; it is refused while
+anything inside it is open, as a snapshot's deletion is.
+
+A rename between the live tree and a clone, or two clones, is `-EXDEV`:
+two trees. A symlink or a rename inside a snapshot or `.snapshots` is
+`-EROFS`; until this unit those two operations had no guard there, and
+would have written the live tree under the snapshot's inode tag (found
+while giving clones their write paths; `cosmofs-clone` asserts both).
+
+The checker walks a clone's tree, with the roots the open transaction
+has, like a snapshot's; its counts are what `cosmofs-clone` takes for
+the truth about what a clone holds and gives back.
 
 ## Self-test fixture failure ownership
 

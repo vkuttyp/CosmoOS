@@ -4,8 +4,9 @@ The installed system's root is a cosmofs filesystem, and cosmofs keeps
 **snapshots**: the whole tree as it was at one moment, kept while the
 live tree moves on, at the cost of only the blocks that have changed
 since. `cosmo-snap` takes them, lists them with what each one keeps,
-shows what changed, and **rolls the system back** to one -- for example
-after an upgrade or a change to `/etc` that left the system broken.
+shows what changed, **rolls the system back** to one -- for example
+after an upgrade or a change to `/etc` that left the system broken --
+and makes writable **clones** of them.
 
 The steps below are the ones `make test-snapshot` runs on an installed
 system (the CI job `install`, on both architectures), with the output it
@@ -108,6 +109,27 @@ the reboot to you; `cosmo-snap rollback --cancel` withdraws a pending
 one (its safety snapshot stays). `cosmo-snap -m /mnt/data rollback good`
 rolls back another cosmofs filesystem, at its next mount: unmount it and
 mount it again.
+
+## Clones
+
+A clone is a snapshot you can write to: it starts as the snapshot's tree
+and shares its blocks, and what you change in it is its own. It lives
+under `/.snapshots` too:
+
+```text
+cosmo$ cosmo-snap clone cl-origin work
+cosmo-snap: clone work of cl-origin (id 7) is at /.snapshots/work
+cosmo$ echo changed > /.snapshots/work/cl/f
+cosmo$ cat /cl/f /.snapshots/cl-origin/cl/f /.snapshots/work/cl/f
+orig
+orig
+changed
+```
+
+`cosmo-snap list` marks it `clone-of:<id>`. The snapshot it came from
+cannot be deleted while the clone exists; `cosmo-snap delete work`
+deletes the clone and gives back what only it held. A clone cannot be
+rolled back to, cloned, or have a file renamed into it from another tree.
 
 ## What happens if the machine stops
 

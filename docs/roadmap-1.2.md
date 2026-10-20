@@ -185,7 +185,7 @@ superblock, so it is atomic and survives a crash), plus a writable clone
 for inspection. Absorbs CFS-8 (rollback, clones), CFS-3 (snapshot ids
 never reused, which rollback depends on).
 
-- [ ] **Acceptance:** `make test-snapshot`: on the installed system,
+- [x] **Acceptance:** `make test-snapshot`: on the installed system,
   snapshot the root, remove `/bin` and corrupt `/etc/rc`, roll back,
   reboot; the system boots and its files are the snapshot's; a crash
   between the rollback and the reboot (the harness kills QEMU) leaves
@@ -193,7 +193,9 @@ never reused, which rollback depends on).
   `cosmofs_check`. A writable clone of a snapshot is mounted, changed,
   and its changes are seen neither in the snapshot nor in the live tree,
   nor the live tree's in it; deleting the clone frees its blocks (the
-  checker's counts return to before).
+  checker's counts return to before). Done 2026-10-20, PRs #421 (format
+  12, identity, `cosmo-snap`), #422 (rollback) and #423 (clones); report
+  `docs/audit/2026-10-20-b1-snapshots-report.md`.
 
 ### B2 fsck and scrub as commands that repair
 

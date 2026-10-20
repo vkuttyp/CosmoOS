@@ -694,6 +694,7 @@ static const struct selftest tests[] = {
     { "cosmofs-rollback-atomic", selftest_cosmofs_rollback_atomic },
     { "cosmofs-rollback-record", selftest_cosmofs_rollback_record },
     { "cosmofs-rollback-shared", selftest_cosmofs_rollback_shared },
+    { "cosmofs-clone", selftest_cosmofs_clone },
     { "cosmofs-pool2", selftest_cosmofs_pool2 },
     { "cosmofs-v3", selftest_cosmofs_v3 },
     { "cosmofs-freelog-format", selftest_cosmofs_freelog_format },

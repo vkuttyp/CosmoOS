@@ -38,7 +38,7 @@ exact:
   its origin's tree, an origin cannot be deleted while cloned, a clone
   cannot be snapshotted, and a clone's deletion walks both trees.
 
-## First pull request: identity, the interface, sizes
+## First pull request (#421): identity, the interface, sizes
 
 As built:
 
@@ -124,7 +124,7 @@ release `make test-snapshot` PASS 32.5 s; `make analyze` clean; `make
 host-test` PASS. AArch64 debug `make test` PASS 157.6 s; release `make
 test-snapshot` PASS 43.0 s; `make analyze` clean.
 
-## Second pull request: rollback at the next mount
+## Second pull request (#422): rollback at the next mount
 
 As built:
 
@@ -227,3 +227,85 @@ Measured after the fixes: x86-64 debug `make test` PASS 164.4 s
 live again, 1 orphan of the target released); AArch64 debug PASS 168.8 s;
 release `make test-snapshot` PASS x86-64 83.2 s, AArch64 120.6 s; `make
 host-test` PASS; `make analyze` clean on both.
+## Third pull request (#423): writable clones
+
+As built:
+
+- `cosmofs_clone.c` (new). A clone is a snapshot-list entry with
+  `CFS_SNAP_F_CLONE` and `origin_id`; the open transaction's roots are
+  in `struct cfs_clone` (`fs->clones`), published into the entries by
+  each commit before it allocates (`cfs_clones_publish`). An operation on
+  a clone's vnode enters the clone under the mount's lock, swapping its
+  `imap_root`, `next_ino` and `inode_count` into the in-memory
+  superblock, and leaves it before the lock goes (`cfs_lock_tree_w`,
+  `cfs_unlock_tree` on create, symlink, unlink, rename, writepage(s),
+  truncate, evict and setattr); a commit from inside a clone leaves it
+  first. Vnodes in a clone carry its id as their tag; inode numbers are
+  masked with `CFS_INO_OF` on the inode and directory paths.
+- Exact ownership (CF20): a block a clone frees is kept when its
+  origin's tree reaches it (the origin's tree, walked once into a bit
+  set) and freed exempt otherwise (`cfs_clone_free`, from the deferred
+  free path). Deleting a clone walks its tree and frees every block the
+  origin's set lacks, in the transaction that removes the entry
+  (`cfs_clone_delete`). An origin with a clone cannot be deleted
+  (`-EBUSY`); a clone cannot be cloned or rolled back to (`-EINVAL`); a
+  clone is never the newest snapshot a live free is offered to, nor a
+  keeper of a deleted snapshot's deadlist.
+- `.snapshots/CLONE` resolves to the clone and is writable; a rename
+  between two trees is `-EXDEV`. Found on the way: `symlink` and `rename`
+  inside a read-only snapshot had no `-EROFS` guard (every other write
+  path had one); the tree guard every write path now takes covers both,
+  and `cosmofs-clone` asserts it.
+- `SNAP_CLONE` (`/dev/fsctl` op 9), `cosmo-snap clone NAME CLONE`;
+  `list` flags a clone `clone-of:<origin id>` and sizes it from its current roots; the
+  checker walks each clone's tree from its current roots
+  (`cfs_tree_roots`).
+- Tests: self-test `cosmofs-clone`; `test-snapshot` stage `clone` (a
+  clone of a root snapshot written apart from the snapshot and the live
+  tree, its origin refused deletion while it exists, `fsctl check` clean
+  after its writes and after its deletion).
+- Docs: design.md "Clones", CF20, testing.md, api.md, the guide's
+  Clones section, limitations.md. Backlog: CFS-8 narrowed to boot
+  environments (B4); CFS-21 (a file unlinked in a clone while open keeps
+  its blocks until the clone goes; clones are not snapshotted).
+
+Measured (2026-10-20):
+
+- The AGENTS matrix on this branch before #422's review fixes, every step
+  PASS: x86-64 host-test, fuzz, analyze, debug boots at `QEMU_SMP=1`, 2
+  and 4 (152, 152, 154 s), `test-smp2`, `test-chaos`, `test-harness-retry`,
+  release test; AArch64 host-test, analyze, debug boots (146.7, 166.8 s,
+  and 172 s at 4), `test-smp2`, `test-chaos`, `test-harness-retry`,
+  release test.
+- Rebased on the review fixes: x86-64 debug `make test` PASS 155.0 s
+  (`cosmofs-clone`: 33 blocks back when the clone was deleted, the
+  checker clean throughout); AArch64 debug PASS 160.5 s; release `make
+  test-snapshot` PASS on x86-64 (95.0 s) and AArch64 (139.2 s), every
+  stage -- install, identity, rollback, crash, clone; `make analyze` clean;
+  `make host-test` PASS.
+
+### Review of the third pull request (#423, 2026-10-20)
+
+Qodo and Codex (one of them Codex's security review):
+
+- `fsync` on a file in a clone, or in a snapshot, wrote its inode
+  through the live tree's inode map: `cfs_vnode_sync` took the plain
+  lock, and this pull request's masking of tagged inode numbers turned
+  the vnode's number into the live inode's. A reader of a snapshot could
+  replace a live inode, the root directory's included. Fixed: every
+  write path takes `cfs_lock_tree_w`, which enters the vnode's clone or
+  refuses (`-EROFS`; `fsync` of a snapshot file writes nothing and
+  returns 0), and `cfs_inode_write` refuses a tagged number whose tree
+  is not the one entered. `cosmofs-clone` fsyncs a clone file and a
+  snapshot file and checks the live file of the same number, also after
+  a remount. With the old `cfs_vnode_sync` and without the guard (a
+  throwaway worktree, x86-64 debug boot) it fails at that check:
+  `read_matches(ENG "/a", "live2", 5)`.
+- A write racing a clone's deletion could fall through to the live
+  tree: the tree is now decided under the same hold that enters it.
+- A clone deletion that cannot build its origin's set fails before the
+  list is copied, leaving the mount writable.
+
+Measured after the fixes: x86-64 debug `make test` PASS 154.4 s; AArch64
+debug PASS 169.1 s; release `make test-snapshot` PASS x86-64 95.1 s,
+AArch64 138.8 s; `make analyze` clean on both.

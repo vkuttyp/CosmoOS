@@ -590,6 +590,11 @@ bool cfs_orphan_named(const struct cfs *fs, uint64_t ino)
  */
 bool cfs_orphan_reserve(struct cfs *fs)
 {
+    /* The orphan record is the live tree's. A clone's unlinked-while-open
+     * inode is not recorded: its blocks are the clone's, and deleting the
+     * clone walks its whole tree, names or not (design.md, "Clones"). */
+    if (fs->cur_clone != NULL)
+        return true;
     if (fs->nr_orphans < fs->orphan_cap)
         return true;
     unsigned cap = fs->orphan_cap ? fs->orphan_cap * 2 : 8;
@@ -604,6 +609,8 @@ bool cfs_orphan_reserve(struct cfs *fs)
 /* Cannot fail: the caller reserved the room. */
 void cfs_orphan_add(struct cfs *fs, uint64_t ino)
 {
+    if (fs->cur_clone != NULL)
+        return;
     if (ino == 0 || cfs_orphan_named(fs, ino))
         return;
     if (fs->nr_orphans == fs->orphan_cap) {
@@ -618,6 +625,8 @@ void cfs_orphan_add(struct cfs *fs, uint64_t ino)
 
 void cfs_orphan_remove(struct cfs *fs, uint64_t ino)
 {
+    if (fs->cur_clone != NULL)
+        return;
     for (unsigned i = 0; i < fs->nr_orphans; i++) {
         if (fs->orphans[i] != ino)
             continue;
@@ -629,6 +638,12 @@ void cfs_orphan_remove(struct cfs *fs, uint64_t ino)
 
 void cfs_free_block_deferred(struct cfs *fs, uint64_t blk)
 {
+    /* A clone's frees are not the live tree's: no snapshot of the live
+     * tree is asked about them (design.md, "Clones"). */
+    if (fs->cur_clone != NULL) {
+        cfs_clone_free(fs, blk);
+        return;
+    }
     if (!cfs_dva_valid(fs, blk))
         return;
     if (fs->nr_pending == fs->pending_cap) {
@@ -753,6 +768,7 @@ int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uin
  * allocated is exactly what it is looking for. */
 int cfs_inode_read_raw(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
 {
+    ino = CFS_INO_OF(ino);   /* a clone's vnode carries its tag (design.md, "Clones") */
     /* The same range the ordinary read accepts: numbers 1 to next_ino-1
      * have been handed out, and the two readers must agree about which
      * numbers exist or the check would ask about a slot no lookup can. */
@@ -769,6 +785,7 @@ int cfs_inode_read_raw(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
 
 int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
 {
+    ino = CFS_INO_OF(ino);
     if (ino == 0 || ino >= fs->sb.next_ino)
         return -ENOENT;
     struct cfs_buf *ib;
@@ -784,6 +801,17 @@ int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
 
 int cfs_inode_write(struct cfs *fs, uint64_t ino, const struct cfs_inode *in)
 {
+    /* A tagged number names one tree: it is written only while that tree
+     * is the one entered. An untagged one is the entered tree's own. A
+     * snapshot's vnode, or a clone's written outside its clone, would
+     * otherwise land on the live inode with the same number. */
+    unsigned tag = CFS_SNAP_TAG(ino);
+    if (tag != 0 && (fs->cur_clone == NULL || fs->cur_clone->id != tag)) {
+        kerror("cosmofs: inode %llu of tree %u written outside that tree; refused",
+               (unsigned long long)CFS_INO_OF(ino), tag);
+        return -EROFS;
+    }
+    ino = CFS_INO_OF(ino);
     struct cfs_buf *ib;
     int rc = inode_block(fs, ino, true, true, &ib);
     if (rc)
@@ -1586,7 +1614,11 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
      * so every record would be a leak nobody could see.
      */
     bool record_frees = fs->sb.version >= 9;
-    int rc = 0;
+    /* The clones' roots into their entries, on a copy of the list: before
+     * anything below allocates past the fixpoint. */
+    int rc = cfs_clones_publish(fs);
+    if (rc)
+        return rc;
     struct cfs_res res = { .blk = NULL, .n = 0, .used = 0 };
     bool *held = NULL;
     unsigned appended = 0;   /* deadlist entries this attempt added: a retry would add them again */
@@ -1811,7 +1843,15 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
 
 int cfs_commit(struct cfs *fs)
 {
-    return cfs_commit_ex(fs, NULL);
+    /* A commit publishes the live tree's roots and every clone's: an
+     * operation inside a clone that commits (fsync) leaves it first. */
+    struct cfs_clone *c = fs->cur_clone;
+    if (c != NULL)
+        cfs_clone_leave(fs);
+    int rc = cfs_commit_ex(fs, NULL);
+    if (c != NULL)
+        cfs_clone_enter(fs, c);
+    return rc;
 }
 
 /* Write back every dirty page of every cached regular file. Called with
@@ -2814,6 +2854,7 @@ static void cfs_destroy(struct cfs *fs)
     kfree(fs->pending_free);
     kfree(fs->pending_exempt);
     kfree(fs->orphans);
+    cfs_clones_free(fs);
     cfs_members_free(fs);
     if (fs->pool)
         pool_close(fs->pool);
@@ -2848,6 +2889,7 @@ static void cfs_reset_root(struct cfs *fs)
     fs->nr_orphans = 0;
     fs->first_dirty_ns = 0;
     fs->failed = 0;   /* the attempt is abandoned, not the filesystem */
+    cfs_clones_free(fs);   /* read again from the root about to be loaded */
     /* The other root may describe a different set of members; the pool
      * keeps its devices, the table is read again. */
     cfs_members_free(fs);
@@ -2894,6 +2936,9 @@ static int load_root(struct cfs *fs, struct vnode **root)
         fs->snap_count = n;
     if (n)
         kinfo("cosmofs: %u snapshot(s)", n);
+    rc = cfs_clones_load(fs);
+    if (rc)
+        return rc;
     /*
      * And what the last root still owed: inodes unlinked while something
      * held them, whose eviction the crash or the forced unmount threw

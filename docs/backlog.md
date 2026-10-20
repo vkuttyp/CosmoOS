@@ -36,7 +36,7 @@ Open lines (struck lines are not counted):
 | Block devices | 3 | 0 | 2 | 3 | 8 |
 | Boot chain and verified boot | 0 | 5 | 2 | 1 | 8 |
 | Build and tooling | 0 | 2 | 0 | 4 | 6 |
-| cosmofs and storage | 5 | 1 | 7 | 6 | 19 |
+| cosmofs and storage | 5 | 1 | 7 | 7 | 20 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 3 | 0 | 2 | 11 | 16 |
 | Linux personality | 6 | 0 | 11 | 6 | 23 |
@@ -52,7 +52,7 @@ Open lines (struck lines are not counted):
 | Commands | 0 | 0 | 4 | 1 | 5 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **40** | **21** | **49** | **89** | **199** |
+| **all** | **40** | **21** | **49** | **90** | **200** |
 
 ## Block devices
 
@@ -94,7 +94,7 @@ Open lines (struck lines are not counted):
 - **CFS-5** correctness, S. `/dev/blkctl`'s mounted check does not see the other members of a mounted multi-device pool.
 - **CFS-6** correctness, M. CF17 abandons the transaction (`cfs_fail`) for failures a retry could survive; `extents_store` and `inode_sync` should allocate and write first so they fail cleanly.
 - **CFS-7** security, M. Metadata is checksummed, not authenticated: a forger can recompute CRC32C; a keyed `csum_algo` would close it.
-- **CFS-8** usability, M. Snapshots cannot be rolled back to, cloned writable or booted as environments from the running system.
+- **CFS-8** usability, M. Snapshots cannot be booted as environments (roadmap 1.2 B4). Rollback to a snapshot and writable clones are done by B1 (`cosmo-snap rollback`, `cosmo-snap clone`; CF19, CF20).
 - **CFS-9** usability, M. Mirrors: no device replacement, no resilvering of a member that missed commits, no hot spares.
 - **CFS-10** usability, M. A file is capped at 516128 blocks (64516 encrypted) by the one-level checksum index (`-EFBIG`).
 - **CFS-11** usability, S. Scrub's `-EIO` discards the counts fsctl would report.
@@ -107,6 +107,7 @@ Open lines (struck lines are not counted):
 - **CFS-18** usability, S. No scheduled snapshots (taken on a timer and pruned by age); `cosmo-snap` is run by hand (out of B1's scope).
 - **CFS-19** usability, M. No quotas: neither per snapshot nor per directory tree (out of B1's scope).
 - **CFS-20** nice-to-have, S. A rollback's switch rebuilds every deadlist into new blocks while the old chains stay allocated until its commit, so a nearly full pool with long deadlists can refuse a rollback that would need no net space; the switch is abandoned and logged and the record stays pending (Qodo on #422).
+- **CFS-21** nice-to-have, S. A file unlinked inside a writable clone while it is open is not on an orphan record (the live tree's is not the clone's), so its blocks stay the clone's until the clone is deleted; a clone cannot be snapshotted or cloned (B1's rules, design.md "Clones").
 
 ## Documentation
 

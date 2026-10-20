@@ -31,6 +31,12 @@ COSMOFS_STOP=1, which stops the switch after its blocks and before its
 root; the kill; then the ordinary kernel again, which redoes it); and
 after the hold is released (the kill once the boot completed).
 
+Stage `clone`: a writable clone of a snapshot of the root, written
+(a file changed, a directory made, a file removed); neither the snapshot
+nor the live tree sees it, nor it the live tree's change; the origin is
+refused deletion while the clone exists; `fsctl check` is clean before
+and after the clone's deletion, and after the origin's.
+
 Each boot is QEMU through scripts/qemu-run.sh, driven at the shell's
 prompt as test-install drives it (tests/boot/install_test.py). Exit 0 PASS,
 1 FAIL.
@@ -329,6 +335,51 @@ def stage_crash(args, results, inst):
     results.append("crash: PASS (" + "; ".join(notes) + "; fsctl check clean after each)")
 
 
+def stage_clone(args, results, inst):
+    b = boot_disk("clone", args, inst)
+    try:
+        rid = root_id(b)
+        b.run("mkdir -p /cl/gone && echo orig > /cl/f && echo bye > /cl/gone/g && sync")
+        need(b.status("cosmo-snap create cl-origin", "o"), r"^o=0$", "cosmo-snap create cl-origin")
+        out = b.status("cosmo-snap clone cl-origin work", "c")
+        need(out, r"^c=0$", "cosmo-snap clone cl-origin work")
+        need(out, r"^cosmo-snap: clone work of cl-origin \(id \d+\) is at /\.snapshots/work$",
+             "cosmo-snap clone cl-origin work")
+        out = b.status("echo changed > /.snapshots/work/cl/f && mkdir /.snapshots/work/cl/new && "
+                       "rm -r /.snapshots/work/cl/gone && echo live > /cl/live && sync", "w")
+        need(out, r"^w=0$", "writing into the clone")
+        out = b.run("cat /cl/f /.snapshots/cl-origin/cl/f /.snapshots/work/cl/f; "
+                    "for p in /cl/new /.snapshots/cl-origin/cl/new /.snapshots/work/cl/new /.snapshots/work/cl/gone "
+                    "/.snapshots/cl-origin/cl/gone /.snapshots/work/cl/live; do "
+                    "if [ -e $p ]; then echo \"has $p\"; else echo \"no $p\"; fi; done")
+        lines = [l for l in out.split("\n") if l in ("orig", "changed")]
+        if lines != ["orig", "orig", "changed"]:
+            raise Fail(f"clone stage: /cl/f in live, origin, clone read {lines}, expected orig, orig, changed")
+        for want in ("no /cl/new", "no /.snapshots/cl-origin/cl/new", "has /.snapshots/work/cl/new",
+                     "no /.snapshots/work/cl/gone", "has /.snapshots/cl-origin/cl/gone",
+                     "no /.snapshots/work/cl/live"):
+            need(out, rf"^{re.escape(want)}$", "the clone's isolation")
+        out = b.status("cosmo-snap list", "l")
+        _, _, _, _, flags = list_entry(out, "work")
+        if not flags.startswith("clone-of:"):
+            raise Fail(f"cosmo-snap list: work has flags {flags!r}, expected clone-of:")
+        check_clean(b, rid, "the clone's writes")
+        out = b.status("cosmo-snap delete cl-origin", "do")
+        need(out, r"^do=1$", "deleting a clone's origin")
+        need(b.status("cosmo-snap delete work", "dw"), r"^dw=0$", "cosmo-snap delete work")
+        check_clean(b, rid, "the clone's deletion")
+        need(b.status("cosmo-snap delete cl-origin", "do2"), r"^do2=0$", "deleting the origin after its clone")
+        check_clean(b, rid, "the origin's deletion")
+        rc = b.finish("poweroff")
+        if rc != EXIT_SUCCESS:
+            raise Fail(f"clone boot: QEMU exit code {rc}")
+    except Exception:
+        b.kill()
+        raise
+    results.append("clone: PASS (a writable clone apart from its snapshot and the live tree; its origin kept while "
+                   "it exists; fsctl check clean after its writes and its deletion)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
@@ -337,7 +388,7 @@ def main():
     ap.add_argument("--key", required=True, help="the build's signing key (the crash stage signs its swapped kernel)")
     ap.add_argument("--stop-kernel", required=True, help="kernel.elf built COSMOFS_STOP=1")
     ap.add_argument("--stop-boot-tar", required=True, help="boot.tar of that build")
-    ap.add_argument("--stages", default="identity,rollback,crash")
+    ap.add_argument("--stages", default="identity,rollback,crash,clone")
     args = ap.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         ap.error(f"--timeout must be a finite number of seconds above 0, not {args.timeout}")
@@ -354,6 +405,8 @@ def main():
             stage_rollback(args, results, inst)
         if "crash" in stages:
             stage_crash(args, results, inst)
+        if "clone" in stages:
+            stage_clone(args, results, inst)
     except Fail as e:
         for r in results:
             print(f"test-snapshot: {r}")
