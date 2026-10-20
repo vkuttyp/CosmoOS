@@ -304,7 +304,10 @@ boot, release included.
 | `COSMO_FSCTL_SNAP_CREATE` (4) | one `struct cosmo_fsctl_snap`: the snapshot `name` taken (id, uuid, generation); raises a format-11 pool to 12 | as CHECK; `-EOPNOTSUPP` below format 11 or for a filesystem without `snapctl`; `-EEXIST`; `-EINVAL`/`-ENAMETOOLONG` for a bad name; `-EROFS` (a snapshot's uuid does not wait for a seeded entropy pool: `cfs_snapshot_new_uuid` makes it unique by checking the list) |
 | `COSMO_FSCTL_SNAP_LIST` (5) | one `struct cosmo_fsctl_snap_pool` (the format; a pending or held rollback), then `count` `struct cosmo_fsctl_snap` oldest first -- at most `COSMO_FSCTL_SNAP_PAGE` (1024), only those with an id above the command's `cursor`, so a full page is followed by one more from its last id -- with `referenced` and `unique` bytes (0 with `F_NO_SIZES`) | as CHECK; `-EIO` when a tree does not walk |
 | `COSMO_FSCTL_SNAP_DELETE` (6) | none (`count` 0) | as CREATE; `-ENOENT`; `-EBUSY` while anything inside it is in use |
-| `COSMO_FSCTL_SNAP_ROLLBACK` (7), `_CANCEL` (8), `_CLONE` (9), `COSMO_FSCTL_BOOT_OK` (10) | B1's later pull requests (`design.md`, "Format version 12"); `-EOPNOTSUPP` until then | |
+| `COSMO_FSCTL_SNAP_ROLLBACK` (7) | one `struct cosmo_fsctl_snap`: the safety snapshot taken (`pre-rollback-<seconds>`, or `name2` with `F_SAFETY_NAME`), flag `SAFETY`; a pending record names it and `name` (`design.md`, "Rollback") | as CREATE; `-ENOENT` for no such target; `-EINVAL` for a clone; `-EBUSY` while another is pending |
+| `COSMO_FSCTL_SNAP_CANCEL` (8) | none | `-ENOENT` when nothing is pending |
+| `COSMO_FSCTL_BOOT_OK` (10) | none; `total` is 1 when a hold was released, 0 when there was none | `-EROFS` on a read-only mount |
+| `COSMO_FSCTL_SNAP_CLONE` (9) | B1's third pull request; `-EOPNOTSUPP` until then | |
 
 Because `cosmofs_scrub` returns `-EIO` whenever `unrecoverable` is
 non-zero, and a failed command leaves no result, an operator never
@@ -312,14 +315,19 @@ receives a SCRUB record with `unrecoverable > 0`: the write fails with
 `-EIO` and the counts are only in the kernel log.
 
 ### `cosmo-snap(8)`
-`cosmo-snap [-m MOUNTPOINT] create NAME | list | delete NAME | diff A B`
+`cosmo-snap [-m MOUNTPOINT] create NAME | list | delete NAME | diff A B |
+rollback [--no-reboot] NAME | rollback --cancel`
 (`userland/system/cosmo-snap.c`): the SNAP operations against the mount
 at MOUNTPOINT (`/` by default), found in `fsctl`'s listing. `list` prints
 the pool's format and one row per snapshot (name, id, creation time in
 UTC, referenced and unique KiB, uuid, flags); `diff` walks the two trees
 under `.snapshots` (`-` is the live tree) and prints `+`, `-` or `M` and a
-path per difference, then a count. Exit status 0 done, 1 refused or
-failed, 2 usage.
+path per difference, then a count. `rollback` prints the safety
+snapshot's name and, for `/`, reboots through init (`kill(1, SIGTERM)`)
+unless `--no-reboot`; for another mount it says the rollback applies at
+that mount's next mount. Exit status 0 done, 1 refused or failed, 2
+usage. Init sends `BOOT_OK` to every snapshot-capable writable mount
+after `/etc/rc` exits 0 (`userland/init/init.c`, `boot_complete`).
 
 ### `fsctl(8)`
 `fsctl list`, `fsctl check <id> [--repair]`, `fsctl scrub <id>`. Ids are

@@ -596,10 +596,10 @@ unchanged.
 - **`int cosmofs_snapctl(struct mount *mnt, struct cosmofs_snap_req *req)`**
   Snapshots of one mount (roadmap 1.2 B1): CREATE (raising a format-11
   pool to 12), LIST (with sizes from a walk of every tree, or without),
-  DELETE (`-EBUSY` while anything inside is in use). `-EINVAL` for a
-  mount that is not a cosmofs, `-EROFS` for a write on a read-only mount,
-  `-EOPNOTSUPP` below format 11 and for the operations B1's later pull
-  requests add. Holds the mount's lock for the operation
+  DELETE (`-EBUSY` while anything inside is in use or a rollback keeps
+  it), ROLLBACK, CANCEL and BOOT_OK. `-EINVAL` for a mount that is not a
+  cosmofs, `-EROFS` for a write on a read-only mount, `-EOPNOTSUPP` below
+  format 11 and for CLONE until B1's third pull request. Holds the mount's lock for the operation
   (`docs/kernel-services/filesystem/cosmofs/design.md`, "Format version 12").
 - **`int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)`**
   `generation` (last committed), `free_blocks` (in-memory count, which

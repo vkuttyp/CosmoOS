@@ -265,6 +265,7 @@ enum cosmofs_corruption {
                                      * at a DIFFERENT pool block -- the case block_seen
                                      * cannot see (next-subsystem-fsck-unchecked.md) */
     COSMOFS_CORRUPT_SNAP_UUID,      /* v12: zero the uuid of the list head's first snapshot */
+    COSMOFS_CORRUPT_ROLLBACK_CRC,   /* v12: flip a byte of the rollback record's own checksum */
 };
 int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what);
 /* Test hook: where an inode's logical block actually lives, as a DVA;
@@ -294,6 +295,10 @@ uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of);
  * behind, for the raise to convert (design.md, "Format version 12"). */
 #if CONFIG_DEBUG
 void cosmofs_test_snap_no_raise(struct mount *mnt, bool on);
+/* Test hook: `left` more commits are published, the next is abandoned as
+ * if the machine stopped (armed false: off). The unmount then drops what
+ * is open, so the remount sees exactly the commits before the stop. */
+void cosmofs_test_commit_budget(struct mount *mnt, bool armed, unsigned left);
 #endif
 
 #if CONFIG_DEBUG

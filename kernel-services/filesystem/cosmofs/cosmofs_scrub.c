@@ -283,6 +283,9 @@ int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out)
     scrub_supers(fs, page, &st);
     scrub_alloc(fs, page, &st);
     scrub_snapshots(fs, page, &st);
+    /* Version 12's rollback record: metadata like the list. */
+    if (fs->sb.version >= 12 && fs->sb.rollback_root != 0)
+        scrub_meta(fs, fs->sb.rollback_root, CFS_KIND_ROLLBACK, page, &st);
     scrub_imap(fs, page, &st);
     mutex_unlock(&fs->lock);
     kfree(page);

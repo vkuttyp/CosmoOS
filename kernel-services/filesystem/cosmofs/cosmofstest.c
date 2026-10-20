@@ -5095,9 +5095,290 @@ bool selftest_cosmofs_snap_identity(const char **reason)
           (unsigned long long)c->id, (unsigned long long)id_b, (unsigned long long)(d->unique / 1024));
     return engine_unmount(bd, reason);
 }
+
+/* The pool's rollback state, from a listing without sizes. */
+static unsigned pool_flags_now(void)
+{
+    static struct cosmofs_snap_info info[16];
+    struct cosmofs_snap_req req = { .op = COSMOFS_SNAP_LIST, .out = info, .max = 16, .no_sizes = true };
+    if (cosmofs_snapctl(mount_of(ENG), &req) != 0)
+        return 0xFFFFu;
+    return req.pool_flags;
+}
+
+static uint32_t snap_flags_of(const char *name)
+{
+    static struct cosmofs_snap_info info[16];
+    struct cosmofs_snap_req req = { .op = COSMOFS_SNAP_LIST, .out = info, .max = 16, .no_sizes = true };
+    if (cosmofs_snapctl(mount_of(ENG), &req) != 0)
+        return 0xFFFFFFFFu;
+    const struct cosmofs_snap_info *s = info_named(info, req.count, name);
+    return s ? s->flags : 0xFFFFFFFFu;
+}
+
+static int rollback_req(const char *target, const char *safety, struct cosmofs_snap_info *out)
+{
+    struct cosmofs_snap_req req = { .op = COSMOFS_SNAP_ROLLBACK, .name = target, .name2 = safety, .out = out,
+                                    .max = out ? 1 : 0 };
+    return cosmofs_snapctl(mount_of(ENG), &req);
+}
+
+static bool remount_eng(struct blkdev *bd, const char **reason)
+{
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    return true;
+}
+
+/*
+ * Rollback (roadmap 1.2 B1; design.md, "Rollback"; CF19), on a pool that
+ * is not the root, where "the next mount" is an unmount and a mount.
+ *
+ * The request takes a safety snapshot and writes a pending record; while
+ * it is pending both snapshots are kept and a second request is refused;
+ * a cancel withdraws it. Applied at the mount: the live tree is the
+ * target's, what the old tree held is in the safety snapshot, a file
+ * written after the request is in neither and its blocks are free; the
+ * safety snapshot is held until BOOT_OK. The switch repaired the
+ * deadlists if deleting every snapshot afterwards leaves a filesystem the
+ * checker calls clean -- a block freed while live is `seen_not_alloc`, a
+ * block held for nobody is `alloc_not_seen` -- with the live files intact
+ * after a remount. A record whose own checksum is wrong is refused at the
+ * mount, named by the checker and removed by its repair.
+ */
+bool selftest_cosmofs_rollback(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 2048, reason))
+        return false;
+    static struct cosmofs_snap_info info[1];
+    static struct cosmofs_check_report rep;
+    static char big[32 * 4096];
+    uint64_t x = 0x2545F4914F6CDD1Dull;
+    for (unsigned i = 0; i < sizeof(big); i++) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        big[i] = (char)x;
+    }
+    unsigned n = 0;
+
+    CHECK(write_file(ENG "/a", "one", 3));
+    CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0);
+    CHECK(write_file(ENG "/dir/x", "ex", 2));
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "base", info, 1, &n) == 0);
+    CHECK(write_file(ENG "/a", "two", 3));
+    CHECK(vfs_unlink(NULL, ENG "/dir/x") == 0);
+    CHECK(write_file(ENG "/new", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+
+    /* Requested: pending, both snapshots kept, a second one refused. */
+    CHECK(rollback_req("nope", NULL, info) == -ENOENT);
+    CHECK(rollback_req("base", NULL, info) == 0);
+    char safety1[COSMOFS_SNAP_NAME_MAX + 1];
+    strlcpy(safety1, info[0].name, sizeof(safety1));
+    CHECK(strncmp(safety1, "pre-rollback-", 13) == 0);
+    CHECK(pool_flags_now() == COSMOFS_POOL_PENDING);
+    CHECK(snap_flags_of("base") == COSMOFS_SNAP_I_TARGET);
+    CHECK(snap_flags_of(safety1) == COSMOFS_SNAP_I_SAFETY);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "base", NULL, 0, NULL) == -EBUSY);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, safety1, NULL, 0, NULL) == -EBUSY);
+    CHECK(rollback_req("base", NULL, info) == -EBUSY);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+
+    /* Withdrawn: the record goes, the safety snapshot stays and is an
+     * ordinary snapshot again. */
+    CHECK(snapctl(COSMOFS_SNAP_CANCEL, NULL, NULL, 0, NULL) == 0);
+    CHECK(snapctl(COSMOFS_SNAP_CANCEL, NULL, NULL, 0, NULL) == -ENOENT);
+    CHECK(pool_flags_now() == 0 && snap_flags_of(safety1) == 0);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, safety1, NULL, 0, NULL) == 0);
+
+    /* Requested again, with the safety snapshot named; then a file
+     * written after the request, which is in neither snapshot. */
+    CHECK(rollback_req("base", "keep-me", info) == 0);
+    CHECK(strcmp(info[0].name, "keep-me") == 0);
+    CHECK(write_file(ENG "/after", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+
+    /* The mount applies it. */
+    CHECK(remount_eng(bd, reason));
+    CHECK(read_matches(ENG "/a", "one", 3));
+    CHECK(read_matches(ENG "/dir/x", "ex", 2));
+    struct cosmo_stat st;
+    CHECK(vfs_stat(NULL, ENG "/new", &st) == -ENOENT);
+    CHECK(vfs_stat(NULL, ENG "/after", &st) == -ENOENT);
+    CHECK(read_matches(ENG "/.snapshots/keep-me/a", "two", 3));
+    CHECK(read_matches(ENG "/.snapshots/keep-me/new", big, sizeof(big)));
+    CHECK(vfs_stat(NULL, ENG "/.snapshots/keep-me/after", &st) == -ENOENT);
+    CHECK(pool_flags_now() == COSMOFS_POOL_HELD);
+    CHECK(snap_flags_of("keep-me") == COSMOFS_SNAP_I_HELD);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "keep-me", NULL, 0, NULL) == -EBUSY);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+
+    /* The boot completed: the hold goes. */
+    struct cosmofs_snap_req ok = { .op = COSMOFS_SNAP_BOOT_OK };
+    CHECK(cosmofs_snapctl(mount_of(ENG), &ok) == 0 && ok.total == 1);
+    CHECK(cosmofs_snapctl(mount_of(ENG), &ok) == 0 && ok.total == 0);
+    CHECK(pool_flags_now() == 0);
+
+    /* Every snapshot gone: nothing live was freed, nothing is held for
+     * nobody. */
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "keep-me", NULL, 0, NULL) == 0);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "base", NULL, 0, NULL) == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    if (!rep.clean) {
+        kinfo("selftest: cosmofs-rollback: after the deletions: %llu leaked, %llu free-in-use",
+              (unsigned long long)rep.alloc_not_seen.count, (unsigned long long)rep.seen_not_alloc.count);
+        CHECK(rep.clean);
+    }
+    CHECK(remount_eng(bd, reason));
+    CHECK(read_matches(ENG "/a", "one", 3));
+    CHECK(read_matches(ENG "/dir/x", "ex", 2));
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+
+    /* A record that does not check out: refused at the mount, named by
+     * the checker, removed by its repair. */
+    CHECK(write_file(ENG "/a", "three", 5));
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "c", info, 1, &n) == 0);
+    CHECK(write_file(ENG "/a", "four", 4));
+    CHECK(rollback_req("c", NULL, info) == 0);
+    uint64_t rec = 0;
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ROLLBACK_CRC, 0, &rec) == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(remount_eng(bd, reason));
+    CHECK(read_matches(ENG "/a", "four", 4));            /* not applied */
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && !rep.clean);
+    CHECK(rep.rollback_record.count == 1 && rep.rollback_record.name[0] == rec);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 && rep.rollback_record.repaired == 1);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+    CHECK(pool_flags_now() == 0);
+    kinfo("selftest: cosmofs-rollback: pending, cancelled, applied at the mount (the old tree in the safety "
+          "snapshot, a later file in neither), held until BOOT_OK, every snapshot deleted with the filesystem "
+          "clean; a bad record refused, named and repaired");
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * CF19's same-transaction rule: a rollback's record and its safety
+ * snapshot reach the disk in one commit. The machine is stopped at every
+ * commit boundary the request crosses (cosmofs_test_commit_budget) and
+ * the filesystem mounted again: each time there is either neither or
+ * both -- never a record naming a safety snapshot that is not there
+ * (`rollback_record`, which tools/b1-rollback-probe.py --old produces).
+ */
+bool selftest_cosmofs_rollback_atomic(const char **reason)
+{
+    static struct cosmofs_snap_info info[1];
+    static struct cosmofs_check_report rep;
+    unsigned seen_neither = 0, seen_both = 0;
+    for (unsigned budget = 0; budget < 4; budget++) {
+        struct blkdev *bd;
+        if (!engine_mount(&bd, 512, reason))
+            return false;
+        unsigned n;
+        CHECK(write_file(ENG "/a", "one", 3));
+        CHECK(snapctl(COSMOFS_SNAP_CREATE, "base", info, 1, &n) == 0);
+        CHECK(write_file(ENG "/a", "two", 3));   /* open work: the request commits it first */
+        cosmofs_test_commit_budget(mount_of(ENG), true, budget);
+        int rc = rollback_req("base", "safe", info);
+        cosmofs_test_commit_budget(mount_of(ENG), false, 0);
+        cosmofs_test_discard_on_unmount(mount_of(ENG), true);
+        CHECK(vfs_umount(ENG) == 0);
+        CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+        cosmofs_test_set_writeback(mount_of(ENG), false);
+        /* The mount applies a pending rollback, so "both" shows as a
+         * switched tree with the safety snapshot held. */
+        unsigned pf = pool_flags_now();
+        uint32_t sf = snap_flags_of("safe");
+        bool both = pf == COSMOFS_POOL_HELD && sf == COSMOFS_SNAP_I_HELD;
+        bool neither = pf == 0 && sf == 0xFFFFFFFFu;
+        kinfo("selftest: cosmofs-rollback-atomic: stopped after %u commit(s): request %d, pool flags %u, "
+              "safety flags 0x%x", budget, rc, pf, sf);
+        CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+        CHECK(rep.rollback_record.count == 0 && rep.hold.count == 0);
+        CHECK(rep.clean);
+        CHECK(both || neither);
+        seen_both += both;
+        seen_neither += neither;
+        CHECK(engine_unmount(bd, reason));
+    }
+    /* Not vacuous: some stop fell before the commit and some after. */
+    CHECK(seen_neither > 0 && seen_both > 0);
+    kinfo("selftest: cosmofs-rollback-atomic: %u stop(s) left neither, %u left both", seen_neither, seen_both);
+    return true;
+}
+
+/*
+ * The rollback record's parse and checksum, on bytes alone: a sealed
+ * record of either state parses back field for field; every single byte
+ * changed anywhere in it is refused (the crc's, or a field's under it);
+ * a wrong magic, version or state is refused even with a crc that
+ * matches it.
+ */
+bool selftest_cosmofs_rollback_record(const char **reason)
+{
+    struct cfs_rollback r, back;
+    memset(&r, 0, sizeof(r));
+    r.state = CFS_ROLLBACK_PENDING;
+    for (unsigned i = 0; i < 16; i++) {
+        r.target_uuid[i] = (uint8_t)(0x10 + i);
+        r.safety_uuid[i] = (uint8_t)(0xA0 + i);
+    }
+    r.target_id = 7;
+    r.safety_id = 9;
+    r.generation = 0x123456789ull;
+    r.requested_ns = 0xFEDCBA9876543210ull;
+    cfs_rollback_seal(&r);
+    CHECK(r.magic == CFS_ROLLBACK_MAGIC && r.version == 1 && r.crc != 0);
+    CHECK(cfs_rollback_parse(&r, &back) == 0);
+    CHECK(memcmp(&r, &back, sizeof(r)) == 0);
+
+    /* Each byte, each of eight flips. */
+    unsigned refused = 0;
+    for (unsigned at = 0; at < sizeof(r); at++)
+        for (unsigned bit = 0; bit < 8; bit++) {
+            uint8_t raw[sizeof(r)];
+            memcpy(raw, &r, sizeof(r));
+            raw[at] ^= (uint8_t)(1u << bit);
+            CHECK(cfs_rollback_parse(raw, &back) == -EIO);
+            refused++;
+        }
+
+    /* Wrong in meaning, right in checksum. */
+    struct cfs_rollback bad = r;
+    bad.magic ^= 1u;
+    bad.crc = 0;
+    bad.crc = crc32c(&bad, sizeof(bad));
+    CHECK(cfs_rollback_parse(&bad, &back) == -EIO);
+    bad = r;
+    bad.version = 2;
+    bad.crc = 0;
+    bad.crc = crc32c(&bad, sizeof(bad));
+    CHECK(cfs_rollback_parse(&bad, &back) == -EIO);
+    static const uint32_t states[] = { 0, 3, 0xFFFFFFFFu };
+    for (unsigned i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+        bad = r;
+        bad.state = states[i];
+        cfs_rollback_seal(&bad);
+        CHECK(cfs_rollback_parse(&bad, &back) == -EIO);
+    }
+    /* HELD is the other state a record may be in. */
+    bad = r;
+    bad.state = CFS_ROLLBACK_HELD;
+    cfs_rollback_seal(&bad);
+    CHECK(cfs_rollback_parse(&bad, &back) == 0 && back.state == CFS_ROLLBACK_HELD);
+    kinfo("selftest: cosmofs-rollback-record: %u single-bit changes over %u bytes refused; wrong magic, version "
+          "and state refused under a matching crc", refused, (unsigned)sizeof(r));
+    return true;
+}
 #else
 bool selftest_cosmofs_badmap(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_snapshot(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_snapshot_remount(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_snap_identity(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_rollback(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_rollback_atomic(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_rollback_record(const char **reason) { (void)reason; return true; }
 #endif

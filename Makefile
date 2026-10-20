@@ -274,11 +274,16 @@ test-install: $(IMAGE)
 # Roadmap 1.2 B1's acceptance test (tests/boot/snapshot_test.py,
 # docs/kernel-services/filesystem/cosmofs/testing.md, "test-snapshot"):
 # snapshots of the installed root from the shell -- identity, diff, sizes,
-# ids never reused across a remount. (CI: BUILD=release, in the install job.)
+# ids never reused across a remount; a rollback of a broken root, and the
+# three crash points, one of them through a sibling kernel built
+# COSMOFS_STOP=1 (as test-crash builds CRASH_TEST=1). (CI: BUILD=release,
+# in the install job.)
 test-snapshot: $(IMAGE)
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) COSMOFS_STOP=1 OUT=$(OUT)-stop image
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/snapshot_test.py --image $(IMAGE) --workdir $(OUT)/test-snapshot \
-		--timeout $(BOOT_TIMEOUT)
+		--timeout $(BOOT_TIMEOUT) --key $(MODSIGN_KEY) \
+		--stop-kernel $(OUT)-stop/kernel/kernel.elf --stop-boot-tar $(OUT)-stop/boot.tar
 
 # Shell completeness S7's acceptance test (tests/boot/upgrade_test.py,
 # docs/userland/testing.md, "test-upgrade"): the published v1.0.3, fetched

@@ -982,8 +982,11 @@ static int snap_max_id(struct cfs *fs, uint64_t *max, unsigned *live)
  *
  * Everything that can fail without having changed anything runs first;
  * past the first change a failure abandons the transaction (CF17).
+ * `reserved`, when not NULL, is a uuid already handed out for the
+ * snapshot this raise is for (a rollback's safety snapshot, drawn before
+ * the list had any): no converted entry is given it.
  */
-static int snap_raise(struct cfs *fs)
+static int snap_raise(struct cfs *fs, const uint8_t *reserved)
 {
     if (fs->sb.version >= 12)
         return 0;
@@ -1003,24 +1006,24 @@ static int snap_raise(struct cfs *fs)
         return rc ? rc : -EIO;
     }
     uint64_t max_id = fs->snap_max_id;
+    /* Unique among those this raise has given so far and the reserved
+     * one; the list has none yet (it is version 11's). Kept apart from
+     * `all`, which the helper does not read. */
+    uint8_t (*given)[16] = kmalloc((size_t)(n + 1) * 16u, 0);
+    if (given == NULL) {
+        kfree(all);
+        return -ENOMEM;
+    }
+    unsigned ngiven = 0;
+    if (reserved != NULL)
+        memcpy(given[ngiven++], reserved, 16);
     for (unsigned i = 0; i < n; i++) {
         if (all[i].id > max_id)
             max_id = all[i].id;
-        /* Unique among those this raise has given so far; the list has
-         * none yet (it is version 11's). Copied out, since `all` is the
-         * array the helper reads. */
-        uint8_t u[16];
-        uint8_t (*given)[16] = kmalloc((size_t)(i ? i : 1) * 16u, 0);
-        if (given == NULL) {
-            kfree(all);
-            return -ENOMEM;
-        }
-        for (unsigned k = 0; k < i; k++)
-            memcpy(given[k], all[k].uuid, 16);
-        cfs_snapshot_new_uuid(fs, u, (const uint8_t (*)[16])given, i);
-        kfree(given);
-        memcpy(all[i].uuid, u, 16);
+        cfs_snapshot_new_uuid(fs, given[ngiven], (const uint8_t (*)[16])given, ngiven);
+        memcpy(all[i].uuid, given[ngiven++], 16);
     }
+    kfree(given);
 
     /* From here the transaction holds the change. The old chain is named
      * by the superblock alone, which no snapshot preserves: exempt. */
@@ -1133,6 +1136,17 @@ static int snaplist_insert(struct cfs *fs, const struct cfs_snapshot *s)
  */
 int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct cfs_snapshot *out)
 {
+    return cfs_snapshot_create_ex(fs, name, identity, true, NULL, out);
+}
+
+/* `commit` false: the snapshot is in the open transaction and the caller
+ * commits it, with whatever else that transaction must carry -- a
+ * rollback's record and its safety snapshot are one commit (CF19). The
+ * open work before it is still committed first, so the snapshot names a
+ * durable tree. */
+int cfs_snapshot_create_ex(struct cfs *fs, const char *name, bool identity, bool commit, const uint8_t *uuid,
+                           struct cfs_snapshot *out)
+{
     if (name == NULL || name[0] == '\0' || strlen(name) > CFS_SNAP_NAME_MAX)
         return -EINVAL;
     if (strchr(name, '/') != NULL)
@@ -1170,7 +1184,7 @@ int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct 
     /* The raise, when this is the first snapshot with identity; it
      * rewrites the list as a copy, so the copy below is a no-op then. */
     if (raise) {
-        rc = snap_raise(fs);
+        rc = snap_raise(fs, uuid);
         if (rc)
             return rc;
         if (fs->snap_max_id > max_id)
@@ -1196,8 +1210,12 @@ int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct 
     s.inode_count = fs->sb.inode_count;
     s.created_ns = clock_realtime_ns();
     strlcpy(s.name, name, sizeof(s.name));
-    if (fs->sb.version >= 12)
-        cfs_snapshot_new_uuid(fs, s.uuid, NULL, 0);
+    if (fs->sb.version >= 12) {
+        if (uuid != NULL)
+            memcpy(s.uuid, uuid, sizeof(s.uuid));   /* the caller drew it: a rollback names it first */
+        else
+            cfs_snapshot_new_uuid(fs, s.uuid, NULL, 0);
+    }
 
     rc = snaplist_insert(fs, &s);
     if (rc == 0)
@@ -1211,7 +1229,7 @@ int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct 
     fs->snap_max_id = s.id;
     if (out != NULL)
         *out = s;
-    return snap_commit(fs, 0);
+    return commit ? snap_commit(fs, 0) : 0;
 }
 
 struct clear_ctx {
@@ -1274,6 +1292,15 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
     if (!found) {
         kfree(remaining);
         return -ENOENT;
+    }
+
+    /* A rollback's snapshots are kept while it needs them (CF19): the
+     * target and the safety snapshot while it is pending, the safety
+     * snapshot -- the tree the live one was rolled back from -- until the
+     * boot after the rollback completes. */
+    if (cfs_rollback_protects(fs, &doomed)) {
+        kfree(remaining);
+        return -EBUSY;
     }
 
     /* The name exists and the transaction is about to change the list,
@@ -1500,6 +1527,87 @@ int cfs_snapshot_walk_held(struct cfs *fs, const struct cfs_snapshot *s, void (*
         }
         at = d->next;
         cfs_buf_put(fs, db);
+    }
+    return rc;
+}
+
+/*
+ * Take off every deadlist each block for which `live` answers true, and
+ * report how many entries went (design.md, "Rollback").
+ *
+ * A deadlist entry is a block the allocator gets back when its snapshot
+ * goes; a rollback makes some of those live again -- the target's tree
+ * is the live tree now, and the live tree had released them -- so they
+ * must not stay on any list. Each list is rebuilt from the entries kept,
+ * on a copy of the snapshot list, its old chain freed exempt. Allocates:
+ * only before a commit's fixpoint, which is where the mount's switch
+ * calls it.
+ */
+int cfs_snapshot_deadlists_filter(struct cfs *fs, bool (*live)(void *arg, uint64_t dva), void *arg,
+                                  uint64_t *dropped)
+{
+    *dropped = 0;
+    if (fs->sb.snap_root == 0)
+        return 0;
+    int rc = snap_cow(fs, NULL);
+    if (rc)
+        return rc;
+    uint32_t kind = cfs_snaplist_kind(fs);
+    unsigned slots = cfs_snaplist_slots(fs);
+    uint64_t blkno = fs->sb.snap_root;
+    unsigned guard = 0;
+    while (blkno && rc == 0) {
+        if (guard++ > CFS_SNAP_MAX_CHAIN)
+            return -EIO;
+        struct cfs_buf *b;
+        rc = cfs_buf_get(fs, blkno, kind, &b);
+        if (rc)
+            break;
+        uint64_t next = cfs_snaplist_next(b);
+        for (unsigned i = 0; i < slots && rc == 0; i++) {
+            struct cfs_snapshot s;
+            if (!cfs_snaplist_get(fs, b, i, &s) || s.deadlist == 0)
+                continue;
+            uint64_t head = 0, at = s.deadlist;
+            unsigned dguard = 0;
+            while (at && rc == 0) {
+                if (dguard++ > CFS_SNAP_MAX_CHAIN) {
+                    rc = -EIO;
+                    break;
+                }
+                struct cfs_buf *db;
+                rc = cfs_buf_get(fs, at, CFS_KIND_DEADLIST, &db);
+                if (rc)
+                    break;
+                struct cfs_dead_block *d = dead_payload(db);
+                uint64_t dnext = d->next;
+                uint64_t n = d->count < CFS_DEAD_PER_BLOCK ? d->count : CFS_DEAD_PER_BLOCK;
+                uint64_t *blks = n ? kmalloc((size_t)n * sizeof(*blks), 0) : NULL;
+                if (n && blks == NULL) {
+                    cfs_buf_put(fs, db);
+                    rc = -ENOMEM;
+                    break;
+                }
+                memcpy(blks, d->blk, (size_t)n * sizeof(*blks));
+                cfs_buf_put(fs, db);
+                for (uint64_t k = 0; k < n && rc == 0; k++) {
+                    if (live(arg, blks[k]))
+                        (*dropped)++;
+                    else
+                        rc = deadlist_append(fs, &head, blks[k], NULL);
+                }
+                kfree(blks);
+                cfs_free_block_exempt(fs, at);   /* the chain's own block: nothing else names it */
+                at = dnext;
+            }
+            if (rc == 0) {
+                s.deadlist = head;
+                cfs_snaplist_set(fs, b, i, &s);
+                cfs_buf_mark_dirty(fs, b);
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
     }
     return rc;
 }

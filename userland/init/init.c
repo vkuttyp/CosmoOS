@@ -6008,6 +6008,45 @@ static bool switch_to_disk_root(void)
     return true;
 }
 
+/*
+ * The boot completed: /etc/rc ran to a 0 status. Tell every filesystem
+ * that keeps snapshots, so one rolled back at this boot's mount releases
+ * the hold on the tree it was rolled back from (roadmap 1.2 B1;
+ * docs/kernel-services/filesystem/cosmofs/design.md, "Rollback"). A boot
+ * that does not get here -- a rollback to a tree that does not boot --
+ * keeps the hold, and the operator can roll back again.
+ */
+static void boot_complete(void)
+{
+    int fd = open("/dev/fsctl", O_RDWR);
+    if (fd < 0)
+        return;
+    static char buf[sizeof(struct cosmo_fsctl_result) + 64 * sizeof(struct cosmo_fsctl_mount)];
+    struct cosmo_fsctl cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_FSCTL_VERSION;
+    cmd.op = COSMO_FSCTL_LIST;
+    long n = write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd) ? read(fd, buf, sizeof(buf)) : -1;
+    if (n < (long)sizeof(struct cosmo_fsctl_result)) {
+        close(fd);
+        return;
+    }
+    const struct cosmo_fsctl_result *h = (const struct cosmo_fsctl_result *)buf;
+    unsigned count = h->count < 64 ? h->count : 64;
+    struct cosmo_fsctl_mount *m = (struct cosmo_fsctl_mount *)(buf + sizeof(*h));
+    for (unsigned i = 0; i < count; i++) {
+        if (!(m[i].caps & COSMO_FSCTL_CAP_SNAP) || (m[i].flags & 1u))   /* MOUNT_RDONLY */
+            continue;
+        struct cosmo_fsctl_result r;
+        cmd.op = COSMO_FSCTL_BOOT_OK;
+        cmd.mount_id = m[i].id;
+        if (write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd) && read(fd, &r, sizeof(r)) == (long)sizeof(r) &&
+            r.total == 1)
+            printf("init: boot complete: released the rollback hold on %s\n", m[i].path);
+    }
+    close(fd);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--crash") == 0) {
@@ -6093,6 +6132,8 @@ int main(int argc, char **argv)
         int status = run_and_wait("/etc/rc", shell, rc_argv, false);
         printf("init: rc exited with status %d\n", status);
         fflush(stdout);
+        if (status == 0)
+            boot_complete();
     }
     const char *sh_argv[] = { "sh", NULL };
     int status = run_and_wait("the shell", shell, sh_argv, true);

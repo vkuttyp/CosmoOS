@@ -199,6 +199,7 @@ struct check {
     uint8_t (*uuids)[16];
     uint64_t *ids;         /* beside them: two snapshots must not share an id either (a vnode tag) */
     unsigned nuuids, uuid_cap;
+    bool bad_rollback;     /* the record is one check_rollback named */
 };
 
 /* 4 KiB, so a directory of a hundred names collides a few per cent of
@@ -598,6 +599,36 @@ static void walk_snapshots(struct check *ck)
 }
 
 /*
+ * Version 12's rollback record (design.md, "Rollback"; CF19): the block
+ * is live metadata, and what it says must hold -- a record that checks
+ * out, naming snapshots that are on the list: both of a pending record's,
+ * a hold's safety snapshot. One finding per record, named by its block.
+ */
+static void check_rollback(struct check *ck)
+{
+    struct cfs *fs = ck->fs;
+    if (fs->sb.version < 12 || fs->sb.rollback_root == 0)
+        return;
+    claim(ck, fs->sb.rollback_root, true);
+    struct cfs_rollback r;
+    int rc = cfs_rollback_read(fs, &r);
+    if (rc) {
+        name_it(&ck->rep->rollback_record, fs->sb.rollback_root);
+        ck->bad_rollback = true;
+        return;
+    }
+    if (r.state == CFS_ROLLBACK_PENDING) {
+        if (!cfs_snapshot_find_uuid(fs, r.target_uuid, NULL) || !cfs_snapshot_find_uuid(fs, r.safety_uuid, NULL)) {
+            name_it(&ck->rep->rollback_record, fs->sb.rollback_root);
+            ck->bad_rollback = true;
+        }
+    } else if (!cfs_snapshot_find_uuid(fs, r.safety_uuid, NULL)) {
+        name_it(&ck->rep->hold, fs->sb.rollback_root);
+        ck->bad_rollback = true;
+    }
+}
+
+/*
  * The chain of blocks recording what this root freed. The blocks of the
  * chain are live metadata; the blocks it *names* are free, and the
  * bitmap already says so, so they are not claimed here -- claiming them
@@ -988,6 +1019,19 @@ static int repair(struct check *ck)
             ck->rep->nlink_wrong.repaired++;
     }
 
+    /* A rollback record that does not check out, or names a snapshot that
+     * is gone, is dropped: the mount would refuse it anyway, and a record
+     * nothing can apply only keeps a snapshot from being deleted. */
+    if (rc == 0 && ck->bad_rollback) {
+        rc = cfs_rollback_drop(fs);
+        if (rc == 0) {
+            if (ck->rep->rollback_record.count)
+                ck->rep->rollback_record.repaired++;
+            else
+                ck->rep->hold.repaired++;
+        }
+    }
+
     /*
      * The totals, and only the ones the comparison disagreed with. The
      * repairs above move both counters themselves -- freeing a leaked
@@ -1146,6 +1190,7 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     if (fs->sb.key_root != 0)
         claim(&ck, fs->sb.key_root, true);
     walk_snapshots(&ck);
+    check_rollback(&ck);
 
     struct cfs_inode root;
     if (cfs_inode_read(fs, CFS_ROOT_INO, &root) == 0) {
