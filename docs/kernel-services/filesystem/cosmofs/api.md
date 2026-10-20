@@ -307,7 +307,7 @@ boot, release included.
 | `COSMO_FSCTL_SNAP_ROLLBACK` (7) | one `struct cosmo_fsctl_snap`: the safety snapshot taken (`pre-rollback-<seconds>`, or `name2` with `F_SAFETY_NAME`), flag `SAFETY`; a pending record names it and `name` (`design.md`, "Rollback") | as CREATE; `-ENOENT` for no such target; `-EINVAL` for a clone; `-EBUSY` while another is pending, or while a hold is in place unless `name` is the held snapshot |
 | `COSMO_FSCTL_SNAP_CANCEL` (8) | none | `-ENOENT` when nothing is pending |
 | `COSMO_FSCTL_BOOT_OK` (10) | none; `total` is 1 when a hold was released, 0 when there was none | `-EROFS` on a read-only mount |
-| `COSMO_FSCTL_SNAP_CLONE` (9) | B1's third pull request; `-EOPNOTSUPP` until then | |
+| `COSMO_FSCTL_SNAP_CLONE` (9) | one `struct cosmo_fsctl_snap`: clone `name2` of snapshot `name`, flag `CLONE`, `origin_id` (`design.md`, "Clones") | as CREATE; `-ENOENT` for no such snapshot; `-EINVAL` to clone a clone or for no `name2`; `-EOPNOTSUPP` below format 12 |
 
 Because `cosmofs_scrub` returns `-EIO` whenever `unrecoverable` is
 non-zero, and a failed command leaves no result, an operator never
@@ -316,7 +316,7 @@ receives a SCRUB record with `unrecoverable > 0`: the write fails with
 
 ### `cosmo-snap(8)`
 `cosmo-snap [-m MOUNTPOINT] create NAME | list | delete NAME | diff A B |
-rollback [--no-reboot] NAME | rollback --cancel`
+rollback [--no-reboot] NAME | rollback --cancel | clone NAME CLONE`
 (`userland/system/cosmo-snap.c`): the SNAP operations against the mount
 at MOUNTPOINT (`/` by default), found in `fsctl`'s listing. `list` prints
 the pool's format and one row per snapshot (name, id, creation time in
@@ -325,8 +325,9 @@ under `.snapshots` (`-` is the live tree) and prints `+`, `-` or `M` and a
 path per difference, then a count. `rollback` prints the safety
 snapshot's name and, for `/`, reboots through init (`kill(1, SIGTERM)`)
 unless `--no-reboot`; for another mount it says the rollback applies at
-that mount's next mount. Exit status 0 done, 1 refused or failed, 2
-usage. Init sends `BOOT_OK` to every snapshot-capable writable mount
+that mount's next mount. `clone` prints where the clone is
+(`MOUNTPOINT/.snapshots/CLONE`); `delete CLONE` deletes one. Exit status
+0 done, 1 refused or failed, 2 usage. Init sends `BOOT_OK` to every snapshot-capable writable mount
 after `/etc/rc` exits 0 (`userland/init/init.c`, `boot_complete`).
 
 ### `fsctl(8)`

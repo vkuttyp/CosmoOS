@@ -9,7 +9,11 @@
  *   cosmo-snap [-m MOUNTPOINT] diff A B
  *   cosmo-snap [-m MOUNTPOINT] rollback [--no-reboot] NAME
  *   cosmo-snap [-m MOUNTPOINT] rollback --cancel
+ *   cosmo-snap [-m MOUNTPOINT] clone NAME CLONE
  *
+ * `clone` makes CLONE, a writable copy of snapshot NAME that shares its
+ * blocks, at MOUNTPOINT/.snapshots/CLONE; `delete CLONE` gives back what
+ * only it holds. NAME cannot be deleted while it has a clone.
  * `rollback` makes snapshot NAME the live tree at the next mount, keeping
  * the tree it replaces as snapshot pre-rollback-<seconds>; for the root
  * that mount is the next boot, and cosmo-snap reboots unless told not to.
@@ -41,7 +45,7 @@ static const char *g_mp = "/";
 static void usage(void)
 {
     fprintf(stderr, "usage: cosmo-snap [-m MOUNTPOINT] create NAME | list | delete NAME | diff A B |\n"
-                    "       rollback [--no-reboot] NAME | rollback --cancel\n");
+                    "       rollback [--no-reboot] NAME | rollback --cancel | clone NAME CLONE\n");
     exit(2);
 }
 
@@ -268,6 +272,18 @@ static int cmd_rollback(int fd, unsigned long long id, const char *name, int reb
         perror("cosmo-snap: reboot");
         return 1;
     }
+    return 0;
+}
+
+static int cmd_clone(int fd, unsigned long long id, const char *name, const char *clone)
+{
+    char buf[sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_snap)];
+    if (run(fd, COSMO_FSCTL_SNAP_CLONE, id, 0, name, clone, buf, sizeof(buf)) < 0)
+        fail("clone", name);
+    struct cosmo_fsctl_snap *s = (struct cosmo_fsctl_snap *)(buf + sizeof(struct cosmo_fsctl_result));
+    const char *sep = strcmp(g_mp, "/") == 0 ? "" : "/";
+    printf("cosmo-snap: clone %s of %s (id %llu) is at %s%s.snapshots/%s\n", s->name, name, (unsigned long long)s->id,
+           g_mp, sep, s->name);
     return 0;
 }
 
@@ -541,6 +557,13 @@ int main(int argc, char **argv)
         return cmd_list(fd, id);
     if (strcmp(op, "delete") == 0 && argc - i == 1)
         return cmd_delete(fd, id, argv[i]);
+    if (strcmp(op, "clone") == 0 && argc - i == 2) {
+        if (argv[i + 1][0] == '-') {
+            fprintf(stderr, "cosmo-snap: clone %s: a clone's name cannot start with '-'\n", argv[i + 1]);
+            return 1;
+        }
+        return cmd_clone(fd, id, argv[i], argv[i + 1]);
+    }
     if (strcmp(op, "rollback") == 0) {
         if (argc - i == 1 && strcmp(argv[i], "--cancel") == 0)
             return cmd_cancel(fd, id);

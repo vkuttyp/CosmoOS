@@ -597,9 +597,9 @@ unchanged.
   Snapshots of one mount (roadmap 1.2 B1): CREATE (raising a format-11
   pool to 12), LIST (with sizes from a walk of every tree, or without),
   DELETE (`-EBUSY` while anything inside is in use or a rollback keeps
-  it), ROLLBACK, CANCEL and BOOT_OK. `-EINVAL` for a mount that is not a
-  cosmofs, `-EROFS` for a write on a read-only mount, `-EOPNOTSUPP` below
-  format 11 and for CLONE until B1's third pull request. Holds the mount's lock for the operation
+  it, or it is a clone's origin), ROLLBACK, CANCEL, BOOT_OK and CLONE.
+  `-EINVAL` for a mount that is not a cosmofs, `-EROFS` for a write on a
+  read-only mount, `-EOPNOTSUPP` below format 11 (12 for CLONE). Holds the mount's lock for the operation
   (`docs/kernel-services/filesystem/cosmofs/design.md`, "Format version 12").
 - **`int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)`**
   `generation` (last committed), `free_blocks` (in-memory count, which

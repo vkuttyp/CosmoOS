@@ -43,6 +43,24 @@ struct cfs_memstate {
     uint8_t uuid[16];
 };
 
+/*
+ * A clone (design.md, "Clones"): a writable tree in the snapshot list,
+ * whose roots the commits advance. The list entry holds them as of the
+ * last commit; this holds them as the open transaction has them, and
+ * `dirty` says the entry is behind. `origin_reach` is every block the
+ * origin's tree reaches, built on first need -- the origin is a snapshot
+ * and does not change, so the set does not either.
+ */
+struct cfs_clone {
+    uint64_t id;
+    uint64_t origin_id;
+    uint64_t imap_root;
+    uint64_t next_ino;
+    uint64_t inode_count;
+    bool dirty;
+    uint8_t *origin_reach;
+};
+
 struct cfs {
     struct spool *pool;
     struct mount *mnt;
@@ -108,6 +126,13 @@ struct cfs {
     bool test_commit_armed;
     unsigned test_commits_left;
 #endif
+    /* Clones, and the one this operation writes (NULL: the live tree).
+     * While one is entered its roots are in `sb` and the live tree's are
+     * in `live_*` (cfs_clone_enter); a commit leaves it first. */
+    struct cfs_clone *clones;
+    unsigned nclones, clone_cap;
+    struct cfs_clone *cur_clone;
+    uint64_t live_imap_root, live_next_ino, live_inode_count;
     /* A rollback switch whose transaction failed was abandoned, and the
      * mount loads the current tree again without trying it (design.md,
      * "Rollback"). */
@@ -253,6 +278,30 @@ int cfs_rollback_drop(struct cfs *fs);
 int cfs_rollback_boot_ok(struct cfs *fs, bool *released);
 bool cfs_rollback_protects(struct cfs *fs, const struct cfs_snapshot *s);
 int cfs_rollback_at_mount(struct cfs *fs, bool *switched);
+/*
+ * Clones (cosmofs_clone.c; design.md, "Clones"). Under fs->lock: enter
+ * swaps the clone's roots into the in-memory superblock, so every inode
+ * and allocation path writes the clone; leave swaps them back and keeps
+ * what moved. A free while one is entered keeps a block the origin's tree
+ * reaches and frees any other outright (cfs_clone_free).
+ */
+struct cfs_clone *cfs_clone_by_id(struct cfs *fs, uint64_t id);
+void cfs_clone_enter(struct cfs *fs, struct cfs_clone *c);
+void cfs_clone_leave(struct cfs *fs);
+void cfs_clone_free(struct cfs *fs, uint64_t dva);
+int cfs_clones_load(struct cfs *fs);
+void cfs_clones_free(struct cfs *fs);
+int cfs_clones_publish(struct cfs *fs);
+int cfs_clone_create(struct cfs *fs, const char *origin, const char *name, struct cfs_snapshot *out);
+int cfs_clone_delete(struct cfs *fs, const struct cfs_snapshot *doomed, uint64_t *freed);
+bool cfs_snapshot_has_clones(struct cfs *fs, uint64_t id);
+int cfs_snapshot_list_cow(struct cfs *fs);
+int cfs_snapshot_walk_write(struct cfs *fs, bool (*fn)(struct cfs_snapshot *s, void *arg), void *arg);
+int cfs_snapshot_add_clone(struct cfs *fs, const struct cfs_snapshot *origin, const char *name,
+                           struct cfs_snapshot *out);
+/* The roots a tree has now: a clone's from the table (the open
+ * transaction), a snapshot's from its entry. */
+void cfs_tree_roots(struct cfs *fs, const struct cfs_snapshot *s, uint64_t *imap_root, uint64_t *next_ino);
 int cfs_snapshot_delete(struct cfs *fs, const char *name);
 int cfs_snapshot_list(struct cfs *fs, struct cfs_snapshot *out, unsigned max, unsigned *count);
 bool cfs_snapshot_find(struct cfs *fs, const char *name, struct cfs_snapshot *out);

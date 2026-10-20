@@ -546,7 +546,9 @@ static void walk_snapshots(struct check *ck)
                 check_identity(ck, s, max_id);
             /* A snapshot's trees are seen, never live: it holds blocks
              * the live tree also holds, on purpose. */
-            walk_imap(ck, s->imap_root, s->next_ino, false, false);
+            uint64_t root, next_ino;
+            cfs_tree_roots(fs, s, &root, &next_ino);   /* a clone's roots move with the open transaction */
+            walk_imap(ck, root, next_ino, false, false);
             /* From version 4 a snapshot's alloc_root is the *member
              * table* it was taken with, and each member's own index
              * hangs off that (cosmofs_snap.c, snap_alloc_root); before

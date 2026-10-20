@@ -889,6 +889,37 @@ static int cfs_vnode_get_tagged(struct cfs *fs, uint64_t ino, unsigned tag, cons
 
 int cfs_vnode_get(struct cfs *fs, uint64_t ino, struct vnode **out)
 {
+    /* Inside a clone the vnode is the clone's: its inode numbers carry
+     * the clone's tag, as a snapshot's do (design.md, "Clones"). */
+    ino = CFS_INO_OF(ino);
+    unsigned ctag = fs->cur_clone ? (unsigned)fs->cur_clone->id : 0;
+    if (ctag) {
+        uint64_t key = CFS_SNAP_INO(ctag, ino);
+        struct vnode *cvn = vnode_lookup_cached(fs->mnt, key);
+        if (cvn) {
+            *out = cvn;
+            return 0;
+        }
+        struct cfs_vnode *cv = kzalloc(sizeof(*cv));
+        if (cv == NULL)
+            return -ENOMEM;
+        int rc = cfs_inode_read(fs, ino, &cv->inode);
+        if (rc) {
+            kfree(cv);
+            return rc;
+        }
+        cv->snap_tag = ctag;
+        cvn = vnode_alloc(fs->mnt, key);
+        if (cvn == NULL) {
+            kfree(cv);
+            return -ENOMEM;
+        }
+        cvn->fs_priv = cv;
+        fill_vnode(cvn, &cv->inode);
+        vnode_hash_insert(cvn);
+        *out = cvn;
+        return 0;
+    }
     struct vnode *vn = vnode_lookup_cached(fs->mnt, ino);
     if (vn) {
         *out = vn;
@@ -1274,7 +1305,7 @@ static int dir_add(struct cfs *fs, struct vnode *dir, const char *name, size_t l
         for (unsigned s = 0; s < CFS_DIRENTS_PER_BLOCK; s++) {
             if (d[s].ino == 0) {
                 memset(&d[s], 0, sizeof(d[s]));
-                d[s].ino = ino;
+                d[s].ino = CFS_INO_OF(ino);   /* an entry names an inode of its own tree, untagged */
                 d[s].type = (uint8_t)type;
                 d[s].namelen = (uint8_t)len;
                 memcpy(d[s].name, name, len);
@@ -1365,6 +1396,39 @@ static unsigned snap_tag_of(struct vnode *vn)
     return cv && cv->snap_tag != 0xFFFFu ? cv->snap_tag : 0;
 }
 
+/*
+ * The tree an operation on `vn` writes: the live tree, or a clone, which
+ * it enters for the length of the operation (cosmofs_clone.c). A vnode
+ * of a snapshot is read-only, and so is one of a clone since deleted.
+ */
+static bool tree_readonly(struct cfs *fs, struct vnode *vn)
+{
+    if (is_snapdir(vn))
+        return true;
+    unsigned tag = snap_tag_of(vn);
+    if (tag == 0)
+        return false;
+    mutex_lock(&fs->lock);
+    bool clone = cfs_clone_by_id(fs, tag) != NULL;
+    mutex_unlock(&fs->lock);
+    return !clone;
+}
+
+static void cfs_lock_tree(struct cfs *fs, struct vnode *vn)
+{
+    mutex_lock(&fs->lock);
+    unsigned tag = snap_tag_of(vn);
+    struct cfs_clone *c = tag ? cfs_clone_by_id(fs, tag) : NULL;
+    if (c != NULL)
+        cfs_clone_enter(fs, c);
+}
+
+static void cfs_unlock_tree(struct cfs *fs)
+{
+    cfs_clone_leave(fs);
+    mutex_unlock(&fs->lock);
+}
+
 static int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
     struct cfs *fs = cfs_of(dir->mnt);
@@ -1383,8 +1447,18 @@ static int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vn
         struct cfs_snapshot s;
         unsigned tag;
         rc = snap_by_name(fs, name, len, &s, &tag);
-        if (rc == 0)
+        if (rc == 0 && (s.flags & CFS_SNAP_F_CLONE)) {
+            struct cfs_clone *c = cfs_clone_by_id(fs, s.id);
+            if (c == NULL) {
+                rc = -EIO;
+            } else {
+                cfs_clone_enter(fs, c);
+                rc = cfs_vnode_get(fs, CFS_ROOT_INO, out);
+                cfs_clone_leave(fs);
+            }
+        } else if (rc == 0) {
             rc = cfs_vnode_get_tagged(fs, CFS_ROOT_INO, tag, &s, out);
+        }
         mutex_unlock(&fs->lock);
         return rc;
     }
@@ -1397,6 +1471,32 @@ static int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vn
         return rc;
     }
     unsigned tag = snap_tag_of(dir);
+    struct cfs_clone *clone = tag ? cfs_clone_by_id(fs, tag) : NULL;
+    if (clone != NULL) {
+        /* Inside a clone: the live tree's lookup, in the clone's tree.
+         * At the clone's root ".." is .snapshots, as at a snapshot's. */
+        if (len == 2 && name[0] == '.' && name[1] == '.' && CFS_INO_OF(dir->ino) == CFS_ROOT_INO) {
+            rc = snapdir_get(fs, out);
+            mutex_unlock(&fs->lock);
+            return rc;
+        }
+        cfs_clone_enter(fs, clone);
+        if (len == 2 && name[0] == '.' && name[1] == '.') {
+            rc = cfs_vnode_get(fs, cfs_inode_of(dir)->parent, out);
+        } else {
+            uint8_t *block = kmalloc(CFS_BLOCK, 0);
+            rc = block ? 0 : -ENOMEM;
+            uint64_t lblk;
+            unsigned slot;
+            if (rc == 0)
+                rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
+            if (rc == 0)
+                rc = cfs_vnode_get(fs, ((struct cfs_dirent *)block)[slot].ino, out);
+            kfree(block);
+        }
+        cfs_unlock_tree(fs);
+        return rc;
+    }
     if (len == 2 && name[0] == '.' && name[1] == '.') {
         if (tag) {
             /* ".." inside a snapshot stays inside it. An untagged parent
@@ -1470,7 +1570,7 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
         return -ENOMEM;
-    mutex_lock(&fs->lock);
+    cfs_lock_tree(fs, dir);
     uint64_t lblk;
     unsigned slot;
     int rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
@@ -1491,7 +1591,7 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     in.gid = cred_current()->egid;
     in.nlink = type == CFS_TYPE_DIR ? 2 : 1;
     in.ino = ino;
-    in.parent = dir->ino;
+    in.parent = CFS_INO_OF(dir->ino);   /* a clone's vnode carries its tag; the map does not */
     /* An encrypted filesystem authenticates every file it creates: a
      * CRC would say a block is intact, not that it is the one written. */
     in.csum_algo = fs->encrypted ? CFS_CSUM_POLY1305 : CFS_CSUM_CRC32C;
@@ -1519,7 +1619,7 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     }
     rc = cfs_vnode_get(fs, ino, out);
 out:
-    mutex_unlock(&fs->lock);
+    cfs_unlock_tree(fs);
     kfree(block);
     return rc;
 }
@@ -1546,11 +1646,13 @@ static int cfs_symlink(struct vnode *dir, const char *name, size_t len, const ch
         return -ENAMETOOLONG;   /* a target is one block, as on any filesystem that stores it there */
     if (fs->sb.version < 8)
         return -EOPNOTSUPP;     /* an older kernel would read this as a regular file */
+    if (tree_readonly(fs, dir))
+        return -EROFS;          /* in .snapshots or a snapshot: what the tree was */
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
         return -ENOMEM;
 
-    mutex_lock(&fs->lock);
+    cfs_lock_tree(fs, dir);
     uint64_t lblk;
     unsigned slot;
     uint64_t ino = 0;
@@ -1573,7 +1675,7 @@ static int cfs_symlink(struct vnode *dir, const char *name, size_t len, const ch
     in.gid = cred_current()->egid;
     in.nlink = 1;
     in.ino = ino;
-    in.parent = dir->ino;
+    in.parent = CFS_INO_OF(dir->ino);   /* a clone's vnode carries its tag; the map does not */
     in.csum_algo = fs->encrypted ? CFS_CSUM_POLY1305 : CFS_CSUM_CRC32C;
     in.compress_algo = CFS_COMPRESS_NONE;   /* one short block: nothing to gain, and readlink stays a read */
     in.size = tlen;
@@ -1610,7 +1712,7 @@ undo:
 out:
     if (ino_taken)
         cfs_inode_discard(fs, ino);
-    mutex_unlock(&fs->lock);
+    cfs_unlock_tree(fs);
     kfree(block);
     return rc;
 }
@@ -1645,8 +1747,8 @@ static int cfs_readlink(struct vnode *vn, char *buf, size_t len)
 
 static int cfs_create(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out)
 {
-    if (is_snapdir(dir) || snap_tag_of(dir))
-        return -EROFS;   /* .snapshots holds snapshots, not files */
+    if (tree_readonly(cfs_of(dir->mnt), dir))
+        return -EROFS;   /* .snapshots holds snapshots, not files; a snapshot is what the tree was */
     return cfs_create_common(dir, name, len, mode, CFS_TYPE_REG, out);
 }
 
@@ -1677,8 +1779,8 @@ static int cfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t m
             kinfo("cosmofs: snapshot '%s' taken", buf);
         return rc;
     }
-    if (snap_tag_of(dir))
-        return -EROFS;   /* a snapshot is not writable */
+    if (tree_readonly(cfs_of(dir->mnt), dir))
+        return -EROFS;   /* a snapshot is not writable (a clone is) */
     return cfs_create_common(dir, name, len, mode, CFS_TYPE_DIR, out);
 }
 
@@ -1690,13 +1792,13 @@ static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, st
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
         return -ENOMEM;
-    mutex_lock(&fs->lock);
+    cfs_lock_tree(fs, dir);
     uint64_t lblk;
     unsigned slot;
     int rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
     if (rc)
         goto out;
-    if (((struct cfs_dirent *)block)[slot].ino != victim->ino) {
+    if (((struct cfs_dirent *)block)[slot].ino != CFS_INO_OF(victim->ino)) {
         rc = -ENOENT;
         goto out;
     }
@@ -1747,14 +1849,14 @@ static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, st
     if (rc == 0)
         rc = inode_sync(fs, victim);
 out:
-    mutex_unlock(&fs->lock);
+    cfs_unlock_tree(fs);
     kfree(block);
     return rc;
 }
 
 static int cfs_unlink(struct vnode *dir, const char *name, size_t len, struct vnode *victim)
 {
-    if (is_snapdir(dir) || snap_tag_of(dir))
+    if (tree_readonly(cfs_of(dir->mnt), dir))
         return -EROFS;
     return cfs_unlink_common(dir, name, len, victim, false);
 }
@@ -1813,7 +1915,7 @@ static int cfs_rmdir(struct vnode *dir, const char *name, size_t len, struct vno
             kinfo("cosmofs: snapshot '%s' deleted", buf);
         return rc;
     }
-    if (snap_tag_of(dir))
+    if (tree_readonly(cfs_of(dir->mnt), dir))
         return -EROFS;
     return cfs_unlink_common(dir, name, len, victim, true);
 }
@@ -1826,16 +1928,20 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         return -EIO;   /* unmounted, or the transaction was abandoned */
     if (nlen > CFS_NAME_MAX)
         return -ENAMETOOLONG;
+    if (tree_readonly(fs, odir) || tree_readonly(fs, ndir))
+        return -EROFS;          /* in .snapshots or a snapshot: what the tree was */
+    if (snap_tag_of(odir) != snap_tag_of(ndir))
+        return -EXDEV;          /* between the live tree and a clone, or two clones: two trees */
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
         return -ENOMEM;
-    mutex_lock(&fs->lock);
+    cfs_lock_tree(fs, odir);
     uint64_t lblk;
     unsigned slot;
     int rc = dir_find(fs, odir, oname, olen, block, &lblk, &slot);
     if (rc)
         goto out;
-    if (((struct cfs_dirent *)block)[slot].ino != victim->ino) {
+    if (((struct cfs_dirent *)block)[slot].ino != CFS_INO_OF(victim->ino)) {
         rc = -ENOENT;
         goto out;
     }
@@ -1870,13 +1976,13 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         if (rc)
             goto out;
         struct cfs_dirent *rd = &((struct cfs_dirent *)block)[rs];
-        rd->ino = victim->ino;
+        rd->ino = CFS_INO_OF(victim->ino);
         rd->type = (uint8_t)type;
         rc = dir_write_block(fs, ndir, rl, block);
         if (rc)
             goto out;
     } else {
-        rc = dir_add(fs, ndir, nname, nlen, victim->ino, type, block);
+        rc = dir_add(fs, ndir, nname, nlen, CFS_INO_OF(victim->ino), type, block);
         if (rc)
             goto out;
     }
@@ -1893,7 +1999,7 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         if (rb == 0) {
             if (replaced) {
                 struct cfs_dirent *rd = &((struct cfs_dirent *)block)[rs];
-                rd->ino = replaced->ino;
+                rd->ino = CFS_INO_OF(replaced->ino);
                 rd->type = (uint8_t)(replaced->type == VNODE_DIR ? CFS_TYPE_DIR : CFS_TYPE_REG);
                 rb = dir_write_block(fs, ndir, rl, block);
             } else {
@@ -1924,7 +2030,7 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         rc = inode_sync(fs, replaced);
     }
     if (rc == 0 && odir != ndir) {
-        cfs_inode_of(victim)->parent = ndir->ino;
+        cfs_inode_of(victim)->parent = CFS_INO_OF(ndir->ino);
         if (victim->type == VNODE_DIR) {
             odir->nlink--;
             ndir->nlink++;
@@ -1938,7 +2044,7 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
     if (rc)
         cfs_fail(fs, rc);
 out:
-    mutex_unlock(&fs->lock);
+    cfs_unlock_tree(fs);
     kfree(block);
     return rc;
 }
@@ -2091,16 +2197,16 @@ static int write_one_page(struct cfs *fs, struct cfs_inode *in, uint64_t index, 
 
 static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
 {
-    if (snap_tag_of(vn))
+    if (tree_readonly(cfs_of(vn->mnt), vn))
         return -EROFS;   /* a snapshot is what the tree was, not what it is */
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
-    mutex_lock(&fs->lock);
+    cfs_lock_tree(fs, vn);
     int rc = write_one_page(fs, cfs_inode_of(vn), index, buf);
     if (rc == 0)
         rc = inode_sync(fs, vn);
-    mutex_unlock(&fs->lock);
+    cfs_unlock_tree(fs);
     return rc;
 }
 
@@ -2112,19 +2218,19 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
  */
 static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, unsigned n, unsigned *done)
 {
-    if (snap_tag_of(vn))
+    if (tree_readonly(cfs_of(vn->mnt), vn))
         return -EROFS;
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;
-    mutex_lock(&fs->lock);
+    cfs_lock_tree(fs, vn);
     struct cfs_inode *in = cfs_inode_of(vn);
     int rc;
     if (index % CFS_RECORD_BLOCKS == 0 && n >= CFS_RECORD_BLOCKS && in->compress_algo != CFS_COMPRESS_NONE) {
         /* Gather the record; the pages are separate frames. */
         uint8_t *rec = kmalloc((size_t)CFS_RECORD_BLOCKS * CFS_BLOCK, 0);
         if (rec == NULL) {
-            mutex_unlock(&fs->lock);
+            cfs_unlock_tree(fs);
             return -ENOMEM;
         }
         for (unsigned i = 0; i < CFS_RECORD_BLOCKS; i++)
@@ -2140,19 +2246,19 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
     }
     if (rc == 0)
         rc = inode_sync(fs, vn);
-    mutex_unlock(&fs->lock);
+    cfs_unlock_tree(fs);
     return rc;
 }
 
 static int cfs_truncate(struct vnode *vn, uint64_t size)
 {
-    if (snap_tag_of(vn))
+    if (tree_readonly(cfs_of(vn->mnt), vn))
         return -EROFS;
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
     pagecache_truncate(vn, size);
-    mutex_lock(&fs->lock);
+    cfs_lock_tree(fs, vn);
     uint64_t keep = (size + CFS_BLOCK - 1) / CFS_BLOCK;
     int rc = cfs_truncate_blocks(fs, cfs_inode_of(vn), keep);
     /* The last block may now be partial. What is past the new end has to
@@ -2184,7 +2290,7 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
         vn->mtime_ns = vfs_now_ns();
         rc = inode_sync(fs, vn);
     }
-    mutex_unlock(&fs->lock);
+    cfs_unlock_tree(fs);
     return rc;
 }
 
@@ -2197,11 +2303,11 @@ static int cfs_vnode_setattr(struct vnode *vn)
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL)
         return 0;
-    if (is_snapdir(vn) || snap_tag_of(vn))
+    if (tree_readonly(fs, vn))
         return -EROFS;   /* a snapshot's metadata is what it was, as its data is (the caller restores the vnode) */
-    mutex_lock(&fs->lock);
+    cfs_lock_tree(fs, vn);
     int rc = inode_sync(fs, vn);
-    mutex_unlock(&fs->lock);
+    cfs_unlock_tree(fs);
     return rc;
 }
 
@@ -2226,10 +2332,19 @@ static void cfs_evict(struct vnode *vn)
 {
     struct cfs *fs = cfs_of(vn->mnt);
     struct cfs_vnode *cv = vn->fs_priv;
-    if (fs && cv && vn->nlink == 0) {
+    /* A snapshot's vnode, or a clone's whose clone is gone (deleting it
+     * freed its blocks), has nothing here to release: its inode number
+     * is not the live tree's. */
+    bool other_tree = false;
+    if (fs && cv && cv->snap_tag != 0) {
+        mutex_lock(&fs->lock);
+        other_tree = cv->snap_tag == 0xFFFFu || cfs_clone_by_id(fs, cv->snap_tag) == NULL;
+        mutex_unlock(&fs->lock);
+    }
+    if (fs && cv && vn->nlink == 0 && !other_tree) {
         /* The last link and the last reference are gone: release the
          * data blocks and the inode slot. */
-        mutex_lock(&fs->lock);
+        cfs_lock_tree(fs, vn);
         int trc = cfs_truncate_blocks(fs, &cv->inode, 0);
         if (trc != 0) {
             /* The same hazard as a failed slot write, one step earlier:
@@ -2257,7 +2372,7 @@ static void cfs_evict(struct vnode *vn)
                 cfs_fail(fs, -EIO);
             }
         }
-        mutex_unlock(&fs->lock);
+        cfs_unlock_tree(fs);
     }
     kfree(cv);
     vn->fs_priv = NULL;
@@ -2482,8 +2597,10 @@ static int snap_list_sized(struct cfs *fs, struct cosmofs_snap_req *req)
             kwarn("cosmofs: snapshot sizes: the live tree does not walk (%d)", rc);
     }
     for (unsigned i = 0; rc == 0 && i < n; i++) {
+        uint64_t root, next;
+        cfs_tree_roots(fs, &all[i], &root, &next);   /* a clone's as the open transaction has them */
         memset(o1.seen, 0, seen_bytes);
-        rc = cfs_tree_walk(fs, all[i].imap_root, all[i].next_ino, once_mark, &o1);
+        rc = cfs_tree_walk(fs, root, next, once_mark, &o1);
         if (rc == 0)
             rc = cfs_snapshot_walk_held(fs, &all[i], once_mark, &o1);
         if (rc)
@@ -2493,10 +2610,12 @@ static int snap_list_sized(struct cfs *fs, struct cosmofs_snap_req *req)
         if (all[i].id <= req->after)
             continue;   /* the caller's cursor: listed in an earlier page */
         struct tally_size sz = { .t = &t };
+        uint64_t root, next;
+        cfs_tree_roots(fs, &all[i], &root, &next);
         memset(o1.seen, 0, seen_bytes);
         o1.fn = tally_size;
         o1.arg = &sz;
-        rc = cfs_tree_walk(fs, all[i].imap_root, all[i].next_ino, once_mark, &o1);
+        rc = cfs_tree_walk(fs, root, next, once_mark, &o1);
         if (rc == 0)
             rc = cfs_snapshot_walk_held(fs, &all[i], once_mark, &o1);
         struct cosmofs_snap_info *o = &req->out[req->count++];
@@ -2605,6 +2724,22 @@ int cosmofs_snapctl(struct mount *mnt, struct cosmofs_snap_req *req)
         if (rc == 0 && req->out != NULL && req->max > 0) {
             snap_info_fill(fs, &req->out[0], &s);
             req->out[0].flags |= COSMOFS_SNAP_I_SAFETY;
+            req->count = 1;
+        }
+        return rc;
+    }
+    case COSMOFS_SNAP_CLONE: {
+        rc = snap_name_ok(req->name);
+        if (rc == 0)
+            rc = req->name2 ? snap_name_ok(req->name2) : -EINVAL;
+        if (rc)
+            return rc;
+        struct cfs_snapshot c;
+        mutex_lock(&fs->lock);
+        rc = cfs_clone_create(fs, req->name, req->name2, &c);
+        mutex_unlock(&fs->lock);
+        if (rc == 0 && req->out != NULL && req->max > 0) {
+            snap_info_fill(fs, &req->out[0], &c);
             req->count = 1;
         }
         return rc;

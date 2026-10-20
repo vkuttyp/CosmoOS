@@ -5486,6 +5486,130 @@ bool selftest_cosmofs_rollback_record(const char **reason)
           "and state refused under a matching crc", refused, (unsigned)sizeof(r));
     return true;
 }
+
+static int clone_req(const char *origin, const char *clone)
+{
+    static struct cosmofs_snap_info out[1];
+    struct cosmofs_snap_req req = { .op = COSMOFS_SNAP_CLONE, .name = origin, .name2 = clone, .out = out, .max = 1 };
+    return cosmofs_snapctl(mount_of(ENG), &req);
+}
+
+/*
+ * Clones (roadmap 1.2 B1; design.md, "Clones"; CF20): a clone of a
+ * snapshot is a writable tree under .snapshots that starts as the
+ * snapshot's and shares its blocks. Its writes are seen neither in the
+ * snapshot nor in the live tree, and the live tree's not in it; they
+ * survive a remount; the origin cannot be deleted while it has a clone,
+ * a clone is no rollback target, and a rename between two trees is
+ * EXDEV. Deleting the clone gives back at least the blocks of the file
+ * only it held, and the checker -- whose counts are the oracle -- calls
+ * the filesystem clean at every step: a clone block freed too early is
+ * `seen_not_alloc`, one kept for nobody `alloc_not_seen`. A snapshot
+ * stays read-only to symlink and rename too (they had no guard).
+ */
+bool selftest_cosmofs_clone(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 2048, reason))
+        return false;
+    static struct cosmofs_snap_info info[1];
+    static struct cosmofs_check_report rep;
+    static char big[16 * 4096];
+    uint64_t x = 0xD1B54A32D192ED03ull;
+    for (unsigned i = 0; i < sizeof(big); i++) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        big[i] = (char)x;
+    }
+    unsigned n = 0;
+    struct cosmofs_stats st;
+    struct cosmo_stat cs;
+    struct file *f = NULL;
+
+    CHECK(write_file(ENG "/a", "orig", 4));
+    CHECK(vfs_mkdir(NULL, ENG "/d", 0755) == 0);
+    CHECK(write_file(ENG "/d/f", "deep", 4));
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "o", info, 1, &n) == 0);
+    CHECK(clone_req("o", "o") == -EEXIST);
+    CHECK(clone_req("nope", "c") == -ENOENT);
+    CHECK(clone_req("o", "c") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    uint64_t free_made = st.free_blocks;
+
+    /* It starts as the snapshot. */
+    CHECK(read_matches(ENG "/.snapshots/c/a", "orig", 4));
+    CHECK(read_matches(ENG "/.snapshots/c/d/f", "deep", 4));
+    /* It is writable, and its writes are its own. */
+    CHECK(write_file(ENG "/.snapshots/c/a", "clone", 5));
+    CHECK(write_file(ENG "/.snapshots/c/new", big, sizeof(big)));
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/c/sub", 0755) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/.snapshots/c/d/f") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(read_matches(ENG "/a", "orig", 4));
+    CHECK(read_matches(ENG "/d/f", "deep", 4));
+    CHECK(read_matches(ENG "/.snapshots/o/a", "orig", 4));
+    CHECK(read_matches(ENG "/.snapshots/o/d/f", "deep", 4));
+    CHECK(vfs_stat(NULL, ENG "/.snapshots/o/new", &cs) == -ENOENT);
+    CHECK(vfs_stat(NULL, ENG "/new", &cs) == -ENOENT);
+    /* And the live tree's are not the clone's. */
+    CHECK(write_file(ENG "/a", "live2", 5));
+    CHECK(read_matches(ENG "/.snapshots/c/a", "clone", 5));
+    CHECK(read_matches(ENG "/.snapshots/o/a", "orig", 4));
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    uint64_t free_written = st.free_blocks;
+    CHECK(free_written + 16 <= free_made);
+
+    /* The rules around it. */
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "o", NULL, 0, NULL) == -EBUSY);
+    CHECK(rollback_req("c", NULL, info) == -EINVAL);
+    CHECK(clone_req("c", "cc") == -EINVAL);
+    CHECK(vfs_rename(NULL, ENG "/.snapshots/c/sub", ENG "/moved") == -EXDEV);
+    CHECK(vfs_symlink(NULL, ENG "/.snapshots/o/link", "x") == -EROFS);
+    CHECK(vfs_rename(NULL, ENG "/.snapshots/o/a", ENG "/.snapshots/o/b") == -EROFS);
+    CHECK(vfs_symlink(NULL, ENG "/.snapshots/c/link", "a") == 0);   /* a clone takes one */
+
+    /* Its writes survive a remount. */
+    CHECK(remount_eng(bd, reason));
+    CHECK(read_matches(ENG "/.snapshots/c/a", "clone", 5));
+    CHECK(read_matches(ENG "/.snapshots/c/new", big, sizeof(big)));
+    CHECK(vfs_stat(NULL, ENG "/.snapshots/c/d/f", &cs) == -ENOENT);
+    CHECK(read_matches(ENG "/.snapshots/o/d/f", "deep", 4));
+    CHECK(read_matches(ENG "/a", "live2", 5));
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+
+    /* Busy while something inside it is open, like a snapshot. */
+    CHECK(vfs_open(NULL, ENG "/.snapshots/c/a", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "c", NULL, 0, NULL) == -EBUSY);
+    file_put(f);
+
+    /* Deleted: what only it held goes back, nothing of the origin's. */
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    uint64_t free_before = st.free_blocks;
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "c", NULL, 0, NULL) == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    if (!rep.clean)
+        kinfo("selftest: cosmofs-clone: after the deletion: %llu leaked, %llu free-in-use",
+              (unsigned long long)rep.alloc_not_seen.count, (unsigned long long)rep.seen_not_alloc.count);
+    CHECK(rep.clean);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.free_blocks >= free_before + 16);
+    CHECK(read_matches(ENG "/.snapshots/o/d/f", "deep", 4));
+    CHECK(vfs_stat(NULL, ENG "/.snapshots/c", &cs) == -ENOENT);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "o", NULL, 0, NULL) == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+    CHECK(remount_eng(bd, reason));
+    CHECK(read_matches(ENG "/a", "live2", 5));
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+    kinfo("selftest: cosmofs-clone: written apart from its snapshot and the live tree, kept across a remount, "
+          "%llu block(s) back when deleted, the checker clean throughout",
+          (unsigned long long)(st.free_blocks - free_before));
+    return engine_unmount(bd, reason);
+}
 #else
 bool selftest_cosmofs_badmap(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_snapshot(const char **reason) { (void)reason; return true; }
@@ -5495,4 +5619,5 @@ bool selftest_cosmofs_rollback(const char **reason) { (void)reason; return true;
 bool selftest_cosmofs_rollback_atomic(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_rollback_record(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_rollback_shared(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_clone(const char **reason) { (void)reason; return true; }
 #endif

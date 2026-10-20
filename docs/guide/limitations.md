@@ -86,8 +86,9 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
   orphan record, as a journalling filesystem replays its journal.
 - A rollback to a snapshot takes effect at the next boot (or the next
   mount of another filesystem), not in the running system
-  ([Snapshots and rollback](snapshots.md)); no clones, no RAID-Z, no
-  resilvering (backlog CFS-8, CFS-9, CFS-13).
+  ([Snapshots and rollback](snapshots.md)); a clone of a clone, and a
+  snapshot of a clone, are not possible; no RAID-Z, no resilvering
+  (backlog CFS-9, CFS-13).
 - A root disk that appears late (USB storage) is not waited for: init
   stays on the live root and says so.
 

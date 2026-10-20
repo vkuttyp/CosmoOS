@@ -344,6 +344,19 @@ record with a bad checksum refused, named and repaired);
 record's commit, inside the switch through a `COSMOFS_STOP=1` kernel, and
 after the hold's release, each followed by a clean `fsctl check`).
 
+**CF20. A clone owns exactly the blocks its tree reaches and its
+origin's does not.** A block a clone frees is kept when its origin's tree
+reaches it and freed outright otherwise; no snapshot of the live tree is
+asked about a clone's block, and a clone is never asked about the live
+tree's; an origin outlives its clones; deleting a clone frees the
+difference between the two trees and nothing else. A clone's writes are
+published with its roots by the commit that makes them durable
+(`design.md`, "Clones"). Check: `cosmofs-clone` (writes apart from the
+snapshot and the live tree both ways, across a remount; the origin
+refused deletion; the checker clean after the writes, after the clone's
+deletion -- which gives back at least its own file -- and after the
+origin's); `test-snapshot`'s `clone` stage on the installed root.
+
 ## 3. Rules stated in `design.md` and not checked
 
 - The commit's flush before and after the root assumes the device honours

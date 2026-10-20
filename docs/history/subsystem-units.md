@@ -3247,3 +3247,21 @@ See the [history index](README.md).
   branch boots timed out with every self-test passed. They take
   `CRASH_TIMEOUT`, 240 s on AArch64 (180 s on x86-64), from 40 CI runs'
   distribution (`docs/testing/flakes.md`).
+- **Snapshots and rollback from the shell (roadmap 1.2 B1, 2026-10-20, PRs #421-#423).**
+  cosmofs format 12, raised lazily by a pool's first snapshot: every
+  snapshot has a uuid made unique by checking the list, ids are never
+  handed out twice (the list head's `max_id`), and `cosmo-upgrade`
+  refuses a set whose kernel cannot mount the root's format.
+  `cosmo-snap create|list|delete|diff|rollback|clone` over `/dev/fsctl`
+  version 3; `list` shows what each snapshot refers to and holds alone.
+  A rollback writes a pending record and a safety snapshot in one
+  transaction; the next mount makes the target the live tree in its
+  first transaction and holds the safety snapshot until `init` reports
+  the boot complete (CF19). A clone is a writable tree that starts as
+  its snapshot; its frees are tested against its origin's tree, so
+  deleting it frees exactly its own blocks (CF20). The checker names a
+  bad record, a hold on a missing snapshot and a broken identity, and
+  repairs each. `make test-snapshot` (CI's install job, both
+  architectures) snapshots the root, breaks the system, rolls back,
+  reboots, kills QEMU at three points of a rollback, and writes and
+  deletes a clone. Report: `docs/audit/2026-10-20-b1-snapshots-report.md`.

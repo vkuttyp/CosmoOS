@@ -1296,6 +1296,11 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
             found = true;
             continue;
         }
+        /* A clone is not a holder of the live tree's history: what it
+         * shares is its origin's, which is on this list as long as the
+         * clone is (design.md, "Clones"). */
+        if (all[i].flags & CFS_SNAP_F_CLONE)
+            continue;
         if (nr_remaining == 0 || all[i].generation < remaining[oldest].generation)
             oldest = nr_remaining;
         remaining[nr_remaining++] = all[i];
@@ -1313,6 +1318,29 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
     if (cfs_rollback_protects(fs, &doomed)) {
         kfree(remaining);
         return -EBUSY;
+    }
+    /* An origin outlives its clones: their shared blocks are its. */
+    if (!(doomed.flags & CFS_SNAP_F_CLONE) && cfs_snapshot_has_clones(fs, doomed.id)) {
+        kfree(remaining);
+        return -EBUSY;
+    }
+    if (doomed.flags & CFS_SNAP_F_CLONE) {
+        kfree(remaining);
+        int crc = snap_cow(fs, NULL);
+        if (crc)
+            return crc;
+        uint64_t cfreed = 0;
+        crc = cfs_clone_delete(fs, &doomed, &cfreed);
+        if (crc)
+            return snap_abandon(fs, crc);
+        struct clear_ctx ccx = { .name = name };
+        crc = snap_walk(fs, clear_entry, &ccx, true);
+        if (crc)
+            return snap_abandon(fs, crc);
+        if (fs->snap_count)
+            fs->snap_count--;
+        kdebug("cosmofs: clone '%s': %llu block(s) freed", name, (unsigned long long)cfreed);
+        return snap_commit(fs, 0);
     }
 
     /* The name exists and the transaction is about to change the list,
@@ -1622,4 +1650,62 @@ int cfs_snapshot_deadlists_filter(struct cfs *fs, bool (*live)(void *arg, uint64
         blkno = next;
     }
     return rc;
+}
+
+/* For the clone code: a copy of the list in the open transaction, and a
+ * walk whose callback may change the entry it is shown. */
+int cfs_snapshot_list_cow(struct cfs *fs)
+{
+    return snap_cow(fs, NULL);
+}
+
+int cfs_snapshot_walk_write(struct cfs *fs, bool (*fn)(struct cfs_snapshot *s, void *arg), void *arg)
+{
+    return snap_walk(fs, fn, arg, true);
+}
+
+/*
+ * A clone's entry: origin's roots, a new id and uuid, CFS_SNAP_F_CLONE
+ * and the origin's id, no deadlist. In the open transaction; the caller
+ * commits (design.md, "Clones").
+ */
+int cfs_snapshot_add_clone(struct cfs *fs, const struct cfs_snapshot *origin, const char *name,
+                           struct cfs_snapshot *out)
+{
+    if (name == NULL || name[0] == '\0' || strlen(name) > CFS_SNAP_NAME_MAX || strchr(name, '/') != NULL)
+        return -EINVAL;
+    uint64_t max_id = 0;
+    unsigned live = 0;
+    int rc = snap_max_id(fs, &max_id, &live);
+    if (rc)
+        return rc;
+    uint64_t disk_max = snaplist_max_id(fs);
+    if (disk_max > max_id)
+        max_id = disk_max;
+    if (max_id >= CFS_SNAP_ID_MAX)
+        return -ENOSPC;
+    rc = snap_cow(fs, NULL);
+    if (rc)
+        return rc;
+    struct cfs_snapshot c = *origin;
+    c.id = max_id + 1;
+    c.deadlist = 0;
+    c.created_ns = clock_realtime_ns();
+    c.origin_id = origin->id;
+    c.flags = CFS_SNAP_F_CLONE;
+    c.generation = fs->sb.generation;
+    cfs_snapshot_new_uuid(fs, c.uuid, NULL, 0);
+    memset(c.name, 0, sizeof(c.name));
+    strlcpy(c.name, name, sizeof(c.name));
+    rc = snaplist_insert(fs, &c);
+    if (rc == 0)
+        rc = snaplist_set_max_id(fs, c.id);
+    if (rc) {
+        cfs_fail(fs, rc);
+        return rc;
+    }
+    fs->snap_count++;
+    fs->snap_max_id = c.id;
+    *out = c;
+    return 0;
 }
