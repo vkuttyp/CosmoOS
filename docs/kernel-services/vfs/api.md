@@ -269,7 +269,10 @@ mid-walk would deadlock.
 `struct fs_type` gains two optional entries, `check` and `scrub`. The
 VFS learns that a filesystem has a pass, never what one is; a filesystem
 with none leaves them null and a command against it is `-EOPNOTSUPP`
-before anything is locked.
+before anything is locked. Roadmap 1.2 B1 adds a third, `snapctl`, on the same terms: the
+snapshot operations of `/dev/fsctl` version 3, one request struct
+(`struct cosmofs_snap_req`) handed to the filesystem and its records
+copied out field by field (`docs/kernel-services/filesystem/cosmofs/api.md`).
 
 ### Namespace operations
 
@@ -590,6 +593,14 @@ unchanged.
   `-EIO` when something was unrecoverable (the counts still say what),
   `-EINVAL` for a mount that is not a cosmofs. Holds the mount's lock
   for the whole walk.
+- **`int cosmofs_snapctl(struct mount *mnt, struct cosmofs_snap_req *req)`**
+  Snapshots of one mount (roadmap 1.2 B1): CREATE (raising a format-11
+  pool to 12), LIST (with sizes from a walk of every tree, or without),
+  DELETE (`-EBUSY` while anything inside is in use). `-EINVAL` for a
+  mount that is not a cosmofs, `-EROFS` for a write on a read-only mount,
+  `-EOPNOTSUPP` below format 11 and for the operations B1's later pull
+  requests add. Holds the mount's lock for the operation
+  (`docs/kernel-services/filesystem/cosmofs/design.md`, "Format version 12").
 - **`int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)`**
   `generation` (last committed), `free_blocks` (in-memory count, which
   includes blocks freed since the last commit once that commit is

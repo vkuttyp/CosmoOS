@@ -274,18 +274,20 @@ Kernel side `kernel-services/vfs/fsctl.c`; ABI
 `kernel/include/uapi/cosmo/fsctl.h`; user tool `userland/system/fsctl.c`
 (`/sbin/fsctl`). The design is in `docs/audit/next-subsystem-fsctl.md`.
 The node is created by `fsctl_dev_init` with mode 0600 and logs
-`fsctl: /dev/fsctl ready (0600): mount listing, check and scrub` on every
+`fsctl: /dev/fsctl ready (0600): mount listing, check, scrub and snapshots` on every
 boot, release included.
 
 ### Protocol
 - `open`: `-EPERM` without `PRIV_SYS_ADMIN`. Each open file owns its own
   result buffer (`struct fsctl_open`, its own mutex).
-- `write`: exactly `sizeof(struct cosmo_fsctl)` bytes (16), else
+- `write`: exactly `sizeof(struct cosmo_fsctl)` bytes (80), else
   `-EINVAL`. `PRIV_SYS_ADMIN` is checked again (`-EPERM`). `version` must
-  equal `COSMO_FSCTL_VERSION` (2), else `-EINVAL`. `flags` may contain
-  only `COSMO_FSCTL_F_REPAIR`, and only for `CHECK`; any other bit is
-  `-EINVAL`. An unknown `op` is `-EINVAL`. A command that fails leaves no
-  result. Returns the length written on success.
+  equal `COSMO_FSCTL_VERSION` (3), else `-EINVAL`. `flags` may contain
+  only `COSMO_FSCTL_F_REPAIR` for `CHECK`, `COSMO_FSCTL_F_NO_SIZES` for
+  `SNAP_LIST` and `COSMO_FSCTL_F_SAFETY_NAME` for `SNAP_ROLLBACK`; any
+  other bit is `-EINVAL`. `name` and `name2` must each hold a NUL within
+  their 32 bytes. An unknown `op` is `-EINVAL`. A command that fails
+  leaves no result. Returns the length written on success.
 - `read`: the whole result or nothing: 0 bytes when no command has
   succeeded on this file, `-ERANGE` when the buffer is smaller than the
   result. A result may be read more than once.
@@ -297,13 +299,27 @@ boot, release included.
 | `op` | Result after `struct cosmo_fsctl_result` | Failures |
 |---|---|---|
 | `COSMO_FSCTL_LIST` (1) | `count` records of `struct cosmo_fsctl_mount` (id, namespace id, flags, `caps`, fstype, path): the root mount first at `/`, then the caller's mount namespace; `total` larger than `count` means the list changed while it was built | `-ENOMEM` |
-| `COSMO_FSCTL_CHECK` (2) | one `struct cosmo_fsctl_check`: `nclasses` (13), `COSMO_FSCTL_R_PARTIAL`/`_CLEAN`/`_REPAIR_REFUSED`, the walk totals, and `class[13]` in the fixed index order of `fsctl.h` | `-EINVAL` for id 0; `-ENOENT` for an id this namespace does not hold; `-EBUSY` for a mount being unmounted; `-EOPNOTSUPP` for a filesystem without `check`; any error of `cosmofs_check` |
+| `COSMO_FSCTL_CHECK` (2) | one `struct cosmo_fsctl_check`: `nclasses` (16), `COSMO_FSCTL_R_PARTIAL`/`_CLEAN`/`_REPAIR_REFUSED`, the walk totals, and `class[16]` in the fixed index order of `fsctl.h` | `-EINVAL` for id 0; `-ENOENT` for an id this namespace does not hold; `-EBUSY` for a mount being unmounted; `-EOPNOTSUPP` for a filesystem without `check`; any error of `cosmofs_check` |
 | `COSMO_FSCTL_SCRUB` (3) | one `struct cosmo_fsctl_scrub` (`blocks_read`, `inodes`, `repaired`, `unrecoverable`) | as CHECK, and any error of `cosmofs_scrub` |
+| `COSMO_FSCTL_SNAP_CREATE` (4) | one `struct cosmo_fsctl_snap`: the snapshot `name` taken (id, uuid, generation); raises a format-11 pool to 12 | as CHECK; `-EOPNOTSUPP` below format 11 or for a filesystem without `snapctl`; `-EEXIST`; `-EINVAL`/`-ENAMETOOLONG` for a bad name; `-EROFS`; `-EAGAIN` with an unseeded entropy pool |
+| `COSMO_FSCTL_SNAP_LIST` (5) | one `struct cosmo_fsctl_snap_pool` (the format; a pending or held rollback), then `count` `struct cosmo_fsctl_snap` oldest first, with `referenced` and `unique` bytes (0 with `F_NO_SIZES`) | as CHECK; `-EIO` when a tree does not walk |
+| `COSMO_FSCTL_SNAP_DELETE` (6) | none (`count` 0) | as CREATE; `-ENOENT`; `-EBUSY` while anything inside it is in use |
+| `COSMO_FSCTL_SNAP_ROLLBACK` (7), `_CANCEL` (8), `_CLONE` (9), `COSMO_FSCTL_BOOT_OK` (10) | B1's later pull requests (`design.md`, "Format version 12"); `-EOPNOTSUPP` until then | |
 
 Because `cosmofs_scrub` returns `-EIO` whenever `unrecoverable` is
 non-zero, and a failed command leaves no result, an operator never
 receives a SCRUB record with `unrecoverable > 0`: the write fails with
 `-EIO` and the counts are only in the kernel log.
+
+### `cosmo-snap(8)`
+`cosmo-snap [-m MOUNTPOINT] create NAME | list | delete NAME | diff A B`
+(`userland/system/cosmo-snap.c`): the SNAP operations against the mount
+at MOUNTPOINT (`/` by default), found in `fsctl`'s listing. `list` prints
+the pool's format and one row per snapshot (name, id, creation time in
+UTC, referenced and unique KiB, uuid, flags); `diff` walks the two trees
+under `.snapshots` (`-` is the live tree) and prints `+`, `-` or `M` and a
+path per difference, then a count. Exit status 0 done, 1 refused or
+failed, 2 usage.
 
 ### `fsctl(8)`
 `fsctl list`, `fsctl check <id> [--repair]`, `fsctl scrub <id>`. Ids are
@@ -314,7 +330,8 @@ failed, or repair was refused, 2 for a usage error.
 ### ABI stability
 `COSMO_FSCTL_VERSION` 1 carried ten check classes; version 2 appended
 `extent_order`, `extent_overlap` and `dir_dup_name` at indices 10-12 and
-moved nothing. The check record is fixed-size and written whole, so a
+moved nothing; version 3 appended `snap_identity`, `rollback_record` and
+`hold` at 13-15, and grew the command by two name fields. The check record is fixed-size and written whole, so a
 size change is a version bump: a version-1 client is refused at the
 version gate. `cosmo_fsctl_result.bytes` gives the record size so a
 reader can skip records it does not know. `struct cosmofs_check_report`

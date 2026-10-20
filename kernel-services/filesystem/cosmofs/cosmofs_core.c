@@ -2044,17 +2044,17 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
 
 int cosmofs_format_pool(struct blkdev **bd, unsigned n)
 {
-    return format_at(bd, n, 1, CFS_VERSION, NULL);
+    return format_at(bd, n, 1, CFS_FORMAT_VERSION, NULL);
 }
 
 int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies)
 {
-    return format_at(bd, n, copies, CFS_VERSION, NULL);
+    return format_at(bd, n, copies, CFS_FORMAT_VERSION, NULL);
 }
 
 int cosmofs_format(struct blkdev *bd)
 {
-    return format_at(&bd, 1, 1, CFS_VERSION, NULL);
+    return format_at(&bd, 1, 1, CFS_FORMAT_VERSION, NULL);
 }
 
 /* A single-device pool named `label` (NULL or "" for none): the fs_type's
@@ -2063,7 +2063,7 @@ int cosmofs_format_label(struct blkdev *bd, const char *label)
 {
     if (label != NULL && strlen(label) > CFS_LABEL_MAX)
         return -EINVAL;
-    return format_at(&bd, 1, 1, CFS_VERSION, label);
+    return format_at(&bd, 1, 1, CFS_FORMAT_VERSION, label);
 }
 
 /* Format with encryption: a random master key, wrapped with `key`. */
@@ -2076,7 +2076,7 @@ int cosmofs_format_encrypted(struct blkdev *bd, const void *key, size_t len)
         return rc;
     g_format_key = key;
     g_format_key_len = len;
-    rc = format_at(&bd, 1, 1, CFS_VERSION, NULL);
+    rc = format_at(&bd, 1, 1, CFS_FORMAT_VERSION, NULL);
     g_format_key = NULL;
     g_format_key_len = 0;
     return rc;
@@ -2205,6 +2205,7 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         case COSMOFS_CORRUPT_DIRENT:
         case COSMOFS_CORRUPT_COUNTER:
         case COSMOFS_CORRUPT_SNAP_MEMBERS:
+        case COSMOFS_CORRUPT_SNAP_UUID:
             memset(&in, 0, sizeof(in));
             break;
         default:
@@ -2520,16 +2521,17 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         unsigned guard = 0;
         while (list != 0 && target == 0 && guard++ < 64) {
             struct cfs_buf *b;
-            if (cfs_buf_get(fs, list, CFS_KIND_SNAPLIST, &b) != 0)
+            if (cfs_buf_get(fs, list, cfs_snaplist_kind(fs), &b) != 0)
                 break;
-            const struct cfs_snap_block *sb = (const struct cfs_snap_block *)(b->data + CFS_MHDR_SIZE);
-            for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
-                if (sb->snap[i].id != 0 && sb->snap[i].alloc_root != 0) {
-                    target = sb->snap[i].alloc_root;
+            unsigned slots = cfs_snaplist_slots(fs);
+            for (unsigned i = 0; i < slots; i++) {
+                struct cfs_snapshot s;
+                if (cfs_snaplist_get(fs, b, i, &s) && s.id != 0 && s.alloc_root != 0) {
+                    target = s.alloc_root;
                     break;
                 }
             }
-            list = sb->next;
+            list = cfs_snaplist_next(b);
             cfs_buf_put(fs, b);
         }
         if (target == 0) {
@@ -2592,6 +2594,32 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
             }
         }
         kfree(blk);
+        break;
+    }
+    case COSMOFS_CORRUPT_SNAP_UUID: {
+        /* Edited where it lies, as the other corruptions are: the fault
+         * is in the committed list, not in a transaction's copy. */
+        if (fs->sb.version < 12 || fs->sb.snap_root == 0) {
+            rc = -ENOENT;
+            break;
+        }
+        struct cfs_buf *b;
+        rc = cfs_buf_get(fs, fs->sb.snap_root, CFS_KIND_SNAPLIST2, &b);
+        if (rc)
+            break;
+        rc = -ENOENT;
+        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK2; i++) {
+            struct cfs_snapshot s;
+            if (!cfs_snaplist_get(fs, b, i, &s))
+                continue;
+            memset(s.uuid, 0, sizeof(s.uuid));
+            cfs_snaplist_set(fs, b, i, &s);
+            cfs_buf_mark_dirty(fs, b);
+            token = s.id;
+            rc = 0;
+            break;
+        }
+        cfs_buf_put(fs, b);
         break;
     }
     case COSMOFS_CORRUPT_COUNTER:
@@ -3119,6 +3147,13 @@ uint64_t cosmofs_test_snap_verdicts(struct mount *mnt)
     return fs ? fs->snap_verdicts : 0;
 }
 
+void cosmofs_test_snap_no_raise(struct mount *mnt, bool on)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs != NULL)
+        fs->test_no_raise = on;
+}
+
 void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)
 {
     struct cfs *fs = cfs_of(mnt);
@@ -3262,13 +3297,25 @@ struct fs_type cosmofs_fs_type = {
      * only caller of either was a self-test. */
     .check = cosmofs_check,
     .scrub = cosmofs_scrub,
+    .snapctl = cosmofs_snapctl,
     /* A single-device pool, unencrypted: what the installer makes
      * through /dev/blkctl (roadmap M2), named or not (S6). */
     .format = cosmofs_format_label,
 };
 
+/*
+ * The newest format this kernel reads, as text in its image: cosmo-upgrade
+ * looks for it in a release's kernel.elf before switching to that release,
+ * and refuses one that could not mount the root (a kernel without the
+ * marker reads 11 at most; design.md, "Format version 12"). Printed at
+ * boot, which also keeps it in every build.
+ */
+_Static_assert(CFS_VERSION == 12, "update the format marker with CFS_VERSION");
+static const char cfs_format_marker[] = "cosmofs-format-max=12";
+
 void cosmofs_init(void)
 {
     if (vfs_register_fs(&cosmofs_fs_type))
         panic("cosmofs: cannot register");
+    kinfo("cosmofs: reads format versions 2 to 12 (%s)", cfs_format_marker);
 }

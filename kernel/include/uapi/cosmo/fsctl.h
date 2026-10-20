@@ -28,11 +28,27 @@
  * a version-2 kernel now disagree at the gate instead of in the middle
  * (docs/audit/next-subsystem-fsck-unchecked.md).
  */
-#define COSMO_FSCTL_VERSION 2
+/*
+ * Version 3 (roadmap 1.2 B1) adds the snapshot operations, which name a
+ * snapshot: the command grows two name fields and so a version-2
+ * command, sixteen bytes, is refused by its length before anything is
+ * read (docs/kernel-services/filesystem/cosmofs/design.md, "Format
+ * version 12"). The check result grows from thirteen classes to sixteen
+ * on the same terms as version 2's growth.
+ */
+#define COSMO_FSCTL_VERSION 3
 
 #define COSMO_FSCTL_LIST  1   /* the mounts this namespace holds */
 #define COSMO_FSCTL_CHECK 2   /* the structural check, against one id */
 #define COSMO_FSCTL_SCRUB 3   /* the scrub, against one id */
+/* Version 3: snapshots of one mount, named by `name` (and `name2`). */
+#define COSMO_FSCTL_SNAP_CREATE   4   /* take snapshot `name` of the live tree */
+#define COSMO_FSCTL_SNAP_LIST     5   /* every snapshot, with its sizes: cosmo_fsctl_snap records */
+#define COSMO_FSCTL_SNAP_DELETE   6   /* delete snapshot `name` */
+#define COSMO_FSCTL_SNAP_ROLLBACK 7   /* make `name` the live tree at the next mount */
+#define COSMO_FSCTL_SNAP_CANCEL   8   /* withdraw a pending rollback */
+#define COSMO_FSCTL_SNAP_CLONE    9   /* `name2`: a writable clone of snapshot `name` */
+#define COSMO_FSCTL_BOOT_OK      10   /* this boot completed: release the hold a rollback left */
 
 /* CHECK only: repair what has one right answer. Off by default. */
 #define COSMO_FSCTL_F_REPAIR (1u << 0)
@@ -40,15 +56,28 @@
 /* What a filesystem offers, in a listing's `caps`. */
 #define COSMO_FSCTL_CAP_CHECK (1u << 0)
 #define COSMO_FSCTL_CAP_SCRUB (1u << 1)
+#define COSMO_FSCTL_CAP_SNAP  (1u << 2)   /* version 3: the SNAP_* operations */
 
 /* The command. Written whole, at exactly this size: a write of any other
  * length is -EINVAL rather than a struct reinterpreted. */
+#define COSMO_FSCTL_NAME_MAX 31   /* a snapshot's name, as the filesystem allows it */
+
 struct cosmo_fsctl {
     uint16_t version;
     uint16_t op;
     uint32_t flags;
     uint64_t mount_id;        /* ignored by LIST */
+    /* Version 3: NUL-terminated; zero for the operations that take none. */
+    char name[COSMO_FSCTL_NAME_MAX + 1];
+    char name2[COSMO_FSCTL_NAME_MAX + 1];
 };
+
+/* SNAP_ROLLBACK only: leave the safety snapshot's name to the caller
+ * (`name2`) instead of pre-rollback-<seconds>. */
+#define COSMO_FSCTL_F_SAFETY_NAME (1u << 1)
+/* SNAP_LIST only: no sizes (0 in every record), so no tree is walked --
+ * what a caller wanting the pool record alone asks for. */
+#define COSMO_FSCTL_F_NO_SIZES (1u << 2)
 
 /*
  * Every result begins with this, so a reader knows what follows and how
@@ -97,12 +126,20 @@ struct cosmo_fsctl_mount {    /* LIST: one per mount */
  *  11 extent_overlap   two runs of one inode covering one lblk
  *  12 dir_dup_name     a name that repeats inside one directory
  *
+ * Version 3 appends three for the structures format version 12 adds:
+ *
+ *  13 snap_identity    a snapshot with no uuid, or one another shares,
+ *                      or an id above the list's high-water mark
+ *  14 rollback_record  a pending rollback whose record does not check
+ *                      out or names a snapshot that is not there
+ *  15 hold             a hold naming a snapshot that is not there
+ *
  * A version-1 reader stops at `nclasses` and sees the first ten, which
  * is the contract; it will report "not clean" with ten zeroes if a
  * filesystem has only one of the new faults, so a reader that shows
  * `clean` should also show `nclasses`.
  */
-#define COSMO_FSCTL_CLASSES 13
+#define COSMO_FSCTL_CLASSES 16
 #define COSMO_FSCTL_NAMES   8
 
 struct cosmo_fsctl_class {
@@ -118,7 +155,7 @@ struct cosmo_fsctl_class {
 #define COSMO_FSCTL_R_REPAIR_REFUSED (1u << 2)   /* repair asked for, the walk was not sure */
 
 struct cosmo_fsctl_check {
-    uint32_t nclasses;        /* COSMO_FSCTL_CLASSES; 10 in version 1, 13 in version 2 */
+    uint32_t nclasses;        /* COSMO_FSCTL_CLASSES; 10 in version 1, 13 in version 2, 16 in version 3 */
     uint32_t flags;           /* COSMO_FSCTL_R_* */
     uint64_t blocks_seen;
     uint64_t inodes_seen;
@@ -136,6 +173,47 @@ struct cosmo_fsctl_scrub {
     uint64_t inodes;
     uint64_t repaired;        /* blocks another copy could satisfy, and now do */
     uint64_t unrecoverable;   /* blocks no copy could satisfy */
+};
+
+/*
+ * SNAP_LIST's result is the header, then one cosmo_fsctl_snap_pool, then
+ * `count` cosmo_fsctl_snap records (`bytes` is one record's size). The
+ * pool record says what is true of the filesystem rather than of one
+ * snapshot: its format version -- which a kernel must read to mount it,
+ * so cosmo-upgrade asks before switching to an older one -- and whether a
+ * rollback is pending or held.
+ */
+#define COSMO_FSCTL_POOL_F_PENDING (1u << 0)   /* a rollback applies at the next mount */
+#define COSMO_FSCTL_POOL_F_HELD    (1u << 1)   /* a rollback applied; the hold lasts until BOOT_OK */
+
+struct cosmo_fsctl_snap_pool {
+    uint32_t format;          /* the filesystem's format version */
+    uint32_t flags;           /* COSMO_FSCTL_POOL_F_* */
+    uint64_t reserved[3];
+};
+
+/*
+ * SNAP_LIST: one per snapshot, oldest first. The sizes are a walk of
+ * every tree under the mount's lock: `referenced` is what the snapshot's
+ * tree reaches, `unique` the part of it no other tree (the live one, any
+ * other snapshot or clone) reaches -- what deleting it would give back.
+ */
+#define COSMO_FSCTL_SNAP_F_CLONE    (1u << 0)   /* a writable clone; `origin_id` is its snapshot */
+#define COSMO_FSCTL_SNAP_F_TARGET   (1u << 1)   /* a pending rollback names it as the tree to become live */
+#define COSMO_FSCTL_SNAP_F_SAFETY   (1u << 2)   /* a pending rollback took it of the live tree */
+#define COSMO_FSCTL_SNAP_F_HELD     (1u << 3)   /* not deletable until the next boot completes */
+
+struct cosmo_fsctl_snap {
+    uint64_t id;
+    uint64_t generation;      /* the commit it pins */
+    uint64_t created_ns;      /* wall clock */
+    uint64_t origin_id;
+    uint64_t referenced;      /* bytes */
+    uint64_t unique;          /* bytes */
+    uint8_t uuid[16];
+    uint32_t flags;           /* COSMO_FSCTL_SNAP_F_* */
+    uint32_t format;          /* the filesystem's format version */
+    char name[COSMO_FSCTL_NAME_MAX + 1];
 };
 
 #endif /* UAPI_COSMO_FSCTL_H */

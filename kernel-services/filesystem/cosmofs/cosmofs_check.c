@@ -194,6 +194,10 @@ struct check {
      * would put the stale number back. */
     bool free_wrong;
     bool inodes_wrong;
+    /* The uuids walk_snapshots has seen, for the duplicate test; sized
+     * up front from the snapshot count, like every other map here. */
+    uint8_t (*uuids)[16];
+    unsigned nuuids, uuid_cap;
 };
 
 /* 4 KiB, so a directory of a hundred names collides a few per cent of
@@ -414,7 +418,12 @@ static void walk_inode_blocks(struct check *ck, const struct cfs_inode *in, bool
  * the inodes are this filesystem's own (a snapshot's inodes are not
  * counted toward inode_count or nlink).
  */
-static void walk_imap(struct check *ck, uint64_t imap_root, bool live, bool count_them)
+/*
+ * `next_ino` is the tree's own high-water mark: a snapshot's, for a
+ * snapshot. The live one's is not a bound on a snapshot's inodes once a
+ * rollback has made an older tree live (design.md, "Rollback").
+ */
+static void walk_imap(struct check *ck, uint64_t imap_root, uint64_t next_ino, bool live, bool count_them)
 {
     if (imap_root == 0)
         return;
@@ -454,7 +463,7 @@ static void walk_imap(struct check *ck, uint64_t imap_root, bool live, bool coun
                  * rather than acted on.
                  */
                 uint64_t expect = ((uint64_t)i * CFS_PTRS_PER_BLOCK + j) * CFS_INODES_PER_BLOCK + k;
-                if (in->ino != expect || expect >= ck->fs->sb.next_ino) {
+                if (in->ino != expect || expect >= next_ino) {
                     name_it(&ck->rep->dir_bad, expect);
                     ck->rep->partial = true;
                     continue;
@@ -480,10 +489,37 @@ static void walk_imap(struct check *ck, uint64_t imap_root, bool live, bool coun
     cfs_buf_put(ck->fs, b1);
 }
 
+/*
+ * Version 12's identity (design.md, "Format version 12"): every snapshot
+ * has a uuid, no two share one, and no id is above the list head's
+ * high-water mark -- the mark is what keeps an id from being handed out
+ * twice, so an id above it is one the next snapshot could repeat. Each
+ * offender is named by its id. `uuids` holds the ones seen so far; a list
+ * longer than it was sized for makes the answer partial.
+ */
+static void check_identity(struct check *ck, const struct cfs_snapshot *s, uint64_t max_id)
+{
+    static const uint8_t zero[16];
+    bool bad = memcmp(s->uuid, zero, sizeof(zero)) == 0 || s->id > max_id;
+    for (unsigned k = 0; k < ck->nuuids && !bad; k++)
+        bad = memcmp(ck->uuids[k], s->uuid, 16) == 0;
+    if (bad) {
+        name_it(&ck->rep->snap_identity, s->id);
+        return;
+    }
+    if (ck->nuuids < ck->uuid_cap)
+        memcpy(ck->uuids[ck->nuuids++], s->uuid, 16);
+    else
+        ck->rep->partial = true;
+}
+
 static void walk_snapshots(struct check *ck)
 {
-    uint64_t list = ck->fs->sb.snap_root;
+    struct cfs *fs = ck->fs;
+    uint64_t list = fs->sb.snap_root;
+    uint64_t max_id = 0;
     unsigned guard = 0;
+    unsigned slots = cfs_snaplist_slots(fs);
     while (list != 0) {
         if (guard++ > CFS_CHECK_MAX_CHAIN) {
             name_it(&ck->rep->chain_cycle, list);
@@ -491,18 +527,22 @@ static void walk_snapshots(struct check *ck)
         }
         claim(ck, list, true);   /* the list itself belongs to the live generation */
         struct cfs_buf *b;
-        if (read_meta(ck, list, CFS_KIND_SNAPLIST, &b))
+        if (read_meta(ck, list, cfs_snaplist_kind(fs), &b))
             return;
-        const struct cfs_snap_block *sb = (const struct cfs_snap_block *)(b->data + CFS_MHDR_SIZE);
-        uint64_t next = sb->next;
-        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
-            const struct cfs_snapshot *s = &sb->snap[i];
-            if (s->id == 0)
+        uint64_t next = cfs_snaplist_next(b);
+        if (fs->sb.version >= 12 && list == fs->sb.snap_root)
+            max_id = ((const struct cfs_snap_block2 *)(b->data + CFS_MHDR_SIZE))->max_id;
+        for (unsigned i = 0; i < slots; i++) {
+            struct cfs_snapshot snap;
+            if (!cfs_snaplist_get(fs, b, i, &snap) || snap.id == 0)
                 continue;
+            const struct cfs_snapshot *s = &snap;
             ck->rep->snapshots_seen++;
+            if (fs->sb.version >= 12)
+                check_identity(ck, s, max_id);
             /* A snapshot's trees are seen, never live: it holds blocks
              * the live tree also holds, on purpose. */
-            walk_imap(ck, s->imap_root, false, false);
+            walk_imap(ck, s->imap_root, s->next_ino, false, false);
             /* From version 4 a snapshot's alloc_root is the *member
              * table* it was taken with, and each member's own index
              * hangs off that (cosmofs_snap.c, snap_alloc_root); before
@@ -945,6 +985,15 @@ static int repair(struct check *ck)
             ck->rep->nlink_wrong.repaired++;
     }
 
+    /* A snapshot with no uuid or a shared one gets a fresh one, and the
+     * high-water mark rises to the highest id: both have one right
+     * answer and neither is an argument from absence. */
+    if (rc == 0 && ck->rep->snap_identity.count != 0) {
+        unsigned fixed = 0;
+        rc = cfs_snapshot_fix_identity(fs, &fixed);
+        ck->rep->snap_identity.repaired += fixed;
+    }
+
     /*
      * The totals, and only the ones the comparison disagreed with. The
      * repairs above move both counters themselves -- freeing a leaked
@@ -974,6 +1023,7 @@ static bool report_clean(const struct cosmofs_check_report *r)
            r->dir_bad.count == 0 && r->counter_wrong.count == 0 && r->chain_cycle.count == 0 &&
            r->extent_order.count == 0 && r->extent_overlap.count == 0 &&
            r->dir_dup_name.count == 0 &&
+           r->snap_identity.count == 0 && r->rollback_record.count == 0 && r->hold.count == 0 &&
            r->unreadable.count == 0 &&
            /*
             * A pass that did not finish cannot call a filesystem
@@ -1026,7 +1076,9 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         ck.name_seen = kmalloc(CFS_CHECK_NAMEBYTES, 0);
         ck.dup_blk = kmalloc(CFS_BLOCK, 0);
         ck.dup_cmp = kmalloc(CFS_BLOCK, 0);
-        if (ck.name_seen == NULL || ck.dup_blk == NULL || ck.dup_cmp == NULL)
+        ck.uuid_cap = fs->snap_count + 8;
+        ck.uuids = kmalloc((size_t)ck.uuid_cap * 16u, 0);
+        if (ck.name_seen == NULL || ck.dup_blk == NULL || ck.dup_cmp == NULL || ck.uuids == NULL)
             rc = -ENOMEM;
     }
     if (rc) {
@@ -1040,6 +1092,7 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         kfree(ck.name_seen);
         kfree(ck.dup_blk);
         kfree(ck.dup_cmp);
+        kfree(ck.uuids);
         kfree(rep);
         return rc;   /* -ENOMEM before the walk, never half way through it */
     }
@@ -1066,7 +1119,7 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         for (uint64_t b = 0; b < fs->mem[v].first_usable; b++)
             claim(&ck, CFS_DVA(v, b), true);
 
-    walk_imap(&ck, fs->sb.imap_root, true, true);
+    walk_imap(&ck, fs->sb.imap_root, fs->sb.next_ino, true, true);
     for (unsigned v = 0; v < fs->nmembers; v++)
         walk_alloc(&ck, fs->mem[v].alloc_root, true);
     if (fs->sb.members != 0)
@@ -1109,6 +1162,7 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     kfree(ck.name_seen);
     kfree(ck.dup_blk);
     kfree(ck.dup_cmp);
+    kfree(ck.uuids);
 
     rep->clean = report_clean(rep);
     rep->elapsed_ns = clock_since_ns(t0);
@@ -1120,14 +1174,16 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     if (!rep->clean)
         kwarn("cosmofs: check: %llu leaked, %llu free-in-use, %llu cross-linked, %llu bad nlink, %llu orphan, "
               "%llu dangling, %llu bad entries, %llu counters, %llu cycles, %llu unordered extents, "
-              "%llu overlapping extents, %llu duplicate names, %llu unreadable",
+              "%llu overlapping extents, %llu duplicate names, %llu snapshot identities, "
+              "%llu rollback records, %llu holds, %llu unreadable",
               (unsigned long long)rep->alloc_not_seen.count, (unsigned long long)rep->seen_not_alloc.count,
               (unsigned long long)rep->dup.count, (unsigned long long)rep->nlink_wrong.count,
               (unsigned long long)rep->orphan.count, (unsigned long long)rep->dangling_entry.count,
               (unsigned long long)rep->dir_bad.count, (unsigned long long)rep->counter_wrong.count,
               (unsigned long long)rep->chain_cycle.count, (unsigned long long)rep->extent_order.count,
               (unsigned long long)rep->extent_overlap.count, (unsigned long long)rep->dir_dup_name.count,
-              (unsigned long long)rep->unreadable.count);
+              (unsigned long long)rep->snap_identity.count, (unsigned long long)rep->rollback_record.count,
+              (unsigned long long)rep->hold.count, (unsigned long long)rep->unreadable.count);
     kfree(rep);
     return rc;
 }

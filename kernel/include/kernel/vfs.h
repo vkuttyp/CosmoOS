@@ -143,6 +143,7 @@ struct vnode {
 
 struct cosmofs_check_report;
 struct cosmofs_scrub_stats;
+struct cosmofs_snap_req;
 
 /* What statfs reports about the filesystem a vnode is on (Linux's
  * struct statfs, which df reads). Sizes are in `bsize` units; 0 blocks
@@ -176,6 +177,9 @@ struct fs_type {
      */
     int (*check)(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
     int (*scrub)(struct mount *mnt, struct cosmofs_scrub_stats *out);
+    /* Optional: snapshots of one mount (roadmap 1.2 B1), on the same terms
+     * as the passes above. */
+    int (*snapctl)(struct mount *mnt, struct cosmofs_snap_req *req);
     /* Optional: make an empty filesystem on `bdev`, which is not mounted
      * (vfs_format checks), named `label` (NULL: none; a filesystem with
      * no names refuses a non-empty one). Reached from /dev/blkctl

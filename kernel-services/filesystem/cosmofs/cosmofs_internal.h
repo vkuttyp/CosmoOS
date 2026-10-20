@@ -99,6 +99,8 @@ struct cfs {
     /* Test hook: orphan_fill returns -EIO, so a commit fails with the
      * record's blocks reserved (docs/audit/next-subsystem-orphan.md). */
     bool test_fail_orphan;
+    /* Test hook: no raise to version 12; snapshots taken are version 11's. */
+    bool test_no_raise;
     /* Walks of the snapshot list, since mount. The verdict used to be
      * taken twice per freed block -- once for the record, once by the
      * release loop -- and is now taken once; this is how that is
@@ -208,11 +210,32 @@ void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b);
 /* Snapshots (cosmofs_snap.c; design.md, "Format version 3"). */
 int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uint64_t ino,
                       struct cfs_inode *out);
-int cfs_snapshot_create(struct cfs *fs, const char *name);
+int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct cfs_snapshot *out);
 int cfs_snapshot_delete(struct cfs *fs, const char *name);
 int cfs_snapshot_list(struct cfs *fs, struct cfs_snapshot *out, unsigned max, unsigned *count);
 bool cfs_snapshot_find(struct cfs *fs, const char *name, struct cfs_snapshot *out);
 bool cfs_has_snapshots(struct cfs *fs);
+/* The list's two layouts (version 11 and 12) behind one interface: the
+ * block kind and slot count for this filesystem's version, a block's
+ * `next`, and entry `i` read into / written from the in-memory struct
+ * (design.md, "Format version 12"). */
+/* The checker's repair for a version-12 list's identity faults. */
+int cfs_snapshot_fix_identity(struct cfs *fs, unsigned *fixed);
+uint32_t cfs_snaplist_kind(const struct cfs *fs);
+unsigned cfs_snaplist_slots(const struct cfs *fs);
+uint64_t cfs_snaplist_next(const struct cfs_buf *b);
+bool cfs_snaplist_get(const struct cfs *fs, const struct cfs_buf *b, unsigned i, struct cfs_snapshot *out);
+void cfs_snaplist_set(const struct cfs *fs, struct cfs_buf *b, unsigned i, const struct cfs_snapshot *s);
+/*
+ * Every block one tree reaches (cosmofs_reach.c): its inode map, its
+ * inode blocks, and each inode's extents, extent chain and checksum
+ * tree. `mark` is called once per block per walk, with the block's
+ * linear index; an unreadable block makes the walk return -EIO after
+ * finishing what it could reach. `next_ino` bounds the inode numbers the
+ * tree may hold, which is the tree's own and not the live one's.
+ */
+int cfs_tree_walk(struct cfs *fs, uint64_t imap_root, uint64_t next_ino,
+                  void (*mark)(void *arg, uint64_t lin), void *arg);
 /* Commit-time: hold `blk` for the newest snapshot instead of freeing it.
  * False when no snapshot exists and the caller should free it. */
 

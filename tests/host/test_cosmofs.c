@@ -21,7 +21,7 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 11 && CFS_VERSION_MIN == 2);
+    EXPECT(CFS_VERSION == 12 && CFS_VERSION_MIN == 2 && CFS_FORMAT_VERSION == 11);
     /* Version 8: a symbolic link is a third type in the mode's top
      * nibble, so the inode did not grow and every older image still
      * mounts; what version 8 gates is *writing* one. */
@@ -57,8 +57,22 @@ static void test_layout_sizes(void)
     EXPECT(CFS_ORPHANS_PER_BLOCK == CFS_DEAD_PER_BLOCK);
     EXPECT(sizeof(struct cfs_inode) == CFS_INODE_SIZE);
     /* The snapshot structures the version adds. */
-    EXPECT(sizeof(struct cfs_snapshot) == 96);
-    EXPECT(CFS_SNAPS_PER_BLOCK >= 40 && sizeof(struct cfs_snap_block) <= CFS_BLOCK - CFS_MHDR_SIZE);
+    EXPECT(sizeof(struct cfs_snapshot_v11) == 96);
+    EXPECT(CFS_SNAPS_PER_BLOCK == 42 && sizeof(struct cfs_snap_block) <= CFS_BLOCK - CFS_MHDR_SIZE);
+    /*
+     * Version 12 (roadmap 1.2 B1): the entry grows to 128 bytes for its
+     * uuid, origin and flags, in a list kind of its own whose blocks also
+     * carry the id high-water mark; the rollback record is a block of its
+     * own named by the superblock's last reserved word, so the superblock
+     * still did not grow (design.md, "Format version 12").
+     */
+    EXPECT(sizeof(struct cfs_snapshot) == 128);
+    EXPECT(CFS_SNAPS_PER_BLOCK2 == 31 && sizeof(struct cfs_snap_block2) <= CFS_BLOCK - CFS_MHDR_SIZE);
+    EXPECT(offsetof(struct cfs_snap_block2, snap) == 16);
+    EXPECT(CFS_KIND_SNAPLIST2 == 15 && CFS_KIND_ROLLBACK == 16);
+    EXPECT(sizeof(struct cfs_rollback) <= CFS_BLOCK - CFS_MHDR_SIZE);
+    EXPECT(offsetof(struct cfs_super, rollback_root) == offsetof(struct cfs_super, label) + CFS_LABEL_MAX);
+    EXPECT(offsetof(struct cfs_super, crc) == offsetof(struct cfs_super, rollback_root) + 8);
     EXPECT(sizeof(struct cfs_dead_block) <= CFS_BLOCK - CFS_MHDR_SIZE);
     EXPECT(CFS_SNAP_INO(3, 7) == ((3ull << 48) | 7) && CFS_INO_OF(CFS_SNAP_INO(3, 7)) == 7);
     EXPECT(CFS_SNAP_TAG(CFS_SNAP_INO(3, 7)) == 3 && CFS_SNAP_TAG(7) == 0);

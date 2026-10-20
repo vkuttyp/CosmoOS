@@ -342,6 +342,7 @@ bool selftest_cosmofs_metadata_csum_id(const char **reason);  /* the metadata he
 bool selftest_cosmofs_fsync(const char **reason);
 bool selftest_cosmofs_snapshot(const char **reason);
 bool selftest_cosmofs_snapshot_remount(const char **reason);      /* fsync commits */
+bool selftest_cosmofs_snap_identity(const char **reason);         /* format 12: uuids, ids, sizes */
 bool selftest_cosmofs_pool2(const char **reason);                 /* a pool of two members */
 bool selftest_cosmofs_v3(const char **reason);
 bool selftest_cosmofs_freelog_format(const char **reason);

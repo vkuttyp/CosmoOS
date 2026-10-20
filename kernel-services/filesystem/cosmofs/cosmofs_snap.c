@@ -16,16 +16,120 @@
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/random.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
 
 #include "cosmofs_internal.h"
 
-/* --- the snapshot list ---------------------------------------------------- */
+/* --- the snapshot list ---------------------------------------------------- *
+ *
+ * Two layouts: version 11 and older keep 42 96-byte entries a block
+ * (CFS_KIND_SNAPLIST), version 12 keeps 31 128-byte ones and the id
+ * high-water mark (CFS_KIND_SNAPLIST2). Everything here reads and writes
+ * an entry through the four accessors below, which decide by the
+ * in-memory superblock's version -- the same field the raise to 12 sets in
+ * the transaction that rewrites the list, so the two cannot disagree
+ * (design.md, "Format version 12").
+ */
 
-static struct cfs_snap_block *snap_payload(struct cfs_buf *b)
+uint32_t cfs_snaplist_kind(const struct cfs *fs)
 {
-    return (struct cfs_snap_block *)(b->data + CFS_MHDR_SIZE);
+    return fs->sb.version >= 12 ? CFS_KIND_SNAPLIST2 : CFS_KIND_SNAPLIST;
+}
+
+unsigned cfs_snaplist_slots(const struct cfs *fs)
+{
+    return fs->sb.version >= 12 ? CFS_SNAPS_PER_BLOCK2 : CFS_SNAPS_PER_BLOCK;
+}
+
+/* `next` is the first word of both payloads. */
+static uint64_t *snaplist_next(struct cfs_buf *b)
+{
+    return (uint64_t *)(b->data + CFS_MHDR_SIZE);
+}
+
+uint64_t cfs_snaplist_next(const struct cfs_buf *b)
+{
+    return *(const uint64_t *)(b->data + CFS_MHDR_SIZE);
+}
+
+/* Entry `i` of a list block, false when the slot is empty. */
+bool cfs_snaplist_get(const struct cfs *fs, const struct cfs_buf *b, unsigned i, struct cfs_snapshot *out)
+{
+    if (fs->sb.version >= 12) {
+        const struct cfs_snap_block2 *sb = (const struct cfs_snap_block2 *)(b->data + CFS_MHDR_SIZE);
+        if (i >= CFS_SNAPS_PER_BLOCK2 || sb->snap[i].name[0] == '\0')
+            return false;
+        *out = sb->snap[i];
+        out->name[CFS_SNAP_NAME_MAX] = '\0';
+        return true;
+    }
+    const struct cfs_snap_block *sb = (const struct cfs_snap_block *)(b->data + CFS_MHDR_SIZE);
+    if (i >= CFS_SNAPS_PER_BLOCK || sb->snap[i].name[0] == '\0')
+        return false;
+    const struct cfs_snapshot_v11 *o = &sb->snap[i];
+    memset(out, 0, sizeof(*out));
+    out->generation = o->generation;
+    out->imap_root = o->imap_root;
+    out->alloc_root = o->alloc_root;
+    out->next_ino = o->next_ino;
+    out->inode_count = o->inode_count;
+    out->deadlist = o->deadlist;
+    out->created_ns = o->created_ns;
+    out->id = o->id;
+    memcpy(out->name, o->name, sizeof(o->name));
+    out->name[CFS_SNAP_NAME_MAX] = '\0';
+    return true;
+}
+
+/* Write entry `i` (NULL: empty it). The caller marks the block dirty. A
+ * version-11 slot has no room for the identity fields and drops them,
+ * which is why nothing that sets them runs before the raise. */
+void cfs_snaplist_set(const struct cfs *fs, struct cfs_buf *b, unsigned i, const struct cfs_snapshot *s)
+{
+    if (fs->sb.version >= 12) {
+        struct cfs_snap_block2 *sb = (struct cfs_snap_block2 *)(b->data + CFS_MHDR_SIZE);
+        if (i >= CFS_SNAPS_PER_BLOCK2)
+            return;
+        if (s == NULL)
+            memset(&sb->snap[i], 0, sizeof(sb->snap[i]));
+        else
+            sb->snap[i] = *s;
+        return;
+    }
+    struct cfs_snap_block *sb = (struct cfs_snap_block *)(b->data + CFS_MHDR_SIZE);
+    if (i >= CFS_SNAPS_PER_BLOCK)
+        return;
+    struct cfs_snapshot_v11 *o = &sb->snap[i];
+    memset(o, 0, sizeof(*o));
+    if (s == NULL)
+        return;
+    o->generation = s->generation;
+    o->imap_root = s->imap_root;
+    o->alloc_root = s->alloc_root;
+    o->next_ino = s->next_ino;
+    o->inode_count = s->inode_count;
+    o->deadlist = s->deadlist;
+    o->created_ns = s->created_ns;
+    o->id = s->id;
+    memcpy(o->name, s->name, sizeof(o->name));
+}
+
+/* A version-12 list's high-water mark, from its head block: the highest
+ * id ever handed out here, so a deleted newest snapshot's id is not
+ * reused after a remount (V22; inventory §3's "snapshot ids are unique
+ * per mount"). 0 below version 12 or with no list. */
+static uint64_t snaplist_max_id(struct cfs *fs)
+{
+    if (fs->sb.version < 12 || fs->sb.snap_root == 0)
+        return 0;
+    struct cfs_buf *b;
+    if (cfs_buf_get(fs, fs->sb.snap_root, CFS_KIND_SNAPLIST2, &b))
+        return 0;
+    uint64_t m = ((const struct cfs_snap_block2 *)(b->data + CFS_MHDR_SIZE))->max_id;
+    cfs_buf_put(fs, b);
+    return m;
 }
 
 static struct cfs_dead_block *dead_payload(struct cfs_buf *b)
@@ -38,19 +142,23 @@ static struct cfs_dead_block *dead_payload(struct cfs_buf *b)
 static int snap_walk(struct cfs *fs, bool (*fn)(struct cfs_snapshot *s, void *arg), void *arg, bool write)
 {
     uint64_t blkno = fs->sb.snap_root;
+    unsigned slots = cfs_snaplist_slots(fs);
     while (blkno) {
         struct cfs_buf *b;
-        int rc = cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b);
+        int rc = cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b);
         if (rc)
             return rc;
-        struct cfs_snap_block *sb = snap_payload(b);
-        uint64_t next = sb->next;
-        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
-            if (sb->snap[i].name[0] == '\0')
+        uint64_t next = cfs_snaplist_next(b);
+        for (unsigned i = 0; i < slots; i++) {
+            struct cfs_snapshot s;
+            if (!cfs_snaplist_get(fs, b, i, &s))
                 continue;
-            if (!fn(&sb->snap[i], arg)) {
-                if (write)
+            if (!fn(&s, arg)) {
+                if (write) {
+                    /* `fn` may have emptied it: a zeroed name is an empty slot. */
+                    cfs_snaplist_set(fs, b, i, s.name[0] ? &s : NULL);
                     cfs_buf_mark_dirty(fs, b);
+                }
                 cfs_buf_put(fs, b);
                 return 0;
             }
@@ -223,7 +331,7 @@ static int snap_cow(struct cfs *fs, struct cfs_res *res)
             break;
         }
         struct cfs_buf *b;
-        rc = cfs_buf_get(fs, *slot, CFS_KIND_SNAPLIST, &b);
+        rc = cfs_buf_get(fs, *slot, cfs_snaplist_kind(fs), &b);
         if (rc)
             break;
         /* The parent slot is `fs->sb.snap_root` for the head and a
@@ -238,7 +346,7 @@ static int snap_cow(struct cfs *fs, struct cfs_res *res)
         if (prev != NULL)
             cfs_buf_put(fs, prev);
         prev = b;
-        slot = &snap_payload(b)->next;
+        slot = snaplist_next(b);
     }
     if (prev != NULL)
         cfs_buf_put(fs, prev);
@@ -401,20 +509,25 @@ static bool snapshot_holds(struct cfs *fs, uint64_t blk, uint64_t *best_at, unsi
     bool any = false;
     while (blkno) {
         struct cfs_buf *b;
-        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b)) {
+        if (cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b)) {
             /* The list cannot be read, so which snapshot needs this
              * block is unknown: hold it. Freeing on an unreadable list
              * would hand a live snapshot's block to the allocator. */
             kerror("cosmofs: snapshot list unreadable; holding block %llu", (unsigned long long)blk);
             return true;
         }
-        struct cfs_snap_block *sb = snap_payload(b);
-        uint64_t next = sb->next;
-        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
-            if (sb->snap[i].name[0] == '\0')
+        uint64_t next = cfs_snaplist_next(b);
+        unsigned slots = cfs_snaplist_slots(fs);
+        for (unsigned i = 0; i < slots; i++) {
+            struct cfs_snapshot s;
+            /* A clone is a tree of its own, not a point in the live
+             * tree's history: the live tree never reaches a block a
+             * clone was born with, so a clone is never the snapshot a
+             * live free belongs to (design.md, "Clones"). */
+            if (!cfs_snaplist_get(fs, b, i, &s) || (s.flags & CFS_SNAP_F_CLONE))
                 continue;
-            if (!any || sb->snap[i].generation >= best_gen) {
-                best_gen = sb->snap[i].generation;
+            if (!any || s.generation >= best_gen) {
+                best_gen = s.generation;
                 best_block = blkno;
                 best_index = i;
                 any = true;
@@ -426,16 +539,23 @@ static bool snapshot_holds(struct cfs *fs, uint64_t blk, uint64_t *best_at, unsi
     if (!any)
         return false;
     struct cfs_buf *b;
-    if (cfs_buf_get(fs, best_block, CFS_KIND_SNAPLIST, &b)) {
+    if (cfs_buf_get(fs, best_block, cfs_snaplist_kind(fs), &b)) {
         kerror("cosmofs: snapshot list unreadable; holding block %llu", (unsigned long long)blk);
         return true;
     }
-    struct cfs_snap_block *sb = snap_payload(b);
+    struct cfs_snapshot newest;
+    if (!cfs_snaplist_get(fs, b, best_index, &newest)) {
+        /* The entry the walk just found is gone: the list moved under
+         * the question, so the answer is unknown -- hold it. */
+        cfs_buf_put(fs, b);
+        kerror("cosmofs: snapshot list changed during a verdict; holding block %llu", (unsigned long long)blk);
+        return true;
+    }
     /* Testing the newest snapshot alone is exact here: a block reaching
      * the commit's free list was in the live tree until now, so if the
      * newest snapshot does not occupy it, it was born after that
      * snapshot and no older one can name it either. */
-    bool held = cfs_snapshot_references(fs, &sb->snap[best_index], blk);
+    bool held = cfs_snapshot_references(fs, &newest, blk);
     cfs_buf_put(fs, b);
     if (held && best_at != NULL) {
         *best_at = best_block;
@@ -469,14 +589,15 @@ uint64_t cfs_snapshot_deadlist_len(struct cfs *fs, uint64_t of)
     unsigned guard = 0;
     while (blkno && guard++ < CFS_SNAP_MAX_CHAIN) {
         struct cfs_buf *b;
-        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b))
+        if (cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b))
             return total;
-        struct cfs_snap_block *sb = snap_payload(b);
-        uint64_t next = sb->next;
-        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
-            if (sb->snap[i].name[0] == '\0')
+        uint64_t next = cfs_snaplist_next(b);
+        unsigned slots = cfs_snaplist_slots(fs);
+        for (unsigned i = 0; i < slots; i++) {
+            struct cfs_snapshot s;
+            if (!cfs_snaplist_get(fs, b, i, &s))
                 continue;
-            uint64_t dl = sb->snap[i].deadlist;
+            uint64_t dl = s.deadlist;
             unsigned dguard = 0;
             while (dl && dguard++ < CFS_SNAP_MAX_CHAIN) {
                 struct cfs_buf *db;
@@ -535,14 +656,15 @@ uint64_t cfs_snapshot_deadlist_dups(struct cfs *fs, uint64_t *examined, uint64_t
     unsigned guard = 0;
     while (blkno && guard++ < CFS_SNAP_MAX_CHAIN) {
         struct cfs_buf *b;
-        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b))
+        if (cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b))
             break;
-        struct cfs_snap_block *sb = snap_payload(b);
-        uint64_t next = sb->next;
-        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
-            if (sb->snap[i].name[0] == '\0')
+        uint64_t next = cfs_snaplist_next(b);
+        unsigned slots = cfs_snaplist_slots(fs);
+        for (unsigned i = 0; i < slots; i++) {
+            struct cfs_snapshot s;
+            if (!cfs_snaplist_get(fs, b, i, &s))
                 continue;
-            uint64_t dl = sb->snap[i].deadlist;
+            uint64_t dl = s.deadlist;
             unsigned dguard = 0;
             while (dl && dguard++ < CFS_SNAP_MAX_CHAIN) {
                 struct cfs_buf *db;
@@ -615,9 +737,9 @@ static unsigned snap_chain_len(struct cfs *fs)
     uint64_t blkno = fs->sb.snap_root;
     while (blkno && n < CFS_SNAP_MAX_CHAIN) {
         struct cfs_buf *b;
-        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b))
+        if (cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b))
             break;
-        blkno = snap_payload(b)->next;
+        blkno = cfs_snaplist_next(b);
         cfs_buf_put(fs, b);
         n++;
     }
@@ -693,13 +815,19 @@ int cfs_snapshot_fill(struct cfs *fs, struct cfs_res *res, bool *held, unsigned 
                 continue;
         }
         struct cfs_buf *b;
-        int rc = cfs_buf_get(fs, at, CFS_KIND_SNAPLIST, &b);
+        int rc = cfs_buf_get(fs, at, cfs_snaplist_kind(fs), &b);
         if (rc == 0) {
-            struct cfs_snap_block *sb = snap_payload(b);
-            uint64_t head = sb->snap[ix].deadlist;
-            rc = fs->test_fail_snapfill ? -EIO : deadlist_append(fs, &head, dva, res);
+            struct cfs_snapshot s;
+            uint64_t head = 0;
+            if (!cfs_snaplist_get(fs, b, ix, &s))
+                rc = -EIO;   /* the entry the verdict named is gone */
+            else
+                head = s.deadlist;
+            if (rc == 0)
+                rc = fs->test_fail_snapfill ? -EIO : deadlist_append(fs, &head, dva, res);
             if (rc == 0) {
-                sb->snap[ix].deadlist = head;
+                s.deadlist = head;
+                cfs_snaplist_set(fs, b, ix, &s);
                 cfs_buf_mark_dirty(fs, b);
                 appended++;
                 *appended_out = appended;
@@ -777,7 +905,163 @@ static int snap_max_id(struct cfs *fs, uint64_t *max, unsigned *live)
     return 0;
 }
 
-int cfs_snapshot_create(struct cfs *fs, const char *name)
+/*
+ * Raise a version-11 pool to 12 (design.md, "Format version 12"): the
+ * list is rewritten in the version-12 layout, every existing snapshot
+ * given a uuid, and the superblock's version raised -- all in the open
+ * transaction, which the caller commits, so the raise and the operation
+ * that needed it reach the disk together or not at all.
+ *
+ * Lazy on purpose: a kernel of v1.0.7 or older reads format 11 at most,
+ * so a pool is changed only by the first operation that needs what 12
+ * adds, never by a mount. Below 11 nothing is raised: those formats
+ * differ in more than the list (version 4's DVAs, 9's and 10's records),
+ * and a snapshot with identity is refused there instead.
+ *
+ * Everything that can fail without having changed anything runs first;
+ * past the first change a failure abandons the transaction (CF17).
+ */
+static int snap_raise(struct cfs *fs)
+{
+    if (fs->sb.version >= 12)
+        return 0;
+    if (fs->sb.version < 11)
+        return -EOPNOTSUPP;
+    int rc = cfs_need_seeded("give snapshots an identity");
+    if (rc)
+        return rc;
+    unsigned total = 0;
+    rc = cfs_snapshot_list(fs, NULL, 0, &total);
+    if (rc)
+        return rc;
+    struct cfs_snapshot *all = total ? kmalloc((size_t)total * sizeof(*all), 0) : NULL;
+    if (total && all == NULL)
+        return -ENOMEM;
+    unsigned n = 0;
+    rc = cfs_snapshot_list(fs, all, total, &n);
+    if (rc || n != total) {
+        kfree(all);
+        return rc ? rc : -EIO;
+    }
+    uint64_t max_id = fs->snap_max_id;
+    for (unsigned i = 0; i < n; i++) {
+        if (all[i].id > max_id)
+            max_id = all[i].id;
+        random_get_bytes(all[i].uuid, sizeof(all[i].uuid));
+        all[i].uuid[6] = (uint8_t)((all[i].uuid[6] & 0x0Fu) | 0x40u);   /* RFC 4122 version 4 */
+        all[i].uuid[8] = (uint8_t)((all[i].uuid[8] & 0x3Fu) | 0x80u);
+    }
+
+    /* From here the transaction holds the change. The old chain is named
+     * by the superblock alone, which no snapshot preserves: exempt. */
+    uint64_t blk = fs->sb.snap_root;
+    unsigned guard = 0;
+    while (blk && rc == 0) {
+        if (guard++ > CFS_SNAP_MAX_CHAIN) {
+            rc = -EIO;
+            break;
+        }
+        struct cfs_buf *b;
+        rc = cfs_buf_get(fs, blk, CFS_KIND_SNAPLIST, &b);
+        if (rc)
+            break;
+        uint64_t next = cfs_snaplist_next(b);
+        cfs_buf_put(fs, b);
+        cfs_free_block_exempt(fs, blk);
+        blk = next;
+    }
+    if (rc == 0) {
+        fs->sb.snap_root = 0;
+        fs->sb.version = 12;
+        for (unsigned i = 0; i < n && rc == 0; i += CFS_SNAPS_PER_BLOCK2) {
+            struct cfs_buf *b;
+            rc = cfs_buf_new(fs, CFS_KIND_SNAPLIST2, &b);
+            if (rc)
+                break;
+            struct cfs_snap_block2 *sb = (struct cfs_snap_block2 *)(b->data + CFS_MHDR_SIZE);
+            sb->next = fs->sb.snap_root;
+            sb->max_id = max_id;
+            for (unsigned k = 0; k < CFS_SNAPS_PER_BLOCK2 && i + k < n; k++)
+                sb->snap[k] = all[i + k];
+            fs->sb.snap_root = b->blkno;
+            cfs_buf_put(fs, b);
+        }
+    }
+    kfree(all);
+    if (rc) {
+        cfs_fail(fs, rc);
+        return rc;
+    }
+    fs->snap_max_id = max_id;
+    kinfo("cosmofs: format version 11 -> 12 (snapshot identity, %u snapshot(s)); a kernel that reads "
+          "format 11 at most (v1.0.7 and older) cannot mount this pool", n);
+    return 0;
+}
+
+/* Set the head block's high-water mark. The list was copied by this
+ * transaction (snap_cow), so the head is this generation's to edit. */
+static int snaplist_set_max_id(struct cfs *fs, uint64_t id)
+{
+    if (fs->sb.version < 12 || fs->sb.snap_root == 0)
+        return 0;
+    struct cfs_buf *b;
+    int rc = cfs_buf_get(fs, fs->sb.snap_root, CFS_KIND_SNAPLIST2, &b);
+    if (rc)
+        return rc;
+    struct cfs_snap_block2 *sb = (struct cfs_snap_block2 *)(b->data + CFS_MHDR_SIZE);
+    if (sb->max_id < id) {
+        sb->max_id = id;
+        cfs_buf_mark_dirty(fs, b);
+    }
+    cfs_buf_put(fs, b);
+    return 0;
+}
+
+/* Put `s` in the first free slot of the list, or a new head block. */
+static int snaplist_insert(struct cfs *fs, const struct cfs_snapshot *s)
+{
+    uint32_t kind = cfs_snaplist_kind(fs);
+    unsigned slots = cfs_snaplist_slots(fs);
+    uint64_t blkno = fs->sb.snap_root;
+    while (blkno) {
+        struct cfs_buf *b;
+        int rc = cfs_buf_get(fs, blkno, kind, &b);
+        if (rc)
+            return rc;
+        uint64_t next = cfs_snaplist_next(b);
+        for (unsigned i = 0; i < slots; i++) {
+            struct cfs_snapshot cur;
+            if (!cfs_snaplist_get(fs, b, i, &cur)) {
+                cfs_snaplist_set(fs, b, i, s);
+                cfs_buf_mark_dirty(fs, b);
+                cfs_buf_put(fs, b);
+                return 0;
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    struct cfs_buf *b;
+    int rc = cfs_buf_new(fs, kind, &b);
+    if (rc)
+        return rc;
+    *snaplist_next(b) = fs->sb.snap_root;
+    if (kind == CFS_KIND_SNAPLIST2)
+        ((struct cfs_snap_block2 *)(b->data + CFS_MHDR_SIZE))->max_id = s->id;
+    cfs_snaplist_set(fs, b, 0, s);
+    fs->sb.snap_root = b->blkno;
+    cfs_buf_put(fs, b);
+    return 0;
+}
+
+/*
+ * Take snapshot `name` of the live tree. With `identity`, the pool is
+ * raised to version 12 first if it is at 11, and the snapshot gets a
+ * uuid; a pool older than 11 is refused (-EOPNOTSUPP). Without it -- the
+ * .snapshots directory on a pool older than 11 -- the snapshot is the
+ * version-3 kind it always was. `out`, when given, receives the entry.
+ */
+int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct cfs_snapshot *out)
 {
     if (name == NULL || name[0] == '\0' || strlen(name) > CFS_SNAP_NAME_MAX)
         return -EINVAL;
@@ -785,21 +1069,44 @@ int cfs_snapshot_create(struct cfs *fs, const char *name)
         return -EINVAL;
     if (cfs_snapshot_find(fs, name, NULL))
         return -EEXIST;
+    if (identity && fs->sb.version < 11)
+        return -EOPNOTSUPP;
 
     /* A snapshot names a durable tree, so commit what is open first. */
     int rc = cfs_commit(fs);
     if (rc)
         return rc;
+    bool raise = fs->sb.version == 11 && !fs->test_no_raise;
+    if (raise) {
+        rc = cfs_need_seeded("take a snapshot");
+        if (rc)
+            return rc;
+    }
 
-    /* An id no live snapshot has and none has had while this filesystem
-     * has been mounted: it is the tag this snapshot's vnodes carry. */
+    /* An id no snapshot has had on this filesystem: the tag this
+     * snapshot's vnodes carry. Before version 12 "on this filesystem"
+     * means "since this mount" (the list's ids and the mount's memory);
+     * from 12 the list's head carries the mark across remounts. */
     uint64_t max_id = 0;
     unsigned live = 0;
     rc = snap_max_id(fs, &max_id, &live);
     if (rc)
         return rc;
+    uint64_t disk_max = snaplist_max_id(fs);
+    if (disk_max > max_id)
+        max_id = disk_max;
     if (max_id >= CFS_SNAP_ID_MAX)
         return -ENOSPC;
+
+    /* The raise, when this is the first snapshot with identity; it
+     * rewrites the list as a copy, so the copy below is a no-op then. */
+    if (raise) {
+        rc = snap_raise(fs);
+        if (rc)
+            return rc;
+        if (fs->snap_max_id > max_id)
+            max_id = fs->snap_max_id;
+    }
 
     /* Every change to the list from here is a change to a copy of it,
      * published by this transaction's root and by nothing earlier. */
@@ -820,40 +1127,24 @@ int cfs_snapshot_create(struct cfs *fs, const char *name)
     s.inode_count = fs->sb.inode_count;
     s.created_ns = clock_realtime_ns();
     strlcpy(s.name, name, sizeof(s.name));
-
-    /* Find a free slot, or start a new block. */
-    uint64_t blkno = fs->sb.snap_root;
-    while (blkno) {
-        struct cfs_buf *b;
-        rc = cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b);
-        if (rc)
-            return rc;
-        struct cfs_snap_block *sb = snap_payload(b);
-        uint64_t next = sb->next;
-        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
-            if (sb->snap[i].name[0] == '\0') {
-                sb->snap[i] = s;
-                cfs_buf_mark_dirty(fs, b);
-                cfs_buf_put(fs, b);
-                fs->snap_count++;
-                fs->snap_max_id = s.id;
-                return snap_commit(fs, 0);
-            }
-        }
-        cfs_buf_put(fs, b);
-        blkno = next;
+    if (fs->sb.version >= 12) {
+        random_get_bytes(s.uuid, sizeof(s.uuid));
+        s.uuid[6] = (uint8_t)((s.uuid[6] & 0x0Fu) | 0x40u);
+        s.uuid[8] = (uint8_t)((s.uuid[8] & 0x3Fu) | 0x80u);
     }
-    struct cfs_buf *b;
-    rc = cfs_buf_new(fs, CFS_KIND_SNAPLIST, &b);
-    if (rc)
+
+    rc = snaplist_insert(fs, &s);
+    if (rc == 0)
+        rc = snaplist_set_max_id(fs, s.id);
+    if (rc) {
+        /* Nothing published yet, but the list copy may hold the entry. */
+        cfs_fail(fs, rc);
         return rc;
-    struct cfs_snap_block *sb = snap_payload(b);
-    sb->next = fs->sb.snap_root;
-    sb->snap[0] = s;
-    fs->sb.snap_root = b->blkno;
-    cfs_buf_put(fs, b);
+    }
     fs->snap_count++;
     fs->snap_max_id = s.id;
+    if (out != NULL)
+        *out = s;
     return snap_commit(fs, 0);
 }
 
@@ -942,21 +1233,26 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
         keeper_head = remaining[oldest].deadlist;
         rc = deadlist_settle(fs, doomed.deadlist, remaining, nr_remaining, &keeper_head, &freed, &kept);
         if (rc == 0 && keeper_head != remaining[oldest].deadlist) {
-            /* Write the keeper's new deadlist head back into its entry. */
-            uint64_t target_gen = remaining[oldest].generation;
+            /* Write the keeper's new deadlist head back into its entry,
+             * found by id: unique, where two entries can share a
+             * generation (a snapshot taken twice with nothing committed
+             * between). */
+            uint64_t target_id = remaining[oldest].id;
             uint64_t blkno = fs->sb.snap_root;
+            unsigned slots = cfs_snaplist_slots(fs);
             bool done = false;
             while (blkno && !done && rc == 0) {
                 struct cfs_buf *b;
-                rc = cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b);
+                rc = cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b);
                 if (rc)
                     break;   /* abandoned below: blocks are already released */
-                struct cfs_snap_block *sb = snap_payload(b);
-                uint64_t next = sb->next;
-                for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
-                    if (sb->snap[i].name[0] == '\0' || sb->snap[i].generation != target_gen)
+                uint64_t next = cfs_snaplist_next(b);
+                for (unsigned i = 0; i < slots; i++) {
+                    struct cfs_snapshot cur;
+                    if (!cfs_snaplist_get(fs, b, i, &cur) || cur.id != target_id)
                         continue;
-                    sb->snap[i].deadlist = keeper_head;
+                    cur.deadlist = keeper_head;
+                    cfs_snaplist_set(fs, b, i, &cur);
                     cfs_buf_mark_dirty(fs, b);
                     done = true;
                     break;
@@ -979,4 +1275,68 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
     if (fs->snap_count)
         fs->snap_count--;
     return snap_commit(fs, 0);
+}
+
+/*
+ * The checker's repair for snap_identity (design.md, "Format version
+ * 12"): a version-12 entry with no uuid, or one an earlier entry already
+ * has, gets a fresh one, and the head's high-water mark rises to the
+ * highest id on the list. On a copy of the list, in the open transaction.
+ */
+int cfs_snapshot_fix_identity(struct cfs *fs, unsigned *fixed)
+{
+    *fixed = 0;
+    if (fs->sb.version < 12 || fs->sb.snap_root == 0)
+        return 0;
+    int rc = cfs_need_seeded("repair snapshot identity");
+    if (rc)
+        return rc;
+    rc = snap_cow(fs, NULL);
+    if (rc)
+        return rc;
+    static const uint8_t zero[16];
+    uint8_t (*seen)[16] = kmalloc((size_t)(fs->snap_count + 8) * 16u, 0);
+    if (seen == NULL)
+        return -ENOMEM;
+    unsigned nseen = 0, cap = fs->snap_count + 8;
+    uint64_t max_id = 0, blkno = fs->sb.snap_root;
+    unsigned guard = 0;
+    while (blkno && rc == 0 && guard++ < CFS_SNAP_MAX_CHAIN) {
+        struct cfs_buf *b;
+        rc = cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST2, &b);
+        if (rc)
+            break;
+        uint64_t next = cfs_snaplist_next(b);
+        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK2; i++) {
+            struct cfs_snapshot s;
+            if (!cfs_snaplist_get(fs, b, i, &s))
+                continue;
+            if (s.id > max_id)
+                max_id = s.id;
+            bool bad = memcmp(s.uuid, zero, 16) == 0;
+            for (unsigned k = 0; k < nseen && !bad; k++)
+                bad = memcmp(seen[k], s.uuid, 16) == 0;
+            if (bad) {
+                random_get_bytes(s.uuid, sizeof(s.uuid));
+                s.uuid[6] = (uint8_t)((s.uuid[6] & 0x0Fu) | 0x40u);
+                s.uuid[8] = (uint8_t)((s.uuid[8] & 0x3Fu) | 0x80u);
+                cfs_snaplist_set(fs, b, i, &s);
+                cfs_buf_mark_dirty(fs, b);
+                (*fixed)++;
+            }
+            if (nseen < cap)
+                memcpy(seen[nseen++], s.uuid, 16);
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    kfree(seen);
+    if (rc == 0 && max_id > snaplist_max_id(fs)) {
+        rc = snaplist_set_max_id(fs, max_id);
+        if (rc == 0)
+            (*fixed)++;
+    }
+    if (max_id > fs->snap_max_id)
+        fs->snap_max_id = max_id;
+    return rc;
 }

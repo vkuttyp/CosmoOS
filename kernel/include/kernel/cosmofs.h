@@ -112,6 +112,13 @@ struct cosmofs_check_report {
     struct cosmofs_check_class counter_wrong;    /* a superblock total the walk disagrees with */
     struct cosmofs_check_class chain_cycle;      /* a metadata chain that revisits a block */
     struct cosmofs_check_class unreadable;       /* a metadata block that could not be read */
+    /* Format version 12 (design.md, "Format version 12"): a snapshot with
+     * no uuid, one another shares, or an id past the list's high-water
+     * mark; a pending rollback record that does not check out or names a
+     * snapshot that is not there; a hold naming one that is not there. */
+    struct cosmofs_check_class snap_identity;
+    struct cosmofs_check_class rollback_record;
+    struct cosmofs_check_class hold;
     uint64_t blocks_seen, inodes_seen, dirs_seen, snapshots_seen;
     uint64_t counted_free;              /* free blocks the walk counted */
     uint64_t counted_inodes;            /* inodes with links the walk counted */
@@ -132,6 +139,62 @@ struct cosmofs_check_report {
  * the report says what they are. In every build: an operator reaches it
  * through /dev/fsctl (docs/audit/next-subsystem-fsctl.md). */
 int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
+
+/*
+ * Snapshots, through /dev/fsctl (roadmap 1.2 B1; design.md, "Format
+ * version 12"). One request struct for every operation, cosmofs's own as
+ * the check report is: the VFS hands it over and copies records out.
+ */
+#define COSMOFS_SNAP_NAME_MAX 31u
+
+struct cosmofs_snap_info {
+    uint64_t id;
+    uint64_t generation;
+    uint64_t created_ns;
+    uint64_t origin_id;
+    uint64_t referenced;      /* bytes */
+    uint64_t unique;          /* bytes */
+    uint8_t uuid[16];
+    uint32_t flags;           /* COSMOFS_SNAP_I_* */
+    uint32_t format;          /* the filesystem's format version */
+    char name[COSMOFS_SNAP_NAME_MAX + 1];
+};
+
+#define COSMOFS_SNAP_I_CLONE  (1u << 0)
+#define COSMOFS_SNAP_I_TARGET (1u << 1)
+#define COSMOFS_SNAP_I_SAFETY (1u << 2)
+#define COSMOFS_SNAP_I_HELD   (1u << 3)
+
+enum cosmofs_snap_op {
+    COSMOFS_SNAP_CREATE = 1,
+    COSMOFS_SNAP_LIST,
+    COSMOFS_SNAP_DELETE,
+    COSMOFS_SNAP_ROLLBACK,
+    COSMOFS_SNAP_CANCEL,
+    COSMOFS_SNAP_CLONE,
+    COSMOFS_SNAP_BOOT_OK,
+};
+
+struct cosmofs_snap_req {
+    enum cosmofs_snap_op op;
+    const char *name;               /* the snapshot operated on */
+    const char *name2;              /* CLONE: the clone; ROLLBACK: the safety snapshot's name, or NULL */
+    struct cosmofs_snap_info *out;  /* LIST: up to `max` records; CREATE/ROLLBACK: the one made */
+    unsigned max;
+    bool no_sizes;                  /* LIST: skip the walks; sizes are 0 */
+    unsigned count;                 /* filled in */
+    unsigned total;                 /* LIST: how many there were */
+    unsigned format;                /* LIST: the filesystem's format version */
+    unsigned pool_flags;            /* LIST: COSMOFS_POOL_* */
+};
+
+#define COSMOFS_POOL_PENDING (1u << 0)
+#define COSMOFS_POOL_HELD    (1u << 1)
+
+/* -EINVAL for a mount that is not a cosmofs; -EOPNOTSUPP for a pool too
+ * old to carry snapshot identity (below format 11, which a snapshot
+ * operation raises to 12). */
+int cosmofs_snapctl(struct mount *mnt, struct cosmofs_snap_req *req);
 
 /* Test hook: the next unmount discards the open transaction instead of
  * committing it, as a crash before the root write would. */
@@ -200,6 +263,7 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_EXTENT_OVERLAP, /* a second run covering an lblk the first covers,
                                      * at a DIFFERENT pool block -- the case block_seen
                                      * cannot see (next-subsystem-fsck-unchecked.md) */
+    COSMOFS_CORRUPT_SNAP_UUID,      /* v12: zero the uuid of the list head's first snapshot */
 };
 int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what);
 /* Test hook: where an inode's logical block actually lives, as a DVA;
@@ -224,6 +288,10 @@ void cosmofs_test_mount_writeback(struct mount *mnt, uint64_t *dirty_notes, uint
  * (docs/audit/next-subsystem-unmount-leak.md).
  */
 uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of);
+/* Test hook: snapshots taken while on are the version-11 kind, so a pool
+ * at 11 is not raised -- how a test builds the list an older kernel left
+ * behind, for the raise to convert (design.md, "Format version 12"). */
+void cosmofs_test_snap_no_raise(struct mount *mnt, bool on);
 
 #if CONFIG_DEBUG
 /* The checker's duplicate-name hash. Only `cosmofs-check-dup-name`
