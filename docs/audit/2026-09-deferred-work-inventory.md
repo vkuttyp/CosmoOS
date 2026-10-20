@@ -1472,12 +1472,10 @@ none is needed by its acceptance test.
   records and pass over the rest silently; the library checks refuse
   past that (`PKG_LIB_SCAN`, #416's review). Found by the review; not
   needed by P4.
-- The Linux personality's `writev` (`rw_vec`) makes one write per iovec,
-  where Linux makes one write of the whole vector to a terminal or pipe:
-  musl's line-buffered stdout flushes a line as two iovecs, so a kernel
-  log line can land inside it on the console (a `test-pkg-net` failure on
-  #415, `docs/testing/flakes.md`), and a pipe reader can see the halves
-  apart. Not needed by P4.
+- ~~The Linux personality's `writev` (`rw_vec`) makes one write per
+  iovec~~ Fixed 2026-10-20: its third sighting turned main red
+  (08f97a91); `lx_writev` gathers the vector into one write
+  (`docs/audit/2026-10-20-writev-report.md`).
 - `test-crash`'s 180 s timeout: main's crash boot reached 178.8 s on
   2026-10-19 (second sighting in `docs/testing/flakes.md`); the
   keep / restate / widen-and-label decision is due.

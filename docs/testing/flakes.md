@@ -4557,6 +4557,12 @@ same job and failure, the same splice (`serial: 11[ INFO] process: pid
 60 'cat' exited with status 0 (23 syscalls)`, `boot-pkgnet.log` line
 412). Rerun.
 
+Third sighting, and fixed: CI on main's merge of #416 (run 39315782811,
+head `08f97a91`), the same job, check and splice (`vcon.log` line 365).
+With main red the defect was fixed rather than recorded again:
+`lx_writev` gathers the vector and writes it in one call
+(`docs/audit/2026-10-20-writev-report.md`, `tools/writev-probe.py`).
+
 ## The firmware stalled on the reset in `test-net-login`'s reboot stage, 2026-10-19
 
 CI on #414 (run 39268982301, head `c19b5712`), `net-login test (x86_64)`:

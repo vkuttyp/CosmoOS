@@ -162,7 +162,7 @@ does not).
 | Linux | Translation |
 |---|---|
 | `read`, `write`, `pread64`, `pwrite64` | the native handle path (`file_read`/`file_pread` or the object's `read`/`write` for pipes, console, sockets); Linux and native share the handle table |
-| `readv`, `writev` | loop over up to 1024 iovecs (each validated), stop at the first short transfer |
+| `readv`, `writev` | up to 1024 iovecs (each validated); `readv` loops and stops at the first short transfer; `writev` is one write of the gathered vector, as on Linux (64 KiB per object call) |
 | `open`, `openat(AT_FDCWD, ...)`, `creat` | Linux `O_*` (octal Linux values) mapped to `COSMO_O_*`, `O_NONBLOCK` included since the named-pipes unit (a FIFO's open rules and per-open mode); `O_CLOEXEC` marks the handle close-on-exec (roadmap M3), `O_NOCTTY`, `O_LARGEFILE` accepted and dropped; a `dirfd` other than `AT_FDCWD` is `-ENOSYS` |
 | `close`, `lseek`, `dup`, `dup2`, `dup3`, `pipe`, `pipe2` | direct; `pipe2(O_NONBLOCK)` sets both ends non-blocking, `O_CLOEXEC` marks both close-on-exec; `dup3` takes `O_CLOEXEC` (any other flag `-EINVAL`); `dup` and `dup2` start without it |
 | `fstat`, `stat`, `lstat`, `newfstatat` | `struct cosmo_stat` → Linux `struct stat` (144 bytes: `st_dev` the mount's id as `makedev(0, id)` (roadmap 1.1 P4), `st_ino`, `st_nlink`, `st_mode` = type bits (`S_IFREG` 0100000, `S_IFDIR` 040000, `S_IFCHR` 020000, `S_IFIFO` 010000, `S_IFSOCK` 0140000) or permission bits, uid, gid, `st_size`, `st_blksize` 4096, `st_blocks`, times as `timespec` from `mtime_ns`/`ctime_ns`); `AT_EMPTY_PATH` with an fd is `fstat` |
