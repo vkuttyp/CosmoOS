@@ -3241,3 +3241,9 @@ See the [history index](README.md).
   writes it in one call, as Linux does; a datagram socket now gets one
   datagram (lxtest), `tools/writev-probe.py`. Report:
   `docs/audit/2026-10-20-writev-report.md`.
+- **The crash boots' timeout (2026-10-20).** AArch64 `test-crash` and
+  `test-wxn` run the whole debug suite before their deliberate panic and
+  had the runner's 180 s; main's crash boot reached 179.4 s and two
+  branch boots timed out with every self-test passed. They take
+  `CRASH_TIMEOUT`, 240 s on AArch64 (180 s on x86-64), from 40 CI runs'
+  distribution (`docs/testing/flakes.md`).

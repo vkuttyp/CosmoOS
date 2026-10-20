@@ -632,6 +632,10 @@ Sources: inventory §§2.10, 2.11 and 3,
   *2026-10-15:* AArch64 300 s: over the last 40 CI runs its entropy job's
   146 boots had a median of 212 s, its passing ones at most 235.7 s, and
   six no-entropy boots timed out at 240 s (estimated 240-246 s whole).
+  *2026-10-20:* AArch64 `test-crash` and `test-wxn` 240 s
+  (`CRASH_TIMEOUT`, 180 s before): over 40 CI runs the crash boot's median
+  was 172.4 s, its slowest pass 179.4 s, and two timed out at 180 s
+  (estimated 193 s whole); x86-64 keeps 180 s (at most 158.6 s).
 - [ ] **Validation — physical hardware matrix.** Establish repeatable AMD, Intel
   and Apple Silicon testing where supported; state which firmware/device paths
   are actually exercised rather than inferring hardware success from QEMU.

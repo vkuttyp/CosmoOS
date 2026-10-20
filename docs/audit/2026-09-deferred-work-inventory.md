@@ -1476,9 +1476,11 @@ none is needed by its acceptance test.
   iovec~~ Fixed 2026-10-20: its third sighting turned main red
   (08f97a91); `lx_writev` gathers the vector into one write
   (`docs/audit/2026-10-20-writev-report.md`).
-- `test-crash`'s 180 s timeout: main's crash boot reached 178.8 s on
+- ~~`test-crash`'s 180 s timeout: main's crash boot reached 178.8 s on
   2026-10-19 (second sighting in `docs/testing/flakes.md`); the
-  keep / restate / widen-and-label decision is due.
+  keep / restate / widen-and-label decision is due.~~ **Widened to 240 s
+  on AArch64, 2026-10-20** (`CRASH_TIMEOUT`, `docs/testing/flakes.md`):
+  40 CI crash boots, median 172.4 s, two timeouts estimated at 193 s.
 - `cosmo-upgrade --fetch` brings the root to the new release with the
   running binary's rules, so a release that adds a directory the old one
   does not know (v1.0.7's `lib/`) needs a second run, by the new binary,
