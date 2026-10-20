@@ -94,7 +94,8 @@ Review (Qodo, Codex), each fixed:
 - `cosmo-snap` refuses a name over 31 bytes (it reached the kernel cut
   short and could delete another snapshot) and a `create` name starting
   with `-`; `diff` fails on a file or directory it cannot read instead of
-  reporting a change or an empty directory; the mount listing is read
+  reporting a change or an empty directory, and on a path longer than its
+  1024-byte buffers instead of walking a truncated one (`fit`); the mount listing is read
   whole (grown on `-ERANGE`, never read past what came back), in
   `cosmo-snap` and `cosmo-upgrade`.
 - `cosmo-upgrade`'s format gate fails closed: a root format it cannot

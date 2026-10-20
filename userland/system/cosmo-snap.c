@@ -19,6 +19,7 @@
  */
 #include <dirent.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -241,11 +242,25 @@ static unsigned long g_changes;
 static uint32_t g_dev_a, g_dev_b;
 
 /* `root` + `rel`, with the live root's empty prefix made "/". */
+/* A path built whole, or exit: one cut short could name another file,
+ * or the directory being walked, and diff would recurse on it. */
+static void fit(char *out, size_t n, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(out, n, fmt, ap);
+    va_end(ap);
+    if (k < 0 || (size_t)k >= n) {
+        fprintf(stderr, "cosmo-snap: a path is longer than %zu bytes: %.64s...\n", n - 1, out);
+        exit(1);
+    }
+}
+
 static void join(char *out, size_t n, const char *root, const char *rel)
 {
-    snprintf(out, n, "%s%s", root, rel);
+    fit(out, n, "%s%s", root, rel);
     if (out[0] == '\0')
-        snprintf(out, n, "/");
+        fit(out, n, "/");
 }
 
 /* Directory entries of `path`, sorted, without . and ..; NULL on error. */
@@ -344,7 +359,7 @@ static void report_tree(char kind, const char *root, const char *rel, uint32_t d
         unreadable(path);   /* its descendants would go unreported */
     for (unsigned i = 0; i < n; i++) {
         char sub[1024];
-        snprintf(sub, sizeof(sub), "%s/%s", rel, v[i]);
+        fit(sub, sizeof(sub), "%s/%s", rel, v[i]);
         report_tree(kind, root, sub, dev);
     }
     names_free(v, n);
@@ -366,16 +381,16 @@ static void diff_dir(const char *ra, const char *rb, const char *rel)
         int c = i == na ? 1 : j == nb ? -1 : strcmp(va[i], vb[j]);
         char sub[1024];
         if (c < 0) {
-            snprintf(sub, sizeof(sub), "%s/%s", rel, va[i++]);
+            fit(sub, sizeof(sub), "%s/%s", rel, va[i++]);
             report_tree('-', ra, sub, g_dev_a);
             continue;
         }
         if (c > 0) {
-            snprintf(sub, sizeof(sub), "%s/%s", rel, vb[j++]);
+            fit(sub, sizeof(sub), "%s/%s", rel, vb[j++]);
             report_tree('+', rb, sub, g_dev_b);
             continue;
         }
-        snprintf(sub, sizeof(sub), "%s/%s", rel, va[i]);
+        fit(sub, sizeof(sub), "%s/%s", rel, va[i]);
         i++;
         j++;
         char fa[1024], fb[1024];
@@ -416,9 +431,9 @@ static void tree_root(const char *name, char *out, size_t n)
 {
     const char *sep = strcmp(g_mp, "/") == 0 ? "" : "/";
     if (strcmp(name, "-") == 0)
-        snprintf(out, n, "%s", strcmp(g_mp, "/") == 0 ? "" : g_mp);
+        fit(out, n, "%s", strcmp(g_mp, "/") == 0 ? "" : g_mp);
     else
-        snprintf(out, n, "%s%s.snapshots/%s", strcmp(g_mp, "/") == 0 ? "/" : g_mp, sep, name);
+        fit(out, n, "%s%s.snapshots/%s", strcmp(g_mp, "/") == 0 ? "/" : g_mp, sep, name);
 }
 
 static int cmd_diff(const char *a, const char *b)
