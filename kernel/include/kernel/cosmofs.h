@@ -164,6 +164,7 @@ struct cosmofs_snap_info {
 #define COSMOFS_SNAP_I_TARGET (1u << 1)
 #define COSMOFS_SNAP_I_SAFETY (1u << 2)
 #define COSMOFS_SNAP_I_HELD   (1u << 3)
+#define COSMOFS_SNAP_I_LIVE   (1u << 4)   /* a held rollback's target: the live tree was rolled back to it */
 
 enum cosmofs_snap_op {
     COSMOFS_SNAP_CREATE = 1,
@@ -187,6 +188,8 @@ struct cosmofs_snap_req {
     unsigned total;                 /* LIST: how many there were */
     unsigned format;                /* LIST: the filesystem's format version */
     unsigned pool_flags;            /* LIST: COSMOFS_POOL_* */
+    uint64_t free_bytes;            /* LIST: what data can still use */
+    uint64_t total_bytes;           /* LIST: the pool's size */
 };
 
 #define COSMOFS_POOL_PENDING (1u << 0)

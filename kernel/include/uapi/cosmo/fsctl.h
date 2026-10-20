@@ -196,7 +196,9 @@ struct cosmo_fsctl_scrub {
 struct cosmo_fsctl_snap_pool {
     uint32_t format;          /* the filesystem's format version */
     uint32_t flags;           /* COSMO_FSCTL_POOL_F_* */
-    uint64_t reserved[3];
+    uint64_t free_bytes;      /* what data can still use (the metadata reserve excluded) */
+    uint64_t total_bytes;     /* the pool's size */
+    uint64_t reserved;
 };
 
 /*
@@ -209,6 +211,7 @@ struct cosmo_fsctl_snap_pool {
 #define COSMO_FSCTL_SNAP_F_TARGET   (1u << 1)   /* a pending rollback names it as the tree to become live */
 #define COSMO_FSCTL_SNAP_F_SAFETY   (1u << 2)   /* a pending rollback took it of the live tree */
 #define COSMO_FSCTL_SNAP_F_HELD     (1u << 3)   /* not deletable until the next boot completes */
+#define COSMO_FSCTL_SNAP_F_LIVE     (1u << 4)   /* a held rollback's target: the live tree was rolled back to it */
 
 struct cosmo_fsctl_snap {
     uint64_t id;

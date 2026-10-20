@@ -42,7 +42,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-pkgtx test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -312,6 +312,16 @@ test-upgrade:
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/upgrade_test.py --base $(UPGRADE_BASE_DIR)/cosmoos-$(ARCH).img --base-tag $(UPGRADE_BASE_TAG) \
 		--set $(UPGRADE_SET_DIR) --pub $(UPGRADE_SET_PUB) --arch $(ARCH) --workdir $(OUT)/test-upgrade \
+		--timeout $(BOOT_TIMEOUT)
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) OUT=$(OUT) test-pkgtx
+
+# Roadmap 1.2 B4's package transactions (PKG-3; tests/boot/pkgtx_test.py,
+# docs/pkg/testing.md, "test-pkgtx"), run by test-upgrade: on this build's
+# installed system, a pkg install and a pkg upgrade killed between two
+# packages are undone at the next boot; pkg rollback; the space refusal.
+test-pkgtx: $(IMAGE)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/pkgtx_test.py --image $(IMAGE) --workdir $(OUT)/test-pkgtx \
 		--timeout $(BOOT_TIMEOUT)
 
 # Roadmap M5's acceptance test (tests/boot/security_test.py,

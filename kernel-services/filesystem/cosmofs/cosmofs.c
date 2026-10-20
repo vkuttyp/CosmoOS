@@ -2574,8 +2574,12 @@ static uint32_t snap_rollback_flags(const struct cfs_rollback *r, bool have, con
     if (r->state == CFS_ROLLBACK_PENDING) {
         f |= target ? COSMOFS_SNAP_I_TARGET : 0u;
         f |= safety ? COSMOFS_SNAP_I_SAFETY : 0u;
-    } else if (safety) {
-        f |= COSMOFS_SNAP_I_HELD;
+    } else {
+        f |= safety ? COSMOFS_SNAP_I_HELD : 0u;
+        /* The tree the live one was rolled back to, while the hold lasts:
+         * how init tells a package transaction undone from one still
+         * waiting to be (roadmap 1.2 B4). */
+        f |= target ? COSMOFS_SNAP_I_LIVE : 0u;
     }
     return f;
 }
@@ -2584,6 +2588,10 @@ static int snap_list_sized(struct cfs *fs, struct cosmofs_snap_req *req)
 {
     req->format = fs->sb.version;
     req->pool_flags = 0;
+    /* Room, as data can use it (the reserve is the metadata's), and the
+     * pool's size: what a caller about to write asks before it does. */
+    req->free_bytes = (fs->free_blocks > fs->reserve ? fs->free_blocks - fs->reserve : 0) * (uint64_t)CFS_BLOCK;
+    req->total_bytes = fs->nblocks * (uint64_t)CFS_BLOCK;
     struct cfs_rollback rb;
     bool have_rb = cfs_rollback_read(fs, &rb) == 0;
     if (have_rb)

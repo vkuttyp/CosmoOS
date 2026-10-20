@@ -4628,3 +4628,26 @@ the job's group as it is spawned. The same loop: 0 in
 400. Deterministic check `spawn-foreground`;
 `tools/spawn-foreground-probe.py --old` fails it on both architectures.
 Report: `docs/audit/2026-10-20-spawn-foreground-report.md`.
+**Second sighting, 2026-10-20:** local x86-64 release `make test-pkgtx`
+(B4's first pull request): init's recovery of an interrupted package
+transaction printed `rebooting once`, the kernel `restart through the ACPI
+reset register (port 0xcf9, value 0xf)`, then only OVMF's screen clears
+until the deadline. Inside one QEMU (`QEMU_REBOOT=1`) a reset has no
+retry; `pkgtx_test.py` now lets init's reset end QEMU and boots the next
+boot in a fresh one, which has the firmware-stall retry.
+
+
+## The kernel stopped in the firmware's RNG call, 2026-10-20
+
+Local x86-64 release `make test-pkgtx` (B4's first pull request, branch
+`b4-pkg-tx` on `50ef1f4d`; QEMU 11.1, this developer's machine): the
+`tx-upgrade-recover` boot -- the first boot after the harness killed QEMU
+at `pkg`'s test stop -- printed `cosmoboot-uefi v1`, `verified boot: ...
+signed by key ec28a00bf331f50b (dev)`, the kernel's display, framebuffer,
+direct-map and `paging: root at ...` lines, and then nothing for the
+240 s deadline. The next line of a normal boot is `firmware: 64-byte seed
+from EFI_RNG_PROTOCOL`: the kernel was inside its call to the firmware's
+RNG, before `exiting boot services`. Nothing the branch changes runs
+there. The same image's other five boots, among them `tx-install-recover`
+(also the first boot after a kill), passed. First sighting; not
+attributed. Log kept at the time of the run; rerun.

@@ -902,6 +902,8 @@ static void pending_clear(void)
     sync();
 }
 
+static int oldest_format_mark(const struct set *a, const struct set *b);
+
 static int fail(const char *what, int rc)
 {
     fprintf(stderr, "cosmo-upgrade: %s: %s\n", what, strerror(rc < 0 ? -rc : rc));
@@ -946,6 +948,7 @@ static int finish(struct esp *e, const struct set *cur)
         fprintf(stderr, "cosmo-upgrade: \\cosmo\\prev: %s\n", err);
         return EXIT_FAILED;
     }
+    (void)oldest_format_mark(cur, &prev);   /* a run finishing another's: the record as the switch left it */
     int rc = base_pass(&prev, cur);
     set_free(&prev);
     if (rc < 0)
@@ -1097,6 +1100,34 @@ static unsigned kernel_reads(const uint8_t *elf, size_t len)
         return v;
     }
     return 11;
+}
+
+/*
+ * OLDEST_FORMAT: the newest cosmofs format every boot set kept on the ESP
+ * can read -- the least of what the current set's and \cosmo\prev's
+ * kernels read -- rewritten after each switch. pkg reads it before a
+ * transaction would raise a format-11 root to 12 (B1's lazy raise): a raise
+ * that a kept set could not mount would take away the way back to it
+ * (roadmap 1.2 B4; docs/pkg/design.md, "Transactions"). cosmo-install
+ * writes "none": a fresh install keeps no other set.
+ */
+#define OLDEST_FORMAT "/var/lib/cosmo-upgrade/oldest-format"
+
+static int oldest_format_mark(const struct set *a, const struct set *b)
+{
+    unsigned ra = kernel_reads(a->file[0], a->len[0]), rb = b ? kernel_reads(b->file[0], b->len[0]) : ra;
+    char text[16];
+    int n = snprintf(text, sizeof(text), "%u\n", ra < rb ? ra : rb);
+    mkdir("/var/lib", 0755);
+    mkdir("/var/lib/cosmo-upgrade", 0755);
+    int fd = open(OLDEST_FORMAT TMP_SUFFIX, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, text, (size_t)n) != n || fsync(fd) < 0 || close(fd) < 0 ||
+        rename(OLDEST_FORMAT TMP_SUFFIX, OLDEST_FORMAT) < 0) {
+        fprintf(stderr, "cosmo-upgrade: %s: %s\n", OLDEST_FORMAT, strerror(errno));
+        return -1;
+    }
+    sync();
+    return 0;
 }
 
 /* Refuse a set whose kernel could not mount this root (the lazy raise's
@@ -1280,7 +1311,11 @@ static int upgrade(const char *dir, bool check, const char *stop)
     say("loader switched: \\EFI\\BOOT\\" LOADER " is the new one");
     if (stop && strcmp(stop, "loader") == 0)
         goto stopped;
-    /* 6. The set, its loader and prev: one sector, the commit point. */
+    /* 6. The set, its loader and prev: one sector, the commit point. The
+     * oldest format a kept set reads first, for both sides of it (the old
+     * prev is gone already): pkg must not raise the root past it. */
+    if (oldest_format_mark(&nw, &cur) < 0)
+        return EXIT_FAILED;
     if (pending_set(nw.file[3]) < 0)
         return EXIT_FAILED;
     struct edit sed[SET_FILES + 2];
@@ -1391,6 +1426,8 @@ static int rollback(void)
         rc = fat_commit(&e.f);
     if (rc < 0)
         return fail("writing \\cosmo\\prev", rc);
+    if (oldest_format_mark(&prev, &cur) < 0)   /* the same two sets kept, before and after */
+        return EXIT_FAILED;
     if (pending_set(prev.file[3]) < 0)
         return EXIT_FAILED;
     struct edit sed[SET_FILES + 2];

@@ -39,9 +39,15 @@ the root, so `cosmo-upgrade` will not switch to one ([Upgrading](upgrading.md)).
 ```text
 cosmo$ cosmo-snap list
 cosmo-snap: /: format 12
+cosmo-snap: /: 176848 KiB free of 195564 KiB
 NAME                    ID CREATED                   REFER     UNIQUE UUID                                 FLAGS
 base                     1 2026-10-20T08:50:55Z     13568K        64K 61331b51-50c4-49fb-917c-508ee9c374b0 -
 ```
+
+`list` leaves out the snapshots programs take for you -- `pkg`'s
+transactions (`pkg-*`, [Packages](packages.md)) and `cosmo-upgrade`'s
+boot environments (`be-*`, [Upgrading](upgrading.md)) -- and says how
+many it left out; `cosmo-snap list --all` shows them too.
 
 `REFER` is everything the snapshot's tree holds; `UNIQUE` is what only
 it holds -- what deleting it would give back. Both come from walking every

@@ -126,6 +126,18 @@ refused -- prints one line ending `staying on the live root`, undoes what
 it did, and the boot continues live. When the shell exits on a disk root,
 init calls `sync` and prints `init: disk root synced` before it returns.
 
+On a disk root, before `/etc/rc` starts any service, init undoes a
+package transaction the last boot cut short (`pkg_recover`; roadmap 1.2
+B4, PKG-3; `docs/pkg/design.md`, "Transactions"): a `pkg-tx-*` snapshot
+left on the root is rolled back to at the next mount, and init reboots
+once; the boot after deletes it and the `pkg` lock it was taken under. A
+rollback the mount left pending is reported and not retried by another
+reboot. Once `/etc/rc` exits 0 and the hold is released, init deletes
+`pkg-undone-*`, the tree the interrupted transaction left. Programs reach
+snapshots through `userland/lib/rootsnap.c` (list, create, delete,
+rollback, cancel, clone over `/dev/fsctl`); `cosmo-snap list` leaves the
+ones they take (`pkg-*`, `be-*`) out unless given `--all`.
+
 `init --selftest` grows checks for every new call (`proc_selftest` in
 `init.c`; the full list is in `testing.md`): pipes with `dup`/`dup2`,
 EOF and `EPIPE`; `spawn` of `echo` into a pipe and its status; `sh -c

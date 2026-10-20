@@ -280,6 +280,7 @@ static int populate(void)
     static const struct { const char *path; uint32_t mode; } dirs[] = {
         { "/dev", 0755 }, { "/proc", 0555 }, { "/tmp", 01777 }, { "/mnt", 0755 },
         { "/var", 0755 }, { "/var/log", 0755 }, { "/var/lib", 0755 }, { "/var/lib/pkg", 0755 },
+        { "/var/lib/cosmo-upgrade", 0755 },
         { "/boot", 0755 },
         /* Roadmap M4: root's home and the ssh server's (decision 6). */
         { "/root", 0700 }, { "/root/.ssh", 0700 },
@@ -314,6 +315,11 @@ static int populate(void)
         fprintf(stderr, "cosmo-install: %s: %s\n", PKG_LIVE_REPO, strerror(errno));
         return -1;
     }
+    /* Roadmap 1.2 B4: no set but this one is kept on the ESP, so nothing a
+     * format raise would lock out (cosmo-upgrade.c, oldest_format_mark;
+     * pkg's transactions read it). */
+    if (write_file("/var/lib/cosmo-upgrade/oldest-format", "none\n", 0644) < 0)
+        return -1;
     if (copy_tree(PKG_LIVE_REPO, MNT PKG_INSTALLED_REPO) < 0 ||
         write_file("/etc/pkg/repos.conf",
                    "# NAME URL [pin sha256:HEX] [insecure] (docs/guide/packages.md)\n"

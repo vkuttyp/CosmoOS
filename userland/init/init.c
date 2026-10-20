@@ -32,7 +32,10 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
+
+#include "../lib/rootsnap.h"
 
 static int g_failures;
 
@@ -6112,6 +6115,160 @@ static bool switch_to_disk_root(void)
  * that does not get here -- a rollback to a tree that does not boot --
  * keeps the hold, and the operator can roll back again.
  */
+/*
+ * A package transaction the last boot did not finish (roadmap 1.2 B4,
+ * PKG-3; docs/pkg/design.md, "Transactions"). pkg takes pkg-tx-<seconds>
+ * of the root, then records its name in /var/db/pkg/tx-active (the
+ * snapshot does not hold the record), and when it is done deletes the
+ * snapshot and then the record. So a record naming a snapshot that is
+ * still there is a transaction cut short. Before any service starts:
+ *
+ *  - the live tree was rolled back to a pkg-tx-* (its LIVE flag, while the
+ *    rollback's hold lasts): the transaction is undone; the snapshot goes,
+ *    and the tree it replaced is noted for deletion once the boot completes.
+ *  - the record names a snapshot a rollback to which is pending, and this
+ *    boot's mount did not apply it (refused: no room, a bad record;
+ *    docs/backlog.md CFS-20): the loop guard -- said, not rebooted again.
+ *  - the record names a snapshot: roll the root back to it at the next
+ *    mount, the tree it replaces kept as pkg-undone-<seconds>; reboot once.
+ *  - any other pkg-tx-* is not this protocol's to act on (a finished
+ *    command that could not delete it; a name the operator chose): said.
+ */
+#define PKG_TX_ACTIVE "/var/db/pkg/tx-active"
+#define PKG_UNDONE    "/var/db/pkg/undone"
+
+static void read_line(const char *path, char *out, size_t n)
+{
+    out[0] = '\0';
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return;
+    ssize_t r = read(fd, out, n - 1);
+    close(fd);
+    out[r > 0 ? r : 0] = '\0';
+    out[strcspn(out, "\n")] = '\0';
+}
+
+static void write_line(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    (void)write(fd, text, strlen(text));
+    (void)write(fd, "\n", 1);
+    fsync(fd);
+    close(fd);
+}
+
+static void pkg_recover(void)
+{
+    /* No pkg outlives a reboot: a lock left on the root is stale. */
+    if (unlink("/var/db/pkg/lock") == 0)
+        printf("init: pkg: removed the lock a pkg the last boot did not finish held\n");
+    struct rootsnap rs;
+    if (rootsnap_open(&rs, "/") < 0) {
+        if (errno != EOPNOTSUPP)
+            printf("init: pkg: the root's snapshots cannot be reached (%s); an interrupted package transaction "
+                   "would not be undone\n", strerror(errno));
+        return;   /* a root without snapshots: no transactions either */
+    }
+    struct cosmo_fsctl_snap_pool pool;
+    struct cosmo_fsctl_snap *v = NULL;
+    unsigned n = 0;
+    if (rootsnap_list(&rs, &pool, &v, &n) < 0) {
+        printf("init: pkg: cannot list the root's snapshots (%s); an interrupted transaction would not be undone\n",
+               strerror(errno));
+        rootsnap_close(&rs);
+        return;
+    }
+    char active[COSMO_FSCTL_NAME_MAX + 2];
+    read_line(PKG_TX_ACTIVE, active, sizeof(active));
+    const struct cosmo_fsctl_snap *tx = active[0] ? rootsnap_find(v, n, active) : NULL;
+    if (active[0] && tx == NULL)
+        (void)unlink(PKG_TX_ACTIVE);   /* its command deleted the snapshot and stopped before the record */
+    bool rebooting = false;
+    for (unsigned i = 0; i < n; i++) {
+        const struct cosmo_fsctl_snap *s = &v[i];
+        if (strncmp(s->name, "pkg-tx-", 7) != 0)
+            continue;
+        if (s->flags & COSMO_FSCTL_SNAP_F_LIVE) {
+            /* Undone. The tree it replaced is the held safety snapshot. */
+            for (unsigned k = 0; k < n; k++)
+                if ((v[k].flags & COSMO_FSCTL_SNAP_F_HELD) && strncmp(v[k].name, "pkg-undone-", 11) == 0)
+                    write_line(PKG_UNDONE, v[k].name);
+            if (rootsnap_delete(&rs, s->name) == 0)
+                printf("init: pkg: the interrupted package transaction %s is undone: the root is as it was before "
+                       "it\n", s->name);
+            else
+                printf("init: pkg: the interrupted package transaction %s is undone, but its snapshot could not be "
+                       "deleted (%s); it will not be acted on again\n", s->name, strerror(errno));
+        } else if (s == tx && (s->flags & COSMO_FSCTL_SNAP_F_TARGET)) {
+            printf("init: pkg: undoing the interrupted package transaction %s is pending, and this boot's mount did "
+                   "not apply it; not rebooting again (see the kernel log, fsctl check /, cosmo-snap list --all)\n",
+                   s->name);
+        } else if (s == tx && (pool.flags & COSMO_FSCTL_POOL_F_PENDING)) {
+            printf("init: pkg: an interrupted package transaction %s is left, but another rollback is pending; not "
+                   "undoing it\n", s->name);
+        } else if (s == tx && !rebooting) {
+            char safety[COSMO_FSCTL_NAME_MAX + 1];
+            struct timespec now = { 0 };
+            (void)clock_gettime(CLOCK_REALTIME, &now);
+            snprintf(safety, sizeof(safety), "pkg-undone-%lld", (long long)now.tv_sec);
+            if (rootsnap_rollback(&rs, s->name, safety, NULL) < 0) {
+                printf("init: pkg: an interrupted package transaction %s is left, and it cannot be undone (%s)\n",
+                       s->name, strerror(errno));
+            } else {
+                printf("init: pkg: undoing the interrupted package transaction %s: the root rolls back to it, and "
+                       "the tree it replaces is kept as %s; rebooting once\n", s->name, safety);
+                rebooting = true;
+            }
+        } else if (s != tx) {
+            printf("init: pkg: snapshot %s is not an interrupted transaction (no record names it); left as it is "
+                   "(cosmo-snap delete %s)\n", s->name, s->name);
+        }
+    }
+    /* Any other rollback this boot's mount left pending was refused (no
+     * room, a bad record: docs/backlog.md CFS-20); the kernel log says why,
+     * and this says it where the operator looks. */
+    for (unsigned i = 0; i < n; i++)
+        if ((v[i].flags & COSMO_FSCTL_SNAP_F_TARGET) && strncmp(v[i].name, "pkg-tx-", 7) != 0)
+            printf("init: a rollback of the root to %s is pending, and this boot's mount did not apply it (see the "
+                   "kernel log; cosmo-upgrade --status)\n", v[i].name);
+    free(v);
+    rootsnap_close(&rs);
+    if (rebooting) {
+        fflush(stdout);
+        sync();
+        cosmo_reboot(COSMO_REBOOT_RESTART);
+        printf("init: pkg: the restart was refused; booting on, the rollback applies at the next boot\n");
+    }
+}
+
+/* After the boot that undid a transaction completed, the tree it replaced
+ * -- the one init noted, no other pkg-undone-* -- has done its job. */
+static void pkg_undone_prune(void)
+{
+    char name[COSMO_FSCTL_NAME_MAX + 2];
+    read_line(PKG_UNDONE, name, sizeof(name));
+    if (!name[0])
+        return;
+    struct rootsnap rs;
+    if (rootsnap_open(&rs, "/") < 0)
+        return;
+    struct cosmo_fsctl_snap *v = NULL;
+    unsigned n = 0;
+    if (rootsnap_list(&rs, NULL, &v, &n) == 0) {
+        const struct cosmo_fsctl_snap *s = rootsnap_find(v, n, name);
+        if (s == NULL || (!(s->flags & COSMO_FSCTL_SNAP_F_HELD) && rootsnap_delete(&rs, name) == 0)) {
+            if (s != NULL)
+                printf("init: pkg: deleted %s, the tree an interrupted transaction left\n", name);
+            (void)unlink(PKG_UNDONE);
+        }
+    }
+    free(v);
+    rootsnap_close(&rs);
+}
+
 static void boot_complete(void)
 {
     int fd = open("/dev/fsctl", O_RDWR);
@@ -6241,13 +6398,17 @@ int main(int argc, char **argv)
     struct stat st;
     char shell[128];
     console_shell(shell, sizeof(shell));
+    if (disk_root)
+        pkg_recover();   /* before any service starts */
     if (stat("/etc/rc", &st) == 0) {
         const char *rc_argv[] = { "sh", "/etc/rc", NULL };
         int status = run_and_wait("/etc/rc", shell, rc_argv, false);
         printf("init: rc exited with status %d\n", status);
         fflush(stdout);
-        if (status == 0)
+        if (status == 0) {
             boot_complete();
+            pkg_undone_prune();
+        }
     }
     const char *sh_argv[] = { "sh", NULL };
     int status = run_and_wait("the shell", shell, sh_argv, true);

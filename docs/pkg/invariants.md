@@ -106,6 +106,21 @@ is written. Check: `badsig` in `rc.test`; `test-pkg-net` (b) refuses an
 procedure, and the ring directory is trusted content of the root
 filesystem. (Replay, this rule's former gap, is PK10's.)
 
+**PK11. A transaction is all or nothing across an interruption**
+(roadmap 1.2 B4, PKG-3; design.md, "Transactions"). `install`, `remove`,
+`upgrade` and `rollback` change the root only between taking
+`pkg-tx-<seconds>` and deleting it; a leftover one is rolled back to by
+init at the next boot, before any service, with one reboot, and init
+does not reboot a second time for a rollback the mount left pending.
+Nothing is written when the root lacks the room the transaction needs.
+Check: `test-pkgtx` (an install and an upgrade killed between two
+packages leave neither change; the space refusal changes nothing).
+
+**PK12. `pkg rollback NAME` returns the version installed before**,
+from the kept copy, its signature checked again; the two last installed
+versions of each package are kept, no more. Check: `test-pkgtx`'s
+rollback stage.
+
 **PK10. A network repository's index is fresh** (roadmap 1.1 P6;
 design.md, "Network repositories"). Before any package line of a fetched
 `INDEX` is parsed, its signature is verified and its header alone read

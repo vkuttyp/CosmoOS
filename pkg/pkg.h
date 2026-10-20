@@ -39,6 +39,10 @@
 #define PKG_KEYS_DIR     "/etc/pkg/keys"
 #define PKG_REPOS_DIR    "/var/lib/pkg/repos"   /* <name>/INDEX: each repository's last accepted index */
 #define PKG_CACHE_DIR    "/var/cache/pkg"       /* <name>/<file>: a package being fetched */
+#define PKG_KEPT_DIR     PKG_CACHE_DIR "/kept"  /* <name>/: the installed version and the one before (pkg rollback) */
+#define PKG_TX_PREFIX    "pkg-tx-"             /* a transaction's root snapshot (init undoes a leftover one) */
+#define PKG_OLDEST_FORMAT "/var/lib/cosmo-upgrade/oldest-format"   /* cosmo-upgrade's record (B4) */
+#define PKG_TX_ACTIVE    PKG_DB_DIR "/tx-active"   /* the open transaction's snapshot, for init */
 #define PKG_MAX_REPOS    8
 #define PKG_URL_MAX      256
 #define PKG_INDEX_MAX_DAYS 90                    /* PK10: an index is valid for at most 90 days */

@@ -429,7 +429,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-upgrade-${{ matrix.arch }}
-          path: out/${{ matrix.arch }}-release/test-upgrade/*.log
+          path: |
+            out/${{ matrix.arch }}-release/test-upgrade/*.log
+            out/${{ matrix.arch }}-release/test-pkgtx/*.log
           if-no-files-found: ignore
 
   # Milestone M5's acceptance (docs/roadmap-1.0.md; docs/boot/testing.md,

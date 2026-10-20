@@ -254,7 +254,11 @@ def stage_refuse(args, results, port, keyid, otherid, vkeyid):
         out = sh(b, f"{VERIFY} {UP}/cosmoos-{arch}-kernel.elf {UP}/SHA256SUMS {UP}/SHA256SUMS.sig", "verifyok")
         need(out, rf"^cosmo-verify: {UP}/cosmoos-{arch}-kernel\.elf: OK \(SHA-256 [0-9a-f]{{16}}\.\.\., in SHA256SUMS "
                   rf"signed by key {keyid}, ", "cosmo-verify of a release file")
-        out = sh(b, f"cp /tmp/badasset/kernel.elf /tmp/cosmoos-{arch}-kernel.elf && "
+        # A link, not a copy: /tmp is a ramfs of at most 64 MiB on v1.0.3
+        # (RAMFS_MAX_PAGES), and the set, its variants and the unpacked tools
+        # are near that already (a copy of the kernel tipped it once the
+        # build's boot.tar grew, 2026-10-20).
+        out = sh(b, f"ln -sf /tmp/badasset/kernel.elf /tmp/cosmoos-{arch}-kernel.elf && "
                     f"{VERIFY} /tmp/cosmoos-{arch}-kernel.elf {UP}/SHA256SUMS {UP}/SHA256SUMS.sig", "verifybad", 3)
         need(out, rf"^cosmo-verify: /tmp/cosmoos-{arch}-kernel\.elf does not match SHA256SUMS; do not use it$",
              "cosmo-verify of a kernel.elf with one byte changed")
@@ -450,6 +454,10 @@ def stage_new(args, results, keyid, nonce):
              "cosmo-upgrade --status")
         out = sh(b, "pkg update && pkg upgrade && hello", "pkg")
         need(out, r"^pkg: 1 package upgraded$", "pkg upgrade from the new repository")
+        # A pkg transaction would raise the root to format 12, which
+        # v1.0.3 -- still in \cosmo\prev -- cannot mount (roadmap 1.2 B4):
+        # none is taken, and --rollback below can return.
+        need(out, r"^pkg: no transaction: its snapshot would raise / to format 12", "pkg upgrade with v1.0.3 kept")
         need(out, r"^hello, world \(hello 1\.1\)$", "hello after pkg upgrade")
         out = sh(b, "cosmo-upgrade --rollback", "back")
         need(out, rf"^cosmo-upgrade: verified \\cosmo\\prev, signed by key {RELEASE_KEY} in /etc/pkg/keys$",
