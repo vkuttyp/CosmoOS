@@ -15,7 +15,13 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      11u  /* version 11: the metadata header declares its checksum algorithm */
+#define CFS_VERSION      12u  /* the newest this kernel reads: version 12, snapshot identity and rollback */
+/* What a format writes. A pool is raised to 12 by the first operation that
+ * needs it (a snapshot taken or rolled back to), not before: a kernel of
+ * v1.0.7 or older reads 11 at most, and a pool nobody asked to change
+ * should stay mountable by the kernel it might be rolled back to
+ * (design.md, "Format version 12"). */
+#define CFS_FORMAT_VERSION 11u
 #define CFS_VERSION_MIN  2u   /* versions 2 and 3 mount unchanged: their pointers are vdev-0 DVAs */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
@@ -38,6 +44,8 @@ enum cfs_kind {
     CFS_KIND_KEYS = 12,     /* the wrapped master key (struct cfs_keys) */
     CFS_KIND_FREELOG = 13,  /* v9: what this root freed, so a mount can finish the job */
     CFS_KIND_ORPHAN = 14,   /* v10: inodes whose last name went while something held them */
+    CFS_KIND_SNAPLIST2 = 15,/* v12: the snapshot list with identity (struct cfs_snap_block2) */
+    CFS_KIND_ROLLBACK = 16, /* v12: a pending rollback or the hold after one (struct cfs_rollback) */
 };
 
 /* --- device-virtual addresses --------------------------------------------
@@ -204,8 +212,12 @@ struct cfs_extent_block {
 
 /* A snapshot is the tuple a commit publishes, kept: every tree it names
  * is copy-on-write, so nothing has to be copied to take one
- * (docs/kernel-services/filesystem/cosmofs/design.md, "Format version 3"). */
-struct cfs_snapshot {          /* 96 bytes */
+ * (docs/kernel-services/filesystem/cosmofs/design.md, "Format version 3").
+ *
+ * This is the version-12 entry, and the one the code works with in
+ * memory; a version-11 list is read into it with `uuid`, `origin_id` and
+ * `flags` zero (struct cfs_snapshot_v11, below). */
+struct cfs_snapshot {          /* 128 bytes */
     uint64_t generation;       /* the commit this snapshot pins */
     uint64_t imap_root;
     uint64_t alloc_root;
@@ -215,12 +227,37 @@ struct cfs_snapshot {          /* 96 bytes */
     uint64_t created_ns;
     /* Never reused while the filesystem lives: it is the tag a
      * snapshot's vnodes carry, and a cached vnode must never be handed
-     * to a different snapshot (design.md, "Reading a snapshot"). */
+     * to a different snapshot (design.md, "Reading a snapshot"). From
+     * version 12 the high-water mark is on disk (cfs_snap_block2.max_id),
+     * so "lives" includes a remount. */
+    uint64_t id;
+    /* v12: drawn at random when the snapshot is taken and never changed;
+     * what a rollback record names, since a name can be deleted and
+     * reused and an id only means something to one filesystem. */
+    uint8_t uuid[16];
+    uint64_t origin_id;        /* v12: a clone's snapshot; 0 for a snapshot */
+    uint32_t flags;            /* v12: CFS_SNAP_F_* */
+    uint32_t reserved;
+    char name[CFS_SNAP_NAME_MAX + 1];
+};
+
+#define CFS_SNAP_F_CLONE 1u    /* a writable tree sharing its origin's blocks (design.md, "Clones") */
+
+/* The version-11 entry, read from a CFS_KIND_SNAPLIST block. */
+struct cfs_snapshot_v11 {      /* 96 bytes */
+    uint64_t generation;
+    uint64_t imap_root;
+    uint64_t alloc_root;
+    uint64_t next_ino;
+    uint64_t inode_count;
+    uint64_t deadlist;
+    uint64_t created_ns;
     uint64_t id;
     char name[CFS_SNAP_NAME_MAX + 1];
 };
 
-#define CFS_SNAPS_PER_BLOCK ((CFS_BLOCK - CFS_MHDR_SIZE - 8) / sizeof(struct cfs_snapshot))
+#define CFS_SNAPS_PER_BLOCK ((CFS_BLOCK - CFS_MHDR_SIZE - 8) / sizeof(struct cfs_snapshot_v11))   /* 42 */
+#define CFS_SNAPS_PER_BLOCK2 ((CFS_BLOCK - CFS_MHDR_SIZE - 16) / sizeof(struct cfs_snapshot))    /* 31 */
 
 /* A snapshot's vnodes share the mount's inode numbers, so they carry a
  * tag in bits above the inode-number space: the VFS caches vnodes by
@@ -238,7 +275,48 @@ struct cfs_snapshot {          /* 96 bytes */
 /* Payload of a CFS_KIND_SNAPLIST block; the chain continues at `next`. */
 struct cfs_snap_block {
     uint64_t next;
-    struct cfs_snapshot snap[CFS_SNAPS_PER_BLOCK];
+    struct cfs_snapshot_v11 snap[CFS_SNAPS_PER_BLOCK];
+};
+
+/* Payload of a CFS_KIND_SNAPLIST2 block (version 12). `max_id` is the
+ * highest id ever handed out on this filesystem; the head block's is the
+ * one read, and every block of a chain carries the same value. */
+struct cfs_snap_block2 {
+    uint64_t next;
+    uint64_t max_id;
+    struct cfs_snapshot snap[CFS_SNAPS_PER_BLOCK2];
+};
+
+/*
+ * Payload of a CFS_KIND_ROLLBACK block (version 12), named by
+ * cfs_super.rollback_root.
+ *
+ * PENDING: `rollback NAME` asked for the live tree to become `target`'s
+ * at the next mount, and took `safety` -- a snapshot of the live tree --
+ * in the same transaction. HELD: a mount did that, and until the next
+ * boot completes neither snapshot may be deleted, so a bad rollback can be
+ * undone (design.md, "Rollback").
+ */
+#define CFS_ROLLBACK_MAGIC   0x42524643u   /* "CFRB" */
+#define CFS_ROLLBACK_PENDING 1u
+#define CFS_ROLLBACK_HELD    2u
+
+struct cfs_rollback {
+    uint32_t magic;
+    uint32_t version;          /* 1 */
+    uint32_t state;            /* CFS_ROLLBACK_* */
+    uint32_t pad;
+    uint8_t target_uuid[16];
+    uint8_t safety_uuid[16];
+    uint64_t target_id;        /* the ids when the record was written, for the log */
+    uint64_t safety_id;
+    /* PENDING: the live root's generation the request was made against.
+     * HELD: the generation of the mount's switch. */
+    uint64_t generation;
+    uint64_t requested_ns;
+    uint64_t reserved[4];
+    uint32_t crc;              /* CRC32C over this struct with this field zero */
+    uint32_t pad2;
 };
 
 #define CFS_DEAD_PER_BLOCK ((CFS_BLOCK - CFS_MHDR_SIZE - 16) / sizeof(uint64_t))
@@ -410,7 +488,12 @@ struct cfs_super {
      * a named filesystem still mounts there and keeps its name.
      */
     char label[CFS_LABEL_MAX];
-    uint64_t reserved[1];
+    /*
+     * v12: the CFS_KIND_ROLLBACK block, or 0 (design.md, "Rollback"). The
+     * last reserved word; read only when version >= 12, where below it
+     * the word is a reserved zero.
+     */
+    uint64_t rollback_root;
     uint32_t crc;          /* CRC32C over the whole block with this field zero */
     uint32_t pad;
 };

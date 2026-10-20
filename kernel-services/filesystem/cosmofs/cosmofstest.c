@@ -3674,7 +3674,7 @@ bool selftest_cosmofs_freelog_format(const char **reason)
     cosmofs_test_set_writeback(mount_of(ENG), false);
     struct cosmofs_stats st;
     CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
-    CHECK(st.version == CFS_VERSION);
+    CHECK(st.version == CFS_FORMAT_VERSION);   /* raised to 12 only by a snapshot */
     CHECK(st.free_root == 0);          /* a fresh filesystem freed nothing */
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_rmdir(NULL, ENG) == 0);
@@ -4953,8 +4953,151 @@ bool selftest_cosmofs_snapshot_remount(const char **reason)
     kinfo("selftest: cosmofs-snapshot-remount: the snapshot survived the unmount");
     return engine_unmount(bd, reason);
 }
+
+/* One snapshot operation through the interface /dev/fsctl uses. */
+static int snapctl(enum cosmofs_snap_op op, const char *name, struct cosmofs_snap_info *out, unsigned max,
+                   unsigned *count)
+{
+    struct cosmofs_snap_req req = { .op = op, .name = name, .out = out, .max = max };
+    int rc = cosmofs_snapctl(mount_of(ENG), &req);
+    if (count != NULL)
+        *count = req.count;
+    return rc;
+}
+
+static const struct cosmofs_snap_info *info_named(const struct cosmofs_snap_info *v, unsigned n, const char *name)
+{
+    for (unsigned i = 0; i < n; i++)
+        if (strcmp(v[i].name, name) == 0)
+            return &v[i];
+    return NULL;
+}
+
+/*
+ * Format version 12's snapshot identity (roadmap 1.2 B1; design.md,
+ * "Format version 12"): a pool formatted at 11 stays at 11 until a
+ * snapshot is taken, which raises it and converts the list an older
+ * kernel left -- every snapshot gains a uuid and stays readable; ids are
+ * never reused, across a remount too (inventory §3, CFS-3); a list's
+ * sizes say what each snapshot alone holds; a pool older than 11 refuses
+ * identity and keeps its version; and the checker names a snapshot with
+ * no uuid and repairs it.
+ */
+bool selftest_cosmofs_snap_identity(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 1024, reason))
+        return false;
+    struct cosmofs_stats st;
+    /* Static: the self-tests run one at a time, and the kernel stack has
+     * no 2.5 KiB to spare for a list and a check report. */
+    static struct cosmofs_snap_info info[8];
+    static struct cosmofs_check_report rep;
+    unsigned n = 0;
+    static const uint8_t zero[16];
+
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.version == 11);                         /* formatted at 11, not 12 */
+
+    /* The list an older kernel would have left: one version-11 snapshot. */
+    CHECK(write_file(ENG "/f", "old", 3));
+    cosmofs_test_snap_no_raise(mount_of(ENG), true);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/legacy", 0755) == 0);
+    cosmofs_test_snap_no_raise(mount_of(ENG), false);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.version == 11);
+
+    /* The first snapshot with identity raises the pool and the list. */
+    CHECK(write_file(ENG "/f", "new", 3));
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "a", info, 1, &n) == 0 && n == 1);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.version == 12);
+    CHECK(memcmp(info[0].uuid, zero, 16) != 0 && info[0].format == 12);
+    uint8_t uuid_a[16];
+    memcpy(uuid_a, info[0].uuid, 16);
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "a", info, 1, &n) == -EEXIST);
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "b", info, 1, &n) == 0);
+    CHECK(memcmp(info[0].uuid, uuid_a, 16) != 0);
+    uint64_t id_b = info[0].id;
+    CHECK(read_matches(ENG "/.snapshots/legacy/f", "old", 3));   /* converted, still readable */
+    CHECK(read_matches(ENG "/.snapshots/a/f", "new", 3));
+
+    /* Every entry, the converted one included, has a uuid of its own. */
+    CHECK(snapctl(COSMOFS_SNAP_LIST, NULL, info, 8, &n) == 0 && n == 3);
+    const struct cosmofs_snap_info *legacy = info_named(info, n, "legacy");
+    CHECK(legacy != NULL && memcmp(legacy->uuid, zero, 16) != 0 && memcmp(legacy->uuid, uuid_a, 16) != 0);
+
+    /* Ids are never reused, across a remount (CFS-3): delete the newest,
+     * remount, take another -- it gets a new id, not b's. */
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "b", NULL, 0, NULL) == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "c", info, 1, &n) == 0);
+    CHECK(info[0].id > id_b);
+
+    /* What a snapshot alone holds: a file of 32 blocks written, taken by
+     * "d", then removed from the live tree. */
+    /* Incompressible: new files are LZ4 (format version 6), and a file
+     * that compresses holds fewer blocks than it has. */
+    static char big[32 * 4096];
+    uint64_t x = 0x9E3779B97F4A7C15ull;
+    for (unsigned i = 0; i < sizeof(big); i++) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        big[i] = (char)x;
+    }
+    CHECK(write_file(ENG "/big", big, sizeof(big)));
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "d", info, 1, &n) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/big") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(snapctl(COSMOFS_SNAP_LIST, NULL, info, 8, &n) == 0 && n == 4);   /* legacy, a, c, d */
+    const struct cosmofs_snap_info *d = info_named(info, n, "d");
+    const struct cosmofs_snap_info *c = info_named(info, n, "c");
+    CHECK(d != NULL && c != NULL);
+    CHECK(d->unique >= 32ull * 4096 && d->referenced >= d->unique);
+    CHECK(c->unique < 32ull * 4096);               /* the file was born after c */
+    /* Oldest first. */
+    CHECK(strcmp(info[0].name, "legacy") == 0 && strcmp(info[n - 1].name, "d") == 0);
+
+    /* The checker: clean, then a snapshot with no uuid is named and repaired. */
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+    uint64_t victim = 0;
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_SNAP_UUID, 0, &victim) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && !rep.clean);
+    CHECK(rep.snap_identity.count == 1 && rep.snap_identity.name[0] == victim);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 && rep.snap_identity.repaired == 1);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "nope", NULL, 0, NULL) == -ENOENT);
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "bad/name", info, 1, &n) == -EINVAL);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "legacy", NULL, 0, NULL) == 0);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "a", NULL, 0, NULL) == 0);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "c", NULL, 0, NULL) == 0);
+    CHECK(snapctl(COSMOFS_SNAP_DELETE, "d", NULL, 0, NULL) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0 && rep.clean);
+    CHECK(engine_unmount(bd, reason));
+
+    /* A pool older than 11 refuses identity and keeps its version; its
+     * own kind of snapshot still works. */
+    bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_test_format_version(bd, 10) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "x", info, 1, &n) == -EOPNOTSUPP);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/old", 0755) == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.version == 10);
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/old") == 0);
+    kinfo("selftest: cosmofs-snap-identity: raised 11 -> 12 with a legacy snapshot converted; ids not reused "
+          "after a remount (%llu > %llu); d holds %llu KiB alone; a version-10 pool refuses identity",
+          (unsigned long long)c->id, (unsigned long long)id_b, (unsigned long long)(d->unique / 1024));
+    return engine_unmount(bd, reason);
+}
 #else
 bool selftest_cosmofs_badmap(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_snapshot(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_snapshot_remount(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_snap_identity(const char **reason) { (void)reason; return true; }
 #endif

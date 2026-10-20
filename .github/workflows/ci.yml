@@ -349,12 +349,20 @@ jobs:
       - name: Install, reboot, persist, fallback (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release test-install
 
+      # Roadmap 1.2 B1 (docs/roadmap-1.2.md): snapshots of the installed
+      # root from the shell. Here rather than in a job of its own: it
+      # installs the same release image the step above just installed.
+      - name: Snapshots from the shell (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-snapshot
+
       - name: Upload the boots' serial logs (on failure)
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-install-${{ matrix.arch }}
-          path: out/${{ matrix.arch }}-release/test-install/*.log
+          path: |
+            out/${{ matrix.arch }}-release/test-install/*.log
+            out/${{ matrix.arch }}-release/test-snapshot/*.log
           if-no-files-found: ignore
 
   # Shell completeness S7's acceptance (docs/roadmap-1.1.md;

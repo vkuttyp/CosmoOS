@@ -29,12 +29,14 @@ deferral by decision or measurement.
 **Size.** S: about a day, one PR. M: a unit, two to five PRs. L: larger
 than one unit.
 
+Open lines (struck lines are not counted):
+
 | | correctness | security | usability | nice-to-have | total |
 |---|---|---|---|---|---|
 | Block devices | 3 | 0 | 2 | 3 | 8 |
 | Boot chain and verified boot | 0 | 5 | 2 | 1 | 8 |
 | Build and tooling | 0 | 2 | 0 | 4 | 6 |
-| cosmofs and storage | 6 | 1 | 4 | 5 | 16 |
+| cosmofs and storage | 5 | 1 | 7 | 5 | 18 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 3 | 0 | 2 | 11 | 16 |
 | Linux personality | 6 | 0 | 11 | 6 | 23 |
@@ -50,7 +52,7 @@ than one unit.
 | Commands | 0 | 0 | 4 | 1 | 5 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **41** | **21** | **46** | **88** | **196** |
+| **all** | **40** | **21** | **49** | **88** | **198** |
 
 ## Block devices
 
@@ -87,7 +89,7 @@ than one unit.
 
 - **CFS-1** correctness, S. A read-only mount still writes the replay of a free or orphan record to the device.
 - **CFS-2** correctness, S. New files are LZ4 on any format version, so an older-version image written here can hold v6 records.
-- **CFS-3** correctness, S. Snapshot ids are unique per mount only: a deleted newest snapshot's id is reused after a remount (V22 says never).
+- ~~**CFS-3** correctness, S. Snapshot ids are unique per mount only: a deleted newest snapshot's id is reused after a remount (V22 says never).~~ Done by roadmap 1.2 B1's first PR (format version 12: the list head carries the id high-water mark, CF18); a pool older than format 11 keeps the old behaviour.
 - **CFS-4** correctness, S. `cosmofs_rekey` leaves the key block in the open transaction until the next commit.
 - **CFS-5** correctness, S. `/dev/blkctl`'s mounted check does not see the other members of a mounted multi-device pool.
 - **CFS-6** correctness, M. CF17 abandons the transaction (`cfs_fail`) for failures a retry could survive; `extents_store` and `inode_sync` should allocate and write first so they fail cleanly.
@@ -101,6 +103,9 @@ than one unit.
 - **CFS-14** nice-to-have, L. Block deduplication, evaluated against its space, integrity and recovery costs.
 - **CFS-15** nice-to-have, S. A cosmofs label cannot be changed after format; `mkfs.cosmofs` makes single-device unencrypted pools only.
 - **CFS-16** nice-to-have, L. A distributed filesystem (deferred: its own consistency and failure project).
+- **CFS-17** usability, M. Rollback of a mounted root takes effect at the next mount (a reboot for the root); a live rollback of a mounted tree is not built (out of B1's scope, roadmap 1.2).
+- **CFS-18** usability, S. No scheduled snapshots (taken on a timer and pruned by age); `cosmo-snap` is run by hand (out of B1's scope).
+- **CFS-19** usability, M. No quotas: neither per snapshot nor per directory tree (out of B1's scope).
 
 ## Documentation
 

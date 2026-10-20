@@ -41,6 +41,11 @@ static const char *const class_name[COSMO_FSCTL_CLASSES] = {
     "unordered extents",      /* extent_order */
     "overlapping extents",    /* extent_overlap */
     "duplicate names",        /* dir_dup_name */
+    /* Version 3: format version 12's snapshot identity and rollback
+     * record (docs/kernel-services/filesystem/cosmofs/design.md). */
+    "snapshot identities",    /* snap_identity */
+    "rollback records",       /* rollback_record */
+    "holds",                  /* hold */
 };
 
 /*
@@ -133,6 +138,8 @@ static int cmd_list(int fd)
             strcat(passes, "c");
         if (m[i].caps & COSMO_FSCTL_CAP_SCRUB)
             strcat(passes, "s");
+        if (m[i].caps & COSMO_FSCTL_CAP_SNAP)
+            strcat(passes, "n");   /* snapshots (cosmo-snap) */
         printf("%6llu  %-10s %-6s %s\n", (unsigned long long)m[i].id, m[i].fstype,
                passes[0] ? passes : "-", m[i].path);
     }

@@ -89,6 +89,8 @@ static uint32_t fsctl_caps(const struct mount *mnt)
         caps |= COSMO_FSCTL_CAP_CHECK;
     if (mnt->fs->scrub)
         caps |= COSMO_FSCTL_CAP_SCRUB;
+    if (mnt->fs->snapctl)
+        caps |= COSMO_FSCTL_CAP_SNAP;
     return caps;
 }
 
@@ -292,6 +294,8 @@ static int64_t fsctl_run(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
                 /* Appended in version 2; the first ten keep their
                  * indices (uapi/cosmo/fsctl.h). */
                 &rep.extent_order, &rep.extent_overlap, &rep.dir_dup_name,
+                /* Appended in version 3 (format version 12). */
+                &rep.snap_identity, &rep.rollback_record, &rep.hold,
             };
             c->nclasses = COSMO_FSCTL_CLASSES;
             c->flags = (rep.partial ? COSMO_FSCTL_R_PARTIAL : 0u) |
@@ -339,6 +343,96 @@ static int64_t fsctl_run(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
     return 0;
 }
 
+/*
+ * A snapshot operation against one named mount (version 3). The mount is
+ * held across the call exactly as a pass holds it, and the records are
+ * copied field by field: struct cosmofs_snap_info is cosmofs's and may
+ * change, struct cosmo_fsctl_snap is the ABI.
+ */
+static int64_t fsctl_snap(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
+{
+    static const enum cosmofs_snap_op ops[] = {
+        [COSMO_FSCTL_SNAP_CREATE] = COSMOFS_SNAP_CREATE,
+        [COSMO_FSCTL_SNAP_LIST] = COSMOFS_SNAP_LIST,
+        [COSMO_FSCTL_SNAP_DELETE] = COSMOFS_SNAP_DELETE,
+        [COSMO_FSCTL_SNAP_ROLLBACK] = COSMOFS_SNAP_ROLLBACK,
+        [COSMO_FSCTL_SNAP_CANCEL] = COSMOFS_SNAP_CANCEL,
+        [COSMO_FSCTL_SNAP_CLONE] = COSMOFS_SNAP_CLONE,
+        [COSMO_FSCTL_BOOT_OK] = COSMOFS_SNAP_BOOT_OK,
+    };
+    struct mount *mnt = NULL;
+    int rc = vfs_mount_acquire(cmd->mount_id, &mnt);
+    if (rc)
+        return rc;
+    if (mnt->fs->snapctl == NULL) {
+        vfs_mount_release(mnt);
+        return -EOPNOTSUPP;
+    }
+    /* Room for every snapshot a list can hold (CFS_SNAP_ID_MAX is the
+     * id space; a list this long is not one anyone has). */
+    unsigned max = cmd->op == COSMO_FSCTL_SNAP_LIST ? COSMO_FSCTL_SNAP_PAGE : 1u;
+    struct cosmofs_snap_info *info = kzalloc((size_t)max * sizeof(*info));
+    if (info == NULL) {
+        vfs_mount_release(mnt);
+        return -ENOMEM;
+    }
+    bool safety_named = (cmd->flags & COSMO_FSCTL_F_SAFETY_NAME) != 0;
+    struct cosmofs_snap_req req = {
+        .op = ops[cmd->op],
+        .name = cmd->name[0] ? cmd->name : NULL,
+        .name2 = (cmd->op == COSMO_FSCTL_SNAP_CLONE || safety_named) && cmd->name2[0] ? cmd->name2 : NULL,
+        .out = info,
+        .max = max,
+        .no_sizes = (cmd->flags & COSMO_FSCTL_F_NO_SIZES) != 0,
+        .after = cmd->op == COSMO_FSCTL_SNAP_LIST ? cmd->cursor : 0,
+    };
+    rc = mnt->fs->snapctl(mnt, &req);
+    vfs_mount_release(mnt);
+    if (rc) {
+        kfree(info);
+        return rc;
+    }
+    bool listing = cmd->op == COSMO_FSCTL_SNAP_LIST;
+    size_t pool = listing ? sizeof(struct cosmo_fsctl_snap_pool) : 0;
+    size_t bytes = sizeof(struct cosmo_fsctl_result) + pool + (size_t)req.count * sizeof(struct cosmo_fsctl_snap);
+    uint8_t *buf = kzalloc(bytes);
+    if (buf == NULL) {
+        kfree(info);
+        return -ENOMEM;
+    }
+    struct cosmo_fsctl_result *hdr = (struct cosmo_fsctl_result *)buf;
+    if (listing) {
+        struct cosmo_fsctl_snap_pool *p = (struct cosmo_fsctl_snap_pool *)(buf + sizeof(*hdr));
+        p->format = req.format;
+        p->flags = ((req.pool_flags & COSMOFS_POOL_PENDING) ? COSMO_FSCTL_POOL_F_PENDING : 0u) |
+                   ((req.pool_flags & COSMOFS_POOL_HELD) ? COSMO_FSCTL_POOL_F_HELD : 0u);
+    }
+    struct cosmo_fsctl_snap *rec = (struct cosmo_fsctl_snap *)(buf + sizeof(*hdr) + pool);
+    for (unsigned i = 0; i < req.count; i++) {
+        rec[i].id = info[i].id;
+        rec[i].generation = info[i].generation;
+        rec[i].created_ns = info[i].created_ns;
+        rec[i].origin_id = info[i].origin_id;
+        rec[i].referenced = info[i].referenced;
+        rec[i].unique = info[i].unique;
+        memcpy(rec[i].uuid, info[i].uuid, sizeof(rec[i].uuid));
+        rec[i].flags = ((info[i].flags & COSMOFS_SNAP_I_CLONE) ? COSMO_FSCTL_SNAP_F_CLONE : 0u) |
+                       ((info[i].flags & COSMOFS_SNAP_I_TARGET) ? COSMO_FSCTL_SNAP_F_TARGET : 0u) |
+                       ((info[i].flags & COSMOFS_SNAP_I_SAFETY) ? COSMO_FSCTL_SNAP_F_SAFETY : 0u) |
+                       ((info[i].flags & COSMOFS_SNAP_I_HELD) ? COSMO_FSCTL_SNAP_F_HELD : 0u);
+        rec[i].format = info[i].format;
+        strlcpy(rec[i].name, info[i].name, sizeof(rec[i].name));
+    }
+    kfree(info);
+    hdr->version = COSMO_FSCTL_VERSION;
+    hdr->kind = cmd->op;
+    hdr->count = req.count;
+    hdr->total = cmd->op == COSMO_FSCTL_SNAP_LIST ? req.total : req.count;
+    hdr->bytes = sizeof(struct cosmo_fsctl_snap);
+    fsctl_set_result(o, buf, bytes);
+    return 0;
+}
+
 static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
                                 const void *buf, size_t len)
 {
@@ -361,8 +455,14 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
      * it ambiguous later, when a version gives that bit a meaning and
      * an old writer turns out to have been setting it.
      */
-    uint32_t allowed = cmd.op == COSMO_FSCTL_CHECK ? COSMO_FSCTL_F_REPAIR : 0u;
+    uint32_t allowed = cmd.op == COSMO_FSCTL_CHECK      ? COSMO_FSCTL_F_REPAIR
+                       : cmd.op == COSMO_FSCTL_SNAP_ROLLBACK ? COSMO_FSCTL_F_SAFETY_NAME
+                       : cmd.op == COSMO_FSCTL_SNAP_LIST     ? COSMO_FSCTL_F_NO_SIZES
+                                                             : 0u;
     if ((cmd.flags & ~allowed) != 0)
+        return -EINVAL;
+    /* A name is a NUL-terminated string inside its field, or empty. */
+    if (memchr(cmd.name, '\0', sizeof(cmd.name)) == NULL || memchr(cmd.name2, '\0', sizeof(cmd.name2)) == NULL)
         return -EINVAL;
 
     int64_t rc;
@@ -373,6 +473,15 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     case COSMO_FSCTL_CHECK:
     case COSMO_FSCTL_SCRUB:
         rc = fsctl_run(o, &cmd);
+        break;
+    case COSMO_FSCTL_SNAP_CREATE:
+    case COSMO_FSCTL_SNAP_LIST:
+    case COSMO_FSCTL_SNAP_DELETE:
+    case COSMO_FSCTL_SNAP_ROLLBACK:
+    case COSMO_FSCTL_SNAP_CANCEL:
+    case COSMO_FSCTL_SNAP_CLONE:
+    case COSMO_FSCTL_BOOT_OK:
+        rc = fsctl_snap(o, &cmd);
         break;
     default:
         rc = -EINVAL;
@@ -440,5 +549,5 @@ void fsctl_dev_init(void)
      * kernel that shipped the passes with no way to reach them is the
      * thing this unit exists to stop.
      */
-    kinfo("fsctl: /dev/fsctl ready (0600): mount listing, check and scrub");
+    kinfo("fsctl: /dev/fsctl ready (0600): mount listing, check, scrub and snapshots");
 }

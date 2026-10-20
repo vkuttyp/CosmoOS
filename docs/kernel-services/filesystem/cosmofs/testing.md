@@ -119,6 +119,7 @@ writeback thread off so that generation counts are exact.
 | `cosmofs-snap-reserved` | more frees than one deadlist block holds: every block the list gained is in the published bitmap |
 | `cosmofs-snap-rollback` | a deadlist fill that fails partway abandons the transaction and returns the reservation |
 | `cosmofs-snap-onewalk` | one snapshot verdict per freed block (walks minus verdicts) |
+| `cosmofs-snap-identity` | format version 12 (CF18): a pool formatted at 11 stays 11 until a snapshot raises it, converting a version-11 entry (`cosmofs_test_snap_no_raise` builds one) that stays readable; every snapshot gets a distinct uuid through `cosmofs_snapctl`; an id is not reused after a delete and a remount; `list`'s sizes: a snapshot holding a 32-block incompressible file the live tree removed has at least that much unique, one taken before the file has less, and the list is oldest first; a zeroed uuid (`COSMOFS_CORRUPT_SNAP_UUID`) is named by `snap_identity` and repaired; a version-10 pool refuses `create` with `-EOPNOTSUPP` and keeps its version |
 
 ### Pools, mirrors, compression, encryption (versions 4 to 7)
 
@@ -209,6 +210,21 @@ checked.
   requires a write into the snapshot to fail, lists and `rmdir`s it.
   `tests/boot/run_boot_test.py` requires `SNAPTEST: PASS` and forbids
   `SNAPTEST: skipped`.
+
+## Snapshots on the installed system (`make test-snapshot`)
+
+Roadmap 1.2 B1's acceptance test, `tests/boot/snapshot_test.py`, in CI's
+install job on both architectures (release builds). It installs as
+`test-install` does and boots the installed disk alone. Stage
+`identity`: the fresh root is format 11 (`cosmo-snap list`); `cosmo-snap
+create base` raises it to 12 (the kernel's line is required) and prints
+the uuid; a second `base` is refused; after the live tree changes,
+`cosmo-snap diff base -` names exactly the four changes under the test's
+directory; the snapshot still reads the old contents; `list` shows base
+with its uuid and non-zero sizes; `fsctl check` of the root is clean and
+counts one snapshot; then a delete, a new snapshot, a power-off, and on
+the next boot the ids rise across the delete and the remount. Rollback
+and clone stages arrive with B1's later pull requests.
 
 ## Installed system (`make test-install`)
 

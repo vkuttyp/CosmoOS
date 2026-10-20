@@ -689,6 +689,7 @@ static const struct selftest tests[] = {
     { "cosmofs-fsync",   selftest_cosmofs_fsync },
     { "cosmofs-snapshot", selftest_cosmofs_snapshot },
     { "cosmofs-snapshot-remount", selftest_cosmofs_snapshot_remount },
+    { "cosmofs-snap-identity", selftest_cosmofs_snap_identity },
     { "cosmofs-pool2", selftest_cosmofs_pool2 },
     { "cosmofs-v3", selftest_cosmofs_v3 },
     { "cosmofs-freelog-format", selftest_cosmofs_freelog_format },

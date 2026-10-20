@@ -303,6 +303,25 @@ after a remount; before CF17 the retry committed holes). Gap: the
 `inode_sync`, `extents_store`, checker, create, symlink, bitmap and
 deadlist sites are checked by review, not by a test.
 
+**CF18. From format version 12 a snapshot's identity is its own: every
+snapshot has a uuid no other snapshot of the filesystem has, and no id
+is handed out twice, across remounts included.** The uuid is drawn when
+the snapshot is taken (or when the raise from 11 converts an older
+entry) and never changed, and redrawn while the list already has it, so
+uniqueness does not depend on a seeded entropy pool; the list head's `max_id` is the highest id
+ever used, every new id is above it and above every id on the list, and
+the head is rewritten in the transaction that takes the snapshot. A pool
+is raised from 11 to 12 only by a snapshot, in that snapshot's
+transaction, and never below 11 (`design.md`, "Format version 12"). The
+checker's `snap_identity` class names a version-12 snapshot with no
+uuid, a shared uuid, or an id above the mark, and repairs each (a fresh
+uuid; the mark raised). Check: `cosmofs-snap-identity` (a pool formatted
+at 11 stays 11 until a snapshot, which converts a version-11 entry and
+gives every snapshot a distinct uuid; an id is not reused after a delete
+and a remount; a version-10 pool refuses identity and keeps its version;
+a zeroed uuid is named and repaired); `test-snapshot`'s identity stage on
+the installed root.
+
 ## 3. Rules stated in `design.md` and not checked
 
 - The commit's flush before and after the root assumes the device honours
@@ -325,8 +344,11 @@ Found while writing this file; the code was read, nothing was changed.
   not clean. `docs/verification/design.md` section 4 also names the
   harness `cosmofs-crash`; `cosmofscrash.c` registers `cosmofs-replay`.
 - V22 and `design.md` ("Reading a snapshot") say a snapshot id is never
-  reused while the filesystem lives. `snap_max_id` (`cosmofs_snap.c`)
-  starts from `fs->snap_max_id`, which is per mount, and the ids on the
-  list; after the newest snapshot is deleted and the filesystem
-  remounted, its id can be handed out again. The vnode cache is per
-  mount, so the property V22 relies on still holds.
+  reused while the filesystem lives. Below format version 12 that is
+  per mount: `snap_max_id` (`cosmofs_snap.c`) starts from
+  `fs->snap_max_id` and the ids on the list, so after the newest snapshot
+  is deleted and the filesystem remounted, its id can be handed out
+  again. The vnode cache is per mount, so the property V22 relies on
+  still holds. From version 12 the list head carries the mark and the
+  wording is true (CF18); a pool at 11 is raised by its first snapshot,
+  so only a pool older than 11 still behaves the old way.

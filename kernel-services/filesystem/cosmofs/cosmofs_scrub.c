@@ -68,14 +68,15 @@ static void scrub_snapshots(struct cfs *fs, uint8_t *page, struct cosmofs_scrub_
     uint64_t blkno = fs->sb.snap_root;
     unsigned guard = 0;
     while (blkno && guard++ < CFS_MAX_MEMBERS * 64u) {
-        scrub_meta(fs, blkno, CFS_KIND_SNAPLIST, page, st);
+        scrub_meta(fs, blkno, cfs_snaplist_kind(fs), page, st);
         struct cfs_buf *b;
-        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b))
+        if (cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b))
             return;
-        const struct cfs_snap_block *sb = (const struct cfs_snap_block *)(b->data + CFS_MHDR_SIZE);
-        uint64_t next = sb->next;
-        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
-            uint64_t dead = sb->snap[i].name[0] ? sb->snap[i].deadlist : 0;
+        uint64_t next = cfs_snaplist_next(b);
+        unsigned slots = cfs_snaplist_slots(fs);
+        for (unsigned i = 0; i < slots; i++) {
+            struct cfs_snapshot s;
+            uint64_t dead = cfs_snaplist_get(fs, b, i, &s) ? s.deadlist : 0;
             unsigned dguard = 0;
             while (dead && dguard++ < 4096u) {
                 scrub_meta(fs, dead, CFS_KIND_DEADLIST, page, st);

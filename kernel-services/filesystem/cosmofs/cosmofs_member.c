@@ -77,7 +77,7 @@ int cfs_label_write(struct spool *pool, unsigned vdev, unsigned copy, uint64_t g
         return -ENOMEM;
     struct cfs_label *l = (struct cfs_label *)block;
     memcpy(l->magic, CFS_LABEL_MAGIC, sizeof(l->magic));
-    l->version = CFS_VERSION;
+    l->version = CFS_FORMAT_VERSION;   /* what a format writes; the label does not change with a raise */
     l->index = vdev;
     l->copy = copy;
     l->generation = generation;

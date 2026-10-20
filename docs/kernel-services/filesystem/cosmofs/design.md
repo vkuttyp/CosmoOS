@@ -1368,11 +1368,168 @@ room for more.
   with its own format extension.
 - Rollback (making a snapshot the live tree), sending or receiving a
   snapshot, quotas, and per-snapshot space accounting beyond the
-  deadlists.
+  deadlists. Rollback and per-snapshot space arrived with format
+  version 12 (below); sending, receiving and quotas have not.
 - Space accounting *per snapshot* (how much a snapshot is keeping
-  alive): the deadlists know, but nothing reports it.
+  alive): reported since format version 12 by `cosmo-snap list`, from a
+  walk rather than the deadlists.
 - Snapshots of a mount that is read-only, and nested `.snapshots`
   inside a snapshot: both refused.
+
+## Format version 12: snapshot identity, rollback and clones
+
+Roadmap 1.2 B1 (`docs/roadmap-1.2.md`): snapshots and rollback as shell
+commands. Version 3's snapshots are trees an operator can read through
+`.snapshots` and delete; nothing could say what one was worth, roll the
+live tree back to one, or write to a copy of one. This section is the
+design for all three. The identity half (below, to "Sizes") is built by
+B1's first pull request; rollback and clones are built by its second and
+third, and each subsection says which.
+
+### Identity
+
+A snapshot was a name and an id. A name can be deleted and reused, and
+an id only means something to one filesystem -- and was not even that:
+the high-water mark lived in the mount's memory, so after the newest
+snapshot was deleted and the filesystem remounted its id was handed out
+again (inventory §3; V22's own wording said never). A rollback record
+that named a snapshot by either could name the wrong one.
+
+Version 12 gives every snapshot a **uuid**, drawn at random when it is
+taken and never changed, beside its creation time and the generation it
+captured (both already there). Unique is the promise, and it is
+checked rather than hoped for: `cfs_snapshot_new_uuid` mixes the random
+bytes with the wall clock and a counter and draws again while any
+snapshot on the list has them, so a boot with no seeded entropy pool
+takes snapshots as before. The entry grows from 96 to 128 bytes
+(`struct cfs_snapshot`: `uuid[16]`, `origin_id`, `flags`) in a list kind
+of its own, `CFS_KIND_SNAPLIST2`, whose blocks also carry `max_id`: the
+highest id ever handed out. The head block's is the one read, so the
+mark survives a remount and a deleted id is never handed out again.
+Thirty-one entries a block, where version 11 kept forty-two.
+
+**The raise is lazy.** `cosmofs_format` still writes version 11
+(`CFS_FORMAT_VERSION`), and a pool becomes 12 in the transaction of the
+first snapshot taken on it -- through `cosmo-snap` or through
+`.snapshots`, which gets the same identity. The raise rewrites the list
+in the new layout, gives every existing snapshot a uuid, frees the old
+chain exempt, and sets the version, all in that snapshot's transaction,
+so the raise and the snapshot reach the disk together or not at all; a
+failure past the first change abandons the transaction (CF17). It is
+logged: `cosmofs: format version 11 -> 12 (snapshot identity, N
+snapshot(s)); a kernel that reads format 11 at most (v1.0.7 and older)
+cannot mount this pool`.
+
+Lazy, because a kernel of v1.0.7 or older refuses version 12 at mount
+(`version > CFS_VERSION`), and `cosmo-upgrade --rollback` returns the
+boot set to the release before -- whose kernel then has to mount the
+root. A pool nobody took a snapshot of stays mountable by that kernel.
+One that has been raised cannot be, so `cosmo-upgrade` refuses to switch
+to a set whose kernel reads less than the root's format: the kernel says
+what it reads in its image (`cosmofs-format-max=12`, printed at boot by
+`cosmofs_init`), and a kernel without the marker reads 11 at most. The
+root's format comes from `/dev/fsctl`'s SNAP_LIST pool record.
+
+Below version 11 nothing is raised: those formats differ in more than
+the list (version 4's DVAs, 9's and 10's records), and converting them
+is not this unit's. `.snapshots` there takes version-3 snapshots as it
+always did; `cosmo-snap create` is refused (`-EOPNOTSUPP`).
+
+Code reads and writes an entry through four accessors
+(`cfs_snaplist_kind`, `_slots`, `_get`, `_set`) that decide the layout by
+the in-memory superblock's version -- the field the raise sets in the
+same transaction that rewrites the list, so the two cannot disagree.
+
+### The interface
+
+`/dev/fsctl` version 3 (`uapi/cosmo/fsctl.h`) adds SNAP_CREATE, LIST,
+DELETE, ROLLBACK, CANCEL, CLONE and BOOT_OK against one mount id, with
+the snapshot's name in the command (which grows two 32-byte name fields,
+so a version-2 command is refused by its length), and a filesystem type
+gains `snapctl` beside `check` and `scrub`. `cosmo-snap` (`/sbin`) is
+the command: `create NAME`, `list`, `delete NAME`, `diff A B`, and with
+the later PRs `rollback NAME` and `clone NAME CLONE`, each against `/` or
+the mount `-m` names. Deletion through it is refused while anything
+inside the snapshot is in use, as `rmdir` in `.snapshots` is.
+
+`diff` is a userland walk of the two trees under `.snapshots` (`-` is the
+live tree): a path in one only is added or removed, a path in both is
+changed when its type, mode, owner, size, link target or contents differ.
+It compares no blocks and does not cross into another filesystem mounted
+on a directory of either tree.
+
+### Sizes
+
+`list` reports, per snapshot, what its tree **references** and what is
+**unique** to it -- what deleting it would give back. The deadlists do
+not answer this (a snapshot's deadlist is what the live tree released
+while it was the newest, not what only it holds), and neither does a
+snapshot's bitmap, which is the pool's at that commit. So the answer is
+a walk: every tree (the live one and every snapshot) is walked once into
+a per-block count of the trees reaching it, then each snapshot again,
+summing its blocks and those whose count is one (`cfs_tree_walk`,
+`cosmofs_reach.c`, the checker's walk without its accounting). Under the
+mount's lock, and two walks per snapshot: `list` is an operator's
+command, not something the system runs on its own. `-F NO_SIZES` skips
+the walks for a caller that wants the pool record alone.
+
+### Rollback (B1's second pull request)
+
+`rollback NAME` does not change the mounted root. It writes a
+**pending-rollback record** -- `CFS_KIND_ROLLBACK`, named by the
+superblock's last reserved word, `rollback_root` (`struct cfs_rollback`:
+state, the target's and a safety snapshot's uuids, the live root's
+generation, its own CRC32C) -- in the same transaction as a **safety
+snapshot** of the live tree, `pre-rollback-<seconds>`. The next mount
+finds the record and, if it checks out and both snapshots exist, makes
+the target's tree the live tree in its first transaction, replacing the
+record with a **hold** naming both snapshots, and logs it. A record that
+does not check out, or names a snapshot that is gone, is refused: the
+mount logs why, clears nothing and mounts the current tree. `rollback
+--cancel` removes a pending record. The root's rollback is followed by a
+reboot (`--no-reboot` skips it); another pool's applies at its next
+mount.
+
+The safety snapshot is what makes a bad rollback undoable, so neither it
+nor the target can be deleted while the hold lasts: until the next boot
+has completed, which init says with BOOT_OK after `/etc/rc`. A rollback
+to a tree that does not boot leaves the hold in place, and the operator
+rolls back to the safety snapshot.
+
+**The switch has to repair the deadlists.** A commit asks only the
+newest snapshot whether it still names a freed block, which is exact
+while the live tree is newer than every snapshot. A rollback breaks
+that: the live tree becomes an older one. So the switch, walking the
+old live tree and the target, (1) appends to the safety snapshot's
+deadlist every block the old live tree reached and the target does not
+-- the safety snapshot now holds them and nothing else does, and without
+the entry deleting it would leak them -- and (2) takes off every
+deadlist each block the new live tree reaches: a block on a deadlist is
+one the allocator may hand out when that snapshot goes, and these are
+live again. The old live tree's orphan record goes with it: its inodes
+are the safety snapshot's.
+
+**Crash safety** (the invariant B1 writes as CF19): at every instant the
+superblock names exactly one live root and at most one rollback record,
+both through committed transactions, so a crash leaves the mount able
+to pick one consistent tree -- before the record's commit, the old
+state; after it, the switch at the next mount; during the switch, the
+previous root still names the pending record and the switch is redone
+from scratch; after it, the hold.
+
+### Clones (B1's third pull request)
+
+`clone NAME CLONE` makes a writable tree that starts as snapshot NAME's
+and shares its blocks, mounted under `.snapshots/CLONE` as a snapshot is.
+It is an entry in the snapshot list with `CFS_SNAP_F_CLONE` and
+`origin_id`, its roots advanced by each commit. Deleting it frees exactly
+the blocks only it reaches. The deadlists cannot say which those are --
+a snapshot's bitmap is the pool's, so "set in a bitmap" cannot tell a
+clone's block from its origin's -- so the rules are: a clone's frees are
+tested against its origin's tree, an origin cannot be deleted while it
+has a clone, a clone cannot be snapshotted, and deleting a clone walks
+the clone's tree and its origin's and frees the difference. The checker's
+counts are the test's oracle.
 
 ## Self-test fixture failure ownership
 

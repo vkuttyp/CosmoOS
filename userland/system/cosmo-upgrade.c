@@ -42,6 +42,7 @@
 #include <unistd.h>
 
 #include <kernel/crypto.h>
+#include <uapi/cosmo/fsctl.h>
 
 #include "../../boot/protocol/cosmomanifest.h"
 #include "../lib/fetch.h"
@@ -984,6 +985,138 @@ static int status(void)
     return EXIT_DONE;
 }
 
+/*
+ * Whether the running kernel's /dev/fsctl is older than version 3: it
+ * takes the 16-byte command of versions 1 and 2. Version 3 came with
+ * format 12, so such a kernel reads format 11 at most -- and since it
+ * mounted the root, the root is not 12.
+ */
+static bool fsctl_predates_v3(int fd)
+{
+    struct {
+        uint16_t version, op;
+        uint32_t flags;
+        uint64_t mount_id;
+    } old;
+    for (uint16_t v = 1; v <= 2; v++) {
+        memset(&old, 0, sizeof(old));
+        old.version = v;
+        old.op = COSMO_FSCTL_LIST;
+        if (write(fd, &old, sizeof(old)) == (long)sizeof(old))
+            return true;
+    }
+    return false;
+}
+
+/*
+ * The cosmofs format the root is at: 0 when the root is not a cosmofs
+ * with snapshots (the live image) or the running kernel predates format
+ * 12, -1 when it cannot be told. A pool is
+ * raised from 11 to 12 by its first snapshot
+ * (docs/kernel-services/filesystem/cosmofs/design.md, "Format version
+ * 12"), and a kernel that reads 11 at most cannot mount it; the gate
+ * fails closed, so not knowing refuses the switch.
+ */
+static int root_format(void)
+{
+    int fd = open("/dev/fsctl", O_RDWR);
+    if (fd < 0)
+        return -1;
+    struct cosmo_fsctl cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_FSCTL_VERSION;
+    cmd.op = COSMO_FSCTL_LIST;
+    /* The listing is read whole: a buffer too small is -ERANGE, and the
+     * next try is twice the size. */
+    uint8_t *buf = NULL;
+    long n = -1;
+    for (size_t room = 64, tries = 0; tries < 12; tries++, room *= 2) {
+        free(buf);
+        size_t cap = sizeof(struct cosmo_fsctl_result) + room * sizeof(struct cosmo_fsctl_mount);
+        buf = malloc(cap);
+        if (buf == NULL)
+            break;
+        if (write(fd, &cmd, sizeof(cmd)) != (long)sizeof(cmd)) {
+            int e = errno;
+            if (e == EINVAL && fsctl_predates_v3(fd)) {
+                free(buf);
+                close(fd);
+                return 0;
+            }
+            errno = e;
+            break;
+        }
+        n = read(fd, buf, cap);
+        if (n >= 0 || errno != ERANGE)
+            break;
+    }
+    int format = -1;
+    if (buf != NULL && n >= (long)sizeof(struct cosmo_fsctl_result)) {
+        const struct cosmo_fsctl_result *h = (const struct cosmo_fsctl_result *)buf;
+        const struct cosmo_fsctl_mount *m = (const struct cosmo_fsctl_mount *)(buf + sizeof(*h));
+        unsigned count = h->count;
+        size_t fits = ((size_t)n - sizeof(*h)) / sizeof(*m);
+        if (count > fits)
+            count = (unsigned)fits;   /* never past what was read */
+        format = 0;
+        for (unsigned i = 0; i < count; i++) {
+            if (strcmp(m[i].path, "/") != 0 || !(m[i].caps & COSMO_FSCTL_CAP_SNAP))
+                continue;
+            cmd.op = COSMO_FSCTL_SNAP_LIST;
+            cmd.flags = COSMO_FSCTL_F_NO_SIZES;
+            cmd.mount_id = m[i].id;
+            /* Only the pool record is wanted: a page of one snapshot. */
+            size_t cap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_snap_pool) +
+                         COSMO_FSCTL_SNAP_PAGE * sizeof(struct cosmo_fsctl_snap);
+            uint8_t *lb = malloc(cap);
+            format = -1;
+            if (lb != NULL && write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd) &&
+                read(fd, lb, cap) >= (long)(sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_snap_pool)))
+                format = (int)((const struct cosmo_fsctl_snap_pool *)(lb + sizeof(struct cosmo_fsctl_result)))->format;
+            free(lb);
+            break;
+        }
+    }
+    free(buf);
+    close(fd);
+    return format;
+}
+
+/* The newest cosmofs format a kernel image reads: the marker it carries
+ * (cosmofs_core.c, cosmofs_init), or 11 for one from before format 12. */
+static unsigned kernel_reads(const uint8_t *elf, size_t len)
+{
+    static const char tag[] = "cosmofs-format-max=";
+    size_t tl = sizeof(tag) - 1;
+    for (size_t i = 0; i + tl + 1 < len; i++) {
+        if (elf[i] != 'c' || memcmp(elf + i, tag, tl) != 0)
+            continue;
+        unsigned v = 0;
+        for (size_t k = i + tl; k < len && elf[k] >= '0' && elf[k] <= '9' && v < 1000; k++)
+            v = v * 10 + (unsigned)(elf[k] - '0');
+        return v;
+    }
+    return 11;
+}
+
+/* Refuse a set whose kernel could not mount this root (the lazy raise's
+ * price, design.md, "Format version 12"). */
+static int format_gate(const struct set *s, const char *what)
+{
+    int rf = root_format();
+    unsigned kr = kernel_reads(s->file[0], s->len[0]);
+    if (rf < 0) {
+        fprintf(stderr, "cosmo-upgrade: the root's cosmofs format could not be read from /dev/fsctl: %s; "
+                        "%s's kernel might not mount it, so nothing written\n", strerror(errno), what);
+        return EXIT_REFUSED;
+    }
+    if ((unsigned)rf <= kr)
+        return 0;
+    fprintf(stderr, "cosmo-upgrade: %s's kernel reads cosmofs format %u at most, and the root is format %u (a "
+                    "snapshot raised it): that kernel could not mount the root; nothing written\n", what, kr, (unsigned)rf);
+    return EXIT_REFUSED;
+}
+
 static int upgrade(const char *dir, bool check, const char *stop)
 {
     struct set nw = { 0 };
@@ -1025,6 +1158,8 @@ static int upgrade(const char *dir, bool check, const char *stop)
     }
     say("verified kernel.elf, boot.tar and cmdline against the manifest, signed by key %s in " KEYS_DIR
         ", and the loader in boot.tar", keyid);
+    if (format_gate(&nw, dir) != 0)
+        return EXIT_REFUSED;
     struct esp e;
     if (esp_load(&e, err, sizeof(err)) < 0) {
         fprintf(stderr, "cosmo-upgrade: %s; nothing written\n", err);
@@ -1206,6 +1341,8 @@ static int rollback(void)
         fprintf(stderr, "cosmo-upgrade: \\cosmo\\prev: %s; nothing written\n", err);
         return EXIT_REFUSED;
     }
+    if (format_gate(&prev, "\\cosmo\\prev") != 0)
+        return EXIT_REFUSED;
     /* Between the two switches one loader starts the other set. The set
      * goes first when the loader the firmware starts trusts the previous
      * set; otherwise the loader does, when the previous set's own loader
