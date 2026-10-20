@@ -92,7 +92,12 @@ user as the first sandbox) and USR-3 (`useradd`, for the build user).
 - [ ] **Acceptance:** `hello`, `fortune` and a library port build and
   install on the target from their recipes; a tarball whose hash differs
   is refused before it is unpacked; a port whose dependency is missing is
-  refused before its build; the build runs as a non-root user.
+  refused before its build; the build runs as a non-root user. For
+  PKG-6: the INDEX carries each package's provided and required libraries
+  with versions; `pkg install` of a program needing a library picks
+  the package that provides it (of two versions, the one the requirement
+  allows) and fetches nothing when no package provides it; an install
+  whose requirement two packages provide picks by the stated rule.
 
 ### A4 nano and curl
 
@@ -180,7 +185,10 @@ never reused, which rollback depends on).
   reboot; the system boots and its files are the snapshot's; a crash
   between the rollback and the reboot (the harness kills QEMU) leaves
   either the old or the new tree, never a mixture, checked by
-  `cosmofs_check`.
+  `cosmofs_check`. A writable clone of a snapshot is mounted, changed,
+  and its changes are seen neither in the snapshot nor in the live tree,
+  nor the live tree's in it; deleting the clone frees its blocks (the
+  checker's counts return to before).
 
 ### B2 fsck and scrub as commands that repair
 
@@ -227,6 +235,10 @@ PKG-3 (a package transaction is a snapshot), PKG-5.
   `/etc` and the base system are byte for byte the pre-upgrade
   snapshot's, the operator's files written after the upgrade kept in a
   named place; a crash at each step boots one consistent environment.
+  For PKG-3, outside an upgrade: `pkg install a b` killed between the two
+  packages leaves, at the next boot, both or neither installed; `pkg
+  upgrade` interrupted the same way likewise; `pkg rollback NAME` returns
+  one package to its previous version and its files.
 
 ### B5 Encrypted root
 
@@ -239,8 +251,10 @@ pool with forgeable metadata is half a promise.
 - [ ] **Acceptance:** `make test-encrypt`: install encrypted; the harness
   types the passphrase and the system boots; a wrong passphrase is
   refused and nothing mounts; the disk image contains none of a marker
-  file's plaintext; a metadata block altered with a recomputed CRC32C is
-  refused; a 1 GiB file is written and read back.
+  file's plaintext; for every metadata checksum domain (the block header
+  `cfs_mhdr`, the superblock and its roots, the member labels) a block
+  altered with its CRC32C recomputed is refused; a 1 GiB file is written
+  and read back.
 
 **Backlog it would absorb.** CFS-1, CFS-2, CFS-3, CFS-5, CFS-6, CFS-7,
 CFS-8, CFS-9, CFS-10, CFS-11, PKG-3, PKG-4, PKG-5, BLK-5, DRV-6 (part),
@@ -277,13 +291,17 @@ page with what works there.
 A CI job on a runner with `/dev/kvm` boots CosmoOS x86-64 under KVM with
 `-cpu host,+vmx` and runs the hypervisor's guest tests on the VMX
 backend (today every boot runs them on the SVM backend, which QEMU's
-TCG emulates; nothing has ever entered a guest through VMX). Fixes what the first execution finds, then VIRT-2's unhandled
-exits. Absorbs VIRT-1, VIRT-2, VIRT-3 (two guest vCPUs) and MEM-7
-(PCID, testable under KVM).
+TCG emulates; nothing has ever entered a guest through VMX). Fixes what
+the first execution finds, then VIRT-2's gaps. Absorbs VIRT-1, VIRT-2,
+VIRT-3 (two guest vCPUs) and MEM-7 (PCID, testable under KVM).
 
-- [ ] **Acceptance:** a CI job `vmx` (x86-64) runs the hypervisor's
-  guest self-tests on the VMX backend, and the MOV-DR, RDPMC, WBINVD and RDTSCP
-  exits are each exercised by a guest test.
+- [ ] **Acceptance:** a CI job `vmx` (x86-64) runs the hypervisor's guest
+  self-tests on the VMX backend; the MOV-DR, RDPMC, WBINVD and RDTSCP
+  exits, string I/O, the guest's TSC and the CPUID leaves it sees are each
+  checked by a guest test; the virtio device models are driven by a guest
+  with two vCPUs at once (VIRT-3); and with PCID enabled under KVM the
+  TLB tests pass and a shootdown across address spaces is checked
+  (MEM-7).
 
 ### C2 KASLR
 
@@ -296,7 +314,11 @@ fixed addresses), which make the layout claim whole.
 - [ ] **Acceptance:** `test-security` boots three times and requires
   three kernel bases (from a privileged read), a panic test still names
   its function, and the release images are still reproducible (the slide
-  is chosen at boot, not build).
+  is chosen at boot, not build). For SEC-4 and SEC-5: every native
+  program and the static BusyBox in the image are `ET_DYN` (a check over
+  the image's files), two runs of each of `init`'s children and of
+  BusyBox show different text addresses in `/proc/self/maps`, and so does
+  a Linux process's signal trampoline.
 
 ### C3 CPU hotplug
 
@@ -313,23 +335,28 @@ balancer contracts to hold across it.
 ### C4 A physical x86-64 machine
 
 One named machine the owner can buy and keep: a small Intel desktop
-whose NIC is in the e1000e family (an I219-V) and whose disk is NVMe, so
-no new driver is needed to start. The work is what QEMU never shows:
+with an NVMe disk and a PCIe slot holding an Intel 82574L card, the only
+NIC `e1000e.c` binds (`8086:10d3`, `docs/drivers/e1000e/api.md`), so no
+new driver is needed to start. (A board's own I219-V would need that
+driver extended first: its own unit.) The work is what QEMU never shows:
 real firmware tables, interrupt routing, timer calibration, the CPU
 feature and errata set (DRV-11), non-coherent assumptions (DRV-1 is
 AArch64's, but its audit is shared).
 
 - [ ] **Acceptance:** the machine boots the release image from USB,
   installs to its NVMe disk, boots that, gets an address by DHCP and
-  accepts an ssh login; `make test` passes there (the suite's QEMU-only
-  tests skipped with a reason, TEST-15); the Tested platforms page names
-  the model, firmware version and what works.
+  accepts an ssh login; a new hardware harness (`make test-hw`: the
+  machine's serial console and power controlled from the host, the image
+  written to a USB stick or served over PXE, the same verdict rules as
+  `run_boot_test.py`) boots the debug suite there and it passes, the
+  QEMU-only tests skipped with a reason (TEST-15). `make test` cannot do
+  this: it boots QEMU. The Tested platforms page names the model,
+  firmware version and what works.
 
 ### C5 A physical AArch64 machine
 
 One ACPI (SBSA-style) AArch64 machine with PCIe NVMe and a NIC this
-kernel drives (an e1000e-family PCIe card if the board's own NIC is
-not): an Ampere Altra developer platform is the likeliest fit; a
+kernel drives (an 82574L PCIe card if the board's own NIC is not): an Ampere Altra developer platform is the likeliest fit; a
 Raspberry Pi 5 is cheaper but needs device-tree boot (DRV-5) and new
 drivers, which would make this two milestones. Absorbs DRV-1
 (non-coherent DMA syncs, if the machine is not coherent), DRV-9
@@ -341,8 +368,8 @@ drivers, which would make this two milestones. Absorbs DRV-1
 
 A self-hosted runner attached to the two machines (power control and a
 serial console, a network boot or a USB image writer) and a CI job that
-boots main's images on each, installs and runs the acceptance of C4 and
-C5. Absorbs TEST-12.
+boots main's images on each through C4's `make test-hw` and runs the
+acceptance of C4 and C5. Absorbs TEST-12.
 
 - [ ] **Acceptance:** CI's `hil` job passes on main for both machines
   and the Tested platforms page links its latest run. **With C1 this
@@ -372,11 +399,13 @@ wait on hardware and runner setup.
 
 ## Recommendation
 
-B, storage depth. It is the only direction whose definition of done is
-entirely testable under QEMU in CI, it is built on code that already
-exists (snapshots, mirrors, the checker, encryption, the upgrade's atomic
-switch), and it absorbs the largest share of the backlog's open
-correctness lines (six of cosmofs's, two of the packages') while closing
+B, storage depth. A and B are both testable under QEMU in CI, but B's
+tests are boots of a few minutes where A's are builds and external test
+suites that may take tens of minutes a job under TCG; C needs hardware.
+B is built on code that already exists (snapshots, mirrors, the checker,
+encryption, the upgrade's atomic switch), and it absorbs the largest
+share of the backlog's open correctness lines (five of cosmofs's six)
+while closing
 the gaps users meet first in the
 [limitations](guide/limitations.md#storage): no rollback from the running
 system, an upgrade rollback that keeps changed packages, and a mirror
