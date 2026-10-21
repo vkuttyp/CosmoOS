@@ -3294,7 +3294,7 @@ See the [history index](README.md).
   `cosmofs-extent-fail`'s `evict` case, `tools/cosmofs-partial-write-probe.py`.
   Report: `docs/audit/2026-10-21-partial-write-report.md`.
 - **Boot environments and package transactions (roadmap 1.2 B4,
-  2026-10-20 to 21, PRs #425 and #426).** `pkg install`,
+  2026-10-20 to 21, PRs #425 and #426, with #427 and #428).** `pkg install`,
   `remove` and `upgrade` take a root snapshot `pkg-tx-<time>` before
   changing anything, record it in `/var/db/pkg/tx-active`, and delete it
   on success; init rolls a recorded leftover back before any service and
