@@ -206,7 +206,9 @@ def stage_rollback(args, results, inst):
         log = wait_after(b, before, r"^init: rc exited with status \d+$", "/etc/rc of the boot after the rollback")
         need(log, r"^cosmo-snap: rollback to good pending; the tree it replaces is kept as snapshot "
                   r"(pre-rollback-\d+)", "cosmo-snap rollback good")
-        need(log, r"^init: restart requested$", "the reboot cosmo-snap asks init for")
+        # init's line can follow the prompt the shell prints once
+        # cosmo-snap exits: "cosmo$ init: restart requested".
+        need(log, r"^(?:cosmo\$ )?init: restart requested$", "the reboot cosmo-snap asks init for")
         m = need(log, ROLLED.format("good") + r" \(generation \d+\); the tree before it is snapshot "
                       r"'(pre-rollback-\d+)'", "the mount's switch")
         safety = m.group(1)

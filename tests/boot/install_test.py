@@ -368,7 +368,8 @@ def stage_reboot(args, results, inst, nonce):
         need(out, r"^1777 0$", "the installed system's /tmp mode (01777, root's)")
         need(out, r"^1000$", "the file uid 1000 made in /tmp")
         rc = b.finish()
-        need(b.text(), r"^init: disk root synced$", "the installed boot's power-off")
+        # After the shell's next prompt, when poweroff exits first.
+        need(b.text(), r"^(?:cosmo\$ )?init: disk root synced$", "the installed boot's power-off")
         if rc != EXIT_SUCCESS:
             raise Fail(f"reboot boot: QEMU exit code {rc}")
     except Exception:
