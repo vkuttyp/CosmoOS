@@ -20,7 +20,8 @@ the recovery both are at their old versions; a full `pkg upgrade` then
 takes both.
 
 Stage `rollback`: `pkg rollback hello` returns hello 1.1 to 1.0, its files
-verified; the kept versions are the two last installed.
+verified; the kept versions are the two last installed. `pkg install
+hello=1.0` over 1.1 says it is a downgrade.
 
 Stage `space`: the root filled, `pkg install fortune` is refused before
 anything changes, naming how much it needs; with the room back it installs.
@@ -206,6 +207,12 @@ def stage_rollback(args, results, inst):
         need(out, r"^pkg: rolling hello back from 1\.1 to 1\.0 \(from \S+: no copy was kept\)$",
              "pkg rollback from the repository")
         need(out, r"^hello, world \(hello 1\.0\)$", "hello 1.0 from the repository")
+        # An install of an older version than the installed one is a
+        # downgrade, and says so (backlog PKG-9).
+        out = b.status("pkg upgrade hello && pkg install hello=1.0 && hello", "down")
+        need(out, r"^down=0$", "pkg install hello=1.0 over 1.1")
+        need(out, r"^pkg: hello will be downgraded from 1\.1 to 1\.0$", "the downgrade's report")
+        need(out, r"^hello, world \(hello 1\.0\)$", "hello 1.0 after the downgrade")
 
         check_clean(b, root_id(b), "pkg rollback")
         rc = b.finish("poweroff")
@@ -214,7 +221,8 @@ def stage_rollback(args, results, inst):
     except Exception:
         b.kill()
         raise
-    results.append("rollback: PASS (hello 1.1 back to 1.0, verified; the two last versions kept)")
+    results.append("rollback: PASS (hello 1.1 back to 1.0, verified; the two last versions kept; an install of 1.0 "
+                   "over 1.1 said downgraded)")
 
 
 def stage_space(args, results, inst):
