@@ -67,3 +67,9 @@ Qodo on #429: the `--kernel` mode passed a kernel that lacked a tagged
 build id (it now requires it). Its second finding, that `v1.0.7.` at a
 sentence's end escapes the pattern, is the release check's own pattern:
 such a string fails neither check, so it cannot fail a tag.
+
+Codex on #429 found the same missing-id case, and that the probe's
+`--old` found the fix commit by its subject, which a squash merge loses;
+it now finds the commit that added "(CosmoOS 1.0.7 and older)" to
+`cosmofs_snap.c` (`git log -S`), and `--old` again names `v1.0.7` on
+both architectures.
