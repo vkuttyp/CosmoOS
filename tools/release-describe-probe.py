@@ -13,7 +13,8 @@ ran the check.
 This builds the release kernel of REV (default HEAD) in a throwaway
 worktree and runs check-release-version.py --kernel on it against the
 worktree's own `git describe --always --dirty`. --old reverse-applies the
-fix commit's change to cosmofs_snap.c (the whole of it, nothing else), and
+fix commit's change to cosmofs_snap.c (the whole of it, nothing else; the
+commit is the one that added "(CosmoOS 1.0.7 and older)" there), and
 the message says v1.0.7 again.
 
 Logs stay under out/release-describe-probe/<arch>-<mode>. Exit 0 when the
@@ -28,7 +29,8 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBJECT = "cosmofs: the format-12 message names no other build id"
+# The fix is found by what it added (git log -S), which survives a squash merge.
+FIXED_TEXT = "(CosmoOS 1.0.7 and older)"
 SOURCES = ["kernel-services/filesystem/cosmofs/cosmofs_snap.c"]
 OTHER = re.compile(r"describe-shaped (.+), not its build id")
 
@@ -52,10 +54,10 @@ def main():
     try:
         if a.old:
             sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={SUBJECT}", a.tree],
+                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", f"-S{FIXED_TEXT}", a.tree, "--"] + SOURCES,
                 text=True).strip()
             if not sha:
-                sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}; name it with --fix")
+                sys.exit(f"no commit adding '{FIXED_TEXT}' to {SOURCES} reachable from {a.tree}; name it with --fix")
             patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + SOURCES)
             if not patch:
                 sys.exit(f"commit {sha[:8]} does not change {SOURCES}")
