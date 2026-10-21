@@ -817,7 +817,7 @@ static int root_pass(const struct member *from, int nfrom, const struct member *
     return failed ? -1 : 0;
 }
 
-static void root_set_mark(const struct set *to, const struct set *from);
+static int root_set_mark(const struct set *to, const struct set *from);
 
 static int base_pass(const struct set *from, const struct set *to)
 {
@@ -837,7 +837,7 @@ static int base_pass(const struct set *from, const struct set *to)
     free(a);
     free(b);
     if (rc == 0)
-        root_set_mark(to, from);   /* this root's base system is now `to`'s, brought from `from`'s */
+        (void)root_set_mark(to, from);   /* this root's base system is now `to`'s, brought from `from`'s */
     return rc;
 }
 
@@ -951,8 +951,9 @@ static int fail(const char *what, int rc)
 #define ROOT_SET STATE_DIR "/root-set"
 
 /* ROOT_SET names set `to`, the base system the root now has, brought
- * from set `from` (NULL: from none, or not known). */
-static void root_set_mark(const struct set *to, const struct set *from)
+ * from set `from` (NULL: from none, or not known). 0, or -1 (said, and
+ * the record as it was) when it cannot be written. */
+static int root_set_mark(const struct set *to, const struct set *from)
 {
     struct root_set r;
     memset(&r, 0, sizeof(r));
@@ -965,9 +966,22 @@ static void root_set_mark(const struct set *to, const struct set *from)
     mkdir("/var/lib", 0755);
     mkdir(STATE_DIR, 0755);
     int fd = open(ROOT_SET TMP_SUFFIX, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (n == 0 || fd < 0 || write(fd, text, n) != (ssize_t)n || fsync(fd) < 0 || close(fd) < 0 ||
-        rename(ROOT_SET TMP_SUFFIX, ROOT_SET) < 0)
-        fprintf(stderr, "cosmo-upgrade: %s: %s\n", ROOT_SET, strerror(errno));
+    bool ok = n > 0 && fd >= 0 && write(fd, text, n) == (ssize_t)n && fsync(fd) == 0;
+    int err = ok ? 0 : (n == 0 ? ENOSPC : errno);
+    if (fd >= 0 && close(fd) < 0 && ok) {
+        ok = false;
+        err = errno;
+    }
+    if (ok && rename(ROOT_SET TMP_SUFFIX, ROOT_SET) < 0) {
+        ok = false;
+        err = errno;
+    }
+    if (!ok) {
+        unlink(ROOT_SET TMP_SUFFIX);
+        fprintf(stderr, "cosmo-upgrade: %s: %s\n", ROOT_SET, strerror(err));
+        return -1;
+    }
+    return 0;
 }
 
 /* The record as written; version 0 when there is none (a root upgraded
@@ -1071,21 +1085,33 @@ static const char *stale_why(const struct root_base *rb)
                : "";
 }
 
-/* The record made what the root's files say, when it is not: true when
- * it was rewritten (said unless there was none). */
-static bool root_set_correct(struct root_base *rb)
+/* The record made what the root's files say, when it is not: 1 when it
+ * was rewritten and reads back so (said unless there was none), 0 when it
+ * needed nothing, -1 when it could not be (said; the record as it was). */
+static int root_set_correct(struct root_base *rb)
 {
     if (!root_base_stale(rb))
-        return false;
-    if (rb->rec.set[0]) {
-        char was[200], is[200];
-        say("the root's record named %s base system, but its files are %s%s: record corrected",
-            set_label(rb, rb->rec.set, rb->rec.release, was, sizeof(was)),
-            set_label(rb, rb->holds, "", is, sizeof(is)), stale_why(rb));
-    }
-    root_set_mark(rb->set, NULL);
+        return 0;
+    /* What it said, and why, before it is rewritten. */
+    char was[200], is[200];
+    set_label(rb, rb->rec.set, rb->rec.release, was, sizeof(was));
+    set_label(rb, rb->holds, "", is, sizeof(is));
+    const char *why = stale_why(rb);
+    bool had = rb->rec.set[0] != '\0';
+    int rc = root_set_mark(rb->set, NULL);
     root_set_read(&rb->rec);
-    return true;
+    if (rc < 0 || strcmp(rb->rec.set, rb->holds) != 0) {
+        if (had)
+            fprintf(stderr, "cosmo-upgrade: the root's record names %s base system, but its files are %s: not "
+                            "corrected\n", was, is);
+        else
+            fprintf(stderr, "cosmo-upgrade: the root has no record of its base system (its files are %s): none "
+                            "written\n", is);
+        return -1;
+    }
+    if (had)
+        say("the root's record named %s base system, but its files are %s%s: record corrected", was, is, why);
+    return 1;
 }
 
 /* What the root holds, told against the ESP's current set and \cosmo\prev
@@ -1729,8 +1755,8 @@ static int upgrade(const char *dir, bool check, const char *stop)
          * environment does: a record that is missing (an install by v1.0.8
          * or older) or wrong is made the current set's when the root's
          * files are; with none to tell by, a missing one is too. */
-        if (!root_set_correct(&rb) && !rb.rec.set[0])
-            root_set_mark(&cur, NULL);
+        if (root_set_correct(&rb) == 0 && !rb.rec.set[0])
+            (void)root_set_mark(&cur, NULL);
         if (be_taking_mark(envname) < 0) {
             fprintf(stderr, "cosmo-upgrade: %s: %s; nothing written\n", BE_TAKING, strerror(errno));
             return EXIT_REFUSED;
@@ -2054,8 +2080,8 @@ static int rollback(const char *stop)
          * its record made right first when its files say otherwise. */
         struct root_base rb;
         root_base_read(&cur, &prev, &rb);
-        if (!root_set_correct(&rb) && !rb.rec.set[0])
-            root_set_mark(&cur, NULL);
+        if (root_set_correct(&rb) == 0 && !rb.rec.set[0])
+            (void)root_set_mark(&cur, NULL);
         struct cosmo_fsctl_snap ss;
         if (rootsnap_rollback(&rs, target, safety, &ss) < 0) {
             fprintf(stderr, "cosmo-upgrade: the root's rollback to %s: %s; \\cosmo\\be names the previous set as "
@@ -2681,9 +2707,11 @@ static int repair(void)
     struct root_base rb;
     if (root_base_load(&e, &cur, &prev, &rb) < 0)
         return EXIT_FAILED;
-    bool corrected = root_set_correct(&rb);
+    int corrected = root_set_correct(&rb);
     set_free(&cur);
     set_free(&prev);
+    if (corrected < 0)
+        return EXIT_FAILED;
     snprintf(curtag, sizeof(curtag), "%s", rb.cur);
     snprintf(rootset, sizeof(rootset), "%s", root_base_tag(&rb));
     if (!be.intent[0]) {
@@ -2692,7 +2720,7 @@ static int repair(void)
     }
     bool esp_ok = strcmp(curtag, be.intent) == 0, root_ok = strcmp(rootset, be.intent) == 0;
     if (esp_ok && root_ok) {
-        say("the root and the boot set are the pairing \\cosmo\\be intends: nothing %sto repair", corrected ? "more " : "");
+        say("the root and the boot set are the pairing \\cosmo\\be intends: nothing %sto repair", corrected > 0 ? "more " : "");
         return repair_loader();
     }
     /* The set half is checked before the root's rollback is asked for: a

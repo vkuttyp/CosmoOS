@@ -3012,6 +3012,17 @@ debug boots passed (185.0-205.6 s); the failing boot's self-tests took
 into `CRASH_TEST=3` builds, so this boot ran main's code. The same 290 ms.
 Not attributed; CI ran again on the commit that records it.
 
+**Ninth sighting, 2026-10-21:** x86-64 CI, PR #430 (the root-set record,
+a change to `cosmo-upgrade`, `cosmo-install` and their tests, nothing in
+the kernel) at `5f6b1400`, run 39622618343, job 119299853429, `entropy
+boots (x86_64)`, the third boot (`boot-test-devrng`): `cpu 3, a spinner
+above the default for 300 ms: 439 calls of the poll, longest gap 290 ms
+(bound 100)`, the check at 302 ms. The job's other two boots passed (164.6
+and 154.6 s); the failing boot's self-tests took 121,494 ms and
+`cosmofs-replay` 14,399 ms, a runner of ordinary speed. The kernel is
+main's (`2acce0c3`). The same 290 ms. Not attributed; CI ran again on
+the commit that records it.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==

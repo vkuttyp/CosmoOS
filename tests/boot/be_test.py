@@ -250,6 +250,15 @@ def stage_forward(args, port, results):
         rec = "/var/lib/cosmo-upgrade/root-set"
         sh(b, f"cp {rec} /tmp/stale", "save")
         listed = sh(b, "cosmo-upgrade --list", "list")
+        # A record that cannot be written is not corrected, and not said
+        # to be: a directory where the new record is made fails its open.
+        failed = sh(b, f"mkdir {rec}.cosmo-upgrade && cosmo-upgrade --repair 2>&1", "rfail", want=1)
+        sh(b, f"rmdir {rec}.cosmo-upgrade && cmp {rec} /tmp/stale", "kept")
+        need(failed, r"^cosmo-upgrade: the root's record names the previous set's \(v\S+, [0-9a-f]{12}\) base system, "
+                     r"but its files are the current set's \(v\S+, [0-9a-f]{12}\): not corrected$",
+             "--repair that cannot write the record")
+        if re.search(r"record corrected|nothing more to repair", failed):
+            raise Fail(f"fwd-again: --repair claimed a correction it could not write: {failed[-600:]!r}")
         repaired = sh(b, "cosmo-upgrade --repair", "rep")
         sh(b, f"cp /tmp/stale {rec} && sync", "restore")
         fetch(b, port, args.arch, "b", UPB)
@@ -292,7 +301,7 @@ def stage_forward(args, port, results):
         raise
     results.append(f"forward: {OLDER} -> A ({OLDER}'s cosmo-upgrade), A's --rollback, {OLDER}'s own --rollback "
                    f"forward to A (A is {m.group(1)}); the record left naming {OLDER}'s set: --list named both, "
-                   f"--repair corrected it with no intent, and with it put back the upgrade to B corrected it and "
+                   f"--repair that could not write it failed and kept it, --repair corrected it with no intent, and with it put back the upgrade to B corrected it and "
                    f"took {env}; B booted on B's base system, its record B's; {time.monotonic() - t0:.1f}s")
 
 

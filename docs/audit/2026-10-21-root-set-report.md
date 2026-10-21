@@ -128,4 +128,18 @@ Matrix (on the branch's head, `gmake`, macOS host):
 | release test | PASS 21 s | PASS 23 s |
 | release test-upgrade (test-be included) | PASS 647 s | PASS 805 s |
 
-Branch CI: see the PR.
+Branch CI on `5f6b1400` (run 39622618343): every job green but `entropy
+boots (x86_64)`, whose third boot failed `irqpoll-boost` at its 100 ms
+gap bound with the open item's 290 ms (its ninth sighting,
+`docs/testing/flakes.md`; this PR changes no kernel code); the rerun
+passed.
+
+Review (Codex, P2): a record that could not be written was still said to
+be corrected, and `--repair` exited 0. `root_set_mark` now returns -1 and
+removes its temporary file; `root_set_correct` says `record corrected`
+only when the record reads back as the files' set, else `not corrected`,
+and `--repair` then exits 1. The upgrade and `--rollback` go on (the
+record is checked on every run, never trusted). The forward stage makes
+the write fail (a directory where the new record is made) and checks the
+exit, the message and the record kept: `BE_ONLY=forward test-be` PASS on
+x86_64 (72.3 s) and AArch64 (90.6 s).
