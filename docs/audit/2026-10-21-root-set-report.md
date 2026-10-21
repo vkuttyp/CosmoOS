@@ -143,3 +143,12 @@ record is checked on every run, never trusted). The forward stage makes
 the write fail (a directory where the new record is made) and checks the
 exit, the message and the record kept: `BE_ONLY=forward test-be` PASS on
 x86_64 (72.3 s) and AArch64 (90.6 s).
+
+Review (Qodo): a record `cosmo-install` could not write failed an install
+that had copied everything; it is now said and the install goes on (the
+record is optional: `cosmo-upgrade` writes a missing one). `--list`
+failed when the current set could not be read; it lists the environments
+against what can be read, as before, and says what is not known. The
+upgrade admitting a root whose files match neither set, whatever its
+record says, is the owner's decision 1, unchanged. After them: release
+`test-install` and `BE_ONLY=forward test-be` PASS on x86_64 and AArch64.
