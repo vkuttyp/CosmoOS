@@ -639,8 +639,13 @@ static int install(const char *target_name, bool force)
     if (mount(root->name, MNT, "cosmofs", 0) < 0)
         return fail("mounting the new root", errno);
     g_mounted = true;
-    if (populate() < 0 || write_root_set(esp) < 0)
+    if (populate() < 0)
         return fail("copying the system", 0);
+    /* The record is checked against the root's files, never trusted, and
+     * cosmo-upgrade writes a missing one: an install without it is whole. */
+    if (write_root_set(esp) < 0)
+        fprintf(stderr, "cosmo-install: the root's record of its base system was not written; cosmo-upgrade "
+                        "writes it\n");
     sync();
     if (umount(MNT) < 0)
         return fail("unmounting the new root", errno);

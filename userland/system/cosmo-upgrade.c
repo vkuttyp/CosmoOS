@@ -2556,8 +2556,14 @@ static int list_envs(void)
             "snapshot");
     struct set cur = { 0 }, prev = { 0 };
     struct root_base rb;
-    if (root_base_load(&e, &cur, &prev, &rb) < 0)
-        return EXIT_FAILED;
+    /* A current set that cannot be read hides nothing else: the
+     * environments are listed against what can be. */
+    bool known = root_base_load(&e, &cur, &prev, &rb) == 0;
+    if (!known) {
+        root_set_read(&rb.rec);
+        if (e.prev_whole && esp_read_set(&e, e.pset, &prev) == 0)
+            manifest_tag(prev.file[3], rb.prev);
+    }
     set_free(&cur);
     set_free(&prev);
     const char *curtag = rb.cur, *prevtag = rb.prev, *rootset = root_base_tag(&rb);
@@ -2577,7 +2583,10 @@ static int list_envs(void)
     /* What the root's files are, and its record when it says otherwise
      * (or nothing): --repair corrects it. */
     char is[200], was[200];
-    if (rb.holds[0])
+    if (!known)
+        say("the current set cannot be read: which set's base system the root holds is not known; its record says "
+            "%s", rb.rec.set[0] ? set_label(&rb, rb.rec.set, rb.rec.release, was, sizeof(was)) : "nothing");
+    else if (rb.holds[0])
         say("the root's base system is %s", set_label(&rb, rb.holds, "", is, sizeof(is)));
     else
         say("the root's base system is neither kept set's exactly (a file under /bin, /sbin, /usr, /lib or the "
