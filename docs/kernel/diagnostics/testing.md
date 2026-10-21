@@ -91,6 +91,15 @@ five-millisecond deadline and the `lockup-sample-busy` checks are unchanged.
 
 ### The framebuffer console
 
+**`console-lines`** (both architectures, any machine): a write of 24
+lines in one `console_write` -- what `dmesg`'s one write of the kernel
+log is -- reaches the sinks a line per hold of the console lock: no hold
+carries more than `CONSOLE_HOLD_MAX` (256) bytes, where the write is
+about 1.1 KiB. It prints the write's time and the longest tick gap on any
+CPU meanwhile. One hold for the whole write kept interrupts off for as
+long as fbcon took to draw it (`docs/testing/flakes.md`, the TLB
+shootdown, 2026-10-21).
+
 **`fb-console`** (both architectures, whenever the machine has a
 display; skipped, as `fb-bench` is, when a display driver's surface holds
 the console, which a display change can free under a pixel read). Everything is checked by reading the pixels back through the

@@ -265,6 +265,7 @@ bool selftest_tty_pty(const char **reason);        /* /dev/ptmx and /dev/pts/N: 
 /* kernel/core/fbtest.c: the framebuffer console, checked by reading the
  * pixels back, and what it costs. */
 bool selftest_fb_console(const char **reason);
+bool selftest_console_lines(const char **reason);
 bool selftest_fb_bench(const char **reason);
 bool selftest_fb_switch(const char **reason);      /* kernel/core/fbtest.c: a surface switch keeps the screen, resizes the terminal */
 

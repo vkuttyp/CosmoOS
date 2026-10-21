@@ -19,6 +19,7 @@
 #include <kernel/font.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/printf.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
@@ -357,5 +358,41 @@ out:
     kinfo("selftest: fb-switch: %ux%u, then 60x17 to 40x12 cells: the screen moved (row %u), the cursor "
           "with it, the terminal's size followed (a newer one kept), and %ux%u is back",
           g0.cols, g0.rows, row - 1, g1.cols, g1.rows);
+    return true;
+}
+
+/*
+ * console-lines: a write of many lines in one call -- what `dmesg`'s one
+ * write of the kernel log is -- reaches the sinks a line per hold of the
+ * console lock, so interrupts are off for one line's drawing at a time.
+ * One hold carried the whole write before: `dmesg` kept interrupts off on
+ * its CPU for over a second while fbcon drew 32 KiB, and a TLB shootdown
+ * waiting on that CPU panicked (docs/testing/flakes.md, 2026-10-21). Any
+ * machine: the hold is the console's, whatever the sinks are.
+ */
+#define CL_LINES 24
+
+bool selftest_console_lines(const char **reason)
+{
+    static char buf[CL_LINES * 80];
+    size_t n = 0;
+    for (int i = 0; i < CL_LINES; i++)
+        n += (size_t)ksnprintf(buf + n, sizeof(buf) - n, "console-lines: line %2d of %d, a hold of its own\n", i + 1,
+                               CL_LINES);
+    (void)console_test_hold_max(true);
+    timer_test_tick_gap_reset();
+    uint64_t t0 = clock_now_ns();
+    console_write(buf, n);
+    uint64_t took = clock_since_ns(t0);
+    size_t most = console_test_hold_max(false);
+    unsigned cpu = 0;
+    uint64_t gap = timer_test_tick_gap_max_ns(&cpu);
+    kinfo("selftest: console-lines: %zu bytes in %d lines in %llu us; the most one hold carried was %zu bytes; the "
+          "longest tick gap meanwhile %llu us (cpu %u)", n, CL_LINES, (unsigned long long)(took / 1000), most,
+          (unsigned long long)(gap / 1000), cpu);
+    /* Other CPUs' log lines are holds too, each one line: none carries
+     * more than CONSOLE_HOLD_MAX, and this write's lines are far shorter. */
+    CHECK(n > CONSOLE_HOLD_MAX);
+    CHECK(most > 0 && most <= CONSOLE_HOLD_MAX);
     return true;
 }

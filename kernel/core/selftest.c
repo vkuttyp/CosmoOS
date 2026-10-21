@@ -830,6 +830,7 @@ static const struct selftest tests[] = {
     { "tty-ldisc",       selftest_tty_ldisc },
     { "console-rx-clear", selftest_console_rx_clear },
     { "fb-console",      selftest_fb_console },
+    { "console-lines",   selftest_console_lines },
     { "fb-bench",        selftest_fb_bench },
     { "fb-switch",       selftest_fb_switch },
     /* After the hotplug tests: unplugging the hub takes the keyboard

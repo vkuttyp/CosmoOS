@@ -13,6 +13,9 @@
 static struct console_sink *g_sinks;
 static spinlock_t g_console_lock = SPINLOCK_INIT("console");
 static bool g_panic_mode;
+#if CONFIG_SELFTEST
+static size_t g_hold_max;   /* the most bytes one console_write hold passed to the sinks, under the lock */
+#endif
 
 void console_register(struct console_sink *sink)
 {
@@ -66,8 +69,27 @@ void console_write(const char *s, size_t len)
         return;
     }
     arch_irq_state_t st = spin_lock_irqsave(&g_console_lock);
+#if CONFIG_SELFTEST
+    if (len > g_hold_max)
+        g_hold_max = len;
+#endif
     write_unlocked(s, len);
     spin_unlock_irqrestore(&g_console_lock, st);
+}
+
+size_t console_test_hold_max(bool reset)
+{
+#if CONFIG_SELFTEST
+    arch_irq_state_t st = spin_lock_irqsave(&g_console_lock);
+    size_t n = g_hold_max;
+    if (reset)
+        g_hold_max = 0;
+    spin_unlock_irqrestore(&g_console_lock, st);
+    return n;
+#else
+    (void)reset;
+    return 0;
+#endif
 }
 
 arch_irq_state_t console_hold(void)
