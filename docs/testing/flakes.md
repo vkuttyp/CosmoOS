@@ -308,14 +308,31 @@ before the gap) and `arch_irq_restore_hw` (`cpu.c:241`, the first after
 it): CPU 2 ran `dmesg` with interrupts masked for the whole 1.2 s and
 took the pending tick as they came back; 32 us before the report it was
 in `dmesg`'s user code. The second sighting (2026-09-20) was in the
-harness's `dmesg` too. `dmesg`'s one interrupts-off stretch is
-`klog_copy` (`kernel/core/log.c`), which copies the 32 KiB ring under
-`spin_lock_irqsave`. That copy is milliseconds, not a second, so this
-does not yet name a mechanism; what fits is a host stall of CPU 2's
-vCPU landing inside that window. What would settle it: the length of
-`klog_copy`'s interrupts-off window under QEMU (if milliseconds, the
-second is the host's; and the copy can be made outside the lock either
-way). Count: 6 (5 on a developer machine, 1 in CI), 1 instrumented.
+harness's `dmesg` too.
+
+**Attributed, 2026-10-21: the console, not the host.** This entry first
+named `klog_copy` (`kernel/core/log.c`) and a host stall; that copy is
+milliseconds. The second-long stretch is the write that follows it.
+BusyBox's `dmesg` writes the 32 KiB it read in one `full_write`
+(`util-linux/dmesg.c`); the syscall's bounce takes up to `IO_BOUNCE_MAX`
+(64 KiB) in one call, so it reaches `tty_write` (`kernel/tty/tty.c`)
+whole, and the console tty passes it whole to `console_write`
+(`kernel/core/console.c`). That took `g_console_lock` with
+`spin_lock_irqsave` once and drew the whole write to every sink, fbcon
+among them, whose scroll repaints the screen. Interrupts stayed off on
+the writer's CPU for as long as 32 KiB took to draw, past the second a
+TLB shootdown waits; the `spin_unlock_irqrestore` that ended it is the
+`arch_irq_restore_hw` where the tick came back. Subsystem: the console
+(`console_write`); faulting path: `dmesg` -> `write` -> `tty_write` ->
+`console_write` -> fbcon, against `mmu.c`'s shootdown wait on CPU 0.
+The self-test `console-lines` measures the cost: 24 short lines
+(1152 bytes) take 28 ms through the sinks on x86-64 debug on the
+developer's machine, so `dmesg`'s 32 KiB is the better part of a second
+there and more on a CI runner. Fixed by PR #431: `console_write` passes a
+write to the sinks a line at a time, at most `CONSOLE_HOLD_MAX` (256)
+bytes a hold; the self-test `console-lines` asserts it
+(`tools/console-lines-probe.py`). The shootdown's one-second deadline is
+unchanged: it caught a real defect.
 
 **Observed once, not yet on the list: `timer-cancel-sync`'s lower
 bound.** `kernel/core/quiescetest.c:960` asserts that a `timer_cancel_sync`
@@ -2945,6 +2962,21 @@ count above the expected names the newcomer in the dump; a count below
 cannot say which thread went -- if a next sighting is that, a baseline of
 the thread identities taken before the test is the next step. Not
 attributed; the failed job was rerun.
+
+**Second sighting, 2026-10-21, and the count below:** local, AArch64
+debug, `QEMU_SMP=1`, the matrix of the console-hold branch (PR #431,
+`8fce3c00`; the change is `console_write`'s lock and a self-test, not on
+the scheduler's path): `check failed: threads_settle(before) at line
+998 (736 ms)`, after the test's own line passed every other check (100
+runs of 32, 3201 trips, nesting 1). `threads_settle: 9 threads after
+200 ms, expected 10`, and the dump lists only the boot's resident threads
+(kmain, idle, reaper, quiesce, netrx/0, irqpoll/0, blk-timeout, xhci/0,
+ahci/0): a thread that existed when the test took its count exited during
+it, the case the first sighting said the dump cannot name. The same
+matrix's `QEMU_SMP=2` and `4` boots, `test-smp2`, `test-chaos` and
+`test-harness-retry` passed. Not attributed. Two sightings, both AArch64;
+the step the first one named is due: a baseline of the thread
+identities before the test, so the dump names the one that went.
 
 ## `irqpoll-boost` over its gap bound, 2026-10-10
 

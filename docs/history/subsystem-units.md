@@ -3336,3 +3336,13 @@ See the [history index](README.md).
   `forward` stage starts from the published v1.0.7.
   `tools/root-set-probe.py`. Report:
   `docs/audit/2026-10-21-root-set-report.md`.
+- **The console held interrupts off for a whole write (2026-10-21, PR
+  #431).** PR #429's CI run 39568825512 panicked in `entropy boots
+  (x86_64)`: CPU 2 ran `dmesg` without a tick for 1223 ms and missed CPU
+  0's TLB shootdown. `dmesg`'s one 32 KiB write reached `console_write`
+  whole, which held `g_console_lock` with interrupts off while fbcon drew
+  all of it. `console_write` now takes the lock once a line, at most
+  `CONSOLE_HOLD_MAX` (256) bytes; the self-test `console-lines`,
+  `tools/console-lines-probe.py`. With it, PKG-9: `pkg` says a version
+  change to an older version is a downgrade. Report:
+  `docs/audit/2026-10-21-console-hold-report.md`.
