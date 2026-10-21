@@ -817,7 +817,7 @@ static int root_pass(const struct member *from, int nfrom, const struct member *
     return failed ? -1 : 0;
 }
 
-static void root_set_mark(const uint8_t *manifest);
+static void root_set_mark(const struct set *to, const struct set *from);
 
 static int base_pass(const struct set *from, const struct set *to)
 {
@@ -837,7 +837,7 @@ static int base_pass(const struct set *from, const struct set *to)
     free(a);
     free(b);
     if (rc == 0)
-        root_set_mark(to->file[3]);   /* this root's base system is now `to`'s */
+        root_set_mark(to, from);   /* this root's base system is now `to`'s, brought from `from`'s */
     return rc;
 }
 
@@ -941,33 +941,171 @@ static int fail(const char *what, int rc)
  * record, then the set, so every crash leaves a pairing --repair can
  * finish. The root records which set's base system it holds (ROOT_SET),
  * which is how a mixed state is told: a snapshot carries its own.
+ *
+ * The record is checked, not trusted (root_base): an older cosmo-upgrade
+ * moves the root without updating it -- v1.0.7's, rolling forward after
+ * a newer one rolled back, leaves it naming the set rolled back to -- so
+ * what the root holds is told from the root's own files, and the record
+ * is corrected from that.
  */
 #define ROOT_SET STATE_DIR "/root-set"
 
-/* ROOT_SET names `manifest`'s set: the base system the root now has. */
-static void root_set_mark(const uint8_t *manifest)
+/* ROOT_SET names set `to`, the base system the root now has, brought
+ * from set `from` (NULL: from none, or not known). */
+static void root_set_mark(const struct set *to, const struct set *from)
 {
-    char tag[129];
-    manifest_tag(manifest, tag);
+    struct root_set r;
+    memset(&r, 0, sizeof(r));
+    manifest_tag(to->file[3], r.set);
+    release_of(to->file[0], to->len[0], r.release);
+    if (from != NULL)
+        manifest_tag(from->file[3], r.from);
+    char text[512];
+    size_t n = rootset_format(&r, text, sizeof(text));
     mkdir("/var/lib", 0755);
     mkdir(STATE_DIR, 0755);
     int fd = open(ROOT_SET TMP_SUFFIX, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0 || write(fd, tag, 128) != 128 || write(fd, "\n", 1) != 1 || fsync(fd) < 0 || close(fd) < 0 ||
+    if (n == 0 || fd < 0 || write(fd, text, n) != (ssize_t)n || fsync(fd) < 0 || close(fd) < 0 ||
         rename(ROOT_SET TMP_SUFFIX, ROOT_SET) < 0)
         fprintf(stderr, "cosmo-upgrade: %s: %s\n", ROOT_SET, strerror(errno));
 }
 
-/* The set the root's base system came from, or "" when it predates the
- * mark (a root upgraded only by v1.0.7 or older). */
-static void root_set_read(char out[129])
+/* The record as written; version 0 when there is none (a root upgraded
+ * only by v1.0.7 or older, installed by v1.0.8 or older) or it does not
+ * parse. */
+static void root_set_read(struct root_set *r)
 {
-    out[0] = '\0';
-    int fd = open(ROOT_SET, O_RDONLY);
-    if (fd < 0)
+    uint8_t *text;
+    size_t len;
+    memset(r, 0, sizeof(*r));
+    if (read_whole(ROOT_SET, &text, &len) < 0)
         return;
-    ssize_t n = read(fd, out, 128);
-    close(fd);
-    out[n == 128 ? 128 : 0] = '\0';
+    (void)rootset_parse((const char *)text, len, r);
+    free(text);
+}
+
+/* Whether the root holds `s`'s base system, told from the root itself:
+ * every file and link the archive puts outside /etc there byte for byte,
+ * and none of `other`'s outside /etc that `s` lacks (the base pass
+ * removes those). /etc is not looked at: a file changed there stays the
+ * operator's. 1 yes, 0 no, -1 when an archive does not index. */
+static int root_is(const struct set *s, const struct set *other)
+{
+    char err[160], path[1024];
+    struct member *a = NULL, *b = NULL;
+    int na = archive_index(s->file[1], s->len[1], &a, err, sizeof(err));
+    int nb = na < 0 || other == NULL ? 0 : archive_index(other->file[1], other->len[1], &b, err, sizeof(err));
+    int yes = na < 0 || nb < 0 ? -1 : 1;
+    for (int i = 0; yes == 1 && i < na; i++)
+        if (strncmp(a[i].name, "etc/", 4) != 0 && target_of(a[i].name, path, sizeof(path)) && !holds(path, &a[i]))
+            yes = 0;
+    for (int i = 0; yes == 1 && i < nb; i++) {
+        struct stat st;
+        if (strncmp(b[i].name, "etc/", 4) != 0 && member_find(a, na, b[i].name) == NULL &&
+            target_of(b[i].name, path, sizeof(path)) && lstat(path, &st) == 0)
+            yes = 0;
+    }
+    free(a);
+    free(b);
+    return yes;
+}
+
+/*
+ * What the root holds, beside what its record says. `holds` is the tag of
+ * the kept set (the current one, or \cosmo\prev's) whose base system the
+ * root's files are, the current one first when both sets' are the same;
+ * "" when they are neither exactly (a file under /bin, /sbin, /usr, /lib
+ * or the repository changed since) -- then nothing is decided by it, and
+ * nothing by the record alone either.
+ */
+struct root_base {
+    struct root_set rec;
+    char holds[129];
+    const struct set *set;       /* the set `holds` names */
+    char cur[129], prev[129];    /* the kept sets' tags ("" for no prev) */
+    char currel[ROOTSET_RELEASE_MAX + 1], prevrel[ROOTSET_RELEASE_MAX + 1];
+};
+
+static void root_base_read(const struct set *cur, const struct set *prev, struct root_base *rb)
+{
+    memset(rb, 0, sizeof(*rb));
+    root_set_read(&rb->rec);
+    manifest_tag(cur->file[3], rb->cur);
+    release_of(cur->file[0], cur->len[0], rb->currel);
+    if (prev != NULL) {
+        manifest_tag(prev->file[3], rb->prev);
+        release_of(prev->file[0], prev->len[0], rb->prevrel);
+    }
+    if (root_is(cur, prev) == 1)
+        rb->set = cur;
+    else if (prev != NULL && root_is(prev, cur) == 1)
+        rb->set = prev;
+    if (rb->set != NULL)
+        snprintf(rb->holds, sizeof(rb->holds), "%s", rb->set == cur ? rb->cur : rb->prev);
+}
+
+/* "the current set's (v1.0.8, 3f2a9c0d1e5b)": set `tag` named for the
+ * operator; `release` when it is neither kept set. */
+static const char *set_label(const struct root_base *rb, const char *tag, const char *release, char *buf, size_t n)
+{
+    bool cur = strcmp(tag, rb->cur) == 0, prev = rb->prev[0] && strcmp(tag, rb->prev) == 0;
+    const char *rel = cur ? rb->currel : prev ? rb->prevrel : release;
+    snprintf(buf, n, "%s (%s, %.12s)", cur ? "the current set's" : prev ? "the previous set's" : "another set's",
+             rel[0] ? rel : "release unknown", tag);
+    return buf;
+}
+
+/* The record names another set than the root's files are. */
+static bool root_base_stale(const struct root_base *rb)
+{
+    return rb->holds[0] && strcmp(rb->rec.set, rb->holds) != 0;
+}
+
+/* Why the record is wrong, when it says: written on the way from the
+ * set the root holds again -- a move an older cosmo-upgrade reversed. */
+static const char *stale_why(const struct root_base *rb)
+{
+    return rb->rec.from[0] && strcmp(rb->rec.from, rb->holds) == 0
+               ? "; it was written when the root moved from that set, and an older cosmo-upgrade (v1.0.7 or before) "
+                 "moved it back without updating it"
+               : "";
+}
+
+/* The record made what the root's files say, when it is not: true when
+ * it was rewritten (said unless there was none). */
+static bool root_set_correct(struct root_base *rb)
+{
+    if (!root_base_stale(rb))
+        return false;
+    if (rb->rec.set[0]) {
+        char was[200], is[200];
+        say("the root's record named %s base system, but its files are %s%s: record corrected",
+            set_label(rb, rb->rec.set, rb->rec.release, was, sizeof(was)),
+            set_label(rb, rb->holds, "", is, sizeof(is)), stale_why(rb));
+    }
+    root_set_mark(rb->set, NULL);
+    root_set_read(&rb->rec);
+    return true;
+}
+
+/* What the root holds, told against the ESP's current set and \cosmo\prev
+ * (read into `cur` and `prev`, which the caller frees and keeps while it
+ * uses `rb`). 0, or -1 when the current set cannot be read. */
+static int root_base_load(struct esp *e, struct set *cur, struct set *prev, struct root_base *rb)
+{
+    memset(rb, 0, sizeof(*rb));
+    if (esp_read_set(e, e->set, cur) < 0)
+        return -1;
+    bool p = e->prev_whole && esp_read_set(e, e->pset, prev) == 0;
+    root_base_read(cur, p ? prev : NULL, rb);
+    return 0;
+}
+
+/* The set the root's base system is: its files' when they say, else its
+ * record's ("" for none). */
+static const char *root_base_tag(const struct root_base *rb)
+{
+    return rb->holds[0] ? rb->holds : rb->rec.set;
 }
 
 static void uuid_hex(const uint8_t u[16], char out[33])
@@ -1193,17 +1331,20 @@ static void status_envs(struct esp *e)
     if (be_load(e, &be) < 0)
         say("boot environments: unknown (%s)", "cosmo-upgrade --prune writes \\cosmo\\be again, empty, keeping "
             "every snapshot");
-    struct set cur = { 0 };
-    char curtag[129] = "", rootset[129];
-    if (esp_read_set(e, e->set, &cur) == 0)
-        manifest_tag(cur.file[3], curtag);
+    struct set cur = { 0 }, prev = { 0 };
+    struct root_base rb;
+    bool known = root_base_load(e, &cur, &prev, &rb) == 0;
     set_free(&cur);
-    root_set_read(rootset);
+    set_free(&prev);
+    const char *root = known ? root_base_tag(&rb) : "";
     say("boot environments: %d paired%s%s", be.n, be.intent[0] ? "; intent: " : "",
-        !be.intent[0] ? "" : strcmp(be.intent, curtag) == 0 ? "the current set" : "another set");
-    if (be.intent[0] && rootset[0])
-        say("the root %s the intended set's base system%s", strcmp(rootset, be.intent) == 0 ? "has" : "does not have",
-            strcmp(rootset, be.intent) == 0 && strcmp(curtag, be.intent) == 0 ? "" : ": cosmo-upgrade --repair");
+        !be.intent[0] ? "" : known && strcmp(be.intent, rb.cur) == 0 ? "the current set" : "another set");
+    if (be.intent[0] && root[0])
+        say("the root %s the intended set's base system%s", strcmp(root, be.intent) == 0 ? "has" : "does not have",
+            strcmp(root, be.intent) == 0 && strcmp(rb.cur, be.intent) == 0 ? "" : ": cosmo-upgrade --repair");
+    if (known && root_base_stale(&rb))
+        say("the root's record of its base system is wrong: cosmo-upgrade --list says how; cosmo-upgrade --repair "
+            "corrects it");
     struct rootsnap rs;
     struct snaps sn = { 0 };
     if (rootsnap_open(&rs, "/") < 0 || rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) < 0)
@@ -1517,10 +1658,11 @@ static int upgrade(const char *dir, bool check, const char *stop)
     }
     char envname[BE_NAME_MAX + 1] = "", dropped[BE_MAX][BE_NAME_MAX + 1];
     int ndropped = 0;
-    char curtag[129], nwtag[129], have[129];
+    char curtag[129], nwtag[129];
     manifest_tag(cur.file[3], curtag);
     manifest_tag(nw.file[3], nwtag);
-    root_set_read(have);
+    struct set kept = { 0 };   /* \cosmo\prev, which the root may hold instead */
+    struct root_base rb;
     if (envs) {
         if (rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) < 0) {
             fprintf(stderr, "cosmo-upgrade: the root's snapshots: %s; nothing written\n", strerror(errno));
@@ -1535,11 +1677,19 @@ static int upgrade(const char *dir, bool check, const char *stop)
                             "apply it, or cosmo-snap rollback --cancel; nothing written\n");
             return EXIT_REFUSED;
         }
-        if (have[0] && strcmp(have, curtag) != 0) {
-            fprintf(stderr, "cosmo-upgrade: the root holds another set's base system than the current set's (a "
-                            "rollback half done): cosmo-upgrade --repair first; nothing written\n");
+        /* Told from the root's files, not its record: a record an older
+         * cosmo-upgrade left behind refuses nothing (it is corrected
+         * below), and files that are neither kept set's refuse nothing
+         * either -- the base pass brings them to the new set. */
+        root_base_read(&cur, e.prev_whole && esp_read_set(&e, e.pset, &kept) == 0 ? &kept : NULL, &rb);
+        if (rb.set == &kept) {
+            char is[200];
+            fprintf(stderr, "cosmo-upgrade: the root's base system is %s, not the current set's (a rollback half "
+                            "done): cosmo-upgrade --repair first; nothing written\n",
+                    set_label(&rb, rb.holds, "", is, sizeof(is)));
             return EXIT_REFUSED;
         }
+        set_free(&kept);   /* rb.set is the current set or none from here */
         /* No environment for a set whose own cosmo-upgrade would refuse
          * an ESP with \cosmo\be once rolled back to (v1.0.7 and older),
          * nor one whose snapshot would raise the root past what a kept
@@ -1576,10 +1726,11 @@ static int upgrade(const char *dir, bool check, const char *stop)
             snprintf(tag, sizeof(tag), "unknown");
         be_name(tag, snaps_taken, &sn, envname);
         /* The root says which set's base system it holds, so that the
-         * environment does: a fresh install does not say yet, and its
-         * base system is the current set's. */
-        if (!have[0])
-            root_set_mark(cur.file[3]);
+         * environment does: a record that is missing (an install by v1.0.8
+         * or older) or wrong is made the current set's when the root's
+         * files are; with none to tell by, a missing one is too. */
+        if (!root_set_correct(&rb) && !rb.rec.set[0])
+            root_set_mark(&cur, NULL);
         if (be_taking_mark(envname) < 0) {
             fprintf(stderr, "cosmo-upgrade: %s: %s; nothing written\n", BE_TAKING, strerror(errno));
             return EXIT_REFUSED;
@@ -1899,10 +2050,12 @@ static int rollback(const char *stop)
         if (running_tag(tag, sizeof(tag)) < 0)
             snprintf(tag, sizeof(tag), "unknown");
         be_name(tag, snaps_taken, &sn, safety);
-        char have[129];
-        root_set_read(have);
-        if (!have[0])
-            root_set_mark(cur.file[3]);   /* as the upgrade does: the tree it keeps says which set it ran */
+        /* As the upgrade does: the tree it keeps says which set it ran,
+         * its record made right first when its files say otherwise. */
+        struct root_base rb;
+        root_base_read(&cur, &prev, &rb);
+        if (!root_set_correct(&rb) && !rb.rec.set[0])
+            root_set_mark(&cur, NULL);
         struct cosmo_fsctl_snap ss;
         if (rootsnap_rollback(&rs, target, safety, &ss) < 0) {
             fprintf(stderr, "cosmo-upgrade: the root's rollback to %s: %s; \\cosmo\\be names the previous set as "
@@ -2376,14 +2529,12 @@ static int list_envs(void)
         say("what \\cosmo\\be paired is unknown; cosmo-upgrade --prune writes it again, empty, keeping every "
             "snapshot");
     struct set cur = { 0 }, prev = { 0 };
-    char curtag[129] = "", prevtag[129] = "", rootset[129];
-    if (esp_read_set(&e, e.set, &cur) == 0)
-        manifest_tag(cur.file[3], curtag);
-    if (e.prev_whole && esp_read_set(&e, e.pset, &prev) == 0)
-        manifest_tag(prev.file[3], prevtag);
+    struct root_base rb;
+    if (root_base_load(&e, &cur, &prev, &rb) < 0)
+        return EXIT_FAILED;
     set_free(&cur);
     set_free(&prev);
-    root_set_read(rootset);
+    const char *curtag = rb.cur, *prevtag = rb.prev, *rootset = root_base_tag(&rb);
     struct rootsnap rs;
     struct snaps sn = { 0 };
     bool snaps = rootsnap_open(&rs, "/") == 0 && rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) == 0;
@@ -2397,9 +2548,20 @@ static int list_envs(void)
     }
     if (be.n == 0)
         printf("(none: no upgrade by this release has taken one yet)\n");
-    say("the root's base system is %s", !rootset[0] ? "unrecorded (older than boot environments)"
-                                       : strcmp(rootset, curtag) == 0 ? "the current set's"
-                                       : strcmp(rootset, prevtag) == 0 ? "the previous set's" : "another set's");
+    /* What the root's files are, and its record when it says otherwise
+     * (or nothing): --repair corrects it. */
+    char is[200], was[200];
+    if (rb.holds[0])
+        say("the root's base system is %s", set_label(&rb, rb.holds, "", is, sizeof(is)));
+    else
+        say("the root's base system is neither kept set's exactly (a file under /bin, /sbin, /usr, /lib or the "
+            "package repository differs from both); its record says %s",
+            rb.rec.set[0] ? set_label(&rb, rb.rec.set, rb.rec.release, was, sizeof(was)) : "nothing");
+    if (root_base_stale(&rb) && rb.rec.set[0])
+        say("the root's record says %s%s: cosmo-upgrade --repair corrects it",
+            set_label(&rb, rb.rec.set, rb.rec.release, was, sizeof(was)), stale_why(&rb));
+    else if (root_base_stale(&rb))
+        say("the root keeps no record of it (an install by v1.0.8 or older): cosmo-upgrade --repair writes one");
     if (be.intent[0] && (strcmp(be.intent, curtag) != 0 || (rootset[0] && strcmp(rootset, be.intent) != 0)))
         say("\\cosmo\\be intends %s: cosmo-upgrade --repair", strcmp(be.intent, prevtag) == 0 ? "the previous set"
                                                                                        : "another pairing");
@@ -2512,17 +2674,25 @@ static int repair(void)
             return EXIT_FAILED;
         }
     }
+    /* The root's record made what its files are, with or without an
+     * intent: a record an older cosmo-upgrade left behind (it rolled the
+     * root forward and kept no record) needs nothing else. */
+    set_free(&cur);
+    struct root_base rb;
+    if (root_base_load(&e, &cur, &prev, &rb) < 0)
+        return EXIT_FAILED;
+    bool corrected = root_set_correct(&rb);
+    set_free(&cur);
+    set_free(&prev);
+    snprintf(curtag, sizeof(curtag), "%s", rb.cur);
+    snprintf(rootset, sizeof(rootset), "%s", root_base_tag(&rb));
     if (!be.intent[0]) {
-        set_free(&cur);
         say("no boot environments recorded: nothing more to repair");
         return repair_loader();
     }
-    manifest_tag(cur.file[3], curtag);
-    set_free(&cur);
-    root_set_read(rootset);
     bool esp_ok = strcmp(curtag, be.intent) == 0, root_ok = strcmp(rootset, be.intent) == 0;
     if (esp_ok && root_ok) {
-        say("the root and the boot set are the pairing \\cosmo\\be intends: nothing to repair");
+        say("the root and the boot set are the pairing \\cosmo\\be intends: nothing %sto repair", corrected ? "more " : "");
         return repair_loader();
     }
     /* The set half is checked before the root's rollback is asked for: a

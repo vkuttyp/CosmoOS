@@ -160,3 +160,97 @@ bool be_aware(const unsigned char *bin, size_t len)
             return true;
     return false;
 }
+
+/* One line of `text` from `*pos`: its start and length, *pos past it. */
+static bool next_line(const char *text, size_t len, size_t *pos, const char **l, size_t *ll)
+{
+    if (*pos >= len)
+        return false;
+    *l = text + *pos;
+    const char *nl = memchr(*l, '\n', len - *pos);
+    *ll = nl ? (size_t)(nl - *l) : len - *pos;
+    *pos += *ll + 1;
+    return true;
+}
+
+int rootset_parse(const char *text, size_t len, struct root_set *r)
+{
+    memset(r, 0, sizeof(*r));
+    if (len < BE_SET_HEX || !all_hex(text, BE_SET_HEX) || (len > BE_SET_HEX && text[BE_SET_HEX] != '\n'))
+        return -1;
+    memcpy(r->set, text, BE_SET_HEX);
+    r->version = 1;
+    size_t pos = BE_SET_HEX + 1, m = sizeof(ROOTSET_MAGIC) - 1;
+    if (len < pos + m || memcmp(text + pos, ROOTSET_MAGIC, m) != 0)
+        return 0;   /* v1.0.8's record, or a later one's first line */
+    pos += m;
+    r->version = 2;
+    const char *l;
+    size_t ll;
+    while (next_line(text, len, &pos, &l, &ll)) {
+        if (ll > 8 && memcmp(l, "release ", 8) == 0 && ll - 8 <= ROOTSET_RELEASE_MAX) {
+            memcpy(r->release, l + 8, ll - 8);
+            r->release[ll - 8] = '\0';
+        } else if (ll == 5 + BE_SET_HEX && memcmp(l, "from ", 5) == 0 && all_hex(l + 5, BE_SET_HEX)) {
+            memcpy(r->from, l + 5, BE_SET_HEX);
+            r->from[BE_SET_HEX] = '\0';
+        }
+    }
+    if (strcmp(r->release, "-") == 0)
+        r->release[0] = '\0';
+    return 0;
+}
+
+size_t rootset_format(const struct root_set *r, char *out, size_t cap)
+{
+    int w = snprintf(out, cap, "%s\n%srelease %s\nfrom %s\n", r->set, ROOTSET_MAGIC, r->release[0] ? r->release : "-",
+                     r->from[0] ? r->from : "-");
+    return w < 0 || (size_t)w >= cap ? 0 : (size_t)w;
+}
+
+static bool word_char(unsigned char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+/* Digits at `*i`, at least one; false otherwise. */
+static bool digits(const unsigned char *s, size_t len, size_t *i)
+{
+    size_t start = *i;
+    while (*i < len && s[*i] >= '0' && s[*i] <= '9')
+        (*i)++;
+    return *i > start;
+}
+
+void release_of(const unsigned char *elf, size_t len, char out[ROOTSET_RELEASE_MAX + 1])
+{
+    out[0] = '\0';
+    for (size_t at = 0; at + 6 <= len; at++) {
+        if (elf[at] != 'v' || (at > 0 && (word_char(elf[at - 1]) || elf[at - 1] == '.')))
+            continue;
+        size_t i = at + 1;
+        if (!digits(elf, len, &i) || i >= len || elf[i++] != '.' || !digits(elf, len, &i) || i >= len ||
+            elf[i++] != '.' || !digits(elf, len, &i))
+            continue;
+        size_t j = i;
+        if (j + 3 < len && memcmp(elf + j, "-rc", 3) == 0 && (j += 3, digits(elf, len, &j)))
+            i = j;
+        j = i;
+        if (j < len && elf[j] == '-' && (j++, digits(elf, len, &j)) && j + 2 < len && memcmp(elf + j, "-g", 2) == 0) {
+            size_t h = j + 2;
+            while (h < len && ((elf[h] >= '0' && elf[h] <= '9') || (elf[h] >= 'a' && elf[h] <= 'f')))
+                h++;
+            if (h - (j + 2) >= 7)
+                i = h;
+        }
+        if (i + 6 <= len && memcmp(elf + i, "-dirty", 6) == 0)
+            i += 6;
+        if (i < len && (word_char(elf[i]) || elf[i] == '.' || elf[i] == '-'))
+            continue;
+        if (i - at > ROOTSET_RELEASE_MAX)
+            continue;
+        memcpy(out, elf + at, i - at);
+        out[i - at] = '\0';
+        return;
+    }
+}

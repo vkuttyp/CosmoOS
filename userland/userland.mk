@@ -43,7 +43,8 @@ PROG_DIR_svc    := system
 PROG_DIR_fsctl  := system
 PROG_DIR_cosmo-snap := system
 PROG_DIR_cosmo-install := system
-PROG_EXTRA_SRCS_cosmo-install := userland/system/install_gpt.c userland/system/install_sha512.c
+PROG_EXTRA_SRCS_cosmo-install := userland/system/install_gpt.c userland/system/install_sha512.c \
+	userland/system/upgrade_fat.c userland/system/blkdevs.c userland/system/upgrade_be.c
 PROG_DIR_cosmo-upgrade := system
 PROG_EXTRA_SRCS_cosmo-upgrade := userland/system/upgrade_fat.c userland/system/blkdevs.c userland/system/install_sha512.c \
 	userland/system/upgrade_ed25519.c userland/system/relsig.c userland/lib/fetch.c userland/lib/rootsnap.c \

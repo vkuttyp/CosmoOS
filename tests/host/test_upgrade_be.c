@@ -122,7 +122,58 @@ static void test_aware(void)
     EXPECT(!be_aware(with, 4));
 }
 
+static void test_rootset(void)
+{
+    struct root_set r, s;
+    char text[512], line[BE_SET_HEX + 2];
+    memset(&r, 0, sizeof(r));
+    hexrun(r.set, BE_SET_HEX, 'a');
+    hexrun(r.from, BE_SET_HEX, 'b');
+    snprintf(r.release, sizeof(r.release), "v1.0.9");
+    size_t len = rootset_format(&r, text, sizeof(text));
+    EXPECT(len > 0 && strncmp(text, r.set, BE_SET_HEX) == 0 && text[BE_SET_HEX] == '\n');
+    EXPECT(rootset_parse(text, len, &s) == 0 && s.version == 2);
+    EXPECT(strcmp(s.set, r.set) == 0 && strcmp(s.from, r.from) == 0 && strcmp(s.release, "v1.0.9") == 0);
+    /* Unknown, '-' fields read back empty. */
+    r.from[0] = r.release[0] = '\0';
+    len = rootset_format(&r, text, sizeof(text));
+    EXPECT(rootset_parse(text, len, &s) == 0 && s.version == 2 && !s.from[0] && !s.release[0]);
+    /* v1.0.8's record: the set and a newline, or the set alone. */
+    snprintf(line, sizeof(line), "%s\n", r.set);
+    EXPECT(rootset_parse(line, BE_SET_HEX + 1, &s) == 0 && s.version == 1 && strcmp(s.set, r.set) == 0);
+    EXPECT(rootset_parse(line, BE_SET_HEX, &s) == 0 && s.version == 1);
+    /* v1.0.8 reads the first 128 bytes: the set, in either version. */
+    len = rootset_format(&r, text, sizeof(text));
+    EXPECT(memcmp(text, r.set, BE_SET_HEX) == 0);
+    /* Not a record: short, not hex, more on the first line. */
+    EXPECT(rootset_parse(line, 100, &s) < 0 && s.version == 0);
+    line[3] = 'g';
+    EXPECT(rootset_parse(line, BE_SET_HEX + 1, &s) < 0);
+    snprintf(line, sizeof(line), "%sx", r.set);
+    EXPECT(rootset_parse(line, BE_SET_HEX + 1, &s) < 0);
+    EXPECT(rootset_format(&r, text, 100) == 0);
+}
+
+static void test_release_of(void)
+{
+    static const struct { const char *in, *want; } cases[] = {
+        { "\x7f" "ELF..CosmoOS kernel v1.0.9 (release)\0..", "v1.0.9" },
+        { "..build v1.0.8-3-g1a2b3c4d-dirty\n", "v1.0.8-3-g1a2b3c4d-dirty" },
+        { "rc: v1.1.0-rc2", "v1.1.0-rc2" },
+        { "..dev1.0.9 xv1.0.9 1.v1.0.9 v1.0.9.1 v1.0 v1.0.9-x then v2.0.0", "v2.0.0" },
+        { "no version here", "" },
+        { "short: v1.0.9-3-gabc", "" },   /* too short a hash: not git's form, and not a bare tag either */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char out[ROOTSET_RELEASE_MAX + 1];
+        release_of((const unsigned char *)cases[i].in, strlen(cases[i].in), out);
+        EXPECT(strcmp(out, cases[i].want) == 0);
+    }
+}
+
 static const struct host_test tests[] = {
+    { "the root's record: format, parse, v1.0.8's", test_rootset },
+    { "a kernel's release", test_release_of },
     { "format and parse back", test_roundtrip },
     { "malformed files refused", test_refused },
     { "at most BE_MAX, the oldest dropped", test_capacity },
