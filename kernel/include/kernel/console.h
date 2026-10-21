@@ -19,11 +19,17 @@
 #include <stdbool.h>
 #include <arch/irq.h>   /* arch_irq_state_t, for console_hold */
 #include <stddef.h>
+#include <stdint.h>
 
 struct console_sink {
     const char *name;
     /* Emit `len` bytes. Must be non-blocking beyond polling the device. */
     void (*write)(struct console_sink *sink, const char *s, size_t len);
+    /* Set by write when it gave up on what it was given (a device that
+     * did not answer): the rest of the same console_write is not passed
+     * to it, so a stalled device costs one wait a write, not one a line. */
+    bool dropped;
+    uint64_t skip_call;        /* owned by the console; do not touch */
     struct console_sink *next; /* owned by the console; do not touch */
 };
 
@@ -35,8 +41,15 @@ bool console_has_sink(const char *name);
 /* True once any sink is registered: false means nothing printed is seen. */
 bool console_any_sink(void);
 
+/* To every sink, a line (at most CONSOLE_HOLD_MAX bytes) per hold of the
+ * console lock: interrupts are off for one line's drawing at a time. */
+#define CONSOLE_HOLD_MAX 256u
 void console_write(const char *s, size_t len);
 void console_puts(const char *s);
+/* CONFIG_SELFTEST: the most bytes one hold of console_write has passed
+ * to the sinks since the last reset (the console-lines self-test). 0 in
+ * a build without self-tests. */
+size_t console_test_hold_max(bool reset);
 
 /* Tests: hold every console writer off -- another CPU's console_write
  * spins -- for a window in which the UART must carry nothing but the

@@ -251,7 +251,8 @@ components are 0), then the revision. Constraint grammar: `name`,
 newest index version satisfying all constraints imposed by the request
 and by every dependant in the closure is chosen; an installed version
 that violates a constraint is replaced by the newest satisfying index
-version (`pkg: NAME will be upgraded from A to B`), and the install fails
+version (`pkg: NAME will be upgraded from A to B`, or `downgraded` when B
+is older), and the install fails
 when the index has none.
 
 ### Resolution (`pkg install`)
@@ -275,7 +276,7 @@ resolve(d):
     if d.name is planned: if the planned version violates the constraints now known: retry = true; return
     cycle through d.name -> error
     if installed (and not --reinstall) and the installed version satisfies all constraints: return
-        (installed but violating: the newest satisfying index version is planned: "will be upgraded")
+        (installed but violating: the newest satisfying index version is planned: "will be upgraded", or "downgraded")
     chosen = index_best_all(d.name); none -> error listing the constraints
     mark visiting; for dep in chosen.depends: resolve(dep); unmark
     plan.append(chosen)                             (dependencies first)

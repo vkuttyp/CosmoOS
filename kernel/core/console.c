@@ -4,6 +4,15 @@
  * A spinlock serialises writes so lines from different CPUs do not
  * interleave. Panic mode drops the lock for good: the panicking CPU has
  * halted the others, one of which may have held it.
+ *
+ * The lock is taken with interrupts off, and a sink can take milliseconds
+ * a line (fbcon's scroll repaints the screen: 11 ms under QEMU's TCG), so
+ * a write is passed to the sinks a line at a time, at most
+ * CONSOLE_HOLD_MAX bytes a hold. One hold for a whole write kept
+ * interrupts off on the writer's CPU for as long as the write took to
+ * draw: `dmesg`'s one 32 KiB write, over a second -- past the second a
+ * TLB shootdown waits for an acknowledgement (docs/testing/flakes.md,
+ * 2026-10-21).
  */
 
 #include <kernel/console.h>
@@ -13,6 +22,10 @@
 static struct console_sink *g_sinks;
 static spinlock_t g_console_lock = SPINLOCK_INIT("console");
 static bool g_panic_mode;
+static uint64_t g_calls;   /* console_write calls, under the lock: a sink's skip_call */
+#if CONFIG_SELFTEST
+static size_t g_hold_max;   /* the most bytes one console_write hold passed to the sinks, under the lock */
+#endif
 
 void console_register(struct console_sink *sink)
 {
@@ -59,15 +72,57 @@ static void write_unlocked(const char *s, size_t len)
         k->write(k, s, len);
 }
 
+/* One hold of console_write `call`: a sink that dropped an earlier part
+ * of the call is passed none of the rest. Lock held. */
+static void write_call(const char *s, size_t len, uint64_t call)
+{
+    for (struct console_sink *k = g_sinks; k != NULL; k = k->next) {
+        if (k->skip_call == call)
+            continue;
+        k->dropped = false;
+        k->write(k, s, len);
+        if (k->dropped)
+            k->skip_call = call;
+    }
+}
+
 void console_write(const char *s, size_t len)
 {
     if (console_in_panic_mode()) {
         write_unlocked(s, len);
         return;
     }
+    uint64_t call = 0;
+    while (len > 0) {
+        const char *nl = memchr(s, '\n', len < CONSOLE_HOLD_MAX ? len : CONSOLE_HOLD_MAX);
+        size_t n = nl ? (size_t)(nl - s) + 1 : (len < CONSOLE_HOLD_MAX ? len : CONSOLE_HOLD_MAX);
+        arch_irq_state_t st = spin_lock_irqsave(&g_console_lock);
+#if CONFIG_SELFTEST
+        if (n > g_hold_max)
+            g_hold_max = n;
+#endif
+        if (call == 0)
+            call = ++g_calls;
+        write_call(s, n, call);
+        spin_unlock_irqrestore(&g_console_lock, st);
+        s += n;
+        len -= n;
+    }
+}
+
+size_t console_test_hold_max(bool reset)
+{
+#if CONFIG_SELFTEST
     arch_irq_state_t st = spin_lock_irqsave(&g_console_lock);
-    write_unlocked(s, len);
+    size_t n = g_hold_max;
+    if (reset)
+        g_hold_max = 0;
     spin_unlock_irqrestore(&g_console_lock, st);
+    return n;
+#else
+    (void)reset;
+    return 0;
+#endif
 }
 
 arch_irq_state_t console_hold(void)

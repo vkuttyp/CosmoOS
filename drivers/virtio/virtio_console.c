@@ -7,7 +7,7 @@
  * console runs in, including a panic with interrupts off: text is copied
  * into a DMA bounce buffer, queued, and the used ring is polled with a
  * bounded spin. A device that does not answer within that spin costs the
- * line, not the console: the buffer it still owns is left alone and the
+ * rest of that console_write, not the console: the buffer it still owns is left alone and the
  * next write waits for it again, so a host that stalls (a loaded machine
  * under emulation) loses a line instead of every line after it. Nothing
  * reads the receive queue yet; one buffer is posted so the device has
@@ -91,12 +91,14 @@ static void vcon_write(struct console_sink *sink, const char *s, size_t len)
         /* Anything the device still owns points at the bounce buffer. */
         if (!vcon_drain(c)) {
             c->drops++;
+            sink->dropped = true;
             break;
         }
         size_t n = len < VCON_TX_BUF ? len : VCON_TX_BUF;
         memcpy(c->txbuf, s, n);
         if (!vcon_send(c, n)) {
             c->drops++;   /* the line is lost; the console is not */
+            sink->dropped = true;
             break;
         }
         c->bytes += n;

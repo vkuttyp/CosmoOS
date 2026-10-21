@@ -38,9 +38,17 @@ checked at compile time; a non-literal format is a build error.
 
 ### `void console_write(const char *s, size_t len)` / `void console_puts(const char *s)`
 - **Purpose**: emit bytes to every sink.
-- **Concurrency**: each call writes under the console spinlock (IRQs
-  saved), so one call's bytes are not interleaved with another's; after
-  `console_set_panic_mode` it writes without the lock.
+- **Concurrency**: a call is passed to the sinks a line at a time (up to
+  and including a newline, at most `CONSOLE_HOLD_MAX`, 256 bytes), each
+  under the console spinlock (IRQs saved): a line is not interleaved with
+  another call's bytes, but another call's lines can come between the
+  lines of a multi-line call, and a line longer than 256 bytes can be cut
+  by them. Interrupts are off for one line's drawing at a time, not for a
+  whole write (a 32 KiB `dmesg` write held them off past a TLB
+  shootdown's one-second wait). A sink that sets its `dropped` from
+  `write` (it gave up on what it was given) is passed none of the rest of
+  that call. After `console_set_panic_mode` a call is written whole,
+  without the lock.
 
 ### `void console_set_panic_mode(void)` / `bool console_in_panic_mode(void)`
 - **Purpose**: irreversibly enter/query fatal-output mode. The getter is

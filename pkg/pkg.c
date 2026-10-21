@@ -1527,7 +1527,8 @@ static int resolve(struct plan *p, const struct depend *d, const char *why)
             print_constraints(d->name);
             return EXIT_FAILED;
         }
-        printf("pkg: %s will be upgraded from %s to %s\n", d->name, ver, e->version);
+        printf("pkg: %s will be %s from %s to %s\n", d->name,
+               version_cmp(e->version, ver) < 0 ? "downgraded" : "upgraded", ver, e->version);
     }
     chosen = index_best_all(d->name);
     if (chosen == NULL) {

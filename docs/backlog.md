@@ -228,7 +228,7 @@ Open lines (struck lines are not counted):
 - **PKG-6** usability, L. Libraries by name only: no versions, no provides/requires in the INDEX, no solver.
 - **PKG-7** nice-to-have, M. SBOMs, dependency locking, build sandboxing, multi-architecture packages.
 - **PKG-8** nice-to-have, M. `cosmo-upgrade`'s FAT writer refuses long names, a multi-sector `\cosmo` and FAT12/16.
-- **PKG-9** usability, S. `pkg install -f NAME=VERSION` to an older version says `NAME will be upgraded from 1.1 to 1.0`; a downgrade should say so (seen on Parallels, 2026-10-21).
+- ~~**PKG-9** usability, S. `pkg install -f NAME=VERSION` to an older version says `NAME will be upgraded from 1.1 to 1.0`; a downgrade should say so (seen on Parallels, 2026-10-21).~~ Done by PR #431: `NAME will be downgraded from 1.1 to 1.0`.
 - ~~**PKG-10** correctness, S. `cosmo-upgrade` trusted the root's record of its base system: an older tool's roll-forward left it naming the set rolled back to, and v1.0.8 refused every later upgrade.~~ Done by PR #430: the record is checked against the root's files and corrected.
 
 ## Quiescence
@@ -281,6 +281,7 @@ Open lines (struck lines are not counted):
 - **TEST-15** nice-to-have, M. The debug suite assumes QEMU's machine (`pci`, `net-firewall`, `net-tap-release-order`, `blk-submit-unregister` fail on Parallels).
 - **TEST-16** nice-to-have, M. Paths proved by review only: retained-DMA sites, `nvme_probe` after `CC.EN`, the usb-hub worker, CF17's other sites, cosmofs chain cycles.
 - **TEST-17** nice-to-have, S. Untested refusals and paths: `switch_root`, partitions removed with bios in flight, halt, `cosmo-upgrade` rerun after `--stop-after=set` and an interruption inside a FAT-chain write, virtio-net probe faults.
+- **TEST-18** correctness, S. Self-tests that wait for the machine-wide thread count (`threads_settle`, `kernel/scheduler/schedtest.c`) fail when a thread elsewhere exits in the window, and the dump cannot name it; `sched-restore-loop` twice on AArch64 (docs/testing/flakes.md). Baseline the identities.
 
 ## Commands
 

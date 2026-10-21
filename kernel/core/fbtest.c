@@ -19,6 +19,7 @@
 #include <kernel/font.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/printf.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
@@ -357,5 +358,87 @@ out:
     kinfo("selftest: fb-switch: %ux%u, then 60x17 to 40x12 cells: the screen moved (row %u), the cursor "
           "with it, the terminal's size followed (a newer one kept), and %ux%u is back",
           g0.cols, g0.rows, row - 1, g1.cols, g1.rows);
+    return true;
+}
+
+/*
+ * console-lines: a write of many lines in one call -- what `dmesg`'s one
+ * write of the kernel log is -- reaches the sinks a line per hold of the
+ * console lock, so interrupts are off for one line's drawing at a time.
+ * One hold carried the whole write before: `dmesg` kept interrupts off on
+ * its CPU for over a second while fbcon drew 32 KiB, and a TLB shootdown
+ * waiting on that CPU panicked (docs/testing/flakes.md, 2026-10-21). Any
+ * machine: the hold is the console's, whatever the sinks are.
+ */
+#define CL_LINES 24
+
+bool selftest_console_lines(const char **reason)
+{
+    static char buf[CL_LINES * 80];
+    size_t n = 0;
+    for (int i = 0; i < CL_LINES; i++)
+        n += (size_t)ksnprintf(buf + n, sizeof(buf) - n, "console-lines: line %2d of %d, a hold of its own\n", i + 1,
+                               CL_LINES);
+    (void)console_test_hold_max(true);
+    timer_test_tick_gap_reset();
+    uint64_t t0 = clock_now_ns();
+    console_write(buf, n);
+    uint64_t took = clock_since_ns(t0);
+    size_t most = console_test_hold_max(false);
+    unsigned cpu = 0;
+    uint64_t gap = timer_test_tick_gap_max_ns(&cpu);
+    kinfo("selftest: console-lines: %zu bytes in %d lines in %llu us; the most one hold carried was %zu bytes; the "
+          "longest tick gap meanwhile %llu us (cpu %u)", n, CL_LINES, (unsigned long long)(took / 1000), most,
+          (unsigned long long)(gap / 1000), cpu);
+    /* Other CPUs' log lines are holds too, each one line: none carries
+     * more than CONSOLE_HOLD_MAX, and this write's lines are far shorter. */
+    CHECK(n > CONSOLE_HOLD_MAX);
+    CHECK(most > 0 && most <= CONSOLE_HOLD_MAX);
+    return true;
+}
+
+/*
+ * console-sink-drop: a sink that gives up on part of a write (the virtio
+ * console, when its device does not return a buffer within its spin) is
+ * passed none of the rest of that write, while the other sinks get every
+ * line: a write split into lines must not make a stalled device wait once
+ * a line where it waited once a write. A sink of the test's own drops
+ * every piece that begins with its mark and counts the pieces it is given.
+ */
+#define CSD_MARK "console-sink-drop: "
+#define CSD_LINES 8
+
+static unsigned g_csd_given, g_csd_after;   /* under the console lock */
+
+static void csd_write(struct console_sink *sink, const char *s, size_t len)
+{
+    if (len < sizeof(CSD_MARK) - 1 || memcmp(s, CSD_MARK, sizeof(CSD_MARK) - 1) != 0)
+        return;
+    if (memcmp(s + sizeof(CSD_MARK) - 1, "after", 5) == 0) {
+        g_csd_after++;
+        return;
+    }
+    g_csd_given++;
+    sink->dropped = true;
+}
+
+bool selftest_console_sink_drop(const char **reason)
+{
+    static struct console_sink sink = { .name = "selftest-drop", .write = csd_write };
+    static char buf[CSD_LINES * 64];
+    size_t n = 0;
+    for (int i = 0; i < CSD_LINES; i++)
+        n += (size_t)ksnprintf(buf + n, sizeof(buf) - n, CSD_MARK "line %d of %d, dropped by its sink\n", i + 1,
+                               CSD_LINES);
+    g_csd_given = g_csd_after = 0;
+    console_register(&sink);
+    console_write(buf, n);
+    /* The next write is passed to it again. */
+    console_puts(CSD_MARK "after, a write of its own\n");
+    console_unregister(&sink);
+    kinfo("selftest: console-sink-drop: %d lines in one write; the dropping sink was given %u of them, and %u of the "
+          "next write", CSD_LINES, g_csd_given, g_csd_after);
+    CHECK(g_csd_given == 1);
+    CHECK(g_csd_after == 1);
     return true;
 }
