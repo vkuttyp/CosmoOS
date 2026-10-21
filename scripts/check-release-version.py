@@ -3,6 +3,7 @@
 a version (docs/development.md, "Releases").
 
     check-release-version.py --tag vX.Y.Z[-rcN] [--notes notes.md] SET_DIR...
+    check-release-version.py --kernel ELF --build-id ID
 
 For each release set (`make release`'s out/release/ARCH):
 
@@ -25,6 +26,12 @@ v1.0.4 was built from a checkout whose annotated tag had become a
 lightweight one (actions/checkout fetches a tag by its commit), so `git
 describe` skipped it and the kernel said v1.0.3-123-g1ec37307 and the
 package 1.0.3-123. Exit 0 when all agree, 1 naming each disagreement.
+
+With --kernel, the one rule a build can break before it is tagged: the
+kernel holds no describe-shaped string but its own build id (ID, `git
+describe --always --dirty`; a bare hash when no tag is reachable, and then
+none). CI checks every release build so; v1.0.8's first tag failed the
+release on a kernel message that said "v1.0.7".
 """
 
 import argparse
@@ -95,10 +102,25 @@ def check_notes(tag, path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tag", required=True)
+    ap.add_argument("--tag")
     ap.add_argument("--notes")
+    ap.add_argument("--kernel")
+    ap.add_argument("--build-id")
     ap.add_argument("sets", nargs="*")
     a = ap.parse_args()
+    if a.kernel:
+        if a.build_id is None or a.tag or a.notes or a.sets:
+            ap.error("--kernel takes --build-id and nothing else")
+        ids = build_ids(a.kernel)
+        other = sorted(ids - {a.build_id})
+        if other:
+            print(f"check-release-version: {a.kernel}: describe-shaped {', '.join(other)}, "
+                  f"not its build id {a.build_id}", file=sys.stderr)
+            return 1
+        print(f"check-release-version: {a.kernel}: no describe-shaped string but {a.build_id}")
+        return 0
+    if not a.tag:
+        ap.error("--tag is required")
     if not TAG.match(a.tag):
         ap.error(f"tag '{a.tag}' is not vX.Y.Z[-rcN]")
     if not a.sets and not a.notes:

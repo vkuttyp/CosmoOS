@@ -1416,8 +1416,8 @@ chain exempt, and sets the version, all in that snapshot's transaction,
 so the raise and the snapshot reach the disk together or not at all; a
 failure past the first change abandons the transaction (CF17). It is
 logged: `cosmofs: format version 11 -> 12 (snapshot identity, N
-snapshot(s)); a kernel that reads format 11 at most (v1.0.7 and older)
-cannot mount this pool`.
+snapshot(s)); a kernel that reads format 11 at most (CosmoOS 1.0.7 and
+older) cannot mount this pool`.
 
 Lazy, because a kernel of v1.0.7 or older refuses version 12 at mount
 (`version > CFS_VERSION`), and `cosmo-upgrade --rollback` returns the

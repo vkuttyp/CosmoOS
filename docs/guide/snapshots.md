@@ -28,7 +28,7 @@ format 12, the format that gives snapshots this identity, and the kernel
 says so:
 
 ```text
-[ INFO] cosmofs: format version 11 -> 12 (snapshot identity, 0 snapshot(s)); a kernel that reads format 11 at most (v1.0.7 and older) cannot mount this pool
+[ INFO] cosmofs: format version 11 -> 12 (snapshot identity, 0 snapshot(s)); a kernel that reads format 11 at most (CosmoOS 1.0.7 and older) cannot mount this pool
 ```
 
 From then on a release older than the one that raised it cannot mount
