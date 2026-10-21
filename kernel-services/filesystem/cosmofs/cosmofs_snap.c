@@ -1078,8 +1078,11 @@ static int snap_raise(struct cfs *fs, const uint8_t *reserved)
         return rc;
     }
     fs->snap_max_id = max_id;
+    /* "CosmoOS 1.0.7", not the tag: every git-describe-shaped string in
+     * a release kernel must be its own build id
+     * (scripts/check-release-version.py). */
     kinfo("cosmofs: format version 11 -> 12 (snapshot identity, %u snapshot(s)); a kernel that reads "
-          "format 11 at most (v1.0.7 and older) cannot mount this pool", n);
+          "format 11 at most (CosmoOS 1.0.7 and older) cannot mount this pool", n);
     return 0;
 }
 

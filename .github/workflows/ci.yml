@@ -177,6 +177,13 @@ jobs:
       - name: Build and boot test (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all test
 
+      # The release workflow requires every describe-shaped string in the
+      # kernel to be the tag; a message naming another release ("v1.0.7")
+      # failed v1.0.8's first tag after main had passed. Checked here, on
+      # every change, against the build's own id.
+      - name: The release kernel names no other build id
+        run: python3 scripts/check-release-version.py --kernel out/${{ matrix.arch }}-release/kernel/kernel.elf --build-id "$(git describe --always --dirty)"
+
       - name: Host unit tests (ASan + UBSan)
         run: make ARCH=${{ matrix.arch }} host-test
 
