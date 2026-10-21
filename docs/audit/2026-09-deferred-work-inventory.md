@@ -1505,3 +1505,7 @@ none is needed by its acceptance test.
   to finish (`docs/guide/upgrading.md`). Running the fetched release's
   own `cosmo-upgrade` from its signed package would remove that step; the
   directory path (`test-upgrade`) already does. *2026-10-20: open; [backlog](../backlog.md) PKG-5.*
+- `klog_copy` (`kernel/core/log.c`) copies the whole 32 KiB ring with
+  interrupts off; the first instrumented TLB-shootdown panic (2026-10-21,
+  CI, `docs/testing/flakes.md`) had `dmesg`'s CPU masked for 1.2 s there.
+  Measure the window; copy outside the lock. *2026-10-21: open.*

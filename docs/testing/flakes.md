@@ -289,6 +289,34 @@ those lines; its control holds for 100 ms and must not panic. AArch64
 broadcasts its invalidations and has no such wait. The next sighting
 answers the question the first three could not.
 
+**The first instrumented sighting, 2026-10-21, CI** (PR #429's run
+39568825512, job "entropy boots (x86_64)", the third boot,
+`boot-test-devrng`; the kernel's code identical to the previous head's,
+whose run passed). During the harness's `dmesg` (pid 547), after every
+self-test had passed:
+
+```text
+mmu: TLB shootdown of 0xffffc0001050a000+0x2000: 2 of 3 CPUs acknowledged within 1 s
+[ WARN] timer: cpu 2: no tick for 1223 ms; interrupts came back at pc 0xffffffff80130720 (last tick interrupted pc 0xffffffff80130736, thread 'dmesg')
+cpu 2: did not acknowledge; running thread 4833 'dmesg', irq_depth 1, preempt_count 1, last tick 1224 ms ago at pc 0xffffffff80130736
+cpu 2: pc 0x0000000000401730 sp 0x00007ffcfd2380c8 (nmi, 32 us ago)
+KERNEL PANIC: mmu: TLB shootdown of 0xffffc0001050a000+0x2000 acknowledged by 2 of 3 CPUs; not by cpu 2
+```
+
+The two kernel PCs are `arch_irq_enable` (`cpu.c:248`, the last tick
+before the gap) and `arch_irq_restore_hw` (`cpu.c:241`, the first after
+it): CPU 2 ran `dmesg` with interrupts masked for the whole 1.2 s and
+took the pending tick as they came back; 32 us before the report it was
+in `dmesg`'s user code. The second sighting (2026-09-20) was in the
+harness's `dmesg` too. `dmesg`'s one interrupts-off stretch is
+`klog_copy` (`kernel/core/log.c`), which copies the 32 KiB ring under
+`spin_lock_irqsave`. That copy is milliseconds, not a second, so this
+does not yet name a mechanism; what fits is a host stall of CPU 2's
+vCPU landing inside that window. What would settle it: the length of
+`klog_copy`'s interrupts-off window under QEMU (if milliseconds, the
+second is the host's; and the copy can be made outside the lock either
+way). Count: 6 (5 on a developer machine, 1 in CI), 1 instrumented.
+
 **Observed once, not yet on the list: `timer-cancel-sync`'s lower
 bound.** `kernel/core/quiescetest.c:960` asserts that a `timer_cancel_sync`
 against a callback holding for 20 ms on another CPU took at least
