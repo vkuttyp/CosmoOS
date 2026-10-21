@@ -579,6 +579,10 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    the tag, the set's file names to be the set's, and the
    `cosmo-upgrade` package's version to be the tag's
    (`package_version`). The acceptance jobs restore the tag the same way.
+   The first rule holds for any build, so CI checks it on every release
+   build (`check-release-version.py --kernel ELF --build-id ID`): a kernel
+   string that names a release (write "CosmoOS 1.0.7", not "v1.0.7")
+   fails the PR, not the tag.
    Both scripts are tested on synthetic sets and a local repository by
    `tests/host/test_release_version.py` (`make host-test`).
 3. `reproducible`: each architecture's two sets compared file by file

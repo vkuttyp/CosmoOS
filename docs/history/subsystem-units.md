@@ -3315,3 +3315,12 @@ See the [history index](README.md).
   and `--repair` restores the intent's pairing (U13). `--list`,
   `--prune`, `--status`. `test-pkgtx` and `be_test.py`, both in
   `test-upgrade`. Report: `docs/audit/2026-10-20-b4-boot-environments-report.md`.
+- **The release kernel named another release (2026-10-21).** v1.0.8's
+  first tag (`d7688f55`) failed the release workflow (run 39553838688)
+  in all four builds: the cosmofs format-12 message said "(v1.0.7 and
+  older)", a second describe-shaped string beside the build id, which
+  `check-release-version.py` refuses; main's CI never ran that check.
+  The message says "CosmoOS 1.0.7", and CI runs `check-release-version.py
+  --kernel` on every release kernel against the build's own id.
+  `tools/release-describe-probe.py`. Report:
+  `docs/audit/2026-10-21-release-describe-report.md`.

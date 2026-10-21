@@ -12,6 +12,15 @@ check-release-version.py, on synthetic release sets:
   architecture's loader;
 - notes that also say another "CosmoOS X.Y.Z", or never say this one, fail.
 
+check-release-version.py --kernel, on a synthetic kernel:
+- its own build id alone passes, a dev build's (v1.0.7-24-g5c7b507f-dirty)
+  as well as a tag;
+- a message saying "(v1.0.7 and older)" beside the build id fails, named
+  (v1.0.8's first tag), and "(CosmoOS 1.0.7 and older)" passes;
+- a bare-hash build id (no tag reachable) with no describe-shaped string
+  passes;
+- --kernel with --tag is refused.
+
 release-tag.sh, in a clone of a local repository:
 - a lightweight tag, as actions/checkout leaves an annotated one, is
   replaced by the annotated tag from origin, and git describe then names it;
@@ -118,6 +127,27 @@ def main():
 
         r = run("--tag", "v1.0.5;rm", good)
         check(r.returncode != 0, "a malformed tag is refused")
+
+        def kernel(name, *strings):
+            p = os.path.join(t, name)
+            with open(p, "wb") as f:
+                f.write(b"\x7fELF\0" + b"\0".join(s.encode() for s in strings) + b"\0")
+            return p
+        dev = "v1.0.7-24-g5c7b507f-dirty"
+        r = run("--kernel", kernel("k-dev", dev, "debug"), "--build-id", dev)
+        check(r.returncode == 0, "a kernel holding its own dev build id alone passes")
+        r = run("--kernel", kernel("k-tag", "v1.0.8"), "--build-id", "v1.0.8")
+        check(r.returncode == 0, "a kernel holding its tag alone passes")
+        msg = "a kernel that reads format 11 at most ({} and older) cannot mount this pool"
+        r = run("--kernel", kernel("k-old", "v1.0.8", msg.format("v1.0.7")), "--build-id", "v1.0.8")
+        check(r.returncode == 1 and "describe-shaped v1.0.7, not its build id v1.0.8" in r.stderr,
+              "a message naming v1.0.7 beside the build id fails, named")
+        r = run("--kernel", kernel("k-new", "v1.0.8", msg.format("CosmoOS 1.0.7")), "--build-id", "v1.0.8")
+        check(r.returncode == 0, "the message saying CosmoOS 1.0.7 passes")
+        r = run("--kernel", kernel("k-hash", "5c7b507f", "debug"), "--build-id", "5c7b507f")
+        check(r.returncode == 0, "a bare-hash build id with no describe-shaped string passes")
+        r = run("--kernel", kernel("k-tag2", "v1.0.8"), "--build-id", "v1.0.8", "--tag", "v1.0.8")
+        check(r.returncode != 0, "--kernel with --tag is refused")
 
         # release-tag.sh against a local origin.
         origin = os.path.join(t, "origin")
