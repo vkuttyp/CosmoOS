@@ -20,7 +20,8 @@ Stages, each on the one installed disk:
               \\cosmo\\be.
   new         B boots; pkg upgrade takes hello to 1.1 (a transaction: every
               kept set reads format 12); the /etc file changed; files under
-              /root, /home and /var/log written; --rollback returns both
+              /root, /home and /var/log written, the file in the way removed
+              from B's tree; --rollback returns both
               halves: the set now, the root at the next mount, and reboots.
   back-held   A boots on the environment's root; the operator's files
               cannot be copied (the file in the way): init keeps the
@@ -230,7 +231,10 @@ def main():
             need(out, r"^hello, world \(hello 1\.1\)$", "pkg upgrade on B")
             if re.search(r"^pkg: no transaction", out, re.M):
                 raise Fail("be-new: pkg took no transaction, though every kept set reads format 12")
-            sh(b, "echo after > /etc/b4-note && echo x > /root/after.txt && mkdir -p /home/op && echo y > "
+            # The file in the way goes from B's tree, the one the rollback keeps:
+            # it stays in A's environment, where back-held needs it, and the
+            # crash-record stage's rollback to B's tree finds the way clear.
+            sh(b, "rm /var/lib/cosmo/rollback && echo after > /etc/b4-note && echo x > /root/after.txt && mkdir -p /home/op && echo y > "
                   "/home/op/notes && echo z > /var/log/op.log && sync", "ops")
             out = rebooting(b, "cosmo-upgrade --rollback", "be-new")
             need(out, rf"^cosmo-upgrade: intent recorded: \\cosmo\\be names the previous set and {re.escape(env_a)}$",
@@ -425,6 +429,7 @@ def main():
         # pending: an upgrade stopped after its set switch; --repair finishes it.
         b = boot("be-pending", args)
         try:
+            fetch(b, port, args.arch, "b", UPB)   # /tmp is the boot's own
             sh(b, f"cosmo-upgrade --stop-after=set {UPB}", "stop", 4)
             out = sh(b, "cosmo-upgrade --repair", "rep")
             need(out, r"^cosmo-upgrade: an earlier run switched to the current set and was interrupted: finishing it$",

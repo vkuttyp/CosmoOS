@@ -280,3 +280,43 @@ kept at the boot after), `crash-record`'s kept tree paired, the
 refusal with a rollback pending, and a `pending` stage (an upgrade
 stopped after its switch, finished by `--repair`); `test_upgrade_be`
 checks `be_aware`.
+
+Validation of the fixes (2026-10-21, local, both architectures, on #428):
+`make host-test`, `make analyze`, debug `make test` at `QEMU_SMP=1`, `2`
+and `4` (x86-64 149 s, 152 s, 165 s; AArch64 164 s, 165 s, 169 s), `make
+test-smp2`, `make test-chaos`, `make test-harness-retry`, release build and
+boot, all PASS; `make fuzz` PASS. x86-64's `QEMU_SMP=2` boot first stalled
+in the firmware twice (the tenth sighting in `docs/testing/flakes.md`) and
+passed when run again. Release `make test-snapshot` PASS (x86-64 98 s,
+AArch64 140 s); release `make test-upgrade` PASS (`test-be` x86-64 313.9 s,
+AArch64 353.2 s), after two fixes to the new stages: the file in the way
+of `/var/lib/cosmo/rollback` was also in B's tree, which the rollback
+keeps, so `crash-record`'s rollback to it found the copy blocked again (it
+is now removed from B's tree in `new`), and `pending` fetches set B into
+its own boot's `/tmp`. The stages as they passed:
+
+```text
+test-be: upgrade: A -> B, environment be-... taken before anything was written
+test-be: new: B ran hello 1.1 (a transaction) and changed /etc; --rollback recorded the intent, the root's rollback to be-... (keeping be-...-2) and the set
+test-be: back-held: 8 file(s) could not be copied (a file in the way of /var/lib/cosmo/rollback): the hold on be-...-2 stayed, nothing marked done
+test-be: back: A on be-...'s root: hello 1.0, /etc and the base system byte for byte be-...'s; 8 operator file(s) kept in /var/lib/cosmo/rollback/be-...-2; --repair: nothing to do
+test-be: crash-record: killed after the root's record: A's kernel booted B's root; --repair switched the set; then B, B, with be-...-3 paired with A
+test-be: mixed-old: A's kernel booted B's root (the root's rollback withdrawn); --repair asked for it again; then A, A
+test-be: crash-intent: killed after the intent: A, A booted; --repair rolled both; then B, B
+test-be: crash-set: killed after the set switch: the next boot was A, A
+test-be: space: refused with a root rollback pending; a full root refused the upgrade (16142 KiB needed, 196 KiB free); the ESP byte for byte unchanged
+test-be: pending: an upgrade stopped after its set switch; --repair finished its base pass; then B, B
+```
+
+## Third and fourth pull requests: what the validation found
+
+- **#427** (main red on #425's merge, merged `17dccd28`): `sched-restore-loop`
+  one trip short, a test seam spending a trap's resumption;
+  `docs/audit/2026-10-21-restore-trap-report.md`.
+- **#428** (merged `cc38bb49`): validating this pull request,
+  `test-pkgtx`'s full root leaked blocks in three runs of four: a
+  write-back that failed partway kept its new map only in the open inode,
+  which a release before the retry discarded (CF17);
+  `docs/audit/2026-10-21-partial-write-report.md`. Its CI also found
+  `test-snapshot` reading init's restart line after the shell's prompt, a
+  test defect fixed there.

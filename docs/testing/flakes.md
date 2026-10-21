@@ -185,6 +185,16 @@ attempt printed. The other 21 steps passed, nine x86-64 boots among them
 (the three 1/4/8 GiB release boots right after), and the rerun passed
 (18.9 s). Still unassigned.
 
+**Tenth sighting, 2026-10-21, both attempts:** local x86-64 debug `make
+QEMU_SMP=2 test`, a boot step of B4's second pull request's matrix on
+`428eb5b6` (QEMU 11.1, this developer's machine, two Parallels VMs
+running beside it, a Windows 11 one and "CosmoOS main"): `firmware stall,
+retried`, then `FAIL: the firmware did not hand over within 30s, twice
+(no loader banner)`, 61 s for the step. Both serial logs are lost as in
+the eighth (the next step wrote the same `boot-test.log`). The other 18
+matrix steps passed, the `QEMU_SMP=1` and `4` x86-64 debug boots of the
+same build among them, and the step was run again. Still unassigned.
+
  The rule moved into
 `tests/boot/firmware_stall.py` and every harness boot uses it --
 `run_boot_test.py` (which had its own copy) and `install_test.Boot`
