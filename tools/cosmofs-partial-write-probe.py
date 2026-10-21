@@ -22,9 +22,9 @@ throwaway worktree, keeping the self-test. The check runs in a debug
 `make test` on either architecture.
 
 Logs stay under out/cosmofs-partial-write-probe/<arch>-<mode>. Exit 0
-when the mode shows what it should (fixed: cosmofs-extent-fail ok; old:
-it fails at that check, with leaked and free-in-use blocks counted),
-else 1.
+when the mode shows what it should (fixed: `make test` passes; old:
+cosmofs-extent-fail fails at that check, with leaked and free-in-use
+blocks counted, and no other self-test fails), else 1.
 """
 import argparse
 from pathlib import Path
@@ -77,19 +77,25 @@ def main():
                 # BusyBox and the pinned sources are the same in either mode.
                 f"BB_DIR={ROOT / 'out' / f'busybox-{a.arch}'}", f"PORTS_CACHE={ROOT / '.cache' / 'ports'}"]
         with (work / "make.log").open("w") as log:
-            subprocess.run(args + ["test"], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                           timeout=2400)
+            rc = subprocess.run(args + ["test"], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                timeout=2400).returncode
         logs = list(out.glob("boot-test.log"))
         text = logs[0].read_text(errors="replace") if logs else ""
         (work / "boot-test.log").write_text(text)
+        # The old mode's boot fails, so `make test` exits non-zero in it: what
+        # tells its expected failure from any other is that this self-test is
+        # the only one that fails. The fixed mode needs the whole boot to pass.
+        failed = re.findall(r"^SELFTEST: (\S+)\s+\.\.\. FAIL", text, re.M)
         if a.old:
             c = COUNTS.search(text)
-            ok = FAILED.search(text) is not None and c is not None and int(c.group(2)) > 0 and int(c.group(3)) > 0
+            ok = (FAILED.search(text) is not None and failed == ["cosmofs-extent-fail"] and c is not None and
+                  int(c.group(2)) > 0 and int(c.group(3)) > 0)
             seen = (f"{c.group(2)} leaked and {c.group(3)} free-in-use after the release (cosmofs-extent-fail FAIL)"
-                    if ok else "no such failure")
+                    if ok else f"no such failure alone (failed: {failed})")
         else:
-            ok = OK.search(text) is not None
-            seen = "the check clean after the release (cosmofs-extent-fail ok)" if ok else "cosmofs-extent-fail did not pass"
+            ok = rc == 0 and OK.search(text) is not None and not failed
+            seen = ("the check clean after the release (cosmofs-extent-fail ok)" if ok else
+                    f"make test exited {rc}; cosmofs-extent-fail {'ok' if OK.search(text) else 'not ok'}; failed: {failed}")
         print(f"PROBE: {'PASS' if ok else 'FAIL'} arch={a.arch} mode={mode}: {seen} ({work})")
         return 0 if ok else 1
     finally:
