@@ -30,7 +30,7 @@ package 1.0.3-123. Exit 0 when all agree, 1 naming each disagreement.
 With --kernel, the one rule a build can break before it is tagged: the
 kernel holds no describe-shaped string but its own build id (ID, `git
 describe --always --dirty`; a bare hash when no tag is reachable, and then
-none). CI checks every release build so; v1.0.8's first tag failed the
+none), and holds ID when it is describe-shaped. CI checks every release build so; v1.0.8's first tag failed the
 release on a kernel message that said "v1.0.7".
 """
 
@@ -116,6 +116,10 @@ def main():
         if other:
             print(f"check-release-version: {a.kernel}: describe-shaped {', '.join(other)}, "
                   f"not its build id {a.build_id}", file=sys.stderr)
+            return 1
+        # A tagged build id must be there too, as the release check requires.
+        if DESCRIBE.fullmatch(a.build_id.encode()) and a.build_id not in ids:
+            print(f"check-release-version: {a.kernel}: never says its build id {a.build_id}", file=sys.stderr)
             return 1
         print(f"check-release-version: {a.kernel}: no describe-shaped string but {a.build_id}")
         return 0

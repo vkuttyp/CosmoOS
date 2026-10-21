@@ -35,13 +35,14 @@ did, so nothing failed before the tag.
   describe-shaped; the guide's snapshots page and the cosmofs design quote
   it so.
 - `check-release-version.py --kernel ELF --build-id ID`: the kernel holds
-  no describe-shaped string but ID (none when ID is a bare hash).
+  no describe-shaped string but ID (none when ID is a bare hash), and
+  holds ID when it is describe-shaped.
 - CI's "The release kernel names no other build id", after "Build and
   boot test (release)" on both architectures, runs it with `git describe
   --always --dirty`.
 - `tests/host/test_release_version.py`: the `--kernel` mode on synthetic
   kernels (the old message fails, named; the new one passes; a bare hash;
-  `--kernel` with `--tag` refused).
+  a kernel without its tagged id fails; `--kernel` with `--tag` refused).
 
 ## Proof
 
@@ -59,3 +60,10 @@ describe. `--old` reverse-applies the fix commit's `cosmofs_snap.c`.
 The tag `v1.0.8` produced no release (the `GitHub release` and
 repository jobs were skipped). It moves to main's merge of this change,
 and the release runs from there.
+
+## Review
+
+Qodo on #429: the `--kernel` mode passed a kernel that lacked a tagged
+build id (it now requires it). Its second finding, that `v1.0.7.` at a
+sentence's end escapes the pattern, is the release check's own pattern:
+such a string fails neither check, so it cannot fail a tag.

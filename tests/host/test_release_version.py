@@ -18,7 +18,7 @@ check-release-version.py --kernel, on a synthetic kernel:
 - a message saying "(v1.0.7 and older)" beside the build id fails, named
   (v1.0.8's first tag), and "(CosmoOS 1.0.7 and older)" passes;
 - a bare-hash build id (no tag reachable) with no describe-shaped string
-  passes;
+  passes, and a kernel missing a tagged build id fails;
 - --kernel with --tag is refused.
 
 release-tag.sh, in a clone of a local repository:
@@ -146,6 +146,9 @@ def main():
         check(r.returncode == 0, "the message saying CosmoOS 1.0.7 passes")
         r = run("--kernel", kernel("k-hash", "5c7b507f", "debug"), "--build-id", "5c7b507f")
         check(r.returncode == 0, "a bare-hash build id with no describe-shaped string passes")
+        r = run("--kernel", kernel("k-none", "unknown", "debug"), "--build-id", "v1.0.8")
+        check(r.returncode == 1 and "never says its build id v1.0.8" in r.stderr,
+              "a kernel missing its tagged build id fails, named")
         r = run("--kernel", kernel("k-tag2", "v1.0.8"), "--build-id", "v1.0.8", "--tag", "v1.0.8")
         check(r.returncode != 0, "--kernel with --tag is refused")
 
