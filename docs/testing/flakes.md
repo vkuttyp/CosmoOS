@@ -453,6 +453,26 @@ the same commit passed on a re-run with nothing changed:
 | x86-64, the default boot | all 319 self-tests passed and `USERTEST: PASS`; the shell script ran its whole command list to `exit 0`; then `SHTEST: PASS` **and every Linux-ABI marker** -- the musl hello, `LINUXTEST: PASS`, `lxinterp`, `lxdyn`, `lxsig term` -- were all missing together | not a bound a loaded host trips. **What the cause was is not established**: those markers are the tail of the run -- the Linux ones come from `rc.test` and `SHTEST: PASS` is printed last -- so an absent boot archive, a Linux-test build that did not arrive, a hang and a premature shutdown all suppress exactly the same suffix. The observation is recorded; the diagnosis is not |
 | aarch64, the guard boot | `selftest: hv: skipped: no backend`, a forbidden marker | the virtualisation backend was absent on a machine variant that normally has one. Seen again 2026-10-08 on PR #331's two-CPU boot (run 37702907701, every self-test passing): the boot's own check logged `hv: backend el2 disabled: nested paging does not confine a guest with paging off (QEMU/TCG before 9.2 has this bug)`, so that runner's QEMU was the older one; the re-run passed |
 
+**The boot self-check failing on a backend that had passed it,
+2026-10-21:** AArch64 CI, PR #430 (userland only; the kernel is main's
+`2acce0c3`), run 39651460318, job 119400652648, the
+`test-harness-retry` boot; the job's five other debug boots passed.
+`hv-disabled` injects one self-check failure (vm1: `failure injected
+(hv-selfcheck)`), then runs the real check again on vm2, which failed:
+`hv: self-check: a guest with paging off exited with rc 0 kind 3 pc 0x200
+(wanted kind 7)`, so `the cycle failed at step -3` and the backend
+stayed disabled (`selftest: hv: skipped: no backend`, every
+virtualisation marker missing). Kind 3 is `COSMO_VM_EXIT_MMIO` at
+pc 0x200: the guest did not execute the WFI written at 0x80000000 but
+took a synchronous exception to VBAR_EL1 (0) + 0x200, whose fetch found
+no region -- what an instruction fetch of anything but that WFI (0 is
+`UDF`) would do. Not QEMU's paging-off bug of the row above: the same
+boot's QEMU passed the check at boot and on vm1. Looked at and not it:
+the VMID's invalidation on release (`invalidate_vm` in `hv_el2.c`, the switch's
+`HV_EL2_CALL_TLBI` loads the VM's VTTBR before `tlbi vmalls12e1is`).
+Not attributed; first sighting; the failed job was rerun. A next
+sighting wants the fetched word and ESR_EL1 from the guest's exit.
+
 Neither is on the list above and neither should be: they are not bounds a
 loaded host can trip, so a re-run distinguishes them from a regression
 rather than curing them. What the rows are for is the next reader, who
@@ -3011,6 +3031,17 @@ debug boots passed (185.0-205.6 s); the failing boot's self-tests took
 144,065 ms and `cosmofs-replay` 23,340 ms. The branch's change compiles only
 into `CRASH_TEST=3` builds, so this boot ran main's code. The same 290 ms.
 Not attributed; CI ran again on the commit that records it.
+
+**Ninth sighting, 2026-10-21:** x86-64 CI, PR #430 (the root-set record,
+a change to `cosmo-upgrade`, `cosmo-install` and their tests, nothing in
+the kernel) at `5f6b1400`, run 39622618343, job 119299853429, `entropy
+boots (x86_64)`, the third boot (`boot-test-devrng`): `cpu 3, a spinner
+above the default for 300 ms: 439 calls of the poll, longest gap 290 ms
+(bound 100)`, the check at 302 ms. The job's other two boots passed (164.6
+and 154.6 s); the failing boot's self-tests took 121,494 ms and
+`cosmofs-replay` 14,399 ms, a runner of ordinary speed. The kernel is
+main's (`2acce0c3`). The same 290 ms. Not attributed; CI ran again on
+the commit that records it.
 
 ## `net-neigh-down-race` step 2, 2026-10-10
 

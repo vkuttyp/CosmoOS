@@ -781,9 +781,25 @@ its pending rollback (`docs/kernel-services/filesystem/cosmofs/design.md`,
   identity, CF18), a set by reading and verifying it from the ESP. `\cosmo`
   gains one entry, still in its one sector.
 - **The root's own record, `/var/lib/cosmo-upgrade/root-set`**: the set
-  whose base system the root holds, written by the base pass, and before
-  an environment is taken when it is missing (a fresh install). A snapshot
-  carries the record of its moment, which is how a mixed state is told.
+  whose base system the root holds (its first line, all v1.0.8 reads),
+  then `cosmo-root-set 2`, `release` (that set's kernel's build id) and
+  `from` (the set the root was brought from); written by the base pass,
+  by `cosmo-install`, and before an environment is taken when it is
+  missing. A snapshot carries the record of its moment.
+- **The record is checked, not trusted.** An older `cosmo-upgrade` moves
+  the root without updating it: v1.0.7's, rolling forward after a newer
+  one rolled back, leaves it naming the set rolled back to. So what the
+  root holds is told from the root itself: the root holds a kept set's
+  base system (the current one's, else `\cosmo\prev`'s) when every file
+  and link that set's `boot.tar` puts outside `/etc` is there byte for
+  byte, and none outside `/etc` that only the other set has (`/etc` is the
+  operator's to change). When the files say and the record disagrees,
+  `--list` and `--status` say so, naming both (and, when the record's
+  `from` is the set the files are, that an older tool reversed the move);
+  `--repair` corrects the record, with or without an intent; an upgrade
+  and an environment rollback correct it before their snapshot. Files
+  that are neither set's exactly decide nothing, and the record alone
+  never refuses.
 - **Upgrade.** Before anything is written: the room (the new `boot.tar`'s
   size and 1 MiB; else `not enough space on the root for the boot
   environment: about N KiB needed ..., M KiB free; nothing written`), then
@@ -793,9 +809,9 @@ its pending rollback (`docs/kernel-services/filesystem/cosmofs/design.md`,
   snapshot such a record names when it is unpaired and not held, and no
   other -- a `be-*` is never judged by its absence from a lost or
   rewritten `\cosmo\be`. Refused, with nothing written, while a rollback
-  of the root is pending, when the root's record names another set than
-  the current one (`--repair` first), and when `\cosmo\be` does not
-  parse. No environment (and no `\cosmo\be`) when the current set's own
+  of the root is pending, when the root's files are `\cosmo\prev`'s base
+  system and not the current set's (`--repair` first), and when
+  `\cosmo\be` does not parse. No environment (and no `\cosmo\be`) when the current set's own
   `cosmo-upgrade` does not read the file (its binary lacks `cosmo-be 1`:
   v1.0.7 and older, which would refuse the ESP once rolled back to) or
   when the snapshot would raise a format-11 root to 12 that the new or
@@ -825,8 +841,8 @@ its pending rollback (`docs/kernel-services/filesystem/cosmofs/design.md`,
   whose set switch is done and whose base pass is not (the pending
   marker), as running `cosmo-upgrade` again would. When the ESP's set is
   not the intent it checks, before anything moves, that `\cosmo\prev` is
-  the intended set and verifies; when the root's record is not the
-  intent it asks for the root's rollback to the intended environment
+  the intended set and verifies; when what the root holds (its files'
+  set, its record's when they do not say) is not the intent it asks for the root's rollback to the intended environment
   (unless one is pending) and restarts; then the set alone is switched. Both mixed
   states boot -- the newer kernel on the older root (killed after the
   record) and the older kernel on the newer root (the root's rollback

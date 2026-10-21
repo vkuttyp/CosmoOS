@@ -62,4 +62,41 @@ void be_name(const char *tag, bool (*taken)(const char *name, void *arg), void *
  * whose \cosmo has a `be` entry. */
 bool be_aware(const unsigned char *bin, size_t len);
 
+/*
+ * The root's record, /var/lib/cosmo-upgrade/root-set: which set's base
+ * system the root holds. It is not trusted: cosmo-upgrade checks it
+ * against the root itself (docs/userland/design.md, "Boot environments").
+ *
+ *   <set>
+ *   cosmo-root-set 2
+ *   release <the set's kernel build id, or ->
+ *   from <set, or ->
+ *
+ * The first line alone is version 1, what v1.0.8 writes and reads (it
+ * reads the first 128 bytes). `from` is the set the root was brought
+ * from when the record was written, by that set's run: a record naming
+ * another set than the current one, written on the way from the current
+ * one, was left behind when an older cosmo-upgrade (v1.0.7 or before,
+ * which keeps no record) brought the root back.
+ */
+#define ROOTSET_MAGIC "cosmo-root-set 2\n"
+#define ROOTSET_RELEASE_MAX 63
+
+struct root_set {
+    int version;                            /* 0: none, 1: the set alone, 2 */
+    char set[BE_SET_HEX + 1];
+    char release[ROOTSET_RELEASE_MAX + 1];  /* empty: not recorded */
+    char from[BE_SET_HEX + 1];              /* empty: not recorded, or none */
+};
+
+/* 0, or -1 for text that is not a record (r->version 0). */
+int rootset_parse(const char *text, size_t len, struct root_set *r);
+/* The record's text (version 2); the length, or 0 when `cap` is too small. */
+size_t rootset_format(const struct root_set *r, char *out, size_t cap);
+/* The first build id in git describe's form (vX.Y.Z[-rcN][-N-gHEX][-dirty],
+ * not inside a longer word) in a kernel image, or "": the release a set
+ * is, since a release's kernel carries its tag and no other
+ * (scripts/check-release-version.py). */
+void release_of(const unsigned char *elf, size_t len, char out[ROOTSET_RELEASE_MAX + 1]);
+
 #endif

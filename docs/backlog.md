@@ -229,6 +229,7 @@ Open lines (struck lines are not counted):
 - **PKG-7** nice-to-have, M. SBOMs, dependency locking, build sandboxing, multi-architecture packages.
 - **PKG-8** nice-to-have, M. `cosmo-upgrade`'s FAT writer refuses long names, a multi-sector `\cosmo` and FAT12/16.
 - **PKG-9** usability, S. `pkg install -f NAME=VERSION` to an older version says `NAME will be upgraded from 1.1 to 1.0`; a downgrade should say so (seen on Parallels, 2026-10-21).
+- ~~**PKG-10** correctness, S. `cosmo-upgrade` trusted the root's record of its base system: an older tool's roll-forward left it naming the set rolled back to, and v1.0.8 refused every later upgrade.~~ Done by PR #430: the record is checked against the root's files and corrected.
 
 ## Quiescence
 

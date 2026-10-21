@@ -4,11 +4,13 @@
 test-upgrade after its v1.0.3 stages.
 
     be_test.py --image cosmoos.img --set DIR --key MODSIGN.key --arch ARCH --workdir DIR
+               [--older cosmoos-ARCH.img] [--only forward]
 
 Set A is this build's release set (DIR); set B is made from it: the same
-kernel, a boot.tar with one more file, etc/cosmo-set-b, and a manifest and
-SHA256SUMS signed again with the build's key. Its base system differs from
-A's by that file, which is how a root says which set's base system it holds.
+kernel, a boot.tar with one more file, usr/share/cosmo-set-b, and a
+manifest and SHA256SUMS signed again with the build's key. Its base system
+differs from A's by that file, which is how a root's files say which set's
+base system they are (cosmo-upgrade tells it so too, outside /etc).
 
 Stages, each on the one installed disk:
 
@@ -29,7 +31,7 @@ Stages, each on the one installed disk:
   back        the next boot copies them and the hold goes: hello 1.0, the /etc file and
               the base system byte for byte the environment's (cosmo-snap
               diff of it and the live tree names nothing under them), no
-              etc/cosmo-set-b; the operator's files copied to
+              usr/share/cosmo-set-b; the operator's files copied to
               /var/lib/cosmo/rollback/<the replaced tree>/; --repair finds
               nothing to do.
   crash-record  --rollback (forward to B) stopped after the root's record
@@ -49,6 +51,21 @@ Stages, each on the one installed disk:
               the room it needs; the ESP byte for byte as it was.
   pending     cosmo-upgrade to B stopped after the set switch: --repair
               finishes its base pass; then B, B.
+
+With --older (the published v1.0.7's live image, whose cosmo-upgrade
+keeps no record of the root's base system), on a disk of its own:
+
+  forward     v1.0.7 installs itself and upgrades to A with its own
+              cosmo-upgrade (no environment); A's --rollback returns the set
+              and the base system, its record naming v1.0.7's set; v1.0.7's
+              own cosmo-upgrade --rollback rolls forward to A and leaves that
+              record. On A, with the record as left: cosmo-upgrade to B is not
+              refused (the root's files are A's: the record is corrected
+              first); --list named both, and --repair corrected the record
+              with no intent recorded. B boots on B's base system with the
+              record B's and an environment paired with A.
+
+--only forward runs that stage alone.
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -71,13 +88,18 @@ import mkmanifest  # noqa: E402
 import modsign  # noqa: E402
 import net_login_test  # noqa: E402
 from snapshot_test import check_clean, root_id  # noqa: E402
+import upgrade_test  # noqa: E402
 
 SET = ("kernel.elf", "boot.tar", "cmdline", "manifest")
-MARK = "etc/cosmo-set-b"
+MARK = "usr/share/cosmo-set-b"
 UPB = "/tmp/b"
 UPA = "/tmp/a"
 # What --rollback must return byte for byte: packages, /etc, the base system.
 RETURNED = ("/etc", "/bin", "/sbin", "/usr", "/lib", "/var/db/pkg")
+
+
+class Done(Exception):
+    """--only's stage has ended."""
 
 
 def make_set_b(seta, setb, arch, seed):
@@ -175,6 +197,114 @@ def fill_root(b):
     raise Fail("the root did not fill")
 
 
+RELEASE_KEY = upgrade_test.RELEASE_KEY
+OLDER = "v1.0.7"
+
+
+def stage_forward(args, port, results):
+    """The roll-forward an older cosmo-upgrade makes, on a disk of its own:
+    v1.0.7 -> A -> (A's --rollback) v1.0.7 -> (v1.0.7's --rollback) A, then
+    the upgrade to B."""
+    sub = argparse.Namespace(base=args.older, workdir=os.path.join(args.workdir, "forward"), timeout=args.timeout,
+                             arch=args.arch)
+    os.makedirs(sub.workdir)
+    upgrade_test.BASE = OLDER
+    upgrade_test.stage_install(sub, results)   # sets sub.target
+    t0 = time.monotonic()
+
+    b = boot("fwd-upgrade", sub)
+    try:
+        need(b.text(), rf"^\[ INFO\] boot: verified boot, key {RELEASE_KEY} ", f"the installed {OLDER}")
+        sh(b, f"wget -q -O /etc/pkg/keys/build.pub http://10.0.2.2:{port}/trust.pub && sync", "trust")
+        fetch(b, port, args.arch, "a", UPA)
+        out = sh(b, f"/sbin/cosmo-upgrade {UPA}", "up")
+        need(out, r"^cosmo-upgrade: upgraded; reboot to run it", f"{OLDER}'s cosmo-upgrade to A")
+        end(b, "fwd-upgrade")
+    except Exception:
+        b.kill()
+        raise
+    b = boot("fwd-new", sub)
+    try:
+        out = sh(b, "cosmo-upgrade --rollback", "back")
+        need(out, r"^cosmo-upgrade: no boot environment pairs \\cosmo\\prev with a snapshot of the root", "A's --rollback")
+        need(out, r"^cosmo-upgrade: rolled back; reboot to run it$", "A's --rollback")
+        end(b, "fwd-new")
+    except Exception:
+        b.kill()
+        raise
+    b = boot("fwd-back", sub)
+    try:
+        need(b.text(), rf"^\[ INFO\] boot: verified boot, key {RELEASE_KEY} ", f"{OLDER} again")
+        out = sh(b, "/sbin/cosmo-upgrade --rollback", "fwd")
+        need(out, r"^cosmo-upgrade: rolled back; reboot to run it$", f"{OLDER}'s own --rollback (forward to A)")
+        end(b, "fwd-back")
+    except Exception:
+        b.kill()
+        raise
+
+    # A, its root's record naming v1.0.7's set: the state the release notes
+    # of 1.0.8 sent an operator into. The upgrade's gate first, on the record
+    # as left; --list and --repair on it too, the record put back between.
+    b = boot("fwd-again", sub)
+    try:
+        rec = "/var/lib/cosmo-upgrade/root-set"
+        sh(b, f"cp {rec} /tmp/stale", "save")
+        listed = sh(b, "cosmo-upgrade --list", "list")
+        # A record that cannot be written is not corrected, and not said
+        # to be: a directory where the new record is made fails its open.
+        failed = sh(b, f"mkdir {rec}.cosmo-upgrade && cosmo-upgrade --repair 2>&1", "rfail", want=1)
+        sh(b, f"rmdir {rec}.cosmo-upgrade && cmp {rec} /tmp/stale", "kept")
+        need(failed, r"^cosmo-upgrade: the root's record names the previous set's \(v\S+, [0-9a-f]{12}\) base system, "
+                     r"but its files are the current set's \(v\S+, [0-9a-f]{12}\): not corrected$",
+             "--repair that cannot write the record")
+        if re.search(r"record corrected|nothing more to repair", failed):
+            raise Fail(f"fwd-again: --repair claimed a correction it could not write: {failed[-600:]!r}")
+        repaired = sh(b, "cosmo-upgrade --repair", "rep")
+        sh(b, f"cp /tmp/stale {rec} && sync", "restore")
+        fetch(b, port, args.arch, "b", UPB)
+        out = sh(b, f"cosmo-upgrade {UPB}", "up")
+        need(out, r"^cosmo-upgrade: the root's record named the previous set's \(v\S+, [0-9a-f]{12}\) base system, "
+                  r"but its files are the current set's \(v\S+, [0-9a-f]{12}\); it was written when the root moved "
+                  r"from that set, and an older cosmo-upgrade \(v1\.0\.7 or before\) moved it back without updating "
+                  r"it: record corrected$",
+             "the upgrade correcting the record before its environment")
+        env = need(out, r"^cosmo-upgrade: boot environment (be-\S+): the root as it is now, paired with the current set$",
+                   "the upgrade's environment").group(1)
+        need(out, r"^cosmo-upgrade: upgraded; reboot to run it", "the upgrade to B")
+        m = need(listed, r"^cosmo-upgrade: the root's base system is the current set's \((v\S+), ([0-9a-f]{12})\)$",
+                 "--list: what the root's files are")
+        need(listed, r"^cosmo-upgrade: the root's record says the previous set's \(v\S+, [0-9a-f]{12}\); it was "
+                     r"written when the root moved from that set, and an older cosmo-upgrade \(v1\.0\.7 or before\) "
+                     r"moved it back without updating it: cosmo-upgrade --repair corrects it$",
+             "--list: the record, and how it came to be wrong")
+        need(repaired, r"^cosmo-upgrade: the root's record named the previous set's .* record corrected$",
+             "--repair correcting the record")
+        need(repaired, r"^cosmo-upgrade: no boot environments recorded: nothing more to repair$",
+             "--repair with no intent")
+        end(b, "fwd-again")
+    except Exception:
+        b.kill()
+        raise
+    b = boot("fwd-b", sub)
+    try:
+        if not has_b(b):
+            raise Fail("fwd-b: the root does not hold B's base system after the upgrade")
+        out = sh(b, f"cosmo-upgrade --list && sed -n 2p {rec}", "list")
+        need(out, r"^cosmo-upgrade: the root's base system is the current set's \(", "--list on B")
+        if re.search(r"^cosmo-upgrade: the root's record says", out, re.M):
+            raise Fail(f"fwd-b: --list says the record is wrong: {out[-600:]!r}")
+        need(out, rf"^{re.escape(env)}\s+previous\s+[0-9a-f]{{12}}\s+on the root$", "--list: A's environment")
+        need(out, r"^cosmo-root-set 2$", "the record B's base pass wrote")
+        end(b, "fwd-b")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"forward: {OLDER} -> A ({OLDER}'s cosmo-upgrade), A's --rollback, {OLDER}'s own --rollback "
+                   f"forward to A (A is {m.group(1)}); the record left naming {OLDER}'s set: --list named both, "
+                   f"--repair that could not write it failed and kept it, --repair corrected it with no intent, and with it put back the upgrade to B corrected it and "
+                   f"took {env}; B booted on B's base system, its record B's; {time.monotonic() - t0:.1f}s")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
@@ -183,7 +313,11 @@ def main():
     ap.add_argument("--arch", required=True)
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
+    ap.add_argument("--older", help=f"the published {OLDER}'s live image: the forward stage")
+    ap.add_argument("--only", choices=("forward",), help="that stage alone")
     args = ap.parse_args()
+    if args.only and not args.older:
+        ap.error("--only forward needs --older")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         ap.error(f"--timeout must be a finite number of seconds above 0, not {args.timeout}")
     shutil.rmtree(args.workdir, ignore_errors=True)
@@ -195,10 +329,15 @@ def main():
         shutil.copyfile(os.path.join(args.set, src), os.path.join(www, "a", src))
     seed = modsign.read_hex_key(args.key, "secret key")
     make_set_b(args.set, os.path.join(www, "b"), args.arch, seed)
+    open(os.path.join(www, "trust.pub"), "w").write(modsign.secret_to_public(seed).hex() + "\n")
     srv, port = net_login_test.start_http(www)
     results = []
     t0 = time.monotonic()
     try:
+        if args.older:
+            stage_forward(args, port, results)
+        if args.only:
+            raise Done()
         inst = install_test.stage_install(args, results)
         args.target = inst["target"]
 
@@ -446,6 +585,8 @@ def main():
             b.kill()
             raise
         results.append("pending: an upgrade stopped after its set switch; --repair finished its base pass; then B, B")
+    except Done:
+        pass
     except Fail as e:
         for r in results:
             print(f"test-be: {r}")

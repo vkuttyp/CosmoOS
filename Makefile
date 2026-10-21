@@ -42,7 +42,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-pkgtx test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -314,9 +314,22 @@ test-upgrade:
 		--set $(UPGRADE_SET_DIR) --pub $(UPGRADE_SET_PUB) --arch $(ARCH) --workdir $(OUT)/test-upgrade \
 		--timeout $(BOOT_TIMEOUT)
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) OUT=$(OUT) test-pkgtx
-	$(Q)$(if $(UPGRADE_SET_TAG),true,QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+	$(Q)$(if $(UPGRADE_SET_TAG),true,$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) OUT=$(OUT) test-be)
+
+# Roadmap 1.2 B4's boot environments (tests/boot/be_test.py), run by
+# test-upgrade on this build's set and one made from it; its forward stage
+# starts from the published BE_OLDER_TAG, whose cosmo-upgrade keeps no
+# record of the root's base system. BE_ONLY=forward runs that stage alone.
+BE_OLDER_TAG ?= v1.0.7
+BE_OLDER_DIR := $(ROOT)/.cache/releases/$(BE_OLDER_TAG)
+BE_ONLY ?=
+test-be: RELEASE_DIR = $(UPGRADE_SET_DIR)
+test-be: release-set $(IMAGE)
+	$(Q)$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(BE_OLDER_TAG) --arch $(ARCH) --dest $(BE_OLDER_DIR)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/be_test.py --image $(IMAGE) --set $(UPGRADE_SET_DIR) --key $(MODSIGN_KEY) \
-		--arch $(ARCH) --workdir $(OUT)/test-be --timeout $(BOOT_TIMEOUT))
+		--arch $(ARCH) --workdir $(OUT)/test-be --timeout $(BOOT_TIMEOUT) \
+		--older $(BE_OLDER_DIR)/cosmoos-$(ARCH).img $(if $(BE_ONLY),--only $(BE_ONLY))
 
 # Roadmap 1.2 B4's package transactions (PKG-3; tests/boot/pkgtx_test.py,
 # docs/pkg/testing.md, "test-pkgtx"), run by test-upgrade: on this build's

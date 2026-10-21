@@ -3324,3 +3324,15 @@ See the [history index](README.md).
   --kernel` on every release kernel against the build's own id.
   `tools/release-describe-probe.py`. Report:
   `docs/audit/2026-10-21-release-describe-report.md`.
+- **The root's record was trusted (2026-10-21, PR #430).** v1.0.8 refused
+  every upgrade after `--rollback` to v1.0.7 and v1.0.7's own `--rollback`
+  forward again: v1.0.7's base pass left `/var/lib/cosmo-upgrade/root-set`
+  naming v1.0.7's set, and `--repair` (no intent) did nothing. What the
+  root holds is now told from its files outside `/etc` against each kept
+  set's `boot.tar`; the upgrade refuses only when they are
+  `\cosmo\prev`'s, and the upgrade, an environment rollback and `--repair`
+  correct the record (`--list` names both). The record gains `release`
+  and `from` lines after the set; `cosmo-install` writes it. `test-be`'s
+  `forward` stage starts from the published v1.0.7.
+  `tools/root-set-probe.py`. Report:
+  `docs/audit/2026-10-21-root-set-report.md`.

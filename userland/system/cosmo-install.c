@@ -37,6 +37,10 @@
 #include <kernel/gpt.h>
 #include <uapi/cosmo/blkctl.h>
 
+#include "blkdevs.h"
+#include "upgrade_be.h"
+#include "upgrade_fat.h"
+
 #define MNT "/mnt/cosmo-install"
 #define PKG_LIVE_REPO "/boot/repo"               /* the boot archive's repo/ */
 #define PKG_INSTALLED_REPO "/var/lib/pkg/repo"   /* where the installed system keeps it */
@@ -269,6 +273,60 @@ static int write_file(const char *path, const char *text, uint32_t mode)
     }
     close(fd);
     return 0;
+}
+
+/*
+ * Roadmap 1.2 B4: the root's record of which set's base system it holds
+ * (cosmo-upgrade.c, ROOT_SET): the set on the ESP just copied -- this
+ * image's, whose base system populate() copies -- by its manifest's
+ * SHA-512, and the release the running kernel is (/proc/version's last
+ * word: the image's own kernel). cosmo-upgrade checks it against the
+ * root's files before it relies on it.
+ */
+static int write_root_set(const struct cosmo_blkctl_dev *esp)
+{
+    struct fat f;
+    struct fat_ent d, m;
+    uint8_t n83[11], nt, *man = NULL;
+    char err[160] = "", path[256];
+    int rc = blkdevs_list();
+    if (rc == 0)
+        rc = fat_open(&f, esp, err, sizeof(err));
+    if (rc == 0) {
+        fat_name83("cosmo", n83, &nt);
+        rc = fat_lookup(&f, f.root, n83, &d) == 1 ? 0 : -ENOENT;
+        fat_name83("manifest", n83, &nt);
+        if (rc == 0)
+            rc = fat_lookup(&f, d.cluster, n83, &m) == 1 ? 0 : -ENOENT;
+        if (rc == 0)
+            rc = fat_read_file(&f, m.cluster, m.size, &man);
+        fat_close(&f);
+    }
+    if (rc < 0 || man == NULL) {
+        fprintf(stderr, "cosmo-install: \\cosmo\\manifest on %s: %s\n", esp->name, err[0] ? err : strerror(-rc));
+        return -1;
+    }
+    struct root_set r;
+    memset(&r, 0, sizeof(r));
+    uint8_t h[SHA512_DIGEST_SIZE];
+    sha512(man, m.size, h);
+    free(man);
+    for (int i = 0; i < SHA512_DIGEST_SIZE; i++)
+        snprintf(r.set + 2 * i, 3, "%02x", h[i]);
+    int fd = open("/proc/version", O_RDONLY);
+    char v[256];
+    ssize_t n = fd < 0 ? -1 : read(fd, v, sizeof(v) - 1);
+    if (fd >= 0)
+        close(fd);
+    if (n > 0) {
+        v[n] = '\0';
+        release_of((const unsigned char *)v, (size_t)n, r.release);
+    }
+    char text[512];
+    if (rootset_format(&r, text, sizeof(text)) == 0)
+        return -1;
+    snprintf(path, sizeof(path), "/var/lib/cosmo-upgrade/root-set");
+    return write_file(path, text, 0644);
 }
 
 /* What the installed system is made of: the running system's own files.
@@ -583,6 +641,11 @@ static int install(const char *target_name, bool force)
     g_mounted = true;
     if (populate() < 0)
         return fail("copying the system", 0);
+    /* The record is checked against the root's files, never trusted, and
+     * cosmo-upgrade writes a missing one: an install without it is whole. */
+    if (write_root_set(esp) < 0)
+        fprintf(stderr, "cosmo-install: the root's record of its base system was not written; cosmo-upgrade "
+                        "writes it\n");
     sync();
     if (umount(MNT) < 0)
         return fail("unmounting the new root", errno);
