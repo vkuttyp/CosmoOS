@@ -26,6 +26,9 @@
 #define BE_NAME_MAX 31    /* a snapshot's name (COSMO_FSCTL_NAME_MAX) */
 #define BE_SET_HEX 128
 #define BE_UUID_HEX 32
+#define BE_MAGIC "cosmo-be 1\n"   /* the file's first line */
+
+_Static_assert(BE_KEEP < BE_MAX, "an upgrade adds one environment to BE_KEEP and drops the rest");
 
 struct be_env {
     char name[BE_NAME_MAX + 1];
@@ -54,5 +57,9 @@ void be_drop(struct be_file *b, int i);
  * says whether a name is in use, and a suffix -2, -3 ... is added until
  * one is not. */
 void be_name(const char *tag, bool (*taken)(const char *name, void *arg), void *arg, char out[BE_NAME_MAX + 1]);
+/* Whether a cosmo-upgrade binary reads this file: it holds BE_MAGIC, which
+ * be_format writes. One that does not (v1.0.7 and older) refuses an ESP
+ * whose \cosmo has a `be` entry. */
+bool be_aware(const unsigned char *bin, size_t len);
 
 #endif

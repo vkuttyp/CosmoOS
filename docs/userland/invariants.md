@@ -195,17 +195,24 @@ room with nothing written, and pairs it with the current set in
 `\cosmo\be` in the same one-sector switch as the set. `--rollback` to a set
 `\cosmo\be` pairs with an environment the root still has writes, in order,
 the intent (`\cosmo\be` naming the previous set), the root's pending
-rollback to the environment, and the set switch; the root is replaced
+rollback to the environment with the tree it keeps paired at once, and
+the set switch, then restarts; the root is replaced
 whole at the next mount (B1, CF19), so packages, `/etc` and the base system
 are the environment's byte for byte. Every crash leaves a pairing that
 boots -- the older or newer kernel on either root -- and `--repair` makes
 the root and the set the intent's. Files under `/root`, `/home` and
 `/var/log` that the replaced tree added or changed are copied to
 `/var/lib/cosmo/rollback/<that tree>/` before any service at the first
-boot after (docs/userland/design.md, "Boot environments"). Check:
-`test-upgrade`'s `be_test.py` (the rollback's byte-for-byte diff; the
-operator's three files; killed after the record, after the intent and
-after the set; the older kernel on the newer root; the space refusal with
-the ESP byte for byte unchanged); `test_upgrade_be` (the file's grammar).
-Gap: environments from before v1.0.8's `cosmo-upgrade` do not exist; a
-rollback past such an upgrade is U12's.
+boot after, and until every one is, the boot does not complete and the
+replaced tree stays held. No snapshot is deleted for being absent from
+`\cosmo\be` except the one an interrupted upgrade recorded taking
+(docs/userland/design.md, "Boot environments"). Check: `test-upgrade`'s
+`be_test.py` (the rollback's byte-for-byte diff; the operator's files,
+kept only at the boot after a copy that could not be made; killed after
+the record -- the kept tree paired -- after the intent and after the
+set; the older kernel on the newer root; an upgrade stopped after its
+switch finished by `--repair`; the refusals with a rollback pending and
+for room, the ESP byte for byte unchanged); `test_upgrade_be` (the
+file's grammar, and which binaries read it). Gap: no environment for an
+upgrade from a set whose `cosmo-upgrade` predates them (v1.0.7 and
+older); a rollback past such an upgrade is U12's.

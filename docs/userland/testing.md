@@ -351,14 +351,16 @@ that file. Each stage boots the one installed disk; logs in
 
 | Stage | Asserts |
 |---|---|
-| `upgrade` | hello 1.0 and an `/etc` file on A; `cosmo-upgrade` to B takes `be-*` before writing anything |
-| `new` | B's base system; `--list` shows A's environment as `previous`; `pkg upgrade` to hello 1.1 is a transaction (every kept set reads format 12); the `/etc` file changed; files under `/root`, `/home`, `/var/log`; `--rollback` records the intent, the root's rollback and the set |
-| `back` | A on the environment's root: hello 1.0, the `/etc` file as before, `cosmo-snap diff` of the environment and the live tree names nothing under `/etc`, `/bin`, `/sbin`, `/usr`, `/lib`, `/var/db/pkg`; the operator's three files in `/var/lib/cosmo/rollback/<tree>/`; check clean; `--repair` has nothing to do |
-| `crash-record` | forward to B stopped after the root's record, QEMU killed: A's kernel boots B's root; `--repair` switches the set; then B, B |
-| `mixed-old` | back to A completed and the root's rollback withdrawn: A's kernel boots B's root; `--repair` asks for the root's rollback; then A, A |
-| `crash-intent` | stopped after the intent alone: A, A boots; `--repair` rolls both; then B, B |
+| `upgrade` | hello 1.0 and an `/etc` file on A, and `/var/lib/cosmo/rollback` made a file; `cosmo-upgrade` to B takes `be-*` before writing anything |
+| `new` | B's base system; `--list` shows A's environment as `previous`; `pkg upgrade` to hello 1.1 is a transaction (every kept set reads format 12); the `/etc` file changed; files under `/root`, `/home`, `/var/log`; `--rollback` records the intent, the root's rollback and the set, and reboots (QEMU ends at init's restart) |
+| `back-held` | A on the environment's root; the operator's files cannot be copied (the file in the way): the count refused, init keeps the hold and does not report the boot complete; the file removed |
+| `back` | the copy made at this boot and the hold released; hello 1.0, the `/etc` file as before, `cosmo-snap diff` of the environment and the live tree names nothing under `/etc`, `/bin`, `/sbin`, `/usr`, `/lib`, `/var/db/pkg`; the operator's files in `/var/lib/cosmo/rollback/<tree>/`; check clean; `--repair` has nothing to do |
+| `crash-record` | forward to B stopped after the root's record, QEMU killed: A's kernel boots B's root; `--repair` switches the set; then B, B, and `--list` shows the tree the record kept paired with A |
+| `mixed-old` | back to A completed (`--no-reboot`) and the root's rollback withdrawn: A's kernel boots B's root; `--repair` asks for the root's rollback and reboots; then A, A |
+| `crash-intent` | stopped after the intent alone: A, A boots; `--repair` rolls both and reboots; then B, B |
 | `crash-set` | stopped after the set switch: the next boot is already A, A |
-| `space` | the root filled: the upgrade refused, naming the KiB needed and free; the ESP byte for byte as it was |
+| `space` | a root rollback pending (`cosmo-snap rollback --no-reboot`): the upgrade refused; then the root filled: refused, naming the KiB needed and free; the ESP byte for byte as it was |
+| `pending` | an upgrade to B stopped after its set switch: `--repair` finishes its base pass; then B, B |
 
 ## `make test-net-login` (`tests/boot/net_login_test.py`)
 

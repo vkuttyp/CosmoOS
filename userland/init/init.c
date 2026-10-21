@@ -6274,11 +6274,14 @@ static void pkg_undone_prune(void)
  * service, cosmo-upgrade copies the operator's files the replaced tree
  * had under /root, /home and /var/log (roadmap 1.2 B4; it does nothing
  * on any other boot, and once per rollback). */
-static void be_after_rollback(void)
+/* False when the operator's files are not all kept yet: the boot then
+ * does not report itself complete, so the rollback's hold stays on the
+ * tree it replaced and the next boot tries again. */
+static bool be_after_rollback(void)
 {
     struct rootsnap rs;
     if (rootsnap_open(&rs, "/") < 0)
-        return;
+        return true;
     struct cosmo_fsctl_snap *v = NULL;
     unsigned n = 0;
     bool env = false;
@@ -6288,13 +6291,16 @@ static void be_after_rollback(void)
     free(v);
     rootsnap_close(&rs);
     if (!env)
-        return;
+        return true;
     const char *argv[] = { "cosmo-upgrade", "--after-rollback", NULL };
     pid_t pid = spawnve("/sbin/cosmo-upgrade", argv, NULL, NULL, 0);
     int st = -1;
-    if (pid <= 0 || waitpid(pid, &st, 0) != pid || st != 0)
-        printf("init: cosmo-upgrade --after-rollback failed; the files written after the upgrade are still in the "
-               "snapshot of the tree the rollback replaced\n");
+    if (pid > 0 && waitpid(pid, &st, 0) == pid && st == 0)
+        return true;
+    printf("init: cosmo-upgrade --after-rollback did not keep every file; the rollback's hold on the tree it "
+           "replaced stays, and the next boot tries again\n");
+    fflush(stdout);
+    return false;
 }
 
 static void boot_complete(void)
@@ -6426,16 +6432,17 @@ int main(int argc, char **argv)
     struct stat st;
     char shell[128];
     console_shell(shell, sizeof(shell));
+    bool kept = true;
     if (disk_root) {
         pkg_recover();         /* before any service starts */
-        be_after_rollback();
+        kept = be_after_rollback();
     }
     if (stat("/etc/rc", &st) == 0) {
         const char *rc_argv[] = { "sh", "/etc/rc", NULL };
         int status = run_and_wait("/etc/rc", shell, rc_argv, false);
         printf("init: rc exited with status %d\n", status);
         fflush(stdout);
-        if (status == 0) {
+        if (status == 0 && kept) {
             boot_complete();
             pkg_undone_prune();
         }

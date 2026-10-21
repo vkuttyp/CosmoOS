@@ -13,14 +13,19 @@ A's by that file, which is how a root says which set's base system it holds.
 Stages, each on the one installed disk:
 
   install     test-install's, of this build (set A).
-  upgrade     hello 1.0 installed, an /etc file written; cosmo-upgrade to B
-              takes the environment be-* of the root first and pairs it
-              with A in \\cosmo\\be.
+  upgrade     hello 1.0 installed, an /etc file written, and
+              /var/lib/cosmo/rollback made a file (so that keeping the
+              operator's files fails once); cosmo-upgrade to B takes the
+              environment be-* of the root first and pairs it with A in
+              \\cosmo\\be.
   new         B boots; pkg upgrade takes hello to 1.1 (a transaction: every
               kept set reads format 12); the /etc file changed; files under
               /root, /home and /var/log written; --rollback returns both
-              halves: the set now, the root at the next mount.
-  back        A boots on the environment's root: hello 1.0, the /etc file and
+              halves: the set now, the root at the next mount, and reboots.
+  back-held   A boots on the environment's root; the operator's files
+              cannot be copied (the file in the way): init keeps the
+              rollback's hold and says so; the file removed.
+  back        the next boot copies them and the hold goes: hello 1.0, the /etc file and
               the base system byte for byte the environment's (cosmo-snap
               diff of it and the live tree names nothing under them), no
               etc/cosmo-set-b; the operator's files copied to
@@ -28,7 +33,8 @@ Stages, each on the one installed disk:
               nothing to do.
   crash-record  --rollback (forward to B) stopped after the root's record
               and the machine killed: the next boot is A's kernel on B's
-              root, and boots; --repair switches the set; then B, B.
+              root, and boots; --repair switches the set; then B, B, and
+              the tree the record kept is a paired environment.
   mixed-old   --rollback (back to A) completed, then the root's rollback
               withdrawn: A's kernel boots B's root; --repair asks for the
               root's rollback; then A, A.
@@ -37,9 +43,11 @@ Stages, each on the one installed disk:
               then B, B.
   crash-set   --rollback stopped after the set switch, killed: the next
               boot is A, A already (the record was before the switch).
-  space       the root filled: cosmo-upgrade to B refused before anything is
-              written, naming the room it needs; the ESP byte for byte as it
-              was.
+  space       with a root rollback pending, cosmo-upgrade to B refused; then
+              the root filled: refused before anything is written, naming
+              the room it needs; the ESP byte for byte as it was.
+  pending     cosmo-upgrade to B stopped after the set switch: --repair
+              finishes its base pass; then B, B.
 
 Exit 0 PASS, 1 FAIL.
 """
@@ -120,6 +128,22 @@ def fetch(b, port, arch, sub, to):
     sh(b, f"mkdir -p {to} && cd {to} && for f in {files}; do wget -q {url}/$f || exit 1; done && cd /", "fetch")
 
 
+def rebooting(b, cmd, what):
+    """`cmd` arms the root's rollback and asks init to restart; init's
+    restart ends this QEMU (no QEMU_REBOOT; pkgtx_test.py). Returns what
+    the command printed."""
+    start = len(b.text())
+    b.proc.stdin.write(cmd.encode() + b"\n")
+    b.proc.stdin.flush()
+    try:
+        b.proc.wait(timeout=120)
+    except Exception:
+        raise Fail(f"{what}: QEMU did not end at init's restart; tail {b.text()[-900:]!r}")
+    out = b.text()[start:]
+    need(out, r"^cosmo-upgrade: rebooting to apply it$", f"{what}: the reboot asked for")
+    return out
+
+
 def has_b(b):
     out = b.run(f"if [ -e /{MARK} ]; then echo base=b; else echo base=a; fi")
     return need(out, r"^base=(a|b)$", "which base system the root holds").group(1) == "b"
@@ -180,7 +204,8 @@ def main():
         # upgrade: A -> B, the environment taken first.
         b = boot("be-upgrade", args)
         try:
-            out = sh(b, "pkg update && pkg install hello=1.0 && echo before > /etc/b4-note && sync && hello", "prep")
+            out = sh(b, "pkg update && pkg install hello=1.0 && echo before > /etc/b4-note && mkdir -p /var/lib/cosmo && "
+                        "echo in-the-way > /var/lib/cosmo/rollback && sync && hello", "prep")
             need(out, r"^hello, world \(hello 1\.0\)$", "hello 1.0 on A")
             fetch(b, port, args.arch, "b", UPB)
             out = sh(b, f"cosmo-upgrade {UPB}", "up")
@@ -207,19 +232,38 @@ def main():
                 raise Fail("be-new: pkg took no transaction, though every kept set reads format 12")
             sh(b, "echo after > /etc/b4-note && echo x > /root/after.txt && mkdir -p /home/op && echo y > "
                   "/home/op/notes && echo z > /var/log/op.log && sync", "ops")
-            out = sh(b, "cosmo-upgrade --rollback", "rb")
+            out = rebooting(b, "cosmo-upgrade --rollback", "be-new")
             need(out, rf"^cosmo-upgrade: intent recorded: \\cosmo\\be names the previous set and {re.escape(env_a)}$",
                  "the rollback's intent")
             env_b = need(out, rf"^cosmo-upgrade: the root rolls back to {re.escape(env_a)} at the next boot; the tree "
                               r"it replaces is kept as (be-\S+)$", "the rollback's record").group(1)
             need(out, r"^cosmo-upgrade: rolled back: the boot set now, and the root -- packages, /etc and the base "
                       r"system as they were in ", "the rollback")
-            end(b, "be-new")
         except Exception:
             b.kill()
             raise
         results.append(f"new: B ran hello 1.1 (a transaction) and changed /etc; --rollback recorded the intent, "
                        f"the root's rollback to {env_a} (keeping {env_b}) and the set")
+
+        # back-held: the operator's files cannot be kept; the hold stays.
+        b = boot("be-back-held", args)
+        try:
+            log = b.text()
+            held = need(log, r"^cosmo-upgrade: (\d+) of the files written under /root, /home and /var/log after "
+                      rf"{re.escape(env_a)} was taken could not be copied to /var/lib/cosmo/rollback/{re.escape(env_b)} "
+                      rf"\(0 were\); they are in snapshot {re.escape(env_b)}, kept for the next boot to try again$",
+                 "the copy refused").group(1)
+            need(log, r"^init: cosmo-upgrade --after-rollback did not keep every file; the rollback's hold on the "
+                      r"tree it replaced stays, and the next boot tries again$", "init keeping the hold")
+            if re.search(r"^init: boot complete: released the rollback hold", log, re.M):
+                raise Fail("be-back-held: init released the hold though the files were not kept")
+            sh(b, "rm /var/lib/cosmo/rollback && sync", "unblock")
+            end(b, "be-back-held")
+        except Exception:
+            b.kill()
+            raise
+        results.append(f"back-held: {held} file(s) could not be copied (a file in the way of "
+                       f"/var/lib/cosmo/rollback): the hold on {env_b} stayed, nothing marked done")
 
         # back: A on the environment's root.
         b = boot("be-back", args)
@@ -227,8 +271,9 @@ def main():
             log = b.text()
             m = need(log, rf"^cosmo-upgrade: (\d+) file\(s\) written under /root, /home and /var/log after "
                           rf"{re.escape(env_a)} was taken are kept in (/var/lib/cosmo/rollback/\S+)$",
-                     "the operator's files kept")
+                     "the operator's files kept, at the boot after")
             keep = m.group(2)
+            need(log, r"^init: boot complete: released the rollback hold on /$", "the hold released once they are")
             if has_b(b):
                 raise Fail("be-back: the root still holds B's base system")
             out = sh(b, "hello && cat /etc/b4-note && pkg list", "back")
@@ -257,6 +302,8 @@ def main():
             out = sh(b, "cosmo-upgrade --rollback --stop-after=record", "stop", 4)
             need(out, r"^cosmo-upgrade: stopped after record \(--stop-after\); cosmo-upgrade --repair finishes it$",
                  "--stop-after=record")
+            kept_a = need(out, r"^cosmo-upgrade: the root rolls back to be-\S+ at the next boot; the tree it replaces "
+                               r"is kept as (be-\S+)$", "the tree the record keeps").group(1)
         finally:
             b.kill()
         b = boot("be-mixed-new", args)   # A's kernel, B's root: it boots
@@ -272,17 +319,20 @@ def main():
         b = boot("be-repaired-b", args)
         try:
             expect_pair(b, "b", "be-repaired-b")
+            out = sh(b, "cosmo-upgrade --list", "list")
+            need(out, rf"^{re.escape(kept_a)}\s+previous\s+[0-9a-f]{{12}}\s+on the root$",
+                 "--list: the tree the interrupted rollback kept, paired with A")
             end(b, "be-repaired-b")
         except Exception:
             b.kill()
             raise
-        results.append("crash-record: killed after the root's record: A's kernel booted B's root; --repair "
-                       "switched the set; then B, B")
+        results.append(f"crash-record: killed after the root's record: A's kernel booted B's root; --repair "
+                       f"switched the set; then B, B, with {kept_a} paired with A")
 
         # mixed-old: back to A completed, the root's rollback withdrawn.
         b = boot("be-mixed-old-prep", args)
         try:
-            sh(b, "cosmo-upgrade --rollback", "rb")
+            sh(b, "cosmo-upgrade --rollback --no-reboot", "rb")
             sh(b, "cosmo-snap rollback --cancel", "cancel")
             end(b, "be-mixed-old-prep")
         except Exception:
@@ -292,9 +342,8 @@ def main():
         try:
             if not has_b(b):
                 raise Fail("be-mixed-old: the root moved though its rollback was withdrawn")
-            out = sh(b, "cosmo-upgrade --repair", "rep")
+            out = rebooting(b, "cosmo-upgrade --repair", "be-mixed-old")
             need(out, r"^cosmo-upgrade: the root rolls back to be-\S+ at the next boot", "--repair asking the root")
-            end(b, "be-mixed-old")
         except Exception:
             b.kill()
             raise
@@ -318,8 +367,7 @@ def main():
         try:
             if has_b(b):
                 raise Fail("be-intent: the root moved with only the intent written")
-            sh(b, "cosmo-upgrade --repair", "rep")
-            end(b, "be-intent")
+            rebooting(b, "cosmo-upgrade --repair", "be-intent")
         except Exception:
             b.kill()
             raise
@@ -355,6 +403,11 @@ def main():
             # (upgrade_test.py's refuse stage).
             before = install_test.esp_of(open(args.target, "rb").read())
             fetch(b, port, args.arch, "b", UPB)
+            sh(b, "cosmo-snap create t && cosmo-snap rollback --no-reboot t", "arm")
+            out = sh(b, f"cosmo-upgrade {UPB}", "pend", 3)
+            need(out, r"^cosmo-upgrade: a rollback of the root is pending \(cosmo-snap list --all\): reboot to apply "
+                      r"it, or cosmo-snap rollback --cancel; nothing written$", "the refusal with a rollback pending")
+            sh(b, "cosmo-snap rollback --cancel && cosmo-snap delete t", "disarm")
             fill_root(b)
             out = sh(b, f"cosmo-upgrade {UPB}", "full", 3)
             m = need(out, r"^cosmo-upgrade: not enough space on the root for the boot environment: about (\d+) KiB "
@@ -366,8 +419,28 @@ def main():
             raise
         if install_test.esp_of(open(args.target, "rb").read()) != before:
             raise Fail("be-space: the refused upgrade changed the ESP")
-        results.append(f"space: a full root refused the upgrade ({m.group(1)} KiB needed, {m.group(2)} KiB free); "
-                       f"the ESP byte for byte unchanged")
+        results.append(f"space: refused with a root rollback pending; a full root refused the upgrade ({m.group(1)} "
+                       f"KiB needed, {m.group(2)} KiB free); the ESP byte for byte unchanged")
+
+        # pending: an upgrade stopped after its set switch; --repair finishes it.
+        b = boot("be-pending", args)
+        try:
+            sh(b, f"cosmo-upgrade --stop-after=set {UPB}", "stop", 4)
+            out = sh(b, "cosmo-upgrade --repair", "rep")
+            need(out, r"^cosmo-upgrade: an earlier run switched to the current set and was interrupted: finishing it$",
+                 "--repair finishing the base pass")
+            end(b, "be-pending")
+        except Exception:
+            b.kill()
+            raise
+        b = boot("be-pending-done", args)
+        try:
+            expect_pair(b, "b", "be-pending-done")
+            end(b, "be-pending-done")
+        except Exception:
+            b.kill()
+            raise
+        results.append("pending: an upgrade stopped after its set switch; --repair finished its base pass; then B, B")
     except Fail as e:
         for r in results:
             print(f"test-be: {r}")

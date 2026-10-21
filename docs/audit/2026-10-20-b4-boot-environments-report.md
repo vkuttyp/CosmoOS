@@ -1,6 +1,6 @@
 # Roadmap 1.2 B4: boot environments with cosmo-upgrade
 
-Date: 2026-10-20. Base: `main` at `50ef1f4d` (after #421-#423, B1) and,
+Date: 2026-10-20 (started; validated and merged 2026-10-21). Base: `main` at `50ef1f4d` (after #421-#423, B1) and,
 for the second pull request, `3e28941d` (#424). The unit is roadmap 1.2's
 B4, chosen by the owner after B1. Its acceptance, as `docs/roadmap-1.2.md`
 writes it: `test-upgrade` gains an upgrade, `pkg upgrade` and a changed
@@ -229,3 +229,54 @@ installed disk, reboots and powers off; `pkg install hello fortune` left no
 transaction behind, and `pkg install -f hello=1.0`, `pkg upgrade`, `pkg
 rollback hello` went 1.0, 1.1, 1.0 with `pkg verify` clean. The message for
 that downgrade says "upgraded" (PKG-9).
+
+### Review of the second pull request (#426, 2026-10-21)
+
+Qodo and Codex, twenty comments, thirteen distinct points; fixed:
+
+- **Unpaired is not a reason to delete.** A missing, unreadable or
+  malformed `\cosmo\be` read as empty, and the sweep deleted every `be-*`
+  it did not name. Now the upgrade records the environment it is taking
+  (`/var/lib/cosmo-upgrade/be-taking`) before the snapshot and removes the
+  record once the switch pairs it; the sweep deletes only that one, when
+  unpaired and not held. A `\cosmo\be` that does not parse refuses the
+  upgrade, the rollback and `--repair`; `--prune` writes it again, empty,
+  keeping every snapshot.
+- **Refusals that were fallbacks.** A snapshot listing that fails other
+  than `EOPNOTSUPP` refuses the rollback instead of rolling the set back
+  alone. An upgrade refuses while a rollback of the root is pending, and
+  when the root's record names another set than the current one.
+- **Which sets get an environment.** None when the current set's own
+  `cosmo-upgrade` does not read `\cosmo\be` (its binary lacks `cosmo-be
+  1`): v1.0.7 and older refuse an ESP with the entry, so a rollback to such
+  a set's environment would leave a system whose updater refuses its own
+  ESP. None when the snapshot would raise a format-11 root to 12 that the
+  new or current set's kernel cannot mount (B1's lazy raise, as `pkg`'s
+  PK11 rule). So the upgrade to v1.0.8 takes none -- v1.0.7's kernel keeps
+  no snapshots anyway -- and the first that can be fully undone is the
+  one made from v1.0.8 (the guide and release notes say so).
+- **The kept tree paired at once.** A crash between the root's record and
+  the set switch left the tree the record kept unpaired after `--repair`.
+  It is now paired in a one-sector switch right after the record.
+- **Rollback reboots.** What is written between arming the root's
+  rollback and the reboot is in neither tree; `--rollback` (and
+  `--repair` when it arms one) asks init to restart, as `cosmo-snap
+  rollback` does; `--no-reboot` leaves it to the operator.
+- **`--repair`** finishes an upgrade whose set switch is done and base pass
+  is not (the pending marker), and checks that `\cosmo\prev` is the
+  intended, verified set before arming the root's rollback.
+- **The operator's files.** `.done` is written only when every file is
+  copied; a failed copy or diff exits non-zero, and init then does not
+  report the boot complete, so B1's hold stays on the replaced tree and
+  the next boot tries again. Paths are no longer cut at 900 bytes; writes
+  loop over short writes.
+- A compile-time bound for the dropped-environment table
+  (`BE_KEEP < BE_MAX`); the roadmap no longer says B4 absorbs PKG-5; the
+  dates say started 2026-10-20, validated 2026-10-21.
+
+`be_test.py` gains a `back-held` stage (a file in the way of
+`/var/lib/cosmo/rollback`: the copy refused, the hold kept, the files
+kept at the boot after), `crash-record`'s kept tree paired, the
+refusal with a rollback pending, and a `pending` stage (an upgrade
+stopped after its switch, finished by `--repair`); `test_upgrade_be`
+checks `be_aware`.

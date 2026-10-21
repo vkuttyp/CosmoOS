@@ -113,11 +113,21 @@ static void test_name(void)
     EXPECT(strcmp(out, "be-unknown") == 0);
 }
 
+static void test_aware(void)
+{
+    static const unsigned char with[] = "\x7f" "ELF....usage....cosmo-be 1\n....";
+    static const unsigned char without[] = "\x7f" "ELF....cosmo-be 2\n..cosmo-be 1";   /* no newline: cut */
+    EXPECT(be_aware(with, sizeof(with) - 1));
+    EXPECT(!be_aware(without, sizeof(without) - 1));
+    EXPECT(!be_aware(with, 4));
+}
+
 static const struct host_test tests[] = {
     { "format and parse back", test_roundtrip },
     { "malformed files refused", test_refused },
     { "at most BE_MAX, the oldest dropped", test_capacity },
     { "environment names", test_name },
+    { "a binary that reads the file", test_aware },
 };
 
 int main(void)

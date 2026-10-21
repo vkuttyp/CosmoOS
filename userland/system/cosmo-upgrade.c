@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <spawn.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -974,25 +975,43 @@ static void uuid_hex(const uint8_t u[16], char out[33])
     relsig_hex(u, 16, out);
 }
 
-/* \cosmo\be as read; an ESP without one, or one that does not parse
- * (said, and treated as empty: it is advisory), gives no environments. */
-static void be_load(struct esp *e, struct be_file *b)
+/* \cosmo\be as read: 0, with no environments for an ESP without one;
+ * -1 (said) for one that cannot be read or does not parse, which is not
+ * taken for an empty one: what it paired is unknown, not absent. */
+static int be_load(struct esp *e, struct be_file *b)
 {
     memset(b, 0, sizeof(*b));
     if (!e->has_be)
-        return;
+        return 0;
     uint8_t *text;
     if (fat_read_file(&e->f, e->be.cluster, e->be.size, &text) < 0) {
-        fprintf(stderr, "cosmo-upgrade: \\cosmo\\be cannot be read; no boot environments are known\n");
-        return;
+        fprintf(stderr, "cosmo-upgrade: \\cosmo\\be cannot be read\n");
+        return -1;
     }
     char err[120];
-    if (be_parse((const char *)text, e->be.size, b, err, sizeof(err)) < 0) {
-        fprintf(stderr, "cosmo-upgrade: \\cosmo\\be: %s; no boot environments are known\n", err);
-        memset(b, 0, sizeof(*b));
-    }
+    int rc = be_parse((const char *)text, e->be.size, b, err, sizeof(err));
     free(text);
+    if (rc < 0) {
+        fprintf(stderr, "cosmo-upgrade: \\cosmo\\be: %s\n", err);
+        memset(b, 0, sizeof(*b));
+        return -1;
+    }
+    return 0;
 }
+
+/* Whether a set's own cosmo-upgrade reads \cosmo\be (upgrade_be.h). */
+static bool set_reads_be(const struct set *s)
+{
+    char err[160];
+    struct member *m = NULL;
+    int n = archive_index(s->file[1], s->len[1], &m, err, sizeof(err));
+    const struct member *x = n < 0 ? NULL : member_find(m, n, "sbin/cosmo-upgrade");
+    bool yes = x != NULL && !x->is_link && be_aware(x->data, x->size);
+    free(m);
+    return yes;
+}
+
+#define BE_DAMAGED "cosmo-upgrade --prune writes it again, empty, keeping every snapshot; nothing written"
 
 /* `b` written to free clusters, named by nothing yet: the edit that names
  * it goes into the caller's switch. */
@@ -1091,21 +1110,68 @@ static int finish(struct esp *e, const struct set *cur)
     return finish_ex(e, cur, true);
 }
 
-/* Environments an interrupted run took and never paired (a be-* snapshot
- * \cosmo\be does not name) go, unless the kernel keeps them for a
- * rollback; then the ones beyond BE_KEEP, oldest first, from both. */
+/* The environment an upgrade is taking, named before the snapshot and
+ * removed once the switch pairs it: the one snapshot a sweep may delete
+ * for being unpaired. Nothing else is judged by its absence from
+ * \cosmo\be, so a lost or rewritten file loses no environment. */
+#define BE_TAKING STATE_DIR "/be-taking"
+
+static void be_taking_read(char out[BE_NAME_MAX + 1])
+{
+    out[0] = '\0';
+    int fd = open(BE_TAKING, O_RDONLY);
+    if (fd < 0)
+        return;
+    ssize_t n = read(fd, out, BE_NAME_MAX);
+    close(fd);
+    out[n > 0 ? n : 0] = '\0';
+    char *nl = strchr(out, '\n');
+    if (nl)
+        *nl = '\0';
+}
+
+static int be_taking_mark(const char *name)
+{
+    int fd = open(BE_TAKING, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        mkdir(STATE_DIR, 0755);
+        fd = open(BE_TAKING, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    }
+    bool ok = fd >= 0 && write(fd, name, strlen(name)) == (ssize_t)strlen(name) && fsync(fd) == 0;
+    if (fd >= 0)
+        close(fd);
+    sync();
+    return ok ? 0 : -1;
+}
+
+static void be_taking_clear(void)
+{
+    unlink(BE_TAKING);
+    sync();
+}
+
+static bool be_paired(const struct be_file *b, const char *name)
+{
+    for (int k = 0; k < b->n; k++)
+        if (strcmp(b->env[k].name, name) == 0)
+            return true;
+    return false;
+}
+
+/* The environment an interrupted upgrade took and never paired goes,
+ * unless the kernel keeps it for a rollback; with `prune`, the ones
+ * beyond BE_KEEP, oldest first, from both. */
 static void be_sweep(struct rootsnap *rs, struct snaps *s, struct be_file *b, bool prune)
 {
-    for (unsigned i = 0; i < s->n; i++) {
-        const char *nm = s->v[i].name;
-        if (strncmp(nm, "be-", 3) != 0)
-            continue;
-        bool paired = false;
-        for (int k = 0; k < b->n && !paired; k++)
-            paired = strcmp(b->env[k].name, nm) == 0;
-        if (!paired && rootsnap_delete(rs, nm) == 0)
-            say("deleted %s, an environment an interrupted run took and never paired", nm);
-    }
+    char taking[BE_NAME_MAX + 1];
+    be_taking_read(taking);
+    const struct cosmo_fsctl_snap *x = taking[0] ? rootsnap_find(s->v, s->n, taking) : NULL;
+    const uint32_t kept = COSMO_FSCTL_SNAP_F_TARGET | COSMO_FSCTL_SNAP_F_SAFETY | COSMO_FSCTL_SNAP_F_HELD |
+                          COSMO_FSCTL_SNAP_F_LIVE;
+    if (x != NULL && !be_paired(b, taking) && !(x->flags & kept) && rootsnap_delete(rs, taking) == 0)
+        say("deleted %s, an environment an interrupted run took and never paired", taking);
+    if (taking[0])
+        be_taking_clear();
     while (prune && b->n > BE_KEEP) {
         char nm[BE_NAME_MAX + 1];
         snprintf(nm, sizeof(nm), "%s", b->env[0].name);
@@ -1124,7 +1190,9 @@ static void be_sweep(struct rootsnap *rs, struct snaps *s, struct be_file *b, bo
 static void status_envs(struct esp *e)
 {
     struct be_file be;
-    be_load(e, &be);
+    if (be_load(e, &be) < 0)
+        say("boot environments: unknown (%s)", "cosmo-upgrade --prune writes \\cosmo\\be again, empty, keeping "
+            "every snapshot");
     struct set cur = { 0 };
     char curtag[129] = "", rootset[129];
     if (esp_read_set(e, e->set, &cur) == 0)
@@ -1436,17 +1504,60 @@ static int upgrade(const char *dir, bool check, const char *stop)
      * base system beside it, and the snapshot keeps the old one -- with
      * nothing written. A root that keeps no snapshots gets none. */
     struct be_file be;
-    be_load(&e, &be);
+    if (be_load(&e, &be) < 0) {
+        fprintf(stderr, "cosmo-upgrade: what \\cosmo\\be paired is unknown: %s\n", BE_DAMAGED);
+        return EXIT_REFUSED;
+    }
     struct rootsnap rs;
     struct snaps sn = { 0 };
     bool envs = rootsnap_open(&rs, "/") == 0;
+    if (!envs && errno != EOPNOTSUPP) {
+        fprintf(stderr, "cosmo-upgrade: /dev/fsctl: %s; nothing written\n", strerror(errno));
+        return EXIT_REFUSED;
+    }
     char envname[BE_NAME_MAX + 1] = "", dropped[BE_MAX][BE_NAME_MAX + 1];
     int ndropped = 0;
+    char curtag[129], nwtag[129], have[129];
+    manifest_tag(cur.file[3], curtag);
+    manifest_tag(nw.file[3], nwtag);
+    root_set_read(have);
     if (envs) {
         if (rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) < 0) {
             fprintf(stderr, "cosmo-upgrade: the root's snapshots: %s; nothing written\n", strerror(errno));
             return EXIT_REFUSED;
         }
+        /* A root that is not the current set's own -- a rollback pending
+         * that will replace it, or one withdrawn or refused that left the
+         * other half moved -- would be snapshotted under the wrong set and
+         * brought forward from the wrong base system. */
+        if (sn.pool.flags & COSMO_FSCTL_POOL_F_PENDING) {
+            fprintf(stderr, "cosmo-upgrade: a rollback of the root is pending (cosmo-snap list --all): reboot to "
+                            "apply it, or cosmo-snap rollback --cancel; nothing written\n");
+            return EXIT_REFUSED;
+        }
+        if (have[0] && strcmp(have, curtag) != 0) {
+            fprintf(stderr, "cosmo-upgrade: the root holds another set's base system than the current set's (a "
+                            "rollback half done): cosmo-upgrade --repair first; nothing written\n");
+            return EXIT_REFUSED;
+        }
+        /* No environment for a set whose own cosmo-upgrade would refuse
+         * an ESP with \cosmo\be once rolled back to (v1.0.7 and older),
+         * nor one whose snapshot would raise the root past what a kept
+         * set's kernel mounts (B1's lazy raise; pkg's rule, PK11). */
+        int rf = root_format();
+        unsigned kn = kernel_reads(nw.file[0], nw.len[0]), kc = kernel_reads(cur.file[0], cur.len[0]);
+        if (!set_reads_be(&cur)) {
+            say("no boot environment: the current set's cosmo-upgrade predates them; --rollback returns the set "
+                "and the base system only");
+            envs = false;
+        } else if (rf >= 0 && rf < 12 && (kn < 12 || kc < 12)) {
+            say("no boot environment: its snapshot would raise the root to cosmofs format 12, which %s set's "
+                "kernel cannot mount; --rollback returns the set and the base system only",
+                kn < 12 ? "the new" : "the current");
+            envs = false;
+        }
+    }
+    if (envs) {
         be_sweep(&rs, &sn, &be, false);
         free(sn.v);
         if (rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) < 0)
@@ -1465,23 +1576,23 @@ static int upgrade(const char *dir, bool check, const char *stop)
             snprintf(tag, sizeof(tag), "unknown");
         be_name(tag, snaps_taken, &sn, envname);
         /* The root says which set's base system it holds, so that the
-         * environment does: a fresh install, or one upgraded only by
-         * releases older than environments, does not say yet, and the
-         * checks above made it the current set's. */
-        char have[129];
-        root_set_read(have);
+         * environment does: a fresh install does not say yet, and its
+         * base system is the current set's. */
         if (!have[0])
             root_set_mark(cur.file[3]);
+        if (be_taking_mark(envname) < 0) {
+            fprintf(stderr, "cosmo-upgrade: %s: %s; nothing written\n", BE_TAKING, strerror(errno));
+            return EXIT_REFUSED;
+        }
         struct cosmo_fsctl_snap es;
         if (rootsnap_create(&rs, envname, &es) < 0) {
             fprintf(stderr, "cosmo-upgrade: the boot environment %s: %s; nothing written\n", envname,
                     errno == ENOSPC ? "no room on the root" : strerror(errno));
+            be_taking_clear();
             return EXIT_REFUSED;
         }
-        char u[33], curtag[129], nwtag[129];
+        char u[33];
         uuid_hex(es.uuid, u);
-        manifest_tag(cur.file[3], curtag);
-        manifest_tag(nw.file[3], nwtag);
         be_add(&be, envname, u, curtag);
         snprintf(be.intent, sizeof(be.intent), "%s", nwtag);
         while (be.n > BE_KEEP) {
@@ -1489,9 +1600,6 @@ static int upgrade(const char *dir, bool check, const char *stop)
             be_drop(&be, 0);
         }
         say("boot environment %s: the root as it is now, paired with the current set", envname);
-    } else if (errno != EOPNOTSUPP) {
-        fprintf(stderr, "cosmo-upgrade: /dev/fsctl: %s; nothing written\n", strerror(errno));
-        return EXIT_REFUSED;
     }
 
     /* 1. The sweep: what an interrupted run left allocated. */
@@ -1595,6 +1703,8 @@ static int upgrade(const char *dir, bool check, const char *stop)
     rc = sweep_commit(&e);
     if (rc < 0)
         return fail("sweeping the ESP", rc);
+    if (envs)
+        be_taking_clear();   /* paired by the switch */
     if (base_pass(&cur, &nw) < 0)
         return EXIT_FAILED;
     pending_clear();
@@ -1604,10 +1714,8 @@ static int upgrade(const char *dir, bool check, const char *stop)
         else
             say("environment %s is no longer paired but stays: %s", dropped[i], strerror(errno));
     }
-    if (envs) {
-        free(sn.v);
-        rootsnap_close(&rs);
-    }
+    free(sn.v);
+    rootsnap_close(&rs);
     say("upgraded; reboot to run it, then pkg update && pkg upgrade%s%s", envs ? "; --rollback returns to " : "",
         envname);
     free(idx);
@@ -1621,6 +1729,26 @@ stopped:
  * left to the pairing (it is already the intended one, or its rollback is
  * pending). */
 static bool g_set_only;
+
+/* After the root's rollback is armed, the tree it keeps (the safety
+ * snapshot) is fixed: what is written after it is in neither tree. So, as
+ * cosmo-snap rollback does, init is asked to restart now; --no-reboot
+ * leaves that to the operator. */
+static bool g_no_reboot;
+
+static int reboot_to_apply(void)
+{
+    if (g_no_reboot) {
+        say("reboot to run it (what is written before then is not kept)");
+        return EXIT_DONE;
+    }
+    say("rebooting to apply it");
+    fflush(stdout);
+    sync();
+    if (kill(1, SIGTERM) != 0)   /* init restarts on SIGTERM, as BusyBox's reboot asks */
+        return fail("asking init to restart", errno);
+    return EXIT_DONE;
+}
 
 static int rollback(const char *stop)
 {
@@ -1682,13 +1810,29 @@ static int rollback(const char *stop)
     /* The other half (roadmap 1.2 B4): the root, when \cosmo\be pairs the
      * previous set with an environment the root still has. */
     struct be_file be;
-    be_load(&e, &be);
+    if (be_load(&e, &be) < 0) {
+        free(pl);
+        fprintf(stderr, "cosmo-upgrade: whether \\cosmo\\prev has a boot environment is unknown: %s\n", BE_DAMAGED);
+        return EXIT_REFUSED;
+    }
     char prevtag[129], curtag[129];
     manifest_tag(prev.file[3], prevtag);
     manifest_tag(cur.file[3], curtag);
     struct rootsnap rs;
     struct snaps sn = { 0 };
-    bool envs = rootsnap_open(&rs, "/") == 0 && rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) == 0;
+    bool envs = rootsnap_open(&rs, "/") == 0;
+    if (envs && rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) < 0)
+        envs = false;
+    else if (!envs && errno == EOPNOTSUPP)
+        errno = 0;
+    if (!envs && errno != 0) {
+        /* Snapshots the root keeps but that cannot be read now: an
+         * environment may be there, and the set alone is not the rollback
+         * asked for. */
+        free(pl);
+        fprintf(stderr, "cosmo-upgrade: the root's snapshots: %s; nothing written\n", strerror(errno));
+        return EXIT_REFUSED;
+    }
     const struct be_env *env = envs ? be_for_set(&be, prevtag) : NULL;
     const struct cosmo_fsctl_snap *envsnap = envs ? be_snapshot(&sn, env) : NULL;
     bool with_root = !g_set_only && envsnap != NULL;
@@ -1775,6 +1919,19 @@ static int rollback(const char *stop)
                 be_drop(&be, i);
             else
                 i++;
+        /* The tree it keeps, paired at once in a switch of its own: a
+         * crash before the set's switch leaves it an environment --repair
+         * finds, not a snapshot nothing names. */
+        struct edit pe;
+        rc = be_stage(&e, &be, &pe);
+        if (rc == 0)
+            rc = fat_commit(&e.f);
+        if (rc == 0)
+            rc = switch_sector(&e, e.lba, &pe, 1);
+        if (rc == 0 && esp_load(&e, err, sizeof(err)) < 0)
+            rc = -EIO;
+        if (rc < 0)
+            return fail("pairing the kept tree in \\cosmo\\be", rc);
         say("the root rolls back to %s at the next boot; the tree it replaces is kept as %s", target, safety);
         if (stop && strcmp(stop, "record") == 0)
             goto stopped;
@@ -1789,7 +1946,8 @@ static int rollback(const char *stop)
     if (rc < 0)
         return fail("writing \\cosmo\\prev", rc);
     struct edit bed;
-    if (with_root) {
+    bool stage_be = with_root;
+    if (stage_be) {
         rc = be_stage(&e, &be, &bed);   /* the current set's environment, switched with the set */
         if (rc == 0)
             rc = fat_commit(&e.f);
@@ -1808,9 +1966,9 @@ static int rollback(const char *stop)
         sed[i] = (struct edit){ (int)e.set[i].slot, e.pset[i].cluster, e.pset[i].size, NULL, 0 };
     sed[SET_FILES] = (struct edit){ (int)e.sloader.slot, e.ploader.cluster, e.ploader.size, NULL, 0 };
     sed[SET_FILES + 1] = (struct edit){ (int)e.prev.slot, pcl, 0, NULL, 0 };
-    if (with_root)
+    if (stage_be)
         sed[SET_FILES + 2] = bed;
-    rc = switch_sector(&e, e.lba, sed, SET_FILES + 2 + (with_root ? 1 : 0));
+    rc = switch_sector(&e, e.lba, sed, SET_FILES + 2 + (stage_be ? 1 : 0));
     if (rc < 0)
         return fail("switching the boot set", rc);
     say("boot set switched back: %s boots the previous set; the one it replaced is in \\cosmo\\prev", e.dev->name);
@@ -1821,10 +1979,11 @@ static int rollback(const char *stop)
         return EXIT_FAILED;
     }
     rc = finish_ex(&e, &prev, !with_root && !g_set_only);
-    if (rc == EXIT_DONE && with_root)
+    if (rc == EXIT_DONE && with_root) {
         say("rolled back: the boot set now, and the root -- packages, /etc and the base system as they were in %s -- "
-            "at the next boot; reboot to run it", target);
-    else if (rc == EXIT_DONE)
+            "at the next boot", target);
+        return reboot_to_apply();
+    } else if (rc == EXIT_DONE)
         say("rolled back; reboot to run it");
     return rc;
 stopped:
@@ -2213,7 +2372,9 @@ static int list_envs(void)
         return EXIT_FAILED;
     }
     struct be_file be;
-    be_load(&e, &be);
+    if (be_load(&e, &be) < 0)
+        say("what \\cosmo\\be paired is unknown; cosmo-upgrade --prune writes it again, empty, keeping every "
+            "snapshot");
     struct set cur = { 0 }, prev = { 0 };
     char curtag[129] = "", prevtag[129] = "", rootset[129];
     if (esp_read_set(&e, e.set, &cur) == 0)
@@ -2260,18 +2421,25 @@ static int prune(void)
         return EXIT_FAILED;
     }
     struct be_file be;
-    be_load(&e, &be);
+    /* A file that does not parse is written again, empty: the environments
+     * it paired are no longer known as such, and their snapshots all stay
+     * (cosmo-snap list --all names them; cosmo-snap delete removes one). */
+    bool damaged = be_load(&e, &be) < 0;
     struct rootsnap rs;
     struct snaps sn = { 0 };
-    if (rootsnap_open(&rs, "/") < 0 || rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) < 0) {
+    if (!damaged && (rootsnap_open(&rs, "/") < 0 || rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) < 0)) {
         fprintf(stderr, "cosmo-upgrade: the root's snapshots: %s\n", strerror(errno));
         return EXIT_FAILED;
     }
     int before = be.n;
-    be_sweep(&rs, &sn, &be, true);
-    free(sn.v);
-    rootsnap_close(&rs);
-    if (be.n != before && e.has_be) {
+    if (!damaged) {
+        be_sweep(&rs, &sn, &be, true);
+        free(sn.v);
+        rootsnap_close(&rs);
+    }
+    if (damaged)
+        say("\\cosmo\\be written again, empty; every be-* snapshot stays");
+    if ((be.n != before || damaged) && e.has_be) {
         struct edit ed;
         int rc = be_stage(&e, &be, &ed);
         if (rc == 0)
@@ -2322,27 +2490,56 @@ static int repair(void)
         return EXIT_FAILED;
     }
     struct be_file be;
-    be_load(&e, &be);
-    if (!be.intent[0]) {
-        say("no boot environments recorded: nothing to repair");
-        return EXIT_DONE;
+    if (be_load(&e, &be) < 0) {
+        fprintf(stderr, "cosmo-upgrade: the pairing \\cosmo\\be intends is unknown: %s\n", BE_DAMAGED);
+        return EXIT_REFUSED;
     }
     struct set cur = { 0 }, prev = { 0 };
-    char curtag[129] = "", prevtag[129] = "", rootset[129];
+    char curtag[129] = "", prevtag[129] = "", rootset[129], key[17];
     if (esp_read_set(&e, e.set, &cur) < 0)
         return EXIT_FAILED;
+    /* An upgrade or set-only rollback that switched the set and stopped
+     * before its base pass: finished as running cosmo-upgrade again
+     * would, which brings the root to the set (and its record with it). */
+    if (pending_is(cur.file[3])) {
+        say("an earlier run switched to the current set and was interrupted: finishing it");
+        int rc = finish(&e, &cur);
+        set_free(&cur);
+        if (rc != EXIT_DONE)
+            return rc;
+        if (esp_load(&e, err, sizeof(err)) < 0 || esp_read_set(&e, e.set, &cur) < 0) {
+            fprintf(stderr, "cosmo-upgrade: %s\n", err);
+            return EXIT_FAILED;
+        }
+    }
+    if (!be.intent[0]) {
+        set_free(&cur);
+        say("no boot environments recorded: nothing more to repair");
+        return repair_loader();
+    }
     manifest_tag(cur.file[3], curtag);
-    if (e.prev_whole && esp_read_set(&e, e.pset, &prev) == 0)
-        manifest_tag(prev.file[3], prevtag);
     set_free(&cur);
-    set_free(&prev);
     root_set_read(rootset);
     bool esp_ok = strcmp(curtag, be.intent) == 0, root_ok = strcmp(rootset, be.intent) == 0;
     if (esp_ok && root_ok) {
         say("the root and the boot set are the pairing \\cosmo\\be intends: nothing to repair");
         return repair_loader();
     }
-    bool changed = false;
+    /* The set half is checked before the root's rollback is asked for: a
+     * root moved toward a set that then cannot follow is what this ends. */
+    if (!esp_ok) {
+        if (e.prev_whole && esp_read_set(&e, e.pset, &prev) == 0)
+            manifest_tag(prev.file[3], prevtag);
+        int v = prevtag[0] ? set_verify(&prev, true, key, err, sizeof(err)) : -1;
+        set_free(&prev);
+        if (strcmp(prevtag, be.intent) != 0 || v < 0) {
+            fprintf(stderr, "cosmo-upgrade: the intended set is not a verified \\cosmo\\prev%s%s: nothing "
+                            "repaired\n", v < 0 && prevtag[0] && strcmp(prevtag, be.intent) == 0 ? ": " : "",
+                    v < 0 && prevtag[0] && strcmp(prevtag, be.intent) == 0 ? err : "");
+            return EXIT_FAILED;
+        }
+    }
+    bool changed = false, armed = false;
     if (!root_ok) {
         struct rootsnap rs;
         struct snaps sn = { 0 };
@@ -2383,24 +2580,22 @@ static int repair(void)
             if (rc < 0)
                 return fail("writing \\cosmo\\be", rc);
             say("the root rolls back to %s at the next boot; the tree it replaces is kept as %s", target, safety);
-            changed = true;
+            changed = armed = true;
         }
         free(sn.v);
         rootsnap_close(&rs);
     }
     if (!esp_ok) {
-        if (!prevtag[0] || strcmp(prevtag, be.intent) != 0) {
-            fprintf(stderr, "cosmo-upgrade: the intended set is not in \\cosmo\\prev: the boot set is not repaired\n");
-            return EXIT_FAILED;
-        }
         int rc = rollback_set_only();
         if (rc != EXIT_DONE)
             return rc;
         changed = true;
     }
-    if (changed)
-        say("repaired; reboot to run the pairing \\cosmo\\be intends");
-    return repair_loader();
+    int rc = repair_loader();
+    if (rc != EXIT_DONE || !changed)
+        return rc;
+    say("repaired; reboot to run the pairing \\cosmo\\be intends");
+    return armed ? reboot_to_apply() : EXIT_DONE;
 }
 
 /* --after-rollback, from init before any service, at the first boot after
@@ -2422,15 +2617,19 @@ static bool kept_path(const char *p)
 
 static int mkdirs_for(const char *path)
 {
-    char d[1024];
-    snprintf(d, sizeof(d), "%s", path);
+    char *d = strdup(path);
+    if (d == NULL)
+        return -1;
     for (char *s = d + 1; *s; s++)
         if (*s == '/') {
             *s = '\0';
-            if (mkdir(d, 0755) < 0 && errno != EEXIST)
+            if (mkdir(d, 0755) < 0 && errno != EEXIST) {
+                free(d);
                 return -1;
+            }
             *s = '/';
         }
+    free(d);
     return 0;
 }
 
@@ -2446,19 +2645,37 @@ static int copy_file(const char *from, const char *to)
         return -errno;
     }
     int fd = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    bool ok = fd >= 0 && write(fd, data, len) == (ssize_t)len && fsync(fd) == 0;
+    bool ok = fd >= 0;
+    for (size_t off = 0; ok && off < len;) {
+        ssize_t w = write(fd, data + off, len - off);
+        ok = w > 0;
+        off += ok ? (size_t)w : 0;
+    }
+    ok = ok && fsync(fd) == 0;
     if (fd >= 0)
         close(fd);
     free(data);
     return ok ? 0 : -EIO;
 }
 
+static char *path_join(const char *a, const char *b, const char *c)
+{
+    size_t n = strlen(a) + strlen(b) + strlen(c) + 1;
+    char *s = malloc(n);
+    if (s != NULL)
+        snprintf(s, n, "%s%s%s", a, b, c);
+    return s;
+}
+
+/* Exit status 0 only when every file is kept: init keeps the rollback's
+ * hold otherwise (the replaced tree stays undeletable), and the next boot
+ * tries again. `.done` marks a rollback whose files are all kept. */
 static int after_rollback(void)
 {
     struct rootsnap rs;
     struct snaps sn = { 0 };
     if (rootsnap_open(&rs, "/") < 0 || rootsnap_list(&rs, &sn.pool, &sn.v, &sn.n) < 0)
-        return EXIT_DONE;   /* a root without snapshots: no environments */
+        return errno == EOPNOTSUPP ? EXIT_DONE : fail("the root's snapshots", errno);
     const struct cosmo_fsctl_snap *live = NULL, *held = NULL;
     for (unsigned i = 0; i < sn.n; i++) {
         if ((sn.v[i].flags & COSMO_FSCTL_SNAP_F_LIVE) && strncmp(sn.v[i].name, "be-", 3) == 0)
@@ -2491,7 +2708,7 @@ static int after_rollback(void)
     int ws = -1;
     if (pid <= 0 || waitpid(pid, &ws, 0) != pid || ws != 0) {
         fprintf(stderr, "cosmo-upgrade: cosmo-snap diff %s %s failed; the files written after the upgrade are in "
-                        "snapshot %s\n", live->name, held->name, held->name);
+                        "snapshot %s, kept for the next boot to try again\n", live->name, held->name, held->name);
         return EXIT_FAILED;
     }
     uint8_t *text;
@@ -2499,36 +2716,54 @@ static int after_rollback(void)
     if (read_whole(diffs, &text, &len) < 0)
         return fail(diffs, errno);
     unsigned copied = 0, failed = 0;
+    char snapdir[64];
+    snprintf(snapdir, sizeof(snapdir), "/.snapshots/%s", held->name);
     for (size_t pos = 0; pos < len;) {
         char *l = (char *)text + pos;
         char *nl = memchr(l, '\n', len - pos);
         size_t ll = nl ? (size_t)(nl - l) : len - pos;
         pos += ll + 1;
-        if (ll < 3 || (l[0] != '+' && l[0] != 'M') || l[1] != ' ' || ll > 900)
+        if (ll < 3 || (l[0] != '+' && l[0] != 'M') || l[1] != ' ')
             continue;
-        char path[1024], from[1100], to[1300];
-        memcpy(path, l + 2, ll - 2);
-        path[ll - 2] = '\0';
-        if (!kept_path(path))
-            continue;
-        snprintf(from, sizeof(from), "/.snapshots/%s%s", held->name, path);
-        if (lstat(from, &st) != 0 || !S_ISREG(st.st_type))
-            continue;
-        snprintf(to, sizeof(to), "%s%s", dest, path);
-        if (copy_file(from, to) == 0)
-            copied++;
-        else
+        char *path = strndup(l + 2, ll - 2);
+        if (path == NULL) {
             failed++;
+            continue;
+        }
+        char *from = kept_path(path) ? path_join(snapdir, path, "") : NULL;
+        if (kept_path(path) && from == NULL)
+            failed++;
+        if (from != NULL && lstat(from, &st) == 0 && S_ISREG(st.st_type)) {
+            char *to = path_join(dest, path, "");
+            if (to != NULL && copy_file(from, to) == 0)
+                copied++;
+            else
+                failed++;
+            free(to);
+        }
+        free(from);
+        free(path);
     }
     free(text);
     unlink(diffs);
-    mkdirs_for(done);
-    int fd = open(done, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0)
-        close(fd);
+    if (failed) {
+        fprintf(stderr, "cosmo-upgrade: %u of the files written under /root, /home and /var/log after %s was taken "
+                        "could not be copied to %s (%u were); they are in snapshot %s, kept for the next boot to "
+                        "try again\n", failed, live->name, dest, copied, held->name);
+        free(sn.v);
+        rootsnap_close(&rs);
+        return EXIT_FAILED;
+    }
+    int fd = mkdirs_for(done) == 0 ? open(done, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
+    if (fd < 0 || fsync(fd) < 0) {
+        if (fd >= 0)
+            close(fd);
+        return fail(done, errno);
+    }
+    close(fd);
     sync();
-    say("%u file(s) written under /root, /home and /var/log after %s was taken are kept in %s%s", copied, live->name,
-        dest, failed ? " (some could not be copied: they are still in the snapshot until the boot completes)" : "");
+    say("%u file(s) written under /root, /home and /var/log after %s was taken are kept in %s", copied, live->name,
+        dest);
     free(sn.v);
     rootsnap_close(&rs);
     return EXIT_DONE;
@@ -2539,8 +2774,9 @@ static int usage(void)
     fprintf(stderr, "usage: cosmo-upgrade [--check] [--stop-after=written|loader|set] DIR\n"
                     "       cosmo-upgrade [--check] [--stop-after=written|loader|set] --fetch TAG|URL\n"
                     "       cosmo-upgrade --check\n"
-                    "       cosmo-upgrade --rollback [--stop-after=intent|record|set]\n"
-                    "       cosmo-upgrade --list | --status | --repair | --prune\n");
+                    "       cosmo-upgrade --rollback [--no-reboot] [--stop-after=intent|record|set]\n"
+                    "       cosmo-upgrade --repair [--no-reboot]\n"
+                    "       cosmo-upgrade --list | --status | --prune\n");
     return EXIT_USAGE;
 }
 
@@ -2562,12 +2798,16 @@ int main(int argc, char **argv)
             only = argv[i];
         else if (strncmp(argv[i], "--stop-after=", 13) == 0)
             stop = argv[i] + 13;
+        else if (strcmp(argv[i], "--no-reboot") == 0)
+            g_no_reboot = true;
         else if (argv[i][0] == '-' || dir != NULL)
             return usage();
         else
             dir = argv[i];
     }
-    if (only != NULL && (argc != 2))
+    if (only != NULL && argc != 2 + (g_no_reboot ? 1 : 0))
+        return usage();
+    if (g_no_reboot && !roll && !(only && strcmp(only, "--repair") == 0))
         return usage();
     if (stop && !roll && strcmp(stop, "written") != 0 && strcmp(stop, "loader") != 0 && strcmp(stop, "set") != 0)
         return usage();

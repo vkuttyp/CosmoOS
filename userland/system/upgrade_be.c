@@ -93,7 +93,7 @@ int be_parse(const char *text, size_t len, struct be_file *b, char *err, size_t 
 size_t be_format(const struct be_file *b, char *out, size_t cap)
 {
     size_t n = 0;
-    int w = snprintf(out, cap, "cosmo-be 1\n");
+    int w = snprintf(out, cap, "%s", BE_MAGIC);
     if (w < 0 || (size_t)w >= cap)
         return 0;
     n += (size_t)w;
@@ -150,4 +150,13 @@ void be_name(const char *tag, bool (*taken)(const char *name, void *arg), void *
     snprintf(out, BE_NAME_MAX + 1, "%s", base);
     for (int k = 2; taken != NULL && taken(out, arg) && k < 100; k++)
         snprintf(out, BE_NAME_MAX + 1, "%s-%d", base, k);
+}
+
+bool be_aware(const unsigned char *bin, size_t len)
+{
+    size_t m = sizeof(BE_MAGIC) - 1;
+    for (size_t i = 0; i + m <= len; i++)
+        if (bin[i] == BE_MAGIC[0] && memcmp(bin + i, BE_MAGIC, m) == 0)
+            return true;
+    return false;
 }
