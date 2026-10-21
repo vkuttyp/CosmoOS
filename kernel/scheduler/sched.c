@@ -507,9 +507,14 @@ static __noinline void schedule_internal(bool preempt)
 #if CONFIG_SELFTEST
         /* sched-restore-loop's seam: resumed with a reschedule pending, as
          * a wake made while this thread was switched out leaves it, and
-         * with its slice spent so the pass re-queues it behind its partner. */
+         * with its slice spent so the pass re-queues it behind its partner.
+         * Only a resumption the loop below can take spends one: a trap's
+         * preemption returns here with interrupts off in `s`, where
+         * `preempt_point_due` is false, and a tick between the test's arming
+         * and its yield once left a run a trip short (docs/testing/
+         * flakes.md, "sched-restore-loop: one trip short"). */
         struct thread *cur = thread_current();
-        if (cur->test_resume_resched != 0) {
+        if (cur->test_resume_resched != 0 && arch_irq_state_enabled(s)) {
             cur->test_resume_resched--;
             cur->slice_left_ns = 0;
             raw_this_cpu()->need_resched = true;

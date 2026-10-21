@@ -80,9 +80,19 @@ deepest stack the test thread entered `schedule()` on stays within 1,024
 bytes of the test's own frame (room for a yield's frames, or a trap frame
 and the trap return's preemption); it was never inside `schedule()`'s
 interrupts-off body twice; every armed resumption was consumed; and the
-trips counted are at least the 3,200 armed, at least 32 in one call. It
-prints the trips, the cost of one, the depth above its frame and the
-nesting.
+trips counted are at least the 3,200 armed, at least 32 in one call. The
+first run is preempted once from the trap path before its yield -- a
+`sched_preempt()` with interrupts off, as a tick between the arming and
+the yield makes it -- and asserts that preemption spent none of the 32:
+the seam spends only on a resumption whose restore has interrupts on,
+the only kind the loop can take (it once spent one there and left a run a
+trip short, `docs/testing/flakes.md`). It prints the trips, the cost of
+one, the depth above its frame, the nesting and what the forced
+preemption left.
+
+`tools/sched-restore-trap-probe.py` (both architectures): `--old` restores
+the seam that spends at every resumption; the test must fail at the trap
+check with 31 of 32 left; without it, pass with 32.
 
 `tools/sched-restore-loop-probe.py` (negative controls, both
 architectures): `--mode recursive` restores the old structure -- one pass,

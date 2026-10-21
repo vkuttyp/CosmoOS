@@ -3275,3 +3275,12 @@ See the [history index](README.md).
   caller is the foreground (T21); `cosmo-sh` uses it for a foreground
   job's last stage. `spawn-foreground`, `tools/spawn-foreground-probe.py`.
   Report: `docs/audit/2026-10-20-spawn-foreground-report.md`.
+- **sched-restore-loop's seam spent a trap's resumption (2026-10-21).**
+  Main turned red on #425's merge: `sched-restore-loop` one trip short
+  (3199 of 3200), its fifth sighting. A tick between the test's arming
+  and its yield preempted it from the trap's return, with interrupts off;
+  the seam spent an armed resumption there, where the restore loop takes
+  none. The seam now spends only on a resumption whose restore has
+  interrupts on, and the test forces the trap-path preemption once every
+  boot and asserts it spent none. `tools/sched-restore-trap-probe.py`.
+  Report: `docs/audit/2026-10-21-restore-trap-report.md`.
