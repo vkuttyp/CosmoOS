@@ -116,4 +116,33 @@ Matrix on `8fce3c00` (`gmake`, macOS host):
   (`docs/testing/flakes.md`; backlog TEST-18), not on this change's
   path. The step rerun on the head passed.
 
-Branch CI: see the PR.
+Branch CI on `1332bffd` (run for PR #431): every job green.
+
+## Review
+
+- **The console's contract** (Codex, Qodo): `docs/kernel/diagnostics/api.md`
+  still said one call's bytes are not interleaved with another's. It now
+  states the line-at-a-time guarantee (I-DIAG-3 already promised only
+  lines).
+- **A stalled virtio console** (Codex): `vcon_write` spins up to 200 ms
+  for a device that does not return its buffer, then drops the rest of
+  what it was given. Passed a write a line at a time, it would have spun
+  once a line -- `dmesg`'s 32 KiB, hundreds of lines -- where it spun once
+  a write. A sink now sets `dropped` when it gives up, and
+  `console_write` passes it none of the rest of that call (`write_call`,
+  `skip_call`); `vcon_write` sets it at both drops. The self-test
+  `console-sink-drop` registers a sink that drops what it is given: in a
+  write of 8 lines it is given the first only, and the next write again.
+  Folded into the fix commit, so `--old` still reverts one commit.
+- Answered, no change: the probe finds the fix by its subject, which
+  this repository's merge commits keep; the seam is its own commit, and
+  `--old` boots and fails at the check (above); PKG-9 is in this PR at
+  the owner's direction.
+
+On the head after the review: the probes again (fixed: largest hold 48
+bytes, x86_64 28.1 ms, AArch64 26.8 ms; `--old`: console-lines FAIL with
+the whole write in one hold, on both), `console-sink-drop` ok in all four
+boots, release `make test` PASS on both.
+`console-sink-drop` is not vacuous: with `write_call`'s skip removed
+(x86_64 debug `make test`), the dropping sink was given 8 of the 8 lines
+and the test failed at `g_csd_given == 1`.
