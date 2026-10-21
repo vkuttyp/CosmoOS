@@ -229,18 +229,101 @@ leaves either the old set, the new loader with the old set, or the new
 set, and each of them boots. Run the same `cosmo-upgrade` again
 afterwards: it finishes what the interrupted run started.
 
+## Boot environments
+
+From v1.0.8 on, an upgrade can be fully undone. Before it writes
+anything, `cosmo-upgrade` takes a snapshot of the root -- a **boot
+environment**, `be-<release>` -- and pairs it with the boot set it ran on:
+
+```text
+cosmo$ cosmo-upgrade /tmp/up
+...
+cosmo-upgrade: boot environment be-v1.0.8: the root as it is now, paired with the current set
+...
+cosmo-upgrade: upgraded; reboot to run it, then pkg update && pkg upgrade; --rollback returns to be-v1.0.8
+cosmo$ cosmo-upgrade --list
+ENVIRONMENT              SET       SET-ID        SNAPSHOT
+be-v1.0.8                previous  3f2a9c0d1e5b  on the root
+cosmo-upgrade: the root's base system is the current set's
+```
+
+The two newest environments are kept; `cosmo-upgrade --prune` deletes any
+older ones. An upgrade refuses to start, writing nothing, when the root
+lacks the room for one (`not enough space on the root for the boot
+environment: about N KiB needed ..., M KiB free`), while a rollback of the
+root is pending, and when the root is not the current set's own (a
+rollback left half done: `cosmo-upgrade --repair` first).
+
+The upgrade *to* v1.0.8 takes no environment: v1.0.7 and older keep no
+snapshots, and their `cosmo-upgrade` would refuse a system partition
+that records environments once rolled back to. The first upgrade that can
+be fully undone is the one made from v1.0.8. Rolling back past an upgrade
+without an environment returns the set and the base system only, as
+below. For the same reason no environment is taken when its snapshot
+would raise the root to cosmofs format 12 and a kept set's kernel reads
+format 11 at most (`no boot environment: ...`).
+
 ## Rolling back
+
+With a boot environment for the previous set, `--rollback` returns both
+halves -- the boot set now, and the root at the next boot:
 
 ```text
 cosmo$ cosmo-upgrade --rollback
 cosmo-upgrade: verified \cosmo\prev, signed by key ... in /etc/pkg/keys
+cosmo-upgrade: intent recorded: \cosmo\be names the previous set and be-v1.0.8
+cosmo-upgrade: the root rolls back to be-v1.0.8 at the next boot; the tree it replaces is kept as be-v1.0.9
+cosmo-upgrade: boot set switched back: ... boots the previous set; the one it replaced is in \cosmo\prev
+cosmo-upgrade: rolled back: the boot set now, and the root -- packages, /etc and the base system as they were in be-v1.0.8 -- at the next boot
+cosmo-upgrade: rebooting to apply it
+```
+
+It reboots at once, as `cosmo-snap rollback` does: the tree it keeps is
+fixed when the root's rollback is recorded, so what is written after that
+would be in neither (`--no-reboot` leaves the reboot to you, and what is
+written before it is lost). After the reboot the packages, `/etc` and the base system are exactly
+what they were when the environment was taken. Anything else written
+since is gone from the live root -- with one exception: files added or
+changed under `/root`, `/home` and `/var/log` are copied, before any
+service starts, into `/var/lib/cosmo/rollback/<the replaced tree's
+name>/`:
+
+```text
+cosmo-upgrade: 3 file(s) written under /root, /home and /var/log after be-v1.0.8 was taken are kept in /var/lib/cosmo/rollback/be-v1.0.9
+```
+
+If one cannot be copied (no room under `/var`, for one), the boot says
+so, the files stay in the replaced tree, and that tree stays held --
+undeletable, and the only rollback allowed -- until a boot copies them
+all; make the room and reboot.
+
+The whole replaced tree also stays, as the environment `be-v1.0.9`:
+rolling back again goes forward to it.
+
+If the machine stops in the middle, the system still boots -- possibly
+the newer kernel on the older root, or the older kernel on the newer one
+-- and `cosmo-upgrade --repair` finishes what was meant, which
+`\cosmo\be` records before anything moves (it reboots when it asked for
+the root's rollback; otherwise reboot after it). It also finishes an
+upgrade whose base pass was cut short. If `\cosmo\be` itself is damaged,
+the commands that need it refuse, and `cosmo-upgrade --prune` writes it
+again, empty, keeping every `be-*` snapshot (`cosmo-snap list --all`).
+`cosmo-upgrade --status` says when a repair is needed, and when a rollback
+of the root is pending but the last boot did not apply it (init says so
+on the console too).
+
+Without a boot environment for the previous set -- it was installed by
+v1.0.7 or older -- the previous boot set, its loader, its programs and its
+repository come back, and packages that `pkg upgrade` changed stay
+changed:
+
+```text
+cosmo$ cosmo-upgrade --rollback
+cosmo-upgrade: verified \cosmo\prev, signed by key ... in /etc/pkg/keys
+cosmo-upgrade: no boot environment pairs \cosmo\prev with a snapshot of the root ...
 cosmo-upgrade: boot set switched back: ... boots the previous set; the one it replaced is in \cosmo\prev
 cosmo-upgrade: rolled back; reboot to run it
 ```
-
-The previous boot set, its loader, its programs and its repository come
-back. Packages that `pkg upgrade` changed stay changed. A package upgrade
-cannot be rolled back ([Known limitations](limitations.md)).
 
 Rolling back again moves forward again. After a rollback to v1.0.3 the
 system has no `cosmo-upgrade` of its own, so fetch the newer release's

@@ -432,6 +432,7 @@ jobs:
           path: |
             out/${{ matrix.arch }}-release/test-upgrade/*.log
             out/${{ matrix.arch }}-release/test-pkgtx/*.log
+            out/${{ matrix.arch }}-release/test-be/*.log
           if-no-files-found: ignore
 
   # Milestone M5's acceptance (docs/roadmap-1.0.md; docs/boot/testing.md,

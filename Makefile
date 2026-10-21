@@ -314,6 +314,9 @@ test-upgrade:
 		--set $(UPGRADE_SET_DIR) --pub $(UPGRADE_SET_PUB) --arch $(ARCH) --workdir $(OUT)/test-upgrade \
 		--timeout $(BOOT_TIMEOUT)
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) OUT=$(OUT) test-pkgtx
+	$(Q)$(if $(UPGRADE_SET_TAG),true,QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/be_test.py --image $(IMAGE) --set $(UPGRADE_SET_DIR) --key $(MODSIGN_KEY) \
+		--arch $(ARCH) --workdir $(OUT)/test-be --timeout $(BOOT_TIMEOUT))
 
 # Roadmap 1.2 B4's package transactions (PKG-3; tests/boot/pkgtx_test.py,
 # docs/pkg/testing.md, "test-pkgtx"), run by test-upgrade: on this build's

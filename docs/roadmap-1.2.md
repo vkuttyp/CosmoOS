@@ -234,10 +234,11 @@ rescan for virtio-blk).
 
 An upgrade snapshots the root first; `--rollback` returns the boot set
 and that snapshot together, so the packages `pkg upgrade` changed and the
-`/etc` files the new release added are returned too. Absorbs PKG-4,
-PKG-3 (a package transaction is a snapshot), PKG-5.
+`/etc` files the new release added are returned too. Absorbs PKG-4 and
+PKG-3 (a package transaction is a snapshot); it named PKG-5 too, which it
+did not take (below).
 
-- [ ] **Acceptance:** `test-upgrade` gains: upgrade, `pkg upgrade` and a
+- [x] **Acceptance:** `test-upgrade` gains: upgrade, `pkg upgrade` and a
   changed `/etc` file, `cosmo-upgrade --rollback`, reboot; packages,
   `/etc` and the base system are byte for byte the pre-upgrade
   snapshot's, the operator's files written after the upgrade kept in a
@@ -245,7 +246,13 @@ PKG-3 (a package transaction is a snapshot), PKG-5.
   For PKG-3, outside an upgrade: `pkg install a b` killed between the two
   packages leaves, at the next boot, both or neither installed; `pkg
   upgrade` interrupted the same way likewise; `pkg rollback NAME` returns
-  one package to its previous version and its files.
+  one package to its previous version and its files. Done 2026-10-21, PRs
+  #425 (package transactions) and #426 (boot environments), with #428
+  (a cosmofs defect its acceptance test found) and #427 (main red on
+  #425's merge); report
+  `docs/audit/2026-10-20-b4-boot-environments-report.md`. PKG-5 is not
+  absorbed: it needs two releases whose `cosmo-upgrade` differ to test,
+  and stays in the backlog.
 
 ### B5 Encrypted root
 
@@ -264,7 +271,7 @@ pool with forgeable metadata is half a promise.
   and read back.
 
 **Backlog it would absorb.** CFS-1, CFS-2, CFS-3, CFS-5, CFS-6, CFS-7,
-CFS-8, CFS-9, CFS-10, CFS-11, PKG-3, PKG-4, PKG-5, BLK-5, DRV-6 (part),
+CFS-8, CFS-9, CFS-10, CFS-11, PKG-3, PKG-4, PKG-5 (not taken by B4), BLK-5, DRV-6 (part),
 TEST-16 (part). Left for later: CFS-12 (send/receive), CFS-13 (RAID-Z),
 CFS-14 (deduplication).
 
