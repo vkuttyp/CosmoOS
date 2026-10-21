@@ -2767,6 +2767,21 @@ held one report, one probe script and this file. The test itself passed
 is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
+## `test-snapshot`: `init: restart requested` after the prompt, 2026-10-21
+
+One sighting, x86-64, CI run 39533566121 (`install test (x86_64)` on
+#428): `test-snapshot: FAIL: the reboot cosmo-snap asks init for: no
+line matching '^init: restart requested$'`. The serial log
+(`boot-rollback.log`) has the line, after the prompt: `cosmo-snap`
+printed `rebooting to apply it` and exited, the shell printed `cosmo$ `,
+and init's message to SIGTERM landed after it -- `cosmo$ init: restart
+requested`. The reboot itself happened and the next boot was right. Not
+a flake but a test defect: two writers to one console, and the pattern
+assumed init's line starts one. `snapshot_test.py` and the same race in
+`install_test.py` (`init: disk root synced` after `poweroff`) accept the
+prompt before it; every other `^init:` pattern in `tests/boot` matches a
+line init prints before any shell runs.
+
 ## `lxpty` check 35: a continued job's read returned, 2026-10-14
 
 `lxpty: FAIL the session child ended early, status 8960` (exit 35: the

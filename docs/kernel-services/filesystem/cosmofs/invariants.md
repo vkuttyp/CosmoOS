@@ -287,7 +287,11 @@ what is on disk and in the map, or the operation calls `cfs_fail` and no
 commit runs again until unmount. The sites: `extents_store` failing after
 it has started rewriting the map; `inode_sync` failing after the change it
 describes (a block mapped and its predecessor queued free, an entry, a
-link count); a compressed record dropped by `record_write`'s plain
+link count); a write-back that fails partway, whose open inode maps the
+blocks written before the failure and has queued the ones they replaced
+free -- `cfs_writepage` and `cfs_writepages` store the inode on failure
+too (`sync_after_write`), since a vnode released before the retry takes
+an unstored map with it; a compressed record dropped by `record_write`'s plain
 fallback or by `truncate_record` and then only partly rewritten (its
 unwritten blocks would be holes); the checker's orphan repair after
 `cfs_truncate_blocks` queued the frees; and a commit failing after
@@ -299,7 +303,11 @@ did not write. The scrub that found them is in
 `docs/audit/2026-10-17-cosmofs-ordering-report.md`. Check:
 `cosmofs-extent-fail` (a record dropped and then failing on its third
 block: the transaction is abandoned and the committed record reads back
-after a remount; before CF17 the retry committed holes). Gap: the
+after a remount; before CF17 the retry committed holes; and the `evict`
+case, a rewrite failing on its fifth block and released with its retry
+failing too: the check is clean after the next commit and the four pages
+written read back new; before, 6 blocks leaked and 6 were free under the
+committed inode, `tools/cosmofs-partial-write-probe.py`). Gap: the
 `inode_sync`, `extents_store`, checker, create, symlink, bitmap and
 deadlist sites are checked by review, not by a test.
 

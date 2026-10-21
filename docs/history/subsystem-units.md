@@ -3284,3 +3284,12 @@ See the [history index](README.md).
   interrupts on, and the test forces the trap-path preemption once every
   boot and asserts it spent none. `tools/sched-restore-trap-probe.py`.
   Report: `docs/audit/2026-10-21-restore-trap-report.md`.
+- **A write-back that fails partway keeps the map it wrote (2026-10-21).**
+  Found by B4's `test-pkgtx` on a full root: a record whose fifth block
+  found no room had mapped the four before it in the open inode, which
+  `cfs_writepages` stored only after a write that succeeded, so a file
+  released before the retry left those blocks leaked (and, for a
+  rewrite, freed the ones the committed inode still named).
+  `sync_after_write` stores the inode either way (CF17).
+  `cosmofs-extent-fail`'s `evict` case, `tools/cosmofs-partial-write-probe.py`.
+  Report: `docs/audit/2026-10-21-partial-write-report.md`.
