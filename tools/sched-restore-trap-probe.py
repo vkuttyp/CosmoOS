@@ -78,6 +78,8 @@ def main():
         if args.old:
             edit(sched, FIXED, OLD)
         log = os.path.join(work, 'boot.serial')
+        if os.path.exists(log):
+            os.remove(log)   # only this run's boot is read: a build that fails boots nothing
         with open(os.path.join(work, 'boot.result'), 'w') as f:
             built = subprocess.run(['gmake', '-C', tree, '-j6', 'ARCH=' + args.arch, 'BOOT_LOG=' + log, 'test'],
                                    stdout=f, stderr=subprocess.STDOUT).returncode
@@ -92,7 +94,7 @@ def main():
                   info is not None and '; 31 of 32 armed left after a trap' in info)
             print(f'PROBE: {"PASS" if ok else "FAIL"} (required: the trap check, {need}, 31 of 32 left)')
         else:
-            ok = (line is not None and ' ok ' in line + ' ' and info is not None and
+            ok = (built == 0 and line is not None and ' ok ' in line + ' ' and info is not None and
                   '; 32 of 32 armed left after a trap' in info)
             print(f'PROBE: {"PASS" if ok else "FAIL"} (required: {TEST} ok, 32 of 32 left)')
         return 0 if ok else 1
