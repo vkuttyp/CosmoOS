@@ -244,15 +244,51 @@ cosmo-upgrade: upgraded; reboot to run it, then pkg update && pkg upgrade; --rol
 cosmo$ cosmo-upgrade --list
 ENVIRONMENT              SET       SET-ID        SNAPSHOT
 be-v1.0.8                previous  3f2a9c0d1e5b  on the root
-cosmo-upgrade: the root's base system is the current set's
+cosmo-upgrade: the root's base system is the current set's (v1.0.9, 7c41e2b09a5d)
 ```
 
 The two newest environments are kept; `cosmo-upgrade --prune` deletes any
 older ones. An upgrade refuses to start, writing nothing, when the root
 lacks the room for one (`not enough space on the root for the boot
 environment: about N KiB needed ..., M KiB free`), while a rollback of the
-root is pending, and when the root is not the current set's own (a
-rollback left half done: `cosmo-upgrade --repair` first).
+root is pending, and when the root's programs are the previous set's, not
+the current set's (a rollback left half done: `cosmo-upgrade --repair`
+first). What the root holds is told from its files -- `/bin`, `/sbin`,
+`/usr`, `/lib` and the package repository against each kept set's boot
+archive -- not from the record `cosmo-upgrade` keeps of it
+(`/var/lib/cosmo-upgrade/root-set`), which only follows the files.
+
+### After rolling back and forward on v1.0.8
+
+On v1.0.8, `--rollback` to v1.0.7 and then v1.0.7's own `cosmo-upgrade
+--rollback` forward again leave that record naming v1.0.7's set: v1.0.7's
+tool does not keep it. v1.0.8's own `cosmo-upgrade` trusts the record,
+so its next upgrade is refused, and its `--repair` finds nothing to do:
+
+```text
+cosmo-upgrade: the root holds another set's base system than the current set's (a rollback half done): cosmo-upgrade --repair first; nothing written
+```
+
+Run v1.0.9's `--repair` once, from the release's signed package (as for
+v1.0.5 above; it checks against the release key v1.0.8 ships), then
+upgrade as usual. It corrects the record from the root's files and
+changes nothing else:
+
+```text
+cosmo$ mkdir /tmp/up && cd /tmp/up
+cosmo$ wget -q https://vkuttyp.github.io/CosmoOS/releases/v1.0.9/cosmoos-x86_64-cosmo-upgrade.cpk
+cosmo$ pkg install -n ./cosmoos-x86_64-cosmo-upgrade.cpk
+pkg: installing cosmo-upgrade-1.0.9 (3 files)
+cosmo$ tar -xf cosmoos-x86_64-cosmo-upgrade.cpk sbin/cosmo-upgrade
+cosmo$ ./sbin/cosmo-upgrade --repair
+cosmo-upgrade: the root's record named the previous set's (v1.0.7, 1a2b3c4d5e6f) base system, but its files are the current set's (v1.0.8, 3f2a9c0d1e5b): record corrected
+cosmo-upgrade: no boot environments recorded: nothing more to repair
+cosmo$ cd / && cosmo-upgrade --fetch v1.0.9
+```
+
+From v1.0.9 on, `cosmo-upgrade --list` says when the record is wrong,
+naming the set it names and the set the files are; the upgrade corrects
+it by itself.
 
 The upgrade *to* v1.0.8 takes no environment: v1.0.7 and older keep no
 snapshots, and their `cosmo-upgrade` would refuse a system partition
