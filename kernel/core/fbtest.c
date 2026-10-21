@@ -396,3 +396,49 @@ bool selftest_console_lines(const char **reason)
     CHECK(most > 0 && most <= CONSOLE_HOLD_MAX);
     return true;
 }
+
+/*
+ * console-sink-drop: a sink that gives up on part of a write (the virtio
+ * console, when its device does not return a buffer within its spin) is
+ * passed none of the rest of that write, while the other sinks get every
+ * line: a write split into lines must not make a stalled device wait once
+ * a line where it waited once a write. A sink of the test's own drops
+ * every piece that begins with its mark and counts the pieces it is given.
+ */
+#define CSD_MARK "console-sink-drop: "
+#define CSD_LINES 8
+
+static unsigned g_csd_given, g_csd_after;   /* under the console lock */
+
+static void csd_write(struct console_sink *sink, const char *s, size_t len)
+{
+    if (len < sizeof(CSD_MARK) - 1 || memcmp(s, CSD_MARK, sizeof(CSD_MARK) - 1) != 0)
+        return;
+    if (memcmp(s + sizeof(CSD_MARK) - 1, "after", 5) == 0) {
+        g_csd_after++;
+        return;
+    }
+    g_csd_given++;
+    sink->dropped = true;
+}
+
+bool selftest_console_sink_drop(const char **reason)
+{
+    static struct console_sink sink = { .name = "selftest-drop", .write = csd_write };
+    static char buf[CSD_LINES * 64];
+    size_t n = 0;
+    for (int i = 0; i < CSD_LINES; i++)
+        n += (size_t)ksnprintf(buf + n, sizeof(buf) - n, CSD_MARK "line %d of %d, dropped by its sink\n", i + 1,
+                               CSD_LINES);
+    g_csd_given = g_csd_after = 0;
+    console_register(&sink);
+    console_write(buf, n);
+    /* The next write is passed to it again. */
+    console_puts(CSD_MARK "after, a write of its own\n");
+    console_unregister(&sink);
+    kinfo("selftest: console-sink-drop: %d lines in one write; the dropping sink was given %u of them, and %u of the "
+          "next write", CSD_LINES, g_csd_given, g_csd_after);
+    CHECK(g_csd_given == 1);
+    CHECK(g_csd_after == 1);
+    return true;
+}

@@ -100,6 +100,13 @@ CPU meanwhile. One hold for the whole write kept interrupts off for as
 long as fbcon took to draw it (`docs/testing/flakes.md`, the TLB
 shootdown, 2026-10-21).
 
+**`console-sink-drop`** (both architectures, any machine): a sink of the
+test's own drops what it is given; in a write of 8 lines it is given the
+first line only, and the next write again. A write passed a line at a
+time must not make a stalled device -- the virtio console, whose spin
+waits 200 ms for its device -- wait once a line where it waited once a
+write.
+
 **`fb-console`** (both architectures, whenever the machine has a
 display; skipped, as `fb-bench` is, when a display driver's surface holds
 the console, which a display change can free under a pixel read). Everything is checked by reading the pixels back through the

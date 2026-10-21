@@ -19,11 +19,17 @@
 #include <stdbool.h>
 #include <arch/irq.h>   /* arch_irq_state_t, for console_hold */
 #include <stddef.h>
+#include <stdint.h>
 
 struct console_sink {
     const char *name;
     /* Emit `len` bytes. Must be non-blocking beyond polling the device. */
     void (*write)(struct console_sink *sink, const char *s, size_t len);
+    /* Set by write when it gave up on what it was given (a device that
+     * did not answer): the rest of the same console_write is not passed
+     * to it, so a stalled device costs one wait a write, not one a line. */
+    bool dropped;
+    uint64_t skip_call;        /* owned by the console; do not touch */
     struct console_sink *next; /* owned by the console; do not touch */
 };
 
