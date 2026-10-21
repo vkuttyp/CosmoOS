@@ -1551,9 +1551,10 @@ enum extent_fail_layout {
     EF_RECORD,    /* a compressed record over a compressed record: record_write */
     EF_DROPPED,   /* one page that leaves a record incompressible: dropped, then plain */
     EF_CRYPT,     /* EF_PLAIN on an encrypted pool: authenticated entries */
+    EF_EVICT,     /* EF_PLAIN, then closed with the retry failing too: the pages dropped */
 };
 
-static const char *const extent_fail_names[] = { "plain", "record", "dropped", "crypt" };
+static const char *const extent_fail_names[] = { "plain", "record", "dropped", "crypt", "evict" };
 
 #define EF_PAGES 16u   /* two records */
 
@@ -1595,6 +1596,7 @@ static bool extent_fail_case(enum fi_kind kind, enum extent_fail_layout layout, 
     switch (layout) {
     case EF_PLAIN:
     case EF_CRYPT:
+    case EF_EVICT:
         fill_incompressible(a, len, 0x1234567u);
         fill_incompressible(b, len, 0x7654321u);
         break;
@@ -1651,6 +1653,50 @@ static bool extent_fail_case(enum fi_kind kind, enum extent_fail_layout layout, 
         /* Either the old contents or the new, whole: never the record's
          * unwritten blocks read back as holes. */
         EF_CHECK(read_matches(ENG "/f", a, len) || read_matches(ENG "/f", b, len));
+    } else if (layout == EF_EVICT) {
+        /* No retry: the last reference goes with every set_extent
+         * failing, so the release's own write-back fails as well and the
+         * pages are dropped. The blocks the first write-back mapped are
+         * the inode's all the same -- before, the inode was stored only
+         * after a write that succeeded, so a vnode gone before the retry
+         * took the map with it: the four new blocks were nobody's and the
+         * four they replaced were freed under the committed inode. */
+        faultinject_set(kind, 1, 1u << 20, thread_current());
+        file_put(f);
+        f = NULL;
+        faultinject_stats(kind, &fst);
+        faultinject_clear(kind);
+        EF_CHECK(vfs_sync() == 0);
+        struct cosmofs_check_report rep;
+        EF_CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+        kinfo("selftest: cosmofs-extent-fail: evict: release hits %llu; %llu leaked, %llu free-in-use",
+              (unsigned long long)fst.hits, (unsigned long long)rep.alloc_not_seen.count,
+              (unsigned long long)rep.seen_not_alloc.count);
+        EF_CHECK(fst.hits >= 1);
+        EF_CHECK(rep.alloc_not_seen.count == 0 && rep.seen_not_alloc.count == 0);
+        EF_CHECK(rep.clean);
+        EF_CHECK(vfs_umount(ENG) == 0);
+        EF_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+        cosmofs_test_set_writeback(mount_of(ENG), false);
+        /* Each page is the old contents or the new: the first four new,
+         * which the first write-back wrote. */
+        uint8_t *back = kmalloc(len, 0);
+        EF_CHECK(back != NULL);
+        bool whole = vfs_open(NULL, ENG "/f", COSMO_O_RDONLY, 0, &f) == 0 && file_read(f, back, len) == (int64_t)len;
+        unsigned fresh = 0, mixed = 0;
+        for (unsigned p = 0; whole && p < EF_PAGES; p++) {
+            const uint8_t *pg = back + (size_t)p * 4096;
+            if (memcmp(pg, b + (size_t)p * 4096, 4096) == 0)
+                fresh += p < 4;
+            else if (memcmp(pg, a + (size_t)p * 4096, 4096) != 0)
+                mixed++;
+        }
+        kfree(back);
+        if (f) {
+            file_put(f);
+            f = NULL;
+        }
+        EF_CHECK(whole && mixed == 0 && fresh == 4);
     } else {
         /* CF16 on what the next commit would publish. */
         uint64_t bad = 0;
@@ -1700,7 +1746,7 @@ bool selftest_cosmofs_extent_fail(const char **reason)
     static const enum fi_kind kinds[] = { FI_COSMOFS_EXTENT_NOMEM, FI_COSMOFS_EXTENT_FBIG };
     unsigned cases = 0;
     for (unsigned k = 0; k < 2; k++) {
-        for (unsigned l = EF_PLAIN; l <= EF_CRYPT; l++) {
+        for (unsigned l = EF_PLAIN; l <= EF_EVICT; l++) {
             if (l == EF_CRYPT && !random_ready())
                 continue;   /* the no-entropy boot formats no encrypted pool (S18) */
             if (!extent_fail_case(kinds[k], (enum extent_fail_layout)l, reason))

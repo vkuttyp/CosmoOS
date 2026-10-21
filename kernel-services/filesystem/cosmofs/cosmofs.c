@@ -2227,6 +2227,27 @@ static int write_one_page(struct cfs *fs, struct cfs_inode *in, uint64_t index, 
     return data_write_block(fs, in, index, buf, CFS_ALLOC_DATA);
 }
 
+/*
+ * The inode is stored after a write-back whether or not the write
+ * succeeded. One that fails partway -- the fifth block of a record finds
+ * no room -- has mapped the blocks before it in the open inode, and
+ * replaced the ones they displace; only the inode names the new blocks,
+ * and the old ones are already queued free. Left unstored, a vnode that
+ * goes before the retry (its last write-back failing too, the pages
+ * dropped) takes that map with it: the new blocks were nobody's and the
+ * old ones were freed under the committed inode that still named them
+ * (found by test-pkgtx's full root: 3 to 7 leaked blocks). What was
+ * written is the new contents under their own checksums, so it is kept.
+ * An abandoned transaction has nothing to store.
+ */
+static int sync_after_write(struct cfs *fs, struct vnode *vn, int rc)
+{
+    if (rc != 0 && fs->failed)
+        return rc;
+    int src = inode_sync(fs, vn);
+    return rc ? rc : src;
+}
+
 static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
 {
     if (tree_readonly(cfs_of(vn->mnt), vn))
@@ -2238,8 +2259,7 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
     if (rc)
         return rc;
     rc = write_one_page(fs, cfs_inode_of(vn), index, buf);
-    if (rc == 0)
-        rc = inode_sync(fs, vn);
+    rc = sync_after_write(fs, vn, rc);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -2279,8 +2299,7 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
         if (rc == 0)
             *done = 1;
     }
-    if (rc == 0)
-        rc = inode_sync(fs, vn);
+    rc = sync_after_write(fs, vn, rc);
     cfs_unlock_tree(fs);
     return rc;
 }
