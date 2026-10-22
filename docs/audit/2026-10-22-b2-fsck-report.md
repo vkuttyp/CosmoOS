@@ -11,7 +11,7 @@ Planned in three pull requests: the cosmofs defects B2 absorbs (this
 section), fsck and scrub with `make test-fsck` (ticks B2), and the
 v1.0.10 release.
 
-## First pull request: the defects
+## First pull request (#433): the defects
 
 Each fix is one commit, and each has a self-test that fails without it:
 `tools/b2-defects-probe.py --case NAME --old` reverts that commit
@@ -103,7 +103,7 @@ After the fixes: debug `make test` at QEMU_SMP 4 (x86-64) and 2
 (AArch64), `analyze` on both architectures: pass; each fix commit still
 reverts cleanly.
 
-## Second pull request: fsck and scrub as commands
+## Second pull request (#434): fsck and scrub as commands
 
 The design is `design.md`, "fsck and scrub as commands (roadmap 1.2
 B2)"; the invariants CF23 and CF24. In brief:

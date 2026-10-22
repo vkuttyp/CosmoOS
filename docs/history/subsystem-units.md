@@ -3347,7 +3347,7 @@ See the [history index](README.md).
   change to an older version is a downgrade. Report:
   `docs/audit/2026-10-21-console-hold-report.md`.
 - **fsck and scrub as commands (2026-10-22, roadmap 1.2 B2; PRs #433 and
-  the fsck PR).** `fsck.cosmofs [--check|--repair] DEVICE` runs the
+  #434).** `fsck.cosmofs [--check|--repair] DEVICE` runs the
   kernel's checker on an unmounted device through `/dev/fsctl`
   `CHECK_DEV` (a mount no namespace sees; read-only for `--check`, a
   commit only after a repair); init checks the root before mounting it

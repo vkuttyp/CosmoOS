@@ -213,8 +213,8 @@ paths, cosmofs chain cycles).
   named; on a two-way mirror with one member's blocks flipped, `scrub
   --repair` restores them and a second scrub is clean. Done 2026-10-22,
   `make test-fsck` (`tools/cosmofs-damage.py`, 23 damages; CI job
-  `fsck`), PRs #433 (the defects CFS-1, CFS-2, CFS-6, CFS-11) and the
-  fsck and scrub PR; report `docs/audit/2026-10-22-b2-fsck-report.md`.
+  `fsck`), PRs #433 (the defects CFS-1, CFS-2, CFS-6, CFS-11) and #434
+  (fsck and scrub); report `docs/audit/2026-10-22-b2-fsck-report.md`.
   CFS-2's older-format image is not made by the tool (there is no host
   formatter); `cosmofs-version-compress` proves it.
 
