@@ -3199,34 +3199,48 @@ static void cfs_writeback_thread(void *arg)
 }
 
 /*
- * The last failed mount's device, stage and error. One record, not one
- * per device: the check on an unmounted device asks right after its own
- * mount failed, holding the device's claim, so the record it reads is
- * that mount's. Under a spinlock because two mounts of different
- * devices can fail at once.
+ * Failed mounts' stages, by device, for the check on an unmounted device,
+ * which asks right after its own mount failed while it holds the
+ * device's claim. One entry per device and a few of them, so two checks
+ * of different devices failing at once each find their own (Codex on
+ * #434: one shared record lost the first). An entry is taken by the
+ * question, so a stale one cannot answer a later mount.
  */
+#define CFS_FAIL_NOTES 8u
 static spinlock_t g_fail_lock = SPINLOCK_INIT("cosmofs-mount-fail");
-static const struct blkdev *g_fail_bd;
-static unsigned g_fail_stage;
-static int g_fail_rc;
+static struct {
+    const struct blkdev *bd;
+    unsigned stage;
+    int rc;
+} g_fail[CFS_FAIL_NOTES];
+static unsigned g_fail_next;
 
 static void mount_failure_note(const struct blkdev *bd, unsigned stage, int rc)
 {
     spin_lock(&g_fail_lock);
-    g_fail_bd = bd;
-    g_fail_stage = stage;
-    g_fail_rc = rc;
+    unsigned slot = CFS_FAIL_NOTES;
+    for (unsigned i = 0; i < CFS_FAIL_NOTES && slot == CFS_FAIL_NOTES; i++)
+        if (g_fail[i].bd == bd)
+            slot = i;   /* this device's: replaced */
+    if (slot == CFS_FAIL_NOTES)
+        slot = g_fail_next++ % CFS_FAIL_NOTES;
+    g_fail[slot].bd = bd;
+    g_fail[slot].stage = stage;
+    g_fail[slot].rc = rc;
     spin_unlock(&g_fail_lock);
 }
 
 bool cfs_mount_failure(const struct blkdev *bd, unsigned *stage, int *rc)
 {
+    bool mine = false;
     spin_lock(&g_fail_lock);
-    bool mine = g_fail_bd == bd;
-    if (mine) {
-        *stage = g_fail_stage;
-        *rc = g_fail_rc;
-        g_fail_bd = NULL;
+    for (unsigned i = 0; i < CFS_FAIL_NOTES && !mine; i++) {
+        if (g_fail[i].bd != bd)
+            continue;
+        *stage = g_fail[i].stage;
+        *rc = g_fail[i].rc;
+        g_fail[i].bd = NULL;
+        mine = true;
     }
     spin_unlock(&g_fail_lock);
     return mine;
@@ -3271,10 +3285,14 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     if (fs == NULL)
         return -ENOMEM;
     fs->rdonly = (flags & MOUNT_RDONLY) != 0;
+    /* A maintenance mount (cosmofs_check_dev) commits only when its
+     * release decides to: no writeback thread may commit a replay or a
+     * refused repair before then (Codex on #434). */
+    bool detached = (flags & MOUNT_DETACHED) != 0;
     list_init(&fs->bufs);
     mutex_init(&fs->lock, "cosmofs");
     fs->mnt = mnt;
-    fs->wb_enabled = true;
+    fs->wb_enabled = !detached;
     fs->wb_interval_ms = CFS_WB_INTERVAL_MS;
     int rc = pool_open(bdev, &fs->pool);
     if (rc) {

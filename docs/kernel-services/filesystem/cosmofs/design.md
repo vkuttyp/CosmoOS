@@ -1779,7 +1779,11 @@ shell has the pool unmounted. `fsck=check` reports and mounts unless
 something is refused; `fsck=skip` prints `cosmofs: root not checked`. A
 check that cannot run at all (an older kernel without `CHECK_DEV`) is
 said and the root mounted unchecked: a check that cannot ask does not
-take the system away.
+take the system away. A device on which no superblock slot verifies is
+treated the same way (`cosmofs: root not checked: DEVICE holds no
+superblock that verifies`): that is a `root=` naming the wrong disk as
+often as a pool whose two slots rotted, and the mount refuses both with
+the line it always printed.
 
 A pending rollback the boot's own mount then fails to apply (CFS-20: the
 switch needs space the pool does not have) is said where the operator

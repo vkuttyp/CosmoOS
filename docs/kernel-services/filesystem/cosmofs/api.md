@@ -411,8 +411,11 @@ boot's (design.md, "fsck at boot"). `--boot` prints, after those, the one
 line a boot gets (`cosmofs: root checked, N findings, M repaired`, or
 `cosmofs: root refused: ...`) and the inode of each logged repair. Exit
 status: 0 nothing found, 1 all repaired, 4 findings left (`--boot`: the
-pool is refused), 8 the check could not run (`-EBUSY` for a mounted
-device, `-EINVAL` from a kernel without `CHECK_DEV`), 2 usage.
+pool is refused) -- a device class (the superblocks, a mount that stops)
+and `incomplete` (a partial walk with nothing else found) are findings --
+8 the check could not be asked for (`-EBUSY` for a mounted device or a
+mirror one of whose other devices is mounted, `-EINVAL` from a kernel
+without `CHECK_DEV`), 2 usage.
 
 ### `mkfs.cosmofs --mirror` and `fs.scrub_rate`
 `mkfs.cosmofs --mirror A B` makes one pool kept as two copies

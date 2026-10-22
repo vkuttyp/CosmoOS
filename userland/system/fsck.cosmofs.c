@@ -30,8 +30,11 @@
  *   cosmofs: root refused: CLASS[, CLASS...]; DEVICE is not mounted ...
  *
  * Output: the `class` and `finding` lines of fsreport.h. Exit 0 nothing
- * found, 1 all repaired, 4 findings left (--boot: the pool is refused),
- * 8 the check could not run, 2 usage.
+ * found, 1 all repaired, 4 findings left (--boot: the pool is refused) --
+ * a pool whose superblocks or mount stop the check is a finding, by its
+ * class, and so is a walk that could not finish -- 8 the check could not
+ * be asked for (the device is mounted, the kernel has no CHECK_DEV),
+ * 2 usage.
  */
 #include <errno.h>
 #include <stdbool.h>
@@ -159,6 +162,14 @@ static int boot(const char *dev, bool repair)
     if (rc) {
         failed(dev, rc);
         printf("cosmofs: root not checked: %s\n", strerror(-rc));
+        return FSR_FAILED;
+    }
+    /* No slot verifies: not a damaged pool but no cosmofs at all, as far
+     * as a check can tell -- a root= naming the wrong disk. The mount is
+     * left to say so, as it did before there was a check; a pool whose
+     * both slots rotted is refused by that mount just the same. */
+    if (r.dev.flags & COSMO_FSCTL_DEV_F_SUPER_NONE) {
+        printf("cosmofs: root not checked: %s holds no superblock that verifies\n", dev);
         return FSR_FAILED;
     }
     struct fsr_tally t = { 0 };

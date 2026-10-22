@@ -3159,7 +3159,9 @@ int vfs_mount_detached(struct fs_type *fs, struct blkdev *bdev, unsigned flags, 
     KASSERT(g_initialized);
     if (fs == NULL || bdev == NULL)
         return -EINVAL;
-    return do_mount(fs, bdev, flags, out);
+    /* The filesystem commits only when the release says so: no committer
+     * of its own may run first (Codex on #434). */
+    return do_mount(fs, bdev, flags | MOUNT_DETACHED, out);
 }
 
 int vfs_mount_detached_release(struct mount *mnt, bool commit)

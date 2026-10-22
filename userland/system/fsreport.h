@@ -8,15 +8,18 @@
  *   class NAME count N repaired M POLICY
  *   finding NAME KIND ID STATE
  *
- * NAME is a class of `fsreport_classes` or one of the device's
- * (superblock, root, free-record, orphan-record, mount); KIND is block
+ * NAME is a class of `fsreport_classes`, one of the device's
+ * (superblock, root, free-record, orphan-record, snapshots, mount, ...),
+ * or `incomplete` (a partial walk with nothing else found); KIND is block
  * (printed member:block), inode, snapshot, count or object (a class that
  * names blocks and inodes both); STATE is repaired, left or partly (the
  * class was part repaired and the kernel does not say which). POLICY is
  * what a boot does with the class: unattended, logged or refuse.
  *
  * Exit status, fsck's convention: 0 nothing found, 1 everything found was
- * repaired, 4 findings are left, 8 the check could not be run.
+ * repaired, 4 findings are left -- a pool that cannot be mounted, its
+ * class named, and an incomplete walk among them -- 8 the check could not
+ * be asked for (a mounted device, a kernel without it).
  */
 #ifndef FSREPORT_H
 #define FSREPORT_H

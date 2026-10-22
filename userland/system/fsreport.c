@@ -46,6 +46,7 @@ static void refused(struct fsr_tally *t, const char *name)
 
 void fsreport_check(FILE *out, const struct cosmo_fsctl_check *c, struct fsr_tally *t)
 {
+    unsigned long long before = t->findings;
     for (unsigned i = 0; i < c->nclasses && i < COSMO_FSCTL_CLASSES; i++) {
         const struct cosmo_fsctl_class *k = &c->class[i];
         if (k->count == 0)
@@ -69,6 +70,11 @@ void fsreport_check(FILE *out, const struct cosmo_fsctl_check *c, struct fsr_tal
         if (f->policy == FSR_REFUSE)
             refused(t, f->name);
     }
+    /* A walk that stopped before the end (the duplicate-name
+     * confirmations' cap) with nothing else to say has not found the pool
+     * sound: a finding of its own, never "clean" (Codex on #434). */
+    if ((c->flags & COSMO_FSCTL_R_PARTIAL) && t->findings == before)
+        fsreport_device(out, "incomplete", "the-walk-stopped-before-the-end", t);
 }
 
 void fsreport_device(FILE *out, const char *name, const char *what, struct fsr_tally *t)

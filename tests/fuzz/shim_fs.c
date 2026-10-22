@@ -274,6 +274,12 @@ int vfs_mount_detached_release(struct mount *mnt, bool commit)
     return 0;
 }
 
+bool vfs_bdev_mounted(const struct blkdev *bd)
+{
+    (void)bd;
+    return false;
+}
+
 /* --- mutexes: one thread, so ownership is all that is tracked --- */
 
 void mutex_init(struct mutex *m, const char *name)

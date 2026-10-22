@@ -33,7 +33,10 @@
 unsigned g_cosmofs_scrub_rate = COSMOFS_SCRUB_RATE_DEFAULT;
 
 /* The pacing window: the budget is a rate, spent a tenth of a second at
- * a time, so a pause is never long enough to be a stall of its own. */
+ * a time, so a pause is never long enough to be a stall of its own --
+ * and, below ten blocks a second, one block a window of 1/rate seconds
+ * (Codex on #434: a 100 ms window's minimum of one block ran a rate of 1
+ * at 10). */
 #define SCRUB_WINDOW_NS 100000000ull
 #define SCRUB_WINDOWS_PER_S 10u
 
@@ -44,6 +47,8 @@ struct scrub {
     struct cosmofs_scrub_stats st;
     bool repair;
     unsigned quota;           /* blocks a window; 0 = unpaced */
+    uint64_t window_ns;       /* how long a window is */
+    uint64_t *slots;          /* an allocation index's chunk pointers, copied out */
     unsigned used;
     uint64_t window;          /* when this window began */
     uint64_t commits;         /* fs->commits when the walk last looked */
@@ -68,8 +73,8 @@ static bool pace(struct scrub *s)
     struct cfs *fs = s->fs;
     uint64_t spent = clock_since_ns(s->window);
     mutex_unlock(&fs->lock);
-    if (spent < SCRUB_WINDOW_NS)
-        thread_sleep_ms((unsigned)((SCRUB_WINDOW_NS - spent + 999999ull) / 1000000ull));
+    if (spent < s->window_ns)
+        thread_sleep_ms((unsigned)((s->window_ns - spent + 999999ull) / 1000000ull));
     else
         sched_yield();
     mutex_lock(&fs->lock);
@@ -188,8 +193,16 @@ static void scrub_supers(struct scrub *s)
             bad[c] = true;
             nbad++;
         }
-        if (best < 0)
-            continue;   /* no copy holds one: the slot is unused */
+        if (best < 0) {
+            /* No copy holds one. A never-written slot of a young pool;
+             * but the slot this mount's root came from was written, and
+             * then it is lost, not unused (Codex on #434). */
+            if (slot == fs->sb_slot) {
+                kerror("cosmofs: superblock slot %u, the mounted root's, verifies on no copy", slot);
+                tally(s, -EIO, 0, 0);
+            }
+            continue;
+        }
         (void)first_visit(s, dva);
         unsigned fixed = 0;
         if (nbad != 0 && s->repair) {
@@ -212,50 +225,63 @@ static void scrub_alloc(struct scrub *s)
 {
     struct cfs *fs = s->fs;
     for (unsigned v = 0; v < fs->nmembers && !s->stop; v++) {
-        uint64_t root = fs->mem[v].alloc_root;
-        scrub_meta(s, root, CFS_KIND_ALLOCIDX);
-        struct cfs_buf *idx;
-        if (cfs_buf_get(fs, root, CFS_KIND_ALLOCIDX, &idx))
-            continue;
-        const uint64_t *slots = (const uint64_t *)(idx->data + CFS_MHDR_SIZE);
-        for (unsigned c = 0; c < fs->mem[v].nchunks; c++)
-            scrub_meta(s, slots[c], CFS_KIND_BITMAP);
-        cfs_buf_put(fs, idx);
-        (void)pace(s);
+        /* The chunk pointers copied out, so the lock can go between
+         * bitmap blocks (Codex on #434: a large member's whole map was
+         * read in one hold); copied again after a commit, which moves
+         * the chunks it rewrote. */
+        uint64_t copied = 0;
+        for (unsigned c = 0; c < fs->mem[v].nchunks && !s->stop; c++) {
+            if (c == 0 || fs->commits != copied) {
+                uint64_t root = fs->mem[v].alloc_root;
+                scrub_meta(s, root, CFS_KIND_ALLOCIDX);
+                struct cfs_buf *idx;
+                if (cfs_buf_get(fs, root, CFS_KIND_ALLOCIDX, &idx))
+                    break;
+                memcpy(s->slots, idx->data + CFS_MHDR_SIZE, (size_t)CFS_PTRS_PER_BLOCK * sizeof(uint64_t));
+                cfs_buf_put(fs, idx);
+                copied = fs->commits;
+            }
+            scrub_meta(s, s->slots[c], CFS_KIND_BITMAP);
+            (void)pace(s);
+        }
     }
 }
 
 /*
- * Snapshot number `k` (counting from 0 down the list), its blocks of the
- * list scrubbed on the way. Found again from the head every time,
- * because the walk lets the lock go between snapshots and the list may
- * have changed; a list is a few blocks, so that costs little.
+ * The snapshot with the lowest id above `after` (`want`: that one id
+ * exactly), its blocks of the list scrubbed on the way. Found again from
+ * the head every time, because the walk lets the lock go between
+ * snapshots and the list may have changed -- and by id, not by place,
+ * because a deletion meanwhile moves every later entry up one and a
+ * walk by place skips the next (Codex on #434). Ids are unique and never
+ * reused (CF18), so "the next id" is a stable cursor. A list is a few
+ * blocks, so the walks cost little.
  */
-static bool snapshot_at(struct scrub *s, unsigned k, struct cfs_snapshot *out)
+static bool snapshot_find(struct scrub *s, uint64_t after, uint64_t want, struct cfs_snapshot *out)
 {
     struct cfs *fs = s->fs;
     uint64_t blk = fs->sb.snap_root;
-    unsigned guard = 0, seen = 0, slots = cfs_snaplist_slots(fs);
+    unsigned guard = 0, slots = cfs_snaplist_slots(fs);
+    bool found = false;
     while (blk != 0 && guard++ < CFS_SNAP_MAX_CHAIN) {
         scrub_meta(s, blk, cfs_snaplist_kind(fs));
         struct cfs_buf *b;
         if (cfs_buf_get(fs, blk, cfs_snaplist_kind(fs), &b))
-            return false;
+            return found;
         uint64_t next = cfs_snaplist_next(b);
         for (unsigned i = 0; i < slots; i++) {
             struct cfs_snapshot sn;
             if (!cfs_snaplist_get(fs, b, i, &sn) || sn.id == 0)
                 continue;
-            if (seen++ == k) {
+            if (want != 0 ? sn.id == want : sn.id > after && (!found || sn.id < out->id)) {
                 *out = sn;
-                cfs_buf_put(fs, b);
-                return true;
+                found = true;
             }
         }
         cfs_buf_put(fs, b);
         blk = next;
     }
-    return false;
+    return found;
 }
 
 /* The roots of tree `id` (0: the live tree), now. */
@@ -268,13 +294,10 @@ static bool tree_roots(struct scrub *s, uint64_t id, uint64_t *imap_root, uint64
         return true;
     }
     struct cfs_snapshot sn;
-    for (unsigned k = 0; snapshot_at(s, k, &sn); k++) {
-        if (sn.id == id) {
-            cfs_tree_roots(fs, &sn, imap_root, next_ino);   /* a clone's move with the open transaction */
-            return true;
-        }
-    }
-    return false;   /* deleted while the scrub paused */
+    if (!snapshot_find(s, 0, id, &sn))
+        return false;   /* deleted while the scrub paused */
+    cfs_tree_roots(fs, &sn, imap_root, next_ino);   /* a clone's move with the open transaction */
+    return true;
 }
 
 static bool inode_again(struct scrub *s, uint64_t id, uint64_t ino, struct cfs_inode *in)
@@ -376,10 +399,24 @@ static void scrub_tree(struct scrub *s, uint64_t id)
         memcpy(s->inodes, bib->data + CFS_MHDR_SIZE, (size_t)CFS_INODES_PER_BLOCK * CFS_INODE_SIZE);
         cfs_buf_put(fs, bib);
         for (unsigned k = 0; k < CFS_INODES_PER_BLOCK && !s->stop; k++) {
+            uint64_t copied = fs->commits;
             const struct cfs_inode *in = (const struct cfs_inode *)(s->inodes + (size_t)k * CFS_INODE_SIZE);
             if (in->nlink == 0 || in->ino == 0)
                 continue;
             scrub_inode(s, id, in);
+            /* The lock went during that inode and a commit came: the
+             * rest of the block's copies may name what is now another
+             * file's (Codex on #434). Each is read again by number. */
+            if (fs->commits != copied && k + 1 < CFS_INODES_PER_BLOCK) {
+                uint64_t r, ni;
+                bool have = tree_roots(s, id, &r, &ni);
+                for (unsigned j = k + 1; j < CFS_INODES_PER_BLOCK; j++) {
+                    struct cfs_inode *slot = (struct cfs_inode *)(s->inodes + (size_t)j * CFS_INODE_SIZE);
+                    uint64_t ino = bi * CFS_INODES_PER_BLOCK + j;
+                    if (!have || cfs_inode_read_at(fs, r, ni, ino, slot) != 0)
+                        memset(slot, 0, sizeof(*slot));   /* gone, or not readable now: skipped */
+                }
+            }
         }
         (void)pace(s);
     }
@@ -392,7 +429,7 @@ static void scrub_snapshots(struct scrub *s)
 {
     struct cfs *fs = s->fs;
     struct cfs_snapshot sn;
-    for (unsigned k = 0; !s->stop && snapshot_at(s, k, &sn); k++) {
+    for (uint64_t last = 0; !s->stop && snapshot_find(s, last, 0, &sn); last = sn.id) {
         uint64_t dead = sn.deadlist;
         unsigned guard = 0;
         while (dead && guard++ < CFS_SNAP_MAX_CHAIN) {
@@ -423,14 +460,16 @@ int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out, unsigned f
     s.repair = (flags & COSMOFS_SCRUB_REPAIR) != 0 && !fs->rdonly;
     unsigned rate = __atomic_load_n(&g_cosmofs_scrub_rate, __ATOMIC_RELAXED);
     s.st.rate = rate;
-    s.quota = rate == 0 ? 0 : (rate / SCRUB_WINDOWS_PER_S ? rate / SCRUB_WINDOWS_PER_S : 1);
+    s.quota = rate == 0 ? 0 : (rate >= SCRUB_WINDOWS_PER_S ? rate / SCRUB_WINDOWS_PER_S : 1);
+    s.window_ns = rate == 0 || rate >= SCRUB_WINDOWS_PER_S ? SCRUB_WINDOW_NS : 1000000000ull / rate;
     s.page = kmalloc(CFS_BLOCK, 0);
+    s.slots = kmalloc((size_t)CFS_PTRS_PER_BLOCK * sizeof(uint64_t), 0);
     s.inodes = kmalloc((size_t)CFS_INODES_PER_BLOCK * CFS_INODE_SIZE, 0);
     uint64_t t0 = clock_now_ns();
 
     mutex_lock(&fs->lock);
     int rc = fs->failed ? -EIO : 0;
-    if (rc == 0 && (s.page == NULL || s.inodes == NULL || cfs_bits_alloc(&s.done, fs->nblocks) != 0))
+    if (rc == 0 && (s.page == NULL || s.inodes == NULL || s.slots == NULL || cfs_bits_alloc(&s.done, fs->nblocks) != 0))
         rc = -ENOMEM;   /* before the walk, never half way through it */
     if (rc == 0) {
         s.window = clock_now_ns();
@@ -449,6 +488,7 @@ int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out, unsigned f
     cfs_bits_free(&s.done);
     kfree(s.page);
     kfree(s.inodes);
+    kfree(s.slots);
     if (rc)
         return rc;
     s.st.elapsed_ns = clock_since_ns(t0);

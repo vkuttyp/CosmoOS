@@ -6122,7 +6122,8 @@ fail:
  * rewrites them; the one after is clean. A snapshot's own blocks -- the
  * file's old contents, which the live tree no longer reaches -- are
  * scrubbed too. And at a bound of 50 blocks a second the same scrub
- * takes the time its block count says.
+ * takes the time its block count says. And the check of the mirror's
+ * other device is refused while the pool is mounted through the first.
  */
 bool selftest_cosmofs_scrub_modes(const char **reason)
 {
@@ -6191,6 +6192,14 @@ bool selftest_cosmofs_scrub_modes(const char **reason)
     SM_CHECK(floor_ms >= 300);   /* a bound this test could not see would prove nothing */
     SM_CHECK(e.rate == 50 && e.elapsed_ns / 1000000 >= floor_ms);
     SM_CHECK(snapctl(COSMOFS_SNAP_DELETE, "old", NULL, 0, NULL) == 0);
+    /* The mirror is mounted through its first device: a check of the
+     * second, which no mount claims, must not run beside the live
+     * allocator (Codex on #434). */
+    static struct cosmofs_check_report leg;
+    struct cosmofs_dev_report legdev;
+    int lrc = cosmofs_check_dev(bd[1], COSMOFS_CHECK_REPAIR, &leg, &legdev);
+    kinfo("selftest: cosmofs-scrub-modes: the other leg of a mounted mirror: check %d", lrc);
+    SM_CHECK(lrc == -EBUSY);
     SM_CHECK(vfs_umount(ENG) == 0);
     SM_CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd[0]);

@@ -423,15 +423,22 @@ static int64_t fsctl_scrub_ex(struct fsctl_open *o, const struct cosmo_fsctl *cm
         vfs_mount_release(mnt);
         return -EOPNOTSUPP;
     }
+    /* The record first: a repairing scrub that then had nowhere to say
+     * what it repaired would have changed the pool and told nobody
+     * (Codex on #434). */
+    size_t bytes = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_scrub_ex);
+    uint8_t *buf = kzalloc(bytes);
+    if (buf == NULL) {
+        vfs_mount_release(mnt);
+        return -ENOMEM;
+    }
     struct cosmofs_scrub_stats st;
     rc = mnt->fs->scrub(mnt, &st, (cmd->flags & COSMO_FSCTL_F_REPAIR) ? COSMOFS_SCRUB_REPAIR : 0u);
     vfs_mount_release(mnt);
-    if (rc)
+    if (rc) {
+        kfree(buf);
         return rc;
-    size_t bytes = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_scrub_ex);
-    uint8_t *buf = kzalloc(bytes);
-    if (buf == NULL)
-        return -ENOMEM;
+    }
     struct cosmo_fsctl_result *hdr = (struct cosmo_fsctl_result *)buf;
     struct cosmo_fsctl_scrub_ex *x = (struct cosmo_fsctl_scrub_ex *)(buf + sizeof(*hdr));
     x->blocks_read = st.blocks_read;
