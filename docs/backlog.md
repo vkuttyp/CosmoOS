@@ -48,11 +48,11 @@ Open lines (struck lines are not counted):
 | Quiescence | 0 | 0 | 0 | 3 | 3 |
 | Scheduler and SMP | 0 | 0 | 1 | 5 | 6 |
 | Security and isolation | 0 | 10 | 1 | 2 | 13 |
-| Testing and CI | 8 | 0 | 0 | 9 | 17 |
+| Testing and CI | 9 | 0 | 0 | 9 | 18 |
 | Commands | 1 | 0 | 4 | 1 | 6 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **43** | **21** | **48** | **90** | **202** |
+| **all** | **44** | **21** | **48** | **90** | **203** |
 
 ## Block devices
 
@@ -287,6 +287,7 @@ Open lines (struck lines are not counted):
 - **TEST-16** nice-to-have, M. Paths proved by review only: retained-DMA sites, `nvme_probe` after `CC.EN`, the usb-hub worker, CF17's other sites, cosmofs chain cycles. Since roadmap 1.2 B2 the cosmofs chain cycles are covered on the read side (CF24: a `test-fsck` class per walker; the four write-side walkers B2 bounded are checked by review) and `extents_store`/`inode_sync` by `cosmofs-nomem`; CF17's checker, create, symlink, bitmap and deadlist sites remain review-only.
 - **TEST-17** nice-to-have, S. Untested refusals and paths: `switch_root`, partitions removed with bios in flight, halt, `cosmo-upgrade` rerun after `--stop-after=set` and an interruption inside a FAT-chain write, virtio-net probe faults.
 - **TEST-18** correctness, S. Self-tests that wait for the machine-wide thread count (`threads_settle`, `kernel/scheduler/schedtest.c`) fail when a thread elsewhere exits in the window, and the dump cannot name it; `sched-restore-loop` twice on AArch64 (docs/testing/flakes.md). Baseline the identities.
+- **TEST-19** correctness, S. The guide test's `networking.md` fetches `http://example.com/` (and HTTPS), a public site that answered 503 to a CI runner twice on 2026-10-22 and failed main's run and the v1.0.10 release run (docs/testing/flakes.md); the guide can show the command while the test checks a site the project controls, or retries a 5xx.
 
 ## Commands
 
