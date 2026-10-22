@@ -307,9 +307,37 @@ after a remount; before CF17 the retry committed holes; and the `evict`
 case, a rewrite failing on its fifth block and released with its retry
 failing too: the check is clean after the next commit and the four pages
 written read back new; before, 6 blocks leaked and 6 were free under the
-committed inode, `tools/cosmofs-partial-write-probe.py`). Gap: the
-`inode_sync`, `extents_store`, checker, create, symlink, bitmap and
-deadlist sites are checked by review, not by a test.
+committed inode, `tools/cosmofs-partial-write-probe.py`). Since roadmap 1.2 B2
+(CFS-6) `extents_store` and `inode_sync` no longer abandon the
+transaction for an allocation: each takes what it needs before it
+changes anything (`cfs_prep_meta`, `cfs_inode_prepare`; `design.md`,
+"Allocate before the point of no return"), and `cfs_fail` stays behind
+`inode_sync` only for a failure the preparation rules out. Check:
+`cosmofs-nomem` (the chain block a file's eleventh run needs and the map
+path a chown needs each fail once with `-ENOMEM`; the operation reports
+it, the same operation succeeds again, commits, and reads back after a
+remount); `tools/b2-defects-probe.py --case nomem --old` fails at
+`retry == 0`. Gap: the checker, create, symlink, bitmap and deadlist
+sites are checked by review, not by a test.
+
+**CF21. A read-only mount writes nothing.** On a `MOUNT_RDONLY` mount
+no commit publishes, no writeback thread starts, read repair and the
+scrub write no copy, and a pending rollback is not switched to; the
+free- and orphan-record replays run in memory only, and a repairing
+check and a rekey are `-EROFS` (`design.md`, "Read-only mounts"; CFS-1).
+Check: `cosmofs-ro-replay` (a pool with both records pending, mounted
+read-only, checked and unmounted: every block's CRC is what it was, the
+check is clean, repair is `-EROFS`; a writable mount after it writes the
+replay). `tools/b2-defects-probe.py --case ro --old` fails at
+`changed == 0`.
+
+**CF22. A pool is written at its own format.** Nothing this kernel
+writes needs a newer format than the pool's superblock says: no
+compressed record below version 6 (`cfs_create_common`, `record_write`;
+CFS-2), no symlink below 8, no record field below the version that
+added it. Check: `cosmofs-version-compress` (a version-5 pool's new file
+maps plain blocks; the same file at the current version is a record).
+`--case compress --old` fails at `v5 == 0`.
 
 **CF18. From format version 12 a snapshot's identity is its own: every
 snapshot has a uuid no other snapshot of the filesystem has, and no id

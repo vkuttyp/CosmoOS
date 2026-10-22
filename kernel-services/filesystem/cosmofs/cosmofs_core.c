@@ -174,8 +174,12 @@ static void buf_evict_clean(struct cfs *fs)
     }
 }
 
-static struct cfs_buf *buf_alloc(struct cfs *fs, uint64_t blkno)
+/* A buffer not yet in the cache: the half of buf_alloc that can fail,
+ * so a set-aside (cfs_prep_meta) can do it before anything changes. */
+static struct cfs_buf *buf_make(struct cfs *fs, uint64_t blkno)
 {
+    /* A clean buffer goes back first: memory the cache holds for nobody
+     * is what a new buffer should be made from (Codex on #433). */
     buf_evict_clean(fs);
     struct cfs_buf *b = kzalloc(sizeof(*b));
     if (b == NULL)
@@ -188,8 +192,21 @@ static struct cfs_buf *buf_alloc(struct cfs *fs, uint64_t blkno)
     list_init(&b->link);
     b->blkno = blkno;
     b->refs = 1;
+    return b;
+}
+
+/* And the half that cannot. */
+static void buf_insert(struct cfs *fs, struct cfs_buf *b)
+{
     list_push_front(&fs->bufs, &b->link);
     fs->nr_bufs++;
+}
+
+static struct cfs_buf *buf_alloc(struct cfs *fs, uint64_t blkno)
+{
+    struct cfs_buf *b = buf_make(fs, blkno);
+    if (b != NULL)
+        buf_insert(fs, b);
     return b;
 }
 
@@ -244,6 +261,15 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
     }
     *out = b;
     return 0;
+}
+
+/* Whether the open transaction holds `blkno` dirty: written in memory
+ * and not yet on any device, so a read of the device says nothing about
+ * it (the scrub's question). */
+bool cfs_buf_is_dirty(struct cfs *fs, uint64_t blkno)
+{
+    struct cfs_buf *b = buf_find(fs, blkno);
+    return b != NULL && b->dirty;
 }
 
 void cfs_buf_put(struct cfs *fs, struct cfs_buf *b)
@@ -388,6 +414,105 @@ int cfs_buf_cow_exempt(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slo
     return buf_cow(fs, bp, parent_slot, true, res);
 }
 
+static inline bool bit_test(const uint8_t *map, uint64_t i) { return (map[i >> 3] >> (i & 7)) & 1; }
+static inline void bit_set(uint8_t *map, uint64_t i) { map[i >> 3] |= (uint8_t)(1u << (i & 7)); }
+static inline void bit_clear(uint8_t *map, uint64_t i) { map[i >> 3] &= (uint8_t)~(1u << (i & 7)); }
+
+/*
+ * Give back a block this transaction allocated and nothing has named or
+ * written: its bit is cleared now, not at the next commit, so the retry
+ * a set-aside's failure invites finds the space it had (Codex on #433;
+ * a deferred free would hold it allocated until a commit). The on-disk
+ * bitmap never had it.
+ */
+static void alloc_undo(struct cfs *fs, uint64_t dva)
+{
+    uint64_t lin = cfs_dva_lin(fs, dva);
+    if (lin == CFS_DVA_NONE || !bit_test(fs->bitmap, lin))
+        return;
+    bit_clear(fs->bitmap, lin);
+    fs->bitmap_dirty[lin / CFS_BITS_PER_BITMAP] = 1;
+    fs->free_blocks++;
+    fs->mem[CFS_DVA_VDEV(dva)].free_blocks++;
+}
+
+/*
+ * Metadata blocks set aside before a change that must not stop half way
+ * (CF17; CFS-6): each block is allocated and its buffer made now, so the
+ * change itself only takes them and cannot fail. What it does not take
+ * goes back with cfs_prep_release. All or nothing: a failure here gives
+ * back what it had set aside and changes nothing else.
+ */
+int cfs_prep_meta(struct cfs *fs, struct cfs_prep *p, unsigned n)
+{
+    p->n = p->used = 0;
+    if (n > CFS_PREP_MAX)
+        return -EFBIG;
+    for (unsigned i = 0; i < n; i++) {
+        uint64_t got;
+        int rc = cfs_alloc_run(fs, CFS_ALLOC_META, 0, 1, &p->blk[i], &got);
+        if (rc == 0) {
+            p->buf[i] = buf_make(fs, p->blk[i]);
+            if (p->buf[i] == NULL) {
+                alloc_undo(fs, p->blk[i]);
+                rc = -ENOMEM;
+            }
+        }
+        if (rc) {
+            p->n = i;
+            cfs_prep_release(fs, p);
+            return rc;
+        }
+    }
+    p->n = n;
+    return 0;
+}
+
+void cfs_prep_release(struct cfs *fs, struct cfs_prep *p)
+{
+    for (unsigned i = p->used; i < p->n; i++) {
+        kfree(p->buf[i]->data);
+        kfree(p->buf[i]);
+        alloc_undo(fs, p->blk[i]);
+    }
+    p->n = p->used = 0;
+}
+
+/* Copy-on-write into a set-aside block: cfs_buf_cow that cannot fail. */
+void cfs_buf_cow_prep(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot, struct cfs_prep *p)
+{
+    struct cfs_buf *b = *bp;
+    struct cfs_mhdr *h = cfs_buf_hdr(b);
+    if (h->generation == fs->gen) {
+        buf_mark_dirty(fs, b);
+        return;
+    }
+    KASSERT(p->used < p->n);
+    struct cfs_buf *nb = p->buf[p->used];
+    uint64_t nblk = p->blk[p->used++];
+    buf_insert(fs, nb);
+    memcpy(nb->data, b->data, CFS_BLOCK);
+    mhdr_seal(fs, nb->data, h->kind, nblk);
+    buf_mark_dirty(fs, nb);
+    cfs_free_block_deferred(fs, b->blkno);
+    cfs_buf_put(fs, b);
+    *parent_slot = nblk;
+    *bp = nb;
+}
+
+/* A new block from the set-aside: cfs_buf_new that cannot fail. */
+struct cfs_buf *cfs_buf_new_prep(struct cfs *fs, uint32_t kind, struct cfs_prep *p)
+{
+    KASSERT(p->used < p->n);
+    struct cfs_buf *b = p->buf[p->used];
+    uint64_t blk = p->blk[p->used++];
+    buf_insert(fs, b);
+    memset(b->data, 0, CFS_BLOCK);
+    mhdr_seal(fs, b->data, kind, blk);
+    buf_mark_dirty(fs, b);
+    return b;
+}
+
 int cfs_buf_new_at(struct cfs *fs, uint32_t kind, uint64_t blk, struct cfs_buf **out)
 {
     /* Through buf_alloc, not cfs_buf_get: a block just handed out may
@@ -410,9 +535,6 @@ bool cfs_bitmap_test(const struct cfs *fs, uint64_t lin)
     return lin < fs->nblocks && (fs->bitmap[lin / 8] & (1u << (lin % 8))) != 0;
 }
 
-static inline bool bit_test(const uint8_t *map, uint64_t i) { return (map[i >> 3] >> (i & 7)) & 1; }
-static inline void bit_set(uint8_t *map, uint64_t i) { map[i >> 3] |= (uint8_t)(1u << (i & 7)); }
-static inline void bit_clear(uint8_t *map, uint64_t i) { map[i >> 3] &= (uint8_t)~(1u << (i & 7)); }
 
 static void cfs_writeback_thread(void *arg);
 
@@ -443,7 +565,9 @@ static void note_dirty(struct cfs *fs)
 {
     if (fs->first_dirty_ns == 0)
         fs->first_dirty_ns = clock_now_ns();
-    if (fs->wb_thread == NULL && fs->wb_enabled && !fs->wb_stop && fs->mnt && fs->mount_done) {
+    /* A read-only mount never commits, so it has nothing for a committer
+     * to do: its replay's changes stay in memory (CFS-1). */
+    if (fs->wb_thread == NULL && fs->wb_enabled && !fs->wb_stop && fs->mnt && fs->mount_done && !fs->rdonly) {
         fs->wb_thread = thread_create(cfs_writeback_thread, fs, "cfs-wb", SCHED_PRIO_DEFAULT);
         if (fs->wb_thread == NULL) {
             fs->wb_enabled = false;
@@ -823,6 +947,26 @@ int cfs_inode_write(struct cfs *fs, uint64_t ino, const struct cfs_inode *in)
     return 0;
 }
 
+/*
+ * Make an inode's map path writable now, before an operation changes
+ * anything (CFS-6): every block from the root to the inode's slot is
+ * copied into this transaction, so the inode write that ends the
+ * operation only writes into dirty buffers -- which stay cached -- and
+ * cannot fail. The copies say what the old blocks said, so an operation
+ * that stops after this leaves nothing a commit should not publish.
+ */
+int cfs_inode_prepare(struct cfs *fs, uint64_t ino)
+{
+    unsigned tag = CFS_SNAP_TAG(ino);
+    if (tag != 0 && (fs->cur_clone == NULL || fs->cur_clone->id != tag))
+        return -EROFS;   /* as cfs_inode_write refuses it */
+    struct cfs_buf *ib;
+    int rc = inode_block(fs, CFS_INO_OF(ino), true, true, &ib);
+    if (rc == 0)
+        cfs_buf_put(fs, ib);
+    return rc;
+}
+
 int cfs_inode_alloc(struct cfs *fs, uint64_t *ino)
 {
     if (fs->sb.next_ino >= CFS_MAX_INODES)
@@ -1075,7 +1219,8 @@ static int freelog_replay(struct cfs *fs)
         cfs_buf_put(fs, b);
         at = next;
     }
-    if (applied)
+    fs->replay_freed = applied;
+    if (applied && !fs->rdonly)
         kinfo("cosmofs: reclaimed %u block(s) the last commit freed and could not write",
               applied);
     return 0;
@@ -1534,7 +1679,8 @@ static int orphan_replay(struct cfs *fs)
         kfree(inos);
         at = next;
     }
-    if (applied || gone)
+    fs->replay_orphans = applied;
+    if ((applied || gone) && !fs->rdonly)
         kinfo("cosmofs: reclaimed %u inode(s) unlinked with a handle open (%u already gone)", applied, gone);
     if (suspect)
         kerror("cosmofs: the orphan record named %u inode(s) that still have links; run the structural check",
@@ -1573,6 +1719,10 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
         *published = false;
     if (fs->failed)
         return fs->failed;
+    /* A read-only mount writes nothing (CFS-1): what its replay changed
+     * stays in memory, and a writable mount replays it again. */
+    if (fs->rdonly)
+        return 0;
     if (fs->nr_dirty == 0 && fs->nr_pending == 0 && fs->nr_exempt == 0) {
         bool any = false;
         for (unsigned c = 0; c < fs->nr_chunks; c++)
@@ -2319,6 +2469,11 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         token = in.direct[0].start;
         break;
     }
+    case COSMOFS_CORRUPT_ROOT_TYPE:
+        in.mode = CFS_MODE(CFS_TYPE_REG, in.mode & 07777u);
+        rc = cfs_inode_write(fs, ino, &in);
+        token = ino;
+        break;
     case COSMOFS_CORRUPT_NLINK:
         in.nlink++;
         rc = cfs_inode_write(fs, ino, &in);
@@ -2953,18 +3108,37 @@ static int load_root(struct cfs *fs, struct vnode **root)
      * without trying (cosmofs_mount).
      */
     bool switched = false;
-    if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && !fs->rollback_off) {
+    if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && fs->rdonly)
+        kinfo("cosmofs: read-only: a rollback record is in place; a writable mount acts on it");
+    if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && !fs->rollback_off && !fs->rdonly) {
         rc = cfs_rollback_at_mount(fs, &switched);
         if (rc) {
             fs->rollback_failed = true;
             return rc;
         }
     }
+    /*
+     * The root must be a directory -- the one the switch, if any, made
+     * live: the VFS takes that as given (do_mount
+     * asserts it), so a root inode that says otherwise is refused here,
+     * by name, rather than met as a panic. A disk with one changed mode
+     * used to stop the kernel.
+     */
+    struct cfs_inode ri;
+    if (cfs_inode_read(fs, CFS_ROOT_INO, &ri) == 0 && CFS_MODE_TYPE(ri.mode) != CFS_TYPE_DIR) {
+        kerror("cosmofs: generation %llu: the root inode is not a directory (mode 0%o); refusing it",
+               (unsigned long long)fs->sb.generation, ri.mode);
+        return -ENOTDIR;
+    }
     /* After a switch the record is the target's own orphans, which the
      * switch's commit wrote (cosmofs_rollback.c). */
     rc = orphan_replay(fs);
     if (rc)
         return rc;
+    if (fs->rdonly && (fs->replay_freed || fs->replay_orphans))
+        kinfo("cosmofs: read-only: %u block(s) of the free record and %u orphan inode(s) released in memory "
+              "only; a writable mount writes them",
+              fs->replay_freed, fs->replay_orphans);
     return cfs_vnode_get(fs, CFS_ROOT_INO, root);
 }
 
@@ -3011,12 +3185,12 @@ static void cfs_writeback_thread(void *arg)
 static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flags, struct mount *mnt)
 {
     (void)fst;
-    (void)flags;
     if (bdev == NULL)
         return -EINVAL;
     struct cfs *fs = kzalloc(sizeof(*fs));
     if (fs == NULL)
         return -ENOMEM;
+    fs->rdonly = (flags & MOUNT_RDONLY) != 0;
     list_init(&fs->bufs);
     mutex_init(&fs->lock, "cosmofs");
     fs->mnt = mnt;
@@ -3302,6 +3476,8 @@ int cosmofs_rekey(struct mount *mnt, const void *key, size_t len)
         return -EINVAL;
     if (!fs->encrypted)
         return -ENOTSUP;
+    if (fs->rdonly)
+        return -EROFS;
     mutex_lock(&fs->lock);
     int rc = cfs_keys_rotate(fs, key, len);
     mutex_unlock(&fs->lock);

@@ -100,7 +100,7 @@ corruption".
 | `cosmofs_format`, `cosmofs_stats`, `cosmofs_test_discard_on_unmount`, `cosmofs_test_set_writeback`, `cosmofs_test_set_writeback_interval` | `kernel/cosmofs.h` | self-tests |
 | `struct cfs_super`, `cfs_mhdr`, `cfs_inode`, `cfs_extent`, `cfs_dirent`, index helpers | `cosmofs_format.h` | the implementation, `tests/host/test_cosmofs.c` |
 | `cosmofs_scrub`, `cosmofs_check` (+ `struct cosmofs_check_report`, `COSMOFS_CHECK_REPAIR`) | `kernel/cosmofs.h` | the self-tests, the crash suite, and `struct fs_type`'s `check`/`scrub` entries, through which `/dev/fsctl` reaches them; in every build |
-| `cosmofs_test_corrupt` (seventeen named corruptions, `enum cosmofs_corruption`) | `kernel/cosmofs.h` | the checker's tests: each manufactures exactly one finding of a class (testing.md lists which test covers which class) |
+| `cosmofs_test_corrupt` (twenty named corruptions, `enum cosmofs_corruption`) | `kernel/cosmofs.h` | the checker's tests: each manufactures exactly one finding of a class (testing.md lists which test covers which class) |
 | `pool_*` | `kernel/storage.h` | cosmofs (its only I/O path) |
 
 See `design.md` for the layout and the transaction model, and

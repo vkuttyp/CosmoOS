@@ -288,6 +288,56 @@ the last committed root stays current until unmount (invariant CF17). In
 particular a block's checksum entry, which is stored before the mapping
 that names the block, is put back when the mapping fails (CF16).
 
+**Allocate before the point of no return (roadmap 1.2 B2, CFS-6).**
+Abandoning the transaction is the right answer to a failure the
+in-memory state cannot survive, and the wrong one to an allocation a
+retry would get: before B2 a chain block `extents_store` could not have,
+or the inode-map copy `inode_sync` needed, threw away every change since
+the last commit and failed every operation after it with `-EIO` until
+the unmount. Both now take what they need first. `extents_store` reads
+the old chain, sets aside every block its copies and new blocks need
+(`cfs_prep_meta`: blocks allocated, buffers made, nothing changed) and
+only then rewrites the inode's runs and the chain, which cannot fail;
+what it does not take goes back. Every operation that ends in
+`inode_sync` -- create, symlink, unlink, rmdir, rename, a page write,
+truncate, setattr, fsync -- first makes each inode it will store
+writable (`cfs_inode_prepare`: the map path from the root to the slot is
+copied into the transaction, saying what it said before), so the
+`inode_sync` at its end writes only into dirty buffers, which stay
+cached. A failure in either first half is an ordinary error that changed
+nothing; `cfs_fail` stays behind `inode_sync` for a failure that should
+not happen. Because `extents_store` may now fail like that, every caller
+releases the blocks the new map displaces only after it is stored --
+`cfs_truncate_blocks` used to queue them first, which was safe only while
+a failed store abandoned the transaction -- and a truncate prepares its
+inode before the page cache drops anything, since the trim cannot be
+undone (both found by Codex on #433).
+
+## Read-only mounts
+
+A mount with `MOUNT_RDONLY` writes nothing to its devices (CFS-1):
+`cfs_commit` returns without publishing, no writeback thread starts, a
+read that finds a bad mirrored copy answers from a good one and leaves
+the bad one alone (the warning says it was not repaired), the scrub
+repairs nothing, and a pending rollback is not switched to. The
+free-record and orphan replays still run, **in memory**: the bitmap
+loses the freed blocks' bits and the orphans' blocks and slots are
+released in the open transaction, which is never committed. So what a
+reader and the checker see is what a writable mount would see -- the
+checker on a read-only mount does not report a recorded orphan's blocks
+as leaked -- and the mount says what it released and did not write. A
+repairing check and a rekey are refused with `-EROFS`, since their
+changes could only be dropped. This is what lets `fsck.cosmofs --check`
+look at a pool without changing a byte of it.
+
+## The root is a directory
+
+The VFS takes it as given that a filesystem's root is a directory
+(`do_mount` asserts it), so the mount checks: a root inode whose mode
+names another type is refused with `-ENOTDIR`, and the older-slot
+fallback is tried as for any root that does not load. Before B2 one
+changed mode byte on a disk panicked the kernel at the assertion.
+
 ## Format version 8: symbolic links
 
 `CFS_TYPE_LNK` (3) joins `CFS_TYPE_REG` and `CFS_TYPE_DIR` in the mode's
@@ -985,6 +1035,18 @@ inode — its metadata blocks by their own headers, its data blocks
 against its checksum tree. It reports blocks read, blocks repaired, and
 blocks no copy could satisfy. Finding an error there is the same event
 as finding it on a read, except that nobody was waiting for the answer.
+
+A block no copy can satisfy is a **finding, not a failure**: the scrub
+returns 0 whenever its walk ran, and the count says how many (CFS-11;
+before B2 it returned `-EIO`, and `/dev/fsctl`, which publishes no
+result for a failed command, dropped the counts the operator asked
+for). And the scrub checks what is **on the devices**: a metadata block
+the open transaction has rewritten exists only in memory until the
+commit, so its device copies are whatever the block held before and are
+left to the next scrub. Before B2 they were checked, and called
+unrecoverable -- or passed, when a stale block of the same kind and
+address happened to be there, which is how `cosmofs-compress` had been
+passing (`cosmofs-scrub-open`).
 
 ### The structural check
 

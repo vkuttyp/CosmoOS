@@ -76,6 +76,12 @@ writeback thread off so that generation counts are exact.
 | `cosmofs-badmap` | an inode whose two direct runs were swapped and re-sealed reads `-EIO`, not a hole |
 | `cosmofs-symlink` | a link and its target survive a remount with a cold cache; one block per link, returned when it goes |
 | `cosmofs-symlink-version` | a version-7 filesystem mounts and works, and `symlink` is `-EOPNOTSUPP` |
+| `cosmofs-ro-replay` | CF21 (CFS-1): a pool left with a free record and an orphan record pending (a held file unlinked, the eviction dropped by a forced unmount) is mounted `MOUNT_RDONLY`: the check is clean (the replay ran in memory), a repairing check is `-EROFS`, and after the unmount every block's CRC32C is what it was; a writable mount then writes the replay and leaves no orphan record |
+| `cosmofs-version-compress` | CF22 (CFS-2): one compressible record's worth of data on a version-5 pool maps a plain block 0; the same file at the current format is a record (`cosmofs_test_block_of` finds no plain run, the file reads back) |
+| `cosmofs-nomem` | CFS-6: `FI_COSMOFS_CHAIN_NOMEM` fails the chain block a file's eleventh run needs and the write-back is `-ENOMEM`, the retry commits; `FI_COSMOFS_INODE_NOMEM` fails a chown's map path and the chown is `-ENOMEM`, the retry and a sync succeed; a truncate whose chain copy fails is `-ENOMEM` and, after a commit, the check is clean (the dropped run's block was not freed under the old map); the check is clean and the eleven pages and the owner read back after a remount |
+| `cosmofs-root-type` | a root inode whose mode says regular file (`COSMOFS_CORRUPT_ROOT_TYPE`, in both slots' trees) is refused by the mount with `-ENOTDIR` rather than met by the VFS's assertion |
+| `cosmofs-scrub-counts` | CFS-11: a plain data block rotted on a single-device pool: `cosmofs_scrub` returns 0 with one unrecoverable block, and `/dev/fsctl`'s SCRUB succeeds with a record saying so |
+| `cosmofs-scrub-open` | a scrub while a transaction holds a rewritten file's checksum tree in memory (in blocks the young pool never wrote) finds nothing unrecoverable; after the commit neither does the next |
 
 ### The free record (format version 9)
 
@@ -289,6 +295,11 @@ one case).
 
 ## Probes
 
+- `tools/b2-defects-probe.py --case ro|compress|nomem|scrub-counts|root-type|scrub-open [--old] [--arch ...]`:
+  `--old` reverse-applies that fix's whole commit in a throwaway
+  worktree; the case's self-test then fails at its stated check
+  (`root-type`: the kernel stops at the VFS assertion before the test
+  reports; `scrub-open`: `cosmofs-compress` fails with it).
 - `tools/b1-rollback-probe.py [--old] [--arch ...]`: `--old` commits a
   rollback's record on its own before its safety snapshot, in a
   throwaway worktree; `cosmofs-rollback-atomic` then fails at its
@@ -307,15 +318,9 @@ one case).
 - Four of the five walkers that can report `chain_cycle` (the deadlist,
   imap and directory-depth guards) have no test; only the extent
   chain's does.
-- No test mounts an image with a free or orphan record `MOUNT_RDONLY`;
-  by reading the code such a mount commits the replay (`api.md`,
-  `cosmofs_mount`).
-- `cosmofs-v3` writes compressed records into a version-3 image and
-  passes, because this kernel reads them; nothing checks that an older
-  kernel could (`invariants.md`, CF9).
-- `fsctl_selftest` scrubs only a clean filesystem. An unrecoverable
-  scrub through `/dev/fsctl` returns `-EIO` with no result record, and
-  no test covers that path.
+- Nothing checks that an older kernel reads what this one writes into
+  an older-format pool; CF22 is checked against this kernel's own map
+  (`cosmofs-version-compress`).
 - No test drives `cosmofs_format_encrypted` concurrently with another
   format (the key passes through an unlocked global).
 - Files beyond `CFS_MAX_EXTENTS` runs, and files near the checksum

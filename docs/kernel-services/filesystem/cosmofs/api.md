@@ -216,9 +216,12 @@ return `-EIO` without walking when the open transaction is abandoned.
   bad one.
 - Output: `blocks_read`, `inodes`, `repaired`, `unrecoverable`. `out` may
   be NULL.
-- Results: 0; `-EIO` when anything was unrecoverable (`*out` is still
-  filled); `-ENOMEM`; `-EINVAL` for an unmounted mount. Needs no key:
-  it verifies the keyless CRC32C kept beside each authentication tag.
+- Results: 0 whenever the walk ran -- `unrecoverable` counts what no
+  copy could satisfy (CFS-11; it was `-EIO`) -- `-EIO` for an abandoned
+  transaction, `-ENOMEM`, `-EINVAL` for an unmounted mount. A metadata
+  block the open transaction rewrote is skipped: it is not on the
+  devices yet. Needs no key: it verifies the keyless CRC32C kept beside
+  each authentication tag. On a read-only mount nothing is repaired.
 
 #### `int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags)`
 - Purpose: the structural check (`cosmofs_check.c`; `design.md`, "The
@@ -234,6 +237,7 @@ return `-EIO` without walking when the open transaction is abandoned.
   (something was unreadable or the duplicate-name confirmations hit
   their cap of 256 per directory); `clean` (every class empty **and**
   not `partial`); `repair_refused`; `elapsed_ns`.
+- Read-only mount: `COSMOFS_CHECK_REPAIR` is `-EROFS`.
 - Repair: with `COSMOFS_CHECK_REPAIR`, only `alloc_not_seen`, `orphan`,
   `nlink_wrong` and `counter_wrong` are repaired, working from the full
   maps rather than the eight names. If the walk skipped anything
@@ -261,7 +265,7 @@ promise.
 | `cosmofs_test_poison_free_root(bd, v)`, `cosmofs_test_poison_freelog_count(bd, n)` | write a value into slot A's `free_root` word; write a too-large count into the live root's free record (re-sealed) |
 | `cosmofs_test_fail_freelog`, `cosmofs_test_fail_snapfill`, `cosmofs_test_fail_orphan` | make the record fill, deadlist fill or orphan fill return `-EIO` inside the next commit |
 | `cosmofs_test_orphan_add(mnt, ino)` | put a still-linked inode into the orphan set |
-| `cosmofs_test_corrupt(mnt, kind, ino, &what)` | seventeen named corruptions (`enum cosmofs_corruption`); `ino` 0 is accepted only by the whole-filesystem kinds |
+| `cosmofs_test_corrupt(mnt, kind, ino, &what)` | twenty named corruptions (`enum cosmofs_corruption`); `ino` 0 is accepted only by the whole-filesystem kinds |
 | `cosmofs_test_block_of(mnt, ino, lblk, &dva)` | where a logical block lives; `-ENOENT` for a hole |
 | `cosmofs_test_member_free(mnt, vdev)` | free blocks on one member, `UINT64_MAX` past the last |
 | `cosmofs_test_deadlist_len`, `cosmofs_test_deadlist_dups`, `cosmofs_test_snap_root`, `cosmofs_test_snap_walks`, `cosmofs_test_snap_verdicts` | deadlist entries (all, or naming one block); entries whose block another entry names; the snapshot list's head block; list walks and verdicts since mount |
@@ -309,10 +313,9 @@ boot, release included.
 | `COSMO_FSCTL_BOOT_OK` (10) | none; `total` is 1 when a hold was released, 0 when there was none | `-EROFS` on a read-only mount |
 | `COSMO_FSCTL_SNAP_CLONE` (9) | one `struct cosmo_fsctl_snap`: clone `name2` of snapshot `name`, flag `CLONE`, `origin_id` (`design.md`, "Clones") | as CREATE; `-ENOENT` for no such snapshot; `-EINVAL` to clone a clone or for no `name2`; `-EOPNOTSUPP` below format 12 |
 
-Because `cosmofs_scrub` returns `-EIO` whenever `unrecoverable` is
-non-zero, and a failed command leaves no result, an operator never
-receives a SCRUB record with `unrecoverable > 0`: the write fails with
-`-EIO` and the counts are only in the kernel log.
+A SCRUB that met blocks no copy could satisfy succeeds and its record
+says how many (`unrecoverable`); before roadmap 1.2 B2 the write failed
+with `-EIO` and the counts were only in the kernel log (CFS-11).
 
 ### `cosmo-snap(8)`
 `cosmo-snap [-m MOUNTPOINT] create NAME | list | delete NAME | diff A B |
@@ -383,11 +386,11 @@ superblock magic is `"COSMOFS1"`.
 - **Gates.** Fields added by a version are read only when the
   superblock's version is at least that version (`free_root` from 9,
   `orphan_root` from 10, `key_root` from 7, the member table from 4) and
-  written only then. Symlink creation is refused below 8. **Compression
-  is not gated**: `cfs_create_common` gives every new regular file
-  `CFS_COMPRESS_LZ4` whatever the superblock version, so a version-2..5
-  image written by this kernel can hold compressed records its own
-  version does not define. The snapshot list is likewise written into a
+  written only then. Symlink creation is refused below 8. Compression is gated at 6: a new
+  regular file gets `CFS_COMPRESS_LZ4` only from version 6, and
+  `record_write` forms no record below it (CF22; before roadmap 1.2 B2 a
+  version-2..5 image written here could hold records its version does
+  not define, CFS-2). The snapshot list is likewise written into a
   version-2 image on its first snapshot, by design (`design.md`,
   "Format version 3").
 - **Limits.** `CFS_NAME_MAX` 47; `CFS_SNAP_NAME_MAX` 31; `CFS_MAX_INODES`

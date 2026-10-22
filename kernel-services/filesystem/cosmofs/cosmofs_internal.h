@@ -151,6 +151,14 @@ struct cfs {
      * other than answering a question once. */
     uint64_t snap_verdicts;
     int failed;             /* nonzero: the open transaction is abandoned, never committed */
+    /* Mounted read-only (MOUNT_RDONLY): nothing reaches the device -- no
+     * commit, no read repair, no rollback switch. The replay of the free
+     * and orphan records still runs, in memory only, so what a reader or
+     * the checker sees is what a writable mount would see (design.md,
+     * "Read-only mounts"; CFS-1). */
+    bool rdonly;
+    unsigned replay_freed;     /* blocks the mount's free-record replay released */
+    unsigned replay_orphans;   /* inodes its orphan replay released */
     uint64_t commits;
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
     uint64_t csum_failures;
@@ -244,8 +252,23 @@ int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot);
 int cfs_buf_cow_exempt(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot, struct cfs_res *res);
 /* A fresh zeroed dirty buffer at a block the caller already owns. */
 int cfs_buf_new_at(struct cfs *fs, uint32_t kind, uint64_t blk, struct cfs_buf **out);
+/* Metadata blocks set aside before a change that must not stop half way
+ * (CF17; CFS-6, cosmofs_core.c). The bound is the longest extent chain. */
+#define CFS_PREP_MAX (CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 2)
+struct cfs_prep {
+    unsigned n, used;
+    uint64_t blk[CFS_PREP_MAX];
+    struct cfs_buf *buf[CFS_PREP_MAX];
+};
+int cfs_prep_meta(struct cfs *fs, struct cfs_prep *p, unsigned n);
+void cfs_prep_release(struct cfs *fs, struct cfs_prep *p);
+void cfs_buf_cow_prep(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot, struct cfs_prep *p);
+struct cfs_buf *cfs_buf_new_prep(struct cfs *fs, uint32_t kind, struct cfs_prep *p);
+int cfs_inode_prepare(struct cfs *fs, uint64_t ino);
 int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out);   /* fresh zeroed block, dirty */
 void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b);
+/* Dirty in the open transaction: in memory only (the scrub's question). */
+bool cfs_buf_is_dirty(struct cfs *fs, uint64_t blkno);
 
 /* Snapshots (cosmofs_snap.c; design.md, "Format version 3"). */
 int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uint64_t ino,

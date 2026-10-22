@@ -35,6 +35,13 @@ static void scrub_meta(struct cfs *fs, uint64_t dva, uint32_t kind, uint8_t *pag
 {
     if (dva == 0 || !cfs_dva_valid(fs, dva))
         return;
+    /* A block the open transaction wrote is in memory only: its device
+     * copies are whatever the block held before, and checking them would
+     * call a sound block unrecoverable -- or pass it by the luck of a
+     * stale block with the same address and kind. The commit writes it;
+     * the next scrub reads it. */
+    if (cfs_buf_is_dirty(fs, dva))
+        return;
     struct meta_want w = { .dva = dva, .kind = kind };
     unsigned fixed = 0;
     int rc = cfs_verify_all(fs, dva, page, meta_ok, &w, &fixed);
@@ -247,6 +254,10 @@ static void scrub_supers(struct cfs *fs, uint8_t *page, struct cosmofs_scrub_sta
         st->blocks_read++;
         if (nbad == 0)
             continue;
+        if (fs->rdonly) {
+            kwarn("cosmofs: superblock slot %u: %u of %u copies bad; not repaired (read-only)", slot, nbad, copies);
+            continue;
+        }
         unsigned fixed = 0;
         for (unsigned c = 0; c < copies; c++)
             if (bad[c] && pool_write_copy(fs->pool, dva, c, good) == 0)
@@ -295,5 +306,8 @@ int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out)
           (unsigned long long)st.unrecoverable);
     if (out)
         *out = st;
-    return st.unrecoverable ? -EIO : 0;
+    /* A block no copy could satisfy is a finding, as a check's are: the
+     * pass ran and the counts say what it found. -EIO here made fsctl
+     * drop the counts the operator asked for (CFS-11). */
+    return 0;
 }

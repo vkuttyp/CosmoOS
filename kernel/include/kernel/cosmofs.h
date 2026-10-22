@@ -71,9 +71,10 @@ struct cosmofs_scrub_stats {
 };
 /* Read every block the filesystem reaches through the ordinary
  * verifying path, repairing a mirrored member where a copy has rotted.
- * -EIO when something was unrecoverable (the counts still say what),
- * -EINVAL for a mount that is not a cosmofs. Sleeps; takes the mount's
- * lock for the whole walk. */
+ * 0 whenever the walk ran -- `unrecoverable` counts what no copy could
+ * satisfy (CFS-11) -- -EIO for an abandoned transaction, -EINVAL for a
+ * mount that is not a cosmofs. Sleeps; takes the mount's lock for the
+ * whole walk. */
 int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out);
 
 /* --- the structural check (docs/audit/next-subsystem-fsck.md) ---------------
@@ -269,6 +270,7 @@ enum cosmofs_corruption {
                                      * cannot see (next-subsystem-fsck-unchecked.md) */
     COSMOFS_CORRUPT_SNAP_UUID,      /* v12: zero the uuid of the list head's first snapshot */
     COSMOFS_CORRUPT_ROLLBACK_CRC,   /* v12: flip a byte of the rollback record's own checksum */
+    COSMOFS_CORRUPT_ROOT_TYPE,      /* the named inode (the root, 1) says it is a regular file */
 };
 int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what);
 /* Test hook: where an inode's logical block actually lives, as a DVA;
