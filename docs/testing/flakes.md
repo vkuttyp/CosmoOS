@@ -2844,7 +2844,11 @@ loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
 ## The guide's `wget http://example.com/`: the site answered 503, 2026-10-22
 
-Two sightings, both on 2026-10-22, on two runner types; backlog TEST-19.
+Two sightings, both on 2026-10-22, on two runner types; backlog TEST-19,
+done by PR #438: the step that must pass now fetches the project's own
+`releases/LATEST` from GitHub Pages, `example.com` is an `optional` block
+(`tests/guide/run_guide.py` warns and goes on), and any console command
+answered `HTTP/1.x 5NN` is typed again up to three times.
 
 The second: release run 39813732868 attempt 1 (`v1.0.10`, `c832d0b6`),
 `guide (macos, aarch64)`, at 16:31 UTC: the same line, `networking.md:113`,

@@ -43,7 +43,10 @@ types each CosmoOS command at its prompt and requires the output shown
 both architectures on every pull request, so a change that makes a
 Linux step wrong fails there; `guide-macos` runs the macOS steps on a
 macOS runner on every push to main; and the release workflow runs both
-against the signed images before it publishes them.
+against the signed images before it publishes them. The fetches from the
+internet check the project's own site; the one from `example.com`, a
+site the project does not run, only warns when it fails, and a fetch
+answered with a server error (5xx) is tried again, up to three times.
 
 Upgrading's steps are the exception: they need an older release installed
 first, so the runner cannot run them. `make test-upgrade` runs them instead
