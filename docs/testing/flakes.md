@@ -51,6 +51,13 @@ passed. The serial (kept in the matrix's log) has the first sighting's
 signature: the child, pid 243, exited with status 7, then its parent,
 pid 242, with status 9 -- an exit reported before the unreported
 continue, as above. Still out of scope.
+**Third sighting, 2026-10-23:** AArch64 debug at `QEMU_SMP=1`, roadmap
+1.2 B3's first PR (`0bf0d0ce`) in its local matrix, `selftest: signal
+probe 'signal-stop' failed check 9`, the same signature: the child, pid
+251, exited with status 7 before its parent, pid 250, with status 9. The
+host was loaded (load average 98 a few minutes later, Docker's VM at
+625 % CPU and another QEMU). The rerun on the same commit on a quiet
+host (load 2) passed. Backlog LX-1.
 
 **Observed once, x86-64 `module-unload-busy` (2026-10-09):**
 `/tmp/cosmo-unit2-ahci-stop-fixed-x86.result` reports the check
@@ -3599,6 +3606,19 @@ boot with nothing extra on A. The unlocked hint counts a yielding CPU
 twice between `enqueue(prev)` and `rq->current = next`. So the test
 passed a balancer lowered to a threshold of one on aarch64, calling 12
 moves "not asserted".
+
+## `syscall-fuzz` over its own bound, 2026-10-23
+
+One sighting, local AArch64 `make test-harness-retry` (the hbreak
+build), roadmap 1.2 B3's first PR (`0bf0d0ce`): `syscall-fuzz ... FAIL:
+check failed: clock_since_ns(t0) < 15000000000ULL at line 263 (17509
+ms)`, with `[WATCHDOG] no progress for 8004 ms` and the per-test budget
+line. Mechanism: the host. Docker Desktop's Apple Virtualization VM had
+started eight minutes before and ran at 625 % of this 8-CPU machine
+(`ps`), beside another QEMU; the load average was 98 just after the
+boot. The rerun on the same commit, on a quiet host (load 2), passed in
+159.1 s. Not a CosmoOS defect and not a bound to widen: the bound is
+what the test claims on a machine that is not running another VM.
 
 ## `syscall-fuzz` over the per-test budget, second sighting, 2026-09-29
 

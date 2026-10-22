@@ -140,7 +140,7 @@ Open lines (struck lines are not counted):
 
 ## Linux personality
 
-- **LX-1** correctness, S. `waitpid(WCONTINUED)` can miss a continue when the child exits at once (`child_event_locked` tests EXITED first; flakes.md, two sightings).
+- **LX-1** correctness, S. `waitpid(WCONTINUED)` can miss a continue when the child exits at once (`child_event_locked` tests EXITED first; flakes.md, three sightings).
 - **LX-2** correctness, S. Linux fork copies SysV shm attach records after the space; a concurrent `shmat`/`shmdt` can split record and mapping.
 - **LX-3** correctness, S. `nanosleep` restarted after a stop sleeps its whole duration again, not the remainder.
 - **LX-4** correctness, S. `dup2` to a slot at or above `RLIMIT_NOFILE` succeeds where Linux returns `EBADF`.
