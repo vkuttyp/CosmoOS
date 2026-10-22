@@ -1187,7 +1187,9 @@ static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk,
  */
 static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n)
 {
-    if (n > 1 && in->compress_algo == CFS_COMPRESS_LZ4) {
+    /* And the format again, for a file an older kernel of this family
+     * created with the flag on a pool below version 6 (CFS-2). */
+    if (n > 1 && in->compress_algo == CFS_COMPRESS_LZ4 && fs->sb.version >= 6) {
         /* Room for one block less than it takes now: a record that
          * compresses to the same number of blocks has cost work and
          * saved nothing, and would have to be decompressed on every
@@ -1678,8 +1680,10 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
      * CRC would say a block is intact, not that it is the one written. */
     in.csum_algo = fs->encrypted ? CFS_CSUM_POLY1305 : CFS_CSUM_CRC32C;
     /* Regular files compress; a directory's blocks are written one at a
-     * time and a record cannot be formed from them. */
-    in.compress_algo = type == CFS_TYPE_REG ? CFS_COMPRESS_LZ4 : CFS_COMPRESS_NONE;
+     * time and a record cannot be formed from them. Not below format 6,
+     * which added records: a version-2..5 pool written here must stay
+     * readable by the kernels of its version (CFS-2). */
+    in.compress_algo = type == CFS_TYPE_REG && fs->sb.version >= 6 ? CFS_COMPRESS_LZ4 : CFS_COMPRESS_NONE;
     in.mtime_ns = in.ctime_ns = vfs_now_ns();
     rc = cfs_inode_write(fs, ino, &in);
     if (rc == 0) {
