@@ -6872,6 +6872,7 @@ bool selftest_cosmofs_resilver(const char **reason)
 {
     struct blkdev *bd[2] = { NULL, NULL };
     uint8_t *x = kmalloc(CFS_BLOCK, 0), *y = kmalloc(CFS_BLOCK, 0);
+    uint32_t limit = g_pool_fault_errors;
     bool ok = false;
     static char data[5 * 4096], during[4096];
     memset(data, 'r', sizeof(data));
@@ -6920,16 +6921,31 @@ bool selftest_cosmofs_resilver(const char **reason)
     struct cosmofs_scrub_stats sc;
     RS_CHECK(cosmofs_scrub(mount_of(ENG), &sc, 0) == 0 && sc.bad_copies == 0 && sc.unrecoverable == 0);
 
+    /* Holes: writes copy 1 fails while copy 0 takes them, below its fault
+     * count. It stays ONLINE with holes, the member not whole; the
+     * resilver fills them and nothing else. */
+    g_pool_fault_errors = 1000;
+    ramblk_set_fail(bd[1], -EIO);
+    RS_CHECK(write_file(ENG "/holes", data, sizeof(data)) && vfs_sync() == 0);
+    ramblk_set_fail(bd[1], 0);
+    g_pool_fault_errors = limit;
+    RS_CHECK(cp->state == POOL_COPY_ONLINE && pool_copy_any_missed(pool, 0, 1) && pool_degraded(pool));
+    RS_CHECK(read_matches(ENG "/holes", data, sizeof(data)));
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 0) == 0);
+    RS_CHECK(cp->state == POOL_COPY_ONLINE && !pool_copy_any_missed(pool, 0, 1) && !pool_degraded(pool));
+    RS_CHECK(vfs_sync() == 0 && same_allocated(bd[0], bd[1], NULL));
+
     /* The rebuilt device alone holds the pool. */
     RS_CHECK(vfs_umount(ENG) == 0);
     ramblk_set_fail(bd[0], -ENODEV);
     RS_CHECK(vfs_mount(ENG, "cosmofs", bd[1], 0) == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
     RS_CHECK(read_matches(ENG "/a", data, sizeof(data)) && read_matches(ENG "/b", data, sizeof(data)));
-    RS_CHECK(read_matches(ENG "/during", during, sizeof(during)));
+    RS_CHECK(read_matches(ENG "/during", during, sizeof(during)) && read_matches(ENG "/holes", data, sizeof(data)));
     ok = true;
     kinfo("selftest: cosmofs-resilver: %u blocks the same on both copies; a write during it reached both", compared);
 out:
+    g_pool_fault_errors = limit;
     cosmofs_test_resilver_hold(false);
     kfree(x);
     kfree(y);

@@ -2048,6 +2048,11 @@ readers run.
 - **The cursor survives a reboot.** It is in the record, which every
   `RS_RECORD_BLOCKS` (2048) blocks copied makes a commit due for; a
   mount finds the target by its tag and goes on from the cursor.
+- **Holes.** An `ONLINE` copy with holes is a target too, after every
+  `RESILVERING` one, when its member has another `ONLINE` copy: the walk
+  copies its holed regions, and a region's bit goes only when the whole
+  region is copied and no write to the copy failed meanwhile, since the
+  copy is read from everywhere else. It stays `ONLINE` throughout.
 - **Failures.** A target whose writes fail is counted and faulted like
   any copy; the resilver stops with it. A pass that ends with bits set
   again (a write failed in a region already done) goes round once more.

@@ -274,10 +274,11 @@ static bool rs_step(struct cfs *fs, uint8_t *buf, struct cfs_pace *pace, uint64_
          * goes as the region begins (above). */
         if (online && (cp->cursor % rb == 0 || cp->cursor >= end) && cp->write_errors == fs->rs_region_errors)
             pool_region_clear(p, v, c, r);
-        if (blk < fs->mem[v].first_usable)
-            continue;   /* the superblocks or the label: last (rs_finish) */
+        bool fixed = blk < fs->mem[v].first_usable;   /* the superblocks or the label */
+        if (fixed && !online)
+            continue;   /* a rebuilding copy takes them last (rs_finish); an ONLINE one's are as any hole */
         uint64_t dva = CFS_DVA(v, blk);
-        if (!cfs_bitmap_test(fs, cfs_dva_lin(fs, dva)))
+        if (!fixed && !cfs_bitmap_test(fs, cfs_dva_lin(fs, dva)))
             continue;   /* free: nothing to copy */
         int rc = pool_read(p, dva, buf);
         if (rc == 0)
