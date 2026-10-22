@@ -269,8 +269,10 @@ the origin's.
 Roadmap 1.2 B2's acceptance test, `tests/boot/fsck_test.py`, in CI's
 `fsck` job on both architectures (release builds). It installs as
 `test-install` does, then a preparation boot gives the root a tree under
-`/fsck` (files `a` to `f`, `dir/x`, and `sparse`: eight random blocks,
-one plain run, and one block twelve on), takes a snapshot `fsckbase` (format 12)
+`/fsck` (files `a` to `f`, `dir/x`, and `sparse`: eight blocks of gzip
+output and one twelve blocks on, at least two plain runs; `extent-overlap`
+makes its own two-block run from two new blocks, so the damage does not
+depend on how the allocator laid the file out), takes a snapshot `fsckbase` (format 12)
 and removes a file after it, so the snapshot has a deadlist. That disk
 is the base; the boot's check of it must say `cosmofs: root checked, 0
 findings, 0 repaired`.

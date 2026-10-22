@@ -85,7 +85,7 @@ CLASSES = {
     "cycle-directory": ("/fsck/dir given an entry naming /fsck, its parent", ["bad-entry", "nlink"]),
     "unreadable": ("/fsck/dir's directory block rotted under its checksum", ["unreadable"]),
     "extent-order": ("/fsck/sparse's two runs swapped", ["extent-order"]),
-    "extent-overlap": ("/fsck/sparse's run after its long one moved into it", ["extent-overlap"]),
+    "extent-overlap": ("/fsck/sparse's first run made two new blocks, its second moved inside them", ["extent-overlap", "leaked"]),
     "dup-name": ("/fsck/f renamed e in place, beside /fsck/e", ["dup-name"]),
     "snap-identity": ("the first snapshot's uuid zeroed", ["snap-identity"]),
     "rollback-record": ("a pending rollback record naming a snapshot that is not there", ["rollback-record"]),
@@ -288,6 +288,13 @@ class Pool:
         else:
             b[MHDR + i // 8] &= ~(1 << (i % 8)) & 0xFF
         self.seal(chunk, b)
+
+    def free_pair(self):
+        m = self.members()[0]
+        for blk in range(m["nblocks"] - 2, m["first_usable"], -1):
+            if not self.bit(blk) and not self.bit(blk + 1):
+                return blk
+        raise Bad("no two adjacent free blocks")
 
     def free_block(self):
         m = self.members()[0]
@@ -521,17 +528,24 @@ def damage(p, cls):
         r = inode.runs()
         if cls == "extent-order":
             if len(r) < 2:
-                raise Bad("/fsck/sparse needs two runs")
+                raise Bad(f"/fsck/sparse needs two runs; its runs: {r}")
             inode.direct[0], inode.direct[1] = inode.direct[1], inode.direct[0]
             p.put_inode(ino, inode)
             return f"inode {ino} runs 0 and 1 swapped: {inode.direct[0]} {inode.direct[1]}"
-        # The run after the first of two blocks or more starts inside it.
-        k = next((i for i in range(len(r) - 1) if not r[i][1] & EXT_COMPRESSED and r[i][1] >= 2), None)
-        if k is None:
-            raise Bad("/fsck/sparse needs a run of two blocks or more with a run after it")
-        inode.direct[k + 1][2] = inode.direct[k][2] + 1
+        # A run of two blocks the second run starts inside. The allocator
+        # lays a file out differently from one machine to the next, so
+        # the two-block run is made here: two adjacent free blocks,
+        # allocated, as run 0 (whose old block is then leaked, which a
+        # repair frees), and run 1 moved to start at its second block.
+        if len(r) < 2 or r[0][1] & EXT_COMPRESSED or r[1][1] & EXT_COMPRESSED:
+            raise Bad(f"/fsck/sparse needs two plain runs; its runs: {r}")
+        x = p.free_pair()
+        p.set_bit(x, True)
+        p.set_bit(x + 1, True)
+        inode.direct[0] = [x, 2, inode.direct[0][2]]
+        inode.direct[1][2] = inode.direct[0][2] + 1
         p.put_inode(ino, inode)
-        return f"inode {ino} run {k + 1} moved into run {k}: {inode.direct[k]} {inode.direct[k + 1]}"
+        return f"inode {ino} runs {inode.direct[0]} {inode.direct[1]} (run 0 on new blocks 0:{x}-{x + 1})"
     if cls == "snap-identity":
         head, b, off = p.first_snapshot()
         b[off + 64:off + 80] = bytes(16)

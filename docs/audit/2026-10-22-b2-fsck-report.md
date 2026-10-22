@@ -230,3 +230,10 @@ After them: debug `make test` at QEMU_SMP 2 on both architectures,
 on both -- all pass. The bound and a writer again: 1938 blocks at 512/s
 in 3738 ms (x86-64), 2009 in 3953 ms (AArch64); the 4 MiB writer 0.42 s
 alone and 0.33 / 0.42 s during the scrub.
+
+The run after the fixes failed CI's x86-64 `fsck` job at `extent-overlap`:
+there `/fsck/sparse` had no run of two blocks (locally its eight blocks
+were laid out one and seven; the allocator interleaves its metadata
+differently from run to run). The damage now builds the two-block run
+from two new adjacent blocks, leaving the old block leaked for the repair
+to free, so it does not depend on the layout.

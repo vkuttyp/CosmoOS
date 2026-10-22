@@ -80,7 +80,7 @@ EXPECT = {
     "dangling": {"refused": ["dangling"], "left": ["dangling", "orphan"]},
     "bad-entry": {"refused": ["bad-entry"], "left": ["bad-entry", "orphan"]},
     "extent-order": {"refused": ["extent-order"], "left": ["extent-order"]},
-    "extent-overlap": {"refused": ["extent-overlap"], "left": ["extent-overlap"]},
+    "extent-overlap": {"refused": ["extent-overlap"], "left": ["extent-overlap"]},   # its leaked block repaired
     "dup-name": {"refused": ["dup-name"], "left": ["dup-name"]},
     "unreadable": {"refused": ["unreadable"], "left": ["unreadable", "orphan"]},
     # A chain that names itself is claimed again at each revisit until the
@@ -126,7 +126,7 @@ def stage_prepare(args, results, inst):
         need(b.text(), r"^cosmofs: root checked, 0 findings, 0 repaired$", "the installed boot's check")
         out = b.status("mkdir -p /fsck/dir && for f in a b c d e f old; do echo $f > /fsck/$f; done && "
                        "echo x > /fsck/dir/x && gzip -c /bin/busybox > /tmp/rnd && "
-                       "dd if=/tmp/rnd of=/fsck/sparse bs=4096 count=8 2>/dev/null && "
+                       "dd if=/tmp/rnd of=/fsck/sparse bs=32768 count=1 2>/dev/null && "
                        "dd if=/tmp/rnd of=/fsck/sparse bs=4096 count=1 skip=8 seek=20 conv=notrunc 2>/dev/null && "
                        "sync", "files")
         need(out, r"^files=0$", "the /fsck tree")
