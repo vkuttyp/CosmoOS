@@ -208,14 +208,21 @@ Both are compiled in every build and reach an operator through
 mutation and commit on that mount waits until the pass returns. Both
 return `-EIO` without walking when the open transaction is abandoned.
 
-#### `int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out)`
+#### `int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out, unsigned flags)`
 - Purpose: read every block the filesystem reaches -- both superblock
   slots, every member's allocation index and bitmap, the snapshot list
-  and deadlists, every inode's metadata and data -- on **every copy** of
-  a mirrored member (`cfs_verify_all`), and write a good copy over each
-  bad one.
-- Output: `blocks_read`, `inodes`, `repaired`, `unrecoverable`. `out` may
-  be NULL.
+  and deadlists, the rollback record, every inode's metadata and data in
+  the live tree and in each snapshot's and clone's (roadmap 1.2 B2) --
+  each block once, on **every copy** of a mirrored member
+  (`cfs_verify_all`), and with `COSMOFS_SCRUB_REPAIR` write a good copy
+  over each bad one. Without it nothing is written.
+- Pacing: at most `g_cosmofs_scrub_rate` blocks a second (sysctl
+  `fs.scrub_rate`, default `COSMOFS_SCRUB_RATE_DEFAULT` 4096, 0 for no
+  bound), spent in 100 ms windows; between windows the scrub lets go of
+  `cfs->lock` (design.md, "The scrub, as a command").
+- Output: `blocks_read` (distinct blocks), `inodes`, `bad_copies`,
+  `repaired`, `unrecoverable`, `skipped` (dirty in the open transaction),
+  `elapsed_ns`, `rate`. `out` may be NULL.
 - Results: 0 whenever the walk ran -- `unrecoverable` counts what no
   copy could satisfy (CFS-11; it was `-EIO`) -- `-EIO` for an abandoned
   transaction, `-ENOMEM`, `-EINVAL` for an unmounted mount. A metadata
@@ -238,6 +245,12 @@ return `-EIO` without walking when the open transaction is abandoned.
   their cap of 256 per directory); `clean` (every class empty **and**
   not `partial`); `repair_refused`; `elapsed_ns`.
 - Read-only mount: `COSMOFS_CHECK_REPAIR` is `-EROFS`.
+- `COSMOFS_CHECK_OFFLINE` (with REPAIR; `cosmofs_check_dev` adds it):
+  also repair `seen_not_alloc`, by setting the block's bit.
+  `COSMOFS_CHECK_BOOT` (with REPAIR): repair only the boot's classes
+  (`alloc_not_seen`, `counter_wrong`, `snap_identity`, `rollback_record`,
+  `hold`, `orphan`, `nlink_wrong`), and nothing when any other class was
+  found or the answer is partial (`boot_refused`, `repair_refused`).
 - Repair: with `COSMOFS_CHECK_REPAIR`, only `alloc_not_seen`, `orphan`,
   `nlink_wrong` and `counter_wrong` are repaired, working from the full
   maps rather than the eight names. If the walk skipped anything
@@ -247,6 +260,24 @@ return `-EIO` without walking when the open transaction is abandoned.
 - Results: 0 whenever the walk ran, whatever it found; `-ENOMEM` before
   the walk starts (all maps are allocated up front); `-EIO` for an
   abandoned transaction; `-EINVAL` for an unmounted mount.
+
+#### `int cosmofs_check_dev(struct blkdev *bd, unsigned flags, struct cosmofs_check_report *rep, struct cosmofs_dev_report *dev)`
+- Purpose: the check on a device nothing has mounted (roadmap 1.2 B2):
+  both superblock slots compared, the pool mounted where no namespace
+  sees it (`vfs_mount_detached`; `MOUNT_RDONLY` unless
+  `COSMOFS_CHECK_REPAIR`), `cosmofs_check` run with `flags` (plus
+  `COSMOFS_CHECK_OFFLINE` when repairing), unmounted
+  (`vfs_mount_detached_release`, which commits the writable mount when a
+  repair was made, and otherwise drops what its mount changed).
+- Output: `rep` as `cosmofs_check`'s; `dev` with `uapi/cosmo/fsctl.h`'s
+  `COSMO_FSCTL_DEV_F_*` flags (`CHECKED`, `SUPER_NONE`,
+  `SUPER_DISAGREE`, `MOUNT_FAILED` with `mount_error` and `mount_stage`,
+  `FELL_BACK`, `ROLLBACK_PENDING`/`HELD`/`APPLIED`/`REFUSED` with
+  `rollback_error` and `rollback_target`, `COMMITTED`, `BOOT_REFUSED`),
+  the format, the generation checked, each slot's generation, and what
+  the mount's replays released.
+- Results: 0 whenever it answered, including "not checked, and why";
+  `-EBUSY` for a device a mount holds; `-ENOMEM`.
 
 ### Test hooks
 
@@ -287,7 +318,8 @@ boot, release included.
 - `write`: exactly `sizeof(struct cosmo_fsctl)` bytes (88), else
   `-EINVAL`. `PRIV_SYS_ADMIN` is checked again (`-EPERM`). `version` must
   equal `COSMO_FSCTL_VERSION` (3), else `-EINVAL`. `flags` may contain
-  only `COSMO_FSCTL_F_REPAIR` for `CHECK`, `COSMO_FSCTL_F_NO_SIZES` for
+  only `COSMO_FSCTL_F_REPAIR` for `CHECK` and `SCRUB_EX`, `F_REPAIR` and
+  `F_BOOT` (only with `F_REPAIR`) for `CHECK_DEV`, `COSMO_FSCTL_F_NO_SIZES` for
   `SNAP_LIST` and `COSMO_FSCTL_F_SAFETY_NAME` for `SNAP_ROLLBACK`; any
   other bit is `-EINVAL`. `name` and `name2` must each hold a NUL within
   their 32 bytes. An unknown `op` is `-EINVAL`. A command that fails
@@ -311,6 +343,8 @@ boot, release included.
 | `COSMO_FSCTL_SNAP_ROLLBACK` (7) | one `struct cosmo_fsctl_snap`: the safety snapshot taken (`pre-rollback-<seconds>`, or `name2` with `F_SAFETY_NAME`), flag `SAFETY`; a pending record names it and `name` (`design.md`, "Rollback") | as CREATE; `-ENOENT` for no such target; `-EINVAL` for a clone; `-EBUSY` while another is pending, or while a hold is in place unless `name` is the held snapshot |
 | `COSMO_FSCTL_SNAP_CANCEL` (8) | none | `-ENOENT` when nothing is pending |
 | `COSMO_FSCTL_BOOT_OK` (10) | none; `total` is 1 when a hold was released, 0 when there was none | `-EROFS` on a read-only mount |
+| `COSMO_FSCTL_CHECK_DEV` (11) | one `struct cosmo_fsctl_devcheck`: the device record (`struct cosmo_fsctl_dev`) and, when its `F_CHECKED` is set, the check record. `name` is the block device, `name2` the filesystem (`""` = cosmofs); flags `F_REPAIR`, and `F_BOOT` with it (roadmap 1.2 B2) | `-ENOENT` for no such device; `-EBUSY` when it is mounted; `-EOPNOTSUPP` for a filesystem without `check_dev`; `-ENODEV` for no such filesystem; `-EINVAL` for `F_BOOT` without `F_REPAIR` |
+| `COSMO_FSCTL_SCRUB_EX` (12) | one `struct cosmo_fsctl_scrub_ex`: `blocks_read`, `inodes`, `bad_copies`, `repaired`, `unrecoverable`, `skipped`, `elapsed_ns`, `rate`; repairs only with `F_REPAIR` | as SCRUB |
 | `COSMO_FSCTL_SNAP_CLONE` (9) | one `struct cosmo_fsctl_snap`: clone `name2` of snapshot `name`, flag `CLONE`, `origin_id` (`design.md`, "Clones") | as CREATE; `-ENOENT` for no such snapshot; `-EINVAL` to clone a clone or for no `name2`; `-EOPNOTSUPP` below format 12 |
 
 A SCRUB that met blocks no copy could satisfy succeeds and its record
@@ -334,16 +368,71 @@ that mount's next mount. `clone` prints where the clone is
 after `/etc/rc` exits 0 (`userland/init/init.c`, `boot_complete`).
 
 ### `fsctl(8)`
-`fsctl list`, `fsctl check <id> [--repair]`, `fsctl scrub <id>`. Ids are
-decimal digits only and non-zero. Exit status: 0 when the command
-worked (a check with findings is 0), 1 when the kernel refused, the pass
-failed, or repair was refused, 2 for a usage error.
+`fsctl list`, `fsctl check <id> [--repair]`, `fsctl scrub <id>
+[--repair]`. Ids are decimal digits only and non-zero. A check prints its
+summary and then fsreport's `class` and `finding` lines (below); a scrub
+one line, `mount N: B blocks read, I inodes, X bad copies, R repaired, U
+unrecoverable, S skipped (T ms, bound RATE blocks/s)`, and `clean` when
+there was nothing to say. `scrub` without `--repair` writes nothing
+(`SCRUB_EX`); against a kernel without `SCRUB_EX` (`-EINVAL`), `--repair`
+falls back to the old `SCRUB` and a report-only scrub is refused. Exit
+status since roadmap 1.2 B2, fsck's convention: 0 nothing found, 1
+everything found repaired, 4 findings left (a refused repair among them),
+8 the pass could not be run, 2 a usage error.
+
+### `fsck.cosmofs(8)`
+`fsck.cosmofs [--check | --repair] DEVICE` and, for init, `fsck.cosmofs
+--boot check|repair DEVICE` (`userland/system/fsck.cosmofs.c`, roadmap
+1.2 B2): `/dev/fsctl` `CHECK_DEV` on DEVICE (`NAME` or `/dev/NAME`), which
+must not be mounted. `--check` (the default) writes nothing; `--repair`
+repairs what has one right answer, `free-in-use` included (offline only),
+and as any writable mount applies a pending rollback -- committed only
+when it repaired something. Output, stable and
+parsed by `test-fsck` (`userland/system/fsreport.h`):
+
+```text
+fsck.cosmofs: vda2: format 12, generation 61, 3311 blocks seen, 44716 free, 412 inodes, 61 directories, 1 snapshots (2810 us)
+class leaked count 1 repaired 1 unattended
+finding leaked block 0:48210 repaired
+fsck.cosmofs: vda2: 1 finding(s), 1 repaired, all repaired
+```
+
+`class NAME count N repaired M POLICY` per class with findings and
+`finding NAME KIND ID STATE` per object the kernel names (at most eight a
+class, then `+N more`). The classes are the check's sixteen under their
+fsreport names -- `leaked`, `free-in-use`, `cross-linked`, `nlink`,
+`orphan`, `dangling`, `bad-entry`, `counter`, `cycle`, `unreadable`,
+`extent-order`, `extent-overlap`, `dup-name`, `snap-identity`,
+`rollback-record`, `hold` -- and the device's (`superblock`, `root`,
+`free-record`, `orphan-record`, `snapshots`, `members`, `bitmap`,
+`mount`). KIND is `block` (printed `member:block`), `inode`, `snapshot`,
+`count` or `object`; STATE `repaired`, `left` or `partly`; POLICY the
+boot's (design.md, "fsck at boot"). `--boot` prints, after those, the one
+line a boot gets (`cosmofs: root checked, N findings, M repaired`, or
+`cosmofs: root refused: ...`) and the inode of each logged repair. Exit
+status: 0 nothing found, 1 all repaired, 4 findings left (`--boot`: the
+pool is refused), 8 the check could not run (`-EBUSY` for a mounted
+device, `-EINVAL` from a kernel without `CHECK_DEV`), 2 usage.
+
+### `mkfs.cosmofs --mirror` and `fs.scrub_rate`
+`mkfs.cosmofs --mirror A B` makes one pool kept as two copies
+(`/dev/blkctl` `COSMO_BLKCTL_FORMAT_MIRROR`: the second device's name in
+the `COSMO_BLKCTL_NAME` bytes after the command; both unmounted, neither
+a disk with partitions). `sysctl fs.scrub_rate` reads and, with
+`PRIV_SYS_ADMIN`, sets the scrub's bound in blocks a second (decimal, at
+most 2^24; 0 for none); a scrub reads it when it starts.
 
 ### ABI stability
 `COSMO_FSCTL_VERSION` 1 carried ten check classes; version 2 appended
 `extent_order`, `extent_overlap` and `dir_dup_name` at indices 10-12 and
 moved nothing; version 3 appended `snap_identity`, `rollback_record` and
-`hold` at 13-15, and grew the command by two name fields. The check record is fixed-size and written whole, so a
+`hold` at 13-15, and grew the command by two name fields. Roadmap 1.2 B2
+added two operations, `CHECK_DEV` and `SCRUB_EX`, each with a record of
+its own, and the flag `F_BOOT`, without a version bump: nothing an
+existing client sends or reads changed size, and a kernel without them
+answers `-EINVAL`, which is how a client tells it. The SNAP_LIST pool
+record's last word, reserved and written 0 before, is `rollback_error`
+(CFS-20). The check record is fixed-size and written whole, so a
 size change is a version bump: a version-1 client is refused at the
 version gate. `cosmo_fsctl_result.bytes` gives the record size so a
 reader can skip records it does not know. `struct cosmofs_check_report`

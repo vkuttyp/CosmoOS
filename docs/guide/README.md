@@ -20,10 +20,12 @@ the pages in order: each one continues where the one before it stopped.
    back.
 7. [Snapshots and rollback](snapshots.md): `cosmo-snap`, what a snapshot
    keeps, and rolling the system back to one.
-8. [Privileges](privileges.md): the privilege set, dropping privileges,
+8. [Checking and repairing](checking.md): the root's check at boot,
+   `fsck.cosmofs`, `fsctl check` and `scrub`, mirrors.
+9. [Privileges](privileges.md): the privilege set, dropping privileges,
    and what an ssh session holds.
-9. [Known limitations](limitations.md).
-10. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
+10. [Known limitations](limitations.md).
+11. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
    Apple Silicon.
 
 Commands for your computer are shown as plain blocks; commands typed on
@@ -48,3 +50,5 @@ first, so the runner cannot run them. `make test-upgrade` runs them instead
 (the CI job `upgrade`, on every pull request, on both architectures), and
 the page shows them as text. Snapshots and rollback's are the other: a rollback reboots
 the machine. `make test-snapshot` runs them (the CI job `install`).
+Checking and repairing's need a damaged disk: `make test-fsck` runs
+them (the CI job `fsck`).

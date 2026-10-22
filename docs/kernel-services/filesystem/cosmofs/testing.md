@@ -81,6 +81,8 @@ writeback thread off so that generation counts are exact.
 | `cosmofs-nomem` | CFS-6: `FI_COSMOFS_CHAIN_NOMEM` fails the chain block a file's eleventh run needs and the write-back is `-ENOMEM`, the retry commits; `FI_COSMOFS_INODE_NOMEM` fails a chown's map path and the chown is `-ENOMEM`, the retry and a sync succeed; a truncate whose chain copy fails is `-ENOMEM` and, after a commit, the check is clean (the dropped run's block was not freed under the old map); the check is clean and the eleven pages and the owner read back after a remount |
 | `cosmofs-root-type` | a root inode whose mode says regular file (`COSMOFS_CORRUPT_ROOT_TYPE`, in both slots' trees) is refused by the mount with `-ENOTDIR` rather than met by the VFS's assertion |
 | `cosmofs-scrub-counts` | CFS-11: a plain data block rotted on a single-device pool: `cosmofs_scrub` returns 0 with one unrecoverable block, and `/dev/fsctl`'s SCRUB succeeds with a record saying so |
+| `cosmofs-check-dev` | CF23: `cosmofs_check_dev` on a pool with a leak and a free block in use: `-EBUSY` while mounted; read-only it names both and every block's CRC is unchanged; a boot repair refuses (`boot_refused`) and repairs nothing; the offline repair repairs both, commits, and the next check is clean; a root not a directory is `MOUNT_FAILED` at `STAGE_ROOT` with `-ENOTDIR`; a second slot naming another pool is `SUPER_DISAGREE`, not checked |
+| `cosmofs-scrub-modes` | CF23: on a two-way mirror with one copy of a file's four blocks rotted, a scrub without repair counts 4 bad copies and a second counts them again; a repairing scrub rewrites 4; the next finds none and the file reads back; the scrub reads a snapshot's own blocks; at `g_cosmofs_scrub_rate` 50 (five blocks a window, so the pool takes several) its time is at least its block count allows |
 | `cosmofs-scrub-open` | a scrub while a transaction holds a rewritten file's checksum tree in memory (in blocks the young pool never wrote) finds nothing unrecoverable; after the commit neither does the next |
 
 ### The free record (format version 9)
@@ -262,6 +264,59 @@ clone `clone-of:`; the origin's deletion is refused (exit 1); `fsctl
 check` is clean after the writes, after the clone's deletion and after
 the origin's.
 
+## fsck and scrub from the shell (`make test-fsck`)
+
+Roadmap 1.2 B2's acceptance test, `tests/boot/fsck_test.py`, in CI's
+`fsck` job on both architectures (release builds). It installs as
+`test-install` does, then a preparation boot gives the root a tree under
+`/fsck` (files `a` to `f`, `dir/x`, and `sparse`: eight random blocks,
+one plain run, and one block twelve on), takes a snapshot `fsckbase` (format 12)
+and removes a file after it, so the snapshot has a deadlist. That disk
+is the base; the boot's check of it must say `cosmofs: root checked, 0
+findings, 0 repaired`.
+
+Stage `classes`: `tools/cosmofs-damage.py` writes each of its damages
+into a copy of the base (`--list` names them and what the checker is
+expected to report; every structure touched is re-sealed and both
+superblock slots name the damaged tree), and the copy is booted. A
+damage a boot repairs -- `leaked`, `counter`, `nlink`, `orphan`,
+`snap-identity`, `rollback-record`, `hold` -- must give the line
+`cosmofs: root checked, N findings, N repaired`, its class with every
+finding repaired (`nlink` and `orphan` also the logged inode), the disk
+root mounted and `fsctl check` of it clean. Any other must give `cosmofs:
+root refused: ...` naming its class, leave init on the live root, and
+then from the live shell `fsck.cosmofs --repair` must exit 1 (all
+repaired: `free-in-use`) or 4, and `fsck.cosmofs --check` report exactly
+the classes left: `cross-linked` (its leaked block repaired), `dangling`
+and `orphan`, `bad-entry` and `orphan`, `extent-order`, `extent-overlap`,
+`dup-name`, `unreadable` and `orphan` (the unreadable directory's file
+has no name the walk reached), `cycle` (a deadlist), `cycle` and
+`cross-linked` (an extent chain naming itself: each revisit up to the
+walker's bound is a second claim), `snapshots` (the snapshot list naming
+itself: the mount refuses it while it loads the snapshots), `bad-entry`
+and `nlink` (a directory naming its parent, which gains a link the
+refused repair leaves: `cycle-directory`), `free-record` and `orphan-record` (a cycle in each,
+which the mount refuses), `root` (not a directory) and `superblock` (two
+slots, two pools).
+
+Stage `readonly` (CF21 on the installed system): a blank disk beside the
+base is formatted and a file written to it and removed, so its root has a
+free record pending (the orphan record's case is `cosmofs-ro-replay`'s);
+on the next boot `fsck.cosmofs --check` reports the replay in memory and
+a read-only mount reads it, and on the host every block of that disk is
+what it was before the boot.
+
+Stage `mirror`: two blank disks beside the base become one pool
+(`mkfs.cosmofs --mirror`), a file of 64 random blocks is written and its
+sha256 taken; on the host `cosmofs-damage.py --flip-mirror` flips 16 of
+its blocks on one device; booted again, `fsctl scrub` reports 16 bad
+copies and repairs none (exit 4), `fsctl scrub --repair` repairs 16
+(exit 1), a third scrub is clean (exit 0) and the file's sha256 is
+unchanged. Then the bound: a 4 MiB writer is timed alone and during a
+scrub at `fs.scrub_rate=512` (both reported, neither asserted: QEMU's
+timing is the host's), and the scrub's own time must be at least what
+its block count allows at that bound.
+
 ## Installed system (`make test-install`)
 
 `tests/boot/install_test.py` runs `cosmo-install`, which formats GPT
@@ -295,6 +350,9 @@ one case).
 
 ## Probes
 
+- `tools/cosmofs-damage.py IMAGE CLASS [--out OUT]`, `--list`,
+  `--describe`, `--flip-mirror COPY0 COPY1 --path P --count N`: the host
+  side of `test-fsck` (above); not a probe, a damage of each class.
 - `tools/b2-defects-probe.py --case ro|compress|nomem|scrub-counts|root-type|scrub-open [--old] [--arch ...]`:
   `--old` reverse-applies that fix's whole commit in a throwaway
   worktree; the case's self-test then fails at its stated check
@@ -315,9 +373,10 @@ one case).
 
 ## Gaps
 
-- Four of the five walkers that can report `chain_cycle` (the deadlist,
-  imap and directory-depth guards) have no test; only the extent
-  chain's does.
+- The directory walker's depth bound (64) is not reached by a test: a
+  directory cycle is caught first, as a directory with two parents
+  (`cycle-directory` reports `bad-entry`). The other walkers have a
+  `test-fsck` class each.
 - Nothing checks that an older kernel reads what this one writes into
   an older-format pool; CF22 is checked against this kernel's own map
   (`cosmofs-version-compress`).
@@ -326,5 +385,7 @@ one case).
 - Files beyond `CFS_MAX_EXTENTS` runs, and files near the checksum
   index's limit (516128 blocks, or 64516 encrypted), are not exercised.
 - Resilvering does not exist, so nothing tests a stale copy rejoining.
-- No host `mkfs` and no offline checker: `cosmofs_format` and
-  `cosmofs_check` run only in the kernel.
+- No host `mkfs`: `cosmofs_format` runs only in the kernel, so
+  `cosmofs-damage.py` cannot make an older-format image to damage; CFS-2's
+  proof is `cosmofs-version-compress`. The offline checker is the
+  kernel's (`fsck.cosmofs`, `CHECK_DEV`), by design.
