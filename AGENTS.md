@@ -74,3 +74,24 @@ requires, on x86-64 and AArch64 (`ARCH=aarch64`):
 
 Use GNU make (`gmake` on macOS). Preserve additional required checks from
 the [development docs](docs/development.md#workflow-for-a-change) and CI.
+
+## Releases
+
+A release is proven on the owner's Parallels VM before it is tagged
+(standing rule since v1.0.10):
+
+1. Merge the release's notes (`docs/releases/vX.Y.Z.md`) and check CI on
+   main's merge commit.
+2. Push `vX.Y.Z-rc1` on that commit. The release workflow builds and signs
+   it as a GitHub pre-release; the release key is a CI secret, so a
+   locally built set is refused by an installed system and cannot stand in.
+3. Upgrade the Parallels VM to the rc with its own `cosmo-upgrade` (the
+   rc's set fetched or served from the Mac), reboot, and check it: the
+   boot's lines, `cosmo-upgrade --status`, `pkg update && pkg upgrade`, the
+   console's `dmesg`, and what the release adds.
+4. Only then push `vX.Y.Z` on the same commit, and upgrade the VM from the
+   rc to the release (`cosmo-upgrade --fetch vX.Y.Z`).
+
+A defect found on the rc is fixed through the ordinary workflow and a new
+rc (`-rc2`) on the fixed merge commit; the release is never tagged on a
+commit the VM did not run.
