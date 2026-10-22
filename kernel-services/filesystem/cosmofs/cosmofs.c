@@ -117,77 +117,100 @@ static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_e
 
 /* Store runs back: the first CFS_DIRECT in the inode, the rest in the
  * chain (existing blocks copy-on-write, new ones allocated, surplus
- * blocks freed). */
+ * blocks freed).
+ *
+ * In two halves (CF17; CFS-6). The first does everything that can fail
+ * -- reads the old chain, sets aside every block the copies and the new
+ * blocks need -- and changes nothing, so a failure there is an ordinary
+ * error the caller can retry: set_extent frees nothing it displaced, and
+ * data_write_block puts its checksum back. The second rewrites the
+ * inode's runs and the chain and cannot fail. It used to be one loop
+ * that abandoned the transaction when the chain's next block could not
+ * be had, half the map new and half old. */
+struct es_scratch {
+    struct cfs_prep prep;
+    struct cfs_buf *keep[CFS_PREP_MAX];   /* the old chain's blocks the new one reuses, held */
+    uint64_t drop[CFS_PREP_MAX];          /* and the rest of it, freed once the new map is in */
+};
+
 static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_extent *ext, unsigned n)
 {
     if (n > CFS_MAX_EXTENTS)
         return -EFBIG;
+    unsigned left = n > CFS_DIRECT ? n - CFS_DIRECT : 0;
+    unsigned need = (left + CFS_EXTENTS_PER_BLOCK - 1) / CFS_EXTENTS_PER_BLOCK;
+    struct es_scratch *w = kzalloc(sizeof(*w));
+    if (w == NULL)
+        return -ENOMEM;
+
+    /* The first half: read and set aside, change nothing. */
+    unsigned nkeep = 0, ndrop = 0, cows = 0, guard = 0;
+    uint64_t at = in->indirect;
+    int rc = 0;
+    while (at != 0 && rc == 0) {
+        if (++guard > CFS_PREP_MAX) {
+            rc = -EIO;   /* a cycle: extents_load refuses one too */
+            break;
+        }
+        struct cfs_buf *b;
+        rc = cfs_buf_get(fs, at, CFS_KIND_EXTENTS, &b);
+        if (rc)
+            break;
+        uint64_t next = ((const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE))->next;
+        if (nkeep < need) {
+            w->keep[nkeep++] = b;
+            if (cfs_buf_hdr(b)->generation != fs->gen)
+                cows++;
+        } else {
+            w->drop[ndrop++] = at;
+            cfs_buf_put(fs, b);
+        }
+        at = next;
+    }
+    /* The test seam (cosmofs-nomem): the chain block cannot be had. */
+    if (rc == 0 && (cows != 0 || need > nkeep) && faultinject_should_fail(FI_COSMOFS_CHAIN_NOMEM))
+        rc = -ENOMEM;
+    if (rc == 0)
+        rc = cfs_prep_meta(fs, &w->prep, cows + (need - nkeep));
+    if (rc) {
+        for (unsigned i = 0; i < nkeep; i++)
+            cfs_buf_put(fs, w->keep[i]);
+        kfree(w);
+        return rc;
+    }
+
+    /* The second half: nothing below can fail. */
     memset(in->direct, 0, sizeof(in->direct));
     for (unsigned i = 0; i < n && i < CFS_DIRECT; i++)
         in->direct[i] = ext[i];
-    unsigned left = n > CFS_DIRECT ? n - CFS_DIRECT : 0;
     const struct cfs_extent *rest = ext + CFS_DIRECT;
     uint64_t *slot = &in->indirect;   /* the pointer to the block we are about to fill */
-    while (left > 0) {
+    for (unsigned i = 0; i < need; i++) {
         struct cfs_buf *b;
-        /* The test seam (cosmofs-nomem): the chain block cannot be had. */
-        int rc = faultinject_should_fail(FI_COSMOFS_CHAIN_NOMEM) ? -ENOMEM : 0;
-        if (rc) {
-        } else if (*slot) {
-            rc = cfs_buf_get(fs, *slot, CFS_KIND_EXTENTS, &b);
-            if (rc == 0)
-                rc = cfs_buf_cow(fs, &b, slot);
+        if (i < nkeep) {
+            b = w->keep[i];
+            cfs_buf_cow_prep(fs, &b, slot, &w->prep);
         } else {
-            rc = cfs_buf_new(fs, CFS_KIND_EXTENTS, &b);
-            if (rc == 0)
-                *slot = b->blkno;
-        }
-        if (rc) {
-            /* The direct runs and the chain blocks before this one hold
-             * the new map, the rest the old: runs missing or overlapping,
-             * and the caller frees what the new map displaced. No commit
-             * may publish that (CF17). */
-            cfs_fail(fs, rc);
-            return rc;
+            b = cfs_buf_new_prep(fs, CFS_KIND_EXTENTS, &w->prep);
+            *slot = b->blkno;
         }
         struct cfs_extent_block *eb = (struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
-        uint64_t next = eb->next;
         unsigned take = left < CFS_EXTENTS_PER_BLOCK ? left : CFS_EXTENTS_PER_BLOCK;
         memset(eb->ext, 0, sizeof(eb->ext));
         memcpy(eb->ext, rest, take * sizeof(*rest));
         rest += take;
         left -= take;
-        if (left == 0) {
-            /* Retire the rest of an old chain. */
-            eb->next = 0;
-            cfs_buf_put(fs, b);
-            while (next) {
-                struct cfs_buf *ob;
-                if (cfs_buf_get(fs, next, CFS_KIND_EXTENTS, &ob))
-                    break;
-                uint64_t after = ((struct cfs_extent_block *)(ob->data + CFS_MHDR_SIZE))->next;
-                cfs_buf_put(fs, ob);
-                cfs_free_block_deferred(fs, next);
-                next = after;
-            }
-            break;
-        }
+        if (i + 1 == need)
+            eb->next = 0;   /* the rest of an old chain is retired below */
         slot = &eb->next;   /* stays valid: the buffer is cached and dirty for this transaction */
         cfs_buf_put(fs, b);
     }
-    if (n <= CFS_DIRECT && in->indirect) {
-        uint64_t next = in->indirect;
+    if (need == 0)
         in->indirect = 0;
-        while (next) {
-            struct cfs_buf *ob;
-            if (cfs_buf_get(fs, next, CFS_KIND_EXTENTS, &ob))
-                break;
-            uint64_t after = ((struct cfs_extent_block *)(ob->data + CFS_MHDR_SIZE))->next;
-            cfs_buf_put(fs, ob);
-            cfs_free_block_deferred(fs, next);
-            next = after;
-        }
-    }
+    for (unsigned i = 0; i < ndrop; i++)
+        cfs_free_block_deferred(fs, w->drop[i]);
+    cfs_prep_release(fs, &w->prep);   /* nothing, unless a kept block needed no copy after all */
+    kfree(w);
     return 0;
 }
 
@@ -507,26 +530,40 @@ int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep)
     rc = extents_load(fs, in, &ext, &n);
     if (rc)
         return rc;
+    /* The shortened map in `out`, the old one kept in `ext`: the blocks
+     * past the end are released only once the new map is stored, as
+     * set_extent and drop_range release theirs. extents_store can fail
+     * as an ordinary error since CFS-6, and frees queued before it would
+     * have a later commit release blocks the old map still names (Codex
+     * on #433). */
+    struct cfs_extent *out = kmalloc((n ? n : 1) * sizeof(*out), 0);
+    if (out == NULL) {
+        kfree(ext);
+        return -ENOMEM;
+    }
     unsigned m = 0;
     for (unsigned i = 0; i < n; i++) {
         struct cfs_extent e = ext[i];
-        uint32_t count = cfs_ext_count(&e), psize = cfs_ext_psize(&e);
-        if (e.lblk >= keep) {
+        uint32_t count = cfs_ext_count(&e);
+        if (e.lblk >= keep)
+            continue;
+        if ((uint64_t)e.lblk + count > keep)
+            e.count = (uint32_t)(keep - e.lblk);   /* truncate_record left only a plain run straddling the end */
+        out[m++] = e;
+    }
+    rc = extents_store(fs, in, out, m);
+    for (unsigned i = 0; rc == 0 && i < n; i++) {
+        const struct cfs_extent *e = &ext[i];
+        uint32_t count = cfs_ext_count(e), psize = cfs_ext_psize(e);
+        if (e->lblk >= keep) {
             for (uint32_t k = 0; k < psize; k++)
-                cfs_free_block_deferred(fs, e.start + k);
-        } else if ((uint64_t)e.lblk + count > keep) {
-            /* truncate_record has already replaced any record here, so
-             * what straddles the end now is a plain run. */
-            uint32_t keepc = (uint32_t)(keep - e.lblk);
-            for (uint32_t k = keepc; k < count; k++)
-                cfs_free_block_deferred(fs, e.start + k);
-            e.count = keepc;
-            ext[m++] = e;
-        } else {
-            ext[m++] = e;
+                cfs_free_block_deferred(fs, e->start + k);
+        } else if ((uint64_t)e->lblk + count > keep) {
+            for (uint32_t k = (uint32_t)(keep - e->lblk); k < count; k++)
+                cfs_free_block_deferred(fs, e->start + k);
         }
     }
-    rc = extents_store(fs, in, ext, m);
+    kfree(out);
     kfree(ext);
     if (rc == 0 && keep == 0)
         cfs_csum_free(fs, in);
@@ -950,9 +987,7 @@ int cfs_vnode_get(struct cfs *fs, uint64_t ino, struct vnode **out)
 /* Push the vnode's public fields into its inode and write it through.
  * Every caller has already changed what the inode describes -- a block
  * mapped and its predecessor queued free, an entry added or removed, a
- * link count -- so a write that fails leaves the inode slot naming
- * blocks the next commit would release: the transaction is abandoned
- * (CF17). */
+ * link count -- which is why each prepared the inode first (CFS-6). */
 static int inode_sync(struct cfs *fs, struct vnode *vn)
 {
     struct cfs_inode *in = cfs_inode_of(vn);
@@ -964,11 +999,28 @@ static int inode_sync(struct cfs *fs, struct vnode *vn)
                         vn->type == VNODE_LNK ? 0777u : vn->mode);
     in->uid = vn->uid;
     in->gid = vn->gid;
-    /* The test seam (cosmofs-nomem): the inode's map path cannot be had. */
-    int rc = faultinject_should_fail(FI_COSMOFS_INODE_NOMEM) ? -ENOMEM : cfs_inode_write(fs, vn->ino, in);
+    /* Not expected to fail: every caller made the inode's map path
+     * writable before its first change (inode_prepare), so this writes
+     * into dirty buffers. Anything else is a defect, and the transaction
+     * goes rather than publish what the caller half did. */
+    int rc = cfs_inode_write(fs, vn->ino, in);
     if (rc)
         cfs_fail(fs, rc);
     return rc;
+}
+
+/*
+ * Before an operation's first change, the inode the operation ends by
+ * storing (cfs_inode_prepare, CFS-6): an allocation that fails here is an
+ * ordinary error the caller can retry, where in inode_sync it abandoned
+ * the transaction.
+ */
+static int inode_prepare(struct cfs *fs, struct vnode *vn)
+{
+    /* The test seam (cosmofs-nomem): the inode's map path cannot be had. */
+    if (faultinject_should_fail(FI_COSMOFS_INODE_NOMEM))
+        return -ENOMEM;
+    return cfs_inode_prepare(fs, vn->ino);
 }
 
 /* --- directories ---------------------------------------------------------------- */
@@ -1594,6 +1646,13 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
         kfree(block);
         return lrc;
     }
+    /* Every inode this changes, made writable before anything changes (CFS-6). */
+    lrc = inode_prepare(fs, dir);
+    if (lrc) {
+        cfs_unlock_tree(fs);
+        kfree(block);
+        return lrc;
+    }
     uint64_t lblk;
     unsigned slot;
     int rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
@@ -1677,6 +1736,13 @@ static int cfs_symlink(struct vnode *dir, const char *name, size_t len, const ch
 
     int lrc = cfs_lock_tree_w(fs, dir);
     if (lrc) {
+        kfree(block);
+        return lrc;
+    }
+    /* Every inode this changes, made writable before anything changes (CFS-6). */
+    lrc = inode_prepare(fs, dir);
+    if (lrc) {
+        cfs_unlock_tree(fs);
         kfree(block);
         return lrc;
     }
@@ -1824,6 +1890,15 @@ static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, st
         kfree(block);
         return lrc;
     }
+    /* Every inode this changes, made writable before anything changes (CFS-6). */
+    lrc = inode_prepare(fs, dir);
+    if (lrc == 0)
+        lrc = inode_prepare(fs, victim);
+    if (lrc) {
+        cfs_unlock_tree(fs);
+        kfree(block);
+        return lrc;
+    }
     uint64_t lblk;
     unsigned slot;
     int rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
@@ -1968,6 +2043,19 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         return -ENOMEM;
     int lrc = cfs_lock_tree_w(fs, odir);
     if (lrc) {
+        kfree(block);
+        return lrc;
+    }
+    /* Every inode this changes, made writable before anything changes (CFS-6). */
+    lrc = inode_prepare(fs, odir);
+    if (lrc == 0)
+        lrc = inode_prepare(fs, ndir);
+    if (lrc == 0)
+        lrc = inode_prepare(fs, victim);
+    if (lrc == 0 && replaced != NULL)
+        lrc = inode_prepare(fs, replaced);
+    if (lrc) {
+        cfs_unlock_tree(fs);
         kfree(block);
         return lrc;
     }
@@ -2261,6 +2349,11 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
     int rc = cfs_lock_tree_w(fs, vn);
     if (rc)
         return rc;
+    rc = inode_prepare(fs, vn);   /* sync_after_write's inode write cannot fail after this (CFS-6) */
+    if (rc) {
+        cfs_unlock_tree(fs);
+        return rc;
+    }
     rc = write_one_page(fs, cfs_inode_of(vn), index, buf);
     rc = sync_after_write(fs, vn, rc);
     cfs_unlock_tree(fs);
@@ -2283,6 +2376,11 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
     int rc = cfs_lock_tree_w(fs, vn);
     if (rc)
         return rc;
+    rc = inode_prepare(fs, vn);   /* as cfs_writepage */
+    if (rc) {
+        cfs_unlock_tree(fs);
+        return rc;
+    }
     struct cfs_inode *in = cfs_inode_of(vn);
     if (index % CFS_RECORD_BLOCKS == 0 && n >= CFS_RECORD_BLOCKS && in->compress_algo != CFS_COMPRESS_NONE) {
         /* Gather the record; the pages are separate frames. */
@@ -2314,10 +2412,31 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
-    pagecache_truncate(vn, size);
+    /*
+     * The inode made writable before the page cache drops anything
+     * (CFS-6): the trim cannot be undone, so an allocation that fails
+     * must fail before it, with the file as it was (Codex on #433). The
+     * trim runs without the tree lock, as it always has, and the
+     * preparation is made again under it -- a no-op unless a commit came
+     * between, which leaves this the one window where -ENOMEM can follow
+     * a trim.
+     */
     int lrc = cfs_lock_tree_w(fs, vn);
     if (lrc)
         return lrc;
+    lrc = inode_prepare(fs, vn);
+    cfs_unlock_tree(fs);
+    if (lrc)
+        return lrc;
+    pagecache_truncate(vn, size);
+    lrc = cfs_lock_tree_w(fs, vn);
+    if (lrc)
+        return lrc;
+    lrc = inode_prepare(fs, vn);
+    if (lrc) {
+        cfs_unlock_tree(fs);
+        return lrc;
+    }
     uint64_t keep = (size + CFS_BLOCK - 1) / CFS_BLOCK;
     int rc = cfs_truncate_blocks(fs, cfs_inode_of(vn), keep);
     /* The last block may now be partial. What is past the new end has to
@@ -2367,7 +2486,9 @@ static int cfs_vnode_setattr(struct vnode *vn)
     int rc = cfs_lock_tree_w(fs, vn);
     if (rc)
         return rc;
-    rc = inode_sync(fs, vn);
+    rc = inode_prepare(fs, vn);   /* a failure here changed nothing: the VFS puts the vnode back (CFS-6) */
+    if (rc == 0)
+        rc = inode_sync(fs, vn);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -2386,7 +2507,9 @@ static int cfs_vnode_sync(struct vnode *vn)
     int rc = cfs_lock_tree_w(fs, vn);
     if (rc)
         return rc == -EROFS ? 0 : rc;
-    rc = inode_sync(fs, vn);
+    rc = inode_prepare(fs, vn);
+    if (rc == 0)
+        rc = inode_sync(fs, vn);
     if (rc == 0)
         rc = cfs_commit(fs);
     cfs_unlock_tree(fs);
