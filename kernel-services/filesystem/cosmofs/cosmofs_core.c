@@ -3108,6 +3108,19 @@ static int load_root(struct cfs *fs, struct vnode **root)
             return rc;
         }
     }
+    /*
+     * The root must be a directory -- the one the switch, if any, made
+     * live: the VFS takes that as given (do_mount
+     * asserts it), so a root inode that says otherwise is refused here,
+     * by name, rather than met as a panic. A disk with one changed mode
+     * used to stop the kernel.
+     */
+    struct cfs_inode ri;
+    if (cfs_inode_read(fs, CFS_ROOT_INO, &ri) == 0 && CFS_MODE_TYPE(ri.mode) != CFS_TYPE_DIR) {
+        kerror("cosmofs: generation %llu: the root inode is not a directory (mode 0%o); refusing it",
+               (unsigned long long)fs->sb.generation, ri.mode);
+        return -ENOTDIR;
+    }
     /* After a switch the record is the target's own orphans, which the
      * switch's commit wrote (cosmofs_rollback.c). */
     rc = orphan_replay(fs);
