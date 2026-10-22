@@ -119,6 +119,21 @@ int blkdevs_flush(const struct cosmo_blkctl_dev *d)
     return rc < 0 ? (int)rc : 0;
 }
 
+int blkdevs_format_mirror(const char *a, const char *b, const char *fstype)
+{
+    if (strncmp(a, "/dev/", 5) == 0)
+        a += 5;
+    if (strncmp(b, "/dev/", 5) == 0)
+        b += 5;
+    char other[COSMO_BLKCTL_NAME];
+    memset(other, 0, sizeof(other));
+    if (strlen(b) >= sizeof(other))
+        return -ENAMETOOLONG;
+    strcpy(other, b);
+    long rc = ctl(COSMO_BLKCTL_FORMAT_MIRROR, a, 0, 0, fstype, other, sizeof(other));
+    return rc < 0 ? (int)rc : 0;
+}
+
 int blkdevs_format(const char *name, const char *fstype, const char *label)
 {
     if (strncmp(name, "/dev/", 5) == 0)
