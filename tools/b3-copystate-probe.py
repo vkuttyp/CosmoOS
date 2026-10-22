@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Prove roadmap 1.2 B3's record of what a copy missed (CF25).
+"""Prove roadmap 1.2 B3's record of what a copy missed (CF25) and that a
+write during a resilver reaches the copy being rebuilt (CF28).
 
     b3-copystate-probe.py --case NAME [--old] [--arch x86_64|aarch64] [--tree REV]
 
@@ -12,6 +13,9 @@ replacement the case names, and runs a debug `make test`:
            block of the commit that wrote it
   persist  the commit writes the record at all (cfs_copystate_prepare):  cosmofs-copy-bitmap
            without it a remount knows nothing of what the copy missed
+  resilver a write goes to a RESILVERING copy too (pool_write_flags):  cosmofs-resilver
+           without it a block written during the resilver is never
+           on the rebuilt copy
 
 Old mode passes when the self-test fails at the case's check and nothing
 else fails but the tests named as its consequences. Fixed mode passes when
@@ -27,6 +31,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MEMBER = "kernel-services/filesystem/cosmofs/cosmofs_member.c"
+POOL = "kernel-services/storage/pool.c"
 
 # file, the text the rule is, what --old leaves instead, self-test, the
 # check its old run fails, other self-tests allowed to fail with it.
@@ -49,10 +54,18 @@ CASES = {
     if (fs || fs->rdonly)
         return 0;""",
                 "cosmofs-copy-bitmap",
-                r"cp->state == POOL_COPY_MISSING && cp->dev == NULL && !cp->whole && cp->since == whole_at",
+                r"cp->state == POOL_COPY_RESILVERING && cp->dev == bd[1] && !cp->whole && cp->since == whole_at",
                 # Without a record nothing is raised to 13 and FAULTED is
                 # not remembered across a remount.
                 ("cosmofs-degraded",)),
+    "resilver": (POOL,
+                 """        if (!writable(&m->copy[c])) {""",
+                 """        if (!readable(&m->copy[c])) {""",
+                 "cosmofs-resilver",
+                 r"raw_block(bd[1], CFS_DVA_BLK(dblk), y) && memcmp(y, during, CFS_BLOCK) == 0",
+                 # The other resilvers end with copies that missed what
+                 # was written while they ran.
+                 ("cosmofs-resilver-resume", "cosmofs-spare", "cosmofs-attach")),
 }
 
 

@@ -91,6 +91,8 @@ static uint32_t fsctl_caps(const struct mount *mnt)
         caps |= COSMO_FSCTL_CAP_SCRUB;
     if (mnt->fs->snapctl)
         caps |= COSMO_FSCTL_CAP_SNAP;
+    if (mnt->fs->poolctl)
+        caps |= COSMO_FSCTL_CAP_POOL;
     return caps;
 }
 
@@ -556,6 +558,96 @@ static int64_t fsctl_snap(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
     return 0;
 }
 
+/*
+ * A pool operation against one named mount (roadmap 1.2 B3). STATUS's
+ * records are copied field by field, as the snapshots' are: struct
+ * cosmofs_copy_info is cosmofs's, struct cosmo_fsctl_copy the ABI.
+ */
+#define FSCTL_POOL_MAX 64u   /* copy records a status reports: 255 members x 4 is not a pool anyone has */
+
+static int64_t fsctl_pool(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
+{
+    static const enum cosmofs_pool_op ops[] = {
+        [COSMO_FSCTL_POOL_STATUS] = COSMOFS_POOL_STATUS,
+        [COSMO_FSCTL_POOL_OFFLINE] = COSMOFS_POOL_OFFLINE,
+        [COSMO_FSCTL_POOL_ONLINE] = COSMOFS_POOL_ONLINE,
+        [COSMO_FSCTL_POOL_REPLACE] = COSMOFS_POOL_REPLACE,
+        [COSMO_FSCTL_POOL_ATTACH] = COSMOFS_POOL_ATTACH,
+        [COSMO_FSCTL_POOL_DETACH] = COSMOFS_POOL_DETACH,
+        [COSMO_FSCTL_POOL_SPARE_ADD] = COSMOFS_POOL_SPARE_ADD,
+        [COSMO_FSCTL_POOL_SPARE_REMOVE] = COSMOFS_POOL_SPARE_REMOVE,
+    };
+    struct mount *mnt = NULL;
+    int rc = vfs_mount_acquire(cmd->mount_id, &mnt);
+    if (rc)
+        return rc;
+    if (mnt->fs->poolctl == NULL) {
+        vfs_mount_release(mnt);
+        return -EOPNOTSUPP;
+    }
+    bool status = cmd->op == COSMO_FSCTL_POOL_STATUS;
+    unsigned max = status ? FSCTL_POOL_MAX : 0u;
+    struct cosmofs_copy_info *info = max ? kzalloc((size_t)max * sizeof(*info)) : NULL;
+    if (max && info == NULL) {
+        vfs_mount_release(mnt);
+        return -ENOMEM;
+    }
+    struct cosmofs_pool_req req = {
+        .op = ops[cmd->op],
+        .name = cmd->name,
+        .name2 = cmd->name2,
+        .out = info,
+        .max = max,
+    };
+    rc = mnt->fs->poolctl(mnt, &req);
+    vfs_mount_release(mnt);
+    if (rc) {
+        kfree(info);
+        return rc;
+    }
+    size_t pool = status ? sizeof(struct cosmo_fsctl_pool) : 0;
+    size_t bytes = sizeof(struct cosmo_fsctl_result) + pool + (size_t)req.count * sizeof(struct cosmo_fsctl_copy);
+    uint8_t *buf = kzalloc(bytes);
+    if (buf == NULL) {
+        kfree(info);
+        return -ENOMEM;
+    }
+    struct cosmo_fsctl_result *hdr = (struct cosmo_fsctl_result *)buf;
+    if (status) {
+        struct cosmo_fsctl_pool *p = (struct cosmo_fsctl_pool *)(buf + sizeof(*hdr));
+        p->generation = req.generation;
+        p->members = req.members;
+        p->flags = (req.degraded ? COSMO_FSCTL_POOL_DEGRADED : 0u) | (req.resilvering ? COSMO_FSCTL_POOL_RESILVER : 0u);
+        p->format = req.format;
+        p->resilver_rate = req.rate;
+        memcpy(p->label, req.label, sizeof(p->label));
+    }
+    struct cosmo_fsctl_copy *rec = (struct cosmo_fsctl_copy *)(buf + sizeof(*hdr) + pool);
+    for (unsigned i = 0; i < req.count; i++) {
+        rec[i].member = info[i].member;
+        rec[i].copy = info[i].copy;
+        rec[i].state = info[i].state;
+        rec[i].flags = ((info[i].flags & COSMOFS_COPY_I_WHOLE) ? COSMO_FSCTL_COPY_F_WHOLE : 0u) |
+                       ((info[i].flags & COSMOFS_COPY_I_DETACH) ? COSMO_FSCTL_COPY_F_DETACH : 0u);
+        rec[i].since = info[i].since;
+        rec[i].cursor = info[i].cursor;
+        rec[i].blocks = info[i].blocks;
+        rec[i].to_do = info[i].to_do;
+        rec[i].read_errors = info[i].read_errors;
+        rec[i].write_errors = info[i].write_errors;
+        rec[i].csum_errors = info[i].csum_errors;
+        strlcpy(rec[i].dev, info[i].dev, sizeof(rec[i].dev));
+    }
+    kfree(info);
+    hdr->version = COSMO_FSCTL_VERSION;
+    hdr->kind = cmd->op;
+    hdr->count = req.count;
+    hdr->total = req.count;
+    hdr->bytes = sizeof(struct cosmo_fsctl_copy);
+    fsctl_set_result(o, buf, bytes);
+    return 0;
+}
+
 static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
                                 const void *buf, size_t len)
 {
@@ -615,6 +707,16 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     case COSMO_FSCTL_SNAP_CLONE:
     case COSMO_FSCTL_BOOT_OK:
         rc = fsctl_snap(o, &cmd);
+        break;
+    case COSMO_FSCTL_POOL_STATUS:
+    case COSMO_FSCTL_POOL_OFFLINE:
+    case COSMO_FSCTL_POOL_ONLINE:
+    case COSMO_FSCTL_POOL_REPLACE:
+    case COSMO_FSCTL_POOL_ATTACH:
+    case COSMO_FSCTL_POOL_DETACH:
+    case COSMO_FSCTL_POOL_SPARE_ADD:
+    case COSMO_FSCTL_POOL_SPARE_REMOVE:
+        rc = fsctl_pool(o, &cmd);
         break;
     default:
         rc = -EINVAL;
@@ -682,5 +784,5 @@ void fsctl_dev_init(void)
      * kernel that shipped the passes with no way to reach them is the
      * thing this unit exists to stop.
      */
-    kinfo("fsctl: /dev/fsctl ready (0600): mount listing, check (mounted or not), scrub and snapshots");
+    kinfo("fsctl: /dev/fsctl ready (0600): mount listing, check (mounted or not), scrub, snapshots and pools");
 }

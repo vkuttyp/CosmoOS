@@ -1200,6 +1200,9 @@ static bool rot_copy(struct blkdev *bd, uint64_t blk, uint8_t fill)
 bool selftest_cosmofs_mirror(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    /* The stale copy at the end is resilvered by the mount since roadmap
+     * 1.2 B3; held, so what is checked is that it is not read. */
+    cosmofs_test_resilver_hold(true);
     struct blkdev *bd[2] = { NULL, NULL };
     struct file *f = NULL;
     struct spool *sp = NULL;
@@ -1328,9 +1331,11 @@ bool selftest_cosmofs_mirror(const char **reason)
     ramblk_destroy(bd[1]);
     bd[1] = NULL;
     kinfo("selftest: cosmofs-mirror: two copies, %llu blocks scrubbed", (unsigned long long)sc.blocks_read);
+    cosmofs_test_resilver_hold(false);
     return true;
 
 cleanup:
+    cosmofs_test_resilver_hold(false);
     if (f)
         file_put(f);
     if (sp)
@@ -1355,6 +1360,7 @@ cleanup:
 bool selftest_cosmofs_mirror_stale(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    cosmofs_test_resilver_hold(true);   /* as cosmofs-mirror: the stale copy is not read */
     struct blkdev *bd[4];
     for (unsigned i = 0; i < 4; i++) {
         bd[i] = ramblk_create(256);
@@ -1390,6 +1396,7 @@ bool selftest_cosmofs_mirror_stale(const char **reason)
     for (unsigned i = 0; i < 4; i++)
         ramblk_destroy(bd[i]);
     kinfo("selftest: cosmofs-mirror-stale: a stale copy is passed over, whichever one it is");
+    cosmofs_test_resilver_hold(false);
     return true;
 }
 
@@ -6193,8 +6200,9 @@ bool selftest_cosmofs_scrub_modes(const char **reason)
     SM_CHECK(e.rate == 50 && e.elapsed_ns / 1000000 >= floor_ms);
     SM_CHECK(snapctl(COSMOFS_SNAP_DELETE, "old", NULL, 0, NULL) == 0);
     /* The mirror is mounted through its first device: a check of the
-     * second, which no mount claims, must not run beside the live
-     * allocator (Codex on #434). */
+     * second must not run beside the live allocator (Codex on #434).
+     * Since roadmap 1.2 B3 the mount holds the second too (CFS-5), so the
+     * check's own mount is refused its claim. */
     static struct cosmofs_check_report leg;
     struct cosmofs_dev_report legdev;
     int lrc = cosmofs_check_dev(bd[1], COSMOFS_CHECK_REPAIR, &leg, &legdev);
@@ -6635,6 +6643,7 @@ bool selftest_cosmofs_copy_bitmap(const char **reason)
     static char data[5 * 4096];
     memset(data, 'x', sizeof(data));
     CS_CHECK(written != NULL);
+    cosmofs_test_resilver_hold(true);   /* the remount below would resilver the copy at once */
     CS_CHECK(mirror_up(bd, 512));
     CS_CHECK(write_file(ENG "/before", data, sizeof(data)) && vfs_sync() == 0);
     struct cosmofs_stats st;
@@ -6678,7 +6687,8 @@ bool selftest_cosmofs_copy_bitmap(const char **reason)
     pool = cosmofs_test_pool(mount_of(ENG));
     CS_CHECK(pool != NULL && pool->m[0].ncopies == 2);
     const struct pool_copy *cp = &pool->m[0].copy[1];
-    CS_CHECK(cp->state == POOL_COPY_MISSING && cp->dev == NULL && !cp->whole && cp->since == whole_at);
+    /* Back, and recognised by the record: resilvering what it missed. */
+    CS_CHECK(cp->state == POOL_COPY_RESILVERING && cp->dev == bd[1] && !cp->whole && cp->since == whole_at);
     /* Every block written after the pull is in the record; nothing else
      * is, but the superblock slots the record marks for the root. */
     unsigned marked = 0, nwritten = 0;
@@ -6697,6 +6707,7 @@ bool selftest_cosmofs_copy_bitmap(const char **reason)
     kinfo("selftest: cosmofs-copy-bitmap: %u blocks written after the pull, %u recorded, since generation %llu",
           nwritten, marked, (unsigned long long)whole_at);
 out:
+    cosmofs_test_resilver_hold(false);
     if (log)
         ramblk_log_free(log);
     kfree(written);
@@ -6714,6 +6725,7 @@ bool selftest_cosmofs_copy_import(const char **reason)
 #define ENG2 "/mnt/eng2"
     struct blkdev *bd[2] = { NULL, NULL };
     bool ok = false;
+    cosmofs_test_resilver_hold(true);
     CS_CHECK(mirror_up(bd, 512));
     CS_CHECK(write_file(ENG "/first", "first", 5) && vfs_sync() == 0);
     ramblk_set_fail(bd[1], -ENODEV);
@@ -6726,6 +6738,8 @@ bool selftest_cosmofs_copy_import(const char **reason)
     cosmofs_test_set_writeback(mount_of(ENG), false);
     struct spool *pool = cosmofs_test_pool(mount_of(ENG));
     CS_CHECK(pool != NULL && pool->m[0].copy[0].dev == bd[0]);
+    /* The lagging device is not read; it is the copy being resilvered. */
+    CS_CHECK(pool->m[0].copy[1].dev == bd[1] && pool->m[0].copy[1].state == POOL_COPY_RESILVERING);
     CS_CHECK(read_matches(ENG "/second", "second", 6) && read_matches(ENG "/first", "first", 5));
     struct cosmofs_stats st;
     CS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 1 && st.degraded == 1);
@@ -6742,6 +6756,7 @@ bool selftest_cosmofs_copy_import(const char **reason)
     ok = true;
     kinfo("selftest: cosmofs-copy-import: the lagging device mounts the newest root, and not twice");
 out:
+    cosmofs_test_resilver_hold(false);
     (void)vfs_umount2(ENG2, VFS_UMOUNT_FORCE);
     (void)vfs_rmdir(NULL, ENG2);
     mirror_down(bd);
@@ -6789,8 +6804,338 @@ out:
     return ok;
 }
 #undef CS_CHECK
+
+/* --- resilvering (roadmap 1.2 B3) ------------------------------------------
+ *
+ * design.md, "Resilvering"; invariants CF28, CF29. The resilver thread is
+ * held (cosmofs_test_resilver_hold) and the tests drive it with
+ * cosmofs_test_resilver_run, so where it stops is the test's choice.
+ */
+
+#define RS_CHECK(cond)                                                        \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto out;                                                        \
+        }                                                                     \
+    } while (0)
+
+static int pool_op(enum cosmofs_pool_op op, const char *a, const char *b)
+{
+    struct cosmofs_pool_req req = { .op = op, .name = a, .name2 = b };
+    return cosmofs_poolctl(mount_of(ENG), &req);
+}
+
+/* One block of `bd`, read raw. */
+static bool raw_block(struct blkdev *bd, uint64_t blk, uint8_t *out)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return false;
+    bool ok = pool_read_copy(p, CFS_DVA(0, blk), 0, out) == 0;
+    pool_close(p);
+    return ok;
+}
+
+/* Every block of member 0 the mount's bitmap calls allocated, and the
+ * superblock slots, the same on both devices. */
+static bool same_allocated(struct blkdev *a, struct blkdev *b, unsigned *compared)
+{
+    struct cfs *fs = cfs_of(mount_of(ENG));
+    uint8_t *x = kmalloc(CFS_BLOCK, 0), *y = kmalloc(CFS_BLOCK, 0);
+    bool ok = fs != NULL && x != NULL && y != NULL;
+    unsigned n = 0;
+    for (uint64_t blk = 0; ok && blk < fs->mem[0].nblocks; blk++) {
+        if (blk >= fs->mem[0].first_usable && !cfs_bitmap_test(fs, cfs_dva_lin(fs, CFS_DVA(0, blk))))
+            continue;
+        ok = raw_block(a, blk, x) && raw_block(b, blk, y) && memcmp(x, y, CFS_BLOCK) == 0;
+        if (!ok)
+            kwarn("selftest: block %llu differs between %s and %s", (unsigned long long)blk, a->name, b->name);
+        n++;
+    }
+    kfree(x);
+    kfree(y);
+    if (compared)
+        *compared = n;
+    return ok;
+}
+
+/*
+ * CF28, CF29: a copy that was away is resilvered from the regions its
+ * record names; a write made during the resilver reaches the copy being
+ * rebuilt (read raw from each device); at the end every allocated block
+ * is the same on both, the copy is ONLINE, a scrub finds nothing, and the
+ * rebuilt device alone mounts the pool. While the pool is mounted the
+ * device is held: /dev/blkctl's check sees it (CFS-5).
+ */
+bool selftest_cosmofs_resilver(const char **reason)
+{
+    struct blkdev *bd[2] = { NULL, NULL };
+    uint8_t *x = kmalloc(CFS_BLOCK, 0), *y = kmalloc(CFS_BLOCK, 0);
+    bool ok = false;
+    static char data[5 * 4096], during[4096];
+    memset(data, 'r', sizeof(data));
+    memset(during, 'w', sizeof(during));
+    cosmofs_test_resilver_hold(true);
+    RS_CHECK(x != NULL && y != NULL);
+    RS_CHECK(mirror_up(bd, 512));
+    RS_CHECK(write_file(ENG "/a", data, sizeof(data)) && vfs_sync() == 0);
+    ramblk_set_fail(bd[1], -ENODEV);
+    RS_CHECK(write_file(ENG "/b", data, sizeof(data)) && vfs_sync() == 0);
+    ramblk_set_fail(bd[1], 0);
+    struct spool *pool = cosmofs_test_pool(mount_of(ENG));
+    RS_CHECK(pool != NULL && pool->m[0].copy[1].state == POOL_COPY_MISSING);
+
+    /* CFS-5: the pool's other copy is not the operator's to format. */
+    RS_CHECK(vfs_bdev_mounted(bd[1]));
+    RS_CHECK(vfs_format("cosmofs", bd[1], NULL) == -EBUSY);
+
+    /* Back: online resilvers what it missed. */
+    RS_CHECK(pool_op(COSMOFS_POOL_ONLINE, bd[1]->name, NULL) == 0);
+    const struct pool_copy *cp = &pool->m[0].copy[1];
+    RS_CHECK(cp->state == POOL_COPY_RESILVERING && !cp->whole && cp->cursor == 0);
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 2) == 0);
+    RS_CHECK(cp->state == POOL_COPY_RESILVERING && cp->cursor > 0);
+
+    /* A write during the resilver: on both devices, read raw. */
+    RS_CHECK(write_file(ENG "/during", during, sizeof(during)) && vfs_sync() == 0);
+    struct file *f = NULL;
+    RS_CHECK(vfs_open(NULL, ENG "/during", COSMO_O_RDONLY, 0, &f) == 0);
+    uint64_t ino = f->vn->ino, dblk = 0;
+    file_put(f);
+    RS_CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &dblk) == 0);
+    RS_CHECK(raw_block(bd[0], CFS_DVA_BLK(dblk), x) && memcmp(x, during, CFS_BLOCK) == 0);
+    RS_CHECK(raw_block(bd[1], CFS_DVA_BLK(dblk), y) && memcmp(y, during, CFS_BLOCK) == 0);
+    RS_CHECK(cp->state == POOL_COPY_RESILVERING);
+
+    /* To the end. */
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 0) == 0);
+    RS_CHECK(cp->state == POOL_COPY_ONLINE && cp->dev == bd[1]);
+    struct cosmofs_stats st;
+    RS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 2 && st.degraded == 0);
+    RS_CHECK(!mounts_line_has(ENG, "degraded"));
+    RS_CHECK(vfs_sync() == 0);
+    unsigned compared = 0;
+    RS_CHECK(same_allocated(bd[0], bd[1], &compared) && compared > 10);
+    struct cosmofs_scrub_stats sc;
+    RS_CHECK(cosmofs_scrub(mount_of(ENG), &sc, 0) == 0 && sc.bad_copies == 0 && sc.unrecoverable == 0);
+
+    /* The rebuilt device alone holds the pool. */
+    RS_CHECK(vfs_umount(ENG) == 0);
+    ramblk_set_fail(bd[0], -ENODEV);
+    RS_CHECK(vfs_mount(ENG, "cosmofs", bd[1], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    RS_CHECK(read_matches(ENG "/a", data, sizeof(data)) && read_matches(ENG "/b", data, sizeof(data)));
+    RS_CHECK(read_matches(ENG "/during", during, sizeof(during)));
+    ok = true;
+    kinfo("selftest: cosmofs-resilver: %u blocks the same on both copies; a write during it reached both", compared);
+out:
+    cosmofs_test_resilver_hold(false);
+    kfree(x);
+    kfree(y);
+    mirror_down(bd);
+    return ok;
+}
+
+/*
+ * CF29: a resilver stopped by an unmount goes on from the cursor the
+ * record holds -- its target found again by the tag in its label -- and
+ * completes; replace put a blank device in the place of a missing one.
+ */
+bool selftest_cosmofs_resilver_resume(const char **reason)
+{
+    struct blkdev *bd[2] = { NULL, NULL };
+    struct blkdev *nd = NULL;
+    bool ok = false;
+    static char data[40 * 4096];
+    memset(data, 'q', sizeof(data));
+    cosmofs_test_resilver_hold(true);
+    RS_CHECK(mirror_up(bd, 512));
+    nd = ramblk_create(512);
+    RS_CHECK(nd != NULL);
+    RS_CHECK(write_file(ENG "/a", data, sizeof(data)) && vfs_sync() == 0);
+    ramblk_set_fail(bd[1], -ENODEV);
+    RS_CHECK(write_file(ENG "/b", data, 4096) && vfs_sync() == 0);
+    RS_CHECK(pool_op(COSMOFS_POOL_REPLACE, bd[1]->name, nd->name) == 0);
+    struct spool *pool = cosmofs_test_pool(mount_of(ENG));
+    RS_CHECK(pool->m[0].ncopies == 2 && pool->m[0].copy[1].dev == nd);
+    RS_CHECK(pool->m[0].copy[1].state == POOL_COPY_RESILVERING && pool->m[0].copy[1].whole);
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 12) == 0);
+    /* A commit records the cursor. */
+    RS_CHECK(write_file(ENG "/mid", "mid", 3) && vfs_sync() == 0);
+    uint64_t saved = pool->m[0].copy[1].cursor;
+    RS_CHECK(saved > 2);
+    RS_CHECK(vfs_umount(ENG) == 0);
+
+    /* The "reboot": the target is found by its tag and goes on. */
+    RS_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    pool = cosmofs_test_pool(mount_of(ENG));
+    const struct pool_copy *cp = &pool->m[0].copy[1];
+    RS_CHECK(cp->dev == nd && cp->state == POOL_COPY_RESILVERING && cp->whole && cp->cursor == saved);
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 0) == 0);
+    RS_CHECK(cp->state == POOL_COPY_ONLINE && cp->dev == nd);
+    RS_CHECK(vfs_sync() == 0);
+    unsigned compared = 0;
+    RS_CHECK(same_allocated(bd[0], nd, &compared));
+    RS_CHECK(vfs_umount(ENG) == 0);
+    ramblk_set_fail(bd[0], -ENODEV);
+    RS_CHECK(vfs_mount(ENG, "cosmofs", nd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    RS_CHECK(read_matches(ENG "/a", data, sizeof(data)) && read_matches(ENG "/mid", "mid", 3));
+    ok = true;
+    kinfo("selftest: cosmofs-resilver-resume: stopped at block %llu, resumed there, %u blocks the same",
+          (unsigned long long)saved, compared);
+out:
+    cosmofs_test_resilver_hold(false);
+    mirror_down(bd);
+    if (nd) {
+        ramblk_set_fail(nd, 0);
+        ramblk_destroy(nd);
+    }
+    return ok;
+}
+
+/*
+ * A spare takes over by itself: a copy pulled while the pool has a spare
+ * is replaced by it, the takeover resilvers it whole, and the spare is
+ * then a member -- the pool whole again, the spare list empty. The spare
+ * is held while it waits (CFS-5).
+ */
+bool selftest_cosmofs_spare(const char **reason)
+{
+    struct blkdev *bd[2] = { NULL, NULL };
+    struct blkdev *sp = NULL;
+    bool ok = false;
+    static char data[8 * 4096];
+    memset(data, 's', sizeof(data));
+    cosmofs_test_resilver_hold(true);
+    RS_CHECK(mirror_up(bd, 512));
+    sp = ramblk_create(512);
+    RS_CHECK(sp != NULL);
+    RS_CHECK(write_file(ENG "/a", data, sizeof(data)) && vfs_sync() == 0);
+    RS_CHECK(pool_op(COSMOFS_POOL_SPARE_ADD, sp->name, NULL) == 0);
+    struct spool *pool = cosmofs_test_pool(mount_of(ENG));
+    RS_CHECK(pool->nspares == 1 && pool->spare[0] == sp && vfs_bdev_mounted(sp));
+    RS_CHECK(pool_op(COSMOFS_POOL_SPARE_ADD, sp->name, NULL) == -EEXIST);
+
+    ramblk_set_fail(bd[1], -ENODEV);
+    RS_CHECK(write_file(ENG "/b", data, sizeof(data)) && vfs_sync() == 0);
+    RS_CHECK(pool->m[0].copy[1].state == POOL_COPY_MISSING);
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 0) == 0);
+    const struct pool_copy *cp = &pool->m[0].copy[1];
+    RS_CHECK(cp->dev == sp && cp->state == POOL_COPY_ONLINE && pool->nspares == 0);
+    struct cosmofs_stats st;
+    RS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 2 && st.degraded == 0);
+    RS_CHECK(vfs_sync() == 0);
+    RS_CHECK(same_allocated(bd[0], sp, NULL));
+    RS_CHECK(vfs_umount(ENG) == 0);
+    /* The pulled disk comes back; the pool has its two copies and leaves it. */
+    ramblk_set_fail(bd[1], 0);
+    RS_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    RS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 2 && st.degraded == 0);
+    pool = cosmofs_test_pool(mount_of(ENG));
+    RS_CHECK(pool->m[0].copy[1].dev == sp || pool->m[0].copy[0].dev == sp);
+    RS_CHECK(read_matches(ENG "/b", data, sizeof(data)));
+    ok = true;
+    kinfo("selftest: cosmofs-spare: the spare took the pulled copy's place and is a member");
+out:
+    cosmofs_test_resilver_hold(false);
+    mirror_down(bd);
+    if (sp) {
+        ramblk_set_fail(sp, 0);
+        ramblk_destroy(sp);
+    }
+    return ok;
+}
+
+/*
+ * A single-device pool becomes a mirror (attach), a good copy is
+ * replaced with the old one serving until the new one is done (replace),
+ * and the mirror goes back to one device (detach). Offline and online
+ * with nothing written meanwhile need no resilver; the last good copy
+ * cannot be taken offline or detached.
+ */
+bool selftest_cosmofs_attach(const char **reason)
+{
+    struct blkdev *bd[3] = { NULL, NULL, NULL };
+    bool ok = false;
+    static char data[6 * 4096];
+    memset(data, 't', sizeof(data));
+    cosmofs_test_resilver_hold(true);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    for (unsigned i = 0; i < 3; i++) {
+        bd[i] = ramblk_create(512);
+        RS_CHECK(bd[i] != NULL);
+    }
+    RS_CHECK(vfs_format("cosmofs", bd[0], NULL) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    RS_CHECK(mk == 0 || mk == -EEXIST);
+    RS_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    RS_CHECK(write_file(ENG "/a", data, sizeof(data)) && vfs_sync() == 0);
+    struct cosmofs_stats st;
+    RS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 1 && st.version == CFS_FORMAT_VERSION);
+
+    /* attach: one disk becomes a mirror. */
+    RS_CHECK(pool_op(COSMOFS_POOL_ATTACH, bd[0]->name, bd[1]->name) == 0);
+    struct spool *pool = cosmofs_test_pool(mount_of(ENG));
+    RS_CHECK(pool->m[0].ncopies == 2 && pool->m[0].copy[1].state == POOL_COPY_RESILVERING);
+    RS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.version == 13);
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 0) == 0);
+    RS_CHECK(pool->m[0].copy[1].state == POOL_COPY_ONLINE);
+    RS_CHECK(vfs_sync() == 0 && same_allocated(bd[0], bd[1], NULL));
+
+    /* offline and online: the commit that recorded the offline is one
+     * the copy missed, so online resilvers that much and no more. */
+    RS_CHECK(pool_op(COSMOFS_POOL_OFFLINE, bd[1]->name, NULL) == 0);
+    RS_CHECK(pool->m[0].copy[1].state == POOL_COPY_OFFLINE);
+    RS_CHECK(pool_op(COSMOFS_POOL_OFFLINE, bd[0]->name, NULL) == -EBUSY);
+    RS_CHECK(pool_op(COSMOFS_POOL_ONLINE, bd[1]->name, NULL) == 0);
+    RS_CHECK(pool->m[0].copy[1].state == POOL_COPY_RESILVERING && !pool->m[0].copy[1].whole);
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 0) == 0);
+    RS_CHECK(pool->m[0].copy[1].state == POOL_COPY_ONLINE);
+
+    /* replace a good copy: bd[1] serves until bd[2] is done, then goes. */
+    RS_CHECK(pool_op(COSMOFS_POOL_REPLACE, bd[1]->name, bd[2]->name) == 0);
+    RS_CHECK(pool->m[0].ncopies == 3 && pool->m[0].copy[1].peer != 0);
+    RS_CHECK(pool->m[0].copy[2].dev == bd[2] && pool->m[0].copy[2].state == POOL_COPY_RESILVERING);
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 0) == 0);
+    RS_CHECK(pool->m[0].ncopies == 2 && pool->m[0].copy[1].dev == bd[2]);
+    RS_CHECK(pool->m[0].copy[1].state == POOL_COPY_ONLINE && !vfs_bdev_mounted(bd[1]));
+    struct cfs_super a, b;
+    int ra = 0, rb = 0;
+    RS_CHECK(cfs_super_slots(bd[1], &a, &ra, &b, &rb) == 0 && ra != 0 && rb != 0);   /* no longer the pool's */
+    RS_CHECK(vfs_sync() == 0 && same_allocated(bd[0], bd[2], NULL));
+
+    /* detach: back to one device. */
+    RS_CHECK(pool_op(COSMOFS_POOL_DETACH, bd[2]->name, NULL) == 0);
+    RS_CHECK(pool->m[0].ncopies == 1);
+    RS_CHECK(pool_op(COSMOFS_POOL_DETACH, bd[0]->name, NULL) == -EBUSY);
+    RS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 1 && st.degraded == 0);
+    RS_CHECK(vfs_umount(ENG) == 0);
+    RS_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    RS_CHECK(read_matches(ENG "/a", data, sizeof(data)));
+    RS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 1 && st.degraded == 0);
+    ok = true;
+    kinfo("selftest: cosmofs-attach: attach, offline/online, replace and detach");
+out:
+    cosmofs_test_resilver_hold(false);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    for (unsigned i = 0; i < 3; i++)
+        if (bd[i])
+            ramblk_destroy(bd[i]);
+    return ok;
+}
+#undef RS_CHECK
 #else
 bool selftest_cosmofs_copy_geometry(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_resilver(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_resilver_resume(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_spare(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_attach(const char **reason) { (void)reason; return true; }
 bool selftest_pool_copy_states(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_degraded(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_copy_bitmap(const char **reason) { (void)reason; return true; }

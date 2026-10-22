@@ -405,7 +405,8 @@ struct cfs_member_block {
 #define CFS_COPY_FAULTED 3u
 #define CFS_COPY_RESILVERING 4u
 #define CFS_COPY_WHOLE (1u << 0)    /* flags: the bitmap does not cover what it missed */
-#define CFS_COPY_DIRTY_BYTES 960u   /* = POOL_DIRTY_BYTES */
+#define CFS_COPY_DETACH (1u << 1)   /* flags: detach this copy when the copy tagged `peer` is ONLINE (replace) */
+#define CFS_COPY_DIRTY_BYTES 944u   /* = POOL_DIRTY_BYTES */
 
 struct cfs_copy_rec {          /* 1000 bytes */
     uint32_t state;            /* CFS_COPY_* */
@@ -413,6 +414,11 @@ struct cfs_copy_rec {          /* 1000 bytes */
     uint64_t since;            /* the last generation this copy holds whole */
     uint64_t cursor;           /* resilver: blocks below this are rebuilt */
     uint32_t read_errors, write_errors, csum_errors, pad;
+    /* Which device: a resilver's target and a spare carry the same tag in
+     * their label (struct cfs_label), so a mount finds them by it; 0 for a
+     * copy that holds the pool's own superblock or label. */
+    uint64_t tag;
+    uint64_t peer;             /* CFS_COPY_DETACH: the tag of the copy replacing this one */
     uint8_t dirty[CFS_COPY_DIRTY_BYTES];   /* one bit per region it missed */
 };
 
@@ -443,10 +449,19 @@ struct cfs_label {
      * checksum and still be the wrong contents (design.md, "A mirror is
      * only as good as its verifier"). */
     uint64_t generation;
-    uint64_t reserved[2];
+    /* Version 13 (roadmap 1.2 B3): CFS_LABEL_RESILVER marks a device being
+     * rebuilt as a copy of member `index` (block 0 of member 0, whose
+     * superblocks it does not hold yet), CFS_LABEL_SPARE a spare of the
+     * pool; `tag` is its record's (struct cfs_copy_rec). Zero before: a
+     * reserved word every label wrote as zero. */
+    uint64_t flags;
+    uint64_t tag;
     uint32_t crc;              /* CRC32C over the block with this field zero */
     uint32_t pad;
 };
+
+#define CFS_LABEL_RESILVER (1ull << 0)
+#define CFS_LABEL_SPARE    (1ull << 1)
 
 /*
  * The wrapped master key (CFS_KIND_KEYS), named by cfs_super.key_root.

@@ -157,6 +157,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_clone.c \
 	kernel-services/filesystem/cosmofs/cosmofs_member.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
+	kernel-services/filesystem/cosmofs/cosmofs_resilver.c \
 	kernel-services/filesystem/cosmofs/cosmofs_check.c \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c \

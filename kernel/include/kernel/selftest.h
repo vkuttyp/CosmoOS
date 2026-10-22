@@ -414,6 +414,10 @@ bool selftest_cosmofs_degraded(const char **reason);             /* B3 CF26: a p
 bool selftest_cosmofs_copy_bitmap(const char **reason);          /* B3 CF25: the record of what a copy missed */
 bool selftest_cosmofs_copy_import(const char **reason);          /* B3 CF27: the newest root, whichever device */
 bool selftest_cosmofs_copy_geometry(const char **reason);        /* B3: a bigger copy mounts at the table's size */
+bool selftest_cosmofs_resilver(const char **reason);             /* B3 CF28/29: online, a write during it, the end */
+bool selftest_cosmofs_resilver_resume(const char **reason);      /* B3 CF29: an unmount mid-resilver, resumed */
+bool selftest_cosmofs_spare(const char **reason);                /* B3: a spare takes over by itself */
+bool selftest_cosmofs_attach(const char **reason);               /* B3: attach, offline/online, replace, detach */
 bool selftest_cosmofs_root_type(const char **reason);             /* a root that is not a directory is refused, not asserted */
 bool selftest_cosmofs_nomem(const char **reason);                 /* CFS-6: -ENOMEM returned, the transaction kept */
 bool selftest_cosmofs_crypt(const char **reason);                 /* encryption and keys */

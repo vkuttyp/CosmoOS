@@ -334,6 +334,8 @@ void pool_close(struct spool *p)
         }
         kfree(m->recent);
     }
+    for (unsigned i = 0; i < p->nspares; i++)
+        blkdev_put(p->spare[i]);
     kfree(p->m);
     kfree(p);
 }
@@ -568,6 +570,8 @@ int pool_write_flags(struct spool *p, uint64_t dva, const void *buf, unsigned fl
     if (m == NULL)
         return -EINVAL;
     unsigned v = POOL_DVA_VDEV(dva);
+    bool online_only = (flags & POOL_WRITE_ONLINE) != 0;
+    flags &= ~POOL_WRITE_ONLINE;
     if (m->recent)
         region_set(m->recent, m, blk);
     int first = 0;
@@ -578,6 +582,11 @@ int pool_write_flags(struct spool *p, uint64_t dva, const void *buf, unsigned fl
             missed(m, c, blk);
             continue;
         }
+        /* The root, skipped on purpose for a copy being rebuilt: not a
+         * block it missed -- the resilver copies the superblock slots
+         * last, when the copy holds everything they name. */
+        if (online_only && !readable(&m->copy[c]))
+            continue;
         bool was_online = m->copy[c].state == POOL_COPY_ONLINE;
         int rc = write_one(p, v, blk, c, buf, flags);
         if (rc == 0 && was_online)
@@ -646,4 +655,183 @@ int pool_flush(struct spool *p)
             first = mfirst ? (mfirst == -ENODEV ? -EIO : mfirst) : -EIO;
     }
     return first;
+}
+
+void pool_region_clear(struct spool *p, unsigned vdev, unsigned c, uint64_t r)
+{
+    if (vdev >= p->nmembers || c >= p->m[vdev].ncopies || r >= POOL_DIRTY_BITS)
+        return;
+    uint8_t *d = p->m[vdev].copy[c].dirty;
+    if (d)
+        d[r / 8] &= (uint8_t)~(1u << (r % 8));
+}
+
+bool pool_region_missed(const struct spool *p, unsigned vdev, unsigned c, uint64_t r)
+{
+    if (vdev >= p->nmembers || c >= p->m[vdev].ncopies || r >= POOL_DIRTY_BITS)
+        return false;
+    const struct pool_copy *cp = &p->m[vdev].copy[c];
+    if (cp->whole)
+        return true;
+    return cp->dirty && ((cp->dirty[r / 8] >> (r % 8)) & 1u);
+}
+
+bool pool_copy_any_missed(const struct spool *p, unsigned vdev, unsigned c)
+{
+    if (vdev >= p->nmembers || c >= p->m[vdev].ncopies)
+        return false;
+    const struct pool_copy *cp = &p->m[vdev].copy[c];
+    if (cp->whole)
+        return true;
+    if (cp->dirty)
+        for (unsigned i = 0; i < POOL_DIRTY_BYTES; i++)
+            if (cp->dirty[i])
+                return true;
+    return false;
+}
+
+static void changed(struct spool *p)
+{
+    p->state_seq++;
+    if (p->notify)
+        p->notify(p->notify_arg);
+}
+
+int pool_copy_resilvered(struct spool *p, unsigned vdev, unsigned c)
+{
+    if (vdev >= p->nmembers || c >= p->m[vdev].ncopies)
+        return -EINVAL;
+    struct pool_copy *cp = &p->m[vdev].copy[c];
+    if (cp->state != POOL_COPY_RESILVERING || cp->dev == NULL)
+        return -EINVAL;
+    cp->state = POOL_COPY_ONLINE;
+    cp->whole = false;
+    cp->cursor = 0;
+    cp->since = p->epoch;
+    if (cp->dirty)
+        memset(cp->dirty, 0, POOL_DIRTY_BYTES);
+    changed(p);
+    kwarn("pool: %s%smember %u copy %u (%s) ONLINE: resilvered; the member is %s", p->name ? p->name : "",
+          p->name ? ": " : "", vdev, c, dev_name_of(cp), pool_member_degraded(p, vdev) ? "degraded" : "whole");
+    return 0;
+}
+
+int pool_copy_replace_dev(struct spool *p, unsigned vdev, unsigned c, struct blkdev *bd, enum pool_copy_state state)
+{
+    if (vdev >= p->nmembers || c >= p->m[vdev].ncopies || (unsigned)state >= POOL_COPY_NSTATES)
+        return -EINVAL;
+    struct spool_member *m = &p->m[vdev];
+    struct pool_copy *cp = &m->copy[c];
+    if (readable(cp) && online_copies(m) == 1)
+        return -EBUSY;   /* the member's last good copy is not given away */
+    int rc = fits(m, bd);
+    if (rc)
+        return rc;
+    struct blkdev *old = cp->dev;
+    cp->dev = NULL;
+    rc = attach(cp, bd);
+    if (rc) {
+        cp->dev = old;
+        return rc;
+    }
+    if (old)
+        blkdev_put(old);
+    cp->state = state;
+    cp->whole = state != POOL_COPY_ONLINE;
+    cp->cursor = 0;
+    cp->since = 0;
+    cp->read_errors = cp->write_errors = cp->csum_errors = 0;
+    cp->peer = 0;
+    if (cp->dirty)
+        memset(cp->dirty, 0, POOL_DIRTY_BYTES);
+    changed(p);
+    return 0;
+}
+
+int pool_detach_copy(struct spool *p, unsigned vdev, unsigned c)
+{
+    if (vdev >= p->nmembers || c >= p->m[vdev].ncopies)
+        return -EINVAL;
+    struct spool_member *m = &p->m[vdev];
+    if (m->ncopies == 1 || (readable(&m->copy[c]) && online_copies(m) == 1))
+        return -EBUSY;
+    struct pool_copy gone = m->copy[c];
+    for (unsigned k = c; k + 1 < m->ncopies; k++)
+        m->copy[k] = m->copy[k + 1];
+    m->ncopies--;
+    memset(&m->copy[m->ncopies], 0, sizeof(m->copy[m->ncopies]));
+    if (gone.dev)
+        blkdev_put(gone.dev);
+    kfree(gone.dirty);
+    changed(p);
+    kwarn("pool: %s%smember %u copy %u (%s) detached; %u copies", p->name ? p->name : "", p->name ? ": " : "", vdev,
+          c, gone.dev ? gone.dev->name : "no device", m->ncopies);
+    return 0;
+}
+
+int pool_add_spare(struct spool *p, struct blkdev *bd, uint64_t tag)
+{
+    if (bd == NULL || bd->sector_size == 0 || POOL_BLOCK % bd->sector_size != 0)
+        return -EINVAL;
+    for (unsigned i = 0; i < p->nspares; i++)
+        if (p->spare[i] == bd)
+            return -EEXIST;
+    if (p->nspares >= POOL_MAX_SPARES)
+        return -ENOSPC;
+    blkdev_get(bd);
+    p->spare[p->nspares] = bd;
+    p->spare_tag[p->nspares] = tag;
+    p->nspares++;
+    return 0;
+}
+
+static void spare_drop(struct spool *p, unsigned i)
+{
+    for (unsigned k = i; k + 1 < p->nspares; k++) {
+        p->spare[k] = p->spare[k + 1];
+        p->spare_tag[k] = p->spare_tag[k + 1];
+    }
+    p->nspares--;
+    p->spare[p->nspares] = NULL;
+    p->spare_tag[p->nspares] = 0;
+}
+
+int pool_remove_spare(struct spool *p, struct blkdev *bd)
+{
+    for (unsigned i = 0; i < p->nspares; i++) {
+        if (p->spare[i] == bd) {
+            spare_drop(p, i);
+            blkdev_put(bd);
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
+struct blkdev *pool_take_spare(struct spool *p, unsigned vdev, uint64_t *tag)
+{
+    if (vdev >= p->nmembers)
+        return NULL;
+    for (unsigned i = 0; i < p->nspares; i++) {
+        struct blkdev *bd = p->spare[i];
+        if (bd->gone || fits(&p->m[vdev], bd) != 0)
+            continue;
+        if (tag)
+            *tag = p->spare_tag[i];
+        spare_drop(p, i);
+        return bd;   /* the list's reference, now the caller's */
+    }
+    return NULL;
+}
+
+bool pool_find_dev(const struct spool *p, const struct blkdev *bd, unsigned *vdev, unsigned *c)
+{
+    for (unsigned v = 0; v < p->nmembers; v++)
+        for (unsigned k = 0; k < p->m[v].ncopies; k++)
+            if (p->m[v].copy[k].dev == bd) {
+                *vdev = v;
+                *c = k;
+                return true;
+            }
+    return false;
 }

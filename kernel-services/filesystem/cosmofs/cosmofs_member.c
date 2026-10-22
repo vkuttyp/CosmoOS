@@ -90,6 +90,66 @@ int cfs_label_write(struct spool *pool, unsigned vdev, unsigned copy, uint64_t g
     return rc;
 }
 
+/*
+ * A label written straight to a device that is not (yet) one of the
+ * pool's copies, or is being rebuilt as one: a resilver's target
+ * (CFS_LABEL_RESILVER) or a spare (CFS_LABEL_SPARE), found again after a
+ * reboot by `tag` (design.md, "Resilvering"). A member-0 target's block 1
+ * is cleared too: what it holds is an older life's superblock, and until
+ * the resilver ends it must not look like a copy of anything.
+ */
+int cfs_label_write_dev(struct cfs *fs, struct blkdev *bd, unsigned vdev, uint64_t flags, uint64_t tag,
+                        uint64_t nblocks)
+{
+    struct spool *p;
+    int rc = pool_open(bd, &p);
+    if (rc)
+        return rc;
+    uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
+    if (block == NULL) {
+        pool_close(p);
+        return -ENOMEM;
+    }
+    struct cfs_label *l = (struct cfs_label *)block;
+    memcpy(l->magic, CFS_LABEL_MAGIC, sizeof(l->magic));
+    l->version = 13;
+    l->index = vdev;
+    memcpy(l->uuid, fs->sb.uuid, 16);
+    l->nblocks = nblocks;
+    l->generation = fs->sb.generation;
+    l->flags = flags;
+    l->tag = tag;
+    l->crc = label_crc(block);
+    rc = pool_write(p, CFS_DVA(0, 0), block);
+    if (rc == 0 && (flags & CFS_LABEL_RESILVER) && vdev == 0) {
+        memset(block, 0, CFS_BLOCK);
+        rc = pool_write(p, CFS_DVA(0, 1), block);
+    }
+    if (rc == 0)
+        rc = pool_flush(p);
+    kfree(block);
+    pool_close(p);
+    return rc;
+}
+
+/* A device that stops being the pool's (detached, replaced, a spare
+ * removed): its label and superblock slots are cleared, so no later
+ * mount takes it for a copy. Best effort: a device that is gone is gone. */
+void cfs_label_clear_dev(struct blkdev *bd)
+{
+    struct spool *p;
+    if (bd == NULL || bd->gone || pool_open(bd, &p))
+        return;
+    uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
+    if (block) {
+        (void)pool_write(p, CFS_DVA(0, 0), block);
+        (void)pool_write(p, CFS_DVA(0, 1), block);
+        (void)pool_flush(p);
+        kfree(block);
+    }
+    pool_close(p);
+}
+
 /* The label at block 0 of `bd`, or -ENOENT when there is none. A device
  * that is not a member of anything reads as random data here, so every
  * field is checked before it is believed. */
@@ -144,6 +204,10 @@ static bool copy_here(struct cfs *fs, struct blkdev *bd, unsigned vdev, const st
     *stale = false;
     *wrong_size = false;
     if (label_read(bd, &l) != 0 || l.index != vdev || memcmp(l.uuid, fs->sb.uuid, 16) != 0)
+        return false;
+    /* A resilver's target or a spare is labelled for this pool and is no
+     * copy of anything yet (design.md, "Resilvering"). */
+    if (fs->sb.version >= 13 && (l.flags & (CFS_LABEL_RESILVER | CFS_LABEL_SPARE)))
         return false;
     if (l.nblocks != want->nblocks) {
         kerror("cosmofs: %s carries member %u but %llu blocks, not %llu", bd->name, vdev,
@@ -208,7 +272,7 @@ static bool device_gen(struct cfs *fs, struct blkdev *bd, unsigned vdev, const s
     if (vdev != 0) {
         struct cfs_label l;
         if (label_read(bd, &l) != 0 || l.index != vdev || memcmp(l.uuid, fs->sb.uuid, 16) != 0 ||
-            l.nblocks != want->nblocks)
+            l.nblocks != want->nblocks || (l.flags & (CFS_LABEL_RESILVER | CFS_LABEL_SPARE)))
             return false;
         *gen = l.generation;
         return true;
@@ -301,6 +365,75 @@ static struct blkdev *find_device(struct cfs *fs, unsigned vdev, const struct cf
     }
 }
 
+/* A device labelled `flags` (CFS_LABEL_RESILVER or CFS_LABEL_SPARE) for
+ * this pool with `tag`, the pool not holding it: referenced, or NULL. */
+struct blkdev *cfs_find_tagged(struct cfs *fs, uint64_t flags, uint64_t tag)
+{
+    for (unsigned i = 0;; i++) {
+        struct blkdev *cand = blk_nth(i);
+        if (cand == NULL)
+            return NULL;
+        struct cfs_label l;
+        unsigned v, c;
+        if (!pool_find_dev(fs->pool, cand, &v, &c) && label_read(cand, &l) == 0 &&
+            memcmp(l.uuid, fs->sb.uuid, 16) == 0 && (l.flags & flags) && (tag == 0 || l.tag == tag))
+            return cand;
+        blkdev_put(cand);
+    }
+}
+
+/* Every spare of this pool among the registered devices, into the pool's
+ * list: a spare is its label (design.md, "Spares"). */
+void cfs_spares_find(struct cfs *fs)
+{
+    for (unsigned i = 0;; i++) {
+        struct blkdev *cand = blk_nth(i);
+        if (cand == NULL)
+            return;
+        struct cfs_label l;
+        unsigned v, c;
+        if (!pool_find_dev(fs->pool, cand, &v, &c) && label_read(cand, &l) == 0 &&
+            memcmp(l.uuid, fs->sb.uuid, 16) == 0 && (l.flags & CFS_LABEL_SPARE) &&
+            pool_add_spare(fs->pool, cand, l.tag) == 0)
+            kinfo("cosmofs: %s is a spare of this pool", cand->name);
+        blkdev_put(cand);
+    }
+}
+
+/*
+ * A device of member `vdev` this pool does not hold whose generation is
+ * behind the root: the copy that was away. `since` it is the copy a
+ * record says missed what its bitmap says (*exact); any other is a whole
+ * rebuild. Referenced, or NULL.
+ */
+struct blkdev *cfs_find_lagging(struct cfs *fs, unsigned vdev, uint64_t since, bool *exact)
+{
+    struct cfs_member want = { .nblocks = fs->mem[vdev].nblocks };
+    struct blkdev *any = NULL;
+    for (unsigned i = 0;; i++) {
+        struct blkdev *cand = blk_nth(i);
+        if (cand == NULL)
+            break;
+        uint64_t g;
+        if (in_pool(fs, vdev, cand) || !device_gen(fs, cand, vdev, &want, &g) || g >= fs->sb.generation) {
+            blkdev_put(cand);
+            continue;
+        }
+        if (since != 0 && g == since) {
+            if (any)
+                blkdev_put(any);
+            *exact = true;
+            return cand;
+        }
+        if (any == NULL)
+            any = cand;
+        else
+            blkdev_put(cand);
+    }
+    *exact = false;
+    return any;
+}
+
 /* --- copy state (version 13) ---------------------------------------------
  *
  * design.md, "Format version 13". The pool keeps each copy's state and
@@ -327,6 +460,10 @@ static void rec_from_copy(struct cfs_copy_rec *r, const struct pool_copy *cp)
     r->read_errors = cp->read_errors;
     r->write_errors = cp->write_errors;
     r->csum_errors = cp->csum_errors;
+    r->tag = cp->tag;
+    r->peer = cp->peer;
+    if (cp->peer)
+        r->flags |= CFS_COPY_DETACH;
     if (cp->dirty)
         memcpy(r->dirty, cp->dirty, CFS_COPY_DIRTY_BYTES);
 }
@@ -340,6 +477,8 @@ static void copy_from_rec(struct pool_copy *cp, const struct cfs_copy_rec *r)
     cp->read_errors = r->read_errors;
     cp->write_errors = r->write_errors;
     cp->csum_errors = r->csum_errors;
+    cp->tag = r->tag;
+    cp->peer = (r->flags & CFS_COPY_DETACH) ? r->peer : 0;
     if (cp->dirty)
         memcpy(cp->dirty, r->dirty, CFS_COPY_DIRTY_BYTES);
 }
@@ -423,6 +562,25 @@ static int setup_copies(struct cfs *fs, unsigned vdev, const struct cfs_member *
         cp->whole = true;
         cp->since = 0;
         kwarn("cosmofs: member %u copy %u is missing; the pool is degraded", vdev, c);
+    }
+    /* A resilver that a reboot interrupted: its target carries the
+     * record's tag, and goes on from the record's cursor. */
+    for (unsigned c = 0; c < n; c++) {
+        struct pool_copy *cp = &pm->copy[c];
+        if (cp->dev != NULL || cp->state != POOL_COPY_RESILVERING)
+            continue;
+        struct blkdev *bd = cp->tag ? cfs_find_tagged(fs, CFS_LABEL_RESILVER, cp->tag) : NULL;
+        if (bd != NULL && pool_attach_copy(fs->pool, vdev, c, bd, POOL_COPY_RESILVERING) == 0) {
+            kinfo("cosmofs: %s: member %u copy %u resilvering, from block %llu", bd->name, vdev, c,
+                  (unsigned long long)cp->cursor);
+        } else {
+            kwarn("cosmofs: member %u copy %u was resilvering and its device is not here", vdev, c);
+            cp->state = POOL_COPY_MISSING;
+            cp->whole = true;
+            cp->since = 0;
+        }
+        if (bd)
+            blkdev_put(bd);
     }
     /* What a lagging device is, said once: it stays out until resilvered. */
     for (unsigned c = 0; c < n; c++) {
@@ -792,8 +950,8 @@ int cfs_labels_update(struct cfs *fs)
 
 /*
  * The devices the pool uses besides the one the mount was given -- its
- * other copies, and after a mount that moved to a newer member-0 device
- * that device too -- held by the mount, so /dev/blkctl and a second
+ * other copies and resilver targets, its spares, and after a mount that
+ * moved to a newer member-0 device that device too -- held by the mount, so /dev/blkctl and a second
  * mount see them as in use (CFS-5; Codex on #439: a redirected mount
  * left the device it actually used unclaimed).
  */
@@ -810,6 +968,8 @@ void cfs_holds_sync(struct cfs *fs)
             if (bd != NULL && bd != fs->mnt->bdev && n < MOUNT_HELD_MAX)
                 held[n++] = bd;
         }
+    for (unsigned i = 0; i < p->nspares && n < MOUNT_HELD_MAX; i++)
+        held[n++] = p->spare[i];   /* and its spares (roadmap 1.2 B3) */
     int rc = vfs_mount_set_held(fs->mnt, held, n);
     if (rc)
         kwarn("cosmofs: %s: the pool's devices could not all be held (%d)", fs->pool_name, rc);

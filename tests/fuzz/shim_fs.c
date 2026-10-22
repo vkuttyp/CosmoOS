@@ -592,3 +592,36 @@ uint32_t pagecache_wb_seq(struct pagecache *pc)
     (void)pc;
     return 0;
 }
+
+/* Roadmap 1.2 B3's resilver and pool commands are not in the fuzz build:
+ * a fuzzed image is mounted, read and written, never resilvered. */
+void cfs_resilver_mount(struct cfs *fs)
+{
+    (void)fs;
+}
+
+void cfs_resilver_stop(struct cfs *fs)
+{
+    (void)fs;
+}
+
+int cosmofs_poolctl(struct mount *mnt, struct cosmofs_pool_req *req)
+{
+    (void)mnt; (void)req;
+    return -EOPNOTSUPP;
+}
+
+int pool_add_spare(struct spool *p, struct blkdev *bd, uint64_t tag)
+{
+    (void)p; (void)bd; (void)tag;
+    return -ENOSPC;
+}
+
+bool pool_find_dev(const struct spool *p, const struct blkdev *bd, unsigned *vdev, unsigned *c)
+{
+    if (p->m[0].copy[0].dev != bd)
+        return false;
+    *vdev = 0;
+    *c = 0;
+    return true;
+}
