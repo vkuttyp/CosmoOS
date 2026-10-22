@@ -71,9 +71,10 @@ struct cosmofs_scrub_stats {
 };
 /* Read every block the filesystem reaches through the ordinary
  * verifying path, repairing a mirrored member where a copy has rotted.
- * -EIO when something was unrecoverable (the counts still say what),
- * -EINVAL for a mount that is not a cosmofs. Sleeps; takes the mount's
- * lock for the whole walk. */
+ * 0 whenever the walk ran -- `unrecoverable` counts what no copy could
+ * satisfy (CFS-11) -- -EIO for an abandoned transaction, -EINVAL for a
+ * mount that is not a cosmofs. Sleeps; takes the mount's lock for the
+ * whole walk. */
 int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out);
 
 /* --- the structural check (docs/audit/next-subsystem-fsck.md) ---------------

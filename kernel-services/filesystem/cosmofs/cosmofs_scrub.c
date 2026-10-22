@@ -299,5 +299,8 @@ int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out)
           (unsigned long long)st.unrecoverable);
     if (out)
         *out = st;
-    return st.unrecoverable ? -EIO : 0;
+    /* A block no copy could satisfy is a finding, as a check's are: the
+     * pass ran and the counts say what it found. -EIO here made fsctl
+     * drop the counts the operator asked for (CFS-11). */
+    return 0;
 }

@@ -1305,7 +1305,7 @@ bool selftest_cosmofs_mirror(const char **reason)
     file_put(f);
     f = NULL;
     MIRROR_CHECK(read_matches(ENG "/dir/inner", "inner", 5));
-    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == -EIO && sc.unrecoverable == 1);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 1);
 
     MIRROR_CHECK(vfs_umount(ENG) == 0);
 
