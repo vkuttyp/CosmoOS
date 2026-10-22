@@ -130,8 +130,10 @@ static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_
     uint64_t *slot = &in->indirect;   /* the pointer to the block we are about to fill */
     while (left > 0) {
         struct cfs_buf *b;
-        int rc;
-        if (*slot) {
+        /* The test seam (cosmofs-nomem): the chain block cannot be had. */
+        int rc = faultinject_should_fail(FI_COSMOFS_CHAIN_NOMEM) ? -ENOMEM : 0;
+        if (rc) {
+        } else if (*slot) {
             rc = cfs_buf_get(fs, *slot, CFS_KIND_EXTENTS, &b);
             if (rc == 0)
                 rc = cfs_buf_cow(fs, &b, slot);
@@ -962,7 +964,8 @@ static int inode_sync(struct cfs *fs, struct vnode *vn)
                         vn->type == VNODE_LNK ? 0777u : vn->mode);
     in->uid = vn->uid;
     in->gid = vn->gid;
-    int rc = cfs_inode_write(fs, vn->ino, in);
+    /* The test seam (cosmofs-nomem): the inode's map path cannot be had. */
+    int rc = faultinject_should_fail(FI_COSMOFS_INODE_NOMEM) ? -ENOMEM : cfs_inode_write(fs, vn->ino, in);
     if (rc)
         cfs_fail(fs, rc);
     return rc;

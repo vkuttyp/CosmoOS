@@ -5672,6 +5672,353 @@ bool selftest_cosmofs_clone(const char **reason)
           (unsigned long long)(st.free_blocks - free_before));
     return engine_unmount(bd, reason);
 }
+
+/* --- roadmap 1.2 B2's defects (docs/audit/2026-10-22-b2-fsck-report.md) --- */
+
+/* One CRC per block of a single-device pool, for "what did this change". */
+static uint32_t *device_crcs(struct blkdev *bd, uint64_t nblocks)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return NULL;
+    uint32_t *crcs = kmalloc((size_t)nblocks * sizeof(*crcs), 0);
+    uint8_t *b = kmalloc(CFS_BLOCK, 0);
+    bool ok = crcs != NULL && b != NULL;
+    for (uint64_t i = 0; ok && i < nblocks; i++) {
+        ok = pool_read(p, CFS_DVA(0, i), b) == 0;
+        if (ok)
+            crcs[i] = crc32c(b, CFS_BLOCK);
+    }
+    kfree(b);
+    pool_close(p);
+    if (!ok) {
+        kfree(crcs);
+        return NULL;
+    }
+    return crcs;
+}
+
+static unsigned crcs_differ(const uint32_t *a, const uint32_t *b, uint64_t nblocks)
+{
+    unsigned n = 0;
+    for (uint64_t i = 0; i < nblocks; i++)
+        n += a[i] != b[i];
+    return n;
+}
+
+/*
+ * CFS-1: a read-only mount writes nothing. The pool is left with both
+ * records pending -- what the last commit freed and an inode unlinked
+ * while held -- and is mounted read-only, checked and unmounted: every
+ * block is what it was. The replay ran all the same, in memory: the
+ * check is clean (it would call the orphan's blocks leaked otherwise).
+ * Before the fix the unmount's commit wrote the replay to the device.
+ */
+bool selftest_cosmofs_ro_replay(const char **reason)
+{
+    const uint64_t nblocks = 512;
+    struct blkdev *bd;
+    if (!engine_mount(&bd, nblocks, reason))
+        return false;
+    const size_t biglen = 16 * 4096;
+    uint8_t *big = kmalloc(biglen, 0);
+    CHECK(big != NULL);
+    fill_incompressible(big, biglen, 0xc0ffee);
+    bool wrote = write_file(ENG "/held", (const char *)big, biglen);
+    kfree(big);
+    CHECK(wrote);
+    CHECK(vfs_sync() == 0);
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/held", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.orphan_root != 0 && st.free_root != 0);   /* both replays have work */
+    file_put(f);
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);    /* the eviction never reaches the disk */
+
+    uint32_t *before = device_crcs(bd, nblocks);
+    CHECK(before != NULL);
+    int mrc = vfs_mount(ENG, "cosmofs", bd, MOUNT_RDONLY);
+    if (mrc != 0)
+        kfree(before);
+    CHECK(mrc == 0);
+    struct cosmofs_check_report r;
+    bool clean = cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean;
+    int repair = cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR);
+    int urc = vfs_umount(ENG);
+    uint32_t *after = device_crcs(bd, nblocks);
+    unsigned changed = after != NULL ? crcs_differ(before, after, nblocks) : ~0u;
+    kfree(before);
+    kfree(after);
+    kinfo("selftest: cosmofs-ro-replay: read-only mount: check %s, repair %d, unmount %d, %u block(s) changed",
+          clean ? "clean" : "NOT clean", repair, urc, changed);
+    CHECK(changed == 0);       /* the claim, first: what the old code got wrong */
+    CHECK(urc == 0);
+    CHECK(clean);              /* the replay ran in memory */
+    CHECK(repair == -EROFS);   /* a repair would be dropped: refused */
+
+    /* The writable mount after it writes the replay, as it always did. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.orphan_root == 0);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * CFS-2: writes honour the mounted format. A version-5 pool has no
+ * compressed records (version 6 added them), so a new file written here
+ * must not get one; at the current version the same file is a record,
+ * which is what shows this test can see one (cosmofs_test_block_of says
+ * -1 for a block inside a record, cfs_map's answer).
+ */
+static bool compress_at_version(unsigned version, int *map0, const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    bool ok = (version == 0 ? cosmofs_format(bd) : cosmofs_test_format_version(bd, version)) == 0;
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    ok = ok && (mk == 0 || mk == -EEXIST) && vfs_mount(ENG, "cosmofs", bd, 0) == 0;
+    if (!ok) {
+        (void)vfs_rmdir(NULL, ENG);
+        ramblk_destroy(bd);
+        *reason = "check failed: format and mount for compress_at_version";
+        return false;
+    }
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    static uint8_t zeros[8 * 4096];   /* one whole record, as compressible as data gets */
+    memset(zeros, 'z', sizeof(zeros));
+    struct vnode *vn = NULL;
+    bool w = write_file(ENG "/z", zeros, sizeof(zeros)) && vfs_sync() == 0 && vfs_lookup(NULL, ENG "/z", &vn) == 0;
+    uint64_t dva = 0;
+    *map0 = w ? cosmofs_test_block_of(mount_of(ENG), vn->ino, 0, &dva) : -100;
+    if (vn)
+        vnode_put(vn);
+    struct cosmofs_stats st;
+    unsigned v = cosmofs_stats(mount_of(ENG), &st) == 0 ? st.version : 0;
+    bool back = read_matches(ENG "/z", zeros, sizeof(zeros));
+    kinfo("selftest: cosmofs-version-compress: format %u: block 0 maps %d, reads back %s", v, *map0,
+          back ? "yes" : "NO");
+    CHECK(w && back);
+    CHECK(version == 0 || v == version);   /* the format is not raised by writing */
+    return engine_unmount(bd, reason);
+}
+
+bool selftest_cosmofs_version_compress(const char **reason)
+{
+    int cur = 0, v5 = 0;
+    if (!compress_at_version(0, &cur, reason))
+        return false;
+    CHECK(cur == -1);   /* the current format compresses: a record */
+    if (!compress_at_version(5, &v5, reason))
+        return false;
+    CHECK(v5 == 0);     /* the claim: a plain block on a version-5 pool */
+    return true;
+}
+
+/*
+ * CFS-11: a scrub that met a block no copy can satisfy still answers, and
+ * says how many. One plain data block rotted on a single-device pool is
+ * unrecoverable; the scrub's counts reach the operator through
+ * /dev/fsctl. Before the fix the write failed with -EIO and the counts
+ * were only in the kernel log.
+ */
+bool selftest_cosmofs_scrub_counts(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    static uint8_t page[4096];
+    fill_incompressible(page, sizeof(page), 0x5c4b);
+    CHECK(write_file(ENG "/rot", page, sizeof(page)));
+    CHECK(vfs_sync() == 0);
+    struct vnode *vn;
+    CHECK(vfs_lookup(NULL, ENG "/rot", &vn) == 0);
+    uint64_t ino = vn->ino, dva = 0;
+    vnode_put(vn);
+    CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &dva) == 0);
+    CHECK(rot_copy(bd, CFS_DVA_BLK(dva), 0x3c));
+
+    struct cosmofs_scrub_stats sc;
+    int direct = cosmofs_scrub(mount_of(ENG), &sc);
+    struct file *f;
+    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &f) == 0);
+    struct cosmo_fsctl cmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_SCRUB,
+                               .mount_id = mount_of(ENG)->id };
+    uint8_t buf[sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_scrub)];
+    int64_t w = file_write(f, &cmd, sizeof(cmd));
+    int64_t n = file_read(f, buf, sizeof(buf));
+    file_put(f);
+    const struct cosmo_fsctl_scrub *s = (const struct cosmo_fsctl_scrub *)(buf + sizeof(struct cosmo_fsctl_result));
+    kinfo("selftest: cosmofs-scrub-counts: scrub %d (%llu unrecoverable); fsctl write %lld, read %lld", direct,
+          (unsigned long long)sc.unrecoverable, (long long)w, (long long)n);
+    CHECK(direct == 0 && sc.unrecoverable == 1);   /* a finding, not a failure */
+    CHECK(w == (int64_t)sizeof(cmd));
+    CHECK(n == (int64_t)sizeof(buf));
+    CHECK(s->unrecoverable == 1 && s->blocks_read > 0);
+    CHECK(vfs_unlink(NULL, ENG "/rot") == 0);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * A root that is not a directory is refused by the mount with -ENOTDIR.
+ * Before, the mount succeeded and the VFS asserted the root was a
+ * directory: a disk with one changed mode panicked the kernel. Both
+ * superblock slots name the corrupted root (a second commit after the
+ * corruption's), so the older-slot fallback has nothing to fall back to.
+ */
+bool selftest_cosmofs_root_type(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    CHECK(write_file(ENG "/a", "a", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ROOT_TYPE, CFS_ROOT_INO, NULL) == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(write_file(ENG "/b", "b", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    int mrc = vfs_mount(ENG, "cosmofs", bd, 0);
+    kinfo("selftest: cosmofs-root-type: a root whose inode says regular file: mount %d", mrc);
+    if (mrc == 0)
+        (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    CHECK(mrc == -ENOTDIR);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    return true;
+}
+
+#if CONFIG_FAULTINJECT
+/*
+ * CFS-6: an allocation a retry could survive is returned to the caller,
+ * and the transaction lives on. Two sites CF17 abandoned the transaction
+ * at: the chain block a file's eleventh run needs (extents_store), and
+ * the inode-map path a chown's inode write needs (inode_sync). Each
+ * fails once, the operation reports -ENOMEM, and the same operation done
+ * again succeeds, commits and reads back after a remount. Before the
+ * fix the first failure abandoned the transaction: the retry and every
+ * commit after it answered -EIO until the unmount dropped everything.
+ */
+bool selftest_cosmofs_nomem(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 1024, reason))
+        return false;
+    struct file *f = NULL;
+    struct vnode *vn = NULL;
+    uint8_t *pages = kmalloc(11 * 4096, 0);
+#define NM_CHECK(cond)                                                        \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto fail;                                                       \
+        }                                                                     \
+    } while (0)
+    NM_CHECK(pages != NULL);
+    fill_incompressible(pages, 11 * 4096, 0x6e6f6d);
+    /* Ten runs: every other page, so no two merge. The direct slots hold
+     * exactly ten. */
+    NM_CHECK(vfs_open(NULL, ENG "/runs", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    for (unsigned i = 0; i < 10; i++)
+        NM_CHECK(file_pwrite(f, pages + (size_t)i * 4096, 4096, (uint64_t)i * 2 * 4096) == 4096);
+    NM_CHECK(file_sync(f) == 0);
+    /* The eleventh run needs the chain's first block. */
+    NM_CHECK(file_pwrite(f, pages + 10 * 4096, 4096, 20 * 4096) == 4096);
+    faultinject_set(FI_COSMOFS_CHAIN_NOMEM, 1, 1, thread_current());
+    int first = file_sync(f);
+    struct fi_stats fst;
+    faultinject_stats(FI_COSMOFS_CHAIN_NOMEM, &fst);
+    faultinject_clear(FI_COSMOFS_CHAIN_NOMEM);
+    int retry = file_sync(f);
+    kinfo("selftest: cosmofs-nomem: chain: sync %d (hits %llu), retry %d", first, (unsigned long long)fst.hits,
+          retry);
+    NM_CHECK(fst.hits == 1 && first == -ENOMEM);
+    NM_CHECK(retry == 0);   /* the claim: the transaction was not abandoned */
+    file_put(f);
+    f = NULL;
+
+    /* A chown's inode write after a commit: the map path is copied anew. */
+    NM_CHECK(vfs_lookup(NULL, ENG "/runs", &vn) == 0);
+    faultinject_set(FI_COSMOFS_INODE_NOMEM, 1, 1, thread_current());
+    int own = vfs_chown(vn, 7, 7);
+    faultinject_stats(FI_COSMOFS_INODE_NOMEM, &fst);
+    faultinject_clear(FI_COSMOFS_INODE_NOMEM);
+    int own2 = vfs_chown(vn, 7, 7);
+    int sync = vfs_sync();
+    kinfo("selftest: cosmofs-nomem: inode: chown %d (hits %llu), retry %d, sync %d", own,
+          (unsigned long long)fst.hits, own2, sync);
+    NM_CHECK(fst.hits == 1 && own == -ENOMEM);
+    NM_CHECK(own2 == 0 && sync == 0);
+    vnode_put(vn);
+    vn = NULL;
+
+    /* A truncate whose map store fails: a twelfth run, committed, then a
+     * truncate that drops it -- eleven runs stay, so the chain's block is
+     * copied, and that copy fails. The truncate is -ENOMEM, and what the
+     * old map names must still be allocated after a commit: the first
+     * draft of this fix queued the dropped run's block free before the
+     * store, and the commit freed it under the map that still named it
+     * (Codex on #433). */
+    NM_CHECK(vfs_open(NULL, ENG "/runs", COSMO_O_RDWR, 0, &f) == 0);
+    NM_CHECK(file_pwrite(f, pages, 4096, 22 * 4096) == 4096);
+    NM_CHECK(file_sync(f) == 0);
+    file_put(f);
+    f = NULL;
+    faultinject_set(FI_COSMOFS_CHAIN_NOMEM, 1, 1, thread_current());
+    int trc = vfs_truncate(NULL, ENG "/runs", 21 * 4096);
+    faultinject_stats(FI_COSMOFS_CHAIN_NOMEM, &fst);
+    faultinject_clear(FI_COSMOFS_CHAIN_NOMEM);
+    NM_CHECK(vfs_sync() == 0);
+    static struct cosmofs_check_report tr;   /* 1.6 KiB: not on the stack */
+    NM_CHECK(cosmofs_check(mount_of(ENG), &tr, 0) == 0);
+    kinfo("selftest: cosmofs-nomem: truncate: %d (hits %llu); then %llu free-in-use, %llu leaked", trc,
+          (unsigned long long)fst.hits, (unsigned long long)tr.seen_not_alloc.count,
+          (unsigned long long)tr.alloc_not_seen.count);
+    NM_CHECK(fst.hits == 1 && trc == -ENOMEM);
+    NM_CHECK(tr.clean);
+    NM_CHECK(vfs_truncate(NULL, ENG "/runs", 21 * 4096) == 0);
+
+    struct cosmofs_check_report r;
+    NM_CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    NM_CHECK(vfs_umount(ENG) == 0);
+    NM_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    NM_CHECK(vfs_open(NULL, ENG "/runs", COSMO_O_RDONLY, 0, &f) == 0);
+    NM_CHECK(f->vn->uid == 7);
+    static uint8_t got[4096];
+    for (unsigned i = 0; i < 11; i++) {
+        uint64_t at = (uint64_t)(i < 10 ? i * 2 : 20) * 4096;
+        NM_CHECK(file_pread(f, got, sizeof(got), at) == 4096);
+        NM_CHECK(memcmp(got, pages + (size_t)i * 4096, 4096) == 0);
+    }
+    file_put(f);
+    f = NULL;
+    NM_CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    kfree(pages);
+    return engine_unmount(bd, reason);
+
+fail:
+    faultinject_clear(FI_COSMOFS_CHAIN_NOMEM);
+    faultinject_clear(FI_COSMOFS_INODE_NOMEM);
+    if (f)
+        file_put(f);
+    if (vn)
+        vnode_put(vn);
+    kfree(pages);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
+#undef NM_CHECK
+}
+#else
+bool selftest_cosmofs_nomem(const char **reason) { (void)reason; return true; }
+#endif
 #else
 bool selftest_cosmofs_badmap(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_snapshot(const char **reason) { (void)reason; return true; }
@@ -5682,4 +6029,9 @@ bool selftest_cosmofs_rollback_atomic(const char **reason) { (void)reason; retur
 bool selftest_cosmofs_rollback_record(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_rollback_shared(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_clone(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_ro_replay(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_version_compress(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_scrub_counts(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_root_type(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_nomem(const char **reason) { (void)reason; return true; }
 #endif

@@ -2327,6 +2327,11 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         token = in.direct[0].start;
         break;
     }
+    case COSMOFS_CORRUPT_ROOT_TYPE:
+        in.mode = CFS_MODE(CFS_TYPE_REG, in.mode & 07777u);
+        rc = cfs_inode_write(fs, ino, &in);
+        token = ino;
+        break;
     case COSMOFS_CORRUPT_NLINK:
         in.nlink++;
         rc = cfs_inode_write(fs, ino, &in);

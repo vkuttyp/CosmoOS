@@ -43,6 +43,8 @@ enum fi_kind {
     FI_XHCI_HALT_ACK, /* xHCI: USBCMD.RS clear does not set USBSTS.HCH */
     FI_COSMOFS_EXTENT_NOMEM, /* cosmofs: set_extent fails with -ENOMEM before it changes the map */
     FI_COSMOFS_EXTENT_FBIG,  /* cosmofs: set_extent fails with -EFBIG before it changes the map */
+    FI_COSMOFS_CHAIN_NOMEM,  /* cosmofs: the extent chain block a map store needs cannot be had (-ENOMEM; CFS-6) */
+    FI_COSMOFS_INODE_NOMEM,  /* cosmofs: the inode-map path an inode write needs cannot be had (-ENOMEM; CFS-6) */
     FI_KIND_COUNT,
 };
 
