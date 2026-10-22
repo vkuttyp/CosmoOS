@@ -6636,13 +6636,18 @@ bool selftest_cosmofs_copy_bitmap(const char **reason)
     struct spool *pool = cosmofs_test_pool(mount_of(ENG));
     CS_CHECK(pool != NULL && pool->m[0].region_blocks == 1);   /* a block a region: the record is exact */
 
-    /* Pull copy 1, and record every write copy 0 takes from now on. */
+    /* Pull copy 1, and record every write copy 0 takes from now on. One
+     * commit, then the unmount's: the unmount's metadata lands on blocks
+     * the first freed, which were written before the pull -- so only the
+     * commit marking its own writes puts them in the record (CF25; a
+     * second commit here would reuse blocks already marked, and the test
+     * would pass without the rule). */
     ramblk_set_fail(bd[1], -ENODEV);
     ramblk_record_start(bd[0], 4096);
     CS_CHECK(write_file(ENG "/after", data, sizeof(data)));
     CS_CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0 && write_file(ENG "/dir/inner", data, 4096));
+    CS_CHECK(write_file(ENG "/later", data, 3 * 4096));
     CS_CHECK(vfs_sync() == 0);
-    CS_CHECK(write_file(ENG "/later", data, 3 * 4096) && vfs_sync() == 0);
     CS_CHECK(pool->m[0].copy[1].state == POOL_COPY_MISSING && pool->m[0].copy[1].since == whole_at);
     CS_CHECK(vfs_umount(ENG) == 0);
     log = ramblk_record_stop(bd[0]);
