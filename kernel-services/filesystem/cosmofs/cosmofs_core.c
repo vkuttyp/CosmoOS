@@ -263,6 +263,15 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
     return 0;
 }
 
+/* Whether the open transaction holds `blkno` dirty: written in memory
+ * and not yet on any device, so a read of the device says nothing about
+ * it (the scrub's question). */
+bool cfs_buf_is_dirty(struct cfs *fs, uint64_t blkno)
+{
+    struct cfs_buf *b = buf_find(fs, blkno);
+    return b != NULL && b->dirty;
+}
+
 void cfs_buf_put(struct cfs *fs, struct cfs_buf *b)
 {
     (void)fs;

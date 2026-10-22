@@ -35,6 +35,13 @@ static void scrub_meta(struct cfs *fs, uint64_t dva, uint32_t kind, uint8_t *pag
 {
     if (dva == 0 || !cfs_dva_valid(fs, dva))
         return;
+    /* A block the open transaction wrote is in memory only: its device
+     * copies are whatever the block held before, and checking them would
+     * call a sound block unrecoverable -- or pass it by the luck of a
+     * stale block with the same address and kind. The commit writes it;
+     * the next scrub reads it. */
+    if (cfs_buf_is_dirty(fs, dva))
+        return;
     struct meta_want w = { .dva = dva, .kind = kind };
     unsigned fixed = 0;
     int rc = cfs_verify_all(fs, dva, page, meta_ok, &w, &fixed);

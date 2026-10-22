@@ -267,6 +267,8 @@ struct cfs_buf *cfs_buf_new_prep(struct cfs *fs, uint32_t kind, struct cfs_prep 
 int cfs_inode_prepare(struct cfs *fs, uint64_t ino);
 int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out);   /* fresh zeroed block, dirty */
 void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b);
+/* Dirty in the open transaction: in memory only (the scrub's question). */
+bool cfs_buf_is_dirty(struct cfs *fs, uint64_t blkno);
 
 /* Snapshots (cosmofs_snap.c; design.md, "Format version 3"). */
 int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uint64_t ino,
