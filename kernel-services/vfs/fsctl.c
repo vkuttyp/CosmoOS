@@ -605,6 +605,8 @@ static int64_t fsctl_pool(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
         kfree(info);
         return rc;
     }
+    if (info == NULL || req.count > max)
+        req.count = 0;   /* only STATUS has records, and never more than it was given room for */
     size_t pool = status ? sizeof(struct cosmo_fsctl_pool) : 0;
     size_t bytes = sizeof(struct cosmo_fsctl_result) + pool + (size_t)req.count * sizeof(struct cosmo_fsctl_copy);
     uint8_t *buf = kzalloc(bytes);

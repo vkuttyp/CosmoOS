@@ -281,7 +281,7 @@ static bool rs_step(struct cfs *fs, uint8_t *buf, struct cfs_pace *pace, uint64_
             continue;   /* free: nothing to copy */
         int rc = pool_read(p, dva, buf);
         if (rc == 0)
-            rc = pool_write_copy(p, dva, c, buf);
+            (void)pool_write_copy(p, dva, c, buf);   /* a failure is the pool's: the bit set again, or FAULTED */
         else
             kwarn("cosmofs: %s: block %u:%llu reads from no copy (%d); member %u copy %u goes without it",
                   fs->pool_name, v, (unsigned long long)blk, rc, v, c);

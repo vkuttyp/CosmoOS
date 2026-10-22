@@ -55,9 +55,10 @@ CASES = {
         return 0;""",
                 "cosmofs-copy-bitmap",
                 r"cp->state == POOL_COPY_RESILVERING && cp->dev == bd[1] && !cp->whole && cp->since == whole_at",
-                # Without a record nothing is raised to 13 and FAULTED is
-                # not remembered across a remount.
-                ("cosmofs-degraded",)),
+                # Without a record nothing is raised to 13, FAULTED is not
+                # remembered across a remount, and nothing that remounts
+                # mid-resilver finds its target or its cursor again.
+                ("cosmofs-degraded", "cosmofs-copy-import", "cosmofs-resilver-resume", "cosmofs-attach")),
     "resilver": (POOL,
                  """        if (!writable(&m->copy[c])) {""",
                  """        if (!readable(&m->copy[c])) {""",

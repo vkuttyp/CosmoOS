@@ -11,6 +11,9 @@
 
 #include "shim_fs.h"
 
+struct cfs;
+struct cosmofs_pool_req;
+
 #include <kernel/blk.h>
 #include <kernel/cred.h>
 #include <kernel/errno.h>
