@@ -1252,14 +1252,14 @@ bool selftest_cosmofs_mirror(const char **reason)
 
     /* A scrub reads everything and puts the rotted copy right. */
     struct cosmofs_scrub_stats sc;
-    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0);
     MIRROR_CHECK(sc.blocks_read > 0 && sc.inodes >= 3 && sc.unrecoverable == 0);
     MIRROR_CHECK(sc.repaired >= 1);
     MIRROR_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.repairs > repairs0);
 
     /* A second scrub finds nothing to do: the first one fixed it. */
     struct cosmofs_scrub_stats sc2;
-    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc2, COSMOFS_SCRUB_REPAIR) == 0);
     MIRROR_CHECK(sc2.repaired == 0 && sc2.unrecoverable == 0);
 
     /* Rot the second copy of a *metadata* block that no read will
@@ -1286,15 +1286,15 @@ bool selftest_cosmofs_mirror(const char **reason)
     MIRROR_CHECK(imap_root != 0);
     MIRROR_CHECK(rot_copy(bd[1], CFS_DVA_BLK(imap_root), 0x77));
     MIRROR_CHECK(read_matches(ENG "/dir/inner", "inner", 5));   /* copy 0 answers; nothing notices */
-    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0);
     MIRROR_CHECK(sc.repaired >= 1 && sc.unrecoverable == 0);
-    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0 && sc2.repaired == 0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc2, COSMOFS_SCRUB_REPAIR) == 0 && sc2.repaired == 0);
 
     /* Now rot copy 0 of the same block: the read falls back to copy 1
      * and repairs copy 0. */
     MIRROR_CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x5A));
     MIRROR_CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
-    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.unrecoverable == 0);
 
     /* Both copies gone: that file is unreadable, and the rest of the
      * filesystem is not. */
@@ -1306,7 +1306,7 @@ bool selftest_cosmofs_mirror(const char **reason)
     file_put(f);
     f = NULL;
     MIRROR_CHECK(read_matches(ENG "/dir/inner", "inner", 5));
-    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 1);
+    MIRROR_CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.unrecoverable == 1);
 
     MIRROR_CHECK(vfs_umount(ENG) == 0);
 
@@ -1383,7 +1383,7 @@ bool selftest_cosmofs_mirror_stale(const char **reason)
     CHECK(st.members == 2 && st.devices == 3 && st.degraded == 1);
     CHECK(read_matches(ENG "/across", "two members, two copies", 23));
     struct cosmofs_scrub_stats sc;
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.unrecoverable == 0);
 
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_rmdir(NULL, ENG) == 0);
@@ -1506,7 +1506,7 @@ bool selftest_cosmofs_compress(const char **reason)
     /* A scrub reads every record through the checksums of its physical
      * blocks. */
     struct cosmofs_scrub_stats sc;
-    COMPRESS_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    COMPRESS_CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.unrecoverable == 0);
 
     kfree(dense);
     dense = NULL;
@@ -1720,7 +1720,7 @@ static bool extent_fail_case(enum fi_kind kind, enum extent_fail_layout layout, 
     struct cosmofs_stats st;
     EF_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures == 0);
     struct cosmofs_scrub_stats sc;
-    EF_CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    EF_CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.unrecoverable == 0);
     kfree(a);
     kfree(b);
     return engine_unmount(bd, reason);
@@ -1847,7 +1847,7 @@ bool selftest_cosmofs_crypt(const char **reason)
     CHECK(write_file(ENG "/secret.txt", secret, sizeof(secret) - 1));
     CHECK(vfs_sync() == 0);
     struct cosmofs_scrub_stats sc;
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.unrecoverable == 0);
 
     /* A valid block of this very file, moved to another of its offsets,
      * must be refused. The tag authenticates where the block belongs as
@@ -1935,7 +1935,7 @@ bool selftest_cosmofs_crypt(const char **reason)
     CHECK(vfs_stat(NULL, ENG "/secret.txt", &st) == -ENOKEY);
     CHECK(vfs_stat(NULL, ENG, &st) == 0 && st.type == COSMO_DT_DIR);   /* the root itself is a vnode */
     /* And a scrub still runs, because what it checks needs no key. */
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0 && sc.blocks_read > 0);
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.unrecoverable == 0 && sc.blocks_read > 0);
     /* The old key is refused; the new one opens it. */
     CHECK(cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == -EKEYREJECTED);
     CHECK(cosmofs_test_unlock(mount_of(ENG), key2, sizeof(key2) - 1) == 0);
@@ -5847,7 +5847,7 @@ bool selftest_cosmofs_scrub_counts(const char **reason)
     CHECK(rot_copy(bd, CFS_DVA_BLK(dva), 0x3c));
 
     struct cosmofs_scrub_stats sc;
-    int direct = cosmofs_scrub(mount_of(ENG), &sc);
+    int direct = cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR);
     struct file *f;
     CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &f) == 0);
     struct cosmo_fsctl cmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_SCRUB,
@@ -5899,12 +5899,12 @@ bool selftest_cosmofs_scrub_open(const char **reason)
     struct cosmofs_stats st;
     CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.dirty_buffers > 0);
     struct cosmofs_scrub_stats sc;
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0);
     kinfo("selftest: cosmofs-scrub-open: %u dirty buffer(s); scrub read %llu, %llu unrecoverable",
           st.dirty_buffers, (unsigned long long)sc.blocks_read, (unsigned long long)sc.unrecoverable);
     CHECK(sc.unrecoverable == 0);
     CHECK(vfs_sync() == 0);
-    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.unrecoverable == 0);
     CHECK(read_matches(ENG "/f", page, sizeof(page)));
     return engine_unmount(bd, reason);
 }
@@ -5938,6 +5938,283 @@ bool selftest_cosmofs_root_type(const char **reason)
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd);
     return true;
+}
+
+/* --- roadmap 1.2 B2: the check on an unmounted device, the scrub's modes --- */
+
+/* Write slot `slot`'s superblock again with its uuid's first byte
+ * changed, CRC recomputed: a slot that names another pool. */
+static bool super_other_pool(struct blkdev *bd, unsigned slot)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return false;
+    uint8_t *b = kmalloc(CFS_BLOCK, 0);
+    bool ok = b != NULL && pool_read(p, CFS_DVA(0, slot), b) == 0;
+    if (ok) {
+        struct cfs_super *sb = (struct cfs_super *)b;
+        sb->uuid[0] ^= 0x5a;
+        sb->crc = 0;
+        uint32_t c = crc32c(b, offsetof(struct cfs_super, crc));
+        static const uint8_t zero4[4] = { 0 };
+        c = crc32c_update(c, zero4, 4);
+        sb->crc = crc32c_update(c, b + offsetof(struct cfs_super, crc) + 4,
+                                CFS_BLOCK - offsetof(struct cfs_super, crc) - 4);
+        ok = pool_write(p, CFS_DVA(0, slot), b) == 0 && pool_flush(p) == 0;
+    }
+    kfree(b);
+    pool_close(p);
+    return ok;
+}
+
+/*
+ * Clear block `blk`'s bit in the newest root's bitmap, on the device of a
+ * single-device version-4+ pool nothing has mounted: a free block in use,
+ * made where no commit can hand the block out again before the check
+ * (cosmofs_test_corrupt's FREE_IN_USE goes through a commit, whose own
+ * copies take the first free block -- this one -- and turn the finding
+ * into a cross-link: CFS-25's hazard, met by the first draft of this test).
+ */
+static bool bitmap_clear_on_disk(struct blkdev *bd, uint64_t blk)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return false;
+    uint8_t *b = kmalloc(CFS_BLOCK, 0);
+    bool ok = b != NULL;
+    uint64_t members = 0, gen = 0;
+    for (unsigned slot = 0; ok && slot < 2; slot++) {
+        if (pool_read(p, CFS_DVA(0, slot), b) != 0)
+            continue;
+        const struct cfs_super *sb = (const struct cfs_super *)b;
+        if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation > gen) {
+            gen = sb->generation;
+            members = sb->members;
+        }
+    }
+    uint64_t at = 0;
+    ok = ok && members != 0 && pool_read(p, members, b) == 0;
+    if (ok)
+        at = ((const struct cfs_member_block *)(b + CFS_MHDR_SIZE))->m[0].alloc_root;
+    ok = ok && at != 0 && pool_read(p, at, b) == 0;
+    uint64_t chunk = ok ? ((const uint64_t *)(b + CFS_MHDR_SIZE))[blk / CFS_BITS_PER_BITMAP] : 0;
+    ok = ok && chunk != 0 && pool_read(p, chunk, b) == 0;
+    if (ok) {
+        const struct cfs_mhdr *h = (const struct cfs_mhdr *)b;
+        uint64_t hgen = h->generation;
+        uint64_t i = blk % CFS_BITS_PER_BITMAP;
+        b[CFS_MHDR_SIZE + i / 8] &= (uint8_t)~(1u << (i % 8));
+        cfs_mhdr_seal_raw(b, CFS_KIND_BITMAP, chunk, hgen);
+        ok = pool_write(p, chunk, b) == 0 && pool_flush(p) == 0;
+    }
+    kfree(b);
+    pool_close(p);
+    return ok;
+}
+
+/*
+ * The check on a device nothing has mounted (cosmofs_check_dev, what
+ * fsck.cosmofs runs through /dev/fsctl CHECK_DEV). A pool left with a
+ * leak and a block in use the bitmap calls free: the read-only check
+ * names both and changes no block; the boot's repair refuses (a free
+ * block in use is not a boot's to repair); the offline repair repairs
+ * both, commits, and the next check is clean -- the free-in-use one is
+ * the repair a mounted pool cannot make. Then the three things that stop
+ * a check before it starts: a mounted device (-EBUSY), superblock slots
+ * that name two pools, and a root that is not a directory.
+ */
+bool selftest_cosmofs_check_dev(const char **reason)
+{
+    const uint64_t nblocks = 512;
+    struct blkdev *bd;
+    if (!engine_mount(&bd, nblocks, reason))
+        return false;
+    struct cosmofs_check_report *rep = kzalloc(sizeof(*rep));
+    struct cosmofs_dev_report dev;
+    uint32_t *before = NULL, *after = NULL;
+#define CD_CHECK(cond)                                                        \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto fail;                                                       \
+        }                                                                     \
+    } while (0)
+    CD_CHECK(rep != NULL);
+    CD_CHECK(write_file(ENG "/a", "file a", 6));
+    CD_CHECK(vfs_sync() == 0);
+    struct vnode *vn;
+    CD_CHECK(vfs_lookup(NULL, ENG "/a", &vn) == 0);
+    uint64_t ino = vn->ino;
+    vnode_put(vn);
+    CD_CHECK(cosmofs_check_dev(bd, 0, rep, &dev) == -EBUSY);   /* mounted: its own CHECK is the way */
+    uint64_t a_blk = 0;
+    CD_CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &a_blk) == 0);
+    CD_CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, NULL) == 0);
+    CD_CHECK(vfs_sync() == 0);
+    CD_CHECK(vfs_umount(ENG) == 0);
+    CD_CHECK(bitmap_clear_on_disk(bd, CFS_DVA_BLK(a_blk)));
+
+    before = device_crcs(bd, nblocks);
+    CD_CHECK(before != NULL);
+    CD_CHECK(cosmofs_check_dev(bd, 0, rep, &dev) == 0);
+    after = device_crcs(bd, nblocks);
+    CD_CHECK(after != NULL);
+    unsigned changed = crcs_differ(before, after, nblocks);
+    kinfo("selftest: cosmofs-check-dev: read-only: flags %#x, %llu leaked, %llu free-in-use, %u block(s) changed",
+          dev.flags, (unsigned long long)rep->alloc_not_seen.count, (unsigned long long)rep->seen_not_alloc.count,
+          changed);
+    CD_CHECK((dev.flags & COSMO_FSCTL_DEV_F_CHECKED) != 0);
+    CD_CHECK(rep->alloc_not_seen.count == 1 && rep->seen_not_alloc.count == 1);
+    CD_CHECK(changed == 0);
+
+    CD_CHECK(cosmofs_check_dev(bd, COSMOFS_CHECK_REPAIR | COSMOFS_CHECK_BOOT, rep, &dev) == 0);
+    CD_CHECK(rep->boot_refused && (dev.flags & COSMO_FSCTL_DEV_F_BOOT_REFUSED) != 0);
+    CD_CHECK(rep->alloc_not_seen.repaired == 0 && rep->seen_not_alloc.repaired == 0);
+
+    CD_CHECK(cosmofs_check_dev(bd, COSMOFS_CHECK_REPAIR, rep, &dev) == 0);
+    kinfo("selftest: cosmofs-check-dev: repair: flags %#x, %llu/%llu leaked, %llu/%llu free-in-use repaired",
+          dev.flags, (unsigned long long)rep->alloc_not_seen.repaired, (unsigned long long)rep->alloc_not_seen.count,
+          (unsigned long long)rep->seen_not_alloc.repaired, (unsigned long long)rep->seen_not_alloc.count);
+    CD_CHECK(rep->alloc_not_seen.repaired == 1 && rep->seen_not_alloc.repaired == 1);
+    CD_CHECK((dev.flags & COSMO_FSCTL_DEV_F_COMMITTED) != 0);
+    CD_CHECK(cosmofs_check_dev(bd, 0, rep, &dev) == 0 && rep->clean);
+    CD_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CD_CHECK(read_matches(ENG "/a", "file a", 6));
+
+    /* A root that is not a directory: the mount says where it stopped. */
+    CD_CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ROOT_TYPE, CFS_ROOT_INO, NULL) == 0);
+    CD_CHECK(vfs_sync() == 0);
+    CD_CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ROOT_TYPE, CFS_ROOT_INO, NULL) == 0);
+    CD_CHECK(vfs_sync() == 0);
+    CD_CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    CD_CHECK(cosmofs_check_dev(bd, 0, rep, &dev) == 0);
+    kinfo("selftest: cosmofs-check-dev: root not a directory: flags %#x, error %d, stage %u", dev.flags,
+          dev.mount_error, dev.mount_stage);
+    CD_CHECK((dev.flags & COSMO_FSCTL_DEV_F_MOUNT_FAILED) && dev.mount_error == -ENOTDIR &&
+             dev.mount_stage == COSMO_FSCTL_STAGE_ROOT);
+
+    /* Two slots, two pools: not checked, and said. */
+    CD_CHECK(super_other_pool(bd, 1));
+    CD_CHECK(cosmofs_check_dev(bd, 0, rep, &dev) == 0);
+    CD_CHECK((dev.flags & COSMO_FSCTL_DEV_F_SUPER_DISAGREE) && !(dev.flags & COSMO_FSCTL_DEV_F_CHECKED));
+    kfree(before);
+    kfree(after);
+    kfree(rep);
+    CD_CHECK(vfs_rmdir(NULL, ENG) == 0 || true);
+    ramblk_destroy(bd);
+    return true;
+fail:
+    kfree(before);
+    kfree(after);
+    kfree(rep);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
+#undef CD_CHECK
+}
+
+/*
+ * The scrub's modes (roadmap 1.2 B2). On a two-way mirror with one copy
+ * of a file's blocks rotted: a scrub without repair counts the bad copies
+ * and writes nothing (the next one counts them again); with repair it
+ * rewrites them; the one after is clean. A snapshot's own blocks -- the
+ * file's old contents, which the live tree no longer reaches -- are
+ * scrubbed too. And at a bound of 50 blocks a second the same scrub
+ * takes the time its block count says. And the check of the mirror's
+ * other device is refused while the pool is mounted through the first.
+ */
+bool selftest_cosmofs_scrub_modes(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd[2] = { ramblk_create(512), ramblk_create(512) };
+    unsigned saved = g_cosmofs_scrub_rate;
+#define SM_CHECK(cond)                                                        \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto fail;                                                       \
+        }                                                                     \
+    } while (0)
+    SM_CHECK(bd[0] != NULL && bd[1] != NULL);
+    SM_CHECK(cosmofs_format_mirror(bd, 1, 2) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    SM_CHECK(mk == 0 || mk == -EEXIST);
+    SM_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    static uint8_t data[4 * 4096];
+    fill_incompressible(data, sizeof(data), 0x5c5c);
+    SM_CHECK(write_file(ENG "/m", data, sizeof(data)));
+    SM_CHECK(vfs_sync() == 0);
+    unsigned n = 0;
+    struct cosmofs_snap_info info;
+    SM_CHECK(snapctl(COSMOFS_SNAP_CREATE, "old", &info, 1, &n) == 0);
+    fill_incompressible(data, sizeof(data), 0x6d6d);
+    SM_CHECK(write_file(ENG "/m", data, sizeof(data)));   /* the snapshot keeps the old blocks */
+    SM_CHECK(vfs_sync() == 0);
+    struct vnode *vn;
+    SM_CHECK(vfs_lookup(NULL, ENG "/m", &vn) == 0);
+    uint64_t ino = vn->ino;
+    vnode_put(vn);
+    for (uint64_t l = 0; l < 4; l++) {
+        uint64_t dva = 0;
+        SM_CHECK(cosmofs_test_block_of(mount_of(ENG), ino, l, &dva) == 0);
+        SM_CHECK(rot_copy(bd[1], CFS_DVA_BLK(dva), 0x3c));
+    }
+    struct cosmofs_scrub_stats a, b, c, d;
+    SM_CHECK(cosmofs_scrub(mount_of(ENG), &a, 0) == 0);
+    SM_CHECK(cosmofs_scrub(mount_of(ENG), &b, 0) == 0);
+    SM_CHECK(cosmofs_scrub(mount_of(ENG), &c, COSMOFS_SCRUB_REPAIR) == 0);
+    SM_CHECK(cosmofs_scrub(mount_of(ENG), &d, 0) == 0);
+    kinfo("selftest: cosmofs-scrub-modes: %llu blocks; report %llu bad, again %llu bad; repair %llu of %llu; "
+          "after %llu bad",
+          (unsigned long long)a.blocks_read, (unsigned long long)a.bad_copies, (unsigned long long)b.bad_copies,
+          (unsigned long long)c.repaired, (unsigned long long)c.bad_copies, (unsigned long long)d.bad_copies);
+    SM_CHECK(a.bad_copies == 4 && a.repaired == 0 && a.unrecoverable == 0);
+    SM_CHECK(b.bad_copies == 4);                 /* the report wrote nothing */
+    SM_CHECK(c.bad_copies == 4 && c.repaired == 4);
+    SM_CHECK(d.bad_copies == 0 && d.unrecoverable == 0);
+    SM_CHECK(read_matches(ENG "/m", data, sizeof(data)));
+    /* The snapshot's blocks: four data blocks the live tree no longer
+     * reaches, read by the scrub (8 = the old file's 4 + the new file's 4,
+     * and more for the trees). */
+    SM_CHECK(a.blocks_read >= 8 + 4);
+
+    g_cosmofs_scrub_rate = 50;   /* 5 blocks a window: the pool's few dozen take several */
+    struct cosmofs_scrub_stats e;
+    SM_CHECK(cosmofs_scrub(mount_of(ENG), &e, 0) == 0);
+    g_cosmofs_scrub_rate = saved;
+    uint64_t floor_ms = e.blocks_read > 5 ? (e.blocks_read / 5 - 1) * 100 : 0;
+    kinfo("selftest: cosmofs-scrub-modes: at 50 blocks/s: %llu blocks in %llu ms (at least %llu ms)",
+          (unsigned long long)e.blocks_read, (unsigned long long)(e.elapsed_ns / 1000000),
+          (unsigned long long)floor_ms);
+    SM_CHECK(floor_ms >= 300);   /* a bound this test could not see would prove nothing */
+    SM_CHECK(e.rate == 50 && e.elapsed_ns / 1000000 >= floor_ms);
+    SM_CHECK(snapctl(COSMOFS_SNAP_DELETE, "old", NULL, 0, NULL) == 0);
+    /* The mirror is mounted through its first device: a check of the
+     * second, which no mount claims, must not run beside the live
+     * allocator (Codex on #434). */
+    static struct cosmofs_check_report leg;
+    struct cosmofs_dev_report legdev;
+    int lrc = cosmofs_check_dev(bd[1], COSMOFS_CHECK_REPAIR, &leg, &legdev);
+    kinfo("selftest: cosmofs-scrub-modes: the other leg of a mounted mirror: check %d", lrc);
+    SM_CHECK(lrc == -EBUSY);
+    SM_CHECK(vfs_umount(ENG) == 0);
+    SM_CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd[0]);
+    ramblk_destroy(bd[1]);
+    return true;
+fail:
+    g_cosmofs_scrub_rate = saved;
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    if (bd[0])
+        ramblk_destroy(bd[0]);
+    if (bd[1])
+        ramblk_destroy(bd[1]);
+    return false;
+#undef SM_CHECK
 }
 
 #if CONFIG_FAULTINJECT
@@ -6081,5 +6358,7 @@ bool selftest_cosmofs_version_compress(const char **reason) { (void)reason; retu
 bool selftest_cosmofs_scrub_counts(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_root_type(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_scrub_open(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_check_dev(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_scrub_modes(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_nomem(const char **reason) { (void)reason; return true; }
 #endif

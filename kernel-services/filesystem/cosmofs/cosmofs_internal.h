@@ -159,6 +159,15 @@ struct cfs {
     bool rdonly;
     unsigned replay_freed;     /* blocks the mount's free-record replay released */
     unsigned replay_orphans;   /* inodes its orphan replay released */
+    /* What the mount did, for the check on an unmounted device
+     * (cosmofs_check_dev) and the operator (roadmap 1.2 B2): how far the
+     * load got (COSMO_FSCTL_STAGE_*), whether a pending rollback was
+     * switched to or why not (CFS-20), and whether the older slot's root
+     * was used because the newer one did not load. */
+    unsigned load_stage;
+    bool rollback_switched;
+    int rollback_error;
+    bool fell_back;
     uint64_t commits;
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
     uint64_t csum_failures;
@@ -254,6 +263,7 @@ int cfs_buf_cow_exempt(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slo
 int cfs_buf_new_at(struct cfs *fs, uint32_t kind, uint64_t blk, struct cfs_buf **out);
 /* Metadata blocks set aside before a change that must not stop half way
  * (CF17; CFS-6, cosmofs_core.c). The bound is the longest extent chain. */
+#define CFS_SNAP_MAX_CHAIN 4096u   /* no sound snapshot list or deadlist is this long */
 #define CFS_PREP_MAX (CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 2)
 struct cfs_prep {
     unsigned n, used;
@@ -265,6 +275,25 @@ void cfs_prep_release(struct cfs *fs, struct cfs_prep *p);
 void cfs_buf_cow_prep(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot, struct cfs_prep *p);
 struct cfs_buf *cfs_buf_new_prep(struct cfs *fs, uint32_t kind, struct cfs_prep *p);
 int cfs_inode_prepare(struct cfs *fs, uint64_t ino);
+/* Mark block `lin` (a linear index) allocated: the offline repair of a
+ * block something reaches and the bitmap calls free. */
+void cfs_bitmap_claim(struct cfs *fs, uint64_t lin);
+/* A set of block numbers in page-sized chunks (cosmofs_check.c): the
+ * checker's maps and the scrub's record of what it verified. */
+struct cfs_bits {
+    uint8_t **chunk;
+    unsigned nchunks;
+};
+int cfs_bits_alloc(struct cfs_bits *m, uint64_t bits);
+void cfs_bits_free(struct cfs_bits *m);
+bool cfs_bits_test(const struct cfs_bits *m, uint64_t bit);
+bool cfs_bits_set(struct cfs_bits *m, uint64_t bit);   /* true if it was already set */
+/* Both superblock slots of the pool on `bd`, as the mount reads them:
+ * each result 0 or the reason the slot does not verify. */
+int cfs_super_slots(struct blkdev *bd, struct cfs_super *a, int *ra, struct cfs_super *b, int *rb);
+/* The stage a mount of `bd` failed at, and its error, if the last failed
+ * mount of it was this kernel's (cosmofs_check_dev). */
+bool cfs_mount_failure(const struct blkdev *bd, unsigned *stage, int *rc);
 int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out);   /* fresh zeroed block, dirty */
 void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b);
 /* Dirty in the open transaction: in memory only (the scrub's question). */
@@ -428,7 +457,7 @@ int cfs_read_repair(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(cons
  * invisible until that copy is the one answering. `buf` comes back
  * holding a good copy when there was one. -EIO when there was none. */
 int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const void *blk, void *arg), void *arg,
-                   unsigned *repaired);
+                   bool repair, unsigned *bad, unsigned *repaired);
 /* Why a metadata block did not verify. MHDR_ALGO is a header whose
  * csum_algo this build cannot verify -- a format or algorithm skew, distinct
  * from MHDR_CRC (a checksum that did not match). Order is the check order, so
@@ -517,7 +546,7 @@ int cfs_aead_get(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, struct cfs
 int cfs_data_read_verified(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf);
 /* The same block, every copy of it: what a scrub reads. */
 int cfs_data_scrub_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf,
-                         unsigned *repaired);
+                         bool repair, unsigned *bad, unsigned *repaired);
 void cfs_csum_free(struct cfs *fs, struct cfs_inode *in);
 
 #endif /* COSMOFS_INTERNAL_H */

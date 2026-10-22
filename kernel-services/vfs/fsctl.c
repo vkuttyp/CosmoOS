@@ -257,6 +257,8 @@ int vfs_mounts_render(char *out, size_t n)
  * cosmofs_check_report freely, and the only thing that must not move is
  * what userland parses.
  */
+static void fsctl_check_record(struct cosmo_fsctl_check *c, const struct cosmofs_check_report *rep);
+
 static int64_t fsctl_run(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
 {
     struct mount *mnt = NULL;
@@ -285,41 +287,12 @@ static int64_t fsctl_run(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
         struct cosmofs_check_report rep;
         unsigned flags = (cmd->flags & COSMO_FSCTL_F_REPAIR) ? COSMOFS_CHECK_REPAIR : 0;
         prc = mnt->fs->check(mnt, &rep, flags);
-        if (prc == 0) {
-            struct cosmo_fsctl_check *c = rec;
-            const struct cosmofs_check_class *src[COSMO_FSCTL_CLASSES] = {
-                &rep.alloc_not_seen, &rep.seen_not_alloc, &rep.dup, &rep.nlink_wrong,
-                &rep.orphan, &rep.dangling_entry, &rep.dir_bad, &rep.counter_wrong,
-                &rep.chain_cycle, &rep.unreadable,
-                /* Appended in version 2; the first ten keep their
-                 * indices (uapi/cosmo/fsctl.h). */
-                &rep.extent_order, &rep.extent_overlap, &rep.dir_dup_name,
-                /* Appended in version 3 (format version 12). */
-                &rep.snap_identity, &rep.rollback_record, &rep.hold,
-            };
-            c->nclasses = COSMO_FSCTL_CLASSES;
-            c->flags = (rep.partial ? COSMO_FSCTL_R_PARTIAL : 0u) |
-                       (rep.clean ? COSMO_FSCTL_R_CLEAN : 0u) |
-                       (rep.repair_refused ? COSMO_FSCTL_R_REPAIR_REFUSED : 0u);
-            c->blocks_seen = rep.blocks_seen;
-            c->inodes_seen = rep.inodes_seen;
-            c->dirs_seen = rep.dirs_seen;
-            c->snapshots_seen = rep.snapshots_seen;
-            c->counted_free = rep.counted_free;
-            c->counted_inodes = rep.counted_inodes;
-            c->bytes_allocated = rep.bytes_allocated;
-            c->elapsed_ns = rep.elapsed_ns;
-            for (unsigned i = 0; i < COSMO_FSCTL_CLASSES; i++) {
-                c->class[i].count = src[i]->count;
-                c->class[i].repaired = src[i]->repaired;
-                c->class[i].named = src[i]->named;
-                for (unsigned k = 0; k < COSMO_FSCTL_NAMES && k < CFS_CHECK_NAMES; k++)
-                    c->class[i].name[k] = src[i]->name[k];
-            }
-        }
+        if (prc == 0)
+            fsctl_check_record(rec, &rep);
     } else {
         struct cosmofs_scrub_stats st;
-        prc = mnt->fs->scrub(mnt, &st);
+        /* Version 1's SCRUB repairs as it always did; SCRUB_EX asks. */
+        prc = mnt->fs->scrub(mnt, &st, COSMOFS_SCRUB_REPAIR);
         if (prc == 0) {
             struct cosmo_fsctl_scrub *sc = rec;
             sc->blocks_read = st.blocks_read;
@@ -339,6 +312,148 @@ static int64_t fsctl_run(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
     hdr->count = 1;
     hdr->total = 1;
     hdr->bytes = (uint32_t)(bytes - sizeof(*hdr));
+    fsctl_set_result(o, buf, bytes);
+    return 0;
+}
+
+/* The record a pass fills, copied field by field (fsctl_run's rule). */
+static void fsctl_check_record(struct cosmo_fsctl_check *c, const struct cosmofs_check_report *rep)
+{
+    const struct cosmofs_check_class *src[COSMO_FSCTL_CLASSES] = {
+        &rep->alloc_not_seen, &rep->seen_not_alloc, &rep->dup, &rep->nlink_wrong,
+        &rep->orphan, &rep->dangling_entry, &rep->dir_bad, &rep->counter_wrong,
+        &rep->chain_cycle, &rep->unreadable,
+        &rep->extent_order, &rep->extent_overlap, &rep->dir_dup_name,
+        &rep->snap_identity, &rep->rollback_record, &rep->hold,
+    };
+    c->nclasses = COSMO_FSCTL_CLASSES;
+    c->flags = (rep->partial ? COSMO_FSCTL_R_PARTIAL : 0u) | (rep->clean ? COSMO_FSCTL_R_CLEAN : 0u) |
+               (rep->repair_refused ? COSMO_FSCTL_R_REPAIR_REFUSED : 0u);
+    c->blocks_seen = rep->blocks_seen;
+    c->inodes_seen = rep->inodes_seen;
+    c->dirs_seen = rep->dirs_seen;
+    c->snapshots_seen = rep->snapshots_seen;
+    c->counted_free = rep->counted_free;
+    c->counted_inodes = rep->counted_inodes;
+    c->bytes_allocated = rep->bytes_allocated;
+    c->elapsed_ns = rep->elapsed_ns;
+    for (unsigned i = 0; i < COSMO_FSCTL_CLASSES; i++) {
+        c->class[i].count = src[i]->count;
+        c->class[i].repaired = src[i]->repaired;
+        c->class[i].named = src[i]->named;
+        for (unsigned k = 0; k < COSMO_FSCTL_NAMES && k < CFS_CHECK_NAMES; k++)
+            c->class[i].name[k] = src[i]->name[k];
+    }
+}
+
+/*
+ * CHECK_DEV (roadmap 1.2 B2): the check on a device nothing has mounted,
+ * named by its block-device name. The filesystem mounts it where no
+ * namespace sees it and runs the same check the mounted case runs
+ * (cosmofs_check_dev), so fsck.cosmofs is the kernel's checker and not a
+ * copy of it. A mounted device is -EBUSY: its own mount's CHECK is the
+ * way in.
+ */
+static int64_t fsctl_check_dev(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
+{
+    struct fs_type *fst = vfs_find_fs(cmd->name2[0] ? cmd->name2 : "cosmofs");
+    if (fst == NULL)
+        return -ENODEV;
+    if (fst->check_dev == NULL)
+        return -EOPNOTSUPP;
+    struct blkdev *bd = blk_find(cmd->name);
+    if (bd == NULL)
+        return -ENOENT;
+    int64_t rc = 0;
+    struct cosmofs_check_report *rep = kzalloc(sizeof(*rep));
+    struct cosmofs_dev_report *dev = kzalloc(sizeof(*dev));
+    size_t bytes = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_devcheck);
+    uint8_t *buf = kzalloc(bytes);
+    if (rep == NULL || dev == NULL || buf == NULL)
+        rc = -ENOMEM;
+    else if (vfs_bdev_mounted(bd))
+        rc = -EBUSY;
+    if (rc == 0) {
+        unsigned flags = 0;
+        if (cmd->flags & COSMO_FSCTL_F_REPAIR)
+            flags |= COSMOFS_CHECK_REPAIR;
+        if (cmd->flags & COSMO_FSCTL_F_BOOT)
+            flags |= COSMOFS_CHECK_BOOT;
+        rc = fst->check_dev(bd, flags, rep, dev);
+    }
+    blkdev_put(bd);
+    if (rc == 0) {
+        struct cosmo_fsctl_result *hdr = (struct cosmo_fsctl_result *)buf;
+        struct cosmo_fsctl_devcheck *r = (struct cosmo_fsctl_devcheck *)(buf + sizeof(*hdr));
+        r->dev.flags = dev->flags;
+        r->dev.mount_error = dev->mount_error;
+        r->dev.mount_stage = dev->mount_stage;
+        r->dev.rollback_error = dev->rollback_error;
+        r->dev.format = dev->format;
+        r->dev.replayed_orphans = dev->replayed_orphans;
+        r->dev.generation = dev->generation;
+        r->dev.slot_generation[0] = dev->slot_generation[0];
+        r->dev.slot_generation[1] = dev->slot_generation[1];
+        r->dev.replayed_frees = dev->replayed_frees;
+        strlcpy(r->dev.rollback_target, dev->rollback_target, sizeof(r->dev.rollback_target));
+        if (dev->flags & COSMO_FSCTL_DEV_F_CHECKED)
+            fsctl_check_record(&r->check, rep);
+        hdr->version = COSMO_FSCTL_VERSION;
+        hdr->kind = cmd->op;
+        hdr->count = 1;
+        hdr->total = 1;
+        hdr->bytes = sizeof(struct cosmo_fsctl_devcheck);
+        fsctl_set_result(o, buf, bytes);
+        buf = NULL;
+    }
+    kfree(buf);
+    kfree(rep);
+    kfree(dev);
+    return rc;
+}
+
+/* SCRUB_EX (roadmap 1.2 B2): the scrub, repairing only when asked. */
+static int64_t fsctl_scrub_ex(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
+{
+    struct mount *mnt = NULL;
+    int rc = vfs_mount_acquire(cmd->mount_id, &mnt);
+    if (rc)
+        return rc;
+    if (mnt->fs->scrub == NULL) {
+        vfs_mount_release(mnt);
+        return -EOPNOTSUPP;
+    }
+    /* The record first: a repairing scrub that then had nowhere to say
+     * what it repaired would have changed the pool and told nobody
+     * (Codex on #434). */
+    size_t bytes = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_scrub_ex);
+    uint8_t *buf = kzalloc(bytes);
+    if (buf == NULL) {
+        vfs_mount_release(mnt);
+        return -ENOMEM;
+    }
+    struct cosmofs_scrub_stats st;
+    rc = mnt->fs->scrub(mnt, &st, (cmd->flags & COSMO_FSCTL_F_REPAIR) ? COSMOFS_SCRUB_REPAIR : 0u);
+    vfs_mount_release(mnt);
+    if (rc) {
+        kfree(buf);
+        return rc;
+    }
+    struct cosmo_fsctl_result *hdr = (struct cosmo_fsctl_result *)buf;
+    struct cosmo_fsctl_scrub_ex *x = (struct cosmo_fsctl_scrub_ex *)(buf + sizeof(*hdr));
+    x->blocks_read = st.blocks_read;
+    x->inodes = st.inodes;
+    x->bad_copies = st.bad_copies;
+    x->repaired = st.repaired;
+    x->unrecoverable = st.unrecoverable;
+    x->skipped = st.skipped;
+    x->elapsed_ns = st.elapsed_ns;
+    x->rate = st.rate;
+    hdr->version = COSMO_FSCTL_VERSION;
+    hdr->kind = cmd->op;
+    hdr->count = 1;
+    hdr->total = 1;
+    hdr->bytes = sizeof(*x);
     fsctl_set_result(o, buf, bytes);
     return 0;
 }
@@ -408,6 +523,7 @@ static int64_t fsctl_snap(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
                    ((req.pool_flags & COSMOFS_POOL_HELD) ? COSMO_FSCTL_POOL_F_HELD : 0u);
         p->free_bytes = req.free_bytes;
         p->total_bytes = req.total_bytes;
+        p->rollback_error = req.rollback_error;
     }
     struct cosmo_fsctl_snap *rec = (struct cosmo_fsctl_snap *)(buf + sizeof(*hdr) + pool);
     for (unsigned i = 0; i < req.count; i++) {
@@ -460,11 +576,15 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
      * an old writer turns out to have been setting it.
      */
     uint32_t allowed = cmd.op == COSMO_FSCTL_CHECK      ? COSMO_FSCTL_F_REPAIR
+                       : cmd.op == COSMO_FSCTL_CHECK_DEV ? COSMO_FSCTL_F_REPAIR | COSMO_FSCTL_F_BOOT
+                       : cmd.op == COSMO_FSCTL_SCRUB_EX  ? COSMO_FSCTL_F_REPAIR
                        : cmd.op == COSMO_FSCTL_SNAP_ROLLBACK ? COSMO_FSCTL_F_SAFETY_NAME
                        : cmd.op == COSMO_FSCTL_SNAP_LIST     ? COSMO_FSCTL_F_NO_SIZES
                                                              : 0u;
     if ((cmd.flags & ~allowed) != 0)
         return -EINVAL;
+    if (cmd.op == COSMO_FSCTL_CHECK_DEV && (cmd.flags & COSMO_FSCTL_F_BOOT) && !(cmd.flags & COSMO_FSCTL_F_REPAIR))
+        return -EINVAL;   /* BOOT narrows a repair; alone it means nothing */
     /* A name is a NUL-terminated string inside its field, or empty. */
     if (memchr(cmd.name, '\0', sizeof(cmd.name)) == NULL || memchr(cmd.name2, '\0', sizeof(cmd.name2)) == NULL)
         return -EINVAL;
@@ -477,6 +597,12 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     case COSMO_FSCTL_CHECK:
     case COSMO_FSCTL_SCRUB:
         rc = fsctl_run(o, &cmd);
+        break;
+    case COSMO_FSCTL_CHECK_DEV:
+        rc = fsctl_check_dev(o, &cmd);
+        break;
+    case COSMO_FSCTL_SCRUB_EX:
+        rc = fsctl_scrub_ex(o, &cmd);
         break;
     case COSMO_FSCTL_SNAP_CREATE:
     case COSMO_FSCTL_SNAP_LIST:
@@ -553,5 +679,5 @@ void fsctl_dev_init(void)
      * kernel that shipped the passes with no way to reach them is the
      * thing this unit exists to stop.
      */
-    kinfo("fsctl: /dev/fsctl ready (0600): mount listing, check, scrub and snapshots");
+    kinfo("fsctl: /dev/fsctl ready (0600): mount listing, check (mounted or not), scrub and snapshots");
 }

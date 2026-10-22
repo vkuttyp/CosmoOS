@@ -250,6 +250,36 @@ int vfs_register_fs(struct fs_type *fs)
     return 0;
 }
 
+/* cosmofs_check_dev's mount where no namespace sees it (roadmap 1.2 B2):
+ * the fuzzer drives cosmofs_mount itself and never calls it. */
+struct fs_type *vfs_find_fs(const char *name)
+{
+    (void)name;
+    return NULL;
+}
+
+int vfs_mount_detached(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount **out)
+{
+    (void)fs;
+    (void)bdev;
+    (void)flags;
+    (void)out;
+    return -ENOSYS;
+}
+
+int vfs_mount_detached_release(struct mount *mnt, bool commit)
+{
+    (void)mnt;
+    (void)commit;
+    return 0;
+}
+
+bool vfs_bdev_mounted(const struct blkdev *bd)
+{
+    (void)bd;
+    return false;
+}
+
 /* --- mutexes: one thread, so ownership is all that is tracked --- */
 
 void mutex_init(struct mutex *m, const char *name)

@@ -139,7 +139,6 @@ static struct cfs_dead_block *dead_payload(struct cfs_buf *b)
 
 /* Walk the list, calling `fn` for every live entry until it returns
  * false. `fn` may modify the entry; the block is marked dirty then. */
-#define CFS_SNAP_MAX_CHAIN 4096u   /* no sound list is this long */
 
 static int snap_walk(struct cfs *fs, bool (*fn)(struct cfs_snapshot *s, void *arg), void *arg, bool write)
 {
@@ -510,7 +509,10 @@ static int deadlist_settle(struct cfs *fs, uint64_t head, const struct cfs_snaps
                            unsigned nr_remaining, uint64_t *keeper_deadlist, uint64_t *freed,
                            uint64_t *kept)
 {
+    unsigned guard = 0;
     while (head) {
+        if (guard++ > CFS_SNAP_MAX_CHAIN)
+            return -EIO;   /* a cycle (TEST-16): refused, not followed */
         struct cfs_buf *b;
         int rc = cfs_buf_get(fs, head, CFS_KIND_DEADLIST, &b);
         if (rc)
@@ -581,8 +583,15 @@ static bool snapshot_holds(struct cfs *fs, uint64_t blk, uint64_t *best_at, unsi
     unsigned best_index = 0;
     uint64_t best_gen = 0;
     bool any = false;
+    unsigned guard = 0;
     while (blkno) {
         struct cfs_buf *b;
+        if (guard++ > CFS_SNAP_MAX_CHAIN) {
+            /* A cycle (TEST-16): the answer is as unknown as for an
+             * unreadable list, and gets the same one. */
+            kerror("cosmofs: snapshot list does not end; holding block %llu", (unsigned long long)blk);
+            return true;
+        }
         if (cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b)) {
             /* The list cannot be read, so which snapshot needs this
              * block is unknown: hold it. Freeing on an unreadable list
@@ -1111,7 +1120,10 @@ static int snaplist_insert(struct cfs *fs, const struct cfs_snapshot *s)
     uint32_t kind = cfs_snaplist_kind(fs);
     unsigned slots = cfs_snaplist_slots(fs);
     uint64_t blkno = fs->sb.snap_root;
+    unsigned guard = 0;
     while (blkno) {
+        if (guard++ > CFS_SNAP_MAX_CHAIN)
+            return -EIO;   /* a cycle (TEST-16) */
         struct cfs_buf *b;
         int rc = cfs_buf_get(fs, blkno, kind, &b);
         if (rc)
@@ -1382,7 +1394,12 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
             uint64_t blkno = fs->sb.snap_root;
             unsigned slots = cfs_snaplist_slots(fs);
             bool done = false;
+            unsigned guard = 0;
             while (blkno && !done && rc == 0) {
+                if (guard++ > CFS_SNAP_MAX_CHAIN) {
+                    rc = -EIO;   /* a cycle (TEST-16) */
+                    break;
+                }
                 struct cfs_buf *b;
                 rc = cfs_buf_get(fs, blkno, cfs_snaplist_kind(fs), &b);
                 if (rc)

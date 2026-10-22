@@ -68,14 +68,25 @@ struct cosmofs_scrub_stats {
     uint64_t inodes;
     uint64_t repaired;       /* blocks another copy could satisfy, and now do */
     uint64_t unrecoverable;  /* blocks no copy could satisfy */
+    uint64_t bad_copies;     /* copies that did not verify while another did (repaired or not) */
+    uint64_t skipped;        /* blocks the open transaction holds in memory */
+    uint64_t elapsed_ns;
+    uint64_t rate;           /* the bound it ran at, blocks a second; 0 for none */
 };
+/* cosmofs_scrub: write a good copy over each bad one. Without it the
+ * scrub reads and verifies and writes nothing (roadmap 1.2 B2). */
+#define COSMOFS_SCRUB_REPAIR (1u << 0)
+/* The scrub's bound, blocks a second over every member (sysctl
+ * fs.scrub_rate; 0 = none). Read at the start of each scrub. */
+extern unsigned g_cosmofs_scrub_rate;
+#define COSMOFS_SCRUB_RATE_DEFAULT 4096u
 /* Read every block the filesystem reaches through the ordinary
  * verifying path, repairing a mirrored member where a copy has rotted.
  * 0 whenever the walk ran -- `unrecoverable` counts what no copy could
  * satisfy (CFS-11) -- -EIO for an abandoned transaction, -EINVAL for a
  * mount that is not a cosmofs. Sleeps; takes the mount's lock for the
  * whole walk. */
-int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out);
+int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out, unsigned flags);
 
 /* --- the structural check (docs/audit/next-subsystem-fsck.md) ---------------
  *
@@ -85,6 +96,14 @@ int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out);
  * rest are reported because no repair has one right answer.
  */
 #define COSMOFS_CHECK_REPAIR (1u << 0)
+/* With REPAIR, on a mount nothing else is using (cosmofs_check_dev): a
+ * block something reaches and the bitmap calls free is marked allocated.
+ * On a mounted filesystem the allocator may already have handed it out,
+ * so it is only reported there. */
+#define COSMOFS_CHECK_OFFLINE (1u << 1)
+/* With REPAIR: only the classes a boot repairs without asking, and
+ * nothing at all when anything else was found (`boot_refused`). */
+#define COSMOFS_CHECK_BOOT   (1u << 2)
 #define CFS_CHECK_NAMES      8u
 
 struct cosmofs_check_class {
@@ -130,8 +149,35 @@ struct cosmofs_check_report {
      * skip, so "nothing reaches this" may mean "this pass did not get
      * there", and every repair here is an argument from absence. */
     bool repair_refused;
+    bool boot_refused;                  /* COSMOFS_CHECK_BOOT: a finding outside the boot's classes */
     uint64_t elapsed_ns;
 };
+
+/*
+ * The check on a device nothing has mounted (roadmap 1.2 B2,
+ * fsck.cosmofs): both superblock slots compared, the pool mounted where
+ * no namespace sees it -- read-only, so it writes nothing (CF21), unless
+ * COSMOFS_CHECK_REPAIR -- checked, a repair committed, and unmounted.
+ * The fields mirror uapi/cosmo/fsctl.h's struct cosmo_fsctl_dev, whose
+ * flag and stage values they use. 0 whenever it answered, including
+ * "the check could not run, and here is why"; -EBUSY for a mounted
+ * device, -ENOMEM.
+ */
+struct cosmofs_dev_report {
+    unsigned flags;
+    int mount_error;
+    unsigned mount_stage;
+    int rollback_error;
+    unsigned format;
+    unsigned replayed_orphans;
+    uint64_t generation;
+    uint64_t slot_generation[2];
+    uint64_t replayed_frees;
+    char rollback_target[32];
+};
+struct blkdev;
+int cosmofs_check_dev(struct blkdev *bd, unsigned flags, struct cosmofs_check_report *rep,
+                      struct cosmofs_dev_report *dev);
 
 /* Walks the live tree, every snapshot, both allocation maps and the inode
  * map under the mount's lock. -EINVAL for a mount that is not a cosmofs,
@@ -191,6 +237,7 @@ struct cosmofs_snap_req {
     unsigned pool_flags;            /* LIST: COSMOFS_POOL_* */
     uint64_t free_bytes;            /* LIST: what data can still use */
     uint64_t total_bytes;           /* LIST: the pool's size */
+    int rollback_error;             /* LIST: why this mount did not apply a pending rollback (CFS-20), or 0 */
 };
 
 #define COSMOFS_POOL_PENDING (1u << 0)

@@ -3346,3 +3346,19 @@ See the [history index](README.md).
   `tools/console-lines-probe.py`. With it, PKG-9: `pkg` says a version
   change to an older version is a downgrade. Report:
   `docs/audit/2026-10-21-console-hold-report.md`.
+- **fsck and scrub as commands (2026-10-22, roadmap 1.2 B2; PRs #433 and
+  #434).** `fsck.cosmofs [--check|--repair] DEVICE` runs the
+  kernel's checker on an unmounted device through `/dev/fsctl`
+  `CHECK_DEV` (a mount no namespace sees; read-only for `--check`, a
+  commit only after a repair); init checks the root before mounting it
+  (`fsck=`): bookkeeping repaired unattended, orphans and link counts
+  logged, anything else refused by name to the live shell. `fsctl scrub
+  [--repair]` reports unless asked to repair (`SCRUB_EX`), reads every
+  tree, and is bounded by `fs.scrub_rate`; `mkfs.cosmofs --mirror`. The
+  defects first (#433): a read-only mount wrote its replay (CFS-1), new
+  files were records below format 6 (CFS-2), an allocation abandoned the
+  transaction (CFS-6), the scrub's -EIO lost its counts (CFS-11), a
+  non-directory root panicked, the scrub checked blocks the transaction
+  held in memory; `tools/b2-defects-probe.py`. `make test-fsck` damages
+  the installed root 23 ways (`tools/cosmofs-damage.py`). Report:
+  `docs/audit/2026-10-22-b2-fsck-report.md`.

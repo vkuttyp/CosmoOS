@@ -1698,6 +1698,132 @@ The checker walks a clone's tree, with the roots the open transaction
 has, like a snapshot's; its counts are what `cosmofs-clone` takes for
 the truth about what a clone holds and gives back.
 
+## fsck and scrub as commands (roadmap 1.2 B2)
+
+The structural check and the scrub existed and an operator could run
+both on a mounted pool through `/dev/fsctl`. B2 makes them the commands an
+installed system needs: a check of a pool **nothing has mounted**, the
+root's check **at boot** before it mounts, and a scrub that **reports
+without repairing** unless asked, covers **every tree**, and leaves the
+writers room.
+
+### One checker, three entry points
+
+| Entry | What runs | Mount |
+|---|---|---|
+| `fsck.cosmofs [--check\|--repair] DEVICE` | `/dev/fsctl` `CHECK_DEV` → `cosmofs_check_dev` → `cosmofs_check` | a mount of DEVICE no namespace sees: read-only for `--check`, writable for `--repair` |
+| `fsctl check ID [--repair]` | `CHECK` → `cosmofs_check` | the mounted pool |
+| `fsctl scrub ID [--repair]` | `SCRUB_EX` → `cosmofs_scrub` | the mounted pool |
+
+There is no checker in user space. `CHECK_DEV` names a block device;
+`cosmofs_check_dev` mounts it with `vfs_mount_detached` -- `do_mount`, so
+the device is claimed as by any mount, and nothing else: no mountpoint,
+no namespace, no listing -- runs the same `cosmofs_check`, and releases
+it with `vfs_mount_detached_release`, which commits a writable mount as an
+unmount would. This needed no new mount mode: `--check` is an ordinary
+read-only mount, which since CF21 writes nothing, and `--repair` an
+ordinary writable one. What a writable mount does a writable check does
+too -- it replays the records and **applies a pending rollback** -- but
+it **commits only when it repaired something**; otherwise its mount's
+changes are dropped and the next mount makes them again. (The first draft
+committed them always, and a boot's refused repair then lost the very
+free block in use it had refused to touch: the commit's copies took it.)
+
+Before the mount `cosmofs_check_dev` reads both superblock slots itself:
+two slots that both verify and name different pools (uuid, size, block
+size or label differ) are a finding the mount would never make -- it would
+take the newer and carry on -- so the pool is not mounted and the device
+record says `SUPER_DISAGREE`; neither slot verifying is `SUPER_NONE`. A
+mount that fails says where (`mount_stage`: the free record, the orphan
+record, the root, ...) through a one-entry note `cosmofs_mount` leaves for
+its device. These are the **device classes** fsck.cosmofs prints beside
+the sixteen: `superblock`, `root`, `free-record`, `orphan-record`,
+`snapshots`, `members`, `bitmap`, `mount`. None is repaired.
+
+**Offline, one more repair.** A block something reaches and the bitmap
+calls free (`seen_not_alloc`) has one right answer -- set its bit -- but on
+a mounted pool the allocator may have handed it out already, so the check
+only reports it there. `COSMOFS_CHECK_OFFLINE`, which `cosmofs_check_dev`
+adds to a repair, makes the repair: nothing else is using the pool. The
+walk counted those blocks free, so the count it hands the totals' repair
+is lowered with each bit set (`cfs_bitmap_claim`).
+
+The root is checked for what the mount now requires: a root inode that is
+not a directory is `dir_bad` (inode 1) and the answer incomplete; the
+mount itself refuses it with `-ENOTDIR` ("The root is a directory").
+
+### fsck at boot
+
+Init runs `fsck.cosmofs --boot MODE DEVICE` on `root=`'s device before it
+mounts it (`userland/init/init.c`, `check_root`); `MODE` is `repair`
+unless the command line says `fsck=check` or `fsck=skip`. The check is
+read-only. What happens next depends on the classes found:
+
+| Class | Boot policy |
+|---|---|
+| `leaked` (alloc_not_seen), `counter`, `snap-identity`, `rollback-record`, `hold` | **unattended**: repaired |
+| `orphan`, `nlink` | **logged**: repaired, each inode named on the console -- they are what a crash leaves |
+| `free-in-use`, `cross-linked`, `dangling`, `bad-entry`, `cycle`, `unreadable`, `extent-order`, `extent-overlap`, `dup-name`, and every device class | **refuse**: the pool is not mounted |
+
+With nothing found the boot prints `cosmofs: root checked, 0 findings, 0
+repaired`. With only unattended and logged findings and `fsck=repair` it
+runs `CHECK_DEV` again with `F_REPAIR | F_BOOT`: the kernel applies the
+same rule to what it finds then (`COSMOFS_CHECK_BOOT`: a finding outside
+the set and it repairs nothing, `boot_refused`), so a pool that changed
+between the two passes -- a pending rollback switched to by the writable
+one -- is not repaired past the policy. The line is then `cosmofs: root
+checked, N findings, M repaired`. Anything refused prints `cosmofs: root
+refused: CLASS[, CLASS]; DEVICE is not mounted. From this shell:
+fsck.cosmofs --repair DEVICE`, and init stays on the live root, whose
+shell has the pool unmounted. `fsck=check` reports and mounts unless
+something is refused; `fsck=skip` prints `cosmofs: root not checked`. A
+check that cannot run at all (an older kernel without `CHECK_DEV`) is
+said and the root mounted unchecked: a check that cannot ask does not
+take the system away. A device on which no superblock slot verifies is
+treated the same way (`cosmofs: root not checked: DEVICE holds no
+superblock that verifies`): that is a `root=` naming the wrong disk as
+often as a pool whose two slots rotted, and the mount refuses both with
+the line it always printed.
+
+A pending rollback the boot's own mount then fails to apply (CFS-20: the
+switch needs space the pool does not have) is said where the operator
+looks: the snapshot listing's pool record carries the mount's error in
+what was a reserved word (`rollback_error`), and init's lines about a
+pending rollback end with it.
+
+### The scrub, as a command
+
+`cosmofs_scrub` takes `COSMOFS_SCRUB_REPAIR`. Without it the scrub writes
+nothing: a bad copy is counted (`bad_copies`) and left, so `fsctl scrub
+ID` is a report and `fsctl scrub ID --repair` the repair; `/dev/fsctl`'s
+old `SCRUB` op keeps repairing, for the clients that send it. It now walks
+**every tree** -- the live one, each snapshot's and each clone's, not only
+the snapshot list and deadlists -- and reads **each block once** however
+many trees share it (`done`, a `cfs_bits` set over the pool). A metadata
+block the open transaction holds dirty is skipped and counted
+(`skipped`): its device copies are not it.
+
+**The bound.** `fs.scrub_rate` (sysctl, blocks a second, default 4096 --
+16 MiB/s -- and 0 for none) is spent a tenth at a time: after a window's
+share the scrub lets go of `fs->lock`, sleeps out the window, and takes
+the lock again, so writers and readers of the same pool get the lock in
+between. The walk lets go only where it holds no buffer -- between inode
+blocks, between a file's data blocks, between snapshots -- and finds its
+place again from the roots as they are then: an inode block by its index
+in the map, a snapshot by its id, a file by its number. What it copied may
+be stale if a commit ran during the pause (`fs->commits` moved), and is
+read again; a block that commit freed is not handed out before the commit
+after it, so a copy taken in one generation never leads to a block that
+has become something else.
+
+### The mirror from the shell
+
+`mkfs.cosmofs --mirror A B` makes the two-way mirror the scrub repairs
+from (`/dev/blkctl` `FORMAT_MIRROR`, `vfs_format_mirror`,
+`cosmofs_format_mirror(bd, 1, 2)`); before it, a mirror could be made
+only by the kernel's self-tests. No label and no more than two devices
+(CFS-15's rest).
+
 ## Self-test fixture failure ownership
 
 `cosmofstest.c:engine_mount` owns the registered RAM device until setup

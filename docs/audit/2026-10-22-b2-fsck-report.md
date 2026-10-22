@@ -11,7 +11,7 @@ Planned in three pull requests: the cosmofs defects B2 absorbs (this
 section), fsck and scrub with `make test-fsck` (ticks B2), and the
 v1.0.10 release.
 
-## First pull request: the defects
+## First pull request (#433): the defects
 
 Each fix is one commit, and each has a self-test that fails without it:
 `tools/b2-defects-probe.py --case NAME --old` reverts that commit
@@ -102,3 +102,138 @@ Codex's six comments, each checked against the code:
 After the fixes: debug `make test` at QEMU_SMP 4 (x86-64) and 2
 (AArch64), `analyze` on both architectures: pass; each fix commit still
 reverts cleanly.
+
+## Second pull request (#434): fsck and scrub as commands
+
+The design is `design.md`, "fsck and scrub as commands (roadmap 1.2
+B2)"; the invariants CF23 and CF24. In brief:
+
+- **One checker.** `fsck.cosmofs` sends `/dev/fsctl` `CHECK_DEV` (op 11)
+  for an unmounted device; `cosmofs_check_dev` mounts it where no
+  namespace sees it (`vfs_mount_detached`: `do_mount`, so the device is
+  claimed, and nothing else), runs `cosmofs_check`, and releases it. No
+  new mount mode was needed: `--check` is a read-only mount, which CF21
+  makes write nothing, and `--repair` a writable one, which commits only
+  when it repaired something. Two superblock slots naming different
+  pools, neither slot verifying, or a mount failing at a named stage are
+  answered in a device record (`struct cosmo_fsctl_dev`), as classes
+  `superblock`, `root`, `free-record`, `orphan-record`, `snapshots`, ...
+- **Offline, one more repair:** a reachable block the bitmap calls free
+  (`COSMOFS_CHECK_OFFLINE`, `cfs_bitmap_claim`). No class turned out to
+  need a format change to repair.
+- **At boot**, before the root mounts, `fsck.cosmofs --boot` with the
+  policy of `fsck=` (repair by default): bookkeeping repaired unattended,
+  orphans and link counts repaired and logged by inode, anything else
+  refused by name with init left on the live root; the kernel enforces
+  the same set (`COSMOFS_CHECK_BOOT`). One line every boot.
+- **The scrub** reports without repairing unless asked (`SCRUB_EX`, op
+  12; the old SCRUB still repairs), reads every tree each block once, and
+  paces itself at `fs.scrub_rate` blocks a second in 100 ms windows,
+  letting go of the lock between them. `mkfs.cosmofs --mirror` makes the
+  two-way mirror it repairs from.
+- **CFS-20 surfaced:** the snapshot listing's pool record carries why the
+  mount left a rollback pending (`rollback_error`, a reserved word
+  before), and init's line ends with it.
+- No fsctl version bump: two new ops with records of their own, a flag
+  only they accept, a reserved word given a meaning.
+
+### Found while building it
+
+- **A refused repair lost the block it refused to touch.** The first
+  `cosmofs_check_dev` committed every writable mount on release; in
+  `cosmofs-check-dev` the boot-mode pass refused (a free block in use is
+  not a boot's), then its commit's copies took the very block the bitmap
+  called free, and the next pass saw no free-in-use block. A writable
+  check now commits only after a repair. The same hazard remains for a
+  repair's own mount, which replays the orphan record and may switch a
+  rollback before the check runs (CFS-25).
+- **`cosmofs_test_corrupt`'s FREE_IN_USE goes through a commit**, whose
+  copies take the freed block at once; `cosmofs-check-dev` clears the
+  bit on the device instead.
+- **Four chain walkers had no bound** (`deadlist_settle`,
+  `snapshot_holds`, `snaplist_insert`, the deadlist handover in
+  `cfs_snapshot_delete`), now bounded (CF24; on write paths, by review).
+- **No `/dev/urandom`** (USR-7): `head -c N /dev/urandom` gave 32 bytes,
+  which first left `/fsck/sparse` and the mirror's file a block each; the
+  test uses gzip output, which does not compress again.
+
+### The checker's classes and what a boot does
+
+| Class | Boot | `test-fsck` damage | After `fsck.cosmofs --repair` |
+|---|---|---|---|
+| leaked | unattended | `leaked` | (repaired at boot) |
+| counter | unattended | `counter` | (repaired at boot) |
+| snap-identity | unattended | `snap-identity` | (repaired at boot) |
+| rollback-record | unattended | `rollback-record` | (repaired at boot) |
+| hold | unattended | `hold` | (repaired at boot) |
+| nlink | logged | `nlink` | (repaired at boot) |
+| orphan | logged | `orphan` | (repaired at boot) |
+| free-in-use | refuse | `free-in-use` | repaired, exit 1, then clean |
+| cross-linked | refuse | `cross-linked` | its leaked block repaired; cross-linked left, exit 4 |
+| dangling | refuse | `dangling` | refused; dangling, orphan left |
+| bad-entry | refuse | `bad-entry`, `cycle-directory` | refused; bad-entry and orphan / nlink left |
+| extent-order | refuse | `extent-order` | left |
+| extent-overlap | refuse | `extent-overlap` | left |
+| dup-name | refuse | `dup-name` | left |
+| unreadable | refuse | `unreadable` | refused; unreadable, orphan left |
+| cycle | refuse | `cycle-extent` (also cross-linked), `cycle-deadlist` | left |
+| snapshots, free-record, orphan-record, root, superblock | refuse | `cycle-snaplist`, `cycle-free-record`, `cycle-orphan-record`, `root-type`, `superblock` | the mount (or the slot comparison) refuses again; left |
+
+### `make test-fsck` (2026-10-22, release builds)
+
+Every class above, the read-only stage and the mirror stage pass on
+x86-64 (182.3 s) and AArch64 (283.9 s). The mirror: 16 of a 64-block
+file's blocks flipped on one device, `fsctl scrub` 16 bad copies and none
+repaired (exit 4), `--repair` 16 repaired (exit 1), the next scrub clean
+(exit 0), the file's sha256 unchanged.
+
+**The bound and a writer.** At `fs.scrub_rate=512`, the scrub read 1806
+blocks in 3447 ms on x86-64 (the bound allows no less than 3400) and 1866
+in 3635 ms on AArch64 (3500). A 4 MiB writer took 0.41 s alone and 0.41 s
+during the scrub on both (0.31 s during it in one earlier x86-64 run):
+at this bound the scrub leaves the writer's time where it was, within
+QEMU's noise. The default bound is 4096 blocks a second.
+
+### Review and CI of the second pull request (#434, 2026-10-22)
+
+CI: `test-install`'s fallback stage failed on both architectures. It
+boots the live image with `root=` naming a blank disk and requires init's
+`cannot mount` line; the boot's check refused the disk as `superblock`
+first. A device on which no superblock slot verifies is now "not
+checked" and left to the mount, which refuses it with the line it always
+printed (a pool whose two slots both rotted is refused the same way).
+
+Codex's ten comments, each checked against the code; all but one fixed:
+
+- **P1, fixed:** a detached check mount ran the writeback thread, which
+  could commit a replay or a refused repair before the release decided
+  not to; `MOUNT_DETACHED` keeps it off.
+- **P1, fixed:** a mirror mounted through its other leg looked unmounted
+  to a check of this leg; `cosmofs_check_dev` refuses (-EBUSY) when any
+  device the pool assembled is mounted. `cosmofs-scrub-modes` checks it.
+- **P1, partly:** a walk made partial only by the duplicate-name cap
+  printed `clean`; it is now the finding `incomplete` (exit 4). A pool
+  whose superblocks or mount stop the check stays exit 4 with its class
+  named -- a finding about the pool, not a failure to ask (8); the docs
+  say so.
+- **P2, fixed:** the bitmap scan paces block by block (chunk pointers
+  copied, again after a commit); rates below 10 blocks a second get a
+  window of 1/rate seconds; the mounted root's superblock slot verifying
+  on no copy is unrecoverable; the scrub's record is allocated before it
+  repairs; mount-failure notes are kept per device; an inode block's
+  later copies are read again after a commit during one of its inodes;
+  snapshots are walked by id, not by place.
+
+After them: debug `make test` at QEMU_SMP 2 on both architectures,
+`analyze` (one dead store fixed) and `fuzz` on both (the fuzz shim gained
+`vfs_bdev_mounted`), and `test-install`, `test-snapshot` and `test-fsck`
+on both -- all pass. The bound and a writer again: 1938 blocks at 512/s
+in 3738 ms (x86-64), 2009 in 3953 ms (AArch64); the 4 MiB writer 0.42 s
+alone and 0.33 / 0.42 s during the scrub.
+
+The run after the fixes failed CI's x86-64 `fsck` job at `extent-overlap`:
+there `/fsck/sparse` had no run of two blocks (locally its eight blocks
+were laid out one and seven; the allocator interleaves its metadata
+differently from run to run). The damage now builds the two-block run
+from two new adjacent blocks, leaving the old block leaked for the repair
+to free, so it does not depend on the layout.

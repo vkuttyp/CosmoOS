@@ -49,9 +49,25 @@
 #define COSMO_FSCTL_SNAP_CANCEL   8   /* withdraw a pending rollback */
 #define COSMO_FSCTL_SNAP_CLONE    9   /* `name2`: a writable clone of snapshot `name` */
 #define COSMO_FSCTL_BOOT_OK      10   /* this boot completed: release the hold a rollback left */
+/*
+ * Roadmap 1.2 B2: two more operations, and no version bump. Each answers
+ * with a record of its own, so a version-3 client that never sends them
+ * is unaffected, and a kernel without them refuses the op with -EINVAL --
+ * which is how fsck.cosmofs and fsctl tell an older kernel.
+ */
+#define COSMO_FSCTL_CHECK_DEV    11   /* the check on an UNMOUNTED device `name` (fstype `name2`, "" = cosmofs):
+                                       * one cosmo_fsctl_devcheck. Read-only unless F_REPAIR */
+#define COSMO_FSCTL_SCRUB_EX     12   /* the scrub, reporting only unless F_REPAIR: one cosmo_fsctl_scrub_ex */
 
-/* CHECK only: repair what has one right answer. Off by default. */
+/* CHECK, CHECK_DEV, SCRUB_EX: repair what has one right answer. Off by
+ * default. */
 #define COSMO_FSCTL_F_REPAIR (1u << 0)
+/* CHECK_DEV with F_REPAIR: repair only what a boot may repair without
+ * asking (leaked blocks, totals, a stale rollback record or hold,
+ * snapshot identity, orphans, link counts), and nothing at all when the
+ * check found anything else (docs/kernel-services/filesystem/cosmofs/
+ * design.md, "fsck at boot"). */
+#define COSMO_FSCTL_F_BOOT (1u << 3)
 
 /* What a filesystem offers, in a listing's `caps`. */
 #define COSMO_FSCTL_CAP_CHECK (1u << 0)
@@ -183,6 +199,73 @@ struct cosmo_fsctl_scrub {
 };
 
 /*
+ * SCRUB_EX: every block every tree reaches (the live tree, each snapshot
+ * and clone), each read on every copy of its member and verified, at
+ * most `rate` blocks a second (sysctl fs.scrub_rate; 0 = no bound). A
+ * bad copy is rewritten from a good one only with F_REPAIR; without it
+ * the scrub writes nothing and `bad_copies` says what a repair would do.
+ */
+struct cosmo_fsctl_scrub_ex {
+    uint64_t blocks_read;     /* distinct blocks verified */
+    uint64_t inodes;
+    uint64_t bad_copies;      /* copies that did not verify while another did */
+    uint64_t repaired;        /* of those, rewritten from a good copy (F_REPAIR) */
+    uint64_t unrecoverable;   /* blocks no copy could satisfy */
+    uint64_t skipped;         /* blocks the open transaction holds in memory: the next scrub's */
+    uint64_t elapsed_ns;
+    uint64_t rate;            /* the bound it ran at, blocks a second; 0 for none */
+};
+
+/*
+ * CHECK_DEV: what was found before the check could run, and around it.
+ * The 16 check classes are the structure's; these are the device's: a
+ * superblock pair that names no pool or two, a mount that failed and
+ * where, and what the pool's rollback record says. When F_CHECKED is
+ * clear the check record is zero and these say why.
+ */
+#define COSMO_FSCTL_DEV_F_CHECKED          (1u << 0)   /* the check ran: `check` is its record */
+#define COSMO_FSCTL_DEV_F_SUPER_NONE       (1u << 1)   /* neither superblock slot verifies */
+#define COSMO_FSCTL_DEV_F_SUPER_DISAGREE   (1u << 2)   /* both verify and name different pools */
+#define COSMO_FSCTL_DEV_F_MOUNT_FAILED     (1u << 3)   /* `mount_error` at `mount_stage` */
+#define COSMO_FSCTL_DEV_F_FELL_BACK        (1u << 4)   /* the newer root did not load; the older one did */
+#define COSMO_FSCTL_DEV_F_ROLLBACK_PENDING (1u << 5)   /* a rollback record waits for a writable mount */
+#define COSMO_FSCTL_DEV_F_ROLLBACK_HELD    (1u << 6)   /* a rollback applied; held until BOOT_OK */
+#define COSMO_FSCTL_DEV_F_ROLLBACK_APPLIED (1u << 7)   /* this (writable) check's mount switched to it */
+#define COSMO_FSCTL_DEV_F_ROLLBACK_REFUSED (1u << 8)   /* its mount tried and could not: `rollback_error` */
+#define COSMO_FSCTL_DEV_F_COMMITTED        (1u << 9)   /* a repair was made and committed */
+#define COSMO_FSCTL_DEV_F_BOOT_REFUSED     (1u << 10)  /* F_BOOT: a finding outside the boot's classes */
+
+/* Where a failed mount stopped (`mount_stage`). */
+#define COSMO_FSCTL_STAGE_NONE          0
+#define COSMO_FSCTL_STAGE_SUPER         1   /* no superblock */
+#define COSMO_FSCTL_STAGE_MEMBERS       2   /* the member table, a missing device, the key */
+#define COSMO_FSCTL_STAGE_BITMAP        3   /* the allocation maps */
+#define COSMO_FSCTL_STAGE_FREE_RECORD   4   /* the record of what the last commit freed */
+#define COSMO_FSCTL_STAGE_SNAPSHOTS     5   /* the snapshot list, the clones */
+#define COSMO_FSCTL_STAGE_ROLLBACK      6
+#define COSMO_FSCTL_STAGE_ORPHAN_RECORD 7   /* the inodes the last root still owed */
+#define COSMO_FSCTL_STAGE_ROOT          8   /* the root directory (not a directory: -ENOTDIR) */
+
+struct cosmo_fsctl_dev {
+    uint32_t flags;           /* COSMO_FSCTL_DEV_F_* */
+    int32_t mount_error;      /* a negative errno, with F_MOUNT_FAILED */
+    uint32_t mount_stage;     /* COSMO_FSCTL_STAGE_* */
+    int32_t rollback_error;   /* with F_ROLLBACK_REFUSED */
+    uint32_t format;          /* the pool's format version */
+    uint32_t replayed_orphans;/* inodes the mount's orphan replay released (in memory when read-only) */
+    uint64_t generation;      /* of the root that was checked */
+    uint64_t slot_generation[2];   /* each superblock slot's, 0 when it does not verify */
+    uint64_t replayed_frees;  /* blocks the mount's free-record replay released */
+    char rollback_target[COSMO_FSCTL_NAME_MAX + 1];   /* a pending or held rollback's target, "" when gone */
+    uint64_t reserved[4];
+};
+
+struct cosmo_fsctl_devcheck {
+    struct cosmo_fsctl_dev dev;
+    struct cosmo_fsctl_check check;
+};
+
+/*
  * SNAP_LIST's result is the header, then one cosmo_fsctl_snap_pool, then
  * `count` cosmo_fsctl_snap records (`bytes` is one record's size). The
  * pool record says what is true of the filesystem rather than of one
@@ -198,7 +281,12 @@ struct cosmo_fsctl_snap_pool {
     uint32_t flags;           /* COSMO_FSCTL_POOL_F_* */
     uint64_t free_bytes;      /* what data can still use (the metadata reserve excluded) */
     uint64_t total_bytes;     /* the pool's size */
-    uint64_t reserved;
+    /* Roadmap 1.2 B2 (CFS-20), in what was a reserved word that every
+     * earlier kernel wrote 0: why this mount did not apply the pending
+     * rollback it found, a negative errno; 0 when it applied it or there
+     * was none. */
+    int32_t rollback_error;
+    uint32_t reserved;
 };
 
 /*

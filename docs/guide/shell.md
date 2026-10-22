@@ -33,9 +33,12 @@ qemu-system-aarch64 -machine virt -cpu cortex-a72 -smp 2 -m 512M \
 The boot log ends with init switching to the disk:
 
 ```text
+cosmofs: root checked, 0 findings, 0 repaired
 init: switched to the disk root ... (root=boot-disk)
 CosmoOS userland ready
 ```
+
+(the root's check, [Checking and repairing](checking.md))
 
 and the console shell's prompt. On the first boot `/etc/rc` also makes
 the ssh server's host key, which takes a moment.

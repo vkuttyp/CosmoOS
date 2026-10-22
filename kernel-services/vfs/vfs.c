@@ -3154,6 +3154,25 @@ int vfs_mount_internal(const char *fsname, struct mount **out)
     return do_mount(fs, NULL, 0, out);
 }
 
+int vfs_mount_detached(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount **out)
+{
+    KASSERT(g_initialized);
+    if (fs == NULL || bdev == NULL)
+        return -EINVAL;
+    /* The filesystem commits only when the release says so: no committer
+     * of its own may run first (Codex on #434). */
+    return do_mount(fs, bdev, flags | MOUNT_DETACHED, out);
+}
+
+int vfs_mount_detached_release(struct mount *mnt, bool commit)
+{
+    int rc = 0;
+    if (commit && !(mnt->flags & MOUNT_RDONLY) && mnt->fs->sync)
+        rc = mnt->fs->sync(mnt);
+    undo_mount(mnt, mnt->bdev);   /* the filesystem's unmount stops its own committer first */
+    return rc;
+}
+
 int vfs_mount_root(const char *fsname, struct blkdev *bdev, unsigned flags)
 {
     KASSERT(g_initialized);
@@ -3220,6 +3239,26 @@ int vfs_format(const char *fsname, struct blkdev *bd, const char *label)
     if (rc == 0)
         kinfo("vfs: made an empty %s on %s%s%s", fsname, bd->name, label && label[0] ? ", named " : "",
               label && label[0] ? label : "");
+    return rc;
+}
+
+int vfs_format_mirror(const char *fsname, struct blkdev **bd, unsigned n)
+{
+    struct fs_type *fs = vfs_find_fs(fsname);
+    if (fs == NULL)
+        return -ENODEV;
+    if (fs->format_mirror == NULL)
+        return -EOPNOTSUPP;
+    for (unsigned i = 0; i < n; i++)
+        for (unsigned j = 0; j < i; j++)
+            if (bd[i] == bd[j])
+                return -EINVAL;   /* a mirror of a device with itself is one copy */
+    for (unsigned i = 0; i < n; i++)
+        if (vfs_bdev_mounted(bd[i]))
+            return -EBUSY;
+    int rc = fs->format_mirror(bd, n);
+    if (rc == 0)
+        kinfo("vfs: made an empty %s mirrored over %u devices, %s first", fsname, n, bd[0]->name);
     return rc;
 }
 

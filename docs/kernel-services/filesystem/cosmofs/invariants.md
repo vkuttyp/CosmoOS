@@ -339,6 +339,38 @@ added it. Check: `cosmofs-version-compress` (a version-5 pool's new file
 maps plain blocks; the same file at the current version is a record).
 `--case compress --old` fails at `v5 == 0`.
 
+**CF23. A check writes nothing it was not asked to, and a boot repairs
+only what it may.** The check of an unmounted device mounts it read-only
+unless asked to repair (CF21 then holds for it); the scrub writes no copy
+without `COSMOFS_SCRUB_REPAIR`; a repair with `COSMOFS_CHECK_BOOT`
+repairs only `alloc_not_seen`, `counter_wrong`, `snap_identity`,
+`rollback_record`, `hold`, `orphan` and `nlink_wrong`, and nothing when
+any other class was found or the walk is partial; `seen_not_alloc` is
+repaired only with `COSMOFS_CHECK_OFFLINE`, which only
+`cosmofs_check_dev` sets (design.md, "fsck and scrub as commands").
+Check: `cosmofs-check-dev` (the read-only check changes no block's CRC;
+a boot repair with a free block in use refuses and repairs nothing; the
+offline repair repairs the leak and the free-in-use block, commits, and
+the next check is clean), `cosmofs-scrub-modes` (a report-only scrub of
+four bad copies leaves them for the next to count again; the repairing
+one rewrites them), `test-fsck` (every class through the boot and the
+live shell, on both architectures).
+
+**CF24. Every chain walker is bounded.** Each loop over a chain of
+blocks -- the snapshot list, a deadlist, an extent chain, the free and
+orphan records, the directory tree's depth -- stops at its bound and
+answers as for an unreadable block: the checker names `chain_cycle`, a
+mount refuses the record, the snapshot filter holds the block it was
+asked about. Roadmap 1.2 B2 bounded the four that were not
+(`deadlist_settle`, `snapshot_holds`, `snaplist_insert`, the deadlist
+handover in `cfs_snapshot_delete`; TEST-16). Check: `test-fsck`'s
+`cycle-*` classes for the read-side walkers -- the checker's extent chain
+and deadlist (`cycle`), the mount's snapshot list, free record and orphan
+record (refused at their stage), the directory walk (`bad-entry`). Gap:
+the four bounded by B2 are on write paths (a delete, a free, a new
+snapshot), which a pool refused at boot never reaches; they are checked
+by review.
+
 **CF18. From format version 12 a snapshot's identity is its own: every
 snapshot has a uuid no other snapshot of the filesystem has, and no id
 is handed out twice, across remounts included.** The uuid is drawn when

@@ -11,6 +11,7 @@
 #   make test-smp2    the same boot test with two CPUs (the default is four)
 #   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
 #   make test-snapshot roadmap 1.2 B1: snapshots of the installed root from the shell (CI: BUILD=release)
+#   make test-fsck    roadmap 1.2 B2: fsck at boot and offline, scrub --repair on a mirror (CI: BUILD=release)
 #   make test-upgrade shell completeness S7: upgrade an installed v1.0.3 to this build, roll back (CI: BUILD=release)
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
 #   make test-security roadmap M5: verified boot refuses tampered files; VERIFY_BOOT=0 says so (CI: BUILD=release)
@@ -42,7 +43,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-fsck test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -284,6 +285,18 @@ test-snapshot: $(IMAGE)
 		$(PYTHON) $(ROOT)/tests/boot/snapshot_test.py --image $(IMAGE) --workdir $(OUT)/test-snapshot \
 		--timeout $(BOOT_TIMEOUT) --key $(MODSIGN_KEY) \
 		--stop-kernel $(OUT)-stop/kernel/kernel.elf --stop-boot-tar $(OUT)-stop/boot.tar
+
+# Roadmap 1.2 B2's acceptance test (tests/boot/fsck_test.py,
+# docs/kernel-services/filesystem/cosmofs/testing.md, "test-fsck"): an
+# installed root damaged by tools/cosmofs-damage.py in each of the
+# checker's classes, booted -- repaired at boot or refused by name, then
+# fsck.cosmofs --repair from the live shell -- a read-only check that
+# writes nothing, and scrub --repair on a two-way mirror. (CI:
+# BUILD=release, in the install job.)
+test-fsck: $(IMAGE)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/fsck_test.py --image $(IMAGE) --workdir $(OUT)/test-fsck \
+		--timeout $(BOOT_TIMEOUT)
 
 # Shell completeness S7's acceptance test (tests/boot/upgrade_test.py,
 # docs/userland/testing.md, "test-upgrade"): the published v1.0.3, fetched

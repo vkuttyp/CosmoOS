@@ -4105,6 +4105,17 @@ static void proc_fs_selftest(void)
     puts("usertest: /proc ok");
 }
 
+/* fsck.cosmofs MODE DEVICE, its exit status. */
+static int fsck_run(const char *mode, const char *dev)
+{
+    const char *argv[] = { "fsck.cosmofs", mode, dev, NULL };
+    pid_t pid = spawnve("/sbin/fsck.cosmofs", argv, NULL, NULL, 0);
+    if (pid < 0)
+        return -1;
+    int status = -1;
+    return waitpid(pid, &status, 0) == pid ? status : -1;
+}
+
 /* Run the operator's tool, capturing its exit status. */
 static int fsctl_run(const char *a, const char *b, const char *c)
 {
@@ -4320,8 +4331,17 @@ static void fsctl_selftest(void)
         CHECK((res.flags & COSMO_FSCTL_R_CLEAN) != 0);
         CHECK((res.flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
 
+        /* Roadmap 1.2 B2: the offline check refuses a mounted device and
+         * finds this one clean once it is not; both modes, through the
+         * kernel's checker on a mount no namespace sees. */
+        CHECK(fsck_run("--check", "vda") == 8);
         CHECK(cosmo_umount("/mnt") == 0);
         printf("usertest: fsctl: a file written, deleted and unmounted strands nothing -- the filesystem is clean on remount\n");
+        CHECK(fsck_run("--check", "vda") == 0);
+        CHECK(fsck_run("--repair", "vda") == 0);
+        CHECK(cosmo_mount("vda", "/mnt", "cosmofs", 0) == 0);   /* mountable after it, as before */
+        CHECK(cosmo_umount("/mnt") == 0);
+        printf("usertest: fsctl: fsck.cosmofs refused the mounted disk and found it clean unmounted\n");
     }
 
     close(fd);
@@ -6052,6 +6072,67 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
 }
 
 /*
+ * fsck= on the kernel command line (roadmap 1.2 B2): skip, check or
+ * repair; repair when absent or unknown.
+ */
+static const char *fsck_mode(void)
+{
+    static char line[512];
+    long n = sysctl_get("kernel.cmdline", line, sizeof(line));
+    if (n <= 0 || n >= (long)sizeof(line))
+        return "repair";
+    line[n] = '\0';
+    /* The last fsck= word wins, as the kernel's own options do. */
+    const char *mode = "repair";
+    for (char *t = line; *t != '\0';) {
+        while (*t == ' ')
+            t++;
+        size_t len = strcspn(t, " ");
+        if (len == 9 && strncmp(t, "fsck=skip", 9) == 0)
+            mode = "skip";
+        else if (len == 10 && strncmp(t, "fsck=check", 10) == 0)
+            mode = "check";
+        else if (len == 11 && strncmp(t, "fsck=repair", 11) == 0)
+            mode = "repair";
+        t += len;
+    }
+    return mode;
+}
+
+/*
+ * The root checked before it is mounted (roadmap 1.2 B2; docs/kernel-
+ * services/filesystem/cosmofs/design.md, "fsck at boot"). fsck.cosmofs
+ * prints the one line every boot gets -- "cosmofs: root checked, N
+ * findings, M repaired" or the refusal -- and repairs, in repair mode,
+ * only what a boot repairs without asking. False when the root must not
+ * be mounted: the live shell then has the pool, unmounted, and the line
+ * says what to run.
+ */
+static bool check_root(const char *dev)
+{
+    const char *mode = fsck_mode();
+    if (strcmp(mode, "skip") == 0) {
+        printf("cosmofs: root not checked (fsck=skip)\n");
+        return true;
+    }
+    const char *argv[] = { "fsck.cosmofs", "--boot", mode, dev, NULL };
+    fflush(stdout);
+    pid_t pid = spawnve("/sbin/fsck.cosmofs", argv, NULL, NULL, 0);
+    int st = -1;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid) {
+        printf("cosmofs: root not checked: fsck.cosmofs did not run (%s); mounting it\n", strerror(errno));
+        return true;
+    }
+    if (st == 4) {
+        printf("init: the root %s is not mounted; the live root stays\n", dev);
+        return false;
+    }
+    if (st != 0 && st != 1)
+        printf("init: the root's check could not run (status %d); mounting it unchecked\n", st);
+    return true;
+}
+
+/*
  * Roadmap M2 (docs/userland/design.md, "The disk root"): when the command
  * line names a root (root=), mount it at /sysroot and make it the root of
  * everything this init starts; /tmp is then a fresh ramfs. Any failure
@@ -6074,6 +6155,8 @@ static bool switch_to_disk_root(void)
             printf("init: root=%s: no such device; staying on the live root\n", spec);
         return false;
     }
+    if (!check_root(dev))
+        return false;
     if (mkdir("/sysroot", 0755) < 0 && errno != EEXIST) {
         printf("init: /sysroot: %s; staying on the live root\n", strerror(errno));
         return false;
@@ -6204,8 +6287,9 @@ static void pkg_recover(void)
                        "deleted (%s); it will not be acted on again\n", s->name, strerror(errno));
         } else if (s == tx && (s->flags & COSMO_FSCTL_SNAP_F_TARGET)) {
             printf("init: pkg: undoing the interrupted package transaction %s is pending, and this boot's mount did "
-                   "not apply it; not rebooting again (see the kernel log, fsctl check /, cosmo-snap list --all)\n",
-                   s->name);
+                   "not apply it%s%s; not rebooting again (see the kernel log, fsctl check /, cosmo-snap list "
+                   "--all)\n",
+                   s->name, pool.rollback_error ? ": " : "", pool.rollback_error ? strerror(-pool.rollback_error) : "");
         } else if (s == tx && (pool.flags & COSMO_FSCTL_POOL_F_PENDING)) {
             printf("init: pkg: an interrupted package transaction %s is left, but another rollback is pending; not "
                    "undoing it\n", s->name);
@@ -6232,8 +6316,9 @@ static void pkg_recover(void)
      * and this says it where the operator looks. */
     for (unsigned i = 0; i < n; i++)
         if ((v[i].flags & COSMO_FSCTL_SNAP_F_TARGET) && strncmp(v[i].name, "pkg-tx-", 7) != 0)
-            printf("init: a rollback of the root to %s is pending, and this boot's mount did not apply it (see the "
-                   "kernel log; cosmo-upgrade --status)\n", v[i].name);
+            printf("init: a rollback of the root to %s is pending, and this boot's mount did not apply it%s%s (see "
+                   "the kernel log; cosmo-upgrade --status)\n",
+                   v[i].name, pool.rollback_error ? ": " : "", pool.rollback_error ? strerror(-pool.rollback_error) : "");
     free(v);
     rootsnap_close(&rs);
     if (rebooting) {

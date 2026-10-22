@@ -101,13 +101,18 @@ Open lines (struck lines are not counted):
 - **CFS-12** nice-to-have, L. Incremental snapshot send/receive: stream format, ancestry check, interruption recovery.
 - **CFS-13** nice-to-have, L. Striping and RAID-Z-like parity layouts with failure, replay and repair coverage.
 - **CFS-14** nice-to-have, L. Block deduplication, evaluated against its space, integrity and recovery costs.
-- **CFS-15** nice-to-have, S. A cosmofs label cannot be changed after format; `mkfs.cosmofs` makes single-device unencrypted pools only.
+- **CFS-15** nice-to-have, S. A cosmofs label cannot be changed after format; `mkfs.cosmofs` makes single-device unencrypted pools only. Roadmap 1.2 B2 added `mkfs.cosmofs --mirror A B` (a two-way mirror, no label); more members and encryption remain.
 - **CFS-16** nice-to-have, L. A distributed filesystem (deferred: its own consistency and failure project).
 - **CFS-17** usability, M. Rollback of a mounted root takes effect at the next mount (a reboot for the root); a live rollback of a mounted tree is not built (out of B1's scope, roadmap 1.2).
 - **CFS-18** usability, S. No scheduled snapshots (taken on a timer and pruned by age); `cosmo-snap` is run by hand (out of B1's scope).
 - **CFS-19** usability, M. No quotas: neither per snapshot nor per directory tree (out of B1's scope).
-- **CFS-20** nice-to-have, S. A rollback's switch rebuilds every deadlist into new blocks while the old chains stay allocated until its commit, so a nearly full pool with long deadlists can refuse a rollback that would need no net space; the switch is abandoned and logged and the record stays pending (Qodo on #422).
+- **CFS-20** nice-to-have, S. A rollback's switch rebuilds every deadlist into new blocks while the old chains stay allocated until its commit, so a nearly full pool with long deadlists can refuse a rollback that would need no net space; the switch is abandoned and logged and the record stays pending (Qodo on #422). Since roadmap 1.2 B2 the reason is said: the snapshot listing's pool record carries the mount's error and init's line ends with it; the space problem itself remains.
 - **CFS-21** nice-to-have, S. A file unlinked inside a writable clone while it is open is not on an orphan record (the live tree's is not the clone's), so its blocks stay the clone's until the clone is deleted; a clone cannot be snapshotted or cloned (B1's rules, design.md "Clones").
+- **CFS-22** usability, M. No interactive fsck: what a repair cannot decide alone (two files claiming a block, a name twice in a directory, overlapping runs, an entry naming a free inode) is refused and named, never resolved with the operator (out of roadmap 1.2 B2's scope).
+- **CFS-23** nice-to-have, S. A scrub runs one pool at a time and only when asked: no scrubs of several pools in parallel and none on a schedule (out of B2's scope).
+- **CFS-24** usability, S. Only the root is checked at boot; a pool mounted later (`mount`, `/etc/rc`) is not.
+- **CFS-25** correctness, S. `fsck.cosmofs --repair`'s writable mount replays the orphan record and applies a pending rollback before the check runs, and either can allocate: on a pool with a free block in use the allocator could hand that block out first, which the repair would then see as a cross-link (by reading the code, not observed).
+- **CFS-26** nice-to-have, S. The scrub paces between inode blocks, data blocks and snapshots but reads one deadlist chain (up to 4096 blocks) without letting go of the lock.
 
 ## Documentation
 
@@ -279,7 +284,7 @@ Open lines (struck lines are not counted):
 - **TEST-13** nice-to-have, M. Linux-guest demonstrations (rootfs, writable root, real-NIC reach) as CI gates.
 - **TEST-14** nice-to-have, M. The slirp defect behind the network harness's retry (outside this kernel).
 - **TEST-15** nice-to-have, M. The debug suite assumes QEMU's machine (`pci`, `net-firewall`, `net-tap-release-order`, `blk-submit-unregister` fail on Parallels).
-- **TEST-16** nice-to-have, M. Paths proved by review only: retained-DMA sites, `nvme_probe` after `CC.EN`, the usb-hub worker, CF17's other sites, cosmofs chain cycles.
+- **TEST-16** nice-to-have, M. Paths proved by review only: retained-DMA sites, `nvme_probe` after `CC.EN`, the usb-hub worker, CF17's other sites, cosmofs chain cycles. Since roadmap 1.2 B2 the cosmofs chain cycles are covered on the read side (CF24: a `test-fsck` class per walker; the four write-side walkers B2 bounded are checked by review) and `extents_store`/`inode_sync` by `cosmofs-nomem`; CF17's checker, create, symlink, bitmap and deadlist sites remain review-only.
 - **TEST-17** nice-to-have, S. Untested refusals and paths: `switch_root`, partitions removed with bios in flight, halt, `cosmo-upgrade` rerun after `--stop-after=set` and an interruption inside a FAT-chain write, virtio-net probe faults.
 - **TEST-18** correctness, S. Self-tests that wait for the machine-wide thread count (`threads_settle`, `kernel/scheduler/schedtest.c`) fail when a thread elsewhere exits in the window, and the dump cannot name it; `sched-restore-loop` twice on AArch64 (docs/testing/flakes.md). Baseline the identities.
 
@@ -291,6 +296,7 @@ Open lines (struck lines are not counted):
 - **USR-4** usability, S. `/etc/fstab` cannot name `LABEL=` or `UUID=`.
 - **USR-5** nice-to-have, S. No `xz` compressor; `syslogd` keeps no file or ring; `lsblk` has no `MAJ:MIN` or options; `blkid` knows no FAT or `PARTLABEL`.
 - **USR-6** correctness, S. `cosmo-sh` hands the terminal to a foreground job as its last stage is spawned (COSMO_SPAWN_FOREGROUND), so the group holds every stage when it takes ^C; the earlier stages of a pipeline start in the background for the moment the spawns take, and one that checks the terminal at its first instruction can still stop itself. A start barrier (spawn stopped, continue the group) would close it (Codex on #424).
+- **USR-7** usability, S. No `/dev/urandom` or `/dev/random`: a shell script wanting random or incompressible bytes reads nothing (`head -c N /dev/urandom` gives at most the error); tests use awk's `rand()` or gzip output instead (test-pkgtx, test-fsck).
 
 ## VFS
 
