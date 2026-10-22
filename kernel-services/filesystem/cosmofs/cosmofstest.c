@@ -16,6 +16,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
+#include <kernel/pagecache.h>
 #include <kernel/printf.h>
 #include <kernel/random.h>
 #include <kernel/selftest.h>
@@ -5867,6 +5868,48 @@ bool selftest_cosmofs_scrub_counts(const char **reason)
 }
 
 /*
+ * A scrub with a transaction open. A file rewritten after a commit has
+ * its checksum tree copied into blocks this young pool has never
+ * written -- zeros on the device -- and the copies exist only in memory
+ * until the commit. The scrub checks what is on the devices, so it must
+ * leave those to the commit: before, it read the zeros and called the
+ * file's checksum index and leaf unrecoverable (found by
+ * cosmofs-compress once B2's inode_prepare moved an allocation, which
+ * had been passing by the luck of a stale block of the same kind).
+ */
+bool selftest_cosmofs_scrub_open(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    static uint8_t page[4096];
+    fill_incompressible(page, sizeof(page), 0x0be4);
+    CHECK(write_file(ENG "/f", page, sizeof(page)));
+    CHECK(vfs_sync() == 0);
+    page[0] ^= 0xff;
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/f", COSMO_O_RDWR, 0, &f) == 0);
+    bool w = file_pwrite(f, page, sizeof(page), 0) == (int64_t)sizeof(page);
+    /* Written back, not committed: the copies are in the transaction. */
+    mutex_lock(&f->vn->lock);
+    int wb = pagecache_sync(f->vn);
+    mutex_unlock(&f->vn->lock);
+    file_put(f);
+    CHECK(w && wb == 0);
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.dirty_buffers > 0);
+    struct cosmofs_scrub_stats sc;
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    kinfo("selftest: cosmofs-scrub-open: %u dirty buffer(s); scrub read %llu, %llu unrecoverable",
+          st.dirty_buffers, (unsigned long long)sc.blocks_read, (unsigned long long)sc.unrecoverable);
+    CHECK(sc.unrecoverable == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+    CHECK(read_matches(ENG "/f", page, sizeof(page)));
+    return engine_unmount(bd, reason);
+}
+
+/*
  * A root that is not a directory is refused by the mount with -ENOTDIR.
  * Before, the mount succeeded and the VFS asserted the root was a
  * directory: a disk with one changed mode panicked the kernel. Both
@@ -6037,5 +6080,6 @@ bool selftest_cosmofs_ro_replay(const char **reason) { (void)reason; return true
 bool selftest_cosmofs_version_compress(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_scrub_counts(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_root_type(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_scrub_open(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_nomem(const char **reason) { (void)reason; return true; }
 #endif

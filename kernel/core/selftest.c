@@ -751,6 +751,7 @@ static const struct selftest tests[] = {
     { "cosmofs-version-compress", selftest_cosmofs_version_compress },
     { "cosmofs-scrub-counts", selftest_cosmofs_scrub_counts },
     { "cosmofs-root-type", selftest_cosmofs_root_type },
+    { "cosmofs-scrub-open", selftest_cosmofs_scrub_open },
     { "cosmofs-nomem", selftest_cosmofs_nomem },
     { "cosmofs-crypt", selftest_cosmofs_crypt },
     { "cosmofs-reserve", selftest_cosmofs_reserve },

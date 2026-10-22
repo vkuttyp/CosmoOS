@@ -406,6 +406,7 @@ bool selftest_cosmofs_extent_fail(const char **reason);           /* CF16: a fai
 bool selftest_cosmofs_ro_replay(const char **reason);             /* CFS-1: a read-only mount writes nothing */
 bool selftest_cosmofs_version_compress(const char **reason);      /* CFS-2: no records below format 6 */
 bool selftest_cosmofs_scrub_counts(const char **reason);          /* CFS-11: scrub's counts survive an unrecoverable block */
+bool selftest_cosmofs_scrub_open(const char **reason);            /* a scrub leaves the open transaction's blocks to the commit */
 bool selftest_cosmofs_root_type(const char **reason);             /* a root that is not a directory is refused, not asserted */
 bool selftest_cosmofs_nomem(const char **reason);                 /* CFS-6: -ENOMEM returned, the transaction kept */
 bool selftest_cosmofs_crypt(const char **reason);                 /* encryption and keys */
