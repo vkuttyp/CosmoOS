@@ -5772,8 +5772,10 @@ bool selftest_cosmofs_ro_replay(const char **reason)
  * CFS-2: writes honour the mounted format. A version-5 pool has no
  * compressed records (version 6 added them), so a new file written here
  * must not get one; at the current version the same file is a record,
- * which is what shows this test can see one (cosmofs_test_block_of says
- * -1 for a block inside a record, cfs_map's answer).
+ * which is what shows this test can see one. cosmofs_test_block_of maps
+ * a plain block and answers -ENOENT for one inside a record (cfs_map
+ * finds no plain run there), and the file reading back says it is not a
+ * hole.
  */
 static bool compress_at_version(unsigned version, int *map0, const char **reason)
 {
@@ -5813,7 +5815,7 @@ bool selftest_cosmofs_version_compress(const char **reason)
     int cur = 0, v5 = 0;
     if (!compress_at_version(0, &cur, reason))
         return false;
-    CHECK(cur == -1);   /* the current format compresses: a record */
+    CHECK(cur == -ENOENT);   /* the current format compresses: a record */
     if (!compress_at_version(5, &v5, reason))
         return false;
     CHECK(v5 == 0);     /* the claim: a plain block on a version-5 pool */
@@ -5878,9 +5880,11 @@ bool selftest_cosmofs_root_type(const char **reason)
         return false;
     CHECK(write_file(ENG "/a", "a", 1));
     CHECK(vfs_sync() == 0);
+    /* Twice, a commit each, so both slots name it. Nothing may write the
+     * root between: its vnode's inode_sync would put the type back. */
     CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ROOT_TYPE, CFS_ROOT_INO, NULL) == 0);
     CHECK(vfs_sync() == 0);
-    CHECK(write_file(ENG "/b", "b", 1));
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ROOT_TYPE, CFS_ROOT_INO, NULL) == 0);
     CHECK(vfs_sync() == 0);
     CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
     int mrc = vfs_mount(ENG, "cosmofs", bd, 0);
