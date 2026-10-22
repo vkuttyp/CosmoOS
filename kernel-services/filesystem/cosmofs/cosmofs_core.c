@@ -443,7 +443,9 @@ static void note_dirty(struct cfs *fs)
 {
     if (fs->first_dirty_ns == 0)
         fs->first_dirty_ns = clock_now_ns();
-    if (fs->wb_thread == NULL && fs->wb_enabled && !fs->wb_stop && fs->mnt && fs->mount_done) {
+    /* A read-only mount never commits, so it has nothing for a committer
+     * to do: its replay's changes stay in memory (CFS-1). */
+    if (fs->wb_thread == NULL && fs->wb_enabled && !fs->wb_stop && fs->mnt && fs->mount_done && !fs->rdonly) {
         fs->wb_thread = thread_create(cfs_writeback_thread, fs, "cfs-wb", SCHED_PRIO_DEFAULT);
         if (fs->wb_thread == NULL) {
             fs->wb_enabled = false;
@@ -1075,7 +1077,8 @@ static int freelog_replay(struct cfs *fs)
         cfs_buf_put(fs, b);
         at = next;
     }
-    if (applied)
+    fs->replay_freed = applied;
+    if (applied && !fs->rdonly)
         kinfo("cosmofs: reclaimed %u block(s) the last commit freed and could not write",
               applied);
     return 0;
@@ -1534,7 +1537,8 @@ static int orphan_replay(struct cfs *fs)
         kfree(inos);
         at = next;
     }
-    if (applied || gone)
+    fs->replay_orphans = applied;
+    if ((applied || gone) && !fs->rdonly)
         kinfo("cosmofs: reclaimed %u inode(s) unlinked with a handle open (%u already gone)", applied, gone);
     if (suspect)
         kerror("cosmofs: the orphan record named %u inode(s) that still have links; run the structural check",
@@ -1573,6 +1577,10 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
         *published = false;
     if (fs->failed)
         return fs->failed;
+    /* A read-only mount writes nothing (CFS-1): what its replay changed
+     * stays in memory, and a writable mount replays it again. */
+    if (fs->rdonly)
+        return 0;
     if (fs->nr_dirty == 0 && fs->nr_pending == 0 && fs->nr_exempt == 0) {
         bool any = false;
         for (unsigned c = 0; c < fs->nr_chunks; c++)
@@ -2953,7 +2961,9 @@ static int load_root(struct cfs *fs, struct vnode **root)
      * without trying (cosmofs_mount).
      */
     bool switched = false;
-    if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && !fs->rollback_off) {
+    if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && fs->rdonly)
+        kinfo("cosmofs: read-only: a rollback record is in place; a writable mount acts on it");
+    if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && !fs->rollback_off && !fs->rdonly) {
         rc = cfs_rollback_at_mount(fs, &switched);
         if (rc) {
             fs->rollback_failed = true;
@@ -2965,6 +2975,10 @@ static int load_root(struct cfs *fs, struct vnode **root)
     rc = orphan_replay(fs);
     if (rc)
         return rc;
+    if (fs->rdonly && (fs->replay_freed || fs->replay_orphans))
+        kinfo("cosmofs: read-only: %u block(s) of the free record and %u orphan inode(s) released in memory "
+              "only; a writable mount writes them",
+              fs->replay_freed, fs->replay_orphans);
     return cfs_vnode_get(fs, CFS_ROOT_INO, root);
 }
 
@@ -3011,12 +3025,12 @@ static void cfs_writeback_thread(void *arg)
 static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flags, struct mount *mnt)
 {
     (void)fst;
-    (void)flags;
     if (bdev == NULL)
         return -EINVAL;
     struct cfs *fs = kzalloc(sizeof(*fs));
     if (fs == NULL)
         return -ENOMEM;
+    fs->rdonly = (flags & MOUNT_RDONLY) != 0;
     list_init(&fs->bufs);
     mutex_init(&fs->lock, "cosmofs");
     fs->mnt = mnt;
@@ -3302,6 +3316,8 @@ int cosmofs_rekey(struct mount *mnt, const void *key, size_t len)
         return -EINVAL;
     if (!fs->encrypted)
         return -ENOTSUP;
+    if (fs->rdonly)
+        return -EROFS;
     mutex_lock(&fs->lock);
     int rc = cfs_keys_rotate(fs, key, len);
     mutex_unlock(&fs->lock);

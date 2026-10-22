@@ -247,6 +247,10 @@ static void scrub_supers(struct cfs *fs, uint8_t *page, struct cosmofs_scrub_sta
         st->blocks_read++;
         if (nbad == 0)
             continue;
+        if (fs->rdonly) {
+            kwarn("cosmofs: superblock slot %u: %u of %u copies bad; not repaired (read-only)", slot, nbad, copies);
+            continue;
+        }
         unsigned fixed = 0;
         for (unsigned c = 0; c < copies; c++)
             if (bad[c] && pool_write_copy(fs->pool, dva, c, good) == 0)

@@ -151,6 +151,14 @@ struct cfs {
      * other than answering a question once. */
     uint64_t snap_verdicts;
     int failed;             /* nonzero: the open transaction is abandoned, never committed */
+    /* Mounted read-only (MOUNT_RDONLY): nothing reaches the device -- no
+     * commit, no read repair, no rollback switch. The replay of the free
+     * and orphan records still runs, in memory only, so what a reader or
+     * the checker sees is what a writable mount would see (design.md,
+     * "Read-only mounts"; CFS-1). */
+    bool rdonly;
+    unsigned replay_freed;     /* blocks the mount's free-record replay released */
+    unsigned replay_orphans;   /* inodes its orphan replay released */
     uint64_t commits;
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
     uint64_t csum_failures;

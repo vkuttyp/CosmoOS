@@ -1099,6 +1099,10 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     struct cfs *fs = cfs_of(mnt);
     if (fs == NULL)
         return -EINVAL;
+    /* A repair goes into the open transaction, and a read-only mount
+     * never commits one (CFS-1): refused rather than done and dropped. */
+    if ((flags & COSMOFS_CHECK_REPAIR) != 0 && fs->rdonly)
+        return -EROFS;
 
     /* The report is about 1.6 KiB: on the heap, not the kernel stack
      * (scripts/frame-baseline.txt). */

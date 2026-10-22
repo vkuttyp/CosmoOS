@@ -530,6 +530,13 @@ int cfs_read_repair(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(cons
         if (rc == 0 && verify(buf, arg)) {
             if (c == 0)
                 return 0;   /* the common case: nothing to repair */
+            if (fs->rdonly) {
+                /* A read-only mount reads from the good copy and writes
+                 * nothing back (CFS-1): the bad one is said, not fixed. */
+                kwarn("cosmofs: block %llu:%llu read from copy %u; %u bad copy(s) not repaired (read-only)",
+                      (unsigned long long)CFS_DVA_VDEV(dva), (unsigned long long)CFS_DVA_BLK(dva), c, c);
+                return 0;
+            }
             /* Write this copy back over every copy that failed. */
             unsigned fixed = 0;
             for (unsigned b = 0; b < c; b++) {
@@ -587,6 +594,9 @@ int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const
     int rc = 0;
     if (good < 0) {
         rc = -EIO;
+    } else if (nbad && fs->rdonly) {
+        kwarn("cosmofs: block %llu:%llu: %u of %u copies rotted; not repaired (read-only)",
+              (unsigned long long)CFS_DVA_VDEV(dva), (unsigned long long)CFS_DVA_BLK(dva), nbad, copies);
     } else if (nbad) {
         unsigned fixed = 0;
         for (unsigned c = 0; c < copies; c++)
