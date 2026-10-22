@@ -3362,3 +3362,11 @@ See the [history index](README.md).
   held in memory; `tools/b2-defects-probe.py`. `make test-fsck` damages
   the installed root 23 ways (`tools/cosmofs-damage.py`). Report:
   `docs/audit/2026-10-22-b2-fsck-report.md`.
+- **The guide's fetch by hostname (2026-10-22, backlog TEST-19; PR
+  #438).** `example.com` answered 503 to two CI runs on 2026-10-22,
+  failing main's run and v1.0.10's release run. The guide's must-pass
+  fetch is now the project's own `releases/LATEST` on GitHub Pages;
+  `example.com` is an `optional` console block, warned per command;
+  any command answered with a 5xx is typed again up to three times.
+  `tests/host/test_run_guide.py`, `tools/guide-fetch-probe.py`. Report:
+  `docs/audit/2026-10-22-test19-guide-report.md`.

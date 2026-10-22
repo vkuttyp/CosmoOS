@@ -38,9 +38,10 @@ one is an error, so no command can be left untested.
       and AArch64's semihosting exit, docs/development.md "Exit-code
       contract").
       A console block whose test line says `optional` checks a site the
-      project does not control (example.com): a line it expected and did
-      not get is printed as a warning and the run goes on. Its commands
-      must still return to the prompt in time.
+      project does not control (example.com): a line a command expected
+      and did not get is printed as a warning, and the block's next
+      command is typed all the same. Its commands must still return to
+      the prompt in time.
 
 Any console command whose output says the server answered 5xx (BusyBox
 wget's `server returned error: HTTP/1.x 5NN`) is typed again, up to three
@@ -340,8 +341,11 @@ def expect(output, wanted, where):
         k += 1
 
 
-def run_console(sess, body, where):
-    """Type the commands of a console block, checking what each prints."""
+def run_console(sess, body, where, warned=None):
+    """Type the commands of a console block, checking what each prints.
+    With `warned` (a list: the block is optional), a command whose output
+    lacks an expected line is noted there and the next command is still
+    typed: every command of the guide runs, optional or not."""
     if sess is None:
         raise Fail(f"{where}: a console block with no session running")
     steps = []
@@ -357,7 +361,7 @@ def run_console(sess, body, where):
         sess.type(cmd)
         if cmd.strip() in ("exit", "poweroff"):
             out = sess.wait_exit(repr(cmd))
-            expect(out, wanted, f"{where}: {cmd}")
+            check(out, wanted, f"{where}: {cmd}", warned)
             return True
         out = sess.wait_prompt(repr(cmd))
         for delay in RETRY_5XX:
@@ -368,8 +372,19 @@ def run_console(sess, body, where):
             time.sleep(delay)
             sess.type(cmd)
             out = sess.wait_prompt(repr(cmd))
-        expect(out, wanted, f"{where}: {cmd}")
+        check(out, wanted, f"{where}: {cmd}", warned)
     return False
+
+
+def check(out, wanted, where, warned):
+    if warned is None:
+        expect(out, wanted, where)
+        return
+    try:
+        expect(out, wanted, where)
+    except Expected as e:
+        print(f"run-guide: WARN (optional block): {e}", flush=True)
+        warned.append(where)
 
 
 def main():
@@ -431,12 +446,8 @@ def main():
                                          os.path.join(work, f"session-{nsess}.log"), args.timeout))
                     stack[-1].wait_prompt("the session's start")
                 elif attrs["optional"]:
-                    try:
-                        if run_console(stack[-1] if stack else None, body, where):
-                            stack.pop()
-                    except Expected as e:
-                        print(f"run-guide: WARN (optional block): {e}", flush=True)
-                        warned.append(where)
+                    if run_console(stack[-1] if stack else None, body, where, warned):
+                        stack.pop()
                 else:
                     if run_console(stack[-1] if stack else None, body, where):
                         stack.pop()
@@ -451,7 +462,7 @@ def main():
     shell.close()
     print(f"run-guide: PASS ({args.host}, {args.arch}): {counts['host']} host blocks, {counts['session']} sessions, "
           f"{counts['console']} console blocks run, {counts['skipped']} for another host or architecture skipped; "
-          + (f"optional blocks that warned: {', '.join(warned)}; " if warned else "") +
+          + (f"optional checks that warned: {', '.join(warned)}; " if warned else "") +
           f"logs in {work}")
     return 0
 
