@@ -21,7 +21,12 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 12 && CFS_VERSION_MIN == 2 && CFS_FORMAT_VERSION == 11);
+    EXPECT(CFS_VERSION == 13 && CFS_VERSION_MIN == 2 && CFS_FORMAT_VERSION == 11);
+    /* Version 13 (roadmap 1.2 B3): the member's state block takes the
+     * word that was `reserved`, so the entry keeps its 64 bytes; one copy
+     * record a quarter of the block, all four in one block's payload. */
+    EXPECT(sizeof(struct cfs_member) == 64 && offsetof(struct cfs_member, state_root) == 56);
+    EXPECT(sizeof(struct cfs_copy_rec) == 1000 && sizeof(struct cfs_copystate) <= CFS_PAYLOAD);
     /* Version 8: a symbolic link is a third type in the mode's top
      * nibble, so the inode did not grow and every older image still
      * mounts; what version 8 gates is *writing* one. */
