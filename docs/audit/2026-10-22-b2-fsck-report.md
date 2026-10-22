@@ -193,3 +193,40 @@ in 3635 ms on AArch64 (3500). A 4 MiB writer took 0.41 s alone and 0.41 s
 during the scrub on both (0.31 s during it in one earlier x86-64 run):
 at this bound the scrub leaves the writer's time where it was, within
 QEMU's noise. The default bound is 4096 blocks a second.
+
+### Review and CI of the second pull request (#434, 2026-10-22)
+
+CI: `test-install`'s fallback stage failed on both architectures. It
+boots the live image with `root=` naming a blank disk and requires init's
+`cannot mount` line; the boot's check refused the disk as `superblock`
+first. A device on which no superblock slot verifies is now "not
+checked" and left to the mount, which refuses it with the line it always
+printed (a pool whose two slots both rotted is refused the same way).
+
+Codex's ten comments, each checked against the code; all but one fixed:
+
+- **P1, fixed:** a detached check mount ran the writeback thread, which
+  could commit a replay or a refused repair before the release decided
+  not to; `MOUNT_DETACHED` keeps it off.
+- **P1, fixed:** a mirror mounted through its other leg looked unmounted
+  to a check of this leg; `cosmofs_check_dev` refuses (-EBUSY) when any
+  device the pool assembled is mounted. `cosmofs-scrub-modes` checks it.
+- **P1, partly:** a walk made partial only by the duplicate-name cap
+  printed `clean`; it is now the finding `incomplete` (exit 4). A pool
+  whose superblocks or mount stop the check stays exit 4 with its class
+  named -- a finding about the pool, not a failure to ask (8); the docs
+  say so.
+- **P2, fixed:** the bitmap scan paces block by block (chunk pointers
+  copied, again after a commit); rates below 10 blocks a second get a
+  window of 1/rate seconds; the mounted root's superblock slot verifying
+  on no copy is unrecoverable; the scrub's record is allocated before it
+  repairs; mount-failure notes are kept per device; an inode block's
+  later copies are read again after a commit during one of its inodes;
+  snapshots are walked by id, not by place.
+
+After them: debug `make test` at QEMU_SMP 2 on both architectures,
+`analyze` (one dead store fixed) and `fuzz` on both (the fuzz shim gained
+`vfs_bdev_mounted`), and `test-install`, `test-snapshot` and `test-fsck`
+on both -- all pass. The bound and a writer again: 1938 blocks at 512/s
+in 3738 ms (x86-64), 2009 in 3953 ms (AArch64); the 4 MiB writer 0.42 s
+alone and 0.33 / 0.42 s during the scrub.
