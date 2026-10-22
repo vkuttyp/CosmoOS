@@ -2844,7 +2844,15 @@ loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
 ## The guide's `wget http://example.com/`: the site answered 503, 2026-10-22
 
-One sighting, CI run 39790028445 attempt 1 (`user guide commands (linux,
+Two sightings, both on 2026-10-22, on two runner types; backlog TEST-19.
+
+The second: release run 39813732868 attempt 1 (`v1.0.10`, `c832d0b6`),
+`guide (macos, aarch64)`, at 16:31 UTC: the same line, `networking.md:113`,
+the same `HTTP/1.1 503 Service Unavailable`. Every build and test job
+passed; the publish jobs waited, and the job's rerun (attempt 2) passed
+and published the release.
+
+The first: CI run 39790028445 attempt 1 (`user guide commands (linux,
 x86_64)` on main's merge of #435, `d0778ec0`, a documentation-only
 change): `run-guide: FAIL: networking.md:113: wget -q -O -
 http://example.com/: expected a line '...Example Domain...'`, with
