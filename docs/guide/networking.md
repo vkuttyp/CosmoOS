@@ -111,16 +111,25 @@ that reaches the internet through your computer:
 
 <!-- test: console -->
 ```console
-cosmo$ nslookup example.com
-...Name:...example.com
-cosmo$ wget -q -O - http://example.com/
-...Example Domain...
+cosmo$ nslookup vkuttyp.github.io
+...Name:...vkuttyp.github.io
 ```
 
-HTTPS works the same way, and the server's certificate is checked:
+HTTPS works the same way as HTTP, and the server's certificate is
+checked. The project's package site names its latest release:
 
 <!-- test: console -->
 ```console
+cosmo$ wget -q -O - https://vkuttyp.github.io/CosmoOS/releases/LATEST
+tag: v...
+```
+
+Any site works, over either protocol:
+
+<!-- test: console optional -->
+```console
+cosmo$ wget -q -O - http://example.com/
+...Example Domain...
 cosmo$ wget -q -O - https://example.com/
 ...Example Domain...
 ```

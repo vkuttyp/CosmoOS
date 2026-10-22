@@ -37,6 +37,15 @@ one is an error, so no command can be left untested.
       power-off gives QEMU on both machines (x86-64's debug-exit device
       and AArch64's semihosting exit, docs/development.md "Exit-code
       contract").
+      A console block whose test line says `optional` checks a site the
+      project does not control (example.com): a line it expected and did
+      not get is printed as a warning and the run goes on. Its commands
+      must still return to the prompt in time.
+
+Any console command whose output says the server answered 5xx (BusyBox
+wget's `server returned error: HTTP/1.x 5NN`) is typed again, up to three
+times, after 5, 10 and 20 s: the guide fetches from public servers, and a
+server's 503 is not the system's (docs/testing/flakes.md, TEST-19).
 
 A block whose host or architecture does not match the run is skipped:
 the guide gives x86-64 and AArch64, Linux and macOS variants of the steps
@@ -66,6 +75,10 @@ FENCE = re.compile(r"^```(\w*)\s*$")
 
 class Fail(Exception):
     pass
+
+
+class Expected(Fail):
+    """An expected output line missing (the session itself is fine)."""
 
 
 def pages_in_order():
@@ -102,7 +115,7 @@ def parse(page):
                     raise Fail(f"{page}:{i + 1}: a ```{lang} block with no <!-- test: ... --> line before it")
                 words = pending[1].split()
                 kind, rest = words[0], " ".join(words[1:])
-                attrs = {"prompt": None, "host": None, "arch": None}
+                attrs = {"prompt": None, "host": None, "arch": None, "optional": False}
                 pm = re.search(r'prompt="([^"]*)"', rest)
                 if pm:
                     attrs["prompt"] = pm.group(1)
@@ -112,6 +125,8 @@ def parse(page):
                         attrs["host"] = w
                     elif w in ("x86_64", "aarch64"):
                         attrs["arch"] = w
+                    elif w == "optional" and kind == "console":
+                        attrs["optional"] = True
                     else:
                         raise Fail(f"{page}:{pending[0]}: unknown word {w!r} in the test line")
                 if kind not in ("host", "session", "console"):
@@ -302,6 +317,8 @@ class Session:
 
 
 KLOG = re.compile(r"^\[ ?(DEBUG|INFO|WARN|ERROR)\] ")
+SERVER_5XX = re.compile(r"server returned error: HTTP/1\.[01] 5\d\d")
+RETRY_5XX = (5, 10, 20)   # seconds before each of the three retries
 
 
 def expect(output, wanted, where):
@@ -311,7 +328,7 @@ def expect(output, wanted, where):
     if wanted == ["(no output)"]:
         rest = [ln for ln in lines[1:] if ln.strip() and not KLOG.match(ln)]
         if rest:
-            raise Fail(f"{where}: expected no output; got:\n" + "\n".join(rest[:20]))
+            raise Expected(f"{where}: expected no output; got:\n" + "\n".join(rest[:20]))
         return
     k = 0
     for w in wanted:
@@ -319,7 +336,7 @@ def expect(output, wanted, where):
         while k < len(lines) and not re.match(pat, lines[k]):
             k += 1
         if k == len(lines):
-            raise Fail(f"{where}: expected a line {w!r}; got:\n" + "\n".join(lines[-30:]))
+            raise Expected(f"{where}: expected a line {w!r}; got:\n" + "\n".join(lines[-30:]))
         k += 1
 
 
@@ -343,6 +360,14 @@ def run_console(sess, body, where):
             expect(out, wanted, f"{where}: {cmd}")
             return True
         out = sess.wait_prompt(repr(cmd))
+        for delay in RETRY_5XX:
+            m = SERVER_5XX.search(out)
+            if not m:
+                break
+            print(f"run-guide: {where}: {cmd}: {m.group(0)}; again in {delay} s", flush=True)
+            time.sleep(delay)
+            sess.type(cmd)
+            out = sess.wait_prompt(repr(cmd))
         expect(out, wanted, f"{where}: {cmd}")
     return False
 
@@ -384,6 +409,7 @@ def main():
     stack = []   # running sessions, the current one last
     nsess = 0
     counts = {"host": 0, "session": 0, "console": 0, "skipped": 0}
+    warned = []
     try:
         for page in pages:
             for line, kind, attrs, lang, body in parse(page):
@@ -404,6 +430,13 @@ def main():
                     stack.append(Session(cmds[0], attrs["prompt"], work,
                                          os.path.join(work, f"session-{nsess}.log"), args.timeout))
                     stack[-1].wait_prompt("the session's start")
+                elif attrs["optional"]:
+                    try:
+                        if run_console(stack[-1] if stack else None, body, where):
+                            stack.pop()
+                    except Expected as e:
+                        print(f"run-guide: WARN (optional block): {e}", flush=True)
+                        warned.append(where)
                 else:
                     if run_console(stack[-1] if stack else None, body, where):
                         stack.pop()
@@ -418,6 +451,7 @@ def main():
     shell.close()
     print(f"run-guide: PASS ({args.host}, {args.arch}): {counts['host']} host blocks, {counts['session']} sessions, "
           f"{counts['console']} console blocks run, {counts['skipped']} for another host or architecture skipped; "
+          + (f"optional blocks that warned: {', '.join(warned)}; " if warned else "") +
           f"logs in {work}")
     return 0
 
