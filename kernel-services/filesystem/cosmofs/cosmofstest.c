@@ -49,7 +49,7 @@ bool selftest_pool(const char **reason)
     struct spool *p;
     CHECK(pool_open(bd, &p) == 0);
     CHECK(p->block_size == 4096 && p->nmembers == 1 && p->m[0].ncopies == 1 &&
-          p->m[0].sectors_per_block[0] == 8 && p->nblocks == bd->capacity / 8);
+          p->m[0].copy[0].sectors_per_block == 8 && p->nblocks == bd->capacity / 8);
     uint8_t *w = kmalloc(4096, 0), *r = kmalloc(4096, 0);
     if (w == NULL || r == NULL) {
         kfree(w);
@@ -6343,7 +6343,402 @@ fail:
 #else
 bool selftest_cosmofs_nomem(const char **reason) { (void)reason; return true; }
 #endif
+
+/* --- copy state (roadmap 1.2 B3) ---------------------------------------------
+ *
+ * design.md, "Format version 13"; invariants CF25, CF26, CF27. Two-way
+ * mirrors on RAM devices; a device is "pulled" by making every request
+ * to it answer -ENODEV (ramblk_set_fail), the block layer's answer for
+ * an unregistered device, so it can come back with what it held.
+ */
+
+#define CS_CHECK(cond)                                                        \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto out;                                                        \
+        }                                                                     \
+    } while (0)
+
+/*
+ * The pool's copy states on a two-way mirror: a failing copy is written
+ * around and FAULTED past fs.fault_errors, starting its record from what
+ * was written since the last root; the member's last ONLINE copy is
+ * never faulted and may not be taken offline; a device that is gone is
+ * MISSING at once; a copy that missed nothing comes back ONLINE and one
+ * that missed a write does not.
+ */
+bool selftest_pool_copy_states(const char **reason)
+{
+    struct blkdev *bd[2] = { ramblk_create(64), ramblk_create(64) };
+    struct spool *p = NULL;
+    uint8_t *w = kmalloc(CFS_BLOCK, 0), *r = kmalloc(CFS_BLOCK, 0);
+    uint32_t limit = g_pool_fault_errors;
+    bool ok = false;
+    CS_CHECK(bd[0] != NULL && bd[1] != NULL && w != NULL && r != NULL);
+    for (unsigned i = 0; i < CFS_BLOCK; i++)
+        w[i] = (uint8_t)(i * 7);
+
+    CS_CHECK(pool_open(bd[0], &p) == 0 && pool_add_copy(p, 0, bd[1]) == 0);
+    CS_CHECK(p->m[0].ncopies == 2 && p->m[0].region_blocks == 1 && !pool_degraded(p));
+    CS_CHECK(pool_write(p, 5, w) == 0 && pool_flush(p) == 0);
+    pool_commit_done(p, 7);
+    CS_CHECK(pool_read_copy(p, 5, 0, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0);
+    CS_CHECK(pool_read_copy(p, 5, 1, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0);
+
+    /* A failing copy: written around, counted, FAULTED past the limit. */
+    g_pool_fault_errors = 3;
+    ramblk_set_fail(bd[1], -EIO);
+    uint64_t seq = p->state_seq;
+    for (unsigned i = 0; i < 3; i++)
+        CS_CHECK(pool_write(p, 10 + i, w) == 0);
+    CS_CHECK(p->m[0].copy[1].state == POOL_COPY_ONLINE && p->m[0].copy[1].write_errors == 3);
+    CS_CHECK(pool_write(p, 13, w) == 0);
+    CS_CHECK(p->m[0].copy[1].state == POOL_COPY_FAULTED && p->state_seq != seq && pool_degraded(p));
+    CS_CHECK(p->m[0].copy[1].since == 7 && !p->m[0].copy[1].whole);
+    /* What it missed: exactly the writes since the last root. */
+    for (uint64_t b = 0; b < 64; b++)
+        CS_CHECK(pool_copy_missed(p, b, 1) == (b >= 10 && b <= 13));
+    /* Not written from now on, not read, and what it misses is recorded. */
+    CS_CHECK(pool_write(p, 20, w) == 0 && pool_copy_missed(p, 20, 1) && p->m[0].copy[1].write_errors == 4);
+    CS_CHECK(!pool_copy_readable(p, 20, 1) && pool_read_copy(p, 20, 1, r) == -ENODEV);
+    CS_CHECK(pool_read(p, 20, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0);
+
+    /* The last ONLINE copy: not offline, and not faulted by a count. */
+    CS_CHECK(pool_copy_set_state(p, 0, 0, POOL_COPY_OFFLINE, 0) == -EBUSY);
+    ramblk_set_fail(bd[0], -EIO);
+    for (unsigned i = 0; i < 5; i++)
+        CS_CHECK(pool_write(p, 30, w) == -EIO);   /* no ONLINE copy took it */
+    CS_CHECK(pool_read(p, 30, r) == -EIO);
+    CS_CHECK(p->m[0].copy[0].state == POOL_COPY_ONLINE && p->m[0].copy[0].write_errors == 5);
+    ramblk_set_fail(bd[0], 0);
+    ramblk_set_fail(bd[1], 0);
+    /* A copy that missed writes comes back only through a resilver. */
+    CS_CHECK(pool_copy_set_state(p, 0, 1, POOL_COPY_ONLINE, 0) == -EAGAIN);
+    pool_close(p);
+    p = NULL;
+
+    /* A device that is gone is MISSING at once, whatever the limit, and
+     * what it may have held only in its cache is missed too. */
+    CS_CHECK(pool_open(bd[0], &p) == 0 && pool_add_copy(p, 0, bd[1]) == 0);
+    pool_commit_done(p, 9);
+    CS_CHECK(pool_write(p, 3, w) == 0);
+    ramblk_set_fail(bd[1], -ENODEV);
+    CS_CHECK(pool_write(p, 4, w) == 0);
+    CS_CHECK(p->m[0].copy[1].state == POOL_COPY_MISSING && p->m[0].copy[1].write_errors == 1);
+    CS_CHECK(p->m[0].copy[1].since == 9 && pool_copy_missed(p, 3, 1) && pool_copy_missed(p, 4, 1));
+    CS_CHECK(!pool_copy_missed(p, 2, 1) && !pool_copy_missed(p, 5, 1));
+    /* A flush that cannot reach it is no error while a copy took the root. */
+    CS_CHECK(pool_flush(p) == 0);
+    ramblk_set_fail(bd[1], 0);
+    pool_close(p);
+    p = NULL;
+
+    /* OFFLINE and back: with nothing written meanwhile it is ONLINE again;
+     * then the other copy goes, reads come from this one, and the one
+     * that missed a write stays out. */
+    CS_CHECK(pool_open(bd[0], &p) == 0 && pool_add_copy(p, 0, bd[1]) == 0);
+    pool_commit_done(p, 11);
+    CS_CHECK(pool_copy_set_state(p, 0, 1, POOL_COPY_OFFLINE, 0) == 0 && !pool_copy_readable(p, 0, 1));
+    CS_CHECK(pool_copy_set_state(p, 0, 1, POOL_COPY_ONLINE, 0) == 0 && !pool_degraded(p));
+    CS_CHECK(pool_copy_set_state(p, 0, 0, POOL_COPY_OFFLINE, 0) == 0);
+    CS_CHECK(pool_read(p, 5, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0);
+    CS_CHECK(pool_write(p, 6, w) == 0 && pool_copy_missed(p, 6, 0) && !pool_copy_missed(p, 7, 0));
+    CS_CHECK(pool_copy_set_state(p, 0, 0, POOL_COPY_ONLINE, 0) == -EAGAIN);
+    ok = true;
+    kinfo("selftest: pool-copy-states: FAULTED after %u errors, MISSING at -ENODEV, the last copy kept", 3u);
+out:
+    g_pool_fault_errors = limit;
+    if (p)
+        pool_close(p);
+    kfree(w);
+    kfree(r);
+    for (unsigned i = 0; i < 2; i++)
+        if (bd[i]) {
+            ramblk_set_fail(bd[i], 0);
+            ramblk_destroy(bd[i]);
+        }
+    return ok;
+}
+
+/* The /proc/mounts line of the mount at `path`, has `opt` in it. */
+static bool mounts_line_has(const char *path, const char *opt)
+{
+    char *buf = kmalloc(4096, 0);
+    if (buf == NULL)
+        return false;
+    int n = vfs_mounts_render(buf, 4096);
+    bool found = false;
+    char key[64];
+    ksnprintf(key, sizeof(key), " %s cosmofs ", path);
+    for (char *line = buf; n > 0 && line && *line;) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+        if (strstr(line, key) && strstr(line, opt))
+            found = true;
+        line = nl ? nl + 1 : NULL;
+    }
+    kfree(buf);
+    return found;
+}
+
+/* A two-way mirror of `nblocks` RAM blocks a device, mounted at ENG
+ * through bd[0] with writeback off. */
+static bool mirror_up(struct blkdev *bd[2], uint64_t nblocks)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    bd[0] = ramblk_create(nblocks);
+    bd[1] = ramblk_create(nblocks);
+    if (bd[0] == NULL || bd[1] == NULL || cosmofs_format_mirror(bd, 1, 2) != 0)
+        return false;
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    if ((mk != 0 && mk != -EEXIST) || vfs_mount(ENG, "cosmofs", bd[0], 0) != 0)
+        return false;
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    return true;
+}
+
+static void mirror_down(struct blkdev *bd[2])
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    for (unsigned i = 0; i < 2; i++)
+        if (bd[i]) {
+            ramblk_set_fail(bd[i], 0);
+            ramblk_destroy(bd[i]);
+            bd[i] = NULL;
+        }
+}
+
+/*
+ * CF26: a mirror with one copy pulled keeps working and says so -- the
+ * stats, /proc/mounts, the format raised to record it -- and a copy that
+ * keeps failing is FAULTED and stays so across a remount. With both
+ * copies gone, a read and a commit fail with -EIO, and nothing panics.
+ */
+bool selftest_cosmofs_degraded(const char **reason)
+{
+    struct blkdev *bd[2] = { NULL, NULL };
+    struct file *f = NULL;
+    uint32_t limit = g_pool_fault_errors;
+    bool ok = false;
+    static char data[3 * 4096];
+    memset(data, 'd', sizeof(data));
+    CS_CHECK(mirror_up(bd, 512));
+    struct cosmofs_stats st;
+    CS_CHECK(write_file(ENG "/a", data, sizeof(data)) && vfs_sync() == 0);
+    CS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 2 && st.degraded == 0);
+    unsigned v0 = st.version;
+    CS_CHECK(v0 == CFS_FORMAT_VERSION);   /* a healthy mirror's commits do not raise it */
+    CS_CHECK(mounts_line_has(ENG, " rw 0 0") && !mounts_line_has(ENG, "degraded"));
+
+    /* Pull copy 1: the writes go on, the pool says it is degraded. */
+    ramblk_set_fail(bd[1], -ENODEV);
+    CS_CHECK(write_file(ENG "/b", data, sizeof(data)));
+    CS_CHECK(vfs_sync() == 0);
+    CS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 1 && st.degraded == 1);
+    CS_CHECK(st.version == 13);           /* recorded, so raised */
+    CS_CHECK(mounts_line_has(ENG, " rw,degraded 0 0"));
+    CS_CHECK(read_matches(ENG "/a", data, sizeof(data)) && read_matches(ENG "/b", data, sizeof(data)));
+
+    /* Both copies gone: the read of a block no copy holds is -EIO, a
+     * commit that reaches no copy is -EIO, and the system is still here.
+     * The change the commit carries is made first, while copy 0 serves. */
+    CS_CHECK(write_file(ENG "/c", "c", 1));
+    ramblk_set_fail(bd[0], -ENODEV);
+    /* -EIO wherever the first block no copy holds is met: the directory
+     * lookup, or the file's data if its inode is still cached. */
+    static char got[4096];
+    int orc = vfs_open(NULL, ENG "/a", COSMO_O_RDONLY, 0, &f);
+    CS_CHECK(orc == 0 || orc == -EIO);
+    if (orc == 0) {
+        CS_CHECK(file_read(f, got, sizeof(got)) == -EIO);
+        file_put(f);
+        f = NULL;
+    }
+    CS_CHECK(vfs_sync() == -EIO);
+    CS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 0 && st.degraded == 2);
+    mirror_down(bd);
+
+    /* A copy that keeps failing is FAULTED, and the record keeps it out
+     * after a remount even though its device answers again. */
+    CS_CHECK(mirror_up(bd, 512));
+    g_pool_fault_errors = 4;
+    ramblk_set_fail(bd[1], -EIO);
+    struct spool *pool = cosmofs_test_pool(mount_of(ENG));
+    CS_CHECK(pool != NULL);
+    for (unsigned i = 0; i < 8 && pool->m[0].copy[1].state == POOL_COPY_ONLINE; i++) {
+        char name[32];
+        ksnprintf(name, sizeof(name), ENG "/f%u", i);
+        CS_CHECK(write_file(name, data, sizeof(data)) && vfs_sync() == 0);
+    }
+    CS_CHECK(pool->m[0].copy[1].state == POOL_COPY_FAULTED);
+    /* Faulted inside a commit, on a member with no record yet: the next
+     * commit records it, and is due with nothing else to write. */
+    CS_CHECK(vfs_sync() == 0);
+    CS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.degraded == 1 && st.version == 13);
+    CS_CHECK(write_file(ENG "/after", data, sizeof(data)) && vfs_sync() == 0);
+    ramblk_set_fail(bd[1], 0);
+    g_pool_fault_errors = limit;
+    CS_CHECK(vfs_umount(ENG) == 0);
+    CS_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    pool = cosmofs_test_pool(mount_of(ENG));
+    CS_CHECK(pool != NULL && pool->m[0].copy[1].state == POOL_COPY_FAULTED && pool->m[0].copy[1].dev == NULL);
+    CS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 1 && st.degraded == 1);
+    CS_CHECK(read_matches(ENG "/after", data, sizeof(data)));
+    CS_CHECK(mounts_line_has(ENG, "rw,degraded"));
+    ok = true;
+    kinfo("selftest: cosmofs-degraded: writes go on with a copy pulled; FAULTED is kept across a remount");
+out:
+    g_pool_fault_errors = limit;
+    if (f)
+        file_put(f);
+    mirror_down(bd);
+    return ok;
+}
+
+/* The blocks of member 0 a recorded write log names. */
+static void log_blocks(const struct ramblk_log *log, uint8_t *set, uint64_t nblocks)
+{
+    for (unsigned i = 0; log && i < log->n; i++) {
+        const struct ramblk_write *e = &log->w[i];
+        if (e->nsectors == 0)
+            continue;   /* a flush */
+        for (uint64_t s = e->sector; s < e->sector + e->nsectors; s += CFS_BLOCK / 512)
+            if (s / (CFS_BLOCK / 512) < nblocks)
+                set[s / (CFS_BLOCK / 512)] = 1;
+    }
+}
+
+/*
+ * CF25: the copy that was pulled is recorded as having missed exactly
+ * what was written after it went -- every block the other copy took
+ * since, and nothing else but the superblock slots -- and the record a
+ * remount reads says the same, with the generation it last held whole,
+ * which is the generation the device itself still carries.
+ */
+bool selftest_cosmofs_copy_bitmap(const char **reason)
+{
+    struct blkdev *bd[2] = { NULL, NULL };
+    struct ramblk_log *log = NULL;
+    uint8_t *written = kzalloc(512);
+    bool ok = false;
+    static char data[5 * 4096];
+    memset(data, 'x', sizeof(data));
+    CS_CHECK(written != NULL);
+    CS_CHECK(mirror_up(bd, 512));
+    CS_CHECK(write_file(ENG "/before", data, sizeof(data)) && vfs_sync() == 0);
+    struct cosmofs_stats st;
+    CS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    uint64_t whole_at = st.generation;
+    struct spool *pool = cosmofs_test_pool(mount_of(ENG));
+    CS_CHECK(pool != NULL && pool->m[0].region_blocks == 1);   /* a block a region: the record is exact */
+
+    /* Pull copy 1, and record every write copy 0 takes from now on. */
+    ramblk_set_fail(bd[1], -ENODEV);
+    ramblk_record_start(bd[0], 4096);
+    CS_CHECK(write_file(ENG "/after", data, sizeof(data)));
+    CS_CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0 && write_file(ENG "/dir/inner", data, 4096));
+    CS_CHECK(vfs_sync() == 0);
+    CS_CHECK(write_file(ENG "/later", data, 3 * 4096) && vfs_sync() == 0);
+    CS_CHECK(pool->m[0].copy[1].state == POOL_COPY_MISSING && pool->m[0].copy[1].since == whole_at);
+    CS_CHECK(vfs_umount(ENG) == 0);
+    log = ramblk_record_stop(bd[0]);
+    CS_CHECK(log != NULL && log->dropped == 0 && log->n > 0);
+    log_blocks(log, written, 512);
+
+    /* The device comes back holding what it held: the root it last took. */
+    ramblk_set_fail(bd[1], 0);
+    struct cfs_super a, b;
+    int ra = -EIO, rb = -EIO;
+    CS_CHECK(cfs_super_slots(bd[1], &a, &ra, &b, &rb) == 0);
+    uint64_t dev_gen = 0;
+    if (ra == 0)
+        dev_gen = a.generation;
+    if (rb == 0 && b.generation > dev_gen)
+        dev_gen = b.generation;
+    CS_CHECK(dev_gen == whole_at);
+
+    CS_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    pool = cosmofs_test_pool(mount_of(ENG));
+    CS_CHECK(pool != NULL && pool->m[0].ncopies == 2);
+    const struct pool_copy *cp = &pool->m[0].copy[1];
+    CS_CHECK(cp->state == POOL_COPY_MISSING && cp->dev == NULL && !cp->whole && cp->since == whole_at);
+    /* Every block written after the pull is in the record; nothing else
+     * is, but the superblock slots the record marks for the root. */
+    unsigned marked = 0, nwritten = 0;
+    for (uint64_t blk = 0; blk < 512; blk++) {
+        bool m = pool_copy_missed(pool, CFS_DVA(0, blk), 1);
+        nwritten += written[blk];
+        marked += m;
+        if (written[blk])
+            CS_CHECK(m);
+        else if (m)
+            CS_CHECK(blk < 2);
+    }
+    CS_CHECK(nwritten > 8);
+    CS_CHECK(read_matches(ENG "/later", data, 3 * 4096) && read_matches(ENG "/dir/inner", data, 4096));
+    ok = true;
+    kinfo("selftest: cosmofs-copy-bitmap: %u blocks written after the pull, %u recorded, since generation %llu",
+          nwritten, marked, (unsigned long long)whole_at);
+out:
+    if (log)
+        ramblk_log_free(log);
+    kfree(written);
+    mirror_down(bd);
+    return ok;
+}
+
+/*
+ * CF27: a mount handed the copy that was away mounts the newest root
+ * from the other device, and leaves the lagging one out; with that other
+ * device already mounted, it refuses rather than mount the pool twice.
+ */
+bool selftest_cosmofs_copy_import(const char **reason)
+{
+#define ENG2 "/mnt/eng2"
+    struct blkdev *bd[2] = { NULL, NULL };
+    bool ok = false;
+    CS_CHECK(mirror_up(bd, 512));
+    CS_CHECK(write_file(ENG "/first", "first", 5) && vfs_sync() == 0);
+    ramblk_set_fail(bd[1], -ENODEV);
+    CS_CHECK(write_file(ENG "/second", "second", 6) && vfs_sync() == 0);
+    CS_CHECK(vfs_umount(ENG) == 0);
+    ramblk_set_fail(bd[1], 0);
+
+    /* Through the lagging device: the newest root, from bd[0]. */
+    CS_CHECK(vfs_mount(ENG, "cosmofs", bd[1], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct spool *pool = cosmofs_test_pool(mount_of(ENG));
+    CS_CHECK(pool != NULL && pool->m[0].copy[0].dev == bd[0]);
+    CS_CHECK(read_matches(ENG "/second", "second", 6) && read_matches(ENG "/first", "first", 5));
+    struct cosmofs_stats st;
+    CS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 1 && st.degraded == 1);
+    CS_CHECK(vfs_umount(ENG) == 0);
+
+    /* The newer device mounted already: the lagging one does not mount. */
+    CS_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    int mk = vfs_mkdir(NULL, ENG2, 0755);
+    CS_CHECK(mk == 0 || mk == -EEXIST);
+    CS_CHECK(vfs_mount(ENG2, "cosmofs", bd[1], 0) == -EBUSY);
+    ok = true;
+    kinfo("selftest: cosmofs-copy-import: the lagging device mounts the newest root, and not twice");
+out:
+    (void)vfs_umount2(ENG2, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG2);
+    mirror_down(bd);
+    return ok;
+#undef ENG2
+}
+#undef CS_CHECK
 #else
+bool selftest_pool_copy_states(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_degraded(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_copy_bitmap(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_copy_import(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_badmap(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_snapshot(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_snapshot_remount(const char **reason) { (void)reason; return true; }

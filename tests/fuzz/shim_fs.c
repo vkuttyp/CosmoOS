@@ -56,12 +56,19 @@ int pool_open(struct blkdev *bd, struct spool **out)
     struct spool *p = kzalloc(sizeof(*p));
     if (p == NULL)
         return -ENOMEM;
-    p->m[0].dev[0] = bd;
-    p->m[0].sectors_per_block[0] = POOL_BLOCK / bd->sector_size;
+    p->m = kzalloc(sizeof(*p->m));
+    if (p->m == NULL) {
+        kfree(p);
+        return -ENOMEM;
+    }
+    p->cap = 1;
+    p->m[0].copy[0].dev = bd;
+    p->m[0].copy[0].sectors_per_block = POOL_BLOCK / bd->sector_size;
     p->m[0].ncopies = 1;
+    p->m[0].region_blocks = 1;
     p->nmembers = 1;
     p->block_size = POOL_BLOCK;
-    p->nblocks = bd->capacity / p->m[0].sectors_per_block[0];
+    p->nblocks = bd->capacity / p->m[0].copy[0].sectors_per_block;
     if (p->nblocks > g_image_blocks)
         p->nblocks = g_image_blocks;
     p->m[0].nblocks = p->nblocks;
@@ -71,6 +78,7 @@ int pool_open(struct blkdev *bd, struct spool **out)
 
 void pool_close(struct spool *p)
 {
+    kfree(p->m);
     kfree(p);
 }
 
@@ -107,10 +115,92 @@ int pool_add_copy(struct spool *p, unsigned vdev, struct blkdev *bd)
     return -ENOSPC;   /* and a single copy of it */
 }
 
+/* A table may promise copies (a fuzzed image says anything): the slots
+ * exist and are MISSING, and only copy 0 -- the image -- is ever read. */
 unsigned pool_copies(const struct spool *p, uint64_t dva)
 {
-    return POOL_DVA_VDEV(dva) == 0 && POOL_DVA_BLK(dva) < p->nblocks ? 1u : 0u;
+    return POOL_DVA_VDEV(dva) == 0 && POOL_DVA_BLK(dva) < p->nblocks ? p->m[0].ncopies : 0u;
 }
+
+bool pool_copy_readable(const struct spool *p, uint64_t dva, unsigned c)
+{
+    return c == 0 && POOL_DVA_VDEV(dva) == 0 && POOL_DVA_BLK(dva) < p->nblocks;
+}
+
+bool pool_member_degraded(const struct spool *p, unsigned vdev)
+{
+    return vdev == 0 && p->m[0].ncopies > 1;
+}
+
+bool pool_degraded(const struct spool *p)
+{
+    return pool_member_degraded(p, 0);
+}
+
+int pool_set_copies(struct spool *p, unsigned vdev, unsigned n)
+{
+    if (vdev != 0 || n == 0 || n > POOL_MAX_COPIES || n < p->m[0].ncopies)
+        return -EINVAL;
+    for (unsigned c = p->m[0].ncopies; c < n; c++) {
+        p->m[0].copy[c].state = POOL_COPY_MISSING;
+        p->m[0].copy[c].whole = true;
+    }
+    p->m[0].ncopies = n;
+    p->state_seq++;
+    return 0;
+}
+
+int pool_attach_copy(struct spool *p, unsigned vdev, unsigned c, struct blkdev *bd, enum pool_copy_state state)
+{
+    (void)p; (void)vdev; (void)c; (void)bd; (void)state;
+    return -ENODEV;   /* the fuzz image is the only device */
+}
+
+void pool_swap_copies(struct spool *p, unsigned vdev, unsigned a, unsigned b)
+{
+    (void)p; (void)vdev; (void)a; (void)b;
+}
+
+int pool_copy_set_state(struct spool *p, unsigned vdev, unsigned c, enum pool_copy_state state, int why)
+{
+    (void)why;
+    if (vdev != 0 || c == 0 || c >= p->m[0].ncopies)
+        return -EINVAL;
+    p->m[0].copy[c].state = state;
+    p->state_seq++;
+    return 0;
+}
+
+void pool_copy_csum_error(struct spool *p, uint64_t dva, unsigned c)
+{
+    (void)dva;
+    if (c < p->m[0].ncopies)
+        p->m[0].copy[c].csum_errors++;
+}
+
+void pool_commit_done(struct spool *p, uint64_t gen)
+{
+    p->epoch = gen;
+}
+
+void pool_mark_missed(struct spool *p, uint64_t dva)
+{
+    (void)p; (void)dva;
+}
+
+bool pool_copy_missed(const struct spool *p, uint64_t dva, unsigned c)
+{
+    (void)dva;
+    return c > 0 && c < p->m[0].ncopies;
+}
+
+const char *pool_copy_state_name(enum pool_copy_state s)
+{
+    (void)s;
+    return "MISSING";
+}
+
+uint32_t g_pool_fault_errors = 16;
 
 int pool_read_copy(struct spool *p, uint64_t dva, unsigned copy, void *buf)
 {

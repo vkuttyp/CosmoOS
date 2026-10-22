@@ -570,8 +570,13 @@ static void walk_snapshots(struct check *ck)
                         name_it(&ck->rep->dir_bad, s->alloc_root);
                         n = CFS_MEMBERS_PER_BLOCK;
                     }
-                    for (unsigned v = 0; v < n; v++)
+                    for (unsigned v = 0; v < n; v++) {
                         walk_alloc(ck, t->m[v].alloc_root, false);
+                        /* The member's copy state as the snapshot was
+                         * taken (version 13): held until it is deleted. */
+                        if (ck->fs->sb.version >= 13 && t->m[v].state_root != 0)
+                            claim(ck, t->m[v].state_root, false);
+                    }
                     cfs_buf_put(ck->fs, mb);
                 }
             }
@@ -1223,6 +1228,17 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         walk_alloc(&ck, fs->mem[v].alloc_root, true);
     if (fs->sb.members != 0)
         claim(&ck, fs->sb.members, true);
+    /* Each mirrored member's copy state (version 13): the table names it,
+     * so it is reachable, and a pass that did not claim it would call it
+     * a leak -- which a boot's repair frees. */
+    for (unsigned v = 0; v < fs->nmembers; v++) {
+        if (fs->mem[v].state_root == 0)
+            continue;
+        claim(&ck, fs->mem[v].state_root, true);
+        struct cfs_buf *sb;
+        if (read_meta(&ck, fs->mem[v].state_root, CFS_KIND_COPYSTATE, &sb) == 0)
+            cfs_buf_put(fs, sb);
+    }
     /*
      * The record of what this root freed is metadata like any other: the
      * root names it, so it is reachable, and a pass that did not claim
@@ -1408,8 +1424,8 @@ int cosmofs_check_dev(struct blkdev *bd, unsigned flags, struct cosmofs_check_re
     struct spool *pool = cfs_of(mnt)->pool;
     for (unsigned v = 0; v < pool->nmembers; v++)
         for (unsigned c = 0; c < pool->m[v].ncopies; c++) {
-            struct blkdev *d = pool->m[v].dev[c];
-            if (d != bd && vfs_bdev_mounted(d)) {
+            struct blkdev *d = pool->m[v].copy[c].dev;
+            if (d != NULL && d != bd && vfs_bdev_mounted(d)) {
                 kwarn("cosmofs: %s: %s, another device of this pool, is mounted; not checked", bd->name,
                       d->name);
                 (void)vfs_mount_detached_release(mnt, false);

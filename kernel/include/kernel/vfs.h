@@ -204,6 +204,8 @@ struct fs_type {
 #define MOUNT_SCRATCH (1u << 2)          /* ramfs: the root is 01777 (COSMO_MOUNT_SCRATCH, a /tmp) */
 #define MOUNT_DETACHED (1u << 3)         /* vfs_mount_detached's: no namespace sees it, no autonomous commit (kernel only) */
 
+#define MOUNT_STATE_DEGRADED (1u << 0)   /* a mirrored pool runs without one of its copies: /proc/mounts says so */
+
 struct mount {
     struct kobject obj;
     /*
@@ -222,6 +224,9 @@ struct mount {
     struct blkdev *bdev;
     void *fs_priv;
     unsigned flags;
+    /* MOUNT_STATE_*, set by the filesystem at any time and read without
+     * its locks (the mount listing): atomics only. */
+    uint32_t state;
     struct list_node vnodes[VNODE_HASH];
     spinlock_t lock;          /* the vnode hash and nr_vnodes only: a leaf below every mutex */
     struct mutex rename_lock; /* serialises renames on this mount; keeps the ancestry stable */

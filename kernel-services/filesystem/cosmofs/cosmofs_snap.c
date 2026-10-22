@@ -1095,6 +1095,14 @@ static int snap_raise(struct cfs *fs, const uint8_t *reserved)
     return 0;
 }
 
+/* The raise to 12 on its own, for a commit that needs 13 (design.md,
+ * "Format version 13"): no snapshot is being taken, so no uuid is
+ * reserved. */
+int cfs_snap_raise(struct cfs *fs)
+{
+    return snap_raise(fs, NULL);
+}
+
 /* Set the head block's high-water mark. The list was copied by this
  * transaction (snap_cow), so the head is this generation's to edit. */
 static int snaplist_set_max_id(struct cfs *fs, uint64_t id)

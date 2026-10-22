@@ -181,6 +181,8 @@ static void scrub_supers(struct scrub *s)
         int best = -1;
         uint64_t newest = 0;
         for (unsigned c = 0; c < copies; c++) {
+            if (!pool_copy_readable(fs->pool, dva, c))
+                continue;   /* not ONLINE: holds nothing yet, good or bad (CF26) */
             if (pool_read_copy(fs->pool, dva, c, s->page) == 0 && cfs_super_ok(s->page)) {
                 uint64_t g = ((const struct cfs_super *)s->page)->generation;
                 if (best < 0 || g > newest) {
@@ -244,6 +246,10 @@ static void scrub_alloc(struct scrub *s)
             scrub_meta(s, s->slots[c], CFS_KIND_BITMAP);
             (void)pace(s);
         }
+        /* And the record of the member's copies (version 13), which a
+         * mount reads before anything else of the member's. */
+        if (!s->stop && fs->mem[v].state_root != 0)
+            scrub_meta(s, fs->mem[v].state_root, CFS_KIND_COPYSTATE);
     }
 }
 

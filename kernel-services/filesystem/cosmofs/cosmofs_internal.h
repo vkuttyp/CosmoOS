@@ -40,6 +40,7 @@ struct cfs_memstate {
     uint64_t free_blocks;
     uint64_t alloc_hint;     /* linear */
     unsigned copies;         /* devices the table says this member has */
+    uint64_t state_root;     /* v13: the member's CFS_KIND_COPYSTATE block, or 0 */
     uint8_t uuid[16];
 };
 
@@ -180,6 +181,10 @@ struct cfs {
     bool have_key;          /* and this mount unwrapped it */
     uint8_t master_key[CHACHA20_KEY_SIZE];
     uint64_t degraded;      /* copies the member table promised and the mount did not find */
+    /* The pool's state_seq the last published root recorded: a commit is
+     * due when the pool's has moved (design.md, "Format version 13"). */
+    uint64_t copystate_seq;
+    char pool_name[CFS_LABEL_MAX + 1];   /* the console lines' name for the pool */
     unsigned snap_count;    /* live snapshots; commit holds their blocks rather than freeing */
     uint64_t snap_max_id;   /* the highest snapshot id ever used here: ids are never reused */
     /* The writeback thread (design.md, "The writeback thread"). */
@@ -303,6 +308,9 @@ bool cfs_buf_is_dirty(struct cfs *fs, uint64_t blkno);
 int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uint64_t ino,
                       struct cfs_inode *out);
 int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct cfs_snapshot *out);
+/* Raise an 11 pool to 12 in the open transaction; 0 at 12 or above,
+ * -EOPNOTSUPP below 11. */
+int cfs_snap_raise(struct cfs *fs);
 int cfs_snapshot_create_ex(struct cfs *fs, const char *name, bool identity, bool commit, const uint8_t *uuid,
                            struct cfs_snapshot *out);
 bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
@@ -441,6 +449,18 @@ int cfs_label_write(struct spool *pool, unsigned vdev, unsigned copy, uint64_t g
 /* Stamp every attached copy's label with this generation, just before
  * the root that generation publishes. */
 int cfs_labels_update(struct cfs *fs);
+/* Copies the member table promises that are not ONLINE with a device. */
+unsigned cfs_copies_out(struct cfs *fs);
+/* The commit's two steps for the copy state (design.md, "The record,
+ * written by the commit"): before anything is reserved, the state blocks
+ * each degraded member needs (and the raise to 13); just before the dirty
+ * metadata is written, their contents. */
+int cfs_copystate_prepare(struct cfs *fs);
+int cfs_copystate_fill(struct cfs *fs);
+bool cfs_copystate_recorded(struct cfs *fs);
+/* The newest member-0 device of the pool `uuid` names, if it is newer
+ * than `gen` and is not `bd`: referenced, or NULL (CF27). */
+struct blkdev *cfs_newer_member0(struct blkdev *bd, const uint8_t uuid[16], uint64_t gen, uint64_t *newer);
 /* Read `dva` into `buf` and check it with `verify`, trying the member's
  * copies in turn and writing the first good one back over the copies
  * that failed. -EIO when no copy satisfies `verify`. */

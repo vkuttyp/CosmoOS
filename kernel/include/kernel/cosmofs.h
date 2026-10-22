@@ -53,7 +53,7 @@ struct cosmofs_stats {
     unsigned members;         /* pool members; 1 before format version 4 */
     unsigned devices;         /* devices behind them: more than members means mirroring */
     uint64_t repairs;         /* blocks written back from a good copy since mount */
-    uint64_t degraded;        /* copies the member table promised and the mount did not find */
+    uint64_t degraded;        /* copies the member table promises that are not ONLINE */
     unsigned version;         /* the on-disk format version this filesystem was written at */
     uint64_t free_root;       /* v9: head of the record of what the last root freed, or 0 */
     uint64_t orphan_root;     /* v10: head of the record of what this root still owes, or 0 */
@@ -255,6 +255,8 @@ void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard);
  * replay harness wants every root write to be one it asked for), and the
  * age trigger in milliseconds. */
 void cosmofs_test_set_writeback(struct mount *mnt, bool on);
+struct spool;
+struct spool *cosmofs_test_pool(struct mount *mnt);
 void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms);
 /* Test hook: format at an older on-disk version, to check that this
  * kernel still mounts and writes what an older one wrote. */

@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      12u  /* the newest this kernel reads: version 12, snapshot identity and rollback */
+#define CFS_VERSION      13u  /* the newest this kernel reads: version 13, copy state (roadmap 1.2 B3) */
 /* What a format writes. A pool is raised to 12 by the first operation that
  * needs it (a snapshot taken or rolled back to), not before: a kernel of
  * v1.0.7 or older reads 11 at most, and a pool nobody asked to change
@@ -46,6 +46,7 @@ enum cfs_kind {
     CFS_KIND_ORPHAN = 14,   /* v10: inodes whose last name went while something held them */
     CFS_KIND_SNAPLIST2 = 15,/* v12: the snapshot list with identity (struct cfs_snap_block2) */
     CFS_KIND_ROLLBACK = 16, /* v12: a pending rollback or the hold after one (struct cfs_rollback) */
+    CFS_KIND_COPYSTATE = 17,/* v13: a mirrored member's copies and what each missed (struct cfs_copystate) */
 };
 
 /* --- device-virtual addresses --------------------------------------------
@@ -375,7 +376,9 @@ struct cfs_member {            /* 64 bytes */
      * by version 4, which had one device per member and read the field
      * as padding, so 0 and 1 mean the same thing. */
     uint32_t copies;
-    uint64_t reserved;
+    /* v13: the member's CFS_KIND_COPYSTATE block, or 0 when every copy is
+     * ONLINE. Read only when the version is 13: below it a reserved zero. */
+    uint64_t state_root;
 };
 
 #define CFS_MAX_COPIES 4u
@@ -386,6 +389,39 @@ struct cfs_member {            /* 64 bytes */
 struct cfs_member_block {
     uint64_t count;
     struct cfs_member m[CFS_MEMBERS_PER_BLOCK];
+};
+
+/* --- copy state (version 13) ---------------------------------------------
+ *
+ * Per mirrored member, the state of each copy and the regions each one
+ * missed while it was not ONLINE (design.md, "Format version 13"). It
+ * lives in the pool and not on the devices: member 0's copies have no
+ * label to hold it, and the copy it most needs to describe is the one
+ * that is not there. The state values are enum pool_copy_state's.
+ */
+#define CFS_COPY_ONLINE 0u
+#define CFS_COPY_MISSING 1u
+#define CFS_COPY_OFFLINE 2u
+#define CFS_COPY_FAULTED 3u
+#define CFS_COPY_RESILVERING 4u
+#define CFS_COPY_WHOLE (1u << 0)    /* flags: the bitmap does not cover what it missed */
+#define CFS_COPY_DIRTY_BYTES 960u   /* = POOL_DIRTY_BYTES */
+
+struct cfs_copy_rec {          /* 1000 bytes */
+    uint32_t state;            /* CFS_COPY_* */
+    uint32_t flags;
+    uint64_t since;            /* the last generation this copy holds whole */
+    uint64_t cursor;           /* resilver: blocks below this are rebuilt */
+    uint32_t read_errors, write_errors, csum_errors, pad;
+    uint8_t dirty[CFS_COPY_DIRTY_BYTES];   /* one bit per region it missed */
+};
+
+/* Payload of a CFS_KIND_COPYSTATE block. */
+struct cfs_copystate {
+    uint32_t ncopies;
+    uint32_t region_blocks;    /* blocks per dirty bit */
+    uint64_t pad;
+    struct cfs_copy_rec copy[4];   /* CFS_MAX_COPIES */
 };
 
 /* Block 0 of every member past the first: how a mount finds the rest of

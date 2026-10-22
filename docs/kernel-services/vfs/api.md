@@ -548,26 +548,56 @@ unchanged.
   on every copy, so the DVA does not change. `-EINVAL` for a bad sector
   size or a device that does not cover the group, `-ENOSPC` past
   `POOL_MAX_COPIES` (4).
-- **`unsigned pool_copies(p, dva)`** Copies of the member `dva` names,
-  0 for a member the pool does not have.
+- **`unsigned pool_copies(p, dva)`** Copy slots of the member `dva`
+  names, present or not; 0 for a member the pool does not have.
 - **`int pool_read_copy(p, dva, copy, buf)` / `pool_write_copy(...)`**
-  One named copy. A reader that can check what it got uses these to try
-  the other copies and to write a good one back.
+  One named copy; `-ENODEV` for a copy that may not be read (not
+  `ONLINE`) or written (not `ONLINE` or `RESILVERING`). A reader that can
+  check what it got uses these to try the other copies and to write a
+  good one back.
+- **Copy states** (roadmap 1.2 B3; `docs/kernel-services/filesystem/cosmofs/design.md`,
+  "Format version 13"). Each copy is `ONLINE`, `MISSING`, `OFFLINE`,
+  `FAULTED` or `RESILVERING` (`struct pool_copy`), with read, write and
+  checksum error counts and, once it has left `ONLINE`, `since` (the
+  last durable root it holds) and a bitmap of the regions it missed
+  (`POOL_DIRTY_BITS` regions of `region_blocks` blocks). The caller
+  serialises: cosmofs calls the pool under `cfs->lock`.
+  `pool_copy_readable(p, dva, c)`, `pool_member_degraded(p, v)`,
+  `pool_degraded(p)` ask; `pool_set_copies(p, v, n)` gives a member `n`
+  slots (the new ones `MISSING`, whole); `pool_attach_copy(p, v, c, bd,
+  state)` puts a device in a slot; `pool_swap_copies` reorders two
+  slots' records; `pool_copy_set_state(p, v, c, state, why)` makes a
+  transition and prints its console line (`-EBUSY` to take a member's
+  last `ONLINE` copy `OFFLINE`, `-EAGAIN` to bring a copy that missed
+  writes `ONLINE`); `pool_copy_csum_error` counts a verifier's mismatch;
+  `pool_mark_missed(p, dva)` sets the block's region for every copy not
+  writable (a write about to happen); `pool_copy_missed(p, dva, c)` asks;
+  `pool_commit_done(p, gen)` says the root of `gen` is durable.
+  `-ENODEV` from the block layer makes a copy `MISSING`; other I/O
+  errors past `g_pool_fault_errors` (sysctl `fs.fault_errors`, default
+  16, 0 never) make it `FAULTED`, never the member's last `ONLINE` copy.
+  `p->notify(p->notify_arg)` runs after every transition.
 - **`void pool_close(struct spool *p)`** Drops every device reference.
 - **`int pool_read(p, dva, buf)` / `pool_write(p, dva, buf)`** One pool
   block through `blk_read`/`blk_write` (synchronous, sleeps). `buf` must
   be DMA-able (kmalloc or dma_alloc memory). `-EINVAL` for a member the
   pool does not have or past that member's end, or the block layer's
-  error. A read takes copy 0 — a mirror is only worth having if what it
-  returns is checked, and the check belongs to whoever knows the block's
-  format. A write goes to every copy, tries them all even after a
-  failure, and returns the first error.
+  error. A read takes the first `ONLINE` copy that answers — a mirror is
+  only worth having if what it returns is checked, and the check belongs
+  to whoever knows the block's format. A write goes to every writable
+  copy, tries them all even after a failure, records the block's region
+  for each copy that did not take it, and succeeds when an `ONLINE` copy
+  did; otherwise it returns the first error (`-EIO` when no copy was
+  writable).
 - **`int pool_write_flags(p, dva, buf, flags)`** The same write with
   `BIO_PREFLUSH` and/or `BIO_FUA`: the block layer flushes before and/or
   after it. cosmofs writes its root this way (one call for the two-flush
   commit).
-- **`int pool_flush(p)`** `blk_flush` on every member, first error wins:
-  a commit durable on one device and in another's cache is not durable.
+- **`int pool_flush(p)`** `blk_flush` on every writable copy of every
+  member. A copy whose flush fails has missed the commit and leaves
+  `ONLINE` (`MISSING` for `-ENODEV`, `FAULTED` otherwise, except the
+  member's last); the flush fails only for a member left with no
+  `ONLINE` copy.
 
 ## cosmofs (`kernel/include/kernel/cosmofs.h`)
 

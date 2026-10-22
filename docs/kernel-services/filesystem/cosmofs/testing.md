@@ -82,6 +82,10 @@ writeback thread off so that generation counts are exact.
 | `cosmofs-root-type` | a root inode whose mode says regular file (`COSMOFS_CORRUPT_ROOT_TYPE`, in both slots' trees) is refused by the mount with `-ENOTDIR` rather than met by the VFS's assertion |
 | `cosmofs-scrub-counts` | CFS-11: a plain data block rotted on a single-device pool: `cosmofs_scrub` returns 0 with one unrecoverable block, and `/dev/fsctl`'s SCRUB succeeds with a record saying so |
 | `cosmofs-check-dev` | CF23: `cosmofs_check_dev` on a pool with a leak and a free block in use: `-EBUSY` while mounted; read-only it names both and every block's CRC is unchanged; a boot repair refuses (`boot_refused`) and repairs nothing; the offline repair repairs both, commits, and the next check is clean; a root not a directory is `MOUNT_FAILED` at `STAGE_ROOT` with `-ENOTDIR`; a second slot naming another pool is `SUPER_DISAGREE`, not checked |
+| `pool-copy-states` | CF26 at the pool: on a two-way mirror of RAM devices, a copy answering `-EIO` is written around and counted, `FAULTED` on its fourth error with `fs.fault_errors` 3, and its record is exactly the four blocks written since the last root; it is then neither read nor written; the last `ONLINE` copy is refused `OFFLINE` and, failing, is not faulted (writes and reads `-EIO`); a copy answering `-ENODEV` is `MISSING` at once with the block written before it in its record; a copy taken `OFFLINE` with nothing written comes back `ONLINE`, one that missed a write does not (`-EAGAIN`) |
+| `cosmofs-degraded` | CF26: a mirror with copy 1 pulled (`-ENODEV`) writes and syncs, reports one device and one copy out, is raised to format 13, and `/proc/mounts` says `rw,degraded`; with both pulled, a read is `-EIO` and the commit fails; a copy failing with `-EIO` at `fs.fault_errors` 4 is `FAULTED`, and after a remount with its device answering again it stays out |
+| `cosmofs-copy-bitmap` | CF25: a mirror at one block a region, copy 1 pulled after a sync; every block copy 0 is written after it, through the unmount, is in copy 1's record, and nothing else but the superblock slots; the remount reads the record back `MISSING` since the generation the pulled device still carries; `tools/b3-copystate-probe.py --old` fails it |
+| `cosmofs-copy-import` | CF27: the mirror mounted through the copy that was away mounts the newest root from the other device and leaves the lagging one out; with the newer device mounted elsewhere, it is refused `-EBUSY` |
 | `cosmofs-scrub-modes` | CF23: on a two-way mirror with one copy of a file's four blocks rotted, a scrub without repair counts 4 bad copies and a second counts them again; a repairing scrub rewrites 4; the next finds none and the file reads back; the scrub reads a snapshot's own blocks; at `g_cosmofs_scrub_rate` 50 (five blocks a window, so the pool takes several) its time is at least its block count allows |
 | `cosmofs-scrub-open` | a scrub while a transaction holds a rewritten file's checksum tree in memory (in blocks the young pool never wrote) finds nothing unrecoverable; after the commit neither does the next |
 
@@ -386,7 +390,9 @@ one case).
   format (the key passes through an unlocked global).
 - Files beyond `CFS_MAX_EXTENTS` runs, and files near the checksum
   index's limit (516128 blocks, or 64516 encrypted), are not exercised.
-- Resilvering does not exist, so nothing tests a stale copy rejoining.
+- Resilvering does not exist yet (roadmap 1.2 B3's next part), so nothing
+  tests a stale copy rejoining; a lagging copy is only recognised and
+  left out (`cosmofs-copy-bitmap`, `cosmofs-copy-import`).
 - No host `mkfs`: `cosmofs_format` runs only in the kernel, so
   `cosmofs-damage.py` cannot make an older-format image to damage; CFS-2's
   proof is `cosmofs-version-compress`. The offline checker is the

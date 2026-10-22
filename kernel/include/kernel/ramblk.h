@@ -49,6 +49,9 @@ void ramblk_set_deferred(struct blkdev *bd, unsigned limit);
  * the block layer's timeout thread then calls the driver's timeout
  * operation, which completes the request with -ETIMEDOUT. */
 void ramblk_set_stall(struct blkdev *bd, bool stall);
+/* Every bio from now on completes with `err` (a negative errno) and moves
+ * no data, as a failing disk does; 0 returns to normal. */
+void ramblk_set_fail(struct blkdev *bd, int err);
 /* Deferred mode, block-layer tests: a refusal (-EAGAIN) first completes the
  * oldest in-flight bio synchronously, inside submit -- the completion's
  * resubmission then meets an empty queue, the window drain_pending must
