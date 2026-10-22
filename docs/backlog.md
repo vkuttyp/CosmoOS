@@ -87,17 +87,17 @@ Open lines (struck lines are not counted):
 
 ## cosmofs and storage
 
-- **CFS-1** correctness, S. A read-only mount still writes the replay of a free or orphan record to the device.
-- **CFS-2** correctness, S. New files are LZ4 on any format version, so an older-version image written here can hold v6 records.
+- ~~**CFS-1** correctness, S. A read-only mount still writes the replay of a free or orphan record to the device.~~ Done by roadmap 1.2 B2's first PR (CF21: no commit, no read repair, no rollback switch; the replay runs in memory).
+- ~~**CFS-2** correctness, S. New files are LZ4 on any format version, so an older-version image written here can hold v6 records.~~ Done by roadmap 1.2 B2's first PR (CF22: no record below format 6).
 - ~~**CFS-3** correctness, S. Snapshot ids are unique per mount only: a deleted newest snapshot's id is reused after a remount (V22 says never).~~ Done by roadmap 1.2 B1's first PR (format version 12: the list head carries the id high-water mark, CF18); a pool older than format 11 keeps the old behaviour.
 - **CFS-4** correctness, S. `cosmofs_rekey` leaves the key block in the open transaction until the next commit.
 - **CFS-5** correctness, S. `/dev/blkctl`'s mounted check does not see the other members of a mounted multi-device pool.
-- **CFS-6** correctness, M. CF17 abandons the transaction (`cfs_fail`) for failures a retry could survive; `extents_store` and `inode_sync` should allocate and write first so they fail cleanly.
+- ~~**CFS-6** correctness, M. CF17 abandons the transaction (`cfs_fail`) for failures a retry could survive; `extents_store` and `inode_sync` should allocate and write first so they fail cleanly.~~ Done by roadmap 1.2 B2's first PR (`cfs_prep_meta`, `cfs_inode_prepare`; `cosmofs-nomem`).
 - **CFS-7** security, M. Metadata is checksummed, not authenticated: a forger can recompute CRC32C; a keyed `csum_algo` would close it.
 - **CFS-8** usability, M. Snapshots cannot be booted as environments (roadmap 1.2 B4). Rollback to a snapshot and writable clones are done by B1 (`cosmo-snap rollback`, `cosmo-snap clone`; CF19, CF20).
 - **CFS-9** usability, M. Mirrors: no device replacement, no resilvering of a member that missed commits, no hot spares.
 - **CFS-10** usability, M. A file is capped at 516128 blocks (64516 encrypted) by the one-level checksum index (`-EFBIG`).
-- **CFS-11** usability, S. Scrub's `-EIO` discards the counts fsctl would report.
+- ~~**CFS-11** usability, S. Scrub's `-EIO` discards the counts fsctl would report.~~ Done by roadmap 1.2 B2's first PR (the scrub returns 0 whenever its walk ran).
 - **CFS-12** nice-to-have, L. Incremental snapshot send/receive: stream format, ancestry check, interruption recovery.
 - **CFS-13** nice-to-have, L. Striping and RAID-Z-like parity layouts with failure, replay and repair coverage.
 - **CFS-14** nice-to-have, L. Block deduplication, evaluated against its space, integrity and recovery costs.
