@@ -143,6 +143,7 @@ struct vnode {
 
 struct cosmofs_check_report;
 struct cosmofs_scrub_stats;
+struct cosmofs_dev_report;
 struct cosmofs_snap_req;
 
 /* What statfs reports about the filesystem a vnode is on (Linux's
@@ -176,7 +177,10 @@ struct fs_type {
      * does not earn a filesystem-neutral result type.
      */
     int (*check)(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
-    int (*scrub)(struct mount *mnt, struct cosmofs_scrub_stats *out);
+    int (*scrub)(struct mount *mnt, struct cosmofs_scrub_stats *out, unsigned flags);
+    /* Optional: the check on an unmounted device (roadmap 1.2 B2). */
+    int (*check_dev)(struct blkdev *bdev, unsigned flags, struct cosmofs_check_report *out,
+                     struct cosmofs_dev_report *dev);
     /* Optional: snapshots of one mount (roadmap 1.2 B1), on the same terms
      * as the passes above. */
     int (*snapctl)(struct mount *mnt, struct cosmofs_snap_req *req);
@@ -185,6 +189,8 @@ struct fs_type {
      * no names refuses a non-empty one). Reached from /dev/blkctl
      * (roadmap M2; the label, shell completeness S6). */
     int (*format)(struct blkdev *bdev, const char *label);
+    /* Optional: one pool mirrored over `n` devices (roadmap 1.2 B2). */
+    int (*format_mirror)(struct blkdev **bdev, unsigned n);
     /* Optional: fill blocks/bfree/bavail (and files/ffree) of `out`, which
      * the VFS has set up with its defaults. Without it a mount whose page
      * cache is its store reports its page budget, and any other reports
@@ -288,6 +294,16 @@ int vfs_mount_root(const char *fsname, struct blkdev *bdev, unsigned flags);
 /* A mount attached nowhere and on no list: a filesystem instance for the
  * kernel's own use (the anonymous-file ramfs). Never unmounted. */
 int vfs_mount_internal(const char *fsname, struct mount **out);
+/*
+ * A mount of `bdev` no namespace sees (roadmap 1.2 B2: the check on an
+ * unmounted device). The device is claimed as by any mount, so a second
+ * mount or a format waits its turn; `flags` is MOUNT_RDONLY or 0. The
+ * release commits a writable one when `commit` (fs->sync), and unmounts
+ * it, and returns the commit's result; without `commit` the open
+ * transaction is dropped.
+ */
+int vfs_mount_detached(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount **out);
+int vfs_mount_detached_release(struct mount *mnt, bool commit);
 /*
  * Make the mount whose root `path` names the root of every namespace
  * (roadmap M2; docs/kernel-services/vfs/design.md, "Switching the root").
@@ -604,6 +620,7 @@ bool vfs_bdev_mounted(const struct blkdev *bd);
  * type, -EOPNOTSUPP for one that cannot format, -EBUSY when
  * vfs_bdev_mounted. */
 int vfs_format(const char *fsname, struct blkdev *bd, const char *label);
+int vfs_format_mirror(const char *fsname, struct blkdev **bd, unsigned n);
 
 /*
  * Name a mount for an operation that acts on one filesystem rather than

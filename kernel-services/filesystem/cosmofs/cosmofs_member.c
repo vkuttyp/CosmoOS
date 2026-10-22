@@ -566,10 +566,12 @@ int cfs_read_repair(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(cons
  * until it is the one answering.
  */
 int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const void *blk, void *arg), void *arg,
-                   unsigned *repaired)
+                   bool repair, unsigned *bad_out, unsigned *repaired)
 {
     if (repaired)
         *repaired = 0;
+    if (bad_out)
+        *bad_out = 0;
     unsigned copies = pool_copies(fs->pool, dva);
     if (copies == 0)
         return -EINVAL;
@@ -594,9 +596,14 @@ int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const
     int rc = 0;
     if (good < 0) {
         rc = -EIO;
-    } else if (nbad && fs->rdonly) {
-        kwarn("cosmofs: block %llu:%llu: %u of %u copies rotted; not repaired (read-only)",
-              (unsigned long long)CFS_DVA_VDEV(dva), (unsigned long long)CFS_DVA_BLK(dva), nbad, copies);
+    } else if (nbad && (!repair || fs->rdonly)) {
+        /* Found and left: a scrub that was not asked to repair writes
+         * nothing, and a read-only mount writes nothing (CFS-1). */
+        kwarn("cosmofs: block %llu:%llu: %u of %u copies rotted; not repaired%s",
+              (unsigned long long)CFS_DVA_VDEV(dva), (unsigned long long)CFS_DVA_BLK(dva), nbad, copies,
+              fs->rdonly ? " (read-only)" : "");
+        if (bad_out)
+            *bad_out = nbad;
     } else if (nbad) {
         unsigned fixed = 0;
         for (unsigned c = 0; c < copies; c++)
@@ -607,6 +614,8 @@ int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const
         fs->repairs += fixed;
         if (repaired)
             *repaired = fixed;
+        if (bad_out)
+            *bad_out = nbad;
     }
     kfree(scratch);
     return rc;

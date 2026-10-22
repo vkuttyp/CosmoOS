@@ -752,6 +752,8 @@ static const struct selftest tests[] = {
     { "cosmofs-scrub-counts", selftest_cosmofs_scrub_counts },
     { "cosmofs-root-type", selftest_cosmofs_root_type },
     { "cosmofs-scrub-open", selftest_cosmofs_scrub_open },
+    { "cosmofs-check-dev", selftest_cosmofs_check_dev },
+    { "cosmofs-scrub-modes", selftest_cosmofs_scrub_modes },
     { "cosmofs-nomem", selftest_cosmofs_nomem },
     { "cosmofs-crypt", selftest_cosmofs_crypt },
     { "cosmofs-reserve", selftest_cosmofs_reserve },

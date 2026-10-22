@@ -18,6 +18,7 @@
  * normal case and must never be reported.
  */
 
+#include <kernel/blk.h>
 #include <kernel/compiler.h>
 #include <kernel/cosmofs.h>
 #include <kernel/errno.h>
@@ -26,6 +27,8 @@
 #include <kernel/pmm.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
+#include <kernel/vfs.h>
+#include <uapi/cosmo/fsctl.h>   /* COSMO_FSCTL_DEV_F_*: what cosmofs_check_dev reports */
 
 #include "cosmofs_internal.h"
 
@@ -42,12 +45,7 @@
  * not catch, or a filesystem no path could name anyway (VFS_MAX_COMPONENTS). */
 #define CFS_CHECK_MAX_DEPTH  64u
 
-struct bitmap {
-    uint8_t **chunk;
-    unsigned nchunks;
-};
-
-static void bitmap_free(struct bitmap *m)
+void cfs_bits_free(struct cfs_bits *m)
 {
     if (m->chunk != NULL) {
         for (unsigned i = 0; i < m->nchunks; i++)
@@ -59,7 +57,7 @@ static void bitmap_free(struct bitmap *m)
     m->nchunks = 0;
 }
 
-static int bitmap_alloc(struct bitmap *m, uint64_t bits)
+int cfs_bits_alloc(struct cfs_bits *m, uint64_t bits)
 {
     m->nchunks = (unsigned)((bits + BITS_PER_CHUNK - 1) / BITS_PER_CHUNK);
     if (m->nchunks == 0)
@@ -70,7 +68,7 @@ static int bitmap_alloc(struct bitmap *m, uint64_t bits)
     for (unsigned i = 0; i < m->nchunks; i++) {
         struct page *pg = pmm_alloc_page(PMM_FLAGS_ZERO);
         if (pg == NULL) {
-            bitmap_free(m);
+            cfs_bits_free(m);
             return -ENOMEM;
         }
         m->chunk[i] = phys_to_virt(page_to_phys(pg));
@@ -78,7 +76,7 @@ static int bitmap_alloc(struct bitmap *m, uint64_t bits)
     return 0;
 }
 
-static bool bitmap_test(const struct bitmap *m, uint64_t bit)
+bool cfs_bits_test(const struct cfs_bits *m, uint64_t bit)
 {
     unsigned c = (unsigned)(bit / BITS_PER_CHUNK);
     if (c >= m->nchunks)
@@ -88,7 +86,7 @@ static bool bitmap_test(const struct bitmap *m, uint64_t bit)
 }
 
 /* Returns true if the bit was already set. */
-static bool bitmap_set(struct bitmap *m, uint64_t bit)
+bool cfs_bits_set(struct cfs_bits *m, uint64_t bit)
 {
     unsigned c = (unsigned)(bit / BITS_PER_CHUNK);
     if (c >= m->nchunks)
@@ -158,10 +156,10 @@ static void counts_add(struct counts *c, uint64_t i, uint32_t n)
 struct check {
     struct cfs *fs;
     struct cosmofs_check_report *rep;
-    struct bitmap seen;    /* claimed by anything, live or snapshot */
-    struct bitmap live;    /* claimed by the live generation */
-    struct bitmap reach;   /* inode numbers reachable from the root */
-    struct bitmap alive;   /* inode numbers the map holds, whatever their nlink */
+    struct cfs_bits seen;    /* claimed by anything, live or snapshot */
+    struct cfs_bits live;    /* claimed by the live generation */
+    struct cfs_bits reach;   /* inode numbers reachable from the root */
+    struct cfs_bits alive;   /* inode numbers the map holds, whatever their nlink */
     struct counts links;   /* directory entries naming each inode */
     struct counts nlink;   /* what each inode says its link count is */
     /*
@@ -260,8 +258,8 @@ static void claim(struct check *ck, uint64_t dva, bool live)
         name_it(&ck->rep->dir_bad, dva);   /* a pointer outside the pool */
         return;
     }
-    bitmap_set(&ck->seen, lin);
-    if (live && bitmap_set(&ck->live, lin))
+    cfs_bits_set(&ck->seen, lin);
+    if (live && cfs_bits_set(&ck->live, lin))
         name_it(&ck->rep->dup, dva);
 }
 
@@ -480,7 +478,7 @@ static void walk_imap(struct check *ck, uint64_t imap_root, uint64_t next_ino, b
                      * cfs_inode_read reports a slot with no links as
                      * absent, which is exactly the orphan this pass
                      * exists to find. */
-                    bitmap_set(&ck->alive, in->ino);
+                    cfs_bits_set(&ck->alive, in->ino);
                     counts_add(&ck->nlink, in->ino, in->nlink);
                 }
             }
@@ -832,12 +830,12 @@ static void walk_dir(struct check *ck, uint64_t ino, const struct cfs_inode *dir
             if (d[s].type == CFS_TYPE_DIR) {
                 counts_add(&ck->links, d[s].ino, 1);   /* its own "." */
                 counts_add(&ck->links, ino, 1);        /* its ".." names this directory */
-                if (!bitmap_set(&ck->reach, d[s].ino))
+                if (!cfs_bits_set(&ck->reach, d[s].ino))
                     walk_dir(ck, d[s].ino, &child, depth + 1);
                 else
                     name_it(&ck->rep->dir_bad, d[s].ino);   /* a directory with two parents */
             } else {
-                bitmap_set(&ck->reach, d[s].ino);
+                cfs_bits_set(&ck->reach, d[s].ino);
             }
         }
     }
@@ -856,7 +854,7 @@ static void compare(struct check *ck)
         if (dva == CFS_DVA_NONE)
             continue;                       /* padding between members */
         bool allocated = cfs_bitmap_test(fs, lin);
-        bool seen = bitmap_test(&ck->seen, lin);
+        bool seen = cfs_bits_test(&ck->seen, lin);
         if (allocated && !seen)
             name_it(&ck->rep->alloc_not_seen, dva);
         else if (!allocated && seen)
@@ -870,7 +868,7 @@ static void compare(struct check *ck)
     /* Link counts and orphans, over the inodes the map itself holds. */
     uint64_t counted_inodes = 0;
     for (uint64_t ino = CFS_ROOT_INO; ino <= fs->sb.next_ino; ino++) {
-        if (!bitmap_test(&ck->alive, ino))
+        if (!cfs_bits_test(&ck->alive, ino))
             continue;                       /* no such inode: nothing to say */
         /*
          * Every slot the map holds, orphans included. The superblock's
@@ -940,6 +938,20 @@ static bool reachability_is_sound(const struct cosmofs_check_report *r)
            r->dangling_entry.count == 0 && r->chain_cycle.count == 0;
 }
 
+/*
+ * What a boot repairs without asking (design.md, "fsck at boot"): the
+ * classes whose repair is bookkeeping -- a leak, a total, a stale
+ * rollback record or hold, a snapshot's identity -- and the two a crash
+ * leaves, orphans and link counts. Anything else found, and a boot
+ * repairs nothing: the pool is refused, by name, to an operator.
+ */
+static bool outside_boot(const struct cosmofs_check_report *r)
+{
+    return r->seen_not_alloc.count || r->dup.count || r->dangling_entry.count || r->dir_bad.count ||
+           r->extent_order.count || r->extent_overlap.count || r->dir_dup_name.count || r->chain_cycle.count ||
+           r->unreadable.count || r->partial;
+}
+
 static int repair(struct check *ck)
 {
     struct cfs *fs = ck->fs;
@@ -949,12 +961,37 @@ static int repair(struct check *ck)
         ck->rep->repair_refused = true;
         return 0;   /* not an error: a refusal, and the report says why */
     }
+    if ((ck->flags & COSMOFS_CHECK_BOOT) != 0 && outside_boot(ck->rep)) {
+        ck->rep->repair_refused = true;
+        ck->rep->boot_refused = true;
+        return 0;
+    }
+
+    /*
+     * A block something reaches and the bitmap calls free: mark it
+     * allocated -- but only offline (cosmofs_check_dev), where nothing
+     * else can be allocating. On a mounted filesystem the allocator may
+     * already have handed the block to a writer, and setting its bit
+     * then would hide a cross-link rather than repair a leak. The walk
+     * counted these blocks free; the count follows the bits, so the
+     * totals' repair below writes what is now true.
+     */
+    if ((ck->flags & COSMOFS_CHECK_OFFLINE) != 0 && ck->rep->seen_not_alloc.count != 0) {
+        for (uint64_t lin = 0; lin < fs->nblocks; lin++) {
+            if (cfs_lin_dva(fs, lin) == CFS_DVA_NONE || !cfs_bits_test(&ck->seen, lin) || cfs_bitmap_test(fs, lin))
+                continue;
+            cfs_bitmap_claim(fs, lin);
+            ck->rep->seen_not_alloc.repaired++;
+            if (ck->rep->counted_free > 0)
+                ck->rep->counted_free--;
+        }
+    }
 
     /* A block nothing reaches: give it back. */
     if (ck->rep->alloc_not_seen.count != 0) {
         for (uint64_t lin = 0; lin < fs->nblocks && rc == 0; lin++) {
             uint64_t dva = cfs_lin_dva(fs, lin);
-            if (dva == CFS_DVA_NONE || bitmap_test(&ck->seen, lin) || !cfs_bitmap_test(fs, lin))
+            if (dva == CFS_DVA_NONE || cfs_bits_test(&ck->seen, lin) || !cfs_bitmap_test(fs, lin))
                 continue;
             cfs_free_block_deferred(fs, dva);
             ck->rep->alloc_not_seen.repaired++;
@@ -969,7 +1006,7 @@ static int repair(struct check *ck)
      * work list.
      */
     for (uint64_t ino = CFS_ROOT_INO; ino <= fs->sb.next_ino && rc == 0; ino++) {
-        if (!bitmap_test(&ck->alive, ino))
+        if (!cfs_bits_test(&ck->alive, ino))
             continue;
         uint32_t named_by = counts_get(&ck->links, ino);
         if (ino == CFS_ROOT_INO)
@@ -1009,7 +1046,7 @@ static int repair(struct check *ck)
     /* A link count the directory entries disagree with: the entries win.
      * Over the maps, for the same reason as the orphans above. */
     for (uint64_t ino = CFS_ROOT_INO; ino <= fs->sb.next_ino && rc == 0; ino++) {
-        if (!bitmap_test(&ck->alive, ino))
+        if (!cfs_bits_test(&ck->alive, ino))
             continue;
         uint32_t named = counts_get(&ck->links, ino);
         if (ino == CFS_ROOT_INO)
@@ -1118,13 +1155,13 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         kfree(rep);
         return -EIO;
     }
-    int rc = bitmap_alloc(&ck.seen, fs->nblocks);
+    int rc = cfs_bits_alloc(&ck.seen, fs->nblocks);
     if (rc == 0)
-        rc = bitmap_alloc(&ck.live, fs->nblocks);
+        rc = cfs_bits_alloc(&ck.live, fs->nblocks);
     if (rc == 0)
-        rc = bitmap_alloc(&ck.reach, fs->sb.next_ino + 2);
+        rc = cfs_bits_alloc(&ck.reach, fs->sb.next_ino + 2);
     if (rc == 0)
-        rc = bitmap_alloc(&ck.alive, fs->sb.next_ino + 2);
+        rc = cfs_bits_alloc(&ck.alive, fs->sb.next_ino + 2);
     if (rc == 0)
         rc = counts_alloc(&ck.links, fs->sb.next_ino + 2);
     if (rc == 0)
@@ -1144,10 +1181,10 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     }
     if (rc) {
         mutex_unlock(&fs->lock);
-        bitmap_free(&ck.seen);
-        bitmap_free(&ck.live);
-        bitmap_free(&ck.reach);
-        bitmap_free(&ck.alive);
+        cfs_bits_free(&ck.seen);
+        cfs_bits_free(&ck.live);
+        cfs_bits_free(&ck.reach);
+        cfs_bits_free(&ck.alive);
         counts_free(&ck.links);
         counts_free(&ck.nlink);
         kfree(ck.name_seen);
@@ -1203,8 +1240,13 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     check_rollback(&ck);
 
     struct cfs_inode root;
-    if (cfs_inode_read(fs, CFS_ROOT_INO, &root) == 0) {
-        bitmap_set(&ck.reach, CFS_ROOT_INO);
+    if (cfs_inode_read(fs, CFS_ROOT_INO, &root) == 0 && CFS_MODE_TYPE(root.mode) != CFS_TYPE_DIR) {
+        /* The mount refuses such a root (-ENOTDIR); a walk that reads it
+         * as a directory would read a file's bytes as entries. */
+        name_it(&rep->dir_bad, CFS_ROOT_INO);
+        rep->partial = true;
+    } else if (cfs_inode_read(fs, CFS_ROOT_INO, &root) == 0) {
+        cfs_bits_set(&ck.reach, CFS_ROOT_INO);
         walk_dir(&ck, CFS_ROOT_INO, &root, 0);
     } else {
         name_it(&rep->unreadable, CFS_ROOT_INO);
@@ -1216,10 +1258,10 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         rc = repair(&ck);
 
     mutex_unlock(&fs->lock);
-    bitmap_free(&ck.seen);
-    bitmap_free(&ck.live);
-    bitmap_free(&ck.reach);
-    bitmap_free(&ck.alive);
+    cfs_bits_free(&ck.seen);
+    cfs_bits_free(&ck.live);
+    cfs_bits_free(&ck.reach);
+    cfs_bits_free(&ck.alive);
     counts_free(&ck.links);
     counts_free(&ck.nlink);
     kfree(ck.name_seen);
@@ -1252,3 +1294,134 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     return rc;
 }
 
+
+/* --- the check on an unmounted device (roadmap 1.2 B2, fsck.cosmofs) ------- */
+
+static bool slots_disagree(const struct cfs_super *a, const struct cfs_super *b)
+{
+    /* What names the pool and never changes after the format. The roots,
+     * the generation and the version (a raise writes the new version in
+     * the next commit's slot) legitimately differ. */
+    return memcmp(a->uuid, b->uuid, sizeof(a->uuid)) != 0 || a->total_blocks != b->total_blocks ||
+           a->block_size != b->block_size || memcmp(a->label, b->label, sizeof(a->label)) != 0;
+}
+
+static bool any_repaired(const struct cosmofs_check_report *r)
+{
+    const struct cosmofs_check_class *c[] = {
+        &r->alloc_not_seen, &r->seen_not_alloc, &r->nlink_wrong, &r->orphan, &r->counter_wrong,
+        &r->snap_identity, &r->rollback_record, &r->hold,
+    };
+    for (unsigned i = 0; i < sizeof(c) / sizeof(c[0]); i++)
+        if (c[i]->repaired)
+            return true;
+    return false;
+}
+
+/* What the mount found and did, before the walk changes anything. */
+static void dev_fill(struct cfs *fs, struct cosmofs_dev_report *dev)
+{
+    mutex_lock(&fs->lock);
+    dev->format = fs->sb.version;
+    dev->generation = fs->sb.generation;
+    dev->replayed_frees = fs->replay_freed;
+    dev->replayed_orphans = fs->replay_orphans;
+    if (fs->fell_back)
+        dev->flags |= COSMO_FSCTL_DEV_F_FELL_BACK;
+    if (fs->rollback_switched)
+        dev->flags |= COSMO_FSCTL_DEV_F_ROLLBACK_APPLIED;
+    struct cfs_rollback r;
+    if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && cfs_rollback_read(fs, &r) == 0) {
+        dev->flags |= r.state == CFS_ROLLBACK_PENDING ? COSMO_FSCTL_DEV_F_ROLLBACK_PENDING
+                                                      : COSMO_FSCTL_DEV_F_ROLLBACK_HELD;
+        struct cfs_snapshot t;
+        if (cfs_snapshot_lookup_uuid(fs, r.target_uuid, &t) == 0)
+            strlcpy(dev->rollback_target, t.name, sizeof(dev->rollback_target));
+        if (r.state == CFS_ROLLBACK_PENDING && fs->rollback_error != 0) {
+            dev->flags |= COSMO_FSCTL_DEV_F_ROLLBACK_REFUSED;
+            dev->rollback_error = fs->rollback_error;
+        }
+    }
+    mutex_unlock(&fs->lock);
+}
+
+/*
+ * The checker on a device nothing has mounted: the same cosmofs_check,
+ * on a mount no namespace sees (vfs_mount_detached), so there is one
+ * implementation and not a second one in user space. Read-only unless
+ * COSMOFS_CHECK_REPAIR, and then OFFLINE too: nothing else is using
+ * the pool, so a reachable block the bitmap calls free can be marked.
+ *
+ * What a mount cannot get past is answered here rather than refused:
+ * two superblock slots that name different pools (the mount would pick
+ * the newer and carry on), neither slot verifying, a load that fails at
+ * a stage the report names. The pool is then not checked and the device
+ * record says why.
+ */
+int cosmofs_check_dev(struct blkdev *bd, unsigned flags, struct cosmofs_check_report *rep,
+                      struct cosmofs_dev_report *dev)
+{
+    memset(dev, 0, sizeof(*dev));
+    memset(rep, 0, sizeof(*rep));
+    struct cfs_super *sl = kmalloc(2 * sizeof(*sl), 0);
+    if (sl == NULL)
+        return -ENOMEM;
+    int ra = -EIO, rb = -EIO;
+    int rc = cfs_super_slots(bd, &sl[0], &ra, &sl[1], &rb);
+    if (rc) {
+        kfree(sl);
+        return rc;
+    }
+    dev->slot_generation[0] = ra == 0 ? sl[0].generation : 0;
+    dev->slot_generation[1] = rb == 0 ? sl[1].generation : 0;
+    bool none = ra != 0 && rb != 0;
+    bool disagree = ra == 0 && rb == 0 && slots_disagree(&sl[0], &sl[1]);
+    kfree(sl);
+    if (none || disagree) {
+        dev->flags |= none ? COSMO_FSCTL_DEV_F_SUPER_NONE : COSMO_FSCTL_DEV_F_SUPER_DISAGREE;
+        kwarn("cosmofs: %s: %s; not checked", bd->name,
+              none ? "neither superblock slot verifies" : "the superblock slots name different pools");
+        return 0;
+    }
+
+    bool repairing = (flags & COSMOFS_CHECK_REPAIR) != 0;
+    struct mount *mnt = NULL;
+    rc = vfs_mount_detached(vfs_find_fs("cosmofs"), bd, repairing ? 0 : MOUNT_RDONLY, &mnt);
+    if (rc == -EBUSY || rc == -ENOMEM)
+        return rc;   /* somebody has it, or no memory: the caller's, not the pool's */
+    if (rc) {
+        dev->flags |= COSMO_FSCTL_DEV_F_MOUNT_FAILED;
+        dev->mount_error = rc;
+        unsigned stage = COSMO_FSCTL_STAGE_NONE;
+        int frc = 0;
+        if (cfs_mount_failure(bd, &stage, &frc))
+            dev->mount_stage = stage;
+        return 0;
+    }
+    dev_fill(cfs_of(mnt), dev);
+    rc = cosmofs_check(mnt, rep, flags | (repairing ? COSMOFS_CHECK_OFFLINE : 0u));
+    if (rc == 0)
+        dev->flags |= COSMO_FSCTL_DEV_F_CHECKED;
+    if (rep->boot_refused)
+        dev->flags |= COSMO_FSCTL_DEV_F_BOOT_REFUSED;
+    /*
+     * Committed only when a repair was made: then with everything the
+     * mount holds -- the replays, a rollback's switch -- as any unmount
+     * would. A writable check that repaired nothing writes nothing: its
+     * mount's own changes are dropped and the next mount makes them again.
+     * Committing them anyway is how the first draft lost a free block in
+     * use -- a boot's refused repair committed, and the commit's copies
+     * took the block the bitmap called free (cosmofs-check-dev).
+     */
+    bool commit = rc == 0 && repairing && any_repaired(rep);
+    int urc = vfs_mount_detached_release(mnt, commit);
+    if (commit) {
+        if (urc == 0)
+            dev->flags |= COSMO_FSCTL_DEV_F_COMMITTED;
+        else
+            rc = urc;
+    }
+    if (rc == 0 && urc != 0)
+        kwarn("cosmofs: %s: the check's unmount did not commit (%d)", bd->name, urc);
+    return rc;
+}

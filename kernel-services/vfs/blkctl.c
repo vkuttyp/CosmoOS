@@ -184,8 +184,15 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     if (cmd.version != COSMO_BLKCTL_VERSION)
         return -EINVAL;
     size_t extra = len - sizeof(cmd);
-    if (extra != 0 && cmd.op != COSMO_BLKCTL_WRITE && cmd.op != COSMO_BLKCTL_FORMAT)
-        return -EINVAL;   /* only a WRITE carries data, and a FORMAT its label */
+    if (extra != 0 && cmd.op != COSMO_BLKCTL_WRITE && cmd.op != COSMO_BLKCTL_FORMAT &&
+        cmd.op != COSMO_BLKCTL_FORMAT_MIRROR)
+        return -EINVAL;   /* only a WRITE carries data, a FORMAT its label, a FORMAT_MIRROR its second device */
+    char other[COSMO_BLKCTL_NAME] = "";
+    if (cmd.op == COSMO_BLKCTL_FORMAT_MIRROR) {
+        if (extra != COSMO_BLKCTL_NAME || memchr((const char *)buf + sizeof(cmd), '\0', COSMO_BLKCTL_NAME) == NULL)
+            return -EINVAL;
+        memcpy(other, (const char *)buf + sizeof(cmd), COSMO_BLKCTL_NAME);
+    }
     char label[COSMO_BLKCTL_LABEL + 1] = "";
     if (cmd.op == COSMO_BLKCTL_FORMAT) {
         if (extra > COSMO_BLKCTL_LABEL)
@@ -254,6 +261,18 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
         if (rc == 0)
             set_result(o, NULL, 0);
         break;
+    case COSMO_BLKCTL_FORMAT_MIRROR: {
+        struct blkdev *two[2] = { bd, blk_find(other) };
+        if (two[1] == NULL) {
+            rc = -ENODEV;
+            break;
+        }
+        rc = blk_part_any(two[0]) || blk_part_any(two[1]) ? -EBUSY : vfs_format_mirror(cmd.fstype, two, 2);
+        blkdev_put(two[1]);
+        if (rc == 0)
+            set_result(o, NULL, 0);
+        break;
+    }
     default:
         rc = -EINVAL;
         break;

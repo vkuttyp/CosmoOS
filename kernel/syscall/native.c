@@ -13,6 +13,7 @@
 #include <kernel/mountns.h>
 #include <kernel/bootfs.h>
 #include <kernel/bootinfo.h>
+#include <kernel/cosmofs.h>   /* g_cosmofs_scrub_rate: sysctl fs.scrub_rate */
 #include <kernel/elf.h>
 #include <kernel/errno.h>
 #include <kernel/faultinject.h>
@@ -2410,6 +2411,7 @@ static const char *const sysctl_names[] = {
     "vm.file_fault_retries", "vm.file_sigbus", "vm.futex_shared_keys", "vm.anon_fault_retries",
     "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
     "net.steer",
+    "fs.scrub_rate",
     "sysctl.names",
     "debug.faultinject",
     "debug.preempt_probe",
@@ -2542,6 +2544,10 @@ static int sysctl_value(const char *name, char *out, size_t n)
         return hv_sysctl(name + 3, out, n);
     if (strcmp(name, "net.steer") == 0)
         return ksnprintf(out, n, "%u", netif_steering() ? 1u : 0u);
+    /* The scrub's bound, blocks a second (roadmap 1.2 B2): a scrub reads
+     * it when it starts. 0 is no bound. */
+    if (strcmp(name, "fs.scrub_rate") == 0)
+        return ksnprintf(out, n, "%u", __atomic_load_n(&g_cosmofs_scrub_rate, __ATOMIC_RELAXED));
     if (strcmp(name, "debug.faultinject") == 0) {
         int len = faultinject_sysctl(out, n);
         return len < 0 ? -ENOENT : len;   /* -ENOENT in release builds: the knob does not exist */
@@ -2636,6 +2642,27 @@ static int64_t sys_sysctl_set(struct syscall_args *a)
         known = known && CONFIG_DEBUG;
     if (!known)
         return -ENOENT;
+    if (strcmp(name, "fs.scrub_rate") == 0) {
+        if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
+            return -EPERM;
+        size_t len = (size_t)a->a[2];
+        char buf[16];
+        if (len == 0 || len >= sizeof(buf))
+            return -EINVAL;
+        if (copy_from_user(buf, a->a[1], len))
+            return -EFAULT;
+        buf[len] = '\0';
+        uint64_t v = 0;
+        for (size_t i = 0; i < len; i++) {
+            if (buf[i] < '0' || buf[i] > '9')
+                return -EINVAL;   /* digits only, as fsctl's ids */
+            v = v * 10 + (uint64_t)(buf[i] - '0');
+        }
+        if (v > (1u << 24))
+            return -EINVAL;   /* 64 GiB a second: past it the bound means nothing */
+        __atomic_store_n(&g_cosmofs_scrub_rate, (unsigned)v, __ATOMIC_RELAXED);
+        return 0;
+    }
     if (strcmp(name, "kernel.hostname") != 0)
         return -EROFS;
     if (!cred_has(cred_current(), PRIV_SYS_ADMIN))

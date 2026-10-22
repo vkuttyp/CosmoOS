@@ -26,6 +26,8 @@
 #include <kernel/timer.h>
 #include <kernel/wait.h>
 
+#include <uapi/cosmo/fsctl.h>   /* COSMO_FSCTL_STAGE_*: where a mount stopped */
+
 #include "cosmofs_internal.h"
 
 /* --- checksums and headers -------------------------------------------- */
@@ -2262,6 +2264,12 @@ int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies)
     return format_at(bd, n, copies, CFS_FORMAT_VERSION, NULL);
 }
 
+/* The VFS's mirror format: one member, a copy on each device. */
+static int cosmofs_format_mirror_devs(struct blkdev **bd, unsigned n)
+{
+    return cosmofs_format_mirror(bd, 1, n);
+}
+
 int cosmofs_format(struct blkdev *bd)
 {
     return format_at(&bd, 1, 1, CFS_FORMAT_VERSION, NULL);
@@ -2982,6 +2990,7 @@ static int load_bitmap(struct cfs *fs)
      * the next mount replays the same list to the same effect. The
      * commit that supersedes the record is what retires it.
      */
+    fs->load_stage = COSMO_FSCTL_STAGE_FREE_RECORD;
     rc = freelog_replay(fs);
     if (rc)
         return rc;
@@ -3055,6 +3064,7 @@ static int load_root(struct cfs *fs, struct vnode **root)
 {
     fs->gen = fs->sb.generation + 1;
     fs->alloc_hint = 2;
+    fs->load_stage = COSMO_FSCTL_STAGE_MEMBERS;
     int rc = cfs_members_load(fs);
     if (rc)
         return rc;
@@ -3081,9 +3091,11 @@ static int load_root(struct cfs *fs, struct vnode **root)
      * small device. */
     uint64_t tot = fs->sb.total_blocks;
     fs->reserve = tot / 32 > 32 ? tot / 32 : 32;
+    fs->load_stage = COSMO_FSCTL_STAGE_BITMAP;
     rc = load_bitmap(fs);
     if (rc)
         return rc;
+    fs->load_stage = COSMO_FSCTL_STAGE_SNAPSHOTS;
     /* How many snapshots exist decides whether a commit may free the
      * blocks it releases (design.md, "Format version 3"). */
     unsigned n = 0;
@@ -3110,6 +3122,7 @@ static int load_root(struct cfs *fs, struct vnode **root)
     bool switched = false;
     if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && fs->rdonly)
         kinfo("cosmofs: read-only: a rollback record is in place; a writable mount acts on it");
+    fs->load_stage = COSMO_FSCTL_STAGE_ROLLBACK;
     if (fs->sb.version >= 12 && fs->sb.rollback_root != 0 && !fs->rollback_off && !fs->rdonly) {
         rc = cfs_rollback_at_mount(fs, &switched);
         if (rc) {
@@ -3117,6 +3130,8 @@ static int load_root(struct cfs *fs, struct vnode **root)
             return rc;
         }
     }
+    fs->rollback_switched = switched;
+    fs->load_stage = COSMO_FSCTL_STAGE_ROOT;
     /*
      * The root must be a directory -- the one the switch, if any, made
      * live: the VFS takes that as given (do_mount
@@ -3132,6 +3147,7 @@ static int load_root(struct cfs *fs, struct vnode **root)
     }
     /* After a switch the record is the target's own orphans, which the
      * switch's commit wrote (cosmofs_rollback.c). */
+    fs->load_stage = COSMO_FSCTL_STAGE_ORPHAN_RECORD;
     rc = orphan_replay(fs);
     if (rc)
         return rc;
@@ -3182,6 +3198,70 @@ static void cfs_writeback_thread(void *arg)
     }
 }
 
+/*
+ * The last failed mount's device, stage and error. One record, not one
+ * per device: the check on an unmounted device asks right after its own
+ * mount failed, holding the device's claim, so the record it reads is
+ * that mount's. Under a spinlock because two mounts of different
+ * devices can fail at once.
+ */
+static spinlock_t g_fail_lock = SPINLOCK_INIT("cosmofs-mount-fail");
+static const struct blkdev *g_fail_bd;
+static unsigned g_fail_stage;
+static int g_fail_rc;
+
+static void mount_failure_note(const struct blkdev *bd, unsigned stage, int rc)
+{
+    spin_lock(&g_fail_lock);
+    g_fail_bd = bd;
+    g_fail_stage = stage;
+    g_fail_rc = rc;
+    spin_unlock(&g_fail_lock);
+}
+
+bool cfs_mount_failure(const struct blkdev *bd, unsigned *stage, int *rc)
+{
+    spin_lock(&g_fail_lock);
+    bool mine = g_fail_bd == bd;
+    if (mine) {
+        *stage = g_fail_stage;
+        *rc = g_fail_rc;
+        g_fail_bd = NULL;
+    }
+    spin_unlock(&g_fail_lock);
+    return mine;
+}
+
+int cfs_super_slots(struct blkdev *bd, struct cfs_super *a, int *ra, struct cfs_super *b, int *rb)
+{
+    struct cfs *fs = kzalloc(sizeof(*fs));
+    if (fs == NULL)
+        return -ENOMEM;
+    int rc = pool_open(bd, &fs->pool);
+    if (rc == 0) {
+        *ra = super_read(fs, CFS_SUPER_A, a);
+        *rb = super_read(fs, CFS_SUPER_B, b);
+        pool_close(fs->pool);
+    }
+    kfree(fs);
+    return rc;
+}
+
+void cfs_bitmap_claim(struct cfs *fs, uint64_t lin)
+{
+    if (lin >= fs->nblocks || bit_test(fs->bitmap, lin))
+        return;
+    bit_set(fs->bitmap, lin);
+    fs->bitmap_dirty[lin / CFS_BITS_PER_BITMAP] = 1;
+    if (fs->free_blocks > 0)
+        fs->free_blocks--;
+    uint64_t dva = cfs_lin_dva(fs, lin);
+    unsigned v = CFS_DVA_VDEV(dva);
+    if (v < fs->nmembers && fs->mem[v].free_blocks > 0)
+        fs->mem[v].free_blocks--;
+    note_dirty(fs);
+}
+
 static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flags, struct mount *mnt)
 {
     (void)fst;
@@ -3209,6 +3289,7 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     int rb = super_read(fs, CFS_SUPER_B, &b);
     if (ra && rb) {
         kerror("cosmofs: %s: no valid superblock", bdev->name);
+        mount_failure_note(bdev, COSMO_FSCTL_STAGE_SUPER, -EIO);
         cfs_destroy(fs);
         return -EIO;
     }
@@ -3224,8 +3305,12 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     rc = load_root(fs, &root);
     if (rc && fs->rollback_failed) {
         /* The rollback's switch failed: nothing of it was published, so
-         * the same root is loaded again with the switch off. */
+         * the same root is loaded again with the switch off -- and why is
+         * kept, for whoever asks why the rollback is still pending
+         * (CFS-20). */
+        int why = rc;
         cfs_reset_root(fs);
+        fs->rollback_error = why;
         fs->sb = fs->sb_slot == CFS_SUPER_A ? a : b;   /* the switch changed the in-memory root */
         fs->rollback_failed = false;
         fs->rollback_off = true;
@@ -3237,9 +3322,11 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
         cfs_reset_root(fs);
         fs->sb = other == CFS_SUPER_A ? a : b;
         fs->sb_slot = other;
+        fs->fell_back = true;
         rc = load_root(fs, &root);
     }
     if (rc) {
+        mount_failure_note(bdev, fs->load_stage, rc);
         mnt->fs_priv = NULL;
         cfs_destroy(fs);
         return rc;
@@ -3594,10 +3681,12 @@ struct fs_type cosmofs_fs_type = {
      * only caller of either was a self-test. */
     .check = cosmofs_check,
     .scrub = cosmofs_scrub,
+    .check_dev = cosmofs_check_dev,
     .snapctl = cosmofs_snapctl,
     /* A single-device pool, unencrypted: what the installer makes
      * through /dev/blkctl (roadmap M2), named or not (S6). */
     .format = cosmofs_format_label,
+    .format_mirror = cosmofs_format_mirror_devs,
 };
 
 /*

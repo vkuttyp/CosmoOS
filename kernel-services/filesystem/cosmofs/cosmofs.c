@@ -803,7 +803,7 @@ int cfs_record_read(struct cfs *fs, struct cfs_inode *in, const struct cfs_exten
 }
 
 int cfs_data_scrub_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf,
-                         unsigned *repaired)
+                         bool repair, unsigned *bad, unsigned *repaired)
 {
     if (in->csum_algo == CFS_CSUM_POLY1305) {
         /* The keyless CRC of the ciphertext: a scrub runs, and repairs,
@@ -815,7 +815,7 @@ int cfs_data_scrub_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, ui
         if (!cfs_dva_valid(fs, dva))
             return -EIO;
         struct data_want w = { .fs = fs, .in = in, .lblk = lblk, .crc = e.crc, .have_crc = true };
-        rc = cfs_verify_all(fs, dva, buf, cipher_crc_ok, &w, repaired);
+        rc = cfs_verify_all(fs, dva, buf, cipher_crc_ok, &w, repair, bad, repaired);
         if (rc)
             fs->csum_failures++;
         return rc;
@@ -831,7 +831,7 @@ int cfs_data_scrub_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, ui
     }
     if (!cfs_dva_valid(fs, dva))
         return -EIO;
-    int rc = cfs_verify_all(fs, dva, buf, data_ok, &w, repaired);
+    int rc = cfs_verify_all(fs, dva, buf, data_ok, &w, repair, bad, repaired);
     if (rc && w.have_crc)
         fs->csum_failures++;
     return rc;
@@ -2745,6 +2745,9 @@ static int snap_list_sized(struct cfs *fs, struct cosmofs_snap_req *req)
     bool have_rb = cfs_rollback_read(fs, &rb) == 0;
     if (have_rb)
         req->pool_flags = rb.state == CFS_ROLLBACK_PENDING ? COSMOFS_POOL_PENDING : COSMOFS_POOL_HELD;
+    /* Why this mount left a pending rollback pending (CFS-20); only while
+     * one is, so a later request does not inherit an old reason. */
+    req->rollback_error = have_rb && rb.state == CFS_ROLLBACK_PENDING ? fs->rollback_error : 0;
     unsigned total = 0;
     int rc = cfs_snapshot_list(fs, NULL, 0, &total);
     if (rc)
