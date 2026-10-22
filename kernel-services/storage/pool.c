@@ -59,6 +59,30 @@ static bool writable(const struct pool_copy *c)
     return c->dev != NULL && (c->state == POOL_COPY_ONLINE || c->state == POOL_COPY_RESILVERING);
 }
 
+/* A hole: a block this ONLINE copy failed to take while another copy
+ * took it (its bit in the copy's bitmap). Not read from until rebuilt. */
+static bool hole(const struct spool_member *m, const struct pool_copy *c, uint64_t blk)
+{
+    if (c->dirty == NULL)
+        return false;
+    uint64_t r = blk / m->region_blocks;
+    return r < POOL_DIRTY_BITS && ((c->dirty[r / 8] >> (r % 8)) & 1u);
+}
+
+static bool readable_at(const struct spool_member *m, const struct pool_copy *c, uint64_t blk)
+{
+    return readable(c) && !hole(m, c, blk);
+}
+
+static bool any_bit(const struct pool_copy *c)
+{
+    if (c->dirty)
+        for (unsigned i = 0; i < POOL_DIRTY_BYTES; i++)
+            if (c->dirty[i])
+                return true;
+    return false;
+}
+
 static unsigned online_copies(const struct spool_member *m)
 {
     unsigned n = 0;
@@ -242,18 +266,37 @@ unsigned pool_copies(const struct spool *p, uint64_t dva)
 bool pool_copy_readable(const struct spool *p, uint64_t dva, unsigned c)
 {
     unsigned v = POOL_DVA_VDEV(dva);
-    return v < p->nmembers && c < p->m[v].ncopies && readable(&p->m[v].copy[c]);
+    uint64_t blk = POOL_DVA_BLK(dva);
+    return v < p->nmembers && c < p->m[v].ncopies && blk < p->m[v].nblocks &&
+           readable_at(&p->m[v], &p->m[v].copy[c], blk);
 }
 
+bool pool_copy_online(const struct spool *p, unsigned vdev, unsigned c)
+{
+    return vdev < p->nmembers && c < p->m[vdev].ncopies && readable(&p->m[vdev].copy[c]);
+}
+
+/* A copy out, or an ONLINE one with holes: either way the member is not
+ * whole, and its record is kept (design.md, "Degraded operation"). */
 bool pool_member_degraded(const struct spool *p, unsigned vdev)
 {
     if (vdev >= p->nmembers)
         return false;
     const struct spool_member *m = &p->m[vdev];
     for (unsigned c = 0; c < m->ncopies; c++)
-        if (!readable(&m->copy[c]))
+        if (!readable(&m->copy[c]) || (m->ncopies > 1 && any_bit(&m->copy[c])))
             return true;
     return false;
+}
+
+void pool_set_member_blocks(struct spool *p, unsigned vdev, uint64_t nblocks)
+{
+    if (vdev >= p->nmembers || nblocks == 0 || nblocks > p->m[vdev].nblocks)
+        return;
+    p->m[vdev].nblocks = nblocks;
+    p->m[vdev].region_blocks = region_blocks_for(nblocks);
+    if (vdev == 0)
+        p->nblocks = nblocks;
 }
 
 bool pool_degraded(const struct spool *p)
@@ -324,11 +367,13 @@ int pool_copy_set_state(struct spool *p, unsigned vdev, unsigned c, enum pool_co
     enum pool_copy_state was = cp->state;
     if (was == POOL_COPY_ONLINE) {
         /* From here it misses writes. Whatever reached it since the last
-         * root may be only in its cache, so it starts from those. */
+         * root may be only in its cache, so that is added to the holes it
+         * already had. */
         cp->since = p->epoch;
         cp->whole = false;
         if (cp->dirty && m->recent)
-            memcpy(cp->dirty, m->recent, POOL_DIRTY_BYTES);
+            for (unsigned i = 0; i < POOL_DIRTY_BYTES; i++)
+                cp->dirty[i] |= m->recent[i];
     }
     if (state == POOL_COPY_ONLINE && cp->dirty)
         memset(cp->dirty, 0, POOL_DIRTY_BYTES);
@@ -434,14 +479,15 @@ int pool_read_copy(struct spool *p, uint64_t dva, unsigned copy, void *buf)
     struct spool_member *m = member_of(p, dva, &blk);
     if (m == NULL || copy >= m->ncopies)
         return -EINVAL;
-    if (!readable(&m->copy[copy]))
+    if (!readable_at(m, &m->copy[copy], blk))
         return -ENODEV;
     return read_one(p, POOL_DVA_VDEV(dva), blk, copy, buf);
 }
 
 /* A write that did not reach copy `c`: its region is one the copy missed.
- * An ONLINE copy's bitmap means nothing; one leaving ONLINE starts from
- * the regions written since the last root, which include this one. */
+ * An ONLINE copy's are holes, set by the writer only when another copy
+ * took the block (pool_write_flags): one leaving ONLINE adds the regions
+ * written since the last root, which include this one. */
 static void missed(struct spool_member *m, unsigned c, uint64_t blk)
 {
     if (m->copy[c].dirty && m->copy[c].state != POOL_COPY_ONLINE)
@@ -475,7 +521,14 @@ int pool_write_copy(struct spool *p, uint64_t dva, unsigned copy, const void *bu
         return -EINVAL;
     if (!writable(&m->copy[copy]))
         return -ENODEV;
-    return write_one(p, POOL_DVA_VDEV(dva), blk, copy, buf, 0);
+    bool was_online = m->copy[copy].state == POOL_COPY_ONLINE;
+    int rc = write_one(p, POOL_DVA_VDEV(dva), blk, copy, buf, 0);
+    /* A repair that did not take: the copy still lacks the block, and
+     * another copy has it (it is what the repair was from). */
+    if (rc && was_online && m->copy[copy].state == POOL_COPY_ONLINE && online_copies(m) > 1 &&
+        m->copy[copy].dirty)
+        region_set(m->copy[copy].dirty, m, blk);
+    return rc;
 }
 
 /* The first ONLINE copy that answers. */
@@ -487,7 +540,7 @@ int pool_read(struct spool *p, uint64_t dva, void *buf)
         return -EINVAL;
     int first = 0;
     for (unsigned c = 0; c < m->ncopies; c++) {
-        if (!readable(&m->copy[c]))
+        if (!readable_at(m, &m->copy[c], blk))
             continue;
         int rc = read_one(p, POOL_DVA_VDEV(dva), blk, c, buf);
         if (rc == 0)
@@ -519,6 +572,7 @@ int pool_write_flags(struct spool *p, uint64_t dva, const void *buf, unsigned fl
         region_set(m->recent, m, blk);
     int first = 0;
     bool landed = false;
+    bool failed_online[POOL_MAX_COPIES] = { false };
     for (unsigned c = 0; c < m->ncopies; c++) {
         if (!writable(&m->copy[c])) {
             missed(m, c, blk);
@@ -528,12 +582,23 @@ int pool_write_flags(struct spool *p, uint64_t dva, const void *buf, unsigned fl
         int rc = write_one(p, v, blk, c, buf, flags);
         if (rc == 0 && was_online)
             landed = true;
-        else if (rc && first == 0)
+        else if (rc && was_online)
+            failed_online[c] = true;
+        if (rc && first == 0)
             first = rc;
     }
-    if (landed)
-        return 0;
-    return first ? first : -EIO;
+    if (!landed)
+        return first ? first : -EIO;
+    /* An ONLINE copy that failed it, below its fault count: still ONLINE,
+     * and holding the old block. That is a hole, recorded and not read
+     * from until it is rebuilt -- forgetting it would let the copy serve
+     * the stale block, or come back from a later fault as if it held it.
+     * Only when another copy took the write: with none, the write failed
+     * and nothing will name the block. */
+    for (unsigned c = 0; c < m->ncopies; c++)
+        if (failed_online[c] && m->copy[c].state == POOL_COPY_ONLINE && m->copy[c].dirty)
+            region_set(m->copy[c].dirty, m, blk);
+    return 0;
 }
 
 int pool_write(struct spool *p, uint64_t dva, const void *buf)
@@ -546,8 +611,8 @@ int pool_write(struct spool *p, uint64_t dva, const void *buf)
  * missed everything since the last root -- which is what its bitmap
  * starts from when it leaves ONLINE -- so it is taken out: MISSING for
  * -ENODEV, FAULTED otherwise, except a member's last ONLINE copy. The
- * flush fails only for a member left with no ONLINE copy: a commit
- * durable on one device of a member is durable.
+ * flush succeeds for a member when an ONLINE copy flushed: a commit
+ * durable on one device of a member is durable, and on none is not.
  */
 int pool_flush(struct spool *p)
 {
@@ -555,14 +620,18 @@ int pool_flush(struct spool *p)
     for (unsigned v = 0; v < p->nmembers; v++) {
         struct spool_member *m = &p->m[v];
         int mfirst = 0;
+        bool flushed = false;   /* an ONLINE copy is durable */
         for (unsigned c = 0; c < m->ncopies; c++) {
             struct pool_copy *cp = &m->copy[c];
             if (!writable(cp))
                 continue;
+            bool was_online = cp->state == POOL_COPY_ONLINE;
             p->flushes++;
             int rc = blk_flush(cp->dev);
-            if (rc == 0)
+            if (rc == 0) {
+                flushed = flushed || was_online;
                 continue;
+            }
             cp->write_errors++;
             if (mfirst == 0)
                 mfirst = rc;
@@ -571,8 +640,10 @@ int pool_flush(struct spool *p)
             else if (!(cp->state == POOL_COPY_ONLINE && online_copies(m) == 1))
                 (void)pool_copy_set_state(p, v, c, POOL_COPY_FAULTED, rc);
         }
-        if (mfirst && online_copies(m) == 0 && first == 0)
-            first = mfirst;
+        /* Durable on one ONLINE copy is durable; on none -- even the last
+         * copy left ONLINE after its flush failed -- it is not. */
+        if (!flushed && first == 0)
+            first = mfirst ? (mfirst == -ENODEV ? -EIO : mfirst) : -EIO;
     }
     return first;
 }

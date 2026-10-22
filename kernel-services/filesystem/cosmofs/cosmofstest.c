@@ -6393,6 +6393,10 @@ bool selftest_pool_copy_states(const char **reason)
     for (unsigned i = 0; i < 3; i++)
         CS_CHECK(pool_write(p, 10 + i, w) == 0);
     CS_CHECK(p->m[0].copy[1].state == POOL_COPY_ONLINE && p->m[0].copy[1].write_errors == 3);
+    /* Still ONLINE, and what it failed is a hole: not read from it, the
+     * member not whole (Codex on #439). */
+    CS_CHECK(!pool_copy_readable(p, 10, 1) && !pool_copy_readable(p, 12, 1) && pool_copy_readable(p, 5, 1));
+    CS_CHECK(pool_copy_online(p, 0, 1) && pool_degraded(p));
     CS_CHECK(pool_write(p, 13, w) == 0);
     CS_CHECK(p->m[0].copy[1].state == POOL_COPY_FAULTED && p->state_seq != seq && pool_degraded(p));
     CS_CHECK(p->m[0].copy[1].since == 7 && !p->m[0].copy[1].whole);
@@ -6411,6 +6415,9 @@ bool selftest_pool_copy_states(const char **reason)
         CS_CHECK(pool_write(p, 30, w) == -EIO);   /* no ONLINE copy took it */
     CS_CHECK(pool_read(p, 30, r) == -EIO);
     CS_CHECK(p->m[0].copy[0].state == POOL_COPY_ONLINE && p->m[0].copy[0].write_errors == 5);
+    CS_CHECK(pool_copy_readable(p, 30, 0));   /* no other copy took block 30: no hole */
+    CS_CHECK(pool_flush(p) == -EIO);   /* the last copy failed its flush: not durable (Codex on #439) */
+    CS_CHECK(p->m[0].copy[0].state == POOL_COPY_ONLINE);
     ramblk_set_fail(bd[0], 0);
     ramblk_set_fail(bd[1], 0);
     /* A copy that missed writes comes back only through a resilver. */
@@ -6722,7 +6729,10 @@ bool selftest_cosmofs_copy_import(const char **reason)
     CS_CHECK(read_matches(ENG "/second", "second", 6) && read_matches(ENG "/first", "first", 5));
     struct cosmofs_stats st;
     CS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 1 && st.degraded == 1);
+    /* The device the mount moved to is held by it (Codex on #439). */
+    CS_CHECK(vfs_bdev_mounted(bd[0]));
     CS_CHECK(vfs_umount(ENG) == 0);
+    CS_CHECK(!vfs_bdev_mounted(bd[0]));
 
     /* The newer device mounted already: the lagging one does not mount. */
     CS_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
@@ -6738,8 +6748,49 @@ out:
     return ok;
 #undef ENG2
 }
+/*
+ * A copy on a bigger device than the first (Codex on #439): the member's
+ * size, and so its record's regions, are the table's, so the pool mounts
+ * through the bigger copy with the record the smaller one's mount wrote.
+ */
+bool selftest_cosmofs_copy_geometry(const char **reason)
+{
+    struct blkdev *bd[2] = { NULL, NULL };
+    bool ok = false;
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    bd[0] = ramblk_create(512);
+    bd[1] = ramblk_create(8192);   /* 8192 blocks would be two a region; 512 are one */
+    CS_CHECK(bd[0] != NULL && bd[1] != NULL && cosmofs_format_mirror(bd, 1, 2) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CS_CHECK(mk == 0 || mk == -EEXIST);
+    CS_CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct spool *pool = cosmofs_test_pool(mount_of(ENG));
+    CS_CHECK(pool->m[0].nblocks == 512 && pool->m[0].region_blocks == 1);
+    CS_CHECK(write_file(ENG "/g", "geometry", 8) && vfs_sync() == 0);
+    ramblk_set_fail(bd[0], -ENODEV);   /* the small one goes: the big one is the pool now */
+    CS_CHECK(write_file(ENG "/h", "after", 5) && vfs_sync() == 0);
+    CS_CHECK(vfs_umount(ENG) == 0);
+    CS_CHECK(vfs_mount(ENG, "cosmofs", bd[1], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    pool = cosmofs_test_pool(mount_of(ENG));
+    CS_CHECK(pool->m[0].nblocks == 512 && pool->m[0].region_blocks == 1);
+    CS_CHECK(read_matches(ENG "/h", "after", 5) && read_matches(ENG "/g", "geometry", 8));
+    ok = true;
+    kinfo("selftest: cosmofs-copy-geometry: a bigger copy mounts the pool at the table's size");
+out:
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    for (unsigned i = 0; i < 2; i++)
+        if (bd[i]) {
+            ramblk_set_fail(bd[i], 0);
+            ramblk_destroy(bd[i]);
+        }
+    return ok;
+}
 #undef CS_CHECK
 #else
+bool selftest_cosmofs_copy_geometry(const char **reason) { (void)reason; return true; }
 bool selftest_pool_copy_states(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_degraded(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_copy_bitmap(const char **reason) { (void)reason; return true; }

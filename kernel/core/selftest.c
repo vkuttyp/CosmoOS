@@ -758,6 +758,7 @@ static const struct selftest tests[] = {
     { "cosmofs-degraded", selftest_cosmofs_degraded },
     { "cosmofs-copy-bitmap", selftest_cosmofs_copy_bitmap },
     { "cosmofs-copy-import", selftest_cosmofs_copy_import },
+    { "cosmofs-copy-geometry", selftest_cosmofs_copy_geometry },
     { "cosmofs-nomem", selftest_cosmofs_nomem },
     { "cosmofs-crypt", selftest_cosmofs_crypt },
     { "cosmofs-reserve", selftest_cosmofs_reserve },

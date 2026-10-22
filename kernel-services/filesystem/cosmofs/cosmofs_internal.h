@@ -458,6 +458,8 @@ unsigned cfs_copies_out(struct cfs *fs);
 int cfs_copystate_prepare(struct cfs *fs);
 int cfs_copystate_fill(struct cfs *fs);
 bool cfs_copystate_recorded(struct cfs *fs);
+/* The pool's other devices held by the mount (CFS-5). */
+void cfs_holds_sync(struct cfs *fs);
 /* The newest member-0 device of the pool `uuid` names, if it is newer
  * than `gen` and is not `bd`: referenced, or NULL (CF27). */
 struct blkdev *cfs_newer_member0(struct blkdev *bd, const uint8_t uuid[16], uint64_t gen, uint64_t *newer);

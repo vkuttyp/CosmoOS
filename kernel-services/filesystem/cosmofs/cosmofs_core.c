@@ -2041,6 +2041,11 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
     /* The frees dirtied bitmap chunks for the next commit; that is
      * bookkeeping of this commit, not a new change to age. */
     fs->first_dirty_ns = 0;
+    /* A copy whose state this commit could not record is a commit still
+     * due, whether or not anything else is written (Codex on #439): the
+     * writeback thread commits only what is marked dirty. */
+    if (fs->pool->state_seq != fs->copystate_seq)
+        note_dirty(fs);
     kdebug("cosmofs: committed generation %llu (%llu free blocks)", (unsigned long long)fs->sb.generation,
            (unsigned long long)fs->free_blocks);
     if (published)
@@ -3468,6 +3473,7 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     }
     mnt->root = root;
     cfs_pool_changed(fs);
+    cfs_holds_sync(fs);
     kinfo("cosmofs: %s: generation %llu, %llu/%llu blocks free (%llu reserved), %llu inodes", bdev->name,
           (unsigned long long)fs->sb.generation, (unsigned long long)fs->free_blocks,
           (unsigned long long)fs->sb.total_blocks, (unsigned long long)fs->reserve,
@@ -3596,7 +3602,7 @@ int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)
     out->devices = 0;
     for (unsigned v = 0; v < fs->nmembers; v++)
         for (unsigned c = 0; c < pool_copies(fs->pool, CFS_DVA(v, 0)); c++)
-            out->devices += pool_copy_readable(fs->pool, CFS_DVA(v, 0), c) ? 1u : 0u;
+            out->devices += pool_copy_online(fs->pool, v, c) ? 1u : 0u;
     out->repairs = fs->repairs;
     out->degraded = cfs_copies_out(fs);
     mutex_unlock(&fs->lock);

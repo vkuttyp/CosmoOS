@@ -477,9 +477,18 @@ int cfs_copystate_prepare(struct cfs *fs)
         struct cfs_buf *b;
         int rc;
         if (m->state_root == 0) {
-            rc = cfs_buf_new(fs, CFS_KIND_COPYSTATE, &b);
+            /* On the member it describes, when it has room (as a member's
+             * allocation index is); the mount reads records only once
+             * every member is assembled, so elsewhere is not fatal. */
+            uint64_t blk, got;
+            rc = cfs_alloc_run(fs, CFS_ALLOC_META, CFS_DVA(v, m->first_usable), 1, &blk, &got);
             if (rc)
                 return rc;
+            rc = cfs_buf_new_at(fs, CFS_KIND_COPYSTATE, blk, &b);
+            if (rc) {
+                cfs_free_block_deferred(fs, blk);
+                return rc;
+            }
             m->state_root = b->blkno;
         } else {
             rc = cfs_buf_get(fs, m->state_root, CFS_KIND_COPYSTATE, &b);
@@ -677,12 +686,18 @@ int cfs_members_load(struct cfs *fs)
         }
         if (rc)
             break;
-        if (m->copies > 1 && fs->pool->m[v].ncopies == 1) {
-            rc = setup_copies(fs, v, src);
-            if (rc)
-                break;
-        }
+        /* And the member is the table's size, however big its device:
+         * the copy record's regions are sized from it, and a larger copy
+         * mounting the pool must size them the same. */
+        pool_set_member_blocks(fs->pool, v, m->nblocks);
     }
+    /* The copies, once every member is assembled: a member's record may
+     * lie on another member (the allocator put it where there was room),
+     * and a record is read like any metadata block -- only once the
+     * member it lies on is there. */
+    for (unsigned v = 0; v < fs->nmembers && rc == 0; v++)
+        if (fs->mem[v].copies > 1 && fs->pool->m[v].ncopies == 1)
+            rc = setup_copies(fs, v, &mb->m[v]);
     kfree(block);
     if (rc) {
         kfree(fs->mem);
@@ -700,7 +715,7 @@ int cfs_members_load(struct cfs *fs)
         unsigned mirrored = 0;
         for (unsigned v = 0; v < fs->nmembers; v++)
             for (unsigned c = 0; c < fs->pool->m[v].ncopies; c++)
-                mirrored += pool_copy_readable(fs->pool, CFS_DVA(v, 0), c) ? 1u : 0u;
+                mirrored += pool_copy_online(fs->pool, v, c) ? 1u : 0u;
         kinfo("cosmofs: pool of %u members over %u device(s), %llu blocks%s", fs->nmembers, mirrored,
               (unsigned long long)fs->sb.total_blocks, fs->degraded ? " (degraded)" : "");
     }
@@ -765,7 +780,7 @@ int cfs_labels_update(struct cfs *fs)
     for (unsigned v = 1; v < fs->nmembers; v++) {
         unsigned n = pool_copies(fs->pool, CFS_DVA(v, 0));
         for (unsigned c = 0; c < n; c++) {
-            if (!pool_copy_readable(fs->pool, CFS_DVA(v, 0), c))
+            if (!pool_copy_online(fs->pool, v, c))
                 continue;
             int rc = cfs_label_write(fs->pool, v, c, fs->gen, fs->sb.uuid, fs->mem[v].nblocks);
             if (rc == -ENOMEM)
@@ -775,6 +790,31 @@ int cfs_labels_update(struct cfs *fs)
     return 0;
 }
 
+/*
+ * The devices the pool uses besides the one the mount was given -- its
+ * other copies, and after a mount that moved to a newer member-0 device
+ * that device too -- held by the mount, so /dev/blkctl and a second
+ * mount see them as in use (CFS-5; Codex on #439: a redirected mount
+ * left the device it actually used unclaimed).
+ */
+void cfs_holds_sync(struct cfs *fs)
+{
+    if (fs->mnt == NULL)
+        return;
+    struct blkdev *held[MOUNT_HELD_MAX];
+    unsigned n = 0;
+    const struct spool *p = fs->pool;
+    for (unsigned v = 0; v < p->nmembers; v++)
+        for (unsigned c = 0; c < p->m[v].ncopies; c++) {
+            struct blkdev *bd = p->m[v].copy[c].dev;
+            if (bd != NULL && bd != fs->mnt->bdev && n < MOUNT_HELD_MAX)
+                held[n++] = bd;
+        }
+    int rc = vfs_mount_set_held(fs->mnt, held, n);
+    if (rc)
+        kwarn("cosmofs: %s: the pool's devices could not all be held (%d)", fs->pool_name, rc);
+}
+
 /* Copies the table promises that are not ONLINE with a device. */
 unsigned cfs_copies_out(struct cfs *fs)
 {
@@ -782,7 +822,7 @@ unsigned cfs_copies_out(struct cfs *fs)
     for (unsigned v = 0; v < fs->nmembers; v++) {
         unsigned n = fs->mem[v].copies;
         for (unsigned c = 0; c < n; c++)
-            out += pool_copy_readable(fs->pool, CFS_DVA(v, 0), c) ? 0u : 1u;
+            out += pool_copy_online(fs->pool, v, c) ? 0u : 1u;
     }
     return out;
 }

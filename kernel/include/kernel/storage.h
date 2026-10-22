@@ -111,8 +111,15 @@ int pool_add_copy(struct spool *p, unsigned vdev, struct blkdev *bd);
 /* Copy slots of the member `dva` names (present or not), or 0 when it
  * names none. */
 unsigned pool_copies(const struct spool *p, uint64_t dva);
-/* True if copy `c` of the member `dva` names may be read (ONLINE). */
+/* True if copy `c` of the member `dva` names may be read for that block:
+ * ONLINE, and the block not in a hole of it (a write it failed while
+ * another copy took it). */
 bool pool_copy_readable(const struct spool *p, uint64_t dva, unsigned c);
+/* True if copy `c` of member `vdev` is ONLINE with a device. */
+bool pool_copy_online(const struct spool *p, unsigned vdev, unsigned c);
+/* The member is `nblocks` long, as its table says, whatever its first
+ * device's capacity: the dirty regions are sized from it. */
+void pool_set_member_blocks(struct spool *p, unsigned vdev, uint64_t nblocks);
 /* True if the member `dva` names has a copy that is not ONLINE. */
 bool pool_member_degraded(const struct spool *p, unsigned vdev);
 bool pool_degraded(const struct spool *p);

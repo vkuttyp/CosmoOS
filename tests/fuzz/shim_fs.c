@@ -202,6 +202,24 @@ const char *pool_copy_state_name(enum pool_copy_state s)
 
 uint32_t g_pool_fault_errors = 16;
 
+bool pool_copy_online(const struct spool *p, unsigned vdev, unsigned c)
+{
+    (void)p;
+    return vdev == 0 && c == 0;
+}
+
+void pool_set_member_blocks(struct spool *p, unsigned vdev, uint64_t nblocks)
+{
+    if (vdev == 0 && nblocks != 0 && nblocks <= p->m[0].nblocks)
+        p->m[0].nblocks = nblocks;
+}
+
+int vfs_mount_set_held(struct mount *mnt, struct blkdev *const *bd, unsigned n)
+{
+    (void)mnt; (void)bd; (void)n;
+    return 0;
+}
+
 int pool_read_copy(struct spool *p, uint64_t dva, unsigned copy, void *buf)
 {
     return copy == 0 ? pool_read(p, dva, buf) : -EINVAL;

@@ -1899,6 +1899,14 @@ region, so a coarse region costs time and never a block.
 - **A read** is served by the first `ONLINE` copy that answers; read
   repair and the scrub pass over copies that are not `ONLINE` rather
   than counting them bad.
+- **A hole.** An `ONLINE` copy whose write failed while another copy
+  took the block stays `ONLINE` (below its fault count) but holds the
+  old block: the region is set in its bitmap, no read is served from it
+  there, and the member counts as degraded, so its record is kept. A
+  copy that later leaves `ONLINE` adds the regions written since the
+  last root to the holes it had; the resilver fills them. When no copy
+  took the write, nothing is set: the write failed, and nothing names
+  the block.
 - **A failure** is counted against the copy. `-ENODEV` -- the block
   layer's answer for an unregistered device -- makes it `MISSING` at
   once; any other I/O error makes it `FAULTED` once its read and write
@@ -1911,10 +1919,14 @@ region, so a coarse region costs time and never a block.
   read instead, taking it out turns some errors into all of them.
 - **What a copy missed.** The pool keeps, per member, the regions
   written since the last durable root (`pool_commit_done(gen)` clears
-  them). A copy that leaves `ONLINE` starts its bitmap from those -- a
+  them). A copy that leaves `ONLINE` adds those to its bitmap -- a
   write that reached its cache and not its disk before it was pulled is
   still a region it missed -- and records `since`, the last root it
   held whole. From then every write it does not take adds its region.
+- **A flush** succeeds for a member when an `ONLINE` copy flushed; a
+  copy whose flush failed leaves `ONLINE`, except the member's last,
+  and then the flush fails: a commit durable on none of a member's
+  devices is not published.
 - **Said once.** Each transition prints one console line (`pool: member
   0 copy 1 (vdb) MISSING (-19): the member is degraded`); the mount line
   ends `(degraded)`; `/proc/mounts` shows `rw,degraded` while any member
@@ -1965,6 +1977,13 @@ for the mount and a copy that missed commits on it is rebuilt whole.
   to it (`cosmofs: vdb is behind (generation 40); mounting from vdc
   (generation 52)`). Before B3 a mount given the stale copy mounted the
   stale tree and attached the current copy beside it.
+- **The member's size is the table's**, whatever the capacity of the
+  device the mount found first: a copy may be bigger than the group, and
+  the record's regions are sized from the group (`pool_set_member_blocks`).
+- **Records are read once every member is assembled**: a member's
+  record is a metadata block like any other and may lie on another
+  member when its own had no room (it is allocated on its own member
+  when it can be).
 - **Copies are matched to records, not to numbers.** Copies are
   interchangeable, so the records are put in order -- `ONLINE` first --
   and the devices found fill them: a current device (its superblock's or
@@ -1977,6 +1996,10 @@ for the mount and a copy that missed commits on it is rebuilt whole.
   what it needs; any other lagging device has no record that covers it
   and is a whole rebuild. `OFFLINE` and `FAULTED` records stay so until
   the operator acts.
+- **The mount holds every device the pool uses** besides the one it was
+  given -- its other copies, and the newer device a redirected mount
+  moved to -- so `/dev/blkctl`'s mounted check and a second mount see
+  them in use (`vfs_mount_set_held`; CFS-5).
 
 ## Self-test fixture failure ownership
 
