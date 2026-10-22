@@ -2842,6 +2842,24 @@ held one report, one probe script and this file. The test itself passed
 is the boot harness's per-test 8 s budget, which a chaos boot on a
 loaded runner exceeded by about 1 s. The re-run passed. First sighting.
 
+## The guide's `wget http://example.com/`: the site answered 503, 2026-10-22
+
+One sighting, CI run 39790028445 attempt 1 (`user guide commands (linux,
+x86_64)` on main's merge of #435, `d0778ec0`, a documentation-only
+change): `run-guide: FAIL: networking.md:113: wget -q -O -
+http://example.com/: expected a line '...Example Domain...'`, with
+`wget: server returned error: HTTP/1.1 503 Service Unavailable`. The
+`nslookup example.com` before it had passed and the request reached a
+server that answered it, so the guest's resolver, TCP and HTTP worked;
+the 503 was the site's (or a cache in front of it). The other three
+guide jobs and every other job in the run passed, and the page answered
+200 from this developer's machine after the run. Not a CosmoOS defect
+and not a timing bound, so not on the list: the guide's networking
+section fetches a public site by design (it shows what a reader types).
+Attempt 2 (`gh run rerun --failed`) ended in `startup_failure` with no
+jobs, and GitHub refused a third attempt; the merge of this entry gave
+main a fresh run.
+
 ## `test-snapshot`: `init: restart requested` after the prompt, 2026-10-21
 
 One sighting, x86-64, CI run 39533566121 (`install test (x86_64)` on
