@@ -3250,15 +3250,12 @@ static bool bdev_related(const struct blkdev *a, const struct blkdev *b)
 {
     if (a == b)
         return true;
-    /* A removed device's name is free for the next one to take: a mount
-     * still holding a pulled vda2 does not hold the new disk called vda
-     * (roadmap 1.2 B3's test-mirror). */
-    if (__atomic_load_n(&a->gone, __ATOMIC_SEQ_CST) || __atomic_load_n(&b->gone, __ATOMIC_SEQ_CST))
-        return false;
-    struct blk_part_info pi;
-    if (blk_part_info(a, &pi) && strcmp(pi.disk, b->name) == 0)
-        return true;
-    return blk_part_info(b, &pi) && strcmp(pi.disk, a->name) == 0;
+    /* The disk objects, not their names: a removed device's name is free
+     * for the next one to take, so a mount still holding a pulled vda2
+     * does not hold the new disk called vda (roadmap 1.2 B3's
+     * test-mirror), and does hold the old vda while its partitions are
+     * being unregistered before it (Codex on #442). */
+    return blk_part_disk(a) == b || blk_part_disk(b) == a;
 }
 
 /* The device claims, not g_mounts: a mount still being set up or still

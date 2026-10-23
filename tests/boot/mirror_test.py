@@ -228,10 +228,11 @@ def stage_reboot(args, results, pair, what):
         need(out, r"^pool / \(cosmo-root\): ONLINE", f"{what}: cosmo-pool status")
         dx = find_disk(b, pair)
         need(out, rf"^\s+copy \d+\s+{re.escape(dx)}\s+ONLINE", f"{what}: the new pair")
-        out = b.status("cmp /mirror-w /bin/busybox || ls -l /mirror-w", "cmp-status")
-        # The writer was stopped mid-copy at the latest; the file is the
-        # binary whole or a prefix of it.
-        need(out, r"^cmp-status=[01]$", f"{what}: the writer's file")
+        # The writer was stopped mid-copy at the latest: the file is the
+        # binary whole or a prefix of it, compared as such (Codex on #442:
+        # `cmp || ls` passed anything that existed).
+        out = b.status("n=$(wc -c < /mirror-w) && head -c \"$n\" /bin/busybox | cmp - /mirror-w", "cmp-status")
+        need(out, r"^cmp-status=0$", f"{what}: the writer's file")
         no_panic(b.text(), what)
         rc = b.finish("poweroff")
         if rc != EXIT_SUCCESS:

@@ -519,6 +519,14 @@ struct target {
     char root_uuid[GPT_GUID_TEXT];
 };
 
+/* The pool's 4096-byte blocks the root partition holds (its last sector
+ * included). */
+#define POOL_BLOCK_BYTES 4096u
+static uint64_t root_blocks(const struct target *t)
+{
+    return (t->root_last - t->root_first + 1) * t->ss / POOL_BLOCK_BYTES;
+}
+
 static const struct cosmo_blkctl_dev *boot_dev(void)
 {
     for (unsigned i = 0; i < g_ndevs; i++)
@@ -680,8 +688,10 @@ static int install(const char *target_name, const char *mirror_name, bool force)
             rc = 3;
         }
         /* The mirror is the first root partition's size: the second's must
-         * hold it (design: a copy covers its group). */
-        if (rc == 0 && (tg[1].root_last - tg[1].root_first) * tg[1].ss < (tg[0].root_last - tg[0].root_first) * tg[0].ss) {
+         * hold as many of the pool's blocks (design: a copy covers its
+         * group), counted in those blocks, so sector sizes do not matter
+         * (Codex on #442). */
+        if (rc == 0 && root_blocks(&tg[1]) < root_blocks(&tg[0])) {
             fprintf(stderr, "cosmo-install: %s is smaller than %s; the mirror's second disk must be as big\n",
                     tg[1].name, tg[0].name);
             rc = 3;

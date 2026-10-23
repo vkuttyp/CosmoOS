@@ -60,6 +60,9 @@ struct blk_part_info {
 
 /* False when `bd` is not a partition. */
 bool blk_part_info(const struct blkdev *bd, struct blk_part_info *out);
+/* The disk object `bd` is a partition of, or NULL when it is not one. For
+ * comparison: a removed disk's name may already be another's. */
+const struct blkdev *blk_part_disk(const struct blkdev *bd);
 
 /* The registered partition whose unique GUID is `uuid`, referenced, or
  * NULL. Sleeps. */

@@ -9,9 +9,9 @@ held devices of a mounted pool (CFS-5, PR #439).
          detached mount holds: the boot's check of a mirrored root said
          `root not checked: Device or resource busy` and init mounted it
          unchecked
-  gone   bdev_related matched by name a device that had been removed: a
-         mount still holding the pulled vda2 held the new disk that took
-         the name vda, and `cosmo-pool replace 0:1 vda` was refused -EBUSY
+  gone   bdev_related matched a partition to its disk by name: a mount
+         still holding the pulled vda2 held the new disk that took the
+         name vda, and `cosmo-pool replace 0:1 vda` was refused -EBUSY
 
 --old restores the old behaviour in a throwaway worktree, by the
 replacement the case names, and runs `make BUILD=release test-mirror`:
@@ -35,8 +35,11 @@ CASES = {
                 "vfs_bdev_mounted_except(d, mnt)", "vfs_bdev_mounted(d)")],
               r"test-mirror: FAIL: replace: the boot's check of the root"),
     "gone": ([("kernel-services/vfs/vfs.c",
-               "    if (__atomic_load_n(&a->gone, __ATOMIC_SEQ_CST) || __atomic_load_n(&b->gone, __ATOMIC_SEQ_CST))\n"
-               "        return false;\n", "")],
+               "    return blk_part_disk(a) == b || blk_part_disk(b) == a;\n",
+               "    struct blk_part_info pi;\n"
+               "    if (blk_part_info(a, &pi) && strcmp(pi.disk, b->name) == 0)\n"
+               "        return true;\n"
+               "    return blk_part_info(b, &pi) && strcmp(pi.disk, a->name) == 0;\n")],
              r"test-mirror: FAIL: cosmo-pool replace: no line matching '\^replace-status=0\$'"),
 }
 
