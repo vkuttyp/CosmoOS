@@ -205,8 +205,9 @@ static int status_one(int fd, unsigned long long id, const char *path)
             printf(" errors: %u read, %u write, %u checksum", k->read_errors, k->write_errors, k->csum_errors);
         printf("\n");
     }
+    int degraded = (p->flags & COSMO_FSCTL_POOL_DEGRADED) ? 1 : 0;   /* p is in buf */
     free(buf);
-    return (p->flags & COSMO_FSCTL_POOL_DEGRADED) ? 1 : 0;
+    return degraded;
 }
 
 static void fail(const char *what, const char *name)
