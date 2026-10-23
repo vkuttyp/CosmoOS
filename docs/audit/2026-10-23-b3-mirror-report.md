@@ -153,7 +153,7 @@ devices, which are on main.
 | Case | Defect | `test-mirror` with `--old` |
 |---|---|---|
 | `check` | The checker's "another device of this pool is mounted" asked `vfs_bdev_mounted`, which sees the checker's own detached mount's hold. A mirrored root's boot check refused itself, and init mounted the root unchecked. | fails at `replace: the boot's check of the root: no line matching '^cosmofs: root checked, 0 findings, 0 repaired$'` (x86-64 and AArch64) |
-| `gone` | `bdev_related` matched a removed device by name. A mount holding the pulled `vda2` held the new disk `vda`, and the replace was refused `-EBUSY`. | fails at `cosmo-pool replace: no line matching '^replace-status=0$'` (x86-64 and AArch64) |
+| `gone` | `bdev_related` matched a partition to its disk by name. A mount holding the pulled `vda2` held the new disk `vda`, and the replace was refused `-EBUSY`. It now compares the partition's disk object (`blk_part_disk`). | fails at `cosmo-pool replace: no line matching '^replace-status=0$'` (x86-64 and AArch64) |
 
 `tools/b3-mirror-probe.py --case NAME --arch ARCH --old` restores the
 old line in a throwaway worktree and runs `make BUILD=release
@@ -172,6 +172,26 @@ main yet, so neither has a probe:
   and every status call ended with signal 11 after printing. The test
   missed this, because it checked only what was printed. Every status
   call must now exit 0 or 1, and no process may fault.
+
+### Review of #442 (2026-10-23)
+
+Codex made three P2 findings, all fixed in `ea830da7`:
+
+- **The first `gone` fix:** it returned "unrelated" for any removed
+  device. While a disk is unregistered, its partitions go first, so for
+  a moment the disk itself was not seen as mounted, and a `/dev/blkctl`
+  write could pass the guard. Partitions and disks are now compared by
+  object. The probe was re-anchored to the new line and still fails at
+  the replace on both architectures.
+- **`cosmo-install --mirror`'s size check:** it compared bytes and left
+  out each partition's last sector. It now compares the 4096-byte blocks
+  the pool uses.
+- **The reboot check of the writer's file:** `cmp ... || ls` passed any
+  file that existed. The file must now equal the same-length prefix of
+  `/bin/busybox`.
+
+After the fixes, on both architectures: `test-mirror` passes (63.0 s
+and 87.9 s), `analyze` is clean, and the debug boots pass.
 
 ## test-mirror
 
