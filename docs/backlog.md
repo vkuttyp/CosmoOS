@@ -306,6 +306,7 @@ Open lines (struck lines are not counted):
 - **USR-5** nice-to-have, S. No `xz` compressor; `syslogd` keeps no file or ring; `lsblk` has no `MAJ:MIN` or options; `blkid` knows no FAT or `PARTLABEL`.
 - **USR-6** correctness, S. `cosmo-sh` hands the terminal to a foreground job as its last stage is spawned (COSMO_SPAWN_FOREGROUND), so the group holds every stage when it takes ^C; the earlier stages of a pipeline start in the background for the moment the spawns take, and one that checks the terminal at its first instruction can still stop itself. A start barrier (spawn stopped, continue the group) would close it (Codex on #424).
 - **USR-7** usability, S. No `/dev/urandom` or `/dev/random`: a shell script wanting random or incompressible bytes reads nothing (`head -c N /dev/urandom` gives at most the error); tests use awk's `rand()` or gzip output instead (test-pkgtx, test-fsck).
+- **USR-8** correctness, S. On the installed system `/run/svc` is on the root disk and nothing clears it at boot, so a pid file outlives its service; `svc`'s `running()` trusts any pid `kill(p, 0)` can signal, and a boot where another process has that pid says `svc: dropbear is already running` and never starts it. Seen on the Parallels VM 2026-10-23: `dropbear.pid` held 13 from 2026-10-22, pid 13 was `syslogd` at every boot, and ssh was refused through several boots and upgrades (cleared by hand). Clear `/run` at boot (or mount a ramfs on it), or check the pid is the service's supervisor.
 
 ## VFS
 

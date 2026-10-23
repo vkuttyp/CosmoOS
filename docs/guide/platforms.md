@@ -139,6 +139,11 @@ each change of disks was made with the VM stopped:
   blocks and 1715 ms later. A scrub was clean, and both files read back
   with their checksums.
 
+The same VM was then upgraded to v1.0.11-rc2 (the rc for the corrected
+notes; the same code) and from it to v1.0.11 (`cosmo-upgrade --fetch
+v1.0.11`); each boot checked the root clean and the mirror was `ONLINE`,
+and a scrub under rc2 was clean.
+
 The added disk carries only the pool's copy and no ESP, so the VM
 boots from `nvme0n2` alone. `cosmo-install DISK --mirror DISK2` gives
 both disks an ESP.
