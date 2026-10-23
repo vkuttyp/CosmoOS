@@ -144,15 +144,17 @@ PCIe native hotplug, as QEMU's `pcie-root-port` and a hot-plug capable
 downstream port offer it. After enumeration, `pciehp_init` finds every
 type-1 function with a PCI Express capability whose port type is a root
 or downstream port, whose `Slot Implemented` bit is set and whose Slot
-Capabilities say `Hot-Plug Capable`. For each one it clears the slot's
-event bits, asks for a single MSI on the port (`pci_msi_enable`) and
-enables presence-detect-changed, data-link-layer-state-changed, the
-attention button when the slot has one, and the hot-plug interrupt. The
-console says which (`pci: pci:00:03.0: hot-plug slot 1 (bus 01),
-attention button, events by MSI`). One thread, `pciehp`, looks every
-20 ms at the slots whose interrupt count moved; a port whose MSI could
-not be set up is read every 500 ms instead, and its line says `no MSI:
-polled every 500 ms`.
+Capabilities say `Hot-Plug Capable`. After the IOMMU is up,
+`pci_hotplug_start` clears each slot's event bits, gives the port
+MSI-X at the entry its Express capability names for hot-plug events
+(else MSI), and enables presence-detect-changed,
+data-link-layer-state-changed, the attention button when the slot has
+one, and the hot-plug interrupt. The console says which (`pci:
+pci:00:0b.0: hot-plug slot 1 (bus 01), attention button, events by
+MSI-X`). One thread, `pciehp`, looks every 20 ms at the slots whose
+interrupt count moved; a port with neither MSI-X nor MSI is read every
+500 ms instead, and its line says `no MSI or MSI-X (...): polled every
+500 ms`.
 
 - **Removal.** QEMU's `device_del` on a root port presses its attention
   button and waits for the guest to power the slot off before it removes
