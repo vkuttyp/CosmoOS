@@ -6925,9 +6925,9 @@ bool selftest_cosmofs_resilver(const char **reason)
      * count. It stays ONLINE with holes, the member not whole; the
      * resilver fills them and nothing else. */
     g_pool_fault_errors = 1000;
-    ramblk_set_fail(bd[1], -EIO);
+    ramblk_set_fail_writes(bd[1], -EIO);   /* writes only: a failed flush faults a copy at once, by design */
     RS_CHECK(write_file(ENG "/holes", data, sizeof(data)) && vfs_sync() == 0);
-    ramblk_set_fail(bd[1], 0);
+    ramblk_set_fail_writes(bd[1], 0);
     g_pool_fault_errors = limit;
     RS_CHECK(cp->state == POOL_COPY_ONLINE && pool_copy_any_missed(pool, 0, 1) && pool_degraded(pool));
     RS_CHECK(read_matches(ENG "/holes", data, sizeof(data)));
