@@ -190,6 +190,17 @@ struct cfs {
     /* The writeback thread (design.md, "The writeback thread"). */
     struct thread *wb_thread;
     bool wb_stop;
+    /* The resilver (cosmofs_resilver.c): one thread a mount, from the
+     * first copy that needs one until the unmount. */
+    struct thread *rs_thread;
+    bool rs_stop;
+    bool maint;                 /* a maintenance mount (MOUNT_DETACHED): no resilver, no pool commands */
+    uint64_t rs_since_record;   /* blocks copied since the cursor was last made due for the record */
+    uint64_t rs_started_ns;
+    uint64_t rs_copied;         /* blocks this resilver copied */
+    uint8_t *rs_buf;            /* the thread's block, allocated before the thread (rs_wake) */
+    uint64_t rs_disagree;       /* blocks two ONLINE sources held differently (rs_step) */
+    uint32_t rs_region_errors;  /* the target's write errors when its current region began (an ONLINE copy's holes) */
     bool wb_enabled;        /* test hook: autonomous commits on */
     unsigned wb_interval_ms;
     uint64_t first_dirty_ns; /* when the open transaction first became non-empty; 0 when empty */
@@ -456,10 +467,36 @@ unsigned cfs_copies_out(struct cfs *fs);
  * each degraded member needs (and the raise to 13); just before the dirty
  * metadata is written, their contents. */
 int cfs_copystate_prepare(struct cfs *fs);
+/* The scrub's and the resilver's bound (fs.scrub_rate, fs.resilver_rate):
+ * `used` counts blocks; cfs_pace lets fs->lock go for the rest of the
+ * window once a window's share is spent, and says whether it did. */
+struct cfs_pace {
+    unsigned quota;          /* blocks a window; 0 = unpaced */
+    uint64_t window_ns;
+    unsigned used;
+    uint64_t window;         /* when this window began */
+};
+void cfs_pace_init(struct cfs_pace *p, unsigned rate);
+bool cfs_pace(struct cfs *fs, struct cfs_pace *p);
 int cfs_copystate_fill(struct cfs *fs);
 bool cfs_copystate_recorded(struct cfs *fs);
 /* The pool's other devices held by the mount (CFS-5). */
 void cfs_holds_sync(struct cfs *fs);
+int cfs_holds_sync_with(struct cfs *fs, struct blkdev *extra);
+/* Labels on devices that are not (yet) copies: resilver targets and
+ * spares (design.md, "Resilvering", "Spares"). */
+int cfs_label_write_dev(struct cfs *fs, struct blkdev *bd, unsigned vdev, uint64_t flags, uint64_t tag,
+                        uint64_t nblocks);
+void cfs_label_clear_dev(struct blkdev *bd);
+struct blkdev *cfs_find_tagged(struct cfs *fs, uint64_t flags, uint64_t tag);
+void cfs_spares_find(struct cfs *fs);
+struct blkdev *cfs_find_lagging(struct cfs *fs, unsigned vdev, uint64_t since, bool *exact);
+/* The resilver (cosmofs_resilver.c): started after a mount, stopped
+ * before the filesystem is torn down; the holds (CFS-5) set again. */
+void cfs_resilver_mount(struct cfs *fs);
+void cfs_resilver_stop(struct cfs *fs);
+int cosmofs_poolctl(struct mount *mnt, struct cosmofs_pool_req *req);
+int cosmofs_commit_mount(struct mount *mnt);
 /* The newest member-0 device of the pool `uuid` names, if it is newer
  * than `gen` and is not `bd`: referenced, or NULL (CF27). */
 struct blkdev *cfs_newer_member0(struct blkdev *bd, const uint8_t uuid[16], uint64_t gen, uint64_t *newer);

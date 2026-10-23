@@ -1128,7 +1128,9 @@ static int super_write(struct cfs *fs, unsigned slot, unsigned flags)
     *sb = fs->sb;
     sb->crc = 0;
     sb->crc = block_crc(block, offsetof(struct cfs_super, crc));
-    int rc = pool_write_flags(fs->pool, slot, block, flags);
+    /* ONLINE copies only: a copy being resilvered gets its superblocks
+     * when it holds everything they name (design.md, "Resilvering"). */
+    int rc = pool_write_flags(fs->pool, slot, block, flags | POOL_WRITE_ONLINE);
     kfree(block);
     return rc;
 }
@@ -3062,6 +3064,7 @@ static void cfs_destroy(struct cfs *fs)
     /* Nothing may still be committing while this frees the buffers and
      * fs. cosmofs_unmount has already stopped the thread; a mount that
      * failed has none to stop, and this says so rather than trusting it. */
+    cfs_resilver_stop(fs);
     if (fs->wb_thread) {
         __atomic_store_n(&fs->wb_stop, true, __ATOMIC_RELEASE);
         thread_join(fs->wb_thread);
@@ -3373,6 +3376,7 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     mutex_init(&fs->lock, "cosmofs");
     fs->mnt = mnt;
     fs->wb_enabled = !detached;
+    fs->maint = detached;
     fs->wb_interval_ms = CFS_WB_INTERVAL_MS;
     int rc = pool_open(bdev, &fs->pool);
     if (rc) {
@@ -3483,6 +3487,10 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     fs->mount_done = true;
     if (fs->first_dirty_ns != 0)
         note_dirty(fs);
+    /* Spares, the pool's other devices held (CFS-5), and a resilver for
+     * every copy that wants one -- after the mount, so a boot does not
+     * wait for it (design.md, "Import"). */
+    cfs_resilver_mount(fs);
     return 0;
 }
 
@@ -3555,6 +3563,17 @@ static int cosmofs_sync(struct mount *mnt)
     return cosmofs_sync_counted(mnt, false);
 }
 
+/* A commit of this mount now, as the writeback thread makes one (under
+ * the mount's sync lock): what a pool command changed is on disk when
+ * the command returns (cosmofs_poolctl). */
+int cosmofs_commit_mount(struct mount *mnt)
+{
+    mutex_lock(&mnt->sync_lock);
+    int rc = mnt->unmounted ? 0 : cosmofs_sync_counted(mnt, false);
+    mutex_unlock(&mnt->sync_lock);
+    return rc;
+}
+
 /* The VFS committed through cosmofs_sync before calling this; what is
  * left is either nothing, a deliberately discarded transaction (test
  * hook) or an abandoned one (cfs_fail), and both are dropped here so the
@@ -3564,6 +3583,9 @@ static int cosmofs_sync(struct mount *mnt)
 static int cosmofs_unmount(struct mount *mnt)
 {
     struct cfs *fs = cfs_of(mnt);
+    /* The resilver first: its cursor is in the record the VFS's last
+     * sync wrote, and the next mount goes on from there. */
+    cfs_resilver_stop(fs);
     if (fs->wb_thread) {
         __atomic_store_n(&fs->wb_stop, true, __ATOMIC_RELEASE);
         thread_join(fs->wb_thread);
@@ -3834,6 +3856,7 @@ struct fs_type cosmofs_fs_type = {
     .scrub = cosmofs_scrub,
     .check_dev = cosmofs_check_dev,
     .snapctl = cosmofs_snapctl,
+    .poolctl = cosmofs_poolctl,
     /* A single-device pool, unencrypted: what the installer makes
      * through /dev/blkctl (roadmap M2), named or not (S6). */
     .format = cosmofs_format_label,

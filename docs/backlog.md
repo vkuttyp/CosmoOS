@@ -64,6 +64,7 @@ Open lines (struck lines are not counted):
 - **BLK-6** nice-to-have, M. AHCI NCQ, deferred until a real disk shows it pays (four streams reach 87 % of NVMe without it).
 - **BLK-7** nice-to-have, S. USB storage scatter-gather beyond 16 segments, deferred (within noise of NVMe).
 - **BLK-8** nice-to-have, L. The rest of the NVMe feature set, only for a demonstrated device or workload.
+- **BLK-9** nice-to-have, M. No NVMe namespace management (create, attach, delete namespaces); a controller's namespaces are what it reports at probe (out of roadmap 1.2 B3's scope).
 
 ## Boot chain and verified boot
 
@@ -91,7 +92,7 @@ Open lines (struck lines are not counted):
 - ~~**CFS-2** correctness, S. New files are LZ4 on any format version, so an older-version image written here can hold v6 records.~~ Done by roadmap 1.2 B2's first PR (CF22: no record below format 6).
 - ~~**CFS-3** correctness, S. Snapshot ids are unique per mount only: a deleted newest snapshot's id is reused after a remount (V22 says never).~~ Done by roadmap 1.2 B1's first PR (format version 12: the list head carries the id high-water mark, CF18); a pool older than format 11 keeps the old behaviour.
 - **CFS-4** correctness, S. `cosmofs_rekey` leaves the key block in the open transaction until the next commit.
-- **CFS-5** correctness, S. `/dev/blkctl`'s mounted check does not see the other members of a mounted multi-device pool.
+- ~~**CFS-5** correctness, S. `/dev/blkctl`'s mounted check does not see the other members of a mounted multi-device pool.~~ Done by roadmap 1.2 B3: a mount holds its pool's other copies (the first PR), resilver targets and spares (the second) (`vfs_mount_set_held`), which `vfs_bdev_mounted` and a new mount's claim see.
 - ~~**CFS-6** correctness, M. CF17 abandons the transaction (`cfs_fail`) for failures a retry could survive; `extents_store` and `inode_sync` should allocate and write first so they fail cleanly.~~ Done by roadmap 1.2 B2's first PR (`cfs_prep_meta`, `cfs_inode_prepare`; `cosmofs-nomem`).
 - **CFS-7** security, M. Metadata is checksummed, not authenticated: a forger can recompute CRC32C; a keyed `csum_algo` would close it.
 - **CFS-8** usability, M. Snapshots cannot be booted as environments (roadmap 1.2 B4). Rollback to a snapshot and writable clones are done by B1 (`cosmo-snap rollback`, `cosmo-snap clone`; CF19, CF20).
@@ -113,6 +114,8 @@ Open lines (struck lines are not counted):
 - **CFS-24** usability, S. Only the root is checked at boot; a pool mounted later (`mount`, `/etc/rc`) is not.
 - **CFS-25** correctness, S. `fsck.cosmofs --repair`'s writable mount replays the orphan record and applies a pending rollback before the check runs, and either can allocate: on a pool with a free block in use the allocator could hand that block out first, which the repair would then see as a cross-link (by reading the code, not observed).
 - **CFS-26** nice-to-have, S. The scrub paces between inode blocks, data blocks and snapshots but reads one deadlist chain (up to 4096 blocks) without letting go of the lock.
+- **CFS-27** nice-to-have, M. A mirror group holds at most four copies (`CFS_MAX_COPIES`, the copy record's four slots) and a replace of a good copy needs a free slot; wider mirrors need a format change (out of roadmap 1.2 B3's scope).
+- **CFS-28** nice-to-have, M. No rebalancing across members: a member added later fills only from new allocations, and nothing moves blocks between members or off one being removed (out of B3's scope).
 
 ## Documentation
 
@@ -137,6 +140,7 @@ Open lines (struck lines are not counted):
 - **DRV-14** nice-to-have, S. `/dev/rtc0` has no alarms or update interrupts.
 - **DRV-15** nice-to-have, S. QEMU `-accel hvf` stops on an MMIO access without ISV; use ISV-reporting accessors.
 - **DRV-16** nice-to-have, L. A display interface for programs, cursor, 3D; Wi-Fi and Bluetooth; a desktop -- when hardware and a use case exist.
+- **DRV-17** nice-to-have, M. Hot-removal of a device that is not on PCIe (a USB disk under a mounted pool is handled by its own driver's disconnect only); roadmap 1.2 B3 did PCIe (out of its scope).
 
 ## Linux personality
 

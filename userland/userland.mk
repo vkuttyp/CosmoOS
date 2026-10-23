@@ -9,7 +9,7 @@ USER_LD := $(ROOT)/userland/user.ld
 # name := directory
 USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir mkfifo rmdir pwd true false sleep sync
 USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl cosmo-install cosmo-upgrade cosmo-verify netcfg priv ip syslogd \
-	lsblk blkid mkfs.cosmofs cosmo-snap fsck.cosmofs
+	lsblk blkid mkfs.cosmofs cosmo-snap fsck.cosmofs cosmo-pool
 
 PROG_DIR_sh     := shell
 PROG_DIR_echo   := coreutils
@@ -45,6 +45,7 @@ PROG_EXTRA_SRCS_fsctl := userland/system/fsreport.c
 PROG_DIR_fsck.cosmofs := system
 PROG_EXTRA_SRCS_fsck.cosmofs := userland/system/fsreport.c
 PROG_DIR_cosmo-snap := system
+PROG_DIR_cosmo-pool := system
 PROG_DIR_cosmo-install := system
 PROG_EXTRA_SRCS_cosmo-install := userland/system/install_gpt.c userland/system/install_sha512.c \
 	userland/system/upgrade_fat.c userland/system/blkdevs.c userland/system/upgrade_be.c

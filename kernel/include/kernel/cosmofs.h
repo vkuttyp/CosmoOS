@@ -240,6 +240,57 @@ struct cosmofs_snap_req {
     int rollback_error;             /* LIST: why this mount did not apply a pending rollback (CFS-20), or 0 */
 };
 
+/*
+ * The pool's copies (roadmap 1.2 B3; design.md, "Format version 13"):
+ * what /dev/fsctl's POOL_* operations reach. Devices are named by their
+ * block device names; a copy without a device by "member:copy".
+ */
+enum cosmofs_pool_op {
+    COSMOFS_POOL_STATUS,
+    COSMOFS_POOL_OFFLINE,
+    COSMOFS_POOL_ONLINE,
+    COSMOFS_POOL_REPLACE,
+    COSMOFS_POOL_ATTACH,
+    COSMOFS_POOL_DETACH,
+    COSMOFS_POOL_SPARE_ADD,
+    COSMOFS_POOL_SPARE_REMOVE,
+};
+
+#define COSMOFS_COPY_SPARE 5u           /* cosmofs_copy_info.state: a spare, not a copy */
+#define COSMOFS_COPY_I_WHOLE  (1u << 0)
+#define COSMOFS_COPY_I_DETACH (1u << 1)
+
+struct cosmofs_copy_info {
+    unsigned member, copy, state, flags;   /* state: CFS_COPY_* or COSMOFS_COPY_SPARE */
+    uint64_t since, cursor, blocks, to_do;
+    uint32_t read_errors, write_errors, csum_errors;
+    char dev[16];
+};
+
+struct cosmofs_pool_req {
+    enum cosmofs_pool_op op;
+    const char *name, *name2;
+    struct cosmofs_copy_info *out;  /* STATUS: up to `max` */
+    unsigned max, count, total;     /* count, total: filled in (STATUS); total > count when `max` was short */
+    uint64_t generation;            /* STATUS: the pool's */
+    unsigned members, format, rate;
+    bool degraded, resilvering;
+    char label[16];
+};
+
+/* sysctl fs.resilver_rate: blocks a second a resilver copies (0: no bound). */
+extern unsigned g_cosmofs_resilver_rate;
+#define COSMOFS_RESILVER_RATE_DEFAULT 8192u
+
+int cosmofs_poolctl(struct mount *mnt, struct cosmofs_pool_req *req);
+#if CONFIG_DEBUG
+/* Test seams (roadmap 1.2 B3): hold every mount's resilver thread; run a
+ * mount's resilver in the caller for at most `blocks` blocks (0: to the
+ * end, takeovers by spares included). */
+void cosmofs_test_resilver_hold(bool hold);
+int cosmofs_test_resilver_run(struct mount *mnt, uint64_t blocks);
+#endif
+
 #define COSMOFS_POOL_PENDING (1u << 0)
 #define COSMOFS_POOL_HELD    (1u << 1)
 

@@ -37,6 +37,7 @@ struct ramblk {
     bool stall;               /* deferred mode: the worker completes nothing */
     bool refuse_completes;    /* deferred mode: a refusal first completes the oldest in-flight bio, synchronously */
     int fail;                 /* nonzero: every bio completes with this error and moves no data */
+    int fail_writes;          /* nonzero: every write (not read, not flush) does */
 };
 
 static struct ramblk *of(struct blkdev *bd)
@@ -95,8 +96,8 @@ static int ramblk_submit(struct blkdev *bd, struct bio *bio)
             bio_complete(oldest, 0);
         return -EAGAIN;
     }
-    if (r->fail) {
-        int err = r->fail;
+    if (r->fail || (r->fail_writes && bio->dir == BIO_WRITE)) {
+        int err = r->fail ? r->fail : r->fail_writes;
         spin_unlock_irqrestore(&r->lock, s);
         bio_complete(bio, err);
         return 0;
@@ -194,6 +195,14 @@ void ramblk_set_fail(struct blkdev *bd, int err)
     struct ramblk *r = of(bd);
     arch_irq_state_t s = spin_lock_irqsave(&r->lock);
     r->fail = err;
+    spin_unlock_irqrestore(&r->lock, s);
+}
+
+void ramblk_set_fail_writes(struct blkdev *bd, int err)
+{
+    struct ramblk *r = of(bd);
+    arch_irq_state_t s = spin_lock_irqsave(&r->lock);
+    r->fail_writes = err;
     spin_unlock_irqrestore(&r->lock, s);
 }
 

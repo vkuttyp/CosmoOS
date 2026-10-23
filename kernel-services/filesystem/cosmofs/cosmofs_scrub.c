@@ -36,9 +36,36 @@ unsigned g_cosmofs_scrub_rate = COSMOFS_SCRUB_RATE_DEFAULT;
  * a time, so a pause is never long enough to be a stall of its own --
  * and, below ten blocks a second, one block a window of 1/rate seconds
  * (Codex on #434: a 100 ms window's minimum of one block ran a rate of 1
- * at 10). */
+ * at 10). The resilver paces itself the same way (roadmap 1.2 B3). */
 #define SCRUB_WINDOW_NS 100000000ull
 #define SCRUB_WINDOWS_PER_S 10u
+
+void cfs_pace_init(struct cfs_pace *p, unsigned rate)
+{
+    p->quota = rate == 0 ? 0 : (rate >= SCRUB_WINDOWS_PER_S ? rate / SCRUB_WINDOWS_PER_S : 1);
+    p->window_ns = rate == 0 || rate >= SCRUB_WINDOWS_PER_S ? SCRUB_WINDOW_NS : 1000000000ull / rate;
+    p->used = 0;
+    p->window = clock_now_ns();
+}
+
+/* Called with fs->lock held, and returns with it held: when this window's
+ * share is spent it lets the caller's lock go for the rest of the window
+ * and takes it again. True if it let go. */
+bool cfs_pace(struct cfs *fs, struct cfs_pace *p)
+{
+    if (p->quota == 0 || p->used < p->quota)
+        return false;
+    uint64_t spent = clock_since_ns(p->window);
+    mutex_unlock(&fs->lock);
+    if (spent < p->window_ns)
+        thread_sleep_ms((unsigned)((p->window_ns - spent + 999999ull) / 1000000ull));
+    else
+        sched_yield();
+    mutex_lock(&fs->lock);
+    p->used = 0;
+    p->window = clock_now_ns();
+    return true;
+}
 
 struct scrub {
     struct cfs *fs;
@@ -46,11 +73,8 @@ struct scrub {
     uint8_t *inodes;          /* one inode block's slots, copied out of the cache */
     struct cosmofs_scrub_stats st;
     bool repair;
-    unsigned quota;           /* blocks a window; 0 = unpaced */
-    uint64_t window_ns;       /* how long a window is */
+    struct cfs_pace pace;     /* fs.scrub_rate */
     uint64_t *slots;          /* an allocation index's chunk pointers, copied out */
-    unsigned used;
-    uint64_t window;          /* when this window began */
     uint64_t commits;         /* fs->commits when the walk last looked */
     struct cfs_bits done;     /* blocks verified (linear numbers) */
     bool stop;                /* stop walking: `err` says why */
@@ -68,18 +92,9 @@ struct scrub {
  */
 static bool pace(struct scrub *s)
 {
-    if (s->quota == 0 || s->used < s->quota)
-        return false;
     struct cfs *fs = s->fs;
-    uint64_t spent = clock_since_ns(s->window);
-    mutex_unlock(&fs->lock);
-    if (spent < s->window_ns)
-        thread_sleep_ms((unsigned)((s->window_ns - spent + 999999ull) / 1000000ull));
-    else
-        sched_yield();
-    mutex_lock(&fs->lock);
-    s->used = 0;
-    s->window = clock_now_ns();
+    if (!cfs_pace(fs, &s->pace))
+        return false;
     if (fs->failed) {
         s->stop = true;
         s->err = -EIO;
@@ -109,7 +124,7 @@ static void tally(struct scrub *s, int rc, unsigned bad, unsigned fixed)
         return;
     }
     s->st.blocks_read++;
-    s->used++;
+    s->pace.used++;
     if (rc)
         s->st.unrecoverable++;
     s->st.bad_copies += bad;
@@ -466,8 +481,7 @@ int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out, unsigned f
     s.repair = (flags & COSMOFS_SCRUB_REPAIR) != 0 && !fs->rdonly;
     unsigned rate = __atomic_load_n(&g_cosmofs_scrub_rate, __ATOMIC_RELAXED);
     s.st.rate = rate;
-    s.quota = rate == 0 ? 0 : (rate >= SCRUB_WINDOWS_PER_S ? rate / SCRUB_WINDOWS_PER_S : 1);
-    s.window_ns = rate == 0 || rate >= SCRUB_WINDOWS_PER_S ? SCRUB_WINDOW_NS : 1000000000ull / rate;
+    cfs_pace_init(&s.pace, rate);
     s.page = kmalloc(CFS_BLOCK, 0);
     s.slots = kmalloc((size_t)CFS_PTRS_PER_BLOCK * sizeof(uint64_t), 0);
     s.inodes = kmalloc((size_t)CFS_INODES_PER_BLOCK * CFS_INODE_SIZE, 0);
@@ -478,7 +492,7 @@ int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out, unsigned f
     if (rc == 0 && (s.page == NULL || s.inodes == NULL || s.slots == NULL || cfs_bits_alloc(&s.done, fs->nblocks) != 0))
         rc = -ENOMEM;   /* before the walk, never half way through it */
     if (rc == 0) {
-        s.window = clock_now_ns();
+        s.pace.window = clock_now_ns();
         s.commits = fs->commits;
         scrub_supers(&s);
         scrub_alloc(&s);

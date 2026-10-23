@@ -399,6 +399,26 @@ devices, and attaches no lagging copy.** Whichever device the mount was
 given; a device behind the root is not attached for reads. Check:
 `cosmofs-copy-import`.
 
+**CF28. A write made during a resilver reaches the copy being rebuilt.**
+From the moment a copy is `RESILVERING` the pool writes every block to
+it with the others (`pool_write`), and the resilver copies under
+`cfs->lock`, so no block it has copied can change without that write;
+only the root's write and the per-commit labels skip it, and its own
+superblock slots or label are copied when it is complete. Check:
+`cosmofs-resilver` (a file written mid-resilver reads back raw from
+both devices); `tools/b3-copystate-probe.py --case resilver --old`
+makes a resilvering copy unwritable and fails it.
+
+**CF29. A resilver ends with the copy holding every allocated block, or
+goes on after a reboot.** The walk covers every region the record names,
+again if a pass ends with bits set; the target carries no superblock or
+plain label until it is complete, so no mount takes it for a copy; the
+cursor is recorded and a mount resumes there. Check: `cosmofs-resilver`
+(every allocated block the same on both devices, the rebuilt one mounts
+the pool alone), `cosmofs-resilver-resume` (an unmount mid-resilver,
+the target found by its tag at the recorded cursor), `cosmofs-spare`,
+`cosmofs-attach`.
+
 **CF18. From format version 12 a snapshot's identity is its own: every
 snapshot has a uuid no other snapshot of the filesystem has, and no id
 is handed out twice, across remounts included.** The uuid is drawn when

@@ -1870,18 +1870,20 @@ struct cfs_copy_rec {          /* 1000 bytes */
     uint64_t since;            /* the last generation this copy holds whole */
     uint64_t cursor;           /* resilver: blocks below this are rebuilt */
     uint32_t read_errors, write_errors, csum_errors, pad;
-    uint8_t dirty[960];        /* one bit per region it missed */
+    uint64_t tag;              /* a resilver target's or spare's: its label says the same */
+    uint64_t peer;             /* CFS_COPY_DETACH: the copy replacing this one */
+    uint8_t dirty[944];        /* one bit per region it missed */
 };
 struct cfs_copystate {         /* the payload, 4016 bytes */
     uint32_t ncopies;
-    uint32_t region_blocks;    /* blocks per bit: ceil(nblocks / 7680) */
+    uint32_t region_blocks;    /* blocks per bit: ceil(nblocks / 7552) */
     uint64_t pad;
     struct cfs_copy_rec copy[CFS_MAX_COPIES];
 };
 ```
 
-7680 regions per copy: one block a region on anything up to 30 MiB, 9
-MiB a region on a 64 GiB member. A region is a unit of *work*, not of
+7552 regions per copy: one block a region on anything up to 29 MiB,
+under 9 MiB a region on a 64 GiB member. A region is a unit of *work*, not of
 correctness: the resilver copies every allocated block in a dirty
 region, so a coarse region costs time and never a block.
 
@@ -2000,6 +2002,116 @@ for the mount and a copy that missed commits on it is rebuilt whole.
   given -- its other copies, and the newer device a redirected mount
   moved to -- so `/dev/blkctl`'s mounted check and a second mount see
   them in use (`vfs_mount_set_held`; CFS-5).
+- **Then, after the mount returns** (`cfs_resilver_mount`): the pool's
+  spares are found by their labels; the devices it uses besides the one
+  it was given are held (CFS-5, below); a resilver a reboot interrupted
+  goes on (its target found by the tag in its label); and a lagging
+  device of a member that has an `ONLINE` copy is put back in its
+  `MISSING` slot and resilvered -- what its record names, or whole. A
+  boot does not wait for it: the root is mounted, `switch_root` runs, and
+  the resilver thread copies behind. A read-only or maintenance mount
+  (`fsck.cosmofs`) does none of this but finding the spares.
+
+### Resilvering
+
+A copy being rebuilt is `RESILVERING`: written, never read. From the
+moment it is, every write the pool takes reaches it, so what the
+resilver has to copy is exactly what was there before -- the allocated
+blocks of the regions its record names (all of them for a whole
+rebuild). One thread a mount does it, `cfs-resilver`, a window at a time
+under `cfs->lock` and paced by `fs.resilver_rate` (sysctl, blocks a
+second, default 8192 -- 32 MiB/s -- and 0 for none) with the scrub's
+pacer (`cfs_pace`): between windows the lock is let go, and writers and
+readers run.
+
+- **The walk.** A cursor runs over the member's blocks. A region is
+  copied when the copy's bitmap says it missed it, or when the cursor is
+  already inside it; its bit is cleared as the region is begun, so a
+  write that fails on the target during it sets the bit again, and a
+  reboot inside a region finishes that region before trusting the bits.
+  A block the bitmap calls free is skipped. A block is read from an
+  `ONLINE` copy (`pool_read`) and written to the target alone
+  (`pool_write_copy`); under the lock no write to it can come between
+  the two. A block no copy can read is said and left: the scrub after it
+  will find it, as it would have before.
+- **Copied last: what makes it a copy.** Blocks below `first_usable` --
+  member 0's two superblock slots, another member's label -- are not
+  copied by the walk, and the commit's root write skips a `RESILVERING`
+  copy (`POOL_WRITE_ONLINE`). The target carries instead a label at
+  block 0 that says it is being rebuilt (`CFS_LABEL_RESILVER` and the
+  record's tag) and, on member 0, an empty block 1. A half-rebuilt
+  device therefore never looks like a copy of the pool to a mount, to
+  `cfs_newer_member0` or to a device scan; when the walk is done, with
+  no commit running, the superblock slots are copied (or the label is
+  written), the device is flushed, and the copy is `ONLINE`
+  (`pool_copy_resilvered`).
+- **The cursor survives a reboot.** It is in the record, which every
+  `RS_RECORD_BLOCKS` (2048) blocks copied makes a commit due for; a
+  mount finds the target by its tag and goes on from the cursor.
+- **Two sources.** The walk copies blocks without knowing what each is,
+  so it cannot check one against its checksum. When a second `ONLINE`
+  copy holds the block too -- a copy being replaced while still good --
+  the two are compared; if any block differs, the copy being replaced is
+  not detached at the end (its `peer` is cleared and the console says
+  so): it may be the only good one, and `fsctl scrub --repair`, which
+  knows each block's checksum, decides before the operator detaches it.
+- **A crash at the end.** A target gets the pool's own superblocks or
+  label last; a mount that finds no tagged target for a `RESILVERING`
+  record but a device of the pool as current as the root takes that
+  device as the copy, `ONLINE`: nothing else gets the root written to it
+  but an `ONLINE` copy, so it is the finished target.
+- **Holes.** An `ONLINE` copy with holes is a target too, after every
+  `RESILVERING` one, when its member has another `ONLINE` copy: the walk
+  copies its holed regions, and a region's bit goes only when the whole
+  region is copied and no write to the copy failed meanwhile, since the
+  copy is read from everywhere else. It stays `ONLINE` throughout.
+- **Failures.** A target whose writes fail is counted and faulted like
+  any copy; the resilver stops with it. A pass that ends with bits set
+  again (a write failed in a region already done) goes round once more.
+
+### Replacing a copy
+
+`cosmo-pool replace COPY DEVICE` (`/dev/fsctl` `POOL_REPLACE`): DEVICE
+must be there, not the pool's, not another mount's, and cover the
+member. If COPY is `ONLINE` it goes on serving: the member gets one more
+slot (`copies` grows in the member table -- adding a copy, nothing
+else), DEVICE is resilvered into it whole, and COPY is marked to be
+detached (`CFS_COPY_DETACH`, `peer` = the new copy's tag); when the new
+copy is `ONLINE` the old one is detached and its label and superblock
+slots cleared. If COPY is out (`MISSING`, `FAULTED`, `OFFLINE`), DEVICE
+takes its slot. `attach COPY DEVICE` is the first case without the
+detach: a single device becomes a mirror, which needs format 11 or
+later (the record), and the pool is raised to 13 by the first commit.
+`detach COPY` removes a slot when another copy is `ONLINE` and clears
+the device's label. `offline` refuses a member's last `ONLINE` copy;
+`online` makes a copy `ONLINE` at once if it missed nothing since it
+left, and otherwise resilvers what it missed -- and given a device the
+pool does not hold, puts it in the `MISSING` slot whose record it
+matches. Every command commits before it answers, so an `offline` is a
+commit the copy misses: the `online` after it resilvers that much (the
+record's blocks and the superblock's region) and no more.
+
+### Spares
+
+`cosmo-pool add-spare DEVICE` writes a label to DEVICE that names the
+pool with `CFS_LABEL_SPARE` and a tag; a mount finds its spares by those
+labels. When a copy is `FAULTED` or `MISSING` and the pool has a spare
+that covers the member, the resilver thread puts the spare in the
+copy's slot, relabels it as the target and resilvers it whole:
+`cosmofs: rootfs: spare vdd takes over member 0 copy 1 (was vdb,
+MISSING)`. Once `ONLINE` it is a member like any other; the copy it
+replaced, if its device comes back, is a device of the pool that no slot
+wants, and is left alone. `remove-spare` clears the label.
+
+### The devices a mount holds (CFS-5)
+
+Before B3 a mount held only the device it was given, so `/dev/blkctl`
+would write (or `cosmo-install` format) the other copy of a mounted
+mirror. A mount now also holds what its filesystem says it uses
+(`vfs_mount_set_held`): cosmofs gives it every copy's device, every
+resilver target and every spare, and sets it again whenever that set
+changes. `vfs_bdev_mounted` -- what blkctl and `vfs_format` ask -- and
+the claim a new mount takes both see them.
 
 ## Self-test fixture failure ownership
 

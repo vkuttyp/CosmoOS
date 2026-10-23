@@ -58,6 +58,21 @@
 #define COSMO_FSCTL_CHECK_DEV    11   /* the check on an UNMOUNTED device `name` (fstype `name2`, "" = cosmofs):
                                        * one cosmo_fsctl_devcheck. Read-only unless F_REPAIR */
 #define COSMO_FSCTL_SCRUB_EX     12   /* the scrub, reporting only unless F_REPAIR: one cosmo_fsctl_scrub_ex */
+/*
+ * The pool's copies (roadmap 1.2 B3; design.md, "Format version 13").
+ * Devices are named by their block device name in `name` / `name2`; a
+ * copy whose device is gone is named "member:copy" (decimal, as STATUS
+ * lists it). The command layout is version 3's: these are new ops of
+ * the same version, offered when a mount's caps say COSMO_FSCTL_CAP_POOL.
+ */
+#define COSMO_FSCTL_POOL_STATUS      13   /* every copy and spare: cosmo_fsctl_pool, then cosmo_fsctl_copy records */
+#define COSMO_FSCTL_POOL_OFFLINE     14   /* take copy `name` out (not the member's last good one) */
+#define COSMO_FSCTL_POOL_ONLINE      15   /* bring `name` back: at once if it missed nothing, else resilvered */
+#define COSMO_FSCTL_POOL_REPLACE     16   /* resilver device `name2` in place of copy `name`; detach `name` after */
+#define COSMO_FSCTL_POOL_ATTACH      17   /* device `name2` becomes another copy of `name`'s member, resilvered */
+#define COSMO_FSCTL_POOL_DETACH      18   /* remove copy `name` (another copy must be ONLINE) */
+#define COSMO_FSCTL_POOL_SPARE_ADD   19   /* device `name` becomes a spare of the pool */
+#define COSMO_FSCTL_POOL_SPARE_REMOVE 20  /* ... and stops being one */
 
 /* CHECK, CHECK_DEV, SCRUB_EX: repair what has one right answer. Off by
  * default. */
@@ -73,6 +88,7 @@
 #define COSMO_FSCTL_CAP_CHECK (1u << 0)
 #define COSMO_FSCTL_CAP_SCRUB (1u << 1)
 #define COSMO_FSCTL_CAP_SNAP  (1u << 2)   /* version 3: the SNAP_* operations */
+#define COSMO_FSCTL_CAP_POOL  (1u << 3)   /* the POOL_* operations (roadmap 1.2 B3) */
 
 /* The command. Written whole, at exactly this size: a write of any other
  * length is -EINVAL rather than a struct reinterpreted. */
@@ -312,6 +328,47 @@ struct cosmo_fsctl_snap {
     uint32_t flags;           /* COSMO_FSCTL_SNAP_F_* */
     uint32_t format;          /* the filesystem's format version */
     char name[COSMO_FSCTL_NAME_MAX + 1];
+};
+
+/*
+ * POOL_STATUS: the header, one cosmo_fsctl_pool, then `count`
+ * cosmo_fsctl_copy records (`bytes` is one record's size): every copy
+ * slot of every mirrored member, then the spares.
+ */
+#define COSMO_FSCTL_POOL_DEGRADED (1u << 0)   /* a copy is not ONLINE */
+#define COSMO_FSCTL_POOL_RESILVER (1u << 1)   /* a copy is being resilvered */
+
+struct cosmo_fsctl_pool {
+    uint64_t generation;      /* the last committed root */
+    uint32_t members;
+    uint32_t flags;           /* COSMO_FSCTL_POOL_* */
+    uint32_t format;          /* the filesystem's format version */
+    uint32_t resilver_rate;   /* fs.resilver_rate, blocks a second */
+    char label[16];           /* the pool's name, as blkid prints it; "" for none */
+};
+
+/* The copy states are cosmofs's (CFS_COPY_*): */
+#define COSMO_FSCTL_COPY_ONLINE      0
+#define COSMO_FSCTL_COPY_MISSING     1
+#define COSMO_FSCTL_COPY_OFFLINE     2
+#define COSMO_FSCTL_COPY_FAULTED     3
+#define COSMO_FSCTL_COPY_RESILVERING 4
+#define COSMO_FSCTL_COPY_SPARE       5   /* not a copy: a spare of the pool (member, copy 0xffff) */
+
+#define COSMO_FSCTL_COPY_F_WHOLE  (1u << 0)   /* what it missed is everything: a whole rebuild */
+#define COSMO_FSCTL_COPY_F_DETACH (1u << 1)   /* replaced: detached once its replacement is ONLINE */
+
+struct cosmo_fsctl_copy {
+    uint32_t member, copy;
+    uint32_t state;           /* COSMO_FSCTL_COPY_* */
+    uint32_t flags;           /* COSMO_FSCTL_COPY_F_* */
+    uint64_t since;           /* a copy out of ONLINE: the last generation it holds whole */
+    uint64_t cursor;          /* RESILVERING: blocks below this are done */
+    uint64_t blocks;          /* the member's size in blocks (a spare's own) */
+    uint64_t to_do;           /* RESILVERING: blocks in regions still to rebuild, an upper bound */
+    uint32_t read_errors, write_errors, csum_errors;
+    uint32_t reserved;
+    char dev[16];             /* the block device, "" when the copy has none */
 };
 
 #endif /* UAPI_COSMO_FSCTL_H */

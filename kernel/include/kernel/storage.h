@@ -22,6 +22,11 @@
 #define POOL_BLOCK 4096u
 #define POOL_MAX_MEMBERS 255u   /* the DVA's vdev field is 8 bits, 255 reserved */
 #define POOL_MAX_COPIES 4u      /* devices in one mirror group */
+#define POOL_MAX_SPARES 4u      /* spares a pool holds */
+/* pool_write_flags: ONLINE copies only -- the root, which a copy being
+ * rebuilt must not carry until it holds everything the root names
+ * (design.md, "Resilvering"). Not a bio flag; the pool strips it. */
+#define POOL_WRITE_ONLINE (1u << 31)
 
 /* bits 63:56 name the member, bits 55:0 the block within it. */
 #define POOL_DVA_SHIFT 56
@@ -48,7 +53,7 @@ enum pool_copy_state {
 
 /* What a copy missed, one bit a region of `region_blocks` blocks. The
  * cosmofs record (struct cfs_copy_rec) holds exactly these bytes. */
-#define POOL_DIRTY_BYTES 960u
+#define POOL_DIRTY_BYTES 944u
 #define POOL_DIRTY_BITS (POOL_DIRTY_BYTES * 8u)
 
 struct pool_copy {
@@ -59,6 +64,8 @@ struct pool_copy {
     uint64_t since;              /* the last root it holds whole (pool_commit_done's) */
     uint64_t cursor;             /* resilver progress, in blocks */
     uint32_t read_errors, write_errors, csum_errors;
+    uint64_t tag;                /* the record's: which device a resilver target or a former spare is */
+    uint64_t peer;               /* detach this copy when the one tagged `peer` is ONLINE (0: no) */
     uint8_t *dirty;              /* POOL_DIRTY_BYTES; allocated with the member's second slot */
 };
 
@@ -92,6 +99,11 @@ struct spool {
      * as for the I/O that caused it. */
     void (*notify)(void *arg);
     void *notify_arg;
+    /* Spares: devices that take a failed copy's place by themselves
+     * (referenced; `spare_tag` is each one's label tag). */
+    struct blkdev *spare[POOL_MAX_SPARES];
+    uint64_t spare_tag[POOL_MAX_SPARES];
+    unsigned nspares;
 };
 
 /* sysctl fs.fault_errors: failures after which a copy is FAULTED (0: never). */
@@ -151,6 +163,28 @@ void pool_commit_done(struct spool *p, uint64_t gen);
 void pool_mark_missed(struct spool *p, uint64_t dva);
 /* The region a block falls in, and whether copy `c` missed it. */
 bool pool_copy_missed(const struct spool *p, uint64_t dva, unsigned c);
+/* Region `r` of member `vdev`: clear it in copy `c`'s bitmap (rebuilt),
+ * or ask whether it is set; the blocks it covers. */
+void pool_region_clear(struct spool *p, unsigned vdev, unsigned c, uint64_t r);
+bool pool_region_missed(const struct spool *p, unsigned vdev, unsigned c, uint64_t r);
+/* True if copy `c`'s bitmap has any region set. */
+bool pool_copy_any_missed(const struct spool *p, unsigned vdev, unsigned c);
+/* A resilver finished: copy `c` holds everything, and is ONLINE. */
+int pool_copy_resilvered(struct spool *p, unsigned vdev, unsigned c);
+/* Put `bd` in slot `c` in place of whatever device it had (referenced
+ * either way), in `state`, as a whole rebuild unless it is ONLINE. */
+int pool_copy_replace_dev(struct spool *p, unsigned vdev, unsigned c, struct blkdev *bd, enum pool_copy_state state);
+/* Remove slot `c` of member `vdev`; the later slots move down. -EBUSY
+ * when it is the member's last ONLINE copy. */
+int pool_detach_copy(struct spool *p, unsigned vdev, unsigned c);
+/* Spares. add: -ENOSPC past POOL_MAX_SPARES, -EEXIST twice. take: the
+ * first spare that covers member `vdev`, out of the list and referenced
+ * (the caller's), or NULL. */
+int pool_add_spare(struct spool *p, struct blkdev *bd, uint64_t tag);
+int pool_remove_spare(struct spool *p, struct blkdev *bd);
+struct blkdev *pool_take_spare(struct spool *p, unsigned vdev, uint64_t *tag);
+/* Which slot holds `bd` (true, *vdev and *c), if any. */
+bool pool_find_dev(const struct spool *p, const struct blkdev *bd, unsigned *vdev, unsigned *c);
 const char *pool_copy_state_name(enum pool_copy_state s);
 void pool_close(struct spool *p);
 
