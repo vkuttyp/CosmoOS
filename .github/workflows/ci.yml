@@ -432,11 +432,11 @@ jobs:
             out/${{ matrix.arch }}-release/test-fsck/*.log
           if-no-files-found: ignore
   # Roadmap 1.2 B3's PCIe hotplug test (docs/drivers/pci/testing.md,
-  # "test-hotplug"): QEMU device_del and device_add on root ports, idle and
+  # "test-pci-hotplug"): QEMU device_del and device_add on root ports, idle and
   # under I/O, virtio-blk and NVMe, and a late disk's partitions. A job of
   # its own, release builds, both architectures.
-  hotplug:
-    name: hotplug test (${{ matrix.arch }})
+  pci-hotplug:
+    name: PCI hotplug test (${{ matrix.arch }})
     runs-on: ubuntu-24.04
     needs: image
     container:
@@ -478,15 +478,15 @@ jobs:
         run: make ARCH=${{ matrix.arch }} BUILD=release all
 
       - name: PCIe hotplug through QMP (release)
-        run: make ARCH=${{ matrix.arch }} BUILD=release test-hotplug
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-pci-hotplug
 
       - name: Upload the boots' serial logs (on failure)
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: test-hotplug-${{ matrix.arch }}
+          name: test-pci-hotplug-${{ matrix.arch }}
           path: |
-            out/${{ matrix.arch }}-release/test-hotplug/*.log
+            out/${{ matrix.arch }}-release/test-pci-hotplug/*.log
           if-no-files-found: ignore
   # Shell completeness S7's acceptance (docs/roadmap-1.1.md;
   # docs/userland/testing.md, "test-upgrade"): the published v1.0.3,

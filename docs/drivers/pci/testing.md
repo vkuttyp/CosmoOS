@@ -22,7 +22,7 @@ function has MSI-X and a memory BAR. The test logs the function count
 (9 under the default QEMU configuration), the virtio count (3) and the
 access mechanism (`ECAM`).
 
-## `make test-hotplug` (`tests/boot/hotplug_test.py`; roadmap 1.2 B3)
+## `make test-pci-hotplug` (`tests/boot/pci_hotplug_test.py`; roadmap 1.2 B3)
 
 The live image with three `pcie-root-port`s, one holding a blank virtio
 disk, driven through QMP: every port announces its slot (and whether its

@@ -14,7 +14,7 @@ PCIe root port (docs/drivers/pci/design.md, "Hotplug").
          write faults and the attention button's event never arrives
 
 --old restores the old behaviour in a throwaway worktree, by the
-replacement the case names, and runs `make BUILD=release test-hotplug`
+replacement the case names, and runs `make BUILD=release test-pci-hotplug`
 on the case's architecture: old mode passes when the test fails at the
 case's step. Fixed mode passes when the test passes. Logs under
 out/hotplug-iommu-probe/<case>-<mode>. Exit 0 when the mode shows what it
@@ -29,22 +29,22 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# arch, [(file, text, old text)], the test-hotplug FAIL line's pattern.
+# arch, [(file, text, old text)], the test-pci-hotplug FAIL line's pattern.
 CASES = {
     "vtd": ("x86_64",
             [("drivers/iommu/intel_vtd.c", "        if (u->scope_type[i] != 2)\n            continue;",
               "        if (u->scope_type[i] != 2 || 1)\n            continue;")],
-            r"test-hotplug: FAIL: NVMe add"),
+            r"test-pci-hotplug: FAIL: NVMe add"),
     "smmu": ("aarch64",
              [("drivers/iommu/arm_smmuv3.c", "#define STRTAB_LOG2_MAX  12u", "#define STRTAB_LOG2_MAX  8u")],
-             r"test-hotplug: FAIL: "),
+             r"test-pci-hotplug: FAIL: "),
     "order": ("aarch64",
               [("kernel/core/main.c",
                 "    pci_hotplug_start();   /* the hot-plug ports' interrupts: an MSI is a DMA write, so after the IOMMU */\n",
                 ""),
                ("drivers/pci/pci.c", "    kinfo(\"pci: %u device(s) enumerated\", g_count);\n    pciehp_init();\n",
                 "    kinfo(\"pci: %u device(s) enumerated\", g_count);\n    pciehp_init();\n    pci_hotplug_start();\n")],
-              r"test-hotplug: FAIL: QMP: no DEVICE_DELETED for hot0dev"),
+              r"test-pci-hotplug: FAIL: QMP: no DEVICE_DELETED for hot0dev"),
 }
 
 
@@ -76,16 +76,16 @@ def main():
         args = [make, "-C", str(tree), "-j8", f"ARCH={arch}", "BUILD=release", f"OUT={tree / 'out' / 'rel'}",
                 f"BB_DIR={ROOT / 'out' / f'busybox-{arch}'}", f"PORTS_CACHE={ROOT / '.cache' / 'ports'}"]
         with (work / "make.log").open("w") as log:
-            rc = subprocess.run(args + ["test-hotplug"], stdin=subprocess.DEVNULL, stdout=log,
+            rc = subprocess.run(args + ["test-pci-hotplug"], stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=subprocess.STDOUT, timeout=2400).returncode
         text = (work / "make.log").read_text(errors="replace")
         if a.old:
             ok = rc != 0 and re.search(fail_at, text) is not None
-            m = re.search(r"test-hotplug: FAIL: .*", text)
+            m = re.search(r"test-pci-hotplug: FAIL: .*", text)
             seen = (f"`{m.group(0)}`" if m else f"no FAIL line (make exited {rc})")
         else:
-            ok = rc == 0 and "test-hotplug: PASS" in text
-            seen = "test-hotplug passed" if ok else f"make exited {rc}"
+            ok = rc == 0 and "test-pci-hotplug: PASS" in text
+            seen = "test-pci-hotplug passed" if ok else f"make exited {rc}"
         print(f"PROBE: {'PASS' if ok else 'FAIL'} case={a.case} arch={arch} mode={mode}: {seen} ({work})")
         return 0 if ok else 1
     finally:

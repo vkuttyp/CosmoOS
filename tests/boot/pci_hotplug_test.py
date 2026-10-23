@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Roadmap 1.2 B3's PCIe hotplug test (DRV-6, BLK-5;
-docs/drivers/pci/testing.md, "test-hotplug").
+docs/drivers/pci/testing.md, "test-pci-hotplug").
 
-    hotplug_test.py --image cosmoos.img --workdir DIR [--timeout S]
+    pci_hotplug_test.py --image cosmoos.img --workdir DIR [--timeout S]
 
 The live image is booted with three PCIe root ports (QEMU pcie-root-port):
 rp1 holds a blank virtio disk, rp2 and rp3 are empty. QEMU's native PCIe
@@ -259,13 +259,13 @@ def main():
             raise Fail(f"QEMU exit code {rc}, expected {EXIT_SUCCESS}")
     except Exception as e:
         b.kill()
-        print(f"test-hotplug: FAIL: {e}\ntest-hotplug: logs in {work}")
+        print(f"test-pci-hotplug: FAIL: {e}\ntest-pci-hotplug: logs in {work}")
         return 1
     finally:
         shutil.rmtree(sockdir, ignore_errors=True)
     for r in results:
-        print(f"test-hotplug: {r}")
-    print(f"test-hotplug: PASS ({arch}) in {b.elapsed():.1f}s; logs in {work}")
+        print(f"test-pci-hotplug: {r}")
+    print(f"test-pci-hotplug: PASS ({arch}) in {b.elapsed():.1f}s; logs in {work}")
     return 0
 
 
