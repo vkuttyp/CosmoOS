@@ -3397,3 +3397,19 @@ See the [history index](README.md).
     `tools/hotplug-iommu-probe.py` proves the hotplug PR's three
     IOMMU-side defects.
   - Report: `docs/audit/2026-10-23-b3-mirror-report.md`.
+- **Services after a reboot, every mirror disk's ESP, the rc's final notes
+  (2026-10-23, backlog USR-8, PKG-11, BUILD-7; PR #446).** The blockers
+  for v1.0.12.
+  - **USR-8:** init mounts a fresh ramfs on `/run` at every boot. A pid
+    file records its process's start time, and `svc` takes it only if
+    that process is `svc --supervise <name>` with that start time. `svc
+    stop` signals a child only if it is the live supervisor's or has the
+    recorded start time (U14). `tools/usr8-probe.py`.
+  - **PKG-11:** an upgrade, `--fetch`, `--rollback` or `--repair`
+    writes the booted ESP to the ESP of each other copy of a mirrored
+    root, and reads it back. An absent copy is named. `cosmo-upgrade
+    --esp-check`, run by init at every boot, names a lagging ESP and
+    the repair command (U15). test-mirror's `esp` stage.
+  - **BUILD-7:** an rc's release run also builds and checks the final
+    tag's notes. `tools/build7-probe.py`.
+  - Report: `docs/audit/2026-10-23-v1012-blockers-report.md`.

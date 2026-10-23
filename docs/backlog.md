@@ -35,7 +35,7 @@ Open lines (struck lines are not counted):
 |---|---|---|---|---|---|
 | Block devices | 3 | 0 | 2 | 4 | 9 |
 | Boot chain and verified boot | 0 | 5 | 2 | 1 | 8 |
-| Build and tooling | 1 | 2 | 0 | 4 | 7 |
+| Build and tooling | 0 | 2 | 0 | 4 | 6 |
 | cosmofs and storage | 3 | 1 | 7 | 12 | 23 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 3 | 0 | 2 | 12 | 17 |
@@ -44,15 +44,15 @@ Open lines (struck lines are not counted):
 | Memory | 2 | 0 | 1 | 6 | 9 |
 | Network | 4 | 3 | 8 | 7 | 22 |
 | Observability | 1 | 0 | 0 | 6 | 7 |
-| Packages and upgrade | 2 | 0 | 3 | 2 | 7 |
+| Packages and upgrade | 2 | 0 | 2 | 2 | 6 |
 | Quiescence | 0 | 0 | 0 | 3 | 3 |
 | Scheduler and SMP | 0 | 0 | 1 | 5 | 6 |
 | Security and isolation | 0 | 10 | 1 | 2 | 13 |
 | Testing and CI | 9 | 0 | 0 | 9 | 18 |
-| Commands | 2 | 0 | 5 | 1 | 8 |
+| Commands | 1 | 0 | 5 | 1 | 7 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **44** | **21** | **49** | **97** | **211** |
+| **all** | **42** | **21** | **48** | **97** | **208** |
 
 ## Block devices
 
@@ -85,7 +85,7 @@ Open lines (struck lines are not counted):
 - **BUILD-4** nice-to-have, L. A KASAN-like kernel sanitiser build.
 - **BUILD-5** nice-to-have, S. `ports/busybox/README.md`'s config regeneration fails at `make defconfig` on the macOS host; the checked-in config differs from the recipe in three options.
 - **BUILD-6** nice-to-have, L. Native programs are static: no shared native libc and no native `PT_INTERP` (deferred by the owner past 1.1).
-- **BUILD-7** correctness, S. An rc's release run reads `docs/releases/vX.Y.Z-rcN.md`, which no release has, so the final notes (`vX.Y.Z.md`) are first checked by `check-release-version.py` in the final tag's run: v1.0.11's failed on "CosmoOS 1.0.10" in its notes (run 39942569981) after v1.0.11-rc1 had passed (run 39938572061). Check `vX.Y.Z.md` in the rc's run, or in CI when `docs/releases/` changes.
+- ~~**BUILD-7** correctness, S. An rc's release run reads `docs/releases/vX.Y.Z-rcN.md`, which no release has, so the final notes (`vX.Y.Z.md`) are first checked by `check-release-version.py` in the final tag's run: v1.0.11's failed on "CosmoOS 1.0.10" in its notes (run 39942569981) after v1.0.11-rc1 had passed (run 39938572061). Check `vX.Y.Z.md` in the rc's run, or in CI when `docs/releases/` changes.~~ Done by #446 (the rc's run builds and checks `vX.Y.Z.md`).
 
 ## cosmofs and storage
 
@@ -242,7 +242,7 @@ Open lines (struck lines are not counted):
 - **PKG-8** nice-to-have, M. `cosmo-upgrade`'s FAT writer refuses long names, a multi-sector `\cosmo` and FAT12/16.
 - ~~**PKG-9** usability, S. `pkg install -f NAME=VERSION` to an older version says `NAME will be upgraded from 1.1 to 1.0`; a downgrade should say so (seen on Parallels, 2026-10-21).~~ Done by PR #431: `NAME will be downgraded from 1.1 to 1.0`.
 - ~~**PKG-10** correctness, S. `cosmo-upgrade` trusted the root's record of its base system: an older tool's roll-forward left it naming the set rolled back to, and v1.0.8 refused every later upgrade.~~ Done by PR #430: the record is checked against the root's files and corrected.
-- **PKG-11** usability, S. On a mirrored root (`cosmo-install --mirror`, roadmap 1.2 B3) `cosmo-upgrade` writes the new release to the ESP of the disk the system booted from only; the other disk's ESP keeps the release it was installed with, so booting from it after the first disk fails starts an older kernel and loader.
+- ~~**PKG-11** usability, S. On a mirrored root (`cosmo-install --mirror`, roadmap 1.2 B3) `cosmo-upgrade` writes the new release to the ESP of the disk the system booted from only; the other disk's ESP keeps the release it was installed with, so booting from it after the first disk fails starts an older kernel and loader.~~ Done by #446 (every copy's ESP written and read back; `--esp-check` at boot, `--repair`; U15).
 
 ## Quiescence
 
@@ -306,7 +306,7 @@ Open lines (struck lines are not counted):
 - **USR-5** nice-to-have, S. No `xz` compressor; `syslogd` keeps no file or ring; `lsblk` has no `MAJ:MIN` or options; `blkid` knows no FAT or `PARTLABEL`.
 - **USR-6** correctness, S. `cosmo-sh` hands the terminal to a foreground job as its last stage is spawned (COSMO_SPAWN_FOREGROUND), so the group holds every stage when it takes ^C; the earlier stages of a pipeline start in the background for the moment the spawns take, and one that checks the terminal at its first instruction can still stop itself. A start barrier (spawn stopped, continue the group) would close it (Codex on #424).
 - **USR-7** usability, S. No `/dev/urandom` or `/dev/random`: a shell script wanting random or incompressible bytes reads nothing (`head -c N /dev/urandom` gives at most the error); tests use awk's `rand()` or gzip output instead (test-pkgtx, test-fsck).
-- **USR-8** correctness, S. On the installed system `/run/svc` is on the root disk and nothing clears it at boot, so a pid file outlives its service; `svc`'s `running()` trusts any pid `kill(p, 0)` can signal, and a boot where another process has that pid says `svc: dropbear is already running` and never starts it. Seen on the Parallels VM 2026-10-23: `dropbear.pid` held 13 from 2026-10-22, pid 13 was `syslogd` at every boot, and ssh was refused through several boots and upgrades (cleared by hand). Clear `/run` at boot (or mount a ramfs on it), or check the pid is the service's supervisor.
+- ~~**USR-8** correctness, S. On the installed system `/run/svc` is on the root disk and nothing clears it at boot, so a pid file outlives its service; `svc`'s `running()` trusts any pid `kill(p, 0)` can signal, and a boot where another process has that pid says `svc: dropbear is already running` and never starts it. Seen on the Parallels VM 2026-10-23: `dropbear.pid` held 13 from 2026-10-22, pid 13 was `syslogd` at every boot, and ssh was refused through several boots and upgrades (cleared by hand). Clear `/run` at boot (or mount a ramfs on it), or check the pid is the service's supervisor.~~ Done by #446 (a fresh ramfs on `/run` at every boot; a pid file records the start time and is checked against the supervisor's cmdline; U14).
 
 ## VFS
 
