@@ -32,7 +32,8 @@
                                  * partitions is refused (-EBUSY) */
 #define COSMO_BLKCTL_FORMAT_MIRROR 7   /* a two-way mirror of `fstype` over the device and the one named
                                         * by the COSMO_BLKCTL_NAME bytes after the struct (NUL-terminated);
-                                        * both unmounted, neither a disk with partitions (roadmap 1.2 B2) */
+                                        * both unmounted, neither a disk with partitions (roadmap 1.2 B2);
+                                        * then, optionally, a label as FORMAT's (roadmap 1.2 B3) */
 
 /* The most data one READ or WRITE carries. */
 #define COSMO_BLKCTL_IO_MAX (32u * 1024u)

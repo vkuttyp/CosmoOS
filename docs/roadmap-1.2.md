@@ -228,12 +228,18 @@ appears later (DRV-6 part, BLK-5), and the blkctl check that sees every
 member (CFS-5). Absorbs CFS-9, CFS-5, BLK-5, DRV-6 (PCI hot-removal and
 rescan for virtio-blk).
 
-- [ ] **Acceptance:** `make test-mirror`: install onto a two-disk
+- [x] **Acceptance:** `make test-mirror`: install onto a two-disk
   mirror; while a writer runs, the harness removes one disk (QEMU
   `device_del`); the system keeps running degraded and says so; a new
   disk is added (`device_add`) and `cosmo-pool replace` resilvers it; a
   scrub is clean; the system reboots from the new pair. Then the same
-  with a spare taking over by itself.
+  with a spare taking over by itself. Done 2026-10-23,
+  `make test-mirror` (CI job `mirror`; it also boots with a copy missing
+  and resilvers it on its return), PRs #439 (copy states and the v13
+  copy record), #440 (the resilver, `cosmo-pool`, spares), #441 (PCIe
+  native hotplug, `make test-pci-hotplug`) and #442
+  (`cosmo-install --mirror`, the test); report
+  `docs/audit/2026-10-23-b3-mirror-report.md`.
 
 ### B4 Boot environments with `cosmo-upgrade`
 

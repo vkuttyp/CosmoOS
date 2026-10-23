@@ -326,6 +326,14 @@ bool blk_part_info(const struct blkdev *bd, struct blk_part_info *out)
     return true;
 }
 
+const struct blkdev *blk_part_disk(const struct blkdev *bd)
+{
+    if (!blk_is_partition(bd))
+        return NULL;
+    const struct blkpart *p = bd->priv;
+    return p->disk;
+}
+
 struct blkdev *blk_find_sibling_typed(const uint8_t uuid[16], const uint8_t type[16], unsigned *matches)
 {
     struct blkdev *found = NULL;

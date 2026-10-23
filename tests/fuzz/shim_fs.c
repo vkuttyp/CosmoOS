@@ -391,6 +391,13 @@ bool vfs_bdev_mounted(const struct blkdev *bd)
     return false;
 }
 
+bool vfs_bdev_mounted_except(const struct blkdev *bd, const struct mount *self)
+{
+    (void)bd;
+    (void)self;
+    return false;
+}
+
 /* --- mutexes: one thread, so ownership is all that is tracked --- */
 
 void mutex_init(struct mutex *m, const char *name)

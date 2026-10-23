@@ -193,7 +193,7 @@ struct fs_type {
      * (roadmap M2; the label, shell completeness S6). */
     int (*format)(struct blkdev *bdev, const char *label);
     /* Optional: one pool mirrored over `n` devices (roadmap 1.2 B2). */
-    int (*format_mirror)(struct blkdev **bdev, unsigned n);
+    int (*format_mirror)(struct blkdev **bdev, unsigned n, const char *label);
     /* Optional: fill blocks/bfree/bavail (and files/ffree) of `out`, which
      * the VFS has set up with its defaults. Without it a mount whose page
      * cache is its store reports its page budget, and any other reports
@@ -631,6 +631,9 @@ void blkctl_dev_init(void);
  * (another copy of a mounted pool, or its spare: CFS-5). A snapshot: the
  * caller decides on it without holding the mount table. */
 bool vfs_bdev_mounted(const struct blkdev *bd);
+/* The same, leaving out what mount `self` holds: whether another mount
+ * has `bd` (a checker's own detached mount holds its pool's devices). */
+bool vfs_bdev_mounted_except(const struct blkdev *bd, const struct mount *self);
 /* The filesystem of `mnt` holds these devices besides its own: replaces
  * the set (references taken, the old ones dropped). -EBUSY when one of
  * them is another mount's, and the set is then unchanged. */
@@ -639,7 +642,7 @@ int vfs_mount_set_held(struct mount *mnt, struct blkdev *const *bd, unsigned n);
  * type, -EOPNOTSUPP for one that cannot format, -EBUSY when
  * vfs_bdev_mounted. */
 int vfs_format(const char *fsname, struct blkdev *bd, const char *label);
-int vfs_format_mirror(const char *fsname, struct blkdev **bd, unsigned n);
+int vfs_format_mirror(const char *fsname, struct blkdev **bd, unsigned n, const char *label);
 
 /*
  * Name a mount for an operation that acts on one filesystem rather than

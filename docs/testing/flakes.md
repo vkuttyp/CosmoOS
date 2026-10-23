@@ -4838,3 +4838,14 @@ RNG, before `exiting boot services`. Nothing the branch changes runs
 there. The same image's other five boots, among them `tx-install-recover`
 (also the first boot after a kill), passed. First sighting; not
 attributed. Log kept at the time of the run; rerun.
+**Second sighting, 2026-10-23:** CI, x86-64 release `make test-be` inside
+the `upgrade test (x86_64)` job (run 39897609921, PR #440 on `3888f9da`,
+GitHub's runner). The `be-repaired-a` boot -- the first after
+`be-mixed-old`'s `cosmo-upgrade --repair` reboot -- printed the same
+lines up to `paging: root at 0xc43e000 (user root 0x0), 8/13 pool pages
+used` and then nothing until `no prompt after the first prompt before the
+deadline`. The other eleven boots of that run passed, and so did the
+same job on `f791de0f` and on `ffbb5f56`, which holds `3888f9da`. Two
+sightings, both x86-64, both the boot straight after an unclean or
+init-requested restart, one local and one on CI; still not attributed.
+The failed job was re-run and passed; `make test-be` locally on the same tree passed (457.7 s).

@@ -96,7 +96,7 @@ Open lines (struck lines are not counted):
 - ~~**CFS-6** correctness, M. CF17 abandons the transaction (`cfs_fail`) for failures a retry could survive; `extents_store` and `inode_sync` should allocate and write first so they fail cleanly.~~ Done by roadmap 1.2 B2's first PR (`cfs_prep_meta`, `cfs_inode_prepare`; `cosmofs-nomem`).
 - **CFS-7** security, M. Metadata is checksummed, not authenticated: a forger can recompute CRC32C; a keyed `csum_algo` would close it.
 - **CFS-8** usability, M. Snapshots cannot be booted as environments (roadmap 1.2 B4). Rollback to a snapshot and writable clones are done by B1 (`cosmo-snap rollback`, `cosmo-snap clone`; CF19, CF20).
-- **CFS-9** usability, M. Mirrors: no device replacement, no resilvering of a member that missed commits, no hot spares.
+- ~~**CFS-9** usability, M. Mirrors: no device replacement, no resilvering of a member that missed commits, no hot spares.~~ Done by roadmap 1.2 B3: copy states and the v13 copy record (the first PR), the resilver, `cosmo-pool` replace, attach, detach and spares (the second), `cosmo-install --mirror` and `make test-mirror` (the fourth).
 - **CFS-10** usability, M. A file is capped at 516128 blocks (64516 encrypted) by the one-level checksum index (`-EFBIG`).
 - ~~**CFS-11** usability, S. Scrub's `-EIO` discards the counts fsctl would report.~~ Done by roadmap 1.2 B2's first PR (the scrub returns 0 whenever its walk ran).
 - **CFS-12** nice-to-have, L. Incremental snapshot send/receive: stream format, ancestry check, interruption recovery.
@@ -116,6 +116,8 @@ Open lines (struck lines are not counted):
 - **CFS-26** nice-to-have, S. The scrub paces between inode blocks, data blocks and snapshots but reads one deadlist chain (up to 4096 blocks) without letting go of the lock.
 - **CFS-27** nice-to-have, M. A mirror group holds at most four copies (`CFS_MAX_COPIES`, the copy record's four slots) and a replace of a good copy needs a free slot; wider mirrors need a format change (out of roadmap 1.2 B3's scope).
 - **CFS-28** nice-to-have, M. No rebalancing across members: a member added later fills only from new allocations, and nothing moves blocks between members or off one being removed (out of B3's scope).
+- **CFS-29** nice-to-have, S. A copy missing when a pool is mounted is marked for a whole resilver, even when its record said `ONLINE` at the root being mounted and only the commits after it were missed (`setup_copies`); a disk left out of one boot is rebuilt rather than caught up (roadmap 1.2 B3's `test-mirror`, stage `lagging`).
+- **CFS-30** correctness, S. A scrub of the running root reports 53 to 77 `skipped` (visits to dirty buffers: inode-map, inode and checksum blocks), the same count after a `sync` and a 3 s wait (roadmap 1.2 B3's `test-mirror`, 2026-10-23); unexplained: either something re-dirties them at once or a sync leaves them dirty.
 
 ## Documentation
 
@@ -178,7 +180,7 @@ Open lines (struck lines are not counted):
 - **LOCK-6** nice-to-have, M. Kernel rwlock, only with a workload, ownership rules and a lockdep model.
 - **LOCK-7** nice-to-have, M. Ticket or MCS spinlocks, only with measurements.
 - **LOCK-8** nice-to-have, M. Completion edges not modelled: a signaller taking a mutex before `complete()`, one blocked in another wait, the network worker's barrier.
-- **LOCK-9** correctness, S. Release boots warn `mutex PI: donation chain cycle -- a lock-order violation` (`mutex.c`) while `/etc/rc` starts services (`svc` starting `greeter`), in some boots of the installed system on both architectures since at least the B1 branches (2026-10-20); unattributed, no backtrace in release; a debug boot of the installed system would name the chain.
+- **LOCK-9** correctness, S. Release boots warn `mutex PI: donation chain cycle -- a lock-order violation` (`mutex.c`) while `/etc/rc` starts services (`svc` starting `greeter`), in some boots of the installed system on both architectures since at least the B1 branches (2026-10-20); unattributed, no backtrace in release; a debug boot of the installed system would name the chain. Roadmap 1.2 B3's `test-mirror` (2026-10-23, x86-64 release) saw it 53 times in one boot, while a shell loop copied `/bin/busybox` and synced, before any disk was removed.
 
 ## Memory
 
@@ -239,6 +241,7 @@ Open lines (struck lines are not counted):
 - **PKG-8** nice-to-have, M. `cosmo-upgrade`'s FAT writer refuses long names, a multi-sector `\cosmo` and FAT12/16.
 - ~~**PKG-9** usability, S. `pkg install -f NAME=VERSION` to an older version says `NAME will be upgraded from 1.1 to 1.0`; a downgrade should say so (seen on Parallels, 2026-10-21).~~ Done by PR #431: `NAME will be downgraded from 1.1 to 1.0`.
 - ~~**PKG-10** correctness, S. `cosmo-upgrade` trusted the root's record of its base system: an older tool's roll-forward left it naming the set rolled back to, and v1.0.8 refused every later upgrade.~~ Done by PR #430: the record is checked against the root's files and corrected.
+- **PKG-11** usability, S. On a mirrored root (`cosmo-install --mirror`, roadmap 1.2 B3) `cosmo-upgrade` writes the new release to the ESP of the disk the system booted from only; the other disk's ESP keeps the release it was installed with, so booting from it after the first disk fails starts an older kernel and loader.
 
 ## Quiescence
 

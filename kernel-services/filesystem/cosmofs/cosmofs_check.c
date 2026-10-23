@@ -1418,14 +1418,14 @@ int cosmofs_check_dev(struct blkdev *bd, unsigned flags, struct cosmofs_check_re
      * Every device the pool assembled, not only the one named: a mirror
      * mounted through its other leg is not "unmounted" because this leg
      * is, and an offline repair beside a live allocator would be anything
-     * but offline (Codex on #434; /dev/blkctl's own check has the same
-     * blind spot, CFS-5).
+     * but offline (Codex on #434). Another mount's, not this one's: the
+     * detached mount holds the pool's other devices itself (CFS-5).
      */
     struct spool *pool = cfs_of(mnt)->pool;
     for (unsigned v = 0; v < pool->nmembers; v++)
         for (unsigned c = 0; c < pool->m[v].ncopies; c++) {
             struct blkdev *d = pool->m[v].copy[c].dev;
-            if (d != NULL && d != bd && vfs_bdev_mounted(d)) {
+            if (d != NULL && d != bd && vfs_bdev_mounted_except(d, mnt)) {
                 kwarn("cosmofs: %s: %s, another device of this pool, is mounted; not checked", bd->name,
                       d->name);
                 (void)vfs_mount_detached_release(mnt, false);

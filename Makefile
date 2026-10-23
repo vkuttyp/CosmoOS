@@ -13,6 +13,7 @@
 #   make test-snapshot roadmap 1.2 B1: snapshots of the installed root from the shell (CI: BUILD=release)
 #   make test-fsck    roadmap 1.2 B2: fsck at boot and offline, scrub --repair on a mirror (CI: BUILD=release)
 #   make test-pci-hotplug roadmap 1.2 B3: PCIe device_del/device_add, idle and under I/O, NVMe, late partition scan
+#   make test-mirror  roadmap 1.2 B3: a two-disk mirrored root, a disk pulled, replaced and resilvered; a spare (CI: BUILD=release)
 #   make test-upgrade shell completeness S7: upgrade an installed v1.0.3 to this build, roll back (CI: BUILD=release)
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
 #   make test-security roadmap M5: verified boot refuses tampered files; VERIFY_BOOT=0 says so (CI: BUILD=release)
@@ -44,7 +45,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-fsck test-pci-hotplug test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -297,6 +298,17 @@ test-snapshot: $(IMAGE)
 test-fsck: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/fsck_test.py --image $(IMAGE) --workdir $(OUT)/test-fsck \
+		--timeout $(BOOT_TIMEOUT)
+
+# Roadmap 1.2 B3's acceptance test (tests/boot/mirror_test.py,
+# docs/kernel-services/filesystem/cosmofs/testing.md, "test-mirror"):
+# install onto a two-disk mirror, remove a disk under a writer, replace
+# and resilver it, scrub, reboot from the new pair; then a spare takes
+# over; then a boot with a copy missing, and its return. (CI:
+# BUILD=release, the mirror job.)
+test-mirror: $(IMAGE)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/mirror_test.py --image $(IMAGE) --workdir $(OUT)/test-mirror \
 		--timeout $(BOOT_TIMEOUT)
 
 # Roadmap 1.2 B3's PCIe hotplug test (tests/boot/pci_hotplug_test.py,

@@ -488,6 +488,64 @@ jobs:
           path: |
             out/${{ matrix.arch }}-release/test-pci-hotplug/*.log
           if-no-files-found: ignore
+  # Roadmap 1.2 B3's acceptance (docs/roadmap-1.2.md; cosmofs testing.md,
+  # "test-mirror"): a two-disk mirrored root installed, a disk removed under
+  # a writer and replaced, the resilver, a scrub, a reboot from the new pair,
+  # a spare taking over, and a boot with a copy missing and then its return.
+  # Release builds, both architectures.
+  mirror:
+    name: mirror test (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 75
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Toolchain versions (ci/Dockerfile)
+        run: |
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # BusyBox, musl and compiler-rt, pinned by SHA-256 in ports/busybox/busybox.mk
+      # and fetched once (scripts/fetch-pinned.py): every image carries BusyBox.
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+
+      - name: Build (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release all
+
+      - name: mirror replacement and resilvering (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-mirror
+
+      - name: Upload the boots' serial logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-mirror-${{ matrix.arch }}
+          path: |
+            out/${{ matrix.arch }}-release/test-mirror/*.log
+          if-no-files-found: ignore
   # Shell completeness S7's acceptance (docs/roadmap-1.1.md;
   # docs/userland/testing.md, "test-upgrade"): the published v1.0.3,
   # fetched with this run's token and checked against its SHA256SUMS,
