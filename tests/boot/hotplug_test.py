@@ -184,8 +184,9 @@ def main():
         boot_log = b.text()
 
         # 1. The slots.
-        slots = re.findall(r"^\[ INFO\] pci: (\S+): hot-plug slot \d+ \(bus ([0-9a-f]{2})\)[^,]*(?:, attention button)?, "
-                           r"(events by MSI|no MSI: polled every 500 ms)$", boot_log, re.M)
+        slots = re.findall(r"^\[ INFO\] pci: (\S+): hot-plug slot \d+ \(bus ([0-9a-f]{2})\)(?:, attention button)?, "
+                           r"(events by MSI-X|events by MSI|no MSI or MSI-X \(-?\d+\): polled every 500 ms)$",
+                           boot_log, re.M)
         if len(slots) < 3:
             raise Fail(f"slots: {len(slots)} hot-plug slots announced, expected 3 root ports")
         mode = sorted(set(s[2] for s in slots))

@@ -178,7 +178,23 @@ polled every 500 ms`.
   decode are turned on, and the functions are enumerated by the boot's
   own `scan_function` -- registered, their DMA domain and MSI-X set up by
   their drivers' probes as at boot. A BAR that does not fit the window is
-  said and left at 0.
+  said and left at 0. The disks the probes registered have their
+  partitions read then (BLK-5).
+- **The port's interrupt** is set up after the IOMMU is
+  (`pci_hotplug_start`, from `kernel/core/main.c`): an MSI is a write the
+  port makes, so the port gets bus mastering and a DMA domain first --
+  behind an SMMU the domain is where the interrupt controller's doorbell
+  is mapped, and a port enabled before the IOMMU existed had none, so its
+  first event faulted in the SMMU and never arrived. QEMU's
+  `pcie-root-port` has MSI-X only, on a BAR of its own; the entry is the
+  one its Express capability names for hot-plug events. Both machines
+  deliver the events by MSI-X; the 500 ms poll is for a port with neither.
+- **The IOMMUs** had to learn the buses behind a root port: VT-d's DMAR
+  lists QEMU's root ports as PCI sub-hierarchy scopes, which now cover
+  the secondary to subordinate buses below them (before, a device behind
+  one got no domain and, for anything that does not bypass the IOMMU as
+  QEMU's virtio does, its first DMA faulted); the SMMUv3 stream table is
+  4096 entries (buses 0 to 15) where it was 256 (DRV-8).
 - **What it does not do.** No hot-plug of bridges with their own buses
   below (the secondary bus numbers are the firmware's), no attention
   indicator or power-fault handling, no `ACPI` hotplug (q35 is run with

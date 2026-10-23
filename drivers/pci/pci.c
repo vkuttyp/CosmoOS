@@ -17,7 +17,9 @@
 #include <kernel/panic.h>
 #include <kernel/pci_bar.h>
 #include <kernel/printf.h>
+#include <kernel/blk.h>
 #include <kernel/mutex.h>
+#include <kernel/part.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
@@ -282,6 +284,7 @@ static void find_capabilities(struct pci_device *p)
 }
 
 static void scan_bus(uint8_t bus, struct device *parent, unsigned depth);
+static void pciehp_init(void);
 
 /* A function is enumerated at boot or when a hot-plug slot gains it, and
  * unregistered when the slot loses it (remove_bus); the release runs when
@@ -444,7 +447,7 @@ void pci_init(void)
 #define PCI_EXP_SLTSTA_CC     (1u << 4)
 #define PCI_EXP_SLTSTA_PDS    (1u << 6)
 #define PCI_EXP_SLTSTA_DLLSC  (1u << 8)
-#define PCI_EXP_SLTSTA_EVENTS (PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_CC | PCI_EXP_SLTSTA_DLLSC | \\
+#define PCI_EXP_SLTSTA_EVENTS (PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_CC | PCI_EXP_SLTSTA_DLLSC | \
                                (1u << 1) | (1u << 2))
 
 #define PCI_IO_BASE           0x1c
@@ -623,9 +626,54 @@ static void assign_bars(uint8_t bus, uint8_t slot, uint8_t func, struct hp_windo
     cfg_write(bus, slot, func, PCI_COMMAND, 2, cmd);
 }
 
+/* The whole disks registered now, by name (the hot-added ones are the
+ * ones not in the list taken before their probe). */
+#define HP_DISKS_MAX 64
+static unsigned disk_names(char (*out)[BLKDEV_NAME_MAX])
+{
+    unsigned n = 0;
+    for (unsigned i = 0; n < HP_DISKS_MAX; i++) {
+        struct blkdev *bd = blk_nth(i);
+        if (bd == NULL)
+            break;
+        if (!blk_is_partition(bd))
+            strlcpy(out[n++], bd->name, BLKDEV_NAME_MAX);
+        blkdev_put(bd);
+    }
+    return n;
+}
+
+/*
+ * A disk that arrived with the slot's device (BLK-5): its partitions are
+ * read now, as boot composition reads every disk's, without being asked.
+ * Here and not at every registration after boot: a self-test that unbinds
+ * and rebinds a disk must not find a scan holding it.
+ */
+static void scan_new_disks(char (*before)[BLKDEV_NAME_MAX], unsigned nbefore)
+{
+    static char now[HP_DISKS_MAX][BLKDEV_NAME_MAX];
+    unsigned n = disk_names(now);
+    for (unsigned i = 0; i < n; i++) {
+        bool old = false;
+        for (unsigned k = 0; k < nbefore && !old; k++)
+            old = strcmp(now[i], before[k]) == 0;
+        if (old)
+            continue;
+        struct blkdev *bd = blk_find(now[i]);
+        if (bd == NULL)
+            continue;
+        unsigned parts = 0;
+        int rc = blk_part_scan(bd, &parts);
+        kinfo("part: %s registered after boot: %u partition(s)%s", bd->name, parts, rc == 0 ? "" : " (no table)");
+        blkdev_put(bd);
+    }
+}
+
 /* What the slot holds now, enumerated and handed to the drivers. */
 static void add_slot_devices(struct hp_slot *s)
 {
+    static char before[HP_DISKS_MAX][BLKDEV_NAME_MAX];
+    unsigned nbefore = disk_names(before);
     uint32_t id = cfg_read(s->secondary, 0, 0, PCI_VENDOR_ID, 4);
     if ((id & 0xffff) == 0xffff) {
         kwarn("pci: %s: a device is present and does not answer", s->port->dev.name);
@@ -641,10 +689,11 @@ static void add_slot_devices(struct hp_slot *s)
     /* The bridge forwards nothing until memory and I/O decode are on. */
     uint16_t cmd = pci_cfg_read16(s->port, PCI_COMMAND);
     pci_cfg_write16(s->port, PCI_COMMAND, cmd | PCI_COMMAND_MEMORY | PCI_COMMAND_IO | PCI_COMMAND_MASTER);
-    unsigned before = g_count;
+    unsigned nfn = g_count;
     for (uint8_t f = 0; f < nfunc; f++)
         scan_function(s->secondary, 0, f, &s->port->dev, 1);
-    kinfo("pci: %s: %u function(s) added behind it", s->port->dev.name, g_count - before);
+    kinfo("pci: %s: %u function(s) added behind it", s->port->dev.name, g_count - nfn);
+    scan_new_disks(before, nbefore);
 }
 
 static bool link_up(const struct hp_slot *s)
@@ -750,16 +799,53 @@ static void pciehp_init(void)
         s->exp = exp;
         s->secondary = pci_cfg_read8(p, PCI_SECONDARY_BUS);
         s->powered = !(sltctl(s) & PCI_EXP_SLTCTL_PCC);
-        pci_cfg_write16(p, (uint16_t)(exp + PCI_EXP_SLTSTA), PCI_EXP_SLTSTA_EVENTS);
-        int v = pci_msi_enable(p, hp_irq, s, "pciehp", IRQ_CPU_ANY);
+    }
+}
+
+/*
+ * After the IOMMU is up (kernel/core/main.c): each slot's interrupt and
+ * events enabled, and the thread started. An MSI is a write the port
+ * makes, so it needs bus mastering and, behind an SMMU, a DMA domain --
+ * where the interrupt controller's doorbell is mapped; attached before the
+ * IOMMU exists, the port has none, and on AArch64 its first event faults
+ * in the SMMU and never arrives. That is why this is not pci_init's.
+ */
+void pci_hotplug_start(void)
+{
+    for (unsigned k = 0; k < g_nslots; k++) {
+        struct hp_slot *s = &g_slots[k];
+        struct pci_device *p = s->port;
+        uint16_t flags = pci_cfg_read16(p, (uint16_t)(s->exp + PCI_EXP_FLAGS));
+        uint32_t cap = pci_cfg_read32(p, (uint16_t)(s->exp + PCI_EXP_SLTCAP));
+        pci_cfg_write16(p, (uint16_t)(s->exp + PCI_EXP_SLTSTA), PCI_EXP_SLTSTA_EVENTS);
+        pci_enable_device(p, true);
+        /* MSI-X (QEMU's pcie-root-port has only that, on a BAR of its own)
+         * at the entry its Express capability names for hot-plug events,
+         * else MSI, else none and a poll. */
+        int v = -ENODEV;
+        if (p->cap_msix) {
+            unsigned entry = (flags >> 9) & 0x1f;   /* Interrupt Message Number */
+            v = pci_msix_enable(p, entry + 1);
+            if (v > (int)entry)
+                v = pci_msix_request(p, entry, hp_irq, s, "pciehp", IRQ_CPU_ANY);
+            else if (v >= 0)
+                v = -ENOSPC;
+            if (v < 0 && p->msix.table)
+                pci_msix_disable(p);
+        }
+        if (v < 0 && p->cap_msi)
+            v = pci_msi_enable(p, hp_irq, s, "pciehp", IRQ_CPU_ANY);
         s->msi = v >= 0;
         uint16_t en = PCI_EXP_SLTCTL_PDCE | PCI_EXP_SLTCTL_DLLSCE | (s->msi ? PCI_EXP_SLTCTL_HPIE : 0);
         if (cap & PCI_EXP_SLTCAP_ABP)
             en |= PCI_EXP_SLTCTL_ABPE;
         set_sltctl(s, 0, en);
-        kinfo("pci: %s: hot-plug slot %u (bus %02x)%s, %s", p->dev.name, cap >> 19, s->secondary,
-              (cap & PCI_EXP_SLTCAP_ABP) ? ", attention button" : "",
-              s->msi ? "events by MSI" : "no MSI: polled every 500 ms");
+        if (s->msi)
+            kinfo("pci: %s: hot-plug slot %u (bus %02x)%s, events by %s", p->dev.name, cap >> 19, s->secondary,
+                  (cap & PCI_EXP_SLTCAP_ABP) ? ", attention button" : "", p->msix.table ? "MSI-X" : "MSI");
+        else
+            kinfo("pci: %s: hot-plug slot %u (bus %02x)%s, no MSI or MSI-X (%d): polled every 500 ms", p->dev.name,
+                  cap >> 19, s->secondary, (cap & PCI_EXP_SLTCAP_ABP) ? ", attention button" : "", v);
     }
     if (g_nslots == 0)
         return;

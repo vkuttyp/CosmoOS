@@ -27,9 +27,7 @@
 #include <kernel/part.h>
 #include <kernel/printf.h>
 #include <kernel/sched.h>
-#include <kernel/spinlock.h>
 #include <kernel/string.h>
-#include <kernel/thread.h>
 #include <kernel/thread.h>
 #include <kernel/wait.h>
 
@@ -278,61 +276,6 @@ int blk_part_scan(struct blkdev *disk, unsigned *nparts)
     return rc;
 }
 
-/*
- * A disk that registers after boot composition -- hot-plugged, a USB
- * stick -- is scanned too (BLK-5): its registration queues it, and one
- * thread scans what is queued, off the registering driver's own path (a
- * probe that reads its own disk before it returns is not a probe to
- * rely on). Only disks with hardware behind them (`dev`): the self-tests'
- * RAM disks come and go in their hundreds and hold no table.
- */
-#define LATE_MAX 16
-static struct blkdev *g_late[LATE_MAX];
-static unsigned g_nlate;
-static bool g_late_on;
-static spinlock_t g_late_lock = SPINLOCK_INIT("part-late");
-
-static void late_thread(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        thread_sleep_ms(100);
-        struct blkdev *bd = NULL;
-        arch_irq_state_t s = spin_lock_irqsave(&g_late_lock);
-        if (g_nlate > 0) {
-            bd = g_late[0];
-            for (unsigned i = 1; i < g_nlate; i++)
-                g_late[i - 1] = g_late[i];
-            g_nlate--;
-        }
-        spin_unlock_irqrestore(&g_late_lock, s);
-        if (bd == NULL)
-            continue;
-        if (!bd->gone) {
-            unsigned n = 0;
-            int rc = blk_part_scan(bd, &n);
-            kinfo("part: %s registered after boot: %u partition(s)%s", bd->name, n, rc == 0 ? "" : " (no table)");
-        }
-        blkdev_put(bd);
-    }
-}
-
-void blk_part_registered(struct blkdev *bd)
-{
-    if (!__atomic_load_n(&g_late_on, __ATOMIC_ACQUIRE) || bd->dev == NULL || blk_is_partition(bd))
-        return;
-    arch_irq_state_t s = spin_lock_irqsave(&g_late_lock);
-    bool queued = g_nlate < LATE_MAX;
-    if (queued) {
-        blkdev_get(bd);
-        g_late[g_nlate++] = bd;
-    }
-    spin_unlock_irqrestore(&g_late_lock, s);
-    if (!queued)
-        kwarn("part: %s registered after boot: too many waiting to be scanned; /dev/blkctl RESCAN scans it",
-              bd->name);
-}
-
 void blk_part_scan_all(void)
 {
     /* Partitions are appended to the registry as they register and are
@@ -345,11 +288,6 @@ void blk_part_scan_all(void)
             (void)blk_part_scan(bd, NULL);
         blkdev_put(bd);
     }
-    /* From here a disk that registers is scanned when it does. */
-    if (thread_create(late_thread, NULL, "part-late", SCHED_PRIO_DEFAULT) != NULL)
-        __atomic_store_n(&g_late_on, true, __ATOMIC_RELEASE);
-    else
-        kwarn("part: no thread for disks registered after boot; /dev/blkctl RESCAN scans them");
 }
 
 void blk_part_remove(struct blkdev *disk)

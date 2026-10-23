@@ -38,9 +38,6 @@ int blk_part_scan(struct blkdev *disk, unsigned *nparts);
 
 /* Boot composition: scan every disk registered so far, logging. */
 void blk_part_scan_all(void);
-/* A disk just registered (blk_register): after boot composition, queued
- * for a scan of its partitions (BLK-5). */
-void blk_part_registered(struct blkdev *bd);
 
 /* blk_unregister's first step for a disk: unregister its partitions and
  * wait for the bios they forwarded to complete. A no-op for a disk with

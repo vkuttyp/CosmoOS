@@ -111,6 +111,9 @@ int pci_test_remove(struct pci_device *p);
 int pci_test_rebind(struct pci_device *p);
 #endif
 
+/* PCIe native hotplug (roadmap 1.2 B3): the slots' interrupts and their
+ * thread, once the IOMMU is up (pci_init found the slots). */
+void pci_hotplug_start(void);
 /* PCIe native hotplug (roadmap 1.2 B3): how many hot-plug slots are
  * watched, the interrupts they took and the events acted on. */
 void pci_hotplug_stats(unsigned *slots, uint64_t *irqs, uint64_t *events);
