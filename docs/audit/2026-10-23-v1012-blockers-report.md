@@ -17,8 +17,9 @@ B5. They sit outside B5's PR count.
   `cosmo-upgrade` wrote the new release to the booted disk's ESP only;
   the other disk's ESP kept the release it was installed with.
 - **BUILD-7** (Build and tooling, correctness, S). An rc's release run
-  checked the notes built from `docs/releases/vX.Y.Z-rcN.md`;
-  `vX.Y.Z.md` was first read by the final tag's run. v1.0.11-rc1 passed
+  built its notes with the rc's own tag, for which no release has a
+  notes file, so `docs/releases/vX.Y.Z.md` was first read by the final
+  tag's run. v1.0.11-rc1 passed
   (run 39938572061) on notes saying "CosmoOS 1.0.10", and the v1.0.11
   tag's run on the same commit failed on them (run 39942569981).
 
