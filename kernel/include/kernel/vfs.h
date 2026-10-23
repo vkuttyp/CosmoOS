@@ -198,9 +198,9 @@ struct fs_type {
     int (*format_mirror)(struct blkdev **bdev, unsigned n, const char *label);
     /* Optional (roadmap 1.2 B5): an encrypted pool's key, by device or by
      * mount; and an encrypted pool on `n` devices (1, or 2 for a mirror)
-     * from a master key and the slots user space sealed. */
+     * from its uuid, a master key and the slots user space sealed for it. */
     int (*keyctl)(struct blkdev *bdev, struct mount *mnt, struct cosmofs_key_req *req);
-    int (*format_keyed)(struct blkdev **bdev, unsigned n, const char *label, const uint8_t master[32],
+    int (*format_keyed)(struct blkdev **bdev, unsigned n, const char *label, const uint8_t uuid[16], const uint8_t master[32],
                         const struct cosmo_keyslot *slots);
     /* Optional: fill blocks/bfree/bavail (and files/ffree) of `out`, which
      * the VFS has set up with its defaults. Without it a mount whose page
@@ -651,7 +651,8 @@ int vfs_mount_set_held(struct mount *mnt, struct blkdev *const *bd, unsigned n);
  * vfs_bdev_mounted. */
 int vfs_format(const char *fsname, struct blkdev *bd, const char *label);
 int vfs_format_mirror(const char *fsname, struct blkdev **bd, unsigned n, const char *label);
-int vfs_format_keyed(const char *fsname, struct blkdev **bd, unsigned n, const char *label, const uint8_t master[32],
+int vfs_format_keyed(const char *fsname, struct blkdev **bd, unsigned n, const char *label, const uint8_t uuid[16],
+                     const uint8_t master[32],
                      const struct cosmo_keyslot *slots);
 
 /*

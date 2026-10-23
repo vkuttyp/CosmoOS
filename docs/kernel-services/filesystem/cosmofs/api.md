@@ -182,15 +182,17 @@ Concurrency: the key is passed to `format_at` through the file-scope
 `cosmofs_format` on another device could pick it up. The only caller is
 the `cosmofs-crypt` self-test.
 
-#### `int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const uint8_t master[32], const struct cosmo_keyslot *slots)`
+#### `int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const uint8_t uuid[16], const uint8_t master[32], const struct cosmo_keyslot *slots)`
 Roadmap 1.2 B5 (`design.md`, "Format version 14"): an encrypted pool on
 `n` devices (1, or 2 as one mirrored member) at version 14, named
-`label`, with `master` as its master key and `slots` (eight,
-`uapi/cosmo/keyslot.h`) as user space sealed them. Every block it writes
+`label`, with `uuid` as its uuid, `master` as its master key and
+`slots` (eight, `uapi/cosmo/keyslot.h`) as user space sealed them. The
+uuid is the caller's because a slot's associated data names it: the
+slots are sealed before the pool exists. Every block it writes
 is MAC'd; on success the key is loaded in the key table, so the pool
 mounts at once. `-EINVAL` for a slot of the wrong shape (a key-file
 slot past 0, a passphrase slot with no passes or too little memory) or
-no usable slot, or a longer label; `-EAGAIN`/`-EINTR` when the entropy
+no usable slot, an all-zero uuid, or a longer label; `-EAGAIN`/`-EINTR` when the entropy
 pool is not seeded (the uuid and the format's own draws need it);
 otherwise as `cosmofs_format`. The VFS's `format_keyed`, reached from
 `/dev/blkctl` `FORMAT_KEYED`. `cosmofs_test_format_keyed_members`

@@ -2254,8 +2254,10 @@ one.
 
 ### Making an encrypted pool
 
-`COSMO_BLKCTL_FORMAT_KEYED` takes, after the command, the master key,
-the eight slots as user space sealed them, an optional second device
+`COSMO_BLKCTL_FORMAT_KEYED` takes, after the command, the pool's uuid
+(chosen by user space, since each slot's associated data names it and
+the slots are sealed before the pool exists), the master key, the eight
+slots as user space sealed them, an optional second device
 (a mirror shares one master key) and a label. The kernel writes the key
 block and MACs every block it formats, then loads the key, so the
 installer can mount the new root at once.

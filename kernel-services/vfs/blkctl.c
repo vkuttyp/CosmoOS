@@ -204,7 +204,7 @@ static int64_t blkctl_format_keyed(struct blkctl_open *o, struct cosmo_blkctl *c
     if (rc == 0 && (blk_part_any(two[0]) || (n == 2 && blk_part_any(two[1]))))
         rc = -EBUSY;   /* as FORMAT: a whole disk with registered partitions */
     if (rc == 0)
-        rc = vfs_format_keyed(cmd->fstype, two, n, label, k->master, k->slot);
+        rc = vfs_format_keyed(cmd->fstype, two, n, label, k->uuid, k->master, k->slot);
     for (unsigned i = 0; i < 2; i++)
         if (two[i] != NULL)
             blkdev_put(two[i]);

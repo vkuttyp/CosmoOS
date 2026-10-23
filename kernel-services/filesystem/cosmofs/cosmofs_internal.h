@@ -574,6 +574,7 @@ int cfs_super_peek(struct spool *p, struct cfs_super *out);
 
 /* What an encrypted format is given (design.md, "Making an encrypted pool"). */
 struct cfs_format_keys {
+    uint8_t uuid[16];                  /* the slots' associated data names it: user space chose it */
     uint8_t master[CHACHA20_KEY_SIZE];
     struct cfs_keyslot slot[CFS_KEY_SLOTS];
 };

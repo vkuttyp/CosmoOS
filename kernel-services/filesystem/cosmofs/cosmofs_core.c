@@ -2257,7 +2257,10 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         return -ENOMEM;
     }
     uint8_t uuid[16];
-    random_get_bytes(uuid, sizeof(uuid));
+    if (fk != NULL)
+        memcpy(uuid, fk->uuid, sizeof(uuid));   /* the slots were sealed for it */
+    else
+        random_get_bytes(uuid, sizeof(uuid));
     uint64_t total = 0, free_total = 0;
     for (unsigned v = 0; v < n; v++) {
         uint64_t nb = pool->m[v].nblocks;
@@ -2497,20 +2500,22 @@ int cosmofs_format_keyed(struct blkdev **bd, unsigned n, const char *label, cons
             return -EINVAL;
         usable += fk->slot[i].kind != CFS_KEYSLOT_EMPTY;
     }
-    if (usable == 0)
-        return -EINVAL;
+    static const uint8_t zero[16] = { 0 };
+    if (usable == 0 || memcmp(fk->uuid, zero, 16) == 0)
+        return -EINVAL;   /* no way in; or no uuid, which is how a pool before version 4 says it has none */
     int rc = cfs_need_seeded("create an encrypted pool");
     if (rc)
         return rc;
     return format_at(bd, 1, n, 14, label, fk);
 }
 
-int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const uint8_t master[32],
+int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const uint8_t uuid[16], const uint8_t master[32],
                         const struct cosmo_keyslot *slots)
 {
     struct cfs_format_keys *fk = kmalloc(sizeof(*fk), 0);
     if (fk == NULL)
         return -ENOMEM;
+    memcpy(fk->uuid, uuid, sizeof(fk->uuid));
     memcpy(fk->master, master, sizeof(fk->master));
     memcpy(fk->slot, slots, sizeof(fk->slot));
     int rc = cosmofs_format_keyed(bd, n, label, fk);
@@ -2523,12 +2528,13 @@ int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const
 /* Test hook: an encrypted pool of `members` single-device members, so the
  * labels -- which only a member past the first has -- are MAC'd and can
  * be forged (cosmofs-encrypted-root). */
-int cosmofs_test_format_keyed_members(struct blkdev **bd, unsigned members, const uint8_t master[32],
+int cosmofs_test_format_keyed_members(struct blkdev **bd, unsigned members, const uint8_t uuid[16], const uint8_t master[32],
                                       const struct cosmo_keyslot *slots)
 {
     struct cfs_format_keys *fk = kmalloc(sizeof(*fk), 0);
     if (fk == NULL)
         return -ENOMEM;
+    memcpy(fk->uuid, uuid, sizeof(fk->uuid));
     memcpy(fk->master, master, sizeof(fk->master));
     memcpy(fk->slot, slots, sizeof(fk->slot));
     int rc = format_at(bd, members, 1, 14, NULL, fk);
