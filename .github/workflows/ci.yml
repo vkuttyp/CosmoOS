@@ -491,8 +491,9 @@ jobs:
   # Roadmap 1.2 B3's acceptance (docs/roadmap-1.2.md; cosmofs testing.md,
   # "test-mirror"): a two-disk mirrored root installed, a disk removed under
   # a writer and replaced, the resilver, a scrub, a reboot from the new pair,
-  # a spare taking over, and a boot with a copy missing and then its return.
-  # Release builds, both architectures.
+  # a spare taking over, and a boot with a copy missing and then its return;
+  # then (PKG-11) upgrades, a repair and a rollback reaching both disks'
+  # ESPs. Release builds, both architectures.
   mirror:
     name: mirror test (${{ matrix.arch }})
     runs-on: ubuntu-24.04

@@ -194,12 +194,44 @@ pool: cosmo-root: member 0 copy 1 (vdb) ONLINE: resilvered; the member is whole
 Once resilvered, the spare is a member like any other. `remove-spare`
 gives back a spare that has not been used.
 
+## Upgrades reach both disks
+
+`cosmo-upgrade` writes the new release to the ESP of the disk the
+system booted from (`ahci0p0p1` here, the first disk's; the second is
+`vda`), then makes every other disk's ESP that one, sector
+for sector: an upgrade, a `--rollback` and a `--repair` each end with a
+line per disk.
+
+```text
+cosmo-upgrade: the ESP on vda1 is ahci0p0p1's (44032 sectors written)
+```
+
+So after an upgrade either disk boots the new release by itself. A
+disk that was missing during an upgrade is named instead, and the ESP on
+it keeps the release it had:
+
+```text
+cosmo-upgrade: 1 copy(ies) of the root are missing: their disks' ESPs are not updated; once they are back, cosmo-upgrade --repair brings them up to this one
+```
+
+When it is back, every boot says so until it is repaired (the pool
+resilvers the root's copy by itself; the ESP is outside the pool):
+
+```text
+cosmo-upgrade: the ESP on vda1 is not ahci0p0p1's (its set 4360a4d314f4, the booted 05822dd894bd): run cosmo-upgrade --repair to bring it up to date
+cosmo$ cosmo-upgrade --repair
+cosmo-upgrade: the root and the boot set are the pairing \cosmo\be intends: nothing to repair
+cosmo-upgrade: the ESP on vda1 is ahci0p0p1's (43776 sectors written)
+```
+
+`--repair` copies from the ESP the system booted from, so run it on the
+disk that has the release you want. A copy that is a whole disk (one
+`cosmo-pool attach` or `replace` gave a whole disk) has no ESP, and that
+disk does not boot by itself; `cosmo-upgrade` says so.
+
 ## What it does not do
 
 - A mirror is two copies, or up to four with `attach`. There is no
   parity (RAID-Z), and nothing moves blocks between members.
-- `cosmo-upgrade` writes the new release to the ESP of the disk the
-  system booted from. The other disk's ESP keeps the release it was
-  installed with.
 - Hot-removal and hot-add of disks work on PCIe (virtio and NVMe). A
   USB disk under a pool is not handled.

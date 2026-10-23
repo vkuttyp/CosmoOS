@@ -755,7 +755,7 @@ reinstalling it, and back.
     cosmo-upgrade [--check] [--stop-after=STEP] --fetch TAG|URL
     cosmo-upgrade --check
     cosmo-upgrade --rollback [--stop-after=intent|record|set]
-    cosmo-upgrade --list | --status | --repair | --prune
+    cosmo-upgrade --list | --status | --repair | --prune | --esp-check
 
 DIR holds a release's boot set: `kernel.elf`, `boot.tar`, `cmdline` and
 `manifest`, under those names or as the release assets name them
@@ -774,6 +774,37 @@ file into `/tmp`. Nothing older than the package can check an Ed25519
 signature on v1.0.3: its `pkg` is the only verifier it has. From v1.0.6
 the package also carries `bin/cosmo-fetch`, for `--fetch` on a system
 older than it (`COSMO_FETCH` names the copy; `userland/lib/fetch.c`).
+
+### Every disk's ESP (PKG-11)
+
+On a mirrored root (`cosmo-install --mirror`, roadmap 1.2 B3) each disk
+has an ESP of its own, and booting from the other disk runs what its ESP
+holds. The switches above write the booted ESP only (the one the loader
+was read from, flagged `BOOT`). When an upgrade, a `--rollback` or a
+`--repair` has finished with it -- before a rollback's reboot -- each
+other disk holding a copy of the root (`COSMO_FSCTL_POOL_STATUS`), whose
+partition 1 has the booted ESP's type and size, is made the booted ESP
+sector for sector: only the sectors that differ are written, the disk is
+flushed and the whole is read back. `/var/lib/cosmo-upgrade/esp-sync`
+names the ESPs being written for as long as they are. A copy whose disk
+is absent is counted and named; one that is a whole disk has no ESP and
+is said to be one that does not boot by itself.
+
+At every boot of a disk root, init runs `cosmo-upgrade --esp-check`:
+each other disk's ESP is compared with the booted one in the files that
+say what it boots -- `\EFI\BOOT`'s loader, `\cosmo`'s manifest and
+loader, `\cosmo\be`, `\cosmo\prev`'s manifest and loader -- and one
+that differs, or that `esp-sync` names, is reported with
+`cosmo-upgrade --repair`, which copies the booted ESP over it. The
+direction is the booted disk's: `--repair` makes the booted pairing
+whole first, then copies it.
+
+What an interruption leaves: the booted ESP's own states are the
+switches' above. A copy cut short leaves the other ESP partly written,
+`esp-sync` naming it, and the boot from the booted disk says so; that
+disk does not boot reliably by itself until `--repair`. The copy is not
+a switch of its own -- two failures at once, the booted disk lost while
+its copy was being written, are not covered.
 
 ### Boot environments (roadmap 1.2 B4)
 

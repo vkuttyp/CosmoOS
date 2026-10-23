@@ -6501,6 +6501,26 @@ static bool be_after_rollback(void)
     return false;
 }
 
+/*
+ * On a mirrored root each disk has an ESP of its own, and booting from the
+ * other disk runs whatever its ESP holds (PKG-11). cosmo-upgrade writes
+ * every one, but a disk absent during an upgrade or a rollback rejoins
+ * with the old one: `cosmo-upgrade --esp-check` names each that is not
+ * the booted ESP, with the command that repairs it. Nothing waits on it.
+ */
+static void esp_check(void)
+{
+    struct stat st;
+    if (stat("/sbin/cosmo-upgrade", &st) != 0)
+        return;
+    const char *argv[] = { "cosmo-upgrade", "--esp-check", NULL };
+    fflush(stdout);
+    pid_t pid = spawnve("/sbin/cosmo-upgrade", argv, NULL, NULL, 0);
+    int rc = -1;
+    if (pid > 0)
+        (void)waitpid(pid, &rc, 0);
+}
+
 static void boot_complete(void)
 {
     int fd = open("/dev/fsctl", O_RDWR);
@@ -6635,6 +6655,7 @@ int main(int argc, char **argv)
     if (disk_root) {
         pkg_recover();         /* before any service starts */
         kept = be_after_rollback();
+        esp_check();
     }
     if (stat("/etc/rc", &st) == 0) {
         const char *rc_argv[] = { "sh", "/etc/rc", NULL };

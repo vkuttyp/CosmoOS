@@ -304,12 +304,18 @@ test-fsck: $(IMAGE)
 # docs/kernel-services/filesystem/cosmofs/testing.md, "test-mirror"):
 # install onto a two-disk mirror, remove a disk under a writer, replace
 # and resilver it, scrub, reboot from the new pair; then a spare takes
-# over; then a boot with a copy missing, and its return. (CI:
-# BUILD=release, the mirror job.)
-test-mirror: $(IMAGE)
+# over; then a boot with a copy missing, and its return; then (PKG-11)
+# upgrades, a repair and a rollback reaching both disks' ESPs, on this
+# build's release set and two made from it. MIRROR_STAGES=esp runs
+# that stage alone. (CI: BUILD=release, the mirror job.)
+MIRROR_SET_DIR := $(OUT)/test-mirror-set
+MIRROR_STAGES ?=
+test-mirror: RELEASE_DIR = $(MIRROR_SET_DIR)
+test-mirror: release-set $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/mirror_test.py --image $(IMAGE) --workdir $(OUT)/test-mirror \
-		--timeout $(BOOT_TIMEOUT)
+		--timeout $(BOOT_TIMEOUT) --set $(MIRROR_SET_DIR) --key $(MODSIGN_KEY) \
+		$(if $(MIRROR_STAGES),--stages $(MIRROR_STAGES))
 
 # Roadmap 1.2 B3's PCIe hotplug test (tests/boot/pci_hotplug_test.py,
 # docs/drivers/pci/testing.md, "test-pci-hotplug"): QEMU device_del and

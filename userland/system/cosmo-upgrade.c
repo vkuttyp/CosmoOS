@@ -24,7 +24,10 @@
  * checked before anything else is fetched, then the four files; then it
  * proceeds as with DIR. --check alone says whether that URL's newest
  * release is newer than the running one. Exit 0 done, 1 failed, 2 usage,
- * 3 refused (nothing written), 4 stopped by --stop-after.
+ * 3 refused (nothing written), 4 stopped by --stop-after. On a mirrored
+ * root, every other disk's ESP is then made the booted one's (PKG-11);
+ * --esp-check, which init runs at every boot of a disk root, says which
+ * one is not.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -477,11 +480,12 @@ static int find_set(const struct fat_ent *ents, int n, struct fat_ent set[SET_FI
     return 0;
 }
 
-static int esp_load(struct esp *e, char *err, size_t errlen)
+/* The ESP on `dev` read as cosmo-upgrade keeps it: the booted one
+ * (esp_load), or another disk's (PKG-11). */
+static int esp_open(struct esp *e, const struct cosmo_blkctl_dev *dev, char *err, size_t errlen)
 {
     memset(e, 0, sizeof(*e));
-    if (esp_find(&e->dev) < 0)
-        return -1;
+    e->dev = dev;
     if (fat_open(&e->f, e->dev, err, errlen) < 0)
         return -1;
     uint8_t n83[11], nt;
@@ -545,6 +549,15 @@ static int esp_load(struct esp *e, char *err, size_t errlen)
                                            sizeof(why)) == 0 && has_loader;
     }
     return 0;
+}
+
+static int esp_load(struct esp *e, char *err, size_t errlen)
+{
+    const struct cosmo_blkctl_dev *dev;
+    memset(e, 0, sizeof(*e));
+    if (esp_find(&dev) < 0)
+        return -1;
+    return esp_open(e, dev, err, errlen);
 }
 
 static int esp_read(struct esp *e, const struct fat_ent *ent, uint8_t **out)
@@ -1222,6 +1235,263 @@ static int running_tag(char *out, size_t n);
  * made the set's, the root brought from the previous set to it. */
 /* As finish, and when `root` is false the root is left alone: a
  * boot-environment rollback replaces it whole at the next mount. */
+/* --- the other disks' ESPs (PKG-11) -------------------------------------------------
+ *
+ * A mirrored root (cosmo-install --mirror, roadmap 1.2 B3) is on two
+ * disks, and each has an ESP of its own, so either boots when the other
+ * fails. Everything above writes the booted ESP alone; once it has the
+ * set an upgrade, a rollback or a repair meant, each other disk holding
+ * a copy of the root is given that ESP whole, sector for sector, as the
+ * installer gave it at the start. Only the sectors that differ are
+ * written, and the copy is read back. The file below names the ESPs
+ * being written for as long as they are: one the system stopped in the
+ * middle of is told apart at the next boot (--esp-check) from one that
+ * merely matches in the files compared. */
+#define ESP_SYNC STATE_DIR "/esp-sync"
+#define MAX_PEERS 8
+#define SYNC_CHUNK 256   /* sectors per comparison */
+
+struct peers {
+    const struct cosmo_blkctl_dev *esp[MAX_PEERS];
+    int n;
+    int absent;   /* copies of the root with no device now (MISSING) */
+};
+
+/* The root pool's copies, by device, and the ESP on each one's disk that
+ * is not the booted disk. A copy that is a whole disk has no ESP: it is
+ * named when `tell`, and passed over (it cannot boot by itself). */
+static int esp_peers(const struct cosmo_blkctl_dev *boot, struct peers *p, bool tell)
+{
+    memset(p, 0, sizeof(*p));
+    struct rootsnap rs;
+    if (rootsnap_open(&rs, "/") < 0)
+        return 0;   /* no pool to ask: a root of one disk */
+    size_t cap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_pool) +
+                 (255 * 4 + 4) * sizeof(struct cosmo_fsctl_copy);
+    char *buf = malloc(cap);
+    struct cosmo_fsctl cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_FSCTL_VERSION;
+    cmd.op = COSMO_FSCTL_POOL_STATUS;
+    cmd.mount_id = rs.mount_id;
+    long n = -1;
+    if (buf != NULL && write(rs.fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd))
+        n = read(rs.fd, buf, cap);
+    rootsnap_close(&rs);
+    if (n < (long)(sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_pool))) {
+        free(buf);
+        return 0;   /* a pool without copies to report (older than B3's) */
+    }
+    const struct cosmo_fsctl_result *h = (const struct cosmo_fsctl_result *)buf;
+    const struct cosmo_fsctl_copy *c =
+        (const struct cosmo_fsctl_copy *)(buf + sizeof(*h) + sizeof(struct cosmo_fsctl_pool));
+    size_t fits = ((size_t)n - sizeof(*h) - sizeof(struct cosmo_fsctl_pool)) / sizeof(*c);
+    unsigned count = h->count < fits ? h->count : (unsigned)fits;
+    for (unsigned i = 0; i < count; i++) {
+        if (c[i].state == COSMO_FSCTL_COPY_SPARE)
+            continue;
+        char dev[sizeof(c[i].dev) + 1];
+        memcpy(dev, c[i].dev, sizeof(c[i].dev));
+        dev[sizeof(c[i].dev)] = '\0';
+        const struct cosmo_blkctl_dev *d = dev[0] ? blkdevs_find(dev) : NULL;
+        if (d == NULL) {
+            p->absent++;
+            continue;
+        }
+        const char *disk = d->disk[0] ? d->disk : d->name;
+        if (strcmp(disk, boot->disk) == 0)
+            continue;
+        const struct cosmo_blkctl_dev *esp = NULL;
+        for (unsigned k = 0; k < g_nblkdevs; k++)
+            if (strcmp(g_blkdevs[k].disk, disk) == 0 && g_blkdevs[k].index == 1 &&
+                memcmp(g_blkdevs[k].type, boot->type, 16) == 0)
+                esp = &g_blkdevs[k];
+        if (esp == NULL) {
+            if (tell)
+                say("the root's copy on %s has no ESP on its disk: that disk does not boot by itself", dev);
+            continue;
+        }
+        if (p->n < MAX_PEERS)
+            p->esp[p->n++] = esp;
+    }
+    free(buf);
+    return 0;
+}
+
+static bool sync_marked(const char *name)
+{
+    char buf[512];
+    int fd = open(ESP_SYNC, O_RDONLY);
+    if (fd < 0)
+        return false;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    buf[n > 0 ? n : 0] = '\0';
+    size_t len = strlen(name);
+    for (const char *s = buf; *s != '\0';) {
+        const char *nl = strchr(s, '\n');
+        size_t l = nl ? (size_t)(nl - s) : strlen(s);
+        if (l == len && strncmp(s, name, len) == 0)
+            return true;
+        if (nl == NULL)
+            break;
+        s = nl + 1;
+    }
+    return false;
+}
+
+/* `peer` made the booted ESP sector for sector; *written: how many
+ * differed. 0 or -errno (-EIO when the read-back is not the source). */
+static int esp_copy(const struct cosmo_blkctl_dev *from, const struct cosmo_blkctl_dev *peer, uint64_t *written)
+{
+    size_t bytes = (size_t)SYNC_CHUNK * from->sector_size;
+    uint8_t *a = malloc(bytes), *b = malloc(bytes);
+    int rc = a && b ? 0 : -ENOMEM;
+    *written = 0;
+    for (int pass = 0; pass < 2 && rc == 0; pass++) {
+        for (uint64_t lba = 0; lba < from->sectors && rc == 0; lba += SYNC_CHUNK) {
+            uint64_t n = from->sectors - lba < SYNC_CHUNK ? from->sectors - lba : SYNC_CHUNK;
+            rc = blkdevs_read(from, lba, n, a);
+            if (rc == 0)
+                rc = blkdevs_read(peer, lba, n, b);
+            if (rc == 0 && memcmp(a, b, n * from->sector_size) != 0) {
+                if (pass == 1)
+                    rc = -EIO;   /* written, flushed, and not what was written */
+                else {
+                    rc = blkdevs_write(peer, lba, n, a);
+                    *written += n;
+                }
+            }
+        }
+        if (rc == 0 && pass == 0)
+            rc = blkdevs_flush(peer);
+    }
+    free(a);
+    free(b);
+    return rc;
+}
+
+/* Every other disk's ESP made the booted one's. EXIT_DONE, or
+ * EXIT_FAILED with each one not brought up named. */
+static int esp_sync_peers(void)
+{
+    const struct cosmo_blkctl_dev *boot;
+    if (esp_find(&boot) < 0)
+        return EXIT_FAILED;
+    struct peers p;
+    esp_peers(boot, &p, true);
+    if (p.absent)
+        say("%d copy(ies) of the root are missing: their disks' ESPs are not updated; once they are back, "
+            "cosmo-upgrade --repair brings them up to this one", p.absent);
+    if (p.n == 0)
+        return EXIT_DONE;
+    int fd = open(ESP_SYNC, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    for (int i = 0; fd >= 0 && i < p.n; i++)
+        dprintf(fd, "%s\n", p.esp[i]->name);
+    if (fd < 0 || fsync(fd) < 0) {
+        int e = errno;
+        if (fd >= 0)
+            close(fd);
+        return fail(ESP_SYNC, e);
+    }
+    close(fd);
+    sync();
+    int rc = EXIT_DONE;
+    for (int i = 0; i < p.n; i++) {
+        uint64_t written;
+        if (p.esp[i]->sectors != boot->sectors || p.esp[i]->sector_size != boot->sector_size) {
+            fprintf(stderr, "cosmo-upgrade: the ESP on %s is not the size of %s's: not updated\n", p.esp[i]->name,
+                    boot->name);
+            rc = EXIT_FAILED;
+            continue;
+        }
+        int r = esp_copy(boot, p.esp[i], &written);
+        if (r < 0) {
+            fprintf(stderr, "cosmo-upgrade: the ESP on %s: %s; it is not the booted one's until cosmo-upgrade "
+                            "--repair\n", p.esp[i]->name, strerror(-r));
+            rc = EXIT_FAILED;
+            continue;
+        }
+        say("the ESP on %s is %s's (%llu sectors written)", p.esp[i]->name, boot->name,
+            (unsigned long long)written);
+    }
+    if (rc == EXIT_DONE) {
+        unlink(ESP_SYNC);
+        sync();
+    }
+    return rc;
+}
+
+/* The files that say which sets an ESP boots, the same on both: the
+ * firmware's loader, the set's manifest and loader, \cosmo\be, and prev's
+ * manifest and loader. A file present on one alone differs. */
+static bool esp_same(struct esp *x, struct esp *y)
+{
+    const struct fat_ent *fx[] = { &x->boot, &x->set[3], x->has_sloader ? &x->sloader : NULL,
+                                   x->has_be ? &x->be : NULL, x->prev_whole ? &x->pset[3] : NULL,
+                                   x->prev_whole ? &x->ploader : NULL };
+    const struct fat_ent *fy[] = { &y->boot, &y->set[3], y->has_sloader ? &y->sloader : NULL,
+                                   y->has_be ? &y->be : NULL, y->prev_whole ? &y->pset[3] : NULL,
+                                   y->prev_whole ? &y->ploader : NULL };
+    for (size_t i = 0; i < sizeof(fx) / sizeof(fx[0]); i++) {
+        if ((fx[i] == NULL) != (fy[i] == NULL))
+            return false;
+        if (fx[i] == NULL)
+            continue;
+        if (fx[i]->size != fy[i]->size)
+            return false;
+        uint8_t *a = NULL, *b = NULL;
+        bool same = esp_read(x, fx[i], &a) >= 0 && esp_read(y, fy[i], &b) >= 0 && memcmp(a, b, fx[i]->size) == 0;
+        free(a);
+        free(b);
+        if (!same)
+            return false;
+    }
+    return true;
+}
+
+/* --esp-check, from init at every boot of a disk root: each other disk's
+ * ESP against the booted one. Silent when they agree; 1 when one does
+ * not, each such one named with the command that repairs it. */
+static int esp_check(void)
+{
+    struct esp e;
+    char err[200];
+    if (esp_load(&e, err, sizeof(err)) < 0) {
+        fprintf(stderr, "cosmo-upgrade: %s\n", err);
+        return EXIT_FAILED;
+    }
+    struct peers p;
+    esp_peers(e.dev, &p, false);
+    int rc = EXIT_DONE;
+    for (int i = 0; i < p.n; i++) {
+        struct esp o;
+        char tag[129] = "", otag[129] = "";
+        uint8_t *m = NULL;
+        if (esp_read(&e, &e.set[3], &m) >= 0 && e.set[3].size == COSMO_MANIFEST_FILE_SIZE)
+            manifest_tag(m, tag);
+        free(m);
+        m = NULL;
+        bool opened = esp_open(&o, p.esp[i], err, sizeof(err)) == 0;
+        if (opened && esp_read(&o, &o.set[3], &m) >= 0 && o.set[3].size == COSMO_MANIFEST_FILE_SIZE)
+            manifest_tag(m, otag);
+        free(m);
+        if (sync_marked(p.esp[i]->name))
+            say("the ESP on %s was being written when the system stopped: run cosmo-upgrade --repair to make it "
+                "%s's", p.esp[i]->name, e.dev->name);
+        else if (!opened)
+            say("the ESP on %s is not one cosmo-upgrade reads (%s): run cosmo-upgrade --repair to make it %s's",
+                p.esp[i]->name, err, e.dev->name);
+        else if (!esp_same(&e, &o))
+            say("the ESP on %s is not %s's (its set %.12s, the booted %.12s): run cosmo-upgrade --repair to bring it "
+                "up to date", p.esp[i]->name, e.dev->name, otag[0] ? otag : "unreadable", tag[0] ? tag : "unreadable");
+        else
+            continue;
+        rc = EXIT_FAILED;
+    }
+    return rc;
+}
+
 static int finish_ex(struct esp *e, const struct set *cur, bool root)
 {
     if (e->has_sloader) {
@@ -1912,9 +2182,25 @@ static bool g_set_only;
  * cosmo-snap rollback does, init is asked to restart now; --no-reboot
  * leaves that to the operator. */
 static bool g_no_reboot;
+static bool g_peers_done;   /* esp_sync_peers ran in this run (PKG-11) */
+
+/* What a run that wrote the booted ESP ends with: the other disks' ESPs
+ * made it, before any reboot. */
+static int peers_after(int rc)
+{
+    if (rc != EXIT_DONE || g_peers_done)
+        return rc;
+    g_peers_done = true;
+    return esp_sync_peers();
+}
 
 static int reboot_to_apply(void)
 {
+    int rc = peers_after(EXIT_DONE);
+    if (rc != EXIT_DONE) {
+        say("not rebooting: an ESP above is not this one's; cosmo-upgrade --repair, then reboot");
+        return rc;
+    }
     if (g_no_reboot) {
         say("reboot to run it (what is written before then is not kept)");
         return EXIT_DONE;
@@ -2983,7 +3269,7 @@ static int usage(void)
                     "       cosmo-upgrade --check\n"
                     "       cosmo-upgrade --rollback [--no-reboot] [--stop-after=intent|record|set]\n"
                     "       cosmo-upgrade --repair [--no-reboot]\n"
-                    "       cosmo-upgrade --list | --status | --prune\n");
+                    "       cosmo-upgrade --list | --status | --prune | --esp-check\n");
     return EXIT_USAGE;
 }
 
@@ -3001,7 +3287,8 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--status") == 0)
             stat_only = true;
         else if ((strcmp(argv[i], "--list") == 0 || strcmp(argv[i], "--repair") == 0 ||
-                  strcmp(argv[i], "--prune") == 0 || strcmp(argv[i], "--after-rollback") == 0) && only == NULL)
+                  strcmp(argv[i], "--prune") == 0 || strcmp(argv[i], "--after-rollback") == 0 ||
+                  strcmp(argv[i], "--esp-check") == 0) && only == NULL)
             only = argv[i];
         else if (strncmp(argv[i], "--stop-after=", 13) == 0)
             stop = argv[i] + 13;
@@ -3028,14 +3315,16 @@ int main(int argc, char **argv)
     bool latest = check && dir == NULL && fetch == NULL;
     struct timespec ts;
     g_now = clock_gettime(CLOCK_REALTIME, &ts) == 0 ? ts.tv_sec : 0;
-    bool reads_only = stat_only || (only && strcmp(only, "--list") == 0);
+    bool reads_only = stat_only || (only && (strcmp(only, "--list") == 0 || strcmp(only, "--esp-check") == 0));
     if (!reads_only && !check && hold_lock() < 0)
         return EXIT_REFUSED;
     relsig_ring_load(KEYS_DIR);
     if (only && strcmp(only, "--list") == 0)
         return list_envs();
+    if (only && strcmp(only, "--esp-check") == 0)
+        return esp_check();
     if (only && strcmp(only, "--repair") == 0)
-        return repair();
+        return peers_after(repair());
     if (only && strcmp(only, "--prune") == 0)
         return prune();
     if (only && strcmp(only, "--after-rollback") == 0)
@@ -3045,8 +3334,8 @@ int main(int argc, char **argv)
     if (stat_only)
         return status();
     if (fetch)
-        return fetch_set(fetch, check, stop);
+        return check ? fetch_set(fetch, check, stop) : peers_after(fetch_set(fetch, check, stop));
     if (roll)
-        return rollback(stop);
-    return upgrade(dir, check, stop);
+        return peers_after(rollback(stop));
+    return check ? upgrade(dir, check, stop) : peers_after(upgrade(dir, check, stop));
 }

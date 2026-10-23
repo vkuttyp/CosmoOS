@@ -237,3 +237,21 @@ start through several boots). Check: init's self-test `svc_stale_selftest`
 not running and the service starts; a stale child file is not killed);
 `test-install`'s reboot stage leaves pid files naming pid 1 on the root's
 own `/run`, and the persist stage requires every service to start.
+
+**U15. An upgrade reaches every disk that boots the root.** On a
+mirrored root, an upgrade, a `--rollback` and a `--repair` that leave the
+booted ESP as they meant end by making every other disk's ESP (partition
+1 of each disk holding a copy of the root, the booted ESP's type and
+size) that ESP sector for sector, read back; a rollback does it before
+its reboot. A disk absent then is counted and named, and at every boot
+of a disk root `cosmo-upgrade --esp-check` names each ESP that differs
+from the booted one in what it boots, or that a copy was cut short on
+(`/var/lib/cosmo-upgrade/esp-sync`), with `cosmo-upgrade --repair`
+(PKG-11: an upgrade wrote the booted disk's ESP alone, and the other
+disk booted the release it was installed with). Check: `test-mirror`'s
+esp stage -- an upgrade on two disks, then the second alone boots the new
+set; an upgrade with the second absent, the boot after it rejoins naming
+its ESP, `--repair`, then the second alone boots that set; a
+`--rollback`, then the second alone boots the previous set. Gap: the copy
+is not a switch of its own; the booted disk lost while its copy was being
+written leaves neither disk sure to boot.
