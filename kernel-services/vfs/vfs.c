@@ -3250,6 +3250,11 @@ static bool bdev_related(const struct blkdev *a, const struct blkdev *b)
 {
     if (a == b)
         return true;
+    /* A removed device's name is free for the next one to take: a mount
+     * still holding a pulled vda2 does not hold the new disk called vda
+     * (roadmap 1.2 B3's test-mirror). */
+    if (__atomic_load_n(&a->gone, __ATOMIC_SEQ_CST) || __atomic_load_n(&b->gone, __ATOMIC_SEQ_CST))
+        return false;
     struct blk_part_info pi;
     if (blk_part_info(a, &pi) && strcmp(pi.disk, b->name) == 0)
         return true;
@@ -3260,11 +3265,16 @@ static bool bdev_related(const struct blkdev *a, const struct blkdev *b)
  * being torn down holds its device too (V38). */
 bool vfs_bdev_mounted(const struct blkdev *bd)
 {
+    return vfs_bdev_mounted_except(bd, NULL);
+}
+
+bool vfs_bdev_mounted_except(const struct blkdev *bd, const struct mount *self)
+{
     bool found = false;
     mutex_lock(&g_claim_lock);
     struct mount *mnt;
     list_for_each_entry(mnt, &g_claims, claim_link) {
-        if (claim_covers(mnt, bd)) {
+        if (mnt != self && claim_covers(mnt, bd)) {
             found = true;
             break;
         }
@@ -3289,7 +3299,7 @@ int vfs_format(const char *fsname, struct blkdev *bd, const char *label)
     return rc;
 }
 
-int vfs_format_mirror(const char *fsname, struct blkdev **bd, unsigned n)
+int vfs_format_mirror(const char *fsname, struct blkdev **bd, unsigned n, const char *label)
 {
     struct fs_type *fs = vfs_find_fs(fsname);
     if (fs == NULL)
@@ -3303,7 +3313,7 @@ int vfs_format_mirror(const char *fsname, struct blkdev **bd, unsigned n)
     for (unsigned i = 0; i < n; i++)
         if (vfs_bdev_mounted(bd[i]))
             return -EBUSY;
-    int rc = fs->format_mirror(bd, n);
+    int rc = fs->format_mirror(bd, n, label);
     if (rc == 0)
         kinfo("vfs: made an empty %s mirrored over %u devices, %s first", fsname, n, bd[0]->name);
     return rc;
