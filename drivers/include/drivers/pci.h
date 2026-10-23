@@ -111,6 +111,10 @@ int pci_test_remove(struct pci_device *p);
 int pci_test_rebind(struct pci_device *p);
 #endif
 
+/* PCIe native hotplug (roadmap 1.2 B3): how many hot-plug slots are
+ * watched, the interrupts they took and the events acted on. */
+void pci_hotplug_stats(unsigned *slots, uint64_t *irqs, uint64_t *events);
+
 /* Configuration access. Any context; a spinlock in the legacy path. */
 uint8_t  pci_cfg_read8(const struct pci_device *pdev, uint16_t off);
 uint16_t pci_cfg_read16(const struct pci_device *pdev, uint16_t off);

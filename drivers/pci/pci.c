@@ -17,7 +17,10 @@
 #include <kernel/panic.h>
 #include <kernel/pci_bar.h>
 #include <kernel/printf.h>
+#include <kernel/mutex.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <kernel/vmm.h>
 
 #include <arch/pci.h>
@@ -280,8 +283,9 @@ static void find_capabilities(struct pci_device *p)
 
 static void scan_bus(uint8_t bus, struct device *parent, unsigned depth);
 
-/* PCI devices are enumerated once and never unregistered today; the
- * release exists so the object model's rule holds when hot-unplug does. */
+/* A function is enumerated at boot or when a hot-plug slot gains it, and
+ * unregistered when the slot loses it (remove_bus); the release runs when
+ * the last holder of its device is gone. */
 static void pci_device_release(struct device *dev)
 {
     struct pci_device *p = container_of(dev, struct pci_device, dev);
@@ -396,6 +400,385 @@ void pci_init(void)
     }
     scan_bus(0, NULL, 0);
     kinfo("pci: %u device(s) enumerated", g_count);
+    pciehp_init();
+}
+
+/* --- PCIe native hotplug (roadmap 1.2 B3, DRV-6) ------------------------
+ *
+ * docs/drivers/pci/design.md, "Hotplug". A root or downstream port whose
+ * slot capability says it is hot-plug capable gets its slot's events --
+ * the attention button QEMU's device_del presses, presence detect and
+ * data-link-layer changes -- as an MSI; one thread acts on them: a
+ * removal unbinds and unregisters the functions behind the port and then
+ * powers the slot off (which is what lets QEMU finish removing the
+ * device), an insertion powers the slot on, waits for the link, gives the
+ * new function BARs from the port's windows and enumerates it, and the
+ * drivers probe it as they would at boot. A port whose MSI cannot be set
+ * up is polled at a slow rate instead, and says so.
+ */
+
+#define PCI_CAP_ID_EXP        0x10
+#define PCI_EXP_FLAGS         0x02
+#define PCI_EXP_FLAGS_TYPE(f) (((f) >> 4) & 0xf)
+#define PCI_EXP_FLAGS_SLOT    (1u << 8)
+#define PCI_EXP_TYPE_ROOT     4u
+#define PCI_EXP_TYPE_DOWN     6u
+#define PCI_EXP_LNKSTA        0x12
+#define PCI_EXP_LNKSTA_DLLLA  (1u << 13)
+#define PCI_EXP_SLTCAP        0x14
+#define PCI_EXP_SLTCAP_ABP    (1u << 0)
+#define PCI_EXP_SLTCAP_PCP    (1u << 1)
+#define PCI_EXP_SLTCAP_HPC    (1u << 6)
+#define PCI_EXP_SLTCTL        0x18
+#define PCI_EXP_SLTCTL_ABPE   (1u << 0)
+#define PCI_EXP_SLTCTL_PDCE   (1u << 3)
+#define PCI_EXP_SLTCTL_HPIE   (1u << 5)
+#define PCI_EXP_SLTCTL_PIC    (3u << 8)
+#define PCI_EXP_SLTCTL_PIC_ON  (1u << 8)
+#define PCI_EXP_SLTCTL_PIC_OFF (3u << 8)
+#define PCI_EXP_SLTCTL_PCC    (1u << 10)   /* 1: power off */
+#define PCI_EXP_SLTCTL_DLLSCE (1u << 12)
+#define PCI_EXP_SLTSTA        0x1a
+#define PCI_EXP_SLTSTA_ABP    (1u << 0)
+#define PCI_EXP_SLTSTA_PDC    (1u << 3)
+#define PCI_EXP_SLTSTA_CC     (1u << 4)
+#define PCI_EXP_SLTSTA_PDS    (1u << 6)
+#define PCI_EXP_SLTSTA_DLLSC  (1u << 8)
+#define PCI_EXP_SLTSTA_EVENTS (PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_CC | PCI_EXP_SLTSTA_DLLSC | \\
+                               (1u << 1) | (1u << 2))
+
+#define PCI_IO_BASE           0x1c
+#define PCI_MEMORY_BASE       0x20
+#define PCI_PREF_MEMORY_BASE  0x24
+#define PCI_PREF_BASE_UPPER   0x28
+#define PCI_PREF_LIMIT_UPPER  0x2c
+#define PCI_IO_BASE_UPPER     0x30
+
+#define HP_POLL_MS       20u     /* the thread's look at what the interrupts said */
+#define HP_SLOW_POLL_MS  500u    /* a port without an interrupt: read its slot */
+#define HP_LINK_WAIT_MS  1000u
+
+struct hp_slot {
+    struct pci_device *port;
+    uint8_t exp;                 /* the PCI Express capability's offset */
+    uint8_t secondary;
+    bool msi;                    /* events arrive as interrupts; else polled */
+    bool powered;
+    uint32_t irqs;               /* interrupts taken (atomic) */
+    uint32_t seen;               /* of which the thread has acted on */
+    uint64_t next_poll_ns;
+    uint64_t events;             /* acted on, for the console and the tests */
+};
+
+#define HP_MAX_SLOTS 16
+static struct hp_slot g_slots[HP_MAX_SLOTS];
+static unsigned g_nslots;
+static struct thread *g_hp_thread;
+static struct mutex g_hp_lock;   /* the device list against a scan or a removal */
+
+static void hp_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector;
+    (void)frame;
+    struct hp_slot *s = arg;
+    __atomic_fetch_add(&s->irqs, 1, __ATOMIC_RELEASE);
+}
+
+static uint16_t sltsta(const struct hp_slot *s) { return pci_cfg_read16(s->port, (uint16_t)(s->exp + PCI_EXP_SLTSTA)); }
+static uint16_t sltctl(const struct hp_slot *s) { return pci_cfg_read16(s->port, (uint16_t)(s->exp + PCI_EXP_SLTCTL)); }
+
+static void set_sltctl(struct hp_slot *s, uint16_t clear, uint16_t set)
+{
+    uint16_t v = sltctl(s);
+    v = (uint16_t)((v & ~clear) | set);
+    pci_cfg_write16(s->port, (uint16_t)(s->exp + PCI_EXP_SLTCTL), v);
+}
+
+/* The functions on bus `bus`, and everything below them. */
+static void remove_bus(uint8_t bus, unsigned depth)
+{
+    for (bool again = true; again;) {
+        again = false;
+        for (unsigned i = 0; i < g_count; i++) {
+            struct pci_device *p = g_by_index[i];
+            if (p->bus != bus)
+                continue;
+            if ((p->header_type & 0x7f) == 1 && depth < 8)
+                remove_bus(pci_cfg_read8(p, PCI_SECONDARY_BUS), depth + 1);
+            kinfo("pci: %s %04x:%04x removed", p->dev.name, p->vendor, p->device);
+            for (unsigned k = i; k + 1 < g_count; k++)
+                g_by_index[k] = g_by_index[k + 1];
+            g_by_index[--g_count] = NULL;
+            list_remove(&p->link);
+            device_unregister(&p->dev);   /* the driver's remove, the bus's reference */
+            device_put(&p->dev);          /* the enumeration's: the release frees it */
+            again = true;
+            break;
+        }
+    }
+}
+
+/* A window of the port: [base, limit], 0 limit for none. */
+struct hp_window {
+    uint64_t base, limit, next;
+};
+
+static void port_windows(const struct pci_device *port, struct hp_window *mem, struct hp_window *pref,
+                         struct hp_window *io)
+{
+    uint32_t m = pci_cfg_read32(port, PCI_MEMORY_BASE);
+    mem->base = (uint64_t)(m & 0xfff0u) << 16;
+    mem->limit = ((uint64_t)(m >> 16 & 0xfff0u) << 16) | 0xfffffu;
+    if (mem->limit < mem->base)
+        mem->base = mem->limit = 0;
+    uint32_t p = pci_cfg_read32(port, PCI_PREF_MEMORY_BASE);
+    pref->base = (uint64_t)(p & 0xfff0u) << 16;
+    pref->limit = ((uint64_t)(p >> 16 & 0xfff0u) << 16) | 0xfffffu;
+    if ((p & 0xf) == 1) {
+        pref->base |= (uint64_t)pci_cfg_read32(port, PCI_PREF_BASE_UPPER) << 32;
+        pref->limit |= (uint64_t)pci_cfg_read32(port, PCI_PREF_LIMIT_UPPER) << 32;
+    }
+    if (pref->limit < pref->base)
+        pref->base = pref->limit = 0;
+    uint32_t i = pci_cfg_read32(port, PCI_IO_BASE);
+    io->base = (uint64_t)(i & 0xf0u) << 8;
+    io->limit = ((uint64_t)(i >> 8 & 0xf0u) << 8) | 0xfffu;
+    if ((i & 0xf) == 1) {
+        uint32_t up = pci_cfg_read32(port, PCI_IO_BASE_UPPER);
+        io->base |= (uint64_t)(up & 0xffffu) << 16;
+        io->limit |= (uint64_t)(up >> 16) << 16;
+    }
+    if (io->limit < io->base || (i & 0xffffu) == 0)
+        io->base = io->limit = 0;
+    mem->next = mem->base;
+    pref->next = pref->base;
+    io->next = io->base;
+}
+
+static bool take(struct hp_window *w, uint64_t size, uint64_t *at)
+{
+    if (w->limit == 0 || size == 0)
+        return false;
+    uint64_t a = (w->next + size - 1) & ~(size - 1);
+    if (a < w->next || a + size - 1 > w->limit)
+        return false;
+    *at = a;
+    w->next = a + size;
+    return true;
+}
+
+/*
+ * A function behind a port that nobody configured: firmware gave its BARs
+ * addresses at boot, and a device added after it has none. Each BAR gets
+ * one inside the port's window -- prefetchable memory into the
+ * prefetchable window when there is one, other memory into the memory
+ * window, I/O into the I/O window -- aligned to its size. A BAR that does
+ * not fit is left at 0 and said; the driver will find it unusable.
+ */
+static void assign_bars(uint8_t bus, uint8_t slot, uint8_t func, struct hp_window *mem, struct hp_window *pref,
+                        struct hp_window *io)
+{
+    uint8_t hdr = (uint8_t)cfg_read(bus, slot, func, PCI_HEADER_TYPE, 1);
+    unsigned nbars = (hdr & 0x7f) == 0 ? 6 : 2;
+    uint16_t cmd = (uint16_t)cfg_read(bus, slot, func, PCI_COMMAND, 2);
+    cfg_write(bus, slot, func, PCI_COMMAND, 2, cmd & (uint16_t)~(PCI_COMMAND_IO | PCI_COMMAND_MEMORY));
+    for (unsigned i = 0; i < nbars; i++) {
+        uint16_t off = (uint16_t)(PCI_BAR0 + 4 * i);
+        cfg_write(bus, slot, func, off, 4, 0xffffffffu);
+        uint32_t mask = cfg_read(bus, slot, func, off, 4);
+        if (mask == 0 || mask == 0xffffffffu)
+            continue;
+        bool isio = mask & 1;
+        bool is64 = !isio && ((mask >> 1) & 3) == 2;
+        bool prefetch = !isio && (mask & 8);
+        uint64_t m;
+        if (isio) {
+            m = (mask & ~3u) | 0xffff0000u;
+            m |= 0xffffffff00000000ULL;
+        } else {
+            m = mask & ~0xfULL;
+            if (is64 && i + 1 < nbars) {
+                cfg_write(bus, slot, func, (uint16_t)(off + 4), 4, 0xffffffffu);
+                m |= (uint64_t)cfg_read(bus, slot, func, (uint16_t)(off + 4), 4) << 32;
+            } else {
+                m |= 0xffffffff00000000ULL;
+            }
+        }
+        uint64_t size = pci_bar_mem_size(m);
+        uint64_t at = 0;
+        bool ok = isio ? take(io, size, &at)
+                       : (prefetch && is64 && take(pref, size, &at)) || take(mem, size, &at) ||
+                             (prefetch && take(pref, size, &at));
+        if (!ok) {
+            kwarn("pci: %02x:%02x.%u BAR%u (%llu bytes) does not fit the port's window", bus, slot, func, i,
+                  (unsigned long long)size);
+            at = 0;
+        }
+        cfg_write(bus, slot, func, off, 4, (uint32_t)at | (mask & (isio ? 3u : 0xfu)));
+        if (is64) {
+            cfg_write(bus, slot, func, (uint16_t)(off + 4), 4, (uint32_t)(at >> 32));
+            i++;
+        }
+    }
+    cfg_write(bus, slot, func, PCI_COMMAND, 2, cmd);
+}
+
+/* What the slot holds now, enumerated and handed to the drivers. */
+static void add_slot_devices(struct hp_slot *s)
+{
+    uint32_t id = cfg_read(s->secondary, 0, 0, PCI_VENDOR_ID, 4);
+    if ((id & 0xffff) == 0xffff) {
+        kwarn("pci: %s: a device is present and does not answer", s->port->dev.name);
+        return;
+    }
+    struct hp_window mem, pref, io;
+    port_windows(s->port, &mem, &pref, &io);
+    uint8_t hdr = (uint8_t)cfg_read(s->secondary, 0, 0, PCI_HEADER_TYPE, 1);
+    unsigned nfunc = (hdr & 0x80) ? 8 : 1;
+    for (uint8_t f = 0; f < nfunc; f++)
+        if ((cfg_read(s->secondary, 0, f, PCI_VENDOR_ID, 4) & 0xffff) != 0xffff)
+            assign_bars(s->secondary, 0, f, &mem, &pref, &io);
+    /* The bridge forwards nothing until memory and I/O decode are on. */
+    uint16_t cmd = pci_cfg_read16(s->port, PCI_COMMAND);
+    pci_cfg_write16(s->port, PCI_COMMAND, cmd | PCI_COMMAND_MEMORY | PCI_COMMAND_IO | PCI_COMMAND_MASTER);
+    unsigned before = g_count;
+    for (uint8_t f = 0; f < nfunc; f++)
+        scan_function(s->secondary, 0, f, &s->port->dev, 1);
+    kinfo("pci: %s: %u function(s) added behind it", s->port->dev.name, g_count - before);
+}
+
+static bool link_up(const struct hp_slot *s)
+{
+    return (pci_cfg_read16(s->port, (uint16_t)(s->exp + PCI_EXP_LNKSTA)) & PCI_EXP_LNKSTA_DLLLA) != 0;
+}
+
+static bool slot_has_devices(const struct hp_slot *s)
+{
+    for (unsigned i = 0; i < g_count; i++)
+        if (g_by_index[i]->bus == s->secondary)
+            return true;
+    return false;
+}
+
+/* One slot's events, read and cleared, then acted on. */
+static void hp_handle(struct hp_slot *s)
+{
+    uint16_t st = sltsta(s);
+    uint16_t ev = st & PCI_EXP_SLTSTA_EVENTS;
+    if (ev)
+        pci_cfg_write16(s->port, (uint16_t)(s->exp + PCI_EXP_SLTSTA), ev);   /* RW1C */
+    bool present = (st & PCI_EXP_SLTSTA_PDS) != 0;
+    if (ev & (PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_DLLSC))
+        s->events++;
+    mutex_lock(&g_hp_lock);
+    if ((ev & PCI_EXP_SLTSTA_ABP) && slot_has_devices(s)) {
+        /* The button: the device is to go. Its drivers first, then the
+         * slot's power -- QEMU removes the device when the power goes. */
+        kinfo("pci: %s: attention button: removing the device behind it", s->port->dev.name);
+        remove_bus(s->secondary, 1);
+        set_sltctl(s, PCI_EXP_SLTCTL_PIC, PCI_EXP_SLTCTL_PCC | PCI_EXP_SLTCTL_PIC_OFF);
+        s->powered = false;
+    } else if (!present && slot_has_devices(s)) {
+        /* Gone without a button press: what was behind it is gone. */
+        kinfo("pci: %s: the device went away", s->port->dev.name);
+        remove_bus(s->secondary, 1);
+    } else if (present && !slot_has_devices(s) && (ev & (PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_DLLSC))) {
+        if (!s->powered || (sltctl(s) & PCI_EXP_SLTCTL_PCC)) {
+            set_sltctl(s, PCI_EXP_SLTCTL_PCC | PCI_EXP_SLTCTL_PIC, PCI_EXP_SLTCTL_PIC_ON);
+            s->powered = true;
+        }
+        for (unsigned ms = 0; !link_up(s) && ms < HP_LINK_WAIT_MS; ms += 10)
+            thread_sleep_ms(10);
+        if (!link_up(s)) {
+            kwarn("pci: %s: a device is present and its link did not come up", s->port->dev.name);
+        } else {
+            thread_sleep_ms(100);   /* PCIe: 100 ms from link up to the first configuration request */
+            kinfo("pci: %s: a device was added", s->port->dev.name);
+            add_slot_devices(s);
+        }
+    }
+    mutex_unlock(&g_hp_lock);
+}
+
+static void hp_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        thread_sleep_ms(HP_POLL_MS);
+        uint64_t now = clock_now_ns();
+        for (unsigned i = 0; i < g_nslots; i++) {
+            struct hp_slot *s = &g_slots[i];
+            uint32_t irqs = __atomic_load_n(&s->irqs, __ATOMIC_ACQUIRE);
+            bool due = irqs != s->seen;
+            if (!s->msi && now >= s->next_poll_ns) {
+                due = due || (sltsta(s) & PCI_EXP_SLTSTA_EVENTS) != 0;
+                s->next_poll_ns = now + (uint64_t)HP_SLOW_POLL_MS * 1000000ull;
+            }
+            if (!due)
+                continue;
+            s->seen = irqs;
+            hp_handle(s);
+        }
+    }
+}
+
+/*
+ * After enumeration: every hot-plug capable slot's events enabled, its
+ * interrupt requested, and the thread that acts on them started. A slot
+ * already holding a device at boot is powered (firmware did it); an empty
+ * one is left as firmware left it until a device arrives.
+ */
+static void pciehp_init(void)
+{
+    mutex_init(&g_hp_lock, "pciehp");
+    for (unsigned i = 0; i < g_count && g_nslots < HP_MAX_SLOTS; i++) {
+        struct pci_device *p = g_by_index[i];
+        if ((p->header_type & 0x7f) != 1)
+            continue;
+        uint8_t exp = pci_find_capability(p, PCI_CAP_ID_EXP, 0);
+        if (exp == 0)
+            continue;
+        uint16_t flags = pci_cfg_read16(p, (uint16_t)(exp + PCI_EXP_FLAGS));
+        unsigned type = PCI_EXP_FLAGS_TYPE(flags);
+        if ((type != PCI_EXP_TYPE_ROOT && type != PCI_EXP_TYPE_DOWN) || !(flags & PCI_EXP_FLAGS_SLOT))
+            continue;
+        uint32_t cap = pci_cfg_read32(p, (uint16_t)(exp + PCI_EXP_SLTCAP));
+        if (!(cap & PCI_EXP_SLTCAP_HPC))
+            continue;
+        struct hp_slot *s = &g_slots[g_nslots++];
+        s->port = p;
+        s->exp = exp;
+        s->secondary = pci_cfg_read8(p, PCI_SECONDARY_BUS);
+        s->powered = !(sltctl(s) & PCI_EXP_SLTCTL_PCC);
+        pci_cfg_write16(p, (uint16_t)(exp + PCI_EXP_SLTSTA), PCI_EXP_SLTSTA_EVENTS);
+        int v = pci_msi_enable(p, hp_irq, s, "pciehp", IRQ_CPU_ANY);
+        s->msi = v >= 0;
+        uint16_t en = PCI_EXP_SLTCTL_PDCE | PCI_EXP_SLTCTL_DLLSCE | (s->msi ? PCI_EXP_SLTCTL_HPIE : 0);
+        if (cap & PCI_EXP_SLTCAP_ABP)
+            en |= PCI_EXP_SLTCTL_ABPE;
+        set_sltctl(s, 0, en);
+        kinfo("pci: %s: hot-plug slot %u (bus %02x)%s, %s", p->dev.name, cap >> 19, s->secondary,
+              (cap & PCI_EXP_SLTCAP_ABP) ? ", attention button" : "",
+              s->msi ? "events by MSI" : "no MSI: polled every 500 ms");
+    }
+    if (g_nslots == 0)
+        return;
+    g_hp_thread = thread_create(hp_thread, NULL, "pciehp", SCHED_PRIO_DEFAULT);
+    if (g_hp_thread == NULL)
+        kerror("pci: no hotplug thread; slots are not watched");
+}
+
+/* Counters for the tests: interrupts taken and events acted on, over every slot. */
+void pci_hotplug_stats(unsigned *slots, uint64_t *irqs, uint64_t *events)
+{
+    uint64_t i = 0, e = 0;
+    for (unsigned k = 0; k < g_nslots; k++) {
+        i += __atomic_load_n(&g_slots[k].irqs, __ATOMIC_RELAXED);
+        e += g_slots[k].events;
+    }
+    *slots = g_nslots;
+    *irqs = i;
+    *events = e;
 }
 
 /* --- driver services ---------------------------------------------------- */

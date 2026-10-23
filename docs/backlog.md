@@ -60,7 +60,7 @@ Open lines (struck lines are not counted):
 - **BLK-2** correctness, S. USB storage: the timeout path clears `recovering`/`broken` after a failed BOT reset recovery; prove the state under a failed recovery and keep it.
 - **BLK-3** correctness, M. No bounce buffers: a 32- or 44-bit DMA device refuses page-cache pages above its mask with `-EINVAL` once RAM is above 4 GiB.
 - **BLK-4** usability, S. GPT: a disk whose primary or backup table alone is valid gets no partitions; recover from the good copy.
-- **BLK-5** usability, S. No partition scan when a disk registers after boot (USB, hot-plug); only `/dev/blkctl` RESCAN.
+- ~~**BLK-5** usability, S. No partition scan when a disk registers after boot (USB, hot-plug); only `/dev/blkctl` RESCAN.~~ Done by roadmap 1.2 B3's third PR: a disk with hardware behind it that registers after boot composition is queued and scanned (`part-late`).
 - **BLK-6** nice-to-have, M. AHCI NCQ, deferred until a real disk shows it pays (four streams reach 87 % of NVMe without it).
 - **BLK-7** nice-to-have, S. USB storage scatter-gather beyond 16 segments, deferred (within noise of NVMe).
 - **BLK-8** nice-to-have, L. The rest of the NVMe feature set, only for a demonstrated device or workload.
@@ -129,7 +129,7 @@ Open lines (struck lines are not counted):
 - **DRV-3** correctness, S. PCI enumeration turns memory decoding off while sizing BARs; a console write then stalls on Parallels' framebuffer.
 - **DRV-4** usability, L. No AML interpreter: Parallels' platform AHCI (SATA), x86-64 ACPI S5 power-off and the DSDT-described RTC are unreachable.
 - **DRV-5** usability, L. No device-tree discovery on AArch64 (ACPI only).
-- **DRV-6** nice-to-have, M. PCI rescan and runtime PCI hot-removal beyond the test hooks; device power management (suspend/resume).
+- **DRV-6** nice-to-have, M. PCI rescan and runtime PCI hot-removal beyond the test hooks; device power management (suspend/resume). Roadmap 1.2 B3's third PR did PCIe native hot-removal and hot-add through a port's slot capability (attention button, presence, link; BARs assigned in the port's windows); left: a rescan of a bus that is not a hot-plug slot, bridges below a slot, ACPI hotplug, and suspend/resume.
 - **DRV-7** nice-to-have, M. Per-device bind/unbind exists only in debug builds.
 - **DRV-8** nice-to-have, L. IOMMU variants: interrupt remapping, AMD-Vi, huge pages, IOVA cache, PASID/ATS, stream ids above 255, bridge aliases, the concatenated root for <= 42-bit SMMUs.
 - **DRV-9** nice-to-have, M. No GICv3 pseudo-NMI on AArch64 (lockup sampling cannot interrupt a CPU with IRQs masked).

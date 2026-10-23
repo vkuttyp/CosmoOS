@@ -138,6 +138,54 @@ capability), `-EBUSY` (MSI-X already enabled, entry in use), `-EIO`
 (table outside its BAR), `-ENOMEM`, `-EINVAL`, or the vector allocator's
 `-ENOSPC`.
 
+## Hotplug (roadmap 1.2 B3, DRV-6)
+
+PCIe native hotplug, as QEMU's `pcie-root-port` and a hot-plug capable
+downstream port offer it. After enumeration, `pciehp_init` finds every
+type-1 function with a PCI Express capability whose port type is a root
+or downstream port, whose `Slot Implemented` bit is set and whose Slot
+Capabilities say `Hot-Plug Capable`. For each one it clears the slot's
+event bits, asks for a single MSI on the port (`pci_msi_enable`) and
+enables presence-detect-changed, data-link-layer-state-changed, the
+attention button when the slot has one, and the hot-plug interrupt. The
+console says which (`pci: pci:00:03.0: hot-plug slot 1 (bus 01),
+attention button, events by MSI`). One thread, `pciehp`, looks every
+20 ms at the slots whose interrupt count moved; a port whose MSI could
+not be set up is read every 500 ms instead, and its line says `no MSI:
+polled every 500 ms`.
+
+- **Removal.** QEMU's `device_del` on a root port presses its attention
+  button and waits for the guest to power the slot off before it removes
+  the device. On the button the thread unregisters every function behind
+  the port, depth first -- `device_unregister`, the driver's `remove`,
+  which for virtio-blk and NVMe unregisters the disk, so its I/O fails
+  `-ENODEV` and a pool marks that copy `MISSING` -- then sets Power
+  Controller Control off and the power indicator off. A presence change
+  to absent with functions still registered (a surprise removal) does
+  the same without the power write. A `pci_device` is the enumeration's
+  until then: its index and list place are given up, the bus drops its
+  reference, and the release frees it when the last holder is gone.
+- **Insertion.** On a presence or link change with a device present and
+  nothing registered behind the port, the slot is powered on if it is
+  off, the thread waits up to 1 s for the link (`Data Link Layer Link
+  Active`) and 100 ms more, as the specification asks before the first
+  configuration request. Firmware gave addresses only to the devices it
+  found at boot, so each new function's BARs are assigned here: inside
+  the port's prefetchable window for a 64-bit prefetchable BAR, else its
+  memory window (else the prefetchable one), I/O BARs in its I/O window,
+  each aligned to its size, from the window's base (one slot behind a
+  port: nothing else is there). The port's memory, I/O and bus-master
+  decode are turned on, and the functions are enumerated by the boot's
+  own `scan_function` -- registered, their DMA domain and MSI-X set up by
+  their drivers' probes as at boot. A BAR that does not fit the window is
+  said and left at 0.
+- **What it does not do.** No hot-plug of bridges with their own buses
+  below (the secondary bus numbers are the firmware's), no attention
+  indicator or power-fault handling, no `ACPI` hotplug (q35 is run with
+  `ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off` for that reason;
+  virt has native hotplug only), and no hot-removal of devices that are
+  not on PCIe (DRV-17).
+
 ## Performance
 
 Enumeration touches every slot on every reachable bus once (256 slots
@@ -159,6 +207,5 @@ addresses only ever come from `dma_alloc`/`dma_map`.
 ## Future extensibility
 
 Extended capabilities (offsets above 256 through ECAM), INTx via a
-static routing table or AML, resource assignment for unprogrammed BARs,
-multiple MCFG segments, SR-IOV, hot-plug (`device_unregister` exists),
-MSI affinity across CPUs.
+static routing table or AML, resource assignment for bridges below a
+hot-plug slot, multiple MCFG segments, SR-IOV, MSI affinity across CPUs.

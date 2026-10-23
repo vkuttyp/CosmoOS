@@ -121,6 +121,7 @@ int blk_register(struct blkdev *bd, const char *prefix)
     register_locked(bd);
     mutex_unlock(&g_blk_lock);
     announce(bd);
+    blk_part_registered(bd);
     return 0;
 }
 
@@ -137,6 +138,7 @@ int blk_register_named(struct blkdev *bd, const char *name)
     register_locked(bd);
     mutex_unlock(&g_blk_lock);
     announce(bd);
+    blk_part_registered(bd);
     return 0;
 }
 
