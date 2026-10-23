@@ -399,10 +399,10 @@ def stage_persist(args, results, inst, nonce):
         no_free_warning(b.text(), "the second installed boot's root mount")
         # The stale pid files the last boot left on the root's /run are
         # under this boot's ramfs: every service starts (USR-8).
-        for svc in ("syslogd", "dropbear"):
-            need(b.text(), rf"^svc: {svc} started$", "services after a boot that left stale pid files")
         if re.search(r"^svc: \S+ is already running$", b.text(), re.M):
             raise Fail("a stale pid file stopped a service from starting (USR-8)")
+        for svc in ("syslogd", "dropbear"):
+            need(b.text(), rf"^svc: {svc} started$", "services after a boot that left stale pid files")
         out = b.status("svc status dropbear", "svcst")
         need(out, r"^dropbear\s+running \(supervisor \d+\)$", "svc status dropbear after the stale boot")
         out = b.status("grep ' /run ramfs ' /proc/mounts", "run")
