@@ -2326,10 +2326,14 @@ int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies)
     return format_at(bd, n, copies, CFS_FORMAT_VERSION, NULL);
 }
 
-/* The VFS's mirror format: one member, a copy on each device. */
-static int cosmofs_format_mirror_devs(struct blkdev **bd, unsigned n)
+/* The VFS's mirror format: one member, a copy on each device, named
+ * `label` (NULL or "" for none; roadmap 1.2 B3, an installed mirrored
+ * root is named as a single one is). */
+static int cosmofs_format_mirror_devs(struct blkdev **bd, unsigned n, const char *label)
 {
-    return cosmofs_format_mirror(bd, 1, n);
+    if (label != NULL && strlen(label) > CFS_LABEL_MAX)
+        return -EINVAL;
+    return format_at(bd, 1, n, CFS_FORMAT_VERSION, label);
 }
 
 int cosmofs_format(struct blkdev *bd)

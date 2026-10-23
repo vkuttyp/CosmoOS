@@ -328,6 +328,55 @@ scrub at `fs.scrub_rate=512` (both reported, neither asserted: QEMU's
 timing is the host's), and the scrub's own time must be at least what
 its block count allows at that bound.
 
+## Mirrors on the installed system (`make test-mirror`)
+
+Roadmap 1.2 B3's acceptance test, `tests/boot/mirror_test.py`, in CI's
+`mirror` job on both architectures (release builds). Every boot is the
+installed disk A as QEMU's boot disk, the others on virtio-blk; QMP on a
+unix socket removes and adds them (`device_del` waits for
+`DEVICE_DELETED`). The guide page [Mirrors](../../../guide/mirrors.md)
+shows the commands it runs.
+
+- **`install`:** the live image with two blank disks. `cosmo-install A
+  --mirror B` must exit 0 and say `the root is mirrored on ...`.
+- **`replace`:** A, with B on a PCIe root port and an empty port beside
+  it.
+  - `cosmo-pool status /` must say `ONLINE` with both copies.
+  - A shell loop copies `/bin/busybox` and syncs. B is removed under it,
+    and the pool's `MISSING` line must follow.
+  - `cosmo-pool status` must then say `DEGRADED`, and `/proc/mounts`
+    must have ` / cosmofs rw,degraded `.
+  - A blank disk C is added on the second port. `cosmo-pool replace 0:1
+    C` must exit 0 and the status reach `ONLINE` with C a copy.
+  - The writer is stopped, and `fsctl scrub` must exit 0.
+- **`reboot`:** A and C alone. The root must switch, init must not say
+  degraded, and the status must be `ONLINE` with C. The writer's file is
+  the binary whole or a prefix of it.
+- **`spare`:** A, with C and a blank D on root ports.
+  - `cosmo-pool add-spare D`, then C is removed under the writer.
+  - `spare D takes over member 0 copy N` must follow, then `ONLINE` with
+    D a copy and no spares listed. The scrub must be clean.
+- **`reboot-spare`:** A and D alone, as `reboot`.
+- **`degraded`:** A alone.
+  - init must print `the root pool is degraded`, and the status must be
+    `DEGRADED` with a copy `MISSING`.
+  - A file only A's copy has is written and synced.
+- **`lagging`:** A and D. D is behind; after the switch to the disk
+  root it is resilvered (the mount found it by its generation), and the
+  status must reach `ONLINE` with D. The file must read back, and the
+  scrub must be clean.
+
+Every `cosmo-pool status` must exit 0 or 1 (whole or degraded), and no
+boot's log may have a panic, a `KASSERT` or a process fault.
+
+Each stage's times are printed, and none is asserted: QEMU's timing is
+the host's. The times are removal to `MISSING`, the resilver, the scrub,
+and the stage. A scrub on the running root reports some blocks `skipped`
+(53 to 77 per scrub on both architectures, 2026-10-23). They are visits
+to dirty buffers: two inode-map, two inode-map-leaf, and a few inode and
+checksum blocks. The count is the same after a `sync` and a 3 s wait, so
+the test does not ask for zero.
+
 ## Installed system (`make test-install`)
 
 `tests/boot/install_test.py` runs `cosmo-install`, which formats GPT

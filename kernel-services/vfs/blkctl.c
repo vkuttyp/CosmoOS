@@ -188,21 +188,29 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
         cmd.op != COSMO_BLKCTL_FORMAT_MIRROR)
         return -EINVAL;   /* only a WRITE carries data, a FORMAT its label, a FORMAT_MIRROR its second device */
     char other[COSMO_BLKCTL_NAME] = "";
+    size_t label_at = sizeof(cmd), label_len = 0;
     if (cmd.op == COSMO_BLKCTL_FORMAT_MIRROR) {
-        if (extra != COSMO_BLKCTL_NAME || memchr((const char *)buf + sizeof(cmd), '\0', COSMO_BLKCTL_NAME) == NULL)
+        /* The second device's name, then (roadmap 1.2 B3) the label, if any. */
+        if (extra < COSMO_BLKCTL_NAME || extra > COSMO_BLKCTL_NAME + COSMO_BLKCTL_LABEL ||
+            memchr((const char *)buf + sizeof(cmd), '\0', COSMO_BLKCTL_NAME) == NULL)
             return -EINVAL;
         memcpy(other, (const char *)buf + sizeof(cmd), COSMO_BLKCTL_NAME);
+        label_at = sizeof(cmd) + COSMO_BLKCTL_NAME;
+        label_len = extra - COSMO_BLKCTL_NAME;
     }
     char label[COSMO_BLKCTL_LABEL + 1] = "";
     if (cmd.op == COSMO_BLKCTL_FORMAT) {
         if (extra > COSMO_BLKCTL_LABEL)
             return -EINVAL;
-        const char *l = (const char *)buf + sizeof(cmd);
-        for (size_t i = 0; i < extra; i++)
+        label_len = extra;
+    }
+    if (cmd.op == COSMO_BLKCTL_FORMAT || cmd.op == COSMO_BLKCTL_FORMAT_MIRROR) {
+        const char *l = (const char *)buf + label_at;
+        for (size_t i = 0; i < label_len; i++)
             if (l[i] < 0x21 || l[i] > 0x7e || l[i] == '"' || l[i] == '\\')
                 return -EINVAL;   /* printable, no blank: blkid prints it between quotes and
                                    * fstab fields split on blanks */
-        memcpy(label, l, extra);
+        memcpy(label, l, label_len);
     }
     if (cmd.op == COSMO_BLKCTL_LIST) {
         int64_t rc = blkctl_list(o);
@@ -267,7 +275,7 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
             rc = -ENODEV;
             break;
         }
-        rc = blk_part_any(two[0]) || blk_part_any(two[1]) ? -EBUSY : vfs_format_mirror(cmd.fstype, two, 2);
+        rc = blk_part_any(two[0]) || blk_part_any(two[1]) ? -EBUSY : vfs_format_mirror(cmd.fstype, two, 2, label);
         blkdev_put(two[1]);
         if (rc == 0)
             set_result(o, NULL, 0);

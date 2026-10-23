@@ -3370,3 +3370,30 @@ See the [history index](README.md).
   any command answered with a 5xx is typed again up to three times.
   `tests/host/test_run_guide.py`, `tools/guide-fetch-probe.py`. Report:
   `docs/audit/2026-10-22-test19-guide-report.md`.
+- **Mirror replacement and resilvering (2026-10-23, roadmap 1.2 B3; PRs
+  #439, #440, #441 and #442).**
+  - **#439, copy states:** a mirrored member's copies are `ONLINE`,
+    `MISSING`, `OFFLINE`, `FAULTED` or `RESILVERING`. Each commit records
+    them in a v13 `COPYSTATE` block, with what a copy missed: its
+    `since` generation and a bitmap of regions. A pulled disk turns its
+    I/O into -EIO, with no panic; the console says so once, and
+    `/proc/mounts` shows `rw,degraded`. A mount holds its pool's other
+    devices (CFS-5).
+  - **#440, the resilver:** a `cfs-resilver` thread copies, at
+    `fs.resilver_rate`, resumes from a recorded cursor, and lets writes
+    reach the copy it is rebuilding. `cosmo-pool` does status, offline,
+    online, replace, attach, detach and add-/remove-spare, and a spare
+    takes over by itself.
+  - **#441, hotplug:** PCIe native hotplug on q35 and virt (DRV-6). The
+    port interrupts are MSI-X, set up after the IOMMU. VT-d bridge
+    scopes now cover the buses below a bridge, and the SMMUv3 stream
+    table has 4096 entries. A hot-added disk's partitions are read
+    (BLK-5).
+  - **#442, the acceptance test:** `cosmo-install DEVICE --mirror
+    DEVICE2` and `make test-mirror`. Its first runs found two defects in
+    #439's held devices: a mirrored root's boot check refused itself
+    (`vfs_bdev_mounted_except`), and a pulled disk's name held the new
+    disk that took it. `tools/b3-mirror-probe.py` proves both, and
+    `tools/hotplug-iommu-probe.py` proves the hotplug PR's three
+    IOMMU-side defects.
+  - Report: `docs/audit/2026-10-23-b3-mirror-report.md`.

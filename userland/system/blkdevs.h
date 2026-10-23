@@ -34,7 +34,7 @@ int blkdevs_flush(const struct cosmo_blkctl_dev *d);
 /* A FORMAT of `fstype` named `label` ("" for none). 0 or -errno. */
 int blkdevs_format(const char *name, const char *fstype, const char *label);
 /* A two-way mirror over devices `a` and `b` (roadmap 1.2 B2). */
-int blkdevs_format_mirror(const char *a, const char *b, const char *fstype);
+int blkdevs_format_mirror(const char *a, const char *b, const char *fstype, const char *label);
 /* The directories `name` is mounted on, from /proc/mounts ("/dev/NAME
  * DIR ..."), unescaped, in order: the `which`th (from 0) into `out`.
  * False when there is no such one. */

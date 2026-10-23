@@ -228,7 +228,7 @@ appears later (DRV-6 part, BLK-5), and the blkctl check that sees every
 member (CFS-5). Absorbs CFS-9, CFS-5, BLK-5, DRV-6 (PCI hot-removal and
 rescan for virtio-blk).
 
-- [ ] **Acceptance:** `make test-mirror`: install onto a two-disk
+- [x] **Acceptance:** `make test-mirror`: install onto a two-disk
   mirror; while a writer runs, the harness removes one disk (QEMU
   `device_del`); the system keeps running degraded and says so; a new
   disk is added (`device_add`) and `cosmo-pool replace` resilvers it; a

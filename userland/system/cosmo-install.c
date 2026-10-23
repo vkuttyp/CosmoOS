@@ -4,6 +4,10 @@
  *
  *   cosmo-install --list            the block devices, as /dev/blkctl sees them
  *   cosmo-install [--force] DEVICE  install on DEVICE (a whole disk)
+ *   cosmo-install [--force] DEVICE --mirror DEVICE2
+ *                                   the same on both disks, the root a two-way
+ *                                   mirror of their root partitions (roadmap
+ *                                   1.2 B3; docs/guide/mirrors.md)
  *
  * The disk becomes: a GPT, partition 1 a copy of the EFI System Partition
  * the loader was read from (the same loader, kernel and boot archive),
@@ -428,8 +432,12 @@ static int populate(void)
 /* --- the install ---------------------------------------------------------------- */
 
 static bool g_mounted;
-static bool g_table_written;
-static const struct cosmo_blkctl_dev *g_target;
+/* The disks being written (two for --mirror): a failure wipes the table of
+ * each one written so far. */
+static bool g_table_written[2];
+static const struct cosmo_blkctl_dev *g_target[2];
+static char g_target_name[2][COSMO_BLKCTL_NAME];
+static unsigned g_ntargets;
 static uint8_t g_head[GPT_BUILD_HEAD_SECTORS(512) * 512 > GPT_BUILD_HEAD_SECTORS(4096) * 4096
                      ? GPT_BUILD_HEAD_SECTORS(512) * 512 : GPT_BUILD_HEAD_SECTORS(4096) * 4096];
 static uint8_t g_tail[sizeof(g_head)];
@@ -440,15 +448,17 @@ static int fail(const char *what, int err)
     if (g_mounted && umount2(MNT, MNT_FORCE) < 0)
         fprintf(stderr, "cosmo-install: cannot unmount %s: %s\n", MNT, strerror(errno));
     rmdir(MNT);
-    if (g_table_written && g_target != NULL) {
+    for (unsigned k = 0; k < g_ntargets; k++) {
+        const struct cosmo_blkctl_dev *t = g_target[k];
+        if (!g_table_written[k] || t == NULL)
+            continue;
         /* No half-installed disk that looks like a system: the table goes. */
-        uint32_t ss = g_target->sector_size;
+        uint32_t ss = t->sector_size;
         memset(g_head, 0, sizeof(g_head));
-        dev_write(g_target, 0, g_head, (size_t)GPT_BUILD_HEAD_SECTORS(ss) * ss);
-        dev_write(g_target, (g_target->sectors - GPT_BUILD_TAIL_SECTORS(ss)) * ss, g_head,
-                  (size_t)GPT_BUILD_TAIL_SECTORS(ss) * ss);
-        ctl(COSMO_BLKCTL_FLUSH, g_target->name, 0, 0, NULL, 0, NULL);
-        ctl(COSMO_BLKCTL_RESCAN, g_target->name, 0, 0, NULL, 0, NULL);
+        dev_write(t, 0, g_head, (size_t)GPT_BUILD_HEAD_SECTORS(ss) * ss);
+        dev_write(t, (t->sectors - GPT_BUILD_TAIL_SECTORS(ss)) * ss, g_head, (size_t)GPT_BUILD_TAIL_SECTORS(ss) * ss);
+        ctl(COSMO_BLKCTL_FLUSH, t->name, 0, 0, NULL, 0, NULL);
+        ctl(COSMO_BLKCTL_RESCAN, t->name, 0, 0, NULL, 0, NULL);
     }
     return 1;
 }
@@ -498,32 +508,32 @@ static void print_list(void)
     }
 }
 
-static int install(const char *target_name, bool force)
+/* One disk the install writes: checked, partitioned like the other, and
+ * its ESP a copy of the boot ESP, so either disk of a mirror boots. */
+struct target {
+    char name[COSMO_BLKCTL_NAME];
+    uint32_t ss;
+    uint64_t sectors;
+    uint64_t esp_first, esp_last, root_first, root_last;
+    char root[COSMO_BLKCTL_NAME];
+    char root_uuid[GPT_GUID_TEXT];
+};
+
+static const struct cosmo_blkctl_dev *boot_dev(void)
 {
-    if (list_devices() < 0)
-        return fail("cannot list the block devices", errno);
-    const struct cosmo_blkctl_dev *boot = NULL;
     for (unsigned i = 0; i < g_ndevs; i++)
         if (g_devs[i].flags & COSMO_BLKCTL_BOOT)
-            boot = &g_devs[i];
-    if (boot == NULL) {
-        fprintf(stderr, "cosmo-install: the loader was not read from a GPT partition; there is no ESP to copy\n");
-        return 3;
-    }
-    /* The ESP is copied with its signed command line (roadmap M5): only
-     * root=boot-disk names the root partition this install makes. An
-     * image built with another CMDLINE would install "successfully" and
-     * then boot some other root, or none (PR #368 review). */
-    char root_spec[160];
-    long rn = sysctl_get("kernel.root", root_spec, sizeof(root_spec));
-    if (rn < 0 || rn >= (long)sizeof(root_spec) || strcmp(root_spec, "boot-disk") != 0) {
-        fprintf(stderr, "cosmo-install: this image's signed command line says root=%s, not root=boot-disk; "
-                "the installed disk would not boot its own root\n", rn >= 0 ? root_spec : "?");
-        return 3;
-    }
-    const struct cosmo_blkctl_dev *t = find_dev(target_name);
+            return &g_devs[i];
+    return NULL;
+}
+
+/* 0, or 3 with the reason said. */
+static int check_target(const char *name, bool force, struct target *out)
+{
+    const struct cosmo_blkctl_dev *boot = boot_dev();
+    const struct cosmo_blkctl_dev *t = find_dev(name);
     if (t == NULL) {
-        fprintf(stderr, "cosmo-install: %s: no such block device\n", target_name);
+        fprintf(stderr, "cosmo-install: %s: no such block device\n", name);
         return 3;
     }
     const char *refuse = NULL;
@@ -540,11 +550,12 @@ static int install(const char *target_name, bool force)
     uint32_t ss = t->sector_size;
     uint64_t esp_bytes = boot->sectors * boot->sector_size;
     uint64_t align = ALIGN_BYTES / ss;
-    uint64_t esp_first = align;
-    uint64_t esp_last = esp_first + (esp_bytes + ss - 1) / ss - 1;
-    uint64_t root_first = (esp_last + 1 + align - 1) / align * align;
-    uint64_t root_last = t->sectors > GPT_BUILD_TAIL_SECTORS(ss) + 1 ? gpt_build_last_usable(ss, t->sectors) : 0;
-    if (refuse == NULL && (root_last <= root_first || (root_last - root_first + 1) * ss < MIN_ROOT_BYTES))
+    out->esp_first = align;
+    out->esp_last = out->esp_first + (esp_bytes + ss - 1) / ss - 1;
+    out->root_first = (out->esp_last + 1 + align - 1) / align * align;
+    out->root_last = t->sectors > GPT_BUILD_TAIL_SECTORS(ss) + 1 ? gpt_build_last_usable(ss, t->sectors) : 0;
+    if (refuse == NULL &&
+        (out->root_last <= out->root_first || (out->root_last - out->root_first + 1) * ss < MIN_ROOT_BYTES))
         refuse = "is too small";
     if (refuse) {
         fprintf(stderr, "cosmo-install: %s %s\n", t->name, refuse);
@@ -554,10 +565,18 @@ static int install(const char *target_name, bool force)
         fprintf(stderr, "cosmo-install: %s already has a partition table; --force replaces it\n", t->name);
         return 3;
     }
-    g_target = t;
+    strcpy(out->name, t->name);
+    out->ss = ss;
+    out->sectors = t->sectors;
+    return 0;
+}
 
-    /* The table, checked by the parser the kernel will use before it
-     * touches the disk. */
+/* The table, checked by the parser the kernel will use before it touches
+ * the disk, then written (backup first, primary last: until the primary
+ * lands the disk has no table the kernel accepts), rescanned, and the
+ * boot ESP copied into partition 1. */
+static int prepare_target(struct target *tg, unsigned idx)
+{
     uint8_t disk_guid[16];
     struct gpt_build_part parts[2];
     memset(parts, 0, sizeof(parts));
@@ -566,34 +585,36 @@ static int install(const char *target_name, bool force)
         return 1;
     }
     parts[0].index = 1;
-    parts[0].first_lba = esp_first;
-    parts[0].last_lba = esp_last;
+    parts[0].first_lba = tg->esp_first;
+    parts[0].last_lba = tg->esp_last;
     memcpy(parts[0].type, gpt_type_esp, 16);
     parts[1].index = 2;
-    parts[1].first_lba = root_first;
-    parts[1].last_lba = root_last;
+    parts[1].first_lba = tg->root_first;
+    parts[1].last_lba = tg->root_last;
     memcpy(parts[1].type, gpt_type_cosmo_root, 16);
-    if (!gpt_build(ss, t->sectors, disk_guid, parts, 2, g_head, g_tail))
+    uint32_t ss = tg->ss;
+    if (!gpt_build(ss, tg->sectors, disk_guid, parts, 2, g_head, g_tail))
         return fail("cannot lay out the partition table", 0);
     static uint8_t scratch[GPT_SCRATCH_BYTES];
     static struct gpt_table check;
     const char *why = "";
-    struct mem_disk md = { ss, t->sectors };
-    if (gpt_parse(ss, t->sectors, mem_read, &md, scratch, &check, &why) != GPT_OK || check.nparts != 2) {
+    struct mem_disk md = { ss, tg->sectors };
+    if (gpt_parse(ss, tg->sectors, mem_read, &md, scratch, &check, &why) != GPT_OK || check.nparts != 2) {
         fprintf(stderr, "cosmo-install: the table built does not parse: %s\n", why);
         return 1;
     }
-    char root_uuid[GPT_GUID_TEXT];
-    gpt_guid_format(parts[1].uuid, root_uuid);
-    printf("cosmo-install: %s: esp sectors %llu-%llu, root sectors %llu-%llu\n", t->name,
-           (unsigned long long)esp_first, (unsigned long long)esp_last, (unsigned long long)root_first,
-           (unsigned long long)root_last);
+    gpt_guid_format(parts[1].uuid, tg->root_uuid);
+    printf("cosmo-install: %s: esp sectors %llu-%llu, root sectors %llu-%llu\n", tg->name,
+           (unsigned long long)tg->esp_first, (unsigned long long)tg->esp_last, (unsigned long long)tg->root_first,
+           (unsigned long long)tg->root_last);
     fflush(stdout);
-
-    /* Backup first, primary last: until the primary lands, the disk has
-     * no table the kernel accepts. */
-    g_table_written = true;
-    int rc = dev_write(t, (t->sectors - GPT_BUILD_TAIL_SECTORS(ss)) * ss, g_tail, (size_t)GPT_BUILD_TAIL_SECTORS(ss) * ss);
+    const struct cosmo_blkctl_dev *t = find_dev(tg->name);
+    if (t == NULL)
+        return fail("the disk went away", 0);
+    g_target[idx] = t;
+    g_table_written[idx] = true;
+    int rc = dev_write(t, (tg->sectors - GPT_BUILD_TAIL_SECTORS(ss)) * ss, g_tail,
+                       (size_t)GPT_BUILD_TAIL_SECTORS(ss) * ss);
     if (rc == 0)
         rc = dev_write(t, 0, g_head, (size_t)GPT_BUILD_HEAD_SECTORS(ss) * ss);
     if (rc == 0)
@@ -605,21 +626,19 @@ static int install(const char *target_name, bool force)
     if (n != (long)sizeof(rs))
         return fail("rescanning the partitions", n < 0 ? (int)n : EIO);
     memcpy(&rs, g_res, sizeof(rs));
-    char tname[COSMO_BLKCTL_NAME];
-    strcpy(tname, t->name);
     if (rs.partitions != 2 || list_devices() < 0)
         return fail("the new partitions did not appear", 0);
-    g_target = find_dev(tname);   /* the list was re-read */
-    const struct cosmo_blkctl_dev *esp = find_part(tname, 1), *root = find_part(tname, 2);
-    boot = NULL;
-    for (unsigned i = 0; i < g_ndevs; i++)
-        if (g_devs[i].flags & COSMO_BLKCTL_BOOT)
-            boot = &g_devs[i];
-    if (g_target == NULL || esp == NULL || root == NULL || boot == NULL)
+    for (unsigned k = 0; k <= idx; k++)
+        g_target[k] = find_dev(k == idx ? tg->name : g_target_name[k]);   /* the list was re-read */
+    const struct cosmo_blkctl_dev *esp = find_part(tg->name, 1), *root = find_part(tg->name, 2);
+    const struct cosmo_blkctl_dev *boot = boot_dev();
+    if (g_target[idx] == NULL || esp == NULL || root == NULL || boot == NULL)
         return fail("the new partitions did not appear", 0);
+    strcpy(tg->root, root->name);
 
     /* Partition 1: the boot ESP, byte for byte -- the loader, the kernel,
      * the archive, the command line and the manifest that signs them. */
+    uint64_t esp_bytes = boot->sectors * boot->sector_size;
     for (uint64_t off = 0; off < esp_bytes; off += CHUNK) {
         size_t len = esp_bytes - off < CHUNK ? (size_t)(esp_bytes - off) : CHUNK;
         static uint8_t chunk[CHUNK];
@@ -629,21 +648,74 @@ static int install(const char *target_name, bool force)
         if (rc < 0)
             return fail("copying the EFI system partition", rc);
     }
+    return 0;
+}
 
-    /* Partition 2: an empty cosmofs named ROOT_LABEL, then the system. */
-    rc = (int)ctl(COSMO_BLKCTL_FORMAT, root->name, 0, 0, ROOT_LABEL, strlen(ROOT_LABEL), "cosmofs");
+static int install(const char *target_name, const char *mirror_name, bool force)
+{
+    if (list_devices() < 0)
+        return fail("cannot list the block devices", errno);
+    if (boot_dev() == NULL) {
+        fprintf(stderr, "cosmo-install: the loader was not read from a GPT partition; there is no ESP to copy\n");
+        return 3;
+    }
+    /* The ESP is copied with its signed command line (roadmap M5): only
+     * root=boot-disk names the root partition this install makes. An
+     * image built with another CMDLINE would install "successfully" and
+     * then boot some other root, or none (PR #368 review). */
+    char root_spec[160];
+    long rn = sysctl_get("kernel.root", root_spec, sizeof(root_spec));
+    if (rn < 0 || rn >= (long)sizeof(root_spec) || strcmp(root_spec, "boot-disk") != 0) {
+        fprintf(stderr, "cosmo-install: this image's signed command line says root=%s, not root=boot-disk; "
+                "the installed disk would not boot its own root\n", rn >= 0 ? root_spec : "?");
+        return 3;
+    }
+    static struct target tg[2];
+    unsigned n = mirror_name ? 2 : 1;
+    int rc = check_target(target_name, force, &tg[0]);
+    if (rc == 0 && mirror_name) {
+        rc = check_target(mirror_name, force, &tg[1]);
+        if (rc == 0 && strcmp(tg[0].name, tg[1].name) == 0) {
+            fprintf(stderr, "cosmo-install: --mirror names %s twice\n", tg[0].name);
+            rc = 3;
+        }
+        /* The mirror is the first root partition's size: the second's must
+         * hold it (design: a copy covers its group). */
+        if (rc == 0 && (tg[1].root_last - tg[1].root_first) * tg[1].ss < (tg[0].root_last - tg[0].root_first) * tg[0].ss) {
+            fprintf(stderr, "cosmo-install: %s is smaller than %s; the mirror's second disk must be as big\n",
+                    tg[1].name, tg[0].name);
+            rc = 3;
+        }
+    }
+    if (rc)
+        return rc;
+    for (unsigned k = 0; k < n; k++)
+        strcpy(g_target_name[k], tg[k].name);
+    g_ntargets = n;
+    for (unsigned k = 0; k < n && rc == 0; k++)
+        rc = prepare_target(&tg[k], k);
+    if (rc)
+        return rc;
+
+    /* Partition 2: an empty cosmofs named ROOT_LABEL -- on one disk, or a
+     * two-way mirror of both disks' (roadmap 1.2 B3) -- then the system. */
+    if (n == 2)
+        rc = blkdevs_format_mirror(tg[0].root, tg[1].root, "cosmofs", ROOT_LABEL);
+    else
+        rc = (int)ctl(COSMO_BLKCTL_FORMAT, tg[0].root, 0, 0, ROOT_LABEL, strlen(ROOT_LABEL), "cosmofs");
     if (rc < 0)
         return fail("making the cosmofs root", rc);
     if (mkdir(MNT, 0755) < 0 && errno != EEXIST)
         return fail("creating " MNT, errno);
-    if (mount(root->name, MNT, "cosmofs", 0) < 0)
+    if (mount(tg[0].root, MNT, "cosmofs", 0) < 0)
         return fail("mounting the new root", errno);
     g_mounted = true;
     if (populate() < 0)
         return fail("copying the system", 0);
     /* The record is checked against the root's files, never trusted, and
      * cosmo-upgrade writes a missing one: an install without it is whole. */
-    if (write_root_set(esp) < 0)
+    const struct cosmo_blkctl_dev *esp = find_part(tg[0].name, 1);
+    if (esp == NULL || write_root_set(esp) < 0)
         fprintf(stderr, "cosmo-install: the root's record of its base system was not written; cosmo-upgrade "
                         "writes it\n");
     sync();
@@ -651,31 +723,38 @@ static int install(const char *target_name, bool force)
         return fail("unmounting the new root", errno);
     g_mounted = false;
     rmdir(MNT);
-    rc = (int)ctl(COSMO_BLKCTL_FLUSH, tname, 0, 0, NULL, 0, NULL);
-    if (rc < 0)
-        return fail("flushing the disk", rc);
+    for (unsigned k = 0; k < n; k++) {
+        rc = (int)ctl(COSMO_BLKCTL_FLUSH, tg[k].name, 0, 0, NULL, 0, NULL);
+        if (rc < 0)
+            return fail("flushing the disk", rc);
+    }
     printf("cosmo-install: copied %u files in %u directories\n", g_files, g_dirs);
-    printf("cosmo-install: installed on %s: esp %s, root %s, partuuid %s\n", tname, esp->name, root->name,
-           root_uuid);
+    printf("cosmo-install: installed on %s: esp %s, root %s, partuuid %s\n", tg[0].name, esp ? esp->name : "?",
+           tg[0].root, tg[0].root_uuid);
+    if (n == 2)
+        printf("cosmo-install: the root is mirrored on %s and %s (%s's root partition, partuuid %s)\n", tg[0].root,
+               tg[1].root, tg[1].name, tg[1].root_uuid);
     return 0;
 }
 
 int main(int argc, char **argv)
 {
-    bool force = false, list = false;
-    const char *target = NULL;
+    bool force = false, list = false, bad = false;
+    const char *target = NULL, *mirror = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--force") == 0)
             force = true;
         else if (strcmp(argv[i], "--list") == 0)
             list = true;
+        else if (strcmp(argv[i], "--mirror") == 0 && i + 1 < argc && mirror == NULL)
+            mirror = argv[++i];
         else if (argv[i][0] != '-' && target == NULL)
             target = argv[i];
         else
-            target = NULL, list = false, i = argc;
+            bad = true;
     }
-    if (!list && target == NULL) {
-        fprintf(stderr, "usage: cosmo-install --list | cosmo-install [--force] DEVICE\n");
+    if (bad || (!list && target == NULL) || (list && (target || mirror))) {
+        fprintf(stderr, "usage: cosmo-install --list | cosmo-install [--force] DEVICE [--mirror DEVICE2]\n");
         return 2;
     }
     g_ctl = open("/dev/blkctl", O_RDWR);
@@ -691,7 +770,7 @@ int main(int argc, char **argv)
         print_list();
         return 0;
     }
-    int rc = install(target, force);
+    int rc = install(target, mirror, force);
     close(g_ctl);
     return rc;
 }

@@ -1390,12 +1390,19 @@ bool selftest_cosmofs_mirror_stale(const char **reason)
     CHECK(read_matches(ENG "/across", "two members, two copies", 23));
     struct cosmofs_scrub_stats sc;
     CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.unrecoverable == 0);
-
     CHECK(vfs_umount(ENG) == 0);
+
+    /* Neither of member 1's copies current: no complete copy of the
+     * member, and the mount refuses rather than mount part of a pool
+     * (roadmap 1.2 B3's boot rule). */
+    CHECK(age_label(bd[2], 1) && age_label(bd[3], 1));
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == -ENODEV);
+
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     for (unsigned i = 0; i < 4; i++)
         ramblk_destroy(bd[i]);
-    kinfo("selftest: cosmofs-mirror-stale: a stale copy is passed over, whichever one it is");
+    kinfo("selftest: cosmofs-mirror-stale: a stale copy is passed over, whichever one it is; with none current, "
+          "the mount refuses");
     cosmofs_test_resilver_hold(false);
     return true;
 }

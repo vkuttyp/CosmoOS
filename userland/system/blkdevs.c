@@ -16,10 +16,16 @@ static uint8_t g_io[sizeof(struct cosmo_blkctl) + COSMO_BLKCTL_IO_MAX];   /* a F
 static uint8_t g_res[64 * 1024];
 
 /* One command, its data after the struct; its result into g_res. The
- * result's length or -errno. */
+ * result's length or -errno. /dev/blkctl is opened by the first command,
+ * whichever it is (cosmo-install formats a mirror without a list first). */
 static long ctl(unsigned op, const char *name, uint64_t sector, uint32_t count, const char *fstype, const void *data,
                 size_t len)
 {
+    if (g_ctl < 0) {
+        g_ctl = open("/dev/blkctl", O_RDWR);
+        if (g_ctl < 0)
+            return -errno;
+    }
     struct cosmo_blkctl cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.version = COSMO_BLKCTL_VERSION;
@@ -43,11 +49,6 @@ static long ctl(unsigned op, const char *name, uint64_t sector, uint32_t count, 
 
 int blkdevs_list(void)
 {
-    if (g_ctl < 0) {
-        g_ctl = open("/dev/blkctl", O_RDWR);
-        if (g_ctl < 0)
-            return -errno;
-    }
     long n = ctl(COSMO_BLKCTL_LIST, NULL, 0, 0, NULL, NULL, 0);
     if (n < (long)sizeof(struct cosmo_blkctl_list))
         return n < 0 ? (int)n : -EIO;
@@ -119,18 +120,21 @@ int blkdevs_flush(const struct cosmo_blkctl_dev *d)
     return rc < 0 ? (int)rc : 0;
 }
 
-int blkdevs_format_mirror(const char *a, const char *b, const char *fstype)
+int blkdevs_format_mirror(const char *a, const char *b, const char *fstype, const char *label)
 {
     if (strncmp(a, "/dev/", 5) == 0)
         a += 5;
     if (strncmp(b, "/dev/", 5) == 0)
         b += 5;
-    char other[COSMO_BLKCTL_NAME];
-    memset(other, 0, sizeof(other));
-    if (strlen(b) >= sizeof(other))
+    char extra[COSMO_BLKCTL_NAME + COSMO_BLKCTL_LABEL];
+    memset(extra, 0, sizeof(extra));
+    size_t ll = label ? strlen(label) : 0;
+    if (strlen(b) >= COSMO_BLKCTL_NAME || ll > COSMO_BLKCTL_LABEL)
         return -ENAMETOOLONG;
-    strcpy(other, b);
-    long rc = ctl(COSMO_BLKCTL_FORMAT_MIRROR, a, 0, 0, fstype, other, sizeof(other));
+    strcpy(extra, b);
+    if (ll)
+        memcpy(extra + COSMO_BLKCTL_NAME, label, ll);
+    long rc = ctl(COSMO_BLKCTL_FORMAT_MIRROR, a, 0, 0, fstype, extra, COSMO_BLKCTL_NAME + ll);
     return rc < 0 ? (int)rc : 0;
 }
 

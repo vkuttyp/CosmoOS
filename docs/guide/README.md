@@ -22,10 +22,12 @@ the pages in order: each one continues where the one before it stopped.
    keeps, and rolling the system back to one.
 8. [Checking and repairing](checking.md): the root's check at boot,
    `fsck.cosmofs`, `fsctl check` and `scrub`, mirrors.
-9. [Privileges](privileges.md): the privilege set, dropping privileges,
+9. [Mirrors](mirrors.md): a root on two disks, a disk that goes,
+   `cosmo-pool replace`, resilvering, spares.
+10. [Privileges](privileges.md): the privilege set, dropping privileges,
    and what an ssh session holds.
-10. [Known limitations](limitations.md).
-11. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
+11. [Known limitations](limitations.md).
+12. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
    Apple Silicon.
 
 Commands for your computer are shown as plain blocks; commands typed on
@@ -54,4 +56,5 @@ first, so the runner cannot run them. `make test-upgrade` runs them instead
 the page shows them as text. Snapshots and rollback's are the other: a rollback reboots
 the machine. `make test-snapshot` runs them (the CI job `install`).
 Checking and repairing's need a damaged disk: `make test-fsck` runs
-them (the CI job `fsck`).
+them (the CI job `fsck`). Mirrors' remove a disk from a running machine:
+`make test-mirror` runs them (the CI job `mirror`).

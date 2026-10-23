@@ -33,7 +33,7 @@ static int mirror(const char *a, const char *b)
         return 1;
     }
     if (rc == 0)
-        rc = blkdevs_format_mirror(da->name, db->name, "cosmofs");
+        rc = blkdevs_format_mirror(da->name, db->name, "cosmofs", NULL);
     if (rc < 0) {
         fprintf(stderr, "mkfs.cosmofs: %s and %s: %s\n", a, b, strerror(-rc));
         return 1;

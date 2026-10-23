@@ -3694,6 +3694,8 @@ static void priv_selftest(void)
 }
 
 /* Read a whole file, NUL-terminated. Returns bytes read, or -1. */
+static void root_degraded_note(void);
+
 static ssize_t slurp(const char *path, char *buf, size_t n)
 {
     int fd = open(path, O_RDONLY, 0);
@@ -6187,7 +6189,35 @@ static bool switch_to_disk_root(void)
     if (mount("none", "/tmp", "ramfs", COSMO_MOUNT_SCRATCH) < 0)
         printf("init: /tmp: %s (it stays on the disk)\n", strerror(errno));
     printf("init: switched to the disk root %s (root=%s)\n", dev, spec);
+    root_degraded_note();
     return true;
+}
+
+/*
+ * A root pool that runs without one of its copies says so where the
+ * operator looks first (roadmap 1.2 B3): its /proc/mounts line carries
+ * `degraded`, and the kernel has said which copy. A copy being rebuilt
+ * is resilvered behind the boot, which does not wait for it.
+ */
+static void root_degraded_note(void)
+{
+    char buf[4096];
+    int fd = open("/proc/mounts", O_RDONLY);
+    if (fd < 0)
+        return;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return;
+    buf[n] = '\0';
+    for (char *line = buf; line && *line;) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+        if (strstr(line, " / cosmofs ") && strstr(line, ",degraded "))
+            printf("init: the root pool is degraded: a copy is missing or being resilvered (cosmo-pool status)\n");
+        line = nl ? nl + 1 : NULL;
+    }
 }
 
 /*
