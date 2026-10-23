@@ -571,7 +571,7 @@ no privileged position: what it knows, `cat` can read.
 
 ```text
   /etc/svc/<name>        the service: key value lines, one per line
-  /run/svc/<name>.pid    the supervisor's pid, once the service has run
+  /run/svc/<name>.pid    the supervisor's pid and start time, once the service has run
   /var/log/svc/<name>    the service's output and its supervisor's notes
 ```
 
@@ -644,6 +644,18 @@ up" -- written earlier, a spawn that then failed would look like a
 running service for as long as it took to fail. `svc start` spawns that and returns, so the
 supervisor is reparented to init, which reaps it -- there is no fork
 here, and none is needed.
+
+A pid file is believed only for as long as it names the process it was
+written for (USR-8, U14). `/run` is a ramfs init mounts at every boot,
+so an earlier boot's files are not there to read; and the file holds
+the pid and that process's start time from `/proc/<pid>/stat`, which
+`svc` compares, then checks the pid is running `svc --supervise <name>`.
+Before this, `kill(pid, 0)` was the whole test, and on an installed
+system, whose `/run` was on the disk, `dropbear.pid` from the day before
+named pid 13 -- `syslogd` at every boot -- and dropbear never started
+again. The service's own pid, in `<name>.child`, is killed by `svc stop`
+only while it is the live supervisor's child or has the recorded start
+time.
 
 The restart policy is bounded in both directions. `never` and a clean
 exit under `on-failure` mean the supervisor exits with the service.

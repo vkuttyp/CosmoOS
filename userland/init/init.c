@@ -3751,6 +3751,66 @@ static int svc_run(const char *a, const char *b)
     return waitpid(pid, &status, 0) == pid ? status : -1;
 }
 
+/* The pid a service's pid file names, or -1. */
+static pid_t svc_pid(const char *name)
+{
+    char path[64], buf[32] = { 0 };
+    snprintf(path, sizeof(path), "/run/svc/%s.pid", name);
+    return slurp(path, buf, sizeof(buf)) > 0 ? (pid_t)atoi(buf) : -1;
+}
+
+/*
+ * USR-8: a pid file naming a live process that is not the service's
+ * supervisor is stale, and the service starts. The live process is this
+ * one, named twice: as an older svc wrote it (the pid alone), and with
+ * this process's own start time -- the case of a boot that repeats the
+ * last one's timeline, where only the program at the pid tells them
+ * apart. A stale child file names this process too, and `svc stop` must
+ * not kill it.
+ */
+static void svc_stale_selftest(void)
+{
+    char stat[512], line[64];
+    long long start = -1;
+    if (slurp("/proc/self/stat", stat, sizeof(stat)) > 0 && strrchr(stat, ')') != NULL) {
+        char *p = strrchr(stat, ')') + 1;
+        for (int field = 3; field < 22 && *p != '\0'; field++) {
+            while (*p == ' ')
+                p++;
+            while (*p != '\0' && *p != ' ')
+                p++;
+        }
+        start = strtoll(p, NULL, 10);
+    }
+    CHECK(start >= 0);
+    CHECK(mkdir("/run/svc", 0755) == 0 || errno == EEXIST);
+    write_file("/etc/svc/stale", "exec /bin/sleep 30\nrestart never\n");
+    for (int form = 0; form < 2; form++) {
+        if (form == 0)
+            snprintf(line, sizeof(line), "%d\n", (int)getpid());
+        else
+            snprintf(line, sizeof(line), "%d %lld\n", (int)getpid(), start);
+        write_file("/run/svc/stale.pid", line);
+        write_file("/run/svc/stale.child", line);
+        CHECK(svc_run("status", "stale") != 0);   /* not running ... */
+        CHECK(svc_run("start", "stale") == 0);    /* ... so it starts */
+        pid_t sup = svc_pid("stale");
+        CHECK(sup > 0 && sup != getpid());
+        CHECK(svc_run("status", "stale") == 0);
+        CHECK(svc_run("stop", "stale") == 0);
+        CHECK(svc_run("status", "stale") != 0);
+    }
+    /* The child file alone, stale -- as an older svc wrote it, so with no
+     * start time to match, and no live supervisor whose child it is: the
+     * stop that reads it kills nothing (this process signalled with
+     * SIGTERM would not be here to check). The form with a start time is
+     * not stale: it names this very process, which a stop would kill. */
+    snprintf(line, sizeof(line), "%d\n", (int)getpid());
+    write_file("/run/svc/stale.child", line);
+    CHECK(svc_run("stop", "stale") == 0);
+    CHECK(access("/run/svc/stale.child", F_OK) != 0);
+}
+
 /*
  * The service manager (docs/userland/design.md, "Services"; U8, U9,
  * U10). Definitions are written here rather than shipped, so each test
@@ -3878,6 +3938,8 @@ static void svc_selftest(void)
 
     /* A long-running service can be stopped, and stopping it takes the
      * service with the supervisor. */
+    svc_stale_selftest();
+
     write_file("/etc/svc/sleeper", "exec /bin/sleep 30\nrestart always\nretries 9\n");
     CHECK(svc_run("start", "sleeper") == 0);
     CHECK(svc_run("status", "sleeper") == 0);
@@ -3892,7 +3954,7 @@ static void svc_selftest(void)
      */
     static const char *const written[] = { "typo",     "flap",    "broken",  "dependent", "loop-a",
                                            "loop-b",   "sleeper", "baduser", "badnum",    "badlimit",
-                                           "missing",  "oneshot", "hugeuser", "unprivsvc" };
+                                           "missing",  "oneshot", "hugeuser", "unprivsvc", "stale" };
     /* The image's own services, which `svc boot` above started: syslogd
      * (shell completeness S2) runs until stopped, and holds /dev/log's
      * socket; /etc/rc's `svc boot` starts it again for the real boot. */
@@ -6194,6 +6256,27 @@ static bool switch_to_disk_root(void)
 }
 
 /*
+ * /run is this boot's and no other's (USR-8; docs/userland/design.md,
+ * "Services"): a fresh ramfs at every boot, with /run/svc made in it
+ * before /etc/rc's `svc boot`. On a disk root a pid file written there
+ * outlived its service, and the next boot read it as running. Whatever
+ * the root's own /run holds is hidden under the mount, not removed.
+ */
+static void fresh_run(void)
+{
+    if (mkdir("/run", 0755) < 0 && errno != EEXIST) {
+        printf("init: /run: %s\n", strerror(errno));
+        return;
+    }
+    if (mount("none", "/run", "ramfs", 0) < 0) {
+        printf("init: /run: %s (it stays on the root)\n", strerror(errno));
+        return;
+    }
+    if (mkdir("/run/svc", 0755) < 0)
+        printf("init: /run/svc: %s\n", strerror(errno));
+}
+
+/*
  * A root pool that runs without one of its copies says so where the
  * operator looks first (roadmap 1.2 B3): its /proc/mounts line carries
  * `degraded`, and the kernel has said which copy. A copy being rebuilt
@@ -6539,6 +6622,7 @@ int main(int argc, char **argv)
     setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin", 1);
     setenv("HOME", "/root", 1);
     bool disk_root = switch_to_disk_root();
+    fresh_run();
     /* Root's home on whichever root is in use: an installed disk has it
      * (cosmo-install makes it), the live image's ramfs root does not. */
     if (mkdir("/root", 0700) < 0 && errno != EEXIST)

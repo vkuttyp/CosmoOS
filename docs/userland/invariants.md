@@ -216,3 +216,24 @@ for room, the ESP byte for byte unchanged); `test_upgrade_be` (the
 file's grammar, and which binaries read it). Gap: no environment for an
 upgrade from a set whose `cosmo-upgrade` predates them (v1.0.7 and
 older); a rollback past such an upgrade is U12's.
+
+**U14. A pid file is this boot's, and names the process it was written
+for.** init mounts a fresh ramfs on `/run` at every boot and makes
+`/run/svc` in it before `/etc/rc` runs, so nothing an earlier boot wrote
+there is read as running (whatever the root's own `/run` holds is
+hidden, not removed). Independently, `svc` reads a pid file as live only
+when the pid is still the process it was written for: the file records
+the pid and that process's start time (`/proc/<pid>/stat`, field 22), and
+the pid must also be running `svc --supervise <name>` (its
+`/proc/<pid>/cmdline`) -- a boot that repeats the last one's timeline
+can bring the pid round at the same tick, but not as the same program. A
+`.child` file is the service only while its parent is the live
+supervisor or its start time is the recorded one; a stale one names
+whatever has that pid now, and `svc stop` does not kill it. Without
+`/proc` signal 0 is the whole answer, as before (USR-8: a
+`dropbear.pid` from the day before named `syslogd`, and dropbear did not
+start through several boots). Check: init's self-test `svc_stale_selftest`
+(a pid file naming the test itself, with and without its start time, is
+not running and the service starts; a stale child file is not killed);
+`test-install`'s reboot stage leaves pid files naming pid 1 on the root's
+own `/run`, and the persist stage requires every service to start.
