@@ -88,7 +88,7 @@ platform: firmware OEM 'PRLS  '; console PL011 at 0x2110000 (DBG2, polled); GICv
 | | |
 |---|---|
 | Works | verified boot; both CPUs; the console on the screen, at the window's size (the virtio-gpu adapter) and on the VM's serial port (set it to a file or a socket); the USB keyboard; the live shell; installing on an NVMe disk and booting it (the controller offers only MSI: one vector for every queue); the network (the adapter is a legacy virtio-net) with DHCP, DNS, `wget` and ssh; randomness (no CPU instruction, firmware generator or virtio-rng: the timing-jitter source seeds the pool in milliseconds); the wall clock (the firmware's time at boot); power-off (`exit`, `poweroff`: PSCI) |
-| Does not work | SATA disks (not on PCI: a platform AHCI described only in the DSDT, which needs an AML interpreter); the sound, USB 2.0 (EHCI) and vsock devices have no driver, and the graphics adapter (virtio-gpu) only carries the text console (no 3D, cursor or display interface for programs); the debug self-test suite assumes QEMU's machine |
+| Does not work | SATA disks (not on PCI: a platform AHCI described only in the DSDT, which needs an AML interpreter); the sound, USB 2.0 (EHCI) and vsock devices have no driver, and the graphics adapter (virtio-gpu) only carries the text console (no 3D, cursor or display interface for programs); the debug self-test suite assumes QEMU's machine; adding or removing a disk while the VM runs (Parallels refuses it, and its NVMe controller sits on bus 0 with no hot-plug slot) |
 
 v1.0.4, the published image, was run there on 2026-10-18 (Parallels
 Desktop 27.0.3, 4 CPUs, 2 GB): it installed itself on a 512 MiB NVMe
@@ -114,6 +114,34 @@ boot set, and kept v1.0.4's in `\cosmo\prev` (root: 177 files unchanged,
 default, and the upgraded disk booted to the shell (`free`: 4133176 KiB,
 "RAM ends at 5120 MiB"), which needs the loader the upgrade brought;
 at 8192 MB too (`free`: 8294712 KiB, DHCP address 10.211.55.12).
+
+**A mirrored root, v1.0.11-rc1, 2026-10-23.** The VM (Parallels Desktop
+27.0.3, 4 CPUs, 4096 MB) was upgraded from v1.0.10 to v1.0.11-rc1 with
+its own `cosmo-upgrade`, the set served from the Mac. Parallels cannot
+add or remove a disk while the VM runs (`prlctl` refuses: "The device
+cannot be added or removed while the virtual machine is running"), so
+each change of disks was made with the VM stopped:
+
+- A third NVMe disk of 1 GiB was added (`prlctl set ... --device-add
+  hdd --type plain --size 1024 --iface nvme`). It is a third namespace
+  of the same controller, `nvme0n3`.
+- `cosmo-pool attach nvme0n2p2 nvme0n3` raised the pool to format 13
+  and resilvered the new copy, 13199 blocks in 1670 ms. `cosmo-pool
+  status` then said `ONLINE` for both copies, and `fsctl scrub` was
+  clean (0 bad copies).
+- With the disk disabled (`--device-set hdd2 --disable`), the system
+  booted and said `cosmofs: member 0 copy 1 is missing; the pool is
+  degraded` and `init: the root pool is degraded`. `cosmo-pool status`
+  said `DEGRADED`, copy 1 `MISSING`, and `/proc/mounts` said
+  `rw,degraded`. A file written then read back intact.
+- With the disk enabled again, the boot said `nvme0n3 is back as member
+  0 copy 1: resilvering it whole`, and the copy was `ONLINE` 13799
+  blocks and 1715 ms later. A scrub was clean, and both files read back
+  with their checksums.
+
+The added disk carries only the pool's copy and no ESP, so the VM
+boots from `nvme0n2` alone. `cosmo-install DISK --mirror DISK2` gives
+both disks an ESP.
 
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)

@@ -85,6 +85,7 @@ Open lines (struck lines are not counted):
 - **BUILD-4** nice-to-have, L. A KASAN-like kernel sanitiser build.
 - **BUILD-5** nice-to-have, S. `ports/busybox/README.md`'s config regeneration fails at `make defconfig` on the macOS host; the checked-in config differs from the recipe in three options.
 - **BUILD-6** nice-to-have, L. Native programs are static: no shared native libc and no native `PT_INTERP` (deferred by the owner past 1.1).
+- **BUILD-7** correctness, S. An rc's release run reads `docs/releases/vX.Y.Z-rcN.md`, which no release has, so the final notes (`vX.Y.Z.md`) are first checked by `check-release-version.py` in the final tag's run: v1.0.11's failed on "CosmoOS 1.0.10" in its notes (run 39942569981) after v1.0.11-rc1 had passed (run 39938572061). Check `vX.Y.Z.md` in the rc's run, or in CI when `docs/releases/` changes.
 
 ## cosmofs and storage
 
