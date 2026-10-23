@@ -14,7 +14,8 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
   SATA disks are not seen ([Tested platforms](platforms.md)). Out of scope for 1.0
   ([roadmap](../roadmap-1.0.md)): GPU and display beyond a text console (on
   the firmware's framebuffer, or a virtio-gpu adapter at the display's
-  own size: no 3D, cursor or display interface for programs), hotplug, NUMA, more than 64 CPUs, huge pages, live migration,
+  own size: no 3D, cursor or display interface for programs), CPU and memory
+  hotplug (PCIe disks can be added and removed since v1.0.11), NUMA, more than 64 CPUs, huge pages, live migration,
   RAID-Z, eBPF, and the Intel VMX backend on hardware.
 - **Randomness from the weakest source last.** The pool seeds from the
   CPU's random instructions, the firmware's `EFI_RNG_PROTOCOL` or a
@@ -87,8 +88,10 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 - A rollback to a snapshot takes effect at the next boot (or the next
   mount of another filesystem), not in the running system
   ([Snapshots and rollback](snapshots.md)); a clone of a clone, and a
-  snapshot of a clone, are not possible; no RAID-Z, no resilvering
-  (backlog CFS-9, CFS-13).
+  snapshot of a clone, are not possible; no RAID-Z (backlog CFS-13). A
+  mirror holds at most four copies (backlog CFS-27), and a copy missing when the pool is
+  mounted is rebuilt whole when it returns, not caught up (backlog
+  CFS-29; [Mirrors](mirrors.md)).
 - A root disk that appears late (USB storage) is not waited for: init
   stays on the live root and says so.
 

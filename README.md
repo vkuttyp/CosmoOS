@@ -147,7 +147,8 @@ to the live shell on Parallels Desktop on Apple Silicon, and since
 v1.0.3 installs and networks there: [Tested platforms](docs/guide/platforms.md));
 there is no physical hardware matrix,
 no GPU or display beyond a text console (on the firmware's
-framebuffer or a 2D virtio-gpu), no hotplug, no NUMA, no
+framebuffer or a 2D virtio-gpu), no CPU or memory hotplug (PCIe disks
+can be added and removed since v1.0.11), no NUMA, no
 huge pages, no live migration, no RAID-Z, no eBPF, no more than 64 CPUs,
 and the Intel VMX backend has not run on hardware. There is no KASLR. The guide's
 [Known limitations](docs/guide/limitations.md) page lists what a user
