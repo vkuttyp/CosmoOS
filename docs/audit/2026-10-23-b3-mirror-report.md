@@ -152,8 +152,8 @@ devices, which are on main.
 
 | Case | Defect | `test-mirror` with `--old` |
 |---|---|---|
-| `check` | The checker's "another device of this pool is mounted" asked `vfs_bdev_mounted`, which sees the checker's own detached mount's hold. A mirrored root's boot check refused itself, and init mounted the root unchecked. | PROBE-CHECK |
-| `gone` | `bdev_related` matched a removed device by name. A mount holding the pulled `vda2` held the new disk `vda`, and the replace was refused `-EBUSY`. | PROBE-GONE |
+| `check` | The checker's "another device of this pool is mounted" asked `vfs_bdev_mounted`, which sees the checker's own detached mount's hold. A mirrored root's boot check refused itself, and init mounted the root unchecked. | fails at `replace: the boot's check of the root: no line matching '^cosmofs: root checked, 0 findings, 0 repaired$'` (x86-64 and AArch64) |
+| `gone` | `bdev_related` matched a removed device by name. A mount holding the pulled `vda2` held the new disk `vda`, and the replace was refused `-EBUSY`. | fails at `cosmo-pool replace: no line matching '^replace-status=0$'` (x86-64 and AArch64) |
 
 `tools/b3-mirror-probe.py --case NAME --arch ARCH --old` restores the
 old line in a throwaway worktree and runs `make BUILD=release
@@ -175,7 +175,25 @@ main yet, so neither has a probe:
 
 ## test-mirror
 
-TM-RESULTS
+Release builds, 2026-10-23, on the tree #442 opens with. Each stage's
+time is in brackets, and none is asserted.
+
+| Stage | x86-64 | AArch64 |
+|---|---|---|
+| `install` | `cosmo-install vdc --mirror vdd` 4.2 s [10.7 s] | `vdd --mirror vde` 4.7 s [14.1 s] |
+| `replace` | `MISSING` 0.2 s after `device_del`; resilvered in 1.2 s; scrub clean in 1.6 s [14.8 s] | 0.0 s; 1.5 s; 1.5 s [17.7 s] |
+| `reboot` | the root from disks a and c, whole [6.6 s] | [9.4 s] |
+| `spare` | the spare took over 0.1 s after `device_del`, `ONLINE` at 0.9 s; scrub 1.4 s [12.1 s] | 0.2 s, 1.5 s; 1.6 s [16.2 s] |
+| `reboot-spare` | [6.0 s] | [9.3 s] |
+| `degraded` | disk a alone; init's line; a copy `MISSING` [5.8 s] | [9.0 s] |
+| `lagging` | disk d resilvered after the switch, `ONLINE` 0.4 s after the prompt; scrub 1.4 s [7.9 s] | 0.4 s; 2.2 s [12.7 s] |
+| total | 64.0 s | 88.4 s |
+
+After the analyzer fix (below), it was run again: 64.2 s and 89.1 s.
+
+A resilver copies about 3600 to 3800 blocks, the pool's allocated blocks
+on a 48891-block member, in 550 to 720 ms. That is well under the 8192
+blocks/s bound.
 
 ## Other observations
 
@@ -192,7 +210,31 @@ TM-RESULTS
 
 ## Validation
 
-VALIDATION
+Each PR ran the AGENTS.md matrix on x86-64 and AArch64 before it
+opened: `make host-test`, `fuzz` and `analyze`; debug `make test` at
+`QEMU_SMP` 1, 2 and 4; `test-smp2`, `test-chaos` and
+`test-harness-retry`; and the release build and boot. Each step waited
+for the host's one-minute load to fall below 8, because Docker's VM had
+been taking 630% of the 8-CPU host (flakes.md, 2026-10-23).
+
+- **#439:** 20 of 20 steps passed. A first attempt was restarted while
+  the host was loaded.
+- **#440:** 20 of 20 steps passed on `f791de0f`, after Codex's review
+  fixes. An earlier run on `d378d10f` had one timeout, the x86-64
+  `QEMU_SMP=1` boot while Docker ran (`cosmofs-replay` 72.6 s against
+  its usual 18.6 s). That step passed on a quiet host.
+  - `3888f9da`, the `cosmo-pool status` fix, came after this matrix:
+    two lines in a userland command. `test-mirror` runs it on both
+    architectures.
+- **#441:** 20 of 20 steps passed on `bb9db052`. After the rebase onto
+  #440's fixes, which change only cosmofs, `test-pci-hotplug` passed on
+  both architectures.
+- **#442:** 18 of 20 steps passed on `2dfeeb20`. `analyze` failed on both
+  architectures with one new `core.NullDereference` in
+  `vfs_bdev_mounted_except`: comparing the list cursor with a NULL
+  `self` told the analyzer the cursor could be NULL. With `self` checked
+  first, `analyze` is clean on both architectures (7 baselined, 0
+  unexpected), and `test-mirror` on both and a debug x86-64 boot pass.
 
 ## Backlog
 
