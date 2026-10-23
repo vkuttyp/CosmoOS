@@ -137,6 +137,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/crc32c.c \
 	kernel/core/lz4.c \
 	kernel/security/chacha20.c \
+	kernel/security/blake2b.c \
 	kernel/core/fwcfg.c \
 	kernel/core/cmdline.c \
 	kernel/core/bootfs.c \
@@ -162,6 +163,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofstest.c \
+	kernel-services/filesystem/cosmofs/cosmofs_keytest.c \
 	kernel-services/filesystem/cosmofs/cosmofscrash.c \
 	kernel-services/network/mbuf.c \
 	kernel-services/network/cksum.c \

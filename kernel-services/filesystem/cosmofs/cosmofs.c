@@ -572,54 +572,119 @@ int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep)
 
 /* --- checksums (docs/kernel-services/filesystem/cosmofs/design.md, version 2) --- */
 
-/* The CSUM block for `lblk`, created (and CoW'd) when `writable`. */
-/* `index` is the leaf's position in the checksum index, which differs
- * between the 4-byte CRC entries and the 32-byte authenticated ones. */
+/*
+ * A file outgrows the one-level checksum index (CFS-10; design.md, "The
+ * two-level checksum index"): the format must say a CSUMIDX2 may be met.
+ * A pool below 14 is raised, through 12 as a snapshot would raise it; one
+ * below 11, or one encrypted with a version-1 key block (which version 14
+ * would read as MAC'd), keeps the old limit.
+ */
+static int csum_raise14(struct cfs *fs)
+{
+    if (fs->sb.version >= 14)
+        return 0;
+    if (fs->sb.version < 11 || fs->sb.key_root != 0)
+        return -EFBIG;
+    unsigned was = fs->sb.version;
+    int rc = cfs_snap_raise(fs);
+    if (rc)
+        return rc;
+    fs->sb.version = 14;
+    kinfo("cosmofs: format version %u -> 14 (two-level checksum index): a file outgrew the one-level index; a "
+          "kernel that reads format 13 at most (CosmoOS 1.0.12 and older) cannot mount this pool", was);
+    return 0;
+}
+
+/* An index block below `*slot`: read (and CoW'd when `writable`), or made
+ * when there is none and `writable`; -ENOENT when there is none to read. */
+static int csum_level(struct cfs *fs, uint64_t *slot, uint32_t kind, bool writable, struct cfs_buf **out)
+{
+    int rc;
+    if (*slot == 0) {
+        if (!writable)
+            return -ENOENT;
+        rc = cfs_buf_new(fs, kind, out);
+        if (rc == 0)
+            *slot = (*out)->blkno;
+        return rc;
+    }
+    rc = cfs_buf_get(fs, *slot, kind, out);
+    if (rc == 0 && writable && (rc = cfs_buf_cow(fs, out, slot)) != 0)
+        cfs_buf_put(fs, *out);
+    return rc;
+}
+
+/* The kind of block an inode's csum_root names: CSUMIDX or, from version
+ * 14, CSUMIDX2. Anything else is a damaged inode. */
+static int csum_root_kind(struct cfs *fs, uint64_t root, uint32_t *kind)
+{
+    struct cfs_buf *b;
+    int rc = cfs_buf_get(fs, root, 0, &b);
+    if (rc)
+        return rc;
+    *kind = cfs_buf_hdr(b)->kind;
+    cfs_buf_put(fs, b);
+    if (*kind == CFS_KIND_CSUMIDX || (*kind == CFS_KIND_CSUMIDX2 && fs->sb.version >= 14))
+        return 0;
+    return -EIO;
+}
+
+/*
+ * The CSUM block for `lblk`, created (and CoW'd) when `writable`.
+ * `index` is the leaf's position in the checksum index, which differs
+ * between the 4-byte CRC entries and the 32-byte authenticated ones. Up
+ * to CFS_CSUMIDX_SPAN leaves the root is a CSUMIDX; past it a CSUMIDX2
+ * whose entries are CSUMIDX blocks, and the old root becomes its entry 0
+ * so no checksum moves.
+ */
 static int csum_block_at(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, unsigned index, bool writable,
                          struct cfs_buf **out)
 {
-    if (lblk >= CFS_CSUM_MAX_BLOCKS || index >= CFS_PTRS_PER_BLOCK)
+    (void)lblk;
+    if (index >= CFS_CSUMIDX_SPAN * CFS_CSUMIDX_SPAN)
         return -EFBIG;
-    struct cfs_buf *idx, *cb;
+    uint32_t kind = CFS_KIND_CSUMIDX;
     int rc;
-    if (in->csum_root == 0) {
+    if (in->csum_root != 0 && (rc = csum_root_kind(fs, in->csum_root, &kind)) != 0)
+        return rc;
+    bool two = kind == CFS_KIND_CSUMIDX2;
+    if (!two && index >= CFS_CSUMIDX_SPAN) {
         if (!writable)
-            return -ENOENT;
-        rc = cfs_buf_new(fs, CFS_KIND_CSUMIDX, &idx);
+            return -ENOENT;   /* past the one-level index: nothing was ever stored there */
+        rc = csum_raise14(fs);
         if (rc)
             return rc;
-        in->csum_root = idx->blkno;
-    } else {
-        rc = cfs_buf_get(fs, in->csum_root, CFS_KIND_CSUMIDX, &idx);
+        /* The new root's entry 0 is the old one-level index, as it is. */
+        struct cfs_buf *top;
+        rc = cfs_buf_new(fs, CFS_KIND_CSUMIDX2, &top);
         if (rc)
             return rc;
-        if (writable && (rc = cfs_buf_cow(fs, &idx, &in->csum_root)) != 0) {
-            cfs_buf_put(fs, idx);
-            return rc;
-        }
+        ((uint64_t *)(top->data + CFS_MHDR_SIZE))[0] = in->csum_root;
+        in->csum_root = top->blkno;
+        cfs_buf_put(fs, top);
+        two = true;
     }
-    uint64_t *slot = &((uint64_t *)(idx->data + CFS_MHDR_SIZE))[index];
-    if (*slot == 0) {
-        if (!writable) {
-            rc = -ENOENT;
-            goto out;
-        }
-        rc = cfs_buf_new(fs, CFS_KIND_CSUM, &cb);
+    struct cfs_buf *root, *mid = NULL, *cb;
+    rc = csum_level(fs, &in->csum_root, two ? CFS_KIND_CSUMIDX2 : CFS_KIND_CSUMIDX, writable, &root);
+    if (rc)
+        return rc;
+    struct cfs_buf *idx = root;
+    unsigned at = index;
+    if (two) {
+        uint64_t *upper = &((uint64_t *)(root->data + CFS_MHDR_SIZE))[index / CFS_CSUMIDX_SPAN];
+        rc = csum_level(fs, upper, CFS_KIND_CSUMIDX, writable, &mid);
         if (rc)
             goto out;
-        *slot = cb->blkno;
-    } else {
-        rc = cfs_buf_get(fs, *slot, CFS_KIND_CSUM, &cb);
-        if (rc)
-            goto out;
-        if (writable && (rc = cfs_buf_cow(fs, &cb, slot)) != 0) {
-            cfs_buf_put(fs, cb);
-            goto out;
-        }
+        idx = mid;
+        at = index % CFS_CSUMIDX_SPAN;
     }
-    *out = cb;
+    rc = csum_level(fs, &((uint64_t *)(idx->data + CFS_MHDR_SIZE))[at], CFS_KIND_CSUM, writable, &cb);
+    if (rc == 0)
+        *out = cb;
 out:
-    cfs_buf_put(fs, idx);
+    if (mid != NULL)
+        cfs_buf_put(fs, mid);
+    cfs_buf_put(fs, root);
     return rc;
 }
 
@@ -856,20 +921,40 @@ int cfs_csum_verify(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const v
     return 0;
 }
 
-/* Release the whole checksum tree (the inode is being emptied). */
-void cfs_csum_free(struct cfs *fs, struct cfs_inode *in)
+/* Release the whole checksum tree (the inode is being emptied): a
+ * one-level index and its CSUM blocks, or a two-level root, its index
+ * blocks and theirs. */
+static void csum_free_index(struct cfs *fs, uint64_t blk)
 {
-    if (in->csum_root == 0)
-        return;
     struct cfs_buf *idx;
-    if (cfs_buf_get(fs, in->csum_root, CFS_KIND_CSUMIDX, &idx) == 0) {
+    if (cfs_buf_get(fs, blk, CFS_KIND_CSUMIDX, &idx) == 0) {
         const uint64_t *slots = (const uint64_t *)(idx->data + CFS_MHDR_SIZE);
         for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++)
             if (slots[i])
                 cfs_free_block_deferred(fs, slots[i]);
         cfs_buf_put(fs, idx);
     }
-    cfs_free_block_deferred(fs, in->csum_root);
+    cfs_free_block_deferred(fs, blk);
+}
+
+void cfs_csum_free(struct cfs *fs, struct cfs_inode *in)
+{
+    if (in->csum_root == 0)
+        return;
+    uint32_t kind = 0;
+    if (csum_root_kind(fs, in->csum_root, &kind) == 0 && kind == CFS_KIND_CSUMIDX2) {
+        struct cfs_buf *top;
+        if (cfs_buf_get(fs, in->csum_root, CFS_KIND_CSUMIDX2, &top) == 0) {
+            const uint64_t *slots = (const uint64_t *)(top->data + CFS_MHDR_SIZE);
+            for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++)
+                if (slots[i])
+                    csum_free_index(fs, slots[i]);
+            cfs_buf_put(fs, top);
+        }
+        cfs_free_block_deferred(fs, in->csum_root);
+    } else {
+        csum_free_index(fs, in->csum_root);
+    }
     in->csum_root = 0;
 }
 

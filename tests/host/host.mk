@@ -25,7 +25,8 @@ HOST_COMMON_SRCS := \
 
 HOST_BUDDY_SRCS := $(HOST_COMMON_SRCS) tests/host/test_buddy.c
 HOST_SLAB_SRCS  := $(HOST_COMMON_SRCS) kernel/memory/slab.c kernel/memory/kmalloc.c tests/host/test_slab.c
-HOST_CRYPTO_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c kernel/core/crc32c.c tests/host/test_crypto.c
+HOST_CRYPTO_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c kernel/security/blake2b.c \
+	kernel/core/crc32c.c tests/host/test_crypto.c
 HOST_RELSIG_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c userland/system/relsig.c tests/host/test_relsig.c
 HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c tests/host/test_modelf.c
 HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) tests/host/test_cosmofs.c

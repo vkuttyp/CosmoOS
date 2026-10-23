@@ -620,6 +620,8 @@ and a failed command leaves none.
 | `FLUSH` | `blk_flush` | none |
 | `RESCAN` | `blk_part_scan` (`-EBUSY` while a partition is in use) | `struct cosmo_blkctl_rescan` |
 | `FORMAT` | `vfs_format(fstype, device, label)`: `fs_type.format`, refused (`-EBUSY`) while mounted. The data after the struct, if any, is the label (S6): at most `COSMO_BLKCTL_LABEL` (16) bytes of printable ASCII with no blank, `"` or `\`, else `-EINVAL`. A whole disk with registered partitions is `-EBUSY` (`blk_part_any`): the format would leave them registered over the new filesystem, and the backup table at the disk's end would register them again at the next boot | none |
+| `FORMAT_MIRROR` | `vfs_format_mirror` over the device and the one named after the struct, then optionally a label (roadmap 1.2 B2, B3) | none |
+| `FORMAT_KEYED` | `vfs_format_keyed` (roadmap 1.2 B5): exactly one `struct cosmo_blkctl_keyed` after the struct -- the second device of a mirror or `""`, the label (FORMAT's rules), the 32-byte master key and the eight slots user space sealed it in -- through `fs_type.format_keyed`; the same refusals as FORMAT and FORMAT_MIRROR. The kernel's copy of the command is wiped before the answer; the filesystem keeps the key in its key table so the new pool mounts | none |
 
 It sits in the VFS rather than the block layer because two of its
 answers are about mounts (D8). `vfs_bdev_mounted` answers for the device,

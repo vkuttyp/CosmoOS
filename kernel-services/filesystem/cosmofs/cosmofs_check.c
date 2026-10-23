@@ -385,19 +385,57 @@ static void walk_extent_chain(struct check *ck, uint64_t head, bool live,
     }
 }
 
-static void walk_csum_tree(struct check *ck, uint64_t root, bool live)
+static void walk_csum_index(struct check *ck, uint64_t blk, bool live)
 {
-    if (root == 0)
-        return;
-    claim(ck, root, live);
+    claim(ck, blk, live);
     struct cfs_buf *idx;
-    if (read_meta(ck, root, CFS_KIND_CSUMIDX, &idx))
+    if (read_meta(ck, blk, CFS_KIND_CSUMIDX, &idx))
         return;
     const uint64_t *slot = (const uint64_t *)(idx->data + CFS_MHDR_SIZE);
     for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++)
         if (slot[i] != 0)
             claim(ck, slot[i], live);
     cfs_buf_put(ck->fs, idx);
+}
+
+/* A one-level index, or from version 14 a two-level root whose entries are
+ * one-level indexes (CFS-10): every block of either is claimed, so a tree
+ * this walk did not follow would show up as allocated and unreached. */
+static void walk_csum_tree(struct check *ck, uint64_t root, bool live)
+{
+    if (root == 0)
+        return;
+    struct cfs_buf *top;
+    if (read_meta(ck, root, 0, &top)) {
+        claim(ck, root, live);
+        return;
+    }
+    uint32_t kind = cfs_buf_hdr(top)->kind;
+    if (kind != CFS_KIND_CSUMIDX2 || ck->fs->sb.version < 14) {
+        cfs_buf_put(ck->fs, top);
+        if (kind != CFS_KIND_CSUMIDX) {
+            claim(ck, root, live);
+            name_it(&ck->rep->dir_bad, root);   /* a checksum root that is neither shape */
+            return;
+        }
+        walk_csum_index(ck, root, live);
+        return;
+    }
+    claim(ck, root, live);
+    /* Copied out: walking an index may evict the root's buffer. */
+    uint64_t *slots = kmalloc(CFS_PTRS_PER_BLOCK * sizeof(*slots), 0);
+    if (slots != NULL)
+        memcpy(slots, top->data + CFS_MHDR_SIZE, CFS_PTRS_PER_BLOCK * sizeof(*slots));
+    cfs_buf_put(ck->fs, top);
+    if (slots == NULL) {
+        ck->rep->partial = true;
+        return;
+    }
+    ck->rep->csum_two_level++;
+    for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++)
+        if (slots[i] != 0)
+            walk_csum_index(ck, slots[i], live);
+    kfree(slots);
 }
 
 /* One inode's trees and every data block its extents name. */
@@ -1290,6 +1328,8 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     rep->elapsed_ns = clock_since_ns(t0);
     if (out)
         *out = *rep;
+    if (rep->csum_two_level)
+        kinfo("cosmofs: check: %llu two-level checksum tree(s) walked", (unsigned long long)rep->csum_two_level);
     if (!rep->clean && rep->unreadable.count != 0)
         kwarn("cosmofs: check: first unreadable block 0x%llx",
               (unsigned long long)rep->unreadable.name[0]);
@@ -1393,6 +1433,13 @@ int cosmofs_check_dev(struct blkdev *bd, unsigned flags, struct cosmofs_check_re
     bool none = ra != 0 && rb != 0;
     bool disagree = ra == 0 && rb == 0 && slots_disagree(&sl[0], &sl[1]);
     kfree(sl);
+    /* An encrypted pool with no key loaded is not a pool without a
+     * superblock: it cannot be read, and says why (roadmap 1.2 B5). */
+    if (none && (ra == -ENOKEY || rb == -ENOKEY)) {
+        dev->flags |= COSMO_FSCTL_DEV_F_LOCKED;
+        kwarn("cosmofs: %s: encrypted and locked; not checked", bd->name);
+        return 0;
+    }
     if (none || disagree) {
         dev->flags |= none ? COSMO_FSCTL_DEV_F_SUPER_NONE : COSMO_FSCTL_DEV_F_SUPER_DISAGREE;
         kwarn("cosmofs: %s: %s; not checked", bd->name,

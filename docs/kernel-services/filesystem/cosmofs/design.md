@@ -2113,6 +2113,183 @@ resilver target and every spare, and sets it again whenever that set
 changes. `vfs_bdev_mounted` -- what blkctl and `vfs_format` ask -- and
 the claim a new mount takes both see them.
 
+## Format version 14: an encrypted root (roadmap 1.2 B5)
+
+Version 7 encrypted file contents and directory names, and left the
+rest of this filesystem's promise undone: its metadata was checksummed
+with CRC32C, which anyone holding the disk can recompute (CFS-7); the
+key arrived through a firmware channel only a test could use; and an
+encrypted file stopped at 252 MiB, the most its one-level checksum
+index can name (CFS-10). Version 14 is what makes the root encryptable:
+a key hierarchy with slots, metadata authenticated under a key, the
+master key handed to the kernel at boot, and a two-level checksum
+index.
+
+### The key hierarchy
+
+```text
+  passphrase ──Argon2id(salt, t, m)──► slot key ──unwraps slot n──► master key
+  key file   ──BLAKE2b(salt)─────────► slot key ──unwraps slot 0──►     │
+                                                                         ├─ ChaCha20(inode) ──► file key (version 7)
+                                                                         └─ BLAKE2b("metadata MAC") ──► MAC key
+```
+
+The **master key** is 32 random bytes, drawn once when the pool is
+made and never changed: every file key and the MAC key derive from it,
+so changing it would mean rewriting every block, which is not offered.
+
+The key block becomes **version 2** (`struct cfs_keys2`): the pool's
+uuid and **eight slots**. A slot is empty, a *passphrase* slot or a
+*key file* slot (slot 0 only). Each holds its own salt, the parameters
+that slot was made with, and the master key sealed with ChaCha20-
+Poly1305 under the slot key. The associated data is the pool's uuid,
+the slot's index, its kind, its parameters and its salt, so a slot
+moved to another index or another pool, or one whose parameters were
+lowered, does not open. Because the seal is an AEAD, a wrong
+passphrase is told by the tag before a single block of metadata is
+read: there is nothing for the kernel to try.
+
+**Argon2id** (RFC 9106) runs in user space, in `cosmo-key`, not in the
+kernel: it needs tens of MiB for a second, which is the point of it and
+not something a kernel should allocate on behalf of a prompt. Its
+parameters are written into the slot, so a later `cosmo-key change`
+can raise them without touching the other slots. The defaults are 64 MiB,
+three passes and one lane (`ARGON2_DEFAULT_*`): RFC 9106's second
+recommended setting, measured under QEMU at about 0.7 s on AArch64 and
+1.5 s on x86-64 on the development machine, where the first touch of
+64 MiB is most of the cost (the B5 report has the measurements).
+
+A **key file** is 32 random bytes; it is already a key, so its slot key
+is BLAKE2b keyed by it over the salt, with no work factor. It lives on
+the ESP, beside the loader, so a machine can boot unattended -- and
+anyone holding the disk holds the key, since the ESP is not encrypted.
+It is off unless asked for, and the guide says so.
+
+### The metadata MAC (CFS-7)
+
+On a version-14 pool with a key block, every place a version-13 pool
+keeps a CRC32C keeps a **64-bit keyed BLAKE2b tag** instead, over the
+same bytes, under the MAC key:
+
+| Domain | Where the tag is | Covers |
+|---|---|---|
+| Block header (`cfs_mhdr`) | `crc` and `csum_algo` | the whole block, kind and address included: every inode, map, bitmap, extent, checksum, snapshot, member, copy-state, rollback and key block |
+| Superblock | `crc` and `pad` | the whole block: every root the pool has |
+| Member label | `crc` and `pad` | the whole block |
+
+A domain byte (`H`, `S`, `L`) goes first into the MAC, so a block that
+verifies as one thing never verifies as another. `csum_algo` is part of
+the tag, not a choice a block makes for itself: on such a pool there is
+one algorithm, decided by the superblock, and a block carrying a CRC
+there is as unauthenticated as a block carrying rubbish. A block whose
+tag does not verify is **unreadable** -- the same answer as an I/O
+error: a mount's read fails, a mirror tries the other copy, the checker
+counts it in `unreadable`, and the scrub repairs it from a copy that
+verifies or counts it unrecoverable.
+
+What decides the mode is the superblock: **version 14 or later and a
+key block** (`key_root != 0`). A plain pool is never MAC'd and keeps
+CRC32C; a version-7 pool with a version-1 key block (the firmware-
+channel encryption, tests only) is never raised to 14.
+
+What the tag does not catch, said here rather than found: a block
+replaced by an **older** block written at the same address under the
+same key verifies (the tree is not hash-linked, so nothing says which
+generation a block must be); and a disk replaced wholesale by a plain
+pool of the attacker's making boots as that pool, since nothing measures
+the root before it mounts. A mount that holds the key for a pool's uuid
+refuses that pool's superblock if it is not MAC'd, so the downgrade
+works only by replacing everything.
+
+### Import rule
+
+A kernel of this version reads formats 2 to 14. **A pool is written at
+14 only if it is made encrypted** (`cosmo-install --encrypt`,
+`COSMO_BLKCTL_FORMAT_KEYED`), **or when one of its files first outgrows
+the one-level checksum index** (below). Every other pool stays at the
+version it was: a plain pool made or used by v1.0.13 mounts on v1.0.12
+unless it holds a file of over 516128 blocks (about 2 GiB). An encrypted
+pool does not mount on v1.0.12, which refuses version 14 by its version
+check, before anything is read; `cosmo-upgrade` refuses to roll an
+encrypted root back to a release whose kernel's
+`cosmofs-format-max` is below 14.
+
+### The key handle
+
+The kernel keeps a small table of unlocked pools: uuid, master key, MAC
+key. User space fills it through `/dev/fsctl` (`COSMO_FSCTL_KEY_LOAD`,
+the 32-byte master key in the command), and the kernel checks the key
+before it keeps it: the key block and at least one superblock slot must
+verify under it. Every later read of that pool -- the check at boot, the
+mount, a scrub -- takes the key from there by the pool's uuid. A pool
+with a key block and no entry is **locked**: its superblock cannot be
+verified, so it neither mounts nor checks, and says
+`cosmofs: vdb2: encrypted and locked`.
+
+The entry is the only copy the kernel keeps. A mount copies it into its
+own state and holds the entry; the last such mount's unmount zeroes both
+and drops it. `COSMO_FSCTL_KEY_UNLOAD` drops an entry no mount holds.
+The key is never printed and is not in `/proc`. fsctl's and blkctl's
+copies of the command are wiped once the filesystem has the key; the
+`write` system call's own bounce buffer, which the command passes
+through on its way in, is not -- a kernel stack page or a freed
+allocation holds those bytes until something reuses it. That is
+residue only the kernel can read, and wiping every write's bounce to
+cover it is not a cost every write should pay.
+
+`COSMO_FSCTL_KEY_INFO` answers, for a device or a mount, whether the
+pool is encrypted and locked, and its slots as stored (kinds,
+parameters, salts, sealed keys): what `cosmo-key` needs to unwrap one,
+and nothing that helps without a passphrase. `COSMO_FSCTL_KEY_SLOT`
+writes or clears one slot of a mounted pool in a transaction; it
+carries the master key, which must match the mount's, so only a holder
+of a working passphrase changes slots, and it refuses to clear the last
+one.
+
+### Making an encrypted pool
+
+`COSMO_BLKCTL_FORMAT_KEYED` takes, after the command, the master key,
+the eight slots as user space sealed them, an optional second device
+(a mirror shares one master key) and a label. The kernel writes the key
+block and MACs every block it formats, then loads the key, so the
+installer can mount the new root at once.
+
+### The two-level checksum index (CFS-10)
+
+An inode's `csum_root` names a `CSUMIDX` block: 508 pointers to
+checksum blocks of 1016 CRCs or 127 authenticated entries, so a file
+could have 516128 blocks plain and 64516 (252 MiB) encrypted. A file
+that outgrows that gets a **`CSUMIDX2`** root: 508 pointers to `CSUMIDX`
+blocks. The one-level index becomes the two-level root's entry 0, so no
+checksum moves; `csum_root` says which shape it is by the kind of the
+block it names. That is 508 times the limit: 32774128 blocks (125 GiB)
+encrypted, 262193024 (1000 GiB) plain. The checker and the scrub walk
+both shapes.
+
+Raising a pool below 14 is what the first `CSUMIDX2` does, as a
+snapshot raises to 12; a pool with a version-1 key block refuses
+(`-EFBIG`, as before).
+
+### Boot
+
+The loader is unchanged: it reads the ESP, which is not encrypted. init
+asks the kernel for the root device's key information before it checks
+or mounts it. For an encrypted root it runs `cosmo-key unlock --boot`,
+which:
+
+- uses slot 0's key file from the ESP if that slot is a key file and
+  the file is there;
+- otherwise prints `passphrase for <label>:` on the console -- every
+  output the console has, the serial lines included -- with echo off,
+  and reads the passphrase from it;
+- tries it on every passphrase slot, unwraps the master key, loads it,
+  and wipes what it held;
+- after three wrong passphrases, exits with a status init answers with
+  a reboot. Nothing has mounted.
+
+The prompt is not measured: verified boot covers the loader, the kernel
+and the archive, not what the person at the console types.
+
 ## Self-test fixture failure ownership
 
 `cosmofstest.c:engine_mount` owns the registered RAM device until setup

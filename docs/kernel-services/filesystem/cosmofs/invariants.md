@@ -419,6 +419,46 @@ the pool alone), `cosmofs-resilver-resume` (an unmount mid-resilver,
 the target found by its tag at the recorded cursor), `cosmofs-spare`,
 `cosmofs-attach`.
 
+**CF30. On a version-14 pool with a key block, no metadata is used
+unless its tag verifies under the pool's MAC key.** Every block header,
+superblock and member label of such a pool is sealed with a keyed
+BLAKE2b tag in the bytes a CRC32C would occupy (`mhdr_seal_mac`,
+`super_seal`, `label_seal`), and every read of one checks the tag and
+nothing else: `csum_algo` is part of what the tag covers, so a block
+re-sealed with a CRC is refused like any other forgery. The superblock,
+not the block, decides (`cfs_super_is_mac`); a pool whose key this
+kernel holds is refused if its superblock is not MAC'd.
+Check: `cosmofs-encrypted-root` (the inode map's root, the key block,
+both superblock slots, a member label and a two-level index's middle
+block, each forged with its CRC32C recomputed, refused);
+`make test-encrypt`.
+
+**CF31. The kernel keeps a pool's master key only after the key has
+opened the pool, and only as long as a writable mount holds it.**
+`KEY_LOAD` installs a key in the table only when a superblock slot of
+that uuid and the key block it names verify under it
+(`keyctl_dev`); a wrong key is `-EKEYREJECTED` and nothing is kept. A
+writable mount copies the entry and holds it; its destruction wipes its
+copy and the last holder's release wipes the entry (`cfs_destroy`,
+`cfs_keytab_release`). A maintenance mount (the check on a device)
+holds nothing, so the boot's check does not drop the key the root's
+mount needs. A slot is written only with the mount's own master key,
+and the last slot is never emptied (`keyctl_mount`). Check:
+`cosmofs-encrypted-root` (wrong key refused; locked after the unmount;
+`CHECK_DEV` says `LOCKED`; the check leaves the key loaded; slot writes
+with the wrong key refused, the last slot kept).
+
+**CF32. A file's checksums survive its index growing a level.** The
+first checksum past the one-level index's span makes a `CSUMIDX2` root
+whose entry 0 is the old index, unchanged, and raises a pool below 14
+(a pool below 11, or with a version-1 key block, keeps the old
+`-EFBIG`). The checker, the scrub and the reachability walk follow both
+shapes, so a two-level tree is neither leaked nor unread. Check:
+`cosmofs-encrypted-root` (a block past 64516 of an encrypted file and
+past 516128 of a plain one read back, the check clean with one
+two-level tree walked; the middle block forged is a refused read and an
+unreadable block); `make test-encrypt` (a 1 GiB file).
+
 **CF18. From format version 12 a snapshot's identity is its own: every
 snapshot has a uuid no other snapshot of the filesystem has, and no id
 is handed out twice, across remounts included.** The uuid is drawn when

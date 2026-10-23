@@ -34,6 +34,36 @@ int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies);
  * allocation and inode metadata stay in the clear
  * (docs/kernel-services/filesystem/cosmofs/design.md, "Format version 7"). */
 int cosmofs_format_encrypted(struct blkdev *bd, const void *key, size_t len);
+/*
+ * The key of an encrypted pool (roadmap 1.2 B5; design.md, "The key
+ * handle"): /dev/fsctl's KEY_* operations. A pool is named by a device
+ * (`bd`) or a mount (`mnt`), not both. LOAD checks `key` against the pool
+ * before it keeps it (-EKEYREJECTED when it does not open it); SLOT
+ * needs the mount's own master key in `key`, and refuses to empty the
+ * last slot (-EBUSY).
+ */
+struct cosmo_keyslot;
+struct cosmo_fsctl_keyinfo;
+enum cosmofs_key_op { COSMOFS_KEY_INFO, COSMOFS_KEY_LOAD, COSMOFS_KEY_UNLOAD, COSMOFS_KEY_SLOT };
+struct cosmofs_key_req {
+    enum cosmofs_key_op op;
+    unsigned slot;                       /* SLOT */
+    const uint8_t *key;                  /* LOAD, SLOT: 32 bytes */
+    const struct cosmo_keyslot *rec;     /* SLOT */
+    struct cosmo_fsctl_keyinfo *info;    /* INFO: filled in */
+};
+int cosmofs_keyctl(struct blkdev *bd, struct mount *mnt, struct cosmofs_key_req *req);
+/* An encrypted pool from /dev/blkctl's FORMAT_KEYED: `n` devices as one
+ * mirrored member, the master key and the slots user space sealed. */
+int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const uint8_t master[32],
+                        const struct cosmo_keyslot *slots);
+
+#if CONFIG_DEBUG
+/* Test hook: an encrypted pool of `members` members, one device each. */
+int cosmofs_test_format_keyed_members(struct blkdev **bd, unsigned members, const uint8_t master[32],
+                                      const struct cosmo_keyslot *slots);
+#endif
+
 /* Test hook: supply the key for a mount, as the unlock channel would. */
 int cosmofs_test_unlock(struct mount *mnt, const void *key, size_t len);
 /* Rewrap the master key with a new user key. No file is rewritten. */
@@ -140,6 +170,7 @@ struct cosmofs_check_report {
     struct cosmofs_check_class rollback_record;
     struct cosmofs_check_class hold;
     uint64_t blocks_seen, inodes_seen, dirs_seen, snapshots_seen;
+    uint64_t csum_two_level;            /* checksum trees walked with two levels (format 14, CFS-10) */
     uint64_t counted_free;              /* free blocks the walk counted */
     uint64_t counted_inodes;            /* inodes with links the walk counted */
     uint64_t bytes_allocated;           /* the chunked maps, so the cost is visible */

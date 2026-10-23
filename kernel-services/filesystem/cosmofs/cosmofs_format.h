@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      13u  /* the newest this kernel reads: version 13, copy state (roadmap 1.2 B3) */
+#define CFS_VERSION      14u  /* the newest this kernel reads: version 14, an encrypted root (roadmap 1.2 B5) */
 /* What a format writes. A pool is raised to 12 by the first operation that
  * needs it (a snapshot taken or rolled back to), not before: a kernel of
  * v1.0.7 or older reads 11 at most, and a pool nobody asked to change
@@ -47,6 +47,7 @@ enum cfs_kind {
     CFS_KIND_SNAPLIST2 = 15,/* v12: the snapshot list with identity (struct cfs_snap_block2) */
     CFS_KIND_ROLLBACK = 16, /* v12: a pending rollback or the hold after one (struct cfs_rollback) */
     CFS_KIND_COPYSTATE = 17,/* v13: a mirrored member's copies and what each missed (struct cfs_copystate) */
+    CFS_KIND_CSUMIDX2 = 18, /* v14: a two-level checksum index: 508 pointers to CSUMIDX blocks */
 };
 
 /* --- device-virtual addresses --------------------------------------------
@@ -77,6 +78,15 @@ enum cfs_kind {
  * says accident from intact; it says nothing about a deliberate change,
  * because anyone can recompute it (design.md, "Integrity"). */
 #define CFS_CSUM_POLY1305 2u
+
+/* Version 14 (design.md, "The metadata MAC"): on a pool with a key block,
+ * the eight bytes a header, a superblock or a label keeps its CRC32C in
+ * (`crc` and the word after it) hold a keyed BLAKE2b tag instead. The
+ * superblock decides, not the block: cfs_super_is_mac. */
+#define CFS_MAC_SIZE 8u
+#define CFS_MAC_HDR   'H'   /* domain: a block with a struct cfs_mhdr */
+#define CFS_MAC_SUPER 'S'   /* domain: a superblock */
+#define CFS_MAC_LABEL 'L'   /* domain: a member label */
 
 /* Compression algorithms (cfs_inode.compress_algo, and the algorithm of
  * a compressed extent). */
@@ -132,6 +142,9 @@ struct cfs_csum_aead {          /* 32 bytes */
 };
 #define CFS_AEAD_PER_BLOCK   (CFS_PAYLOAD / sizeof(struct cfs_csum_aead))
 #define CFS_CSUM_MAX_BLOCKS  ((uint64_t)CFS_PTRS_PER_BLOCK * CFS_CSUMS_PER_BLOCK)
+/* What one CSUMIDX names, in checksum blocks; a CSUMIDX2 names
+ * CFS_PTRS_PER_BLOCK of those (version 14, CFS-10). */
+#define CFS_CSUMIDX_SPAN     CFS_PTRS_PER_BLOCK
 #define CFS_DIRENT_SIZE      64u
 #define CFS_DIRENTS_PER_BLOCK (CFS_BLOCK / CFS_DIRENT_SIZE)
 #define CFS_NAME_MAX         47u
@@ -485,6 +498,68 @@ struct cfs_keys {
 
 #define CFS_KDF_SHA512 1u
 
+/*
+ * Version 2 of the key block (format version 14; design.md, "The key
+ * hierarchy"): eight slots, each able to unwrap the same master key.
+ * The slots are sealed in user space (cosmo-key), with the pool's uuid,
+ * the slot's index, kind, parameters and salt as the AEAD's associated
+ * data (cfs_keyslot_aad), so the kernel never sees a passphrase and a
+ * slot cannot be moved or have its work factor lowered.
+ */
+#define CFS_KEY_SLOTS 8u
+#define CFS_KEYSLOT_EMPTY      0u
+#define CFS_KEYSLOT_PASSPHRASE 1u   /* slot key = Argon2id(passphrase, salt, t, m, lanes) */
+#define CFS_KEYSLOT_KEYFILE    2u   /* slot 0 only: slot key = BLAKE2b keyed by a 32-byte file, over the salt */
+
+struct cfs_keyslot {           /* 96 bytes */
+    uint32_t kind;             /* CFS_KEYSLOT_* */
+    uint32_t t_cost;           /* Argon2id passes; 0 for a key file */
+    uint32_t m_cost_kib;       /* Argon2id memory */
+    uint32_t lanes;            /* Argon2id parallelism */
+    uint8_t salt[16];
+    uint8_t wrapped[32];       /* the master key, sealed under the slot key */
+    uint8_t tag[16];           /* Poly1305 over `wrapped` and the associated data */
+    uint64_t created_ns;       /* when cosmo-key wrote it; for `cosmo-key list` */
+    uint64_t reserved;
+};
+
+struct cfs_keys2 {
+    uint32_t version;          /* 2 */
+    uint32_t nslots;           /* CFS_KEY_SLOTS */
+    uint8_t uuid[16];          /* the pool's: a key block belongs to one pool */
+    uint64_t reserved[2];
+    struct cfs_keyslot slot[CFS_KEY_SLOTS];
+};
+
+/* The associated data a slot is sealed with: the pool's uuid, then the
+ * slot's index, kind, t_cost, m_cost_kib and lanes (little-endian words),
+ * then its salt. */
+#define CFS_KEYSLOT_AAD 52u
+static inline void cfs_keyslot_aad(const uint8_t uuid[16], unsigned index, const struct cfs_keyslot *s,
+                                   uint8_t out[CFS_KEYSLOT_AAD])
+{
+    const uint32_t words[5] = { index, s->kind, s->t_cost, s->m_cost_kib, s->lanes };
+    for (unsigned i = 0; i < 16; i++)
+        out[i] = uuid[i];
+    for (unsigned w = 0; w < 5; w++)
+        for (unsigned b = 0; b < 4; b++)
+            out[16 + 4 * w + b] = (uint8_t)(words[w] >> (8 * b));
+    for (unsigned i = 0; i < 16; i++)
+        out[36 + i] = s->salt[i];
+}
+
+/* The nonce a slot is sealed with. Fixed, as version 1's is: the slot key
+ * is derived from a salt drawn fresh for every seal, so a key never
+ * seals twice. */
+static inline void cfs_keyslot_nonce(unsigned index, uint8_t out[12])
+{
+    static const char tag[8] = { 'c', 'f', 's', '-', 's', 'l', 'o', 't' };
+    for (unsigned i = 0; i < 8; i++)
+        out[i] = (uint8_t)tag[i];
+    for (unsigned b = 0; b < 4; b++)
+        out[8 + b] = (uint8_t)(index >> (8 * b));
+}
+
 struct cfs_dirent {
     uint64_t ino;          /* 0 = free slot */
     uint8_t type;          /* CFS_TYPE_* */
@@ -553,6 +628,14 @@ struct cfs_super {
     uint32_t crc;          /* CRC32C over the whole block with this field zero */
     uint32_t pad;
 };
+
+/* A version-14 pool with a key block authenticates its metadata (design.md,
+ * "The metadata MAC"); every other pool checksums it. A version-1 key
+ * block is never raised to 14, so a key_root here names a version 2. */
+static inline int cfs_super_is_mac(const struct cfs_super *sb)
+{
+    return sb->version >= 14 && sb->key_root != 0;
+}
 
 /* --- inline helpers ------------------------------------------------------- */
 

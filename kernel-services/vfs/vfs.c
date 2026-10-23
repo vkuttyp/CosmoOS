@@ -3318,6 +3318,27 @@ int vfs_format_mirror(const char *fsname, struct blkdev **bd, unsigned n, const 
     return rc;
 }
 
+/* An encrypted pool on `n` devices (roadmap 1.2 B5): as vfs_format_mirror,
+ * with the master key and the slots it is sealed in. */
+int vfs_format_keyed(const char *fsname, struct blkdev **bd, unsigned n, const char *label, const uint8_t master[32],
+                     const struct cosmo_keyslot *slots)
+{
+    struct fs_type *fs = vfs_find_fs(fsname);
+    if (fs == NULL)
+        return -ENODEV;
+    if (fs->format_keyed == NULL)
+        return -EOPNOTSUPP;
+    if (n == 2 && bd[0] == bd[1])
+        return -EINVAL;
+    for (unsigned i = 0; i < n; i++)
+        if (vfs_bdev_mounted(bd[i]))
+            return -EBUSY;
+    int rc = fs->format_keyed(bd, n, label, master, slots);
+    if (rc == 0)
+        kinfo("vfs: made an empty encrypted %s on %s%s", fsname, bd[0]->name, n > 1 ? " and its mirror" : "");
+    return rc;
+}
+
 /*
  * Name a mount for an operation on one filesystem. The id is looked up
  * in the caller's own mount namespace: an id another namespace holds is

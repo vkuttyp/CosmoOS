@@ -7,6 +7,8 @@
 
 #include "cosmofs_format.h"
 
+#include <string.h>
+
 static void test_layout_sizes(void)
 {
     EXPECT(sizeof(struct cfs_mhdr) == CFS_MHDR_SIZE);
@@ -21,7 +23,9 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 13 && CFS_VERSION_MIN == 2 && CFS_FORMAT_VERSION == 11);
+    /* Version 14 is read; a plain pool is still written at 11, which is
+     * what keeps it mountable by v1.0.12 (roadmap 1.2 B5, the import rule). */
+    EXPECT(CFS_VERSION == 14 && CFS_VERSION_MIN == 2 && CFS_FORMAT_VERSION == 11);
     /* Version 13 (roadmap 1.2 B3): the member's state block takes the
      * word that was `reserved`, so the entry keeps its 64 bytes; one copy
      * record a quarter of the block, all four in one block's payload. */
@@ -151,6 +155,48 @@ static void test_layout_sizes(void)
     EXPECT(offsetof(struct cfs_super, label) == offsetof(struct cfs_super, orphan_root) + 8);
     EXPECT(offsetof(struct cfs_super, label) == 136 && CFS_LABEL_MAX == 16);
     EXPECT(offsetof(struct cfs_super, crc) == 160);
+
+    /* Version 14 (roadmap 1.2 B5): the MAC takes the CRC and the word
+     * after it in each domain, so nothing moves; the key block of eight
+     * slots fits a block's payload. */
+    EXPECT(CFS_MAC_SIZE == 8);
+    EXPECT(offsetof(struct cfs_mhdr, csum_algo) == offsetof(struct cfs_mhdr, crc) + 4);
+    EXPECT(offsetof(struct cfs_super, pad) == offsetof(struct cfs_super, crc) + 4);
+    EXPECT(offsetof(struct cfs_label, pad) == offsetof(struct cfs_label, crc) + 4);
+    EXPECT(sizeof(struct cfs_keyslot) == 96 && CFS_KEY_SLOTS == 8);
+    EXPECT(sizeof(struct cfs_keys2) <= CFS_PAYLOAD);
+    struct cfs_super sb;
+    memset(&sb, 0, sizeof(sb));
+    sb.version = 13;
+    sb.key_root = 5;
+    EXPECT(!cfs_super_is_mac(&sb));   /* a version-1 key block keeps CRC32C */
+    sb.version = 14;
+    EXPECT(cfs_super_is_mac(&sb));
+    sb.key_root = 0;
+    EXPECT(!cfs_super_is_mac(&sb));   /* a plain pool raised to 14 keeps CRC32C */
+    /* The slot's associated data: uuid, five words, salt -- each field
+     * where it says, so a moved, re-kinded or weakened slot differs. */
+    struct cfs_keyslot ks;
+    memset(&ks, 0, sizeof(ks));
+    ks.kind = CFS_KEYSLOT_PASSPHRASE;
+    ks.t_cost = 3;
+    ks.m_cost_kib = 65536;
+    ks.lanes = 1;
+    for (unsigned i = 0; i < 16; i++)
+        ks.salt[i] = (uint8_t)(0xa0 + i);
+    uint8_t uuid[16], aad[CFS_KEYSLOT_AAD], aad2[CFS_KEYSLOT_AAD];
+    for (unsigned i = 0; i < 16; i++)
+        uuid[i] = (uint8_t)i;
+    cfs_keyslot_aad(uuid, 2, &ks, aad);
+    EXPECT(aad[0] == 0 && aad[15] == 15 && aad[16] == 2 && aad[20] == CFS_KEYSLOT_PASSPHRASE && aad[24] == 3);
+    EXPECT(aad[28] == 0 && aad[29] == 0 && aad[30] == 1 && aad[32] == 1 && aad[36] == 0xa0 && aad[51] == 0xaf);
+    ks.m_cost_kib = 32768;
+    cfs_keyslot_aad(uuid, 2, &ks, aad2);
+    EXPECT(memcmp(aad, aad2, sizeof(aad)) != 0);
+    uint8_t n0[12], n1[12];
+    cfs_keyslot_nonce(0, n0);
+    cfs_keyslot_nonce(1, n1);
+    EXPECT(memcmp(n0, "cfs-slot", 8) == 0 && n0[8] == 0 && n1[8] == 1);
 }
 
 static void test_inode_indices(void)
@@ -190,6 +236,12 @@ static void test_csum_index(void)
     EXPECT(cfs_csum_index(1016) == 1 && cfs_csum_slot(1016) == 0);
     EXPECT(cfs_csum_index(CFS_CSUM_MAX_BLOCKS - 1) == 507);
     EXPECT(CFS_CSUM_MAX_BLOCKS == 516128);   /* one index level: files up to 516128 blocks (about 1.97 GiB) */
+    /* Version 14 (CFS-10): a CSUMIDX2 names CFS_CSUMIDX_SPAN one-level
+     * indexes, so an encrypted file's limit goes from 64516 blocks to 508
+     * times that. */
+    EXPECT(CFS_CSUMIDX_SPAN == 508 && CFS_KIND_CSUMIDX2 == 18);
+    EXPECT((uint64_t)CFS_CSUMIDX_SPAN * CFS_CSUMIDX_SPAN * CFS_AEAD_PER_BLOCK == 32774128u);
+    EXPECT(cfs_aead_index(70000) / CFS_CSUMIDX_SPAN == 1);   /* the far block of cosmofs-encrypted-root */
 }
 
 static const struct host_test tests[] = {
