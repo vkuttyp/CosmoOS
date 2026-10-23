@@ -33,12 +33,12 @@ Open lines (struck lines are not counted):
 
 | | correctness | security | usability | nice-to-have | total |
 |---|---|---|---|---|---|
-| Block devices | 3 | 0 | 2 | 3 | 8 |
+| Block devices | 3 | 0 | 2 | 4 | 9 |
 | Boot chain and verified boot | 0 | 5 | 2 | 1 | 8 |
-| Build and tooling | 0 | 2 | 0 | 4 | 6 |
-| cosmofs and storage | 5 | 1 | 7 | 7 | 20 |
+| Build and tooling | 1 | 2 | 0 | 4 | 7 |
+| cosmofs and storage | 3 | 1 | 7 | 12 | 23 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
-| Drivers and platforms | 3 | 0 | 2 | 11 | 16 |
+| Drivers and platforms | 3 | 0 | 2 | 12 | 17 |
 | Linux personality | 6 | 0 | 11 | 6 | 23 |
 | Lock validator and concurrency | 2 | 0 | 0 | 7 | 9 |
 | Memory | 2 | 0 | 1 | 6 | 9 |
@@ -49,10 +49,10 @@ Open lines (struck lines are not counted):
 | Scheduler and SMP | 0 | 0 | 1 | 5 | 6 |
 | Security and isolation | 0 | 10 | 1 | 2 | 13 |
 | Testing and CI | 9 | 0 | 0 | 9 | 18 |
-| Commands | 1 | 0 | 4 | 1 | 6 |
+| Commands | 2 | 0 | 5 | 1 | 8 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **44** | **21** | **48** | **90** | **203** |
+| **all** | **44** | **21** | **49** | **97** | **211** |
 
 ## Block devices
 
