@@ -309,6 +309,25 @@ jobs:
             $lead --out notes.md
           cat notes.md
           python3 scripts/check-release-version.py --tag "$TAG" --notes notes.md sets/release-x86_64-a sets/release-aarch64-a
+          # An rc proves the final tag's notes as well (BUILD-7): the final
+          # tag goes on the same commit and builds its notes from
+          # docs/releases/vX.Y.Z.md, which an rc's own notes never read.
+          # v1.0.11-rc1 passed and the v1.0.11 tag's run then failed on
+          # "CosmoOS 1.0.10" in that file (run 39942569981).
+          case "$TAG" in
+            *-rc*)
+              final="${TAG%-rc*}"
+              if [ ! -f "docs/releases/$final.md" ]; then
+                echo "release: docs/releases/$final.md is missing: an rc carries its final release's notes (BUILD-7)" >&2
+                exit 1
+              fi
+              python3 scripts/release-notes.py --tag "$final" \
+                --toolchain "${{ needs.image.outputs.toolchain }}" --litmus "${{ needs.image.outputs.litmus }}" \
+                --packages /usr/share/cosmoos-ci/packages.txt --pub "$(ls tools/keys/*.pub)" --sums dist/SHA256SUMS \
+                --lead "docs/releases/$final.md" --out final-notes.md
+              python3 scripts/check-release-version.py --tag "$final" --notes final-notes.md
+              ;;
+          esac
 
       - name: Publish
         env:

@@ -605,7 +605,12 @@ requires the two `SHA256SUMS` to be equal before it publishes.
    limitations), and `gh release create`; a tag with a hyphen is a
    pre-release. Before `gh release create`, `check-release-version.py
    --notes` requires the notes to say "CosmoOS <version>" and no other
-   "CosmoOS X.Y.Z", and checks both sets again.
+   "CosmoOS X.Y.Z", and checks both sets again. An rc (`vX.Y.Z-rcN`)
+   also builds the notes its final tag will publish, from
+   `docs/releases/vX.Y.Z.md`, and checks them for `vX.Y.Z`; the file
+   must exist (BUILD-7: v1.0.11-rc1 passed, and the v1.0.11 tag's run
+   failed on "CosmoOS 1.0.10" in that file). A notes mistake fails the
+   rc, not the tag the Parallels VM already ran.
 6. `repository` (roadmap 1.1 P6): for a release, the
    workflow `.github/workflows/repository.yml` downloads the published
    release's set files (not the images), and `scripts/publish-repo.py`
