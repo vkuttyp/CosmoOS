@@ -9,7 +9,7 @@ USER_LD := $(ROOT)/userland/user.ld
 # name := directory
 USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir mkfifo rmdir pwd true false sleep sync
 USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl cosmo-install cosmo-upgrade cosmo-verify netcfg priv ip syslogd \
-	lsblk blkid mkfs.cosmofs cosmo-snap fsck.cosmofs cosmo-pool
+	lsblk blkid mkfs.cosmofs cosmo-snap fsck.cosmofs cosmo-pool cosmo-key
 
 PROG_DIR_sh     := shell
 PROG_DIR_echo   := coreutils
@@ -46,9 +46,13 @@ PROG_DIR_fsck.cosmofs := system
 PROG_EXTRA_SRCS_fsck.cosmofs := userland/system/fsreport.c
 PROG_DIR_cosmo-snap := system
 PROG_DIR_cosmo-pool := system
+PROG_DIR_cosmo-key := system
+PROG_EXTRA_SRCS_cosmo-key := userland/lib/argon2.c userland/lib/blake2b.c userland/lib/chacha20.c userland/lib/keyslot.c \
+	userland/lib/fskey.c userland/lib/rootsnap.c userland/lib/secret.c userland/system/blkdevs.c userland/system/upgrade_fat.c
 PROG_DIR_cosmo-install := system
 PROG_EXTRA_SRCS_cosmo-install := userland/system/install_gpt.c userland/system/install_sha512.c \
-	userland/system/upgrade_fat.c userland/system/blkdevs.c userland/system/upgrade_be.c
+	userland/system/upgrade_fat.c userland/system/blkdevs.c userland/system/upgrade_be.c \
+	userland/lib/argon2.c userland/lib/blake2b.c userland/lib/chacha20.c userland/lib/keyslot.c userland/lib/secret.c
 PROG_DIR_cosmo-upgrade := system
 PROG_EXTRA_SRCS_cosmo-upgrade := userland/system/upgrade_fat.c userland/system/blkdevs.c userland/system/install_sha512.c \
 	userland/system/upgrade_ed25519.c userland/system/relsig.c userland/lib/fetch.c userland/lib/rootsnap.c \

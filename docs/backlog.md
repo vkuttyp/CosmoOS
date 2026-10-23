@@ -34,14 +34,14 @@ Open lines (struck lines are not counted):
 | | correctness | security | usability | nice-to-have | total |
 |---|---|---|---|---|---|
 | Block devices | 3 | 0 | 2 | 4 | 9 |
-| Boot chain and verified boot | 0 | 5 | 2 | 1 | 8 |
+| Boot chain and verified boot | 0 | 6 | 2 | 1 | 9 |
 | Build and tooling | 0 | 2 | 0 | 4 | 6 |
-| cosmofs and storage | 3 | 1 | 7 | 12 | 23 |
+| cosmofs and storage | 4 | 1 | 7 | 13 | 25 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 3 | 0 | 2 | 12 | 17 |
 | Linux personality | 6 | 0 | 11 | 6 | 23 |
 | Lock validator and concurrency | 2 | 0 | 0 | 7 | 9 |
-| Memory | 2 | 0 | 1 | 6 | 9 |
+| Memory | 2 | 0 | 1 | 7 | 10 |
 | Network | 4 | 3 | 8 | 7 | 22 |
 | Observability | 1 | 0 | 0 | 6 | 7 |
 | Packages and upgrade | 2 | 0 | 2 | 2 | 6 |
@@ -52,7 +52,7 @@ Open lines (struck lines are not counted):
 | Commands | 1 | 0 | 5 | 1 | 7 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **42** | **21** | **48** | **97** | **208** |
+| **all** | **43** | **22** | **48** | **99** | **212** |
 
 ## Block devices
 
@@ -71,10 +71,11 @@ Open lines (struck lines are not counted):
 - **BOOT-1** security, M. KASLR: a relocatable kernel, a loader-chosen slide from `EFI_RNG_PROTOCOL` or the CPU, the slide in the boot protocol, symbolisation and `ksymtab` adjusted.
 - **BOOT-2** security, M. The loader is not signed for UEFI Secure Boot (no db enrolment): replacing `BOOTX64.EFI` defeats verified boot.
 - **BOOT-3** security, M. No measured boot: the manifest and boot files are not extended into TPM PCRs.
-- **BOOT-4** security, L. The installed root filesystem is not verified (no dm-verity-like tree); verification ends at the boot archive.
+- **BOOT-4** security, L. The installed root filesystem is not verified (no dm-verity-like tree); verification ends at the boot archive. Roadmap 1.2 B5's encrypted root authenticates each metadata block, not the tree: a disk replaced wholesale by another pool still boots as that pool.
 - **BOOT-5** security, M. No anti-rollback: any boot manifest or module ever signed by a trusted key verifies forever; needs signature versions and a recovery-safe policy.
 - **BOOT-6** usability, S. init does not wait for a `root=` disk that registers late (USB storage); it stays on the live root.
 - **BOOT-7** usability, S. The loader allocates below 4 GiB only (`LOADER_ALLOC_LIMIT`); a machine with all RAM above cannot boot.
+- **BOOT-9** security, M. No TPM-sealed key: an encrypted root (roadmap 1.2 B5) unlocks unattended only through a key file on the unencrypted ESP; sealing the master key to measured PCRs (needs BOOT-3) is out of B5's scope.
 - **BOOT-8** nice-to-have, S. `direct_map_size` covers the RSDP's tables, not those reached through the FADT (DSDT, FACS).
 
 ## Build and tooling
@@ -95,10 +96,10 @@ Open lines (struck lines are not counted):
 - **CFS-4** correctness, S. `cosmofs_rekey` leaves the key block in the open transaction until the next commit.
 - ~~**CFS-5** correctness, S. `/dev/blkctl`'s mounted check does not see the other members of a mounted multi-device pool.~~ Done by roadmap 1.2 B3: a mount holds its pool's other copies (the first PR), resilver targets and spares (the second) (`vfs_mount_set_held`), which `vfs_bdev_mounted` and a new mount's claim see.
 - ~~**CFS-6** correctness, M. CF17 abandons the transaction (`cfs_fail`) for failures a retry could survive; `extents_store` and `inode_sync` should allocate and write first so they fail cleanly.~~ Done by roadmap 1.2 B2's first PR (`cfs_prep_meta`, `cfs_inode_prepare`; `cosmofs-nomem`).
-- **CFS-7** security, M. Metadata is checksummed, not authenticated: a forger can recompute CRC32C; a keyed `csum_algo` would close it.
+- ~~**CFS-7** security, M. Metadata is checksummed, not authenticated: a forger can recompute CRC32C; a keyed `csum_algo` would close it.~~ Done by roadmap 1.2 B5 (#447): on a format-14 pool with a key block every header, superblock and label carries a keyed BLAKE2b tag (CF30); plain pools keep CRC32C.
 - **CFS-8** usability, M. Snapshots cannot be booted as environments (roadmap 1.2 B4). Rollback to a snapshot and writable clones are done by B1 (`cosmo-snap rollback`, `cosmo-snap clone`; CF19, CF20).
 - ~~**CFS-9** usability, M. Mirrors: no device replacement, no resilvering of a member that missed commits, no hot spares.~~ Done by roadmap 1.2 B3: copy states and the v13 copy record (the first PR), the resilver, `cosmo-pool` replace, attach, detach and spares (the second), `cosmo-install --mirror` and `make test-mirror` (the fourth).
-- **CFS-10** usability, M. A file is capped at 516128 blocks (64516 encrypted) by the one-level checksum index (`-EFBIG`).
+- ~~**CFS-10** usability, M. A file is capped at 516128 blocks (64516 encrypted) by the one-level checksum index (`-EFBIG`).~~ Done by roadmap 1.2 B5 (#447): a two-level index past those (CF32); test-encrypt writes and reads back 1 GiB on an encrypted root.
 - ~~**CFS-11** usability, S. Scrub's `-EIO` discards the counts fsctl would report.~~ Done by roadmap 1.2 B2's first PR (the scrub returns 0 whenever its walk ran).
 - **CFS-12** nice-to-have, L. Incremental snapshot send/receive: stream format, ancestry check, interruption recovery.
 - **CFS-13** nice-to-have, L. Striping and RAID-Z-like parity layouts with failure, replay and repair coverage.
@@ -120,6 +121,10 @@ Open lines (struck lines are not counted):
 - **CFS-29** nice-to-have, S. A copy missing when a pool is mounted is marked for a whole resilver, even when its record said `ONLINE` at the root being mounted and only the commits after it were missed (`setup_copies`); a disk left out of one boot is rebuilt rather than caught up (roadmap 1.2 B3's `test-mirror`, stage `lagging`).
 - **CFS-30** correctness, S. A scrub of the running root reports 53 to 77 `skipped` (visits to dirty buffers: inode-map, inode and checksum blocks), the same count after a `sync` and a 3 s wait (roadmap 1.2 B3's `test-mirror`, 2026-10-23); unexplained: either something re-dirties them at once or a sync leaves them dirty.
 - ~~**CFS-31** correctness, S. The member table's seal was not checked at mount: it is read raw, before the buffer cache can check an address, and was used whenever its magic, kind and address were right.~~ Found and done by roadmap 1.2 B5's first PR (#447): checked with the pool's CRC32C or, on an encrypted pool, its MAC (CF30).
+- **CFS-32** correctness, M. A file LZ4 compresses is one run per 32 KiB record, and an inode's map is loaded only up to `CFS_MAX_EXTENTS` (4096) runs, so such a file stops at about 128 MiB with `-EFBIG` -- and the failure is not contained: every writeback commit fails with it, the dirty pages pile up until memory runs out, and they are lost (`vfs: N dirty page(s) ... lost`). Seen writing 1 GiB of binaries to an encrypted root (roadmap 1.2 B5's test-encrypt, 2026-10-24), and on a plain pool from the live shell the same day: 150 MB of text written to a fresh `mkfs.cosmofs` disk, every commit `-EFBIG`, `4344 dirty page(s) of inode 2 on cosmofs lost`, and `ls` still saying 150533400 bytes. Merge adjacent records' runs, or raise the bound with a map that is not loaded whole, and refuse the write itself rather than the commit.
+- **CFS-33** usability, M. An existing plain root cannot be encrypted in place; `cosmo-install --encrypt` makes a new one (out of roadmap 1.2 B5's scope).
+- **CFS-34** nice-to-have, M. One master key per pool: no per-user or per-directory keys a user unlocks apart from the pool (the per-file keys derive from the master; out of roadmap 1.2 B5's scope).
+- **CFS-35** security, M. An encrypted pool's metadata MAC binds a block to its address and the pool, not to its generation: a block replaced by an older version of itself at the same address verifies (the tree is not hash-linked; roadmap 1.2 B5, design.md "The metadata MAC").
 
 ## Documentation
 
@@ -194,6 +199,7 @@ Open lines (struck lines are not counted):
 - **MEM-6** nice-to-have, L. Swap, compression and deduplication.
 - **MEM-7** nice-to-have, M. x86-64 PCID, once a test path exists (TCG has none).
 - **MEM-8** nice-to-have, S. Thread guard page by map-then-protect instead of reserve-and-replace (no benefit shown).
+- **MEM-10** nice-to-have, S. There is no swap; when there is, it should be encrypted (an encrypted root's pages would otherwise reach the disk in the clear; out of roadmap 1.2 B5's scope).
 - **MEM-9** correctness, M. Dirty page-cache pages are not bounded by memory or by the filesystem's free space: `dd` to a file on a 256 MiB root wrote ~470 MB before it was killed by a fault, and every spawn after was `ENOMEM` (test-pkgtx's first fill, 2026-10-20). A write should meet `ENOSPC` when the pool cannot hold it, and writeback should throttle a writer.
 
 ## Network

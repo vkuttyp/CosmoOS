@@ -763,6 +763,8 @@ struct cosmo_dirent {
 #define COSMO_EMSGSIZE 90
 #define COSMO_EPROTOTYPE 91 /* connect/sendto: a unix name whose socket is of the other type */
 #define COSMO_EOPNOTSUPP 95
+#define COSMO_ENOKEY  126  /* an encrypted pool whose key is not loaded (roadmap 1.2 B5) */
+#define COSMO_EKEYREJECTED 129 /* a key that does not open the pool */
 #define COSMO_EPROTONOSUPPORT 93 /* socket(): a protocol this type does not carry */
 #define COSMO_ESOCKTNOSUPPORT 94 /* socket(): a type this family does not have (SOCK_SEQPACKET on AF_UNIX) */
 #define COSMO_EAFNOSUPPORT 97

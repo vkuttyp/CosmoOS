@@ -80,6 +80,10 @@ int fat_sweep(struct fat *f);
  * then FLUSH. 0 or -errno. */
 int fat_commit(struct fat *f);
 
+/* A new file `name` (8.3) in the directory at `dir`, committed: 0, or
+ * -EEXIST, -ENOSPC (the directory is full; it is not grown), -errno. */
+int fat_add_file(struct fat *f, uint32_t dir, const char *name, const void *data, size_t len, int64_t now);
+
 /* A directory entry for a file or directory, stamped with `now` (seconds
  * since 1970, UTC). */
 void fat_make_ent(uint8_t raw[FAT_DIRENT], const uint8_t name83[11], uint8_t nt, uint8_t attr, uint32_t cluster,

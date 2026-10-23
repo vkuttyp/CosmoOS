@@ -126,6 +126,23 @@ refused -- prints one line ending `staying on the live root`, undoes what
 it did, and the boot continues live. When the shell exits on a disk root,
 init calls `sync` and prints `init: disk root synced` before it returns.
 
+Before it checks or mounts the root, init runs `cosmo-key unlock --boot
+DEV` (roadmap 1.2 B5; `docs/kernel-services/filesystem/cosmofs/design.md`,
+"Boot"). For a root that is not encrypted it does one `KEY_INFO` and
+exits 0. For an encrypted one it uses slot 0's key file from the ESP the
+loader was read from when that slot is one and the file is there;
+otherwise it prints `passphrase for cosmo-root: ` on init's console --
+every output the console has, serial lines included -- with echo off,
+reads a line, tries it on every passphrase slot (Argon2id, in user
+space), and hands the master key it opens to the kernel (`KEY_LOAD`),
+printing `cosmo-key: cosmo-root unlocked with slot N (argon2id M KiB, T
+passes: S s)`. A wrong passphrase is `that passphrase opens no slot`,
+and the prompt comes again; after three, `cosmo-key` exits 3 and init
+prints `init: three wrong passphrases for the root; restarting` and
+restarts the machine, nothing mounted. Any other failure leaves the live
+root, with a line saying so. Then the check (`check_root`), then the
+mount.
+
 On a disk root, before `/etc/rc` starts any service, init undoes a
 package transaction the last boot cut short (`pkg_recover`; roadmap 1.2
 B4, PKG-3; `docs/pkg/design.md`, "Transactions"): a `pkg-tx-*` snapshot
@@ -743,8 +760,44 @@ Roadmap M2. Non-interactive; everything through `/dev/blkctl`
 
 Any failure after the table was written unmounts what it mounted and
 wipes both copies of the table, so a failed install never leaves a disk
-that looks bootable. The installer writes no FAT: the ESP is the boot
-ESP's bytes.
+that looks bootable. The installer writes no FAT, but for one file below:
+the ESP is the boot ESP's bytes.
+
+**`--encrypt`** (roadmap 1.2 B5; `docs/guide/encrypted-root.md`). Before
+anything is written the installer asks for a passphrase twice on the
+standard input, echo off (a mismatch is exit 3), draws the pool's uuid,
+the 32-byte master key and a salt from `SYS_getrandom`, and seals the
+master key into slot 0 with Argon2id at the defaults (64 MiB, three
+passes; `userland/lib/keyslot.c`). Step 5's `FORMAT` is then
+`FORMAT_KEYED` (one device, or both with `--mirror`: one pool, one master
+key), which leaves the key loaded, so the copy runs as for a plain root;
+the unmount wipes it. With **`--key-file`** slot 0 is a random 32-byte
+key file instead, sealed with BLAKE2b, and written as `\cosmo.key` at the
+root of every target's ESP (`fat_add_file`); the passphrase is slot 1.
+The installer's copies of the key and the passphrase are wiped once
+used.
+
+## cosmo-key (`userland/system/cosmo-key.c`; roadmap 1.2 B5)
+
+    cosmo-key list [PATH]
+    cosmo-key unlock [--boot] DEVICE
+    cosmo-key add [--passes N] [--memory KIB] [PATH]
+    cosmo-key change [--passes N] [--memory KIB] [PATH]
+    cosmo-key remove SLOT [PATH]
+    cosmo-key bench [KIB [PASSES]]
+
+The slots of an encrypted pool, through `/dev/fsctl`'s `KEY_*`
+operations (`userland/lib/fskey.c`). `unlock` is init's (above). `add`
+asks for a passphrase that opens the pool -- its master key is what the
+new slot seals -- and the new one twice, and writes the first empty
+slot; `change` rewrites the slot the current passphrase opens, with a
+new salt and, if given, new Argon2id parameters; `remove` empties a slot
+after a passphrase proves the asker can open the pool. The kernel checks
+the master key it is sent is the mount's and refuses to empty the last
+slot. A slot is sealed and opened in user space, by the kernel's own
+ChaCha20-Poly1305 and BLAKE2b compiled for it; the master key is the one
+secret that crosses to the kernel. Exit 0, 1 failed, 2 usage, 3 three
+wrong passphrases (`unlock`).
 
 ## Updating (`userland/system/cosmo-upgrade.c`; shell completeness S7)
 

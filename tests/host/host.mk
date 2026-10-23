@@ -32,6 +32,8 @@ HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c tests/host/test_m
 HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) tests/host/test_cosmofs.c
 HOST_LZ4_SRCS := $(HOST_COMMON_SRCS) kernel/core/lz4.c tests/host/test_lz4.c
 HOST_CHACHA_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c tests/host/test_chacha20.c
+HOST_KEYSLOT_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c kernel/security/blake2b.c userland/lib/argon2.c \
+	userland/lib/keyslot.c tests/host/test_keyslot.c
 HOST_LIBC_SRCS := tests/host/test_libc.c
 HOST_PKG_SRCS := tests/host/test_pkg.c pkg/manifest.c pkg/version.c pkg/tar.c
 HOST_LINUX_SRCS := tests/host/test_linux.c compat/linux/convert.c
@@ -54,7 +56,7 @@ HOST_UPBE_SRCS := $(HOST_COMMON_SRCS) userland/system/upgrade_be.c tests/host/te
 HOST_PCI_BAR_SRCS := $(HOST_COMMON_SRCS) tests/host/test_pci_bar.c
 HOST_JITTER_SRCS := $(HOST_COMMON_SRCS) kernel/core/jitter.c tests/host/test_jitter.c
 
-HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_upgrade_be $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter
+HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_keyslot $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_upgrade_be $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter
 
 $(HOST_OUT)/test_fbvalid: $(addprefix $(ROOT)/,$(HOST_FBVALID_SRCS))
 	$(call log,HOSTCC,$@)
@@ -214,6 +216,12 @@ $(HOST_OUT)/test_chacha20: $(addprefix $(ROOT)/,$(HOST_CHACHA_SRCS)) $(ROOT)/ker
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
+$(HOST_OUT)/test_keyslot: $(addprefix $(ROOT)/,$(HOST_KEYSLOT_SRCS)) $(ROOT)/userland/lib/keyslot.h \
+	$(ROOT)/userland/lib/argon2.h $(ROOT)/kernel-services/filesystem/cosmofs/cosmofs_format.h
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
+
 $(HOST_OUT)/test_lz4: $(addprefix $(ROOT)/,$(HOST_LZ4_SRCS)) $(ROOT)/kernel/include/kernel/lz4.h
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
@@ -235,6 +243,8 @@ host-test: $(HOST_TESTS)
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_fetch_pinned.py
 	@echo "== $(ROOT)/tests/host/test_analysis_gate.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_analysis_gate.py
+	@echo "== $(ROOT)/tools/cosmofs_key.py --self-test"
+	$(Q)$(PYTHON) $(ROOT)/tools/cosmofs_key.py --self-test
 	@echo "== $(ROOT)/tests/host/test_run_guide.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_run_guide.py
 	@echo "== $(ROOT)/tests/host/test_release_version.py"

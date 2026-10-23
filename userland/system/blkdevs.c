@@ -138,6 +138,36 @@ int blkdevs_format_mirror(const char *a, const char *b, const char *fstype, cons
     return rc < 0 ? (int)rc : 0;
 }
 
+int blkdevs_format_keyed(const char *name, const char *mirror, const char *fstype, const char *label,
+                         const uint8_t uuid[16], const uint8_t master[COSMO_KEY_SIZE], const struct cosmo_keyslot slots[COSMO_KEY_SLOTS])
+{
+    if (strncmp(name, "/dev/", 5) == 0)
+        name += 5;
+    if (mirror != NULL && strncmp(mirror, "/dev/", 5) == 0)
+        mirror += 5;
+    struct cosmo_blkctl_keyed k;
+    memset(&k, 0, sizeof(k));
+    size_t ll = label ? strlen(label) : 0;
+    if ((mirror != NULL && strlen(mirror) >= COSMO_BLKCTL_NAME) || ll > COSMO_BLKCTL_LABEL)
+        return -ENAMETOOLONG;
+    if (mirror != NULL)
+        strcpy(k.mirror, mirror);
+    if (ll)
+        memcpy(k.label, label, ll);
+    memcpy(k.uuid, uuid, sizeof(k.uuid));
+    memcpy(k.master, master, COSMO_KEY_SIZE);
+    memcpy(k.slot, slots, sizeof(k.slot));
+    long rc = ctl(COSMO_BLKCTL_FORMAT_KEYED, name, 0, 0, fstype, &k, sizeof(k));
+    /* The key went through this copy and ctl's: neither keeps it. */
+    volatile uint8_t *v = (volatile uint8_t *)&k;
+    for (size_t i = 0; i < sizeof(k); i++)
+        v[i] = 0;
+    v = (volatile uint8_t *)g_io;
+    for (size_t i = 0; i < sizeof(struct cosmo_blkctl) + sizeof(k); i++)
+        v[i] = 0;
+    return rc < 0 ? (int)rc : 0;
+}
+
 int blkdevs_format(const char *name, const char *fstype, const char *label)
 {
     if (strncmp(name, "/dev/", 5) == 0)

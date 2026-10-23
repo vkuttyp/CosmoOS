@@ -3,9 +3,9 @@
 at a time (roadmap 1.2 B2; docs/kernel-services/filesystem/cosmofs/
 testing.md, "test-fsck").
 
-    cosmofs-damage.py IMAGE CLASS [--out OUT]
+    cosmofs-damage.py IMAGE CLASS [--out OUT] [--passphrase P]
     cosmofs-damage.py --list
-    cosmofs-damage.py IMAGE --describe
+    cosmofs-damage.py IMAGE --describe [--passphrase P]
     cosmofs-damage.py --flip-mirror COPY0 COPY1 --path PATH [--count N]
 
 IMAGE is a GPT disk whose second partition is the CosmoOS root (what
@@ -35,6 +35,15 @@ the snapshot it takes. --flip-mirror is the mirror case: COPY0 and COPY1
 are the two devices of a two-way mirror, and the first N data blocks of
 PATH are flipped on COPY1 only.
 
+An encrypted root (format 14, roadmap 1.2 B5) is damaged the same way,
+with its own keys: --passphrase opens a slot cheap enough to open in
+Python (tools/cosmofs_key.py; test-fsck adds one with `cosmo-key add
+--memory 8 --passes 1`), and every block it touches is sealed with the
+pool's metadata MAC instead of a CRC; directory blocks are decrypted and
+encrypted again with their file's key, a fresh nonce and their entry in
+the checksum tree. The kernel then sees the structure, as on a plain pool,
+not a forgery.
+
 Exit 0 when the damage was written, 2 for a usage error, 1 when the image
 does not have what the class needs.
 """
@@ -44,6 +53,9 @@ import shutil
 import struct
 import sys
 import uuid as uuidlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cosmofs_key  # noqa: E402
 
 BLOCK = 4096
 MHDR = 32
@@ -183,11 +195,29 @@ class Inode:
         return [d for d in self.direct if d[1] & 0xFFFF and d[1]]
 
 
+AEAD_PER_BLOCK = (BLOCK - MHDR) // 32           # 127
+K_KEYS = 12
+
+
 class Pool:
-    def __init__(self, path):
+    def __init__(self, path, passphrase=None):
         self.f = open(path, "r+b")
         size = os.fstat(self.f.fileno()).st_size
         self.base, self.size = find_root(self.f, size)
+        self.master = self.mac = None
+        self.mac_mode = False
+        raw = [self.read(s) for s in (0, 1)]
+        heads = [dict(zip(SUPER_FIELDS, struct.unpack_from(SUPER_FMT, r))) for r in raw if r[:8] == b"COSMOFS1"]
+        if any(h["version"] >= 14 and h["key_root"] for h in heads):
+            # An encrypted root: its keys first, from the key block a slot
+            # names -- read unverified, as the kernel's KEY_INFO reads it;
+            # the slot authenticates itself when it opens.
+            if passphrase is None:
+                raise Bad("an encrypted pool: --passphrase is needed")
+            h = max(heads, key=lambda x: x["generation"])
+            self.master = cosmofs_key.open_master(bytes(self.read(h["key_root"])), passphrase.encode())
+            self.mac = cosmofs_key.mac_key(self.master)
+            self.mac_mode = True
         a, b = self.super_at(0), self.super_at(1)
         good = [s for s in (a, b) if s is not None]
         if not good:
@@ -217,7 +247,10 @@ class Pool:
         if b[:8] != b"COSMOFS1":
             return None
         v = dict(zip(SUPER_FIELDS, struct.unpack_from(SUPER_FMT, b)))
-        if block_crc(b, SUPER_CRC_OFF) != v["crc"]:
+        if self.mac_mode:
+            if cosmofs_key.mac_tag(self.mac, "S", b, SUPER_CRC_OFF) != bytes(b[SUPER_CRC_OFF:SUPER_CRC_OFF + 8]):
+                return None
+        elif block_crc(b, SUPER_CRC_OFF) != v["crc"]:
             return None
         v["_raw"] = b
         return v
@@ -226,7 +259,10 @@ class Pool:
         b = bytearray(sb["_raw"])
         vals = [sb[k] for k in SUPER_FIELDS]
         struct.pack_into(SUPER_FMT, b, 0, *vals)
-        struct.pack_into("<I", b, SUPER_CRC_OFF, block_crc(b, SUPER_CRC_OFF))
+        if self.mac_mode:
+            b[SUPER_CRC_OFF:SUPER_CRC_OFF + 8] = cosmofs_key.mac_tag(self.mac, "S", b, SUPER_CRC_OFF)
+        else:
+            struct.pack_into("<I", b, SUPER_CRC_OFF, block_crc(b, SUPER_CRC_OFF))
         self.write(slot, b)
 
     def commit_super(self):
@@ -241,13 +277,42 @@ class Pool:
     def meta(self, blk, kind):
         b = self.read(blk)
         magic, k, gen, blkno, crc, algo = struct.unpack_from("<IIQQII", b)
-        if magic != MHDR_MAGIC or k != kind or blkno != blk or block_crc(b, 24) != crc:
+        sealed = (cosmofs_key.mac_tag(self.mac, "H", b, 24) == bytes(b[24:32]) if self.mac_mode
+                  else block_crc(b, 24) == crc)
+        if magic != MHDR_MAGIC or k != kind or blkno != blk or not sealed:
             raise Bad(f"block {blk:#x} is not a sound metadata block of kind {kind}")
         return b
 
     def seal(self, blk, b):
-        struct.pack_into("<I", b, 24, block_crc(b, 24))
+        if self.mac_mode:
+            b[24:32] = cosmofs_key.mac_tag(self.mac, "H", b, 24)
+        else:
+            struct.pack_into("<I", b, 24, block_crc(b, 24))
         self.write(blk, b)
+
+    # an encrypted file's blocks (format 7; cosmofs_crypt.c, cosmofs.c seal_block)
+    def file_key(self, ino):
+        return cosmofs_key.chacha20_xor(self.master, 0, struct.pack("<Q", ino) + bytes(4), bytes(32))
+
+    def aead_entry(self, inode, lblk):
+        """(the CSUM block, the entry's offset in it) of an encrypted file's
+        block `lblk`: a one-level index, as a directory's is."""
+        idx = self.meta(inode.csum_root, K_CSUMIDX)
+        leaf = struct.unpack_from("<Q", idx, MHDR + 8 * (lblk // AEAD_PER_BLOCK))[0]
+        return leaf, MHDR + 32 * (lblk % AEAD_PER_BLOCK)
+
+    def data_read(self, inode, lblk, pb):
+        b = self.read(pb)
+        if inode.csum_algo != 2:
+            return b
+        leaf, off = self.aead_entry(inode, lblk)
+        lb = self.meta(leaf, K_CSUM)
+        tag, nonce = bytes(lb[off:off + 16]), bytes(lb[off + 16:off + 28])
+        plain = cosmofs_key.aead_open(self.file_key(inode.ino), nonce, struct.pack("<QQ", inode.ino, lblk),
+                                      bytes(b), tag)
+        if plain is None:
+            raise Bad(f"inode {inode.ino} block {lblk} does not open")
+        return bytearray(plain)
 
     def new_meta(self, kind):
         """A free block, allocated, sealed as an empty block of `kind`."""
@@ -352,7 +417,7 @@ class Pool:
             pb = self.map(d, lblk)
             if pb is None:
                 continue
-            b = self.read(pb)
+            b = self.data_read(d, lblk, pb)
             for s in range(BLOCK // DIRENT):
                 e_ino, typ, nl = struct.unpack_from("<QBB", b, s * DIRENT)
                 if e_ino:
@@ -379,8 +444,23 @@ class Pool:
 
     def write_dir_block(self, dino, lblk, pb, data):
         """A directory block written in place, its checksum entry with it."""
-        self.write(pb, data)
         d = self.inode(dino)
+        if d.csum_algo == 2:
+            # Encrypted: a fresh nonce, the tag over the ciphertext and the
+            # block's place, and the keyless CRC beside it (seal_block).
+            nonce = os.urandom(12)
+            ct = cosmofs_key.chacha20_xor(self.file_key(dino), 1, nonce, bytes(data))
+            aad = struct.pack("<QQ", dino, lblk)
+            otk = cosmofs_key._chacha_block(self.file_key(dino), 0, nonce)[:32]
+            tag = cosmofs_key.poly1305(otk, cosmofs_key._pad16(aad) + cosmofs_key._pad16(ct) +
+                                       struct.pack("<QQ", len(aad), len(ct)))
+            self.write(pb, ct)
+            leaf, off = self.aead_entry(d, lblk)
+            lb = self.meta(leaf, K_CSUM)
+            lb[off:off + 32] = tag + nonce + struct.pack("<I", crc32c(ct))
+            self.seal(leaf, lb)
+            return
+        self.write(pb, data)
         if d.csum_algo != 1:
             raise Bad(f"directory {dino} is not CRC32C-checksummed")
         idx = self.meta(d.csum_root, K_CSUMIDX)
@@ -440,7 +520,7 @@ def damage(p, cls):
     if cls in ("orphan", "dangling", "bad-entry", "dup-name"):
         name = {"orphan": "/fsck/b", "dangling": "/fsck/c", "bad-entry": "/fsck/d", "dup-name": "/fsck/f"}[cls]
         pino, (n, e_ino, typ, lblk, pb, s) = p.entry(name)
-        b = p.read(pb)
+        b = p.data_read(p.inode(pino), lblk, pb)
         if cls == "orphan":
             b[s * DIRENT:(s + 1) * DIRENT] = bytes(DIRENT)
         elif cls == "dangling":
@@ -505,7 +585,7 @@ def damage(p, cls):
         up = p.lookup("/fsck")
         d = p.inode(pino)
         pb = p.map(d, 0)
-        b = p.read(pb)
+        b = p.data_read(d, 0, pb)
         for s in range(BLOCK // DIRENT):
             if struct.unpack_from("<Q", b, s * DIRENT)[0] == 0:
                 struct.pack_into("<QBB", b, s * DIRENT, up, TYPE_DIR, 2)
@@ -611,6 +691,7 @@ def main():
     ap.add_argument("--flip-mirror", nargs=2, metavar=("COPY0", "COPY1"))
     ap.add_argument("--path")
     ap.add_argument("--count", type=int, default=8)
+    ap.add_argument("--passphrase", help="an encrypted root's: opens a slot cheap enough to open here")
     a = ap.parse_args()
     try:
         if a.list:
@@ -627,7 +708,7 @@ def main():
         if not a.image:
             ap.error("IMAGE is required")
         if a.describe:
-            p = Pool(a.image)
+            p = Pool(a.image, a.passphrase)
             sb = p.sb
             print(f"format {p.v}, generation {sb['generation']} (slot {p.slot}), {sb['total_blocks']} blocks, "
                   f"{sb['inode_count']} inodes, next_ino {sb['next_ino']}, snap_root {sb['snap_root']:#x}, "
@@ -640,7 +721,7 @@ def main():
         if a.out:
             shutil.copyfile(a.image, a.out)
             target = a.out
-        p = Pool(target)
+        p = Pool(target, a.passphrase)
         what = damage(p, a.cls)
         if a.cls != "superblock":
             p.commit_super()

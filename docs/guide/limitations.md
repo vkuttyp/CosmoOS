@@ -80,9 +80,13 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 
 ## Storage
 
-- cosmofs files are capped at 516128 blocks of 4 KiB (about 1.97 GiB),
-  64516 blocks (252 MiB) when encrypted; a larger write fails with
-  `EFBIG`.
+- A file that LZ4 compresses (text, logs, most programs) stops at about
+  128 MiB: each 32 KiB of it is a run, and cosmofs loads at most 4096
+  runs per file. Worse, the write that crosses the limit is not refused:
+  the system goes on failing to commit it and the data is lost (backlog
+  CFS-32). Data that does not compress (already compressed, encrypted
+  before it was written) has no such limit; with it a file can reach
+  1000 GiB, 125 GiB on an [encrypted root](encrypted-root.md).
 - A read-only mount still writes the replay of an interrupted free or
   orphan record, as a journalling filesystem replays its journal.
 - A rollback to a snapshot takes effect at the next boot (or the next

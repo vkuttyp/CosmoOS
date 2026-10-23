@@ -255,3 +255,17 @@ its ESP, `--repair`, then the second alone boots that set; a
 `--rollback`, then the second alone boots the previous set. Gap: the copy
 is not a switch of its own; the booted disk lost while its copy was being
 written leaves neither disk sure to boot.
+
+**U16. An encrypted root is unlocked before anything reads it, and a
+passphrase never reaches a log.** init runs `cosmo-key unlock --boot` on
+the root device before its check and its mount; the passphrase is read
+with echo off, used in user space to open a slot, and wiped, and only the
+master key it opens crosses to the kernel (`KEY_LOAD`), which checks it
+opens the pool before keeping it. Three wrong passphrases restart the
+machine with nothing mounted. The key file of a `--key-file` install is
+read from the ESP the loader was read from, and only for slot 0. Check:
+`make test-encrypt` (the `wrong` stage: three refusals, the restart, no
+mount; every stage: no passphrase in the serial log; `keyfile`: no prompt).
+Gap: the prompt's code is the signed boot archive's (verified boot), but
+the disk it unlocks is not verified before it mounts (backlog BOOT-4): a
+disk replaced wholesale by a plain pool boots without asking.

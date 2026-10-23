@@ -1828,8 +1828,9 @@ static int oldest_format_mark(const struct set *a, const struct set *b)
     return 0;
 }
 
-/* Refuse a set whose kernel could not mount this root (the lazy raise's
- * price, design.md, "Format version 12"). */
+/* Refuse a set whose kernel could not mount this root: the lazy raise's
+ * price (design.md, "Format version 12"), and an encrypted root's, which is
+ * format 14 from the start (roadmap 1.2 B5). */
 static int format_gate(const struct set *s, const char *what)
 {
     int rf = root_format();
@@ -1841,8 +1842,9 @@ static int format_gate(const struct set *s, const char *what)
     }
     if ((unsigned)rf <= kr)
         return 0;
-    fprintf(stderr, "cosmo-upgrade: %s's kernel reads cosmofs format %u at most, and the root is format %u (a "
-                    "snapshot raised it): that kernel could not mount the root; nothing written\n", what, kr, (unsigned)rf);
+    fprintf(stderr, "cosmo-upgrade: %s's kernel reads cosmofs format %u at most, and the root is format %u (%s): "
+                    "that kernel could not mount the root; nothing written\n", what, kr, (unsigned)rf,
+            rf >= 14 ? "encrypted, or a file outgrew the one-level checksum index" : "a snapshot raised it");
     return EXIT_REFUSED;
 }
 

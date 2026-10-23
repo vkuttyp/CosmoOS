@@ -8,6 +8,15 @@
  *                                   the same on both disks, the root a two-way
  *                                   mirror of their root partitions (roadmap
  *                                   1.2 B3; docs/guide/mirrors.md)
+ *   cosmo-install --encrypt [--key-file] [--force] DEVICE [--mirror DEVICE2]
+ *                                   the root encrypted (roadmap 1.2 B5;
+ *                                   docs/guide/encrypted-root.md): a passphrase
+ *                                   asked twice seals the master key in slot 0;
+ *                                   with --key-file slot 0 is a random key file
+ *                                   written to every target's ESP, so the
+ *                                   machine boots unattended, and the
+ *                                   passphrase is slot 1. A mirror's two disks
+ *                                   are one pool with one master key.
  *
  * The disk becomes: a GPT, partition 1 a copy of the EFI System Partition
  * the loader was read from (the same loader, kernel and boot archive),
@@ -18,7 +27,7 @@
  * the disk the loader was read from, so the installer writes nothing on it
  * and signs nothing (roadmap M5; docs/boot/design.md, "Verified boot").
  *
- * Non-interactive. A disk that already has a partition table is refused
+ * Non-interactive, but for --encrypt's passphrase. A disk that already has a partition table is refused
  * unless --force. Exit 0 installed, 1 failed (nothing left mounted, the
  * new table wiped), 2 usage, 3 refused.
  */
@@ -33,14 +42,18 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <cosmo/auxv.h>
 #include <cosmo/sysctl.h>
+#include <cosmo/syscall.h>
 #include <kernel/crypto.h>
 #include <kernel/gpt.h>
 #include <uapi/cosmo/blkctl.h>
 
+#include "../lib/keyslot.h"
+#include "../lib/secret.h"
 #include "blkdevs.h"
 #include "upgrade_be.h"
 #include "upgrade_fat.h"
@@ -659,7 +672,86 @@ static int prepare_target(struct target *tg, unsigned idx)
     return 0;
 }
 
-static int install(const char *target_name, const char *mirror_name, bool force)
+/* What an encrypted root is made from (roadmap 1.2 B5): drawn and sealed
+ * before anything is written, so a mistyped passphrase leaves the disks
+ * as they were. */
+struct crypt {
+    uint8_t uuid[16];
+    uint8_t master[COSMO_KEY_SIZE];
+    uint8_t file[KEYFILE_SIZE];      /* --key-file: slot 0's */
+    struct cosmo_keyslot slot[COSMO_KEY_SLOTS];
+    bool key_file;
+};
+
+static void crypt_wipe(struct crypt *c)
+{
+    secret_wipe(c, sizeof(*c));
+}
+
+static int draw(void *buf, size_t n)
+{
+    return cosmo_getrandom(buf, n) == (long)n ? 0 : -1;
+}
+
+static int crypt_prepare(struct crypt *c, bool key_file)
+{
+    memset(c, 0, sizeof(*c));
+    c->key_file = key_file;
+    char pass[SECRET_MAX];
+    int len = secret_read_new("cosmo-install", pass, sizeof(pass));
+    if (len < 0) {
+        secret_wipe(pass, sizeof(pass));
+        return 3;
+    }
+    uint8_t salt[16], fsalt[16];
+    int rc = draw(c->uuid, sizeof(c->uuid)) || draw(c->master, sizeof(c->master)) || draw(salt, sizeof(salt)) ||
+                     (key_file && (draw(c->file, sizeof(c->file)) || draw(fsalt, sizeof(fsalt))))
+                 ? -1
+                 : 0;
+    unsigned pslot = key_file ? 1 : 0;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (rc == 0)
+        rc = keyslot_seal_passphrase(c->uuid, pslot, KEYSLOT_T_DEFAULT, KEYSLOT_M_DEFAULT, KEYSLOT_LANES_DEFAULT, pass,
+                                     (size_t)len, salt, c->master, &c->slot[pslot]);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    if (rc == 0 && key_file)
+        rc = keyslot_seal_keyfile(c->uuid, c->file, fsalt, c->master, &c->slot[0]);
+    secret_wipe(pass, sizeof(pass));
+    if (rc != 0) {
+        fprintf(stderr, "cosmo-install: the key could not be made (%d)\n", rc);
+        crypt_wipe(c);
+        return 1;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    for (unsigned i = 0; i < COSMO_KEY_SLOTS; i++)
+        if (c->slot[i].kind != COSMO_KEYSLOT_EMPTY)
+            c->slot[i].created_ns = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+    double secs = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+    printf("cosmo-install: slot %u sealed with the passphrase (argon2id %u KiB, %u passes: %.2f s)\n", pslot,
+           KEYSLOT_M_DEFAULT, KEYSLOT_T_DEFAULT, secs);
+    return 0;
+}
+
+/* Slot 0's key file onto a target's ESP, at its root. */
+static int key_file_write(const struct cosmo_blkctl_dev *esp, const struct crypt *c)
+{
+    struct fat f;
+    char err[120];
+    int rc = fat_open(&f, esp, err, sizeof(err));
+    if (rc < 0) {
+        fprintf(stderr, "cosmo-install: %s: %s\n", esp->name, err);
+        return rc;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    rc = fat_add_file(&f, f.root, KEYFILE_NAME, c->file, sizeof(c->file), now.tv_sec);
+    fat_close(&f);
+    return rc;
+}
+
+static int install(const char *target_name, const char *mirror_name, bool force, bool encrypt, bool key_file)
 {
     if (list_devices() < 0)
         return fail("cannot list the block devices", errno);
@@ -699,22 +791,38 @@ static int install(const char *target_name, const char *mirror_name, bool force)
     }
     if (rc)
         return rc;
+    static struct crypt cr;
+    if (encrypt && (rc = crypt_prepare(&cr, key_file)) != 0)
+        return rc;
     for (unsigned k = 0; k < n; k++)
         strcpy(g_target_name[k], tg[k].name);
     g_ntargets = n;
     for (unsigned k = 0; k < n && rc == 0; k++)
         rc = prepare_target(&tg[k], k);
-    if (rc)
+    if (rc) {
+        crypt_wipe(&cr);
         return rc;
+    }
 
     /* Partition 2: an empty cosmofs named ROOT_LABEL -- on one disk, or a
      * two-way mirror of both disks' (roadmap 1.2 B3) -- then the system. */
-    if (n == 2)
+    if (encrypt) {
+        /* One pool, one master key, however many disks; the kernel keeps
+         * the key, so the new root mounts below as a plain one would. */
+        rc = blkdevs_format_keyed(tg[0].root, n == 2 ? tg[1].root : NULL, "cosmofs", ROOT_LABEL, cr.uuid, cr.master,
+                                  cr.slot);
+        for (unsigned k = 0; k < n && rc == 0 && key_file; k++) {
+            const struct cosmo_blkctl_dev *esp = find_part(tg[k].name, 1);
+            rc = esp == NULL ? -ENODEV : key_file_write(esp, &cr);
+        }
+        crypt_wipe(&cr);
+    } else if (n == 2) {
         rc = blkdevs_format_mirror(tg[0].root, tg[1].root, "cosmofs", ROOT_LABEL);
-    else
+    } else {
         rc = (int)ctl(COSMO_BLKCTL_FORMAT, tg[0].root, 0, 0, ROOT_LABEL, strlen(ROOT_LABEL), "cosmofs");
+    }
     if (rc < 0)
-        return fail("making the cosmofs root", rc);
+        return fail(encrypt ? "making the encrypted cosmofs root" : "making the cosmofs root", rc);
     if (mkdir(MNT, 0755) < 0 && errno != EEXIST)
         return fail("creating " MNT, errno);
     if (mount(tg[0].root, MNT, "cosmofs", 0) < 0)
@@ -744,18 +852,28 @@ static int install(const char *target_name, const char *mirror_name, bool force)
     if (n == 2)
         printf("cosmo-install: the root is mirrored on %s and %s (%s's root partition, partuuid %s)\n", tg[0].root,
                tg[1].root, tg[1].name, tg[1].root_uuid);
+    if (encrypt && key_file)
+        printf("cosmo-install: the root is encrypted (format 14): slot 0 the key file \\%s on the ESP%s, slot 1 "
+               "the passphrase; anyone with the disk has the key file\n", KEYFILE_NAME, n == 2 ? "s" : "");
+    else if (encrypt)
+        printf("cosmo-install: the root is encrypted (format 14): slot 0 the passphrase; it is asked for at every "
+               "boot\n");
     return 0;
 }
 
 int main(int argc, char **argv)
 {
-    bool force = false, list = false, bad = false;
+    bool force = false, list = false, bad = false, encrypt = false, key_file = false;
     const char *target = NULL, *mirror = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--force") == 0)
             force = true;
         else if (strcmp(argv[i], "--list") == 0)
             list = true;
+        else if (strcmp(argv[i], "--encrypt") == 0)
+            encrypt = true;
+        else if (strcmp(argv[i], "--key-file") == 0)
+            key_file = true;
         else if (strcmp(argv[i], "--mirror") == 0 && i + 1 < argc && mirror == NULL)
             mirror = argv[++i];
         else if (argv[i][0] != '-' && target == NULL)
@@ -763,8 +881,9 @@ int main(int argc, char **argv)
         else
             bad = true;
     }
-    if (bad || (!list && target == NULL) || (list && (target || mirror))) {
-        fprintf(stderr, "usage: cosmo-install --list | cosmo-install [--force] DEVICE [--mirror DEVICE2]\n");
+    if (bad || (!list && target == NULL) || (list && (target || mirror || encrypt)) || (key_file && !encrypt)) {
+        fprintf(stderr, "usage: cosmo-install --list | cosmo-install [--encrypt [--key-file]] [--force] DEVICE "
+                        "[--mirror DEVICE2]\n");
         return 2;
     }
     g_ctl = open("/dev/blkctl", O_RDWR);
@@ -780,7 +899,7 @@ int main(int argc, char **argv)
         print_list();
         return 0;
     }
-    int rc = install(target, mirror, force);
+    int rc = install(target, mirror, force, encrypt, key_file);
     close(g_ctl);
     return rc;
 }

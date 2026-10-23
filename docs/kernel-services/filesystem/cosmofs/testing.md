@@ -206,6 +206,26 @@ Its boot budget is 40 s (`kernel/core/selftest.c`, the `SELFTEST:
 budgets` line), not the 8 s default; it logs how many prefix images it
 checked.
 
+### Format version 14 (`cosmofs-encrypted-root`, `cosmofs_keytest.c`)
+
+On RAM devices of its own (roadmap 1.2 B5): a keyed format refuses a
+slot of the wrong shape, no usable slot and an all-zero uuid; the pool
+is made at 14, MAC'd, with the uuid it was given, and mounts at once.
+A sparse file with a block past 64516 gets a `CSUMIDX2` root and reads
+back; the check is clean with one two-level tree walked. Slot writes
+need the mount's master key and keep the last slot. After the unmount
+the pool is locked: the mount says `-ENOKEY`, `CHECK_DEV` says `LOCKED`;
+a wrong key is `-EKEYREJECTED`, the right one is kept, and the check's
+mount does not drop it. Then each domain forged with its CRC32C
+recomputed -- the inode map's root, the member table, the key block
+(the check's mount fails or falls back to the older root), both
+superblock slots (`-EIO`, `SUPER_NONE`), a member label of a two-member
+pool (`CONFIG_DEBUG`; the mount refused) and the far file's middle index
+block (the read refused, the check counting it unreadable) -- is refused,
+and a plain pool's member table damaged in place is refused too (CFS-31;
+`tools/cfs31-probe.py --old` shows it accepted without the fix). Last, a
+plain pool's file past 516128 blocks raises it to 14 and keeps CRC32C.
+
 ### Other self-tests that run on cosmofs
 
 | Test | File | Uses cosmofs for |
@@ -376,6 +396,75 @@ and the stage. A scrub on the running root reports some blocks `skipped`
 to dirty buffers: two inode-map, two inode-map-leaf, and a few inode and
 checksum blocks. The count is the same after a `sync` and a 3 s wait, so
 the test does not ask for zero.
+
+## An encrypted root (`make test-encrypt`)
+
+Roadmap 1.2 B5's acceptance test, `tests/boot/encrypt_test.py`, in CI's
+`encrypt` job on both architectures (release builds). The harness types
+every passphrase at the prompt it waits for, and checks the serial log
+never shows one. The guide page [Encrypted root](../../../guide/encrypted-root.md)
+shows the commands it runs.
+
+- **`install`:** the live image with blank disks A (1536 MiB), B and B2.
+  - `cosmo-install --encrypt A`, the passphrase typed twice: exit 0,
+    `slot 0 sealed with the passphrase (argon2id 65536 KiB, 3 passes: N s)`.
+  - `cosmo-install --encrypt --key-file B --mirror B2` with two different
+    passphrases: `the two passphrases differ`, exit 3, nothing written;
+    then with the same twice: slot 0 the key file on both ESPs, slot 1 the
+    passphrase.
+  - `blkid` of A's root says `ENCRYPTED="yes"`; on the host, A's newest
+    superblock is format 14 with a key block.
+- **`wrong`:** A alone, three wrong passphrases: three refusals, `init:
+  three wrong passphrases for the root; restarting`, QEMU ends, and no
+  root was mounted or switched to.
+- **`boot`:** A and a blank spare. A wrong passphrase is refused, the
+  right one unlocks slot 0 (its Argon2id time is recorded), the boot's
+  check says `0 findings`, the root switches. 2000 lines of a marker are
+  written; `cosmo-key add` writes slot 1 with a second passphrase; `cosmo-key
+  list` shows both; `cosmo-pool add-spare` labels the spare for the pool.
+- **`plaintext`:** on the host, neither A nor the spare holds the
+  marker's text anywhere.
+- **`forge`:** five boots, each on a fresh copy of A and the spare with
+  one block forged as a CRC32C pool would accept it: a byte changed,
+  `csum_algo` set to CRC32C, the CRC recomputed. Each must be refused:
+  - the newest superblock slot: `superblock slot N (generation G) does
+    not authenticate`, and the root mounts from the other slot;
+  - the inode map's root: `metadata ... fault ... it does not
+    authenticate`;
+  - the member table: `the member table is unreadable`;
+  - the key block (a reserved byte, which only its tag covers): `the key
+    block does not authenticate`, and nothing mounts;
+  - the spare's label: the root mounts and the spare is not the pool's.
+- **`slot2`:** A, unlocked with slot 1's passphrase. 4 MiB of the
+  system's programs written 256 times: a 1 GiB file whose SHA-256 must be
+  the chunk's 256 times; `fsctl check` of the root is `clean` and the
+  kernel says it walked a two-level checksum tree.
+- **`readback`:** A, unlocked with slot 0's: the 1 GiB file's SHA-256 is
+  the same after the reboot.
+- **`keyfile`:** B and B2 boot with no prompt, `unlocked with the key
+  file on the ESP`; then B2 alone, from its own ESP's copy: one master
+  key for the mirror.
+
+The last lines give the Argon2id times measured: sealing in the
+installer and unlocking at boot. `ENCRYPT_STAGES` runs a subset (the
+install always runs).
+
+**The last stage** (`ENCRYPT_B1_B4=0` skips it) runs B1-B4's tests again
+on an encrypted root: `test-snapshot`, `test-fsck`, `test-mirror`,
+`test-pkgtx`, and `be_test.py` without its older release (v1.0.7's
+installer cannot encrypt and its kernel cannot read format 14). With
+`COSMO_TEST_ENCRYPT` set, `install_test.Boot` adds `--encrypt` to every
+`cosmo-install` a test types and answers every passphrase prompt; the
+tests' format expectations become 14 (`FORMAT_FRESH`, `FORMAT_SNAP`).
+`test-fsck` damages the encrypted root with its own keys: its
+preparation boot adds a slot cheap enough to open in Python (`cosmo-key
+add --memory 8 --passes 1`), and `tools/cosmofs-damage.py --passphrase`
+opens it (`tools/cosmofs_key.py`: Argon2id, ChaCha20-Poly1305, the MAC),
+seals each damaged block with the pool's MAC and encrypts again each
+directory block it edits. All 23 classes are then reported and repaired
+as on a plain root, but one: `superblock`, a slot naming another pool,
+cannot be authenticated without that pool's key, so it is left out as a
+slot that does not verify and the root mounts clean from the other.
 
 ## Installed system (`make test-install`)
 

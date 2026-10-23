@@ -106,6 +106,8 @@ void fsreport_dev(FILE *out, const struct cosmo_fsctl_dev *d, struct fsr_tally *
     char what[96];
     if (d->flags & COSMO_FSCTL_DEV_F_SUPER_NONE)
         fsreport_device(out, "superblock", "neither-slot-verifies", t);
+    if (d->flags & COSMO_FSCTL_DEV_F_LOCKED)
+        fsreport_device(out, "superblock", "encrypted-and-locked(cosmo-key unlock)", t);
     if (d->flags & COSMO_FSCTL_DEV_F_SUPER_DISAGREE) {
         snprintf(what, sizeof(what), "slots-name-different-pools(generations:%llu,%llu)",
                  (unsigned long long)d->slot_generation[0], (unsigned long long)d->slot_generation[1]);

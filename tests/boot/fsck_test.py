@@ -60,6 +60,9 @@ import install_test  # noqa: E402
 from install_test import Boot, Fail, need, EXIT_SUCCESS  # noqa: E402
 
 DAMAGE = os.path.join(install_test.ROOT, "tools", "cosmofs-damage.py")
+# An encrypted root (test-encrypt's run of this test): the damage is sealed
+# with the pool's own keys, from a slot cheap enough to open in Python.
+DAMAGE_KEY = ["--passphrase", install_test.ENCRYPT_PASS] if install_test.ENCRYPT_PASS else []
 
 # What each damage leaves, by fsck.cosmofs's class names (fsreport.h):
 #   boot:   the classes the boot's line reports (all repaired when the
@@ -134,6 +137,9 @@ def stage_prepare(args, results, inst):
         need(out, r"^snap=0$", "cosmo-snap create fsckbase")
         out = b.status("rm /fsck/old && sync", "rm")
         need(out, r"^rm=0$", "removing a file the snapshot keeps")
+        if install_test.ENCRYPT_PASS:
+            out = b.status("cosmo-key add --memory 8 --passes 1", "cheap")
+            need(out, r"^cheap=0$", "a slot cheap enough for the damage tool to open")
         rc = b.finish("poweroff")
         if rc != EXIT_SUCCESS:
             raise Fail(f"prepare boot: QEMU exit code {rc}")
@@ -142,8 +148,8 @@ def stage_prepare(args, results, inst):
         raise
     base = os.path.join(args.workdir, "base.img")
     shutil.copyfile(inst["target"], base)
-    d = subprocess.run([sys.executable, DAMAGE, base, "--describe"], capture_output=True, text=True)
-    if d.returncode != 0 or not re.search(r"^format 12,", d.stdout, re.M):
+    d = subprocess.run([sys.executable, DAMAGE, base, "--describe"] + DAMAGE_KEY, capture_output=True, text=True)
+    if d.returncode != 0 or not re.search(rf"^format {install_test.FORMAT_SNAP},", d.stdout, re.M):
         raise Fail(f"the base disk: {d.stdout.strip()} {d.stderr.strip()}")
     results.append(f"prepare: PASS ({d.stdout.strip()})")
     return base
@@ -151,13 +157,26 @@ def stage_prepare(args, results, inst):
 
 def one_class(args, base, cls):
     img = os.path.join(args.workdir, f"{cls}.img")
-    d = subprocess.run([sys.executable, DAMAGE, base, cls, "--out", img], capture_output=True, text=True)
+    d = subprocess.run([sys.executable, DAMAGE, base, cls, "--out", img] + DAMAGE_KEY, capture_output=True, text=True)
     if d.returncode != 0:
         raise Fail(f"{cls}: cosmofs-damage.py: {d.stdout.strip()} {d.stderr.strip()}")
     exp = EXPECT[cls]
     b = boot_disk(f"class-{cls}", img, args)
     try:
         log = b.text()
+        if cls == "superblock" and install_test.ENCRYPT_PASS:
+            # An encrypted root's slot that names another pool cannot be
+            # authenticated -- no key for that uuid is loaded -- so it is
+            # one that does not verify, as a rotted slot is on a plain pool:
+            # left out, the root mounted from the other, clean (design.md,
+            # "The key handle"). A plain pool's both verify and disagree.
+            need(log, r"^cosmofs: root checked, 0 findings, 0 repaired$", f"{cls}: the boot's check")
+            need(log, r"^init: switched to the disk root \S+ ", f"{cls}: the root mounted from the slot that is its own")
+            note = f"{cls}: the slot naming another pool cannot be authenticated, so is left out; the root mounted clean"
+            rc = b.finish("poweroff")
+            if rc != EXIT_SUCCESS:
+                raise Fail(f"{cls}: QEMU exit code {rc}")
+            return note
         if "boot" in exp:
             m = need(log, r"^cosmofs: root checked, (\d+) findings, (\d+) repaired$", f"{cls}: the boot's line")
             got = classes_in(log[:m.end()])

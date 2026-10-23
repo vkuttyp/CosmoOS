@@ -561,3 +561,54 @@ void fat_make_ent(uint8_t raw[FAT_DIRENT], const uint8_t name83[11], uint8_t nt,
     put16(raw + 16, date);
     fat_ent_set(raw, cluster, size, now);
 }
+
+/*
+ * A new file `name` (8.3) in the directory at `dir`, in its first free
+ * entry (deleted or never used; a never-used one is followed by another
+ * never-used one or the cluster's end, which the walk's end-of-directory
+ * rule needs). The data first, then the entry, then the FAT: a crash
+ * before the entry leaves clusters fat_sweep frees. -EEXIST when the name
+ * is there, -ENOSPC when the directory has no free entry (it is not
+ * grown). For cosmo-install's key file (roadmap 1.2 B5).
+ */
+int fat_add_file(struct fat *f, uint32_t dir, const char *name, const void *data, size_t len, int64_t now)
+{
+    uint8_t n83[11], nt;
+    struct fat_ent e;
+    if (!fat_name83(name, n83, &nt))
+        return -EINVAL;
+    int rc = fat_lookup(f, dir, n83, &e);
+    if (rc != 0)
+        return rc < 0 ? rc : -EEXIST;
+    uint32_t first;
+    rc = fat_write_new(f, data, len, &first);
+    if (rc < 0)
+        return rc;
+    uint8_t sec[4096];
+    uint32_t c = dir;
+    for (uint32_t hops = 0; valid(f, c); hops++) {
+        if (hops > f->nclusters)
+            break;
+        for (uint32_t s = 0; s < f->spc; s++) {
+            uint64_t lba = fat_cluster_lba(f, c) + s;
+            if ((rc = fat_read_sector(f, lba, sec)) < 0)
+                return rc;
+            unsigned per = f->bps / FAT_DIRENT;
+            for (unsigned i = 0; i < per; i++) {
+                uint8_t *r = sec + i * FAT_DIRENT;
+                if (r[0] != 0x00 && r[0] != 0xE5)
+                    continue;
+                fat_make_ent(r, n83, nt, FAT_ATTR_ARCHIVE, first, (uint32_t)len, now);
+                if ((rc = fat_write_sector(f, lba, sec)) < 0)
+                    return rc;
+                return fat_commit(f);
+            }
+        }
+        uint32_t n = next_of(f, c);
+        if (n >= 0x0FFFFFF8u)
+            break;
+        c = n;
+    }
+    fat_free_chain(f, first);
+    return -ENOSPC;
+}

@@ -6197,6 +6197,39 @@ static bool check_root(const char *dev)
 }
 
 /*
+ * An encrypted root is unlocked before it is checked or mounted (roadmap
+ * 1.2 B5; docs/kernel-services/filesystem/cosmofs/design.md, "Boot"):
+ * cosmo-key asks for the passphrase on this console -- every output the
+ * console has, the serial lines included -- or uses slot 0's key file on
+ * the ESP, and hands the master key to the kernel. A root that is not
+ * encrypted costs one KEY_INFO. Three wrong passphrases restart the
+ * machine with nothing mounted. False when the root stays locked.
+ */
+static bool unlock_root(const char *dev)
+{
+    const char *argv[] = { "cosmo-key", "unlock", "--boot", dev, NULL };
+    fflush(stdout);
+    pid_t pid = spawnve("/sbin/cosmo-key", argv, NULL, NULL, 0);
+    int st = -1;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid) {
+        printf("init: cosmo-key did not run (%s); the root %s is not unlocked\n", strerror(errno), dev);
+        return false;
+    }
+    if (st == 3) {
+        printf("init: three wrong passphrases for the root; restarting\n");
+        fflush(stdout);
+        cosmo_reboot(COSMO_REBOOT_RESTART);
+        printf("init: restart refused; the live root stays\n");
+        return false;
+    }
+    if (st != 0) {
+        printf("init: the root %s could not be unlocked (status %d); the live root stays\n", dev, st);
+        return false;
+    }
+    return true;
+}
+
+/*
  * Roadmap M2 (docs/userland/design.md, "The disk root"): when the command
  * line names a root (root=), mount it at /sysroot and make it the root of
  * everything this init starts; /tmp is then a fresh ramfs. Any failure
@@ -6219,7 +6252,7 @@ static bool switch_to_disk_root(void)
             printf("init: root=%s: no such device; staying on the live root\n", spec);
         return false;
     }
-    if (!check_root(dev))
+    if (!unlock_root(dev) || !check_root(dev))
         return false;
     if (mkdir("/sysroot", 0755) < 0 && errno != EEXIST) {
         printf("init: /sysroot: %s; staying on the live root\n", strerror(errno));

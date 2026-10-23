@@ -90,7 +90,8 @@ def stage_identity(args, results, inst):
         rid = root_id(b)
         out = b.status("cosmo-snap list", "list0")
         need(out, r"^list0=0$", "cosmo-snap list on a fresh install")
-        need(out, r"^cosmo-snap: /: format 11$", "a fresh install's format (11: nothing raised it)")
+        need(out, rf"^cosmo-snap: /: format {install_test.FORMAT_FRESH}$",
+             f"a fresh install's format ({install_test.FORMAT_FRESH}: nothing raised it)")
         # A tree to change.
         b.run("mkdir -p /snapdemo/keep && echo one > /snapdemo/edit.txt && echo gone > /snapdemo/drop.txt && "
               "echo kept > /snapdemo/keep/k.txt && sync")
@@ -99,7 +100,8 @@ def stage_identity(args, results, inst):
         m = need(out, r"^cosmo-snap: created base \(id (\d+), uuid ([0-9a-f-]{36}), generation \d+\)$",
                  "cosmo-snap create base")
         base_id, base_uuid = int(m.group(1)), m.group(2)
-        need(b.text(), r"cosmofs: format version 11 -> 12 \(snapshot identity", "the raise to format 12")
+        if not install_test.ENCRYPT_PASS:   # an encrypted root is made at 14: nothing to raise
+            need(b.text(), r"cosmofs: format version 11 -> 12 \(snapshot identity", "the raise to format 12")
         out = b.status("cosmo-snap create base", "again")
         need(out, r"^again=1$", "a second snapshot named base")
         # The live tree moves on.
@@ -119,7 +121,7 @@ def stage_identity(args, results, inst):
         need(out, r"^one$", "the snapshot's copy of edit.txt")
         need(out, r"^gone$", "the snapshot's copy of drop.txt")
         out = b.status("cosmo-snap list", "list1")
-        need(out, r"^cosmo-snap: /: format 12$", "the format after the first snapshot")
+        need(out, rf"^cosmo-snap: /: format {install_test.FORMAT_SNAP}$", "the format after the first snapshot")
         sid, refer, unique, uuid, flags = list_entry(out, "base")
         if sid != base_id or uuid != base_uuid or refer == 0 or unique == 0:
             raise Fail(f"cosmo-snap list: base is id {sid} uuid {uuid} refer {refer}K unique {unique}K")
@@ -154,7 +156,7 @@ def stage_identity(args, results, inst):
     except Exception:
         b2.kill()
         raise
-    results.append(f"identity: PASS (format 11 -> 12 at the first snapshot; base id {base_id} {base_uuid}; diff "
+    results.append(f"identity: PASS (format {install_test.FORMAT_FRESH} -> {install_test.FORMAT_SNAP} at the first snapshot; base id {base_id} {base_uuid}; diff "
                    f"named the four changes; ids {base_id} < {sid2} < {sid3} across a delete and a remount)")
 
 
@@ -256,7 +258,8 @@ def stage_crash(args, results, inst):
         out = b.status("cosmo-snap rollback --no-reboot c1", "rb1")
         need(out, r"^rb1=0$", "cosmo-snap rollback --no-reboot c1")
         out = b.status("cosmo-snap list", "l1")
-        need(out, r"^cosmo-snap: /: format 12, a rollback is pending$", "the pending rollback in the listing")
+        need(out, rf"^cosmo-snap: /: format {install_test.FORMAT_SNAP}, a rollback is pending$",
+             "the pending rollback in the listing")
     finally:
         b.kill()   # the machine stops: the record is committed, nothing else happens
     b = boot_disk("crash-record-after", args, inst)
@@ -325,7 +328,7 @@ def stage_crash(args, results, inst):
             raise Fail("crash-clear-after: a rollback was applied again after its hold was released")
         need(b.run("cat /crash.txt"), r"^s2$", "/crash.txt after a stop past the release")
         out = b.status("cosmo-snap list", "l3")
-        need(out, r"^cosmo-snap: /: format 12$", "no pending or held rollback after the release")
+        need(out, rf"^cosmo-snap: /: format {install_test.FORMAT_SNAP}$", "no pending or held rollback after the release")
         check_clean(b, root_id(b), "a stop after the release")
         rc = b.finish("poweroff")
         if rc != EXIT_SUCCESS:
