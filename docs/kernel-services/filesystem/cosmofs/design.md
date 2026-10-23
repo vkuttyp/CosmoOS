@@ -2237,6 +2237,12 @@ allocation holds those bytes until something reuses it. That is
 residue only the kernel can read, and wiping every write's bounce to
 cover it is not a cost every write should pay.
 
+The member table is read raw at mount, before the buffer cache can
+check an address against it, and its seal had never been checked there:
+on a plain pool a member table damaged in place was read as long as its
+magic, kind and address were right. Version 14 checks it with the pool's
+seal, CRC32C or tag, which plain pools get too.
+
 `COSMO_FSCTL_KEY_INFO` answers, for a device or a mount, whether the
 pool is encrypted and locked, and its slots as stored (kinds,
 parameters, salts, sealed keys): what `cosmo-key` needs to unwrap one,

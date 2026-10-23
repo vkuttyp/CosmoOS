@@ -829,12 +829,14 @@ int cfs_members_load(struct cfs *fs)
     uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
     if (block == NULL)
         return -ENOMEM;
+    /* Read raw -- the buffer cache checks an address against the very
+     * table this is -- and so checked here as any metadata block is: its
+     * own address, kind and seal. The seal was not checked before roadmap
+     * 1.2 B5, which found it unchecked when a forged table on an encrypted
+     * pool mounted. */
     int rc = pool_read(fs->pool, fs->sb.members, block);
-    if (rc == 0) {
-        const struct cfs_mhdr *h = (const struct cfs_mhdr *)block;
-        if (h->magic != CFS_MHDR_MAGIC || h->kind != CFS_KIND_MEMBERS || h->blkno != fs->sb.members)
-            rc = -EIO;
-    }
+    if (rc == 0 && !cfs_mhdr_ok(&fs->mac, block, fs->sb.members, CFS_KIND_MEMBERS))
+        rc = -EIO;
     if (rc) {
         kfree(block);
         kerror("cosmofs: the member table is unreadable");

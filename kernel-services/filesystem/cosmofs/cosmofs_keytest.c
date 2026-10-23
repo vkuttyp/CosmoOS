@@ -283,7 +283,8 @@ bool selftest_cosmofs_encrypted_root(const char **reason)
     struct {
         const char *what;
         uint64_t dva;
-    } hdrs[] = { { "the inode map's root", sb.imap_root }, { "the key block", sb.key_root } };
+    } hdrs[] = { { "the inode map's root", sb.imap_root }, { "the member table", sb.members },
+                 { "the key block", sb.key_root } };
     for (unsigned i = 0; i < sizeof(hdrs) / sizeof(hdrs[0]); i++) {
         KT_CHECK(cfs_keytab_has(sb.uuid) || kt_load(bd, master) == 0);
         KT_CHECK(kt_forge(bd, hdrs[i].dva, offsetof(struct cfs_mhdr, crc), true, CFS_MHDR_SIZE + 9, save));
@@ -359,6 +360,43 @@ bool selftest_cosmofs_encrypted_root(const char **reason)
     kinfo("selftest: cosmofs-encrypted-root: member 1's label forged with its CRC32C recomputed: mount refused (%d)",
           lrc);
 #endif
+
+    /* CFS-31, on a plain pool: the member table damaged in place -- one
+     * byte of member 0's advisory free count, its CRC32C left as it was --
+     * is refused like any other metadata block. It used to be read with
+     * only its magic, kind and address checked, and the check's mount
+     * loaded the newest root with it. */
+    plain = ramblk_create(1024);
+    KT_CHECK(plain != NULL);
+    KT_CHECK(cosmofs_format(plain) == 0);
+    KT_CHECK(kt_mount_dev(plain) == 0);
+    mounted = true;
+    KT_CHECK(kt_write_at(KT "/a", 0, secret, sizeof(secret) - 1));
+    KT_CHECK(vfs_sync() == 0);
+    KT_CHECK(kt_write_at(KT "/b", 0, secret, sizeof(secret) - 1));
+    KT_CHECK(vfs_sync() == 0);
+    KT_CHECK(vfs_umount(KT) == 0);
+    mounted = false;
+    KT_CHECK(kt_super(plain, &sb));
+    {
+        size_t free_at = CFS_MHDR_SIZE + 8 + offsetof(struct cfs_member, free_blocks);
+        struct spool *p;
+        KT_CHECK(pool_open(plain, &p) == 0);
+        bool w = pool_read(p, sb.members, save) == 0;
+        memcpy(save2, save, CFS_BLOCK);
+        save2[free_at] ^= 0x01;
+        w = w && pool_write(p, sb.members, save2) == 0 && pool_flush(p) == 0;
+        pool_close(p);
+        KT_CHECK(w);
+    }
+    int prc = cosmofs_check_dev(plain, 0, rep, &dev);
+    bool plain_refused = prc == 0 && (dev.flags & (COSMO_FSCTL_DEV_F_MOUNT_FAILED | COSMO_FSCTL_DEV_F_FELL_BACK));
+    kinfo("selftest: cosmofs-encrypted-root: a plain pool's member table damaged in place: %s (check %d, flags "
+          "0x%x)", plain_refused ? "refused" : "ACCEPTED", prc, dev.flags);
+    KT_CHECK(plain_refused);
+    KT_CHECK(kt_put_back(plain, sb.members, save));
+    ramblk_destroy(plain);
+    plain = NULL;
 
     /* A plain pool whose file outgrows the one-level index is raised to
      * 14 and keeps CRC32C: no key block, so no MAC (design.md, "Import

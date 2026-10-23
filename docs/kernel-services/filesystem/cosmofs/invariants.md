@@ -427,10 +427,12 @@ BLAKE2b tag in the bytes a CRC32C would occupy (`mhdr_seal_mac`,
 nothing else: `csum_algo` is part of what the tag covers, so a block
 re-sealed with a CRC is refused like any other forgery. The superblock,
 not the block, decides (`cfs_super_is_mac`); a pool whose key this
-kernel holds is refused if its superblock is not MAC'd.
-Check: `cosmofs-encrypted-root` (the inode map's root, the key block,
-both superblock slots, a member label and a two-level index's middle
-block, each forged with its CRC32C recomputed, refused);
+kernel holds is refused if its superblock is not MAC'd. The member
+table, read raw before the buffer cache can be used, is checked with
+the same seal (before roadmap 1.2 B5 its CRC was not checked at all).
+Check: `cosmofs-encrypted-root` (the inode map's root, the member table,
+the key block, both superblock slots, a member label and a two-level
+index's middle block, each forged with its CRC32C recomputed, refused);
 `make test-encrypt`.
 
 **CF31. The kernel keeps a pool's master key only after the key has
