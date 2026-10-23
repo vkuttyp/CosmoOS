@@ -207,7 +207,9 @@ static bool copy_here(struct cfs *fs, struct blkdev *bd, unsigned vdev, const st
         return false;
     /* A resilver's target or a spare is labelled for this pool and is no
      * copy of anything yet (design.md, "Resilvering"). */
-    if (fs->sb.version >= 13 && (l.flags & (CFS_LABEL_RESILVER | CFS_LABEL_SPARE)))
+    /* At any version: the words were reserved zero before 13, and a
+     * resilver may have labelled a device of an older pool (Codex on #440). */
+    if (l.flags & (CFS_LABEL_RESILVER | CFS_LABEL_SPARE))
         return false;
     if (l.nblocks != want->nblocks) {
         kerror("cosmofs: %s carries member %u but %llu blocks, not %llu", bd->name, vdev,
@@ -570,9 +572,24 @@ static int setup_copies(struct cfs *fs, unsigned vdev, const struct cfs_member *
         if (cp->dev != NULL || cp->state != POOL_COPY_RESILVERING)
             continue;
         struct blkdev *bd = cp->tag ? cfs_find_tagged(fs, CFS_LABEL_RESILVER, cp->tag) : NULL;
+        struct blkdev *done = bd == NULL ? find_device(fs, vdev, want, true, 0) : NULL;
         if (bd != NULL && pool_attach_copy(fs->pool, vdev, c, bd, POOL_COPY_RESILVERING) == 0) {
             kinfo("cosmofs: %s: member %u copy %u resilvering, from block %llu", bd->name, vdev, c,
                   (unsigned long long)cp->cursor);
+        } else if (done != NULL && pool_attach_copy(fs->pool, vdev, c, done, POOL_COPY_ONLINE) == 0) {
+            /* The resilver finished -- the target carries the pool's own
+             * superblocks or label, as current as the root -- and the
+             * machine stopped before the commit that records it ONLINE
+             * (Codex on #440). Only a complete copy is current: a target
+             * gets them last, and nothing else of the pool's is written
+             * the root. */
+            kinfo("cosmofs: %s: member %u copy %u was resilvered just before the last stop; ONLINE", done->name,
+                  vdev, c);
+            cp->whole = false;
+            cp->cursor = 0;
+            cp->tag = 0;
+            if (cp->dirty)
+                memset(cp->dirty, 0, CFS_COPY_DIRTY_BYTES);
         } else {
             kwarn("cosmofs: member %u copy %u was resilvering and its device is not here", vdev, c);
             cp->state = POOL_COPY_MISSING;
@@ -581,6 +598,8 @@ static int setup_copies(struct cfs *fs, unsigned vdev, const struct cfs_member *
         }
         if (bd)
             blkdev_put(bd);
+        if (done)
+            blkdev_put(done);
     }
     /* What a lagging device is, said once: it stays out until resilvered. */
     for (unsigned c = 0; c < n; c++) {
@@ -957,8 +976,17 @@ int cfs_labels_update(struct cfs *fs)
  */
 void cfs_holds_sync(struct cfs *fs)
 {
+    (void)cfs_holds_sync_with(fs, NULL);
+}
+
+/* The same with `extra` held too: a device about to join the pool is
+ * claimed before anything is written to it, and -EBUSY when another mount
+ * has it (Codex on #440: checked first and claimed after, a mount could
+ * take it in between). */
+int cfs_holds_sync_with(struct cfs *fs, struct blkdev *extra)
+{
     if (fs->mnt == NULL)
-        return;
+        return 0;
     struct blkdev *held[MOUNT_HELD_MAX];
     unsigned n = 0;
     const struct spool *p = fs->pool;
@@ -970,9 +998,15 @@ void cfs_holds_sync(struct cfs *fs)
         }
     for (unsigned i = 0; i < p->nspares && n < MOUNT_HELD_MAX; i++)
         held[n++] = p->spare[i];   /* and its spares (roadmap 1.2 B3) */
+    if (extra != NULL) {
+        if (n == MOUNT_HELD_MAX)
+            return -ENOSPC;
+        held[n++] = extra;
+    }
     int rc = vfs_mount_set_held(fs->mnt, held, n);
-    if (rc)
+    if (rc && extra == NULL)
         kwarn("cosmofs: %s: the pool's devices could not all be held (%d)", fs->pool_name, rc);
+    return rc;
 }
 
 /* Copies the table promises that are not ONLINE with a device. */

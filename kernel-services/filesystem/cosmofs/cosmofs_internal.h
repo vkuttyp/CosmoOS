@@ -198,6 +198,8 @@ struct cfs {
     uint64_t rs_since_record;   /* blocks copied since the cursor was last made due for the record */
     uint64_t rs_started_ns;
     uint64_t rs_copied;         /* blocks this resilver copied */
+    uint8_t *rs_buf;            /* the thread's block, allocated before the thread (rs_wake) */
+    uint64_t rs_disagree;       /* blocks two ONLINE sources held differently (rs_step) */
     uint32_t rs_region_errors;  /* the target's write errors when its current region began (an ONLINE copy's holes) */
     bool wb_enabled;        /* test hook: autonomous commits on */
     unsigned wb_interval_ms;
@@ -480,6 +482,7 @@ int cfs_copystate_fill(struct cfs *fs);
 bool cfs_copystate_recorded(struct cfs *fs);
 /* The pool's other devices held by the mount (CFS-5). */
 void cfs_holds_sync(struct cfs *fs);
+int cfs_holds_sync_with(struct cfs *fs, struct blkdev *extra);
 /* Labels on devices that are not (yet) copies: resilver targets and
  * spares (design.md, "Resilvering", "Spares"). */
 int cfs_label_write_dev(struct cfs *fs, struct blkdev *bd, unsigned vdev, uint64_t flags, uint64_t tag,

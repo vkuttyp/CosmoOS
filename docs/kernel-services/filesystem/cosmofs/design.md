@@ -2048,6 +2048,18 @@ readers run.
 - **The cursor survives a reboot.** It is in the record, which every
   `RS_RECORD_BLOCKS` (2048) blocks copied makes a commit due for; a
   mount finds the target by its tag and goes on from the cursor.
+- **Two sources.** The walk copies blocks without knowing what each is,
+  so it cannot check one against its checksum. When a second `ONLINE`
+  copy holds the block too -- a copy being replaced while still good --
+  the two are compared; if any block differs, the copy being replaced is
+  not detached at the end (its `peer` is cleared and the console says
+  so): it may be the only good one, and `fsctl scrub --repair`, which
+  knows each block's checksum, decides before the operator detaches it.
+- **A crash at the end.** A target gets the pool's own superblocks or
+  label last; a mount that finds no tagged target for a `RESILVERING`
+  record but a device of the pool as current as the root takes that
+  device as the copy, `ONLINE`: nothing else gets the root written to it
+  but an `ONLINE` copy, so it is the finished target.
 - **Holes.** An `ONLINE` copy with holes is a target too, after every
   `RESILVERING` one, when its member has another `ONLINE` copy: the walk
   copies its holed regions, and a region's bit goes only when the whole

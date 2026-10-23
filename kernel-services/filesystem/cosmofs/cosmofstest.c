@@ -7125,8 +7125,28 @@ bool selftest_cosmofs_attach(const char **reason)
     RS_CHECK(cfs_super_slots(bd[1], &a, &ra, &b, &rb) == 0 && ra != 0 && rb != 0);   /* no longer the pool's */
     RS_CHECK(vfs_sync() == 0 && same_allocated(bd[0], bd[2], NULL));
 
+    /* A replace whose sources disagree keeps the copy it replaces (Codex
+     * on #440): copy 0's block of /a rots, the walk copies the rot from it,
+     * bd[2] -- the good one -- is not detached, and after a scrub put the
+     * copies right the operator detaches it. */
+    struct file *af = NULL;
+    RS_CHECK(vfs_open(NULL, ENG "/a", COSMO_O_RDONLY, 0, &af) == 0);
+    uint64_t aino = af->vn->ino, ablk = 0;
+    file_put(af);
+    RS_CHECK(cosmofs_test_block_of(mount_of(ENG), aino, 0, &ablk) == 0);
+    RS_CHECK(rot_copy(bd[0], CFS_DVA_BLK(ablk), 0x5c));
+    RS_CHECK(pool_op(COSMOFS_POOL_REPLACE, bd[2]->name, bd[1]->name) == 0);
+    RS_CHECK(cosmofs_test_resilver_run(mount_of(ENG), 0) == 0);
+    unsigned kv = 0, kc = 0;
+    RS_CHECK(pool->m[0].ncopies == 3 && pool_find_dev(pool, bd[2], &kv, &kc) && pool->m[0].copy[kc].peer == 0);
+    struct cosmofs_scrub_stats sc;
+    RS_CHECK(cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.repaired >= 2 && sc.unrecoverable == 0);
+    RS_CHECK(pool_op(COSMOFS_POOL_DETACH, bd[2]->name, NULL) == 0 && pool->m[0].ncopies == 2);
+    RS_CHECK(read_matches(ENG "/a", data, sizeof(data)));
+    RS_CHECK(vfs_sync() == 0 && same_allocated(bd[0], bd[1], NULL));
+
     /* detach: back to one device. */
-    RS_CHECK(pool_op(COSMOFS_POOL_DETACH, bd[2]->name, NULL) == 0);
+    RS_CHECK(pool_op(COSMOFS_POOL_DETACH, bd[1]->name, NULL) == 0);
     RS_CHECK(pool->m[0].ncopies == 1);
     RS_CHECK(pool_op(COSMOFS_POOL_DETACH, bd[0]->name, NULL) == -EBUSY);
     RS_CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.devices == 1 && st.degraded == 0);

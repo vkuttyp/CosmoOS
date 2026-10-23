@@ -563,7 +563,10 @@ static int64_t fsctl_snap(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
  * records are copied field by field, as the snapshots' are: struct
  * cosmofs_copy_info is cosmofs's, struct cosmo_fsctl_copy the ABI.
  */
-#define FSCTL_POOL_MAX 64u   /* copy records a status reports: 255 members x 4 is not a pool anyone has */
+/* Copy and spare records a status has room for: every copy of the most
+ * members the format allows, and the spares (Codex on #440: 64 cut a big
+ * pool's listing short). `total` says how many there were regardless. */
+#define FSCTL_POOL_MAX (255u * 4u + 4u)
 
 static int64_t fsctl_pool(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
 {
@@ -644,7 +647,7 @@ static int64_t fsctl_pool(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
     hdr->version = COSMO_FSCTL_VERSION;
     hdr->kind = cmd->op;
     hdr->count = req.count;
-    hdr->total = req.count;
+    hdr->total = req.total > req.count ? req.total : req.count;
     hdr->bytes = sizeof(struct cosmo_fsctl_copy);
     fsctl_set_result(o, buf, bytes);
     return 0;

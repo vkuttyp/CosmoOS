@@ -271,7 +271,7 @@ struct cosmofs_pool_req {
     enum cosmofs_pool_op op;
     const char *name, *name2;
     struct cosmofs_copy_info *out;  /* STATUS: up to `max` */
-    unsigned max, count;            /* count: filled in (STATUS) */
+    unsigned max, count, total;     /* count, total: filled in (STATUS); total > count when `max` was short */
     uint64_t generation;            /* STATUS: the pool's */
     unsigned members, format, rate;
     bool degraded, resilvering;

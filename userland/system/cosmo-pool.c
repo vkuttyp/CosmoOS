@@ -148,7 +148,7 @@ static const char *state_name(unsigned s)
 static int status_one(int fd, unsigned long long id, const char *path)
 {
     size_t cap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_pool) +
-                 64 * sizeof(struct cosmo_fsctl_copy);
+                 (255 * 4 + 4) * sizeof(struct cosmo_fsctl_copy);   /* every copy and spare a pool can have */
     char *buf = malloc(cap);
     if (buf == NULL)
         return -1;

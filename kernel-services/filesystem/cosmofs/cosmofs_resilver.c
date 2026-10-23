@@ -59,6 +59,8 @@ static int rs_start(struct cfs *fs, unsigned v, unsigned c)
     struct pool_copy *cp = &fs->pool->m[v].copy[c];
     if (cp->dev == NULL)
         return -ENODEV;
+    if (fs->sb.version < 11)
+        return -EOPNOTSUPP;   /* the record that finds the target again cannot be kept (design.md) */
     uint64_t tag = cp->tag ? cp->tag : new_tag();
     int rc = cfs_label_write_dev(fs, cp->dev, v, CFS_LABEL_RESILVER, tag, fs->mem[v].nblocks);
     if (rc)
@@ -93,14 +95,25 @@ static bool rs_takeover(struct cfs *fs, unsigned v, unsigned c)
     strlcpy(was, cp->dev ? cp->dev->name : "no device", sizeof(was));
     enum pool_copy_state state = cp->state;
     int rc = pool_copy_replace_dev(fs->pool, v, c, spare, POOL_COPY_RESILVERING);
-    if (rc == 0) {
-        cp->tag = tag;
-        rc = rs_start(fs, v, c);
-    }
     if (rc) {
         kerror("cosmofs: %s: spare %s could not take member %u copy %u (%d)", fs->pool_name, spare->name, v, c, rc);
-        (void)pool_add_spare(fs->pool, spare, tag);
+        (void)pool_add_spare(fs->pool, spare, tag);   /* the slot never had it */
         blkdev_put(spare);
+        return false;
+    }
+    cp->tag = tag;
+    rc = rs_start(fs, v, c);
+    if (rc) {
+        /* The slot has the spare now and it cannot be labelled: a spare
+         * that does not take a label is no spare, and the copy is out
+         * either way (Codex on #440: back on the spare list it would be a
+         * copy and a spare at once). */
+        kerror("cosmofs: %s: spare %s took member %u copy %u and cannot be written (%d); FAULTED", fs->pool_name,
+               spare->name, v, c, rc);
+        cp->state = POOL_COPY_FAULTED;
+        fs->pool->state_seq++;
+        blkdev_put(spare);
+        cfs_holds_sync(fs);
         return false;
     }
     kwarn("cosmofs: %s: spare %s takes over member %u copy %u (was %s, %s)", fs->pool_name, spare->name, v, c, was,
@@ -111,6 +124,39 @@ static bool rs_takeover(struct cfs *fs, unsigned v, unsigned c)
 }
 
 /* --- the copying --------------------------------------------------------- */
+
+/*
+ * The walk copies blocks as they are, without knowing what each one is, so
+ * it cannot check one against its checksum. What it can check: when a
+ * second ONLINE copy has the block too, that the two agree. A copy being
+ * replaced while it is still good is such a second source; if the first
+ * one rotted, the walk has just copied the rot, and detaching the good
+ * copy at the end would leave none (Codex on #440). So a disagreement is
+ * counted, and rs_finish keeps the copy it would have detached until a
+ * scrub, which does know what each block is, has put the copies right.
+ */
+static void rs_check_sources(struct cfs *fs, unsigned v, unsigned target, uint64_t dva, const uint8_t *got)
+{
+    struct spool *p = fs->pool;
+    unsigned first = POOL_MAX_COPIES;
+    for (unsigned k = 0; k < p->m[v].ncopies; k++)
+        if (k != target && pool_copy_readable(p, dva, k)) {
+            if (first == POOL_MAX_COPIES) {
+                first = k;   /* the one pool_read took */
+                continue;
+            }
+            uint8_t *other = kmalloc(CFS_BLOCK, 0);
+            if (other == NULL)
+                return;
+            if (pool_read_copy(p, dva, k, other) == 0 && memcmp(other, got, CFS_BLOCK) != 0) {
+                if (fs->rs_disagree++ < 8)
+                    kwarn("cosmofs: %s: block %u:%llu differs between member %u copies %u and %u", fs->pool_name, v,
+                          (unsigned long long)POOL_DVA_BLK(dva), v, first, k);
+            }
+            kfree(other);
+            return;
+        }
+}
 
 /* The copy being rebuilt, if any: the first RESILVERING copy with a device
  * whose member has a copy to read from. */
@@ -184,7 +230,17 @@ static int rs_finish(struct cfs *fs, unsigned v, unsigned c, uint8_t *buf)
     fs->rs_copied = 0;
     fs->rs_started_ns = 0;
     /* A replace: what this copy was replacing goes now (design.md,
-     * "Replacing a copy"). */
+     * "Replacing a copy") -- unless two of the copies it was built from
+     * disagreed, when the one being replaced may be the only good one. */
+    if (fs->rs_disagree) {
+        kwarn("cosmofs: %s: %llu block(s) differed between the copies %s was built from; the copy it replaces "
+              "stays until `fsctl scrub --repair` and a `cosmo-pool detach`", fs->pool_name,
+              (unsigned long long)fs->rs_disagree, name);
+        for (unsigned k = 0; k < p->m[v].ncopies; k++)
+            if (p->m[v].copy[k].peer == tag)
+                p->m[v].copy[k].peer = 0;
+        fs->rs_disagree = 0;
+    }
     for (unsigned k = 0; k < p->m[v].ncopies;) {
         struct pool_copy *old = &p->m[v].copy[k];
         if (old->peer == 0 || old->peer != tag) {
@@ -282,6 +338,8 @@ static bool rs_step(struct cfs *fs, uint8_t *buf, struct cfs_pace *pace, uint64_
             continue;   /* free: nothing to copy */
         int rc = pool_read(p, dva, buf);
         if (rc == 0)
+            rs_check_sources(fs, v, c, dva, buf);
+        if (rc == 0)
             (void)pool_write_copy(p, dva, c, buf);   /* a failure is the pool's: the bit set again, or FAULTED */
         else
             kwarn("cosmofs: %s: block %u:%llu reads from no copy (%d); member %u copy %u goes without it",
@@ -328,11 +386,7 @@ static bool rs_step(struct cfs *fs, uint8_t *buf, struct cfs_pace *pace, uint64_
 static void rs_thread(void *arg)
 {
     struct cfs *fs = arg;
-    uint8_t *buf = kmalloc(CFS_BLOCK, 0);
-    if (buf == NULL) {
-        kerror("cosmofs: %s: no memory for the resilver", fs->pool_name);
-        return;
-    }
+    uint8_t *buf = fs->rs_buf;   /* rs_wake's: the thread exists only with it (Codex on #440) */
     struct cfs_pace pace;
     cfs_pace_init(&pace, __atomic_load_n(&g_cosmofs_resilver_rate, __ATOMIC_RELAXED));
     while (!__atomic_load_n(&fs->rs_stop, __ATOMIC_ACQUIRE)) {
@@ -348,7 +402,6 @@ static void rs_thread(void *arg)
             cfs_pace_init(&pace, __atomic_load_n(&g_cosmofs_resilver_rate, __ATOMIC_RELAXED));
         }
     }
-    kfree(buf);
 }
 
 /* With fs->lock held: the thread exists while the mount does (it sleeps
@@ -358,9 +411,15 @@ static void rs_wake(struct cfs *fs)
 {
     if (fs->rs_thread != NULL || fs->rs_stop || fs->rdonly || fs->maint || !fs->mount_done)
         return;
+    if (fs->rs_buf == NULL)
+        fs->rs_buf = kmalloc(CFS_BLOCK, 0);
+    if (fs->rs_buf == NULL) {
+        kwarn("cosmofs: %s: no memory for the resilver; tried again at its next wake", fs->pool_name);
+        return;
+    }
     fs->rs_thread = thread_create(rs_thread, fs, "cfs-resilver", SCHED_PRIO_DEFAULT);
     if (fs->rs_thread == NULL)
-        kwarn("cosmofs: %s: no resilver thread", fs->pool_name);
+        kwarn("cosmofs: %s: no resilver thread; tried again at its next wake", fs->pool_name);
 }
 
 void cfs_resilver_stop(struct cfs *fs)
@@ -370,6 +429,8 @@ void cfs_resilver_stop(struct cfs *fs)
     __atomic_store_n(&fs->rs_stop, true, __ATOMIC_RELEASE);
     thread_join(fs->rs_thread);
     fs->rs_thread = NULL;
+    kfree(fs->rs_buf);
+    fs->rs_buf = NULL;
 }
 
 /*
@@ -519,8 +580,16 @@ static int new_device(struct cfs *fs, const char *name, int v, struct blkdev **o
         rc = -EBUSY;
     if (rc == 0 && bd->read_only)
         rc = -EROFS;
+    /* A sector the pool's block is a whole number of, before anything is
+     * divided by it (Codex on #440: an 8 KiB sector divided by zero). */
+    if (rc == 0 && (bd->sector_size == 0 || bd->sector_size > POOL_BLOCK || POOL_BLOCK % bd->sector_size != 0))
+        rc = -EINVAL;
     if (rc == 0 && v >= 0 && bd->capacity / (POOL_BLOCK / bd->sector_size) < fs->mem[v].nblocks)
         rc = -ENOSPC;
+    /* Claimed before anything is written to it: a mount that took it
+     * after the check above would otherwise share it (Codex on #440). */
+    if (rc == 0)
+        rc = cfs_holds_sync_with(fs, bd);
     if (rc) {
         blkdev_put(bd);
         return rc;
@@ -737,12 +806,14 @@ static void status(struct cfs *fs, struct cosmofs_pool_req *req)
     req->resilvering = false;
     memcpy(req->label, fs->sb.label, sizeof(req->label) < CFS_LABEL_MAX ? sizeof(req->label) : CFS_LABEL_MAX);
     req->count = 0;
+    req->total = 0;
     for (unsigned v = 0; v < p->nmembers; v++) {
         const struct spool_member *m = &p->m[v];
         for (unsigned c = 0; c < m->ncopies; c++) {
             const struct pool_copy *cp = &m->copy[c];
             if (cp->state == POOL_COPY_RESILVERING)
                 req->resilvering = true;
+            req->total++;
             if (req->count >= req->max)
                 continue;
             struct cosmofs_copy_info *o = &req->out[req->count++];
@@ -774,6 +845,7 @@ static void status(struct cfs *fs, struct cosmofs_pool_req *req)
                 strlcpy(o->dev, cp->dev->name, sizeof(o->dev));
         }
     }
+    req->total += p->nspares;
     for (unsigned i = 0; i < p->nspares && req->count < req->max; i++) {
         struct cosmofs_copy_info *o = &req->out[req->count++];
         memset(o, 0, sizeof(*o));

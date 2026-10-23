@@ -48,8 +48,9 @@ void cfs_pace_init(struct cfs_pace *p, unsigned rate)
     p->window = clock_now_ns();
 }
 
-/* With fs->lock held: when this window's share is spent, let the lock go
- * for the rest of the window and take it again. True if it let go. */
+/* Called with fs->lock held, and returns with it held: when this window's
+ * share is spent it lets the caller's lock go for the rest of the window
+ * and takes it again. True if it let go. */
 bool cfs_pace(struct cfs *fs, struct cfs_pace *p)
 {
     if (p->quota == 0 || p->used < p->quota)
