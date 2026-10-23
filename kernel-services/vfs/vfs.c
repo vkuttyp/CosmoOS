@@ -3274,7 +3274,9 @@ bool vfs_bdev_mounted_except(const struct blkdev *bd, const struct mount *self)
     mutex_lock(&g_claim_lock);
     struct mount *mnt;
     list_for_each_entry(mnt, &g_claims, claim_link) {
-        if (mnt != self && claim_covers(mnt, bd)) {
+        if (self != NULL && mnt == self)
+            continue;   /* not "mnt != self": compared with a NULL self, the analyzer takes mnt for NULL */
+        if (claim_covers(mnt, bd)) {
             found = true;
             break;
         }
