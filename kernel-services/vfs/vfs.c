@@ -50,12 +50,23 @@ static bool bdev_related(const struct blkdev *a, const struct blkdev *b);
 
 /* Claim `mnt`'s device, or -EBUSY: it, its disk or one of its
  * partitions is another mount's. */
+/* `bd` against everything mount `m` holds. Under g_claim_lock. */
+static bool claim_covers(const struct mount *m, const struct blkdev *bd)
+{
+    if (bdev_related(m->bdev, bd))
+        return true;
+    for (unsigned i = 0; i < m->nheld; i++)
+        if (bdev_related(m->held[i], bd))
+            return true;
+    return false;
+}
+
 static int bdev_claim(struct mount *mnt)
 {
     mutex_lock(&g_claim_lock);
     struct mount *m;
     list_for_each_entry(m, &g_claims, claim_link) {
-        if (bdev_related(m->bdev, mnt->bdev)) {
+        if (claim_covers(m, mnt->bdev)) {
             mutex_unlock(&g_claim_lock);
             return -EBUSY;
         }
@@ -70,7 +81,43 @@ static void bdev_unclaim(struct mount *mnt)
     mutex_lock(&g_claim_lock);
     list_remove(&mnt->claim_link);
     list_init(&mnt->claim_link);
+    unsigned n = mnt->nheld;
+    struct blkdev *held[MOUNT_HELD_MAX];
+    memcpy(held, mnt->held, sizeof(held));
+    mnt->nheld = 0;
     mutex_unlock(&g_claim_lock);
+    for (unsigned i = 0; i < n; i++)
+        blkdev_put(held[i]);
+}
+
+int vfs_mount_set_held(struct mount *mnt, struct blkdev *const *bd, unsigned n)
+{
+    if (n > MOUNT_HELD_MAX)
+        return -ENOSPC;
+    mutex_lock(&g_claim_lock);
+    struct mount *m;
+    list_for_each_entry(m, &g_claims, claim_link) {
+        if (m == mnt)
+            continue;
+        for (unsigned i = 0; i < n; i++) {
+            if (claim_covers(m, bd[i])) {
+                mutex_unlock(&g_claim_lock);
+                return -EBUSY;
+            }
+        }
+    }
+    for (unsigned i = 0; i < n; i++)
+        blkdev_get(bd[i]);
+    unsigned was = mnt->nheld;
+    struct blkdev *old[MOUNT_HELD_MAX];
+    memcpy(old, mnt->held, sizeof(old));
+    for (unsigned i = 0; i < n; i++)
+        mnt->held[i] = bd[i];
+    mnt->nheld = n;
+    mutex_unlock(&g_claim_lock);
+    for (unsigned i = 0; i < was; i++)
+        blkdev_put(old[i]);
+    return 0;
 }
 
 /* A mount is done with its device: the claim, then its reference. */
@@ -3217,7 +3264,7 @@ bool vfs_bdev_mounted(const struct blkdev *bd)
     mutex_lock(&g_claim_lock);
     struct mount *mnt;
     list_for_each_entry(mnt, &g_claims, claim_link) {
-        if (bdev_related(mnt->bdev, bd)) {
+        if (claim_covers(mnt, bd)) {
             found = true;
             break;
         }

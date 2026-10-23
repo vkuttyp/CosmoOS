@@ -1704,6 +1704,23 @@ static int commit_unfilled(struct cfs *fs, int rc, unsigned appended)
     return rc;
 }
 
+/* The state blocks again, sealed and written: after a copy changed state
+ * during the commit that had already written them (cfs_commit_ex). */
+static int copystate_rewrite(struct cfs *fs)
+{
+    int rc = cfs_copystate_fill(fs);
+    for (unsigned v = 0; v < fs->nmembers && rc == 0; v++) {
+        if (fs->mem[v].state_root == 0)
+            continue;
+        struct cfs_buf *b = buf_find(fs, fs->mem[v].state_root);
+        if (b == NULL)
+            return -EIO;   /* prepare made it dirty in this generation; it is cached */
+        mhdr_seal(fs, b->data, CFS_KIND_COPYSTATE, b->blkno);
+        rc = pool_write(fs->pool, b->blkno, b->data);
+    }
+    return rc;
+}
+
 /*
  * `published` (optional) says whether *this call* put a new root on
  * disk. It is not derivable from the generation number: a commit that
@@ -1726,7 +1743,9 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
     if (fs->rdonly)
         return 0;
     if (fs->nr_dirty == 0 && fs->nr_pending == 0 && fs->nr_exempt == 0) {
-        bool any = false;
+        /* A copy that changed state is something to record, with or
+         * without a change to the tree (design.md, "Format version 13"). */
+        bool any = fs->pool->state_seq != fs->copystate_seq;
         for (unsigned c = 0; c < fs->nr_chunks; c++)
             any = any || fs->bitmap_dirty[c];
         if (!any)
@@ -1766,9 +1785,17 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
      * so every record would be a leak nobody could see.
      */
     bool record_frees = fs->sb.version >= 9;
+    /* The copy state's blocks, and the raise to 13 the first of them
+     * needs: before anything is reserved, because they take blocks and a
+     * raise rewrites the snapshot list (design.md, "The record, written
+     * by the commit"). */
+    int rc = cfs_copystate_prepare(fs);
+    if (rc)
+        return rc;
+    record_frees = fs->sb.version >= 9;
     /* The clones' roots into their entries, on a copy of the list: before
      * anything below allocates past the fixpoint. */
-    int rc = cfs_clones_publish(fs);
+    rc = cfs_clones_publish(fs);
     if (rc)
         return rc;
     struct cfs_res res = { .blk = NULL, .n = 0, .used = 0 };
@@ -1875,6 +1902,15 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
         return commit_unfilled(fs, rc, appended);
     }
 
+    /* What each copy that will miss this commit missed, this commit
+     * included: the record is the last metadata to change (CF25). */
+    rc = cfs_copystate_fill(fs);
+    if (rc) {
+        kfree(held);
+        return commit_unfilled(fs, rc, appended);
+    }
+    uint64_t filled_seq = fs->pool->state_seq;
+
     /* Every dirty metadata block, re-sealed with its final contents. */
     struct cfs_buf *b;
     list_for_each_entry(b, &fs->bufs, link) {
@@ -1911,10 +1947,26 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
      * member's write cache is a root that can outlive them. This is not
      * about labels alone -- it has been true of every block on another
      * member since a pool could have more than one. */
-    rc = pool_flush(fs->pool);
-    if (rc) {
-        kfree(held);
-        return commit_unfilled(fs, rc, appended);
+    /* A copy that died while those were written is one the records just
+     * written do not describe: write them again -- they are this
+     * generation's blocks -- and flush again, until the state holds
+     * still (CF25). Each round takes a copy out, so it ends. */
+    for (unsigned round = 0;; round++) {
+        if (fs->pool->state_seq != filled_seq) {
+            rc = copystate_rewrite(fs);
+            filled_seq = fs->pool->state_seq;
+            if (rc) {
+                kfree(held);
+                return commit_unfilled(fs, rc, appended);
+            }
+        }
+        rc = pool_flush(fs->pool);
+        if (rc) {
+            kfree(held);
+            return commit_unfilled(fs, rc, appended);
+        }
+        if (fs->pool->state_seq == filled_seq || round >= 2 * POOL_MAX_COPIES)
+            break;
     }
 #if CONFIG_COSMOFS_STOP
     /* test-snapshot's crash point "during the switch": every block of the
@@ -1935,6 +1987,9 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
     fs->sb_slot = slot;
     fs->commits++;
     fs->first_dirty_ns = 0;
+    pool_commit_done(fs->pool, fs->sb.generation);
+    if (cfs_copystate_recorded(fs))
+        fs->copystate_seq = filled_seq;
 
     /* The new root is durable: the old generation's blocks are free. */
     list_for_each_entry(b, &fs->bufs, link) {
@@ -1986,6 +2041,11 @@ static int cfs_commit_ex(struct cfs *fs, bool *published)
     /* The frees dirtied bitmap chunks for the next commit; that is
      * bookkeeping of this commit, not a new change to age. */
     fs->first_dirty_ns = 0;
+    /* A copy whose state this commit could not record is a commit still
+     * due, whether or not anything else is written (Codex on #439): the
+     * writeback thread commits only what is marked dirty. */
+    if (fs->pool->state_seq != fs->copystate_seq)
+        note_dirty(fs);
     kdebug("cosmofs: committed generation %llu (%llu free blocks)", (unsigned long long)fs->sb.generation,
            (unsigned long long)fs->free_blocks);
     if (published)
@@ -3065,9 +3125,13 @@ static int load_root(struct cfs *fs, struct vnode **root)
     fs->gen = fs->sb.generation + 1;
     fs->alloc_hint = 2;
     fs->load_stage = COSMO_FSCTL_STAGE_MEMBERS;
+    /* The root being loaded is the last durable one: what the copies
+     * missed is counted from it (design.md, "Degraded operation"). */
+    pool_commit_done(fs->pool, fs->sb.generation);
     int rc = cfs_members_load(fs);
     if (rc)
         return rc;
+    fs->copystate_seq = fs->pool->state_seq;
     /* The key, if this filesystem has one. A mount without it still
      * works for everything that is not a file's contents: the metadata
      * is plaintext by design, and every data read answers -ENOKEY
@@ -3276,6 +3340,22 @@ void cfs_bitmap_claim(struct cfs *fs, uint64_t lin)
     note_dirty(fs);
 }
 
+/* A copy changed state (the pool's notify, under fs->lock or during the
+ * mount): the change is a commit due, and the mount listing says whether
+ * the pool runs degraded (design.md, "Degraded operation"). */
+static void cfs_pool_changed(void *arg)
+{
+    struct cfs *fs = arg;
+    if (fs->mnt == NULL)
+        return;
+    if (pool_degraded(fs->pool))
+        __atomic_fetch_or(&fs->mnt->state, MOUNT_STATE_DEGRADED, __ATOMIC_RELAXED);
+    else
+        __atomic_fetch_and(&fs->mnt->state, ~MOUNT_STATE_DEGRADED, __ATOMIC_RELAXED);
+    if (fs->mount_done && !fs->rdonly)
+        note_dirty(fs);
+}
+
 static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flags, struct mount *mnt)
 {
     (void)fst;
@@ -3311,6 +3391,38 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
         cfs_destroy(fs);
         return -EIO;
     }
+    /* The newest root of the pool, whichever of member 0's devices this
+     * one is (CF27): a copy that was away holds an older root that every
+     * checksum on it still passes. */
+    const struct cfs_super *mine = (ra == 0 && (rb != 0 || a.generation >= b.generation)) ? &a : &b;
+    uint64_t newer_gen = 0;
+    struct blkdev *newer = cfs_newer_member0(bdev, mine->uuid, mine->generation, &newer_gen);
+    if (newer != NULL) {
+        if (vfs_bdev_mounted(newer)) {
+            kerror("cosmofs: %s is behind (generation %llu) and %s, newer, is mounted; not mounting", bdev->name,
+                   (unsigned long long)mine->generation, newer->name);
+            blkdev_put(newer);
+            cfs_destroy(fs);
+            return -EBUSY;
+        }
+        kwarn("cosmofs: %s is behind (generation %llu); mounting from %s (generation %llu)", bdev->name,
+              (unsigned long long)mine->generation, newer->name, (unsigned long long)newer_gen);
+        pool_close(fs->pool);
+        fs->pool = NULL;
+        rc = pool_open(newer, &fs->pool);
+        blkdev_put(newer);
+        if (rc == 0) {
+            ra = super_read(fs, CFS_SUPER_A, &a);
+            rb = super_read(fs, CFS_SUPER_B, &b);
+            if (ra && rb)
+                rc = -EIO;
+        }
+        if (rc) {
+            mount_failure_note(bdev, COSMO_FSCTL_STAGE_SUPER, rc);
+            cfs_destroy(fs);
+            return rc;
+        }
+    }
     /* The newer valid root first; if its tree does not load, the older
      * one (design.md, "Older-slot fallback at mount"). */
     unsigned first = (ra == 0 && (rb != 0 || a.generation >= b.generation)) ? CFS_SUPER_A : CFS_SUPER_B;
@@ -3319,6 +3431,16 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     fs->sb = first == CFS_SUPER_A ? a : b;
     fs->sb_slot = first;
     mnt->fs_priv = fs;
+    /* The pool's console lines name it by its label, or by this device;
+     * and every change of a copy's state is a commit due and, while any
+     * copy is out, a mount listed as degraded. */
+    memcpy(fs->pool_name, fs->sb.label, CFS_LABEL_MAX);
+    fs->pool_name[CFS_LABEL_MAX] = '\0';
+    if (fs->pool_name[0] == '\0')
+        strlcpy(fs->pool_name, bdev->name, sizeof(fs->pool_name));
+    fs->pool->name = fs->pool_name;
+    fs->pool->notify = cfs_pool_changed;
+    fs->pool->notify_arg = fs;
     struct vnode *root = NULL;
     rc = load_root(fs, &root);
     if (rc && fs->rollback_failed) {
@@ -3350,6 +3472,8 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
         return rc;
     }
     mnt->root = root;
+    cfs_pool_changed(fs);
+    cfs_holds_sync(fs);
     kinfo("cosmofs: %s: generation %llu, %llu/%llu blocks free (%llu reserved), %llu inodes", bdev->name,
           (unsigned long long)fs->sb.generation, (unsigned long long)fs->free_blocks,
           (unsigned long long)fs->sb.total_blocks, (unsigned long long)fs->reserve,
@@ -3477,9 +3601,10 @@ int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)
     out->members = fs->nmembers;
     out->devices = 0;
     for (unsigned v = 0; v < fs->nmembers; v++)
-        out->devices += pool_copies(fs->pool, CFS_DVA(v, 0));
+        for (unsigned c = 0; c < pool_copies(fs->pool, CFS_DVA(v, 0)); c++)
+            out->devices += pool_copy_online(fs->pool, v, c) ? 1u : 0u;
     out->repairs = fs->repairs;
-    out->degraded = fs->degraded;
+    out->degraded = cfs_copies_out(fs);
     mutex_unlock(&fs->lock);
     return 0;
 }
@@ -3674,6 +3799,14 @@ void cosmofs_test_mount_writeback(struct mount *mnt, uint64_t *dirty_notes, uint
         *early = fs ? fs->wb_early : 0;
 }
 
+/* The pool under a mount, for the copy-state self-tests to read (roadmap
+ * 1.2 B3). Read with writeback off: nothing else moves it then. */
+struct spool *cosmofs_test_pool(struct mount *mnt)
+{
+    struct cfs *fs = cfs_of(mnt);
+    return fs ? fs->pool : NULL;
+}
+
 void cosmofs_test_set_writeback(struct mount *mnt, bool on)
 {
     struct cfs *fs = cfs_of(mnt);
@@ -3714,12 +3847,12 @@ struct fs_type cosmofs_fs_type = {
  * marker reads 11 at most; design.md, "Format version 12"). Printed at
  * boot, which also keeps it in every build.
  */
-_Static_assert(CFS_VERSION == 12, "update the format marker with CFS_VERSION");
-static const char cfs_format_marker[] = "cosmofs-format-max=12";
+_Static_assert(CFS_VERSION == 13, "update the format marker with CFS_VERSION");
+static const char cfs_format_marker[] = "cosmofs-format-max=13";
 
 void cosmofs_init(void)
 {
     if (vfs_register_fs(&cosmofs_fs_type))
         panic("cosmofs: cannot register");
-    kinfo("cosmofs: reads format versions 2 to 12 (%s)", cfs_format_marker);
+    kinfo("cosmofs: reads format versions 2 to 13 (%s)", cfs_format_marker);
 }

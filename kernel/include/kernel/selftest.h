@@ -409,6 +409,11 @@ bool selftest_cosmofs_scrub_counts(const char **reason);          /* CFS-11: scr
 bool selftest_cosmofs_scrub_open(const char **reason);            /* a scrub leaves the open transaction's blocks to the commit */
 bool selftest_cosmofs_check_dev(const char **reason);             /* B2: the check on an unmounted device */
 bool selftest_cosmofs_scrub_modes(const char **reason);           /* B2: report-only, repair, snapshots, the bound */
+bool selftest_pool_copy_states(const char **reason);             /* B3: FAULTED, MISSING, the last copy, back ONLINE */
+bool selftest_cosmofs_degraded(const char **reason);             /* B3 CF26: a pulled copy, both gone, FAULTED kept */
+bool selftest_cosmofs_copy_bitmap(const char **reason);          /* B3 CF25: the record of what a copy missed */
+bool selftest_cosmofs_copy_import(const char **reason);          /* B3 CF27: the newest root, whichever device */
+bool selftest_cosmofs_copy_geometry(const char **reason);        /* B3: a bigger copy mounts at the table's size */
 bool selftest_cosmofs_root_type(const char **reason);             /* a root that is not a directory is refused, not asserted */
 bool selftest_cosmofs_nomem(const char **reason);                 /* CFS-6: -ENOMEM returned, the transaction kept */
 bool selftest_cosmofs_crypt(const char **reason);                 /* encryption and keys */

@@ -1824,6 +1824,183 @@ from (`/dev/blkctl` `FORMAT_MIRROR`, `vfs_format_mirror`,
 only by the kernel's self-tests. No label and no more than two devices
 (CFS-15's rest).
 
+## Format version 13: copy state (roadmap 1.2 B3)
+
+Version 5 made a member a mirror group and recorded, per device, the
+last commit it took part in. That was enough to *refuse* a stale copy,
+and nothing more: a copy that went away stayed away until the pool was
+reformatted, a write to a group with a dead device failed the
+transaction, and nothing said which blocks a briefly absent copy had
+missed. B3 makes the copy a thing with a state, keeps a record of what
+it missed, and writes that record into the pool. This section is the
+first of B3's parts: the states, degraded operation and the record.
+Resilvering, replacement and spares build on it.
+
+### Where the state lives
+
+**In memory, in the pool** (`kernel-services/storage/pool.c`). Each
+copy of each member has a state:
+
+| State | Read from | Written to | Means |
+|---|---|---|---|
+| `ONLINE` | yes | yes | holds every block the pool has |
+| `MISSING` | no | no | its device is gone (`-ENODEV`), or was not found at import |
+| `OFFLINE` | no | no | the operator took it out (`pool_copy_offline`) |
+| `FAULTED` | no | no | it failed more than `fs.fault_errors` times |
+| `RESILVERING` | no | yes | being rebuilt (the next part) |
+
+A member is **degraded** when any of its copies is not `ONLINE`. The
+pool knows nothing of formats or generations; the filesystem calls it
+under its own lock (`cfs->lock`), which is what serialises the state.
+
+**On disk, in the filesystem** (`cosmofs_member.c`). Member 0 has no
+label -- its copies carry the superblock slots at blocks 0 and 1, and its
+data starts at block 2 -- so per-copy state cannot live on the device it
+describes, and in any case the device it most needs to describe is the
+one that is not there. It lives instead in a `CFS_KIND_COPYSTATE`
+metadata block per mirrored member, named by `cfs_member.state_root`
+(the word that was `reserved`), written copy-on-write like any other
+metadata, so every copy that is present holds the record of the ones
+that are not:
+
+```c
+struct cfs_copy_rec {          /* 1000 bytes */
+    uint32_t state;            /* CFS_COPY_ONLINE .. CFS_COPY_RESILVERING */
+    uint32_t flags;            /* CFS_COPY_WHOLE: the bitmap does not cover it */
+    uint64_t since;            /* the last generation this copy holds whole */
+    uint64_t cursor;           /* resilver: blocks below this are rebuilt */
+    uint32_t read_errors, write_errors, csum_errors, pad;
+    uint8_t dirty[960];        /* one bit per region it missed */
+};
+struct cfs_copystate {         /* the payload, 4016 bytes */
+    uint32_t ncopies;
+    uint32_t region_blocks;    /* blocks per bit: ceil(nblocks / 7680) */
+    uint64_t pad;
+    struct cfs_copy_rec copy[CFS_MAX_COPIES];
+};
+```
+
+7680 regions per copy: one block a region on anything up to 30 MiB, 9
+MiB a region on a 64 GiB member. A region is a unit of *work*, not of
+correctness: the resilver copies every allocated block in a dirty
+region, so a coarse region costs time and never a block.
+
+### Degraded operation
+
+- **A write** goes to every `ONLINE` and `RESILVERING` copy. A copy that
+  does not take it -- not writable, or its write failed -- has the
+  block's region set in its bitmap, and the write succeeds if any
+  `ONLINE` copy took it. Only when none did is it an error (`-EIO`, or
+  the device's), and the transaction is abandoned as before (CF17):
+  the last committed root stays current and nothing panics. A device
+  that goes away during an I/O makes the copy `MISSING` and is `-EIO` to
+  the caller; from the pool `-ENODEV` only ever means "that copy may not
+  be read".
+- **A read** is served by the first `ONLINE` copy that answers; read
+  repair and the scrub pass over copies that are not `ONLINE` rather
+  than counting them bad.
+- **A hole.** An `ONLINE` copy whose write failed while another copy
+  took the block stays `ONLINE` (below its fault count) but holds the
+  old block: the region is set in its bitmap, no read is served from it
+  there, and the member counts as degraded, so its record is kept. A
+  copy that later leaves `ONLINE` adds the regions written since the
+  last root to the holes it had; the resilver fills them. When no copy
+  took the write, nothing is set: the write failed, and nothing names
+  the block.
+- **A failure** is counted against the copy. `-ENODEV` -- the block
+  layer's answer for an unregistered device -- makes it `MISSING` at
+  once; any other I/O error makes it `FAULTED` once its read and write
+  errors pass `fs.fault_errors` (sysctl, default 16; 0 never faults). A
+  checksum mismatch the filesystem's verifier finds is counted too
+  (`pool_copy_csum_error`) and does not fault the copy: a device that
+  answers with the wrong bytes is one read repair and the scrub rewrite,
+  and a faulted copy is one they could no longer write to. The last
+  `ONLINE` copy of a member is never faulted by a count: with nothing to
+  read instead, taking it out turns some errors into all of them.
+- **What a copy missed.** The pool keeps, per member, the regions
+  written since the last durable root (`pool_commit_done(gen)` clears
+  them). A copy that leaves `ONLINE` adds those to its bitmap -- a
+  write that reached its cache and not its disk before it was pulled is
+  still a region it missed -- and records `since`, the last root it
+  held whole. From then every write it does not take adds its region.
+- **A flush** succeeds for a member when an `ONLINE` copy flushed; a
+  copy whose flush failed leaves `ONLINE`, except the member's last,
+  and then the flush fails: a commit durable on none of a member's
+  devices is not published.
+- **Said once.** Each transition prints one console line (`pool: member
+  0 copy 1 (vdb) MISSING (-19): the member is degraded`); the mount line
+  ends `(degraded)`; `/proc/mounts` shows `rw,degraded` while any member
+  is (`MOUNT_STATE_DEGRADED`, which the mount listing reads without
+  the filesystem's lock).
+
+### The record, written by the commit
+
+Whenever a member has a copy that is not `ONLINE`, each commit writes
+its `COPYSTATE` block -- once more after the last copy returns, to
+record that, and then the block is freed and `state_root` is 0. The
+order inside the commit:
+
+1. With the member table, before anything is reserved: copy-on-write
+   the member's state block (or allocate it). It takes a block, and
+   that block must be counted in the bitmaps this commit writes.
+2. Just before the dirty metadata is written: **fill** it. Every dirty
+   buffer's region and region 0 (the superblocks, or the label) are set
+   first for every copy that is not `ONLINE`, because those writes are
+   about to happen and the copy will miss them; then the pool's state
+   is copied in. Without step one the record would describe everything
+   but the commit that wrote it.
+3. After the metadata and the labels, before the flush: if the pool's
+   state changed while they were written (`pool_state_seq` moved -- a
+   copy died mid-commit), fill and write the state blocks again. They
+   are this generation's own blocks, so rewriting them in place is the
+   copy-on-write rule, not an exception to it. A member that had no
+   record when the commit began has no block to rewrite: its copy is
+   recorded by the next commit, which the changed state keeps due
+   (`cfs_copystate_recorded`) even when nothing else is written.
+4. The root, and `pool_commit_done`.
+
+**The format is raised only when there is something to record.** A
+healthy mirror's commits write no state block and leave the pool at its
+version, so it still mounts on a kernel that predates B3. The first
+commit that must record a copy raises the superblock to 13, through 12
+(the snapshot list's raise, B1) when the pool is at 11; from then an
+older kernel refuses the pool, as it refuses every newer version,
+rather than mounting it and never freeing the block it cannot see. A
+pool below version 11 is not raised: its copy state is kept in memory
+for the mount and a copy that missed commits on it is rebuilt whole.
+
+### Import
+
+- **The newest root wins, whichever device the mount was given.** A
+  mount of member 0's device first reads the superblocks of every other
+  device carrying the same pool uuid; if one is newer, the mount moves
+  to it (`cosmofs: vdb is behind (generation 40); mounting from vdc
+  (generation 52)`). Before B3 a mount given the stale copy mounted the
+  stale tree and attached the current copy beside it.
+- **The member's size is the table's**, whatever the capacity of the
+  device the mount found first: a copy may be bigger than the group, and
+  the record's regions are sized from the group (`pool_set_member_blocks`).
+- **Records are read once every member is assembled**: a member's
+  record is a metadata block like any other and may lie on another
+  member when its own had no room (it is allocated on its own member
+  when it can be).
+- **Copies are matched to records, not to numbers.** Copies are
+  interchangeable, so the records are put in order -- `ONLINE` first --
+  and the devices found fill them: a current device (its superblock's or
+  label's generation not older than the root) fills an `ONLINE` record;
+  a record left without one becomes `MISSING` and, not knowing since
+  when, `CFS_COPY_WHOLE`.
+- **A lagging device is not trusted for reads.** It is left out, and
+  its record says what it missed: a device whose generation is a
+  `MISSING` record's `since` is that copy, and the record's bitmap is
+  what it needs; any other lagging device has no record that covers it
+  and is a whole rebuild. `OFFLINE` and `FAULTED` records stay so until
+  the operator acts.
+- **The mount holds every device the pool uses** besides the one it was
+  given -- its other copies, and the newer device a redirected mount
+  moved to -- so `/dev/blkctl`'s mounted check and a second mount see
+  them in use (`vfs_mount_set_held`; CFS-5).
+
 ## Self-test fixture failure ownership
 
 `cosmofstest.c:engine_mount` owns the registered RAM device until setup

@@ -371,6 +371,34 @@ the four bounded by B2 are on write paths (a delete, a free, a new
 snapshot), which a pool refused at boot never reaches; they are checked
 by review.
 
+**CF25. A copy that misses a write is recorded as having missed it.**
+Every write the pool does not complete on a copy of a member -- the copy
+not writable, or its write failed -- sets that block's region in the
+copy's dirty bitmap, and a copy that leaves `ONLINE` starts from every
+region written since the last durable root. The commit that writes the
+copy's `COPYSTATE` record sets the regions of its own metadata and root
+first, and rewrites the record if a copy's state changed while it ran;
+the record a mount reads therefore names every region the copy lacks
+relative to that root (`design.md`, "Format version 13"). Check:
+`cosmofs-copy-bitmap` (a copy removed, files written and committed, the
+pool remounted: the record's bitmap covers the region of every block
+written after the removal, and the remount's record equals the one
+before it); `tools/b3-copystate-probe.py --old` fails it.
+
+**CF26. A pool with one good copy of a block keeps working; with none,
+the I/O fails and only it.** A write succeeds when one `ONLINE` copy
+took it; a read is served by any `ONLINE` copy; a copy that is gone
+(`-ENODEV`), offline or faulted is never read, and the last `ONLINE`
+copy is never faulted by a count. A block no copy can supply is `-EIO`
+to that read; a write no copy took is `-EIO` and abandons the
+transaction (CF17) -- neither panics. Check: `cosmofs-degraded`
+(states, `/proc/mounts`, the threshold, both copies gone).
+
+**CF27. A mount serves the newest root among the pool's member-0
+devices, and attaches no lagging copy.** Whichever device the mount was
+given; a device behind the root is not attached for reads. Check:
+`cosmofs-copy-import`.
+
 **CF18. From format version 12 a snapshot's identity is its own: every
 snapshot has a uuid no other snapshot of the filesystem has, and no id
 is handed out twice, across remounts included.** The uuid is drawn when
@@ -431,9 +459,9 @@ origin's); `test-snapshot`'s `clone` stage on the installed root.
   `flush`; a device that did not negotiate one is taken to have no
   volatile cache (V2's gap).
 - A member-0 device that missed only a root write cannot be told from a
-  stale one, and nothing resilvers a copy left out; the pool runs
-  degraded until reformatted (`design.md`, "The failure a checksum
-  cannot see").
+  stale one; since roadmap 1.2 B3 its record says what it missed
+  (CF25), and until a resilver it is left out (`design.md`, "The
+  failure a checksum cannot see", "Format version 13").
 - Space a snapshot keeps alive is not reported (V21's gap).
 
 ## 4. Where documents and code disagree

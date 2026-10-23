@@ -204,6 +204,9 @@ struct fs_type {
 #define MOUNT_SCRATCH (1u << 2)          /* ramfs: the root is 01777 (COSMO_MOUNT_SCRATCH, a /tmp) */
 #define MOUNT_DETACHED (1u << 3)         /* vfs_mount_detached's: no namespace sees it, no autonomous commit (kernel only) */
 
+#define MOUNT_HELD_MAX 12                /* devices a mount holds beyond its own (a pool: copies and spares) */
+#define MOUNT_STATE_DEGRADED (1u << 0)   /* a mirrored pool runs without one of its copies: /proc/mounts says so */
+
 struct mount {
     struct kobject obj;
     /*
@@ -222,6 +225,9 @@ struct mount {
     struct blkdev *bdev;
     void *fs_priv;
     unsigned flags;
+    /* MOUNT_STATE_*, set by the filesystem at any time and read without
+     * its locks (the mount listing): atomics only. */
+    uint32_t state;
     struct list_node vnodes[VNODE_HASH];
     spinlock_t lock;          /* the vnode hash and nr_vnodes only: a leaf below every mutex */
     struct mutex rename_lock; /* serialises renames on this mount; keeps the ancestry stable */
@@ -232,6 +238,11 @@ struct mount {
      * mount's: from before fs->mount reads it until after fs->unmount
      * has finished with it (V38; found in S6's review). */
     struct list_node claim_link;
+    /* The other devices the filesystem holds besides `bdev` (a pool's
+     * other copies and spares: CFS-5), referenced; on the claims with
+     * it. Set by the filesystem (vfs_mount_set_held) under g_claim_lock. */
+    struct blkdev *held[MOUNT_HELD_MAX];
+    unsigned nheld;
     /* The namespaces that can see this mount, as struct mount_ns_ref.
      * Under the mountpoint's lock, the same lock as cover_link: where a
      * mount is attached and who can see it are one question, and a
@@ -613,10 +624,14 @@ void fsctl_dev_init(void);
 void blkctl_dev_init(void);
 
 /* Whether `bd`, the disk it is a partition of, or a partition of it is
- * the device of a mount right now. A snapshot: the caller decides on it
- * without holding the mount table. Pool members other than a mount's
- * named device are not seen. */
+ * the device of a mount right now, or one the mount's filesystem holds
+ * (another copy of a mounted pool, or its spare: CFS-5). A snapshot: the
+ * caller decides on it without holding the mount table. */
 bool vfs_bdev_mounted(const struct blkdev *bd);
+/* The filesystem of `mnt` holds these devices besides its own: replaces
+ * the set (references taken, the old ones dropped). -EBUSY when one of
+ * them is another mount's, and the set is then unchanged. */
+int vfs_mount_set_held(struct mount *mnt, struct blkdev *const *bd, unsigned n);
 /* Make an empty `fsname` filesystem on `bd`: -ENODEV for an unknown
  * type, -EOPNOTSUPP for one that cannot format, -EBUSY when
  * vfs_bdev_mounted. */

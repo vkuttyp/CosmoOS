@@ -213,7 +213,10 @@ static void mounts_line(struct mounts_out *o, const struct mount *mnt, const cha
     mo_path(o, path);
     mo_str(o, " ");
     mo_str(o, mnt->fs->name);
-    mo_str(o, (mnt->flags & MOUNT_RDONLY) ? " ro 0 0\n" : " rw 0 0\n");
+    mo_str(o, (mnt->flags & MOUNT_RDONLY) ? " ro" : " rw");
+    if (__atomic_load_n(&mnt->state, __ATOMIC_RELAXED) & MOUNT_STATE_DEGRADED)
+        mo_str(o, ",degraded");
+    mo_str(o, " 0 0\n");
     if (o->over)
         o->len = start;
 }
