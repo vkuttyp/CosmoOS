@@ -22,6 +22,20 @@ function has MSI-X and a memory BAR. The test logs the function count
 (9 under the default QEMU configuration), the virtio count (3) and the
 access mechanism (`ECAM`).
 
+## `make test-pci-hotplug` (`tests/boot/pci_hotplug_test.py`; roadmap 1.2 B3)
+
+The live image with three `pcie-root-port`s, one holding a blank virtio
+disk, driven through QMP: every port announces its slot (and whether its
+events come by MSI); `device_del` of the disk ends with QEMU's
+`DEVICE_DELETED` (which QEMU sends only after the guest powered the slot
+off) and the disk's removal; `device_add` of a disk with a GPT into the
+second port is enumerated, registered and its two partitions scanned
+without being asked (BLK-5); a cosmofs on that disk's partition with a
+shell loop writing to it is removed the same way and the shell still
+answers; an NVMe controller is added into the third port and removed.
+Each step's time from the QMP command to the guest's line is printed.
+x86-64 runs q35 with its ACPI hotplug of root ports off.
+
 ## Host test `test_pci_bar` (`tests/host/test_pci_bar.c`)
 
 `pci_bar_mem_size` on sizing masks: 32-bit and 64-bit BARs with writable

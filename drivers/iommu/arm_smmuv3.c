@@ -1,6 +1,6 @@
 /*
  * arm_smmuv3.c - ARM SMMUv3 stage-2 DMA remapping for the virt machine
- * (docs/kernel/iommu/design.md §5). A linear stream table of 256 entries,
+ * (docs/kernel/iommu/design.md §5). A linear stream table of up to 4096 entries,
  * stage-2 translation through the generic walker (LPAE descriptors), a
  * polled command queue, an event queue on a wired SPI.
  */
@@ -81,8 +81,11 @@
  * level 0), IRGN0/ORGN0 write-back, SH0 inner, TG0 4 KiB. */
 #define STE_S2VTCR_FIXED ((uint64_t)((2 << 6) | (1 << 8) | (1 << 10) | (3 << 12) | (0 << 14)) << 32)
 
-#define STRTAB_LOG2      8u           /* stream ids 0..255: every function of bus 0 */
-#define STRTAB_ENTRIES   (1u << STRTAB_LOG2)
+/* Stream ids 0..4095: every function of buses 0 to 15 -- bus 0 and the
+ * buses behind its root ports, which every device a hot-plug slot adds is
+ * on (roadmap 1.2 B3; DRV-8 was 0..255, bus 0 alone). A linear table of
+ * 256 KiB, smaller when the SMMU's own stream ids are narrower. */
+#define STRTAB_LOG2_MAX  12u
 #define QUEUE_LOG2       8u
 #define QUEUE_ENTRIES    (1u << QUEUE_LOG2)
 
@@ -96,6 +99,7 @@ struct smmu {
     struct iommu_unit unit;
     volatile uint8_t *regs;
     paddr_t strtab, cmdq, eventq;
+    unsigned strtab_log2, strtab_entries;   /* the linear stream table's size: min(SIDSIZE, STRTAB_LOG2_MAX) */
     uint32_t cmdq_prod;
     uint32_t eventq_cons;
     uint32_t vmid_bits[65536 / 32];
@@ -247,7 +251,7 @@ static void smmu_domain_fini(struct iommu_unit *iu, struct iommu_domain *d)
 static int smmu_attach(struct iommu_unit *iu, struct iommu_domain *d, uint32_t sid)
 {
     struct smmu *u = of(iu);
-    if (sid >= STRTAB_ENTRIES)
+    if (sid >= u->strtab_entries)
         return -ERANGE;
     uint64_t *ste = (uint64_t *)((uint8_t *)phys_to_virt(u->strtab) + sid * 64);
     ste[1] = 0;
@@ -270,7 +274,7 @@ static int smmu_attach(struct iommu_unit *iu, struct iommu_domain *d, uint32_t s
 static int smmu_detach(struct iommu_unit *iu, struct iommu_domain *d, uint32_t sid)
 {
     struct smmu *u = of(iu);
-    if (sid >= STRTAB_ENTRIES)
+    if (sid >= u->strtab_entries)
         return 0;
     uint64_t *ste = (uint64_t *)((uint8_t *)phys_to_virt(u->strtab) + sid * 64);
     ste[0] = 0;
@@ -474,7 +478,9 @@ void arm_smmuv3_init(void)
     wait_eq(u, SMMU_CR0ACK, 0);
     wr32(u, SMMU_CR1, (3u << 10) | (1u << 8) | (1u << 6) | (3u << 4) | (1u << 2) | 1u);   /* inner-shareable, write-back */
     wr32(u, SMMU_CR2, 0);
-    u->strtab = alloc_zeroed(STRTAB_ENTRIES * 64);
+    u->strtab_log2 = sidsize < STRTAB_LOG2_MAX ? sidsize : STRTAB_LOG2_MAX;
+    u->strtab_entries = 1u << u->strtab_log2;
+    u->strtab = alloc_zeroed((size_t)u->strtab_entries * 64);
     u->cmdq = alloc_zeroed(QUEUE_ENTRIES * 16);
     u->eventq = alloc_zeroed(QUEUE_ENTRIES * 32);
     if (!u->strtab || !u->cmdq || !u->eventq) {
@@ -482,7 +488,7 @@ void arm_smmuv3_init(void)
         return;
     }
     wr64(u, SMMU_STRTAB_BASE, (u->strtab & 0x000ffffffffffc0ull) | Q_RA_WA);
-    wr32(u, SMMU_STRTAB_BASE_CFG, STRTAB_LOG2);   /* linear */
+    wr32(u, SMMU_STRTAB_BASE_CFG, u->strtab_log2);   /* linear */
     wr64(u, SMMU_CMDQ_BASE, (u->cmdq & 0x000fffffffffffe0ull) | Q_RA_WA | QUEUE_LOG2);
     wr32(u, SMMU_CMDQ_PROD, 0);
     wr32(u, SMMU_CMDQ_CONS, 0);
@@ -524,7 +530,7 @@ void arm_smmuv3_init(void)
     g_present = true;
     iommu_register_unit(&u->unit);
     kinfo("iommu: %s at %p: stream ids %u bits (%u tabled), VMIDs to %u, stage 2, %u-bit addresses, 4 KiB granule; translation on",
-          u->unit.name, (void *)(uintptr_t)desc.base, sidsize, STRTAB_ENTRIES, u->vmid_max, u->oas_bits);
+          u->unit.name, (void *)(uintptr_t)desc.base, sidsize, u->strtab_entries, u->vmid_max, u->oas_bits);
 }
 
 #else

@@ -233,6 +233,7 @@ void kernel_main(const struct cosmoboot_info *info)
     device_init();
     pci_init();
     iommu_init();   /* DMA remapping on before the first driver enables bus mastering (kernel/iommu) */
+    pci_hotplug_start();   /* the hot-plug ports' interrupts: an MSI is a DMA write, so after the IOMMU */
     blk_init();
     random_init();
 

@@ -12,6 +12,7 @@
 #   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
 #   make test-snapshot roadmap 1.2 B1: snapshots of the installed root from the shell (CI: BUILD=release)
 #   make test-fsck    roadmap 1.2 B2: fsck at boot and offline, scrub --repair on a mirror (CI: BUILD=release)
+#   make test-pci-hotplug roadmap 1.2 B3: PCIe device_del/device_add, idle and under I/O, NVMe, late partition scan
 #   make test-upgrade shell completeness S7: upgrade an installed v1.0.3 to this build, roll back (CI: BUILD=release)
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
 #   make test-security roadmap M5: verified boot refuses tampered files; VERIFY_BOOT=0 says so (CI: BUILD=release)
@@ -43,7 +44,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-fsck test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-fsck test-pci-hotplug test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -296,6 +297,15 @@ test-snapshot: $(IMAGE)
 test-fsck: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/fsck_test.py --image $(IMAGE) --workdir $(OUT)/test-fsck \
+		--timeout $(BOOT_TIMEOUT)
+
+# Roadmap 1.2 B3's PCIe hotplug test (tests/boot/pci_hotplug_test.py,
+# docs/drivers/pci/testing.md, "test-pci-hotplug"): QEMU device_del and
+# device_add against root ports, idle and under I/O, virtio-blk and NVMe,
+# and the partitions of a disk that arrives after boot.
+test-pci-hotplug: $(IMAGE)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/pci_hotplug_test.py --image $(IMAGE) --workdir $(OUT)/test-pci-hotplug \
 		--timeout $(BOOT_TIMEOUT)
 
 # Shell completeness S7's acceptance test (tests/boot/upgrade_test.py,

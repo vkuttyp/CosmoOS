@@ -253,8 +253,14 @@ through the installer's channel). A rescan removes the previous
 partitions first and is refused with `-EBUSY` while any of them is in use
 (a reference beyond the registry's and the scan's: a mount, a
 `blk_find` holder). `blk_unregister` of a disk removes its partitions
-first (D17). A disk registered after boot -- a USB stick, a hot-plugged
-disk -- is not scanned until asked (inventory).
+first (D17). A disk that arrives with a device a PCIe hot-plug slot adds
+is scanned too (roadmap 1.2 B3, BLK-5): the hotplug thread lists the
+whole disks before the new functions probe and scans each one that is
+there after it, logging `part: vdc registered after boot: 2
+partition(s)`. Not every registration after boot is scanned: the
+self-tests unbind and rebind disks and count when each is released, and
+a scan holding one would change the count. A USB disk that arrives late
+is still scanned only when asked (`/dev/blkctl` RESCAN; backlog BLK-5).
 
 ### Entropy (`kernel/include/kernel/random.h`)
 

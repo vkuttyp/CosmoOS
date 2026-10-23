@@ -20,6 +20,8 @@
 #include <kernel/vmm.h>
 #include <arch/cpu.h>
 
+#include <drivers/pci.h>
+
 #include <kernel/iommu_pt.h>
 
 #if defined(ARCH_X86_64)
@@ -78,6 +80,7 @@ struct vtd_unit {
     bool include_all;
     unsigned nr_scopes;
     uint32_t scope_sid[16];
+    uint8_t scope_type[16];      /* 1: a PCI endpoint, 2: a PCI sub-hierarchy (a bridge and what is below it) */
     spinlock_t lock;             /* register sequences and the context tables */
     int fault_vector;
 };
@@ -150,9 +153,26 @@ static bool vtd_covers(struct iommu_unit *iu, uint32_t sid)
     struct vtd_unit *u = of(iu);
     if (u->include_all)
         return true;
-    for (unsigned i = 0; i < u->nr_scopes; i++)
+    for (unsigned i = 0; i < u->nr_scopes; i++) {
         if (u->scope_sid[i] == sid)
             return true;
+        /* A sub-hierarchy scope names a bridge: it covers every function on
+         * the buses below it, its secondary to its subordinate. A device
+         * behind a PCIe root port is one -- every function a hot-plug slot
+         * adds (roadmap 1.2 B3) -- and it is translated whether or not it
+         * was given a domain: one without faults its first DMA. */
+        if (u->scope_type[i] != 2)
+            continue;
+        unsigned bus = (sid >> 8) & 0xff;
+        for (unsigned k = 0; k < pci_device_count(); k++) {
+            struct pci_device *br = pci_device_at(k);
+            if (br == NULL || pci_requester_id(br) != u->scope_sid[i] || (br->header_type & 0x7f) != 1)
+                continue;
+            unsigned sec = pci_cfg_read8(br, 0x19), sub = pci_cfg_read8(br, 0x1a);
+            if (bus >= sec && bus <= sub && sec != 0)
+                return true;
+        }
+    }
     return false;
 }
 
@@ -339,6 +359,7 @@ static void parse_scopes(struct vtd_unit *u, const uint8_t *p, const uint8_t *en
             break;
         if ((type == 1 || type == 2) && len >= 8 && u->nr_scopes < 16) {
             uint8_t dev = p[6], fn = p[7];   /* the first path entry names the device on start_bus */
+            u->scope_type[u->nr_scopes] = type;
             u->scope_sid[u->nr_scopes++] = ((uint32_t)start_bus << 8) | ((uint32_t)dev << 3) | fn;
         }
         p += len;
