@@ -321,6 +321,18 @@ bool pagecache_text_busy(struct vnode *vn)
     return false;
 }
 
+/*
+ * Asked before a clean page becomes dirty: the filesystem says now, not
+ * at write-back, whether it could ever write the page back (CFS-32). A
+ * page already dirty was asked about when it became so.
+ */
+static int may_dirty(struct vnode *vn, const struct pc_entry *e)
+{
+    if (e->dirty || vn->ops == NULL || vn->ops->dirty_check == NULL)
+        return 0;
+    return vn->ops->dirty_check(vn, e->index, vn->pc.nr_dirty);
+}
+
 /* A write dirties the page: off the LRU until pagecache_sync cleans it. */
 static void mark_dirty(struct pagecache *pc, struct pc_entry *e)
 {
@@ -370,6 +382,7 @@ int64_t pagecache_write(struct vnode *vn, uint64_t off, const void *buf, size_t 
     const uint8_t *in = buf;
     size_t done = 0;
     int err = 0;
+    bool flushed = false;
     reclaim_if_needed();
     mutex_lock(&vn->pc.lock);
     while (done < len) {
@@ -381,6 +394,26 @@ int64_t pagecache_write(struct vnode *vn, uint64_t off, const void *buf, size_t 
         struct pc_entry *e = get(vn, index, &err);
         if (e == NULL)
             break;
+        /* Refused before a byte is copied, so a refused write leaves the
+         * page as it was. The pages this vnode already has dirty count
+         * against it until written, and writing them may be all the room
+         * the next one needs (a filesystem charges a dirty page for the
+         * worst it can cost): write them once and ask again. The writer
+         * holds the vnode lock, the order pagecache_sync runs in. */
+        err = may_dirty(vn, e);
+        if (err == -EFBIG && vn->pc.nr_dirty != 0 && !flushed) {
+            lockdep_assert_held(&vn->lock, LOCKDEP_KIND_MUTEX);
+            mutex_unlock(&vn->pc.lock);
+            err = pagecache_sync(vn);
+            mutex_lock(&vn->pc.lock);
+            flushed = true;
+            if (err)
+                break;
+            continue;   /* the entry again: reclaim may have taken it while unlocked */
+        }
+        if (err)
+            break;
+        flushed = false;
         memcpy((uint8_t *)page_to_virt(e->page) + in_page, in + done, n);
         mark_dirty(&vn->pc, e);
         if (!list_empty(&vn->pc.mappings))
@@ -589,8 +622,16 @@ int pagecache_fault_page(struct vnode *vn, uint64_t index, bool dirty, struct pa
     struct pc_entry *e = get(vn, index, &err);
     if (e == NULL)
         return err;
-    if (dirty)
+    if (dirty) {
+        /* A page the file could never write back is a SIGBUS for the
+         * store, as a write() of it is an error: this path holds the
+         * cache lock without the vnode's, so it cannot write the
+         * vnode's other dirty pages first as pagecache_write does. */
+        err = may_dirty(vn, e);
+        if (err)
+            return err;
         mark_dirty(pc, e);
+    }
     pmm_page_get(e->page);   /* the mapping's reference, taken under the mutex reclaim decides under */
     *out = e->page;
     return 0;
@@ -615,6 +656,11 @@ int pagecache_put_page(struct vnode *vn, uint64_t index, const void *buf)
     int err = 0;
     struct pc_entry *e = get(vn, index, &err);
     if (e) {
+        err = may_dirty(vn, e);
+        if (err) {
+            mutex_unlock(&vn->pc.lock);
+            return err;
+        }
         memcpy(page_to_virt(e->page), buf, PAGE_SIZE);
         mark_dirty(&vn->pc, e);
         if (!list_empty(&vn->pc.mappings))

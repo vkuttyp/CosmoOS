@@ -16,6 +16,7 @@
 #include <kernel/cred.h>
 #include <kernel/crc32c.h>
 #include <kernel/page.h>
+#include <kernel/panic.h>
 #include <kernel/lz4.h>
 #include <kernel/string.h>
 
@@ -211,6 +212,36 @@ static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_
         cfs_free_block_deferred(fs, w->drop[i]);
     cfs_prep_release(fs, &w->prep);   /* nothing, unless a kept block needed no copy after all */
     kfree(w);
+    __atomic_store_n(&fs->map_stores, fs->map_stores + 1, __ATOMIC_RELEASE);
+    fs->last_store_in = in;
+    fs->last_store_n = n;
+    return 0;
+}
+
+/* The runs an inode's map holds, counted without gathering them: the
+ * direct slots in use and each chain block's, bounded as extents_load
+ * bounds the chain. Under fs->lock. */
+static int extents_count(struct cfs *fs, const struct cfs_inode *in, unsigned *out)
+{
+    unsigned k = 0;
+    for (unsigned i = 0; i < CFS_DIRECT && cfs_ext_count(&in->direct[i]); i++)
+        k++;
+    uint64_t next = in->indirect;
+    unsigned chain = 0;
+    while (next) {
+        if (++chain > CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 1 || !cfs_dva_valid(fs, next))
+            return -EIO;   /* a cycle or a wild pointer, as extents_load says */
+        struct cfs_buf *b;
+        int rc = cfs_buf_get(fs, next, CFS_KIND_EXTENTS, &b);
+        if (rc)
+            return rc;
+        const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
+        for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK && cfs_ext_count(&eb->ext[i]); i++)
+            k++;
+        next = eb->next;
+        cfs_buf_put(fs, b);
+    }
+    *out = k;
     return 0;
 }
 
@@ -336,8 +367,12 @@ static int faultinject_set_extent(void)
 static int set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne, uint64_t *old)
 {
     int rc = faultinject_set_extent();
-    if (rc)
+    if (rc) {
+#if CONFIG_DEBUG
+        fs->fbig_injected = rc == -EFBIG;
+#endif
         return rc;
+    }
     uint64_t lblk = ne.lblk, count = cfs_ext_count(&ne);
     if (lblk + count > 0x100000000ull)
         return -EFBIG;
@@ -2441,6 +2476,96 @@ static int sync_after_write(struct cfs *fs, struct vnode *vn, int rc)
     return rc ? rc : src;
 }
 
+/*
+ * The run bound, charged when a page becomes dirty rather than found at
+ * its write-back (CFS-32; design.md, "Refused at the write"). A dirty
+ * page's write-back is one set_extent, which adds at most two runs (the
+ * run it lands in split around it); a whole record's is one set_extent
+ * for eight pages, so two a page is a bound and not a guess. A truncate
+ * adds runs of its own -- a record it cuts is written again as plain
+ * blocks, at most seven, and a partial last block once more -- so
+ * cfs_truncate writes the dirty pages first when its additions could
+ * reach the room they were charged; CFS_TRUNC_ADDS of headroom covers a
+ * store that faults a page dirty between that test and the trim.
+ */
+#define CFS_TRUNC_ADDS CFS_RECORD_BLOCKS
+
+static int inode_runs(struct cfs *fs, struct vnode *vn, unsigned *out)
+{
+    struct cfs_vnode *cv = vn->fs_priv;
+    if (!cv->runs_valid || cv->runs_at != __atomic_load_n(&fs->map_stores, __ATOMIC_ACQUIRE)) {
+        int rc = cfs_lock_tree_w(fs, vn);
+        if (rc)
+            return rc;
+        unsigned n;
+        rc = extents_count(fs, cfs_inode_of(vn), &n);
+        if (rc == 0) {
+            cv->runs = n;
+            cv->runs_at = fs->map_stores;
+            cv->runs_valid = true;
+        }
+        cfs_unlock_tree(fs);
+        if (rc)
+            return rc;
+    }
+    *out = cv->runs;
+    return 0;
+}
+
+static bool runs_fit(struct cfs *fs, unsigned runs, unsigned dirty)
+{
+    return (uint64_t)runs + 2ull * dirty + CFS_TRUNC_ADDS <= cfs_max_extents(fs);
+}
+
+/* After a write-back or a truncate under fs->lock: when the last map
+ * stored is this vnode's, its length is the inode's runs now, so the next
+ * page asked about needs no count. */
+static void note_runs(struct cfs *fs, struct vnode *vn)
+{
+    struct cfs_vnode *cv = vn->fs_priv;
+    if (fs->last_store_in == cfs_inode_of(vn)) {
+        cv->runs = fs->last_store_n;
+        cv->runs_at = fs->map_stores;
+        cv->runs_valid = true;
+    }
+}
+
+/* A page cfs_dirty_check let be dirtied that write-back cannot store is
+ * this file's bug, not the writer's: named, under CONFIG_DEBUG, where it
+ * happens (CFS-32). The extent-fail seam's -EFBIG is the one expected. */
+static void stuck_page_check(struct cfs *fs, struct vnode *vn, uint64_t index, int rc)
+{
+#if CONFIG_DEBUG
+    if ((rc == -EFBIG && !fs->fbig_injected) || rc == -EROFS)
+        panic("cosmofs: inode %llu page %llu is dirty and write-back cannot store it (%d): cfs_dirty_check "
+              "admitted it (CFS-32)",
+              (unsigned long long)cfs_inode_of(vn)->ino, (unsigned long long)index, rc);
+    fs->fbig_injected = false;
+#else
+    (void)fs;
+    (void)vn;
+    (void)index;
+    (void)rc;
+#endif
+}
+
+/* The VFS `dirty_check` operation. */
+static int cfs_dirty_check(struct vnode *vn, uint64_t index, unsigned dirty)
+{
+    struct cfs *fs = cfs_of(vn->mnt);
+    if (fs == NULL || fs->failed)
+        return -EIO;     /* write-back would say the same, for ever */
+    if (tree_readonly(fs, vn))
+        return -EROFS;   /* a snapshot's file: its write-back is refused */
+    if (index >= 0x100000000ull)
+        return -EFBIG;   /* past a 32-bit logical block, which no run can name */
+    unsigned runs;
+    int rc = inode_runs(fs, vn, &runs);
+    if (rc)
+        return rc;
+    return runs_fit(fs, runs, dirty + 1) ? 0 : -EFBIG;
+}
+
 static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
 {
     if (tree_readonly(cfs_of(vn->mnt), vn))
@@ -2458,6 +2583,8 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
     }
     rc = write_one_page(fs, cfs_inode_of(vn), index, buf);
     rc = sync_after_write(fs, vn, rc);
+    note_runs(fs, vn);
+    stuck_page_check(fs, vn, index, rc);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -2503,6 +2630,8 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
             *done = 1;
     }
     rc = sync_after_write(fs, vn, rc);
+    note_runs(fs, vn);
+    stuck_page_check(fs, vn, index, rc);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -2531,6 +2660,19 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
     if (lrc)
         return lrc;
     pagecache_truncate(vn, size);
+    /* What the trim adds to the map must not come out of the room the
+     * pages still dirty were charged for: near the bound, write them
+     * first. The caller holds the vnode lock, the order pagecache_sync
+     * runs in. */
+    unsigned runs;
+    lrc = inode_runs(fs, vn, &runs);
+    if (lrc)
+        return lrc;
+    if (vn->pc.nr_dirty != 0 && !runs_fit(fs, runs + CFS_TRUNC_ADDS, vn->pc.nr_dirty)) {
+        lrc = pagecache_sync(vn);
+        if (lrc)
+            return lrc;
+    }
     lrc = cfs_lock_tree_w(fs, vn);
     if (lrc)
         return lrc;
@@ -2570,6 +2712,7 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
         vn->mtime_ns = vfs_now_ns();
         rc = inode_sync(fs, vn);
     }
+    note_runs(fs, vn);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -2689,6 +2832,7 @@ static const struct vnode_ops cfs_file_ops = {
     .readpage = cfs_readpage,
     .writepage = cfs_writepage,
     .writepages = cfs_writepages,
+    .dirty_check = cfs_dirty_check,
     .truncate = cfs_truncate,
     .sync = cfs_vnode_sync,
     .evict = cfs_evict,

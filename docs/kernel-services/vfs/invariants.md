@@ -691,3 +691,19 @@ mounted, a second mount of it refused with "Resource
 busy", the first still there);
 `tools/mount-claim-probe.py --old` shows both mounts succeeding without
 the claim.
+
+**V39. A page is dirtied only if its filesystem could write it back.**
+Before a clean page becomes dirty -- `pagecache_write`, a shared
+mapping's write fault, `pagecache_put_page` -- the page cache asks the
+filesystem's optional `dirty_check(vn, index, dirty)`, with the pages
+the vnode already has dirty, and a refusal refuses the write: before a
+byte is copied, so the page is as it was. `pagecache_write` holds the
+vnode lock (the order `pagecache_sync` runs in), so on `-EFBIG` with
+dirty pages of its own it writes them back once and asks again; a write
+fault holds only the cache lock, and its refusal is the fault's error (a
+`SIGBUS` for the store). A write cut short returns what it took, as
+`write(2)` does. Before this a file past what cosmofs can map was taken
+whole into the cache, every write-back of it failed, and the pages were
+dropped with the vnode while its size still counted them (CFS-32).
+**Checked by** `cosmofs-extent-bound` (CF33).
+

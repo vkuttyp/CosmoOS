@@ -463,6 +463,22 @@ unreadable block; its copy failing is a write-back's `-ENOMEM` and a
 retry that commits; on a mirror, its first copy damaged is one bad copy
 the scrub counts and repairs); `make test-encrypt` (a 1 GiB file).
 
+**CF33. No page is dirtied that write-back cannot store (CFS-32).** A
+file's page becomes dirty only after `cfs_dirty_check` has found room for
+it: the inode's runs, plus two for each page already dirty and for this
+one, plus `CFS_TRUNC_ADDS`, within `cfs_max_extents` (`CFS_MAX_EXTENTS`,
+4096); a logical block that a 32-bit `lblk` can name; a tree that is not
+a snapshot's; a transaction not abandoned. A write-back's set_extent adds
+at most two runs, and a truncate that could add more than the headroom
+holds writes the dirty pages first. Under `CONFIG_DEBUG` a write-back
+that fails `-EFBIG` (other than the extent-fail seam's) or `-EROFS` panics
+naming the inode and the page, so a path the rule misses is found where
+it happens rather than as `vfs: N dirty page(s) ... lost`. Check:
+`cosmofs-extent-bound` (a sparse compressible file past a bound of 64
+runs: the write refused `-EFBIG` after 54 records, fsync clean, no
+write-back failure or dropped page, the size and every record the same
+after a remount, the check clean); `tools/cfs32-probe.py --old`.
+
 **CF18. From format version 12 a snapshot's identity is its own: every
 snapshot has a uuid no other snapshot of the filesystem has, and no id
 is handed out twice, across remounts included.** The uuid is drawn when

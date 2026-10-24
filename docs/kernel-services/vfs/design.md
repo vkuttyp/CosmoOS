@@ -780,6 +780,27 @@ says so (`16 dirty page(s) of inode 16 on cosmofs lost: write-back
 failed (-28)`): the one loss the suite makes, silent before this unit.
 The test itself learns the `-ENOSPC` from its `fsync`.
 
+### Refused at the write (CFS-32, invariant V39)
+
+A failure the filesystem can know before the page is dirty is refused
+then, not found at write-back. The vnode operation `dirty_check(vn,
+index, dirty)` is asked before a clean page becomes dirty, with the
+vnode's dirty pages so far; a filesystem without one is never asked. Its
+refusal is the write's error before a byte is copied. `pagecache_write`
+holds the vnode lock, so a refusal of `-EFBIG` while the vnode has dirty
+pages first writes those back once and asks again -- a filesystem charges
+a dirty page for the worst its write-back can cost, and writing them
+turns the charge into what they did cost. A write fault holds only the
+cache lock, so it cannot, and a refusal there is the fault's `SIGBUS`. A
+write the refusal cuts short returns what it took.
+
+cosmofs charges for its run bound (cosmofs `design.md`, "The run bound,
+charged at the write"), for a snapshot's tree (its write-back is
+`-EROFS`) and for an abandoned transaction (`-EIO`). The loss the release
+rule above reports is then a write-back that failed for a reason the
+filesystem could not have known when the page was dirtied: a device
+error, and until MEM-9 an `-ENOSPC`.
+
 Nothing in cosmofs's transaction model moves: a data-page refusal is a
 returned error, not a poisoned mount (`cfs_fail` is reached only from
 rename's recovery and the commit's post-superblock failure).

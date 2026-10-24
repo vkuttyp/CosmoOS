@@ -85,6 +85,14 @@ struct vnode_ops {
      * page cache's lock held, so it must not call back into the
      * cache. */
     int (*writepages)(struct vnode *vn, uint64_t index, void *const *pages, unsigned n, unsigned *done);
+    /* Optional: whether page `index` may become dirty, asked before a
+     * byte of it changes, with `dirty` the vnode's pages already dirty
+     * (each asked about when it became so). 0, or why the filesystem
+     * could never write it back (-EFBIG, -EROFS, -EIO): the write that
+     * would dirty it is refused instead, so no page is dirtied that
+     * write-back must then fail on (CFS-32). Called with the page
+     * cache's lock held, under the same rule as writepages. */
+    int (*dirty_check)(struct vnode *vn, uint64_t index, unsigned dirty);
     int (*truncate)(struct vnode *vn, uint64_t size);
     /* Optional per-open lifecycle (devices with an instance per open). open
      * runs on every open of the node and may refuse; release runs once, when
