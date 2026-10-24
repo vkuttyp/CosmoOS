@@ -658,6 +658,18 @@ jobs:
             out/${{ matrix.arch }}-release/test-pkgtx/*.log
             out/${{ matrix.arch }}-release/test-be-encrypted/*.log
           if-no-files-found: ignore
+
+      # Each test-be boot's lines with the second they arrived, kept on a
+      # pass too: how long a runner takes over each command is what tells
+      # a slow runner from a stuck command (docs/testing/flakes.md,
+      # "be-space ... 2026-10-24").
+      - name: Upload test-be's boot timings
+        if: always() && matrix.part == 'mirror be'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-be-times-${{ matrix.arch }}-${{ github.run_attempt }}
+          path: out/${{ matrix.arch }}-release/test-be-encrypted/*-times.log
+          if-no-files-found: ignore
   # Shell completeness S7's acceptance (docs/roadmap-1.1.md;
   # docs/userland/testing.md, "test-upgrade"): the published v1.0.3,
   # fetched with this run's token and checked against its SHA256SUMS,
