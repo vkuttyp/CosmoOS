@@ -603,8 +603,15 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-encrypt-${{ matrix.arch }}
+          # The last stage's B1-B4 runs keep their boots in their own
+          # workdirs (test-be's is test-be-encrypted).
           path: |
             out/${{ matrix.arch }}-release/test-encrypt/*.log
+            out/${{ matrix.arch }}-release/test-snapshot/*.log
+            out/${{ matrix.arch }}-release/test-fsck/*.log
+            out/${{ matrix.arch }}-release/test-mirror/*.log
+            out/${{ matrix.arch }}-release/test-pkgtx/*.log
+            out/${{ matrix.arch }}-release/test-be-encrypted/*.log
           if-no-files-found: ignore
   # Shell completeness S7's acceptance (docs/roadmap-1.1.md;
   # docs/userland/testing.md, "test-upgrade"): the published v1.0.3,
