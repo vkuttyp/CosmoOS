@@ -9,7 +9,9 @@ unplug, inside `pool: ... MISSING`) must not split that line in what the
 tests match. A fake qemu-run.sh writes half a line to stdout, a QEMU
 message to stderr, then the rest of the line:
 - Boot.text() holds the guest line whole, without QEMU's message;
-- QEMU's message is kept, in the boot's -qemu.log beside its serial log.
+- QEMU's message is kept, in the boot's -qemu.log beside its serial log;
+- a -qemu.log left by an earlier run into the same directory is started
+  afresh, not added to.
 """
 import os
 import shutil
@@ -48,6 +50,8 @@ def main():
             f.write(FAKE)
         os.chmod(fake, 0o755)
         install_test.ROOT = tmp
+        with open(os.path.join(tmp, "boot-fake-qemu.log"), "w") as f:
+            f.write("an earlier run's message\n")
         b = install_test.Boot("fake", "unused.img", tmp, {}, 30)
         b.wait_prompt("the fake prompt")
         text = b.text()
@@ -56,7 +60,9 @@ def main():
         check("queue_enable" not in text, "QEMU's message is not in the serial text")
         b.kill()
         with open(os.path.join(tmp, "boot-fake-qemu.log")) as f:
-            check("wrong value for queue_enable 0" in f.read(), "QEMU's message is kept in boot-fake-qemu.log")
+            qlog = f.read()
+        check("wrong value for queue_enable 0" in qlog, "QEMU's message is kept in boot-fake-qemu.log")
+        check("an earlier run's message" not in qlog, "an earlier run's boot-fake-qemu.log is started afresh")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("boot-harness: PASS")

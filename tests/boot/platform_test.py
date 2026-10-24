@@ -125,7 +125,7 @@ def boot(name, image, work, spec, timeout, key, arch):
         state["log"] = open(log_path, "wb")
         # QEMU's own messages in a file of their own, not inside guest
         # lines (tests/boot/install_test.py, Boot).
-        with open(os.path.splitext(log_path)[0] + "-qemu.log", "ab") as qerr:
+        with open(os.path.splitext(log_path)[0] + "-qemu.log", "ab" if attempt else "wb") as qerr:
             p = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), img], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=qerr, env=env)
 

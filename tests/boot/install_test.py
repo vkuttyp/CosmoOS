@@ -80,8 +80,9 @@ class Boot:
             self.t0 = time.monotonic()
             # QEMU's own messages go to a file of their own: one printed
             # inside a guest line (a hot unplug's `wrong value for
-            # queue_enable`) split that line in the serial text.
-            with open(os.path.splitext(self.log_path)[0] + "-qemu.log", "ab") as qerr:
+            # queue_enable`) split that line in the serial text. The first
+            # attempt starts the file afresh; a retry adds to it.
+            with open(os.path.splitext(self.log_path)[0] + "-qemu.log", "ab" if attempt else "wb") as qerr:
                 self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image],
                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=qerr, env=env)
             self.log = open(self.log_path, "wb")

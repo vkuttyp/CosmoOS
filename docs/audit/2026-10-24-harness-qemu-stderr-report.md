@@ -31,13 +31,17 @@ the two streams the same way.
   QEMU's stderr a file of its own beside the boot's serial log:
   `boot-<name>-qemu.log` (`boot-test-qemu.log` for `make test`, which
   CI's `boot-test*.log` upload keeps). The serial text the tests match is
-  the guest's alone.
+  the guest's alone. A boot's first attempt starts the file afresh and a
+  firmware-stall retry adds to it, so a rerun into the same `out/` does
+  not pile up earlier runs' messages (CosmoReview on #450).
 - `tests/host/test_boot_harness.py` (in `make host-test`): a fake
   `qemu-run.sh` writes half a guest line, a QEMU message to stderr, then
   the rest. Boot's text must hold the line whole and without the
   message, and the message must be in `boot-fake-qemu.log`. On the old
   harness it fails: `FAIL: a guest line QEMU wrote a message inside of is
-  whole in the serial text`; with the change it passes.
+  whole in the serial text`; with the change it passes. It also leaves
+  an earlier run's `boot-fake-qemu.log` in place first and checks the
+  boot started it afresh; opened append-only, that check fails.
 - Backlog TEST-20, struck by this change.
 
 ## Validation
@@ -75,6 +79,11 @@ The device-lifecycle matrix on `a2497be6` (exit status and seconds):
 | release `test-snapshot` | 0, 135 s | 0, 181 s |
 | release `test-fsck` | 0, 210 s | 0, 284 s |
 | `make reproducible` | 0, 475 s | - |
+
+After the truncation change, on its commit: `make host-test` PASS; debug
+`make test`, release `test-install` and release `test-platforms` exited 0
+on both architectures (x86_64 176, 30, 17 s; aarch64 179, 48, 97 s), the
+three harnesses that open a `-qemu.log`.
 
 ## Probe
 
