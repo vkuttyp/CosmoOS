@@ -84,7 +84,8 @@ slot 2: empty
 - `cosmo-key change` gives the slot the current passphrase opens a new
   one. `--passes` and `--memory` raise Argon2id's cost for that slot.
 - `cosmo-key remove SLOT` empties a slot, after a passphrase that opens
-  the pool. The last slot cannot be removed.
+  the pool. The last slot cannot be removed, nor the last passphrase:
+  only a passphrase opens `add`, `change` and `remove`.
 
 Forgetting every passphrase loses the data: there is no way in without
 one, and no copy of the master key anywhere else.

@@ -1,13 +1,23 @@
 /*
  * test_keyslot.c - Argon2id (RFC 9106's test vector) and an encrypted
  * pool's key slots (userland/lib/keyslot.c; roadmap 1.2 B5) on the host
- * under ASan/UBSan.
+ * under ASan/UBSan; and the passphrase reader's echo (userland/lib/secret.c).
  */
+
+#define _XOPEN_SOURCE 700   /* posix_openpt and ptsname under -std=c11 */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#endif
 
 #include "harness.h"
 
+#include <fcntl.h>
+#include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <uapi/cosmo/syscall.h>
 
@@ -95,10 +105,59 @@ static void test_keyslot_keyfile(void)
     EXPECT(keyslot_open(uuid, 0, &s, file, 31, got) == -COSMO_EKEYREJECTED);   /* not a key file's size */
 }
 
+/* The reader's first flush is its prompt's: was echo already off then? */
+static int g_flushes, g_prompt_echo;
+
+static int prompt_fflush(FILE *f)
+{
+    struct termios t;
+    if (f == stdout && g_flushes++ == 0)
+        g_prompt_echo = tcgetattr(0, &t) == 0 && (t.c_lflag & ECHO);
+    return fflush(f);
+}
+
+#define fflush prompt_fflush
+#include "../../userland/lib/secret.c"
+#undef fflush
+
+static void test_secret_echo_off_before_prompt(void)
+{
+    /* A reply sent as soon as the prompt is seen (a paste, the boot
+     * harness) must not be echoed: echo is off before the prompt is out,
+     * and back on after the line. */
+    int m = posix_openpt(O_RDWR | O_NOCTTY);
+    EXPECT(m >= 0);
+    EXPECT(grantpt(m) == 0 && unlockpt(m) == 0);
+    int s = open(ptsname(m), O_RDWR | O_NOCTTY);
+    EXPECT(s >= 0);
+    struct termios t;
+    EXPECT(tcgetattr(s, &t) == 0);
+    t.c_lflag |= ECHO | ICANON;
+    EXPECT(tcsetattr(s, TCSANOW, &t) == 0);
+    int saved = dup(0);
+    EXPECT(dup2(s, 0) == 0);
+    EXPECT(write(m, "pw\n", 3) == 3);
+    char buf[SECRET_MAX];
+    g_flushes = 0;
+    g_prompt_echo = -1;
+    int len = secret_read("secret: ", buf, sizeof(buf));
+    struct termios after;
+    bool echo_back = tcgetattr(0, &after) == 0 && (after.c_lflag & ECHO);
+    EXPECT(dup2(saved, 0) == 0);
+    close(saved);
+    close(s);
+    close(m);
+    EXPECT(len == 2 && strcmp(buf, "pw") == 0);
+    EXPECT(g_flushes >= 1);
+    EXPECT(g_prompt_echo == 0);
+    EXPECT(echo_back);
+}
+
 static const struct host_test tests[] = {
     { "argon2id-rfc9106", test_argon2id_rfc9106 },
     { "keyslot-passphrase", test_keyslot_passphrase },
     { "keyslot-keyfile", test_keyslot_keyfile },
+    { "secret-echo-off-before-prompt", test_secret_echo_off_before_prompt },
 };
 
 int main(void)

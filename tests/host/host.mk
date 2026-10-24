@@ -217,10 +217,11 @@ $(HOST_OUT)/test_chacha20: $(addprefix $(ROOT)/,$(HOST_CHACHA_SRCS)) $(ROOT)/ker
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_keyslot: $(addprefix $(ROOT)/,$(HOST_KEYSLOT_SRCS)) $(ROOT)/userland/lib/keyslot.h \
-	$(ROOT)/userland/lib/argon2.h $(ROOT)/kernel-services/filesystem/cosmofs/cosmofs_format.h
+	$(ROOT)/userland/lib/argon2.h $(ROOT)/kernel-services/filesystem/cosmofs/cosmofs_format.h \
+	$(ROOT)/userland/lib/secret.c $(ROOT)/userland/lib/secret.h
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter-out %/secret.c,$(filter %.c,$^)) $(HOST_LDFLAGS) -o $@   # the test includes secret.c
 
 $(HOST_OUT)/test_lz4: $(addprefix $(ROOT)/,$(HOST_LZ4_SRCS)) $(ROOT)/kernel/include/kernel/lz4.h
 	$(call log,HOSTCC,$@)

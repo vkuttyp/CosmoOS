@@ -400,7 +400,9 @@ the test does not ask for zero.
 ## An encrypted root (`make test-encrypt`)
 
 Roadmap 1.2 B5's acceptance test, `tests/boot/encrypt_test.py`, in CI's
-`encrypt` job on both architectures (release builds). The harness types
+`encrypt` job on both architectures (release builds), as two parallel
+halves: the stages below with `test-snapshot` and `test-pkgtx` of the
+last stage, and `test-fsck`, `test-mirror` and `test-be` of it. The harness types
 every passphrase at the prompt it waits for, and checks the serial log
 never shows one. The guide page [Encrypted root](../../../guide/encrypted-root.md)
 shows the commands it runs.
@@ -436,8 +438,10 @@ shows the commands it runs.
     block does not authenticate`, and nothing mounts;
   - the spare's label: the root mounts and the spare is not the pool's.
 - **`slot2`:** A, unlocked with slot 1's passphrase. 4 MiB of the
-  system's programs written 256 times: a 1 GiB file whose SHA-256 must be
-  the chunk's 256 times; `fsctl check` of the root is `clean` and the
+  system's programs written 256 times, with a `sync` after each 32 MiB
+  (dirty pages are not bounded, backlog MEM-9: one `sync` at the end made
+  it 3.3 times as long): a 1 GiB file whose SHA-256 must be the chunk's
+  256 times; `fsctl check` of the root is `clean` and the
   kernel says it walked a two-level checksum tree.
 - **`readback`:** A, unlocked with slot 0's: the 1 GiB file's SHA-256 is
   the same after the reboot.
@@ -449,8 +453,9 @@ The last lines give the Argon2id times measured: sealing in the
 installer and unlocking at boot. `ENCRYPT_STAGES` runs a subset (the
 install always runs).
 
-**The last stage** (`ENCRYPT_B1_B4=0` skips it) runs B1-B4's tests again
-on an encrypted root: `test-snapshot`, `test-fsck`, `test-mirror`,
+**The last stage** (`ENCRYPT_B1_B4=0` skips it, `make test-encrypt-b1b4`
+runs it alone, and `ENCRYPT_B1B4_TESTS` picks its tests) runs B1-B4's
+tests again on an encrypted root: `test-snapshot`, `test-fsck`, `test-mirror`,
 `test-pkgtx`, and `be_test.py` without its older release (v1.0.7's
 installer cannot encrypt and its kernel cannot read format 14). With
 `COSMO_TEST_ENCRYPT` set, `install_test.Boot` adds `--encrypt` to every

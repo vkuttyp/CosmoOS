@@ -376,10 +376,15 @@ def stage_slot2(args, results, d):
         # at most 4096 runs per inode (CFS_MAX_EXTENTS), so such a file
         # stops at 128 MiB (backlog CFS-32). head -c reads until it has
         # them (dd's count of a pipe's blocks counts its short reads).
+        # A sync after each 32 MiB: dirty pages are not bounded (backlog
+        # MEM-9), and 1 GiB written with one sync at the end took 3.3x as
+        # long, written back under memory pressure (x86-64, 1275 s against
+        # 386 s).
         t0 = time.monotonic()
         out = b.status("cat /sbin/* /bin/* 2>/dev/null | head -c 16777216 | gzip -c | head -c 4194304 > /tmp/chunk; "
-                       "test $(wc -c < /tmp/chunk) -eq 4194304 && "
-                       f"for i in $(seq {BIG_MIB // 4}); do cat /tmp/chunk; done > /big && sync && "
+                       "test $(wc -c < /tmp/chunk) -eq 4194304 && : > /big && "
+                       f"for i in $(seq {BIG_MIB // 32}); do for j in 1 2 3 4 5 6 7 8; do cat /tmp/chunk; done >> /big "
+                       "&& sync || break; done && "
                        "ls -l /big && sha256sum /big", "big")
         wrote = time.monotonic() - t0
         need(out, r"^big=0$", "writing 1 GiB")
@@ -433,6 +438,14 @@ def stage_keyfile(args, results, d):
             if "passphrase for cosmo-root" in log:
                 raise Fail(f"{name}: a passphrase was asked for")
             need(log, r"^init: switched to the disk root \S+ \(root=boot-disk\)$", f"{name}: the boot")
+            if name == "keyfile":
+                # Slot 1 is B's only passphrase, and only a passphrase opens
+                # cosmo-key's slot commands: it is refused before any prompt.
+                out = b.run("cosmo-key remove 1 </dev/null; echo rm=$?")
+                need(out, r"^cosmo-key: slot 1 of cosmo-root not removed: it is the last passphrase$",
+                     "keyfile: the last passphrase kept")
+                need(out, r"^rm=1$", "keyfile: cosmo-key remove 1's exit status")
+                need(b.run("cosmo-key list"), r"^slot 1: passphrase, ", "keyfile: slot 1 after the refusal")
             rc = b.finish()
             if rc != EXIT_SUCCESS:
                 raise Fail(f"{name}: QEMU exit code {rc}")
@@ -440,7 +453,7 @@ def stage_keyfile(args, results, d):
             b.kill()
             raise
     results.append("keyfile: PASS (B and B2 unlocked with no prompt by the key file on the ESP; B2 alone by its "
-                   "own ESP's copy: the mirror's disks share one master key)")
+                   "own ESP's copy: the mirror's disks share one master key; B's last passphrase not removed)")
 
 
 def stage_forge(args, results, d):

@@ -17,8 +17,8 @@ void secret_wipe(void *p, size_t n)
 
 int secret_read(const char *prompt, char *buf, size_t n)
 {
-    fputs(prompt, stdout);
-    fflush(stdout);
+    /* Echo off before the prompt: a reply sent the moment the prompt is
+     * seen (a paste, the boot harness) is not echoed. */
     struct termios old, quiet;
     bool tty = tcgetattr(0, &old) == 0;
     if (tty) {
@@ -26,6 +26,8 @@ int secret_read(const char *prompt, char *buf, size_t n)
         quiet.c_lflag &= ~(tcflag_t)ECHO;
         tcsetattr(0, TCSANOW, &quiet);
     }
+    fputs(prompt, stdout);
+    fflush(stdout);
     /* A byte at a time: what follows the line is the next reader's. */
     size_t len = 0;
     int got = -1;

@@ -5,7 +5,7 @@
  *   cosmo-key unlock [--boot] DEVICE     unwrap its master key and hand it to the kernel
  *   cosmo-key add [OPTS] [PATH]          a new passphrase slot
  *   cosmo-key change [OPTS] [PATH]       the passphrase of the slot the current one opens
- *   cosmo-key remove SLOT [PATH]         empty a slot (never the last)
+ *   cosmo-key remove SLOT [PATH]         empty a slot (never the last passphrase)
  *   cosmo-key bench [KIB [PASSES]]       time one Argon2id derivation
  *
  *   OPTS: --passes N, --memory KIB (Argon2id's; 3 and 65536 unless given)
@@ -316,6 +316,15 @@ static int remove_slot(unsigned idx, const char *path)
         return 1;
     if (idx >= COSMO_KEY_SLOTS || k.slot[idx].kind == COSMO_KEYSLOT_EMPTY) {
         fprintf(stderr, "cosmo-key: slot %u of %s is empty\n", idx, name);
+        return 1;
+    }
+    /* Only a passphrase opens add, change and remove: the last one stays,
+     * or a pool booting by its key file could never manage a slot again. */
+    unsigned passphrases = 0;
+    for (unsigned i = 0; i < COSMO_KEY_SLOTS; i++)
+        passphrases += k.slot[i].kind == COSMO_KEYSLOT_PASSPHRASE;
+    if (k.slot[idx].kind == COSMO_KEYSLOT_PASSPHRASE && passphrases == 1) {
+        fprintf(stderr, "cosmo-key: slot %u of %s not removed: it is the last passphrase\n", idx, name);
         return 1;
     }
     uint8_t master[COSMO_KEY_SIZE];
