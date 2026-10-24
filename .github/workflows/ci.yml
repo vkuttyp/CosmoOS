@@ -566,7 +566,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
-    timeout-minutes: 75
+    timeout-minutes: 180 # 50 / 56 min locally (x86_64 / aarch64) with B1-B4; CI runs ~1.7x
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:
