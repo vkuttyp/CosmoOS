@@ -812,35 +812,35 @@ bool selftest_cosmofs_metadata_csum_id(const char **reason)
     struct cfs_mhdr *h = (struct cfs_mhdr *)block;
 
     /* A freshly sealed block names CRC32C and verifies. */
-    cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
-    enum mhdr_fault f_sealed = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+    cfs_mhdr_seal_raw(NULL, block, CFS_KIND_INODES, 42, 7);
+    enum mhdr_fault f_sealed = cfs_mhdr_fault_of(NULL, block, 42, CFS_KIND_INODES);
     unsigned sealed_algo = h->csum_algo;
 
     /* A pre-v11 image left the field zero; it still reads as CRC32C. */
     h->csum_algo = CFS_CSUM_NONE;
     h->crc = meta_test_crc(block);
-    enum mhdr_fault f_legacy = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+    enum mhdr_fault f_legacy = cfs_mhdr_fault_of(NULL, block, 42, CFS_KIND_INODES);
 
     /* A block declaring an algorithm this build has no verifier for, with a
      * CRC that is itself valid: the fault is MHDR_ALGO, decided before the
      * checksum, so a format or algorithm skew is not read as damage. */
     h->csum_algo = CFS_CSUM_POLY1305;
     h->crc = meta_test_crc(block);
-    enum mhdr_fault f_algo = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+    enum mhdr_fault f_algo = cfs_mhdr_fault_of(NULL, block, 42, CFS_KIND_INODES);
 
     /* One flipped payload bit under CRC32C is MHDR_CRC, distinct from above. */
-    cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
+    cfs_mhdr_seal_raw(NULL, block, CFS_KIND_INODES, 42, 7);
     block[CFS_MHDR_SIZE + 3] ^= 0x01u;
-    enum mhdr_fault f_corrupt = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+    enum mhdr_fault f_corrupt = cfs_mhdr_fault_of(NULL, block, 42, CFS_KIND_INODES);
 
     /* csum_algo sits after crc but is inside the checksummed region: block_crc
      * zeroes only the 4 crc bytes and covers the rest of the block. Flip the
      * field between two *supported* values (1 -> 0), so the algorithm check
      * still passes, without recomputing the CRC: the block no longer verifies,
      * which it could not do unless csum_algo were covered by crc. */
-    cfs_mhdr_seal_raw(block, CFS_KIND_INODES, 42, 7);
+    cfs_mhdr_seal_raw(NULL, block, CFS_KIND_INODES, 42, 7);
     h->csum_algo = CFS_CSUM_NONE;
-    enum mhdr_fault f_covered = cfs_mhdr_fault_of(block, 42, CFS_KIND_INODES);
+    enum mhdr_fault f_covered = cfs_mhdr_fault_of(NULL, block, 42, CFS_KIND_INODES);
 
     kfree(block);   /* free before any CHECK can return */
 
@@ -6018,7 +6018,7 @@ static bool bitmap_clear_on_disk(struct blkdev *bd, uint64_t blk)
         uint64_t hgen = h->generation;
         uint64_t i = blk % CFS_BITS_PER_BITMAP;
         b[CFS_MHDR_SIZE + i / 8] &= (uint8_t)~(1u << (i % 8));
-        cfs_mhdr_seal_raw(b, CFS_KIND_BITMAP, chunk, hgen);
+        cfs_mhdr_seal_raw(NULL, b, CFS_KIND_BITMAP, chunk, hgen);
         ok = pool_write(p, chunk, b) == 0 && pool_flush(p) == 0;
     }
     kfree(b);

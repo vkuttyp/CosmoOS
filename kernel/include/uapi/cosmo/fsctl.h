@@ -16,6 +16,8 @@
 
 #include <stdint.h>
 
+#include <uapi/cosmo/keyslot.h>
+
 /* Version 1: LIST, CHECK and SCRUB. Every later version documents itself
  * here, beside the constant, as netctl.h does. */
 /*
@@ -74,6 +76,17 @@
 #define COSMO_FSCTL_POOL_SPARE_ADD   19   /* device `name` becomes a spare of the pool */
 #define COSMO_FSCTL_POOL_SPARE_REMOVE 20  /* ... and stops being one */
 
+/*
+ * An encrypted pool's key (roadmap 1.2 B5; design.md, "The key handle").
+ * New ops of version 3, in a longer command (struct cosmo_fsctl_key,
+ * below), written whole at its own size. A pool is named by its device
+ * in `name`, or when `name` is empty by `mount_id`.
+ */
+#define COSMO_FSCTL_KEY_INFO   21   /* is it encrypted, is it unlocked, and its slots: one cosmo_fsctl_keyinfo */
+#define COSMO_FSCTL_KEY_LOAD   22   /* the master key in `key`: checked against the pool, then kept */
+#define COSMO_FSCTL_KEY_UNLOAD 23   /* forget a pool's key that no mount holds */
+#define COSMO_FSCTL_KEY_SLOT   24   /* a mounted pool: write `rec` to slot `slot` (EMPTY clears it); `key` must be its master key */
+
 /* CHECK, CHECK_DEV, SCRUB_EX: repair what has one right answer. Off by
  * default. */
 #define COSMO_FSCTL_F_REPAIR (1u << 0)
@@ -110,6 +123,31 @@ struct cosmo_fsctl {
 };
 
 #define COSMO_FSCTL_SNAP_PAGE 1024
+
+/* The key operations' command: the version-3 command, then theirs. The
+ * master key travels only here, and only inward. */
+struct cosmo_fsctl_key {
+    struct cosmo_fsctl cmd;
+    uint32_t slot;            /* KEY_SLOT: which, 0..COSMO_KEY_SLOTS-1 */
+    uint32_t reserved;
+    uint8_t key[COSMO_KEY_SIZE];   /* KEY_LOAD, KEY_SLOT */
+    struct cosmo_keyslot rec;      /* KEY_SLOT */
+};
+
+#define COSMO_FSCTL_KEY_F_ENCRYPTED (1u << 0)   /* the pool has a key block */
+#define COSMO_FSCTL_KEY_F_UNLOCKED  (1u << 1)   /* this kernel holds its key */
+#define COSMO_FSCTL_KEY_F_MAC       (1u << 2)   /* format 14: its metadata is authenticated, so it needs the key to mount */
+
+struct cosmo_fsctl_keyinfo {
+    uint32_t flags;           /* COSMO_FSCTL_KEY_F_* */
+    uint32_t format;          /* the pool's format version */
+    uint8_t uuid[16];
+    char label[16];           /* NUL-padded, as the superblock has it */
+    uint64_t generation;      /* of the superblock the slots were read through */
+    uint32_t nslots;          /* COSMO_KEY_SLOTS for format 14; 0 for an older key block */
+    uint32_t reserved;
+    struct cosmo_keyslot slot[COSMO_KEY_SLOTS];
+};
 
 /* SNAP_ROLLBACK only: leave the safety snapshot's name to the caller
  * (`name2`) instead of pre-rollback-<seconds>. */
@@ -250,6 +288,7 @@ struct cosmo_fsctl_scrub_ex {
 #define COSMO_FSCTL_DEV_F_ROLLBACK_REFUSED (1u << 8)   /* its mount tried and could not: `rollback_error` */
 #define COSMO_FSCTL_DEV_F_COMMITTED        (1u << 9)   /* a repair was made and committed */
 #define COSMO_FSCTL_DEV_F_BOOT_REFUSED     (1u << 10)  /* F_BOOT: a finding outside the boot's classes */
+#define COSMO_FSCTL_DEV_F_LOCKED           (1u << 11)  /* an encrypted pool whose key is not loaded: not checked */
 
 /* Where a failed mount stopped (`mount_stage`). */
 #define COSMO_FSCTL_STAGE_NONE          0

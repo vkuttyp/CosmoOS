@@ -168,6 +168,52 @@ static int64_t blkctl_write(struct blkdev *bd, const struct cosmo_blkctl *cmd, c
     return rc;
 }
 
+/*
+ * FORMAT_KEYED (roadmap 1.2 B5): an encrypted pool on the device, or a
+ * mirror of it and `mirror`, from the master key and the slots user space
+ * sealed. The kernel's copy of the key is wiped here; the filesystem keeps
+ * it in its key table for the installer's mount.
+ */
+static int64_t blkctl_format_keyed(struct blkctl_open *o, struct cosmo_blkctl *cmd, const void *buf, size_t len)
+{
+    if (len != sizeof(*cmd) + sizeof(struct cosmo_blkctl_keyed))
+        return -EINVAL;
+    struct cosmo_blkctl_keyed *k = kmalloc(sizeof(*k), 0);
+    if (k == NULL)
+        return -ENOMEM;
+    memcpy(k, (const uint8_t *)buf + sizeof(*cmd), sizeof(*k));
+    int64_t rc = 0;
+    char label[COSMO_BLKCTL_LABEL + 1] = "";
+    if (memchr(k->mirror, '\0', sizeof(k->mirror)) == NULL)
+        rc = -EINVAL;
+    for (size_t i = 0; i < COSMO_BLKCTL_LABEL && rc == 0 && k->label[i] != '\0'; i++) {
+        if (k->label[i] < 0x21 || k->label[i] > 0x7e || k->label[i] == '"' || k->label[i] == '\\')
+            rc = -EINVAL;   /* FORMAT's rules */
+        label[i] = k->label[i];
+    }
+    cmd->name[sizeof(cmd->name) - 1] = '\0';
+    cmd->fstype[sizeof(cmd->fstype) - 1] = '\0';
+    struct blkdev *two[2] = { NULL, NULL };
+    unsigned n = k->mirror[0] ? 2 : 1;
+    if (rc == 0) {
+        two[0] = blk_find(cmd->name);
+        two[1] = n == 2 ? blk_find(k->mirror) : NULL;
+        if (two[0] == NULL || (n == 2 && two[1] == NULL))
+            rc = -ENODEV;
+    }
+    if (rc == 0 && (blk_part_any(two[0]) || (n == 2 && blk_part_any(two[1]))))
+        rc = -EBUSY;   /* as FORMAT: a whole disk with registered partitions */
+    if (rc == 0)
+        rc = vfs_format_keyed(cmd->fstype, two, n, label, k->uuid, k->master, k->slot);
+    for (unsigned i = 0; i < 2; i++)
+        if (two[i] != NULL)
+            blkdev_put(two[i]);
+    memset(k, 0, sizeof(*k));
+    kfree(k);
+    set_result(o, NULL, 0);
+    return rc ? rc : (int64_t)len;
+}
+
 static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
 {
     (void)vn;
@@ -185,8 +231,10 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
         return -EINVAL;
     size_t extra = len - sizeof(cmd);
     if (extra != 0 && cmd.op != COSMO_BLKCTL_WRITE && cmd.op != COSMO_BLKCTL_FORMAT &&
-        cmd.op != COSMO_BLKCTL_FORMAT_MIRROR)
+        cmd.op != COSMO_BLKCTL_FORMAT_MIRROR && cmd.op != COSMO_BLKCTL_FORMAT_KEYED)
         return -EINVAL;   /* only a WRITE carries data, a FORMAT its label, a FORMAT_MIRROR its second device */
+    if (cmd.op == COSMO_BLKCTL_FORMAT_KEYED)
+        return blkctl_format_keyed(o, &cmd, buf, len);
     char other[COSMO_BLKCTL_NAME] = "";
     size_t label_at = sizeof(cmd), label_len = 0;
     if (cmd.op == COSMO_BLKCTL_FORMAT_MIRROR) {

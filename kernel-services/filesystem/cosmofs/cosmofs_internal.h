@@ -18,6 +18,12 @@
 #define CFS_BUF_CACHE 64u
 #define CFS_MIN_BLOCKS 64u
 
+/* The metadata MAC's key (format version 14). `on` false: CRC32C. */
+struct cfs_mac {
+    bool on;
+    uint8_t key[32];
+};
+
 struct cfs_buf {
     struct list_node link;
     uint64_t blkno;
@@ -180,6 +186,12 @@ struct cfs {
     bool encrypted;         /* the filesystem has a key block */
     bool have_key;          /* and this mount unwrapped it */
     uint8_t master_key[CHACHA20_KEY_SIZE];
+    /* Version 14 (design.md, "The metadata MAC"): every header, superblock
+     * and label is sealed and checked under this key when `on`. Set by
+     * the superblock read, from the key table; `key_held` when this mount
+     * holds the table's entry and its destruction releases it. */
+    struct cfs_mac mac;
+    bool key_held;
     uint64_t degraded;      /* copies the member table promised and the mount did not find */
     /* The pool's state_seq the last published root recorded: a commit is
      * due when the pool's has moved (design.md, "Format version 13"). */
@@ -455,8 +467,8 @@ int cfs_members_load(struct cfs *fs);
 int cfs_members_store(struct cfs *fs);
 void cfs_members_free(struct cfs *fs);
 /* Format-time: the label that lets a mount find this member again. */
-int cfs_label_write(struct spool *pool, unsigned vdev, unsigned copy, uint64_t generation, const uint8_t uuid[16],
-                    uint64_t nblocks);
+int cfs_label_write(struct spool *pool, const struct cfs_mac *mac, unsigned vdev, unsigned copy, uint64_t generation,
+                    const uint8_t uuid[16], uint64_t nblocks);
 /* Stamp every attached copy's label with this generation, just before
  * the root that generation publishes. */
 int cfs_labels_update(struct cfs *fs);
@@ -521,12 +533,17 @@ int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const
  * csum_algo this build cannot verify -- a format or algorithm skew, distinct
  * from MHDR_CRC (a checksum that did not match). Order is the check order, so
  * the algorithm is resolved before the checksum it names. */
-enum mhdr_fault { MHDR_OK = 0, MHDR_MAGIC, MHDR_BLKNO, MHDR_KIND, MHDR_ALGO, MHDR_CRC };
-enum mhdr_fault cfs_mhdr_fault_of(const void *block, uint64_t dva, uint32_t kind);
-/* A metadata block's own check: kind, its own DVA, csum_algo, and the CRC. */
-bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind);
+enum mhdr_fault { MHDR_OK = 0, MHDR_MAGIC, MHDR_BLKNO, MHDR_KIND, MHDR_ALGO, MHDR_CRC, MHDR_MAC };
+/* `mac` NULL or off: CRC32C, as before version 14. */
+enum mhdr_fault cfs_mhdr_fault_of(const struct cfs_mac *mac, const void *block, uint64_t dva, uint32_t kind);
+/* A metadata block's own check: kind, its own DVA, and its CRC or tag. */
+bool cfs_mhdr_ok(const struct cfs_mac *mac, const void *block, uint64_t dva, uint32_t kind);
 /* Seal a metadata block outside a transaction (format time). */
-void cfs_mhdr_seal_raw(void *block, uint32_t kind, uint64_t dva, uint64_t generation);
+void cfs_mhdr_seal_raw(const struct cfs_mac *mac, void *block, uint32_t kind, uint64_t dva, uint64_t generation);
+/* The version-14 tag: domain CFS_MAC_*, the 8 bytes at `off` taken as zero. */
+void cfs_mac_tag(const struct cfs_mac *m, char domain, const uint8_t *block, size_t off, uint8_t tag[CFS_MAC_SIZE]);
+bool cfs_mac_ok(const struct cfs_mac *m, char domain, const uint8_t *block, size_t off);
+void cfs_mac_seal(const struct cfs_mac *m, char domain, uint8_t *block, size_t off);
 
 /* Encryption (cosmofs_crypt.c; design.md, "Format version 7"). */
 void cfs_file_key(const struct cfs *fs, uint64_t ino, uint8_t out[CHACHA20_KEY_SIZE]);
@@ -545,9 +562,35 @@ int cfs_keys_unwrap(const struct cfs_keys *k, const void *user_key, size_t user_
 int cfs_need_seeded(const char *what);
 int cfs_keys_load(struct cfs *fs, const void *user_key, size_t user_len);
 int cfs_keys_rotate(struct cfs *fs, const void *new_key, size_t new_len);
-/* A superblock's own check: magic, a version this kernel reads, and the
- * CRC. A zeroed slot is not a superblock and not an error. */
+/* A superblock's own check: magic, a version this kernel reads, and its
+ * CRC or tag. A zeroed slot is not a superblock and not an error. */
 bool cfs_super_ok(const void *block);
+/* The same, saying why: -ENOKEY for a version-14 encrypted pool whose key
+ * is not loaded, -EIO otherwise; `mac` (may be NULL) gets the MAC key. */
+int cfs_super_verify(const void *block, struct cfs_mac *mac);
+/* The newest slot, unverified when it is a version-14 encrypted pool's:
+ * for the key operations alone. */
+int cfs_super_peek(struct spool *p, struct cfs_super *out);
+
+/* What an encrypted format is given (design.md, "Making an encrypted pool"). */
+struct cfs_format_keys {
+    uint8_t uuid[16];                  /* the slots' associated data names it: user space chose it */
+    uint8_t master[CHACHA20_KEY_SIZE];
+    struct cfs_keyslot slot[CFS_KEY_SLOTS];
+};
+int cosmofs_format_keyed(struct blkdev **bd, unsigned n, const char *label, const struct cfs_format_keys *fk);
+
+/* Version 14 (cosmofs_crypt.c; design.md, "The key hierarchy", "The key handle"). */
+void cfs_mac_derive(const uint8_t master[CHACHA20_KEY_SIZE], struct cfs_mac *out);
+bool cfs_keyslot_valid(unsigned index, const struct cfs_keyslot *s);
+int cfs_keys2_write(struct spool *pool, const struct cfs_mac *mac, uint64_t dva, uint64_t generation,
+                    const uint8_t uuid[16], const struct cfs_keyslot slots[CFS_KEY_SLOTS]);
+int cfs_keytab_mac(const uint8_t uuid[16], struct cfs_mac *mac);
+int cfs_keytab_take(const uint8_t uuid[16], bool hold, uint8_t master[CHACHA20_KEY_SIZE]);
+void cfs_keytab_release(const uint8_t uuid[16]);
+int cfs_keytab_install(const uint8_t uuid[16], const uint8_t master[CHACHA20_KEY_SIZE]);
+int cfs_keytab_unload(const uint8_t uuid[16]);
+bool cfs_keytab_has(const uint8_t uuid[16]);
 
 int cfs_alloc_block(struct cfs *fs, uint64_t *out);                    /* one metadata block */
 /* Up to `want` consecutive data blocks at or after `hint` (0: the hint of

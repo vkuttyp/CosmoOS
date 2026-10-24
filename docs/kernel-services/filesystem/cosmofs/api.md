@@ -182,11 +182,53 @@ Concurrency: the key is passed to `format_at` through the file-scope
 `cosmofs_format` on another device could pick it up. The only caller is
 the `cosmofs-crypt` self-test.
 
+#### `int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const uint8_t uuid[16], const uint8_t master[32], const struct cosmo_keyslot *slots)`
+Roadmap 1.2 B5 (`design.md`, "Format version 14"): an encrypted pool on
+`n` devices (1, or 2 as one mirrored member) at version 14, named
+`label`, with `uuid` as its uuid, `master` as its master key and
+`slots` (eight, `uapi/cosmo/keyslot.h`) as user space sealed them. The
+uuid is the caller's because a slot's associated data names it: the
+slots are sealed before the pool exists. Every block it writes
+is MAC'd; on success the key is loaded in the key table, so the pool
+mounts at once. `-EINVAL` for a slot of the wrong shape (a key-file
+slot past 0, a passphrase slot with no passes or too little memory) or
+no usable slot, an all-zero uuid, or a longer label; `-EAGAIN`/`-EINTR` when the entropy
+pool is not seeded (the uuid and the format's own draws need it);
+otherwise as `cosmofs_format`. The VFS's `format_keyed`, reached from
+`/dev/blkctl` `FORMAT_KEYED`. `cosmofs_test_format_keyed_members`
+(`CONFIG_DEBUG`) makes one of several members, for the label test.
+
+#### `int cosmofs_keyctl(struct blkdev *bd, struct mount *mnt, struct cosmofs_key_req *req)`
+The key of a version-14 pool, by device (`bd`) or by mount (`mnt`),
+never both (`-EINVAL`). The VFS's `keyctl`, reached from `/dev/fsctl`'s
+`KEY_*` operations (below).
+- `COSMOFS_KEY_INFO`: fills `req->info` (`struct cosmo_fsctl_keyinfo`):
+  encrypted, MAC'd, unlocked; the format, uuid, label, generation; and
+  for a version-14 pool the eight slots as stored. By device the
+  superblock and the key block are read **unverified** -- without the
+  key nothing else is possible, and a slot authenticates itself when it
+  is opened -- and `-EXDEV` when the key block is not on member 0.
+- `COSMOFS_KEY_LOAD` (device): installs `req->key` in the key table if a
+  superblock slot and the key block verify under it (CF31);
+  `-EKEYREJECTED` when no slot does, `-EIO` when the key block does not,
+  `-EINVAL` for a pool that is not version 14 with a key block,
+  `-ENOSPC` when eight pools are already unlocked.
+- `COSMOFS_KEY_UNLOAD` (device): drops an entry no mount holds;
+  `-EBUSY` when one does, `-ENOKEY` when there is none.
+- `COSMOFS_KEY_SLOT` (mount): writes `req->rec` to slot `req->slot` and
+  commits. `req->key` must be the mount's master key (`-EKEYREJECTED`);
+  emptying the last slot is `-EBUSY`; `-EROFS` read-only; `-EINVAL` for a
+  slot of the wrong shape or a pool that is not version 14.
+Concurrency: the key table has its own spinlock (`cosmofs-keys`); the
+slot write runs under `fs->lock`.
+
 #### `int cosmofs_rekey(struct mount *mnt, const void *key, size_t len)`
 Rewraps the master key under a new user key with a new salt
 (`cfs_keys_rotate`). The rewritten key block is in the open transaction
 and becomes durable at the next commit; this call does not commit.
-`-ENOTSUP` for an unencrypted filesystem, `-ENOKEY` for a locked mount.
+`-ENOTSUP` for an unencrypted filesystem, `-ENOKEY` for a locked mount,
+`-EOPNOTSUPP` for a version-14 pool (its slots change through
+`COSMOFS_KEY_SLOT`).
 No operator interface reaches it; the only caller is `cosmofs-crypt`.
 
 ### Statistics
@@ -309,14 +351,15 @@ Kernel side `kernel-services/vfs/fsctl.c`; ABI
 `kernel/include/uapi/cosmo/fsctl.h`; user tool `userland/system/fsctl.c`
 (`/sbin/fsctl`). The design is in `docs/audit/next-subsystem-fsctl.md`.
 The node is created by `fsctl_dev_init` with mode 0600 and logs
-`fsctl: /dev/fsctl ready (0600): mount listing, check, scrub and snapshots` on every
+`fsctl: /dev/fsctl ready (0600): mount listing, check (mounted or not), scrub, snapshots, pools and keys` on every
 boot, release included.
 
 ### Protocol
 - `open`: `-EPERM` without `PRIV_SYS_ADMIN`. Each open file owns its own
   result buffer (`struct fsctl_open`, its own mutex).
-- `write`: exactly `sizeof(struct cosmo_fsctl)` bytes (88), else
-  `-EINVAL`. `PRIV_SYS_ADMIN` is checked again (`-EPERM`). `version` must
+- `write`: exactly `sizeof(struct cosmo_fsctl)` bytes (88) -- or, for
+  the `KEY_*` operations and only for them, `sizeof(struct
+  cosmo_fsctl_key)` (224) -- else `-EINVAL`. `PRIV_SYS_ADMIN` is checked again (`-EPERM`). `version` must
   equal `COSMO_FSCTL_VERSION` (3), else `-EINVAL`. `flags` may contain
   only `COSMO_FSCTL_F_REPAIR` for `CHECK` and `SCRUB_EX`, `F_REPAIR` and
   `F_BOOT` (only with `F_REPAIR`) for `CHECK_DEV`, `COSMO_FSCTL_F_NO_SIZES` for
@@ -345,6 +388,10 @@ boot, release included.
 | `COSMO_FSCTL_BOOT_OK` (10) | none; `total` is 1 when a hold was released, 0 when there was none | `-EROFS` on a read-only mount |
 | `COSMO_FSCTL_CHECK_DEV` (11) | one `struct cosmo_fsctl_devcheck`: the device record (`struct cosmo_fsctl_dev`) and, when its `F_CHECKED` is set, the check record. `name` is the block device, `name2` the filesystem (`""` = cosmofs); flags `F_REPAIR`, and `F_BOOT` with it (roadmap 1.2 B2) | `-ENOENT` for no such device; `-EBUSY` when it is mounted; `-EOPNOTSUPP` for a filesystem without `check_dev`; `-ENODEV` for no such filesystem; `-EINVAL` for `F_BOOT` without `F_REPAIR` |
 | `COSMO_FSCTL_SCRUB_EX` (12) | one `struct cosmo_fsctl_scrub_ex`: `blocks_read`, `inodes`, `bad_copies`, `repaired`, `unrecoverable`, `skipped`, `elapsed_ns`, `rate`; repairs only with `F_REPAIR` | as SCRUB |
+| `COSMO_FSCTL_KEY_INFO` (21) | one `struct cosmo_fsctl_keyinfo` (`cosmofs_keyctl`, INFO); the pool named by the device in `name` (`name2` the filesystem, `""` = cosmofs) or, when `name` is empty, by `mount_id` | `-ENOENT` no such device; `-EINVAL` not a cosmofs; `-EXDEV`; as CHECK for a mount |
+| `COSMO_FSCTL_KEY_LOAD` (22) | none: the 32-byte master key in `key` is checked and kept (CF31); the command is wiped once handed over | `-EKEYREJECTED`; `-EIO`; `-EINVAL`; `-ENOSPC` |
+| `COSMO_FSCTL_KEY_UNLOAD` (23) | none | `-EBUSY` while a mount holds it; `-ENOKEY` |
+| `COSMO_FSCTL_KEY_SLOT` (24) | none: slot `slot` of the mount `mount_id` becomes `rec` (`COSMO_KEYSLOT_EMPTY` clears it), committed before the answer | `-EKEYREJECTED` when `key` is not its master key; `-EBUSY` for the last slot; `-EROFS`; `-EINVAL` |
 | `COSMO_FSCTL_SNAP_CLONE` (9) | one `struct cosmo_fsctl_snap`: clone `name2` of snapshot `name`, flag `CLONE`, `origin_id` (`design.md`, "Clones") | as CREATE; `-ENOENT` for no such snapshot; `-EINVAL` to clone a clone or for no `name2`; `-EOPNOTSUPP` below format 12 |
 
 A SCRUB that met blocks no copy could satisfy succeeds and its record
@@ -454,8 +501,12 @@ is not the ABI; `fsctl_run` copies it field by field.
   (`cfs_super.label`, offset 136).
 - Snapshots: `mkdir` and `rmdir` under `<mount>/.snapshots`, reading
   under `<mount>/.snapshots/<name>/`.
-- There is no system call for keys, compression policy, rekeying or
-  member management.
+- `/dev/blkctl` `COSMO_BLKCTL_FORMAT_KEYED` (roadmap 1.2 B5) reaches
+  `cosmofs_format_keys` through `vfs_format_keyed`; `/dev/fsctl`'s
+  `KEY_*` operations reach `cosmofs_keyctl`. `CHECK_DEV` on a pool that
+  is locked answers `COSMO_FSCTL_DEV_F_LOCKED` and checks nothing.
+- There is no system call for compression policy, rekeying a version-7
+  pool or member management.
 
 ## On-disk format and its stability
 
@@ -463,10 +514,13 @@ is not the ABI; `fsctl_run` copies it field by field.
 version. All integers are little-endian, blocks are 4096 bytes, and the
 superblock magic is `"COSMOFS1"`.
 
-- **Versions.** This kernel writes `CFS_VERSION` 11 and mounts
-  `CFS_VERSION_MIN` 2 through 11. A version-1 image, or one newer than
-  11, is refused at mount with a message naming the version. Mounting an
-  older image never rewrites its superblock version.
+- **Versions.** This kernel writes `CFS_FORMAT_VERSION` 11 and mounts
+  `CFS_VERSION_MIN` 2 through `CFS_VERSION` 14. A version-1 image, or
+  one newer than 14, is refused at mount with a message naming the
+  version. Mounting an older image never rewrites its superblock
+  version; an operation that needs a newer one raises it (12 for a
+  snapshot, 13 for a degraded mirror's copy state, 14 for a two-level
+  checksum index), and an encrypted pool is made at 14.
 - **What each version added**: 2 extents with `lblk`, extent chains,
   per-inode checksum trees; 3 snapshots (`snap_root`); 4 DVAs and the
   member table (`members`, `uuid`); 5 mirror copies (`cfs_member.copies`,
@@ -474,7 +528,10 @@ superblock magic is `"COSMOFS1"`.
   `cfs_extent.count`); 7 encryption (`key_root`, `CFS_CSUM_POLY1305`);
   8 symbolic links (`CFS_TYPE_LNK`); 9 the free record (`free_root`,
   `CFS_KIND_FREELOG`); 10 the orphan record (`orphan_root`,
-  `CFS_KIND_ORPHAN`); 11 `cfs_mhdr.csum_algo`.
+  `CFS_KIND_ORPHAN`); 11 `cfs_mhdr.csum_algo`; 12 snapshot identity,
+  rollback and clones; 13 copy state; 14 the metadata MAC on a pool with
+  a key block (`cfs_super_is_mac`), the version-2 key block of eight
+  slots, and `CFS_KIND_CSUMIDX2`.
 - **Gates.** Fields added by a version are read only when the
   superblock's version is at least that version (`free_root` from 9,
   `orphan_root` from 10, `key_root` from 7, the member table from 4) and
@@ -490,11 +547,11 @@ superblock magic is `"COSMOFS1"`.
   `CFS_MAX_MEMBERS` 255; `CFS_MAX_COPIES` 4; `CFS_MAX_EXTENTS` 4096 runs
   loaded per inode (`-EFBIG` above; an implementation bound). A file's
   logical blocks are bounded by the 32-bit `lblk` (`set_extent`:
-  `-EFBIG`), but the checksum index is one level, so `csum_block_at`
-  refuses (`-EFBIG`) a block at or past `CFS_CSUM_MAX_BLOCKS` (516128
-  blocks, about 1.97 GiB) on a CRC32C file, and past 508 x
-  `CFS_AEAD_PER_BLOCK` (127) = 64516 blocks (252 MiB) on an encrypted
-  file.
+  `-EFBIG`). The checksum index is one level up to 516128 blocks (about
+  1.97 GiB) on a CRC32C file and 64516 blocks (252 MiB) on an encrypted
+  one; past that `csum_block_at` makes it two levels (version 14,
+  CFS-10), to 508 times those (1000 GiB and 125 GiB). A pool below 11, or
+  with a version-1 key block, keeps the one-level limit (`-EFBIG`).
 - **Host-testable.** `cosmofs_format.h` has no kernel dependency and is
   compiled by `tests/host/test_cosmofs.c`, which fixes the structure
   sizes and field offsets the format depends on.

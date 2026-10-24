@@ -765,6 +765,7 @@ static const struct selftest tests[] = {
     { "cosmofs-attach", selftest_cosmofs_attach },
     { "cosmofs-nomem", selftest_cosmofs_nomem },
     { "cosmofs-crypt", selftest_cosmofs_crypt },
+    { "cosmofs-encrypted-root", selftest_cosmofs_encrypted_root },
     { "cosmofs-reserve", selftest_cosmofs_reserve },
     { "cosmofs-fallback", selftest_cosmofs_fallback },
     { "cosmofs-writeback", selftest_cosmofs_writeback },

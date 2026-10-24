@@ -653,6 +653,73 @@ static int64_t fsctl_pool(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
     return 0;
 }
 
+/*
+ * The key operations (roadmap 1.2 B5): a pool named by its device, or by
+ * a mount when `name` is empty. The command carries the master key for
+ * LOAD and SLOT; it is wiped here once the filesystem has it.
+ */
+static int64_t fsctl_key(struct fsctl_open *o, struct cosmo_fsctl_key *k)
+{
+    static const enum cosmofs_key_op ops[] = {
+        [COSMO_FSCTL_KEY_INFO] = COSMOFS_KEY_INFO,
+        [COSMO_FSCTL_KEY_LOAD] = COSMOFS_KEY_LOAD,
+        [COSMO_FSCTL_KEY_UNLOAD] = COSMOFS_KEY_UNLOAD,
+        [COSMO_FSCTL_KEY_SLOT] = COSMOFS_KEY_SLOT,
+    };
+    const struct cosmo_fsctl *cmd = &k->cmd;
+    bool info = cmd->op == COSMO_FSCTL_KEY_INFO;
+    size_t bytes = sizeof(struct cosmo_fsctl_result) + (info ? sizeof(struct cosmo_fsctl_keyinfo) : 0);
+    uint8_t *buf = kzalloc(bytes);
+    if (buf == NULL)
+        return -ENOMEM;
+    struct cosmofs_key_req req = {
+        .op = ops[cmd->op],
+        .slot = k->slot,
+        .key = k->key,
+        .rec = &k->rec,
+        .info = info ? (struct cosmo_fsctl_keyinfo *)(buf + sizeof(struct cosmo_fsctl_result)) : NULL,
+    };
+    int64_t rc;
+    if (cmd->name[0] != '\0') {
+        struct fs_type *fst = vfs_find_fs(cmd->name2[0] ? cmd->name2 : "cosmofs");
+        struct blkdev *bd = fst != NULL && fst->keyctl != NULL ? blk_find(cmd->name) : NULL;
+        if (fst == NULL)
+            rc = -ENODEV;
+        else if (fst->keyctl == NULL)
+            rc = -EOPNOTSUPP;
+        else if (bd == NULL)
+            rc = -ENOENT;
+        else
+            rc = fst->keyctl(bd, NULL, &req);
+        if (bd != NULL)
+            blkdev_put(bd);
+    } else {
+        struct mount *mnt = NULL;
+        rc = vfs_mount_acquire(cmd->mount_id, &mnt);
+        if (rc == 0) {
+            rc = mnt->fs->keyctl != NULL ? mnt->fs->keyctl(NULL, mnt, &req) : -EOPNOTSUPP;
+            vfs_mount_release(mnt);
+        }
+    }
+    if (rc) {
+        kfree(buf);
+        return rc;
+    }
+    struct cosmo_fsctl_result *hdr = (struct cosmo_fsctl_result *)buf;
+    hdr->version = COSMO_FSCTL_VERSION;
+    hdr->kind = cmd->op;
+    hdr->count = info ? 1 : 0;
+    hdr->total = hdr->count;
+    hdr->bytes = info ? sizeof(struct cosmo_fsctl_keyinfo) : 0;
+    fsctl_set_result(o, buf, bytes);
+    return 0;
+}
+
+static bool fsctl_key_op(uint16_t op)
+{
+    return op >= COSMO_FSCTL_KEY_INFO && op <= COSMO_FSCTL_KEY_SLOT;
+}
+
 static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
                                 const void *buf, size_t len)
 {
@@ -662,11 +729,15 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
         return -EINVAL;
     if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
         return -EPERM;   /* the fd may have outlived the privilege that opened it */
-    if (len != sizeof(struct cosmo_fsctl))
-        return -EINVAL;  /* a command is exactly one struct, applied whole */
+    /* A command is exactly one struct, applied whole: the key operations'
+     * is the longer one, and only theirs. */
+    if (len != sizeof(struct cosmo_fsctl) && len != sizeof(struct cosmo_fsctl_key))
+        return -EINVAL;
     struct cosmo_fsctl cmd;
     memcpy(&cmd, buf, sizeof(cmd));
     if (cmd.version != COSMO_FSCTL_VERSION)
+        return -EINVAL;
+    if (fsctl_key_op(cmd.op) != (len == sizeof(struct cosmo_fsctl_key)))
         return -EINVAL;
 
     /*
@@ -723,6 +794,21 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     case COSMO_FSCTL_POOL_SPARE_REMOVE:
         rc = fsctl_pool(o, &cmd);
         break;
+    case COSMO_FSCTL_KEY_INFO:
+    case COSMO_FSCTL_KEY_LOAD:
+    case COSMO_FSCTL_KEY_UNLOAD:
+    case COSMO_FSCTL_KEY_SLOT: {
+        struct cosmo_fsctl_key *k = kmalloc(sizeof(*k), 0);
+        if (k == NULL) {
+            rc = -ENOMEM;
+            break;
+        }
+        memcpy(k, buf, sizeof(*k));
+        rc = fsctl_key(o, k);
+        memset(k, 0, sizeof(*k));   /* the master key, if it carried one */
+        kfree(k);
+        break;
+    }
     default:
         rc = -EINVAL;
         break;
@@ -789,5 +875,5 @@ void fsctl_dev_init(void)
      * kernel that shipped the passes with no way to reach them is the
      * thing this unit exists to stop.
      */
-    kinfo("fsctl: /dev/fsctl ready (0600): mount listing, check (mounted or not), scrub, snapshots and pools");
+    kinfo("fsctl: /dev/fsctl ready (0600): mount listing, check (mounted or not), scrub, snapshots, pools and keys");
 }

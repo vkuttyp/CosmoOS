@@ -18,6 +18,8 @@
 
 #include <stdint.h>
 
+#include <uapi/cosmo/keyslot.h>
+
 #define COSMO_BLKCTL_VERSION 1
 
 #define COSMO_BLKCTL_LIST   1   /* every registered block device: struct cosmo_blkctl_dev[] */
@@ -35,6 +37,11 @@
                                         * both unmounted, neither a disk with partitions (roadmap 1.2 B2);
                                         * then, optionally, a label as FORMAT's (roadmap 1.2 B3) */
 
+#define COSMO_BLKCTL_FORMAT_KEYED 8   /* an encrypted pool of `fstype` (roadmap 1.2 B5): exactly one
+                                        * struct cosmo_blkctl_keyed after the struct -- the second device
+                                        * of a mirror ("" for none), the label, the pool's uuid, the master
+                                        * key and the slots user space sealed it in for that uuid. The key is loaded on success */
+
 /* The most data one READ or WRITE carries. */
 #define COSMO_BLKCTL_IO_MAX (32u * 1024u)
 
@@ -48,6 +55,14 @@ struct cosmo_blkctl {
     uint64_t sector;                   /* READ, WRITE */
     char name[COSMO_BLKCTL_NAME];      /* the device (every op but LIST) */
     char fstype[COSMO_BLKCTL_NAME];    /* FORMAT */
+};
+
+struct cosmo_blkctl_keyed {
+    char mirror[COSMO_BLKCTL_NAME];    /* NUL-terminated; "" for one device */
+    char label[COSMO_BLKCTL_LABEL];    /* NUL-padded; FORMAT's rules */
+    uint8_t uuid[16];                  /* the pool's: the slots are sealed for it, so it is chosen first */
+    uint8_t master[COSMO_KEY_SIZE];
+    struct cosmo_keyslot slot[COSMO_KEY_SLOTS];
 };
 
 /* cosmo_blkctl_dev.flags */
