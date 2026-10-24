@@ -148,6 +148,24 @@ The added disk carries only the pool's copy and no ESP, so the VM
 boots from `nvme0n2` alone. `cosmo-install DISK --mirror DISK2` gives
 both disks an ESP.
 
+**ssh after reboot, v1.0.12-rc1 and v1.0.12, 2026-10-24.** A new VM,
+"CosmoOS" (Parallels Desktop 27.0.3, 4 CPUs, 4096 MB; the published
+v1.0.11 image on a 66 MiB disk, installed to a 512 MiB one, IP
+10.211.55.15), was upgraded from v1.0.11 to v1.0.12-rc1 with its own
+`cosmo-upgrade`, the rc's set served from the Mac. It took the boot
+environment `be-v1.0.11` and booted `build v1.0.12-rc1` (verified, key
+36ae7bb4947896ab); the root checked clean and the boot said `svc:
+dropbear started`. `/run` was a ramfs, `/run/svc/dropbear.pid` held the
+pid and its start time, `cosmo-upgrade --status` said the root has the
+intended set's base system, `--esp-check` and `--repair` had nothing to
+do on its one disk, `pkg update && pkg upgrade` read index serial 13, and
+`dmesg` named no panic and no error but the usual `xhci probe failed`.
+ssh from the Mac answered before and after each of two reboots, with
+nothing removed by hand. Then `cosmo-upgrade --fetch v1.0.12` from the
+Pages repository, a reboot to `build v1.0.12`, dropbear started, ssh
+answered, and `pkg update` read serial 14. This VM has one disk, so the
+mirrored ESPs are shown by `make test-mirror` only.
+
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)
 and [`docs/audit/2026-10-13-parallels-devices-report.md`](../audit/2026-10-13-parallels-devices-report.md).
