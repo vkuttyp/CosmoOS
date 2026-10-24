@@ -116,6 +116,39 @@ every other small file a rebuild adds about two
 (`cosmofs-extent-rebuild`); the worst case is that panic's to name, and
 docs/backlog.md's CFS-39.
 
+#### Plain past three quarters of the bound (CFS-32)
+
+The bound stays where it is (no format change: `CFS_MAX_EXTENTS`, a
+compressed extent's 16-bit count and 8-bit length), and what reaches it
+changes. A plain run is any number of consecutive blocks, and
+`extents_merge` joins a run to the one before it when both are plain and
+adjacent on the disk and in the file; so a plain record written next to
+the plain run before it is no new run at all. Once an inode holds
+`CFS_RAW_AT_PERCENT` (75 %) of the runs it may have, `cfs_writepages`
+writes a new record plain (`record_compresses`), as one run of eight
+blocks allocated together (`plain_run_write`), which then merges. A
+record that replaces a compressed record still compresses: it takes that
+record's run rather than adding one. A truncate or rewrite that brings
+the inode under the mark brings compression back. So a file written in
+order compresses for its first 3,072 records (96 MiB) and is plain after
+that. Records merge when they are written back together; the first
+record of the next write-back did not land next to them in the test
+below (the allocator's hint is shared with the commit's own blocks, a
+likely reason, not checked), so it starts a run of its own. A writer that commits after
+every record past the mark adds a run per record, as compressed records
+did (seen in `cosmofs-extent-raw` with a `file_sync` after each one), and
+a sparse file's records never touch; those files still meet the bound,
+and CF33 refuses them at the write (`cosmofs-extent-bound`). Measured on
+a 1 GiB pool with a 4 MiB `dd ... conv=fsync` per chunk (`make
+test-large`, x86-64, 2026-10-25): the largest compressible file was
+124 MiB on v1.0.13 and is 1016 MiB now, the pool full rather than the
+bound reached.
+
+Both rules hold on v1.0.13, so a kernel booted from an older boot
+environment reads such a file: its `extent_valid` bounds only a
+compressed run's count, and its checker has no count bound for a plain
+run (checked on the v1.0.13 tag, 2026-10-24).
+
 Directories are ordinary file data: 64 entries per block, linear scan,
 a removed entry is zeroed, a new entry takes the first free slot or
 appends a block. `.` and `..` are synthesised by `readdir` from the

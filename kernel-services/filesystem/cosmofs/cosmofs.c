@@ -1312,17 +1312,85 @@ static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk,
 }
 
 /*
- * Write an aligned record's worth of logical blocks, compressed if that
- * makes it strictly smaller in whole blocks. Anything else -- it does
- * not compress, the algorithm is off, there is no room for a contiguous
- * run -- is written as ordinary blocks, which is always allowed and
- * never wrong.
+ * A record's blocks as one plain run: `n` consecutive blocks allocated
+ * together, written and checksummed as data_write_block does each one,
+ * and mapped by one set_extent, which merges the run into the one before
+ * it when they are adjacent on the disk. -ENOSPC when no run of `n` is
+ * free next to the hint, which leaves everything as it was and the
+ * caller to write the blocks one at a time.
  */
-static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n)
+static int plain_run_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n)
 {
+    uint64_t start, got;
+    int rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, next_block_hint(fs, in, lblk0), n, &start, &got);
+    if (rc)
+        return rc;
+    if (got < n) {
+        for (uint64_t k = 0; k < got; k++)
+            cfs_free_block_deferred(fs, start + k);
+        return -ENOSPC;
+    }
+    uint8_t *cipher = NULL;
+    if (in->csum_algo == CFS_CSUM_POLY1305) {
+        cipher = kmalloc(CFS_BLOCK, 0);
+        if (cipher == NULL)
+            rc = -ENOMEM;
+    }
+    /* As record_write's: the entries the range holds now are the map's
+     * until set_extent succeeds, kept and put back on a failure (CF16). */
+    struct csum_saved prev[CFS_RECORD_BLOCKS];
+    uint32_t saved = 0;
+    for (; saved < n && rc == 0; saved++)
+        rc = csum_save(fs, in, lblk0 + saved, cipher != NULL, &prev[saved]);
+    for (unsigned i = 0; i < n && rc == 0; i++) {
+        const uint8_t *blk = data + (size_t)i * CFS_BLOCK;
+        if (cipher) {
+            struct cfs_csum_aead entry;
+            rc = seal_block(fs, in, lblk0 + i, blk, cipher, &entry);
+            if (rc == 0)
+                rc = cfs_data_write(fs, start + i, cipher);
+            if (rc == 0)
+                rc = cfs_aead_put(fs, in, lblk0 + i, &entry);
+            continue;
+        }
+        rc = cfs_data_write(fs, start + i, blk);
+        if (rc == 0)
+            rc = cfs_csum_put(fs, in, lblk0 + i, crc32c(blk, CFS_BLOCK));
+    }
+    kfree(cipher);
+    if (rc == 0) {
+        struct cfs_extent ne = { start, n, (uint32_t)lblk0 };
+        rc = set_extent(fs, in, ne, NULL);
+    }
+    if (rc) {
+        for (uint32_t i = 0; i < saved; i++)
+            csum_restore(fs, in, lblk0 + i, &prev[i]);
+        for (unsigned i = 0; i < n; i++)
+            cfs_free_block_deferred(fs, start + i);
+    }
+    return rc;
+}
+
+/*
+ * Write an aligned record's worth of logical blocks, compressed if
+ * `compress` and that makes it strictly smaller in whole blocks. Anything
+ * else -- it does not compress, the algorithm is off, the write policy
+ * says plain (cfs_writepages), there is no room for a contiguous run -- is
+ * written as ordinary blocks, which is always allowed and never wrong:
+ * one run when the policy chose it and a run of `n` is free, else a block
+ * at a time.
+ */
+static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n,
+                        bool compress)
+{
+    if (!compress && n == CFS_RECORD_BLOCKS && lblk0 % CFS_RECORD_BLOCKS == 0) {
+        int rc = plain_run_write(fs, in, lblk0, data, n);
+        if (rc != -ENOSPC)
+            return rc;
+    }
     /* And the format again, for a file an older kernel of this family
      * created with the flag on a pool below version 6 (CFS-2). */
-    if (n > 1 && in->compress_algo == CFS_COMPRESS_LZ4 && fs->sb.version >= 6) {
+    if (compress && n > 1 && in->compress_algo == CFS_COMPRESS_LZ4 && fs->sb.version >= 6) {
         /* Room for one block less than it takes now: a record that
          * compresses to the same number of blocks has cost work and
          * saved nothing, and would have to be decompressed on every
@@ -2446,7 +2514,7 @@ static int write_one_page(struct cfs *fs, struct cfs_inode *in, uint64_t index, 
         rc = cfs_record_read(fs, in, &e, rec);
         if (rc == 0) {
             memcpy(rec + (size_t)(index - e.lblk) * CFS_BLOCK, buf, CFS_BLOCK);
-            rc = record_write(fs, in, e.lblk, rec, count);
+            rc = record_write(fs, in, e.lblk, rec, count, true);   /* a record replaced by a record */
         }
         kfree(rec);
         return rc;
@@ -2549,6 +2617,34 @@ static void stuck_page_check(struct cfs *fs, struct vnode *vn, uint64_t index, i
 #endif
 }
 
+/*
+ * The write policy that keeps a compressible file inside the run bound
+ * (CFS-32 1b; design.md, "The run bound, charged at the write"). A
+ * compressed record is a run of its own, and a plain record next to the
+ * run before it is no new run at all, so once the inode holds
+ * CFS_RAW_AT_PERCENT of the runs it may have, a new record is written
+ * plain. A record that replaces a compressed one stays compressed: it
+ * takes that record's run rather than adding one. The inode's runs fall
+ * below the mark again when a truncate or rewrite takes them away, and
+ * compression resumes. Under fs->lock.
+ */
+#define CFS_RAW_AT_PERCENT 75u
+
+static bool record_compresses(struct cfs *fs, struct vnode *vn, uint64_t index)
+{
+    struct cfs_vnode *cv = vn->fs_priv;
+    unsigned runs;
+    if (cv->runs_valid && cv->runs_at == fs->map_stores) {
+        runs = cv->runs;
+    } else if (extents_count(fs, cfs_inode_of(vn), &runs) != 0) {
+        return true;   /* the write itself will meet what the count did */
+    }
+    if ((uint64_t)runs * 100 < (uint64_t)cfs_max_extents(fs) * CFS_RAW_AT_PERCENT)
+        return true;
+    struct cfs_extent e;
+    return cfs_map_ext(fs, cfs_inode_of(vn), index, &e) == 1 && cfs_ext_compressed(&e);
+}
+
 int cosmofs_test_runs(struct vnode *vn, unsigned *n)
 {
 #if CONFIG_SELFTEST
@@ -2629,6 +2725,7 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
     }
     struct cfs_inode *in = cfs_inode_of(vn);
     if (index % CFS_RECORD_BLOCKS == 0 && n >= CFS_RECORD_BLOCKS && in->compress_algo != CFS_COMPRESS_NONE) {
+        bool compress = record_compresses(fs, vn, index);
         /* Gather the record; the pages are separate frames. */
         uint8_t *rec = kmalloc((size_t)CFS_RECORD_BLOCKS * CFS_BLOCK, 0);
         if (rec == NULL) {
@@ -2637,7 +2734,7 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
         }
         for (unsigned i = 0; i < CFS_RECORD_BLOCKS; i++)
             memcpy(rec + (size_t)i * CFS_BLOCK, pages[i], CFS_BLOCK);
-        rc = record_write(fs, in, index, rec, CFS_RECORD_BLOCKS);
+        rc = record_write(fs, in, index, rec, CFS_RECORD_BLOCKS, compress);
         kfree(rec);
         if (rc == 0)
             *done = CFS_RECORD_BLOCKS;
