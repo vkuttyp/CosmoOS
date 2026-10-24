@@ -4883,3 +4883,19 @@ PASS); a CI runner is about 1.35 times slower on this job, so about
 The rerun on `88360ad7` passed (`test-be` 574.2 s, run 40069427738).
 First sighting; not attributed, no mechanism: treat a second as a
 regression, and read its `test-be-encrypted/boot-be-space.log`.
+**Second sighting, 2026-10-24:** CI, PR #448 at `3035ded4`, run
+40079613201, `encrypted root test (x86_64, mirror be)`: the same `FAIL`,
+at the same command. Its `boot-be-space.log` (artifact
+`test-encrypt-x86_64-2`) shows no hang before it: 21 fill rounds took the
+root from 163816 to 6712 KiB free, each `cosmo-snap list` answered, the
+last round wrote 25 x 256 KiB and its `sync` exited, and then the final
+`cosmo-snap list | grep 'KiB free'` printed nothing before the 240 s
+deadline. Locally the same step answers `160 KiB free`. A replica (21 MiB
+in `/tmp` as the fetched set, a rollback armed and cancelled, the same
+fill), three runs at once, two of them under `taskpolicy -c utility nice
+-n 5`: all reached 180 KiB free with every `cosmo-snap list` in 3.3-3.8 s.
+Two of three CI runs fail, no local run has. Not attributed: the serial
+log has no times, so a slow runner and one stuck command cannot be told
+apart. `install_test.Boot` now writes `boot-<name>-times.log` (each line
+with the second it arrived) and a missed deadline names the last line's
+second.

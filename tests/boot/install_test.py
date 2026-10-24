@@ -102,6 +102,11 @@ class Boot:
             self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image], stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
             self.log = open(self.log_path, "wb")
+            # Each line again with the second it arrived at, from launch:
+            # a deadline missed says whether the boot was slow throughout
+            # or stopped at one command.
+            self.times = open(os.path.splitext(self.log_path)[0] + "-times.log", "wb")
+            self.last_line_s = 0.0
             self.reader = threading.Thread(target=self._read, args=(self.proc, self.log, self.buf), daemon=True)
             self.reader.start()
             return self.proc
@@ -130,6 +135,8 @@ class Boot:
 
     def _read(self, proc, log, buf):
         answered = 0   # where the last passphrase prompt answered ends
+        partial = b""
+        times = self.times
         while True:
             b = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(1)
             if not b:
@@ -138,6 +145,11 @@ class Boot:
                 buf += b
             log.write(b)
             log.flush()
+            *lines, partial = (partial + b).split(b"\n")
+            if lines:
+                self.last_line_s = time.monotonic() - self.t0
+                times.write(b"".join(b"%8.2f %s\n" % (self.last_line_s, ln.rstrip(b"\r")) for ln in lines))
+                times.flush()
             while ENCRYPT_PASS:
                 with self.lock:
                     hits = [(buf.find(p, answered), p) for p in ENCRYPT_PROMPTS]
@@ -167,7 +179,8 @@ class Boot:
             if self.proc.poll() is not None:
                 raise Fail(f"{self.name}: QEMU exited (code {self.proc.returncode}) waiting for {what}")
             time.sleep(0.1)
-        raise Fail(f"{self.name}: no prompt after {what} before the deadline")
+        raise Fail(f"{self.name}: no prompt after {what} before the deadline ({time.monotonic() - self.t0:.0f} s from "
+                   f"launch; the last line at {self.last_line_s:.1f} s)")
 
     def run(self, cmd):
         """Type `cmd`, wait for the next prompt, return what it printed."""
