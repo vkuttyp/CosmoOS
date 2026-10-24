@@ -102,16 +102,16 @@ class Done(Exception):
     """--only's stage has ended."""
 
 
-def make_set_b(seta, setb, arch, seed):
-    """Set B from set A: boot.tar with MARK added, the manifest and
-    SHA256SUMS signed again."""
+def make_set_b(seta, setb, arch, seed, mark=MARK):
+    """Set B from set A: boot.tar with `mark` (MARK) added, the manifest
+    and SHA256SUMS signed again. test-mirror makes a set C with another."""
     os.makedirs(setb, exist_ok=True)
     f = {n: open(os.path.join(seta, f"cosmoos-{arch}-{n}"), "rb").read() for n in SET}
     with tarfile.open(os.path.join(seta, f"cosmoos-{arch}-boot.tar")) as t:
         last = t.getmembers()[-1]
         end = last.offset_data + (last.size + 511) // 512 * 512
-    data = b"set b\n"
-    member = mkbootarchive.header(MARK, len(data)) + data + bytes(512 - len(data))
+    data = b"set b\n" if mark == MARK else f"{mark}\n".encode()
+    member = mkbootarchive.header(mark, len(data)) + data + bytes(512 - len(data))
     tar = f["boot.tar"][:end] + member + f["boot.tar"][end:]
     f["boot.tar"] = tar
     f["manifest"] = mkmanifest.sign(seed, [f["kernel.elf"], tar, f["cmdline"]])

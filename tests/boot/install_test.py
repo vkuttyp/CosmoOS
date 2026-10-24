@@ -367,6 +367,17 @@ def stage_reboot(args, results, inst, nonce):
         need(out, r"^tmp=0$", "uid 1000 writing in the installed system's /tmp")
         need(out, r"^1777 0$", "the installed system's /tmp mode (01777, root's)")
         need(out, r"^1000$", "the file uid 1000 made in /tmp")
+        need(log, r"^svc: syslogd started$", "the installed boot's services")
+        need(log, r"^svc: dropbear started$", "the installed boot's services")
+        # The root's own /run, under this boot's ramfs, gets pid files that
+        # name pid 1 -- live at every boot, and no service's supervisor --
+        # as a /run on the disk kept them before (USR-8). The next boot must
+        # start every service regardless. (The umount fails where /run is
+        # the disk's, as it was then.)
+        out = b.status("{ umount /run 2>/dev/null; true; } && mkdir -p /run/svc && for s in syslogd dropbear hello; do "
+                       "echo 1 > /run/svc/$s.pid; echo 1 > /run/svc/$s.child; done && sync && "
+                       "cat /run/svc/dropbear.pid", "stale")
+        need(out, r"^stale=0$", "stale pid files on the root's own /run")
         rc = b.finish()
         # After the shell's next prompt, when poweroff exits first.
         need(b.text(), r"^(?:cosmo\$ )?init: disk root synced$", "the installed boot's power-off")
@@ -375,7 +386,8 @@ def stage_reboot(args, results, inst, nonce):
     except Exception:
         b.kill()
         raise
-    results.append(f"reboot: PASS in {b.elapsed():.1f}s (root {m.group(1)}, wrote /persist.txt)")
+    results.append(f"reboot: PASS in {b.elapsed():.1f}s (root {m.group(1)}, wrote /persist.txt; /run a ramfs, "
+                   "stale pid files left under it)")
 
 
 def stage_persist(args, results, inst, nonce):
@@ -385,6 +397,16 @@ def stage_persist(args, results, inst, nonce):
         b.wait_prompt("the first prompt")
         need(b.text(), r"^init: switched to the disk root \S+ ", "the second installed boot")
         no_free_warning(b.text(), "the second installed boot's root mount")
+        # The stale pid files the last boot left on the root's /run are
+        # under this boot's ramfs: every service starts (USR-8).
+        if re.search(r"^svc: \S+ is already running$", b.text(), re.M):
+            raise Fail("a stale pid file stopped a service from starting (USR-8)")
+        for svc in ("syslogd", "dropbear"):
+            need(b.text(), rf"^svc: {svc} started$", "services after a boot that left stale pid files")
+        out = b.status("svc status dropbear", "svcst")
+        need(out, r"^dropbear\s+running \(supervisor \d+\)$", "svc status dropbear after the stale boot")
+        out = b.status("grep ' /run ramfs ' /proc/mounts", "run")
+        need(out, r"^run=0$", "/run, a ramfs of this boot's")
         out = b.run("cat /persist.txt && echo read-ok")
         need(out, r"^read-ok$", "reading /persist.txt")
         need(out, rf"^{nonce}$", "reading /persist.txt")
@@ -400,7 +422,8 @@ def stage_persist(args, results, inst, nonce):
     except Exception:
         b.kill()
         raise
-    results.append(f"persist: PASS in {b.elapsed():.1f}s (read back {nonce}; pkg install hello from "
+    results.append(f"persist: PASS in {b.elapsed():.1f}s (read back {nonce}; every service started past stale "
+                   "pid files; pkg install hello from "
                    "/var/lib/pkg/repo)")
 
 

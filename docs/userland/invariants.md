@@ -216,3 +216,42 @@ for room, the ESP byte for byte unchanged); `test_upgrade_be` (the
 file's grammar, and which binaries read it). Gap: no environment for an
 upgrade from a set whose `cosmo-upgrade` predates them (v1.0.7 and
 older); a rollback past such an upgrade is U12's.
+
+**U14. A pid file is this boot's, and names the process it was written
+for.** init mounts a fresh ramfs on `/run` at every boot and makes
+`/run/svc` in it before `/etc/rc` runs, so nothing an earlier boot wrote
+there is read as running (whatever the root's own `/run` holds is
+hidden, not removed). Independently, `svc` reads a pid file as live only
+when the pid is still the process it was written for: the file records
+the pid and that process's start time (`/proc/<pid>/stat`, field 22), and
+the pid must also be running `svc --supervise <name>` (its
+`/proc/<pid>/cmdline`) -- a boot that repeats the last one's timeline
+can bring the pid round at the same tick, but not as the same program. A
+`.child` file is the service only while its parent is the live
+supervisor or its start time is the recorded one; a stale one names
+whatever has that pid now, and `svc stop` does not kill it. Without
+`/proc` signal 0 is the whole answer, as before (USR-8: a
+`dropbear.pid` from the day before named `syslogd`, and dropbear did not
+start through several boots). Check: init's self-test `svc_stale_selftest`
+(a pid file naming the test itself, with and without its start time, is
+not running and the service starts; a stale child file is not killed);
+`test-install`'s reboot stage leaves pid files naming pid 1 on the root's
+own `/run`, and the persist stage requires every service to start.
+
+**U15. An upgrade reaches every disk that boots the root.** On a
+mirrored root, an upgrade, a `--rollback` and a `--repair` that leave the
+booted ESP as they meant end by making every other disk's ESP (partition
+1 of each disk holding a copy of the root, the booted ESP's type and
+size) that ESP sector for sector, read back; a rollback does it before
+its reboot. A disk absent then is counted and named, and at every boot
+of a disk root `cosmo-upgrade --esp-check` names each ESP that differs
+from the booted one in what it boots, or that a copy was cut short on
+(`/var/lib/cosmo-upgrade/esp-sync`), with `cosmo-upgrade --repair`
+(PKG-11: an upgrade wrote the booted disk's ESP alone, and the other
+disk booted the release it was installed with). Check: `test-mirror`'s
+esp stage -- an upgrade on two disks, then the second alone boots the new
+set; an upgrade with the second absent, the boot after it rejoins naming
+its ESP, `--repair`, then the second alone boots that set; a
+`--rollback`, then the second alone boots the previous set. Gap: the copy
+is not a switch of its own; the booted disk lost while its copy was being
+written leaves neither disk sure to boot.

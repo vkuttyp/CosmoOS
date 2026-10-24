@@ -52,7 +52,7 @@ from pci_hotplug_test import Qmp, wait_line  # noqa: E402
 SS = 512
 # Sizes tell the disks apart in `cosmo-install --list`; each one after A
 # holds A's root partition.
-MIB = {"a": 256, "b": 288, "c": 320, "d": 352}
+MIB = {"a": 256, "b": 288, "c": 320, "d": 352, "e": 272, "f": 384}
 WRITER = "(while true; do cat /bin/busybox > /mirror-w || break; sync; done) > /dev/null 2>&1 &"
 
 
@@ -339,20 +339,233 @@ def stage_spare(args, results, sock):
                    f"device_del and was ONLINE at {t_res:.1f}s; scrub clean in {t_scrub:.1f}s")
 
 
+# --- PKG-11: an upgrade reaches every disk's ESP ------------------------------------
+#
+# Disks e and f, installed as a mirror (each with an ESP of its own: the
+# disks the replace and spare stages add are whole-disk copies, which have
+# none). Set A is this build's, B and C are made from it (be_test.py's
+# make_set_b), each boot.tar 1 KiB longer than the last, so the loader's
+# `archive: N bytes read` line says which set a disk's ESP booted.
+
+
+def booted_set(b, sizes, what):
+    n = int(need(b.text(), r"^archive: (\d+) bytes read$", f"{what}: the loader's archive line").group(1))
+    for name, size in sizes.items():
+        if size == n:
+            return name
+    raise Fail(f"{what}: the loader read a {n}-byte archive, none of the sets' ({sizes})")
+
+
+def esp_pair(work):
+    e, f = disk(work, "e"), disk(work, "f")
+    return e, f, f"-drive if=none,id=dx,format=raw,file={f} -device virtio-blk-pci,drive=dx"
+
+
+def esp_boot(args, image, what, extra=""):
+    b = boot(args.workdir, image, what, extra, args.timeout)
+    b.wait_prompt("the first prompt")
+    root_checked(b, what)
+    return b
+
+
+def esp_sh(b, cmd, tag, want=0):
+    out = b.status(cmd, tag)
+    got = int(need(out, rf"^{tag}=(\d+)$", cmd).group(1))
+    if got != want:
+        raise Fail(f"{cmd!r}: exit {got}, want {want}; output {out[-900:]!r}")
+    return out
+
+
+def esp_get(b, port, sub):
+    import be_test  # noqa: E402  (its sets' file names)
+    be_test.fetch(b, port, os.environ.get("QEMU_ARCH", "x86_64"), sub, f"/tmp/{sub}")
+
+
+def esp_end(b, what):
+    no_panic(b.text(), what)
+    rc = b.finish("poweroff")
+    if rc != EXIT_SUCCESS:
+        raise Fail(f"{what}: QEMU exit code {rc}")
+
+
+def esp_sets(args):
+    """Sets A, B and C served over HTTP; their boot.tar sizes by name."""
+    import be_test  # noqa: E402
+    import modsign  # noqa: E402
+    import net_login_test  # noqa: E402
+    www = os.path.join(args.workdir, "www")
+    shutil.rmtree(www, ignore_errors=True)
+    os.makedirs(os.path.join(www, "a"))
+    for n in list(be_test.SET) + ["SHA256SUMS", "SHA256SUMS.sig"]:
+        src = n if n.startswith("SHA") else f"cosmoos-{args.arch}-{n}"
+        shutil.copyfile(os.path.join(args.set, src), os.path.join(www, "a", src))
+    seed = modsign.read_hex_key(args.key, "secret key")
+    be_test.make_set_b(os.path.join(www, "a"), os.path.join(www, "b"), args.arch, seed)
+    be_test.make_set_b(os.path.join(www, "b"), os.path.join(www, "c"), args.arch, seed, "usr/share/cosmo-set-c")
+    sizes = {k: os.path.getsize(os.path.join(www, k, f"cosmoos-{args.arch}-boot.tar")) for k in "abc"}
+    srv, port = net_login_test.start_http(www)
+    return srv, port, sizes
+
+
+def stage_esp(args, results, port, sizes):
+    work = args.workdir
+    # esp-install: e --mirror f from the live image (set A).
+    live = os.path.join(work, "live")
+    os.makedirs(live, exist_ok=True)
+    image = os.path.join(live, "cosmoos.img")
+    shutil.copyfile(args.image, image)
+    e, f, with_f = esp_pair(work)
+    extra = (f"-drive if=none,id=de,format=raw,file={e} -device virtio-blk-pci,drive=de "
+             f"-drive if=none,id=df,format=raw,file={f} -device virtio-blk-pci,drive=df")
+    b = Boot("esp-install", image, work, {"QEMU_EXTRA": (os.environ.get("QEMU_EXTRA", "") + " " + extra).strip()},
+             args.timeout)
+    try:
+        b.wait_prompt("the first prompt")
+        de, df = find_disk(b, "e"), find_disk(b, "f")
+        esp_sh(b, f"cosmo-install {de} --mirror {df}", "inst")
+        esp_end(b, "esp-install")
+    except Exception:
+        b.kill()
+        raise
+
+    # esp-upgrade: e and f, A -> B; f's ESP made e's.
+    b = esp_boot(args, e, "esp-upgrade", with_f)
+    try:
+        if booted_set(b, sizes, "esp-upgrade") != "a":
+            raise Fail("esp-upgrade: the installed system is not set A")
+        if re.search(r"^cosmo-upgrade: the ESP on ", b.text(), re.M):
+            raise Fail("esp-upgrade: the boot's check found the ESPs of a fresh install different")
+        esp_get(b, port, "b")
+        out = esp_sh(b, "cosmo-upgrade /tmp/b", "up")
+        m = need(out, r"^cosmo-upgrade: the ESP on (\S+) is (\S+)'s \((\d+) sectors written\)$",
+                 "esp-upgrade: the other disk's ESP")
+        if int(m.group(3)) == 0:
+            raise Fail("esp-upgrade: the upgrade wrote no sector of the other disk's ESP")
+        peer, booted, n_up = m.group(1), m.group(2), int(m.group(3))
+        esp_sh(b, "cosmo-upgrade --esp-check", "chk")
+        esp_end(b, "esp-upgrade")
+    except Exception:
+        b.kill()
+        raise
+
+    # esp-pull: f alone, its ESP: set B.
+    b = esp_boot(args, f, "esp-pull")
+    try:
+        got = booted_set(b, sizes, "esp-pull")
+        if got != "b":
+            raise Fail(f"esp-pull: disk f alone booted set {got.upper()}, not the upgrade's B")
+        esp_end(b, "esp-pull")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"esp-upgrade: A -> B on e and f wrote {n_up} sectors of {peer} ({booted}'s copy); "
+                   "f alone then booted B")
+
+    # esp-rejoin: e and f again, e resilvered (f ran alone).
+    b = esp_boot(args, e, "esp-rejoin", with_f)
+    try:
+        wait_status(b, r"^pool / \(cosmo-root\): ONLINE", args.timeout / 2, "esp-rejoin: the resilver")
+        esp_end(b, "esp-rejoin")
+    except Exception:
+        b.kill()
+        raise
+
+    # esp-absent: e alone, B -> C: f's ESP cannot be written.
+    b = esp_boot(args, e, "esp-absent")
+    try:
+        esp_get(b, port, "c")
+        out = esp_sh(b, "cosmo-upgrade /tmp/c", "up")
+        need(out, r"^cosmo-upgrade: 1 copy\(ies\) of the root are missing: their disks' ESPs are not updated; once "
+                  r"they are back, cosmo-upgrade --repair brings them up to this one$", "esp-absent: the missing copy")
+        esp_end(b, "esp-absent")
+    except Exception:
+        b.kill()
+        raise
+
+    # esp-lagging: f rejoins; the boot says its ESP lags; --repair.
+    b = esp_boot(args, e, "esp-lagging", with_f)
+    try:
+        need(b.text(), rf"^cosmo-upgrade: the ESP on {re.escape(peer)} is not {re.escape(booted)}'s \(its set "
+                       r"[0-9a-f]{12}, the booted [0-9a-f]{12}\): run cosmo-upgrade --repair to bring it up to date$",
+             "esp-lagging: the boot's check")
+        esp_sh(b, "cosmo-upgrade --esp-check", "chk", 1)
+        wait_status(b, r"^pool / \(cosmo-root\): ONLINE", args.timeout / 2, "esp-lagging: the resilver")
+        out = esp_sh(b, "cosmo-upgrade --repair", "rep")
+        m = need(out, rf"^cosmo-upgrade: the ESP on {re.escape(peer)} is {re.escape(booted)}'s \((\d+) sectors "
+                      r"written\)$", "esp-lagging: --repair")
+        n_rep = int(m.group(1))
+        if n_rep == 0:
+            raise Fail("esp-lagging: --repair wrote no sector of the lagging ESP")
+        esp_sh(b, "cosmo-upgrade --esp-check", "chk")
+        esp_end(b, "esp-lagging")
+    except Exception:
+        b.kill()
+        raise
+
+    # esp-repaired: f alone boots C.
+    b = esp_boot(args, f, "esp-repaired")
+    try:
+        got = booted_set(b, sizes, "esp-repaired")
+        if got != "c":
+            raise Fail(f"esp-repaired: disk f alone booted set {got.upper()}, not C")
+        esp_end(b, "esp-repaired")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"esp-absent: B -> C with f absent named the missing copy; f back: the boot said its ESP "
+                   f"lags, --repair wrote {n_rep} sectors, f alone then booted C")
+
+    # esp-rollback: e and f, --rollback (C -> B) reaches both; f alone boots B.
+    b = esp_boot(args, e, "esp-rollback", with_f)
+    try:
+        wait_status(b, r"^pool / \(cosmo-root\): ONLINE", args.timeout / 2, "esp-rollback: the resilver")
+        start = len(b.text())
+        b.proc.stdin.write(b"cosmo-upgrade --rollback\n")
+        b.proc.stdin.flush()
+        try:
+            b.proc.wait(timeout=180)
+        except Exception:
+            raise Fail(f"esp-rollback: QEMU did not end at init's restart; tail {b.text()[-900:]!r}")
+        out = b.text()[start:]
+        need(out, rf"^cosmo-upgrade: the ESP on {re.escape(peer)} is {re.escape(booted)}'s \(\d+ sectors written\)$",
+             "esp-rollback: the other disk's ESP")
+        need(out, r"^cosmo-upgrade: rebooting to apply it$", "esp-rollback: the reboot")
+        no_panic(b.text(), "esp-rollback")
+    except Exception:
+        b.kill()
+        raise
+    b = esp_boot(args, f, "esp-rolled-back")
+    try:
+        got = booted_set(b, sizes, "esp-rolled-back")
+        if got != "b":
+            raise Fail(f"esp-rolled-back: disk f alone booted set {got.upper()}, not the rollback's B")
+        esp_end(b, "esp-rolled-back")
+    except Exception:
+        b.kill()
+        raise
+    results.append("esp-rollback: --rollback C -> B on e and f wrote f's ESP before the reboot; f alone then "
+                   "booted B")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
     ap.add_argument("--workdir", required=True)
-    ap.add_argument("--stages", default="install,replace,reboot,spare,reboot-spare,degraded,lagging")
+    ap.add_argument("--stages", default="install,replace,reboot,spare,reboot-spare,degraded,lagging,esp")
     ap.add_argument("--timeout", type=float, default=300.0)
+    ap.add_argument("--set", help="this build's release set (set A): the esp stage")
+    ap.add_argument("--key", help="the build's signing key (scripts/modsign.py): the esp stage")
     args = ap.parse_args()
     args.arch = os.environ.get("QEMU_ARCH", "x86_64")
+    if "esp" in args.stages.split(",") and not (args.set and args.key):
+        ap.error("the esp stage needs --set and --key")
     stages = args.stages.split(",")
     if "install" in stages and os.path.isdir(args.workdir):
         shutil.rmtree(args.workdir)
     os.makedirs(args.workdir, exist_ok=True)
     sockdir = tempfile.mkdtemp(prefix="cosmo-mr-")
     sock = os.path.join(sockdir, "qmp.sock")
+    srv = None
     results = []
     t0 = time.monotonic()
     try:
@@ -372,6 +585,9 @@ def main():
                 stage_degraded(args, results)
             elif st == "lagging":
                 stage_lagging(args, results)
+            elif st == "esp":
+                srv, port, sizes = esp_sets(args)
+                stage_esp(args, results, port, sizes)
             else:
                 raise Fail(f"unknown stage {st}")
             results[-1] += f" [{time.monotonic() - t:.1f}s]"
@@ -382,6 +598,8 @@ def main():
         return 1
     finally:
         shutil.rmtree(sockdir, ignore_errors=True)
+        if srv is not None:
+            srv.shutdown()
     for r in results:
         print(f"test-mirror: {r}")
     print(f"test-mirror: PASS ({args.arch}) in {time.monotonic() - t0:.1f}s; logs in {args.workdir}")

@@ -329,38 +329,123 @@ static void child_path(const char *name, char *out, size_t n)
     snprintf(out, n, RUN_DIR "/%s.child", name);
 }
 
+static ssize_t slurp_path(const char *path, char *buf, size_t n)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    ssize_t len = read(fd, buf, n - 1);
+    close(fd);
+    if (len < 0)
+        return -1;
+    buf[len] = '\0';
+    return len;
+}
+
+/*
+ * A field of /proc/<pid>/stat, counted as proc(5) counts them: 4 the
+ * parent, 22 the start time in ticks (USR-8). The name in parentheses
+ * may hold spaces, so the fields are counted from the last ')'. -1 when
+ * the process is gone or there is no /proc.
+ */
+static long long proc_stat_field(pid_t pid, int want)
+{
+    char path[64], buf[512];
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    if (slurp_path(path, buf, sizeof(buf)) <= 0)
+        return -1;
+    char *p = strrchr(buf, ')');
+    if (p == NULL)
+        return -1;
+    p++;
+    /* Field 3, the state, is the first after the ')'. */
+    for (int field = 3; field < want; field++) {
+        while (*p == ' ')
+            p++;
+        while (*p != '\0' && *p != ' ')
+            p++;
+    }
+    while (*p == ' ')
+        p++;
+    unsigned long long v;
+    char *end = p;
+    while (*end >= '0' && *end <= '9')
+        end++;
+    *end = '\0';
+    return parse_uint(p, ~0ULL >> 1, &v) == 0 ? (long long)v : -1;
+}
+
+static long long proc_start(pid_t pid)
+{
+    return proc_stat_field(pid, 22);
+}
+
+/* A pid file: the pid and that process's start time (USR-8). */
 static void write_pid(const char *path, pid_t pid)
 {
     FILE *f = fopen(path, "w");
     if (f == NULL)
         return;
-    fprintf(f, "%d\n", (int)pid);
+    fprintf(f, "%d %lld\n", (int)pid, proc_start(pid));
     fclose(f);
 }
 
-static pid_t read_pid(const char *name)
+/* The pid a file names and the start time it recorded (-1 for a file
+ * an older svc wrote, which recorded none). */
+static pid_t read_pid_file(const char *path, long long *start)
 {
-    char path[128];
-    pid_path(name, path, sizeof(path));
-    FILE *f = fopen(path, "r");
-    if (f == NULL)
+    char buf[64];
+    *start = -1;
+    if (slurp_path(path, buf, sizeof(buf)) <= 0)
         return -1;
-    char buf[32] = { 0 };
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    if (n == 0)
-        return -1;
+    char *sp = strchr(buf, ' ');
+    if (sp != NULL) {
+        *start = strtoll(sp + 1, NULL, 10);
+        *sp = '\0';
+    }
     return (pid_t)atoi(buf);
 }
 
-/* Live means the pid is there to be signalled. Signal 0 asks without
- * sending, which is what tells a stale pid file from a running one. */
+/*
+ * The pid is still the process the file was written for. A pid that
+ * kill(p, 0) can signal is not enough: pids repeat at every boot, and a
+ * file that outlives its process names whatever has that pid now (USR-8:
+ * a dropbear.pid from the day before named syslogd, and dropbear never
+ * started again). The start time is the process's own, so a reused pid
+ * has another -- except at the same moment of another boot, which the
+ * caller's second check covers. Without /proc there is nothing to
+ * compare and signal 0 is the whole answer.
+ */
+static int same_process(pid_t p, long long start)
+{
+    if (p <= 0 || kill(p, 0) != 0)
+        return 0;
+    long long now = proc_start(p);
+    if (now < 0)
+        return proc_start(getpid()) < 0;   /* gone, unless there is no /proc */
+    return start < 0 || now == start;
+}
+
+/*
+ * Live means the file's pid is still this service's supervisor: the
+ * same process (same_process) and one running `svc --supervise <name>`,
+ * as cmd_start spawned it. The second check is what a boot that repeats
+ * the last one's timeline cannot fool: the pid may come round again at
+ * the same tick, but as another program.
+ */
 static int running(const char *name, pid_t *out)
 {
-    pid_t p = read_pid(name);
-    if (p <= 0)
+    char path[128];
+    long long start;
+    pid_path(name, path, sizeof(path));
+    pid_t p = read_pid_file(path, &start);
+    if (!same_process(p, start))
         return 0;
-    if (kill(p, 0) != 0)
+    char cmd[128], want[128];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)p);
+    ssize_t n = slurp_path(path, cmd, sizeof(cmd));
+    int wn = snprintf(want, sizeof(want), "svc%c--supervise%c%s", 0, 0, name) + 1;
+    if (n >= 0 && (n != wn || memcmp(cmd, want, (size_t)wn) != 0))
         return 0;
     if (out)
         *out = p;
@@ -598,6 +683,19 @@ static int cmd_stop(const char *name)
 
     pid_t pid;
     int was_running = running(name, &pid);
+    /*
+     * The service is the child file's pid when that is still the
+     * process the supervisor spawned (USR-8): the live supervisor's
+     * child, asked before the supervisor is killed and the child
+     * reparented, or one with the start time the file recorded -- a
+     * service whose supervisor died. A stale file names whatever has
+     * that pid now, which is not ours to kill.
+     */
+    long long cstart;
+    pid_t child = read_pid_file(childfile, &cstart);
+    int ours = child > 0 && kill(child, 0) == 0 &&
+               ((was_running && proc_stat_field(child, 4) == pid) ||
+                (cstart >= 0 && proc_start(child) == cstart));
     if (was_running && kill(pid, SIGTERM) != 0 && errno != ESRCH) {
         fprintf(stderr, "svc: %s: %s\n", name, strerror(errno));
         return 1;
@@ -605,15 +703,8 @@ static int cmd_stop(const char *name)
     for (int i = 0; i < 500 && was_running && running(name, NULL); i++)
         cosmo_sleep_ns(1000000ULL);
 
-    FILE *cf = fopen(childfile, "r");
-    if (cf != NULL) {
-        char buf[32] = { 0 };
-        size_t n = fread(buf, 1, sizeof(buf) - 1, cf);
-        fclose(cf);
-        pid_t child = n > 0 ? (pid_t)atoi(buf) : -1;
-        if (child > 0 && kill(child, 0) == 0 && kill(child, SIGTERM) != 0 && errno != ESRCH)
-            fprintf(stderr, "svc: %s: cannot stop pid %d: %s\n", name, (int)child, strerror(errno));
-    }
+    if (ours && kill(child, SIGTERM) != 0 && errno != ESRCH)
+        fprintf(stderr, "svc: %s: cannot stop pid %d: %s\n", name, (int)child, strerror(errno));
     unlink(childfile);
     unlink(pidfile);
     printf("svc: %s %s\n", name, was_running ? "stopped" : "is not running");
