@@ -99,8 +99,13 @@ class Boot:
             self.buf = bytearray()
             self.deadline = time.monotonic() + timeout
             self.t0 = time.monotonic()
-            self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image], stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+            # QEMU's own messages go to a file of their own: one printed
+            # inside a guest line (a hot unplug's `wrong value for
+            # queue_enable`) split that line in the serial text. The first
+            # attempt starts the file afresh; a retry adds to it.
+            with open(os.path.splitext(self.log_path)[0] + "-qemu.log", "ab" if attempt else "wb") as qerr:
+                self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image],
+                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=qerr, env=env)
             self.log = open(self.log_path, "wb")
             # Each line again with the second it arrived at, from launch:
             # a deadline missed says whether the boot was slow throughout

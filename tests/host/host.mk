@@ -250,6 +250,8 @@ host-test: $(HOST_TESTS)
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_run_guide.py
 	@echo "== $(ROOT)/tests/host/test_release_version.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_release_version.py
+	@echo "== $(ROOT)/tests/host/test_boot_harness.py"
+	$(Q)$(PYTHON) $(ROOT)/tests/host/test_boot_harness.py
 	@echo "== $(ROOT)/tests/host/test_publish_repo.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/host/test_publish_repo.py
 	@echo "== $(ROOT)/tests/host/test_pkgbuild_libs.py"
