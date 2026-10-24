@@ -34,10 +34,13 @@ one key ([Mirrors](mirrors.md)).
 
 The passphrase is not the key. The installer draws a random 256-bit
 master key, which encrypts everything, and seals it with a key made from
-the passphrase by Argon2id: 64 MiB of memory and three passes, which
-take about a second (the line above says how long it took here). That
-cost is paid once per guess, so a passphrase is only as strong as it is
-long: use several words.
+the passphrase by Argon2id: 64 MiB of memory and three passes. That
+cost is fixed, not measured against the machine: it took the time the
+line above says under QEMU, and 0.16 s on an Apple-silicon Parallels VM
+([Tested platforms](platforms.md)). It is paid once per guess, so a
+passphrase is only as strong as it is long: use several words, and on
+fast hardware raise the cost with `cosmo-key change --passes N --memory
+KIB` (below).
 
 ## Booting
 
