@@ -197,6 +197,37 @@ def fill_root(b):
     raise Fail("the root did not fill")
 
 
+def stage_space(args, port, results):
+    """space: the upgrade refused on a full root, nothing written. With
+    --only space it runs straight after the install, the root holding no
+    environment yet; the refusals it checks are the same."""
+    b = boot("be-space", args)
+    try:
+        # The ESP once the firmware is done with it: x86 firmware with no
+        # variable store writes \\NvVars there at every boot
+        # (upgrade_test.py's refuse stage).
+        before = install_test.esp_of(open(args.target, "rb").read())
+        fetch(b, port, args.arch, "b", UPB)
+        sh(b, "cosmo-snap create t && cosmo-snap rollback --no-reboot t", "arm")
+        out = sh(b, f"cosmo-upgrade {UPB}", "pend", 3)
+        need(out, r"^cosmo-upgrade: a rollback of the root is pending \(cosmo-snap list --all\): reboot to apply "
+                  r"it, or cosmo-snap rollback --cancel; nothing written$", "the refusal with a rollback pending")
+        sh(b, "cosmo-snap rollback --cancel && cosmo-snap delete t", "disarm")
+        fill_root(b)
+        out = sh(b, f"cosmo-upgrade {UPB}", "full", 3)
+        m = need(out, r"^cosmo-upgrade: not enough space on the root for the boot environment: about (\d+) KiB "
+                      r"needed .*, (\d+) KiB free; nothing written$", "the refusal naming the room")
+        sh(b, "rm /fill* && sync", "unfill")
+        end(b, "be-space")
+    except Exception:
+        b.kill()
+        raise
+    if install_test.esp_of(open(args.target, "rb").read()) != before:
+        raise Fail("be-space: the refused upgrade changed the ESP")
+    results.append(f"space: refused with a root rollback pending; a full root refused the upgrade ({m.group(1)} "
+                   f"KiB needed, {m.group(2)} KiB free); the ESP byte for byte unchanged")
+
+
 RELEASE_KEY = upgrade_test.RELEASE_KEY
 OLDER = "v1.0.7"
 
@@ -314,9 +345,9 @@ def main():
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
     ap.add_argument("--older", help=f"the published {OLDER}'s live image: the forward stage")
-    ap.add_argument("--only", choices=("forward",), help="that stage alone")
+    ap.add_argument("--only", choices=("forward", "space"), help="that stage alone (space: after the install)")
     args = ap.parse_args()
-    if args.only and not args.older:
+    if args.only == "forward" and not args.older:
         ap.error("--only forward needs --older")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         ap.error(f"--timeout must be a finite number of seconds above 0, not {args.timeout}")
@@ -334,12 +365,15 @@ def main():
     results = []
     t0 = time.monotonic()
     try:
-        if args.older:
+        if args.older and args.only != "space":
             stage_forward(args, port, results)
-        if args.only:
+        if args.only == "forward":
             raise Done()
         inst = install_test.stage_install(args, results)
         args.target = inst["target"]
+        if args.only == "space":
+            stage_space(args, port, results)
+            raise Done()
 
         # upgrade: A -> B, the environment taken first.
         b = boot("be-upgrade", args)
@@ -538,32 +572,7 @@ def main():
             raise
         results.append("crash-set: killed after the set switch: the next boot was A, A")
 
-        # space: the upgrade refused on a full root, nothing written.
-        b = boot("be-space", args)
-        try:
-            # The ESP once the firmware is done with it: x86 firmware with no
-            # variable store writes \\NvVars there at every boot
-            # (upgrade_test.py's refuse stage).
-            before = install_test.esp_of(open(args.target, "rb").read())
-            fetch(b, port, args.arch, "b", UPB)
-            sh(b, "cosmo-snap create t && cosmo-snap rollback --no-reboot t", "arm")
-            out = sh(b, f"cosmo-upgrade {UPB}", "pend", 3)
-            need(out, r"^cosmo-upgrade: a rollback of the root is pending \(cosmo-snap list --all\): reboot to apply "
-                      r"it, or cosmo-snap rollback --cancel; nothing written$", "the refusal with a rollback pending")
-            sh(b, "cosmo-snap rollback --cancel && cosmo-snap delete t", "disarm")
-            fill_root(b)
-            out = sh(b, f"cosmo-upgrade {UPB}", "full", 3)
-            m = need(out, r"^cosmo-upgrade: not enough space on the root for the boot environment: about (\d+) KiB "
-                          r"needed .*, (\d+) KiB free; nothing written$", "the refusal naming the room")
-            sh(b, "rm /fill* && sync", "unfill")
-            end(b, "be-space")
-        except Exception:
-            b.kill()
-            raise
-        if install_test.esp_of(open(args.target, "rb").read()) != before:
-            raise Fail("be-space: the refused upgrade changed the ESP")
-        results.append(f"space: refused with a root rollback pending; a full root refused the upgrade ({m.group(1)} "
-                       f"KiB needed, {m.group(2)} KiB free); the ESP byte for byte unchanged")
+        stage_space(args, port, results)
 
         # pending: an upgrade stopped after its set switch; --repair finishes it.
         b = boot("be-pending", args)

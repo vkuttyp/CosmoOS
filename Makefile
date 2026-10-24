@@ -311,7 +311,8 @@ endif
 ifneq ($(filter be,$(ENCRYPT_B1B4_TESTS)),)
 	$(Q)COSMO_TEST_ENCRYPT='$(ENCRYPT_PASS)' QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) \
 		QEMU_ACCEL=$(QEMU_ACCEL) $(PYTHON) $(ROOT)/tests/boot/be_test.py --image $(IMAGE) --set $(UPGRADE_SET_DIR) \
-		--key $(MODSIGN_KEY) --arch $(ARCH) --workdir $(OUT)/test-be-encrypted --timeout $(BOOT_TIMEOUT)
+		--key $(MODSIGN_KEY) --arch $(ARCH) --workdir $(OUT)/test-be-encrypted --timeout $(BOOT_TIMEOUT) \
+		$(if $(filter space,$(BE_ONLY)),--only space)
 endif
 	@echo "test-encrypt: B1-B4 on an encrypted root: $(addprefix test-,$(ENCRYPT_B1B4_TESTS)): PASS ($(ARCH))"
 
@@ -401,7 +402,9 @@ test-upgrade:
 # Roadmap 1.2 B4's boot environments (tests/boot/be_test.py), run by
 # test-upgrade on this build's set and one made from it; its forward stage
 # starts from the published BE_OLDER_TAG, whose cosmo-upgrade keeps no
-# record of the root's base system. BE_ONLY=forward runs that stage alone.
+# record of the root's base system. BE_ONLY=forward runs that stage alone,
+# BE_ONLY=space the be-space boot alone after the install (here and in
+# test-encrypt-b1b4's run of test-be; tools/be-space-probe.py).
 BE_OLDER_TAG ?= v1.0.7
 BE_OLDER_DIR := $(ROOT)/.cache/releases/$(BE_OLDER_TAG)
 BE_ONLY ?=
