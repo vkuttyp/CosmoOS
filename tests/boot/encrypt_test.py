@@ -440,8 +440,9 @@ def stage_keyfile(args, results, d):
             need(log, r"^init: switched to the disk root \S+ \(root=boot-disk\)$", f"{name}: the boot")
             if name == "keyfile":
                 # Slot 1 is B's only passphrase, and only a passphrase opens
-                # cosmo-key's slot commands: it is refused before any prompt.
-                out = b.run("cosmo-key remove 1 </dev/null; echo rm=$?")
+                # cosmo-key's slot commands: refused, though the passphrase
+                # given opens it.
+                out = b.run(f'echo "{PASS_B}" | cosmo-key remove 1; echo rm=$?')
                 need(out, r"^cosmo-key: slot 1 of cosmo-root not removed: it is the last passphrase$",
                      "keyfile: the last passphrase kept")
                 need(out, r"^rm=1$", "keyfile: cosmo-key remove 1's exit status")
