@@ -747,6 +747,7 @@ static const struct selftest tests[] = {
     { "cosmofs-mirror-stale", selftest_cosmofs_mirror_stale },
     { "cosmofs-compress", selftest_cosmofs_compress },
     { "cosmofs-extent-bound", selftest_cosmofs_extent_bound },
+    { "cosmofs-extent-rebuild", selftest_cosmofs_extent_rebuild },
     { "cosmofs-extent-fail", selftest_cosmofs_extent_fail },
     { "cosmofs-ro-replay", selftest_cosmofs_ro_replay },
     { "cosmofs-version-compress", selftest_cosmofs_version_compress },

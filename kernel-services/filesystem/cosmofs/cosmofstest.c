@@ -1664,6 +1664,164 @@ cleanup:
 }
 
 /*
+ * CFS-32: a page in a compressed record can turn the record
+ * incompressible, and its write-back then drops the record and writes it
+ * again as eight plain blocks, which may be more than one run. A page is
+ * charged two runs (cfs_dirty_check); this checks that records rebuilt
+ * that way, on a pool whose free space has been cut up, are refused at
+ * the write when the bound is near and written back whole otherwise. (A
+ * rebuild here adds about two runs; seven, on free space of single
+ * blocks only, is the path CONFIG_DEBUG's stuck_page_check names: CF33,
+ * docs/backlog.md CFS-39.)
+ *
+ * Each record is six pages of noise and two of zeros, compressed to
+ * seven blocks; one zero page made noise leaves it incompressible.
+ */
+#define RB_MAX     64u
+#define RB_RECORDS 30u
+#define RB_HOLES   300u
+
+static void rb_noise(uint8_t *p, size_t len, uint32_t seed)
+{
+    uint32_t x = seed * 2654435761u + 1;
+    for (size_t i = 0; i < len; i++) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        p[i] = (uint8_t)x;
+    }
+}
+
+static void rb_record(uint8_t *rec, unsigned k)
+{
+    for (unsigned i = 0; i < CFS_RECORD_BLOCKS; i++) {
+        if (i < 6)
+            rb_noise(rec + (size_t)i * 4096, 4096, k * 16 + i);
+        else
+            memset(rec + (size_t)i * 4096, 0, 4096);
+    }
+}
+
+bool selftest_cosmofs_extent_rebuild(const char **reason)
+{
+    struct blkdev *bd = NULL;
+    uint8_t *rec = NULL, *back = NULL;
+    struct cosmofs_check_report *r = NULL;
+    struct file *f = NULL;
+    char path[48];
+    if (!engine_mount(&bd, 4096, reason))
+        return false;
+#define RB_CHECK(cond)                                                        \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
+    const size_t rlen = (size_t)CFS_RECORD_BLOCKS * 4096;
+    rec = kmalloc(rlen, 0);
+    back = kmalloc(rlen, 0);
+    r = kmalloc(sizeof(*r), 0);
+    RB_CHECK(rec != NULL && back != NULL && r != NULL);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    cosmofs_test_set_max_extents(mount_of(ENG), RB_MAX);
+    struct pagecache_stats pc0, pc1;
+    pagecache_get_stats(&pc0);
+    struct cosmofs_stats st0, st1;
+    RB_CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+
+    RB_CHECK(vfs_open(NULL, ENG "/c", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+    for (unsigned k = 0; k < RB_RECORDS; k++) {
+        rb_record(rec, k);
+        RB_CHECK(file_pwrite(f, rec, rlen, (uint64_t)k * rlen) == (int64_t)rlen);
+    }
+    RB_CHECK(file_sync(f) == 0);
+    file_put(f);
+    f = NULL;
+    RB_CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    /* Each record compressed to seven blocks, not stored plain. */
+    RB_CHECK(st0.free_blocks - st1.free_blocks < (uint64_t)RB_RECORDS * CFS_RECORD_BLOCKS);
+
+    /* Free space in single blocks: files of one block each, every other
+     * one removed. */
+    rb_noise(back, 4096, 7);
+    for (unsigned i = 0; i < RB_HOLES; i++) {
+        ksnprintf(path, sizeof(path), ENG "/h%u", i);
+        RB_CHECK(vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+        RB_CHECK(file_pwrite(f, back, 4096, 0) == 4096);
+        file_put(f);
+        f = NULL;
+    }
+    RB_CHECK(vfs_sync() == 0);
+    for (unsigned i = 0; i < RB_HOLES; i += 2) {
+        ksnprintf(path, sizeof(path), ENG "/h%u", i);
+        RB_CHECK(vfs_unlink(NULL, path) == 0);
+    }
+    RB_CHECK(vfs_sync() == 0);
+    RB_CHECK(vfs_sync() == 0);   /* the blocks freed by the last commit are free after the next */
+
+    /* One zero page of each record made noise, until the bound refuses. */
+    RB_CHECK(vfs_open(NULL, ENG "/c", COSMO_O_RDWR, 0, &f) == 0);
+    unsigned accepted = 0;
+    int64_t refused = 0;
+    for (unsigned k = 0; k < RB_RECORDS; k++) {
+        rb_noise(back, 4096, 1000 + k);
+        int64_t n = file_pwrite(f, back, 4096, (uint64_t)k * rlen + 6 * 4096);
+        if (n != 4096) {
+            refused = n;
+            break;
+        }
+        accepted++;
+    }
+    kinfo("cosmofs-extent-rebuild: %u of %u pages accepted under a bound of %u runs, then %lld", accepted,
+          RB_RECORDS, RB_MAX, (long long)refused);
+    RB_CHECK(accepted > 0);
+    RB_CHECK(accepted == RB_RECORDS || refused == -EFBIG);
+    /* Everything accepted can be written back. */
+    RB_CHECK(file_sync(f) == 0);
+    file_put(f);
+    f = NULL;
+    pagecache_get_stats(&pc1);
+    RB_CHECK(pc1.wb_errors == pc0.wb_errors && pc1.dropped_dirty == pc0.dropped_dirty);
+
+    /* And it is on the disk. */
+    cosmofs_test_set_max_extents(mount_of(ENG), 0);
+    RB_CHECK(vfs_umount(ENG) == 0);
+    RB_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    RB_CHECK(vfs_open(NULL, ENG "/c", COSMO_O_RDONLY, 0, &f) == 0);
+    for (unsigned k = 0; k < RB_RECORDS; k++) {
+        rb_record(rec, k);
+        if (k < accepted)
+            rb_noise(rec + 6 * 4096, 4096, 1000 + k);
+        RB_CHECK(file_pread(f, back, rlen, (uint64_t)k * rlen) == (int64_t)rlen);
+        RB_CHECK(memcmp(back, rec, rlen) == 0);
+    }
+    file_put(f);
+    f = NULL;
+    RB_CHECK(cosmofs_check(mount_of(ENG), r, 0) == 0 && r->clean);
+
+    kfree(r);
+    kfree(rec);
+    kfree(back);
+    kinfo("selftest: cosmofs-extent-rebuild: %u records made incompressible by one page each, on cut-up "
+          "free space, all written back", accepted);
+    return engine_unmount(bd, reason);
+
+cleanup:
+    if (f)
+        file_put(f);
+    kfree(r);
+    kfree(rec);
+    kfree(back);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
+#undef RB_CHECK
+}
+
+/*
  * CF16: a mapped block's stored checksum is the checksum of the data at
  * that block. A block's entry is stored before the mapping that names
  * it, so a mapping that fails must put the old entry back: before that

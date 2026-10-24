@@ -107,6 +107,15 @@ once the transaction is abandoned (`-EIO`): all three are write-backs
 that could only fail. Under `CONFIG_DEBUG` a write-back that fails
 `-EFBIG` or `-EROFS` anyway panics naming the inode and the page.
 
+One path is known to cost more than its charge. A page in a compressed
+record that leaves the record incompressible has the record dropped and
+written again as eight plain blocks (`record_write`'s plain fallback),
+and on free space of single blocks those are eight runs: seven more for
+a page charged two. On a pool whose free space was cut up by deleting
+every other small file a rebuild adds about two
+(`cosmofs-extent-rebuild`); the worst case is that panic's to name, and
+docs/backlog.md's CFS-39.
+
 Directories are ordinary file data: 64 entries per block, linear scan,
 a removed entry is zeroed, a new entry takes the first free slot or
 appends a block. `.` and `..` are synthesised by `readdir` from the
