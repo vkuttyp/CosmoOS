@@ -78,8 +78,12 @@ class Boot:
             self.buf = bytearray()
             self.deadline = time.monotonic() + timeout
             self.t0 = time.monotonic()
-            self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image], stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+            # QEMU's own messages go to a file of their own: one printed
+            # inside a guest line (a hot unplug's `wrong value for
+            # queue_enable`) split that line in the serial text.
+            with open(os.path.splitext(self.log_path)[0] + "-qemu.log", "ab") as qerr:
+                self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image],
+                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=qerr, env=env)
             self.log = open(self.log_path, "wb")
             self.reader = threading.Thread(target=self._read, args=(self.proc, self.log, self.buf), daemon=True)
             self.reader.start()
