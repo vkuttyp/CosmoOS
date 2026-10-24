@@ -140,8 +140,7 @@ the old ones too, and the deadlines were lowered.
 
 ## Validation
 
-The device-lifecycle matrix on `9a8ee222`, local (Apple M-series host,
-QEMU HVF/TCG as `make` chooses), plus `test-install`, `test-be` and
+The device-lifecycle matrix on `9a8ee222`, local, plus `test-install`, `test-be` and
 `test-encrypt-b1b4 ENCRYPT_B1B4_TESTS=be` in release builds, since the
 change is to `be_test.py` and the boot harness:
 
