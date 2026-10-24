@@ -193,6 +193,21 @@ ran; it was running after. Argon2id took 0.16 s here against about a
 second under QEMU: the cost is fixed, not calibrated (backlog CFS-37),
 so the guide and the release notes give both.
 
+**v1.0.13-rc2 and v1.0.13, 2026-10-24.** Both VMs took -rc2 (the same
+code, with the notes above corrected) with their own `cosmo-upgrade`,
+the set served from the Mac: on each, boot environment `be-v1.0.13-rc1`
+and the base system unchanged. "CosmoOS encrypted" made that snapshot on
+its encrypted root and rebooted to `build v1.0.13-rc2`: the console
+asked for the passphrase, `cosmo-root unlocked with slot 0` (0.28 s), and
+`fsck.cosmofs` read format 14 with 0 findings. `cosmo-key list` showed
+slot 0 the passphrase and slots 1-7 empty; on both, `--status` and
+`--esp-check` were clean, `pkg update` read serial 16, `dmesg` was
+clean, and ssh answered. Then `cosmo-upgrade --fetch v1.0.13` from the
+Pages repository on both (boot environment `be-v1.0.13-rc2`), a reboot
+to `build v1.0.13`, the encrypted one unlocked in 0.16 s, both roots
+checked clean, dropbear started, `pkg update` read serial 17, and ssh
+answered.
+
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)
 and [`docs/audit/2026-10-13-parallels-devices-report.md`](../audit/2026-10-13-parallels-devices-report.md).
