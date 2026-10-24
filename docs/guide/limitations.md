@@ -80,10 +80,15 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 
 ## Storage
 
-- A file that LZ4 compresses (text, logs, most programs) stops at about
-  128 MiB: each 32 KiB of it is a run, and cosmofs loads at most 4096
-  runs per file. Worse, the write that crosses the limit is not refused:
-  the system goes on failing to commit it and the data is lost (backlog
+- A file that LZ4 compresses (text, logs, most programs) is written
+  compressed for its first 96 MiB and plain after that, so it can be as
+  large as the pool: on a 1 GiB pool the largest such file was 124 MiB
+  on v1.0.13 and is 1016 MiB on v1.0.14, the pool full. A file written
+  with an `fsync` after every 32 KiB, or one with a hole between every
+  two records, can still reach cosmofs's limit of 4096 runs per file;
+  the write that would cross it is refused (`File too large`) and
+  nothing already written is lost. Before v1.0.14 that write was not
+  refused, and what was written past about 128 MiB was lost (backlog
   CFS-32). Data that does not compress (already compressed, encrypted
   before it was written) has no such limit; with it a file can reach
   1000 GiB, 125 GiB on an [encrypted root](encrypted-root.md).
