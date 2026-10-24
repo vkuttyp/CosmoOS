@@ -2549,6 +2549,23 @@ static void stuck_page_check(struct cfs *fs, struct vnode *vn, uint64_t index, i
 #endif
 }
 
+int cosmofs_test_runs(struct vnode *vn, unsigned *n)
+{
+#if CONFIG_SELFTEST
+    struct cfs *fs = cfs_of(vn->mnt);
+    int rc = cfs_lock_tree_w(fs, vn);
+    if (rc)
+        return rc;
+    rc = extents_count(fs, cfs_inode_of(vn), n);
+    cfs_unlock_tree(fs);
+    return rc;
+#else
+    (void)vn;
+    (void)n;
+    return -ENOTSUP;
+#endif
+}
+
 /* The VFS `dirty_check` operation. */
 static int cfs_dirty_check(struct vnode *vn, uint64_t index, unsigned dirty)
 {

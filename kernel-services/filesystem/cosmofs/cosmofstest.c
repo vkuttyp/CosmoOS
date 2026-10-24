@@ -1822,6 +1822,170 @@ cleanup:
 }
 
 /*
+ * CFS-32 1b: a compressible file written in order is not stopped by the
+ * run bound. A compressed record is a run of its own; once the inode
+ * holds three quarters of the runs it may have, new records are written
+ * plain, as one run each next to the one before, which merge. A rewrite
+ * of a compressed record stays compressed (it replaces a run), and a
+ * truncate that takes the inode below the mark brings compression back.
+ * On a mount whose bound the seam lowers to ER_MAX runs.
+ */
+#define ER_MAX     64u
+#define ER_RECORDS 200u   /* three times the bound's worth of compressed records */
+
+static bool er_fill(uint8_t *rec, size_t rlen, unsigned k)
+{
+    for (size_t i = 0; i < rlen; i++)
+        rec[i] = (uint8_t)((i + k) % 61);   /* repetitive: compresses to a block */
+    return true;
+}
+
+/* Committed, and the blocks the commit replaced free again (they are
+ * freed by the commit after), so a count of free blocks is the data's. */
+static bool er_settle(void)
+{
+    return vfs_sync() == 0 && vfs_sync() == 0;
+}
+
+static bool er_runs(const char *path, unsigned *n)
+{
+    struct vnode *vn;
+    if (vfs_lookup(NULL, path, &vn))
+        return false;
+    int rc = cosmofs_test_runs(vn, n);
+    vnode_put(vn);
+    return rc == 0;
+}
+
+bool selftest_cosmofs_extent_raw(const char **reason)
+{
+    struct blkdev *bd = NULL;
+    uint8_t *rec = NULL, *back = NULL;
+    struct cosmofs_check_report *r = NULL;   /* not the stack: the frame is near its limit */
+    struct file *f = NULL;
+    if (!engine_mount(&bd, 4096, reason))
+        return false;
+#define ER_CHECK(cond)                                                        \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
+    const size_t rlen = (size_t)CFS_RECORD_BLOCKS * 4096;
+    const unsigned mark = ER_MAX * 3 / 4;
+    rec = kmalloc(rlen, 0);
+    back = kmalloc(rlen, 0);
+    ER_CHECK(rec != NULL && back != NULL);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    cosmofs_test_set_max_extents(mount_of(ENG), ER_MAX);
+    struct pagecache_stats pc0, pc1;
+    pagecache_get_stats(&pc0);
+    struct cosmofs_stats st0, st1, st2, st3;
+    ER_CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+
+    /* Every record of a file three times the bound's worth, in order,
+     * written back as the page cache chooses: under the seam's bound the
+     * write's charge (CF33) writes back every few records, a record cut
+     * by it in part as plain blocks, so the mark is reached sooner than
+     * by records alone; past it the plain records merge. */
+    ER_CHECK(vfs_open(NULL, ENG "/long", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+    for (unsigned k = 0; k < ER_RECORDS; k++) {
+        er_fill(rec, rlen, k);
+        ER_CHECK(file_pwrite(f, rec, rlen, (uint64_t)k * rlen) == (int64_t)rlen);
+    }
+    ER_CHECK(file_sync(f) == 0);
+    ER_CHECK(er_settle());
+    ER_CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    unsigned runs = 0;
+    ER_CHECK(er_runs(ENG "/long", &runs));
+    uint64_t used = st0.free_blocks - st1.free_blocks;
+    kinfo("cosmofs-extent-raw: %u records in %u runs under a bound of %u (plain from %u), %llu blocks", ER_RECORDS,
+          runs, ER_MAX, mark, (unsigned long long)used);
+    /* Every record taken (without the policy the bound refuses the file
+     * at about EB_MAX records: cosmofs-extent-bound), inside the bound,
+     * and the part before the mark compressed: fewer blocks than every
+     * record plain by at least a block for each run of the mark. */
+    ER_CHECK(runs <= ER_MAX);
+    ER_CHECK(used < (uint64_t)ER_RECORDS * CFS_RECORD_BLOCKS - mark);
+
+    /* A rewrite inside the compressed part stays compressed: no new run,
+     * and no plain record's worth of blocks more. */
+    er_fill(rec, rlen, 1000);
+    ER_CHECK(file_pwrite(f, rec, rlen, 5 * rlen) == (int64_t)rlen);
+    ER_CHECK(file_sync(f) == 0);
+    ER_CHECK(er_settle());
+    unsigned runs2 = 0;
+    ER_CHECK(er_runs(ENG "/long", &runs2));
+    ER_CHECK(cosmofs_stats(mount_of(ENG), &st2) == 0);
+    ER_CHECK(runs2 == runs);
+    ER_CHECK(st2.free_blocks + CFS_RECORD_BLOCKS / 2 > st1.free_blocks);
+    file_put(f);
+    f = NULL;
+
+    /* Truncated below the mark, a record written after it compresses
+     * again: it takes a block or two, not eight. */
+    ER_CHECK(vfs_truncate(NULL, ENG "/long", (uint64_t)(mark / 2) * rlen) == 0);
+    ER_CHECK(er_settle());
+    ER_CHECK(cosmofs_stats(mount_of(ENG), &st2) == 0);
+    ER_CHECK(vfs_open(NULL, ENG "/long", COSMO_O_RDWR, 0, &f) == 0);
+    er_fill(rec, rlen, mark / 2);
+    ER_CHECK(file_pwrite(f, rec, rlen, (uint64_t)(mark / 2) * rlen) == (int64_t)rlen);
+    ER_CHECK(file_sync(f) == 0);
+    ER_CHECK(er_settle());
+    ER_CHECK(cosmofs_stats(mount_of(ENG), &st3) == 0);
+    ER_CHECK(st2.free_blocks - st3.free_blocks < CFS_RECORD_BLOCKS / 2);
+    file_put(f);
+    f = NULL;
+    pagecache_get_stats(&pc1);
+    ER_CHECK(pc1.wb_errors == pc0.wb_errors && pc1.dropped_dirty == pc0.dropped_dirty);
+
+    /* Back to the long file, whole, and read after a remount. */
+    ER_CHECK(vfs_open(NULL, ENG "/long", COSMO_O_RDWR, 0, &f) == 0);
+    for (unsigned k = mark / 2; k < ER_RECORDS; k++) {
+        er_fill(rec, rlen, k);
+        ER_CHECK(file_pwrite(f, rec, rlen, (uint64_t)k * rlen) == (int64_t)rlen);
+    }
+    ER_CHECK(file_sync(f) == 0);
+    file_put(f);
+    f = NULL;
+    cosmofs_test_set_max_extents(mount_of(ENG), 0);
+    ER_CHECK(vfs_umount(ENG) == 0);
+    ER_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    ER_CHECK(vfs_open(NULL, ENG "/long", COSMO_O_RDONLY, 0, &f) == 0);
+    for (unsigned k = 0; k < ER_RECORDS; k++) {
+        er_fill(rec, rlen, k == 5 ? 1000 : k);
+        ER_CHECK(file_pread(f, back, rlen, (uint64_t)k * rlen) == (int64_t)rlen);
+        ER_CHECK(memcmp(back, rec, rlen) == 0);
+    }
+    file_put(f);
+    f = NULL;
+    r = kmalloc(sizeof(*r), 0);
+    ER_CHECK(r != NULL);
+    ER_CHECK(cosmofs_check(mount_of(ENG), r, 0) == 0 && r->clean);
+
+    kfree(r);
+    kfree(rec);
+    kfree(back);
+    kinfo("selftest: cosmofs-extent-raw: %u compressible records in %u runs under a bound of %u; a rewrite stays "
+          "compressed, a truncate below the mark compresses again", ER_RECORDS, runs, ER_MAX);
+    return engine_unmount(bd, reason);
+
+cleanup:
+    if (f)
+        file_put(f);
+    kfree(r);
+    kfree(rec);
+    kfree(back);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
+#undef ER_CHECK
+}
+
+/*
  * CF16: a mapped block's stored checksum is the checksum of the data at
  * that block. A block's entry is stored before the mapping that names
  * it, so a mapping that fails must put the old entry back: before that

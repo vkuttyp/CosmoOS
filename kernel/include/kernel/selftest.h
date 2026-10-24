@@ -404,6 +404,7 @@ bool selftest_cosmofs_mirror_stale(const char **reason);          /* the stale c
 bool selftest_cosmofs_compress(const char **reason);              /* compressed records */
 bool selftest_cosmofs_extent_bound(const char **reason);          /* CFS-32: the run bound refused at the write */
 bool selftest_cosmofs_extent_rebuild(const char **reason);        /* CFS-32: records rebuilt plain, within the charge */
+bool selftest_cosmofs_extent_raw(const char **reason);            /* CFS-32: plain records past the mark merge */
 bool selftest_cosmofs_extent_fail(const char **reason);           /* CF16: a failed mapping keeps the old checksum */
 bool selftest_cosmofs_ro_replay(const char **reason);             /* CFS-1: a read-only mount writes nothing */
 bool selftest_cosmofs_version_compress(const char **reason);      /* CFS-2: no records below format 6 */
