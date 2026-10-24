@@ -4803,6 +4803,16 @@ value 0xf)` and five of the firmware's screen clears: the same stall, on
 a guest-initiated reset inside one QEMU. The branch changes nothing that
 runs there (the passphrase reader and `cosmo-key`). Not attributed;
 rerun.
+**Third sighting, 2026-10-24:** CI, PR #453 at `9a8ee222` (run
+40128407985, job `encrypted root test (x86_64, snapshot pkgtx fsck)`),
+`test-snapshot`'s `rollback`: the same failure. `boot-rollback-times.log`
+ends at 8.52 s with `reboot: restart through the ACPI reset register
+(port 0xcf9, value 0xf)`, and `boot-rollback.log` has only the
+firmware's screen clears after it, no `BdsDxe` and no loader banner, to
+the 240 s deadline. The PR changes the boot harness only where
+`Boot.per_command` is called, which `snapshot_test.py` does not. Three
+sightings now, all x86-64 and all a reset inside one QEMU, where the
+harness has no firmware-stall retry (backlog TEST-21). Rerun.
 
 
 ## ash history: the nested shell stopped, 2026-10-18 and 2026-10-20
@@ -4899,3 +4909,48 @@ log has no times, so a slow runner and one stuck command cannot be told
 apart. `install_test.Boot` now writes `boot-<name>-times.log` (each line
 with the second it arrived) and a missed deadline names the last line's
 second.
+
+**Attributed, 2026-10-24: a slow runner; restated.** The timing log,
+now uploaded on a pass (run 40123417299, PR #453, the x86-64 `mirror be`
+job): be-space took 187.3 s with every command answered, its 22
+`cosmo-snap list`s at 6.2-6.5 s each where they take 2.7-5.4 s locally
+(that command walks every snapshot's tree under the mount's lock), and
+its fill rounds at the local 1.1 s. The 16 boots before be-space took
+346 s on that runner and 474 s and about 464 s on the two that failed
+(1.37x and 1.34x; test-mirror on them 295.9 s and 296.7 s, the two
+slowest of eight x86-64 samples). Scaled by 1.35, that boot types its
+last list at about 235 s and has it answered at about 244 s: past the
+240 s deadline, at the command both sightings named, with nothing
+stuck. **Third sighting, with the log**: the same job re-run on PR #453's
+first commit (run 40123417299 attempt 2, before the fix) landed on a
+slow runner -- test-mirror 305.5 s, the 16 boots before be-space 472 s
+-- and failed the same way (`240 s from launch; the last line at 238.5
+s`). Its timing log has every list of the fill answered, at 8.4-8.9 s
+each (1.37 times the faster runner's), every fill round at 1.6-1.7 s,
+and the last list typed at 238.5 s: every command answered, the last one
+late. Locally the boot took 149.0 s in a full run and 107.3-131.7 s in
+five replays from a disk saved just before it, four of them filled to
+CI's end state (240 KiB free), two under the host slow mode, the lists
+flat to the last. Classification: **restate** -- the per-boot deadline stood
+for "no command hangs"; `be_test.py`'s be-space now gives each command
+65 s of its own (`Boot.per_command`, ten times its slowest on CI), and
+`tests/boot/test_boot_deadline.py` checks that a command that never
+answers still fails within it. Not listed above: the bound is now each
+command's, not the boot's.
+
+## `net-tcp-delack`: a retransmission counted host-wide, 2026-10-24
+
+Local validation of PR #453 at `9a8ee222` (its change touches only
+`tests/boot/` and CI, no kernel code), AArch64 debug `make test` at
+`QEMU_SMP=4`: `SELFTEST: net-tcp-delack ... FAIL: check failed:
+t1.retransmits == t0.retransmits at line 1287 (149 ms)`, 1 of 507; the
+other five debug boots of the matrix passed it. The checks before line
+1287 passed, so the odd segment's acknowledgement came after the delay
+check's lower bound and within the loop. `t0` and `t1` are
+`tcp_get_stats`, which is host-wide. The test just before it,
+`net-lo-tcp`, logged `421 segments, 3 retransmits` in the same boot.
+Candidate, not a mechanism: a retransmission by another pcb, which the
+host-wide counter cannot tell apart from the client's. The client's own
+`pcb->retransmits` (`tcp.c:1212`, `:2261`) would name it. First sighting;
+recorded in the backlog as NET-23 and not fixed in v1.0.14's unit,
+whose acceptance it does not block.
