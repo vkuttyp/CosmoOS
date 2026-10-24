@@ -58,6 +58,14 @@ probe 'signal-stop' failed check 9`, the same signature: the child, pid
 host was loaded (load average 98 a few minutes later, Docker's VM at
 625 % CPU and another QEMU). The rerun on the same commit on a quiet
 host (load 2) passed. Backlog LX-1.
+**Fourth sighting, 2026-10-24:** AArch64 debug at `QEMU_SMP=1`, roadmap
+1.2 B5's second PR (#448, `a1106611`, no kernel change of its own) in
+its local matrix, `selftest: signal probe 'signal-stop' failed check 9`,
+the same signature: the child, pid 268, exited with status 7 before its
+parent, pid 267, with status 9. The matrix had run for about three hours
+of back-to-back QEMU boots; the load average was 5 when the rerun on the
+same commit started, and it passed. All four sightings are AArch64, and
+three of them at `QEMU_SMP=1`. Still backlog LX-1.
 
 **Observed once, x86-64 `module-unload-busy` (2026-10-09):**
 `/tmp/cosmo-unit2-ahci-stop-fixed-x86.result` reports the check
