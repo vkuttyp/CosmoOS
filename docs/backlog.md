@@ -228,6 +228,7 @@ Open lines (struck lines are not counted):
 - **NET-20** nice-to-have, M. Routing and protocol lookups on the epoch read side (constitution §22).
 - **NET-21** nice-to-have, S. Small forwarding and listing gaps: route tie between two interfaces, UDP length mismatch relayed, IP id/options rebuilt, IPv6 neighbours unlisted, `SIOCSIFFLAGS` only `UP`, `/proc/net` uid/inode 0 and UDP receive queues in datagrams, not bytes.
 - **NET-22** nice-to-have, S. e1000e checksum offload (measured at about 2 %).
+- **NET-23** correctness, S. `net-tcp-delack` asserts no retransmission with the host-wide `tcp_get_stats` counter, so another pcb's retransmission fails it (AArch64 SMP4, 2026-10-24, flakes.md); count the client pcb's own.
 
 ## Observability
 
@@ -306,6 +307,7 @@ Open lines (struck lines are not counted):
 - **TEST-18** correctness, S. Self-tests that wait for the machine-wide thread count (`threads_settle`, `kernel/scheduler/schedtest.c`) fail when a thread elsewhere exits in the window, and the dump cannot name it; `sched-restore-loop` twice on AArch64 (docs/testing/flakes.md). Baseline the identities.
 - ~~**TEST-19** correctness, S. The guide test's `networking.md` fetches `http://example.com/` (and HTTPS), a public site that answered 503 to a CI runner twice on 2026-10-22 and failed main's run and the v1.0.10 release run (docs/testing/flakes.md); the guide can show the command while the test checks a site the project controls, or retries a 5xx.~~ Done by PR #438: the guide checks the project's own site (`https://vkuttyp.github.io/CosmoOS/releases/LATEST`), `example.com` is an `optional` block that only warns, and a 5xx answer is retried three times (5, 10, 20 s).
 - ~~**TEST-20** correctness, S. The boot harnesses (`install_test.Boot`, `platform_test.py`, `run_boot_test.py`) read QEMU's stderr into the serial stream, so a message QEMU prints inside a guest line splits it: main's `test-mirror` on `097b6a19` (run 40077407190) failed `pool: cosmo-root: member 0 copy 1 (vda2) MISSING` with `qemu-system-x86_64: wrong value for queue_enable 0`, from the hot unplug, written in its middle.~~ Done by the PR that found it (QEMU's stderr to `boot-<name>-qemu.log`; `tests/host/test_boot_harness.py`).
+- **TEST-21** correctness, S. x86-64 OVMF sometimes never reaches the loader after a guest-initiated reset inside one QEMU (`reboot: restart through the ACPI reset register`, then only screen clears; three sightings, flakes.md), and the boot harnesses retry a stalled firmware only at launch (`firmware_stall.py`).
 
 ## Commands
 
