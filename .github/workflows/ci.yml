@@ -582,8 +582,8 @@ jobs:
   # plaintext on the disk, a second slot, a key-file mirror booting
   # unattended, every metadata domain forged and refused, and a 1 GiB file
   # written and read back; and its last stage, B1-B4's tests again on an
-  # encrypted root, split across two parallel jobs (make test-encrypt runs
-  # it all). Release builds, both architectures.
+  # encrypted root, split across parallel jobs (make test-encrypt runs it
+  # all). Release builds, both architectures.
   encrypt:
     name: encrypted root test (${{ matrix.arch }}, ${{ matrix.part }})
     runs-on: ubuntu-24.04
@@ -597,15 +597,21 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
-        # Two halves of about the same length (run 40069427738, aarch64:
-        # snapshot 3.5, pkgtx 3.8, fsck 6.3, mirror 5.7, be 13.2 minutes).
-        part: [encrypt snapshot pkgtx, fsck mirror be]
+        # Three parts of about the same length. Local AArch64 at d913b67b
+        # (CI ran this job ~1.6x slower in run 40069427738): the stages
+        # 1159 s (the 1 GiB written in 754 s, read in 239 s); snapshot 160,
+        # pkgtx 174, fsck 312; mirror 258, be 550.
+        part: [encrypt, snapshot pkgtx fsck, mirror be]
         include:
-          - part: encrypt snapshot pkgtx
-            target: test-encrypt ENCRYPT_B1B4_TESTS='snapshot pkgtx'
-          - part: fsck mirror be
-            target: test-encrypt-b1b4 ENCRYPT_B1B4_TESTS='fsck mirror be'
-    timeout-minutes: TIMEOUT_TBD
+          - part: encrypt
+            target: test-encrypt ENCRYPT_B1_B4=0
+          - part: snapshot pkgtx fsck
+            target: test-encrypt-b1b4 ENCRYPT_B1B4_TESTS='snapshot pkgtx fsck'
+          - part: mirror be
+            target: test-encrypt-b1b4 ENCRYPT_B1B4_TESTS='mirror be'
+    # A hang guard: the longest part, the stages, is about 37 minutes on
+    # CI with its build (1159 s x 1.6, and 6 for the build).
+    timeout-minutes: 75
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:

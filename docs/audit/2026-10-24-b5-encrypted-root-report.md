@@ -264,6 +264,56 @@ unreported continue (`child_event_locked` checks `EXITED` before
 `CONTINUED`). #448 changes no kernel code. The rerun on the same commit
 passed (load average 5 before it, 1.5 after).
 
+## Review fixes and CI time (PR #448)
+
+Codex on #448, three findings:
+
+- **The prompt before echo off.** `secret_read` printed the prompt, then
+  turned echo off, so a reply sent the moment the prompt was seen (a
+  paste, the boot harness) could be echoed. Echo is now off first. The
+  host test `secret-echo-off-before-prompt` (`tests/host/test_keyslot.c`,
+  the reader included with `fflush` wrapped) reads the terminal's `ECHO`
+  at the prompt's flush: it failed on the old order (`g_prompt_echo ==
+  0`) and passes.
+- **The last passphrase removed.** On a `--key-file` pool, `cosmo-key
+  remove 1` emptied the only passphrase slot, after which no `add`,
+  `change` or `remove` could open the pool (only a passphrase opens
+  them). It is refused now, before any prompt. test-encrypt's `keyfile`
+  stage pipes B's passphrase to `cosmo-key remove 1`: on the old
+  `cosmo-key` the kernel logged `key slot 1 cleared` and the stage
+  failed; it passes with the fix.
+- **A plaintext pool in place of the encrypted one** boots as that pool:
+  answered with BOOT-4 and the guide's "What it protects, and what it
+  does not"; there is no signed place on an installed disk to record
+  that its root must be encrypted (the release key is CI's).
+
+CI time. Run 40069427738 took 91 minutes, set by the AArch64 `encrypt`
+job: the 1 GiB written in 2569 s, B1-B4 again in about 1950 s. Writing
+1 GiB with one `sync` at the end leaves it all dirty in a 256 MiB guest
+(MEM-9); with a `sync` after each 32 MiB the same file took 386 s
+against 1275 s on x86-64, and the test now writes it so (still 1 GiB,
+the same SHA-256 checks and two-level walk). An experiment appending
+32 MiB at a time found each append slower as the file grows, plain or
+encrypted (CFS-36). The `encrypt` job is now three parallel parts
+(`test-encrypt-b1b4` with `ENCRYPT_B1B4_TESTS` runs the last stage's
+tests alone; `make test-encrypt` still runs everything), and
+`build-and-boot` three parts (`build`, `boots`, `stress`), each set from
+that run's step times.
+
+Local, at `d913b67b`, both architectures:
+
+| part | x86_64 | aarch64 |
+|---|---|---|
+| test-encrypt stages | PASS 1066.5 s (1 GiB written 643 s, read 279 s) | PASS 1159.2 s (754 s, 239 s) |
+| Argon2id seal / unlock | 1.62 s / 1.15 s | 0.83 s / 0.83 s |
+| snapshot, pkgtx | FAIL (snapshot: the firmware stall below); rerun PASS 168.7 s, 154.5 s | PASS 159.6 s, 173.9 s |
+| fsck, mirror, be | PASS 282.0 s, 225.6 s, 512.5 s | PASS 312.2 s, 257.8 s, 550.2 s |
+
+The x86-64 `test-snapshot` first failed its `rollback` boot: OVMF stalled
+on the guest's reset inside one QEMU, the screen cleared five times and
+the loader never ran, flakes.md's "firmware stalled on the reset", a
+second sighting.
+
 ## Backlog
 
 Struck: CFS-7 and CFS-10 (#447), CFS-31 (found and fixed in #447).
@@ -272,6 +322,8 @@ CFS-33 (encrypting an existing root in place), CFS-34 (per-user keys),
 BOOT-9 (TPM-sealed keys), MEM-10 (encrypted swap); CFS-35 (a block put
 back to an older version of itself verifies: the MAC binds the address
 and the pool, not the generation); BOOT-4 notes that the MAC is not a
-verified root.
+verified root. With the CI work: MEM-9 gains the measured cost of
+unbounded dirty pages, and CFS-36 (appending costs more the larger the
+file).
 
 With #448, roadmap 1.2 B5 is done, and direction B with it.

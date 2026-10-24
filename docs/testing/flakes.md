@@ -4793,6 +4793,16 @@ loader. The same handover stall as "firmware handover in
 `test-harness-retry`" above, here on a guest-initiated reset inside one
 QEMU process, where the harness has no retry. Recorded, not attributed;
 rerun.
+**Second sighting, 2026-10-24:** local x86-64 release `make
+test-encrypt-b1b4`'s `test-snapshot` on an encrypted root (PR #448 at
+`d913b67b`, this developer's machine, an AArch64 `test-encrypt` running
+beside it): `rollback: no /etc/rc of the boot after the rollback before
+the deadline`. `boot-rollback.log` ends with `cosmo-snap: rebooting to
+apply it`, `reboot: restart through the ACPI reset register (port 0xcf9,
+value 0xf)` and five of the firmware's screen clears: the same stall, on
+a guest-initiated reset inside one QEMU. The branch changes nothing that
+runs there (the passphrase reader and `cosmo-key`). Not attributed;
+rerun.
 
 
 ## ash history: the nested shell stopped, 2026-10-18 and 2026-10-20
@@ -4857,3 +4867,19 @@ same job on `f791de0f` and on `ffbb5f56`, which holds `3888f9da`. Two
 sightings, both x86-64, both the boot straight after an unclean or
 init-requested restart, one local and one on CI; still not attributed.
 The failed job was re-run and passed; `make test-be` locally on the same tree passed (457.7 s).
+
+## `test-be`'s `be-space` boot on an encrypted root out of time, 2026-10-24
+
+CI, PR #448 at `00ca2724`, run 40057006013, job 120762119306 (`encrypted
+root test (x86_64)`), test-encrypt's last stage: `test-be: FAIL:
+be-space: no prompt after "cosmo-snap list | grep 'KiB free'" before the
+deadline` (240 s, per boot), after the stages before it passed. The
+upload of that job kept no serial log (the B1-B4 workdirs were not in its
+paths; added in `88360ad7`). Locally, `be-space` on an encrypted root
+takes 101-109 s on x86-64 (three runs of `be_test.py`, 256 MiB, all
+PASS); a CI runner is about 1.35 times slower on this job, so about
+140 s was expected. A bounded experiment filled an encrypted root to
+16 KiB free from the same shell: no hang, each `cosmo-snap list` 3.3 s.
+The rerun on `88360ad7` passed (`test-be` 574.2 s, run 40069427738).
+First sighting; not attributed, no mechanism: treat a second as a
+regression, and read its `test-be-encrypted/boot-be-space.log`.

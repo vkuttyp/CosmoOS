@@ -125,6 +125,7 @@ Open lines (struck lines are not counted):
 - **CFS-33** usability, M. An existing plain root cannot be encrypted in place; `cosmo-install --encrypt` makes a new one (out of roadmap 1.2 B5's scope).
 - **CFS-34** nice-to-have, M. One master key per pool: no per-user or per-directory keys a user unlocks apart from the pool (the per-file keys derive from the master; out of roadmap 1.2 B5's scope).
 - **CFS-35** security, M. An encrypted pool's metadata MAC binds a block to its address and the pool, not to its generation: a block replaced by an older version of itself at the same address verifies (the tree is not hash-linked; roadmap 1.2 B5, design.md "The metadata MAC").
+- **CFS-36** performance, M. Appending to a file costs more the larger it is: 32 MiB appended and synced took 3.2 s at the start of a file and 14-18 s past 768 MiB on a plain root (1 GiB in 303 s), 20 s at 1 GiB on an encrypted one (1 GiB in 386 s) (x86-64 under QEMU, 2026-10-24), so a large file's writing time grows with the square of its size. Not measured further: something in each commit is proportional to the file (candidates: its run map or checksum index written whole); find it and make a commit cost what it changed.
 
 ## Documentation
 
@@ -200,7 +201,7 @@ Open lines (struck lines are not counted):
 - **MEM-7** nice-to-have, M. x86-64 PCID, once a test path exists (TCG has none).
 - **MEM-8** nice-to-have, S. Thread guard page by map-then-protect instead of reserve-and-replace (no benefit shown).
 - **MEM-10** nice-to-have, S. There is no swap; when there is, it should be encrypted (an encrypted root's pages would otherwise reach the disk in the clear; out of roadmap 1.2 B5's scope).
-- **MEM-9** correctness, M. Dirty page-cache pages are not bounded by memory or by the filesystem's free space: `dd` to a file on a 256 MiB root wrote ~470 MB before it was killed by a fault, and every spawn after was `ENOMEM` (test-pkgtx's first fill, 2026-10-20). A write should meet `ENOSPC` when the pool cannot hold it, and writeback should throttle a writer.
+- **MEM-9** correctness, M. Dirty page-cache pages are not bounded by memory or by the filesystem's free space: `dd` to a file on a 256 MiB root wrote ~470 MB before it was killed by a fault, and every spawn after was `ENOMEM` (test-pkgtx's first fill, 2026-10-20). A write should meet `ENOSPC` when the pool cannot hold it, and writeback should throttle a writer. It also costs time: 1 GiB written to an encrypted root with one `sync` at the end took 1275 s on x86-64 under QEMU (256 MiB of memory), against 386 s with a `sync` after each 32 MiB (2026-10-24; test-encrypt now syncs every 32 MiB).
 
 ## Network
 

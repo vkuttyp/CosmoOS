@@ -400,9 +400,9 @@ the test does not ask for zero.
 ## An encrypted root (`make test-encrypt`)
 
 Roadmap 1.2 B5's acceptance test, `tests/boot/encrypt_test.py`, in CI's
-`encrypt` job on both architectures (release builds), as two parallel
-halves: the stages below with `test-snapshot` and `test-pkgtx` of the
-last stage, and `test-fsck`, `test-mirror` and `test-be` of it. The harness types
+`encrypt` job on both architectures (release builds), as three parallel
+parts: the stages below; `test-snapshot`, `test-pkgtx` and `test-fsck` of
+the last stage; and `test-mirror` and `test-be` of it. The harness types
 every passphrase at the prompt it waits for, and checks the serial log
 never shows one. The guide page [Encrypted root](../../../guide/encrypted-root.md)
 shows the commands it runs.
