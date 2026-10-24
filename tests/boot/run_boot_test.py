@@ -1056,13 +1056,16 @@ def main():
             logs[-1].close()
             start = time.monotonic()   # a retried boot is timed from its own launch
         logs.append(open(args.log, "wb"))
-        return subprocess.Popen(
-            [runner, args.image],
-            stdin=subprocess.PIPE if shelltest is not None else subprocess.DEVNULL,
-            stdout=logs[-1],
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
+        # QEMU's own messages in a file of their own, not inside guest
+        # lines (tests/boot/install_test.py, Boot).
+        with open(os.path.splitext(args.log)[0] + "-qemu.log", "ab" if attempt else "wb") as qerr:
+            return subprocess.Popen(
+                [runner, args.image],
+                stdin=subprocess.PIPE if shelltest is not None else subprocess.DEVNULL,
+                stdout=logs[-1],
+                stderr=qerr,
+                env=env,
+            )
 
     def read_log(attempt):
         with open(args.log, "rb") as f:
