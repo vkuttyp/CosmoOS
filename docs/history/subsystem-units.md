@@ -3413,3 +3413,23 @@ See the [history index](README.md).
   - **BUILD-7:** an rc's release run also builds and checks the final
     tag's notes. `tools/build7-probe.py`.
   - Report: `docs/audit/2026-10-23-v1012-blockers-report.md`.
+- **An encrypted root (2026-10-24, roadmap 1.2 B5; PRs #447, #448).**
+  Direction B's last unit.
+  - **#447, format 14:** a random master key in eight slots (Argon2id or
+    a key file, sealed with ChaCha20-Poly1305, the slot's place as
+    associated data); a key table the kernel holds while a writable
+    mount does and wipes after; `/dev/fsctl`'s `KEY_*` and `/dev/blkctl`
+    `FORMAT_KEYED`. Every header, superblock and label of an encrypted
+    pool carries a 64-bit BLAKE2b tag keyed from the master key instead
+    of CRC32C (CFS-7). A two-level checksum index lifts the file limit
+    to 125 GiB encrypted (CFS-10). CFS-31, a member table whose seal was
+    never checked, found and fixed (`tools/cfs31-probe.py`). Codex found
+    a double release on a failed copy and a scrub that missed a copy its
+    own read repaired; both fixed with tests.
+  - **#448, user space:** `cosmo-key` (list, unlock, add, change,
+    remove, bench), init's unlock before the root's check (three wrong
+    passphrases restart), `cosmo-install --encrypt [--key-file]`, one
+    key for a mirror. `make test-encrypt` on both architectures, which
+    then runs B1-B4's tests on an encrypted root. CFS-32 (a compressed
+    file stops at about 128 MiB) found by it, in the backlog.
+  - Report: `docs/audit/2026-10-24-b5-encrypted-root-report.md`.

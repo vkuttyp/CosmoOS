@@ -46,6 +46,27 @@ import mkmanifest  # noqa: E402
 import modsign  # noqa: E402
 
 PROMPT = b"\ncosmo$ "
+
+# Roadmap 1.2 B5: with COSMO_TEST_ENCRYPT set to a passphrase, a test that
+# boots through Boot runs on an encrypted root unchanged -- every
+# `cosmo-install` it types gets --encrypt, and the passphrase is typed at
+# each prompt the installer and init's unlock print (test-encrypt's last
+# stage runs the B1-B4 tests this way).
+ENCRYPT_PASS = os.environ.get("COSMO_TEST_ENCRYPT", "")
+ENCRYPT_PROMPTS = (b"new passphrase: ", b"new passphrase again: ", b"passphrase for cosmo-root: ")
+
+
+# The format a fresh install is at, and the one a first snapshot leaves:
+# an encrypted root is made at 14, which a snapshot does not raise.
+FORMAT_FRESH = 14 if ENCRYPT_PASS else 11
+FORMAT_SNAP = 14 if ENCRYPT_PASS else 12
+
+
+def encrypted_cmd(cmd):
+    """`cmd` with --encrypt after each cosmo-install that installs."""
+    if not ENCRYPT_PASS:
+        return cmd
+    return re.sub(r"\bcosmo-install (?!--list)", "cosmo-install --encrypt ", cmd)
 TARGET_MIB = 256
 SS = 512
 EXIT_SUCCESS = (0x10 << 1) | 1
@@ -86,6 +107,11 @@ class Boot:
                 self.proc = subprocess.Popen([os.path.join(ROOT, "scripts", "qemu-run.sh"), image],
                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=qerr, env=env)
             self.log = open(self.log_path, "wb")
+            # Each line again with the second it arrived at, from launch:
+            # a deadline missed says whether the boot was slow throughout
+            # or stopped at one command.
+            self.times = open(os.path.splitext(self.log_path)[0] + "-times.log", "wb")
+            self.last_line_s = 0.0
             self.reader = threading.Thread(target=self._read, args=(self.proc, self.log, self.buf), daemon=True)
             self.reader.start()
             return self.proc
@@ -113,6 +139,9 @@ class Boot:
             raise Fail(f"{name}: {e}")
 
     def _read(self, proc, log, buf):
+        answered = 0   # where the last passphrase prompt answered ends
+        partial = b""
+        times = self.times
         while True:
             b = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(1)
             if not b:
@@ -121,6 +150,24 @@ class Boot:
                 buf += b
             log.write(b)
             log.flush()
+            *lines, partial = (partial + b).split(b"\n")
+            if lines:
+                self.last_line_s = time.monotonic() - self.t0
+                times.write(b"".join(b"%8.2f %s\n" % (self.last_line_s, ln.rstrip(b"\r")) for ln in lines))
+                times.flush()
+            while ENCRYPT_PASS:
+                with self.lock:
+                    hits = [(buf.find(p, answered), p) for p in ENCRYPT_PROMPTS]
+                hits = [(i, p) for i, p in hits if i >= 0]
+                if not hits:
+                    break
+                i, p = min(hits)
+                answered = i + len(p)
+                try:
+                    proc.stdin.write(ENCRYPT_PASS.encode() + b"\n")
+                    proc.stdin.flush()
+                except (BrokenPipeError, ValueError):
+                    return
 
     def text(self):
         with self.lock:
@@ -137,10 +184,12 @@ class Boot:
             if self.proc.poll() is not None:
                 raise Fail(f"{self.name}: QEMU exited (code {self.proc.returncode}) waiting for {what}")
             time.sleep(0.1)
-        raise Fail(f"{self.name}: no prompt after {what} before the deadline")
+        raise Fail(f"{self.name}: no prompt after {what} before the deadline ({time.monotonic() - self.t0:.0f} s from "
+                   f"launch; the last line at {self.last_line_s:.1f} s)")
 
     def run(self, cmd):
         """Type `cmd`, wait for the next prompt, return what it printed."""
+        cmd = encrypted_cmd(cmd)
         before = len(self.text())
         self.proc.stdin.write(cmd.encode() + b"\n")
         self.proc.stdin.flush()
@@ -276,7 +325,10 @@ def stage_install(args, results):
         out = b.status(f"cosmo-install {dev}", "again-status")
         need(out, r"^again-status=3$", "a second install without --force")
         need(out, r"already has a partition table; --force replaces it", "a second install without --force")
-        out = b.run(f"mkdir /mnt/v && mount -t cosmofs /dev/{root_dev} /mnt/v && ls -1 /mnt/v/sbin && ls -1 /mnt/v && "
+        # An encrypted root's key went with the installer's unmount: it is
+        # unlocked again, as init would, before it is mounted to look at.
+        unlock = f"cosmo-key unlock {root_dev} && " if ENCRYPT_PASS else ""
+        out = b.run(f"{unlock}mkdir /mnt/v && mount -t cosmofs /dev/{root_dev} /mnt/v && ls -1 /mnt/v/sbin && ls -1 /mnt/v && "
                     "cat /mnt/v/etc/rc && cat /mnt/v/etc/pkg/repos.conf && ls -1 /mnt/v/var/lib/pkg/repo")
         out += b.status(f"cosmo-install --force {dev}", "busy-status")
         out += b.run("umount /mnt/v && echo look-ok")

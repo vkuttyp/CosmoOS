@@ -59,7 +59,10 @@ static bool zero(const uint8_t *p, size_t n)
 }
 
 /* cosmofs's superblock check (cfs_super_ok): the magic, a known version,
- * the CRC32C over the block with the crc field as zero. */
+ * the CRC32C over the block with the crc field as zero. A version-14
+ * encrypted pool's carries a MAC there instead, which needs the key: its
+ * slot is taken unverified, as the kernel's KEY_INFO takes it, since what
+ * blkid prints (a type, a label, a uuid) helps nobody forge anything. */
 static bool slot_ok(const uint8_t *b, uint64_t *gen)
 {
     uint32_t version, crc;
@@ -67,6 +70,10 @@ static bool slot_ok(const uint8_t *b, uint64_t *gen)
     memcpy(&crc, b + CFS_OFF_CRC, 4);
     if (memcmp(b, CFS_MAGIC, 8) != 0 || version < CFS_VERSION_MIN || version > CFS_VERSION)
         return false;
+    if (cfs_super_is_mac((const struct cfs_super *)b)) {
+        memcpy(gen, b + CFS_OFF_GENERATION, 8);
+        return *gen != 0;
+    }
     static const uint8_t zero4[4] = { 0 };
     uint32_t c = crc32c(b, CFS_OFF_CRC);
     c = crc32c_update(c, zero4, 4);
@@ -113,6 +120,8 @@ static bool probe(const struct cosmo_blkctl_dev *d)
             n += snprintf(line + n, sizeof(line) - (size_t)n, " UUID=\"%s\"", u);
         }
         n += snprintf(line + n, sizeof(line) - (size_t)n, " TYPE=\"cosmofs\"");
+        if (cfs_super_is_mac((const struct cfs_super *)sb))
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " ENCRYPTED=\"yes\"");
     } else if (!(d->flags & COSMO_BLKCTL_PART)) {
         const char *why = NULL;
         static struct cosmo_blkctl_dev disk;   /* the read callback's context, which is not const */

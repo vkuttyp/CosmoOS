@@ -24,10 +24,12 @@ the pages in order: each one continues where the one before it stopped.
    `fsck.cosmofs`, `fsctl check` and `scrub`, mirrors.
 9. [Mirrors](mirrors.md): a root on two disks, a disk that goes,
    `cosmo-pool replace`, resilvering, spares.
-10. [Privileges](privileges.md): the privilege set, dropping privileges,
+10. [Encrypted root](encrypted-root.md): `cosmo-install --encrypt`, the
+   passphrase at boot, key slots, a key file, and what it protects.
+11. [Privileges](privileges.md): the privilege set, dropping privileges,
    and what an ssh session holds.
-11. [Known limitations](limitations.md).
-12. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
+12. [Known limitations](limitations.md).
+13. [Tested platforms](platforms.md): QEMU, and Parallels Desktop on
    Apple Silicon.
 
 Commands for your computer are shown as plain blocks; commands typed on

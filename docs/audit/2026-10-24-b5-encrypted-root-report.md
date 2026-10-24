@@ -2,7 +2,8 @@
 
 Date: 2026-10-24. Base: `usr8-pkg11-build7` at `0805c67c` (PR #446,
 itself on `main` at `78afb0b8`): B5 builds on #446's `/run` and ESP
-changes, so its PRs are stacked on it. PR #447 (this part: the kernel).
+changes, so its PRs are stacked on it. PR #447 (the kernel) and PR #448
+(user space and the acceptance test, stacked on #447).
 
 ## Scope and baseline
 
@@ -151,7 +152,178 @@ self-test 940 ms) and AArch64 (176.3 s, 963 ms); release `make test`,
 278.8 s) and `test-mirror` (169.1 s / 224.1 s) pass on x86-64 /
 AArch64.
 
-## What is not done in this part
+## What changed (PR #448)
 
-User space -- `cosmo-key`, the unlock at boot, `cosmo-install
---encrypt` -- and the acceptance test are PR #448.
+User space, on #447's kernel. The design is `docs/userland/design.md`
+(init's unlock, `cosmo-install --encrypt`, "cosmo-key"); invariant U16.
+
+- **The slots, sealed in user space.** `userland/lib/argon2.c` is
+  Argon2id (RFC 9106) over the kernel's BLAKE2b; `keyslot.c` seals the
+  master key with ChaCha20-Poly1305 (the kernel's `chacha20_seal`) under
+  a key from a passphrase (Argon2id, 64 MiB, three passes, one lane) or
+  a 32-byte key file, the slot's associated data and nonce as #447 fixed
+  them. `secret.c` reads a passphrase with echo off and wipes it;
+  `fskey.c` wraps `/dev/fsctl`'s `KEY_*`.
+- **`cosmo-key`** (`userland/system/cosmo-key.c`): `list`, `unlock
+  [--boot]`, `add`, `change`, `remove SLOT`, `bench`. An unlock tries
+  slot 0's key file on the ESP (`\cosmo.key`) when there is one, then
+  asks `passphrase for <pool>:` up to three times; the third wrong one
+  exits 3. It prints how long Argon2id took.
+- **init** runs `cosmo-key unlock --boot` on the root device before its
+  check and its mount when the pool is locked; exit 3 restarts the
+  machine with nothing mounted. The prompt is on every console.
+- **`cosmo-install --encrypt [--key-file]`** asks for the passphrase
+  twice before it writes anything, draws the pool's uuid and master key
+  (`getrandom`), seals slot 0 (or the key file in 0 and the passphrase
+  in 1, the file written to each ESP) and formats with `FORMAT_KEYED`,
+  one disk or a mirror with one key.
+- `fsck.cosmofs` and the boot report say `LOCKED`; `blkid` says
+  `ENCRYPTED="yes"`; libc has `ENOKEY` and `EKEYREJECTED`;
+  `cosmo-upgrade`'s format gate names the encrypted root.
+
+## The acceptance test (PR #448)
+
+`make test-encrypt` (`tests/boot/encrypt_test.py`, CI job `encrypt`,
+release builds), stages: **install** (disk A with `--encrypt`, the
+harness typing the passphrase twice; B and B2 a mirror with
+`--key-file`; a mismatched second passphrase writes nothing),
+**wrong** (three wrong passphrases: the machine restarts with nothing
+mounted), **boot** (one wrong, then the right one; a marker written,
+slot 1 added), **plaintext** (no disk holds the marker), **forge**
+(each domain on a clone of disk A, the block altered and its CRC32C
+recomputed: superblock, inode map root, member table, key block, a
+spare's label), **slot2** (slot 1's passphrase; 1 GiB of incompressible
+data written, its sha256 taken, the check clean with a two-level tree
+walked), **readback** (after a reboot, the same sha256), **keyfile** (B
+and B2 boot with no prompt; B2 alone by its own ESP's copy). Its last
+stage runs `test-snapshot`, `test-fsck`, `test-mirror`, `test-pkgtx` and
+`test-be` again with every install `--encrypt` and the passphrase typed
+at every boot.
+
+| | x86_64 | aarch64 |
+|---|---|---|
+| test-encrypt | PASS in 1660.0 s | PASS in 1979.9 s |
+| Argon2id 64 MiB, t=3: sealing (install) | 2.05 s | 0.76 s |
+| Argon2id: unlocking at boot | 1.06 s | 0.81 s |
+| 1 GiB written / read back | 1275 s / 248 s | 1614 s / 207 s |
+| forge | all five refused | all five refused |
+| test-snapshot, encrypted | PASS 140.5 s | PASS 160.7 s |
+| test-fsck, encrypted | PASS 273.5 s | PASS 310.2 s |
+| test-mirror, encrypted | PASS 219.3 s | PASS 251.9 s |
+| test-pkgtx, encrypted | PASS 140.4 s | PASS 162.8 s |
+| test-be, encrypted | PASS 515.4 s | PASS 519.7 s |
+
+These runs were on `7e259e9a` (#448 before the rebase onto #447's
+review fixes, which change only the kernel's checksum-index walk and
+scrub). Argon2id's cost is about a second on both: the parameters are
+stored in each slot, and `cosmo-key change --passes/--memory` raises
+them. The x86-64 seal at install is slower than the unlock (a cold
+first touch of 64 MiB in the live system); AArch64 under TCG is not the
+slower architecture for Argon2id here.
+
+test-fsck's `superblock` class is the one class that behaves
+differently on an encrypted root: the harness's forged slot names
+another pool, which cannot be authenticated, so it is left out and the
+root mounts clean; the test asserts that.
+
+**CFS-32, found by this test.** The first 1 GiB file was compressible
+(`dd` of a repeated pattern): LZ4 makes one run per 32 KiB record, and
+past `CFS_MAX_EXTENTS` runs (about 128 MiB) every commit failed with
+`-EFBIG` until memory ran out. Reproduced on a plain pool at 150 MB, so
+it is not B5's; backlog CFS-32 (correctness). The test writes
+incompressible data.
+
+## Validation (PR #448)
+
+The full matrix on `a1106611`, every step exit 0 with its own PASS line
+except one, rerun:
+
+| step | x86_64 | aarch64 |
+|---|---|---|
+| analyze | clean (7 baselined, 0 unexpected) | clean |
+| debug `make test`, `QEMU_SMP=1` / `2` / `4` | PASS 159.4 / 164.0 / 165.5 s | FAIL (`signal-stop` check 9; rerun PASS 154.1 s) / PASS 170.4 / 176.7 s |
+| `test-smp2` | PASS 159.3 s | PASS 161.1 s |
+| `test-chaos` | PASS 172.5 s | PASS 177.3 s |
+| `test-harness-retry` | PASS 170.6 s | PASS 175.2 s |
+| `test-crash` | PASS 136.3 s | PASS 138.9 s |
+| `BUILD=release test` | PASS 18.2 s | PASS 21.7 s |
+| release `test-install` | PASS 33.0 s | PASS 46.6 s |
+| release `test-mirror` | PASS 169.9 s | PASS 226.9 s |
+| release `test-upgrade` | PASS (be 430.7 s) | PASS (be 533.4 s) |
+| release `test-snapshot` | PASS 129.1 s | PASS 142.7 s |
+| release `test-fsck` | PASS 241.3 s | PASS 309.2 s |
+
+The network harness passed in every debug boot. `make host-test` (with
+`test_keyslot` and `tools/cosmofs_key.py --self-test`),
+`host-test-fetch` and `fuzz` passed; `make reproducible`: yes.
+
+The AArch64 `QEMU_SMP=1` failure is backlog LX-1's, a fourth sighting in
+`docs/testing/flakes.md`: the child (pid 268) exited with status 7
+before its parent (pid 267) with status 9, a fast exit hiding an
+unreported continue (`child_event_locked` checks `EXITED` before
+`CONTINUED`). #448 changes no kernel code. The rerun on the same commit
+passed (load average 5 before it, 1.5 after).
+
+## Review fixes and CI time (PR #448)
+
+Codex on #448, three findings:
+
+- **The prompt before echo off.** `secret_read` printed the prompt, then
+  turned echo off, so a reply sent the moment the prompt was seen (a
+  paste, the boot harness) could be echoed. Echo is now off first. The
+  host test `secret-echo-off-before-prompt` (`tests/host/test_keyslot.c`,
+  the reader included with `fflush` wrapped) reads the terminal's `ECHO`
+  at the prompt's flush: it failed on the old order (`g_prompt_echo ==
+  0`) and passes.
+- **The last passphrase removed.** On a `--key-file` pool, `cosmo-key
+  remove 1` emptied the only passphrase slot, after which no `add`,
+  `change` or `remove` could open the pool (only a passphrase opens
+  them). It is refused now, before any prompt. test-encrypt's `keyfile`
+  stage pipes B's passphrase to `cosmo-key remove 1`: on the old
+  `cosmo-key` the kernel logged `key slot 1 cleared` and the stage
+  failed; it passes with the fix.
+- **A plaintext pool in place of the encrypted one** boots as that pool:
+  answered with BOOT-4 and the guide's "What it protects, and what it
+  does not"; there is no signed place on an installed disk to record
+  that its root must be encrypted (the release key is CI's).
+
+CI time. Run 40069427738 took 91 minutes, set by the AArch64 `encrypt`
+job: the 1 GiB written in 2569 s, B1-B4 again in about 1950 s. Writing
+1 GiB with one `sync` at the end leaves it all dirty in a 256 MiB guest
+(MEM-9); with a `sync` after each 32 MiB the same file took 386 s
+against 1275 s on x86-64, and the test now writes it so (still 1 GiB,
+the same SHA-256 checks and two-level walk). An experiment appending
+32 MiB at a time found each append slower as the file grows, plain or
+encrypted (CFS-36). The `encrypt` job is now three parallel parts
+(`test-encrypt-b1b4` with `ENCRYPT_B1B4_TESTS` runs the last stage's
+tests alone; `make test-encrypt` still runs everything), and
+`build-and-boot` three parts (`build`, `boots`, `stress`), each set from
+that run's step times.
+
+Local, at `d913b67b`, both architectures:
+
+| part | x86_64 | aarch64 |
+|---|---|---|
+| test-encrypt stages | PASS 1066.5 s (1 GiB written 643 s, read 279 s) | PASS 1159.2 s (754 s, 239 s) |
+| Argon2id seal / unlock | 1.62 s / 1.15 s | 0.83 s / 0.83 s |
+| snapshot, pkgtx | FAIL (snapshot: the firmware stall below); rerun PASS 168.7 s, 154.5 s | PASS 159.6 s, 173.9 s |
+| fsck, mirror, be | PASS 282.0 s, 225.6 s, 512.5 s | PASS 312.2 s, 257.8 s, 550.2 s |
+
+The x86-64 `test-snapshot` first failed its `rollback` boot: OVMF stalled
+on the guest's reset inside one QEMU, the screen cleared five times and
+the loader never ran, flakes.md's "firmware stalled on the reset", a
+second sighting.
+
+## Backlog
+
+Struck: CFS-7 and CFS-10 (#447), CFS-31 (found and fixed in #447).
+Added: CFS-32 (above); out of B5's scope, as the roadmap lists them:
+CFS-33 (encrypting an existing root in place), CFS-34 (per-user keys),
+BOOT-9 (TPM-sealed keys), MEM-10 (encrypted swap); CFS-35 (a block put
+back to an older version of itself verifies: the MAC binds the address
+and the pool, not the generation); BOOT-4 notes that the MAC is not a
+verified root. With the CI work: MEM-9 gains the measured cost of
+unbounded dirty pages, and CFS-36 (appending costs more the larger the
+file).
+
+With #448, roadmap 1.2 B5 is done, and direction B with it.

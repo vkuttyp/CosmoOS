@@ -519,11 +519,15 @@ toolchain, edit `ci/Dockerfile`: the next run builds the new image, and
 its packages are listed in the image at
 `/usr/share/cosmoos-ci/packages.txt`.
 
-The `build-and-boot` job is a matrix over `arch: [x86_64, aarch64]`. Each
-runs `check-tools`, a debug build with `test`, a release build with
-`test`, `host-test`, `analyze`, `reproducible`, and `test-crash` with
-`ARCH=<arch>`; the x86-64 job also runs `fuzz` (the targets are host
-binaries, the same on either job), and each uploads serial logs and images per architecture.
+The `build-and-boot` job is a matrix over `arch: [x86_64, aarch64]` and
+`part: [build, boots, stress]`, the three parts in parallel, each with
+`ARCH=<arch>`. `build` runs `check-tools`, the debug build, `analyze`, a
+release build with `test`, `host-test` and `reproducible`, and uploads
+the images; the x86-64 one also runs `fuzz` (the targets are host
+binaries, the same on either job). `boots` runs the debug `test`,
+`test-gic`, `test-guard` and `test-smp2`; `stress` runs `test-chaos`,
+`test-harness-retry`, `test-crash` and `test-wxn`. Each uploads its serial
+logs.
 The `platforms` job builds the AArch64 release image and runs `make
 ARCH=aarch64 BUILD=release test-platforms`, uploading the boots' logs on
 failure. Both targets are

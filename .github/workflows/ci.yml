@@ -61,7 +61,7 @@ jobs:
         run: scripts/ci-image.sh "ghcr.io/${{ github.repository_owner }}/cosmoos-ci"
 
   build-and-boot:
-    name: build, boot, analyze (${{ matrix.arch }})
+    name: build, boot, analyze (${{ matrix.arch }}, ${{ matrix.part }})
     runs-on: ${{ matrix.os }}
     needs: image
     container:
@@ -74,6 +74,18 @@ jobs:
       matrix:
         os: [ubuntu-24.04]
         arch: [x86_64, aarch64]
+        # Three parallel parts, each building what its steps need: one
+        # job of 50 minutes (aarch64, run 40069427738) set the length of
+        # every run. Step times from that run, aarch64 (x86_64):
+        #   build  debug build 2.5 (3.1), analyze 5.1 (7.1), release 1.1
+        #          (1.2), host tests 1.5 (1.6), fuzz (1.9), reproducible
+        #          8.3 (9.8): about 19 (25) minutes
+        #   boots  debug build, test 4.8 (5.2), test-gic 3.2 (a no-op),
+        #          test-guard 3.2 (3.5), test-smp2 3.0 (3.4): 17 (15)
+        #   stress debug build, test-chaos 4.0 (4.5), test-harness-retry
+        #          3.9 (4.4), test-crash 3.4 (3.7), test-wxn 3.3 (a
+        #          no-op): 17 (16)
+        part: [build, boots, stress]
     # 30 was the limit until 2026-09-25: main's aarch64 job had grown to
     # 29-29.5 minutes (runs 36069717395, 36008860068) and was cancelled by
     # it once with every boot passed (run 36028371189).
@@ -86,8 +98,9 @@ jobs:
     # last 60 runs it took a median of 51.7 minutes, a p95 of 54.0 and at
     # most 54.2, and PR #401's was cancelled at 55.1 in its last step with
     # every boot passed (run 39061354017). A hang guard; each boot keeps its
-    # own timeout.
-    timeout-minutes: 70
+    # own timeout. 70 was the limit of the one job until 2026-10-24, when it
+    # was split in three; the longest part is about 25 minutes.
+    timeout-minutes: 45
     env:
       # SIGNING=dev generates an ephemeral signing key here on first use; it
       # lives only in this job's filesystem and is never uploaded (the
@@ -118,16 +131,18 @@ jobs:
           key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
 
       - name: Verify toolchain and that no signing secret is tracked
+        if: matrix.part == 'build'
         run: make ARCH=${{ matrix.arch }} check-tools
 
       - name: Build (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug all
 
       - name: Static analysis against reviewed architecture baseline
+        if: matrix.part == 'build'
         run: make ARCH=${{ matrix.arch }} analyze
 
       - name: Upload analyzer inventory
-        if: always()
+        if: always() && matrix.part == 'build'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: analysis-inventory-${{ matrix.arch }}
@@ -135,12 +150,14 @@ jobs:
           if-no-files-found: ignore
 
       - name: Boot test (debug)
+        if: matrix.part == 'boots'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test
 
       # QEMU's virt defaults to gic-version=2, so the step above exercises
       # the GICv2 driver and never the GICv3 one or the ITS. A no-op on
       # x86-64.
       - name: Boot test on the other interrupt controller (debug)
+        if: matrix.part == 'boots'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-gic
 
       # The default CPU models lack SMEP/SMAP/UMIP (qemu64) and PAN
@@ -148,6 +165,7 @@ jobs:
       # is a no-op in the boots above. This boots the same image on a
       # model that has the guard and requires the kernel to say so.
       - name: Boot test on a protection-capable CPU (debug)
+        if: matrix.part == 'boots'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-guard
 
       # Every other boot uses four CPUs. Three self-tests needed a third
@@ -155,12 +173,14 @@ jobs:
       # (docs/audit/2026-10-05-two-cpu-validation-report.md); this boot
       # keeps the two-CPU premises honest.
       - name: Boot test with two CPUs (debug)
+        if: matrix.part == 'boots'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-smp2
 
       # The same suite with a migrator in the tick moving ready threads
       # between CPUs for no reason (docs/kernel/scheduler/design.md,
       # "Migration"): every concurrency test, with threads moving under it.
       - name: Boot test under a chaos migrator (debug)
+        if: matrix.part == 'stress'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-chaos
 
       # net-harness retries its back-connection because QEMU's user-mode
@@ -172,9 +192,11 @@ jobs:
       # This boot breaks the first attempt on purpose and requires both
       # that it broke and that a later attempt carried the exchange.
       - name: Boot test with the harness's first attempt broken (debug)
+        if: matrix.part == 'stress'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-harness-retry
 
       - name: Build and boot test (release)
+        if: matrix.part == 'build'
         run: make ARCH=${{ matrix.arch }} BUILD=release all test
 
       # The release workflow requires every describe-shaped string in the
@@ -182,43 +204,50 @@ jobs:
       # failed v1.0.8's first tag after main had passed. Checked here, on
       # every change, against the build's own id.
       - name: The release kernel names no other build id
+        if: matrix.part == 'build'
         run: python3 scripts/check-release-version.py --kernel out/${{ matrix.arch }}-release/kernel/kernel.elf --build-id "$(git describe --always --dirty)"
 
       - name: Host unit tests (ASan + UBSan)
+        if: matrix.part == 'build'
         run: make ARCH=${{ matrix.arch }} host-test
 
       # cosmo-fetch, the HTTPS client pkg and cosmo-upgrade run, built for
       # the host on the target's mbedTLS and configuration, against local
       # TLS servers (ports/mbedtls/README.md, "Tested by").
       - name: cosmo-fetch's certificate, redirect and range cases (host, ASan + UBSan)
+        if: matrix.part == 'build'
         run: make ARCH=${{ matrix.arch }} host-test-fetch
 
       # The quiescence epoch core under TSan, with its two negative
       # controls (one pairing weakened each) required to report a race.
       - name: Host TSan model of the quiescence protocol
+        if: matrix.part == 'build'
         run: make ARCH=${{ matrix.arch }} host-test-quiesce-tsan
 
       - name: Fuzz targets (ASan + UBSan, bounded run)
         # Host binaries, identical on either job: run them once.
-        if: matrix.arch == 'x86_64'
+        if: matrix.arch == 'x86_64' && matrix.part == 'build'
         run: make ARCH=${{ matrix.arch }} fuzz FUZZ_RUNS=50000
 
       - name: Reproducible build check
+        if: matrix.part == 'build'
         run: make ARCH=${{ matrix.arch }} reproducible
 
       - name: Panic path test
+        if: matrix.part == 'stress'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-crash
 
       # AArch64: a page mapped writable and executable on purpose must
       # not execute (SCTLR_EL1.WXN). A no-op on x86-64.
       - name: WXN test
+        if: matrix.part == 'stress'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-wxn
 
       - name: Upload serial logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: serial-logs-${{ matrix.arch }}
+          name: serial-logs-${{ matrix.arch }}-${{ matrix.part }}
           path: out/**/boot-test*.log
           if-no-files-found: ignore
 
@@ -232,14 +261,14 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: debug-elfs-${{ matrix.arch }}
+          name: debug-elfs-${{ matrix.arch }}-${{ matrix.part }}
           path: |
             out/${{ matrix.arch }}-debug*/kernel/kernel.elf
             out/${{ matrix.arch }}-debug*/modules/*.ko
           if-no-files-found: ignore
 
       - name: Upload binaries
-        if: success()
+        if: success() && matrix.part == 'build'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: images-${{ matrix.arch }}
@@ -546,6 +575,88 @@ jobs:
           name: test-mirror-${{ matrix.arch }}
           path: |
             out/${{ matrix.arch }}-release/test-mirror/*.log
+          if-no-files-found: ignore
+  # Roadmap 1.2 B5's acceptance (docs/roadmap-1.2.md; cosmofs testing.md,
+  # "test-encrypt"): an encrypted root installed, its passphrase typed at
+  # boot, three wrong ones restarting the machine with nothing mounted, no
+  # plaintext on the disk, a second slot, a key-file mirror booting
+  # unattended, every metadata domain forged and refused, and a 1 GiB file
+  # written and read back; and its last stage, B1-B4's tests again on an
+  # encrypted root, split across parallel jobs (make test-encrypt runs it
+  # all). Release builds, both architectures.
+  encrypt:
+    name: encrypted root test (${{ matrix.arch }}, ${{ matrix.part }})
+    runs-on: ubuntu-24.04
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        # Three parts of about the same length. Local AArch64 at d913b67b
+        # (CI ran this job ~1.6x slower in run 40069427738): the stages
+        # 1159 s (the 1 GiB written in 754 s, read in 239 s); snapshot 160,
+        # pkgtx 174, fsck 312; mirror 258, be 550.
+        part: [encrypt, snapshot pkgtx fsck, mirror be]
+        include:
+          - part: encrypt
+            target: test-encrypt ENCRYPT_B1_B4=0
+          - part: snapshot pkgtx fsck
+            target: test-encrypt-b1b4 ENCRYPT_B1B4_TESTS='snapshot pkgtx fsck'
+          - part: mirror be
+            target: test-encrypt-b1b4 ENCRYPT_B1B4_TESTS='mirror be'
+    # A hang guard: the longest part, the stages, is about 37 minutes on
+    # CI with its build (1159 s x 1.6, and 6 for the build).
+    timeout-minutes: 75
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Toolchain versions (ci/Dockerfile)
+        run: |
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # BusyBox, musl and compiler-rt, pinned by SHA-256 in ports/busybox/busybox.mk
+      # and fetched once (scripts/fetch-pinned.py): every image carries BusyBox.
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+
+      - name: Build (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release all
+
+      - name: encrypted root, ${{ matrix.part }} (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release ${{ matrix.target }}
+
+      - name: Upload the boots' serial logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-encrypt-${{ matrix.arch }}-${{ strategy.job-index }}
+          # The last stage's B1-B4 runs keep their boots in their own
+          # workdirs (test-be's is test-be-encrypted).
+          path: |
+            out/${{ matrix.arch }}-release/test-encrypt/*.log
+            out/${{ matrix.arch }}-release/test-snapshot/*.log
+            out/${{ matrix.arch }}-release/test-fsck/*.log
+            out/${{ matrix.arch }}-release/test-mirror/*.log
+            out/${{ matrix.arch }}-release/test-pkgtx/*.log
+            out/${{ matrix.arch }}-release/test-be-encrypted/*.log
           if-no-files-found: ignore
   # Shell completeness S7's acceptance (docs/roadmap-1.1.md;
   # docs/userland/testing.md, "test-upgrade"): the published v1.0.3,

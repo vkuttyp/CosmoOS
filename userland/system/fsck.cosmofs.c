@@ -172,6 +172,12 @@ static int boot(const char *dev, bool repair)
         printf("cosmofs: root not checked: %s holds no superblock that verifies\n", dev);
         return FSR_FAILED;
     }
+    /* Encrypted and its key not loaded (roadmap 1.2 B5): nothing can be
+     * read until cosmo-key unlocks it, which init does first. */
+    if (r.dev.flags & COSMO_FSCTL_DEV_F_LOCKED) {
+        printf("cosmofs: root not checked: %s is encrypted and locked (cosmo-key unlock %s)\n", dev, dev);
+        return FSR_FAILED;
+    }
     struct fsr_tally t = { 0 };
     bool ran = report(dev, &r, false, &t);
     if (!ran || t.refuse)

@@ -35,6 +35,11 @@ int blkdevs_flush(const struct cosmo_blkctl_dev *d);
 int blkdevs_format(const char *name, const char *fstype, const char *label);
 /* A two-way mirror over devices `a` and `b` (roadmap 1.2 B2). */
 int blkdevs_format_mirror(const char *a, const char *b, const char *fstype, const char *label);
+/* An encrypted pool (roadmap 1.2 B5) on `name`, or a mirror of it and
+ * `mirror` (NULL for none), with the uuid the slots were sealed for, the
+ * master key and the slots; the kernel keeps the key, so the pool mounts at once. */
+int blkdevs_format_keyed(const char *name, const char *mirror, const char *fstype, const char *label,
+                         const uint8_t uuid[16], const uint8_t master[COSMO_KEY_SIZE], const struct cosmo_keyslot slots[COSMO_KEY_SLOTS]);
 /* The directories `name` is mounted on, from /proc/mounts ("/dev/NAME
  * DIR ..."), unescaped, in order: the `which`th (from 0) into `out`.
  * False when there is no such one. */

@@ -61,6 +61,8 @@ static const char *const messages[] = {
     [ETIMEDOUT] = "Connection timed out",
     [ECONNREFUSED] = "Connection refused",
     [EHOSTUNREACH] = "No route to host",
+    [ENOKEY] = "Required key not available",
+    [EKEYREJECTED] = "Key was rejected",
 };
 
 char *strerror(int err)

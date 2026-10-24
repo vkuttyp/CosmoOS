@@ -273,13 +273,24 @@ serial line asks), the 252 MiB encrypted-file cap lifted (CFS-10) and
 metadata authenticated with a keyed checksum (CFS-7), since an encrypted
 pool with forgeable metadata is half a promise.
 
-- [ ] **Acceptance:** `make test-encrypt`: install encrypted; the harness
+- [x] **Acceptance:** `make test-encrypt`: install encrypted; the harness
   types the passphrase and the system boots; a wrong passphrase is
   refused and nothing mounts; the disk image contains none of a marker
   file's plaintext; for every metadata checksum domain (the block header
   `cfs_mhdr`, the superblock and its roots, the member labels) a block
   altered with its CRC32C recomputed is refused; a 1 GiB file is written
-  and read back.
+  and read back. Done 2026-10-24, PRs #447 (format 14: the key slots, the
+  key table, the metadata MAC, the two-level checksum index, and CFS-31,
+  a member table whose seal was never checked) and #448 (`cosmo-key`,
+  the unlock at boot, `cosmo-install --encrypt [--key-file]`, the test,
+  which also runs B1-B4's tests again on an encrypted root); report
+  `docs/audit/2026-10-24-b5-encrypted-root-report.md`. Not done, and in
+  the backlog: encrypting an existing root in place (CFS-33), per-user
+  keys (CFS-34), TPM-sealed keys (BOOT-9), encrypted swap (MEM-10).
+
+**Direction B is complete.** B1 to B5 are done and their acceptance
+tests run in CI on both architectures; the definition of done above
+holds on the installed system.
 
 **Backlog it would absorb.** CFS-1, CFS-2, CFS-3, CFS-5, CFS-6, CFS-7,
 CFS-8, CFS-9, CFS-10, CFS-11, PKG-3, PKG-4, PKG-5 (not taken by B4), BLK-5, DRV-6 (part),

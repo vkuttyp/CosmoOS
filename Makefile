@@ -10,6 +10,8 @@
 #   make test-guard   the same boot test on a CPU model with SMEP/SMAP/UMIP (x86-64) or PAN (AArch64)
 #   make test-smp2    the same boot test with two CPUs (the default is four)
 #   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
+#   make test-encrypt roadmap 1.2 B5: an encrypted root -- passphrase, slots, key file, 1 GiB, forged metadata (CI: BUILD=release)
+#   make test-encrypt-b1b4 test-encrypt's last stage alone: B1-B4's tests on an encrypted root
 #   make test-snapshot roadmap 1.2 B1: snapshots of the installed root from the shell (CI: BUILD=release)
 #   make test-fsck    roadmap 1.2 B2: fsck at boot and offline, scrub --repair on a mirror (CI: BUILD=release)
 #   make test-pci-hotplug roadmap 1.2 B3: PCIe device_del/device_add, idle and under I/O, NVMe, late partition scan
@@ -45,7 +47,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -274,6 +276,45 @@ test-install: $(IMAGE)
 		$(PYTHON) $(ROOT)/tests/boot/install_test.py --image $(IMAGE) --workdir $(OUT)/test-install \
 		--timeout $(BOOT_TIMEOUT) --key $(MODSIGN_KEY)
 
+# Roadmap 1.2 B5's acceptance test (tests/boot/encrypt_test.py,
+# docs/kernel-services/filesystem/cosmofs/testing.md, "test-encrypt"): an
+# encrypted install whose passphrase the harness types; three wrong ones
+# restart the machine with nothing mounted; no plaintext on the disk; a
+# second slot; a key-file mirror booting unattended; a 1 GiB file through a
+# two-level checksum index; every metadata domain forged and refused.
+# ENCRYPT_STAGES picks stages (the install always runs). The last stage,
+# skipped with ENCRYPT_B1_B4=0, runs B1-B4's tests again on an encrypted
+# root: COSMO_TEST_ENCRYPT makes every cosmo-install they type --encrypt
+# and answers each passphrase prompt (tests/boot/install_test.py). test-be
+# runs without its older release, whose kernel cannot read format 14.
+# test-encrypt-b1b4 runs that stage alone; ENCRYPT_B1B4_TESTS picks its
+# tests (CI runs it as parallel jobs, BUILD=release).
+ENCRYPT_STAGES ?=
+ENCRYPT_B1_B4 ?= 1
+ENCRYPT_B1B4_TESTS ?= snapshot fsck mirror pkgtx be
+ENCRYPT_PASS := b1-b4 on an encrypted root
+test-encrypt: release-set $(IMAGE)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/encrypt_test.py --image $(IMAGE) --workdir $(OUT)/test-encrypt \
+		--timeout $(BOOT_TIMEOUT) --arch $(ARCH) $(if $(ENCRYPT_STAGES),--stages $(ENCRYPT_STAGES))
+ifeq ($(ENCRYPT_B1_B4),1)
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		ENCRYPT_B1B4_TESTS='$(ENCRYPT_B1B4_TESTS)' test-encrypt-b1b4
+endif
+
+ENCRYPT_B1B3 := $(addprefix test-,$(filter-out be,$(ENCRYPT_B1B4_TESTS)))
+test-encrypt-b1b4: release-set $(IMAGE)
+ifneq ($(ENCRYPT_B1B3),)
+	$(Q)COSMO_TEST_ENCRYPT='$(ENCRYPT_PASS)' $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		$(ENCRYPT_B1B3)
+endif
+ifneq ($(filter be,$(ENCRYPT_B1B4_TESTS)),)
+	$(Q)COSMO_TEST_ENCRYPT='$(ENCRYPT_PASS)' QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) \
+		QEMU_ACCEL=$(QEMU_ACCEL) $(PYTHON) $(ROOT)/tests/boot/be_test.py --image $(IMAGE) --set $(UPGRADE_SET_DIR) \
+		--key $(MODSIGN_KEY) --arch $(ARCH) --workdir $(OUT)/test-be-encrypted --timeout $(BOOT_TIMEOUT)
+endif
+	@echo "test-encrypt: B1-B4 on an encrypted root: $(addprefix test-,$(ENCRYPT_B1B4_TESTS)): PASS ($(ARCH))"
+
 # Roadmap 1.2 B1's acceptance test (tests/boot/snapshot_test.py,
 # docs/kernel-services/filesystem/cosmofs/testing.md, "test-snapshot"):
 # snapshots of the installed root from the shell -- identity, diff, sizes,
@@ -365,6 +406,7 @@ BE_OLDER_TAG ?= v1.0.7
 BE_OLDER_DIR := $(ROOT)/.cache/releases/$(BE_OLDER_TAG)
 BE_ONLY ?=
 test-be: RELEASE_DIR = $(UPGRADE_SET_DIR)
+test-encrypt test-encrypt-b1b4: RELEASE_DIR = $(UPGRADE_SET_DIR)
 test-be: release-set $(IMAGE)
 	$(Q)$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(BE_OLDER_TAG) --arch $(ARCH) --dest $(BE_OLDER_DIR)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \

@@ -58,6 +58,14 @@ probe 'signal-stop' failed check 9`, the same signature: the child, pid
 host was loaded (load average 98 a few minutes later, Docker's VM at
 625 % CPU and another QEMU). The rerun on the same commit on a quiet
 host (load 2) passed. Backlog LX-1.
+**Fourth sighting, 2026-10-24:** AArch64 debug at `QEMU_SMP=1`, roadmap
+1.2 B5's second PR (#448, `a1106611`, no kernel change of its own) in
+its local matrix, `selftest: signal probe 'signal-stop' failed check 9`,
+the same signature: the child, pid 268, exited with status 7 before its
+parent, pid 267, with status 9. The matrix had run for about three hours
+of back-to-back QEMU boots; the load average was 5 when the rerun on the
+same commit started, and it passed. All four sightings are AArch64, and
+three of them at `QEMU_SMP=1`. Still backlog LX-1.
 
 **Observed once, x86-64 `module-unload-busy` (2026-10-09):**
 `/tmp/cosmo-unit2-ahci-stop-fixed-x86.result` reports the check
@@ -4785,6 +4793,16 @@ loader. The same handover stall as "firmware handover in
 `test-harness-retry`" above, here on a guest-initiated reset inside one
 QEMU process, where the harness has no retry. Recorded, not attributed;
 rerun.
+**Second sighting, 2026-10-24:** local x86-64 release `make
+test-encrypt-b1b4`'s `test-snapshot` on an encrypted root (PR #448 at
+`d913b67b`, this developer's machine, an AArch64 `test-encrypt` running
+beside it): `rollback: no /etc/rc of the boot after the rollback before
+the deadline`. `boot-rollback.log` ends with `cosmo-snap: rebooting to
+apply it`, `reboot: restart through the ACPI reset register (port 0xcf9,
+value 0xf)` and five of the firmware's screen clears: the same stall, on
+a guest-initiated reset inside one QEMU. The branch changes nothing that
+runs there (the passphrase reader and `cosmo-key`). Not attributed;
+rerun.
 
 
 ## ash history: the nested shell stopped, 2026-10-18 and 2026-10-20
@@ -4849,3 +4867,35 @@ same job on `f791de0f` and on `ffbb5f56`, which holds `3888f9da`. Two
 sightings, both x86-64, both the boot straight after an unclean or
 init-requested restart, one local and one on CI; still not attributed.
 The failed job was re-run and passed; `make test-be` locally on the same tree passed (457.7 s).
+
+## `test-be`'s `be-space` boot on an encrypted root out of time, 2026-10-24
+
+CI, PR #448 at `00ca2724`, run 40057006013, job 120762119306 (`encrypted
+root test (x86_64)`), test-encrypt's last stage: `test-be: FAIL:
+be-space: no prompt after "cosmo-snap list | grep 'KiB free'" before the
+deadline` (240 s, per boot), after the stages before it passed. The
+upload of that job kept no serial log (the B1-B4 workdirs were not in its
+paths; added in `88360ad7`). Locally, `be-space` on an encrypted root
+takes 101-109 s on x86-64 (three runs of `be_test.py`, 256 MiB, all
+PASS); a CI runner is about 1.35 times slower on this job, so about
+140 s was expected. A bounded experiment filled an encrypted root to
+16 KiB free from the same shell: no hang, each `cosmo-snap list` 3.3 s.
+The rerun on `88360ad7` passed (`test-be` 574.2 s, run 40069427738).
+First sighting; not attributed, no mechanism: treat a second as a
+regression, and read its `test-be-encrypted/boot-be-space.log`.
+**Second sighting, 2026-10-24:** CI, PR #448 at `3035ded4`, run
+40079613201, `encrypted root test (x86_64, mirror be)`: the same `FAIL`,
+at the same command. Its `boot-be-space.log` (artifact
+`test-encrypt-x86_64-2`) shows no hang before it: 21 fill rounds took the
+root from 163816 to 6712 KiB free, each `cosmo-snap list` answered, the
+last round wrote 25 x 256 KiB and its `sync` exited, and then the final
+`cosmo-snap list | grep 'KiB free'` printed nothing before the 240 s
+deadline. Locally the same step answers `160 KiB free`. A replica (21 MiB
+in `/tmp` as the fetched set, a rollback armed and cancelled, the same
+fill), three runs at once, two of them under `taskpolicy -c utility nice
+-n 5`: all reached 180 KiB free with every `cosmo-snap list` in 3.3-3.8 s.
+Two of three CI runs fail, no local run has. Not attributed: the serial
+log has no times, so a slow runner and one stuck command cannot be told
+apart. `install_test.Boot` now writes `boot-<name>-times.log` (each line
+with the second it arrived) and a missed deadline names the last line's
+second.
