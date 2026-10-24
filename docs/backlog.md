@@ -126,6 +126,7 @@ Open lines (struck lines are not counted):
 - **CFS-34** nice-to-have, M. One master key per pool: no per-user or per-directory keys a user unlocks apart from the pool (the per-file keys derive from the master; out of roadmap 1.2 B5's scope).
 - **CFS-35** security, M. An encrypted pool's metadata MAC binds a block to its address and the pool, not to its generation: a block replaced by an older version of itself at the same address verifies (the tree is not hash-linked; roadmap 1.2 B5, design.md "The metadata MAC").
 - **CFS-36** performance, M. Appending to a file costs more the larger it is: 32 MiB appended and synced took 3.2 s at the start of a file and 14-18 s past 768 MiB on a plain root (1 GiB in 303 s), 20 s at 1 GiB on an encrypted one (1 GiB in 386 s) (x86-64 under QEMU, 2026-10-24), so a large file's writing time grows with the square of its size. Not measured further: something in each commit is proportional to the file (candidates: its run map or checksum index written whole); find it and make a commit cost what it changed.
+- **CFS-37** security, S. Argon2id's cost for a new slot is fixed (64 MiB, three passes), not calibrated to the machine: a guess takes about a second under QEMU but 0.16 s on an Apple-silicon Parallels VM (v1.0.13-rc1, 2026-10-24), so a passphrase there costs an attacker a sixth of what the guide first said. Time one derivation at install and raise the passes until it takes about a second, as `cosmo-key bench` already measures.
 
 ## Documentation
 

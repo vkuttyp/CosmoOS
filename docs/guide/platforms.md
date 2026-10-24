@@ -166,6 +166,33 @@ Pages repository, a reboot to `build v1.0.12`, dropbear started, ssh
 answered, and `pkg update` read serial 14. This VM has one disk, so the
 mirrored ESPs are shown by `make test-mirror` only.
 
+**An encrypted root, v1.0.13-rc1, 2026-10-24.** "CosmoOS" was upgraded
+from v1.0.12 to v1.0.13-rc1 the same way (boot environment
+`be-v1.0.12`; 43 files replaced, 1 added, 1 kept as changed here). It booted `build v1.0.13-rc1` (verified,
+key 36ae7bb4947896ab), its plain root stayed at format 12 and checked
+clean, `cosmo-key list` said it is not an encrypted pool, `--status` and
+`--esp-check` were clean, `pkg update` read serial 15, and ssh answered.
+A second VM, "CosmoOS encrypted" (4 CPUs, 4096 MB, IP 10.211.55.16),
+booted the rc's published image on a 66 MiB disk and ran `cosmo-install
+--encrypt` on a blank 512 MiB one, the passphrase typed at its two
+prompts on the serial console:
+
+    cosmo-install: slot 0 sealed with the passphrase (argon2id 65536 KiB, 3 passes: 0.22 s)
+
+Booted from that disk, the console asked `passphrase for cosmo-root:`
+before the root was checked or mounted, and:
+
+    cosmo-key: cosmo-root unlocked with slot 0 (argon2id 65536 KiB, 3 passes: 0.16 s)
+    cosmofs: root checked, 0 findings, 0 repaired
+    init: switched to the disk root nvme0n2p2 (root=boot-disk)
+
+The same after a reboot; HTTPS to the Pages repository, `pkg update`,
+`cosmo-key list`, a clean `dmesg`, and ssh from the Mac all answered.
+On the first boot dropbear was still making its host key when `ps`
+ran; it was running after. Argon2id took 0.16 s here against about a
+second under QEMU: the cost is fixed, not calibrated (backlog CFS-37),
+so the guide and the release notes give both.
+
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)
 and [`docs/audit/2026-10-13-parallels-devices-report.md`](../audit/2026-10-13-parallels-devices-report.md).
