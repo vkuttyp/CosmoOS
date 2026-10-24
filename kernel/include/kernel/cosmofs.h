@@ -341,6 +341,9 @@ void cosmofs_test_set_writeback(struct mount *mnt, bool on);
 struct spool;
 struct spool *cosmofs_test_pool(struct mount *mnt);
 void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms);
+/* Test hook: a lower bound on the runs one inode may have, so a test can
+ * reach CFS_MAX_EXTENTS's behaviour in a few records (CFS-32). */
+void cosmofs_test_set_max_extents(struct mount *mnt, unsigned n);
 /* Test hook: format at an older on-disk version, to check that this
  * kernel still mounts and writes what an older one wrote. */
 int cosmofs_test_format_version(struct blkdev *bd, unsigned version);

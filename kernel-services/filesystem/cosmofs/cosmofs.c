@@ -83,12 +83,12 @@ static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_e
         const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
         for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK && cfs_ext_count(&eb->ext[i]); i++) {
             if (k == cap) {
-                if (cap >= CFS_MAX_EXTENTS) {
+                if (cap >= cfs_max_extents(fs)) {
                     cfs_buf_put(fs, b);
                     kfree(ext);
                     return -EFBIG;
                 }
-                unsigned ncap = cap * 2 > CFS_MAX_EXTENTS ? CFS_MAX_EXTENTS : cap * 2;
+                unsigned ncap = cap * 2 > cfs_max_extents(fs) ? cfs_max_extents(fs) : cap * 2;
                 struct cfs_extent *grown = krealloc(ext, ncap * sizeof(*ext), 0);
                 if (grown == NULL) {
                     cfs_buf_put(fs, b);
@@ -135,7 +135,7 @@ struct es_scratch {
 
 static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_extent *ext, unsigned n)
 {
-    if (n > CFS_MAX_EXTENTS)
+    if (n > cfs_max_extents(fs))
         return -EFBIG;
     unsigned left = n > CFS_DIRECT ? n - CFS_DIRECT : 0;
     unsigned need = (left + CFS_EXTENTS_PER_BLOCK - 1) / CFS_EXTENTS_PER_BLOCK;

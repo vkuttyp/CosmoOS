@@ -220,7 +220,22 @@ struct cfs {
     bool mount_done;          /* the mount finished: before this there is no autonomous committer */
     uint64_t mount_dirty_notes; /* dirty marks the mount's own replay made */
     uint64_t wb_early;          /* how many of those found a committer already running */
+#if CONFIG_SELFTEST
+    unsigned test_max_extents;  /* test seam: a lower run bound than CFS_MAX_EXTENTS; 0 for none */
+#endif
 };
+
+/* Runs an inode may have: CFS_MAX_EXTENTS, or a self-test's lower bound
+ * on its own mount, so a test reaches the bound in a few records. */
+static inline unsigned cfs_max_extents(const struct cfs *fs)
+{
+#if CONFIG_SELFTEST
+    if (fs->test_max_extents != 0)
+        return fs->test_max_extents;
+#endif
+    (void)fs;
+    return CFS_MAX_EXTENTS;
+}
 
 #define CFS_WB_POLL_MS       50u
 #define CFS_WB_DIRTY_BUFS    64u

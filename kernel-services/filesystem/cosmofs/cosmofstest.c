@@ -1546,6 +1546,124 @@ cleanup:
 }
 
 /*
+ * CFS-32: a write that would take an inode past the runs it may have is
+ * refused at the write, with nothing dirtied, and never at the commit.
+ * The failure this replaces: every write was accepted into the page
+ * cache, every write-back of it failed -EFBIG, and the pages were lost
+ * when the vnode went (`vfs: N dirty page(s) ... lost`) while the size
+ * still counted them.
+ *
+ * One compressible record at every other record's place: each is a run
+ * of its own, and the gaps between them keep any two from merging, so
+ * the file reaches the bound whatever the write policy. The mount's
+ * bound is lowered to EB_MAX runs (the test seam) so it takes a few
+ * records rather than 128 MiB.
+ */
+#define EB_MAX     64u
+#define EB_RECORDS 100u   /* more than EB_MAX runs' worth */
+
+bool selftest_cosmofs_extent_bound(const char **reason)
+{
+    struct blkdev *bd = NULL;
+    uint8_t *rec = NULL, *back = NULL;
+    struct file *f = NULL;
+    if (!engine_mount(&bd, 2048, reason))
+        return false;
+#define EB_CHECK(cond)                                                        \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);     \
+            goto cleanup;                                                    \
+        }                                                                     \
+    } while (0)
+    const size_t rlen = (size_t)CFS_RECORD_BLOCKS * 4096;
+    rec = kmalloc(rlen, 0);
+    back = kmalloc(rlen, 0);
+    EB_CHECK(rec != NULL && back != NULL);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    cosmofs_test_set_max_extents(mount_of(ENG), EB_MAX);
+    struct pagecache_stats pc0, pc1;
+    pagecache_get_stats(&pc0);
+
+    EB_CHECK(vfs_open(NULL, ENG "/sparse", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+    /* Records written whole, then the bytes of the one the bound cut: a
+     * write that reaches it returns what it took, as write(2) does, and
+     * the rest of it is refused. */
+    unsigned accepted = 0;
+    size_t part = 0;
+    int64_t refused = 0;
+    for (unsigned k = 0; k < EB_RECORDS; k++) {
+        for (size_t i = 0; i < rlen; i++)
+            rec[i] = (uint8_t)((i + k) % 61);   /* repetitive: each record compresses */
+        int64_t n = file_pwrite(f, rec, rlen, (uint64_t)k * 2 * rlen);
+        if (n > 0 && n < (int64_t)rlen) {
+            part = (size_t)n;
+            n = file_pwrite(f, rec + part, rlen - part, (uint64_t)k * 2 * rlen + part);
+        }
+        if (n != (int64_t)rlen) {
+            refused = n;
+            break;
+        }
+        accepted++;
+    }
+    kinfo("cosmofs-extent-bound: %u of %u records accepted under a bound of %u runs, %zu bytes of the next; "
+          "then %lld", accepted, EB_RECORDS, EB_MAX, part, (long long)refused);
+    /* Refused by the bound, at the write: not before half of it is used,
+     * and not after it is passed. */
+    EB_CHECK(refused == -EFBIG);
+    EB_CHECK(accepted >= EB_MAX / 2 && accepted <= EB_MAX);
+    /* Everything accepted can be written back: no write-back failed. */
+    EB_CHECK(file_sync(f) == 0);
+    file_put(f);
+    f = NULL;
+    pagecache_get_stats(&pc1);
+    EB_CHECK(pc1.wb_errors == pc0.wb_errors && pc1.dropped_dirty == pc0.dropped_dirty);
+
+    /* And it is what the disk holds: after a remount the size ends at the
+     * last record accepted, and every record reads back. */
+    cosmofs_test_set_max_extents(mount_of(ENG), 0);
+    EB_CHECK(vfs_umount(ENG) == 0);
+    EB_CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct vnode *vn;
+    EB_CHECK(vfs_lookup(NULL, ENG "/sparse", &vn) == 0);
+    uint64_t size = vn->size;
+    vnode_put(vn);
+    uint64_t want = part ? (uint64_t)accepted * 2 * rlen + part : ((uint64_t)(accepted - 1) * 2 + 1) * rlen;
+    EB_CHECK(accepted > 0 && size == want);
+    EB_CHECK(vfs_open(NULL, ENG "/sparse", COSMO_O_RDONLY, 0, &f) == 0);
+    for (unsigned k = 0; k <= accepted; k++) {
+        size_t len = k < accepted ? rlen : part;
+        if (len == 0)
+            break;
+        EB_CHECK(file_pread(f, back, len, (uint64_t)k * 2 * rlen) == (int64_t)len);
+        for (size_t i = 0; i < len; i++)
+            EB_CHECK(back[i] == (uint8_t)((i + k) % 61));
+    }
+    file_put(f);
+    f = NULL;
+    struct cosmofs_check_report r;
+    EB_CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+
+    kfree(rec);
+    kfree(back);
+    kinfo("selftest: cosmofs-extent-bound: a write past the run bound is refused -EFBIG after %u records, and "
+          "every record accepted is on the disk", accepted);
+    return engine_unmount(bd, reason);
+
+cleanup:
+    if (f)
+        file_put(f);
+    kfree(rec);
+    kfree(back);
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    ramblk_destroy(bd);
+    return false;
+#undef EB_CHECK
+}
+
+/*
  * CF16: a mapped block's stored checksum is the checksum of the data at
  * that block. A block's entry is stored before the mapping that names
  * it, so a mapping that fails must put the old entry back: before that

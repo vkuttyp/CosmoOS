@@ -402,6 +402,7 @@ bool selftest_cosmofs_badmembers(const char **reason);            /* a member ta
 bool selftest_cosmofs_mirror(const char **reason);                /* a mirrored member, repair and scrub */
 bool selftest_cosmofs_mirror_stale(const char **reason);          /* the stale copy is the first one */
 bool selftest_cosmofs_compress(const char **reason);              /* compressed records */
+bool selftest_cosmofs_extent_bound(const char **reason);          /* CFS-32: the run bound refused at the write */
 bool selftest_cosmofs_extent_fail(const char **reason);           /* CF16: a failed mapping keeps the old checksum */
 bool selftest_cosmofs_ro_replay(const char **reason);             /* CFS-1: a read-only mount writes nothing */
 bool selftest_cosmofs_version_compress(const char **reason);      /* CFS-2: no records below format 6 */

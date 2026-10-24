@@ -4110,6 +4110,20 @@ void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms)
         fs->wb_interval_ms = ms;
 }
 
+/* Test seam: the run bound on this mount (0 restores CFS_MAX_EXTENTS).
+ * Nothing in a build without self-tests. */
+void cosmofs_test_set_max_extents(struct mount *mnt, unsigned n)
+{
+#if CONFIG_SELFTEST
+    struct cfs *fs = cfs_of(mnt);
+    if (fs)
+        fs->test_max_extents = n;
+#else
+    (void)mnt;
+    (void)n;
+#endif
+}
+
 struct fs_type cosmofs_fs_type = {
     .name = "cosmofs",
     .magic = 0x4d534643u,   /* "CFSM", the metadata header's magic: Linux has no number for this one */
