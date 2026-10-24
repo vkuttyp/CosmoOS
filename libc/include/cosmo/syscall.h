@@ -391,6 +391,13 @@ static inline long cosmo_reboot(unsigned cmd)
     return cosmo_syscall1(SYS_reboot, cmd);
 }
 
+/* Roadmap 1.2 B5: `len` (at most 256) seeded random bytes; waits until
+ * the kernel's pool is seeded. Returns len or -errno. */
+static inline long cosmo_getrandom(void *buf, size_t len)
+{
+    return cosmo_syscall2(SYS_getrandom, buf, len);
+}
+
 /* Credentials: -1 keeps an id. */
 static inline long cosmo_setresuid(long ruid, long euid, long suid)
 {

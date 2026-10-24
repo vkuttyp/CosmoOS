@@ -132,10 +132,10 @@ object (`read` drains the guest's debug console, `fstat` is
 credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
 58–59 the readiness and non-blocking calls (milestone 8;
 `docs/kernel/object/api.md`), 60–62 the asynchronous I/O ring
-(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 106 (101 when
+(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 107 (101 when
 this paragraph was written: 101 is `SYS_timer_create`,
 `docs/kernel/io/api.md`; 102–104 are `SYS_switch_root`, `SYS_exec` and
-`SYS_sysctl_set`, the bullets below, and 105 `SYS_reboot`; 63–65 are `gethostname`,
+`SYS_sysctl_set`, the bullets below, 105 `SYS_reboot` and 106 `SYS_getrandom`; 63–65 are `gethostname`,
 `sethostname`, `syscall_filter`; 79–80 `vm_raise_spi`/`vm_lower_spi`,
 81 `fsync`, 88 `vcpu_stop`): **100 is `SYS_mknod`** (the named-pipes unit: a `COSMO_DT_FIFO` node, with `COSMO_O_NONBLOCK` `0x0800` joining `open`'s flags -- row 100 and `docs/kernel/ipc/api.md`), 89–91 are the symbolic-link calls, 97–99 are `SYS_sendmsg`, `SYS_recvmsg` and `SYS_socketpair` (the unix-sockets unit, `docs/kernel/ipc/api.md`), **96 is `SYS_msync`** (the file-regions unit, with `mmap` gaining `fd` and `off`, `COSMO_MAP_SHARED` and `COSMO_MAP_PRIVATE`: row 96 and the **mmap** and **msync** bullets below; `docs/audit/next-subsystem-file-regions.md`), **94 is `SYS_futex_requeue` and 95 `SYS_thread_kill`** (the last two calls the native thread ABI lacked and the Linux personality had: the compare-form requeue over `futex_requeue`, and `tgkill` with the process implied over `signal_send_thread` — rows 94–95, the **futex_requeue** and **thread_kill** bullets below, and `docs/audit/next-subsystem-native-thread-door.md`; the milestone-10 thread calls 82–87 are described in `docs/kernel/process/design.md`, "Five system calls", rather than in this table), **93 is `SYS_mprotect`** (the native door onto `vm_user_protect`, which the Linux personality had reached since milestone 10 and the native ABI could not — row 93 and the **mprotect** bullet below; `docs/audit/next-subsystem-mprotect.md`), and **92 is `SYS_getsockopt`** `(int h, int level, int opt, void *val, size_t *len)`, which answers one question — `COSMO_SOL_SOCKET`/`COSMO_SO_ERROR`, the socket's pending error as a *positive* errno, 0 for none, and cleared by the read. Every other level or option is `-ENOPROTOOPT`, which is true of this stack; `-EINVAL` when the caller's buffer is smaller than an `int`, because a verdict is not worth truncating. It needs no right beyond the handle: it reads a verdict rather than changing anything. There is no `SYS_setsockopt` — nothing about a socket is settable yet (non-blocking mode is chosen at creation with `COSMO_SOCK_NONBLOCK`), and a setter with an empty option table is the empty promise this unit removed from the Linux door (`docs/audit/next-subsystem-socket-verdict.md`). A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
@@ -324,7 +324,15 @@ Details per call:
   x86-64), halts it, or powers it off as init's exit does. Nothing is
   synced first. Returns only with `EPERM` (no `PRIV_SYS_ADMIN`) or
   `EINVAL` (another command). Init calls it for BusyBox's `reboot` and
-  `halt` (`docs/userland/design.md`). `SYS_COUNT` is 106.
+  `halt` (`docs/userland/design.md`).
+- **getrandom** (`SYS_getrandom` 106, roadmap 1.2 B5): `(void *buf,
+  size_t len)`, `len` at most 256: that many bytes from the kernel's
+  pool, after waiting for it to be seeded (`random_wait_ready`; an
+  unseeded pool's bytes are not key material, S18). Returns `len`;
+  `EINVAL` for more than 256, `EFAULT` for a bad buffer. What
+  `cosmo-key` draws a master key, a salt and a key file from: the
+  native personality had only a process's sixteen `AT_RANDOM` bytes.
+  `SYS_COUNT` is 107.
 - **syscall_filter**: `mask` is `words` (1..`COSMO_SYSCALL_MASK_WORDS`,
   8) 64-bit words; bit N of the mask allows system call N in the
   caller's personality, and the words not supplied are treated as zero.

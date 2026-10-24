@@ -10,6 +10,7 @@
  * on disk.
  */
 
+#include <kernel/blake2b.h>
 #include <kernel/blk.h>
 #include <kernel/cosmofs.h>
 #include <kernel/crc32c.h>
@@ -41,22 +42,73 @@ static uint32_t block_crc(const uint8_t *block, size_t crc_off)
     return crc32c_update(c, block + crc_off + 4, CFS_BLOCK - crc_off - 4);
 }
 
-static void mhdr_seal(struct cfs *fs, uint8_t *block, uint32_t kind, uint64_t blkno)
+/*
+ * The version-14 tag (design.md, "The metadata MAC"): a 64-bit keyed
+ * BLAKE2b over the domain byte and the block, with the eight bytes at
+ * `off` -- where the CRC and the word after it were -- taken as zero.
+ */
+void cfs_mac_tag(const struct cfs_mac *m, char domain, const uint8_t *block, size_t off, uint8_t tag[CFS_MAC_SIZE])
+{
+    static const uint8_t zero8[CFS_MAC_SIZE] = { 0 };
+    uint8_t d = (uint8_t)domain;
+    struct blake2b s;
+    blake2b_init_key(&s, CFS_MAC_SIZE, m->key, sizeof(m->key));
+    blake2b_update(&s, &d, 1);
+    blake2b_update(&s, block, off);
+    blake2b_update(&s, zero8, CFS_MAC_SIZE);
+    blake2b_update(&s, block + off + CFS_MAC_SIZE, CFS_BLOCK - off - CFS_MAC_SIZE);
+    blake2b_final(&s, tag);
+}
+
+/* Constant time: a comparison that stops early says how much of a
+ * forgery was right. */
+bool cfs_mac_ok(const struct cfs_mac *m, char domain, const uint8_t *block, size_t off)
+{
+    uint8_t want[CFS_MAC_SIZE];
+    cfs_mac_tag(m, domain, block, off, want);
+    uint8_t diff = 0;
+    for (unsigned i = 0; i < CFS_MAC_SIZE; i++)
+        diff |= (uint8_t)(want[i] ^ block[off + i]);
+    memset(want, 0, sizeof(want));
+    return diff == 0;
+}
+
+void cfs_mac_seal(const struct cfs_mac *m, char domain, uint8_t *block, size_t off)
+{
+    uint8_t tag[CFS_MAC_SIZE];
+    cfs_mac_tag(m, domain, block, off, tag);
+    memcpy(block + off, tag, CFS_MAC_SIZE);
+}
+
+/* Seal a header: the CRC32C and its algorithm, or on a version-14
+ * encrypted pool the tag in their place. */
+static void mhdr_seal_mac(const struct cfs_mac *mac, uint8_t *block, uint32_t kind, uint64_t blkno, uint64_t gen)
 {
     struct cfs_mhdr *h = (struct cfs_mhdr *)block;
     h->magic = CFS_MHDR_MAGIC;
     h->kind = kind;
-    h->generation = fs->gen;
+    h->generation = gen;
     h->blkno = blkno;
+    if (mac != NULL && mac->on) {
+        cfs_mac_seal(mac, CFS_MAC_HDR, block, offsetof(struct cfs_mhdr, crc));
+        return;
+    }
     h->csum_algo = CFS_CSUM_CRC32C;   /* the algorithm `crc` is computed with */
     h->crc = 0;
     h->crc = block_crc(block, offsetof(struct cfs_mhdr, crc));
 }
 
+static void mhdr_seal(struct cfs *fs, uint8_t *block, uint32_t kind, uint64_t blkno)
+{
+    mhdr_seal_mac(&fs->mac, block, kind, blkno, fs->gen);
+}
+
 /* A metadata header's checksum algorithm. CRC32C is the only one the format
  * computes today; 0 is a pre-v11 image's zeroed pad and is also CRC32C. Any
  * other value is a block this build cannot verify (MHDR_ALGO), which is a
- * different finding from a checksum that simply did not match. */
+ * different finding from a checksum that simply did not match. On a
+ * version-14 encrypted pool the field is half the tag and means nothing on
+ * its own. */
 static bool meta_csum_supported(uint32_t algo)
 {
     return algo == CFS_CSUM_NONE || algo == CFS_CSUM_CRC32C;
@@ -74,8 +126,10 @@ static bool meta_csum_supported(uint32_t algo)
  * bad CRC is content that changed after it was sealed. Chasing the writeback
  * thread that committed during a mount needed to know which; the message is
  * kept because the next one will too. The enum is in cosmofs_internal.h.
+ * Under a MAC (version 14) the last is MHDR_MAC: a tag that does not
+ * verify, which is a forgery as readily as damage.
  */
-enum mhdr_fault cfs_mhdr_fault_of(const void *block, uint64_t blkno, uint32_t kind)
+enum mhdr_fault cfs_mhdr_fault_of(const struct cfs_mac *mac, const void *block, uint64_t blkno, uint32_t kind)
 {
     const struct cfs_mhdr *h = (const struct cfs_mhdr *)block;
     if (h->magic != CFS_MHDR_MAGIC)
@@ -84,6 +138,8 @@ enum mhdr_fault cfs_mhdr_fault_of(const void *block, uint64_t blkno, uint32_t ki
         return MHDR_BLKNO;
     if (kind && h->kind != kind)
         return MHDR_KIND;
+    if (mac != NULL && mac->on)
+        return cfs_mac_ok(mac, CFS_MAC_HDR, block, offsetof(struct cfs_mhdr, crc)) ? MHDR_OK : MHDR_MAC;
     if (!meta_csum_supported(h->csum_algo))
         return MHDR_ALGO;
     if (block_crc(block, offsetof(struct cfs_mhdr, crc)) != h->crc)
@@ -91,42 +147,79 @@ enum mhdr_fault cfs_mhdr_fault_of(const void *block, uint64_t blkno, uint32_t ki
     return MHDR_OK;
 }
 
-static int mhdr_check(const uint8_t *block, uint64_t blkno, uint32_t kind)
+static int mhdr_check(const struct cfs_mac *mac, const uint8_t *block, uint64_t blkno, uint32_t kind)
 {
-    return cfs_mhdr_fault_of(block, blkno, kind) == MHDR_OK ? 0 : -EIO;
+    return cfs_mhdr_fault_of(mac, block, blkno, kind) == MHDR_OK ? 0 : -EIO;
 }
 
 struct mhdr_want {
+    const struct cfs_mac *mac;
     uint64_t dva;
     uint32_t kind;
 };
 
-void cfs_mhdr_seal_raw(void *block, uint32_t kind, uint64_t dva, uint64_t generation)
+void cfs_mhdr_seal_raw(const struct cfs_mac *mac, void *block, uint32_t kind, uint64_t dva, uint64_t generation)
 {
-    struct cfs fake;
-    memset(&fake, 0, sizeof(fake));
-    fake.gen = generation;
-    mhdr_seal(&fake, block, kind, dva);
+    mhdr_seal_mac(mac, block, kind, dva, generation);
 }
 
-bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind)
+bool cfs_mhdr_ok(const struct cfs_mac *mac, const void *block, uint64_t dva, uint32_t kind)
 {
-    return mhdr_check(block, dva, kind) == 0;
+    return mhdr_check(mac, block, dva, kind) == 0;
+}
+
+/* A superblock's seal: CRC32C, or the tag when it says it is a version-14
+ * encrypted pool's. */
+static void super_seal(const struct cfs_mac *mac, uint8_t *block)
+{
+    struct cfs_super *sb = (struct cfs_super *)block;
+    if (cfs_super_is_mac(sb)) {
+        cfs_mac_seal(mac, CFS_MAC_SUPER, block, offsetof(struct cfs_super, crc));
+        return;
+    }
+    sb->crc = 0;
+    sb->crc = block_crc(block, offsetof(struct cfs_super, crc));
+}
+
+/*
+ * A superblock's own check: magic, a version this kernel reads, and its
+ * seal. A MAC'd one needs its pool's key from the key table (`mac` is
+ * filled from it): -ENOKEY when the pool is locked. A CRC'd one is
+ * refused when a key is loaded for its uuid -- a pool whose key this
+ * kernel holds does not get to stop authenticating (design.md, "The
+ * metadata MAC"). -EIO for anything else that does not verify.
+ */
+int cfs_super_verify(const void *block, struct cfs_mac *mac)
+{
+    const struct cfs_super *sb = block;
+    if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || sb->version < CFS_VERSION_MIN || sb->version > CFS_VERSION)
+        return -EIO;
+    struct cfs_mac m;
+    int rc = cfs_keytab_mac(sb->uuid, &m);
+    if (cfs_super_is_mac(sb)) {
+        if (rc)
+            return -ENOKEY;
+        rc = cfs_mac_ok(&m, CFS_MAC_SUPER, block, offsetof(struct cfs_super, crc)) ? 0 : -EIO;
+    } else {
+        rc = rc == 0 ? -EIO : block_crc(block, offsetof(struct cfs_super, crc)) == sb->crc ? 0 : -EIO;
+        m.on = false;
+    }
+    if (rc == 0 && mac != NULL)
+        *mac = m;
+    memset(&m, 0, sizeof(m));
+    return rc;
 }
 
 bool cfs_super_ok(const void *block)
 {
-    const struct cfs_super *sb = block;
-    if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || sb->version < CFS_VERSION_MIN || sb->version > CFS_VERSION)
-        return false;
-    return block_crc(block, offsetof(struct cfs_super, crc)) == sb->crc;
+    return cfs_super_verify(block, NULL) == 0;
 }
 
 /* The verifier cfs_read_repair calls for a metadata block. */
 static bool mhdr_ok(const void *block, void *arg)
 {
     const struct mhdr_want *w = arg;
-    return mhdr_check(block, w->dva, w->kind) == 0;
+    return mhdr_check(w->mac, block, w->dva, w->kind) == 0;
 }
 
 struct cfs_mhdr *cfs_buf_hdr(struct cfs_buf *b)
@@ -234,7 +327,7 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
     /* A metadata block checks itself, so a mirrored member can answer
      * from another copy and put the bad one right (design.md, "A mirror
      * is only as good as its verifier"). */
-    struct mhdr_want want = { .dva = blkno, .kind = kind };
+    struct mhdr_want want = { .mac = &fs->mac, .dva = blkno, .kind = kind };
     bool read_ok = false;
     int rc = cfs_read_repair(fs, blkno, b->data, mhdr_ok, &want, NULL, &read_ok);
     if (rc) {
@@ -243,13 +336,21 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
              * "bad header or checksum" covers four different faults with
              * four different causes. */
             const struct cfs_mhdr *h = (const struct cfs_mhdr *)b->data;
-            static const char *const why[] = { "ok", "magic", "blkno", "kind", "algo", "crc" };
-            enum mhdr_fault f = cfs_mhdr_fault_of(b->data, blkno, kind);
-            kerror("cosmofs: block %llu: metadata %s fault: magic 0x%08x kind %u gen %llu blkno %llu algo %u crc 0x%08x "
-                   "(wanted kind %u at blkno %llu, computed crc 0x%08x)",
-                   (unsigned long long)blkno, why[f], h->magic, h->kind, (unsigned long long)h->generation,
-                   (unsigned long long)h->blkno, h->csum_algo, h->crc, kind, (unsigned long long)blkno,
-                   block_crc(b->data, offsetof(struct cfs_mhdr, crc)));
+            static const char *const why[] = { "ok", "magic", "blkno", "kind", "algo", "crc", "mac" };
+            enum mhdr_fault f = cfs_mhdr_fault_of(&fs->mac, b->data, blkno, kind);
+            if (fs->mac.on)
+                /* No computed value: printing the right tag beside a
+                 * forged one would hand the forger the answer. */
+                kerror("cosmofs: block %llu: metadata %s fault: magic 0x%08x kind %u gen %llu blkno %llu "
+                       "(wanted kind %u at blkno %llu): it does not authenticate",
+                       (unsigned long long)blkno, why[f], h->magic, h->kind, (unsigned long long)h->generation,
+                       (unsigned long long)h->blkno, kind, (unsigned long long)blkno);
+            else
+                kerror("cosmofs: block %llu: metadata %s fault: magic 0x%08x kind %u gen %llu blkno %llu algo %u "
+                       "crc 0x%08x (wanted kind %u at blkno %llu, computed crc 0x%08x)",
+                       (unsigned long long)blkno, why[f], h->magic, h->kind, (unsigned long long)h->generation,
+                       (unsigned long long)h->blkno, h->csum_algo, h->crc, kind, (unsigned long long)blkno,
+                       block_crc(b->data, offsetof(struct cfs_mhdr, crc)));
         } else {
             /* Nothing was read, so b->data describes nothing: saying
              * which header field is wrong would be inventing one. */
@@ -1126,8 +1227,7 @@ static int super_write(struct cfs *fs, unsigned slot, unsigned flags)
         return -ENOMEM;
     struct cfs_super *sb = (struct cfs_super *)block;
     *sb = fs->sb;
-    sb->crc = 0;
-    sb->crc = block_crc(block, offsetof(struct cfs_super, crc));
+    super_seal(&fs->mac, block);
     /* ONLINE copies only: a copy being resilvered gets its superblocks
      * when it holds everything they name (design.md, "Resilvering"). */
     int rc = pool_write_flags(fs->pool, slot, block, flags | POOL_WRITE_ONLINE);
@@ -2123,7 +2223,8 @@ int cfs_sync_vnodes(struct cfs *fs)
 static const void *g_format_key;
 static size_t g_format_key_len;
 
-static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned version, const char *label)
+static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned version, const char *label,
+                     const struct cfs_format_keys *fk)
 {
     if (n == 0 || n > CFS_MAX_MEMBERS || copies == 0 || copies > CFS_MAX_COPIES)
         return -EINVAL;
@@ -2156,7 +2257,10 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         return -ENOMEM;
     }
     uint8_t uuid[16];
-    random_get_bytes(uuid, sizeof(uuid));
+    if (fk != NULL)
+        memcpy(uuid, fk->uuid, sizeof(uuid));   /* the slots were sealed for it */
+    else
+        random_get_bytes(uuid, sizeof(uuid));
     uint64_t total = 0, free_total = 0;
     for (unsigned v = 0; v < n; v++) {
         uint64_t nb = pool->m[v].nblocks;
@@ -2183,7 +2287,12 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
      * Member v>0: 0 label; 1 alloc index; 2.. bitmaps. */
     unsigned chunks0 = (unsigned)((mem[0].nblocks + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
     bool v4 = version >= 4;
-    bool crypt = version >= 7 && g_format_key != NULL;
+    /* Version 14 (design.md, "Making an encrypted pool"): the master key
+     * and slots user space sealed, and every block MAC'd under it. */
+    bool keyed = fk != NULL;
+    if (keyed)
+        version = 14;
+    bool crypt = keyed || (version >= 7 && g_format_key != NULL);
     /* Before version 4 there is no member table, and the allocation
      * index is at block 2 where that format put it. */
     uint64_t members_blk = 2, alloc_idx = v4 ? 3 : 2, bitmap0 = v4 ? 4 : 3;
@@ -2201,6 +2310,8 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
     memset(&tmp, 0, sizeof(tmp));
     tmp.gen = 1;
     tmp.pool = pool;
+    if (keyed)
+        cfs_mac_derive(fk->master, &tmp.mac);
 
     for (unsigned v = 0; v < n && rc == 0; v++) {
         uint64_t nb = mem[v].nblocks;
@@ -2229,7 +2340,7 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         }
         /* Generation 1: the commit this device took part in. */
         for (unsigned c = 0; c < copies && rc == 0 && v > 0; c++)
-            rc = cfs_label_write(pool, v, c, 1, uuid, nb);
+            rc = cfs_label_write(pool, &tmp.mac, v, c, 1, uuid, nb);
         mem[v].alloc_root = CFS_DVA(v, idx_blk);
         mem[v].free_blocks = nb - used;
         free_total += nb - used;
@@ -2274,7 +2385,9 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         rc = pool_write(pool, imap1, block);
     }
     uint8_t master[CHACHA20_KEY_SIZE];
-    if (rc == 0 && crypt) {
+    if (rc == 0 && keyed) {
+        rc = cfs_keys2_write(pool, &tmp.mac, CFS_DVA(0, keys_blk), 1, uuid, fk->slot);
+    } else if (rc == 0 && crypt) {
         random_get_bytes(master, sizeof(master));
         rc = cfs_keys_write(pool, CFS_DVA(0, keys_blk), 1, master, g_format_key, g_format_key_len);
         memset(master, 0, sizeof(master));
@@ -2307,23 +2420,29 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         if (rc == 0)
             rc = super_write(&tmp, CFS_SUPER_A, BIO_PREFLUSH | BIO_FUA);
     }
+    /* The installer mounts what it just made: the key is loaded, as the
+     * boot's unlock would load it. */
+    if (rc == 0 && keyed)
+        rc = cfs_keytab_install(uuid, fk->master);
+    memset(&tmp.mac, 0, sizeof(tmp.mac));
     kfree(block);
     kfree(mem);
     pool_close(pool);
     if (rc == 0)
-        kinfo("cosmofs: formatted %s%s: %u member(s), %llu blocks, %llu free", bd[0]->name,
-              n > 1 ? " and others" : "", n, (unsigned long long)total, (unsigned long long)free_total);
+        kinfo("cosmofs: formatted %s%s: %u member(s), %llu blocks, %llu free%s", bd[0]->name,
+              n > 1 ? " and others" : "", n, (unsigned long long)total, (unsigned long long)free_total,
+              keyed ? ", encrypted (format 14)" : "");
     return rc;
 }
 
 int cosmofs_format_pool(struct blkdev **bd, unsigned n)
 {
-    return format_at(bd, n, 1, CFS_FORMAT_VERSION, NULL);
+    return format_at(bd, n, 1, CFS_FORMAT_VERSION, NULL, NULL);
 }
 
 int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies)
 {
-    return format_at(bd, n, copies, CFS_FORMAT_VERSION, NULL);
+    return format_at(bd, n, copies, CFS_FORMAT_VERSION, NULL, NULL);
 }
 
 /* The VFS's mirror format: one member, a copy on each device, named
@@ -2333,12 +2452,12 @@ static int cosmofs_format_mirror_devs(struct blkdev **bd, unsigned n, const char
 {
     if (label != NULL && strlen(label) > CFS_LABEL_MAX)
         return -EINVAL;
-    return format_at(bd, 1, n, CFS_FORMAT_VERSION, label);
+    return format_at(bd, 1, n, CFS_FORMAT_VERSION, label, NULL);
 }
 
 int cosmofs_format(struct blkdev *bd)
 {
-    return format_at(&bd, 1, 1, CFS_FORMAT_VERSION, NULL);
+    return format_at(&bd, 1, 1, CFS_FORMAT_VERSION, NULL, NULL);
 }
 
 /* A single-device pool named `label` (NULL or "" for none): the fs_type's
@@ -2347,7 +2466,7 @@ int cosmofs_format_label(struct blkdev *bd, const char *label)
 {
     if (label != NULL && strlen(label) > CFS_LABEL_MAX)
         return -EINVAL;
-    return format_at(&bd, 1, 1, CFS_FORMAT_VERSION, label);
+    return format_at(&bd, 1, 1, CFS_FORMAT_VERSION, label, NULL);
 }
 
 /* Format with encryption: a random master key, wrapped with `key`. */
@@ -2360,11 +2479,70 @@ int cosmofs_format_encrypted(struct blkdev *bd, const void *key, size_t len)
         return rc;
     g_format_key = key;
     g_format_key_len = len;
-    rc = format_at(&bd, 1, 1, CFS_FORMAT_VERSION, NULL);
+    rc = format_at(&bd, 1, 1, CFS_FORMAT_VERSION, NULL, NULL);
     g_format_key = NULL;
     g_format_key_len = 0;
     return rc;
 }
+
+/*
+ * An encrypted pool (roadmap 1.2 B5): one member on `n` devices (a
+ * mirror when n is 2), version 14, the slots as user space sealed them.
+ * At least one slot must be usable; a key-file slot only at 0.
+ */
+int cosmofs_format_keyed(struct blkdev **bd, unsigned n, const char *label, const struct cfs_format_keys *fk)
+{
+    if (label != NULL && strlen(label) > CFS_LABEL_MAX)
+        return -EINVAL;
+    unsigned usable = 0;
+    for (unsigned i = 0; i < CFS_KEY_SLOTS; i++) {
+        if (!cfs_keyslot_valid(i, &fk->slot[i]))
+            return -EINVAL;
+        usable += fk->slot[i].kind != CFS_KEYSLOT_EMPTY;
+    }
+    static const uint8_t zero[16] = { 0 };
+    if (usable == 0 || memcmp(fk->uuid, zero, 16) == 0)
+        return -EINVAL;   /* no way in; or no uuid, which is how a pool before version 4 says it has none */
+    int rc = cfs_need_seeded("create an encrypted pool");
+    if (rc)
+        return rc;
+    return format_at(bd, 1, n, 14, label, fk);
+}
+
+int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const uint8_t uuid[16], const uint8_t master[32],
+                        const struct cosmo_keyslot *slots)
+{
+    struct cfs_format_keys *fk = kmalloc(sizeof(*fk), 0);
+    if (fk == NULL)
+        return -ENOMEM;
+    memcpy(fk->uuid, uuid, sizeof(fk->uuid));
+    memcpy(fk->master, master, sizeof(fk->master));
+    memcpy(fk->slot, slots, sizeof(fk->slot));
+    int rc = cosmofs_format_keyed(bd, n, label, fk);
+    memset(fk, 0, sizeof(*fk));
+    kfree(fk);
+    return rc;
+}
+
+#if CONFIG_DEBUG
+/* Test hook: an encrypted pool of `members` single-device members, so the
+ * labels -- which only a member past the first has -- are MAC'd and can
+ * be forged (cosmofs-encrypted-root). */
+int cosmofs_test_format_keyed_members(struct blkdev **bd, unsigned members, const uint8_t uuid[16], const uint8_t master[32],
+                                      const struct cosmo_keyslot *slots)
+{
+    struct cfs_format_keys *fk = kmalloc(sizeof(*fk), 0);
+    if (fk == NULL)
+        return -ENOMEM;
+    memcpy(fk->uuid, uuid, sizeof(fk->uuid));
+    memcpy(fk->master, master, sizeof(fk->master));
+    memcpy(fk->slot, slots, sizeof(fk->slot));
+    int rc = format_at(bd, members, 1, 14, NULL, fk);
+    memset(fk, 0, sizeof(*fk));
+    kfree(fk);
+    return rc;
+}
+#endif
 
 /* Test hook: write an older format, so that "versions 2 and 3 mount
  * unchanged" is a claim something checks (design.md, "The DVA is 64
@@ -2373,7 +2551,7 @@ int cosmofs_test_format_version(struct blkdev *bd, unsigned version)
 {
     if (version < CFS_VERSION_MIN || version > CFS_VERSION)
         return -EINVAL;
-    return format_at(&bd, 1, 1, version, NULL);
+    return format_at(&bd, 1, 1, version, NULL, NULL);
 }
 
 /*
@@ -2977,12 +3155,30 @@ static int super_read(struct cfs *fs, unsigned slot, struct cfs_super *out)
                       CFS_DVA_VDEV(sb->members) < CFS_MAX_MEMBERS && CFS_DVA_BLK(sb->members) < CFS_MAX_BLOCKS;
         else
             ptrs_ok = sb->total_blocks == dev0 && sb->imap_root < dev0 && sb->alloc_root < dev0;
+        /* The seal last: a slot that is not a superblock at all is -EIO
+         * whether or not a key is loaded, and only one that is a
+         * version-14 encrypted pool's says -ENOKEY (design.md, "The key
+         * handle"). Its MAC key comes with it. */
+        struct cfs_mac mac;
         if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || !version_ok || sb->block_size != CFS_BLOCK ||
-            sb->total_blocks == 0 || sb->generation == 0 ||
-            block_crc(block, offsetof(struct cfs_super, crc)) != sb->crc || !ptrs_ok)
+            sb->total_blocks == 0 || sb->generation == 0 || !ptrs_ok)
             rc = -EIO;
         else
+            rc = cfs_super_verify(block, &mac);
+        /* Said once per slot read: the test of the MAC domains (make
+         * test-encrypt) and an operator both need to know which slot a
+         * mount refused and why. */
+        if (rc == -EIO && cfs_super_is_mac(sb) && version_ok)
+            kerror("cosmofs: superblock slot %u (generation %llu) does not authenticate", slot,
+                   (unsigned long long)sb->generation);
+        if (rc == 0) {
             *out = *sb;
+            if (mac.on && !fs->mac.on)
+                fs->mac = mac;
+            else if (mac.on != fs->mac.on || (mac.on && memcmp(mac.key, fs->mac.key, sizeof(mac.key)) != 0))
+                rc = -EIO;   /* the other slot was another pool's: slots_disagree's case, refused here */
+        }
+        memset(&mac, 0, sizeof(mac));
     }
     kfree(block);
     return rc;
@@ -3089,6 +3285,13 @@ static void cfs_destroy(struct cfs *fs)
     cfs_members_free(fs);
     if (fs->pool)
         pool_close(fs->pool);
+    /* The key goes with the mount: its copy here is wiped, and the last
+     * writable mount's release wipes the table's (design.md, "The key
+     * handle"). */
+    if (fs->key_held)
+        cfs_keytab_release(fs->sb.uuid);
+    memset(fs->master_key, 0, sizeof(fs->master_key));
+    memset(&fs->mac, 0, sizeof(fs->mac));
     kfree(fs);
 }
 
@@ -3144,7 +3347,28 @@ static int load_root(struct cfs *fs, struct vnode **root)
      * is plaintext by design, and every data read answers -ENOKEY
      * (design.md, "Boot-time unlock"). */
     fs->encrypted = fs->sb.version >= 7 && fs->sb.key_root != 0;
-    if (fs->encrypted && !fs->have_key) {
+    if (fs->encrypted && fs->mac.on && !fs->have_key) {
+        /* Version 14: the superblock verified under the key table's MAC
+         * key, so the master key is there; a writable mount holds it until
+         * its unmount (design.md, "The key handle"). The key block is read
+         * as any metadata is, so it authenticates too. */
+        rc = cfs_keytab_take(fs->sb.uuid, !fs->maint, fs->master_key);
+        if (rc)
+            return rc;
+        fs->have_key = true;
+        fs->key_held = !fs->maint;
+        struct cfs_buf *kb;
+        rc = cfs_buf_get(fs, fs->sb.key_root, CFS_KIND_KEYS, &kb);
+        if (rc)
+            return rc;
+        const struct cfs_keys2 *k = (const struct cfs_keys2 *)(kb->data + CFS_MHDR_SIZE);
+        bool ok = k->version == 2 && memcmp(k->uuid, fs->sb.uuid, 16) == 0;
+        cfs_buf_put(fs, kb);
+        if (!ok) {
+            kerror("cosmofs: %s: the key block is not this pool's version-2 key block", fs->pool_name);
+            return -EIO;
+        }
+    } else if (fs->encrypted && !fs->have_key) {
         char key[128];
         if (fwcfg_get_string("fskey", key, sizeof(key)) && key[0]) {
             rc = cfs_keys_load(fs, key, strlen(key));
@@ -3317,6 +3541,38 @@ bool cfs_mount_failure(const struct blkdev *bd, unsigned *stage, int *rc)
     return mine;
 }
 
+/*
+ * The newest superblock slot of `bd` that is either a CRC'd one that
+ * verifies or a version-14 encrypted one, *unverified* -- which without
+ * its key is all it can be. For the key operations alone (design.md, "The
+ * key handle"): KEY_INFO hands out the slots, which authenticate
+ * themselves, and KEY_LOAD verifies what it found under the key it was
+ * given before it keeps anything. -ENOENT when neither slot is either.
+ */
+int cfs_super_peek(struct spool *p, struct cfs_super *out)
+{
+    uint8_t *block = kmalloc(CFS_BLOCK, 0);
+    if (block == NULL)
+        return -ENOMEM;
+    int rc = -ENOENT;
+    for (unsigned slot = 0; slot < 2; slot++) {
+        if (pool_read(p, slot, block) != 0)
+            continue;
+        const struct cfs_super *sb = (const struct cfs_super *)block;
+        if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || sb->version < CFS_VERSION_MIN || sb->version > CFS_VERSION ||
+            sb->generation == 0)
+            continue;
+        if (!cfs_super_is_mac(sb) && block_crc(block, offsetof(struct cfs_super, crc)) != sb->crc)
+            continue;
+        if (rc == 0 && sb->generation <= out->generation)
+            continue;
+        *out = *sb;
+        rc = 0;
+    }
+    kfree(block);
+    return rc;
+}
+
 int cfs_super_slots(struct blkdev *bd, struct cfs_super *a, int *ra, struct cfs_super *b, int *rb)
 {
     struct cfs *fs = kzalloc(sizeof(*fs));
@@ -3328,6 +3584,7 @@ int cfs_super_slots(struct blkdev *bd, struct cfs_super *a, int *ra, struct cfs_
         *rb = super_read(fs, CFS_SUPER_B, b);
         pool_close(fs->pool);
     }
+    memset(&fs->mac, 0, sizeof(fs->mac));   /* a MAC key super_read took from the key table */
     kfree(fs);
     return rc;
 }
@@ -3394,10 +3651,14 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     int ra = super_read(fs, CFS_SUPER_A, &a);
     int rb = super_read(fs, CFS_SUPER_B, &b);
     if (ra && rb) {
-        kerror("cosmofs: %s: no valid superblock", bdev->name);
-        mount_failure_note(bdev, COSMO_FSCTL_STAGE_SUPER, -EIO);
+        int why = ra == -ENOKEY || rb == -ENOKEY ? -ENOKEY : -EIO;
+        if (why == -ENOKEY)
+            kerror("cosmofs: %s: encrypted and locked: its key is not loaded", bdev->name);
+        else
+            kerror("cosmofs: %s: no valid superblock", bdev->name);
+        mount_failure_note(bdev, COSMO_FSCTL_STAGE_SUPER, why);
         cfs_destroy(fs);
-        return -EIO;
+        return why;
     }
     /* The newest root of the pool, whichever of member 0's devices this
      * one is (CF27): a copy that was away holds an older root that every
@@ -3732,6 +3993,8 @@ int cosmofs_rekey(struct mount *mnt, const void *key, size_t len)
         return -EINVAL;
     if (!fs->encrypted)
         return -ENOTSUP;
+    if (fs->mac.on)
+        return -EOPNOTSUPP;   /* version 14: slots, through COSMOFS_KEY_SLOT, not a version-1 rewrap */
     if (fs->rdonly)
         return -EROFS;
     mutex_lock(&fs->lock);
@@ -3865,6 +4128,9 @@ struct fs_type cosmofs_fs_type = {
      * through /dev/blkctl (roadmap M2), named or not (S6). */
     .format = cosmofs_format_label,
     .format_mirror = cosmofs_format_mirror_devs,
+    /* An encrypted pool's key, and making one (roadmap 1.2 B5). */
+    .keyctl = cosmofs_keyctl,
+    .format_keyed = cosmofs_format_keys,
 };
 
 /*
@@ -3874,12 +4140,12 @@ struct fs_type cosmofs_fs_type = {
  * marker reads 11 at most; design.md, "Format version 12"). Printed at
  * boot, which also keeps it in every build.
  */
-_Static_assert(CFS_VERSION == 13, "update the format marker with CFS_VERSION");
-static const char cfs_format_marker[] = "cosmofs-format-max=13";
+_Static_assert(CFS_VERSION == 14, "update the format marker with CFS_VERSION");
+static const char cfs_format_marker[] = "cosmofs-format-max=14";
 
 void cosmofs_init(void)
 {
     if (vfs_register_fs(&cosmofs_fs_type))
         panic("cosmofs: cannot register");
-    kinfo("cosmofs: reads format versions 2 to 13 (%s)", cfs_format_marker);
+    kinfo("cosmofs: reads format versions 2 to 14 (%s)", cfs_format_marker);
 }

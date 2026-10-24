@@ -421,6 +421,7 @@ bool selftest_cosmofs_attach(const char **reason);               /* B3: attach, 
 bool selftest_cosmofs_root_type(const char **reason);             /* a root that is not a directory is refused, not asserted */
 bool selftest_cosmofs_nomem(const char **reason);                 /* CFS-6: -ENOMEM returned, the transaction kept */
 bool selftest_cosmofs_crypt(const char **reason);                 /* encryption and keys */
+bool selftest_cosmofs_encrypted_root(const char **reason);        /* format 14: key table, key ops, MAC domains, two-level index */
 bool selftest_cosmofs_reserve(const char **reason);    /* the metadata reserve on a full disk */
 bool selftest_cosmofs_fallback(const char **reason);   /* older-slot fallback at mount */
 bool selftest_cosmofs_writeback(const char **reason);  /* the writeback thread */

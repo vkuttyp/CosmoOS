@@ -168,7 +168,8 @@
 #define SYS_exec      103 /* (const char *path, char *const argv[], char *const envp[]) -> no return; the image replaced in place (roadmap M3) */
 #define SYS_sysctl_set 104 /* (const char *name, const char *value, size_t len) -> 0; PRIV_SYS_ADMIN (roadmap M5) */
 #define SYS_reboot    105 /* (unsigned cmd) -> no return, or -errno; COSMO_REBOOT_*; PRIV_SYS_ADMIN (shell completeness S5) */
-#define SYS_COUNT     106
+#define SYS_getrandom 106 /* (void *buf, size_t len) -> len; seeded random bytes, at most 256 a call; waits for the seeding (roadmap 1.2 B5) */
+#define SYS_COUNT     107
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five

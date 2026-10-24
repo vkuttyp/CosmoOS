@@ -45,6 +45,7 @@ enum fi_kind {
     FI_COSMOFS_EXTENT_FBIG,  /* cosmofs: set_extent fails with -EFBIG before it changes the map */
     FI_COSMOFS_CHAIN_NOMEM,  /* cosmofs: the extent chain block a map store needs cannot be had (-ENOMEM; CFS-6) */
     FI_COSMOFS_INODE_NOMEM,  /* cosmofs: the inode-map path an inode write needs cannot be had (-ENOMEM; CFS-6) */
+    FI_COSMOFS_CSUM_COW,     /* cosmofs: the copy of a checksum index block a write needs cannot be had (-ENOMEM) */
     FI_KIND_COUNT,
 };
 

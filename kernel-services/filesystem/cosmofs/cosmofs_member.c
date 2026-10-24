@@ -69,8 +69,28 @@ static uint32_t label_crc(const uint8_t *block)
     return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
 }
 
-int cfs_label_write(struct spool *pool, unsigned vdev, unsigned copy, uint64_t generation, const uint8_t uuid[16],
-                    uint64_t nblocks)
+/* A label's seal: its CRC32C, or on a version-14 encrypted pool the tag
+ * in the CRC and the word after it (design.md, "The metadata MAC"). */
+static void label_seal(const struct cfs_mac *mac, uint8_t *block)
+{
+    struct cfs_label *l = (struct cfs_label *)block;
+    if (mac != NULL && mac->on) {
+        cfs_mac_seal(mac, CFS_MAC_LABEL, block, offsetof(struct cfs_label, crc));
+        return;
+    }
+    l->crc = label_crc(block);
+}
+
+static bool label_sealed(const struct cfs_mac *mac, const uint8_t *block)
+{
+    const struct cfs_label *l = (const struct cfs_label *)block;
+    if (mac != NULL && mac->on)
+        return cfs_mac_ok(mac, CFS_MAC_LABEL, block, offsetof(struct cfs_label, crc));
+    return label_crc(block) == l->crc;
+}
+
+int cfs_label_write(struct spool *pool, const struct cfs_mac *mac, unsigned vdev, unsigned copy, uint64_t generation,
+                    const uint8_t uuid[16], uint64_t nblocks)
 {
     uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
     if (block == NULL)
@@ -83,7 +103,7 @@ int cfs_label_write(struct spool *pool, unsigned vdev, unsigned copy, uint64_t g
     l->generation = generation;
     memcpy(l->uuid, uuid, 16);
     l->nblocks = nblocks;
-    l->crc = label_crc(block);
+    label_seal(mac, block);
     /* To that copy alone: every device of a group carries its own. */
     int rc = pool_write_copy(pool, CFS_DVA(vdev, 0), copy, block);
     kfree(block);
@@ -119,7 +139,7 @@ int cfs_label_write_dev(struct cfs *fs, struct blkdev *bd, unsigned vdev, uint64
     l->generation = fs->sb.generation;
     l->flags = flags;
     l->tag = tag;
-    l->crc = label_crc(block);
+    label_seal(&fs->mac, block);
     rc = pool_write(p, CFS_DVA(0, 0), block);
     if (rc == 0 && (flags & CFS_LABEL_RESILVER) && vdev == 0) {
         memset(block, 0, CFS_BLOCK);
@@ -153,7 +173,7 @@ void cfs_label_clear_dev(struct blkdev *bd)
 /* The label at block 0 of `bd`, or -ENOENT when there is none. A device
  * that is not a member of anything reads as random data here, so every
  * field is checked before it is believed. */
-static int label_read(struct blkdev *bd, struct cfs_label *out)
+static int label_read(const struct cfs_mac *mac, struct blkdev *bd, struct cfs_label *out)
 {
     struct spool *p;
     int rc = pool_open(bd, &p);
@@ -167,7 +187,7 @@ static int label_read(struct blkdev *bd, struct cfs_label *out)
     rc = pool_read(p, CFS_DVA(0, 0), block);
     if (rc == 0) {
         const struct cfs_label *l = (const struct cfs_label *)block;
-        if (memcmp(l->magic, CFS_LABEL_MAGIC, sizeof(l->magic)) != 0 || label_crc(block) != l->crc ||
+        if (memcmp(l->magic, CFS_LABEL_MAGIC, sizeof(l->magic)) != 0 || !label_sealed(mac, block) ||
             l->index >= CFS_MAX_MEMBERS || l->copy >= CFS_MAX_COPIES)
             rc = -ENOENT;
         else
@@ -203,7 +223,7 @@ static bool copy_here(struct cfs *fs, struct blkdev *bd, unsigned vdev, const st
     struct cfs_label l;
     *stale = false;
     *wrong_size = false;
-    if (label_read(bd, &l) != 0 || l.index != vdev || memcmp(l.uuid, fs->sb.uuid, 16) != 0)
+    if (label_read(&fs->mac, bd, &l) != 0 || l.index != vdev || memcmp(l.uuid, fs->sb.uuid, 16) != 0)
         return false;
     /* A resilver's target or a spare is labelled for this pool and is no
      * copy of anything yet (design.md, "Resilvering"). */
@@ -273,7 +293,7 @@ static bool device_gen(struct cfs *fs, struct blkdev *bd, unsigned vdev, const s
 {
     if (vdev != 0) {
         struct cfs_label l;
-        if (label_read(bd, &l) != 0 || l.index != vdev || memcmp(l.uuid, fs->sb.uuid, 16) != 0 ||
+        if (label_read(&fs->mac, bd, &l) != 0 || l.index != vdev || memcmp(l.uuid, fs->sb.uuid, 16) != 0 ||
             l.nblocks != want->nblocks || (l.flags & (CFS_LABEL_RESILVER | CFS_LABEL_SPARE)))
             return false;
         *gen = l.generation;
@@ -377,7 +397,7 @@ struct blkdev *cfs_find_tagged(struct cfs *fs, uint64_t flags, uint64_t tag)
             return NULL;
         struct cfs_label l;
         unsigned v, c;
-        if (!pool_find_dev(fs->pool, cand, &v, &c) && label_read(cand, &l) == 0 &&
+        if (!pool_find_dev(fs->pool, cand, &v, &c) && label_read(&fs->mac, cand, &l) == 0 &&
             memcmp(l.uuid, fs->sb.uuid, 16) == 0 && (l.flags & flags) && (tag == 0 || l.tag == tag))
             return cand;
         blkdev_put(cand);
@@ -394,7 +414,7 @@ void cfs_spares_find(struct cfs *fs)
             return;
         struct cfs_label l;
         unsigned v, c;
-        if (!pool_find_dev(fs->pool, cand, &v, &c) && label_read(cand, &l) == 0 &&
+        if (!pool_find_dev(fs->pool, cand, &v, &c) && label_read(&fs->mac, cand, &l) == 0 &&
             memcmp(l.uuid, fs->sb.uuid, 16) == 0 && (l.flags & CFS_LABEL_SPARE) &&
             pool_add_spare(fs->pool, cand, l.tag) == 0)
             kinfo("cosmofs: %s is a spare of this pool", cand->name);
@@ -809,12 +829,14 @@ int cfs_members_load(struct cfs *fs)
     uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
     if (block == NULL)
         return -ENOMEM;
+    /* Read raw -- the buffer cache checks an address against the very
+     * table this is -- and so checked here as any metadata block is: its
+     * own address, kind and seal. The seal was not checked before roadmap
+     * 1.2 B5, which found it unchecked when a forged table on an encrypted
+     * pool mounted. */
     int rc = pool_read(fs->pool, fs->sb.members, block);
-    if (rc == 0) {
-        const struct cfs_mhdr *h = (const struct cfs_mhdr *)block;
-        if (h->magic != CFS_MHDR_MAGIC || h->kind != CFS_KIND_MEMBERS || h->blkno != fs->sb.members)
-            rc = -EIO;
-    }
+    if (rc == 0 && !cfs_mhdr_ok(&fs->mac, block, fs->sb.members, CFS_KIND_MEMBERS))
+        rc = -EIO;
     if (rc) {
         kfree(block);
         kerror("cosmofs: the member table is unreadable");
@@ -959,7 +981,7 @@ int cfs_labels_update(struct cfs *fs)
         for (unsigned c = 0; c < n; c++) {
             if (!pool_copy_online(fs->pool, v, c))
                 continue;
-            int rc = cfs_label_write(fs->pool, v, c, fs->gen, fs->sb.uuid, fs->mem[v].nblocks);
+            int rc = cfs_label_write(fs->pool, &fs->mac, v, c, fs->gen, fs->sb.uuid, fs->mem[v].nblocks);
             if (rc == -ENOMEM)
                 return rc;
         }

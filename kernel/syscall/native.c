@@ -39,6 +39,7 @@
 #include <kernel/unix.h>
 #include <arch/user.h>
 #include <kernel/futex.h>
+#include <kernel/random.h>
 #include <kernel/string.h>
 #include <kernel/syscall.h>
 #include <kernel/timer.h>
@@ -2634,6 +2635,30 @@ static int64_t sys_reboot(struct syscall_args *a)
     }
 }
 
+/*
+ * Roadmap 1.2 B5: what a key, a salt or a key file is made of, for the
+ * native personality, which had only the sixteen AT_RANDOM bytes a
+ * process starts with. The Linux door's getrandom without its flags: it
+ * waits for the pool to be seeded (an unseeded pool's bytes are not key
+ * material, invariant S18) and gives at most 256 bytes, as getentropy.
+ */
+static int64_t sys_getrandom(struct syscall_args *a)
+{
+    size_t len = (size_t)a->a[1];
+    if (len > 256)
+        return -EINVAL;
+    if (!user_range_ok(a->a[0], len))
+        return -EFAULT;
+    int rc = random_wait_ready(RANDOM_WAIT_FOREVER);
+    if (rc)
+        return rc;
+    uint8_t tmp[256];
+    random_get_bytes(tmp, len);
+    rc = copy_to_user(a->a[0], tmp, len) ? -EFAULT : 0;
+    memset(tmp, 0, sizeof(tmp));
+    return rc ? rc : (int64_t)len;
+}
+
 static int64_t sys_sysctl_set(struct syscall_args *a)
 {
     char name[64];
@@ -2763,6 +2788,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_sysctl] = sys_sysctl,
     [SYS_sysctl_set] = sys_sysctl_set,
     [SYS_reboot] = sys_reboot,
+    [SYS_getrandom] = sys_getrandom,
     [SYS_vm_create] = sys_vm_create,
     [SYS_vm_mem] = sys_vm_mem,
     [SYS_vm_mem_rw] = sys_vm_mem_rw,

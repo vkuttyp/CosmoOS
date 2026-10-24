@@ -212,7 +212,7 @@ static int rs_finish(struct cfs *fs, unsigned v, unsigned c, uint8_t *buf)
                 rc = pool_write_copy(p, CFS_DVA(0, blk), c, buf);
         }
     } else {
-        rc = cfs_label_write(p, v, c, fs->sb.generation, fs->sb.uuid, fs->mem[v].nblocks);
+        rc = cfs_label_write(p, &fs->mac, v, c, fs->sb.generation, fs->sb.uuid, fs->mem[v].nblocks);
     }
     if (rc == 0)
         rc = blk_flush(cp->dev);

@@ -132,18 +132,21 @@ static void tally(struct scrub *s, int rc, unsigned bad, unsigned fixed)
 }
 
 struct meta_want {
+    const struct cfs_mac *mac;
     uint64_t dva;
     uint32_t kind;
+    uint32_t alt;   /* a second kind the block may be, or 0 */
 };
 
 static bool meta_ok(const void *block, void *arg)
 {
     const struct meta_want *w = arg;
-    return cfs_mhdr_ok(block, w->dva, w->kind);
+    return cfs_mhdr_ok(w->mac, block, w->dva, w->kind) ||
+           (w->alt != 0 && cfs_mhdr_ok(w->mac, block, w->dva, w->alt));
 }
 
-/* One metadata block, every copy of it. */
-static void scrub_meta(struct scrub *s, uint64_t dva, uint32_t kind)
+/* One metadata block, every copy of it: of kind `kind` or `alt`. */
+static void scrub_meta_either(struct scrub *s, uint64_t dva, uint32_t kind, uint32_t alt)
 {
     struct cfs *fs = s->fs;
     if (dva == 0 || !cfs_dva_valid(fs, dva))
@@ -159,10 +162,57 @@ static void scrub_meta(struct scrub *s, uint64_t dva, uint32_t kind)
     }
     if (!first_visit(s, dva))
         return;
-    struct meta_want w = { .dva = dva, .kind = kind };
+    struct meta_want w = { .mac = &fs->mac, .dva = dva, .kind = kind, .alt = alt };
     unsigned bad = 0, fixed = 0;
     int rc = cfs_verify_all(fs, dva, s->page, meta_ok, &w, s->repair, &bad, &fixed);
     tally(s, rc, bad, fixed);
+}
+
+static void scrub_meta(struct scrub *s, uint64_t dva, uint32_t kind)
+{
+    scrub_meta_either(s, dva, kind, 0);
+}
+
+/*
+ * A checksum tree, one level or (version 14) two: every block's copies.
+ * Each block's copies are verified before the cached read that finds its
+ * children: on a writable mirror that read repairs a bad first copy, and
+ * the scrub would neither count it nor say it was repaired (Codex on
+ * #447). The root may be either shape.
+ */
+static void scrub_csum(struct scrub *s, uint64_t blk, unsigned depth)
+{
+    struct cfs *fs = s->fs;
+    if (depth)
+        scrub_meta(s, blk, CFS_KIND_CSUMIDX);
+    else
+        scrub_meta_either(s, blk, CFS_KIND_CSUMIDX, fs->sb.version >= 14 ? CFS_KIND_CSUMIDX2 : 0);
+    struct cfs_buf *idx;
+    if (s->stop || cfs_buf_get(fs, blk, depth ? CFS_KIND_CSUMIDX : 0, &idx) != 0)
+        return;
+    uint32_t kind = cfs_buf_hdr(idx)->kind;
+    bool two = depth == 0 && kind == CFS_KIND_CSUMIDX2 && fs->sb.version >= 14;
+    if (!two && kind != CFS_KIND_CSUMIDX) {
+        cfs_buf_put(fs, idx);
+        return;
+    }
+    uint64_t *slots = kmalloc(CFS_PTRS_PER_BLOCK * sizeof(*slots), 0);
+    if (slots != NULL)
+        memcpy(slots, idx->data + CFS_MHDR_SIZE, CFS_PTRS_PER_BLOCK * sizeof(*slots));
+    cfs_buf_put(fs, idx);
+    if (slots == NULL) {
+        tally(s, -ENOMEM, 0, 0);   /* the tree's blocks unread: the scrub stops and says so (Codex on #447) */
+        return;
+    }
+    for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK && !s->stop; i++) {
+        if (slots[i] == 0)
+            continue;
+        if (two)
+            scrub_csum(s, slots[i], 1);
+        else
+            scrub_meta(s, slots[i], CFS_KIND_CSUM);
+    }
+    kfree(slots);
 }
 
 static void scrub_data(struct scrub *s, struct cfs_inode *in, uint64_t lblk, uint64_t dva)
@@ -345,17 +395,8 @@ static void scrub_inode(struct scrub *s, uint64_t id, const struct cfs_inode *in
         next = ((const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE))->next;
         cfs_buf_put(fs, b);
     }
-    if (in.csum_root != 0) {
-        scrub_meta(s, in.csum_root, CFS_KIND_CSUMIDX);
-        struct cfs_buf *idx;
-        if (cfs_buf_get(fs, in.csum_root, CFS_KIND_CSUMIDX, &idx) == 0) {
-            const uint64_t *slots = (const uint64_t *)(idx->data + CFS_MHDR_SIZE);
-            for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++)
-                if (slots[i])
-                    scrub_meta(s, slots[i], CFS_KIND_CSUM);
-            cfs_buf_put(fs, idx);
-        }
-    }
+    if (in.csum_root != 0)
+        scrub_csum(s, in.csum_root, 0);
     uint64_t blocks = (in.size + CFS_BLOCK - 1) / CFS_BLOCK;
     for (uint64_t lblk = 0; lblk < blocks && !s->stop;) {
         struct cfs_extent e;

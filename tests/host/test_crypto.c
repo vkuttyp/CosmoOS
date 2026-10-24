@@ -1,10 +1,12 @@
 /*
- * test_crypto.c - SHA-512 (FIPS 180-4 examples) and Ed25519 (RFC 8032
- * section 7.1 vectors) on the host under ASan/UBSan.
+ * test_crypto.c - SHA-512 (FIPS 180-4 examples), Ed25519 (RFC 8032
+ * section 7.1 vectors) and BLAKE2b (RFC 7693; the keyed vectors are
+ * Python hashlib's) on the host under ASan/UBSan.
  */
 
 #include "harness.h"
 
+#include <kernel/blake2b.h>
 #include <kernel/crc32c.h>
 #include <kernel/crypto.h>
 
@@ -169,7 +171,48 @@ static void test_crc32c(void)
     EXPECT(b == 0xE3069283u);
 }
 
+static bool blake2b_is(const void *key, size_t keylen, const void *msg, size_t len, size_t outlen, const char *hex)
+{
+    uint8_t got[64], want[64];
+    struct blake2b s;
+    blake2b_init_key(&s, outlen, key, keylen);
+    /* In two pieces, the first a whole block: the last block is only
+     * compressed by final, so a full buffer must wait for more input. */
+    size_t first = len > 128 ? 128 : len;
+    blake2b_update(&s, msg, first);
+    blake2b_update(&s, (const uint8_t *)msg + first, len - first);
+    blake2b_final(&s, got);
+    unhex(want, hex, outlen);
+    return memcmp(got, want, outlen) == 0;
+}
+
+static void test_blake2b(void)
+{
+    uint8_t key[64], msg[4096];
+    for (unsigned i = 0; i < sizeof(key); i++)
+        key[i] = (uint8_t)i;
+    for (unsigned i = 0; i < sizeof(msg); i++)
+        msg[i] = (uint8_t)i;
+    /* RFC 7693 appendix A. */
+    EXPECT(blake2b_is(NULL, 0, "abc", 3, 64,
+                      "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1"
+                      "7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"));
+    EXPECT(blake2b_is(key, 64, "", 0, 64,
+                      "10ebb67700b1868efb4417987acf4690ae9d972fb7a590c2f02871799aaa4786"
+                      "b5e996e8f0f4eb981fc214b005f42d2ff4233499391653df7aefcbc13fc51568"));
+    EXPECT(blake2b_is(key, 64, msg, 255, 64,
+                      "142709d62e28fcccd0af97fad0f8465b971e82201dc51070faa0372aa43e9248"
+                      "4be1c1e73ba10906d5d1853db6a4106e0a7bf9800d373d6dee2d46d62ef2a461"));
+    /* The metadata MAC's shape: a 32-byte key, 8 bytes out, a block in. */
+    EXPECT(blake2b_is(key, 32, msg, 4096, 8, "7dc54a935c9936df"));
+    uint8_t zero[128] = { 0 }, got[32], want[32];
+    blake2b(got, 32, zero, sizeof(zero));
+    unhex(want, "378d0caaaa3855f1b38693c1d6ef004fd118691c95c959d4efa950d6d6fcf7c1", 32);
+    EXPECT(memcmp(got, want, 32) == 0);
+}
+
 static const struct host_test tests[] = {
+    { "blake2b", test_blake2b },
     { "crc32c", test_crc32c },
     { "sha512-vectors", test_sha512_vectors },
     { "ed25519-vectors", test_ed25519_vectors },

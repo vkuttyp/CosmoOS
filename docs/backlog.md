@@ -119,6 +119,7 @@ Open lines (struck lines are not counted):
 - **CFS-28** nice-to-have, M. No rebalancing across members: a member added later fills only from new allocations, and nothing moves blocks between members or off one being removed (out of B3's scope).
 - **CFS-29** nice-to-have, S. A copy missing when a pool is mounted is marked for a whole resilver, even when its record said `ONLINE` at the root being mounted and only the commits after it were missed (`setup_copies`); a disk left out of one boot is rebuilt rather than caught up (roadmap 1.2 B3's `test-mirror`, stage `lagging`).
 - **CFS-30** correctness, S. A scrub of the running root reports 53 to 77 `skipped` (visits to dirty buffers: inode-map, inode and checksum blocks), the same count after a `sync` and a 3 s wait (roadmap 1.2 B3's `test-mirror`, 2026-10-23); unexplained: either something re-dirties them at once or a sync leaves them dirty.
+- ~~**CFS-31** correctness, S. The member table's seal was not checked at mount: it is read raw, before the buffer cache can check an address, and was used whenever its magic, kind and address were right.~~ Found and done by roadmap 1.2 B5's first PR (#447): checked with the pool's CRC32C or, on an encrypted pool, its MAC (CF30).
 
 ## Documentation
 

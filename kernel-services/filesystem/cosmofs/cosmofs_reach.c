@@ -54,6 +54,48 @@ static int reach_get(struct reach *r, uint64_t dva, uint32_t kind, struct cfs_bu
     return rc;
 }
 
+/* A checksum tree: a one-level index (`depth` 1 or a root of unknown
+ * shape, 0) or a version-14 two-level root, every block read. */
+static void reach_csum(struct reach *r, uint64_t blk, unsigned depth)
+{
+    reach_mark(r, blk);
+    struct cfs_buf *idx;
+    if (reach_get(r, blk, depth ? CFS_KIND_CSUMIDX : 0, &idx))
+        return;
+    uint32_t kind = cfs_buf_hdr(idx)->kind;
+    bool two = depth == 0 && kind == CFS_KIND_CSUMIDX2 && r->fs->sb.version >= 14;
+    if (!two && kind != CFS_KIND_CSUMIDX) {
+        cfs_buf_put(r->fs, idx);
+        reach_fail(r, blk, "not a checksum index");
+        return;
+    }
+    /* Copied out (on the heap: a block's worth): reading a leaf may evict
+     * the index's buffer. */
+    uint64_t *slots = kmalloc(CFS_PTRS_PER_BLOCK * sizeof(*slots), 0);
+    if (slots == NULL) {
+        cfs_buf_put(r->fs, idx);
+        reach_fail(r, blk, "out of memory");
+        return;
+    }
+    memcpy(slots, idx->data + CFS_MHDR_SIZE, CFS_PTRS_PER_BLOCK * sizeof(*slots));
+    cfs_buf_put(r->fs, idx);
+    for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++) {
+        if (slots[i] == 0)
+            continue;
+        if (two) {
+            reach_csum(r, slots[i], 1);
+            continue;
+        }
+        reach_mark(r, slots[i]);
+        /* Read, not only counted: a walk that says it reached a leaf has
+         * read it, or it says it could not. */
+        struct cfs_buf *leaf;
+        if (reach_get(r, slots[i], CFS_KIND_CSUM, &leaf) == 0)
+            cfs_buf_put(r->fs, leaf);
+    }
+    kfree(slots);
+}
+
 static void reach_extent(struct reach *r, const struct cfs_extent *e)
 {
     if (cfs_ext_count(e) == 0)
@@ -84,33 +126,8 @@ static void reach_inode(struct reach *r, const struct cfs_inode *in)
         next = eb->next;
         cfs_buf_put(r->fs, b);
     }
-    if (in->csum_root != 0) {
-        reach_mark(r, in->csum_root);
-        struct cfs_buf *idx;
-        if (reach_get(r, in->csum_root, CFS_KIND_CSUMIDX, &idx) == 0) {
-            /* Copied out (on the heap: a block's worth): reading a leaf may
-             * evict the index's buffer. */
-            uint64_t *slots = kmalloc(CFS_PTRS_PER_BLOCK * sizeof(*slots), 0);
-            if (slots == NULL) {
-                cfs_buf_put(r->fs, idx);
-                reach_fail(r, in->csum_root, "out of memory");
-                return;
-            }
-            memcpy(slots, idx->data + CFS_MHDR_SIZE, CFS_PTRS_PER_BLOCK * sizeof(*slots));
-            cfs_buf_put(r->fs, idx);
-            for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++) {
-                if (slots[i] == 0)
-                    continue;
-                reach_mark(r, slots[i]);
-                /* Read, not only counted: a walk that says it reached a
-                 * leaf has read it, or it says it could not. */
-                struct cfs_buf *leaf;
-                if (reach_get(r, slots[i], CFS_KIND_CSUM, &leaf) == 0)
-                    cfs_buf_put(r->fs, leaf);
-            }
-            kfree(slots);
-        }
-    }
+    if (in->csum_root != 0)
+        reach_csum(r, in->csum_root, 0);
 }
 
 int cfs_tree_walk(struct cfs *fs, uint64_t imap_root, uint64_t next_ino,
