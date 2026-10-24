@@ -459,7 +459,9 @@ shapes, so a two-level tree is neither leaked nor unread. Check:
 `cosmofs-encrypted-root` (a block past 64516 of an encrypted file and
 past 516128 of a plain one read back, the check clean with one
 two-level tree walked; the middle block forged is a refused read and an
-unreadable block); `make test-encrypt` (a 1 GiB file).
+unreadable block; its copy failing is a write-back's `-ENOMEM` and a
+retry that commits; on a mirror, its first copy damaged is one bad copy
+the scrub counts and repairs); `make test-encrypt` (a 1 GiB file).
 
 **CF18. From format version 12 a snapshot's identity is its own: every
 snapshot has a uuid no other snapshot of the filesystem has, and no id

@@ -82,7 +82,8 @@ The design is `docs/kernel-services/filesystem/cosmofs/design.md`,
   file's middle index block (the read refused, the check counting it
   unreadable); a plain pool's member table damaged in place refused
   (CFS-31); a plain pool's file past 516128 blocks raised to 14 with
-  CRC32C kept. 576 ms on x86-64, 650 ms on AArch64.
+  CRC32C kept. 576 ms on x86-64, 650 ms on AArch64 (before the review
+  fixes below).
 - Host: `test_crypto` gains BLAKE2b (RFC 7693 and keyed hashlib vectors);
   `test_cosmofs` the format-14 layout, `cfs_super_is_mac`, the slot's
   associated data and nonce, the two-level span.
@@ -116,6 +117,39 @@ passed; `make reproducible`: yes. The first run of this matrix was
 stopped after its first probes, when the keyed format was found to need
 the pool's uuid from user space (`ed8a72ca`); this is the run on that
 commit.
+
+## Review fixes (PR #447)
+
+Codex found three defects in this PR's own code (none on main), fixed
+in `9b25c98c`:
+
+- `csum_level` released the block whose copy-on-write failed and left
+  the caller's pointer set, so `csum_block_at` released the mid-level
+  index a second time: a panic (`cfs_buf_put`'s KASSERT) where the
+  write should have been `-ENOMEM`. The pointer is now NULL on every
+  failure. A seam, `FI_COSMOFS_CSUM_COW`, fails an index block's copy.
+- `scrub_csum` read each index block through the cache before verifying
+  its copies; on a writable mirror that read repaired a bad first copy,
+  and the scrub neither counted nor reported it. Copies are verified
+  first, the root as either index kind.
+- A failed allocation for an index's children skipped the tree without
+  stopping the scrub; it now stops it with `-ENOMEM`, as `tally` does.
+  No test: the allocation is not reachable by a seam without counting
+  the scrub's other allocations.
+
+`cosmofs-encrypted-root` gains a test for each of the first two, and
+each was run without its fix on x86-64:
+
+| test | with the fix | without it |
+|---|---|---|
+| the far block rewritten, the mid block's copy failing | sync -12 (hits 1), retry 0 | `KERNEL PANIC: assertion failed: b->refs > 0` (`cfs_buf_put`) |
+| a mirror's mid block, first copy damaged, scrubbed | 1 bad, 1 repaired, 0 unrecoverable | 0 bad, 0 repaired: FAIL |
+
+With the fixes, debug `make test` passes on x86-64 (162.7 s, the
+self-test 940 ms) and AArch64 (176.3 s, 963 ms); release `make test`,
+`make fuzz`, `make host-test`, and release `test-fsck` (238.1 s /
+278.8 s) and `test-mirror` (169.1 s / 224.1 s) pass on x86-64 /
+AArch64.
 
 ## What is not done in this part
 

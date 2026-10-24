@@ -2272,7 +2272,9 @@ blocks. The one-level index becomes the two-level root's entry 0, so no
 checksum moves; `csum_root` says which shape it is by the kind of the
 block it names. That is 508 times the limit: 32774128 blocks (125 GiB)
 encrypted, 262193024 (1000 GiB) plain. The checker and the scrub walk
-both shapes.
+both shapes. The scrub verifies each index block's copies before it reads
+the block for its children, since that cached read repairs a bad first
+copy on a writable mirror without the scrub counting it.
 
 Raising a pool below 14 is what the first `CSUMIDX2` does, as a
 snapshot raises to 12; a pool with a version-1 key block refuses
