@@ -49,6 +49,7 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_COSMOFS_EXTENT_FBIG] = "cosmofs-extent-fbig",
     [FI_COSMOFS_CHAIN_NOMEM] = "cosmofs-chain-nomem",
     [FI_COSMOFS_INODE_NOMEM] = "cosmofs-inode-nomem",
+    [FI_COSMOFS_CSUM_COW] = "cosmofs-csum-cow",
 };
 
 const char *faultinject_kind_name(enum fi_kind kind)

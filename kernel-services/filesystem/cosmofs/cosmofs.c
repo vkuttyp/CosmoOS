@@ -596,7 +596,8 @@ static int csum_raise14(struct cfs *fs)
 }
 
 /* An index block below `*slot`: read (and CoW'd when `writable`), or made
- * when there is none and `writable`; -ENOENT when there is none to read. */
+ * when there is none and `writable`; -ENOENT when there is none to read.
+ * On failure `*out` is NULL: the caller has nothing to release. */
 static int csum_level(struct cfs *fs, uint64_t *slot, uint32_t kind, bool writable, struct cfs_buf **out)
 {
     int rc;
@@ -609,8 +610,20 @@ static int csum_level(struct cfs *fs, uint64_t *slot, uint32_t kind, bool writab
         return rc;
     }
     rc = cfs_buf_get(fs, *slot, kind, out);
-    if (rc == 0 && writable && (rc = cfs_buf_cow(fs, out, slot)) != 0)
-        cfs_buf_put(fs, *out);
+    if (rc != 0) {
+        *out = NULL;
+        return rc;
+    }
+    if (writable) {
+        /* The test seam (cosmofs-encrypted-root): an index block's copy
+         * cannot be had, as when the pool is full. */
+        rc = kind == CFS_KIND_CSUMIDX && faultinject_should_fail(FI_COSMOFS_CSUM_COW) ? -ENOMEM
+                                                                                      : cfs_buf_cow(fs, out, slot);
+        if (rc != 0) {
+            cfs_buf_put(fs, *out);
+            *out = NULL;   /* a two-level walk's cleanup releases `mid` (Codex on #447) */
+        }
+    }
     return rc;
 }
 

@@ -13,6 +13,7 @@
 #include <kernel/cosmofs.h>
 #include <kernel/crc32c.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/ramblk.h>
@@ -20,6 +21,7 @@
 #include <kernel/selftest.h>
 #include <kernel/storage.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 #include <kernel/vfs.h>
 
 #include <uapi/cosmo/fsctl.h>
@@ -188,8 +190,8 @@ bool selftest_cosmofs_encrypted_root(const char **reason)
     }
     (void)vfs_umount2(KT, VFS_UMOUNT_FORCE);
     bool ok = false, mounted = false;
-    struct blkdev *bd = ramblk_create(4096), *two[2] = { NULL, NULL }, *plain = NULL;
-    uint8_t master[32], wrong[32], master2[32], uuid[16], uuid2[16];
+    struct blkdev *bd = ramblk_create(4096), *two[2] = { NULL, NULL }, *mir[2] = { NULL, NULL }, *plain = NULL;
+    uint8_t master[32], wrong[32], master2[32], master3[32], uuid[16], uuid2[16], uuid3[16];
     struct cosmo_keyslot *slots = kmalloc(sizeof(*slots) * COSMO_KEY_SLOTS, 0);
     struct cosmo_fsctl_keyinfo *info = kmalloc(sizeof(*info), 0);
     uint8_t *save = kmalloc(CFS_BLOCK, 0), *save2 = kmalloc(CFS_BLOCK, 0), *blk = kmalloc(CFS_BLOCK, 0);
@@ -203,6 +205,8 @@ bool selftest_cosmofs_encrypted_root(const char **reason)
     random_get_bytes(master2, sizeof(master2));
     random_get_bytes(uuid, sizeof(uuid));
     random_get_bytes(uuid2, sizeof(uuid2));
+    random_get_bytes(master3, sizeof(master3));
+    random_get_bytes(uuid3, sizeof(uuid3));
     memcpy(wrong, master, sizeof(wrong));
     wrong[7] ^= 0x40;
     for (unsigned i = 0; i < CFS_BLOCK; i++)
@@ -274,6 +278,27 @@ bool selftest_cosmofs_encrypted_root(const char **reason)
     KT_CHECK(vfs_sync() == 0);
     KT_CHECK(kt_read_at(KT "/far", 0, blk, CFS_BLOCK));
     KT_CHECK(kt_read_at(KT "/far", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK));
+#if CONFIG_FAULTINJECT
+    /* The far block rewritten when its mid-level index cannot be copied:
+     * the write-back is -ENOMEM and the retry commits. The failed copy
+     * used to leave the walk holding the block it had released, and its
+     * cleanup released it again (Codex on #447). */
+    {
+        struct file *f;
+        KT_CHECK(vfs_open(NULL, KT "/far", COSMO_O_RDWR, 0, &f) == 0);
+        bool w = file_pwrite(f, blk, CFS_BLOCK, (uint64_t)KT_FAR_LBLK * CFS_BLOCK) == CFS_BLOCK;
+        faultinject_set(FI_COSMOFS_CSUM_COW, 1, 1, thread_current());
+        int first = w ? file_sync(f) : -1;
+        struct fi_stats fst;
+        faultinject_stats(FI_COSMOFS_CSUM_COW, &fst);
+        faultinject_clear(FI_COSMOFS_CSUM_COW);
+        int retry = file_sync(f);
+        file_put(f);
+        kinfo("selftest: cosmofs-encrypted-root: a two-level index's mid block not copied: sync %d (hits %llu), "
+              "retry %d", first, (unsigned long long)fst.hits, retry);
+        KT_CHECK(w && fst.hits == 1 && first == -ENOMEM && retry == 0);
+    }
+#endif
     uint32_t root_kind = 0;
     uint64_t mid = kt_csum_mid(kt_mount(), KT "/far", KT_FAR_LBLK / 127 / CFS_PTRS_PER_BLOCK, &root_kind);
     KT_CHECK(root_kind == CFS_KIND_CSUMIDX2 && mid != 0);
@@ -375,6 +400,37 @@ bool selftest_cosmofs_encrypted_root(const char **reason)
     KT_CHECK(vfs_umount(KT) == 0);
     mounted = false;
 
+    /* A two-level tree on a mirror, its mid block's first copy damaged:
+     * the scrub counts the bad copy and repairs it. It used to read the
+     * block through the cache first, whose read on a writable mirror
+     * repaired the copy unseen (Codex on #447). */
+    mir[0] = ramblk_create(2048);
+    mir[1] = ramblk_create(2048);
+    KT_CHECK(mir[0] != NULL && mir[1] != NULL);
+    KT_CHECK(cosmofs_format_keys(mir, 2, "keytest", uuid3, master3, slots) == 0);
+    KT_CHECK(kt_mount_dev(mir[0]) == 0);
+    mounted = true;
+    KT_CHECK(kt_write_at(KT "/far", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK));
+    KT_CHECK(vfs_sync() == 0);
+    uint64_t mmid = kt_csum_mid(kt_mount(), KT "/far", KT_FAR_LBLK / 127 / CFS_PTRS_PER_BLOCK, &root_kind);
+    KT_CHECK(root_kind == CFS_KIND_CSUMIDX2 && mmid != 0);
+    KT_CHECK(vfs_umount(KT) == 0);
+    mounted = false;
+    KT_CHECK(kt_forge(mir[0], mmid, offsetof(struct cfs_mhdr, crc), true, CFS_MHDR_SIZE + 3, save));
+    KT_CHECK(kt_load(mir[0], master3) == 0);
+    KT_CHECK(kt_mount_dev(mir[0]) == 0);
+    mounted = true;
+    struct cosmofs_scrub_stats sc;
+    KT_CHECK(cosmofs_scrub(kt_mount(), &sc, COSMOFS_SCRUB_REPAIR) == 0);
+    kinfo("selftest: cosmofs-encrypted-root: a mirrored two-level index's mid block, first copy damaged: the scrub "
+          "counted %llu bad, repaired %llu, %llu unrecoverable", (unsigned long long)sc.bad_copies,
+          (unsigned long long)sc.repaired, (unsigned long long)sc.unrecoverable);
+    KT_CHECK(sc.bad_copies == 1 && sc.repaired == 1 && sc.unrecoverable == 0);
+    KT_CHECK(cosmofs_scrub(kt_mount(), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.bad_copies == 0);
+    KT_CHECK(kt_read_at(KT "/far", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK));
+    KT_CHECK(vfs_umount(KT) == 0);
+    mounted = false;
+
 #if CONFIG_DEBUG
     /* The labels: a pool of two members, the second's label forged (the
      * format of two members is a test hook). */
@@ -445,10 +501,19 @@ out:
                 (void)cfs_keytab_unload(s2.uuid);
             ramblk_destroy(two[i]);
         }
+    if (mir[0] != NULL)
+        (void)cfs_keytab_unload(uuid3);
+    for (unsigned i = 0; i < 2; i++)
+        if (mir[i] != NULL)
+            ramblk_destroy(mir[i]);
     if (plain != NULL)
         ramblk_destroy(plain);
+#if CONFIG_FAULTINJECT
+    faultinject_clear(FI_COSMOFS_CSUM_COW);
+#endif
     memset(master, 0, sizeof(master));
     memset(master2, 0, sizeof(master2));
+    memset(master3, 0, sizeof(master3));
     kfree(slots);
     kfree(info);
     kfree(save);
