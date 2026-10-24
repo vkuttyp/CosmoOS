@@ -86,6 +86,9 @@ class Boot:
         self.log_path = os.path.join(workdir, f"boot-{name}.log")
         self.lock = threading.Lock()
         self.prompts_seen = 0
+        # Seconds each command typed may take, when a boot's length is the
+        # sum of its commands rather than a property (per_command below).
+        self.command_budget = None
         env = dict(os.environ)
         env.update(env_extra)
 
@@ -187,9 +190,19 @@ class Boot:
         raise Fail(f"{self.name}: no prompt after {what} before the deadline ({time.monotonic() - self.t0:.0f} s from "
                    f"launch; the last line at {self.last_line_s:.1f} s)")
 
+    def per_command(self, seconds):
+        """From now on each command has `seconds` of its own to answer in,
+        beyond the boot's deadline if it must: for a boot that is a long
+        run of commands, where what the deadline guards against -- one that
+        never answers -- is a property of each command, and the total is
+        the runner's speed times their number (be_test.py's be-space)."""
+        self.command_budget = seconds
+
     def run(self, cmd):
         """Type `cmd`, wait for the next prompt, return what it printed."""
         cmd = encrypted_cmd(cmd)
+        if self.command_budget is not None:
+            self.deadline = max(self.deadline, time.monotonic() + self.command_budget)
         before = len(self.text())
         self.proc.stdin.write(cmd.encode() + b"\n")
         self.proc.stdin.flush()
@@ -206,6 +219,8 @@ class Boot:
 
     def finish(self, cmd="exit"):
         """Type `cmd` (ending init), wait for QEMU to exit, return its code."""
+        if self.command_budget is not None:
+            self.deadline = max(self.deadline, time.monotonic() + self.command_budget)
         self.proc.stdin.write(cmd.encode() + b"\n")
         self.proc.stdin.flush()
         try:

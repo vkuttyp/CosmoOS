@@ -197,11 +197,24 @@ def fill_root(b):
     raise Fail("the root did not fill")
 
 
+# be-space's commands each answer in this or fail as stuck. The boot is
+# about forty commands, twenty-two of them `cosmo-snap list`, which walks
+# every snapshot's tree under the mount's lock: 2.7-5.4 s each locally,
+# 6.2-6.5 s on a CI x86-64 runner, so the boot took 187 s there (run
+# 40123417299) and about 1.35 times that on the runners where it twice
+# missed the per-boot deadline at its last list (docs/testing/flakes.md,
+# "be-space ... 2026-10-24"). Restated, not widened: the deadline stood
+# for "nothing hangs", which is a property of each command, so each has
+# its own -- ten times the slowest one seen on CI.
+BE_SPACE_COMMAND_S = 65.0
+
+
 def stage_space(args, port, results):
     """space: the upgrade refused on a full root, nothing written. With
     --only space it runs straight after the install, the root holding no
     environment yet; the refusals it checks are the same."""
     b = boot("be-space", args)
+    b.per_command(BE_SPACE_COMMAND_S)
     try:
         # The ESP once the firmware is done with it: x86 firmware with no
         # variable store writes \\NvVars there at every boot
