@@ -153,6 +153,19 @@ only those.** Order is the build's dependency order
 Check: boot test marker (`module: loaded hello 1.0`), test
 `module-reject` (`cosmotest` is not live when the self-tests start).
 
+**M27. A module whose `shutdown` ends everything its `init` started can
+be loaded and unloaded any number of times and leaves nothing behind.**
+After the first cycle and after the last, the module count, kmalloc's
+live objects, the VM's regions and its anonymous pages are equal, and
+every load and unload returns 0 (no zombie). Lockdep's class count is
+not part of the claim (backlog LOCK-10). An object a module makes during
+its own `init` is not counted against it (backlog MOD-1), so a module
+that hands one out can pass a cycle run while it leaks. Check:
+self-test `module-cycle` (200 cycles of `cosmotest`; a leak while the
+module is live fails it, and an object kept past `shutdown` makes the
+unload `-EBUSY`, a zombie the next load sweeps); `module.cycle=` on the
+command line for any module in the boot archive.
+
 ## Format
 
 **M25. `struct cosmo_module_info` is 240 bytes and `struct

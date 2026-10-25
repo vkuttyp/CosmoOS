@@ -313,6 +313,36 @@ CFS-14 (deduplication).
 (snapshots, mirrors, checker, encryption, the upgrade's switch), all
 testable under QEMU in CI.
 
+## Requested by Nova
+
+Units asked for by the Nova language project's CosmoOS integration
+(its milestones C1-C9 build programs and kernel modules for this tree
+out of tree), each scheduled by the owner like any other.
+
+### N1 Load and unload in cycles
+
+Chosen 2026-10-25. Nova's C8 builds a kernel module whose state,
+`init` and `shutdown` come from Nova, and its acceptance needs a module
+loaded and unloaded at least 1,000 times through this tree's loader. No
+door exists: `module_load` and `module_unload` are not exported, no
+system call reaches them, and `module_load_boot` loads once per boot.
+So a debug-build hook, with the loader still unexported:
+`module.cycle=<archive entry>:<count>[:<hold ms>]` on the kernel command
+line has the kernel load and unload that boot-archive module `<count>`
+times right after the boot modules, compare the module count, kmalloc's
+live objects, the VM's regions and anonymous pages after the first cycle
+and after the last, and log one PASS or FAIL line (invariant M27).
+Nova's report also found two defects, MOD-1 (an object made during a
+module's `init` belongs to no module) and LOCK-10 (lockdep keeps a class
+per callback address); both are in the backlog, not in N1.
+
+- [ ] **Acceptance:** `make test-modcycle` (CI, both architectures):
+  `cosmotest` loaded and unloaded 1,000 times at boot, PASS; the
+  self-test `module-cycle` in every debug boot: 200 cycles leave every
+  count as it was, and its two controls fail the run (an allocation
+  leaked while the module is live; an object kept past `shutdown`, which
+  makes a zombie the next load sweeps).
+
 ## C. Platform depth (deferred)
 
 Not chosen for 1.2 (2026-10-20); kept as written for a later roadmap.
