@@ -9,6 +9,7 @@
 #   make test-platforms  AArch64: boots where QEMU differs from virt's defaults; the platform line (CI: BUILD=release)
 #   make test-guard   the same boot test on a CPU model with SMEP/SMAP/UMIP (x86-64) or PAN (AArch64)
 #   make test-smp2    the same boot test with two CPUs (the default is four)
+#   make test-modcycle the debug boot test with module.cycle=: cosmotest loaded and unloaded 1000 times
 #   make test-install roadmap M2: install to a blank disk, boot it, persist a file (CI: BUILD=release)
 #   make test-encrypt roadmap 1.2 B5: an encrypted root -- passphrase, slots, key file, 1 GiB, forged metadata (CI: BUILD=release)
 #   make test-encrypt-b1b4 test-encrypt's last stage alone: B1-B4's tests on an encrypted root
@@ -49,7 +50,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -260,6 +261,16 @@ endif
 	$(Q)QEMU_HWRNG=0 QEMU_CPU='$(NORNG_CPU)' BOOT_FW_SEED=0 BOOT_JITTER=0 $(MAKE) --no-print-directory -C $(ROOT) \
 		ARCH=$(ARCH) BUILD=$(BUILD) CMDLINE='$(CMDLINE) random.firmware=off random.jitter=off' \
 		BOOT_LOG=$(OUT)/boot-test-devrng.log test
+
+# Load and unload in cycles (docs/kernel/module/design.md, invariant
+# M27): the debug boot test with module.cycle= on the command line, so the
+# kernel loads and unloads cosmotest MODCYCLE_COUNT times right after the
+# boot modules; the harness requires the hook's PASS line for that entry
+# and count. Debug builds only (the hook is a test seam).
+MODCYCLE_COUNT ?= 1000
+test-modcycle:
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
+		CMDLINE='$(CMDLINE) module.cycle=tests/cosmotest.ko:$(MODCYCLE_COUNT)' BOOT_LOG=$(OUT)/boot-test-modcycle.log test
 
 # Roadmap M2's acceptance test (tests/boot/install_test.py,
 # docs/userland/testing.md): the live image installs itself on a blank
