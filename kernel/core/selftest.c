@@ -661,6 +661,7 @@ static const struct selftest tests[] = {
     { "wb-error-once",   selftest_wb_error_once },
     { "wb-error-close",  selftest_wb_error_close },
     { "wb-error-lost",   selftest_wb_error_lost },
+    { "pagecache-dirty-bound", selftest_pagecache_dirty_bound },
     { "read-bench",      selftest_read_bench },
     { "write-bench",     selftest_write_bench },
     { "vfs-concurrency", selftest_vfs_concurrency },

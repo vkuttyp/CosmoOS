@@ -728,16 +728,20 @@ static unsigned pick_member(const struct cfs *fs)
 }
 
 /* First fit from `hint` (or the running hint), taking up to `want`
- * consecutive free blocks. Data allocations stop at the reserve so
+ * consecutive free blocks. Data allocations stop at half the reserve so
  * deletion and commit always have metadata blocks (design.md,
- * "Allocation: contiguity and the metadata reserve"). A run never
+ * "Allocation: contiguity and the metadata reserve"). The whole reserve
+ * is kept at the write, where a dirty page is charged (cfs_dirty_check,
+ * CF34); the metadata a transaction takes after that charge comes from
+ * the same free blocks, so the write-back of a page charged may find
+ * them under the reserve, and takes from its upper half. A run never
  * crosses a member: an extent's `count` counts blocks on one device
  * (design.md, "One bitmap, many members"). */
 int cfs_alloc_run(struct cfs *fs, enum cfs_alloc_class cls, uint64_t hint, uint32_t want, uint64_t *start,
                   uint64_t *got)
 {
-    uint64_t usable = cls == CFS_ALLOC_DATA ? (fs->free_blocks > fs->reserve ? fs->free_blocks - fs->reserve : 0)
-                                            : fs->free_blocks;
+    uint64_t floor = cls == CFS_ALLOC_DATA ? fs->reserve / 2 : 0;
+    uint64_t usable = fs->free_blocks > floor ? fs->free_blocks - floor : 0;
     if (usable == 0)
         return -ENOSPC;
     if (want == 0)

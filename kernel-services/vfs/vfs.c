@@ -2496,7 +2496,25 @@ int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
     return n;
 }
 
+/*
+ * The dirty bound (MEM-9): a writer to a cached file sleeps here, if it
+ * must, before it takes the open file's lock or the vnode's. file_sync
+ * cleans pages holding the open file's lock, so a writer asleep under it
+ * would wait for what that lock holds up (pagecache_throttle).
+ */
+void file_throttle(struct file *f)
+{
+    if (f->vn->type == VNODE_REG && !vnode_is_stream(f->vn))
+        pagecache_throttle(f->vn);
+}
+
 int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
+{
+    file_throttle(f);
+    return file_pwrite_held(f, buf, len, off);
+}
+
+int64_t file_pwrite_held(struct file *f, const void *buf, size_t len, uint64_t off)
 {
     struct vnode *vn = f->vn;
     if ((file_flags(f) & COSMO_O_ACCMODE) == COSMO_O_RDONLY)
@@ -2528,6 +2546,14 @@ int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
         return -ETXTBSY;
     }
     int64_t n = pagecache_write(vn, off, buf, len);
+    if (n == -ENOSPC && vn->ops->sync) {
+        /* The filesystem charges a dirty page for the block it will
+         * take (MEM-9); blocks the open transaction has replaced are free
+         * only once it commits. Commit, as file_sync does, and ask once
+         * more before the writer is told. */
+        if (pagecache_sync(vn) == 0 && vn->ops->sync(vn) == 0)
+            n = pagecache_write(vn, off, buf, len);
+    }
     if (n > 0)
         vn->mtime_ns = vfs_now_ns();   /* vnode state, so it stays inside */
     mutex_unlock(&vn->lock);
@@ -2550,11 +2576,12 @@ int64_t file_write(struct file *f, const void *buf, size_t len)
 {
     if (vnode_is_stream(f->vn))
         return file_pwrite(f, buf, len, 0);
+    file_throttle(f);
     mutex_lock(&f->lock);
     uint64_t off = f->pos;
     if (file_flags(f) & COSMO_O_APPEND)
         off = f->vn->size;
-    int64_t n = file_pwrite(f, buf, len, off);
+    int64_t n = file_pwrite_held(f, buf, len, off);
     if (n > 0)
         f->pos = off + (uint64_t)n;
     mutex_unlock(&f->lock);
@@ -3190,6 +3217,7 @@ void vfs_init(void)
     struct pmm_stats pst;
     pmm_get_stats(&pst);
     pagecache_set_limit(pst.total_pages / 4);
+    pagecache_dirty_init();
 }
 
 int vfs_mount_internal(const char *fsname, struct mount **out)

@@ -324,6 +324,7 @@ bool selftest_wb_error_fsync(const char **reason);  /* a refused write-back: fsy
 bool selftest_wb_error_once(const char **reason);   /* two files hear the failure once each; a later open never */
 bool selftest_wb_error_close(const char **reason);  /* close says -EIO and closes; the release's retry keeps the data */
 bool selftest_wb_error_lost(const char **reason);   /* three refusals: the page is lost, counted, said; the mount lives */
+bool selftest_pagecache_dirty_bound(const char **reason);   /* MEM-9: dirty pages bounded, the writer asleep holding nothing */
 bool selftest_read_bench(const char **reason);      /* prints: the object path at 1/4/64 KiB requests, ramfs and cosmofs */
 bool selftest_write_bench(const char **reason);     /* prints: the same for writes on ramfs */
 bool selftest_pagecache(const char **reason);

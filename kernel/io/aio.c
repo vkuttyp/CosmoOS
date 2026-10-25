@@ -184,6 +184,8 @@ static int64_t run(struct aio_req *q)
          * path (VFS invariant V32), so the serialisation is taken here,
          * where it belongs: per open file rather than per vnode, so two
          * rings on one handle order and two handles on one device do not. */
+        if (e->op == COSMO_AIO_PWRITE)
+            file_throttle(f);   /* before f->lock (MEM-9) */
         mutex_lock(&f->lock);
         while (done < len) {
             size_t n = len - done < sizeof(tmp) ? len - done : sizeof(tmp);
@@ -192,7 +194,7 @@ static int64_t run(struct aio_req *q)
                     rc = -EFAULT;
                     break;
                 }
-                rc = file_pwrite(f, tmp, n, e->offset + done);
+                rc = file_pwrite_held(f, tmp, n, e->offset + done);
             } else {
                 rc = file_pread(f, tmp, n, e->offset + done);
                 if (rc > 0 && copy_to_user(e->addr + done, tmp, (size_t)rc))

@@ -12,10 +12,12 @@
 #include <kernel/page.h>
 #include <kernel/pagecache.h>
 #include <kernel/pmm.h>
+#include <kernel/sched.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
+#include <kernel/wait.h>
 
 static struct pagecache_stats g_stats;
 static spinlock_t g_stats_lock = SPINLOCK_INIT("pagecache-stats");
@@ -30,6 +32,59 @@ static uint64_t g_limit_pages;   /* 0: no limit */
 static bool entry_reclaimable(const struct pc_entry *e)
 {
     return !(e->vn->mnt->flags & MOUNT_CACHE_IS_STORE);
+}
+
+/*
+ * Dirty pages, bounded (MEM-9; design.md, "Dirty pages, bounded"). Every
+ * dirty page of a reclaimable mount is counted here as well as in its
+ * cache and its mount; a writer that finds the count at the bound writes
+ * its own file back and then sleeps, holding nothing, until pages are
+ * cleaned below it (pagecache_throttle). The bound is
+ * PAGECACHE_DIRTY_DIVISOR's share of the cache limit: half of it, an
+ * eighth of RAM. A ramfs page is its store and cannot be cleaned, so it
+ * is not counted.
+ */
+#define PAGECACHE_DIRTY_DIVISOR 2u
+#define PAGECACHE_THROTTLE_NS   (100ull * 1000000ull)   /* one sleep, then the count is looked at again */
+#define PAGECACHE_THROTTLE_WAITS 50u                    /* at most 5 s behind other files' dirty pages */
+
+static uint64_t g_dirty;          /* dirty pages of reclaimable mounts */
+static unsigned g_throttled;      /* writers asleep in pagecache_throttle */
+static struct waitqueue g_dirty_wq;
+static uint16_t g_dirty_class;    /* the sleep's lockdep completion class */
+static bool g_dirty_ready;
+
+static uint64_t dirty_limit(void)
+{
+    return pagecache_limit() / PAGECACHE_DIRTY_DIVISOR;
+}
+
+static bool dirty_over(void)
+{
+    uint64_t limit = dirty_limit();
+    return limit != 0 && __atomic_load_n(&g_dirty, __ATOMIC_RELAXED) >= limit;
+}
+
+static void dirty_inc(const struct pc_entry *e)
+{
+    __atomic_fetch_add(&e->vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+    if (entry_reclaimable(e))
+        __atomic_fetch_add(&g_dirty, 1u, __ATOMIC_RELAXED);
+}
+
+/* A page cleaned or dropped, under its cache's lock: a writer asleep
+ * behind the bound is woken once the count is under it. */
+static void dirty_dec(const struct pc_entry *e)
+{
+    __atomic_fetch_sub(&e->vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+    if (!entry_reclaimable(e))
+        return;
+    __atomic_fetch_sub(&g_dirty, 1u, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&g_throttled, __ATOMIC_ACQUIRE) != 0 && !dirty_over()) {
+        lockdep_completion_signal(&g_dirty_wq, &g_dirty_class, "pagecache-dirty",
+                                  (uintptr_t)__builtin_return_address(0));
+        waitqueue_wake_all(&g_dirty_wq);
+    }
 }
 
 /* Both take the LRU lock; the caller holds the owning cache's mutex. */
@@ -263,7 +318,7 @@ static void remove_entry(struct pagecache *pc, struct pc_entry *e)
     lru_remove(e);
     if (e->dirty) {
         pc->nr_dirty--;
-        __atomic_fetch_sub(&e->vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+        dirty_dec(e);
     }
     pc->nr_pages--;
     __atomic_fetch_sub(&e->vn->mnt->cache_pages, 1u, __ATOMIC_RELAXED);
@@ -339,7 +394,7 @@ static void mark_dirty(struct pagecache *pc, struct pc_entry *e)
     if (!e->dirty) {
         e->dirty = true;
         pc->nr_dirty++;
-        __atomic_fetch_add(&e->vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+        dirty_inc(e);
         lru_remove(e);
     }
 }
@@ -401,7 +456,7 @@ int64_t pagecache_write(struct vnode *vn, uint64_t off, const void *buf, size_t 
          * worst it can cost): write them once and ask again. The writer
          * holds the vnode lock, the order pagecache_sync runs in. */
         err = may_dirty(vn, e);
-        if (err == -EFBIG && vn->pc.nr_dirty != 0 && !flushed) {
+        if ((err == -EFBIG || err == -ENOSPC) && vn->pc.nr_dirty != 0 && !flushed) {
             lockdep_assert_held(&vn->lock, LOCKDEP_KIND_MUTEX);
             mutex_unlock(&vn->pc.lock);
             err = pagecache_sync(vn);
@@ -492,7 +547,7 @@ int pagecache_sync(struct vnode *vn)
                 for (unsigned i = 0; i < done; i++) {
                     run[i]->dirty = false;
                     pc->nr_dirty--;
-                    __atomic_fetch_sub(&vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+                    dirty_dec(run[i]);
                     stat_add(&g_stats.writebacks, 1);
                     lru_add(run[i]);   /* clean again: reclaimable */
                 }
@@ -511,6 +566,47 @@ int pagecache_sync(struct vnode *vn)
     }
     mutex_unlock(&pc->lock);
     return rc;
+}
+
+void pagecache_dirty_init(void)
+{
+    waitqueue_init(&g_dirty_wq, "pagecache-dirty");
+    lockdep_completion_init(&g_dirty_class, "pagecache-dirty", (uintptr_t)__builtin_return_address(0));
+    __atomic_store_n(&g_dirty_ready, true, __ATOMIC_RELEASE);
+}
+
+/*
+ * Before a write takes the vnode lock, and with no lock of the caller's
+ * that write-back takes: at the bound, the writer writes back its own
+ * file (under the vnode lock, as file_sync does), and while the count is
+ * still at the bound it sleeps until a page cleaned anywhere brings it
+ * under, or a while passes. Its own pages are what it can always clean;
+ * the others are a write-back thread's (cosmofs's commits when a mount's
+ * dirty pages pass CFS_WB_DIRTY_PAGES), so the sleep is bounded for a
+ * mount that has none. Returns at once under the bound: one load.
+ */
+void pagecache_throttle(struct vnode *vn)
+{
+    if (!dirty_over() || !__atomic_load_n(&g_dirty_ready, __ATOMIC_ACQUIRE))
+        return;
+    if (vn->type == VNODE_REG && vn->pc.nr_dirty != 0) {
+        mutex_lock(&vn->lock);
+        (void)pagecache_sync(vn);   /* a failure is the file's, reported by its next sync */
+        mutex_unlock(&vn->lock);
+    }
+    for (unsigned i = 0; i < PAGECACHE_THROTTLE_WAITS && dirty_over(); i++) {
+        __atomic_fetch_add(&g_throttled, 1u, __ATOMIC_ACQ_REL);
+        lockdep_completion_wait(&g_dirty_wq, &g_dirty_class, "pagecache-dirty",
+                                (uintptr_t)__builtin_return_address(0));
+        (void)wait_event_timeout(&g_dirty_wq, !dirty_over(), PAGECACHE_THROTTLE_NS);
+        __atomic_fetch_sub(&g_throttled, 1u, __ATOMIC_ACQ_REL);
+        stat_add(&g_stats.throttled, 1);
+    }
+}
+
+uint64_t pagecache_dirty_pages(void)
+{
+    return __atomic_load_n(&g_dirty, __ATOMIC_RELAXED);
 }
 
 bool pagecache_error_since(struct pagecache *pc, uint32_t seen, int *err, uint32_t *now)
@@ -577,7 +673,7 @@ unsigned pagecache_drop(struct vnode *vn, bool count_lost)
             lru_remove(e);
             if (e->dirty) {
                 pc->nr_dirty--;
-                __atomic_fetch_sub(&vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+                dirty_dec(e);
                 lost++;
             }
             pc->nr_pages--;

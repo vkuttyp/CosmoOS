@@ -192,9 +192,10 @@ interval and nothing commits when nothing is dirty), `cosmofs-format`
 one). The tests that count generations turn the thread off
 (`cosmofs_test_set_writeback`).
 
-**V19. A full disk can still delete and commit.** File data is allocated
-from the data class, refused at or below the reserve (`max(32,
-nblocks / 32)` blocks); metadata, directory blocks and the commit's
+**V19. A full disk can still delete and commit.** A file's page is charged
+at the write against the blocks free above the reserve (`max(32,
+nblocks / 32)` blocks; cosmofs CF34), and its write-back allocates from
+the data class, refused at or below half the reserve; metadata, directory blocks and the commit's
 bitmap chunks come from the metadata class and may use it. Check:
 `cosmofs-reserve` (a 256-block device filled to `-ENOSPC` keeps its 32
 reserve blocks; two unlinks and a commit return the space and a new file
@@ -706,4 +707,23 @@ fault holds only the cache lock, and its refusal is the fault's error (a
 whole into the cache, every write-back of it failed, and the pages were
 dropped with the vnode while its size still counted them (CFS-32).
 **Checked by** `cosmofs-extent-bound` (CF33).
+
+**V40. Dirty pages of reclaimable mounts stay under an eighth of RAM, and
+a writer waits for that with no lock held.** `pagecache_dirty_pages()`
+counts them (`mark_dirty` and every place a dirty page is cleaned or
+dropped); `pagecache_throttle`, called by `file_write`, `aio`'s write and
+`file_pwrite` before the open file's lock and the vnode's, writes the
+writer's own file back and then sleeps on `pagecache-dirty` until the
+count is under `pagecache_limit() / 2` (bounded at 5 s). The sleep is a
+lockdep completion class, so a wait under a lock its wakers hold is a
+reported cycle. Shared-mapping write faults are not throttled.
+**Checked by** `pagecache-dirty-writer` (the failing test: write-back
+off and the cache limit lowered to 256 pages, one writer of 1024 pages
+has at most the bound and one write's pages dirty on its mount; main
+had all 1024), `pagecache-dirty-bound` (the cache limit lowered to 256
+pages: 2048 pages written with at most the bound dirty, and a writer
+behind another file's dirty pages asleep until their sync wakes it, the
+wait and the wake seen by lockdep) and `test-fill`
+(`tests/boot/fill_test.py`, stage `writer`: 512 MiB written with no sync
+on a 256 MiB guest, nothing killed).
 

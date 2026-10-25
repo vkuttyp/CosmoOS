@@ -2662,6 +2662,32 @@ int cosmofs_test_runs(struct vnode *vn, unsigned *n)
 #endif
 }
 
+/*
+ * The pool's space, charged at the write as the run bound is (MEM-9;
+ * design.md, "Space, charged at the write"). A dirty page is written
+ * back copy-on-write into a new block, so each dirty page of the mount
+ * is a data block it will take: a page may become dirty while the data
+ * blocks free above the metadata reserve cover every dirty page of the
+ * mount, this one and CFS_DIRTY_META's allowance, and is refused -ENOSPC
+ * otherwise. The checksum and map blocks a write-back adds are metadata,
+ * which may take the reserve; the allowance is for writers who read the
+ * count at once (one page each) and a margin that grows with the pages.
+ * The charge is the dirty page itself: write-back takes the block it
+ * stood for, and a truncate or a drop gives it back. A compressed record
+ * takes fewer than its pages, so the charge is never short. Read without
+ * the lock: two writers may each take the last page, which the allowance
+ * covers.
+ */
+#define CFS_DIRTY_META(pages) ((pages) / 512u + 4u)
+
+static bool space_fits(struct cfs *fs, struct vnode *vn)
+{
+    uint64_t free = __atomic_load_n(&fs->free_blocks, __ATOMIC_RELAXED);
+    uint64_t usable = free > fs->reserve ? free - fs->reserve : 0;
+    uint64_t pages = (uint64_t)__atomic_load_n(&vn->mnt->cache_dirty, __ATOMIC_RELAXED) + 1;
+    return pages + CFS_DIRTY_META(pages) <= usable;
+}
+
 /* The VFS `dirty_check` operation. */
 static int cfs_dirty_check(struct vnode *vn, uint64_t index, unsigned dirty)
 {
@@ -2676,7 +2702,11 @@ static int cfs_dirty_check(struct vnode *vn, uint64_t index, unsigned dirty)
     int rc = inode_runs(fs, vn, &runs);
     if (rc)
         return rc;
-    return runs_fit(fs, runs, dirty + 1) ? 0 : -EFBIG;
+    if (!runs_fit(fs, runs, dirty + 1))
+        return -EFBIG;
+    /* A directory's blocks come from the metadata class, the reserve
+     * included, so a deletion on a full pool still has one to write. */
+    return vn->type != VNODE_REG || space_fits(fs, vn) ? 0 : -ENOSPC;
 }
 
 static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
