@@ -162,6 +162,14 @@ unsigned module_load_boot(void);
 unsigned module_count(void);
 void module_dump(void);
 
+/* Debug builds: with module.cycle=<archive entry>:<count>[:<hold ms>] on
+ * the command line, load and unload that boot-archive entry <count> times
+ * through module_load/module_unload and log one modcycle: line
+ * (kernel/module/modcycle.c, invariant M27). Returns 1 when it was asked
+ * for and failed (counted into the boot verdict, as module_load_boot's
+ * failures are), else 0. Release builds: 0, nothing read. */
+unsigned module_cycle_boot(void);
+
 #endif /* !COSMO_MODULE_BUILD */
 
 #if CONFIG_DEBUG
@@ -174,6 +182,42 @@ void module_set_max_live_for_test(unsigned n);
  * satisfied by a sweep on some other exit, so it cannot tell the two
  * apart (invariant M24). */
 unsigned module_zombie_count(void);
+
+#ifndef COSMO_MODULE_BUILD
+/* Load and unload in cycles (invariant M27; kernel/module/modcycle.c),
+ * the kernel's own: not visible to a module. */
+#define MODULE_CYCLE_MAX         1000000u
+#define MODULE_CYCLE_HOLD_MAX_MS 60000u
+/* What a cycle run compares: machine-wide counts, taken after the first
+ * cycle and after the last. */
+struct module_cycle_count {
+    unsigned modules;
+    uint64_t heap_objects;   /* kmalloc's live objects */
+    uint64_t vm_regions;
+    uint64_t anon_pages;
+    unsigned lock_classes;   /* reported, not judged (backlog LOCK-10) */
+};
+struct module_cycle_result {
+    unsigned cycles;         /* loads that succeeded, each followed by an unload */
+    unsigned load_failures;
+    unsigned unload_failures;   /* -EBUSY: a zombie */
+    int first_error;
+    struct module_cycle_count before, after;
+};
+/* Called while the module is live, between its load and its unload
+ * (a self-test's controls leak through it). */
+typedef void (*module_cycle_live_fn)(struct module *m, unsigned cycle, void *arg);
+/* `count` loads of `file`, each unloaded at once (or after `hold_ms`).
+ * True when every load and unload returned 0 and the module count,
+ * kmalloc's live objects, the VM's regions and anonymous pages after the
+ * last cycle equal their values after the first. Sleeps; takes g_lock
+ * per call, so not from a module's init or shutdown (M18). */
+bool module_cycle(const void *file, size_t size, const char *origin, unsigned count, unsigned hold_ms,
+                  module_cycle_live_fn live, void *arg, struct module_cycle_result *out);
+/* "<entry>:<count>[:<hold ms>]", split in place (the entry is `spec`
+ * NUL-terminated); false when malformed or out of range. */
+bool module_cycle_parse(char *spec, unsigned *count, unsigned *hold_ms);
+#endif /* !COSMO_MODULE_BUILD */
 #endif
 
 #endif /* KERNEL_MODULE_H */

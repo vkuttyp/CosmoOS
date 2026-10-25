@@ -537,6 +537,7 @@ bool selftest_module_zombie_swept_on_every_exit(const char **reason);
 bool selftest_module_zombie_name_reused(const char **reason);
 bool selftest_module_zombie_two_of_a_name(const char **reason);
 bool selftest_module_slots_enospc(const char **reason);
+bool selftest_module_cycle(const char **reason);
 bool selftest_hv_probe(const char **reason);
 bool selftest_hv_vcpu_regs_roundtrip(const char **reason);
 bool selftest_hv_caps(const char **reason);

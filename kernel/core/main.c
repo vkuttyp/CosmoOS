@@ -274,6 +274,9 @@ void kernel_main(const struct cosmoboot_info *info)
     /* Boot-time kernel modules from the archive, before the self-tests
      * (which load and unload their own fixtures) and before init. */
     int failed = (int)module_load_boot();
+    /* Debug builds: module.cycle= loads and unloads one of them in
+     * cycles, before anything else runs (kernel/module/modcycle.c). */
+    failed += (int)module_cycle_boot();
     /* The disk drivers are in: partitions, then what root= names
      * (kernel/core/bootfs.c). */
     bootfs_disks_ready();

@@ -760,3 +760,108 @@ bool selftest_module_unload_busy(const char **reason)
     CHECK(module_unload("cosmotest") == 0);
     return true;
 }
+
+/* --- module-cycle: load and unload in cycles (invariant M27) -------------- */
+
+#if CONFIG_DEBUG
+#define CYCLE_COUNT 200u
+
+/* The first control: an allocation made while the module is live, from
+ * the second cycle on, that nobody frees. */
+struct cycle_leak {
+    void *ptr[4];
+    unsigned n;
+};
+
+static void cycle_leak_one(struct module *m, unsigned cycle, void *arg)
+{
+    (void)m;
+    struct cycle_leak *l = arg;
+    if (cycle >= 1 && l->n < ARRAY_SIZE(l->ptr))
+        l->ptr[l->n++] = kmalloc(64, 0);
+}
+
+/* The second control: in the second cycle, an object whose release is
+ * the module's code is taken and kept, so that unload must leave a
+ * zombie. */
+static void cycle_hold_object(struct module *m, unsigned cycle, void *arg)
+{
+    (void)m;
+    if (cycle != 1)
+        return;
+    struct kobject *(*take)(void) = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_object_take", NULL);
+    *(struct kobject **)arg = take != NULL ? take() : NULL;
+}
+#endif
+
+bool selftest_module_cycle(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: module-cycle: module_cycle is a debug-build seam; skipping");
+    return true;
+#else
+    size_t size;
+    const void *file = fixture("tests/cosmotest.ko", &size);
+    if (file == NULL) {
+        kinfo("selftest: module fixture missing from the boot archive; skipping");
+        return true;
+    }
+    struct module_cycle_result r;
+
+    /* THE CLAIM: a module whose shutdown ends what its init started can be
+     * loaded and unloaded any number of times and leaves nothing. */
+    CHECK(module_cycle(file, size, "tests/cosmotest.ko", CYCLE_COUNT, 0, NULL, NULL, &r));
+    CHECK(r.cycles == CYCLE_COUNT && r.load_failures == 0 && r.unload_failures == 0);
+    CHECK(module_find("cosmotest") == NULL);
+    kinfo("selftest: module-cycle: %u cycles: modules %u -> %u, kmalloc live %llu -> %llu, vm regions %llu -> %llu, "
+          "anon pages %llu -> %llu, lockdep classes %u -> %u",
+          r.cycles, r.before.modules, r.after.modules, (unsigned long long)r.before.heap_objects,
+          (unsigned long long)r.after.heap_objects, (unsigned long long)r.before.vm_regions,
+          (unsigned long long)r.after.vm_regions, (unsigned long long)r.before.anon_pages,
+          (unsigned long long)r.after.anon_pages, r.before.lock_classes, r.after.lock_classes);
+
+    /* Control 1: a leak while the module is live is seen. Two cycles
+     * after the baseline leak one allocation each. */
+    struct cycle_leak leak = { .n = 0 };
+    bool ok = module_cycle(file, size, "tests/cosmotest.ko", 3, 0, cycle_leak_one, &leak, &r);
+    for (unsigned i = 0; i < leak.n; i++)
+        kfree(leak.ptr[i]);
+    CHECK(!ok);
+    CHECK(leak.n == 2 && r.load_failures == 0 && r.unload_failures == 0);
+    CHECK(r.after.heap_objects == r.before.heap_objects + 2);
+
+    /* Control 2: an object that outlives shutdown makes a zombie, and the
+     * run says so. The unload's wait is shortened around the one call. */
+    struct kobject *held = NULL;
+    module_set_unload_timeout_ms(50);
+    ok = module_cycle(file, size, "tests/cosmotest.ko", 3, 0, cycle_hold_object, &held, &r);
+    module_set_unload_timeout_ms(MODULE_UNLOAD_TIMEOUT_MS_DEFAULT);
+    CHECK(held != NULL);
+    CHECK(!ok);
+    CHECK(r.cycles == 3 && r.load_failures == 0 && r.unload_failures == 1 && r.first_error == -EBUSY);
+    CHECK(module_zombie_count() == 1);
+    kobject_put(held);   /* its release runs from the zombie's text */
+    /* The next load sweeps it (M24). */
+    struct module *m = NULL;
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    CHECK(module_zombie_count() == 0);
+    CHECK(module_unload("cosmotest") == 0);
+
+    /* The command line's parser. */
+    unsigned count, hold;
+    char spec[64];
+    strlcpy(spec, "tests/x.ko:1000", sizeof(spec));
+    CHECK(module_cycle_parse(spec, &count, &hold) && strcmp(spec, "tests/x.ko") == 0 && count == 1000 && hold == 0);
+    strlcpy(spec, "tests/x.ko:3:100", sizeof(spec));
+    CHECK(module_cycle_parse(spec, &count, &hold) && count == 3 && hold == 100);
+    static const char *const bad[] = { "tests/x.ko", "tests/x.ko:", "tests/x.ko:0", ":5", "tests/x.ko:5:",
+                                       "tests/x.ko:5:1:2", "tests/x.ko:1000001", "tests/x.ko:5:60001",
+                                       "tests/x.ko:-1", "tests/x.ko:99999999999999999999" };
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        strlcpy(spec, bad[i], sizeof(spec));
+        CHECK(!module_cycle_parse(spec, &count, &hold));
+    }
+    return true;
+#endif
+}
