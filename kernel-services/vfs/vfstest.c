@@ -2567,10 +2567,10 @@ bool selftest_file_read_filled(const char **reason)
  * cache limit is lowered to DW_LIMIT pages; the bound V40 states is half
  * of it. One writer of eight times the bound may never have more than
  * the bound and one write's pages dirty on its mount. Without a bound
- * the mount's count is every page written (1024 here); a fault-killed
- * writer on a 256 MiB guest (test-fill's writer stage on 75e1e15f) was
- * that count meeting memory, which a fast enough write-back thread can
- * hide.
+ * the mount's count is every page written (1024 here); test-fill's
+ * writer stage on 75e1e15f, a 256 MiB guest, was that count meeting
+ * memory (`sh: cat: Out of memory`, 219 MiB of the 512 written), which a
+ * fast enough write-back thread can hide.
  */
 #define DW_LIMIT 256u
 #define DW_WRITES 64u   /* of 64 KiB: 1024 pages */
