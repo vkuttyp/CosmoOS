@@ -16,7 +16,9 @@ data pool, then the root filled by one dd with no sync.
   fixed  pagecache-dirty-writer ok, at most the bound dirty; test-fill
          passes: dd ends ENOSPC, no write-back fails, no page is lost,
          spawns work after it.
-  --old  the fix commit reverse-applied whole in a throwaway worktree:
+  --old  the fix commit reverse-applied whole in a throwaway worktree
+         (after the AIO fix and its failing test, which rewrote the code
+         it changed in aio.c, also reverted whole, newest first):
          pagecache-dirty-writer fails with every page written dirty; the
          fill's writes are taken, its commits fail -ENOSPC, and test-fill
          fails on `writeback commit failed (-28)` or `dirty page(s) ...
@@ -39,6 +41,11 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SUBJECT = ("vfs, cosmofs: dirty pages bounded at an eighth of RAM with the writer asleep holding nothing; "
            "ENOSPC charged at the write (MEM-9)")
+# Reverted first, newest first: they rewrite the PWRITE loop the fix
+# changed (tools/mem9-aio-probe.py is theirs).
+LATER = ("aio: an AIO PWRITE asks about the dirty bound every 64 KiB and lets f->lock go to be throttled (MEM-9)",
+         "aio, vfs: aio-pwrite-dirty, one AIO PWRITE past the dirty bound, throttled only before its loop "
+         "(MEM-9, failing)")
 LOSS = ("writeback commit failed (-28)", "dirty page(s) of inode")
 
 
@@ -61,24 +68,28 @@ def main():
                    stdout=subprocess.DEVNULL)
     try:
         if a.old:
-            sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={SUBJECT}", a.tree],
-                text=True).strip()
+            def find(subject):
+                return subprocess.check_output(
+                    ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={subject}",
+                     a.tree], text=True).strip()
+            shas = [x for x in (find(s) for s in LATER) if x]
+            sha = a.fix or find(SUBJECT)
             if not sha:
                 sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}; name it with --fix")
-            # The whole commit, not chosen hunks.
-            # Three-way, so later commits beside its hunks do not stop it. A
-            # conflict only in docs/ (later sections beside the fix's) keeps
-            # the tree's text, since no document reaches the build; one in
-            # code stops the probe.
-            if subprocess.run(["git", "-C", str(tree), "revert", "--no-commit", sha],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-                clash = subprocess.check_output(["git", "-C", str(tree), "diff", "--name-only", "--diff-filter=U"],
-                                                text=True).split()
-                code = [p for p in clash if not p.startswith("docs/")]
-                if code:
-                    sys.exit(f"the revert of {sha} conflicts in code: {' '.join(code)}")
-                subprocess.run(["git", "-C", str(tree), "checkout", "HEAD", "--", *clash], check=True)
+            # Whole commits, not chosen hunks.
+            # Three-way, so later commits beside their hunks do not stop it.
+            # A conflict only in docs/ (later sections beside the fix's)
+            # keeps the tree's text, since no document reaches the build; one
+            # in code stops the probe.
+            for rev in shas + [sha]:
+                if subprocess.run(["git", "-C", str(tree), "revert", "--no-commit", rev],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+                    clash = subprocess.check_output(
+                        ["git", "-C", str(tree), "diff", "--name-only", "--diff-filter=U"], text=True).split()
+                    code = [p for p in clash if not p.startswith("docs/")]
+                    if code:
+                        sys.exit(f"the revert of {rev} conflicts in code: {' '.join(code)}")
+                    subprocess.run(["git", "-C", str(tree), "checkout", "HEAD", "--", *clash], check=True)
         make = "gmake" if sys.platform == "darwin" else "make"
         dbg = tree / "out" / "d"
         with (work / "make-debug.log").open("w") as log:

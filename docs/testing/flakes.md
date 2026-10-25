@@ -3120,6 +3120,23 @@ and 154.6 s); the failing boot's self-tests took 121,494 ms and
 main's (`2acce0c3`). The same 290 ms. Not attributed; CI ran again on
 the commit that records it.
 
+**Tenth sighting, 2026-10-26:** x86-64 CI, PR #455 (MEM-9: the page
+cache, cosmofs and the AIO ring's write, nothing on the irq-poll or
+scheduler path) at `dc27d62a`, run 40235787586, job 121298002369,
+`entropy boots (x86_64)`, its first boot: `cpu 0, a spinner above the
+default for 300 ms: 286 calls of the poll, longest gap 290 ms (bound
+100)`, the check at 303 ms, 1 of 512. The boot's self-tests took 171,499
+ms (`cosmofs-replay` 25,351 ms, `lockdep-graph-bench` 7,097 ms), a slow
+runner. The same 290 ms. **A gap of another length, 2026-10-25:** in a
+local x86-64 `test-smp2` boot of the same branch (`ef4ecdb0`) on a host
+running 12 busy loops (about 720 % of its 8 CPUs; "Debug boots slow
+throughout under another project's builds" below), `cpu 1 ... 171 calls
+of the poll, longest gap 253 ms (bound 100)`, the check at 306 ms. That
+is the first gap seen that is neither about 14 ms nor 290 ms, so "the
+worker is raised by its timer, or not at all" is not true of a starved
+host; the boot's log does not say when the worker was raised. Not
+attributed; CI ran again on the commit that records it.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
