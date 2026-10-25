@@ -16,6 +16,7 @@
 #   make test-fsck    roadmap 1.2 B2: fsck at boot and offline, scrub --repair on a mirror (CI: BUILD=release)
 #   make test-pci-hotplug roadmap 1.2 B3: PCIe device_del/device_add, idle and under I/O, NVMe, late partition scan
 #   make test-mirror  roadmap 1.2 B3: a two-disk mirrored root, a disk pulled, replaced and resilvered; a spare (CI: BUILD=release)
+#   make test-large   CFS-32: compressible files past the old run bound, read by v1.0.13 (CI: BUILD=release)
 #   make test-upgrade shell completeness S7: upgrade an installed v1.0.3 to this build, roll back (CI: BUILD=release)
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
 #   make test-security roadmap M5: verified boot refuses tampered files; VERIFY_BOOT=0 says so (CI: BUILD=release)
@@ -47,7 +48,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -416,6 +417,22 @@ test-be: release-set $(IMAGE)
 		$(PYTHON) $(ROOT)/tests/boot/be_test.py --image $(IMAGE) --set $(UPGRADE_SET_DIR) --key $(MODSIGN_KEY) \
 		--arch $(ARCH) --workdir $(OUT)/test-be --timeout $(BOOT_TIMEOUT) \
 		--older $(BE_OLDER_DIR)/cosmoos-$(ARCH).img $(if $(BE_ONLY),--only $(BE_ONLY))
+
+# CFS-32's acceptance test (tests/boot/large_test.py): the published
+# LARGE_OLD_TAG installs itself and upgrades to this build, which writes
+# compressible files past the old run bound on two pools of its own (the
+# largest a 1 GiB pool holds, and 1 GiB); the release's kernel, booted
+# from its environment, reads both back. (CI: BUILD=release.)
+# LARGE_BEFORE=1 measures the same fill on the release's own kernel only.
+LARGE_OLD_TAG ?= v1.0.13
+LARGE_OLD_DIR := $(ROOT)/.cache/releases/$(LARGE_OLD_TAG)
+test-large: RELEASE_DIR = $(UPGRADE_SET_DIR)
+test-large: release-set
+	$(Q)$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(LARGE_OLD_TAG) --arch $(ARCH) --dest $(LARGE_OLD_DIR)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/large_test.py --base $(LARGE_OLD_DIR)/cosmoos-$(ARCH).img \
+		--set $(UPGRADE_SET_DIR) --key $(MODSIGN_KEY) --arch $(ARCH) --workdir $(OUT)/test-large \
+		--timeout $(BOOT_TIMEOUT) $(if $(LARGE_BEFORE),--before)
 
 # Roadmap 1.2 B4's package transactions (PKG-3; tests/boot/pkgtx_test.py,
 # docs/pkg/testing.md, "test-pkgtx"), run by test-upgrade: on this build's

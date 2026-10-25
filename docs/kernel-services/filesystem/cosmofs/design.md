@@ -73,6 +73,85 @@ three. The implementation loads at most `CFS_MAX_EXTENTS` (4096) runs
 per inode, a fragmentation bound rather than a format limit (version 2,
 below).
 
+#### The run bound, charged at the write (CFS-32, CF33)
+
+A compressed record is one run of its own (it neither merges nor is
+merged into), so a compressible file is one run per 32 KiB and reaches
+the bound at about 128 MiB. Until v1.0.14 the bound was found at
+write-back: the writes were taken into the page cache, every write-back
+of them failed `-EFBIG`, and the pages were lost with the vnode while its
+size still counted them.
+
+The bound is now charged when a page becomes dirty (`cfs_dirty_check`,
+the VFS's `dirty_check`; vfs `design.md`, "Refused at the write"). A
+write-back is one `set_extent`, which adds at most two runs -- the run it
+lands in, split around it -- whether it writes one page or a record of
+eight, so a page is charged two. A page may become dirty while
+
+    runs + 2 x (dirty pages + 1) + CFS_TRUNC_ADDS <= CFS_MAX_EXTENTS
+
+and is refused `-EFBIG` otherwise; the page cache writes the vnode's
+dirty pages and asks once more before it refuses, so the charge for what
+is dirty is replaced by what it cost. `runs` is the inode's map as last
+stored: each `extents_store` counts itself in `fs->map_stores` and
+leaves its inode and length, a write-back or truncate of the vnode takes
+that length (`note_runs`), and a count from any other store is read
+again from the chain (`extents_count`). A truncate adds runs of its own
+-- a record it cuts is written again as up to seven plain blocks, and a
+partial last block once more -- so `cfs_truncate` writes the dirty pages
+first when its additions could reach the room they were charged for;
+`CFS_TRUNC_ADDS` (one record's blocks) covers a page a store faults dirty
+between that test and the trim. The same check refuses a page past a
+32-bit logical block, a page of a snapshot's tree (`-EROFS`) and any page
+once the transaction is abandoned (`-EIO`): all three are write-backs
+that could only fail. Under `CONFIG_DEBUG` a write-back that fails
+`-EFBIG` or `-EROFS` anyway panics naming the inode and the page.
+
+One path is known to cost more than its charge. A page in a compressed
+record that leaves the record incompressible has the record dropped and
+written again as eight plain blocks (`record_write`'s plain fallback),
+and on free space of single blocks those are eight runs: seven more for
+a page charged two. On a pool whose free space was cut up by deleting
+every other small file a rebuild adds about two
+(`cosmofs-extent-rebuild`); the worst case is that panic's to name, and
+docs/backlog.md's CFS-39.
+
+#### Plain past three quarters of the bound (CFS-32)
+
+The bound stays where it is (no format change: `CFS_MAX_EXTENTS`, a
+compressed extent's 16-bit count and 8-bit length), and what reaches it
+changes. A plain run is any number of consecutive blocks, and
+`extents_merge` joins a run to the one before it when both are plain and
+adjacent on the disk and in the file; so a plain record written next to
+the plain run before it is no new run at all. Once an inode holds
+`CFS_RAW_AT_PERCENT` (75 %) of the runs it may have, `cfs_writepages`
+writes a new record plain (`record_compresses`), as one run of eight
+blocks allocated together (`plain_run_write`), which then merges. A
+record that replaces a compressed record still compresses: it takes that
+record's run rather than adding one. A truncate or rewrite that brings
+the inode under the mark brings compression back. So a file written in
+order compresses for its first 3,072 records (96 MiB) and is plain after
+that. Records merge when they are written back together; the first
+record of the next write-back did not land next to them in the test
+below (the allocator's hint is shared with the commit's own blocks, a
+likely reason, not checked), so it starts a run of its own. A writer that commits after
+every record past the mark adds a run per record, as compressed records
+did (seen in `cosmofs-extent-raw` with a `file_sync` after each one), and
+a sparse file's records never touch; those files still meet the bound,
+and CF33 refuses them at the write (`cosmofs-extent-bound`). Measured on
+a 1 GiB pool with a 4 MiB `dd ... conv=fsync` per chunk (`make
+test-large`, x86-64, 2026-10-25): the largest compressible file was
+124 MiB on v1.0.13 and is 1016 MiB now, the pool full rather than the
+bound reached. With CF33's charge and not this policy, the 1 GiB file
+stops at 144 to 148 MiB (36 or 37 chunks, three runs on both arches),
+refused at the write with no page lost
+(`tools/cfs32-raw-probe.py --old`).
+
+Both rules hold on v1.0.13, so a kernel booted from an older boot
+environment reads such a file: its `extent_valid` bounds only a
+compressed run's count, and its checker has no count bound for a plain
+run (checked on the v1.0.13 tag, 2026-10-24).
+
 Directories are ordinary file data: 64 entries per block, linear scan,
 a removed entry is zeroed, a new entry takes the first free slot or
 appends a block. `.` and `..` are synthesised by `readdir` from the

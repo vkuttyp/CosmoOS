@@ -220,7 +220,31 @@ struct cfs {
     bool mount_done;          /* the mount finished: before this there is no autonomous committer */
     uint64_t mount_dirty_notes; /* dirty marks the mount's own replay made */
     uint64_t wb_early;          /* how many of those found a committer already running */
+    /* Every run map stored (extents_store), and the last one's inode and
+     * length: what lets cfs_dirty_check know an inode's runs without
+     * reading its chain for each page (CFS-32). Under fs->lock. */
+    uint64_t map_stores;
+    const struct cfs_inode *last_store_in;
+    unsigned last_store_n;
+#if CONFIG_DEBUG
+    bool fbig_injected;         /* the cosmofs-extent-fail seam's -EFBIG fired: not a page write-back cannot store */
+#endif
+#if CONFIG_SELFTEST
+    unsigned test_max_extents;  /* test seam: a lower run bound than CFS_MAX_EXTENTS; 0 for none */
+#endif
 };
+
+/* Runs an inode may have: CFS_MAX_EXTENTS, or a self-test's lower bound
+ * on its own mount, so a test reaches the bound in a few records. */
+static inline unsigned cfs_max_extents(const struct cfs *fs)
+{
+#if CONFIG_SELFTEST
+    if (fs->test_max_extents != 0)
+        return fs->test_max_extents;
+#endif
+    (void)fs;
+    return CFS_MAX_EXTENTS;
+}
 
 #define CFS_WB_POLL_MS       50u
 #define CFS_WB_DIRTY_BUFS    64u
@@ -245,6 +269,12 @@ struct cfs_vnode {
     unsigned snap_tag;
     uint64_t snap_imap_root;
     uint64_t snap_next_ino;
+    /* The runs the inode's map holds, as cfs_dirty_check last counted
+     * them, while fs->map_stores is still runs_at: any map stored since
+     * may have changed it (CFS-32). */
+    unsigned runs;
+    uint64_t runs_at;
+    bool runs_valid;
 };
 
 static inline struct cfs *cfs_of(struct mount *mnt) { return mnt->fs_priv; }

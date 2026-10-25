@@ -16,6 +16,7 @@
 #include <kernel/cred.h>
 #include <kernel/crc32c.h>
 #include <kernel/page.h>
+#include <kernel/panic.h>
 #include <kernel/lz4.h>
 #include <kernel/string.h>
 
@@ -83,12 +84,12 @@ static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_e
         const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
         for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK && cfs_ext_count(&eb->ext[i]); i++) {
             if (k == cap) {
-                if (cap >= CFS_MAX_EXTENTS) {
+                if (cap >= cfs_max_extents(fs)) {
                     cfs_buf_put(fs, b);
                     kfree(ext);
                     return -EFBIG;
                 }
-                unsigned ncap = cap * 2 > CFS_MAX_EXTENTS ? CFS_MAX_EXTENTS : cap * 2;
+                unsigned ncap = cap * 2 > cfs_max_extents(fs) ? cfs_max_extents(fs) : cap * 2;
                 struct cfs_extent *grown = krealloc(ext, ncap * sizeof(*ext), 0);
                 if (grown == NULL) {
                     cfs_buf_put(fs, b);
@@ -135,7 +136,7 @@ struct es_scratch {
 
 static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_extent *ext, unsigned n)
 {
-    if (n > CFS_MAX_EXTENTS)
+    if (n > cfs_max_extents(fs))
         return -EFBIG;
     unsigned left = n > CFS_DIRECT ? n - CFS_DIRECT : 0;
     unsigned need = (left + CFS_EXTENTS_PER_BLOCK - 1) / CFS_EXTENTS_PER_BLOCK;
@@ -211,6 +212,36 @@ static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_
         cfs_free_block_deferred(fs, w->drop[i]);
     cfs_prep_release(fs, &w->prep);   /* nothing, unless a kept block needed no copy after all */
     kfree(w);
+    __atomic_store_n(&fs->map_stores, fs->map_stores + 1, __ATOMIC_RELEASE);
+    fs->last_store_in = in;
+    fs->last_store_n = n;
+    return 0;
+}
+
+/* The runs an inode's map holds, counted without gathering them: the
+ * direct slots in use and each chain block's, bounded as extents_load
+ * bounds the chain. Under fs->lock. */
+static int extents_count(struct cfs *fs, const struct cfs_inode *in, unsigned *out)
+{
+    unsigned k = 0;
+    for (unsigned i = 0; i < CFS_DIRECT && cfs_ext_count(&in->direct[i]); i++)
+        k++;
+    uint64_t next = in->indirect;
+    unsigned chain = 0;
+    while (next) {
+        if (++chain > CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 1 || !cfs_dva_valid(fs, next))
+            return -EIO;   /* a cycle or a wild pointer, as extents_load says */
+        struct cfs_buf *b;
+        int rc = cfs_buf_get(fs, next, CFS_KIND_EXTENTS, &b);
+        if (rc)
+            return rc;
+        const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
+        for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK && cfs_ext_count(&eb->ext[i]); i++)
+            k++;
+        next = eb->next;
+        cfs_buf_put(fs, b);
+    }
+    *out = k;
     return 0;
 }
 
@@ -336,8 +367,12 @@ static int faultinject_set_extent(void)
 static int set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne, uint64_t *old)
 {
     int rc = faultinject_set_extent();
-    if (rc)
+    if (rc) {
+#if CONFIG_DEBUG
+        fs->fbig_injected = rc == -EFBIG;
+#endif
         return rc;
+    }
     uint64_t lblk = ne.lblk, count = cfs_ext_count(&ne);
     if (lblk + count > 0x100000000ull)
         return -EFBIG;
@@ -1277,17 +1312,85 @@ static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk,
 }
 
 /*
- * Write an aligned record's worth of logical blocks, compressed if that
- * makes it strictly smaller in whole blocks. Anything else -- it does
- * not compress, the algorithm is off, there is no room for a contiguous
- * run -- is written as ordinary blocks, which is always allowed and
- * never wrong.
+ * A record's blocks as one plain run: `n` consecutive blocks allocated
+ * together, written and checksummed as data_write_block does each one,
+ * and mapped by one set_extent, which merges the run into the one before
+ * it when they are adjacent on the disk. -ENOSPC when no run of `n` is
+ * free next to the hint, which leaves everything as it was and the
+ * caller to write the blocks one at a time.
  */
-static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n)
+static int plain_run_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n)
 {
+    uint64_t start, got;
+    int rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, next_block_hint(fs, in, lblk0), n, &start, &got);
+    if (rc)
+        return rc;
+    if (got < n) {
+        for (uint64_t k = 0; k < got; k++)
+            cfs_free_block_deferred(fs, start + k);
+        return -ENOSPC;
+    }
+    uint8_t *cipher = NULL;
+    if (in->csum_algo == CFS_CSUM_POLY1305) {
+        cipher = kmalloc(CFS_BLOCK, 0);
+        if (cipher == NULL)
+            rc = -ENOMEM;
+    }
+    /* As record_write's: the entries the range holds now are the map's
+     * until set_extent succeeds, kept and put back on a failure (CF16). */
+    struct csum_saved prev[CFS_RECORD_BLOCKS];
+    uint32_t saved = 0;
+    for (; saved < n && rc == 0; saved++)
+        rc = csum_save(fs, in, lblk0 + saved, cipher != NULL, &prev[saved]);
+    for (unsigned i = 0; i < n && rc == 0; i++) {
+        const uint8_t *blk = data + (size_t)i * CFS_BLOCK;
+        if (cipher) {
+            struct cfs_csum_aead entry;
+            rc = seal_block(fs, in, lblk0 + i, blk, cipher, &entry);
+            if (rc == 0)
+                rc = cfs_data_write(fs, start + i, cipher);
+            if (rc == 0)
+                rc = cfs_aead_put(fs, in, lblk0 + i, &entry);
+            continue;
+        }
+        rc = cfs_data_write(fs, start + i, blk);
+        if (rc == 0)
+            rc = cfs_csum_put(fs, in, lblk0 + i, crc32c(blk, CFS_BLOCK));
+    }
+    kfree(cipher);
+    if (rc == 0) {
+        struct cfs_extent ne = { start, n, (uint32_t)lblk0 };
+        rc = set_extent(fs, in, ne, NULL);
+    }
+    if (rc) {
+        for (uint32_t i = 0; i < saved; i++)
+            csum_restore(fs, in, lblk0 + i, &prev[i]);
+        for (unsigned i = 0; i < n; i++)
+            cfs_free_block_deferred(fs, start + i);
+    }
+    return rc;
+}
+
+/*
+ * Write an aligned record's worth of logical blocks, compressed if
+ * `compress` and that makes it strictly smaller in whole blocks. Anything
+ * else -- it does not compress, the algorithm is off, the write policy
+ * says plain (cfs_writepages), there is no room for a contiguous run -- is
+ * written as ordinary blocks, which is always allowed and never wrong:
+ * one run when the policy chose it and a run of `n` is free, else a block
+ * at a time.
+ */
+static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n,
+                        bool compress)
+{
+    if (!compress && n == CFS_RECORD_BLOCKS && lblk0 % CFS_RECORD_BLOCKS == 0) {
+        int rc = plain_run_write(fs, in, lblk0, data, n);
+        if (rc != -ENOSPC)
+            return rc;
+    }
     /* And the format again, for a file an older kernel of this family
      * created with the flag on a pool below version 6 (CFS-2). */
-    if (n > 1 && in->compress_algo == CFS_COMPRESS_LZ4 && fs->sb.version >= 6) {
+    if (compress && n > 1 && in->compress_algo == CFS_COMPRESS_LZ4 && fs->sb.version >= 6) {
         /* Room for one block less than it takes now: a record that
          * compresses to the same number of blocks has cost work and
          * saved nothing, and would have to be decompressed on every
@@ -2411,7 +2514,7 @@ static int write_one_page(struct cfs *fs, struct cfs_inode *in, uint64_t index, 
         rc = cfs_record_read(fs, in, &e, rec);
         if (rc == 0) {
             memcpy(rec + (size_t)(index - e.lblk) * CFS_BLOCK, buf, CFS_BLOCK);
-            rc = record_write(fs, in, e.lblk, rec, count);
+            rc = record_write(fs, in, e.lblk, rec, count, true);   /* a record replaced by a record */
         }
         kfree(rec);
         return rc;
@@ -2441,6 +2544,141 @@ static int sync_after_write(struct cfs *fs, struct vnode *vn, int rc)
     return rc ? rc : src;
 }
 
+/*
+ * The run bound, charged when a page becomes dirty rather than found at
+ * its write-back (CFS-32; design.md, "Refused at the write"). A dirty
+ * page's write-back is one set_extent, which adds at most two runs (the
+ * run it lands in split around it); a whole record's is one set_extent
+ * for eight pages, so two a page is a bound and not a guess. A truncate
+ * adds runs of its own -- a record it cuts is written again as plain
+ * blocks, at most seven, and a partial last block once more -- so
+ * cfs_truncate writes the dirty pages first when its additions could
+ * reach the room they were charged; CFS_TRUNC_ADDS of headroom covers a
+ * store that faults a page dirty between that test and the trim.
+ */
+#define CFS_TRUNC_ADDS CFS_RECORD_BLOCKS
+
+static int inode_runs(struct cfs *fs, struct vnode *vn, unsigned *out)
+{
+    struct cfs_vnode *cv = vn->fs_priv;
+    if (!cv->runs_valid || cv->runs_at != __atomic_load_n(&fs->map_stores, __ATOMIC_ACQUIRE)) {
+        int rc = cfs_lock_tree_w(fs, vn);
+        if (rc)
+            return rc;
+        unsigned n;
+        rc = extents_count(fs, cfs_inode_of(vn), &n);
+        if (rc == 0) {
+            cv->runs = n;
+            cv->runs_at = fs->map_stores;
+            cv->runs_valid = true;
+        }
+        cfs_unlock_tree(fs);
+        if (rc)
+            return rc;
+    }
+    *out = cv->runs;
+    return 0;
+}
+
+static bool runs_fit(struct cfs *fs, unsigned runs, unsigned dirty)
+{
+    return (uint64_t)runs + 2ull * dirty + CFS_TRUNC_ADDS <= cfs_max_extents(fs);
+}
+
+/* After a write-back or a truncate under fs->lock: when the last map
+ * stored is this vnode's, its length is the inode's runs now, so the next
+ * page asked about needs no count. */
+static void note_runs(struct cfs *fs, struct vnode *vn)
+{
+    struct cfs_vnode *cv = vn->fs_priv;
+    if (fs->last_store_in == cfs_inode_of(vn)) {
+        cv->runs = fs->last_store_n;
+        cv->runs_at = fs->map_stores;
+        cv->runs_valid = true;
+    }
+}
+
+/* A page cfs_dirty_check let be dirtied that write-back cannot store is
+ * this file's bug, not the writer's: named, under CONFIG_DEBUG, where it
+ * happens (CFS-32). The extent-fail seam's -EFBIG is the one expected. */
+static void stuck_page_check(struct cfs *fs, struct vnode *vn, uint64_t index, int rc)
+{
+#if CONFIG_DEBUG
+    if ((rc == -EFBIG && !fs->fbig_injected) || rc == -EROFS)
+        panic("cosmofs: inode %llu page %llu is dirty and write-back cannot store it (%d): cfs_dirty_check "
+              "admitted it (CFS-32)",
+              (unsigned long long)cfs_inode_of(vn)->ino, (unsigned long long)index, rc);
+    fs->fbig_injected = false;
+#else
+    (void)fs;
+    (void)vn;
+    (void)index;
+    (void)rc;
+#endif
+}
+
+/*
+ * The write policy that keeps a compressible file inside the run bound
+ * (CFS-32 1b; design.md, "The run bound, charged at the write"). A
+ * compressed record is a run of its own, and a plain record next to the
+ * run before it is no new run at all, so once the inode holds
+ * CFS_RAW_AT_PERCENT of the runs it may have, a new record is written
+ * plain. A record that replaces a compressed one stays compressed: it
+ * takes that record's run rather than adding one. The inode's runs fall
+ * below the mark again when a truncate or rewrite takes them away, and
+ * compression resumes. Under fs->lock.
+ */
+#define CFS_RAW_AT_PERCENT 75u
+
+static bool record_compresses(struct cfs *fs, struct vnode *vn, uint64_t index)
+{
+    struct cfs_vnode *cv = vn->fs_priv;
+    unsigned runs;
+    if (cv->runs_valid && cv->runs_at == fs->map_stores) {
+        runs = cv->runs;
+    } else if (extents_count(fs, cfs_inode_of(vn), &runs) != 0) {
+        return true;   /* the write itself will meet what the count did */
+    }
+    if ((uint64_t)runs * 100 < (uint64_t)cfs_max_extents(fs) * CFS_RAW_AT_PERCENT)
+        return true;
+    struct cfs_extent e;
+    return cfs_map_ext(fs, cfs_inode_of(vn), index, &e) == 1 && cfs_ext_compressed(&e);
+}
+
+int cosmofs_test_runs(struct vnode *vn, unsigned *n)
+{
+#if CONFIG_SELFTEST
+    struct cfs *fs = cfs_of(vn->mnt);
+    int rc = cfs_lock_tree_w(fs, vn);
+    if (rc)
+        return rc;
+    rc = extents_count(fs, cfs_inode_of(vn), n);
+    cfs_unlock_tree(fs);
+    return rc;
+#else
+    (void)vn;
+    (void)n;
+    return -ENOTSUP;
+#endif
+}
+
+/* The VFS `dirty_check` operation. */
+static int cfs_dirty_check(struct vnode *vn, uint64_t index, unsigned dirty)
+{
+    struct cfs *fs = cfs_of(vn->mnt);
+    if (fs == NULL || fs->failed)
+        return -EIO;     /* write-back would say the same, for ever */
+    if (tree_readonly(fs, vn))
+        return -EROFS;   /* a snapshot's file: its write-back is refused */
+    if (index >= 0x100000000ull)
+        return -EFBIG;   /* past a 32-bit logical block, which no run can name */
+    unsigned runs;
+    int rc = inode_runs(fs, vn, &runs);
+    if (rc)
+        return rc;
+    return runs_fit(fs, runs, dirty + 1) ? 0 : -EFBIG;
+}
+
 static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
 {
     if (tree_readonly(cfs_of(vn->mnt), vn))
@@ -2458,6 +2696,8 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
     }
     rc = write_one_page(fs, cfs_inode_of(vn), index, buf);
     rc = sync_after_write(fs, vn, rc);
+    note_runs(fs, vn);
+    stuck_page_check(fs, vn, index, rc);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -2485,6 +2725,7 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
     }
     struct cfs_inode *in = cfs_inode_of(vn);
     if (index % CFS_RECORD_BLOCKS == 0 && n >= CFS_RECORD_BLOCKS && in->compress_algo != CFS_COMPRESS_NONE) {
+        bool compress = record_compresses(fs, vn, index);
         /* Gather the record; the pages are separate frames. */
         uint8_t *rec = kmalloc((size_t)CFS_RECORD_BLOCKS * CFS_BLOCK, 0);
         if (rec == NULL) {
@@ -2493,7 +2734,7 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
         }
         for (unsigned i = 0; i < CFS_RECORD_BLOCKS; i++)
             memcpy(rec + (size_t)i * CFS_BLOCK, pages[i], CFS_BLOCK);
-        rc = record_write(fs, in, index, rec, CFS_RECORD_BLOCKS);
+        rc = record_write(fs, in, index, rec, CFS_RECORD_BLOCKS, compress);
         kfree(rec);
         if (rc == 0)
             *done = CFS_RECORD_BLOCKS;
@@ -2503,6 +2744,8 @@ static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, 
             *done = 1;
     }
     rc = sync_after_write(fs, vn, rc);
+    note_runs(fs, vn);
+    stuck_page_check(fs, vn, index, rc);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -2531,6 +2774,19 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
     if (lrc)
         return lrc;
     pagecache_truncate(vn, size);
+    /* What the trim adds to the map must not come out of the room the
+     * pages still dirty were charged for: near the bound, write them
+     * first. The caller holds the vnode lock, the order pagecache_sync
+     * runs in. */
+    unsigned runs;
+    lrc = inode_runs(fs, vn, &runs);
+    if (lrc)
+        return lrc;
+    if (vn->pc.nr_dirty != 0 && !runs_fit(fs, runs + CFS_TRUNC_ADDS, vn->pc.nr_dirty)) {
+        lrc = pagecache_sync(vn);
+        if (lrc)
+            return lrc;
+    }
     lrc = cfs_lock_tree_w(fs, vn);
     if (lrc)
         return lrc;
@@ -2570,6 +2826,7 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
         vn->mtime_ns = vfs_now_ns();
         rc = inode_sync(fs, vn);
     }
+    note_runs(fs, vn);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -2689,6 +2946,7 @@ static const struct vnode_ops cfs_file_ops = {
     .readpage = cfs_readpage,
     .writepage = cfs_writepage,
     .writepages = cfs_writepages,
+    .dirty_check = cfs_dirty_check,
     .truncate = cfs_truncate,
     .sync = cfs_vnode_sync,
     .evict = cfs_evict,
