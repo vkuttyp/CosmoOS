@@ -3,6 +3,7 @@
  */
 
 #include <arch/cpu.h>
+#include <kernel/aio.h>
 #include <kernel/blk.h>
 #include <kernel/completion.h>
 #include <kernel/cosmofs.h>
@@ -2651,4 +2652,84 @@ out:
     kfree(back);
     return ok;
 #undef DW_CHECK
+}
+
+/*
+ * MEM-9, V40, the review's case: one COSMO_AIO_PWRITE of twice the
+ * dirty bound (the cache limit lowered to DW_LIMIT, so 128 pages, and
+ * write-back off, as above), through the ring's own body
+ * (aio_test_pwrite). The request has no size cap, and its loop holds the
+ * open file's lock, under which the throttle may not sleep; a writer
+ * throttled once before the loop leaves every page of the request dirty
+ * (256 here). Bounded, the mount never holds more than the bound and one
+ * piece's page.
+ */
+#define AW_BYTES (1u << 20)   /* 256 pages: twice the bound */
+
+bool selftest_aio_pwrite_dirty(const char **reason)
+{
+#if !CONFIG_SELFTEST
+    (void)reason;
+    return true;
+#else
+    struct blkdev *bd = ramblk_create(4096);
+    uint8_t *buf = kmalloc(AW_BYTES, 0);
+    uint8_t *back = kmalloc(65536, 0);
+    struct file *f = NULL;
+    struct mount *m = NULL;
+    uint64_t saved = pagecache_limit();
+    bool ok = false;
+#define AW_CHECK(cond)                                                         \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);        \
+            goto out;                                                          \
+        }                                                                      \
+    } while (0)
+    AW_CHECK(bd != NULL && buf != NULL && back != NULL);
+    AW_CHECK(cosmofs_format(bd) == 0);
+    int mrc = vfs_mkdir(NULL, "/mnt/aw", 0755);
+    AW_CHECK(mrc == 0 || mrc == -EEXIST);
+    AW_CHECK(vfs_mount("/mnt/aw", "cosmofs", bd, 0) == 0);
+    struct vnode *root;
+    AW_CHECK(vfs_lookup(NULL, "/mnt/aw", &root) == 0);
+    m = root->mnt;
+    vnode_put(root);
+    cosmofs_test_set_writeback(m, false);
+    pagecache_set_limit(DW_LIMIT);
+    const uint64_t bound = DW_LIMIT / 2;
+
+    AW_CHECK(vfs_open(NULL, "/mnt/aw/w", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    for (unsigned i = 0; i < AW_BYTES / 65536; i++)
+        dw_noise(buf + (size_t)i * 65536, 65536, i);
+    AW_CHECK(aio_test_pwrite(f, buf, AW_BYTES, 0) == (int64_t)AW_BYTES);
+    /* Write-back is off: what the request left dirty is still dirty. */
+    uint64_t left = __atomic_load_n(&m->cache_dirty, __ATOMIC_RELAXED);
+    kinfo("selftest: aio-pwrite-dirty: one PWRITE of %u pages with write-back off left %llu dirty on the mount "
+          "against a bound of %llu",
+          AW_BYTES / 4096, (unsigned long long)left, (unsigned long long)bound);
+    AW_CHECK(left <= bound + 16);   /* the bound, as pagecache-dirty-writer's */
+    AW_CHECK(file_sync(f) == 0);
+    for (unsigned i = 0; i < AW_BYTES / 65536; i += 5) {
+        AW_CHECK(file_pread(f, back, 65536, (uint64_t)i * 65536) == 65536);
+        AW_CHECK(memcmp(back, buf + (size_t)i * 65536, 65536) == 0);
+    }
+    ok = true;
+out:
+    pagecache_set_limit(saved);
+    if (f)
+        file_put(f);
+    if (m) {
+        cosmofs_test_set_writeback(m, true);
+        if (vfs_umount("/mnt/aw") != 0)
+            (void)vfs_umount2("/mnt/aw", VFS_UMOUNT_FORCE);
+    }
+    (void)vfs_rmdir(NULL, "/mnt/aw");
+    if (bd)
+        ramblk_destroy(bd);
+    kfree(buf);
+    kfree(back);
+    return ok;
+#undef AW_CHECK
+#endif
 }

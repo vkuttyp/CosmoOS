@@ -37,4 +37,10 @@ struct aio_ring *aio_ring_from_kobject(struct kobject *obj);
 int64_t aio_submit(struct aio_ring *r, uint64_t usqes, unsigned n);
 int64_t aio_wait(struct aio_ring *r, uint64_t ucqes, unsigned n, unsigned min, uint64_t timeout_ns);
 
+#if CONFIG_SELFTEST
+/* aio-pwrite-dirty: a COSMO_AIO_PWRITE's body, from a kernel buffer. */
+struct file;
+int64_t aio_test_pwrite(struct file *f, const void *buf, size_t len, uint64_t off);
+#endif
+
 #endif /* KERNEL_AIO_H */

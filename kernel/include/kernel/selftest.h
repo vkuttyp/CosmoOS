@@ -330,6 +330,7 @@ bool selftest_write_bench(const char **reason);     /* prints: the same for writ
 bool selftest_pagecache(const char **reason);
 bool selftest_pagecache_pinned(const char **reason);  /* a frame a mapping references is not reclaimed */
 bool selftest_pagecache_dirty_writer(const char **reason);  /* MEM-9: a writer with write-back off stays under the dirty bound */
+bool selftest_aio_pwrite_dirty(const char **reason);       /* MEM-9: one AIO PWRITE past the dirty bound stays under it */
 bool selftest_file_read_filled(const char **reason);   /* a large read of a file is one read: position locked, moved by what was accepted */
 bool selftest_cache_limits(const char **reason);   /* ramfs page budget, global limit with reclaim */
 bool selftest_cache_budget_race(const char **reason);   /* the budget admission under concurrent misses */

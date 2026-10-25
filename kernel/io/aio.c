@@ -148,6 +148,64 @@ static bool runnable(const struct aio_req *q)
     return (bits & (q->want | COSMO_IO_HANGUP | COSMO_IO_ERROR)) != 0;
 }
 
+/*
+ * PREAD and PWRITE: the file's own lock, which every other path into
+ * file_pread and file_pwrite holds (file_read and file_write take it; the
+ * READ and WRITE opcodes reach those). This one used to be the exception
+ * and got away with it because file_pread took the vnode's lock on the
+ * way past, which serialised two rings on one character device by
+ * accident. That lock is gone from the device path (VFS invariant V32), so
+ * the serialisation is taken here, where it belongs: per open file rather
+ * than per vnode, so two rings on one handle order and two handles on one
+ * device do not. `user` says whether `addr` is a user address (every
+ * request) or a kernel one (the self-test's seam below).
+ */
+static int64_t file_io(struct file *f, bool write, uint64_t addr, bool user, size_t len, uint64_t off)
+{
+    char tmp[1024];
+    size_t done = 0;
+    int64_t rc = 0;
+    if (write)
+        file_throttle(f);   /* before f->lock (MEM-9) */
+    mutex_lock(&f->lock);
+    while (done < len) {
+        size_t n = len - done < sizeof(tmp) ? len - done : sizeof(tmp);
+        if (write) {
+            if (!user) {
+                memcpy(tmp, (const void *)(uintptr_t)(addr + done), n);
+            } else if (copy_from_user(tmp, addr + done, n)) {
+                rc = -EFAULT;
+                break;
+            }
+            rc = file_pwrite_held(f, tmp, n, off + done);
+        } else {
+            rc = file_pread(f, tmp, n, off + done);
+            if (rc > 0) {
+                if (!user)
+                    memcpy((void *)(uintptr_t)(addr + done), tmp, (size_t)rc);
+                else if (copy_to_user(addr + done, tmp, (size_t)rc))
+                    rc = -EFAULT;
+            }
+        }
+        if (rc <= 0)
+            break;
+        done += (size_t)rc;
+        if ((size_t)rc < n)
+            break;
+    }
+    mutex_unlock(&f->lock);
+    return done > 0 ? (int64_t)done : rc;
+}
+
+#if CONFIG_SELFTEST
+/* aio-pwrite-dirty's seam: a PWRITE's body from a kernel buffer, as run()
+ * executes it for a ring. */
+int64_t aio_test_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
+{
+    return file_io(f, true, (uint64_t)(uintptr_t)buf, false, len, off);
+}
+#endif
+
 /* Execute in the caller's thread with object waits turned into -EAGAIN. */
 static int64_t run(struct aio_req *q)
 {
@@ -168,47 +226,7 @@ static int64_t run(struct aio_req *q)
     case COSMO_AIO_PREAD:
     case COSMO_AIO_PWRITE: {
         struct file *f = file_from_kobject(q->obj);
-        if (f == NULL) {
-            rc = -ESPIPE;
-            break;
-        }
-        char tmp[1024];
-        size_t done = 0, len = (size_t)e->len;
-        rc = 0;
-        /* The file's own lock, which every other path into file_pread and
-         * file_pwrite holds (file_read and file_write take it; the READ
-         * and WRITE opcodes above reach those). This one used to be the
-         * exception and got away with it because file_pread took the
-         * vnode's lock on the way past, which serialised two rings on one
-         * character device by accident. That lock is gone from the device
-         * path (VFS invariant V32), so the serialisation is taken here,
-         * where it belongs: per open file rather than per vnode, so two
-         * rings on one handle order and two handles on one device do not. */
-        if (e->op == COSMO_AIO_PWRITE)
-            file_throttle(f);   /* before f->lock (MEM-9) */
-        mutex_lock(&f->lock);
-        while (done < len) {
-            size_t n = len - done < sizeof(tmp) ? len - done : sizeof(tmp);
-            if (e->op == COSMO_AIO_PWRITE) {
-                if (copy_from_user(tmp, e->addr + done, n)) {
-                    rc = -EFAULT;
-                    break;
-                }
-                rc = file_pwrite_held(f, tmp, n, e->offset + done);
-            } else {
-                rc = file_pread(f, tmp, n, e->offset + done);
-                if (rc > 0 && copy_to_user(e->addr + done, tmp, (size_t)rc))
-                    rc = -EFAULT;
-            }
-            if (rc <= 0)
-                break;
-            done += (size_t)rc;
-            if ((size_t)rc < n)
-                break;
-        }
-        mutex_unlock(&f->lock);
-        if (done > 0)
-            rc = (int64_t)done;
+        rc = f ? file_io(f, e->op == COSMO_AIO_PWRITE, e->addr, true, (size_t)e->len, e->offset) : -ESPIPE;
         break;
     }
     case COSMO_AIO_FSYNC: {
