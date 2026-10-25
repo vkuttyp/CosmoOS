@@ -645,6 +645,7 @@ static const struct selftest tests[] = {
     { "crc32c",          selftest_crc32c },
     { "pagecache",       selftest_pagecache },
     { "pagecache-pinned", selftest_pagecache_pinned },
+    { "pagecache-dirty-writer", selftest_pagecache_dirty_writer },
     { "file-read-filled", selftest_file_read_filled },
     { "vfs-ramfs",       selftest_vfs_ramfs },
     { "vfs-rename2",     selftest_vfs_rename2 },

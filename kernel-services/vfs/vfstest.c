@@ -2418,3 +2418,95 @@ bool selftest_file_read_filled(const char **reason)
     CHECK(z == -EOPNOTSUPP && c.pieces == 0);
     return true;
 }
+
+/*
+ * MEM-9, V40, the failing test: a writer alone with its dirty pages.
+ * Write-back is off, so nothing but the writer can clean a page, and the
+ * cache limit is lowered to DW_LIMIT pages; the bound V40 states is half
+ * of it. One writer of eight times the bound may never have more than
+ * the bound and one write's pages dirty on its mount. Without a bound
+ * the mount's count is every page written (1024 here); a fault-killed
+ * writer on a 256 MiB guest (test-fill's writer stage on 75e1e15f) was
+ * that count meeting memory, which a fast enough write-back thread can
+ * hide.
+ */
+#define DW_LIMIT 256u
+#define DW_WRITES 64u   /* of 64 KiB: 1024 pages */
+
+static void dw_noise(uint8_t *p, size_t len, uint32_t seed)
+{
+    uint32_t x = seed * 2654435761u + 1;
+    for (size_t i = 0; i < len; i++) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        p[i] = (uint8_t)x;
+    }
+}
+
+bool selftest_pagecache_dirty_writer(const char **reason)
+{
+    struct blkdev *bd = ramblk_create(4096);
+    uint8_t *buf = kmalloc(65536, 0);
+    uint8_t *back = kmalloc(65536, 0);
+    struct file *f = NULL;
+    struct mount *m = NULL;
+    uint64_t saved = pagecache_limit();
+    bool ok = false;
+#define DW_CHECK(cond)                                                         \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);        \
+            goto out;                                                          \
+        }                                                                      \
+    } while (0)
+    DW_CHECK(bd != NULL && buf != NULL && back != NULL);
+    DW_CHECK(cosmofs_format(bd) == 0);
+    int mrc = vfs_mkdir(NULL, "/mnt/dw", 0755);
+    DW_CHECK(mrc == 0 || mrc == -EEXIST);
+    DW_CHECK(vfs_mount("/mnt/dw", "cosmofs", bd, 0) == 0);
+    struct vnode *root;
+    DW_CHECK(vfs_lookup(NULL, "/mnt/dw", &root) == 0);
+    m = root->mnt;
+    vnode_put(root);
+    cosmofs_test_set_writeback(m, false);
+    pagecache_set_limit(DW_LIMIT);
+    const uint64_t bound = DW_LIMIT / 2;
+
+    DW_CHECK(vfs_open(NULL, "/mnt/dw/w", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    uint64_t peak = 0;
+    for (unsigned i = 0; i < DW_WRITES; i++) {
+        dw_noise(buf, 65536, i);
+        DW_CHECK(file_write(f, buf, 65536) == 65536);
+        uint64_t d = __atomic_load_n(&m->cache_dirty, __ATOMIC_RELAXED);
+        if (d > peak)
+            peak = d;
+    }
+    kinfo("selftest: pagecache-dirty-writer: %u pages written with write-back off, at most %llu dirty on the "
+          "mount against a bound of %llu",
+          DW_WRITES * 16, (unsigned long long)peak, (unsigned long long)bound);
+    DW_CHECK(peak <= bound + 16);   /* the bound and one write's pages */
+    DW_CHECK(file_sync(f) == 0);
+    for (unsigned i = 0; i < DW_WRITES; i += 21) {
+        dw_noise(buf, 65536, i);
+        DW_CHECK(file_pread(f, back, 65536, (uint64_t)i * 65536) == 65536);
+        DW_CHECK(memcmp(back, buf, 65536) == 0);
+    }
+    ok = true;
+out:
+    pagecache_set_limit(saved);
+    if (f)
+        file_put(f);
+    if (m) {
+        cosmofs_test_set_writeback(m, true);
+        if (vfs_umount("/mnt/dw") != 0)
+            (void)vfs_umount2("/mnt/dw", VFS_UMOUNT_FORCE);
+    }
+    (void)vfs_rmdir(NULL, "/mnt/dw");
+    if (bd)
+        ramblk_destroy(bd);
+    kfree(buf);
+    kfree(back);
+    return ok;
+#undef DW_CHECK
+}
