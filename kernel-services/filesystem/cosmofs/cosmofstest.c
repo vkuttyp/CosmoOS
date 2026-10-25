@@ -1828,7 +1828,12 @@ cleanup:
  * plain, as one run each next to the one before, which merge. A rewrite
  * of a compressed record stays compressed (it replaces a run), and a
  * truncate that takes the inode below the mark brings compression back.
- * On a mount whose bound the seam lowers to ER_MAX runs.
+ * On a mount whose bound the seam lowers to ER_MAX runs. This is the
+ * policy's coverage, not its failing test: under so low a bound the
+ * write's charge (CF33) cuts records into plain blocks, which merge, from
+ * about the same point as the mark, and the test passes without the
+ * policy as well (2026-10-25, both trees 53 runs). The failing test is
+ * test-large's 1 GiB file (tools/cfs32-raw-probe.py).
  */
 #define ER_MAX     64u
 #define ER_RECORDS 200u   /* three times the bound's worth of compressed records */
@@ -1902,9 +1907,8 @@ bool selftest_cosmofs_extent_raw(const char **reason)
     uint64_t used = st0.free_blocks - st1.free_blocks;
     kinfo("cosmofs-extent-raw: %u records in %u runs under a bound of %u (plain from %u), %llu blocks", ER_RECORDS,
           runs, ER_MAX, mark, (unsigned long long)used);
-    /* Every record taken (without the policy the bound refuses the file
-     * at about EB_MAX records: cosmofs-extent-bound), inside the bound,
-     * and the part before the mark compressed: fewer blocks than every
+    /* Every record taken, inside the bound, and the part before the
+     * mark compressed: fewer blocks than every
      * record plain by at least a block for each run of the mark. */
     ER_CHECK(runs <= ER_MAX);
     ER_CHECK(used < (uint64_t)ER_RECORDS * CFS_RECORD_BLOCKS - mark);

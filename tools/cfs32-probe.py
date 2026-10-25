@@ -61,8 +61,18 @@ def main():
                 text=True).strip()
             if not sha:
                 sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}; name it with --fix")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha])
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            # Three-way, so later commits beside its hunks do not stop it. A
+            # conflict only in docs/ (later sections beside the fix's) keeps
+            # the tree's text, since no document reaches the build; one in
+            # code stops the probe.
+            if subprocess.run(["git", "-C", str(tree), "revert", "--no-commit", sha],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+                clash = subprocess.check_output(["git", "-C", str(tree), "diff", "--name-only", "--diff-filter=U"],
+                                                text=True).split()
+                code = [p for p in clash if not p.startswith("docs/")]
+                if code:
+                    sys.exit(f"the revert of {sha} conflicts in code: {' '.join(code)}")
+                subprocess.run(["git", "-C", str(tree), "checkout", "HEAD", "--", *clash], check=True)
         make = "gmake" if sys.platform == "darwin" else "make"
         out = tree / "out" / "o"
         args = [make, "-C", str(tree), "-j8", f"ARCH={a.arch}", f"OUT={out}",

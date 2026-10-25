@@ -142,7 +142,9 @@ and CF33 refuses them at the write (`cosmofs-extent-bound`). Measured on
 a 1 GiB pool with a 4 MiB `dd ... conv=fsync` per chunk (`make
 test-large`, x86-64, 2026-10-25): the largest compressible file was
 124 MiB on v1.0.13 and is 1016 MiB now, the pool full rather than the
-bound reached.
+bound reached. With CF33's charge and not this policy, the 1 GiB file
+stops at 144 MiB (36 chunks), refused at the write with no page lost
+(`tools/cfs32-raw-probe.py --old`).
 
 Both rules hold on v1.0.13, so a kernel booted from an older boot
 environment reads such a file: its `extent_valid` bounds only a
