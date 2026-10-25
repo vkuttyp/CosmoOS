@@ -143,6 +143,10 @@ unsigned pagecache_reclaim(unsigned max);
  * lock write-back takes; it returns at once under the bound. */
 void pagecache_dirty_init(void);
 void pagecache_throttle(struct vnode *vn);
+/* Whether a writer would be throttled now: one load, no lock. A loop
+ * that holds a lock the throttle may not sleep under asks this between
+ * its pieces, and only then lets the lock go to be throttled. */
+bool pagecache_dirty_over(void);
 uint64_t pagecache_dirty_pages(void);
 
 #endif /* KERNEL_PAGECACHE_H */

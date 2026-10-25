@@ -503,7 +503,8 @@ and a stream's per-open state is the driver's to protect (`fsctl`'s
 result, replaced by a write and copied by a read, has its own mutex;
 the tap's and the terminal's per-open state is one atomic bit). The
 AIO ring's `PREAD`/`PWRITE` still hold `f->lock` around their loop,
-which is the position's, and never wait inside it.
+which is the position's, and never wait inside it: a `PWRITE` at the
+dirty bound lets it go between two pieces to be throttled (V40).
 
 Gaps: the assertions are `((void)0)` in release builds, as every
 `KASSERT` here is, and the behavioural test runs in both. The ring
@@ -712,7 +713,9 @@ dropped with the vnode while its size still counted them (CFS-32).
 a writer waits for that with no lock held.** `pagecache_dirty_pages()`
 counts them (`mark_dirty` and every place a dirty page is cleaned or
 dropped); `pagecache_throttle`, called by `file_write`, `aio`'s write and
-`file_pwrite` before the open file's lock and the vnode's, writes the
+`file_pwrite` before the open file's lock and the vnode's (an AIO
+`PWRITE` asks again every 64 KiB of the request, with that lock let go
+to be throttled), writes the
 writer's own file back and then sleeps on `pagecache-dirty` until the
 count is under `pagecache_limit() / 2` (bounded at 5 s). The sleep is a
 lockdep completion class, so a wait under a lock its wakers hold is a
@@ -723,7 +726,10 @@ has at most the bound and one write's pages dirty on its mount; main
 had all 1024), `pagecache-dirty-bound` (the cache limit lowered to 256
 pages: 2048 pages written with at most the bound dirty, and a writer
 behind another file's dirty pages asleep until their sync wakes it, the
-wait and the wake seen by lockdep) and `test-fill`
+wait and the wake seen by lockdep), `aio-pwrite-dirty` (the same
+lowered limit, write-back off: one AIO `PWRITE` of 256 pages leaves at
+most the bound and 16 pages dirty; throttled only before its loop, it
+left all 256) and `test-fill`
 (`tests/boot/fill_test.py`, stage `writer`: 512 MiB written with no sync
 on a 256 MiB guest, nothing killed).
 

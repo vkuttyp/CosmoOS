@@ -833,7 +833,11 @@ none. Under the bound the throttle is one load.
 Where it is called is the rule. `file_write` and `aio`'s write call
 `file_throttle` before they take the open file's lock, and `file_pwrite`
 calls it at its top; `file_pwrite_held` is the write for a caller that
-holds `f->lock` and throttled first. The open file's lock is held across
+holds `f->lock` and throttled first. An AIO `PWRITE` has no size cap and
+holds `f->lock` across its pieces, so it also asks `pagecache_dirty_over`
+(one load) once per `IO_BOUNCE_MAX` (64 KiB) of the request, as often as
+a `write` is throttled, and over the bound lets the lock go between two
+pieces to be throttled. The open file's lock is held across
 write-back (`file_sync` takes it, then the vnode lock, then writes), so a
 writer asleep under it would be waiting on a wake that lock can hold up.
 The sleep is a lockdep completion class (`pagecache-dirty`; L21): each

@@ -604,6 +604,11 @@ void pagecache_throttle(struct vnode *vn)
     }
 }
 
+bool pagecache_dirty_over(void)
+{
+    return dirty_over();
+}
+
 uint64_t pagecache_dirty_pages(void)
 {
     return __atomic_load_n(&g_dirty, __ATOMIC_RELAXED);

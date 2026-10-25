@@ -13,6 +13,7 @@
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/pagecache.h>
 #include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
@@ -163,13 +164,25 @@ static bool runnable(const struct aio_req *q)
 static int64_t file_io(struct file *f, bool write, uint64_t addr, bool user, size_t len, uint64_t off)
 {
     char tmp[1024];
-    size_t done = 0;
+    size_t done = 0, asked = 0;   /* `asked`: where the bound was last asked about */
     int64_t rc = 0;
     if (write)
-        file_throttle(f);   /* before f->lock (MEM-9) */
+        file_throttle(f);   /* before f->lock (MEM-9), and again below between pieces */
     mutex_lock(&f->lock);
     while (done < len) {
         size_t n = len - done < sizeof(tmp) ? len - done : sizeof(tmp);
+        if (write && done - asked >= IO_BOUNCE_MAX) {
+            /* The request has no size cap, so the bound is met inside it
+             * too. Asked as often as a write(2) is, once per IO_BOUNCE_MAX
+             * of it: the throttle sleeps with no lock held, and between
+             * two pieces the open file's lock is free to let go (MEM-9). */
+            asked = done;
+            if (pagecache_dirty_over()) {
+                mutex_unlock(&f->lock);
+                file_throttle(f);
+                mutex_lock(&f->lock);
+            }
+        }
         if (write) {
             if (!user) {
                 memcpy(tmp, (const void *)(uintptr_t)(addr + done), n);
