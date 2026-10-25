@@ -143,7 +143,8 @@ a 1 GiB pool with a 4 MiB `dd ... conv=fsync` per chunk (`make
 test-large`, x86-64, 2026-10-25): the largest compressible file was
 124 MiB on v1.0.13 and is 1016 MiB now, the pool full rather than the
 bound reached. With CF33's charge and not this policy, the 1 GiB file
-stops at 144 MiB (36 chunks), refused at the write with no page lost
+stops at 144 to 148 MiB (36 or 37 chunks, three runs on both arches),
+refused at the write with no page lost
 (`tools/cfs32-raw-probe.py --old`).
 
 Both rules hold on v1.0.13, so a kernel booted from an older boot
