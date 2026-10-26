@@ -568,7 +568,8 @@ requires the two `SHA256SUMS` to be equal before it publishes.
 
 1. `image`: the CI images for the tag's `ci/Dockerfile` (as in CI).
 2. `build` (x86-64 and AArch64, copies `a` and `b`, four jobs): the
-   release key from the secret `COSMOOS_RELEASE_KEY` into a 0600 file
+   release key from the `release` environment's secret
+   `COSMOOS_RELEASE_KEY` (below) into a 0600 file
    (`scripts/release-key.sh`, which refuses a key whose public half is
    not the one `tools/keys/*.pub`), then `make SIGNING=release
    MODSIGN_KEY=<it> KEYRING_PUBS=tools/keys/<release>.pub release`.
@@ -663,10 +664,17 @@ covers the quiet months between them.
    (`https://vkuttyp.github.io/CosmoOS/repo/<arch>/INDEX.90`).
 
 A release (a tag without a hyphen) must point at a commit on main (job
-`guard`); a pre-release may be any head. The key itself is a repository
-secret, which any workflow pushed by someone with write access can read;
-moving it to a GitHub environment with required reviewers would close
-that, and is the owner's to set up (inventory 2.9).
+`guard`); a pre-release may be any head. The key itself is a secret of
+the GitHub environment `release` (BUILD-2), not of the repository, so a
+workflow pushed on a branch cannot read it: only the jobs that name the
+environment (`release.yml`'s `build`, `acceptance` and `publish`;
+`repository.yml`'s `publish`) get it, and the environment admits them
+only from a `v*` tag or from main (its deployment rules). Until
+2026-10-27 it was a repository secret, which any workflow pushed by
+someone with write access could read (inventory 2.9). The environment's
+settings are the owner's (repository settings, Environments): adding a
+required reviewer there makes every job that reads the key wait for an
+approval, the weekly re-signing included.
 
 The release key's public half is the only `tools/keys/*.pub`
 (`tools/keys/README.md`); developer builds keep their per-machine key

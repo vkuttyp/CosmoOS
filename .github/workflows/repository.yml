@@ -24,8 +24,10 @@
 # - by hand (workflow_dispatch) with a release tag: publish it again, or
 #   without one: the weekly step now.
 #
-# Secret: COSMOOS_RELEASE_KEY, the release workflow's. Here it signs each
-# INDEX and nothing else, and it never leaves the job's filesystem.
+# Secret: COSMOOS_RELEASE_KEY, the `release` environment's (BUILD-2; as in
+# release.yml). Here it signs each INDEX and nothing else, and it never
+# leaves the job's filesystem. The environment admits a run from main or a
+# `v*` tag only, so a dispatch from another branch cannot read it.
 
 name: Package repository
 
@@ -36,9 +38,6 @@ on:
         type: string
         required: false
         default: ''
-    secrets:
-      COSMOOS_RELEASE_KEY:
-        required: true
   workflow_dispatch:
     inputs:
       tag:
@@ -62,6 +61,7 @@ jobs:
   publish:
     name: publish the package repository
     runs-on: ubuntu-24.04
+    environment: release   # the release key (BUILD-2)
     timeout-minutes: 20
     steps:
       # main's publisher, whatever started the job: a pre-release (any
