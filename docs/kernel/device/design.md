@@ -217,7 +217,17 @@ a referenced pointer.
 Roadmap M2. A disk's GUID Partition Table is read by `gpt_parse`
 (`kernel/block/gpt.c`), a parser with no kernel dependencies that reads
 through a callback, so the host tests, the fuzzer (`fuzz_gpt`) and the
-installer link the same file. A table is accepted only whole: a
+installer link the same file. Since 2026-10-26 the parser and writer are
+written in Nova, a memory-safe language compiled to C: `gpt.c` is Nova's
+generated C, checked in so the build needs no Nova compiler, with Nova's
+runtime (`kernel/include/nova/rt.h`, `kernel/nova/`). Every index, length
+and arithmetic step is checked; a failed check is a kernel panic naming
+the Nova source line (`kernel/nova/nova_panic.c`), never a read or write
+outside the buffers. Do not edit `gpt.c`: change the Nova source and
+regenerate it (Nova's `integrations/cosmoos/c9/vendor.py`; the method and
+the comparison against the C original are Nova's
+`docs/cosmoos/c9-report.md`). The checks, their order and their reasons
+are the C original's. A table is accepted only whole: a
 protective MBR (an `0xEE` record; without one the disk is "not GPT",
 which is not an error), a primary header at LBA 1 and a backup on the
 last sector, each with a valid CRC, a revision 1.x, a size of 92 bytes
