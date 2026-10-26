@@ -2614,6 +2614,26 @@ static void down_race_nd_resolve(void *arg)
     __atomic_store_n(&r->done, 1u, __ATOMIC_RELEASE);
 }
 
+/* TEST-3's control: armed for the test's interface, the hook must let a
+ * caller on another interface through (a debug boot's eth0 traffic, here a
+ * resolve on a decoy). True if that caller parked instead -- the arming
+ * taken by the wrong caller, so the test's own caller would run unparked. */
+static bool down_race_decoy_parked(struct down_race *decoy, void (*fn)(void *), bool (*parked)(void),
+                                   void (*release)(void))
+{
+    decoy->done = 0;
+    struct thread *t = thread_create(fn, decoy, "neighdecoy", SCHED_PRIO_DEFAULT);
+    if (t == NULL)
+        return false;
+    uint64_t give_up = clock_now_ns() + NS_PER_SEC;
+    while (!__atomic_load_n(&decoy->done, __ATOMIC_ACQUIRE) && !parked() && clock_now_ns() < give_up)
+        sched_yield();
+    bool took = parked();
+    release();   /* whichever way it went, the decoy finishes */
+    thread_join(t);
+    return took;
+}
+
 /* Run `fn` on a thread parked at the hook, take the interface down while
  * it is parked, release it and join. False if it never parked. */
 static bool down_race_run(struct down_race *r, void (*fn)(void *), bool (*parked)(void), void (*release)(void))
@@ -2649,6 +2669,29 @@ bool selftest_net_neigh_down_race(const char **reason)
     r.ip6 = peer6;
     uint8_t mac[ETH_ALEN];
     struct arp_stats a0, a1;
+
+    /* 0. The control (TEST-3): armed for ndown0, a resolve on a decoy
+     * interface passes the hook, ARP's and ND's alike. Parking whichever
+     * caller came first let eth0's own ARP work take the park in a debug
+     * boot while the test's resolve ran unparked (flakes.md). */
+    static struct dual_nif decoy;
+    dual_nif_init(&decoy, "ndecoy0", 0x2e, htonl(0x0a4e0001));   /* 10.78.0.1/24 */
+    CHECK(nt_netif_register(&decoy.nif) == 0);
+    struct down_race dr = { .nif = &decoy.nif, .ip4 = htonl(0x0a4e0002) };
+    const struct in6_addr decoy6 = { { 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4e, 2 } };
+    dr.ip6 = decoy6;
+    arp_test_hold_lock_entry(true);
+    bool arp_decoy = down_race_decoy_parked(&dr, down_race_arp_resolve, arp_test_lock_entry_parked,
+                                            arp_test_release_lock_entry);
+    arp_test_hold_lock_entry(false);
+    nd_test_hold_lock_entry(true);
+    bool nd_decoy = down_race_decoy_parked(&dr, down_race_nd_resolve, nd_test_lock_entry_parked,
+                                           nd_test_release_lock_entry);
+    nd_test_hold_lock_entry(false);
+    nt_netif_unregister(&decoy.nif);
+    kobject_put(&decoy.nif.obj);
+    CHECK(!arp_decoy);   /* the old hook: the decoy's resolve took the park meant for ndown0 */
+    CHECK(!nd_decoy);
 
     /* 1. ARP input racing the down: the request's asker must not be learned. */
     arp_get_stats(&a0);
