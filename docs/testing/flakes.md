@@ -5104,3 +5104,37 @@ Not a CosmoOS defect and not a bound to widen, as for `syscall-fuzz` on
 2026-10-23: each bound is what its test claims on a host not running
 another project's builds beside QEMU. A matrix whose boots fail together
 like this is rerun on a quiet host, and the rerun is the one recorded.
+
+## `test-crash` (x86-64) over its 180 s timeout, 2026-10-26
+
+Two consecutive merges to main failed `build, boot, analyze (x86_64,
+stress)` in its "Panic path test" step the same way: `make test-crash`
+`timed out after 180s` (`boot-test: FAIL after 184.0s`) with every panic
+marker missing, after all 514 self-tests. The deliberate fault after
+`SELFTEST: PASS` was never reached. The harness verdict is the timeout.
+
+| run (attempt) | head | verdict | self-tests summed | `cosmofs-replay` | `irqpoll-boost` |
+| --- | --- | --- | --- | --- | --- |
+| 40323876091 (1), job 121576203801 | `dc1d5166`, the merge of #458 (docs only: the license) | `timed out after 180s` | 173.0 s | 25.5 s | ok (306 ms) |
+| 40360512423 (1), job 121704473905 | `68925d14`, the merge of #459 (the GPT parser generated from Nova) | `timed out after 180s` | 172.8 s | 26.2 s | FAIL: `gap_ms <= BOOST_GAP_MS` at line 111 (325 ms), the entry for this test above |
+| 40360512423 (2), job 121749771931 | `68925d14`, rerun of the failed job | PASS in 142.7 s | | | |
+
+**Not #459.** The first failure is on the merge before it, whose kernel
+had the C parser; `blk-gpt` passed in both failing boots (144 and 143 ms),
+no `nova panic` line appears, and the failed job passed when rerun on the
+same commit. #459's own CI run (40343135060, head `b383e45f`) passed this
+boot in 164.5 s.
+
+**The trend.** The 2026-10-20 widening note above measured x86-64's crash
+boot at a median of 153.2 s and at most 158.6 s over 41 runs, and kept
+x86-64 at 180 s. Passing x86-64 crash boots on main since: 181.4 s on
+`118e47b7` (run 40307965678, job 121522543588), the merge of #457, and
+164.5 s on #459's run. The self-test totals of the two timeouts,
+172.8-173.0 s, put the whole boot past 180 s by the AArch64 entry's fit
+(boot ≈ 1.115 x self-tests - 2.8 s ≈ 190 s). That is where AArch64 stood
+before its widening: x86-64's crash boot now passes with under 1 % to
+spare and fails when the runner is slow, the second failure also slowing
+`irqpoll-boost` past its bound. The candidate, under the keep / restate /
+widen-and-label rule, is `CRASH_TIMEOUT` (240 s) for x86-64 `test-crash`
+and `test-wxn` as for AArch64; left to the owner. The failed job was
+rerun.
