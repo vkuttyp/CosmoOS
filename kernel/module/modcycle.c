@@ -34,9 +34,46 @@ static void snapshot(struct module_cycle_count *c)
     lockdep_get_stats(&locks);
     c->modules = module_count();
     c->heap_objects = heap.live_objects;
+    c->large_pages = heap.large_pages;
     c->vm_regions = vm.regions;
     c->anon_pages = vm.anon_pages;
     c->lock_classes = locks.classes;
+}
+
+static bool counts_equal(const struct module_cycle_count *a, const struct module_cycle_count *b)
+{
+    return a->modules == b->modules && a->heap_objects == b->heap_objects && a->large_pages == b->large_pages &&
+           a->vm_regions == b->vm_regions && a->anon_pages == b->anon_pages;
+}
+
+#define SETTLE_STEP_NS 10000000ULL   /* 10 ms between readings */
+
+/* The counts are machine-wide, and the network's workers (a DHCP
+ * exchange, a neighbour entry) allocate while a run goes on. The baseline
+ * is two equal readings 10 ms apart; the last reading is taken again until
+ * it equals the baseline, for MODULE_CYCLE_SETTLE_MS at most. A buffer
+ * held for a moment is gone by then; a leak never is (design.md, "Load
+ * and unload in cycles"). */
+static void snapshot_quiet(struct module_cycle_count *c)
+{
+    snapshot(c);
+    for (unsigned waited = 0; waited < MODULE_CYCLE_SETTLE_MS; waited += 10) {
+        struct module_cycle_count again;
+        thread_sleep_ns(SETTLE_STEP_NS);
+        snapshot(&again);
+        if (counts_equal(&again, c))
+            return;
+        *c = again;
+    }
+}
+
+static void snapshot_until(struct module_cycle_count *c, const struct module_cycle_count *want)
+{
+    snapshot(c);
+    for (unsigned waited = 0; waited < MODULE_CYCLE_SETTLE_MS && !counts_equal(c, want); waited += 10) {
+        thread_sleep_ns(SETTLE_STEP_NS);
+        snapshot(c);
+    }
 }
 
 bool module_cycle(const void *file, size_t size, const char *origin, unsigned count, unsigned hold_ms,
@@ -47,7 +84,7 @@ bool module_cycle(const void *file, size_t size, const char *origin, unsigned co
         /* The baseline is taken after one cycle: what the first load makes
          * once and every later one reuses is not a leak. */
         if (i == 1)
-            snapshot(&out->before);
+            snapshot_quiet(&out->before);
         struct module *m = NULL;
         int rc = module_load(file, size, origin, &m);
         if (rc != 0) {
@@ -72,14 +109,12 @@ bool module_cycle(const void *file, size_t size, const char *origin, unsigned co
         out->cycles++;
     }
     if (count < 2)
-        snapshot(&out->before);
-    snapshot(&out->after);
+        snapshot_quiet(&out->before);
+    snapshot_until(&out->after, &out->before);
     /* lockdep's classes are reported, not judged: a callback's class is
      * named after its address, so a module whose callback lands at a new
      * address adds a class that stays (backlog LOCK-10). */
-    return out->load_failures == 0 && out->unload_failures == 0 && out->after.modules == out->before.modules &&
-           out->after.heap_objects == out->before.heap_objects && out->after.vm_regions == out->before.vm_regions &&
-           out->after.anon_pages == out->before.anon_pages;
+    return out->load_failures == 0 && out->unload_failures == 0 && counts_equal(&out->after, &out->before);
 }
 
 /* Digits to a number no larger than `max`; false for none, anything
@@ -138,11 +173,12 @@ unsigned module_cycle_boot(void)
     struct module_cycle_result r;
     bool ok = module_cycle(file, size, spec, count, hold_ms, NULL, NULL, &r);
     kinfo("modcycle: %s: %u cycles (hold %u ms): %s (load failures %u, unload failures %u, first error %d; "
-          "modules %u -> %u; kmalloc live %llu -> %llu; vm regions %llu -> %llu, anon pages %llu -> %llu; "
+          "modules %u -> %u; kmalloc live %llu -> %llu, large pages %llu -> %llu; vm regions %llu -> %llu, anon pages %llu -> %llu; "
           "lockdep classes %u -> %u)",
           spec, r.cycles, hold_ms, ok ? "PASS" : "FAIL", r.load_failures, r.unload_failures, r.first_error,
           r.before.modules, r.after.modules, (unsigned long long)r.before.heap_objects,
-          (unsigned long long)r.after.heap_objects, (unsigned long long)r.before.vm_regions,
+          (unsigned long long)r.after.heap_objects, (unsigned long long)r.before.large_pages,
+          (unsigned long long)r.after.large_pages, (unsigned long long)r.before.vm_regions,
           (unsigned long long)r.after.vm_regions, (unsigned long long)r.before.anon_pages,
           (unsigned long long)r.after.anon_pages, r.before.lock_classes, r.after.lock_classes);
     return ok ? 0 : 1;

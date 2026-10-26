@@ -188,11 +188,13 @@ unsigned module_zombie_count(void);
  * the kernel's own: not visible to a module. */
 #define MODULE_CYCLE_MAX         1000000u
 #define MODULE_CYCLE_HOLD_MAX_MS 60000u
+#define MODULE_CYCLE_SETTLE_MS   500u   /* how long a reading waits for the counts to go quiet */
 /* What a cycle run compares: machine-wide counts, taken after the first
- * cycle and after the last. */
+ * cycle and after the last, each once they are quiet. */
 struct module_cycle_count {
     unsigned modules;
     uint64_t heap_objects;   /* kmalloc's live objects */
+    uint64_t large_pages;    /* kmalloc's whole-page allocations, past KMALLOC_MAX_SLAB */
     uint64_t vm_regions;
     uint64_t anon_pages;
     unsigned lock_classes;   /* reported, not judged (backlog LOCK-10) */
@@ -209,8 +211,10 @@ struct module_cycle_result {
 typedef void (*module_cycle_live_fn)(struct module *m, unsigned cycle, void *arg);
 /* `count` loads of `file`, each unloaded at once (or after `hold_ms`).
  * True when every load and unload returned 0 and the module count,
- * kmalloc's live objects, the VM's regions and anonymous pages after the
- * last cycle equal their values after the first. Sleeps; takes g_lock
+ * kmalloc's live objects and large pages, the VM's regions and anonymous
+ * pages after the last cycle equal their values after the first (read
+ * again for up to MODULE_CYCLE_SETTLE_MS, since other threads allocate
+ * too). Sleeps; takes g_lock
  * per call, so not from a module's init or shutdown (M18). */
 bool module_cycle(const void *file, size_t size, const char *origin, unsigned count, unsigned hold_ms,
                   module_cycle_live_fn live, void *arg, struct module_cycle_result *out);

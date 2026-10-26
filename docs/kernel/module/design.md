@@ -295,7 +295,9 @@ only in the self-tests, on this tree's own fixtures. `module_cycle`
 (`kernel/module/modcycle.c`, `CONFIG_DEBUG` only) loads one module image
 and unloads it `count` times through the real loader and compares, after
 the first cycle and after the last, the module count, kmalloc's live
-objects, the VM's regions and its anonymous pages (invariant **M27**).
+objects and its whole-page allocations (those over `KMALLOC_MAX_SLAB`,
+which no slab counts), the VM's regions and its anonymous pages
+(invariant **M27**).
 The baseline follows the first cycle because what a first load makes
 once and every later load reuses is not a leak. Lockdep's class count is
 reported, not judged: a callback's class is named after its address,
@@ -306,7 +308,8 @@ Two callers. The self-test `module-cycle` runs it on `cosmotest`, with
 two controls that must fail it: an allocation leaked while the module is
 live, and an object kept past `shutdown` (a zombie). And
 `module.cycle=<archive entry>:<count>[:<hold ms>]` on the kernel command
-line runs it once at boot, right after `module_load_boot`, on any module
+line runs it once at boot, after the boot modules and the wait for DHCP
+leases (`dhcp_boot_wait`) and before the self-tests, on any module
 in the boot archive, holding each load `<hold ms>` before its unload,
 and logs one line:
 
@@ -320,10 +323,20 @@ that fails, or that cannot be parsed, counts as a failed boot, as a boot
 module that fails to load does. Release builds compile none of it; the
 call is an empty function there.
 
-The counts are machine-wide. They hold still because the hook runs
-before the self-tests and `init`, and `module-cycle` runs in the
-self-test sequence as `kmalloc`'s own test does; a check that read them
-under load elsewhere would need per-module accounting instead.
+The counts are machine-wide, and the kernel's own threads change them
+while a run goes on: the network's workers are running when the hook
+does, and a DHCP exchange or a new neighbour entry allocates. So the run
+does not take them as they fall. The baseline is a quiet sample, two
+equal readings 10 ms apart (at most `MODULE_CYCLE_SETTLE_MS`, 500 ms, of
+tries); after the last cycle the counts are read again every 10 ms
+until they equal the baseline or 500 ms have passed. A buffer some other
+thread holds for a moment is gone by then; a leak never goes. Running
+the hook after `dhcp_boot_wait` narrows what can overlap it, but nothing
+isolates it: something else that allocates for good during a run (a
+lease taken late, a route) still fails it, with the counts in the FAIL
+line to say which. Counting allocations by the module that made them
+would isolate it, at the cost of a hook in `kmalloc`'s path (backlog
+MOD-2).
 
 ## Concurrency
 

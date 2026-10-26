@@ -39,7 +39,7 @@ Open lines (struck lines are not counted):
 | cosmofs and storage | 4 | 1 | 7 | 13 | 25 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 3 | 0 | 2 | 12 | 17 |
-| Kernel modules | 1 | 0 | 0 | 0 | 1 |
+| Kernel modules | 1 | 0 | 0 | 1 | 2 |
 | Linux personality | 6 | 0 | 11 | 6 | 23 |
 | Lock validator and concurrency | 3 | 0 | 0 | 7 | 10 |
 | Memory | 1 | 0 | 1 | 7 | 9 |
@@ -53,7 +53,7 @@ Open lines (struck lines are not counted):
 | Commands | 1 | 0 | 5 | 1 | 7 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **44** | **22** | **48** | **99** | **213** |
+| **all** | **44** | **22** | **48** | **100** | **214** |
 
 ## Block devices
 
@@ -159,6 +159,8 @@ Open lines (struck lines are not counted):
 ## Kernel modules
 
 - **MOD-1** correctness, S. An object a module makes while its `init` or `shutdown` runs belongs to no module: `kobject_init` asks `module_owner_of` (`kernel/object/object.c`), which searches only the published modules, and a module is published after `init` returns and unpublished before `shutdown` runs (`kernel/module/module.c`). So such an object raises no `live_objects`, `module_unload` does not wait for it, and if it outlives the unload its release runs from freed module text. No in-tree module hands one out (the self-tests make theirs after the load); found by Nova's C8 (its report, 2026-10-25), whose first zombie control unloaded with 0 while kmalloc's live objects grew by 2 a cycle. `module-cycle` (invariant M27) is the harness for its failing test.
+
+- **MOD-2** nice-to-have, M. `module_cycle`'s counts are machine-wide (kmalloc's live objects and large pages, the VM's regions and anonymous pages), so other work that allocates for good during a run (a late DHCP lease, a neighbour entry, a route) fails a module that leaks nothing; the run only waits out allocations that are freed again (`MODULE_CYCLE_SETTLE_MS`, design.md, "Load and unload in cycles"). Count allocations by the module whose code made them instead, which needs a hook in `kmalloc`'s path that takes no lock and does no atomic read-modify-write when unarmed.
 
 ## Linux personality
 

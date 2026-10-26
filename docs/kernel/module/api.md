@@ -252,16 +252,17 @@ command line (count 1 to 1,000,000, hold 0 to 60,000 ms) and runs
 `module_cycle` on that boot-archive entry, logging one `modcycle:` line.
 Returns 1 when asked for and failed (malformed, not in the archive, or a
 failed run), else 0; `kernel_main` adds it to the boot verdict. Called
-right after `module_load_boot`. Release builds: returns 0.
+after `dhcp_boot_wait`, before the self-tests. Release builds: returns 0.
 
 ### `bool module_cycle(const void *file, size_t size, const char *origin, unsigned count, unsigned hold_ms, module_cycle_live_fn live, void *arg, struct module_cycle_result *out)` (debug builds)
 
 `count` cycles of `module_load` then `module_unload` (after `live(m,
 cycle, arg)`, when given, and `hold_ms`). Fills `out` with the cycles
 done, the load and unload failures, the first error, and the counts
-(`struct module_cycle_count`: modules, kmalloc live objects, VM regions,
-anonymous pages, lockdep classes) after the first cycle and after the
-last. True when nothing failed and every count but lockdep's is equal
+(`struct module_cycle_count`: modules, kmalloc live objects and large
+pages, VM regions, anonymous pages, lockdep classes) after the first
+cycle and after the last, each read once the counts are quiet (design,
+"Load and unload in cycles"). True when nothing failed and every count but lockdep's is equal
 (invariant M27). Sleeps; not from a module's `init` or `shutdown`
 (M18). `module_cycle_parse` splits the command line's value.
 

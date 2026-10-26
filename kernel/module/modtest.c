@@ -781,6 +781,18 @@ static void cycle_leak_one(struct module *m, unsigned cycle, void *arg)
         l->ptr[l->n++] = kmalloc(64, 0);
 }
 
+/* Its twin past the slabs: whole pages, which kmalloc counts apart from
+ * its live objects (large_pages). */
+#define CYCLE_LARGE (2 * KMALLOC_MAX_SLAB)
+
+static void cycle_leak_large(struct module *m, unsigned cycle, void *arg)
+{
+    (void)m;
+    struct cycle_leak *l = arg;
+    if (cycle >= 1 && l->n < ARRAY_SIZE(l->ptr))
+        l->ptr[l->n++] = kmalloc(CYCLE_LARGE, 0);
+}
+
 /* The second control: in the second cycle, an object whose release is
  * the module's code is taken and kept, so that unload must leave a
  * zombie. */
@@ -814,10 +826,11 @@ bool selftest_module_cycle(const char **reason)
     CHECK(module_cycle(file, size, "tests/cosmotest.ko", CYCLE_COUNT, 0, NULL, NULL, &r));
     CHECK(r.cycles == CYCLE_COUNT && r.load_failures == 0 && r.unload_failures == 0);
     CHECK(module_find("cosmotest") == NULL);
-    kinfo("selftest: module-cycle: %u cycles: modules %u -> %u, kmalloc live %llu -> %llu, vm regions %llu -> %llu, "
-          "anon pages %llu -> %llu, lockdep classes %u -> %u",
+    kinfo("selftest: module-cycle: %u cycles: modules %u -> %u, kmalloc live %llu -> %llu, large pages %llu -> %llu, "
+          "vm regions %llu -> %llu, anon pages %llu -> %llu, lockdep classes %u -> %u",
           r.cycles, r.before.modules, r.after.modules, (unsigned long long)r.before.heap_objects,
-          (unsigned long long)r.after.heap_objects, (unsigned long long)r.before.vm_regions,
+          (unsigned long long)r.after.heap_objects, (unsigned long long)r.before.large_pages,
+          (unsigned long long)r.after.large_pages, (unsigned long long)r.before.vm_regions,
           (unsigned long long)r.after.vm_regions, (unsigned long long)r.before.anon_pages,
           (unsigned long long)r.after.anon_pages, r.before.lock_classes, r.after.lock_classes);
 
@@ -830,6 +843,16 @@ bool selftest_module_cycle(const char **reason)
     CHECK(!ok);
     CHECK(leak.n == 2 && r.load_failures == 0 && r.unload_failures == 0);
     CHECK(r.after.heap_objects == r.before.heap_objects + 2);
+
+    /* Control 1b: the same past KMALLOC_MAX_SLAB, where kmalloc counts
+     * pages, not objects. */
+    leak.n = 0;
+    ok = module_cycle(file, size, "tests/cosmotest.ko", 3, 0, cycle_leak_large, &leak, &r);
+    for (unsigned i = 0; i < leak.n; i++)
+        kfree(leak.ptr[i]);
+    CHECK(!ok);
+    CHECK(leak.n == 2 && r.load_failures == 0 && r.unload_failures == 0);
+    CHECK(r.after.large_pages == r.before.large_pages + 2 * (CYCLE_LARGE / PAGE_SIZE));
 
     /* Control 2: an object that outlives shutdown makes a zombie, and the
      * run says so. The unload's wait is shortened around the one call. */
