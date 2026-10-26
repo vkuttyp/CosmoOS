@@ -2680,14 +2680,14 @@ bool selftest_net_neigh_down_race(const char **reason)
     struct down_race dr = { .nif = &decoy.nif, .ip4 = htonl(0x0a4e0002) };
     const struct in6_addr decoy6 = { { 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4e, 2 } };
     dr.ip6 = decoy6;
-    arp_test_hold_lock_entry(true);
+    arp_test_hold_lock_entry(&d.nif);   /* armed for ndown0 */
     bool arp_decoy = down_race_decoy_parked(&dr, down_race_arp_resolve, arp_test_lock_entry_parked,
                                             arp_test_release_lock_entry);
-    arp_test_hold_lock_entry(false);
-    nd_test_hold_lock_entry(true);
+    arp_test_hold_lock_entry(NULL);
+    nd_test_hold_lock_entry(&d.nif);
     bool nd_decoy = down_race_decoy_parked(&dr, down_race_nd_resolve, nd_test_lock_entry_parked,
                                            nd_test_release_lock_entry);
-    nd_test_hold_lock_entry(false);
+    nd_test_hold_lock_entry(NULL);
     nt_netif_unregister(&decoy.nif);
     kobject_put(&decoy.nif.obj);
     CHECK(!arp_decoy);   /* the old hook: the decoy's resolve took the park meant for ndown0 */
@@ -2695,9 +2695,9 @@ bool selftest_net_neigh_down_race(const char **reason)
 
     /* 1. ARP input racing the down: the request's asker must not be learned. */
     arp_get_stats(&a0);
-    arp_test_hold_lock_entry(true);
+    arp_test_hold_lock_entry(&d.nif);
     bool parked = down_race_run(&r, down_race_arp_input, arp_test_lock_entry_parked, arp_test_release_lock_entry);
-    arp_test_hold_lock_entry(false);
+    arp_test_hold_lock_entry(NULL);
     CHECK(parked);
     CHECK(!arp_lookup(&d.nif, r.ip4, mac));   /* the old order leaves the asker reachable on the down interface */
     arp_get_stats(&a1);
@@ -2706,9 +2706,9 @@ bool selftest_net_neigh_down_race(const char **reason)
     /* 2. ARP resolve racing the down: no entry, the packet freed and counted. */
     netif_set_up(&d.nif, true);
     arp_get_stats(&a0);
-    arp_test_hold_lock_entry(true);
+    arp_test_hold_lock_entry(&d.nif);
     parked = down_race_run(&r, down_race_arp_resolve, arp_test_lock_entry_parked, arp_test_release_lock_entry);
-    arp_test_hold_lock_entry(false);
+    arp_test_hold_lock_entry(NULL);
     CHECK(parked);
     CHECK(r.rc == -ENETUNREACH);   /* the old order: -EINPROGRESS, an incomplete entry with a parked packet on a down interface */
     CHECK(!arp_lookup(&d.nif, r.ip4, mac));
@@ -2717,9 +2717,9 @@ bool selftest_net_neigh_down_race(const char **reason)
 
     /* 3. ND input racing the down: the solicitation's asker must not be learned. */
     netif_set_up(&d.nif, true);
-    nd_test_hold_lock_entry(true);
+    nd_test_hold_lock_entry(&d.nif);
     parked = down_race_run(&r, down_race_nd_input, nd_test_lock_entry_parked, nd_test_release_lock_entry);
-    nd_test_hold_lock_entry(false);
+    nd_test_hold_lock_entry(NULL);
     CHECK(parked);
     netif_set_up(&d.nif, true);
     CHECK(nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS);   /* no entry: 0 would mean the asker was learned across the down */
@@ -2736,9 +2736,9 @@ bool selftest_net_neigh_down_race(const char **reason)
     struct mbuf *probe = dual_packet();
     CHECK(probe != NULL);
     CHECK(nd_resolve(&d.nif, &peer6, probe_mac, probe) == -EINPROGRESS);
-    nd_test_hold_lock_entry(true);
+    nd_test_hold_lock_entry(&d.nif);
     parked = down_race_run(&r, down_race_nd_advert, nd_test_lock_entry_parked, nd_test_release_lock_entry);
-    nd_test_hold_lock_entry(false);
+    nd_test_hold_lock_entry(NULL);
     CHECK(parked);
     netif_set_up(&d.nif, true);
     CHECK(nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS);   /* no reachable entry: the advertisement completed nothing */
@@ -2748,9 +2748,9 @@ bool selftest_net_neigh_down_race(const char **reason)
     struct ip_stats n0, n1;
     ipv6_get_stats(&n0);
     netif_set_up(&d.nif, true);
-    nd_test_hold_lock_entry(true);
+    nd_test_hold_lock_entry(&d.nif);
     parked = down_race_run(&r, down_race_nd_resolve, nd_test_lock_entry_parked, nd_test_release_lock_entry);
-    nd_test_hold_lock_entry(false);
+    nd_test_hold_lock_entry(NULL);
     CHECK(parked);
     CHECK(r.rc == -ENETUNREACH);
     ipv6_get_stats(&n1);
