@@ -3474,3 +3474,23 @@ See the [history index](README.md).
   - Backlog MOD-1 and LOCK-10, from Nova's report; MOD-2 (per-module
     accounting), from the review.
   - Report: `docs/audit/2026-10-26-n1-module-cycle-report.md`.
+- **CPU time and the CPU-time timers, in Nova (2026-10-27, roadmap 1.2
+  A5's first PR, LX-14; PR #461).**
+  - **Nova sources in tree:** `kernel/block/gpt.nova` and
+    `kernel/process/cputime.nova` sit beside the C they generate, which
+    stays checked in; `make nova` regenerates it with the pinned novac
+    (0.1.1) and CI's "Nova sources" job fails on a mismatch
+    (`docs/build/design.md`, "Nova sources").
+  - **The split:** the tick samples the interrupted thread as user or
+    system time, and a report divides the exact run time in that
+    proportion, never below an earlier report. `ITIMER_VIRTUAL`
+    (`SIGVTALRM`) and `ITIMER_PROF` (`SIGPROF`) run on those clocks;
+    the arithmetic and the timers are Nova's (`cputime.nova`), the tick's
+    hook and the rest C (`cpu_account.c`).
+  - **Two defects fixed:** `CLOCK_PROCESS_CPUTIME_ID` and
+    `CLOCK_THREAD_CPUTIME_ID` read the monotonic clock, and a process
+    lost an exited thread's CPU time (`tools/cputime-probe.py --old`).
+  - Linux `getrusage`, `times` and `wait4`'s `rusage`; `/proc/<pid>/stat`'s
+    `utime`, `stime`, `cutime` and `cstime`. Tests: lxtest's CPU-time block
+    (failing first), `test_cputime`, `fuzz_cputime`.
+  - Report: `docs/audit/2026-10-27-a5-cputime-report.md`.
