@@ -215,7 +215,8 @@ Each environment supplies its own panic hook, called when a Nova check
 fails (`kernel/nova/nova_panic.c` panics the kernel, naming the Nova line;
 `tests/host/nova_panic.c` aborts).
 
-Changing a `.nova` file needs the pinned compiler: `make nova` runs
+How to write a port, its header and its tests is
+[`nova.md`](nova.md). Changing a `.nova` file needs the pinned compiler: `make nova` runs
 `scripts/nova-gen.py`, which compiles each source with `novac build
 --profile freestanding --no-float --emit c`, adds the banner and writes
 the results. A new port is one line in the script's `PORTS`. The compiler

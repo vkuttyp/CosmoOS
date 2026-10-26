@@ -57,6 +57,7 @@ fn remaining(timer: borrow cputime_itimer, now: u64, tickNs: u64) -> u64 {
 }
 
 /// One tick's sample, then the timers.
+@context(irq)
 fn tick(ct: borrow mut cputime, user: bool, tickNs: u64) -> u32 {
     if (user) {
         ct.sample.user_ns = ct.sample.user_ns.saturatingAdd(tickNs);
@@ -139,6 +140,7 @@ fn adjust(run: u64, sample: borrow cputime_pair, reported: borrow mut cputime_pa
 
 /// Safety: cputime.h's contract: `ct` points to a live cputime whose lock the caller holds.
 @export("cputime_tick")
+@context(irq)
 unsafe fn tickC(ct: *mut cputime, user: bool, tickNs: u64) -> u32 => tick(Ptr.toBorrowMut(ct), user, tickNs);
 
 /// Safety: `ct` points to a live cputime whose lock the caller holds; `oldValue` and `oldInterval` are each null

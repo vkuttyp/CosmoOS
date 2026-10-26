@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-nova-gen.py - the C that CosmoOS's Nova sources generate (docs/build/design.md, "Nova sources").
+nova-gen.py - the C that CosmoOS's Nova sources generate (docs/build/nova.md).
 
 Some kernel code is written in Nova, a memory-safe language compiled to C
 (https://github.com/vkuttyp/Nova). Each NAME.nova sits beside the NAME.c it
@@ -11,6 +11,12 @@ generated C needs, is generated too.
   kernel/block/gpt.nova        -> kernel/block/gpt.c
   kernel/process/cputime.nova  -> kernel/process/cputime.c
   (every port)                 -> kernel/include/nova/rt.h, kernel/nova/nova_rt_core.c
+
+A port's header is normally hand-written C that the Nova source imports
+(kernel/include/kernel/cputime.h). A port whose structs and API are
+defined in Nova instead can name a generated header: novac's
+nova_exports.h (its @repr(C) types and a prototype per @export), written
+under that name with its own include guard (docs/build/nova.md).
 
 The compiler is pinned (NOVAC_VERSION): generated C is a pure function of
 the source and the compiler, so a regeneration with the pinned novac
@@ -38,11 +44,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 NOVAC_VERSION = "0.1.1"
 
-# Each port: its Nova source, the C it generates, and what that C is.
+# Each port: its Nova source, the C it generates, what that C is, and the header novac generates for it (None
+# when the port's header is hand-written C, imported by the source).
 PORTS = [
-    ("kernel/block/gpt.nova", "kernel/block/gpt.c", "The GUID Partition Table (gpt.h)"),
+    ("kernel/block/gpt.nova", "kernel/block/gpt.c", "The GUID Partition Table (gpt.h)", None),
     ("kernel/process/cputime.nova", "kernel/process/cputime.c",
-     "CPU time and the CPU-time interval timers (cputime.h)"),
+     "CPU time and the CPU-time interval timers (cputime.h)", None),
 ]
 RUNTIME = [("nova/rt.h", "kernel/include/nova/rt.h"), ("nova_rt_core.c", "kernel/nova/nova_rt_core.c")]
 
@@ -71,12 +78,19 @@ def novac() -> str:
 def generated(exe: str, work: Path) -> dict[str, str]:
     """Every generated file, by its path in the tree, as the pinned novac makes it now."""
     files: dict[str, str] = {}
-    for i, (source, target, title) in enumerate(PORTS):
+    for i, (source, target, title, header) in enumerate(PORTS):
         out = work / str(i)
         subprocess.run([exe, "build", "--profile", "freestanding", "--no-float", "--emit", "c", "-o", out, source],
                        cwd=ROOT, check=True)
         main = (out / "main.c").read_text()
         files[target] = BANNER.format(name=Path(target).name, title=title, source=source) + main
+        if header is not None:
+            # novac names every exports header's guard NOVA_EXPORTS_H; two included in one file would hide the
+            # second, so each gets a guard from its own path.
+            guard = "".join(c if c.isalnum() else "_" for c in header.upper())
+            exports = (out / "nova_exports.h").read_text().replace("NOVA_EXPORTS_H", guard)
+            files[header] = BANNER.format(name=Path(header).name, title=title + ": its C interface",
+                                          source=source) + exports
         for made, path in RUNTIME:
             text = (out / made).read_text()
             if files.setdefault(path, text) != text:
