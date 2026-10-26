@@ -1649,7 +1649,7 @@ static int64_t sys_wait(struct syscall_args *a)
         wf |= PROCESS_WAIT_CONTINUED;
     pid_t got = 0;
     int status = 0;
-    int rc = process_wait_child(pid, wf, &got, &status);
+    int rc = process_wait_child(pid, wf, &got, &status, NULL);
     if (rc)
         return rc;
     if (got != 0 && a->a[1] != 0 && copy_to_user(a->a[1], &status, sizeof(status)))

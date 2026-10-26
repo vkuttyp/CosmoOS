@@ -15,6 +15,7 @@
 #define KERNEL_THREAD_H
 
 #include <kernel/completion.h>
+#include <kernel/cputime.h>
 #include <kernel/lockdep_core.h>
 #include <kernel/list.h>
 #include <kernel/signal.h>
@@ -79,6 +80,12 @@ struct thread {
     int cpu;                            /* (rq) run queue this thread belongs to */
     uint64_t slice_left_ns;             /* (rq) */
     uint64_t run_time_ns;               /* (rq) */
+    /* CPU time's user/system split (kernel/include/kernel/cputime.h): the
+     * tick's samples of this thread, written only by the tick of the CPU it
+     * runs on (atomic loads elsewhere), and the last split RUSAGE_THREAD
+     * reported, which only the thread itself reads or writes. */
+    struct cputime_pair cpu_sample;
+    struct cputime_pair cpu_reported;
     uint64_t last_start_ns;             /* (rq) */
     uint64_t ready_since_ns;            /* (rq) when it was last enqueued: the stall detector's stamp (debug) */
     uint64_t switches;                  /* (rq) times switched in */

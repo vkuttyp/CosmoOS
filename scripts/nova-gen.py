@@ -9,6 +9,7 @@ Nova compiler; only changing a .nova file does. Nova's runtime, which the
 generated C needs, is generated too.
 
   kernel/block/gpt.nova        -> kernel/block/gpt.c
+  kernel/process/cputime.nova  -> kernel/process/cputime.c
   (every port)                 -> kernel/include/nova/rt.h, kernel/nova/nova_rt_core.c
 
 The compiler is pinned (NOVAC_VERSION): generated C is a pure function of
@@ -40,6 +41,8 @@ NOVAC_VERSION = "0.1.1"
 # Each port: its Nova source, the C it generates, and what that C is.
 PORTS = [
     ("kernel/block/gpt.nova", "kernel/block/gpt.c", "The GUID Partition Table (gpt.h)"),
+    ("kernel/process/cputime.nova", "kernel/process/cputime.c",
+     "CPU time and the CPU-time interval timers (cputime.h)"),
 ]
 RUNTIME = [("nova/rt.h", "kernel/include/nova/rt.h"), ("nova_rt_core.c", "kernel/nova/nova_rt_core.c")]
 

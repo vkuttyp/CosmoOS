@@ -16,6 +16,7 @@
 #include <kernel/printf.h>
 #include <kernel/quiesce.h>
 #include <kernel/quiesce_core.h>
+#include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
@@ -1226,6 +1227,9 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
         load_sample(now_ns);
     }
     lockup_tick(frame, now_ns);
+    /* CPU time's user/system sample, and the CPU-time timers: before the
+     * run-queue lock, a leaf, since it takes the process's lock. */
+    process_cputime_tick(frame);
 
     spin_lock(&rq->lock);
     struct thread *cur = rq->current;

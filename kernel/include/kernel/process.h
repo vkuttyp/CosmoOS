@@ -13,6 +13,7 @@
 #define KERNEL_PROCESS_H
 
 #include <kernel/completion.h>
+#include <kernel/cputime.h>
 #include <kernel/cred.h>
 #include <kernel/rlimit.h>
 #include <kernel/handle.h>
@@ -314,6 +315,12 @@ struct process {
     struct mutex itimer_lock;
     uint64_t itimer_expires_ns;        /* clock_deadline_ns deadline, 0 = disarmed (atomic) */
     uint64_t itimer_interval_ns;       /* atomic */
+    /* CPU time, split into user and system time, and the CPU-time timers
+     * ITIMER_VIRTUAL and ITIMER_PROF (kernel/process/cpu_account.c; the
+     * arithmetic is Nova's, kernel/process/cputime.c). Under `lock`: the
+     * tick takes it in interrupt context, as signal_send does. A fork
+     * starts zeroed; exec keeps it all. */
+    struct cputime cputime;
     /* vfork (docs/kernel/process/design.md, "fork"): the parent waits on
      * vfork_wq until the child stops borrowing its space -- it execs or
      * its last thread is gone -- and process_vfork_release sets this. */
@@ -450,7 +457,10 @@ unsigned process_count_uid(uint32_t ruid);
 bool process_log_permitted(void);
 
 /* Collect an exited child: pid > 0 for that child, -1 for any. Returns
- * 0 with *pid_out (0 when WNOHANG found none), -ECHILD, -EINTR. */
+ * 0 with *pid_out (0 when WNOHANG found none), -ECHILD, -EINTR. A
+ * collected child's CPU time, its own children's included, is added to
+ * the caller's children's and, when `usage` is non-NULL, written there
+ * (left alone when nothing was collected). */
 #define PROCESS_WAIT_NOHANG (1u << 0)
 /* Report a child that stopped, or one that was continued, without
  * reaping it (docs/kernel/process/design.md, "Stopping"). Both are
@@ -458,7 +468,7 @@ bool process_log_permitted(void);
  * with NOHANG does not spin on the same one. */
 #define PROCESS_WAIT_UNTRACED (1u << 1)
 #define PROCESS_WAIT_CONTINUED (1u << 2)
-int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out);
+int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out, struct cputime_pair *usage);
 
 /* Terminate `p` asynchronously with status 128 + sig. */
 void process_kill(struct process *p, int sig);
@@ -741,6 +751,29 @@ void process_itimer_set(struct process *p, uint64_t value_ns, uint64_t interval_
                         uint64_t *old_interval);
 void process_itimer_get(struct process *p, uint64_t *value, uint64_t *interval);
 void process_itimer_stop(struct process *p);
+/* CPU time (kernel/process/cpu_account.c; docs/kernel/process/design.md,
+ * "CPU time").
+ * tick: the scheduler tick's sample of the thread it interrupted, by the
+ * mode `frame` was in; sends SIGVTALRM and SIGPROF when their timers fire.
+ * run_ns: the process's run time, every thread it has had, to the
+ * nanosecond. times: that run time split into user and system time, and
+ * its waited-for children's (`children` may be NULL); _locked with
+ * `p->lock` held. reap: a waited-for child's times, its own children's
+ * included, added to its parent's children and returned in `usage`
+ * (NULL: not wanted); the child has no threads left.
+ * thread_times: the calling thread's own split.
+ * cputimer_set/get: setitimer/getitimer for ITIMER_VIRTUAL (1) and
+ * ITIMER_PROF (2), as process_itimer_set/get; false for another `which`. */
+void process_cputime_tick(const struct arch_trap_frame *frame);
+uint64_t process_cpu_run_ns(struct process *p);
+void process_cpu_times(struct process *p, struct cputime_pair *self, struct cputime_pair *children);
+void process_cpu_times_locked(struct process *p, uint64_t now_ns, struct cputime_pair *self,
+                              struct cputime_pair *children);
+void process_cputime_reap(struct process *parent, struct process *child, struct cputime_pair *usage);
+void thread_cpu_times(struct cputime_pair *self);
+bool process_cputimer_set(struct process *p, unsigned which, uint64_t value_ns, uint64_t interval_ns,
+                          uint64_t *old_value, uint64_t *old_interval);
+bool process_cputimer_get(struct process *p, unsigned which, uint64_t *value, uint64_t *interval);
 void process_dump_all(void);
 
 extern const struct personality personality_native;

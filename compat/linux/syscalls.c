@@ -2680,6 +2680,16 @@ static __maybe_unused int64_t lx_arch_prctl(struct syscall_args *a)
     }
 }
 
+/* A user/system pair as struct rusage: the times truncated to the
+ * microsecond, as Linux truncates them, and the rest 0 (not kept). */
+static void rusage_from(const struct cputime_pair *t, struct lx_rusage *ru)
+{
+    memset(ru, 0, sizeof(*ru));
+    ru->ru_utime = (struct lx_timeval){ (int64_t)(t->user_ns / 1000000000ull), (int64_t)(t->user_ns % 1000000000ull / 1000) };
+    ru->ru_stime = (struct lx_timeval){ (int64_t)(t->system_ns / 1000000000ull),
+                                        (int64_t)(t->system_ns % 1000000000ull / 1000) };
+}
+
 static int64_t lx_wait4(struct syscall_args *a)
 {
     int pid = (int)a->a[0];
@@ -2699,7 +2709,8 @@ static int64_t lx_wait4(struct syscall_args *a)
         wf |= PROCESS_WAIT_UNTRACED;
     if (options & LX_WCONTINUED)
         wf |= PROCESS_WAIT_CONTINUED;
-    int rc = process_wait_child(pid, wf, &got, &status);
+    struct cputime_pair usage = { 0, 0 };   /* a stopped or continued child reports none */
+    int rc = process_wait_child(pid, wf, &got, &status, &usage);
     if (rc)
         return rc;
     if (got != 0 && a->a[1] != 0) {
@@ -2708,8 +2719,9 @@ static int64_t lx_wait4(struct syscall_args *a)
             return -EFAULT;
     }
     if (got != 0 && a->a[3] != 0) {
-        uint8_t zero[144] = { 0 };   /* struct rusage */
-        if (copy_to_user(a->a[3], zero, sizeof(zero)))
+        struct lx_rusage ru;
+        rusage_from(&usage, &ru);
+        if (copy_to_user(a->a[3], &ru, sizeof(ru)))
             return -EFAULT;
     }
     return got;
@@ -2735,7 +2747,56 @@ static int64_t lx_clock_gettime(struct syscall_args *a)
     unsigned clk = (unsigned)a->a[0];
     if (clk > LX_CLOCK_BOOTTIME)
         return -EINVAL;
+    /* The CPU-time clocks: the caller's process and thread, to the
+     * nanosecond (kernel/process/cpu_account.c). */
+    if (clk == LX_CLOCK_PROCESS_CPUTIME_ID)
+        return put_timespec(a->a[1], process_cpu_run_ns(process_current()));
+    if (clk == LX_CLOCK_THREAD_CPUTIME_ID)
+        return put_timespec(a->a[1], sched_thread_run_ns(thread_current(), clock_now_ns()));
     return put_timespec(a->a[1], clock_read(clk));
+}
+
+/* getrusage(2): the caller's process (every thread it has had), its
+ * waited-for children (with theirs), or the calling thread; only the two
+ * times are kept. */
+static int64_t lx_getrusage(struct syscall_args *a)
+{
+    struct cputime_pair self, children;
+    switch ((int)a->a[0]) {
+    case LX_RUSAGE_SELF:
+        process_cpu_times(process_current(), &self, NULL);
+        break;
+    case LX_RUSAGE_CHILDREN:
+        process_cpu_times(process_current(), &self, &children);
+        self = children;
+        break;
+    case LX_RUSAGE_THREAD:
+        thread_cpu_times(&self);
+        break;
+    default:
+        return -EINVAL;
+    }
+    struct lx_rusage ru;
+    rusage_from(&self, &ru);
+    return copy_to_user(a->a[1], &ru, sizeof(ru)) ? -EFAULT : 0;
+}
+
+/* times(2): the same four times in USER_HZ ticks, and the monotonic
+ * clock in the same ticks as the result (Linux's is jiffies since an
+ * arbitrary point; only differences between two results mean anything).
+ * A NULL buffer asks for the result alone. */
+static int64_t lx_times(struct syscall_args *a)
+{
+    if (a->a[0] != 0) {
+        struct cputime_pair self, children;
+        process_cpu_times(process_current(), &self, &children);
+        const uint64_t tick = 1000000000ull / LX_USER_HZ;
+        struct lx_tms tms = { (int64_t)(self.user_ns / tick), (int64_t)(self.system_ns / tick),
+                              (int64_t)(children.user_ns / tick), (int64_t)(children.system_ns / tick) };
+        if (copy_to_user(a->a[0], &tms, sizeof(tms)))
+            return -EFAULT;
+    }
+    return (int64_t)(clock_now_ns() / (1000000000ull / LX_USER_HZ));
 }
 
 static int64_t lx_gettimeofday(struct syscall_args *a)
@@ -3032,7 +3093,9 @@ static int64_t lx_nanosleep(struct syscall_args *a)
 static int64_t lx_clock_nanosleep(struct syscall_args *a)
 {
     unsigned clk = (unsigned)a->a[0], flags = (unsigned)a->a[1];
-    if (clk > LX_CLOCK_BOOTTIME)
+    /* Sleeping on a CPU-time clock is not built (Linux refuses the
+     * thread's too). */
+    if (clk > LX_CLOCK_BOOTTIME || clk == LX_CLOCK_PROCESS_CPUTIME_ID || clk == LX_CLOCK_THREAD_CPUTIME_ID)
         return -EINVAL;
     uint64_t ns;
     int rc = ns_from_timespec(a->a[2], &ns);
@@ -3819,8 +3882,9 @@ static void ns_to_itv(uint64_t ns, struct lx_timeval *tv)
 
 static int64_t lx_setitimer(struct syscall_args *a)
 {
-    if ((int)a->a[0] != LX_ITIMER_REAL)
-        return -EINVAL;   /* ITIMER_VIRTUAL and ITIMER_PROF are not built */
+    int which = (int)a->a[0];
+    if (which != LX_ITIMER_REAL && which != LX_ITIMER_VIRTUAL && which != LX_ITIMER_PROF)
+        return -EINVAL;
     struct lx_itimerval nv;
     uint64_t value = 0, interval = 0, ov, oi;
     if (a->a[1] != 0) {
@@ -3829,7 +3893,10 @@ static int64_t lx_setitimer(struct syscall_args *a)
         if (!itv_to_ns(&nv.it_value, &value) || !itv_to_ns(&nv.it_interval, &interval))
             return -EINVAL;
     }
-    process_itimer_set(process_current(), value, interval, &ov, &oi);
+    if (which == LX_ITIMER_REAL)
+        process_itimer_set(process_current(), value, interval, &ov, &oi);
+    else
+        (void)process_cputimer_set(process_current(), (unsigned)which, value, interval, &ov, &oi);
     if (a->a[2] != 0) {
         struct lx_itimerval old;
         ns_to_itv(ov, &old.it_value);
@@ -3842,10 +3909,12 @@ static int64_t lx_setitimer(struct syscall_args *a)
 
 static int64_t lx_getitimer(struct syscall_args *a)
 {
-    if ((int)a->a[0] != LX_ITIMER_REAL)
-        return -EINVAL;
+    int which = (int)a->a[0];
     uint64_t v, i;
-    process_itimer_get(process_current(), &v, &i);
+    if (which == LX_ITIMER_REAL)
+        process_itimer_get(process_current(), &v, &i);
+    else if (!process_cputimer_get(process_current(), (unsigned)which, &v, &i))
+        return -EINVAL;
     struct lx_itimerval cur;
     ns_to_itv(v, &cur.it_value);
     ns_to_itv(i, &cur.it_interval);
@@ -4568,6 +4637,8 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_setitimer] = lx_setitimer,
     [LX_prctl] = lx_prctl,
     [LX_getitimer] = lx_getitimer,
+    [LX_getrusage] = lx_getrusage,
+    [LX_times] = lx_times,
 #ifdef LX_alarm
     [LX_alarm] = lx_alarm,
 #endif

@@ -136,12 +136,15 @@ static void render_privs(uint32_t privs, char *out, size_t n)
 /* What `stat` and `status` both say about a process's threads, from one
  * hold of its lock. Its CPU time counts each thread's current running
  * stretch too (sched_thread_run_ns), which the scheduler charges only at
- * a switch-out; rq->lock nests inside p->lock. */
+ * a switch-out, and the threads that have left; rq->lock nests inside
+ * p->lock. `self` and `children` split it into user and system time
+ * (kernel/process/cpu_account.c). */
 struct proc_threads {
     unsigned nr_threads, live;
     int cpu;
     bool stopped;
     uint64_t run_ns;
+    struct cputime_pair self, children;
 };
 
 static void proc_threads(struct process *p, struct proc_threads *out)
@@ -151,6 +154,8 @@ static void proc_threads(struct process *p, struct proc_threads *out)
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     out->nr_threads = p->nr_threads;
     out->stopped = p->stopped;
+    out->run_ns = p->cputime.gone_run_ns;
+    process_cpu_times_locked(p, now, &out->self, &out->children);
     struct thread *t;
     list_for_each_entry(t, &p->threads, proc_link) {
         out->run_ns += sched_thread_run_ns(t, now);
@@ -272,9 +277,10 @@ static unsigned long long proc_ticks(uint64_t ns)
 /*
  * /proc/<pid>/stat, Linux's one-line record (proc(5)) through field 44,
  * which is as far as top and ps read. What this kernel does not keep
- * reads as Linux's "none": no page faults are counted, no user/system
- * split is kept (all of cpu_ns is utime), and there is no nice value
- * (priority 20, nice 0). The memory sizes are the space's own counts,
+ * reads as Linux's "none": no page faults are counted, and there is no
+ * nice value (priority 20, nice 0). utime and stime are the CPU time's
+ * split by the tick's samples, cutime and cstime the waited-for
+ * children's (kernel/process/cpu_account.c). The memory sizes are the space's own counts,
  * read under the rule exit and exec follow (P38): vsize in bytes, rss in
  * pages, both 0 once the space is gone.
  */
@@ -292,10 +298,11 @@ static int render_pid_stat(struct process *p, char *out, size_t n)
     int tpgid;
     proc_tty(sid, &tty_nr, &tpgid);
     return ksnprintf(out, n,
-                     "%u (%s) %c %u %d %d %u %d 0 0 0 0 0 %llu 0 0 0 20 0 %u 0 %llu %llu %llu "
+                     "%u (%s) %c %u %d %d %u %d 0 0 0 0 0 %llu %llu %llu %llu 20 0 %u 0 %llu %llu %llu "
                      "18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 %d 0 0 0 0 0\n",
                      p->pid, p->name, proc_state(p, &th), p->parent_pid, pgid, sid, tty_nr, tpgid,
-                     proc_ticks(th.run_ns), th.nr_threads, proc_ticks(p->start_ns),
+                     proc_ticks(th.self.user_ns), proc_ticks(th.self.system_ns), proc_ticks(th.children.user_ns),
+                     proc_ticks(th.children.system_ns), th.nr_threads, proc_ticks(p->start_ns),
                      (unsigned long long)mapped * PAGE_SIZE, (unsigned long long)resident,
                      th.cpu < 0 ? 0 : th.cpu);
 }
