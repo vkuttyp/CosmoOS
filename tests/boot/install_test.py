@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -42,6 +43,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import firmware_stall  # noqa: E402
+import stall_diag  # noqa: E402
 import mkmanifest  # noqa: E402
 import modsign  # noqa: E402
 
@@ -91,6 +93,17 @@ class Boot:
         self.command_budget = None
         env = dict(os.environ)
         env.update(env_extra)
+        base = os.path.splitext(self.log_path)[0]
+        # Evidence for a boot that misses its deadline (stall_diag.py): QEMU's
+        # trace of the virtio-rng device beside the log, and a QMP socket to
+        # ask QEMU what the CPUs were doing before the boot is killed. A test
+        # that has a QMP socket of its own keeps it; this one's path is short,
+        # as a socket's must be.
+        env.setdefault("QEMU_TRACE_LOG", base + "-trace.log")
+        if not env.get("QEMU_QMP"):
+            env["QEMU_QMP"] = os.path.join(tempfile.mkdtemp(prefix="cq"), "qmp")
+        self.qmp_path = env["QEMU_QMP"]
+        self.diag_path = base + "-diag.log"
 
         # A boot whose firmware never hands over is killed and started once
         # more; the first attempt's log is kept beside the second
@@ -98,6 +111,8 @@ class Boot:
         def launch(attempt):
             if attempt:
                 os.replace(self.log_path, os.path.splitext(self.log_path)[0] + "-stall.log")
+                if os.path.exists(env["QEMU_TRACE_LOG"]):
+                    os.replace(env["QEMU_TRACE_LOG"], os.path.splitext(self.log_path)[0] + "-stall-trace.log")
             # Each attempt's reader appends to that attempt's own buffer.
             self.buf = bytearray()
             self.deadline = time.monotonic() + timeout
@@ -187,6 +202,8 @@ class Boot:
             if self.proc.poll() is not None:
                 raise Fail(f"{self.name}: QEMU exited (code {self.proc.returncode}) waiting for {what}")
             time.sleep(0.1)
+        if getattr(self, "qmp_path", None):   # a Boot built without __init__ (test_boot_deadline.py) has none
+            stall_diag.capture(self.qmp_path, self.diag_path)
         raise Fail(f"{self.name}: no prompt after {what} before the deadline ({time.monotonic() - self.t0:.0f} s from "
                    f"launch; the last line at {self.last_line_s:.1f} s)")
 

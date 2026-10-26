@@ -286,6 +286,11 @@ void kernel_main(const struct cosmoboot_info *info)
      * as Linux's ipconfig does, so the self-tests and init start with the
      * network configured (kernel/include/kernel/net/dhcp.h). */
     dhcp_boot_wait();
+    /* Debug builds: module.cycle= loads and unloads one boot-archive
+     * module in cycles, once the leases are taken (fewer allocations to
+     * overlap its counts) and before the self-tests and init
+     * (kernel/module/modcycle.c). */
+    failed += (int)module_cycle_boot();
     faultinject_init();   /* opt/cosmo/faultinject, if the boot asked for injected faults */
 #if CONFIG_CRASH_TEST == 3 && CONFIG_LOCKDEP
     /* make test-display (x86-64, a debug build): a panic while another

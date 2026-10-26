@@ -39,8 +39,9 @@ Open lines (struck lines are not counted):
 | cosmofs and storage | 4 | 1 | 7 | 13 | 25 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 3 | 0 | 2 | 12 | 17 |
-| Linux personality | 6 | 0 | 11 | 6 | 23 |
-| Lock validator and concurrency | 2 | 0 | 0 | 7 | 9 |
+| Kernel modules | 1 | 0 | 0 | 1 | 2 |
+| Linux personality | 7 | 0 | 11 | 6 | 24 |
+| Lock validator and concurrency | 3 | 0 | 0 | 7 | 10 |
 | Memory | 1 | 0 | 1 | 7 | 9 |
 | Network | 4 | 3 | 8 | 7 | 22 |
 | Observability | 1 | 0 | 0 | 6 | 7 |
@@ -52,7 +53,7 @@ Open lines (struck lines are not counted):
 | Commands | 1 | 0 | 5 | 1 | 7 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **42** | **22** | **48** | **99** | **211** |
+| **all** | **45** | **22** | **48** | **100** | **215** |
 
 ## Block devices
 
@@ -155,6 +156,12 @@ Open lines (struck lines are not counted):
 - **DRV-16** nice-to-have, L. A display interface for programs, cursor, 3D; Wi-Fi and Bluetooth; a desktop -- when hardware and a use case exist.
 - **DRV-17** nice-to-have, M. Hot-removal of a device that is not on PCIe (a USB disk under a mounted pool is handled by its own driver's disconnect only); roadmap 1.2 B3 did PCIe (out of its scope).
 
+## Kernel modules
+
+- **MOD-1** correctness, S. An object a module makes while its `init` or `shutdown` runs belongs to no module: `kobject_init` asks `module_owner_of` (`kernel/object/object.c`), which searches only the published modules, and a module is published after `init` returns and unpublished before `shutdown` runs (`kernel/module/module.c`). So such an object raises no `live_objects`, `module_unload` does not wait for it, and if it outlives the unload its release runs from freed module text. No in-tree module hands one out (the self-tests make theirs after the load); found by Nova's C8 (its report, 2026-10-25), whose first zombie control unloaded with 0 while kmalloc's live objects grew by 2 a cycle. `module-cycle` (invariant M27) is the harness for its failing test.
+
+- **MOD-2** nice-to-have, M. `module_cycle`'s counts are machine-wide (kmalloc's live objects and large pages, the VM's regions and anonymous pages), so other work that allocates for good during a run (a late DHCP lease, a neighbour entry, a route) fails a module that leaks nothing; the run only waits out allocations that are freed again (`MODULE_CYCLE_SETTLE_MS`, design.md, "Load and unload in cycles"). Count allocations by the module whose code made them instead, which needs a hook in `kmalloc`'s path that takes no lock and does no atomic read-modify-write when unarmed.
+
 ## Linux personality
 
 - **LX-1** correctness, S. `waitpid(WCONTINUED)` can miss a continue when the child exits at once (`child_event_locked` tests EXITED first; flakes.md, three sightings).
@@ -181,6 +188,8 @@ Open lines (struck lines are not counted):
 - **LX-22** nice-to-have, S. `fchown` on a pipe or socket is `EBADF`; no time zone kept by `settimeofday`.
 - **LX-23** nice-to-have, M. glibc's dynamic linker untried; no vDSO (`AT_SYSINFO_EHDR`).
 
+- **LX-24** correctness, S. BusyBox `yes` with a 53-byte line, piped to `head -c N | md5sum`, never exits once `head` has its N bytes: `md5sum` prints, `head` exits, and `yes` runs on (state R, its stdout the pipe's write end) until killed, so the shell waits for ever. `yes abc` exits at once with `Broken pipe` at every size tried (1000 B to 200 MiB); the 53-byte line hangs at 10 MB and 200 MiB, every time. Seen on v1.0.14-rc1 and on v1.0.13 (Parallels, aarch64, 2026-10-26), so not v1.0.14's. `pipe_ring_write` returns `-EPIPE` once the readers are gone and no write raises SIGPIPE here; what `yes` gets back instead is not yet known.
+
 ## Lock validator and concurrency
 
 - **LOCK-1** correctness, M. lockdep's writer under general NMI/#MC entry, and cross-CPU raw-lock wait cycles, are undefined (same-CPU re-entry fails stop).
@@ -192,6 +201,7 @@ Open lines (struck lines are not counted):
 - **LOCK-7** nice-to-have, M. Ticket or MCS spinlocks, only with measurements.
 - **LOCK-8** nice-to-have, M. Completion edges not modelled: a signaller taking a mutex before `complete()`, one blocked in another wait, the network worker's barrier.
 - **LOCK-9** correctness, S. Release boots warn `mutex PI: donation chain cycle -- a lock-order violation` (`mutex.c`) while `/etc/rc` starts services (`svc` starting `greeter`), in some boots of the installed system on both architectures since at least the B1 branches (2026-10-20); unattributed, no backtrace in release; a debug boot of the installed system would name the chain. Roadmap 1.2 B3's `test-mirror` (2026-10-23, x86-64 release) saw it 53 times in one boot, while a shell loop copied `/bin/busybox` and synced, before any disk was removed.
+- **LOCK-10** correctness, S. Lockdep keeps a class for every address a callback ever had: a callback's class is named `callback %p` (`lockdep.c`, `callback_name`) and the table only grows, so each load of a module whose callback lands at a new address adds a class that stays, until the table is full ("lock class table full", and lockdep stops). Nova's C8 measured 136 -> 143 over 1,000 load/unload cycles and one per zombie (2026-10-25); an x86-64 debug boot already peaks at 481 of 512 without it (`lockdep: class table peak`, 2026-10-25). `module_cycle` reports the count and does not judge it.
 
 ## Memory
 

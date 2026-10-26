@@ -123,6 +123,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/module/modelf.c \
 	kernel/module/module.c \
 	kernel/module/modtest.c \
+	kernel/module/modcycle.c \
 	kernel/device/device.c \
 	kernel/device/dma.c \
 	kernel/device/devtest.c \

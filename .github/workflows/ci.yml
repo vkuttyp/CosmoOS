@@ -335,6 +335,12 @@ jobs:
       - name: Boot tests without an entropy device (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-entropy
 
+      # Load and unload in cycles (docs/kernel/module/design.md, M27):
+      # module.cycle= has cosmotest loaded and unloaded 1000 times at boot.
+      # Here rather than in build-and-boot, which is near its limit.
+      - name: Module load and unload cycles (debug)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-modcycle
+
   # Milestone M2's acceptance (docs/roadmap-1.0.md; docs/userland/testing.md,
   # "test-install"): the live image installs itself on a blank disk with
   # cosmo-install and the disk is checked on the host. Release builds:

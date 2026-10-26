@@ -314,6 +314,13 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^Verified boot, key [0-9a-f]{16} \(",
     r"^\[ INFO\] boot: verified boot, key [0-9a-f]{16} \(",
 ]
+# Load and unload in cycles (module.cycle= on the command line, a debug
+# build; make test-modcycle): the hook's one line says PASS for the entry
+# and the count asked for (docs/kernel/module/design.md).
+_MODCYCLE = re.search(r"(?:^| )module\.cycle=([^: ]+):(\d+)(?::\d+)?(?= |$)", os.environ.get("BOOT_CMDLINE", ""))
+if _MODCYCLE:
+    REQUIRED_MARKERS += [r"^\[ INFO\] modcycle: " + re.escape(_MODCYCLE.group(1)) + ": " + _MODCYCLE.group(2)
+                         + r" cycles \(hold \d+ ms\): PASS "]
 # The guard boot: every protection on, the guard proved live by the
 # self-test, UMIP proved from user mode (x86-64); the WARN that names an
 # absent protection must not appear.

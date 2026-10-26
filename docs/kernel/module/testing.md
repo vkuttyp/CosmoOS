@@ -71,6 +71,7 @@ fixture is absent from the archive.
 | `module-zombie-two-of-a-name` | two zombies sharing a name are both collected by **one** sweep, which the name lookup takes two calls to do |
 | `module-zombie-swept-on-every-exit` | the `-EBUSY` of a still-busy named zombie, and the `0` after a named zombie is freed, each collect the zombie nobody named (debug only: uses `module_zombie_count`) |
 | `module-slots-enospc` | exhausting the publish-slot search returns `-ENOSPC`, publishes nothing, and leaves the loader usable (debug only: uses `module_set_max_live_for_test`) |
+| `module-cycle` | 200 load/unload cycles of `cosmotest` through `module_cycle`: every load and unload 0, the module count, kmalloc's live objects, VM regions and anonymous pages after the last cycle equal to after the first (M27); control 1, two allocations leaked while the module is live: the run fails, live objects up by exactly 2; control 1b, two 16 KiB allocations (past `KMALLOC_MAX_SLAB`) leaked the same way: the run fails, large pages up by exactly 8; control 2, an object taken in the second cycle and kept: one unload `-EBUSY`, one zombie, swept by the next load once the object is put; the `module.cycle=` parser on good and bad values (debug only) |
 
 The module tests run last in the boot self-test run; the run's total is
 reported by the run itself and is not repeated here. The boot test
@@ -83,6 +84,11 @@ also requires, in every build type, the boot-loaded module's lines:
 
 (`REQUIRED_MARKERS` in `tests/boot/run_boot_test.py`), and
 `kernel_main` counts `module_load_boot` failures into the exit verdict.
+
+`module.cycle=<archive entry>:<count>[:<hold ms>]` on the command line
+cycles any module in the boot archive the same way, once, after the
+DHCP wait and before the self-tests, and logs `modcycle: <entry>: <n> cycles (hold <ms> ms):
+PASS|FAIL in <ms> ms (...)`; a FAIL fails the boot (debug builds only).
 
 ## Variants
 

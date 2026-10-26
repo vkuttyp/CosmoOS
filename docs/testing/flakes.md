@@ -4910,6 +4910,69 @@ same job on `f791de0f` and on `ffbb5f56`, which holds `3888f9da`. Two
 sightings, both x86-64, both the boot straight after an unclean or
 init-requested restart, one local and one on CI; still not attributed.
 The failed job was re-run and passed; `make test-be` locally on the same tree passed (457.7 s).
+**Third sighting, 2026-10-26:** CI, x86-64 release `make test-be` inside
+the `upgrade test (x86_64)` job (run 40271826991, job 121406134646, PR
+#457 on `25ce894e`). The `be-pending-done` boot printed the loader's
+lines up to `paging: root at 0xc39b000 (user root 0x0), 8/13 pool pages
+used` at 3.20 s and then nothing until `no prompt after the first prompt
+before the deadline (240 s from launch; the last line at 3.2 s)`. The
+boot before it, `be-pending`, ended with `poweroff` and `shutdown: exit
+status 0`, so this one was a fresh QEMU after a clean power-off, unlike
+the first two (after a kill, after an init-requested restart). The other
+18 boots of that run passed.
+**Fourth sighting, 2026-10-26:** the next run on the same PR (run
+40278254789, job 121425629775, `install test (x86_64)`, `9784daf8`):
+`test-snapshot`'s `crash-switch-after` boot, the first after
+`crash-switch` ended at its test stop and was killed, printed up to
+`paging: root at 0xc39c000 (user root 0x0), 8/13 pool pages used` at
+3.19 s and then nothing (`the last line at 3.2 s`). In the same job's
+good boots the next line is `firmware: 64-byte seed from
+EFI_RNG_PROTOCOL`, so both stopped inside the loader's call to OVMF's
+RNG, before the kernel ran. The branch changes neither the loader nor
+anything before the kernel's first line, which neither boot printed;
+its release kernel differs from main's by an empty `module_cycle_boot`.
+Two sightings in two runs of one branch is noted, not taken as
+attribution. Four sightings, all x86-64, three of them the boot after a
+kill or a restart; still not attributed. The failed job was re-run and passed (attempt 2, job 121447092656).
+Locally, x86-64 release `make test-snapshot` alternated three times each
+on `9784daf8` and on main (`8d8c96f0`), 2026-10-26 09:57-10:09: all six
+passed, in 103.6 to 135.8 s.
+**Fifth sighting, 2026-10-26:** the third run on the same PR (run
+40288077004, job 121456450054, `upgrade test (x86_64)`, `9fdd42d2`, a
+documentation commit on `9784daf8`): `test-be`'s `be-mixed-old-prep`
+boot printed up to `paging: root at 0xc3a9000 (user root 0x0), 8/13
+pool pages used` at 1.96 s and then nothing (`the last line at 2.0 s`).
+**Every one of #457's three CI runs had one; the other 57 of the last 60
+CI runs had one between them** (run 39897609921, the second sighting).
+That count reads every failed job's FAIL line in those runs (2026-10-26):
+the other early-deadline failure among them, `test-snapshot`'s
+`rollback` in run 40128407985, stopped in OVMF after a reset with no
+loader banner (TEST-21), not here. That is
+not chance, though nothing the branch changes runs before the kernel's
+first line: what differs in the loader's view is the kernel's and the
+archive's sizes (CI's kernel 5594776-5594784 bytes against v1.0.14's
+5593944), so where it places them and its page tables before it asks
+for the seed. Between `paging:` and the next line the loader does only
+the switch's range check, which would have printed, and
+`firmware_gather` (`boot/uefi/firmware.c`): `LocateProtocol` and
+`GetRNG`. OVMF's `EFI_RNG_PROTOCOL` on these machines is the virtio-rng
+device: QEMU's trace of a normal boot shows the firmware's 4-byte
+requests popped and pushed before the loader runs.
+
+**What the next sighting will carry.** `tests/boot/install_test.Boot`
+(every install-based boot: test-install, test-snapshot, test-be,
+test-pkgtx, test-encrypt and the rest) now keeps beside each boot's log
+QEMU's trace of the virtio-rng device (`boot-NAME-trace.log`,
+`QEMU_TRACE_LOG` in `scripts/qemu-run.sh`: each request, pop and push),
+and on a missed deadline asks QEMU over QMP, before the boot is killed,
+for the CPUs' registers twice a second apart, the instructions at each
+PC and the virtio-rng queue's indices (`boot-NAME-diag.log`,
+`tests/boot/stall_diag.py`). That separates the candidates: a request
+made and never answered (`inuse` 1, `last_avail_idx` past `used_idx`,
+no push after the last request in the trace) is the device or QEMU; a
+request never made, with the CPU looping or halted in the firmware, is
+the firmware's own state, which the loader's placements may have
+disturbed. Still not attributed.
 
 ## `test-be`'s `be-space` boot on an encrypted root out of time, 2026-10-24
 

@@ -260,6 +260,8 @@ host-test: $(HOST_TESTS)
 	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_firmware_stall.py
 	@echo "== $(ROOT)/tests/boot/test_boot_deadline.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_boot_deadline.py
+	@echo "== $(ROOT)/tests/boot/test_stall_diag.py"
+	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_stall_diag.py
 	@echo "== $(ROOT)/tests/boot/test_nettest_deadline.py"
 	$(Q)$(PYTHON) $(ROOT)/tests/boot/test_nettest_deadline.py
 	@echo "== $(ROOT)/tests/boot/test_usertest_sections.py"

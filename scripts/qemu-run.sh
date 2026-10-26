@@ -27,6 +27,12 @@
 #   QEMU_SEMIHOSTING  0 leaves AArch64's semihosting out: the kernel's exit
 #               is then a PSCI SYSTEM_OFF and QEMU exits 0 whatever the
 #               boot's result (make test-platforms)
+#   QEMU_TRACE_LOG  a file for QEMU's trace of the virtio-rng device: each
+#               request, what was popped and what was pushed back. The
+#               firmware's EFI_RNG_PROTOCOL reads it, so a boot stopped in
+#               the loader's GetRNG call says whether the request reached
+#               QEMU and was answered (docs/testing/flakes.md, "The kernel
+#               stopped in the firmware's RNG call"; tests/boot/install_test.py)
 #   OVMF_CODE   firmware image override
 #
 # The isa-debug-exit device lets the kernel terminate QEMU with an exit
@@ -69,6 +75,14 @@ if [ "$testdisk" != 0 ] && [ ! -f "$testdisk" ]; then
 fi
 rng_dev="-device virtio-rng-pci"
 [ "${QEMU_RNG:-1}" = "0" ] && rng_dev=""
+trace=""
+# Only where this QEMU has the events (a build without a trace backend
+# lists none): the trace is evidence, never a reason for a boot to fail.
+if [ -n "${QEMU_TRACE_LOG:-}" ] && "qemu-system-$arch" -trace help 2>/dev/null | grep -qx virtio_rng_request; then
+    trace="-trace enable=virtio_rng_* -D $QEMU_TRACE_LOG"
+fi
+# The trace pattern is QEMU's, not the shell's: no globbing from here on.
+set -f
 vcon=${QEMU_VCON:-$outdir/vcon.log}
 : > "$vcon"
 # Milestone 9: an NVMe controller with one 8 MiB namespace (the nvme
@@ -310,7 +324,7 @@ if [ "$arch" = aarch64 ]; then
         -drive if=none,id=boot,format=raw${boot_ro},file="$image" \
         -device virtio-blk-pci,drive=boot \
         $nvme_devs \
-        $rng_dev \
+        $rng_dev $trace \
         -device virtio-serial-pci \
         -chardev file,id=vcon,path="$vcon" \
         -device virtconsole,chardev=vcon \
@@ -344,7 +358,7 @@ exec ${QEMU_WRAP:-} qemu-system-x86_64 \
     -drive format=raw,file="$image" \
     $test_devs \
     $nvme_devs \
-    $rng_dev \
+    $rng_dev $trace \
     -device virtio-serial-pci \
     -chardev file,id=vcon,path="$vcon" \
     -device virtconsole,chardev=vcon \

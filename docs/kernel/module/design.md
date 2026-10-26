@@ -286,6 +286,61 @@ inside `quiesce_read_lock`). Unload clears the slot before `shutdown()`
 and the grace period that follows orders every reader's increment before
 the unloader's check (`docs/kernel/quiesce/design.md`).
 
+### Load and unload in cycles (debug builds)
+
+Nothing outside the kernel can unload a module: `module_load` and
+`module_unload` are not exported, no system call reaches them, and
+`module_load_boot` loads once per boot. So a module's `shutdown` runs
+only in the self-tests, on this tree's own fixtures. `module_cycle`
+(`kernel/module/modcycle.c`, `CONFIG_DEBUG` only) loads one module image
+and unloads it `count` times through the real loader and compares, after
+the first cycle and after the last, the module count, kmalloc's live
+objects and its whole-page allocations (those over `KMALLOC_MAX_SLAB`,
+which no slab counts), the VM's regions and its anonymous pages
+(invariant **M27**).
+The baseline follows the first cycle because what a first load makes
+once and every later load reuses is not a leak. Lockdep's class count is
+reported, not judged: a callback's class is named after its address,
+so a module whose callback lands somewhere new adds a class that stays
+(backlog LOCK-10).
+
+Two callers. The self-test `module-cycle` runs it on `cosmotest`, with
+two controls that must fail it: an allocation leaked while the module is
+live, and an object kept past `shutdown` (a zombie). And
+`module.cycle=<archive entry>:<count>[:<hold ms>]` on the kernel command
+line runs it once at boot, after the boot modules and the wait for DHCP
+leases (`dhcp_boot_wait`) and before the self-tests, on any module
+in the boot archive, holding each load `<hold ms>` before its unload,
+and logs one line:
+
+```text
+[ INFO] modcycle: tests/cosmotest.ko: 1000 cycles (hold 0 ms): PASS in 13103 ms (load failures 0, unload failures 0, ...)
+```
+
+That is the door for a module built outside the tree (Nova's C8 module):
+the loader stays unexported and the kernel does the cycling. A request
+that fails, or that cannot be parsed, counts as a failed boot, as a boot
+module that fails to load does. Release builds compile none of it; the
+call is an empty function there.
+
+The counts are machine-wide, and the kernel's own threads change them
+while a run goes on: the network's workers are running when the hook
+does, and a DHCP exchange or a new neighbour entry allocates. So the run
+does not take them as they fall. The baseline is a quiet sample, two
+equal readings 10 ms apart (at most `MODULE_CYCLE_SETTLE_MS`, 500 ms, of
+tries); after the last cycle the counts are read again every 10 ms
+until they equal the baseline or 500 ms have passed. Both limits are the
+clock's, not a count of sleeps, since a 10 ms sleep lasts longer under
+TCG, and the run reports what each reading waited (`waited A + B ms for
+quiet`). A buffer some other
+thread holds for a moment is gone by then; a leak never goes. Running
+the hook after `dhcp_boot_wait` narrows what can overlap it, but nothing
+isolates it: something else that allocates for good during a run (a
+lease taken late, a route) still fails it, with the counts in the FAIL
+line to say which. Counting allocations by the module that made them
+would isolate it, at the cost of a hook in `kmalloc`'s path (backlog
+MOD-2).
+
 ## Concurrency
 
 - `g_modules_lock` (mutex, may sleep) serialises every list mutation
