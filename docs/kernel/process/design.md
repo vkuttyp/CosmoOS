@@ -1066,9 +1066,65 @@ serialises the setters, which cancel with `timer_cancel_sync` before
 re-arming, since a second `timer_start` on a pending timer is a panic. A
 fork starts disarmed, exec keeps it (POSIX), and the last thread's exit
 cancels it synchronously (again at release, for a process that never
-ran), so no callback can reach a freed process. Only `ITIMER_REAL`:
-`ITIMER_VIRTUAL` and `ITIMER_PROF` are `-EINVAL`. A time beyond 2^62 ns
-clamps there, as Linux accepts "never".
+ran), so no callback can reach a freed process. A time beyond 2^62 ns
+clamps there, as Linux accepts "never". `ITIMER_VIRTUAL` and
+`ITIMER_PROF` run on CPU time, not on a kernel timer: "CPU time" below.
+
+### CPU time
+
+`kernel/process/cpu_account.c`, with the arithmetic and the CPU-time
+timers' state machine in Nova (`kernel/process/cputime.nova`, from which `make nova` generates
+`kernel/process/cputime.c`; the API and structs are
+`kernel/include/kernel/cputime.h`). Roadmap 1.2 A5's first PR;
+backlog LX-14. Do not edit `cputime.c`: change `cputime.nova` and run
+`make nova` (`docs/build/design.md`, "Nova sources"). A failed Nova check, which no input
+reaches (every sum saturates), would be a kernel panic naming the Nova
+line.
+
+- **The measure.** A thread's run time is exact: the scheduler charges
+  `run_time_ns` at every switch-out, and `sched_thread_run_ns` adds the
+  running stretch. A process's is its threads' plus `gone_run_ns`, the
+  run time of the threads that have left it, folded in by `thread_put`
+  under the process's lock as it unlinks them (before this, a process's
+  CPU time in `/proc` lost every thread that had exited).
+- **The split.** Which part of that ran in user mode is sampled: every
+  tick (250 Hz) charges `TICK_NS` to the thread it interrupted and to its
+  process, as user time when the trap frame came from user mode
+  (`arch_trap_frame_is_user`), as system time otherwise. A report divides
+  the exact run time in the samples' proportion and never goes below the
+  previous report of the same process (or thread): Linux's
+  `cputime_adjust`. The division is exact, a 128-bit product divided
+  bit by bit in 64-bit arithmetic (`cputime_scale`), with no compiler-rt
+  call. A process that never met a tick has its time counted as user
+  time.
+- **The timers.** `ITIMER_VIRTUAL` (`SIGVTALRM`, 26) runs on the sampled
+  user time, `ITIMER_PROF` (`SIGPROF`, 27) on user plus system time.
+  Each is an expiry on its clock and a reload interval, checked by the
+  tick after its sample; a periodic one reloads from its expiry, not
+  from the tick, so a late tick does not stretch the period. A new value
+  gets one tick added, as Linux adds one, since the first sample may
+  charge a whole tick for a fraction of one; `getitimer` reads one tick
+  for a timer due but not yet fired, so an armed timer never reads 0.
+  A value of 0 disarms and clears the interval, as `ITIMER_REAL` does
+  here (Linux keeps the interval).
+- **Locks.** The process's own spinlock guards it all. The tick takes it
+  in interrupt context before the run-queue lock (a leaf, S2), as
+  `signal_send` already does from `tty_input` and the `ITIMER_REAL`
+  callback, and sends a due signal after releasing it. A thread's sample
+  is written only by the tick of the CPU running it.
+- **Children.** A waited-for child's split, with its own children's, is
+  added to its parent's `children` by `process_wait_child`, with the
+  child's lock and then the parent's, never both; a child nobody waits
+  for is not counted, as on Linux. `wait4` returns it as the child's
+  `rusage`.
+- **Lifetime.** A fork starts at zero with both timers disarmed; exec
+  keeps everything, timers included (POSIX); nothing is left to cancel
+  at exit, since the timers are not kernel timers.
+- **Readers.** Linux's `getrusage` (`RUSAGE_SELF`, `_CHILDREN`,
+  `_THREAD`), `times`, `clock_gettime`'s `CLOCK_PROCESS_CPUTIME_ID` and
+  `CLOCK_THREAD_CPUTIME_ID` (the exact run times), `wait4`'s `rusage`,
+  and `/proc/<pid>/stat`'s `utime`, `stime`, `cutime` and `cstime`.
+  The native ABI has no call for it yet.
 
 ### The wall clock
 

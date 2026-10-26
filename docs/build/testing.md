@@ -17,6 +17,17 @@ image (`find-firmware.sh`), and that the compiler can actually produce an
 object for `x86_64-unknown-none-elf` and `x86_64-unknown-windows`. Every
 missing item is listed; the script exits 1 if any is missing.
 
+## Generated C
+
+```sh
+make nova-check
+```
+
+`scripts/nova-gen.py --check` recompiles every Nova source with the pinned
+novac and fails if a checked-in generated file differs
+(`docs/build/design.md`, "Nova sources"). CI's "Nova sources" job runs it;
+locally it needs the pinned novac.
+
 ## Link-time checks
 
 `scripts/check-kernel-elf.sh` is part of the `kernel.elf` rule. It parses

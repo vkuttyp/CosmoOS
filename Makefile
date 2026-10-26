@@ -40,6 +40,7 @@
 #   make check-tools  verify the cross toolchain is usable (and run check-secrets)
 #   make check-secrets  fail if a private or revoked module-signing key is tracked
 #   make check-docs   every subsystem in docs/README.md has its five documentation files
+#   make nova         regenerate the C of the kernel's Nova sources with the pinned novac (nova-check: compare only)
 #   make clean        remove $(OUT)
 #
 # Host and target are separate concepts throughout. See docs/build/.
@@ -50,7 +51,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -663,6 +664,14 @@ reproducible:
 
 check-docs:
 	$(Q)$(PYTHON) $(ROOT)/scripts/check-docs.py $(ROOT)
+
+# The C generated from the kernel's Nova sources (docs/build/design.md, "Nova sources"): nova
+# regenerates it with the pinned novac; nova-check only compares.
+nova:
+	$(Q)$(PYTHON) $(ROOT)/scripts/nova-gen.py
+
+nova-check:
+	$(Q)$(PYTHON) $(ROOT)/scripts/nova-gen.py --check
 
 # compile_commands.json for clangd/IDEs, using the real cross flags so
 # editor diagnostics match the build. The file is git-ignored.

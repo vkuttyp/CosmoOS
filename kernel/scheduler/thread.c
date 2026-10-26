@@ -397,6 +397,7 @@ void thread_put(struct thread *t)
     if (p != NULL) {
         arch_irq_state_t s = spin_lock_irqsave(&p->lock);
         list_remove(&t->proc_link);
+        p->cputime.gone_run_ns += t->run_time_ns;   /* final: charged at its last switch-out */
         bool last = --p->nr_threads == 0;
         bool exec_waits = p->exec_thread != NULL;
         spin_unlock_irqrestore(&p->lock, s);

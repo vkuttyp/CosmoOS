@@ -45,6 +45,8 @@ struct arch_user_regs;
 #define SIGTTIN 21
 #define SIGTTOU 22
 #define SIGURG 23
+#define SIGVTALRM 26   /* ITIMER_VIRTUAL (kernel/process/cpu_account.c) */
+#define SIGPROF 27     /* ITIMER_PROF */
 #define SIGWINCH 28
 #define SIGSYS 31
 

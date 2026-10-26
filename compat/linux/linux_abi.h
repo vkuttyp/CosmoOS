@@ -346,6 +346,10 @@ struct lx_winsize {
 #define LX_CLOCK_REALTIME_COARSE 5
 #define LX_CLOCK_MONOTONIC_COARSE 6
 #define LX_CLOCK_BOOTTIME 7
+/* The CPU-time clocks: the calling process's and thread's CPU time
+ * (kernel/process/cputime.c). */
+#define LX_CLOCK_PROCESS_CPUTIME_ID 2
+#define LX_CLOCK_THREAD_CPUTIME_ID 3
 #define LX_TIMER_ABSTIME 1
 
 /* --- sockets --- */
@@ -581,13 +585,38 @@ struct lx_timeval {
     int64_t tv_usec;
 };
 
-/* setitimer(2)/getitimer(2): ITIMER_REAL (0) is the one built. */
+/* setitimer(2)/getitimer(2): ITIMER_REAL (0) on the wall clock, and the
+ * CPU-time timers ITIMER_VIRTUAL (1) and ITIMER_PROF (2). */
 struct lx_itimerval {
     struct lx_timeval it_interval;
     struct lx_timeval it_value;
 };
 _Static_assert(sizeof(struct lx_itimerval) == 32, "struct itimerval is 32 bytes on LP64");
 #define LX_ITIMER_REAL 0
+#define LX_ITIMER_VIRTUAL 1
+#define LX_ITIMER_PROF 2
+
+/* getrusage(2)'s struct rusage: two timevals, then fourteen longs this
+ * kernel reports as 0 (it keeps no page-fault, I/O or context-switch
+ * counts, and no maximum resident size). */
+struct lx_rusage {
+    struct lx_timeval ru_utime;
+    struct lx_timeval ru_stime;
+    int64_t ru_other[14];
+};
+_Static_assert(sizeof(struct lx_rusage) == 144, "struct rusage is 144 bytes on LP64");
+#define LX_RUSAGE_SELF 0
+#define LX_RUSAGE_CHILDREN (-1)
+#define LX_RUSAGE_THREAD 1
+
+/* times(2)'s struct tms, in clock ticks of LX_USER_HZ. */
+struct lx_tms {
+    int64_t tms_utime;
+    int64_t tms_stime;
+    int64_t tms_cutime;
+    int64_t tms_cstime;
+};
+#define LX_USER_HZ 100
 
 /* statfs(2)'s struct statfs: the LP64 layout, identical on x86-64 and
  * AArch64 (120 bytes). */

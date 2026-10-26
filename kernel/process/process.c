@@ -1840,7 +1840,7 @@ static bool child_reapable(struct process *parent, int pid, unsigned flags)
     return c != NULL || !matched;
 }
 
-int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out)
+int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out, struct cputime_pair *usage)
 {
     struct process *cur = process_current();
     for (;;) {
@@ -1868,6 +1868,7 @@ int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out)
             spin_unlock_irqrestore(&cur->lock, s);
             *pid_out = c->pid;
             *status_out = c->exit_status;
+            process_cputime_reap(cur, c, usage);   /* its CPU time becomes its parent's children's */
             process_put(c);   /* the table's reference: the zombie goes */
             return 0;
         }
@@ -2239,6 +2240,7 @@ unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct c
             strlcpy(pi->name, p->name, sizeof(pi->name));
             arch_irq_state_t s = spin_lock_irqsave(&p->lock);
             pi->nr_threads = p->nr_threads;
+            pi->run_ns = p->cputime.gone_run_ns;   /* threads that have left */
             struct thread *t;
             list_for_each_entry(t, &p->threads, proc_link)
                 pi->run_ns += t->run_time_ns;

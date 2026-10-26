@@ -1,0 +1,191 @@
+// cputime.nova - CPU-time accounting in Nova: the source of kernel/process/cputime.c, which `make nova` generates
+// (docs/kernel/process/design.md, "CPU time"; scripts/nova-gen.py). The tick's user/system sample, the CPU-time
+// interval timers ITIMER_VIRTUAL and ITIMER_PROF, and the split of a measured run time into user and system time
+// that times(2), getrusage(2) and /proc report. The API and the structs are kernel/include/kernel/cputime.h,
+// imported (Nova's type-system.md §31). The caller holds the lock that guards the structs, and the tick runs this
+// in interrupt context: nothing here allocates, blocks or panics on any input, every sum that could pass 2^64
+// saturates, and `unsafe` appears only where cputime.h's pointers become references.
+
+@header("kernel/cputime.h")
+extern "C" {
+    struct cputime_pair {
+        user_ns: u64;
+        system_ns: u64;
+    }
+    struct cputime_itimer {
+        expires_ns: u64;
+        interval_ns: u64;
+    }
+    struct cputime {
+        sample: cputime_pair;
+        reported: cputime_pair;
+        gone_run_ns: u64;
+        children: cputime_pair;
+        virt: cputime_itimer;
+        prof: cputime_itimer;
+    }
+}
+
+/// cputime.h: CPUTIME_DUE_VIRT and CPUTIME_DUE_PROF, cputime_tick's result bits.
+const DUE_VIRT: u32 = 1;
+const DUE_PROF: u32 = 2;
+/// cputime.h: setitimer's `which` for the two timers (Linux's ITIMER_VIRTUAL and ITIMER_PROF).
+const ITIMER_VIRTUAL: u32 = 1;
+const ITIMER_PROF: u32 = 2;
+
+/// The reading of `which`'s clock: user time for ITIMER_VIRTUAL, user plus system time for ITIMER_PROF.
+fn clock(sample: borrow cputime_pair, which: u32) -> u64 {
+    if (which == ITIMER_VIRTUAL) { return sample.user_ns; }
+    return sample.user_ns.saturatingAdd(sample.system_ns);
+}
+
+/// Advances `timer` to `now` on its clock: true if it fired. A periodic timer reloads by its interval from its last
+/// expiry, not from `now`, so a late tick does not stretch the period; one that fell more than an interval behind
+/// fires once per tick until it catches up, as Linux's does.
+fn advance(timer: borrow mut cputime_itimer, now: u64) -> bool {
+    if (timer.expires_ns == 0 || now < timer.expires_ns) { return false; }
+    timer.expires_ns = if (timer.interval_ns == 0) 0 else timer.expires_ns.saturatingAdd(timer.interval_ns);
+    return true;
+}
+
+/// The time `timer` has left on a clock reading `now`: 0 when disarmed, and one tick, the time to the next sample,
+/// when it is due but has not fired; so never 0 when armed.
+fn remaining(timer: borrow cputime_itimer, now: u64, tickNs: u64) -> u64 {
+    if (timer.expires_ns == 0) { return 0; }
+    if (timer.expires_ns <= now) { return tickNs; }
+    return timer.expires_ns - now;
+}
+
+/// One tick's sample, then the timers.
+@context(irq)
+fn tick(ct: borrow mut cputime, user: bool, tickNs: u64) -> u32 {
+    if (user) {
+        ct.sample.user_ns = ct.sample.user_ns.saturatingAdd(tickNs);
+    } else {
+        ct.sample.system_ns = ct.sample.system_ns.saturatingAdd(tickNs);
+    }
+    var due: u32 = 0;
+    if (advance(mut ct.virt, clock(ct.sample, ITIMER_VIRTUAL))) { due = due | DUE_VIRT; }
+    if (advance(mut ct.prof, clock(ct.sample, ITIMER_PROF))) { due = due | DUE_PROF; }
+    return due;
+}
+
+/// The old setting of `timer`, then the new: a `value` of 0 disarms and clears the interval (as ITIMER_REAL does
+/// here); otherwise it fires once the clock has advanced by `value` and one tick more, since the sample that
+/// arrives first may charge a whole tick for a fraction of one (Linux adds the same tick).
+fn set(
+    timer: borrow mut cputime_itimer, now: u64, value: u64, interval: u64, tickNs: u64,
+    oldValue: borrow mut u64, oldInterval: borrow mut u64,
+) {
+    oldValue = remaining(timer, now, tickNs);
+    oldInterval = timer.interval_ns;
+    if (value == 0) {
+        timer.expires_ns = 0;
+        timer.interval_ns = 0;
+    } else {
+        timer.expires_ns = now.saturatingAdd(value).saturatingAdd(tickNs);
+        timer.interval_ns = interval;
+    }
+}
+
+/// ⌊a·b/c⌋ for a ≤ c and c > 0, which is at most b, so it fits. The product's 128 bits are kept as two 64-bit
+/// halves, from four 32×32-bit products, and divided by c a bit at a time: exact, and in 64-bit arithmetic only.
+fn scale(a: u64, b: u64, c: u64) -> u64 {
+    let mask: u64 = 0xFFFF_FFFF;
+    let ll = (a & mask) * (b & mask);
+    let lh = (a & mask) * (b >> 32);
+    let hl = (a >> 32) * (b & mask);
+    let hh = (a >> 32) * (b >> 32);
+    // The middle column, under 3·2^32: its low half joins lo, its high half carries into hi.
+    let mid = (ll >> 32) + (lh & mask) + (hl & mask);
+    var lo = (ll & mask) | (mid << 32);
+    var hi = hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
+    // hi < c, since a·b < c·2^64; so each step's remainder stays below c and the quotient fits in 64 bits.
+    var quotient: u64 = 0;
+    for (step in 0..64) {
+        let carry = hi >> 63;
+        hi = (hi << 1) | (lo >> 63);
+        lo = lo << 1;
+        quotient = quotient << 1;
+        if (carry != 0 || hi >= c) {
+            hi = hi.wrappingSub(c);
+            quotient = quotient | 1;
+        }
+    }
+    return quotient;
+}
+
+/// Linux's cputime_adjust: `run` split in the proportion of `sample`, with neither part below `reported`'s, which
+/// then holds the result. A thread or process that ran but was never sampled (it ran between ticks) has its time
+/// counted as system time if the sample is all system, else as user time.
+fn adjust(run: u64, sample: borrow cputime_pair, reported: borrow mut cputime_pair) {
+    // An earlier report already covers this much: repeat it.
+    if (reported.user_ns.saturatingAdd(reported.system_ns) >= run) { return; }
+    let total = sample.user_ns.saturatingAdd(sample.system_ns);
+    var system: u64 = 0;
+    if (sample.user_ns == 0 && sample.system_ns != 0) {
+        system = run;
+    } else if (sample.system_ns != 0) {
+        system = scale(sample.system_ns, run, total);
+    }
+    if (system < reported.system_ns) { system = reported.system_ns; }
+    var user = run - system;
+    if (user < reported.user_ns) {
+        user = reported.user_ns;
+        system = run - user;
+    }
+    reported.user_ns = user;
+    reported.system_ns = system;
+}
+
+/// Safety: cputime.h's contract: `ct` points to a live cputime whose lock the caller holds.
+@export("cputime_tick")
+@context(irq)
+unsafe fn tickC(ct: *mut cputime, user: bool, tickNs: u64) -> u32 => tick(Ptr.toBorrowMut(ct), user, tickNs);
+
+/// Safety: `ct` points to a live cputime whose lock the caller holds; `oldValue` and `oldInterval` are each null
+/// or point to storage for one u64.
+@export("cputime_itimer_set")
+unsafe fn itimerSetC(
+    ct: *mut cputime, which: u32, value: u64, interval: u64, tickNs: u64, oldValue: *mut u64, oldInterval: *mut u64,
+) -> bool {
+    if (which != ITIMER_VIRTUAL && which != ITIMER_PROF) { return false; }
+    let c = Ptr.toBorrowMut(ct);
+    let now = clock(c.sample, which);
+    var ov: u64 = 0;
+    var oi: u64 = 0;
+    if (which == ITIMER_VIRTUAL) {
+        set(mut c.virt, now, value, interval, tickNs, mut ov, mut oi);
+    } else {
+        set(mut c.prof, now, value, interval, tickNs, mut ov, mut oi);
+    }
+    if (!oldValue.isNull()) { oldValue.write(ov); }
+    if (!oldInterval.isNull()) { oldInterval.write(oi); }
+    return true;
+}
+
+/// Safety: `ct` points to a live cputime whose lock the caller holds; `value` and `interval` point to storage for
+/// one u64 each.
+@export("cputime_itimer_get")
+unsafe fn itimerGetC(ct: *cputime, which: u32, tickNs: u64, value: *mut u64, interval: *mut u64) -> bool {
+    if (which != ITIMER_VIRTUAL && which != ITIMER_PROF) { return false; }
+    let c = Ptr.toBorrow(ct);
+    let now = clock(c.sample, which);
+    if (which == ITIMER_VIRTUAL) {
+        value.write(remaining(c.virt, now, tickNs));
+        interval.write(c.virt.interval_ns);
+    } else {
+        value.write(remaining(c.prof, now, tickNs));
+        interval.write(c.prof.interval_ns);
+    }
+    return true;
+}
+
+/// Safety: `sample` and `reported` point to live pairs, `reported` not shared with anyone during the call.
+@export("cputime_adjust")
+unsafe fn adjustC(run: u64, sample: *cputime_pair, reported: *mut cputime_pair) {
+    adjust(run, Ptr.toBorrow(sample), Ptr.toBorrowMut(reported));
+}
+
+@export("cputime_scale")
+fn scaleC(a: u64, b: u64, c: u64) -> u64 => scale(a, b, c);

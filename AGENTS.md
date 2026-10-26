@@ -58,6 +58,14 @@ choosing what to do.
   Run QEMU at default priority; avoid zsh background `&` boot loops, and
   inspect QEMU's priority and nice value with `ps`.
 - State checkable facts: actual paths, functions, measurements and run IDs.
+- A `NAME.c` with a `NAME.nova` beside it is generated from Nova (its
+  banner says so): edit the `.nova` file and run `make nova` with the pinned
+  novac, never the C; commit both. `make nova-check` and CI's "Nova sources"
+  job fail on a mismatch. Before writing or changing Nova, read
+  [Writing kernel code in Nova](docs/build/nova.md): setup (the pinned
+  novac, its MCP server), the workflow, hand-written or generated headers,
+  and the kernel's rules (`unsafe` only at the boundary, no failing check
+  in interrupt context, `@context(irq)`, locks stay in C).
 
 ## Validation matrix
 

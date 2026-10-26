@@ -1,0 +1,615 @@
+// gpt.nova - The GUID Partition Table's parser and writer, in Nova: the source of kernel/block/gpt.c, which
+// `make nova` generates (docs/kernel/device/design.md, "Partitions"; scripts/nova-gen.py). It replaced the C original
+// (Nova's docs/cosmoos/c9-report.md) with the same API (kernel/include/kernel/gpt.h), the same answers, the same
+// reasons, and the same reads, writes and buffer contents. The parser reads untrusted disks: every byte it reads is bounds-checked,
+// every size computation overflow-checked, and the disk's sectors reach it only through slices of the caller's
+// scratch buffer. `unsafe` appears only where gpt.h's raw pointers become slices and references, and where the
+// caller's read callback is called.
+//
+// The layout (UEFI §5.3; gpt.c's comments): LBA 0 is a protective MBR, LBA 1 the primary header, then the
+// entry array; the backup entry array sits just before the last sector, which holds the backup header. Every
+// multi-byte field is little-endian and read byte by byte, so neither alignment nor byte order matters. The
+// result structs are gpt.h's own, imported (type-system.md §31; ADR 0014 for their arrays).
+
+@header("kernel/gpt.h")
+extern "C" {
+    struct gpt_part {
+        index: u32;
+        first_lba: u64;
+        last_lba: u64;
+        @cname ("type") kind: [u8; 16];
+        uuid: [u8; 16];
+        attrs: u64;
+    }
+    struct gpt_table {
+        disk_guid: [u8; 16];
+        first_usable: u64;
+        last_usable: u64;
+        nr_entries: u32;
+        entry_size: u32;
+        nparts: u32;
+        parts: [gpt_part; 32];
+    }
+    struct gpt_build_part {
+        index: u32;
+        first_lba: u64;
+        last_lba: u64;
+        @cname ("type") kind: [u8; 16];
+        uuid: [u8; 16];
+    }
+}
+
+/// gpt.h: GPT_MAX_PARTS, GPT_MAX_ENTRY_BYTES and GPT_SCRATCH_BYTES (a sector, then the largest entry array).
+const MAX_PARTS: u32 = 32;
+const MAX_ENTRY_BYTES: u64 = 32768;
+const SCRATCH_SECTOR: usize = 4096;
+const SCRATCH_BYTES: usize = 36864;
+/// gpt.h: GPT_BUILD_ENTRIES entries of GPT_BUILD_ENTRY_SIZE bytes in the tables gpt_build writes.
+const BUILD_ENTRIES: u32 = 128;
+const BUILD_ENTRY_SIZE: u32 = 128;
+const BUILD_ARRAY_BYTES: u32 = 16384;
+/// gpt.h: GPT_GUID_TEXT, the text form with its NUL.
+const GUID_TEXT: usize = 37;
+
+/// The UEFI EFI System Partition type, C12A7328-F81F-11D2-BA4B-00A0C93EC93B, in on-disk byte order.
+@export("gpt_type_esp")
+const TYPE_ESP: [u8; 16] = [
+    0x28,
+    0x73,
+    0x2a,
+    0xc1,
+    0x1f,
+    0xf8,
+    0xd2,
+    0x11,
+    0xba,
+    0x4b,
+    0x00,
+    0xa0,
+    0xc9,
+    0x3e,
+    0xc9,
+    0x3b,
+];
+
+/// The CosmoOS root, c9b09224-e00d-418e-846a-9f1d9a61bfd5 (chosen for CosmoOS, M2).
+@export("gpt_type_cosmo_root")
+const TYPE_COSMO_ROOT: [u8; 16] = [
+    0x24,
+    0x92,
+    0xb0,
+    0xc9,
+    0x0d,
+    0xe0,
+    0x8e,
+    0x41,
+    0x84,
+    0x6a,
+    0x9f,
+    0x1d,
+    0x9a,
+    0x61,
+    0xbf,
+    0xd5,
+];
+
+/// "EFI PART", a header's signature.
+const SIGNATURE: [u8; 8] = [0x45, 0x46, 0x49, 0x20, 0x50, 0x41, 0x52, 0x54];
+
+/// Text position of each GUID byte, in on-disk order: the first three groups are stored little-endian, so their
+/// bytes are printed back to front.
+const GUID_POSITION: [u8; 16] = [6, 4, 2, 0, 11, 9, 16, 14, 19, 21, 24, 26, 28, 30, 32, 34];
+const HEX_DIGITS: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102];
+
+// ---- CRC-32 ----
+
+/// The CRC-32 of IEEE 802.3 (reflected, polynomial 0xEDB88320), continued from `crc`. Bitwise, as gpt.c: a table
+/// would be 1 KiB of state, and the largest input is a 32 KiB entry array read once per scan.
+fn crc32Update(crc: u32, data: Slice<u8>) -> u32 {
+    var c = crc ^ 0xFFFFFFFF;
+    for (b in data) {
+        c ^= b as u32;
+        for (k in 0..8) {
+            c = if ((c & 1) != 0) (c >> 1) ^ 0xEDB88320 else c >> 1;
+        }
+    }
+    return c ^ 0xFFFFFFFF;
+}
+
+fn crc32(data: Slice<u8>) -> u32 => crc32Update(0, data);
+
+// ---- GUID text ----
+
+/// Writes `guid` as 36 characters of lowercase text and a NUL.
+fn guidFormat(guid: Slice<u8>, out: SliceMut<u8>) {
+    out[..36].fill(0x2d); // '-'
+    for (i in 0..16usize) {
+        let at = GUID_POSITION[i] as usize;
+        out[at] = HEX_DIGITS[(guid[i] >> 4) as usize];
+        out[at + 1] = HEX_DIGITS[(guid[i] & 15) as usize];
+    }
+    out[36] = 0;
+}
+
+/// A hex digit's value, or null.
+fn hexValue(c: u8) -> u8? {
+    if (c >= '0' as u8 && c <= '9' as u8) { return c - '0' as u8; }
+    if (c >= 'a' as u8 && c <= 'f' as u8) { return c - 'a' as u8 + 10; }
+    if (c >= 'A' as u8 && c <= 'F' as u8) { return c - 'A' as u8 + 10; }
+    return null;
+}
+
+/// Reads the 36-character text form, in either case, into `guid`; false, leaving `guid` alone, if `text` is not
+/// one. `text` holds the characters before the C string's NUL, at most 36.
+fn guidParse(text: Slice<u8>, guid: SliceMut<u8>) -> bool {
+    if (text.length < 36) { return false; } // C finds the NUL where a digit or a dash should be
+    for (i in 0..36usize) {
+        let dash = i == 8 || i == 13 || i == 18 || i == 23;
+        if (dash) {
+            if (text[i] != '-' as u8) { return false; }
+        } else if (hexValue(text[i]) == null) {
+            return false;
+        }
+    }
+    for (i in 0..16usize) {
+        let at = GUID_POSITION[i] as usize;
+        guid[i] = (hexValue(text[at])! << 4) | hexValue(text[at + 1])!;
+    }
+    return true;
+}
+
+// ---- The parser ----
+
+fn le32(b: Slice<u8>, at: usize) -> u32 =>
+    (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) | ((b[at + 3] as u32) << 24);
+
+fn le64(b: Slice<u8>, at: usize) -> u64 => (le32(b, at) as u64) | ((le32(b, at + 4) as u64) << 32);
+
+fn isZero(b: Slice<u8>) -> bool {
+    for (x in b) {
+        if (x != 0) { return false; }
+    }
+    return true;
+}
+
+fn same(a: Slice<u8>, b: Slice<u8>) -> bool {
+    for (i in 0..a.length) {
+        if (a[i] != b[i]) { return false; }
+    }
+    return true;
+}
+
+/// Why a table is refused (GPT_BAD).
+enum Reason {
+    HeaderSignature,
+    HeaderRevision,
+    HeaderSize,
+    HeaderCrc,
+    HeaderIsNotWhereItSaysItIs,
+    EntrySize,
+    EntryArraySize,
+    UsableRange,
+    EntryArrayOutsideTheDisk,
+    EntryArrayOverlapsTheUsableRange,
+    EntryArrayOverlapsItsHeader,
+    EntryArrayCrc,
+    SectorSize,
+    BackupHeaderIsNotOnTheLastSector,
+    BackupHeader,
+    BackupHeaderDoesNotPointAtThePrimary,
+    PrimaryAndBackupHeadersDisagree,
+    BackupEntryArrayCrc,
+    TooManyPartitions,
+    PartitionEndsBeforeItStarts,
+    PartitionOutsideTheUsableRange,
+    PartitionWithoutAUniqueGuid,
+    PartitionsOverlap,
+    TwoPartitionsShareAUniqueGuid,
+}
+
+/// The reason as gpt.c words it, for `why`: a static C string.
+fn reasonText(reason: Reason) -> StringView => match (reason) {
+    Reason.HeaderSignature => "header signature\0",
+    Reason.HeaderRevision => "header revision\0",
+    Reason.HeaderSize => "header size\0",
+    Reason.HeaderCrc => "header CRC\0",
+    Reason.HeaderIsNotWhereItSaysItIs => "header is not where it says it is\0",
+    Reason.EntrySize => "entry size\0",
+    Reason.EntryArraySize => "entry array size\0",
+    Reason.UsableRange => "usable range\0",
+    Reason.EntryArrayOutsideTheDisk => "entry array outside the disk\0",
+    Reason.EntryArrayOverlapsTheUsableRange => "entry array overlaps the usable range\0",
+    Reason.EntryArrayOverlapsItsHeader => "entry array overlaps its header\0",
+    Reason.EntryArrayCrc => "entry array CRC\0",
+    Reason.SectorSize => "sector size\0",
+    Reason.BackupHeaderIsNotOnTheLastSector => "backup header is not on the last sector\0",
+    Reason.BackupHeader => "backup header\0",
+    Reason.BackupHeaderDoesNotPointAtThePrimary => "backup header does not point at the primary\0",
+    Reason.PrimaryAndBackupHeadersDisagree => "primary and backup headers disagree\0",
+    Reason.BackupEntryArrayCrc => "backup entry array CRC\0",
+    Reason.TooManyPartitions => "too many partitions\0",
+    Reason.PartitionEndsBeforeItStarts => "partition ends before it starts\0",
+    Reason.PartitionOutsideTheUsableRange => "partition outside the usable range\0",
+    Reason.PartitionWithoutAUniqueGuid => "partition without a unique GUID\0",
+    Reason.PartitionsOverlap => "partitions overlap\0",
+    Reason.TwoPartitionsShareAUniqueGuid => "two partitions share a unique GUID\0",
+};
+
+/// Why gpt_parse did not return GPT_OK: gpt.h's results other than GPT_OK, with GPT_BAD's reason.
+enum Failure {
+    NotGpt,
+    Bad(Reason),
+    Io,
+}
+
+/// The header fields the parser uses, decoded.
+struct Header {
+    myLba: u64;
+    altLba: u64;
+    firstUsable: u64;
+    lastUsable: u64;
+    entriesLba: u64;
+    nrEntries: u32;
+    entrySize: u32;
+    entriesCrc: u32;
+    diskGuid: [u8; 16];
+}
+
+/// The disk: its sector size and count. Its sectors come from the caller's reader, `read(lba, count, buffer)`,
+/// which fills `buffer` with `count` sectors from `lba`, or fails.
+struct Disk {
+    sectorSize: u32;
+    sectors: u64;
+}
+
+/// One header, read at `lba` into `sector` and checked alone: signature, revision, size, its own CRC, where it says
+/// it is, and an entry array that lies on the disk outside the usable range. Agreement with the other copy is the
+/// caller's check.
+fn readHeader(
+    disk: borrow Disk,
+    read: borrow fn(u64, u32, SliceMut<u8>) -> bool,
+    lba: u64,
+    scratch: SliceMut<u8>,
+) -> Result<Header, Failure> {
+    let ss = disk.sectorSize;
+    let n = disk.sectors;
+    let sector = borrow mut scratch[..ss as usize];
+    if (!read(lba, 1, sector)) { return Err(Failure.Io); }
+    for (i in 0..8usize) {
+        if (sector[i] != SIGNATURE[i]) { return Err(Failure.Bad(Reason.HeaderSignature)); }
+    }
+    if (le32(sector, 8) >> 16 != 1) { return Err(Failure.Bad(Reason.HeaderRevision)); }
+    let size = le32(sector, 12);
+    if (size < 92 || size > ss) { return Err(Failure.Bad(Reason.HeaderSize)); }
+    let want = le32(sector, 16);
+    sector[16..20].fill(0);
+    if (crc32(sector[..size as usize]) != want) { return Err(Failure.Bad(Reason.HeaderCrc)); }
+    var h = Header {
+        myLba: le64(sector, 24),
+        altLba: le64(sector, 32),
+        firstUsable: le64(sector, 40),
+        lastUsable: le64(sector, 48),
+        entriesLba: le64(sector, 72),
+        nrEntries: le32(sector, 80),
+        entrySize: le32(sector, 84),
+        entriesCrc: le32(sector, 88),
+        diskGuid: [0; 16],
+    };
+    h.diskGuid[..].copyFrom(sector[56..72]);
+    if (h.myLba != lba) { return Err(Failure.Bad(Reason.HeaderIsNotWhereItSaysItIs)); }
+    if (h.entrySize < 128 || (h.entrySize & (h.entrySize - 1)) != 0) { return Err(Failure.Bad(Reason.EntrySize)); }
+    let arrayBytes = h.nrEntries as u64 * h.entrySize as u64;
+    if (h.nrEntries == 0 || arrayBytes > MAX_ENTRY_BYTES) { return Err(Failure.Bad(Reason.EntryArraySize)); }
+    let arraySectors = (arrayBytes + ss as u64 - 1) / ss as u64;
+    if (h.firstUsable > h.lastUsable || h.lastUsable >= n - 1 || h.firstUsable < 2) {
+        return Err(Failure.Bad(Reason.UsableRange));
+    }
+    if (h.entriesLba < 2 || h.entriesLba >= n || n - h.entriesLba < arraySectors) {
+        return Err(Failure.Bad(Reason.EntryArrayOutsideTheDisk));
+    }
+    let arrayEnd = h.entriesLba + arraySectors - 1;
+    if (!(arrayEnd < h.firstUsable || h.entriesLba > h.lastUsable)) {
+        return Err(Failure.Bad(Reason.EntryArrayOverlapsTheUsableRange));
+    }
+    if (h.entriesLba <= lba && lba <= arrayEnd) { return Err(Failure.Bad(Reason.EntryArrayOverlapsItsHeader)); }
+    return Ok(h);
+}
+
+/// Reads the entry array `h` describes into `scratch` after its sector, and checks its CRC. The header's checks
+/// bound it by MAX_ENTRY_BYTES, a whole number of sectors, so it fits.
+fn readEntries(
+    disk: borrow Disk,
+    read: borrow fn(u64, u32, SliceMut<u8>) -> bool,
+    h: borrow Header,
+    scratch: SliceMut<u8>,
+) -> Result<void, Failure> {
+    let buffer = borrow mut scratch[SCRATCH_SECTOR..];
+    let ss = disk.sectorSize;
+    let bytes = h.nrEntries * h.entrySize;
+    let sectors = (bytes + ss - 1) / ss;
+    if (!read(h.entriesLba, sectors, mut buffer[..(sectors * ss) as usize])) { return Err(Failure.Io); }
+    if (crc32(buffer[..bytes as usize]) != h.entriesCrc) { return Err(Failure.Bad(Reason.EntryArrayCrc)); }
+    return Ok();
+}
+
+/// gpt_parse: reads and checks both copies of the table on `disk`, and decodes the used entries into `out`.
+/// `scratch` holds a sector, then the largest entry array (GPT_SCRATCH_BYTES).
+fn parse(
+    disk: borrow Disk,
+    read: borrow fn(u64, u32, SliceMut<u8>) -> bool,
+    scratch: SliceMut<u8>,
+    out: borrow mut gpt_table,
+) -> Result<void, Failure> {
+    let ss = disk.sectorSize;
+    let n = disk.sectors;
+    if (ss != 512 && ss != 4096) { return Err(Failure.Bad(Reason.SectorSize)); }
+    // The smallest table: MBR, header, one sector of entries, one usable sector, the backup's entries and header.
+    if (n < 6) { return Err(Failure.NotGpt); }
+
+    // The protective MBR: a GPT disk says so in LBA 0 (UEFI §5.2.3). A disk without one is not a GPT disk -- blank,
+    // or something else -- and that is not an error.
+    if (!read(0, 1, mut scratch[..ss as usize])) { return Err(Failure.Io); }
+    var protective = false;
+    if (scratch[510] == 0x55 && scratch[511] == 0xAA) {
+        for (i in 0..4usize) {
+            if (scratch[446 + 16 * i + 4] == 0xEE) { protective = true; }
+        }
+    }
+    if (!protective) { return Err(Failure.NotGpt); }
+
+    let primary = readHeader(disk, read, 1, scratch)?;
+    if (primary.altLba != n - 1) { return Err(Failure.Bad(Reason.BackupHeaderIsNotOnTheLastSector)); }
+    let backup = match (readHeader(disk, read, n - 1, scratch)) {
+        Ok(h) => h,
+        Err(Failure.Bad(_)) => { return Err(Failure.Bad(Reason.BackupHeader)); } // the copy that failed, not which check
+        Err(other) => { return Err(other); }
+    };
+    if (backup.altLba != 1) { return Err(Failure.Bad(Reason.BackupHeaderDoesNotPointAtThePrimary)); }
+    if (!same(primary.diskGuid[..], backup.diskGuid[..]) || primary.firstUsable != backup.firstUsable ||
+        primary.lastUsable != backup.lastUsable || primary.nrEntries != backup.nrEntries ||
+        primary.entrySize != backup.entrySize || primary.entriesCrc != backup.entriesCrc) {
+        return Err(Failure.Bad(Reason.PrimaryAndBackupHeadersDisagree));
+    }
+
+    // Both arrays must match their CRC; equal CRCs over equal sizes say they hold the same entries. The backup is
+    // read first so that the primary's stays in the buffer for decoding.
+    match (readEntries(disk, read, backup, scratch)) {
+        Ok() => {}
+        Err(Failure.Bad(_)) => { return Err(Failure.Bad(Reason.BackupEntryArrayCrc)); }
+        Err(other) => { return Err(other); }
+    }
+    readEntries(disk, read, primary, scratch)?;
+    let entries = scratch[SCRATCH_SECTOR..];
+
+    out.disk_guid = primary.diskGuid;
+    out.first_usable = primary.firstUsable;
+    out.last_usable = primary.lastUsable;
+    out.nr_entries = primary.nrEntries;
+    out.entry_size = primary.entrySize;
+    out.nparts = 0;
+    let size = primary.entrySize as usize;
+    for (i in 0..primary.nrEntries) {
+        let e = entries[i as usize * size..i as usize * size + 128];
+        if (isZero(e[..16])) { continue; } // an unused entry
+        if (out.nparts == MAX_PARTS) { return Err(Failure.Bad(Reason.TooManyPartitions)); }
+        let count = out.nparts as usize;
+        decodeEntry(i + 1, e, mut out.parts[count]);
+        let p = borrow out.parts[count];
+        if (p.first_lba > p.last_lba) { return Err(Failure.Bad(Reason.PartitionEndsBeforeItStarts)); }
+        if (p.first_lba < primary.firstUsable || p.last_lba > primary.lastUsable) {
+            return Err(Failure.Bad(Reason.PartitionOutsideTheUsableRange));
+        }
+        if (isZero(p.uuid[..])) { return Err(Failure.Bad(Reason.PartitionWithoutAUniqueGuid)); }
+        for (j in 0..count) {
+            let q = borrow out.parts[j];
+            if (!(p.last_lba < q.first_lba || p.first_lba > q.last_lba)) {
+                return Err(Failure.Bad(Reason.PartitionsOverlap));
+            }
+            if (same(p.uuid[..], q.uuid[..])) { return Err(Failure.Bad(Reason.TwoPartitionsShareAUniqueGuid)); }
+        }
+        out.nparts += 1;
+    }
+    return Ok();
+}
+
+/// Decodes one 128-byte entry, number `index`, into `p`.
+fn decodeEntry(index: u32, e: Slice<u8>, p: borrow mut gpt_part) {
+    p.index = index;
+    p.kind[..].copyFrom(e[..16]);
+    p.uuid[..].copyFrom(e[16..32]);
+    p.first_lba = le64(e, 32);
+    p.last_lba = le64(e, 40);
+    p.attrs = le64(e, 48);
+}
+
+// ---- The writer ----
+
+fn put32(b: SliceMut<u8>, at: usize, v: u32) {
+    for (i in 0..4u32) {
+        b[at + i as usize] = truncate<u8>(v >> (8 * i));
+    }
+}
+
+fn put64(b: SliceMut<u8>, at: usize, v: u64) {
+    put32(b, at, truncate<u32>(v));
+    put32(b, at + 4, truncate<u32>(v >> 32));
+}
+
+/// gpt.h's GPT_BUILD_ARRAY_SECTORS, GPT_BUILD_HEAD_SECTORS and GPT_BUILD_TAIL_SECTORS.
+fn arraySectors(ss: u32) -> u32 => BUILD_ARRAY_BYTES / ss;
+fn headSectors(ss: u32) -> u32 => 2 + arraySectors(ss);
+fn tailSectors(ss: u32) -> u32 => arraySectors(ss) + 1;
+
+fn buildFirstUsable(ss: u32) -> u64 => headSectors(ss) as u64;
+
+/// As gpt.c computes it, in unsigned arithmetic: a disk too small for a table gives a meaningless value, which
+/// gpt_build refuses, rather than a panic in a function C callers use to size partitions.
+fn buildLastUsable(ss: u32, n: u64) -> u64 => n.wrappingSub(tailSectors(ss) as u64).wrappingSub(1);
+
+/// One header, in the first `ss` bytes of `h`.
+fn buildHeader(
+    h: SliceMut<u8>,
+    ss: u32,
+    my: u64,
+    alt: u64,
+    first: u64,
+    last: u64,
+    guid: Slice<u8>,
+    entriesLba: u64,
+    entriesCrc: u32,
+) {
+    h[..ss as usize].fill(0);
+    let signature = SIGNATURE;
+    h[..8].copyFrom(signature[..]);
+    put32(h, 8, 0x00010000);
+    put32(h, 12, 92);
+    put64(h, 24, my);
+    put64(h, 32, alt);
+    put64(h, 40, first);
+    put64(h, 48, last);
+    h[56..72].copyFrom(guid);
+    put64(h, 72, entriesLba);
+    put32(h, 80, BUILD_ENTRIES);
+    put32(h, 84, BUILD_ENTRY_SIZE);
+    put32(h, 88, entriesCrc);
+    let crc = crc32(h[..92]);
+    put32(h, 16, crc);
+}
+
+/// gpt_build's first half: zeroes both buffers and writes the protective MBR, one partition of type 0xEE over the
+/// whole disk (as much of it as 32 bits of sectors can say). False for a sector size or disk it cannot lay out.
+fn buildStart(ss: u32, n: u64, head: SliceMut<u8>, tail: SliceMut<u8>) -> bool {
+    head.fill(0);
+    tail.fill(0);
+    let record = 446usize;
+    head[record + 1] = 0x00;
+    head[record + 2] = 0x02; // CHS 0/0/2: unused, as UEFI writes it
+    head[record + 4] = 0xEE;
+    head[record + 5] = 0xFF;
+    head[record + 6] = 0xFF;
+    head[record + 7] = 0xFF;
+    put32(head, record + 8, 1);
+    put32(head, record + 12, if (n - 1 > 0xFFFFFFFF) 0xFFFFFFFF else truncate<u32>(n - 1));
+    head[510] = 0x55;
+    head[511] = 0xAA;
+    return true;
+}
+
+/// Writes one partition's entry into the primary array (at `head[2 * ss..]`); false if its index is not 1 to
+/// GPT_BUILD_ENTRIES.
+fn buildEntry(ss: u32, head: SliceMut<u8>, p: borrow gpt_build_part) -> bool {
+    if (p.index == 0 || p.index > BUILD_ENTRIES) { return false; }
+    let at = 2 * ss as usize + (p.index - 1) as usize * BUILD_ENTRY_SIZE as usize;
+    head[at..at + 16].copyFrom(p.kind[..]);
+    head[at + 16..at + 32].copyFrom(p.uuid[..]);
+    put64(head, at + 32, p.first_lba);
+    put64(head, at + 40, p.last_lba);
+    return true;
+}
+
+/// gpt_build's second half: the primary header, then the backup -- the same entries just before the last
+/// sector, and a header on the last sector that points back at the primary.
+fn buildFinish(ss: u32, n: u64, guid: Slice<u8>, head: SliceMut<u8>, tail: SliceMut<u8>) {
+    let s = ss as usize;
+    let arrayBytes = arraySectors(ss) as usize * s;
+    let crc = crc32(head[2 * s..2 * s + (BUILD_ENTRIES * BUILD_ENTRY_SIZE) as usize]);
+    let first = buildFirstUsable(ss);
+    let last = buildLastUsable(ss, n);
+    buildHeader(mut head[s..], ss, 1, n - 1, first, last, guid, 2, crc);
+    tail[..arrayBytes].copyFrom(head[2 * s..2 * s + arrayBytes]);
+    buildHeader(mut tail[arrayBytes..], ss, n - 1, 1, first, last, guid, n - 1 - arraySectors(ss) as u64, crc);
+}
+
+// ---- The C API of kernel/include/kernel/gpt.h ----
+
+/// Safety: gpt.h's contract: `data` has `len` readable bytes.
+@export("gpt_crc32_update")
+unsafe fn crc32UpdateC(crc: u32, data: *void, len: usize) -> u32 {
+    if (len == 0) { return crc; }
+    return crc32Update(crc, Slice.fromRaw(data as *u8, len));
+}
+
+/// Safety: as gpt_crc32_update.
+@export("gpt_crc32")
+unsafe fn crc32C(data: *void, len: usize) -> u32 => crc32UpdateC(0, data, len);
+
+/// Safety: gpt.h's contract: `guid` has 16 readable bytes and `out` GPT_GUID_TEXT writable ones.
+@export("gpt_guid_format")
+unsafe fn guidFormatC(guid: *u8, out: *mut CChar) {
+    guidFormat(Slice.fromRaw(guid, 16), SliceMut.fromRaw(out as *mut u8, GUID_TEXT));
+}
+
+/// Safety: gpt.h's contract: `text` is a NUL-terminated string, or has at least 36 readable bytes; `guid` has 16
+/// writable bytes. Bytes are read only up to the NUL or the 36th, whichever comes first.
+@export("gpt_guid_parse")
+unsafe fn guidParseC(text: *CChar, guid: *mut u8) -> bool {
+    let p = text as *u8;
+    var length: usize = 0;
+    while (length < 36 && p.add(length).read() != 0) { length += 1; }
+    if (length < 36) { return false; } // the NUL is not a digit or a dash; `guid` stays as it was
+    return guidParse(Slice.fromRaw(p, length), SliceMut.fromRaw(guid, 16));
+}
+
+@export("gpt_build_first_usable")
+fn buildFirstUsableC(ss: u32) -> u64 => buildFirstUsable(ss);
+
+@export("gpt_build_last_usable")
+fn buildLastUsableC(ss: u32, n: u64) -> u64 => buildLastUsable(ss, n);
+
+/// Safety: gpt.h's contract: `diskGuid` has 16 readable bytes; `parts` points to `nparts` parts; `head` and `tail`
+/// have GPT_BUILD_HEAD_SECTORS(ss) and GPT_BUILD_TAIL_SECTORS(ss) sectors, writable and not overlapping.
+@export("gpt_build")
+unsafe fn buildC(
+    ss: u32,
+    n: u64,
+    diskGuid: *u8,
+    parts: *gpt_build_part,
+    nparts: u32,
+    head: *mut u8,
+    tail: *mut u8,
+) -> bool {
+    if (ss != 512 && ss != 4096) { return false; }
+    if (n < headSectors(ss) as u64 + tailSectors(ss) as u64 + 1) { return false; }
+    let headBytes = SliceMut.fromRaw(head, (headSectors(ss) * ss) as usize);
+    let tailBytes = SliceMut.fromRaw(tail, (tailSectors(ss) * ss) as usize);
+    buildStart(ss, n, headBytes, tailBytes);
+    for (i in 0..nparts) {
+        if (!buildEntry(ss, headBytes, Ptr.toBorrow(parts.add(i as usize)))) { return false; }
+    }
+    buildFinish(ss, n, Slice.fromRaw(diskGuid, 16), headBytes, tailBytes);
+    return true;
+}
+
+/// gpt.h's enum gpt_result.
+const GPT_OK: u32 = 0;
+const GPT_NONE: u32 = 1;
+const GPT_BAD: u32 = 2;
+const GPT_IO: u32 = 3;
+
+/// Safety: gpt.h's contract: `read` is a function that reads `count` sectors of `ss` bytes from `lba` into `buf`
+/// (0 on success), given `ctx`; `scratch` has GPT_SCRATCH_BYTES writable bytes; `out` points to a table nothing
+/// else uses during the call; `why` is null or points to storage for one string pointer. The reasons written to
+/// `why` are static strings.
+@export("gpt_parse")
+unsafe fn parseC(
+    ss: u32, n: u64, read: extern "C" fn(*mut void, u64, u32, *mut void) -> i32, ctx: *mut void,
+    scratch: *mut void, out: *mut gpt_table, why: *mut *CChar,
+) -> u32 {
+    if (!why.isNull()) { why.write("\0".ptr as *CChar); }
+    let reader = (lba: u64, count: u32, buffer: SliceMut<u8>) => unsafe { read(
+        ctx,
+        lba,
+        count,
+        buffer.ptr as *mut void,
+    ) } == 0;
+    let disk = Disk { sectorSize: ss, sectors: n };
+    match (parse(disk, reader, SliceMut.fromRaw(scratch as *mut u8, SCRATCH_BYTES), Ptr.toBorrowMut(out))) {
+        Ok() => { return GPT_OK; }
+        Err(Failure.NotGpt) => { return GPT_NONE; }
+        Err(Failure.Io) => { return GPT_IO; }
+        Err(Failure.Bad(reason)) => {
+            if (!why.isNull()) { why.write(reasonText(reason).ptr as *CChar); }
+            return GPT_BAD;
+        }
+    }
+}
