@@ -336,7 +336,7 @@ Nova's report also found two defects, MOD-1 (an object made during a
 module's `init` belongs to no module) and LOCK-10 (lockdep keeps a class
 per callback address); both are in the backlog, not in N1.
 
-- [ ] **Acceptance:** `make test-modcycle` (CI, both architectures):
+- [x] **Acceptance:** `make test-modcycle` (CI, both architectures):
   `cosmotest` loaded and unloaded 1,000 times at boot, PASS; the
   self-test `module-cycle` in every debug boot: 200 cycles leave every
   count as it was, and its two controls fail the run (an allocation
