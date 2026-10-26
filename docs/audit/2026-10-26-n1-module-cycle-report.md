@@ -188,6 +188,37 @@ The matrix again on `9784daf8`, after the review fixes, 2026-10-26,
 | test-harness-retry | 192 | 190 |
 | release test | 19 | 23 |
 
+The matrix again on `2daa7713` (the budget, the clock-bounded readings
+and the stall evidence), with `test-install` and `test-snapshot` added
+for the harness change, 2026-10-26, 12:09 to 13:12 local:
+
+| step | x86_64 s | aarch64 s |
+| --- | --- | --- |
+| host-test / fuzz | 73 / 17 | |
+| analyze | 321 | 222 |
+| debug test QEMU_SMP=1 / 2 / 4 | 224 / 212 / 179 | 175 / 184 / 211 |
+| test-smp2 | **2**, 227 | **2**, 274 |
+| test-chaos | **2**, 259 | **2**, 266 |
+| test-harness-retry | 235 | 233 |
+| release test | 21 | 23 |
+| release test-install | 33 | 67 |
+| release test-snapshot | 108 | 242 |
+
+The four failures were slow throughout, the family flakes.md records as
+host load: `syscall-fuzz` over its 8 s budget (9.9, 8.8 and 11.8 s) with
+`[WATCHDOG] no progress for 8000 ms`, x86-64 chaos timed out at 240 s,
+and AArch64 chaos also failed `process-user` (17.4 s against 15 s) and
+`net-tcp-delack`. `module-cycle` passed in all four (4252-6366 ms). The
+host's load averages were 15-16 at the matrix's end; for part of the
+matrix a shallow clone of a Linux tree (1.5 GB, unrelated to this work)
+was being fetched and unpacked beside it, and the owner's two Parallels
+VMs were running. The same four boots rerun at 13:13-13:26, the sampler
+showing QEMU at 76 % of a CPU and no compiler or `dotnet` processes: all
+passed, in 178.8 to 189.5 s. Every boot of the release tests kept its
+`-trace.log` (the snapshot boots' 18.9-37.8 KB, each its own).
+
+CI on `2daa7713` (run 40297347117) passed every job, with no stall.
+
 Branch CI is checked on the PR. On `25ce894e` one job failed,
 `upgrade test (x86_64)`: `test-be`'s `be-pending-done` boot stopped
 after the loader's last line; on `9784daf8`, `install test (x86_64)`:
