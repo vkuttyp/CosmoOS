@@ -154,3 +154,16 @@ and the Intel VMX backend has not run on hardware. There is no KASLR. The guide'
 [Known limitations](docs/guide/limitations.md) page lists what a user
 will meet; [`docs/plan.md`](docs/plan.md) is the work that remains after
 1.0, by area.
+
+## License
+
+Copyright (C) 2026 Veeran Puthumkara.
+
+CosmoOS is free software, licensed under the
+[GNU General Public License, version 2 only](COPYING) (`GPL-2.0-only`).
+
+Third-party software that CosmoOS builds from `ports/` keeps its own
+license; each port's recipe fetches the upstream source. When an image
+includes mbedTLS (licensed `Apache-2.0 OR GPL-2.0-or-later`), it is used
+under its GPL option, since Apache-2.0 alone is not compatible with
+GPLv2.
