@@ -1395,6 +1395,14 @@ static void waiter_entry(void *arg)
  * nothing corrupt. waitqueue_prepare may sleep, so preemption stays on: a
  * switch inside the sequence (a tick) would leave nothing to observe, so
  * a run decides only when this CPU switched no thread meanwhile.
+ *
+ * A control comes first (TEST-1): a schedule() right after the wake. On
+ * this pinned CPU, with nothing else ready, it picks this thread again --
+ * READY to RUNNING without a switch, which a tick or a preemption point
+ * inside the second prepare does too (flakes.md, "wait-multi-prepare").
+ * The thread is then legitimately RUNNING, not READY, so the run must not
+ * be judged: the guard has to see that pass. Control attempts repeat until
+ * one lands (no switch to another thread), then the real attempts run.
  */
 bool selftest_wait_multi_prepare(const char **reason)
 {
@@ -1407,6 +1415,7 @@ bool selftest_wait_multi_prepare(const char **reason)
 #else
     struct thread *self = thread_current();
     cpumask_t was = thread_pin_self();   /* the CPU and its switch count are read here (S25) */
+    bool control = true;   /* until a control attempt lands */
     for (unsigned attempt = 0; attempt < 50; attempt++) {
         struct waitqueue a, b;
         waitqueue_init(&a, "wmp-a");
@@ -1419,6 +1428,8 @@ bool selftest_wait_multi_prepare(const char **reason)
 
         waitqueue_prepare(&a, &ea);               /* BLOCKED, still running */
         unsigned woke = waitqueue_wake_all(&a);   /* READY, and queued: a wake from the first queue */
+        if (control)
+            sched_yield();                        /* the control: picked again, RUNNING with no switch */
         waitqueue_prepare(&b, &eb);               /* the second queue armed */
         bool breached = sched_test_repair_blocked_queued();
         bool still_ready = __atomic_load_n(&self->state, __ATOMIC_ACQUIRE) == THREAD_READY;
@@ -1428,6 +1439,14 @@ bool selftest_wait_multi_prepare(const char **reason)
 
         if (sched_switch_count(cpu) != switches)
             continue;   /* switched out inside the sequence: nothing to observe */
+        if (control) {
+            /* A control attempt the guard let through: the re-pick was not
+             * seen, and the checks below judge a state the scheduler
+             * changed. */
+            thread_set_affinity_self(was);
+            *reason = "the control's re-pick was not seen: the run was judged after a schedule() picked this thread again";
+            return false;
+        }
         thread_set_affinity_self(was);
         CHECK(woke == 1);
         CHECK(!breached);
