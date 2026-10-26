@@ -43,7 +43,7 @@ FUZZ_VIRTQ_SRCS   := tests/fuzz/fuzz_virtq.c drivers/virtio/virtqueue.c $(FUZZ_C
 FUZZ_LZ4_SRCS     := tests/fuzz/fuzz_lz4.c kernel/core/lz4.c $(FUZZ_DRIVER)
 FUZZ_USB_DESC_SRCS := tests/fuzz/fuzz_usb_desc.c drivers/usb/usb_desc.c $(FUZZ_COMMON)
 FUZZ_FBVALID_SRCS := tests/fuzz/fuzz_fbvalid.c kernel/core/fbvalid.c $(FUZZ_COMMON)
-FUZZ_GPT_SRCS := tests/fuzz/fuzz_gpt.c kernel/block/gpt.c $(FUZZ_DRIVER)
+FUZZ_GPT_SRCS := tests/fuzz/fuzz_gpt.c kernel/block/gpt.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c $(FUZZ_DRIVER)
 FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
