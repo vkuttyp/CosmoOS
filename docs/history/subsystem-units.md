@@ -3440,6 +3440,9 @@ See the [history index](README.md).
     writes its own file back, then sleeps on `pagecache-dirty` holding no
     lock (at most fifty 100 ms sleeps), throttled before the open file's
     lock is taken; the sleep is a lockdep completion class.
+  - **An AIO `PWRITE`** (found in review) asks about the bound every
+    64 KiB and lets the open file's lock go to be throttled
+    (`aio-pwrite-dirty`, `tools/mem9-aio-probe.py`).
   - **ENOSPC at the write (CF34):** cosmofs charges each dirty page of a
     regular file against the free blocks above the reserve, and the VFS
     commits once before the writer is told. Write-back may take the
