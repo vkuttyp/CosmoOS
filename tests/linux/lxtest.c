@@ -39,6 +39,47 @@ static void check(int cond, const char *what, long value)
 #define CHECK(c) check((c), #c, 0)
 #define CHECKV(c, v) check((c), #c, (long)(v))
 
+/* --- CPU time (kernel/process/cputime.c) --- */
+static uint64_t ts_ns(const struct lx_timespec *t)
+{
+    return (uint64_t)t->tv_sec * 1000000000ull + (uint64_t)t->tv_nsec;
+}
+
+static uint64_t tv_ns(const struct lx_timeval *t)
+{
+    return (uint64_t)t->tv_sec * 1000000000ull + (uint64_t)t->tv_usec * 1000ull;
+}
+
+static uint64_t clock_ns(int clk)
+{
+    struct lx_timespec t = { 0, 0 };
+    lx_syscall6(LX_clock_gettime, clk, (long)&t, 0, 0, 0, 0);
+    return ts_ns(&t);
+}
+
+/* Burns CPU in user mode until the process's CPU-time clock has advanced
+ * by `ns`, or until `pending` (a signal mask) is all pending; at most 10 s
+ * of wall time either way. Mostly a plain loop, with a system call only
+ * every so often, so nearly all of it is user time. */
+static void spin_cpu(uint64_t ns, uint64_t pending)
+{
+    uint64_t c0 = clock_ns(LX_CLOCK_PROCESS_CPUTIME_ID), m0 = clock_ns(LX_CLOCK_MONOTONIC);
+    for (;;) {
+        for (volatile unsigned i = 0; i < 200000; i++) {
+        }
+        if (pending != 0) {
+            uint64_t p = 0;
+            lx_syscall6(LX_rt_sigpending, (long)&p, 8, 0, 0, 0, 0);
+            if ((p & pending) == pending)
+                return;
+        } else if (clock_ns(LX_CLOCK_PROCESS_CPUTIME_ID) - c0 >= ns) {
+            return;
+        }
+        if (clock_ns(LX_CLOCK_MONOTONIC) - m0 > 10000000000ull)
+            return;
+    }
+}
+
 static int memeq(const void *a, const void *b, size_t n)
 {
     const unsigned char *x = a, *y = b;
@@ -1403,6 +1444,161 @@ static void auxv_tests(int argc, char **argv)
     lx_puts("lxtest: auxv ok\n");
 }
 
+/* /proc/self/stat's utime plus stime (fields 14 and 15), in USER_HZ ticks;
+ * -1 when it cannot be read. */
+static long proc_self_cpu_ticks(void)
+{
+    char buf[512];
+    long fd = sc4(LX_openat, LX_AT_FDCWD, "/proc/self/stat", 0, 0);
+    if (fd < 0)
+        return -1;
+    long n = sc3(LX_read, fd, buf, sizeof(buf) - 1);
+    sc1(LX_close, fd);
+    if (n <= 0)
+        return -1;
+    buf[n] = '\0';
+    long i = n - 1;
+    while (i >= 0 && buf[i] != ')')   /* the name may hold spaces; the last ')' ends it */
+        i--;
+    long field = 2, sum = 0, cur = 0;
+    for (i++; i < n; i++) {
+        if (buf[i] == ' ') {
+            if (field == 14 || field == 15)
+                sum += cur;
+            field++;
+            cur = 0;
+        } else if (buf[i] >= '0' && buf[i] <= '9') {
+            cur = cur * 10 + (buf[i] - '0');
+        }
+    }
+    return field > 15 ? sum : -1;
+}
+
+/* A thread that burns 300 ms of wall time in user mode, then exits. */
+static int t_spin(void *arg)
+{
+    (void)arg;
+    uint64_t m0 = clock_ns(LX_CLOCK_MONOTONIC);
+    while (clock_ns(LX_CLOCK_MONOTONIC) - m0 < 300000000ull)
+        for (volatile unsigned i = 0; i < 100000; i++) {
+        }
+    return 0;
+}
+
+/* CPU time (kernel/process/cputime.c, generated from Nova; backlog
+ * LX-14): the CPU-time clocks, getrusage and times with the tick's
+ * user/system split, a waited-for child's time, and the CPU-time
+ * timers ITIMER_VIRTUAL and ITIMER_PROF. */
+static void test_cputime(void)
+{
+    /* Asleep costs no CPU time: 200 ms asleep moves both CPU-time
+     * clocks by far less, and a thread's is never above its process's. */
+    uint64_t m0 = clock_ns(LX_CLOCK_MONOTONIC), p0 = clock_ns(LX_CLOCK_PROCESS_CPUTIME_ID),
+             t0 = clock_ns(LX_CLOCK_THREAD_CPUTIME_ID);
+    struct lx_timespec nap = { 0, 200000000 };
+    sc2(LX_nanosleep, &nap, 0);
+    /* The thread's first: read after the process's, it would count the
+     * time between the two reads that the process's did not. */
+    uint64_t m1 = clock_ns(LX_CLOCK_MONOTONIC), t1 = clock_ns(LX_CLOCK_THREAD_CPUTIME_ID),
+             p1 = clock_ns(LX_CLOCK_PROCESS_CPUTIME_ID);
+    CHECKV(m1 - m0 >= 200000000ull, (m1 - m0) / 1000);
+    CHECKV(p1 > 0 && p1 - p0 < 50000000ull, (p1 - p0) / 1000);
+    CHECKV(t1 > 0 && t1 - t0 < 50000000ull && t1 <= p1, (t1 - t0) / 1000);
+
+    /* 100 ms of CPU in user mode is mostly user time, in getrusage
+     * (the process and the thread) and in times alike; neither part
+     * goes down. */
+    struct lx_rusage r0, r1, rt;
+    struct lx_tms tm0, tm1;
+    CHECKV(sc2(LX_getrusage, LX_RUSAGE_SELF, &r0) == 0, 0);
+    long k0 = sc1(LX_times, &tm0);
+    CHECKV(k0 > 0, k0);
+    spin_cpu(100000000ull, 0);
+    CHECKV(sc2(LX_getrusage, LX_RUSAGE_SELF, &r1) == 0, 0);
+    long k1 = sc1(LX_times, &tm1);
+    CHECKV(k1 >= k0, k1 - k0);
+    uint64_t du = tv_ns(&r1.ru_utime) - tv_ns(&r0.ru_utime);
+    CHECKV(tv_ns(&r1.ru_utime) >= tv_ns(&r0.ru_utime) && du >= 50000000ull, du / 1000);
+    CHECKV(tv_ns(&r1.ru_stime) >= tv_ns(&r0.ru_stime), tv_ns(&r1.ru_stime) / 1000);
+    CHECKV(r1.ru_utime.tv_usec >= 0 && r1.ru_utime.tv_usec < 1000000, r1.ru_utime.tv_usec);
+    CHECKV(tm1.tms_utime - tm0.tms_utime >= 5 && tm1.tms_stime >= tm0.tms_stime, tm1.tms_utime - tm0.tms_utime);
+    CHECKV(sc2(LX_getrusage, LX_RUSAGE_THREAD, &rt) == 0 && tv_ns(&rt.ru_utime) >= 50000000ull,
+           tv_ns(&rt.ru_utime) / 1000);
+    CHECKV(sc2(LX_getrusage, 2, &rt) == -22, 0);
+
+    /* A child's CPU time reaches its parent when the parent waits for
+     * it: in wait4's rusage, then in RUSAGE_CHILDREN and times. */
+    CHECKV(sc2(LX_getrusage, LX_RUSAGE_CHILDREN, &r0) == 0 && sc1(LX_times, &tm0) > 0, 0);
+    long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c == 0) {
+        spin_cpu(100000000ull, 0);
+        lx_exit(0);
+    }
+    CHECKV(c > 0, c);
+    int st = -1;
+    struct lx_rusage cr;
+    CHECKV(sc4(LX_wait4, c, &st, 0, &cr) == c && st == 0, st);
+    uint64_t ct = tv_ns(&cr.ru_utime) + tv_ns(&cr.ru_stime);
+    CHECKV(ct >= 80000000ull, ct / 1000);
+    CHECKV(sc2(LX_getrusage, LX_RUSAGE_CHILDREN, &r1) == 0 && sc1(LX_times, &tm1) > 0, 0);
+    uint64_t dc = tv_ns(&r1.ru_utime) + tv_ns(&r1.ru_stime) - tv_ns(&r0.ru_utime) - tv_ns(&r0.ru_stime);
+    CHECKV(dc + 2000 >= ct && dc <= ct + 2000, dc / 1000);   /* each read truncated to the microsecond */
+    CHECKV((tm1.tms_cutime + tm1.tms_cstime) - (tm0.tms_cutime + tm0.tms_cstime) >= 7,
+           tm1.tms_cutime + tm1.tms_cstime);
+
+    /* ITIMER_VIRTUAL and ITIMER_PROF: disarmed at first; set, read
+     * (the value plus at most a tick, as Linux adds one), and cleared,
+     * which reports the old setting. */
+    for (int which = LX_ITIMER_VIRTUAL; which <= LX_ITIMER_PROF; which++) {
+        struct lx_itimerval cur, nv, old;
+        CHECKV(sc2(LX_getitimer, which, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0 &&
+               cur.it_interval.tv_sec == 0, which);
+        nv = (struct lx_itimerval){ .it_interval = { 1, 0 }, .it_value = { 10, 0 } };
+        CHECKV(sc3(LX_setitimer, which, &nv, 0) == 0, which);
+        CHECKV(sc2(LX_getitimer, which, &cur) == 0 && tv_ns(&cur.it_value) >= 9900000000ull &&
+               tv_ns(&cur.it_value) <= 10100000000ull && cur.it_interval.tv_sec == 1 && cur.it_interval.tv_usec == 0,
+               tv_ns(&cur.it_value) / 1000);
+        nv = (struct lx_itimerval){ .it_interval = { 0, 0 }, .it_value = { 0, 0 } };
+        CHECKV(sc3(LX_setitimer, which, &nv, &old) == 0 && tv_ns(&old.it_value) >= 9800000000ull &&
+               tv_ns(&old.it_value) <= 10100000000ull && old.it_interval.tv_sec == 1,
+               tv_ns(&old.it_value) / 1000);
+        CHECKV(sc2(LX_getitimer, which, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0 &&
+               cur.it_interval.tv_sec == 0, which);
+    }
+    struct lx_itimerval bad = { .it_interval = { 0, 0 }, .it_value = { 1, 0 } };
+    CHECKV(sc3(LX_setitimer, 3, &bad, 0) == -22 && sc2(LX_getitimer, 3, &bad) == -22, 0);
+
+    /* Both fire on CPU time: blocked, each set to 20 ms, both pending
+     * once the process has burnt enough; one-shots are then disarmed.
+     * SIGVTALRM is 26 and SIGPROF 27, Linux's numbers. */
+    uint64_t mvp = (1ull << 25) | (1ull << 26), before = 0, pend = 0;
+    CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_BLOCK, &mvp, &before, 8) == 0, 0);
+    struct lx_itimerval shot = { .it_interval = { 0, 0 }, .it_value = { 0, 20000 } };
+    CHECKV(sc3(LX_setitimer, LX_ITIMER_VIRTUAL, &shot, 0) == 0 && sc3(LX_setitimer, LX_ITIMER_PROF, &shot, 0) == 0, 0);
+    spin_cpu(0, mvp);
+    CHECKV(sc2(LX_rt_sigpending, &pend, 8) == 0 && (pend & mvp) == mvp, pend);
+    struct lx_itimerval cur;
+    CHECKV(sc2(LX_getitimer, LX_ITIMER_VIRTUAL, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0,
+           cur.it_value.tv_usec);
+    CHECKV(sc2(LX_getitimer, LX_ITIMER_PROF, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0,
+           cur.it_value.tv_usec);
+    struct lx_sigaction ign = { .handler = 1 }, dfl = { .handler = 0 };
+    CHECKV(sc4(LX_rt_sigaction, 26, &ign, 0, 8) == 0 && sc4(LX_rt_sigaction, 27, &ign, 0, 8) == 0, 0);
+    CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &before, 0, 8) == 0, 0);
+    CHECKV(sc4(LX_rt_sigaction, 26, &dfl, 0, 8) == 0 && sc4(LX_rt_sigaction, 27, &dfl, 0, 8) == 0, 0);
+
+    /* A thread's CPU time stays its process's after the thread is gone:
+     * /proc/self/stat counted only live threads' until roadmap 1.2 A5. The
+     * spinner runs while this thread sleeps in the join. */
+    long s0 = proc_self_cpu_ticks();
+    static int32_t ptid, ctid;   /* THREAD_FLAGS writes both words */
+    long t = lx_clone(t_spin, g_stacks[0] + sizeof(g_stacks[0]), 0, THREAD_FLAGS, &ptid, &ctid, g_tcb);
+    CHECKV(t > 0 && lx_join(&ctid) == 0, t);
+    long s1 = proc_self_cpu_ticks();
+    CHECKV(s0 >= 0 && s1 - s0 >= 15, s1 - s0);   /* 300 ms run; at least half of it, in 10 ms ticks */
+    lx_puts("lxtest: cputime ok\n");
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2)
@@ -2062,7 +2258,6 @@ int main(int argc, char **argv)
         struct lx_itimerval cur, nv, old;
         CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_usec == 0,
                cur.it_value.tv_sec);
-        CHECKV(sc2(LX_getitimer, 1, &cur) == -22, 0);   /* ITIMER_VIRTUAL: not built */
         nv = (struct lx_itimerval){ .it_interval = { 2, 0 }, .it_value = { 10, 0 } };
         CHECKV(sc3(LX_setitimer, LX_ITIMER_REAL, &nv, 0) == 0, 0);
         CHECKV(sc2(LX_getitimer, LX_ITIMER_REAL, &cur) == 0 && cur.it_value.tv_sec >= 9 && cur.it_value.tv_sec <= 10 &&
@@ -2104,6 +2299,7 @@ int main(int argc, char **argv)
         CHECKV(sc4(LX_rt_sigprocmask, LX_SIG_SETMASK, &before, 0, 8) == 0, 0);
         CHECKV(sc4(LX_rt_sigaction, 14, &dfl, 0, 8) == 0, 0);
     }
+    test_cputime();
     /* prctl: the dumpable flag (the scp-sftp unit: OpenSSH's sftp-server
      * clears it and refuses to run when it cannot); every other option is
      * -EINVAL. */

@@ -510,6 +510,7 @@ LINUXTEST_MARKERS = [
     # getrandom's flags: which kind of pool lxtest found (design.md §6).
     r"^lxtest: getrandom: " + ("seeded" if SEEDED else "unseeded") + "$",
     r"^lxtest: auxv ok$",
+    r"^lxtest: cputime ok$",
     # Shared libraries (roadmap 1.1 P4; tests/dyn/).
     r"^dynhello: ok$",
     r"^dltest: libtextrel\.so refused: ",

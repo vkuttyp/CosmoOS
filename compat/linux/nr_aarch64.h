@@ -76,6 +76,8 @@
 #define LX_getitimer 102
 #define LX_prctl 167
 #define LX_setitimer 103
+#define LX_getrusage 165
+#define LX_times 153
 #define LX_statfs 43
 #define LX_fstatfs 44
 #define LX_getuid 174
