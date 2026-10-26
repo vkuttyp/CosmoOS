@@ -18,7 +18,8 @@
 # it, and it never leaves the job's filesystem. It is a secret of the
 # `release` environment, not of the repository (BUILD-2): only a job that
 # names that environment, running from a `v*` tag or from main (the
-# environment's deployment rules), can read it.
+# environment's deployment rules), can read it, and only once the owner
+# approves the run's wait (the environment's required reviewer).
 
 name: Release
 

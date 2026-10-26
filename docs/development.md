@@ -672,9 +672,10 @@ environment (`release.yml`'s `build`, `acceptance` and `publish`;
 only from a `v*` tag or from main (its deployment rules). Until
 2026-10-27 it was a repository secret, which any workflow pushed by
 someone with write access could read (inventory 2.9). The environment's
-settings are the owner's (repository settings, Environments): adding a
-required reviewer there makes every job that reads the key wait for an
-approval, the weekly re-signing included.
+settings are the owner's (repository settings, Environments), and it
+requires the owner's review: every job that reads the key waits for an
+approval on its run's page (one approval covers every job waiting at
+that moment), the weekly re-signing included.
 
 The release key's public half is the only `tools/keys/*.pub`
 (`tools/keys/README.md`); developer builds keep their per-machine key

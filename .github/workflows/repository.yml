@@ -27,7 +27,8 @@
 # Secret: COSMOOS_RELEASE_KEY, the `release` environment's (BUILD-2; as in
 # release.yml). Here it signs each INDEX and nothing else, and it never
 # leaves the job's filesystem. The environment admits a run from main or a
-# `v*` tag only, so a dispatch from another branch cannot read it.
+# `v*` tag only, so a dispatch from another branch cannot read it, and each
+# run waits for the owner's approval -- the weekly one too.
 
 name: Package repository
 
