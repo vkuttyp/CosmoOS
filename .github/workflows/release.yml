@@ -15,7 +15,11 @@
 #
 # Secret: COSMOOS_RELEASE_KEY, the Ed25519 seed (64 hex characters) whose
 # public half is the one tools/keys/*.pub file. Nothing else is signed with
-# it, and it never leaves the job's filesystem.
+# it, and it never leaves the job's filesystem. It is a secret of the
+# `release` environment, not of the repository (BUILD-2): only a job that
+# names that environment, running from a `v*` tag or from main (the
+# environment's deployment rules), can read it, and only once the owner
+# approves the run's wait (the environment's required reviewer).
 
 name: Release
 
@@ -33,10 +37,9 @@ env:
 jobs:
   # A release (a tag without a hyphen) is made only from a commit on main;
   # a pre-release (v1.0.0-rc1) may be any reviewed head. Every job that
-  # reads the release key needs this one. It does not protect the key from
-  # someone who can push to this repository -- any pushed workflow can read
-  # repository secrets; that is what an environment with required reviewers
-  # is for (docs/development.md, "Releases").
+  # reads the release key needs this one. The key itself is the `release`
+  # environment's: a workflow pushed on another branch cannot read it
+  # (BUILD-2; docs/development.md, "Releases").
   guard:
     name: tag points at main (releases)
     runs-on: ubuntu-24.04
@@ -89,6 +92,7 @@ jobs:
     name: build ${{ matrix.arch }} (${{ matrix.copy }})
     runs-on: ubuntu-24.04
     needs: [guard, image]
+    environment: release   # the release key (BUILD-2)
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
@@ -165,6 +169,7 @@ jobs:
     name: ${{ matrix.test }} (${{ matrix.arch }})
     runs-on: ubuntu-24.04
     needs: [guard, image, build]
+    environment: release   # the release key (BUILD-2)
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
@@ -257,6 +262,7 @@ jobs:
     name: GitHub release
     runs-on: ubuntu-24.04
     needs: [guard, image, reproducible, acceptance, guide-macos]
+    environment: release   # the release key (BUILD-2)
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
@@ -354,5 +360,5 @@ jobs:
     uses: ./.github/workflows/repository.yml
     with:
       tag: ${{ !contains(github.ref_name, '-') && github.ref_name || '' }}
-    secrets:
-      COSMOOS_RELEASE_KEY: ${{ secrets.COSMOOS_RELEASE_KEY }}
+    # No secrets: an environment's secret cannot be passed to a called
+    # workflow; repository.yml's job names the environment and reads it.
