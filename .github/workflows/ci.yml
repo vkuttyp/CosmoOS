@@ -21,6 +21,14 @@
 # exceeded", M4).
 # Both targets build and boot on the same x86-64 runner: QEMU/TCG runs
 # the AArch64 `virt` machine with the qemu-efi-aarch64 firmware.
+#
+# On a pull request (docs/build/testing.md, "Which jobs a pull request
+# runs"): a new push cancels the run of the last one; the `gate` job
+# (scripts/ci-gate.py) skips the two long acceptance tests -- the
+# large-file test and the encrypted root's `encrypt` part -- unless the
+# pull request changes a path they exercise or carries the `full-ci`
+# label, and adding that label starts a full run. A push to main, and a
+# run by hand, always run everything.
 
 name: CI
 
@@ -28,12 +36,54 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+# A pull request's newer run cancels its older one. Every other run --
+# a push to main, a run by hand, and a pull request's label other than
+# full-ci (which the gate turns into no work) -- is a group of its own,
+# so nothing cancels it.
+concurrency:
+  group: >-
+    ci-${{ github.event_name == 'pull_request'
+    && (github.event.action != 'labeled' || github.event.label.name == 'full-ci')
+    && format('pr-{0}', github.event.pull_request.number)
+    || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
   packages: read   # the toolchain image on ghcr.io
 
 jobs:
+  # What this run runs (scripts/ci-gate.py): `run` false only for a pull
+  # request's label other than full-ci; `heavy` true for the long
+  # acceptance tests, which a pull request runs only when it changes a path
+  # they exercise or is labelled full-ci.
+  gate:
+    name: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      heavy: ${{ steps.gate.outputs.heavy }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # the pull request's base and head, for the diff
+
+      - name: Decide
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci-gate.py
+
   # The CI images (ci/Dockerfile; scripts/ci-image.sh): pushed to
   # ghcr.io/<owner>/cosmoos-ci under a tag naming the Dockerfile's hash the
   # first time that Dockerfile is seen, found there every later time. Its
@@ -42,6 +92,8 @@ jobs:
   image:
     name: CI image
     runs-on: ubuntu-24.04
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     timeout-minutes: 30
     permissions:
       contents: read
@@ -590,7 +642,8 @@ jobs:
   large:
     name: large-file test (${{ matrix.arch }})
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [gate, image]
+    if: needs.gate.outputs.heavy == 'true'   # a long test: scripts/ci-gate.py
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
@@ -716,7 +769,7 @@ jobs:
   encrypt:
     name: encrypted root test (${{ matrix.arch }}, ${{ matrix.part }})
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [gate, image]
     container:
       image: ${{ needs.image.outputs.toolchain }}
       credentials:
@@ -766,10 +819,14 @@ jobs:
           path: .cache/ports
           key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
 
+      # The encrypt part is a long test (scripts/ci-gate.py): a pull request
+      # that the gate finds no reason to run it for skips its two steps.
       - name: Build (release)
+        if: matrix.part != 'encrypt' || needs.gate.outputs.heavy == 'true'
         run: make ARCH=${{ matrix.arch }} BUILD=release all
 
       - name: encrypted root, ${{ matrix.part }} (release)
+        if: matrix.part != 'encrypt' || needs.gate.outputs.heavy == 'true'
         run: make ARCH=${{ matrix.arch }} BUILD=release ${{ matrix.target }}
 
       - name: Upload the boots' serial logs (on failure)
@@ -1214,6 +1271,8 @@ jobs:
   docs:
     name: five-file docs
     runs-on: ubuntu-24.04
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     timeout-minutes: 5
     steps:
       - name: Check out

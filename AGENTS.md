@@ -70,7 +70,11 @@ requires, on x86-64 and AArch64 (`ARCH=aarch64`):
 - `make test-smp2`, `make test-chaos`, `make test-harness-retry`.
 - Release build and boot (`make BUILD=release test`).
 - Branch CI passing on both architectures before completion. After merge,
-  check CI on main's merge commit; a red merge run takes priority.
+  check CI on main's merge commit; a red merge run takes priority. A pull
+  request skips the two long acceptance tests unless it changes a path they
+  exercise; label it `full-ci` when a change could reach the file system,
+  storage or upgrade path indirectly
+  ([which jobs a pull request runs](docs/build/testing.md#which-jobs-a-pull-request-runs)).
 
 Use GNU make (`gmake` on macOS). Preserve additional required checks from
 the [development docs](docs/development.md#workflow-for-a-change) and CI.

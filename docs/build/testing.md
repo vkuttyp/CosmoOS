@@ -137,9 +137,36 @@ behind a passing `make test`.
 7. `make reproducible`
 
 Serial logs are uploaded as artifacts on failure. CI runs QEMU under TCG
-only. The runner is x86-64; ARM64 hosted runners are not enabled for this
-private repository, so the ARM64 primary host is exercised manually until
-that changes.
+only (invariant B10). The runners are x86-64; the AArch64 targets run
+under TCG on them, and the ARM64 primary host is exercised manually. (The
+repository is public since 2026-10-26, so GitHub's ARM64 hosted runners
+are available to it; none is used yet.)
+
+### Which jobs a pull request runs
+
+A run's first job, `gate` (`scripts/ci-gate.py`), decides what the rest
+run. Two acceptance tests take most of a run's time under TCG: the
+large-file test (`make test-large`, about 65 minutes on x86-64 and 78 on
+AArch64 in run 40398038325) and the encrypted root's `encrypt` part
+(`make test-encrypt`, about 17 and 41). Every other job ends within about
+28 minutes. So:
+
+- **A push to main, and a run by hand** (`workflow_dispatch`), run every
+  job.
+- **A pull request** runs every job except those two, unless it changes a
+  path they exercise (`HEAVY_PATHS` in the script: the file system, block,
+  storage and memory code, booting, installing, upgrading and keys, the
+  boot harness and tests, the build and CI) or carries the **`full-ci`**
+  label. Adding the label starts a full run; another label starts nothing.
+  The skipped tests show as skipped (the large-file job) or as an
+  `encrypt` part whose build and test steps were skipped.
+- **A pull request's newer push cancels its older run**, which can only
+  report on a commit nobody will merge. Other runs never cancel each other.
+
+A regression the gate lets through, from a path it does not list, is
+caught by the full run on main after the merge. Label the pull request
+`full-ci` when a change could reach the file system or the upgrade path
+indirectly.
 
 ## What is not tested yet
 
