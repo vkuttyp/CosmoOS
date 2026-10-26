@@ -186,7 +186,8 @@ sessions; they were stubs answering the pid or 0 before that),
 `wait4(pid, status, options, rusage)` → `process_wait_child` with
 `WNOHANG`; the status is encoded: exit `n` → `n << 8`; a kill by `sig`
 (native `128 + sig`) → `sig`; a fault (native 139) → `SIGSEGV` (11);
-`rusage` is zeroed when given. `fork`, `vfork` and a `clone` without
+`rusage` carries the collected child's user and system time, its own
+waited-for children's included, and 0 for the rest. `fork`, `vfork` and a `clone` without
 `CLONE_THREAD`: "fork" below; `execve`: "execve" below. `clone3` →
 `-ENOSYS`. `rseq` and `sched_getaffinity` → `-ENOSYS`
 (a libc tolerates these). `readlink`, `readlinkat`, `symlink` and

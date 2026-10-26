@@ -169,10 +169,14 @@ refused with `-EAGAIN` when its real uid already has
   process. The image is read into a populated kernel-arena buffer and
   freed after loading.
 
-### `int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out)`
+### `int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out, struct cputime_pair *usage)`
 - Purpose: collect an exited child. `pid > 0` names one child, `-1` any.
 - Outputs: 0 with `*pid_out` the reaped pid and `*status_out` its exit
-  status (the table reference is dropped: the zombie is gone); 0 with
+  status (the table reference is dropped: the zombie is gone); the
+  child's CPU time, its own waited-for children's included, is added to
+  the caller's children's (`process_cputime_reap`) and written to
+  `*usage` when that is non-NULL (left alone when nothing was
+  collected: a stop or a continue); 0 with
   `*pid_out == 0` when `PROCESS_WAIT_NOHANG` found nothing; `-ECHILD`
   when no matching child exists; `-EINTR` when the caller is killed
   while waiting.

@@ -177,7 +177,7 @@ Open lines (struck lines are not counted):
 - **LX-11** usability, L. No Linux `/sys`; `/proc` is partial; no real distribution userland validated (Linux phase 4).
 - **LX-12** usability, M. termios: most flags and control characters are accepted and ignored.
 - **LX-13** usability, S. No nice values or `setpriority`/`nice` (`stat` reports 20/0 for every process).
-- **LX-14** usability, S. `ITIMER_VIRTUAL` and `ITIMER_PROF` are `-EINVAL`.
+- ~~**LX-14** usability, S. `ITIMER_VIRTUAL` and `ITIMER_PROF` are `-EINVAL`.~~ Done by roadmap 1.2 A5's first PR (CPU time split into user and system time by the tick's samples; both timers, `getrusage`, `times`, the CPU-time clocks; the arithmetic in Nova, `kernel/process/cputime.c`).
 - **LX-15** usability, S. A fork-like `clone` takes only `SIGCHLD` as exit signal (`__WCLONE` not built).
 - **LX-16** usability, S. `fchownat`/`fchmodat` through a dirfd need the handle's write right; Linux needs none.
 - **LX-17** usability, M. `adjtimex`/`clock_adjtime` are `-ENOSYS`: no slewing, `ntpd` runs only with `-q`.
