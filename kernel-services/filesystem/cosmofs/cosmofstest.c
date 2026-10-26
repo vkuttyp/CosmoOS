@@ -697,7 +697,10 @@ bool selftest_cosmofs_reserve(const char **reason)
     }
     CHECK(enospc);
     CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
-    CHECK(st.free_blocks <= st.reserve_blocks + 2 && st.free_blocks > 0);   /* stopped at the reserve */
+    /* Stopped at the reserve, less the allowance a dirty page is charged
+     * on top of its block (CF34: CFS_DIRTY_META, 4 blocks with no page
+     * dirty); before MEM-9 the write was taken and its commit failed. */
+    CHECK(st.free_blocks <= st.reserve_blocks + 2 + 4 && st.free_blocks > 0);
     uint64_t full_free = st.free_blocks;
     /* Deletion needs metadata blocks: the reserve provides them. */
     CHECK(vfs_unlink(NULL, ENG "/f0") == 0);

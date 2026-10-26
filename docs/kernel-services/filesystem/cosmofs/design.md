@@ -116,6 +116,48 @@ every other small file a rebuild adds about two
 (`cosmofs-extent-rebuild`); the worst case is that panic's to name, and
 docs/backlog.md's CFS-39.
 
+#### Space, charged at the write (MEM-9, CF34)
+
+A dirty page is written back copy-on-write into a new block, so each
+dirty page of a mount stands for a data block its write-back will take.
+`cfs_dirty_check` charges it, as it charges the run bound: a page of a
+regular file may become dirty while
+
+    dirty pages of the mount + 1 + CFS_DIRTY_META(that) <= free blocks - reserve
+
+and is refused `-ENOSPC` otherwise. `CFS_DIRTY_META(n)` (`n / 512 + 4`)
+is room for writers who read the count at once (it is read without the
+lock; each takes at most a page past it) and a margin that grows with
+the pages. The checksum, inode and map blocks their write-back adds are
+metadata, and they come from the same free blocks: first fit takes a
+free block above the reserve before one in it. So the metadata a
+transaction takes after a page was charged can leave that page's
+write-back with nothing above the reserve (in `test-fill`'s last
+transaction, 792 data blocks and 7 metadata ones against 799 free above
+the reserve when the pages were charged, the allowance 5: two pages
+lost, `-ENOSPC`). The data class's floor is therefore half the reserve,
+not the reserve: the write is charged against the whole reserve, its
+write-back may take the upper half, and the lower half stays the
+metadata's. What a transaction's metadata is beyond the allowance is
+what it takes from the reserve, as the commit always took it. The
+charge is the dirty page itself: write-back takes the block it stood
+for, a truncate or a drop gives it back, and nothing else is held. A
+compressed record takes fewer blocks than its pages, so the charge is
+never short; it is conservative for a compressible file, whose dirty
+pages take fewer blocks than they are charged, so the page cache writes
+the vnode's pages back once and asks again (as for `-EFBIG`), and for an
+overwrite, whose old block comes back only when the transaction commits,
+so the VFS then commits once and asks again before it reports `ENOSPC`
+(vfs `design.md`, "Refused at the write"). A directory's blocks are not charged: they come
+from the metadata class, reserve included, so a deletion on a full pool
+still has a block to write.
+
+Before this a write the pool could not hold was taken, every commit
+then failed `-ENOSPC`, and the pages were dropped with their vnode
+(`vfs: N dirty page(s) ... lost: write-back failed (-28)`) while the
+size still counted them: on a 256 MiB root, `dd` was told `ENOSPC` only
+after 178 MiB and 2010 of its pages were gone (`test-fill`, 2026-10-25).
+
 #### Plain past three quarters of the bound (CFS-32)
 
 The bound stays where it is (no format change: `CFS_MAX_EXTENTS`, a
@@ -548,8 +590,9 @@ so a sequentially written file lays out in one run; milestone 6's
 in-order writeback made sequential the common case.
 
 Two allocation classes exist. `CFS_ALLOC_DATA` (file data blocks) is
-refused with `-ENOSPC` once free blocks are at or below the **reserve**
-(`max(32, nblocks / 32)`); `CFS_ALLOC_META` (inode map, inode blocks,
+refused with `-ENOSPC` once free blocks are at or below half the **reserve**
+(`max(32, nblocks / 32)`; the whole reserve is kept at the write, where
+the page is charged: "Space, charged at the write"); `CFS_ALLOC_META` (inode map, inode blocks,
 extent and checksum blocks, directory blocks, bitmap chunks at commit)
 may use the reserve. Directory blocks count as metadata because a
 deletion rewrites one. Deleting a file needs a copy-on-write directory block,

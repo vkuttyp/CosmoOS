@@ -642,6 +642,63 @@ jobs:
           path: |
             out/${{ matrix.arch }}-release/test-large/*.log
           if-no-files-found: ignore
+  # MEM-9's acceptance (docs/backlog.md; vfs design.md, "Dirty pages,
+  # bounded"; cosmofs design.md, "Space, charged at the write"): on a
+  # 256 MiB guest, 512 MiB written with no sync, and the root filled by one
+  # dd until ENOSPC with no page lost. Release builds, both architectures.
+  fill:
+    name: fill test (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 60
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Toolchain versions (ci/Dockerfile)
+        run: |
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # BusyBox, musl and compiler-rt, pinned by SHA-256 in ports/busybox/busybox.mk
+      # and fetched once (scripts/fetch-pinned.py): every image carries BusyBox.
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+
+      - name: Build (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release all
+
+      - name: writers past memory and past the root's space (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-fill
+
+      - name: Upload the boots' serial logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-fill-${{ matrix.arch }}
+          path: |
+            out/${{ matrix.arch }}-release/test-fill/*.log
+          if-no-files-found: ignore
   # Roadmap 1.2 B5's acceptance (docs/roadmap-1.2.md; cosmofs testing.md,
   # "test-encrypt"): an encrypted root installed, its passphrase typed at
   # boot, three wrong ones restarting the machine with nothing mounted, no

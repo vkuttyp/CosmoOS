@@ -805,6 +805,49 @@ Nothing in cosmofs's transaction model moves: a data-page refusal is a
 returned error, not a poisoned mount (`cfs_fail` is reached only from
 rename's recovery and the commit's post-superblock failure).
 
+A refusal of `-ENOSPC` (cosmofs's space charge, MEM-9) is first
+treated as `-EFBIG` is, the vnode's pages written once and the page
+asked about again, and then gets one more chance in `file_pwrite`: with
+the vnode lock still held, as `file_sync` does, it writes the vnode's
+pages, commits through the vnode's `sync`, and writes once more, since
+blocks the open transaction replaced are free only once it commits. A
+second refusal is the writer's `ENOSPC`.
+
+### Dirty pages, bounded (MEM-9, invariant V40)
+
+Dirty pages of reclaimable mounts (every mount but ramfs's, whose pages
+are its store) are counted machine-wide, `pagecache_dirty_pages()`, and
+bounded: at most `pagecache_limit() / PAGECACHE_DIRTY_DIVISOR`, half the
+cache limit, so an eighth of RAM (32 MiB on a 256 MiB guest). The
+fraction is chosen once here and is not a test's to tune. A writer that
+finds the count at the bound is throttled in `pagecache_throttle`: it
+writes back its own file (`pagecache_sync` under the vnode lock, the
+order `file_sync` uses), and while the count is still at the bound it
+sleeps on the `pagecache-dirty` wait queue, holding no lock, until a page
+cleaned anywhere takes the count under it or 100 ms pass, at most fifty
+times (5 s). Its own pages are the ones it can always clean; the rest
+are a write-back thread's (cosmofs commits a mount whose dirty pages
+pass `CFS_WB_DIRTY_PAGES`), so the sleep is bounded for a mount that has
+none. Under the bound the throttle is one load.
+
+Where it is called is the rule. `file_write` and `aio`'s write call
+`file_throttle` before they take the open file's lock, and `file_pwrite`
+calls it at its top; `file_pwrite_held` is the write for a caller that
+holds `f->lock` and throttled first. An AIO `PWRITE` has no size cap and
+holds `f->lock` across its pieces, so it also asks `pagecache_dirty_over`
+(one load) once per `IO_BOUNCE_MAX` (64 KiB) of the request, as often as
+a `write` is throttled, and over the bound lets the lock go between two
+pieces to be throttled. The open file's lock is held across
+write-back (`file_sync` takes it, then the vnode lock, then writes), so a
+writer asleep under it would be waiting on a wake that lock can hold up.
+The sleep is a lockdep completion class (`pagecache-dirty`; L21): each
+wake, from a page cleaned under its cache lock, records the locks its
+waker holds, and a wait with any of them held is reported as a cycle.
+
+A shared mapping's write fault dirties pages without the throttle: it
+holds the address space's locks and cannot sleep on write-back there. Its
+pages are counted and bound the next `write`.
+
 ## Performance
 
 Not a goal in this phase: linear directories, one lock per filesystem,

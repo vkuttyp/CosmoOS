@@ -41,7 +41,7 @@ Open lines (struck lines are not counted):
 | Drivers and platforms | 3 | 0 | 2 | 12 | 17 |
 | Linux personality | 6 | 0 | 11 | 6 | 23 |
 | Lock validator and concurrency | 2 | 0 | 0 | 7 | 9 |
-| Memory | 2 | 0 | 1 | 7 | 10 |
+| Memory | 1 | 0 | 1 | 7 | 9 |
 | Network | 4 | 3 | 8 | 7 | 22 |
 | Observability | 1 | 0 | 0 | 6 | 7 |
 | Packages and upgrade | 2 | 0 | 2 | 2 | 6 |
@@ -52,7 +52,7 @@ Open lines (struck lines are not counted):
 | Commands | 1 | 0 | 5 | 1 | 7 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **43** | **22** | **48** | **99** | **212** |
+| **all** | **42** | **22** | **48** | **99** | **211** |
 
 ## Block devices
 
@@ -204,7 +204,7 @@ Open lines (struck lines are not counted):
 - **MEM-7** nice-to-have, M. x86-64 PCID, once a test path exists (TCG has none).
 - **MEM-8** nice-to-have, S. Thread guard page by map-then-protect instead of reserve-and-replace (no benefit shown).
 - **MEM-10** nice-to-have, S. There is no swap; when there is, it should be encrypted (an encrypted root's pages would otherwise reach the disk in the clear; out of roadmap 1.2 B5's scope).
-- **MEM-9** correctness, M. Dirty page-cache pages are not bounded by memory or by the filesystem's free space: `dd` to a file on a 256 MiB root wrote ~470 MB before it was killed by a fault, and every spawn after was `ENOMEM` (test-pkgtx's first fill, 2026-10-20). A write should meet `ENOSPC` when the pool cannot hold it, and writeback should throttle a writer. It also costs time: 1 GiB written to an encrypted root with one `sync` at the end took 1275 s on x86-64 under QEMU (256 MiB of memory), against 386 s with a `sync` after each 32 MiB (2026-10-24; test-encrypt now syncs every 32 MiB).
+- ~~**MEM-9** correctness, M. Dirty page-cache pages are not bounded by memory or by the filesystem's free space: `dd` to a file on a 256 MiB root wrote ~470 MB before it was killed by a fault, and every spawn after was `ENOMEM` (test-pkgtx's first fill, 2026-10-20). A write should meet `ENOSPC` when the pool cannot hold it, and writeback should throttle a writer. It also costs time: 1 GiB written to an encrypted root with one `sync` at the end took 1275 s on x86-64 under QEMU (256 MiB of memory), against 386 s with a `sync` after each 32 MiB (2026-10-24; test-encrypt now syncs every 32 MiB).~~ Done in v1.0.14: dirty pages of reclaimable mounts are bounded at an eighth of RAM, a writer at the bound writes its own file back and sleeps holding no lock (V40), and a page of a regular file is charged at the write against the pool's free blocks above the reserve, so a full pool refuses the write `ENOSPC` with no page lost (CF34): `make test-fill` (512 MiB with no sync on a 256 MiB guest, nothing killed; one `dd` filling a 256 MiB root stopped by `ENOSPC` after 170 MiB with 16 KiB left), both architectures, 2026-10-25.
 
 ## Network
 

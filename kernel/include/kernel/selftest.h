@@ -324,10 +324,13 @@ bool selftest_wb_error_fsync(const char **reason);  /* a refused write-back: fsy
 bool selftest_wb_error_once(const char **reason);   /* two files hear the failure once each; a later open never */
 bool selftest_wb_error_close(const char **reason);  /* close says -EIO and closes; the release's retry keeps the data */
 bool selftest_wb_error_lost(const char **reason);   /* three refusals: the page is lost, counted, said; the mount lives */
+bool selftest_pagecache_dirty_bound(const char **reason);   /* MEM-9: dirty pages bounded, the writer asleep holding nothing */
 bool selftest_read_bench(const char **reason);      /* prints: the object path at 1/4/64 KiB requests, ramfs and cosmofs */
 bool selftest_write_bench(const char **reason);     /* prints: the same for writes on ramfs */
 bool selftest_pagecache(const char **reason);
 bool selftest_pagecache_pinned(const char **reason);  /* a frame a mapping references is not reclaimed */
+bool selftest_pagecache_dirty_writer(const char **reason);  /* MEM-9: a writer with write-back off stays under the dirty bound */
+bool selftest_aio_pwrite_dirty(const char **reason);       /* MEM-9: one AIO PWRITE past the dirty bound stays under it */
 bool selftest_file_read_filled(const char **reason);   /* a large read of a file is one read: position locked, moved by what was accepted */
 bool selftest_cache_limits(const char **reason);   /* ramfs page budget, global limit with reclaim */
 bool selftest_cache_budget_race(const char **reason);   /* the budget admission under concurrent misses */

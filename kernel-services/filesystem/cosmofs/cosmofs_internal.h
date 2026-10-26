@@ -254,7 +254,7 @@ static inline unsigned cfs_max_extents(const struct cfs *fs)
 
 enum cfs_alloc_class {
     CFS_ALLOC_META,   /* may use the reserve */
-    CFS_ALLOC_DATA,   /* refused at or below the reserve */
+    CFS_ALLOC_DATA,   /* refused at or below half the reserve (MEM-9) */
 };
 
 /* Abandon the open transaction after a mutation that could not be

@@ -174,6 +174,12 @@ def stage_write(args, results, d):
         check_pool(b, "/mnt/l", "write")
         check_pool(b, "/mnt/m", "write")
         sh(b, "umount /mnt/m && umount /mnt/l", "umount")
+        # No write taken and then dropped: past the run bound (CFS-32) or
+        # past the pool's space, the fill's last chunk (MEM-9; on the
+        # CFS-32 tree 164 pages lost -ENOSPC, x86-64, 2026-10-25).
+        lost = re.search(r"^.*dirty page\(s\) of inode \d+ on \S+ lost.*$", b.text(), re.M)
+        if lost:
+            raise Fail(f"write: {lost.group(0).strip()!r}")
         end(b, "write")
     except Exception:
         b.kill()

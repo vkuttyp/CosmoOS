@@ -544,6 +544,10 @@ int64_t file_read(struct file *f, void *buf, size_t len);
 int64_t file_write(struct file *f, const void *buf, size_t len);
 int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off);
 int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off);
+/* file_pwrite without the dirty bound's throttle, for a caller holding
+ * f->lock that called file_throttle before it took it (MEM-9). */
+int64_t file_pwrite_held(struct file *f, const void *buf, size_t len, uint64_t off);
+void file_throttle(struct file *f);
 int64_t file_seek(struct file *f, int64_t off, int whence);
 int file_stat(struct file *f, struct cosmo_stat *st);
 /* Pack struct cosmo_dirent records; returns bytes, 0 at end. */

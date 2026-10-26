@@ -3433,3 +3433,21 @@ See the [history index](README.md).
     then runs B1-B4's tests on an encrypted root. CFS-32 (a compressed
     file stops at about 128 MiB) found by it, in the backlog.
   - Report: `docs/audit/2026-10-24-b5-encrypted-root-report.md`.
+- **Dirty pages bounded, and ENOSPC at the write (2026-10-25, backlog
+  MEM-9; PR #455).** The third of v1.0.14's PRs.
+  - **The bound (V40):** dirty pages of reclaimable mounts are counted
+    machine-wide and held under an eighth of RAM. A writer at the bound
+    writes its own file back, then sleeps on `pagecache-dirty` holding no
+    lock (at most fifty 100 ms sleeps), throttled before the open file's
+    lock is taken; the sleep is a lockdep completion class.
+  - **ENOSPC at the write (CF34):** cosmofs charges each dirty page of a
+    regular file against the free blocks above the reserve, and the VFS
+    commits once before the writer is told. Write-back may take the
+    reserve's upper half, for the metadata a transaction takes after a
+    page's charge (the first matrix lost two pages to it).
+  - `make test-fill` (512 MiB with no `sync` on a 256 MiB guest; a 256 MiB
+    root filled to `ENOSPC` with no page lost) on both architectures in
+    CI; `pagecache-dirty-writer` failing on main; `tools/mem9-probe.py`.
+    The matrix's four slow boots were another project's builds on the
+    host (flakes.md).
+  - Report: `docs/audit/2026-10-25-mem9-report.md`.

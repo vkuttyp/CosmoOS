@@ -124,6 +124,7 @@ struct pagecache_stats {
     uint64_t dropped_dirty;    /* dirty pages dropped at a vnode's release: data lost */
     uint64_t pinned_skips;     /* reclaim candidates left alone because a mapping holds the frame */
     uint64_t exec_syncs;       /* writes into a page some mapping executes: the I-cache synced by the kernel alias */
+    uint64_t throttled;        /* sleeps of a writer at the dirty bound (pagecache_throttle) */
 };
 void pagecache_get_stats(struct pagecache_stats *out);
 
@@ -135,5 +136,17 @@ void pagecache_set_limit(uint64_t pages);
 uint64_t pagecache_limit(void);
 /* Evict up to `max` clean pages from the LRU tail; returns the number evicted. */
 unsigned pagecache_reclaim(unsigned max);
+
+/* Dirty pages, bounded (MEM-9; vfs design.md, "Dirty pages, bounded"):
+ * at most half the cache limit dirty on reclaimable mounts. A writer
+ * calls pagecache_throttle before it takes the vnode lock, holding no
+ * lock write-back takes; it returns at once under the bound. */
+void pagecache_dirty_init(void);
+void pagecache_throttle(struct vnode *vn);
+/* Whether a writer would be throttled now: one load, no lock. A loop
+ * that holds a lock the throttle may not sleep under asks this between
+ * its pieces, and only then lets the lock go to be throttled. */
+bool pagecache_dirty_over(void);
+uint64_t pagecache_dirty_pages(void);
 
 #endif /* KERNEL_PAGECACHE_H */

@@ -17,6 +17,7 @@
 #   make test-pci-hotplug roadmap 1.2 B3: PCIe device_del/device_add, idle and under I/O, NVMe, late partition scan
 #   make test-mirror  roadmap 1.2 B3: a two-disk mirrored root, a disk pulled, replaced and resilvered; a spare (CI: BUILD=release)
 #   make test-large   CFS-32: compressible files past the old run bound, read by v1.0.13 (CI: BUILD=release)
+#   make test-fill    MEM-9: writers past memory and past the root's space, on a 256 MiB guest (CI: BUILD=release)
 #   make test-upgrade shell completeness S7: upgrade an installed v1.0.3 to this build, roll back (CI: BUILD=release)
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
 #   make test-security roadmap M5: verified boot refuses tampered files; VERIFY_BOOT=0 says so (CI: BUILD=release)
@@ -48,7 +49,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -276,6 +277,14 @@ test-install: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/install_test.py --image $(IMAGE) --workdir $(OUT)/test-install \
 		--timeout $(BOOT_TIMEOUT) --key $(MODSIGN_KEY)
+
+# MEM-9 (tests/boot/fill_test.py): on a 256 MiB guest with this build
+# installed, 512 MiB written with no sync to a data pool, and the root
+# filled by one dd until ENOSPC; nothing killed, spawns work after.
+test-fill: $(IMAGE)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/fill_test.py --image $(IMAGE) --workdir $(OUT)/test-fill \
+		--timeout $(BOOT_TIMEOUT)
 
 # Roadmap 1.2 B5's acceptance test (tests/boot/encrypt_test.py,
 # docs/kernel-services/filesystem/cosmofs/testing.md, "test-encrypt"): an

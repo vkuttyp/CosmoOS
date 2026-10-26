@@ -479,6 +479,18 @@ runs: the write refused `-EFBIG` after 54 records, fsync clean, no
 write-back failure or dropped page, the size and every record the same
 after a remount, the check clean); `tools/cfs32-probe.py --old`.
 
+**CF34. No page of a regular file is dirtied that the pool has no block
+for (MEM-9).** `cfs_dirty_check` refuses `-ENOSPC` unless the data blocks
+free above the reserve cover the mount's dirty pages, this one and
+`CFS_DIRTY_META`'s allowance; a directory's pages are not charged (they
+may use the reserve). The VFS commits once and asks again before the
+writer hears it. The metadata a transaction takes after a page's charge
+comes from the same free blocks, so the page's write-back may take the
+upper half of the reserve (the data class's floor is half of it): 7
+blocks against the allowance's 5 in `test-fill`'s last transaction. **Checked by** `test-fill` (stage `enospc`: the root
+filled by one `dd` with no sync ends in `ENOSPC` with no write-back
+failing and no dirty page lost).
+
 **CF18. From format version 12 a snapshot's identity is its own: every
 snapshot has a uuid no other snapshot of the filesystem has, and no id
 is handed out twice, across remounts included.** The uuid is drawn when

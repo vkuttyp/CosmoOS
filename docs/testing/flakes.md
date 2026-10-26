@@ -3120,6 +3120,23 @@ and 154.6 s); the failing boot's self-tests took 121,494 ms and
 main's (`2acce0c3`). The same 290 ms. Not attributed; CI ran again on
 the commit that records it.
 
+**Tenth sighting, 2026-10-26:** x86-64 CI, PR #455 (MEM-9: the page
+cache, cosmofs and the AIO ring's write, nothing on the irq-poll or
+scheduler path) at `dc27d62a`, run 40235787586, job 121298002369,
+`entropy boots (x86_64)`, its first boot: `cpu 0, a spinner above the
+default for 300 ms: 286 calls of the poll, longest gap 290 ms (bound
+100)`, the check at 303 ms, 1 of 512. The boot's self-tests took 171,499
+ms (`cosmofs-replay` 25,351 ms, `lockdep-graph-bench` 7,097 ms), a slow
+runner. The same 290 ms. **A gap of another length, 2026-10-25:** in a
+local x86-64 `test-smp2` boot of the same branch (`ef4ecdb0`) on a host
+running 12 busy loops (about 720 % of its 8 CPUs; "Debug boots slow
+throughout under another project's builds" below), `cpu 1 ... 171 calls
+of the poll, longest gap 253 ms (bound 100)`, the check at 306 ms. That
+is the first gap seen that is neither about 14 ms nor 290 ms, so "the
+worker is raised by its timer, or not at all" is not true of a starved
+host; the boot's log does not say when the worker was raised. Not
+attributed; CI ran again on the commit that records it.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==
@@ -3770,6 +3787,22 @@ stops, a second `lockup_sample_all` must hear from `k` within
 NMI-or-not branch had passed. A vCPU the host did not schedule in time
 fits; nothing in the log shows it. First sighting; recorded, not
 attributed.
+
+**Second sighting, 2026-10-25:** `SELFTEST: lockup-sample-irqoff ...
+FAIL: check failed: m2 & CPUMASK_OF((unsigned)k) at line 398 (314 ms)`,
+1 of 512, local x86-64 debug `make test` (four CPUs), MEM-9's branch
+with `pagecache-dirty-writer` added and not yet committed. It booted
+alone, right after the same boot of main's tree, which passed this test.
+It is the same check as the first sighting (line 373 then, 398 now):
+the NMI branch passed (`nmi answered through the mask; tick sample 28 ms
+old`), and so did `CHECK(ok2)`, which says only that the second sample
+took the reporter's slot. CPU `k` was then missing from the answered
+mask, so it did not publish within `LOCKUP_SAMPLE_TIMEOUT_NS` (5 ms) of
+the spinner stopping. The branch changes the page cache and cosmofs, not
+the lockup sampler or its IPIs. No host-load record covers the boot. The
+two sightings are on different architectures, x86-64 and AArch64. Still
+recorded, not attributed; a third sighting would justify recording which
+CPUs answered and how long after the deadline `k` published.
 
 ## The network harness's budget, missed by a slow boot, 2026-09-29
 
@@ -4954,3 +4987,57 @@ host-wide counter cannot tell apart from the client's. The client's own
 `pcb->retransmits` (`tcp.c:1212`, `:2261`) would name it. First sighting;
 recorded in the backlog as NET-23 and not fixed in v1.0.14's unit,
 whose acceptance it does not block.
+
+## Debug boots slow throughout under another project's builds, 2026-10-25
+
+MEM-9's validation matrix on `ef4ecdb0` (14:47-18:55 local) failed four
+debug boots, every one slow from start to finish rather than stuck in
+one place, and every one passing when rerun on a quiet host:
+
+| boot | when (local) | verdict | self-tests | `cosmofs-replay` | `process-user` | rerun, quiet |
+| --- | --- | --- | --- | --- | --- | --- |
+| x86-64 `test-smp2` | 15:02-15:06 | `timed out after 240s`, in the shell harness at `jobs` | 194.1 s | 37.1 s | 9.7 s | PASS in 167.5 s |
+| AArch64 `QEMU_SMP=2` | 16:52-16:57 | `cosmofs-replay took 46781 ms (budget 40000 ms)`, `[WATCHDOG] no progress for 40001 ms` | 225.3 s | 46.8 s | 13.1 s | PASS in 174.8 s |
+| AArch64 `test-smp2` | 17:00-17:05 | `process-user ... FAIL: check failed: clock_since_ns(t0) < 15000000000ULL at line 263 (19048 ms)` | 214.6 s | 38.8 s | 19.0 s | PASS in 197.9 s |
+| AArch64 `test-chaos` | 17:05-17:10 | `process-user` (18268 ms), `net-tcp-delack` (`delay_ms >= TCP_DELACK_NS / 1000000ull - 10` at line 1286), `epoll-scale` (`wake_ns[3] <= 4 * wake_ns[0] + 200000` at line 411) | 200.1 s | 17.9 s | 18.3 s | PASS in 170.8 s |
+
+The reruns were on the same tree, 19:47-20:14, with `process-user` at
+6.5-7.3 s and `cosmofs-replay` at 16.7-19.7 s. The branch's first
+matrix (`bcc53210`) had failed x86-64 `test-smp2` and `test-chaos` the
+same way (`process-user` 17.9 and 19.6 s) and `test-harness-retry` by a
+timeout with `[WATCHDOG] no progress for 40000 ms`, from 12:09 to 12:23.
+
+**The load.** On this host the owner's Nova project was running its
+tests and builds: `dotnet test Nova.slnx` with clang compiles under it,
+from about 17:00, with Nova's test runs writing files at 16:52 and 16:58,
+and Nova's c4 builds from 12:02 to 12:15. A sampler of `ps`'s CPU shares
+every 30 s, started at 17:05 during the chaos boot, showed Nova's
+processes at 183-275 % of a CPU from 17:06:49 to 17:10:19 and QEMU held
+to 0-104 %. No sample covers the x86-64 failure at 15:02.
+
+**The mechanism, reproduced.** x86-64 `test-smp2` on `ef4ecdb0`,
+alternated between the quiet host and the same host running 12 busy
+loops (about 720 % of its 8 CPUs), with Nova idle (0 %) throughout:
+
+| run | verdict | self-tests | `cosmofs-replay` | `lockdep-graph-bench` |
+| --- | --- | --- | --- | --- |
+| quiet 1 | PASS in 167.5 s | 133.3 s | 17.4 s | 3.4 s |
+| loaded 1 | `timed out after 240s` | 82.8 s, unfinished | 24.2 s | 4.2 s |
+| quiet 2 | PASS in 177.3 s | 141.8 s | 20.0 s | 3.4 s |
+| loaded 2 | `timed out after 240s` | 231.8 s | 75.2 s | 16.6 s |
+
+Under the loops QEMU had about 60 % of a CPU instead of about 100 %, and
+loaded 2 also failed `lockup-hard` (`s1.hard_answered &
+CPUMASK_OF((unsigned)k)` at line 670) and `irqpoll-boost` (`gap_ms <=
+BOOST_GAP_MS` at line 111). The owner's Parallels VM ran at about 85-100
+% of a CPU through every run, quiet and loaded alike, so it is not what
+separates them. Its effect alone is not measured.
+
+**Not the branch.** On a quiet host, alternated x86-64 `test-smp2` boots
+of main (`57701d4b`) and the branch took `process-user` 7.2 and 7.0 s
+against 6.4 and 7.0 s, all four passing.
+
+Not a CosmoOS defect and not a bound to widen, as for `syscall-fuzz` on
+2026-10-23: each bound is what its test claims on a host not running
+another project's builds beside QEMU. A matrix whose boots fail together
+like this is rerun on a quiet host, and the rerun is the one recorded.
