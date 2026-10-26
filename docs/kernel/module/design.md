@@ -314,7 +314,7 @@ in the boot archive, holding each load `<hold ms>` before its unload,
 and logs one line:
 
 ```text
-[ INFO] modcycle: tests/cosmotest.ko: 1000 cycles (hold 0 ms): PASS (load failures 0, unload failures 0, ...)
+[ INFO] modcycle: tests/cosmotest.ko: 1000 cycles (hold 0 ms): PASS in 13103 ms (load failures 0, unload failures 0, ...)
 ```
 
 That is the door for a module built outside the tree (Nova's C8 module):
@@ -329,7 +329,10 @@ does, and a DHCP exchange or a new neighbour entry allocates. So the run
 does not take them as they fall. The baseline is a quiet sample, two
 equal readings 10 ms apart (at most `MODULE_CYCLE_SETTLE_MS`, 500 ms, of
 tries); after the last cycle the counts are read again every 10 ms
-until they equal the baseline or 500 ms have passed. A buffer some other
+until they equal the baseline or 500 ms have passed. Both limits are the
+clock's, not a count of sleeps, since a 10 ms sleep lasts longer under
+TCG, and the run reports what each reading waited (`waited A + B ms for
+quiet`). A buffer some other
 thread holds for a moment is gone by then; a leak never goes. Running
 the hook after `dhcp_boot_wait` narrows what can overlap it, but nothing
 isolates it: something else that allocates for good during a run (a

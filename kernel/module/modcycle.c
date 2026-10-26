@@ -19,6 +19,7 @@
 #include <kernel/log.h>
 #include <kernel/module.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 #include <kernel/wait.h>
 #include <kernel/vmm.h>
 
@@ -54,26 +55,32 @@ static bool counts_equal(const struct module_cycle_count *a, const struct module
  * it equals the baseline, for MODULE_CYCLE_SETTLE_MS at most. A buffer
  * held for a moment is gone by then; a leak never is (design.md, "Load
  * and unload in cycles"). */
-static void snapshot_quiet(struct module_cycle_count *c)
+/* Both bounded by the clock, not by a count of sleeps: a 10 ms sleep
+ * lasts longer under TCG. Each returns the milliseconds it waited. */
+static unsigned snapshot_quiet(struct module_cycle_count *c)
 {
+    uint64_t t0 = clock_now_ns();
     snapshot(c);
-    for (unsigned waited = 0; waited < MODULE_CYCLE_SETTLE_MS; waited += 10) {
+    while (clock_since_ns(t0) < MODULE_CYCLE_SETTLE_MS * 1000000ULL) {
         struct module_cycle_count again;
         thread_sleep_ns(SETTLE_STEP_NS);
         snapshot(&again);
         if (counts_equal(&again, c))
-            return;
+            break;
         *c = again;
     }
+    return (unsigned)(clock_since_ns(t0) / 1000000ULL);
 }
 
-static void snapshot_until(struct module_cycle_count *c, const struct module_cycle_count *want)
+static unsigned snapshot_until(struct module_cycle_count *c, const struct module_cycle_count *want)
 {
+    uint64_t t0 = clock_now_ns();
     snapshot(c);
-    for (unsigned waited = 0; waited < MODULE_CYCLE_SETTLE_MS && !counts_equal(c, want); waited += 10) {
+    while (!counts_equal(c, want) && clock_since_ns(t0) < MODULE_CYCLE_SETTLE_MS * 1000000ULL) {
         thread_sleep_ns(SETTLE_STEP_NS);
         snapshot(c);
     }
+    return (unsigned)(clock_since_ns(t0) / 1000000ULL);
 }
 
 bool module_cycle(const void *file, size_t size, const char *origin, unsigned count, unsigned hold_ms,
@@ -84,7 +91,7 @@ bool module_cycle(const void *file, size_t size, const char *origin, unsigned co
         /* The baseline is taken after one cycle: what the first load makes
          * once and every later one reuses is not a leak. */
         if (i == 1)
-            snapshot_quiet(&out->before);
+            out->settle_before_ms = snapshot_quiet(&out->before);
         struct module *m = NULL;
         int rc = module_load(file, size, origin, &m);
         if (rc != 0) {
@@ -109,8 +116,8 @@ bool module_cycle(const void *file, size_t size, const char *origin, unsigned co
         out->cycles++;
     }
     if (count < 2)
-        snapshot_quiet(&out->before);
-    snapshot_until(&out->after, &out->before);
+        out->settle_before_ms = snapshot_quiet(&out->before);
+    out->settle_after_ms = snapshot_until(&out->after, &out->before);
     /* lockdep's classes are reported, not judged: a callback's class is
      * named after its address, so a module whose callback lands at a new
      * address adds a class that stays (backlog LOCK-10). */
@@ -171,16 +178,20 @@ unsigned module_cycle_boot(void)
         return 1;
     }
     struct module_cycle_result r;
+    uint64_t t0 = clock_now_ns();
     bool ok = module_cycle(file, size, spec, count, hold_ms, NULL, NULL, &r);
-    kinfo("modcycle: %s: %u cycles (hold %u ms): %s (load failures %u, unload failures %u, first error %d; "
-          "modules %u -> %u; kmalloc live %llu -> %llu, large pages %llu -> %llu; vm regions %llu -> %llu, anon pages %llu -> %llu; "
-          "lockdep classes %u -> %u)",
-          spec, r.cycles, hold_ms, ok ? "PASS" : "FAIL", r.load_failures, r.unload_failures, r.first_error,
-          r.before.modules, r.after.modules, (unsigned long long)r.before.heap_objects,
+    uint64_t took_ms = clock_since_ns(t0) / 1000000ULL;
+    kinfo("modcycle: %s: %u cycles (hold %u ms): %s in %llu ms (load failures %u, unload failures %u, "
+          "first error %d; modules %u -> %u; kmalloc live %llu -> %llu, large pages %llu -> %llu; "
+          "vm regions %llu -> %llu, anon pages %llu -> %llu; lockdep classes %u -> %u; waited %u + %u ms for quiet)",
+          spec, r.cycles, hold_ms, ok ? "PASS" : "FAIL", (unsigned long long)took_ms, r.load_failures,
+          r.unload_failures, r.first_error, r.before.modules, r.after.modules,
+          (unsigned long long)r.before.heap_objects,
           (unsigned long long)r.after.heap_objects, (unsigned long long)r.before.large_pages,
           (unsigned long long)r.after.large_pages, (unsigned long long)r.before.vm_regions,
           (unsigned long long)r.after.vm_regions, (unsigned long long)r.before.anon_pages,
-          (unsigned long long)r.after.anon_pages, r.before.lock_classes, r.after.lock_classes);
+          (unsigned long long)r.after.anon_pages, r.before.lock_classes, r.after.lock_classes, r.settle_before_ms,
+          r.settle_after_ms);
     return ok ? 0 : 1;
 }
 

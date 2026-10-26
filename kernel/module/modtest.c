@@ -827,12 +827,13 @@ bool selftest_module_cycle(const char **reason)
     CHECK(r.cycles == CYCLE_COUNT && r.load_failures == 0 && r.unload_failures == 0);
     CHECK(module_find("cosmotest") == NULL);
     kinfo("selftest: module-cycle: %u cycles: modules %u -> %u, kmalloc live %llu -> %llu, large pages %llu -> %llu, "
-          "vm regions %llu -> %llu, anon pages %llu -> %llu, lockdep classes %u -> %u",
+          "vm regions %llu -> %llu, anon pages %llu -> %llu, lockdep classes %u -> %u; waited %u + %u ms for quiet",
           r.cycles, r.before.modules, r.after.modules, (unsigned long long)r.before.heap_objects,
           (unsigned long long)r.after.heap_objects, (unsigned long long)r.before.large_pages,
           (unsigned long long)r.after.large_pages, (unsigned long long)r.before.vm_regions,
           (unsigned long long)r.after.vm_regions, (unsigned long long)r.before.anon_pages,
-          (unsigned long long)r.after.anon_pages, r.before.lock_classes, r.after.lock_classes);
+          (unsigned long long)r.after.anon_pages, r.before.lock_classes, r.after.lock_classes, r.settle_before_ms,
+          r.settle_after_ms);
 
     /* Control 1: a leak while the module is live is seen. Two cycles
      * after the baseline leak one allocation each. */

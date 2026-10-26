@@ -143,6 +143,23 @@ line 729 against 5730 on x86-64, 762 against 5763 on AArch64). The
 self-test takes about 2 s longer, the controls' 500 ms waits for counts
 that never return.
 
+## The modcycle boot's budget, and the quiet readings' clock
+
+CI's next run (40288077004, `9fdd42d2`) timed out the x86-64 modcycle
+boot at 240 s (244.0 s) on a slow runner whose plain debug boots took
+221.4-226.2 s and passed; the cycles add 6-12 s at middling speeds and at
+least 18 s there. `make test-modcycle` now has its own budget,
+`MODCYCLE_TIMEOUT`, 300 s on both architectures, with that data in the
+Makefile, and the `modcycle:` line gives the cycles' own time: `PASS in
+13103 ms` (x86-64) and `13449 ms` (AArch64) locally.
+
+A local x86-64 modcycle boot then failed the `module-cycle` self-test's
+8 s budget (9095 ms). The quiet readings were bounded by a count of
+10 ms sleeps, and a sleep under TCG can last longer, so each control,
+whose counts never come back, could wait past its 500 ms. They are now
+bounded by the clock and report what they waited. Four boots after it:
+the self-test 4333-4887 ms, its main run waiting 10-13 ms for quiet.
+
 ## Validation
 
 The matrix on `4331948f` (AGENTS.md), 2026-10-26, 07:08 to 07:56 local,

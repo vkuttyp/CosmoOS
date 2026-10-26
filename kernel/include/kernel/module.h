@@ -205,6 +205,7 @@ struct module_cycle_result {
     unsigned unload_failures;   /* -EBUSY: a zombie */
     int first_error;
     struct module_cycle_count before, after;
+    unsigned settle_before_ms, settle_after_ms;   /* how long each reading waited to be quiet */
 };
 /* Called while the module is live, between its load and its unload
  * (a self-test's controls leak through it). */

@@ -264,12 +264,21 @@ endif
 
 # Load and unload in cycles (docs/kernel/module/design.md, invariant
 # M27): the debug boot test with module.cycle= on the command line, so the
-# kernel loads and unloads cosmotest MODCYCLE_COUNT times right after the
-# boot modules; the harness requires the hook's PASS line for that entry
-# and count. Debug builds only (the hook is a test seam).
+# kernel loads and unloads cosmotest MODCYCLE_COUNT times after the boot
+# modules and the DHCP wait; the harness requires the hook's PASS line for
+# that entry and count. Debug builds only (the hook is a test seam).
 MODCYCLE_COUNT ?= 1000
+# Its whole-boot timeout: a debug boot's and the cycles'. On CI's x86-64
+# entropy job (PR #457) the modcycle boot took 152.3 s beside plain boots
+# of 145.9-154.0 s, then 189.9 s beside 178.4-183.5 s, and on a slow runner
+# timed out at 240 s (244.0 s) beside plain boots of 221.4-226.2 s that
+# passed (run 40288077004): the cycles add 6-12 s at those speeds and at
+# least 18 s at the slowest. AArch64's took 212.8-263.2 s beside plain
+# boots of 198.3-254.0 s under its 300 s. 300 s on both; the modcycle line
+# gives the cycles' own time (`PASS in N ms`) for the next look.
+MODCYCLE_TIMEOUT ?= 300
 test-modcycle:
-	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug \
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug BOOT_TIMEOUT=$(MODCYCLE_TIMEOUT) \
 		CMDLINE='$(CMDLINE) module.cycle=tests/cosmotest.ko:$(MODCYCLE_COUNT)' BOOT_LOG=$(OUT)/boot-test-modcycle.log test
 
 # Roadmap M2's acceptance test (tests/boot/install_test.py,

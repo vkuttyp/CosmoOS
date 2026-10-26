@@ -88,7 +88,7 @@ also requires, in every build type, the boot-loaded module's lines:
 `module.cycle=<archive entry>:<count>[:<hold ms>]` on the command line
 cycles any module in the boot archive the same way, once, after the
 DHCP wait and before the self-tests, and logs `modcycle: <entry>: <n> cycles (hold <ms> ms):
-PASS|FAIL (...)`; a FAIL fails the boot (debug builds only).
+PASS|FAIL in <ms> ms (...)`; a FAIL fails the boot (debug builds only).
 
 ## Variants
 
