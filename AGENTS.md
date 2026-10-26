@@ -58,6 +58,10 @@ choosing what to do.
   Run QEMU at default priority; avoid zsh background `&` boot loops, and
   inspect QEMU's priority and nice value with `ps`.
 - State checkable facts: actual paths, functions, measurements and run IDs.
+- A `NAME.c` with a `NAME.nova` beside it is generated from Nova (its
+  banner says so): edit the `.nova` file and run `make nova` with the pinned
+  novac, never the C; commit both. `make nova-check` and CI's "Nova sources"
+  job fail on a mismatch ([build design](docs/build/design.md#nova-sources)).
 
 ## Validation matrix
 

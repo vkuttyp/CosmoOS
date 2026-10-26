@@ -60,6 +60,30 @@ jobs:
         id: image
         run: scripts/ci-image.sh "ghcr.io/${{ github.repository_owner }}/cosmoos-ci"
 
+  # The C generated from the kernel's Nova sources matches them
+  # (docs/build/design.md, "Nova sources"): recompiled with the pinned novac,
+  # the release's Linux x64 archive verified against its SHA-256.
+  nova:
+    name: Nova sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install the pinned novac
+        env:
+          NOVAC_SHA256: ff1d3b0a45d0de503e60307e586805a6c86b799d806dccd2c5eed33747c1e3b8   # novac-linux-x64.tar.gz of the pinned release
+        run: |
+          v=$(python3 scripts/nova-gen.py --pinned)
+          curl -fsSL -o novac.tar.gz "https://github.com/vkuttyp/Nova/releases/download/v$v/novac-linux-x64.tar.gz"
+          echo "$NOVAC_SHA256  novac.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/novac" && tar -xzf novac.tar.gz -C "$RUNNER_TEMP/novac" && rm novac.tar.gz
+          echo "NOVAC=$RUNNER_TEMP/novac/novac" >> "$GITHUB_ENV"
+
+      - name: Generated C matches its Nova sources
+        run: python3 scripts/nova-gen.py --check
+
   build-and-boot:
     name: build, boot, analyze (${{ matrix.arch }}, ${{ matrix.part }})
     runs-on: ${{ matrix.os }}

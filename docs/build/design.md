@@ -199,3 +199,37 @@ wrapped set and the list differ, so an exemption is never added or left
 behind silently. A fix removes both. Where the two architectures differ
 (`compat/linux/signal.c`'s frame builders are large only on AArch64), only
 the large definition is wrapped.
+
+## Nova sources
+
+Some kernel code is written in Nova, a memory-safe language compiled to C
+(https://github.com/vkuttyp/Nova): the GPT parser and writer
+(`kernel/block/gpt.nova`). Each `NAME.nova` sits beside the
+`NAME.c` it generates, and the generated C is checked in with a "do not
+edit" banner naming its source, so **building CosmoOS needs no Nova
+compiler**: the C compiles like any other file, and every target, host
+test and fuzz target that links it is unchanged. Nova's runtime is
+generated too: `kernel/include/nova/rt.h` and `kernel/nova/nova_rt_core.c`.
+Each environment supplies its own panic hook, called when a Nova check
+fails (`kernel/nova/nova_panic.c` panics the kernel, naming the Nova line;
+`tests/host/nova_panic.c` aborts).
+
+Changing a `.nova` file needs the pinned compiler: `make nova` runs
+`scripts/nova-gen.py`, which compiles each source with `novac build
+--profile freestanding --no-float --emit c`, adds the banner and writes
+the results. A new port is one line in the script's `PORTS`. The compiler
+is pinned (`NOVAC_VERSION` in the script; `make nova` refuses any other):
+generated C is a pure function of the source and the compiler, so the
+pinned novac reproduces the checked-in files byte for byte. Moving to a
+newer novac is a change of its own: bump the pin and the CI job's
+`NOVAC_SHA256` (the release's `SHA256SUMS`), `make nova`, review the diff,
+run the matrix. The pinned release is installed with
+
+```sh
+curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.1.1 sh
+```
+
+or named with `NOVAC=<path>`. `make nova-check` only compares, and CI's
+"Nova sources" job runs it with the pinned release (its Linux x64 archive,
+verified against the release's SHA-256), so a `.nova` change without its
+regenerated C, or a hand edit to generated C, fails CI.

@@ -223,8 +223,8 @@ generated C, checked in so the build needs no Nova compiler, with Nova's
 runtime (`kernel/include/nova/rt.h`, `kernel/nova/`). Every index, length
 and arithmetic step is checked; a failed check is a kernel panic naming
 the Nova source line (`kernel/nova/nova_panic.c`), never a read or write
-outside the buffers. Do not edit `gpt.c`: change the Nova source and
-regenerate it (Nova's `integrations/cosmoos/c9/vendor.py`; the method and
+outside the buffers. Do not edit `gpt.c`: change its source, `kernel/block/gpt.nova`, and
+run `make nova` (`docs/build/design.md`, "Nova sources"; the method and
 the comparison against the C original are Nova's
 `docs/cosmoos/c9-report.md`). The checks, their order and their reasons
 are the C original's. A table is accepted only whole: a
