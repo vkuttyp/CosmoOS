@@ -40,7 +40,7 @@ Open lines (struck lines are not counted):
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 3 | 0 | 2 | 12 | 17 |
 | Kernel modules | 1 | 0 | 0 | 1 | 2 |
-| Linux personality | 6 | 0 | 11 | 6 | 23 |
+| Linux personality | 7 | 0 | 11 | 6 | 24 |
 | Lock validator and concurrency | 3 | 0 | 0 | 7 | 10 |
 | Memory | 1 | 0 | 1 | 7 | 9 |
 | Network | 4 | 3 | 8 | 7 | 22 |
@@ -53,7 +53,7 @@ Open lines (struck lines are not counted):
 | Commands | 1 | 0 | 5 | 1 | 7 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **44** | **22** | **48** | **100** | **214** |
+| **all** | **45** | **22** | **48** | **100** | **215** |
 
 ## Block devices
 
@@ -187,6 +187,8 @@ Open lines (struck lines are not counted):
 - **LX-21** nice-to-have, M. `chroot` is refused to a multi-threaded process (P39).
 - **LX-22** nice-to-have, S. `fchown` on a pipe or socket is `EBADF`; no time zone kept by `settimeofday`.
 - **LX-23** nice-to-have, M. glibc's dynamic linker untried; no vDSO (`AT_SYSINFO_EHDR`).
+
+- **LX-24** correctness, S. BusyBox `yes` with a 53-byte line, piped to `head -c N | md5sum`, never exits once `head` has its N bytes: `md5sum` prints, `head` exits, and `yes` runs on (state R, its stdout the pipe's write end) until killed, so the shell waits for ever. `yes abc` exits at once with `Broken pipe` at every size tried (1000 B to 200 MiB); the 53-byte line hangs at 10 MB and 200 MiB, every time. Seen on v1.0.14-rc1 and on v1.0.13 (Parallels, aarch64, 2026-10-26), so not v1.0.14's. `pipe_ring_write` returns `-EPIPE` once the readers are gone and no write raises SIGPIPE here; what `yes` gets back instead is not yet known.
 
 ## Lock validator and concurrency
 

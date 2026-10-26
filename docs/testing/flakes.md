@@ -4910,6 +4910,33 @@ same job on `f791de0f` and on `ffbb5f56`, which holds `3888f9da`. Two
 sightings, both x86-64, both the boot straight after an unclean or
 init-requested restart, one local and one on CI; still not attributed.
 The failed job was re-run and passed; `make test-be` locally on the same tree passed (457.7 s).
+**Third sighting, 2026-10-26:** CI, x86-64 release `make test-be` inside
+the `upgrade test (x86_64)` job (run 40271826991, job 121406134646, PR
+#457 on `25ce894e`). The `be-pending-done` boot printed the loader's
+lines up to `paging: root at 0xc39b000 (user root 0x0), 8/13 pool pages
+used` at 3.20 s and then nothing until `no prompt after the first prompt
+before the deadline (240 s from launch; the last line at 3.2 s)`. The
+boot before it, `be-pending`, ended with `poweroff` and `shutdown: exit
+status 0`, so this one was a fresh QEMU after a clean power-off, unlike
+the first two (after a kill, after an init-requested restart). The other
+18 boots of that run passed.
+**Fourth sighting, 2026-10-26:** the next run on the same PR (run
+40278254789, job 121425629775, `install test (x86_64)`, `9784daf8`):
+`test-snapshot`'s `crash-switch-after` boot, the first after
+`crash-switch` ended at its test stop and was killed, printed up to
+`paging: root at 0xc39c000 (user root 0x0), 8/13 pool pages used` at
+3.19 s and then nothing (`the last line at 3.2 s`). In the same job's
+good boots the next line is `firmware: 64-byte seed from
+EFI_RNG_PROTOCOL`, so both stopped inside the loader's call to OVMF's
+RNG, before the kernel ran. The branch changes neither the loader nor
+anything before the kernel's first line, which neither boot printed;
+its release kernel differs from main's by an empty `module_cycle_boot`.
+Two sightings in two runs of one branch is noted, not taken as
+attribution. Four sightings, all x86-64, three of them the boot after a
+kill or a restart; still not attributed. The failed job was re-run and passed (attempt 2, job 121447092656).
+Locally, x86-64 release `make test-snapshot` alternated three times each
+on `9784daf8` and on main (`8d8c96f0`), 2026-10-26 09:57-10:09: all six
+passed, in 103.6 to 135.8 s.
 
 ## `test-be`'s `be-space` boot on an encrypted root out of time, 2026-10-24
 

@@ -3455,16 +3455,19 @@ See the [history index](README.md).
   Nova; PR #457).**
   - **`module_cycle` (M27, debug builds only):** one module image loaded
     and unloaded `count` times through the real loader; the module
-    count, kmalloc's live objects, the VM's regions and anonymous pages
-    after the first cycle and after the last must be equal, every load
+    count, kmalloc's live objects and large pages, the VM's regions and
+    anonymous pages after the first cycle and after the last (each read
+    once quiet) must be equal, every load
     and unload 0. Lockdep's class count is reported, not judged
     (LOCK-10).
   - `module.cycle=<archive entry>:<count>[:<hold ms>]` on the command
-    line runs it at boot, after the boot modules, and counts a failure
+    line runs it at boot, after the boot modules and the DHCP wait, and
+    counts a failure
     into the boot's verdict: the door for Nova's C8 module, with the
     loader still unexported.
   - The self-test `module-cycle` (200 cycles; a leak while live and an
     object kept past `shutdown` must fail it) and `make test-modcycle`
     (1,000 cycles of `cosmotest` at boot), in CI on both architectures.
-  - Backlog MOD-1 and LOCK-10, from Nova's report.
+  - Backlog MOD-1 and LOCK-10, from Nova's report; MOD-2 (per-module
+    accounting), from the review.
   - Report: `docs/audit/2026-10-26-n1-module-cycle-report.md`.

@@ -329,9 +329,10 @@ system call reaches them, and `module_load_boot` loads once per boot.
 So a debug-build hook, with the loader still unexported:
 `module.cycle=<archive entry>:<count>[:<hold ms>]` on the kernel command
 line has the kernel load and unload that boot-archive module `<count>`
-times right after the boot modules, compare the module count, kmalloc's
-live objects, the VM's regions and anonymous pages after the first cycle
-and after the last, and log one PASS or FAIL line (invariant M27).
+times after the boot modules and the DHCP wait, compare the module
+count, kmalloc's live objects and large pages, the VM's regions and
+anonymous pages after the first cycle and after the last (each read once
+quiet), and log one PASS or FAIL line (invariant M27).
 Nova's report also found two defects, MOD-1 (an object made during a
 module's `init` belongs to no module) and LOCK-10 (lockdep keeps a class
 per callback address); both are in the backlog, not in N1.
