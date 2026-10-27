@@ -76,6 +76,14 @@ void aarch64_cpu_init(void)
         __asm__ volatile(".inst 0xd500419f" ::: "memory");   /* msr pan, #1 */
         isb();
     }
+    /* UCT and UCI, as Linux sets them: a user program may read the cache
+     * line sizes and make the instruction cache see code it wrote (DC
+     * CVAU, IC IVAU) -- what __clear_cache does, which a compiler running
+     * code it just generated needs (tcc -run; roadmap 1.2 A1) and any JIT.
+     * The APs start from this value (smp.c's mailbox). */
+    uint64_t sctlr_u = READ_SYSREG(sctlr_el1);
+    WRITE_SYSREG(sctlr_el1, sctlr_u | SCTLR_UCT | SCTLR_UCI);
+    isb();
     /* FP/SIMD, for user threads and for the switch that saves them
      * (fpu.c). Every CPU, because CPACR_EL1 is per-CPU state. */
     aarch64_fpu_init_cpu();
@@ -161,7 +169,8 @@ void arch_dma_barrier(void)
  * that names the feature). Left out: what this kernel would have to turn
  * on or emulate for EL0 -- SVE and SME (CPACR ZEN), pointer authentication
  * (no keys), BTI (no GP pages), MTE, SSBS, the MRS emulation (CPUID), the
- * event stream (EVTSTRM) and DC CVAP/CVADP (SCTLR_EL1.UCI is not set).
+ * event stream (EVTSTRM) and DC CVAP/CVADP (not advertised; UCI is set for
+ * DC CVAU and IC IVAU since roadmap 1.2 A1).
  */
 #define IDF(reg, lsb) ((unsigned)(((reg) >> (lsb)) & 0xF))
 

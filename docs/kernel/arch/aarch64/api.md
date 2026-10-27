@@ -181,7 +181,7 @@ Only files under `kernel/arch/aarch64/` include these.
 - `sysreg.h`: `READ_SYSREG(name)` / `WRITE_SYSREG(name, v)`, `isb`,
   `dsb_sy/ish/ishst`, `wfi`, `yield_hint`, `tlbi_vmalle1is`,
   `tlbi_vaae1is`, `current_el`, bit constants for `DAIF`, `SCTLR_EL1`
-  (`M`, `C`, `I`, `WXN`, `SPAN`), `TCR_EL1`, `MAIR_EL1` (index 0 WB, 1
+  (`M`, `C`, `I`, `WXN`, `SPAN`, `UCT`, `UCI`), `TCR_EL1`, `MAIR_EL1` (index 0 WB, 1
   device, 2 NC; `MAIR_VALUE`), `SPSR`, `ESR` (`ESR_EC`, `ESR_ISS`, the EC
   codes, `ESR_ISS_WNR`, `ESR_ISS_FSC`, `FSC_*` classifiers), `CNT_CTL_*`,
   `ID_AA64MMFR0_PARANGE`, `ID_AA64MMFR1_PAN`, `ID_AA64PFR0_GIC`,
