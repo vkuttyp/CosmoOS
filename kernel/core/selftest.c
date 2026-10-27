@@ -738,6 +738,8 @@ static const struct selftest tests[] = {
     { "cosmofs-check-chain-cycle", selftest_cosmofs_check_chain_cycle },
     { "cosmofs-check-bad-ptr", selftest_cosmofs_check_bad_ptr },
     { "cosmofs-check-namelen", selftest_cosmofs_check_namelen },
+    { "cosmofs-longname", selftest_cosmofs_longname },
+    { "cosmofs-check-longname", selftest_cosmofs_check_longname },
     { "cosmofs-check-extent-order", selftest_cosmofs_check_extent_order },
     { "cosmofs-check-extent-overlap", selftest_cosmofs_check_extent_overlap },
     { "cosmofs-check-snapshot", selftest_cosmofs_check_snapshot },

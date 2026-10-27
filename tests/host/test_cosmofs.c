@@ -23,9 +23,10 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    /* Version 14 is read; a plain pool is still written at 11, which is
-     * what keeps it mountable by v1.0.12 (roadmap 1.2 B5, the import rule). */
-    EXPECT(CFS_VERSION == 14 && CFS_VERSION_MIN == 2 && CFS_FORMAT_VERSION == 11);
+    /* Version 15 is read (roadmap 1.2 A2, long names); a plain pool is
+     * still written at 11, which is what keeps it mountable by v1.0.12
+     * (roadmap 1.2 B5, the import rule). */
+    EXPECT(CFS_VERSION == 15 && CFS_VERSION_MIN == 2 && CFS_FORMAT_VERSION == 11);
     /* Version 13 (roadmap 1.2 B3): the member's state block takes the
      * word that was `reserved`, so the entry keeps its 64 bytes; one copy
      * record a quarter of the block, all four in one block's payload. */
@@ -244,12 +245,73 @@ static void test_csum_index(void)
     EXPECT(cfs_aead_index(70000) / CFS_CSUMIDX_SPAN == 1);   /* the far block of cosmofs-encrypted-root */
 }
 
+static void test_long_names(void);
+
 static const struct host_test tests[] = {
     { "cosmofs-layout", test_layout_sizes },
     { "cosmofs-inode-index", test_inode_indices },
     { "cosmofs-extents", test_extent_mapping },
     { "cosmofs-csum-index", test_csum_index },
+    { "cosmofs-longnames", test_long_names },
 };
+
+/* Version 15's long names (design.md, "Format version 15"): the helpers
+ * the kernel, its checker and its fault injectors share. */
+static void test_long_names(void)
+{
+    static struct cfs_dirent blk[CFS_DIRENTS_PER_BLOCK];
+    char name[CFS_NAME_MAX_LONG], out[CFS_NAME_MAX_LONG];
+    for (unsigned i = 0; i < sizeof(name); i++)
+        name[i] = (char)('a' + i % 26);
+
+    EXPECT(sizeof(struct cfs_dirent_cont) == CFS_DIRENT_SIZE);
+    EXPECT(cfs_dirent_extra(1) == 0 && cfs_dirent_extra(48) == 0);
+    EXPECT(cfs_dirent_extra(49) == 1 && cfs_dirent_extra(104) == 1 && cfs_dirent_extra(105) == 2);
+    EXPECT(cfs_dirent_extra(CFS_NAME_MAX_LONG) == 4);   /* five slots for the longest */
+
+    /* A 255-byte name round-trips, and takes slots 3..7. */
+    memset(blk, 0, sizeof(blk));
+    cfs_dirent_put(blk, 3, 42, CFS_TYPE_REG, name, 255);
+    EXPECT(cfs_dirent_check(blk, 3, 15) == 5);
+    EXPECT(cfs_dirent_name(blk, 3, out) == 255 && memcmp(out, name, 255) == 0);
+    EXPECT(cfs_dirent_name_eq(blk, 3, name, 255) && !cfs_dirent_name_eq(blk, 3, name, 254));
+    for (unsigned k = 4; k <= 7; k++)
+        EXPECT(blk[k].ino == CFS_DIRENT_CONT && cfs_dirent_check(blk, k, 15) == 0);
+    EXPECT(blk[8].ino == 0);
+
+    /* Below 15 the same head is malformed, and so is a 48-byte name. */
+    EXPECT(cfs_dirent_check(blk, 3, 14) == 0);
+    cfs_dirent_put(blk, 10, 43, CFS_TYPE_REG, name, 48);
+    EXPECT(cfs_dirent_check(blk, 10, 15) == 1 && cfs_dirent_check(blk, 10, 14) == 0);
+    cfs_dirent_put(blk, 11, 44, CFS_TYPE_REG, name, 47);
+    EXPECT(cfs_dirent_check(blk, 11, 14) == 1 && cfs_dirent_check(blk, 11, 15) == 1);
+
+    /* Malformed shapes: a wrong count, a run past the block, an unmarked
+     * continuation. */
+    blk[3].extra = 3;
+    EXPECT(cfs_dirent_check(blk, 3, 15) == 0);
+    blk[3].extra = 4;
+    blk[5].ino = 0;
+    EXPECT(cfs_dirent_check(blk, 3, 15) == 0);
+    blk[5].ino = CFS_DIRENT_CONT;
+    memset(&blk[60], 0, 4 * sizeof(blk[0]));
+    blk[61].ino = 45;
+    blk[61].namelen = 160;
+    blk[61].extra = (uint8_t)cfs_dirent_extra(160);   /* 3: slots 62..64, one past the block */
+    EXPECT(cfs_dirent_check(blk, 61, 15) == 0);
+
+    /* Free runs, and clearing a whole entry. */
+    memset(blk, 0, sizeof(blk));
+    blk[2].ino = 7;
+    EXPECT(cfs_dirent_free_run(blk, 2) == 0 && cfs_dirent_free_run(blk, 3) == 3);
+    cfs_dirent_put(blk, 3, 46, CFS_TYPE_DIR, name, 200);
+    EXPECT(cfs_dirent_check(blk, 3, 15) == 4 && cfs_dirent_free_run(blk, 5) == 7);
+    cfs_dirent_clear(blk, 3);
+    EXPECT(blk[3].ino == 0 && blk[6].ino == 0 && blk[2].ino == 7);
+    for (unsigned s = 3; s < CFS_DIRENTS_PER_BLOCK; s++)
+        blk[s].ino = 1;
+    EXPECT(cfs_dirent_free_run(blk, 2) == 0 && cfs_dirent_free_run(blk, 3) == -1);   /* slots 0 and 1 only */
+}
 
 int main(void)
 {
