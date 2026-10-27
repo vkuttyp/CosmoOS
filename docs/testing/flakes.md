@@ -5210,3 +5210,15 @@ boot in 237.6 s of its 240. Not the stack protector: with it, a run has
 taken 123 s of self-tests. The failed job was run again. First sighting at
 this timeout for this job; `test-crash`'s 180 s timeout is the same kind
 (above).
+**Second sighting, 2026-10-27:** CI, PR #468 (A1, the C compiler) at
+`a3c23476`, run 40475814997, the same step: `boot-test: FAIL after
+243.5s`, 516 self-tests in 178,274 ms, the network harness ready at
+157.5 s, and the serial log ending at `cosmo$` after `sysctl
+kernel.name`, the shell test's last steps still running. The same job on
+main's run 40456206117 took 121-127 s of self-tests. The PR adds two
+compiles to the shell test: about 3 s on a CI runner (the x86-64 debug
+boot's time from the network harness to `PASS`: 78 s on main's run, 81 s
+on the PR's run 40467126835, both runners of the slow kind). Main's own
+slow-runner debug boot passed in 228.9 and 230.0 s. So the 240 s budget,
+not the PR: `BOOT_TIMEOUT` is 300 s on x86-64 too from this PR, as on
+AArch64 since 2026-10-15 (the Makefile's note).

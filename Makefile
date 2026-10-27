@@ -192,8 +192,13 @@ BOOT_LOG ?= $(OUT)/boot-test.log
 # 228.3 s and at most 236.9 s passing, and one timed out at 247 s with
 # every self-test passed (run 39056570530; docs/testing/flakes.md). It
 # takes BOOT_TIMEOUT now: 300 s on AArch64, 240 s on x86-64 as before.
+# x86-64 300 s too from 2026-10-27: on the slow kind of runner its debug
+# boot had grown to 228.9-237.6 s passing (main's run 40456206117, and
+# f96c80c1's 40398038325), and two entropy boots that day timed out at
+# 240 s with every self-test passed and init still running its shell test
+# (runs 40448337851 and 40475814997; docs/testing/flakes.md).
 # The shell, network and key harnesses derive their deadlines from it.
-BOOT_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),300,240)
+BOOT_TIMEOUT ?= 300
 # test-crash and test-wxn (the whole debug suite, then an early panic):
 # AArch64 240 s from 2026-10-20. Over the last 40 CI runs (39155230078 to
 # 39347750738) its 40 crash boots took a median of 172.4 s, a p95 of
