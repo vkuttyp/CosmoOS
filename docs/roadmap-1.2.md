@@ -39,6 +39,15 @@ flakes that have already reached CI, and none waits on a feature.
 
 About two to three days of work, or one unit of at most five PRs.
 
+**Done 2026-10-27** (taken first on the owner's word that day, before
+returning to a direction): CFS-1 and CFS-3 by B2 and B1; BUILD-2 by #463
+(the release key in the `release` environment, the owner's settings);
+TEST-1, TEST-2, TEST-3 and TEST-5 by #464; LX-1 and PKG-1 by #465; NET-6
+and SEC-4 by #466; BUILD-1 by the fourth PR. Each defect has a test that
+failed on main on every boot and a probe (`tools/always-tests-probe.py`,
+`always-correctness-probe.py`, `always-security-probe.py`,
+`stackprot-probe.py`); reports `docs/audit/2026-10-27-always-*.md`.
+
 ## A. Self-hosting software (deferred)
 
 Not chosen for 1.2 (2026-10-20); kept as written for a later roadmap.

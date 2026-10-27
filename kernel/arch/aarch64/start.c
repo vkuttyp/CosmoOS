@@ -13,7 +13,9 @@
 /* The direct-map base, for device access before the PMM publishes its own. */
 uint64_t aarch64_hhdm_base;
 
-void aarch64_start(const void *info_ptr)
+/* Not instrumented: its frame spans the install of the per-CPU block,
+ * which holds the stack protector's canary (BUILD-1). */
+__no_stack_protector void aarch64_start(const void *info_ptr)
 {
     const struct cosmoboot_info *info = info_ptr;
     aarch64_hhdm_base = info->hhdm_base;

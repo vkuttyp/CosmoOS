@@ -41,6 +41,7 @@
 #   make check-secrets  fail if a private or revoked module-signing key is tracked
 #   make check-docs   every subsystem in docs/README.md has its five documentation files
 #   make nova         regenerate the C of the kernel's Nova sources with the pinned novac (nova-check: compare only)
+#   make test-stackprot BUILD-1: a stack buffer overrun on purpose must panic as one (the stack protector)
 #   make clean        remove $(OUT)
 #
 # Host and target are separate concepts throughout. See docs/build/.
@@ -51,7 +52,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-stackprot test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -623,6 +624,17 @@ test-crash:
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic fault --timeout $(CRASH_TIMEOUT) \
 		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log \
 		--kernel $(OUT)-crash/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
+
+# The stack protector (BUILD-1): a kernel that overruns a stack buffer on
+# purpose (CRASH_TEST=4); the harness requires the stack-protector panic,
+# not a fault from the corrupted return. Both architectures.
+test-stackprot:
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		CRASH_TEST=4 OUT=$(OUT)-stackprot image
+	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic smash --timeout $(CRASH_TIMEOUT) \
+		--image $(OUT)-stackprot/cosmoos.img --log $(OUT)-stackprot/boot-test-stackprot.log \
+		--kernel $(OUT)-stackprot/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
 # AArch64: build a kernel that maps one page writable and executable on
 # purpose and executes it (CRASH_TEST=2); SCTLR_EL1.WXN must make that

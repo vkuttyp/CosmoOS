@@ -81,8 +81,8 @@ Open lines (struck lines are not counted):
 
 ## Build and tooling
 
-- **BUILD-1** security, S. The kernel builds with `-fno-stack-protector`; enable the stack protector with per-thread canaries.
-- **BUILD-2** security, S. `COSMOOS_RELEASE_KEY` is a repository secret any pushed workflow can read; move it to an environment with required reviewers (repository settings).
+- ~~**BUILD-1** security, S. The kernel builds with `-fno-stack-protector`; enable the stack protector with per-thread canaries.~~ Done by roadmap 1.2's first unit ("Always"), its fourth PR: `-fstack-protector-strong` with per-thread canaries in the per-CPU block (`%gs:24`, `[SP_EL0 + 24]`); `make test-stackprot`.
+- ~~**BUILD-2** security, S. `COSMOOS_RELEASE_KEY` is a repository secret any pushed workflow can read; move it to an environment with required reviewers (repository settings).~~ Done by #463: the key is the `release` environment's secret (deployment rules `main` and `v*`, the owner's review), and the repository secret is deleted (2026-10-27).
 - **BUILD-3** nice-to-have, M. Coverage builds with line coverage of the self-tests, and an LTO configuration, each with its own build and boot validation.
 - **BUILD-4** nice-to-have, L. A KASAN-like kernel sanitiser build.
 - **BUILD-5** nice-to-have, S. `ports/busybox/README.md`'s config regeneration fails at `make defconfig` on the macOS host; the checked-in config differs from the recipe in three options.

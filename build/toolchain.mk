@@ -19,6 +19,18 @@ NM      := $(LLVM_PREFIX)llvm-nm
 OBJDUMP := $(LLVM_PREFIX)llvm-objdump
 PYTHON  ?= python3
 
+# The stack protector (BUILD-1; docs/kernel/security/design.md, "The stack
+# protector"): the kernel and its modules, not the loader or user space
+# (COMMON_CFLAGS keeps -fno-stack-protector for those). The canary is read
+# from this CPU's per-CPU block -- %gs on x86-64; on AArch64 SP_EL0, which
+# clang's only choice of register there, and which the kernel points at the
+# per-CPU block while it runs (the kernel's own stack is SP_EL1) -- at
+# PERCPU_CANARY_OFFSET (struct percpu's stack_canary, asserted in
+# percpu.h), and each thread's own canary is put there when it is switched
+# in. The arch files (build/arch/*.mk) add the register.
+PERCPU_CANARY_OFFSET := 24
+KERNEL_STACK_PROTECTOR := -fstack-protector-strong -DPERCPU_CANARY_OFFSET=$(PERCPU_CANARY_OFFSET)
+
 # Per-architecture target triples and code-model flags.
 include $(ROOT)/build/arch/$(ARCH).mk
 
@@ -61,11 +73,12 @@ CLANG_RESOURCE_INC := $(shell $(CC) -print-resource-dir 2>/dev/null)/include
 COMMON_CFLAGS += -isystem $(CLANG_RESOURCE_INC)
 
 # --- kernel ---
+
 # -Wframe-larger-than: the kernel-stack guard (roadmap M3; compiler.h,
 # FRAME_EXEMPT_BEGIN; scripts/frame-baseline.txt). An error under -Werror.
 KERNEL_FRAME_LIMIT := 2048
 KERNEL_CFLAGS := \
-	--target=$(KERNEL_TARGET) \
+	--target=$(KERNEL_CC_TARGET) \
 	$(COMMON_CFLAGS) \
 	-Wframe-larger-than=$(KERNEL_FRAME_LIMIT) \
 	$(KERNEL_ARCH_CFLAGS) \

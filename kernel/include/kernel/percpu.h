@@ -38,6 +38,7 @@ struct percpu {
     struct percpu *self;        /* offset 0: arch fast path (x86-64: mov %gs:0; AArch64 reads TPIDR_EL1) */
     uintptr_t kernel_stack_top; /* offset 8: syscall entry loads rsp from here */
     uintptr_t user_rsp_scratch; /* offset 16: syscall entry parks the user rsp here */
+    uint64_t stack_canary;      /* offset 24: the running thread's stack-protector canary (BUILD-1) */
     unsigned cpu_id;
     struct thread *current;
     struct thread *idle;
@@ -76,6 +77,10 @@ struct percpu {
 STATIC_ASSERT(offsetof(struct percpu, self) == 0, "percpu.self offset");
 STATIC_ASSERT(offsetof(struct percpu, kernel_stack_top) == 8, "percpu.kernel_stack_top offset");
 STATIC_ASSERT(offsetof(struct percpu, user_rsp_scratch) == 16, "percpu.user_rsp_scratch offset");
+#ifdef PERCPU_CANARY_OFFSET
+STATIC_ASSERT(offsetof(struct percpu, stack_canary) == PERCPU_CANARY_OFFSET,
+              "percpu.stack_canary: the offset the stack protector reads (build/toolchain.mk)");
+#endif
 
 /* Set up and install the boot CPU's instance. First call in arch start. */
 void percpu_init_boot(void);

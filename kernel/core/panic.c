@@ -126,6 +126,21 @@ void panic_frame(const struct arch_trap_frame *frame, const char *fmt, ...)
     panic_common(frame, fmt, ap);
 }
 
+/*
+ * The stack protector's failure (BUILD-1): an instrumented function found
+ * its frame's canary changed at its return, so something wrote past a local
+ * buffer -- and over the saved frame pointer and return address beside it,
+ * which the return would have used. The address named is in the function
+ * whose frame it was (its check calls here). Not instrumented itself.
+ */
+void __stack_chk_fail(void);
+__no_stack_protector __noreturn void __stack_chk_fail(void)
+{
+    panic("stack-protector: a stack canary was overwritten, found in the function at %p",
+          __builtin_return_address(0));
+}
+
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(panic);
+EXPORT_SYMBOL(__stack_chk_fail);

@@ -80,6 +80,7 @@ struct thread {
     int cpu;                            /* (rq) run queue this thread belongs to */
     uint64_t slice_left_ns;             /* (rq) */
     uint64_t run_time_ns;               /* (rq) */
+    uint64_t stack_canary;              /* the stack protector's canary for this thread's frames, fixed for its life (BUILD-1) */
     /* CPU time's user/system split (kernel/include/kernel/cputime.h): the
      * tick's samples of this thread, written only by the tick of the CPU it
      * runs on (atomic loads elsewhere), and the last split RUSAGE_THREAD

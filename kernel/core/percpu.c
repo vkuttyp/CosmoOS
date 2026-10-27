@@ -14,12 +14,38 @@
 #include <arch/percpu.h>
 
 static struct percpu g_boot_percpu;
+
+/*
+ * The boot context's stack-protector canary (BUILD-1), drawn before the
+ * entropy pool exists: the cycle counter, mixed. kmain keeps it for its
+ * whole life (thread 0 inherits it, sched_init), since a canary cannot
+ * change under live frames; every later thread draws its own from the
+ * pool. The low byte is zero, as glibc's is, so an overrun by a string
+ * copy stops at the canary's first byte.
+ */
+static __no_stack_protector uint64_t boot_canary(void)
+{
+#if defined(ARCH_X86_64)
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t c = ((uint64_t)hi << 32) | lo;
+#else
+    uint64_t c;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(c));
+#endif
+    c ^= c >> 31;
+    c *= 0x9E3779B97F4A7C15ull;
+    c ^= c >> 29;
+    return c & ~0xFFull;
+}
 static struct percpu *g_cpus[CONFIG_MAX_CPUS];
 static unsigned g_cpu_count;
 
-void percpu_init_boot(void)
+/* Before the block is installed: not instrumented (BUILD-1). */
+__no_stack_protector void percpu_init_boot(void)
 {
     memset(&g_boot_percpu, 0, sizeof(g_boot_percpu));
+    g_boot_percpu.stack_canary = boot_canary();
     g_boot_percpu.cpu_id = 0;
     g_boot_percpu.online = true;
     g_cpus[0] = &g_boot_percpu;
@@ -37,7 +63,7 @@ void percpu_register(struct percpu *pc, unsigned cpu_id)
         g_cpu_count = cpu_id + 1;
 }
 
-struct percpu *percpu_get(unsigned cpu)
+__no_stack_protector struct percpu *percpu_get(unsigned cpu)   /* an AP calls it before it installs its block */
 {
     return cpu < CONFIG_MAX_CPUS ? g_cpus[cpu] : NULL;
 }

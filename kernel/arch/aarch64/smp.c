@@ -212,7 +212,9 @@ void arch_smp_finish(void)
     g_tramp_ready = false;
 }
 
-void aarch64_ap_entry(unsigned cpu)
+/* Not instrumented: it runs before this CPU's per-CPU block, which holds
+ * the stack protector's canary, is installed (BUILD-1). */
+__no_stack_protector void aarch64_ap_entry(unsigned cpu)
 {
     __atomic_store_n(&g_ap_started[cpu], 1u, __ATOMIC_RELEASE);
     WRITE_SYSREG(vbar_el1, (uint64_t)(uintptr_t)aarch64_vectors);

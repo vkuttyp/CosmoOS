@@ -5,10 +5,15 @@
 #include <arch/percpu.h>
 #include <aarch64/sysreg.h>
 
-void arch_percpu_install(struct percpu *pc)
+__no_stack_protector void arch_percpu_install(struct percpu *pc)
 {
     pc->self = pc;
     WRITE_SYSREG(tpidr_el1, (uint64_t)(uintptr_t)pc);
+    /* SP_EL0 too, while at EL1: the stack protector reads its canary
+     * through it (BUILD-1; clang takes no other register for it). The
+     * kernel runs on SP_EL1; an entry from EL0 saves the user's SP_EL0
+     * and points it here again (vectors.S), the return puts it back. */
+    WRITE_SYSREG(sp_el0, (uint64_t)(uintptr_t)pc);
     isb();
 }
 

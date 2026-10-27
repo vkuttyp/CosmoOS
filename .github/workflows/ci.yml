@@ -313,6 +313,12 @@ jobs:
         if: matrix.part == 'stress'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-crash
 
+      # A stack buffer overrun on purpose must panic as one: the stack
+      # protector, with per-thread canaries (BUILD-1).
+      - name: Stack protector test
+        if: matrix.part == 'stress'
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-stackprot
+
       # AArch64: a page mapped writable and executable on purpose must
       # not execute (SCTLR_EL1.WXN). A no-op on x86-64.
       - name: WXN test

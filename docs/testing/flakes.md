@@ -5173,3 +5173,20 @@ spare and fails when the runner is slow, the second failure also slowing
 widen-and-label rule, is `CRASH_TIMEOUT` (240 s) for x86-64 `test-crash`
 and `test-wxn` as for AArch64; left to the owner. The failed job was
 rerun.
+
+## `entropy boots (x86_64)` over its 240 s timeout, 2026-10-27
+
+#467 (BUILD-1, the stack protector) at `677d4e23`, run 40448337851, job
+122005055213, step `Boot tests without an entropy device (debug)`:
+`boot-test: FAIL after 243.5s`, `timed out after 240s`, with all 514
+self-tests passed (`SELFTEST: PASS`, 183,250 ms of them) and the boot cut
+off before init finished. Mechanism, from the logs: the runner's speed.
+The same job's boots of the same kernel -- `677d4e23` changed only a
+`CRASH_TEST=4` build and docs since `0da62489` -- took 122,563 to 128,709 ms
+of self-tests and 149.5 to 160.4 s in all on `0da62489`'s run
+(40444247086), and 183,250 ms on this one. Before this unit, `f96c80c1`'s
+run (40398038325) took 174,235 to 177,848 ms of self-tests and passed one
+boot in 237.6 s of its 240. Not the stack protector: with it, a run has
+taken 123 s of self-tests. The failed job was run again. First sighting at
+this timeout for this job; `test-crash`'s 180 s timeout is the same kind
+(above).

@@ -23,7 +23,7 @@
  * the per-CPU pointer after the GDT is loaded on every CPU, and never
  * reload GS afterwards.
  */
-void arch_percpu_install(struct percpu *pc)
+__no_stack_protector void arch_percpu_install(struct percpu *pc)
 {
     pc->self = pc;
     wrmsr(MSR_GS_BASE, (uint64_t)(uintptr_t)pc);

@@ -156,6 +156,7 @@ void sched_start_cpu(void)
     spin_lock(&rq->lock);
     rq->current = rq->idle;
     pc->current = rq->idle;
+    pc->stack_canary = rq->idle->stack_canary;   /* BUILD-1; this bring-up frame never returns */
     rq->idle->state = THREAD_RUNNING;
     rq->idle->last_start_ns = clock_now_ns();
     quiesce_note_quiescent();   /* a CPU coming online holds no reference from before */
@@ -456,6 +457,7 @@ static void schedule_pass(bool preempt)
         g_policy->slice_new(next);
     rq->current = next;
     pc->current = next;
+    pc->stack_canary = next->stack_canary;   /* its frames' canary (BUILD-1); prev's is put back when it is switched in */
     rq->switches++;
 
     arch_thread_switch_prepare(prev, next);

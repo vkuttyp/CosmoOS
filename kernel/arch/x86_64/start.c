@@ -22,7 +22,9 @@
 #include <x86/idt.h>
 #include <x86/pic.h>
 
-void x86_start(const struct cosmoboot_info *info)
+/* Not instrumented: its frame spans the install of the per-CPU block,
+ * which holds the stack protector's canary (BUILD-1). */
+__no_stack_protector void x86_start(const struct cosmoboot_info *info)
 {
     /* Order matters: the console lock, like every spinlock, reads the
      * per-CPU block through GS, and the GS base is reset by gdt_init's

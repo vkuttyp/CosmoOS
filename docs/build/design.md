@@ -41,7 +41,7 @@ header does not break the build.
 
 | Component | Triple | Object format | ABI |
 |---|---|---|---|
-| kernel | `x86_64-unknown-none-elf` | ELF64 | System V |
+| kernel | `x86_64-unknown-none-elf` (compiled for `x86_64-unknown-linux-gnu`, `KERNEL_CC_TARGET`: the stack protector's `%gs` guard, BUILD-1) | ELF64 | System V |
 | UEFI loader | `x86_64-unknown-windows` | PE/COFF | Microsoft x64 (what UEFI requires) |
 
 Using the Windows triple for the loader is what makes `efi_main` and every
