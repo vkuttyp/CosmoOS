@@ -43,6 +43,8 @@
 #   make check-docs   every subsystem in docs/README.md has its five documentation files
 #   make nova         regenerate the C of the kernel's Nova sources with the pinned novac (nova-check: compare only)
 #   make test-stackprot BUILD-1: a stack buffer overrun on purpose must panic as one (the stack protector)
+#   make clang-eval   roadmap 1.2 A1: a static musl clang+lld for ARCH, for the evaluation (tools/clang-eval/)
+#   make test-clang-eval  run that clang on this build installed (BUILD=release)
 #   make clean        remove $(OUT)
 #
 # Host and target are separate concepts throughout. See docs/build/.
@@ -66,6 +68,7 @@ include $(ROOT)/ports/dropbear/dropbear.mk
 include $(ROOT)/ports/openssh/openssh.mk
 include $(ROOT)/ports/mbedtls/mbedtls.mk
 include $(ROOT)/ports/tcc/tcc.mk
+include $(ROOT)/tools/clang-eval/clang.mk
 include $(ROOT)/userland/userland.mk
 include $(ROOT)/pkg/pkg.mk
 # The Linux ABI test programs and the virtualization guests both build
