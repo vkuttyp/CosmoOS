@@ -680,6 +680,24 @@ WXN_REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^stack trace:",
     r"^halting\.",
 ]
+# --expect-panic smash (CRASH_TEST=4 kernel): a local buffer overrun on
+# purpose must be caught by the stack protector at the overrunning
+# function's return (BUILD-1; docs/kernel/security/design.md, "The stack
+# protector"), not reach a corrupted return address.
+SMASH_REQUIRED_MARKERS = BOOT_MARKERS + [
+    PANIC_CONTEXT_MARKER,
+    r"^\[ INFO\] crash test: overrunning a stack buffer on purpose",
+    r"^KERNEL PANIC: stack-protector: a stack canary was overwritten",
+    r"^stack trace:",
+    r"^halting\.",
+]
+SMASH_FORBIDDEN_MARKERS = [
+    r"^\[ INFO\] boot complete",
+    r"crash test: the overrun went unnoticed",
+    r"KERNEL PANIC: page fault",
+    r"KERNEL PANIC \(recursive\)",
+    r"cosmoboot: FATAL",
+]
 WXN_FORBIDDEN_MARKERS = [
     r"^\[ INFO\] boot complete",
     r"crash test: a writable page executed; WXN is off",
@@ -939,11 +957,11 @@ def main():
     ap.add_argument("--harness-retry", action="store_true",
                     help="a HARNESS_BREAK=1 image: require that net-harness's first back-connection "
                          "attempt was broken on purpose and that a later one carried the exchange")
-    ap.add_argument("--expect-panic", nargs="?", const="fault", default=None, choices=["fault", "wxn"],
+    ap.add_argument("--expect-panic", nargs="?", const="fault", default=None, choices=["fault", "wxn", "smash"],
                     help="the kernel was built to crash on purpose: require that crash's panic report "
                          "and the failure exit code instead of a clean boot. 'fault' (the default: "
                          "CRASH_TEST=1, an unmapped write) or 'wxn' (CRASH_TEST=2, a writable page "
-                         "executed; AArch64)")
+                         "executed; AArch64) or 'smash' (CRASH_TEST=4, a stack buffer overrun)")
     ap.add_argument("--kernel", default=None,
                     help="the kernel ELF: symbolise the addresses of a panic, watchdog or lockup "
                          "report in the harness's own report (docs/kernel/diagnostics/design.md)")
@@ -954,7 +972,11 @@ def main():
                          "(default: modules/ beside the kernel's build directory)")
     args = ap.parse_args()
 
-    if args.expect_panic == "wxn":
+    if args.expect_panic == "smash":
+        required, forbidden = SMASH_REQUIRED_MARKERS, SMASH_FORBIDDEN_MARKERS
+        expected_exit = EXIT_FAILURE_VALUE
+        args.expect_selftest = "no"
+    elif args.expect_panic == "wxn":
         required, forbidden = WXN_REQUIRED_MARKERS, WXN_FORBIDDEN_MARKERS
         expected_exit = EXIT_FAILURE_VALUE
         args.expect_selftest = "no"

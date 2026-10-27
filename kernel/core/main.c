@@ -99,6 +99,20 @@ static const char *firmware_name(uint32_t firmware)
 
 /* Verified boot as the loader reported it (boot protocol v8). The key is
  * named from the kernel's own ring, which the loader's was built from. */
+#if CONFIG_CRASH_TEST == 4
+/* BUILD-1's crash test: a local buffer overrun on purpose. The writes run
+ * past the buffer over whatever the frame keeps above it -- the canary, the
+ * saved frame pointer, the return address. With the stack protector the
+ * epilogue finds the canary changed and calls __stack_chk_fail; without it
+ * the return goes to 0x4141... */
+static __attribute__((noinline)) void crash_overrun_stack(void)
+{
+    volatile char buf[16];
+    for (volatile unsigned i = 0; i < 64; i++)
+        buf[i] = 0x41;
+}
+#endif
+
 static void verified_boot_line(char *out, size_t n, bool banner)
 {
     uint8_t id[COSMOBOOT_KEY_ID_SIZE];
@@ -387,6 +401,14 @@ void kernel_main(const struct cosmoboot_info *info)
         ((void (*)(void))va)();
     }
     kerror("crash test: a writable page executed; WXN is off");
+    failed++;
+#elif CONFIG_CRASH_TEST == 4
+    /* The stack protector (BUILD-1; make test-stackprot): an overrun of a
+     * local buffer must panic as one, at the overrunning function's
+     * return, before that return uses what the overrun wrote. */
+    kinfo("crash test: overrunning a stack buffer on purpose");
+    crash_overrun_stack();
+    kerror("crash test: the overrun went unnoticed; no stack protector");
     failed++;
 #endif
 
