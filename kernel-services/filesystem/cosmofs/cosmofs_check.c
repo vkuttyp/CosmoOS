@@ -185,6 +185,7 @@ struct check {
      */
     uint8_t *dup_blk;      /* the block check_dup_names is scanning */
     uint8_t *dup_cmp;      /* the earlier block dir_name_repeats re-reads */
+    char *dup_name;        /* a whole name, CFS_NAME_MAX_LONG bytes (version 15) */
     unsigned flags;
     /* Which counters the comparison found wrong, so that repair fixes
      * those and only those: the orphan repair changes `inode_count`
@@ -732,14 +733,20 @@ static bool dir_name_repeats(struct check *ck, const struct cfs_inode *dir,
                              const uint8_t *cur, uint64_t lblk, unsigned slot)
 {
     const struct cfs_dirent *d = (const struct cfs_dirent *)cur;
-    const char *want = d[slot].name;
-    unsigned wantlen = d[slot].namelen;
+    unsigned version = ck->fs->sb.version;
+    char *want = ck->dup_name;         /* preallocated, CFS_NAME_MAX_LONG bytes */
+    unsigned wantlen = cfs_dirent_name(d, slot, want);
 
-    /* Earlier slots of the block already in hand. */
-    for (unsigned s = 0; s < slot; s++)
-        if (d[s].ino != 0 && d[s].namelen == wantlen &&
-            memcmp(d[s].name, want, wantlen) == 0)
+    /* Earlier entries of the block already in hand: whole names, each
+     * however many slots it takes (design.md, "Format version 15"). */
+    for (unsigned s = 0; s < slot; s++) {
+        unsigned n = cfs_dirent_check(d, s, version);
+        if (n == 0)
+            continue;
+        if (cfs_dirent_name_eq(d, s, want, wantlen))
             return true;
+        s += n - 1;
+    }
     if (lblk == 0)
         return false;
 
@@ -749,12 +756,16 @@ static bool dir_name_repeats(struct check *ck, const struct cfs_inode *dir,
         if (cfs_dir_read_block_at(ck->fs, dir, b, scratch) != 0)
             continue;
         const struct cfs_dirent *e = (const struct cfs_dirent *)scratch;
-        for (unsigned s = 0; s < CFS_DIRENTS_PER_BLOCK; s++)
-            if (e[s].ino != 0 && e[s].namelen == wantlen &&
-                memcmp(e[s].name, want, wantlen) == 0) {
+        for (unsigned s = 0; s < CFS_DIRENTS_PER_BLOCK; s++) {
+            unsigned n = cfs_dirent_check(e, s, version);
+            if (n == 0)
+                continue;
+            if (cfs_dirent_name_eq(e, s, want, wantlen)) {
                 found = true;
                 break;
             }
+            s += n - 1;
+        }
     }
     return found;
 }
@@ -789,16 +800,19 @@ static void check_dup_names(struct check *ck, uint64_t ino, const struct cfs_ino
             continue;         /* already `unreadable` and `partial` in the main pass */
         const struct cfs_dirent *d = (const struct cfs_dirent *)block;
         for (unsigned s = 0; s < CFS_DIRENTS_PER_BLOCK; s++) {
-            if (d[s].ino == 0 || d[s].namelen == 0 || d[s].namelen > CFS_NAME_MAX)
-                continue;     /* a malformed entry is the main pass's finding */
-            unsigned h = name_hash(d[s].name, d[s].namelen);
+            unsigned n = cfs_dirent_check(d, s, ck->fs->sb.version);
+            if (n == 0)
+                continue;     /* free, a continuation, or malformed: the main pass's finding */
+            unsigned nlen = cfs_dirent_name(d, s, ck->dup_name);
+            unsigned h = name_hash(ck->dup_name, nlen);
+            s += n - 1;       /* the continuations are this name; the confirm below takes its head */
             if (ck->name_seen[h >> 3] & (uint8_t)(1u << (h & 7))) {
                 if (confirms >= CFS_CHECK_MAX_DUP_CONFIRMS) {
                     ck->rep->partial = true;
                     continue;      /* incomplete, never wrong */
                 }
                 confirms++;
-                if (dir_name_repeats(ck, dir, block, lblk, s))
+                if (dir_name_repeats(ck, dir, block, lblk, s - (n - 1)))
                     name_it(&ck->rep->dir_dup_name, ino);
             } else {
                 ck->name_seen[h >> 3] |= (uint8_t)(1u << (h & 7));
@@ -849,17 +863,23 @@ static void walk_dir(struct check *ck, uint64_t ino, const struct cfs_inode *dir
         for (unsigned s = 0; s < CFS_DIRENTS_PER_BLOCK; s++) {
             if (d[s].ino == 0)
                 continue;
-            if (d[s].namelen == 0 || d[s].namelen > CFS_NAME_MAX) {
+            /* The entry's shape before a byte of its name (CF13; design.md,
+             * "Format version 15"): a continuation reached here has no
+             * head before it, since a head's run is stepped over below. */
+            unsigned n = cfs_dirent_check(d, s, ck->fs->sb.version);
+            if (n == 0) {
                 name_it(&ck->rep->dir_bad, ino);
                 continue;
             }
+            const struct cfs_dirent *e = &d[s];   /* the head; the loop resumes past its continuations */
+            s += n - 1;
             struct cfs_inode child;
-            if (!inode_exists(ck, d[s].ino, &child)) {
-                name_it(&ck->rep->dangling_entry, d[s].ino);
+            if (!inode_exists(ck, e->ino, &child)) {
+                name_it(&ck->rep->dangling_entry, e->ino);
                 continue;
             }
-            if (CFS_MODE_TYPE(child.mode) != d[s].type) {
-                name_it(&ck->rep->dir_bad, d[s].ino);
+            if (CFS_MODE_TYPE(child.mode) != e->type) {
+                name_it(&ck->rep->dir_bad, e->ino);
                 continue;
             }
             /*
@@ -869,16 +889,16 @@ static void walk_dir(struct check *ck, uint64_t ino, const struct cfs_inode *dir
              * ".." (credited to the parent, also below). A file's is
              * just the entries that name it.
              */
-            counts_add(&ck->links, d[s].ino, 1);
-            if (d[s].type == CFS_TYPE_DIR) {
-                counts_add(&ck->links, d[s].ino, 1);   /* its own "." */
-                counts_add(&ck->links, ino, 1);        /* its ".." names this directory */
-                if (!cfs_bits_set(&ck->reach, d[s].ino))
-                    walk_dir(ck, d[s].ino, &child, depth + 1);
+            counts_add(&ck->links, e->ino, 1);
+            if (e->type == CFS_TYPE_DIR) {
+                counts_add(&ck->links, e->ino, 1);   /* its own "." */
+                counts_add(&ck->links, ino, 1);      /* its ".." names this directory */
+                if (!cfs_bits_set(&ck->reach, e->ino))
+                    walk_dir(ck, e->ino, &child, depth + 1);
                 else
-                    name_it(&ck->rep->dir_bad, d[s].ino);   /* a directory with two parents */
+                    name_it(&ck->rep->dir_bad, e->ino);   /* a directory with two parents */
             } else {
-                cfs_bits_set(&ck->reach, d[s].ino);
+                cfs_bits_set(&ck->reach, e->ino);
             }
         }
     }
@@ -1216,10 +1236,12 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         ck.name_seen = kmalloc(CFS_CHECK_NAMEBYTES, 0);
         ck.dup_blk = kmalloc(CFS_BLOCK, 0);
         ck.dup_cmp = kmalloc(CFS_BLOCK, 0);
+        ck.dup_name = kmalloc(CFS_NAME_MAX_LONG, 0);
         ck.uuid_cap = fs->snap_count + 8;
         ck.uuids = kmalloc((size_t)ck.uuid_cap * 16u, 0);
         ck.ids = kzalloc((size_t)ck.uuid_cap * sizeof(*ck.ids));
-        if (ck.name_seen == NULL || ck.dup_blk == NULL || ck.dup_cmp == NULL || ck.uuids == NULL || ck.ids == NULL)
+        if (ck.name_seen == NULL || ck.dup_blk == NULL || ck.dup_cmp == NULL || ck.dup_name == NULL || ck.uuids == NULL ||
+            ck.ids == NULL)
             rc = -ENOMEM;
     }
     if (rc) {
@@ -1233,6 +1255,7 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         kfree(ck.name_seen);
         kfree(ck.dup_blk);
         kfree(ck.dup_cmp);
+        kfree(ck.dup_name);
         kfree(ck.uuids);
         kfree(ck.ids);
         kfree(rep);
@@ -1321,6 +1344,7 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     kfree(ck.name_seen);
     kfree(ck.dup_blk);
     kfree(ck.dup_cmp);
+    kfree(ck.dup_name);
     kfree(ck.uuids);
     kfree(ck.ids);
 
