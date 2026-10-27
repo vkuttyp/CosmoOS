@@ -24,7 +24,7 @@
 
 struct ramfs_dirent {
     struct list_node link;
-    struct vnode *child;     /* pinned reference */
+    struct vnode *child;     /* pinned while it has a name: one pin however many (VFS-4) */
     uint8_t len;
     char name[VFS_NAME_MAX + 1];
 };
@@ -229,7 +229,8 @@ static int ramfs_readlink(struct vnode *vn, char *buf, size_t len)
     return (int)tlen;
 }
 
-/* Drop the entry and its pin. Caller holds dir and victim locks. */
+/* Drop the entry, and the pin with the last name (VFS-4: a file's other
+ * names keep it). Caller holds dir and victim locks. */
 static void drop_entry(struct vnode *dir, struct ramfs_dirent *e)
 {
     struct ramfs_node *n = dir->fs_priv;
@@ -239,10 +240,27 @@ static void drop_entry(struct vnode *dir, struct ramfs_dirent *e)
     kfree(e);
     dir->mtime_ns = vfs_now_ns();
     child->nlink = child->type == VNODE_DIR ? 0 : child->nlink - 1;
-    child->flags &= ~VNODE_PINNED;
+    child->ctime_ns = vfs_now_ns();
     if (child->type == VNODE_DIR)
         dir->nlink--;
-    vnode_put(child);   /* the pin; open files keep it alive */
+    if (child->nlink == 0) {
+        child->flags &= ~VNODE_PINNED;
+        vnode_put(child);   /* the pin; open files keep it alive */
+    }
+}
+
+/* A second name for `target` (VFS-4): an entry under the pin it already
+ * has, and one more link. Under dir->lock and target->lock. */
+static int ramfs_link(struct vnode *dir, const char *name, size_t len, struct vnode *target)
+{
+    if (find_entry(dir, name, len))
+        return -EEXIST;
+    int rc = add_entry(dir, name, len, target);
+    if (rc)
+        return rc;
+    target->nlink++;
+    target->ctime_ns = vfs_now_ns();
+    return 0;
 }
 
 static int ramfs_unlink(struct vnode *dir, const char *name, size_t len, struct vnode *victim)
@@ -401,6 +419,7 @@ static const struct vnode_ops ramfs_dir_ops = {
     .create = ramfs_create,
     .mkdir = ramfs_mkdir,
     .unlink = ramfs_unlink,
+    .link = ramfs_link,
     .rmdir = ramfs_rmdir,
     .rename = ramfs_rename,
     .readdir = ramfs_readdir,
@@ -687,9 +706,13 @@ static void ramfs_release_tree(struct vnode *dir)
         kfree(e);
         if (child->type == VNODE_DIR)
             ramfs_release_tree(child);
-        child->nlink = 0;
-        child->flags &= ~VNODE_PINNED;
-        vnode_put(child);   /* the pin; nothing else references it (unmount checked) */
+        /* The pin goes with the last name: a file named twice (VFS-4) is
+         * met twice, and the first meeting must not free it. */
+        child->nlink = child->type == VNODE_DIR ? 0 : child->nlink - 1;
+        if (child->nlink == 0) {
+            child->flags &= ~VNODE_PINNED;
+            vnode_put(child);   /* the pin; nothing else references it (unmount checked) */
+        }
     }
 }
 
