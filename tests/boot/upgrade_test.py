@@ -196,12 +196,22 @@ def fetch_all(b, port, arch, variants=False, check=True):
     if not variants:
         return
     # The refused variants: links to the good files, the rest replaced.
-    for d, bad in VARIANTS:
-        links = " && ".join(f"ln -s {UP}/cosmoos-{arch}-{f} /tmp/{d}/{f}" for f in SET if f not in bad)
-        gets = " && ".join(f"wget -q -O /tmp/{d}/{f} {url}/{d}/{f}" for f in bad + SUMS_FILES[d])
-        sh(b, f"mkdir -p /tmp/{d} && {links} && {gets}", f"get{d}")
+    # untrusting's comes later (fetch_variant): /tmp holds at most 64 MiB
+    # on v1.0.3 (RAMFS_MAX_PAGES), and the set's boot.tar with badtar's and
+    # untrusting's no longer fit at once (once the build carried the C
+    # compiler, roadmap 1.2 A1).
+    for d, _ in VARIANTS:
+        if d not in LATE_VARIANTS:
+            fetch_variant(b, url, arch, d)
     sh(b, f"wget -q -O /tmp/untrusting.pub {url}/untrusting.pub && wget -q -O /tmp/variants.pub {url}/variants.pub "
           f"&& wget -q -O /tmp/bad.cpk {url}/bad.cpk", "getpubs")
+
+
+def fetch_variant(b, url, arch, d):
+    bad = dict(VARIANTS)[d]
+    links = " && ".join(f"ln -s {UP}/cosmoos-{arch}-{f} /tmp/{d}/{f}" for f in SET if f not in bad)
+    gets = " && ".join(f"wget -q -O /tmp/{d}/{f} {url}/{d}/{f}" for f in bad + SUMS_FILES[d])
+    sh(b, f"mkdir -p /tmp/{d} && {links} && {gets}", f"get{d}")
 
 
 def cpk_name(arch):
@@ -219,6 +229,8 @@ VARIANTS = (("badasset", ("kernel.elf",)), ("badsums", ()), ("nosig", ()),
 # badasset keeps the set's own signed SHA256SUMS; badsums changes one of
 # its digests under the set's signature; nosig has no signature; the rest
 # have SHA256SUMS over their own files, signed by the throwaway variant key.
+# Fetched only once badtar's check is done and its files are gone.
+LATE_VARIANTS = ("untrusting",)
 SUMS_FILES = {d: (("SHA256SUMS",) if d == "nosig" else ("SHA256SUMS", "SHA256SUMS.sig")) for d, _ in VARIANTS}
 
 
@@ -282,6 +294,8 @@ def stage_refuse(args, results, port, keyid, otherid, vkeyid):
         out = sh(b, f"{TOOL} /tmp/badtar", "badtar", 3)
         need(out, r"^cosmo-upgrade: /tmp/badtar: boot\.tar does not match the manifest \(SHA-512\); nothing written$",
              "an archive with one byte changed")
+        sh(b, "rm -r /tmp/badtar", "rmbadtar")
+        fetch_variant(b, f"http://10.0.2.2:{port}", arch, "untrusting")
         out = sh(b, "cp /tmp/untrusting.pub /etc/pkg/keys/untrusting.pub && sync && "
                     f"{TOOL} /tmp/untrusting", "untrusting", 3)
         need(out, rf"^cosmo-upgrade: /tmp/untrusting: its loader does not trust key {RELEASE_KEY}, which signed the "

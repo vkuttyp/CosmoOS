@@ -51,7 +51,9 @@ static inline void yield_hint(void) { __asm__ volatile("yield" ::: "memory"); }
 #define SCTLR_SA  (1ull << 3)
 #define SCTLR_SA0 (1ull << 4)
 #define SCTLR_I   (1ull << 12)
+#define SCTLR_UCT (1ull << 15)   /* set: EL0 may read CTR_EL0 (the cache line sizes) */
 #define SCTLR_WXN (1ull << 19)
+#define SCTLR_UCI (1ull << 26)   /* set: EL0 may clean and invalidate by address (DC CVAU, IC IVAU, ...) */
 #define SCTLR_SPAN (1ull << 23)   /* set: PAN is not set automatically on exception entry */
 #define SCTLR_RES1 ((1ull << 11) | (1ull << 20) | (1ull << 22) | (1ull << 28) | (1ull << 29))
 

@@ -140,6 +140,13 @@ pkg list
 pkg list > /tmp/shtest/many || FAILS=1
 /bin/busybox sh -c 'n=$(grep -c "^many" /tmp/shtest/many); echo "pkg-many: $n of 130 listed"; test "$n" = 130' || FAILS=1
 /bin/busybox sh -c 'rm -rf /var/db/pkg/installed/many*' || FAILS=1
+# A C compiler on the target (roadmap 1.2 A1; ports/tcc/README.md): cc (tcc)
+# compiles, assembles and links a program against musl, statically and
+# against libc.so, and both run.
+cc -static -o /tmp/shtest/hello-static /boot/tests/tcc/hello.c || FAILS=1
+/tmp/shtest/hello-static static || FAILS=1
+cc -o /tmp/shtest/hello-dyn /boot/tests/tcc/hello.c || FAILS=1
+/tmp/shtest/hello-dyn dynamic || FAILS=1
 # Linux programs (docs/compat/linux/testing.md): no CosmoOS note, so the kernel runs them as Linux.
 # Both architectures carry them (milestone 10); a build without them reports the section skipped.
 cosmo-sh -c 'ls /boot/tests/linux/lxhello > /tmp/shtest/lx.probe 2>&1 || exit 0; cosmo-sh /etc/rc.linux' || FAILS=1

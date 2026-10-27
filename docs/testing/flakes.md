@@ -5008,6 +5008,26 @@ no push after the last request in the trace) is the device or QEMU; a
 request never made, with the CPU looping or halted in the firmware, is
 the firmware's own state, which the loader's placements may have
 disturbed. Still not attributed.
+**Sixth sighting, 2026-10-27, the first with the trace and the
+diagnostics:** CI, PR #468 at `0199d71b` (run 40467126835, `encrypted
+root test (x86_64, snapshot pkgtx fsck)`), `test-pkgtx`'s
+`tx-install-after` boot: up to `paging: root at 0xbfd4000 (user root
+0x0), 8/13 pool pages used` at 1.72 s, then nothing (`the last line at
+1.7 s`). The PR adds the C compiler to the boot archive (20107776 bytes
+read, against about 16.5 MB before), so the archive's size and placement
+differ again. What the new files show (artifact `test-encrypt-x86_64-1`):
+no request left unanswered. The trace has 32 requests and 29 pushes,
+the three without a push being 0-byte requests (no buffer posted), which
+a good boot has too (`tx-install`: 4 of them). The last non-empty request
+was 4 bytes and was pushed, and so was a 64-byte request a little before
+it. The queue is idle: `inuse` 0, `last_avail_idx` = `used_idx` = 29.
+CPU 0 was running, not halted, in one firmware loop at both samples
+(`0xeceb319` and `0xeceb370`, CR3 `0xf801000`, the loop's `cmpl $-1,
+%r12d` and `movl $0x400000, %ebx` in `boot-tx-install-after-diag.log`);
+CPUs 1-3 were halted at `0xeccf9e1`. By the test above, this is the
+second case, the firmware's own state, not the device or QEMU. Still not
+attributed; what the loop is waiting for is the next question (OVMF's
+symbols for that address).
 
 ## `test-be`'s `be-space` boot on an encrypted root out of time, 2026-10-24
 
@@ -5190,3 +5210,15 @@ boot in 237.6 s of its 240. Not the stack protector: with it, a run has
 taken 123 s of self-tests. The failed job was run again. First sighting at
 this timeout for this job; `test-crash`'s 180 s timeout is the same kind
 (above).
+**Second sighting, 2026-10-27:** CI, PR #468 (A1, the C compiler) at
+`a3c23476`, run 40475814997, the same step: `boot-test: FAIL after
+243.5s`, 516 self-tests in 178,274 ms, the network harness ready at
+157.5 s, and the serial log ending at `cosmo$` after `sysctl
+kernel.name`, the shell test's last steps still running. The same job on
+main's run 40456206117 took 121-127 s of self-tests. The PR adds two
+compiles to the shell test: about 3 s on a CI runner (the x86-64 debug
+boot's time from the network harness to `PASS`: 78 s on main's run, 81 s
+on the PR's run 40467126835, both runners of the slow kind). Main's own
+slow-runner debug boot passed in 228.9 and 230.0 s. So the 240 s budget,
+not the PR: `BOOT_TIMEOUT` is 300 s on x86-64 too from this PR, as on
+AArch64 since 2026-10-15 (the Makefile's note).

@@ -551,6 +551,12 @@ each secondary set `SCTLR_EL1.SPAN` so exception entry leaves PAN alone,
 then set PAN. The copy routines validate ranges before touching user
 memory regardless. `arch_trap_frame_is_user` = `SPSR.M[3:0]` is EL0t and
 `M[4]` (AArch32) clear.
+`aarch64_cpu_init` also sets `SCTLR_EL1.UCT` and `UCI` (roadmap 1.2 A1), as
+Linux does, and the secondaries start from that value: a user program may
+read `CTR_EL0`'s cache line sizes and clean and invalidate by address
+(`DC CVAU`, `IC IVAU`) -- `__clear_cache`, which a program that writes
+code it then runs needs (tcc's `-run`, any JIT). Without them those
+instructions trapped to EL1 as undefined.
 
 ## SMP (`smp.c`, `trampoline.S`)
 

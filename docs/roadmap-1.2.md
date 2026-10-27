@@ -48,9 +48,13 @@ failed on main on every boot and a probe (`tools/always-tests-probe.py`,
 `always-correctness-probe.py`, `always-security-probe.py`,
 `stackprot-probe.py`); reports `docs/audit/2026-10-27-always-*.md`.
 
-## A. Self-hosting software (deferred)
+## A. Self-hosting software (chosen 2026-10-27, after B)
 
-Not chosen for 1.2 (2026-10-20); kept as written for a later roadmap.
+Not chosen for 1.2 on 2026-10-20. **Chosen 2026-10-27**, with B complete and
+the "Always" unit done: the owner's next direction. Its milestones run in
+order (A1 first; each needs the one before: a compiler, then `make`, then
+a ports tree, then the ports), each done when its acceptance test is green
+on main, at most five PRs a milestone.
 
 **Definition of done.** CosmoOS rebuilds BusyBox from source on itself,
 on both architectures, with a C compiler and `make` that run on the
@@ -61,6 +65,10 @@ test suites (the documented subset where a suite needs what CosmoOS
 does not have, each exclusion named with its reason), all checked by CI.
 
 ### A1 A C compiler on the target
+
+*In progress.* The port (`ports/tcc/`) and the compiler on the image come
+first, with a smoke test in the debug boot; `make test-selfhost` and the
+clang evaluation follow.
 
 TinyCC (tcc 0.9.27 plus the `mob` fixes for AArch64) as a port, built by
 the cross toolchain against musl, with musl's headers, `crt*.o`, `libc.a`
