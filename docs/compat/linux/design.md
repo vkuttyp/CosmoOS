@@ -346,15 +346,19 @@ handler entry clears `DF`, `TF` and `RF`; `uc_stack` describes the
 `sas_ss_flags(sp)`: `SS_DISABLE` with none configured, 0 when the
 handler was moved onto it, `SS_ONSTACK` when already on it).
 
-**The signal trampoline.** Every Linux process gets one read-only,
-executable page at `LX_SIGTRAMP` (`0x7FFFFFFF1000`, the page above the
-stack's top with one unmapped page between) holding `mov $15, %eax; syscall` / `mov x8, #139; svc #0` and
-`ud2`/`brk`. AArch64 handlers return through it (the arm64 kernel has no
-`SA_RESTORER` in common use); on x86-64 it is present for symmetry and
-used when a handler has no restorer *and* the process asked for it
-through `SA_RESTORER` = 0 — which Linux refuses; so does this kernel
-(`SIGSEGV`). The page is a `VM_REGION_ANON` region named `sigtramp`,
-populated at process creation.
+**The signal trampoline.** An AArch64 Linux process gets one read-only,
+executable page holding `mov x8, #139; svc #0`, through which a handler
+installed without `SA_RESTORER` returns (Linux's arm64 counterpart is the
+vDSO's sigreturn). It is at a random page of the mmap range, drawn at
+every exec (the first free page at or above `USER_MMAP_BASE` plus up to
+2^`ASLR_MMAP_BITS` pages) and kept by fork, recorded in the process's
+Linux state (`linux_sigtramp_map`, `linux_sigtramp_addr`); a
+`VM_REGION_ANON` region named `sigtramp`, populated at process creation.
+An x86-64 process has none: a frame needs `SA_RESTORER`, which Linux
+requires too, and a handler without one is `SIGSEGV`. Until SEC-4
+(2026-10-27) every Linux process had the page at the fixed
+`0x7FFFFFFF1000`, a known executable address in an otherwise randomised
+layout.
 
 Default dispositions follow Linux: the stop signals stop the process
 (since the job-control unit; they were ignored before it), `SIGCONT`

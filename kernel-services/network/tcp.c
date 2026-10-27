@@ -36,7 +36,19 @@
 static spinlock_t g_table_lock = SPINLOCK_INIT("tcp-table");
 static struct list_node g_hash[TCP_HASH_SIZE];
 static struct tcp_stats g_stats;
+/*
+ * The SYN-cookie secret (NET-6). tcp_init draws one, which on a machine
+ * whose pool seeds after it is predictable in principle; the first cookie
+ * made or checked once the pool is seeded draws it again, once. A cookie
+ * made under the old secret then fails its check and the peer's handshake
+ * starts over: at most the few SYNs a boot answers before seeding.
+ * g_cookie_state: COOKIE_UNSEEDED, COOKIE_DRAWING (one caller redraws),
+ * COOKIE_SEEDED (final).
+ */
 static uint64_t g_cookie_secret;
+static bool g_cookie_seeded;   /* the secret was drawn from a seeded pool */
+static unsigned g_cookie_state;
+enum { COOKIE_UNSEEDED, COOKIE_DRAWING, COOKIE_SEEDED };
 
 /* Tunables the self-tests shorten. */
 static uint64_t g_keep_idle_ns = TCP_KEEPIDLE_NS;
@@ -1739,9 +1751,25 @@ static struct tcp_syn_entry *syncache_alloc(struct tcp_pcb *l, const struct neta
 static const uint16_t g_cookie_mss[8] = { 536, 1220, 1440, 1460, 2048, 4096, 8960, 16384 };
 #define COOKIE_SLOT_SHIFT 33   /* ~8.6 s */
 
+/* The secret, drawn again from the pool the first time it is needed after
+ * the pool has seeded; never redrawn after that. Any context. */
+static uint64_t cookie_secret(void)
+{
+    if (__atomic_load_n(&g_cookie_state, __ATOMIC_ACQUIRE) == COOKIE_UNSEEDED && random_ready()) {
+        unsigned unseeded = COOKIE_UNSEEDED;
+        if (__atomic_compare_exchange_n(&g_cookie_state, &unseeded, COOKIE_DRAWING, false, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&g_cookie_secret, random_u64() | 1, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_cookie_seeded, true, __ATOMIC_RELEASE);
+            __atomic_store_n(&g_cookie_state, COOKIE_SEEDED, __ATOMIC_RELEASE);
+        }
+    }
+    return __atomic_load_n(&g_cookie_secret, __ATOMIC_ACQUIRE);
+}
+
 static uint32_t cookie_hash(const struct netaddr *local, const struct netaddr *remote, uint64_t slot)
 {
-    return (uint32_t)mix64(tuple_hash(local, remote, g_cookie_secret) ^ slot);
+    return (uint32_t)mix64(tuple_hash(local, remote, cookie_secret()) ^ slot);
 }
 
 static uint32_t cookie_make(const struct netaddr *local, const struct netaddr *remote, uint64_t now, uint16_t peer_mss)
@@ -2420,9 +2448,33 @@ void tcp_init(void)
     for (unsigned i = 0; i < TCP_HASH_SIZE; i++)
         list_init(&g_hash[i]);
     g_cookie_secret = random_u64() | 1;
+    g_cookie_seeded = random_ready();
+    g_cookie_state = g_cookie_seeded ? COOKIE_SEEDED : COOKIE_UNSEEDED;
 }
 
 #if CONFIG_SELFTEST
+/* NET-6's seam: as if the secret had been drawn before the pool seeded,
+ * which tcp_init does on a machine whose pool seeds after it (no firmware
+ * seed, no CPU random instruction: entropy comes with the drivers). */
+void tcp_test_cookie_mark_unseeded(void)
+{
+    __atomic_store_n(&g_cookie_seeded, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_cookie_state, COOKIE_UNSEEDED, __ATOMIC_RELEASE);
+}
+
+bool tcp_test_cookie_seeded(void)
+{
+    return __atomic_load_n(&g_cookie_seeded, __ATOMIC_ACQUIRE);
+}
+
+/* A cookie for a made-up 4-tuple, as a SYN past the backlog would get. */
+uint32_t tcp_test_cookie_make(void)
+{
+    struct netaddr local = { .family = COSMO_AF_INET, .port = htons(80), .v4 = htonl(0x0a000001) };
+    struct netaddr remote = { .family = COSMO_AF_INET, .port = htons(40000), .v4 = htonl(0x0a000002) };
+    return cookie_make(&local, &remote, clock_now_ns(), 1460);
+}
+
 void tcp_test_reset_rto_backoff_max(void)
 {
     __atomic_store_n(&g_stats.rto_backoff_max, 0, __ATOMIC_RELAXED);

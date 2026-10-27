@@ -597,7 +597,9 @@ for an entry answers SYN-ACK again (there is no SYN-ACK retransmit
 timer: the client's SYN retransmit drives it). When no slot is free the
 listener answers with a *SYN cookie* and keeps nothing: `iss = H(secret,
 4-tuple, t) & ~7 | mss_index`, `t` the 8-second slot of the clock, `H`
-a 32-bit hash keyed by a boot-time secret, `mss_index` into the table
+a 32-bit hash keyed by a boot-time secret (drawn at `tcp_init`, and
+drawn again, once, by the first cookie made or checked after the entropy
+pool seeds, if it was drawn before: NET-6), `mss_index` into the table
 {536, 1220, 1440, 1460, 4096, 8960, 16384}. The completing ACK
 (`ack - 1 == iss`) is checked against the cache first, then against the
 cookies of the current and previous slot; only then is a pcb allocated,

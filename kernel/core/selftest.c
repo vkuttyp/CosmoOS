@@ -816,6 +816,7 @@ static const struct selftest tests[] = {
     { "net-lo-tcp",      selftest_net_lo_tcp },
     { "net-tcp-delack",  selftest_net_tcp_delack },
     { "net-tcp-nagle-peer", selftest_net_tcp_nagle_peer },
+    { "net-syncookie-seeded", selftest_net_syncookie_seeded },
     { "net-rx-dup",      selftest_net_rx_dup },
     { "net-accept-order", selftest_net_accept_order },
     { "net-lo-tcp-loss", selftest_net_lo_tcp_loss },

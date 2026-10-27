@@ -278,6 +278,11 @@ struct tcp_sock_info {
 unsigned tcp_list(struct tcp_sock_info *out, unsigned max, uint16_t family);
 #if CONFIG_SELFTEST
 void tcp_test_reset_rto_backoff_max(void);   /* net-bench: the maximum per round */
+/* NET-6: mark the SYN-cookie secret as drawn before the pool seeded; whether
+ * the secret now in use was drawn from a seeded pool; a cookie made now. */
+void tcp_test_cookie_mark_unseeded(void);
+bool tcp_test_cookie_seeded(void);
+uint32_t tcp_test_cookie_make(void);
 #endif
 const char *tcp_state_name(enum tcp_state s);
 

@@ -73,6 +73,7 @@ struct lx_shm_attach {
 
 struct linux_state {
     uint64_t brk_start, brk;
+    uint64_t sigtramp;   /* the trampoline page, drawn per exec (SEC-4); 0 on x86-64 */
     unsigned unknown_syscalls;
     bool wx_logged;   /* lx_wx_refused has said why, once per exec */
     struct lx_shm_attach *shm_attaches;   /* singly linked; head insert */
@@ -107,7 +108,13 @@ static int linux_process_init(struct process *p, const struct elf_info *info)
     ls->brk = ls->brk_start;
     spinlock_init(&ls->shm_lock, "lx-shm-attach");
     p->linux = ls;
-    return linux_sigtramp_map(p);
+    return linux_sigtramp_map(p, &ls->sigtramp);
+}
+
+uint64_t linux_sigtramp_addr(const struct process *p)
+{
+    const struct linux_state *ls = p->linux;
+    return ls != NULL ? ls->sigtramp : 0;
 }
 
 static void linux_process_release(struct process *p)
@@ -152,6 +159,7 @@ static int linux_process_fork(struct process *parent, struct process *child)
     spinlock_init(&ls->shm_lock, "lx-shm-attach");
     ls->brk_start = pls->brk_start;
     ls->brk = pls->brk;
+    ls->sigtramp = pls->sigtramp;   /* the page came with the copied space */
     child->linux = ls;   /* linux_process_release frees it, records and all, if the fork fails */
     if (child->space == parent->space)
         return 0;

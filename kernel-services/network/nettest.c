@@ -24,6 +24,7 @@
 #include <kernel/vfs.h>
 #include <kernel/net/tap.h>
 #include <kernel/net/tcp.h>
+#include <kernel/random.h>
 #include <kernel/net/udp.h>
 #include <kernel/netif.h>
 #include <kernel/object.h>
@@ -11810,3 +11811,31 @@ bool selftest_net_dhcp_client(const char **reason)
     return true;
 }
 #endif
+
+/* --- net-syncookie-seeded (NET-6) --------------------------------------------- *
+ *
+ * tcp_init draws the SYN-cookie secret, and on a machine whose pool seeds
+ * after it -- no firmware seed, no CPU random instruction -- that secret
+ * came from an unseeded pool, predictable in principle, and was kept for
+ * the life of the boot. A cookie made once the pool is seeded must use a
+ * secret drawn from it. The seam marks the current secret as drawn
+ * unseeded, the case such a machine starts in.
+ */
+bool selftest_net_syncookie_seeded(const char **reason)
+{
+#if !CONFIG_SELFTEST
+    (void)reason;
+    kinfo("selftest: net-syncookie-seeded: needs CONFIG_SELFTEST; skipping");
+    return true;
+#else
+    if (!random_ready()) {
+        kinfo("selftest: net-syncookie-seeded: the pool never seeded (S19 warned); skipping");
+        return true;
+    }
+    tcp_test_cookie_mark_unseeded();
+    (void)tcp_test_cookie_make();
+    CHECK(tcp_test_cookie_seeded());   /* main keeps tcp_init's secret, seeded or not */
+    kinfo("selftest: net-syncookie-seeded: a cookie made on a seeded pool used a secret drawn from it");
+    return true;
+#endif
+}
