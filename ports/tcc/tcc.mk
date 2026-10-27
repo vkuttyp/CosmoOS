@@ -43,12 +43,15 @@ $(TCC_TAR):
 # libtcc1.a, which tcc builds with itself, is built here with the target's
 # clang (tcc's own <cpu>-libtcc1-usegcc switch): the tcc just built cannot
 # run on the build host.
+# Patches go on with git apply, as BusyBox's do (ports/busybox/busybox.mk):
+# the CI image has git and no patch.
 $(TCC_ELF) $(TCC_LIBTCC1) &: $(TCC_TAR) $(TCC_PATCHES) $(BB_LIBC) $(BB_BUILTINS) $(BB_CC) $(ROOT)/ports/tcc/tcc.mk
 	$(call log,TCC,$(TCC_COMMIT) $(BB_TARGET))
 	$(Q)rm -rf $(TCC_DIR)/src $(TCC_DIR)/build
 	$(Q)mkdir -p $(TCC_DIR)/src $(TCC_DIR)/build
 	$(Q)tar -xzf $(TCC_TAR) -C $(TCC_DIR)/src --strip-components=1
-	$(Q)for p in $(TCC_PATCHES); do patch -s -d $(TCC_DIR)/src -p1 < $$p || exit 1; done
+	$(Q)for p in $(TCC_PATCHES); do \
+		(cd $(TCC_DIR)/src && GIT_CEILING_DIRECTORIES=$(TCC_DIR) git apply -p1 $$p) || exit 1; done
 	$(Q)cd $(TCC_DIR)/build && $(TCC_DIR)/src/configure --cc=$(BB_CC) --ar="$(AR)" --cpu=$(TCC_CPU) \
 		--targetos=Linux --config-musl --config-bcheck=no --config-backtrace=no --prefix=/usr \
 		--sysincludepaths=/usr/lib/tcc/include:/usr/include --libpaths=/usr/lib/tcc:/usr/lib \
