@@ -9,7 +9,8 @@ The probe boots a debug build and judges:
 
   LX-1   the self-test signal-stop, whose parent waits 100 ms after SIGCONT
          on purpose, and signal-stop-exit (an exited child reports its
-         exit, the kernel's order, unchanged by the fix).
+         exit, the kernel's order, unchanged by the fix; the fix commit
+         adds this self-test, so --old has no line for it).
   PKG-1  rc.test's 130 hand-made installed records: its line
          "pkg-many: N of 130 listed".
 
@@ -87,7 +88,7 @@ def main():
         many = re.search(r"^pkg-many: (\d+) of 130 listed$", serial, re.M)
         listed = int(many.group(1)) if many else -1
         if a.old:
-            ok = stop == "FAIL" and check9 and stop_exit == "ok" and 0 <= listed < 130
+            ok = stop == "FAIL" and check9 and stop_exit == "no line" and 0 <= listed < 130
         else:
             ok = stop == "ok" and stop_exit == "ok" and listed == 130
         seen = [f"signal-stop: {stop}{' (check 9)' if check9 else ''}", f"signal-stop-exit: {stop_exit}",
