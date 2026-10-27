@@ -3494,6 +3494,20 @@ See the [history index](README.md).
     `utime`, `stime`, `cutime` and `cstime`. Tests: lxtest's CPU-time block
     (failing first), `test_cputime`, `fuzz_cputime`.
   - Report: `docs/audit/2026-10-27-a5-cputime-report.md`.
+- **Four test and CI defects (2026-10-27, roadmap 1.2's first unit, "Always,
+  whichever direction", its first PR).**
+  - TEST-1: `wait-multi-prepare` judges a run only when its CPU's scheduler
+    made no pick meanwhile (`sched_pick_count`, `CONFIG_SELFTEST`), since a
+    re-pick of the running thread sets it RUNNING without a switch.
+  - TEST-2: `module-unload-busy` judges the unload's wait on the deadline
+    clock it was made with, not the per-CPU clock.
+  - TEST-3: the ARP and ND park hooks are armed for one interface, so
+    another interface's traffic no longer takes the test's park.
+  - TEST-5: `test-display`'s failure upload leaves out the QMP sockets that
+    made it upload nothing.
+  - Each self-test defect has a control that fails on every boot without
+    its fix (`tools/always-tests-probe.py --old`, both architectures).
+  - Report: `docs/audit/2026-10-27-always-tests-report.md`.
 - **LX-1 and PKG-1 (2026-10-27, roadmap 1.2's first unit, its second PR).**
   - LX-1: `signal-stop`'s child exits only once its parent has seen the
     continue; the kernel's order (an exited child reports its exit, as

@@ -141,8 +141,9 @@ void ipv4_test_release_forward(void);
 void nd_test_hold_retry(bool on);
 bool nd_test_retry_parked(void);
 void nd_test_release_retry(void);
-/* ND's twin of arp_test_hold_lock_entry (N25 follow-up). */
-void nd_test_hold_lock_entry(bool on);
+/* ND's twin of arp_test_hold_lock_entry (N25 follow-up), armed for one
+ * interface the same way (TEST-3). */
+void nd_test_hold_lock_entry(const struct netif *nif);
 bool nd_test_lock_entry_parked(void);
 void nd_test_release_lock_entry(void);
 #endif

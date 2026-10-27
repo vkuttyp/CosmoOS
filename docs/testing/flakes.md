@@ -100,6 +100,16 @@ Every other test in that boot passed, the xHCI cancel proof included.
 Still outside Unit 2 and unchanged; a fix belongs to the test's
 measurement (take `waited` from the deadline clock) and is in the
 inventory.
+**Fixed (2026-10-27, TEST-2; roadmap 1.2's first unit):** the test now
+takes a deadline 50 ms out on the clock `module_unload` waits on before
+the call and checks it has passed after. A control replays
+`module_unload`'s 48 ms wait with this CPU's per-CPU clock injected 40 ms
+back (`clock_test_set_cpu_offset_ns`, which the deadline clock never
+reads), so the old per-CPU measurement reads about 8 ms of it on every
+boot whatever the tick timing (`tools/always-tests-probe.py --old`). A
+first control that relied on tick timing (the clock forced not common, the
+wait started 3.5 ms after a tick) failed on AArch64 but not on x86-64,
+whose ticks under TCG ran late enough to cover the gap.
 
 **Observed once, host test `online-late` (2026-10-09):** the first
 `gmake host-test` overlapped two `gmake -j4 ... analyze` builds and failed
@@ -3158,6 +3168,14 @@ parks the first caller on *any* interface, so another thread's ARP work
 resolve on `ndown0` runs before the down and returns `-EINPROGRESS`. Not
 confirmed by a run; outside M2 (inventory). First sighting.
 
+
+**Fixed, not a flake (2026-10-27, TEST-3; roadmap 1.2's first unit).**
+`arp_test_hold_lock_entry` and `nd_test_hold_lock_entry` take the
+interface to park a caller on, and a caller on any other interface passes.
+A control arms the hooks for `ndown0` and resolves on a decoy interface;
+against the old hooks the decoy parks on every boot
+(`tools/always-tests-probe.py --old`).
+
 ## `syscall-fuzz` over the per-test budget, 2026-09-28
 
 **No dump could have attributed it.** The test ran after `cosmofs-replay`,
@@ -4718,6 +4736,15 @@ with the virtio-rng device): the same line, `still_ready at line 1417 (1
 ms)`, and only it. The runner was slow (that run's AArch64 chaos boot took
 243.5 s and its crash boot 178.1 s of 180). The same mechanism, not
 confirmed by a run; CI ran again on the commit that records it.
+
+
+**Fixed, not a flake (2026-10-27, TEST-1; roadmap 1.2's first unit).**
+`sched_pick_count` (CONFIG_SELFTEST) counts every pass through the pick,
+the `next == prev` one included, and the test judges a run only when its
+CPU's scheduler made no pick meanwhile. A control makes the race certain:
+a `schedule()` right after the wake re-picks the pinned thread on every
+boot; against the old guard the test fails every boot.
+`tools/always-tests-probe.py --old` shows it on both architectures.
 
 ## `test-display`'s panic-lockdep: another CPU's re-entry panic first, 2026-10-16
 

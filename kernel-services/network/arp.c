@@ -59,9 +59,9 @@ static struct net_work g_age_work;
  * interface completed the other's entry (invariant N25).
  */
 #if CONFIG_DEBUG
-static void arp_test_park_before_lock(void);
+static void arp_test_park_before_lock(const struct netif *nif);
 #else
-static inline void arp_test_park_before_lock(void) {}
+static inline void arp_test_park_before_lock(const struct netif *nif) { (void)nif; }
 #endif
 
 static struct arp_entry *find(const struct netif *nif, uint32_t ip)
@@ -135,7 +135,7 @@ int arp_resolve(struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN], struct mb
         memcpy(mac, eth_broadcast, ETH_ALEN);
         return 0;
     }
-    arp_test_park_before_lock();
+    arp_test_park_before_lock(nif);
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     /* Under the table lock, so it orders against netif_set_up(false):
      * the flag is cleared before the flush takes this lock, and whichever
@@ -209,7 +209,7 @@ void arp_input(struct netif *nif, struct mbuf *m)
     uint16_t op = ntohs(a.op);
     bool for_us = a.tpa == nif->ip4.addr && nif->ip4.addr != 0;
     struct mbuf *pending = NULL;
-    arp_test_park_before_lock();
+    arp_test_park_before_lock(nif);
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     /* A frame queued before the interface went down can arrive here after
      * the down flushed its entries; learning from it would carry a MAC
@@ -332,24 +332,25 @@ void arp_delete(const struct netif *nif, uint32_t ip)
  * NETIF_UP check was before the lock; the flag could clear and the flush
  * run in this window). One caller per arming, like the retry hook below.
  */
-static unsigned g_test_hold_lock_entry, g_test_lock_entry_parked, g_test_lock_entry_release;
+static const struct netif *g_test_hold_lock_entry;   /* the interface armed for; NULL: disarmed */
+static unsigned g_test_lock_entry_parked, g_test_lock_entry_release;
 
-void arp_test_hold_lock_entry(bool on)
+void arp_test_hold_lock_entry(const struct netif *nif)
 {
     __atomic_store_n(&g_test_lock_entry_parked, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_lock_entry_release, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_test_hold_lock_entry, on ? 1u : 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_hold_lock_entry, nif, __ATOMIC_RELEASE);
 }
 bool arp_test_lock_entry_parked(void) { return __atomic_load_n(&g_test_lock_entry_parked, __ATOMIC_ACQUIRE) != 0; }
 void arp_test_release_lock_entry(void) { __atomic_store_n(&g_test_lock_entry_release, 1u, __ATOMIC_RELEASE); }
 
-static void arp_test_park_before_lock(void)
+static void arp_test_park_before_lock(const struct netif *nif)
 {
-    if (__atomic_load_n(&g_test_hold_lock_entry, __ATOMIC_RELAXED) == 0)
-        return;   /* not armed, the common case: no atomic read-modify-write on the input path */
-    unsigned one = 1u;
-    if (!__atomic_compare_exchange_n(&g_test_hold_lock_entry, &one, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-        return;   /* not armed, or another caller took the arming */
+    const struct netif *armed = __atomic_load_n(&g_test_hold_lock_entry, __ATOMIC_RELAXED);
+    if (armed == NULL || armed != nif)
+        return;   /* not armed, the common case, or armed for another interface: no read-modify-write */
+    if (!__atomic_compare_exchange_n(&g_test_hold_lock_entry, &armed, NULL, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;   /* another caller on this interface took the arming */
     __atomic_store_n(&g_test_lock_entry_parked, 1u, __ATOMIC_RELEASE);
     while (!__atomic_load_n(&g_test_lock_entry_release, __ATOMIC_ACQUIRE))
         arch_cpu_relax();
