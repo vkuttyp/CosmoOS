@@ -3683,6 +3683,8 @@ static int unpriv_test(void)
 
     /* The sticky bit on /tmp: root's entry there is not the child's to remove or rename. */
     UCHECK(unlink("/tmp/rootowned") < 0 && errno == EACCES);
+    UCHECK(chroot("/tmp") < 0 && errno == EPERM);   /* VFS-6: the native door asks PRIV_MOUNT, as the Linux one */
+    UCHECK(chmod("/tmp/rootowned", 0600) < 0 && errno == EPERM);   /* not its owner */
     UCHECK(rename("/tmp/rootowned", "/tmp/rootowned2") < 0 && errno == EACCES);
 
     /* Reserved ports are judged at bind time: a socket the child creates
@@ -3731,6 +3733,7 @@ static void priv_selftest(void)
     CHECK(fd >= 0);
     if (fd >= 0)
         close(fd);
+    CHECK(chmod("/tmp/rootowned", 0666) == 0);   /* past the umask (VFS-6): world-writable as said */
     uid_t r, e, s;
     CHECK(getresuid(&r, &e, &s) == 0 && r == 0 && e == 0 && s == 0);
     CHECK(getgroups(0, NULL) == 0);
@@ -5805,8 +5808,77 @@ static void devices_selftest(void)
             (unsigned long long)(lat / DEV_ROUNDS));
 }
 
+/*
+ * Hard links and the native metadata calls (VFS-4, VFS-6; roadmap 1.2 A2),
+ * on /tmp's ramfs: two names for one file, either readable when the other
+ * is gone; a link to a symbolic link is that link; a directory and a
+ * second mount are refused. Every native creation takes the umask, and
+ * chmod, utimes and chown change what stat reports. chroot's refusal is
+ * the unprivileged child's (priv).
+ */
+static void links_selftest(void)
+{
+    struct cosmo_stat a, b;
+    char buf[8];
+    CHECK(mkdir("/tmp/lk", 0755) == 0 || errno == EEXIST);
+    int fd = open("/tmp/lk/a", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK(fd >= 0 && write(fd, "one", 3) == 3);
+    if (fd >= 0)
+        close(fd);
+    CHECK(link("/tmp/lk/a", "/tmp/lk/b") == 0);
+    CHECK(cosmo_stat("/tmp/lk/a", &a) == 0 && cosmo_stat("/tmp/lk/b", &b) == 0);
+    CHECK(a.ino == b.ino && a.nlink == 2 && b.nlink == 2);
+    CHECK(link("/tmp/lk/a", "/tmp/lk/b") < 0 && errno == EEXIST);
+    CHECK(link("/tmp/lk", "/tmp/lk/d") < 0 && errno == EPERM);
+    /* A second mount: no link across it; and a ramfs whose file has two
+     * names still unmounts (one pin a file, however many names). */
+    CHECK(mkdir("/tmp/lk/mnt", 0755) == 0 && cosmo_mount("none", "/tmp/lk/mnt", "ramfs", 0) == 0);
+    CHECK(link("/tmp/lk/a", "/tmp/lk/mnt/a") < 0 && errno == EXDEV);
+    fd = open("/tmp/lk/mnt/x", O_WRONLY | O_CREAT, 0644);
+    CHECK(fd >= 0);
+    if (fd >= 0)
+        close(fd);
+    CHECK(link("/tmp/lk/mnt/x", "/tmp/lk/mnt/y") == 0);
+    CHECK(cosmo_umount2("/tmp/lk/mnt", 0) == 0 && rmdir("/tmp/lk/mnt") == 0);
+    CHECK(unlink("/tmp/lk/a") == 0);
+    fd = open("/tmp/lk/b", O_RDONLY, 0);
+    CHECK(fd >= 0 && read(fd, buf, sizeof(buf)) == 3 && memcmp(buf, "one", 3) == 0);
+    if (fd >= 0)
+        close(fd);
+    CHECK(cosmo_stat("/tmp/lk/b", &b) == 0 && b.nlink == 1);
+    CHECK(symlink("/tmp/lk/b", "/tmp/lk/s") == 0 && link("/tmp/lk/s", "/tmp/lk/s2") == 0);
+    CHECK(cosmo_lstat("/tmp/lk/s2", &a) == 0 && a.type == COSMO_DT_LNK);   /* the link itself, not b */
+
+    /* The umask, on native creation. */
+    mode_t old = umask(027);
+    fd = open("/tmp/lk/m", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    CHECK(fd >= 0);
+    if (fd >= 0)
+        close(fd);
+    CHECK(mkdir("/tmp/lk/md", 0777) == 0);
+    CHECK(cosmo_stat("/tmp/lk/m", &a) == 0 && a.mode == 0640);
+    CHECK(cosmo_stat("/tmp/lk/md", &a) == 0 && a.mode == 0750);
+    CHECK(umask(old) == 027);
+
+    /* chmod, utimes, chown. */
+    CHECK(chmod("/tmp/lk/b", 0600) == 0 && cosmo_stat("/tmp/lk/b", &b) == 0 && b.mode == 0600);
+    CHECK(cosmo_utimes("/tmp/lk/b", 1000000000ull * 86400) == 0);
+    CHECK(cosmo_stat("/tmp/lk/b", &b) == 0 && b.mtime_ns == 1000000000ull * 86400);
+    CHECK(cosmo_utimes("/tmp/lk/b", COSMO_UTIME_NOW) == 0);
+    CHECK(cosmo_stat("/tmp/lk/b", &b) == 0 && b.mtime_ns > 1000000000ull * 86400);
+    CHECK(chown("/tmp/lk/b", COSMO_ID_KEEP, COSMO_ID_KEEP) == 0);
+    CHECK(chown("/tmp/lk/b", 1000, 1000) == 0 && cosmo_stat("/tmp/lk/b", &b) == 0 && b.uid == 1000 && b.gid == 1000);
+    CHECK(chown("/tmp/lk/b", 0, 0) == 0);
+
+    CHECK(unlink("/tmp/lk/b") == 0 && unlink("/tmp/lk/s") == 0 && unlink("/tmp/lk/s2") == 0);
+    CHECK(unlink("/tmp/lk/m") == 0 && rmdir("/tmp/lk/md") == 0 && rmdir("/tmp/lk") == 0);
+    printf("usertest: links: two names for one file, a link to a link, the umask on native creation, "
+           "chmod, utimes and chown\n");
+}
+
 static const struct selftest_section g_sections[] = {
     { "fs",       fs_selftest },
+    { "links",    links_selftest },
     { "mmap",     mmap_selftest },
     { "fsctl",    fsctl_selftest },
     { "net",      net_selftest },

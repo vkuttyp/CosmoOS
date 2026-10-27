@@ -31,6 +31,16 @@ an empty `argv` `EINVAL`), `waitpid` with no children (`ECHILD`),
 `ERANGE`, `getppid() == 0`, its own `procinfo` record, `klog_read`,
 `sysctl_get` (`kernel.name`, `hw.ncpu`, `sysctl.names`, `ENOENT`,
 truncation), `malloc`/`realloc`, `snprintf`, `strtol`, `setenv`/`getenv`.
+Since roadmap 1.2 A2 a `links` section (`links_selftest`, VFS-4 and VFS-6), on
+`/tmp`: two names for one file, either readable once the other is gone; a
+link to a symbolic link is that link; a directory is `EPERM`, an existing
+name `EEXIST`, a second (ramfs) mount `EXDEV`, and that ramfs, holding a file
+with two names, still unmounts; every native creation takes the umask
+(027: `0666` is `0640`, a directory's `0777` is `0750`); `chmod`, `utimes` (a
+time and "now") and `chown` change what `stat` reports. The unprivileged
+child's `priv` checks find the native `chroot` and a non-owner's `chmod`
+refused (`EPERM`).
+
 Since the unix-sockets unit a `unix` section (`unix_selftest`): a
 stream pair carries bytes both ways and `SO_PEERCRED` names this
 process; a child echoes over the end it was given through the spawn
