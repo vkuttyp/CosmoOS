@@ -47,10 +47,15 @@
     str x21, [sp, #FRAME_OFF_KIND]
     .endm
 
-    /* User frames record SP_EL0; kernel frames the interrupted SP. */
+    /* User frames record SP_EL0; kernel frames the interrupted SP. From
+     * EL0, SP_EL0 is then pointed at this CPU's per-CPU block, where the
+     * stack protector reads its canary (BUILD-1); the return to EL0 puts
+     * the user's back from the frame. */
     .macro save_sp_user
     mrs x21, sp_el0
     str x21, [sp, #FRAME_OFF_SP]
+    mrs x21, tpidr_el1
+    msr sp_el0, x21
     .endm
     .macro save_sp_kernel
     add x21, sp, #FRAME_SIZE

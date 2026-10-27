@@ -476,9 +476,47 @@ What the CPU is asked to enforce, and where it is proved
   (`docs/kernel/syscall/api.md`), so a program can probe for a flag and
   a future flag is never silently dropped; `wait` already did. The
   Linux personality keeps Linux's rule, which is to ignore them.
+- **The stack protector** (BUILD-1, 2026-10-27). The kernel and its
+  modules build with `-fstack-protector-strong`: every function with a
+  local array or an address-taken local keeps a canary beside its saved
+  frame pointer and return address and checks it at its return;
+  `__stack_chk_fail` panics (`stack-protector: a stack canary was
+  overwritten`), so an overrun of a local buffer stops at that function's
+  return instead of reaching a corrupted return address.
+  - **Per thread.** The canary is read from this CPU's per-CPU block
+    (`struct percpu`'s `stack_canary`, offset 24: `%gs:24` on x86-64,
+    `[SP_EL0 + 24]` on AArch64), and each thread's own canary
+    (`thread->stack_canary`, drawn from the pool at `thread_alloc`, its low
+    byte zero) is put there when it is switched in (`schedule_internal`,
+    `sched_start_cpu`). A canary never changes under a thread's live
+    frames: thread 0 (kmain) keeps the boot context's, drawn from the cycle
+    counter before the pool exists (`percpu_init_boot`), and an AP's
+    bring-up frames use one drawn when its block is made.
+  - **The registers.** x86-64's segment-relative guard
+    (`-mstack-protector-guard=tls`, `%gs`) is one LLVM honours only for
+    targets with a TLS guard slot, so the kernel and modules compile for
+    `x86_64-unknown-linux-gnu` (`KERNEL_CC_TARGET`, as Linux's own kernel
+    does; `-ffreestanding`; nothing in the tree tests `__linux__`); on
+    `x86_64-unknown-none` LLVM uses one global guard. AArch64's
+    (`-mstack-protector-guard=sysreg`) takes only `SP_EL0`, which the
+    kernel, running on `SP_EL1`, points at the per-CPU block: at
+    `arch_percpu_install`, and at every entry from EL0 after the user's
+    `SP_EL0` is saved in the frame (`vectors.S`), the return putting the
+    user's back. The EL2 world switch saves and restores it with the rest of
+    EL1's state.
+  - **Before the block.** A function that runs, or keeps a frame live,
+    before its CPU's per-CPU block is installed is `__no_stack_protector`:
+    `x86_start`, `x86_ap_entry`, `aarch64_start`, `aarch64_ap_entry`,
+    `gdt_init`, `gdt_init_cpu`, `idt_load`, `arch_console_early_init`,
+    `percpu_init_boot`, `percpu_get`, `arch_percpu_install`, and
+    `__stack_chk_fail` itself. The loader and user space keep
+    `-fno-stack-protector`.
+  - **Test:** `make test-stackprot` (CI, both architectures): a
+    `CRASH_TEST=4` kernel overruns a stack buffer on purpose and the
+    harness requires the stack protector's panic.
 - **Not done, and named:** UAO, E0PD, BTI and PAC are unused; an SError
-  from EL0 still panics (no deterministic trigger under TCG); no
-  stack protector, KASLR or speculative-execution mitigation
+  from EL0 still panics (no deterministic trigger under TCG); no KASLR or
+  speculative-execution mitigation
   (`docs/audit/2026-09-deferred-work-inventory.md`).
 
 ## 6. Randomness

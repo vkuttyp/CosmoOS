@@ -1,6 +1,7 @@
 # AArch64 target definitions (docs/kernel/arch/aarch64/).
 
 KERNEL_TARGET := aarch64-unknown-none-elf
+KERNEL_CC_TARGET := $(KERNEL_TARGET)   # -mstack-protector-guard=sysreg needs no OS (BUILD-1)
 LOADER_TARGET := aarch64-unknown-windows
 
 # Kernel: ARMv8.0-A baseline (QEMU's cortex-a72; PAN and LSE are detected
@@ -18,7 +19,9 @@ LOADER_TARGET := aarch64-unknown-windows
 KERNEL_ARCH_CFLAGS := \
 	-march=armv8-a -mcmodel=small -mgeneral-regs-only -mno-outline-atomics \
 	-mno-omit-leaf-frame-pointer \
-	-ffixed-x18 -fno-pic -fno-pie -DARCH_AARCH64=1
+	-ffixed-x18 -fno-pic -fno-pie -DARCH_AARCH64=1 \
+	$(KERNEL_STACK_PROTECTOR) -mstack-protector-guard=sysreg \
+	-mstack-protector-guard-reg=sp_el0 -mstack-protector-guard-offset=$(PERCPU_CANARY_OFFSET)
 
 KERNEL_ARCH_LDFLAGS :=
 

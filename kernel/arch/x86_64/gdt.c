@@ -132,7 +132,7 @@ static void tables_load(struct x86_cpu_tables *t)
     __asm__ volatile("ltr %w0" : : "r"(GDT_TSS) : "memory");
 }
 
-void gdt_init(void)
+__no_stack_protector void gdt_init(void)   /* before the per-CPU block (BUILD-1) */
 {
     uintptr_t tops[IST_COUNT];
     for (unsigned i = 0; i < IST_COUNT; i++)
@@ -176,7 +176,7 @@ uintptr_t gdt_ist_top(unsigned ist)
     return g_tables[arch_cpu_id()]->ist_top[ist - 1];
 }
 
-void gdt_init_cpu(unsigned cpu)
+__no_stack_protector void gdt_init_cpu(unsigned cpu)   /* before the per-CPU block (BUILD-1) */
 {
     KASSERT(cpu < CONFIG_MAX_CPUS && g_tables[cpu] != NULL);
     tables_load(g_tables[cpu]);

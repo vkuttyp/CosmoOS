@@ -14,6 +14,10 @@
 #include <stdbool.h>
 
 #define __noreturn      __attribute__((noreturn))
+/* A function the stack protector must not instrument (BUILD-1): one that
+ * runs, or keeps a frame live, while this CPU's per-CPU block -- which
+ * holds the canary -- is not yet installed. */
+#define __no_stack_protector __attribute__((no_stack_protector))
 #define __maybe_unused  __attribute__((unused))
 #define __always_used   __attribute__((used))
 #define __packed        __attribute__((packed))

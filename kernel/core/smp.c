@@ -8,6 +8,7 @@
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
+#include <kernel/random.h>
 #include <kernel/smp.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
@@ -69,6 +70,7 @@ void smp_init(void)
         }
 
         pc->boot_stack = stack;
+        pc->stack_canary = random_u64() & ~0xFFull;   /* the AP's bring-up frames, until it switches to its idle thread (BUILD-1) */
         pc->hw_id = cpus[i].apic_id;
         percpu_register(pc, cpu);
         next++;

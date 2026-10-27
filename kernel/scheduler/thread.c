@@ -7,6 +7,7 @@
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/process.h>
+#include <kernel/random.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/lockdep.h>
@@ -123,6 +124,11 @@ struct thread *thread_alloc(const char *name, int priority, unsigned flags)
         return NULL;
 
     strlcpy(t->name, name ? name : "?", sizeof(t->name));
+    /* The stack protector's canary (BUILD-1), fixed for the thread's life.
+     * Thread 0 is the boot context made a thread, its frames already live
+     * under the boot canary, so it keeps that one. Low byte zero, as
+     * glibc's. */
+    t->stack_canary = (flags & THREAD_FLAG_BOOT) ? this_cpu()->stack_canary : random_u64() & ~0xFFull;
     t->state = THREAD_BLOCKED;
     t->priority = priority < 0 ? 0 : priority >= SCHED_PRIO_COUNT ? SCHED_PRIO_LOWEST : priority;
     t->base_prio = t->priority;   /* the effective priority starts at the base; inheritance may lower the number */

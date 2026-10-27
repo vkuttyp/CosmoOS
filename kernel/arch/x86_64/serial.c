@@ -96,7 +96,7 @@ static struct console_sink g_serial_sink = {
     .write = serial_sink_write,
 };
 
-void arch_console_early_init(void)
+__no_stack_protector void arch_console_early_init(void)   /* before the per-CPU block (BUILD-1) */
 {
     serial_init();
     console_register(&g_serial_sink);

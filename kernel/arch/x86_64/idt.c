@@ -7,6 +7,7 @@
  * that a future user-mode debugger's int3 can reach the kernel.
  */
 
+#include <kernel/compiler.h>
 #include <kernel/string.h>
 
 #include <x86/gdt.h>
@@ -74,7 +75,7 @@ void idt_init(void)
     idt_load();
 }
 
-void idt_load(void)
+__no_stack_protector void idt_load(void)   /* an AP loads it before its per-CPU block (BUILD-1) */
 {
     struct idtr idtr = {
         .limit = sizeof(g_idt) - 1,

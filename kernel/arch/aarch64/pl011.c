@@ -164,7 +164,7 @@ static bool cmdline_says_no_serial(const struct cosmoboot_info *info)
     return false;
 }
 
-void arch_console_early_init(void)
+__no_stack_protector void arch_console_early_init(void)   /* before the per-CPU block (BUILD-1) */
 {
     const struct cosmoboot_info *info = aarch64_boot_info;
     /* A loader of another protocol version has no console record (or a
