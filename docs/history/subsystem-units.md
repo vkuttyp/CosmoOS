@@ -3541,3 +3541,19 @@ See the [history index](README.md).
   - `make test-stackprot` (CI, both architectures): a stack overrun on
     purpose panics as one; `tools/stackprot-probe.py --old`.
   - Report: `docs/audit/2026-10-27-always-stackprot-report.md`.
+- **A C compiler on the target (2026-10-27, roadmap 1.2 A1, its first two
+  PRs).**
+  - #468: TinyCC (`mob` at `e23dabed`) as a port (`ports/tcc/`), `cc` on
+    the image with musl's headers, start files and libraries under `/usr`;
+    `mkbootarchive`'s directory entries; AArch64 user code may read
+    `CTR_EL0` and clean caches by address (`SCTLR_EL1.UCT`, `UCI`). The
+    debug boot's shell test builds `hello.c` static and dynamic.
+  - The second PR: `make test-selfhost`, A1's acceptance, on the installed
+    system: static, dynamic and `dlopen` programs; tcc's `tests2` (x86-64
+    125 passed, AArch64 126, the exclusions only the Makefile's own); tcc
+    rebuilt from its source, rebuilding itself to the same bytes, and the
+    same `hello` from both compilers. It found four defects in the port,
+    fixed there: `runmain.o` not installed, a static tcc that could not
+    `dlopen` for `-run`, `-run` mapping code writable and executable, and
+    AArch64's `wchar_t`.
+  - Report: `docs/audit/2026-10-27-a1-selfhost-report.md`.
