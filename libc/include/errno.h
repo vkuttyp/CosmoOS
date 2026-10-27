@@ -28,6 +28,7 @@ int *__errno_location(void);
 #define EBUSY COSMO_EBUSY
 #define EEXIST COSMO_EEXIST
 #define EXDEV COSMO_EXDEV
+#define EMLINK COSMO_EMLINK
 #define ENODEV COSMO_ENODEV
 #define ENOTDIR COSMO_ENOTDIR
 #define EISDIR COSMO_EISDIR

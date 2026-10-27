@@ -26,4 +26,6 @@ int lstat(const char *path, struct stat *st);
 int fstat(int fd, struct stat *st);
 int mkdir(const char *path, mode_t mode);
 int mkfifo(const char *path, mode_t mode);   /* a named pipe: SYS_mknod with COSMO_DT_FIFO */
+int chmod(const char *path, mode_t mode);
+mode_t umask(mode_t mask);   /* every creation takes it, native or Linux (VFS-6) */
 #endif

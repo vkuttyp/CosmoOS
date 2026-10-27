@@ -211,6 +211,33 @@ static inline long cosmo_symlink(const char *target, const char *path)
     return cosmo_syscall2(SYS_symlink, (long)target, (long)path);
 }
 
+/* VFS-4, VFS-6 (roadmap 1.2 A2): link does not follow a final link;
+ * chmod, chown and utimes do. */
+static inline long cosmo_link(const char *oldpath, const char *newpath)
+{
+    return cosmo_syscall2(SYS_link, (long)oldpath, (long)newpath);
+}
+static inline long cosmo_chmod(const char *path, unsigned mode)
+{
+    return cosmo_syscall2(SYS_chmod, (long)path, (long)mode);
+}
+static inline long cosmo_chown(const char *path, unsigned uid, unsigned gid)
+{
+    return cosmo_syscall3(SYS_chown, (long)path, (long)uid, (long)gid);
+}
+static inline long cosmo_utimes(const char *path, unsigned long long mtime_ns)
+{
+    return cosmo_syscall2(SYS_utimes, (long)path, (long)mtime_ns);
+}
+static inline long cosmo_umask(unsigned mask)
+{
+    return cosmo_syscall1(SYS_umask, (long)mask);
+}
+static inline long cosmo_chroot(const char *path)
+{
+    return cosmo_syscall1(SYS_chroot, (long)path);
+}
+
 static inline long cosmo_readlink(const char *path, char *buf, unsigned long len)
 {
     return cosmo_syscall3(SYS_readlink, (long)path, (long)buf, (long)len);

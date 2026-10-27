@@ -645,6 +645,13 @@ static int get_path(uint64_t uptr, char *buf)
     return buf[0] == '\0' ? -ENOENT : 0;
 }
 
+/* The calling process's file-creation mask (VFS-6): native creation
+ * takes it as the Linux door does. */
+static uint32_t native_umask(void)
+{
+    return __atomic_load_n(&process_current()->umask, __ATOMIC_RELAXED);
+}
+
 static struct file *file_of(int h, unsigned rights)
 {
     struct kobject *obj = handle_lookup(&process_current()->handles, h, rights);
@@ -672,7 +679,7 @@ static int64_t sys_open(struct syscall_args *a)
     int rc = get_path(a->a[0], path);
     if (rc)
         goto out;
-    uint32_t mode = (uint32_t)a->a[2];
+    uint32_t mode = (uint32_t)a->a[2] & 07777u & ~native_umask();   /* VFS-6 */
     struct file *f;
     struct vnode *cwd = process_cwd_snapshot(base, VFS_PATH_MAX);
     /* A directory remembers the name its own walk took to it, from the
@@ -722,6 +729,90 @@ static int64_t sys_symlink(struct syscall_args *a)
         vnode_put(cwd);
     }
     kfree(target);
+    return rc;
+}
+
+/* --- links and metadata (VFS-4, VFS-6; roadmap 1.2 A2) ---------------- */
+
+static int64_t sys_link(struct syscall_args *a)
+{
+    char *oldp = kmalloc(2 * VFS_PATH_MAX, 0);   /* heap: see sys_open */
+    if (oldp == NULL)
+        return -ENOMEM;
+    char *newp = oldp + VFS_PATH_MAX;
+    int rc = get_path(a->a[0], oldp);
+    if (rc == 0)
+        rc = get_path(a->a[1], newp);
+    if (rc == 0) {
+        struct vnode *cwd = process_cwd_get();
+        rc = vfs_link(cwd, oldp, cwd, newp, false);   /* a final link is linked itself, as POSIX link() */
+        vnode_put(cwd);
+    }
+    kfree(oldp);
+    return rc;
+}
+
+/* The node `path` names from the working directory, a final link followed. */
+static int path_node(uint64_t upath, struct vnode **out)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(upath, path);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_lookup(cwd, path, out);
+    vnode_put(cwd);
+    return rc;
+}
+
+static int64_t sys_chmod(struct syscall_args *a)
+{
+    struct vnode *vn;
+    int rc = path_node(a->a[0], &vn);
+    if (rc)
+        return rc;
+    rc = vfs_setattr(vn, VFS_SET_MODE, (uint32_t)a->a[1], 0);
+    vnode_put(vn);
+    return rc;
+}
+
+static int64_t sys_chown(struct syscall_args *a)
+{
+    struct vnode *vn;
+    int rc = path_node(a->a[0], &vn);
+    if (rc)
+        return rc;
+    rc = vfs_chown(vn, (uint32_t)a->a[1], (uint32_t)a->a[2]);   /* COSMO_ID_KEEP is VFS_ID_KEEP */
+    vnode_put(vn);
+    return rc;
+}
+
+static int64_t sys_utimes(struct syscall_args *a)
+{
+    struct vnode *vn;
+    int rc = path_node(a->a[0], &vn);
+    if (rc)
+        return rc;
+    uint64_t t = a->a[1];
+    rc = t == COSMO_UTIME_NOW ? vfs_setattr(vn, VFS_SET_MTIME_NOW, 0, 0) : vfs_setattr(vn, VFS_SET_MTIME, 0, t);
+    vnode_put(vn);
+    return rc;
+}
+
+/* The process's own mask, inherited by spawn and fork (struct process). */
+static int64_t sys_umask(struct syscall_args *a)
+{
+    return (int64_t)__atomic_exchange_n(&process_current()->umask, (uint32_t)a->a[0] & 0777u, __ATOMIC_RELAXED);
+}
+
+static int64_t sys_chroot(struct syscall_args *a)
+{
+    struct vnode *dir;
+    int rc = path_node(a->a[0], &dir);
+    if (rc)
+        return rc;
+    rc = process_chroot(dir);
+    vnode_put(dir);
     return rc;
 }
 
@@ -824,7 +915,7 @@ static int64_t sys_mkdir(struct syscall_args *a)
     if (rc)
         return rc;
     struct vnode *cwd = process_cwd_get();
-    rc = vfs_mkdir(cwd, path, (uint32_t)a->a[1]);
+    rc = vfs_mkdir(cwd, path, (uint32_t)a->a[1] & 07777u & ~native_umask());   /* VFS-6 */
     vnode_put(cwd);
     return rc;
 }
@@ -842,7 +933,7 @@ static int64_t sys_mknod(struct syscall_args *a)
         return rc;
     struct vnode *cwd = process_cwd_get();
     struct vnode *vn;
-    rc = vfs_mknod(cwd, path, (uint32_t)a->a[1], VNODE_FIFO, &vn);
+    rc = vfs_mknod(cwd, path, (uint32_t)a->a[1] & 07777u & ~native_umask(), VNODE_FIFO, &vn);   /* VFS-6 */
     vnode_put(cwd);
     if (rc == 0)
         vnode_put(vn);
@@ -2718,6 +2809,8 @@ static int64_t sys_sysctl_set(struct syscall_args *a)
     return utsns_sethostname(utsns_current(), buf, len);
 }
 
+_Static_assert(COSMO_ID_KEEP == VFS_ID_KEEP, "sys_chown passes the user's keep straight through");
+
 static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_exit] = sys_exit,
     [SYS_write] = sys_write,
@@ -2789,6 +2882,12 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_sysctl_set] = sys_sysctl_set,
     [SYS_reboot] = sys_reboot,
     [SYS_getrandom] = sys_getrandom,
+    [SYS_link] = sys_link,
+    [SYS_chmod] = sys_chmod,
+    [SYS_chown] = sys_chown,
+    [SYS_utimes] = sys_utimes,
+    [SYS_umask] = sys_umask,
+    [SYS_chroot] = sys_chroot,
     [SYS_vm_create] = sys_vm_create,
     [SYS_vm_mem] = sys_vm_mem,
     [SYS_vm_mem_rw] = sys_vm_mem_rw,

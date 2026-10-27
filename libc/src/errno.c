@@ -33,6 +33,7 @@ static const char *const messages[] = {
     [EBUSY] = "Device or resource busy",
     [EEXIST] = "File exists",
     [EXDEV] = "Invalid cross-device link",
+    [EMLINK] = "Too many links",
     [ENODEV] = "No such device",
     [ENOTDIR] = "Not a directory",
     [EISDIR] = "Is a directory",

@@ -169,7 +169,19 @@
 #define SYS_sysctl_set 104 /* (const char *name, const char *value, size_t len) -> 0; PRIV_SYS_ADMIN (roadmap M5) */
 #define SYS_reboot    105 /* (unsigned cmd) -> no return, or -errno; COSMO_REBOOT_*; PRIV_SYS_ADMIN (shell completeness S5) */
 #define SYS_getrandom 106 /* (void *buf, size_t len) -> len; seeded random bytes, at most 256 a call; waits for the seeding (roadmap 1.2 B5) */
-#define SYS_COUNT     107
+/* VFS-4 and VFS-6 (roadmap 1.2 A2): hard links, and the metadata calls the
+ * Linux door had and the native one did not. Paths resolve from the
+ * working directory; chmod, chown and utimes follow a final symbolic link,
+ * link does not (POSIX). */
+#define SYS_link      107 /* (const char *old, const char *new) -> 0; another name for old's file */
+#define SYS_chmod     108 /* (const char *path, uint32_t mode) -> 0; owner or PRIV_SYS_ADMIN */
+#define SYS_chown     109 /* (const char *path, uint32_t uid, uint32_t gid) -> 0; COSMO_ID_KEEP leaves one */
+#define SYS_utimes    110 /* (const char *path, uint64_t mtime_ns) -> 0; COSMO_UTIME_NOW is the clock */
+#define SYS_umask     111 /* (uint32_t mask) -> the old mask; applied to every creation, native or Linux */
+#define SYS_chroot    112 /* (const char *path) -> 0; PRIV_MOUNT; the working directory moves to it */
+#define SYS_COUNT     113
+#define COSMO_ID_KEEP   0xffffffffu
+#define COSMO_UTIME_NOW (~(uint64_t)0)
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
@@ -749,6 +761,7 @@ struct cosmo_dirent {
 #define COSMO_ENOSPC  28
 #define COSMO_ENOSYS  38
 #define COSMO_EXDEV   18
+#define COSMO_EMLINK  31
 #define COSMO_ENODEV  19
 #define COSMO_ENOTDIR 20
 #define COSMO_EISDIR  21
