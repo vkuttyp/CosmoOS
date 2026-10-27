@@ -3078,6 +3078,11 @@ static int probe_signal_stop(void)
         return 7;
     if (kill(c, SIGCONT) != 0)
         return 8;
+    /* LX-1: the parent late to wait, as a loaded host makes it. A child
+     * that exits on its continue has exited by now, and an exited child is
+     * reported by its exit (POSIX; Linux's wait_consider_task), not by a
+     * continue it can no longer have: check 9 must not depend on the race. */
+    usleep(100000);
     if (waitpid(c, &st, WUNTRACED | WCONTINUED) != c || !WIFCONTINUED(st))
         return 9;
     if (waitpid(c, &st, 0) != c || st != 7)
