@@ -1,0 +1,3 @@
+# aarch64 only: the Makefile's skips for a target other than i386 and x86_64.
+85_asm-outside-function Makefile: x86 asm
+127_asm_goto            Makefile: hardcodes x86 asm

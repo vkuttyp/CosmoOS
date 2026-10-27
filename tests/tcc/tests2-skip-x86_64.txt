@@ -1,0 +1,4 @@
+# x86_64 only: the Makefile's skips for a target other than arm64.
+138_arm64_encoding      Makefile: arm64 only
+139_arm64_errors        Makefile: arm64 only
+140_arm64_extasm        Makefile: arm64 only

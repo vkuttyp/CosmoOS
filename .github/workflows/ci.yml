@@ -204,7 +204,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Verify toolchain and that no signing secret is tracked
         if: matrix.part == 'build'
@@ -409,7 +409,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug all
@@ -465,7 +465,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -532,7 +532,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -589,7 +589,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -648,7 +648,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -707,7 +707,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -772,7 +772,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -787,6 +787,64 @@ jobs:
           name: test-fill-${{ matrix.arch }}
           path: |
             out/${{ matrix.arch }}-release/test-fill/*.log
+          if-no-files-found: ignore
+  # Roadmap 1.2 A1's acceptance (docs/roadmap-1.2.md; userland testing.md,
+  # "test-selfhost"): on this build installed, cc builds and runs static,
+  # dynamic and dlopen programs; tcc's tests/tests2 pass, less the listed
+  # exclusions; tcc rebuilds itself and the rebuilt compiler builds the same
+  # hello byte for byte. Release builds, both architectures.
+  selfhost:
+    name: selfhost test (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    needs: image
+    container:
+      image: ${{ needs.image.outputs.toolchain }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    timeout-minutes: 60
+    env:
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
+    steps:
+      - name: Toolchain versions (ci/Dockerfile)
+        run: |
+          clang --version | head -1
+          qemu-system-x86_64 --version | head -1
+          qemu-system-aarch64 --version | head -1
+
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # BusyBox, musl and compiler-rt, pinned by SHA-256 in ports/busybox/busybox.mk
+      # and fetched once (scripts/fetch-pinned.py): every image carries BusyBox.
+      - name: Cache the pinned source archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .cache/ports
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
+
+      - name: Build (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release all
+
+      - name: the C compiler on the installed system (release)
+        run: make ARCH=${{ matrix.arch }} BUILD=release test-selfhost
+
+      - name: Upload the boots' serial logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-selfhost-${{ matrix.arch }}
+          path: |
+            out/${{ matrix.arch }}-release/test-selfhost/*.log
           if-no-files-found: ignore
   # Roadmap 1.2 B5's acceptance (docs/roadmap-1.2.md; cosmofs testing.md,
   # "test-encrypt"): an encrypted root installed, its passphrase typed at
@@ -847,7 +905,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       # The encrypt part is a long test (scripts/ci-gate.py): a pull request
       # that the gate finds no reason to run it for skips its two steps.
@@ -927,7 +985,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       # The release the test starts from never changes: SHA256SUMS checks
       # whatever the cache holds (tools/fetch-release.py).
@@ -1000,7 +1058,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -1061,7 +1119,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -1125,7 +1183,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -1182,7 +1240,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all
@@ -1233,7 +1291,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Release build twice, every output and the release set compared
         run: make ARCH=${{ matrix.arch }} BUILD=release reproducible
@@ -1284,7 +1342,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: .cache/ports
-          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk') }}
+          key: ports-${{ hashFiles('ports/busybox/busybox.mk', 'ports/dropbear/dropbear.mk', 'ports/openssh/openssh.mk', 'ports/mbedtls/mbedtls.mk', 'ports/tcc/tcc.mk') }}
 
       - name: Build (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release image
