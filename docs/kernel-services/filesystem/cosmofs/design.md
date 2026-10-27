@@ -61,7 +61,7 @@ struct cfs_inode {                                                        /* 256
     uint64_t csum_root;          /* CSUMIDX block or 0 */
     uint64_t reserved;
 };
-struct cfs_dirent { uint64_t ino /* 0 = free slot */; uint8_t type, namelen; uint8_t pad[6]; char name[48]; };  /* 64 bytes, names up to 47 */
+struct cfs_dirent { uint64_t ino /* 0 = free slot */; uint8_t type, namelen, extra /* v15 */; uint8_t pad[5]; char name[48]; };  /* 64 bytes, names up to 47; longer from version 15 ("Format version 15") */
 ```
 
 A file's logical block `n` is found by walking its runs, sorted by
@@ -399,7 +399,8 @@ stack arrays of up to 266 extents (4.3 KiB) in `cfs_set_block`.
 
 `-EIO` for any header, checksum, range or superblock problem; `-ENOSPC`
 when the bitmap is exhausted or an inode number would exceed the map;
-`-EFBIG` for more than 264 runs; `-ENAMETOOLONG` above 47 bytes;
+`-EFBIG` for more than 264 runs; `-ENAMETOOLONG` above 47 bytes on a pool
+that cannot be raised to version 15 (above 255 everywhere: the VFS's);
 `-ENOTEMPTY`, `-EEXIST`, `-ENOENT` as the VFS expects. A failed
 mutation may leave buffers dirty for the open transaction but never
 touches the committed root; a later commit publishes whatever
@@ -2421,6 +2422,83 @@ which:
 
 The prompt is not measured: verified boot covers the loader, the kernel
 and the archive, not what the person at the console types.
+
+## Format version 15: long names (roadmap 1.2 A2)
+
+Roadmap 1.2 A2 builds BusyBox from its source tarball on the installed
+system, and that tarball holds 35 names longer than 47 bytes, the
+longest 73 (`var-do-not-expand-tilde-in-parameter-expansion-in-quotes.right`,
+in its testsuite). A version-14 directory entry is one 64-byte slot with
+room for 47, so the tarball cannot even be unpacked onto the root. The
+VFS takes names of up to 255 bytes (`VFS_NAME_MAX`), as Linux does;
+version 15 lets cosmofs store them.
+
+### An entry of several slots
+
+A directory block is still 64 slots of 64 bytes, and every walker still
+steps through it a slot at a time. A name of up to 48 bytes is one slot,
+as before. A longer one is a **head** and its **continuations**, in
+consecutive slots of one block:
+
+```c
+struct cfs_dirent {        /* the head, or a whole short entry */
+    uint64_t ino;          /* 0 = free; CFS_DIRENT_CONT = a continuation */
+    uint8_t type, namelen; /* namelen 1..255 */
+    uint8_t extra;         /* continuations that follow (was pad[0]) */
+    uint8_t pad[5];
+    char name[48];         /* the name's first 48 bytes */
+};
+struct cfs_dirent_cont {   /* the same 64 bytes, read as a continuation */
+    uint64_t mark;         /* CFS_DIRENT_CONT, ~0: no inode has it */
+    char name[56];         /* the next 56 bytes */
+};
+```
+
+`extra` is exactly `cfs_dirent_extra(namelen)`: 0 up to 48 bytes, then
+one per 56 bytes beyond, so a 255-byte name takes five slots and a block
+holds at least twelve of them. Before version 15, `extra` was padding
+that every writer zeroed, and `namelen` was at most 47.
+
+- **One block, one write.** A head and its continuations never cross a
+  block boundary. Adding a name writes them into a run of free slots of
+  one block, and removing it zeroes the run; each is the one
+  copy-on-write write of that block that a short name's change was, so a
+  crash leaves the whole name or none of it.
+- **A continuation is never a name.** Its `mark` is no inode number
+  (`CFS_INO_OF` of every real one is below 2^`CFS_SNAP_INO_SHIFT`), and
+  a free-slot search wants `ino == 0`, so code that steps over it
+  finds neither an entry nor a hole. Lookup, `readdir`, the checker and
+  the fault injectors go through shared helpers in `cosmofs_format.h`
+  (`cfs_dirent_check`, `cfs_dirent_name`, `cfs_dirent_put`,
+  `cfs_dirent_free_run`, `cfs_dirent_clear`).
+- **`readdir`'s position is still a slot.** It resumes after the whole
+  entry it last returned, and a position that lands on a continuation
+  (the entry changed between two calls) moves on to the next head.
+
+### When a pool becomes version 15
+
+As 12, 13 and 14 are, version 15 is raised by the first operation that
+needs it: a create, `mkdir`, `symlink` or rename that makes a name
+longer than 47 bytes. A pool nobody gives a long name stays mountable by
+the kernel it might be rolled back to; once raised, a kernel that reads
+14 at most (CosmoOS 1.0.14 and older) cannot mount it, and the raise
+says so on the console. The raise goes through 12 as a snapshot's would
+(`cfs_snap_raise`). A pool below 11, or one encrypted with a version-1
+key block (which a later version reads as MAC'd), cannot be raised:
+there a long name is `-ENAMETOOLONG`, the version-14 answer.
+
+A lookup of a name longer than 47 bytes on a pool below 15 is
+`-ENOENT`: no such entry can exist. Names longer than 255 bytes never
+reach cosmofs (the VFS's `-ENAMETOOLONG`).
+
+### The checker
+
+CF13 grows by the shape of an entry: a head's `namelen` is 1..255 (1..47
+below version 15) and its `extra` is what that length needs (0 below
+15); its continuations follow it in its own block, each marked; and no
+continuation stands without a head. Any other shape is `dir_bad`, found
+before a byte of the name is read, as an over-long `namelen` was.
+Duplicate names compare whole names, however many slots each takes.
 
 ## Self-test fixture failure ownership
 
