@@ -3494,3 +3494,13 @@ See the [history index](README.md).
     `utime`, `stime`, `cutime` and `cstime`. Tests: lxtest's CPU-time block
     (failing first), `test_cputime`, `fuzz_cputime`.
   - Report: `docs/audit/2026-10-27-a5-cputime-report.md`.
+- **NET-6 and SEC-4 (2026-10-27, roadmap 1.2's first unit, its third PR).**
+  - NET-6: the SYN-cookie secret, drawn at `tcp_init`, is drawn again by
+    the first cookie made or checked after the pool seeds
+    (`cookie_secret`); `net-syncookie-seeded`.
+  - SEC-4: no Linux signal trampoline at a fixed address. x86-64 maps none
+    (a frame needs `SA_RESTORER`); AArch64's is at a random page of the mmap
+    range, drawn per exec.
+  - `tools/always-security-probe.py --old`: both defects on both
+    architectures.
+  - Report: `docs/audit/2026-10-27-always-security-report.md`.
