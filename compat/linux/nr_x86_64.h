@@ -76,6 +76,7 @@
 #define LX_chdir 80
 #define LX_fchdir 81
 #define LX_rename 82
+#define LX_link 86
 #define LX_mkdir 83
 #define LX_mknod 133
 #define LX_rmdir 84
@@ -151,6 +152,7 @@
 #define LX_statx 332
 #define LX_unlinkat 263
 #define LX_renameat 264
+#define LX_linkat 265
 #define LX_symlinkat 266
 #define LX_readlinkat 267
 #define LX_faccessat 269
