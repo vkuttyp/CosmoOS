@@ -223,7 +223,7 @@ Open lines (struck lines are not counted):
 - **NET-3** correctness, S. virtio-net posts RX before `netif_register` with no purge on a failed registration; prove whether an escaped `rcvif` outlives the device.
 - **NET-4** correctness, S. An interface's IPv4 configuration is published field by field and read with plain loads; packet paths need a consistent snapshot.
 - **NET-5** security, M. The filter does not inspect IPv6.
-- **NET-6** security, S. The SYN-cookie secret is drawn once at `tcp_init`, possibly before the pool seeds; rekey at seeding.
+- ~~**NET-6** security, S. The SYN-cookie secret is drawn once at `tcp_init`, possibly before the pool seeds; rekey at seeding.~~ Done by roadmap 1.2's first unit ("Always"), its third PR: the first cookie made or checked after the pool seeds draws the secret again (`cookie_secret`); `net-syncookie-seeded`.
 - **NET-7** security, M. `wget`'s CA bundle is fixed at build time and nothing checks revocation.
 - **NET-8** usability, L. TCP window scaling, SACK, timestamps, ECN, fast recovery, sender Nagle.
 - **NET-9** usability, M. No IP fragmentation or reassembly (fragments dropped); with it, MTU change and per-interface MSS (`SIOCSIFMTU`, `SIOCSIFHWADDR` take the current value only).
@@ -286,7 +286,7 @@ Open lines (struck lines are not counted):
 - **SEC-1** security, M. A root session with fewer privileges can rewrite `/etc/svc` and init's scripts, which run with all of them at the next boot.
 - **SEC-2** security, M. No audit logging of privileged operations, logins or denials.
 - **SEC-3** security, M. A confined walk's `..` can pass the root under a concurrent rename (needs a rename sequence count).
-- **SEC-4** security, S. The Linux signal trampoline is executable at the fixed `0x7FFFFFFF1000` in every Linux process.
+- ~~**SEC-4** security, S. The Linux signal trampoline is executable at the fixed `0x7FFFFFFF1000` in every Linux process.~~ Done by roadmap 1.2's first unit, its third PR: AArch64's trampoline is at a random page per exec, and x86-64 has none (a frame needs `SA_RESTORER`).
 - **SEC-5** security, M. Native programs and static BusyBox are `ET_EXEC`: ASLR does not move their code (static-PIE).
 - **SEC-6** security, S. No SP 800-90B health tests on RDSEED/RNDRRS, the firmware seed or virtio-rng.
 - **SEC-7** security, M. AArch64 UAO, E0PD, BTI and PAC unused.
