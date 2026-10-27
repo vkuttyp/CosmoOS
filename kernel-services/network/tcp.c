@@ -37,6 +37,7 @@ static spinlock_t g_table_lock = SPINLOCK_INIT("tcp-table");
 static struct list_node g_hash[TCP_HASH_SIZE];
 static struct tcp_stats g_stats;
 static uint64_t g_cookie_secret;
+static bool g_cookie_seeded;   /* the secret was drawn from a seeded pool (NET-6) */
 
 /* Tunables the self-tests shorten. */
 static uint64_t g_keep_idle_ns = TCP_KEEPIDLE_NS;
@@ -2420,9 +2421,31 @@ void tcp_init(void)
     for (unsigned i = 0; i < TCP_HASH_SIZE; i++)
         list_init(&g_hash[i]);
     g_cookie_secret = random_u64() | 1;
+    g_cookie_seeded = random_ready();
 }
 
 #if CONFIG_SELFTEST
+/* NET-6's seam: as if the secret had been drawn before the pool seeded,
+ * which tcp_init does on a machine whose pool seeds after it (no firmware
+ * seed, no CPU random instruction: entropy comes with the drivers). */
+void tcp_test_cookie_mark_unseeded(void)
+{
+    __atomic_store_n(&g_cookie_seeded, false, __ATOMIC_RELEASE);
+}
+
+bool tcp_test_cookie_seeded(void)
+{
+    return __atomic_load_n(&g_cookie_seeded, __ATOMIC_ACQUIRE);
+}
+
+/* A cookie for a made-up 4-tuple, as a SYN past the backlog would get. */
+uint32_t tcp_test_cookie_make(void)
+{
+    struct netaddr local = { .family = COSMO_AF_INET, .port = htons(80), .v4 = htonl(0x0a000001) };
+    struct netaddr remote = { .family = COSMO_AF_INET, .port = htons(40000), .v4 = htonl(0x0a000002) };
+    return cookie_make(&local, &remote, clock_now_ns(), 1460);
+}
+
 void tcp_test_reset_rto_backoff_max(void)
 {
     __atomic_store_n(&g_stats.rto_backoff_max, 0, __ATOMIC_RELAXED);
