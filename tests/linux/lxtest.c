@@ -241,6 +241,18 @@ static void sig_install(int sig, unsigned flags)
 
 /* One store instruction the SIGSEGV handler steps over: movb $1, (%rax)
  * (c6 00 01, three bytes) or strb (four bytes). */
+#if defined(__aarch64__)
+/* SEC-4: a handler installed without SA_RESTORER returns through the
+ * kernel's trampoline page; its link register on entry says where that is. */
+static volatile unsigned long g_tramp_ret;
+
+static void tramp_ret_handler(int sig)
+{
+    (void)sig;
+    g_tramp_ret = (unsigned long)(uintptr_t)__builtin_return_address(0);
+}
+#endif
+
 static void sig_fault_store(unsigned long addr)
 {
 #if defined(__x86_64__)
@@ -3059,19 +3071,33 @@ int main(int argc, char **argv)
     struct lx_stack_t dis = { .ss_flags = LX_SS_DISABLE };
     CHECKV(sc2(LX_sigaltstack, &dis, &oss) == 0 && oss.ss_sp == (uint64_t)(uintptr_t)altstk, 0);
     CHECKV(sc2(LX_sigaltstack, 0, &oss) == 0 && oss.ss_flags == LX_SS_DISABLE, oss.ss_flags);
-    /* Faults: SEGV_MAPERR on an unmapped page, SEGV_ACCERR on the read-only
-     * trampoline page; the handler steps over the store. */
+    /* Faults: SEGV_MAPERR on an unmapped page; the handler steps over the
+     * store. Then the trampoline (SEC-4): no executable page at a fixed
+     * address. x86-64 has no trampoline at all (a frame needs SA_RESTORER,
+     * as on Linux), so the old fixed page is unmapped. AArch64's -- the
+     * return of a handler installed without SA_RESTORER, which is where a
+     * Linux arm64 process's vDSO sigreturn would be -- is at a random page,
+     * read-only and executable, holding the sigreturn call. */
     sig_install(11, 0);
     sig_fault_store(0x7000);
     CHECKV(g_sig.count == 7 && g_sig.sig == 11 && g_sig.code == LX_SEGV_MAPERR && g_sig.addr == 0x7000, g_sig.code);
 #if defined(__x86_64__)
-    static const unsigned char tramp[] = { 0xb8, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x05 };   /* mov $15,%eax; syscall */
+    sig_fault_store(LX_SIGTRAMP);
+    CHECKV(g_sig.count == 8 && g_sig.code == LX_SEGV_MAPERR && g_sig.addr == LX_SIGTRAMP, g_sig.code);
 #else
     static const unsigned char tramp[] = { 0x68, 0x11, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4 };   /* mov x8,#139; svc #0 */
+    struct lx_sigaction tra = { .handler = (uint64_t)(uintptr_t)tramp_ret_handler };   /* no SA_RESTORER */
+    CHECKV(sc4(LX_rt_sigaction, 12, &tra, 0, 8) == 0, 0);
+    g_tramp_ret = 0;
+    CHECKV(sc2(LX_kill, pid, 12) == 0 && g_tramp_ret != 0, g_tramp_ret);   /* ran, and returned through it */
+    unsigned long tpage = g_tramp_ret & ~0xFFFul;
+    CHECKV(tpage != LX_SIGTRAMP, tpage);
+    CHECK(memeq((const void *)(uintptr_t)g_tramp_ret, tramp, sizeof(tramp)));
+    sig_fault_store(tpage);
+    CHECKV(g_sig.count == 8 && g_sig.code == LX_SEGV_ACCERR && g_sig.addr == tpage, g_sig.code);
+    struct lx_sigaction dfl12 = { .handler = 0 };
+    CHECKV(sc4(LX_rt_sigaction, 12, &dfl12, 0, 8) == 0, 0);
 #endif
-    CHECK(memeq((const void *)(uintptr_t)LX_SIGTRAMP, tramp, sizeof(tramp)));
-    sig_fault_store(LX_SIGTRAMP);
-    CHECKV(g_sig.count == 8 && g_sig.code == LX_SEGV_ACCERR && g_sig.addr == LX_SIGTRAMP, g_sig.code);
     /* The vector registers survive a handler (the frame's FXSAVE image). */
     sig_install(10, 0);
 #if defined(__x86_64__)
