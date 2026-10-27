@@ -164,7 +164,7 @@ Open lines (struck lines are not counted):
 
 ## Linux personality
 
-- **LX-1** correctness, S. `waitpid(WCONTINUED)` can miss a continue when the child exits at once (`child_event_locked` tests EXITED first; flakes.md, three sightings).
+- ~~**LX-1** correctness, S. `waitpid(WCONTINUED)` can miss a continue when the child exits at once (`child_event_locked` tests EXITED first; flakes.md, three sightings).~~ Done by roadmap 1.2's first unit ("Always"), its second PR: the kernel's order is POSIX's and Linux's (an exited child reports its exit); `signal-stop`'s child now waits for its parent to see the continue, and `signal-stop-exit` pins the order.
 - **LX-2** correctness, S. Linux fork copies SysV shm attach records after the space; a concurrent `shmat`/`shmdt` can split record and mapping.
 - **LX-3** correctness, S. `nanosleep` restarted after a stop sleeps its whole duration again, not the remainder.
 - **LX-4** correctness, S. `dup2` to a slot at or above `RLIMIT_NOFILE` succeeds where Linux returns `EBADF`.
@@ -254,7 +254,7 @@ Open lines (struck lines are not counted):
 
 ## Packages and upgrade
 
-- **PKG-1** correctness, S. `pkg`'s whole-database checks (ownership, `depends`, `list`, `upgrade`) pass over installed records beyond 128 silently.
+- ~~**PKG-1** correctness, S. `pkg`'s whole-database checks (ownership, `depends`, `list`, `upgrade`) pass over installed records beyond 128 silently.~~ Done by roadmap 1.2's first unit, its second PR: `installed_all` reads every installed record, and `upgrade` plans as many requests as packages.
 - **PKG-2** correctness, S. On v1.0.3, `pkg install` of `cosmo-upgrade.cpk` without `-n` leaves a package a rollback then removes.
 - ~~**PKG-3** usability, M. No multi-package transactions, interrupted-install recovery or per-package rollback.~~ Done by roadmap 1.2 B4's first PR: each command a root snapshot undone by init after an interruption, `pkg rollback NAME` (PK11, PK12).
 - ~~**PKG-4** usability, M. `cosmo-upgrade --rollback` keeps the packages `pkg upgrade` changed and `/etc` files the new release added.~~ Done by roadmap 1.2 B4: boot environments (`cosmo-upgrade --rollback` returns the root's snapshot with the set) for upgrades from v1.0.8's tool on.

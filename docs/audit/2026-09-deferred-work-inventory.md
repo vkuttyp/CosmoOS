@@ -1489,7 +1489,7 @@ none is needed by its acceptance test.
   `remove`'s `depends`, `list`, `upgrade`) read at most 128 installed
   records and pass over the rest silently; the library checks refuse
   past that (`PKG_LIB_SCAN`, #416's review). Found by the review; not
-  needed by P4. *2026-10-20: open; [backlog](../backlog.md) PKG-1.*
+  needed by P4. *2026-10-20: open; [backlog](../backlog.md) PKG-1. 2026-10-27: done (roadmap 1.2's first unit).*
 - ~~The Linux personality's `writev` (`rw_vec`) makes one write per
   iovec~~ Fixed 2026-10-20: its third sighting turned main red
   (08f97a91); `lx_writev` gathers the vector into one write

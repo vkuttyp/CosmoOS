@@ -180,7 +180,10 @@ operation stops. A file owned by another installed package is a conflict
 Limits (`pkg/pkg.h`): a package at most 64 MiB, an index at most 4 MiB,
 1024 index entries, 64 dependencies and 4096 files per package, 256
 recorded directories, names 63 bytes, versions 31 bytes, paths 255
-bytes, 128 installed packages listed.
+bytes. Installed packages have no limit: every whole-database walk
+(ownership, `remove`'s dependants, `list`, `upgrade`, `rollback`,
+`verify`) reads all of them (PKG-1); only the shared-library view stops at
+128 (`PKG_LIB_SCAN`), and refuses past it.
 
 ## The builder (`tools/pkgbuild.py`)
 
