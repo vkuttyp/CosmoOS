@@ -322,7 +322,7 @@ most 236.9 s passing). Ordinary boots use `BOOT_TIMEOUT` too: 240 s on x86-64 si
 one of its CI boots exceeded 180 s (2026-10-07), and on AArch64 240 s
 since its CI boots were measured to exceed 180 s on slow runners
 (2026-10-06), then 300 s since its entropy boots timed out at 240 s six
-times in 40 runs (2026-10-15; the Makefile comment has the distributions). x86-64 300 s too since two of its entropy boots timed out at 240 s in one day, every self-test passed (2026-10-27). When chaos got its 240 s the corresponding
+times in 40 runs (2026-10-15; the Makefile comment has the distributions). x86-64 300 s too since two of its entropy boots timed out at 240 s in one day, every self-test passed (2026-10-27), and AArch64 380 s since two of its debug boots timed out at 300 s, one on main, every self-test passed (2026-10-27). When chaos got its 240 s the corresponding
 CI run's ordinary boots took 164–167 s; chaos added about 11 s of kernel
 self-tests and exhausted the shell deadline. Per-test watchdogs, the
 shell's 3 s signal-response check and the final boot timeout remain active.

@@ -5264,3 +5264,36 @@ on the PR's run 40467126835, both runners of the slow kind). Main's own
 slow-runner debug boot passed in 228.9 and 230.0 s. So the 240 s budget,
 not the PR: `BOOT_TIMEOUT` is 300 s on x86-64 too from this PR, as on
 AArch64 since 2026-10-15 (the Makefile's note).
+
+## AArch64 debug boots over their 300 s timeout, 2026-10-27
+
+Two AArch64 debug boots timed out at 300 s (`boot-test: FAIL after
+307.0s`, `timed out after 300s`) with every self-test passed, the boot cut
+off in init's shell test:
+- PR #470 at `aaf50da2`, run 40537322148, job 122306243916, `entropy boots
+  (aarch64)`, the `test-modcycle` boot: 516 self-tests in 221,474 ms,
+  beside the same job's other four boots, which passed in 262.7-281.5 s.
+  The failed job was rerun (job 122351923877) and passed, its boots taking
+  176.4-191.6 s.
+- main at `6779e0ff`, the merge of #470, run 40560498664, job
+  122388138578, `build, boot, analyze (aarch64, stress)`, the
+  `test-harness-retry` boot: 516 self-tests in 195,949 ms, beside a chaos
+  boot that passed in 263.9 s.
+
+Mechanism, from the logs: the runner's speed. The same kernel's boots fall
+into speeds about 1.5x apart. In the entropy job over the 30 runs to
+2026-10-27, the fast kind took 133-142 s of self-tests and 170-192 s a
+boot; the slow kind 186-221 s of self-tests and 240-307 s a boot. Main's
+own runs drew the slow kind (290.8 s at `1fbe1db7`, 278.4 s at
+`60442953`). Over 33 runs (40323876091 to 40565224086) the 358 passing
+AArch64 debug boots took a median of 240.0 s, a p95 of 278.4 s and at most
+296.7 s: under 1 % to spare. On 2026-10-15, when AArch64 got 300 s, the
+slowest passing boot was 235.7 s.
+
+`BOOT_TIMEOUT` and `MODCYCLE_TIMEOUT` are 380 s on AArch64 from this date,
+the slowest passing boot x 1.28, the margin the 2026-10-15 change gave.
+`CRASH_TIMEOUT` is 300 s on AArch64: its 63 crash and WXN boots took at
+most 233.8 s of 240. The entropy job's own limit is 45 min (it took up to
+29.1 of 30). x86-64 is unchanged. The figures are in the Makefile's
+comments. What made the slow kind of boot grow from about 236 s to about
+290 s in twelve days is not measured here.
