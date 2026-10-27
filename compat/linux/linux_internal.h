@@ -17,7 +17,12 @@ struct sigaction_k;
  * trampoline page, and the signal-related system calls. */
 int linux_signal_frame(struct arch_user_regs *regs, const struct sigaction_k *act, const struct signal_info *info,
                        uint64_t blocked_before);
-int linux_sigtramp_map(struct process *p);
+/* The trampoline page (SEC-4): mapped at a random page on AArch64 and its
+ * address stored in *where; not mapped on x86-64 (*where 0), where a frame
+ * needs SA_RESTORER. */
+int linux_sigtramp_map(struct process *p, uint64_t *where);
+/* syscalls.c: where the calling process's trampoline is (0: none). */
+uint64_t linux_sigtramp_addr(const struct process *p);
 
 int64_t lx_rt_sigaction(struct syscall_args *a);
 int64_t lx_rt_sigprocmask(struct syscall_args *a);

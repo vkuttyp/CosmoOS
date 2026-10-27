@@ -436,6 +436,9 @@ static void schedule_pass(bool preempt)
         next = rq->idle;
 
     pc->need_resched = false;
+#if CONFIG_SELFTEST
+    rq->picks++;
+#endif
 
     if (next == prev) {
         prev->state = THREAD_RUNNING;
@@ -1291,6 +1294,13 @@ uint64_t sched_switch_count(unsigned cpu)
 {
     return cpu < CONFIG_MAX_CPUS ? g_rqs[cpu].switches : 0;
 }
+
+#if CONFIG_SELFTEST
+uint64_t sched_pick_count(unsigned cpu)
+{
+    return cpu < CONFIG_MAX_CPUS ? __atomic_load_n(&g_rqs[cpu].picks, __ATOMIC_RELAXED) : 0;
+}
+#endif
 
 #define SCHED_DUMP_HOOKS 8
 static struct { const char *name; void (*fn)(void); } g_dump_hooks[SCHED_DUMP_HOOKS];

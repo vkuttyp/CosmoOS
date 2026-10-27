@@ -164,7 +164,7 @@ Open lines (struck lines are not counted):
 
 ## Linux personality
 
-- **LX-1** correctness, S. `waitpid(WCONTINUED)` can miss a continue when the child exits at once (`child_event_locked` tests EXITED first; flakes.md, three sightings).
+- ~~**LX-1** correctness, S. `waitpid(WCONTINUED)` can miss a continue when the child exits at once (`child_event_locked` tests EXITED first; flakes.md, three sightings).~~ Done by roadmap 1.2's first unit ("Always"), its second PR: the kernel's order is POSIX's and Linux's (an exited child reports its exit); `signal-stop`'s child now waits for its parent to see the continue, and `signal-stop-exit` pins the order.
 - **LX-2** correctness, S. Linux fork copies SysV shm attach records after the space; a concurrent `shmat`/`shmdt` can split record and mapping.
 - **LX-3** correctness, S. `nanosleep` restarted after a stop sleeps its whole duration again, not the remainder.
 - **LX-4** correctness, S. `dup2` to a slot at or above `RLIMIT_NOFILE` succeeds where Linux returns `EBADF`.
@@ -223,7 +223,7 @@ Open lines (struck lines are not counted):
 - **NET-3** correctness, S. virtio-net posts RX before `netif_register` with no purge on a failed registration; prove whether an escaped `rcvif` outlives the device.
 - **NET-4** correctness, S. An interface's IPv4 configuration is published field by field and read with plain loads; packet paths need a consistent snapshot.
 - **NET-5** security, M. The filter does not inspect IPv6.
-- **NET-6** security, S. The SYN-cookie secret is drawn once at `tcp_init`, possibly before the pool seeds; rekey at seeding.
+- ~~**NET-6** security, S. The SYN-cookie secret is drawn once at `tcp_init`, possibly before the pool seeds; rekey at seeding.~~ Done by roadmap 1.2's first unit ("Always"), its third PR: the first cookie made or checked after the pool seeds draws the secret again (`cookie_secret`); `net-syncookie-seeded`.
 - **NET-7** security, M. `wget`'s CA bundle is fixed at build time and nothing checks revocation.
 - **NET-8** usability, L. TCP window scaling, SACK, timestamps, ECN, fast recovery, sender Nagle.
 - **NET-9** usability, M. No IP fragmentation or reassembly (fragments dropped); with it, MTU change and per-interface MSS (`SIOCSIFMTU`, `SIOCSIFHWADDR` take the current value only).
@@ -254,7 +254,7 @@ Open lines (struck lines are not counted):
 
 ## Packages and upgrade
 
-- **PKG-1** correctness, S. `pkg`'s whole-database checks (ownership, `depends`, `list`, `upgrade`) pass over installed records beyond 128 silently.
+- ~~**PKG-1** correctness, S. `pkg`'s whole-database checks (ownership, `depends`, `list`, `upgrade`) pass over installed records beyond 128 silently.~~ Done by roadmap 1.2's first unit, its second PR: `installed_all` reads every installed record, and `upgrade` plans as many requests as packages.
 - **PKG-2** correctness, S. On v1.0.3, `pkg install` of `cosmo-upgrade.cpk` without `-n` leaves a package a rollback then removes.
 - ~~**PKG-3** usability, M. No multi-package transactions, interrupted-install recovery or per-package rollback.~~ Done by roadmap 1.2 B4's first PR: each command a root snapshot undone by init after an interruption, `pkg rollback NAME` (PK11, PK12).
 - ~~**PKG-4** usability, M. `cosmo-upgrade --rollback` keeps the packages `pkg upgrade` changed and `/etc` files the new release added.~~ Done by roadmap 1.2 B4: boot environments (`cosmo-upgrade --rollback` returns the root's snapshot with the set) for upgrades from v1.0.8's tool on.
@@ -286,7 +286,7 @@ Open lines (struck lines are not counted):
 - **SEC-1** security, M. A root session with fewer privileges can rewrite `/etc/svc` and init's scripts, which run with all of them at the next boot.
 - **SEC-2** security, M. No audit logging of privileged operations, logins or denials.
 - **SEC-3** security, M. A confined walk's `..` can pass the root under a concurrent rename (needs a rename sequence count).
-- **SEC-4** security, S. The Linux signal trampoline is executable at the fixed `0x7FFFFFFF1000` in every Linux process.
+- ~~**SEC-4** security, S. The Linux signal trampoline is executable at the fixed `0x7FFFFFFF1000` in every Linux process.~~ Done by roadmap 1.2's first unit, its third PR: AArch64's trampoline is at a random page per exec, and x86-64 has none (a frame needs `SA_RESTORER`).
 - **SEC-5** security, M. Native programs and static BusyBox are `ET_EXEC`: ASLR does not move their code (static-PIE).
 - **SEC-6** security, S. No SP 800-90B health tests on RDSEED/RNDRRS, the firmware seed or virtio-rng.
 - **SEC-7** security, M. AArch64 UAO, E0PD, BTI and PAC unused.
@@ -299,11 +299,11 @@ Open lines (struck lines are not counted):
 
 ## Testing and CI
 
-- **TEST-1** correctness, S. `wait-multi-prepare`'s guard misses `schedule()` picking the same thread again.
-- **TEST-2** correctness, S. `module-unload-busy` compares a tick-quantised deadline with `clock_since_ns` on a machine without a common clock.
-- **TEST-3** correctness, S. `net-neigh-down-race`'s park hooks park the first caller on any interface.
+- ~~**TEST-1** correctness, S. `wait-multi-prepare`'s guard misses `schedule()` picking the same thread again.~~ Done by roadmap 1.2's first unit ("Always"), its first PR: `sched_pick_count` counts a re-pick of the running thread, and a control re-picks it on purpose.
+- ~~**TEST-2** correctness, S. `module-unload-busy` compares a tick-quantised deadline with `clock_since_ns` on a machine without a common clock.~~ Done by roadmap 1.2's first unit, its first PR: the wait is judged on the deadline clock (`clock_deadline_passed`), and a control replays `module_unload`'s wait with the per-CPU clock injected 40 ms back.
+- ~~**TEST-3** correctness, S. `net-neigh-down-race`'s park hooks park the first caller on any interface.~~ Done by roadmap 1.2's first unit, its first PR: the park hooks are armed for one interface, and a control resolves on a decoy interface while armed.
 - **TEST-4** correctness, S. `net-hostinput` leaves a transmitting TCP connection the census does not see.
-- **TEST-5** correctness, S. CI's failure upload for `test-display` includes QMP sockets and uploads nothing.
+- ~~**TEST-5** correctness, S. CI's failure upload for `test-display` includes QMP sockets and uploads nothing.~~ Done by roadmap 1.2's first unit, its first PR: the upload excludes `*.sock`.
 - **TEST-6** correctness, S. Unexplained: AArch64 `syscall-fuzz` over its budget (8,240 ms of 8,000); the AArch64 virtio-console file missing its last line.
 - **TEST-7** correctness, S. Test timing that stands in for durations: `cwdtest --held`'s 200,000-yield bound, remaining `thrtest`/`cwdtest` waits.
 - **TEST-8** correctness, S. `net-bench`: a loopback TCP flow's 200 ms RTO with no drop, and an earlier test's connection still retransmitting during it.

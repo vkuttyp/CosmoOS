@@ -183,6 +183,7 @@ bool selftest_process_reaped(const char **reason);     /* a reaped pid is unfind
 bool selftest_signal_group(const char **reason);        /* kill(-pgid) reaches the group and nothing else */
 bool selftest_signal_setsid(const char **reason);      /* a session is started once */
 bool selftest_signal_stop(const char **reason);         /* a stop is an event a parent waits for */
+bool selftest_signal_stop_exit(const char **reason);    /* continued and gone: the exit is reported (LX-1) */
 bool selftest_signal_stop_kill(const char **reason);   /* a stopped process is still killable */
 bool selftest_signal_stop_mask(const char **reason);   /* SIGSTOP cannot be caught or blocked */
 bool selftest_signal_stop_restart(const char **reason);/* a call cut short by a stop is restarted */
@@ -472,6 +473,7 @@ bool selftest_net_sockerr_locking(const char **reason);
 bool selftest_tcp_pcb_timer_free(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);
 bool selftest_net_tcp_delack(const char **reason);   /* a receiver that stays silent gets its acknowledgement from the delayed-ACK timer */
+bool selftest_net_syncookie_seeded(const char **reason);   /* a SYN cookie's secret comes from a seeded pool (NET-6) */
 bool selftest_net_tcp_nagle_peer(const char **reason);   /* a Nagle sender's write-write-read is acknowledged by the read, not the timer */
 bool selftest_net_rx_dup(const char **reason);
 bool selftest_net_accept_order(const char **reason);

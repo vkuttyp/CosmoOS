@@ -188,8 +188,9 @@ the ranges cannot meet (static asserts in `process.h`: the lowest stack
 stays above the highest PIE, the highest mmap base below the lowest
 PIE). `vm_space_fork` copies `mmap_base`, so a fork child has its
 parent's layout, as on Linux; every exec draws a new one. The Linux
-signal trampoline page stays at its fixed `LX_SIGTRAMP` above the
-highest stack top (an inventory line).
+signal trampoline page (AArch64 only) is drawn the same way, a random
+page of the mmap range per exec; until SEC-4 it was at the fixed
+`0x7FFFFFFF1000` (docs/compat/linux/design.md, "The signal trampoline").
 
 W^X (decision 4): the map and protect paths already refuse a writable
 and executable request (`vm_user_map_*`, `vm_user_protect`, native and
@@ -1006,6 +1007,10 @@ struct thread  { ... bool sig_must_stop; ... };            /* under p->lock */
   `cont_reportable` are set by the event and cleared by the report, so a
   parent polling with `WNOHANG | WUNTRACED` does not see the same stop
   for ever; a stop cancels an unreported continue and the reverse.
+  An exit outranks both: a child that has exited is reported by its exit,
+  even with a continue unreported (POSIX: `WCONTINUED` reports a
+  continued process; Linux's order), and the continue is then gone with
+  it (`signal-stop-exit`; LX-1).
 
 **The wait status** grew two outcomes rather than changing:
 `COSMO_STATUS_STOPPED(sig)` is `0x200 | sig` and

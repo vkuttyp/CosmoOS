@@ -417,6 +417,13 @@ bool selftest_signal_stop(const char **reason)
     return run_signal_probe("signal-stop", reason);
 }
 
+/* A child continued and gone before its parent waits: the exit is reported,
+ * not the continue (POSIX; Linux's order; LX-1). */
+bool selftest_signal_stop_exit(const char **reason)
+{
+    return run_signal_probe("signal-stop-exit", reason);
+}
+
 bool selftest_signal_stop_kill(const char **reason)
 {
     return run_signal_probe("signal-stop-kill", reason);

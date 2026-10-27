@@ -68,9 +68,11 @@ for a Linux process, `linux_process_init` allocates `p->linux`.
   milestone 10 the signal state lives in the kernel core, `kernel/signal.h`,
   and `clear_child_tid` on the thread), set `brk_start = brk =
   page_align_up(info->hi)` plus a random number of pages below
-  2^`ASLR_BRK_BITS` (M5), and map the signal trampoline page
-  (`linux_sigtramp_map`: one RX page at `LX_SIGTRAMP` = `0x7FFFFFFF1000`
-  holding `mov $15,%eax; syscall` / `mov x8,#139; svc #0`). Also
+  2^`ASLR_BRK_BITS` (M5), and on AArch64 map the signal trampoline page
+  (`linux_sigtramp_map`: one RX page holding `mov x8,#139; svc #0` at a
+  random page of the mmap range, drawn per exec, its address in the
+  process's Linux state; x86-64 maps none, since a frame needs
+  `SA_RESTORER`; SEC-4). Also
   completes the personality table the first time (every empty slot
   becomes `lx_unknown`), before any Linux process can make a call.
 - Called from `process_create_from_elf` after the image is loaded and

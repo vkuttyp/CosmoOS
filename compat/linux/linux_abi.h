@@ -324,10 +324,11 @@ struct lx_winsize {
 #define LX_SEGV_ACCERR 2
 #define LX_UC_SIGCONTEXT_SS 0x2
 #define LX_UC_STRICT_RESTORE_SS 0x4
-/* The kernel's signal-return trampoline page (docs/compat/linux/design.md,
- * stage 2): `mov $15, %eax; syscall` or `mov x8, #139; svc #0`. The page
- * above the highest stack top (USER_STACK_TOP), with one unmapped page
- * between; a fixed address, unlike the randomised stack below it (M5). */
+/* Where the kernel's signal-return trampoline page was until SEC-4 (the
+ * page above the highest stack top, a fixed address): nothing is mapped
+ * there now -- AArch64's trampoline is at a random page per exec
+ * (linux_sigtramp_map), and x86-64 has none. Kept for lxtest, which checks
+ * that the address is empty or is not the trampoline. */
 #define LX_SIGTRAMP 0x7FFFFFFF1000ull
 
 /* --- fcntl --- */

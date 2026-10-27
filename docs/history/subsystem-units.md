@@ -3494,6 +3494,40 @@ See the [history index](README.md).
     `utime`, `stime`, `cutime` and `cstime`. Tests: lxtest's CPU-time block
     (failing first), `test_cputime`, `fuzz_cputime`.
   - Report: `docs/audit/2026-10-27-a5-cputime-report.md`.
+- **Four test and CI defects (2026-10-27, roadmap 1.2's first unit, "Always,
+  whichever direction", its first PR).**
+  - TEST-1: `wait-multi-prepare` judges a run only when its CPU's scheduler
+    made no pick meanwhile (`sched_pick_count`, `CONFIG_SELFTEST`), since a
+    re-pick of the running thread sets it RUNNING without a switch.
+  - TEST-2: `module-unload-busy` judges the unload's wait on the deadline
+    clock it was made with, not the per-CPU clock.
+  - TEST-3: the ARP and ND park hooks are armed for one interface, so
+    another interface's traffic no longer takes the test's park.
+  - TEST-5: `test-display`'s failure upload leaves out the QMP sockets that
+    made it upload nothing.
+  - Each self-test defect has a control that fails on every boot without
+    its fix (`tools/always-tests-probe.py --old`, both architectures).
+  - Report: `docs/audit/2026-10-27-always-tests-report.md`.
+- **LX-1 and PKG-1 (2026-10-27, roadmap 1.2's first unit, its second PR).**
+  - LX-1: `signal-stop`'s child exits only once its parent has seen the
+    continue; the kernel's order (an exited child reports its exit, as
+    POSIX and Linux do) is unchanged and pinned by `signal-stop-exit`.
+  - PKG-1: every whole-database walk in `pkg` reads every installed record
+    (`installed_all`), and `upgrade` plans as many requests as packages;
+    `rc.test` lists 130 hand-made records.
+  - `tools/always-correctness-probe.py --old`: check 9 and 128 of 130 on
+    both architectures.
+  - Report: `docs/audit/2026-10-27-always-correctness-report.md`.
+- **NET-6 and SEC-4 (2026-10-27, roadmap 1.2's first unit, its third PR).**
+  - NET-6: the SYN-cookie secret, drawn at `tcp_init`, is drawn again by
+    the first cookie made or checked after the pool seeds
+    (`cookie_secret`); `net-syncookie-seeded`.
+  - SEC-4: no Linux signal trampoline at a fixed address. x86-64 maps none
+    (a frame needs `SA_RESTORER`); AArch64's is at a random page of the mmap
+    range, drawn per exec.
+  - `tools/always-security-probe.py --old`: both defects on both
+    architectures.
+  - Report: `docs/audit/2026-10-27-always-security-report.md`.
 - **The stack protector (2026-10-27, roadmap 1.2's first unit, its fourth
   and last PR; BUILD-1).**
   - The kernel and modules build with `-fstack-protector-strong`; the

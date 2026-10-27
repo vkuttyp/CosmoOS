@@ -670,7 +670,7 @@ says yes is a draw from a seeded pool.
 | cosmofs pool UUID (`format_at`) | may-be-early | drawn | an identity, not a secret: it needs only to differ |
 | user-space ASLR (`image_build`: stack top, initial stack offset, mmap base, PIE bias; `linux_process_init`: break) | may-be-early | drawn at every spawn and exec | defence in depth; the boot waits for seeding before the first user process, as for `AT_RANDOM`, and a process started earlier is the kernel's own (docs/kernel/process/design.md §4a) |
 | TCP initial sequence numbers (`tcp.c`) | may-be-early | drawn | RFC 6528 unpredictability against off-path guessing; defence in depth, as in Linux |
-| TCP SYN-cookie secret (`tcp_init`) | may-be-early | drawn at network start | drawn once before a device-only pool can seed; recorded in the inventory, not changed here |
+| TCP SYN-cookie secret (`tcp_init`, `cookie_secret`) | drawn again once seeded | drawn at network start, then once more by the first cookie made or checked after the pool seeds (NET-6) | on a device-only pool the first draw precedes seeding; the second makes the secret the boot keeps unpredictable. A cookie made under the first fails its check and the peer's handshake starts over (`net-syncookie-seeded`) |
 | ephemeral port starts (`tcp.c`, `udp.c`), tap port (`tapsvc.c`) | may-be-early | drawn | RFC 6056 port randomisation is a hint, not a secret |
 | self-tests (`devtest.c`) | test | drawn | |
 

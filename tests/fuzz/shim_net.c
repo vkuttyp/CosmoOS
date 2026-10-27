@@ -383,6 +383,13 @@ uint64_t random_u64(void)
     return x * 0x2545F4914F6CDD1Dull;
 }
 
+/* The fuzzer's source is deterministic and always "seeded": the stack's
+ * may-be-early callers (tcp.c's SYN-cookie secret, NET-6) take it as is. */
+bool random_ready(void)
+{
+    return true;
+}
+
 void random_get_bytes(void *buf, size_t len)
 {
     uint8_t *p = buf;

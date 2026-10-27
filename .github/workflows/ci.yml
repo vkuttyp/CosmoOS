@@ -1075,6 +1075,10 @@ jobs:
       - name: The console on a virtio-gpu, read back from the screen (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release test-display
 
+      # test-display's directory holds the boots' QMP sockets, which the
+      # upload refuses ("entry not supported") and so uploaded nothing at all
+      # (TEST-5; docs/audit/2026-10-17-crash3-waiter-report.md): every file
+      # but those.
       - name: Upload the boots' serial logs (on failure)
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1083,6 +1087,7 @@ jobs:
           path: |
             out/${{ matrix.arch }}-release/test-net-login/*.log
             out/${{ matrix.arch }}-release/test-display/*
+            !out/${{ matrix.arch }}-release/test-display/*.sock
           if-no-files-found: ignore
 
   # Roadmap 1.1 P6's acceptance (docs/pkg/testing.md, "test-pkg-net"): the

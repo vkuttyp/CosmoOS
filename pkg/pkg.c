@@ -225,9 +225,29 @@ static int installed_names_more(char names[][PKG_NAME_MAX], int max, bool *more)
     return n;
 }
 
-static int installed_names(char names[][PKG_NAME_MAX], int max)
+/*
+ * Every installed package's name, however many (PKG-1: the whole-database
+ * walks below read at most 128 and passed over the rest silently). A heap
+ * array of *n names, which the caller frees; no database is no names. Out
+ * of memory, the command stops (EXIT_FAILED) rather than walk part of the
+ * database: a check that sees part of it is the defect this replaced.
+ */
+static char (*installed_all(int *n))[PKG_NAME_MAX]
 {
-    return installed_names_more(names, max, NULL);
+    char (*names)[PKG_NAME_MAX] = NULL;
+    for (int cap = 64;; cap *= 2) {
+        char (*grown)[PKG_NAME_MAX] = realloc(names, (size_t)cap * PKG_NAME_MAX);
+        if (grown == NULL) {
+            free(names);
+            fprintf(stderr, "pkg: out of memory reading %s\n", PKG_DB_INSTALLED);
+            exit(EXIT_FAILED);
+        }
+        names = grown;
+        bool more;
+        *n = installed_names_more(names, cap, &more);
+        if (!more)
+            return names;
+    }
 }
 
 /*
@@ -738,8 +758,8 @@ out:
 /* Another installed package owning `path`, or NULL. */
 static bool owned_by_other(const char *path, const char *self, char *owner, size_t ownerlen)
 {
-    char names[128][PKG_NAME_MAX];
-    int n = installed_names(names, 128);
+    int n;
+    char (*names)[PKG_NAME_MAX] = installed_all(&n);
     for (int i = 0; i < n; i++) {
         if (strcmp(names[i], self) == 0)
             continue;
@@ -752,9 +772,11 @@ static bool owned_by_other(const char *path, const char *self, char *owner, size
         manifest_free(&m);
         if (found) {
             strlcpy(owner, names[i], ownerlen);
+            free(names);
             return true;
         }
     }
+    free(names);
     return false;
 }
 
@@ -1558,8 +1580,8 @@ static int resolve(struct plan *p, const struct depend *d, const char *why)
  * breaks an installed dependant. */
 static int cons_add_installed(void)
 {
-    char names[128][PKG_NAME_MAX];
-    int n = installed_names(names, 128);
+    int n;
+    char (*names)[PKG_NAME_MAX] = installed_all(&n);
     int rc = 0;
     for (int i = 0; i < n; i++) {
         struct manifest m;
@@ -1573,6 +1595,7 @@ static int cons_add_installed(void)
         }
         manifest_free(&m);
     }
+    free(names);
     return rc;
 }
 
@@ -1778,8 +1801,8 @@ static int cmd_remove(int argc, char **argv)
             continue;
         }
         /* Dependants. */
-        char names[128][PKG_NAME_MAX];
-        int n = installed_names(names, 128);
+        int n;
+        char (*names)[PKG_NAME_MAX] = installed_all(&n);
         bool blocked = false;
         for (int k = 0; k < n; k++) {
             if (strcmp(names[k], argv[i]) == 0)
@@ -1796,6 +1819,7 @@ static int cmd_remove(int argc, char **argv)
             }
             manifest_free(&other);
         }
+        free(names);
         if (libs_still_required(&m, NULL))
             blocked = true;
         if (blocked) {
@@ -1865,19 +1889,27 @@ static int cmd_upgrade(int argc, char **argv)
 {
     if (index_load())
         return EXIT_FAILED;
-    char names[128][PKG_NAME_MAX];
-    int n = argc ? argc : installed_names(names, 128);
+    int n = argc;
+    char (*names)[PKG_NAME_MAX] = argc ? NULL : installed_all(&n);
     int rc = 0;
     /* Every package with a newer version, planned at once with what they
-     * need, before anything changes: the plan sizes the transaction. */
-    struct depend reqs[128];
+     * need, before anything changes: the plan sizes the transaction. As
+     * many requests as packages (a cap of 128 passed over the rest, PKG-1). */
+    struct depend *reqs = calloc(n > 0 ? (size_t)n : 1, sizeof(*reqs));
+    if (reqs == NULL) {
+        free(names);
+        fprintf(stderr, "pkg: out of memory\n");
+        return EXIT_FAILED;
+    }
     int nreq = 0;
-    for (int i = 0; i < n && nreq < 128; i++) {
+    for (int i = 0; i < n; i++) {
         const char *name = argc ? argv[i] : names[i];
         struct manifest inst;
         if (!installed_load(name, &inst)) {
             if (argc) {
                 fprintf(stderr, "pkg: %s is not installed\n", name);
+                free(reqs);
+                free(names);
                 return EXIT_FAILED;
             }
             continue;
@@ -1892,8 +1924,10 @@ static int cmd_upgrade(int argc, char **argv)
         strlcpy(d.version, best->version, sizeof(d.version));
         reqs[nreq++] = d;
     }
+    free(names);   /* the names are copied into reqs */
     if (nreq == 0) {
         printf("pkg: 0 packages upgraded\n");
+        free(reqs);
         return 0;   /* nothing to change: no transaction */
     }
     struct plan p;
@@ -1908,6 +1942,7 @@ static int cmd_upgrade(int argc, char **argv)
         rc = install_entry(p.entries[k]);
     if (rc == 0)
         printf("pkg: %d package%s upgraded\n", nreq, nreq == 1 ? "" : "s");
+    free(reqs);
     return rc;
 }
 
@@ -1918,8 +1953,8 @@ static int cmd_upgrade(int argc, char **argv)
  * accepts? 0, or EXIT_FAILED with each conflict named (-f overrides). */
 static int rollback_fits(const char *name, const char *version, const struct depend *deps, int ndeps)
 {
-    char names[128][PKG_NAME_MAX];
-    int n = installed_names(names, 128);
+    int n;
+    char (*names)[PKG_NAME_MAX] = installed_all(&n);
     int bad = 0;
     for (int i = 0; i < n; i++) {
         if (strcmp(names[i], name) == 0)
@@ -1935,6 +1970,7 @@ static int rollback_fits(const char *name, const char *version, const struct dep
             }
         manifest_free(&m);
     }
+    free(names);
     for (int k = 0; k < ndeps; k++) {
         struct manifest m;
         bool ok = installed_load(deps[k].name, &m);
@@ -2045,8 +2081,8 @@ static int cmd_rollback(int argc, char **argv)
 
 static int cmd_list(void)
 {
-    char names[128][PKG_NAME_MAX];
-    int n = installed_names(names, 128);
+    int n;
+    char (*names)[PKG_NAME_MAX] = installed_all(&n);
     for (int i = 0; i < n; i++) {
         struct manifest m;
         if (installed_load(names[i], &m)) {
@@ -2054,6 +2090,7 @@ static int cmd_list(void)
             manifest_free(&m);
         }
     }
+    free(names);
     return 0;
 }
 
@@ -2107,8 +2144,8 @@ static int cmd_search(int argc, char **argv)
 
 static int cmd_verify(int argc, char **argv)
 {
-    char names[128][PKG_NAME_MAX];
-    int n = argc ? argc : installed_names(names, 128);
+    int n = argc;
+    char (*names)[PKG_NAME_MAX] = argc ? NULL : installed_all(&n);
     int bad = 0;
     for (int i = 0; i < n; i++) {
         const char *name = argc ? argv[i] : names[i];
@@ -2138,6 +2175,7 @@ static int cmd_verify(int argc, char **argv)
         }
         manifest_free(&m);
     }
+    free(names);
     printf("pkg: verify: %d problem%s\n", bad, bad == 1 ? "" : "s");
     return bad ? EXIT_FAILED : 0;
 }

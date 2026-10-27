@@ -16,6 +16,7 @@
 #include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/process.h>
+#include <kernel/random.h>
 #include <kernel/signal.h>
 #include <kernel/string.h>
 #include <kernel/syscall.h>
@@ -282,7 +283,7 @@ int linux_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act, 
     r->x[1] = frame + A64_OFF(info);
     r->x[2] = frame + A64_OFF(uc);
     r->x[29] = sp;
-    r->x[30] = (act->flags & SA_RESTORER) ? act->restorer : LX_SIGTRAMP;
+    r->x[30] = (act->flags & SA_RESTORER) ? act->restorer : linux_sigtramp_addr(process_current());
     r->sp = sp;
     r->pc = act->handler;
     return 0;
@@ -337,21 +338,40 @@ int64_t lx_rt_sigreturn(struct syscall_args *a)
 
 /* --- the trampoline page and the exit hook ------------------------------------- */
 
-int linux_sigtramp_map(struct process *p)
+/*
+ * The signal-return trampoline (SEC-4). x86-64 has none: a frame needs
+ * SA_RESTORER, as on Linux, so nothing is mapped. AArch64 returns a
+ * handler without SA_RESTORER through it -- Linux's arm64 counterpart is
+ * the vDSO's sigreturn, randomised with the vDSO -- so it goes at a random
+ * page of the mmap range (the first free page at or above a random page
+ * offset from USER_MMAP_BASE, ASLR_MMAP_BITS of them), drawn at every
+ * exec and kept by fork. It used to sit at the fixed LX_SIGTRAMP in every
+ * process: a known executable address in an otherwise randomised layout.
+ */
+int linux_sigtramp_map(struct process *p, uint64_t *where)
 {
+    *where = 0;
 #if defined(ARCH_X86_64)
-    static const uint8_t code[] = { 0xb8, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x05 };   /* mov $15,%eax; syscall */
+    (void)p;
+    return 0;
 #else
     static const uint8_t code[] = { 0x68, 0x11, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4 };   /* mov x8,#139; svc #0 */
-#endif
-    int rc = vm_user_map_anon(p->space, LX_SIGTRAMP, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "sigtramp");
+    uint64_t hint = USER_MMAP_BASE + ((random_u64() & (((uint64_t)1 << ASLR_MMAP_BITS) - 1)) << PAGE_SHIFT);
+    uint64_t at = vm_user_find_free(p->space, hint, PAGE_SIZE);
+    if (at == 0)
+        return -ENOMEM;
+    int rc = vm_user_map_anon(p->space, at, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "sigtramp");
     if (rc)
         return rc;
     paddr_t pa;
-    if (!arch_mmu_query(&p->space->mmu, (vaddr_t)LX_SIGTRAMP, &pa, NULL, NULL, NULL))
+    if (!arch_mmu_query(&p->space->mmu, (vaddr_t)at, &pa, NULL, NULL, NULL))
         return -EFAULT;   /* populated: cannot happen */
     memcpy(phys_to_virt(pa), code, sizeof(code));
-    return vm_user_protect(p->space, LX_SIGTRAMP, PAGE_SIZE, VM_PROT_RX);
+    rc = vm_user_protect(p->space, at, PAGE_SIZE, VM_PROT_RX);
+    if (rc == 0)
+        *where = at;
+    return rc;
+#endif
 }
 
 /* --- system calls -------------------------------------------------------------- */

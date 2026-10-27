@@ -133,6 +133,13 @@ pkg install busybox-dyn || FAILS=1
 /usr/bin/busybox-dyn echo busybox-dyn package ok || FAILS=1
 pkg remove busybox-dyn || FAILS=1
 pkg list
+# PKG-1: pkg's whole-database checks read every installed record, not the
+# first 128. 130 records made by hand (BusyBox's sh, since this shell has
+# no loops), each seen by pkg list, then removed.
+/bin/busybox sh -c 'for i in $(seq 1 130); do d=/var/db/pkg/installed/many$i; mkdir -p $d && printf "name: many%s\nversion: 1.0\nsummary: one of 130\n" $i > $d/MANIFEST || exit 1; done' || FAILS=1
+pkg list > /tmp/shtest/many || FAILS=1
+/bin/busybox sh -c 'n=$(grep -c "^many" /tmp/shtest/many); echo "pkg-many: $n of 130 listed"; test "$n" = 130' || FAILS=1
+/bin/busybox sh -c 'rm -rf /var/db/pkg/installed/many*' || FAILS=1
 # Linux programs (docs/compat/linux/testing.md): no CosmoOS note, so the kernel runs them as Linux.
 # Both architectures carry them (milestone 10); a build without them reports the section skipped.
 cosmo-sh -c 'ls /boot/tests/linux/lxhello > /tmp/shtest/lx.probe 2>&1 || exit 0; cosmo-sh /etc/rc.linux' || FAILS=1
