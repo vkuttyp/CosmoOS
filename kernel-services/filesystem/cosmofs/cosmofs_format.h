@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      14u  /* the newest this kernel reads: version 14, an encrypted root (roadmap 1.2 B5) */
+#define CFS_VERSION      15u  /* the newest this kernel reads: version 15, long names (roadmap 1.2 A2) */
 /* What a format writes. A pool is raised to 12 by the first operation that
  * needs it (a snapshot taken or rolled back to), not before: a kernel of
  * v1.0.7 or older reads 11 at most, and a pool nobody asked to change
@@ -147,7 +147,8 @@ struct cfs_csum_aead {          /* 32 bytes */
 #define CFS_CSUMIDX_SPAN     CFS_PTRS_PER_BLOCK
 #define CFS_DIRENT_SIZE      64u
 #define CFS_DIRENTS_PER_BLOCK (CFS_BLOCK / CFS_DIRENT_SIZE)
-#define CFS_NAME_MAX         47u
+#define CFS_NAME_MAX         47u   /* below version 15 */
+#define CFS_NAME_MAX_LONG    255u  /* version 15 (design.md, "Format version 15") */
 #define CFS_MAX_INODES       ((uint64_t)CFS_PTRS_PER_BLOCK * CFS_PTRS_PER_BLOCK * CFS_INODES_PER_BLOCK)
 #define CFS_MAX_BLOCKS       ((uint64_t)CFS_PTRS_PER_BLOCK * CFS_BITS_PER_BITMAP)
 
@@ -561,12 +562,140 @@ static inline void cfs_keyslot_nonce(unsigned index, uint8_t out[12])
 }
 
 struct cfs_dirent {
-    uint64_t ino;          /* 0 = free slot */
+    uint64_t ino;          /* 0 = free slot; CFS_DIRENT_CONT = a continuation */
     uint8_t type;          /* CFS_TYPE_* */
-    uint8_t namelen;
-    uint8_t pad[6];
-    char name[48];
+    uint8_t namelen;       /* 1..47 below version 15, 1..255 from it */
+    uint8_t extra;         /* version 15: the continuations that follow (padding, zero, before) */
+    uint8_t pad[5];
+    char name[48];         /* the name's first 48 bytes */
 };
+
+/*
+ * Version 15's long names (design.md, "Format version 15"): a name longer
+ * than 48 bytes is a head and `extra` continuations, in consecutive slots
+ * of one block. A continuation is the same 64 bytes read as below; its
+ * mark is no inode number, so a walker that steps over it sees neither
+ * an entry nor a free slot.
+ */
+#define CFS_DIRENT_CONT       (~(uint64_t)0)
+#define CFS_DIRENT_HEAD_NAME  48u
+#define CFS_DIRENT_CONT_NAME  56u
+struct cfs_dirent_cont {
+    uint64_t mark;         /* CFS_DIRENT_CONT */
+    char name[56];
+};
+
+/* The continuations a name of `len` bytes needs. */
+static inline unsigned cfs_dirent_extra(unsigned len)
+{
+    return len <= CFS_DIRENT_HEAD_NAME ? 0
+                                       : (len - CFS_DIRENT_HEAD_NAME + CFS_DIRENT_CONT_NAME - 1) / CFS_DIRENT_CONT_NAME;
+}
+
+/*
+ * The entry whose head is slot `s` of `blk`, checked before a byte of its
+ * name is read: the slots it takes (1 + extra), or 0 when slot `s` is not
+ * a well-formed head for a pool of `version` -- free, a continuation, an
+ * impossible length, a wrong `extra`, a run that leaves the block, or a
+ * continuation that is not marked.
+ */
+static inline unsigned cfs_dirent_check(const struct cfs_dirent *blk, unsigned s, unsigned version)
+{
+    const struct cfs_dirent *d = &blk[s];
+    if (d->ino == 0 || d->ino == CFS_DIRENT_CONT || d->namelen == 0)
+        return 0;
+    unsigned max = version >= 15 ? CFS_NAME_MAX_LONG : CFS_NAME_MAX;
+    if (d->namelen > max || d->extra != cfs_dirent_extra(d->namelen))
+        return 0;
+    if (s + d->extra >= CFS_BLOCK / sizeof(struct cfs_dirent))
+        return 0;
+    for (unsigned k = 1; k <= d->extra; k++)
+        if (((const struct cfs_dirent_cont *)&blk[s + k])->mark != CFS_DIRENT_CONT)
+            return 0;
+    return 1u + d->extra;
+}
+
+/* The name of the checked entry at slot `s` into `out` (CFS_NAME_MAX_LONG
+ * bytes at least, not terminated); returns its length. */
+static inline unsigned cfs_dirent_name(const struct cfs_dirent *blk, unsigned s, char *out)
+{
+    const struct cfs_dirent *d = &blk[s];
+    unsigned len = d->namelen, n = 0;
+    for (; n < len && n < CFS_DIRENT_HEAD_NAME; n++)
+        out[n] = d->name[n];
+    for (unsigned k = 1; n < len; k++) {
+        const struct cfs_dirent_cont *c = (const struct cfs_dirent_cont *)&blk[s + k];
+        for (unsigned i = 0; i < CFS_DIRENT_CONT_NAME && n < len; i++)
+            out[n++] = c->name[i];
+    }
+    return len;
+}
+
+/* Whether the checked entry at slot `s` is `name` (`len` bytes). */
+static inline int cfs_dirent_name_eq(const struct cfs_dirent *blk, unsigned s, const char *name, unsigned len)
+{
+    const struct cfs_dirent *d = &blk[s];
+    if (d->namelen != len)
+        return 0;
+    unsigned n = 0;
+    for (; n < len && n < CFS_DIRENT_HEAD_NAME; n++)
+        if (d->name[n] != name[n])
+            return 0;
+    for (unsigned k = 1; n < len; k++) {
+        const struct cfs_dirent_cont *c = (const struct cfs_dirent_cont *)&blk[s + k];
+        for (unsigned i = 0; i < CFS_DIRENT_CONT_NAME && n < len; i++, n++)
+            if (c->name[i] != name[n])
+                return 0;
+    }
+    return 1;
+}
+
+/* The first slot of `blk` that starts `need` consecutive free slots, or
+ * -1 when the block has no such run. */
+static inline int cfs_dirent_free_run(const struct cfs_dirent *blk, unsigned need)
+{
+    unsigned run = 0, n = CFS_BLOCK / sizeof(struct cfs_dirent);
+    for (unsigned s = 0; s < n; s++) {
+        run = blk[s].ino == 0 ? run + 1 : 0;
+        if (run == need)
+            return (int)(s + 1 - need);
+    }
+    return -1;
+}
+
+/* Write the entry for `name` at slot `s`, whose 1 + cfs_dirent_extra(len)
+ * slots the caller found free (cfs_dirent_free_run). */
+static inline void cfs_dirent_put(struct cfs_dirent *blk, unsigned s, uint64_t ino, unsigned type, const char *name,
+                                  unsigned len)
+{
+    unsigned extra = cfs_dirent_extra(len);
+    unsigned char *z = (unsigned char *)&blk[s];
+    for (unsigned i = 0; i < (1u + extra) * sizeof(struct cfs_dirent); i++)
+        z[i] = 0;
+    struct cfs_dirent *d = &blk[s];
+    d->ino = ino;
+    d->type = (uint8_t)type;
+    d->namelen = (uint8_t)len;
+    d->extra = (uint8_t)extra;
+    unsigned n = 0;
+    for (; n < len && n < CFS_DIRENT_HEAD_NAME; n++)
+        d->name[n] = name[n];
+    for (unsigned k = 1; k <= extra; k++) {
+        struct cfs_dirent_cont *c = (struct cfs_dirent_cont *)&blk[s + k];
+        c->mark = CFS_DIRENT_CONT;
+        for (unsigned i = 0; i < CFS_DIRENT_CONT_NAME && n < len; i++)
+            c->name[i] = name[n++];
+    }
+}
+
+/* Free the checked entry at slot `s`: its head and continuations. */
+static inline void cfs_dirent_clear(struct cfs_dirent *blk, unsigned s)
+{
+    unsigned slots = 1u + blk[s].extra;
+    unsigned char *z = (unsigned char *)&blk[s];
+    for (unsigned i = 0; i < slots * sizeof(struct cfs_dirent); i++)
+        z[i] = 0;
+}
 
 struct cfs_super {
     uint8_t magic[8];

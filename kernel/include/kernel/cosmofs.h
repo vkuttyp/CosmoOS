@@ -410,6 +410,8 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_SNAP_UUID,      /* v12: zero the uuid of the list head's first snapshot */
     COSMOFS_CORRUPT_ROLLBACK_CRC,   /* v12: flip a byte of the rollback record's own checksum */
     COSMOFS_CORRUPT_ROOT_TYPE,      /* the named inode (the root, 1) says it is a regular file */
+    COSMOFS_CORRUPT_LONGNAME_EXTRA, /* v15: the named directory's first long name claims one continuation fewer */
+    COSMOFS_CORRUPT_LONGNAME_CONT,  /* v15: that name's head cleared, its continuations left standing alone */
 };
 int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what);
 /* Test hook: where an inode's logical block actually lives, as a DVA;
