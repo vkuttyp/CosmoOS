@@ -1510,3 +1510,11 @@ none is needed by its acceptance test.
   CI, `docs/testing/flakes.md`) had `dmesg`'s CPU masked for 1.2 s there.
   Measure the window; copy outside the lock. *2026-10-21: misattributed; the window was
   `console_write`'s, not `klog_copy`'s, and PR #431 closes it ([flakes](../testing/flakes.md)).*
+- Exec reads the whole program file into kernel memory and refuses one
+  over 16 MiB (`SPAWN_IMAGE_MAX`) with an `-ENOEXEC` it does not log; a
+  static clang and lld cannot run (roadmap 1.2 A1's clang evaluation,
+  `docs/audit/2026-10-27-a1-clang-eval-report.md`). Map PT_LOADs from the
+  page cache. *2026-10-27: open; [backlog](../backlog.md) MEM-11.*
+- The BusyBox port's builtins archive holds compiler-rt's `crtbegin.o` and
+  `crtend.o`; a link with clang's `clang_rt.crtbegin.o` pulls `crtend.o`
+  twice. *2026-10-27: open; [backlog](../backlog.md) BUILD-8.*

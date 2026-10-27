@@ -66,9 +66,14 @@ does not have, each exclusion named with its reason), all checked by CI.
 
 ### A1 A C compiler on the target
 
-*In progress.* The port (`ports/tcc/`) and the compiler on the image
-(#468), then `make test-selfhost`, A1's acceptance, passing on both
-architectures (2026-10-27); the clang evaluation follows.
+*Done 2026-10-27.* The port (`ports/tcc/`) and the compiler on the image
+(#468); `make test-selfhost`, A1's acceptance, passing on both
+architectures (#469); and the clang evaluation, recorded: clang is not
+adopted (`docs/audit/2026-10-27-a1-clang-eval-report.md`). A static clang
+and lld need new kernel work to run at all (exec refuses a program over
+16 MiB: backlog MEM-11). With that limit raised in an experiment, they
+built and ran every test program on both architectures, but a clang run
+took 45-60 s under TCG before compiling anything. tcc stays `cc`.
 
 TinyCC (tcc 0.9.27 plus the `mob` fixes for AArch64) as a port, built by
 the cross toolchain against musl, with musl's headers, `crt*.o`, `libc.a`

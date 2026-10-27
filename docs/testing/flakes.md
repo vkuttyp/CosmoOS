@@ -3155,6 +3155,18 @@ worker is raised by its timer, or not at all" is not true of a starved
 host; the boot's log does not say when the worker was raised. Not
 attributed; CI ran again on the commit that records it.
 
+**Eleventh sighting, 2026-10-27, the second on AArch64:** CI, PR #470
+(A1's clang evaluation: `tools/clang-eval/` and documents, nothing in the
+kernel or the image) at `3a395d11`, run 40522350482, job 122252757131,
+`entropy boots (aarch64)`, its third boot: `cpu 3, a spinner above the
+default for 300 ms: 215 calls of the poll, longest gap 290 ms (bound
+100)`, the check at 303 ms, 1 of 516. The job's other two boots passed
+(257.2 and 245.5 s); the failing boot's self-tests took 192,722 ms and
+`cosmofs-replay` 26,508 ms, against 189,952 and 184,589 ms for the two
+that passed: the runner was no slower for the failing boot. The same
+290 ms. Not attributed; the failed job was rerun (job 122291371371) and
+passed.
+
 ## `net-neigh-down-race` step 2, 2026-10-10
 
 `SELFTEST: net-neigh-down-race ... FAIL: check failed: r.rc ==

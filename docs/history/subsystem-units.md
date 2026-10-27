@@ -3557,3 +3557,12 @@ See the [history index](README.md).
     `dlopen` for `-run`, `-run` mapping code writable and executable, and
     AArch64's `wchar_t`.
   - Report: `docs/audit/2026-10-27-a1-selfhost-report.md`.
+- **The clang evaluation (2026-10-27, roadmap 1.2 A1, its last part).**
+  A static musl clang and lld (LLVM 19.1.7), cross-built on the host
+  (`tools/clang-eval/`), do not run on CosmoOS: exec refuses a program over
+  16 MiB (MEM-11). With that limit raised in an uncommitted experiment
+  they built and ran static, dynamic and `dlopen` programs and all of
+  tcc.c on both architectures, at 45-60 s a run under TCG. Not adopted;
+  tcc stays `cc`. Found: MEM-11, BUILD-8, and evidence for MEM-3 (a TLB
+  shootdown panic during an 84 MB exec's populate). Report:
+  `docs/audit/2026-10-27-a1-clang-eval-report.md`.
