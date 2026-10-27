@@ -311,7 +311,7 @@ must keep (`net-nicbench` reports rather than asserts its reply rate in
 this build, after CI's slower host moved its sender behind the busy
 receive worker), and a test that names another CPU pins itself.
 The complete chaos boot has the ordinary boots' timeout (`BOOT_TIMEOUT`:
-300 s on both architectures; its own 240 s until 2026-10-17), so its
+380 s on AArch64, 300 s on x86-64; its own 240 s until 2026-10-17), so its
 shell harness can finish after the extra migration work.
 Individual test budgets and signal-response checks still apply; see
 [verification timing](../../verification/design.md#6-per-test-timing-kernelcoreselftestc-testsbootrun_boot_testpy).

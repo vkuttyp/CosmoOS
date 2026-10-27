@@ -385,7 +385,9 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
-    timeout-minutes: 30
+    # Five debug boots. AArch64's job took up to 29.1 min of 30 over the
+    # 30 runs to 2026-10-27, and its boots now have 380 s each (Makefile).
+    timeout-minutes: 45
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:

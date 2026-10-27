@@ -201,8 +201,17 @@ BOOT_LOG ?= $(OUT)/boot-test.log
 # f96c80c1's 40398038325), and two entropy boots that day timed out at
 # 240 s with every self-test passed and init still running its shell test
 # (runs 40448337851 and 40475814997; docs/testing/flakes.md).
+# AArch64 380 s from 2026-10-27: over the last 33 CI runs (40323876091 to
+# 40565224086) its 358 passing debug boots (test, test-chaos, test-gic,
+# test-guard, test-harness-retry, test-smp2, the entropy job's five) took
+# a median of 240.0 s, a p95 of 278.4 s and at most 296.7 s, and two timed
+# out at 300 s (307.0 s) with every self-test passed: PR #470's modcycle
+# boot (run 40537322148) and main's test-harness-retry boot at 6779e0ff
+# (run 40560498664). Runners come in speeds about 1.5x apart (the same
+# boots: 170-192 s, 240-307 s; docs/testing/flakes.md). 380 s is the
+# slowest passing boot x 1.28, the margin 2026-10-15's 300 s gave.
 # The shell, network and key harnesses derive their deadlines from it.
-BOOT_TIMEOUT ?= 300
+BOOT_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),380,300)
 # test-crash and test-wxn (the whole debug suite, then an early panic):
 # AArch64 240 s from 2026-10-20. Over the last 40 CI runs (39155230078 to
 # 39347750738) its 40 crash boots took a median of 172.4 s, a p95 of
@@ -212,7 +221,11 @@ BOOT_TIMEOUT ?= 300
 # time - 2.8 s over the 38 passing ones, within 0.8 s). Its 38 WXN boots:
 # median 170.3 s, at most 177.8 s. x86-64's 41 crash boots: median 153.2 s,
 # at most 158.6 s; it keeps the runner's 180 s.
-CRASH_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),240,180)
+# AArch64 300 s from 2026-10-27: over the same 33 runs as BOOT_TIMEOUT's
+# its 63 crash and WXN boots took a median of 201.1 s, a p95 of 229.1 s and
+# at most 233.8 s passing, 6.2 s inside 240; none timed out. 300 s is that
+# maximum x 1.28, as above.
+CRASH_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),300,180)
 # test-busybox: one boot that runs the scripted test and fifteen testsuite files.
 BUSYBOX_TIMEOUT ?= 900
 test: $(IMAGE)
@@ -288,7 +301,10 @@ MODCYCLE_COUNT ?= 1000
 # least 18 s at the slowest. AArch64's took 212.8-263.2 s beside plain
 # boots of 198.3-254.0 s under its 300 s. 300 s on both; the modcycle line
 # gives the cycles' own time (`PASS in N ms`) for the next look.
-MODCYCLE_TIMEOUT ?= 300
+# AArch64 380 s from 2026-10-27, with BOOT_TIMEOUT: over its 30 passing
+# boots of those 33 runs, a median of 263.4 s and at most 290.8 s, and
+# one timed out at 300 s (run 40537322148).
+MODCYCLE_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),380,300)
 test-modcycle:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug BOOT_TIMEOUT=$(MODCYCLE_TIMEOUT) \
 		CMDLINE='$(CMDLINE) module.cycle=tests/cosmotest.ko:$(MODCYCLE_COUNT)' BOOT_LOG=$(OUT)/boot-test-modcycle.log test
