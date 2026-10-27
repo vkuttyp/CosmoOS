@@ -2116,6 +2116,71 @@ static int cfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t m
     return cfs_create_common(dir, name, len, mode, CFS_TYPE_DIR, out);
 }
 
+/*
+ * A second name for `target` (VFS-4; design.md, "Hard links"): an entry
+ * naming its inode and one more link, in one transaction. The checker
+ * already counts every entry that names an inode (CF13), and unlink and
+ * rename's replace already take one link of several, so this is the only
+ * operation hard links add. Within one tree: a snapshot's is read-only,
+ * and a name in a clone for a file of the live tree would cross trees.
+ */
+static int cfs_link(struct vnode *dir, const char *name, size_t len, struct vnode *target)
+{
+    struct cfs *fs = cfs_of(dir->mnt);
+    if (fs == NULL || fs->failed)
+        return -EIO;   /* unmounted, or the transaction was abandoned */
+    if (len == 0 || len > CFS_NAME_MAX_LONG)
+        return -ENAMETOOLONG;
+    if (tree_readonly(fs, dir) || tree_readonly(fs, target))
+        return -EROFS;          /* in .snapshots or a snapshot: what the tree was */
+    if (snap_tag_of(dir) != snap_tag_of(target))
+        return -EXDEV;          /* between the live tree and a clone, or two clones */
+    if (target->type == VNODE_DIR)
+        return -EPERM;
+    unsigned type = target->type == VNODE_LNK ? CFS_TYPE_LNK : CFS_TYPE_REG;
+    uint8_t *block = kmalloc(CFS_BLOCK, 0);
+    if (block == NULL)
+        return -ENOMEM;
+    int rc = cfs_lock_tree_w(fs, dir);
+    if (rc) {
+        kfree(block);
+        return rc;
+    }
+    /* Every inode this changes, made writable before anything changes (CFS-6). */
+    rc = inode_prepare(fs, dir);
+    if (rc == 0)
+        rc = inode_prepare(fs, target);
+    uint64_t lblk;
+    unsigned slot;
+    if (rc == 0) {
+        rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
+        if (rc == 0)
+            rc = -EEXIST;
+        else if (rc == -ENOENT)
+            rc = names_allow(fs, len);
+    }
+    if (rc == 0)
+        rc = dir_add(fs, dir, name, len, CFS_INO_OF(target->ino), type, block);
+    if (rc == 0) {
+        target->nlink++;
+        target->ctime_ns = vfs_now_ns();
+        rc = inode_sync(fs, target);
+        if (rc) {
+            /* The count could not be written: take the name back, or, if
+             * even that fails, abandon the transaction (as rename does). */
+            target->nlink--;
+            int rb = dir_find(fs, dir, name, len, block, &lblk, &slot);
+            if (rb == 0)
+                rb = dir_remove_slot(fs, dir, lblk, slot, block);
+            if (rb)
+                cfs_fail(fs, rb);
+        }
+    }
+    cfs_unlock_tree(fs);
+    kfree(block);
+    return rc;
+}
+
 static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, struct vnode *victim, bool rmdir)
 {
     struct cfs *fs = cfs_of(dir->mnt);
@@ -3009,6 +3074,7 @@ static const struct vnode_ops cfs_dir_ops = {
     .symlink = cfs_symlink,
     .mkdir = cfs_mkdir,
     .unlink = cfs_unlink,
+    .link = cfs_link,
     .rmdir = cfs_rmdir,
     .rename = cfs_rename,
     .readdir = cfs_readdir,
