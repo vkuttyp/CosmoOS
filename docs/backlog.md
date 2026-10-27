@@ -299,11 +299,11 @@ Open lines (struck lines are not counted):
 
 ## Testing and CI
 
-- **TEST-1** correctness, S. `wait-multi-prepare`'s guard misses `schedule()` picking the same thread again.
-- **TEST-2** correctness, S. `module-unload-busy` compares a tick-quantised deadline with `clock_since_ns` on a machine without a common clock.
-- **TEST-3** correctness, S. `net-neigh-down-race`'s park hooks park the first caller on any interface.
+- ~~**TEST-1** correctness, S. `wait-multi-prepare`'s guard misses `schedule()` picking the same thread again.~~ Done by roadmap 1.2's first unit ("Always"), its first PR: `sched_pick_count` counts a re-pick of the running thread, and a control re-picks it on purpose.
+- ~~**TEST-2** correctness, S. `module-unload-busy` compares a tick-quantised deadline with `clock_since_ns` on a machine without a common clock.~~ Done by roadmap 1.2's first unit, its first PR: the wait is judged on the deadline clock (`clock_deadline_passed`), and a control replays `module_unload`'s wait with the per-CPU clock injected 40 ms back.
+- ~~**TEST-3** correctness, S. `net-neigh-down-race`'s park hooks park the first caller on any interface.~~ Done by roadmap 1.2's first unit, its first PR: the park hooks are armed for one interface, and a control resolves on a decoy interface while armed.
 - **TEST-4** correctness, S. `net-hostinput` leaves a transmitting TCP connection the census does not see.
-- **TEST-5** correctness, S. CI's failure upload for `test-display` includes QMP sockets and uploads nothing.
+- ~~**TEST-5** correctness, S. CI's failure upload for `test-display` includes QMP sockets and uploads nothing.~~ Done by roadmap 1.2's first unit, its first PR: the upload excludes `*.sock`.
 - **TEST-6** correctness, S. Unexplained: AArch64 `syscall-fuzz` over its budget (8,240 ms of 8,000); the AArch64 virtio-console file missing its last line.
 - **TEST-7** correctness, S. Test timing that stands in for durations: `cwdtest --held`'s 200,000-yield bound, remaining `thrtest`/`cwdtest` waits.
 - **TEST-8** correctness, S. `net-bench`: a loopback TCP flow's 200 ms RTO with no drop, and an earlier test's connection still retransmitting during it.
