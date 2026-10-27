@@ -3574,3 +3574,12 @@ See the [history index](README.md).
   `irqpoll-drop-preempt` makes the switch at the drop deterministic
   (`irq_poll_test_on_drop`); `tools/irqpoll-drop-probe.py --old`. Report:
   `docs/audit/2026-10-27-irqpoll-drop-report.md`.
+- **Long names in cosmofs (2026-10-28, roadmap 1.2 A2, its first PR).**
+  Format version 15: a name of up to 255 bytes, as a head and up to four
+  marked continuations in consecutive slots of one directory block, so a
+  change is still one block's write. A pool is raised by its first name
+  over 47 bytes and stays mountable by v1.0.14 until then; one below 11,
+  or with a version-1 key block, keeps the old limit. The checker refuses
+  malformed shapes before reading a name. Found by A2's experiment:
+  BusyBox's tarball has 35 names over 47 bytes. Report:
+  `docs/audit/2026-10-28-a2-longnames-report.md`.
