@@ -56,12 +56,24 @@ if nothing had happened, and AArch64 died later of an unrelated exception.
   `arch_percpu_install`) and on `__stack_chk_fail`. The disassembly shows
   no canary load in any of them, and about 2,800 checks in each kernel.
 
+## The first CI run
+
+#467's first run failed one step, `Stack protector test` (x86-64, the
+`stress` part), with `timed out after 180s`. The stack protector had
+caught the overrun -- the log has `KERNEL PANIC: stack-protector: a stack
+canary was overwritten` -- but the crash-test kernel, a debug build, ran
+every self-test before the overrun, and on that runner the boot took
+longer than the harness's 180 s: the slow-runner timeout `test-crash`
+already has (flakes.md). The overrun now comes before the self-tests, so
+the crash boot takes 6.2 s (x86-64) and 9.1 s (AArch64) locally instead of
+about 150 s. The probe was run again with it there (below).
+
 ## Validation (2026-10-27, macOS host)
 
 | Check | x86_64 | aarch64 |
 |---|---|---|
-| `tools/stackprot-probe.py --old` | PASS: the boot fails, no stack-protector panic | PASS, the same |
-| `tools/stackprot-probe.py` (`make test-stackprot`) | PASS: `KERNEL PANIC: stack-protector: a stack canary was overwritten` | PASS, the same |
+| `tools/stackprot-probe.py --old` (the overrun before the self-tests) | PASS: the boot fails, no stack-protector panic | PASS, the same |
+| `tools/stackprot-probe.py` (`make test-stackprot`) | PASS: `KERNEL PANIC: stack-protector: a stack canary was overwritten` (6.2 s) | PASS, the same (9.1 s) |
 | debug `make test` (4 CPUs) | PASS (180.7 s); no lockdep report beyond the self-test's expected ones | PASS (191.2 s), the same |
 | debug `QEMU_SMP=1 make test` | PASS (159.5 s) | PASS (163.7 s) |
 | `make test-smp2` | PASS (178.7 s) | PASS (195.1 s) |
