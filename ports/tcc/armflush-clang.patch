@@ -1,0 +1,26 @@
+--- a/lib/armflush.c
++++ b/lib/armflush.c
+@@ -57,7 +57,23 @@
+ #elif defined __aarch64__
+ void __clear_cache(void *beg, void *end)
+ {
++#ifdef __TINYC__
+     __arm64_clear_cache(beg, end);
++#else
++    /* Built by another compiler (CosmoOS's port builds libtcc1.a with
++     * clang): what tcc's builtin does. Clean each data cache line to the
++     * point of unification, then invalidate each instruction cache line,
++     * the line sizes from CTR_EL0. */
++    unsigned long ctr, p;
++    __asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
++    unsigned long dline = 4ul << ((ctr >> 16) & 15), iline = 4ul << (ctr & 15);
++    for (p = (unsigned long)beg & ~(dline - 1); p < (unsigned long)end; p += dline)
++        __asm__ volatile("dc cvau, %0" : : "r"(p) : "memory");
++    __asm__ volatile("dsb ish" : : : "memory");
++    for (p = (unsigned long)beg & ~(iline - 1); p < (unsigned long)end; p += iline)
++        __asm__ volatile("ic ivau, %0" : : "r"(p) : "memory");
++    __asm__ volatile("dsb ish\n\tisb" : : : "memory");
++#endif
+ }
+ 
+ /* ------------------------------------------------------------- */

@@ -513,6 +513,9 @@ LINUXTEST_MARKERS = [
     r"^lxtest: cputime ok$",
     # Shared libraries (roadmap 1.1 P4; tests/dyn/).
     r"^dynhello: ok$",
+    # The target's C compiler (roadmap 1.2 A1): rc.test's programs cc built.
+    r"^cc-hello: static, built on this system by cc$",
+    r"^cc-hello: dynamic, built on this system by cc$",
     r"^dltest: libtextrel\.so refused: ",
     r"^dltest: aslr: ",
     r"^dltest: ok$",
