@@ -58,6 +58,14 @@ probe 'signal-stop' failed check 9`, the same signature: the child, pid
 host was loaded (load average 98 a few minutes later, Docker's VM at
 625 % CPU and another QEMU). The rerun on the same commit on a quiet
 host (load 2) passed. Backlog LX-1.
+**Fixed, not a flake (2026-10-27, LX-1; roadmap 1.2's first unit):** the
+kernel's order was right -- an exited child is reported by its exit, as
+POSIX and Linux report it -- and the probe wrong to expect a continue from
+a child that may already have exited. `signal-stop`'s child now exits only
+after its parent has seen `WIFCONTINUED`; the probe waits 100 ms after
+`SIGCONT` on purpose, which failed check 9 on every boot before; and
+`signal-stop-exit` pins the order (`tools/always-correctness-probe.py
+--old`).
 **Fourth sighting, 2026-10-24:** AArch64 debug at `QEMU_SMP=1`, roadmap
 1.2 B5's second PR (#448, `a1106611`, no kernel change of its own) in
 its local matrix, `selftest: signal probe 'signal-stop' failed check 9`,

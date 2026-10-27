@@ -3508,3 +3508,13 @@ See the [history index](README.md).
   - Each self-test defect has a control that fails on every boot without
     its fix (`tools/always-tests-probe.py --old`, both architectures).
   - Report: `docs/audit/2026-10-27-always-tests-report.md`.
+- **LX-1 and PKG-1 (2026-10-27, roadmap 1.2's first unit, its second PR).**
+  - LX-1: `signal-stop`'s child exits only once its parent has seen the
+    continue; the kernel's order (an exited child reports its exit, as
+    POSIX and Linux do) is unchanged and pinned by `signal-stop-exit`.
+  - PKG-1: every whole-database walk in `pkg` reads every installed record
+    (`installed_all`), and `upgrade` plans as many requests as packages;
+    `rc.test` lists 130 hand-made records.
+  - `tools/always-correctness-probe.py --old`: check 9 and 128 of 130 on
+    both architectures.
+  - Report: `docs/audit/2026-10-27-always-correctness-report.md`.

@@ -344,7 +344,15 @@ number: the program that knows the detail is gone by then).
 - **`signal-stop`** -- a child stops itself, the parent sees
   `WIFSTOPPED` with the right signal and *not* a second time without a
   second stop, continues it, sees `WIFCONTINUED`, and collects the exit
-  status the child only reaches after being resumed.
+  status the child only reaches after being resumed. The child exits only
+  once the parent has seen the continue (a `SIGUSR1` handshake), so a
+  parent late to wait -- the probe waits 100 ms on purpose -- still finds
+  it alive (LX-1).
+- **`signal-stop-exit`** -- a child continued and gone before its parent
+  waits is reported by its exit, not by the continue, and the continue is
+  not reported afterwards: POSIX's `WCONTINUED` reports a continued
+  process, and Linux's `wait_consider_task` reports a zombie first, the
+  order `child_event_locked` keeps (LX-1).
 - **`signal-stop-kill`** -- a stopped process is killed and dies.
 - **`signal-stop-mask`** -- `SIGSTOP` cannot be caught, ignored or
   blocked.
