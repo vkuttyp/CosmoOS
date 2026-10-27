@@ -88,6 +88,7 @@ Open lines (struck lines are not counted):
 - **BUILD-5** nice-to-have, S. `ports/busybox/README.md`'s config regeneration fails at `make defconfig` on the macOS host; the checked-in config differs from the recipe in three options.
 - **BUILD-6** nice-to-have, L. Native programs are static: no shared native libc and no native `PT_INTERP` (deferred by the owner past 1.1).
 - ~~**BUILD-7** correctness, S. An rc's release run reads `docs/releases/vX.Y.Z-rcN.md`, which no release has, so the final notes (`vX.Y.Z.md`) are first checked by `check-release-version.py` in the final tag's run: v1.0.11's failed on "CosmoOS 1.0.10" in its notes (run 39942569981) after v1.0.11-rc1 had passed (run 39938572061). Check `vX.Y.Z.md` in the rc's run, or in CI when `docs/releases/` changes.~~ Done by #446 (the rc's run builds and checks `vX.Y.Z.md`).
+- **BUILD-8** nice-to-have, S. The BusyBox port's `libclang_rt.builtins.a` takes every file of compiler-rt's `lib/builtins`, `crtbegin.c` and `crtend.c` with them: a link with clang's own `clang_rt.crtbegin.o` pulls `crtend.o` in a second time (duplicate `__CTOR_LIST_END__`). The ports' links use no crtbegin and are unaffected; exclude the two files (A1's clang evaluation, whose package drops them).
 
 ## cosmofs and storage
 
@@ -207,7 +208,7 @@ Open lines (struck lines are not counted):
 
 - **MEM-1** correctness, M. `vm_map_phys` maps large blocks that `vm_unmap_phys` cannot tear down across 2 MiB; its 14 callers are not audited.
 - **MEM-2** usability, S. The native ABI has no memfd or `shm_open`.
-- **MEM-3** nice-to-have, S. `VM_KALLOC_POPULATE` fills every page under the kernel space spinlock with IRQs off.
+- **MEM-3** nice-to-have, S. `VM_KALLOC_POPULATE` fills every page under the kernel space spinlock with IRQs off. The window grows with the allocation: in A1's clang evaluation (an experimental kernel with exec's 16 MiB cap raised; `docs/audit/2026-10-27-a1-clang-eval-report.md`), exec's populate of an 84 MB image held a CPU's interrupts off for over 1 s and a TLB shootdown panicked.
 - **MEM-4** nice-to-have, L. User huge pages.
 - **MEM-5** nice-to-have, L. NUMA: topology (SRAT), node-aware allocation and placement.
 - **MEM-6** nice-to-have, L. Swap, compression and deduplication.
@@ -215,6 +216,7 @@ Open lines (struck lines are not counted):
 - **MEM-8** nice-to-have, S. Thread guard page by map-then-protect instead of reserve-and-replace (no benefit shown).
 - **MEM-10** nice-to-have, S. There is no swap; when there is, it should be encrypted (an encrypted root's pages would otherwise reach the disk in the clear; out of roadmap 1.2 B5's scope).
 - ~~**MEM-9** correctness, M. Dirty page-cache pages are not bounded by memory or by the filesystem's free space: `dd` to a file on a 256 MiB root wrote ~470 MB before it was killed by a fault, and every spawn after was `ENOMEM` (test-pkgtx's first fill, 2026-10-20). A write should meet `ENOSPC` when the pool cannot hold it, and writeback should throttle a writer. It also costs time: 1 GiB written to an encrypted root with one `sync` at the end took 1275 s on x86-64 under QEMU (256 MiB of memory), against 386 s with a `sync` after each 32 MiB (2026-10-24; test-encrypt now syncs every 32 MiB).~~ Done in v1.0.14: dirty pages of reclaimable mounts are bounded at an eighth of RAM, a writer at the bound writes its own file back and sleeps holding no lock (V40), and a page of a regular file is charged at the write against the pool's free blocks above the reserve, so a full pool refuses the write `ENOSPC` with no page lost (CF34): `make test-fill` (512 MiB with no sync on a 256 MiB guest, nothing killed; one `dd` filling a 256 MiB root stopped by `ENOSPC` after 170 MiB with 16 KiB left), both architectures, 2026-10-25.
+- **MEM-11** usability, M. Exec reads the whole program into kernel memory (`vm_kernel_alloc` populated) and refuses one over 16 MiB (`SPAWN_IMAGE_MAX`, `kernel/process/spawn.c`) with an `-ENOEXEC` it does not log, so a shell then runs the ELF as a script: a static clang (79-84 MB) and lld (47-50 MB) cannot run, and every exec costs its size in kernel memory and time. Map the PT_LOAD segments from the page cache, as a file `mmap` is (A1's clang evaluation, `docs/audit/2026-10-27-a1-clang-eval-report.md`).
 
 ## Network
 
