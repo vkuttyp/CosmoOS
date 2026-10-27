@@ -183,6 +183,7 @@ bool selftest_process_reaped(const char **reason);     /* a reaped pid is unfind
 bool selftest_signal_group(const char **reason);        /* kill(-pgid) reaches the group and nothing else */
 bool selftest_signal_setsid(const char **reason);      /* a session is started once */
 bool selftest_signal_stop(const char **reason);         /* a stop is an event a parent waits for */
+bool selftest_signal_stop_exit(const char **reason);    /* continued and gone: the exit is reported (LX-1) */
 bool selftest_signal_stop_kill(const char **reason);   /* a stopped process is still killable */
 bool selftest_signal_stop_mask(const char **reason);   /* SIGSTOP cannot be caught or blocked */
 bool selftest_signal_stop_restart(const char **reason);/* a call cut short by a stop is restarted */

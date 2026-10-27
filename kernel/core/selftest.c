@@ -961,6 +961,7 @@ static const struct selftest tests[] = {
     { "signal-group",    selftest_signal_group },
     { "signal-setsid",   selftest_signal_setsid },
     { "signal-stop",     selftest_signal_stop },
+    { "signal-stop-exit", selftest_signal_stop_exit },
     { "signal-stop-kill", selftest_signal_stop_kill },
     { "signal-stop-mask", selftest_signal_stop_mask },
     { "signal-stop-late", selftest_signal_stop_late },

@@ -3059,10 +3059,35 @@ static int probe_signal_stop_child(void)
     return 7;
 }
 
+/* signal-stop's child: stops itself and, once continued, exits 7 only
+ * when its parent says so (SIGUSR1), so the parent's wait for the continue
+ * finds it alive however late the parent is (LX-1). */
+static volatile int g_stop_go;
+
+static void stop_go(int sig)
+{
+    (void)sig;
+    g_stop_go = 1;
+}
+
+static int probe_signal_stop_child_wait(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = stop_go;
+    if (sigaction(SIGUSR1, &sa, NULL) != 0)
+        return 21;
+    if (raise(SIGSTOP) != 0)
+        return 20;
+    for (int i = 0; i < 1000 && !g_stop_go; i++)   /* at most about 10 s */
+        usleep(10000);
+    return g_stop_go ? 7 : 22;
+}
+
 /* A stop is an event a parent waits for, reported once per stop. */
 static int probe_signal_stop(void)
 {
-    const char *argv[] = { "init", "--probe", "signal-stop-child", NULL };
+    const char *argv[] = { "init", "--probe", "signal-stop-child-wait", NULL };
     pid_t c = spawnve("/boot/init", argv, NULL, NULL, 0);
     if (c <= 0)
         return 3;
@@ -3085,8 +3110,34 @@ static int probe_signal_stop(void)
     usleep(100000);
     if (waitpid(c, &st, WUNTRACED | WCONTINUED) != c || !WIFCONTINUED(st))
         return 9;
+    if (kill(c, SIGUSR1) != 0)   /* the continue is seen: the child may exit */
+        return 11;
     if (waitpid(c, &st, 0) != c || st != 7)
         return 10;
+    return 0;
+}
+
+/* A child continued and gone before its parent waits is reported by its
+ * exit, not by the continue: POSIX's WCONTINUED reports a continued
+ * process, and Linux's wait_consider_task reports a zombie first
+ * (child_event_locked, the same order). The continue is not reported
+ * after the exit either. */
+static int probe_signal_stop_exit(void)
+{
+    const char *argv[] = { "init", "--probe", "signal-stop-child", NULL };
+    pid_t c = spawnve("/boot/init", argv, NULL, NULL, 0);
+    if (c <= 0)
+        return 3;
+    int st = -1;
+    if (waitpid(c, &st, WUNTRACED) != c || !WIFSTOPPED(st))
+        return 4;
+    if (kill(c, SIGCONT) != 0)
+        return 5;
+    usleep(100000);   /* the child, which exits on its continue, is gone */
+    if (waitpid(c, &st, WUNTRACED | WCONTINUED) != c || WIFCONTINUED(st) || st != 7)
+        return 6;
+    if (waitpid(c, &st, WUNTRACED | WCONTINUED | WNOHANG) != -1 || errno != ECHILD)
+        return 7;
     return 0;
 }
 
@@ -3476,8 +3527,12 @@ static int signal_probe(const char *kind)
         return probe_signal_tty_quit();
     if (strcmp(kind, "signal-stop-child") == 0)
         return probe_signal_stop_child();
+    if (strcmp(kind, "signal-stop-child-wait") == 0)
+        return probe_signal_stop_child_wait();
     if (strcmp(kind, "signal-stop") == 0)
         return probe_signal_stop();
+    if (strcmp(kind, "signal-stop-exit") == 0)
+        return probe_signal_stop_exit();
     if (strcmp(kind, "signal-stop-kill") == 0)
         return probe_signal_stop_kill();
     if (strcmp(kind, "signal-stop-mask") == 0)
