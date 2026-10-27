@@ -356,6 +356,18 @@ void kernel_main(const struct cosmoboot_info *info)
     panic("crash test: lockdep's lock is held by another CPU (owner word %u, this CPU's %u, CPU %u waiting on it)",
           owner, this_cpu + 1u, waiter);
 #endif
+#if CONFIG_CRASH_TEST == 4
+    /* The stack protector (BUILD-1; make test-stackprot): an overrun of a
+     * local buffer must panic as one, at the overrunning function's
+     * return, before that return uses what the overrun wrote. Before the
+     * self-tests, unlike the other crash tests: a debug crash boot that
+     * runs them first took more than the harness's 180 s on a slow CI
+     * runner (#467's first run), as test-crash has (flakes.md). */
+    kinfo("crash test: overrunning a stack buffer on purpose");
+    crash_overrun_stack();
+    kerror("crash test: the overrun went unnoticed; no stack protector");
+    failed++;
+#endif
 #if CONFIG_SELFTEST
     failed += selftest_run_all();
 #else
@@ -401,14 +413,6 @@ void kernel_main(const struct cosmoboot_info *info)
         ((void (*)(void))va)();
     }
     kerror("crash test: a writable page executed; WXN is off");
-    failed++;
-#elif CONFIG_CRASH_TEST == 4
-    /* The stack protector (BUILD-1; make test-stackprot): an overrun of a
-     * local buffer must panic as one, at the overrunning function's
-     * return, before that return uses what the overrun wrote. */
-    kinfo("crash test: overrunning a stack buffer on purpose");
-    crash_overrun_stack();
-    kerror("crash test: the overrun went unnoticed; no stack protector");
     failed++;
 #endif
 
