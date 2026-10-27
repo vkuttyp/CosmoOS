@@ -18,8 +18,10 @@
 #include <kernel/printf.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
+#include <arch/cpu.h>
 
 #define STR_(x) #x
 #define STR(x)  STR_(x)
@@ -689,8 +691,50 @@ bool selftest_module_slots_enospc(const char **reason)
 #endif
 }
 
+/*
+ * How module-unload-busy judges a wait of `ms` that module_unload makes on
+ * its deadline clock (clock_deadline_ns, polled every millisecond): a mark
+ * taken before the call, passed after it (TEST-2).
+ */
+struct wait_mark {
+    uint64_t start_ns;
+    uint64_t budget_ns;
+};
+
+static struct wait_mark wait_mark_start(unsigned ms)
+{
+    return (struct wait_mark){ clock_now_ns(), (uint64_t)ms * 1000000ULL };
+}
+
+static bool wait_mark_passed(const struct wait_mark *m)
+{
+    return clock_since_ns(m->start_ns) >= m->budget_ns;
+}
+
 bool selftest_module_unload_busy(const char **reason)
 {
+#if CONFIG_DEBUG
+    /* TEST-2's control: module_unload's own wait replayed on a CPU whose
+     * per-CPU clock disagrees with the deadline clock, as it does on a
+     * machine whose clock is not common (where the deadline is the
+     * machine-wide tick, up to a tick behind). The disagreement is
+     * injected, so it does not depend on when ticks arrive: pinned to this
+     * CPU, the mark is taken, then this CPU's clock_now_ns is set 40 ms
+     * back (clock_test_set_cpu_offset_ns; the deadline clock never reads
+     * it). A per-CPU mark then reads about 8 ms of the 48 ms wait. The
+     * mark must judge the wait on the clock it was made with. */
+    cpumask_t was = thread_pin_self();
+    unsigned cpu = arch_cpu_id();
+    struct wait_mark control = wait_mark_start(48);
+    clock_test_set_cpu_offset_ns(cpu, -40000000LL);
+    uint64_t deadline = clock_deadline_ns(48000000ULL);
+    while (!clock_deadline_passed(deadline))
+        thread_sleep_ns(1000000);
+    bool control_passed = wait_mark_passed(&control);
+    clock_test_set_cpu_offset_ns(cpu, 0);
+    thread_set_affinity_self(was);
+    CHECK(control_passed);   /* a per-CPU mark read about 8 ms of this 48 ms wait */
+#endif
     size_t size;
     const void *file = fixture("tests/cosmotest.ko", &size);
     if (file == NULL) {
@@ -713,11 +757,10 @@ bool selftest_module_unload_busy(const char **reason)
     struct kobject *obj = take();
     CHECK(obj != NULL && obj->owner == m && m->live_objects == 1);
 
-    uint64_t t0 = clock_now_ns();
+    struct wait_mark mark = wait_mark_start(50);
     int rc = unload_with_timeout("cosmotest", 50);
-    uint64_t waited = clock_since_ns(t0);
     CHECK(rc == -EBUSY);
-    CHECK(waited >= 50000000ULL);                 /* it waited the timeout for the object */
+    CHECK(wait_mark_passed(&mark));               /* it waited the timeout for the object */
     CHECK(module_find("cosmotest") == NULL);      /* not live */
     CHECK(module_symbol_lookup("cosmotest_object_take", NULL) == 0);
     CHECK(*released == 0);
