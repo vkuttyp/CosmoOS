@@ -3566,3 +3566,11 @@ See the [history index](README.md).
   tcc stays `cc`. Found: MEM-11, BUILD-8, and evidence for MEM-3 (a TLB
   shootdown panic during an 84 MB exec's populate). Report:
   `docs/audit/2026-10-27-a1-clang-eval-report.md`.
+- **irqpoll: the drop and the raise as one step (2026-10-27).**
+  `irqpoll-boost`'s eleven failures (nine on CI), each a 290 ms gap, were
+  a worker switched out between dropping to the default priority and
+  arming the timer that raises it again: the drop's own unlock is a
+  preemption point. The two now run under `preempt_disable`.
+  `irqpoll-drop-preempt` makes the switch at the drop deterministic
+  (`irq_poll_test_on_drop`); `tools/irqpoll-drop-probe.py --old`. Report:
+  `docs/audit/2026-10-27-irqpoll-drop-report.md`.

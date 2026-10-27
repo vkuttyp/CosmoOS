@@ -589,6 +589,7 @@ static const struct selftest tests[] = {
     { "vnet-remove-late", selftest_vnet_remove_late },
     { "blk-irq-budget", selftest_blk_irq_budget },
     { "irqpoll-boost", selftest_irqpoll_boost },
+    { "irqpoll-drop-preempt", selftest_irqpoll_drop_preempt },
     { "device-reset", selftest_device_reset },
     { "blk-lifetime",    selftest_blk_lifetime },
     { "fault-kmalloc",   selftest_fault_kmalloc },

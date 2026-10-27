@@ -3164,8 +3164,38 @@ default for 300 ms: 215 calls of the poll, longest gap 290 ms (bound
 (257.2 and 245.5 s); the failing boot's self-tests took 192,722 ms and
 `cosmofs-replay` 26,508 ms, against 189,952 and 184,589 ms for the two
 that passed: the runner was no slower for the failing boot. The same
-290 ms. Not attributed; the failed job was rerun (job 122291371371) and
-passed.
+290 ms. The failed job was rerun (job 122291371371) and passed.
+
+**Root cause, 2026-10-27: a switch between the worker's drop and its
+raise's timer, fixed.** `worker_main` (`kernel/core/irqpoll.c`) lowered
+itself with `sched_reprioritize(self, SCHED_PRIO_DEFAULT)` and only then
+armed `boost`. The drop's `spin_unlock_irqrestore` is a preemption point
+(`arch_irq_restore` calls `preempt_point`), and a tick held off by the
+drop's lock is taken there. That tick's `rr_tick` sees the worker at the
+default with its slice spent -- it yields after every batch and, picked
+again at once, keeps the spent slice -- and the test thread ready at the
+same level, so it asks for a switch. Switched out there, the worker is
+lowered with no timer armed; the test thread starts the spinner, and
+nothing raises the worker until the spinner ends: 300 ms less the 10 ms
+hold, the same 290 ms every time.
+
+How it was found: an uncommitted build ran the test 1,000 times in one
+boot and logged each drop and each `boost` firing (QEMU TCG on the
+development Mac, debug, both architectures booting at once). AArch64
+failed 2 of 1,000 runs, both `longest gap 290 ms` from +10 ms; in both
+the only drop logged is at +300 ms, after the spinner, and `boost` never
+fired. x86-64 failed 0 of 1,000. With the fix, 0 of 2,000 on each,
+the longest gap 70 ms.
+
+The fix runs the drop, the `lowered` mark and `timer_start` under
+`preempt_disable`. `irqpoll-drop-preempt` makes the switch at the drop
+deterministic (a one-shot seam, `irq_poll_test_on_drop`) and asserts no
+time bound, only that the poll ran while the spinner did:
+`tools/irqpoll-drop-probe.py --old` shows it failing on main on both
+architectures (the audit report,
+`docs/audit/2026-10-27-irqpoll-drop-report.md`). `irqpoll-boost` stays on
+the list: gaps of 50-70 ms remain where `boost` fires late on a loaded
+host, under its 100 ms bound.
 
 ## `net-neigh-down-race` step 2, 2026-10-10
 

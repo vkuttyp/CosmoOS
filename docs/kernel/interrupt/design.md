@@ -116,7 +116,12 @@ sleeps. The raise is the timer's job because a lowered worker held off by
 a busier thread above the default (quiesce, the reaper) cannot run to
 raise itself (review, PR #335; `irqpoll-boost`: a spinner at the default
 less 4 on the worker's CPU, and the poll's longest gap is 24 ms, against
-290 ms without the timer). Without that
+290 ms without the timer). The drop and the timer's arming are one step,
+under `preempt_disable`: the drop's own unlock is a preemption point, and
+a worker switched out there was left lowered with no timer armed, held
+off for as long as the busier thread ran (2026-10-27; `irqpoll-drop-preempt`
+makes that switch at the drop, and the poll must still run while the
+spinner does). Without that
 bound, a device that never ran dry kept that CPU's threads off it for as
 long as it lasted. In `virtio-remove-inflight`'s held pass that
 included the test thread that was to stop the submitter: a livelock, 36 s

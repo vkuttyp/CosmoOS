@@ -109,4 +109,10 @@ void irq_poll_synchronize(struct irq_poll *ip);
 /* kernel_main, once every CPU is online. */
 void irq_poll_start_workers(void);
 
+/* Self-tests (irqpoll-drop-preempt): `fn` runs once on `cpu`'s worker, in
+ * thread context, at its next drop to the default priority -- between the
+ * drop and the arming of the timer that raises it again. NULL disarms.
+ * A no-op without CONFIG_SELFTEST. */
+void irq_poll_test_on_drop(unsigned cpu, void (*fn)(void));
+
 #endif /* KERNEL_IRQPOLL_H */
