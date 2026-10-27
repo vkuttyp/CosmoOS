@@ -3494,3 +3494,16 @@ See the [history index](README.md).
     `utime`, `stime`, `cutime` and `cstime`. Tests: lxtest's CPU-time block
     (failing first), `test_cputime`, `fuzz_cputime`.
   - Report: `docs/audit/2026-10-27-a5-cputime-report.md`.
+- **The stack protector (2026-10-27, roadmap 1.2's first unit, its fourth
+  and last PR; BUILD-1).**
+  - The kernel and modules build with `-fstack-protector-strong`; the
+    canary is per thread, kept in the per-CPU block (`%gs:24`;
+    `[SP_EL0 + 24]`) and switched with the thread; `__stack_chk_fail`
+    panics.
+  - x86-64's kernel compiles for `x86_64-unknown-linux-gnu`
+    (`KERNEL_CC_TARGET`), the only kind of target for which LLVM honours the
+    `%gs` guard; AArch64's kernel points `SP_EL0` at the per-CPU block while
+    it runs.
+  - `make test-stackprot` (CI, both architectures): a stack overrun on
+    purpose panics as one; `tools/stackprot-probe.py --old`.
+  - Report: `docs/audit/2026-10-27-always-stackprot-report.md`.
