@@ -34,6 +34,9 @@ struct irq_poll_worker {
     uint64_t busy_since;      /* the worker's own: when its current hold began (0 = idle) */
     struct timer boost;       /* raises a lowered worker after IRQ_POLL_HOLD_NS */
     char name[16];
+#if CONFIG_SELFTEST
+    void (*volatile on_drop)(void);   /* irq_poll_test_on_drop: called once, at the next drop */
+#endif
 };
 
 static struct irq_poll_worker g_workers[CONFIG_MAX_CPUS];
@@ -333,11 +336,29 @@ static void worker_main(void *arg)
         }
         if (!w->lowered && clock_now_ns() - w->busy_since > IRQ_POLL_HOLD_NS) {
             sched_reprioritize(self, SCHED_PRIO_DEFAULT);
+#if CONFIG_SELFTEST
+            if (w->on_drop != NULL) {   /* unarmed: one load */
+                void (*fn)(void) = w->on_drop;
+                w->on_drop = NULL;
+                fn();
+            }
+#endif
             w->lowered = true;
             timer_start(&w->boost, IRQ_POLL_HOLD_NS);
         }
         sched_yield();
     }
+}
+
+void irq_poll_test_on_drop(unsigned cpu, void (*fn)(void))
+{
+#if CONFIG_SELFTEST
+    if (cpu < CONFIG_MAX_CPUS)
+        g_workers[cpu].on_drop = fn;
+#else
+    (void)cpu;
+    (void)fn;
+#endif
 }
 
 void irq_poll_start_workers(void)
