@@ -34,6 +34,12 @@ $(TCC_TAR):
 # need tcc's own runtime support, not built here). The build's one host
 # tool, c2str (it turns include/tccdefs.h into a C string), is built for
 # the host by $(CC) first, so make does not build it for the target.
+# tcc's makefiles have variables of their own named as ours are (ARCH is
+# arm64 to tcc), so the sub-makes get none of this make's command-line
+# variables (MAKEFLAGS and the rest unset in their environment): `make
+# ARCH=aarch64`, as CI and make
+# reproducible run it, would otherwise override tcc's ARCH and build no
+# compiler objects.
 # libtcc1.a, which tcc builds with itself, is built here with the target's
 # clang (tcc's own <cpu>-libtcc1-usegcc switch): the tcc just built cannot
 # run on the build host.
@@ -50,9 +56,9 @@ $(TCC_ELF) $(TCC_LIBTCC1) &: $(TCC_TAR) $(TCC_PATCHES) $(BB_LIBC) $(BB_BUILTINS)
 		--extra-cflags="-ffile-prefix-map=$(TCC_DIR)=tcc" > $(TCC_DIR)/configure.log 2>&1 \
 		|| { tail -40 $(TCC_DIR)/configure.log; exit 1; }
 	$(Q)$(CC) -DC2STR $(TCC_DIR)/src/conftest.c -o $(TCC_DIR)/build/c2str.exe
-	$(Q)$(MAKE) -s -C $(TCC_DIR)/build tcc > $(TCC_DIR)/build.log 2>&1 \
+	$(Q)env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES $(MAKE) -s -C $(TCC_DIR)/build tcc > $(TCC_DIR)/build.log 2>&1 \
 		|| { tail -40 $(TCC_DIR)/build.log; exit 1; }
-	$(Q)$(MAKE) -s -C $(TCC_DIR)/build libtcc1.a $(TCC_CPU)-libtcc1-usegcc=yes >> $(TCC_DIR)/build.log 2>&1 \
+	$(Q)env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES $(MAKE) -s -C $(TCC_DIR)/build libtcc1.a $(TCC_CPU)-libtcc1-usegcc=yes >> $(TCC_DIR)/build.log 2>&1 \
 		|| { tail -40 $(TCC_DIR)/build.log; exit 1; }
 	$(Q)$(OBJCOPY) --strip-all --remove-section=.note --remove-section=.comment $(TCC_DIR)/build/tcc $(TCC_ELF)
 	$(Q)cp $(TCC_DIR)/build/libtcc1.a $(TCC_LIBTCC1)
