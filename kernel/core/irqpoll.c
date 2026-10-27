@@ -335,6 +335,14 @@ static void worker_main(void *arg)
             w->busy_since = clock_now_ns();
         }
         if (!w->lowered && clock_now_ns() - w->busy_since > IRQ_POLL_HOLD_NS) {
+            /* The drop and the raise's timer as one step. The drop's own
+             * irqsave unlock is a preemption point (preempt_point), and the
+             * tick its lock held off finds the worker at the default with
+             * its slice spent (it yields every batch): switched out there,
+             * it was lowered with no timer armed, and a thread above the
+             * default held it off for as long as it ran -- the 290 ms of
+             * irqpoll-boost's sightings (docs/testing/flakes.md). */
+            preempt_disable();
             sched_reprioritize(self, SCHED_PRIO_DEFAULT);
 #if CONFIG_SELFTEST
             if (w->on_drop != NULL) {   /* unarmed: one load */
@@ -345,6 +353,7 @@ static void worker_main(void *arg)
 #endif
             w->lowered = true;
             timer_start(&w->boost, IRQ_POLL_HOLD_NS);
+            preempt_enable();
         }
         sched_yield();
     }
