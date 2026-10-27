@@ -25,6 +25,9 @@ struct runqueue {
     struct thread *idle;
     struct thread *prev_exited;              /* handed to sched_finish_switch */
     uint64_t switches;
+#if CONFIG_SELFTEST
+    uint64_t picks;                          /* every pass through the pick, a re-pick of the current thread included */
+#endif
     unsigned cpu;
 };
 
@@ -193,6 +196,10 @@ void sched_dump(void);
  * says so and puts it back to READY, so the caller's waitqueue_finish takes
  * it off the queue and nothing is left corrupt (wait-multi-prepare). */
 bool sched_test_repair_blocked_queued(void);
+/* How many times this CPU's scheduler has picked a thread, counting a pass
+ * that picks the thread already running, which sched_switch_count does
+ * not: a self-test's "nothing ran the scheduler here meanwhile" (TEST-1). */
+uint64_t sched_pick_count(unsigned cpu);
 /* Where `t` is linked: the CPU and level of the ready list that holds it
  * (each queue locked in turn), and whether that level's bitmap bit is set,
  * which is what makes pick_next look there. False when no ready list holds

@@ -87,9 +87,9 @@ static void solicited_node_mac(const struct in6_addr *ip, uint8_t mac[ETH_ALEN])
  * is per link by definition, and the same one on two links is two
  * neighbours (invariant N25). */
 #if CONFIG_DEBUG
-static void nd_test_park_before_lock(void);
+static void nd_test_park_before_lock(const struct netif *nif);
 #else
-static inline void nd_test_park_before_lock(void) {}
+static inline void nd_test_park_before_lock(const struct netif *nif) { (void)nif; }
 #endif
 
 static struct nd_entry *nd_find(const struct netif *nif, const struct in6_addr *ip)
@@ -179,7 +179,7 @@ int nd_resolve(struct netif *nif, const struct in6_addr *ip, uint8_t mac[ETH_ALE
         memcpy(mac + 2, ip->s6_addr + 12, 4);
         return 0;
     }
-    nd_test_park_before_lock();
+    nd_test_park_before_lock(nif);
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
     if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP)) {   /* under the lock, as arp_resolve (N25) */
         if (m)
@@ -237,7 +237,7 @@ void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
         return;
     /* Learn the asker (never at the cost of an entry in use), answer with our address. */
     if (nd.opt_type == 1 && nd.opt_len == 1) {
-        nd_test_park_before_lock();
+        nd_test_park_before_lock(nif);
         arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
         if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP)) {
             spin_unlock_irqrestore(&g_nd_lock, s);   /* queued input on a down interface learns nothing (N25): read under the lock */
@@ -268,7 +268,7 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     if (nd.opt_type != 2 || nd.opt_len != 1)
         return;
     struct mbuf *pending = NULL;
-    nd_test_park_before_lock();
+    nd_test_park_before_lock(nif);
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
     if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP)) {
         spin_unlock_irqrestore(&g_nd_lock, s);   /* as nd_input_ns */
@@ -289,24 +289,25 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
 
 #if CONFIG_DEBUG
 /* ND's twin of arp_test_park_before_lock (N25 follow-up). */
-static unsigned g_test_hold_lock_entry, g_test_lock_entry_parked, g_test_lock_entry_release;
+static const struct netif *g_test_hold_lock_entry;   /* the interface armed for; NULL: disarmed */
+static unsigned g_test_lock_entry_parked, g_test_lock_entry_release;
 
-void nd_test_hold_lock_entry(bool on)
+void nd_test_hold_lock_entry(const struct netif *nif)
 {
     __atomic_store_n(&g_test_lock_entry_parked, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_lock_entry_release, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_test_hold_lock_entry, on ? 1u : 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_hold_lock_entry, nif, __ATOMIC_RELEASE);
 }
 bool nd_test_lock_entry_parked(void) { return __atomic_load_n(&g_test_lock_entry_parked, __ATOMIC_ACQUIRE) != 0; }
 void nd_test_release_lock_entry(void) { __atomic_store_n(&g_test_lock_entry_release, 1u, __ATOMIC_RELEASE); }
 
-static void nd_test_park_before_lock(void)
+static void nd_test_park_before_lock(const struct netif *nif)
 {
-    if (__atomic_load_n(&g_test_hold_lock_entry, __ATOMIC_RELAXED) == 0)
-        return;   /* not armed, the common case: no atomic read-modify-write on the input path */
-    unsigned one = 1u;
-    if (!__atomic_compare_exchange_n(&g_test_hold_lock_entry, &one, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-        return;
+    const struct netif *armed = __atomic_load_n(&g_test_hold_lock_entry, __ATOMIC_RELAXED);
+    if (armed == NULL || armed != nif)
+        return;   /* not armed, the common case, or armed for another interface: no read-modify-write */
+    if (!__atomic_compare_exchange_n(&g_test_hold_lock_entry, &armed, NULL, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return;   /* another caller on this interface took the arming */
     __atomic_store_n(&g_test_lock_entry_parked, 1u, __ATOMIC_RELEASE);
     while (!__atomic_load_n(&g_test_lock_entry_release, __ATOMIC_ACQUIRE))
         arch_cpu_relax();

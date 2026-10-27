@@ -1007,6 +1007,10 @@ struct thread  { ... bool sig_must_stop; ... };            /* under p->lock */
   `cont_reportable` are set by the event and cleared by the report, so a
   parent polling with `WNOHANG | WUNTRACED` does not see the same stop
   for ever; a stop cancels an unreported continue and the reverse.
+  An exit outranks both: a child that has exited is reported by its exit,
+  even with a continue unreported (POSIX: `WCONTINUED` reports a
+  continued process; Linux's order), and the continue is then gone with
+  it (`signal-stop-exit`; LX-1).
 
 **The wait status** grew two outcomes rather than changing:
 `COSMO_STATUS_STOPPED(sig)` is `0x200 | sig` and

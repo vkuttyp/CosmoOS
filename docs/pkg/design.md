@@ -466,9 +466,12 @@ report missing and modified files; exit 1 if any.
 `pkg` is a short-lived program: it reads whole files into `malloc`
 memory (a package at most 64 MiB, an index at most 4 MiB), keeps parsed
 stanzas in arrays (at most 1024 index entries, 64 dependencies per
-package, 4096 files per package, 256 recorded directories, 128
-installed packages listed), and frees what it can as it goes. Every
-limit is a constant in `pkg.h` and a clear error message.
+package, 4096 files per package, 256 recorded directories), and frees
+what it can as it goes. Every limit is a constant in `pkg.h` and a clear
+error message. The installed packages' names are read whole into a heap
+array (`installed_all`), as many as there are: the walks over the
+database once read 128 and passed over the rest silently (PKG-1). Out of
+memory there, the command stops rather than walk part of the database.
 
 ## Concurrency
 

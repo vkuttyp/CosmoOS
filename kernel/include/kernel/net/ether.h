@@ -76,11 +76,12 @@ void arp_get_stats(struct arp_stats *out);
 void arp_test_hold_retry(bool on);
 bool arp_test_retry_parked(void);
 void arp_test_release_retry(void);
-/* Park the next arp_input or arp_resolve between its decision to proceed
- * and its taking of the table lock, where the old NETIF_UP check (before
- * the lock) could be overtaken by netif_set_up(false)'s flag clear and
- * flush (N25 follow-up). One caller per arming. */
-void arp_test_hold_lock_entry(bool on);
+/* Park the next arp_input or arp_resolve on `nif` between its decision to
+ * proceed and its taking of the table lock, where the old NETIF_UP check
+ * (before the lock) could be overtaken by netif_set_up(false)'s flag clear
+ * and flush (N25 follow-up). One caller per arming; a caller on another
+ * interface passes (TEST-3). NULL disarms. */
+void arp_test_hold_lock_entry(const struct netif *nif);
 bool arp_test_lock_entry_parked(void);
 void arp_test_release_lock_entry(void);
 #endif
