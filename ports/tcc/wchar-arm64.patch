@@ -1,0 +1,40 @@
+AArch64 Linux: wchar_t is unsigned int (AAPCS64), not int.
+musl's bits/alltypes.h defines it so, beside tcc's stddef.h, and a
+program including both failed (incompatible redefinition of 'wchar_t');
+wide character and string literals take the same type.
+
+--- a/include/tccdefs.h
++++ b/include/tccdefs.h
+@@ -60,6 +60,11 @@
+ #if defined _WIN32
+     #define __WCHAR_TYPE__ unsigned short
+     #define __WINT_TYPE__ unsigned short
++#elif defined __linux__ && defined __aarch64__
++    /* AArch64 Linux: wchar_t is unsigned int (AAPCS64), as musl's
++       alltypes.h defines it beside this stddef.h's */
++    #define __WCHAR_TYPE__ unsigned int
++    #define __WINT_TYPE__ unsigned int
+ #elif defined __linux__
+     #define __WCHAR_TYPE__ int
+     #define __WINT_TYPE__ unsigned int
+--- a/tccgen.c
++++ b/tccgen.c
+@@ -5665,6 +5665,9 @@
+ #ifdef TCC_TARGET_PE
+         t = VT_SHORT|VT_UNSIGNED;
+         goto push_tokc;
++#elif defined TCC_TARGET_ARM64 && !defined TCC_TARGET_MACHO
++        t = VT_INT|VT_UNSIGNED; /* wchar_t, as tccdefs.h's __WCHAR_TYPE__ */
++        goto push_tokc;
+ #endif
+     case TOK_CINT:
+     case TOK_CCHAR: 
+@@ -5717,6 +5720,8 @@
+     case TOK_LSTR:
+ #ifdef TCC_TARGET_PE
+         t = VT_SHORT | VT_UNSIGNED;
++#elif defined TCC_TARGET_ARM64 && !defined TCC_TARGET_MACHO
++        t = VT_INT | VT_UNSIGNED;
+ #else
+         t = VT_INT;
+ #endif

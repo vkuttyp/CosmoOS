@@ -547,6 +547,55 @@ must print `dynhello: ok` and `dltest: ok`.
 The installed system's console is ash too: `make test-install`'s reboot
 and persist stages type their commands at it (`/etc/console-shell`).
 
+## `make test-selfhost` (`tests/boot/selfhost_test.py`)
+
+Roadmap 1.2 A1's acceptance: the C compiler on the installed system
+(`ports/tcc/README.md`). This build is installed on a disk
+(`install_test.py`'s install) and booted from it. The harness serves the
+source the installed tcc was built from -- the pinned tarball with
+`ports/tcc`'s patches, `$(TCC_DIR)/src` packed as `tinycc.tar.gz` -- and
+`tests/tcc` over HTTP; the guest fetches them into `/root/selfhost`, and
+`tests/tcc/selfhost.sh` runs three stages there, each one command with
+its own 30-minute budget (release builds in CI, job `selfhost`, both
+architectures):
+
+- **`programs`**: `cc -static` and `cc` build `tests/tcc/hello.c`, and
+  both run (`cc-hello: static ...`, `cc-hello: dynamic ...`); `cc -shared
+  -fPIC` builds `dl-greet.c` into `libgreet.so` and `cc ... -ldl` builds
+  `dl-main.c`, which opens it with `dlopen`, calls a function and reads a
+  variable through `dlsym` (`cc-dlopen: loaded by dlopen, 42`).
+- **`tests2`**: tcc's own `tests/tests2`, each test as its Makefile runs
+  it (`-run`, or built and run for its `NORUN` tests; its per-test flags,
+  arguments and two-file and shared-library tests), its output compared
+  with the `.expect` file by `diff -Nbu`. There is no `make` on the system
+  yet (A2), so `selfhost.sh` spells the rules out. Excluded:
+  `tests/tcc/tests2-skip.txt` and `tests2-skip-<arch>.txt`, each line with
+  its reason -- only what the Makefile itself skips for this
+  configuration (another architecture's, i386's and riscv64's tests;
+  those needing the bounds checker or backtraces, which the port leaves
+  out; `34_array_assignment`). Every other test must pass.
+- **`rebuild`**: tcc's `configure` (the port's options) and `c2str` run on
+  the system, then the installed `cc` builds `tcc.c` (stage 1) and stage 1
+  builds it again (stage 2): the two must be the same bytes. The installed
+  `cc` and stage 1 then build `hello.c`, which must be the same bytes too,
+  and run.
+
+Measured (2026-10-27, release, QEMU TCG on the development Mac): x86-64
+programs 3 s, tests2 125 passed and 16 excluded in 93 s, rebuild 9 s
+(stage 1 407,708 bytes), the whole test 125 s; AArch64 programs 3 s,
+tests2 126 passed and 15 excluded in 108 s, rebuild 10 s (496,959 bytes),
+the whole test 146 s.
+
+What the test found on the port as #468 left it (2026-10-27): every
+`-run` test failed, first for want of `runmain.o` (not installed) and of
+`dlopen` in a static tcc (`/usr/lib/libc.so: unrecognized file type`),
+then with `mprotect failed`, tcc's default mapping its code writable and
+executable at once, which `vm_user_protect` refuses; and on AArch64
+`124_atomic_counter` failed to compile (`incompatible redefinition of
+'wchar_t'`). The port now installs `runmain.o`, links tcc against
+`libc.so`, builds it `-DCONFIG_RUNMEM_RO=1` and carries
+`wchar-arm64.patch` (`ports/tcc/README.md`).
+
 ## Gaps and planned tests
 
 - No test of a redirected builtin (`pwd > file`), of `sh file args`

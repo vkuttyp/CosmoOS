@@ -18,6 +18,7 @@
 #   make test-pci-hotplug roadmap 1.2 B3: PCIe device_del/device_add, idle and under I/O, NVMe, late partition scan
 #   make test-mirror  roadmap 1.2 B3: a two-disk mirrored root, a disk pulled, replaced and resilvered; a spare (CI: BUILD=release)
 #   make test-large   CFS-32: compressible files past the old run bound, read by v1.0.13 (CI: BUILD=release)
+#   make test-selfhost roadmap 1.2 A1: cc on the installed system: programs, tcc's tests2, tcc rebuilt (CI: BUILD=release)
 #   make test-fill    MEM-9: writers past memory and past the root's space, on a 256 MiB guest (CI: BUILD=release)
 #   make test-upgrade shell completeness S7: upgrade an installed v1.0.3 to this build, roll back (CI: BUILD=release)
 #   make test-busybox roadmap M3: BusyBox ash's scripted test and testsuite subset (CI: BUILD=release)
@@ -52,7 +53,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-stackprot test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-selfhost test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-stackprot test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -305,6 +306,18 @@ test-install: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/install_test.py --image $(IMAGE) --workdir $(OUT)/test-install \
 		--timeout $(BOOT_TIMEOUT) --key $(MODSIGN_KEY)
+
+# Roadmap 1.2 A1's acceptance test (tests/boot/selfhost_test.py,
+# docs/userland/testing.md, "test-selfhost"): on this build installed,
+# cc builds and runs static, dynamic and dlopen programs; tcc's own
+# tests/tests2 pass, less the listed exclusions (tests/tcc/tests2-skip*.txt);
+# tcc rebuilds itself from the source it was built from (the pinned
+# tarball with ports/tcc's patches), and the rebuilt compiler
+# builds the same hello byte for byte. (CI: BUILD=release.)
+test-selfhost: $(IMAGE) $(TCC_ELF)
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
+		$(PYTHON) $(ROOT)/tests/boot/selfhost_test.py --image $(IMAGE) --workdir $(OUT)/test-selfhost \
+		--tcc-src $(TCC_DIR)/src --timeout $(BOOT_TIMEOUT)
 
 # MEM-9 (tests/boot/fill_test.py): on a 256 MiB guest with this build
 # installed, 512 MiB written with no sync to a data pool, and the root

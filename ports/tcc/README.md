@@ -1,6 +1,6 @@
 # ports/tcc
 
-The C compiler on the target (roadmap 1.2 A1): TinyCC, a static program
+The C compiler on the target (roadmap 1.2 A1): TinyCC, a dynamically linked program
 built from source for the architecture in hand by the same ports path as
 BusyBox (`ports/busybox/`), with musl's headers, start files and libraries
 installed beside it, so a program is compiled, assembled and linked on
@@ -38,14 +38,31 @@ its `cc` wrapper, so nothing is built twice:
   `va_list` on x86-64, atomics) built by the target's clang, tcc's own
   switch for doing so, since the tcc just built cannot run on the build
   host.
-- One patch, `armflush-clang.patch`: AArch64's `__clear_cache`
+- Two patches, both for AArch64 and both applied on both architectures.
+  `armflush-clang.patch`: AArch64's `__clear_cache`
   (`lib/armflush.c`) calls `__arm64_clear_cache`, a builtin only tcc has;
   built by clang it cleans the data cache and invalidates the instruction
   cache by line itself, the line sizes from `CTR_EL0`, as tcc's builtin
   does. That runs at EL0, which the kernel allows since A1
   (`SCTLR_EL1.UCT` and `UCI`, as Linux sets them).
-- `tcc` stripped with `llvm-objcopy`; `-ffile-prefix-map` keeps the build
-  directory out of it.
+  `wchar-arm64.patch`: on AArch64 Linux `wchar_t` is `unsigned int`
+  (AAPCS64), as musl's `bits/alltypes.h` defines it, but tcc said `int`
+  (`include/tccdefs.h`), so a program including tcc's `stddef.h` and a
+  libc header failed (`incompatible redefinition of 'wchar_t'`, tcc's
+  `tests2/124_atomic_counter` under `make test-selfhost`); wide character
+  and string literals take the same type. glibc takes `wchar_t` from the
+  compiler's `stddef.h`, which is why tcc's own tests on glibc never saw it
+  (inferred).
+- `--extra-cflags="-Wall -O2 -DCONFIG_RUNMEM_RO=1 -ffile-prefix-map=..."`:
+  configure's own `-Wall -O2`, which `--extra-cflags` replaces;
+  `CONFIG_RUNMEM_RO=1`, so `tcc -run` maps the code it generated read and
+  execute and its data read and write (`tccrun.c`; tcc's default only on
+  macOS), since the kernel maps no page writable and executable at once
+  (`vm_user_protect`); and the build directory kept out of the binary.
+- Linked against the system's `libc.so` (the BusyBox port's `cc-dyn`), so
+  `tcc -run` can `dlopen` the libraries a program names; `runmain.o`
+  (what `-run` starts a program with) installed beside `libtcc1.a`.
+- `tcc` stripped with `llvm-objcopy`.
 
 ## On the system
 
@@ -69,7 +86,9 @@ About 4 MB in all, most of it `libc.a` and the headers.
   `tests/tcc/hello.c` statically and dynamically, and both run
   (`cc-hello: static ...`, `cc-hello: dynamic ...`, required by the boot
   test).
-- **`make test-selfhost`** (A1's acceptance, to come): on the installed
-  system, static, dynamic and `dlopen` programs; tcc's `tests/tests2`
-  suite with its exclusions listed; tcc rebuilding itself, and the rebuilt
-  compiler building the same `hello` byte for byte.
+- **`make test-selfhost`** (A1's acceptance; `docs/userland/testing.md`,
+  "test-selfhost"; CI job `selfhost`): on the installed system, static,
+  dynamic and `dlopen` programs; tcc's `tests/tests2` suite with its
+  exclusions listed (`tests/tcc/tests2-skip*.txt`); tcc rebuilt from its
+  source by `cc`, rebuilding itself to the same bytes, and building the
+  same `hello` byte for byte.

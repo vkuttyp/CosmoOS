@@ -1,0 +1,15 @@
+# tcc's tests/tests2 left out on CosmoOS (selfhost.sh's tests2), each with
+# its reason. The Makefile's own skips for this configuration come first.
+34_array_assignment     Makefile: array assignment is not in C standard
+98_al_ax_extend         Makefile: i386 only
+99_fastcall             Makefile: i386 only
+141_riscv_asm           Makefile: riscv64 only
+145_winarm64_interlocked  Makefile: arm64-win32 only
+112_backtrace           Makefile: needs the bounds checker (--config-bcheck=no)
+113_btdll               Makefile: needs backtraces (--config-backtrace=no)
+114_bound_signal        Makefile: needs the bounds checker
+115_bound_setjmp        Makefile: needs the bounds checker
+116_bound_setjmp2       Makefile: needs the bounds checker
+117_builtins            Makefile: needs the bounds checker
+126_bound_global        Makefile: needs the bounds checker
+132_bound_test          Makefile: needs the bounds checker

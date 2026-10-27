@@ -66,9 +66,9 @@ does not have, each exclusion named with its reason), all checked by CI.
 
 ### A1 A C compiler on the target
 
-*In progress.* The port (`ports/tcc/`) and the compiler on the image come
-first, with a smoke test in the debug boot; `make test-selfhost` and the
-clang evaluation follow.
+*In progress.* The port (`ports/tcc/`) and the compiler on the image
+(#468), then `make test-selfhost`, A1's acceptance, passing on both
+architectures (2026-10-27); the clang evaluation follows.
 
 TinyCC (tcc 0.9.27 plus the `mob` fixes for AArch64) as a port, built by
 the cross toolchain against musl, with musl's headers, `crt*.o`, `libc.a`
@@ -79,11 +79,18 @@ host runs under the Linux personality without new kernel work if its
 memory and `mmap` needs fit, and is adopted only if the evaluation says
 so.
 
-- [ ] **Acceptance:** `make test-selfhost` (both architectures) compiles
+- [x] **Acceptance:** `make test-selfhost` (both architectures) compiles
   and runs, on the installed system, a static and a dynamic program and a
   `dlopen` one; tcc's own `tests/tests2` suite passes (exclusions
   listed); tcc rebuilds itself on the target and the rebuilt compiler
-  builds the same `hello` byte for byte.
+  builds the same `hello` byte for byte. *Done 2026-10-27*
+  (`tests/boot/selfhost_test.py`, CI job `selfhost`;
+  `docs/userland/testing.md`, "test-selfhost"): x86-64 125 tests2 passed
+  and 16 excluded, AArch64 126 and 15, the exclusions only those tcc's
+  Makefile makes for this configuration (`tests/tcc/tests2-skip*.txt`).
+  It took four fixes to the port: `runmain.o` installed, tcc linked
+  against `libc.so`, `-run`'s code mapped read-only
+  (`CONFIG_RUNMEM_RO`), and AArch64's `wchar_t` (`wchar-arm64.patch`).
 
 ### A2 `make` and the build tools
 
