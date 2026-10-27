@@ -428,10 +428,14 @@ Pure Python (RFC 8032 reference arithmetic, standard library only);
 re-signing an already signed file replaces the trailer. Signing is
 deterministic, so builds stay reproducible.
 
-### `scripts/mkbootarchive.py OUTPUT.tar NAME=PATH ...`
+### `scripts/mkbootarchive.py OUTPUT.tar NAME=PATH|NAME@TARGET|NAME/=DIR ...`
 
 Reproducible ustar (mode 0644, uid/gid 0, mtime 0, no prefix, names ≤
-100 bytes, regular files only, entries in argument order). Rejects
+100 bytes, entries in argument order). `NAME=PATH` is a regular file,
+`NAME@TARGET` a symbolic link, and `NAME/=DIR` (roadmap 1.2 A1) every
+regular file under `DIR` as `NAME/<path under DIR>`, in sorted order, for
+a tree known only once it is built (the musl headers the tcc port
+installs); a symbolic link inside such a tree is refused. Rejects
 duplicate, absolute, or `..` names.
 
 ### `scripts/gen-keyring.py OUTPUT.c KEY.pub ...`

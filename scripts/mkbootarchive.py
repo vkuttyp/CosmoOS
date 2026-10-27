@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkbootarchive.py OUTPUT.tar NAME=PATH|NAME@TARGET ...
+"""mkbootarchive.py OUTPUT.tar NAME=PATH|NAME@TARGET|NAME/=DIR ...
 
 Write a reproducible ustar archive for the kernel's boot archive parser
 (kernel/core/bootarchive.c). Entries are written in the order given, so
@@ -7,7 +7,10 @@ the caller controls module load order. Every field that could vary
 between builds is fixed: mode 0644, uid/gid 0, mtime 0, no user or group
 names, no prefix. Names are limited to 100 bytes. NAME=PATH is a regular
 file with PATH's bytes; NAME@TARGET (roadmap M3) a symbolic link whose
-target, at most 100 bytes, is TARGET (ustar type 2, no data).
+target, at most 100 bytes, is TARGET (ustar type 2, no data). NAME/=DIR
+(roadmap 1.2 A1) is every regular file under DIR, as NAME/<its path under
+DIR>, in sorted order so the archive stays reproducible: a tree whose
+files are known only once it is built (a sysroot's headers).
 """
 
 import os
@@ -47,6 +50,30 @@ def header(name, size, link=None):
     return bytes(h)
 
 
+def add_file(name, path, seen, chunks):
+    if name in seen:
+        raise SystemExit(f"mkbootarchive: duplicate entry {name}")
+    seen.add(name)
+    with open(path, "rb") as f:
+        data = f.read()
+    chunks.append(header(name, len(data)))
+    chunks.append(data)
+    chunks.append(b"\0" * ((-len(data)) % BLOCK))
+
+
+def tree_files(top):
+    """Every regular file under top, as paths relative to it, sorted; a symbolic link is refused."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(top):
+        dirnames.sort()
+        for n in filenames:
+            full = os.path.join(dirpath, n)
+            if os.path.islink(full) or not os.path.isfile(full):
+                raise SystemExit(f"mkbootarchive: not a regular file in a tree entry: {full}")
+            out.append(os.path.relpath(full, top).replace(os.sep, "/"))
+    return sorted(out)
+
+
 def main(argv):
     if len(argv) < 2:
         sys.stderr.write(__doc__)
@@ -66,15 +93,13 @@ def main(argv):
         if eq < 0:
             raise SystemExit(f"mkbootarchive: expected NAME=PATH or NAME@TARGET, got {spec}")
         name, path = spec.split("=", 1)
-        if name in seen:
-            raise SystemExit(f"mkbootarchive: duplicate entry {name}")
-        seen.add(name)
-        with open(path, "rb") as f:
-            data = f.read()
-        chunks.append(header(name, len(data)))
-        chunks.append(data)
-        pad = (-len(data)) % BLOCK
-        chunks.append(b"\0" * pad)
+        if name.endswith("/"):
+            if not os.path.isdir(path):
+                raise SystemExit(f"mkbootarchive: {name}= wants a directory, got {path}")
+            for rel in tree_files(path):
+                add_file(name + rel, os.path.join(path, rel), seen, chunks)
+            continue
+        add_file(name, path, seen, chunks)
     chunks.append(b"\0" * (2 * BLOCK))
     blob = b"".join(chunks)
     tmp = out + ".tmp"
