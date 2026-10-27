@@ -694,21 +694,22 @@ bool selftest_module_slots_enospc(const char **reason)
 /*
  * How module-unload-busy judges a wait of `ms` that module_unload makes on
  * its deadline clock (clock_deadline_ns, polled every millisecond): a mark
- * taken before the call, passed after it (TEST-2).
+ * taken before the call, passed after it (TEST-2). The mark is a deadline
+ * on that same clock, so it holds whether the clock is common or the
+ * machine-wide tick; the per-CPU clock could read a tick less.
  */
 struct wait_mark {
-    uint64_t start_ns;
-    uint64_t budget_ns;
+    uint64_t deadline;
 };
 
 static struct wait_mark wait_mark_start(unsigned ms)
 {
-    return (struct wait_mark){ clock_now_ns(), (uint64_t)ms * 1000000ULL };
+    return (struct wait_mark){ clock_deadline_ns((uint64_t)ms * 1000000ULL) };
 }
 
 static bool wait_mark_passed(const struct wait_mark *m)
 {
-    return clock_since_ns(m->start_ns) >= m->budget_ns;
+    return clock_deadline_passed(m->deadline);
 }
 
 bool selftest_module_unload_busy(const char **reason)
