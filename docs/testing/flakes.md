@@ -5236,6 +5236,17 @@ widen-and-label rule, is `CRASH_TIMEOUT` (240 s) for x86-64 `test-crash`
 and `test-wxn` as for AArch64; left to the owner. The failed job was
 rerun.
 
+**Widened, 2026-10-28** (the owner's call): x86-64 `test-crash` and
+`test-wxn` take `CRASH_TIMEOUT` 240 s. A third failure, PR #474's run
+40598486544 (job 122537300885, head `bb146716`), timed out the same way:
+`boot-test: FAIL after 184.0s`, `USERTEST: PASS`, every panic marker
+missing. Over the last 23 CI runs (40323876091 to 40598486544) the
+x86_64 stress job's 20 passing crash boots took a median of 160.7 s and
+at most 183.1 s (main's 6779e0ff, run 40560498664), in two groups:
+125-165 s and 178-183 s. Eight of the twenty were in the slow group,
+within 4 s of the timeout. 240 s is the slowest pass x 1.31, near the
+1.28 margin used for AArch64.
+
 ## `entropy boots (x86_64)` over its 240 s timeout, 2026-10-27
 
 #467 (BUILD-1, the stack protector) at `677d4e23`, run 40448337851, job

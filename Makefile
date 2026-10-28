@@ -225,7 +225,15 @@ BOOT_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),380,300)
 # its 63 crash and WXN boots took a median of 201.1 s, a p95 of 229.1 s and
 # at most 233.8 s passing, 6.2 s inside 240; none timed out. 300 s is that
 # maximum x 1.28, as above.
-CRASH_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),300,180)
+# x86-64 240 s from 2026-10-28: over the last 23 CI runs (40323876091 to
+# 40598486544) its 20 passing crash boots took a median of 160.7 s and at
+# most 183.1 s (a pass's time includes about 4 s past the guest's 180 s),
+# and two timed out with every self-test passed and the panic not yet
+# reached: main's dc1d5166 (run 40323876091) and PR #474 (run
+# 40598486544). Its runners come in the same two speeds as AArch64's
+# (125-165 s, 178-183 s; docs/testing/flakes.md). 240 s is that maximum
+# x 1.31.
+CRASH_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),300,240)
 # test-busybox: one boot that runs the scripted test and fifteen testsuite files.
 BUSYBOX_TIMEOUT ?= 900
 test: $(IMAGE)
