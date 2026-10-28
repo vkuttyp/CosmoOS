@@ -210,7 +210,8 @@ struct cosmo_thread {
 #define COSMO_RLIMIT_NOFILE 2   /* open handles (at most the table size, 64) */
 #define COSMO_RLIMIT_NPROC  3   /* processes with the caller's real uid, counting a new child */
 #define COSMO_RLIMIT_VMEM   4   /* guest memory per VM the process creates */
-#define COSMO_RLIMIT_COUNT  5
+#define COSMO_RLIMIT_NICE   5   /* the lowest nice value reachable without PRIV_PROC is 20 - this (Linux's RLIMIT_NICE) */
+#define COSMO_RLIMIT_COUNT  6
 #define COSMO_RLIM_INFINITY (~0ull)
 
 #define COSMO_NGROUPS_MAX 16

@@ -14,6 +14,7 @@
 
 #include <kernel/completion.h>
 #include <kernel/cputime.h>
+#include <kernel/nice.h>
 #include <kernel/cred.h>
 #include <kernel/rlimit.h>
 #include <kernel/handle.h>
@@ -321,6 +322,10 @@ struct process {
      * tick takes it in interrupt context, as signal_send does. A fork
      * starts zeroed; exec keeps it all. */
     struct cputime cputime;
+    /* The nice value, NICE_MIN..NICE_MAX (kernel/include/kernel/nice.h;
+     * the rules are Nova's, kernel/process/nice.c). Under `lock`. A fork
+     * and a spawn copy the parent's; exec keeps it. */
+    int32_t nice;
     /* vfork (docs/kernel/process/design.md, "fork"): the parent waits on
      * vfork_wq until the child stops borrowing its space -- it execs or
      * its last thread is gone -- and process_vfork_release sets this. */
@@ -710,6 +715,8 @@ int process_setsid(pid_t *out);
  * is dropped before it returns, so the caller may block, signal or take
  * any other lock while it holds the member. */
 struct process *process_group_next(pid_t pgid, pid_t after);
+/* The same walk over the processes whose real uid is `ruid`. */
+struct process *process_user_next(uint32_t ruid, pid_t after);
 /* True when at least one process of group `pgid` is in session `sid`.
  * An empty group belongs to no session and answers false. */
 bool process_group_in_session(pid_t pgid, pid_t sid);
@@ -774,6 +781,14 @@ void thread_cpu_times(struct cputime_pair *self);
 bool process_cputimer_set(struct process *p, unsigned which, uint64_t value_ns, uint64_t interval_ns,
                           uint64_t *old_value, uint64_t *old_interval);
 bool process_cputimer_get(struct process *p, unsigned which, uint64_t *value, uint64_t *interval);
+/* Nice values (kernel/include/kernel/nice.h). nice_caller: the calling
+ * process as the rules see it, read under its lock. nice_set: gives `p`
+ * the value `nice` (in range) if `caller` may (nice_may_set), checking
+ * and storing under p->lock; returns nice_may_set's verdict. nice_get:
+ * p's value. */
+void process_nice_caller(struct nice_caller *caller);
+int process_nice_set(struct process *p, const struct nice_caller *caller, int32_t nice);
+int32_t process_nice_get(struct process *p);
 void process_dump_all(void);
 
 extern const struct personality personality_native;

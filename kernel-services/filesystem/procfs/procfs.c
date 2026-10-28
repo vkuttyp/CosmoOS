@@ -255,7 +255,7 @@ static int render_status(struct process *p, char *out, size_t n)
 
 static int render_limits(struct process *p, char *out, size_t n)
 {
-    static const char *const names[COSMO_RLIMIT_COUNT] = { "as", "mem", "nofile", "nproc", "vmem" };
+    static const char *const names[COSMO_RLIMIT_COUNT] = { "as", "mem", "nofile", "nproc", "vmem", "nice" };
     int used = 0;
     for (unsigned i = 0; i < COSMO_RLIMIT_COUNT && used < (int)n; i++) {
         uint64_t v = p->rlim.v[i];
@@ -277,8 +277,9 @@ static unsigned long long proc_ticks(uint64_t ns)
 /*
  * /proc/<pid>/stat, Linux's one-line record (proc(5)) through field 44,
  * which is as far as top and ps read. What this kernel does not keep
- * reads as Linux's "none": no page faults are counted, and there is no
- * nice value (priority 20, nice 0). utime and stime are the CPU time's
+ * reads as Linux's "none": no page faults are counted. The priority is
+ * Linux's for a normal task, 20 + nice, and the nice value follows
+ * (kernel/include/kernel/nice.h). utime and stime are the CPU time's
  * split by the tick's samples, cutime and cstime the waited-for
  * children's (kernel/process/cpu_account.c). The memory sizes are the space's own counts,
  * read under the rule exit and exec follow (P38): vsize in bytes, rss in
@@ -297,12 +298,13 @@ static int render_pid_stat(struct process *p, char *out, size_t n)
     unsigned tty_nr;
     int tpgid;
     proc_tty(sid, &tty_nr, &tpgid);
+    int nice = process_nice_get(p);
     return ksnprintf(out, n,
-                     "%u (%s) %c %u %d %d %u %d 0 0 0 0 0 %llu %llu %llu %llu 20 0 %u 0 %llu %llu %llu "
+                     "%u (%s) %c %u %d %d %u %d 0 0 0 0 0 %llu %llu %llu %llu %d %d %u 0 %llu %llu %llu "
                      "18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 %d 0 0 0 0 0\n",
                      p->pid, p->name, proc_state(p, &th), p->parent_pid, pgid, sid, tty_nr, tpgid,
                      proc_ticks(th.self.user_ns), proc_ticks(th.self.system_ns), proc_ticks(th.children.user_ns),
-                     proc_ticks(th.children.system_ns), th.nr_threads, proc_ticks(p->start_ns),
+                     proc_ticks(th.children.system_ns), 20 + nice, nice, th.nr_threads, proc_ticks(p->start_ns),
                      (unsigned long long)mapped * PAGE_SIZE, (unsigned long long)resident,
                      th.cpu < 0 ? 0 : th.cpu);
 }

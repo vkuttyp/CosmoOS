@@ -10,6 +10,7 @@ generated C needs, is generated too.
 
   kernel/block/gpt.nova        -> kernel/block/gpt.c
   kernel/process/cputime.nova  -> kernel/process/cputime.c
+  kernel/process/nice.nova     -> kernel/process/nice.c
   (every port)                 -> kernel/include/nova/rt.h, kernel/nova/nova_rt_core.c
 
 A port's header is normally hand-written C that the Nova source imports
@@ -50,6 +51,7 @@ PORTS = [
     ("kernel/block/gpt.nova", "kernel/block/gpt.c", "The GUID Partition Table (gpt.h)", None),
     ("kernel/process/cputime.nova", "kernel/process/cputime.c",
      "CPU time and the CPU-time interval timers (cputime.h)", None),
+    ("kernel/process/nice.nova", "kernel/process/nice.c", "The rules of nice values (nice.h)", None),
 ]
 RUNTIME = [("nova/rt.h", "kernel/include/nova/rt.h"), ("nova_rt_core.c", "kernel/nova/nova_rt_core.c")]
 

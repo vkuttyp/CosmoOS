@@ -1,0 +1,75 @@
+// nice.nova - Nice values in Nova: the source of kernel/process/nice.c, which `make nova` generates
+// (docs/kernel/process/design.md, "Nice values"; scripts/nova-gen.py). The rules of getpriority(2) and
+// setpriority(2): the range, who may set a process's value and how low, and how a group's or a user's outcome is
+// reported. The API and the structs are kernel/include/kernel/nice.h, imported (Nova's type-system.md §31). The
+// caller holds the target's lock, a spin lock: nothing here allocates, blocks or panics on any input, and `unsafe`
+// appears only where nice.h's pointers become references.
+
+@header("kernel/nice.h")
+extern "C" {
+    struct nice_caller {
+        euid: u32;
+        privileged: bool;
+    }
+    struct nice_target {
+        ruid: u32;
+        euid: u32;
+        nice: i32;
+        rlimit: u64;
+    }
+}
+
+/// nice.h: NICE_MIN and NICE_MAX.
+const NICE_MIN: i32 = -20;
+const NICE_MAX: i32 = 19;
+/// errno.h: the three errors the rules report.
+const EPERM: i32 = 1;
+const ESRCH: i32 = 3;
+const EACCES: i32 = 13;
+
+fn clamp(value: i32) -> i32 {
+    if (value < NICE_MIN) { return NICE_MIN; }
+    if (value > NICE_MAX) { return NICE_MAX; }
+    return value;
+}
+
+/// Linux's rlimit form of a nice value, 20 - nice: 1 for NICE_MAX to 40 for NICE_MIN, and what getpriority returns.
+fn toRlimit(nice: i32) -> i32 => 20 - clamp(nice);
+
+/// Linux's set_one_prio_perm, then can_nice: the target is the caller's (its real or effective uid is the caller's
+/// effective uid) or the caller is privileged; and a lower value than the target has is within the target's
+/// RLIMIT_NICE, or the caller is privileged.
+fn maySet(caller: borrow nice_caller, target: borrow nice_target, nice: i32) -> i32 {
+    if (!caller.privileged && target.ruid != caller.euid && target.euid != caller.euid) { return -EPERM; }
+    // toRlimit is 1 to 40, so the conversion is exact.
+    if (nice < target.nice && !caller.privileged && truncate<u64>(toRlimit(nice)) > target.rlimit) { return -EACCES; }
+    return 0;
+}
+
+/// Linux's setpriority: the last refusal stands; a success counts only while nothing was found.
+fn setResult(result: i32, one: i32) -> i32 {
+    if (one != 0) { return one; }
+    if (result == -ESRCH) { return 0; }
+    return result;
+}
+
+/// Linux's getpriority: the highest 20 - nice over the processes named, or -ESRCH for none.
+fn getResult(result: i32, nice: i32) -> i32 {
+    let value = toRlimit(nice);
+    if (value > result) { return value; }
+    return result;
+}
+
+@export("nice_clamp")
+fn clampC(value: i32) -> i32 => clamp(value);
+
+/// Safety: nice.h's contract: `caller` and `target` point to live structs.
+@export("nice_may_set")
+unsafe fn maySetC(caller: *nice_caller, target: *nice_target, nice: i32) -> i32 =>
+    maySet(Ptr.toBorrow(caller), Ptr.toBorrow(target), nice);
+
+@export("nice_set_result")
+fn setResultC(result: i32, one: i32) -> i32 => setResult(result, one);
+
+@export("nice_get_result")
+fn getResultC(result: i32, nice: i32) -> i32 => getResult(result, nice);
