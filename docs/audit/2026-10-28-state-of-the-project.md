@@ -136,8 +136,8 @@ count or missing entry; **L** cosmetic.
 **Status.** The pull request that adds this report fixes every **H** row
 below, plus the M rows in `docs/README.md`'s Layout table, SMP-1 and the
 backlog's own rule for where follow-ups go. Two H rows are fixed by
-recording rather than rewriting: `vfs/design.md`'s cosmofs summary is
-replaced by a pointer to `cosmofs/design.md`, and the missing
+recording rather than rewriting: `docs/kernel-services/vfs/design.md`'s cosmofs summary is
+replaced by a pointer to `docs/kernel-services/filesystem/cosmofs/design.md`, and the missing
 `ENETUNREACH`/`ENOBUFS` names (a code change) are backlog NET-24. The
 remaining M and L rows, the two stale code comments and a drift check
 for CI are backlog DOC-3.
@@ -164,60 +164,60 @@ for CI are backlog DOC-3.
 
 | Sev | Where | Says | Code |
 |---|---|---|---|
-| H | `kernel/scheduler/architecture.md:51-55` | "fixed priority with round-robin … Fairness … are later policies" | Contradicts the same directory's `design.md:173-217` and invariant S35 |
-| H | `kernel/scheduler/api.md:244-249` | Policy table is `{enqueue, dequeue, pick_next, tick, slice_new}` | Also `pick_migratable`, `charge`, `moved` (`sched.h:35-53`); fair-level preemption by `fair_should_preempt` |
-| H | `kernel/process/invariants.md:39-44` (P5) | Two pages eager; at most `INITIAL_STRINGS_MAX` (300) strings; fails `-EINVAL` | `INITIAL_STACK_PAGES` 2 minimum, `INITIAL_STACK_PAGES_MAX` 40, `-E2BIG` (`process.c:224-276`); `INITIAL_STRINGS_MAX` does not exist |
-| M | `quiesce/design.md:237,264`, `quiesce/invariants.md:75`, `timer/api.md:147` | `pcb_free_locked`; TCP timer callbacks take only `g_work_lock` | No `pcb_free_locked`; `tcp.c` has `pcb_put`, `pcb_retire_locked`, `pcb_kill_locked`, `pcb_end_locked`. This is the lock-order argument for `timer_cancel_sync`: re-check it, not only rename |
-| M | `scheduler/api.md` | — | `thread_set_nice` (`thread.h:199`) and `kernel/include/kernel/fair.h` not documented anywhere |
-| M | `process/architecture.md` | Files are `process.c`, `spawn.c`, `elf.c` | Also `nice.c/.nova`, `cputime.c/.nova`, `itimer.c`, `cpu_account.c`, `cred.c`, `signal.c`, `native_signal.c` |
+| H | `docs/kernel/scheduler/architecture.md:51-55` | "fixed priority with round-robin … Fairness … are later policies" | Contradicts the same directory's `design.md:173-217` and invariant S35 |
+| H | `docs/kernel/scheduler/api.md:244-249` | Policy table is `{enqueue, dequeue, pick_next, tick, slice_new}` | Also `pick_migratable`, `charge`, `moved` (`sched.h:35-53`); fair-level preemption by `fair_should_preempt` |
+| H | `docs/kernel/process/invariants.md:39-44` (P5) | Two pages eager; at most `INITIAL_STRINGS_MAX` (300) strings; fails `-EINVAL` | `INITIAL_STACK_PAGES` 2 minimum, `INITIAL_STACK_PAGES_MAX` 40, `-E2BIG` (`process.c:224-276`); `INITIAL_STRINGS_MAX` does not exist |
+| M | `docs/kernel/quiesce/design.md:237,264`, `docs/kernel/quiesce/invariants.md:75`, `docs/kernel/timer/api.md:147` | `pcb_free_locked`; TCP timer callbacks take only `g_work_lock` | No `pcb_free_locked`; `tcp.c` has `pcb_put`, `pcb_retire_locked`, `pcb_kill_locked`, `pcb_end_locked`. This is the lock-order argument for `timer_cancel_sync`: re-check it, not only rename |
+| M | `docs/kernel/scheduler/api.md` | — | `thread_set_nice` (`thread.h:199`) and `kernel/include/kernel/fair.h` not documented anywhere |
+| M | `docs/kernel/process/architecture.md` | Files are `process.c`, `spawn.c`, `elf.c` | Also `nice.c/.nova`, `cputime.c/.nova`, `itimer.c`, `cpu_account.c`, `cred.c`, `signal.c`, `native_signal.c` |
 | M | renamed identifiers | `SCHED_PRIO_IDLE`, `sched_enqueue`, `idle_thread_main`, `arch_percpu_setup`, `x86_cpu_identify/enable_features`, `x86_shootdown_handle`, `g_shootdown_acks`, `ap_started`, `console_panic_mode`, `timer_tick_hook`, `X86_VECTOR_TIMER`, `timer_tick_isr`, `timer_run_expired`, `buddy_free/alloc`, `pmm_free_range_core`, `phys_limit`, `user_thread_start`, `arch_user_regs_from_frame`, `signal_setup_frame`, `LX_TID_BASE` | Now `SCHED_PRIO_LOWEST`, `sched_enqueue_new`, `idle_main`, `arch_percpu_install`, `x86_cpu_init/enable`, `arch_mmu_shootdown_ipi_handler`, `g_shootdown_acked`, `g_ap_started`, `console_in_panic_mode`, `timer_set_tick_hook`, `timer_vector`, `tick_isr`, `run_expired`, `buddy_*_block`, `buddy_free_range`, `bootinfo_phys_limit`, `process_thread_start`, `arch_user_regs_from_syscall/_trap`, `signal_deliver`/`signal_frame`, literal `0x10000u` |
 
 ### 3.3 Kernel platform (arch, interrupt, diagnostics, security, module, device, tty, boot)
 
 | Sev | Where | Says | Code |
 |---|---|---|---|
-| H | `kernel/module/api.md:12`, `module/design.md:28` | `COSMO_MODULE_ABI_VERSION` is 1 | 11 (`module.h:23`); the same `api.md:72` says 11 |
-| H | `boot/design.md:5` | Boot protocol "version 9" | `COSMOBOOT_VERSION 10` (`cosmoboot.h:75`) |
-| H | `boot/design.md:588-622` | No framebuffer or command line; x86 loader only; AArch64 loader and "protocol version 4" planned | All shipped (v6, v7, AArch64 loader) |
-| H | `kernel/tty/architecture.md:74-82` | Raw mode, termios, job control, `^C` signals, PTYs, `/dev/tty` are non-responsibilities; "`^C` is dropped" | All implemented: `tty.c:203` (SIGINT), `:304` `tty_set_pgrp`, `:525-535` termios, `kernel/tty/pty.c` |
-| H | `kernel/diagnostics/architecture.md:41-42,131` | "No log ring buffer yet"; dmesg, timestamps, lock diagnostics planned | `kernel/core/log.c:15-18` has the ring; lockdep exists. `log.c:4-6`'s own comment is also stale |
-| M | `kernel/diagnostics/architecture.md:125` | "Five self-tests" | About 525 entries in `kernel/core/selftest.c` |
-| M | `kernel/arch/design.md:177` | `ist[0]` = `g_df_stack` | `IST_COUNT` 4 per-CPU IST stacks (#DF, NMI, #MC) (`gdt.c:56-70`) |
-| M | `kernel/device/design.md:493,566-568` | Locks `g_device_lock`, `g_pci_lock`; virtio-net, NVMe, AHCI, USB, hot-plug are future | `g_device_mutex`, no PCI registry lock (`g_hp_lock` only); all those drivers exist |
-| M | `kernel/security/invariants.md:334` | `g_key` writers: `reseed_locked`, `ratchet_locked`, jitter | No `ratchet_locked` (inline in `random_get_bytes`); `random_init` also writes it |
+| H | `docs/kernel/module/api.md:12`, `docs/kernel/module/design.md:28` | `COSMO_MODULE_ABI_VERSION` is 1 | 11 (`module.h:23`); the same `api.md:72` says 11 |
+| H | `docs/boot/design.md:5` | Boot protocol "version 9" | `COSMOBOOT_VERSION 10` (`cosmoboot.h:75`) |
+| H | `docs/boot/design.md:588-622` | No framebuffer or command line; x86 loader only; AArch64 loader and "protocol version 4" planned | All shipped (v6, v7, AArch64 loader) |
+| H | `docs/kernel/tty/architecture.md:74-82` | Raw mode, termios, job control, `^C` signals, PTYs, `/dev/tty` are non-responsibilities; "`^C` is dropped" | All implemented: `tty.c:203` (SIGINT), `:304` `tty_set_pgrp`, `:525-535` termios, `kernel/tty/pty.c` |
+| H | `docs/kernel/diagnostics/architecture.md:41-42,131` | "No log ring buffer yet"; dmesg, timestamps, lock diagnostics planned | `kernel/core/log.c:15-18` has the ring; lockdep exists. `log.c:4-6`'s own comment is also stale |
+| M | `docs/kernel/diagnostics/architecture.md:125` | "Five self-tests" | About 480 self-tests (`kernel/core/selftest.c`) |
+| M | `docs/kernel/arch/design.md:177` | `ist[0]` = `g_df_stack` | `IST_COUNT` 4 per-CPU IST stacks (#DF, NMI, #MC) (`gdt.c:56-70`) |
+| M | `docs/kernel/device/design.md:493,566-568` | Locks `g_device_lock`, `g_pci_lock`; virtio-net, NVMe, AHCI, USB, hot-plug are future | `g_device_mutex`, no PCI registry lock (`g_hp_lock` only); all those drivers exist |
+| M | `docs/kernel/security/invariants.md:334` | `g_key` writers: `reseed_locked`, `ratchet_locked`, jitter | No `ratchet_locked` (inline in `random_get_bytes`); `random_init` also writes it |
 | M | renamed identifiers | `x86_vector_alloc/free`, `pagecache_limit_pages`, `pagecache_reclaim_if_needed`, `arch_hv_vcpu_irq_taken`, `modelf_parse`, `test_modreloc`, `boot/uefi/cpu.c`, semihosting `SYS_EXIT` | `arch_vector_alloc/free`, `pagecache_limit()`, `pagecache_reclaim()`, `arch_hv_vcpu_irq_delivered/_waiting`, `modelf_validate`, only `test_reloc_aarch64`, `boot/uefi/arch/<arch>/cpu.c`, `SYS_EXIT_EXTENDED` |
-| L | `kernel/interrupt/*.md` | — | GICv3 never mentioned (only under `kernel/arch/aarch64/`) |
+| L | `docs/kernel/interrupt/*.md` | — | GICv3 never mentioned (only under `kernel/arch/aarch64/`) |
 
 ### 3.4 Kernel services (VFS, cosmofs, network, virtualization)
 
 | Sev | Where | Says | Code |
 |---|---|---|---|
-| H | `vfs/api.md:735`, `vfs/design.md:516` | `struct cosmo_stat` has `pad` / omits the field | `uint32_t dev` (mount id) is ABI (`syscall.h:677`) |
-| H | `vfs/design.md:392-506` (cosmofs summary) | Superblock version 1; max 264 extents; `cfs_dirent` with fixed `name[48]`; `struct spool` with one device; files `cosmofs_txn.c`, `cosmofs_alloc.c`; commit only at sync/unmount | `CFS_MAX_EXTENTS` 4096; names up to 255 with continuation entries (v15); inode has `parent`, `csum_*`, `compress_algo`; spool has members, epoch, `state_seq`; those files don't exist; contradicts invariant V17. Recommend replacing the section with a pointer to `cosmofs/design.md`, which is current |
-| H | `network/api.md:843-844` | `COSMO_ENETUNREACH` (101), `COSMO_ENOBUFS` (105) exported to user space | In neither `uapi/cosmo/syscall.h` nor `libc/include/errno.h`, though the kernel returns both |
-| M | `vfs/api.md:714-716`; `virtualization/api.md:115` | `SYS_COUNT` "is 101 now"; "`SYS_COUNT` 50" | 113 |
-| M | `virtualization/architecture.md:30-46`, `api.md:115-127` | Seven calls; `vmx.c` "(next backend)"; no AArch64 backend; table lacks 79-80 | Ten calls (`vm_raise_spi`, `vm_lower_spi`); `vmx.c`, `vmx_ept.c`, `vmx_run.S` exist; `kernel/arch/aarch64/hv*.c`; `vuart.c` unlisted |
-| M | `virtualization/api.md:274` and `svm.c:775` | `x86/hvops.h` | Does not exist |
-| M | `vfs/api.md:652` | Snapshots "(format version 3)"; "no new system call" | `/dev/fsctl` `SNAP_CREATE/ROLLBACK/CLONE` (`fsctl.h:47-52`), format 12 |
-| M | `cosmofs/architecture.md:14-21`; `vfs/architecture.md:17-26` | File maps | Missing `cosmofs_{snap,clone,rollback,member,resilver,scrub,check,crypt,reach}.c`; `blkctl.c`, `fsctl.c`, `memdev.c`, `mountns.c` |
-| M | `network/design.md:1869` | "Nothing is per CPU … (`g_rxq`)" | `g_rxq` gone; per-CPU `netrx/N` workers |
+| H | `docs/kernel-services/vfs/api.md:735`, `docs/kernel-services/vfs/design.md:516` | `struct cosmo_stat` has `pad` / omits the field | `uint32_t dev` (mount id) is ABI (`syscall.h:677`) |
+| H | `docs/kernel-services/vfs/design.md:392-506` (cosmofs summary) | Superblock version 1; max 264 extents; `cfs_dirent` with fixed `name[48]`; `struct spool` with one device; files `cosmofs_txn.c`, `cosmofs_alloc.c`; commit only at sync/unmount | `CFS_MAX_EXTENTS` 4096; names up to 255 with continuation entries (v15); inode has `parent`, `csum_*`, `compress_algo`; spool has members, epoch, `state_seq`; those files don't exist; contradicts invariant V17. Recommend replacing the section with a pointer to `docs/kernel-services/filesystem/cosmofs/design.md`, which is current |
+| H | `docs/kernel-services/network/api.md:843-844` | `COSMO_ENETUNREACH` (101), `COSMO_ENOBUFS` (105) exported to user space | In neither `uapi/cosmo/syscall.h` nor `libc/include/errno.h`, though the kernel returns both |
+| M | `docs/kernel-services/vfs/api.md:714-716`; `docs/kernel-services/virtualization/api.md:115` | `SYS_COUNT` "is 101 now"; "`SYS_COUNT` 50" | 113 |
+| M | `docs/kernel-services/virtualization/architecture.md:30-46`, `api.md:115-127` | Seven calls; `vmx.c` "(next backend)"; no AArch64 backend; table lacks 79-80 | Ten calls (`vm_raise_spi`, `vm_lower_spi`); `vmx.c`, `vmx_ept.c`, `vmx_run.S` exist; `kernel/arch/aarch64/hv*.c`; `vuart.c` unlisted |
+| M | `docs/kernel-services/virtualization/api.md:274` and `svm.c:775` | `x86/hvops.h` | Does not exist |
+| M | `docs/kernel-services/vfs/api.md:652` | Snapshots "(format version 3)"; "no new system call" | `/dev/fsctl` `SNAP_CREATE/ROLLBACK/CLONE` (`fsctl.h:47-52`), format 12 |
+| M | `docs/kernel-services/filesystem/cosmofs/architecture.md:14-21`; `docs/kernel-services/vfs/architecture.md:17-26` | File maps | Missing `cosmofs_{snap,clone,rollback,member,resilver,scrub,check,crypt,reach}.c`; `blkctl.c`, `fsctl.c`, `memdev.c`, `mountns.c` |
+| M | `docs/kernel-services/network/design.md:1869` | "Nothing is per CPU … (`g_rxq`)" | `g_rxq` gone; per-CPU `netrx/N` workers |
 | L | renamed identifiers | `arp_lock`/`udp_lock`, `mbuf_cache`/`mcluster_cache`, `tcp_attach_socket`, `vfs_walk`, `pool_state_seq`, `DL_COPY`, `tap_dev_activate`, `mss_index`; `cosmofs_format.h:2-7` says "(version 2)" | `g_lock`, `g_mbuf_cache`/`g_cluster_cache`, `state_seq`; the others don't exist |
 
 ### 3.5 Drivers and the Linux personality
 
 | Sev | Where | Says | Code |
 |---|---|---|---|
-| H | `compat/linux/api.md:156-158` | 129 entries, 123 translated, 6 `-ENOSYS` | 178 (x86-64) / 147 (AArch64); 2 `-ENOSYS` (`rseq`, `clone3`), 1 returns 0 (`set_robust_list`) |
-| H | `compat/linux/architecture.md:93-94` | "87 calls; 13 more … refused" | As above |
-| H | `compat/linux/api.md` | — | About 50 implemented calls have no row: epoll_*, eventfd*, signalfd*, timerfd_*, memfd_create, ftruncate, shm*, statx, chown/chmod family, utimensat, chroot, mount, umount2, reboot, settimeofday, clock_settime, prlimit64, rlimits, statfs, set*uid/gid, groups |
-| H | `compat/linux/design.md:247,220,192,166`; `api.md:297-298` | `epoll_*`, `sysinfo`, `sched_getaffinity`, non-`AT_FDCWD` dirfd, `mremap` return `-ENOSYS` | All implemented (`lx_mremap` at `syscalls.c:4678`; `at_base()` at `:312`) |
-| H | `drivers/virtio/invariants.md:3-7` (V1), `architecture.md:47-48`, `api.md:26-28` | Legacy devices refused; `VERSION_1` always negotiated | Legacy transport (`virtio.c:109-115`, `virtio_pci.c:64-72`); `design.md:137` documents it |
-| M | `compat/linux/design.md:44-50` | `struct linux_state` has `clear_child_tid`, `sigmask`, `act[64]`, `altstack` | Holds `brk_start/brk`, `sigtramp`, `unknown_syscalls`, `wx_logged`, `shm_attaches`, `shm_lock` (`syscalls.c:74-81`) |
-| M | `compat/linux/architecture.md:75,127` | File mappings refused with `ENODEV`; native has no futex | File and shared mappings supported (`syscalls.c:2168-2207`); `SYS_futex_*` 83, 84, 94 |
-| M | `compat/linux/api.md:230`, `design.md:304` | `linux_thread_exit`, `signal_setup_frame` | `thread_clear_tid`, `linux_signal_frame` |
-| M | `drivers/virtio/architecture.md:14-24` | Four device drivers | Also `virtio_gpu.ko` (`build/module.mk`) |
-| M | `drivers/nvme/invariants.md:43-48` (M4), `architecture.md` | Every queue's vector routed to its CPU | One-vector mode (`nvme.c:112, 909-915`) is an exception the invariant doesn't state |
-| L | `drivers/nvme/api.md:52,58`; `README.md:44` | Banner and error text; VirtIO list | Banner has interrupt-mode field; message is "neither MSI-X nor MSI"; GPU missing |
+| H | `docs/compat/linux/api.md:156-158` | 129 entries, 123 translated, 6 `-ENOSYS` | 178 (x86-64) / 147 (AArch64); 2 `-ENOSYS` (`rseq`, `clone3`), 1 returns 0 (`set_robust_list`) |
+| H | `docs/compat/linux/architecture.md:93-94` | "87 calls; 13 more … refused" | As above |
+| H | `docs/compat/linux/api.md` | — | About 50 implemented calls have no row: epoll_*, eventfd*, signalfd*, timerfd_*, memfd_create, ftruncate, shm*, statx, chown/chmod family, utimensat, chroot, mount, umount2, reboot, settimeofday, clock_settime, prlimit64, rlimits, statfs, set*uid/gid, groups |
+| H | `docs/compat/linux/design.md:247,220,192,166`; `api.md:297-298` | `epoll_*`, `sysinfo`, `sched_getaffinity`, non-`AT_FDCWD` dirfd, `mremap` return `-ENOSYS` | All implemented (`lx_mremap` at `syscalls.c:4678`; `at_base()` at `:312`) |
+| H | `docs/drivers/virtio/invariants.md:3-7` (V1), `architecture.md:47-48`, `api.md:26-28` | Legacy devices refused; `VERSION_1` always negotiated | Legacy transport (`virtio.c:109-115`, `virtio_pci.c:64-72`); `design.md:137` documents it |
+| M | `docs/compat/linux/design.md:44-50` | `struct linux_state` has `clear_child_tid`, `sigmask`, `act[64]`, `altstack` | Holds `brk_start/brk`, `sigtramp`, `unknown_syscalls`, `wx_logged`, `shm_attaches`, `shm_lock` (`syscalls.c:74-81`) |
+| M | `docs/compat/linux/architecture.md:75,127` | File mappings refused with `ENODEV`; native has no futex | File and shared mappings supported (`syscalls.c:2168-2207`); `SYS_futex_*` 83, 84, 94 |
+| M | `docs/compat/linux/api.md:230`, `design.md:304` | `linux_thread_exit`, `signal_setup_frame` | `thread_clear_tid`, `linux_signal_frame` |
+| M | `docs/drivers/virtio/architecture.md:14-24` | Four device drivers | Also `virtio_gpu.ko` (`build/module.mk`) |
+| M | `docs/drivers/nvme/invariants.md:43-48` (M4), `architecture.md` | Every queue's vector routed to its CPU | One-vector mode (`nvme.c:112, 909-915`) is an exception the invariant doesn't state |
+| L | `docs/drivers/nvme/api.md:52,58`; `README.md:44` | Banner and error text; VirtIO list | Banner has interrupt-mode field; message is "neither MSI-X nor MSI"; GPU missing |
 
 ### 3.6 Userland, libc, build, verification, user guide
 
@@ -289,7 +289,7 @@ backlog DOC-3.
    hard-links lines in the guide. These are what a newcomer reads first.
 2. **A second docs PR per area for the H rows** in §3.2-3.5: module ABI,
    boot protocol, tty and diagnostics non-responsibilities, the cosmofs
-   summary in `vfs/design.md` (replace with a link), `cosmo_stat.dev`,
+   summary in `docs/kernel-services/vfs/design.md` (replace with a link), `cosmo_stat.dev`,
    the Linux counts and `-ENOSYS` lists, virtio V1, process P5. Re-derive
    the `pcb_free_locked` lock-order argument rather than renaming.
 3. **Make the drift checkable.** `scripts/check-docs.py` only checks that
