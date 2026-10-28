@@ -396,6 +396,7 @@ bool selftest_cosmofs_check_bad_ptr(const char **reason);
 bool selftest_cosmofs_check_namelen(const char **reason);
 bool selftest_cosmofs_longname(const char **reason);         /* format 15: names of 48-255 bytes */
 bool selftest_cosmofs_check_longname(const char **reason);   /* format 15: malformed long entries are dir_bad */
+bool selftest_cosmofs_link(const char **reason);             /* VFS-4: hard links on cosmofs */
 bool selftest_cosmofs_check_extent_order(const char **reason);
 bool selftest_cosmofs_check_extent_overlap(const char **reason);
 bool selftest_cosmofs_check_snapshot(const char **reason);

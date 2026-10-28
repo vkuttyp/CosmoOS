@@ -57,6 +57,7 @@
 #define LX_AT_REMOVEDIR 0x200
 #define LX_AT_EMPTY_PATH 0x1000
 #define LX_AT_SYMLINK_NOFOLLOW 0x100
+#define LX_AT_SYMLINK_FOLLOW 0x400
 #define LX_UTIME_NOW  ((1l << 30) - 1l)   /* utimensat: a tv_nsec meaning "now" */
 #define LX_UTIME_OMIT ((1l << 30) - 2l)   /* ... and "leave it" */
 

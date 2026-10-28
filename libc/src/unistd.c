@@ -36,6 +36,11 @@ int mkfifo(const char *path, mode_t mode) { return (int)__syscall_ret(cosmo_mkno
 int unlink(const char *path) { return (int)__syscall_ret(cosmo_unlink(path)); }
 int lstat(const char *path, struct stat *st) { return (int)__syscall_ret(cosmo_lstat(path, (struct cosmo_stat *)st)); }
 int symlink(const char *target, const char *path) { return (int)__syscall_ret(cosmo_symlink(target, path)); }
+int link(const char *oldpath, const char *newpath) { return (int)__syscall_ret(cosmo_link(oldpath, newpath)); }
+int chmod(const char *path, mode_t mode) { return (int)__syscall_ret(cosmo_chmod(path, mode)); }
+int chown(const char *path, uid_t uid, gid_t gid) { return (int)__syscall_ret(cosmo_chown(path, uid, gid)); }
+mode_t umask(mode_t mask) { return (mode_t)cosmo_umask(mask); }
+int chroot(const char *path) { return (int)__syscall_ret(cosmo_chroot(path)); }
 long readlink(const char *path, char *buf, unsigned long len) { return __syscall_ret(cosmo_readlink(path, buf, len)); }
 int rmdir(const char *path) { return (int)__syscall_ret(cosmo_rmdir(path)); }
 int rename(const char *oldpath, const char *newpath) { return (int)__syscall_ret(cosmo_rename(oldpath, newpath)); }

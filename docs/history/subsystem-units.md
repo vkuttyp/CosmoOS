@@ -3583,6 +3583,13 @@ See the [history index](README.md).
   malformed shapes before reading a name. Found by A2's experiment:
   BusyBox's tarball has 35 names over 47 bytes. Report:
   `docs/audit/2026-10-28-a2-longnames-report.md`.
+- **Hard links and the native metadata calls (2026-10-28, roadmap 1.2 A2,
+  its second PR; VFS-4, VFS-6).** `vfs_link`, on ramfs and cosmofs,
+  through Linux's `link`/`linkat` and a native `SYS_link`; a file is dead
+  only once its last name is gone; ramfs keeps one pin per file however
+  many names. The native ABI gained `chmod`, `chown`, `utimes`, `umask`
+  and `chroot`, and native creation now takes the umask. Report:
+  `docs/audit/2026-10-28-a2-links-report.md`.
 - **Nice values, their rules in Nova (2026-10-28, roadmap 1.2 A5's second
   PR, LX-13's interface).**
   - A process's nice value, -20..19, inherited by fork and spawn and kept

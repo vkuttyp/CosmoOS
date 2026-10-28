@@ -156,6 +156,14 @@ against musl's `libc.so`, `PT_INTERP` `/lib/ld-musl-$ARCH.so.1`, run by
 rather than held to exit),
 `writev`, `exit_group`: the sequence a real Linux libc needs.
 
+**Hard links** (roadmap 1.2 A2, VFS-4), in `lxtest` beside the symbolic-link
+cases: `link` (x86-64) or `linkat` gives `/tmp/lxtest.txt` a second name with
+the same inode and `st_nlink` 2; again is `-EEXIST`, a directory `-EPERM`, an
+unknown flag `-EINVAL`, and a name in `/proc` `-EXDEV`; `linkat` of a symbolic
+link is that link (`S_IFLNK` without following), and with `AT_SYMLINK_FOLLOW`
+the file it names (`st_nlink` 3); after the extra names go the file is back to
+one link.
+
 **Directory descriptors** (the dirfd unit,
 `docs/audit/next-subsystem-dirfd.md`), in `lxtest` while it holds a
 descriptor for `/tmp/lxdir`: `openat`, `newfstatat`, `faccessat`,

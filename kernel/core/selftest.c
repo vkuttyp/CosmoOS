@@ -740,6 +740,7 @@ static const struct selftest tests[] = {
     { "cosmofs-check-namelen", selftest_cosmofs_check_namelen },
     { "cosmofs-longname", selftest_cosmofs_longname },
     { "cosmofs-check-longname", selftest_cosmofs_check_longname },
+    { "cosmofs-link", selftest_cosmofs_link },
     { "cosmofs-check-extent-order", selftest_cosmofs_check_extent_order },
     { "cosmofs-check-extent-overlap", selftest_cosmofs_check_extent_overlap },
     { "cosmofs-check-snapshot", selftest_cosmofs_check_snapshot },

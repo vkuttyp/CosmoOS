@@ -2829,7 +2829,9 @@ static int remove_entry(struct vnode *start, const char *path, bool dir)
             rc = parent->ops->rmdir ? parent->ops->rmdir(parent, last, len, victim) : -ENOTSUP;
         else
             rc = parent->ops->unlink ? parent->ops->unlink(parent, last, len, victim) : -ENOTSUP;
-        if (rc == 0)
+        /* Dead once its last name is gone: a file with another name
+         * (VFS-4) is still reached through that one. */
+        if (rc == 0 && (dir || victim->nlink == 0))
             victim->flags |= VNODE_DEAD;
         mutex_unlock(&victim->lock);
         vnode_put(victim);
@@ -3060,8 +3062,8 @@ int vfs_rename2(struct vnode *ostart, const char *oldpath, struct vnode *nstart,
             }
             if (rc == 0 && replaced != victim) {
                 rc = odir->ops->rename(odir, oname, olen, victim, ndir, nname, nlen, replaced);
-                if (rc == 0 && replaced)
-                    replaced->flags |= VNODE_DEAD;
+                if (rc == 0 && replaced && (replaced->type == VNODE_DIR || replaced->nlink == 0))
+                    replaced->flags |= VNODE_DEAD;   /* as remove_entry: once its last name is gone */
             }
             if (replaced)
                 vnode_put(replaced);
@@ -3196,6 +3198,76 @@ int vfs_symlink(struct vnode *start, const char *path, const char *target)
     }
     mutex_unlock(&parent->lock);
     vnode_put(parent);
+    return rc;
+}
+
+/*
+ * link (VFS-4; docs/kernel-services/vfs/design.md, "Hard links"): the new
+ * name's directory as any creation takes it (parent_for_mutation's checks:
+ * a writable mount, write and search permission), except that two mounts
+ * are -EXDEV before either, as Linux answers; then the target under it, as
+ * a child is taken under its parent (V7).
+ */
+int vfs_link(struct vnode *ostart, const char *oldpath, struct vnode *nstart, const char *newpath, bool follow)
+{
+    struct vnode *target;
+    int rc = follow ? vfs_lookup(ostart, oldpath, &target) : vfs_lookup_nofollow(ostart, oldpath, &target);
+    if (rc)
+        return rc;
+    if (target->type == VNODE_DIR) {
+        vnode_put(target);
+        return -EPERM;            /* a directory has one name: the tree stays a tree */
+    }
+    struct vnode *parent;
+    char last[VFS_NAME_MAX + 1];
+    size_t len;
+    struct walk w = { 0 };
+    rc = walk_parent(nstart, newpath, &w, last, &parent, &len, NULL);
+    walk_fini(&w);
+    if (rc) {
+        vnode_put(target);
+        return rc;
+    }
+    if (len == 0 || dot_name(last, len))
+        rc = len == 0 ? -EEXIST : -EINVAL;
+    else if (parent->type != VNODE_DIR)
+        rc = -ENOTDIR;
+    else if (parent->mnt != target->mnt)
+        rc = -EXDEV;
+    else if (parent->mnt->flags & MOUNT_RDONLY)
+        rc = -EROFS;
+    else
+        rc = vfs_permission(parent, VFS_MAY_WRITE | VFS_MAY_EXEC);
+    if (rc) {
+        vnode_put(parent);
+        vnode_put(target);
+        return rc;
+    }
+    mutex_lock(&parent->lock);
+    if (parent->flags & VNODE_DEAD) {
+        rc = -ENOENT;
+    } else if (parent->ops->link == NULL) {
+        rc = -EPERM;              /* a filesystem without links, as Linux answers */
+    } else {
+        struct vnode *vn = NULL;
+        rc = parent->ops->lookup(parent, last, len, &vn);
+        if (rc == 0) {
+            vnode_put(vn);
+            rc = -EEXIST;
+        } else if (rc == -ENOENT) {
+            mutex_lock_nested(&target->lock, VNODE_NESTED_CHILD);
+            if (target->flags & VNODE_DEAD)
+                rc = -ENOENT;     /* its last name went: nothing to name again */
+            else if (target->nlink >= VFS_LINK_MAX)
+                rc = -EMLINK;
+            else
+                rc = parent->ops->link(parent, last, len, target);
+            mutex_unlock(&target->lock);
+        }
+    }
+    mutex_unlock(&parent->lock);
+    vnode_put(parent);
+    vnode_put(target);
     return rc;
 }
 

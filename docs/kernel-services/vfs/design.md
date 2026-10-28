@@ -37,6 +37,7 @@ struct vnode_ops {
     int  (*create)(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
     int  (*mkdir)(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
     int  (*unlink)(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
+    int  (*link)(struct vnode *dir, const char *name, size_t len, struct vnode *target);   /* optional (VFS-4) */
     int  (*rmdir)(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
     int  (*rename)(struct vnode *odir, const char *oname, size_t olen, struct vnode *victim,
                    struct vnode *ndir, const char *nname, size_t nlen, struct vnode *replaced);
@@ -97,7 +98,7 @@ directory (`-ENOTDIR` otherwise; `vfs_open` treats it as
 `O_DIRECTORY`). Components
 are limited to `VFS_NAME_MAX` (255) bytes and paths to `VFS_PATH_MAX`
 (1024); more than 40 components or a walk through a dead vnode fails.
-Symbolic links do not exist.
+Symbolic links are followed by the walk (`docs/audit/next-subsystem-symlink.md`).
 
 A mountpoint carries the mounts covering it on a list, `vnode.covers`:
 a directory can be a mountpoint in one mount namespace and an ordinary
@@ -526,6 +527,36 @@ with `strncpy_from_user` (1024
 max); `open` installs the file with `HANDLE_RIGHT_READ`/`WRITE` from the
 access mode, so `read`/`write`/`close` need no change. `mount` names a
 block device (`vda`) and requires uid 0.
+
+## Hard links
+
+Roadmap 1.2 A2 (VFS-4): `vfs_link(ostart, oldpath, nstart, newpath,
+follow)` gives a file another name, as `link(2)`, `linkat(2)` and the
+native `SYS_link` ask.
+
+- **What may be linked.** Anything but a directory (`-EPERM`: the tree
+  stays a tree, and `..` stays one name). A final symbolic link is linked
+  itself unless `follow` (Linux's `AT_SYMLINK_FOLLOW`; POSIX `link` and
+  `SYS_link` do not follow). A file whose last name is gone (`VNODE_DEAD`)
+  is `-ENOENT`. At `VFS_LINK_MAX` (65000) names, `-EMLINK`.
+- **Where.** On the target's mount only: two mounts are `-EXDEV`, checked
+  before the new name's directory is: as Linux, a link across mounts is
+  refused whatever the permissions there. Then the directory as any
+  creation takes it: a writable mount (`-EROFS`), write and search
+  permission, `-EEXIST` for a name that exists. A filesystem without a
+  `link` operation is `-EPERM` (procfs). Within cosmofs a snapshot is
+  read-only both ways, and a clone and the live tree are two trees
+  (`-EXDEV`), as for rename.
+- **Locks.** The new name's directory, then the target under it as a
+  child is taken under its parent (V7).
+- **The last name decides death.** `VNODE_DEAD` ("no new lookups") is set
+  by an unlink or a rename's replace only when the victim's `nlink` has
+  reached zero, or the victim is a directory. A file with another name is
+  still reached through it, and an open file keeps reading after its last.
+- **ramfs** keeps one pin per file, not one per name: `link` adds an entry
+  and a link, an unlink drops the pin with the last name, and so does the
+  unmount's teardown, which meets a file once per name. The unmount's busy
+  check, which counts one pin, holds for a file with many names.
 
 ## Boot composition
 

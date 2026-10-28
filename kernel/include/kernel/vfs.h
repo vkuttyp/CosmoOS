@@ -22,6 +22,7 @@
 #include <uapi/cosmo/syscall.h>
 
 #define VFS_NAME_MAX 255
+#define VFS_LINK_MAX 65000u   /* names one file may have (VFS-4) */
 #define VFS_PATH_MAX 1024
 #define VFS_MAX_COMPONENTS 40
 #define VNODE_HASH 64
@@ -68,6 +69,10 @@ struct vnode_ops {
     int (*mknod)(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
                  struct vnode **out);
     int (*unlink)(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
+    /* Optional (VFS-4): a second name for `target`, which is on this mount
+     * and is no directory; the filesystem adds the entry and counts the
+     * link. Under dir->lock and target->lock. Without it, -EPERM. */
+    int (*link)(struct vnode *dir, const char *name, size_t len, struct vnode *target);
     int (*rmdir)(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
     int (*rename)(struct vnode *odir, const char *oname, size_t olen, struct vnode *victim, struct vnode *ndir,
                   const char *nname, size_t nlen, struct vnode *replaced);
@@ -490,6 +495,12 @@ int vfs_unlink(struct vnode *start, const char *path);
  * permission on the directory; the new node referenced in *out. */
 int vfs_mknod(struct vnode *start, const char *path, uint32_t mode, enum vnode_type type, struct vnode **out);
 int vfs_rmdir(struct vnode *start, const char *path);
+/* Hard links (VFS-4): `newpath` becomes another name for what `oldpath`
+ * names -- its final symbolic link followed only when `follow`. -EPERM
+ * for a directory or a filesystem without links, -EXDEV across mounts,
+ * -EEXIST, -EMLINK at VFS_LINK_MAX names, -ENOENT for a file whose last
+ * name is gone. */
+int vfs_link(struct vnode *ostart, const char *oldpath, struct vnode *nstart, const char *newpath, bool follow);
 int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath);
 /* renameat: the two paths resolve from two starts. vfs_rename(s, a, b)
  * is vfs_rename2(s, a, s, b). */
