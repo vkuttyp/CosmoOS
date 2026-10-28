@@ -2500,6 +2500,20 @@ continuation stands without a head. Any other shape is `dir_bad`, found
 before a byte of the name is read, as an over-long `namelen` was.
 Duplicate names compare whole names, however many slots each takes.
 
+## Hard links (roadmap 1.2 A2)
+
+A file with several names needed nothing new on disk: an inode already
+carries `nlink`, unlink and a rename's replace already take one link of
+several (the orphan record and eviction act at zero), and the checker
+already counts every entry that names an inode against it (CF13).
+`cfs_link` is the one operation hard links add: under the tree's write
+lock, an entry naming the target's inode (`dir_add`, with `names_allow`
+for a long name) and one more link, in one transaction. If the count
+cannot be written, the entry is taken back, or the transaction
+abandoned. A snapshot's tree is read-only to a link either way (`-EROFS`),
+and a clone and the live tree are two trees (`-EXDEV`), as for rename.
+A directory has one name (`-EPERM`).
+
 ## Self-test fixture failure ownership
 
 `cosmofstest.c:engine_mount` owns the registered RAM device until setup

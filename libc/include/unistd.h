@@ -53,6 +53,9 @@ unsigned sleep(unsigned seconds);
 int usleep(unsigned long usec);
 int unlink(const char *path);
 int symlink(const char *target, const char *path);
+int link(const char *oldpath, const char *newpath);   /* a final symbolic link is linked itself */
+int chown(const char *path, uid_t uid, gid_t gid);    /* (uid_t)-1 or (gid_t)-1 keeps one */
+int chroot(const char *path);
 /* Copies at most `len` bytes and does NOT terminate them, as POSIX says. */
 long readlink(const char *path, char *buf, unsigned long len);
 int rmdir(const char *path);

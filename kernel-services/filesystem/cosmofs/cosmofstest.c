@@ -5834,6 +5834,64 @@ bool selftest_cosmofs_check_longname(const char **reason)
 }
 
 /*
+ * cosmofs-link (VFS-4; design.md, "Hard links"): one file, four names in
+ * two directories (one of them long enough to raise the pool to 15); a
+ * directory and an existing name refused; a link to a symbolic link is
+ * that link. Names go one by one and the file stays readable through the
+ * rest; the count survives a remount and the checker counts every name.
+ * An open file outlives its last name and is freed after it (checked
+ * clean). A snapshot is read-only to a link, either way.
+ */
+bool selftest_cosmofs_link(const char **reason)
+{
+    struct blkdev *bd;
+    struct cosmofs_check_report rep;
+    struct cosmo_stat st, st2;
+    struct file *f;
+    static char lng[300];
+    uint8_t buf[4];
+
+    CHECK(engine_mount(&bd, 1024, reason));
+    CHECK(write_file(ENG "/a", "one", 3) && vfs_mkdir(NULL, ENG "/d", 0755) == 0);
+    CHECK(vfs_link(NULL, ENG "/a", NULL, ENG "/b", false) == 0);
+    CHECK(vfs_link(NULL, ENG "/a", NULL, ENG "/d/c", false) == 0);
+    CHECK(vfs_link(NULL, ENG "/b", NULL, lname(lng, 60, 'n'), false) == 0 && pool_version() == 15);
+    CHECK(vfs_stat(NULL, ENG "/a", &st) == 0 && vfs_stat(NULL, ENG "/d/c", &st2) == 0);
+    CHECK(st.ino == st2.ino && st.nlink == 4);
+    CHECK(vfs_link(NULL, ENG "/d", NULL, ENG "/e", false) == -EPERM);
+    CHECK(vfs_link(NULL, ENG "/a", NULL, ENG "/b", false) == -EEXIST);
+    CHECK(vfs_symlink(NULL, ENG "/s", "a") == 0 && vfs_link(NULL, ENG "/s", NULL, ENG "/s2", false) == 0);
+    CHECK(vfs_lstat(NULL, ENG "/s2", &st2) == 0 && st2.type == COSMO_DT_LNK && st2.nlink == 2);
+
+    CHECK(vfs_unlink(NULL, ENG "/a") == 0 && read_matches(ENG "/b", "one", 3));
+    CHECK(vfs_stat(NULL, ENG "/b", &st) == 0 && st.nlink == 3);
+    CHECK(vfs_sync() == 0 && remount_eng(bd, reason));
+    CHECK(vfs_stat(NULL, ENG "/d/c", &st) == 0 && st.nlink == 3 && read_matches(lng, "one", 3));
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK_CLEAN(rep);
+
+    /* Read-only both ways in a snapshot: no name made there, none taken out. */
+    unsigned n;
+    static struct cosmofs_snap_info info[1];
+    CHECK(snapctl(COSMOFS_SNAP_CREATE, "lk", info, 1, &n) == 0);
+    CHECK(vfs_link(NULL, ENG "/b", NULL, ENG "/.snapshots/lk/z", false) == -EROFS);
+    CHECK(vfs_link(NULL, ENG "/.snapshots/lk/b", NULL, ENG "/z", false) == -EROFS);
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/lk") == 0);
+
+    /* An open file outlives its last name, and is freed after it. */
+    CHECK(vfs_open(NULL, ENG "/b", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/b") == 0 && vfs_unlink(NULL, ENG "/d/c") == 0 && vfs_unlink(NULL, lng) == 0);
+    CHECK(f->vn->nlink == 0 && file_pread(f, buf, 3, 0) == 3 && memcmp(buf, "one", 3) == 0);
+    file_put(f);
+    CHECK(vfs_sync() == 0 && remount_eng(bd, reason));
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK_CLEAN(rep);
+    kinfo("selftest: cosmofs-link: four names for one file in two directories, a link to a link, the count across "
+          "a remount, a snapshot read-only both ways, an open file outliving its last name");
+    return engine_unmount(bd, reason);
+}
+
+/*
  * Rollback (roadmap 1.2 B1; design.md, "Rollback"; CF19), on a pool that
  * is not the root, where "the next mount" is an unmount and a mount.
  *

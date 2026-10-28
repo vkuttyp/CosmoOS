@@ -1670,6 +1670,50 @@ static __maybe_unused int64_t lx_rename(struct syscall_args *a)
     return rc;
 }
 
+/*
+ * linkat(olddirfd, oldpath, newdirfd, newpath, flags) (VFS-4): as Linux,
+ * a final symbolic link is linked itself unless AT_SYMLINK_FOLLOW.
+ * AT_EMPTY_PATH (linking a descriptor's file) needs CAP_DAC_READ_SEARCH
+ * on Linux; here an empty path is -ENOENT whatever the flags say.
+ */
+static int64_t linkat_common(int64_t odirfd, uint64_t uold, int64_t ndirfd, uint64_t unew, unsigned flags)
+{
+    if (flags & ~(unsigned)(LX_AT_SYMLINK_FOLLOW | LX_AT_EMPTY_PATH))
+        return -EINVAL;
+    char *oldp = kmalloc(2 * VFS_PATH_MAX, 0);   /* heap: see do_open */
+    if (oldp == NULL)
+        return -ENOMEM;
+    char *newp = oldp + VFS_PATH_MAX;
+    struct vnode *ostart, *nstart = NULL;
+    int rc = get_path(uold, oldp);
+    if (rc == 0)
+        rc = get_path(unew, newp);
+    if (rc == 0)
+        rc = at_base(odirfd, oldp, HANDLE_RIGHT_READ, &ostart, NULL, 0, NULL);
+    if (rc == 0) {
+        rc = at_base(ndirfd, newp, HANDLE_RIGHT_WRITE, &nstart, NULL, 0, NULL);
+        if (rc == 0)
+            rc = vfs_link(ostart, oldp, nstart, newp, (flags & LX_AT_SYMLINK_FOLLOW) != 0);
+        vnode_put(ostart);
+        if (nstart != NULL)
+            vnode_put(nstart);
+    }
+    kfree(oldp);
+    return rc;
+}
+
+static int64_t lx_linkat(struct syscall_args *a)
+{
+    return linkat_common((int64_t)a->a[0], a->a[1], (int64_t)a->a[2], a->a[3], (unsigned)a->a[4]);
+}
+
+#ifdef LX_link
+static int64_t lx_link(struct syscall_args *a)
+{
+    return linkat_common(LX_AT_FDCWD, a->a[0], LX_AT_FDCWD, a->a[1], 0);
+}
+#endif
+
 static int64_t lx_renameat(struct syscall_args *a)
 {
     char *oldp = kmalloc(2 * VFS_PATH_MAX, 0);   /* heap: see do_open */
@@ -4743,6 +4787,10 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_fchmodat2] = lx_fchmodat2,
     [LX_utimensat] = lx_utimensat,
     [LX_renameat] = lx_renameat,
+    [LX_linkat] = lx_linkat,
+#ifdef LX_link
+    [LX_link] = lx_link,
+#endif
     [LX_readlinkat] = lx_readlinkat,
 #ifdef LX_symlink
     [LX_symlink] = lx_symlink,

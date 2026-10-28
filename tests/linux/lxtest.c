@@ -2595,6 +2595,36 @@ int main(int argc, char **argv)
 #endif
         CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxlink", 0) == 0, 0);
     }
+    /* Hard links (VFS-4): linkat and, on x86-64, link. A final symbolic
+     * link is linked itself unless AT_SYMLINK_FOLLOW; a directory is
+     * EPERM, an existing name EEXIST, a second mount EXDEV, and an
+     * unknown flag EINVAL. Both names are one file until one goes. */
+    {
+        struct lx_stat a, b;
+#ifdef LX_link
+        CHECKV(sc2(LX_link, "/tmp/lxtest.txt", "/tmp/lxhard") == 0, 0);
+#else
+        CHECKV(sc5(LX_linkat, LX_AT_FDCWD, "/tmp/lxtest.txt", LX_AT_FDCWD, "/tmp/lxhard", 0) == 0, 0);
+#endif
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxtest.txt", &a, 0) == 0
+               && sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxhard", &b, 0) == 0, 0);
+        CHECKV(a.st_ino == b.st_ino && a.st_nlink == 2 && b.st_size == 22, (long)a.st_nlink);
+        CHECKV(sc5(LX_linkat, LX_AT_FDCWD, "/tmp/lxtest.txt", LX_AT_FDCWD, "/tmp/lxhard", 0) == -17, 0);
+        CHECKV(sc5(LX_linkat, LX_AT_FDCWD, "/tmp", LX_AT_FDCWD, "/tmp/lxhdir", 0) == -1, 0);   /* EPERM */
+        CHECKV(sc5(LX_linkat, LX_AT_FDCWD, "/tmp/lxtest.txt", LX_AT_FDCWD, "/tmp/lxh2", 0x8000) == -22, 0);
+        CHECKV(sc3(LX_symlinkat, "/tmp/lxtest.txt", LX_AT_FDCWD, "/tmp/lxhs") == 0, 0);
+        CHECKV(sc5(LX_linkat, LX_AT_FDCWD, "/tmp/lxhs", LX_AT_FDCWD, "/tmp/lxhs1", 0) == 0, 0);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxhs1", &b, LX_AT_SYMLINK_NOFOLLOW) == 0
+               && (b.st_mode & LX_S_IFMT) == LX_S_IFLNK, b.st_mode);
+        CHECKV(sc5(LX_linkat, LX_AT_FDCWD, "/tmp/lxhs", LX_AT_FDCWD, "/tmp/lxhs2", LX_AT_SYMLINK_FOLLOW) == 0, 0);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxhs2", &b, LX_AT_SYMLINK_NOFOLLOW) == 0
+               && (b.st_mode & LX_S_IFMT) == LX_S_IFREG && b.st_ino == a.st_ino && b.st_nlink == 3, b.st_mode);
+        CHECKV(sc5(LX_linkat, LX_AT_FDCWD, "/tmp/lxtest.txt", LX_AT_FDCWD, "/proc/lxhard", 0) == -18, 0);   /* procfs: EXDEV before any permission */
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxhs2", 0) == 0 && sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxhs1", 0) == 0
+               && sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxhs", 0) == 0, 0);
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxhard", 0) == 0, 0);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxtest.txt", &a, 0) == 0 && a.st_nlink == 1, (long)a.st_nlink);
+    }
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/nope", &st, 0) == -2, 0);
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp", &st, 0) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);
     CHECKV(sc2(LX_fstat, 0, &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFCHR, st.st_mode);

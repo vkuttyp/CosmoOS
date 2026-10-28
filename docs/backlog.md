@@ -339,9 +339,9 @@ Open lines (struck lines are not counted):
 - **VFS-1** correctness, S. `vfs_setattr` checks the owner before the vnode lock and keeps a mode the filesystem failed to store.
 - **VFS-2** correctness, S. `chown`/`chmod` on procfs or devfs changes only the cached vnode.
 - **VFS-3** correctness, M. A read whose copy-out faults loses what the object took from its source (pipes, console, pty), except signalfd.
-- **VFS-4** usability, M. No hard links (`link`/`linkat`).
+- ~~**VFS-4** usability, M. No hard links (`link`/`linkat`).~~ Done by roadmap 1.2 A2, its second PR: `link`/`linkat` and the native `SYS_link` over `vfs_link`, on ramfs and cosmofs; a file dies with its last name (`docs/kernel-services/vfs/design.md`, "Hard links").
 - **VFS-5** usability, M. Mount options: `mount(2)` takes `MS_RDONLY` only (no remount, bind, move, `nosuid`...) and no option string; `umount2` refuses `MNT_DETACH`, `MNT_EXPIRE`, `UMOUNT_NOFOLLOW`; no overlay.
-- **VFS-6** usability, S. The native ABI has no `chmod`, `chown`, `chroot`, `utimes` or `umask`; the Linux umask is not applied to native creation.
+- ~~**VFS-6** usability, S. The native ABI has no `chmod`, `chown`, `chroot`, `utimes` or `umask`; the Linux umask is not applied to native creation.~~ Done by roadmap 1.2 A2, its second PR: `SYS_chmod`, `SYS_chown`, `SYS_chroot`, `SYS_utimes` and `SYS_umask`, and every native creation takes the umask (`docs/kernel/syscall/api.md`).
 - **VFS-7** usability, M. Devices have no numbers (`st_rdev` 0), so `ps` cannot name a terminal and `lsblk` has no `MAJ:MIN`.
 - **VFS-8** usability, S. No `/proc/filesystems` (BusyBox `mount` without `-t` fails).
 - **VFS-9** nice-to-have, M. A dentry cache and an `(ino, generation)` identity.
