@@ -28,6 +28,14 @@ choosing what to do.
   boot or self-test budget under `tests/boot/` or a `*_TIMEOUT` variable)
   that changes no other code; it cites the CI data that sets the budget
   instead (as #418 did).
+- Exempt from the matrix, not from the dated report: a test-only PR,
+  one that changes only an acceptance test's scripts or harness that no
+  matrix step runs (such as `tests/busybox/`, copied into the image but
+  run only by `make test-busybox`) and host-side `tools/`, and no
+  compiled code. Its proof is the probe on both architectures and branch
+  CI, which runs the acceptance test it changes (as #479 did). A change
+  to the self-tests, anything compiled, or a harness a matrix step runs
+  (such as `tests/boot/run_boot_test.py`) is not test-only.
 - At most 5 PRs per unit. If more seem needed, stop and report why.
 - A unit is done when its acceptance test is green on main; tick its
   box in [docs/roadmap-1.2.md](docs/roadmap-1.2.md) in the same PR.

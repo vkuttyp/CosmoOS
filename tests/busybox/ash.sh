@@ -326,6 +326,9 @@ expect nice-self 0 "$(nice)"
 expect nice-exec 7 "$(nice -n 7 nice)"
 nice -n 7 sleep 64 &
 np=$!
+# $! is the forked shell, at nice 0 until it has run nice, which sets the
+# value and execs sleep: read it once the process is sleep.
+for i in 1 2 3 4 5 6 7 8 9 10; do [ "$(ps -o pid,comm | awk -v p=$np '$1 == p { print $2 }')" = sleep ] && break; sleep 0.1; done
 expect ps-nice "$np 7" "$(ps -o pid,nice | awk -v p=$np '$1 == p { print $1, $2 }')"
 renice -n 2 -p $np > /dev/null
 expect renice-add 9 "$(ps -o pid,nice | awk -v p=$np '$1 == p { print $2 }')"

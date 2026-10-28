@@ -3619,3 +3619,10 @@ See the [history index](README.md).
     before review.
   - Tests: `sched-fair` (failing first), `process-nice-threads`,
     `test_fair`. Report: `docs/audit/2026-10-28-a5-fair-report.md`.
+- **ps-nice waits for the exec (2026-10-28, a fix after A5's merge).**
+  - Main's merge of #477 failed `busybox test (aarch64)`: `ps-nice` read
+    `$!` while it was still the forked shell, before `nice` set the value
+    and execed `sleep`. The check now waits until ps names it `sleep`.
+  - `tools/ps-nice-probe.py` holds that window 0.3 s; `--old` fails
+    `ps-nice` (0) and `renice-add` (2) on both architectures.
+  - Report: `docs/audit/2026-10-28-ps-nice-report.md`.

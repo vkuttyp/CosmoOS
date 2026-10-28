@@ -5308,3 +5308,19 @@ most 233.8 s of 240. The entropy job's own limit is 45 min (it took up to
 29.1 of 30). x86-64 is unchanged. The figures are in the Makefile's
 comments. What made the slow kind of boot grow from about 236 s to about
 290 s in twelve days is not measured here.
+
+
+## ash.sh ps-nice: read before the exec, 2026-10-28
+
+`test-busybox: FAIL: dynamic scripted test: BBTEST: FAIL ps-nice: want
+[5315 7] got [5315 0]`.
+
+- 2026-10-28, CI `busybox test (aarch64)` on main's #477 merge
+  (`f87a808f`, run 40703059019, job 122867956771). Main red. The
+  branch's own run (40700526693) passed.
+
+Mechanism, established: `$!` after `nice -n 7 sleep 64 &` is the forked
+ash, at nice 0 until it has run `nice`; ps read it first. Fixed the same
+day (backlog TEST-22, `docs/audit/2026-10-28-ps-nice-report.md`): the
+check waits until the process is `sleep`. `tools/ps-nice-probe.py`
+holds the window open and fails the old script on both architectures.
