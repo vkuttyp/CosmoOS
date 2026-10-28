@@ -60,10 +60,17 @@ runs `nice`. Release `make test-busybox`, as CI runs it:
 
 ## Validation
 
-A test-script change confined to the BusyBox boot: the probe's four
-runs above, and branch CI on both architectures. The device-lifecycle
-matrix's kernel boots do not run `ash.sh`, and this change touches no
-code they build, so the matrix was not run.
+A test-only PR: `ash.sh` is copied into the image's boot archive
+(`ports/busybox/busybox.mk`) but only `make test-busybox` runs it, and
+nothing compiled changes. Its proof is the probe's four runs above and
+branch CI on both architectures, which runs `test-busybox`.
+
+The device-lifecycle matrix was started on the PR's head (`da044918`)
+after Codex's review pointed out that `AGENTS.md` exempted only
+documentation-only and timeout-only PRs. x86-64 `host-test` and `fuzz`
+passed before the owner stopped it: none of its steps runs `ash.sh`, so
+it would test main's code. This PR adds the test-only exemption to
+`AGENTS.md`'s scope rules.
 
 ## Follow-ups
 
