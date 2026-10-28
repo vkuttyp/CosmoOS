@@ -320,6 +320,19 @@ expect status-vm "1 1" "$(awk '/^VmSize:/ { s = ($2 > 0) } /^VmRSS:/ { r = ($2 >
 expect status-state "S (sleeping)" "$(sed -n 's/^State:\t//p' /proc/$sp/status)"
 kill $sp
 wait $sp 2>/dev/null
+# Roadmap 1.2 A5: nice values (LX-13). nice and renice set them, exec
+# keeps them, and ps and /proc/<pid>/stat show them (priority 20 + nice).
+expect nice-self 0 "$(nice)"
+expect nice-exec 7 "$(nice -n 7 nice)"
+nice -n 7 sleep 64 &
+np=$!
+expect ps-nice "$np 7" "$(ps -o pid,nice | awk -v p=$np '$1 == p { print $1, $2 }')"
+renice -n 2 -p $np > /dev/null
+expect renice-add 9 "$(ps -o pid,nice | awk -v p=$np '$1 == p { print $2 }')"
+renice -12 -p $np > /dev/null
+expect renice-set "8 -12" "$(awk '{ print $18, $19 }' /proc/$np/stat)"
+kill $np
+wait $np 2>/dev/null
 # free says what sysctl says: the same total, and a free figure within
 # 2 MiB of one read just before it (the two are separate processes, and
 # memory moves between them).

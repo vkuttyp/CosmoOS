@@ -16,7 +16,7 @@ off one.
 | `/proc/<pid>/fd/<n>` | symbolic link | what the handle is: a terminal by its path (`/dev/console`, `/dev/tty`, `/dev/ptmx`, `/dev/pts/N`), a directory by the path it was opened by, else `file:[ino]` or `<kind>:[address]` |
 | `/proc/<pid>/status` | file, 0444 | Linux's `Key:\tvalue` lines, then this kernel's own, below |
 | `/proc/<pid>/limits` | file, 0444 | one `name: value` line per `COSMO_RLIMIT_*` |
-| `/proc/<pid>/stat` | file, 0444 | Linux's record (proc(5)) through field 44: pid, `(name)`, state `R`, `S`, `T` or `Z`, ppid, pgid, sid, tty_nr (Linux's number for the session's controlling terminal: the console 5,1, `/dev/pts/N` 136,N; 0 for none), tpgid (its foreground group, -1 for none), utime (all cpu time; stime 0), priority 20, nice 0, num_threads, starttime, vsize (bytes) and rss (pages) of the process's space (0 once it is gone), processor; times in 1/100 s; page faults 0 |
+| `/proc/<pid>/stat` | file, 0444 | Linux's record (proc(5)) through field 44: pid, `(name)`, state `R`, `S`, `T` or `Z`, ppid, pgid, sid, tty_nr (Linux's number for the session's controlling terminal: the console 5,1, `/dev/pts/N` 136,N; 0 for none), tpgid (its foreground group, -1 for none), utime, stime, cutime and cstime (the CPU time's user/system split, the process's and its waited-for children's), priority (20 + nice) and nice, num_threads, starttime, vsize (bytes) and rss (pages) of the process's space (0 once it is gone), processor; times in 1/100 s; page faults 0 |
 | `/proc/<pid>/cmdline` | file, 0444 | argv, each string NUL-terminated, the first 256 bytes |
 | `/proc/<pid>/environ` | file, 0444, the process's own (P5 at the open is the rule) | envp as exec gave it, each string NUL-terminated, the first 4095 bytes; opened only under P5 (`EACCES` otherwise); its size is 0 until opened |
 | `/proc/<pid>/cwd` | symbolic link | the working directory's path; under P5 (`EACCES`); `ENOENT` for an exited process or one whose root or mounts are not the reader's |
@@ -49,7 +49,7 @@ lower-case `key: value` (`name`, `pid`, `state: running` ...); `priv`
 reads `Privs:`. No file renders a
 kernel address (an open handle that is not a file or a terminal is named
 by its kind alone).
-`limits` names `as`, `mem`, `nofile`, `nproc` and `vmem`, with
+`limits` names `as`, `mem`, `nofile`, `nproc`, `vmem` and `nice`, with
 `unlimited` for `COSMO_RLIM_INFINITY`.
 
 `fd` and its links answer only the process's own user and the

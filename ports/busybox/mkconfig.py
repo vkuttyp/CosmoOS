@@ -27,9 +27,11 @@ FOLD PASTE COMM CKSUM BASE64 UNZIP BZIP2 BUNZIP2 XZ UNXZ ZCAT MKTEMP LOGGER SETS
 PS KILL
 CHOWN CHGRP SU
 REBOOT HALT HWCLOCK NTPD
-MOUNT UMOUNT""".split())
+MOUNT UMOUNT
+NICE RENICE""".split())
 # M4 (decision 5); v1.0.2's everyday commands; ping over raw ICMP sockets; poweroff; shell completeness S1's
-# network inspection, S2's applets, S3's process tools, S4's ownership, S5's power and clock and S6's mounting
+# network inspection, S2's applets, S3's process tools, S4's ownership, S5's power and clock, S6's mounting and
+# roadmap 1.2 A5's nice values
 
 FORCE = {
     "STATIC": "y",                 # decision 6: a static binary

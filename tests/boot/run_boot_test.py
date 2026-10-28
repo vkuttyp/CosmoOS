@@ -511,6 +511,7 @@ LINUXTEST_MARKERS = [
     r"^lxtest: getrandom: " + ("seeded" if SEEDED else "unseeded") + "$",
     r"^lxtest: auxv ok$",
     r"^lxtest: cputime ok$",
+    r"^lxtest: nice ok$",
     # Shared libraries (roadmap 1.1 P4; tests/dyn/).
     r"^dynhello: ok$",
     # The target's C compiler (roadmap 1.2 A1): rc.test's programs cc built.

@@ -53,6 +53,7 @@ const struct rlimits rlimits_default = {
         [COSMO_RLIMIT_NOFILE] = HANDLE_TABLE_SIZE,
         [COSMO_RLIMIT_NPROC] = 128,
         [COSMO_RLIMIT_VMEM] = COSMO_HV_VM_MEM_MAX,
+        [COSMO_RLIMIT_NICE] = 0,   /* Linux's default: no lowering without PRIV_PROC */
     },
 };
 
@@ -937,6 +938,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
          * give the child new ids with the old mask (PR #370 review). */
         arch_irq_state_t cs = spin_lock_irqsave(&parent->lock);
         p->cred = parent->cred;
+        p->nice = parent->nice;
         spin_unlock_irqrestore(&parent->lock, cs);
         p->rlim = parent->rlim;
         p->umask = __atomic_load_n(&parent->umask, __ATOMIC_RELAXED);
@@ -1180,6 +1182,7 @@ static void fork_inherit(struct process *p, struct process *parent)
     arch_irq_state_t s = spin_lock_irqsave(&parent->lock);
     p->cred = parent->cred;
     p->rlim = parent->rlim;
+    p->nice = parent->nice;
     p->domain = parent->domain;
     p->root = parent->root;
     if (p->root)
@@ -2413,6 +2416,34 @@ int process_setrlimit(unsigned resource, uint64_t value)
     return 0;
 }
 
+void process_nice_caller(struct nice_caller *caller)
+{
+    struct process *p = process_current();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    caller->euid = p->cred.euid;
+    caller->privileged = cred_has(&p->cred, PRIV_PROC);
+    spin_unlock_irqrestore(&p->lock, s);
+}
+
+int process_nice_set(struct process *p, const struct nice_caller *caller, int32_t nice)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    struct nice_target t = { p->cred.ruid, p->cred.euid, p->nice, p->rlim.v[COSMO_RLIMIT_NICE] };
+    int rc = nice_may_set(caller, &t, nice);
+    if (rc == 0)
+        p->nice = nice;
+    spin_unlock_irqrestore(&p->lock, s);
+    return rc;
+}
+
+int32_t process_nice_get(struct process *p)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    int32_t nice = p->nice;
+    spin_unlock_irqrestore(&p->lock, s);
+    return nice;
+}
+
 /* sys_log for a process without PRIV_SYS_ADMIN: a token bucket of
  * LOG_BUCKET lines refilling at LOG_RATE_PER_S. Returns false when the
  * caller must wait. */
@@ -2775,13 +2806,15 @@ int process_setsid(pid_t *out)
     return rc;
 }
 
-struct process *process_group_next(pid_t pgid, pid_t after)
+/* The member of the set `in` names (a group or a user) with the smallest
+ * pid above `after`: process_group_next and process_user_next. */
+static struct process *process_set_next(bool (*in)(const struct process *p, uint32_t id), uint32_t id, pid_t after)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
     for (;;) {
         struct process *best = NULL, *p;
         list_for_each_entry(p, &g_processes, all_link) {
-            if (p->pgid != pgid || p->pid <= after)
+            if (!in(p, id) || p->pid <= after)
                 continue;
             if (best == NULL || p->pid < best->pid)
                 best = p;
@@ -2798,6 +2831,23 @@ struct process *process_group_next(pid_t pgid, pid_t after)
     }
     spin_unlock_irqrestore(&g_process_table_lock, s);
     return NULL;
+}
+
+static bool in_group(const struct process *p, uint32_t pgid) { return p->pgid == (pid_t)pgid; }
+
+/* The real uid is read under the table's lock, as process_count_uid reads
+ * it: setresuid writes it under the process's own, so a walk racing a uid
+ * change sees the process under either id. */
+static bool of_user(const struct process *p, uint32_t ruid) { return p->cred.ruid == ruid; }
+
+struct process *process_group_next(pid_t pgid, pid_t after)
+{
+    return process_set_next(in_group, (uint32_t)pgid, after);
+}
+
+struct process *process_user_next(uint32_t ruid, pid_t after)
+{
+    return process_set_next(of_user, ruid, after);
 }
 
 /*

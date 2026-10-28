@@ -2524,6 +2524,7 @@ static int lx_rlimit_map(unsigned res)
     case LX_RLIMIT_RSS: return COSMO_RLIMIT_MEM;
     case LX_RLIMIT_NOFILE: return COSMO_RLIMIT_NOFILE;
     case LX_RLIMIT_NPROC: return COSMO_RLIMIT_NPROC;
+    case LX_RLIMIT_NICE: return COSMO_RLIMIT_NICE;
     default: return -1;
     }
 }
@@ -2831,6 +2832,96 @@ static int64_t lx_getrusage(struct syscall_args *a)
     struct lx_rusage ru;
     rusage_from(&self, &ru);
     return copy_to_user(a->a[1], &ru, sizeof(ru)) ? -EFAULT : 0;
+}
+
+/* --- nice values (roadmap 1.2 A5, LX-13; the rules are Nova's, kernel/process/nice.c) --- */
+
+/* The id getpriority and setpriority walk for `which` and `who` (Linux's
+ * `who` is an int; 0 names the caller's process, group or real uid), or
+ * -EINVAL for another `which`. */
+static int lx_prio_id(unsigned which, int who, pid_t *id)
+{
+    switch (which) {
+    case LX_PRIO_PROCESS:
+        *id = who != 0 ? who : process_current()->pid;
+        return 0;
+    case LX_PRIO_PGRP:
+        if (who != 0) {
+            *id = who;
+            return 0;
+        }
+        return process_getpgid(0, id);
+    case LX_PRIO_USER:
+        *id = who != 0 ? who : (pid_t)cred_current()->ruid;
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+/* The next process `which` and `id` name after pid `after` (0 first),
+ * referenced, or NULL: one for a process, every member for a group or a
+ * user. A process outside the caller's domain is not there for it, as
+ * kill finds it (kill_one). */
+static struct process *lx_prio_next(unsigned which, pid_t id, pid_t after)
+{
+    const struct process *cur = process_current();
+    for (;;) {
+        struct process *p;
+        if (which == LX_PRIO_PROCESS)
+            p = after == 0 && id > 0 ? process_lookup(id) : NULL;
+        else if (which == LX_PRIO_PGRP)
+            p = id > 0 ? process_group_next(id, after) : NULL;
+        else
+            p = process_user_next((uint32_t)id, after);
+        if (p == NULL || cur->domain == 0 || p->domain == cur->domain)
+            return p;
+        after = p->pid;
+        process_put(p);
+    }
+}
+
+/* setpriority(2): every process named that the caller may change gets the
+ * value, clamped to -20..19; the result is nice_set_result's. */
+static int64_t lx_setpriority(struct syscall_args *a)
+{
+    unsigned which = (unsigned)a->a[0];
+    pid_t id;
+    int rc = lx_prio_id(which, (int)a->a[1], &id);
+    if (rc)
+        return rc;
+    int32_t nice = nice_clamp((int32_t)a->a[2]);
+    struct nice_caller caller;
+    process_nice_caller(&caller);
+    int result = -ESRCH;
+    pid_t after = 0;
+    struct process *p;
+    while ((p = lx_prio_next(which, id, after)) != NULL) {
+        after = p->pid;
+        result = nice_set_result(result, process_nice_set(p, &caller, nice));
+        process_put(p);
+    }
+    return result;
+}
+
+/* getpriority(2): 20 - the lowest nice value among the processes named
+ * (1 to 40; libc turns it back), or -ESRCH. Anyone may read it. */
+static int64_t lx_getpriority(struct syscall_args *a)
+{
+    unsigned which = (unsigned)a->a[0];
+    pid_t id;
+    int rc = lx_prio_id(which, (int)a->a[1], &id);
+    if (rc)
+        return rc;
+    int result = -ESRCH;
+    pid_t after = 0;
+    struct process *p;
+    while ((p = lx_prio_next(which, id, after)) != NULL) {
+        after = p->pid;
+        result = nice_get_result(result, process_nice_get(p));
+        process_put(p);
+    }
+    return result;
 }
 
 /* times(2): the same four times in USER_HZ ticks, and the monotonic
@@ -4691,6 +4782,8 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_getitimer] = lx_getitimer,
     [LX_getrusage] = lx_getrusage,
     [LX_times] = lx_times,
+    [LX_getpriority] = lx_getpriority,
+    [LX_setpriority] = lx_setpriority,
 #ifdef LX_alarm
     [LX_alarm] = lx_alarm,
 #endif

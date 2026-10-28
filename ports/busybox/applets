@@ -144,3 +144,7 @@ ntpd
 # cosmofs nor prints PARTUUID: /sbin/lsblk and /sbin/blkid are native.
 mount
 umount
+# Roadmap 1.2 A5: nice values (LX-13) over getpriority(2) and
+# setpriority(2); ps -o nice shows them.
+nice
+renice
