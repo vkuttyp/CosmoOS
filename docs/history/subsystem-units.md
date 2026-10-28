@@ -3626,3 +3626,13 @@ See the [history index](README.md).
   - `tools/ps-nice-probe.py` holds that window 0.3 s; `--old` fails
     `ps-nice` (0) and `renice-add` (2) on both architectures.
   - Report: `docs/audit/2026-10-28-ps-nice-report.md`.
+- **net-login's RTC bound counts the century write (2026-10-28, a fix
+  after #480's merge).**
+  - Main's merge of #480 failed `net-login test (x86_64)` a second short
+    after the reboot. edk2 writes the RTC's century register at every boot
+    with the clock running, and QEMU's MC146818 then keeps the last set's
+    sub-second phase: the RTC drops back by the time since `hwclock -w`
+    modulo a second. The x86-64 allowance below is 3 s; AArch64 keeps 2 s.
+  - `tools/rtc-century-probe.py` measures the rewind over qtest; `--old`'s
+    2 s bound rejects the worst reading it allows.
+  - Report: `docs/audit/2026-10-28-rtc-century-report.md`.
