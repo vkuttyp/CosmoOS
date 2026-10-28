@@ -17,7 +17,7 @@ the sub-second phase of the last set, so the RTC drops back by the time
 since that set modulo a second. The probe drives QEMU's RTC through qtest,
 no guest: it sets the time under SET as the kernel's hwclock -w does, waits
 D, writes the century register, and times the next rollover against the
-host, for D = 0.3, 0.6, 0.9 and 1.4 s. Each lag must be D mod 1 within
+host, for D = 1.3, 1.6, 1.9 and 2.4 s. Each lag must be D mod 1 within
 50 ms.
 
 Then the bound: the reading the mechanism allows at its worst is the
@@ -45,7 +45,9 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 SUBJECT = "test-net-login: the RTC bound counts the firmware's century write"
 HARNESS = "tests/boot/net_login_test.py"
-DELAYS = (0.3, 0.6, 0.9, 1.4)
+# Seconds from the set to the century write: after the first rollover (at
+# most a second), rewinds of 0.3, 0.6, 0.9 and 0.4 s.
+DELAYS = (1.3, 1.6, 1.9, 2.4)
 TOLERANCE = 0.05
 TRUNCATION = 0.999   # the most a whole-second reading loses
 
@@ -141,7 +143,7 @@ def main():
         want, lag = rewind(d)
         # 0.999 late is 0.001 early: compare on the circle.
         off = min(abs(lag - want), 1.0 - abs(lag - want))
-        measured.append((d, want, lag, off <= TOLERANCE))
+        measured.append((d, want, want if off <= TOLERANCE else lag, off <= TOLERANCE))
         print(f"rtc-century: set, {d:.1f}s, century write: the RTC rolls over {lag:.3f}s late "
               f"(predicted {want:.3f}s)")
     mech = all(ok for *_, ok in measured)
