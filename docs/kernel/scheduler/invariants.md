@@ -436,3 +436,16 @@ from the first of two queues, the second prepare leaves the thread READY;
 a breach is repaired by `sched_test_repair_blocked_queued` before the
 waits finish, so a failure leaves nothing corrupt).
 
+**S35. At the fair level, CPU time follows weight.** The ready list at
+`SCHED_PRIO_DEFAULT` is in vruntime order, every running thread there is
+charged its run time × 1024 / its weight exactly once, and the running
+thread gives way once it is a granularity ahead of the leftmost; so over
+time threads sharing a CPU at that level receive time in proportion to
+their nice values' weights, and none starves: a thread's vruntime only
+grows while it runs, so the leftmost always runs within one granularity
+of everyone else's lead. A yielding thread goes behind every equal. Check:
+`sched-fair` in the kernel (two pinned spinners: equal, 0 against 5, -5
+against 0, 0 against 19), and `test_fair` on the host (the arithmetic
+against Linux's table and 128-bit arithmetic; one CPU simulated for
+400 s per mix, shares within 2 % of the weights, a sleeper's lead bounded).
+

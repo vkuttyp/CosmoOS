@@ -1245,7 +1245,7 @@ each; none is needed by M2's acceptance test.
   `5,1` rather than a name, since it finds no node with that number. *2026-10-20: open; [backlog](../backlog.md) VFS-7.*
 - No nice value and no scheduling-priority calls in the Linux personality
   (`setpriority`, `nice`): `stat`'s priority is 20 and nice 0 for every
-  process, and `ps -o nice` is 0. *2026-10-20: open; [backlog](../backlog.md) LX-13. 2026-10-28: the calls, `RLIMIT_NICE`, `stat` and `ps` done by roadmap 1.2 A5's second PR; the scheduler weighs the value from its third.*
+  process, and `ps -o nice` is 0. *2026-10-20: open; [backlog](../backlog.md) LX-13. 2026-10-28: the calls, `RLIMIT_NICE`, `stat` and `ps` done by roadmap 1.2 A5's second PR, and the scheduler weighs the value since its third: done.*
 - No user/system split of CPU time: all of it is `utime`, `stime` is 0
   (as since v1.0.2). *2026-10-20: open; [backlog](../backlog.md) OBS-7.*
 - `/proc/<pid>/environ` is the environment exec gave the process, kept by

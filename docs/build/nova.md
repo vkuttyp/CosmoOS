@@ -32,8 +32,9 @@ committed without its C, cannot merge.
 | `kernel/kernel.mk`, `tests/host/host.mk`, `tests/fuzz/fuzz.mk` | you | build `NAME.c` like any C file, with `nova_rt_core.c` and a `nova_panic.c` |
 
 The current ports: `kernel/block/gpt.nova` (the GPT parser and writer),
-`kernel/process/cputime.nova` (CPU time and the CPU-time timers) and
-`kernel/process/nice.nova` (the rules of nice values).
+`kernel/process/cputime.nova` (CPU time and the CPU-time timers),
+`kernel/process/nice.nova` (the rules of nice values) and
+`kernel/scheduler/fair.nova` (the fair level's weights and virtual time).
 Read them before writing a new one.
 
 ## Setting up

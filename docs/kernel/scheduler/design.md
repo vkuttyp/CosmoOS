@@ -159,6 +159,9 @@ struct sched_policy {
     struct thread *(*pick_next)(struct runqueue *rq);   /* NULL = idle */
     void (*tick)(struct runqueue *rq, struct thread *current, uint64_t ns);
     void (*slice_new)(struct thread *t);                /* refill on switch-in */
+    struct thread *(*pick_migratable)(struct runqueue *rq, cpumask_t allowed);
+    void (*charge)(struct runqueue *rq, struct thread *t, uint64_t now);  /* tick and switch-out */
+    void (*moved)(struct runqueue *from, struct runqueue *to, struct thread *t);  /* migration */
 };
 ```
 
@@ -167,6 +170,52 @@ struct sched_policy {
 sets the bitmap bit; `pick_next` takes `__builtin_ctzll(bitmap)`;
 `tick` subtracts the tick period from `slice_left_ns` and requests
 reschedule at zero; `slice_new` refills to `SCHED_SLICE_NS` (10 ms).
+That is every level but one: `SCHED_PRIO_DEFAULT` is the fair level.
+
+### The fair level
+
+Roadmap 1.2 A5's third PR (backlog LX-13). Every user thread and most
+kernel workers run at `SCHED_PRIO_DEFAULT`, so that level shares a CPU
+by weight instead of by turns: Linux's CFS, without its groups. The
+arithmetic is Nova's (`kernel/scheduler/fair.nova`, from which `make
+nova` generates `fair.c`; API `kernel/include/kernel/fair.h`), the lists
+and locks `policy_rr.c`. The other 63 levels are unchanged, and a
+better level always runs first.
+
+- **Weight.** A thread's nice value (`thread.nice`: its process's,
+  `docs/kernel/process/design.md`, "Nice values"; 0 for a kernel thread)
+  gives Linux's weight, 1024 at nice 0, about 1.25 times less per step:
+  15 at 19, 88761 at -20 (`fair_weight`).
+- **Virtual time.** `thread.vruntime` grows by run time × 1024 / weight
+  (`fair_charge`, exact, saturating), charged by `policy->charge` at
+  every tick and at the switch-out from the later of the switch-in and
+  the last charge, so nothing is charged twice. Time spent boosted to
+  another level by priority inheritance is not charged.
+- **Order.** The level's list is kept in vruntime order, ties in arrival
+  order (`fair_before`); `pick_next` takes its head, as for every level,
+  and `pick_migratable` its tail, the thread furthest ahead.
+- **Preemption.** The tick switches the running thread out once it is
+  more than `FAIR_GRANULARITY_NS` (4 ms, a tick) of virtual time ahead
+  of the leftmost ready thread (`fair_should_preempt`), or a better
+  level has a thread. Two equal threads take turns of 12 to 16 ms, about
+  the 10 ms slice. The slice does not count at this level, and a wake
+  preempts only from a better level, as before.
+- **Placement.** The queue keeps `fair_min`, which only grows: the
+  smaller of the running thread's vruntime and the leftmost's
+  (`fair_min`). A thread joining the level -- new, woken, back from a
+  boost -- starts no earlier than `fair_min - FAIR_WAKE_BONUS_NS` (5 ms;
+  `fair_place`): a sleeper runs soon but cannot claim the CPU for as long
+  as it slept.
+- **Yield.** `sched_yield` sets `THREAD_FLAG_YIELDED`; the thread is
+  queued behind every thread at the level, its vruntime raised to the
+  last one's, so a yield still lets every equal run first, as the 82
+  callers that spin with it expect.
+- **Migration.** `policy->moved` carries a thread's lead or lag from the
+  old queue's `fair_min` to the new one's (`fair_rebase`). The balancer
+  still counts threads, not weights.
+- **Measured.** `sched-fair` (two spinners on one CPU): nice 0 against 5
+  ran 454 and 149 ms (3.05; Linux's weights say 3.06), -5 against 0 449
+  and 153, 0 against 19 793 and 11 (72; 68), equal values 203 and 199.
 
 ### schedule()
 

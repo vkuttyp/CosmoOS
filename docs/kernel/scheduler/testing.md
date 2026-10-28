@@ -234,9 +234,14 @@ join; the queue is empty.
   with IPI, contended mutex across CPUs, migration at creation) arrive
   with the SMP PR.
 - No priority-inheritance test because there is no priority inheritance.
-- No host tests yet for the run-queue bitmap logic or the wait-queue
-  protocol; both separate cleanly (`policy_rr.c` and `wait.c` depend on
-  little) and are the next host-test candidates.
+- The fair level's arithmetic has a host test, `test_fair`: Linux's
+  weights, the exact charge against 128-bit arithmetic over a grid and
+  200,000 random cases, placement, rebasing, the order, and one CPU
+  simulated tick by tick with `policy_rr.c`'s fair-level rules over those
+  functions (six nice mixes for 400 s each, shares within 2 % of the
+  weights; turns of two equal threads at most 16 ms; a sleeper's lead
+  bounded). No host test yet for the run-queue bitmap logic or the
+  wait-queue protocol themselves.
 - Timing bounds are loose under TCG; a KVM/HVF run
   (`QEMU_ACCEL=kvm`) would allow tighter ones.
 - Stack overflow into the guard page is not exercised; it would need a
@@ -253,6 +258,7 @@ join; the queue is empty.
 | `sched-migrate` | a worker held READY on CPU A behind a higher-priority pinned spinner, its mask widened to {A, B}, is moved to B by `sched_migrate` and its *first* recorded CPU is B; the migration count rose. The test thread pins itself, so A and B are two other CPUs (three online needed, else skipped) The worker is created only after the spinner has said it runs (`wait_spinner_entered`, the placed-running unit): a worker READY behind a spinner still queued was the case 1-14 times in 100. |
 | `sched-migrate-refuses` | each refusal by name: a worker pinned to A -> `affinity`; to A itself -> `same-cpu`; to `cpu_count()` -> `offline`; the running spinner -> `not-ready`; a thread that has run `waitqueue_prepare` (BLOCKED, still running) -> `not-ready`; the same thread woken (READY, queued, still `rq->current`, held there by `preempt_disable`) -> `current`; a worker that has run on A and is then displaced by a higher-priority spinner pinned to A (READY, queued, not current) -> `preempted` The spinner runs at `DEFAULT - 16`, above the reaper and `quiesce`, and is waited for until it says it runs. Before its migrate, a rival at the reaper's priority (`mig-rival`) is made runnable on its CPU and must not run in 20 ms; with the spinner at `DEFAULT - 1` the rival takes the CPU and the spinner is refused as `preempted` (the placed-running unit). |
 | `sched-migrate-stress` | eight spinners, eight 1 ms sleepers, four completion ping-pong pairs, two mutex contenders, a late starter (its first round after 300 ms), and a migrator calling `sched_migrate_from` on random CPU pairs, in three phases. **Stress**, 200 ms: at least 100 migrations (thousands on four CPUs), and no worker ever outside its mask (checked under `preempt_disable` each round). **The migrator stops** on its own flag and is joined. **Every worker runs again**: its rounds pass a snapshot taken at that stop, within a 2 s hang guard (a deadline, not a latency claim; a clean run needs a few waits). The claim is that migration strands no thread, not that every thread runs within the window; a random migrator can delay a waiting thread for as long as it keeps moving it (S26). Workers set `exited` as their last action and only those are joined. A worker not leaving is named: a mutex contender asleep while another unjoined worker holds the mutex as "blocked behind a stranded worker", any other as "stranded or stuck", with its kind, entry, first round, rounds, thread state and CPU. The run's storage is allocated per run and left to a worker that is not leaving. |
+| `sched-fair` | two spinners pinned to the last online CPU at the default level for 400 to 800 ms, by `sched_thread_run_ns`: equal nice values within 2:3; nice 0 against 5 and -5 against 0 between 2.0 and 4.5 to 1 (Linux's weights: 3.06 and 3.05); nice 19 runs, at most a fifteenth of nice 0's (S35). Failed first on main, 1:1 (306 and 297 ms). |
 
 ## Balancing (`kernel/scheduler/smptest.c`)
 

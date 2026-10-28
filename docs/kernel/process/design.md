@@ -1171,12 +1171,14 @@ calls are C. Roadmap 1.2 A5's second PR; backlog LX-13. Linux's rules
   18, 20 + nice, Linux's figure for a normal task) and nice (field 19),
   which BusyBox's `ps -o nice` and `top` read. `nice` and `renice` are
   BusyBox's.
-- **What it does not do yet.** The scheduler does not read it: every
-  process still runs at one level. A weighted share at that level,
-  Linux's weight table with nice 0 = 1024, is A5's third PR. The value is
-  per process, not per thread as Linux's is: a thread's id other than the
-  process's pid names nothing (`-ESRCH`). The native ABI has no call for
-  it.
+- **What it changes.** Every thread of the process carries the value
+  (`thread.nice`, set when it joins and whenever `setpriority` changes
+  the process's, under the process's lock), and the scheduler's fair
+  level weighs it with Linux's table, nice 0 = 1024
+  (`docs/kernel/scheduler/design.md`, "The fair level"; A5's third PR).
+  The value is per process, not per thread as Linux's is: a thread's id
+  other than the process's pid names nothing (`-ESRCH`). The native ABI
+  has no call for it.
 
 ### The wall clock
 
