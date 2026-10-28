@@ -5324,3 +5324,23 @@ ash, at nice 0 until it has run `nice`; ps read it first. Fixed the same
 day (backlog TEST-22, `docs/audit/2026-10-28-ps-nice-report.md`): the
 check waits until the process is `sleep`. `tools/ps-nice-probe.py`
 holds the window open and fails the old script on both architectures.
+
+
+## net-login stage j: the century write, 2026-10-28
+
+`test-net-login: FAIL: after reboot the guest reads 1793382913, the RTC
+should read 1793382913..1793382917` (the bounds rounded; the lower one
+was above the reading).
+
+- 2026-10-28, CI `net-login test (x86_64)` on main's #480 merge
+  (`4c711c66`, run 40739284519, job 122996579922). Main red. The kernel
+  read 1793382911 from the RTC 4.4 s after `hwclock -w` wrote
+  1793382908.
+
+Mechanism, established: edk2's `PcRtcAcpiTableChangeCallback` writes the
+century register at every boot with the clock running, and QEMU's
+MC146818 keeps the sub-second phase of the last set, so the RTC drops
+back by the time since `hwclock -w` modulo a second. Not a load-sensitive
+bound: the check is a keep, restated with that loss counted (backlog
+TEST-24, `docs/audit/2026-10-28-rtc-century-report.md`).
+`tools/rtc-century-probe.py` measures the rewind over qtest.

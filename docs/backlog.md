@@ -326,6 +326,7 @@ Open lines (struck lines are not counted):
 - **TEST-21** correctness, S. x86-64 OVMF sometimes never reaches the loader after a guest-initiated reset inside one QEMU (`reboot: restart through the ACPI reset register`, then only screen clears; three sightings, flakes.md), and the boot harnesses retry a stalled firmware only at launch (`firmware_stall.py`).
 - ~~**TEST-22** correctness, S. `ash.sh`'s `ps-nice` reads `$!` before the forked shell has run `nice` (main red, CI run 40703059019).~~ Fixed 2026-10-28: it waits until the process is `sleep` (`docs/audit/2026-10-28-ps-nice-report.md`).
 - **TEST-23** nice-to-have, M. `test-large` sets main's CI time: 32-80 min per architecture (every other job within about 35), the spread runner speed (run 40680963987: aarch64 40 min, x86-64 62, every stage scaling together). Its summary gives no time for the remount and old-kernel stages, about 60% of it; print each stage's time, then see whether a pool and file smaller than 1 GiB still prove CFS-32 (a file past the old run bound, about 128 MiB).
+- ~~**TEST-24** correctness, S. `test-net-login` stage j's RTC bound allows 2 s below and the x86-64 firmware's century write (edk2, every boot, the clock running) rewinds QEMU's RTC by up to a second more (main red, CI run 40739284519).~~ Fixed 2026-10-28: 3 s below on x86-64 (`docs/audit/2026-10-28-rtc-century-report.md`).
 
 ## Commands
 

@@ -30,6 +30,7 @@ Remaining work is grouped in [`docs/plan.md`](../plan.md).
 | [`2026-10-07-epoll-callback-report.md`](2026-10-07-epoll-callback-report.md) | epoll readiness by callback, and nesting — 2026-10-07 |
 | [`2026-10-28-state-of-the-project.md`](2026-10-28-state-of-the-project.md) | Where the project stands against the master prompt, and where the docs drifted from the code — 2026-10-28 |
 | [`2026-10-28-ps-nice-report.md`](2026-10-28-ps-nice-report.md) | ash.sh's ps-nice read the forked shell before it ran nice; main red on #477's merge — 2026-10-28 |
+| [`2026-10-28-rtc-century-report.md`](2026-10-28-rtc-century-report.md) | test-net-login's RTC bound and the firmware's century write; main red on #480's merge — 2026-10-28 |
 
 ## Section 68 reports
 
