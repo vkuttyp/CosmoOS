@@ -76,10 +76,24 @@ struct thread {
     void *arg;
     int priority;                       /* (rq) the effective priority the scheduler keys on */
     int base_prio;                      /* (pi) the created priority; `priority` equals it except while boosted by priority inheritance */
+    int32_t nice;                       /* (atomic) its nice value, -20..19: its process's, 0 for a kernel thread */
     cpumask_t affinity;
     int cpu;                            /* (rq) run queue this thread belongs to */
     uint64_t slice_left_ns;             /* (rq) */
     uint64_t run_time_ns;               /* (rq) */
+    /* (rq) the fair level's virtual run time (kernel/include/kernel/fair.h),
+     * and when it was last charged: run time is charged from the later of
+     * this and last_start_ns, so nothing is charged twice. */
+    uint64_t vruntime;
+    uint64_t vruntime_stamp_ns;
+    /* Gave way with sched_yield: at the fair level it is queued behind
+     * every thread there, as round-robin queues it behind its equals.
+     * Set by the thread itself, read and cleared under its run-queue lock
+     * when it is queued or runs. A field of its own, not a `flags` bit:
+     * setting a shared word would need interrupts off around the write,
+     * and an interrupt restore is costly enough under emulation to slow
+     * the spin-waits that yield in a loop (aarch64 boots, 15 %). */
+    bool yield_pending;
     uint64_t stack_canary;              /* the stack protector's canary for this thread's frames, fixed for its life (BUILD-1) */
     /* CPU time's user/system split (kernel/include/kernel/cputime.h): the
      * tick's samples of this thread, written only by the tick of the CPU it
@@ -180,6 +194,9 @@ void thread_set_affinity_self(cpumask_t affinity);
 /* Widen another thread's affinity (tests). `affinity` must admit the CPU
  * the thread is on: nothing here moves it, `sched_migrate` does. */
 void thread_set_affinity(struct thread *t, cpumask_t affinity);
+/* Set a thread's nice value, clamped to -20..19 (kernel/include/kernel/nice.h):
+ * its process's, or a test's choice for a kernel thread. */
+void thread_set_nice(struct thread *t, int nice);
 
 /* Same, restricted to the CPUs in `affinity` (must include at least one
  * online CPU, else NULL). */

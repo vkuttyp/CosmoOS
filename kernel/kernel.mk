@@ -109,6 +109,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/process/cpu_account.c \
 	kernel/process/cputime.c \
 	kernel/process/nice.c \
+	kernel/scheduler/fair.c \
 	kernel/process/spawn.c \
 	kernel/process/signal.c \
 	kernel/process/native_signal.c \

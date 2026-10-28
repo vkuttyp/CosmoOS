@@ -25,6 +25,7 @@ struct runqueue {
     struct thread *idle;
     struct thread *prev_exited;              /* handed to sched_finish_switch */
     uint64_t switches;
+    uint64_t fair_min;                       /* the fair level's min_vruntime (kernel/fair.h); only grows */
 #if CONFIG_SELFTEST
     uint64_t picks;                          /* every pass through the pick, a re-pick of the current thread included */
 #endif
@@ -43,6 +44,12 @@ struct sched_policy {
      * none may. Called with `rq->lock` held. The policy chooses which of
      * the eligible it offers (round-robin: the one it would run last). */
     struct thread *(*pick_migratable)(struct runqueue *rq, cpumask_t allowed);
+    /* Charge `t`, this queue's current thread, its run time up to `now`:
+     * at the tick before `tick`, and at the switch-out. Lock held. */
+    void (*charge)(struct runqueue *rq, struct thread *t, uint64_t now_ns);
+    /* `t` was dequeued from `from` and is about to be queued on `to`, both
+     * locks held: carry what is relative to the queue. */
+    void (*moved)(struct runqueue *from, struct runqueue *to, struct thread *t);
 };
 
 extern const struct sched_policy sched_policy_rr;

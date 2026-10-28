@@ -329,6 +329,11 @@ void thread_set_affinity(struct thread *t, cpumask_t affinity)
     set_affinity_locked(t, affinity);
 }
 
+void thread_set_nice(struct thread *t, int nice)
+{
+    __atomic_store_n(&t->nice, nice < -20 ? -20 : nice > 19 ? 19 : nice, __ATOMIC_RELAXED);
+}
+
 struct thread *thread_create_on(void (*entry)(void *arg), void *arg, const char *name, int priority,
                                 cpumask_t affinity)
 {

@@ -1,0 +1,101 @@
+// fair.nova - The weighted fair share at the default priority level, in Nova: the source of
+// kernel/scheduler/fair.c, which `make nova` generates (docs/kernel/scheduler/design.md, "The fair level";
+// scripts/nova-gen.py). Nice values' weights, Linux's table, and the virtual-time arithmetic that orders the
+// level: charging run time, placing a thread that joins, carrying one between CPUs, the order itself, and when
+// the running thread gives way. The API is kernel/include/kernel/fair.h. The callers hold a run-queue lock, often
+// in the tick: nothing here allocates, blocks or panics on any input, and every sum saturates.
+
+@header("kernel/fair.h")
+extern "C" {}
+
+/// Linux's sched_prio_to_weight: nice -20 to 19, each step about 1.25 times the next, nice 0 = 1024.
+const WEIGHTS: [u32; 40] = [
+    88761, 71755, 56483, 46273, 36291,
+    29154, 23254, 18705, 14949, 11916,
+    9548, 7620, 6100, 4904, 3906,
+    3121, 2501, 1991, 1586, 1277,
+    1024, 820, 655, 526, 423,
+    335, 272, 215, 172, 137,
+    110, 87, 70, 56, 45,
+    36, 29, 23, 18, 15,
+];
+
+const NICE_0_WEIGHT: u64 = 1024;
+
+fn weight(nice: i32) -> u32 {
+    if (nice <= -20) { return WEIGHTS[0]; }
+    if (nice >= 19) { return WEIGHTS[39]; }
+    // -19 to 18 here, so the index is 1 to 38 and the conversion exact.
+    let table = WEIGHTS;
+    return table[truncate<usize>(nice + 20)];
+}
+
+/// ⌊delta · 1024 / w⌋ added to `vruntime`, exactly: delta = q·w + r, so it is q·1024 + ⌊r·1024 / w⌋, where
+/// r·1024 < w·1024 fits. Only q·1024 and the sums can pass 2^64, and they saturate. A weight of 0, which the table
+/// never gives, is taken as 1.
+fn charge(vruntime: u64, delta: u64, w: u32) -> u64 {
+    let weight = if (w == 0) 1 as u64 else w as u64;
+    let q = delta / weight;
+    let r = delta % weight;
+    let scaled = q.saturatingMul(NICE_0_WEIGHT).saturatingAdd(r * NICE_0_WEIGHT / weight);
+    return vruntime.saturatingAdd(scaled);
+}
+
+fn place(vruntime: u64, minVruntime: u64, bonus: u64) -> u64 {
+    let floor = minVruntime.saturatingSub(bonus);
+    if (vruntime < floor) { return floor; }
+    return vruntime;
+}
+
+fn rebase(vruntime: u64, fromMin: u64, toMin: u64) -> u64 {
+    if (vruntime >= fromMin) { return toMin.saturatingAdd(vruntime - fromMin); }
+    return toMin.saturatingSub(fromMin - vruntime);
+}
+
+fn before(a: u64, b: u64) -> bool => a < b;
+
+fn shouldPreempt(current: u64, leftmost: u64, granularity: u64) -> bool =>
+    current > leftmost.saturatingAdd(granularity);
+
+fn newMin(minVruntime: u64, hasCurrent: bool, current: u64, hasLeftmost: bool, leftmost: u64) -> u64 {
+    var candidate = minVruntime;
+    if (hasCurrent && hasLeftmost) {
+        candidate = if (current < leftmost) current else leftmost;
+    } else if (hasCurrent) {
+        candidate = current;
+    } else if (hasLeftmost) {
+        candidate = leftmost;
+    }
+    if (candidate > minVruntime) { return candidate; }
+    return minVruntime;
+}
+
+@export("fair_weight")
+@context(irq)
+fn weightC(nice: i32) -> u32 => weight(nice);
+
+@export("fair_charge")
+@context(irq)
+fn chargeC(vruntime: u64, delta: u64, w: u32) -> u64 => charge(vruntime, delta, w);
+
+@export("fair_place")
+@context(irq)
+fn placeC(vruntime: u64, minVruntime: u64, bonus: u64) -> u64 => place(vruntime, minVruntime, bonus);
+
+@export("fair_rebase")
+@context(irq)
+fn rebaseC(vruntime: u64, fromMin: u64, toMin: u64) -> u64 => rebase(vruntime, fromMin, toMin);
+
+@export("fair_before")
+@context(irq)
+fn beforeC(a: u64, b: u64) -> bool => before(a, b);
+
+@export("fair_should_preempt")
+@context(irq)
+fn shouldPreemptC(current: u64, leftmost: u64, granularity: u64) -> bool =>
+    shouldPreempt(current, leftmost, granularity);
+
+@export("fair_min")
+@context(irq)
+fn minC(minVruntime: u64, hasCurrent: bool, current: u64, hasLeftmost: bool, leftmost: u64) -> u64 =>
+    newMin(minVruntime, hasCurrent, current, hasLeftmost, leftmost);

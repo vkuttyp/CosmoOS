@@ -156,6 +156,7 @@ bool selftest_lockdep_rq_order(const char **reason);     /* a class per run queu
 bool selftest_sched_migrate(const char **reason);        /* one thread, one move */
 bool selftest_sched_migrate_refuses(const char **reason); /* every refusal by name, the window included */
 bool selftest_sched_migrate_stress(const char **reason); /* 200 ms of workers under a migrator */
+bool selftest_sched_fair(const char **reason);           /* nice values weigh the default level */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */
@@ -181,6 +182,7 @@ bool selftest_signal_async(const char **reason);       /* ... at an interrupt, w
 bool selftest_signal_mask(const char **reason);        /* blocked, pending, delivered at the unblock */
 bool selftest_signal_fault(const char **reason);       /* ... at a fault, with the address in siginfo */
 bool selftest_process_reaped(const char **reason);     /* a reaped pid is unfindable before its object goes */
+bool selftest_process_nice_threads(const char **reason);   /* a process's nice value reaches its threads */
 bool selftest_signal_group(const char **reason);        /* kill(-pgid) reaches the group and nothing else */
 bool selftest_signal_setsid(const char **reason);      /* a session is started once */
 bool selftest_signal_stop(const char **reason);         /* a stop is an event a parent waits for */

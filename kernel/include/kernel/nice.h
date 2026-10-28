@@ -16,9 +16,10 @@
  * the privilege a value can go no lower than 20 - RLIMIT_NICE, so the
  * default limit, 0, allows none; otherwise -EACCES. Raising one is free.
  *
- * Every process is its own scheduling entity at one level for now: the
- * value is recorded, inherited and reported, and the scheduler does not
- * read it yet (roadmap 1.2 A5's third PR weighs it).
+ * Each of the process's threads carries a copy (`thread.nice`), which the
+ * scheduler's fair level weighs (kernel/include/kernel/fair.h): a
+ * thread's share of a CPU at the default level follows Linux's weight
+ * for it.
  *
  * The functions are Nova's (kernel/process/nice.c, generated). They keep
  * no state; the caller holds the target's lock across the check and the

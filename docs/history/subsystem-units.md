@@ -3603,3 +3603,19 @@ See the [history index](README.md).
   - The scheduler does not read it yet (A5's third PR). Tests: lxtest's
     nice block (failing first), ash.sh, `test_nice` (exhaustive).
   - Report: `docs/audit/2026-10-28-a5-nice-report.md`.
+- **A weighted fair share at the default level, in Nova (2026-10-28,
+  roadmap 1.2 A5's third PR, LX-13 done).**
+  - `SCHED_PRIO_DEFAULT`, where every user thread runs, shares a CPU by
+    Linux's weights (nice 0 = 1024): a vruntime per thread, the level's
+    list in vruntime order, a tick of granularity, placement at the
+    queue's minimum less 5 ms, the lead kept across a migration, a yield
+    still behind every equal. The other 63 levels stay round-robin.
+  - The weights and the virtual-time arithmetic are Nova's
+    (`kernel/scheduler/fair.nova`); the lists, locks and the two new
+    policy hooks C. Each thread carries its process's nice.
+  - Measured (`sched-fair`): 0 against 5 shares 3.05 to 1 (Linux's
+    weights: 3.06), 0 against 19 72 to 1 (68). A slowdown of aarch64
+    boots by a yield mark set under interrupts off was found and fixed
+    before review.
+  - Tests: `sched-fair` (failing first), `process-nice-threads`,
+    `test_fair`. Report: `docs/audit/2026-10-28-a5-fair-report.md`.

@@ -403,6 +403,8 @@ static void schedule_pass(bool preempt)
     /* `last_start_ns` was stamped by whichever CPU last ran this thread,
      * which need not be this one. */
     prev->run_time_ns += clock_delta_ns(now, prev->last_start_ns);
+    if (prev != rq->idle)
+        g_policy->charge(rq, prev, now);
 
     /*
      * A thread switched out by preemption stopped at a point it did not
@@ -443,6 +445,7 @@ static void schedule_pass(bool preempt)
     if (next == prev) {
         prev->state = THREAD_RUNNING;
         prev->flags &= ~THREAD_FLAG_PREEMPTED;
+        prev->yield_pending = false;
         prev->last_start_ns = now;
         spin_unlock(&rq->lock);
         return;
@@ -450,6 +453,7 @@ static void schedule_pass(bool preempt)
 
     next->state = THREAD_RUNNING;
     next->flags &= ~THREAD_FLAG_PREEMPTED;   /* it runs again: whatever it had in flight completes here */
+    next->yield_pending = false;
     next->cpu = (int)rq->cpu;
     next->last_start_ns = now;
     next->switches++;
@@ -547,7 +551,9 @@ void schedule(void)
 
 void sched_yield(void)
 {
-    thread_current()->slice_left_ns = 0;
+    struct thread *self = thread_current();
+    self->slice_left_ns = 0;
+    self->yield_pending = true;
     schedule_internal(false);
 }
 
@@ -722,6 +728,7 @@ static void migrate_locked(struct thread *t, unsigned from, unsigned to)
             (t->flags & THREAD_FLAG_PREEMPTED) == 0);
     g_policy->dequeue(rqf, t);
     t->cpu = (int)to;
+    g_policy->moved(rqf, rqt, t);
     g_policy->enqueue(rqt, t, false);
     if (rqt->current == NULL || rqt->current == rqt->idle || t->priority < rqt->current->priority)
         request_resched(rqt);
@@ -1238,8 +1245,10 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
 
     spin_lock(&rq->lock);
     struct thread *cur = rq->current;
-    if (cur != NULL && cur != rq->idle)
+    if (cur != NULL && cur != rq->idle) {
+        g_policy->charge(rq, cur, now_ns);
         g_policy->tick(rq, cur, TICK_NS);
+    }
     else if (cur == rq->idle && rq->bitmap != 0)
         pc->need_resched = true;
     spin_unlock(&rq->lock);

@@ -894,6 +894,7 @@ static int process_first_thread(struct process *p, struct thread **out)
     process_get(p);
     t->user_tid = p->pid;   /* a first thread's id is the pid, in either personality */
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    thread_set_nice(t, p->nice);   /* the scheduler weighs it (kernel/fair.h) */
     list_push_back(&p->threads, &t->proc_link);
     p->nr_threads = 1;
     p->nr_live = 1;
@@ -1577,6 +1578,7 @@ int process_add_thread(struct process *p, const struct arch_user_regs *regs, uin
      * never towards `nr_stopped`, so the process would never be *fully*
      * stopped and a parent's waitpid(WUNTRACED) would wait for ever. */
     t->sig_must_stop = p->stopped;
+    thread_set_nice(t, p->nice);
     list_push_back(&p->threads, &t->proc_link);
     p->nr_threads++;
     p->nr_live++;
@@ -2430,8 +2432,14 @@ int process_nice_set(struct process *p, const struct nice_caller *caller, int32_
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     struct nice_target t = { p->cred.ruid, p->cred.euid, p->nice, p->rlim.v[COSMO_RLIMIT_NICE] };
     int rc = nice_may_set(caller, &t, nice);
-    if (rc == 0)
+    if (rc == 0) {
         p->nice = nice;
+        /* Every thread's copy, which the scheduler reads without this lock
+         * (kernel/fair.h): a thread joins under it with the value of then. */
+        struct thread *th;
+        list_for_each_entry(th, &p->threads, proc_link)
+            thread_set_nice(th, nice);
+    }
     spin_unlock_irqrestore(&p->lock, s);
     return rc;
 }
