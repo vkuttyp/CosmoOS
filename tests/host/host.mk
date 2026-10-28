@@ -54,11 +54,12 @@ HOST_DISPLAY_SRCS := $(HOST_COMMON_SRCS) boot/uefi/display_pick.c tests/host/tes
 HOST_GPT_SRCS := $(HOST_COMMON_SRCS) kernel/block/gpt.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c kernel/core/cmdline.c tests/host/test_gpt.c
 HOST_CPUTIME_SRCS := $(HOST_COMMON_SRCS) kernel/process/cputime.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_cputime.c
 HOST_NICE_SRCS := $(HOST_COMMON_SRCS) kernel/process/nice.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_nice.c
+HOST_FAIR_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/fair.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_fair.c
 HOST_UPBE_SRCS := $(HOST_COMMON_SRCS) userland/system/upgrade_be.c tests/host/test_upgrade_be.c
 HOST_PCI_BAR_SRCS := $(HOST_COMMON_SRCS) tests/host/test_pci_bar.c
 HOST_JITTER_SRCS := $(HOST_COMMON_SRCS) kernel/core/jitter.c tests/host/test_jitter.c
 
-HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_keyslot $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_cputime $(HOST_OUT)/test_nice $(HOST_OUT)/test_upgrade_be $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter
+HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_keyslot $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_cputime $(HOST_OUT)/test_nice $(HOST_OUT)/test_fair $(HOST_OUT)/test_upgrade_be $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter
 
 $(HOST_OUT)/test_fbvalid: $(addprefix $(ROOT)/,$(HOST_FBVALID_SRCS))
 	$(call log,HOSTCC,$@)
@@ -98,6 +99,11 @@ $(HOST_OUT)/test_cputime: $(addprefix $(ROOT)/,$(HOST_CPUTIME_SRCS))
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_nice: $(addprefix $(ROOT)/,$(HOST_NICE_SRCS))
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
+
+$(HOST_OUT)/test_fair: $(addprefix $(ROOT)/,$(HOST_FAIR_SRCS))
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@

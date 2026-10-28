@@ -395,6 +395,52 @@ bool selftest_process_reaped(const char **reason)
     return true;
 }
 
+/*
+ * A process's nice value reaches its threads, whose copy the scheduler's
+ * fair level weighs (kernel/fair.h): a new process's thread starts at the
+ * process's value, and setpriority's change (process_nice_set) reaches it
+ * while it runs. The probe sleeps 300 ms and exits.
+ */
+
+/* Whether `p` has threads and every one carries `nice`: read under its
+ * lock, which keeps the list and the threads on it. A thread reference
+ * held across the test instead would keep the process from finishing its
+ * exit (process_wait_exit waits for its last thread). */
+static bool threads_nice(struct process *p, int32_t nice)
+{
+    bool any = false, all = true;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    struct thread *t;
+    list_for_each_entry(t, &p->threads, proc_link) {
+        any = true;
+        all = all && __atomic_load_n(&t->nice, __ATOMIC_RELAXED) == nice;
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+    return any && all;
+}
+
+bool selftest_process_nice_threads(const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    static const char *const argv[] = { "init", "--probe", "signal-sleep", NULL };
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    CHECK(threads_nice(p, 0));
+    struct nice_caller root = { 0, true };
+    CHECK(process_nice_set(p, &root, 7) == 0 && process_nice_get(p) == 7 && threads_nice(p, 7));
+    CHECK(process_nice_set(p, &root, -3) == 0 && threads_nice(p, -3));
+    struct nice_caller stranger = { 4242, false };   /* refused: nothing changes */
+    CHECK(process_nice_set(p, &stranger, 10) == -EPERM && threads_nice(p, -3));
+    CHECK(process_wait_exit(p) == 0);
+    process_put(p);
+    return true;
+}
+
 bool selftest_signal_group(const char **reason)
 {
     return run_signal_probe("signal-group", reason);

@@ -182,6 +182,7 @@ bool selftest_signal_async(const char **reason);       /* ... at an interrupt, w
 bool selftest_signal_mask(const char **reason);        /* blocked, pending, delivered at the unblock */
 bool selftest_signal_fault(const char **reason);       /* ... at a fault, with the address in siginfo */
 bool selftest_process_reaped(const char **reason);     /* a reaped pid is unfindable before its object goes */
+bool selftest_process_nice_threads(const char **reason);   /* a process's nice value reaches its threads */
 bool selftest_signal_group(const char **reason);        /* kill(-pgid) reaches the group and nothing else */
 bool selftest_signal_setsid(const char **reason);      /* a session is started once */
 bool selftest_signal_stop(const char **reason);         /* a stop is an event a parent waits for */

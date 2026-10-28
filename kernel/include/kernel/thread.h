@@ -50,6 +50,10 @@ enum thread_state {
  * the field) and must resume on the CPU it left: not migratable until it
  * runs again (S26). Set and cleared under the run-queue lock. */
 #define THREAD_FLAG_PREEMPTED (1u << 2)
+/* Gave way with sched_yield: at the fair level it is queued behind every
+ * thread there, as round-robin queues it behind its equals. Set with
+ * interrupts off by the thread itself, cleared when it is queued or runs. */
+#define THREAD_FLAG_YIELDED (1u << 3)
 
 /* `bal_gap_min` before any pull: above every gap a pull can be made at. */
 #define THREAD_BAL_GAP_NONE INT32_MAX
@@ -81,6 +85,11 @@ struct thread {
     int cpu;                            /* (rq) run queue this thread belongs to */
     uint64_t slice_left_ns;             /* (rq) */
     uint64_t run_time_ns;               /* (rq) */
+    /* (rq) the fair level's virtual run time (kernel/include/kernel/fair.h),
+     * and when it was last charged: run time is charged from the later of
+     * this and last_start_ns, so nothing is charged twice. */
+    uint64_t vruntime;
+    uint64_t vruntime_stamp_ns;
     uint64_t stack_canary;              /* the stack protector's canary for this thread's frames, fixed for its life (BUILD-1) */
     /* CPU time's user/system split (kernel/include/kernel/cputime.h): the
      * tick's samples of this thread, written only by the tick of the CPU it

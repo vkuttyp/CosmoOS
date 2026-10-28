@@ -959,6 +959,7 @@ static const struct selftest tests[] = {
     { "signal-mask",     selftest_signal_mask },
     { "signal-fault",    selftest_signal_fault },
     { "process-reaped",  selftest_process_reaped },
+    { "process-nice-threads", selftest_process_nice_threads },
     { "process-gone-order", selftest_process_gone_order },
     { "process-leftover-named", selftest_process_leftover_named },
     { "p33-once",        selftest_p33_once },
