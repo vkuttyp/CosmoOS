@@ -373,6 +373,7 @@ by the process like its credentials:
 | `COSMO_RLIMIT_NOFILE` | open handles | `handle_install`: `-EMFILE` | 64 (the table size; cannot exceed it) |
 | `COSMO_RLIMIT_NPROC` | processes with the child's real uid, counting the child | `spawn`: `-EAGAIN` | 128 |
 | `COSMO_RLIMIT_VMEM` | guest memory per VM created by the process | `vm_mem`: `-ENOMEM` (the VM records the cap at creation) | 64 MiB |
+| `COSMO_RLIMIT_NICE` | how far its nice value may be lowered without `PRIV_PROC`: to 20 minus this (Linux's `RLIMIT_NICE`; `docs/kernel/process/design.md`, "Nice values") | `setpriority`: `-EACCES` | 0 (no lowering) |
 
 `COSMO_RLIM_INFINITY` (`~0`) disables a limit. `setrlimit` may lower a
 limit freely and raise one only with privilege (`-EPERM` otherwise);
@@ -382,7 +383,7 @@ from an unprivileged caller. Limits apply to privileged processes too;
 root raises its own when it needs to. Native calls `SYS_getrlimit` (56)
 and `SYS_setrlimit` (57); Linux `getrlimit`, `setrlimit` and
 `prlimit64` (self only) map `RLIMIT_AS`, `RLIMIT_RSS` (→ `MEM`),
-`RLIMIT_NOFILE` and `RLIMIT_NPROC`; every other Linux resource reads as
+`RLIMIT_NOFILE`, `RLIMIT_NPROC` and `RLIMIT_NICE`; every other Linux resource reads as
 infinity and accepts only infinity.
 
 Where the numbers live: the address-space limits are copied into the

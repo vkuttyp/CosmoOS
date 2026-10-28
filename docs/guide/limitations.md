@@ -52,7 +52,8 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
   page](shell.md): no `ping6`; no hard links; no `/sys`.
 - `/proc` has the process directories and a fixed set of system files
   (`meminfo`, `stat`, `loadavg`, `uptime`, `mounts`, `version`,
-  `cpuinfo`). A process has no nice value, and its user/system split of CPU
+  `cpuinfo`). A process's nice value is kept and shown but does not yet
+  change how it is scheduled, and its user/system split of CPU
   time is sampled by the 250 Hz tick (the total is exact); `ps`'s `TT` column is a pair of Linux device numbers (`5,1`
   for the console), since devices here have none of their own; and a
   process's `environ` is what exec gave it, not what it has since written

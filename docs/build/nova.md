@@ -31,8 +31,9 @@ committed without its C, cannot merge.
 | a line in `scripts/nova-gen.py`'s `PORTS` | you | registers the port |
 | `kernel/kernel.mk`, `tests/host/host.mk`, `tests/fuzz/fuzz.mk` | you | build `NAME.c` like any C file, with `nova_rt_core.c` and a `nova_panic.c` |
 
-The current ports: `kernel/block/gpt.nova` (the GPT parser and writer)
-and `kernel/process/cputime.nova` (CPU time and the CPU-time timers).
+The current ports: `kernel/block/gpt.nova` (the GPT parser and writer),
+`kernel/process/cputime.nova` (CPU time and the CPU-time timers) and
+`kernel/process/nice.nova` (the rules of nice values).
 Read them before writing a new one.
 
 ## Setting up
@@ -76,7 +77,7 @@ claude mcp add nova -- novac mcp        # Claude Code; other clients: run `novac
 
 ## The header: two models
 
-**Header first (the default; both current ports).** The C header is
+**Header first (the default; every current port).** The C header is
 hand-written, like any kernel header: it declares the structs, the
 constants and the prototypes, with comments, and C callers include it.
 The Nova source imports the structs it touches, with the header that

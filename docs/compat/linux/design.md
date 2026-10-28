@@ -198,7 +198,7 @@ links").
 
 `getrlimit`, `setrlimit` and `prlimit64` (self only; another pid is
 `-EPERM`) map `RLIMIT_AS`, `RLIMIT_RSS` (→ `COSMO_RLIMIT_MEM`),
-`RLIMIT_NOFILE` and `RLIMIT_NPROC` onto the native limits
+`RLIMIT_NOFILE`, `RLIMIT_NPROC` and `RLIMIT_NICE` (roadmap 1.2 A5) onto the native limits
 (`docs/kernel/security/design.md` §2). The kernel keeps one value per
 resource: a read reports `rlim_cur == rlim_max`; a write stores
 `rlim_max` (`cur > max` is `-EINVAL`; raising needs privilege, `-EPERM`).

@@ -204,8 +204,9 @@ the large definition is wrapped.
 
 Some kernel code is written in Nova, a memory-safe language compiled to C
 (https://github.com/vkuttyp/Nova): the GPT parser and writer
-(`kernel/block/gpt.nova`) and CPU-time accounting
-(`kernel/process/cputime.nova`). Each `NAME.nova` sits beside the
+(`kernel/block/gpt.nova`), CPU-time accounting
+(`kernel/process/cputime.nova`) and the rules of nice values
+(`kernel/process/nice.nova`). Each `NAME.nova` sits beside the
 `NAME.c` it generates, and the generated C is checked in with a "do not
 edit" banner naming its source, so **building CosmoOS needs no Nova
 compiler**: the C compiles like any other file, and every target, host

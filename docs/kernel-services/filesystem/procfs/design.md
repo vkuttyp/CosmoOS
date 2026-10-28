@@ -106,8 +106,9 @@ or the new one, never one being freed. A reference on the space would
 have been the other way, and the wrong one: the reader could then be
 the last user, and the teardown would run after the exit had published
 `EXITED`. Once the space is gone the sizes are 0 and `status` leaves its
-memory lines out, as Linux's does for a zombie. There is no nice value,
-so `priority` is 20 and `nice` 0. The controlling terminal (`tty_nr`) is
+memory lines out, as Linux's does for a zombie. `priority` is Linux's
+figure for a normal task, 20 + the nice value, and `nice` the value
+(`docs/kernel/process/design.md`, "Nice values"). The controlling terminal (`tty_nr`) is
 Linux's number for the same terminal (the console 5,1, `/dev/pts/N`
 136,N), because this kernel numbers no devices. A process's state
 is `Z` once exited, `T` while job control has it stopped, `R` with a

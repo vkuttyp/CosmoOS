@@ -1131,6 +1131,53 @@ line.
   and `/proc/<pid>/stat`'s `utime`, `stime`, `cutime` and `cstime`.
   The native ABI has no call for it yet.
 
+### Nice values
+
+A process's nice value, `nice` in `struct process`, from -20 (the most
+favoured) to 19, 0 by default. The rules are Nova's
+(`kernel/process/nice.nova`, from which `make nova` generates
+`kernel/process/nice.c`; the API and structs are
+`kernel/include/kernel/nice.h`); the walks, the locks and the system
+calls are C. Roadmap 1.2 A5's second PR; backlog LX-13. Linux's rules
+(`kernel/sys.c`), with `PRIV_PROC` for `CAP_SYS_NICE`:
+
+- **Range.** A value outside -20..19 is clamped, not refused. Only the
+  low 32 bits of the argument count (Linux's `int`).
+- **Who may set it.** A caller may set the value of a process whose real
+  or effective uid is the caller's effective uid; with `PRIV_PROC`, of
+  any process. Otherwise `-EPERM`.
+- **How low.** Raising a value is free. Lowering one needs `PRIV_PROC`,
+  or must stay at or above 20 minus the *target's* `RLIMIT_NICE`
+  (`COSMO_RLIMIT_NICE`, 0 by default, so a user cannot lower a value at
+  all, even back to where it was); otherwise `-EACCES`. Raising the limit
+  is a privileged act, as for every limit here.
+- **Which processes.** `PRIO_PROCESS` names one process by pid (0: the
+  caller); `PRIO_PGRP` a process group (0: the caller's); `PRIO_USER`
+  every process whose real uid is the one named (0: the caller's). A
+  process outside the caller's domain is not there for it, as for
+  `kill`. A walk takes each process's reference and lock in turn, never
+  two process locks at once; the check and the store are under the
+  target's lock, so a racing `setresuid` or `setrlimit` sees one or the
+  other.
+- **What a group reports.** `setpriority` changes every member the caller
+  may change; its result is `-ESRCH` if nothing was named, else the last
+  refusal, else 0. `getpriority` needs no permission and returns
+  20 minus the lowest value among those named (1 to 40; libc turns it
+  back), or `-ESRCH`.
+- **Lifetime.** A fork and a spawn copy the parent's value, under the
+  parent's lock with its credentials; exec keeps it. Kernel-created
+  processes start at 0.
+- **Readers.** `getpriority`, and `/proc/<pid>/stat`'s priority (field
+  18, 20 + nice, Linux's figure for a normal task) and nice (field 19),
+  which BusyBox's `ps -o nice` and `top` read. `nice` and `renice` are
+  BusyBox's.
+- **What it does not do yet.** The scheduler does not read it: every
+  process still runs at one level. A weighted share at that level,
+  Linux's weight table with nice 0 = 1024, is A5's third PR. The value is
+  per process, not per thread as Linux's is: a thread's id other than the
+  process's pid names nothing (`-ESRCH`). The native ABI has no call for
+  it.
+
 ### The wall clock
 
 `clock_realtime_ns()` = `clock_now_ns()` + a boot-time offset the
