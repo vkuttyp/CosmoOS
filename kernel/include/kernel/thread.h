@@ -76,6 +76,7 @@ struct thread {
     void *arg;
     int priority;                       /* (rq) the effective priority the scheduler keys on */
     int base_prio;                      /* (pi) the created priority; `priority` equals it except while boosted by priority inheritance */
+    int32_t nice;                       /* (atomic) its nice value, -20..19: its process's, 0 for a kernel thread */
     cpumask_t affinity;
     int cpu;                            /* (rq) run queue this thread belongs to */
     uint64_t slice_left_ns;             /* (rq) */
@@ -180,6 +181,9 @@ void thread_set_affinity_self(cpumask_t affinity);
 /* Widen another thread's affinity (tests). `affinity` must admit the CPU
  * the thread is on: nothing here moves it, `sched_migrate` does. */
 void thread_set_affinity(struct thread *t, cpumask_t affinity);
+/* Set a thread's nice value, clamped to -20..19 (kernel/include/kernel/nice.h):
+ * its process's, or a test's choice for a kernel thread. */
+void thread_set_nice(struct thread *t, int nice);
 
 /* Same, restricted to the CPUs in `affinity` (must include at least one
  * online CPU, else NULL). */

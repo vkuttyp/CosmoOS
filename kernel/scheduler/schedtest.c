@@ -1720,3 +1720,67 @@ bool selftest_wait_timeout(const char **reason)
           "returns false; a waker inside a 10 s deadline returns true");
     return true;
 }
+
+/* --- nice values weigh the default level (roadmap 1.2 A5's third PR) ---
+ *
+ * Two spinners pinned to one CPU at the default level, with the nice
+ * values given, for `ms`: what each ran, through sched_thread_run_ns. The
+ * CPU is the last online one, away from CPU 0's watchdog and load
+ * sampling; this thread sleeps through the measure, wherever it is.
+ */
+static bool fair_pair(int nice_a, int nice_b, unsigned ms, uint64_t *ran_a, uint64_t *ran_b)
+{
+    unsigned cpu = 0;
+    for (unsigned c = 0; c < cpu_count(); c++)
+        if (cpu_online(c))
+            cpu = c;
+    int stop = 0;
+    struct thread *a = thread_create_on(spinner_entry, &stop, "fair-a", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    struct thread *b = thread_create_on(spinner_entry, &stop, "fair-b", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    if (a == NULL || b == NULL) {
+        __atomic_store_n(&stop, 1, __ATOMIC_RELEASE);
+        if (a != NULL)
+            thread_join(a);
+        if (b != NULL)
+            thread_join(b);
+        return false;
+    }
+    thread_set_nice(a, nice_a);
+    thread_set_nice(b, nice_b);
+    thread_sleep_ms(50);   /* both started, and past where they began */
+    uint64_t now = clock_now_ns();
+    uint64_t a0 = sched_thread_run_ns(a, now), b0 = sched_thread_run_ns(b, now);
+    thread_sleep_ms(ms);
+    now = clock_now_ns();
+    *ran_a = sched_thread_run_ns(a, now) - a0;
+    *ran_b = sched_thread_run_ns(b, now) - b0;
+    __atomic_store_n(&stop, 1, __ATOMIC_RELEASE);
+    thread_join(a);
+    thread_join(b);
+    kinfo("selftest: sched-fair: nice %d ran %llu ms, nice %d ran %llu ms, on CPU %u", nice_a,
+          (unsigned long long)(*ran_a / 1000000), nice_b, (unsigned long long)(*ran_b / 1000000), cpu);
+    return true;
+}
+
+/*
+ * Linux's weights: nice 0 is 1024 and nice 5 is 335, a share of about
+ * 3.06 to 1; nice 19 is 15, about 68 to 1, and still runs. Equal values
+ * share equally. The bounds are wide (a tick is 4 ms, the measure a few
+ * hundred), and round-robin, which ignores the values, gives 1 to 1 in
+ * every case.
+ */
+bool selftest_sched_fair(const char **reason)
+{
+    unsigned before = thread_count();
+    uint64_t a, b;
+    CHECK(fair_pair(0, 0, 400, &a, &b));
+    CHECK(a > 0 && b > 0 && a * 3 >= b * 2 && b * 3 >= a * 2);   /* within 2:3 */
+    CHECK(fair_pair(0, 5, 600, &a, &b));
+    CHECK(b > 0 && a * 10 >= b * 20 && a * 10 <= b * 45);         /* 2.0 to 4.5 */
+    CHECK(fair_pair(-5, 0, 600, &a, &b));                          /* 3121 to 1024: 3.05 */
+    CHECK(b > 0 && a * 10 >= b * 20 && a * 10 <= b * 45);
+    CHECK(fair_pair(0, 19, 800, &a, &b));
+    CHECK(b > 0 && a >= b * 15);                                  /* never starved, far behind */
+    CHECK(threads_settle(before));
+    return true;
+}

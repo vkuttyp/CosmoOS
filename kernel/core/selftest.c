@@ -620,6 +620,7 @@ static const struct selftest tests[] = {
     { "sched-migrate",   selftest_sched_migrate },
     { "sched-migrate-refuses", selftest_sched_migrate_refuses },
     { "sched-migrate-stress", selftest_sched_migrate_stress },
+    { "sched-fair",      selftest_sched_fair },
     { "nvme",            selftest_nvme },
     { "nvme-worker-cleanup", selftest_nvme_worker_cleanup },
     { "nvme-admin-poll", selftest_nvme_admin_poll },

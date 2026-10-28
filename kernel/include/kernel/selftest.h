@@ -156,6 +156,7 @@ bool selftest_lockdep_rq_order(const char **reason);     /* a class per run queu
 bool selftest_sched_migrate(const char **reason);        /* one thread, one move */
 bool selftest_sched_migrate_refuses(const char **reason); /* every refusal by name, the window included */
 bool selftest_sched_migrate_stress(const char **reason); /* 200 ms of workers under a migrator */
+bool selftest_sched_fair(const char **reason);           /* nice values weigh the default level */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */
