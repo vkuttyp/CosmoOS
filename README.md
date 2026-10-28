@@ -62,9 +62,10 @@ observability, security, portability, performance, optimization.
   crash-consistency replay. CI boots both architectures and runs the host
   tests and fuzzers.
 
-1.0 is the [1.0 roadmap](docs/roadmap-1.0.md) completed; what remains
-open after it, and why, is in [`docs/plan.md`](docs/plan.md); the units
-proposed next are in the [1.1 roadmap](docs/roadmap-1.1.md).
+1.0 is the [1.0 roadmap](docs/roadmap-1.0.md) completed; the
+[1.1 roadmap](docs/roadmap-1.1.md) is complete too. The work now is the
+[1.2 roadmap](docs/roadmap-1.2.md); open defects and gaps are in
+[`docs/backlog.md`](docs/backlog.md).
 
 ## Targets
 
@@ -122,8 +123,10 @@ Pass `ARCH=aarch64` for AArch64 and `BUILD=release` for a release build;
 | [`docs/history/`](docs/history/README.md) | What was built, phase by phase and unit by unit |
 | [`docs/guide/`](docs/guide/README.md) | The user guide: installing, the shell, networking, ssh, packages, privileges, known limitations |
 | [`docs/roadmap-1.0.md`](docs/roadmap-1.0.md) | The 1.0 definition of done and its milestones |
-| [`docs/roadmap-1.1.md`](docs/roadmap-1.1.md) | What merged after 1.0, the gaps recorded since, and the proposed next units |
-| [`docs/plan.md`](docs/plan.md) | Work after 1.0, grouped by area |
+| [`docs/roadmap-1.1.md`](docs/roadmap-1.1.md) | What merged after 1.0 and the 1.1 units (complete) |
+| [`docs/roadmap-1.2.md`](docs/roadmap-1.2.md) | The current roadmap: storage depth (B, complete) and self-hosting (A) |
+| [`docs/backlog.md`](docs/backlog.md) | Open defects and gaps, by subsystem |
+| [`docs/plan.md`](docs/plan.md) | Work after 1.0, grouped by area (historical record) |
 | [`docs/audit/`](docs/audit/README.md) | Architecture audits, the deferred-work inventory and per-unit reports |
 
 ## Status
@@ -133,9 +136,14 @@ installs to a disk, reboots into it, is used through BusyBox `ash`, keeps
 files across reboots, reaches the network by name, accepts an ssh login,
 and has a verified boot chain and sound randomness, on x86-64 and
 AArch64 under QEMU, all checked by CI. The release images are signed and
-rebuild bit for bit from their tag (`make release`); they are attached
-to the [`v1.0.0` release](https://github.com/vkuttyp/CosmoOS/releases/tag/v1.0.0)
-with their `SHA256SUMS` and the release key. Start with the
+rebuild bit for bit from their tag (`make release`); each release on
+the [releases page](https://github.com/vkuttyp/CosmoOS/releases) carries
+them with their `SHA256SUMS` and the release key (latest: v1.0.14, notes
+in [`docs/releases/`](docs/releases/)). Since 1.0 the 1.1 roadmap and
+the 1.2 roadmap's storage direction (snapshots and rollback, `fsck` and
+scrub that repair, mirror resilvering, boot environments, encrypted
+root) have shipped; 1.2's self-hosting direction is under way, with a C
+compiler on the image (`cc`). Start with the
 [user guide](docs/guide/README.md); what was built, milestone by
 milestone, is in [`docs/history/`](docs/history/README.md) and the
 milestone reports in [`docs/audit/`](docs/audit/README.md).

@@ -49,7 +49,8 @@ gaps in the [deferred-work inventory](../audit/2026-09-deferred-work-inventory.m
 ## Shell and commands
 
 - The commands are the BusyBox applets listed in [the shell
-  page](shell.md): no `ping6`; no hard links; no `/sys`.
+  page](shell.md): no `ping6`; no `/sys`. (Hard links, `ln` without
+  `-s`, work since roadmap 1.2 A2.)
 - `/proc` has the process directories and a fixed set of system files
   (`meminfo`, `stat`, `loadavg`, `uptime`, `mounts`, `version`,
   `cpuinfo`). A process's nice value weighs its threads' share of a CPU

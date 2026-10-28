@@ -840,13 +840,15 @@ cosmo_sockaddr)`; on input it is ignored. A socket handle also answers
 `read`, `write` and `close` (numbers 2, 1, 10) through the
 `kobject_io_type`. New error numbers: `COSMO_EPIPE` 32,
 `COSMO_EMSGSIZE` 90, `COSMO_EOPNOTSUPP` 95, `COSMO_EAFNOSUPPORT` 97,
-`COSMO_EADDRINUSE` 98, `COSMO_EADDRNOTAVAIL` 99, `COSMO_ENETUNREACH`
-101, `COSMO_ECONNRESET` 104, `COSMO_ENOBUFS` 105, `COSMO_EISCONN` 106,
+`COSMO_EADDRINUSE` 98, `COSMO_EADDRNOTAVAIL` 99, `COSMO_ECONNRESET`
+104, `COSMO_EISCONN` 106,
 `COSMO_ENOTCONN` 107, `COSMO_ETIMEDOUT` 110, `COSMO_ECONNREFUSED` 111,
 `COSMO_EHOSTUNREACH` 113, `COSMO_EALREADY` 114, `COSMO_EINPROGRESS`
-115 (the last two from a non-blocking `connect`; `sendto` and
+115 (the last two from a non-blocking `connect`). The stack also
+returns `ENETUNREACH` (101) and `ENOBUFS` (105), which have no name in
+`uapi/cosmo/syscall.h` or the libc headers yet (backlog NET-24). `sendto` and
 `recvfrom` on a non-blocking socket return `COSMO_EAGAIN` 11 when they
-would wait). Readiness without waiting is `ioready` (58) and the mode
+would wait. Readiness without waiting is `ioready` (58) and the mode
 switch `setnonblock` (59), both generic over handles
 (`docs/kernel/syscall/api.md`).
 

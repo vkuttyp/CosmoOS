@@ -9,7 +9,8 @@ ABI section is the exception and is versioned.
 
 ## Module ABI (`kernel/include/kernel/module.h`)
 
-**ABI stability: versioned.** `COSMO_MODULE_ABI_VERSION` is 1. It is
+**ABI stability: versioned.** `COSMO_MODULE_ABI_VERSION` is 11 (its
+history is under "Module ABI v3" below). It is
 bumped on any incompatible change to the exported symbol set, to a
 structure an exported function takes, to `struct cosmo_module_info`,
 or to `struct ksym`. The loader compares the number exactly; a module

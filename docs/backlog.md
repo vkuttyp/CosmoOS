@@ -15,9 +15,9 @@ The scope rules in [`AGENTS.md`](../AGENTS.md#scope-rules) still decide
 what is worked: a line here is taken up only as part of a roadmap unit the
 owner has chosen, or when it blocks that unit's acceptance test or turns
 main red. A line is struck through with its PR when it is done. New
-follow-ups are still recorded where `AGENTS.md` says (the inventory) until
-the owner moves that rule here; each is then given a line here too, under
-its subsystem with the next free number.
+follow-ups are recorded here, as `AGENTS.md` says: one line under the
+subsystem, with the next free number; nothing new goes to the inventory
+or `plan.md`.
 
 **Severity.** *correctness*: a reachable wrong result, leak, crash or
 race, or a test that can fail for a reason other than the defect it
@@ -136,6 +136,7 @@ Open lines (struck lines are not counted):
 
 - **DOC-1** usability, S. The Parallels guide does not say the live image's plain disk must be the image's own size (a larger disk's GPT is refused).
 - **DOC-2** nice-to-have, S. `handle.h` says every function is non-blocking, but `handle_close` can block in the last put.
+- **DOC-3** nice-to-have, M. The stale names, counts and lists in the [2026-10-28 audit](audit/2026-10-28-state-of-the-project.md) section 3 that its PR did not fix (the medium and low rows: renamed identifiers, file maps, the Linux personality's per-call rows, the guide's applet and `/sbin` lists, the libc and make-target tables), two stale code comments (`kernel/core/log.c`'s "no ring buffer yet", `ramfs.c`'s "sticky bit … not yet enforced"), and a check that would keep them from returning: `scripts/check-docs.py` checks only that the five files exist; a scan of backticked identifiers against the tree, with an allow-list for spec and Linux names, finds most of them.
 
 ## Drivers and platforms
 
@@ -243,6 +244,7 @@ Open lines (struck lines are not counted):
 - **NET-21** nice-to-have, S. Small forwarding and listing gaps: route tie between two interfaces, UDP length mismatch relayed, IP id/options rebuilt, IPv6 neighbours unlisted, `SIOCSIFFLAGS` only `UP`, `/proc/net` uid/inode 0 and UDP receive queues in datagrams, not bytes.
 - **NET-22** nice-to-have, S. e1000e checksum offload (measured at about 2 %).
 - **NET-23** correctness, S. `net-tcp-delack` asserts no retransmission with the host-wide `tcp_get_stats` counter, so another pcb's retransmission fails it (AArch64 SMP4, 2026-10-24, flakes.md); count the client pcb's own.
+- **NET-24** usability, S. The kernel returns `ENETUNREACH` (101) and `ENOBUFS` (105) to user space, but neither `uapi/cosmo/syscall.h` nor `libc/include/errno.h` names them.
 
 ## Observability
 
@@ -276,7 +278,7 @@ Open lines (struck lines are not counted):
 
 ## Scheduler and SMP
 
-- **SMP-1** usability, L. Fixed-priority round-robin only: no fair, real-time or deadline policy, CPU isolation, or policy syscalls.
+- **SMP-1** usability, L. Fixed priority, with round-robin at every level but the default and a weighted fair share by nice value at it (LX-13, roadmap 1.2 A5): no real-time or deadline policy, CPU isolation, or policy syscalls (`sched_setscheduler` and friends).
 - **SMP-2** nice-to-have, L. More than 64 CPUs: one-word `cpumask_t`, xAPIC only, one cross-call slot, sequential AP bring-up, NVMe-only IRQ spreading.
 - **SMP-3** nice-to-have, L. CPU hotplug.
 - **SMP-4** nice-to-have, M. Migrating a thread preempted in user mode (S26 need not hold there); no measured stranding yet.

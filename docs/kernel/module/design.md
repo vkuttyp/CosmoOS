@@ -25,7 +25,7 @@ allowed, the ramfs creates the intermediate directories,
 
 ```c
 #define COSMO_MODULE_MAGIC        "COSMOMOD"     /* 8 bytes */
-#define COSMO_MODULE_ABI_VERSION  1
+#define COSMO_MODULE_ABI_VERSION  11u   /* 1 at the module unit; history in api.md */
 
 struct cosmo_module_info {                 /* one per module, in .cosmo.module */
     char     magic[8];

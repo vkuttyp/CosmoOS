@@ -25,7 +25,7 @@ untrusted input; here: bytes from the wire).
         ▲                                  │ echo
         │ tty_input()                      ▼
    kernel/arch/x86_64/serial.c    UART receive interrupt (IRQ 4)      kernel/core/console.c → sinks
-   (later: keyboard, virtio-console receive)
+   (also: drivers/usb/usb_hid.c, kernel/tty/pty.c)
 ```
 
 The console kobject that Phase 4 installed as handles 0, 1 and 2 of
@@ -71,20 +71,24 @@ cannot exist.
 
 ## Non-responsibilities
 
-- Raw (non-canonical) mode, `termios`, window size, `ioctl`. Programs
-  see one canonical, echoing terminal; an editor or a program that wants
-  keystrokes waits for a later phase (the structure is a `flags` word
-  away).
-- Job control, a foreground process group, `^C` and `^Z` delivering
-  signals: there are no signals beyond kill in this phase (see
-  `docs/kernel/process/`). `^C` is dropped.
-- Pseudo-terminals, multiple ttys, `/dev/tty` and `/dev/console` nodes:
-  the VFS has no device nodes yet; processes reach the console only
-  through inherited handles.
+The phase-9 list here once named raw mode, `termios`, window size, job
+control, `^C`/`^Z` signals, pseudo-terminals and the `/dev/tty` and
+`/dev/console` nodes as out of scope; all of them have since been
+implemented and are described in `design.md` and `api.md`: modes and
+`termios` (`tty_get_termios`/`tty_set_termios`, `VMIN`), window size
+(`tty_set_size`/`tty_get_size`), sessions and the foreground process
+group (`tty_set_pgrp`; `^C`, `^\` and `^Z` send `SIGINT`, `SIGQUIT`
+and `SIGTSTP`, `tty.c`), pseudo-terminals (`kernel/tty/pty.c`,
+`/dev/ptmx` and `/dev/pts/N`), the character nodes (`ttydev.c`), and the
+USB HID keyboard as a producer (`drivers/usb/usb_hid.c` →
+`tty_input`). What the tty still does not do:
+
 - Output processing beyond what the serial sink already does (`\n` →
   `\r\n`).
-- Keyboard (PS/2, USB) and virtio-console receive: the interface is
-  ready (`tty_input` from any producer); the drivers are not.
+- `VTIME`: accepted in `termios` and not implemented
+  (`kernel/include/uapi/cosmo/syscall.h`).
+- Virtio-console receive: the console's input comes from the UART, the
+  USB keyboard or a pseudo-terminal master, not from `virtio_console`.
 
 ## Interfaces at a glance
 

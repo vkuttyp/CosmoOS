@@ -6,8 +6,8 @@ Read the governing [prompts](prompts/) before acting. Follow the
 
 ## Scope rules
 
-The [1.2 roadmap](docs/roadmap-1.2.md) (direction B, storage depth) sets
-the work; the [1.0](docs/roadmap-1.0.md) and [1.1](docs/roadmap-1.1.md)
+The [1.2 roadmap](docs/roadmap-1.2.md) (direction A, self-hosting,
+chosen 2026-10-27 after direction B was completed) sets the work; the [1.0](docs/roadmap-1.0.md) and [1.1](docs/roadmap-1.1.md)
 roadmaps are complete. These rules take precedence over the backlog when
 choosing what to do.
 

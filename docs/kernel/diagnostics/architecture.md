@@ -38,11 +38,12 @@ Files:
 
 - Device access: the serial driver is in the arch layer and registers
   itself as a sink.
-- Persistence: there is no log ring buffer yet, so nothing is retrievable
-  after the fact (a `dmesg` buffer is planned).
+- Persistence across boots: the log ring (`g_ring`, `KLOG_RING_SIZE`
+  32 KiB in `kernel/core/log.c`, read by `klog_copy` and `SYS_klog`) is
+  in memory only.
 - Symbolisation: addresses are printed raw and resolved offline against
   `kernel.map`.
-- Timestamps: there is no clock yet.
+- Timestamps: log lines carry none.
 
 ## Layering
 
@@ -122,15 +123,18 @@ from the UART.
 
 ## Testing strategy
 
-Five self-tests (`printf`, `string`, `bootinfo`, `irq-state`,
-`breakpoint-trap`) run at boot in debug builds; `make test-crash` verifies
+The self-tests registered in `kernel/core/selftest.c` (over four
+hundred, across every subsystem; the first five were `printf`,
+`string`, `bootinfo`, `irq-state` and `breakpoint-trap`) run at boot in
+debug builds; `make test-crash` verifies
 the panic path. See `testing.md`.
 
 ## Future extensibility
 
-Planned, in likely order: log ring buffer with `dmesg`; timestamps once a
-clock exists; console spinlock for SMP; symbol table in the image for
-symbolised traces; lock diagnostics ("might sleep", lock ordering);
+Shipped since this list was written: the log ring buffer (read by
+`SYS_klog`), the console lock for SMP, and lock diagnostics
+(`might_sleep` and lock ordering: `docs/kernel/lockdep/`). Still
+planned: timestamps; a symbol table in the image for symbolised traces;
 `WARN_ONCE`; a GDB remote stub over a second serial port; crash dumps;
 tracing. All of these attach below `klog` or beside `panic` without
 changing the call sites.

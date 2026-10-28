@@ -153,10 +153,12 @@ interrupts enabled and may block; every user pointer passes through
 `uaccess` (`copy_from_user`, `copy_to_user`, `strncpy_from_user`,
 `user_range_ok`); every handle passes through the process's handle table
 with rights (a Linux fd *is* a native handle: 0/1/2 are the console or
-whatever `spawn` mapped). The table has 129 entries (a few of them
-x86-64-only numbers): 123 are translated, 6 return `-ENOSYS` explicitly
-(listed at the end; the counts are of the table's initialisers in
-`compat/linux/syscalls.c`, as of the device-readiness unit); everything else
+whatever `spawn` mapped). The table (`linux_table` in
+`compat/linux/syscalls.c`) has 178 entries on x86-64 and 147 on AArch64
+(the other 31 are x86-64-only numbers): two return `-ENOSYS` explicitly
+(`rseq`, `clone3`; listed at the end), `set_robust_list` succeeds and does
+nothing (`lx_zero`), and the rest are translated (counted 2026-10-28,
+after roadmap 1.2 A5's second PR); everything else
 returns `-ENOSYS` through `lx_unknown`, which increments
 `linux_state.unknown_syscalls` and logs the first eight per process at
 DEBUG (`linux: pid N: unimplemented system call NR`).
@@ -289,13 +291,33 @@ as Linux does.
 | 54 | `setsockopt` | 0 for `SOL_SOCKET` (1), `-ENOPROTOOPT` otherwise | nothing stored |
 | 55 | `getsockopt` | `-ENOPROTOOPT` | |
 
+### Calls without a row above
+
+These entries were added by units after the tables above were written;
+each is translated by the handler of the same name with an `lx_` prefix
+in `compat/linux/syscalls.c`, and its semantics are
+described where the native object it reaches is:
+
+| Calls | Native service, documented in |
+|---|---|
+| `epoll_create`, `epoll_create1`, `epoll_ctl`, `epoll_wait`, `epoll_pwait` | the epoll kobject over `io_poll`: `docs/kernel/io/design.md` |
+| `eventfd`, `eventfd2`, `signalfd`, `signalfd4`, `timerfd_create`, `timerfd_settime`, `timerfd_gettime` | kobjects on the aio-timer template: `docs/kernel/io/design.md`, `docs/kernel/object/api.md` |
+| `memfd_create`, `ftruncate` | memfd objects and file truncation: `docs/kernel/object/api.md` |
+| `shmget`, `shmat`, `shmdt`, `shmctl` | System V shared memory on memfd segments (`kernel/ipc/shm.c`): `design.md` here, `docs/kernel/memory/design.md` |
+| `statx`, `statfs`, `fstatfs` | VFS `stat` (`struct cosmo_stat`) and `vnode_statfs` (`put_statfs`: the fsid is the mount's id) |
+| `chown`, `lchown`, `fchown`, `fchownat`, `chmod`, `fchmod`, `fchmodat`, `fchmodat2`, `utimensat`, `chroot` | the native ownership calls 108-112: `design.md` here, `docs/kernel-services/vfs/design.md`, `docs/kernel/security/design.md` |
+| `mount`, `umount2` | `vfs_mount_at`/`vfs_umount_at`: `docs/kernel-services/vfs/api.md` |
+| `reboot`, `settimeofday`, `clock_settime` | `SYS_reboot` and the wall clock, under privileges: `design.md` here, `docs/kernel/security/design.md` |
+| `getrlimit`, `setrlimit`, `prlimit64` | rlimits: `docs/kernel/process/api.md`, `docs/kernel/security/api.md` |
+| `setuid`, `setgid`, `setreuid`, `setregid`, `setresuid`, `getresuid`, `setresgid`, `getresgid`, `getgroups`, `setgroups` | credentials (`kernel/process/cred.c`): `docs/kernel/process/api.md`, `docs/kernel/security/` |
+
 ### Explicit `-ENOSYS`
 
 `rseq` 334, `clone3` 435 (x86-64 numbers; the AArch64 rows use that
 table's). `fork` 57, `vfork` 58 and `execve` 59 left this list with
 roadmap M3 (the rows above), `sysinfo` 99 with the sysinfo unit. These are `lx_nosys`, not `lx_unknown`: they are
 known and refused, so they are not counted as unknown. `mremap` 25 has
-a number in the tables but no entry: it goes through `lx_unknown`;
+an entry (`lx_mremap`) since the mremap unit;
 `sendmsg` 46 and `recvmsg` 47 have entries since the unix-sockets unit,
 `select` 23 and `pselect6` 270 / 72 since the device-readiness unit. `msync` 26 has an entry since
 the file-regions unit (the `mmap` row above).

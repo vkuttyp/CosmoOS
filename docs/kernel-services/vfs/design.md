@@ -375,130 +375,30 @@ same type (a non-empty directory target is refused).
 
 ### Storage pool (`kernel/include/kernel/storage.h`)
 
-```c
-struct spool { struct blkdev *dev; uint32_t block_size; /* 4096 */ uint64_t nblocks; unsigned sectors_per_block; };
-int  pool_open(struct blkdev *bd, struct spool **out);      /* references bd */
-void pool_close(struct spool *p);
-int  pool_read(struct spool *p, uint64_t blk, void *buf);   /* one pool block */
-int  pool_write(struct spool *p, uint64_t blk, const void *buf);
-int  pool_write_flags(struct spool *p, uint64_t blk, const void *buf, unsigned flags);   /* BIO_PREFLUSH, BIO_FUA: the root write */
-int  pool_flush(struct spool *p);
-```
+`struct spool` is the only thing cosmofs addresses: members
+(`pool_add_member`), each a mirror of up to `POOL_MAX_COPIES` copies
+(`pool_add_copy`, `pool_attach_copy`, `pool_detach_copy`), spares, the
+durable `epoch` and a `state_seq` that advances at every copy state
+change. Reads and writes take a device-virtual address (`pool_read`,
+`pool_write`, `pool_read_copy`, `pool_write_copy`); copy states,
+resilvering and the region map of missed writes live in
+`kernel-services/storage/pool.c`. The header is the API reference; the
+design (members, device-virtual addresses, mirrors, resilvering) is in
+`docs/kernel-services/filesystem/cosmofs/design.md`.
 
-The pool is the only thing cosmofs addresses. Adding a second member,
-allocation groups, or redundancy changes this file and the superblock's
-member table, not the filesystem.
+### cosmofs (`kernel-services/filesystem/cosmofs/`)
 
-### cosmofs on disk (`kernel-services/filesystem/cosmofs/cosmofs_format.h`)
-
-Summary; the authoritative description, with a block-by-block picture of
-a formatted disk and the commit sequence, is
-`docs/kernel-services/filesystem/cosmofs/design.md`. Divergences from the
-text below as first drafted, now reflected there: inodes are written
-through on every mutation (`struct cfs_vnode` caches them), directory
-blocks bypass the page cache, `writepage` fills unwritten logical blocks
-below the written one with zero blocks, inode numbers are never reused,
-and the inode carries a `parent` field for `..`.
-
-Block size 4096. All integers little-endian. Every metadata block
-starts with:
-
-```c
-struct cfs_mhdr { uint32_t magic; /* "CFSM" */ uint32_t kind; uint64_t generation; uint64_t blkno; uint32_t crc; uint32_t csum_algo; };  /* 32 bytes */
-```
-
-`crc` is a checksum over the block with the field zeroed, `csum_algo`
-(version 11, the former `pad` word) says which algorithm it is (CRC32C
-today; a pre-v11 image's zeroed word also reads as CRC32C), and `blkno`
-must equal the block's own number (misdirected writes are detected).
-
-| Block | Content |
-|---|---|
-| 0, 1 | Superblock slots A and B (`struct cfs_super`): magic `COSMOFS1`, version 1, block size, total blocks, `generation`, `imap_root`, `alloc_root`, `next_ino`, `inode_count`, `free_blocks`, `csum_root` (reserved for a data-checksum tree), `snap_root` (reserved for snapshot roots), member table (one entry), CRC32C. Mount reads both, keeps the valid one with the higher generation. Commit writes the slot the current root did **not** come from. |
-| imap L1 | `kind IMAP1`: 508 block numbers of L0 blocks. |
-| imap L0 | `kind IMAP0`: 508 block numbers of inode blocks. |
-| inode block | `kind INODES`: 15 × 256-byte `struct cfs_inode`. Inode `i` lives in inode block `i / 15`, slot `i % 15`; L0 index `(i/15) % 508`, L1 index `(i/15) / 508`. |
-| alloc index | `kind ALLOCIDX`: 508 block numbers of bitmap blocks. |
-| bitmap | `kind BITMAP`: 32512 bits, one per pool block, 1 = allocated. |
-| indirect | `kind EXTENTS`: 254 `struct cfs_extent`. |
-| data | file contents and directory entries; no header. |
-
-```c
-struct cfs_extent { uint64_t start; uint32_t count; uint32_t pad; };      /* 16 bytes, count in blocks */
-struct cfs_inode {                                                          /* 256 bytes */
-    uint32_t mode;      /* CFS_TYPE_* << 12 | permissions */
-    uint32_t nlink;
-    uint32_t uid, gid;
-    uint64_t size;
-    uint64_t mtime_ns, ctime_ns;
-    uint64_t generation;                 /* last transaction that changed it */
-    uint64_t ino;
-    struct cfs_extent direct[10];        /* 160 bytes */
-    uint64_t indirect;                   /* EXTENTS block or 0 */
-    uint64_t reserved[4];
-};
-struct cfs_dirent { uint64_t ino; uint8_t type; uint8_t namelen; uint8_t pad[6]; char name[48]; };   /* 64 bytes, ino 0 = free */
-```
-
-Inode 1 is the root directory. A file's logical block `n` is found by
-walking the extents in order (direct then indirect); a block number of
-0 inside an extent run is not possible (runs are contiguous allocated
-blocks), and a logical block beyond the runs is a hole. Maximum extent
-count is 264, which bounds file size by fragmentation; sequential
-allocation merges runs.
-
-### cosmofs in memory and transactions (`cosmofs.c`, `cosmofs_txn.c`, `cosmofs_alloc.c`)
-
-```c
-struct cfs { struct spool *pool; struct cfs_super sb; unsigned sb_slot; uint64_t gen; /* sb.generation + 1 = the open transaction */
-             uint8_t *bitmap; /* in-memory copy, nblocks bits */ struct list_node pending_free; struct list_node bufs; /* dirty metadata */
-             unsigned nr_dirty; struct mutex lock; bool dirty; struct mount *mnt; };
-struct cfs_buf { struct list_node link; uint64_t blkno; uint8_t *data; /* 4 KiB */ bool dirty; };
-```
-
-One filesystem lock serialises every metadata operation (v1). The open
-transaction is generation `gen`. Rules:
-
-1. **Read**: metadata blocks are read through `cfs_buf` (a small LRU of
-   64 buffers keyed by block number); the header's `crc`, `blkno` and
-   `kind` are verified on every read from the pool (`-EIO` on mismatch).
-2. **Copy on write**: to modify a metadata block whose header
-   `generation < gen`, allocate a fresh block, copy, set
-   `generation = gen`, `blkno = new`, mark dirty, put the old block on
-   `pending_free`, and update the parent pointer (which recurses: the
-   L0 block's parent L1, the L1's parent is the superblock root field;
-   the bitmap's parent is the alloc index). A block with
-   `generation == gen` is already new in this transaction and is
-   modified in place.
-3. **Data**: `writepage` for a logical block always allocates a new
-   block, writes the page there, and rewrites the extent (splitting a
-   run if necessary); the old block goes on `pending_free`. `readpage`
-   maps and reads. So committed data is never overwritten either.
-4. **Allocation**: first-fit in the in-memory bitmap, never returning a
-   block on `pending_free` (they are still referenced by the committed
-   root). The on-disk bitmap blocks touched by allocation are CoW'd like
-   any metadata.
-5. **Commit** (`cfs_commit`): write every dirty data page
-   (`pagecache_sync` on dirty vnodes), write every dirty `cfs_buf`,
-   `pool_flush`, then write the superblock into the other slot with
-   `generation = gen`, `pool_flush`, then `gen++`, clear `pending_free`
-   bits in the in-memory bitmap (they become allocatable in the next
-   transaction, which will CoW the bitmap blocks and write them with the
-   next commit), clear the buffers' dirty flags. Runs on `vfs_sync` and
-   `unmount` only; there is no size or time threshold (V17). The full
-   sequence, including the reserve-then-write bitmap fixpoint, is in
-   `docs/kernel-services/filesystem/cosmofs/design.md`.
-6. **Crash**: before the superblock write, the old root is intact (all
-   new blocks were free in it); after, the new root is complete. The
-   superblock CRC makes a torn slot write detectable, and the other slot
-   still holds the previous root.
-7. **Frees**: `unlink` of the last link with no open file, or eviction
-   of an unlinked vnode, puts the file's blocks and its inode slot on
-   `pending_free` and clears the inode.
-
-Format (`cosmofs_format(pool)`): writes bitmap, alloc index, inode
-block 0 with the root directory (inode 1, empty), imap L0 and L1, and
-superblock slot A at generation 1 with slot B zeroed.
+The on-disk format (`cosmofs_format.h`: structure version
+`CFS_VERSION` 15, format `CFS_FORMAT_VERSION` 11), transactions and
+commit, snapshots, clones, rollback, scrub, repair, mirrors and
+encryption are described in
+`docs/kernel-services/filesystem/cosmofs/design.md`, which is
+authoritative. This document once carried a summary of the first
+format; it went stale (superblock version 1, a 264-extent bound, 48-byte
+names, a single-device pool) and was removed rather than kept in step.
+What the VFS relies on: cosmofs registers an `fs_type` and implements
+the vnode operations (`link` included), with file data through the page
+cache's `readpage`/`writepage`.
 
 **Links in ramfs.** The target is a bounded string in the node, freed at
 evict, and `ramfs_lnk_ops` has no `readpage` or `writepage`: a link is
@@ -519,7 +419,7 @@ the store.
 unit: a FIFO's open rules and the open's mode; a regular file ignores
 it), `O_DIRECTORY 0x10000`. `mknod(path, mode, type)` is 100 (the
 named-pipes unit; `type` is `COSMO_DT_FIFO`).
-`struct cosmo_stat { ino, type, mode, nlink, uid, gid, size, mtime_ns, ctime_ns }`;
+`struct cosmo_stat { ino, type, mode, nlink, uid, gid, dev, size, mtime_ns, ctime_ns }` (`dev`: the mount's id);
 `struct cosmo_dirent { ino, type, reclen, name[] }` records packed into
 the `getdents` buffer (at least `sizeof(struct cosmo_dirent) + 2` bytes;
 `-EINVAL` only when the very next entry does not fit). Paths are copied

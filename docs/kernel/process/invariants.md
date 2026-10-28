@@ -36,12 +36,15 @@ resolves each destination page with `arch_mmu_query` and writes via
 the user CR3 nor STAC. Check: review (the function has no
 `arch_user_access_begin`).
 
-**P5. The initial stack.** The top two pages (`INITIAL_STACK_PAGES`)
-are populated eagerly (the initial frame is written into them byte by
-byte through the direct map); the rest of the 8 MiB region is lazy with
-`VM_REGION_GUARD_BELOW`; argv/envp/auxv strings (at most
-`INITIAL_STRINGS_MAX` 300) and the 16 `AT_RANDOM` bytes must fit those
-pages or creation fails with `-EINVAL`. Check: test `process-user` (64
+**P5. The initial stack.** The top pages are populated eagerly, at
+least two (`INITIAL_STACK_PAGES`) and as many as the frame needs up to
+`INITIAL_STACK_PAGES_MAX` (40, 160 KiB: exec's 64 KiB of strings, their
+pointers and the vector) (`kernel/process/process.c`); the initial frame
+is written into them byte by byte through the direct map; the rest of
+the 8 MiB region is lazy with `VM_REGION_GUARD_BELOW`. The argv/envp
+strings and pointers, the auxiliary vector and the 16 `AT_RANDOM` bytes
+must fit those pages or creation fails with `-E2BIG`
+(`build_initial_stack`). Check: test `process-user` (64
 KiB of stack touched through lazy pages), `linux-elf` and the Linux
 programs (which read the larger vector), review of
 `build_initial_stack`.

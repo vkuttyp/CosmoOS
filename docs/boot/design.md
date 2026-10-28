@@ -2,7 +2,7 @@
 
 ## The protocol structure
 
-`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 9). All
+`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 10). All
 fields are fixed-width integers; there are no pointers, enums, or
 padding surprises, so the layout is identical on every architecture and
 compiler.
@@ -585,10 +585,11 @@ under TCG; byte-wise `memcpy` of a 115 KiB kernel is not measurable.
 - On x86-64, MMIO ranges inside the identity map are mapped write-back like
   RAM. The kernel must not access device memory through the bootstrap
   tables without remapping it first.
-- No framebuffer or command line; `reserved1` is zero. Exactly one
-  archive, always read from the fixed path `\cosmo\boot.tar`; the
-  loader knows nothing about its contents (names, order, or what is a
-  module) and passes no command line for it. Entry naming and load
+- Exactly one archive, always read from the fixed path
+  `\cosmo\boot.tar` and checked against the signed manifest; the loader
+  knows nothing about its contents (names, order, or what is a module).
+  (The framebuffer arrived in protocol version 6 and the command line,
+  `\cosmo\cmdline`, in version 7.) Entry naming and load
   order are a kernel/build convention (`docs/kernel/module/design.md`).
 - If the loader-defined memory types fall back to `EfiLoaderData`
   (firmware rejected `0x8000000x`), the translated map would list the
@@ -602,24 +603,18 @@ under TCG; byte-wise `memcpy` of a 115 KiB kernel is not measurable.
   by review only.
 - A memory map with more than about 630 merged entries would not fit in
   `BOOTINFO_PAGES` and is fatal; real firmware produces well under 200.
-- `BOOTX64.EFI` only; no 32-bit UEFI, no legacy BIOS.
+- `BOOTX64.EFI` and `BOOTAA64.EFI` only; no 32-bit UEFI, no legacy BIOS.
 
 ## Future extensibility
 
-- **AArch64**: the struct is unchanged. The header gains an "Entry state
-  (AArch64)" section: EL1, MMU on with TTBR1 covering the kernel and the
-  HHDM, `X0` = info, `SP` = handoff stack, DAIF masked. An AArch64 loader
-  (`boot/uefi` compiled for `aarch64-unknown-windows`) reuses `main.c`,
-  `elf.c` (with `EM_AARCH64`), `memory.c`, and `console.c` (UART via
-  the EFI SerialIo or a PL011 at a firmware-reported address);
-  `paging.c` and `cpu.c` become per-architecture files.
-- **Protocol version 4** (framebuffer, command line): bump
-  `COSMOBOOT_VERSION`, replace `reserved1` fields, and keep `size` so a
-  kernel can read an older loader's struct and refuse it cleanly. The
-  kernel refuses any version other than its own (`bootinfo_init`).
-  Version 3 already answered the multi-module need with the archive, so
-  no module list field is planned: more boot files mean more archive
-  entries, not more protocol.
+- **Protocol versions.** Both items once planned here have shipped: the
+  AArch64 loader (`boot/uefi/arch/aarch64/`, `BOOTAA64.EFI`) and the
+  framebuffer and command line (versions 6 and 7; the version history is
+  in `boot/protocol/cosmoboot.h`). A further change bumps
+  `COSMOBOOT_VERSION` and keeps `size`, so a kernel can read an older
+  loader's struct and refuse it cleanly; the kernel refuses any version
+  other than its own (`bootinfo_init`). More boot files mean more
+  archive entries, not more protocol.
 - **Memory manager handoff**: reservation is by map type, and the
   loader guarantees the types are right even under the `EfiLoaderData`
   fallback by retyping its own ranges (`mark_range`). The PMM's

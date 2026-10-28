@@ -91,6 +91,25 @@ that outlives a sleep, and a migrator never moves a pinned thread. The
 third widens another thread's mask (tests); it must admit the CPU the
 thread is on, since nothing here moves it.
 
+### `void thread_set_nice(struct thread *t, int nice)`
+Set `t->nice`, clamped to -20..19, by a relaxed atomic store: no lock,
+no allocation, no sleep; any context. The process layer calls it with
+the process's value when a thread is created and from `setpriority`
+(`kernel/process/process.c`); tests call it on kernel threads. The new
+weight applies from the thread's next charge; nothing is requeued.
+
+### `kernel/include/kernel/fair.h`
+The fair level's arithmetic, pure functions generated from
+`kernel/scheduler/fair.nova` (`make nova`): `fair_weight` (Linux's
+weight for a nice value), `fair_charge` (vruntime advanced by run time ×
+1024 / weight, saturating), `fair_place` (a joining thread's start, no
+earlier than `min_vruntime - FAIR_WAKE_BONUS_NS`), `fair_rebase` (a
+vruntime carried between run queues), `fair_before` (the level's order),
+`fair_should_preempt` (ahead of the leftmost by more than
+`FAIR_GRANULARITY_NS`, 4 ms) and `fair_min` (the queue's monotonic
+minimum). None takes a lock, allocates or sleeps; `policy_rr.c` calls
+them under `runqueue.lock`.
+
 ### `struct thread *thread_current(void)`
 - `this_cpu()->current`. NULL before `sched_init`.
 
@@ -241,12 +260,19 @@ in a `SCHED_CHAOS=1` build, the tick migrator's tally.
 `allowed`, or NULL;
 called with `rq->lock` held. Round-robin offers the thread it would run
 last (the lowest priority level's tail).
-- Function table `{enqueue, dequeue, pick_next, tick, slice_new}`. All
-  entries run under `runqueue.lock`. `pick_next` returning NULL selects
-  idle. The only policy is `sched_policy_rr` (`policy_rr.c`): 64 FIFO
-  lists with a 64-bit occupancy bitmap, `SCHED_SLICE_NS` = 10 ms; a thread
-  whose slice expires yields only if the highest ready priority is ≤ its
-  own, otherwise the slice refills.
+- Function table `{enqueue, dequeue, pick_next, tick, slice_new,
+  pick_migratable, charge, moved}` (`kernel/include/kernel/sched.h`).
+  All entries run under `runqueue.lock`. `pick_next` returning NULL
+  selects idle. `charge` bills the current thread its run time at the
+  tick and at the switch-out; `moved` carries queue-relative state (the
+  fair level's vruntime) when a thread changes run queues. The only
+  policy is `sched_policy_rr` (`policy_rr.c`): 64 lists with a 64-bit
+  occupancy bitmap, `SCHED_SLICE_NS` = 10 ms. Outside the fair level a
+  thread whose slice expires yields only if the highest ready priority
+  is ≤ its own, otherwise the slice refills. At `SCHED_PRIO_DEFAULT` the
+  list is kept in vruntime order and the tick preempts by
+  `fair_should_preempt` (`kernel/include/kernel/fair.h`; `design.md`,
+  "The fair level").
 
 ---
 

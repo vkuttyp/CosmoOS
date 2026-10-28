@@ -125,8 +125,7 @@ cosmo$ jobs
 ## What is missing compared with Linux
 
 The shell and its applets behave as on Linux, but the system around them
-is smaller. Among what you will notice: no `ping6`; no hard links (`ln`
-without `-s`); no `/sys`; one user, root; no swap. [Known limitations](limitations.md) has the full
+is smaller. Among what you will notice: no `ping6`; no `/sys`; one user, root; no swap. [Known limitations](limitations.md) has the full
 list.
 
 Power off with `exit` (or `poweroff`, which works from any shell); QEMU

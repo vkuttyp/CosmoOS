@@ -163,7 +163,7 @@ does not).
 |---|---|
 | `read`, `write`, `pread64`, `pwrite64` | the native handle path (`file_read`/`file_pread` or the object's `read`/`write` for pipes, console, sockets); Linux and native share the handle table |
 | `readv`, `writev` | up to 1024 iovecs (each validated); `readv` loops and stops at the first short transfer; `writev` is one write of the gathered vector, as on Linux (64 KiB per object call) |
-| `open`, `openat(AT_FDCWD, ...)`, `creat` | Linux `O_*` (octal Linux values) mapped to `COSMO_O_*`, `O_NONBLOCK` included since the named-pipes unit (a FIFO's open rules and per-open mode); `O_CLOEXEC` marks the handle close-on-exec (roadmap M3), `O_NOCTTY`, `O_LARGEFILE` accepted and dropped; a `dirfd` other than `AT_FDCWD` is `-ENOSYS` |
+| `open`, `openat(AT_FDCWD, ...)`, `creat` | Linux `O_*` (octal Linux values) mapped to `COSMO_O_*`, `O_NONBLOCK` included since the named-pipes unit (a FIFO's open rules and per-open mode); `O_CLOEXEC` marks the handle close-on-exec (roadmap M3), `O_NOCTTY`, `O_LARGEFILE` accepted and dropped; a `dirfd` other than `AT_FDCWD` is resolved by `at_base` (the dirfd unit) |
 | `close`, `lseek`, `dup`, `dup2`, `dup3`, `pipe`, `pipe2` | direct; `pipe2(O_NONBLOCK)` sets both ends non-blocking, `O_CLOEXEC` marks both close-on-exec; `dup3` takes `O_CLOEXEC` (any other flag `-EINVAL`); `dup` and `dup2` start without it |
 | `fstat`, `stat`, `lstat`, `newfstatat` | `struct cosmo_stat` → Linux `struct stat` (144 bytes: `st_dev` the mount's id as `makedev(0, id)` (roadmap 1.1 P4), `st_ino`, `st_nlink`, `st_mode` = type bits (`S_IFREG` 0100000, `S_IFDIR` 040000, `S_IFCHR` 020000, `S_IFIFO` 010000, `S_IFSOCK` 0140000) or permission bits, uid, gid, `st_size`, `st_blksize` 4096, `st_blocks`, times as `timespec` from `mtime_ns`/`ctime_ns`); `AT_EMPTY_PATH` with an fd is `fstat` |
 | `getdents64` | native `getdents` records → `linux_dirent64` (`d_ino`, `d_off`, `d_reclen`, `d_type`, `d_name`), through two kernel buffers; the native name starts at byte 12 of its record (`offsetof(struct cosmo_dirent, name)`, not `sizeof`, which is 16), `d_type` is mapped to Linux's `DT_*` values (`DT_REG` 8, `DT_DIR` 4, `DT_CHR` 2, `DT_FIFO` 1, `DT_SOCK` 12), each output record is the 19-byte header plus the NUL-terminated name padded to 8 bytes, and `d_off` is the offset of the next record in the buffer |
@@ -189,8 +189,8 @@ sessions; they were stubs answering the pid or 0 before that),
 `rusage` carries the collected child's user and system time, its own
 waited-for children's included, and 0 for the rest. `fork`, `vfork` and a `clone` without
 `CLONE_THREAD`: "fork" below; `execve`: "execve" below. `clone3` →
-`-ENOSYS`. `rseq` and `sched_getaffinity` → `-ENOSYS`
-(a libc tolerates these). `readlink`, `readlinkat`, `symlink` and
+`-ENOSYS`. `rseq` → `-ENOSYS` (a libc tolerates it);
+`sched_getaffinity` answers with the online CPUs (`lx_sched_getaffinity`). `readlink`, `readlinkat`, `symlink` and
 `symlinkat` are implemented over `vfs_readlink`/`vfs_symlink` since the
 symlink unit, `lstat` is no longer an alias for `stat`, and
 `newfstatat` honours `AT_SYMLINK_NOFOLLOW` (`api.md`, "Symbolic
@@ -217,7 +217,7 @@ for the remainder, ended early after `^Z` and `fg`); `getrandom` → `random_get
 `struct utsname` (six 65-byte fields: `Linux`, the uts name, `6.0.0-cosmo`,
 the build id, `x86_64`, `(none)`); `sethostname` sets the uts name under
 `PRIV_SYS_ADMIN`, as the native call does (shell completeness S1:
-BusyBox's `hostname`); `sysinfo` `-ENOSYS`.
+BusyBox's `hostname`); `sysinfo` is translated (`lx_sysinfo`, the sysinfo unit).
 
 ### Open flags on AArch64 (roadmap M3)
 
@@ -244,7 +244,7 @@ flowinfo, 16-byte address, scope) to `struct netaddr` and back (output
 length honoured, full size reported). `setsockopt` returns 0 for
 `SOL_SOCKET` options (`SO_REUSEADDR`, `SO_KEEPALIVE`, `SO_BROADCAST`,
 ...) and `-ENOPROTOOPT` otherwise; `getsockopt` `-ENOPROTOOPT`;
-`epoll_*` `-ENOSYS` (`poll`, `ppoll`, `select` and `pselect6` are built); `sendmsg`/`recvmsg`/`socketpair`
+`epoll_*` are built since the epoll unit (`docs/kernel/io/design.md`), as are `poll`, `ppoll`, `select` and `pselect6`; `sendmsg`/`recvmsg`/`socketpair`
 are built since the unix-sockets unit (with `AF_UNIX` and `SCM_RIGHTS`).
 `getsockopt(SO_PEERCRED)` answers on a connected unix stream socket.
 
