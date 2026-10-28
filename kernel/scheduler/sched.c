@@ -444,14 +444,16 @@ static void schedule_pass(bool preempt)
 
     if (next == prev) {
         prev->state = THREAD_RUNNING;
-        prev->flags &= ~(THREAD_FLAG_PREEMPTED | THREAD_FLAG_YIELDED);
+        prev->flags &= ~THREAD_FLAG_PREEMPTED;
+        prev->yield_pending = false;
         prev->last_start_ns = now;
         spin_unlock(&rq->lock);
         return;
     }
 
     next->state = THREAD_RUNNING;
-    next->flags &= ~(THREAD_FLAG_PREEMPTED | THREAD_FLAG_YIELDED);   /* it runs again: whatever it had in flight completes here */
+    next->flags &= ~THREAD_FLAG_PREEMPTED;   /* it runs again: whatever it had in flight completes here */
+    next->yield_pending = false;
     next->cpu = (int)rq->cpu;
     next->last_start_ns = now;
     next->switches++;
@@ -551,9 +553,7 @@ void sched_yield(void)
 {
     struct thread *self = thread_current();
     self->slice_left_ns = 0;
-    arch_irq_state_t s = arch_irq_save();   /* the preemption path writes `flags` too */
-    self->flags |= THREAD_FLAG_YIELDED;
-    arch_irq_restore(s);
+    self->yield_pending = true;
     schedule_internal(false);
 }
 

@@ -206,7 +206,7 @@ better level always runs first.
   boost -- starts no earlier than `fair_min - FAIR_WAKE_BONUS_NS` (5 ms;
   `fair_place`): a sleeper runs soon but cannot claim the CPU for as long
   as it slept.
-- **Yield.** `sched_yield` sets `THREAD_FLAG_YIELDED`; the thread is
+- **Yield.** `sched_yield` sets `thread.yield_pending`; the thread is
   queued behind every thread at the level, its vruntime raised to the
   last one's, so a yield still lets every equal run first, as the 82
   callers that spin with it expect.

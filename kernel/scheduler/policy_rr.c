@@ -41,7 +41,7 @@ static uint64_t fair_vruntime(const struct thread *t)
 static void fair_enqueue(struct runqueue *rq, struct thread *t)
 {
     struct list_node *head = &rq->ready[FAIR_LEVEL];
-    if (t->flags & THREAD_FLAG_YIELDED) {
+    if (t->yield_pending) {
         if (!list_empty(head)) {
             uint64_t last = fair_vruntime(list_entry(head->prev, struct thread, rq_link));
             if (fair_before(t->vruntime, last))
@@ -67,7 +67,7 @@ static void rr_enqueue(struct runqueue *rq, struct thread *t, bool at_head)
         list_push_front(&rq->ready[t->priority], &t->rq_link);
     else
         list_push_back(&rq->ready[t->priority], &t->rq_link);
-    t->flags &= ~THREAD_FLAG_YIELDED;
+    t->yield_pending = false;
     rq->bitmap |= (uint64_t)1 << t->priority;
     rq->nr_running++;
 #if CONFIG_DEBUG
