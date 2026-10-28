@@ -218,8 +218,13 @@ bool selftest_cosmofs_ops(const char **reason)
     CHECK(write_file("/mnt/hello.txt", "hello from the kernel", 21));
     CHECK(vfs_stat(NULL, "/mnt/hello.txt", &s) == 0 && s.size == 21);
 
-    /* Errors. */
-    CHECK(vfs_mkdir(NULL, "/mnt/dir/a-very-long-name-that-exceeds-the-forty-seven-byte-limit", 0755) == -ENAMETOOLONG);
+    /* Errors. A name longer than 255 bytes; one of 48 to 255 is format
+     * 15's (design.md, "Format version 15"; cosmofs-longname). */
+    static char toolong[9 + 256 + 1];
+    memcpy(toolong, "/mnt/dir/", 9);
+    memset(toolong + 9, 'n', 256);
+    toolong[9 + 256] = '\0';
+    CHECK(vfs_mkdir(NULL, toolong, 0755) == -ENAMETOOLONG);
     CHECK(vfs_rmdir(NULL, "/mnt/dir") == -ENOTEMPTY);
     CHECK(vfs_rename(NULL, "/mnt/dir", "/tmp/x") == -EXDEV);
 
@@ -5636,6 +5641,195 @@ static bool remount_eng(struct blkdev *bd, const char **reason)
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
+    return true;
+}
+
+/* --- long names (roadmap 1.2 A2; design.md, "Format version 15"; CF13) --- */
+
+/* `ENG "/"` and a name of `len` bytes, distinct per `tag`, into `out`. */
+static const char *lname(char *out, unsigned len, char tag)
+{
+    size_t n = strlen(ENG "/");
+    memcpy(out, ENG "/", n);
+    out[n] = tag;
+    for (unsigned i = 1; i < len; i++)
+        out[n + i] = (char)('a' + (i * 7 + (unsigned char)tag) % 26);
+    out[n + len] = '\0';
+    return out;
+}
+
+/* How many entries of `dir` are named `want`, listed through a buffer of
+ * `bufsz` bytes -- small, so the walk resumes between long names -- and
+ * how many entries there were in all, "." and ".." among them. */
+static bool list_count(const char *dir, size_t bufsz, const char *want, unsigned *hits, unsigned *total)
+{
+    struct file *f;
+    if (vfs_open(NULL, dir, COSMO_O_RDONLY, 0, &f))
+        return false;
+    uint8_t *buf = kmalloc(bufsz, 0);
+    bool ok = buf != NULL;
+    size_t wlen = strlen(want);
+    *hits = *total = 0;
+    while (ok) {
+        int64_t n = file_readdir(f, buf, bufsz);
+        if (n <= 0) {
+            ok = n == 0;
+            break;
+        }
+        for (size_t o = 0; o < (size_t)n;) {
+            const struct cosmo_dirent *e = (const struct cosmo_dirent *)(buf + o);
+            if (e->reclen == 0) {
+                ok = false;
+                break;
+            }
+            (*total)++;
+            if (e->namelen == wlen && memcmp(e->name, want, wlen) == 0)
+                (*hits)++;
+            o += e->reclen;
+        }
+    }
+    kfree(buf);
+    file_put(f);
+    return ok;
+}
+
+static unsigned pool_version(void)
+{
+    struct cosmofs_stats st;
+    return cosmofs_stats(mount_of(ENG), &st) == 0 ? st.version : 0;
+}
+
+/* The name part of a path lname made. */
+#define LBASE(p) ((p) + strlen(ENG "/"))
+
+/*
+ * cosmofs-longname: names of 48 to 255 bytes. A version-11 pool takes
+ * short names and stays 11, finds no long name, and is raised to 15 by
+ * its first name over 47 bytes; then files, a directory and a symbolic
+ * link with long names are created, read back, listed whole through a
+ * buffer that holds one long entry at a time, renamed long to long, long
+ * to short and short to long, and removed. A 255-byte name that does not
+ * fit the slots its block has left goes to the next block. All of it
+ * survives a remount and the checker calls the pool clean. A version-10
+ * pool cannot be raised: there a long name is -ENAMETOOLONG and the pool
+ * stays 10. 256 bytes is the VFS's -ENAMETOOLONG everywhere.
+ */
+bool selftest_cosmofs_longname(const char **reason)
+{
+    struct blkdev *bd;
+    struct cosmofs_check_report rep;
+    struct cosmo_stat st;
+    struct file *f;
+    unsigned hits, total;
+    static char p48[300], p49[300], p104[300], p105[300], p255[300], pdir[300], plnk[300], p256[300], pnew[300];
+
+    CHECK(engine_mount(&bd, 2048, reason));
+    CHECK(write_file(ENG "/a", "short", 5) && pool_version() == CFS_FORMAT_VERSION);
+    CHECK(vfs_open(NULL, lname(p105, 105, 'f'), COSMO_O_RDONLY, 0, &f) == -ENOENT);
+    CHECK(pool_version() == CFS_FORMAT_VERSION);   /* a lookup raises nothing */
+
+    CHECK(write_file(lname(p48, 48, 'a'), "48", 2) && pool_version() == 15);
+    CHECK(write_file(lname(p49, 49, 'b'), "49", 2));
+    CHECK(write_file(lname(p104, 104, 'c'), "104", 3));
+    CHECK(write_file(p105, "105", 3));
+    CHECK(write_file(lname(p255, 255, 'e'), "255", 3));
+    CHECK(vfs_mkdir(NULL, lname(pdir, 200, 'g'), 0755) == 0);
+    CHECK(vfs_symlink(NULL, lname(plnk, 150, 'h'), "a") == 0);
+    CHECK(vfs_open(NULL, lname(p256, 256, 'i'), COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == -ENAMETOOLONG);
+    CHECK(read_matches(p48, "48", 2) && read_matches(p104, "104", 3) && read_matches(p255, "255", 3));
+    CHECK(read_matches(plnk, "short", 5));   /* through the link */
+
+    /* Listed whole, one long entry per call at the smallest buffer. */
+    size_t one = sizeof(struct cosmo_dirent) + CFS_NAME_MAX_LONG + 8;
+    CHECK(list_count(ENG, one, LBASE(p255), &hits, &total) && hits == 1 && total == 2 + 8);
+    CHECK(list_count(ENG, one, LBASE(pdir), &hits, &total) && hits == 1);
+    CHECK(list_count(ENG, 4096, LBASE(p49), &hits, &total) && hits == 1 && total == 2 + 8);
+
+    /* Renames: long to long, long to short, short to long. */
+    CHECK(vfs_rename(NULL, p255, lname(pnew, 230, 'j')) == 0);
+    CHECK(vfs_stat(NULL, p255, &st) == -ENOENT && read_matches(pnew, "255", 3));
+    CHECK(vfs_rename(NULL, p104, ENG "/s") == 0 && read_matches(ENG "/s", "104", 3));
+    CHECK(vfs_rename(NULL, ENG "/s", p104) == 0 && read_matches(p104, "104", 3));
+    CHECK(vfs_unlink(NULL, p49) == 0 && vfs_stat(NULL, p49, &st) == -ENOENT);
+    CHECK(list_count(ENG, one, LBASE(pnew), &hits, &total) && hits == 1 && total == 2 + 7);
+
+    /* A directory whose first block has four free slots left: the
+     * 255-byte name (five slots) is put in the next block. */
+    char *sub = pdir;
+    static char path[600];   /* the 200-byte directory, a slash, a 255-byte name */
+    for (unsigned i = 0; i < CFS_DIRENTS_PER_BLOCK - 4; i++) {
+        ksnprintf(path, sizeof(path), "%s/%u", sub, i);
+        CHECK(write_file(path, "x", 1));
+    }
+    CHECK(vfs_stat(NULL, sub, &st) == 0 && st.size == CFS_BLOCK);
+    ksnprintf(path, sizeof(path), "%s/%s", sub, LBASE(lname(p256, 255, 'k')));
+    CHECK(write_file(path, "next", 4) && read_matches(path, "next", 4));
+    CHECK(vfs_stat(NULL, sub, &st) == 0 && st.size == 2 * CFS_BLOCK);
+    CHECK(list_count(sub, one, LBASE(p256), &hits, &total) && hits == 1 && total == 2 + CFS_DIRENTS_PER_BLOCK - 3);
+
+    CHECK(vfs_sync() == 0);
+    CHECK(remount_eng(bd, reason));
+    CHECK(pool_version() == 15);
+    CHECK(read_matches(p48, "48", 2) && read_matches(pnew, "255", 3) && read_matches(path, "next", 4));
+    CHECK(list_count(ENG, one, LBASE(p104), &hits, &total) && hits == 1 && total == 2 + 7);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK_CLEAN(rep);
+    CHECK(engine_unmount(bd, reason));
+
+    /* A version-10 pool cannot be raised: the version-14 answer. */
+    bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_test_format_version(bd, 10) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(vfs_open(NULL, p48, COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == -ENAMETOOLONG);
+    CHECK(vfs_mkdir(NULL, p105, 0755) == -ENAMETOOLONG);
+    CHECK(write_file(ENG "/a", "short", 5) && pool_version() == 10);
+    kinfo("selftest: cosmofs-longname: names of 48-255 bytes created, listed, renamed and removed on a pool raised "
+          "11 -> 15 by the first; a 255-byte name went to the next block; a version-10 pool refuses them");
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * cosmofs-check-longname: version 15's two malformed shapes (CF13) -- a
+ * head whose `extra` is not what its length needs, and continuations
+ * whose head is gone -- are each `dir_bad`, refused before the name is
+ * read; and one long name twice in a directory is `dir_dup_name`.
+ */
+bool selftest_cosmofs_check_longname(const char **reason)
+{
+    static const enum cosmofs_corruption kinds[] = { COSMOFS_CORRUPT_LONGNAME_EXTRA, COSMOFS_CORRUPT_LONGNAME_CONT };
+    static char p[600], q[300];
+    struct cosmofs_check_report r;
+    struct cosmo_stat st;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    for (unsigned k = 0; k < 2; k++) {
+        CHECK(check_fixture(&bd, reason));
+        ksnprintf(p, sizeof(p), "%s/sub/%s", ENG, LBASE(lname(q, 120, 'l')));
+        CHECK(write_file(p, "x", 1) && vfs_sync() == 0);
+        CHECK(vfs_stat(NULL, ENG "/sub", &st) == 0);
+        CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.dir_bad.count == 0);
+        CHECK(cosmofs_test_corrupt(mount_of(ENG), kinds[k], st.ino, &what) == 0);
+        CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+        CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == st.ino);
+        check_teardown(bd);
+    }
+
+    CHECK(check_fixture(&bd, reason));
+    ksnprintf(p, sizeof(p), "%s/sub/%s", ENG, LBASE(lname(q, 200, 'm')));
+    CHECK(write_file(p, "x", 1) && vfs_sync() == 0);
+    CHECK(vfs_stat(NULL, ENG "/sub", &st) == 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DUP_NAME, st.ino, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_dup_name.count >= 1 && r.dir_dup_name.name[0] == st.ino);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-longname: a wrong continuation count and continuations without a head are "
+          "dir_bad; a 200-byte name twice is a duplicate");
     return true;
 }
 

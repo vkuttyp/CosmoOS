@@ -108,7 +108,10 @@ any write inside a snapshot or in `.snapshots`.
 | `cfs_file_ops` | `readpage`, `writepage`, `writepages`, `truncate`, `sync`, `evict`, `setattr` |
 | `cfs_lnk_ops` | `readlink`, `evict` |
 
-- Names: at most `CFS_NAME_MAX` (47) bytes, else `-ENAMETOOLONG`.
+- Names: at most `CFS_NAME_MAX` (47) bytes below format version 15, and
+  `CFS_NAME_MAX_LONG` (255) from it; the first longer name raises the pool
+  to 15 (design.md, "Format version 15"), and a pool that cannot be raised
+  answers `-ENAMETOOLONG`.
 - `create`/`mkdir`: a new inode number from `next_ino` (never reused);
   owner is the caller's effective uid and gid; regular files are
   created with `compress_algo = CFS_COMPRESS_LZ4`, directories with
@@ -542,7 +545,7 @@ superblock magic is `"COSMOFS1"`.
   not define, CFS-2). The snapshot list is likewise written into a
   version-2 image on its first snapshot, by design (`design.md`,
   "Format version 3").
-- **Limits.** `CFS_NAME_MAX` 47; `CFS_SNAP_NAME_MAX` 31; `CFS_MAX_INODES`
+- **Limits.** `CFS_NAME_MAX` 47 (`CFS_NAME_MAX_LONG` 255 from version 15); `CFS_SNAP_NAME_MAX` 31; `CFS_MAX_INODES`
   508 x 508 x 15; `CFS_MAX_BLOCKS` 508 x 32512 per member;
   `CFS_MAX_MEMBERS` 255; `CFS_MAX_COPIES` 4; `CFS_MAX_EXTENTS` 4096 runs
   loaded per inode (`-EFBIG` above; an implementation bound). A file's

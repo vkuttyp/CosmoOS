@@ -630,6 +630,28 @@ static int csum_raise14(struct cfs *fs)
     return 0;
 }
 
+/*
+ * A name longer than 47 bytes (design.md, "Format version 15"): the format
+ * must say an entry may take several slots. Raised as 14 is, through 12;
+ * a pool below 11, or one encrypted with a version-1 key block, keeps the
+ * old limit. Under the tree's write lock, before anything is allocated.
+ */
+static int names_allow(struct cfs *fs, size_t len)
+{
+    if (len <= CFS_NAME_MAX || fs->sb.version >= 15)
+        return len > CFS_NAME_MAX_LONG ? -ENAMETOOLONG : 0;
+    if (len > CFS_NAME_MAX_LONG || fs->sb.version < 11 || (fs->sb.key_root != 0 && fs->sb.version < 14))
+        return -ENAMETOOLONG;
+    unsigned was = fs->sb.version;
+    int rc = cfs_snap_raise(fs);
+    if (rc)
+        return rc;
+    fs->sb.version = 15;
+    kinfo("cosmofs: format version %u -> 15 (long names): a name of %zu bytes; a kernel that reads format 14 at "
+          "most (CosmoOS 1.0.14 and older) cannot mount this pool", was, len);
+    return 0;
+}
+
 /* An index block below `*slot`: read (and CoW'd when `writable`), or made
  * when there is none and `writable`; -ENOENT when there is none to read.
  * On failure `*out` is NULL: the caller has nothing to release. */
@@ -1529,29 +1551,39 @@ static uint64_t dir_blocks(const struct vnode *dir)
 static int dir_find(struct cfs *fs, struct vnode *dir, const char *name, size_t len, uint8_t *block,
                     uint64_t *lblk_out, unsigned *slot_out)
 {
-    if (len > CFS_NAME_MAX)
+    if (len > CFS_NAME_MAX_LONG)
         return -ENAMETOOLONG;
+    if (len > CFS_NAME_MAX && fs->sb.version < 15)
+        return -ENOENT;   /* no entry of a pool below 15 has a name this long */
     for (uint64_t lblk = 0; lblk < dir_blocks(dir); lblk++) {
         int rc = dir_read_block(fs, dir, lblk, block);
         if (rc)
             return rc;
         const struct cfs_dirent *d = (const struct cfs_dirent *)block;
         for (unsigned s = 0; s < CFS_DIRENTS_PER_BLOCK; s++) {
-            if (d[s].ino && d[s].namelen == len && memcmp(d[s].name, name, len) == 0) {
+            unsigned slots = cfs_dirent_check(d, s, fs->sb.version);
+            if (slots == 0)
+                continue;
+            if (cfs_dirent_name_eq(d, s, name, (unsigned)len)) {
                 *lblk_out = lblk;
                 *slot_out = s;
                 return 0;
             }
+            s += slots - 1;
         }
     }
     return -ENOENT;
 }
 
+/* A long name's slots are one run in one block (design.md, "Format
+ * version 15"); the caller has had names_allow say yes to `len`. */
 static int dir_add(struct cfs *fs, struct vnode *dir, const char *name, size_t len, uint64_t ino, unsigned type,
                    uint8_t *block)
 {
-    if (len == 0 || len > CFS_NAME_MAX)
+    unsigned max = fs->sb.version >= 15 ? CFS_NAME_MAX_LONG : CFS_NAME_MAX;
+    if (len == 0 || len > max)
         return -ENAMETOOLONG;
+    unsigned need = 1u + cfs_dirent_extra((unsigned)len);
     uint64_t nb = dir_blocks(dir);
     for (uint64_t lblk = 0; lblk <= nb; lblk++) {
         int rc;
@@ -1560,24 +1592,20 @@ static int dir_add(struct cfs *fs, struct vnode *dir, const char *name, size_t l
         else if ((rc = dir_read_block(fs, dir, lblk, block)) != 0)
             return rc;
         struct cfs_dirent *d = (struct cfs_dirent *)block;
-        for (unsigned s = 0; s < CFS_DIRENTS_PER_BLOCK; s++) {
-            if (d[s].ino == 0) {
-                memset(&d[s], 0, sizeof(d[s]));
-                d[s].ino = CFS_INO_OF(ino);   /* an entry names an inode of its own tree, untagged */
-                d[s].type = (uint8_t)type;
-                d[s].namelen = (uint8_t)len;
-                memcpy(d[s].name, name, len);
-                return dir_write_block(fs, dir, lblk, block);
-            }
+        int s = cfs_dirent_free_run(d, need);
+        if (s >= 0) {
+            /* An entry names an inode of its own tree, untagged. */
+            cfs_dirent_put(d, (unsigned)s, CFS_INO_OF(ino), type, name, (unsigned)len);
+            return dir_write_block(fs, dir, lblk, block);
         }
     }
     return -ENOSPC;
 }
 
+/* The entry at `slot`, found by dir_find: its head and continuations. */
 static int dir_remove_slot(struct cfs *fs, struct vnode *dir, uint64_t lblk, unsigned slot, uint8_t *block)
 {
-    struct cfs_dirent *d = (struct cfs_dirent *)block;
-    memset(&d[slot], 0, sizeof(d[slot]));
+    cfs_dirent_clear((struct cfs_dirent *)block, slot);
     return dir_write_block(fs, dir, lblk, block);
 }
 
@@ -1839,7 +1867,7 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     struct cfs *fs = cfs_of(dir->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
-    if (len > CFS_NAME_MAX)
+    if (len > CFS_NAME_MAX_LONG)
         return -ENAMETOOLONG;
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
@@ -1864,6 +1892,9 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
         goto out;
     }
     if (rc != -ENOENT)
+        goto out;
+    rc = names_allow(fs, len);
+    if (rc)
         goto out;
     uint64_t ino;
     rc = cfs_inode_alloc(fs, &ino);
@@ -1926,7 +1957,7 @@ static int cfs_symlink(struct vnode *dir, const char *name, size_t len, const ch
     struct cfs *fs = cfs_of(dir->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;
-    if (len == 0 || len > CFS_NAME_MAX)
+    if (len == 0 || len > CFS_NAME_MAX_LONG)
         return -ENAMETOOLONG;
     size_t tlen = strnlen(target, CFS_BLOCK);
     if (tlen == 0 || tlen >= CFS_BLOCK)
@@ -1962,6 +1993,9 @@ static int cfs_symlink(struct vnode *dir, const char *name, size_t len, const ch
         goto out;
     }
     if (rc != -ENOENT)
+        goto out;
+    rc = names_allow(fs, len);
+    if (rc)
         goto out;
     rc = cfs_inode_alloc(fs, &ino);
     if (rc)
@@ -2237,7 +2271,7 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
     struct cfs *fs = cfs_of(odir->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
-    if (nlen > CFS_NAME_MAX)
+    if (nlen > CFS_NAME_MAX_LONG)
         return -ENAMETOOLONG;
     if (tree_readonly(fs, odir) || tree_readonly(fs, ndir))
         return -EROFS;          /* in .snapshots or a snapshot: what the tree was */
@@ -2310,7 +2344,9 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         if (rc)
             goto out;
     } else {
-        rc = dir_add(fs, ndir, nname, nlen, CFS_INO_OF(victim->ino), type, block);
+        rc = names_allow(fs, nlen);
+        if (rc == 0)
+            rc = dir_add(fs, ndir, nname, nlen, CFS_INO_OF(victim->ino), type, block);
         if (rc)
             goto out;
     }
@@ -2392,9 +2428,11 @@ static int cfs_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void 
             return 0;
         *pos = 2;
     }
-    uint8_t *block = kmalloc(CFS_BLOCK, 0);
+    /* The block, then room to assemble a long name (off the stack). */
+    uint8_t *block = kmalloc(CFS_BLOCK + CFS_NAME_MAX_LONG, 0);
     if (block == NULL)
         return -ENOMEM;
+    char *name = (char *)block + CFS_BLOCK;
     mutex_lock(&fs->lock);
     int rc = 0;
     uint64_t total = dir_blocks(dir) * CFS_DIRENTS_PER_BLOCK;
@@ -2407,14 +2445,21 @@ static int cfs_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void 
                 break;
         }
         const struct cfs_dirent *d = (const struct cfs_dirent *)block;
+        if (d[s].ino == CFS_DIRENT_CONT) {
+            *pos = i + 3;   /* the rest of a name: its head was returned, or changed under a resumed walk */
+            continue;
+        }
         if (d[s].ino) {
-            if (d[s].namelen == 0 || d[s].namelen > CFS_NAME_MAX) {
-                rc = -EIO;   /* on-disk length must never size a copy */
+            unsigned slots = cfs_dirent_check(d, s, fs->sb.version);
+            if (slots == 0) {
+                rc = -EIO;   /* an on-disk length or shape must never size a copy */
                 break;
             }
+            unsigned nlen = cfs_dirent_name(d, s, name);
             enum vnode_type t = d[s].type == CFS_TYPE_DIR ? VNODE_DIR : VNODE_REG;
-            if (cb(arg, d[s].name, d[s].namelen, d[s].ino, t))
+            if (cb(arg, name, nlen, d[s].ino, t))
                 break;
+            i += slots - 1;   /* past its continuations, which stay in this block */
         }
         *pos = i + 3;
     }

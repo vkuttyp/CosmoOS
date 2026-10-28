@@ -65,6 +65,7 @@ INODES_PER_BLOCK = (BLOCK - MHDR) // 256        # 15
 BITS_PER_BITMAP = (BLOCK - MHDR) * 8            # 32512
 CSUMS_PER_BLOCK = (BLOCK - MHDR) // 4           # 1016
 DIRENT = 64
+DIRENT_CONT = (1 << 64) - 1   # a version-15 continuation slot's mark
 NAME_MAX = 47
 EXTENTS_PER_BLOCK = (BLOCK - MHDR - 8) // 16    # 253
 SNAPS_PER_BLOCK2 = (BLOCK - MHDR - 16) // 128   # 31
@@ -418,11 +419,19 @@ class Pool:
             if pb is None:
                 continue
             b = self.data_read(d, lblk, pb)
-            for s in range(BLOCK // DIRENT):
-                e_ino, typ, nl = struct.unpack_from("<QBB", b, s * DIRENT)
-                if e_ino:
-                    name = bytes(b[s * DIRENT + 16:s * DIRENT + 16 + min(nl, 48)]).decode(errors="replace")
-                    out.append((name, e_ino, typ, lblk, pb, s))
+            s = 0
+            while s < BLOCK // DIRENT:
+                e_ino, typ, nl, extra = struct.unpack_from("<QBBB", b, s * DIRENT)
+                if e_ino and e_ino != DIRENT_CONT:
+                    # Version 15: a head's first 48 bytes, then `extra`
+                    # continuations of 56 (design.md, "Format version 15").
+                    raw = bytes(b[s * DIRENT + 16:s * DIRENT + 16 + min(nl, 48)])
+                    for k in range(1, extra + 1):
+                        if s + k < BLOCK // DIRENT:
+                            raw += bytes(b[(s + k) * DIRENT + 8:(s + k + 1) * DIRENT])
+                    out.append((raw[:nl].decode(errors="replace"), e_ino, typ, lblk, pb, s))
+                    s += extra
+                s += 1
         return out
 
     def lookup(self, path):

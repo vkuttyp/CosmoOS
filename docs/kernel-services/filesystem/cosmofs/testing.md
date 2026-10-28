@@ -33,6 +33,7 @@ Compiles only `cosmofs_format.h`; 83 `EXPECT`s in four cases.
 | `cosmofs-inode-index` | inode block, slot and the two imap indices |
 | `cosmofs-extents` | `cfs_map_block` over sorted runs and holes, and `-1` for a compressed record |
 | `cosmofs-csum-index` | checksum index and slot; `CFS_CSUM_MAX_BLOCKS == 516128` |
+| `cosmofs-longnames` | version 15's entry helpers: `cfs_dirent_extra` at 48, 49, 104, 105 and 255; a 255-byte name round-trips through five slots; below 15 a 48-byte head is malformed; a wrong count, a run past the block and an unmarked continuation are malformed; free runs and a whole entry's clearing |
 
 ## Fuzz target (`tests/fuzz/fuzz_cosmofs.c`)
 
@@ -167,6 +168,8 @@ writeback thread off so that generation counts are exact.
 | `cosmofs-check-extent-overlap` | two runs over one `lblk` at different blocks |
 | `cosmofs-check-bad-ptr` | a block pointer past the end of the pool is `dir_bad` |
 | `cosmofs-check-namelen` | a `namelen` longer than its slot is refused by length before the name is read |
+| `cosmofs-longname` | names of 48-255 bytes (design.md, "Format version 15"): a version-11 pool stays 11 for short names and lookups and is raised to 15 by its first long name; files, a directory and a symbolic link with long names are created, read, listed whole through a buffer that holds one long entry, renamed long to long, long to short and short to long, and removed; a 255-byte name that does not fit its block's last four slots goes to the next block; all of it survives a remount and checks clean; a version-10 pool answers `-ENAMETOOLONG` and stays 10; 256 bytes is `-ENAMETOOLONG` |
+| `cosmofs-check-longname` | a long name's head with one continuation too few, and continuations whose head is gone, are each `dir_bad` in their directory; a 200-byte name twice is `dir_dup_name` |
 | `cosmofs-check-two-parents` | a directory named from two directories is reported |
 | `cosmofs-check-chain-cycle` | an extent chain whose last block names an earlier one is `chain_cycle` |
 | `cosmofs-check-snap-members` | a snapshot member count larger than its block is reported, and what the block holds is still walked (no false leaks) |

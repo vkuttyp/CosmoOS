@@ -2902,7 +2902,11 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
             if (s2 == CFS_DIRENTS_PER_BLOCK)
                 rc = -EINVAL;          /* an empty directory cannot carry this fault */
             else {
-                d[s2].namelen = CFS_NAME_MAX + 1;
+                /* Longer than any one slot holds at every version: below 15
+                 * past CFS_NAME_MAX, from 15 a length needing continuations
+                 * the entry does not have (design.md, "Format version 15"). */
+                d[s2].namelen = (uint8_t)CFS_NAME_MAX_LONG;
+                d[s2].extra = 0;
                 rc = cfs_dir_write_block_at(fs, &in, 0, blk);
                 token = ino;
             }
@@ -3057,11 +3061,18 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
                     rc = cfs_inode_write(fs, twin, &ti);
                 }
                 if (rc == 0) {
-                    d[dst] = d[src];          /* the same name ... */
-                    d[dst].ino = twin;        /* ... at a different inode */
-                    d[dst].type = CFS_TYPE_REG;
-                    rc = cfs_dir_write_block_at(fs, &in, 0, blk);
-                    token = ino;
+                    /* The same name, however many slots it takes, at a
+                     * different inode. */
+                    char nm[CFS_NAME_MAX_LONG];
+                    unsigned nlen = cfs_dirent_check(d, src, fs->sb.version) ? cfs_dirent_name(d, src, nm) : 0;
+                    int run = nlen ? cfs_dirent_free_run(d, 1u + cfs_dirent_extra(nlen)) : -1;
+                    if (run < 0) {
+                        rc = -ENOSPC;
+                    } else {
+                        cfs_dirent_put(d, (unsigned)run, twin, CFS_TYPE_REG, nm, nlen);
+                        rc = cfs_dir_write_block_at(fs, &in, 0, blk);
+                        token = ino;
+                    }
                 }
             }
         }
@@ -3120,6 +3131,39 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
             fs->sb.inode_count--;
         token = fs->sb.free_blocks;
         break;
+    case COSMOFS_CORRUPT_LONGNAME_EXTRA:
+    case COSMOFS_CORRUPT_LONGNAME_CONT: {
+        /* Version 15's two shapes the checker must refuse before reading a
+         * name (CF13): a head whose `extra` is not what its length needs,
+         * and continuations with no head. The named directory's first
+         * long name, in its first block. */
+        rc = cfs_inode_read(fs, ino, &in);
+        if (rc == 0 && CFS_MODE_TYPE(in.mode) != CFS_TYPE_DIR)
+            rc = -ENOTDIR;
+        uint8_t *blk = rc == 0 ? kmalloc(CFS_BLOCK, 0) : NULL;
+        if (rc == 0 && blk == NULL)
+            rc = -ENOMEM;
+        if (rc == 0)
+            rc = cfs_dir_read_block_at(fs, &in, 0, blk);
+        if (rc == 0) {
+            struct cfs_dirent *d = (struct cfs_dirent *)blk;
+            unsigned s = 0;
+            while (s < CFS_DIRENTS_PER_BLOCK && !(cfs_dirent_check(d, s, fs->sb.version) && d[s].extra > 0))
+                s++;
+            if (s == CFS_DIRENTS_PER_BLOCK) {
+                rc = -ENOENT;   /* no long name to spoil */
+            } else {
+                token = d[s].ino;
+                if (kind == COSMOFS_CORRUPT_LONGNAME_EXTRA)
+                    d[s].extra--;
+                else
+                    memset(&d[s], 0, sizeof(d[s]));
+                rc = cfs_dir_write_block_at(fs, &in, 0, blk);
+            }
+        }
+        kfree(blk);
+        break;
+    }
     default:
         rc = -EINVAL;
         break;
@@ -4158,12 +4202,12 @@ struct fs_type cosmofs_fs_type = {
  * marker reads 11 at most; design.md, "Format version 12"). Printed at
  * boot, which also keeps it in every build.
  */
-_Static_assert(CFS_VERSION == 14, "update the format marker with CFS_VERSION");
-static const char cfs_format_marker[] = "cosmofs-format-max=14";
+_Static_assert(CFS_VERSION == 15, "update the format marker with CFS_VERSION");
+static const char cfs_format_marker[] = "cosmofs-format-max=15";
 
 void cosmofs_init(void)
 {
     if (vfs_register_fs(&cosmofs_fs_type))
         panic("cosmofs: cannot register");
-    kinfo("cosmofs: reads format versions 2 to 14 (%s)", cfs_format_marker);
+    kinfo("cosmofs: reads format versions 2 to 15 (%s)", cfs_format_marker);
 }

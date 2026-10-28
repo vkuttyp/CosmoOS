@@ -223,13 +223,18 @@ chain's has a test; the deadlist, imap and directory-depth guards are
 untested.
 
 **CF13. A directory is a set of well-formed entries in a tree.** An
-entry's `namelen` is at most 47 and fits its slot; no name appears
-twice in one directory; the entry's type matches its inode's; a
+entry's `namelen` is 1..47 below format version 15 and 1..255 from it,
+and fits its slots: its `extra` is the continuations that length needs
+(0 below 15), they follow it in its block, each marked
+`CFS_DIRENT_CONT`, and no continuation stands without its head
+(design.md, "Format version 15"); no name appears twice in one
+directory; the entry's type matches its inode's; a
 directory is named from exactly one parent, and its `parent` field
 names that directory (the root names itself). `.` and `..` are never
 stored. The VFS validates names before a mutation (V12) and cosmofs
 answers `-EEXIST` for an existing name. Check:
-`cosmofs-check-namelen`, `cosmofs-check-dup-name` (with two names whose
+`cosmofs-check-namelen`, `cosmofs-longname` and
+`cosmofs-check-longname`, `cosmofs-check-dup-name` (with two names whose
 hashes are asserted to collide), `cosmofs-check-two-parents`,
 `cosmofs-check-faults` (`COSMOFS_CORRUPT_DIRENT`), `cosmofs-ops` (`..`
 across a remount).
