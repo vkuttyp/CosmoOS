@@ -177,7 +177,9 @@ duplicate export), `-ERANGE` (32-bit relocation overflow), `-EINVAL`
 `g_live[]` publish slot; claimed before `init()` runs, so the failure
 costs nothing and leaves nothing initialised), `-ENOMEM`, or
 `init()`'s own negative value. Every failure logs one `module: <origin>:
-...` line and leaves no state.
+...` line and leaves no state, with one exception: when `init()` fails
+after handing out an object whose release is module code, the module is
+kept as a zombie (as an unload would) and freed once the object goes.
 Ownership: `file` is borrowed and never written; the bytes are copied
 out. The module's three regions and record belong to the loader.
 Blocking: allocations, the mutex, a TLB shootdown per protected region
@@ -187,9 +189,10 @@ Blocking: allocations, the mutex, a TLB shootdown per protected region
 
 Purpose: take a live module down and free it, in the order the lifetime
 design requires (`docs/kernel/quiesce/design.md`, "Module unload
-protocol"): state `GOING` and the module unpublished from every lookup
-(`module_find`, symbol lookup, `module_owner_of`); `shutdown()`; one
-grace period (`synchronize_quiesce`), so a CPU that looked it up or was
+protocol"): state `GOING` and the module gone from `module_find` and
+symbol lookup; `shutdown()`; the module unpublished from
+`module_owner_of`, which still finds it while `shutdown()` runs, so an
+object `shutdown()` makes counts against it (MOD-1); one grace period (`synchronize_quiesce`), so a CPU that looked it up or was
 inside a handler it unlinked has left; then a wait for `live_objects` to
 reach zero (objects whose release code lives in the module), bounded by
 `module_set_unload_timeout_ms` (default 5 s); then the regions are freed.

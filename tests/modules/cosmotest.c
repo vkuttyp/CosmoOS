@@ -78,6 +78,42 @@ struct kobject *cosmotest_object_take(void)
 }
 EXPORT_SYMBOL(cosmotest_object_take);
 
+/* MOD-1: objects made while init and shutdown run, when the module is
+ * not live, must still count against it. init makes one and keeps the
+ * reference until a caller takes it (or shutdown drops it); shutdown
+ * makes one into a caller's slot when asked. Self-test module-cycle. */
+int cosmotest_window_released;
+EXPORT_SYMBOL(cosmotest_window_released);
+
+static void cosmotest_window_release(struct kobject *obj)
+{
+    (void)obj;
+    cosmotest_window_released++;
+}
+
+static const struct kobject_type cosmotest_window_type = { .name = "cosmotest-window",
+                                                           .release = cosmotest_window_release };
+static struct kobject cosmotest_init_obj;
+static struct kobject *cosmotest_init_ref;
+static struct kobject cosmotest_shutdown_obj;
+static struct kobject **cosmotest_shutdown_slot;
+
+struct kobject *cosmotest_init_object_take(void);
+struct kobject *cosmotest_init_object_take(void)
+{
+    struct kobject *obj = cosmotest_init_ref;
+    cosmotest_init_ref = NULL;
+    return obj;
+}
+EXPORT_SYMBOL(cosmotest_init_object_take);
+
+void cosmotest_shutdown_object_to(struct kobject **slot);
+void cosmotest_shutdown_object_to(struct kobject **slot)
+{
+    cosmotest_shutdown_slot = slot;
+}
+EXPORT_SYMBOL(cosmotest_shutdown_object_to);
+
 /* Uses kernel exports across the module ABI: kmalloc, memset, strlen. */
 static int cosmotest_init(void)
 {
@@ -99,6 +135,8 @@ static int cosmotest_init(void)
     if (cosmotest_ops[0] != NULL)
         return -EINVAL;
     cosmotest_counter++;
+    kobject_init(&cosmotest_init_obj, &cosmotest_window_type);
+    cosmotest_init_ref = &cosmotest_init_obj;
     timer_setup(&cosmotest_timer, cosmotest_tick, NULL);
     timer_start(&cosmotest_timer, 10ull * 1000000000ull);
     kinfo("cosmotest: init ok, answer %d, counter %d", cosmotest_answer(), cosmotest_counter);
@@ -108,6 +146,12 @@ static int cosmotest_init(void)
 static void cosmotest_shutdown(void)
 {
     timer_cancel_sync(&cosmotest_timer);
+    if (cosmotest_init_ref != NULL)
+        kobject_put(cosmotest_init_ref);   /* nobody took it */
+    if (cosmotest_shutdown_slot != NULL) {
+        kobject_init(&cosmotest_shutdown_obj, &cosmotest_window_type);
+        *cosmotest_shutdown_slot = &cosmotest_shutdown_obj;
+    }
     kinfo("cosmotest: shutdown, counter %d", cosmotest_counter);
 }
 

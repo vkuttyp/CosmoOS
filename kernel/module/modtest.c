@@ -345,7 +345,9 @@ bool selftest_module_load(const char **reason)
     CHECK(prot_is((vaddr_t)m->info, VM_PROT_READ));
     CHECK(m->info->init != NULL && (vaddr_t)m->info->init >= m->text &&
           (vaddr_t)m->info->init < m->text + m->text_size);
-    CHECK(m->nr_exports == 5);   /* table, counter, answer, released, object_take */
+    /* table, counter, answer, released, object_take, and MOD-1's
+     * window_released, init_object_take, shutdown_object_to */
+    CHECK(m->nr_exports == 8);
 
     /* Call into the module through its export table. */
     const struct module *owner = NULL;
@@ -753,10 +755,10 @@ bool selftest_module_unload_busy(const char **reason)
     struct module *owner = module_owner_of((uintptr_t)take);
     CHECK(owner == m);
     module_object_released(owner);
-    CHECK(m->live_objects == 0);
+    CHECK(m->live_objects == 1);   /* the object init made and keeps (MOD-1) */
 
     struct kobject *obj = take();
-    CHECK(obj != NULL && obj->owner == m && m->live_objects == 1);
+    CHECK(obj != NULL && obj->owner == m && m->live_objects == 2);
 
     struct wait_mark mark = wait_mark_start(50);
     int rc = unload_with_timeout("cosmotest", 50);
@@ -885,6 +887,50 @@ static bool module_moved_reload_keeps_classes(const void *file, size_t size)
 }
 #endif
 
+#if CONFIG_DEBUG
+/* MOD-1: an object a module makes while its init or shutdown runs
+ * belongs to the module, so an unload waits for it and, past the
+ * timeout, keeps the text as a zombie rather than freeing the code the
+ * object's release would run. Before, the module was published only
+ * between init and shutdown: these objects had no owner, the unload
+ * returned 0, and the release ran from freed text. */
+static bool module_window_objects_count(const void *file, size_t size, const char **reason)
+{
+    struct module *m = NULL;
+    int *released = NULL;
+
+    /* An object init made, taken while the module is live. */
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    struct kobject *(*take)(void) =
+        (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_init_object_take", NULL);
+    released = (int *)module_symbol_lookup("cosmotest_window_released", NULL);
+    CHECK(take != NULL && released != NULL);
+    struct kobject *obj = take();
+    CHECK(obj != NULL && obj->owner == m);
+    CHECK(unload_with_timeout("cosmotest", 50) == -EBUSY);   /* a zombie, not freed text */
+    kobject_put(obj);                                         /* its release runs from the zombie */
+    CHECK(*released == 1);
+    CHECK(module_unload("cosmotest") == 0);                   /* the zombie is reaped */
+
+    /* An object shutdown makes, into a slot the caller keeps. */
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    void (*to)(struct kobject **) =
+        (void (*)(struct kobject **))module_symbol_lookup("cosmotest_shutdown_object_to", NULL);
+    released = (int *)module_symbol_lookup("cosmotest_window_released", NULL);
+    CHECK(to != NULL && released != NULL);
+    struct kobject *held = NULL;
+    to(&held);
+    CHECK(unload_with_timeout("cosmotest", 50) == -EBUSY);
+    CHECK(held != NULL && held->owner == m);
+    int before = *released;
+    kobject_put(held);
+    CHECK(*released == before + 1);
+    CHECK(module_unload("cosmotest") == 0);
+    kinfo("selftest: module-cycle: objects made by init and by shutdown kept their module as a zombie");
+    return true;
+}
+#endif
+
 bool selftest_module_cycle(const char **reason)
 {
 #if !CONFIG_DEBUG
@@ -907,6 +953,8 @@ bool selftest_module_cycle(const char **reason)
     CHECK(module_find("cosmotest") == NULL);
     CHECK(r.after.lock_classes == r.before.lock_classes);
     CHECK(module_moved_reload_keeps_classes(file, size));
+    if (!module_window_objects_count(file, size, reason))
+        return false;
     kinfo("selftest: module-cycle: %u cycles: modules %u -> %u, kmalloc live %llu -> %llu, large pages %llu -> %llu, "
           "vm regions %llu -> %llu, anon pages %llu -> %llu, lockdep classes %u -> %u; waited %u + %u ms for quiet",
           r.cycles, r.before.modules, r.after.modules, (unsigned long long)r.before.heap_objects,
