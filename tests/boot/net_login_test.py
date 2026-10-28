@@ -758,7 +758,16 @@ def stage_power_clock(args, results, b):
     after = b.text()[banner.start():]
     need(after, r"switched to the disk root", "the installed system again after reboot")
     g, h0, h1 = guest_epoch(b, "the clock after reboot")
-    lo, hi = target + (h0 - t_set) - 2, target + (h1 - t_set) + 2
+    # Keep (docs/testing/flakes.md): the bound is the RTC's resolution, not a
+    # time budget. Below, the reading may lose under a second each to the
+    # boot's whole-second RTC read and to `date +%s`; on x86-64 also the
+    # firmware's century write (edk2's PcRtcAcpiTableChangeCallback, every
+    # boot, the clock running), which QEMU's MC146818 takes as a new time
+    # with the old sub-second phase: the RTC drops back by the time since
+    # hwclock -w modulo a second (tools/rtc-century-probe.py). Above, QEMU
+    # keeps the old phase at hwclock -w's write too.
+    below = 3 if os.environ.get("QEMU_ARCH", "x86_64") == "x86_64" else 2
+    lo, hi = target + (h0 - t_set) - below, target + (h1 - t_set) + 2
     if not (lo <= g <= hi):
         raise Fail(f"after reboot the guest reads {g}, the RTC should read {lo:.0f}..{hi:.0f}")
     results.append(f"j. reboot, reboot -f, date -s and hwclock -w refused without sys_admin (date -s for uid "
