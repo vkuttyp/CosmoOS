@@ -29,6 +29,7 @@ Remaining work is grouped in [`docs/plan.md`](../plan.md).
 | [`2026-10-07-epoll-close-report.md`](2026-10-07-epoll-close-report.md) | epoll interest removal on the final close — 2026-10-07 |
 | [`2026-10-07-epoll-callback-report.md`](2026-10-07-epoll-callback-report.md) | epoll readiness by callback, and nesting — 2026-10-07 |
 | [`2026-10-28-state-of-the-project.md`](2026-10-28-state-of-the-project.md) | Where the project stands against the master prompt, and where the docs drifted from the code — 2026-10-28 |
+| [`2026-10-28-ps-nice-report.md`](2026-10-28-ps-nice-report.md) | ash.sh's ps-nice read the forked shell before it ran nice; main red on #477's merge — 2026-10-28 |
 
 ## Section 68 reports
 
