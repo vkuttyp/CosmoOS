@@ -15,12 +15,15 @@ modes the background command becomes `{ sleep 0.3; exec nice -n 7 sleep
 With the fix the script waits (up to 1 s) until ps names the process
 sleep, and every check passes; --old reverse-applies the fix commit's
 change to ash.sh in a throwaway worktree, and ps-nice fails with nice 0.
+The held window also reaches the next check: `renice -n 2` lands on the
+shell, still at 0, so renice-add reads 2 where it wants 9 (CI's shorter
+window reached only ps-nice).
 The check runs in a release `make test-busybox` (as CI runs it) on either
 architecture.
 
 Logs stay under out/ps-nice-probe/<arch>-<mode>. Exit 0 when the mode
-shows what it should (fixed: test-busybox passes; old: ps-nice is the
-only check that fails, with nice 0), else 1.
+shows what it should (fixed: test-busybox passes; old: ps-nice fails
+with nice 0 and renice-add with 2, and no other check fails), else 1.
 """
 import argparse
 from pathlib import Path
@@ -38,6 +41,7 @@ ADVERSARY = "{ sleep 0.3; exec nice -n 7 sleep 64; } &\n"
 VERDICT = re.compile(r"^test-busybox: FAIL: (?:dynamic )?scripted test: (.*) \(log in .*\)$", re.M)
 CHECK = re.compile(r"^BBTEST: FAIL (\S+): (.*)$")
 NICE0 = re.compile(r"^want \[(\d+) 7\] got \[\1 0\]$")
+RENICE_ON_SHELL = "want [9] got [2]"
 
 
 def main():
@@ -87,8 +91,9 @@ def main():
         failed = [m.groups() for m in map(CHECK.match, v.group(1).split("; ")) if m] if v else []
         names = sorted({n for n, _ in failed})
         if a.old:
-            ok = rc != 0 and v is not None and names == ["ps-nice"] and all(NICE0.match(w) for _, w in failed)
-            seen = (f"ps-nice read nice 0 ({len(failed)} failure lines)" if ok
+            ok = (rc != 0 and v is not None and names == ["ps-nice", "renice-add"] and
+                  all(NICE0.match(w) if n == "ps-nice" else w == RENICE_ON_SHELL for n, w in failed))
+            seen = ("ps-nice read nice 0 and renice-add 2: both read the shell before the exec" if ok
                     else f"exit {rc}; failed: {failed}")
         else:
             ok = rc == 0 and "test-busybox: PASS" in log and not failed
