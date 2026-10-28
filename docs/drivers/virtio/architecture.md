@@ -4,25 +4,26 @@ Constitution section 27: VirtIO as a normal device subsystem, a generic
 transport abstraction, virtqueues reusable by every device type,
 independent of the virtualization implementation (invariant 9). Spec:
 VirtIO 1.1 (OASIS), sections 2.1 (status), 2.6 (split virtqueues),
-3.1.1 (initialisation), 4.1 (PCI transport), 5.2 (block), 5.3 (console),
-5.4 (entropy).
+3.1.1 (initialisation), 4.1 (PCI transport, with the legacy interface of
+4.1.4.8), 5.1 (network), 5.2 (block), 5.3 (console), 5.4 (entropy), 5.7
+(GPU).
 
 ## Where it sits
 
 ```text
-   modules      virtio_blk.ko      virtio_rng.ko      virtio_console.ko   virtio_net.ko
+   modules      virtio_blk.ko      virtio_rng.ko      virtio_console.ko   virtio_net.ko   virtio_gpu.ko
                 (struct blkdev)    (random_add_entropy) (console sink)      (struct netif eth0)
                       │                  │                  │                  │
                 virtio.ko:  virtio.c     the "virtio" bus, device init, drivers
                             virtqueue.c  split rings: alloc/add/kick/pop/free
-                            virtio_pci.c the virtio-pci modern transport, module entry
+                            virtio_pci.c the virtio-pci modern and legacy transports, module entry
                       │
    kernel       drivers/pci (pci bus, BARs, capabilities, MSI-X)
                 kernel/device (device model, DMA), kernel/block, kernel/core/random, console
 ```
 
 All of VirtIO is outside the kernel image: `virtio` is a boot module,
-the four device drivers are boot modules depending on it (`deps =
+the five device drivers are boot modules depending on it (`deps =
 "virtio"`), and everything they use from the kernel is an exported
 symbol. `drivers/include/drivers/virtio.h` is the shared header.
 
@@ -39,8 +40,9 @@ entropy buffer, a console byte stream).
   device`, named `virtioN`; `match` by device id list; `struct
   virtio_driver` with typed `probe`/`remove`.
 - **Device initialisation** (spec 3.1.1): reset, ACKNOWLEDGE, DRIVER,
-  feature negotiation (`VIRTIO_F_VERSION_1` mandatory, legacy devices
-  refused), FEATURES_OK confirmation, then queues, then DRIVER_OK.
+  feature negotiation (`VIRTIO_F_VERSION_1` mandatory on the modern
+  transport; a legacy device's 32 bits written once), FEATURES_OK
+  confirmation (modern only), then queues, then DRIVER_OK.
 - **Virtqueues**: split rings in one DMA allocation per queue,
   descriptor free list, `virtq_add` (out then in segments), `virtq_kick`
   (honouring `NO_NOTIFY`), `virtq_pop` (validating what the device
@@ -49,7 +51,10 @@ entropy buffer, a console byte stream).
   ISR, DEVICE), BAR mapping, feature/status/config/queue registers, one
   MSI-X vector for configuration changes (entry 0) and one per
   interrupt-driven queue, device id from the PCI id (modern) or the
-  subsystem id (transitional).
+  subsystem id (transitional). **The legacy transport**
+  (`vleg_transport`, `design.md`): one register block at the start of
+  BAR0, in memory (Parallels) or I/O space (x86-64), for devices without
+  the modern capabilities.
 - **Device drivers**: `virtio_blk` (a block device `vda`), `virtio_rng`
   (feeds the entropy pool up to a per-boot budget), `virtio_console`
   (port 0 transmit as a console sink), and since Phase 8 `virtio_net`

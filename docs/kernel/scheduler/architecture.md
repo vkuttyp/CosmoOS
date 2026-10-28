@@ -49,10 +49,12 @@ enqueue, dequeue, pick the next thread through the policy, switch, wake,
 block, per-CPU run queues, preemption requests, migration at creation.
 
 Policy (`kernel/scheduler/policy_rr.c`, behind `struct sched_policy`):
-which ready thread runs next, how long, what a tick does. The first
-policy is fixed priority with round-robin inside a priority and a fixed
-time slice. Fairness, deadlines, and interactivity are later policies
-behind the same interface.
+which ready thread runs next, how long, what a tick does. The one
+policy is fixed priority over 64 levels: round-robin with a fixed time
+slice inside every level but `SCHED_PRIO_DEFAULT`, which shares the CPU
+by weight from the nice value (the fair level: `fair.c`, generated from
+`fair.nova`; `design.md`, "The fair level", invariant S35). Deadlines,
+real-time classes and interactivity are not implemented.
 
 ## 4. Responsibilities
 

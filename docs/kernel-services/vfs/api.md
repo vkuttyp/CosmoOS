@@ -731,7 +731,7 @@ FIFO's open and its per-open mode read it, a regular file ignores it),
 `COSMO_DT_UNKNOWN/REG/DIR/CHR` 0/1/2/3; `COSMO_MOUNT_RDONLY 1`.
 
 ```c
-struct cosmo_stat { uint64_t ino; uint32_t type, mode, nlink, uid, gid, pad; uint64_t size, mtime_ns, ctime_ns; };
+struct cosmo_stat { uint64_t ino; uint32_t type, mode, nlink, uid, gid, dev; uint64_t size, mtime_ns, ctime_ns; };  /* dev: the mount's id, low 32 bits */
 struct cosmo_dirent { uint64_t ino; uint16_t reclen; uint8_t type, namelen; char name[]; };  /* NUL terminated, reclen 8-aligned */
 ```
 

@@ -23,9 +23,11 @@ call these.
 
 ### `int virtio_device_init(struct virtio_device *vdev, uint64_t wanted)` *(exported)*
 Purpose: spec 3.1.1 steps 1 to 6: reset, ACKNOWLEDGE, DRIVER, negotiate
-`(offered & wanted) | VIRTIO_F_VERSION_1`, FEATURES_OK. Outputs: 0;
-`-EIO` (device did not reset); `-ENOTSUP` (legacy device without
-VERSION_1, or the device cleared FEATURES_OK; status is set to FAILED).
+`(offered & wanted) | VIRTIO_F_VERSION_1`, FEATURES_OK. On the legacy
+transport (`tr->legacy`): write `offered & wanted` (32 bits) once, with
+no VERSION_1 and no FEATURES_OK step. Outputs: 0; `-EIO` (device did
+not reset); `-ENOTSUP` (a modern device without VERSION_1, or the
+device cleared FEATURES_OK; status is set to FAILED).
 Afterwards `vdev->features` holds the negotiated set. Thread context;
 bounded spins, no sleep.
 

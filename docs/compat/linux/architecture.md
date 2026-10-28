@@ -90,8 +90,9 @@ what Linux is.
 - **`poll`/`ppoll`** over the kernel's `io_poll`; **wall clock** behind
   `CLOCK_REALTIME`, `gettimeofday`, `time`.
 - **Files, directories, processes, time, identity, sockets**: the
-  translated set is listed in `api.md` (87 calls; 13 more are known and
-  refused with `-ENOSYS`). Any other number below 512 lands on
+  translated set is listed in `api.md` (178 table entries on x86-64,
+  147 on AArch64; two, `rseq` and `clone3`, are known and refused with
+  `-ENOSYS`). Any other number below 512 lands on
   `lx_unknown`: `-ENOSYS`, counted in the process's `unknown_syscalls`,
   the first eight logged at DEBUG; a number at or above 512 is refused
   by the dispatcher's own bounds check.

@@ -1,10 +1,16 @@
 # VirtIO: invariants
 
-**V1. A device is driven only after `VIRTIO_F_VERSION_1` was offered
-and FEATURES_OK was confirmed by re-reading.** Legacy devices and
-feature rejection end in status FAILED and `-ENOTSUP`; no queue is set
-up. Check: every boot logs the negotiated features for three devices.
-Gap: no test presents a legacy-only or feature-rejecting device.
+**V1. A device on the modern transport is driven only after
+`VIRTIO_F_VERSION_1` was offered and FEATURES_OK was confirmed by
+re-reading; a device on the legacy transport (`vleg_transport`, spec
+4.1.4.8) is driven with its 32 feature bits written once and no
+FEATURES_OK step.** A modern device without VERSION_1, and feature
+rejection, end in status FAILED and `-ENOTSUP`; no queue is set up
+(`virtio_device_init`, `drivers/virtio/virtio.c`). Check: every boot
+logs the negotiated features; `make test-smp2` on x86-64 runs the network
+suite over a legacy-only virtio-net (`testing.md`). Gap: no test
+presents a modern device without VERSION_1 or one that rejects the
+features.
 
 **V2. Nothing the device writes is used unchecked, and nothing in the
 shared allocation is read to make a decision except the used ring.**

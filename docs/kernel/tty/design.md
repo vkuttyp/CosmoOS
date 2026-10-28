@@ -468,10 +468,11 @@ without handle 0 cannot read it), which `spawn` makes explicit.
 
 ## Future extensibility
 
-- Raw mode and `termios` through a `tty_set_mode` call and an `ioctl`
-  system call; the classifier becomes a table indexed by mode.
-- A foreground process group and `^C`/`^Z` when signals exist.
-- Pseudo-terminals: `struct tty` with a kobject and a master side.
+Raw mode and `termios` (`tty_set_termios`, `SYS_tcsetattr`), the
+foreground process group with `^C`/`^Z`, and pseudo-terminals, once
+listed here, have shipped (see the sections above). Still open:
+
+- `VTIME` (accepted, not implemented).
 - More producers: PS/2 keyboard (scancode translation lives in the
   driver, the tty sees bytes), virtio-console receive.
 - Device nodes (`/dev/console`, `/dev/tty`) once the VFS has them; the
