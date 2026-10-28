@@ -142,6 +142,15 @@ int module_unload(const char *name);
 struct module *module_owner_of(uintptr_t addr);
 void module_object_released(struct module *m);
 
+/* Writes "<name>+0x<offset> <version>" (the version last, so a name cut
+ * short by `len` loses it, not the offset) for an address in a mapped
+ * module's text -- from before its init to after its shutdown and any
+ * zombie life -- and returns true, or returns false for any other address.
+ * The name identifies the code across loads, so lockdep keys a callback's
+ * class by it rather than by an address that changes with every load
+ * (backlog LOCK-10). Any context, no locks. */
+bool module_text_name(uintptr_t addr, char *buf, size_t len);
+
 /* How long module_unload waits for live objects before giving up.
  * Self-tests shorten it around a single unload and put it back; the
  * default is named here so a restore cannot drift from the initial

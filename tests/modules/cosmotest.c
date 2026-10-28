@@ -12,6 +12,7 @@
 #include <kernel/object.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 
 /* rodata: a table the dependant reads through a relocated pointer. */
 const int cosmotest_table[4] = { 1, 2, 3, 36 };
@@ -28,6 +29,17 @@ static char cosmotest_scratch[256];
 static int (*const cosmotest_ops[])(void) = { NULL };
 
 int cosmotest_answer(void);
+
+/* A timer armed by init and cancelled by shutdown, before it fires: the
+ * cancel's lockdep wait names the callback's class while the module is
+ * no longer live, so the module-cycle self-test sees whether a reload
+ * reuses that class (LOCK-10). */
+static struct timer cosmotest_timer;
+static void cosmotest_tick(struct timer *t, void *arg)
+{
+    (void)t;
+    (void)arg;
+}
 /* Both object and class name live in the unloadable image. The graph
  * must keep its own metadata after module-unload frees this rodata. */
 static spinlock_t cosmotest_lock = SPINLOCK_INIT("cosmotest-unloadable-lock");
@@ -87,12 +99,15 @@ static int cosmotest_init(void)
     if (cosmotest_ops[0] != NULL)
         return -EINVAL;
     cosmotest_counter++;
+    timer_setup(&cosmotest_timer, cosmotest_tick, NULL);
+    timer_start(&cosmotest_timer, 10ull * 1000000000ull);
     kinfo("cosmotest: init ok, answer %d, counter %d", cosmotest_answer(), cosmotest_counter);
     return 0;
 }
 
 static void cosmotest_shutdown(void)
 {
+    timer_cancel_sync(&cosmotest_timer);
     kinfo("cosmotest: shutdown, counter %d", cosmotest_counter);
 }
 

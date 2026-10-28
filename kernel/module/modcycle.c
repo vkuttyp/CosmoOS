@@ -118,9 +118,9 @@ bool module_cycle(const void *file, size_t size, const char *origin, unsigned co
     if (count < 2)
         out->settle_before_ms = snapshot_quiet(&out->before);
     out->settle_after_ms = snapshot_until(&out->after, &out->before);
-    /* lockdep's classes are reported, not judged: a callback's class is
-     * named after its address, so a module whose callback lands at a new
-     * address adds a class that stays (backlog LOCK-10). */
+    /* lockdep's classes are reported, not judged here: they are global,
+     * and the boot-time run overlaps the rest of boot making its own. The
+     * module-cycle self-test, which runs alone, judges them (LOCK-10). */
     return out->load_failures == 0 && out->unload_failures == 0 && counts_equal(&out->after, &out->before);
 }
 

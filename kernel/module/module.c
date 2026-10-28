@@ -20,12 +20,14 @@
 #include <kernel/module.h>
 #include <kernel/mutex.h>
 #include <kernel/panic.h>
+#include <kernel/printf.h>
 #include <kernel/quiesce.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
 #include <kernel/wait.h>
 
+#include <arch/irq.h>
 #include <arch/module.h>
 
 static struct mutex g_lock;
@@ -95,9 +97,67 @@ static bool in_text(const struct module *m, uintptr_t addr)
     return m->text != 0 && addr >= m->text && addr < m->text + m->text_size;
 }
 
+/*
+ * Names of mapped module text, for module_text_name (lockdep's callback
+ * classes, LOCK-10). Not g_live: a module's code runs before it is
+ * published (init) and after it is unpublished (shutdown, a zombie's
+ * release callbacks), and its class must have the same name throughout.
+ * Each entry holds copies, never a pointer into the module, so a reader
+ * needs no grace period; a sequence count makes a torn read retry.
+ * Written under g_lock only: set once the text is final (load step 7),
+ * cleared when it is unmapped (free_module). Twice the live bound leaves
+ * room for zombies; a load that finds no free entry goes unnamed, and its
+ * callbacks are named by address as before.
+ */
+#define TEXT_NAMES (2u * MODULE_MAX_LIVE)
+static struct text_name {
+    uint32_t seq;   /* odd while being written */
+    uintptr_t base;
+    size_t size;
+    char name[MODULE_NAME_MAX];
+    char version[MODULE_VERSION_MAX];
+} g_text_names[TEXT_NAMES];
+
+/* Interrupts off: a reader in an interrupt on this CPU would otherwise
+ * spin on an odd count the interrupted writer can never finish. */
+static void text_name_write(struct text_name *e, uintptr_t base, size_t size, const struct module *m)
+{
+    arch_irq_state_t s = arch_irq_save();
+    __atomic_store_n(&e->seq, e->seq + 1u, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&e->base, base, __ATOMIC_RELAXED);
+    __atomic_store_n(&e->size, size, __ATOMIC_RELAXED);
+    if (m) {
+        strlcpy(e->name, m->name, sizeof(e->name));
+        strlcpy(e->version, m->version, sizeof(e->version));
+    }
+    __atomic_store_n(&e->seq, e->seq + 1u, __ATOMIC_RELEASE);
+    arch_irq_restore(s);
+}
+
+static void text_name_set(const struct module *m)
+{
+    for (unsigned i = 0; i < TEXT_NAMES; i++) {
+        if (g_text_names[i].base == 0) {
+            text_name_write(&g_text_names[i], m->text, m->text_size, m);
+            return;
+        }
+    }
+}
+
+static void text_name_clear(const struct module *m)
+{
+    for (unsigned i = 0; i < TEXT_NAMES; i++) {
+        if (g_text_names[i].base == m->text)
+            text_name_write(&g_text_names[i], 0, 0, NULL);
+    }
+}
+
 static void free_module(struct module_priv *p)
 {
     struct module *m = &p->m;
+    if (m->text)
+        text_name_clear(m);
     if (m->text)
         vm_kernel_free(m->text);
     if (m->rodata)
@@ -399,6 +459,8 @@ static int load_locked(const void *file, size_t size, const char *origin, struct
         goto fail;
     if (m->rodata && (rc = vm_kernel_protect(m->rodata, VM_PROT_READ)) != 0)
         goto fail;
+    if (m->text)
+        text_name_set(m);
 
     /*
      * 7b. Reserve a publish slot BEFORE initialising.
@@ -686,6 +748,35 @@ struct module *module_owner_of(uintptr_t addr)
     }
     quiesce_read_unlock();
     return found;
+}
+
+bool module_text_name(uintptr_t addr, char *buf, size_t len)
+{
+    for (unsigned i = 0; i < TEXT_NAMES; i++) {
+        struct text_name *e = &g_text_names[i];
+        for (;;) {
+            uint32_t seq = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
+            if (seq & 1u)
+                continue;   /* a writer on another CPU, with interrupts off: a few stores */
+            uintptr_t base = __atomic_load_n(&e->base, __ATOMIC_RELAXED);
+            size_t size = __atomic_load_n(&e->size, __ATOMIC_RELAXED);
+            char name[MODULE_NAME_MAX], version[MODULE_VERSION_MAX];
+            for (unsigned k = 0; k < sizeof(name); k++)
+                name[k] = __atomic_load_n(&e->name[k], __ATOMIC_RELAXED);
+            for (unsigned k = 0; k < sizeof(version); k++)
+                version[k] = __atomic_load_n(&e->version[k], __ATOMIC_RELAXED);
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
+            if (__atomic_load_n(&e->seq, __ATOMIC_RELAXED) != seq)
+                continue;
+            if (base == 0 || addr < base || addr - base >= size)
+                break;
+            name[sizeof(name) - 1] = '\0';
+            version[sizeof(version) - 1] = '\0';
+            ksnprintf(buf, len, "%s+0x%lx %s", name, (unsigned long)(addr - base), version);
+            return true;
+        }
+    }
+    return false;
 }
 
 void module_object_released(struct module *m)

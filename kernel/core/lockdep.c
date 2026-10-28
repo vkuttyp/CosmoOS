@@ -19,6 +19,7 @@ STATIC_ASSERT(LOCKDEP_MAX_TIMER_PROFILES >= CONFIG_MAX_CPUS,
 #include <kernel/console.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/module.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/printf.h>
@@ -818,7 +819,10 @@ void lockdep_release(const void *lock, unsigned kind, uintptr_t ip, bool irqrest
  * One class per callback function, named by its address: the graph copies
  * the name, and two timers with one function share the class -- which is
  * what makes a wait for one timer answerable from what another's callback
- * did (design.md, "Callback classes").
+ * did (design.md, "Callback classes"). A function in a live module is
+ * named by module and offset instead, so a reload, which puts the module
+ * at a new address, finds the class the last load made: the table only
+ * grows, and an address name would add classes on every load (LOCK-10).
  */
 /* The class's name: the graph's own copy once the slot is cached, so a
  * callback that runs every tick does not format a string every tick. The
@@ -828,7 +832,11 @@ static const char *callback_name(char *buf, size_t len, const void *fn, const ui
     uint16_t cached = __atomic_load_n(class_slot, __ATOMIC_ACQUIRE);
     if (cached != 0)
         return g_graph.classes[cached - 1u].name;
-    ksnprintf(buf, len, "callback %p", fn);
+    char where[LOCKDEP_CLASS_NAME_MAX - sizeof("callback ")];
+    if (module_text_name((uintptr_t)fn, where, sizeof(where)))
+        ksnprintf(buf, len, "callback %s", where);
+    else
+        ksnprintf(buf, len, "callback %p", fn);
     return buf;
 }
 

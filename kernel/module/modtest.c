@@ -850,6 +850,41 @@ static void cycle_hold_object(struct module *m, unsigned cycle, void *arg)
 }
 #endif
 
+#if CONFIG_DEBUG
+/* LOCK-10: a callback in a module is named by module and offset, so a
+ * reload at a NEW address reuses the lockdep class the last load made.
+ * The cycles above cannot show it: each load lands where the last one
+ * was freed, so an address name would match too. Here a placeholder
+ * takes the freed text's place, the reload lands elsewhere, and
+ * cosmotest's timer, cancelled by shutdown, names its class again. */
+static bool module_moved_reload_keeps_classes(const void *file, size_t size)
+{
+    struct module *m = NULL;
+    if (module_load(file, size, "tests/cosmotest.ko", &m) != 0)
+        return false;
+    vaddr_t first = m->text;
+    size_t text_size = m->text_size;
+    char name[64];
+    bool named = module_text_name((uintptr_t)m->info->shutdown, name, sizeof(name)) &&
+                 strncmp(name, "cosmotest+0x", 12) == 0;
+    if (module_unload("cosmotest") != 0)
+        return false;
+    vaddr_t placeholder = vm_kernel_alloc(text_size, VM_KALLOC_GUARD | VM_KALLOC_NEAR_KERNEL, VM_PROT_RW);
+    if (placeholder == 0)
+        return false;
+    struct lockdep_stats before, after;
+    lockdep_get_stats(&before);
+    bool ok = module_load(file, size, "tests/cosmotest.ko", &m) == 0;
+    vaddr_t second = ok ? m->text : 0;
+    ok = ok && module_unload("cosmotest") == 0;
+    lockdep_get_stats(&after);
+    vm_kernel_free(placeholder);
+    kinfo("selftest: module-cycle: reload moved %p -> %p, lockdep classes %u -> %u", (void *)first, (void *)second,
+          before.classes, after.classes);
+    return named && ok && second != first && after.classes == before.classes;
+}
+#endif
+
 bool selftest_module_cycle(const char **reason)
 {
 #if !CONFIG_DEBUG
@@ -870,6 +905,8 @@ bool selftest_module_cycle(const char **reason)
     CHECK(module_cycle(file, size, "tests/cosmotest.ko", CYCLE_COUNT, 0, NULL, NULL, &r));
     CHECK(r.cycles == CYCLE_COUNT && r.load_failures == 0 && r.unload_failures == 0);
     CHECK(module_find("cosmotest") == NULL);
+    CHECK(r.after.lock_classes == r.before.lock_classes);
+    CHECK(module_moved_reload_keeps_classes(file, size));
     kinfo("selftest: module-cycle: %u cycles: modules %u -> %u, kmalloc live %llu -> %llu, large pages %llu -> %llu, "
           "vm regions %llu -> %llu, anon pages %llu -> %llu, lockdep classes %u -> %u; waited %u + %u ms for quiet",
           r.cycles, r.before.modules, r.after.modules, (unsigned long long)r.before.heap_objects,
