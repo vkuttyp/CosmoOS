@@ -92,6 +92,8 @@
 #define LX_setitimer 38
 #define LX_getrusage 98
 #define LX_times 100
+#define LX_getpriority 140
+#define LX_setpriority 141
 #define LX_statfs 137
 #define LX_fstatfs 138
 #define LX_getuid 102

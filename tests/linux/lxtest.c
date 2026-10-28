@@ -1611,6 +1611,161 @@ static void test_cputime(void)
     lx_puts("lxtest: cputime ok\n");
 }
 
+/* /proc/<pid>/stat's fields 18 and 19, the priority and the nice value
+ * (signed). 0 on success. */
+static int proc_stat_nice(long pid, long *prio, long *nice)
+{
+    char path[48], buf[512];
+    proc_path(path, pid, "stat");
+    long fd = sc4(LX_openat, LX_AT_FDCWD, path, 0, 0);
+    if (fd < 0)
+        return -1;
+    long n = sc3(LX_read, fd, buf, sizeof(buf) - 1);
+    sc1(LX_close, fd);
+    if (n <= 0)
+        return -1;
+    buf[n] = '\0';
+    long i = n - 1;
+    while (i >= 0 && buf[i] != ')')   /* the name may hold spaces; the last ')' ends it */
+        i--;
+    long field = 2, cur = 0, sign = 1;
+    for (i++; i < n; i++) {
+        if (buf[i] == ' ') {
+            if (field == 18)
+                *prio = sign * cur;
+            if (field == 19) {
+                *nice = sign * cur;
+                return 0;
+            }
+            field++;
+            cur = 0;
+            sign = 1;
+        } else if (buf[i] == '-') {
+            sign = -1;
+        } else if (buf[i] >= '0' && buf[i] <= '9') {
+            cur = cur * 10 + (buf[i] - '0');
+        }
+    }
+    return -1;
+}
+
+/* A child of uid and gid 4242 (no privileges) for the nice tests: says so
+ * on `ready`, then waits until every write end of `go` is closed (it
+ * closes its copies of both children's, `wa` and `wb`, first). With
+ * `check` it first runs the unprivileged caller's checks against `peer`,
+ * a process of the same user, and `root`, the test's own, exiting with
+ * the number of the first that fails. */
+static long nice_child(int ready, int go, int wa, int wb, long check, long peer, long root)
+{
+    long c = fork_raw(LX_CLONE_EXIT_SIGCHLD, 0, 0);
+    if (c != 0)
+        return c;
+    sc1(LX_close, wa);
+    sc1(LX_close, wb);
+    char res = 'r';
+    if (sc3(LX_setresgid, 4242, 4242, 4242) != 0 || sc3(LX_setresuid, 4242, 4242, 4242) != 0)
+        res = '2';
+    CHILD_CHECK(sc3(LX_write, ready, &res, 1) == 1, 3);
+    if (res != 'r')
+        lx_exit(2);
+    char x;
+    sc3(LX_read, go, &x, 1);   /* until the parent closes it */
+    if (check) {
+        /* Its own and its user's processes: raising is free, lowering
+         * stops at 20 - RLIMIT_NICE (25 here, from the parent: -5). */
+        CHILD_CHECK(sc3(LX_setpriority, LX_PRIO_PROCESS, peer, 5) == 0, 10);
+        CHILD_CHECK(sc2(LX_getpriority, LX_PRIO_PROCESS, peer) == 15, 11);
+        CHILD_CHECK(sc3(LX_setpriority, LX_PRIO_PROCESS, peer, -5) == 0, 12);
+        CHILD_CHECK(sc3(LX_setpriority, LX_PRIO_PROCESS, peer, -6) == -13, 13);   /* EACCES */
+        CHILD_CHECK(sc2(LX_getpriority, LX_PRIO_PROCESS, peer) == 25, 14);
+        CHILD_CHECK(sc3(LX_setpriority, LX_PRIO_PROCESS, 0, 19) == 0, 15);
+        CHILD_CHECK(sc3(LX_setpriority, LX_PRIO_PROCESS, 0, -20) == -13, 16);
+        CHILD_CHECK(sc2(LX_getpriority, LX_PRIO_PROCESS, 0) == 1, 17);
+        /* Another user's process: readable, not settable, even upwards. */
+        CHILD_CHECK(sc2(LX_getpriority, LX_PRIO_PROCESS, root) == 20, 18);
+        CHILD_CHECK(sc3(LX_setpriority, LX_PRIO_PROCESS, root, 10) == -1, 19);   /* EPERM */
+        CHILD_CHECK(sc2(LX_getpriority, LX_PRIO_PROCESS, root) == 20, 20);
+        /* RLIMIT_NICE reads as set (cur == max) and only privilege raises it. */
+        struct lx_rlimit rl = { 0, 0 };
+        CHILD_CHECK(sc2(LX_getrlimit, LX_RLIMIT_NICE, &rl) == 0 && rl.rlim_cur == 25 && rl.rlim_max == 25, 21);
+        rl.rlim_cur = rl.rlim_max = 40;
+        CHILD_CHECK(sc2(LX_setrlimit, LX_RLIMIT_NICE, &rl) == -1, 22);
+    }
+    lx_exit(0);
+    return 0;
+}
+
+/* Nice values (backlog LX-13; the rules are Nova's,
+ * kernel/process/nice.c): getpriority and setpriority for a process, a
+ * process group and a user, with Linux's range, encoding and permission
+ * rules; inherited by fork, kept by exec (BusyBox's nice, in ash.sh);
+ * shown in /proc/<pid>/stat as priority 20 + nice and nice. */
+static void test_nice(void)
+{
+    long pid = sc0(LX_getpid), prio = -1, nice = -1;
+    /* getpriority's result is 20 - nice, 1 to 40, never negative but for
+     * an error; libc's wrapper turns it back. */
+    CHECKV(sc2(LX_getpriority, LX_PRIO_PROCESS, 0) == 20, sc2(LX_getpriority, LX_PRIO_PROCESS, 0));
+    CHECKV(proc_stat_nice(pid, &prio, &nice) == 0 && prio == 20 && nice == 0, prio * 100 + nice);
+    struct lx_rlimit rl = { 1, 1 }, zero = { 0, 0 };
+    CHECKV(sc2(LX_getrlimit, LX_RLIMIT_NICE, &rl) == 0 && rl.rlim_cur == 0 && rl.rlim_max == 0, rl.rlim_cur);   /* Linux's default */
+    CHECKV(sc3(LX_setpriority, LX_PRIO_PROCESS, 0, 5) == 0, 0);
+    CHECKV(sc2(LX_getpriority, LX_PRIO_PROCESS, pid) == 15, sc2(LX_getpriority, LX_PRIO_PROCESS, pid));
+    CHECKV(proc_stat_nice(pid, &prio, &nice) == 0 && prio == 25 && nice == 5, prio * 100 + nice);
+    /* Out of range is clamped, not refused; only the low 32 bits count. */
+    CHECKV(sc3(LX_setpriority, LX_PRIO_PROCESS, pid, 100) == 0 && sc2(LX_getpriority, LX_PRIO_PROCESS, 0) == 1, 0);
+    CHECKV(sc3(LX_setpriority, LX_PRIO_PROCESS, 0, -100) == 0 && sc2(LX_getpriority, LX_PRIO_PROCESS, 0) == 40, 0);
+    CHECKV(proc_stat_nice(pid, &prio, &nice) == 0 && prio == 0 && nice == -20, prio * 100 + nice);
+    CHECKV(sc3(LX_setpriority, LX_PRIO_PROCESS, 0, 0x100000003l) == 0 && sc2(LX_getpriority, LX_PRIO_PROCESS, 0) == 17,
+           sc2(LX_getpriority, LX_PRIO_PROCESS, 0));
+    /* Bad arguments. */
+    CHECKV(sc3(LX_setpriority, 3, 0, 0) == -22 && sc2(LX_getpriority, 3, 0) == -22, 0);
+    CHECKV(sc3(LX_setpriority, LX_PRIO_PROCESS, 0x7ffffff0, 0) == -3 && sc2(LX_getpriority, LX_PRIO_PROCESS, -1) == -3,
+           0);
+    CHECKV(sc2(LX_getpriority, LX_PRIO_USER, 4243) == -3 && sc3(LX_setpriority, LX_PRIO_PGRP, 0x7ffffff0, 0) == -3, 0);
+
+    /* Inherited by fork: two children of uid 4242 start at this process's
+     * nice (3), with its RLIMIT_NICE (25), and form a process group. */
+    rl.rlim_cur = rl.rlim_max = 25;
+    CHECKV(sc2(LX_setrlimit, LX_RLIMIT_NICE, &rl) == 0, 0);
+    int ready[2], goa[2], gob[2];
+    CHECKV(sc2(LX_pipe2, ready, 0) == 0 && sc2(LX_pipe2, goa, 0) == 0 && sc2(LX_pipe2, gob, 0) == 0, 0);
+    long a = nice_child(ready[1], goa[0], goa[1], gob[1], 0, 0, 0);
+    long b = nice_child(ready[1], gob[0], goa[1], gob[1], 1, a, pid);
+    CHECKV(a > 0 && b > 0, a < 0 ? a : b);
+    char x[2] = { 0, 0 };
+    CHECKV(sc3(LX_read, ready[0], x, 1) == 1 && sc3(LX_read, ready[0], x + 1, 1) == 1, 0);
+    CHECKV(x[0] == 'r' && x[1] == 'r', (x[0] << 8) | x[1]);
+    CHECKV(sc2(LX_setrlimit, LX_RLIMIT_NICE, &zero) == 0, 0);   /* privileged: may lower, and raise again */
+    CHECKV(sc3(LX_setpriority, LX_PRIO_PROCESS, 0, 0) == 0, 0);
+    CHECKV(sc2(LX_getpriority, LX_PRIO_PROCESS, a) == 17 && sc2(LX_getpriority, LX_PRIO_PROCESS, b) == 17, 0);
+    CHECKV(sc2(LX_setpgid, a, a) == 0 && sc2(LX_setpgid, b, a) == 0, 0);
+    /* A group or a user: the set reaches every member; the get reports the
+     * lowest nice among them (the highest 20 - nice). */
+    CHECKV(sc3(LX_setpriority, LX_PRIO_PROCESS, a, 8) == 0 && sc3(LX_setpriority, LX_PRIO_PROCESS, b, 2) == 0, 0);
+    CHECKV(sc2(LX_getpriority, LX_PRIO_PGRP, a) == 18, sc2(LX_getpriority, LX_PRIO_PGRP, a));
+    CHECKV(sc3(LX_setpriority, LX_PRIO_PGRP, a, 6) == 0, 0);
+    CHECKV(sc2(LX_getpriority, LX_PRIO_PROCESS, a) == 14 && sc2(LX_getpriority, LX_PRIO_PROCESS, b) == 14, 0);
+    CHECKV(sc2(LX_getpriority, LX_PRIO_USER, 4242) == 14, sc2(LX_getpriority, LX_PRIO_USER, 4242));
+    CHECKV(sc3(LX_setpriority, LX_PRIO_USER, 4242, 1) == 0, 0);
+    CHECKV(sc2(LX_getpriority, LX_PRIO_PROCESS, a) == 19 && sc2(LX_getpriority, LX_PRIO_PROCESS, b) == 19, 0);
+    CHECKV(proc_stat_nice(a, &prio, &nice) == 0 && prio == 21 && nice == 1, prio * 100 + nice);
+    /* The unprivileged child's checks (nice_child), then its peer's result. */
+    int32_t st = -1;
+    sc1(LX_close, gob[1]);
+    CHECKV(sc4(LX_wait4, b, &st, 0, 0) == b && st == 0, st >> 8);
+    CHECKV(sc2(LX_getpriority, LX_PRIO_PROCESS, a) == 25, sc2(LX_getpriority, LX_PRIO_PROCESS, a));
+    CHECKV(proc_stat_nice(a, &prio, &nice) == 0 && prio == 15 && nice == -5, prio * 100 + nice);
+    sc1(LX_close, goa[1]);
+    CHECKV(sc4(LX_wait4, a, &st, 0, 0) == a && st == 0, st >> 8);
+    sc1(LX_close, goa[0]);
+    sc1(LX_close, gob[0]);
+    sc1(LX_close, ready[0]);
+    sc1(LX_close, ready[1]);
+    CHECKV(sc2(LX_getpriority, LX_PRIO_PROCESS, 0) == 20, 0);
+    lx_puts("lxtest: nice ok\n");
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2)
@@ -2312,6 +2467,7 @@ int main(int argc, char **argv)
         CHECKV(sc4(LX_rt_sigaction, 14, &dfl, 0, 8) == 0, 0);
     }
     test_cputime();
+    test_nice();
     /* prctl: the dumpable flag (the scp-sftp unit: OpenSSH's sftp-server
      * clears it and refuses to run when it cannot); every other option is
      * -EINVAL. */

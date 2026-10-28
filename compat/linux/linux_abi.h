@@ -76,6 +76,7 @@
 #define LX_RLIMIT_NPROC 6
 #define LX_RLIMIT_NOFILE 7
 #define LX_RLIMIT_AS 9
+#define LX_RLIMIT_NICE 13   /* the lowest nice reachable is 20 - this */
 #define LX_RLIM_NLIMITS 16
 #define LX_RLIM_INFINITY (~0ull)
 struct lx_rlimit {
@@ -596,6 +597,11 @@ _Static_assert(sizeof(struct lx_itimerval) == 32, "struct itimerval is 32 bytes 
 #define LX_ITIMER_REAL 0
 #define LX_ITIMER_VIRTUAL 1
 #define LX_ITIMER_PROF 2
+
+/* getpriority/setpriority's `which` (PRIO_*); nice values run from -20 to 19. */
+#define LX_PRIO_PROCESS 0
+#define LX_PRIO_PGRP 1
+#define LX_PRIO_USER 2
 
 /* getrusage(2)'s struct rusage: two timevals, then fourteen longs this
  * kernel reports as 0 (it keeps no page-fault, I/O or context-switch
