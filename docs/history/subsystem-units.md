@@ -3583,3 +3583,16 @@ See the [history index](README.md).
   malformed shapes before reading a name. Found by A2's experiment:
   BusyBox's tarball has 35 names over 47 bytes. Report:
   `docs/audit/2026-10-28-a2-longnames-report.md`.
+- **Nice values, their rules in Nova (2026-10-28, roadmap 1.2 A5's second
+  PR, LX-13's interface).**
+  - A process's nice value, -20..19, inherited by fork and spawn and kept
+    by exec. Linux `getpriority`/`setpriority` for a process, a group or a
+    user, with Linux's rules (`EPERM` for another user's process, `EACCES`
+    below 20 - the target's `RLIMIT_NICE`, both lifted by `PRIV_PROC`);
+    the rules are Nova's (`kernel/process/nice.nova`), the walks and
+    calls C. `COSMO_RLIMIT_NICE` is new (default 0).
+  - `/proc/<pid>/stat` reports priority 20 + nice and nice; BusyBox
+    `nice` and `renice` are on, and `ps -o nice` shows the value.
+  - The scheduler does not read it yet (A5's third PR). Tests: lxtest's
+    nice block (failing first), ash.sh, `test_nice` (exhaustive).
+  - Report: `docs/audit/2026-10-28-a5-nice-report.md`.
