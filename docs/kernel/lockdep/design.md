@@ -286,7 +286,14 @@ A synchronous wait for a callback deadlocks when the waiter holds a lock
 the callback needs, directly or through a chain. The graph expresses this
 by giving each timer callback **function** a pseudo-class, kind
 `LOCKDEP_KIND_CALLBACK`, named `callback <address>` and cached in
-`struct timer`'s `lockdep_class` (reset by `timer_setup`):
+`struct timer`'s `lockdep_class` (reset by `timer_setup`). A function in
+a module's text is named `callback <module>+0x<offset> <version>`
+instead (`module_text_name`, from a table that covers the text from
+before `init` to its unmapping, so `shutdown` and a zombie's callbacks
+are named too): a reload can put the module at a new address, and since
+the class table only grows, an address name would add a class each time
+until the table filled (LOCK-10). The module-cycle self-test reloads
+cosmotest at a moved address and requires the class count unchanged.
 
 - `run_expired` brackets each callback with `lockdep_callback_enter` and
   `lockdep_callback_exit`. Enter acquires the class and holds it on the
