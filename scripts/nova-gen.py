@@ -44,7 +44,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-NOVAC_VERSION = "0.1.1"
+NOVAC_VERSION = "0.1.2"
 
 # Each port: its Nova source, the C it generates, what that C is, and the header novac generates for it (None
 # when the port's header is hand-written C, imported by the source).
