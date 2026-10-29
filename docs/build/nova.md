@@ -200,7 +200,9 @@ Moving to a newer novac is a change of its own. Bump `NOVAC_VERSION` in
 `scripts/nova-gen.py` and the CI job's `NOVAC_SHA256` (from the release's
 `SHA256SUMS`), run `make nova`, and review the regenerated C. Usually only
 version lines and locations change; anything else needs an explanation.
-Then run the validation matrix on both architectures.
+Then run the validation matrix on both architectures. Nova's side of the
+checklist (its CI, nightly fuzz campaign and NativeAOT check green for the
+release) is in Nova's `docs/release.md`, "Moving CosmoOS to a new release".
 
 ## References (Nova's repository)
 
