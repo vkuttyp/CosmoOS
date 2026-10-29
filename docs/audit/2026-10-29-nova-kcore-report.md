@@ -49,6 +49,13 @@ Branch `nova-kcore` from main at `9be071c4` (#488).
   table: in local boots it took 3.2 → 4.8 s (AArch64) and 3.4 → 5.1 s
   (x86-64). The budget keeps its margin over CI's slowest figure scaled
   by that 1.5×.
+- **The analyzer baseline** (`tools/analysis/*.json`): CI's static
+  analysis found four "Potential memory leak" reports in `kcore_test.c`,
+  one per `Box.create` in a `KernelHeap` (`nvB_…` functions). Each block
+  leaves as the `Ok` payload of a `Result` returned by value, which the
+  analyzer stops tracking; the caller's box frees it on drop, and the
+  test creates and drops each. They are baselined with that reason, for
+  both compilers and both architectures.
 - `docs/build/nova.md` describes the library; roadmap 2.0's N1, N3 and N6
   rows say what is done.
 
@@ -62,6 +69,7 @@ Branch `nova-kcore` from main at `9be071c4` (#488).
 | the same at 512 classes (control) | AArch64 PASS; x86-64 FAIL: the class-table overflow above |
 | `gmake host-test` | PASS |
 | `gmake check-docs` | PASS |
+| `gmake analyze`, both architectures | clean after the baseline (11 baselined, 0 unexpected) |
 
 No lockdep report names a Nova lock. The test leaves its table empty and
 its boxes freed. Its static locks, the per-CPU counter and the drop count
