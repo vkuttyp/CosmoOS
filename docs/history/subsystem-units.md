@@ -3653,3 +3653,16 @@ See the [history index](README.md).
     x86-64 with the test's classes added; it is now 640, and
     `lockdep-graph-bench`'s budget 30 s.
   - Report: `docs/audit/2026-10-29-nova-kcore-report.md`.
+- **novac 0.3.1: static mutexes and object caches in Nova (2026-10-29).**
+  - The pin moves to novac 0.3.1 (Nova's 0.3.0, ADR 0026 and 0027, and
+    one fix). Nova's atomics are inline (`rt.h`), and enum values that may
+    hold a pointer are built so that the analyzer follows them, so the
+    four baselined reports in `kcore_test.c` are gone.
+  - `MUTEX_INIT_AT(p, name)` in `mutex.h`: a mutex in static storage, as
+    `mutex_init` leaves one; Nova's static `Mutex` uses it.
+  - `nova-kcore` gains a static mutex, an object cache, and a C check that
+    `MUTEX_INIT_AT` matches `mutex_init` member by member. Its first run,
+    with 0.3.0, found that Nova's `ObjectCache` passed an alignment below
+    `KMALLOC_MIN_ALIGN`, which `kmem_cache_create` refuses; 0.3.1 fixes it.
+  - Report: `docs/audit/2026-10-29-novac-0.3.1-report.md`.
+

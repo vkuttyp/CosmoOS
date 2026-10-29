@@ -35,6 +35,16 @@ struct mutex {
 };
 
 void mutex_init(struct mutex *m, const char *name);
+/* A mutex in static storage, built at compile time as mutex_init leaves
+ * one (mutex.c, wait.c, spinlock.c): p is the mutex's own address, an
+ * address constant, which the self-pointing lists need. Nova's static
+ * Mutex<T> uses it (Nova ADR 0027); the self-test nova-kcore compares a
+ * mutex it built with one from mutex_init. A change to struct mutex or to
+ * mutex_init must keep the two equal. */
+#define MUTEX_INIT_AT(p, n) { .lock = SPINLOCK_INIT(n), .owner = NULL, \
+    .wq = { .lock = SPINLOCK_INIT(n), .waiters = LIST_HEAD_INIT((p)->wq.waiters), \
+            .callbacks = LIST_HEAD_INIT((p)->wq.callbacks) }, \
+    .name = (n), .class = 0, .pi_active = 0, .pi_link = LIST_HEAD_INIT((p)->pi_link), .handoff = NULL }
 void mutex_lock(struct mutex *m);
 /* As mutex_lock, annotated for nesting inside another mutex of the same
  * class (docs/kernel/lockdep/invariants.md lists every use). */

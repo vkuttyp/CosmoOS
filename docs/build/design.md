@@ -230,7 +230,7 @@ newer novac is a change of its own: bump the pin and the CI job's
 run the matrix. The pinned release is installed with
 
 ```sh
-curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.2.0 sh
+curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.3.1 sh
 ```
 
 or named with `NOVAC=<path>`. `make nova-check` only compares, and CI's

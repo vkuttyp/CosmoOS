@@ -659,7 +659,7 @@ void nova_free(void *p, uint32_t allocator);
 void nova_fail_after(uint64_t n);
 void nova_fail_reset(void);
 
-/* ---- Threads, mutexes and atomics (type-system.md §38; runtime/hosted/nova_rt_thread.c) ---------------- */
+/* ---- Threads and mutexes (type-system.md §38; runtime/hosted/nova_rt_thread.c), and atomics (here) ---------- */
 
 typedef struct nv_thread nv_thread;
 /* Starts a thread running body(arg); NULL if it or its record could not be made. */
@@ -671,28 +671,112 @@ void *nova_mutex_create(void);
 void nova_mutex_lock(void *m);
 void nova_mutex_unlock(void *m);
 void nova_mutex_destroy(void *m);
-/* Sequentially consistent; cas returns the previous value (the exchange happened iff it equals expected). */
-uint64_t nova_atomic_load_u64(uint64_t *p);
-void nova_atomic_store_u64(uint64_t *p, uint64_t v);
-uint64_t nova_atomic_swap_u64(uint64_t *p, uint64_t v);
-uint64_t nova_atomic_cas_u64(uint64_t *p, uint64_t expected, uint64_t desired);
-uint64_t nova_atomic_add_u64(uint64_t *p, uint64_t v);
-uint32_t nova_atomic_load_u32(uint32_t *p);
-void nova_atomic_store_u32(uint32_t *p, uint32_t v);
-uint32_t nova_atomic_swap_u32(uint32_t *p, uint32_t v);
-uint32_t nova_atomic_cas_u32(uint32_t *p, uint32_t expected, uint32_t desired);
-uint32_t nova_atomic_add_u32(uint32_t *p, uint32_t v);
-/* With an ordering (ADR 0021): 0 relaxed, 1 acquire, 2 release, 3 acquire-release, 4 sequentially consistent. */
-uint64_t nova_atomic_load_ord_u64(uint64_t *p, int32_t order);
-void nova_atomic_store_ord_u64(uint64_t *p, uint64_t v, int32_t order);
-uint64_t nova_atomic_swap_ord_u64(uint64_t *p, uint64_t v, int32_t order);
-uint64_t nova_atomic_cas_ord_u64(uint64_t *p, uint64_t expected, uint64_t desired, int32_t order);
-uint64_t nova_atomic_add_ord_u64(uint64_t *p, uint64_t v, int32_t order);
-uint32_t nova_atomic_load_ord_u32(uint32_t *p, int32_t order);
-void nova_atomic_store_ord_u32(uint32_t *p, uint32_t v, int32_t order);
-uint32_t nova_atomic_swap_ord_u32(uint32_t *p, uint32_t v, int32_t order);
-uint32_t nova_atomic_cas_ord_u32(uint32_t *p, uint32_t expected, uint32_t desired, int32_t order);
-uint32_t nova_atomic_add_ord_u32(uint32_t *p, uint32_t v, int32_t order);
+/* ---- Atomics (§38.3): sequentially consistent, and with an ordering (ADR 0021); compare-exchange returns the
+ * previous value. Static inline (ADR 0026), so an operation is its instructions where the compiler inlines it, and
+ * a freestanding build needs no runtime for them. An ordering is lib/core's code: 0 relaxed, 1 acquire, 2 release, 3 acquire-release, 4 sequentially
+ * consistent. lib/core passes a load only 0, 1 or 4 and a store only 0, 2 or 4, so no ordering C11 leaves undefined
+ * reaches a builtin. --------------------------------------------------------------------------------------------- */
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+static inline uint64_t nova_atomic_load_u64(uint64_t *p) { return (uint64_t)_InterlockedCompareExchange64((volatile __int64 *)p, 0, 0); }
+static inline void nova_atomic_store_u64(uint64_t *p, uint64_t v) { (void)_InterlockedExchange64((volatile __int64 *)p, (__int64)v); }
+static inline uint64_t nova_atomic_swap_u64(uint64_t *p, uint64_t v) { return (uint64_t)_InterlockedExchange64((volatile __int64 *)p, (__int64)v); }
+static inline uint64_t nova_atomic_cas_u64(uint64_t *p, uint64_t expected, uint64_t desired) {
+    return (uint64_t)_InterlockedCompareExchange64((volatile __int64 *)p, (__int64)desired, (__int64)expected);
+}
+static inline uint64_t nova_atomic_add_u64(uint64_t *p, uint64_t v) { return (uint64_t)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)v); }
+static inline uint32_t nova_atomic_load_u32(uint32_t *p) { return (uint32_t)_InterlockedCompareExchange((volatile long *)p, 0, 0); }
+static inline void nova_atomic_store_u32(uint32_t *p, uint32_t v) { (void)_InterlockedExchange((volatile long *)p, (long)v); }
+static inline uint32_t nova_atomic_swap_u32(uint32_t *p, uint32_t v) { return (uint32_t)_InterlockedExchange((volatile long *)p, (long)v); }
+static inline uint32_t nova_atomic_cas_u32(uint32_t *p, uint32_t expected, uint32_t desired) {
+    return (uint32_t)_InterlockedCompareExchange((volatile long *)p, (long)desired, (long)expected);
+}
+static inline uint32_t nova_atomic_add_u32(uint32_t *p, uint32_t v) { return (uint32_t)_InterlockedExchangeAdd((volatile long *)p, (long)v); }
+/* Every _Interlocked intrinsic is a full barrier: a correct, stronger, implementation of each ordering. */
+static inline uint64_t nova_atomic_load_ord_u64(uint64_t *p, int32_t o) { (void)o; return nova_atomic_load_u64(p); }
+static inline void nova_atomic_store_ord_u64(uint64_t *p, uint64_t v, int32_t o) { (void)o; nova_atomic_store_u64(p, v); }
+static inline uint64_t nova_atomic_swap_ord_u64(uint64_t *p, uint64_t v, int32_t o) { (void)o; return nova_atomic_swap_u64(p, v); }
+static inline uint64_t nova_atomic_cas_ord_u64(uint64_t *p, uint64_t e, uint64_t d, int32_t o) { (void)o; return nova_atomic_cas_u64(p, e, d); }
+static inline uint64_t nova_atomic_add_ord_u64(uint64_t *p, uint64_t v, int32_t o) { (void)o; return nova_atomic_add_u64(p, v); }
+static inline uint32_t nova_atomic_load_ord_u32(uint32_t *p, int32_t o) { (void)o; return nova_atomic_load_u32(p); }
+static inline void nova_atomic_store_ord_u32(uint32_t *p, uint32_t v, int32_t o) { (void)o; nova_atomic_store_u32(p, v); }
+static inline uint32_t nova_atomic_swap_ord_u32(uint32_t *p, uint32_t v, int32_t o) { (void)o; return nova_atomic_swap_u32(p, v); }
+static inline uint32_t nova_atomic_cas_ord_u32(uint32_t *p, uint32_t e, uint32_t d, int32_t o) { (void)o; return nova_atomic_cas_u32(p, e, d); }
+static inline uint32_t nova_atomic_add_ord_u32(uint32_t *p, uint32_t v, int32_t o) { (void)o; return nova_atomic_add_u32(p, v); }
+#else
+static inline uint64_t nova_atomic_load_u64(uint64_t *p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+static inline void nova_atomic_store_u64(uint64_t *p, uint64_t v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
+static inline uint64_t nova_atomic_swap_u64(uint64_t *p, uint64_t v) { return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST); }
+static inline uint64_t nova_atomic_cas_u64(uint64_t *p, uint64_t expected, uint64_t desired) {
+    (void)__atomic_compare_exchange_n(p, &expected, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected; /* the previous value: equal to the argument exactly when the exchange happened */
+}
+static inline uint64_t nova_atomic_add_u64(uint64_t *p, uint64_t v) { return __atomic_fetch_add(p, v, __ATOMIC_SEQ_CST); }
+static inline uint32_t nova_atomic_load_u32(uint32_t *p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+static inline void nova_atomic_store_u32(uint32_t *p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
+static inline uint32_t nova_atomic_swap_u32(uint32_t *p, uint32_t v) { return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST); }
+static inline uint32_t nova_atomic_cas_u32(uint32_t *p, uint32_t expected, uint32_t desired) {
+    (void)__atomic_compare_exchange_n(p, &expected, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected;
+}
+static inline uint32_t nova_atomic_add_u32(uint32_t *p, uint32_t v) { return __atomic_fetch_add(p, v, __ATOMIC_SEQ_CST); }
+
+/* A builtin's ordering must be a constant for the compiler to choose its instructions (a variable one is treated as
+ * sequentially consistent), so each entry point switches. A compare-exchange fails with the ordering C11 allows for
+ * its success ordering: acquire for acquire-release, relaxed for release. */
+#define NV_LOAD_ORD(T, W)                                                                                            \
+    static inline T nova_atomic_load_ord_##W(T *p, int32_t o) {                                                                    \
+        switch (o) {                                                                                                 \
+        case 0: return __atomic_load_n(p, __ATOMIC_RELAXED);                                                         \
+        case 1: return __atomic_load_n(p, __ATOMIC_ACQUIRE);                                                         \
+        default: return __atomic_load_n(p, __ATOMIC_SEQ_CST);                                                        \
+        }                                                                                                            \
+    }
+#define NV_STORE_ORD(T, W)                                                                                           \
+    static inline void nova_atomic_store_ord_##W(T *p, T v, int32_t o) {                                                           \
+        switch (o) {                                                                                                 \
+        case 0: __atomic_store_n(p, v, __ATOMIC_RELAXED); break;                                                     \
+        case 2: __atomic_store_n(p, v, __ATOMIC_RELEASE); break;                                                     \
+        default: __atomic_store_n(p, v, __ATOMIC_SEQ_CST); break;                                                    \
+        }                                                                                                            \
+    }
+#define NV_RMW_ORD(T, W, NAME, CALL)                                                                                 \
+    static inline T nova_atomic_##NAME##_ord_##W(T *p, T v, int32_t o) {                                                           \
+        switch (o) {                                                                                                 \
+        case 0: return CALL(p, v, __ATOMIC_RELAXED);                                                                 \
+        case 1: return CALL(p, v, __ATOMIC_ACQUIRE);                                                                 \
+        case 2: return CALL(p, v, __ATOMIC_RELEASE);                                                                 \
+        case 3: return CALL(p, v, __ATOMIC_ACQ_REL);                                                                 \
+        default: return CALL(p, v, __ATOMIC_SEQ_CST);                                                                \
+        }                                                                                                            \
+    }
+#define NV_CAS_ORD(T, W)                                                                                             \
+    static inline T nova_atomic_cas_ord_##W(T *p, T e, T d, int32_t o) {                                                           \
+        switch (o) {                                                                                                 \
+        case 0: (void)__atomic_compare_exchange_n(p, &e, d, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED); break;       \
+        case 1: (void)__atomic_compare_exchange_n(p, &e, d, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE); break;       \
+        case 2: (void)__atomic_compare_exchange_n(p, &e, d, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED); break;       \
+        case 3: (void)__atomic_compare_exchange_n(p, &e, d, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE); break;       \
+        default: (void)__atomic_compare_exchange_n(p, &e, d, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); break;      \
+        }                                                                                                            \
+        return e;                                                                                                    \
+    }
+NV_LOAD_ORD(uint64_t, u64)
+NV_STORE_ORD(uint64_t, u64)
+NV_RMW_ORD(uint64_t, u64, swap, __atomic_exchange_n)
+NV_RMW_ORD(uint64_t, u64, add, __atomic_fetch_add)
+NV_CAS_ORD(uint64_t, u64)
+NV_LOAD_ORD(uint32_t, u32)
+NV_STORE_ORD(uint32_t, u32)
+NV_RMW_ORD(uint32_t, u32, swap, __atomic_exchange_n)
+NV_RMW_ORD(uint32_t, u32, add, __atomic_fetch_add)
+NV_CAS_ORD(uint32_t, u32)
+#undef NV_LOAD_ORD
+#undef NV_STORE_ORD
+#undef NV_RMW_ORD
+#undef NV_CAS_ORD
+#endif
 
 /* ---- Vectors and strings (type-system.md §23; runtime/core/nova_rt_core.c) ---------------- */
 
