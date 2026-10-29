@@ -635,6 +635,8 @@ _Noreturn void nova_platform_exit(int32_t code);
 _Noreturn void nova_platform_abort(void);
 /* Heap memory; NULL on failure. Must be aligned for any Nova type (max_align_t). */
 void *nova_platform_alloc(size_t size);
+/* Resizes a block from nova_platform_alloc, keeping its first bytes; NULL with the block unchanged on failure. */
+void *nova_platform_realloc(void *p, size_t size);
 void nova_platform_free(void *p);
 /* A configuration number from the environment; 0 if absent or not a number (hosted test builds). */
 uint64_t nova_platform_config(const char *name);
@@ -650,10 +652,47 @@ uint64_t nova_platform_config(const char *name);
  * NOVA_FAIL_ALLOC_AT (1-based, all allocators) fails: the fault-injection hook for the M3 sweep.
  */
 void *nova_alloc(size_t size, uint32_t allocator);
+/* Resizes a block from nova_alloc: one attempt, the block unchanged (and still live) on failure. */
+void *nova_realloc(void *p, size_t size, uint32_t allocator);
 void nova_free(void *p, uint32_t allocator);
 /* FailingAllocator.failAfter(n) / FailingAllocator.reset(). */
 void nova_fail_after(uint64_t n);
 void nova_fail_reset(void);
+
+/* ---- Threads, mutexes and atomics (type-system.md §38; runtime/hosted/nova_rt_thread.c) ---------------- */
+
+typedef struct nv_thread nv_thread;
+/* Starts a thread running body(arg); NULL if it or its record could not be made. */
+nv_thread *nova_thread_start(void *(*body)(void *), void *arg);
+/* Waits for the thread to end, then frees its record. */
+void nova_thread_join(nv_thread *t);
+/* A platform mutex in allocated memory, or NULL. */
+void *nova_mutex_create(void);
+void nova_mutex_lock(void *m);
+void nova_mutex_unlock(void *m);
+void nova_mutex_destroy(void *m);
+/* Sequentially consistent; cas returns the previous value (the exchange happened iff it equals expected). */
+uint64_t nova_atomic_load_u64(uint64_t *p);
+void nova_atomic_store_u64(uint64_t *p, uint64_t v);
+uint64_t nova_atomic_swap_u64(uint64_t *p, uint64_t v);
+uint64_t nova_atomic_cas_u64(uint64_t *p, uint64_t expected, uint64_t desired);
+uint64_t nova_atomic_add_u64(uint64_t *p, uint64_t v);
+uint32_t nova_atomic_load_u32(uint32_t *p);
+void nova_atomic_store_u32(uint32_t *p, uint32_t v);
+uint32_t nova_atomic_swap_u32(uint32_t *p, uint32_t v);
+uint32_t nova_atomic_cas_u32(uint32_t *p, uint32_t expected, uint32_t desired);
+uint32_t nova_atomic_add_u32(uint32_t *p, uint32_t v);
+/* With an ordering (ADR 0021): 0 relaxed, 1 acquire, 2 release, 3 acquire-release, 4 sequentially consistent. */
+uint64_t nova_atomic_load_ord_u64(uint64_t *p, int32_t order);
+void nova_atomic_store_ord_u64(uint64_t *p, uint64_t v, int32_t order);
+uint64_t nova_atomic_swap_ord_u64(uint64_t *p, uint64_t v, int32_t order);
+uint64_t nova_atomic_cas_ord_u64(uint64_t *p, uint64_t expected, uint64_t desired, int32_t order);
+uint64_t nova_atomic_add_ord_u64(uint64_t *p, uint64_t v, int32_t order);
+uint32_t nova_atomic_load_ord_u32(uint32_t *p, int32_t order);
+void nova_atomic_store_ord_u32(uint32_t *p, uint32_t v, int32_t order);
+uint32_t nova_atomic_swap_ord_u32(uint32_t *p, uint32_t v, int32_t order);
+uint32_t nova_atomic_cas_ord_u32(uint32_t *p, uint32_t expected, uint32_t desired, int32_t order);
+uint32_t nova_atomic_add_ord_u32(uint32_t *p, uint32_t v, int32_t order);
 
 /* ---- Vectors and strings (type-system.md §23; runtime/core/nova_rt_core.c) ---------------- */
 
