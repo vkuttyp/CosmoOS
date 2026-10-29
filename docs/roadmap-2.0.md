@@ -100,9 +100,12 @@ The rule from adoption on:
    reachable only through the guard, and holding a spin lock is an atomic
    context the compiler checks), allocates through `KernelHeap` and
    `ObjectCache<T>` with failure as a `Result`, and holds kernel objects as
-   `KRef<T>`, whose drop is the release. Nova's repository already built
-   these (its C5 and C7) and a Nova module loaded and unloaded 1,000 times
-   against CosmoOS (C8). The rules that stay: `--no-float`; `unsafe` only
+   `KRef<T>`, whose drop is the release. Nova's repository built most of
+   these as demonstrations (its C5: `KernelHeap`; C7: `KRef<T>`,
+   `SpinLock<T>`, `IrqSpinLock<T>`, `Mutex<T>`, `Quiesce`), and a Nova
+   module loaded and unloaded 1,000 times against CosmoOS (C8);
+   `ObjectCache<T>` is still to write, and none of them is yet a library
+   the kernel depends on ([Nova prerequisites](#nova-prerequisites), N3). The rules that stay: `--no-float`; `unsafe` only
    at the floor's boundary, each with its `/// Safety:` comment; context
    effects (`@context(irq)`, `@context(atomic)`) on every function that
    runs there; no failing check reachable in interrupt context.
@@ -121,12 +124,39 @@ The rule from adoption on:
    the whole kernel in Nova that doubles the tree for no reader. From SA1
    on, the build runs the pinned novac and the generated C is not
    committed; CI's "Nova sources" check becomes a reproducibility check of
-   the build (`make reproducible`).
+   the build (`make reproducible`). novac does not run on CosmoOS, so a
+   self-hosted build (SW0) needs the generated C from somewhere: source
+   releases ship it ([Nova prerequisites](#nova-prerequisites), N4).
 
 Userland follows the same rule where it is CosmoOS's own code: `libc/`,
 `userland/` (the native tools, `svc`, `syslogd`, `cosmo-*`) and `pkg/`
 are converted in SA12. Third-party ports (BusyBox, musl, dropbear, the
 servers) stay as their upstreams write them.
+
+## Nova prerequisites
+
+Added 2026-10-29 from a review of this roadmap against Nova's compiler
+(Nova's [milestone 14](https://github.com/vkuttyp/Nova/blob/main/docs/milestone-14.md),
+proposed; its open decisions OD-28 to OD-31). The Nova rule assumes Nova
+can write whole subsystems. Today it writes leaf functions whose state
+lives in C, which is all the four ports needed. These are what it lacks,
+and the CosmoOS milestone each one gates:
+
+| | Nova lacks | Gates | Nova's plan |
+|---|---|---|---|
+| N1 | **Global and per-CPU state.** Nova has only compile-time `const`; `static var count: u64 = 0;` is a syntax error. A kernel's tables, singletons and per-CPU data have nowhere to live in Nova. | SA2, SA3 | M14 K1: `static` items whose mutable state is reached only through `Share` types (lock guards, atomics), statically initialised C state (`SPINLOCK_INIT`), `@percpu` statics accessed where the CPU cannot change (OD-28) |
+| N2 | **Nova-typed calls between files.** Each `.nova` file compiles alone and they meet only through `@export` C functions, so references, regions, effects and `Send`/`Share` stop at every file boundary. Building the kernel as one whole program instead was measured on a synthetic 202,000-line package: 13.1 s in novac and 33.8 s in clang for one 1,076,000-line C file, on every change, on one core. | SA1 (the build), SA6 onward | M14 K2: first C in several translation units (K2a), then separate compilation per package with interface files (OD-29) |
+| N3 | **A kernel library.** `KernelHeap`, `KRef<T>`, the lock guards and `Quiesce` exist as Nova's C5 and C7 demonstrations with their own C glue; `ObjectCache<T>` is not built. | SA2, SA3 | M14 K3: a Nova package in this tree (`kernel/nova-core/`), owned here because it binds this kernel's C API (OD-30) |
+| N4 | **novac on a self-hosted CosmoOS.** novac is a .NET NativeAOT binary for macOS, Linux and Windows; it does not run on CosmoOS, and the Nova rule's point 7 makes every kernel build run it. | SA1, SW0 | M14 K4: source releases carry the generated C, so a self-hosted build needs no novac; changing a `.nova` file needs a host with novac (OD-31) |
+| N5 | **An outside audit.** Once whole subsystems are Nova, the compiler is part of the kernel's trusted base. Nova's 2026-10-29 review found two soundness holes, one of them in a release (fixed in novac 0.1.2), and that review was by the same model that wrote the compiler. | phase 2 (SA6 onward) | M14 K6: the owner engages a reviewer; Nova keeps its `safety-audit.md` current |
+| N6 | **Hot-path speed.** Nova's measured gaps to C are 0.98-1.06x (`fbvalid`), 1.13-1.20x (sort) and 1.26-1.40x (string building); its atomics are calls into the runtime, about 2x slower than inline C on a two-thread ring (Nova's ADR 0021). | PF2, SA6, SA10 | M14 K5: inline atomics (Nova's OD-27) first, then the check elimination PF1's numbers call for |
+
+So the order gains these edges: SA1 after N4's decision and K2a; SA2 and
+SA3 after N1 and N3; phase 2 after N5. SA5 (parsers) and PF1 need
+nothing new and can start at once. N1 and K2a change Nova's language and
+output, so they come in **Nova 0.2.0**, and this tree moves its pin to it
+in one PR, as every pin bump does (`docs/build/nova.md`, "Upgrading the
+compiler").
 
 ## How the work runs
 
@@ -157,6 +187,7 @@ This replaces `AGENTS.md`'s one-milestone-at-a-time rule for 2.0's work.
 ## Order
 
 ```text
+nova:        N4 decided, K2a ─► SA1;  N1, N3 ─► SA2, SA3;  N5 ─► phase 2  (Nova prerequisites)
 conversion:  SA1 ─► SA2 ─► SA3 ─► SA4 ─► SA6 (network) ─► SA7 (storage, VFS) ─► SA8 (Linux) ─► SA9 (drivers)
                      └─► SA5 (parsers, first)            ─► SA10 (core) ─► SA11 (arch, hypervisor) ─► SA12 (userland) ─► SA13 (the last C)
 platform:    PF1 ─► HW1 ─► HW2 (with SA9) ─► HW3 ─► PF2 ─► PF3 (after SA10) ─► VM1 ─► VM2 ─► UK1
@@ -207,8 +238,9 @@ Size: about 0.7x.
 
 ### SA2 Allocation and object lifetimes in Nova
 
-Nova's C5 (`KernelHeap`, `ObjectCache<T>`) and C7 `KRef<T>` (a counted
-kobject reference whose drop is the release) come into the tree, behind
+Nova's C5 `KernelHeap`, a new `ObjectCache<T>` over `kmem_cache`, and C7's
+`KRef<T>` (a counted kobject reference whose drop is the release) come into
+the tree as the kernel library (N3), behind
 the fault injection the C allocators have (`CONFIG_FAULTINJECT`).
 Allocation failure is a `Result` a caller handles or returns, never a
 panic. The proving conversion has real allocation and lifetimes: the
@@ -998,4 +1030,6 @@ rules to match in the first PR, and start three streams at once: SA1
 performance claim needs) and SW0 (self-hosting, already under way). Then
 SA2-SA4, which make allocation, locks and drivers possible in Nova:
 without them the conversion can reach only parsers and pure functions,
-as it does today.
+as it does today. SA2-SA4 wait for Nova's N1 and N3 (Nova 0.2.0), so the
+conversion stream's first work is SA5, the parsers, which needs nothing
+new from Nova.
