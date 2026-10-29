@@ -3636,3 +3636,20 @@ See the [history index](README.md).
   - `tools/rtc-century-probe.py` measures the rewind over qtest; `--old`'s
     2 s bound rejects the worst reading it allows.
   - Report: `docs/audit/2026-10-28-rtc-century-report.md`.
+- **Nova's kernel library in a debug boot (2026-10-29, roadmap 2.0's
+  N1 and N3).**
+  - novac 0.2.0 (pinned since #488) has `static` items built at compile
+    time and `lib/kernel`, Nova's library for this kernel's C API: the
+    kernel heap, spin locks, irqsave spin locks and mutexes reached
+    through guards, preemption and interrupt guards, per-CPU values,
+    kernel objects and grace periods.
+  - The self-test `nova-kcore` (`kernel/nova/kcore_test.nova`, named by
+    `kcore_selftest.c`) uses each, as code built into the kernel: a
+    table under a static spin lock, a static irqsave lock, this CPU's
+    counter, boxed locks, a kernel object's clone and release, a grace
+    period and a deferred free. A `PORTS` line can now ask for the
+    library (`novac --kernel cosmoos`).
+  - Lockdep's class table, at about 500 of 512 on main, overflowed on
+    x86-64 with the test's classes added; it is now 640, and
+    `lockdep-graph-bench`'s budget 30 s.
+  - Report: `docs/audit/2026-10-29-nova-kcore-report.md`.

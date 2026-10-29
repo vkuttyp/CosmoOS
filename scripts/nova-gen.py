@@ -12,6 +12,7 @@ generated C needs, is generated too.
   kernel/process/cputime.nova  -> kernel/process/cputime.c
   kernel/process/nice.nova     -> kernel/process/nice.c
   kernel/scheduler/fair.nova   -> kernel/scheduler/fair.c
+  kernel/nova/kcore_test.nova  -> kernel/nova/kcore_test.c   (with Nova's kernel library)
   (every port)                 -> kernel/include/nova/rt.h, kernel/nova/nova_rt_core.c
 
 A port's header is normally hand-written C that the Nova source imports
@@ -46,15 +47,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 NOVAC_VERSION = "0.2.0"
 
-# Each port: its Nova source, the C it generates, what that C is, and the header novac generates for it (None
-# when the port's header is hand-written C, imported by the source).
+# Each port: its Nova source, the C it generates, what that C is, the header novac generates for it (None
+# when the port's header is hand-written C, imported by the source), and whether it uses Nova's kernel library
+# (lib/kernel: locks, per-CPU values, kernel objects; novac --kernel cosmoos).
 PORTS = [
-    ("kernel/block/gpt.nova", "kernel/block/gpt.c", "The GUID Partition Table (gpt.h)", None),
+    ("kernel/block/gpt.nova", "kernel/block/gpt.c", "The GUID Partition Table (gpt.h)", None, False),
     ("kernel/process/cputime.nova", "kernel/process/cputime.c",
-     "CPU time and the CPU-time interval timers (cputime.h)", None),
-    ("kernel/process/nice.nova", "kernel/process/nice.c", "The rules of nice values (nice.h)", None),
+     "CPU time and the CPU-time interval timers (cputime.h)", None, False),
+    ("kernel/process/nice.nova", "kernel/process/nice.c", "The rules of nice values (nice.h)", None, False),
     ("kernel/scheduler/fair.nova", "kernel/scheduler/fair.c",
-     "The weighted fair share at the default priority level (fair.h)", None),
+     "The weighted fair share at the default priority level (fair.h)", None, False),
+    ("kernel/nova/kcore_test.nova", "kernel/nova/kcore_test.c",
+     "The boot self-test of Nova's kernel library (selftest nova-kcore)", None, True),
 ]
 RUNTIME = [("nova/rt.h", "kernel/include/nova/rt.h"), ("nova_rt_core.c", "kernel/nova/nova_rt_core.c")]
 
@@ -83,10 +87,10 @@ def novac() -> str:
 def generated(exe: str, work: Path) -> dict[str, str]:
     """Every generated file, by its path in the tree, as the pinned novac makes it now."""
     files: dict[str, str] = {}
-    for i, (source, target, title, header) in enumerate(PORTS):
+    for i, (source, target, title, header, kernel) in enumerate(PORTS):
         out = work / str(i)
-        subprocess.run([exe, "build", "--profile", "freestanding", "--no-float", "--emit", "c", "-o", out, source],
-                       cwd=ROOT, check=True)
+        subprocess.run([exe, "build", "--profile", "freestanding", "--no-float", *(["--kernel", "cosmoos"] if kernel else []),
+                        "--emit", "c", "-o", out, source], cwd=ROOT, check=True)
         main = (out / "main.c").read_text()
         files[target] = BANNER.format(name=Path(target).name, title=title, source=source) + main
         if header is not None:

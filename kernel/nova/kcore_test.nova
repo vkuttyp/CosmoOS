@@ -1,0 +1,153 @@
+// The boot self-test of Nova's kernel library (lib/kernel; Nova ADR 0025), as code built into the kernel: statics
+// built at compile time (Nova type-system.md §39), each lock, a per-CPU value, kernel objects and grace periods.
+// kcore_selftest.c runs it as the self-test nova-kcore. It returns 0, or the number of the first check that failed.
+
+/// A value that counts its drops, to see that a kernel object's release and a deferred free drop what they hold.
+struct Tracked {
+    id: u64;
+
+    drop {
+        var guard = DROPS.lock();
+        let drops = guard.data();
+        drops += 1;
+    }
+}
+
+/// A table under a static spin lock: the shape of a kernel object table (Nova M14 K1's acceptance).
+struct Table {
+    entries: [u64; 8];
+    used: u32;
+}
+
+static TABLE: SpinLock<Table> = SpinLock<Table>.constant(
+    "nova.kcore.table\0".ptr as *CChar,
+    Table { entries: [0; 8], used: 0 },
+);
+static PENDING: IrqSpinLock<u64> = IrqSpinLock<u64>.constant("nova.kcore.pending\0".ptr as *CChar, 0);
+static DROPS: SpinLock<u64> = SpinLock<u64>.constant("nova.kcore.drops\0".ptr as *CChar, 0);
+static TICKS: PerCpu<u64> = PerCpu<u64>.constant(0);
+
+fn drops() -> u64 {
+    var guard = DROPS.lock();
+    return guard.data();
+}
+
+/// Adds `value` to the table under its lock; its slot, or 8 when the table is full.
+fn insert(value: u64) -> u32 {
+    var guard = TABLE.lock();
+    let table = guard.data();
+    if (table.used >= 8) {
+        return 8;
+    }
+    let slot = table.used;
+    table.entries[slot as usize] = value;
+    table.used += 1;
+    return slot;
+}
+
+fn lookup(slot: u32) -> u64 {
+    var guard = TABLE.lock();
+    let table = guard.data();
+    return table.entries[(slot % 8) as usize];
+}
+
+/// Empties the table, so the test leaves it as it found it.
+fn clear() {
+    var guard = TABLE.lock();
+    let table = guard.data();
+    table.used = 0;
+}
+
+fn tick() -> u64 {
+    var mine = TICKS.local(IrqGuard.enter());
+    let value = mine.get();
+    value += 1;
+    return value;
+}
+
+/// Runs every check; 0, or the number of the first that failed.
+/// Safety: the only unsafe call is deferDrop, of a value that was never published, so no reader can find it.
+@export("kcore_nova_selftest")
+fn selftest() -> u32 {
+    // 1-2: the static spin-locked table.
+    let a = insert(11);
+    let b = insert(22);
+    if (a != 0 || b != 1) {
+        clear();
+        return 1;
+    }
+    if (lookup(a) != 11 || lookup(b) != 22) {
+        clear();
+        return 2;
+    }
+    clear();
+
+    // 3: the static irqsave spin lock.
+    {
+        var guard = PENDING.lock();
+        let pending = guard.data();
+        pending += 5;
+        if (pending < 5) {
+            return 3;
+        }
+    }
+
+    // 4: this CPU's value, with interrupts off while it is lent.
+    let first = tick();
+    let second = tick();
+    if (second != first + 1) {
+        return 4;
+    }
+
+    // 5: a spin lock in a kernel-heap box.
+    match (SpinLock<u64>.create("nova.kcore.boxed\0".ptr as *CChar, 7)) {
+        Ok(lock) => {
+            var guard = lock.lock();
+            if (guard.data() != 7) {
+                return 5;
+            }
+        }
+        Err(e) => { return 5; }
+    }
+
+    // 6: a mutex in a kernel-heap box, taken twice (this is thread context: it may sleep).
+    match (Mutex<u64>.create("nova.kcore.mutex\0".ptr as *CChar, 1)) {
+        Ok(mutex) => {
+            {
+                var guard = mutex.lock();
+                let value = guard.data();
+                value += 1;
+            }
+            var again = mutex.lock();
+            if (again.data() != 2) {
+                return 6;
+            }
+        }
+        Err(e) => { return 6; }
+    }
+
+    // 7-8: a kernel object: a clone takes a count, and the last drop releases it, dropping its data once.
+    let before = drops();
+    match (KRef<Tracked>.create("nova.kcore.object\0".ptr as *CChar, Tracked { id: 9 })) {
+        Ok(object) => {
+            let other = object.clone();
+            if (other.count() != 2 || object.get().id != 9) {
+                return 7;
+            }
+        }
+        Err(e) => { return 7; }
+    }
+    if (drops() != before + 1) {
+        return 8;
+    }
+
+    // 9: a grace period, and a free deferred past one.
+    Quiesce.synchronize();
+    match (Deferred<Tracked>.create(Tracked { id: 10 })) {
+        Ok(value) => {
+            unsafe { deferDrop(value); }
+        }
+        Err(e) => { return 9; }
+    }
+    return 0;
+}

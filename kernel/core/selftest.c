@@ -91,10 +91,13 @@ static const struct selftest_budget {
      * went over under the chaos migrator (AArch64, 8,153 ms, main run
      * 37752084144) and on a slow x86-64 runner (13,839 ms, PR #332), and
      * reports progress only between phases, so the watchdog fired too
-     * (docs/testing/flakes.md). 20 s is over twice CI's slowest normal
+     * (docs/testing/flakes.md). 20 s was over twice CI's slowest normal
      * figure, as for cosmofs-replay: the budget notices a test that
-     * stopped terminating, it does not ration a benchmark. */
-    { "lockdep-graph-bench", 20000 },
+     * stopped terminating, it does not ration a benchmark. The table grew
+     * again (512 -> 640, 2026-10-29), which took the test from 3.2 to 4.8 s
+     * (AArch64) and 3.4 to 5.1 s (x86-64) in local QEMU boots, 1.5x; 30 s
+     * keeps the same margin over CI's figures scaled by that. */
+    { "lockdep-graph-bench", 30000 },
 };
 
 /* --- formatter --- */
@@ -526,6 +529,7 @@ static const struct selftest tests[] = {
     { "quiesce-kick-spinner", selftest_quiesce_kick_spinner },
     { "quiesce-grace",   selftest_quiesce_grace },
     { "quiesce-call",    selftest_quiesce_call },
+    { "nova-kcore",      selftest_nova_kcore },
     { "irq-sync",        selftest_irq_sync },
     { "irq-writers",     selftest_irq_writers },
     { "irq-unhandled",   selftest_irq_unhandled },
