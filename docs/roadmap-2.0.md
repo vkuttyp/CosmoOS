@@ -1,6 +1,7 @@
 # CosmoOS 2.0 roadmap (proposed)
 
-Written 2026-10-29 at v1.0.14, on main at `f073ad71`. **Proposed, not
+Written 2026-10-29 at v1.0.14, on main at `f073ad71`; the MS track
+(messaging at scale) added the same day on `4b1c55ec`. **Proposed, not
 adopted.**
 
 Its goal: make CosmoOS competitive with Linux and FreeBSD for the
@@ -53,6 +54,7 @@ the 2026-10-28 tree.
 | Performance | Not measured against Linux or FreeBSD | Within 15% of the better of Linux and FreeBSD on the benchmark set, same VM and hardware; no worse than 1.5x on any one | `make bench-compare` (PF1), dated reports |
 | Scale | 64 CPUs, no NUMA, no huge pages, no swap | 256 CPUs, two NUMA nodes, huge pages, swap | PF3's tests on QEMU and HW3's machines |
 | Linux programs | musl static/PIE/dynamic; glibc untested; about 20 common calls missing | glibc programs from a mainstream distribution's packages run; the Linux Test Project's chosen subset passes | LX1's test lists |
+| Connections | 64 handles per process (`HANDLE_TABLE_SIZE`); TCP connections in 256 buckets keyed by local port; per-CPU timer queues with a sorted-list insert | 2,000,000 persistent TCP connections in one guest, held by an Erlang messaging server | MS6's load test, in `make bench-compare` |
 | Server software | BusyBox, dropbear, tcc; A4-A6 (curl, OpenSSH, git, Python) in progress | Also nginx, PostgreSQL, Redis, a Go and a Rust toolchain, an OCI container runtime | Each port's own test suite |
 | Security | Verified boot, signed modules, user ASLR, privileges | Also KASLR, Secure Boot, measured boot, verified root, capability-based sandboxing, syscall filtering, multiple users | SE1-SE2's acceptance tests |
 | Observability | lockdep, self-tests, serial logs | Tracing with programmable probes, performance counters, a kernel debugger workflow | OB1-OB2 |
@@ -160,18 +162,25 @@ conversion:  SA1 ─► SA2 ─► SA3 ─► SA4 ─► SA6 (network) ─► SA
 platform:    PF1 ─► HW1 ─► HW2 (with SA9) ─► HW3 ─► PF2 ─► PF3 (after SA10) ─► VM1 ─► VM2 ─► UK1
 features:    SW0 (self-hosting) ─► SE1 ─► NT1 (after SA6) ─► LX1 (after SA8) ─► LX2 ─► NT2 ─► SW1
              ─► SE2 ─► CT1 ─► CT2 ─► ST1, ST2 (after SA7) ─► OB1 ─► OB2 ─► SW2
+messaging:   MS1 (after SA2, SA6) ─► MS2 ─► MS3 ─► MS4 ─► MS5 (after PF3) ─► MS6
 ```
+
+The MS track runs in the features stream's slot when that stream is
+between subsystems, or as a fourth stream if the owner adds one; it
+changes the network, the handle table and the timers, so it follows the
+same convert-then-extend rule.
 
 | Phase | Version | Theme | Milestones | Size |
 |---|---|---|---|---|
 | 1 | 2.0-alpha | The Nova foundation | SA1-SA5, SW0, PF1, HW1 | about 13x |
 | 2 | 2.0 | The I/O half in Nova, real machines | SA6-SA9, HW2, HW3, SE1, NT1 | about 19x |
-| 3 | 2.1 | The core in Nova, server parity | SA10, SA11, NT2, LX1, LX2, PF2, PF3, SW1 | about 19.5x |
-| 4 | 2.2 | No C left; containers, observability, storage | SA12, SA13, SE2, CT1, CT2, OB1, OB2, ST1, ST2, SW2 | about 19x |
+| 3 | 2.1 | The core in Nova, server parity, connections at scale | SA10, SA11, NT2, LX1, LX2, PF2, PF3, SW1, MS1-MS4 | about 24x |
+| 4 | 2.2 | No C left; containers, observability, storage; the messaging server | SA12, SA13, SE2, CT1, CT2, OB1, OB2, ST1, ST2, SW2, MS5, MS6 | about 22x |
 | 5 | 2.3 | Virtualization, and the hybrid kernel's other half | VM1, VM2, UK1 | about 6x |
 
-About 76x of work in all. Run serially at 1.x's pace (1.0x is about ten
-days) that is two years; in three streams, about nine to twelve months.
+About 83.5x of work in all. Run serially at 1.x's pace (1.0x is about ten
+days) that is about two and a quarter years; in three streams, about ten
+to thirteen months.
 
 ---
 
@@ -476,8 +485,8 @@ Size: about 1.0x (iperf3 and fio are ports).
 Work chosen from PF1's numbers, not before them (NET-19's own rule: only
 with measured benefit). The likely candidates, in the order PF1 is likely
 to show them: zero-copy I/O (`sendfile`, `splice`, user-mapped buffers;
-NET-19), multiqueue virtio-net and NVMe with interrupt moderation, TSO and
-LRO, page-cache read-ahead, and the scheduler's wake-up path. New code in
+NET-19), multiqueue NVMe with interrupt moderation (multiqueue
+virtio-net is MS4's), TSO and LRO, page-cache read-ahead, and the scheduler's wake-up path. New code in
 Nova; a hot path's Nova port held to the rule's 5%.
 
 - [ ] **Acceptance:** PF1's report shows CosmoOS within 15% of the better
@@ -490,7 +499,8 @@ Size: about 2.5x, depending on what PF1 shows.
 
 More than 64 CPUs (SMP-2: a multi-word `cpumask_t`, x2APIC, parallel AP
 bring-up, IRQ spreading for every multiqueue device); NUMA topology and
-node-aware allocation and placement (MEM-5); user huge pages (MEM-4);
+node-aware allocation and placement (MEM-5); user huge pages, asked for
+by the program (MEM-4; MS5 adds transparent promotion);
 swap to a file or partition (MEM-6, without compression or deduplication
 at first). The NUMA policy, the huge-page allocator's accounting and
 the swap slot allocator are new code, in Nova.
@@ -599,6 +609,165 @@ can be developed on the system it runs on.
   (`make nova-check` on the target).
 
 Size: about 2.0x.
+
+---
+
+## MS. Messaging at scale
+
+The workload this track is measured by: a chat server in the style
+WhatsApp ran on FreeBSD, an Erlang/BEAM program holding about two million
+persistent TCP connections per machine. Each connection is a phone that is
+mostly idle, waiting for a message. What it needs from the kernel is
+cheap idle connections, lookups and timers that cost the same at a
+million connections as at a thousand, event notification that scales with
+the active connections rather than the registered ones, the network path
+spread across CPUs, and large pages under a large heap.
+
+**Built here, in Nova; not imported.** FreeBSD's `netinet` is not taken
+into the tree. It depends on FreeBSD's mbufs, UMA allocator, epoch
+reclamation, callouts, taskqueues, `ifnet` and VNET, so porting it means
+porting a large slice of FreeBSD's kernel as C, against the Nova rule.
+What made FreeBSD fit that workload is a short list of mechanisms (kqueue,
+a 4-tuple connection table, per-CPU timer wheels, receive-side scaling,
+superpages, large descriptor limits), and each is a milestone below. The
+designs are BSD-licensed and documented; MS2-MS5's design notes name the
+FreeBSD (and Linux) mechanism each follows and where it differs.
+
+Today (measured on main at `4b1c55ec`):
+
+- a process has at most 64 handles: `HANDLE_TABLE_SIZE` in
+  `kernel/include/kernel/handle.h` sizes a fixed array;
+- TCP connections sit in `TCP_HASH_SIZE` (256) buckets keyed by the local
+  port alone (`kernel/include/kernel/net/tcp.h`), so every connection to a
+  server's one port is in one bucket;
+- the listen backlog is at most 16 (`TCP_MAX_BACKLOG`) and the window at
+  most 65,535 bytes (no window scaling, which NT1 adds);
+- each CPU's timer queue is a list kept sorted on insert
+  (`kernel/timer/timer.c`), so arming a timer walks the CPU's other
+  timers; every connection arms several (retransmission, delayed ACK,
+  keepalive);
+- virtio-net uses one queue pair; epoll exists, with callback wait
+  entries and a ready list ([I/O design](kernel/io/design.md)); kqueue
+  does not;
+- user memory is mapped in 4 KiB pages only.
+
+### MS1 Millions of handles
+
+A handle table that grows: a two-level table (or radix tree) in place of
+the fixed array, its memory charged to the process, with `RLIMIT_NOFILE`
+settable up to 16 million and the Linux personality's limit following it.
+Socket buffers are allocated when data arrives, not when the socket is
+made, and returned when they drain, so an idle connection costs its pcb,
+its socket and its handle. The table, its growth and its lookup are in
+Nova (SA2's allocation and object lifetimes; the socket-buffer part on
+SA6's converted stack).
+
+- [ ] **Acceptance:** one process holds 1,000,000 established TCP
+  connections over loopback (clients bound to 16 local addresses); a
+  self-test reports the kernel memory per idle connection, and the bar is
+  under 4 KiB; closing them returns the memory to within 1% of the
+  starting count.
+
+Size: about 1.0x.
+
+### MS2 A connection table that scales
+
+Established connections in a hash table keyed by the 4-tuple, resized as
+it fills, with lookups that take no lock (readers under SA3's
+quiescence, as FreeBSD's `in_pcblookup` reads under its network epoch);
+listeners in their own table, with `SO_REUSEPORT` groups so that each CPU
+can accept on its own listener (NT1 parses the option; MS2 distributes
+by it); the backlog and the SYN cache sized by the administrator
+(`somaxconn`). In Nova, on SA6's converted stack.
+
+- [ ] **Acceptance:** a self-test measures the cost of a lookup with
+  1,000 and with 1,000,000 connections in the table, and the second is
+  within twice the first; on a KVM host, the accept rate of a
+  `SO_REUSEPORT` server with 8 listeners on 8 CPUs is at least 6 times
+  that of one listener.
+
+Size: about 1.0x.
+
+### MS3 kqueue
+
+`kqueue` and `kevent` as native calls, with FreeBSD's semantics:
+changes and events in one call, the `EVFILT_READ`, `EVFILT_WRITE`,
+`EVFILT_TIMER`, `EVFILT_SIGNAL`, `EVFILT_PROC` and `EVFILT_USER`
+filters, and `EV_CLEAR`, `EV_ONESHOT` and `EV_DISPATCH`. They are built on
+the callback wait entries and ready lists epoll already uses, so that
+their cost follows the active events, not the registered ones; CosmoOS's
+libc exposes them with FreeBSD's `<sys/event.h>`. Linux programs keep
+epoll. In Nova.
+
+- [ ] **Acceptance:** libkqueue's test suite, built against the native
+  calls, passes on both architectures; a self-test registers 1,000,000
+  sockets, makes 1,000 ready, and the cost of one `kevent` collecting them
+  is within twice the cost with 1,000 registered.
+
+Size: about 1.0x.
+
+### MS4 The network path across CPUs
+
+Multiqueue virtio-net (`VIRTIO_NET_F_MQ`) with receive-side scaling
+(`VIRTIO_NET_F_RSS` where the device offers it, a Toeplitz hash in the
+driver where it does not), one queue pair and one interrupt per CPU; a
+connection's processing and its timers kept on the CPU its packets
+arrive at; and the per-CPU timer queues replaced by hierarchical timer
+wheels, as FreeBSD's callout wheel is per CPU, so that arming,
+re-arming and cancelling a timer is constant time. pcbs come from a
+per-CPU cache. In Nova. This takes the multiqueue virtio-net part of
+NET-19 from PF2.
+
+- [ ] **Acceptance:** on a KVM host with 8 vCPUs and 8 queue pairs, PF1's
+  TCP request/response rate is at least 6 times the 1-vCPU rate; lockdep's
+  contention counts show no lock shared between CPUs on the per-packet
+  receive path; a self-test arms 1,000,000 timers and the cost per arm is
+  within twice the cost at 1,000.
+
+Size: about 1.5x.
+
+### MS5 Transparent superpages
+
+Anonymous user memory promoted to 2 MiB pages without the program asking,
+by reservation as FreeBSD does it: a fault in an aligned 2 MiB range of a
+large mapping reserves the physical range, the range fills with 4 KiB
+pages, and when it is full the mapping is promoted to one 2 MiB entry;
+demotion on a partial `munmap`, `mprotect` or memory pressure. Both
+architectures. Builds on PF3's huge-page allocator; the reservation logic
+is in Nova.
+
+- [ ] **Acceptance:** a self-test touches a 1 GiB anonymous mapping and
+  finds it mapped by 2 MiB entries on both architectures, then splits one
+  by `mprotect` and checks the contents; BEAM's heap under MS6's load
+  shows (in `/proc/self/smaps`' `AnonHugePages`) most of its size in
+  2 MiB pages.
+
+Size: about 1.0x.
+
+### MS6 Erlang/OTP and the messaging server
+
+Erlang/OTP ported (`ports/otp`, built on the target, SW0's toolchain)
+with its kernel-poll backend on epoll under the Linux personality, its
+own test suite's chosen subset passing; and a messaging server: ejabberd
+(XMPP, Erlang), or, if ejabberd's dependencies cost more than they prove,
+a small checked-in Erlang server with the same shape (log in, hold the
+connection, deliver messages to online users, store them for offline
+users on cosmofs with batched `fsync` through the native asynchronous I/O
+path). A load generator runs on other guests with many source addresses.
+
+- [ ] **Acceptance:** on a KVM host, one CosmoOS guest with 16 vCPUs and
+  32 GiB holds 2,000,000 connections, each sent a message every 60 s
+  (about 33,000 a second), for one hour, with no connection dropped and
+  the 99th-percentile delivery latency under 50 ms; the same test runs in
+  `make bench-compare` against Linux and FreeBSD in the same guest, and
+  CosmoOS is within PF2's bar (15% of the better of the two) on
+  connections held, memory per connection and latency.
+
+Size: about 2.0x.
+
+Not in this track: the "C10M" figure (ten million connections) is a
+cluster's number, not a machine's; the track's bar is per machine, and
+spreading users over machines is the application's job.
 
 ---
 
@@ -807,8 +976,8 @@ Size: about 1.5x.
   (TEST-23). Phases 2 and 3 add long suites (PostgreSQL, LTP, Go). Each
   milestone adding a suite to CI says which jobs a PR runs
   ([which jobs a pull request runs](build/testing.md#which-jobs-a-pull-request-runs)).
-- **Scale of the work.** About 76x in all: two years serially at 1.x's
-  pace, nine to twelve months in three streams. The phases are ordered so
+- **Scale of the work.** About 83.5x in all: about two and a quarter
+  years serially at 1.x's pace, ten to thirteen months in three streams. The phases are ordered so
   that each leaves a system better at its job than before if work stops
   there, and so that the conversion reaches what attackers touch first
   (parsers in phase 1, the I/O subsystems in phase 2).
