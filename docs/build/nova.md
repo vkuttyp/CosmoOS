@@ -33,9 +33,27 @@ committed without its C, cannot merge.
 
 The current ports: `kernel/block/gpt.nova` (the GPT parser and writer),
 `kernel/process/cputime.nova` (CPU time and the CPU-time timers),
-`kernel/process/nice.nova` (the rules of nice values) and
-`kernel/scheduler/fair.nova` (the fair level's weights and virtual time).
+`kernel/process/nice.nova` (the rules of nice values),
+`kernel/scheduler/fair.nova` (the fair level's weights and virtual time)
+and `kernel/nova/kcore_test.nova` (the self-test `nova-kcore`, below).
 Read them before writing a new one.
+
+### Nova's kernel library
+
+Nova ships a library for code built against this kernel's C API
+(`lib/kernel` in Nova's repository; Nova ADR 0025, API in Nova's
+`docs/api` and the guide's kernel page): `KernelHeap`; `SpinLock<T>`,
+`IrqSpinLock<T>` and `Mutex<T>`, whose data is reached only through a
+guard, and spin locks in `static` items built at compile time with
+`SPINLOCK_INIT`; `PreemptGuard`, `IrqGuard` and `PerCpu<T>`; `KRef<T>`
+over `struct kobject`; `Quiesce` and `deferDrop`. A port uses it by
+setting the last field of its `PORTS` line (`novac --kernel cosmoos`).
+`IrqGuard`, `PreemptGuard` and `PerCpu` call primitives the kernel does
+not export, so they are for code built into the kernel, not modules.
+There is no static `Mutex` yet: a mutex's wait list points to itself,
+which a C constant initialiser cannot express without its own name. The
+self-test `nova-kcore` (`kernel/nova/kcore_test.nova`, named by
+`kcore_selftest.c`) exercises each type in every debug boot.
 
 ## Setting up
 

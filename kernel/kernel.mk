@@ -135,6 +135,8 @@ KERNEL_GENERIC_SRCS := \
 	kernel/block/gpt.c \
 	kernel/nova/nova_rt_core.c \
 	kernel/nova/nova_panic.c \
+	kernel/nova/kcore_test.c \
+	kernel/nova/kcore_selftest.c \
 	kernel/block/part.c \
 	kernel/block/ramblk.c \
 	kernel/block/blktest.c \
