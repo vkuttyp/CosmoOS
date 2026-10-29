@@ -141,11 +141,9 @@ void *nova_vec_grow(void *ptr, uint64_t len, uint64_t *cap, uint64_t extra, uint
     if (next < 4u) next = 4u;
     if (next < need) next = need;
     if (size == 0u || next > (uint64_t)SIZE_MAX / size) return NULL;
-    uint8_t *fresh = (uint8_t *)nova_alloc((size_t)(next * size), allocator);
+    /* A first buffer is allocated; a later one is reallocated, which keeps the old block on failure. */
+    void *fresh = *cap == 0u ? nova_alloc((size_t)(next * size), allocator) : nova_realloc(ptr, (size_t)(next * size), allocator);
     if (fresh == NULL) return NULL;
-    /* len <= *cap, whose bytes were allocated, so len * size fits; the old and new blocks are distinct. */
-    if (len != 0u) nova_mem_copy(fresh, ptr, (size_t)(len * size));
-    if (*cap != 0u) nova_free(ptr, allocator);
     *cap = next;
     return fresh;
 }
@@ -234,27 +232,50 @@ void nova_rt_start(void) {
     alloc_report = nova_platform_config("NOVA_ALLOC_REPORT") != 0u;
 }
 
-void *nova_alloc(size_t size, uint32_t allocator) {
-    alloc_attempts++;
+/*
+ * The counters change from every thread of a threaded program (type-system.md §38), so atomically. The fault-injection
+ * flags are set before threads exist (FailingAllocator is single-threaded test code).
+ */
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#define NV_COUNT(counter, delta) ((uint64_t)_InterlockedExchangeAdd64((volatile __int64 *)&(counter), (__int64)(delta)) + (uint64_t)(delta))
+#else
+#define NV_COUNT(counter, delta) __atomic_add_fetch(&(counter), (uint64_t)(delta), __ATOMIC_RELAXED)
+#endif
+
+/* Counts an attempt; true if it is to fail (FailingAllocator, or NOVA_FAIL_ALLOC_AT). */
+static bool alloc_refused(uint32_t allocator) {
+    uint64_t attempt = NV_COUNT(alloc_attempts, 1u);
     if (allocator == NV_ALLOC_FAILING && failing_armed) {
         if (failing_left == 0u) {
-            return NULL;
+            return true;
         }
         failing_left--;
     }
-    if (alloc_fail_at != 0u && alloc_attempts == alloc_fail_at) {
+    return alloc_fail_at != 0u && attempt == alloc_fail_at;
+}
+
+void *nova_alloc(size_t size, uint32_t allocator) {
+    if (alloc_refused(allocator)) {
         return NULL;
     }
     void *p = nova_platform_alloc(size == 0u ? 1u : size);
     if (p != NULL) {
-        alloc_live++;
+        (void)NV_COUNT(alloc_live, 1u);
     }
     return p;
 }
 
+void *nova_realloc(void *p, size_t size, uint32_t allocator) {
+    if (alloc_refused(allocator)) {
+        return NULL;
+    }
+    return nova_platform_realloc(p, size == 0u ? 1u : size);
+}
+
 void nova_free(void *p, uint32_t allocator) {
     (void)allocator; /* every M3 allocator frees to the platform heap */
-    alloc_live--;
+    (void)NV_COUNT(alloc_live, UINT64_MAX); /* minus one */
     nova_platform_free(p);
 }
 
