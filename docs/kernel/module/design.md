@@ -232,8 +232,9 @@ fails without side effects on the module list:
    prints a new line, and the latest one covering a PC wins.
 
 `module_unload(name)`: `-ENOENT` if absent, `-EBUSY` if `refs != 0`,
-otherwise state `GOING`, `shutdown()`, unlink, decrement dependency
-refs, free regions. `module_load_boot()` loads every archive entry whose
+otherwise state `GOING`, unlink, `shutdown()`, unpublish from
+`g_live[]`, a grace period and the wait for live objects, decrement
+dependency refs, free regions. `module_load_boot()` loads every archive entry whose
 name starts with `modules/` in archive order (the packer writes them in
 the order the Makefile lists them, which is dependency order); a failure
 is logged and counted but does not stop the boot.
@@ -280,11 +281,15 @@ ask for it by name (**M24**). The zombie is the honest outcome when a
 `blk_find` holder or a mounted filesystem still names a device the
 driver has removed.
 
-Live modules are also published in a fixed array `g_live[]` for the
-lock-free `module_owner_of` (a release store per slot; readers walk it
-inside `quiesce_read_lock`). Unload clears the slot before `shutdown()`
-and the grace period that follows orders every reader's increment before
-the unloader's check (`docs/kernel/quiesce/design.md`).
+Modules whose code can run are also published in a fixed array
+`g_live[]` for the lock-free `module_owner_of` (a release store per slot;
+readers walk it inside `quiesce_read_lock`): from just before `init()`
+to just after `shutdown()`, so an object either makes counts against the
+module (MOD-1). Unload clears the slot after `shutdown()`, and the grace
+period that follows orders every reader's increment before the
+unloader's check (`docs/kernel/quiesce/design.md`). A failed `init()`
+does the same before the regions are freed, and keeps the module as a
+zombie if an object it made is still alive.
 
 ### Load and unload in cycles (debug builds)
 

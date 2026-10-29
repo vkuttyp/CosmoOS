@@ -281,9 +281,11 @@ another CPU without a lock is freed only from a kobject release or a
 module_unload(name):
   1. mutex g_lock; find LIVE module; refs (dependants) == 0 else -EBUSY
   2. state = GOING                       stop new users: module_find ignores GOING
-  3. info->shutdown()                    the module unregisters drivers, devices, netifs, timers
+  3. info->shutdown()                    the module unregisters drivers, devices, netifs, timers;
+                                         still in g_live[], so objects it makes are counted (MOD-1)
+  3b. clear the module's g_live[] slot   module_owner_of no longer finds it
   4. synchronize_quiesce()               no CPU is still executing module text from a handler
-                                         or a lock-free reader entered before step 2
+                                         or a lock-free reader entered before step 3b
   5. wait until m->live_objects == 0     kobjects whose type lives in the module (counted by
                                          kobject_init/put through module_owner_of), bounded:
                                          5 s, then -EBUSY and the module stays GOING (zombie,
@@ -291,10 +293,11 @@ module_unload(name):
   6. unlink from the list; drop dependency refs; free text/rodata/data
 ```
 
-`module_owner_of(addr)` walks the module list under `quiesce_read_lock`
-(the list is published with release stores and unlinked before a grace
-period, step 4 to 6), so `kobject_init` can attribute a type to its
-module from any non-sleeping context.
+`module_owner_of(addr)` walks `g_live[]` under `quiesce_read_lock` (a
+slot is published with a release store before `init()` runs and cleared
+before the grace period, steps 3b to 4), so `kobject_init` can attribute
+a type to its module from any non-sleeping context. A failed `init()`
+runs steps 3b to 5 before the regions are freed.
 
 Two consequences of the zombie state: the module's dependency pins
 (`deps[i]->refs`) drop only when the memory is freed, never at the

@@ -47,6 +47,8 @@ static unsigned g_count;
 static struct module *g_live[MODULE_MAX_LIVE];
 static LIST_HEAD(g_zombies);          /* GOING modules whose objects outlived the unload */
 static unsigned reap_zombies_locked(void);   /* defined below; called from load and unload */
+static void unpublish(struct module *m);     /* defined below; a failed init and unload */
+static uint32_t wait_objects_locked(struct module *m);
 #if CONFIG_DEBUG
 /* The effective slot bound. Only the publish SEARCH honours it; the
  * walks that scan for a module still cover the whole array, so nothing
@@ -487,22 +489,39 @@ static int load_locked(const void *file, size_t size, const char *origin, struct
         goto fail;
     }
 
-    /* 8. Initialise. */
+    /* 8. Publish for module_owner_of, then initialise. Before init, not
+     * after: an object init makes must count against the module, or an
+     * unload would not wait for it (MOD-1). The publish is a release
+     * store: every field a reader of g_live needs (the region bounds) is
+     * written before it. The slot was reserved at 7b and this is the
+     * only path that fills it: g_lock is held throughout, so nothing can
+     * have taken it. module_find and symbol lookups still see only LIVE
+     * modules (g_modules). */
+    KASSERT(g_live[slot] == NULL);
+    __atomic_store_n(&g_live[slot], m, __ATOMIC_RELEASE);
     rc = m->info->init();
     if (rc) {
         kerror("module: %s: init failed (%d)", m->name, rc);
+        /* As an unload from step 3: what init made and handed out must
+         * be gone before the text is, or the module stays a zombie.
+         * The dependencies are pinned for the zombie as for a live
+         * module, since its release code may call into them. */
+        unpublish(m);
+        if (wait_objects_locked(m) != 0) {
+            m->state = MODULE_GOING;
+            for (unsigned i = 0; i < m->nr_deps; i++)
+                m->deps[i]->refs++;
+            list_push_back(&g_zombies, &m->link);
+            kfree(l);
+            return rc;
+        }
         goto fail;
     }
 
-    /* 9. Register. The publish is a release store: every field a reader
-     * of g_live needs (the region bounds) is written before it. */
+    /* 9. Register. */
     m->state = MODULE_LIVE;
     list_push_back(&g_modules, &m->link);
     g_count++;
-    /* The slot was reserved at 7b and this is the only path that fills
-     * it: g_lock is held throughout, so nothing can have taken it. */
-    KASSERT(g_live[slot] == NULL);
-    __atomic_store_n(&g_live[slot], m, __ATOMIC_RELEASE);
     for (unsigned i = 0; i < m->nr_deps; i++)
         m->deps[i]->refs++;
     kinfo("module: loaded %s %s (text %zu KiB, rodata %zu KiB, data %zu KiB, %zu exports%s)", m->name,
@@ -547,6 +566,21 @@ static void unpublish(struct module *m)
         if (g_live[i] == m)
             __atomic_store_n(&g_live[i], (struct module *)NULL, __ATOMIC_RELEASE);
     }
+}
+
+/* Steps 3-4 of an unload, for an unpublished module (and a failed init):
+ * one grace period, so a CPU that looked the module up (or was inside a
+ * handler unlinked without waiting) is out of its read-side section and
+ * every live-object increment made under a section that saw the module
+ * is visible; then wait, up to the unload timeout, for the objects whose
+ * release code lives here. Returns how many are still alive. */
+static uint32_t wait_objects_locked(struct module *m)
+{
+    synchronize_quiesce();
+    uint64_t deadline = clock_deadline_ns((uint64_t)g_unload_timeout_ms * 1000000ULL);
+    while (__atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE) != 0 && !clock_deadline_passed(deadline))
+        thread_sleep_ns(1000000);
+    return __atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE);
 }
 
 /* A module's code may reference its dependencies until it is unmapped,
@@ -674,29 +708,22 @@ int module_unload(const char *name)
         return -EBUSY;
     }
 
-    /* 1. GOING: no new lookups find it (module_find, symbol lookup,
-     *    module_owner_of). */
+    /* 1. GOING: no new lookups find it (module_find, symbol lookup). */
     m->state = MODULE_GOING;
-    unpublish(m);
     list_remove(&m->link);
     g_count--;
 
     /* 2. The module unregisters everything it registered. Handlers,
      *    timers and callbacks it owned are unlinked by the time this
-     *    returns, each through its own synchronous unregister. */
+     *    returns, each through its own synchronous unregister. It is
+     *    still published for module_owner_of, so an object shutdown
+     *    makes counts against it (MOD-1). */
     m->info->shutdown();
 
-    /* 3. One grace period: a CPU that looked the module up (or was
-     *    inside a handler the shutdown unlinked without waiting) is out
-     *    of its read-side section, and every live-object increment made
-     *    under a section that saw the module is visible. */
-    synchronize_quiesce();
-
-    /* 4. Objects whose release code lives here must all be gone. */
-    uint64_t deadline = clock_deadline_ns((uint64_t)g_unload_timeout_ms * 1000000ULL);
-    while (__atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE) != 0 && !clock_deadline_passed(deadline))
-        thread_sleep_ns(1000000);
-    uint32_t live = __atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE);
+    /* 3-4. Unpublished, then one grace period, then objects whose
+     *    release code lives here must all be gone (wait_objects_locked). */
+    unpublish(m);
+    uint32_t live = wait_objects_locked(m);
     if (live != 0) {
         /* Freeing would leave a release pointer into unmapped text. The
          * memory stays; the name is free for a new load; a later unload

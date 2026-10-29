@@ -143,9 +143,13 @@ the zombie's text, the second unload frees it).
 **M23. `module_owner_of` never returns a module that can be freed before
 the caller's increment is seen.** The lookup and the increment happen in
 one `quiesce_read_lock` section; unload unpublishes the slot, then waits
-a grace period, then reads the count. Check: `module-unload-busy`
-(owner lookup of the fixture's export raises the count; a kernel address
-gives NULL); review of the ordering.
+a grace period, then reads the count. The slot is published before
+`init()` and cleared after `shutdown()`, so objects those make are
+counted too (MOD-1), and a failed `init()` waits as an unload does.
+Check: `module-unload-busy` (owner lookup of the fixture's export raises
+the count; a kernel address gives NULL); `module-cycle` (an object made
+by `init()` and one made by `shutdown()` each keep the module as a
+zombie); review of the ordering.
 
 **M21. `module_load_boot` loads `modules/` entries in archive order and
 only those.** Order is the build's dependency order
