@@ -1,5 +1,6 @@
-// The boot self-test of Nova's kernel library (lib/kernel; Nova ADR 0025), as code built into the kernel: statics
-// built at compile time (Nova type-system.md §39), each lock, a per-CPU value, kernel objects and grace periods.
+// The boot self-test of Nova's kernel library (lib/kernel; Nova ADR 0025, ADR 0027), as code built into the kernel:
+// statics built at compile time (Nova type-system.md §39), each lock (a static mutex too), a per-CPU value, kernel
+// objects, an object cache and grace periods.
 // kcore_selftest.c runs it as the self-test nova-kcore. It returns 0, or the number of the first check that failed.
 
 /// A value that counts its drops, to see that a kernel object's release and a deferred free drop what they hold.
@@ -26,6 +27,9 @@ static TABLE: SpinLock<Table> = SpinLock<Table>.constant(
 static PENDING: IrqSpinLock<u64> = IrqSpinLock<u64>.constant("nova.kcore.pending\0".ptr as *CChar, 0);
 static DROPS: SpinLock<u64> = SpinLock<u64>.constant("nova.kcore.drops\0".ptr as *CChar, 0);
 static TICKS: PerCpu<u64> = PerCpu<u64>.constant(0);
+// A mutex built at compile time by MUTEX_INIT_AT, given its own address (Nova's `here`, ADR 0027).
+static SETTINGS: Mutex<u64> = Mutex<u64>.constant("nova.kcore.settings\0".ptr as *CChar, 40);
+static TRACKED: ObjectCache<Tracked> = ObjectCache<Tracked>.constant();
 
 fn drops() -> u64 {
     var guard = DROPS.lock();
@@ -139,6 +143,37 @@ fn selftest() -> u32 {
     }
     if (drops() != before + 1) {
         return 8;
+    }
+
+    // 10: the static mutex, taken twice.
+    {
+        var guard = SETTINGS.lock();
+        let value = guard.data();
+        value += 2;
+    }
+    {
+        var guard = SETTINGS.lock();
+        if (guard.data() < 42) {
+            return 10;
+        }
+    }
+
+    // 11-12: an object cache: its box holds the value, and dropping the box drops it once.
+    match (TRACKED.setUp("nova.kcore.tracked\0".ptr as *CChar)) {
+        Ok() => {}
+        Err(e) => { return 11; }
+    }
+    let beforeCache = drops();
+    match (TRACKED.alloc(Tracked { id: 11 })) {
+        Ok(boxed) => {
+            if (boxed.get().id != 11) {
+                return 11;
+            }
+        }
+        Err(e) => { return 11; }
+    }
+    if (drops() != beforeCache + 1) {
+        return 12;
     }
 
     // 9: a grace period, and a free deferred past one.

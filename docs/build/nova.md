@@ -50,10 +50,15 @@ over `struct kobject`; `Quiesce` and `deferDrop`. A port uses it by
 setting the last field of its `PORTS` line (`novac --kernel cosmoos`).
 `IrqGuard`, `PreemptGuard` and `PerCpu` call primitives the kernel does
 not export, so they are for code built into the kernel, not modules.
-There is no static `Mutex` yet: a mutex's wait list points to itself,
-which a C constant initialiser cannot express without its own name. The
-self-test `nova-kcore` (`kernel/nova/kcore_test.nova`, named by
-`kcore_selftest.c`) exercises each type in every debug boot.
+Since novac 0.3.0 (Nova ADR 0027) a `Mutex` can be a static too: its
+`@constant` constructor expands `MUTEX_INIT_AT(p, name)` (`mutex.h`),
+given the mutex's own address, which its self-pointing lists need.
+`ObjectCache<T>` is a typed slab cache: a static, set up once at
+start-up (`setUp`), whose `alloc(value)` returns a `CacheBox<T>` that
+drops the value and frees the object when dropped (in v1, `T` holds no C
+state). The self-test `nova-kcore` (`kernel/nova/kcore_test.nova`, named
+by `kcore_selftest.c`) exercises each type in every debug boot, and checks
+that `MUTEX_INIT_AT` leaves a mutex as `mutex_init` does.
 
 ## Setting up
 
@@ -61,7 +66,7 @@ Install the pinned compiler, the version in `scripts/nova-gen.py`
 (`python3 scripts/nova-gen.py --pinned`); `make nova` refuses any other:
 
 ```sh
-curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.2.0 sh   # into ~/.nova/bin
+curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.3.1 sh   # into ~/.nova/bin
 export PATH="$HOME/.nova/bin:$PATH"     # or: export NOVAC=~/.nova/bin/novac
 ```
 
