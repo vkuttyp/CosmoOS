@@ -28,11 +28,12 @@
 #include <kernel/compiler.h>
 #include <kernel/percpu.h>
 
-struct quiesce_head {
-    struct quiesce_head *next;
-    void (*fn)(struct quiesce_head *h);
-    bool pending;   /* submitted and not yet run; a second call_quiesce panics */
-};
+/* struct quiesce_head { next; callback (run after the grace period; was
+ * `fn`, a Nova keyword); pending (submitted and not yet run: a second
+ * call_quiesce panics); } and struct quiesce_stats (each counter described
+ * there) are defined in Nova (kernel/core/quiesce.nova) and generated into
+ * quiesce_types.h (roadmap 2.0 SA3; Nova ADR 0029, 0030). */
+#include <kernel/quiesce_types.h>
 
 /* After sched_init: the callback worker thread. */
 void quiesce_init(void);
@@ -83,38 +84,6 @@ void synchronize_quiesce(void);
  * callback). `h` must be zero-initialised or previously run. */
 void call_quiesce(struct quiesce_head *h, void (*fn)(struct quiesce_head *h));
 
-struct quiesce_stats {
-    uint64_t epoch;
-    uint64_t synchronizes;       /* synchronize_quiesce calls completed */
-    uint64_t callbacks;          /* call_quiesce callbacks run */
-    uint64_t max_wait_ns;        /* longest grace period observed */
-    /* Straggler kick IPIs SENT -- one per pending CPU per round, not one
-     * per round: a round can kick several CPUs, so this is the only one
-     * of the two that can be a denominator. The per-waiter
-     * `quiesce_test_sync_kicks` counts rounds, which is what the
-     * eight-round bound is about. */
-    uint64_t straggler_ipis;
-    /* Kicks that WORKED, machine-wide: a publish that happened in a
-     * kick's own trap return. `straggler_ipis` counts kicks sent, so
-     * before this counter existed no number in the tree would have
-     * changed if the kick were replaced by a no-op
-     * (docs/audit/next-subsystem-straggler-kick.md). */
-    uint64_t kick_publishes;
-    /* How a waiter's block ENDED, not that it happened: on more than one
-     * CPU the waiter always blocks, because the epoch it waits for was
-     * bumped a moment earlier and nobody has published it yet. With the
-     * wake, an idle machine's grace period ends by being woken and this
-     * does not move; without it, every block ends at its deadline
-     * (invariant Q-W). */
-    uint64_t gp_timeouts;        /* grace-period waits that reached their deadline */
-    /* Wakes actually sent to a queued grace-period waiter. Zero unless
-     * the wake path runs at all, which is what makes it the observable:
-     * how *long* a grace period takes depends on where the other CPUs'
-     * ticks fall, but whether the mechanism fires does not (Q18). */
-    uint64_t gp_wakes;
-    uint64_t irq_syncs;          /* synchronize_irq calls */
-    uint64_t timer_sync_waits;   /* timer_cancel_sync calls that waited for a running callback */
-};
 void quiesce_get_stats(struct quiesce_stats *out);
 #if CONFIG_DEBUG
 /* A grace period that hands back the straggler kicks *it* sent.

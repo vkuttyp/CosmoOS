@@ -69,6 +69,8 @@ PORTS = [
      "kernel/include/kernel/semaphore_types.h", False),
     ("kernel/scheduler/mutex.nova", "kernel/scheduler/mutex.c", "Sleeping mutexes with priority inheritance (mutex.h)",
      "kernel/include/kernel/mutex_types.h", False),
+    ("kernel/core/quiesce.nova", "kernel/core/quiesce.c", "Quiescence: epoch-based reclamation (quiesce.h)",
+     "kernel/include/kernel/quiesce_types.h", False),
     ("kernel/nova/kcore_test.nova", "kernel/nova/kcore_test.c",
      "The boot self-test of Nova's kernel library (selftest nova-kcore)", None, True),
 ]

@@ -14,7 +14,7 @@ one rule, and converts the objects the audit named.
 ## Where it sits
 
 ```text
- kernel/core/quiesce.c          epoch-based reclamation: read-side sections, synchronize_quiesce,
+ kernel/core/quiesce.nova       epoch-based reclamation: read-side sections, synchronize_quiesce,
    kernel/quiesce.h             call_quiesce (deferred free), the quiescent points
         ▲            ▲
         │            └── quiescent points: schedule() (kernel/scheduler/sched.c), the idle loop,
@@ -29,6 +29,15 @@ one rule, and converts the objects the audit named.
                                   accept attaches under the lock; UDP wakes under a reference
    drivers/virtio                 remove paths put references instead of freeing
 ```
+
+`quiesce.nova` is Nova (roadmap 2.0 SA3): `make nova` generates
+`quiesce.c` and `kernel/include/kernel/quiesce_types.h` (`struct
+quiesce_head`, `struct quiesce_stats`), which `quiesce.h` includes.
+`quiesce_floor.c` keeps the C that Nova does not express: the epoch state
+and the two wait queues (statics of C types, with an accessor each), the
+formatted panics and messages, what exists only in a debug build (the
+read-section depth, the ten-second stall panic, the test hooks) and the
+module exports.
 
 The primitive is generic (`kernel/quiesce.h` has no architecture code);
 the architectures contribute exactly one call each, `quiesce_note_quiescent()`
