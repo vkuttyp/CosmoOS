@@ -10,7 +10,7 @@ QEMU TCG on an Apple M-series host, 2026-09-05).
 |---|---|---|
 | Host fuzz | `fuzz_modelf`, `fuzz_elf`, `fuzz_pkg`, `fuzz_linux`, `fuzz_virtq`, `fuzz_cosmofs`, `fuzz_lz4`, `fuzz_usb_desc`, `fuzz_fbvalid`, `fuzz_net_frame`, `fuzz_tcp_segments`, `fuzz_dhcp_dns`, `fuzz_net_config`: seeds (and a corpus) plus `FUZZ_RUNS` mutations each, ASan + UBSan | `make fuzz` (CI: `FUZZ_RUNS=50000` on the x86-64 job) |
 | Host unit | `test_modelf` `unaligned-tables` (the fuzz finding's regression) | `make host-test` |
-| Target, debug | `fault-kmalloc`, `fault-blk`, `cosmofs-replay`, `syscall-fuzz`; every test's duration and the timing summary | `make test`, `QEMU_SMP=1 make test`, `ARCH=aarch64 make test` |
+| Target, debug | `fault-kmalloc`, `fault-blk`, `object-fault-sweep`, `cosmofs-replay`, `syscall-fuzz`; every test's duration and the timing summary | `make test`, `QEMU_SMP=1 make test`, `ARCH=aarch64 make test` |
 | Target, release | the four tests report "compiled out" and pass; no fault-injection hook, no `debug.faultinject` | `make BUILD=release test` |
 | Boot harness | `boot-test: N self-tests, T ms total; slowest: …`; a test over its budget fails the run: 8000 ms, or its entry in the kernel's `SELFTEST: budgets` line if it is a suite behind one line (`process-user`, `cosmofs-replay`); a run with tests and no budgets line fails; a `[WATCHDOG]` dump fails | `make test`; the parse: `tests/boot/test_selftest_budgets.py` (`make host-test`) |
 

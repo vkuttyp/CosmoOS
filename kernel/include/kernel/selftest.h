@@ -131,6 +131,7 @@ bool selftest_mountns(const char **reason);
 bool selftest_utsns(const char **reason);
 bool selftest_fault_kmalloc(const char **reason);
 bool selftest_fault_blk(const char **reason);
+bool selftest_object_fault_sweep(const char **reason);   /* kernel/core/faulttest.c: every allocation of object creation failed in turn, census unchanged (SA2) */
 bool selftest_blk_gpt(const char **reason);     /* kernel/block/parttest.c: partitions from a GPT, bounds, damaged tables */
 bool selftest_blk_queue(const char **reason);   /* kernel/block/blktest.c: the pending queue and bio flags */
 bool selftest_blk_segments(const char **reason); /* multi-segment bios (milestone 9) */
