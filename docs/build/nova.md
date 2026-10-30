@@ -66,7 +66,7 @@ Install the pinned compiler, the version in `scripts/nova-gen.py`
 (`python3 scripts/nova-gen.py --pinned`); `make nova` refuses any other:
 
 ```sh
-curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.5.0 sh   # into ~/.nova/bin
+curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.6.0 sh   # into ~/.nova/bin
 export PATH="$HOME/.nova/bin:$PATH"     # or: export NOVAC=~/.nova/bin/novac
 ```
 
@@ -138,10 +138,15 @@ needs macros or documentation.
 exports, and novac writes the header. Give the port's `PORTS` line a
 fourth element, the header's path (`"kernel/include/kernel/NAME.h"`).
 `make nova` then writes novac's interface there: the `@repr(C)` structs
-and a prototype per export, with a banner and an include guard from the
-path. Choose it for a self-contained component whose interface is just
-its functions. It cannot carry macros or comments, so C callers learn the
-API from the `.nova` file's doc comments.
+and a prototype per export, with a banner and an include guard from its
+name under `kernel/include` (`kernel/NAME.h`, passed as novac's
+`--exports-header`). The generated C includes the header by that name
+rather than defining the structs again (Nova ADR 0030), so a kernel
+header may include it and the port may include that kernel header: the
+handle table's `handle_types.h`, which `handle.h` includes, is one. Choose
+it for a component whose types Nova owns. The header cannot carry macros
+or comments, so a C header that includes it carries them, or C callers
+learn the API from the `.nova` file's doc comments.
 
 Either way only these types cross between C and Nova: integers, `bool`,
 raw pointers to them or to C-compatible structs, `@repr(C)` structs and

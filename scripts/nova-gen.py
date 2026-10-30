@@ -45,7 +45,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-NOVAC_VERSION = "0.5.0"
+NOVAC_VERSION = "0.6.0"
 
 # Each port: its Nova source, the C it generates, what that C is, the header novac generates for it (None
 # when the port's header is hand-written C, imported by the source), and whether it uses Nova's kernel library
@@ -93,15 +93,16 @@ def generated(exe: str, work: Path) -> dict[str, str]:
     files: dict[str, str] = {}
     for i, (source, target, title, header, kernel) in enumerate(PORTS):
         out = work / str(i)
+        # The exports header is included by its name under kernel/include (kernel/handle_types.h): the generated C
+        # includes it by that name rather than defining its structs again, and its guard comes from it (Nova ADR 0030).
+        include = None if header is None else str(Path(header).relative_to("kernel/include"))
         subprocess.run([exe, "build", "--profile", "freestanding", "--no-float", *(["--kernel", "cosmoos"] if kernel else []),
-                        "--emit", "c", "-o", out, source], cwd=ROOT, check=True)
+                        *(["--exports-header", include] if include else []), "--emit", "c", "-o", out, source],
+                       cwd=ROOT, check=True)
         main = (out / "main.c").read_text()
         files[target] = BANNER.format(name=Path(target).name, title=title, source=source) + main
-        if header is not None:
-            # novac names every exports header's guard NOVA_EXPORTS_H; two included in one file would hide the
-            # second, so each gets a guard from its own path.
-            guard = "".join(c if c.isalnum() else "_" for c in header.upper())
-            exports = (out / "nova_exports.h").read_text().replace("NOVA_EXPORTS_H", guard)
+        if include is not None:
+            exports = (out / include).read_text()
             files[header] = BANNER.format(name=Path(header).name, title=title + ": its C interface",
                                           source=source) + exports
         for made, path in RUNTIME:

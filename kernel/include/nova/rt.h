@@ -509,6 +509,16 @@ static inline void nv_check_index(uint64_t index, uint64_t length, const nv_loc 
 
 /* ---- CPU and target queries (type-system.md §29.3) ----------------------------------------- */
 
+/* callerAddress() (ADR 0030): the address an export's wrapper returns to, taken in the wrapper. A macro, since a
+ * function would name its own caller instead. */
+#if defined(__GNUC__) || defined(__clang__)
+#define nv_return_address() ((uint64_t)(uintptr_t)__builtin_return_address(0))
+#elif defined(_MSC_VER)
+#define nv_return_address() ((uint64_t)(uintptr_t)_ReturnAddress())
+#else
+#define nv_return_address() ((uint64_t)0)
+#endif
+
 /* A hint inside a busy-wait loop: no effect on the program's meaning. */
 static inline void nv_spin_hint(void) {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))

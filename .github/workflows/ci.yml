@@ -125,7 +125,7 @@ jobs:
 
       - name: Install the pinned novac
         env:
-          NOVAC_SHA256: 173bf7393e11d12de80bb53a48449388b6f5de8197f695005c4b156a7f04fc7b   # novac-linux-x64.tar.gz of the pinned release
+          NOVAC_SHA256: 977472da73d96eea4a43230aa083820da6c85872690960960cf8eaf9882c193c   # novac-linux-x64.tar.gz of the pinned release
         run: |
           v=$(python3 scripts/nova-gen.py --pinned)
           curl -fsSL -o novac.tar.gz "https://github.com/vkuttyp/Nova/releases/download/v$v/novac-linux-x64.tar.gz"
