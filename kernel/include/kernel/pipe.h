@@ -6,7 +6,7 @@
  * anonymous pipe is one client: two kobject ends, the read end's type
  * has `read`, the write end's has `write`, both have `stat`, and each
  * end is one reader or one writer for as long as it lives. A named
- * pipe (kernel/ipc/fifo.c) is the other client: the same ring behind a
+ * pipe (kernel/ipc/fifo.nova) is the other client: the same ring behind a
  * filesystem node, its counts the opens of each side.
  */
 

@@ -107,7 +107,15 @@ Waking after the decrement lets a blocked reader see `writers == 0`
 
 `type = COSMO_DT_FIFO`, `size = used`, mode 0600, `nlink` 1.
 
-## Named pipes (kernel/ipc/fifo.c)
+## Named pipes (kernel/ipc/fifo.nova)
+
+`fifo.nova` is Nova (roadmap 2.0 SA3): `make nova` generates `fifo.c` and
+`kernel/include/kernel/fifo_types.h` (`struct fifo`, `struct fifo_open`),
+which only `fifo.c` includes, so a fifo stays opaque to the rest of the
+kernel. The open's wait goes through the wait floor's
+`wait_floor_until_killable`; `fifo_floor.c` keeps the panic. An open's
+non-blocking bit is a `u32`, accessed atomically, and the generations
+are written atomically under the fifo's lock.
 
 A named pipe is the same ring behind a filesystem node: a `VNODE_FIFO`
 made by `vfs_mknod` (the `mknod` vnode operation the unix-sockets unit

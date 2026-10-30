@@ -73,6 +73,8 @@ PORTS = [
      "kernel/include/kernel/quiesce_types.h", False),
     ("kernel/ipc/pipe.nova", "kernel/ipc/pipe.c", "The pipe's ring, and anonymous pipes over it (pipe.h)",
      "kernel/include/kernel/pipe_types.h", False),
+    ("kernel/ipc/fifo.nova", "kernel/ipc/fifo.c", "Named pipes: the pipe's ring behind a filesystem node (fifo.h)",
+     "kernel/include/kernel/fifo_types.h", False),
     ("kernel/nova/kcore_test.nova", "kernel/nova/kcore_test.c",
      "The boot self-test of Nova's kernel library (selftest nova-kcore)", None, True),
 ]

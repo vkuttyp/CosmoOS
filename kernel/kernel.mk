@@ -83,6 +83,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/ipc/pipe_floor.c \
 	kernel/ipc/pipetest.c \
 	kernel/ipc/fifo.c \
+	kernel/ipc/fifo_floor.c \
 	kernel/ipc/fifotest.c \
 	kernel/ipc/unix.c \
 	kernel/ipc/unixtest.c \

@@ -301,7 +301,8 @@ quiescence (`kernel/core/quiesce.nova`, over `quiesce_floor.c`), the
 first port drafted by Nova's `c2nova port` and finished by hand; its
 self-tests pass on both architectures (2026-10-30). Then the pipe's ring
 and anonymous pipes (`kernel/ipc/pipe.nova`, over `pipe_floor.c` and a
-killable wait in `wait_floor.c`; 2026-10-31).
+killable wait in `wait_floor.c`; 2026-10-31), and named pipes
+(`kernel/ipc/fifo.nova`, over `fifo_floor.c`; 2026-10-31).
 
 Size: about 1.5x.
 
