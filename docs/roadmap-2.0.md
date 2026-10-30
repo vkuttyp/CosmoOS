@@ -284,6 +284,15 @@ as the first users.
   Nova versions and the C deleted; lockdep's graph self-tests pass; a
   negative compile test refuses a sleep under a spin lock's guard.
 
+Scope (2026-10-30): CosmoOS has no read-write lock, so none is converted
+(none is added either). The types become Nova's, as SA2's did (Nova ADR
+0029), with their member names kept, so the static initialisers and the
+callers stay. Progress: a host test first, `tests/host/test_sync.c`:
+wait queues, completions, semaphores and the mutex on a deterministic
+one-CPU scheduler, 300 seeds per workload, with a recorded trace digest
+the Nova versions must reproduce. It found a spurious priority-donation
+cycle warning after a mutex handoff, fixed in `mutex.c`.
+
 Size: about 1.5x.
 
 ### SA4 Driver modules in Nova

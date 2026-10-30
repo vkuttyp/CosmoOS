@@ -218,6 +218,38 @@ join; the queue is empty.
    stale node; `waitqueue_wake_one` handed `sched_wake` a garbage thread
    pointer, which faulted in `spin_lock_irqsave` on `g_rqs[t->cpu]`. The
    symbolised backtrace pointed straight at `wake → sched_wake`.
+3. **A handoff heir still "blocked on" the mutex it owns (2026-10-30).**
+   `mutex_unlock` handing the mutex to an overtaken waiter (S33) made it
+   the owner before it ran to clear its own `pi_blocked_on`. A donation to
+   the heir in that window walked heir → the mutex → its owner, the heir,
+   and warned of a donation-chain cycle that was not there (416 times in
+   `test_sync`'s contention runs). The unlock now clears the heir's
+   `pi_blocked_on` under `g_pi_lock`, which it holds.
+
+## Host test (`tests/host/test_sync.c`, roadmap 2.0 SA3)
+
+`wait.c`, `completion.c`, `semaphore.c` and `mutex.c`, unchanged, on a
+deterministic one-CPU scheduler (`tests/host/sync_sched.c`): each fake
+thread is a pthread, only the one holding the baton runs
+(`sync_baton.c`), a switch happens only where the kernel would switch (a
+block, a yield, a thread's end), and which ready thread runs next is drawn
+from a seed. When nothing is ready the fake clock jumps to the earliest
+timer, whose callback runs as an interrupt. Each workload runs under 300
+seeds:
+
+| Workload | Steps | Checks |
+|---|---|---|
+| `mutex-contention` | four threads (priorities 20, 20, 30, 10), four turns each by lock or trylock, yielding inside | one thread inside at a time; every thread gets its turns; free at the end |
+| `mutex-pi-chain` | L (50) holds A; M (30) holds B and waits on A; H (10) waits on B | L runs at 10 before its unlock and at 50 after; M back at 30; no thread left boosted |
+| `completion` | three waiters (one with a 50 ms deadline) and a completer; the completer then waits 1 ms on a completion nobody completes | every waiter released, the deadline one with true; the never-completed wait returns false when the fake clock reaches its timer |
+| `semaphore` | five threads, three turns each, on a count of 2 | never more than two inside; the count back at 2 |
+| `waitqueue-callbacks` | two callback entries beside two sleeping threads; `wake_one`, then `wake_all`, then `detach_callbacks` | `wake_one` runs both callbacks and wakes one thread; each callback runs twice and is freed once |
+
+Every acquisition and release, wake, block, timer and priority change is
+a line of the trace; the lines' FNV-1a digest is recorded in the test
+(`TRACE_DIGEST`, 56,070 lines). Rewritten in another language (SA3), these
+primitives must give the same digest before the C is deleted.
+`SYNC_TRACE_DUMP=1 out/<arch>-debug/host/test_sync` prints the lines.
 
 ## Measured results (2026-09-04, QEMU TCG, `-m 256M`)
 
@@ -240,8 +272,9 @@ join; the queue is empty.
   simulated tick by tick with `policy_rr.c`'s fair-level rules over those
   functions (six nice mixes for 400 s each, shares within 2 % of the
   weights; turns of two equal threads at most 16 ms; a sleeper's lead
-  bounded). No host test yet for the run-queue bitmap logic or the
-  wait-queue protocol themselves.
+  bounded). The wait-queue protocol, completions, semaphores and the
+  mutex have `test_sync` (above); the run-queue bitmap logic has no host
+  test yet.
 - Timing bounds are loose under TCG; a KVM/HVF run
   (`QEMU_ACCEL=kvm`) would allow tighter ones.
 - Stack overflow into the guard page is not exercised; it would need a
