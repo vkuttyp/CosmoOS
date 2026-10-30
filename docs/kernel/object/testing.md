@@ -10,12 +10,68 @@
 | C11 model (herd7, RC11) | `tests/litmus/epoll/watched.litmus`: `handle_close`'s fence against epoll's add (OB5) | `make litmus` |
 | Defect probe | `tools/epoll-close-probe.py`: rebuilds `kernel/object/handle.c` without the last-close epoll notice (`--old`) and shows `epoll-close` fail | `python3 tools/epoll-close-probe.py --arch x86_64 [--old]` |
 
-No host test or fuzzer compiles `kernel/object/`. The cosmofs and
-network fuzzers replace it with a plain-count shim (`kobject_init`,
-`kobject_get`, `kobject_tryget`, `kobject_put`, `kobject_refcount`,
-`kobject_track_code` in `tests/fuzz/shim_fs.c` and
-`tests/fuzz/shim_net.c`), so `make fuzz` and `make host-test` exercise
-callers of this code, not this code.
+`tests/host/test_handles.c` compiles `kernel/object/` on the host
+(`make host-test`, below). The cosmofs and network fuzzers replace it with
+a plain-count shim (`tests/fuzz/shim_fs.c`, `tests/fuzz/shim_net.c`), so
+`make fuzz` exercises callers of this code, not this code.
+
+## The object census
+
+`kobject_census` counts kobjects initialised and not yet released or
+discarded, by type (`api.md`). The self-test runner takes it before each
+test and, after the test and its deferred releases, requires that no type
+has more live objects than before; a release that comes late (a reaped
+process's handles, a deferred free) is given two seconds. A failure names
+the type: `selftest: <test> left kernel objects of type <type>: <n> live
+before it, <m> after`. Fewer is logged, not failed: a test may remove
+what an earlier one made (`ahci-stop-ack` removes a disk), or an earlier
+test's release may arrive late.
+
+What a test leaves on purpose is listed, with the reason, in
+`census_allowed` (`kernel/core/selftest.c`):
+
+| Test | Type | Why |
+|---|---|---|
+| `process-user` | `vnode` | the files the user-mode suite creates stay on the root filesystem |
+| `process-user` | `mount` | a mount the suite leaves (Gaps) |
+| `process-user` | `process` | one process object, not yet attributed (Gaps) |
+| `syscall-fuzz` | `vnode` | the files twenty thousand random system calls create stay |
+
+When the census was added (2026-10-29) it found two kinds of leftover,
+both fixed: creation failures that freed an initialised object by hand
+(`process_unbuild`, `vcpu_create`), which now `kobject_discard` it; and
+tests that never dropped their creator's reference (`device`,
+`device-remove-busy`, `dma`, `device-reset`, `net-dhcp-client`) or left a
+device node behind (`vfs-chrdev-open`, `vfs-chr-write-during-blocked-read`).
+
+## Host test (`tests/host/test_handles.c`)
+
+| Test | Steps | Proves |
+|---|---|---|
+| `object-refcount` | init, get, get_n, tryget, puts to zero: released once; tryget from zero false; a get from zero and an underflow panic | OB1, OB2; the census |
+| `object-discard` | discard of a fresh object leaves the census as before and runs no release; discard of a shared one panics | OB2's exception |
+| `object-put-and-lock` | from 2 without the lock; from 1 with the lock held, the release only at `kobject_release_final` | OB3 |
+| `handle-table` | install, a missing right, install-at, close-on-exec, a close returning the flush's `-EIO`, the exit's gate | OB4, OB6, OB7, OB8 |
+| `handle-trace` | the recorded trace (below) | everything above, in combination |
+
+**The recorded trace** (roadmap 2.0 SA2's differential test). 10,000
+operations, chosen by a xorshift generator from a fixed seed, over three
+tables and eight objects (half with an I/O type whose flush can fail,
+some marked as watched by epoll): installs with rights and flags,
+install-at, lookups with and without `missing`, get and get-flags,
+set-flags, close, close-on-exec, transfer checks, limit changes,
+references taken (get, tryget) and dropped (put, put_and_lock), creators
+letting go, and tables destroyed and remade. A released object is made
+again. Each operation's result and the counts it leaves (references,
+handles, releases, flushes, epoll notices) are one line; the lines' FNV-1a
+digest is recorded in the test (`TRACE_DIGEST`). An implementation of this
+layer in another language must give the same digest before the C is
+deleted. `HANDLES_TRACE_DUMP=1 out/<arch>-debug/host/test_handles` prints
+the lines, to find the first that differs. At the end every table is
+destroyed and every reference dropped: each object released exactly once
+and the census back where it started. In the recorded run every operation
+both succeeds and fails in each of its ways at least once (closes: 325
+ok, 47 `-EIO`, 695 `-EBADF`).
 
 ## Target self-tests
 
@@ -60,8 +116,10 @@ self-test; a boot runs the whole registered list.
 
 ## Gaps
 
-- No test drives the panic paths of OB1 (get from zero, underflow) or
-  OB11 (an object over-reporting a count).
+- The host test drives OB1's panics; nothing drives OB11's (an object
+  over-reporting a count).
+- `process-user` leaves one process object and one mount alive (the
+  census allows them); neither is attributed yet.
 - No test performs I/O on a plain kobject such as a vCPU handle (OB10).
 - `handle_get_flags` and `handle_set_flags` on an exiting table are
   untested (OB7).

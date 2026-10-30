@@ -9,6 +9,69 @@
 
 #include <uapi/cosmo/syscall.h>
 
+/* The object census (roadmap 2.0 SA2): kobjects initialised and not yet
+ * released. The self-test runner checks that every test leaves it where
+ * it found it, and the fault-injection sweep that a failed creation leaks
+ * none (docs/kernel/object/testing.md). */
+static uint64_t g_kobjects_live;
+
+/* The census by type: each type a slot, found or claimed on first use; a
+ * type beyond the table is counted in the total only. */
+static const struct kobject_type *g_census_type[KOBJECT_CENSUS_TYPES];
+static int64_t g_census_count[KOBJECT_CENSUS_TYPES];
+/* The type's name, copied when its slot is claimed: a module's type (and
+ * its name) goes away when the module is unloaded, the slot does not. */
+static char g_census_name[KOBJECT_CENSUS_TYPES][KOBJECT_CENSUS_NAME];
+
+static int census_slot(const struct kobject_type *t)
+{
+    for (unsigned i = 0; i < KOBJECT_CENSUS_TYPES; i++) {
+        const struct kobject_type *cur = __atomic_load_n(&g_census_type[i], __ATOMIC_ACQUIRE);
+        if (cur == t)
+            return (int)i;
+        if (cur == NULL) {
+            const struct kobject_type *expected = NULL;
+            if (__atomic_compare_exchange_n(&g_census_type[i], &expected, t, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                const char *name = t->name ? t->name : "?";
+                unsigned n = 0;
+                for (; n + 1 < KOBJECT_CENSUS_NAME && name[n]; n++)
+                    g_census_name[i][n] = name[n];
+                g_census_name[i][n] = '\0';
+                return (int)i;
+            }
+            if (expected == t)
+                return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void census_count(const struct kobject_type *t, int64_t delta)
+{
+    int k = census_slot(t);
+    if (k >= 0)
+        __atomic_fetch_add(&g_census_count[k], delta, __ATOMIC_ACQ_REL);
+    __atomic_fetch_add(&g_kobjects_live, (uint64_t)delta, __ATOMIC_ACQ_REL);
+}
+
+void kobject_census_by_type(int64_t out[KOBJECT_CENSUS_TYPES])
+{
+    for (unsigned i = 0; i < KOBJECT_CENSUS_TYPES; i++)
+        out[i] = __atomic_load_n(&g_census_count[i], __ATOMIC_ACQUIRE);
+}
+
+const char *kobject_census_name(unsigned i)
+{
+    if (i >= KOBJECT_CENSUS_TYPES || __atomic_load_n(&g_census_type[i], __ATOMIC_ACQUIRE) == NULL)
+        return NULL;
+    return g_census_name[i];
+}
+
+uint64_t kobject_census(void)
+{
+    return __atomic_load_n(&g_kobjects_live, __ATOMIC_ACQUIRE);
+}
+
 void kobject_init(struct kobject *obj, const struct kobject_type *type)
 {
     KASSERT(type != NULL && type->release != NULL);
@@ -21,6 +84,18 @@ void kobject_init(struct kobject *obj, const struct kobject_type *type)
      * read section, so the module cannot be freed between the lookup and
      * the increment (docs/kernel/quiesce/design.md, "Module unload"). */
     obj->owner = module_owner_of((uintptr_t)type->release);
+    census_count(type, 1);
+}
+
+void kobject_discard(struct kobject *obj)
+{
+    if (__atomic_load_n(&obj->refcount, __ATOMIC_ACQUIRE) != 1)
+        panic("kobject_discard of a %s object %p someone else holds", obj->type->name, (void *)obj);
+    obj->refcount = 0;
+    if (obj->owner)
+        module_object_released(obj->owner);
+    obj->owner = NULL;
+    census_count(obj->type, -1);
 }
 
 void kobject_track_code(struct kobject *obj, uintptr_t code)
@@ -66,9 +141,11 @@ void kobject_release_final(struct kobject *obj)
      * count is dropped after the release returned, so the module's
      * text stays mapped while its release code runs. */
     struct module *owner = obj->owner;
+    const struct kobject_type *type = obj->type;
     obj->type->release(obj);
     if (owner)
         module_object_released(owner);
+    census_count(type, -1);   /* the type read before the release freed the object */
 }
 
 void kobject_put(struct kobject *obj)

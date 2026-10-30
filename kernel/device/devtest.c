@@ -165,6 +165,8 @@ bool selftest_device(const char **reason)
     CHECK(device_count(&fake_bus) == 0);
     CHECK(kobject_refcount(&d1.obj) == 1);
     CHECK(bus_find("selftest") == &fake_bus && bus_find("pci") == &pci_bus);
+    device_put(&d1);   /* the creator's references (device_setup): the object census */
+    device_put(&d2);
     return true;
 }
 
@@ -284,6 +286,7 @@ bool selftest_dma(const char **reason)
     dma_get_stats(&after);
     unsigned tiny_ok = lva != NULL ? 1u : 0u;   /* the 24-bit allocation exists only with a DMA zone */
     CHECK(after.allocs == before.allocs + 1 + tiny_ok && after.frees == before.frees + 1 + tiny_ok);
+    kobject_discard(&tiny.obj);   /* never registered, on this stack: the object census */
     CHECK(after.bytes_allocated == before.bytes_allocated);
     CHECK(after.maps == before.maps + 3 && after.map_failures == before.map_failures + 3);
     CHECK(after.unmaps == before.unmaps + 3);
@@ -922,6 +925,7 @@ bool selftest_device_remove_busy(const char **reason)
 
     driver_unregister(&drv);
     device_unregister(&d);
+    device_put(&d);   /* the creator's reference (device_setup): the object census */
     kinfo("selftest: device-remove-busy: the removal took the driver's hook and the model's bookkeeping together, "
           "with %u unit(s) of work outstanding",
           busy_inflight);
@@ -2257,6 +2261,8 @@ bool selftest_device_reset(const char **reason)
     CHECK(device_reset(&fu) == -ENODEV);        /* never bound */
     device_unregister(&fb);
     device_unregister(&fu);
+    device_put(&fb);   /* the creators' references (device_setup): the object census */
+    device_put(&fu);
     driver_unregister(&fdrv);
 
 #if !CONFIG_DEBUG

@@ -65,6 +65,12 @@ struct kobject {
 /* Reference 1 belongs to the caller. Records the owner of type->release.
  * No handle yet, no watchers, never watched. */
 void kobject_init(struct kobject *obj, const struct kobject_type *type);
+/* An object its creator built but never published -- only the creator's
+ * reference exists -- and now frees itself, without the release (a failed
+ * creation that unwinds by hand). Leaves the census and the owner module's
+ * count as the release would. The count must be 1; the memory is still the
+ * caller's to free. */
+void kobject_discard(struct kobject *obj);
 void kobject_get(struct kobject *obj);
 /* `n` references in one add, for a caller that has counted under a lock
  * how many holders it is creating and must not spend `n` atomic
@@ -95,6 +101,16 @@ bool kobject_put_and_lock(struct kobject *obj, spinlock_t *lock, arch_irq_state_
  * the caller has finished with the table. Count must be zero. */
 void kobject_release_final(struct kobject *obj);
 uint32_t kobject_refcount(const struct kobject *obj);
+/* The object census: how many kobjects are initialised and not yet
+ * released, across the kernel, and by type. For tests
+ * (docs/kernel/object/testing.md, "The object census"). */
+uint64_t kobject_census(void);
+#define KOBJECT_CENSUS_TYPES 128
+#define KOBJECT_CENSUS_NAME  24
+/* out[i] is the live count of the type in slot i, whose name is
+ * kobject_census_name(i) (NULL for an unused slot); slots never move. */
+void kobject_census_by_type(int64_t out[KOBJECT_CENSUS_TYPES]);
+const char *kobject_census_name(unsigned i);
 
 /* Types whose release trampolines to a per-object callback (device,
  * blkdev, netif) record the callback's owner here, once the callback is

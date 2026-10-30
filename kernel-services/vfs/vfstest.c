@@ -1530,6 +1530,7 @@ bool selftest_vfs_chr_write_during_blocked_read(const char **reason)
     CHECK(writer_returned);     /* the claim */
 
     kinfo("selftest: vfs-chr-write-during-blocked-read: the write completed with a reader blocked in the driver");
+    CHECK(vfs_unlink(NULL, "/dev/chrblock-test") == 0);   /* the node: the object census */
     return true;
 }
 
@@ -1565,6 +1566,8 @@ bool selftest_vfs_chrdev_open(const char **reason)
     g_chropen_refuse = 0;
 
     kinfo("selftest: vfs-chrdev-open: per-open instances distinct, release once on last close, refusal clean");
+    vnode_put(node);   /* ramfs_mkchr's reference, and the node itself: the object census */
+    CHECK(vfs_unlink(NULL, "/dev/chropen-test") == 0);
     return true;
 }
 

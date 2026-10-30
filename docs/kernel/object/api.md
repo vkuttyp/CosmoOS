@@ -108,6 +108,14 @@ expose them (`docs/kernel/syscall/api.md`).
 - Concurrency: none needed for the object; the owner lookup is a
   `quiesce_read_lock` section, any context.
 
+### `void kobject_discard(struct kobject *obj)`
+- Purpose: an object its creator initialised but never published, whose
+  creation now fails and frees the storage by hand rather than through
+  the release (`process_unbuild`, `vcpu_create`'s failure paths). Leaves
+  the object census and the owner module's live-object count as the
+  release would; the caller still frees the memory.
+- Failure: panics unless the count is 1 (someone else holds it).
+
 ### `void kobject_track_code(struct kobject *obj, uintptr_t code)`
 - Purpose: for types whose release trampolines to a per-object callback
   (`struct device.release`, `struct blkdev_ops.release`,
@@ -158,6 +166,14 @@ expose them (`docs/kernel/syscall/api.md`).
 
 ### `uint32_t kobject_refcount(const struct kobject *obj)`
 Acquire load; for tests and diagnostics only.
+
+### `uint64_t kobject_census(void)`, `void kobject_census_by_type(int64_t out[KOBJECT_CENSUS_TYPES])`, `const char *kobject_census_name(unsigned i)`
+The object census (roadmap 2.0 SA2): how many kobjects are initialised
+and not yet released or discarded, in total and by type. A type takes a
+slot on its first `kobject_init` and keeps it; its name is copied, so a
+module's type can be named after the module is gone. Raised by
+`kobject_init`, lowered after the release returns and by
+`kobject_discard`. For tests (`testing.md`, "The object census").
 
 ### `struct kobject *console_object(void)`
 - Purpose: the single console object (`kernel/object/console_obj.c`),

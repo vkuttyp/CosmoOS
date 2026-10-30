@@ -791,6 +791,7 @@ static void process_unbuild(struct process *p)
         p->pers->release(p);
     signal_process_release(p);
     kfree(p->sig_shared_info);
+    kobject_discard(&p->obj);   /* never published: freed here, not by the release */
     kmem_cache_free(g_process_cache, p);
 }
 
