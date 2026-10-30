@@ -218,6 +218,12 @@ void mutex_unlock(struct mutex *m)
     struct thread *heir = m->handoff;
     m->handoff = NULL;
     __atomic_store_n(&m->owner, heir, __ATOMIC_RELEASE);
+    /* The heir owns `m` from here, though it has not run to clear its own
+     * pi_blocked_on: clear it now (g_pi_lock is held), or a donation to the
+     * heir before it runs walks heir -> m -> owner == heir and reports a
+     * cycle that is not there (found by tests/host/test_sync.c). */
+    if (heir != NULL)
+        heir->pi_blocked_on = NULL;
     spin_unlock_irqrestore(&m->lock, s);
 
     if (!list_empty(&m->pi_link)) {
