@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include "kernel/spinlock.h"
 #include "kernel/wait.h"
+#include "kernel/lockdep.h"
 
 struct completion;
 typedef bool (*nvP_F1Mvbool)(void *);

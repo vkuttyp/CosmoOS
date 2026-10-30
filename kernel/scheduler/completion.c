@@ -11,6 +11,7 @@
 #include "nova/rt.h"
 #include "kernel/spinlock.h"
 #include "kernel/wait.h"
+#include "kernel/lockdep.h"
 #include "kernel/completion_types.h"
 
 _Static_assert(sizeof(void *) * 8 == 64, "novac: generated for a 64-bit target");
@@ -18,7 +19,7 @@ _Static_assert(sizeof(void *) * 8 == 64, "novac: generated for a 64-bit target")
 static NV_UNUSED const char nv_file_0[] = "lib/core/atomics.nova";
 static NV_UNUSED const char nv_file_1[] = "kernel/scheduler/completion.nova";
 
-static NV_UNUSED const nv_loc nvL_0 = { nv_file_1, 88u, 21u };
+static NV_UNUSED const nv_loc nvL_0 = { nv_file_1, 84u, 21u };
 
 typedef struct nvT_AtomicU32 nvT_AtomicU32;
 typedef struct completion nvT_completion;

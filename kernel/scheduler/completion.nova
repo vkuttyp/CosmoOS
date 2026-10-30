@@ -5,7 +5,7 @@
 //
 // The C this replaces is held to tests/host/test_sync.c's recorded trace.
 
-@header("kernel/spinlock.h", "kernel/wait.h")
+@header("kernel/spinlock.h", "kernel/wait.h", "kernel/lockdep.h")
 extern "C" {
     @ctype("spinlock_t")
     struct spinlock_t {
@@ -24,11 +24,7 @@ extern "C" {
     fn wait_floor_until_timeout(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void, ns: u64) -> bool;
     fn wait_floor_check_sleep(ip: usize, what: *CChar);
     fn clock_now_ns() -> u64;
-}
-
-// lockdep.h's (no @header: the generated completion_types.h includes every @header, and lockdep.h reaches thread.h,
-// which includes completion.h).
-extern "C" {
+    // lockdep.h's: functions in a debug build, static inline no-ops in a release one (CONFIG_LOCKDEP).
     fn lockdep_completion_init(slot: *mut u16, name: *CChar, ip: usize);
     fn lockdep_completion_wait(c: *void, slot: *mut u16, name: *CChar, ip: usize);
     fn lockdep_completion_signal(c: *void, slot: *mut u16, name: *CChar, ip: usize);
