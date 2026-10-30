@@ -64,6 +64,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/scheduler/mutex.c \
 	kernel/scheduler/semaphore.c \
 	kernel/scheduler/completion.c \
+	kernel/scheduler/completion_floor.c \
 	kernel/scheduler/schedtest.c \
 	kernel/scheduler/smptest.c \
 	kernel/object/object.c \

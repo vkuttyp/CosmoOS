@@ -376,7 +376,10 @@ last (the lowest priority level's tail).
 
 ## semaphore.h
 
-`struct semaphore { spinlock_t lock; int count; struct waitqueue wq; }`
+`struct semaphore { spinlock_t lock; int count; struct waitqueue wq; }`,
+written in Nova (`kernel/scheduler/semaphore.nova`, roadmap 2.0 SA3): `make
+nova` generates `semaphore.c` and `semaphore_types.h`, which `semaphore.h`
+includes.
 
 - `semaphore_init(s, count, name)`, `semaphore_down(s)` (blocks until
   `count > 0`; panics in interrupt context), `semaphore_trydown(s)`,
@@ -385,7 +388,18 @@ last (the lowest priority level's tail).
 
 ## completion.h
 
-`struct completion { spinlock_t lock; bool done; struct waitqueue wq; }`
+`struct completion { spinlock_t lock; uint32_t done; struct waitqueue wq; }`,
+written in Nova (`kernel/scheduler/completion.nova`, roadmap 2.0 SA3): `make
+nova` generates `completion.c` and `completion_types.h`, which
+`completion.h` includes; `completion_floor.c` holds the module exports.
+`done` was a `bool` (lib/core's atomic flag is four bytes); it sits where
+the `bool` and its padding were, so the layout is unchanged.
+
+The Nova ports wait through `wait_floor_until` and
+`wait_floor_until_timeout` (`wait.h`), `wait_event` and
+`wait_event_timeout` over a condition function, since a wait entry is C
+state a Nova local cannot hold; `wait_floor_check_sleep` makes a sleeping
+call's checks with the caller's address.
 
 - `completion_init(c, name)`, `complete(c)` (sets `done` and wakes all
   under the lock; interrupt-safe; idempotent), `wait_for_completion(c)`

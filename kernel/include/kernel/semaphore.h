@@ -11,11 +11,10 @@
 #include <kernel/spinlock.h>
 #include <kernel/wait.h>
 
-struct semaphore {
-    spinlock_t lock;
-    int count;
-    struct waitqueue wq;
-};
+/* struct semaphore { lock; count; wq; } is defined in Nova
+ * (kernel/scheduler/semaphore.nova) and generated into semaphore_types.h
+ * (roadmap 2.0 SA3; Nova ADR 0029, 0030). */
+#include <kernel/semaphore_types.h>
 
 void semaphore_init(struct semaphore *s, int count, const char *name);
 void semaphore_down(struct semaphore *s);

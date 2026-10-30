@@ -79,7 +79,7 @@ real-time classes and interactivity are not implemented.
 - CPU selection at creation: the least-loaded CPU in the affinity mask.
   No periodic rebalancing yet.
 
-**Synchronisation** (`wait.nova` with `wait_floor.c`, `mutex.c`, `semaphore.c`, `completion.c`)
+**Synchronisation** (`wait.nova` with `wait_floor.c`, `mutex.c`, `semaphore.nova`, `completion.nova`)
 - Wait queues with a lost-wakeup-free `wait_event()` protocol.
 - Mutex (sleeping lock, owner tracked, not recursive), counting
   semaphore, completion (one-shot broadcast), all built on wait queues.

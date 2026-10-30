@@ -1,0 +1,140 @@
+// One-shot completions on a wait queue (kernel/include/kernel/completion.h), in Nova (roadmap 2.0 SA3). struct
+// completion is Nova's, generated into kernel/include/kernel/completion_types.h, which completion.h includes (Nova ADR
+// 0029, 0030); its wait queue is the C type that wait.nova defines. The waits go through wait_floor.c's wait_event
+// helpers, since a wait entry is C state no Nova local may hold; completion_floor.c keeps the module exports.
+//
+// The C this replaces is held to tests/host/test_sync.c's recorded trace.
+
+@header("kernel/spinlock.h", "kernel/wait.h")
+extern "C" {
+    @ctype("spinlock_t")
+    struct spinlock_t {
+        name: *CChar;
+        @cname("class")
+        lockClass: u16; // lockdep class + 1, which a completion's lock keys its own class through
+    }
+    struct waitqueue;
+
+    fn spinlock_init(lock: *mut spinlock_t, name: *CChar);
+    fn spin_lock_irqsave(lock: *mut spinlock_t) -> usize;
+    fn spin_unlock_irqrestore(lock: *mut spinlock_t, state: usize);
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn waitqueue_wake_all(wq: *mut waitqueue) -> u32;
+    fn wait_floor_until(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void);
+    fn wait_floor_until_timeout(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void, ns: u64) -> bool;
+    fn wait_floor_check_sleep(ip: usize, what: *CChar);
+    fn clock_now_ns() -> u64;
+}
+
+// lockdep.h's (no @header: the generated completion_types.h includes every @header, and lockdep.h reaches thread.h,
+// which includes completion.h).
+extern "C" {
+    fn lockdep_completion_init(slot: *mut u16, name: *CChar, ip: usize);
+    fn lockdep_completion_wait(c: *void, slot: *mut u16, name: *CChar, ip: usize);
+    fn lockdep_completion_signal(c: *void, slot: *mut u16, name: *CChar, ip: usize);
+}
+
+@repr(C)
+struct completion {
+    lock: spinlock_t;
+    done: u32; // set once, under `lock`; read atomically (completion_done)
+    wq: waitqueue;
+}
+
+/// An atomic view of `done`.
+/// Safety: `c` is a live completion, whose `done` is only ever accessed atomically.
+unsafe fn doneOf(c: *mut completion) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(c).done as *mut u32 as *AtomicU32);
+
+/// Safety: `c` is a live completion.
+unsafe fn lockOf(c: *mut completion) -> *mut spinlock_t => borrow mut Ptr.toBorrowMut(c).lock as *mut spinlock_t;
+
+/// Safety: `c` is a live completion.
+unsafe fn queueOf(c: *mut completion) -> *mut waitqueue => borrow mut Ptr.toBorrowMut(c).wq as *mut waitqueue;
+
+/// Safety: `c` is a live completion.
+unsafe fn classOf(c: *mut completion) -> *mut u16 => borrow mut Ptr.toBorrowMut(c).lock.lockClass as *mut u16;
+
+/// wait_event's condition: the completion is done.
+/// Safety: `arg` is a live completion.
+@callback
+unsafe fn isDone(arg: *mut void) -> bool => doneOf(arg as *mut completion).loadWith(LoadOrdering.Acquire) != 0;
+
+/// Safety: `c` points to storage for a completion nothing uses yet; `name` outlives it.
+@export("completion_init")
+unsafe fn init(c: *mut completion, name: *CChar) {
+    spinlock_init(lockOf(c), name);
+    let completion = Ptr.toBorrowMut(c);
+    completion.done = 0;
+    // Its own lock class: complete() wakes with c->lock held, and two locks of one class nested is what lockdep calls
+    // recursion.
+    waitqueue_init(queueOf(c), "completion-wq\0".ptr as *CChar);
+    // The completion's lockdep class, keyed by name through its own spinlock's class (docs/kernel/lockdep/design.md,
+    // "Completion waits").
+    lockdep_completion_init(classOf(c), name, callerAddress());
+}
+
+/// `done` becomes visible and the waiters are woken under one hold of c->lock, and a waiter takes c->lock once after
+/// it has seen `done`, so it cannot return -- and free the completion, which usually lives on its stack -- until the
+/// wake has finished touching it (selftest completion-race). `lingerNs` widens the window a poller races, for a test.
+/// Safety: `c` is a live completion.
+unsafe fn signal(c: *mut completion, lingerNs: u64, ip: usize) {
+    // In thread context with mutexes held: "to signal c, these were held" (completion -> mutex).
+    let lock = lockOf(c);
+    lockdep_completion_signal(c as *void, classOf(c), Ptr.toBorrow(lock as *spinlock_t).name, ip);
+    let s = spin_lock_irqsave(lock);
+    doneOf(c).storeWith(1, StoreOrdering.Release);
+    if (lingerNs != 0) {
+        let until = clock_now_ns() + lingerNs;
+        while (clock_now_ns() < until) {
+            Cpu.spinHint();
+        }
+    }
+    waitqueue_wake_all(queueOf(c));
+    spin_unlock_irqrestore(lock, s);
+}
+
+/// Safety: `c` is a live completion.
+@export("complete_linger")
+unsafe fn completeLinger(c: *mut completion, lingerNs: u64) => signal(c, lingerNs, callerAddress());
+
+/// Safety: `c` is a live completion.
+@export("complete")
+unsafe fn complete(c: *mut completion) => signal(c, 0, callerAddress());
+
+/// Safety: `c` is a live completion.
+@export("completion_done")
+unsafe fn isCompleted(c: *mut completion) -> bool => isDone(c as *mut void);
+
+/// The handshake after a wait: complete() holds c->lock until its wake has returned, so once this lock is ours nothing
+/// is still inside `c`.
+/// Safety: `c` is a live completion.
+unsafe fn handshake(c: *mut completion) {
+    let s = spin_lock_irqsave(lockOf(c));
+    spin_unlock_irqrestore(lockOf(c), s);
+}
+
+/// Safety: `c` is a live completion, and the caller may sleep.
+@export("wait_for_completion")
+unsafe fn waitFor(c: *mut completion) {
+    let ip = callerAddress();
+    wait_floor_check_sleep(ip, "wait_for_completion\0".ptr as *CChar);
+    // Before the wait, done or not: held mutex -> completion, and a report if it already reaches a held mutex.
+    lockdep_completion_wait(c as *void, classOf(c), Ptr.toBorrow(lockOf(c) as *spinlock_t).name, ip);
+    wait_floor_until(queueOf(c), isDone, c as *mut void);
+    handshake(c);
+}
+
+/// False at the deadline: `c` may complete later, so the caller must not free it yet.
+/// Safety: `c` is a live completion, and the caller may sleep.
+@export("wait_for_completion_timeout")
+unsafe fn waitForTimeout(c: *mut completion, timeoutNs: u64) -> bool {
+    let ip = callerAddress();
+    wait_floor_check_sleep(ip, "wait_for_completion_timeout\0".ptr as *CChar);
+    lockdep_completion_wait(c as *void, classOf(c), Ptr.toBorrow(lockOf(c) as *spinlock_t).name, ip);
+    if (!wait_floor_until_timeout(queueOf(c), isDone, c as *mut void, timeoutNs)) {
+        return false;
+    }
+    handshake(c); // done: the same handshake, so the completer has let go of `c` before this returns
+    return true;
+}
