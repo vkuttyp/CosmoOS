@@ -73,26 +73,22 @@
     (HANDLE_RIGHT_ALL | HANDLE_RIGHT_VCPU_RUN | HANDLE_RIGHT_VCPU_REGS |       \
      HANDLE_RIGHT_VCPU_IRQ)
 
-struct handle_entry {
-    struct kobject *obj;   /* NULL = free */
-    unsigned rights;
-    unsigned flags;        /* HANDLE_FLAG_*: the slot's, not the object's (POSIX FD_CLOEXEC) */
-};
-
 /* Closed by exec (process_exec): Linux's FD_CLOEXEC. A dup or an install
  * at a slot starts without it; fork copies it. */
 #define HANDLE_FLAG_CLOEXEC 1u
 
-struct handle_table {
-    spinlock_t lock;
-    struct handle_entry entries[HANDLE_TABLE_SIZE];
-    unsigned count;
-    unsigned limit;   /* COSMO_RLIMIT_NOFILE: handle_install refuses at or above it */
-    /* Set before the table is torn down. A lookup or install after this
-     * would hand out a reference to an object the exit is releasing, or
-     * add one for nobody to close. */
-    bool exiting;
-};
+/*
+ * struct handle_entry { obj (NULL = free), rights, flags } and
+ * struct handle_table { lock, entries[HANDLE_TABLE_SIZE], count, limit
+ * (COSMO_RLIMIT_NOFILE: an install refuses at or above it), exiting (set
+ * before the table is torn down) } are defined in Nova
+ * (kernel/object/handle.nova) and generated into handle_types.h, with the
+ * functions below (roadmap 2.0 SA2; Nova ADR 0029).
+ */
+#include <kernel/handle_types.h>
+
+_Static_assert(sizeof(((struct handle_table *)0)->entries) / sizeof(struct handle_entry) == HANDLE_TABLE_SIZE,
+               "handle.nova's table size is HANDLE_TABLE_SIZE");
 
 void handle_table_init(struct handle_table *t);
 

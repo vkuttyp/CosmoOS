@@ -68,6 +68,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/object/object.c \
 	kernel/object/object_floor.c \
 	kernel/object/handle.c \
+	kernel/object/handle_floor.c \
 	kernel/object/console_obj.c \
 	kernel/device/hidtest.c \
 	kernel/tty/tty.c \

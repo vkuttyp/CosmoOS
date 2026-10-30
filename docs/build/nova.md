@@ -66,7 +66,7 @@ Install the pinned compiler, the version in `scripts/nova-gen.py`
 (`python3 scripts/nova-gen.py --pinned`); `make nova` refuses any other:
 
 ```sh
-curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.4.1 sh   # into ~/.nova/bin
+curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.5.0 sh   # into ~/.nova/bin
 export PATH="$HOME/.nova/bin:$PATH"     # or: export NOVAC=~/.nova/bin/novac
 ```
 

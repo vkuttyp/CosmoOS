@@ -1,0 +1,367 @@
+// The per-process handle table (kernel/include/kernel/handle.h; docs/kernel/object/), in Nova (roadmap 2.0 SA2). The
+// table is Nova's type: `struct handle_table` and `struct handle_entry` are defined here and generated into
+// kernel/include/kernel/handle_types.h, which handle.h includes, so C embeds the table by value as before (Nova ADR
+// 0029). The table's spin lock (irqsave) protects every slot. handle_floor.c keeps a call through a function pointer
+// (the flush), the fenced last-close check, which Nova has no fence for, and the assertion's panic.
+
+@header("kernel/spinlock.h", "kernel/object.h")
+extern "C" {
+    @ctype("spinlock_t")
+    struct spinlock_t;
+    struct kobject {
+        handles: u32;
+    }
+
+    fn spinlock_init(lock: *mut spinlock_t, name: *CChar);
+    fn spin_lock_irqsave(lock: *mut spinlock_t) -> usize;
+    fn spin_unlock_irqrestore(lock: *mut spinlock_t, state: usize);
+    fn kobject_get(obj: *mut kobject);
+    fn kobject_put(obj: *mut kobject);
+
+    // handle_floor.c
+    fn handle_floor_flush(obj: *mut kobject) -> i32;
+    fn handle_floor_last_closed(obj: *mut kobject);
+    fn handle_floor_fatal(what: *CChar);
+}
+
+/// Slots per table (HANDLE_TABLE_SIZE in handle.h, which checks it).
+const HANDLE_TABLE_SIZE: i32 = 64;
+/// HANDLE_RIGHT_TRANSFER and COSMO_RIGHTS_SAME (handle.h, uapi/cosmo/syscall.h; handle_floor.c checks them).
+const RIGHT_TRANSFER: u32 = 8;
+const RIGHTS_SAME: u32 = 0;
+/// HANDLE_FLAG_CLOEXEC (handle.h).
+const FLAG_CLOEXEC: u32 = 1;
+/// errno.h's values, returned negated.
+const EPERM: i32 = 1;
+const EBADF: i32 = 9;
+const EBUSY: i32 = 16;
+const EMFILE: i32 = 24;
+
+@repr(C)
+struct handle_entry {
+    obj: *mut kobject; // null: free
+    rights: u32;
+    flags: u32; // HANDLE_FLAG_*: the slot's, not the object's (POSIX FD_CLOEXEC)
+}
+
+@repr(C)
+struct handle_table {
+    lock: spinlock_t;
+    entries: [handle_entry; 64];
+    count: u32;
+    limit: u32; // COSMO_RLIMIT_NOFILE: an install refuses at or above it
+    // Set before the table is torn down. A lookup or install after this would hand out a reference to an object the
+    // exit is releasing, or add one for nobody to close.
+    exiting: bool;
+}
+
+/// Takes the table's lock; the result is the interrupt state to restore.
+/// Safety: `t` is an initialised table.
+unsafe fn lock(t: *mut handle_table) -> usize => spin_lock_irqsave(borrow mut Ptr.toBorrowMut(t).lock as *mut spinlock_t);
+
+/// Safety: the caller holds `t`'s lock, taken with `state`.
+unsafe fn unlock(t: *mut handle_table, state: usize) {
+    spin_unlock_irqrestore(borrow mut Ptr.toBorrowMut(t).lock as *mut spinlock_t, state);
+}
+
+/// An atomic view of an object's count of handles, in every table (object.h).
+/// Safety: `obj` is a live kobject, whose handle count is only ever accessed atomically.
+unsafe fn handlesOf(obj: *mut kobject) -> borrow(static) AtomicU32 {
+    let o = Ptr.toBorrowMut(obj);
+    return Ptr.toBorrow(borrow mut o.handles as *mut u32 as *AtomicU32);
+}
+
+fn inRange(h: i32) -> bool => h >= 0 && h < HANDLE_TABLE_SIZE;
+
+/// The slot of a handle that inRange accepted.
+fn slot(h: i32) -> usize => truncate<usize>(h);
+
+/// Safety: `t` points to storage for a table that nothing uses yet.
+@export("handle_table_init")
+fn tableInit(t: *mut handle_table) {
+    unsafe {
+        let table = Ptr.toBorrowMut(t);
+        spinlock_init(borrow mut table.lock as *mut spinlock_t, "handles\0".ptr as *CChar);
+        for (i in 0..table.entries.length) {
+            table.entries[i] = handle_entry { obj: 0 as *mut kobject, rights: 0, flags: 0 };
+        }
+        table.count = 0;
+        table.limit = truncate<u32>(HANDLE_TABLE_SIZE);
+        table.exiting = false;
+    }
+}
+
+/// Closes every handle. Closing them is not enough on its own: a thread of this process could be inside a syscall,
+/// between its own lookup and its install, and would put a reference back into a table nobody will close again. The
+/// gate is raised first, so every later lookup and install fails, and only then are the slots emptied.
+/// Safety: `t` is an initialised table.
+@export("handle_table_destroy")
+fn tableDestroy(t: *mut handle_table) {
+    unsafe {
+        let s = lock(t);
+        let table = Ptr.toBorrowMut(t);
+        table.exiting = true;
+        unlock(t, s);
+        var h: i32 = 0;
+        while (h < HANDLE_TABLE_SIZE) {
+            close(t, h); // a flush's error has no reader here: counted by the page cache
+            h += 1;
+        }
+        if (Ptr.toBorrow(t as *handle_table).count != 0) {
+            handle_floor_fatal("handle_table_destroy left handles open\0".ptr as *CChar);
+        }
+    }
+}
+
+/// Fills slot `h`; the caller holds the lock and the reference it stores.
+/// Safety: `t` is locked, `h` is in range and free, and `obj` is live.
+unsafe fn installSlot(t: *mut handle_table, h: i32, obj: *mut kobject, rights: u32, flags: u32) -> i32 {
+    let table = Ptr.toBorrowMut(t);
+    table.entries[slot(h)] = handle_entry { obj: obj, rights: rights, flags: flags };
+    table.count += 1;
+    // One more descriptor to the object, in some process (the count is per object, across every table).
+    handlesOf(obj).fetchAddWith(1, Ordering.AcquireRelease);
+    return h;
+}
+
+/// Safety: as handle_install_flags.
+@export("handle_install")
+fn install(t: *mut handle_table, obj: *mut kobject, rights: u32) -> i32 => installFlags(t, obj, rights, 0);
+
+/// A reference to `obj` in the lowest free slot: the handle, or -EMFILE, or -EBADF once the table is exiting.
+/// Safety: `t` is an initialised table and `obj` a live object the caller holds a reference to.
+@export("handle_install_flags")
+fn installFlags(t: *mut handle_table, obj: *mut kobject, rights: u32, flags: u32) -> i32 {
+    unsafe {
+        if (obj.isNull()) {
+            handle_floor_fatal("handle_install of a null object\0".ptr as *CChar);
+        }
+        kobject_get(obj);
+        let s = lock(t);
+        let table = Ptr.toBorrowMut(t);
+        if (table.exiting) {
+            unlock(t, s);
+            kobject_put(obj);
+            return -EBADF; // the table is going away; nothing would close it
+        }
+        if (table.count >= table.limit) { // the process's NOFILE limit
+            unlock(t, s);
+            kobject_put(obj);
+            return -EMFILE;
+        }
+        var h: i32 = 0;
+        while (h < HANDLE_TABLE_SIZE) {
+            if (table.entries[slot(h)].obj.isNull()) {
+                let r = installSlot(t, h, obj, rights, flags);
+                unlock(t, s);
+                return r;
+            }
+            h += 1;
+        }
+        unlock(t, s);
+        kobject_put(obj);
+        return -EMFILE;
+    }
+}
+
+/// Safety: as handle_install_at_flags.
+@export("handle_install_at")
+fn installAt(t: *mut handle_table, h: i32, obj: *mut kobject, rights: u32) -> i32 => installAtFlags(t, h, obj, rights, 0);
+
+/// A reference to `obj` in slot `h`: -EBADF out of range or once exiting, -EBUSY if the slot is taken.
+/// Safety: as handle_install_flags.
+@export("handle_install_at_flags")
+fn installAtFlags(t: *mut handle_table, h: i32, obj: *mut kobject, rights: u32, flags: u32) -> i32 {
+    unsafe {
+        if (obj.isNull()) {
+            handle_floor_fatal("handle_install_at of a null object\0".ptr as *CChar);
+        }
+        if (!inRange(h)) {
+            return -EBADF;
+        }
+        kobject_get(obj);
+        let s = lock(t);
+        let table = Ptr.toBorrowMut(t);
+        if (table.exiting) {
+            unlock(t, s);
+            kobject_put(obj);
+            return -EBADF;
+        }
+        if (!table.entries[slot(h)].obj.isNull()) {
+            unlock(t, s);
+            kobject_put(obj);
+            return -EBUSY;
+        }
+        installSlot(t, h, obj, rights, flags);
+        unlock(t, s);
+        return h;
+    }
+}
+
+/// The object in `h`, referenced, if the handle holds every right in `needed`; null otherwise. `*missing` (if not
+/// null) tells the two failures apart: set when the handle exists and the rights do not.
+/// Safety: `t` is an initialised table; `missing` is null or writable.
+@export("handle_lookup_rights")
+fn lookupRights(t: *mut handle_table, h: i32, needed: u32, missing: *mut bool) -> *mut kobject {
+    unsafe {
+        if (!missing.isNull()) {
+            missing.write(false);
+        }
+        if (!inRange(h)) {
+            return 0 as *mut kobject;
+        }
+        let s = lock(t);
+        let table = Ptr.toBorrow(t as *handle_table);
+        var obj = if (table.exiting) 0 as *mut kobject else table.entries[slot(h)].obj;
+        if (!obj.isNull() && (table.entries[slot(h)].rights & needed) != needed) {
+            // The handle is real and does not carry what was asked for: a different answer than "no such handle",
+            // and one the caller is entitled to tell apart.
+            if (!missing.isNull()) {
+                missing.write(true);
+            }
+            obj = 0 as *mut kobject;
+        } else if (!obj.isNull()) {
+            kobject_get(obj);
+        }
+        unlock(t, s);
+        return obj;
+    }
+}
+
+/// Safety: as handle_lookup_rights.
+@export("handle_lookup")
+fn lookup(t: *mut handle_table, h: i32, needed: u32) -> *mut kobject => lookupRights(t, h, needed, 0 as *mut bool);
+
+/// The object in `h`, referenced, with its rights in `*rights` (and its flags in `*flags`, if not null); null when free.
+/// Safety: `t` is an initialised table; `rights` is writable; `flags` is null or writable.
+unsafe fn getWith(t: *mut handle_table, h: i32, rights: *mut u32, flags: *mut u32) -> *mut kobject {
+    if (!inRange(h)) {
+        return 0 as *mut kobject;
+    }
+    let s = lock(t);
+    let table = Ptr.toBorrow(t as *handle_table);
+    let obj = if (table.exiting) 0 as *mut kobject else table.entries[slot(h)].obj;
+    if (!obj.isNull()) {
+        kobject_get(obj);
+        rights.write(table.entries[slot(h)].rights);
+        if (!flags.isNull()) {
+            flags.write(table.entries[slot(h)].flags);
+        }
+    }
+    unlock(t, s);
+    return obj;
+}
+
+/// Safety: `t` is an initialised table; `rights` is writable.
+@export("handle_get")
+fn get(t: *mut handle_table, h: i32, rights: *mut u32) -> *mut kobject => unsafe { getWith(t, h, rights, 0 as *mut u32) };
+
+/// Safety: `t` is an initialised table; `rights` and `flags` are writable.
+@export("handle_get_flags")
+fn getFlags(t: *mut handle_table, h: i32, rights: *mut u32, flags: *mut u32) -> *mut kobject =>
+    unsafe { getWith(t, h, rights, flags) };
+
+/// Drops the table's reference in `h`: -EBADF if the slot is empty or out of range, else the object's flush result.
+/// Safety: `t` is an initialised table.
+@export("handle_close")
+fn close(t: *mut handle_table, h: i32) -> i32 {
+    if (!inRange(h)) {
+        return -EBADF;
+    }
+    unsafe {
+        let s = lock(t);
+        let table = Ptr.toBorrowMut(t);
+        let obj = table.entries[slot(h)].obj;
+        if (obj.isNull()) {
+            unlock(t, s);
+            return -EBADF;
+        }
+        table.entries[slot(h)] = handle_entry { obj: 0 as *mut kobject, rights: 0, flags: 0 };
+        table.count -= 1;
+        let left = handlesOf(obj).fetchSubWith(1, Ordering.AcquireRelease) - 1;
+        unlock(t, s);
+
+        // The last descriptor to the object anywhere: its epoll registrations end here (docs/kernel/io/design.md,
+        // "epoll"), outside the table lock and before the put. The floor orders our decrement before its read of
+        // `watched` (tests/litmus/epoll/watched.litmus).
+        if (left == 0) {
+            handle_floor_last_closed(obj);
+        }
+
+        // The object's flush, before the put and outside the lock: its report is close's result, and the handle is
+        // gone either way (POSIX: close may fail with EIO; the descriptor is closed).
+        let rc = handle_floor_flush(obj);
+        kobject_put(obj); // outside the lock: release may block
+        return rc;
+    }
+}
+
+/// Safety: `t` is an initialised table.
+@export("handle_set_flags")
+fn setFlags(t: *mut handle_table, h: i32, flags: u32) -> i32 {
+    if (!inRange(h)) {
+        return -EBADF;
+    }
+    unsafe {
+        let s = lock(t);
+        let table = Ptr.toBorrowMut(t);
+        var rc = -EBADF;
+        if (!table.exiting && !table.entries[slot(h)].obj.isNull()) {
+            table.entries[slot(h)].flags = flags;
+            rc = 0;
+        }
+        unlock(t, s);
+        return rc;
+    }
+}
+
+/// exec: closes every handle marked HANDLE_FLAG_CLOEXEC, through handle_close.
+/// Safety: `t` is an initialised table.
+@export("handle_close_on_exec")
+fn closeOnExec(t: *mut handle_table) {
+    var h: i32 = 0;
+    while (h < HANDLE_TABLE_SIZE) {
+        unsafe {
+            let s = lock(t);
+            let entry = Ptr.toBorrow(t as *handle_table).entries[slot(h)];
+            unlock(t, s);
+            if (!entry.obj.isNull() && (entry.flags & FLAG_CLOEXEC) != 0) {
+                close(t, h); // exec has no reader for a flush's error
+            }
+        }
+        h += 1;
+    }
+}
+
+/// The rule for giving a handle to another process: the giver must hold TRANSFER on `h`, and `give` is
+/// COSMO_RIGHTS_SAME or a subset of what it holds, never more. On success `*obj` is the referenced object and
+/// `*rights` what to install it with; -EBADF for no such handle, -EPERM otherwise.
+/// Safety: `t` is an initialised table; `obj` and `rights` are writable.
+@export("handle_transfer_check")
+fn transferCheck(t: *mut handle_table, h: i32, give: u32, obj: *mut *mut kobject, rights: *mut u32) -> i32 {
+    unsafe {
+        var have: u32 = 0;
+        let o = get(t, h, borrow mut have as *mut u32);
+        if (o.isNull()) {
+            return -EBADF;
+        }
+        if ((have & RIGHT_TRANSFER) == 0 || (give != RIGHTS_SAME && (give & (have ^ 0xFFFFFFFF)) != 0)) {
+            kobject_put(o);
+            return -EPERM;
+        }
+        obj.write(o);
+        rights.write(if (give == RIGHTS_SAME) have else give);
+        return 0;
+    }
+}
+
+/// Safety: `t` is an initialised table.
+@export("handle_table_count")
+fn tableCount(t: *mut handle_table) -> u32 {
+    unsafe {
+        let s = lock(t);
+        let n = Ptr.toBorrow(t as *handle_table).count;
+        unlock(t, s);
+        return n;
+    }
+}

@@ -255,8 +255,11 @@ kernel object and handle layer (`kernel/object/object.c`, `handle.c`;
 
 Progress: the object census, `kobject_discard` and the recorded trace
 (#491); the object layer in Nova (`kernel/object/object.nova`, over
-`object_floor.c`), which gives the recorded digest (2026-10-30). Next:
-the handle table, then the fault-injection sweep.
+`object_floor.c`), which gives the recorded digest (#493, 2026-10-30);
+the handle table in Nova (`kernel/object/handle.nova`, a Nova-owned type C
+embeds by value, with novac 0.5.0's ADR 0029), which gives it too
+(2026-10-30). The hand-written C of both is gone. Next: the fault-injection
+sweep, the rest of the acceptance.
 
 Size: about 1.0x.
 

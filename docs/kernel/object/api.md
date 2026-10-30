@@ -197,7 +197,17 @@ module's type can be named after the module is gone. Raised by
   killed); `stat` reports `COSMO_DT_CHR`, mode 0620, one link. `buf` is
   kernel memory (the syscall layer bounces user data).
 
-## Handle tables (`kernel/include/kernel/handle.h`, `kernel/object/handle.c`)
+## Handle tables (`kernel/include/kernel/handle.h`, `kernel/object/handle.nova`)
+
+The table and its functions are written in Nova (`handle.nova`). `make
+nova` generates `handle.c` and `kernel/include/kernel/handle_types.h`,
+which defines `struct handle_entry` and `struct handle_table` for C (Nova
+ADR 0029: a Nova struct that holds a `spinlock_t` and an array, which C
+embeds by value). `handle.h` includes it and checks that its table has
+`HANDLE_TABLE_SIZE` slots. `handle_floor.c` keeps the flush (a call through
+the type's function pointer), the last close's fence before it reads
+`watched`, and the assertion's panic, and checks the constants
+`handle.nova` copies. The C interface is unchanged.
 
 `struct handle_table`: spinlock, `HANDLE_TABLE_SIZE` (64) entries of
 `{ struct kobject *obj; unsigned rights; unsigned flags; }` with `NULL`
