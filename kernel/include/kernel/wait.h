@@ -156,11 +156,13 @@ void wait_timeout_fired(struct timer *t, void *arg);
 bool wait_timeout_expired(const struct wait_timeout *wt);
 
 /* For the Nova ports (kernel/scheduler/wait_floor.c), which cannot hold a
- * wait entry or a timer on their stack: wait_event and wait_event_timeout
- * over a condition function, and the checks a sleeping call makes first
- * (`what` in interrupt context panics; might_sleep, naming `ip`). */
+ * wait entry or a timer on their stack: wait_event, wait_event_timeout and
+ * wait_event_killable over a condition function, and the checks a sleeping
+ * call makes first (`what` in interrupt context panics; might_sleep,
+ * naming `ip`). */
 void wait_floor_until(struct waitqueue *wq, bool (*cond)(void *), void *arg);
 bool wait_floor_until_timeout(struct waitqueue *wq, bool (*cond)(void *), void *arg, uint64_t ns);
+int wait_floor_until_killable(struct waitqueue *wq, bool (*cond)(void *), void *arg);
 void wait_floor_check_sleep(uintptr_t ip, const char *what);
 void wait_floor_loop(struct waitqueue *wq, bool (*attempt)(void *, bool), void (*woken)(void *), void *arg);
 

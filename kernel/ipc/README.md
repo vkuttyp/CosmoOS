@@ -1,7 +1,7 @@
 # kernel/ipc
 
 IPC primitives (docs/kernel/ipc/). The pipe's ring and anonymous pipes
-(`pipe.c`): a 16 KiB byte stream counting its readers and writers, EOF
+(`pipe.nova`, in Nova; `pipe_floor.c` keeps its two end types): a 16 KiB byte stream counting its readers and writers, EOF
 when the last writer goes, `EPIPE` when the last reader does, killable
 waits, atomic writes up to `PIPE_BUF` in the pipe layer; the anonymous
 pipe is two kobject ends (`pipe-read`, `pipe-write`) over one ring.

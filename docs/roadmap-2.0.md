@@ -299,7 +299,9 @@ which give it too (2026-10-30); and the mutex with its priority
 inheritance (`mutex.nova`), which gives it as well (2026-10-30). Then
 quiescence (`kernel/core/quiesce.nova`, over `quiesce_floor.c`), the
 first port drafted by Nova's `c2nova port` and finished by hand; its
-self-tests pass on both architectures (2026-10-30).
+self-tests pass on both architectures (2026-10-30). Then the pipe's ring
+and anonymous pipes (`kernel/ipc/pipe.nova`, over `pipe_floor.c` and a
+killable wait in `wait_floor.c`; 2026-10-31).
 
 Size: about 1.5x.
 

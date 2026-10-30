@@ -171,7 +171,7 @@ Calls 23–31 translate to `kernel-services/network/socket.c` (`ksock_*`,
 `kill`, `pipe`, `dup`, `getppid`, `chdir`, `getcwd`, `procinfo`, `klog`,
 `sysctl`) translate to `kernel/process/` (`process_spawn`,
 `process_wait_child`, `process_kill`, `process_chdir`, `process_info`),
-`kernel/ipc/pipe.c` (`pipe_create`), the handle table (`handle_get`,
+`kernel/ipc/pipe.nova` (`pipe_create`), the handle table (`handle_get`,
 `handle_install`, `handle_install_at`, `handle_close` for `dup`),
 `kernel/core/log.c` (`klog_copy`) and a static table of read-only values
 in `native.c` (`sysctl`). `sys_spawn` copies the whole request (path,

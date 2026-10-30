@@ -400,9 +400,10 @@ nova` generates `completion.c` and `completion_types.h`, which
 `done` was a `bool` (lib/core's atomic flag is four bytes); it sits where
 the `bool` and its padding were, so the layout is unchanged.
 
-The Nova ports wait through `wait_floor_until` and
-`wait_floor_until_timeout` (`wait.h`), `wait_event` and
-`wait_event_timeout` over a condition function, since a wait entry is C
+The Nova ports wait through `wait_floor_until`,
+`wait_floor_until_timeout` and `wait_floor_until_killable` (`wait.h`),
+`wait_event`, `wait_event_timeout` and `wait_event_killable` (0 or
+-EINTR; the pipe's waits) over a condition function, since a wait entry is C
 state a Nova local cannot hold; `wait_floor_check_sleep` makes a sleeping
 call's checks with the caller's address.
 

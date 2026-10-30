@@ -1,0 +1,443 @@
+// The pipe's ring, and anonymous pipes over it (kernel/include/kernel/pipe.h, docs/kernel/ipc/design.md), in Nova
+// (roadmap 2.0 SA3). struct pipe and struct pipe_stats are Nova's, generated into kernel/include/kernel/pipe_types.h,
+// which pipe.h includes (Nova ADR 0029, 0030); so are the anonymous pipe's end and pair, which only this file uses.
+// The killable waits go through wait_floor.c, since a wait entry is C state no Nova local may hold; pipe_floor.c keeps
+// the two end types, whose operations are this file's exported functions.
+//
+// One spinlock per ring, never held while blocking or while touching user memory (the system-call layer copies through
+// a kernel buffer). Waits are killable: a blocked reader or writer whose process is killed returns -EINTR. The ring
+// counts readers and writers and does not know who they are: the anonymous pipe's two end objects count themselves
+// here, a named pipe (fifo.c) counts its opens.
+//
+// It was first drafted by Nova's c2nova (docs/tooling.md §9.4), then written over by hand.
+
+@header("kernel/kmalloc.h", "kernel/object.h", "kernel/spinlock.h", "kernel/string.h", "kernel/thread.h", "kernel/wait.h", "uapi/cosmo/syscall.h")
+extern "C" {
+    @ctype("spinlock_t")
+    struct spinlock_t;
+    struct waitqueue;
+    struct kobject;
+    struct kobject_type;
+    struct cosmo_stat {
+        @cname("type")
+        type_: u32;
+        mode: u32;
+        nlink: u32;
+        size: u64;
+    }
+
+    @constant
+    fn SPINLOCK_INIT(name: *CChar) -> spinlock_t;
+    fn spinlock_init(lock: *mut spinlock_t, name: *CChar);
+    fn spin_lock_irqsave(lock: *mut spinlock_t) -> usize;
+    fn spin_unlock_irqrestore(lock: *mut spinlock_t, state: usize);
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn waitqueue_wake_all(wq: *mut waitqueue) -> u32;
+    fn wait_floor_until_killable(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void) -> i32;
+    fn io_nonblocking(nonblock: bool) -> bool;
+    fn kobject_init(obj: *mut kobject, t: *kobject_type);
+    fn kmalloc(size: usize, flags: u32) -> *mut void;
+    fn kzalloc(size: usize) -> *mut void;
+    fn kfree(p: *mut void);
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(dst: *mut void, c: i32, n: usize) -> *mut void;
+}
+
+// pipe_floor.c's: the two end types, which hold this file's exported operations below.
+extern "C" {
+    fn pipe_floor_read_type() -> *kobject_type;
+    fn pipe_floor_write_type() -> *kobject_type;
+}
+
+// pipe.h's and the headers' constants, which pipe_floor.c checks.
+const PIPE_SIZE: u32 = 16384; // ring capacity
+const PIPE_BUF: u32 = 4096; // writes up to this size are never interleaved
+const COSMO_IO_READABLE: u32 = 1;
+const COSMO_IO_WRITABLE: u32 = 2;
+const COSMO_IO_HANGUP: u32 = 4;
+const COSMO_IO_ERROR: u32 = 8;
+const COSMO_DT_FIFO: u32 = 4;
+const EAGAIN: i64 = 11;
+const ENOMEM: i32 = 12;
+const EPIPE: i64 = 32;
+
+/// The ring. `readers` and `writers` are the live readers and writers, whatever they are (end objects, or a FIFO's
+/// opens); the ring gives end of file when `writers` is zero and the ring is empty, and -EPIPE when `readers` is zero. A
+/// client changes the counts under `lock` and wakes the queue the other side sleeps on: `wr_wq` when a reader goes
+/// (writers learn -EPIPE), `rd_wq` when a writer goes (readers learn EOF). The lock is a leaf: never held while
+/// blocking or touching user memory.
+@repr(C)
+struct pipe {
+    lock: spinlock_t;
+    buf: *mut u8;
+    head: u32;
+    tail: u32;
+    used: u32;
+    readers: u32;
+    writers: u32;
+    rd_wq: waitqueue;
+    wr_wq: waitqueue;
+}
+
+@repr(C)
+struct pipe_stats {
+    created: u64; // rings (anonymous and named)
+    alive: u64;
+    bytes: u64; // bytes read
+}
+
+/// An anonymous pipe's end: one reader or one writer for as long as it lives.
+@repr(C)
+struct pipe_end {
+    obj: kobject;
+    pair: *mut pipe_pair;
+    nonblock: u32; // this end's mode, shared by every handle to it; accessed atomically (a bool in the C)
+}
+
+@repr(C)
+struct pipe_pair {
+    ring: *mut pipe;
+    rd: pipe_end;
+    wr: pipe_end;
+}
+
+static mut g_stats: pipe_stats = pipe_stats { created: 0, alive: 0, bytes: 0 };
+static mut g_stats_lock: spinlock_t = SPINLOCK_INIT("pipe-stats\0".ptr as *CChar);
+
+/// Safety: `f` is one of g_stats's fields.
+unsafe fn stat_add(f: *mut u64, d: i64) {
+    let s = spin_lock_irqsave(borrow mut g_stats_lock as *mut spinlock_t);
+    f.write(f.read().wrappingAdd(truncate<u64>(d)));
+    spin_unlock_irqrestore(borrow mut g_stats_lock as *mut spinlock_t, s);
+}
+
+/// Safety: `p` is a live ring.
+unsafe fn lockOf(p: *mut pipe) -> *mut spinlock_t => borrow mut Ptr.toBorrowMut(p).lock as *mut spinlock_t;
+
+/// Safety: `p` is a live ring.
+unsafe fn readQueue(p: *mut pipe) -> *mut waitqueue => borrow mut Ptr.toBorrowMut(p).rd_wq as *mut waitqueue;
+
+/// Safety: `p` is a live ring.
+unsafe fn writeQueue(p: *mut pipe) -> *mut waitqueue => borrow mut Ptr.toBorrowMut(p).wr_wq as *mut waitqueue;
+
+// --- the ring --------------------------------------------------------------------------------------------------------
+
+/// A ring with no readers and no writers; null when out of memory.
+/// Safety: the caller may allocate.
+@export("pipe_ring_alloc")
+unsafe fn ringAlloc() -> *mut pipe {
+    let p = kzalloc(layoutOf<pipe>().size) as *mut pipe;
+    if (p.isNull()) {
+        return p;
+    }
+    let buf = kmalloc(PIPE_SIZE as usize, 0) as *mut u8;
+    if (buf.isNull()) {
+        kfree(p as *mut void);
+        return 0 as *mut pipe;
+    }
+    let ring = Ptr.toBorrowMut(p);
+    ring.buf = buf;
+    spinlock_init(lockOf(p), "pipe\0".ptr as *CChar);
+    waitqueue_init(readQueue(p), "pipe-rd\0".ptr as *CChar);
+    waitqueue_init(writeQueue(p), "pipe-wr\0".ptr as *CChar);
+    stat_add(borrow mut g_stats.created as *mut u64, 1);
+    stat_add(borrow mut g_stats.alive as *mut u64, 1);
+    return p;
+}
+
+/// Safety: the counts are both zero: nothing is left that could reach `p`.
+@export("pipe_ring_free")
+unsafe fn ringFree(p: *mut pipe) {
+    kfree(Ptr.toBorrow(p as *pipe).buf as *mut void);
+    kfree(p as *mut void);
+    stat_add(borrow mut g_stats.alive as *mut u64, -1);
+}
+
+/// A reader's wait: bytes to read, or no writer left. Read without the lock, as wait_event's condition is.
+/// Safety: `arg` is a live ring.
+@callback
+unsafe fn readable(arg: *mut void) -> bool {
+    let p = Ptr.toBorrow(arg as *pipe);
+    return p.used > 0 || p.writers == 0;
+}
+
+/// A writer's wait: room for `need` bytes, or no reader left.
+struct WriteWait {
+    p: *mut pipe;
+    need: u32;
+}
+
+/// Safety: `arg` is a live WriteWait whose ring is live.
+@callback
+unsafe fn writable(arg: *mut void) -> bool {
+    let w = Ptr.toBorrow(arg as *WriteWait);
+    let p = Ptr.toBorrow(w.p as *pipe);
+    return PIPE_SIZE - p.used >= w.need || p.readers == 0;
+}
+
+/// Returns 0 only when the ring is empty and no writer remains, -EAGAIN when non-blocking and empty with a writer.
+/// `nonblock` is the caller's mode (the thread's I/O-ring mode is applied inside).
+/// Safety: `p` is a live ring, `buf` has room for `len` bytes, and unless non-blocking the caller may sleep.
+@export("pipe_ring_read")
+unsafe fn ringRead(p: *mut pipe, buf: *mut void, len: usize, nonblock: bool) -> i64 {
+    if (len == 0) {
+        return 0;
+    }
+    if (!io_nonblocking(nonblock)) {
+        let rc = wait_floor_until_killable(readQueue(p), readable, p as *mut void);
+        if (rc != 0) {
+            return rc as i64;
+        }
+    }
+    let s = spin_lock_irqsave(lockOf(p));
+    let ring = Ptr.toBorrowMut(p);
+    if (ring.used == 0 && ring.writers > 0) {
+        spin_unlock_irqrestore(lockOf(p), s);
+        return -EAGAIN; // non-blocking and empty
+    }
+    let n: u32 = if ((ring.used as usize) < len) ring.used else truncate<u32>(len);
+    var first = PIPE_SIZE - ring.head;
+    if (first > n) {
+        first = n;
+    }
+    memcpy(buf, ring.buf.add(ring.head as usize) as *void, first as usize);
+    memcpy((buf as *mut u8).add(first as usize) as *mut void, ring.buf as *void, (n - first) as usize);
+    ring.head = (ring.head + n) % PIPE_SIZE;
+    ring.used -= n;
+    spin_unlock_irqrestore(lockOf(p), s);
+    if (n > 0) {
+        waitqueue_wake_all(writeQueue(p));
+        stat_add(borrow mut g_stats.bytes as *mut u64, n as i64);
+    }
+    return n as i64; // 0 only when drained and no writer remains
+}
+
+/// Returns -EPIPE with no reader and lands at most PIPE_BUF bytes whole; a non-blocking write that cannot fit returns
+/// what it wrote or -EAGAIN.
+/// Safety: `p` is a live ring, `buf` holds `len` bytes, and unless non-blocking the caller may sleep.
+@export("pipe_ring_write")
+unsafe fn ringWrite(p: *mut pipe, buf: *void, len: usize, nonblock: bool) -> i64 {
+    if (Ptr.toBorrow(p as *pipe).readers == 0) {
+        return -EPIPE;
+    }
+    if (len == 0) {
+        return 0;
+    }
+    let nb = io_nonblocking(nonblock);
+    var done: usize = 0;
+    while (done < len) {
+        let left = len - done;
+        let need: u32 = if (left <= PIPE_BUF as usize) truncate<u32>(left) else 1; // small writes land whole
+        if (!nb) {
+            var w = WriteWait { p: p, need: need };
+            let rc = wait_floor_until_killable(writeQueue(p), writable, borrow mut w as *mut WriteWait as *mut void);
+            if (rc != 0) {
+                return if (done != 0) truncate<i64>(done) else rc as i64;
+            }
+        }
+        let s = spin_lock_irqsave(lockOf(p));
+        let ring = Ptr.toBorrowMut(p);
+        if (ring.readers == 0) {
+            spin_unlock_irqrestore(lockOf(p), s);
+            return if (done != 0) truncate<i64>(done) else -EPIPE;
+        }
+        let space = PIPE_SIZE - ring.used;
+        if (space < need) {
+            spin_unlock_irqrestore(lockOf(p), s);
+            if (nb) {
+                return if (done != 0) truncate<i64>(done) else -EAGAIN;
+            }
+            continue; // another writer got there first
+        }
+        let n: u32 = if (left < space as usize) truncate<u32>(left) else space;
+        var first = PIPE_SIZE - ring.tail;
+        if (first > n) {
+            first = n;
+        }
+        let from = (buf as *u8).add(done);
+        memcpy(ring.buf.add(ring.tail as usize) as *mut void, from as *void, first as usize);
+        memcpy(ring.buf as *mut void, from.add(first as usize) as *void, (n - first) as usize);
+        ring.tail = (ring.tail + n) % PIPE_SIZE;
+        ring.used += n;
+        spin_unlock_irqrestore(lockOf(p), s);
+        waitqueue_wake_all(readQueue(p));
+        done += n as usize;
+    }
+    return truncate<i64>(done);
+}
+
+/// READABLE with bytes, READABLE|HANGUP with no writer.
+/// Safety: `p` is a live ring.
+@export("pipe_ring_ready_rd")
+unsafe fn ringReadyRead(p: *mut pipe) -> u32 {
+    var r: u32 = 0;
+    let s = spin_lock_irqsave(lockOf(p));
+    let ring = Ptr.toBorrow(p as *pipe);
+    if (ring.used > 0) {
+        r |= COSMO_IO_READABLE;
+    }
+    if (ring.writers == 0) {
+        r |= COSMO_IO_READABLE | COSMO_IO_HANGUP; // EOF reads at once
+    }
+    spin_unlock_irqrestore(lockOf(p), s);
+    return r;
+}
+
+/// WRITABLE with PIPE_BUF free, WRITABLE|ERROR with no reader.
+/// Safety: `p` is a live ring.
+@export("pipe_ring_ready_wr")
+unsafe fn ringReadyWrite(p: *mut pipe) -> u32 {
+    var r: u32 = 0;
+    let s = spin_lock_irqsave(lockOf(p));
+    let ring = Ptr.toBorrow(p as *pipe);
+    if (PIPE_SIZE - ring.used >= PIPE_BUF) {
+        r |= COSMO_IO_WRITABLE;
+    }
+    if (ring.readers == 0) {
+        r |= COSMO_IO_WRITABLE | COSMO_IO_ERROR; // -EPIPE at once
+    }
+    spin_unlock_irqrestore(lockOf(p), s);
+    return r;
+}
+
+// --- the anonymous pipe: two end objects over one ring ---------------------------------------------------------------
+
+/// container_of(obj, struct pipe_end, obj).
+/// Safety: `obj` is a live end's object.
+unsafe fn endOf(obj: *mut kobject) -> *mut pipe_end => (obj as *mut u8).sub(offsetOf<pipe_end>(obj)) as *mut pipe_end;
+
+/// Safety: `obj` is a live end's object.
+unsafe fn ringOf(obj: *mut kobject) -> *mut pipe => Ptr.toBorrow(Ptr.toBorrow(endOf(obj) as *pipe_end).pair as *pipe_pair).ring;
+
+/// An atomic view of an end's mode.
+/// Safety: `e` is a live end, whose `nonblock` is only ever accessed atomically.
+unsafe fn nonblockOf(e: *mut pipe_end) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(e).nonblock as *mut u32 as *AtomicU32);
+
+/// An end's release takes its count off the ring under the ring's lock; whichever release sees both counts at zero
+/// frees the ring and the pair (the other end is already gone, so nothing reaches either).
+/// Safety: `obj` is an end's object whose last reference was just put.
+unsafe fn endRelease(obj: *mut kobject, reader: bool) {
+    let pair = Ptr.toBorrow(endOf(obj) as *pipe_end).pair;
+    let p = Ptr.toBorrow(pair as *pipe_pair).ring;
+    let s = spin_lock_irqsave(lockOf(p));
+    let ring = Ptr.toBorrowMut(p);
+    if (reader) {
+        ring.readers -= 1;
+    } else {
+        ring.writers -= 1;
+    }
+    let last = ring.readers == 0 && ring.writers == 0;
+    spin_unlock_irqrestore(lockOf(p), s);
+    waitqueue_wake_all(if (reader) writeQueue(p) else readQueue(p)); // writers learn -EPIPE; readers EOF
+    if (last) {
+        ringFree(p);
+        kfree(pair as *mut void);
+    }
+}
+
+/// Safety: as endRelease.
+@export("pipe_read_end_release")
+unsafe fn readEndRelease(obj: *mut kobject) {
+    endRelease(obj, true);
+}
+
+/// Safety: as endRelease.
+@export("pipe_write_end_release")
+unsafe fn writeEndRelease(obj: *mut kobject) {
+    endRelease(obj, false);
+}
+
+/// Safety: `obj` is a live read end, as ringRead.
+@export("pipe_end_read")
+unsafe fn endRead(obj: *mut kobject, buf: *mut void, len: usize) -> i64 {
+    let e = endOf(obj);
+    let nonblock = nonblockOf(e).loadWith(LoadOrdering.Relaxed) != 0;
+    return ringRead(Ptr.toBorrow(Ptr.toBorrow(e as *pipe_end).pair as *pipe_pair).ring, buf, len, nonblock);
+}
+
+/// Safety: `obj` is a live write end, as ringWrite.
+@export("pipe_end_write")
+unsafe fn endWrite(obj: *mut kobject, buf: *void, len: usize) -> i64 {
+    let e = endOf(obj);
+    let nonblock = nonblockOf(e).loadWith(LoadOrdering.Relaxed) != 0;
+    return ringWrite(Ptr.toBorrow(Ptr.toBorrow(e as *pipe_end).pair as *pipe_pair).ring, buf, len, nonblock);
+}
+
+/// Safety: `obj` is a live end and `st` writable.
+@export("pipe_end_stat")
+unsafe fn endStat(obj: *mut kobject, st: *mut cosmo_stat) -> i32 {
+    let p = ringOf(obj);
+    memset(st as *mut void, 0, layoutOf<cosmo_stat>().size);
+    let stat = Ptr.toBorrowMut(st);
+    stat.type_ = COSMO_DT_FIFO;
+    stat.mode = 0o600;
+    stat.nlink = 1;
+    let s = spin_lock_irqsave(lockOf(p));
+    stat.size = Ptr.toBorrow(p as *pipe).used as u64;
+    spin_unlock_irqrestore(lockOf(p), s);
+    return 0;
+}
+
+/// Safety: `obj` is a live end.
+@export("pipe_end_read_ready")
+unsafe fn endReadReady(obj: *mut kobject) -> u32 => ringReadyRead(ringOf(obj));
+
+/// Safety: `obj` is a live end.
+@export("pipe_end_write_ready")
+unsafe fn endWriteReady(obj: *mut kobject) -> u32 => ringReadyWrite(ringOf(obj));
+
+/// Safety: `obj` is a live end.
+@export("pipe_end_read_poll_wq")
+unsafe fn endReadPollQueue(obj: *mut kobject, events: u32) -> *mut waitqueue => readQueue(ringOf(obj));
+
+/// Safety: `obj` is a live end.
+@export("pipe_end_write_poll_wq")
+unsafe fn endWritePollQueue(obj: *mut kobject, events: u32) -> *mut waitqueue => writeQueue(ringOf(obj));
+
+/// The mode before; `on` below zero only asks.
+/// Safety: `obj` is a live end.
+@export("pipe_end_set_nonblock")
+unsafe fn endSetNonblock(obj: *mut kobject, on: i32) -> i32 {
+    let mode = nonblockOf(endOf(obj));
+    let was: i32 = if (mode.loadWith(LoadOrdering.Relaxed) != 0) 1 else 0;
+    if (on >= 0) {
+        mode.storeWith(if (on != 0) 1 else 0, StoreOrdering.Relaxed);
+    }
+    return was;
+}
+
+/// Creates an anonymous pipe: the two referenced end objects (one reference each, owned by the caller), or -ENOMEM.
+/// Safety: both outputs are writable, and the caller may allocate.
+@export("pipe_create")
+unsafe fn create(read_end: *mut *mut kobject, write_end: *mut *mut kobject) -> i32 {
+    let pair = kzalloc(layoutOf<pipe_pair>().size) as *mut pipe_pair;
+    if (pair.isNull()) {
+        return -ENOMEM;
+    }
+    let ring = ringAlloc();
+    if (ring.isNull()) {
+        kfree(pair as *mut void);
+        return -ENOMEM;
+    }
+    let both = Ptr.toBorrowMut(pair);
+    both.ring = ring;
+    kobject_init(borrow mut both.rd.obj as *mut kobject, pipe_floor_read_type());
+    kobject_init(borrow mut both.wr.obj as *mut kobject, pipe_floor_write_type());
+    both.rd.pair = pair;
+    both.wr.pair = pair;
+    let counts = Ptr.toBorrowMut(ring);
+    counts.readers = 1;
+    counts.writers = 1;
+    read_end.write(borrow mut both.rd.obj as *mut kobject);
+    write_end.write(borrow mut both.wr.obj as *mut kobject);
+    return 0;
+}
+
+/// Safety: `out` is writable.
+@export("pipe_get_stats")
+unsafe fn getStats(out: *mut pipe_stats) {
+    let s = spin_lock_irqsave(borrow mut g_stats_lock as *mut spinlock_t);
+    out.write(g_stats);
+    spin_unlock_irqrestore(borrow mut g_stats_lock as *mut spinlock_t, s);
+}

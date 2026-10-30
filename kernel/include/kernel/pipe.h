@@ -22,25 +22,18 @@
 #define PIPE_BUF  4096u    /* writes up to this size are never interleaved */
 
 /*
- * The ring. `readers` and `writers` are the live readers and writers,
- * whatever they are (end objects, or a FIFO's opens); the ring gives end
- * of file when `writers` is zero and the ring is empty, and -EPIPE when
- * `readers` is zero. A client changes the counts under `lock` and wakes
- * the queue the other side sleeps on: `wr_wq` when a reader goes (writers
- * learn -EPIPE), `rd_wq` when a writer goes (readers learn EOF). The
- * lock is a leaf: never held while blocking or touching user memory.
+ * The ring, `struct pipe`, and `struct pipe_stats` are Nova's
+ * (kernel/ipc/pipe.nova, roadmap 2.0 SA3), generated into pipe_types.h. The
+ * ring's `readers` and `writers` are the live readers and writers, whatever
+ * they are (end objects, or a FIFO's opens); the ring gives end of file
+ * when `writers` is zero and the ring is empty, and -EPIPE when `readers`
+ * is zero. A client changes the counts under `lock` and wakes the queue
+ * the other side sleeps on: `wr_wq` when a reader goes (writers learn
+ * -EPIPE), `rd_wq` when a writer goes (readers learn EOF). The lock is a
+ * leaf: never held while blocking or touching user memory. The stats count
+ * rings (anonymous and named) created and alive, and bytes read.
  */
-struct pipe {
-    spinlock_t lock;
-    uint8_t *buf;
-    unsigned head, tail, used;
-    unsigned readers, writers;
-    struct waitqueue rd_wq, wr_wq;
-};
-
-struct pipe_stats {
-    uint64_t created, alive, bytes;   /* rings (anonymous and named), and bytes read */
-};
+#include <kernel/pipe_types.h>
 
 /* A ring with no readers and no writers; NULL when out of memory. */
 struct pipe *pipe_ring_alloc(void);

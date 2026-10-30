@@ -11,11 +11,18 @@ lifetime) and invariant 14 (validate untrusted input).
    user process       pipe(h[2]); write(h[1]) in one process, read(h[0]) in another
         │             kernel/syscall/native.c → handle table → pipe end kobjects
         ▼
-   kernel/ipc/pipe.c   one buffer, two ends: `pipe_read` and `pipe_write` kobjects
+   kernel/ipc/pipe.nova  one buffer, two ends: `pipe-read` and `pipe-write` kobjects
         │
    kernel/object/      kobject refcounts, handle rights (READ on the read end, WRITE on the write end)
    kernel/scheduler/   wait queues (killable waits)
 ```
+
+The ring and the anonymous pipe are Nova (roadmap 2.0 SA3): `make nova`
+generates `pipe.c` and `kernel/include/kernel/pipe_types.h` (`struct
+pipe`, `struct pipe_stats`, and the anonymous pipe's end and pair), which
+`pipe.h` includes. The killable waits go through the wait floor's
+`wait_floor_until_killable`; `pipe_floor.c` keeps the two end types,
+constant C objects holding `pipe.nova`'s exported operations.
 
 A pipe is the first IPC primitive; Phase 11 added the second, the futex
 (`kernel/ipc/futex.c`: wait on and wake by a 32-bit user word, keyed by
