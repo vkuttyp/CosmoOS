@@ -18,6 +18,7 @@
 #include <kernel/panic.h>
 #include <kernel/printf.h>
 #include <kernel/process.h>
+#include <kernel/object.h>
 #include <kernel/thread.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
@@ -450,6 +451,56 @@ static bool selftest_watchdog_rearm(const char **reason)
     kinfo("selftest: watchdog-rearm: armed afresh at %llu ms after the previous test fired it",
           (unsigned long long)(period / 1000000));
     return true;
+}
+
+/*
+ * Objects a test leaves alive on purpose, by type (docs/kernel/object/
+ * testing.md, "The object census"). Anything else a test leaves fails it.
+ */
+static const struct census_allowance {
+    const char *test;
+    const char *type;
+    const char *why;
+} census_allowed[] = {
+    { "process-user", "vnode", "the files the user-mode suite creates stay on the root filesystem" },
+    { "process-user", "mount", "a mount the user-mode suite leaves (docs/kernel/object/testing.md, Gaps)" },
+    { "process-user", "process", "one process object, not yet attributed (docs/kernel/object/testing.md, Gaps)" },
+    { "syscall-fuzz", "vnode", "the files twenty thousand random system calls create stay on the root filesystem" },
+};
+
+static bool census_allows(const char *test, const char *type)
+{
+    for (size_t k = 0; k < sizeof(census_allowed) / sizeof(census_allowed[0]); k++)
+        if (strcmp(census_allowed[k].test, test) == 0 && strcmp(census_allowed[k].type, type) == 0)
+            return true;
+    return false;
+}
+
+/* The object census around a test (roadmap 2.0 SA2): what it created it
+ * released, type by type: no type may end with more live objects. A release may come after the test returns (a
+ * reaped process's handles, a deferred free), so it is given two seconds. */
+static bool census_unchanged(const char *test, const int64_t before[KOBJECT_CENSUS_TYPES],
+                             int64_t after[KOBJECT_CENSUS_TYPES])
+{
+    bool clean = false;
+    for (uint64_t w0 = clock_now_ns();; thread_sleep_ns(1000ull * 1000)) {
+        kobject_census_by_type(after);
+        clean = true;
+        for (unsigned k = 0; k < KOBJECT_CENSUS_TYPES && clean; k++)
+            clean = after[k] <= before[k] || census_allows(test, kobject_census_name(k));
+        if (clean || clock_since_ns(w0) >= 2000ull * 1000 * 1000)
+            break;
+    }
+    for (unsigned k = 0; k < KOBJECT_CENSUS_TYPES; k++) {
+        if (after[k] > before[k] && !census_allows(test, kobject_census_name(k)))
+            kerror("selftest: %s left kernel objects of type %s: %lld live before it, %lld after", test,
+                   kobject_census_name(k), (long long)before[k], (long long)after[k]);
+        else if (after[k] < before[k])   /* released what it did not create: a removal it made, or an earlier
+                                           * test's release arriving late; a leak is only ever more */
+            kinfo("selftest: %s: kernel objects of type %s: %lld live before it, %lld after", test,
+                  kobject_census_name(k), (long long)before[k], (long long)after[k]);
+    }
+    return clean;
 }
 
 static const struct selftest tests[] = {
@@ -1235,6 +1286,8 @@ int selftest_run_all(void)
          * becomes the next test's starting point -- blamed once. */
         static struct nettest_census net_before, net_after;
         nettest_census(&net_before);
+        static int64_t objects_before[KOBJECT_CENSUS_TYPES], objects_after[KOBJECT_CENSUS_TYPES];
+        kobject_census_by_type(objects_before);
         g_defer_overflow = false;
         bool ok = tests[i].fn(&reason);
         unsigned released = run_defers();
@@ -1261,6 +1314,10 @@ int selftest_run_all(void)
                 ok = false;
                 reason = "a process it spawned outlived it (P33)";
             }
+        }
+        if (!census_unchanged(tests[i].name, objects_before, objects_after) && ok) {
+            ok = false;
+            reason = "it left kernel objects alive (the object census)";
         }
         nettest_census(&net_after);
         if (!nettest_census_equal(&net_before, &net_after)) {

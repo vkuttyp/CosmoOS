@@ -3665,4 +3665,18 @@ See the [history index](README.md).
     with 0.3.0, found that Nova's `ObjectCache` passed an alignment below
     `KMALLOC_MIN_ALIGN`, which `kmem_cache_create` refuses; 0.3.1 fixes it.
   - Report: `docs/audit/2026-10-29-novac-0.3.1-report.md`.
+- **The object census and a recorded handle trace: SA2's first PR
+  (2026-10-30).**
+  - Roadmap 2.0 SA2 converts the object and handle layer to Nova; its
+    acceptance needs a census and a differential test, which this adds
+    first, in C.
+  - `kobject_census`: kobjects initialised and not yet released, by type.
+    Every self-test must leave each type no higher (2 s for late
+    releases), except four listed leftovers with reasons.
+  - It found creation failures that freed an initialised object by hand
+    (`process_unbuild`, `vcpu_create`; now `kobject_discard`) and seven
+    tests that never dropped a creator's reference or left a node behind.
+  - `tests/host/test_handles.c`: the layer on the host, and a seeded trace
+    of 10,000 operations whose digest a Nova version must reproduce.
+  - Report: `docs/audit/2026-10-30-sa2-census-report.md`.
 

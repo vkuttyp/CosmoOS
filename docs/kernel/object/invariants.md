@@ -35,7 +35,11 @@ through 1 → 2 → 1 → 0. Gap: no test drives any of the panic paths.
 **OB2. `type->release` runs exactly once per object, from the drop that
 reached zero, on the dropping thread.** Only `kobject_release_final`
 calls it, and only `kobject_put` (on an old value of 1) and a caller of
-`kobject_put_and_lock` that got `true` call that. Check: `objects`
+`kobject_put_and_lock` that got `true` call that. An object that was
+never published is the one exception: its creator may undo it with
+`kobject_discard` (count 1) and free it, and no release runs. The object
+census (`testing.md`) checks that every object initialised is released
+or discarded. Check: `objects`
 (`released` is 0 after the first of two puts and 1 after the second;
 after `handle_table_destroy` and the creator's put, 1 again);
 `blk-lifetime`, `net-netif-lifetime` and `module-unload-busy` count

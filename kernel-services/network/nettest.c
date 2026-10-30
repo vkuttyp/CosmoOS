@@ -11798,6 +11798,7 @@ bool selftest_net_dhcp_client(const char **reason)
 
     /* (9) Unregistering stops the client: no state, no lease listed. */
     nt_netif_unregister(&f.nif);
+    kobject_put(&f.nif.obj);   /* the creator's reference (netif_register), as the other tests drop it */
     CHECK(dhcp_test_state(&f.nif) == 0 && !dhcpt_lease(&f.nif, &li));
     dhcp_get_stats(&st1);
     CHECK(st1.acks == st0.acks + 2 && st1.naks == st0.naks + 1 && st1.expiries == st0.expiries + 1);

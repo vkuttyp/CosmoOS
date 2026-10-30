@@ -41,6 +41,7 @@ int vcpu_create(struct vm *vm, unsigned index, struct vcpu **out)
     v->index = index;
     int rc = arch_hv_vcpu_create(vm->arch, index, &v->arch);
     if (rc) {
+        kobject_discard(&v->obj);   /* never published */
         kfree(v);
         return rc;
     }
@@ -52,6 +53,7 @@ int vcpu_create(struct vm *vm, unsigned index, struct vcpu **out)
     if (vm->vcpus[index] != NULL) {
         mutex_unlock(&vm->lock);
         arch_hv_vcpu_destroy(v->arch);
+        kobject_discard(&v->obj);   /* never published */
         kfree(v);
         return -EEXIST;
     }
