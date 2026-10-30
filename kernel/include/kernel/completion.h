@@ -18,11 +18,11 @@
 #include <kernel/spinlock.h>
 #include <kernel/wait.h>
 
-struct completion {
-    spinlock_t lock;
-    bool done;
-    struct waitqueue wq;
-};
+/* struct completion { lock; done (a u32: set once under `lock`, read
+ * atomically); wq; } is defined in Nova (kernel/scheduler/completion.nova)
+ * and generated into completion_types.h (roadmap 2.0 SA3; Nova ADR 0029,
+ * 0030). */
+#include <kernel/completion_types.h>
 
 void completion_init(struct completion *c, const char *name);
 void complete(struct completion *c);

@@ -293,7 +293,9 @@ one-CPU scheduler, 300 seeds per workload, with a recorded trace digest
 the Nova versions must reproduce. It found a spurious priority-donation
 cycle warning after a mutex handoff, fixed in `mutex.c`. Then the wait
 queues in Nova (`kernel/scheduler/wait.nova`, over `wait_floor.c`; novac
-0.6.0's ADR 0030), which give the recorded digest (2026-10-30).
+0.6.0's ADR 0030), which give the recorded digest (2026-10-30); and the
+completions and semaphores in Nova (`completion.nova`, `semaphore.nova`),
+which give it too (2026-10-30).
 
 Size: about 1.5x.
 

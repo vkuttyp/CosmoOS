@@ -63,6 +63,10 @@ PORTS = [
      "kernel/include/kernel/handle_types.h", False),
     ("kernel/scheduler/wait.nova", "kernel/scheduler/wait.c", "Wait queues (wait.h)",
      "kernel/include/kernel/wait_types.h", False),
+    ("kernel/scheduler/completion.nova", "kernel/scheduler/completion.c", "One-shot completions (completion.h)",
+     "kernel/include/kernel/completion_types.h", False),
+    ("kernel/scheduler/semaphore.nova", "kernel/scheduler/semaphore.c", "Counting semaphores (semaphore.h)",
+     "kernel/include/kernel/semaphore_types.h", False),
     ("kernel/nova/kcore_test.nova", "kernel/nova/kcore_test.c",
      "The boot self-test of Nova's kernel library (selftest nova-kcore)", None, True),
 ]

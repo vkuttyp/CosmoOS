@@ -29,9 +29,15 @@ void wait_floor_fatal(const char *what);
  * waitqueue_prepare passes as its caller's address), and the thread. */
 struct thread *wait_floor_enter_sleep(uintptr_t ip)
 {
-    struct percpu *pc = raw_this_cpu();   /* identity: irq_depth and the thread are the same wherever it runs */
+    wait_floor_check_sleep(ip, "wait_event");
+    return raw_this_cpu()->current;   /* identity: the thread is the same wherever it runs */
+}
+
+void wait_floor_check_sleep(uintptr_t ip, const char *what)
+{
+    struct percpu *pc = raw_this_cpu();   /* identity: irq_depth is the same wherever a sleeper runs */
     if (pc->irq_depth != 0)
-        panic("wait_event in interrupt context");
+        panic("%s in interrupt context", what);
     if (pc->preempt_count != 0 || pc->irq_depth != 0) {   /* might_sleep, with the caller's address */
         if (CONFIG_LOCKDEP)
             lockdep_might_sleep(ip);
@@ -39,7 +45,18 @@ struct thread *wait_floor_enter_sleep(uintptr_t ip)
             panic("sleeping call with preemption disabled (count %d) or in interrupt (depth %u)", pc->preempt_count,
                   pc->irq_depth);
     }
-    return pc->current;
+}
+
+/* wait_event and wait_event_timeout for Nova ports, whose wait entry and
+ * timer must be C's stack objects (a Nova local cannot hold C state). */
+void wait_floor_until(struct waitqueue *wq, bool (*cond)(void *), void *arg)
+{
+    wait_event(wq, cond(arg));
+}
+
+bool wait_floor_until_timeout(struct waitqueue *wq, bool (*cond)(void *), void *arg, uint64_t ns)
+{
+    return wait_event_timeout(wq, cond(arg), ns);
 }
 
 void wait_floor_set_waiting_on(struct thread *t, struct waitqueue *wq)

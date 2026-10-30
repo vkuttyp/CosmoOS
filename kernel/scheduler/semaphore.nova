@@ -1,0 +1,90 @@
+// Counting semaphores on a wait queue (kernel/include/kernel/semaphore.h), in Nova (roadmap 2.0 SA3). struct semaphore
+// is Nova's, generated into kernel/include/kernel/semaphore_types.h, which semaphore.h includes (Nova ADR 0029, 0030);
+// its wait queue is the C type that wait.nova defines. The wait goes through wait_floor.c's wait_event helper, since a
+// wait entry is C state no Nova local may hold.
+//
+// The C this replaces is held to tests/host/test_sync.c's recorded trace.
+
+@header("kernel/spinlock.h", "kernel/wait.h")
+extern "C" {
+    @ctype("spinlock_t")
+    struct spinlock_t;
+    struct waitqueue;
+
+    fn spinlock_init(lock: *mut spinlock_t, name: *CChar);
+    fn spin_lock_irqsave(lock: *mut spinlock_t) -> usize;
+    fn spin_unlock_irqrestore(lock: *mut spinlock_t, state: usize);
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn waitqueue_wake_one(wq: *mut waitqueue) -> u32;
+    fn wait_floor_until(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void);
+    fn wait_floor_check_sleep(ip: usize, what: *CChar);
+}
+
+@repr(C)
+struct semaphore {
+    lock: spinlock_t;
+    count: i32; // changed under `lock`; read atomically outside it
+    wq: waitqueue;
+}
+
+/// An atomic view of `count` (an i32's bits, as a u32).
+/// Safety: `s` is a live semaphore.
+unsafe fn countOf(s: *mut semaphore) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(s).count as *mut i32 as *AtomicU32);
+
+/// Safety: `s` is a live semaphore.
+unsafe fn lockOf(s: *mut semaphore) -> *mut spinlock_t => borrow mut Ptr.toBorrowMut(s).lock as *mut spinlock_t;
+
+/// wait_event's condition: a unit is free.
+/// Safety: `arg` is a live semaphore.
+@callback
+unsafe fn available(arg: *mut void) -> bool => truncate<i32>(countOf(arg as *mut semaphore).loadWith(LoadOrdering.Acquire)) > 0;
+
+/// Safety: `s` points to storage for a semaphore nothing uses yet; `name` outlives it.
+@export("semaphore_init")
+unsafe fn init(s: *mut semaphore, count: i32, name: *CChar) {
+    spinlock_init(lockOf(s), name);
+    let sem = Ptr.toBorrowMut(s);
+    sem.count = count;
+    waitqueue_init(borrow mut sem.wq as *mut waitqueue, name);
+}
+
+/// A unit if one is free; never waits.
+/// Safety: `s` is a live semaphore.
+@export("semaphore_trydown")
+unsafe fn tryDown(s: *mut semaphore) -> bool {
+    let state = spin_lock_irqsave(lockOf(s));
+    let sem = Ptr.toBorrowMut(s);
+    let got = sem.count > 0;
+    if (got) {
+        sem.count -= 1;
+    }
+    spin_unlock_irqrestore(lockOf(s), state);
+    return got;
+}
+
+/// Safety: `s` is a live semaphore, and the caller may sleep.
+@export("semaphore_down")
+unsafe fn down(s: *mut semaphore) {
+    wait_floor_check_sleep(callerAddress(), "semaphore_down\0".ptr as *CChar);
+    loop {
+        if (tryDown(s)) {
+            return;
+        }
+        wait_floor_until(borrow mut Ptr.toBorrowMut(s).wq as *mut waitqueue, available, s as *mut void);
+    }
+}
+
+/// Safety: `s` is a live semaphore.
+@export("semaphore_up")
+unsafe fn up(s: *mut semaphore) {
+    let state = spin_lock_irqsave(lockOf(s));
+    let sem = Ptr.toBorrowMut(s);
+    sem.count += 1;
+    spin_unlock_irqrestore(lockOf(s), state);
+    waitqueue_wake_one(borrow mut sem.wq as *mut waitqueue);
+}
+
+/// Safety: `s` is a live semaphore.
+@export("semaphore_count")
+unsafe fn count(s: *mut semaphore) -> i32 => truncate<i32>(countOf(s).loadWith(LoadOrdering.Acquire));

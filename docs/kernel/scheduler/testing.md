@@ -249,7 +249,9 @@ Every acquisition and release, wake, block, timer and priority change is
 a line of the trace; the lines' FNV-1a digest is recorded in the test
 (`TRACE_DIGEST`, 56,070 lines). Rewritten in another language (SA3), these
 primitives must give the same digest before the C is deleted. The wait
-queues in Nova (`wait.nova`, SA3's second step) give it (2026-10-30).
+queues in Nova (`wait.nova`, SA3's second step) give it, and so do the
+completions and semaphores (`completion.nova`, `semaphore.nova`, the
+third) over them (2026-10-30).
 `SYNC_TRACE_DUMP=1 out/<arch>-debug/host/test_sync` prints the lines.
 
 ## Measured results (2026-09-04, QEMU TCG, `-m 256M`)
