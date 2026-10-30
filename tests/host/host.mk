@@ -56,7 +56,7 @@ HOST_CPUTIME_SRCS := $(HOST_COMMON_SRCS) kernel/process/cputime.c kernel/nova/no
 HOST_NICE_SRCS := $(HOST_COMMON_SRCS) kernel/process/nice.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_nice.c
 HOST_FAIR_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/fair.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_fair.c
 HOST_UPBE_SRCS := $(HOST_COMMON_SRCS) userland/system/upgrade_be.c tests/host/test_upgrade_be.c
-HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/handle.c tests/host/test_handles.c
+HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/object_floor.c kernel/object/handle.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_handles.c
 HOST_PCI_BAR_SRCS := $(HOST_COMMON_SRCS) tests/host/test_pci_bar.c
 HOST_JITTER_SRCS := $(HOST_COMMON_SRCS) kernel/core/jitter.c tests/host/test_jitter.c
 

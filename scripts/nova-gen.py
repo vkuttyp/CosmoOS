@@ -57,6 +57,8 @@ PORTS = [
     ("kernel/process/nice.nova", "kernel/process/nice.c", "The rules of nice values (nice.h)", None, False),
     ("kernel/scheduler/fair.nova", "kernel/scheduler/fair.c",
      "The weighted fair share at the default priority level (fair.h)", None, False),
+    ("kernel/object/object.nova", "kernel/object/object.c", "The reference-counted kernel object header (object.h)", None,
+     False),
     ("kernel/nova/kcore_test.nova", "kernel/nova/kcore_test.c",
      "The boot self-test of Nova's kernel library (selftest nova-kcore)", None, True),
 ]
