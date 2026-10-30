@@ -403,7 +403,7 @@ bool vfs_bdev_mounted_except(const struct blkdev *bd, const struct mount *self)
 void mutex_init(struct mutex *m, const char *name)
 {
     memset(m, 0, sizeof(*m));
-    m->name = name;
+    m->name = (char *)(uintptr_t)name; /* mutex_types.h: a Nova struct's pointer members carry no const */
 }
 
 void mutex_lock(struct mutex *m)
