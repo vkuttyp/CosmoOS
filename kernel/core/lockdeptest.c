@@ -1411,7 +1411,7 @@ bool selftest_lockdep_first_bench(const char **reason)
             mutex_init(&m, names[kind][sample][0]);
             lockdep_get_stats(&before);
             bool owned;
-            ok = a.class == 0 && b.class == 0 && m.class == 0 && m.lock.class == 0;
+            ok = a.class == 0 && b.class == 0 && m.lock_class == 0 && m.lock.class == 0;
             elapsed[kind][0][sample] = first_bench_acquire(kind, &a, &b, &m, &owned);
             ok = ok && owned && !a.locked && !b.locked && !m.owner;
             lockdep_get_stats(&after);
@@ -1423,12 +1423,12 @@ bool selftest_lockdep_first_bench(const char **reason)
             if (kind == 3)
                 ok = ok && b.class != 0 && b.class != a.class && after.searches > before.searches;
             if (kind == 4)
-                ok = ok && m.class != 0 && m.lock.class != 0 && m.class != m.lock.class;
+                ok = ok && m.lock_class != 0 && m.lock.class != 0 && m.lock_class != m.lock.class;
 #endif
-            uint16_t ca = a.class, cb = b.class, cm = m.class, ci = m.lock.class;
+            uint16_t ca = a.class, cb = b.class, cm = m.lock_class, ci = m.lock.class;
             elapsed[kind][1][sample] = first_bench_acquire(kind, &a, &b, &m, &owned);
             ok = ok && owned && !a.locked && !b.locked && !m.owner &&
-                 a.class == ca && b.class == cb && m.class == cm && m.lock.class == ci;
+                 a.class == ca && b.class == cb && m.lock_class == cm && m.lock.class == ci;
         }
         lockdep_get_stats(&after);
         classes_after[kind] = after.classes;

@@ -59,6 +59,23 @@ bool wait_floor_until_timeout(struct waitqueue *wq, bool (*cond)(void *), void *
     return wait_event_timeout(wq, cond(arg), ns);
 }
 
+/* wait_event with work around the block, for the mutex's contended path:
+ * prepared, then `attempt` (false: block), then `woken` after the block,
+ * until an attempt succeeds; `again` is false only for the first. */
+void wait_floor_loop(struct waitqueue *wq, bool (*attempt)(void *, bool), void (*woken)(void *), void *arg)
+{
+    struct wait_entry we;
+    wait_entry_init(&we);
+    for (bool again = false;; again = true) {
+        waitqueue_prepare(wq, &we);
+        if (attempt(arg, again))
+            break;
+        sched_block_current();
+        woken(arg);
+    }
+    waitqueue_finish(wq, &we);
+}
+
 void wait_floor_set_waiting_on(struct thread *t, struct waitqueue *wq)
 {
     t->waiting_on = wq;

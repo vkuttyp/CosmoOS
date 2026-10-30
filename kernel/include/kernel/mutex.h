@@ -17,22 +17,15 @@
 
 struct thread;
 
-struct mutex {
-    spinlock_t lock;
-    struct thread *owner;
-    struct waitqueue wq;
-    const char *name;
-    uint16_t class;   /* lockdep class + 1 (kind mutex), cached at first acquisition */
-    uint16_t pi_active;   /* a waiter has donated to the owner: unlock must run the PI restore (under g_pi_lock) */
-    /* (pi, under g_pi_lock in mutex.c) links this mutex into its owner's
-     * pi_held list while it has waiters, so the owner inherits their priority. */
-    struct list_node pi_link;
-    /* (lock) A waiter that was woken and found the mutex taken again (a
-     * releaser re-took it before the waiter ran): the next unlock hands
-     * the mutex to it instead of releasing it, so no waiter is overtaken
-     * twice in a row (S33). NULL when none has asked. */
-    struct thread *handoff;
-};
+/* struct mutex { lock; owner; wq; name; lock_class (lockdep class + 1,
+ * cached at first acquisition); pi_active (a waiter has donated to the
+ * owner: unlock runs the PI restore); pi_link (in its owner's pi_held list
+ * while it has waiters); handoff (a waiter overtaken once, which the next
+ * unlock hands the mutex to, S33); } is defined in Nova
+ * (kernel/scheduler/mutex.nova) and generated into mutex_types.h (roadmap
+ * 2.0 SA3; Nova ADR 0029, 0030). `lock_class` was `class`, a Nova keyword; `name` is `char *` (a Nova
+ * struct's pointer members carry no const), so MUTEX_INIT_AT casts it. */
+#include <kernel/mutex_types.h>
 
 void mutex_init(struct mutex *m, const char *name);
 /* A mutex in static storage, built at compile time as mutex_init leaves
@@ -44,7 +37,7 @@ void mutex_init(struct mutex *m, const char *name);
 #define MUTEX_INIT_AT(p, n) { .lock = SPINLOCK_INIT(n), .owner = NULL, \
     .wq = { .lock = SPINLOCK_INIT(n), .waiters = LIST_HEAD_INIT((p)->wq.waiters), \
             .callbacks = LIST_HEAD_INIT((p)->wq.callbacks) }, \
-    .name = (n), .class = 0, .pi_active = 0, .pi_link = LIST_HEAD_INIT((p)->pi_link), .handoff = NULL }
+    .name = (char *)(uintptr_t)(n), .lock_class = 0, .pi_active = 0, .pi_link = LIST_HEAD_INIT((p)->pi_link), .handoff = NULL }
 void mutex_lock(struct mutex *m);
 /* As mutex_lock, annotated for nesting inside another mutex of the same
  * class (docs/kernel/lockdep/invariants.md lists every use). */
