@@ -66,6 +66,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/scheduler/schedtest.c \
 	kernel/scheduler/smptest.c \
 	kernel/object/object.c \
+	kernel/object/object_floor.c \
 	kernel/object/handle.c \
 	kernel/object/console_obj.c \
 	kernel/device/hidtest.c \

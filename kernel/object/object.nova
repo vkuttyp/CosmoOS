@@ -1,0 +1,325 @@
+// The reference-counted kernel object header (kernel/include/kernel/object.h; docs/kernel/object/), in Nova (roadmap
+// 2.0 SA2): counts, the release, discard, put_and_lock, and the object census. `struct kobject` stays C's: it is
+// embedded in every object. Its counts are reached as lib/core atomics through their fields' addresses (a u32 is an
+// AtomicU32's only member). object_floor.c keeps the calls through the type's function pointers, panic's message and
+// the module exports.
+
+@header("kernel/object.h", "kernel/module.h", "kernel/spinlock.h")
+extern "C" {
+    struct kobject_type {
+        name: *CChar;
+    }
+    struct kobject {
+        @cname("type")
+        kind: *kobject_type;
+        refcount: u32;
+        handles: u32;
+        watched: u8;
+        owner: *mut module;
+        watchers: *mut epoll_item;
+    }
+    struct module;
+    struct epoll_item;
+    @ctype("spinlock_t")
+    struct spinlock_t;
+
+    fn module_owner_of(code: usize) -> *mut module;
+    fn module_object_released(m: *mut module);
+    fn spin_lock_irqsave(lock: *mut spinlock_t) -> usize;
+    fn spin_unlock_irqrestore(lock: *mut spinlock_t, state: usize);
+
+    // object_floor.c
+    fn kobject_floor_release(obj: *mut kobject);
+    fn kobject_floor_release_address(kind: *kobject_type) -> usize;
+    fn kobject_floor_fatal(before: *CChar, after: *CChar, obj: *kobject);
+}
+
+/// The census's table sizes (KOBJECT_CENSUS_TYPES, KOBJECT_CENSUS_NAME in object.h).
+const CENSUS_TYPES: usize = 128;
+const CENSUS_NAME: usize = 24;
+
+// The object census (docs/kernel/object/testing.md): kobjects initialised and not yet released or discarded, in total
+// and by type. Every element is accessed atomically, through census_cell; a type takes a slot on its first init and
+// keeps it, and its name is copied, so a module's type can still be named after the module is unloaded.
+static mut LIVE: u64 = 0;
+static mut TYPES: [u64; 128] = [0; 128];
+static mut COUNTS: [u64; 128] = [0; 128];
+static mut NAMES: [[u8; 24]; 128] = [[0; 24]; 128];
+
+/// An atomic view of one of the census's words.
+/// Safety: `p` is LIVE or an element of TYPES or COUNTS, which only these views access.
+unsafe fn censusCell(p: *mut u64) -> borrow(static) AtomicU64 => Ptr.toBorrow(p as *AtomicU64);
+
+/// An atomic view of a kobject's reference count.
+/// Safety: `obj` is a live kobject, whose count is only ever accessed atomically (object.h).
+unsafe fn countOf(obj: *kobject) -> borrow(static) AtomicU32 {
+    let o = Ptr.toBorrow(obj);
+    return Ptr.toBorrow(borrow o.refcount as *u32 as *AtomicU32);
+}
+
+/// Panics with object.c's message: "<before> <type> object <address><after>".
+/// Safety: `obj` points to a kobject; the floor reads its type's name.
+unsafe fn fatal(before: StringView, after: StringView, obj: *kobject) {
+    kobject_floor_fatal(before.ptr as *CChar, after.ptr as *CChar, obj);
+}
+
+/// The slot of `kind` in the census, claimed on first use, or CENSUS_TYPES when every slot is another type's.
+/// Safety: the census words are accessed only atomically; a slot's name is written once, by the thread that claimed it.
+unsafe fn censusSlot(kind: *kobject_type) -> usize {
+    let key = kind as usize as u64;
+    for (i in 0..CENSUS_TYPES) {
+        let cell = censusCell(borrow mut TYPES[i] as *mut u64);
+        let current = cell.loadWith(LoadOrdering.Acquire);
+        if (current == key) {
+            return i;
+        }
+        if (current == 0) {
+            match (cell.compareExchangeWith(0, key, Ordering.AcquireRelease)) {
+                Ok(previous) => {
+                    copyName(i, kind);
+                    return i;
+                }
+                Err(other) => {
+                    if (other == key) {
+                        return i;
+                    }
+                }
+            }
+        }
+    }
+    return CENSUS_TYPES;
+}
+
+/// Copies the type's name into the slot, at most CENSUS_NAME - 1 bytes and a zero.
+/// Safety: `kind` points to a kobject_type whose name is a zero-terminated string; only the claiming thread writes the slot.
+unsafe fn copyName(slot: usize, kind: *kobject_type) {
+    let name = Ptr.toBorrow(kind).name as *u8;
+    var n: usize = 0;
+    if (!name.isNull()) {
+        while (n + 1 < CENSUS_NAME && name.add(n).read() != 0) {
+            NAMES[slot][n] = name.add(n).read();
+            n += 1;
+        }
+    } else {
+        NAMES[slot][0] = 63; // '?'
+        n = 1;
+    }
+    NAMES[slot][n] = 0;
+}
+
+/// Counts an object of `kind` in (one) or out (minus one).
+/// Safety: as censusSlot.
+unsafe fn census(kind: *kobject_type, up: bool) {
+    let slot = censusSlot(kind);
+    let live = censusCell(borrow mut LIVE as *mut u64);
+    if (up) {
+        if (slot < CENSUS_TYPES) {
+            censusCell(borrow mut COUNTS[slot] as *mut u64).fetchAddWith(1, Ordering.AcquireRelease);
+        }
+        live.fetchAddWith(1, Ordering.AcquireRelease);
+    } else {
+        if (slot < CENSUS_TYPES) {
+            censusCell(borrow mut COUNTS[slot] as *mut u64).fetchSubWith(1, Ordering.AcquireRelease);
+        }
+        live.fetchSubWith(1, Ordering.AcquireRelease);
+    }
+}
+
+/// Safety: LIVE is accessed only atomically.
+@export("kobject_census")
+fn censusTotal() -> u64 => unsafe { censusCell(borrow mut LIVE as *mut u64) }.loadWith(LoadOrdering.Acquire);
+
+/// Safety: `out` points to KOBJECT_CENSUS_TYPES int64_t (object.h's prototype); COUNTS is accessed only atomically.
+@export("kobject_census_by_type")
+fn censusByType(out: *mut i64) {
+    for (i in 0..CENSUS_TYPES) {
+        unsafe {
+            let count = censusCell(borrow mut COUNTS[i] as *mut u64).loadWith(LoadOrdering.Acquire);
+            out.add(i).write(truncate<i64>(count));
+        }
+    }
+}
+
+/// Safety: a claimed slot's name was written before the slot was published, by the CAS that claimed it, and never
+/// again; the pointer is to static storage.
+@export("kobject_census_name")
+fn censusName(i: u32) -> *CChar {
+    if (i as usize >= CENSUS_TYPES) {
+        return 0 as *CChar;
+    }
+    unsafe {
+        if (censusCell(borrow mut TYPES[i as usize] as *mut u64).loadWith(LoadOrdering.Acquire) == 0) {
+            return 0 as *CChar;
+        }
+        return borrow NAMES[i as usize][0] as *u8 as *CChar;
+    }
+}
+
+/// Reference 1 belongs to the caller; records the owner module of the type's release (object.h).
+/// Safety: `obj` points to storage for a kobject that nothing else uses yet; `kind` to a type that outlives it.
+@export("kobject_init")
+fn init(obj: *mut kobject, kind: *kobject_type) {
+    unsafe {
+        let o = Ptr.toBorrowMut(obj);
+        o.kind = kind; // first, so the message below can name the type
+        let release = kobject_floor_release_address(kind);
+        if (release == 0) {
+            fatal("kobject_init of a\0", " whose type has no release\0", obj as *kobject);
+            return;
+        }
+        o.refcount = 1;
+        o.handles = 0;
+        o.watched = 0;
+        o.watchers = 0 as *mut epoll_item;
+        // The owner's live-object count is taken inside module_owner_of's read section, so the module cannot be
+        // freed between the lookup and the increment (docs/kernel/quiesce/design.md, "Module unload").
+        o.owner = module_owner_of(release);
+        census(kind, true);
+    }
+}
+
+/// An object its creator built but never published, now freed by hand (object.h).
+/// Safety: `obj` is an initialised kobject; only its creator's reference exists, which this ends.
+@export("kobject_discard")
+fn discard(obj: *mut kobject) {
+    unsafe {
+        if (countOf(obj as *kobject).loadWith(LoadOrdering.Acquire) != 1) {
+            fatal("kobject_discard of a\0", " someone else holds\0", obj as *kobject);
+            return;
+        }
+        let o = Ptr.toBorrowMut(obj);
+        o.refcount = 0;
+        if (!o.owner.isNull()) {
+            module_object_released(o.owner);
+        }
+        o.owner = 0 as *mut module;
+        census(o.kind, false);
+    }
+}
+
+/// Safety: `obj` is a live kobject; its owner field is written only here and at init.
+@export("kobject_track_code")
+fn trackCode(obj: *mut kobject, code: usize) {
+    unsafe {
+        let owner = module_owner_of(code);
+        let o = Ptr.toBorrowMut(obj);
+        if (!o.owner.isNull()) {
+            module_object_released(o.owner);
+        }
+        o.owner = owner;
+    }
+}
+
+/// Safety: the caller holds a reference, so `obj` is live.
+@export("kobject_get")
+fn get(obj: *mut kobject) {
+    unsafe {
+        if (countOf(obj as *kobject).fetchAddWith(1, Ordering.AcquireRelease) == 0) {
+            fatal("kobject_get on a released\0", "\0", obj as *kobject);
+        }
+    }
+}
+
+/// Safety: as get.
+@export("kobject_get_n")
+fn getN(obj: *mut kobject, n: u32) {
+    if (n == 0) {
+        return;
+    }
+    unsafe {
+        if (countOf(obj as *kobject).fetchAddWith(n, Ordering.AcquireRelease) == 0) {
+            fatal("kobject_get_n on a released\0", "\0", obj as *kobject);
+        }
+    }
+}
+
+/// A reference unless the count is already zero (object.h).
+/// Safety: `obj`'s storage is live (a table the caller locked still holds it); its count is accessed only atomically.
+@export("kobject_tryget")
+fn tryGet(obj: *mut kobject) -> bool {
+    let count = unsafe { countOf(obj as *kobject) };
+    var current = count.loadWith(LoadOrdering.Acquire);
+    loop {
+        if (current == 0) {
+            return false;
+        }
+        match (count.compareExchangeWith(current, current + 1, Ordering.AcquireRelease)) {
+            Ok(previous) => { return true; }
+            Err(seen) => { current = seen; }
+        }
+    }
+}
+
+/// The release of an object whose count reached zero (object.h).
+/// Safety: the count is zero and the caller made it so, so nothing else can reach `obj`; the release frees it, so the
+/// owner and type are read first.
+@export("kobject_release_final")
+fn releaseFinal(obj: *mut kobject) {
+    unsafe {
+        if (countOf(obj as *kobject).loadWith(LoadOrdering.Acquire) != 0) {
+            fatal("kobject_release_final on a live\0", "\0", obj as *kobject);
+            return;
+        }
+        let o = Ptr.toBorrow(obj as *kobject);
+        // The owner's count is dropped after the release returned, so the module's text stays mapped while its
+        // release code runs.
+        let owner = o.owner;
+        let kind = o.kind;
+        kobject_floor_release(obj);
+        if (!owner.isNull()) {
+            module_object_released(owner);
+        }
+        census(kind, false); // the type read before the release freed the object
+    }
+}
+
+/// Safety: the caller holds a reference, which this drops.
+@export("kobject_put")
+fn put(obj: *mut kobject) {
+    let old = unsafe { countOf(obj as *kobject) }.fetchSubWith(1, Ordering.AcquireRelease);
+    if (old == 0) {
+        unsafe { fatal("kobject_put underflow on\0", "\0", obj as *kobject); }
+        return;
+    }
+    if (old == 1) {
+        releaseFinal(obj);
+    }
+}
+
+/// Drops a reference, taking `lock` only for the drop that reaches zero; true, with the lock held and its state in
+/// `*state`, when this was the last (object.h).
+/// Safety: the caller holds a reference; `lock` and `state` are valid for the call.
+@export("kobject_put_and_lock")
+fn putAndLock(obj: *mut kobject, lock: *mut spinlock_t, state: *mut usize) -> bool {
+    let count = unsafe { countOf(obj as *kobject) };
+    var current = count.loadWith(LoadOrdering.Acquire);
+    loop {
+        if (current == 0) {
+            unsafe { fatal("kobject_put_and_lock underflow on\0", "\0", obj as *kobject); }
+            return false;
+        }
+        if (current == 1) {
+            break; // ours may be the last: decide under the lock
+        }
+        // Not the last: drop it without the lock. A concurrent dropper from the same count fails this exchange,
+        // re-reads, and finds itself at 1 -- which is the whole correction.
+        match (count.compareExchangeWith(current, current - 1, Ordering.AcquireRelease)) {
+            Ok(previous) => { return false; }
+            Err(seen) => { current = seen; }
+        }
+    }
+    unsafe {
+        let saved = spin_lock_irqsave(lock);
+        state.write(saved);
+        if (count.fetchSubWith(1, Ordering.AcquireRelease) == 1) {
+            return true; // zero, and it happened under the lock: the table is ours to clean
+        }
+        // A lookup under this lock raised the count between our read and our drop; not the last after all.
+        spin_unlock_irqrestore(lock, saved);
+    }
+    return false;
+}
+
+/// Safety: `obj` points to a kobject; the count is read atomically.
+@export("kobject_refcount")
+fn refcount(obj: *kobject) -> u32 => unsafe { countOf(obj) }.loadWith(LoadOrdering.Acquire);

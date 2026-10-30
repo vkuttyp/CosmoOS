@@ -4,7 +4,13 @@ All interfaces are kernel-internal (**ABI stability: internal**); user
 space sees only handle integers through the system-call layer. Each
 entry follows constitution section 52.
 
-## Objects (`kernel/include/kernel/object.h`, `kernel/object/object.c`)
+## Objects (`kernel/include/kernel/object.h`, `kernel/object/object.nova`)
+
+The functions below are written in Nova (`object.nova`; `make nova`
+generates `object.c` from it). `object_floor.c` keeps what Nova cannot say
+yet: calls through the type's function pointers (the release and the I/O
+operations), `panic`'s formatted message, and the `EXPORT_SYMBOL` lines.
+The C interface is unchanged.
 
 ### `struct kobject { type; refcount; handles; watched; owner; watchers; }`
 Embedded as the first or any member of a concrete object; recover the

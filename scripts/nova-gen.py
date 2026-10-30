@@ -45,7 +45,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-NOVAC_VERSION = "0.4.0"
+NOVAC_VERSION = "0.4.1"
 
 # Each port: its Nova source, the C it generates, what that C is, the header novac generates for it (None
 # when the port's header is hand-written C, imported by the source), and whether it uses Nova's kernel library
@@ -57,6 +57,8 @@ PORTS = [
     ("kernel/process/nice.nova", "kernel/process/nice.c", "The rules of nice values (nice.h)", None, False),
     ("kernel/scheduler/fair.nova", "kernel/scheduler/fair.c",
      "The weighted fair share at the default priority level (fair.h)", None, False),
+    ("kernel/object/object.nova", "kernel/object/object.c", "The reference-counted kernel object header (object.h)", None,
+     False),
     ("kernel/nova/kcore_test.nova", "kernel/nova/kcore_test.c",
      "The boot self-test of Nova's kernel library (selftest nova-kcore)", None, True),
 ]

@@ -253,6 +253,11 @@ kernel object and handle layer (`kernel/object/object.c`, `handle.c`;
   the C agrees on a recorded trace of 10,000 operations before the C is
   deleted; the matrix on both architectures.
 
+Progress: the object census, `kobject_discard` and the recorded trace
+(#491); the object layer in Nova (`kernel/object/object.nova`, over
+`object_floor.c`), which gives the recorded digest (2026-10-30). Next:
+the handle table, then the fault-injection sweep.
+
 Size: about 1.0x.
 
 ### SA3 Locks, waits and quiescence in Nova
