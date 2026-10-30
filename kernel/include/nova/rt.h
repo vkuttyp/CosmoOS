@@ -955,6 +955,19 @@ uint64_t nova_arg_count(void);
 /* Argument `index` as a view; false if out of range or not valid UTF-8. */
 bool nova_arg(uint64_t index, nv_str *out);
 bool nova_utf8_valid(const uint8_t *bytes, uint64_t length);
+/* Host services (type-system.md §26.7-§26.10, ADR 0028; lib/std/host.nova): a value >= 0, or a negated errno. The types
+ * are written as novac writes lib/std's extern declarations, which repeat them. */
+int64_t nova_host_env(uint8_t const *name, uint64_t length, uint8_t const **value, uint64_t *value_length);
+int64_t nova_host_path_kind(uint8_t const *path, uint64_t length);
+int64_t nova_host_dir_create(uint8_t const *path, uint64_t length);
+int64_t nova_host_dir_remove(uint8_t const *path, uint64_t length);
+void *nova_host_dir_open(uint8_t const *path, uint64_t length, int32_t *error);
+int64_t nova_host_dir_next(void *dir, uint8_t const **name, uint64_t *length);
+void nova_host_dir_close(void *dir);
+int64_t nova_host_temporary(uint8_t *buffer, uint64_t capacity);
+int64_t nova_host_current(uint8_t *buffer, uint64_t capacity);
+int64_t nova_host_spawn(void const *arguments, uint64_t count, uint8_t const *input, uint64_t input_length,
+                        uint8_t const *output, uint64_t output_length, uint8_t const *errors, uint64_t errors_length);
 
 /* Files: `mode` 0 opens for reading, 1 creates or truncates for writing; `value` is the descriptor. */
 nv_io_result nova_file_open(nv_str path, uint32_t mode);
