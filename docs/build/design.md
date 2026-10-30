@@ -237,3 +237,11 @@ or named with `NOVAC=<path>`. `make nova-check` only compares, and CI's
 "Nova sources" job runs it with the pinned release (its Linux x64 archive,
 verified against the release's SHA-256), so a `.nova` change without its
 regenerated C, or a hand edit to generated C, fails CI.
+
+`make nova` and `make nova-check` also check the Nova sources the kernel
+must refuse, `tests/nova/negative/*.nova`: each line marked `//
+error[N…]` must be refused with that code by `novac check` (with the
+kernel library), and no other line may be, so the accepted cases beside
+the refused ones must compile. `sleep-under-spin.nova` is roadmap 2.0
+SA3's negative test: nothing that may sleep compiles under a spin lock's
+guard, with interrupts off or with preemption off.
