@@ -43,17 +43,14 @@ typedef void (*wait_callback_fn)(struct wait_entry *e, unsigned flags);
  * first thread it wakes (a contended mutex unlock is not O(waiters) under its
  * spinlock; the first version of the callback kind walked one list to its
  * end). */
-struct wait_entry {
-    struct list_node link;
-    struct thread *thread;
-    wait_callback_fn fn;
-};
+/* struct wait_entry { link; thread; callback; } is defined in Nova
+ * (kernel/scheduler/wait.nova) and generated into wait_types.h, below;
+ * `callback` is a wait_callback_fn, NULL for a sleeping thread's entry. */
 
-struct waitqueue {
-    spinlock_t lock;
-    struct list_node waiters;     /* sleeping threads */
-    struct list_node callbacks;   /* callback entries, run by every wake */
-};
+/* struct waitqueue { lock; waiters (sleeping threads); callbacks (callback
+ * entries, run by every wake); } and struct wait_timeout { wq; expired; }
+ * are Nova's too (roadmap 2.0 SA3; Nova ADR 0029, 0030). */
+#include <kernel/wait_types.h>
 
 #define WAITQUEUE_INIT(name) { .lock = SPINLOCK_INIT(#name), .waiters = LIST_HEAD_INIT((name).waiters), \
                                .callbacks = LIST_HEAD_INIT((name).callbacks) }
@@ -65,7 +62,7 @@ static inline void wait_entry_init(struct wait_entry *e)
 {
     list_init(&e->link);
     e->thread = NULL;
-    e->fn = NULL;
+    e->callback = NULL;
 }
 
 /* Put a callback entry on the queue; every later wake runs `fn` under the
@@ -154,10 +151,6 @@ bool process_kill_pending(void);
 /* The timed wait's private state: a timer wakes the caller's own queue,
  * so a waiter is woken either by whoever makes the condition true or by
  * the deadline, and re-checks the same condition in both cases. */
-struct wait_timeout {
-    struct waitqueue *wq;
-    bool expired;
-};
 void wait_timeout_init(struct wait_timeout *wt, struct waitqueue *wq);
 void wait_timeout_fired(struct timer *t, void *arg);
 bool wait_timeout_expired(const struct wait_timeout *wt);

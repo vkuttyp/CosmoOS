@@ -291,7 +291,9 @@ callers stay. Progress: a host test first, `tests/host/test_sync.c`:
 wait queues, completions, semaphores and the mutex on a deterministic
 one-CPU scheduler, 300 seeds per workload, with a recorded trace digest
 the Nova versions must reproduce. It found a spurious priority-donation
-cycle warning after a mutex handoff, fixed in `mutex.c`.
+cycle warning after a mutex handoff, fixed in `mutex.c`. Then the wait
+queues in Nova (`kernel/scheduler/wait.nova`, over `wait_floor.c`; novac
+0.6.0's ADR 0030), which give the recorded digest (2026-10-30).
 
 Size: about 1.5x.
 
