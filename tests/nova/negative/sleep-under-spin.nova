@@ -1,0 +1,89 @@
+// Roadmap 2.0 SA3's negative compile test: nothing that may sleep compiles under a spin lock's guard, with interrupts
+// off, or with preemption off (Nova type-system.md §32.3). `make nova-check` checks this file with the pinned novac
+// (scripts/nova-gen.py): every line marked `// error[N…]` must be refused with that code, and nothing else may be.
+//
+// The sleeping calls are the SA3 primitives as kernel Nova reaches them: lib/kernel's Mutex and Quiesce, and the
+// C interface of completion.nova and semaphore.nova declared with the sleep effect, as a port calling them declares it.
+
+@header("kernel/completion.h", "kernel/semaphore.h", "kernel/sched.h")
+extern "C" {
+    struct completion;
+    struct semaphore;
+
+    @effects(sleep)
+    fn wait_for_completion(c: *mut completion);
+    @effects(sleep)
+    fn down(s: *mut semaphore);
+    @effects(sleep)
+    fn thread_sleep_ns(ns: u64);
+}
+
+struct Table {
+    count: u64;
+}
+
+static SPIN: SpinLock<Table> = SpinLock<Table>.constant("nova-negative.spin\0".ptr as *CChar, Table { count: 0 });
+static IRQSPIN: IrqSpinLock<Table> = IrqSpinLock<Table>.constant("nova-negative.irqspin\0".ptr as *CChar, Table { count: 0 });
+static MUTEX: Mutex<Table> = Mutex<Table>.constant("nova-negative.mutex\0".ptr as *CChar, Table { count: 0 });
+
+// --- refused -----------------------------------------------------------------------------------------------------------
+
+fn mutexUnderSpin() {
+    let guard = SPIN.lock();
+    let inner = MUTEX.lock(); // error[N0295]
+}
+
+fn quiesceUnderSpin() {
+    let guard = SPIN.lock();
+    Quiesce.synchronize(); // error[N0295]
+}
+
+fn mutexUnderIrqSpin() {
+    let guard = IRQSPIN.lock();
+    let inner = MUTEX.lock(); // error[N0295]
+}
+
+/// Safety: `c` is a live completion.
+unsafe fn completionUnderSpin(c: *mut completion) {
+    let guard = SPIN.lock();
+    wait_for_completion(c); // error[N0295]
+}
+
+/// Safety: `s` is a live semaphore.
+unsafe fn semaphoreUnderSpin(s: *mut semaphore) {
+    let guard = SPIN.lock();
+    down(s); // error[N0295]
+}
+
+/// Safety: thread_sleep_ns only sleeps.
+unsafe fn sleepWithIrqsOff() {
+    let irq = IrqGuard.enter();
+    thread_sleep_ns(1000); // error[N0295]
+}
+
+/// Safety: thread_sleep_ns only sleeps.
+unsafe fn sleepWithPreemptionOff() {
+    let preempt = PreemptGuard.enter();
+    thread_sleep_ns(1000); // error[N0295]
+}
+
+// --- accepted: the same calls where sleeping is allowed ------------------------------------------------------------
+
+fn mutexAlone() {
+    let guard = MUTEX.lock();
+    Quiesce.synchronize();
+}
+
+fn spinUnderMutex() {
+    let outer = MUTEX.lock();
+    let inner = SPIN.lock();
+}
+
+/// Safety: `c` is a live completion and `s` a live semaphore.
+unsafe fn waitsAfterTheGuard(c: *mut completion, s: *mut semaphore) {
+    {
+        let guard = SPIN.lock();
+    }
+    wait_for_completion(c);
+    down(s);
+}

@@ -27,6 +27,10 @@ reproduces the checked-in files byte for byte, and --check (CI's "Nova
 sources" job) fails when they differ. Moving to another novac is a change
 of its own: bump the pin and regenerate.
 
+Both modes also check the sources the kernel must refuse,
+tests/nova/negative/*.nova (NEGATIVE): novac must give exactly the errors
+their `// error[N...]` lines name.
+
 Usage:
     python3 scripts/nova-gen.py           # regenerate (make nova)
     python3 scripts/nova-gen.py --check   # compare only (make nova-check)
@@ -36,7 +40,9 @@ The novac used is $NOVAC, else `novac` on PATH. To install the pinned one:
 """
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -126,6 +132,33 @@ def generated(exe: str, work: Path) -> dict[str, str]:
     return files
 
 
+# Nova sources the kernel must refuse (roadmap 2.0 SA3: a sleep under a spin lock's guard does not compile). Each line
+# marked `// error[N…]` must be refused with that code, and nothing else may be: the rest are the cases that compile.
+NEGATIVE = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "tests" / "nova" / "negative").glob("*.nova"))
+
+
+def refused(exe: str) -> list[str]:
+    """What each negative source's diagnostics got wrong, against its annotations; empty when every one is right."""
+    wrong = []
+    for source in NEGATIVE:
+        expected = set()
+        for number, line in enumerate((ROOT / source).read_text().splitlines(), 1):
+            expected.update((number, code) for code in re.findall(r"//\s*error\[(N\d{4})\]", line))
+        run = subprocess.run([exe, "check", "--profile", "freestanding", "--no-float", "--kernel", "cosmoos",
+                              "--diagnostics-format=json", source], cwd=ROOT, capture_output=True, text=True)
+        try:
+            found = {(d["start"]["line"], d["code"]) for d in json.loads(run.stdout)["diagnostics"]
+                     if d["severity"] == "error"}
+        except (ValueError, KeyError):
+            wrong.append(f"{source}: novac gave no diagnostics: {(run.stdout + run.stderr).strip()[:200]}")
+            continue
+        wrong += [f"{source}:{n}: expected error[{c}], which novac did not give" for n, c in sorted(expected - found)]
+        wrong += [f"{source}:{n}: novac gave error[{c}], which is not expected" for n, c in sorted(found - expected)]
+        if not expected:
+            wrong.append(f"{source}: no `// error[N…]` line: a negative test must expect a refusal")
+    return wrong
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate the C of CosmoOS's Nova sources.")
     parser.add_argument("--check", action="store_true", help="compare with the checked-in files instead of writing")
@@ -152,7 +185,12 @@ def main() -> int:
         print(f"nova-gen: {len(files)} generated files match their Nova sources (novac {NOVAC_VERSION})")
     elif args.check:
         print("nova-gen: run `make nova` with the pinned novac and commit the result")
-    return 1 if args.check and stale else 0
+    wrong = refused(exe)
+    for line in wrong:
+        print(f"nova-gen: {line}")
+    if not wrong:
+        print(f"nova-gen: {len(NEGATIVE)} negative source(s) refused as their annotations say")
+    return 1 if (args.check and stale) or wrong else 0
 
 
 if __name__ == "__main__":

@@ -302,7 +302,12 @@ first port drafted by Nova's `c2nova port` and finished by hand; its
 self-tests pass on both architectures (2026-10-30). Then the pipe's ring
 and anonymous pipes (`kernel/ipc/pipe.nova`, over `pipe_floor.c` and a
 killable wait in `wait_floor.c`; 2026-10-31), and named pipes
-(`kernel/ipc/fifo.nova`, over `fifo_floor.c`; 2026-10-31).
+(`kernel/ipc/fifo.nova`, over `fifo_floor.c`; 2026-10-31). The negative
+compile test is `tests/nova/negative/sleep-under-spin.nova`, which `make
+nova-check` (CI's "Nova sources" job) holds to exactly its seven refusals:
+a mutex, a grace period, a completion, a semaphore and a sleep under spin
+and interrupt-saving spin guards, interrupts off and preemption off, with
+the same calls accepted where sleeping is allowed (2026-10-31).
 
 Size: about 1.5x.
 
