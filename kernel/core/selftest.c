@@ -649,6 +649,7 @@ static const struct selftest tests[] = {
     { "blk-lifetime",    selftest_blk_lifetime },
     { "fault-kmalloc",   selftest_fault_kmalloc },
     { "fault-blk",       selftest_fault_blk },
+    { "object-fault-sweep", selftest_object_fault_sweep },
     { "blk-queue",       selftest_blk_queue },
     { "blk-segments",    selftest_blk_segments },
     { "blk-timeout",     selftest_blk_timeout },

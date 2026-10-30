@@ -23,6 +23,13 @@
 #include <kernel/vfs.h>
 #include <kernel/cosmofs.h>
 #include <kernel/errno.h>
+#include <kernel/epoll.h>
+#include <kernel/eventfd.h>
+#include <kernel/handle.h>
+#include <kernel/object.h>
+#include <kernel/pipe.h>
+#include <kernel/process.h>
+#include <kernel/unix.h>
 
 #include <uapi/cosmo/syscall.h>
 
@@ -265,6 +272,189 @@ bool selftest_fault_blk(const char **reason)
     return true;
 }
 
+/* --- object-fault-sweep: every allocation of object creation failed in turn (roadmap 2.0 SA2) --- */
+
+/* An operation makes kernel objects and installs them in `t`, as the
+ * system calls do: 0, or the first error. The sweep destroys the table
+ * afterwards, which drops what it holds. */
+typedef int (*sweep_op)(struct handle_table *t);
+/* Undoes what outlives the table on purpose (a created file stays on its
+ * filesystem); a leaked reference survives it, and the census sees that. */
+typedef void (*sweep_undo)(void);
+
+/* Installs `obj` and drops the creator's reference: the table's is then the only one. */
+static int sweep_install(struct handle_table *t, struct kobject *obj, unsigned rights)
+{
+    int h = handle_install(t, obj, rights);
+    kobject_put(obj);
+    return h;
+}
+
+static int sweep_pipe(struct handle_table *t)
+{
+    struct kobject *r, *w;
+    int rc = pipe_create(&r, &w);
+    if (rc)
+        return rc;
+    int a = sweep_install(t, r, HANDLE_RIGHT_READ);
+    int b = sweep_install(t, w, HANDLE_RIGHT_WRITE);
+    return a < 0 ? a : b < 0 ? b : 0;
+}
+
+static int sweep_eventfd(struct handle_table *t)
+{
+    struct kobject *e;
+    int rc = eventfd_obj_create(0, false, &e);
+    if (rc)
+        return rc;
+    int h = sweep_install(t, e, HANDLE_RIGHT_ALL);
+    return h < 0 ? h : 0;
+}
+
+/* An epoll instance watching a pipe's read end: the registration holds a
+ * reference that only the last close of the pipe end takes back. */
+static int sweep_epoll(struct handle_table *t)
+{
+    struct kobject *ep, *r, *w;
+    int rc = epoll_obj_create(&ep);
+    if (rc)
+        return rc;
+    int he = sweep_install(t, ep, HANDLE_RIGHT_ALL);
+    rc = pipe_create(&r, &w);
+    if (rc)
+        return rc;
+    int hr = sweep_install(t, r, HANDLE_RIGHT_READ);
+    int hw = sweep_install(t, w, HANDLE_RIGHT_WRITE);
+    if (he < 0 || hr < 0 || hw < 0)
+        return -EMFILE;
+    struct kobject *epobj = handle_lookup(t, he, 0);
+    struct kobject *target = handle_lookup(t, hr, 0);
+    rc = epoll_obj_add(epobj, hr, target, COSMO_IO_READABLE, 0, (uint64_t)hr, false, false);
+    if (rc)
+        kobject_put(target);   /* a registration takes the lookup's reference; a failed one leaves it ours */
+    kobject_put(epobj);
+    return rc;
+}
+
+static int sweep_tcp(struct handle_table *t)
+{
+    struct socket *s;
+    int rc = ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &s);
+    if (rc)
+        return rc;
+    int h = sweep_install(t, &s->obj, HANDLE_RIGHT_ALL);
+    return h < 0 ? h : 0;
+}
+
+static int sweep_unix(struct handle_table *t)
+{
+    struct socket *a, *b;
+    int rc = unix_socketpair(COSMO_SOCK_STREAM, &a, &b);
+    if (rc)
+        return rc;
+    int ha = sweep_install(t, &a->obj, HANDLE_RIGHT_ALL);
+    int hb = sweep_install(t, &b->obj, HANDLE_RIGHT_ALL);
+    return ha < 0 ? ha : hb < 0 ? hb : 0;
+}
+
+static void sweep_file_undo(void)
+{
+    (void)vfs_unlink(NULL, "/tmp/fi-sweep");
+}
+
+static int sweep_file(struct handle_table *t)
+{
+    struct file *f;
+    int rc = vfs_open(NULL, "/tmp/fi-sweep", COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f);
+    if (rc)
+        return rc;
+    int h = sweep_install(t, &f->obj, HANDLE_RIGHT_ALL);
+    return h < 0 ? h : 0;
+}
+
+/* A process from the boot archive's init that exits at once: its
+ * address space, threads, handle table and process object. */
+static int sweep_process(struct handle_table *t)
+{
+    (void)t;
+    const void *image;
+    size_t size;
+    if (!bootarchive_find("init", &image, &size))
+        return 0;
+    static const char *const argv[] = { "init", "--exec-done", "0", NULL };
+    struct process *p = NULL;
+    int rc = process_create_from_elf(image, size, "fi-sweep", argv, NULL, NULL, &p);
+    if (rc)
+        return rc;
+    (void)process_wait_exit(p);
+    process_put(p);
+    return 0;
+}
+
+/* The census back at `before`, allowing two seconds for late releases (a
+ * reaped process, a deferred free), as the runner does. */
+static bool census_returns(uint64_t before)
+{
+    for (unsigned ms = 0; ms < 2000; ms += 10) {
+        if (kobject_census() == before)
+            return true;
+        thread_sleep_ms(10);
+    }
+    return kobject_census() == before;
+}
+
+bool selftest_object_fault_sweep(const char **reason)
+{
+    static const struct {
+        const char *name;
+        sweep_op op;
+        sweep_undo undo;
+    } ops[] = {
+        { "pipe", sweep_pipe, NULL }, { "eventfd", sweep_eventfd, NULL }, { "epoll", sweep_epoll, NULL },
+        { "tcp", sweep_tcp, NULL },   { "unix", sweep_unix, NULL },       { "file", sweep_file, sweep_file_undo },
+        { "process", sweep_process, NULL },
+    };
+    static struct handle_table t;   /* 64 slots: too big for a stack frame */
+    thread_sleep_ms(20);            /* the reaper and deferred frees from earlier tests */
+    unsigned total = 0;
+    for (size_t k = 0; k < sizeof(ops) / sizeof(ops[0]); k++) {
+        unsigned failed = 0;
+        bool clean = false;
+        for (unsigned n = 1; n <= 1000 && !clean; n++) {
+            uint64_t before = kobject_census();
+            handle_table_init(&t);
+            faultinject_set(FI_KMALLOC, n, 1, thread_current());
+            int rc = ops[k].op(&t);
+            struct fi_stats st;
+            faultinject_stats(FI_KMALLOC, &st);
+            faultinject_clear(FI_KMALLOC);
+            if (st.hits == 0) {
+                CHECK(rc == 0);   /* past the operation's last allocation: a clean run ends the sweep */
+                clean = true;
+            } else {
+                CHECK(rc == 0 || rc == -ENOMEM);
+                failed += rc != 0;
+            }
+            handle_table_destroy(&t);
+            if (ops[k].undo != NULL)
+                ops[k].undo();
+            if (!census_returns(before)) {
+                faultinject_clear_all();
+                kinfo("selftest: object-fault-sweep: %s with allocation %u failed: census %llu before, %llu after",
+                      ops[k].name, n, (unsigned long long)before, (unsigned long long)kobject_census());
+                *reason = "an object leaked under an allocation failure";
+                return false;
+            }
+            total++;
+        }
+        CHECK(clean);
+        kinfo("selftest: object-fault-sweep: %s: %u attempts, %u ended -ENOMEM, census unchanged after each",
+              ops[k].name, total, failed);
+        total = 0;
+    }
+    return true;
+}
+
 #else
 
 bool selftest_fault_kmalloc(const char **reason)
@@ -278,6 +468,13 @@ bool selftest_fault_blk(const char **reason)
 {
     (void)reason;
     kinfo("selftest: fault-blk: fault injection is compiled out of this build");
+    return true;
+}
+
+bool selftest_object_fault_sweep(const char **reason)
+{
+    (void)reason;
+    kinfo("selftest: object-fault-sweep: fault injection is compiled out of this build");
     return true;
 }
 

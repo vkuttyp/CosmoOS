@@ -247,7 +247,7 @@ panic. The proving conversion has real allocation and lifetimes: the
 kernel object and handle layer (`kernel/object/object.c`, `handle.c`;
 495 lines, used at 159 `HANDLE_RIGHT_*` sites), with its census tests.
 
-- [ ] **Acceptance:** the object and handle layer in Nova passes its
+- [x] **Acceptance:** the object and handle layer in Nova passes its
   self-tests and a fault-injection sweep (every allocation failed in turn)
   with no leak in the object census; the differential host test against
   the C agrees on a recorded trace of 10,000 operations before the C is
@@ -258,8 +258,13 @@ Progress: the object census, `kobject_discard` and the recorded trace
 `object_floor.c`), which gives the recorded digest (#493, 2026-10-30);
 the handle table in Nova (`kernel/object/handle.nova`, a Nova-owned type C
 embeds by value, with novac 0.5.0's ADR 0029), which gives it too
-(2026-10-30). The hand-written C of both is gone. Next: the fault-injection
-sweep, the rest of the acceptance.
+(2026-10-30). The hand-written C of both is gone. The sweep,
+`object-fault-sweep` (`kernel/core/faulttest.c`), fails every allocation
+of seven object-creating paths in turn (pipe, eventfd, epoll with a
+registration, TCP, unix pair, file, process: 52 attempts on x86-64, 51 on
+AArch64) and finds the
+census unchanged after each (2026-10-30). With the matrix green on both
+architectures, SA2's acceptance is met.
 
 Size: about 1.0x.
 
