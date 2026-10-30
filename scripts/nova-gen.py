@@ -61,6 +61,8 @@ PORTS = [
      False),
     ("kernel/object/handle.nova", "kernel/object/handle.c", "The per-process handle table (handle.h)",
      "kernel/include/kernel/handle_types.h", False),
+    ("kernel/scheduler/wait.nova", "kernel/scheduler/wait.c", "Wait queues (wait.h)",
+     "kernel/include/kernel/wait_types.h", False),
     ("kernel/nova/kcore_test.nova", "kernel/nova/kcore_test.c",
      "The boot self-test of Nova's kernel library (selftest nova-kcore)", None, True),
 ]

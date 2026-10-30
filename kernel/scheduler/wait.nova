@@ -1,0 +1,297 @@
+// Wait queues (kernel/include/kernel/wait.h; docs/kernel/scheduler/design.md, "Wait queues"), in Nova (roadmap 2.0
+// SA3). The types are Nova's: struct wait_entry, struct waitqueue and struct wait_timeout are defined here and
+// generated into kernel/include/kernel/wait_types.h, which wait.h includes (Nova ADR 0029, 0030), with their C member
+// names, so WAITQUEUE_INIT, wait_entry_init and the wait_event macros are unchanged. wait_floor.c keeps what reads a
+// thread's or a CPU's fields (struct thread and struct percpu are in headers that include wait.h), panic's message,
+// the timed sleeps over the wait_event macros, and the module exports.
+//
+// The C this replaces is held to tests/host/test_sync.c's recorded trace.
+
+@header("kernel/spinlock.h", "kernel/list.h", "kernel/timer.h")
+extern "C" {
+    @ctype("spinlock_t")
+    struct spinlock_t;
+    struct list_node {
+        next: *mut list_node;
+        prev: *mut list_node;
+    }
+    struct thread;
+    struct timer;
+
+    fn spinlock_init(lock: *mut spinlock_t, name: *CChar);
+    fn spin_lock_irqsave(lock: *mut spinlock_t) -> usize;
+    fn spin_lock_irqsave_nested(lock: *mut spinlock_t, subclass: u32) -> usize;
+    fn spin_unlock_irqrestore(lock: *mut spinlock_t, state: usize);
+    fn list_init(head: *mut list_node);
+    fn list_empty(head: *list_node) -> bool;
+    fn list_push_back(head: *mut list_node, node: *mut list_node);
+    fn list_remove(node: *mut list_node);
+}
+
+// The scheduler's (sched.h, sched_internal.h) and the floor's (wait_floor.c). No @header: the generated wait_types.h
+// includes every @header, and sched.h reaches wait.h through thread.h; wait_floor.c includes them with wait_types.h,
+// so a prototype that disagrees fails there.
+extern "C" {
+    fn sched_wake(t: *mut thread) -> bool;
+    fn sched_prepare_block_current();
+    fn sched_set_running_current();
+
+    fn wait_floor_enter_sleep(ip: usize) -> *mut thread;
+    fn wait_floor_set_waiting_on(t: *mut thread, wq: *mut waitqueue);
+    fn wait_floor_fatal(what: *CChar);
+}
+
+/// WAIT_CB_FREED (wait.h): the queue's owner is about to free the queue.
+const CB_FREED: u32 = 1;
+
+/// A sleeping thread (`thread` set, `callback` null) on `waiters`, or a callback (`callback` set) on `callbacks`.
+@repr(C)
+struct wait_entry {
+    link: list_node;
+    thread: *mut thread;
+    callback: extern "C" fn(*mut wait_entry, u32);
+}
+
+@repr(C)
+struct waitqueue {
+    lock: spinlock_t;
+    waiters: list_node; // sleeping threads
+    callbacks: list_node; // callback entries, run by every wake
+}
+
+/// wait_event_timeout's deadline: `expired` is set (atomically) by the timer.
+@repr(C)
+struct wait_timeout {
+    wq: *mut waitqueue;
+    expired: u32;
+}
+
+/// Safety: `wq` is a live queue; the lock is the queue's.
+unsafe fn lock(wq: *mut waitqueue) -> usize => spin_lock_irqsave(borrow mut Ptr.toBorrowMut(wq).lock as *mut spinlock_t);
+
+/// Safety: the caller holds `wq`'s lock, taken with `state`.
+unsafe fn unlock(wq: *mut waitqueue, state: usize) {
+    spin_unlock_irqrestore(borrow mut Ptr.toBorrowMut(wq).lock as *mut spinlock_t, state);
+}
+
+/// The first node after `head`, or null; the node after `node`, or null at the end.
+/// Safety: `head` is an initialised list (and `node` on it).
+unsafe fn first(head: *mut list_node) -> *mut list_node {
+    let n = Ptr.toBorrow(head as *list_node).next;
+    return if (n == head) 0 as *mut list_node else n;
+}
+
+/// Safety: as first.
+unsafe fn after(head: *mut list_node, node: *mut list_node) -> *mut list_node {
+    let n = Ptr.toBorrow(node as *list_node).next;
+    return if (n == head) 0 as *mut list_node else n;
+}
+
+/// The entry whose `link` is `node`.
+/// Safety: `node` is a wait entry's link.
+unsafe fn entryOf(node: *mut list_node) -> *mut wait_entry => (node as *mut u8).sub(offsetOf<wait_entry>(link)) as *mut wait_entry;
+
+/// Safety: `wq` points to storage for a queue nothing uses yet; `name` outlives it.
+@export("waitqueue_init")
+unsafe fn init(wq: *mut waitqueue, name: *CChar) {
+    let q = Ptr.toBorrowMut(wq);
+    spinlock_init(borrow mut q.lock as *mut spinlock_t, name);
+    list_init(borrow mut q.waiters as *mut list_node);
+    list_init(borrow mut q.callbacks as *mut list_node);
+}
+
+/// Queues the calling thread on `wq` and marks it BLOCKED, under the queue's lock, so a concurrent waker sees either
+/// the BLOCKED state and enqueues it or runs after the waiter's own check (wait_event's protocol, wait.h).
+/// Safety: `wq` is a live queue and `e` the caller's entry, initialised, on no other queue.
+@export("waitqueue_prepare")
+unsafe fn prepare(wq: *mut waitqueue, e: *mut wait_entry) {
+    // The floor panics in interrupt context and checks that the caller may sleep, naming the wait's call site.
+    let cur = wait_floor_enter_sleep(callerAddress());
+    let entry = Ptr.toBorrowMut(e);
+    entry.thread = cur;
+    let s = lock(wq);
+    // A woken waiter re-preparing after a false condition is still linked; pushing it again would corrupt the list.
+    let link = borrow mut entry.link as *mut list_node;
+    if (list_empty(link as *list_node)) {
+        list_push_back(borrow mut Ptr.toBorrowMut(wq).waiters as *mut list_node, link);
+    }
+    wait_floor_set_waiting_on(cur, wq);
+    // Under the queue's lock, and never over a READY thread: a wait that arms several queues (poll) may already have
+    // been woken from an earlier one and queued (S34).
+    sched_prepare_block_current();
+    unlock(wq, s);
+}
+
+/// Safety: `wq` is the queue `e` was prepared on.
+@export("waitqueue_finish")
+unsafe fn finish(wq: *mut waitqueue, e: *mut wait_entry) {
+    let s = lock(wq);
+    let entry = Ptr.toBorrowMut(e);
+    let link = borrow mut entry.link as *mut list_node;
+    if (!list_empty(link as *list_node)) {
+        list_remove(link);
+    }
+    wait_floor_set_waiting_on(entry.thread, 0 as *mut waitqueue);
+    unlock(wq, s);
+    sched_set_running_current();
+}
+
+/// Safety: `wq` is a live queue; `e` is initialised and on no queue; `callback` keeps the rules of wait.h.
+@export("waitqueue_add_callback")
+unsafe fn addCallback(wq: *mut waitqueue, e: *mut wait_entry, callback: extern "C" fn(*mut wait_entry, u32)) {
+    let entry = Ptr.toBorrowMut(e);
+    if (callback.isNull() || !list_empty(borrow entry.link as *list_node)) {
+        wait_floor_fatal("waitqueue_add_callback: a null callback, or an entry already on a queue\0".ptr as *CChar);
+    }
+    entry.thread = 0 as *mut thread;
+    entry.callback = callback;
+    let s = lock(wq);
+    list_push_back(borrow mut Ptr.toBorrowMut(wq).callbacks as *mut list_node, borrow mut entry.link as *mut list_node);
+    unlock(wq, s);
+}
+
+/// The lock is what makes the return a promise: a wake running this entry's callback holds it, so it has finished
+/// when this has it.
+/// Safety: `wq` is a live queue; `e` was added to it or is on none.
+@export("waitqueue_remove_callback")
+unsafe fn removeCallback(wq: *mut waitqueue, e: *mut wait_entry) {
+    let s = lock(wq);
+    let link = borrow mut Ptr.toBorrowMut(e).link as *mut list_node;
+    if (!list_empty(link as *list_node)) {
+        list_remove(link);
+    }
+    unlock(wq, s);
+}
+
+/// Unlinks every callback entry and runs it with WAIT_CB_FREED; how many.
+/// Safety: `wq` is a live queue about to be freed.
+@export("waitqueue_detach_callbacks")
+unsafe fn detachCallbacks(wq: *mut waitqueue) -> u32 {
+    var n: u32 = 0;
+    let s = lock(wq);
+    let head = borrow mut Ptr.toBorrowMut(wq).callbacks as *mut list_node;
+    var node = first(head);
+    while (!node.isNull()) {
+        let next = after(head, node);
+        list_remove(node);
+        let e = entryOf(node);
+        let callback = Ptr.toBorrow(e as *wait_entry).callback;
+        callback(e, CB_FREED);
+        n += 1;
+        node = next;
+    }
+    unlock(wq, s);
+    return n;
+}
+
+/// Callback entries first, every one, whichever kind of wake, and not counted: they observe the event. Then the
+/// threads: a waiter already woken stays linked until it runs waitqueue_finish, so a wake_one counts only the waiters
+/// it transitions and stops at the first (a contended mutex unlock is one thread's work under the lock).
+/// Safety: the caller holds `wq`'s lock.
+unsafe fn wakeLocked(wq: *mut waitqueue, all: bool) -> u32 {
+    var n: u32 = 0;
+    let q = Ptr.toBorrowMut(wq);
+    let callbacks = borrow mut q.callbacks as *mut list_node;
+    var node = first(callbacks);
+    while (!node.isNull()) {
+        let next = after(callbacks, node);
+        let e = entryOf(node);
+        let callback = Ptr.toBorrow(e as *wait_entry).callback;
+        callback(e, 0);
+        node = next;
+    }
+    let waiters = borrow mut q.waiters as *mut list_node;
+    node = first(waiters);
+    while (!node.isNull()) {
+        let next = after(waiters, node);
+        if (sched_wake(Ptr.toBorrow(entryOf(node) as *wait_entry).thread)) {
+            n += 1;
+            if (!all) {
+                break;
+            }
+        }
+        node = next;
+    }
+    return n;
+}
+
+/// Safety: `wq` is a live queue.
+unsafe fn wake(wq: *mut waitqueue, all: bool) -> u32 {
+    let s = lock(wq);
+    let n = wakeLocked(wq, all);
+    unlock(wq, s);
+    return n;
+}
+
+/// Safety: `wq` is a live queue.
+@export("waitqueue_wake_one")
+unsafe fn wakeOne(wq: *mut waitqueue) -> u32 => wake(wq, false);
+
+/// Safety: `wq` is a live queue.
+@export("waitqueue_wake_all")
+unsafe fn wakeAll(wq: *mut waitqueue) -> u32 => wake(wq, true);
+
+/// Safety: `wq` is a live queue.
+@export("waitqueue_lock_nested")
+unsafe fn lockNested(wq: *mut waitqueue, subclass: u32) -> usize =>
+    spin_lock_irqsave_nested(borrow mut Ptr.toBorrowMut(wq).lock as *mut spinlock_t, subclass);
+
+/// Safety: the caller holds `wq`'s lock (waitqueue_lock_nested).
+@export("waitqueue_wake_all_locked")
+unsafe fn wakeAllLocked(wq: *mut waitqueue) -> u32 => wakeLocked(wq, true);
+
+/// Safety: the caller holds `wq`'s lock, taken with `state`.
+@export("waitqueue_unlock")
+unsafe fn unlockQueue(wq: *mut waitqueue, state: usize) => unlock(wq, state);
+
+/// Both lists: a caller skips a wake on an empty queue, and a wake is owed to a callback entry as much as to a thread.
+/// Safety: `wq` is a live queue.
+@export("waitqueue_empty")
+unsafe fn isEmpty(wq: *mut waitqueue) -> bool {
+    let s = lock(wq);
+    let q = Ptr.toBorrow(wq as *waitqueue);
+    let empty = list_empty(borrow q.waiters as *list_node) && list_empty(borrow q.callbacks as *list_node);
+    unlock(wq, s);
+    return empty;
+}
+
+/// Safety: `wq` is a live queue.
+@export("waitqueue_waiting")
+unsafe fn waiting(wq: *mut waitqueue) -> u32 {
+    var n: u32 = 0;
+    let s = lock(wq);
+    let head = borrow mut Ptr.toBorrowMut(wq).waiters as *mut list_node;
+    var node = first(head);
+    while (!node.isNull()) {
+        n += 1;
+        node = after(head, node);
+    }
+    unlock(wq, s);
+    return n;
+}
+
+/// An atomic view of a timed wait's flag (only ever accessed atomically).
+/// Safety: `wt` is a live wait_timeout.
+unsafe fn expiredOf(wt: *mut wait_timeout) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(wt).expired as *mut u32 as *AtomicU32);
+
+/// Safety: `wt` points to storage for a wait_timeout; `wq` outlives it.
+@export("wait_timeout_init")
+unsafe fn timeoutInit(wt: *mut wait_timeout, wq: *mut waitqueue) {
+    let t = Ptr.toBorrowMut(wt);
+    t.wq = wq;
+    t.expired = 0;
+}
+
+/// The timer's callback, in interrupt context: ends the block and decides nothing; the waiter re-tests its condition.
+/// Safety: `arg` is the timer's wait_timeout, live while the timer is armed.
+@export("wait_timeout_fired")
+unsafe fn timeoutFired(t: *mut timer, arg: *mut void) {
+    let wt = arg as *mut wait_timeout;
+    expiredOf(wt).storeWith(1, StoreOrdering.Release);
+    wake(Ptr.toBorrow(wt as *wait_timeout).wq, true);
+}
+
+/// Safety: `wt` is a live wait_timeout.
+@export("wait_timeout_expired")
+unsafe fn timeoutExpired(wt: *wait_timeout) -> bool => expiredOf(wt as *mut wait_timeout).loadWith(LoadOrdering.Acquire) != 0;

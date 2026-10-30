@@ -279,7 +279,13 @@ last (the lowest priority level's tail).
 ## wait.h
 
 ### `struct waitqueue`, `void waitqueue_init(struct waitqueue *wq, const char *name)`, `WAITQUEUE_INIT(name)`
-- A spinlock and two lists of `struct wait_entry` (link, thread, `fn`):
+- Written in Nova (`kernel/scheduler/wait.nova`, roadmap 2.0 SA3): `make
+  nova` generates `wait.c` and the types' header `wait_types.h`, which
+  `wait.h` includes; `wait_floor.c` keeps the timed sleeps and what reads a
+  thread's or a CPU's fields. The C interface is unchanged but for one
+  member's name: a wait entry's callback is `callback` (it was `fn`, a Nova
+  keyword).
+- A spinlock and two lists of `struct wait_entry` (link, thread, `callback`):
   `waiters`, the sleeping threads (entries on the waiting thread's stack),
   and `callbacks`, the callback entries every wake runs under the lock
   (`waitqueue_add_callback`; epoll's items). A `wake_one` runs the

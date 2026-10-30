@@ -539,7 +539,7 @@ and `sched_dump`'s per-CPU line carries the load.
 ## 4. Wait queues
 
 ```c
-struct wait_entry { struct list_node link; struct thread *thread; wait_callback_fn fn; };
+struct wait_entry { struct list_node link; struct thread *thread; wait_callback_fn callback; };  /* kernel/scheduler/wait.nova */
 struct waitqueue { spinlock_t lock; struct list_node waiters; struct list_node callbacks; };
 
 #define wait_event(wq, cond)                          \
