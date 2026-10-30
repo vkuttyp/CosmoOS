@@ -1,6 +1,6 @@
 # Kernel object lifetime and quiescence: design
 
-## Data structures (`kernel/core/quiesce.c`, `kernel/include/kernel/quiesce.h`)
+## Data structures (`kernel/core/quiesce.nova`, `kernel/include/kernel/quiesce.h`)
 
 ```c
 struct quiesce_cpu {                            /* one per CPU, its own cache line */
@@ -20,7 +20,7 @@ struct quiesce_head { struct quiesce_head *next; void (*fn)(struct quiesce_head 
 The epoch algorithm lives in `quiesce_core.h` as inline functions over a
 `struct quiesce_state`, with no kernel dependency, so the host test
 (`tests/host/test_quiesce.c`) drives the same code under ASan with real
-threads; `kernel/core/quiesce.c` wraps it with the CPU registry, the
+threads; `kernel/core/quiesce.nova` wraps it with the CPU registry, the
 sleeping wait, the callback worker and the statistics.
 
 The callback list is a spinlocked (irqsave) singly linked list drained by

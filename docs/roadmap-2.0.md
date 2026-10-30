@@ -296,7 +296,10 @@ queues in Nova (`kernel/scheduler/wait.nova`, over `wait_floor.c`; novac
 0.6.0's ADR 0030), which give the recorded digest (2026-10-30); and the
 completions and semaphores in Nova (`completion.nova`, `semaphore.nova`),
 which give it too (2026-10-30); and the mutex with its priority
-inheritance (`mutex.nova`), which gives it as well (2026-10-30).
+inheritance (`mutex.nova`), which gives it as well (2026-10-30). Then
+quiescence (`kernel/core/quiesce.nova`, over `quiesce_floor.c`), the
+first port drafted by Nova's `c2nova port` and finished by hand; its
+self-tests pass on both architectures (2026-10-30).
 
 Size: about 1.5x.
 

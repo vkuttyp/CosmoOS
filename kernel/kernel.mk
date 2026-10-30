@@ -32,6 +32,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/percpu.c \
 	kernel/core/smp.c \
 	kernel/core/quiesce.c \
+	kernel/core/quiesce_floor.c \
 	kernel/core/quiescetest.c \
 	kernel/core/lockdep.c \
 	kernel/core/lockdeptest.c \
