@@ -52,7 +52,7 @@ static const char *mutex_init_at_matches(void)
 
     mutex_init(&made, "nova.kcore.init-at");
     const struct mutex *s = &kcore_static_mutex;
-    if (!same_spinlock(&s->lock, &made.lock) || s->owner != made.owner || s->name != made.name || s->class != made.class
+    if (!same_spinlock(&s->lock, &made.lock) || s->owner != made.owner || s->name != made.name || s->lock_class != made.lock_class
         || s->pi_active != made.pi_active || s->handoff != made.handoff)
         return "MUTEX_INIT_AT and mutex_init leave different scalar members";
     if (!same_spinlock(&s->wq.lock, &made.wq.lock))

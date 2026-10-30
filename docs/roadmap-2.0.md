@@ -295,7 +295,8 @@ cycle warning after a mutex handoff, fixed in `mutex.c`. Then the wait
 queues in Nova (`kernel/scheduler/wait.nova`, over `wait_floor.c`; novac
 0.6.0's ADR 0030), which give the recorded digest (2026-10-30); and the
 completions and semaphores in Nova (`completion.nova`, `semaphore.nova`),
-which give it too (2026-10-30).
+which give it too (2026-10-30); and the mutex with its priority
+inheritance (`mutex.nova`), which gives it as well (2026-10-30).
 
 Size: about 1.5x.
 

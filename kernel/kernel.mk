@@ -62,6 +62,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/scheduler/wait.c \
 	kernel/scheduler/wait_floor.c \
 	kernel/scheduler/mutex.c \
+	kernel/scheduler/mutex_floor.c \
 	kernel/scheduler/semaphore.c \
 	kernel/scheduler/completion.c \
 	kernel/scheduler/completion_floor.c \

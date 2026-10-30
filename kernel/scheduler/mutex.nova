@@ -1,0 +1,351 @@
+// Sleeping mutexes on a wait queue, with priority inheritance (kernel/include/kernel/mutex.h;
+// docs/kernel/scheduler/design.md), in Nova (roadmap 2.0 SA3). struct mutex is Nova's, generated into
+// kernel/include/kernel/mutex_types.h, which mutex.h includes (Nova ADR 0029, 0030), so MUTEX_INIT_AT and every caller
+// are unchanged; its wait queue is the C type wait.nova defines. The contended wait goes through wait_floor.c's
+// wait_floor_loop, since a wait entry is C state no Nova local may hold. mutex_floor.c keeps panic's and WARN's
+// messages, the interrupt and might-sleep checks, and the module exports.
+//
+// The C this replaces is held to tests/host/test_sync.c's recorded trace.
+
+@header("kernel/spinlock.h", "kernel/list.h", "kernel/wait.h", "kernel/thread.h", "kernel/sched.h", "kernel/lockdep.h")
+extern "C" {
+    @ctype("spinlock_t")
+    struct spinlock_t;
+    struct list_node {
+        next: *mut list_node;
+        prev: *mut list_node;
+    }
+    struct waitqueue {
+        lock: spinlock_t;
+        waiters: list_node;
+    }
+    struct wait_entry {
+        link: list_node;
+        thread: *mut thread;
+    }
+    struct thread {
+        priority: i32; // (rq) the effective priority the scheduler keys on
+        base_prio: i32; // (pi) the created priority
+        pi_held: list_node; // (pi) the mutexes it holds that have waiters
+        pi_blocked_on: *mut mutex; // (pi) the mutex it waits for
+        pi_walk_gen: u64; // (pi) the donation walk that last visited it
+    }
+
+    @constant
+    fn SPINLOCK_INIT(name: *CChar) -> spinlock_t;
+    fn spinlock_init(lock: *mut spinlock_t, name: *CChar);
+    fn spin_lock_irqsave(lock: *mut spinlock_t) -> usize;
+    fn spin_unlock_irqrestore(lock: *mut spinlock_t, state: usize);
+    fn list_init(head: *mut list_node);
+    fn list_empty(head: *list_node) -> bool;
+    fn list_push_back(head: *mut list_node, node: *mut list_node);
+    fn list_remove(node: *mut list_node);
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn waitqueue_empty(wq: *mut waitqueue) -> bool;
+    fn waitqueue_wake_one(wq: *mut waitqueue) -> u32;
+    fn wait_floor_loop(wq: *mut waitqueue, attempt: extern "C" fn(*mut void, bool) -> bool,
+        woken: extern "C" fn(*mut void), arg: *mut void);
+    fn thread_current() -> *mut thread;
+    fn sched_wake(t: *mut thread) -> bool;
+    fn sched_reprioritize(t: *mut thread, prio: i32);
+    fn lockdep_acquire_check(lock: *void, slot: *mut u16, name: *CChar, kind: u32, subclass: u32, irqsOn: bool, ip: usize);
+    fn lockdep_acquired(lock: *void, slot: *mut u16, name: *CChar, kind: u32, subclass: u32, trylock: bool, irqsOn: bool,
+        ip: usize);
+    fn lockdep_release(lock: *void, kind: u32, ip: usize, irqRestore: bool);
+
+    // mutex_floor.c
+    fn mutex_floor_check_lock(m: *mutex, ip: usize);
+    fn mutex_floor_recursive(m: *mutex, cur: *thread);
+    fn mutex_floor_bad_unlock(m: *mutex, cur: *thread);
+    fn mutex_floor_pi_cycle();
+}
+
+/// LOCKDEP_KIND_MUTEX and SCHED_PRIO_COUNT (lockdep_core.h, thread.h; mutex_floor.c checks them).
+const KIND_MUTEX: u32 = 1;
+const PRIO_COUNT: i32 = 64;
+
+@repr(C)
+struct mutex {
+    lock: spinlock_t;
+    owner: *mut thread;
+    wq: waitqueue;
+    name: *CChar;
+    lock_class: u16; // lockdep class + 1 (kind mutex), cached at first acquisition
+    pi_active: u16; // a waiter has donated to the owner: unlock must run the PI restore (under PI_LOCK)
+    pi_link: list_node; // (PI_LOCK) in its owner's pi_held list while it has waiters
+    handoff: *mut thread; // (lock) a waiter overtaken once, which the next unlock hands the mutex to (S33)
+}
+
+// Priority inheritance (docs/audit/next-subsystem-priority-inheritance.md). One global lock serialises every donation
+// and restoration. It is the outermost lock of the scheme: under it come run-queue locks (sched_reprioritize) and
+// wait-queue locks (to read a mutex's waiters), never the reverse. A mutex is in its owner's pi_held list exactly while
+// it has waiters, and an owner's effective priority is the best (lowest number) of its base and the top waiter of each
+// mutex it holds.
+static mut PI_LOCK: spinlock_t = SPINLOCK_INIT("mutex-pi\0".ptr as *CChar);
+static mut PI_WALK_GEN: u64 = 0; // bumped per chain walk, under PI_LOCK
+
+/// Safety: PI_LOCK is only ever taken through these.
+unsafe fn piLock() -> usize => spin_lock_irqsave(borrow mut PI_LOCK as *mut spinlock_t);
+
+/// Safety: the caller holds PI_LOCK, taken with `state`.
+unsafe fn piUnlock(state: usize) {
+    spin_unlock_irqrestore(borrow mut PI_LOCK as *mut spinlock_t, state);
+}
+
+/// An atomic view of the owner (a pointer's bits).
+/// Safety: `m` is a live mutex.
+unsafe fn ownerOf(m: *mut mutex) -> borrow(static) AtomicUSize =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(m).owner as *mut *mut thread as *AtomicUSize);
+
+/// Safety: `m` is a live mutex.
+unsafe fn ownerAcquire(m: *mut mutex) -> *mut thread => ownerOf(m).loadWith(LoadOrdering.Acquire) as *mut thread;
+
+/// The node after `node` on `head`, or null.
+/// Safety: `head` is an initialised list, and `node` is it or on it.
+unsafe fn after(head: *mut list_node, node: *mut list_node) -> *mut list_node {
+    let n = Ptr.toBorrow(node as *list_node).next;
+    return if (n == head) 0 as *mut list_node else n;
+}
+
+/// The best (lowest-number) effective priority among `m`'s blocked waiters, or PRIO_COUNT when it has none.
+/// Safety: PI_LOCK is held; `m` is a live mutex.
+unsafe fn piTopWaiter(m: *mut mutex) -> i32 {
+    var best = PRIO_COUNT;
+    let queue = borrow mut Ptr.toBorrowMut(m).wq as *mut waitqueue;
+    let s = spin_lock_irqsave(borrow mut Ptr.toBorrowMut(queue).lock as *mut spinlock_t);
+    let head = borrow mut Ptr.toBorrowMut(queue).waiters as *mut list_node;
+    var node = after(head, head);
+    while (!node.isNull()) {
+        let e = (node as *mut u8).sub(offsetOf<wait_entry>(link)) as *wait_entry;
+        let t = Ptr.toBorrow(e).thread;
+        if (!t.isNull() && Ptr.toBorrow(t as *thread).priority < best) {
+            best = Ptr.toBorrow(t as *thread).priority;
+        }
+        node = after(head, node);
+    }
+    spin_unlock_irqrestore(borrow mut Ptr.toBorrowMut(queue).lock as *mut spinlock_t, s);
+    return best;
+}
+
+/// Recomputes `t`'s effective priority from its held mutexes, applies it, and propagates up the chain of mutexes it is
+/// itself blocked on. Each thread is marked as the walk visits it: a valid chain is acyclic and ends on its own, however
+/// long; reaching a thread already marked for this walk is a cycle, which only a lock-order bug makes, and the walk
+/// stops with a warning.
+/// Safety: PI_LOCK is held; `t` is null or a live thread.
+unsafe fn piApplyChain(start: *mut thread) {
+    PI_WALK_GEN += 1;
+    let gen = PI_WALK_GEN;
+    var t = start;
+    while (!t.isNull()) {
+        let th = Ptr.toBorrowMut(t);
+        if (th.pi_walk_gen == gen) {
+            mutex_floor_pi_cycle();
+            break;
+        }
+        th.pi_walk_gen = gen;
+        var eff = th.base_prio;
+        let held = borrow mut th.pi_held as *mut list_node;
+        var node = after(held, held);
+        while (!node.isNull()) {
+            let hm = (node as *mut u8).sub(offsetOf<mutex>(pi_link)) as *mut mutex;
+            let tw = piTopWaiter(hm);
+            if (tw < eff) {
+                eff = tw;
+            }
+            node = after(held, node);
+        }
+        if (eff == Ptr.toBorrow(t as *thread).priority) {
+            break; // no change: nothing to propagate
+        }
+        sched_reprioritize(t, eff);
+        let n = Ptr.toBorrow(t as *thread).pi_blocked_on;
+        if (n.isNull()) {
+            break;
+        }
+        t = ownerAcquire(n); // the next owner up the chain
+    }
+}
+
+/// Safety: `m` is a live mutex.
+unsafe fn lockOf(m: *mut mutex) -> *mut spinlock_t => borrow mut Ptr.toBorrowMut(m).lock as *mut spinlock_t;
+
+/// Safety: `m` is a live mutex.
+unsafe fn tryTake(m: *mut mutex, cur: *mut thread) -> bool {
+    let s = spin_lock_irqsave(lockOf(m));
+    let mx = Ptr.toBorrowMut(m);
+    let got = mx.owner.isNull();
+    if (got) {
+        mx.owner = cur;
+    }
+    spin_unlock_irqrestore(lockOf(m), s);
+    return got;
+}
+
+/// A waiter's attempt: true when the mutex is free (taken now) or was handed to it by the last unlock. Otherwise a
+/// waiter already woken once (`overtaken`) asks for the next unlock's handoff, unless another asked first.
+/// Safety: `m` is a live mutex.
+unsafe fn waiterTake(m: *mut mutex, cur: *mut thread, overtaken: bool) -> bool {
+    let s = spin_lock_irqsave(lockOf(m));
+    let mx = Ptr.toBorrowMut(m);
+    let got = mx.owner.isNull() || mx.owner == cur;
+    if (got) {
+        mx.owner = cur;
+    } else if (overtaken && mx.handoff.isNull()) {
+        mx.handoff = cur;
+    }
+    spin_unlock_irqrestore(lockOf(m), s);
+    return got;
+}
+
+/// The contended path's state, for wait_floor_loop's callbacks.
+struct Contender {
+    m: *mut mutex;
+    cur: *mut thread;
+}
+
+/// Prepared and queued: take the mutex, or donate this thread's priority to the owner (and up the chain) before
+/// blocking. wait_event's lost-wakeup protocol is kept: prepared and BLOCKED before the owner is re-checked, so a
+/// release between the donation and the block makes the block return at once.
+/// Safety: `arg` is the caller's Contender.
+@callback
+unsafe fn attempt(arg: *mut void, overtaken: bool) -> bool {
+    let c = Ptr.toBorrow(arg as *Contender);
+    if (waiterTake(c.m, c.cur, overtaken)) {
+        return true;
+    }
+    let s = piLock();
+    let o = ownerAcquire(c.m);
+    if (!o.isNull() && o != c.cur) {
+        let blocked = Ptr.toBorrowMut(c.cur);
+        blocked.pi_blocked_on = c.m;
+        let mx = Ptr.toBorrowMut(c.m);
+        let link = borrow mut mx.pi_link as *mut list_node;
+        if (list_empty(link as *list_node)) {
+            list_push_back(borrow mut Ptr.toBorrowMut(o).pi_held as *mut list_node, link);
+            mx.pi_active = 1;
+        }
+        piApplyChain(o);
+    }
+    piUnlock(s);
+    return false;
+}
+
+/// After a block: no longer blocked on the mutex until the next attempt says so.
+/// Safety: `arg` is the caller's Contender.
+@callback
+unsafe fn woken(arg: *mut void) {
+    let c = Ptr.toBorrow(arg as *Contender);
+    let s = piLock();
+    let blocked = Ptr.toBorrowMut(c.cur);
+    blocked.pi_blocked_on = 0 as *mut mutex;
+    piUnlock(s);
+}
+
+/// Safety: `m` is a live mutex, the caller may sleep, and `ip` is the lock's call site.
+unsafe fn lockCommon(m: *mut mutex, subclass: u32, ip: usize) {
+    let cur = thread_current();
+    mutex_floor_check_lock(m as *mutex, ip);
+    if (Ptr.toBorrow(m as *mutex).owner == cur) {
+        mutex_floor_recursive(m as *mutex, cur as *thread);
+    }
+    // The order check runs before the wait, so a deadlocking acquisition is reported, not hung on.
+    let mx = Ptr.toBorrowMut(m);
+    lockdep_acquire_check(m as *void, borrow mut mx.lock_class as *mut u16, mx.name, KIND_MUTEX, subclass, false, ip);
+    if (!tryTake(m, cur)) {
+        var contender = Contender { m: m, cur: cur };
+        wait_floor_loop(borrow mut mx.wq as *mut waitqueue, attempt, woken, borrow mut contender as *mut Contender as *mut void);
+        // Acquired through the contended path. Only one waiter was woken and the release unlinked the mutex from the
+        // old owner, so if others are still queued this new owner must inherit them.
+        let s = piLock();
+        let blocked = Ptr.toBorrowMut(cur);
+        blocked.pi_blocked_on = 0 as *mut mutex;
+        if (!waitqueue_empty(borrow mut mx.wq as *mut waitqueue)) {
+            let link = borrow mut mx.pi_link as *mut list_node;
+            if (list_empty(link as *list_node)) {
+                list_push_back(borrow mut Ptr.toBorrowMut(cur).pi_held as *mut list_node, link);
+                mx.pi_active = 1;
+            }
+            piApplyChain(cur);
+        }
+        piUnlock(s);
+    }
+    lockdep_acquired(m as *void, borrow mut mx.lock_class as *mut u16, mx.name, KIND_MUTEX, subclass, false, false, ip);
+}
+
+/// Safety: `m` points to storage for a mutex nothing uses yet; `name` outlives it.
+@export("mutex_init")
+unsafe fn init(m: *mut mutex, name: *CChar) {
+    spinlock_init(lockOf(m), name);
+    let mx = Ptr.toBorrowMut(m);
+    mx.owner = 0 as *mut thread;
+    mx.name = name;
+    mx.lock_class = 0;
+    mx.pi_active = 0;
+    mx.handoff = 0 as *mut thread;
+    list_init(borrow mut mx.pi_link as *mut list_node);
+    waitqueue_init(borrow mut mx.wq as *mut waitqueue, name);
+}
+
+/// Safety: `m` is a live mutex.
+@export("mutex_trylock")
+unsafe fn tryLock(m: *mut mutex) -> bool {
+    if (!tryTake(m, thread_current())) {
+        return false;
+    }
+    let mx = Ptr.toBorrowMut(m);
+    lockdep_acquired(m as *void, borrow mut mx.lock_class as *mut u16, mx.name, KIND_MUTEX, 0, true, false, callerAddress());
+    return true;
+}
+
+/// Safety: `m` is a live mutex, and the caller may sleep.
+@export("mutex_lock")
+unsafe fn lock(m: *mut mutex) => lockCommon(m, 0, callerAddress());
+
+/// Safety: as mutex_lock.
+@export("mutex_lock_nested")
+unsafe fn lockNested(m: *mut mutex, subclass: u32) => lockCommon(m, subclass, callerAddress());
+
+/// PI_LOCK is held across both the ownership change and the removal of this mutex's donation, so they are one step:
+/// otherwise a new owner could take and release the mutex in the gap and remove the link from this (old) owner's
+/// pi_held, leaving it boosted forever. PI_LOCK is outermost; the mutex's lock nests inside it.
+/// Safety: `m` is a live mutex the caller holds.
+@export("mutex_unlock")
+unsafe fn unlock(m: *mut mutex) {
+    let cur = thread_current();
+    let gs = piLock();
+    let s = spin_lock_irqsave(lockOf(m));
+    let mx = Ptr.toBorrowMut(m);
+    if (mx.owner != cur) {
+        mutex_floor_bad_unlock(m as *mutex, cur as *thread);
+    }
+    lockdep_release(m as *void, KIND_MUTEX, callerAddress(), false);
+    // A waiter overtaken once gets the mutex now, rather than a chance at it (S33). It is blocked in lockCommon, or
+    // between its prepare and its block, and cannot leave (mutex waits are not interruptible), so the pointer is good.
+    let heir = mx.handoff;
+    mx.handoff = 0 as *mut thread;
+    ownerOf(m).storeWith(heir as usize, StoreOrdering.Release);
+    // The heir owns the mutex from here, though it has not run to clear its own pi_blocked_on: clear it now (PI_LOCK is
+    // held), or a donation to the heir before it runs would walk heir -> m -> owner == heir and report a cycle.
+    if (!heir.isNull()) {
+        let blocked = Ptr.toBorrowMut(heir);
+        blocked.pi_blocked_on = 0 as *mut mutex;
+    }
+    spin_unlock_irqrestore(lockOf(m), s);
+    let link = borrow mut mx.pi_link as *mut list_node;
+    if (!list_empty(link as *list_node)) {
+        list_remove(link);
+        list_init(link);
+        mx.pi_active = 0;
+        piApplyChain(cur); // cur loses this mutex's inherited priority
+    }
+    piUnlock(gs);
+    if (!heir.isNull()) {
+        sched_wake(heir); // BLOCKED: READY now; still preparing: its block returns at once
+    } else {
+        waitqueue_wake_one(borrow mut mx.wq as *mut waitqueue);
+    }
+}
+
+/// Safety: `m` is a live mutex.
+@export("mutex_is_locked")
+unsafe fn isLocked(m: *mut mutex) -> bool => !ownerAcquire(m).isNull();

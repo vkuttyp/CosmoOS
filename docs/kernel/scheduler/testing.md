@@ -251,7 +251,8 @@ a line of the trace; the lines' FNV-1a digest is recorded in the test
 primitives must give the same digest before the C is deleted. The wait
 queues in Nova (`wait.nova`, SA3's second step) give it, and so do the
 completions and semaphores (`completion.nova`, `semaphore.nova`, the
-third) over them (2026-10-30).
+third) over them, and the mutex with its priority inheritance
+(`mutex.nova`, the fourth) (2026-10-30).
 `SYNC_TRACE_DUMP=1 out/<arch>-debug/host/test_sync` prints the lines.
 
 ## Measured results (2026-09-04, QEMU TCG, `-m 256M`)

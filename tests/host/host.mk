@@ -48,7 +48,7 @@ HOST_VIRTQ_SRCS := $(HOST_COMMON_SRCS) drivers/virtio/virtqueue.c tests/host/tes
 HOST_CRED_SRCS := $(HOST_COMMON_SRCS) kernel/process/cred.c tests/host/test_cred.c
 HOST_QUIESCE_SRCS := $(HOST_COMMON_SRCS) tests/host/test_quiesce.c
 HOST_SYNC_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/wait.c kernel/scheduler/wait_floor.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c kernel/scheduler/completion.c kernel/scheduler/completion_floor.c kernel/scheduler/semaphore.c \
-	kernel/scheduler/mutex.c tests/host/sync_baton.c tests/host/sync_sched.c tests/host/test_sync.c
+	kernel/scheduler/mutex.c kernel/scheduler/mutex_floor.c tests/host/sync_baton.c tests/host/sync_sched.c tests/host/test_sync.c
 HOST_LOCKDEP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockdep.c
 HOST_LOCKUP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockup.c
 HOST_FBVALID_SRCS := $(HOST_COMMON_SRCS) kernel/core/fbvalid.c tests/host/test_fbvalid.c

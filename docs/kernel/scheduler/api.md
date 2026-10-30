@@ -359,7 +359,12 @@ last (the lowest priority level's tail).
 
 ## mutex.h
 
-`struct mutex { spinlock_t lock; struct thread *owner; struct waitqueue wq; const char *name; uint16_t class; }`
+`struct mutex { spinlock_t lock; struct thread *owner; struct waitqueue wq; const char *name; uint16_t lock_class;
+uint16_t pi_active; struct list_node pi_link; struct thread *handoff; }`, written in Nova
+(`kernel/scheduler/mutex.nova`, roadmap 2.0 SA3) with its priority inheritance: `make nova` generates `mutex.c` and
+`mutex_types.h`, which `mutex.h` includes; `mutex_floor.c` keeps the formatted panics and the warning, the interrupt and
+might-sleep checks, and the module exports. The contended wait runs through `wait_floor_loop` (`wait.h`). `lock_class`
+was `class`, a Nova keyword; `MUTEX_INIT_AT` and the layout are otherwise unchanged.
 
 - `mutex_init(m, name)`; the name is the lock class for the debug-build
   checker (`docs/kernel/lockdep/`).
