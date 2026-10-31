@@ -279,10 +279,18 @@ acquisition with today's classes, callback classes and completion classes
 (L21). Pipes and FIFOs (`kernel/ipc/pipe.c`, `fifo.c`) convert with them,
 as the first users.
 
-- [ ] **Acceptance:** `test-smp2`, `test-chaos` and every lock, wait,
+- [x] **Acceptance:** `test-smp2`, `test-chaos` and every lock, wait,
   quiescence, pipe and FIFO self-test pass on both architectures with the
   Nova versions and the C deleted; lockdep's graph self-tests pass; a
   negative compile test refuses a sleep under a spin lock's guard.
+  Met 2026-10-31: with every SA3 port in (wait queues, completions,
+  semaphores, the mutex, quiescence, pipes and FIFOs: their C is now
+  generated from Nova), `test-smp2` and `test-chaos` pass on x86_64 and
+  aarch64 (debug), as do their lock, wait, quiescence, pipe, FIFO and
+  lockdep self-tests; `tests/nova/negative/sleep-under-spin.nova` is the
+  negative test. Two `test-chaos` boots first failed on time bounds
+  (`process-user`, `irqpoll-boost`) at a host load average near 30, and
+  passed when rerun on a quieter host.
 
 Scope (2026-10-30): CosmoOS has no read-write lock, so none is converted
 (none is added either). The types become Nova's, as SA2's did (Nova ADR
@@ -302,7 +310,12 @@ first port drafted by Nova's `c2nova port` and finished by hand; its
 self-tests pass on both architectures (2026-10-30). Then the pipe's ring
 and anonymous pipes (`kernel/ipc/pipe.nova`, over `pipe_floor.c` and a
 killable wait in `wait_floor.c`; 2026-10-31), and named pipes
-(`kernel/ipc/fifo.nova`, over `fifo_floor.c`; 2026-10-31).
+(`kernel/ipc/fifo.nova`, over `fifo_floor.c`; 2026-10-31). The negative
+compile test is `tests/nova/negative/sleep-under-spin.nova`, which `make
+nova-check` (CI's "Nova sources" job) holds to exactly its seven refusals:
+a mutex, a grace period, a completion, a semaphore and a sleep under spin
+and interrupt-saving spin guards, interrupts off and preemption off, with
+the same calls accepted where sleeping is allowed (2026-10-31).
 
 Size: about 1.5x.
 
