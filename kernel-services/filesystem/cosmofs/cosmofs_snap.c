@@ -54,35 +54,6 @@ uint64_t cfs_snaplist_next(const struct cfs_buf *b)
     return *(const uint64_t *)(b->data + CFS_MHDR_SIZE);
 }
 
-/* Entry `i` of a list block, false when the slot is empty. */
-bool cfs_snaplist_get(const struct cfs *fs, const struct cfs_buf *b, unsigned i, struct cfs_snapshot *out)
-{
-    if (fs->sb.version >= 12) {
-        const struct cfs_snap_block2 *sb = (const struct cfs_snap_block2 *)(b->data + CFS_MHDR_SIZE);
-        if (i >= CFS_SNAPS_PER_BLOCK2 || sb->snap[i].name[0] == '\0')
-            return false;
-        *out = sb->snap[i];
-        out->name[CFS_SNAP_NAME_MAX] = '\0';
-        return true;
-    }
-    const struct cfs_snap_block *sb = (const struct cfs_snap_block *)(b->data + CFS_MHDR_SIZE);
-    if (i >= CFS_SNAPS_PER_BLOCK || sb->snap[i].name[0] == '\0')
-        return false;
-    const struct cfs_snapshot_v11 *o = &sb->snap[i];
-    memset(out, 0, sizeof(*out));
-    out->generation = o->generation;
-    out->imap_root = o->imap_root;
-    out->alloc_root = o->alloc_root;
-    out->next_ino = o->next_ino;
-    out->inode_count = o->inode_count;
-    out->deadlist = o->deadlist;
-    out->created_ns = o->created_ns;
-    out->id = o->id;
-    memcpy(out->name, o->name, sizeof(o->name));
-    out->name[CFS_SNAP_NAME_MAX] = '\0';
-    return true;
-}
-
 /* Write entry `i` (NULL: empty it). The caller marks the block dirty. A
  * version-11 slot has no room for the identity fields and drops them,
  * which is why nothing that sets them runs before the raise. */

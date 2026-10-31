@@ -473,15 +473,213 @@ static void test_mount_digest(void)
     EXPECT(g_digest == MOUNT_DIGEST);
 }
 
+/* --- batch 3: the records snapshots, rollback and encryption keep ------- */
+
+#define RECS_ROUNDS 50000
+#define RECS_SEED 0xC05F5FA2026B0003ull
+/* The digest of the C decoders (cfsrecs.c, 2026-11-01). */
+#define RECS_DIGEST 0xb62644e6cd01c30cull
+
+/* One round's inputs: a snapshot list block read under a pool version, a
+ * rollback record, a key slot at an index. */
+struct rround {
+    _Alignas(8) uint8_t list[CFS_BLOCK];
+    struct cfs_rollback rb;
+    struct cfs_keyslot ks;
+    uint32_t version;
+    unsigned entry, slot;
+};
+
+static uint64_t fnv_bytes(const void *p, size_t n)
+{
+    const uint8_t *b = p;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < n; i++) {
+        h ^= b[i];
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+static void uuid_fill(uint8_t u[16], uint64_t how)
+{
+    memset(u, 0, 16);
+    if (how % 4 != 0)   /* a quarter of them all zero */
+        for (unsigned i = 0; i < 16; i++)
+            u[i] = (uint8_t)(i % 3 == 0 ? 0 : next());
+}
+
+static void gen_recs(struct rround *r)
+{
+    /* A snapshot list block, either layout: entries whose names are empty
+     * a third of the time, the rest of every byte random. */
+    for (unsigned i = 0; i < CFS_BLOCK; i += 8) {
+        uint64_t w = next();
+        memcpy(r->list + i, &w, 8);
+    }
+    for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK2; i++)
+        if (next() % 3 == 0)
+            r->list[CFS_MHDR_SIZE + 16 + i * sizeof(struct cfs_snapshot) + offsetof(struct cfs_snapshot, name)] = 0;
+    for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++)
+        if (next() % 3 == 0)
+            r->list[CFS_MHDR_SIZE + 8 + i * sizeof(struct cfs_snapshot_v11) + offsetof(struct cfs_snapshot_v11, name)] =
+                0;
+    r->version = (uint32_t)(2 + next() % 14);
+    r->entry = (unsigned)(next() % 48);
+    /* A rollback record near a valid one, sealed by the test's own CRC. */
+    struct cfs_rollback *b = &r->rb;
+    for (unsigned i = 0; i < sizeof(*b); i += 8) {
+        uint64_t w = next();
+        memcpy((uint8_t *)b + i, &w, sizeof(*b) - i < 8 ? sizeof(*b) - i : 8);
+    }
+    b->magic = next() % 8 ? CFS_ROLLBACK_MAGIC : (uint32_t)next();
+    b->version = next() % 8 ? 1 : (uint32_t)(next() % 3);
+    b->state = (uint32_t)(next() % 8 ? next() % 4 : next());
+    static const uint32_t fl[] = { 0, 0, 0, CFS_ROLLBACK_F_FROM_HELD, CFS_ROLLBACK_F_FROM_HELD, 2, 3, 0x80000000u };
+    b->flags = fl[next() % (sizeof(fl) / sizeof(fl[0]))];
+    uuid_fill(b->safety_uuid, next());
+    if (next() % 4 == 0)
+        memcpy(b->target_uuid, b->safety_uuid, 16);
+    else
+        uuid_fill(b->target_uuid, next());
+    b->crc = 0;
+    b->crc = crc32c(b, sizeof(*b));
+    if (next() % 6 == 0)
+        ((uint8_t *)b)[next() % sizeof(*b)] ^= (uint8_t)(1u << (next() % 8));
+    /* A key slot near every bound of its parameters. */
+    struct cfs_keyslot *k = &r->ks;
+    memset(k, 0, sizeof(*k));
+    k->kind = (uint32_t)(next() % 8 ? next() % 4 : next());
+    k->t_cost = (uint32_t)(next() % 4 ? next() % 4 : next());
+    static const uint32_t ln[] = { 0, 1, 2, 4, 0xfffffe, 0xffffff, 0x1000000, 0x1fffffff, 0x20000000, 0x40000000,
+                                   0x80000000u, 0xffffffffu };
+    k->lanes = next() % 2 ? ln[next() % (sizeof(ln) / sizeof(ln[0]))] : (uint32_t)next();
+    uint32_t want = 8u * k->lanes;
+    static const uint32_t mc[] = { 0, 7, 8, 16, 64, 65536, 0xffffffffu };
+    switch (next() % 4) {
+    case 0: k->m_cost_kib = mc[next() % (sizeof(mc) / sizeof(mc[0]))]; break;
+    case 1: k->m_cost_kib = want; break;
+    case 2: k->m_cost_kib = want - 1; break;
+    default: k->m_cost_kib = (uint32_t)next(); break;
+    }
+    r->slot = (unsigned)(next() % 4);
+}
+
+static void decode_recs(const struct rround *r)
+{
+    static struct cfs fs;
+    char line[256];
+    int n;
+    fs.sb.version = r->version;
+    struct cfs_buf b;
+    memset(&b, 0, sizeof(b));
+    b.data = (uint8_t *)r->list;
+    struct cfs_snapshot s;
+    memset(&s, 0xa5, sizeof(s));   /* an entry not returned leaves it as it was */
+    int got = cfs_snaplist_get(&fs, &b, r->entry, &s);
+    n = snprintf(line, sizeof(line), "n%d %016llx", got, (unsigned long long)fnv_bytes(&s, sizeof(s)));
+    emit(line, n);
+    struct cfs_rollback out;
+    memset(&out, 0xa5, sizeof(out));
+    int rc = cfs_rollback_parse(&r->rb, &out);
+    n = snprintf(line, sizeof(line), "r%d %016llx %08x", rc, (unsigned long long)fnv_bytes(&out, sizeof(out)),
+                 cfs_rollback_crc(&r->rb));
+    emit(line, n);
+    n = snprintf(line, sizeof(line), "k%d", cfs_keyslot_valid(r->slot, &r->ks));
+    emit(line, n);
+}
+
+static void test_recs_digest(void)
+{
+    static struct rround r;
+    g_dump = getenv("CFSPARSE_DUMP") != NULL;
+    g_digest = 0xcbf29ce484222325ull;
+    g_rng = RECS_SEED;
+    for (unsigned i = 0; i < RECS_ROUNDS; i++) {
+        gen_recs(&r);
+        decode_recs(&r);
+    }
+    printf("  cfsparse records digest 0x%016llx over %u rounds\n", (unsigned long long)g_digest, RECS_ROUNDS);
+    EXPECT(g_digest == RECS_DIGEST);
+}
+
+/* Argon2id's bound on lanes (RFC 9106; userland/lib/argon2.c): 8 * lanes
+ * must not wrap into a memory cost any slot meets. */
+static void test_keyslot_lanes(void)
+{
+    struct cfs_keyslot k;
+    memset(&k, 0, sizeof(k));
+    k.kind = CFS_KEYSLOT_PASSPHRASE;
+    k.t_cost = 3;
+    k.lanes = 0x20000000;   /* 8 * lanes wraps to 0 */
+    k.m_cost_kib = 0;
+    EXPECT(!cfs_keyslot_valid(1, &k));
+    k.lanes = 0x1000000;
+    k.m_cost_kib = 0x8000000;
+    EXPECT(!cfs_keyslot_valid(1, &k));
+    k.lanes = 0xffffff;
+    k.m_cost_kib = 8u * 0xffffff;
+    EXPECT(cfs_keyslot_valid(1, &k));
+    k.m_cost_kib -= 1;
+    EXPECT(!cfs_keyslot_valid(1, &k));
+}
+
+/* CFSPARSE_BENCH=records: batch 3's decoders alone on 2,000 rounds made beforehand (best of 15). */
+static int bench_recs(void)
+{
+    enum { N = 2000 };
+    struct rround *rs = malloc(sizeof(*rs) * N);
+    if (rs == NULL)
+        return 1;
+    static struct cfs fs;
+    g_rng = RECS_SEED;
+    for (unsigned i = 0; i < N; i++)
+        gen_recs(&rs[i]);
+    const char *what[] = { "snaplist", "rollback", "keyslot" };
+    for (int d = 0; d < 3; d++) {
+        double best = 1e30;
+        for (int run = 0; run < 15; run++) {
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            uint64_t acc = 0;
+            for (unsigned i = 0; i < N; i++) {
+                const struct rround *r = &rs[i];
+                if (d == 0) {
+                    fs.sb.version = r->version;
+                    struct cfs_buf b = { .data = (uint8_t *)r->list };
+                    struct cfs_snapshot s;
+                    acc += cfs_snaplist_get(&fs, &b, r->entry, &s) ? s.id : 1;
+                } else if (d == 1) {
+                    struct cfs_rollback out;
+                    acc += (uint64_t)cfs_rollback_parse(&r->rb, &out) + out.generation;
+                } else {
+                    acc += cfs_keyslot_valid(r->slot, &r->ks);
+                }
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            g_sink += acc;
+            double ns = (double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec);
+            if (ns < best)
+                best = ns;
+        }
+        printf("%s %.2f ns  ", what[d], best / N);
+    }
+    printf("per round (best of 15 runs of %u)\n", N);
+    free(rs);
+    return 0;
+}
+
 static const struct host_test tests[] = {
     { "recorded digest", test_recorded_digest },
     { "mount digest", test_mount_digest },
+    { "records digest", test_recs_digest },
+    { "keyslot lanes", test_keyslot_lanes },
 };
 
 int main(void)
 {
     const char *b = getenv("CFSPARSE_BENCH");
     if (b != NULL)
-        return strcmp(b, "mount") == 0 ? bench_mount() : bench();
+        return strcmp(b, "mount") == 0 ? bench_mount() : strcmp(b, "records") == 0 ? bench_recs() : bench();
     return harness_run(tests, sizeof(tests) / sizeof(tests[0]));
 }

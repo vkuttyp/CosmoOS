@@ -25,37 +25,11 @@
 
 /* --- the record ------------------------------------------------------------ */
 
-static uint32_t rb_crc(const struct cfs_rollback *r)
-{
-    struct cfs_rollback tmp = *r;
-    tmp.crc = 0;
-    return crc32c(&tmp, sizeof(tmp));
-}
-
 void cfs_rollback_seal(struct cfs_rollback *r)
 {
     r->magic = CFS_ROLLBACK_MAGIC;
     r->version = 1;
-    r->crc = rb_crc(r);
-}
-
-int cfs_rollback_parse(const void *payload, struct cfs_rollback *out)
-{
-    static const uint8_t zero[16];
-    memcpy(out, payload, sizeof(*out));
-    if (out->magic != CFS_ROLLBACK_MAGIC || out->version != 1 || rb_crc(out) != out->crc ||
-        (out->state != CFS_ROLLBACK_PENDING && out->state != CFS_ROLLBACK_HELD) ||
-        (out->flags & ~CFS_ROLLBACK_F_FROM_HELD) != 0 ||
-        (out->state == CFS_ROLLBACK_HELD && out->flags != 0))
-        return -EIO;
-    /* Checked for meaning too, not only for damage: a record whose safety
-     * snapshot is its target keeps nothing of the tree it replaces. */
-    if (memcmp(out->safety_uuid, zero, 16) == 0)
-        return -EIO;
-    if (out->state == CFS_ROLLBACK_PENDING &&
-        (memcmp(out->target_uuid, zero, 16) == 0 || memcmp(out->target_uuid, out->safety_uuid, 16) == 0))
-        return -EIO;
-    return 0;
+    r->crc = cfs_rollback_crc(r);
 }
 
 int cfs_rollback_read(struct cfs *fs, struct cfs_rollback *out)

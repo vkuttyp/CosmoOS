@@ -384,6 +384,7 @@ int cfs_rollback_read(struct cfs *fs, struct cfs_rollback *out);
  * copies a block's payload out and checks all three and the state
  * (-EIO when any is wrong). */
 void cfs_rollback_seal(struct cfs_rollback *r);
+uint32_t cfs_rollback_crc(const struct cfs_rollback *r);
 int cfs_rollback_parse(const void *payload, struct cfs_rollback *out);
 int cfs_rollback_request(struct cfs *fs, const char *target, const char *safety_name, struct cfs_snapshot *safety);
 int cfs_rollback_cancel(struct cfs *fs);
