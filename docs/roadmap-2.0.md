@@ -444,6 +444,19 @@ header is ceesafec's, with results as bools and named facts rather than
 codes C would need a hand header for, and the `module.cycle=` parsers
 SA4's take-over needed are CeeSafe (`kernel/module/modspec.cee`), so
 `kernel/` has 24 lines less C to convert than before SA4.
+ELF and module ELF (2026-10-31): `kernel/process/elfparse.cee` (the user
+executable validator; `elf.c` keeps the loader) and
+`kernel/module/modelf.cee` (the module image validator, the metadata
+check and the loader's accessors; `modelf.c` is gone), so `fuzz_elf` and
+`fuzz_modelf` drive no C. Digests `0x9a2e2083c6cf3e58` (100,000 images)
+and `0xeaa7bf3ed05aa6ff` (50,000 images and records), the C's.
+Benchmarks: module ELF 1.02x the C on arm64 (1.10x on x86-64 under
+Rosetta); the executable validator 1.09x on arm64 and 1.12x under
+Rosetta, from 2.5x before each header was copied out once and decoded
+from an array of known length, the rest code-generation quality: for
+the owner's ruling. The UEFI loader's ELF reader (`boot/uefi/elf.c`) is
+not in this family: no fuzz target drives it, and the loader is not
+built with ceesafec.
 
 Size: about 3.0x.
 

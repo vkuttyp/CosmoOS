@@ -61,12 +61,13 @@ static inline int modelf_validate(const void *file, size_t size, struct modelf_l
 
 /* Metadata rules: magic, ABI version, name syntax, deps syntax and
  * count, reserved words zero. -ENOEXEC and `why` on failure. */
-int modelf_check_info_for(const uint8_t *magic, uint32_t abi_version, const uint8_t *name, const uint8_t *version,
-                          const uint8_t *deps, const uint64_t *reserved, const char **why);
+int modelf_check_info_for(const uint8_t *magic, uint32_t abi_version, uint32_t expected_abi, const uint8_t *name,
+                          const uint8_t *version, const uint8_t *deps, const uint64_t *reserved, const char **why);
 static inline int modelf_check_info(const struct cosmo_module_info *info, const char **why)
 {
-    return modelf_check_info_for((const uint8_t *)info->magic, info->abi_version, (const uint8_t *)info->name,
-                                 (const uint8_t *)info->version, (const uint8_t *)info->deps, info->reserved, why);
+    return modelf_check_info_for((const uint8_t *)info->magic, info->abi_version, COSMO_MODULE_ABI_VERSION,
+                                 (const uint8_t *)info->name, (const uint8_t *)info->version, (const uint8_t *)info->deps,
+                                 info->reserved, why);
 }
 
 /* Allocatable section by ELF index, or NULL. */

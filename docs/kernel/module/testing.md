@@ -20,7 +20,7 @@ build produces.
 - `ed25519-malleability`: `S + L` (the same scalar mod L) is rejected;
   a non-canonical public key encoding is rejected.
 
-`tests/host/test_modelf` (`kernel/module/modelf.c` under
+`tests/host/test_modelf` (`kernel/module/modelf.cee`, in CeeSafe, under
 `-DMODELF_HOST_TEST=1`): a builder assembles a well-formed synthetic
 `ET_REL` (text, rodata, data, bss, `.cosmo.module`, `.ksymtab`, symbol
 and string tables, one RELA section), then:
@@ -139,9 +139,15 @@ validator over mutations of the synthetic images (`tests/host/modelf_image.h`,
 shared with `test_modelf`), asserting that every section and metadata
 table an accepted image describes lies inside the image. Its first run
 found that `e_shoff` was not checked for alignment and the section
-header table was read in place unaligned (UBSan); `modelf.c` now rejects
+header table was read in place unaligned (UBSan); the validator now rejects
 an `e_shoff` or a structured section's `sh_offset` that is not 8-byte
-aligned (`test_modelf` `unaligned-tables`). `fault-kmalloc`
+aligned (`test_modelf` `unaligned-tables`). `test_modelf` also has a
+recorded digest (roadmap 2.0 SA5's differential test): 50,000 mutated
+images through `modelf_validate_for` under both machines and the
+accessors on what it accepts, and as many metadata records good and bad
+through `modelf_check_info_for`; the C's digest (`0xeaa7bf3ed05aa6ff`,
+2026-10-31) is the CeeSafe's. `MODELF_BENCH=1` times the validator: 1.02x
+the C on arm64, 1.10x on x86-64 under Rosetta. `fault-kmalloc`
 (`kernel/core/faulttest.c`) loads `cosmotest.ko` with one injected
 allocation failure at a different allocation each time and requires a
 clean load or `-ENOMEM`.

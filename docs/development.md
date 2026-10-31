@@ -100,7 +100,7 @@ unchanged with the *host* `clang` (no `--target`), links them with
 resulting binaries under `-fsanitize=address,undefined`: `test_buddy`
 and `test_slab` (`kernel/memory/buddy.c`, `slab.c`, `kmalloc.c`),
 `test_crypto` (`kernel/security/sha512.c`, `ed25519.c` against the
-FIPS and RFC 8032 vectors), and `test_modelf` (`kernel/module/modelf.c`
+FIPS and RFC 8032 vectors), and `test_modelf` (`kernel/module/modelf.cee`
 against synthetic module images, built with `-DMODELF_HOST_TEST=1`), and
 `test_cosmofs` (the cosmofs on-disk layout header: structure sizes,
 inode-map arithmetic, extent mapping), and `test_libc` (the C library's

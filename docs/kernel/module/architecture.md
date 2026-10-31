@@ -12,7 +12,7 @@ module dependencies, module signing.
                     │
                     ▼
     kernel/module/          modsig.c   signature trailer, key lookup, Ed25519
-                            modelf.c   ET_REL validation and layout (pure, host-testable)
+                            modelf.cee ET_REL validation and layout (CeeSafe; pure, host-testable)
                             module.c   load pipeline, symbol tables, dependencies, unload
                             ksym.c     the kernel's exported symbol table
                     │                         │

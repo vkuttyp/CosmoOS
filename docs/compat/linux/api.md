@@ -13,7 +13,7 @@ Nothing here is a native interface: the native ABI
 (`docs/kernel/syscall/api.md`, 43 calls) is unchanged by this phase
 (invariant 7).
 
-## The CosmoOS ELF note (`libc/src/crt0.S`, `userland/user.ld`, `kernel/process/elf.c`)
+## The CosmoOS ELF note (`libc/src/crt0.S`, `userland/user.ld`, `kernel/process/elfparse.cee`)
 
 **ABI stability: stable** (a program built today must keep being native).
 

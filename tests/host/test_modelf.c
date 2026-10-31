@@ -11,7 +11,8 @@
  * both machines, the accessors on what it accepts, and modelf_check_info_for
  * on metadata records with names, versions and dependency lists good and
  * bad. Every result is a line; the lines' FNV-1a digest is recorded below.
- * The C gave it (modelf.c); the CeeSafe must give the same. MODELF_DUMP=1
+ * The C gave it (2026-10-31), and the CeeSafe that replaced it
+ * (modelf.cee) gives the same. MODELF_DUMP=1
  * prints the lines; MODELF_BENCH=1 times the validator.
  */
 
@@ -296,7 +297,7 @@ static void test_info_rules(void)
 
 #define ROUNDS 50000
 #define SEED 0x40DE1F5A52026E11ull
-/* The digest of the C validator (modelf.c, 2026-10-31). */
+/* The digest of the C validator (2026-10-31), which modelf.cee gives too. */
 #define MODELF_DIGEST 0xeaa7bf3ed05aa6ffull
 
 static uint64_t g_rng;
@@ -437,7 +438,7 @@ static void run_info(uint64_t *digest, bool dump, unsigned *accepted)
     if (next() % 8 == 0)
         info.reserved[next() % 4] = next();
     const char *why = NULL;
-    int rc = modelf_check_info_for((const uint8_t *)info.magic, info.abi_version, (const uint8_t *)info.name,
+    int rc = modelf_check_info_for((const uint8_t *)info.magic, info.abi_version, COSMO_MODULE_ABI_VERSION, (const uint8_t *)info.name,
                                    (const uint8_t *)info.version, (const uint8_t *)info.deps, info.reserved, &why);
     *accepted += rc == 0;
     char line[256];

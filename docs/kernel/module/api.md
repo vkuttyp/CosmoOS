@@ -334,9 +334,14 @@ milliseconds per 100 KiB under TCG); any context.
 
 `CONFIG_MODULE_SIG_ENFORCE != 0` (make `MODULE_SIG_ENFORCE`, default 1).
 
-## ELF validation (`kernel/include/kernel/modelf.h`, `kernel/module/modelf.c`)
+## ELF validation (`kernel/include/kernel/modelf.h`, `kernel/module/modelf.cee`)
 
-Pure functions; compiled on the host with `-DMODELF_HOST_TEST=1`.
+Pure functions, in CeeSafe (roadmap 2.0 SA5); compiled on the host with
+`-DMODELF_HOST_TEST=1`. `modelf_validate` and `modelf_check_info` are
+inline wrappers in `modelf.h` over `modelf_validate_for` (taking this
+architecture's machine and refusal message) and `modelf_check_info_for`
+(taking the metadata's fields, `char` arrays CeeSafe cannot import, and
+the expected `COSMO_MODULE_ABI_VERSION`).
 
 ### `int modelf_validate(const void *file, size_t size, struct modelf_layout *out, const char **why)`
 

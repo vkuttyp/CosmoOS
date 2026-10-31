@@ -53,7 +53,7 @@ what Linux is.
 
 ## Responsibilities
 
-- **Personality selection** (`kernel/process/elf.c`, `process.c`): the
+- **Personality selection** (`kernel/process/elfparse.cee`, `process.c`): the
   loader records whether the image carries the CosmoOS note;
   `process_create_from_elf` picks `personality_native` or
   `personality_linux`. Native programs get the note from `crt0.S`
@@ -123,7 +123,7 @@ what Linux is.
 | Interface | Where | Used by |
 |---|---|---|
 | `personality_linux` (table, count, name) | `compat/linux/syscalls.c`, `kernel/process.h` | `process_create_from_elf`, the dispatcher |
-| The CosmoOS ELF note (`.note.cosmo`) | `libc/src/crt0.S`, `userland/user.ld`, `kernel/process/elf.c` | personality selection |
+| The CosmoOS ELF note (`.note.cosmo`) | `libc/src/crt0.S`, `userland/user.ld`, `kernel/process/elfparse.cee` | personality selection |
 | Linux ABI definitions (numbers, structures, flags) | `compat/linux/linux_abi.h` | the translation only |
 | `futex_wait`/`futex_wake` | `kernel/include/kernel/futex.h` | the Linux personality (native programs have no futex call yet) |
 | `arch_prctl` → `thread->tls_base` → `MSR_FS_BASE` | `compat/linux/syscalls.c`, `kernel/arch/x86_64/context.c` | Linux libcs |

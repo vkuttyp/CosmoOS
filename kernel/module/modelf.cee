@@ -1,0 +1,573 @@
+// modelf.cee - ET_REL module image validation and layout (kernel/include/kernel/modelf.h; roadmap 2.0 SA5, the
+// module-ELF family). Pure over the file bytes: every offset, size and index is checked against the buffer before it is
+// read, so the loader (module.c) acts on the layout without repeating the checks. The image is a slice of exactly the
+// bytes given; fields are read little-endian, as the header's ELFDATA2LSB, checked before any multi-byte field, says.
+// Each section header is copied out once and decoded from an array of known length. tests/host/test_modelf.c holds this
+// to the C it replaced: the same digest over 50,000 images and as many metadata records.
+
+@header("kernel/modelf.h")
+extern "C" {
+    struct elf64_shdr;
+    struct modelf_section {
+        index: u32;
+        group: u8;
+        nobits: bool;
+        offset: u64;
+        size: u64;
+        file_off: u64;
+        align: u64;
+    }
+    struct modelf_layout {
+        group_size: [u64; 3];
+        nr_sections: u32;
+        sections: [modelf_section; 32];
+        symtab: u32;
+        strtab: u32;
+        shstrtab: u32;
+        info_section: u32;
+        ksymtab_section: u32;
+        info_file_off: u64;
+        nr_symbols: u32;
+    }
+}
+
+const ENOEXEC: i32 = 8;
+const MAX_SECTIONS: u32 = 32; // MODELF_MAX_SECTIONS
+const PAGE: u64 = 4096;       // MODELF_PAGE
+const GROUPS: usize = 3;      // MODELF_GROUPS
+const TEXT: u8 = 0;           // MODELF_TEXT
+const RODATA: u8 = 1;
+const DATA: u8 = 2;
+const EHDR: usize = 64;
+const SHDR: u64 = 64;
+const SYM: u64 = 24;
+const RELA: u64 = 24;
+const KSYM: u64 = 16;
+const MODULE_INFO: u64 = 240;  // struct cosmo_module_info: the module ABI's, fixed
+const NAME_MAX: usize = 32;    // MODULE_NAME_MAX
+const VERSION_MAX: usize = 16; // MODULE_VERSION_MAX
+const DEPS_MAX: usize = 128;   // MODULE_DEPS_MAX
+const MAX_DEPS: u32 = 8;       // MODULE_MAX_DEPS
+const ET_REL: u16 = 1;
+const SHT_NULL: u32 = 0;
+const SHT_PROGBITS: u32 = 1;
+const SHT_SYMTAB: u32 = 2;
+const SHT_STRTAB: u32 = 3;
+const SHT_RELA: u32 = 4;
+const SHT_NOBITS: u32 = 8;
+const SHT_REL: u32 = 9;
+const SHT_DYNSYM: u32 = 11;
+const SHF_WRITE: u64 = 1;
+const SHF_ALLOC: u64 = 2;
+const SHF_EXECINSTR: u64 = 4;
+const SHN_UNDEF: u16 = 0;
+const SHN_LORESERVE: u16 = 0xff00;
+const SHN_ABS: u16 = 0xfff1;
+const SHN_COMMON: u16 = 0xfff2;
+const SHN_XINDEX: u16 = 0xffff;
+
+/// A section header's fields.
+struct Shdr {
+    name: u32;
+    stype: u32;
+    flags: u64;
+    offset: u64;
+    size: u64;
+    link: u32;
+    info: u32;
+    addralign: u64;
+    entsize: u64;
+}
+
+fn s32(h: borrow [u8; 64], at: usize) -> u32 =>
+    h[at] as u32 | (h[at + 1] as u32) << 8 | (h[at + 2] as u32) << 16 | (h[at + 3] as u32) << 24;
+
+fn s64(h: borrow [u8; 64], at: usize) -> u64 => s32(h, at) as u64 | (s32(h, at + 4) as u64) << 32;
+
+/// The little-endian u16, u32 and u64 at `at` of a slice.
+fn le16(b: Slice<u8>, at: usize) -> u16 => b[at] as u16 | (b[at + 1] as u16) << 8;
+
+fn le32(b: Slice<u8>, at: usize) -> u32 => le16(b, at) as u32 | (le16(b, at + 2) as u32) << 16;
+
+fn le64(b: Slice<u8>, at: usize) -> u64 => le32(b, at) as u64 | (le32(b, at + 4) as u64) << 32;
+
+/// Whether `len` bytes at `off` lie inside a file of `size` bytes.
+fn inFile(off: u64, len: u64, size: u64) -> bool => off <= size && len <= size - off;
+
+/// Section header `index` of a table at `shoff` (inside the file: the caller checked the whole table).
+fn shdrAt(f: Slice<u8>, shoff: u64, index: u32) -> Shdr {
+    var h: [u8; 64] = [0; 64];
+    let at = (shoff + index as u64 * SHDR) as usize;
+    h[..].copyFrom(f[at..at + 64]);
+    return Shdr {
+        name: s32(borrow h, 0),
+        stype: s32(borrow h, 4),
+        flags: s64(borrow h, 8),
+        offset: s64(borrow h, 24),
+        size: s64(borrow h, 32),
+        link: s32(borrow h, 40),
+        info: s32(borrow h, 44),
+        addralign: s64(borrow h, 48),
+        entsize: s64(borrow h, 56),
+    };
+}
+
+/// A NUL-terminated string table where every name lookup is bounded.
+fn strtabOk(sh: borrow Shdr, size: u64) -> bool =>
+    sh.stype == SHT_STRTAB && sh.size != 0 && inFile(sh.offset, sh.size, size);
+
+/// Whether the name at `off` of a string table exists: inside it, in a table whose last byte is NUL.
+fn strtabHas(f: Slice<u8>, t: borrow Shdr, off: u64) -> bool {
+    if (off >= t.size) {
+        return false;
+    }
+    return f[(t.offset + t.size - 1) as usize] == 0;
+}
+
+/// Whether the name at `off` (strtabHas) is `want`: its bytes, then the NUL that ends it inside the table.
+fn nameIs(f: Slice<u8>, t: borrow Shdr, off: u64, want: Slice<u8>) -> bool {
+    let n = want.length as u64;
+    if (off + n >= t.size) {
+        return false;
+    }
+    let at = (t.offset + off) as usize;
+    for (k in 0..want.length) {
+        if (f[at + k] != want[k]) {
+            return false;
+        }
+    }
+    return f[at + want.length] == 0;
+}
+
+/// A refusal: the reason, when the caller asked for one, and -ENOEXEC.
+/// Safety: `why` is null or writable (modelf_validate's contract), and `msg` an immortal string.
+fn reject(why: *mut *CChar, msg: *CChar) -> i32 {
+    if (!why.isNull()) {
+        unsafe { why.write(msg); }
+    }
+    return -ENOEXEC;
+}
+
+/// The allocatable section with ELF index `index`, by its position in the layout.
+fn findSection(l: borrow modelf_layout, index: u32) -> u32? {
+    for (i in 0..l.nr_sections) {
+        if (l.sections[i as usize].index == index) {
+            return i;
+        }
+    }
+    return null;
+}
+
+/// Validates an ET_REL image for a machine whose e_machine is `machine`, into `out` (zeroed by the caller): 0, or
+/// -ENOEXEC with the rule in `why`. A refusal leaves what was filled before it, as the C did.
+/// Safety: `why` is null or writable; it is set to "" first, as the C did.
+fn validate(f: Slice<u8>, machine: u16, notMachine: *CChar, out: borrow mut modelf_layout, why: *mut *CChar) -> i32 {
+    if (!why.isNull()) {
+        unsafe { why.write("\0".ptr as *CChar); }
+    }
+    let size = f.length as u64;
+    if (f.length < EHDR) {
+        return reject(why, "file shorter than an ELF header\0".ptr as *CChar);
+    }
+    var e: [u8; 64] = [0; 64];
+    e[..].copyFrom(f[..EHDR]);
+    if (e[0] != 0x7f || e[1] != 0x45 || e[2] != 0x4c || e[3] != 0x46) {
+        return reject(why, "bad ELF magic\0".ptr as *CChar);
+    }
+    if (e[4] != 2) {
+        return reject(why, "not ELF64\0".ptr as *CChar);
+    }
+    if (e[5] != 1) {
+        return reject(why, "not little endian\0".ptr as *CChar);
+    }
+    if (e[6] != 1 || s32(borrow e, 20) != 1) {
+        return reject(why, "bad ELF version\0".ptr as *CChar);
+    }
+    if ((e[16] as u16 | (e[17] as u16) << 8) != ET_REL) {
+        return reject(why, "not a relocatable object (ET_REL)\0".ptr as *CChar);
+    }
+    if ((e[18] as u16 | (e[19] as u16) << 8) != machine) {
+        return reject(why, notMachine);
+    }
+    if ((e[52] as u16 | (e[53] as u16) << 8) as usize != EHDR) {
+        return reject(why, "bad e_ehsize\0".ptr as *CChar);
+    }
+    if ((e[58] as u16 | (e[59] as u16) << 8) as u64 != SHDR) {
+        return reject(why, "bad e_shentsize\0".ptr as *CChar);
+    }
+    let shnum = e[60] as u16 | (e[61] as u16) << 8;
+    let shstrndx = e[62] as u16 | (e[63] as u16) << 8;
+    let shoff = s64(borrow e, 40);
+    if (shnum < 2) {
+        return reject(why, "no sections\0".ptr as *CChar);
+    }
+    if (shnum >= SHN_LORESERVE) {
+        return reject(why, "too many sections\0".ptr as *CChar);
+    }
+    if (!inFile(shoff, shnum as u64 * SHDR, size)) {
+        return reject(why, "section header table outside the file\0".ptr as *CChar);
+    }
+    // The loader reads the tables in place as structures, so their file offsets carry the structures' alignment
+    // (found by fuzz_modelf: an unaligned e_shoff is undefined behaviour and a trap on strict architectures).
+    if (shoff % 8 != 0) {
+        return reject(why, "section header table not 8-byte aligned\0".ptr as *CChar);
+    }
+    if (shstrndx == 0 || shstrndx >= shnum) {
+        return reject(why, "bad e_shstrndx\0".ptr as *CChar);
+    }
+    let shstr = shdrAt(f, shoff, shstrndx as u32);
+    if (!strtabOk(borrow shstr, size)) {
+        return reject(why, "bad section name table\0".ptr as *CChar);
+    }
+    out.shstrtab = shstrndx as u32;
+
+    // Pass 1: every header sane; find the symbol table and metadata.
+    let cosmoModule = ".cosmo.module";
+    let ksymtab = ".ksymtab";
+    for (i in 1..shnum as u32) {
+        let sh = shdrAt(f, shoff, i);
+        if (!strtabHas(f, borrow shstr, sh.name as u64)) {
+            return reject(why, "section name outside the name table\0".ptr as *CChar);
+        }
+        if (sh.stype == SHT_REL) {
+            return reject(why, "REL relocations unsupported (need RELA)\0".ptr as *CChar);
+        }
+        if (sh.stype == SHT_DYNSYM) {
+            return reject(why, "dynamic symbol table in a module\0".ptr as *CChar);
+        }
+        if (sh.stype != SHT_NOBITS && sh.stype != SHT_NULL && !inFile(sh.offset, sh.size, size)) {
+            return reject(why, "section outside the file\0".ptr as *CChar);
+        }
+        let isInfo = nameIs(f, borrow shstr, sh.name as u64, cosmoModule.bytes());
+        let isKsymtab = nameIs(f, borrow shstr, sh.name as u64, ksymtab.bytes());
+        if ((sh.stype == SHT_SYMTAB || sh.stype == SHT_RELA || isInfo || isKsymtab) && sh.offset % 8 != 0) {
+            return reject(why, "structured section not 8-byte aligned in the file\0".ptr as *CChar);
+        }
+        if (sh.stype == SHT_SYMTAB) {
+            if (out.symtab != 0) {
+                return reject(why, "more than one symbol table\0".ptr as *CChar);
+            }
+            if (sh.entsize != SYM) {
+                return reject(why, "bad symbol entry size\0".ptr as *CChar);
+            }
+            if (sh.size % SYM != 0) {
+                return reject(why, "symbol table size not a multiple\0".ptr as *CChar);
+            }
+            if (sh.link == 0 || sh.link >= shnum as u32) {
+                return reject(why, "symbol table string link out of range\0".ptr as *CChar);
+            }
+            let linked = shdrAt(f, shoff, sh.link);
+            if (!strtabOk(borrow linked, size)) {
+                return reject(why, "bad symbol string table\0".ptr as *CChar);
+            }
+            if (sh.size / SYM > 0xffffffff) {
+                return reject(why, "too many symbols\0".ptr as *CChar);
+            }
+            out.symtab = i;
+            out.strtab = sh.link;
+            out.nr_symbols = truncate<u32>(sh.size / SYM); // at most 0xffffffff, checked above
+        }
+        if (isInfo) {
+            if (out.info_section != 0) {
+                return reject(why, "more than one .cosmo.module section\0".ptr as *CChar);
+            }
+            if (sh.stype != SHT_PROGBITS) {
+                return reject(why, ".cosmo.module is not PROGBITS\0".ptr as *CChar);
+            }
+            if ((sh.flags & SHF_ALLOC) == 0) {
+                return reject(why, ".cosmo.module is not allocatable\0".ptr as *CChar);
+            }
+            if ((sh.flags & SHF_WRITE) != 0) {
+                return reject(why, ".cosmo.module is writable\0".ptr as *CChar);
+            }
+            if (sh.size != MODULE_INFO) {
+                return reject(why, ".cosmo.module has the wrong size\0".ptr as *CChar);
+            }
+            out.info_section = i;
+            out.info_file_off = sh.offset;
+        }
+        if (isKsymtab) {
+            if ((sh.flags & SHF_ALLOC) == 0) {
+                return reject(why, ".ksymtab is not allocatable\0".ptr as *CChar);
+            }
+            if (sh.stype != SHT_PROGBITS) {
+                return reject(why, ".ksymtab is not PROGBITS\0".ptr as *CChar);
+            }
+            if (sh.size % KSYM != 0) {
+                return reject(why, ".ksymtab size is not a multiple of an entry\0".ptr as *CChar);
+            }
+            out.ksymtab_section = i;
+        }
+    }
+    if (out.symtab == 0) {
+        return reject(why, "no symbol table\0".ptr as *CChar);
+    }
+    if (out.nr_symbols == 0) {
+        return reject(why, "empty symbol table\0".ptr as *CChar);
+    }
+    if (out.info_section == 0) {
+        return reject(why, "no .cosmo.module section\0".ptr as *CChar);
+    }
+
+    // Pass 2: allocatable sections into groups; relocation sections checked.
+    for (i in 1..shnum as u32) {
+        let sh = shdrAt(f, shoff, i);
+        if (sh.stype == SHT_RELA) {
+            if (sh.entsize != RELA) {
+                return reject(why, "bad relocation entry size\0".ptr as *CChar);
+            }
+            if (sh.size % RELA != 0) {
+                return reject(why, "relocation section size not a multiple\0".ptr as *CChar);
+            }
+            if (sh.link != out.symtab) {
+                return reject(why, "relocations linked to a foreign symbol table\0".ptr as *CChar);
+            }
+            if (sh.info == 0 || sh.info >= shnum as u32) {
+                return reject(why, "relocation target out of range\0".ptr as *CChar);
+            }
+            let target = shdrAt(f, shoff, sh.info);
+            if ((target.flags & SHF_ALLOC) == 0) {
+                continue; // relocations for debug info: ignored
+            }
+            if (target.stype == SHT_NOBITS) {
+                return reject(why, "relocations against a NOBITS section\0".ptr as *CChar);
+            }
+            continue;
+        }
+        if ((sh.flags & SHF_ALLOC) == 0) {
+            continue;
+        }
+        if (sh.stype != SHT_PROGBITS && sh.stype != SHT_NOBITS) {
+            return reject(why, "allocatable section of an unexpected type\0".ptr as *CChar);
+        }
+        let w = (sh.flags & SHF_WRITE) != 0;
+        let x = (sh.flags & SHF_EXECINSTR) != 0;
+        if (w && x) {
+            return reject(why, "section is writable and executable (W^X)\0".ptr as *CChar);
+        }
+        if (x && sh.stype == SHT_NOBITS) {
+            return reject(why, "executable NOBITS section\0".ptr as *CChar);
+        }
+        let align = if (sh.addralign == 0) 1 else sh.addralign;
+        if ((align & (align - 1)) != 0) {
+            return reject(why, "section alignment is not a power of two\0".ptr as *CChar);
+        }
+        if (align > PAGE) {
+            return reject(why, "section alignment larger than a page\0".ptr as *CChar);
+        }
+        let count = out.nr_sections;
+        if (count == MAX_SECTIONS) {
+            return reject(why, "too many allocatable sections\0".ptr as *CChar);
+        }
+        if (sh.size > 0x40000000) {
+            return reject(why, "section larger than 1 GiB\0".ptr as *CChar);
+        }
+        let group = if (x) TEXT else if (w) DATA else RODATA;
+        let g = group as usize;
+        // Under 2 GiB (checked after each section) plus at most a page of alignment: no overflow.
+        let off = (out.group_size[g] + align - 1) & (0xffffffffffffffff ^ (align - 1));
+        out.nr_sections = count + 1;
+        let ms = borrow mut out.sections[count as usize];
+        ms.index = i;
+        ms.group = group;
+        ms.nobits = sh.stype == SHT_NOBITS;
+        ms.size = sh.size;
+        ms.file_off = sh.offset;
+        ms.align = align;
+        ms.offset = off;
+        out.group_size[g] = off + sh.size;
+        if (out.group_size[g] > 0x80000000) {
+            return reject(why, "module larger than 2 GiB\0".ptr as *CChar);
+        }
+    }
+    for (g in 0..GROUPS) {
+        out.group_size[g] = (out.group_size[g] + PAGE - 1) & (0xffffffffffffffff ^ (PAGE - 1));
+    }
+
+    // The metadata must land in a group the loader can protect read-only.
+    match (findSection(out, out.info_section)) {
+        Some(k) => {
+            if (out.sections[k as usize].group != RODATA) {
+                return reject(why, ".cosmo.module is not read-only data\0".ptr as *CChar);
+            }
+        }
+        null => { return reject(why, ".cosmo.module is not read-only data\0".ptr as *CChar); }
+    }
+    if (out.ksymtab_section != 0) {
+        match (findSection(out, out.ksymtab_section)) {
+            Some(k) => {
+                if (out.sections[k as usize].group == TEXT) {
+                    return reject(why, ".ksymtab in the text group\0".ptr as *CChar);
+                }
+            }
+            null => { return reject(why, ".ksymtab in the text group\0".ptr as *CChar); }
+        }
+    }
+
+    // Symbols: section indices in range, no COMMON, no XINDEX.
+    let symtab = shdrAt(f, shoff, out.symtab);
+    let strtab = shdrAt(f, shoff, out.strtab);
+    let syms = f[symtab.offset as usize..(symtab.offset + symtab.size) as usize];
+    if (le16(syms, 6) != SHN_UNDEF || le32(syms, 0) != 0) {
+        return reject(why, "symbol 0 is not the null symbol\0".ptr as *CChar);
+    }
+    for (i in 1..out.nr_symbols) {
+        let s = i as usize * SYM as usize;
+        if (!strtabHas(f, borrow strtab, le32(syms, s) as u64)) {
+            return reject(why, "symbol name outside the string table\0".ptr as *CChar);
+        }
+        let shn = le16(syms, s + 6);
+        if (shn == SHN_COMMON) {
+            return reject(why, "COMMON symbol (build with -fno-common)\0".ptr as *CChar);
+        }
+        if (shn == SHN_XINDEX) {
+            return reject(why, "extended section index unsupported\0".ptr as *CChar);
+        }
+        if (shn != SHN_UNDEF && shn != SHN_ABS && shn >= shnum) {
+            return reject(why, "symbol section index out of range\0".ptr as *CChar);
+        }
+        if (shn == SHN_UNDEF && (syms[s + 4] >> 4) == 0) { // STB_LOCAL
+            return reject(why, "undefined local symbol\0".ptr as *CChar);
+        }
+    }
+    return 0;
+}
+
+/// A module or dependency name's character: [A-Za-z0-9_-].
+fn nameCharOk(c: u8) -> bool =>
+    (c >= 0x61 && c <= 0x7a) || (c >= 0x41 && c <= 0x5a) || (c >= 0x30 && c <= 0x39) || c == 0x5f || c == 0x2d;
+
+/// The offset of the first NUL in `s`, if it has one.
+fn nul(s: Slice<u8>) -> usize? {
+    for (i in 0..s.length) {
+        if (s[i] == 0) {
+            return i;
+        }
+    }
+    return null;
+}
+
+/// The metadata rules: magic, ABI version, name syntax, deps syntax and count, reserved words zero.
+fn checkInfo(
+    magic: Slice<u8>, abi: u32, expectedAbi: u32, name: Slice<u8>, version: Slice<u8>, deps: Slice<u8>,
+    reserved: Slice<u64>, why: *mut *CChar,
+) -> i32 {
+    let want = "COSMOMOD";
+    let w = want.bytes();
+    for (k in 0..8usize) {
+        if (magic[k] != w[k]) {
+            return reject(why, "bad module metadata magic\0".ptr as *CChar);
+        }
+    }
+    if (abi != expectedAbi) {
+        return reject(why, "module ABI version mismatch\0".ptr as *CChar);
+    }
+    let nameEnd = match (nul(name)) {
+        Some(n) => n,
+        null => { return reject(why, "module name not terminated\0".ptr as *CChar); }
+    };
+    if (nameEnd == 0) {
+        return reject(why, "empty module name\0".ptr as *CChar);
+    }
+    for (k in 0..nameEnd) {
+        if (!nameCharOk(name[k])) {
+            return reject(why, "module name has characters outside [A-Za-z0-9_-]\0".ptr as *CChar);
+        }
+    }
+    if (nul(version) == null) {
+        return reject(why, "module version not terminated\0".ptr as *CChar);
+    }
+    let depsEnd = match (nul(deps)) {
+        Some(n) => n,
+        null => { return reject(why, "module deps not terminated\0".ptr as *CChar); }
+    };
+    var count: u32 = 0;
+    var run: usize = 0;
+    for (k in 0..depsEnd) {
+        let c = deps[k];
+        if (c == 0x2c) { // ','
+            if (run == 0) {
+                return reject(why, "empty dependency name\0".ptr as *CChar);
+            }
+            count += 1;
+            run = 0;
+            continue;
+        }
+        if (!nameCharOk(c)) {
+            return reject(why, "dependency name has characters outside [A-Za-z0-9_-]\0".ptr as *CChar);
+        }
+        run += 1;
+        if (run >= NAME_MAX) {
+            return reject(why, "dependency name too long\0".ptr as *CChar);
+        }
+    }
+    if (run > 0) {
+        count += 1;
+    } else if (count > 0) {
+        return reject(why, "trailing comma in deps\0".ptr as *CChar);
+    }
+    if (count > MAX_DEPS) {
+        return reject(why, "too many dependencies\0".ptr as *CChar);
+    }
+    for (k in 0..4usize) {
+        if (reserved[k] != 0) {
+            return reject(why, "reserved metadata words are not zero\0".ptr as *CChar);
+        }
+    }
+    return 0;
+}
+
+// --- the exports -----------------------------------------------------------------------------------------------------
+
+/// Safety: `file` points to `size` readable bytes; `out` is writable and zeroed (modelf.h's modelf_validate does it);
+/// `notMachine` is an immortal string; `why` is null or writable.
+@export("modelf_validate_for")
+unsafe fn validateC(
+    file: *void, size: usize, machine: u16, notMachine: *CChar, out: *mut modelf_layout,
+    why: *mut *CChar,
+) -> i32 =>
+    validate(Slice.fromRaw(file as *u8, size), machine, notMachine, Ptr.toBorrowMut(out), why);
+
+/// Safety: each pointer is a cosmo_module_info field of its declared size (modelf.h's modelf_check_info passes them);
+/// `why` is null or writable.
+@export("modelf_check_info_for")
+unsafe fn checkInfoC(
+    magic: *u8, abi: u32, expectedAbi: u32, name: *u8, version: *u8, deps: *u8, reserved: *u64,
+    why: *mut *CChar,
+) -> i32 =>
+    checkInfo(
+        Slice.fromRaw(magic, 8), abi, expectedAbi, Slice.fromRaw(name, NAME_MAX), Slice.fromRaw(version, VERSION_MAX),
+        Slice.fromRaw(deps, DEPS_MAX), Slice.fromRaw(reserved, 4), why,
+    );
+
+/// The allocatable section with ELF index `index`, or null.
+/// Safety: `l` is a layout modelf_validate filled.
+@export("modelf_find_section")
+unsafe fn findSectionC(l: *modelf_layout, index: u32) -> *modelf_section {
+    let layout = Ptr.toBorrow(l);
+    match (findSection(layout, index)) {
+        Some(k) => { return borrow layout.sections[k as usize] as *modelf_section; }
+        null => { return 0 as *modelf_section; }
+    }
+}
+
+/// Section header `index` of a file modelf_validate accepted.
+/// Safety: `file` is that file and `index` below its e_shnum, so the header lies inside it.
+@export("modelf_shdr")
+unsafe fn shdrC(file: *void, index: u32) -> *elf64_shdr {
+    let shoff = le64(Slice.fromRaw(file as *u8, EHDR), 40);
+    return (file as *u8).add((shoff + index as u64 * SHDR) as usize) as *elf64_shdr;
+}
+
+/// Section `index`'s name in a file modelf_validate accepted, or "" when its offset is past the name table.
+/// Safety: as modelf_shdr, and `l` is the file's layout.
+@export("modelf_section_name")
+unsafe fn sectionNameC(file: *void, l: *modelf_layout, index: u32) -> *CChar {
+    let names = Slice.fromRaw(shdrC(file, Ptr.toBorrow(l).shstrtab) as *u8, SHDR as usize);
+    let sh = Slice.fromRaw(shdrC(file, index) as *u8, SHDR as usize);
+    let off = le32(sh, 0) as u64;
+    if (off >= le64(names, 32)) {
+        return "\0".ptr as *CChar;
+    }
+    return (file as *u8).add((le64(names, 24) + off) as usize) as *CChar;
+}

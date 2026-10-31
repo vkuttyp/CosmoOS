@@ -35,7 +35,7 @@ FUZZ_ASAN_OPTIONS ?= $(if $(filter Darwin,$(shell uname -s)),detect_leaks=0,dete
 
 FUZZ_COMMON := $(FUZZ_DRIVER) tests/host/harness.c tests/host/shim_spinlock.c kernel/memory/buddy.c
 
-FUZZ_MODELF_SRCS  := tests/fuzz/fuzz_modelf.c kernel/module/modelf.c $(FUZZ_COMMON)
+FUZZ_MODELF_SRCS  := tests/fuzz/fuzz_modelf.c kernel/module/modelf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
 FUZZ_ELF_SRCS     := tests/fuzz/fuzz_elf.c kernel/process/elfparse.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
 FUZZ_PKG_SRCS     := tests/fuzz/fuzz_pkg.c pkg/manifest.c pkg/version.c pkg/tar.c $(FUZZ_DRIVER)
 FUZZ_LINUX_SRCS   := tests/fuzz/fuzz_linux.c compat/linux/lxconv.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)

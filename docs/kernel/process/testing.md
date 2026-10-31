@@ -465,11 +465,21 @@ service state, `proc` 912 / 939 ms from 235, `fpu` 664 / 665 ms from 4
 `proc-fs`, `syscalls`, and since the file-regions unit `mmap` (264 / 300 ms then; 1186 / 1468 ms since the shared-futex unit added its two-process waits, three deliberate timeouts and the futex bench). Time here is spawning and waiting, not
 checking.
 
+## The executable validator (`tests/host/test_elf.c`)
+
+`elf_validate_for` (`kernel/process/elfparse.cee`, in CeeSafe; roadmap
+2.0 SA5) has direct checks (a valid executable of either type, its
+rebasing, a foreign machine, W^X, an executable stack, an unterminated
+interpreter, an entry outside the text) and a recorded digest over
+100,000 images: a valid executable with header and program-header fields
+set to edge values, bytes flipped, the size cut, under both machines,
+then `elf_rebase`. The C's digest (`0x9a2e2083c6cf3e58`, 2026-10-31) is
+the CeeSafe's, refusals and the partial results they leave included.
+`fuzz_elf` drives the same validator. `ELF_BENCH=1` times it: 1.09x the
+C on arm64, 1.12x on x86-64 under Rosetta.
+
 ## Gaps and planned tests
 
-- `elf_validate` compiles on the host (`ELF_HOST_TEST`) but no host
-  test drives it yet; a `tests/host/test_elf.c` with the crafted cases
-  and a fuzz loop over random mutations of the init image is planned.
 - User-space syscall fuzzing is `init --syscall-fuzz` (the
   `syscall-fuzz` self-test; `docs/kernel/syscall/testing.md`); it reaches
   few calls numbered 62 and above.

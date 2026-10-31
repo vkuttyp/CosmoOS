@@ -93,6 +93,8 @@ PORTS = [
      "kernel/include/kernel/fifo_types.h", False),
     ("kernel/core/crc32c.cee", "kernel/core/crc32c.c", "CRC-32C (crc32c.h)", None, False),
     ("kernel/process/elfparse.cee", "kernel/process/elfparse.c", "The user executable validator (elf.h)", None, False),
+    ("kernel/module/modelf.cee", "kernel/module/modelf.c", "ET_REL module image validation and layout (modelf.h)", None,
+     False),
     ("kernel/module/modspec.cee", "kernel/module/modspec.c", "The module.cycle= specification's parsers (module.h)", None,
      False),
     ("compat/linux/lxconv.cee", "compat/linux/lxconv.c",

@@ -57,7 +57,8 @@ thread; exit with a status; termination on an unrecoverable fault or by
 to init; the working directory; reaping of the address space by the
 reaper thread (never on the exiting thread's own stack or CR3).
 
-**ELF loader** (`kernel/process/elf.c`): validation of a static x86-64
+**ELF loader** (`kernel/process/elf.c`, its validator `elfparse.cee` in
+CeeSafe, roadmap 2.0 SA5): validation of a static x86-64
 ELF64 executable (bounds, W^X, page-granularity overlap, entry inside an
 executable segment), mapping of PT_LOAD segments as user regions with
 ELF-derived permissions, zero-fill of `.bss`, initial stack with
