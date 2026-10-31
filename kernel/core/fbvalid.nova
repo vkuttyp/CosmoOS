@@ -1,0 +1,119 @@
+// Is this framebuffer description one we may write to? (kernel/include/kernel/bootinfo.h), in Nova (roadmap 2.0
+// SA1's offset for crash-nova's C hook, and one of SA5's parsers of untrusted input: the loader reports what the
+// firmware told it). Everything the kernel later does to the display -- every pixel written by the console sink -- is
+// bounded by the answer this file gives, so it is a pure function of the boot fields: it compiles into the kernel, the
+// host test (tests/host/test_fbvalid.c) and the fuzz target (tests/fuzz/fuzz_fbvalid.c). The failure this prevents is
+// writing outside the mapping on someone else's firmware, the kind of bug a machine with no serial port cannot report.
+//
+// Nova's C6 wrote this port (its docs/cosmoos/c6-report.md) and held it to the C original's host test and fuzz target
+// and a differential test, 20,000 cases with no mismatch, before the C was deleted. The boot protocol's structs are
+// imported from CosmoOS's own headers: Nova names the fields it reads and writes, and the C compiler checks each of
+// them against the header. Where the C relied on a sum wrapping (`fb_phys + fb_size < fb_phys`), the Nova asks the
+// question without wrapping.
+
+@header("kernel/bootinfo.h")
+extern "C" {
+    /// boot/protocol/cosmoboot.h: the loader's report (protocol v6 framebuffer fields).
+    struct cosmoboot_info {
+        fb_phys: u64;
+        fb_size: u64;
+        fb_width: u32;
+        fb_height: u32;
+        fb_pitch: u32;
+        fb_bpp: u32;
+        fb_red_shift: u8;
+        fb_red_bits: u8;
+        fb_green_shift: u8;
+        fb_green_bits: u8;
+        fb_blue_shift: u8;
+        fb_blue_bits: u8;
+    }
+    /// kernel/include/kernel/bootinfo.h: the validated copy the console draws with.
+    struct bootinfo_framebuffer {
+        phys: u64;
+        size: u64;
+        width: u32;
+        height: u32;
+        pitch: u32;
+        bpp: u32;
+        red_shift: u8;
+        red_bits: u8;
+        green_shift: u8;
+        green_bits: u8;
+        blue_shift: u8;
+        blue_bits: u8;
+    }
+}
+
+const U64_MAX: u64 = 18446744073709551615;
+
+/// Does a colour channel of `bits` bits at `shift` fit in a pixel of `bpp` bits? The reason it does not, or null.
+fn channelProblem(shift: u8, bits: u8, bpp: u32) -> StringView? {
+    if (bits == 0 || bits as u32 > bpp) { return "a colour channel has no usable width\0"; }
+    if (shift as u32 + bits as u32 > bpp) { return "a colour channel runs off the end of a pixel\0"; }
+    return null;
+}
+
+/// Why the kernel may not write to the framebuffer `info` describes, or null when it may (fbvalid.c's checks, in
+/// its order, with its reasons; each reason ends in a zero byte for C).
+fn refusal(info: borrow cosmoboot_info) -> StringView? {
+    // Absent is spelled all-zero, and is not an error.
+    if (info.fb_phys == 0 && info.fb_size == 0 && info.fb_width == 0 && info.fb_height == 0) {
+        return "no framebuffer\0";
+    }
+    if (info.fb_phys == 0) { return "framebuffer at physical zero\0"; }
+    if (info.fb_width == 0 || info.fb_height == 0) { return "zero width or height\0"; }
+    let bpp = info.fb_bpp;
+    if (bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32) { return "bits per pixel is not 8, 16, 24 or 32\0"; }
+    let rowBytes = info.fb_width as u64 * (bpp / 8) as u64;
+    if ((info.fb_pitch as u64) < rowBytes) { return "pitch is shorter than a row of pixels\0"; }
+    // Both factors are 32-bit, so the product fits in 64 bits.
+    if (info.fb_pitch as u64 * info.fb_height as u64 > info.fb_size) { return "the rows do not fit the framebuffer\0"; }
+    if (info.fb_size > U64_MAX - info.fb_phys) { return "the framebuffer wraps the address space\0"; }
+    match (channelProblem(info.fb_red_shift, info.fb_red_bits, bpp)) {
+        Some(reason) => { return reason; }
+        null => {}
+    }
+    match (channelProblem(info.fb_green_shift, info.fb_green_bits, bpp)) {
+        Some(reason) => { return reason; }
+        null => {}
+    }
+    return channelProblem(info.fb_blue_shift, info.fb_blue_bits, bpp);
+}
+
+/// The fields the kernel keeps, exactly the loader's.
+fn copyOut(info: borrow cosmoboot_info, out: borrow mut bootinfo_framebuffer) {
+    out.phys = info.fb_phys;
+    out.size = info.fb_size;
+    out.width = info.fb_width;
+    out.height = info.fb_height;
+    out.pitch = info.fb_pitch;
+    out.bpp = info.fb_bpp;
+    out.red_shift = info.fb_red_shift;
+    out.red_bits = info.fb_red_bits;
+    out.green_shift = info.fb_green_shift;
+    out.green_bits = info.fb_green_bits;
+    out.blue_shift = info.fb_blue_shift;
+    out.blue_bits = info.fb_blue_bits;
+}
+
+// ---- The C API of kernel/include/kernel/bootinfo.h ----
+
+/// Safety: bootinfo.h's contract: `info` is null or points to a live boot information structure; `out` is null
+/// or points to a framebuffer description nothing else uses during the call; `why` is null or points to storage
+/// for one string pointer. The reasons written to `why` are static strings.
+@export("bootinfo_fb_validate")
+unsafe fn validateC(info: *cosmoboot_info, out: *mut bootinfo_framebuffer, why: *mut *CChar) -> bool {
+    var reason: StringView? = "no boot information\0";
+    if (!info.isNull()) { reason = refusal(Ptr.toBorrow(info)); }
+    match (reason) {
+        Some(text) => {
+            if (!why.isNull()) { why.write(text.ptr as *CChar); }
+            return false;
+        }
+        null => {}
+    }
+    if (!why.isNull()) { why.write("\0".ptr as *CChar); }
+    if (!out.isNull()) { copyOut(Ptr.toBorrow(info), Ptr.toBorrowMut(out)); }
+    return true;
+}

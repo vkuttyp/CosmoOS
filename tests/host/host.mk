@@ -51,7 +51,7 @@ HOST_SYNC_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/wait.c kernel/scheduler/w
 	kernel/scheduler/mutex.c kernel/scheduler/mutex_floor.c tests/host/sync_baton.c tests/host/sync_sched.c tests/host/test_sync.c
 HOST_LOCKDEP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockdep.c
 HOST_LOCKUP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockup.c
-HOST_FBVALID_SRCS := $(HOST_COMMON_SRCS) kernel/core/fbvalid.c tests/host/test_fbvalid.c
+HOST_FBVALID_SRCS := $(HOST_COMMON_SRCS) kernel/core/fbvalid.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_fbvalid.c
 HOST_DISPLAY_SRCS := $(HOST_COMMON_SRCS) boot/uefi/display_pick.c tests/host/test_display.c
 HOST_GPT_SRCS := $(HOST_COMMON_SRCS) kernel/block/gpt.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c kernel/core/cmdline.c tests/host/test_gpt.c
 HOST_CPUTIME_SRCS := $(HOST_COMMON_SRCS) kernel/process/cputime.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_cputime.c

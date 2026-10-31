@@ -167,8 +167,14 @@ pointer and a length; references, optionals and Nova strings do not cross.
   holds which lock, which pointers may be NULL.
 - **A failed check is a kernel panic.** Nova checks every index, every
   integer overflow, every shift and every division. In the kernel a failed
-  check calls `nova_panic`, which panics and names the Nova line. So
-  either make the failure impossible or make it explicit:
+  check calls `nova_panic`, which panics and names the Nova line
+  (`KERNEL PANIC: nova panic: index out of bounds at
+  kernel/nova/crash_test.nova:10:18`). `make test-crash-nova` (CI's stress
+  part, both architectures) proves that: a `CRASH_TEST=5` kernel calls
+  `kernel/nova/crash_test.nova` with an index past its table, and the
+  harness (`run_boot_test.py --expect-panic nova`) requires that report
+  with the file and the line the source marks. So either make the failure
+  impossible or make it explicit:
   - Code that runs in interrupt context, or under a spin lock, must not
     fail on any input. Use `saturatingAdd`/`wrappingSub`/`checkedMul`
     (each says what happens at the limit) where an ordinary `+` could

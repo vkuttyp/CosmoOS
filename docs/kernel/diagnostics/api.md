@@ -118,7 +118,9 @@ True when the description is one the kernel may write to, with `out`
 filled; false with a static reason in `why` otherwise, including the
 ordinary case of no framebuffer at all. A pure function of the boot
 fields, with no kernel dependencies, so it compiles unchanged into the
-kernel, `tests/host/test_fbvalid.c` and `tests/fuzz/fuzz_fbvalid.c`. It
+kernel, `tests/host/test_fbvalid.c` and `tests/fuzz/fuzz_fbvalid.c`
+(written in Nova, `kernel/core/fbvalid.nova`; the tests link Nova's
+runtime and `tests/host/nova_panic.c`). It
 refuses: rows that do not fit the memory claimed, a pitch shorter than a
 row, a pixel that is not 8, 16, 24 or 32 bits, a colour field that runs
 off the end of a pixel, a base of zero, and a range that wraps the
