@@ -106,7 +106,6 @@ public struct netparse_l4 {
     tcp_flags: u8;
 }
 
-
 // The sizes of what each decoder reads.
 const ETH_HLEN: usize = 14;
 const ARP_LEN: usize = 28;

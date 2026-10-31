@@ -101,7 +101,11 @@ fn entryName(entry: Slice<u8>, name: SliceMut<u8>) {
 /// Safety: `spec` is a NUL-terminated string the caller may write; `count` and `holdMs` are writable.
 @export("module_cycle_parse")
 unsafe fn cycleParseC(spec: *mut CChar, count: *mut u32, holdMs: *mut u32) -> bool =>
-    cycleParse(SliceMut.fromRaw(spec as *mut u8, strlen(spec as *CChar)), Ptr.toBorrowMut(count), Ptr.toBorrowMut(holdMs));
+    cycleParse(
+        SliceMut.fromRaw(spec as *mut u8, strlen(spec as *CChar)),
+        Ptr.toBorrowMut(count),
+        Ptr.toBorrowMut(holdMs),
+    );
 
 /// Safety: `entry` is a NUL-terminated string and `name` points to `len` writable bytes, at least 1.
 @export("module_entry_name")
