@@ -709,8 +709,9 @@ musl`), and the harness requires that line when the build reported musl
 (`HAVE_MUSL=1`); without `musl-gcc`, `MUSL_GCC=` may name any command
 with the same interface, such as a wrapper compiling in an Alpine
 container. Host tests: `test_linux` compiles the pure conversion
-helpers (`compat/linux/convert.c`: flags, stat, dirent, wait status,
-sockaddr) under ASan/UBSan. Kernel self-test `linux-elf`: the loader
+helpers (`compat/linux/lxconv.cee` and `convert.c`: flags, stat,
+dirent, wait status, sockaddr) under ASan/UBSan, with a recorded digest
+over 100,000 inputs. Kernel self-test `linux-elf`: the loader
 sees the note in `init` (and a program header address), and its absence
 in `lxhello` (whose table is at `0x400040`). Details in `testing.md`.
 

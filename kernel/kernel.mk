@@ -263,3 +263,7 @@ $(KERNEL_ELF): $(KERNEL_OBJS) $(KERNEL_LINKER_SCRIPT)
 kernel: $(KERNEL_ELF)
 
 -include $(KERNEL_OBJS:.o=.d)
+
+# compat/linux/lxconv.c is generated from lxconv.cee into out/cee (scripts/cee-gen.py), away from the convert.h it
+# includes by name: its object, and its analysis, look in compat/linux too.
+$(OUT)/compat/linux/lxconv.o $(OUT)/compat/linux/lxconv.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux

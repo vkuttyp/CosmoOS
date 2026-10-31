@@ -9,7 +9,8 @@
  * holds -- open flags under both architectures' encodings, PROT bits,
  * wait statuses, socket addresses in and out at every cut, the guest's
  * termios, getdents64 records from native ones of good and bad lengths.
- * The C gave it (lxconv.c); the CeeSafe (lxconv.cee) must give the same.
+ * The C gave it (lxconv.c, 2026-10-31), and the CeeSafe that replaced it
+ * (lxconv.cee) gives the same.
  * LINUX_DUMP=1 prints the lines; LINUX_BENCH=1 times the conversions.
  */
 
@@ -38,7 +39,7 @@ static int g_failures;
 
 #define ROUNDS 100000
 #define SEED 0x11C0FFEE5A520261ull
-/* The digest of the C conversions (lxconv.c, 2026-10-31). */
+/* The digest of the C conversions (2026-10-31), which lxconv.cee gives too. */
 #define LINUX_DIGEST 0x3a72da1935783ee6ull
 
 /* x86-64's and AArch64's O_DIRECTORY, O_NOFOLLOW, O_LARGEFILE (linux_abi.h). */

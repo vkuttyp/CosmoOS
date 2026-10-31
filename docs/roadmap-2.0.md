@@ -426,7 +426,19 @@ client's message and lease with the host name a server offers, the DNS
 proxy's id and its resolver address; a digest of their own over 100,000
 inputs (`0x27c8c7e8ec420cdd`, the C's); 1.01x the C on arm64 and 1.03x
 on x86-64 (Rosetta). The DNS proxy reads only the id: the queries and
-answers it relays are not parsed here.
+answers it relays are not parsed here. Linux syscall arguments
+(2026-10-31): `compat/linux/lxconv.cee` -- open flags, PROT bits,
+socket addresses both ways, the guest's termios, wait statuses, dirent
+types, getdents64 records -- so `fuzz_linux` drives no C; `stat`,
+`statx` and termios going out stay in `convert.c` (Linux's `struct
+stat` differs between the architectures, and they encode the kernel's
+data rather than decode a guest's). Digest `0x3a72da1935783ee6` over
+100,000 inputs, the C's. Benchmark: 1.04x the C on arm64 (39.1 ns
+against 37.5); 1.07x on x86-64 under Rosetta (50.4 against 47.1),
+where identical machine code (`lx_wait_status`, the same instructions
+in both builds) measured 4 ns apart, so Rosetta's figure is not a
+native one: a native x86-64 run is owed before the owner's ruling on
+the 5%.
 
 Size: about 3.0x.
 

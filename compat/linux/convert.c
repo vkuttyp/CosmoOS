@@ -8,6 +8,52 @@
 
 #include "convert.h"
 
+/* What lxconv.cee writes down rather than reads from these headers (it is
+ * generated once for both architectures): the Linux ABI's byte order, the
+ * records' layouts, and the numbers it restates. A target or a header where
+ * any differs does not build. */
+_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "lxconv.cee reads and writes little-endian ABI fields");
+_Static_assert(sizeof(struct cosmo_dirent) == 16 && offsetof(struct cosmo_dirent, ino) == 0 &&
+                   offsetof(struct cosmo_dirent, reclen) == 8 && offsetof(struct cosmo_dirent, type) == 10 &&
+                   offsetof(struct cosmo_dirent, namelen) == 11 && offsetof(struct cosmo_dirent, name) == 12,
+               "lxconv.cee's native dirent");
+_Static_assert(offsetof(struct lx_dirent64, d_off) == 8 && offsetof(struct lx_dirent64, d_reclen) == 16 &&
+                   offsetof(struct lx_dirent64, d_type) == 18 && offsetof(struct lx_dirent64, d_name) == 19,
+               "lxconv.cee's linux_dirent64 header");
+_Static_assert(sizeof(struct lx_sockaddr_in) == 16 && offsetof(struct lx_sockaddr_in, sin_port) == 2 &&
+                   offsetof(struct lx_sockaddr_in, sin_addr) == 4 && sizeof(struct lx_sockaddr_in6) == 28 &&
+                   offsetof(struct lx_sockaddr_in6, sin6_port) == 2 && offsetof(struct lx_sockaddr_in6, sin6_addr) == 8,
+               "lxconv.cee's socket addresses");
+_Static_assert(offsetof(struct netaddr, v4) == offsetof(struct netaddr, v6) && sizeof(struct netaddr) == 20,
+               "lxconv.cee writes v4 through v6's bytes");
+_Static_assert(LX_O_ACCMODE == 3 && LX_O_RDONLY == 0 && LX_O_WRONLY == 1 && LX_O_RDWR == 2 && LX_O_CREAT == 0x40 &&
+                   LX_O_EXCL == 0x80 && LX_O_NOCTTY == 0x100 && LX_O_TRUNC == 0x200 && LX_O_APPEND == 0x400 &&
+                   LX_O_NONBLOCK == 0x800 && LX_O_CLOEXEC == 0x80000,
+               "lxconv.cee's Linux open flags");
+_Static_assert(COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 &&
+                   COSMO_O_EXCL == 0x80 && COSMO_O_TRUNC == 0x200 && COSMO_O_APPEND == 0x400 &&
+                   COSMO_O_NONBLOCK == 0x800 && COSMO_O_DIRECTORY == 0x10000 && COSMO_O_NOFOLLOW == 0x20000 &&
+                   COSMO_O_NOCTTY == 0x40000,
+               "lxconv.cee's native open flags");
+_Static_assert(LX_PROT_READ == COSMO_PROT_READ && LX_PROT_WRITE == COSMO_PROT_WRITE && LX_PROT_EXEC == COSMO_PROT_EXEC &&
+                   COSMO_PROT_READ == 1 && COSMO_PROT_WRITE == 2 && COSMO_PROT_EXEC == 4,
+               "lxconv.cee's PROT bits");
+_Static_assert(COSMO_STATUS_STOPPED(0) == 0x200 && COSMO_STATUS_CONTINUED == 0x400 && COSMO_EXIT_FAULT == 139 &&
+                   LX_SIGSEGV == 11,
+               "lxconv.cee's statuses");
+_Static_assert(LX_ICRNL == 0x100 && LX_ISIG == 1 && LX_ICANON == 2 && LX_ECHO == 8 && LX_TOSTOP == 0x100 &&
+                   LX_OPOST == 1 && LX_ONLCR == 4 && LX_VTIME == 5 && LX_VMIN == 6 && LX_NCCS == 19 &&
+                   COSMO_TTY_ECHO == 1 && COSMO_TTY_ICRNL == 2 && COSMO_TTY_ICANON == 4 && COSMO_TTY_ISIG == 8 &&
+                   COSMO_TTY_OPOST == 16 && COSMO_TTY_TOSTOP == 32,
+               "lxconv.cee's terminal flags");
+_Static_assert(LX_AF_INET == 2 && LX_AF_INET6 == 10 && COSMO_AF_INET == 2 && COSMO_AF_INET6 == 10 && EINVAL == 22 &&
+                   EAFNOSUPPORT == 97,
+               "lxconv.cee's families and errors");
+_Static_assert(COSMO_DT_REG == 1 && COSMO_DT_DIR == 2 && COSMO_DT_CHR == 3 && COSMO_DT_FIFO == 4 && COSMO_DT_SOCK == 5 &&
+                   COSMO_DT_LNK == 6 && LX_DT_REG == 8 && LX_DT_DIR == 4 && LX_DT_CHR == 2 && LX_DT_FIFO == 1 &&
+                   LX_DT_SOCK == 12 && LX_DT_LNK == 10 && LX_DT_UNKNOWN == 0,
+               "lxconv.cee's dirent types");
+
 /* Linux's makedev (glibc's and musl's encoding): the minor's low byte, the
  * major's twelve bits, then the minor's rest. A file's device is
  * makedev(0, its mount's id). */

@@ -9,7 +9,7 @@ linked musl program built by a Linux toolchain.
 
 | Level | What | How to run |
 |---|---|---|
-| Host, conversions | `tests/host/test_linux.c` over `compat/linux/convert.c` under ASan/UBSan | `make host-test` |
+| Host, conversions | `tests/host/test_linux.c` over `compat/linux/lxconv.cee` and `convert.c` under ASan/UBSan: direct checks, and a digest over 100,000 seeded inputs through every `lxconv` conversion (`0x3a72da1935783ee6`, the C's before SA5 replaced it; `LINUX_DUMP=1`, `LINUX_BENCH=1`) | `make host-test` |
 | Kernel self-test | `linux-elf` (`kernel/process/proctest.c`): the loader's note and program-header detection | `make test` (self-test builds) |
 | Target, raw ABI | `/boot/tests/linux/lxhello`, `/boot/tests/linux/lxtest` from `/etc/rc.test` | `make test` |
 | Target, real libc | `/boot/tests/linux/hello_musl` from `/etc/rc.test`, built when `musl-gcc` exists or `MUSL_GCC` is set | `make test` (CI always; locally see below) |

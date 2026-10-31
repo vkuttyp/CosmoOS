@@ -3,8 +3,11 @@
 The Linux process personality (docs/compat/linux/): a static x86-64 ELF
 without the CosmoOS ABI note runs here. `syscalls.c` is the Linux
 system-call table translating onto the native kernel services;
-`convert.c` holds the pure structure and flag conversions (also compiled
-by the host test); `linux_abi.h` writes out the Linux ABI the personality
+`lxconv.cee` holds the decoders of what a guest passes (open flags, PROT
+bits, socket addresses, termios) and the other conversions the fuzz
+target drives, in CeeSafe (roadmap 2.0 SA5); `convert.c` the encoders
+whose Linux layout differs between the architectures (stat, statx) and
+the terminal's modes out; both are pure and compiled by the host test; `linux_abi.h` writes out the Linux ABI the personality
 needs. Nothing native depends on this directory (invariant 7).
 
 Documentation: `docs/compat/linux/architecture.md`, `design.md`,

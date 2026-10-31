@@ -92,6 +92,8 @@ PORTS = [
     ("kernel/ipc/fifo.cee", "kernel/ipc/fifo.c", "Named pipes: the pipe's ring behind a filesystem node (fifo.h)",
      "kernel/include/kernel/fifo_types.h", False),
     ("kernel/core/crc32c.cee", "kernel/core/crc32c.c", "CRC-32C (crc32c.h)", None, False),
+    ("compat/linux/lxconv.cee", "compat/linux/lxconv.c",
+     "The Linux personality's decoders, and the conversions fuzz_linux drives (convert.h)", None, False),
     ("kernel-services/network/netparse.cee", "kernel-services/network/netparse.c",
      "The network receive path's decoders: frames, TCP segments, DHCP and DNS (netparse.h)", None, False),
     ("kernel/core/fbvalid.cee", "kernel/core/fbvalid.c", "The framebuffer validator (bootinfo.h)", None, False),

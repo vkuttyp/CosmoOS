@@ -1,0 +1,355 @@
+// lxconv.cee - the Linux personality's decoders, and the conversions its fuzz target drives (compat/linux/convert.h;
+// roadmap 2.0 SA5, the Linux-syscall-argument family): the open flags, PROT bits, socket addresses and termios a
+// guest passes, socket addresses and getdents64 records going back, wait statuses and dirent types. convert.c keeps
+// the encoders whose Linux layout differs between the architectures (stat, statx) and the terminal's modes out.
+//
+// The Linux ABI's integers are little-endian on both CosmoOS targets (x86-64 and AArch64), and the records written and
+// read here have the layouts linux_abi.h and syscall.h give them; convert.c asserts both at compile time, so a target
+// or a header where they differ does not build. A socket address's IPv4 address is copied byte for byte into the
+// netaddr's in6_addr, which shares its storage with `v4`, so its network order needs no byte-order assumption.
+// tests/host/test_linux.c holds these to the C they replaced: the same digest over 100,000 inputs.
+
+@header("convert.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct netaddr {
+        family: u16;
+        port: u16;
+        v6: in6_addr; // in a union with v4 (network order): the address's bytes either way
+    }
+    struct cosmo_termios {
+        modes: u32;
+        vmin: u8;
+        vtime: u8;
+        reserved: u16;
+    }
+    struct lx_termios {
+        c_iflag: u32;
+        c_oflag: u32;
+        c_cflag: u32;
+        c_lflag: u32;
+        c_cc: [u8; 19];
+    }
+}
+
+// Linux's open flags that are the same on both architectures, and COSMO_O_*.
+const LX_O_ACCMODE: u32 = 3;
+const LX_O_CREAT: u32 = 0x40;
+const LX_O_EXCL: u32 = 0x80;
+const LX_O_NOCTTY: u32 = 0x100;
+const LX_O_TRUNC: u32 = 0x200;
+const LX_O_APPEND: u32 = 0x400;
+const LX_O_NONBLOCK: u32 = 0x800;
+const LX_O_CLOEXEC: u32 = 0x80000;
+const COSMO_O_CREAT: u32 = 0x40;
+const COSMO_O_EXCL: u32 = 0x80;
+const COSMO_O_TRUNC: u32 = 0x200;
+const COSMO_O_APPEND: u32 = 0x400;
+const COSMO_O_NONBLOCK: u32 = 0x800;
+const COSMO_O_DIRECTORY: u32 = 0x10000;
+const COSMO_O_NOFOLLOW: u32 = 0x20000;
+const COSMO_O_NOCTTY: u32 = 0x40000;
+
+// PROT_* (the same bits on both sides).
+const PROT_READ: u32 = 1;
+const PROT_WRITE: u32 = 2;
+const PROT_EXEC: u32 = 4;
+
+// The native exit statuses (syscall.h) and Linux's wait status words.
+const STATUS_CONTINUED: i32 = 0x400;
+const EXIT_FAULT: i32 = 139;
+const LX_SIGSEGV: i32 = 11;
+
+// The terminal's flags: Linux's (linux_abi.h), then COSMO_TTY_*.
+const LX_ICRNL: u32 = 0x100;
+const LX_ISIG: u32 = 0x1;
+const LX_ICANON: u32 = 0x2;
+const LX_ECHO: u32 = 0x8;
+const LX_TOSTOP: u32 = 0x100;
+const LX_OPOST: u32 = 0x1;
+const LX_ONLCR: u32 = 0x4;
+const LX_VTIME: usize = 5;
+const LX_VMIN: usize = 6;
+const TTY_ECHO: u32 = 1;
+const TTY_ICRNL: u32 = 2;
+const TTY_ICANON: u32 = 4;
+const TTY_ISIG: u32 = 8;
+const TTY_OPOST: u32 = 16;
+const TTY_TOSTOP: u32 = 32;
+
+// Socket addresses: the families (Linux's and the native are the same numbers), and their sizes.
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+const SOCKADDR_IN: usize = 16;
+const SOCKADDR_IN6: usize = 28;
+const EINVAL: i32 = 22;
+const EAFNOSUPPORT: i32 = 97;
+
+// getdents: a native record's header (struct cosmo_dirent: 16 bytes with its padding, the name at 12) and a
+// linux_dirent64's (19 bytes: d_ino, d_off, d_reclen, d_type).
+const NATIVE_DIRENT: usize = 16;
+const NATIVE_NAME: usize = 12;
+const LX_DIRENT_HDR: usize = 19;
+
+// --- flags and numbers -----------------------------------------------------------------------------------------------
+
+/// Linux open flags to COSMO_O_*, with this architecture's O_DIRECTORY, O_NOFOLLOW and O_LARGEFILE bits; -1 for an
+/// access mode of 3 or a flag the kernel does not know. O_CLOEXEC and O_LARGEFILE are accepted and have no effect.
+fn openFlags(lx: u32, dir: u32, nofollow: u32, largefile: u32, native: borrow mut u32) -> i32 {
+    var n: u32 = 0;
+    let mode = lx & LX_O_ACCMODE;
+    if (mode == 3) {
+        return -1;
+    }
+    n = mode; // RDONLY 0, WRONLY 1, RDWR 2 on both sides
+    if ((lx & LX_O_CREAT) != 0) {
+        n |= COSMO_O_CREAT;
+    }
+    if ((lx & LX_O_EXCL) != 0) {
+        n |= COSMO_O_EXCL;
+    }
+    if ((lx & LX_O_TRUNC) != 0) {
+        n |= COSMO_O_TRUNC;
+    }
+    if ((lx & LX_O_APPEND) != 0) {
+        n |= COSMO_O_APPEND;
+    }
+    if ((lx & dir) != 0) {
+        n |= COSMO_O_DIRECTORY;
+    }
+    if ((lx & nofollow) != 0) {
+        n |= COSMO_O_NOFOLLOW;
+    }
+    if ((lx & LX_O_NONBLOCK) != 0) {
+        n |= COSMO_O_NONBLOCK; // a FIFO's open rules, and the open's mode
+    }
+    if ((lx & LX_O_NOCTTY) != 0) {
+        n |= COSMO_O_NOCTTY; // a session leader opening a terminal does not take it
+    }
+    let known = LX_O_ACCMODE | LX_O_CREAT | LX_O_EXCL | LX_O_TRUNC | LX_O_APPEND | dir | LX_O_CLOEXEC | LX_O_NONBLOCK |
+        LX_O_NOCTTY | largefile | nofollow;
+    if ((lx & (known ^ 0xffffffff)) != 0) {
+        return -1;
+    }
+    native = n;
+    return 0;
+}
+
+/// Linux PROT_* to the native bits, which coincide; -1 for any other bit.
+fn prot(lx: u32, native: borrow mut i32) -> i32 {
+    if ((lx & ((PROT_READ | PROT_WRITE | PROT_EXEC) ^ 0xffffffff)) != 0) {
+        return -1;
+    }
+    native = truncate<u8>(lx) as i32; // at most 7: no other bit is set
+    return 0;
+}
+
+/// A native exit status (exit n, 128 + signal, 139 for a fault, stopped, continued) as Linux's wait status word.
+fn waitStatus(s: i32) -> i32 {
+    // The status's bits, as C's `&` on an int sees them.
+    let bits = truncate<u32>(s);
+    // The job-control outcomes sit above the byte the exit and kill encodings use, so they are tested first.
+    if ((bits & 0xffffff00) == 0x200) {                // COSMO_STATUS_STOPPED(sig) without the signal
+        return truncate<u8>(bits) as i32 * 256 + 0x7f; // WIFSTOPPED: the signal, then 0x7f
+    }
+    if (s == STATUS_CONTINUED) {
+        return 0xffff; // WIFCONTINUED
+    }
+    if (s == EXIT_FAULT) {
+        return LX_SIGSEGV;
+    }
+    if (s > 128 && s < 128 + 64) {
+        return s - 128; // terminated by that signal
+    }
+    return truncate<u8>(bits) as i32 * 256; // exited normally: the low byte, shifted
+}
+
+/// COSMO_DT_* to Linux's DT_*.
+fn direntType(native: u8) -> u8 => match (native) {
+    1 => 8,  // regular
+    2 => 4,  // directory
+    3 => 2,  // character device
+    4 => 1,  // FIFO
+    5 => 12, // socket
+    6 => 10, // symbolic link
+    _ => 0,
+};
+
+/// The guest's termios to the native modes: the flags this line discipline implements, and VMIN and VTIME.
+fn termiosToNative(out: borrow mut cosmo_termios, t: borrow lx_termios) {
+    var m: u32 = 0;
+    if ((t.c_iflag & LX_ICRNL) != 0) {
+        m |= TTY_ICRNL;
+    }
+    if ((t.c_lflag & LX_ISIG) != 0) {
+        m |= TTY_ISIG;
+    }
+    if ((t.c_lflag & LX_ICANON) != 0) {
+        m |= TTY_ICANON;
+    }
+    if ((t.c_lflag & LX_ECHO) != 0) {
+        m |= TTY_ECHO;
+    }
+    if ((t.c_lflag & LX_TOSTOP) != 0) {
+        m |= TTY_TOSTOP;
+    }
+    if ((t.c_oflag & LX_OPOST) != 0 && (t.c_oflag & LX_ONLCR) != 0) {
+        m |= TTY_OPOST;
+    }
+    out.modes = m;
+    out.vmin = t.c_cc[LX_VMIN];
+    out.vtime = t.c_cc[LX_VTIME];
+    out.reserved = 0;
+}
+
+// --- socket addresses ------------------------------------------------------------------------------------------------
+
+/// The netaddr emptied: every byte (family, port, and the 16 of the address union).
+fn clearNetaddr(out: borrow mut netaddr) {
+    out.family = 0;
+    out.port = 0;
+    out.v6.s6_addr[..].fill(0);
+}
+
+/// A guest's sockaddr_in or sockaddr_in6, `sa.length` bytes, as a netaddr; -EINVAL when it is shorter than its
+/// family's, -EAFNOSUPPORT for another family.
+fn sockaddrToNetaddr(sa: Slice<u8>, out: borrow mut netaddr) -> i32 {
+    clearNetaddr(out);
+    if (sa.length < 2) {
+        return -EINVAL;
+    }
+    let family = sa[0] as u16 | (sa[1] as u16) << 8; // native order: little-endian on both targets
+    if (family == AF_INET) {
+        if (sa.length < SOCKADDR_IN) {
+            return -EINVAL;
+        }
+        out.family = AF_INET;
+        out.port = (sa[2] as u16) << 8 | sa[3] as u16;
+        out.v6.s6_addr[..4].copyFrom(sa[4..8]); // v4, network order
+        return 0;
+    }
+    if (family == AF_INET6) {
+        if (sa.length < SOCKADDR_IN6) {
+            return -EINVAL;
+        }
+        out.family = AF_INET6;
+        out.port = (sa[2] as u16) << 8 | sa[3] as u16;
+        out.v6.s6_addr[..].copyFrom(sa[8..24]);
+        return 0;
+    }
+    return -EAFNOSUPPORT;
+}
+
+/// A netaddr as a Linux sockaddr_in6 (an IPv6 one) or sockaddr_in (anything else), its first `out.length` bytes at
+/// most; the full size the caller needed.
+fn sockaddrFromNetaddr(a: borrow netaddr, out: SliceMut<u8>) -> usize {
+    var b: [u8; 28] = [0; 28];
+    var size = SOCKADDR_IN;
+    if (a.family == AF_INET6) {
+        size = SOCKADDR_IN6;
+        b[0] = 10; // AF_INET6, little-endian
+        b[8..24].copyFrom(a.v6.s6_addr[..]);
+    } else {
+        b[0] = 2;                            // AF_INET
+        b[4..8].copyFrom(a.v6.s6_addr[..4]); // v4, network order
+    }
+    b[2] = truncate<u8>(a.port >> 8); // the port's high byte, network order
+    b[3] = truncate<u8>(a.port);      // its low byte
+    let n = if (out.length < size) out.length else size;
+    out[..n].copyFrom(b[..n]);
+    return size;
+}
+
+// --- getdents --------------------------------------------------------------------------------------------------------
+
+/// The little-endian u64 at `at` (which has 8 bytes after it).
+fn le64(b: Slice<u8>, at: usize) -> u64 {
+    let x = b[at..at + 8];
+    return (x[0] as u64) | (x[1] as u64) << 8 | (x[2] as u64) << 16 | (x[3] as u64) << 24 | (x[4] as u64) << 32 |
+        (x[5] as u64) << 40 | (x[6] as u64) << 48 | (x[7] as u64) << 56;
+}
+
+/// A linux_dirent64 header: d_ino, d_off and d_reclen little-endian, then d_type. Built in an array whose length the
+/// compiler knows, so its stores need no checks, and copied out in one copy.
+fn direntHeader(h: SliceMut<u8>, ino: u64, off: u64, reclen: u64, kind: u8) {
+    var b: [u8; 19] = [0; 19];
+    for (k in 0..8u32) {
+        b[k as usize] = truncate<u8>(ino >> (8 * k));
+        b[8 + k as usize] = truncate<u8>(off >> (8 * k));
+    }
+    b[16] = truncate<u8>(reclen);
+    b[17] = truncate<u8>(reclen >> 8);
+    b[18] = kind;
+    h.copyFrom(b[..]);
+}
+
+/// Native getdents records (`input`) to linux_dirent64 records in `out`: the bytes written, stopping at a record
+/// whose length is below its header, past the input, or too short for its name, and before one that would not fit.
+fn direntsFromNative(input: Slice<u8>, out: SliceMut<u8>) -> usize {
+    var ip: usize = 0;
+    var op: usize = 0;
+    while (NATIVE_DIRENT <= input.length - ip) {
+        // The record's header, copied out once: its fields then read from an array of known length, with no checks.
+        var h: [u8; 16] = [0; 16];
+        h[..].copyFrom(input[ip..ip + NATIVE_DIRENT]);
+        let ino = le64(h[..], 0);
+        let reclen = h[8] as usize | (h[9] as usize) << 8;
+        let kind = h[10];
+        let namelen = h[11] as usize;
+        if (reclen < NATIVE_NAME || reclen > input.length - ip || namelen > reclen - NATIVE_NAME) {
+            break;
+        }
+        let rec = (LX_DIRENT_HDR + namelen + 1 + 7) & (7usize ^ 0xffffffffffffffff); // header, name, NUL; 8-aligned
+        if (rec > out.length - op) {
+            break;
+        }
+        // The record's two windows, taken once: what follows slices within them.
+        let src = input[ip..ip + reclen];
+        let dst = borrow mut out[op..op + rec];
+        direntHeader(mut dst[..LX_DIRENT_HDR], ino, (op + rec) as u64, rec as u64, direntType(kind));
+        dst[LX_DIRENT_HDR..LX_DIRENT_HDR + namelen].copyFrom(src[NATIVE_NAME..NATIVE_NAME + namelen]);
+        dst[LX_DIRENT_HDR + namelen..].fill(0);
+        op += rec;
+        ip += reclen;
+    }
+    return op;
+}
+
+// --- the exports -----------------------------------------------------------------------------------------------------
+
+/// Safety: `native` is writable.
+@export("lx_open_flags_for")
+unsafe fn openFlagsC(lx: u32, dir: u32, nofollow: u32, largefile: u32, native: *mut u32) -> i32 =>
+    openFlags(lx, dir, nofollow, largefile, Ptr.toBorrowMut(native));
+
+/// Safety: `native` is writable.
+@export("lx_prot")
+unsafe fn protC(lx: u32, native: *mut i32) -> i32 => prot(lx, Ptr.toBorrowMut(native));
+
+@export("lx_wait_status")
+fn waitStatusC(s: i32) -> i32 => waitStatus(s);
+
+@export("lx_dirent_type")
+fn direntTypeC(native: u8) -> u8 => direntType(native);
+
+/// Safety: `out` is writable and `t` readable (the guest's termios, already copied in).
+@export("lx_termios_to_native")
+unsafe fn termiosToNativeC(out: *mut cosmo_termios, t: *lx_termios) =>
+    termiosToNative(Ptr.toBorrowMut(out), Ptr.toBorrow(t));
+
+/// Safety: `sa` points to `len` readable bytes and `out` is writable.
+@export("lx_sockaddr_to_netaddr")
+unsafe fn sockaddrToNetaddrC(sa: *void, len: usize, out: *mut netaddr) -> i32 =>
+    sockaddrToNetaddr(Slice.fromRaw(sa as *u8, len), Ptr.toBorrowMut(out));
+
+/// Safety: `a` is readable and `out` points to `cap` writable bytes.
+@export("lx_sockaddr_from_netaddr")
+unsafe fn sockaddrFromNetaddrC(a: *netaddr, out: *mut void, cap: usize) -> usize =>
+    sockaddrFromNetaddr(Ptr.toBorrow(a), SliceMut.fromRaw(out as *mut u8, cap));
+
+/// Safety: `input` points to `inlen` readable bytes and `out` to `outcap` writable ones, not overlapping.
+@export("lx_dirents_from_native")
+unsafe fn direntsFromNativeC(input: *u8, inlen: usize, out: *mut u8, outcap: usize) -> usize =>
+    direntsFromNative(Slice.fromRaw(input, inlen), SliceMut.fromRaw(out, outcap));
