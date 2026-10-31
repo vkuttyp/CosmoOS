@@ -11,9 +11,11 @@
 #ifndef KERNEL_ELF_H
 #define KERNEL_ELF_H
 
+#include <kernel/elf64.h>
 #include <kernel/types.h>
 
 #define ELF_MAX_SEGMENTS 16
+#define ELF_INTERP_MAX 256
 
 #define ELF_PF_X 1u
 #define ELF_PF_W 2u
@@ -53,16 +55,25 @@ struct elf_info {
      * segment keeps the alignment its linker gave it (PR #369 review). */
     uint64_t max_align;
     bool has_interp;   /* PT_INTERP named a program interpreter */
-    char interp[256];  /* its path (NUL-terminated, at most 255 bytes) */
+    char interp[ELF_INTERP_MAX];  /* its path (NUL-terminated, at most 255 bytes) */
 };
 
 #define ELF_ALIGN_MAX (2ULL << 20)
 
 /* Validate a native static executable for the user range
  * [user_lo, user_hi). On failure returns -ENOEXEC and, when `why` is
- * non-NULL, points it at an immortal string naming the rule. */
-int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user_hi, struct elf_info *info,
-                 const char **why);
+ * non-NULL, points it at an immortal string naming the rule. The
+ * validator (elfparse) takes this architecture's machine, and the
+ * interpreter path's buffer apart from `info`. */
+int elf_validate_for(const void *image, size_t size, uint64_t user_lo, uint64_t user_hi, uint16_t machine,
+                     const char *not_machine, struct elf_info *info, char *interp, const char **why);
+static inline int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user_hi,
+                               struct elf_info *info, const char **why)
+{
+    __builtin_memset(info, 0, sizeof(*info));
+    return elf_validate_for(image, size, user_lo, user_hi, ELF_MACHINE_NATIVE, "not " ELF_MACHINE_NATIVE_NAME, info,
+                            info->interp, why);
+}
 
 /* Add `base` to every address of an ET_DYN image's info (segments, entry,
  * lo, hi, the program header table). The caller checks that the result

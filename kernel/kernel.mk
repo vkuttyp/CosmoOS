@@ -112,6 +112,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/virtualization/hvsys.c \
 	kernel-services/virtualization/hvtest.c \
 	kernel/process/elf.c \
+	kernel/process/elfparse.c \
 	kernel/process/cred.c \
 	kernel/process/process.c \
 	kernel/process/itimer.c \
