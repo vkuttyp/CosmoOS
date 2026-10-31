@@ -12,6 +12,9 @@
  * The C decoders gave it (2026-10-31), and the CeeSafe ones that replaced
  * them (netparse.cee) give the same. NETPARSE_DUMP=1 prints the lines.
  *
+ * The TCP segment family has a digest of its own ("tcp digest"): 200,000
+ * headers and option lists, recorded from netparse_tcp.c the same way.
+ *
  * NETPARSE_BENCH=1 times the decoders instead: the same inputs, every
  * decoder on each, best of 9 runs, in nanoseconds per input (the 5% rule).
  */
@@ -188,6 +191,35 @@ static void test_transports(void)
     EXPECT(l.tcp_flags == 0);
 }
 
+static void test_tcp(void)
+{
+    uint8_t h[20] = { 0x30, 0x39, 0, 80, 1, 2, 3, 4, 5, 6, 7, 8, 0x60, 0x12, 0xff, 0xff };
+    struct netparse_tcp d;
+    EXPECT(netparse_tcp(h, 24, &d) == NETPARSE_OK && d.hlen == 24 && d.sport == 12345 && d.dport == 80);
+    EXPECT(d.seq == 0x01020304 && d.ack == 0x05060708 && d.flags == 0x12 && d.win == 0xffff);
+    EXPECT(netparse_tcp(h, 23, &d) == NETPARSE_BAD);   /* options beyond the segment */
+    h[12] = 0x40;   /* 16 bytes */
+    EXPECT(netparse_tcp(h, 100, &d) == NETPARSE_BAD);
+    h[12] = 0xf0;
+    EXPECT(netparse_tcp(h, 60, &d) == NETPARSE_OK && d.hlen == 60);
+
+    static const uint8_t mss[] = { 2, 4, 0x05, 0xb4 };
+    EXPECT(netparse_tcp_mss(mss, 4, 1220) == 1460);
+    static const uint8_t low[] = { 1, 1, 2, 4, 0x01, 0x00 };   /* no-ops, then an MSS of 256 */
+    EXPECT(netparse_tcp_mss(low, 6, 1220) == 536);
+    static const uint8_t after_end[] = { 0, 2, 4, 0x05, 0xb4 };
+    EXPECT(netparse_tcp_mss(after_end, 5, 1220) == 1220);
+    static const uint8_t sack_then[] = { 4, 2, 3, 3, 7, 2, 4, 0x05, 0x00 };
+    EXPECT(netparse_tcp_mss(sack_then, 9, 1220) == 1280);
+    static const uint8_t bad_len[] = { 3, 1, 2, 4, 0x05, 0xb4 };   /* a length below 2 ends the walk */
+    EXPECT(netparse_tcp_mss(bad_len, 6, 1220) == 1220);
+    static const uint8_t past[] = { 8, 10, 2, 4, 0x05, 0xb4 };     /* runs past the options */
+    EXPECT(netparse_tcp_mss(past, 6, 1220) == 1220);
+    static const uint8_t cut[] = { 1, 2 };                          /* a kind with no length byte */
+    EXPECT(netparse_tcp_mss(cut, 2, 1220) == 1220);
+    EXPECT(netparse_tcp_mss(mss, 0, 777) == 777);
+}
+
 /* --- the recorded digest --------------------------------------------------- */
 
 #define ROUNDS 200000
@@ -333,6 +365,88 @@ static void test_recorded_digest(void)
     EXPECT(digest == NETPARSE_DIGEST);
 }
 
+/* The TCP segment family's digest (netparse_tcp.c, 2026-10-31). */
+#define TCP_ROUNDS 200000
+#define TCP_SEED 0x7C9A5E6D2026B31Full
+#define TCP_DIGEST 0x35875a1cf041750bull
+
+struct tcp_input {
+    uint8_t h[20];
+    uint8_t opts[40];
+    uint32_t optlen;
+    uint32_t seg_len;
+    uint16_t dflt;
+};
+
+/* A header and an option list: options built from the kinds a SYN carries
+ * (end, no-op, MSS, window scale, SACK permitted, timestamps) and others,
+ * with lengths right or wrong, then a few bytes changed. */
+static void make_tcp(struct tcp_input *in)
+{
+    for (size_t i = 0; i < sizeof(in->h); i += 4) {
+        uint32_t r = (uint32_t)next();
+        memcpy(in->h + i, &r, 4);
+    }
+    uint32_t words = 5 + (uint32_t)(next() % 11);
+    in->h[12] = (uint8_t)(next() % 8 ? words << 4 : next());
+    uint32_t n = 0;
+    while (n < sizeof(in->opts)) {
+        static const uint8_t kinds[] = { 0, 1, 1, 2, 2, 2, 3, 4, 8, 5, 30 };
+        uint8_t kind = kinds[next() % sizeof(kinds)];
+        uint8_t len = kind == 2 ? 4 : kind == 3 ? 3 : kind == 4 ? 2 : kind == 8 ? 10 : (uint8_t)(2 + next() % 8);
+        if (next() % 8 == 0)
+            len = (uint8_t)(next() % 12);
+        in->opts[n++] = kind;
+        if (kind <= 1)
+            continue;
+        if (n < sizeof(in->opts))
+            in->opts[n++] = len;
+        for (uint8_t k = 2; k < len && n < sizeof(in->opts); k++)
+            in->opts[n++] = (uint8_t)next();
+    }
+    unsigned flips = (unsigned)(next() % 3);
+    for (unsigned i = 0; i < flips; i++)
+        in->opts[next() % sizeof(in->opts)] ^= (uint8_t)(1u << (next() % 8));
+    in->optlen = (uint32_t)(next() % 41);
+    uint32_t hlen = (uint32_t)(in->h[12] >> 4) * 4;
+    in->seg_len = next() % 2 ? hlen + (uint32_t)(next() % 3) - 1 : (uint32_t)(next() % 100);
+    in->dflt = (uint16_t)(next() % 2 ? 1220 : 1460);
+}
+
+static void test_tcp_digest(void)
+{
+    bool dump = getenv("NETPARSE_DUMP") != NULL;
+    uint64_t digest = 0xcbf29ce484222325ull;
+    g_rng = TCP_SEED;
+    unsigned ok = 0, found = 0;
+    for (unsigned r = 0; r < TCP_ROUNDS; r++) {
+        struct tcp_input in;
+        make_tcp(&in);
+        struct netparse_tcp d;
+        memset(&d, 0, sizeof(d));
+        uint32_t rc = netparse_tcp(in.h, in.seg_len, &d);
+        uint16_t mss = netparse_tcp_mss(in.opts, in.optlen, in.dflt);
+        ok += rc == NETPARSE_OK;
+        found += mss != in.dflt;
+        char line[160];
+        int n = snprintf(line, sizeof(line), "t%u:%u:%u:%u:%08x:%08x:%02x:%u m%u", rc, d.hlen, d.sport, d.dport, d.seq,
+                         d.ack, d.flags, d.win, mss);
+        EXPECT(n > 0 && (size_t)n < sizeof(line));
+        for (int i = 0; i < n; i++) {
+            digest ^= (uint8_t)line[i];
+            digest *= 0x100000001b3ull;
+        }
+        digest ^= '\n';
+        digest *= 0x100000001b3ull;
+        if (dump)
+            printf("%s\n", line);
+    }
+    EXPECT(ok > 1000 && found > 1000);
+    printf("  tcp digest 0x%016llx over %u inputs (headers accepted %u, an MSS found %u)\n",
+           (unsigned long long)digest, TCP_ROUNDS, ok, found);
+    EXPECT(digest == TCP_DIGEST);
+}
+
 /* --- the benchmark ----------------------------------------------------------- */
 
 static volatile uint64_t g_sink;
@@ -379,6 +493,33 @@ static int bench(void)
     }
     printf("netparse bench: %.2f ns per input (best of 9 runs of %u)\n", best / ROUNDS, ROUNDS);
     free(ins);
+
+    struct tcp_input *tins = malloc(sizeof(*tins) * TCP_ROUNDS);
+    if (tins == NULL)
+        return 1;
+    g_rng = TCP_SEED;
+    for (unsigned r = 0; r < TCP_ROUNDS; r++)
+        make_tcp(&tins[r]);
+    best = 1e30;
+    for (int run = 0; run < 9; run++) {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        uint64_t acc = 0;
+        for (unsigned r = 0; r < TCP_ROUNDS; r++) {
+            const struct tcp_input *in = &tins[r];
+            struct netparse_tcp d;
+            if (netparse_tcp(in->h, in->seg_len, &d) == NETPARSE_OK)
+                acc += d.seq + d.hlen;
+            acc += netparse_tcp_mss(in->opts, in->optlen, in->dflt);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        g_sink += acc;
+        double ns = (double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec);
+        if (ns < best)
+            best = ns;
+    }
+    printf("tcp bench: %.2f ns per input (best of 9 runs of %u)\n", best / TCP_ROUNDS, TCP_ROUNDS);
+    free(tins);
     return 0;
 }
 
@@ -388,7 +529,9 @@ static const struct host_test tests[] = {
     { "ipv4", test_ipv4 },
     { "ipv6 and neighbour discovery", test_ipv6_nd },
     { "udp and transport ids", test_transports },
+    { "tcp", test_tcp },
     { "recorded digest", test_recorded_digest },
+    { "tcp digest", test_tcp_digest },
 };
 
 int main(void)

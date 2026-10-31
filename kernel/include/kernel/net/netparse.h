@@ -107,4 +107,28 @@ struct netparse_l4 {
  * as the protocol it would be; the caller picks the ones its protocol has. */
 void netparse_l4(const uint8_t *b, uint32_t avail, struct netparse_l4 *out);
 
+/* --- TCP (the segment family) ---------------------------------------- */
+
+struct netparse_tcp {
+    uint32_t hlen;        /* the header's length, options included: 20..60, at most the segment's */
+    uint16_t sport;
+    uint16_t dport;
+    uint32_t seq;
+    uint32_t ack;
+    uint8_t flags;        /* TH_* */
+    uint16_t win;
+};
+
+/* The fixed 20 bytes of a TCP header, in a segment of `seg_len` bytes
+ * (header and data): NETPARSE_OK with its fields in *out, or NETPARSE_BAD
+ * for a data offset below 20 bytes or beyond the segment. */
+uint32_t netparse_tcp(const uint8_t *hdr, uint32_t seg_len, struct netparse_tcp *out);
+
+/* The maximum segment size a SYN's options announce, `optlen` bytes (0-40)
+ * after the fixed header, raised to 536 (RFC 1122 §4.2.2.6); `dflt` when
+ * there is none, or the options end, are padded out or malformed first.
+ * End-of-options and no-op are one byte; every other option is a kind and
+ * a length (2 or more) that must fit in what is left. */
+uint16_t netparse_tcp_mss(const uint8_t *opts, uint32_t optlen, uint16_t dflt);
+
 #endif /* KERNEL_NET_NETPARSE_H */

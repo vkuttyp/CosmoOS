@@ -23,6 +23,7 @@
 #include <kernel/panic.h>
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
+#include <kernel/net/netparse.h>
 #include <kernel/net/tcp.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
@@ -316,11 +317,11 @@ bool tcp_test_deliver_held_ack(void)
 }
 
 /* In tcp_input: take `m` if it is the armed client's bare ACK to the armed port. */
-static bool test_hold_ack(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, const struct tcp_hdr *th,
-                          uint32_t len, unsigned hlen)
+static bool test_hold_ack(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4,
+                          const struct netparse_tcp *th, uint32_t len)
 {
     if (__atomic_load_n(&g_test_hold_state, __ATOMIC_ACQUIRE) != HOLD_ARMED || ip4 == NULL ||
-        ntohs(th->dport) != g_test_hold_dport || ntohs(th->sport) != g_test_hold_sport || len != hlen ||
+        th->dport != g_test_hold_dport || th->sport != g_test_hold_sport || len != th->hlen ||
         (th->flags & (TH_SYN | TH_ACK | TH_FIN | TH_RST)) != TH_ACK)
         return false;
     unsigned st = HOLD_ARMED;
@@ -840,17 +841,17 @@ static int build_segment(struct tcp_pcb *pcb, struct tcp_batch *b, uint8_t flags
 }
 
 /* Reset in reply to a segment for which there is no connection. */
-static void build_rst(struct tcp_batch *b, const struct netaddr *src, const struct netaddr *dst, const struct tcp_hdr *th,
-                      uint32_t seglen)
+static void build_rst(struct tcp_batch *b, const struct netaddr *src, const struct netaddr *dst, uint8_t flags,
+                      uint32_t seq, uint32_t ack, uint32_t seglen)
 {
-    if (th->flags & TH_RST)
+    if (flags & TH_RST)
         return;
     int rc;
-    if (th->flags & TH_ACK)
-        rc = build_raw(b, src, dst, TH_RST, ntohl(th->ack), 0, 0, 0);
+    if (flags & TH_ACK)
+        rc = build_raw(b, src, dst, TH_RST, ack, 0, 0, 0);
     else
         rc = build_raw(b, src, dst, TH_RST | TH_ACK, 0,
-                       ntohl(th->seq) + seglen + ((th->flags & TH_SYN) ? 1 : 0) + ((th->flags & TH_FIN) ? 1 : 0), 0, 0);
+                       seq + seglen + ((flags & TH_SYN) ? 1 : 0) + ((flags & TH_FIN) ? 1 : 0), 0, 0);
     if (rc == 0)
         STAT(rsts_out);
 }
@@ -1618,9 +1619,7 @@ void tcp_close(struct tcp_pcb *pcb)
             if (c->state != TCP_CLOSED) {
                 /* A reset carrying the child's own sequence number: build_rst
                  * takes the peer's view, whose ack is our snd_nxt. */
-                struct tcp_hdr peer = { .flags = TH_ACK, .sport = htons(c->remote.port), .dport = htons(c->local.port),
-                                        .ack = htonl(c->snd_nxt) };
-                build_rst(&b, &c->local, &c->remote, &peer, 0);
+                build_rst(&b, &c->local, &c->remote, TH_ACK, 0, c->snd_nxt, 0);
                 ck = pcb_kill_locked(c);
             }
             spin_unlock_irqrestore(&c->lock, s2);
@@ -1796,31 +1795,6 @@ static bool cookie_check(const struct netaddr *local, const struct netaddr *remo
 
 /* --- input -------------------------------------------------------------------- */
 
-static uint16_t parse_mss(const uint8_t *opts, unsigned optlen, uint16_t dflt)
-{
-    unsigned i = 0;
-    while (i < optlen) {
-        uint8_t kind = opts[i];
-        if (kind == 0)
-            break;
-        if (kind == 1) {
-            i++;
-            continue;
-        }
-        if (i + 1 >= optlen)
-            break;
-        uint8_t len = opts[i + 1];
-        if (len < 2 || i + len > optlen)
-            break;
-        if (kind == 2 && len == 4) {
-            uint16_t mss = (uint16_t)((opts[i + 2] << 8) | opts[i + 3]);
-            return mss < 536 ? 536 : mss;
-        }
-        i += len;
-    }
-    return dflt;
-}
-
 static void rtt_sample(struct tcp_pcb *pcb, uint64_t now)
 {
     uint64_t r = clock_delta_ns(now, pcb->rtt_start_ns);
@@ -1854,7 +1828,6 @@ static void enter_time_wait(struct tcp_pcb *pcb)
 /* Everything tcp_input parsed from one segment. */
 struct seg {
     struct netaddr src, dst;   /* remote, local */
-    struct tcp_hdr hdr;
     uint8_t opts[40];
     unsigned optlen;
     uint32_t seq, ack, len;
@@ -1886,7 +1859,7 @@ static struct tcp_pcb *listen_input(struct tcp_pcb *l, struct seg *g, struct tcp
     }
     if (flags & TH_ACK) {
         if (flags & TH_SYN) {
-            build_rst(b, local, remote, &g->hdr, g->len);
+            build_rst(b, local, remote, g->flags, g->seq, g->ack, g->len);
             return NULL;
         }
         uint32_t iss, irs;
@@ -1895,7 +1868,7 @@ static struct tcp_pcb *listen_input(struct tcp_pcb *l, struct seg *g, struct tcp
         if (e) {
             if (g->ack != e->iss + 1 || SEQ_LT(g->seq, e->irs + 1)) {
                 STAT(syn_bad_ack);
-                build_rst(b, local, remote, &g->hdr, g->len);
+                build_rst(b, local, remote, g->flags, g->seq, g->ack, g->len);
                 return NULL;
             }
             iss = e->iss;
@@ -1911,7 +1884,7 @@ static struct tcp_pcb *listen_input(struct tcp_pcb *l, struct seg *g, struct tcp
             STAT(syn_cookies_ok);
         } else {
             STAT(syn_bad_ack);
-            build_rst(b, local, remote, &g->hdr, g->len);
+            build_rst(b, local, remote, g->flags, g->seq, g->ack, g->len);
             return NULL;
         }
         if (l->nr_queued >= l->backlog)
@@ -1951,7 +1924,7 @@ static struct tcp_pcb *listen_input(struct tcp_pcb *l, struct seg *g, struct tcp
 
     /* A SYN: remember it, or answer statelessly. */
     uint16_t path_mss = g->via_lo ? TCP_MSS_LO : family_mss(local->family);
-    uint16_t peer_mss = parse_mss(g->opts, g->optlen, family_mss(local->family));
+    uint16_t peer_mss = netparse_tcp_mss(g->opts, g->optlen, family_mss(local->family));
     uint32_t iss;
     struct tcp_syn_entry *e = syncache_find(l, local, remote, now);
     if (e) {
@@ -1999,18 +1972,17 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     m = m_pullup(m, sizeof(struct tcp_hdr));
     if (m == NULL)
         return;
-    const struct tcp_hdr *th = (const struct tcp_hdr *)m->data;
-    unsigned hlen = TCP_HDR_LEN(th);
-    if (hlen < sizeof(*th) || hlen > len) {
+    struct netparse_tcp th;
+    if (netparse_tcp(m->data, len, &th) != NETPARSE_OK) {   /* a data offset below 20 or beyond the segment */
         m_freem(m);
         return;
     }
+    uint32_t hlen = th.hlen;
     m = m_pullup(m, hlen);
     if (m == NULL)
         return;
-    th = (const struct tcp_hdr *)m->data;
 #if CONFIG_DEBUG
-    if (test_hold_ack(nif, m, ip4, th, len, hlen))
+    if (test_hold_ack(nif, m, ip4, &th, len))
         return;   /* held for a self-test; tcp_test_deliver_held_ack brings it back */
 #endif
 
@@ -2035,17 +2007,16 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         m_freem(m);
         return;
     }
-    g.src.port = ntohs(th->sport);
-    g.dst.port = ntohs(th->dport);
-    memcpy(&g.hdr, th, sizeof(g.hdr));
-    g.optlen = hlen - sizeof(g.hdr);
-    memcpy(g.opts, m->data + sizeof(g.hdr), g.optlen);
+    g.src.port = th.sport;
+    g.dst.port = th.dport;
+    g.optlen = hlen - sizeof(struct tcp_hdr);
+    memcpy(g.opts, m->data + sizeof(struct tcp_hdr), g.optlen);
     m_adj(m, (int)hlen);
     g.len = m->pkt.len;
-    g.seq = ntohl(g.hdr.seq);
-    g.ack = ntohl(g.hdr.ack);
-    g.flags = g.hdr.flags;
-    g.win = ntohs(g.hdr.win);
+    g.seq = th.seq;
+    g.ack = th.ack;
+    g.flags = th.flags;
+    g.win = th.win;
     uint32_t seq = g.seq, ack = g.ack, seglen = g.len;
     uint8_t flags = g.flags;
     uint16_t win = g.win;
@@ -2066,7 +2037,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     }
     if (pcb == NULL) {
         STAT(dropped_no_pcb);
-        build_rst(&b, &g.dst, &g.src, &g.hdr, seglen);
+        build_rst(&b, &g.dst, &g.src, g.flags, g.seq, g.ack, seglen);
         m_freem(m);
         batch_send(&b);
         return;
@@ -2101,7 +2072,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         if (flags & TH_ACK) {
             if (SEQ_LEQ(ack, pcb->iss) || SEQ_GT(ack, pcb->snd_nxt)) {
                 if (!(flags & TH_RST))
-                    build_rst(&b, &g.dst, &g.src, &g.hdr, seglen);
+                    build_rst(&b, &g.dst, &g.src, g.flags, g.seq, g.ack, seglen);
                 goto out;
             }
         }
@@ -2120,7 +2091,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         b.quiet = false;   /* accepted: the peer's SYN(+ACK) completes the host's own open */
         pcb->irs = seq;
         pcb->rcv_nxt = seq + 1;
-        pcb->mss = parse_mss(g.opts, g.optlen, pcb->mss);
+        pcb->mss = netparse_tcp_mss(g.opts, g.optlen, pcb->mss);
         if (pcb->mss > pcb->path_mss)
             pcb->mss = pcb->path_mss;
         pcb->cwnd = 2 * pcb->mss;
@@ -2221,7 +2192,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
 
     if (pcb->state == TCP_SYN_RCVD) {
         if (SEQ_LT(ack, pcb->snd_una) || SEQ_GT(ack, pcb->snd_nxt)) {
-            build_rst(&b, &g.dst, &g.src, &g.hdr, seglen);
+            build_rst(&b, &g.dst, &g.src, g.flags, g.seq, g.ack, seglen);
             goto out;
         }
         pcb->snd_una = ack;
