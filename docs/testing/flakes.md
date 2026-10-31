@@ -5344,3 +5344,23 @@ back by the time since `hwclock -w` modulo a second. Not a load-sensitive
 bound: the check is a keep, restated with that loss counted (backlog
 TEST-24, `docs/audit/2026-10-28-rtc-century-report.md`).
 `tools/rtc-century-probe.py` measures the rewind over qtest.
+
+## `upgrade test (aarch64)` over its 30-minute job limit, 2026-10-31
+
+CI, four runs on 2026-10-30 and -31: main's 41067037377 (`087e37f8`) and
+41103076962 (`a3fb2986`), PR #499's 41109526176 (`d0fe4ba4`) and PR #502's
+41147110864 (`b8763410`). Each `upgrade test (aarch64)` job was cancelled
+by its 30-minute `timeout-minutes` with nothing failed: `test-upgrade` and
+`test-pkgtx` had passed in all four, and in 41067037377 `test-be` had
+passed too (in 1048.9 s) when the limit came. Attributed: slow runners.
+On those runners `test-upgrade` took 188.0-188.6 s and `test-pkgtx`
+205.8-210.7 s; on a fast one (PR #499's rerun, job 124302273242) 130.2 s
+and 173.5 s, with `test-be` 616.7 s and the test step 1022 s. The job's
+three tests run back to back after a release build of 2.5-3 minutes, so
+on a slow runner they need about 27-30 minutes of a 30-minute job. Over
+the day's twelve passing aarch64 jobs it took 17-29 minutes (x86_64,
+15-23). The limit is 45 since this entry, as other jobs of this size
+have; a rerun of the cancelled job passed (#499's) and is the workaround
+on an older branch. `test-be` prints its stages only when it ends, so a
+job cancelled inside it shows no stage: read the step's times above
+rather than its output.

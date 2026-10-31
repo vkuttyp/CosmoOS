@@ -1000,7 +1000,15 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
-    timeout-minutes: 30
+    # 30 was the limit until 2026-10-31: the aarch64 job (test-upgrade,
+    # test-pkgtx and test-be, about 10 minutes of it test-be's boots) took
+    # 17-29 minutes over twelve passing runs on 2026-10-30, and the limit
+    # cancelled it four times (main's runs 41067037377 and 41103076962,
+    # PR #499's 41109526176, PR #502's 41147110864), each on a slow runner
+    # with nothing failed: test-upgrade 188 s there against 130 s, and
+    # test-be once passed in 1049 s against 617 s just before the limit
+    # (docs/testing/flakes.md). x86_64 took 15-23.
+    timeout-minutes: 45
     env:
       COSMO_KEYDIR: /tmp/cosmo-ci-keys
     steps:
