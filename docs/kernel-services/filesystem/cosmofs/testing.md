@@ -47,6 +47,22 @@ root NULL. The seed is `cosmofs_format` of the empty image. Any ASan or
 UBSan report fails the run; a crashing input is saved under
 `out/<arch>-<build>/fuzz/` (`docs/verification/testing.md`).
 
+## The decoders (`tests/host/test_cfsparse.c`)
+
+The checks cosmofs makes on metadata it reads before trusting it are
+CeeSafe (`cfsparse.cee`; roadmap 2.0 SA5): a metadata block's magic,
+address, kind, algorithm and CRC32C (`cfs_mhdr_decode`; the version-14
+MAC stays with `cfs_mhdr_fault_of`, which has the key), directory
+entries (`cfs_dirent_check`, `_name`, `_name_eq`), block addresses
+against the pool's geometry (`cfs_dva_valid`, `cfs_dva_lin`) and runs
+(`cfs_extent_valid`, `cfs_direct_valid`, `cfs_extents_valid`). Their host
+test records a digest over 20,000 rounds of metadata blocks, directory
+blocks under formats 14 and 15, and geometries with addresses and runs
+in and out of range (its own CRC, not the one under test): the C's
+(`0x548e0e13fea79b80`, 2026-11-01) is the CeeSafe's. `CFSPARSE_BENCH=1`
+times the decoders alone on rounds made beforehand: 1.03x the C on
+arm64, 1.02x on x86-64 under Rosetta.
+
 ## Target self-tests
 
 All are registered in `kernel/core/selftest.c` and run in debug builds.

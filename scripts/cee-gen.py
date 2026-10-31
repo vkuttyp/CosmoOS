@@ -92,6 +92,8 @@ PORTS = [
     ("kernel/ipc/fifo.cee", "kernel/ipc/fifo.c", "Named pipes: the pipe's ring behind a filesystem node (fifo.h)",
      "kernel/include/kernel/fifo_types.h", False),
     ("kernel/core/crc32c.cee", "kernel/core/crc32c.c", "CRC-32C (crc32c.h)", None, False),
+    ("kernel-services/filesystem/cosmofs/cfsparse.cee", "kernel-services/filesystem/cosmofs/cfsparse.c",
+     "cosmofs's decoders of on-disk metadata (cosmofs_internal.h)", None, False),
     ("kernel/process/elfparse.cee", "kernel/process/elfparse.c", "The user executable validator (elf.h)", None, False),
     ("kernel/module/modelf.cee", "kernel/module/modelf.c", "ET_REL module image validation and layout (modelf.h)", None,
      False),

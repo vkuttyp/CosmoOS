@@ -270,3 +270,8 @@ kernel: $(KERNEL_ELF)
 # compat/linux/lxconv.c is generated from lxconv.cee into out/cee (scripts/cee-gen.py), away from the convert.h it
 # includes by name: its object, and its analysis, look in compat/linux too.
 $(OUT)/compat/linux/lxconv.o $(OUT)/compat/linux/lxconv.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+
+# kernel-services/filesystem/cosmofs/cfsparse.c is generated from cfsparse.cee into out/cee (scripts/cee-gen.py), away
+# from the cosmofs_internal.h it includes by name: its object, and its analysis, look in the cosmofs directory too.
+$(OUT)/kernel-services/filesystem/cosmofs/cfsparse.o $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.analyzed: \
+	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs

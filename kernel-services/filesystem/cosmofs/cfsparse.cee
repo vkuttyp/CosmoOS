@@ -1,0 +1,356 @@
+// cfsparse.cee - cosmofs's decoders of on-disk metadata (roadmap 2.0 SA5, the cosmofs family, batch 1): metadata block
+// headers and their CRC, directory entries, block addresses, and extents -- every check made on bytes read from disk
+// before they are trusted. They read the pool's geometry (fs->mem, fs->nmembers) and nothing else of its state; the
+// version-14 MAC, which needs the pool's key, stays with its caller (cosmofs_core.c's cfs_mhdr_fault_of).
+//
+// A block is a slice of exactly CFS_BLOCK bytes, so no decoder can read past it. The on-disk integers are the
+// structures' own, little-endian on both CosmoOS targets (cosmofs_format.h). tests/host/test_cfsparse.c holds these to
+// the C they replaced: the same digest over 20,000 rounds.
+
+@header("kernel/crc32c.h", "cosmofs_internal.h")
+extern "C" {
+    @effects()
+    fn crc32c(data: *void, len: usize) -> u32;
+    @effects()
+    fn crc32c_update(crc: u32, data: *void, len: usize) -> u32;
+    struct cfs_memstate {
+        nblocks: u64;
+        first_usable: u64;
+        base: u64;
+    }
+    struct cfs {
+        mem: *mut cfs_memstate;
+        nmembers: u32;
+    }
+    struct cfs_extent {
+        start: u64;
+        count: u32;
+        lblk: u32;
+    }
+    struct cfs_inode {
+        direct: [cfs_extent; 10];
+    }
+    struct cfs_dirent;
+}
+
+const BLOCK: usize = 4096;              // CFS_BLOCK
+const CFS_MHDR_MAGIC: u32 = 0x4d534643; // "CFSM"
+const MHDR_CRC_AT: usize = 24;          // offsetof(struct cfs_mhdr, crc)
+const CSUM_NONE: u32 = 0;
+const CSUM_CRC32C: u32 = 1;
+// enum mhdr_fault (cosmofs_internal.h).
+const MHDR_OK: u32 = 0;
+const MHDR_MAGIC: u32 = 1;
+const MHDR_BLKNO: u32 = 2;
+const MHDR_KIND: u32 = 3;
+const MHDR_ALGO: u32 = 4;
+const MHDR_CRC: u32 = 5;
+
+const DVA_VDEV_SHIFT: u64 = 56;
+const DVA_BLK_MASK: u64 = 0x00ffffffffffffff;
+const DVA_NONE: u64 = 0xffffffffffffffff;
+const EXT_COMPRESSED: u32 = 0x80000000;
+const EXT_ALGO_SHIFT: u32 = 24;
+const EXT_ALGO_MASK: u32 = 0x7f;
+const EXT_PSIZE_SHIFT: u32 = 16;
+const EXT_PSIZE_MASK: u32 = 0xff;
+const EXT_COUNT_MASK: u32 = 0xffff;
+const RECORD_BLOCKS: u32 = 8; // CFS_RECORD_BLOCKS
+const COMPRESS_LZ4: u32 = 1;
+const DIRECT: usize = 10; // CFS_DIRECT
+
+const DIRENT: usize = 64;  // sizeof(struct cfs_dirent)
+const SLOTS: u32 = 64;     // CFS_BLOCK / sizeof(struct cfs_dirent)
+const HEAD_NAME: u32 = 48; // CFS_DIRENT_HEAD_NAME
+const CONT_NAME: u32 = 56; // CFS_DIRENT_CONT_NAME
+const DIRENT_CONT: u64 = 0xffffffffffffffff;
+const NAME_MAX: u32 = 47;       // CFS_NAME_MAX, below version 15
+const NAME_MAX_LONG: u32 = 255; // CFS_NAME_MAX_LONG
+
+fn le32(b: Slice<u8>, at: usize) -> u32 =>
+    b[at] as u32 | (b[at + 1] as u32) << 8 | (b[at + 2] as u32) << 16 | (b[at + 3] as u32) << 24;
+
+fn le64(b: Slice<u8>, at: usize) -> u64 => le32(b, at) as u64 | (le32(b, at + 4) as u64) << 32;
+
+// --- metadata headers ------------------------------------------------------------------------------------------------
+
+/// CRC32C over a block with the 4-byte crc field at `at` taken as zero.
+/// Safety: crc32c and crc32c_update read the ranges given, all inside the block, and keep nothing.
+fn blockCrc(b: Slice<u8>, at: usize) -> u32 {
+    let zero: [u8; 4] = [0, 0, 0, 0];
+    let head = b[..at];
+    let tail = b[at + 4..];
+    let z = zero[..];
+    unsafe {
+        let c = crc32c(head.ptr as *void, head.length);
+        let d = crc32c_update(c, z.ptr as *void, 4);
+        return crc32c_update(d, tail.ptr as *void, tail.length);
+    }
+}
+
+/// A metadata block's header against its expected address and kind (0: any), then its CRC32C unless the caller checks
+/// a MAC: an enum mhdr_fault.
+fn mhdrDecode(b: Slice<u8>, blkno: u64, kind: u32, macOn: bool) -> u32 {
+    if (le32(b, 0) != CFS_MHDR_MAGIC) {
+        return MHDR_MAGIC;
+    }
+    if (le64(b, 16) != blkno) {
+        return MHDR_BLKNO;
+    }
+    if (kind != 0 && le32(b, 4) != kind) {
+        return MHDR_KIND;
+    }
+    if (macOn) {
+        return MHDR_OK;
+    }
+    // CRC32C is the only algorithm the format computes; 0 is a pre-v11 image's zeroed pad and also CRC32C.
+    let algo = le32(b, 28);
+    if (algo != CSUM_NONE && algo != CSUM_CRC32C) {
+        return MHDR_ALGO;
+    }
+    if (blockCrc(b, MHDR_CRC_AT) != le32(b, MHDR_CRC_AT)) {
+        return MHDR_CRC;
+    }
+    return MHDR_OK;
+}
+
+// --- addresses -------------------------------------------------------------------------------------------------------
+
+/// The geometry of member `v` (below fs->nmembers).
+/// Safety: fs->mem holds fs->nmembers entries, and the caller checked `v` against it.
+fn member(fs: borrow cfs, v: u32) -> borrow cfs_memstate =>
+    unsafe { Ptr.toBorrow(fs.mem.add(v as usize) as *cfs_memstate) };
+
+/// Whether `dva` names a usable block of one of the pool's members.
+fn dvaValid(fs: borrow cfs, dva: u64) -> bool {
+    let v = truncate<u32>(dva >> DVA_VDEV_SHIFT); // 8 bits
+    if (v >= fs.nmembers) {
+        return false;
+    }
+    let m = member(fs, v);
+    let b = dva & DVA_BLK_MASK;
+    return b >= m.first_usable && b < m.nblocks;
+}
+
+/// `dva` in the allocator's linear space, or DVA_NONE when it is not the pool's.
+fn dvaLin(fs: borrow cfs, dva: u64) -> u64 {
+    let v = truncate<u32>(dva >> DVA_VDEV_SHIFT);
+    if (v >= fs.nmembers) {
+        return DVA_NONE;
+    }
+    let m = member(fs, v);
+    let b = dva & DVA_BLK_MASK;
+    if (b >= m.nblocks) {
+        return DVA_NONE;
+    }
+    return m.base + b;
+}
+
+// --- extents ---------------------------------------------------------------------------------------------------------
+
+/// Logical blocks a run covers, from its count word.
+fn extCount(count: u32) -> u32 => if ((count & EXT_COMPRESSED) != 0) count & EXT_COUNT_MASK else count;
+
+/// A run read from disk: on one member, whole, of a size a record can hold if it is compressed (and then LZ4), and not
+/// wrapping the 32-bit logical block.
+fn extentValid(fs: borrow cfs, e: borrow cfs_extent) -> bool {
+    let compressed = (e.count & EXT_COMPRESSED) != 0;
+    let count = extCount(e.count);
+    let psize = if (compressed) ((e.count >> EXT_PSIZE_SHIFT) & EXT_PSIZE_MASK) + 1 else count;
+    if (count == 0 || psize == 0) {
+        return false;
+    }
+    if (compressed) {
+        if (count > RECORD_BLOCKS || psize > count) {
+            return false;
+        }
+        if (((e.count >> EXT_ALGO_SHIFT) & EXT_ALGO_MASK) != COMPRESS_LZ4) {
+            return false; // nothing else can be read back
+        }
+    }
+    if (!dvaValid(fs, e.start)) {
+        return false;
+    }
+    // e.start is valid, so its block is below 2^56 and the last block's address does not overflow.
+    let last = e.start + psize as u64 - 1;
+    return dvaValid(fs, last) && (e.start >> DVA_VDEV_SHIFT) == (last >> DVA_VDEV_SHIFT) &&
+        e.lblk as u64 + count as u64 <= 0x100000000;
+}
+
+/// An inode's direct runs as read from disk: in range, sorted, no overlap, no run after the first empty slot.
+fn directValid(fs: borrow cfs, inode: borrow cfs_inode) -> bool {
+    var n: usize = 0;
+    while (n < DIRECT && extCount(inode.direct[n].count) != 0) {
+        n += 1;
+    }
+    for (i in n..DIRECT) {
+        let e = borrow inode.direct[i];
+        if (e.count != 0 || e.start != 0 || e.lblk != 0) {
+            return false; // a run hiding behind an empty slot
+        }
+    }
+    for (i in 0..n) {
+        if (!extentValid(fs, borrow inode.direct[i])) {
+            return false;
+        }
+        if (i > 0) {
+            let p = borrow inode.direct[i - 1];
+            if ((inode.direct[i].lblk as u64) < p.lblk as u64 + extCount(p.count) as u64) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// --- directory entries ------------------------------------------------------------------------------------------------
+
+/// The continuations a name of `len` bytes needs.
+fn direntExtra(len: u32) -> u32 => if (len <= HEAD_NAME) 0 else (len - HEAD_NAME + CONT_NAME - 1) / CONT_NAME;
+
+/// The entry whose head is slot `s` of the block, checked before a byte of its name is read: the slots it takes
+/// (1 + extra), or 0 when it is not a well-formed head for a pool of `version` -- free, a continuation, an impossible
+/// length, a wrong `extra`, a run that leaves the block, or a continuation that is not marked.
+fn direntCheck(b: Slice<u8>, s: u32, version: u32) -> u32 {
+    if (s >= SLOTS) {
+        return 0;
+    }
+    let at = s as usize * DIRENT;
+    let ino = le64(b, at);
+    let namelen = b[at + 9] as u32;
+    let extra = b[at + 10] as u32;
+    if (ino == 0 || ino == DIRENT_CONT || namelen == 0) {
+        return 0;
+    }
+    let max = if (version >= 15) NAME_MAX_LONG else NAME_MAX;
+    if (namelen > max || extra != direntExtra(namelen)) {
+        return 0;
+    }
+    if (s + extra >= SLOTS) {
+        return 0;
+    }
+    for (k in 1..extra + 1) {
+        if (le64(b, (s + k) as usize * DIRENT) != DIRENT_CONT) {
+            return 0;
+        }
+    }
+    return 1 + extra;
+}
+
+/// Where the name's bytes from `n` on lie, as a range of the block: in the head's 48 bytes, then in each continuation's
+/// 56, up to `len`.
+fn segment(s: u32, n: u32, len: u32) -> Seg {
+    if (n < HEAD_NAME) {
+        let take = if (len < HEAD_NAME) len - n else HEAD_NAME - n;
+        return Seg { at: s as usize * DIRENT + 16 + n as usize, count: take };
+    }
+    let k = (n - HEAD_NAME) / CONT_NAME + 1;
+    let i = (n - HEAD_NAME) % CONT_NAME;
+    let left = CONT_NAME - i;
+    let take = if (len - n < left) len - n else left;
+    return Seg { at: (s + k) as usize * DIRENT + 8 + i as usize, count: take };
+}
+
+/// A run of name bytes in a block.
+struct Seg {
+    at: usize;
+    count: u32;
+}
+
+// --- the exports -----------------------------------------------------------------------------------------------------
+
+/// Safety: `block` points to CFS_BLOCK readable bytes.
+@export("cfs_block_crc")
+unsafe fn blockCrcC(block: *u8, crcOff: usize) -> u32 => blockCrc(Slice.fromRaw(block, BLOCK), crcOff);
+
+/// Safety: `block` points to CFS_BLOCK readable bytes.
+@export("cfs_mhdr_decode")
+unsafe fn mhdrDecodeC(block: *void, blkno: u64, kind: u32, macOn: bool) -> u32 =>
+    mhdrDecode(Slice.fromRaw(block as *u8, BLOCK), blkno, kind, macOn);
+
+/// Safety: `fs` is a mounted pool's (or a test's), whose mem holds nmembers entries.
+@export("cfs_dva_valid")
+unsafe fn dvaValidC(fs: *cfs, dva: u64) -> bool => dvaValid(Ptr.toBorrow(fs), dva);
+
+/// Safety: as cfs_dva_valid.
+@export("cfs_dva_lin")
+unsafe fn dvaLinC(fs: *cfs, dva: u64) -> u64 => dvaLin(Ptr.toBorrow(fs), dva);
+
+/// Safety: as cfs_dva_valid; `e` is readable.
+@export("cfs_extent_valid")
+unsafe fn extentValidC(fs: *cfs, e: *cfs_extent) -> bool => extentValid(Ptr.toBorrow(fs), Ptr.toBorrow(e));
+
+/// Safety: as cfs_dva_valid; `inode` is readable.
+@export("cfs_direct_valid")
+unsafe fn directValidC(fs: *cfs, inode: *cfs_inode) -> bool => directValid(Ptr.toBorrow(fs), Ptr.toBorrow(inode));
+
+/// Runs read from disk, `n` of them: each in range, sorted, no overlap.
+/// Safety: as cfs_dva_valid; `ext` points to `n` readable runs.
+@export("cfs_extents_valid")
+unsafe fn extentsValidC(fs: *cfs, ext: *cfs_extent, n: u32) -> bool {
+    let f = Ptr.toBorrow(fs);
+    for (i in 0..n) {
+        let e = Ptr.toBorrow(ext.add(i as usize));
+        if (!extentValid(f, e)) {
+            return false;
+        }
+        if (i > 0) {
+            let p = Ptr.toBorrow(ext.add(i as usize - 1));
+            if ((e.lblk as u64) < p.lblk as u64 + extCount(p.count) as u64) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+@export("cfs_dirent_extra")
+fn direntExtraC(len: u32) -> u32 => direntExtra(len);
+
+/// Safety: `blk` points to a CFS_BLOCK directory block.
+@export("cfs_dirent_check")
+unsafe fn direntCheckC(blk: *cfs_dirent, s: u32, version: u32) -> u32 =>
+    direntCheck(Slice.fromRaw(blk as *u8, BLOCK), s, version);
+
+/// The checked entry's name into `out` (CFS_NAME_MAX_LONG bytes at least, not terminated); its length.
+/// Safety: `blk` points to a CFS_BLOCK directory block whose slot `s` cfs_dirent_check accepted; `out` is writable.
+@export("cfs_dirent_name")
+unsafe fn direntNameC(blk: *cfs_dirent, s: u32, out: *mut CChar) -> u32 {
+    let b = Slice.fromRaw(blk as *u8, BLOCK);
+    let len = b[s as usize * DIRENT + 9] as u32;
+    let o = SliceMut.fromRaw(out as *mut u8, NAME_MAX_LONG as usize);
+    // A segment at a time: the head's bytes, then each continuation's (one copy each, not one check per byte).
+    var n: u32 = 0;
+    while (n < len) {
+        let g = segment(s, n, len);
+        let c = g.count as usize;
+        o[n as usize..n as usize + c].copyFrom(b[g.at..g.at + c]);
+        n += g.count;
+    }
+    return len;
+}
+
+/// Whether the checked entry at slot `s` is `name` (`len` bytes): 1 or 0.
+/// Safety: as cfs_dirent_name; `name` points to `len` readable bytes.
+@export("cfs_dirent_name_eq")
+unsafe fn direntNameEqC(blk: *cfs_dirent, s: u32, name: *CChar, len: u32) -> i32 {
+    let b = Slice.fromRaw(blk as *u8, BLOCK);
+    if (b[s as usize * DIRENT + 9] as u32 != len) {
+        return 0;
+    }
+    let want = Slice.fromRaw(name as *u8, len as usize);
+    var n: u32 = 0;
+    while (n < len) {
+        let g = segment(s, n, len);
+        let c = g.count as usize;
+        let have = b[g.at..g.at + c];
+        let theirs = want[n as usize..n as usize + c];
+        for (k in 0..c) {
+            if (have[k] != theirs[k]) {
+                return 0;
+            }
+        }
+        n += g.count;
+    }
+    return 1;
+}

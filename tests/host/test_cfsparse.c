@@ -5,8 +5,9 @@
  * with headers right and wrong, directory blocks of heads, continuations
  * and free slots under formats 14 and 15, pool geometries with addresses,
  * extents, direct maps and run lists in and out of range. Every result is
- * a line; the lines' FNV-1a digest is recorded below. The C gave it; the
- * CeeSafe must give the same. CFSPARSE_DUMP=1 prints the lines;
+ * a line; the lines' FNV-1a digest is recorded below. The C gave it
+ * (2026-11-01), and the CeeSafe that replaced it (cfsparse.cee) gives the
+ * same. CFSPARSE_DUMP=1 prints the lines;
  * CFSPARSE_BENCH=1 times the decoders. ASan and UBSan.
  */
 
@@ -23,8 +24,8 @@
 
 #define ROUNDS 20000
 #define SEED 0xC05F5FA2026B0001ull
-/* The digest of the C decoders (cfsparse.c, 2026-11-01). */
-#define CFSPARSE_DIGEST 0x8d9223e072453d78ull
+/* The digest of the C decoders (2026-11-01), which cfsparse.cee gives too. */
+#define CFSPARSE_DIGEST 0x548e0e13fea79b80ull
 
 static uint64_t g_rng;
 
@@ -62,44 +63,54 @@ static uint32_t own_crc(const uint8_t *block)
     return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
 }
 
-static uint8_t g_block[CFS_BLOCK];
+/* One round's inputs, made before any is decoded so that the benchmark times the decoders alone. */
+#define SLOTS (CFS_BLOCK / sizeof(struct cfs_dirent))
+
+struct round {
+    _Alignas(8) uint8_t mblock[CFS_BLOCK];
+    uint64_t dva;
+    uint32_t want;
+    bool mac_on;
+    _Alignas(8) uint8_t dblock[CFS_BLOCK];
+    unsigned version;
+    unsigned mut[SLOTS];   /* which name byte to change, per slot */
+    struct cfs_memstate mem[4];
+    unsigned nmem;
+    uint64_t dvas[4];
+    struct cfs_inode in;
+    unsigned used;
+};
 
 /* --- metadata headers -------------------------------------------------- */
 
-static void run_mhdr(void)
+static void gen_mhdr(struct round *r)
 {
     for (size_t i = 0; i < CFS_BLOCK; i += 8) {
-        uint64_t r = next();
-        memcpy(g_block + i, &r, 8);
+        uint64_t x = next();
+        memcpy(r->mblock + i, &x, 8);
     }
-    struct cfs_mhdr *h = (struct cfs_mhdr *)g_block;
-    uint64_t dva = CFS_DVA(next() % 3, next() % 4096);
+    struct cfs_mhdr *h = (struct cfs_mhdr *)r->mblock;
+    r->dva = CFS_DVA(next() % 3, next() % 4096);
     uint32_t kind = (uint32_t)(1 + next() % 12);
     if (next() % 8)
         h->magic = CFS_MHDR_MAGIC;
-    h->blkno = next() % 8 ? dva : dva ^ (1ull << (next() % 64));
+    h->blkno = next() % 8 ? r->dva : r->dva ^ (1ull << (next() % 64));
     h->kind = next() % 8 ? kind : (uint32_t)next();
     uint32_t algos[] = { CFS_CSUM_NONE, CFS_CSUM_CRC32C, CFS_CSUM_POLY1305, 7 };
     h->csum_algo = algos[next() % 4];
-    h->crc = own_crc(g_block);
+    h->crc = own_crc(r->mblock);
     if (next() % 6 == 0)
-        g_block[next() % CFS_BLOCK] ^= (uint8_t)(1u << (next() % 8));
-    uint32_t want = next() % 4 ? kind : 0;
-    bool mac_on = next() % 6 == 0;
-    char line[128];
-    int n = snprintf(line, sizeof(line), "m%u c%08x", cfs_mhdr_decode(g_block, dva, want, mac_on),
-                     cfs_block_crc(g_block, offsetof(struct cfs_mhdr, crc)));
-    emit(line, n);
+        r->mblock[next() % CFS_BLOCK] ^= (uint8_t)(1u << (next() % 8));
+    r->want = next() % 4 ? kind : 0;
+    r->mac_on = next() % 6 == 0;
 }
 
 /* --- directory entries ------------------------------------------------- */
 
-#define SLOTS (CFS_BLOCK / sizeof(struct cfs_dirent))
-
-static void run_dirents(void)
+static void gen_dirents(struct round *r)
 {
-    struct cfs_dirent *d = (struct cfs_dirent *)g_block;
-    memset(g_block, 0, CFS_BLOCK);
+    struct cfs_dirent *d = (struct cfs_dirent *)r->dblock;
+    memset(r->dblock, 0, CFS_BLOCK);
     unsigned s = 0;
     while (s < SLOTS) {
         unsigned kind = (unsigned)(next() % 6);
@@ -123,46 +134,23 @@ static void run_dirents(void)
                 c->name[i] = (char)('A' + next() % 26);
         }
     }
-    unsigned version = next() % 2 ? 15 : 14;
-    char line[4096];
-    int n = snprintf(line, sizeof(line), "d%u", version);
-    for (unsigned i = 0; i < SLOTS; i++) {
-        unsigned slots = cfs_dirent_check(d, i, version);
-        n += snprintf(line + n, sizeof(line) - (size_t)n, " %u", slots);
-        if (slots == 0)
-            continue;
-        char name[CFS_NAME_MAX_LONG];
-        unsigned len = cfs_dirent_name(d, i, name);
-        uint64_t h = 0xcbf29ce484222325ull;
-        for (unsigned k = 0; k < len; k++) {
-            h ^= (uint8_t)name[k];
-            h *= 0x100000001b3ull;
-        }
-        int same = cfs_dirent_name_eq(d, i, name, len);
-        if (len > 0)
-            name[next() % len] ^= 1;
-        int changed = cfs_dirent_name_eq(d, i, name, len);
-        int shorter = len > 0 ? cfs_dirent_name_eq(d, i, name, len - 1) : 9;
-        n += snprintf(line + n, sizeof(line) - (size_t)n, ":%u:%llx:%d%d%d", len, (unsigned long long)h, same, changed,
-                      shorter);
-    }
-    emit(line, n);
+    r->version = next() % 2 ? 15 : 14;
+    for (unsigned i = 0; i < SLOTS; i++)
+        r->mut[i] = (unsigned)next();
 }
 
 /* --- addresses and extents --------------------------------------------- */
 
-static struct cfs_memstate g_mem[4];
-
-static uint64_t rand_dva(unsigned nmem)
+static uint64_t rand_dva(const struct round *r)
 {
-    unsigned v = (unsigned)(next() % (nmem + 1));
-    uint64_t b = next() % 8 ? next() % (g_mem[v < 4 ? v : 0].nblocks + 4) : next();
+    unsigned v = (unsigned)(next() % (r->nmem + 1));
+    uint64_t b = next() % 8 ? next() % (r->mem[v < 4 ? v : 0].nblocks + 4) : next();
     return next() % 16 ? CFS_DVA(v, b) : next();
 }
 
-static void rand_extent(struct cfs_extent *e, unsigned nmem)
+static void rand_extent(const struct round *r, struct cfs_extent *e)
 {
-    e->start = rand_dva(nmem);
+    e->start = rand_dva(r);
     e->lblk = (uint32_t)(next() % 2 ? next() % 1000 : next());
     if (next() % 4) {
         e->count = (uint32_t)(1 + next() % 32);
@@ -175,43 +163,107 @@ static void rand_extent(struct cfs_extent *e, unsigned nmem)
         e->count = (uint32_t)next();
 }
 
-static void run_extents(void)
+static void gen_extents(struct round *r)
 {
-    struct cfs fs;
-    memset(&fs, 0, sizeof(fs));
-    unsigned nmem = (unsigned)(1 + next() % 3);
+    r->nmem = (unsigned)(1 + next() % 3);
     for (unsigned v = 0; v < 4; v++) {
-        g_mem[v].nblocks = 64 + next() % 4096;
-        g_mem[v].first_usable = v == 0 ? 2 : 1;
-        g_mem[v].base = v == 0 ? 0 : g_mem[v - 1].base + g_mem[v - 1].nblocks;
+        r->mem[v].nblocks = 64 + next() % 4096;
+        r->mem[v].first_usable = v == 0 ? 2 : 1;
+        r->mem[v].base = v == 0 ? 0 : r->mem[v - 1].base + r->mem[v - 1].nblocks;
     }
-    fs.mem = g_mem;
-    fs.nmembers = nmem;
-    char line[4096];
-    int n = snprintf(line, sizeof(line), "x%u", nmem);
-    for (unsigned k = 0; k < 4; k++) {
-        uint64_t dva = rand_dva(nmem);
-        n += snprintf(line + n, sizeof(line) - (size_t)n, " a%d:%llx", cfs_dva_valid(&fs, dva),
-                      (unsigned long long)cfs_dva_lin(&fs, dva));
-    }
-    struct cfs_inode in;
-    memset(&in, 0, sizeof(in));
-    unsigned used = (unsigned)(next() % (CFS_DIRECT + 1));
+    for (unsigned k = 0; k < 4; k++)
+        r->dvas[k] = rand_dva(r);
+    memset(&r->in, 0, sizeof(r->in));
+    r->used = (unsigned)(next() % (CFS_DIRECT + 1));
     uint32_t lblk = (uint32_t)(next() % 50);
-    for (unsigned i = 0; i < used; i++) {
-        rand_extent(&in.direct[i], nmem);
+    for (unsigned i = 0; i < r->used; i++) {
+        rand_extent(r, &r->in.direct[i]);
         if (next() % 4) {   /* mostly sorted, sometimes not */
-            in.direct[i].lblk = lblk;
-            lblk += cfs_ext_count(&in.direct[i]) + (uint32_t)(next() % 4);
+            r->in.direct[i].lblk = lblk;
+            lblk += cfs_ext_count(&r->in.direct[i]) + (uint32_t)(next() % 4);
         }
     }
-    if (next() % 8 == 0 && used < CFS_DIRECT)
-        rand_extent(&in.direct[used + (next() % (CFS_DIRECT - used))], nmem);   /* a run behind an empty slot */
-    for (unsigned i = 0; i < CFS_DIRECT; i++)
-        n += snprintf(line + n, sizeof(line) - (size_t)n, " e%d", cfs_extent_valid(&fs, &in.direct[i]));
-    n += snprintf(line + n, sizeof(line) - (size_t)n, " D%d L%d", cfs_direct_valid(&fs, &in),
-                  cfs_extents_valid(&fs, in.direct, used));
-    emit(line, n);
+    if (next() % 8 == 0 && r->used < CFS_DIRECT)
+        rand_extent(r, &r->in.direct[r->used + (next() % (CFS_DIRECT - r->used))]);   /* behind an empty slot */
+}
+
+static void gen_round(struct round *r)
+{
+    gen_mhdr(r);
+    gen_dirents(r);
+    gen_extents(r);
+}
+
+/* Every decoder on a round's inputs; its results as lines when `emit_lines`, else a checksum of them. */
+static uint64_t decode_round(struct round *r, bool emit_lines)
+{
+    uint64_t acc = 0;
+    char line[4096];
+    int n = 0;
+    uint32_t m = cfs_mhdr_decode(r->mblock, r->dva, r->want, r->mac_on);
+    uint32_t c = cfs_block_crc(r->mblock, offsetof(struct cfs_mhdr, crc));
+    acc += m + c;
+    if (emit_lines) {
+        n = snprintf(line, sizeof(line), "m%u c%08x", m, c);
+        emit(line, n);
+        n = snprintf(line, sizeof(line), "d%u", r->version);
+    }
+    struct cfs_dirent *d = (struct cfs_dirent *)r->dblock;
+    for (unsigned i = 0; i < SLOTS; i++) {
+        unsigned slots = cfs_dirent_check(d, i, r->version);
+        acc += slots;
+        if (emit_lines)
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " %u", slots);
+        if (slots == 0)
+            continue;
+        char name[CFS_NAME_MAX_LONG];
+        unsigned len = cfs_dirent_name(d, i, name);
+        int same = cfs_dirent_name_eq(d, i, name, len);
+        if (len > 0)
+            name[r->mut[i] % len] ^= 1;
+        int changed = cfs_dirent_name_eq(d, i, name, len);
+        int shorter = len > 0 ? cfs_dirent_name_eq(d, i, name, len - 1) : 9;
+        acc += len + (unsigned)same + (unsigned)changed + (unsigned)shorter;
+        if (emit_lines) {
+            if (len > 0)
+                name[r->mut[i] % len] ^= 1;   /* the name as read, for its hash */
+            uint64_t h = 0xcbf29ce484222325ull;
+            for (unsigned k = 0; k < len; k++) {
+                h ^= (uint8_t)name[k];
+                h *= 0x100000001b3ull;
+            }
+            n += snprintf(line + n, sizeof(line) - (size_t)n, ":%u:%llx:%d%d%d", len, (unsigned long long)h, same,
+                          changed, shorter);
+        }
+    }
+    if (emit_lines) {
+        emit(line, n);
+        n = snprintf(line, sizeof(line), "x%u", r->nmem);
+    }
+    struct cfs fs;
+    memset(&fs, 0, sizeof(fs));
+    fs.mem = r->mem;
+    fs.nmembers = r->nmem;
+    for (unsigned k = 0; k < 4; k++) {
+        bool ok = cfs_dva_valid(&fs, r->dvas[k]);
+        uint64_t lin = cfs_dva_lin(&fs, r->dvas[k]);
+        acc += ok + lin;
+        if (emit_lines)
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " a%d:%llx", ok, (unsigned long long)lin);
+    }
+    for (unsigned i = 0; i < CFS_DIRECT; i++) {
+        bool ok = cfs_extent_valid(&fs, &r->in.direct[i]);
+        acc += ok;
+        if (emit_lines)
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " e%d", ok);
+    }
+    bool dv = cfs_direct_valid(&fs, &r->in), lv = cfs_extents_valid(&fs, r->in.direct, r->used);
+    acc += dv + lv;
+    if (emit_lines) {
+        n += snprintf(line + n, sizeof(line) - (size_t)n, " D%d L%d", dv, lv);
+        emit(line, n);
+    }
+    return acc;
 }
 
 static void test_recorded_digest(void)
@@ -219,38 +271,46 @@ static void test_recorded_digest(void)
     g_dump = getenv("CFSPARSE_DUMP") != NULL;
     g_digest = 0xcbf29ce484222325ull;
     g_rng = SEED;
-    for (unsigned r = 0; r < ROUNDS; r++) {
-        run_mhdr();
-        run_dirents();
-        run_extents();
+    struct round *r = malloc(sizeof(*r));
+    EXPECT(r != NULL);
+    if (r == NULL)
+        return;
+    for (unsigned i = 0; i < ROUNDS; i++) {
+        gen_round(r);
+        decode_round(r, true);
     }
+    free(r);
     printf("  cfsparse digest 0x%016llx over %u rounds\n", (unsigned long long)g_digest, ROUNDS);
     EXPECT(g_digest == CFSPARSE_DIGEST);
 }
 
 static volatile uint64_t g_sink;
 
-/* CFSPARSE_BENCH=1: the decoders on the same inputs, ns per round (best of 15). */
+/* CFSPARSE_BENCH=1: the decoders alone on 2,000 rounds made beforehand, ns per round (best of 15). */
 static int bench(void)
 {
+    enum { N = 2000 };
+    struct round *rs = malloc(sizeof(*rs) * N);
+    if (rs == NULL)
+        return 1;
+    g_rng = SEED;
+    for (unsigned i = 0; i < N; i++)
+        gen_round(&rs[i]);
     double best = 1e30;
     for (int run = 0; run < 15; run++) {
-        g_rng = SEED;
-        g_dump = false;
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
-        for (unsigned r = 0; r < 2000; r++) {
-            run_mhdr();
-            run_dirents();
-            run_extents();
-        }
+        uint64_t acc = 0;
+        for (unsigned i = 0; i < N; i++)
+            acc += decode_round(&rs[i], false);
         clock_gettime(CLOCK_MONOTONIC, &t1);
-        g_sink += g_digest;
+        g_sink += acc;
         double ns = (double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec);
         if (ns < best)
             best = ns;
     }
-    printf("cfsparse bench: %.2f ns per round (best of 15 runs of 2000)\n", best / 2000);
+    printf("cfsparse bench: %.2f ns per round (best of 15 runs of %u)\n", best / N, N);
+    free(rs);
     return 0;
 }
 
