@@ -169,10 +169,12 @@ $(HOST_OUT)/test_pkg: $(call src_paths,$(HOST_PKG_SRCS)) | $(CEE_STAMP)
 	$(Q)$(HOST_CC) -std=c11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 		-Wall -Wextra -Werror -Wno-missing-prototypes -I$(ROOT)/pkg $^ $(HOST_LDFLAGS) -o $@
 
+# test_linux and test_netparse time their conversions with clock_gettime (LINUX_BENCH, NETPARSE_BENCH): POSIX, which
+# glibc hides under -std=c11, as for test_relsig.
 $(HOST_OUT)/test_linux: $(call src_paths,$(HOST_LINUX_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/compat/linux $(call src_paths,$(HOST_LINUX_SRCS)) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE -I$(ROOT)/compat/linux $(call src_paths,$(HOST_LINUX_SRCS)) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_fdt: $(call src_paths,$(HOST_FDT_SRCS)) $(ROOT)/tools/fdt/fdt.h $(ROOT)/kernel/include/uapi/cosmo/hv_machine.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
@@ -217,7 +219,7 @@ $(HOST_OUT)/test_virtq: $(call src_paths,$(HOST_VIRTQ_SRCS)) $(ROOT)/drivers/inc
 $(HOST_OUT)/test_netparse: $(call src_paths,$(HOST_NETPARSE_SRCS)) $(ROOT)/kernel/include/kernel/net/netparse.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(call src_paths,$(HOST_NETPARSE_SRCS)) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(call src_paths,$(HOST_NETPARSE_SRCS)) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_handles: $(call src_paths,$(HOST_HANDLES_SRCS)) $(ROOT)/kernel/include/kernel/object.h $(ROOT)/kernel/include/kernel/handle.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
