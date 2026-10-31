@@ -92,7 +92,7 @@ struct bootinfo_framebuffer {
  * to, and copy it out when it is. This is the whole trust boundary for
  * the display: everything a fbcon does is bounded by these checks, so it
  * is a pure function of the boot fields, tested on the host and fuzzed
- * (kernel/core/fbvalid.c). `why` receives a static reason when the
+ * (kernel/core/fbvalid.nova). `why` receives a static reason when the
  * answer is false; either pointer may be NULL.
  *
  * False for a framebuffer that is absent (all zero), one whose rows do

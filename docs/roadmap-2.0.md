@@ -245,7 +245,11 @@ C to convert (631 of them the ports' `*_floor.c`): 2.0% Nova. Then
 with an index past its table before the self-tests run, and `make
 test-crash-nova` (CI's stress part) requires `KERNEL PANIC: nova panic:
 index out of bounds at kernel/nova/crash_test.nova:10:18`, the line the
-source marks; it passes on x86_64 and aarch64 (2026-10-31).
+source marks; it passes on x86_64 and aarch64 (2026-10-31). Its hook in
+`kernel_main` is C (self-tests and `CRASH_TEST` are C's), so the same
+change ports the framebuffer validator (`kernel/core/fbvalid.nova`, Nova's
+C6 port, held there to the C's host test, fuzz target and a 20,000-case
+differential test) and `kernel/` has less C to convert, not more.
 
 Size: about 0.7x.
 

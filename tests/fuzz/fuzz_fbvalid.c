@@ -1,6 +1,6 @@
 /*
  * fuzz_fbvalid.c - The framebuffer description the firmware handed us,
- * from arbitrary bytes (kernel/core/fbvalid.c).
+ * from arbitrary bytes (kernel/core/fbvalid.nova).
  *
  * The validator is what stands between a firmware quirk and the console
  * writing outside its mapping, so the interesting property is not that it

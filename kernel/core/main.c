@@ -370,11 +370,8 @@ void kernel_main(const struct cosmoboot_info *info)
     failed++;
 #endif
 #if CONFIG_CRASH_TEST == 5 && CONFIG_SELFTEST
-    /* crash-nova (roadmap 2.0 SA1; make test-crash-nova): a Nova bounds
-     * check fails on purpose, through a volatile index neither compiler
-     * sees; the harness requires the Nova file and line in the panic. */
-    kinfo("crash test: a Nova bounds check on purpose");
-    crash_nova_index(*(volatile size_t *)&(size_t){4});
+    kinfo("crash test: a Nova bounds check on purpose"); /* SA1's crash-nova (make test-crash-nova) */
+    crash_nova_index(*(volatile size_t *)&(size_t){4});   /* past its table; neither compiler sees the 4 */
     kerror("crash test: the Nova bounds check did not stop the kernel");
     failed++;
 #endif
