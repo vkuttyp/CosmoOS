@@ -574,6 +574,19 @@ uint32_t cfs_mhdr_decode(const void *block, uint64_t blkno, uint32_t kind, bool 
 bool cfs_extent_valid(const struct cfs *fs, const struct cfs_extent *e);
 bool cfs_direct_valid(const struct cfs *fs, const struct cfs_inode *in);
 bool cfs_extents_valid(const struct cfs *fs, const struct cfs_extent *ext, unsigned n);
+/* The records a mount reads first (cfsmount; roadmap 2.0 SA5, batch 2). */
+bool cfs_super_ident_ok(const struct cfs_super *sb);
+bool cfs_super_shape_ok(const struct cfs_super *sb, uint64_t dev0);
+bool cfs_super_crc_ok(const void *block);
+bool cfs_super_peek_ok(const void *block);
+uint32_t cfs_label_crc(const uint8_t *block);
+bool cfs_label_crc_ok(const uint8_t *block);
+bool cfs_label_shape_ok(const void *block);
+bool cfs_member_sane(const struct cfs_member *m, unsigned v, unsigned nmembers);
+bool cfs_members_count_ok(uint64_t count);
+bool cfs_freelog_count_ok(uint64_t count);
+bool cfs_orphan_count_ok(uint64_t count);
+bool cfs_inode_slot_ok(const struct cfs_inode *in, uint64_t ino);
 /* A metadata block's own check: kind, its own DVA, and its CRC or tag. */
 bool cfs_mhdr_ok(const struct cfs_mac *mac, const void *block, uint64_t dva, uint32_t kind);
 /* Seal a metadata block outside a transaction (format time). */

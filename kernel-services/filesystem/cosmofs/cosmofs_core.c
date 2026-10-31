@@ -166,7 +166,7 @@ static void super_seal(const struct cfs_mac *mac, uint8_t *block)
 int cfs_super_verify(const void *block, struct cfs_mac *mac)
 {
     const struct cfs_super *sb = block;
-    if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || sb->version < CFS_VERSION_MIN || sb->version > CFS_VERSION)
+    if (!cfs_super_ident_ok(sb))
         return -EIO;
     struct cfs_mac m;
     int rc = cfs_keytab_mac(sb->uuid, &m);
@@ -175,7 +175,7 @@ int cfs_super_verify(const void *block, struct cfs_mac *mac)
             return -ENOKEY;
         rc = cfs_mac_ok(&m, CFS_MAC_SUPER, block, offsetof(struct cfs_super, crc)) ? 0 : -EIO;
     } else {
-        rc = rc == 0 ? -EIO : cfs_block_crc(block, offsetof(struct cfs_super, crc)) == sb->crc ? 0 : -EIO;
+        rc = rc == 0 ? -EIO : cfs_super_crc_ok(block) ? 0 : -EIO;
         m.on = false;
     }
     if (rc == 0 && mac != NULL)
@@ -962,7 +962,7 @@ int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uin
         return rc;
     memcpy(out, inode_slot(ib, ino), sizeof(*out));
     cfs_buf_put(fs, ib);
-    if (out->ino != ino || out->nlink == 0)
+    if (!cfs_inode_slot_ok(out, ino))
         return -ENOENT;
     return 0;
 }
@@ -999,7 +999,7 @@ int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
         return rc;
     memcpy(out, inode_slot(ib, ino), sizeof(*out));
     cfs_buf_put(fs, ib);
-    if (out->ino != ino || out->nlink == 0)
+    if (!cfs_inode_slot_ok(out, ino))
         return -ENOENT;   /* free slot */
     return 0;
 }
@@ -1273,7 +1273,7 @@ static int freelog_replay(struct cfs *fs)
         const struct cfs_dead_block *d = (const struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE);
         uint64_t next = d->next;
         uint64_t count = d->count;
-        if (count > CFS_FREELOG_PER_BLOCK) {
+        if (!cfs_freelog_count_ok(count)) {
             /*
              * The block's checksum is good and its contents are not: a
              * count past the payload is a record this kernel cannot
@@ -1675,7 +1675,7 @@ static int orphan_replay(struct cfs *fs)
         const struct cfs_dead_block *d = (const struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE);
         uint64_t next = d->next;
         uint64_t count = d->count;
-        if (count > CFS_ORPHANS_PER_BLOCK) {
+        if (!cfs_orphan_count_ok(count)) {
             kerror("cosmofs: orphan record at %llu names %llu inodes, more than the %u a block holds; "
                    "refusing the mount",
                    (unsigned long long)at, (unsigned long long)count, (unsigned)CFS_ORPHANS_PER_BLOCK);
@@ -3170,20 +3170,12 @@ static int super_read(struct cfs *fs, unsigned slot, struct cfs_super *out)
          * metadata block carries its own DVA (mhdr_check). Before
          * version 4 there is one member and the old exact checks hold. */
         uint64_t dev0 = fs->pool->m[0].nblocks;
-        bool ptrs_ok;
-        if (sb->version >= 4)
-            ptrs_ok = sb->total_blocks <= CFS_MAX_BLOCKS * (uint64_t)CFS_MAX_MEMBERS &&
-                      CFS_DVA_VDEV(sb->imap_root) < CFS_MAX_MEMBERS && CFS_DVA_BLK(sb->imap_root) < CFS_MAX_BLOCKS &&
-                      CFS_DVA_VDEV(sb->members) < CFS_MAX_MEMBERS && CFS_DVA_BLK(sb->members) < CFS_MAX_BLOCKS;
-        else
-            ptrs_ok = sb->total_blocks == dev0 && sb->imap_root < dev0 && sb->alloc_root < dev0;
         /* The seal last: a slot that is not a superblock at all is -EIO
          * whether or not a key is loaded, and only one that is a
          * version-14 encrypted pool's says -ENOKEY (design.md, "The key
          * handle"). Its MAC key comes with it. */
         struct cfs_mac mac;
-        if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || !version_ok || sb->block_size != CFS_BLOCK ||
-            sb->total_blocks == 0 || sb->generation == 0 || !ptrs_ok)
+        if (!cfs_super_shape_ok(sb, dev0))   /* cfsmount: magic, version, geometry, pointers' shape */
             rc = -EIO;
         else
             rc = cfs_super_verify(block, &mac);
@@ -3581,10 +3573,7 @@ int cfs_super_peek(struct spool *p, struct cfs_super *out)
         if (pool_read(p, slot, block) != 0)
             continue;
         const struct cfs_super *sb = (const struct cfs_super *)block;
-        if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || sb->version < CFS_VERSION_MIN || sb->version > CFS_VERSION ||
-            sb->generation == 0)
-            continue;
-        if (!cfs_super_is_mac(sb) && cfs_block_crc(block, offsetof(struct cfs_super, crc)) != sb->crc)
+        if (!cfs_super_peek_ok(block))
             continue;
         if (rc == 0 && sb->generation <= out->generation)
             continue;

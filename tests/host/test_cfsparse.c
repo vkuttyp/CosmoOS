@@ -314,8 +314,102 @@ static int bench(void)
     return 0;
 }
 
+/* --- batch 2: the records a mount reads first --------------------------- */
+
+#define MOUNT_ROUNDS 50000
+#define MOUNT_SEED 0xC05F5FA2026B0002ull
+/* The digest of the C decoders (cfsmount.c, 2026-11-01). */
+#define MOUNT_DIGEST 0x5d91f9b738036dfeull
+
+static uint64_t edge(void)
+{
+    static const uint64_t e[] = { 0, 1, 2, 3, 63, 64, 65, 4095, 4096, 4097, 32512, 32513, 0xff00, 0xffffffffull,
+                                  CFS_MAX_BLOCKS - 1, CFS_MAX_BLOCKS, CFS_MAX_BLOCKS + 1,
+                                  CFS_MAX_BLOCKS * (uint64_t)CFS_MAX_MEMBERS, 0xffffffffffffffffull };
+    return next() % 2 ? e[next() % (sizeof(e) / sizeof(e[0]))] : next() % 100000;
+}
+
+/* The test's own CRC of a superblock or label (the field at `off`), as own_crc does a header's. */
+static uint32_t own_crc_at(const uint8_t *block, size_t off)
+{
+    static const uint8_t zero4[4] = { 0 };
+    uint32_t c = crc32c(block, off);
+    c = crc32c_update(c, zero4, 4);
+    return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
+}
+
+static _Alignas(8) uint8_t g_sb[CFS_BLOCK], g_lb[CFS_BLOCK];
+
+static void run_mount(void)
+{
+    char line[512];
+    int n;
+    /* A superblock. */
+    memset(g_sb, 0, CFS_BLOCK);
+    struct cfs_super *sb = (struct cfs_super *)g_sb;
+    memcpy(sb->magic, next() % 8 ? CFS_MAGIC : "COSMOFS2", 8);
+    sb->version = (uint32_t)(next() % 8 ? 1 + next() % 16 : next());
+    sb->block_size = next() % 8 ? CFS_BLOCK : (uint32_t)edge();
+    sb->total_blocks = edge();
+    sb->generation = next() % 8 ? 1 + next() % 100 : 0;
+    sb->imap_root = next() % 2 ? CFS_DVA(next() % 300, edge()) : edge();
+    sb->alloc_root = edge();
+    sb->members = next() % 2 ? CFS_DVA(next() % 300, edge()) : edge();
+    sb->key_root = next() % 4 ? 0 : 1 + next() % 100;
+    sb->crc = own_crc_at(g_sb, offsetof(struct cfs_super, crc));
+    if (next() % 6 == 0)
+        g_sb[next() % CFS_BLOCK] ^= (uint8_t)(1u << (next() % 8));
+    uint64_t dev0 = next() % 2 ? sb->total_blocks : edge();
+    n = snprintf(line, sizeof(line), "s%d%d%d%d", cfs_super_ident_ok(sb), cfs_super_shape_ok(sb, dev0),
+                 cfs_super_crc_ok(g_sb), cfs_super_peek_ok(g_sb));
+    emit(line, n);
+    /* A label. */
+    memset(g_lb, 0, CFS_BLOCK);
+    struct cfs_label *l = (struct cfs_label *)g_lb;
+    memcpy(l->magic, next() % 8 ? CFS_LABEL_MAGIC : "COSMOMBX", 8);
+    l->index = (uint32_t)(next() % 2 ? next() % 300 : next());
+    l->copy = (uint32_t)(next() % 2 ? next() % 6 : next());
+    l->nblocks = edge();
+    l->generation = next();
+    l->crc = own_crc_at(g_lb, offsetof(struct cfs_label, crc));
+    if (next() % 6 == 0)
+        g_lb[next() % CFS_BLOCK] ^= (uint8_t)(1u << (next() % 8));
+    n = snprintf(line, sizeof(line), "l%08x %d%d", cfs_label_crc(g_lb), cfs_label_crc_ok(g_lb), cfs_label_shape_ok(g_lb));
+    emit(line, n);
+    /* A member of the table, its index and the table's count. */
+    struct cfs_member m;
+    memset(&m, 0, sizeof(m));
+    m.nblocks = edge();
+    m.first_usable = next() % 2 ? 1 + next() % 3 : edge();
+    m.alloc_root = next() % 2 ? CFS_DVA(next() % 6, edge()) : edge();
+    m.free_blocks = next() % 2 ? m.nblocks - next() % 4 : edge();
+    m.copies = (uint32_t)(next() % 2 ? next() % 6 : next());
+    unsigned v = (unsigned)(next() % 4), nmem = (unsigned)(1 + next() % 5);
+    uint64_t count = edge();
+    struct cfs_inode in;
+    memset(&in, 0, sizeof(in));
+    uint64_t ino = 1 + next() % 100;
+    in.ino = next() % 4 ? ino : edge();
+    in.nlink = (uint32_t)(next() % 4 ? 1 + next() % 3 : 0);
+    n = snprintf(line, sizeof(line), "m%d c%d%d%d i%d", cfs_member_sane(&m, v, nmem), cfs_members_count_ok(count),
+                 cfs_freelog_count_ok(count), cfs_orphan_count_ok(count), cfs_inode_slot_ok(&in, ino));
+    emit(line, n);
+}
+
+static void test_mount_digest(void)
+{
+    g_dump = getenv("CFSPARSE_DUMP") != NULL;
+    g_digest = 0xcbf29ce484222325ull;
+    g_rng = MOUNT_SEED;
+    for (unsigned r = 0; r < MOUNT_ROUNDS; r++)
+        run_mount();
+    printf("  cfsparse mount digest 0x%016llx over %u rounds\n", (unsigned long long)g_digest, MOUNT_ROUNDS);
+    EXPECT(g_digest == MOUNT_DIGEST);
+}
+
 static const struct host_test tests[] = {
     { "recorded digest", test_recorded_digest },
+    { "mount digest", test_mount_digest },
 };
 
 int main(void)

@@ -41,14 +41,6 @@ uint64_t cfs_lin_dva(const struct cfs *fs, uint64_t lin)
 
 /* --- labels -------------------------------------------------------------- */
 
-static uint32_t label_crc(const uint8_t *block)
-{
-    static const uint8_t zero4[4] = { 0 };
-    size_t off = offsetof(struct cfs_label, crc);
-    uint32_t c = crc32c(block, off);
-    c = crc32c_update(c, zero4, 4);
-    return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
-}
 
 /* A label's seal: its CRC32C, or on a version-14 encrypted pool the tag
  * in the CRC and the word after it (design.md, "The metadata MAC"). */
@@ -59,15 +51,14 @@ static void label_seal(const struct cfs_mac *mac, uint8_t *block)
         cfs_mac_seal(mac, CFS_MAC_LABEL, block, offsetof(struct cfs_label, crc));
         return;
     }
-    l->crc = label_crc(block);
+    l->crc = cfs_label_crc(block);
 }
 
 static bool label_sealed(const struct cfs_mac *mac, const uint8_t *block)
 {
-    const struct cfs_label *l = (const struct cfs_label *)block;
     if (mac != NULL && mac->on)
         return cfs_mac_ok(mac, CFS_MAC_LABEL, block, offsetof(struct cfs_label, crc));
-    return label_crc(block) == l->crc;
+    return cfs_label_crc_ok(block);
 }
 
 int cfs_label_write(struct spool *pool, const struct cfs_mac *mac, unsigned vdev, unsigned copy, uint64_t generation,
@@ -168,8 +159,7 @@ static int label_read(const struct cfs_mac *mac, struct blkdev *bd, struct cfs_l
     rc = pool_read(p, CFS_DVA(0, 0), block);
     if (rc == 0) {
         const struct cfs_label *l = (const struct cfs_label *)block;
-        if (memcmp(l->magic, CFS_LABEL_MAGIC, sizeof(l->magic)) != 0 || !label_sealed(mac, block) ||
-            l->index >= CFS_MAX_MEMBERS || l->copy >= CFS_MAX_COPIES)
+        if (!cfs_label_shape_ok(block) || !label_sealed(mac, block))
             rc = -ENOENT;
         else
             *out = *l;
@@ -748,30 +738,6 @@ int cfs_copystate_fill(struct cfs *fs)
  * believed -- the formatter's limits are not evidence about a disk this
  * kernel did not write.
  */
-static bool member_sane(const struct cfs_member *m, unsigned v, unsigned nmembers)
-{
-    if (m->nblocks < CFS_MIN_BLOCKS || m->nblocks > CFS_MAX_BLOCKS)
-        return false;
-    /* One allocation index holds CFS_PTRS_PER_BLOCK chunk pointers, so a
-     * member that claims more chunks than that would be read past the
-     * end of its index block. */
-    uint64_t chunks = (m->nblocks + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP;
-    if (chunks > CFS_PTRS_PER_BLOCK)
-        return false;
-    uint64_t first = v == 0 ? 2 : 1;   /* the superblocks, or the label */
-    if (m->first_usable < first || m->first_usable >= m->nblocks)
-        return false;
-    /* A member's allocation index is normally on that member (that is
-     * what the copy-on-write hint arranges), but a member with no free
-     * block at all leaves its replacement elsewhere rather than wedging
-     * the filesystem, so what is checked here is only that the address
-     * could name a block of this pool. */
-    if (CFS_DVA_VDEV(m->alloc_root) >= nmembers)
-        return false;
-    if (m->copies > CFS_MAX_COPIES)
-        return false;
-    return m->free_blocks <= m->nblocks;
-}
 
 /* Lay the members out in the linear space the bitmap is indexed by:
  * each member starts at a whole chunk, so no chunk straddles two. */
@@ -825,7 +791,7 @@ int cfs_members_load(struct cfs *fs)
     }
     const struct cfs_member_block *mb = (const struct cfs_member_block *)(block + CFS_MHDR_SIZE);
     uint64_t count = mb->count;
-    if (count == 0 || count > CFS_MEMBERS_PER_BLOCK || count > CFS_MAX_MEMBERS) {
+    if (!cfs_members_count_ok(count)) {
         kfree(block);
         return -EIO;
     }
@@ -838,7 +804,7 @@ int cfs_members_load(struct cfs *fs)
     for (unsigned v = 0; v < fs->nmembers; v++) {
         const struct cfs_member *src = &mb->m[v];
         struct cfs_memstate *m = &fs->mem[v];
-        if (!member_sane(src, v, fs->nmembers)) {
+        if (!cfs_member_sane(src, v, fs->nmembers)) {
             kerror("cosmofs: member %u of the table is not a member this format can describe", v);
             rc = -EIO;
             break;

@@ -30,7 +30,7 @@ HOST_CRYPTO_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security
 	kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_crypto.c
 HOST_RELSIG_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c userland/system/relsig.c tests/host/test_relsig.c
 HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_modelf.c
-HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cosmofs.c
+HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel-services/filesystem/cosmofs/cfsmount.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cosmofs.c
 HOST_LZ4_SRCS := $(HOST_COMMON_SRCS) kernel/core/lz4.c tests/host/test_lz4.c
 HOST_CHACHA_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c tests/host/test_chacha20.c
 HOST_KEYSLOT_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c kernel/security/blake2b.c userland/lib/argon2.c \
@@ -61,7 +61,7 @@ HOST_FAIR_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/fair.c kernel/ceesafe/cee
 HOST_UPBE_SRCS := $(HOST_COMMON_SRCS) userland/system/upgrade_be.c tests/host/test_upgrade_be.c
 HOST_NETPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/netparse.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_netparse.c
 HOST_ELF_SRCS := $(HOST_COMMON_SRCS) kernel/process/elfparse.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_elf.c
-HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c
+HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel-services/filesystem/cosmofs/cfsmount.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c
 HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/object_floor.c kernel/object/handle.c kernel/object/handle_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_handles.c
 HOST_PCI_BAR_SRCS := $(HOST_COMMON_SRCS) tests/host/test_pci_bar.c
 HOST_JITTER_SRCS := $(HOST_COMMON_SRCS) kernel/core/jitter.c tests/host/test_jitter.c
