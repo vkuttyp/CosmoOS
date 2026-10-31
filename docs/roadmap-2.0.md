@@ -360,9 +360,24 @@ module ABI and the device API as CeeSafe interfaces, a template under
 proving driver is virtio-rng (`drivers/virtio/virtio_rng.c`), small and
 present on every CI boot.
 
-- [ ] **Acceptance:** `virtio_rng.ko` from CeeSafe passes `test-modcycle`
+- [x] **Acceptance:** `virtio_rng.ko` from CeeSafe passes `test-modcycle`
   (1,000 cycles, both architectures) and the randomness self-tests, with
   the C driver deleted.
+  Met 2026-10-31, locally, with ceesafec 0.2.0: `drivers/virtio/virtio_rng.cee`
+  replaces the C, over the device API and floor in `drivers/ceesafe/`
+  (`README.md` there), with the template in `drivers/ceesafe-template/`;
+  `scripts/cee-gen.py`'s `MODULES` generates the module and its
+  `COSMO_MODULE` entry. `module.cycle=` now takes over a module the boot
+  loaded, so `make test-modcycle MODCYCLE_ENTRY=modules/virtio_rng.ko`
+  passed on x86-64 (1,000 cycles in 30.4 s) and AArch64 (32.5 s), every
+  count back where it started; `test-entropy` passed on both, its
+  devices-only boot seeded by the CeeSafe driver alone (`devices 256`);
+  `VRNG-RESET-REPOST` passes in every self-test boot, and
+  `tools/virtio-rng-repost-probe.py` passes both ways on x86-64 (removing
+  the stopping check makes the self-test fail). That devices-only boot
+  caught the one porting bug: a null virtqueue cookie, which `virtq_add`
+  refuses, so nothing was posted while every other source seeded the
+  pool.
 
 Size: about 0.7x.
 
