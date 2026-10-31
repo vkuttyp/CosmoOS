@@ -318,7 +318,7 @@ static int bench(void)
 
 #define MOUNT_ROUNDS 50000
 #define MOUNT_SEED 0xC05F5FA2026B0002ull
-/* The digest of the C decoders (cfsmount.c, 2026-11-01). */
+/* The digest of the C decoders (cfsmount.c, 2026-11-01), which cfsparse.cee replaced. */
 #define MOUNT_DIGEST 0x5d91f9b738036dfeull
 
 static uint64_t edge(void)
@@ -338,15 +338,21 @@ static uint32_t own_crc_at(const uint8_t *block, size_t off)
     return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
 }
 
-static _Alignas(8) uint8_t g_sb[CFS_BLOCK], g_lb[CFS_BLOCK];
+/* One mount round's inputs, made before any is decoded so that the benchmark times the decoders alone. */
+struct mround {
+    _Alignas(8) uint8_t sb[CFS_BLOCK];
+    _Alignas(8) uint8_t lb[CFS_BLOCK];
+    struct cfs_member m;
+    struct cfs_inode in;
+    uint64_t dev0, count, ino;
+    unsigned v, nmem;
+};
 
-static void run_mount(void)
+static void gen_mount(struct mround *r)
 {
-    char line[512];
-    int n;
     /* A superblock. */
-    memset(g_sb, 0, CFS_BLOCK);
-    struct cfs_super *sb = (struct cfs_super *)g_sb;
+    memset(r->sb, 0, CFS_BLOCK);
+    struct cfs_super *sb = (struct cfs_super *)r->sb;
     memcpy(sb->magic, next() % 8 ? CFS_MAGIC : "COSMOFS2", 8);
     sb->version = (uint32_t)(next() % 8 ? 1 + next() % 16 : next());
     sb->block_size = next() % 8 ? CFS_BLOCK : (uint32_t)edge();
@@ -356,44 +362,104 @@ static void run_mount(void)
     sb->alloc_root = edge();
     sb->members = next() % 2 ? CFS_DVA(next() % 300, edge()) : edge();
     sb->key_root = next() % 4 ? 0 : 1 + next() % 100;
-    sb->crc = own_crc_at(g_sb, offsetof(struct cfs_super, crc));
+    sb->crc = own_crc_at(r->sb, offsetof(struct cfs_super, crc));
     if (next() % 6 == 0)
-        g_sb[next() % CFS_BLOCK] ^= (uint8_t)(1u << (next() % 8));
-    uint64_t dev0 = next() % 2 ? sb->total_blocks : edge();
-    n = snprintf(line, sizeof(line), "s%d%d%d%d", cfs_super_ident_ok(sb), cfs_super_shape_ok(sb, dev0),
-                 cfs_super_crc_ok(g_sb), cfs_super_peek_ok(g_sb));
-    emit(line, n);
+        r->sb[next() % CFS_BLOCK] ^= (uint8_t)(1u << (next() % 8));
+    r->dev0 = next() % 2 ? sb->total_blocks : edge();
     /* A label. */
-    memset(g_lb, 0, CFS_BLOCK);
-    struct cfs_label *l = (struct cfs_label *)g_lb;
+    memset(r->lb, 0, CFS_BLOCK);
+    struct cfs_label *l = (struct cfs_label *)r->lb;
     memcpy(l->magic, next() % 8 ? CFS_LABEL_MAGIC : "COSMOMBX", 8);
     l->index = (uint32_t)(next() % 2 ? next() % 300 : next());
     l->copy = (uint32_t)(next() % 2 ? next() % 6 : next());
     l->nblocks = edge();
     l->generation = next();
-    l->crc = own_crc_at(g_lb, offsetof(struct cfs_label, crc));
+    l->crc = own_crc_at(r->lb, offsetof(struct cfs_label, crc));
     if (next() % 6 == 0)
-        g_lb[next() % CFS_BLOCK] ^= (uint8_t)(1u << (next() % 8));
-    n = snprintf(line, sizeof(line), "l%08x %d%d", cfs_label_crc(g_lb), cfs_label_crc_ok(g_lb), cfs_label_shape_ok(g_lb));
-    emit(line, n);
+        r->lb[next() % CFS_BLOCK] ^= (uint8_t)(1u << (next() % 8));
     /* A member of the table, its index and the table's count. */
-    struct cfs_member m;
-    memset(&m, 0, sizeof(m));
-    m.nblocks = edge();
-    m.first_usable = next() % 2 ? 1 + next() % 3 : edge();
-    m.alloc_root = next() % 2 ? CFS_DVA(next() % 6, edge()) : edge();
-    m.free_blocks = next() % 2 ? m.nblocks - next() % 4 : edge();
-    m.copies = (uint32_t)(next() % 2 ? next() % 6 : next());
-    unsigned v = (unsigned)(next() % 4), nmem = (unsigned)(1 + next() % 5);
-    uint64_t count = edge();
-    struct cfs_inode in;
-    memset(&in, 0, sizeof(in));
-    uint64_t ino = 1 + next() % 100;
-    in.ino = next() % 4 ? ino : edge();
-    in.nlink = (uint32_t)(next() % 4 ? 1 + next() % 3 : 0);
-    n = snprintf(line, sizeof(line), "m%d c%d%d%d i%d", cfs_member_sane(&m, v, nmem), cfs_members_count_ok(count),
-                 cfs_freelog_count_ok(count), cfs_orphan_count_ok(count), cfs_inode_slot_ok(&in, ino));
+    struct cfs_member *m = &r->m;
+    memset(m, 0, sizeof(*m));
+    m->nblocks = edge();
+    m->first_usable = next() % 2 ? 1 + next() % 3 : edge();
+    m->alloc_root = next() % 2 ? CFS_DVA(next() % 6, edge()) : edge();
+    m->free_blocks = next() % 2 ? m->nblocks - next() % 4 : edge();
+    m->copies = (uint32_t)(next() % 2 ? next() % 6 : next());
+    r->v = (unsigned)(next() % 4);
+    r->nmem = (unsigned)(1 + next() % 5);
+    r->count = edge();
+    /* An inode slot. */
+    memset(&r->in, 0, sizeof(r->in));
+    r->ino = 1 + next() % 100;
+    r->in.ino = next() % 4 ? r->ino : edge();
+    r->in.nlink = (uint32_t)(next() % 4 ? 1 + next() % 3 : 0);
+}
+
+static void decode_mount(const struct mround *r)
+{
+    char line[512];
+    int n;
+    const struct cfs_super *sb = (const struct cfs_super *)r->sb;
+    n = snprintf(line, sizeof(line), "s%d%d%d%d", cfs_super_ident_ok(sb), cfs_super_shape_ok(sb, r->dev0),
+                 cfs_super_crc_ok(r->sb), cfs_super_peek_ok(r->sb));
     emit(line, n);
+    n = snprintf(line, sizeof(line), "l%08x %d%d", cfs_label_crc(r->lb), cfs_label_crc_ok(r->lb),
+                 cfs_label_shape_ok(r->lb));
+    emit(line, n);
+    n = snprintf(line, sizeof(line), "m%d c%d%d%d i%d", cfs_member_sane(&r->m, r->v, r->nmem),
+                 cfs_members_count_ok(r->count), cfs_freelog_count_ok(r->count), cfs_orphan_count_ok(r->count),
+                 cfs_inode_slot_ok(&r->in, r->ino));
+    emit(line, n);
+}
+
+/* The checks alone, without the block CRCs (the same crc32c in both builds): what the port changed. */
+static unsigned check_mount(const struct mround *r)
+{
+    const struct cfs_super *sb = (const struct cfs_super *)r->sb;
+    return (unsigned)cfs_super_ident_ok(sb) + cfs_super_shape_ok(sb, r->dev0) + cfs_label_shape_ok(r->lb) +
+           cfs_member_sane(&r->m, r->v, r->nmem) + cfs_members_count_ok(r->count) +
+           cfs_freelog_count_ok(r->count) + cfs_orphan_count_ok(r->count) + cfs_inode_slot_ok(&r->in, r->ino);
+}
+
+static void run_mount(void)
+{
+    static struct mround r;
+    gen_mount(&r);
+    decode_mount(&r);
+}
+
+/* CFSPARSE_BENCH=mount: batch 2's checks alone, then with the CRCs, on 2,000 rounds made beforehand (best of 15). */
+static int bench_mount(void)
+{
+    enum { N = 2000 };
+    struct mround *rs = malloc(sizeof(*rs) * N);
+    if (rs == NULL)
+        return 1;
+    g_rng = MOUNT_SEED;
+    for (unsigned i = 0; i < N; i++)
+        gen_mount(&rs[i]);
+    for (int crc = 0; crc < 2; crc++) {
+        double best = 1e30;
+        for (int run = 0; run < 15; run++) {
+            struct timespec t0, t1;
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            uint64_t acc = 0;
+            for (unsigned i = 0; i < N; i++) {
+                acc += check_mount(&rs[i]);
+                if (crc)
+                    acc += cfs_super_crc_ok(rs[i].sb) + cfs_super_peek_ok(rs[i].sb) + cfs_label_crc_ok(rs[i].lb);
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            g_sink += acc;
+            double ns = (double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec);
+            if (ns < best)
+                best = ns;
+        }
+        printf("%s %.2f ns  ", crc ? "with crc" : "checks", best / N);
+    }
+    printf("per round (best of 15 runs of %u)\n", N);
+    free(rs);
+    return 0;
 }
 
 static void test_mount_digest(void)
@@ -414,7 +480,8 @@ static const struct host_test tests[] = {
 
 int main(void)
 {
-    if (getenv("CFSPARSE_BENCH") != NULL)
-        return bench();
+    const char *b = getenv("CFSPARSE_BENCH");
+    if (b != NULL)
+        return strcmp(b, "mount") == 0 ? bench_mount() : bench();
     return harness_run(tests, sizeof(tests) / sizeof(tests[0]));
 }

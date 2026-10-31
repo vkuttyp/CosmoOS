@@ -574,7 +574,7 @@ uint32_t cfs_mhdr_decode(const void *block, uint64_t blkno, uint32_t kind, bool 
 bool cfs_extent_valid(const struct cfs *fs, const struct cfs_extent *e);
 bool cfs_direct_valid(const struct cfs *fs, const struct cfs_inode *in);
 bool cfs_extents_valid(const struct cfs *fs, const struct cfs_extent *ext, unsigned n);
-/* The records a mount reads first (cfsmount; roadmap 2.0 SA5, batch 2). */
+/* The records a mount reads first (cfsparse; roadmap 2.0 SA5, batch 2). */
 bool cfs_super_ident_ok(const struct cfs_super *sb);
 bool cfs_super_shape_ok(const struct cfs_super *sb, uint64_t dev0);
 bool cfs_super_crc_ok(const void *block);

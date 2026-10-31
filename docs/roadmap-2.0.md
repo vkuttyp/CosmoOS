@@ -463,9 +463,18 @@ their CRC32C, directory entries, block addresses and extents, the checks
 on the paths a crafted image reaches first (every metadata read, every
 lookup and readdir, every data map). Digest `0x548e0e13fea79b80` over
 20,000 rounds, the C's; 1.03x the C on arm64, 1.02x on x86-64 (Rosetta),
-after names were copied and compared a segment at a time. Still C, for
-the next batches: the superblock and member checks, the free and orphan
-records' counts, snapshot and rollback records, keyslots.
+after names were copied and compared a segment at a time.
+cosmofs metadata, batch 2 (2026-11-01): the records a mount reads first,
+added to `cfsparse.cee` -- the superblock's identity, shape, CRC and
+peek check, a member label's CRC and identity, the member table's count
+and each member, the free and orphan records' counts, an inode slot's
+identity (the C step was `cfsmount.c`, now gone). Digest
+`0x5d91f9b738036dfe` over 50,000 rounds, the C's. `CFSPARSE_BENCH=mount`:
+the field checks 0.88x the C on arm64 and 0.85x on x86-64 (Rosetta),
+read as imported struct fields; with the block CRCs, the same C crc32c
+in both, 1.00x. The copy-state check stays C: it compares a record with
+the live device's region size. Still C, for batch 3: snapshot and
+rollback records, keyslots.
 
 Size: about 3.0x.
 

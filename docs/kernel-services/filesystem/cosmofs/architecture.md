@@ -16,7 +16,8 @@ state"), 31 (checksums), 32 (snapshots as immutable roots).
         cosmofs_core.c   metadata buffer cache, copy-on-write, bitmap allocator, inode map,
                          commit, format, mount/unmount, stats, the crash test hook
         cfsparse.cee     the decoders of on-disk metadata, in CeeSafe (roadmap 2.0 SA5): headers and
-                         their CRC, directory entries, block addresses, extents
+                         their CRC, directory entries, block addresses, extents; the superblock,
+                         member labels and table, free/orphan record counts, inode slots
         cosmofs_format.h the on-disk layout (host-testable, no kernel dependencies)
         cosmofs_internal.h shared in-memory state
         │

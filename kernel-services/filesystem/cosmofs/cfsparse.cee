@@ -1,11 +1,13 @@
-// cfsparse.cee - cosmofs's decoders of on-disk metadata (roadmap 2.0 SA5, the cosmofs family, batch 1): metadata block
-// headers and their CRC, directory entries, block addresses, and extents -- every check made on bytes read from disk
-// before they are trusted. They read the pool's geometry (fs->mem, fs->nmembers) and nothing else of its state; the
+// cfsparse.cee - cosmofs's decoders of on-disk metadata (roadmap 2.0 SA5, the cosmofs family): metadata block headers
+// and their CRC, directory entries, block addresses, and extents (batch 1); the records a mount reads first -- the
+// superblock, a member label, the member table, the free and orphan records' counts, an inode slot (batch 2) -- every
+// check made on bytes read from disk before they are trusted. They read the pool's geometry (fs->mem, fs->nmembers) and nothing else of its state; the
 // version-14 MAC, which needs the pool's key, stays with its caller (cosmofs_core.c's cfs_mhdr_fault_of).
 //
 // A block is a slice of exactly CFS_BLOCK bytes, so no decoder can read past it. The on-disk integers are the
 // structures' own, little-endian on both CosmoOS targets (cosmofs_format.h). tests/host/test_cfsparse.c holds these to
-// the C they replaced: the same digest over 20,000 rounds.
+// the C they replaced: the same digests, over 20,000 rounds (batch 1) and 50,000 (batch 2). The copy-state check stays
+// C: it compares a record with the live device's region size.
 
 @header("kernel/crc32c.h", "cosmofs_internal.h")
 extern "C" {
@@ -28,7 +30,34 @@ extern "C" {
         lblk: u32;
     }
     struct cfs_inode {
+        nlink: u32;
+        ino: u64;
         direct: [cfs_extent; 10];
+    }
+    struct cfs_member {
+        nblocks: u64;
+        first_usable: u64;
+        alloc_root: u64;
+        free_blocks: u64;
+        copies: u32;
+    }
+    struct cfs_super {
+        magic: [u8; 8];
+        version: u32;
+        block_size: u32;
+        total_blocks: u64;
+        generation: u64;
+        imap_root: u64;
+        alloc_root: u64;
+        members: u64;
+        key_root: u64;
+        crc: u32;
+    }
+    struct cfs_label {
+        magic: [u8; 8];
+        index: u32;
+        copy: u32;
+        crc: u32;
     }
     struct cfs_dirent;
 }
@@ -257,6 +286,85 @@ struct Seg {
     count: u32;
 }
 
+// --- the mount's first records (batch 2) -----------------------------------------------------------------------------
+
+const SUPER: usize = 168;                    // sizeof(struct cfs_super)
+const SUPER_CRC_AT: usize = 160;             // offsetof(struct cfs_super, crc)
+const CFS_MAGIC: u64 = 0x3153464f4d534f43;   // "COSMOFS1"
+const VERSION_MIN: u32 = 2;                  // CFS_VERSION_MIN
+const VERSION: u32 = 15;                     // CFS_VERSION
+const MAX_MEMBERS: u64 = 255;                // CFS_MAX_MEMBERS
+const MAX_BLOCKS: u64 = 16516096;            // CFS_MAX_BLOCKS
+const MIN_BLOCKS: u64 = 64;                  // CFS_MIN_BLOCKS
+const BITS_PER_BITMAP: u64 = 32512;          // CFS_BITS_PER_BITMAP
+const PTRS_PER_BLOCK: u64 = 508;             // CFS_PTRS_PER_BLOCK
+const MAX_COPIES: u32 = 4;                   // CFS_MAX_COPIES
+const MEMBERS_PER_BLOCK: u64 = 63;           // CFS_MEMBERS_PER_BLOCK
+const DEAD_PER_BLOCK: u64 = 506;             // CFS_DEAD_PER_BLOCK, CFS_FREELOG_PER_BLOCK, CFS_ORPHANS_PER_BLOCK
+const LABEL_MAGIC: u64 = 0x52424d4f4d534f43; // "COSMOMBR"
+const LABEL_CRC_AT: usize = 72;              // offsetof(struct cfs_label, crc)
+
+fn versionOk(v: u32) -> bool => v >= VERSION_MIN && v <= VERSION;
+
+/// An 8-byte magic as the little-endian word it is compared as.
+fn magic64(m: borrow [u8; 8]) -> u64 =>
+    m[0] as u64 | (m[1] as u64) << 8 | (m[2] as u64) << 16 | (m[3] as u64) << 24 | (m[4] as u64) << 32 |
+        (m[5] as u64) << 40 | (m[6] as u64) << 48 | (m[7] as u64) << 56;
+
+/// Magic, and a version this kernel reads.
+fn superIdentOk(sb: borrow cfs_super) -> bool => magic64(borrow sb.magic) == CFS_MAGIC && versionOk(sb.version);
+
+/// Whether a version-4 pointer has a DVA's shape: a member the pool can have, a block a member can have.
+fn dvaShapeOk(d: u64) -> bool => (d >> DVA_VDEV_SHIFT) < MAX_MEMBERS && (d & DVA_BLK_MASK) < MAX_BLOCKS;
+
+/// The mount's own check of a superblock slot, before its seal: identity, block size, a size and a generation, and
+/// its pointers' shape. The member table is not read yet -- this very block names it -- so a pointer can only be
+/// checked for shape; before version 4 there is one member, `dev0` blocks, and the old exact checks hold.
+fn superShapeOk(sb: borrow cfs_super, dev0: u64) -> bool {
+    if (!superIdentOk(sb) || sb.block_size as usize != BLOCK || sb.total_blocks == 0 || sb.generation == 0) {
+        return false;
+    }
+    if (sb.version >= 4) {
+        return sb.total_blocks <= MAX_BLOCKS * MAX_MEMBERS && dvaShapeOk(sb.imap_root) && dvaShapeOk(sb.members);
+    }
+    return sb.total_blocks == dev0 && sb.imap_root < dev0 && sb.alloc_root < dev0;
+}
+
+/// cfs_super_peek's check: identity, a generation, and the CRC unless a MAC (which it does not verify) seals it.
+fn superPeekOk(sb: borrow cfs_super, b: Slice<u8>) -> bool {
+    if (!superIdentOk(sb) || sb.generation == 0) {
+        return false;
+    }
+    let mac = sb.version >= 14 && sb.key_root != 0; // cfs_super_is_mac
+    return mac || blockCrc(b, SUPER_CRC_AT) == sb.crc;
+}
+
+/// A label's identity: magic, and a member index and copy in range.
+fn labelShapeOk(l: borrow cfs_label) -> bool =>
+    magic64(borrow l.magic) == LABEL_MAGIC && (l.index as u64) < MAX_MEMBERS && l.copy < MAX_COPIES;
+
+/// A member table entry, for member `v` of `nmembers`.
+fn memberSane(m: borrow cfs_member, v: u32, nmembers: u32) -> bool {
+    if (m.nblocks < MIN_BLOCKS || m.nblocks > MAX_BLOCKS) {
+        return false;
+    }
+    // One allocation index holds PTRS_PER_BLOCK chunk pointers, so a member that claims more chunks than that would be
+    // read past the end of its index block.
+    if ((m.nblocks + BITS_PER_BITMAP - 1) / BITS_PER_BITMAP > PTRS_PER_BLOCK) {
+        return false;
+    }
+    let first: u64 = if (v == 0) 2 else 1; // the superblocks, or the label
+    if (m.first_usable < first || m.first_usable >= m.nblocks) {
+        return false;
+    }
+    // A member's allocation index is normally on that member, but a member with no free block leaves its replacement
+    // elsewhere rather than wedging the filesystem: only that the address could name a block of this pool is checked.
+    if ((m.alloc_root >> DVA_VDEV_SHIFT) >= nmembers as u64) {
+        return false;
+    }
+    return m.copies <= MAX_COPIES && m.free_blocks <= m.nblocks;
+}
+
 // --- the exports -----------------------------------------------------------------------------------------------------
 
 /// Safety: `block` points to CFS_BLOCK readable bytes.
@@ -353,4 +461,62 @@ unsafe fn direntNameEqC(blk: *cfs_dirent, s: u32, name: *CChar, len: u32) -> i32
         n += g.count;
     }
     return 1;
+}
+
+/// Safety: `sb` points to a readable struct cfs_super.
+@export("cfs_super_ident_ok")
+unsafe fn superIdentOkC(sb: *cfs_super) -> bool => superIdentOk(Ptr.toBorrow(sb));
+
+/// Safety: as cfs_super_ident_ok.
+@export("cfs_super_shape_ok")
+unsafe fn superShapeOkC(sb: *cfs_super, dev0: u64) -> bool => superShapeOk(Ptr.toBorrow(sb), dev0);
+
+/// The superblock's CRC32C (a CRC'd one: not version 14's MAC).
+/// Safety: `block` points to CFS_BLOCK readable bytes, a superblock.
+@export("cfs_super_crc_ok")
+unsafe fn superCrcOkC(block: *void) -> bool =>
+    blockCrc(Slice.fromRaw(block as *u8, BLOCK), SUPER_CRC_AT) == Ptr.toBorrow(block as *cfs_super).crc;
+
+/// Safety: as cfs_super_crc_ok.
+@export("cfs_super_peek_ok")
+unsafe fn superPeekOkC(block: *void) -> bool =>
+    superPeekOk(Ptr.toBorrow(block as *cfs_super), Slice.fromRaw(block as *u8, BLOCK));
+
+/// A label's CRC32C, its crc field taken as zero.
+/// Safety: `block` points to CFS_BLOCK readable bytes.
+@export("cfs_label_crc")
+unsafe fn labelCrcC(block: *u8) -> u32 => blockCrc(Slice.fromRaw(block, BLOCK), LABEL_CRC_AT);
+
+/// A label's CRC32C (a CRC'd one: the MAC is the caller's).
+/// Safety: `block` points to CFS_BLOCK readable bytes, a label.
+@export("cfs_label_crc_ok")
+unsafe fn labelCrcOkC(block: *u8) -> bool =>
+    blockCrc(Slice.fromRaw(block, BLOCK), LABEL_CRC_AT) == Ptr.toBorrow(block as *cfs_label).crc;
+
+/// Safety: `block` points to CFS_BLOCK readable bytes, a label.
+@export("cfs_label_shape_ok")
+unsafe fn labelShapeOkC(block: *void) -> bool => labelShapeOk(Ptr.toBorrow(block as *cfs_label));
+
+/// Safety: `m` is readable.
+@export("cfs_member_sane")
+unsafe fn memberSaneC(m: *cfs_member, v: u32, nmembers: u32) -> bool => memberSane(Ptr.toBorrow(m), v, nmembers);
+
+/// The member table's count: at least one, no more than a block holds or the pool can address.
+@export("cfs_members_count_ok")
+fn membersCountOkC(count: u64) -> bool => count != 0 && count <= MEMBERS_PER_BLOCK && count <= MAX_MEMBERS;
+
+/// A free record's count: no more than a block holds.
+@export("cfs_freelog_count_ok")
+fn freelogCountOkC(count: u64) -> bool => count <= DEAD_PER_BLOCK;
+
+/// An orphan record's count: no more than a block holds.
+@export("cfs_orphan_count_ok")
+fn orphanCountOkC(count: u64) -> bool => count <= DEAD_PER_BLOCK;
+
+/// An inode slot read for inode `ino`: that inode's, and in use.
+/// Safety: `inode` is readable.
+@export("cfs_inode_slot_ok")
+unsafe fn inodeSlotOkC(inode: *cfs_inode, ino: u64) -> bool {
+    let i = Ptr.toBorrow(inode);
+    return i.ino == ino && i.nlink != 0;
 }

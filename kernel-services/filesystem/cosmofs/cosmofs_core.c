@@ -3175,7 +3175,7 @@ static int super_read(struct cfs *fs, unsigned slot, struct cfs_super *out)
          * version-14 encrypted pool's says -ENOKEY (design.md, "The key
          * handle"). Its MAC key comes with it. */
         struct cfs_mac mac;
-        if (!cfs_super_shape_ok(sb, dev0))   /* cfsmount: magic, version, geometry, pointers' shape */
+        if (!cfs_super_shape_ok(sb, dev0))   /* cfsparse: magic, version, geometry, pointers' shape */
             rc = -EIO;
         else
             rc = cfs_super_verify(block, &mac);

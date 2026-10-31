@@ -63,6 +63,20 @@ in and out of range (its own CRC, not the one under test): the C's
 times the decoders alone on rounds made beforehand: 1.03x the C on
 arm64, 1.02x on x86-64 under Rosetta.
 
+The records a mount reads first are CeeSafe too (batch 2): the
+superblock's identity, shape, CRC and peek check (`cfs_super_ident_ok`,
+`_shape_ok`, `_crc_ok`, `_peek_ok`; the MAC stays with
+`cfs_super_verify`), a member label's (`cfs_label_crc`, `_crc_ok`,
+`_shape_ok`), the member table's (`cfs_members_count_ok`,
+`cfs_member_sane`), the free and orphan records' counts and an inode
+slot's identity (`cfs_freelog_count_ok`, `cfs_orphan_count_ok`,
+`cfs_inode_slot_ok`). The "mount digest" covers 50,000 rounds of
+superblocks of every version near their bounds, labels, members near
+every limit, counts and inode slots: the C's (`0x5d91f9b738036dfe`,
+2026-11-01) is the CeeSafe's. `CFSPARSE_BENCH=mount` times the field
+checks alone (0.88x the C on arm64, 0.85x under Rosetta) and with the
+block CRCs (1.00x).
+
 ## Target self-tests
 
 All are registered in `kernel/core/selftest.c` and run in debug builds.
