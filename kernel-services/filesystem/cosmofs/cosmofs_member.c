@@ -22,25 +22,6 @@
 
 /* --- addresses ----------------------------------------------------------- */
 
-bool cfs_dva_valid(const struct cfs *fs, uint64_t dva)
-{
-    unsigned v = CFS_DVA_VDEV(dva);
-    if (v >= fs->nmembers)
-        return false;
-    uint64_t b = CFS_DVA_BLK(dva);
-    return b >= fs->mem[v].first_usable && b < fs->mem[v].nblocks;
-}
-
-uint64_t cfs_dva_lin(const struct cfs *fs, uint64_t dva)
-{
-    unsigned v = CFS_DVA_VDEV(dva);
-    if (v >= fs->nmembers)
-        return CFS_DVA_NONE;
-    uint64_t b = CFS_DVA_BLK(dva);
-    if (b >= fs->mem[v].nblocks)
-        return CFS_DVA_NONE;
-    return fs->mem[v].base + b;
-}
 
 uint64_t cfs_lin_dva(const struct cfs *fs, uint64_t lin)
 {

@@ -585,70 +585,20 @@ struct cfs_dirent_cont {
     char name[56];
 };
 
-/* The continuations a name of `len` bytes needs. */
-static inline unsigned cfs_dirent_extra(unsigned len)
-{
-    return len <= CFS_DIRENT_HEAD_NAME ? 0
-                                       : (len - CFS_DIRENT_HEAD_NAME + CFS_DIRENT_CONT_NAME - 1) / CFS_DIRENT_CONT_NAME;
-}
 
-/*
- * The entry whose head is slot `s` of `blk`, checked before a byte of its
- * name is read: the slots it takes (1 + extra), or 0 when slot `s` is not
- * a well-formed head for a pool of `version` -- free, a continuation, an
- * impossible length, a wrong `extra`, a run that leaves the block, or a
- * continuation that is not marked.
- */
-static inline unsigned cfs_dirent_check(const struct cfs_dirent *blk, unsigned s, unsigned version)
-{
-    const struct cfs_dirent *d = &blk[s];
-    if (d->ino == 0 || d->ino == CFS_DIRENT_CONT || d->namelen == 0)
-        return 0;
-    unsigned max = version >= 15 ? CFS_NAME_MAX_LONG : CFS_NAME_MAX;
-    if (d->namelen > max || d->extra != cfs_dirent_extra(d->namelen))
-        return 0;
-    if (s + d->extra >= CFS_BLOCK / sizeof(struct cfs_dirent))
-        return 0;
-    for (unsigned k = 1; k <= d->extra; k++)
-        if (((const struct cfs_dirent_cont *)&blk[s + k])->mark != CFS_DIRENT_CONT)
-            return 0;
-    return 1u + d->extra;
-}
 
-/* The name of the checked entry at slot `s` into `out` (CFS_NAME_MAX_LONG
- * bytes at least, not terminated); returns its length. */
-static inline unsigned cfs_dirent_name(const struct cfs_dirent *blk, unsigned s, char *out)
-{
-    const struct cfs_dirent *d = &blk[s];
-    unsigned len = d->namelen, n = 0;
-    for (; n < len && n < CFS_DIRENT_HEAD_NAME; n++)
-        out[n] = d->name[n];
-    for (unsigned k = 1; n < len; k++) {
-        const struct cfs_dirent_cont *c = (const struct cfs_dirent_cont *)&blk[s + k];
-        for (unsigned i = 0; i < CFS_DIRENT_CONT_NAME && n < len; i++)
-            out[n++] = c->name[i];
-    }
-    return len;
-}
 
-/* Whether the checked entry at slot `s` is `name` (`len` bytes). */
-static inline int cfs_dirent_name_eq(const struct cfs_dirent *blk, unsigned s, const char *name, unsigned len)
-{
-    const struct cfs_dirent *d = &blk[s];
-    if (d->namelen != len)
-        return 0;
-    unsigned n = 0;
-    for (; n < len && n < CFS_DIRENT_HEAD_NAME; n++)
-        if (d->name[n] != name[n])
-            return 0;
-    for (unsigned k = 1; n < len; k++) {
-        const struct cfs_dirent_cont *c = (const struct cfs_dirent_cont *)&blk[s + k];
-        for (unsigned i = 0; i < CFS_DIRENT_CONT_NAME && n < len; i++, n++)
-            if (c->name[i] != name[n])
-                return 0;
-    }
-    return 1;
-}
+
+/* The entry decoders (cfsparse; roadmap 2.0 SA5). The continuations a name of
+ * `len` bytes needs; the entry whose head is slot `s` of `blk`, checked before a
+ * byte of its name is read: the slots it takes (1 + extra), or 0 when slot `s`
+ * is not a well-formed head for a pool of `version`; the checked entry's name
+ * into `out` (CFS_NAME_MAX_LONG bytes at least, not terminated), returning its
+ * length; and whether the checked entry is `name` (`len` bytes). */
+unsigned cfs_dirent_extra(unsigned len);
+unsigned cfs_dirent_check(const struct cfs_dirent *blk, unsigned s, unsigned version);
+unsigned cfs_dirent_name(const struct cfs_dirent *blk, unsigned s, char *out);
+int cfs_dirent_name_eq(const struct cfs_dirent *blk, unsigned s, const char *name, unsigned len);
 
 /* The first slot of `blk` that starts `need` consecutive free slots, or
  * -1 when the block has no such run. */

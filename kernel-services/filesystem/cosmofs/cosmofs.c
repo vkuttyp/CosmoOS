@@ -38,26 +38,6 @@ static const struct vnode_ops cfs_lnk_ops;
 static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *buf,
                             enum cfs_alloc_class cls);
 
-static bool extent_valid(const struct cfs *fs, const struct cfs_extent *e)
-{
-    /* A run lies on one member (cfs_alloc_run never crosses one), so
-     * both ends are checked against that member; the logical range must
-     * not wrap the 32-bit lblk either. A compressed record occupies
-     * fewer physical blocks than it covers logical ones, and never more
-     * of either than a record can hold. */
-    uint32_t count = cfs_ext_count(e), psize = cfs_ext_psize(e);
-    if (count == 0 || psize == 0)
-        return false;
-    if (cfs_ext_compressed(e)) {
-        if (count > CFS_RECORD_BLOCKS || psize > count)
-            return false;
-        if (cfs_ext_algo(e) != CFS_COMPRESS_LZ4)
-            return false;   /* nothing else can be read back */
-    }
-    return cfs_dva_valid(fs, e->start) && cfs_dva_valid(fs, e->start + psize - 1) &&
-           CFS_DVA_VDEV(e->start) == CFS_DVA_VDEV(e->start + psize - 1) &&
-           (uint64_t)e->lblk + count <= 0x100000000ull;
-}
 
 /* Gather the inode's runs into a kmalloc'd array (the caller frees). */
 static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_extent **out, unsigned *n)
@@ -104,12 +84,9 @@ static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_e
         next = eb->next;
         cfs_buf_put(fs, b);
     }
-    for (unsigned i = 0; i < k; i++) {
-        if (!extent_valid(fs, &ext[i]) ||
-            (i > 0 && ext[i].lblk < (uint64_t)ext[i - 1].lblk + cfs_ext_count(&ext[i - 1]))) {
-            kfree(ext);
-            return -EIO;   /* out of range, unsorted or overlapping */
-        }
+    if (!cfs_extents_valid(fs, ext, k)) {
+        kfree(ext);
+        return -EIO;   /* out of range, unsorted or overlapping */
     }
     *out = ext;
     *n = k;
@@ -245,31 +222,13 @@ static int extents_count(struct cfs *fs, const struct cfs_inode *in, unsigned *o
     return 0;
 }
 
-/* The direct runs of an inode as read from disk: in range, sorted, no
- * overlap, no run after the first empty slot. */
-static bool direct_valid(const struct cfs *fs, const struct cfs_inode *in)
-{
-    unsigned n = 0;
-    while (n < CFS_DIRECT && cfs_ext_count(&in->direct[n]))
-        n++;
-    for (unsigned i = n; i < CFS_DIRECT; i++)
-        if (in->direct[i].count || in->direct[i].start || in->direct[i].lblk)
-            return false;   /* a run hiding behind an empty slot */
-    for (unsigned i = 0; i < n; i++) {
-        if (!extent_valid(fs, &in->direct[i]))
-            return false;
-        if (i > 0 && in->direct[i].lblk < (uint64_t)in->direct[i - 1].lblk + cfs_ext_count(&in->direct[i - 1]))
-            return false;
-    }
-    return true;
-}
 
 int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t *pblk)
 {
     /* The direct runs answer most lookups without loading the chain; they
      * get the same checks the chain gets, so a crafted inode cannot map a
      * block of another file or turn data into a hole (Greptile, PR #22). */
-    if (!direct_valid(fs, in))
+    if (!cfs_direct_valid(fs, in))
         return -EIO;
     if (cfs_map_block(in->direct, CFS_DIRECT, lblk, pblk) == 1)
         return 1;
@@ -287,7 +246,7 @@ int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t 
 
 int cfs_map_ext(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, struct cfs_extent *out)
 {
-    if (!direct_valid(fs, in))
+    if (!cfs_direct_valid(fs, in))
         return -EIO;
     for (unsigned i = 0; i < CFS_DIRECT; i++) {
         const struct cfs_extent *e = &in->direct[i];

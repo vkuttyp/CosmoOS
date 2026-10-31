@@ -33,14 +33,6 @@
 
 /* --- checksums and headers -------------------------------------------- */
 
-/* CRC32C over a block with the 4-byte crc field at crc_off taken as zero. */
-static uint32_t block_crc(const uint8_t *block, size_t crc_off)
-{
-    static const uint8_t zero4[4] = { 0 };
-    uint32_t c = crc32c(block, crc_off);
-    c = crc32c_update(c, zero4, 4);
-    return crc32c_update(c, block + crc_off + 4, CFS_BLOCK - crc_off - 4);
-}
 
 /*
  * The version-14 tag (design.md, "The metadata MAC"): a 64-bit keyed
@@ -95,7 +87,7 @@ static void mhdr_seal_mac(const struct cfs_mac *mac, uint8_t *block, uint32_t ki
     }
     h->csum_algo = CFS_CSUM_CRC32C;   /* the algorithm `crc` is computed with */
     h->crc = 0;
-    h->crc = block_crc(block, offsetof(struct cfs_mhdr, crc));
+    h->crc = cfs_block_crc(block, offsetof(struct cfs_mhdr, crc));
 }
 
 static void mhdr_seal(struct cfs *fs, uint8_t *block, uint32_t kind, uint64_t blkno)
@@ -103,16 +95,6 @@ static void mhdr_seal(struct cfs *fs, uint8_t *block, uint32_t kind, uint64_t bl
     mhdr_seal_mac(&fs->mac, block, kind, blkno, fs->gen);
 }
 
-/* A metadata header's checksum algorithm. CRC32C is the only one the format
- * computes today; 0 is a pre-v11 image's zeroed pad and is also CRC32C. Any
- * other value is a block this build cannot verify (MHDR_ALGO), which is a
- * different finding from a checksum that simply did not match. On a
- * version-14 encrypted pool the field is half the tag and means nothing on
- * its own. */
-static bool meta_csum_supported(uint32_t algo)
-{
-    return algo == CFS_CSUM_NONE || algo == CFS_CSUM_CRC32C;
-}
 
 /*
  * Why a metadata block did not verify, for the message below.
@@ -131,20 +113,12 @@ static bool meta_csum_supported(uint32_t algo)
  */
 enum mhdr_fault cfs_mhdr_fault_of(const struct cfs_mac *mac, const void *block, uint64_t blkno, uint32_t kind)
 {
-    const struct cfs_mhdr *h = (const struct cfs_mhdr *)block;
-    if (h->magic != CFS_MHDR_MAGIC)
-        return MHDR_MAGIC;
-    if (h->blkno != blkno)
-        return MHDR_BLKNO;
-    if (kind && h->kind != kind)
-        return MHDR_KIND;
-    if (mac != NULL && mac->on)
+    /* The header's own checks are cfsparse's; a MAC needs the pool's key. */
+    bool mac_on = mac != NULL && mac->on;
+    enum mhdr_fault f = (enum mhdr_fault)cfs_mhdr_decode(block, blkno, kind, mac_on);
+    if (f == MHDR_OK && mac_on)
         return cfs_mac_ok(mac, CFS_MAC_HDR, block, offsetof(struct cfs_mhdr, crc)) ? MHDR_OK : MHDR_MAC;
-    if (!meta_csum_supported(h->csum_algo))
-        return MHDR_ALGO;
-    if (block_crc(block, offsetof(struct cfs_mhdr, crc)) != h->crc)
-        return MHDR_CRC;
-    return MHDR_OK;
+    return f;
 }
 
 static int mhdr_check(const struct cfs_mac *mac, const uint8_t *block, uint64_t blkno, uint32_t kind)
@@ -178,7 +152,7 @@ static void super_seal(const struct cfs_mac *mac, uint8_t *block)
         return;
     }
     sb->crc = 0;
-    sb->crc = block_crc(block, offsetof(struct cfs_super, crc));
+    sb->crc = cfs_block_crc(block, offsetof(struct cfs_super, crc));
 }
 
 /*
@@ -201,7 +175,7 @@ int cfs_super_verify(const void *block, struct cfs_mac *mac)
             return -ENOKEY;
         rc = cfs_mac_ok(&m, CFS_MAC_SUPER, block, offsetof(struct cfs_super, crc)) ? 0 : -EIO;
     } else {
-        rc = rc == 0 ? -EIO : block_crc(block, offsetof(struct cfs_super, crc)) == sb->crc ? 0 : -EIO;
+        rc = rc == 0 ? -EIO : cfs_block_crc(block, offsetof(struct cfs_super, crc)) == sb->crc ? 0 : -EIO;
         m.on = false;
     }
     if (rc == 0 && mac != NULL)
@@ -350,7 +324,7 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
                        "crc 0x%08x (wanted kind %u at blkno %llu, computed crc 0x%08x)",
                        (unsigned long long)blkno, why[f], h->magic, h->kind, (unsigned long long)h->generation,
                        (unsigned long long)h->blkno, h->csum_algo, h->crc, kind, (unsigned long long)blkno,
-                       block_crc(b->data, offsetof(struct cfs_mhdr, crc)));
+                       cfs_block_crc(b->data, offsetof(struct cfs_mhdr, crc)));
         } else {
             /* Nothing was read, so b->data describes nothing: saying
              * which header field is wrong would be inventing one. */
@@ -2593,7 +2567,7 @@ int cosmofs_test_poison_freelog_count(struct blkdev *bd, uint64_t count)
         const struct cfs_super *sb = (const struct cfs_super *)block;
         uint32_t want = sb->crc;
         ((struct cfs_super *)block)->crc = 0;
-        uint32_t have = block_crc(block, offsetof(struct cfs_super, crc));
+        uint32_t have = cfs_block_crc(block, offsetof(struct cfs_super, crc));
         if (want != have || sb->generation == 0 || sb->generation < best_gen)
             continue;
         best_gen = sb->generation;
@@ -2607,7 +2581,7 @@ int cosmofs_test_poison_freelog_count(struct blkdev *bd, uint64_t count)
         d->count = count;
         struct cfs_mhdr *h = (struct cfs_mhdr *)block;
         h->crc = 0;
-        h->crc = block_crc(block, offsetof(struct cfs_mhdr, crc));
+        h->crc = cfs_block_crc(block, offsetof(struct cfs_mhdr, crc));
         rc = pool_write(pool, at, block);
         if (rc == 0)
             rc = pool_flush(pool);
@@ -2633,7 +2607,7 @@ int cosmofs_test_poison_free_root(struct blkdev *bd, uint64_t value)
         struct cfs_super *sb = (struct cfs_super *)block;
         sb->free_root = value;
         sb->crc = 0;
-        sb->crc = block_crc(block, offsetof(struct cfs_super, crc));
+        sb->crc = cfs_block_crc(block, offsetof(struct cfs_super, crc));
         rc = pool_write(pool, 0, block);
         if (rc == 0)
             rc = pool_flush(pool);
@@ -3610,7 +3584,7 @@ int cfs_super_peek(struct spool *p, struct cfs_super *out)
         if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || sb->version < CFS_VERSION_MIN || sb->version > CFS_VERSION ||
             sb->generation == 0)
             continue;
-        if (!cfs_super_is_mac(sb) && block_crc(block, offsetof(struct cfs_super, crc)) != sb->crc)
+        if (!cfs_super_is_mac(sb) && cfs_block_crc(block, offsetof(struct cfs_super, crc)) != sb->crc)
             continue;
         if (rc == 0 && sb->generation <= out->generation)
             continue;

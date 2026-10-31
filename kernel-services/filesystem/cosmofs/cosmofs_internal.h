@@ -566,6 +566,14 @@ int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const
 enum mhdr_fault { MHDR_OK = 0, MHDR_MAGIC, MHDR_BLKNO, MHDR_KIND, MHDR_ALGO, MHDR_CRC, MHDR_MAC };
 /* `mac` NULL or off: CRC32C, as before version 14. */
 enum mhdr_fault cfs_mhdr_fault_of(const struct cfs_mac *mac, const void *block, uint64_t dva, uint32_t kind);
+/* The decoders (cfsparse; roadmap 2.0 SA5): CRC32C over a block with the
+ * crc field at `crc_off` taken as zero; a header's own checks (the MAC is
+ * the caller's, given the key); a pool's runs read from disk. */
+uint32_t cfs_block_crc(const uint8_t *block, size_t crc_off);
+uint32_t cfs_mhdr_decode(const void *block, uint64_t blkno, uint32_t kind, bool mac_on);
+bool cfs_extent_valid(const struct cfs *fs, const struct cfs_extent *e);
+bool cfs_direct_valid(const struct cfs *fs, const struct cfs_inode *in);
+bool cfs_extents_valid(const struct cfs *fs, const struct cfs_extent *ext, unsigned n);
 /* A metadata block's own check: kind, its own DVA, and its CRC or tag. */
 bool cfs_mhdr_ok(const struct cfs_mac *mac, const void *block, uint64_t dva, uint32_t kind);
 /* Seal a metadata block outside a transaction (format time). */
