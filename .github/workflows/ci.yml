@@ -112,9 +112,12 @@ jobs:
         id: image
         run: scripts/ci-image.sh "ghcr.io/${{ github.repository_owner }}/cosmoos-ci"
 
-  # The C generated from the kernel's Nova sources matches them
-  # (docs/build/design.md, "Nova sources"): recompiled with the pinned novac,
-  # the release's Linux x64 archive verified against its SHA-256.
+  # The kernel's Nova sources compile with the pinned novac and the negative
+  # sources are refused (docs/build/design.md, "Nova sources"), on the
+  # runner, with the release's Linux x64 archive verified against its
+  # SHA-256. Every other job builds in the CI image, which has the same
+  # novac (ci/Dockerfile); `make reproducible` checks that a dist tarball
+  # builds the same bytes with none.
   nova:
     name: Nova sources
     runs-on: ubuntu-24.04
@@ -133,8 +136,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/novac" && tar -xzf novac.tar.gz -C "$RUNNER_TEMP/novac" && rm novac.tar.gz
           echo "NOVAC=$RUNNER_TEMP/novac/novac" >> "$GITHUB_ENV"
 
-      - name: Generated C matches its Nova sources
-        run: python3 scripts/nova-gen.py --check
+      - name: Every Nova source compiles, and the negative sources are refused
+        run: python3 scripts/nova-gen.py --out out/nova
 
   # Roadmap 2.0 SA1 (docs/roadmap-2.0.md, "The Nova rule"): how much of ring
   # 0 and of CosmoOS's own userland is Nova (scripts/nova-share.py), and no

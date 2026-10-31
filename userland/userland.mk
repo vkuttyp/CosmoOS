@@ -129,3 +129,7 @@ USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/f
 userland: $(USER_ELFS)
 
 -include $(USER_OBJS:.o=.d)
+
+# install_gpt.c includes the GPT code generated from kernel/block/gpt.nova, and Nova's runtime, from where the
+# build generated them (build/nova.mk).
+$(OUT)/userland/system/install_gpt.o $(OUT)/userland/system/install_gpt.analyzed: EXTRA_CFLAGS += -I$(NOVA_GEN) $(NOVA_CFLAGS)

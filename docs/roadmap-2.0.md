@@ -227,7 +227,7 @@ itself and the generated C leaves the tree (the Nova rule, point 7);
 `make reproducible` checks that two builds agree. A panic in Nova code
 names the Nova file and line in the crash report on both architectures.
 
-- [ ] **Acceptance:** CI's `nova-share` job runs on every PR and on main
+- [x] **Acceptance:** CI's `nova-share` job runs on every PR and on main
   and fails a test PR that adds a C function under `kernel-services/`; a
   clean checkout builds with only the pinned novac and the cross
   toolchain, and `make reproducible` passes; `crash-nova` (a self-test
@@ -249,7 +249,16 @@ source marks; it passes on x86_64 and aarch64 (2026-10-31). Its hook in
 `kernel_main` is C (self-tests and `CRASH_TEST` are C's), so the same
 change ports the framebuffer validator (`kernel/core/fbvalid.nova`, Nova's
 C6 port, held there to the C's host test, fuzz target and a 20,000-case
-differential test) and `kernel/` has less C to convert, not more.
+differential test) and `kernel/` has less C to convert, not more. Then the build runs the pinned novac and the generated C leaves the
+tree (`build/nova.mk`, into `out/nova`; the CI image carries novac), and
+`make dist` writes a source tarball with the generated C beside each
+source, which releases publish and which builds with no novac (Nova's ADR
+0023). `make reproducible` builds its second tree from such a tarball,
+with a `novac` that fails if run, and found every output the same
+(2026-10-31). Met 2026-10-31: the `nova-share` job runs on every PR and
+push; a clean checkout builds with the pinned novac and the cross
+toolchain, and `make reproducible` passes in CI on both architectures;
+`crash-nova` names its Nova file:line on both.
 
 Size: about 0.7x.
 

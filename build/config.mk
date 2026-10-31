@@ -167,4 +167,5 @@ SOURCE_DATE_EPOCH ?= 0
 export SOURCE_DATE_EPOCH
 
 # Build identity, derived from the tree so equal sources give equal builds.
-BUILD_ID := $(shell cd $(ROOT) && git describe --always --dirty 2>/dev/null || echo unknown)
+# A `make dist` tarball has no .git: its .build-id names the commit it was made from (scripts/dist.py).
+BUILD_ID := $(if $(wildcard $(ROOT)/.build-id),$(shell cat $(ROOT)/.build-id),$(shell cd $(ROOT) && git describe --always --dirty 2>/dev/null || echo unknown))

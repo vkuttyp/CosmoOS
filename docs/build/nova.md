@@ -10,26 +10,27 @@ what the kernel asks of it. The build side (the pin, the CI job) is
 
 ## The model in one paragraph
 
-A Nova source `NAME.nova` sits beside the `NAME.c` it generates. Both are
-committed. The C is what every build compiles, so building CosmoOS never
-needs the Nova compiler; **changing the code does**. You edit only the
-`.nova` file, run `make nova` with the pinned compiler, and commit both.
-The generated C carries a banner, `GENERATED: do not edit`, naming its
-source. CI's "Nova sources" job regenerates everything and fails if any
-checked-in file differs. A hand edit to generated C, or a `.nova` change
-committed without its C, cannot merge.
+A Nova source `NAME.nova` is what is committed; the `NAME.c` it becomes
+is not (roadmap 2.0's Nova rule, point 7). Every build runs the pinned
+compiler, which writes the C into `out/nova/kernel/<area>/NAME.c`, with a
+banner, `GENERATED: do not edit`, naming its source, and compiles it from
+there; so building CosmoOS needs the pinned novac. You edit the `.nova`
+file and build. A source tarball (`make dist`) carries the generated C
+beside each source and builds with no novac, which is how a self-hosted
+CosmoOS builds its kernel; `make reproducible` checks that it builds the
+same bytes.
 
 ## Files of a port
 
 | File | Written by | What it is |
 |---|---|---|
 | `kernel/<area>/NAME.nova` | you | the code |
-| `kernel/<area>/NAME.c` | `make nova` | novac's C for it, with the banner; never edit |
-| `kernel/include/kernel/NAME.h` | you, or `make nova` | the C interface (below: hand-written or generated) |
-| `kernel/include/nova/rt.h`, `kernel/nova/nova_rt_core.c` | `make nova` | Nova's runtime, shared by every port |
+| `out/nova/kernel/<area>/NAME.c` | the build (`make nova`) | novac's C for it, with the banner; not committed |
+| `kernel/include/kernel/NAME.h` | you, or the build (Nova first: `out/nova/kernel/include/kernel/NAME_types.h`) | the C interface (below: hand-written or generated) |
+| `out/nova/kernel/include/nova/rt.h`, `out/nova/kernel/nova/nova_rt_core.c` | the build | Nova's runtime, shared by every port |
 | `kernel/nova/nova_panic.c`, `tests/host/nova_panic.c` | hand-written | what a failed Nova check does: a kernel panic naming the Nova line; `abort()` in host tests and fuzzers |
 | a line in `scripts/nova-gen.py`'s `PORTS` | you | registers the port |
-| `kernel/kernel.mk`, `tests/host/host.mk`, `tests/fuzz/fuzz.mk` | you | build `NAME.c` like any C file, with `nova_rt_core.c` and a `nova_panic.c` |
+| `kernel/kernel.mk`, `tests/host/host.mk`, `tests/fuzz/fuzz.mk` | you | list `kernel/<area>/NAME.c` like any C file, with `nova_rt_core.c` and a `nova_panic.c`; the build takes it from `out/nova` (`build/nova.mk`) |
 
 The current ports: `kernel/block/gpt.nova` (the GPT parser and writer),
 `kernel/process/cputime.nova` (CPU time and the CPU-time timers),
@@ -92,12 +93,13 @@ claude mcp add nova -- novac mcp        # Claude Code; other clients: run `novac
    and its sources to the makefiles, like `cputime.c`'s
    (`kernel/kernel.mk`; a host test in `tests/host/host.mk`; a fuzz target
    in `tests/fuzz/fuzz.mk`).
-5. **Generate:** `make nova`, which writes `NAME.c` (and the header, if
-   the port has a generated one).
-6. **Build and test** as for any C change: the validation matrix in
-   `AGENTS.md`, both architectures.
-7. **Commit `NAME.nova` and everything `make nova` changed together.**
-   `make nova-check` must say the files match.
+5. **Build:** the build generates `out/nova/kernel/<area>/NAME.c` (and
+   the header, if the port has a generated one) before it compiles
+   anything; `make nova` does only that, to read the C.
+6. **Test** as for any C change: the validation matrix in `AGENTS.md`,
+   both architectures, and `make nova-check` (every source compiles, the
+   negative sources are refused).
+7. **Commit `NAME.nova`**, never its generated C (`out/` is not tracked).
 
 ## The header: two models
 
@@ -137,7 +139,7 @@ needs macros or documentation.
 **Nova first.** Nova defines the structs (`@repr(C) struct ...`) and the
 exports, and novac writes the header. Give the port's `PORTS` line a
 fourth element, the header's path (`"kernel/include/kernel/NAME.h"`).
-`make nova` then writes novac's interface there: the `@repr(C)` structs
+The build then writes novac's interface there, under `out/nova`: the `@repr(C)` structs
 and a prototype per export, with a banner and an include guard from its
 name under `kernel/include` (`kernel/NAME.h`, passed as novac's
 `--exports-header`). The generated C includes the header by that name
@@ -219,10 +221,10 @@ cheap to drive from the host:
 
 | Mistake | What happens | Instead |
 |---|---|---|
-| editing the generated `NAME.c` | CI's "Nova sources" job fails | edit `NAME.nova`, `make nova` |
+| editing the generated `out/nova/.../NAME.c` | the next build writes it again | edit `NAME.nova` |
 | new C in a port's `*_floor.c` beyond the C the port deletes | CI's `nova-share` job fails | keep the floor to what Nova cannot express; delete the C the port replaces in the same change |
-| committing `NAME.nova` without regenerating | the same | `make nova`, commit both |
-| a novac other than the pinned one | `make nova` refuses; another version's C differs | install the pinned release; bumping the pin is its own change |
+| committing generated C | `nova-share` counts it as C to convert, and the tree is two copies of one thing | commit the `.nova` only |
+| a novac other than the pinned one | the build refuses it; another version's C differs | install the pinned release; bumping the pin is its own change |
 | `+` on a counter in interrupt context | a possible kernel panic on overflow | `saturatingAdd`, or prove the bound |
 | a borrow-taking parameter called without `mut` | N0249 | `f(mut x)`: a call that lends mutably says so |
 | copying an imported struct out of a field | N0294, N0251 | borrow it; act on each field in place |
@@ -232,9 +234,11 @@ cheap to drive from the host:
 ## Upgrading the compiler
 
 Moving to a newer novac is a change of its own. Bump `NOVAC_VERSION` in
-`scripts/nova-gen.py` and the CI job's `NOVAC_SHA256` (from the release's
-`SHA256SUMS`), run `make nova`, and review the regenerated C. Usually only
-version lines and locations change; anything else needs an explanation.
+`scripts/nova-gen.py`, the CI job's `NOVAC_SHA256` and `ci/Dockerfile`'s
+`NOVAC_VERSION` and `NOVAC_SHA256` (from the release's `SHA256SUMS`), run
+`make nova` before and after, and review the difference of the two
+`out/nova` trees. Usually only version lines and locations change;
+anything else needs an explanation.
 Then run the validation matrix on both architectures. Nova's side of the
 checklist (its CI, nightly fuzz campaign and NativeAOT check green for the
 release) is in Nova's `docs/release.md`, "Moving CosmoOS to a new release".
