@@ -6,13 +6,20 @@ Read the governing [prompts](prompts/) before acting. Follow the
 
 ## Scope rules
 
-The [1.2 roadmap](docs/roadmap-1.2.md) (direction A, self-hosting,
-chosen 2026-10-27 after direction B was completed) sets the work; the [1.0](docs/roadmap-1.0.md) and [1.1](docs/roadmap-1.1.md)
-roadmaps are complete. These rules take precedence over the backlog when
-choosing what to do.
+The [2.0 roadmap](docs/roadmap-2.0.md), adopted by the owner on
+2026-10-31, sets the work; its [How the work runs](docs/roadmap-2.0.md#how-the-work-runs)
+section governs alongside these rules. The [1.0](docs/roadmap-1.0.md) and
+[1.1](docs/roadmap-1.1.md) roadmaps are complete; [1.2](docs/roadmap-1.2.md)
+is superseded (its direction A is 2.0's SW0). These rules take precedence
+over the backlog when choosing what to do.
 
-- Work only on the current roadmap unit: the 1.2 milestone the project
-  owner has chosen. With none chosen, propose; do not start one. A defect
+- Work only on roadmap milestones the project owner has chosen. Up to
+  three streams run at once, each its own branch and PR series: the
+  conversion stream (the SA track), a platform stream (HW, PF, VM) and a
+  features stream (NT, LX, SE, CT, OB, ST, SW, MS). Two streams never
+  change the same subsystem in the same week, and where a feature and a
+  conversion touch the same subsystem the conversion lands first. With
+  no milestone chosen, propose; do not start one. A defect
   found along the way is fixed only if it blocks that unit's acceptance
   test or turns main red. Otherwise add one line to
   [docs/backlog.md](docs/backlog.md) (under its subsystem, the next free
@@ -36,9 +43,9 @@ choosing what to do.
   CI, which runs the acceptance test it changes (as #479 did). A change
   to the self-tests, anything compiled, or a harness a matrix step runs
   (such as `tests/boot/run_boot_test.py`) is not test-only.
-- At most 5 PRs per unit. If more seem needed, stop and report why.
-- A unit is done when its acceptance test is green on main; tick its
-  box in [docs/roadmap-1.2.md](docs/roadmap-1.2.md) in the same PR.
+- A milestone takes the PRs it needs; its report says how many and why.
+- A milestone is done when its acceptance test is green on main; tick its
+  box in [docs/roadmap-2.0.md](docs/roadmap-2.0.md) in the same PR.
 
 ## Project conventions
 

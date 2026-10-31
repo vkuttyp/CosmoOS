@@ -1,8 +1,8 @@
-# CosmoOS 2.0 roadmap (proposed)
+# CosmoOS 2.0 roadmap
 
 Written 2026-10-29 at v1.0.14, on main at `f073ad71`; the MS track
-(messaging at scale) added the same day on `4b1c55ec`. **Proposed, not
-adopted.**
+(messaging at scale) added the same day on `4b1c55ec`. **Adopted by the owner on
+2026-10-31**, after SA1-SA3 had been done under it.
 
 Its goal: make CosmoOS competitive with Linux and FreeBSD for the
 workloads it chooses, with its kernel written in Nova so that it is
@@ -17,7 +17,8 @@ for Nova in [build/nova.md](build/nova.md#rules-for-nova-in-the-kernel)
 functions), and 1.x's promise of stable formats and ABIs. Where it
 replaces one of them it says what replaces it. If it is adopted, those
 documents are rewritten to match in its first PR; until then they stand
-for the work in progress. Each milestone is still done when its
+for the work in progress. Adopted 2026-10-31: `AGENTS.md`'s scope rules
+now follow [How the work runs](#how-the-work-runs). Each milestone is still done when its
 acceptance test is green on main, its box ticked in the same PR.
 
 Backlog references (`NET-8`, `SEC-10`, ...) are lines of
