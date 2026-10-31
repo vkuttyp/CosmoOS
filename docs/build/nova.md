@@ -214,6 +214,7 @@ cheap to drive from the host:
 | Mistake | What happens | Instead |
 |---|---|---|
 | editing the generated `NAME.c` | CI's "Nova sources" job fails | edit `NAME.nova`, `make nova` |
+| new C in a port's `*_floor.c` beyond the C the port deletes | CI's `nova-share` job fails | keep the floor to what Nova cannot express; delete the C the port replaces in the same change |
 | committing `NAME.nova` without regenerating | the same | `make nova`, commit both |
 | a novac other than the pinned one | `make nova` refuses; another version's C differs | install the pinned release; bumping the pin is its own change |
 | `+` on a counter in interrupt context | a possible kernel panic on overflow | `saturatingAdd`, or prove the bound |

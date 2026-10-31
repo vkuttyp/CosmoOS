@@ -28,6 +28,26 @@ novac and fails if a checked-in generated file differs
 (`docs/build/design.md`, "Nova sources"). CI's "Nova sources" job runs it;
 locally it needs the pinned novac.
 
+## The Nova share
+
+```sh
+python3 scripts/nova-share.py                      # the table for HEAD
+python3 scripts/nova-share.py --gate origin/main   # and no tree with more C to convert than main
+```
+
+`scripts/nova-share.py` (roadmap 2.0 SA1) counts the lines of ring 0
+(`kernel/`, `kernel-services/`, `drivers/`, `compat/`, `boot/`) and of
+CosmoOS's own userland (`libc/`, `userland/`, `pkg/`) per tree and per
+subsystem: Nova sources; the floor (assembly, and the C files its `FLOOR`
+names: Nova's runtime shim so far); and C to convert, every other `.c`
+and `.h`, of which a port's `*_floor.c` is shown on its own. C generated
+from a `.nova` source is not counted again. It reads a git tree, so the
+numbers belong to a commit. CI's `nova-share` job runs it on every pull
+request and push with `--gate`, which fails when any tree has more C to
+convert than the commit the change started from: new code is Nova
+(`docs/roadmap-2.0.md`, "The Nova rule", point 1). A file that has to stay
+C is added to `FLOOR` in the same change, where its review asks why.
+
 ## Link-time checks
 
 `scripts/check-kernel-elf.sh` is part of the `kernel.elf` rule. It parses
