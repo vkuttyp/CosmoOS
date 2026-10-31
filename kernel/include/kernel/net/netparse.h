@@ -131,4 +131,67 @@ uint32_t netparse_tcp(const uint8_t *hdr, uint32_t seg_len, struct netparse_tcp 
  * a length (2 or more) that must fit in what is left. */
 uint16_t netparse_tcp_mss(const uint8_t *opts, uint32_t optlen, uint16_t dflt);
 
+/* --- DHCP and DNS ----------------------------------------------------- */
+
+/* The DHCP option `code` in `len` bytes of options: its value's offset
+ * from `opts`, with its length in *olen, or -1. Stops at the end option
+ * (255), skips pads (0), and never reads past `len`: an option whose
+ * length runs past the end ends the walk. (dhcp.h's dhcp_opt.) */
+int32_t netparse_dhcp_opt(const uint8_t *opts, uint32_t len, uint8_t code, uint8_t *olen);
+
+struct netparse_dhcp {
+    uint8_t msg_type;     /* the message type (option 53, one byte) */
+    uint8_t xid[4];       /* as on the wire */
+    uint16_t flags;       /* BOOTP flags (DHCP_FLAG_BROADCAST) */
+    uint8_t ciaddr[4];
+    uint8_t yiaddr[4];
+    uint8_t chaddr[6];    /* the client's MAC */
+    uint8_t server[4];    /* option 54, when has_server */
+    bool has_server;
+    uint8_t reqip[4];     /* option 50, when has_reqip */
+    bool has_reqip;
+};
+
+/* A DHCP message of `dhlen` bytes (BOOTP header, cookie, options): OK with
+ * its fields in *out when it is at least DHCP_FIXED bytes, its op is `op`
+ * (BOOTP_REQUEST or BOOTP_REPLY), its hardware is Ethernet with 6-byte
+ * addresses, its cookie is DHCP's, and it has a one-byte message type; or
+ * NETPARSE_BAD. The options are the `dhlen - DHCP_FIXED` bytes after
+ * DHCP_FIXED. */
+uint32_t netparse_dhcp(const uint8_t *dh, uint32_t dhlen, uint8_t op, struct netparse_dhcp *out);
+
+struct netparse_dhcp_lease {
+    uint8_t addr[4];      /* yiaddr */
+    uint32_t lease;       /* seconds (option 51); 0xffffffff is infinite */
+    uint8_t mask[4];      /* option 1, when has_mask */
+    bool has_mask;
+    uint8_t router[4];    /* the first of option 3, when has_router */
+    bool has_router;
+    uint8_t ndns;         /* option 6's addresses, at most DHCP_MAX_DNS */
+    uint8_t dns[12];
+    uint8_t hostname[64]; /* option 12, NUL-terminated, when it is a usable host name (else empty): 1-63 letters, digits, - and . */
+    uint32_t t1;          /* option 58, 0 when absent or not 4 bytes */
+    uint32_t t2;          /* option 59, likewise */
+};
+
+/* An ACK's lease (the message `dh` of `dhlen` bytes, as netparse_dhcp
+ * accepted it): true with its parameters in *out; false when it is
+ * unusable -- no address (0 or the broadcast), or no lease time, or a
+ * lease of 0 (RFC 2131 table 3). */
+bool netparse_dhcp_lease(const uint8_t *dh, uint32_t dhlen, struct netparse_dhcp_lease *out);
+
+/* A frame a guest's tap sent, `len` bytes: true when it is an IPv4 UDP
+ * datagram to the DHCP server port with its headers whole, with the DHCP
+ * message's offset in the frame in *dh_off (its length is the rest of the
+ * frame); false when it is anything else, for the stack. */
+bool netparse_dhcp_frame(const uint8_t *frame, uint32_t len, uint32_t *dh_off);
+
+/* A DNS message's id, its first two bytes (`len` is the message's length,
+ * at least the 12-byte header). */
+uint16_t netparse_dns_id(const uint8_t *msg, uint32_t len);
+
+/* A dotted quad (`len` characters, no NUL needed): true with the address in
+ * network order in *out (4 bytes); false for anything else. */
+bool netparse_ipv4_text(const char *s, uint32_t len, uint8_t *out);
+
 #endif /* KERNEL_NET_NETPARSE_H */

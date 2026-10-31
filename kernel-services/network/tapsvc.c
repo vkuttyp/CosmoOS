@@ -18,6 +18,7 @@
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/netparse.h>
 #include <kernel/net/tap.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
@@ -83,11 +84,9 @@ static uint8_t *put_opt(uint8_t *p, uint8_t code, uint8_t len, const void *val)
 
 /* Build and send a DHCP reply of `type` out the tap. `req` points at the
  * request's DHCP payload (BOOTP header onward), used for xid/flags/chaddr. */
-static void dhcp_reply(struct tapsvc *s, const uint8_t *req, uint8_t type)
+static void dhcp_reply(struct tapsvc *s, const uint8_t *req, const struct netparse_dhcp *msg, uint8_t type)
 {
-    /* The two flag bytes assembled big-endian already give the host value. */
-    uint16_t flags = (uint16_t)(req[BOOTP_OFF_FLAGS] << 8 | req[BOOTP_OFF_FLAGS + 1]);
-    bool bcast = (flags & DHCP_FLAG_BROADCAST) || type == DHCP_NAK;
+    bool bcast = (msg->flags & DHCP_FLAG_BROADCAST) || type == DHCP_NAK;
 
     struct mbuf *m = m_getcl();
     if (m == NULL)
@@ -146,7 +145,7 @@ static void dhcp_reply(struct tapsvc *s, const uint8_t *req, uint8_t type)
     if (bcast)
         memcpy(dstmac, eth_broadcast, 6);
     else
-        memcpy(dstmac, req + BOOTP_OFF_CHADDR, 6);   /* the client's hardware address */
+        memcpy(dstmac, msg->chaddr, 6);   /* the client's hardware address */
     ether_output(s->nif, m, dstmac, ETH_P_IP);
 }
 
@@ -156,73 +155,44 @@ static bool dhcp_filter(struct tap *t, const void *frame, uint32_t len, void *ar
     (void)t;
     struct tapsvc *s = arg;
     const uint8_t *f = frame;
-    if (len < ETH_HLEN + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr))
-        return false;
-    if (!(f[12] == 0x08 && f[13] == 0x00))       /* IPv4 */
-        return false;
-    const struct ipv4_hdr *iph = (const struct ipv4_hdr *)(f + ETH_HLEN);
-    unsigned ihl = IPV4_HDR_LEN(iph);
-    if ((iph->vhl >> 4) != 4 || ihl < 20 || iph->proto != IPPROTO_UDP)
-        return false;
-    if (ETH_HLEN + ihl + sizeof(struct udp_hdr) > len)
-        return false;
-    const struct udp_hdr *uh = (const struct udp_hdr *)(f + ETH_HLEN + ihl);
-    if (ntohs(uh->dport) != DHCP_SPORT)
+    uint32_t off;
+    if (!netparse_dhcp_frame(f, len, &off))
         return false;                            /* not DHCP-to-server: leave it for the stack */
 
     /* From here the frame is ours (claimed), whatever its contents. */
-    const uint8_t *dh = f + ETH_HLEN + ihl + sizeof(struct udp_hdr);
-    uint32_t dhlen = len - (uint32_t)(ETH_HLEN + ihl + sizeof(struct udp_hdr));
-    if (dhlen < DHCP_FIXED) {
+    const uint8_t *dh = f + off;
+    struct netparse_dhcp msg;
+    if (netparse_dhcp(dh, len - off, BOOTP_REQUEST, &msg) != NETPARSE_OK) {
         STAT(dhcp_ignored);
         return true;
     }
-    uint32_t cookie;
-    memcpy(&cookie, dh + BOOTP_LEN, 4);
-    if (dh[BOOTP_OFF_OP] != BOOTP_REQUEST || dh[BOOTP_OFF_HTYPE] != DHCP_HTYPE_ETHER ||
-        dh[BOOTP_OFF_HLEN] != 6 || ntohl(cookie) != DHCP_MAGIC) {
-        STAT(dhcp_ignored);
-        return true;
-    }
-    const uint8_t *opts = dh + DHCP_FIXED;
-    uint32_t optlen = dhlen - DHCP_FIXED;
-    uint8_t l;
-    const uint8_t *mt = dhcp_opt(opts, optlen, OPT_MSGTYPE, &l);
-    if (mt == NULL || l != 1) {
-        STAT(dhcp_ignored);
-        return true;
-    }
-    const uint8_t *chaddr = dh + BOOTP_OFF_CHADDR;
+    const uint8_t *chaddr = msg.chaddr;
 
     arch_irq_state_t st = spin_lock_irqsave(&s->lock);
     /* One binding: a second, different client is offered nothing. */
     bool mine = !s->bound || memcmp(s->client_mac, chaddr, 6) == 0;
 
-    switch (mt[0]) {
+    switch (msg.msg_type) {
     case DHCP_DISCOVER:
         STAT(dhcp_discover);
         if (!mine) { STAT(dhcp_ignored); spin_unlock_irqrestore(&s->lock, st); return true; }
         spin_unlock_irqrestore(&s->lock, st);
         STAT(dhcp_offer);
-        dhcp_reply(s, dh, DHCP_OFFER);
+        dhcp_reply(s, dh, &msg, DHCP_OFFER);
         return true;
     case DHCP_REQUEST: {
         STAT(dhcp_request);
         /* The address the client is asking for: option 50, else ciaddr. */
-        const uint8_t *req_ip = dhcp_opt(opts, optlen, OPT_REQIP, &l);
         uint32_t want = 0;
-        if (req_ip && l == 4)
-            memcpy(&want, req_ip, 4);
-        else
-            memcpy(&want, dh + 12, 4);   /* ciaddr */
+        memcpy(&want, msg.has_reqip ? msg.reqip : msg.ciaddr, 4);
         bool ok = mine && want == s->guest;
         if (ok) {
             s->bound = true;
             memcpy(s->client_mac, chaddr, 6);
         }
         spin_unlock_irqrestore(&s->lock, st);
-        if (ok) { STAT(dhcp_ack); dhcp_reply(s, dh, DHCP_ACK); }
-        else    { STAT(dhcp_nak); dhcp_reply(s, dh, DHCP_NAK); }
+        if (ok) { STAT(dhcp_ack); dhcp_reply(s, dh, &msg, DHCP_ACK); }
+        else    { STAT(dhcp_nak); dhcp_reply(s, dh, &msg, DHCP_NAK); }
         return true;
     }
     case DHCP_DECLINE:
@@ -337,7 +307,7 @@ static void dns_guest_one(struct tapsvc *svc, uint8_t *buf, uint32_t n, const st
 {
     STAT(dns_query);
     if (!svc->up_set) { dns_servfail(svc, buf, n, from); return; }
-    uint16_t gid = (uint16_t)(buf[0] << 8 | buf[1]);
+    uint16_t gid = netparse_dns_id(buf, n);
     uint16_t uid;
     if (!dns_alloc(svc, gid, from, &uid)) { STAT(dns_drop_full); return; }
     buf[0] = (uint8_t)(uid >> 8); buf[1] = (uint8_t)uid;
@@ -355,7 +325,7 @@ static void dns_up_one(struct tapsvc *svc, uint8_t *buf, uint32_t n, const struc
      * a reachable attacker race a forged response into the guest. */
     if (from->v4 != svc->up_ip || from->port != svc->up_port)
         return;
-    uint16_t uid = (uint16_t)(buf[0] << 8 | buf[1]);
+    uint16_t uid = netparse_dns_id(buf, n);
     struct netaddr guest; uint16_t gid;
     if (!dns_take(svc, uid, &guest, &gid))
         return;                               /* no live entry: drop */
@@ -395,17 +365,10 @@ static void dns_up_main(void *arg)
 /* Parse a dotted-quad into a network-order address; false on malformed. */
 static bool dns_parse_ip(const char *s, uint32_t *out)
 {
-    uint32_t o[4] = {0}; int part = 0, digits = 0; uint32_t v = 0;
-    for (;; s++) {
-        if (*s >= '0' && *s <= '9') { v = v * 10 + (uint32_t)(*s - '0'); digits++; if (v > 255) return false; }
-        else if (*s == '.' || *s == 0) {
-            if (!digits || part > 3) return false;
-            o[part++] = v; v = 0; digits = 0;
-            if (*s == 0) break;
-        } else return false;
-    }
-    if (part != 4) return false;
-    *out = IPV4_ADDR(o[0], o[1], o[2], o[3]);
+    uint8_t a[4];
+    if (!netparse_ipv4_text(s, (uint32_t)strlen(s), a))
+        return false;
+    memcpy(out, a, 4);   /* network order, as IPV4_ADDR gives */
     return true;
 }
 

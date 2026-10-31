@@ -28,6 +28,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/netparse.h>
 #include <kernel/net/udp.h>
 #include <kernel/netif.h>
 #include <kernel/random.h>
@@ -382,13 +383,6 @@ static void dhcp_timer(struct timer *t, void *arg)
 
 /* --- receiving --------------------------------------------------------------------- */
 
-static uint32_t be32_at(const uint8_t *p)
-{
-    uint32_t v;
-    memcpy(&v, p, 4);
-    return ntohl(v);
-}
-
 /* The natural mask of an address's class, for an ACK without option 1. */
 static uint32_t class_mask(uint32_t addr)
 {
@@ -396,64 +390,37 @@ static uint32_t class_mask(uint32_t addr)
     return htonl(a < 0x80000000u ? 0xff000000u : a < 0xc0000000u ? 0xffff0000u : 0xffffff00u);
 }
 
-/* Option 12, kept only when it is a name sethostname and a file can take
- * as it is: 1-63 letters, digits, '-' and '.', no NUL (RFC 1123's host
- * name characters; RFC 2132 allows a trailing NUL, which is dropped).
- * Anything else is ignored: the name is written to /etc/hostname and
- * shown at prompts, and a server is not trusted with what lands there. */
-static void take_hostname(struct dhcp_client *c, const uint8_t *v, uint8_t l)
-{
-    if (l > 0 && v[l - 1] == '\0')
-        l--;
-    if (l == 0 || l >= DHCP_HOSTNAME_MAX)
-        return;
-    for (unsigned i = 0; i < l; i++) {
-        uint8_t ch = v[i];
-        bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' ||
-                  ch == '.';
-        if (!ok)
-            return;
-    }
-    memcpy(c->hostname, v, l);
-    c->hostname[l] = '\0';
-}
-
 /* An ACK: take the lease (under c->lock). False when it is unusable. */
-static bool bind_lease(struct dhcp_client *c, const uint8_t *dh, const uint8_t *opts, uint32_t optlen, uint64_t now)
+static bool bind_lease(struct dhcp_client *c, const uint8_t *dh, uint32_t dhlen, uint64_t now)
 {
-    uint32_t yi;
-    memcpy(&yi, dh + BOOTP_OFF_YIADDR, 4);
-    uint8_t l;
-    const uint8_t *v = dhcp_opt(opts, optlen, OPT_LEASE, &l);
-    if (yi == 0 || yi == INADDR_BROADCAST_N || v == NULL || l != 4)
-        return false;   /* an ACK to a REQUEST must carry the lease time (RFC 2131 table 3) */
-    uint32_t lease = be32_at(v);
-    if (lease == 0)
+    /* The lease's parameters, decoded (netparse_dhcp_lease): false for an
+     * ACK with no address or no lease time (RFC 2131 table 3). Option 12 is
+     * kept only when it is a name sethostname and a file can take as it is
+     * (1-63 letters, digits, '-' and '.'): it lands in /etc/hostname and at
+     * prompts, and a server is not trusted with what lands there. */
+    struct netparse_dhcp_lease ls;
+    if (!netparse_dhcp_lease(dh, dhlen, &ls))
         return false;
+    uint32_t yi;
+    memcpy(&yi, ls.addr, 4);
+    uint32_t lease = ls.lease;
     uint32_t mask = class_mask(yi), router = 0;
-    if ((v = dhcp_opt(opts, optlen, OPT_SUBNET, &l)) != NULL && l == 4)
-        memcpy(&mask, v, 4);
-    if ((v = dhcp_opt(opts, optlen, OPT_ROUTER, &l)) != NULL && l >= 4)
-        memcpy(&router, v, 4);   /* the first router */
-    uint8_t ndns = 0;
-    if ((v = dhcp_opt(opts, optlen, OPT_DNS, &l)) != NULL)
-        for (unsigned i = 0; i + 4 <= l && ndns < DHCP_MAX_DNS; i += 4)
-            memcpy(&c->dns[ndns++], v + i, 4);
-    c->ndns = ndns;
-    c->hostname[0] = '\0';
-    if ((v = dhcp_opt(opts, optlen, OPT_HOSTNAME, &l)) != NULL)
-        take_hostname(c, v, l);
+    if (ls.has_mask)
+        memcpy(&mask, ls.mask, 4);
+    if (ls.has_router)
+        memcpy(&router, ls.router, 4);   /* the first router */
+    for (unsigned i = 0; i < ls.ndns; i++)
+        memcpy(&c->dns[i], ls.dns + 4 * i, 4);
+    c->ndns = ls.ndns;
+    _Static_assert(sizeof(c->hostname) == sizeof(ls.hostname), "netparse_dhcp_lease's host name is the client's");
+    memcpy(c->hostname, ls.hostname, sizeof(c->hostname));
     /* T1 and T2: the server's when they are ordered (T1 < T2 < lease),
      * else the RFC's 0.5 and 0.875 of the lease -- in nanoseconds, so a
      * lease of a second or two still has a T1 before its T2. 0xffffffff
      * is infinite. */
     uint64_t lease_ns = (uint64_t)lease * NS_PER_S;
     uint64_t t1_ns = lease_ns / 2, t2_ns = lease_ns / 8 * 7;
-    uint32_t st1 = 0, st2 = 0;
-    if ((v = dhcp_opt(opts, optlen, OPT_T1, &l)) != NULL && l == 4)
-        st1 = be32_at(v);
-    if ((v = dhcp_opt(opts, optlen, OPT_T2, &l)) != NULL && l == 4)
-        st2 = be32_at(v);
+    uint32_t st1 = ls.t1, st2 = ls.t2;
     if (st1 && st2 && st1 < st2 && st2 < lease) {
         t1_ns = (uint64_t)st1 * NS_PER_S;
         t2_ns = (uint64_t)st2 * NS_PER_S;
@@ -510,9 +477,12 @@ static bool from_server(const struct dhcp_client *c, uint32_t server)
 
 bool dhcp_client_input(struct netif *nif, struct mbuf *m, unsigned ihl)
 {
-    uint8_t ports[4];
-    if (!m_copydata(m, ihl, 4, ports) || ports[0] != 0 || ports[1] != DHCP_SPORT || ports[2] != 0 ||
-        ports[3] != DHCP_CPORT)
+    uint8_t ports[8] = { 0 };
+    struct netparse_l4 id;
+    if (!m_copydata(m, ihl, 4, ports))
+        return false;
+    netparse_l4(ports, sizeof(ports), &id);   /* the first four bytes: the ports */
+    if (id.sport != DHCP_SPORT || id.dport != DHCP_CPORT)
         return false;
     if (client_of(nif) == NULL)
         return false;
@@ -540,24 +510,22 @@ bool dhcp_client_input(struct netif *nif, struct mbuf *m, unsigned ihl)
     m_freem(m);
     const struct ipv4_hdr *iph = (const struct ipv4_hdr *)buf;
     const uint8_t *udp = buf + ihl;
-    const struct udp_hdr *uh = (const struct udp_hdr *)udp;
-    uint32_t udplen = ntohs(uh->len);
-    if (udplen < sizeof(*uh) + DHCP_FIXED || udplen > total - ihl ||
-        (uh->cksum != 0 &&
-         cksum_fold(cksum_partial(udp, udplen, cksum_pseudo4(iph->src, iph->dst, IPPROTO_UDP, (uint16_t)udplen))) !=
+    struct netparse_udp uh;
+    if (netparse_udp(udp, total - ihl, &uh) != NETPARSE_OK || uh.len < sizeof(struct udp_hdr) + DHCP_FIXED ||
+        (uh.has_cksum &&
+         cksum_fold(cksum_partial(udp, uh.len, cksum_pseudo4(iph->src, iph->dst, IPPROTO_UDP, uh.len))) !=
              0)) {   /* cksum_fold complements: a valid datagram sums to 0 */
         STAT(ignored);
         kfree(buf);
         return true;
     }
-    const uint8_t *dh = udp + sizeof(*uh);
-    uint32_t dhlen = udplen - (uint32_t)sizeof(*uh);
-    const uint8_t *opts = dh + DHCP_FIXED;
-    uint32_t optlen = dhlen - DHCP_FIXED;
-    uint8_t l = 0;
-    const uint8_t *mt = dhcp_opt(opts, optlen, OPT_MSGTYPE, &l);
-    uint32_t xid;
-    memcpy(&xid, dh + BOOTP_OFF_XID, 4);
+    const uint8_t *dh = udp + sizeof(struct udp_hdr);
+    uint32_t dhlen = uh.len - (uint32_t)sizeof(struct udp_hdr);
+    struct netparse_dhcp msg;
+    bool well_formed = netparse_dhcp(dh, dhlen, BOOTP_REPLY, &msg) == NETPARSE_OK;
+    uint32_t xid = 0;
+    if (well_formed)
+        memcpy(&xid, msg.xid, 4);
 
     struct dhcp_tx tx = { 0 };
     arch_irq_state_t s;
@@ -567,21 +535,17 @@ bool dhcp_client_input(struct netif *nif, struct mbuf *m, unsigned ihl)
         return true;   /* the client stopped while the datagram was copied */
     }
     uint64_t now = clock_now_ns();
-    bool ours = dh[BOOTP_OFF_OP] == BOOTP_REPLY && dh[BOOTP_OFF_HTYPE] == DHCP_HTYPE_ETHER &&
-                dh[BOOTP_OFF_HLEN] == 6 && be32_at(dh + BOOTP_LEN) == DHCP_MAGIC && xid == c->xid &&
-                memcmp(dh + BOOTP_OFF_CHADDR, nif->mac, 6) == 0 && mt != NULL && l == 1;
+    bool ours = well_formed && xid == c->xid && memcmp(msg.chaddr, nif->mac, 6) == 0;
     bool used = false;
     if (ours) {
-        uint8_t sl;
-        const uint8_t *sid = dhcp_opt(opts, optlen, OPT_SERVERID, &sl);
         uint32_t server = 0;
-        if (sid != NULL && sl == 4)
-            memcpy(&server, sid, 4);
-        switch (*mt) {
+        if (msg.has_server)
+            memcpy(&server, msg.server, 4);
+        switch (msg.msg_type) {
         case DHCP_OFFER:
             if (c->state == DHCP_S_SELECTING && server != 0) {
                 uint32_t yi;
-                memcpy(&yi, dh + BOOTP_OFF_YIADDR, 4);
+                memcpy(&yi, msg.yiaddr, 4);
                 if (yi != 0 && yi != INADDR_BROADCAST_N) {
                     STAT(offers);
                     c->offer_addr = yi;
@@ -594,7 +558,7 @@ bool dhcp_client_input(struct netif *nif, struct mbuf *m, unsigned ihl)
             }
             break;
         case DHCP_ACK:
-            if (from_server(c, server) && bind_lease(c, dh, opts, optlen, now)) {
+            if (from_server(c, server) && bind_lease(c, dh, dhlen, now)) {
                 if (server != 0)
                     c->server = server;   /* rebinding may be answered by another server */
                 STAT(acks);

@@ -16,12 +16,17 @@
  * headers and option lists, recorded from the C (netparse_tcp.c) the same
  * way, which netparse.cee gives too.
  *
+ * The DHCP and DNS family has one too ("dhcp digest"): 100,000 DHCP
+ * messages, the frames that carry them to the tap's server, and resolver
+ * addresses as text, recorded from the C (netparse_dhcp.c).
+ *
  * NETPARSE_BENCH=1 times the decoders instead: the same inputs, every
  * decoder on each, best of 9 runs, in nanoseconds per input (the 5% rule).
  */
 
 #include "harness.h"
 
+#include <kernel/net/dhcp.h>
 #include <kernel/net/netparse.h>
 
 #include <stdio.h>
@@ -219,6 +224,73 @@ static void test_tcp(void)
     static const uint8_t cut[] = { 1, 2 };                          /* a kind with no length byte */
     EXPECT(netparse_tcp_mss(cut, 2, 1220) == 1220);
     EXPECT(netparse_tcp_mss(mss, 0, 777) == 777);
+}
+
+/* A DHCP message: the BOOTP header, the cookie, then `opts` (n bytes). */
+static uint32_t dhcp_msg(uint8_t *dh, uint8_t op, const uint8_t *opts, uint32_t n)
+{
+    memset(dh, 0, DHCP_FIXED);
+    dh[BOOTP_OFF_OP] = op;
+    dh[BOOTP_OFF_HTYPE] = DHCP_HTYPE_ETHER;
+    dh[BOOTP_OFF_HLEN] = 6;
+    dh[BOOTP_OFF_XID] = 0xde; dh[BOOTP_OFF_XID + 3] = 0x01;
+    dh[BOOTP_OFF_FLAGS] = 0x80;
+    dh[BOOTP_OFF_YIADDR] = 10; dh[BOOTP_OFF_YIADDR + 3] = 15;
+    memcpy(dh + BOOTP_OFF_CHADDR, OWN, 6);
+    dh[BOOTP_LEN] = 0x63; dh[BOOTP_LEN + 1] = 0x82; dh[BOOTP_LEN + 2] = 0x53; dh[BOOTP_LEN + 3] = 0x63;
+    memcpy(dh + DHCP_FIXED, opts, n);
+    return DHCP_FIXED + n;
+}
+
+static void test_dhcp(void)
+{
+    uint8_t dh[DHCP_FIXED + 96];
+    static const uint8_t ack[] = { 53, 1, 5, 54, 4, 10, 0, 2, 2, 51, 4, 0, 0, 0x0e, 0x10, 1, 4, 255, 255, 255, 0,
+                                   3, 8, 10, 0, 2, 2, 10, 0, 2, 3, 6, 4, 10, 0, 2, 3, 12, 5, 'c', 'o', 's', 'm', 'o',
+                                   0, 0, 58, 4, 0, 0, 7, 8, 255, 99, 1, 7 };
+    uint32_t n = dhcp_msg(dh, BOOTP_REPLY, ack, sizeof(ack));
+    struct netparse_dhcp m;
+    EXPECT(netparse_dhcp(dh, n, BOOTP_REPLY, &m) == NETPARSE_OK && m.msg_type == DHCP_ACK && m.has_server);
+    EXPECT(m.server[3] == 2 && m.flags == 0x8000 && m.xid[0] == 0xde && m.yiaddr[3] == 15 && !m.has_reqip);
+    EXPECT(netparse_dhcp(dh, n, BOOTP_REQUEST, &m) == NETPARSE_BAD);   /* the wrong direction */
+    EXPECT(netparse_dhcp(dh, DHCP_FIXED - 1, BOOTP_REPLY, &m) == NETPARSE_BAD);
+    struct netparse_dhcp_lease ls;
+    EXPECT(netparse_dhcp_lease(dh, n, &ls) && ls.lease == 3600 && ls.has_mask && ls.mask[2] == 255);
+    EXPECT(ls.has_router && ls.router[3] == 2 && ls.ndns == 1 && ls.dns[3] == 3);
+    EXPECT(strcmp((const char *)ls.hostname, "cosmo") == 0 && ls.t1 == 0x708 && ls.t2 == 0);
+    uint8_t l = 0;
+    EXPECT(netparse_dhcp_opt(dh + DHCP_FIXED, n - DHCP_FIXED, 99, &l) == -1);   /* after the end option */
+    EXPECT(netparse_dhcp_opt(dh + DHCP_FIXED, n - DHCP_FIXED, 51, &l) == 11 && l == 4);
+
+    static const uint8_t bad_name[] = { 53, 1, 5, 51, 4, 0, 0, 0, 60, 12, 3, 'a', '/', 'b', 255 };
+    n = dhcp_msg(dh, BOOTP_REPLY, bad_name, sizeof(bad_name));
+    EXPECT(netparse_dhcp_lease(dh, n, &ls) && ls.hostname[0] == 0 && !ls.has_mask && !ls.has_router);
+    static const uint8_t no_lease[] = { 53, 1, 5, 51, 2, 0, 1, 255 };
+    n = dhcp_msg(dh, BOOTP_REPLY, no_lease, sizeof(no_lease));
+    EXPECT(!netparse_dhcp_lease(dh, n, &ls));
+    static const uint8_t runs_past[] = { 53, 1, 1, 50, 9, 10, 0 };   /* option 50's length runs past the end */
+    n = dhcp_msg(dh, BOOTP_REQUEST, runs_past, sizeof(runs_past));
+    EXPECT(netparse_dhcp(dh, n, BOOTP_REQUEST, &m) == NETPARSE_OK && m.msg_type == DHCP_DISCOVER && !m.has_reqip);
+    static const uint8_t no_type[] = { 0, 0, 255, 53, 1, 1 };
+    n = dhcp_msg(dh, BOOTP_REQUEST, no_type, sizeof(no_type));
+    EXPECT(netparse_dhcp(dh, n, BOOTP_REQUEST, &m) == NETPARSE_BAD);
+
+    uint8_t f[14 + 24 + 8 + 4] = { 0 };
+    f[12] = 0x08; f[14] = 0x46; f[14 + 9] = 17;   /* IPv4, a 24-byte header, UDP */
+    f[14 + 24 + 2] = 0; f[14 + 24 + 3] = 67;
+    uint32_t off = 0;
+    EXPECT(netparse_dhcp_frame(f, sizeof(f), &off) && off == 14 + 24 + 8);
+    EXPECT(!netparse_dhcp_frame(f, 14 + 24 + 7, &off));
+    f[14 + 24 + 3] = 68;
+    EXPECT(!netparse_dhcp_frame(f, sizeof(f), &off));
+
+    uint8_t a[4];
+    EXPECT(netparse_ipv4_text("10.0.2.3", 8, a) && a[0] == 10 && a[3] == 3);
+    EXPECT(!netparse_ipv4_text("10.0.2.256", 10, a) && !netparse_ipv4_text("10.0..3", 7, a));
+    EXPECT(!netparse_ipv4_text("10.0.2", 6, a) && !netparse_ipv4_text("1.2.3.4.5", 9, a) && !netparse_ipv4_text("", 0, a));
+    EXPECT(netparse_ipv4_text("10.0.2.3 x", 8, a));   /* only `len` characters count */
+    static const uint8_t q[12] = { 0xab, 0xcd };
+    EXPECT(netparse_dns_id(q, sizeof(q)) == 0xabcd);
 }
 
 /* --- the recorded digest --------------------------------------------------- */
@@ -448,6 +520,135 @@ static void test_tcp_digest(void)
     EXPECT(digest == TCP_DIGEST);
 }
 
+/* The DHCP and DNS family's digest (netparse_dhcp.c, 2026-10-31). */
+#define DHCP_ROUNDS 100000
+#define DHCP_SEED 0xD4C9D45E2026A11Full
+#define DHCP_DIGEST 0x27c8c7e8ec420cddull
+
+struct dhcp_input {
+    uint8_t frame[14 + 60 + 8 + DHCP_FIXED + 64];
+    uint32_t frame_len;
+    uint32_t dh_off;
+    uint32_t dhlen;
+    uint8_t op;
+    uint8_t code;
+    char text[20];
+    uint32_t text_len;
+};
+
+/* A frame carrying a DHCP message to the server port, its options built
+ * from the codes both ends read (with lengths right or wrong, host names
+ * good and bad), then a few bytes changed anywhere; and a resolver address
+ * as text, a dotted quad or close to one. */
+static void make_dhcp(struct dhcp_input *in)
+{
+    memset(in->frame, 0, sizeof(in->frame));
+    uint8_t *f = in->frame;
+    f[12] = 0x08;
+    uint32_t ihl = next() % 8 ? 20 : 20 + 4 * (uint32_t)(next() % 11);
+    f[14] = (uint8_t)(0x40 | ihl / 4);
+    f[14 + 9] = 17;
+    f[14 + ihl + 2] = 0;
+    f[14 + ihl + 3] = next() % 8 ? 67 : 68;
+    in->dh_off = 14 + ihl + 8;
+    uint8_t *dh = f + in->dh_off;
+    uint8_t opts[64];
+    uint32_t n = 0;
+    while (n < sizeof(opts)) {
+        static const uint8_t codes[] = { 0, 255, 53, 53, 54, 50, 51, 51, 1, 3, 6, 12, 12, 58, 59, 61, 99 };
+        uint8_t code = codes[next() % sizeof(codes)];
+        opts[n++] = code;
+        if (code == 0 || code == 255)
+            continue;
+        uint8_t len = code == 53 ? 1 : code == 54 || code == 50 || code == 51 || code == 1 || code == 58 || code == 59 ? 4
+                    : code == 3 || code == 6 ? (uint8_t)(4 * (1 + next() % 4)) : (uint8_t)(1 + next() % 10);
+        if (next() % 8 == 0)
+            len = (uint8_t)(next() % 16);
+        if (n < sizeof(opts))
+            opts[n++] = len;
+        for (uint8_t k = 0; k < len && n < sizeof(opts); k++) {
+            uint8_t v = (uint8_t)next();
+            if (code == 12 && next() % 4)
+                v = (uint8_t)("abcdefghij-.0123"[next() % 16]);
+            if (code == 53)
+                v = (uint8_t)(1 + next() % 7);
+            opts[n++] = v;
+        }
+    }
+    in->op = (uint8_t)(1 + next() % 2);
+    uint32_t used = (uint32_t)(next() % (sizeof(opts) + 1));
+    in->dhlen = dhcp_msg(dh, (uint8_t)(next() % 4 ? in->op : 3 - in->op), opts, used);
+    if (next() % 16 == 0)
+        in->dhlen = (uint32_t)(next() % in->dhlen);
+    in->frame_len = in->dh_off + in->dhlen;
+    unsigned flips = (unsigned)(next() % 3);
+    for (unsigned i = 0; i < flips; i++)
+        f[next() % in->frame_len] ^= (uint8_t)(1u << (next() % 8));
+    in->code = (uint8_t)(next() % 64);
+    uint32_t t = 0;
+    for (int part = 0; part < 4 + (int)(next() % 8 == 0); part++) {
+        if (part)
+            in->text[t++] = '.';
+        uint32_t v = next() % 8 ? (uint32_t)(next() % 256) : (uint32_t)(next() % 1000);
+        t += (uint32_t)snprintf(in->text + t, sizeof(in->text) - t, "%u", v);
+    }
+    if (next() % 8 == 0)
+        in->text[next() % t] = (char)(next() % 128);
+    in->text_len = next() % 8 ? t : (uint32_t)(next() % (t + 1));
+}
+
+static void test_dhcp_digest(void)
+{
+    bool dump = getenv("NETPARSE_DUMP") != NULL;
+    uint64_t digest = 0xcbf29ce484222325ull;
+    g_rng = DHCP_SEED;
+    unsigned frames = 0, msgs = 0, leases = 0, texts = 0;
+    for (unsigned r = 0; r < DHCP_ROUNDS; r++) {
+        struct dhcp_input in;
+        make_dhcp(&in);
+        uint32_t off = 0;
+        bool frame = netparse_dhcp_frame(in.frame, in.frame_len, &off);
+        const uint8_t *dh = in.frame + in.dh_off;
+        struct netparse_dhcp m;
+        memset(&m, 0, sizeof(m));
+        uint32_t rc = netparse_dhcp(dh, in.dhlen, in.op, &m);
+        struct netparse_dhcp_lease ls;
+        memset(&ls, 0, sizeof(ls));
+        bool lease = in.dhlen >= DHCP_FIXED && netparse_dhcp_lease(dh, in.dhlen, &ls);
+        uint8_t ol = 0;
+        int32_t at = in.dhlen >= DHCP_FIXED ? netparse_dhcp_opt(dh + DHCP_FIXED, in.dhlen - DHCP_FIXED, in.code, &ol) : -2;
+        uint8_t a[4] = { 0, 0, 0, 0 };
+        bool text = netparse_ipv4_text(in.text, in.text_len, a);
+        uint16_t id = in.dhlen >= 12 ? netparse_dns_id(dh, in.dhlen) : 0;
+        frames += frame;
+        msgs += rc == NETPARSE_OK;
+        leases += lease;
+        texts += text;
+        char line[400];
+        int n = snprintf(line, sizeof(line),
+                         "f%d:%u d%u:%u:%02x%02x%02x%02x:%04x:%u.%u:%u.%u:%02x%02x:%d%u:%d%u "
+                         "l%d:%u:%u:%d%u:%d%u:%u:%u.%u.%u:%s:%u:%u o%d:%u t%d:%u.%u.%u.%u i%04x",
+                         frame, off, rc, m.msg_type, m.xid[0], m.xid[1], m.xid[2], m.xid[3], m.flags, m.ciaddr[0],
+                         m.ciaddr[3], m.yiaddr[0], m.yiaddr[3], m.chaddr[0], m.chaddr[5], m.has_server, m.server[3],
+                         m.has_reqip, m.reqip[3], lease, ls.addr[3], ls.lease, ls.has_mask, ls.mask[3], ls.has_router,
+                         ls.router[3], ls.ndns, ls.dns[3], ls.dns[7], ls.dns[11], (const char *)ls.hostname, ls.t1,
+                         ls.t2, at, ol, text, a[0], a[1], a[2], a[3], id);
+        EXPECT(n > 0 && (size_t)n < sizeof(line));
+        for (int i = 0; i < n; i++) {
+            digest ^= (uint8_t)line[i];
+            digest *= 0x100000001b3ull;
+        }
+        digest ^= '\n';
+        digest *= 0x100000001b3ull;
+        if (dump)
+            printf("%s\n", line);
+    }
+    EXPECT(frames > 1000 && msgs > 1000 && leases > 1000 && texts > 1000);
+    printf("  dhcp digest 0x%016llx over %u inputs (frames %u, messages %u, leases %u, addresses %u)\n",
+           (unsigned long long)digest, DHCP_ROUNDS, frames, msgs, leases, texts);
+    EXPECT(digest == DHCP_DIGEST);
+}
+
 /* --- the benchmark ----------------------------------------------------------- */
 
 static volatile uint64_t g_sink;
@@ -521,6 +722,40 @@ static int bench(void)
     }
     printf("tcp bench: %.2f ns per input (best of 9 runs of %u)\n", best / TCP_ROUNDS, TCP_ROUNDS);
     free(tins);
+
+    struct dhcp_input *dins = malloc(sizeof(*dins) * DHCP_ROUNDS);
+    if (dins == NULL)
+        return 1;
+    g_rng = DHCP_SEED;
+    for (unsigned r = 0; r < DHCP_ROUNDS; r++)
+        make_dhcp(&dins[r]);
+    best = 1e30;
+    for (int run = 0; run < 9; run++) {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        uint64_t acc = 0;
+        for (unsigned r = 0; r < DHCP_ROUNDS; r++) {
+            const struct dhcp_input *in = &dins[r];
+            uint32_t off;
+            acc += netparse_dhcp_frame(in->frame, in->frame_len, &off);
+            const uint8_t *dh = in->frame + in->dh_off;
+            struct netparse_dhcp m;
+            if (netparse_dhcp(dh, in->dhlen, in->op, &m) == NETPARSE_OK)
+                acc += m.msg_type;
+            struct netparse_dhcp_lease ls;
+            if (in->dhlen >= DHCP_FIXED && netparse_dhcp_lease(dh, in->dhlen, &ls))
+                acc += ls.lease + ls.ndns;
+            uint8_t a[4];
+            acc += netparse_ipv4_text(in->text, in->text_len, a);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        g_sink += acc;
+        double ns = (double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec);
+        if (ns < best)
+            best = ns;
+    }
+    printf("dhcp bench: %.2f ns per input (best of 9 runs of %u)\n", best / DHCP_ROUNDS, DHCP_ROUNDS);
+    free(dins);
     return 0;
 }
 
@@ -533,6 +768,8 @@ static const struct host_test tests[] = {
     { "tcp", test_tcp },
     { "recorded digest", test_recorded_digest },
     { "tcp digest", test_tcp_digest },
+    { "dhcp and dns", test_dhcp },
+    { "dhcp digest", test_dhcp_digest },
 };
 
 int main(void)
