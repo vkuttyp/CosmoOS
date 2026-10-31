@@ -239,5 +239,10 @@ void thread_dump_all(void);
 void thread_report_stack_use(void);
 #endif
 unsigned thread_count(void);
+/* True when every thread handed to the reaper so far has been put, its
+ * stack freed and that free's TLB shootdown done. A test that masks
+ * interrupts on a CPU waits for this first: a shootdown cannot finish
+ * while a CPU cannot take its IPI (lockuptest.c). */
+bool thread_reaper_idle(void);
 
 #endif /* KERNEL_THREAD_H */

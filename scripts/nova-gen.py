@@ -81,6 +81,7 @@ PORTS = [
      "kernel/include/kernel/pipe_types.h", False),
     ("kernel/ipc/fifo.nova", "kernel/ipc/fifo.c", "Named pipes: the pipe's ring behind a filesystem node (fifo.h)",
      "kernel/include/kernel/fifo_types.h", False),
+    ("kernel/core/crc32c.nova", "kernel/core/crc32c.c", "CRC-32C (crc32c.h)", None, False),
     ("kernel/core/fbvalid.nova", "kernel/core/fbvalid.c", "The framebuffer validator (bootinfo.h)", None, False),
     ("kernel/nova/crash_test.nova", "kernel/nova/crash_test.c",
      "The crash test crash-nova: a Nova bounds check that fails on purpose (CRASH_TEST=5)",
