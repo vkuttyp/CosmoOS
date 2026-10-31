@@ -1,0 +1,374 @@
+// elfparse.cee - the user executable validator (kernel/include/kernel/elf.h; roadmap 2.0 SA5, the ELF family): an
+// ELF64 executable's header, program headers, notes and interpreter path checked against the bytes it came in, and its
+// loadable segments laid out for the loader (elf.c), which maps them.
+//
+// The image is a slice of exactly the bytes given, so no read can leave it: a field past its end is a bounds panic,
+// never a read of another buffer, though every one is checked against the size first, as the C was. Fields are read
+// little-endian from the bytes, which is what the header's ELFDATA2LSB, checked before any multi-byte field is read,
+// says they are. tests/host/test_elf.c holds this to the C it replaced: the same digest over 100,000 images, refusals
+// and the partial results they leave included.
+
+@header("kernel/elf.h")
+extern "C" {
+    struct elf_segment {
+        vaddr: u64;
+        memsz: u64;
+        offset: u64;
+        filesz: u64;
+        file_vaddr: u64;
+        file_memsz: u64;
+        flags: u32;
+    }
+    struct elf_info {
+        entry: u64;
+        lo: u64;
+        hi: u64;
+        nr_segments: u32;
+        segments: [elf_segment; 16];
+        cosmo_note: bool;
+        phdr_vaddr: u64;
+        phnum: u16;
+        phent: u16;
+        is_dyn: bool;
+        max_align: u64;
+        has_interp: bool;
+    }
+}
+
+const ENOEXEC: i32 = 8;
+const PAGE: u64 = 4096;
+const ALIGN_MAX: u64 = 0x200000; // ELF_ALIGN_MAX
+const MAX_SEGMENTS: u32 = 16;    // ELF_MAX_SEGMENTS
+const INTERP_MAX: u64 = 256;     // ELF_INTERP_MAX
+const EHDR: usize = 64;
+const PHDR: u64 = 56;
+const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
+const PT_LOAD: u32 = 1;
+const PT_INTERP: u32 = 3;
+const PT_NOTE: u32 = 4;
+const PT_GNU_STACK: u32 = 0x6474e551;
+const PF_X: u32 = 1;
+const PF_W: u32 = 2;
+const PF_R: u32 = 4;
+
+/// The little-endian u16 at `at`.
+fn le16(b: Slice<u8>, at: usize) -> u16 => b[at] as u16 | (b[at + 1] as u16) << 8;
+
+/// The little-endian u32 at `at`.
+fn le32(b: Slice<u8>, at: usize) -> u32 =>
+    b[at] as u32 | (b[at + 1] as u32) << 8 | (b[at + 2] as u32) << 16 | (b[at + 3] as u32) << 24;
+
+/// The little-endian u64 at `at`.
+fn le64(b: Slice<u8>, at: usize) -> u64 => le32(b, at) as u64 | (le32(b, at + 4) as u64) << 32;
+
+/// A program header's fields.
+struct Phdr {
+    ptype: u32;
+    pflags: u32;
+    poff: u64;
+    pvaddr: u64;
+    pfilesz: u64;
+    pmemsz: u64;
+    palign: u64;
+}
+
+/// The little-endian u32 at constant offset `at` of a header copied out whole: on an array of known length, so these
+/// reads need no checks (and clang folds them into one load).
+fn a32(h: borrow [u8; 56], at: usize) -> u32 =>
+    h[at] as u32 | (h[at + 1] as u32) << 8 | (h[at + 2] as u32) << 16 | (h[at + 3] as u32) << 24;
+
+fn a64(h: borrow [u8; 56], at: usize) -> u64 => a32(h, at) as u64 | (a32(h, at + 4) as u64) << 32;
+
+/// The ELF header's little-endian u64 at constant offset `at`, as a32 and a64 read a program header's.
+fn e64(h: borrow [u8; 64], at: usize) -> u64 {
+    let lo = h[at] as u32 | (h[at + 1] as u32) << 8 | (h[at + 2] as u32) << 16 | (h[at + 3] as u32) << 24;
+    let hi = h[at + 4] as u32 | (h[at + 5] as u32) << 8 | (h[at + 6] as u32) << 16 | (h[at + 7] as u32) << 24;
+    return lo as u64 | (hi as u64) << 32;
+}
+
+/// A note header's little-endian u32 at constant offset `at`.
+fn n32(h: borrow [u8; 12], at: usize) -> u32 =>
+    h[at] as u32 | (h[at + 1] as u32) << 8 | (h[at + 2] as u32) << 16 | (h[at + 3] as u32) << 24;
+
+/// A program header, decoded from its 56 bytes.
+fn decodePhdr(h: borrow [u8; 56]) -> Phdr => Phdr {
+    ptype: a32(h, 0),
+    pflags: a32(h, 4),
+    poff: a64(h, 8),
+    pvaddr: a64(h, 16),
+    pfilesz: a64(h, 32),
+    pmemsz: a64(h, 40),
+    palign: a64(h, 48),
+};
+
+/// Whether `len` bytes at `off` lie inside a file of `size` bytes.
+fn inFile(off: u64, len: u64, size: u64) -> bool => off <= size && len <= size - off;
+
+/// A refusal: the reason, when the caller asked for one, and -ENOEXEC.
+/// Safety: `why` is null or writable (elf_validate's contract), and `msg` an immortal string.
+fn fail(why: *mut *CChar, msg: *CChar) -> i32 {
+    if (!why.isNull()) {
+        unsafe { why.write(msg); }
+    }
+    return -ENOEXEC;
+}
+
+/// A page-aligned end: `end` rounded up to the page, or 0 where C's unsigned addition would have wrapped (the caller
+/// then refuses the segment, as the C did, unless its start is in page 0 too).
+fn pageUp(end: u64) -> u64 {
+    if (end > 0xffffffffffffffff - (PAGE - 1)) {
+        return 0;
+    }
+    return (end + PAGE - 1) & (0xffffffffffffffff ^ (PAGE - 1));
+}
+
+/// Whether a PT_NOTE's notes (namesz, descsz, type, name and desc each padded to 4) include CosmoOS's type-1 note, the
+/// mark of a native program. A note this loader does not know ends the walk: sizes are bounded before any arithmetic.
+fn hasCosmoNote(f: Slice<u8>, start: u64, end: u64) -> bool {
+    var found = false;
+    var off = start;
+    while (off + 12 <= end) {
+        let o = off as usize;
+        var nh: [u8; 12] = [0; 12];
+        nh[..].copyFrom(f[o..o + 12]);
+        let namesz = n32(borrow nh, 0);
+        let descsz = n32(borrow nh, 4);
+        let kind = n32(borrow nh, 8);
+        if (namesz > 256 || descsz > 4096) {
+            return found;
+        }
+        let nameAt = off + 12;
+        let descAt = nameAt + ((namesz as u64 + 3) & (0xffffffffffffffff ^ 3));
+        let next = descAt + ((descsz as u64 + 3) & (0xffffffffffffffff ^ 3));
+        if (next > end || next <= off) {
+            return found;
+        }
+        if (namesz == 8 && kind == 1) {
+            let n = nameAt as usize;
+            // "CosmoOS" and its NUL.
+            if (f[n] == 0x43 && f[n + 1] == 0x6f && f[n + 2] == 0x73 && f[n + 3] == 0x6d && f[n + 4] == 0x6f &&
+                f[n + 5] == 0x4f && f[n + 6] == 0x53 && f[n + 7] == 0) {
+                found = true;
+            }
+        }
+        off = next;
+    }
+    return found;
+}
+
+/// Validates an executable of `f.length` bytes for the user range [userLo, userHi) on a machine whose e_machine is
+/// `machine`, into `info` (zeroed by the caller) and `interp` (its 256 bytes). 0, or -ENOEXEC with the rule in `why`;
+/// a refusal leaves what was filled before it, as the C did.
+/// Safety: `why` is null or writable (elf_validate's contract); it is cleared first, as the C did.
+fn validate(
+    f: Slice<u8>, userLo: u64, userHi: u64, machine: u16, notMachine: *CChar, info: borrow mut elf_info,
+    interp: SliceMut<u8>, why: *mut *CChar,
+) -> i32 {
+    if (!why.isNull()) {
+        unsafe { why.write(0 as *CChar); }
+    }
+    let size = f.length as u64;
+    if (f.length < EHDR) {
+        return fail(why, "file shorter than the ELF header\0".ptr as *CChar);
+    }
+    // The header copied out once, then read from an array of known length.
+    var e: [u8; 64] = [0; 64];
+    e[..].copyFrom(f[..EHDR]);
+    if (e[0] != 0x7f || e[1] != 0x45 || e[2] != 0x4c || e[3] != 0x46) {
+        return fail(why, "bad ELF magic\0".ptr as *CChar);
+    }
+    if (e[4] != 2 || e[5] != 1 || e[6] != 1) { // ELFCLASS64, ELFDATA2LSB, EV_CURRENT
+        return fail(why, "not ELF64 little-endian v1\0".ptr as *CChar);
+    }
+    let etype = e[16] as u16 | (e[17] as u16) << 8;
+    if (etype != ET_EXEC && etype != ET_DYN) {
+        return fail(why, "not ET_EXEC or ET_DYN\0".ptr as *CChar);
+    }
+    info.is_dyn = etype == ET_DYN;
+    // An ET_DYN image is validated relative to 0 and rebased by the caller; it must fit the window from wherever it is
+    // placed.
+    let loBound = if (info.is_dyn) 0 else userLo;
+    let hiBound = if (info.is_dyn) userHi - userLo else userHi;
+    if ((e[18] as u16 | (e[19] as u16) << 8) != machine) {
+        return fail(why, notMachine);
+    }
+    let entry = e64(borrow e, 24);
+    let phoff = e64(borrow e, 32);
+    let phent = e[54] as u16 | (e[55] as u16) << 8;
+    let phnum = e[56] as u16 | (e[57] as u16) << 8;
+    if (phent as u64 != PHDR || phnum == 0) {
+        return fail(why, "bad program header table\0".ptr as *CChar);
+    }
+    if (!inFile(phoff, phnum as u64 * PHDR, size)) {
+        return fail(why, "program header table outside the file\0".ptr as *CChar);
+    }
+
+    var lo: u64 = 0xffffffffffffffff;
+    var hi: u64 = 0;
+    info.phnum = phnum;
+    info.phent = phent;
+
+    var raw: [u8; 56] = [0; 56];
+    for (i in 0..phnum) {
+        // The header copied out once (one range check), then decoded from an array of known length.
+        let p = (phoff + i as u64 * PHDR) as usize;
+        raw[..].copyFrom(f[p..p + 56]);
+        let ph = decodePhdr(borrow raw);
+        let ptype = ph.ptype;
+        let pflags = ph.pflags;
+        let poff = ph.poff;
+        let pvaddr = ph.pvaddr;
+        let pfilesz = ph.pfilesz;
+        let pmemsz = ph.pmemsz;
+        let palign = ph.palign;
+
+        if (ptype == PT_INTERP) {
+            // The interpreter's path: inside the file, 1..255 bytes, NUL-terminated.
+            if (info.has_interp) {
+                return fail(why, "two PT_INTERP entries\0".ptr as *CChar);
+            }
+            if (pfilesz < 2 || pfilesz > INTERP_MAX - 1 || !inFile(poff, pfilesz, size)) {
+                return fail(why, "PT_INTERP path is empty, too long or outside the file\0".ptr as *CChar);
+            }
+            let at = poff as usize;
+            let n = pfilesz as usize;
+            if (f[at + n - 1] != 0) {
+                return fail(why, "PT_INTERP path is not NUL-terminated\0".ptr as *CChar);
+            }
+            interp[..n].copyFrom(f[at..at + n]);
+            info.has_interp = true;
+            continue;
+        }
+        if (ptype == PT_NOTE) {
+            if (!inFile(poff, pfilesz, size)) {
+                return fail(why, "PT_NOTE outside the file\0".ptr as *CChar);
+            }
+            if (hasCosmoNote(f, poff, poff + pfilesz)) {
+                info.cosmo_note = true;
+            }
+            continue;
+        }
+        if (ptype == PT_GNU_STACK) {
+            if ((pflags & PF_X) != 0) {
+                return fail(why, "PT_GNU_STACK requests an executable stack\0".ptr as *CChar);
+            }
+            continue;
+        }
+        if (ptype != PT_LOAD || pmemsz == 0) {
+            continue;
+        }
+        if (pmemsz < pfilesz) {
+            return fail(why, "PT_LOAD memsz smaller than filesz\0".ptr as *CChar);
+        }
+        if (!inFile(poff, pfilesz, size)) {
+            return fail(why, "PT_LOAD file bytes outside the file\0".ptr as *CChar);
+        }
+        if (pmemsz > 0xffffffffffffffff - pvaddr) {
+            return fail(why, "PT_LOAD address range overflows\0".ptr as *CChar);
+        }
+        if ((pflags & PF_W) != 0 && (pflags & PF_X) != 0) {
+            return fail(why, "PT_LOAD is writable and executable (W^X)\0".ptr as *CChar);
+        }
+        if ((pvaddr & (PAGE - 1)) != (poff & (PAGE - 1))) {
+            return fail(why, "PT_LOAD vaddr and offset are not congruent modulo the page size\0".ptr as *CChar);
+        }
+        if (palign > PAGE && (palign & (palign - 1)) == 0) {
+            let a = if (palign < ALIGN_MAX) palign else ALIGN_MAX;
+            if (a > info.max_align) {
+                info.max_align = a;
+            }
+        }
+
+        let segLo = pvaddr & (0xffffffffffffffff ^ (PAGE - 1));
+        let segHi = pageUp(pvaddr + pmemsz);
+        if (segLo < loBound || segHi > hiBound || segHi < segLo) {
+            return fail(why, "PT_LOAD outside the user address range\0".ptr as *CChar);
+        }
+        let count = info.nr_segments;
+        for (j in 0..count) {
+            let o = borrow info.segments[j as usize];
+            if (segLo < o.vaddr + o.memsz && o.vaddr < segHi) {
+                return fail(why, "PT_LOAD segments share a page\0".ptr as *CChar);
+            }
+        }
+        if (count >= MAX_SEGMENTS) {
+            return fail(why, "too many PT_LOAD segments\0".ptr as *CChar);
+        }
+        info.nr_segments = count + 1;
+        let seg = borrow mut info.segments[count as usize];
+        seg.vaddr = segLo;
+        seg.memsz = segHi - segLo;
+        seg.offset = poff;
+        seg.filesz = pfilesz;
+        seg.file_memsz = pmemsz;
+        seg.file_vaddr = pvaddr;
+        seg.flags = pflags & (PF_R | PF_W | PF_X);
+        if (segLo < lo) {
+            lo = segLo;
+        }
+        if (segHi > hi) {
+            hi = segHi;
+        }
+    }
+
+    if (info.nr_segments == 0) {
+        return fail(why, "no PT_LOAD segments\0".ptr as *CChar);
+    }
+    if (info.max_align < PAGE) {
+        info.max_align = PAGE;
+    }
+    var entryOk = false;
+    for (j in 0..info.nr_segments) {
+        let s = borrow info.segments[j as usize];
+        if ((s.flags & PF_X) != 0 && entry >= s.vaddr && entry < s.vaddr + s.memsz) {
+            entryOk = true;
+        }
+    }
+    if (!entryOk) {
+        return fail(why, "entry point is not inside an executable segment\0".ptr as *CChar);
+    }
+    // Where the program header table lands in memory, for AT_PHDR.
+    let table = phnum as u64 * PHDR;
+    for (j in 0..info.nr_segments) {
+        let s = borrow info.segments[j as usize];
+        if (phoff >= s.offset && phoff + table <= s.offset + s.filesz) {
+            info.phdr_vaddr = s.file_vaddr + (phoff - s.offset);
+        }
+    }
+    info.entry = entry;
+    info.lo = lo;
+    info.hi = hi;
+    return 0;
+}
+
+/// Safety: `image` points to `size` readable bytes; `info` is writable and zeroed (elf.h's elf_validate does both);
+/// `interp` points to ELF_INTERP_MAX writable bytes; `notMachine` is an immortal string; `why` is null or writable.
+@export("elf_validate_for")
+unsafe fn validateC(
+    image: *void, size: usize, userLo: u64, userHi: u64, machine: u16, notMachine: *CChar,
+    info: *mut elf_info, interp: *mut CChar, why: *mut *CChar,
+) -> i32 =>
+    validate(
+        Slice.fromRaw(image as *u8, size), userLo, userHi, machine, notMachine, Ptr.toBorrowMut(info),
+        SliceMut.fromRaw(interp as *mut u8, INTERP_MAX as usize), why,
+    );
+
+/// Moves an ET_DYN image's addresses by `base`, the bias the caller chose inside the user window (so no address
+/// overflows; one that did would be a panic, not a wrap).
+/// Safety: `info` is a validated image's.
+@export("elf_rebase")
+unsafe fn rebaseC(info: *mut elf_info, base: u64) {
+    let i = Ptr.toBorrowMut(info);
+    for (k in 0..i.nr_segments) {
+        let s = borrow mut i.segments[k as usize];
+        s.vaddr += base;
+        s.file_vaddr += base;
+    }
+    i.entry += base;
+    i.lo += base;
+    i.hi += base;
+    if (i.phdr_vaddr != 0) {
+        i.phdr_vaddr += base;
+    }
+}

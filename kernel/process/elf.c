@@ -2,7 +2,7 @@
  * elf.c - Static ELF64 executables for user processes.
  *
  * The loader. The validator, which the host tests and fuzz_elf feed
- * crafted images, is elfparse's (roadmap 2.0 SA5).
+ * crafted images, is CeeSafe: elfparse.cee (roadmap 2.0 SA5).
  */
 
 #include <kernel/elf.h>
@@ -10,13 +10,9 @@
 #include <kernel/errno.h>
 #include <kernel/string.h>
 
-#ifndef ELF_HOST_TEST
 #include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/vmm.h>
-#endif
-
-#ifndef ELF_HOST_TEST
 
 static vm_prot_t seg_prot(uint32_t flags)
 {
@@ -162,4 +158,3 @@ int elf_load_into(struct vm_space *space, const void *image, const struct elf_in
     return 0;
 }
 
-#endif /* ELF_HOST_TEST */

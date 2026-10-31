@@ -7,8 +7,9 @@
  * with fields and bytes changed -- go through elf_validate_for under
  * both architectures' machines, then elf_rebase; every result (the info,
  * every segment, the interpreter, the reason) is a line, and the lines'
- * FNV-1a digest is recorded below. The C gave it; the CeeSafe must give
- * the same. ELF_DUMP=1 prints the lines; ELF_BENCH=1 times the validator.
+ * FNV-1a digest is recorded below. The C gave it (2026-10-31), and the
+ * CeeSafe that replaced it (elfparse.cee) gives the same. ELF_DUMP=1 prints the lines; ELF_BENCH=1 times the validator
+ * (best of 15 runs over 100,000 images).
  * ASan and UBSan.
  */
 
@@ -125,7 +126,7 @@ static void test_refusals(void)
 
 #define ROUNDS 100000
 #define SEED 0xE1F5A5E2026D16E5ull
-/* The digest of the C validator (elfparse.c, 2026-10-31). */
+/* The digest of the C validator (2026-10-31), which elfparse.cee gives too. */
 #define ELF_DIGEST 0x9a2e2083c6cf3e58ull
 
 static uint64_t g_rng;
@@ -243,7 +244,7 @@ static volatile uint64_t g_sink;
 
 static int bench(void)
 {
-    enum { N = 20000 };
+    enum { N = 100000 };
     struct input *ins = malloc(sizeof(*ins) * N);
     if (ins == NULL)
         return 1;
@@ -251,7 +252,7 @@ static int bench(void)
     for (unsigned r = 0; r < N; r++)
         make_input(&ins[r]);
     double best = 1e30;
-    for (int run = 0; run < 9; run++) {
+    for (int run = 0; run < 15; run++) {
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         uint64_t acc = 0;
@@ -266,7 +267,7 @@ static int bench(void)
         if (ns < best)
             best = ns;
     }
-    printf("elf bench: %.2f ns per image (best of 9 runs of %u)\n", best / N, N);
+    printf("elf bench: %.2f ns per image (best of 15 runs of %u)\n", best / N, N);
     free(ins);
     return 0;
 }
