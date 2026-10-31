@@ -23,6 +23,7 @@
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/netparse.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
 #include <kernel/socket.h>
@@ -322,15 +323,17 @@ int nat_out(struct netif *in, unsigned in_flags, struct netif *out, unsigned out
     if (iph->proto == IPPROTO_TCP || iph->proto == IPPROTO_UDP) {
         uint8_t *dl4 = m->data + ihl;
         unsigned dcoff = iph->proto == IPPROTO_TCP ? 16 : 6;
-        uint16_t sport = ntohs(get16(dl4 + 0));    /* guest port Q */
-        uint16_t dport = ntohs(get16(dl4 + 2));    /* the client's port */
+        struct netparse_l4 did;
+        netparse_l4(dl4, iph->proto == IPPROTO_TCP ? 14u : 8u, &did);
+        uint16_t sport = did.sport;    /* guest port Q */
+        uint16_t dport = did.dport;    /* the client's port */
         uint64_t dnow = clock_now_ns();
         arch_irq_state_t ds = spin_lock_irqsave(&g_nat_lock);
         struct nat_entry *de = nat_find_dnat_reply(iph->proto, iph->src, sport, iph->dst, dport, dnow);
         struct nat_entry dsnap;
         bool dhave = false;
         if (de) {
-            if (iph->proto == IPPROTO_TCP && (dl4[13] & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK))
+            if (iph->proto == IPPROTO_TCP && (did.tcp_flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK))
                 de->dnat_synack = true;      /* the guest accepted; the client's ACK completes it */
             de->expires_ns = dnow + nat_timeout(de);
             dsnap = *de;
@@ -367,20 +370,22 @@ int nat_out(struct netif *in, unsigned in_flags, struct netif *out, unsigned out
     uint16_t orig_port, peer_port;
     unsigned foff, coff;      /* identifier and checksum offsets within l4 */
     bool icmp = false, est = false;
+    struct netparse_l4 oid;
+    netparse_l4(l4, proto == IPPROTO_TCP ? 14u : 8u, &oid);
 
     if (proto == IPPROTO_UDP) {
-        orig_port = ntohs(get16(l4 + 0));
-        peer_port = ntohs(get16(l4 + 2));
+        orig_port = oid.sport;
+        peer_port = oid.dport;
         foff = 0; coff = 6;
     } else if (proto == IPPROTO_TCP) {
-        orig_port = ntohs(get16(l4 + 0));
-        peer_port = ntohs(get16(l4 + 2));
+        orig_port = oid.sport;
+        peer_port = oid.dport;
         foff = 0; coff = 16;
-        est = (l4[13] & TH_ACK) && !(l4[13] & TH_SYN);
+        est = (oid.tcp_flags & TH_ACK) && !(oid.tcp_flags & TH_SYN);
     } else if (proto == IPPROTO_ICMP) {
-        if (l4[0] != ICMP_ECHO)
+        if (oid.icmp_type != ICMP_ECHO)
             return -ENOTSUP;             /* only echo is masqueraded */
-        orig_port = ntohs(get16(l4 + 4));
+        orig_port = oid.icmp_id;
         peer_port = 0;
         foff = 4; coff = 2;
         icmp = true;
@@ -467,8 +472,8 @@ static bool nat_in_icmp_error(struct mbuf *m, unsigned ihl, uint16_t total)
     if (!m_copydata(m, icmp_off, sizeof(hdr), hdr))
         return false;
     const struct ipv4_hdr *qiph = (const struct ipv4_hdr *)(hdr + sizeof(struct icmp_hdr));
-    unsigned qihl = IPV4_HDR_LEN(qiph);
-    if ((qiph->vhl >> 4) != 4 || qihl < 20)
+    uint32_t qihl;
+    if (!netparse_ipv4_quote(hdr + sizeof(struct icmp_hdr), &qihl))
         return false;
     /* The quote is the packet we sent (src = our nat_ip). Its L4 source
      * identifier is the value we lent. */
@@ -476,13 +481,15 @@ static bool nat_in_icmp_error(struct mbuf *m, unsigned ihl, uint16_t total)
     if (!m_copydata(m, icmp_off + sizeof(struct icmp_hdr) + qihl, 8, ql4))
         return false;
     uint8_t qproto = qiph->proto;
+    struct netparse_l4 q4;
+    netparse_l4(ql4, sizeof(ql4), &q4);
     uint16_t nat_id, peer_port;
     if (qproto == IPPROTO_ICMP) {
-        nat_id = (uint16_t)(ql4[4] << 8 | ql4[5]);      /* echo id */
+        nat_id = q4.icmp_id;      /* echo id */
         peer_port = 0;
     } else {
-        nat_id = (uint16_t)(ql4[0] << 8 | ql4[1]);      /* our lent source port */
-        peer_port = (uint16_t)(ql4[2] << 8 | ql4[3]);   /* the far side's port */
+        nat_id = q4.sport;        /* our lent source port */
+        peer_port = q4.dport;     /* the far side's port */
     }
 
     uint64_t now = clock_now_ns();
@@ -620,6 +627,8 @@ bool nat_in(struct netif *nif, struct mbuf *m,
     uint8_t l4[8];
     if (!m_copydata(m, ihl, sizeof(l4), l4))
         return false;
+    struct netparse_l4 id;
+    netparse_l4(l4, sizeof(l4), &id);
 
     /* An ICMP message we might translate must pass the same checksum check
      * the normal receive path applies -- nat_in runs before icmp_input, and
@@ -634,18 +643,18 @@ bool nat_in(struct netif *nif, struct mbuf *m,
 
     /* Decide without disturbing m (read-only via the copy), so a non-NAT
      * packet falls through to normal delivery untouched. */
-    if (proto == IPPROTO_ICMP && (l4[0] == ICMP_DEST_UNREACH || l4[0] == ICMP_TIME_EXCEEDED))
+    if (proto == IPPROTO_ICMP && (id.icmp_type == ICMP_DEST_UNREACH || id.icmp_type == ICMP_TIME_EXCEEDED))
         return nat_in_icmp_error(m, ihl, total);
 
     uint16_t nat_port, peer_port;
     if (proto == IPPROTO_ICMP) {
-        if (l4[0] != ICMP_ECHO_REPLY)
+        if (id.icmp_type != ICMP_ECHO_REPLY)
             return false;
-        nat_port = (uint16_t)(l4[4] << 8 | l4[5]);    /* echo id */
+        nat_port = id.icmp_id;    /* echo id */
         peer_port = 0;
     } else {
-        peer_port = (uint16_t)(l4[0] << 8 | l4[1]);   /* reply's source port */
-        nat_port = (uint16_t)(l4[2] << 8 | l4[3]);    /* reply's dest port = the lent id */
+        peer_port = id.sport;     /* reply's source port */
+        nat_port = id.dport;      /* reply's dest port = the lent id */
     }
 
     uint64_t now = clock_now_ns();

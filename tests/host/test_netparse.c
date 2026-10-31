@@ -1,0 +1,399 @@
+/*
+ * test_netparse.c - Host test of the network receive path's decoders
+ * (kernel/net/netparse.h; roadmap 2.0 SA5, the network-frame family).
+ * ASan/UBSan.
+ *
+ * Besides direct checks, a recorded digest: 200,000 inputs from a seeded
+ * generator, half of them a valid header of the decoder's layer with a few
+ * bytes changed (so the accepting paths are reached, not only the
+ * refusals), every decoder run on each with lengths, MACs and option types
+ * the generator also picks. Every result is a line, and the lines' FNV-1a
+ * digest is recorded below: the differential test of the rule's point 5.
+ * The C decoders gave it; the CeeSafe ones (netparse.cee) must give the
+ * same before the C is deleted. NETPARSE_DUMP=1 prints the lines.
+ *
+ * NETPARSE_BENCH=1 times the decoders instead: the same inputs, every
+ * decoder on each, best of 9 runs, in nanoseconds per input (the 5% rule).
+ */
+
+#include "harness.h"
+
+#include <kernel/net/netparse.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+/* --- direct checks --------------------------------------------------------- */
+
+static const uint8_t OWN[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+
+static void eth(uint8_t *f, const uint8_t dst[6], const uint8_t src[6], uint16_t type)
+{
+    memcpy(f, dst, 6);
+    memcpy(f + 6, src, 6);
+    f[12] = (uint8_t)(type >> 8);
+    f[13] = (uint8_t)type;
+}
+
+static void test_ether(void)
+{
+    static const uint8_t peer[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x02 };
+    static const uint8_t other[6] = { 0x52, 0x54, 0x00, 0x99, 0x99, 0x99 };
+    static const uint8_t bcast[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    static const uint8_t mcast[6] = { 0x33, 0x33, 0x00, 0x00, 0x00, 0x01 };
+    uint8_t f[14];
+    uint16_t type = 0;
+    eth(f, OWN, peer, 0x0800);
+    EXPECT(netparse_ether(f, OWN, &type) == NETPARSE_ETH_UNICAST && type == 0x0800);
+    eth(f, other, peer, 0x0806);
+    EXPECT(netparse_ether(f, OWN, &type) == NETPARSE_ETH_OTHER);
+    eth(f, OWN, OWN, 0x0800);
+    EXPECT(netparse_ether(f, OWN, &type) == NETPARSE_ETH_OWN);
+    eth(f, bcast, OWN, 0x0806);   /* our own broadcast, reflected */
+    EXPECT(netparse_ether(f, OWN, &type) == NETPARSE_ETH_OWN);
+    eth(f, bcast, peer, 0x0806);
+    EXPECT(netparse_ether(f, OWN, &type) == NETPARSE_ETH_BROADCAST && type == 0x0806);
+    eth(f, mcast, peer, 0x86dd);
+    EXPECT(netparse_ether(f, OWN, &type) == NETPARSE_ETH_MULTICAST && type == 0x86dd);
+}
+
+static void arp_pkt(uint8_t *p, uint16_t op)
+{
+    static const uint8_t pkt[28] = { 0, 1, 8, 0, 6, 4, 0, 1, 0x52, 0x54, 0, 0x12, 0x34, 2, 10, 0, 2, 2,
+                                     0, 0, 0, 0, 0, 0, 10, 0, 2, 15 };
+    memcpy(p, pkt, sizeof(pkt));
+    p[6] = (uint8_t)(op >> 8);
+    p[7] = (uint8_t)op;
+}
+
+static void test_arp(void)
+{
+    uint8_t p[28];
+    struct netparse_arp a;
+    arp_pkt(p, 2);
+    EXPECT(netparse_arp(p, &a));
+    EXPECT(a.op == 2 && a.sha[5] == 2 && a.spa[0] == 10 && a.spa[3] == 2 && a.tpa[3] == 15);
+    for (int i = 0; i < 6; i++) {   /* each of htype, ptype, hlen, plen wrong */
+        arp_pkt(p, 1);
+        p[i] ^= 0x10;
+        EXPECT(!netparse_arp(p, &a));
+    }
+}
+
+/* A valid IPv4 header of `ihl` bytes in a `total`-byte datagram, checksummed. */
+static void ipv4_hdr(uint8_t *h, uint32_t ihl, uint32_t total)
+{
+    memset(h, 0, ihl);
+    h[0] = (uint8_t)(0x40 | ihl / 4);
+    h[2] = (uint8_t)(total >> 8);
+    h[3] = (uint8_t)total;
+    h[6] = 0x40;   /* DF */
+    h[8] = 64;
+    h[9] = 17;
+    h[12] = 10; h[15] = 2;
+    h[16] = 10; h[19] = 15;
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < ihl; i += 2)
+        sum += (uint32_t)(h[i] << 8 | h[i + 1]);
+    while (sum >> 16)
+        sum = (sum & 0xffff) + (sum >> 16);
+    sum = ~sum & 0xffff;
+    h[10] = (uint8_t)(sum >> 8);
+    h[11] = (uint8_t)sum;
+}
+
+static void test_ipv4(void)
+{
+    uint8_t h[60];
+    uint32_t ihl = 0, total = 0;
+    ipv4_hdr(h, 20, 48);
+    EXPECT(netparse_ipv4_outer(h, 48, &ihl, &total) == NETPARSE_OK && ihl == 20 && total == 48);
+    EXPECT(netparse_ipv4_outer(h, 47, &ihl, &total) == NETPARSE_BAD);   /* claims more than arrived */
+    EXPECT(netparse_ipv4_header(h, 20) == NETPARSE_OK);
+    h[8] = 63;   /* TTL changed under the checksum */
+    EXPECT(netparse_ipv4_header(h, 20) == NETPARSE_BAD_CKSUM);
+    ipv4_hdr(h, 60, 60);
+    EXPECT(netparse_ipv4_outer(h, 1500, &ihl, &total) == NETPARSE_OK && ihl == 60 && total == 60);
+    EXPECT(netparse_ipv4_header(h, 60) == NETPARSE_OK);
+    ipv4_hdr(h, 20, 19);   /* total below the header */
+    EXPECT(netparse_ipv4_outer(h, 100, &ihl, &total) == NETPARSE_BAD);
+    ipv4_hdr(h, 20, 40);
+    h[0] = 0x44;   /* ihl 16 */
+    EXPECT(netparse_ipv4_outer(h, 100, &ihl, &total) == NETPARSE_BAD);
+    h[0] = 0x65;   /* version 6 */
+    EXPECT(netparse_ipv4_outer(h, 100, &ihl, &total) == NETPARSE_BAD);
+    /* A fragment with a correct checksum: refused as a fragment. */
+    ipv4_hdr(h, 20, 40);
+    h[6] = 0x20;   /* MF */
+    h[10] = h[11] = 0;
+    uint32_t sum = 0;
+    for (int i = 0; i < 20; i += 2)
+        sum += (uint32_t)(h[i] << 8 | h[i + 1]);
+    while (sum >> 16)
+        sum = (sum & 0xffff) + (sum >> 16);
+    sum = ~sum & 0xffff;
+    h[10] = (uint8_t)(sum >> 8);
+    h[11] = (uint8_t)sum;
+    EXPECT(netparse_ipv4_header(h, 20) == NETPARSE_FRAGMENT);
+    /* A quote: version and length only. */
+    ipv4_hdr(h, 24, 2);
+    EXPECT(netparse_ipv4_quote(h, &ihl) && ihl == 24);
+    h[0] = 0x43;
+    EXPECT(!netparse_ipv4_quote(h, &ihl));
+}
+
+static void test_ipv6_nd(void)
+{
+    uint8_t h[40] = { 0x60, 0, 0, 0, 0, 32, 58, 255 };
+    uint32_t plen = 0;
+    EXPECT(netparse_ipv6(h, 72, &plen) == NETPARSE_OK && plen == 32);
+    EXPECT(netparse_ipv6(h, 71, &plen) == NETPARSE_BAD);
+    h[0] = 0x40;
+    EXPECT(netparse_ipv6(h, 72, &plen) == NETPARSE_BAD);
+
+    uint8_t msg[32] = { 135, 0, 0, 0, 0, 0, 0, 0, 0xfe, 0x80 };
+    msg[23] = 1;
+    msg[24] = 1;
+    msg[25] = 1;
+    memcpy(msg + 26, OWN, 6);
+    struct netparse_nd nd;
+    netparse_nd(msg, 1, &nd);
+    EXPECT(nd.has_mac && nd.target[0] == 0xfe && nd.target[15] == 1 && memcmp(nd.mac, OWN, 6) == 0);
+    netparse_nd(msg, 2, &nd);   /* a solicitation's option is not a target address */
+    EXPECT(!nd.has_mac && nd.target[0] == 0xfe && nd.mac[0] == 0);
+    msg[25] = 2;
+    netparse_nd(msg, 1, &nd);
+    EXPECT(!nd.has_mac);
+}
+
+static void test_transports(void)
+{
+    uint8_t u[8] = { 0x30, 0x39, 0, 53, 0, 20, 0, 0 };
+    struct netparse_udp d;
+    EXPECT(netparse_udp(u, 20, &d) == NETPARSE_OK && d.len == 20 && d.sport == 12345 && d.dport == 53 && !d.has_cksum);
+    EXPECT(netparse_udp(u, 19, &d) == NETPARSE_BAD);
+    u[7] = 1;
+    EXPECT(netparse_udp(u, 30, &d) == NETPARSE_OK && d.has_cksum);
+    u[5] = 7;
+    EXPECT(netparse_udp(u, 30, &d) == NETPARSE_BAD);
+
+    uint8_t t[14] = { 0x30, 0x39, 0, 80, 0x01, 0x02, 0x03, 0x04, 0, 0, 0, 0, 0x50, 0x12 };
+    struct netparse_l4 l;
+    netparse_l4(t, 14, &l);
+    EXPECT(l.sport == 12345 && l.dport == 80 && l.seq == 0x01020304 && l.tcp_flags == 0x12);
+    EXPECT(l.icmp_type == 0x30 && l.icmp_id == 0x0102);
+    netparse_l4(t, 8, &l);
+    EXPECT(l.tcp_flags == 0);
+}
+
+/* --- the recorded digest --------------------------------------------------- */
+
+#define ROUNDS 200000
+#define DIGEST_SEED 0x5A5E7F4A3E202610ull
+/* The digest of the C decoders (netparse.c, 2026-10-31). An implementation
+ * that disagrees changes it: find the first differing line with
+ * NETPARSE_DUMP=1 against the C. */
+#define NETPARSE_DIGEST 0xb332eb59d8cf9149ull
+
+struct input {
+    uint8_t b[64];
+    uint8_t own[6];
+    uint32_t len_a, len_b;   /* packet lengths the length checks are given */
+    uint8_t opt_type;
+    uint32_t avail;
+};
+
+static uint64_t g_rng;
+
+static uint64_t next(void)
+{
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 7;
+    g_rng ^= g_rng << 17;
+    return g_rng;
+}
+
+static void make_input(struct input *in)
+{
+    for (size_t i = 0; i < sizeof(in->b); i += 8) {
+        uint64_t r = next();
+        memcpy(in->b + i, &r, 8);
+    }
+    switch (next() % 8) {   /* a valid start for one layer, or (0-3) none */
+    case 4: {
+        uint32_t ihl = 20 + 4 * (uint32_t)(next() % 11);
+        ipv4_hdr(in->b, ihl, ihl + (uint32_t)(next() % 64));
+        break;
+    }
+    case 5:
+        arp_pkt(in->b, (uint16_t)(1 + next() % 3));
+        break;
+    case 6:
+        in->b[0] = 0x60;
+        in->b[4] = 0;
+        in->b[5] = (uint8_t)(next() % 64);
+        in->b[24] = (uint8_t)(1 + next() % 2);
+        in->b[25] = 1;
+        break;
+    case 7:
+        in->b[4] = 0;
+        in->b[5] = (uint8_t)(next() % 32);
+        break;
+    default:
+        break;
+    }
+    unsigned flips = (unsigned)(next() % 4);   /* then a few bytes changed */
+    for (unsigned i = 0; i < flips; i++)
+        in->b[next() % 64] ^= (uint8_t)(1u << (next() % 8));
+    switch (next() % 3) {   /* the interface's MAC: the frame's destination, its source, or another */
+    case 0: memcpy(in->own, in->b, 6); break;
+    case 1: memcpy(in->own, in->b + 6, 6); break;
+    default: memcpy(in->own, OWN, 6); break;
+    }
+    uint32_t claimed = (uint32_t)(in->b[2] << 8 | in->b[3]);
+    in->len_a = next() % 2 ? claimed + (uint32_t)(next() % 3) - 1 : (uint32_t)(next() % 2000);
+    in->len_b = next() % 2 ? (uint32_t)(in->b[4] << 8 | in->b[5]) + (uint32_t)(next() % 3) + 39 : (uint32_t)(next() % 200);
+    in->opt_type = (uint8_t)(1 + next() % 2);
+    in->avail = next() % 2 ? 14 : 8;
+}
+
+/* Every decoder on one input, its results as a line; `accepted` counts, per
+ * layer, the inputs a decoder accepted (ipv4, arp, ipv6, udp). */
+static int run_all(const struct input *in, char *line, size_t size, unsigned accepted[4])
+{
+    uint16_t type = 0;
+    uint32_t eth = netparse_ether(in->b, in->own, &type);
+
+    struct netparse_arp a;
+    memset(&a, 0, sizeof(a));
+    bool arp = netparse_arp(in->b, &a);
+
+    uint32_t ihl = 0, total = 0, hdr = 9;
+    uint32_t outer = netparse_ipv4_outer(in->b, in->len_a, &ihl, &total);
+    if (outer == NETPARSE_OK)
+        hdr = netparse_ipv4_header(in->b, ihl);
+    uint32_t qihl = 0;
+    bool quote = netparse_ipv4_quote(in->b, &qihl);
+
+    uint32_t plen = 0;
+    uint32_t v6 = netparse_ipv6(in->b, in->len_b, &plen);
+    struct netparse_nd nd;
+    memset(&nd, 0, sizeof(nd));
+    netparse_nd(in->b, in->opt_type, &nd);
+
+    struct netparse_udp u;
+    memset(&u, 0, sizeof(u));
+    uint32_t udp = netparse_udp(in->b, in->len_a, &u);
+    struct netparse_l4 l;
+    memset(&l, 0, sizeof(l));
+    netparse_l4(in->b, in->avail, &l);
+
+    accepted[0] += outer == NETPARSE_OK && hdr == NETPARSE_OK;
+    accepted[1] += arp;
+    accepted[2] += v6 == NETPARSE_OK;
+    accepted[3] += udp == NETPARSE_OK;
+    return snprintf(line, size,
+                    "e%u:%04x a%d:%u:%02x%02x%02x%02x%02x%02x:%u.%u.%u.%u:%u.%u.%u.%u "
+                    "4%u:%u:%u:%u q%d:%u 6%u:%u n%d:%02x%02x:%02x%02x%02x%02x%02x%02x "
+                    "u%u:%u:%u:%u:%d l%u:%u:%08x:%u:%u:%u",
+                    eth, type, arp, a.op, a.sha[0], a.sha[1], a.sha[2], a.sha[3], a.sha[4], a.sha[5], a.spa[0],
+                    a.spa[1], a.spa[2], a.spa[3], a.tpa[0], a.tpa[1], a.tpa[2], a.tpa[3], outer, ihl, total, hdr,
+                    quote, qihl, v6, plen, nd.has_mac, nd.target[0], nd.target[15], nd.mac[0], nd.mac[1], nd.mac[2],
+                    nd.mac[3], nd.mac[4], nd.mac[5], udp, u.len, u.sport, u.dport, u.has_cksum, l.sport, l.dport,
+                    l.seq, l.icmp_type, l.icmp_id, l.tcp_flags);
+}
+
+static void test_recorded_digest(void)
+{
+    bool dump = getenv("NETPARSE_DUMP") != NULL;
+    uint64_t digest = 0xcbf29ce484222325ull;
+    g_rng = DIGEST_SEED;
+    unsigned accepted[4] = { 0, 0, 0, 0 };
+    for (unsigned r = 0; r < ROUNDS; r++) {
+        struct input in;
+        make_input(&in);
+        char line[512];
+        int n = run_all(&in, line, sizeof(line), accepted);
+        EXPECT(n > 0 && (size_t)n < sizeof(line));
+        for (int i = 0; i < n; i++) {
+            digest ^= (uint8_t)line[i];
+            digest *= 0x100000001b3ull;
+        }
+        digest ^= '\n';
+        digest *= 0x100000001b3ull;
+        if (dump)
+            printf("%s\n", line);
+    }
+    /* The generator reaches the accepting paths, not only the refusals. */
+    EXPECT(accepted[0] > 1000 && accepted[1] > 1000 && accepted[2] > 1000 && accepted[3] > 1000);
+    printf("  netparse digest 0x%016llx over %u inputs (accepted: ipv4 %u, arp %u, ipv6 %u, udp %u)\n",
+           (unsigned long long)digest, ROUNDS, accepted[0], accepted[1], accepted[2], accepted[3]);
+    EXPECT(digest == NETPARSE_DIGEST);
+}
+
+/* --- the benchmark ----------------------------------------------------------- */
+
+static volatile uint64_t g_sink;
+
+static int bench(void)
+{
+    struct input *ins = malloc(sizeof(*ins) * ROUNDS);
+    if (ins == NULL)
+        return 1;
+    g_rng = DIGEST_SEED;
+    for (unsigned r = 0; r < ROUNDS; r++)
+        make_input(&ins[r]);
+    double best = 1e30;
+    for (int run = 0; run < 9; run++) {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        uint64_t acc = 0;
+        for (unsigned r = 0; r < ROUNDS; r++) {
+            const struct input *in = &ins[r];
+            uint16_t type;
+            acc += netparse_ether(in->b, in->own, &type) + type;
+            struct netparse_arp a;
+            acc += netparse_arp(in->b, &a) ? a.op : 0;
+            uint32_t ihl, total;
+            if (netparse_ipv4_outer(in->b, in->len_a, &ihl, &total) == NETPARSE_OK)
+                acc += netparse_ipv4_header(in->b, ihl) + total;
+            acc += netparse_ipv4_quote(in->b, &ihl);
+            uint32_t plen;
+            acc += netparse_ipv6(in->b, in->len_b, &plen);
+            struct netparse_nd nd;
+            netparse_nd(in->b, in->opt_type, &nd);
+            acc += nd.has_mac;
+            struct netparse_udp u;
+            acc += netparse_udp(in->b, in->len_a, &u);
+            struct netparse_l4 l;
+            netparse_l4(in->b, in->avail, &l);
+            acc += l.seq;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        g_sink += acc;
+        double ns = (double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec);
+        if (ns < best)
+            best = ns;
+    }
+    printf("netparse bench: %.2f ns per input (best of 9 runs of %u)\n", best / ROUNDS, ROUNDS);
+    free(ins);
+    return 0;
+}
+
+static const struct host_test tests[] = {
+    { "ethernet", test_ether },
+    { "arp", test_arp },
+    { "ipv4", test_ipv4 },
+    { "ipv6 and neighbour discovery", test_ipv6_nd },
+    { "udp and transport ids", test_transports },
+    { "recorded digest", test_recorded_digest },
+};
+
+int main(void)
+{
+    if (getenv("NETPARSE_BENCH") != NULL)
+        return bench();
+    return harness_run(tests, sizeof(tests) / sizeof(tests[0]));
+}

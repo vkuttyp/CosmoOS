@@ -9,6 +9,7 @@
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/netparse.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
 #include <kernel/string.h>
@@ -230,13 +231,15 @@ void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     m = m_pullup(m, sizeof(struct nd_msg));
     if (m == NULL)
         return;
-    struct nd_msg nd;
-    memcpy(&nd, m->data, sizeof(nd));
+    struct netparse_nd nd;
+    netparse_nd(m->data, 1, &nd);   /* a source link-layer address option */
     m_freem(m);
-    if (!in6_equal(&nd.target, &nif->ip6_ll) || in6_is_unspecified(&ip6->src))
+    struct in6_addr target;
+    memcpy(target.s6_addr, nd.target, sizeof(target.s6_addr));
+    if (!in6_equal(&target, &nif->ip6_ll) || in6_is_unspecified(&ip6->src))
         return;
     /* Learn the asker (never at the cost of an entry in use), answer with our address. */
-    if (nd.opt_type == 1 && nd.opt_len == 1) {
+    if (nd.has_mac) {
         nd_test_park_before_lock(nif);
         arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
         if (!(__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_UP)) {
@@ -247,12 +250,12 @@ void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
         if (e == NULL)
             e = nd_alloc(&ip6->src, nif, false);
         if (e) {
-            memcpy(e->mac, nd.opt_mac, ETH_ALEN);
+            memcpy(e->mac, nd.mac, ETH_ALEN);
             e->state = ND_REACHABLE;
             e->updated_ns = clock_now_ns();
         }
         spin_unlock_irqrestore(&g_nd_lock, s);
-        nd_send(nif, ICMPV6_NA, &nif->ip6_ll, &ip6->src, nd.opt_mac);
+        nd_send(nif, ICMPV6_NA, &nif->ip6_ll, &ip6->src, nd.mac);
     }
 }
 
@@ -262,11 +265,13 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     m = m_pullup(m, sizeof(struct nd_msg));
     if (m == NULL)
         return;
-    struct nd_msg nd;
-    memcpy(&nd, m->data, sizeof(nd));
+    struct netparse_nd nd;
+    netparse_nd(m->data, 2, &nd);   /* a target link-layer address option */
     m_freem(m);
-    if (nd.opt_type != 2 || nd.opt_len != 1)
+    if (!nd.has_mac)
         return;
+    struct in6_addr target;
+    memcpy(target.s6_addr, nd.target, sizeof(target.s6_addr));
     struct mbuf *pending = NULL;
     nd_test_park_before_lock(nif);
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
@@ -274,9 +279,9 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
         spin_unlock_irqrestore(&g_nd_lock, s);   /* as nd_input_ns */
         return;
     }
-    struct nd_entry *e = nd_find(nif, &nd.target);   /* this interface's entry: an advertisement here completes no other's */
+    struct nd_entry *e = nd_find(nif, &target);   /* this interface's entry: an advertisement here completes no other's */
     if (e && e->state == ND_INCOMPLETE) {   /* only the answer to our own solicitation */
-        memcpy(e->mac, nd.opt_mac, ETH_ALEN);
+        memcpy(e->mac, nd.mac, ETH_ALEN);
         e->state = ND_REACHABLE;
         e->updated_ns = clock_now_ns();
         pending = e->pending;
@@ -284,7 +289,7 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     }
     spin_unlock_irqrestore(&g_nd_lock, s);
     if (pending)
-        ether_output(nif, pending, nd.opt_mac, ETH_P_IPV6);
+        ether_output(nif, pending, nd.mac, ETH_P_IPV6);
 }
 
 #if CONFIG_DEBUG
@@ -530,8 +535,8 @@ void ipv6_input(struct netif *nif, struct mbuf *m)
         return;
     }
     const struct ipv6_hdr *h = (const struct ipv6_hdr *)m->data;
-    uint16_t plen = ntohs(h->plen);
-    if ((ntohl(h->vtcfl) >> 28) != 6 || (uint32_t)plen + sizeof(*h) > m->pkt.len) {
+    uint32_t plen;
+    if (netparse_ipv6(m->data, m->pkt.len, &plen) != NETPARSE_OK) {
         STAT(rx_bad_header);
         m_freem(m);
         return;
@@ -557,7 +562,7 @@ void ipv6_input(struct netif *nif, struct mbuf *m)
         m_freem(m);
         return;
     }
-    if ((uint32_t)plen + sizeof(*h) < m->pkt.len)
+    if (plen + sizeof(*h) < m->pkt.len)
         m_adj(m, -(int)(m->pkt.len - plen - sizeof(*h)));
     struct ipv6_hdr hdr;
     memcpy(&hdr, h, sizeof(hdr));

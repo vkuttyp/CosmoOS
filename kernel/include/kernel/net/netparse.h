@@ -1,0 +1,110 @@
+/*
+ * netparse.h - The network receive path's decoders: every check and field
+ * read the stack makes on bytes a frame brought (roadmap 2.0 SA5, the
+ * network-frame family). The callers keep the mbufs, the tables and the
+ * policy; these see only a buffer the caller has made contiguous (with
+ * m_pullup or m_copydata) and its length, and say what it holds or why it
+ * is dropped. No function here reads past the bytes its comment names.
+ *
+ * Addresses are copied byte for byte, so they stay in network order: a
+ * caller compares them with memcmp or copies them into its own uint32_t
+ * or struct in6_addr. Ports, ids and sequence numbers are in host order.
+ */
+
+#ifndef KERNEL_NET_NETPARSE_H
+#define KERNEL_NET_NETPARSE_H
+
+#include <kernel/types.h>
+
+/* --- Ethernet ---------------------------------------------------------- */
+
+#define NETPARSE_ETH_OTHER     0u   /* unicast to another host: drop (a promiscuous device's) */
+#define NETPARSE_ETH_OWN       1u   /* sent by this interface and reflected: drop */
+#define NETPARSE_ETH_UNICAST   2u
+#define NETPARSE_ETH_BROADCAST 3u
+#define NETPARSE_ETH_MULTICAST 4u
+
+/* The 14-byte header `hdr` of a frame arriving on an interface whose MAC is
+ * `own` (6 bytes): one of NETPARSE_ETH_*, and the EtherType in *type. */
+uint32_t netparse_ether(const uint8_t *hdr, const uint8_t *own, uint16_t *type);
+
+/* --- ARP --------------------------------------------------------------- */
+
+struct netparse_arp {
+    uint16_t op;          /* ARP_OP_REQUEST, ARP_OP_REPLY or another */
+    uint8_t sha[6];       /* the sender's MAC */
+    uint8_t spa[4];       /* the sender's IPv4 address */
+    uint8_t tpa[4];       /* the target's IPv4 address */
+};
+
+/* The 28-byte packet `pkt`: true for Ethernet hardware and IPv4 protocol
+ * addresses of their sizes, with the fields in *out; false for any other. */
+bool netparse_arp(const uint8_t *pkt, struct netparse_arp *out);
+
+/* --- IPv4 -------------------------------------------------------------- */
+
+#define NETPARSE_OK        0u
+#define NETPARSE_BAD       1u   /* a malformed header, or one that claims more bytes than arrived */
+#define NETPARSE_BAD_CKSUM 2u
+#define NETPARSE_FRAGMENT  3u   /* MF or an offset: fragments are not reassembled */
+
+/* The fixed 20 bytes of an IPv4 header, in a packet of `pkt_len` bytes:
+ * NETPARSE_OK with the header's length in *ihl (20-60) and the datagram's
+ * in *total (ihl..pkt_len), or NETPARSE_BAD. */
+uint32_t netparse_ipv4_outer(const uint8_t *hdr, uint32_t pkt_len, uint32_t *ihl, uint32_t *total);
+
+/* The whole header, `ihl` bytes as netparse_ipv4_outer gave them:
+ * NETPARSE_OK, NETPARSE_BAD_CKSUM or NETPARSE_FRAGMENT. */
+uint32_t netparse_ipv4_header(const uint8_t *hdr, uint32_t ihl);
+
+/* An IPv4 header quoted in an ICMP error, its first 20 bytes: true with its
+ * length in *ihl when it is version 4 and at least 20 bytes long. Nothing
+ * else is checked: a quote is truncated and its checksum is the sender's. */
+bool netparse_ipv4_quote(const uint8_t *q, uint32_t *ihl);
+
+/* --- IPv6 -------------------------------------------------------------- */
+
+/* The 40-byte header of a packet of `pkt_len` bytes: NETPARSE_OK with the
+ * payload length in *plen (at most pkt_len - 40), or NETPARSE_BAD. */
+uint32_t netparse_ipv6(const uint8_t *hdr, uint32_t pkt_len, uint32_t *plen);
+
+struct netparse_nd {
+    uint8_t target[16];   /* the solicited or advertised address */
+    uint8_t mac[6];       /* the link-layer address option's, when has_mac */
+    bool has_mac;
+};
+
+/* A 32-byte neighbour solicitation or advertisement (its ICMPv6 header, the
+ * target, one option): the target, and the MAC when the option is of type
+ * `opt_type` (1, source; 2, target link-layer address) and 8 bytes long. */
+void netparse_nd(const uint8_t *msg, uint8_t opt_type, struct netparse_nd *out);
+
+/* --- transports -------------------------------------------------------- */
+
+struct netparse_udp {
+    uint16_t len;         /* the datagram's length, header included: 8..pkt_len */
+    uint16_t sport;
+    uint16_t dport;
+    bool has_cksum;       /* a zero checksum field means none (IPv4 only) */
+};
+
+/* The 8-byte header of a UDP datagram whose IP payload is `pkt_len` bytes:
+ * NETPARSE_OK with its fields in *out, or NETPARSE_BAD for a length below
+ * the header's or beyond the payload. */
+uint32_t netparse_udp(const uint8_t *hdr, uint32_t pkt_len, struct netparse_udp *out);
+
+struct netparse_l4 {
+    uint16_t sport;       /* UDP and TCP: bytes 0-1 */
+    uint16_t dport;       /* bytes 2-3 */
+    uint32_t seq;         /* TCP: bytes 4-7 */
+    uint8_t icmp_type;    /* ICMP: byte 0 */
+    uint16_t icmp_id;     /* ICMP echo: bytes 4-5 */
+    uint8_t tcp_flags;    /* TCP: byte 13, when `avail` reaches it; else 0 */
+};
+
+/* The identifiers NAT, the firewall and ICMP errors key a flow on, from the
+ * first `avail` bytes (at least 8) of a transport header: every field, read
+ * as the protocol it would be; the caller picks the ones its protocol has. */
+void netparse_l4(const uint8_t *b, uint32_t avail, struct netparse_l4 *out);
+
+#endif /* KERNEL_NET_NETPARSE_H */

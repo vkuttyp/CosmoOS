@@ -23,6 +23,7 @@
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/netparse.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/tcp.h>
 #include <kernel/netif.h>
@@ -384,16 +385,18 @@ static void l4_read(struct mbuf *m, unsigned ihl, uint8_t proto, struct l4_view 
     if (m->pkt.len < ihl + need || !m_copydata(m, ihl, need, b))
         return;
     v->ok = true;
+    struct netparse_l4 id;
+    netparse_l4(b, need, &id);
     if (proto == IPPROTO_ICMP) {
-        v->icmp_type = b[0];
-        v->icmp_id = (uint16_t)(b[4] << 8 | b[5]);
+        v->icmp_type = id.icmp_type;
+        v->icmp_id = id.icmp_id;
         return;
     }
     v->ports = true;
-    v->sport = (uint16_t)(b[0] << 8 | b[1]);
-    v->dport = (uint16_t)(b[2] << 8 | b[3]);
+    v->sport = id.sport;
+    v->dport = id.dport;
     if (proto == IPPROTO_TCP)
-        v->tcp_flags = b[13];
+        v->tcp_flags = id.tcp_flags;
 }
 
 static inline bool prefix_matches(uint32_t addr, uint32_t net, uint8_t prefix)

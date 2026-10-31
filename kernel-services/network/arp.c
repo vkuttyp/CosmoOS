@@ -8,6 +8,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/netparse.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/ip.h>
 #include <kernel/string.h>
@@ -198,16 +199,19 @@ void arp_input(struct netif *nif, struct mbuf *m)
     m = m_pullup(m, sizeof(struct arp_pkt));
     if (m == NULL)
         return;
-    struct arp_pkt a;
-    memcpy(&a, m->data, sizeof(a));
+    struct netparse_arp a;
+    bool ok = netparse_arp(m->data, &a);   /* Ethernet and IPv4 addresses of their sizes */
     m_freem(m);
-    if (ntohs(a.htype) != ARP_HW_ETHER || ntohs(a.ptype) != ETH_P_IP || a.hlen != ETH_ALEN || a.plen != 4)
+    if (!ok)
         return;
-    if (a.spa == 0 || a.spa == nif->ip4.addr)
+    uint32_t spa, tpa;   /* network order, as nif->ip4.addr */
+    memcpy(&spa, a.spa, sizeof(spa));
+    memcpy(&tpa, a.tpa, sizeof(tpa));
+    if (spa == 0 || spa == nif->ip4.addr)
         return;   /* probes and our own address: nothing to learn */
 
-    uint16_t op = ntohs(a.op);
-    bool for_us = a.tpa == nif->ip4.addr && nif->ip4.addr != 0;
+    uint16_t op = a.op;
+    bool for_us = tpa == nif->ip4.addr && nif->ip4.addr != 0;
     struct mbuf *pending = NULL;
     arp_test_park_before_lock(nif);
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
@@ -222,7 +226,7 @@ void arp_input(struct netif *nif, struct mbuf *m)
         spin_unlock_irqrestore(&g_lock, s);
         return;
     }
-    struct arp_entry *e = find(nif, a.spa);   /* this interface's entry: a reply here completes no other's */
+    struct arp_entry *e = find(nif, spa);   /* this interface's entry: a reply here completes no other's */
     /*
      * ARP carries no authentication, so the table learns only what RFC 826
      * requires: a request addressed to us records (or refreshes) the asker,
@@ -239,7 +243,7 @@ void arp_input(struct netif *nif, struct mbuf *m)
             g_stats.unsolicited++;
     }
     if (learn && e == NULL)
-        e = alloc_entry(a.spa, nif, false);   /* NULL when the table is full */
+        e = alloc_entry(spa, nif, false);   /* NULL when the table is full */
     if (learn && e) {
         memcpy(e->mac, a.sha, ETH_ALEN);
         e->state = ARP_REACHABLE;
@@ -254,7 +258,7 @@ void arp_input(struct netif *nif, struct mbuf *m)
         __atomic_fetch_add(&g_stats.requests_rcvd, 1, __ATOMIC_RELAXED);
         if (for_us) {
             __atomic_fetch_add(&g_stats.replies_sent, 1, __ATOMIC_RELAXED);
-            send_arp(nif, ARP_OP_REPLY, a.spa, a.sha, a.sha);
+            send_arp(nif, ARP_OP_REPLY, spa, a.sha, a.sha);
         }
     } else if (op == ARP_OP_REPLY) {
         __atomic_fetch_add(&g_stats.replies_rcvd, 1, __ATOMIC_RELAXED);

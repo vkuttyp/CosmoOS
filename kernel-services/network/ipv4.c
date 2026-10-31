@@ -15,6 +15,7 @@
 #include <arch/cpu.h>
 #include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/netparse.h>
 #include <kernel/net/raw.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
@@ -385,21 +386,23 @@ static bool icmp_quoted_flow(struct mbuf *m, const struct icmp_hdr *ic,
     if (!m_copydata(m, sizeof(*ic), sizeof(quote), quote))
         return false;
     const struct ipv4_hdr *q = (const struct ipv4_hdr *)quote;
-    unsigned ihl = IPV4_HDR_LEN(q);
-    if ((q->vhl >> 4) != 4 || ihl < 20 || !netif_owns_ipv4(q->src))
+    uint32_t ihl;
+    if (!netparse_ipv4_quote(quote, &ihl) || !netif_owns_ipv4(q->src))
         return false;
     uint8_t th[8];
     if (!m_copydata(m, sizeof(*ic) + ihl, sizeof(th), th))
         return false;
+    struct netparse_l4 l4;
+    netparse_l4(th, sizeof(th), &l4);
     memset(local, 0, sizeof(*local));
     memset(remote, 0, sizeof(*remote));
     local->family = remote->family = COSMO_AF_INET;
     local->v4 = q->src;
     remote->v4 = q->dst;
-    local->port = (uint16_t)(th[0] << 8 | th[1]);
-    remote->port = (uint16_t)(th[2] << 8 | th[3]);
+    local->port = l4.sport;
+    remote->port = l4.dport;
     *proto = q->proto;
-    *seq = (uint32_t)th[4] << 24 | (uint32_t)th[5] << 16 | (uint32_t)th[6] << 8 | th[7];
+    *seq = l4.seq;
     *quoted_len = ntohs(q->len);
     return true;
 }
@@ -730,10 +733,8 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
         STAT(rx_bad_header);
         return;
     }
-    const struct ipv4_hdr *iph = (const struct ipv4_hdr *)m->data;
-    unsigned ihl = IPV4_HDR_LEN(iph);
-    uint16_t total = ntohs(iph->len);
-    if ((iph->vhl >> 4) != 4 || ihl < 20 || total < ihl || total > m->pkt.len) {
+    uint32_t ihl, total;
+    if (netparse_ipv4_outer(m->data, m->pkt.len, &ihl, &total) != NETPARSE_OK) {
         STAT(rx_bad_header);
         m_freem(m);
         return;
@@ -743,16 +744,18 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
         STAT(rx_bad_header);
         return;
     }
-    iph = (const struct ipv4_hdr *)m->data;
-    if (in_cksum(iph, ihl) != 0) {
+    const struct ipv4_hdr *iph = (const struct ipv4_hdr *)m->data;
+    switch (netparse_ipv4_header(m->data, ihl)) {
+    case NETPARSE_BAD_CKSUM:
         STAT(rx_bad_cksum);
         m_freem(m);
         return;
-    }
-    if (ntohs(iph->frag) & 0x3fff) {   /* MF or offset: fragments unsupported */
+    case NETPARSE_FRAGMENT:   /* fragments unsupported */
         STAT(rx_fragments);
         m_freem(m);
         return;
+    default:
+        break;
     }
     /* Trim any link padding to the IP total length before anyone downstream
      * (forwarding, NAT, delivery) reads past it: a short datagram in a padded

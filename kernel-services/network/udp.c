@@ -6,6 +6,7 @@
 #include <kernel/log.h>
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
+#include <kernel/net/netparse.h>
 #include <kernel/net/udp.h>
 #include <kernel/random.h>
 #include <kernel/socket.h>
@@ -240,13 +241,13 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     m = m_pullup(m, sizeof(struct udp_hdr));
     if (m == NULL)
         return;
-    const struct udp_hdr *uh = (const struct udp_hdr *)m->data;
-    uint16_t ulen = ntohs(uh->len);
-    if (ulen < sizeof(*uh) || ulen > len) {
+    struct netparse_udp uh;
+    if (netparse_udp(m->data, len, &uh) != NETPARSE_OK) {
         STAT(rx_bad_len);
         m_freem(m);
         return;
     }
+    uint16_t ulen = uh.len;
     if (ulen < len)
         m_adj(m, -(int)(len - ulen));
 
@@ -258,27 +259,27 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         src.family = dst.family = COSMO_AF_INET;
         src.v4 = ip4->src;
         dst.v4 = ip4->dst;
-        if (uh->cksum != 0)
+        if (uh.has_cksum)
             sum = cksum_pseudo4(ip4->src, ip4->dst, IPPROTO_UDP, ulen);
     } else {
         src.family = dst.family = COSMO_AF_INET6;
         src.v6 = ip6->src;
         dst.v6 = ip6->dst;
-        if (uh->cksum == 0) {
+        if (!uh.has_cksum) {
             STAT(rx_bad_cksum);   /* mandatory on IPv6 */
             m_freem(m);
             return;
         }
         sum = cksum_pseudo6(&ip6->src, &ip6->dst, IPPROTO_UDP, ulen);
     }
-    if (uh->cksum != 0 && !(m->flags & M_CSUM_OK) && cksum_fold(m_cksum_partial(m, 0, ulen, sum)) != 0) {
+    if (uh.has_cksum && !(m->flags & M_CSUM_OK) && cksum_fold(m_cksum_partial(m, 0, ulen, sum)) != 0) {
         STAT(rx_bad_cksum);
         m_freem(m);
         return;
     }
-    src.port = ntohs(uh->sport);
-    dst.port = ntohs(uh->dport);
-    m_adj(m, (int)sizeof(*uh));
+    src.port = uh.sport;
+    dst.port = uh.dport;
+    m_adj(m, (int)sizeof(struct udp_hdr));
     m->pkt.src = src;
 
     /* The host firewall said DROP (M_FW_QUIET): the datagram exists only for
@@ -310,7 +311,7 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     if (pcb == NULL) {
         STAT(rx_no_port);
         if (ip4 && !(m->flags & M_BCAST)) {
-            struct mbuf *q = m_prepend(m, (uint32_t)sizeof(*uh) + IPV4_HDR_LEN(ip4));
+            struct mbuf *q = m_prepend(m, (uint32_t)sizeof(struct udp_hdr) + IPV4_HDR_LEN(ip4));
             if (q) {
                 memcpy(q->data, ip4, IPV4_HDR_LEN(ip4));
                 icmp_send_unreach(q, ip4, ICMP_UNREACH_PORT);
