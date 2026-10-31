@@ -28,6 +28,21 @@ need mcopy "install mtools"
 need qemu-system-x86_64 "install qemu"
 need "$python" "install python3"
 
+echo "Nova:"
+root=$(cd "$(dirname "$0")/.." && pwd)
+if [ -f "$root/.nova-dist" ]; then
+    printf '  ok       a make dist tree: the generated C is here, no novac needed\n'
+else
+    pinned=$("$python" "$root/scripts/nova-gen.py" --pinned)
+    novac=${NOVAC:-$(command -v novac 2>/dev/null || true)}
+    if [ -n "$novac" ] && [ "$("$novac" --version 2>/dev/null)" = "novac $pinned" ]; then
+        printf '  ok       novac %s (%s)\n' "$pinned" "$novac"
+    else
+        printf '  MISSING  novac %s - the build runs it: curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v%s sh (or set NOVAC)\n' "$pinned" "$pinned"
+        status=1
+    fi
+fi
+
 echo "firmware:"
 here=$(cd "$(dirname "$0")" && pwd)
 if fw=$("$here/find-firmware.sh" x86_64 2>/dev/null); then

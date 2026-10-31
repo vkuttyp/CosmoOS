@@ -66,10 +66,11 @@ choosing what to do.
   Run QEMU at default priority; avoid zsh background `&` boot loops, and
   inspect QEMU's priority and nice value with `ps`.
 - State checkable facts: actual paths, functions, measurements and run IDs.
-- A `NAME.c` with a `NAME.nova` beside it is generated from Nova (its
-  banner says so): edit the `.nova` file and run `make nova` with the pinned
-  novac, never the C; commit both. `make nova-check` and CI's "Nova sources"
-  job fail on a mismatch. Before writing or changing Nova, read
+- The kernel's Nova sources (`NAME.nova`) are committed and the C made from
+  them is not: the build runs the pinned novac (install it first) into
+  `out/nova/` and compiles from there. Edit the `.nova` file, never the
+  generated C; `make nova-check` also runs the negative sources, and `make
+  dist` writes a source tarball that builds with no novac. Before writing or changing Nova, read
   [Writing kernel code in Nova](docs/build/nova.md): setup (the pinned
   novac, its MCP server), the workflow, hand-written or generated headers,
   and the kernel's rules (`unsafe` only at the boundary, no failing check

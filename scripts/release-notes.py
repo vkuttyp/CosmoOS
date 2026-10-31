@@ -78,7 +78,9 @@ def main():
              "sound randomness, on x86-64 and AArch64 under QEMU.\n")
     n.append(f"Start with the [user guide](https://github.com/vkuttyp/CosmoOS/blob/{a.tag}/docs/guide/README.md). "
              "Each architecture's files: `cosmoos-ARCH.img` (the signed live image), its UEFI loader, `kernel.elf`, "
-             "`boot.tar`, `cmdline`, the signed `manifest`, `cosmo-upgrade` and its signed package. `SHA256SUMS.sig` is "
+             "`boot.tar`, `cmdline`, the signed `manifest`, `cosmo-upgrade` and its signed package. "
+             f"`cosmoos-{a.tag}-src.tar.gz` is the source, with the C generated from its Nova sources beside them, so it "
+             "builds with no Nova compiler (`make`). `SHA256SUMS.sig` is "
              "`SHA256SUMS`'s detached signature with the release key below (`scripts/modsign.py verify-detached`, or "
              "`cosmo-verify` on an installed system); check the files with `sha256sum --ignore-missing -c SHA256SUMS`.\n")
     n.append("## Release signing key\n")
