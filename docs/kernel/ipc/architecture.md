@@ -11,11 +11,18 @@ lifetime) and invariant 14 (validate untrusted input).
    user process       pipe(h[2]); write(h[1]) in one process, read(h[0]) in another
         │             kernel/syscall/native.c → handle table → pipe end kobjects
         ▼
-   kernel/ipc/pipe.c   one buffer, two ends: `pipe_read` and `pipe_write` kobjects
+   kernel/ipc/pipe.nova  one buffer, two ends: `pipe-read` and `pipe-write` kobjects
         │
    kernel/object/      kobject refcounts, handle rights (READ on the read end, WRITE on the write end)
    kernel/scheduler/   wait queues (killable waits)
 ```
+
+The ring and the anonymous pipe are Nova (roadmap 2.0 SA3): `make nova`
+generates `pipe.c` and `kernel/include/kernel/pipe_types.h` (`struct
+pipe`, `struct pipe_stats`, and the anonymous pipe's end and pair), which
+`pipe.h` includes. The killable waits go through the wait floor's
+`wait_floor_until_killable`; `pipe_floor.c` keeps the two end types,
+constant C objects holding `pipe.nova`'s exported operations.
 
 A pipe is the first IPC primitive; Phase 11 added the second, the futex
 (`kernel/ipc/futex.c`: wait on and wake by a 32-bit user word, keyed by
@@ -50,7 +57,7 @@ gone.
   reference count follows; closing the last handle to an end releases
   it, which wakes the other side.
 - **`fstat`** on either end reports `COSMO_DT_FIFO`.
-- **Named pipes** (`fifo.c`, the named-pipes unit): the same ring behind
+- **Named pipes** (`fifo.nova`, the named-pipes unit): the same ring behind
   a `VNODE_FIFO` node made by `mknod`, its counts the opens of each
   side, POSIX's open rules, a per-open non-blocking bit, and the three
   readiness operations files gained for it (`design.md`, "Named pipes").
@@ -69,7 +76,7 @@ gone.
 | Interface | Header | Used by |
 |---|---|---|
 | `pipe_create(struct kobject **rd, struct kobject **wr)`, `pipe_stats` | `kernel/pipe.h` | `sys_pipe`, self-tests |
-| `struct pipe` (the ring), `pipe_ring_alloc/free/read/write/ready_rd/ready_wr` | `kernel/pipe.h` | the anonymous pipe's ends, `fifo.c` |
+| `struct pipe` (the ring), `pipe_ring_alloc/free/read/write/ready_rd/ready_wr` | `kernel/pipe.h` | the anonymous pipe's ends, `fifo.nova` |
 | `fifo_alloc/free/open/release/read/write/ready/poll_wq/set_nonblock`, `fifo_count` | `kernel/fifo.h` | ramfs's `VNODE_FIFO` vnode ops, `ipc-fifo` |
 | `SYS_mknod` (100), `COSMO_O_NONBLOCK` | `uapi/cosmo/syscall.h` | libc `mkfifo`, `open` |
 | `pipe_read`/`pipe_write` kobject types with `read`/`write`/`stat` | `kernel/object.h` (`kobject_io_type`) | `sys_read`, `sys_write`, `sys_fstat` |

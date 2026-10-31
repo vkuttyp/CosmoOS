@@ -1,0 +1,365 @@
+// Named pipes: the pipe's ring behind a filesystem node (kernel/include/kernel/fifo.h, docs/kernel/ipc/design.md,
+// "Named pipes"; invariant I9), in Nova (roadmap 2.0 SA3). struct fifo and the per-open state are Nova's, generated
+// into kernel/include/kernel/fifo_types.h, which only the generated fifo.c includes: to the rest of the kernel a fifo
+// stays opaque (fifo.h). The open's wait goes through wait_floor.c's killable wait, since a wait entry is C state no
+// Nova local may hold; fifo_floor.c keeps the panic.
+//
+// The ring is made by the first open and freed by the last release, and its reader and writer counts are the live opens
+// of each side. Both facts change together, so they change under one lock order: the fifo's lock (the ring pointer)
+// outside the ring's (the counts). Open waits for its counterpart on the fifo's own queue with no lock held; the wait
+// is killable, and an open that fails -- killed, refused, out of memory -- takes back what it did before it returns,
+// because the VFS runs the release hook only for an open that succeeded.
+//
+// It was first drafted by Nova's c2nova (docs/tooling.md §9.4), then written over by hand.
+
+@header("kernel/kmalloc.h", "kernel/pipe.h", "kernel/spinlock.h", "kernel/vfs.h", "kernel/wait.h", "uapi/cosmo/syscall.h")
+extern "C" {
+    @ctype("spinlock_t")
+    struct spinlock_t;
+    struct waitqueue;
+    struct pipe {
+        lock: spinlock_t;
+        readers: u32;
+        writers: u32;
+        rd_wq: waitqueue;
+        wr_wq: waitqueue;
+    }
+    struct file {
+        priv: *mut void; // the open's state, a fifo_open
+    }
+
+    fn spinlock_init(lock: *mut spinlock_t, name: *CChar);
+    fn spin_lock(lock: *mut spinlock_t);
+    fn spin_unlock(lock: *mut spinlock_t);
+    fn spin_lock_irqsave(lock: *mut spinlock_t) -> usize;
+    fn spin_unlock_irqrestore(lock: *mut spinlock_t, state: usize);
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn waitqueue_wake_all(wq: *mut waitqueue) -> u32;
+    fn wait_floor_until_killable(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void) -> i32;
+    fn file_flags(f: *file) -> u32;
+    fn kzalloc(size: usize) -> *mut void;
+    fn kfree(p: *mut void);
+    fn pipe_ring_alloc() -> *mut pipe;
+    fn pipe_ring_free(p: *mut pipe);
+    fn pipe_ring_read(p: *mut pipe, buf: *mut void, len: usize, nonblock: bool) -> i64;
+    fn pipe_ring_write(p: *mut pipe, buf: *void, len: usize, nonblock: bool) -> i64;
+    fn pipe_ring_ready_rd(p: *mut pipe) -> u32;
+    fn pipe_ring_ready_wr(p: *mut pipe) -> u32;
+}
+
+// fifo_floor.c's.
+extern "C" {
+    fn fifo_floor_panic_live();
+}
+
+// The headers' constants, which fifo_floor.c checks.
+const COSMO_O_RDONLY: u32 = 0x0000;
+const COSMO_O_WRONLY: u32 = 0x0001;
+const COSMO_O_ACCMODE: u32 = 0x0003;
+const COSMO_O_NONBLOCK: u32 = 0x0800;
+const COSMO_IO_READABLE: u32 = 1;
+const COSMO_IO_WRITABLE: u32 = 2;
+const ENOMEM: i32 = 12;
+const ENXIO: i32 = 6;
+
+const FIFO_RD: u32 = 1;
+const FIFO_WR: u32 = 2;
+
+@repr(C)
+struct fifo {
+    lock: spinlock_t; // the ring pointer and the generations; taken outside the ring's lock
+    ring: *mut pipe; // null while nobody has the FIFO open
+    openers: waitqueue; // an open waiting for the other side
+    // Opens ever, per side. A blocking open waits for the OTHER side's generation to move past what it was when this
+    // open joined, not for the other side's count to be nonzero: a writer that opens, writes and closes before the woken
+    // reader gets to run has still "had the FIFO open", and the reader returns to read those bytes and end of file.
+    // Waiting on the count instead lost exactly that writer and left the reader asleep for good (found by the fifo
+    // section's writer child on the first CI-shaped run). Linux keeps the same two counters for the same reason.
+    // Changed under `lock`, read without it by a waiter: accessed atomically.
+    r_gen: u32;
+    w_gen: u32;
+}
+
+@repr(C)
+struct fifo_open {
+    ring: *mut pipe; // held alive by this open's count
+    side: u32; // FIFO_RD, FIFO_WR or both
+    nonblock: u32; // this open's mode (POSIX: per open); accessed atomically (a bool in the C)
+}
+
+static mut g_rings: u32 = 0; // live rings held by fifos; atomic, since each fifo has its own lock
+
+/// An atomic view of g_rings.
+/// Safety: g_rings is only ever accessed through this view.
+unsafe fn rings() -> borrow(static) AtomicU32 => Ptr.toBorrow(borrow mut g_rings as *mut u32 as *AtomicU32);
+
+/// An atomic view of a generation.
+/// Safety: `gen` is a live fifo's r_gen or w_gen.
+unsafe fn generation(gen: *mut u32) -> borrow(static) AtomicU32 => Ptr.toBorrow(gen as *AtomicU32);
+
+/// Safety: `fifo` is a live fifo.
+unsafe fn lockOf(fifo: *mut fifo) -> *mut spinlock_t => borrow mut Ptr.toBorrowMut(fifo).lock as *mut spinlock_t;
+
+/// Safety: `fifo` is a live fifo.
+unsafe fn openersOf(fifo: *mut fifo) -> *mut waitqueue => borrow mut Ptr.toBorrowMut(fifo).openers as *mut waitqueue;
+
+/// Safety: `ring` is a live ring.
+unsafe fn ringLock(ring: *mut pipe) -> *mut spinlock_t => borrow mut Ptr.toBorrowMut(ring).lock as *mut spinlock_t;
+
+/// Safety: `f` is an open fifo file.
+unsafe fn openOf(f: *mut file) -> *mut fifo_open => Ptr.toBorrow(f as *file).priv as *mut fifo_open;
+
+/// An atomic view of an open's mode.
+/// Safety: `fo` is a live open, whose `nonblock` is only ever accessed atomically.
+unsafe fn nonblockOf(fo: *mut fifo_open) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(fo).nonblock as *mut u32 as *AtomicU32);
+
+/// A fifo with no ring and no opens; null when out of memory.
+/// Safety: the caller may allocate.
+@export("fifo_alloc")
+unsafe fn alloc() -> *mut fifo {
+    let fifo = kzalloc(layoutOf<fifo>().size) as *mut fifo;
+    if (fifo.isNull()) {
+        return fifo;
+    }
+    spinlock_init(lockOf(fifo), "fifo\0".ptr as *CChar);
+    waitqueue_init(openersOf(fifo), "fifo-open\0".ptr as *CChar);
+    return fifo;
+}
+
+/// Safety: `fifo` is a live fifo with no open, which nothing reaches any more.
+@export("fifo_free")
+unsafe fn free(fifo: *mut fifo) {
+    if (!Ptr.toBorrow(fifo as *fifo).ring.isNull()) {
+        fifo_floor_panic_live(); // an open outlived the node
+    }
+    kfree(fifo as *mut void);
+}
+
+/// Takes `side`'s counts off the ring, under both locks. Returns the ring to free when this was the last open, or null.
+/// The caller wakes the queues afterwards, with the locks dropped and before it frees anything.
+/// Safety: the fifo's lock is held, and `ring` is its ring, holding `side`'s counts.
+unsafe fn dropLocked(fifo: *mut fifo, ring: *mut pipe, side: u32) -> *mut pipe {
+    spin_lock(ringLock(ring));
+    let counts = Ptr.toBorrowMut(ring);
+    if ((side & FIFO_RD) != 0) {
+        counts.readers -= 1;
+    }
+    if ((side & FIFO_WR) != 0) {
+        counts.writers -= 1;
+    }
+    let last = counts.readers == 0 && counts.writers == 0;
+    spin_unlock(ringLock(ring));
+    if (!last) {
+        return 0 as *mut pipe;
+    }
+    let f = Ptr.toBorrowMut(fifo);
+    f.ring = 0 as *mut pipe;
+    rings().fetchSubWith(1, Ordering.Relaxed);
+    return ring;
+}
+
+/// Safety: `ring` is the fifo's ring, holding `side`'s counts, and the fifo's lock is not held.
+unsafe fn dropOpen(fifo: *mut fifo, ring: *mut pipe, side: u32) {
+    let s = spin_lock_irqsave(lockOf(fifo));
+    let gone = dropLocked(fifo, ring, side);
+    spin_unlock_irqrestore(lockOf(fifo), s);
+    if ((side & FIFO_RD) != 0) {
+        waitqueue_wake_all(borrow mut Ptr.toBorrowMut(ring).wr_wq as *mut waitqueue); // writers learn -EPIPE
+    }
+    if ((side & FIFO_WR) != 0) {
+        waitqueue_wake_all(borrow mut Ptr.toBorrowMut(ring).rd_wq as *mut waitqueue); // readers learn EOF
+    }
+    waitqueue_wake_all(openersOf(fifo)); // an opener's condition may have changed
+    if (!gone.isNull()) {
+        pipe_ring_free(gone); // nobody waits on a ring with no opens
+    }
+}
+
+/// The other side's generation, read without the lock by the waiter.
+/// Safety: `fifo` is a live fifo.
+unsafe fn peerGen(fifo: *mut fifo, side: u32) -> u32 {
+    let f = Ptr.toBorrowMut(fifo);
+    let gen = if (side == FIFO_RD) borrow mut f.w_gen as *mut u32 else borrow mut f.r_gen as *mut u32;
+    return generation(gen).loadWith(LoadOrdering.Acquire);
+}
+
+/// Adds one to a generation; under the fifo's lock, its only writer.
+/// Safety: `gen` is a live fifo's r_gen or w_gen, and the fifo's lock is held.
+unsafe fn bump(gen: *mut u32) {
+    let g = generation(gen);
+    g.storeWith(g.loadWith(LoadOrdering.Relaxed).wrappingAdd(1), StoreOrdering.Release);
+}
+
+/// An open's wait: the other side's generation has moved past `gen`.
+struct OpenWait {
+    fifo: *mut fifo;
+    side: u32;
+    gen: u32;
+}
+
+/// Safety: `arg` is a live OpenWait whose fifo is live.
+@callback
+unsafe fn peerArrived(arg: *mut void) -> bool {
+    let w = Ptr.toBorrow(arg as *OpenWait);
+    return peerGen(w.fifo, w.side) != w.gen;
+}
+
+/// Opens one side or both, by `f`'s access mode, making the ring if this is the first open. A blocking open of one side
+/// waits for the other; a non-blocking read open does not, and a non-blocking write open with no reader is -ENXIO. The
+/// wait is killable (-EINTR). An open that fails leaves the fifo as it found it.
+/// Safety: `fifo` is a live fifo, `f` the file being opened, and the caller may allocate and sleep.
+@export("fifo_open")
+unsafe fn open(fifo: *mut fifo, f: *mut file) -> i32 {
+    let flags = file_flags(f as *file);
+    let acc = flags & COSMO_O_ACCMODE;
+    let side = if (acc == COSMO_O_RDONLY) FIFO_RD else if (acc == COSMO_O_WRONLY) FIFO_WR else FIFO_RD | FIFO_WR;
+    let nonblock = (flags & COSMO_O_NONBLOCK) != 0;
+    let fo = kzalloc(layoutOf<fifo_open>().size) as *mut fifo_open;
+    if (fo.isNull()) {
+        return -ENOMEM;
+    }
+    let open = Ptr.toBorrowMut(fo);
+    open.side = side;
+    open.nonblock = if (nonblock) 1 else 0;
+
+    // The first open makes the ring. The allocator is not a thing to call with a spinlock held, so an open that finds no
+    // ring drops the lock, allocates one and looks again; an open that finds a ring allocates nothing, and one that lost
+    // the race to make it gives its ring back after the lock.
+    var fresh = 0 as *mut pipe;
+    var s = spin_lock_irqsave(lockOf(fifo));
+    while (Ptr.toBorrow(fifo as *fifo).ring.isNull() && fresh.isNull()) {
+        spin_unlock_irqrestore(lockOf(fifo), s);
+        fresh = pipe_ring_alloc();
+        if (fresh.isNull()) {
+            kfree(fo as *mut void);
+            return -ENOMEM;
+        }
+        s = spin_lock_irqsave(lockOf(fifo));
+    }
+    let fi = Ptr.toBorrowMut(fifo);
+    if (fi.ring.isNull()) {
+        fi.ring = fresh;
+        fresh = 0 as *mut pipe;
+        rings().fetchAddWith(1, Ordering.Relaxed);
+    }
+    let ring = fi.ring;
+    spin_lock(ringLock(ring));
+    let counts = Ptr.toBorrowMut(ring);
+    if ((side & FIFO_RD) != 0) {
+        counts.readers += 1;
+        bump(borrow mut fi.r_gen as *mut u32);
+    }
+    if ((side & FIFO_WR) != 0) {
+        counts.writers += 1;
+        bump(borrow mut fi.w_gen as *mut u32);
+    }
+    // The other side is here now, or this open waits for its generation to move past this.
+    let peer = if (side == FIFO_RD) counts.writers > 0 else if (side == FIFO_WR) counts.readers > 0 else true;
+    let gen = if (side == FIFO_RD) fi.w_gen else fi.r_gen;
+    let refused = side == FIFO_WR && nonblock && counts.readers == 0; // POSIX: -ENXIO
+    spin_unlock(ringLock(ring));
+    let gone = if (refused) dropLocked(fifo, ring, side) else 0 as *mut pipe;
+    spin_unlock_irqrestore(lockOf(fifo), s);
+    if (!fresh.isNull()) {
+        pipe_ring_free(fresh); // another opener made the ring first
+    }
+    if (refused) {
+        if (!gone.isNull()) {
+            pipe_ring_free(gone);
+        }
+        kfree(fo as *mut void);
+        return -ENXIO;
+    }
+    waitqueue_wake_all(openersOf(fifo)); // the other side's openers have their peer
+    let done = Ptr.toBorrowMut(fo);
+    done.ring = ring;
+
+    if (!peer && side != (FIFO_RD | FIFO_WR) && !(side == FIFO_RD && nonblock)) {
+        // Our count holds the ring; the wait touches nothing else.
+        var w = OpenWait { fifo: fifo, side: side, gen: gen };
+        let rc = wait_floor_until_killable(openersOf(fifo), peerArrived, borrow mut w as *mut OpenWait as *mut void);
+        if (rc != 0) {
+            dropOpen(fifo, ring, side); // as if this open never happened
+            kfree(fo as *mut void);
+            return rc;
+        }
+    }
+    let file = Ptr.toBorrowMut(f);
+    file.priv = fo as *mut void;
+    return 0;
+}
+
+/// Safety: `f` is an open of `fifo`, released once.
+@export("fifo_release")
+unsafe fn release(fifo: *mut fifo, f: *mut file) {
+    let fo = openOf(f);
+    let file = Ptr.toBorrowMut(f);
+    file.priv = 0 as *mut void;
+    let open = Ptr.toBorrow(fo as *fifo_open);
+    dropOpen(fifo, open.ring, open.side);
+    kfree(fo as *mut void);
+}
+
+/// Safety: `f` is a live open of a fifo, and `buf` has room for `len` bytes.
+@export("fifo_read")
+unsafe fn read(fifo: *mut fifo, f: *mut file, buf: *mut void, len: usize) -> i64 {
+    let fo = openOf(f);
+    let nonblock = nonblockOf(fo).loadWith(LoadOrdering.Relaxed) != 0;
+    return pipe_ring_read(Ptr.toBorrow(fo as *fifo_open).ring, buf, len, nonblock);
+}
+
+/// Safety: `f` is a live open of a fifo, and `buf` holds `len` bytes.
+@export("fifo_write")
+unsafe fn write(fifo: *mut fifo, f: *mut file, buf: *void, len: usize) -> i64 {
+    let fo = openOf(f);
+    let nonblock = nonblockOf(fo).loadWith(LoadOrdering.Relaxed) != 0;
+    return pipe_ring_write(Ptr.toBorrow(fo as *fifo_open).ring, buf, len, nonblock);
+}
+
+/// Safety: `f` is a live open of a fifo.
+@export("fifo_ready")
+unsafe fn ready(fifo: *mut fifo, f: *mut file) -> u32 {
+    let open = Ptr.toBorrow(openOf(f) as *fifo_open);
+    var r: u32 = 0;
+    if ((open.side & FIFO_RD) != 0) {
+        r |= pipe_ring_ready_rd(open.ring);
+    }
+    if ((open.side & FIFO_WR) != 0) {
+        r |= pipe_ring_ready_wr(open.ring);
+    }
+    return r;
+}
+
+/// Safety: `f` is a live open of a fifo.
+@export("fifo_poll_wq")
+unsafe fn pollQueue(fifo: *mut fifo, f: *mut file, events: u32) -> *mut waitqueue {
+    let open = Ptr.toBorrow(openOf(f) as *fifo_open);
+    let ring = Ptr.toBorrowMut(open.ring);
+    let rd = borrow mut ring.rd_wq as *mut waitqueue;
+    let wr = borrow mut ring.wr_wq as *mut waitqueue;
+    if (open.side == FIFO_RD) {
+        return rd;
+    }
+    if (open.side == FIFO_WR) {
+        return wr;
+    }
+    return if ((events & COSMO_IO_WRITABLE) != 0 && (events & COSMO_IO_READABLE) == 0) wr else rd;
+}
+
+/// Per open, as POSIX has it: `on` 1/0 sets, -1 asks; returns the previous mode.
+/// Safety: `f` is a live open of a fifo.
+@export("fifo_set_nonblock")
+unsafe fn setNonblock(fifo: *mut fifo, f: *mut file, on: i32) -> i32 {
+    let mode = nonblockOf(openOf(f));
+    let was: i32 = if (mode.loadWith(LoadOrdering.Relaxed) != 0) 1 else 0;
+    if (on >= 0) {
+        mode.storeWith(if (on != 0) 1 else 0, StoreOrdering.Relaxed);
+    }
+    return was;
+}
+
+/// Live rings held by fifos (the leak test).
+/// Safety: none beyond rings()'s.
+@export("fifo_count")
+unsafe fn count() -> u32 => rings().loadWith(LoadOrdering.Acquire);

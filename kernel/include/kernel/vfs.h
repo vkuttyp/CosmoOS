@@ -37,7 +37,7 @@ enum vnode_type {
     VNODE_CHR = COSMO_DT_CHR,
     VNODE_LNK = COSMO_DT_LNK,
     VNODE_SOCK = COSMO_DT_SOCK,   /* a unix socket's name: made by bind through mknod; open() is -ENXIO */
-    VNODE_FIFO = COSMO_DT_FIFO,   /* a named pipe: the pipe's ring behind a node (kernel/ipc/fifo.c) */
+    VNODE_FIFO = COSMO_DT_FIFO,   /* a named pipe: the pipe's ring behind a node (kernel/ipc/fifo.nova) */
 };
 
 /* How many symbolic links one path resolution may expand before it is

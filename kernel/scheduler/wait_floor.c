@@ -59,6 +59,13 @@ bool wait_floor_until_timeout(struct waitqueue *wq, bool (*cond)(void *), void *
     return wait_event_timeout(wq, cond(arg), ns);
 }
 
+/* 0 when `cond` became true, -EINTR when the caller's process is being
+ * killed (the pipe's waits). */
+int wait_floor_until_killable(struct waitqueue *wq, bool (*cond)(void *), void *arg)
+{
+    return wait_event_killable(wq, cond(arg));
+}
+
 /* wait_event with work around the block, for the mutex's contended path:
  * prepared, then `attempt` (false: block), then `woken` after the block,
  * until an attempt succeeds; `again` is false only for the first. */
