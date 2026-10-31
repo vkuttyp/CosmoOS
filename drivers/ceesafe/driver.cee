@@ -1,0 +1,45 @@
+// The device API every CeeSafe driver module shares (roadmap 2.0 SA4; drivers/ceesafe/README.md): kernel log lines and
+// the build's self-test switch and device names, from the module's C floor (drivers/ceesafe/driver_floor.c), and DMA-coherent memory
+// (kernel/include/kernel/dma.h). Compiled into each module with its driver; nothing here is driver specific.
+
+@header("drivers/ceesafe_driver.h")
+extern "C" {
+    @effects()
+    fn cosmo_drv_klog(level: u32, fmt: *CChar, s: *CChar, value: u64);
+    @effects()
+    fn cosmo_drv_selftest() -> bool;
+    @effects()
+    fn cosmo_drv_device_name(dev: *device) -> *CChar;
+}
+
+@header("kernel/device.h", "kernel/dma.h")
+extern "C" {
+    public struct device;
+    // dma_alloc may take the page allocator's lock but never sleeps (dma.h); DMA_ZERO zero-fills.
+    @effects(alloc)
+    fn dma_alloc(dev: *mut device, size: usize, dmaOut: *mut u64, flags: u32) -> *mut void;
+    @effects()
+    fn dma_free(dev: *mut device, size: usize, va: *mut void, dma: u64);
+}
+
+/// enum klog_level (kernel/log.h).
+public const KLOG_INFO: u32 = 1;
+public const KLOG_WARN: u32 = 2;
+public const KLOG_ERROR: u32 = 3;
+
+/// dma.h's DMA_ZERO.
+public const DMA_ZERO: u32 = 1;
+
+public struct Log {
+    /// A kernel log line: `fmt` is a static string ending in a zero byte, in which "%s" stands for `s` (a string
+    /// ending in a zero byte, or null) and "%u" for `value`.
+    /// Safety: cosmo_drv_klog reads `fmt` and `s` up to their zero bytes and keeps neither, which the caller's static
+    /// strings and the kernel's names (device.h's name[], always terminated) meet.
+    public fn line(level: u32, fmt: *CChar, s: *CChar, value: u64) {
+        unsafe { cosmo_drv_klog(level, fmt, s, value); }
+    }
+}
+
+/// Whether this build runs the kernel's self-tests (CONFIG_SELFTEST).
+/// Safety: cosmo_drv_selftest reads a compile-time constant.
+public fn selfTestBuild() -> bool => unsafe { cosmo_drv_selftest() };

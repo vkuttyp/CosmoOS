@@ -9,9 +9,12 @@ framework in `kernel/device/`. Drivers contain no generic bus logic.
   kernel image.
 - `pci/`: the PCI core (kernel image; drivers are modules and need the
   bus first). `docs/drivers/pci/`.
-- `virtio/`: the `virtio` module and the `virtio_blk`, `virtio_rng`,
-  `virtio_console` driver modules, built by `build/module.mk` and loaded
+- `virtio/`: the `virtio` module and the `virtio_blk`, `virtio_rng`
+  (in CeeSafe), `virtio_console` driver modules, built by `build/module.mk` and loaded
   from the boot archive. `docs/drivers/virtio/`.
+- `ceesafe/`, `ceesafe-template/`: the device API and floor that driver
+  modules written in CeeSafe share, and the template a new one starts
+  from (roadmap 2.0 SA4). `ceesafe/README.md`.
 - `nvme/`: the `nvme` module (milestone 9). `docs/drivers/nvme/`.
 - `network/`: the `e1000e` module, the first NIC that is not virtio. `docs/drivers/e1000e/`.
 - `usb/`: the `xhci` module (USB core and controller driver) and the `usb_storage` module: the first bus whose devices arrive, leave and have a parent. `docs/drivers/usb/`.

@@ -174,6 +174,15 @@ struct virtio_driver {
     int (*reset)(struct virtio_device *vdev);   /* optional: reset the device in place */
 };
 
+/* A driver for one device id, as a static's initialiser: its name and id
+ * table only. A CeeSafe driver cannot make a struct the kernel's headers
+ * define, nor name a function in a static's initialiser, so it imports
+ * this and sets probe and remove before it registers
+ * (drivers/ceesafe/virtio.cee, Virtio.register). The id table is a
+ * compound literal at file scope, so it is static too. */
+#define VIRTIO_DRIVER_INIT(dname, did) \
+    { .drv = { .name = (dname) }, .ids = (const uint32_t[]){ (did), 0u } }
+
 extern struct bus_type virtio_bus;
 
 

@@ -29,7 +29,7 @@ MODULES := hello virtio virtio_blk virtio_rng virtio_console virtio_net virtio_g
 MODULE_hello_SRCS          := modules/hello/hello.c
 MODULE_virtio_SRCS         := drivers/virtio/virtio.c drivers/virtio/virtqueue.c drivers/virtio/virtio_pci.c
 MODULE_virtio_blk_SRCS     := drivers/virtio/virtio_blk.c
-MODULE_virtio_rng_SRCS     := drivers/virtio/virtio_rng.c
+MODULE_virtio_rng_SRCS     := drivers/virtio/virtio_rng.c   # generated from virtio_rng.cee (scripts/cee-gen.py)
 MODULE_virtio_console_SRCS := drivers/virtio/virtio_console.c
 MODULE_virtio_net_SRCS     := drivers/virtio/virtio_net.c
 MODULE_virtio_gpu_SRCS     := drivers/virtio/virtio_gpu.c
@@ -64,14 +64,22 @@ MODULE_ARCHIVE_ENTRIES := \
 	tests/cosmotest_dep.ko=$(MODULE_OUT)/cosmotest_dep.ko \
 	tests/cosmotest_fail.ko=$(MODULE_OUT)/cosmotest_fail.ko
 
+# Driver modules written in CeeSafe (roadmap 2.0 SA4; drivers/ceesafe/README.md): their C is generated
+# (scripts/cee-gen.py's MODULES), and each also links CeeSafe's runtime and the driver floor, compiled once here with
+# the module flags.
+CEE_MODULES := virtio_rng
+CEE_MODULE_COMMON_OBJS := $(call objs_of,drivers/ceesafe/ceesafe_rt_core.c drivers/ceesafe/driver_floor.c)
+$(eval $(call compile_rules,$(CEE_MODULE_COMMON_OBJS),MODULE_CFLAGS))
+$(foreach m,$(CEE_MODULES),$(eval MODULE_$(m)_LINK := $(CEE_MODULE_COMMON_OBJS)))
+
 # $(1) module name
 define module_rules
 MODULE_$(1)_OBJS := $$(call objs_of,$$(MODULE_$(1)_SRCS))
 $$(eval $$(call compile_rules,$$(MODULE_$(1)_OBJS),MODULE_CFLAGS))
-$$(MODULE_OUT)/$(1).ko: $$(MODULE_$(1)_OBJS) $$(ROOT)/scripts/modsign.py $$(MODSIGN_KEY) $$(SIGNING_STAMP)
+$$(MODULE_OUT)/$(1).ko: $$(MODULE_$(1)_OBJS) $$(MODULE_$(1)_LINK) $$(ROOT)/scripts/modsign.py $$(MODSIGN_KEY) $$(SIGNING_STAMP)
 	$$(call log,MODLD,$$@)
 	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)$$(LD) $$(MODULE_LDFLAGS) -o $$@.unsigned $$(MODULE_$(1)_OBJS)
+	$$(Q)$$(LD) $$(MODULE_LDFLAGS) -o $$@.unsigned $$(MODULE_$(1)_OBJS) $$(MODULE_$(1)_LINK)
 	$$(Q)$$(MODSIGN) sign --key $$(MODSIGN_KEY) --in $$@.unsigned --out $$@
 	$$(Q)$$(PYTHON) $$(ROOT)/scripts/check-module-elf.py $$@ $$(ARCH)
 MODULE_KOS += $$(MODULE_OUT)/$(1).ko
@@ -81,7 +89,8 @@ endef
 
 MODULE_KOS :=
 MODULE_ANALYZE :=
-MODULE_ALL_OBJS :=
+MODULE_ALL_OBJS := $(CEE_MODULE_COMMON_OBJS)
+MODULE_ANALYZE += $(patsubst %.o,%.analyzed,$(CEE_MODULE_COMMON_OBJS))
 $(foreach m,$(MODULES),$(eval $(call module_rules,$(m))))
 
 .PHONY: modules

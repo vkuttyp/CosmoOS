@@ -301,9 +301,14 @@ endif
 
 # Load and unload in cycles (docs/kernel/module/design.md, invariant
 # M27): the debug boot test with module.cycle= on the command line, so the
-# kernel loads and unloads cosmotest MODCYCLE_COUNT times after the boot
-# modules and the DHCP wait; the harness requires the hook's PASS line for
-# that entry and count. Debug builds only (the hook is a test seam).
+# kernel loads and unloads the boot-archive entry MODCYCLE_ENTRY (the
+# cosmotest fixture) MODCYCLE_COUNT times after the boot modules and the
+# DHCP wait; the harness requires the hook's PASS line for that entry and
+# count. Debug builds only (the hook is a test seam). An entry the boot
+# loaded already, a driver, is unloaded first and loaded again after:
+# `make test-modcycle MODCYCLE_ENTRY=modules/virtio_rng.ko` is roadmap 2.0
+# SA4's test of the first driver written in CeeSafe.
+MODCYCLE_ENTRY ?= tests/cosmotest.ko
 MODCYCLE_COUNT ?= 1000
 # Its whole-boot timeout: a debug boot's and the cycles'. On CI's x86-64
 # entropy job (PR #457) the modcycle boot took 152.3 s beside plain boots
@@ -319,7 +324,7 @@ MODCYCLE_COUNT ?= 1000
 MODCYCLE_TIMEOUT ?= $(if $(filter aarch64,$(ARCH)),380,300)
 test-modcycle:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=debug BOOT_TIMEOUT=$(MODCYCLE_TIMEOUT) \
-		CMDLINE='$(CMDLINE) module.cycle=tests/cosmotest.ko:$(MODCYCLE_COUNT)' BOOT_LOG=$(OUT)/boot-test-modcycle.log test
+		CMDLINE='$(CMDLINE) module.cycle=$(MODCYCLE_ENTRY):$(MODCYCLE_COUNT)' BOOT_LOG=$(OUT)/boot-test-modcycle.log test
 
 # Roadmap M2's acceptance test (tests/boot/install_test.py,
 # docs/userland/testing.md): the live image installs itself on a blank

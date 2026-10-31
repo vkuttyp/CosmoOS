@@ -1,0 +1,57 @@
+// template.cee - the shape of a virtio driver module written in CeeSafe (drivers/ceesafe/README.md; roadmap 2.0 SA4).
+// Copy it to drivers/<bus>/<name>.cee, rename `template` everywhere, and register it in scripts/cee-gen.py's
+// MODULES and build/module.mk (the README's steps). `make cee-check` compiles this file as it stands, so the
+// template keeps up with the device API; it is never built into a module.
+//
+// The pattern: a device's state is one CeeSafe value in a KernelHeap box, made by probe and dropped by remove, its
+// address the device's `priv` in between. State the queue callback and the rest of the driver share goes behind a
+// lock in it. The registration is a static the bus keeps from init to shutdown.
+
+const ENOMEM: i32 = -12;
+
+/// One device.
+struct Template {
+    vdev: *mut virtio_device;
+}
+
+/// The bus's probe: makes the state and hangs it from `priv`, then brings the device up.
+/// Safety: the bus passes a live device, not yet bound, and reads nothing of `priv`.
+@callback
+fn templateProbe(vdev: *mut virtio_device) -> i32 {
+    match (Box.createIn(KernelHeap {}, Template { vdev: vdev })) {
+        Ok(state) => {
+            unsafe { Virtio.setPriv(vdev, Box.intoRaw(state) as *mut void); }
+            // virtio_device_init, the queues (virtq_alloc), virtio_device_ready; on failure, undo and return the error.
+            Log.line(KLOG_INFO, "template: %s: bound\0".ptr as *CChar, unsafe { Virtio.nameOf(vdev) }, 0);
+            return 0;
+        }
+        Err(e) => { return ENOMEM; }
+    }
+}
+
+/// The bus's remove: resets the device, frees its queues, and drops the state.
+/// Safety: the bus passes a device this driver probed, whose `priv` is its state.
+@callback
+fn templateRemove(vdev: *mut virtio_device) {
+    let state: Box<Template, KernelHeap> = unsafe { Box.fromRaw(Virtio.privOf(vdev) as *mut Template) };
+    unsafe {
+        virtio_device_reset(vdev);
+        Virtio.setPriv(vdev, 0 as *mut void);
+    }
+}
+
+static mut DRIVER: virtio_driver = VIRTIO_DRIVER_INIT("template\0".ptr as *CChar, VIRTIO_ID_RNG);
+
+/// The module's init: COSMO_MODULE's, named <module>_module_init.
+/// Safety: DRIVER is registered once here and unregistered once by shutdown; the bus keeps it in between.
+@export("template_module_init")
+fn moduleInit() -> i32 {
+    return unsafe { Virtio.register(borrow mut DRIVER as *mut virtio_driver, templateProbe, templateRemove) };
+}
+
+/// The module's shutdown: unregistering removes every device the driver bound.
+/// Safety: DRIVER was registered by init (the loader runs shutdown only after an init that returned 0).
+@export("template_module_shutdown")
+fn moduleShutdown() {
+    unsafe { virtio_unregister_driver(borrow mut DRIVER as *mut virtio_driver); }
+}

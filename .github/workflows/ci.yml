@@ -463,6 +463,12 @@ jobs:
       - name: Module load and unload cycles (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-modcycle
 
+      # Roadmap 2.0 SA4: the first driver written in CeeSafe, cycled the
+      # same way (the boot's own instance is unloaded first and loaded
+      # again after; drivers/ceesafe/README.md).
+      - name: CeeSafe driver load and unload cycles (debug, virtio_rng)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-modcycle MODCYCLE_ENTRY=modules/virtio_rng.ko
+
   # Milestone M2's acceptance (docs/roadmap-1.0.md; docs/userland/testing.md,
   # "test-install"): the live image installs itself on a blank disk with
   # cosmo-install and the disk is checked on the host. Release builds:

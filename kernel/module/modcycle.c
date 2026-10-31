@@ -159,6 +159,24 @@ bool module_cycle_parse(char *spec, unsigned *count, unsigned *hold_ms)
            (n == 2 || parse_number(fields[2], MODULE_CYCLE_HOLD_MAX_MS, hold_ms));
 }
 
+/* "modules/virtio_rng.ko" -> "virtio_rng": the part after the last '/',
+ * without a ".ko" ending, cut to fit. */
+static void entry_module_name(const char *entry, char *name, size_t len)
+{
+    const char *base = entry;
+    for (const char *p = entry; *p; p++) {
+        if (*p == '/')
+            base = p + 1;
+    }
+    size_t n = strlen(base);
+    if (n >= 3 && strcmp(base + n - 3, ".ko") == 0)
+        n -= 3;
+    if (n >= len)
+        n = len - 1;
+    memcpy(name, base, n);
+    name[n] = '\0';
+}
+
 unsigned module_cycle_boot(void)
 {
     char spec[128];
@@ -177,10 +195,35 @@ unsigned module_cycle_boot(void)
         kerror("modcycle: %s: not in the boot archive", spec);
         return 1;
     }
+    /* A module the boot has loaded already (a driver: roadmap 2.0 SA4
+     * cycles virtio_rng) is taken over: unloaded first, cycled, then
+     * loaded once more, so the rest of the boot finds it as the boot left
+     * it. Its name is the entry's file name without ".ko", as
+     * build/module.mk names every module. */
+    char name[MODULE_NAME_MAX];
+    entry_module_name(spec, name, sizeof(name));
+    bool taken_over = module_find(name) != NULL;
+    if (taken_over) {
+        int rc = module_unload(name);
+        if (rc != 0) {
+            kerror("modcycle: %s: the loaded module %s does not unload (%d)", spec, name, rc);
+            return 1;
+        }
+    }
     struct module_cycle_result r;
     uint64_t t0 = clock_now_ns();
     bool ok = module_cycle(file, size, spec, count, hold_ms, NULL, NULL, &r);
     uint64_t took_ms = clock_since_ns(t0) / 1000000ULL;
+    if (taken_over) {
+        int rc = module_load(file, size, spec, NULL);
+        if (rc != 0) {
+            kerror("modcycle: %s: %s does not load again after the cycles (%d)", spec, name, rc);
+            ok = false;
+        } else {
+            kinfo("modcycle: %s: %s was loaded at boot: unloaded before the cycles, loaded again after", spec,
+                  name);
+        }
+    }
     kinfo("modcycle: %s: %u cycles (hold %u ms): %s in %llu ms (load failures %u, unload failures %u, "
           "first error %d; modules %u -> %u; kmalloc live %llu -> %llu, large pages %llu -> %llu; "
           "vm regions %llu -> %llu, anon pages %llu -> %llu; lockdep classes %u -> %u; waited %u + %u ms for quiet)",

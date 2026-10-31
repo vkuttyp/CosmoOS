@@ -261,6 +261,19 @@ A draft is a start, finished by hand to this page's rules; the `.cee`
 files that began as drafts say so in their first lines (`quiesce`, `pipe`
 and `fifo`, drafted by c2cee's predecessor, Nova's `c2nova`).
 
+## Driver modules
+
+A driver is a module written in CeeSafe (roadmap 2.0 SA4; the first is
+`drivers/virtio/virtio_rng.cee`). `scripts/cee-gen.py`'s `MODULES` compiles
+the driver with the device API (`drivers/ceesafe/*.cee`) and CeeSafe's
+kernel library into one C file ending in its `COSMO_MODULE` entry;
+`build/module.mk` links it with a module copy of CeeSafe's runtime and the
+driver floor (`drivers/ceesafe/driver_floor.c`), and signs it as any
+module. `drivers/ceesafe/README.md` has the rules and the steps; a new
+driver starts from `drivers/ceesafe-template/template.cee`, which every
+`make cee-check` compiles. `make test-modcycle
+MODCYCLE_ENTRY=modules/<name>.ko` cycles a driver 1,000 times.
+
 ## References (CeeSafe's repository)
 
 - The language: `spec/type-system.md`. §28 is C interoperability (`@export`,

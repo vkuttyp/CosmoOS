@@ -21,6 +21,16 @@ The generated C needs a ceesafe_panic for the environment it is linked into
 (kernel/ceesafe/ceesafe_panic.c in the kernel, tests/host/ceesafe_panic.c in
 host tests and fuzz targets).
 
+A driver module written in CeeSafe (MODULES; roadmap 2.0 SA4,
+drivers/ceesafe/README.md) is its driver source compiled with the device
+API's sources (drivers/ceesafe/*.cee) and CeeSafe's kernel library, into
+one C file that ends with the module's COSMO_MODULE entry. Every module
+links its own copy of the runtime, built with the module flags, and the
+driver floor (drivers/ceesafe/driver_floor.c, which has its ceesafe_panic):
+
+  drivers/virtio/virtio_rng.cee     -> drivers/virtio/virtio_rng.c   (module virtio_rng)
+  (every module)                    -> drivers/ceesafe/ceesafe_rt_core.c
+
 The compiler is pinned (CEESAFEC_VERSION): generated C is a pure function of
 the source and the compiler, so two builds agree (`make reproducible`).
 Moving to another ceesafec is a change of its own: bump the pin here and in
@@ -91,6 +101,39 @@ PORTS = [
 ]
 RUNTIME = [("ceesafe/rt.h", "kernel/include/ceesafe/rt.h"), ("ceesafe_rt_core.c", "kernel/ceesafe/ceesafe_rt_core.c")]
 
+# The device API every CeeSafe driver module is compiled with (drivers/ceesafe/README.md).
+DEVICE_API = ["drivers/ceesafe/driver.cee", "drivers/ceesafe/virtio.cee"]
+
+# Each CeeSafe driver module: its name, its driver source, the C it generates, what it is, and its COSMO_MODULE
+# entry (kernel/include/kernel/module.h): version, dependencies (comma separated) and capabilities. The source exports
+# <name>_module_init and <name>_module_shutdown, which the entry names; build/module.mk links the module.
+MODULES = [
+    ("virtio_rng", "drivers/virtio/virtio_rng.cee", "drivers/virtio/virtio_rng.c",
+     "The virtio entropy device (module virtio_rng)", "1.0", "virtio", "MODULE_CAP_DRIVER"),
+]
+MODULE_RUNTIME = ("ceesafe_rt_core.c", "drivers/ceesafe/ceesafe_rt_core.c")
+# The driver template (drivers/ceesafe/README.md): never built, but checked with the device API on every run but the
+# build's own, so it keeps compiling as the API changes.
+TEMPLATE = "drivers/ceesafe-template/template.cee"
+
+MODULE_BANNER = """/*
+ * {name} - {title}, generated from {source}
+ * and the device API (drivers/ceesafe/driver.cee, virtio.cee).
+ *
+ * GENERATED: do not edit. Change {source} and run `make cee`
+ * (scripts/cee-gen.py), which compiles it with the pinned ceesafec. The
+ * module links CeeSafe's runtime (drivers/ceesafe/ceesafe_rt_core.c, also
+ * generated) and the driver floor (drivers/ceesafe/driver_floor.c).
+ */
+"""
+
+MODULE_ENTRY = """
+/* The module's entry (kernel/include/kernel/module.h), from scripts/cee-gen.py's MODULES. */
+#include <kernel/module.h>
+
+COSMO_MODULE("{name}", "{version}", {name}_module_init, {name}_module_shutdown, "{deps}", {caps});
+"""
+
 BANNER = """/*
  * {name} - {title}, generated from {source}.
  *
@@ -134,6 +177,17 @@ def generated(exe: str, work: Path) -> dict[str, str]:
             text = (out / made).read_text()
             if files.setdefault(path, text) != text:
                 sys.exit(f"cee-gen: {source}'s {path} differs from the other ports'")
+    for i, (name, source, target, title, version, deps, caps) in enumerate(MODULES):
+        out = work / f"module-{i}"
+        subprocess.run([exe, "build", "--profile", "freestanding", "--no-float", "--kernel", "cosmoos", "--emit", "c",
+                        "-o", out, *DEVICE_API, source], cwd=ROOT, check=True)
+        files[target] = (MODULE_BANNER.format(name=Path(target).name, title=title, source=source)
+                         + (out / "main.c").read_text()
+                         + MODULE_ENTRY.format(name=name, version=version, deps=deps, caps=caps))
+        made, path = MODULE_RUNTIME
+        text = (out / made).read_text()
+        if files.setdefault(path, text) != text:
+            sys.exit(f"cee-gen: module {name}'s {path} differs from the other modules'")
     return files
 
 
@@ -161,12 +215,17 @@ def refused(exe: str) -> list[str]:
         wrong += [f"{source}:{n}: ceesafec gave error[{c}], which is not expected" for n, c in sorted(found - expected)]
         if not expected:
             wrong.append(f"{source}: no `// error[N…]` line: a negative test must expect a refusal")
+    run = subprocess.run([exe, "check", "--profile", "freestanding", "--no-float", "--kernel", "cosmoos", *DEVICE_API,
+                          TEMPLATE], cwd=ROOT, capture_output=True, text=True)
+    if run.returncode != 0:
+        wrong.append(f"{TEMPLATE}: does not compile with the device API: {(run.stdout + run.stderr).strip()[:300]}")
     return wrong
 
 
 def outputs() -> list[str]:
     """Every generated file's path, relative to the tree, without running ceesafec (make's list)."""
     paths = [target for _, target, _, _, _ in PORTS] + [h for _, _, _, h, _ in PORTS if h] + [p for _, p in RUNTIME]
+    paths += [target for _, _, target, _, _, _, _ in MODULES] + ([MODULE_RUNTIME[1]] if MODULES else [])
     return sorted(set(paths))
 
 
@@ -210,7 +269,7 @@ def main() -> int:
     for line in wrong:
         print(f"cee-gen: {line}")
     if not wrong and not args.no_negative:
-        print(f"cee-gen: {len(NEGATIVE)} negative source(s) refused as their annotations say")
+        print(f"cee-gen: {len(NEGATIVE)} negative source(s) refused as their annotations say; {TEMPLATE} compiles")
     return 1 if (args.check and stale) or wrong else 0
 
 

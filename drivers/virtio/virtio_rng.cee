@@ -1,0 +1,261 @@
+// virtio_rng.cee - the virtio entropy device (VirtIO 1.1 section 5.4), feeding the kernel pool. Module `virtio_rng`,
+// depends on `virtio` (scripts/cee-gen.py's MODULES; roadmap 2.0 SA4, the first driver written in CeeSafe).
+//
+// One queue. A 64-byte device-writable buffer is posted; every completion credits half the bits the device wrote and
+// re-posts until a per-boot budget is reached, so the pool is seeded without keeping the device busy forever.
+//
+// A device's state is one CeeSafe value in a KernelHeap box, made by probe and dropped by remove; between them the
+// box's address is the device's `priv`. Whether a buffer is posted, and whether the device is stopping, sit behind
+// an irqsave lock, so a completion racing remove cannot post to a reset device.
+
+@header("kernel/random.h")
+extern "C" {
+    // random_add_entropy mixes under the pool's irqsave lock (random.h): it never sleeps.
+    @effects()
+    fn random_add_entropy(buf: *void, len: usize, bits: u32);
+}
+
+const VRNG_BUF: u32 = 64;
+const VRNG_BUDGET: u32 = 4096;
+const ENOMEM: i32 = -12;
+
+/// The posting state, under the device's lock. The `test` fields are the self-test's (vrngSelfTest): a synthetic
+/// device posts nothing, it counts.
+struct Post {
+    posted: bool;
+    stopping: bool;
+    synthetic: bool;
+    reset: bool;
+    postsAfterReset: u32;
+}
+
+/// One device. `sg` is the queue entry for `buf` (zero-filled when made, set once by probe).
+struct Vrng {
+    vdev: *mut virtio_device;
+    vq: *mut virtqueue;
+    buf: *mut u8;
+    bufDma: u64;
+    sg: virtq_sg;
+    /// Bytes credited so far. Only the queue's callback changes it, one completion at a time, and remove reads it
+    /// after the queue is gone.
+    collected: u32;
+    post: Box<IrqSpinLock<Post>, KernelHeap>;
+}
+
+/// Posts the buffer, unless the device is stopping.
+/// Safety: `r.vq` is the device's live queue unless `stopping` or `synthetic` is set, and `r.sg` describes `r.buf`;
+/// the queue keeps the cookie only to hand it back from virtq_pop, never reading through it.
+fn post(r: borrow Vrng) {
+    var guard = r.post.lock();
+    let p = guard.data();
+    if (p.stopping) {
+        return;
+    }
+    if (p.synthetic) {
+        if (p.reset) {
+            p.postsAfterReset += 1;
+        }
+        p.posted = true;
+        return;
+    }
+    // The cookie is the device's state: virtq_add refuses a null one, and virtq_pop returns it (null means empty).
+    let added = unsafe { virtq_add(r.vq, borrow r.sg as *virtq_sg, 0, 1, r as *Vrng as *mut void) };
+    if (added == 0) {
+        p.posted = true;
+        unsafe { virtq_kick(r.vq); }
+    }
+}
+
+/// A completion of `len` bytes: credits half their bits, then re-posts until the budget is reached.
+/// Safety: random_add_entropy reads `n` bytes of `r.buf`, which holds VRNG_BUF, and keeps nothing.
+fn completed(r: borrow mut Vrng, len: u32) {
+    let n = if (len > VRNG_BUF) VRNG_BUF else len;
+    if (n > 0) {
+        // Half credit (docs/kernel/security/design.md §6).
+        unsafe { random_add_entropy(r.buf as *void, n as usize, n * 4); }
+        r.collected += n;
+    }
+    if (r.collected < VRNG_BUDGET) {
+        post(r);
+    }
+}
+
+/// The queue's callback: takes up to `budget` completions.
+/// Safety: the queue's device is bound to this driver while its queue exists (probe allocates it after setting
+/// `priv`, remove frees it before dropping the state), so `priv` is this device's Vrng; the callbacks of one queue
+/// do not overlap, so the state's only other user is `post`, behind the lock.
+@callback
+fn vrngDone(vq: *mut virtqueue, budget: u32) -> u32 {
+    let r = unsafe { Ptr.toBorrowMut(Virtio.privOf(Virtio.deviceOfQueue(vq)) as *mut Vrng) };
+    var n: u32 = 0;
+    var len: u32 = 0;
+    while (n < budget && !unsafe { virtq_pop(vq, borrow mut len as *mut u32) }.isNull()) {
+        {
+            var guard = r.post.lock();
+            let p = guard.data();
+            p.posted = false;
+        }
+        completed(r, len);
+        n += 1;
+    }
+    return n;
+}
+
+/// Stops posting: after this, `post` does nothing.
+fn stop(r: borrow Vrng) {
+    var guard = r.post.lock();
+    let p = guard.data();
+    p.stopping = true;
+}
+
+/// Frees the buffer, if probe got that far.
+/// Safety: the device was reset, so it no longer writes to the buffer.
+fn freeBuffer(r: borrow Vrng) {
+    if (!r.buf.isNull()) {
+        unsafe { dma_free(Virtio.deviceOf(r.vdev), VRNG_BUF as usize, r.buf as *mut void, r.bufDma); }
+    }
+}
+
+/// The device's state, made with nothing posted.
+fn makeVrng(vdev: *mut virtio_device) -> Result<Box<Vrng, KernelHeap>, AllocError> {
+    let post = IrqSpinLock<Post>.create(
+        "virtio-rng-post\0".ptr as *CChar,
+        Post { posted: false, stopping: false, synthetic: false, reset: false, postsAfterReset: 0 },
+    )?;
+    return Box.createIn(KernelHeap {}, Vrng {
+        vdev: vdev,
+        vq: 0 as *mut virtqueue,
+        buf: 0 as *mut u8,
+        bufDma: 0,
+        collected: 0,
+        post: post,
+    });
+}
+
+/// Brings the device up: features, the buffer, the queue, then the first post.
+/// Safety: `vdev` is the device being probed; `r` is its state, already its `priv`.
+fn start(vdev: *mut virtio_device, r: borrow mut Vrng) -> i32 {
+    let rc = unsafe { virtio_device_init(vdev, 0) };
+    if (rc != 0) {
+        return rc;
+    }
+    var dma: u64 = 0;
+    r.buf = unsafe { dma_alloc(
+        Virtio.deviceOf(vdev),
+        VRNG_BUF as usize,
+        borrow mut dma as *mut u64,
+        DMA_ZERO,
+    ) } as *mut u8;
+    if (r.buf.isNull()) {
+        return ENOMEM;
+    }
+    r.bufDma = dma;
+    r.sg.addr = dma;
+    r.sg.len = VRNG_BUF;
+    var vq = 0 as *mut virtqueue;
+    let queued = unsafe { virtq_alloc(vdev, 0, 0, vrngDone, borrow mut vq as *mut *mut virtqueue) };
+    if (queued != 0) {
+        return queued;
+    }
+    r.vq = vq;
+    unsafe { virtio_device_ready(vdev); }
+    post(r);
+    return 0;
+}
+
+/// The bus's probe: makes the state, hangs it from `priv`, and starts the device; on failure undoes all of it.
+/// Safety: the bus passes a live device, not yet bound, and reads nothing of `priv`.
+@callback
+fn vrngProbe(vdev: *mut virtio_device) -> i32 {
+    match (makeVrng(vdev)) {
+        Ok(state) => {
+            let raw = Box.intoRaw(state);
+            unsafe { Virtio.setPriv(vdev, raw as *mut void); }
+            let rc = start(vdev, unsafe { Ptr.toBorrowMut(raw) });
+            if (rc == 0) {
+                Log.line(
+                    KLOG_INFO,
+                    "virtio-rng: %s: feeding the entropy pool\0".ptr as *CChar,
+                    unsafe { Virtio.nameOf(vdev) },
+                    0,
+                );
+                return 0;
+            }
+            let failed: Box<Vrng, KernelHeap> = unsafe { Box.fromRaw(raw) };
+            stop(borrow failed);
+            unsafe { virtio_device_reset(vdev); }
+            freeBuffer(borrow failed);
+            unsafe { Virtio.setPriv(vdev, 0 as *mut void); }
+            return rc;
+        }
+        Err(e) => { return ENOMEM; }
+    }
+}
+
+/// The bus's remove: stops posting, resets the device, frees the queue and the buffer, and drops the state.
+/// Safety: the bus passes a device this driver probed, whose `priv` is its Vrng.
+@callback
+fn vrngRemove(vdev: *mut virtio_device) {
+    let r: Box<Vrng, KernelHeap> = unsafe { Box.fromRaw(Virtio.privOf(vdev) as *mut Vrng) };
+    stop(borrow r);
+    unsafe {
+        virtio_device_reset(vdev);
+        virtq_free(r.vq);
+    }
+    freeBuffer(borrow r);
+    Log.line(
+        KLOG_INFO, "virtio-rng: %s: removed after %u bytes\0".ptr as *CChar, unsafe { Virtio.nameOf(vdev) },
+        r.collected as u64,
+    );
+    unsafe { Virtio.setPriv(vdev, 0 as *mut void); }
+}
+
+static mut DRIVER: virtio_driver = VIRTIO_DRIVER_INIT("virtio_rng\0".ptr as *CChar, VIRTIO_ID_RNG);
+
+/// The regression VRNG-RESET-REPOST: a completion that arrives once the device is stopping must not post again (the
+/// boot harness, tests/boot/run_boot_test.py, wants its PASS line in a self-test build).
+fn vrngSelfTest() {
+    match (makeVrng(0 as *mut virtio_device)) {
+        Ok(test) => {
+            {
+                var guard = test.post.lock();
+                let p = guard.data();
+                p.stopping = true;
+                p.synthetic = true;
+                p.reset = true;
+            }
+            var t = test;
+            completed(borrow mut t, 0);
+            var posts: u32 = 0;
+            {
+                var guard = t.post.lock();
+                posts = guard.data().postsAfterReset;
+            }
+            Log.line(
+                KLOG_INFO, "VRNG-RESET-REPOST: %s posts_after_reset=%u\0".ptr as *CChar,
+                (if (posts == 0) "PASS\0" else "FAIL\0").ptr as *CChar, posts as u64,
+            );
+        }
+        Err(e) => {
+            Log.line(KLOG_ERROR, "VRNG-RESET-REPOST: %s (out of memory)\0".ptr as *CChar, "FAIL\0".ptr as *CChar, 0);
+        }
+    }
+}
+
+/// The module's init (COSMO_MODULE, from scripts/cee-gen.py's MODULES).
+/// Safety: DRIVER is registered once here and unregistered once by shutdown; the bus keeps it in between, and no
+/// CeeSafe code touches it.
+@export("virtio_rng_module_init")
+fn moduleInit() -> i32 {
+    if (selfTestBuild()) {
+        vrngSelfTest();
+    }
+    return unsafe { Virtio.register(borrow mut DRIVER as *mut virtio_driver, vrngProbe, vrngRemove) };
+}
+
+/// The module's shutdown: unregistering removes every device this driver bound.
+/// Safety: DRIVER was registered by init (the loader runs shutdown only after an init that returned 0).
+@export("virtio_rng_module_shutdown")
+fn moduleShutdown() {
+    unsafe { virtio_unregister_driver(borrow mut DRIVER as *mut virtio_driver); }
+}

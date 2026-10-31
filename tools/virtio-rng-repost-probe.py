@@ -3,7 +3,9 @@
 
 Run once per architecture. --old removes the stopping check in a
 throwaway worktree and requires the deterministic callback assertion to
-be the sole boot failure. Logs stay under out/.
+be the sole boot failure. Logs stay under out/. The driver is CeeSafe
+since roadmap 2.0 SA4 (drivers/virtio/virtio_rng.cee); the baseline check
+still reads the C driver at the pinned commit.
 """
 import argparse
 from pathlib import Path
@@ -15,9 +17,9 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = "2661385c14c388190d8becfe95388f80c23995d3"
-DRIVER = "drivers/virtio/virtio_rng.c"
-STOP_CHECK = """    if (r->stopping) {
-        spin_unlock_irqrestore(&r->post_lock, s);
+BASELINE_DRIVER = "drivers/virtio/virtio_rng.c"
+DRIVER = "drivers/virtio/virtio_rng.cee"
+STOP_CHECK = """    if (p.stopping) {
         return;
     }
 """
@@ -36,7 +38,7 @@ def restore_old(tree):
 
 def verify_baseline():
     source = subprocess.check_output(
-        ["git", "-C", str(ROOT), "show", f"{BASELINE}:{DRIVER}"], text=True)
+        ["git", "-C", str(ROOT), "show", f"{BASELINE}:{BASELINE_DRIVER}"], text=True)
     if "VRNG-RESET-REPOST" in source:
         raise RuntimeError("pinned main unexpectedly contains the injected proof")
     if "static void vrng_post(" not in source:

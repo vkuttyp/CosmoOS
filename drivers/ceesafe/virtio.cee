@@ -1,0 +1,98 @@
+// The virtio device API for CeeSafe drivers (roadmap 2.0 SA4; drivers/include/drivers/virtio.h,
+// docs/drivers/virtio/). The kernel's own structs are imported, never made: a driver's registration is a static built
+// by VIRTIO_DRIVER_INIT, its callbacks are @callback functions, and its per-device state hangs from the device's
+// `priv` pointer. Every function here is exported by the `virtio` module, on which a virtio driver module depends.
+
+@header("drivers/virtio.h")
+extern "C" {
+    public struct virtio_device {
+        dev: device;
+        priv: *mut void; // the driver's, from probe to remove
+    }
+    public struct virtqueue {
+        vdev: *mut virtio_device;
+    }
+    public struct virtq_sg {
+        addr: u64;
+        len: u32;
+    }
+    public struct virtio_driver {
+        probe: extern "C" fn(*mut virtio_device) -> i32;
+        remove: extern "C" fn(*mut virtio_device);
+    }
+
+    // virtio.h's static initialiser for a driver of one device id; a static initialiser cannot name a function, so
+    // the driver sets probe and remove before it registers (Virtio.register).
+    @constant
+    fn VIRTIO_DRIVER_INIT(name: *CChar, id: u32) -> virtio_driver;
+
+    // Registration walks the bus and probes, which may sleep.
+    @effects(sleep)
+    fn virtio_register_driver(d: *mut virtio_driver) -> i32;
+    @effects(sleep)
+    fn virtio_unregister_driver(d: *mut virtio_driver);
+    @effects(sleep)
+    fn virtio_device_init(vdev: *mut virtio_device, wanted: u64) -> i32;
+    @effects()
+    fn virtio_device_ready(vdev: *mut virtio_device);
+    @effects(sleep)
+    fn virtio_device_reset(vdev: *mut virtio_device);
+    // A queue's callback runs in the virtio interrupt's thread with `budget` completions at most and returns how
+    // many it took (virtq_callback_fn).
+    @effects(sleep)
+    fn virtq_alloc(
+        vdev: *mut virtio_device, index: u32, max: u32, callback: extern "C" fn(*mut virtqueue, u32) -> u32,
+        out: *mut *mut virtqueue,
+    ) -> i32;
+    @effects(sleep)
+    fn virtq_free(vq: *mut virtqueue);
+    // The queue's own lock is an irqsave spinlock: these may run under a driver's spin guard.
+    @effects()
+    fn virtq_add(vq: *mut virtqueue, sg: *virtq_sg, out: u32, inCount: u32, cookie: *mut void) -> i32;
+    @effects()
+    fn virtq_kick(vq: *mut virtqueue);
+    @effects()
+    fn virtq_pop(vq: *mut virtqueue, len: *mut u32) -> *mut void;
+}
+
+/// virtio.h's device ids.
+public const VIRTIO_ID_RNG: u32 = 4;
+
+public struct Virtio {
+    /// The device's struct device, for DMA and its name.
+    /// Safety: `vdev` is a live device (the bus passes one to probe and remove, a queue's vdev is one).
+    public unsafe fn deviceOf(vdev: *mut virtio_device) -> *mut device =>
+        borrow mut Ptr.toBorrowMut(vdev).dev as *mut device;
+
+    /// The device's name (device.h's name[], always terminated).
+    /// Safety: as deviceOf.
+    public unsafe fn nameOf(vdev: *mut virtio_device) -> *CChar =>
+        cosmo_drv_device_name(borrow Ptr.toBorrow(vdev as *virtio_device).dev as *device);
+
+    /// The driver's state pointer.
+    /// Safety: as deviceOf.
+    public unsafe fn privOf(vdev: *mut virtio_device) -> *mut void => Ptr.toBorrow(vdev as *virtio_device).priv;
+
+    /// Safety: as deviceOf; the bus does not read `priv`.
+    public unsafe fn setPriv(vdev: *mut virtio_device, p: *mut void) {
+        let d = Ptr.toBorrowMut(vdev);
+        d.priv = p;
+    }
+
+    /// Registers a driver: sets its callbacks, then registers it with the bus, which probes the devices it matches.
+    /// Safety: `d` is a static driver made by VIRTIO_DRIVER_INIT, not registered; the bus keeps it until
+    /// virtio_unregister_driver.
+    public unsafe fn register(
+        d: *mut virtio_driver, probe: extern "C" fn(*mut virtio_device) -> i32,
+        remove: extern "C" fn(*mut virtio_device),
+    ) -> i32 {
+        let driver = Ptr.toBorrowMut(d);
+        driver.probe = probe;
+        driver.remove = remove;
+        return virtio_register_driver(d);
+    }
+
+    /// The device a queue belongs to.
+    /// Safety: `vq` is a live queue (the one a callback was given).
+    public unsafe fn deviceOfQueue(vq: *mut virtqueue) -> *mut virtio_device => Ptr.toBorrow(vq as *virtqueue).vdev;
+}
