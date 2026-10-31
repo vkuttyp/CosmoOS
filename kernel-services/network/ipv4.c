@@ -15,7 +15,7 @@
 #include <arch/cpu.h>
 #include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/net/raw.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
@@ -734,7 +734,7 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
         return;
     }
     uint32_t ihl, total;
-    if (netparse_ipv4_outer(m->data, m->pkt.len, &ihl, &total) != NETPARSE_OK) {
+    if (!netparse_ipv4_outer(m->data, m->pkt.len, &ihl, &total)) {
         STAT(rx_bad_header);
         m_freem(m);
         return;
@@ -745,17 +745,15 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
         return;
     }
     const struct ipv4_hdr *iph = (const struct ipv4_hdr *)m->data;
-    switch (netparse_ipv4_header(m->data, ihl)) {
-    case NETPARSE_BAD_CKSUM:
+    if (!netparse_ipv4_cksum_ok(m->data, ihl)) {
         STAT(rx_bad_cksum);
         m_freem(m);
         return;
-    case NETPARSE_FRAGMENT:   /* fragments unsupported */
+    }
+    if (netparse_ipv4_fragment(m->data)) {   /* fragments unsupported */
         STAT(rx_fragments);
         m_freem(m);
         return;
-    default:
-        break;
     }
     /* Trim any link padding to the IP total length before anyone downstream
      * (forwarding, NAT, delivery) reads past it: a short datagram in a padded

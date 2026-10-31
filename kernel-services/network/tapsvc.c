@@ -18,7 +18,7 @@
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/net/tap.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
@@ -162,7 +162,7 @@ static bool dhcp_filter(struct tap *t, const void *frame, uint32_t len, void *ar
     /* From here the frame is ours (claimed), whatever its contents. */
     const uint8_t *dh = f + off;
     struct netparse_dhcp msg;
-    if (netparse_dhcp(dh, len - off, BOOTP_REQUEST, &msg) != NETPARSE_OK) {
+    if (!netparse_dhcp(dh, len - off, BOOTP_REQUEST, &msg)) {
         STAT(dhcp_ignored);
         return true;
     }

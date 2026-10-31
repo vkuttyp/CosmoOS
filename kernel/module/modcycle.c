@@ -124,59 +124,6 @@ bool module_cycle(const void *file, size_t size, const char *origin, unsigned co
     return out->load_failures == 0 && out->unload_failures == 0 && counts_equal(&out->after, &out->before);
 }
 
-/* Digits to a number no larger than `max`; false for none, anything
- * else, or more. */
-static bool parse_number(const char *p, unsigned max, unsigned *out)
-{
-    uint64_t n = 0;
-    if (*p == '\0')
-        return false;
-    for (; *p; p++) {
-        if (*p < '0' || *p > '9')
-            return false;
-        n = n * 10 + (uint64_t)(*p - '0');
-        if (n > max)
-            return false;
-    }
-    *out = (unsigned)n;
-    return true;
-}
-
-bool module_cycle_parse(char *spec, unsigned *count, unsigned *hold_ms)
-{
-    char *fields[3] = { spec, NULL, NULL };
-    unsigned n = 1;
-    for (char *p = spec; *p; p++) {
-        if (*p != ':')
-            continue;
-        if (n == 3)
-            return false;
-        *p = '\0';
-        fields[n++] = p + 1;
-    }
-    *hold_ms = 0;
-    return n >= 2 && fields[0][0] != '\0' && parse_number(fields[1], MODULE_CYCLE_MAX, count) && *count > 0 &&
-           (n == 2 || parse_number(fields[2], MODULE_CYCLE_HOLD_MAX_MS, hold_ms));
-}
-
-/* "modules/virtio_rng.ko" -> "virtio_rng": the part after the last '/',
- * without a ".ko" ending, cut to fit. */
-static void entry_module_name(const char *entry, char *name, size_t len)
-{
-    const char *base = entry;
-    for (const char *p = entry; *p; p++) {
-        if (*p == '/')
-            base = p + 1;
-    }
-    size_t n = strlen(base);
-    if (n >= 3 && strcmp(base + n - 3, ".ko") == 0)
-        n -= 3;
-    if (n >= len)
-        n = len - 1;
-    memcpy(name, base, n);
-    name[n] = '\0';
-}
-
 unsigned module_cycle_boot(void)
 {
     char spec[128];
@@ -201,7 +148,7 @@ unsigned module_cycle_boot(void)
      * it. Its name is the entry's file name without ".ko", as
      * build/module.mk names every module. */
     char name[MODULE_NAME_MAX];
-    entry_module_name(spec, name, sizeof(name));
+    module_entry_name(spec, name, sizeof(name));
     bool taken_over = module_find(name) != NULL;
     if (taken_over) {
         int rc = module_unload(name);

@@ -407,7 +407,7 @@ C over seeded inputs, the CeeSafe port giving the same digest, the
 benchmark, then the C deleted.
 
 Progress: network frames (2026-10-31): `kernel-services/network/netparse.cee`
-behind `kernel/net/netparse.h` -- Ethernet, ARP, the IPv4 header and its
+(C interface `kernel/net/netparse_types.h`, ceesafec's) -- Ethernet, ARP, the IPv4 header and its
 checksum and fragment check, IPv4 headers quoted in ICMP errors, IPv6,
 neighbour solicitations and advertisements, the UDP header, and the
 transport identifiers NAT and the firewall key on. `tests/host/test_netparse.c`'s
@@ -439,6 +439,11 @@ where identical machine code (`lx_wait_status`, the same instructions
 in both builds) measured 4 ns apart, so Rosetta's figure is not a
 native one: a native x86-64 run is owed before the owner's ruling on
 the 5%.
+No new C (the CeeSafe rule's point 1, cee-share's gate): the decoders'
+header is ceesafec's, with results as bools and named facts rather than
+codes C would need a hand header for, and the `module.cycle=` parsers
+SA4's take-over needed are CeeSafe (`kernel/module/modspec.cee`), so
+`kernel/` has 24 lines less C to convert than before SA4.
 
 Size: about 3.0x.
 

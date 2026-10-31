@@ -23,7 +23,7 @@
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
 #include <kernel/socket.h>

@@ -1,0 +1,109 @@
+// modspec.cee - the module.cycle= specification's parsers (kernel/include/kernel/module.h; roadmap 2.0 SA5): the
+// "<archive entry>:<count>[:<hold ms>]" a boot's command line gives the load-and-unload hook (kernel/module/modcycle.c,
+// invariant M27), and the module name an archive entry's file name gives. modtest.c's module-cycle self-test checks the
+// first; test-modcycle's boots use both.
+
+@header("kernel/module.h", "kernel/string.h")
+extern "C" {
+    @effects()
+    fn strlen(s: *CChar) -> usize;
+}
+
+// module.h's bounds: MODULE_CYCLE_MAX and MODULE_CYCLE_HOLD_MAX_MS.
+const CYCLE_MAX: u64 = 1000000;
+const HOLD_MAX_MS: u64 = 60000;
+const COLON: u8 = 0x3a;
+const SLASH: u8 = 0x2f;
+
+/// Decimal digits to a number no larger than `max`; null for none, anything else, or more.
+fn number(s: Slice<u8>, max: u64) -> u32? {
+    if (s.length == 0) {
+        return null;
+    }
+    var n: u64 = 0;
+    for (c in s) {
+        if (c < 0x30 || c > 0x39) {
+            return null;
+        }
+        n = n * 10 + (c - 0x30) as u64;
+        if (n > max) {
+            return null;
+        }
+    }
+    return truncate<u32>(n); // at most max, which a u32 holds
+}
+
+/// The specification split in place at its colons, each turned into the NUL that ends a field: the entry, the count
+/// (1 to CYCLE_MAX), and the hold (0 to HOLD_MAX_MS; 0 when absent). False when malformed or out of range, as soon as
+/// that is known; `hold` is 0 unless the split reached its end.
+fn cycleParse(spec: SliceMut<u8>, count: borrow mut u32, hold: borrow mut u32) -> bool {
+    var starts: [usize; 3] = [0, 0, 0];
+    var ends: [usize; 3] = [0, 0, 0];
+    var n: usize = 1;
+    for (i in 0..spec.length) {
+        if (spec[i] != COLON) {
+            continue;
+        }
+        if (n == 3) {
+            return false;
+        }
+        spec[i] = 0;
+        ends[n - 1] = i;
+        starts[n] = i + 1;
+        n += 1;
+    }
+    ends[n - 1] = spec.length;
+    hold = 0;
+    if (n < 2 || ends[0] == 0) {
+        return false;
+    }
+    match (number(spec[starts[1]..ends[1]], CYCLE_MAX)) {
+        Some(c) => {
+            count = c;
+            if (c == 0) {
+                return false;
+            }
+        }
+        null => { return false; }
+    }
+    if (n == 2) {
+        return true;
+    }
+    match (number(spec[starts[2]..ends[2]], HOLD_MAX_MS)) {
+        Some(h) => {
+            hold = h;
+            return true;
+        }
+        null => { return false; }
+    }
+}
+
+/// An archive entry's module name into `name` with its NUL: the part after the last '/', without a ".ko" ending, cut
+/// to fit ("modules/virtio_rng.ko" is "virtio_rng"). build/module.mk names every module after its file.
+fn entryName(entry: Slice<u8>, name: SliceMut<u8>) {
+    var base: usize = 0;
+    for (i in 0..entry.length) {
+        if (entry[i] == SLASH) {
+            base = i + 1;
+        }
+    }
+    var n = entry.length - base;
+    if (n >= 3 && entry[base + n - 3] == 0x2e && entry[base + n - 2] == 0x6b && entry[base + n - 1] == 0x6f) {
+        n -= 3;
+    }
+    if (n >= name.length) {
+        n = name.length - 1;
+    }
+    name[..n].copyFrom(entry[base..base + n]);
+    name[n] = 0;
+}
+
+/// Safety: `spec` is a NUL-terminated string the caller may write; `count` and `holdMs` are writable.
+@export("module_cycle_parse")
+unsafe fn cycleParseC(spec: *mut CChar, count: *mut u32, holdMs: *mut u32) -> bool =>
+    cycleParse(SliceMut.fromRaw(spec as *mut u8, strlen(spec as *CChar)), Ptr.toBorrowMut(count), Ptr.toBorrowMut(holdMs));
+
+/// Safety: `entry` is a NUL-terminated string and `name` points to `len` writable bytes, at least 1.
+@export("module_entry_name")
+unsafe fn entryNameC(entry: *CChar, name: *mut CChar, len: usize) =>
+    entryName(Slice.fromRaw(entry as *u8, strlen(entry)), SliceMut.fromRaw(name as *mut u8, len));

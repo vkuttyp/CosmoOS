@@ -1,4 +1,4 @@
-// netparse.cee - the network receive path's decoders (kernel/net/netparse.h; roadmap 2.0 SA5, the network-frame,
+// netparse.cee - the network receive path's decoders (kernel/net/netparse_types.h; roadmap 2.0 SA5, the network-frame,
 // TCP-segment, and DHCP-and-DNS families). Every check and field read the stack makes on bytes a frame brought: ether_input, arp_input, ipv4_input,
 // the quoted headers of ICMP errors (icmp_quoted_flow, nat_in_icmp_error), ipv6_input, nd_input_ns and nd_input_na,
 // udp_input, the transport identifiers NAT and the firewall key on, TCP's header and options (tcp_input, parse_mss),
@@ -11,7 +11,19 @@
 // tests/host/test_netparse.c holds them to the C they replaced: the same digests over 200,000 inputs each.
 
 // The decoders' results, which C reads: CeeSafe's, with C's layout; ceesafec writes kernel/net/netparse_types.h from
-// them (netparse.h includes it, with the result codes).
+// them and from the exports below, so C callers include that and learn the API from these comments. A result is a
+// bool or a struct of named facts, not a code: C cannot import a CeeSafe constant.
+
+/// An Ethernet header's verdict and EtherType: `other` (unicast to another host: drop), `reflected` (sent by this interface
+/// and reflected: drop), else `broadcast`, `multicast` or neither (unicast to us).
+@repr(C)
+public struct netparse_eth {
+    etype: u16;
+    other: bool;
+    reflected: bool;
+    broadcast: bool;
+    multicast: bool;
+}
 
 /// An ARP packet's fields (netparse_arp): op is ARP_OP_REQUEST, ARP_OP_REPLY or another; the addresses in network order.
 @repr(C)
@@ -94,16 +106,6 @@ public struct netparse_l4 {
     tcp_flags: u8;
 }
 
-// netparse.h's results.
-const ETH_OTHER: u32 = 0;
-const ETH_OWN: u32 = 1;
-const ETH_UNICAST: u32 = 2;
-const ETH_BROADCAST: u32 = 3;
-const ETH_MULTICAST: u32 = 4;
-const OK: u32 = 0;
-const BAD: u32 = 1;
-const BAD_CKSUM: u32 = 2;
-const FRAGMENT: u32 = 3;
 
 // The sizes of what each decoder reads.
 const ETH_HLEN: usize = 14;
@@ -151,26 +153,17 @@ fn mac48(b: Slice<u8>, at: usize) -> u64 =>
 
 // --- Ethernet --------------------------------------------------------------------------------------------------------
 
-/// The header of a frame arriving on an interface whose MAC is `mac`: its class, and its EtherType in `etherType`.
-fn ether(hdr: Slice<u8>, mac: Slice<u8>, etherType: borrow mut u16) -> u32 {
+/// The header of a frame arriving on an interface whose MAC is `mac`: whose it is, and its EtherType.
+fn ether(hdr: Slice<u8>, mac: Slice<u8>, out: borrow mut netparse_eth) {
     let dst = mac48(hdr, 0);
     let self = mac48(mac, 0);
     let bcast = dst == 0xffffffffffff;
     let mcast = (hdr[0] & 1) != 0;
-    etherType = be16(hdr, 12);
-    if (!bcast && !mcast && dst != self) {
-        return ETH_OTHER;
-    }
-    if (mac48(hdr, 6) == self) {
-        return ETH_OWN;
-    }
-    if (bcast) {
-        return ETH_BROADCAST;
-    }
-    if (mcast) {
-        return ETH_MULTICAST;
-    }
-    return ETH_UNICAST;
+    out.etype = be16(hdr, 12);
+    out.other = !bcast && !mcast && dst != self;
+    out.reflected = !out.other && mac48(hdr, 6) == self;
+    out.broadcast = !out.other && !out.reflected && bcast;
+    out.multicast = !out.other && !out.reflected && !bcast && mcast;
 }
 
 // --- IPv4 ------------------------------------------------------------------------------------------------------------
@@ -179,19 +172,19 @@ fn ether(hdr: Slice<u8>, mac: Slice<u8>, etherType: borrow mut u16) -> u32 {
 fn ihlOf(b: Slice<u8>) -> u32 => ((b[0] & 0xf) as u32) * 4;
 
 /// The fixed part of an IPv4 header in a packet of `pktLen` bytes.
-fn ipv4Outer(hdr: Slice<u8>, pktLen: u32, ihl: borrow mut u32, total: borrow mut u32) -> u32 {
+fn ipv4Outer(hdr: Slice<u8>, pktLen: u32, ihl: borrow mut u32, total: borrow mut u32) -> bool {
     let hl = ihlOf(hdr);
     let len = be16(hdr, 2) as u32;
     if ((hdr[0] >> 4) != 4 || hl < 20 || len < hl || len > pktLen) {
-        return BAD;
+        return false;
     }
     ihl = hl;
     total = len;
-    return OK;
+    return true;
 }
 
-/// The whole header: its checksum (RFC 1071: a correct header sums to 0xffff), then its fragment fields.
-fn ipv4Header(hdr: Slice<u8>) -> u32 {
+/// Whether the whole header's checksum is right (RFC 1071: a correct header sums to 0xffff).
+fn ipv4Cksum(hdr: Slice<u8>) -> bool {
     var sum: u32 = 0;
     var i: usize = 0;
     while (i + 1 < hdr.length) {
@@ -201,13 +194,7 @@ fn ipv4Header(hdr: Slice<u8>) -> u32 {
     while ((sum >> 16) != 0) {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    if (sum != 0xffff) {
-        return BAD_CKSUM;
-    }
-    if ((be16(hdr, 6) & 0x3fff) != 0) {
-        return FRAGMENT;
-    }
-    return OK;
+    return sum == 0xffff;
 }
 
 /// A quoted IPv4 header: version 4 and at least 20 bytes.
@@ -223,14 +210,14 @@ fn ipv4Quote(q: Slice<u8>, ihl: borrow mut u32) -> bool {
 // --- IPv6 ------------------------------------------------------------------------------------------------------------
 
 /// The fixed header of a packet of `pktLen` bytes.
-fn ipv6(hdr: Slice<u8>, pktLen: u32, plen: borrow mut u32) -> u32 {
+fn ipv6(hdr: Slice<u8>, pktLen: u32, plen: borrow mut u32) -> bool {
     let len = be16(hdr, 4) as u32;
     // pktLen is a packet's length, under 2^32 - 40 by far; widened so the sum cannot overflow.
     if ((hdr[0] >> 4) != 6 || (len as u64) + 40 > pktLen as u64) {
-        return BAD;
+        return false;
     }
     plen = len;
-    return OK;
+    return true;
 }
 
 // --- TCP ------------------------------------------------------------------------------------------------------------
@@ -320,27 +307,27 @@ fn opt4(o: Slice<u8>, code: u8, out: SliceMut<u8>) -> bool {
     }
 }
 
-/// A DHCP message whose op is `op`: its fields, or BAD (dhcp_filter's and dhcp_client_input's checks).
-fn dhcp(dh: Slice<u8>, op: u8, m: borrow mut netparse_dhcp) -> u32 {
+/// A DHCP message whose op is `op`: its fields, or false (dhcp_filter's and dhcp_client_input's checks).
+fn dhcp(dh: Slice<u8>, op: u8, m: borrow mut netparse_dhcp) -> bool {
     if (dh.length < DHCP_FIXED) {
-        return BAD;
+        return false;
     }
     // The cookie byte by byte (0x63825363): under the length check above these reads need no bounds checks.
     if (dh[0] != op ||
         dh[1] != DHCP_HTYPE_ETHER || dh[2] != 6 || dh[236] != 0x63 || dh[237] != 0x82 || dh[238] != 0x53 ||
         dh[239] != 0x63) {
-        return BAD;
+        return false;
     }
     let o = dh[DHCP_FIXED..];
     var l: u8 = 0;
     match (dhcpOpt(o, OPT_MSGTYPE, borrow mut l)) {
         Some(at) => {
             if (l != 1) {
-                return BAD;
+                return false;
             }
             m.msg_type = o[at];
         }
-        null => { return BAD; }
+        null => { return false; }
     }
     put4(mut m.xid[..], dh, 4);
     m.flags = (dh[10] as u16) << 8 | dh[11] as u16;
@@ -357,7 +344,7 @@ fn dhcp(dh: Slice<u8>, op: u8, m: borrow mut netparse_dhcp) -> u32 {
     if (!m.has_reqip) {
         m.reqip[..].fill(0);
     }
-    return OK;
+    return true;
 }
 
 /// A host name a server offers (option 12), into `name` with its NUL: kept only when it is 1-63 letters, digits, '-'
@@ -514,12 +501,12 @@ fn ipv4Text(s: Slice<u8>, out: SliceMut<u8>) -> bool {
 
 // --- the exports -----------------------------------------------------------------------------------------------------
 
-/// Safety: `hdr` points to ETH_HLEN readable bytes and `mac` to 6 (netparse.h); `etherType` is writable.
+/// Safety: `hdr` points to ETH_HLEN readable bytes and `mac` to 6; `out` is writable.
 @export("netparse_ether")
-unsafe fn etherC(hdr: *u8, mac: *u8, etherType: *mut u16) -> u32 =>
-    ether(Slice.fromRaw(hdr, ETH_HLEN), Slice.fromRaw(mac, 6), Ptr.toBorrowMut(etherType));
+unsafe fn etherC(hdr: *u8, mac: *u8, out: *mut netparse_eth) =>
+    ether(Slice.fromRaw(hdr, ETH_HLEN), Slice.fromRaw(mac, 6), Ptr.toBorrowMut(out));
 
-/// Safety: `pkt` points to ARP_LEN readable bytes and `out` to a writable struct (netparse.h).
+/// Safety: `pkt` points to ARP_LEN readable bytes and `out` to a writable struct.
 @export("netparse_arp")
 unsafe fn arpC(pkt: *u8, out: *mut netparse_arp) -> bool {
     let p = Slice.fromRaw(pkt, ARP_LEN);
@@ -537,12 +524,17 @@ unsafe fn arpC(pkt: *u8, out: *mut netparse_arp) -> bool {
 
 /// Safety: `hdr` points to IPV4_MIN readable bytes; `ihl` and `total` are writable.
 @export("netparse_ipv4_outer")
-unsafe fn ipv4OuterC(hdr: *u8, pktLen: u32, ihl: *mut u32, total: *mut u32) -> u32 =>
+unsafe fn ipv4OuterC(hdr: *u8, pktLen: u32, ihl: *mut u32, total: *mut u32) -> bool =>
     ipv4Outer(Slice.fromRaw(hdr, IPV4_MIN), pktLen, Ptr.toBorrowMut(ihl), Ptr.toBorrowMut(total));
 
 /// Safety: `hdr` points to `ihl` readable bytes, as netparse_ipv4_outer gave it (20-60).
-@export("netparse_ipv4_header")
-unsafe fn ipv4HeaderC(hdr: *u8, ihl: u32) -> u32 => ipv4Header(Slice.fromRaw(hdr, ihl as usize));
+@export("netparse_ipv4_cksum_ok")
+unsafe fn ipv4CksumC(hdr: *u8, ihl: u32) -> bool => ipv4Cksum(Slice.fromRaw(hdr, ihl as usize));
+
+/// Whether the header (its first IPV4_MIN bytes) is a fragment: MF set, or an offset. Fragments are not reassembled.
+/// Safety: `hdr` points to IPV4_MIN readable bytes.
+@export("netparse_ipv4_fragment")
+unsafe fn ipv4FragmentC(hdr: *u8) -> bool => (be16(Slice.fromRaw(hdr, IPV4_MIN), 6) & 0x3fff) != 0;
 
 /// Safety: `q` points to IPV4_MIN readable bytes; `ihl` is writable.
 @export("netparse_ipv4_quote")
@@ -550,7 +542,7 @@ unsafe fn ipv4QuoteC(q: *u8, ihl: *mut u32) -> bool => ipv4Quote(Slice.fromRaw(q
 
 /// Safety: `hdr` points to IPV6_HLEN readable bytes; `plen` is writable.
 @export("netparse_ipv6")
-unsafe fn ipv6C(hdr: *u8, pktLen: u32, plen: *mut u32) -> u32 =>
+unsafe fn ipv6C(hdr: *u8, pktLen: u32, plen: *mut u32) -> bool =>
     ipv6(Slice.fromRaw(hdr, IPV6_HLEN), pktLen, Ptr.toBorrowMut(plen));
 
 /// Safety: `msg` points to ND_LEN readable bytes and `out` to a writable struct.
@@ -571,18 +563,18 @@ unsafe fn ndC(msg: *u8, optType: u8, out: *mut netparse_nd) {
 
 /// Safety: `hdr` points to UDP_HLEN readable bytes and `out` to a writable struct.
 @export("netparse_udp")
-unsafe fn udpC(hdr: *u8, pktLen: u32, out: *mut netparse_udp) -> u32 {
+unsafe fn udpC(hdr: *u8, pktLen: u32, out: *mut netparse_udp) -> bool {
     let h = Slice.fromRaw(hdr, UDP_HLEN);
     let len = be16(h, 4);
     if (len < 8 || len as u32 > pktLen) {
-        return BAD;
+        return false;
     }
     let u = Ptr.toBorrowMut(out);
     u.len = len;
     u.sport = be16(h, 0);
     u.dport = be16(h, 2);
     u.has_cksum = h[6] != 0 || h[7] != 0;
-    return OK;
+    return true;
 }
 
 /// Safety: `b` points to `avail` readable bytes, at least L4_MIN, and `out` to a writable struct.
@@ -601,11 +593,11 @@ unsafe fn l4C(b: *u8, avail: u32, out: *mut netparse_l4) {
 
 /// Safety: `hdr` points to TCP_HLEN readable bytes and `out` to a writable struct.
 @export("netparse_tcp")
-unsafe fn tcpC(hdr: *u8, segLen: u32, out: *mut netparse_tcp) -> u32 {
+unsafe fn tcpC(hdr: *u8, segLen: u32, out: *mut netparse_tcp) -> bool {
     let h = Slice.fromRaw(hdr, TCP_HLEN);
     let hlen = ((h[12] >> 4) as u32) * 4;
     if (hlen < 20 || hlen > segLen) {
-        return BAD;
+        return false;
     }
     let d = Ptr.toBorrowMut(out);
     d.hlen = hlen;
@@ -615,7 +607,7 @@ unsafe fn tcpC(hdr: *u8, segLen: u32, out: *mut netparse_tcp) -> u32 {
     d.ack = be32(h, 8);
     d.flags = h[13];
     d.win = be16(h, 14);
-    return OK;
+    return true;
 }
 
 /// Safety: `opts` points to `optlen` readable bytes (at most 40: the header's options).
@@ -634,7 +626,7 @@ unsafe fn dhcpOptC(opts: *u8, len: u32, code: u8, olen: *mut u8) -> i32 {
 
 /// Safety: `dh` points to `dhlen` readable bytes and `out` to a writable struct.
 @export("netparse_dhcp")
-unsafe fn dhcpC(dh: *u8, dhlen: u32, op: u8, out: *mut netparse_dhcp) -> u32 =>
+unsafe fn dhcpC(dh: *u8, dhlen: u32, op: u8, out: *mut netparse_dhcp) -> bool =>
     dhcp(Slice.fromRaw(dh, dhlen as usize), op, Ptr.toBorrowMut(out));
 
 /// Safety: `dh` points to `dhlen` readable bytes, at least DHCP_FIXED, and `out` to a writable struct.

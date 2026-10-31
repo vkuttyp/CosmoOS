@@ -6,7 +6,7 @@
 #include <kernel/log.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/string.h>
 
 const uint8_t eth_broadcast[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
@@ -18,21 +18,17 @@ void ether_input(struct netif *nif, struct mbuf *m)
         __atomic_fetch_add(&nif->stats.rx_errors, 1, __ATOMIC_RELAXED);
         return;
     }
-    uint16_t type;
-    switch (netparse_ether(m->data, nif->mac, &type)) {
-    case NETPARSE_ETH_OTHER:   /* promiscuous devices hand us others' frames */
-    case NETPARSE_ETH_OWN:     /* our own frame reflected: never accept it */
+    struct netparse_eth eh;
+    netparse_ether(m->data, nif->mac, &eh);
+    if (eh.other || eh.reflected) {   /* a promiscuous device's other frames; our own, never accepted */
         m_freem(m);
         return;
-    case NETPARSE_ETH_BROADCAST:
-        m->flags |= M_BCAST;
-        break;
-    case NETPARSE_ETH_MULTICAST:
-        m->flags |= M_MCAST;
-        break;
-    default:
-        break;
     }
+    if (eh.broadcast)
+        m->flags |= M_BCAST;
+    else if (eh.multicast)
+        m->flags |= M_MCAST;
+    uint16_t type = eh.etype;
     m->pkt.proto = type;
     m_adj(m, ETH_HLEN);
     switch (type) {

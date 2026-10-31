@@ -2203,7 +2203,8 @@ to the transport identifiers NAT and the firewall key on, TCP's
 header and options, and DHCP and DNS (the options walk both ends share,
 the messages, a lease and the host name a server offers, the DNS
 proxy's id and its resolver address) -- are CeeSafe
-(`netparse.cee` behind `kernel/net/netparse.h`; roadmap 2.0 SA5): each
+(`netparse.cee`, whose C interface ceesafec writes as
+`kernel/net/netparse_types.h`; roadmap 2.0 SA5): each
 reads a slice of exactly the bytes its caller made contiguous, so an
 index past them is a bounds panic, not a read of another buffer. The
 callers keep the mbufs, the tables and the policy. ISNs come from

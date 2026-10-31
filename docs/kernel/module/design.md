@@ -297,7 +297,8 @@ Nothing outside the kernel can unload a module: `module_load` and
 `module_unload` are not exported, no system call reaches them, and
 `module_load_boot` loads once per boot. So a module's `shutdown` runs
 only in the self-tests, on this tree's own fixtures. `module_cycle`
-(`kernel/module/modcycle.c`, `CONFIG_DEBUG` only) loads one module image
+(`kernel/module/modcycle.c`, `CONFIG_DEBUG` only; its `module.cycle=`
+parsers are `modspec.cee`) loads one module image
 and unloads it `count` times through the real loader and compares, after
 the first cycle and after the last, the module count, kmalloc's live
 objects and its whole-page allocations (those over `KMALLOC_MAX_SLAB`,

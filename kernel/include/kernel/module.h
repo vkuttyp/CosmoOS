@@ -178,6 +178,10 @@ void module_dump(void);
  * for and failed (counted into the boot verdict, as module_load_boot's
  * failures are), else 0. Release builds: 0, nothing read. */
 unsigned module_cycle_boot(void);
+/* module.cycle='s parsers (kernel/module/modspec.cee): "<entry>:<count>[:<hold ms>]" split in place, false when
+ * malformed or out of range; and an archive entry's module name ("modules/x.ko" is "x"), cut to `len` with its NUL. */
+bool module_cycle_parse(char *spec, unsigned *count, unsigned *hold_ms);
+void module_entry_name(const char *entry, char *name, size_t len);
 
 #endif /* !COSMO_MODULE_BUILD */
 
@@ -228,9 +232,6 @@ typedef void (*module_cycle_live_fn)(struct module *m, unsigned cycle, void *arg
  * per call, so not from a module's init or shutdown (M18). */
 bool module_cycle(const void *file, size_t size, const char *origin, unsigned count, unsigned hold_ms,
                   module_cycle_live_fn live, void *arg, struct module_cycle_result *out);
-/* "<entry>:<count>[:<hold ms>]", split in place (the entry is `spec`
- * NUL-terminated); false when malformed or out of range. */
-bool module_cycle_parse(char *spec, unsigned *count, unsigned *hold_ms);
 #endif /* !COSMO_MODULE_BUILD */
 #endif
 

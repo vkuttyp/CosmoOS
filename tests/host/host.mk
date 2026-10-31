@@ -216,7 +216,7 @@ $(HOST_OUT)/test_virtq: $(call src_paths,$(HOST_VIRTQ_SRCS)) $(ROOT)/drivers/inc
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/drivers/include $(call src_paths,$(HOST_VIRTQ_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_netparse: $(call src_paths,$(HOST_NETPARSE_SRCS)) $(ROOT)/kernel/include/kernel/net/netparse.h | $(CEE_STAMP)
+$(HOST_OUT)/test_netparse: $(call src_paths,$(HOST_NETPARSE_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(call src_paths,$(HOST_NETPARSE_SRCS)) $(HOST_LDFLAGS) -o $@

@@ -268,7 +268,9 @@ pages, VM regions, anonymous pages, lockdep classes) after the first
 cycle and after the last, each read once the counts are quiet (design,
 "Load and unload in cycles"). True when nothing failed and every count but lockdep's is equal
 (invariant M27). Sleeps; not from a module's `init` or `shutdown`
-(M18). `module_cycle_parse` splits the command line's value.
+(M18). `module_cycle_parse` splits the command line's value and
+`module_entry_name` gives an archive entry's module name: both CeeSafe
+(`kernel/module/modspec.cee`; roadmap 2.0 SA5), declared in every build.
 
 ### `unsigned module_count(void)`, `void module_dump(void)`
 

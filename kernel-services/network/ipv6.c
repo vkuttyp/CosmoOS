@@ -9,7 +9,7 @@
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
 #include <kernel/string.h>
@@ -536,7 +536,7 @@ void ipv6_input(struct netif *nif, struct mbuf *m)
     }
     const struct ipv6_hdr *h = (const struct ipv6_hdr *)m->data;
     uint32_t plen;
-    if (netparse_ipv6(m->data, m->pkt.len, &plen) != NETPARSE_OK) {
+    if (!netparse_ipv6(m->data, m->pkt.len, &plen)) {
         STAT(rx_bad_header);
         m_freem(m);
         return;

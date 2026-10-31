@@ -6,7 +6,7 @@
 #include <kernel/log.h>
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/net/udp.h>
 #include <kernel/random.h>
 #include <kernel/socket.h>
@@ -242,7 +242,7 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     if (m == NULL)
         return;
     struct netparse_udp uh;
-    if (netparse_udp(m->data, len, &uh) != NETPARSE_OK) {
+    if (!netparse_udp(m->data, len, &uh)) {
         STAT(rx_bad_len);
         m_freem(m);
         return;

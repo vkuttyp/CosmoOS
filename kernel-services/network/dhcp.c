@@ -28,7 +28,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/net/udp.h>
 #include <kernel/netif.h>
 #include <kernel/random.h>
@@ -511,7 +511,7 @@ bool dhcp_client_input(struct netif *nif, struct mbuf *m, unsigned ihl)
     const struct ipv4_hdr *iph = (const struct ipv4_hdr *)buf;
     const uint8_t *udp = buf + ihl;
     struct netparse_udp uh;
-    if (netparse_udp(udp, total - ihl, &uh) != NETPARSE_OK || uh.len < sizeof(struct udp_hdr) + DHCP_FIXED ||
+    if (!netparse_udp(udp, total - ihl, &uh) || uh.len < sizeof(struct udp_hdr) + DHCP_FIXED ||
         (uh.has_cksum &&
          cksum_fold(cksum_partial(udp, uh.len, cksum_pseudo4(iph->src, iph->dst, IPPROTO_UDP, uh.len))) !=
              0)) {   /* cksum_fold complements: a valid datagram sums to 0 */
@@ -522,7 +522,7 @@ bool dhcp_client_input(struct netif *nif, struct mbuf *m, unsigned ihl)
     const uint8_t *dh = udp + sizeof(struct udp_hdr);
     uint32_t dhlen = uh.len - (uint32_t)sizeof(struct udp_hdr);
     struct netparse_dhcp msg;
-    bool well_formed = netparse_dhcp(dh, dhlen, BOOTP_REPLY, &msg) == NETPARSE_OK;
+    bool well_formed = netparse_dhcp(dh, dhlen, BOOTP_REPLY, &msg);
     uint32_t xid = 0;
     if (well_formed)
         memcpy(&xid, msg.xid, 4);

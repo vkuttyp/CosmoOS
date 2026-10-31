@@ -1,6 +1,7 @@
 /*
  * test_netparse.c - Host test of the network receive path's decoders
- * (kernel/net/netparse.h; roadmap 2.0 SA5, the network-frame family).
+ * (kernel-services/network/netparse.cee, kernel/net/netparse_types.h;
+ * roadmap 2.0 SA5).
  * ASan/UBSan.
  *
  * Besides direct checks, a recorded digest: 200,000 inputs from a seeded
@@ -28,7 +29,43 @@
 #include "harness.h"
 
 #include <kernel/net/dhcp.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
+
+/* The decoders' result codes when the digests below were recorded, before
+ * the results became bools and named facts (C cannot import a CeeSafe
+ * constant): every new result is mapped back to its old code, so the
+ * recorded lines, and their digests, still hold the decoders to the C. */
+enum { NETPARSE_OK, NETPARSE_BAD, NETPARSE_BAD_CKSUM, NETPARSE_FRAGMENT };
+enum { NETPARSE_ETH_OTHER, NETPARSE_ETH_OWN, NETPARSE_ETH_UNICAST, NETPARSE_ETH_BROADCAST, NETPARSE_ETH_MULTICAST };
+
+static uint32_t okbad(bool ok)
+{
+    return ok ? NETPARSE_OK : NETPARSE_BAD;
+}
+
+static uint32_t ether_code(const uint8_t *hdr, const uint8_t *own, uint16_t *type)
+{
+    struct netparse_eth e;
+    (netparse_ether)(hdr, own, &e);
+    *type = e.etype;
+    return e.other ? NETPARSE_ETH_OTHER : e.reflected ? NETPARSE_ETH_OWN : e.broadcast ? NETPARSE_ETH_BROADCAST
+         : e.multicast ? NETPARSE_ETH_MULTICAST : NETPARSE_ETH_UNICAST;
+}
+
+static uint32_t ipv4_header_code(const uint8_t *hdr, uint32_t ihl)
+{
+    if (!netparse_ipv4_cksum_ok(hdr, ihl))
+        return NETPARSE_BAD_CKSUM;
+    return netparse_ipv4_fragment(hdr) ? NETPARSE_FRAGMENT : NETPARSE_OK;
+}
+
+#define netparse_ether(h, own, type)    ether_code(h, own, type)
+#define netparse_ipv4_header(h, ihl)    ipv4_header_code(h, ihl)
+#define netparse_ipv4_outer(...)        okbad((netparse_ipv4_outer)(__VA_ARGS__))
+#define netparse_ipv6(...)              okbad((netparse_ipv6)(__VA_ARGS__))
+#define netparse_udp(...)               okbad((netparse_udp)(__VA_ARGS__))
+#define netparse_tcp(...)               okbad((netparse_tcp)(__VA_ARGS__))
+#define netparse_dhcp(...)              okbad((netparse_dhcp)(__VA_ARGS__))
 
 #include <stdio.h>
 #include <stdlib.h>

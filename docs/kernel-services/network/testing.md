@@ -1186,7 +1186,7 @@ back. `tools/fuzz-coverage.py` reports a target's line coverage by file.
 
 ## The decoders (`tests/host/test_netparse.c`)
 
-The receive path's decoders (`netparse.cee`, `kernel/net/netparse.h`)
+The receive path's decoders (`netparse.cee`, `kernel/net/netparse_types.h`)
 have a host test of their own: direct checks of each, and a recorded
 digest over 200,000 seeded inputs, half of them a valid header of a
 layer with a few bytes changed so that the accepting paths are reached.

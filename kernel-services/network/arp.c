@@ -8,7 +8,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/ip.h>
 #include <kernel/string.h>

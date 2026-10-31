@@ -14,7 +14,7 @@
 #ifndef KERNEL_NET_DHCP_H
 #define KERNEL_NET_DHCP_H
 
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/types.h>
 
 struct netif;
@@ -70,7 +70,7 @@ struct mbuf;
 
 /* Find option `code` in [opts, opts+len); its value and length (*olen), or
  * NULL. Stops at OPT_END, skips OPT_PAD, never reads past `len`. The walk
- * is netparse_dhcp_opt's (kernel/net/netparse.h). */
+ * is netparse_dhcp_opt's (kernel-services/network/netparse.cee). */
 static inline const uint8_t *dhcp_opt(const uint8_t *opts, uint32_t len, uint8_t code, uint8_t *olen)
 {
     int32_t at = netparse_dhcp_opt(opts, len, code, olen);

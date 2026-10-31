@@ -23,7 +23,7 @@
 #include <kernel/panic.h>
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
-#include <kernel/net/netparse.h>
+#include <kernel/net/netparse_types.h>
 #include <kernel/net/tcp.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
@@ -1973,7 +1973,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     if (m == NULL)
         return;
     struct netparse_tcp th;
-    if (netparse_tcp(m->data, len, &th) != NETPARSE_OK) {   /* a data offset below 20 or beyond the segment */
+    if (!netparse_tcp(m->data, len, &th)) {   /* a data offset below 20 or beyond the segment */
         m_freem(m);
         return;
     }
