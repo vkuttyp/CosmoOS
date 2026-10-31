@@ -235,14 +235,17 @@ void cfs_mac_derive(const uint8_t master[CHACHA20_KEY_SIZE], struct cfs_mac *out
 }
 
 /* A slot as user space sealed it is taken as it is -- the kernel cannot
- * open one, which needs the passphrase -- but its shape is checked. */
+ * open one, which needs the passphrase -- but its shape is checked: the
+ * Argon2id parameters user space can derive with (userland/lib/argon2.c).
+ * Lanes are at most 2^24 - 1 (RFC 9106), which also keeps 8 * lanes from
+ * wrapping: 0x20000000 lanes would have passed with any memory cost. */
 bool cfs_keyslot_valid(unsigned index, const struct cfs_keyslot *s)
 {
     switch (s->kind) {
     case CFS_KEYSLOT_EMPTY:
         return true;
     case CFS_KEYSLOT_PASSPHRASE:
-        return s->t_cost >= 1 && s->lanes >= 1 && s->m_cost_kib >= 8 * s->lanes;
+        return s->t_cost >= 1 && s->lanes >= 1 && s->lanes <= 0xffffff && s->m_cost_kib >= 8 * s->lanes;
     case CFS_KEYSLOT_KEYFILE:
         return index == 0;
     default:
