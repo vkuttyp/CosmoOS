@@ -13,7 +13,8 @@
  * them (netparse.cee) give the same. NETPARSE_DUMP=1 prints the lines.
  *
  * The TCP segment family has a digest of its own ("tcp digest"): 200,000
- * headers and option lists, recorded from netparse_tcp.c the same way.
+ * headers and option lists, recorded from the C (netparse_tcp.c) the same
+ * way, which netparse.cee gives too.
  *
  * NETPARSE_BENCH=1 times the decoders instead: the same inputs, every
  * decoder on each, best of 9 runs, in nanoseconds per input (the 5% rule).
@@ -365,7 +366,7 @@ static void test_recorded_digest(void)
     EXPECT(digest == NETPARSE_DIGEST);
 }
 
-/* The TCP segment family's digest (netparse_tcp.c, 2026-10-31). */
+/* The TCP segment family's digest: the C's (2026-10-31), which netparse.cee gives too. */
 #define TCP_ROUNDS 200000
 #define TCP_SEED 0x7C9A5E6D2026B31Full
 #define TCP_DIGEST 0x35875a1cf041750bull

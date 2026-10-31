@@ -11,7 +11,7 @@ The network stack (Phase 8): a layered design over an mbuf abstraction
 | `cksum.c` | The Internet checksum over buffers and chains, pseudo headers (`kernel/net/cksum.h`) |
 | `netif.c` | Interface registry, the 512-packet receive queue, deferred work, the `netrx` worker thread, fw_cfg address configuration (`kernel/netif.h`) |
 | `loopback.c` | The `lo` interface and the test filter hook |
-| `netparse.cee` | The receive path's decoders, in CeeSafe (roadmap 2.0 SA5): every check and field read on frame bytes, from Ethernet to the transport identifiers NAT and the firewall key on (`kernel/net/netparse.h`) |
+| `netparse.cee` | The receive path's decoders, in CeeSafe (roadmap 2.0 SA5): every check and field read on frame bytes, from Ethernet to the transport identifiers NAT and the firewall key on, and TCP's header and options (`kernel/net/netparse.h`) |
 | `ether.c` | Ethernet framing, dispatch by EtherType, runt padding |
 | `arp.c` | ARP table (64 entries), resolution with one pending packet, retries and ageing |
 | `ipv4.c` | IPv4 input/output, route and source selection, ICMP echo and unreachable |

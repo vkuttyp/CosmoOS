@@ -1,12 +1,12 @@
-// netparse.cee - the network receive path's decoders (kernel/net/netparse.h; roadmap 2.0 SA5, the network-frame
-// family). Every check and field read the stack makes on bytes a frame brought: ether_input, arp_input, ipv4_input,
+// netparse.cee - the network receive path's decoders (kernel/net/netparse.h; roadmap 2.0 SA5, the network-frame and
+// TCP-segment families). Every check and field read the stack makes on bytes a frame brought: ether_input, arp_input, ipv4_input,
 // the quoted headers of ICMP errors (icmp_quoted_flow, nat_in_icmp_error), ipv6_input, nd_input_ns and nd_input_na,
-// udp_input, and the transport identifiers NAT and the firewall key on. The callers keep the mbufs, the tables and the
+// udp_input, the transport identifiers NAT and the firewall key on, and TCP's header and options (tcp_input, parse_mss). The callers keep the mbufs, the tables and the
 // policy.
 //
 // Each decoder is a safe function over a slice of exactly the bytes the header's comment names; the exports below make
 // those slices from the caller's pointer, so an index past them is a bounds panic, never a read of another buffer.
-// tests/host/test_netparse.c holds them to the C they replaced: the same digest over 200,000 inputs.
+// tests/host/test_netparse.c holds them to the C they replaced: the same digests over 200,000 inputs each.
 
 @header("kernel/net/netparse.h")
 extern "C" {
@@ -26,6 +26,15 @@ extern "C" {
         sport: u16;
         dport: u16;
         has_cksum: bool;
+    }
+    struct netparse_tcp {
+        hlen: u32;
+        sport: u16;
+        dport: u16;
+        seq: u32;
+        ack: u32;
+        flags: u8;
+        win: u16;
     }
     struct netparse_l4 {
         sport: u16;
@@ -57,6 +66,8 @@ const ND_LEN: usize = 32;
 const UDP_HLEN: usize = 8;
 const L4_MIN: usize = 8;
 const L4_TCP_FLAGS: usize = 14;
+const TCP_HLEN: usize = 20;
+const TCP_MIN_MSS: u16 = 536;
 
 /// The big-endian 16-bit field at `at`.
 fn be16(b: Slice<u8>, at: usize) -> u16 => (b[at] as u16) << 8 | b[at + 1] as u16;
@@ -154,6 +165,37 @@ fn ipv6(hdr: Slice<u8>, pktLen: u32, plen: borrow mut u32) -> u32 {
     return OK;
 }
 
+// --- TCP ------------------------------------------------------------------------------------------------------------
+
+/// The maximum segment size the options announce (kind 2, length 4), raised to 536; `dflt` when there is none, or the
+/// list ends (kind 0) or is malformed first: a kind with no length byte, a length below 2, or one past the options.
+fn tcpMss(o: Slice<u8>, dflt: u16) -> u16 {
+    var i: usize = 0;
+    while (i < o.length) {
+        let kind = o[i];
+        if (kind == 0) {
+            return dflt;
+        }
+        if (kind == 1) {
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= o.length) {
+            return dflt;
+        }
+        let len = o[i + 1] as usize;
+        if (len < 2 || len > o.length - i) {
+            return dflt;
+        }
+        if (kind == 2 && len == 4) {
+            let mss = be16(o, i + 2);
+            return if (mss < TCP_MIN_MSS) TCP_MIN_MSS else mss;
+        }
+        i += len;
+    }
+    return dflt;
+}
+
 // --- the exports -----------------------------------------------------------------------------------------------------
 
 /// Safety: `hdr` points to ETH_HLEN readable bytes and `mac` to 6 (netparse.h); `etherType` is writable.
@@ -240,3 +282,26 @@ unsafe fn l4C(b: *u8, avail: u32, out: *mut netparse_l4) {
     l.icmp_id = be16(h, 4);
     l.tcp_flags = if (n == L4_TCP_FLAGS) h[13] else 0;
 }
+
+/// Safety: `hdr` points to TCP_HLEN readable bytes and `out` to a writable struct.
+@export("netparse_tcp")
+unsafe fn tcpC(hdr: *u8, segLen: u32, out: *mut netparse_tcp) -> u32 {
+    let h = Slice.fromRaw(hdr, TCP_HLEN);
+    let hlen = ((h[12] >> 4) as u32) * 4;
+    if (hlen < 20 || hlen > segLen) {
+        return BAD;
+    }
+    let d = Ptr.toBorrowMut(out);
+    d.hlen = hlen;
+    d.sport = be16(h, 0);
+    d.dport = be16(h, 2);
+    d.seq = be32(h, 4);
+    d.ack = be32(h, 8);
+    d.flags = h[13];
+    d.win = be16(h, 14);
+    return OK;
+}
+
+/// Safety: `opts` points to `optlen` readable bytes (at most 40: the header's options).
+@export("netparse_tcp_mss")
+unsafe fn tcpMssC(opts: *u8, optlen: u32, dflt: u16) -> u16 => tcpMss(Slice.fromRaw(opts, optlen as usize), dflt);

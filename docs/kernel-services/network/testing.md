@@ -1200,6 +1200,14 @@ C's time at -O2 on arm64 (22.8 ns against 23.3 ns) and on x86-64 under
 Rosetta (33.5 against 34.0). Every fuzz target over the network stack
 runs them.
 
+TCP's decoders (the header's data offset and fields, and the options
+walk that finds a SYN's MSS) have a digest of their own over 200,000
+headers and option lists, built from the kinds a SYN carries and others
+with lengths right and wrong: the C's (`0x35875a1cf041750b`,
+2026-10-31), which the CeeSafe gives too. Their benchmark line (`tcp
+bench`) was 0.97x the C on arm64 (15.8 ns against 16.3) and 0.95x on
+x86-64 under Rosetta (18.5 against 19.5).
+
 ## Releases however a test returns (the net-leftover unit)
 
 `CHECK` returns at once. A network test used to release what it made

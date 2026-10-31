@@ -414,7 +414,12 @@ transport identifiers NAT and the firewall key on. `tests/host/test_netparse.c`'
 digest over 200,000 inputs is the C's; the benchmark is 0.98x the C on
 arm64 and on x86-64 (Rosetta), after bulk copies and 48-bit MAC compares
 took the first port's 1.07-1.09x back. All four network fuzz targets
-run it.
+run it. TCP segments and options (2026-10-31): tcp_input's header check
+and fields and the options walk (`netparse_tcp`, `netparse_tcp_mss`),
+with a digest of their own over 200,000 headers and option lists
+(`0x35875a1cf041750b`, the C's); 0.97x the C on arm64 and 0.95x on
+x86-64 (Rosetta). tcp_input keeps the decoded fields, not the raw
+header, so the reset it builds reads them too.
 
 Size: about 3.0x.
 
