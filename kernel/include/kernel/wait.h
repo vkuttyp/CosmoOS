@@ -43,13 +43,13 @@ typedef void (*wait_callback_fn)(struct wait_entry *e, unsigned flags);
  * first thread it wakes (a contended mutex unlock is not O(waiters) under its
  * spinlock; the first version of the callback kind walked one list to its
  * end). */
-/* struct wait_entry { link; thread; callback; } is defined in Nova
- * (kernel/scheduler/wait.nova) and generated into wait_types.h, below;
+/* struct wait_entry { link; thread; callback; } is defined in CeeSafe
+ * (kernel/scheduler/wait.cee) and generated into wait_types.h, below;
  * `callback` is a wait_callback_fn, NULL for a sleeping thread's entry. */
 
 /* struct waitqueue { lock; waiters (sleeping threads); callbacks (callback
  * entries, run by every wake); } and struct wait_timeout { wq; expired; }
- * are Nova's too (roadmap 2.0 SA3; Nova ADR 0029, 0030). */
+ * are CeeSafe's too (roadmap 2.0 SA3; CeeSafe ADR 0029, 0030). */
 #include <kernel/wait_types.h>
 
 #define WAITQUEUE_INIT(name) { .lock = SPINLOCK_INIT(#name), .waiters = LIST_HEAD_INIT((name).waiters), \
@@ -155,7 +155,7 @@ void wait_timeout_init(struct wait_timeout *wt, struct waitqueue *wq);
 void wait_timeout_fired(struct timer *t, void *arg);
 bool wait_timeout_expired(const struct wait_timeout *wt);
 
-/* For the Nova ports (kernel/scheduler/wait_floor.c), which cannot hold a
+/* For the CeeSafe ports (kernel/scheduler/wait_floor.c), which cannot hold a
  * wait entry or a timer on their stack: wait_event, wait_event_timeout and
  * wait_event_killable over a condition function, and the checks a sleeping
  * call makes first (`what` in interrupt context panics; might_sleep,

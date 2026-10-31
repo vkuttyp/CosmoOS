@@ -1,7 +1,7 @@
 /*
- * completion_floor.c - The C under kernel/scheduler/completion.nova (roadmap
- * 2.0 SA3): the module exports, a C macro. The completions are Nova
- * (completion.nova, generated into completion.c and
+ * completion_floor.c - The C under kernel/scheduler/completion.cee (roadmap
+ * 2.0 SA3): the module exports, a C macro. The completions are CeeSafe
+ * (completion.cee, generated into completion.c and
  * kernel/include/kernel/completion_types.h).
  */
 

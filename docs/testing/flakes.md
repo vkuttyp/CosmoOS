@@ -5200,17 +5200,17 @@ matrix (`bcc53210`) had failed x86-64 `test-smp2` and `test-chaos` the
 same way (`process-user` 17.9 and 19.6 s) and `test-harness-retry` by a
 timeout with `[WATCHDOG] no progress for 40000 ms`, from 12:09 to 12:23.
 
-**The load.** On this host the owner's Nova project was running its
-tests and builds: `dotnet test Nova.slnx` with clang compiles under it,
-from about 17:00, with Nova's test runs writing files at 16:52 and 16:58,
-and Nova's c4 builds from 12:02 to 12:15. A sampler of `ps`'s CPU shares
-every 30 s, started at 17:05 during the chaos boot, showed Nova's
+**The load.** On this host the owner's CeeSafe project was running its
+tests and builds: `dotnet test CeeSafe.slnx` with clang compiles under it,
+from about 17:00, with CeeSafe's test runs writing files at 16:52 and 16:58,
+and CeeSafe's c4 builds from 12:02 to 12:15. A sampler of `ps`'s CPU shares
+every 30 s, started at 17:05 during the chaos boot, showed CeeSafe's
 processes at 183-275 % of a CPU from 17:06:49 to 17:10:19 and QEMU held
 to 0-104 %. No sample covers the x86-64 failure at 15:02.
 
 **The mechanism, reproduced.** x86-64 `test-smp2` on `ef4ecdb0`,
 alternated between the quiet host and the same host running 12 busy
-loops (about 720 % of its 8 CPUs), with Nova idle (0 %) throughout:
+loops (about 720 % of its 8 CPUs), with CeeSafe idle (0 %) throughout:
 
 | run | verdict | self-tests | `cosmofs-replay` | `lockdep-graph-bench` |
 | --- | --- | --- | --- | --- |
@@ -5246,12 +5246,12 @@ marker missing, after all 514 self-tests. The deliberate fault after
 | run (attempt) | head | verdict | self-tests summed | `cosmofs-replay` | `irqpoll-boost` |
 | --- | --- | --- | --- | --- | --- |
 | 40323876091 (1), job 121576203801 | `dc1d5166`, the merge of #458 (docs only: the license) | `timed out after 180s` | 173.0 s | 25.5 s | ok (306 ms) |
-| 40360512423 (1), job 121704473905 | `68925d14`, the merge of #459 (the GPT parser generated from Nova) | `timed out after 180s` | 172.8 s | 26.2 s | FAIL: `gap_ms <= BOOST_GAP_MS` at line 111 (325 ms), the entry for this test above |
+| 40360512423 (1), job 121704473905 | `68925d14`, the merge of #459 (the GPT parser generated from CeeSafe) | `timed out after 180s` | 172.8 s | 26.2 s | FAIL: `gap_ms <= BOOST_GAP_MS` at line 111 (325 ms), the entry for this test above |
 | 40360512423 (2), job 121749771931 | `68925d14`, rerun of the failed job | PASS in 142.7 s | | | |
 
 **Not #459.** The first failure is on the merge before it, whose kernel
 had the C parser; `blk-gpt` passed in both failing boots (144 and 143 ms),
-no `nova panic` line appears, and the failed job passed when rerun on the
+no `ceesafe panic` line appears, and the failed job passed when rerun on the
 same commit. #459's own CI run (40343135060, head `b383e45f`) passed this
 boot in 164.5 s.
 

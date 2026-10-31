@@ -1,6 +1,6 @@
-// fair.nova - The weighted fair share at the default priority level, in Nova: the source of
-// kernel/scheduler/fair.c, which `make nova` generates (docs/kernel/scheduler/design.md, "The fair level";
-// scripts/nova-gen.py). Nice values' weights, Linux's table, and the virtual-time arithmetic that orders the
+// fair.cee - The weighted fair share at the default priority level, in CeeSafe: the source of
+// kernel/scheduler/fair.c, which `make cee` generates (docs/kernel/scheduler/design.md, "The fair level";
+// scripts/cee-gen.py). Nice values' weights, Linux's table, and the virtual-time arithmetic that orders the
 // level: charging run time, placing a thread that joins, carrying one between CPUs, the order itself, and when
 // the running thread gives way. The API is kernel/include/kernel/fair.h. The callers hold a run-queue lock, often
 // in the tick: nothing here allocates, blocks or panics on any input, and every sum saturates.

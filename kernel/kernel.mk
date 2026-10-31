@@ -141,11 +141,11 @@ KERNEL_GENERIC_SRCS := \
 	kernel/device/devtest.c \
 	kernel/block/blk.c \
 	kernel/block/gpt.c \
-	kernel/nova/nova_rt_core.c \
-	kernel/nova/nova_panic.c \
-	kernel/nova/crash_test.c \
-	kernel/nova/kcore_test.c \
-	kernel/nova/kcore_selftest.c \
+	kernel/ceesafe/ceesafe_rt_core.c \
+	kernel/ceesafe/ceesafe_panic.c \
+	kernel/ceesafe/crash_test.c \
+	kernel/ceesafe/kcore_test.c \
+	kernel/ceesafe/kcore_selftest.c \
 	kernel/block/part.c \
 	kernel/block/ramblk.c \
 	kernel/block/blktest.c \

@@ -200,61 +200,62 @@ behind silently. A fix removes both. Where the two architectures differ
 (`compat/linux/signal.c`'s frame builders are large only on AArch64), only
 the large definition is wrapped.
 
-## Nova sources
+## CeeSafe sources
 
-Some kernel code is written in Nova, a memory-safe language compiled to C
-(https://github.com/vkuttyp/Nova): the object and handle layer, wait
+Some kernel code is written in CeeSafe, a memory-safe language compiled to C
+(https://github.com/vkuttyp/CeeSafe, the fork of Nova 0.6.0 this tree used
+before 2026-10-31): the object and handle layer, wait
 queues, completions, semaphores, the mutex, quiescence, pipes and named
 pipes, the GPT parser and writer, CPU-time accounting, nice values, the
-scheduler's fair level and the framebuffer validator, each a `NAME.nova`
-(the list is `PORTS` in `scripts/nova-gen.py`). Since roadmap 2.0 SA1 the
-tree holds the `.nova` files and **not the C made from them** (the Nova
-rule's point 7): **building CosmoOS runs the pinned Nova compiler.**
-`build/nova.mk` runs `scripts/nova-gen.py`, which compiles each source with
-`novac build --profile freestanding --no-float --emit c` and adds a "do
-not edit" banner naming the source, into `out/nova/`, at the path the file
-would have in the tree (`out/nova/kernel/core/fbvalid.c`). Every object,
+scheduler's fair level and the framebuffer validator, each a `NAME.cee`
+(the list is `PORTS` in `scripts/cee-gen.py`). Since roadmap 2.0 SA1 the
+tree holds the `.cee` files and **not the C made from them** (the CeeSafe
+rule's point 7): **building CosmoOS runs the pinned CeeSafe compiler.**
+`build/cee.mk` runs `scripts/cee-gen.py`, which compiles each source with
+`ceesafec build --profile freestanding --no-float --emit c` and adds a "do
+not edit" banner naming the source, into `out/cee/`, at the path the file
+would have in the tree (`out/cee/kernel/core/fbvalid.c`). Every object,
 host test and fuzz target made from a generated file takes it from there,
-and the generated headers (`kernel/include/kernel/NAME_types.h`, Nova's
-runtime `kernel/include/nova/rt.h`) are on the include path before the
-tree's. Nova's runtime is generated too (`kernel/nova/nova_rt_core.c`).
-Each environment supplies its own panic hook, called when a Nova check
-fails (`kernel/nova/nova_panic.c` panics the kernel, naming the Nova line;
-`tests/host/nova_panic.c` aborts). A prefix map gives the generated C the
-paths it has in the tree, so a build from `out/nova` and one from a source
+and the generated headers (`kernel/include/kernel/NAME_types.h`, CeeSafe's
+runtime `kernel/include/ceesafe/rt.h`) are on the include path before the
+tree's. CeeSafe's runtime is generated too (`kernel/ceesafe/ceesafe_rt_core.c`).
+Each environment supplies its own panic hook, called when a CeeSafe check
+fails (`kernel/ceesafe/ceesafe_panic.c` panics the kernel, naming the CeeSafe line;
+`tests/host/ceesafe_panic.c` aborts). A prefix map gives the generated C the
+paths it has in the tree, so a build from `out/cee` and one from a source
 tarball are the same bytes.
 
-How to write a port, its header and its tests is [`nova.md`](nova.md). A
+How to write a port, its header and its tests is [`ceesafe.md`](ceesafe.md). A
 new port is one line in the script's `PORTS`. The compiler is pinned
-(`NOVAC_VERSION` in the script; the build refuses any other): generated C
-is a pure function of the source and the compiler. Moving to a newer novac
-is a change of its own: bump the pin, the CI job's `NOVAC_SHA256` and the
+(`CEESAFEC_VERSION` in the script; the build refuses any other): generated C
+is a pure function of the source and the compiler. Moving to a newer ceesafec
+is a change of its own: bump the pin, the CI job's `CEESAFEC_SHA256` and the
 CI image's (`ci/Dockerfile`; the release's `SHA256SUMS`), build, run the
 matrix. The pinned release is installed with
 
 ```sh
-curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.6.0 sh
+curl -fsSL https://vkuttyp.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v0.2.0 sh
 ```
 
-or named with `NOVAC=<path>`; the CI image has it (`ci/Dockerfile`).
+or named with `CEESAFEC=<path>`; the CI image has it (`ci/Dockerfile`).
 
-**Building without novac.** novac does not run on CosmoOS, so a
-self-hosted build cannot run it (Nova's ADR 0023). `make dist`
+**Building without ceesafec.** ceesafec does not run on CosmoOS, so a
+self-hosted build cannot run it yet (CeeSafe's ADR 0023). `make dist`
 (`scripts/dist.py`) writes `out/dist/cosmoos-<build id>-src.tar.gz`: the
-tree with the generated C beside each `.nova` source, `.nova-dist` (which
-tells `build/nova.mk` the C is there, so no novac is run) and `.build-id`
+tree with the generated C beside each `.cee` source, `.cee-dist` (which
+tells `build/cee.mk` the C is there, so no ceesafec is run) and `.build-id`
 (the commit's `git describe`, which the build would otherwise ask git for).
 A release publishes it beside the release sets, in the signed
 `SHA256SUMS`. `make reproducible` builds its second tree from such a
-tarball, with a `novac` that fails if anything runs it, and requires every
+tarball, with a `ceesafec` that fails if anything runs it, and requires every
 output to be the same bytes as the first tree's
-(`scripts/check-reproducible.sh`): so a tarball builds with no novac, and
-its C is what the pinned novac makes. CI runs it on both architectures.
+(`scripts/check-reproducible.sh`): so a tarball builds with no ceesafec, and
+its C is what the pinned ceesafec makes. CI runs it on both architectures.
 
-`make nova-check` (and CI's "Nova sources" job) also checks the Nova sources the kernel
-must refuse, `tests/nova/negative/*.nova`: each line marked `//
-error[N…]` must be refused with that code by `novac check` (with the
+`make cee-check` (and CI's "CeeSafe sources" job) also checks the CeeSafe sources the kernel
+must refuse, `tests/ceesafe/negative/*.cee`: each line marked `//
+error[N…]` must be refused with that code by `ceesafec check` (with the
 kernel library), and no other line may be, so the accepted cases beside
-the refused ones must compile. `sleep-under-spin.nova` is roadmap 2.0
+the refused ones must compile. `sleep-under-spin.cee` is roadmap 2.0
 SA3's negative test: nothing that may sleep compiles under a spin lock's
 guard, with interrupts off or with preemption off.

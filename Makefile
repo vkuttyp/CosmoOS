@@ -27,7 +27,7 @@
 #   make test-pkg-net  roadmap 1.1 P6: pkg against HTTPS repositories served by the harness (CI: BUILD=release)
 #   make test-display  virtio-gpu: the console on the display's own size, read back from a screendump (CI: BUILD=release)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
-#   make test-crash-nova SA1: a Nova bounds check failing on purpose must panic naming its Nova file:line
+#   make test-crash-cee SA1: a CeeSafe bounds check failing on purpose must panic naming its CeeSafe file:line
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
 #   make test-harness-retry  boot with net-harness's first back-connection broken on purpose
@@ -42,9 +42,9 @@
 #   make check-tools  verify the cross toolchain is usable (and run check-secrets)
 #   make check-secrets  fail if a private or revoked module-signing key is tracked
 #   make check-docs   every subsystem in docs/README.md has its five documentation files
-#   make nova         generate the C of the kernel's Nova sources into out/nova with the pinned novac (the build does)
-#   make nova-check   the same, and the negative sources (tests/nova/negative) refused as they say
-#   make dist         a source tarball with the generated C beside each source, which builds with no novac
+#   make cee             generate the C of the kernel's CeeSafe sources into out/cee with the pinned ceesafec (the build does)
+#   make cee-check       the same, and the negative sources (tests/ceesafe/negative) refused as they say
+#   make dist         a source tarball with the generated C beside each source, which builds with no ceesafec
 #   make test-stackprot BUILD-1: a stack buffer overrun on purpose must panic as one (the stack protector)
 #   make clang-eval   roadmap 1.2 A1: a static musl clang+lld for ARCH, for the evaluation (tools/clang-eval/)
 #   make test-clang-eval  run that clang on this build installed (BUILD=release)
@@ -55,11 +55,11 @@
 ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 include $(ROOT)/build/config.mk
-include $(ROOT)/build/nova.mk
+include $(ROOT)/build/cee.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-selfhost test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-crash-nova test-stackprot test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check dist clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-selfhost test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-crash-cee test-stackprot test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs cee cee-check dist clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -686,16 +686,16 @@ test-stackprot:
 		--image $(OUT)-stackprot/cosmoos.img --log $(OUT)-stackprot/boot-test-stackprot.log \
 		--kernel $(OUT)-stackprot/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
-# crash-nova (roadmap 2.0 SA1): a kernel whose Nova bounds check fails on
-# purpose (CRASH_TEST=5, kernel/nova/crash_test.nova); the harness requires
-# Nova's panic naming that file and the line it marks. Both architectures.
-test-crash-nova:
+# crash-cee (roadmap 2.0 SA1): a kernel whose CeeSafe bounds check fails on
+# purpose (CRASH_TEST=5, kernel/ceesafe/crash_test.cee); the harness requires
+# CeeSafe's panic naming that file and the line it marks. Both architectures.
+test-crash-cee:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
-		CRASH_TEST=5 OUT=$(OUT)-crash-nova image
+		CRASH_TEST=5 OUT=$(OUT)-crash-cee image
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic nova --timeout $(CRASH_TIMEOUT) \
-		--image $(OUT)-crash-nova/cosmoos.img --log $(OUT)-crash-nova/boot-test-crash-nova.log \
-		--kernel $(OUT)-crash-nova/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic ceesafe --timeout $(CRASH_TIMEOUT) \
+		--image $(OUT)-crash-cee/cosmoos.img --log $(OUT)-crash-cee/boot-test-crash-cee.log \
+		--kernel $(OUT)-crash-cee/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
 # AArch64: build a kernel that maps one page writable and executable on
 # purpose and executes it (CRASH_TEST=2); SCTLR_EL1.WXN must make that
@@ -738,19 +738,19 @@ reproducible:
 check-docs:
 	$(Q)$(PYTHON) $(ROOT)/scripts/check-docs.py $(ROOT)
 
-# The C generated from the kernel's Nova sources (docs/build/design.md, "Nova sources"): nova
-# regenerates it with the pinned novac; nova-check only compares.
-nova:
-	$(Q)$(PYTHON) $(ROOT)/scripts/nova-gen.py --out out/nova
-	$(Q)touch $(NOVA_STAMP)
+# The C generated from the kernel's CeeSafe sources (docs/build/design.md, "CeeSafe sources"): make cee
+# regenerates it with the pinned ceesafec; cee-check only compares.
+cee:
+	$(Q)$(PYTHON) $(ROOT)/scripts/cee-gen.py --out out/cee
+	$(Q)touch $(CEE_STAMP)
 
-# Every Nova source compiles with the pinned novac and the negative sources are refused as they say; that a build from
+# Every CeeSafe source compiles with the pinned ceesafec and the negative sources are refused as they say; that a build from
 # the generated C is the same bytes as one from a dist tarball is make reproducible's.
-nova-check:
-	$(Q)$(PYTHON) $(ROOT)/scripts/nova-gen.py --out out/nova
-	$(Q)touch $(NOVA_STAMP)
+cee-check:
+	$(Q)$(PYTHON) $(ROOT)/scripts/cee-gen.py --out out/cee
+	$(Q)touch $(CEE_STAMP)
 
-# A source tarball that builds with no novac: the generated C beside each .nova source (scripts/dist.py; Nova's ADR
+# A source tarball that builds with no ceesafec: the generated C beside each .cee source (scripts/dist.py; CeeSafe's ADR
 # 0023). make reproducible builds its second tree from one.
 dist:
 	$(Q)$(PYTHON) $(ROOT)/scripts/dist.py
@@ -758,7 +758,7 @@ dist:
 # compile_commands.json for clangd/IDEs, using the real cross flags so
 # editor diagnostics match the build. The file is git-ignored.
 ARCH_INC := -I$(ROOT)/kernel/arch/$(ARCH)/include
-compile-commands: | $(NOVA_STAMP)
+compile-commands: | $(CEE_STAMP)
 	$(call log,GEN,$(ROOT)/compile_commands.json)
 	$(Q)( \
 	  $(foreach s,$(KERNEL_GENERIC_SRCS),printf '%s\t%s\n' '$(patsubst $(ROOT)/%,%,$(call src_paths,$(s)))' '$(KERNEL_CFLAGS)';) \

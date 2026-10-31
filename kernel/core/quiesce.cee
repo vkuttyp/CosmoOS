@@ -1,8 +1,8 @@
-// Quiescence: epoch-based reclamation (kernel/include/kernel/quiesce.h; docs/kernel/quiesce/), in Nova (roadmap 2.0
+// Quiescence: epoch-based reclamation (kernel/include/kernel/quiesce.h; docs/kernel/quiesce/), in CeeSafe (roadmap 2.0
 // SA3). The epoch arithmetic stays C's (quiesce_core.h, shared with the host test); this is the kernel around it: the
 // quiescent points, the grace period with its straggler kicks and its timed wait, and the deferred-callback worker.
-// struct quiesce_head and struct quiesce_stats are Nova's, generated into kernel/include/kernel/quiesce_types.h, which
-// quiesce.h includes (Nova ADR 0029, 0030); a head's `fn` is `callback` (a Nova keyword). quiesce_floor.c keeps the
+// struct quiesce_head and struct quiesce_stats are CeeSafe's, generated into kernel/include/kernel/quiesce_types.h, which
+// quiesce.h includes (CeeSafe ADR 0029, 0030); a head's `fn` is `callback` (a CeeSafe keyword). quiesce_floor.c keeps the
 // statics of C types (the state, the two wait queues), the formatted messages, the debug-only read-section counting and
 // test hooks, and the module exports.
 //
@@ -80,7 +80,7 @@ const PRIO_DEFAULT: i32 = 32;
 @repr(C)
 struct quiesce_head {
     next: *mut quiesce_head;
-    callback: extern "C" fn(*mut quiesce_head); // run after the grace period; was `fn`, a Nova keyword
+    callback: extern "C" fn(*mut quiesce_head); // run after the grace period; was `fn`, a CeeSafe keyword
     pending: bool;
 }
 

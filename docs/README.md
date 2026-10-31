@@ -28,7 +28,7 @@ wins and the document is wrong.
 | `kernel/interrupt/` | Vector-to-handler dispatch; `controllers.md` covers the Phase 3 IRQ layer (GSI routing, LAPIC/IOAPIC, vector map, IPIs) |
 | `kernel/diagnostics/` | Console, logging, printf, panic, self-tests, crash test; and the framebuffer console (`fbcon`): the display the firmware lit, carried through boot protocol v6, drawn with an in-tree face, checked by reading the pixels back |
 | `kernel/memory/` | Physical memory (bootmem, zones, buddy), virtual memory (page-table takeover, arena, faults), slab heap and kmalloc; host unit tests in `tests/host/` |
-| `kernel/scheduler/` | Threads, per-CPU run queues, fixed-priority policy with round-robin above and below the default level and a weighted fair share by nice value at it (`fair.c`, from Nova), preemption, wait queues, mutex, semaphore, completion, per-CPU data |
+| `kernel/scheduler/` | Threads, per-CPU run queues, fixed-priority policy with round-robin above and below the default level and a weighted fair share by nice value at it (`fair.c`, from CeeSafe), preemption, wait queues, mutex, semaphore, completion, per-CPU data |
 | `kernel/timer/` | Monotonic clock (TSC on x86-64, the generic timer on AArch64), the per-CPU tick, one-shot timers, sleep, PIT calibration, the real-time clock |
 | `kernel/smp/` | AP bring-up (trampoline, per-CPU tables), IPIs, cross-CPU calls, TLB shootdown, stopping CPUs, the hang watchdog |
 | `drivers/acpi/` | Static ACPI tables: RSDP/XSDT walk and the decoded MADT (CPUs, LAPIC, IOAPICs, overrides; GIC CPU interfaces, distributor and MSI frame on AArch64) |

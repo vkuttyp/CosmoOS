@@ -1,10 +1,10 @@
 /*
- * object_floor.c - The C under kernel/object/object.nova (roadmap 2.0 SA2).
+ * object_floor.c - The C under kernel/object/object.cee (roadmap 2.0 SA2).
  *
- * The object layer's counts, release, discard and census are Nova
- * (object.nova, generated into object.c). What stays here is what Nova
+ * The object layer's counts, release, discard and census are CeeSafe
+ * (object.cee, generated into object.c). What stays here is what CeeSafe
  * cannot express yet: calls through the type's function pointers (an
- * imported C struct cannot declare a function-pointer member, Nova
+ * imported C struct cannot declare a function-pointer member, CeeSafe
  * type-system.md §31.1), panic's message (a variadic call), and the
  * module exports (a C macro). Each is a few lines and no decision.
  */
@@ -16,7 +16,7 @@
 
 #include <uapi/cosmo/syscall.h>
 
-/* Declared for object.nova only; not part of object.h's interface. */
+/* Declared for object.cee only; not part of object.h's interface. */
 void kobject_floor_release(struct kobject *obj);
 uintptr_t kobject_floor_release_address(const struct kobject_type *type);
 void kobject_floor_fatal(const char *before, const char *after, const struct kobject *obj);

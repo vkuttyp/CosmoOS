@@ -30,7 +30,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SUBJECT = ("kernel/process: CPU time split into user and system time, and ITIMER_VIRTUAL and ITIMER_PROF, "
-           "in Nova (roadmap 1.2 A5, LX-14)")
+           "in CeeSafe (roadmap 1.2 A5, LX-14)")
 # The checks --old must see fail: the two defects, then one per missing feature.
 OLD_FAILS = [
     r"p1 > 0 && p1 - p0 < 50000000ull",

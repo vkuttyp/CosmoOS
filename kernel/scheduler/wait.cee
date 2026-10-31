@@ -1,6 +1,6 @@
-// Wait queues (kernel/include/kernel/wait.h; docs/kernel/scheduler/design.md, "Wait queues"), in Nova (roadmap 2.0
-// SA3). The types are Nova's: struct wait_entry, struct waitqueue and struct wait_timeout are defined here and
-// generated into kernel/include/kernel/wait_types.h, which wait.h includes (Nova ADR 0029, 0030), with their C member
+// Wait queues (kernel/include/kernel/wait.h; docs/kernel/scheduler/design.md, "Wait queues"), in CeeSafe (roadmap 2.0
+// SA3). The types are CeeSafe's: struct wait_entry, struct waitqueue and struct wait_timeout are defined here and
+// generated into kernel/include/kernel/wait_types.h, which wait.h includes (CeeSafe ADR 0029, 0030), with their C member
 // names, so WAITQUEUE_INIT, wait_entry_init and the wait_event macros are unchanged. wait_floor.c keeps what reads a
 // thread's or a CPU's fields (struct thread and struct percpu are in headers that include wait.h), panic's message,
 // the timed sleeps over the wait_event macros, and the module exports.

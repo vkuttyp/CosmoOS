@@ -1,8 +1,8 @@
 /*
- * quiesce_floor.c - The C under kernel/core/quiesce.nova (roadmap 2.0 SA3).
+ * quiesce_floor.c - The C under kernel/core/quiesce.cee (roadmap 2.0 SA3).
  *
- * Quiescence is Nova (quiesce.nova, generated into quiesce.c and
- * kernel/include/kernel/quiesce_types.h). What stays here is C that Nova
+ * Quiescence is CeeSafe (quiesce.cee, generated into quiesce.c and
+ * kernel/include/kernel/quiesce_types.h). What stays here is C that CeeSafe
  * cannot express yet or that exists only in a debug build:
  *   - the statics of C types: the epoch state (quiesce_core.h's) and the two
  *     wait queues, which WAITQUEUE_INIT builds from their own names, with an
@@ -12,7 +12,7 @@
  *     counting, the ten-second stall panic, and the test hooks that hand
  *     back one grace period's kicks and timeouts;
  *   - the module exports.
- * It also checks the constants quiesce.nova copies.
+ * It also checks the constants quiesce.cee copies.
  *
  * First drafted by Nova's c2nova (docs/tooling.md §9.4), then finished by
  * hand.
@@ -32,9 +32,9 @@
 
 STATIC_ASSERT(QUIESCE_MAX_CPUS >= CONFIG_MAX_CPUS, "quiesce state covers every CPU");
 _Static_assert(IPI_QUIESCE_KICK == 5 && NS_PER_SEC == 1000000000ull && TICK_NS == 4000000ull && CONFIG_MAX_CPUS == 64u &&
-               SCHED_PRIO_DEFAULT == 32, "quiesce.nova's constants");
+               SCHED_PRIO_DEFAULT == 32, "quiesce.cee's constants");
 
-/* Declared for quiesce.nova only; not part of quiesce.h's interface. */
+/* Declared for quiesce.cee only; not part of quiesce.h's interface. */
 struct quiesce_state *quiesce_floor_g_state(void);
 struct waitqueue *quiesce_floor_g_worker_wq(void);
 struct waitqueue *quiesce_floor_g_gp_wq(void);
@@ -94,7 +94,7 @@ void quiesce_floor_stall_check(uint64_t waited, uint64_t pending)
 
 void quiesce_floor_assert_7(void)
 {
-    panic("assertion failed: %s at %s:%d (%s)", "fn != NULL", "quiesce.nova", 0, "call_quiesce");
+    panic("assertion failed: %s at %s:%d (%s)", "fn != NULL", "quiesce.cee", 0, "call_quiesce");
 }
 
 void quiesce_floor_panic_8(void *a0)
@@ -104,7 +104,7 @@ void quiesce_floor_panic_8(void *a0)
 
 void quiesce_floor_assert_17(void)
 {
-    panic("assertion failed: %s at %s:%d (%s)", "!g_ready", "quiesce.nova", 0, "quiesce_init");
+    panic("assertion failed: %s at %s:%d (%s)", "!g_ready", "quiesce.cee", 0, "quiesce_init");
 }
 
 void quiesce_floor_panic_18(void)

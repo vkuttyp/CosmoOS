@@ -100,7 +100,7 @@ weight applies from the thread's next charge; nothing is requeued.
 
 ### `kernel/include/kernel/fair.h`
 The fair level's arithmetic, pure functions generated from
-`kernel/scheduler/fair.nova` (`make nova`): `fair_weight` (Linux's
+`kernel/scheduler/fair.cee` (`make cee`): `fair_weight` (Linux's
 weight for a nice value), `fair_charge` (vruntime advanced by run time ×
 1024 / weight, saturating), `fair_place` (a joining thread's start, no
 earlier than `min_vruntime - FAIR_WAKE_BONUS_NS`), `fair_rebase` (a
@@ -279,11 +279,11 @@ last (the lowest priority level's tail).
 ## wait.h
 
 ### `struct waitqueue`, `void waitqueue_init(struct waitqueue *wq, const char *name)`, `WAITQUEUE_INIT(name)`
-- Written in Nova (`kernel/scheduler/wait.nova`, roadmap 2.0 SA3): `make
-  nova` generates `wait.c` and the types' header `wait_types.h`, which
+- Written in CeeSafe (`kernel/scheduler/wait.cee`, roadmap 2.0 SA3): `make
+  ceesafe` generates `wait.c` and the types' header `wait_types.h`, which
   `wait.h` includes; `wait_floor.c` keeps the timed sleeps and what reads a
   thread's or a CPU's fields. The C interface is unchanged but for one
-  member's name: a wait entry's callback is `callback` (it was `fn`, a Nova
+  member's name: a wait entry's callback is `callback` (it was `fn`, a CeeSafe
   keyword).
 - A spinlock and two lists of `struct wait_entry` (link, thread, `callback`):
   `waiters`, the sleeping threads (entries on the waiting thread's stack),
@@ -360,11 +360,11 @@ last (the lowest priority level's tail).
 ## mutex.h
 
 `struct mutex { spinlock_t lock; struct thread *owner; struct waitqueue wq; const char *name; uint16_t lock_class;
-uint16_t pi_active; struct list_node pi_link; struct thread *handoff; }`, written in Nova
-(`kernel/scheduler/mutex.nova`, roadmap 2.0 SA3) with its priority inheritance: `make nova` generates `mutex.c` and
+uint16_t pi_active; struct list_node pi_link; struct thread *handoff; }`, written in CeeSafe
+(`kernel/scheduler/mutex.cee`, roadmap 2.0 SA3) with its priority inheritance: `make cee` generates `mutex.c` and
 `mutex_types.h`, which `mutex.h` includes; `mutex_floor.c` keeps the formatted panics and the warning, the interrupt and
 might-sleep checks, and the module exports. The contended wait runs through `wait_floor_loop` (`wait.h`). `lock_class`
-was `class`, a Nova keyword; `MUTEX_INIT_AT` and the layout are otherwise unchanged.
+was `class`, a CeeSafe keyword; `MUTEX_INIT_AT` and the layout are otherwise unchanged.
 
 - `mutex_init(m, name)`; the name is the lock class for the debug-build
   checker (`docs/kernel/lockdep/`).
@@ -382,8 +382,8 @@ was `class`, a Nova keyword; `MUTEX_INIT_AT` and the layout are otherwise unchan
 ## semaphore.h
 
 `struct semaphore { spinlock_t lock; int count; struct waitqueue wq; }`,
-written in Nova (`kernel/scheduler/semaphore.nova`, roadmap 2.0 SA3): `make
-nova` generates `semaphore.c` and `semaphore_types.h`, which `semaphore.h`
+written in CeeSafe (`kernel/scheduler/semaphore.cee`, roadmap 2.0 SA3): `make
+ceesafe` generates `semaphore.c` and `semaphore_types.h`, which `semaphore.h`
 includes.
 
 - `semaphore_init(s, count, name)`, `semaphore_down(s)` (blocks until
@@ -394,17 +394,17 @@ includes.
 ## completion.h
 
 `struct completion { spinlock_t lock; uint32_t done; struct waitqueue wq; }`,
-written in Nova (`kernel/scheduler/completion.nova`, roadmap 2.0 SA3): `make
-nova` generates `completion.c` and `completion_types.h`, which
+written in CeeSafe (`kernel/scheduler/completion.cee`, roadmap 2.0 SA3): `make
+ceesafe` generates `completion.c` and `completion_types.h`, which
 `completion.h` includes; `completion_floor.c` holds the module exports.
 `done` was a `bool` (lib/core's atomic flag is four bytes); it sits where
 the `bool` and its padding were, so the layout is unchanged.
 
-The Nova ports wait through `wait_floor_until`,
+The CeeSafe ports wait through `wait_floor_until`,
 `wait_floor_until_timeout` and `wait_floor_until_killable` (`wait.h`),
 `wait_event`, `wait_event_timeout` and `wait_event_killable` (0 or
 -EINTR; the pipe's waits) over a condition function, since a wait entry is C
-state a Nova local cannot hold; `wait_floor_check_sleep` makes a sleeping
+state a CeeSafe local cannot hold; `wait_floor_check_sleep` makes a sleeping
 call's checks with the caller's address.
 
 - `completion_init(c, name)`, `complete(c)` (sets `done` and wakes all

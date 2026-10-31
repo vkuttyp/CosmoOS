@@ -1,11 +1,11 @@
 /*
- * pipe_floor.c - The C under kernel/ipc/pipe.nova (roadmap 2.0 SA3).
+ * pipe_floor.c - The C under kernel/ipc/pipe.cee (roadmap 2.0 SA3).
  *
- * Pipes are Nova (pipe.nova, generated into pipe.c and
+ * Pipes are CeeSafe (pipe.cee, generated into pipe.c and
  * kernel/include/kernel/pipe_types.h). What stays here is the anonymous
- * pipe's two end types: constant C objects holding pipe.nova's exported
- * operations, which Nova cannot build (a static of a C type), with an
- * accessor each. It also checks the constants pipe.nova copies.
+ * pipe's two end types: constant C objects holding pipe.cee's exported
+ * operations, which CeeSafe cannot build (a static of a C type), with an
+ * accessor each. It also checks the constants pipe.cee copies.
  */
 
 #include <kernel/errno.h>
@@ -17,9 +17,9 @@
 _Static_assert(PIPE_SIZE == 16384u && PIPE_BUF == 4096u && COSMO_IO_READABLE == 1 && COSMO_IO_WRITABLE == 2 &&
                    COSMO_IO_HANGUP == 4 && COSMO_IO_ERROR == 8 && COSMO_DT_FIFO == 4 && EAGAIN == 11 && ENOMEM == 12 &&
                    EPIPE == 32,
-               "pipe.nova's constants");
+               "pipe.cee's constants");
 
-/* Declared for pipe.nova only; not part of pipe.h's interface. */
+/* Declared for pipe.cee only; not part of pipe.h's interface. */
 const struct kobject_type *pipe_floor_read_type(void);
 const struct kobject_type *pipe_floor_write_type(void);
 

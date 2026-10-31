@@ -17,38 +17,38 @@ image (`find-firmware.sh`), and that the compiler can actually produce an
 object for `x86_64-unknown-none-elf` and `x86_64-unknown-windows`. Every
 missing item is listed; the script exits 1 if any is missing.
 
-## Nova sources
+## CeeSafe sources
 
 ```sh
-make nova-check
+make cee-check
 ```
 
-`scripts/nova-gen.py` compiles every Nova source with the pinned novac
-into `out/nova` and checks the sources the kernel must refuse
-(`tests/nova/negative/*.nova`: exactly the errors their `// error[N…]`
-lines name). CI's "Nova sources" job runs it; locally it needs the pinned
-novac, as every build does (`docs/build/design.md`, "Nova sources"). That
+`scripts/cee-gen.py` compiles every CeeSafe source with the pinned ceesafec
+into `out/cee` and checks the sources the kernel must refuse
+(`tests/ceesafe/negative/*.cee`: exactly the errors their `// error[N…]`
+lines name). CI's "CeeSafe sources" job runs it; locally it needs the pinned
+ceesafec, as every build does (`docs/build/design.md`, "CeeSafe sources"). That
 the generated C is what a source tarball carries, and builds the same
-bytes with no novac, is `make reproducible`'s (below).
+bytes with no ceesafec, is `make reproducible`'s (below).
 
-## The Nova share
+## The CeeSafe share
 
 ```sh
-python3 scripts/nova-share.py                      # the table for HEAD
-python3 scripts/nova-share.py --gate origin/main   # and no tree with more C to convert than main
+python3 scripts/cee-share.py                      # the table for HEAD
+python3 scripts/cee-share.py --gate origin/main   # and no tree with more C to convert than main
 ```
 
-`scripts/nova-share.py` (roadmap 2.0 SA1) counts the lines of ring 0
+`scripts/cee-share.py` (roadmap 2.0 SA1) counts the lines of ring 0
 (`kernel/`, `kernel-services/`, `drivers/`, `compat/`, `boot/`) and of
 CosmoOS's own userland (`libc/`, `userland/`, `pkg/`) per tree and per
-subsystem: Nova sources; the floor (assembly, and the C files its `FLOOR`
-names: Nova's runtime shim so far); and C to convert, every other `.c`
+subsystem: CeeSafe sources; the floor (assembly, and the C files its `FLOOR`
+names: CeeSafe's runtime shim so far); and C to convert, every other `.c`
 and `.h`, of which a port's `*_floor.c` is shown on its own. C generated
-from a `.nova` source is not counted again. It reads a git tree, so the
-numbers belong to a commit. CI's `nova-share` job runs it on every pull
+from a `.cee` source is not counted again. It reads a git tree, so the
+numbers belong to a commit. CI's `cee-share` job runs it on every pull
 request and push with `--gate`, which fails when any tree has more C to
-convert than the commit the change started from: new code is Nova
-(`docs/roadmap-2.0.md`, "The Nova rule", point 1). A file that has to stay
+convert than the commit the change started from: new code is CeeSafe
+(`docs/roadmap-2.0.md`, "The CeeSafe rule", point 1). A file that has to stay
 C is added to `FLOOR` in the same change, where its review asks why.
 
 ## Link-time checks
@@ -89,9 +89,9 @@ make reproducible            # or scripts/check-reproducible.sh x86_64 debug
 Builds the tree twice into `out/repro-a` and `out/repro-b` and compares
 every output of the release set with `cmp` (`scripts/check-reproducible.sh`
 lists them). The second build is of a `make dist` tree
-(`out/repro-src`, the generated C beside each `.nova` source), with a
-`novac` that fails if run: so a source tarball builds with no novac, and
-its C is the pinned novac's. Current result: identical. If this fails, the diff usually points at a new absolute path
+(`out/repro-src`, the generated C beside each `.cee` source), with a
+`ceesafec` that fails if run: so a source tarball builds with no ceesafec, and
+its C is the pinned ceesafec's. Current result: identical. If this fails, the diff usually points at a new absolute path
 or timestamp; `llvm-objdump -s` on both files locates the differing
 section.
 

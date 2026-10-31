@@ -1,4 +1,4 @@
-// The reference-counted kernel object header (kernel/include/kernel/object.h; docs/kernel/object/), in Nova (roadmap
+// The reference-counted kernel object header (kernel/include/kernel/object.h; docs/kernel/object/), in CeeSafe (roadmap
 // 2.0 SA2): counts, the release, discard, put_and_lock, and the object census. `struct kobject` stays C's: it is
 // embedded in every object. Its counts are reached as lib/core atomics through their fields' addresses (a u32 is an
 // AtomicU32's only member). object_floor.c keeps the calls through the type's function pointers, panic's message and

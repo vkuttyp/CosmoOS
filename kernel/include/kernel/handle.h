@@ -81,14 +81,14 @@
  * struct handle_entry { obj (NULL = free), rights, flags } and
  * struct handle_table { lock, entries[HANDLE_TABLE_SIZE], count, limit
  * (COSMO_RLIMIT_NOFILE: an install refuses at or above it), exiting (set
- * before the table is torn down) } are defined in Nova
- * (kernel/object/handle.nova) and generated into handle_types.h, with the
- * functions below (roadmap 2.0 SA2; Nova ADR 0029).
+ * before the table is torn down) } are defined in CeeSafe
+ * (kernel/object/handle.cee) and generated into handle_types.h, with the
+ * functions below (roadmap 2.0 SA2; CeeSafe ADR 0029).
  */
 #include <kernel/handle_types.h>
 
 _Static_assert(sizeof(((struct handle_table *)0)->entries) / sizeof(struct handle_entry) == HANDLE_TABLE_SIZE,
-               "handle.nova's table size is HANDLE_TABLE_SIZE");
+               "handle.cee's table size is HANDLE_TABLE_SIZE");
 
 void handle_table_init(struct handle_table *t);
 

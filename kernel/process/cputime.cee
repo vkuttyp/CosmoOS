@@ -1,8 +1,8 @@
-// cputime.nova - CPU-time accounting in Nova: the source of kernel/process/cputime.c, which `make nova` generates
-// (docs/kernel/process/design.md, "CPU time"; scripts/nova-gen.py). The tick's user/system sample, the CPU-time
+// cputime.cee - CPU-time accounting in CeeSafe: the source of kernel/process/cputime.c, which `make cee` generates
+// (docs/kernel/process/design.md, "CPU time"; scripts/cee-gen.py). The tick's user/system sample, the CPU-time
 // interval timers ITIMER_VIRTUAL and ITIMER_PROF, and the split of a measured run time into user and system time
 // that times(2), getrusage(2) and /proc report. The API and the structs are kernel/include/kernel/cputime.h,
-// imported (Nova's type-system.md §31). The caller holds the lock that guards the structs, and the tick runs this
+// imported (CeeSafe's type-system.md §31). The caller holds the lock that guards the structs, and the tick runs this
 // in interrupt context: nothing here allocates, blocks or panics on any input, every sum that could pass 2^64
 // saturates, and `unsafe` appears only where cputime.h's pointers become references.
 

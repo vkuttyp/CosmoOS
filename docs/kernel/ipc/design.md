@@ -107,9 +107,9 @@ Waking after the decrement lets a blocked reader see `writers == 0`
 
 `type = COSMO_DT_FIFO`, `size = used`, mode 0600, `nlink` 1.
 
-## Named pipes (kernel/ipc/fifo.nova)
+## Named pipes (kernel/ipc/fifo.cee)
 
-`fifo.nova` is Nova (roadmap 2.0 SA3): `make nova` generates `fifo.c` and
+`fifo.cee` is CeeSafe (roadmap 2.0 SA3): `make cee` generates `fifo.c` and
 `kernel/include/kernel/fifo_types.h` (`struct fifo`, `struct fifo_open`),
 which only `fifo.c` includes, so a fifo stays opaque to the rest of the
 kernel. The open's wait goes through the wait floor's

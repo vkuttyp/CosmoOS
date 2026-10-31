@@ -1497,7 +1497,7 @@ static int t_spin(void *arg)
     return 0;
 }
 
-/* CPU time (kernel/process/cputime.c, generated from Nova; backlog
+/* CPU time (kernel/process/cputime.c, generated from CeeSafe; backlog
  * LX-14): the CPU-time clocks, getrusage and times with the tick's
  * user/system split, a waited-for child's time, and the CPU-time
  * timers ITIMER_VIRTUAL and ITIMER_PROF. */
@@ -1695,7 +1695,7 @@ static long nice_child(int ready, int go, int wa, int wb, long check, long peer,
     return 0;
 }
 
-/* Nice values (backlog LX-13; the rules are Nova's,
+/* Nice values (backlog LX-13; the rules are CeeSafe's,
  * kernel/process/nice.c): getpriority and setpriority for a process, a
  * process group and a user, with Linux's range, encoding and permission
  * rules; inherited by fork, kept by exec (BusyBox's nice, in ash.sh);

@@ -21,17 +21,17 @@ struct thread;
  * cached at first acquisition); pi_active (a waiter has donated to the
  * owner: unlock runs the PI restore); pi_link (in its owner's pi_held list
  * while it has waiters); handoff (a waiter overtaken once, which the next
- * unlock hands the mutex to, S33); } is defined in Nova
- * (kernel/scheduler/mutex.nova) and generated into mutex_types.h (roadmap
- * 2.0 SA3; Nova ADR 0029, 0030). `lock_class` was `class`, a Nova keyword; `name` is `char *` (a Nova
+ * unlock hands the mutex to, S33); } is defined in CeeSafe
+ * (kernel/scheduler/mutex.cee) and generated into mutex_types.h (roadmap
+ * 2.0 SA3; CeeSafe ADR 0029, 0030). `lock_class` was `class`, a CeeSafe keyword; `name` is `char *` (a CeeSafe
  * struct's pointer members carry no const), so MUTEX_INIT_AT casts it. */
 #include <kernel/mutex_types.h>
 
 void mutex_init(struct mutex *m, const char *name);
 /* A mutex in static storage, built at compile time as mutex_init leaves
  * one (mutex.c, wait.c, spinlock.c): p is the mutex's own address, an
- * address constant, which the self-pointing lists need. Nova's static
- * Mutex<T> uses it (Nova ADR 0027); the self-test nova-kcore compares a
+ * address constant, which the self-pointing lists need. CeeSafe's static
+ * Mutex<T> uses it (CeeSafe ADR 0027); the self-test cee-kcore compares a
  * mutex it built with one from mutex_init. A change to struct mutex or to
  * mutex_init must keep the two equal. */
 #define MUTEX_INIT_AT(p, n) { .lock = SPINLOCK_INIT(n), .owner = NULL, \

@@ -29,12 +29,12 @@ make check-tools
 
 The script installs `clang lld llvm libclang-rt-dev make git mtools
 musl-tools qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64 python3`
-with apt, the same set CI installs. The build also runs the pinned Nova
-compiler (`docs/build/design.md`, "Nova sources"), which `make
+with apt, the same set CI installs. The build also runs the pinned CeeSafe
+compiler (`docs/build/design.md`, "CeeSafe sources"), which `make
 check-tools` asks for by version; install it with
-`curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.6.0 sh`
-(the version is `python3 scripts/nova-gen.py --pinned`), or name it with
-`NOVAC=<path>`. A `make dist` tarball builds without it. Any Linux distribution works if the same tools are
+`curl -fsSL https://vkuttyp.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v0.2.0 sh`
+(the version is `python3 scripts/cee-gen.py --pinned`), or name it with
+`CEESAFEC=<path>`. A `make dist` tarball builds without it. Any Linux distribution works if the same tools are
 present; only Debian/Ubuntu is scripted.
 
 ## Secondary host: macOS with Homebrew

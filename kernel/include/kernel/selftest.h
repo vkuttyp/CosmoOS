@@ -38,7 +38,7 @@ bool selftest_rlimit(const char **reason);     /* kernel/memory/memtest.c: addre
 bool selftest_uaccess(const char **reason);    /* kernel/syscall/uaccesstest.c: exception fixups */
 bool selftest_uaccess_guard(const char **reason);   /* the guard on kernel access to user memory, where the CPU has one */
 bool selftest_kmalloc(const char **reason);
-bool selftest_nova_kcore(const char **reason);   /* kernel/nova/kcore_selftest.c: Nova's kernel library */
+bool selftest_cee_kcore(const char **reason);   /* kernel/ceesafe/kcore_selftest.c: CeeSafe's kernel library */
 
 /* Phase 3: kernel/scheduler/schedtest.c */
 bool selftest_acpi(const char **reason);

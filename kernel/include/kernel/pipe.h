@@ -6,7 +6,7 @@
  * anonymous pipe is one client: two kobject ends, the read end's type
  * has `read`, the write end's has `write`, both have `stat`, and each
  * end is one reader or one writer for as long as it lives. A named
- * pipe (kernel/ipc/fifo.nova) is the other client: the same ring behind a
+ * pipe (kernel/ipc/fifo.cee) is the other client: the same ring behind a
  * filesystem node, its counts the opens of each side.
  */
 
@@ -22,8 +22,8 @@
 #define PIPE_BUF  4096u    /* writes up to this size are never interleaved */
 
 /*
- * The ring, `struct pipe`, and `struct pipe_stats` are Nova's
- * (kernel/ipc/pipe.nova, roadmap 2.0 SA3), generated into pipe_types.h. The
+ * The ring, `struct pipe`, and `struct pipe_stats` are CeeSafe's
+ * (kernel/ipc/pipe.cee, roadmap 2.0 SA3), generated into pipe_types.h. The
  * ring's `readers` and `writers` are the live readers and writers, whatever
  * they are (end objects, or a FIFO's opens); the ring gives end of file
  * when `writers` is zero and the ring is empty, and -EPIPE when `readers`

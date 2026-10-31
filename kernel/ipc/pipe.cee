@@ -1,7 +1,7 @@
-// The pipe's ring, and anonymous pipes over it (kernel/include/kernel/pipe.h, docs/kernel/ipc/design.md), in Nova
-// (roadmap 2.0 SA3). struct pipe and struct pipe_stats are Nova's, generated into kernel/include/kernel/pipe_types.h,
-// which pipe.h includes (Nova ADR 0029, 0030); so are the anonymous pipe's end and pair, which only this file uses.
-// The killable waits go through wait_floor.c, since a wait entry is C state no Nova local may hold; pipe_floor.c keeps
+// The pipe's ring, and anonymous pipes over it (kernel/include/kernel/pipe.h, docs/kernel/ipc/design.md), in CeeSafe
+// (roadmap 2.0 SA3). struct pipe and struct pipe_stats are CeeSafe's, generated into kernel/include/kernel/pipe_types.h,
+// which pipe.h includes (CeeSafe ADR 0029, 0030); so are the anonymous pipe's end and pair, which only this file uses.
+// The killable waits go through wait_floor.c, since a wait entry is C state no CeeSafe local may hold; pipe_floor.c keeps
 // the two end types, whose operations are this file's exported functions.
 //
 // One spinlock per ring, never held while blocking or while touching user memory (the system-call layer copies through

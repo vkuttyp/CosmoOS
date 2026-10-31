@@ -1,6 +1,6 @@
 /*
  * test_fbvalid.c - Host test of the framebuffer description validator
- * (kernel/core/fbvalid.nova, docs/kernel/diagnostics/testing.md). ASan/UBSan.
+ * (kernel/core/fbvalid.cee, docs/kernel/diagnostics/testing.md). ASan/UBSan.
  *
  * The validator decides whether the kernel may write to memory the
  * firmware described. Everything it lets through bounds every pixel the

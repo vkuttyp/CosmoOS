@@ -1,5 +1,5 @@
 // Table-driven CRC-32C (Castagnoli, polynomial 0x1EDC6F41, reflected as 0x82F63B78; kernel/include/kernel/crc32c.h):
-// cosmofs's integrity checksum. In Nova since 2026-10-31 (roadmap 2.0 SA1's offset for the lockup self-test's reaper
+// cosmofs's integrity checksum. In CeeSafe since 2026-10-31 (roadmap 2.0 SA1's offset for the lockup self-test's reaper
 // wait). The table is a constant, the C's table built at first use: so no first call builds it unsynchronised.
 // crc32c("123456789") == 0xE3069283 (the self-test crc32c).
 

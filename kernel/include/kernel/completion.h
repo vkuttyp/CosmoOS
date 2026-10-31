@@ -19,8 +19,8 @@
 #include <kernel/wait.h>
 
 /* struct completion { lock; done (a u32: set once under `lock`, read
- * atomically); wq; } is defined in Nova (kernel/scheduler/completion.nova)
- * and generated into completion_types.h (roadmap 2.0 SA3; Nova ADR 0029,
+ * atomically); wq; } is defined in CeeSafe (kernel/scheduler/completion.cee)
+ * and generated into completion_types.h (roadmap 2.0 SA3; CeeSafe ADR 0029,
  * 0030). */
 #include <kernel/completion_types.h>
 

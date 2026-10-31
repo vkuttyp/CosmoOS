@@ -21,7 +21,7 @@
  * thread's share of a CPU at the default level follows Linux's weight
  * for it.
  *
- * The functions are Nova's (kernel/process/nice.c, generated). They keep
+ * The functions are CeeSafe's (kernel/process/nice.c, generated). They keep
  * no state; the caller holds the target's lock across the check and the
  * store.
  */

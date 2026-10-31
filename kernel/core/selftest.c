@@ -580,7 +580,7 @@ static const struct selftest tests[] = {
     { "quiesce-kick-spinner", selftest_quiesce_kick_spinner },
     { "quiesce-grace",   selftest_quiesce_grace },
     { "quiesce-call",    selftest_quiesce_call },
-    { "nova-kcore",      selftest_nova_kcore },
+    { "cee-kcore",      selftest_cee_kcore },
     { "irq-sync",        selftest_irq_sync },
     { "irq-writers",     selftest_irq_writers },
     { "irq-unhandled",   selftest_irq_unhandled },

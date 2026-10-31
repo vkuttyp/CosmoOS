@@ -5,15 +5,15 @@ Written 2026-10-29 at v1.0.14, on main at `f073ad71`; the MS track
 adopted.**
 
 Its goal: make CosmoOS competitive with Linux and FreeBSD for the
-workloads it chooses, with its kernel written in Nova so that it is
+workloads it chooses, with its kernel written in CeeSafe so that it is
 memory safe.
 
 **Written without today's restrictions.** At the owner's direction, this
 roadmap is not bound by the rules CosmoOS works under now: the scope
 rules in [`AGENTS.md`](../AGENTS.md#scope-rules) (one milestone at a
 time, at most five PRs each, 1.2's direction A first), the kernel rules
-for Nova in [build/nova.md](build/nova.md#rules-for-nova-in-the-kernel)
-(locks, allocation and object lifetimes in C; Nova only at leaf
+for CeeSafe in [build/ceesafe.md](build/ceesafe.md#rules-for-ceesafe-in-the-kernel)
+(locks, allocation and object lifetimes in C; CeeSafe only at leaf
 functions), and 1.x's promise of stable formats and ABIs. Where it
 replaces one of them it says what replaces it. If it is adopted, those
 documents are rewritten to match in its first PR; until then they stand
@@ -49,7 +49,7 @@ the 2026-10-28 tree.
 
 | Area | Today | Bar at the end of this roadmap | Measured by |
 |---|---|---|---|
-| Memory safety | 982 lines of Nova in four ports (`gpt`, `cputime`, `nice`, `fair`) of about 227,000 kernel-side lines: under 0.5% | All ring-0 code in Nova except a named assembly and C floor (below: today's assembly is about 1% of ring-0 lines, the floor a few percent); every parser of untrusted input in Nova by the end of phase 1 | `scripts/nova-share.py` (SA1), in CI |
+| Memory safety | 982 lines of CeeSafe in four ports (`gpt`, `cputime`, `nice`, `fair`) of about 227,000 kernel-side lines: under 0.5% | All ring-0 code in CeeSafe except a named assembly and C floor (below: today's assembly is about 1% of ring-0 lines, the floor a few percent); every parser of untrusted input in CeeSafe by the end of phase 1 | `scripts/cee-share.py` (SA1), in CI |
 | Hardware | QEMU `q35`/`virt` and Parallels; no physical machine | Two physical servers per architecture in hardware-in-the-loop CI; common server NICs and storage | `hil` CI job (HW3) |
 | Performance | Not measured against Linux or FreeBSD | Within 15% of the better of Linux and FreeBSD on the benchmark set, same VM and hardware; no worse than 1.5x on any one | `make bench-compare` (PF1), dated reports |
 | Scale | 64 CPUs, no NUMA, no huge pages, no swap | 256 CPUs, two NUMA nodes, huge pages, swap | PF3's tests on QEMU and HW3's machines |
@@ -59,16 +59,16 @@ the 2026-10-28 tree.
 | Security | Verified boot, signed modules, user ASLR, privileges | Also KASLR, Secure Boot, measured boot, verified root, capability-based sandboxing, syscall filtering, multiple users | SE1-SE2's acceptance tests |
 | Observability | lockdep, self-tests, serial logs | Tracing with programmable probes, performance counters, a kernel debugger workflow | OB1-OB2 |
 
-## The Nova rule
+## The CeeSafe rule
 
-The target is a kernel written in Nova, not a C kernel with Nova parts.
+The target is a kernel written in CeeSafe, not a C kernel with CeeSafe parts.
 The rule from adoption on:
 
-1. **All new kernel code is written in Nova, and no new C is written.**
+1. **All new kernel code is written in CeeSafe, and no new C is written.**
    New subsystems, drivers, parsers, fixes that rewrite a function: all
-   Nova. There is no exemption process for new C.
+   CeeSafe. There is no exemption process for new C.
 2. **All existing C is converted.** Every C file in ring 0 is rewritten in
-   Nova, by the SA track below, whether or not a feature needs it. The
+   CeeSafe, by the SA track below, whether or not a feature needs it. The
    order is by risk, not by size: first what parses input an attacker or a
    damaged disk controls (the code behind the 15 fuzz targets: ELF, module
    ELF, cosmofs metadata, network frames and TCP segments, DHCP and DNS,
@@ -77,35 +77,35 @@ The rule from adoption on:
    its history (the backlog's `correctness` lines by subsystem); then
    whole subsystems, the network stack, cosmofs, VFS, the Linux
    personality, memory and the scheduler.
-3. **The floor that stays assembly and C is named and small.** Nova can
+3. **The floor that stays assembly and C is named and small.** CeeSafe can
    express raw pointers, MMIO and C function pointers, but not
-   instructions it has no syntax for. What stays outside Nova: boot entry
+   instructions it has no syntax for. What stays outside CeeSafe: boot entry
    and the loader's hand-off, trap, interrupt and system-call entry and
    exit stubs, context switch, the user-copy routines with their fault
    fixups (`uaccess.S`), the atomic and barrier primitives and the
    lowest-level spin lock, TLB and cache maintenance, the hypervisor's
-   world switch (`vmx_run.S`, the SVM and EL2 equivalents), and Nova's
-   runtime shim (`nova_rt_core.c`, `nova_panic.c`). Each is a function a
-   Nova caller reaches through `extern "C"`, with its contract written as a
-   `/// Safety:` comment on the Nova declaration. Everything else, locks
+   world switch (`vmx_run.S`, the SVM and EL2 equivalents), and CeeSafe's
+   runtime shim (`ceesafe_rt_core.c`, `ceesafe_panic.c`). Each is a function a
+   CeeSafe caller reaches through `extern "C"`, with its contract written as a
+   `/// Safety:` comment on the CeeSafe declaration. Everything else, locks
    built on the primitive (mutexes, rwlocks, wait queues), allocation,
-   kobjects, quiescence, per-CPU data, the scheduler, is Nova. The floor
-   also keeps the one-instruction C wrappers Nova has no syntax for (MSR,
+   kobjects, quiescence, per-CPU data, the scheduler, is CeeSafe. The floor
+   also keeps the one-instruction C wrappers CeeSafe has no syntax for (MSR,
    port I/O and system-register access, `cpuid`, `rdtsc`, `wfi`). Today's
    assembly is 1,886 of 195,417 ring-0 lines (about 1%); with those
    wrappers and the shim the floor is a few percent.
-4. **The kernel rules for Nova are replaced.** "Locks stay in C",
-   "allocates nothing" and "no current port takes a lock" go. Nova code
-   takes locks through Nova guards (`SpinLock<T>`, `Mutex<T>`: the data is
+4. **The kernel rules for CeeSafe are replaced.** "Locks stay in C",
+   "allocates nothing" and "no current port takes a lock" go. CeeSafe code
+   takes locks through CeeSafe guards (`SpinLock<T>`, `Mutex<T>`: the data is
    reachable only through the guard, and holding a spin lock is an atomic
    context the compiler checks), allocates through `KernelHeap` and
    `ObjectCache<T>` with failure as a `Result`, and holds kernel objects as
    `KRef<T>`, whose drop is the release. Nova's repository built most of
    these as demonstrations (its C5: `KernelHeap`; C7: `KRef<T>`,
-   `SpinLock<T>`, `IrqSpinLock<T>`, `Mutex<T>`, `Quiesce`), and a Nova
+   `SpinLock<T>`, `IrqSpinLock<T>`, `Mutex<T>`, `Quiesce`), and a CeeSafe
    module loaded and unloaded 1,000 times against CosmoOS (C8);
    `ObjectCache<T>` is still to write, and none of them is yet a library
-   the kernel depends on ([Nova prerequisites](#nova-prerequisites), N3). The rules that stay: `--no-float`; `unsafe` only
+   the kernel depends on ([CeeSafe prerequisites](#ceesafe-prerequisites), N3). The rules that stay: `--no-float`; `unsafe` only
    at the floor's boundary, each with its `/// Safety:` comment; context
    effects (`@context(irq)`, `@context(atomic)`) on every function that
    runs there; no failing check reachable in interrupt context.
@@ -115,18 +115,18 @@ The rule from adoption on:
    deleted in the same PR or the next. Its benchmark is within 5% of the C
    on both architectures with clang (Nova's C6 measured 0.98-1.06x for
    `fbvalid`), or the owner accepts the slowdown with the number recorded.
-   The C and the Nova versions never both ship.
-6. **No weakened Nova checks to save time.** A check that costs too much is
-   removed by a proof the compiler accepts (Nova's `optimisations.md`), not
+   The C and the CeeSafe versions never both ship.
+6. **No weakened CeeSafe checks to save time.** A check that costs too much is
+   removed by a proof the compiler accepts (CeeSafe's `optimisations.md`), not
    by `unsafe` or a wrapping operation that hides a real overflow.
 7. **Generated C is a build artefact.** Today the generated C is committed
-   beside each `.nova` file so that building needs no Nova compiler. With
-   the whole kernel in Nova that doubles the tree for no reader. From SA1
-   on, the build runs the pinned novac and the generated C is not
-   committed; CI's "Nova sources" check becomes a reproducibility check of
-   the build (`make reproducible`). novac does not run on CosmoOS, so a
+   beside each `.cee` file so that building needs no CeeSafe compiler. With
+   the whole kernel in CeeSafe that doubles the tree for no reader. From SA1
+   on, the build runs the pinned ceesafec and the generated C is not
+   committed; CI's "CeeSafe sources" check becomes a reproducibility check of
+   the build (`make reproducible`). ceesafec does not run on CosmoOS, so a
    self-hosted build (SW0) needs the generated C from somewhere: source
-   releases ship it ([Nova prerequisites](#nova-prerequisites), N4).
+   releases ship it ([CeeSafe prerequisites](#ceesafe-prerequisites), N4).
 
 Userland follows the same rule where it is CosmoOS's own code: `libc/`,
 `userland/` (the native tools, `svc`, `syslogd`, `cosmo-*`) and `pkg/`
@@ -134,6 +134,12 @@ are converted in SA12. Third-party ports (BusyBox, musl, dropbear, the
 servers) stay as their upstreams write them.
 
 ## Nova prerequisites
+
+> **Since 2026-10-31 the language is CeeSafe**, the fork of Nova 0.6.0
+> (github.com/vkuttyp/CeeSafe): Nova is no longer developed, and the tree
+> moved to the pinned ceesafec in one change (`docs/build/ceesafe.md`). This
+> section is the record of the 2026-10-29 review of Nova's compiler; N1-N3
+> were met in Nova 0.2.0-0.6.0, and the open items (N4-N6) are CeeSafe's.
 
 Added 2026-10-29 from a review of this roadmap against Nova's compiler
 (Nova's [milestone 14](https://github.com/vkuttyp/Nova/blob/main/docs/milestone-14.md),
@@ -167,7 +173,7 @@ This replaces `AGENTS.md`'s one-milestone-at-a-time rule for 2.0's work.
   stream (HW, PF, VM) and a features stream (NT, LX, SE, CT, OB, ST, SW).
   Two streams never change the same subsystem in the same week: a
   subsystem's conversion (SA6-SA11) goes first, and its features follow
-  on the Nova code, so nothing is written twice.
+  on the CeeSafe code, so nothing is written twice.
 - **No PR cap.** A milestone takes the PRs it needs; its report says how
   many and why.
 - **Convert, then extend.** Where a feature milestone and a conversion
@@ -187,7 +193,7 @@ This replaces `AGENTS.md`'s one-milestone-at-a-time rule for 2.0's work.
 ## Order
 
 ```text
-nova:        N4 decided, K2a ─► SA1;  N1, N3 ─► SA2, SA3;  N5 ─► phase 2  (Nova prerequisites)
+ceesafe:        N4 decided, K2a ─► SA1;  N1, N3 ─► SA2, SA3;  N5 ─► phase 2  (CeeSafe prerequisites)
 conversion:  SA1 ─► SA2 ─► SA3 ─► SA4 ─► SA6 (network) ─► SA7 (storage, VFS) ─► SA8 (Linux) ─► SA9 (drivers)
                      └─► SA5 (parsers, first)            ─► SA10 (core) ─► SA11 (arch, hypervisor) ─► SA12 (userland) ─► SA13 (the last C)
 platform:    PF1 ─► HW1 ─► HW2 (with SA9) ─► HW3 ─► PF2 ─► PF3 (after SA10) ─► VM1 ─► VM2 ─► UK1
@@ -203,9 +209,9 @@ same convert-then-extend rule.
 
 | Phase | Version | Theme | Milestones | Size |
 |---|---|---|---|---|
-| 1 | 2.0-alpha | The Nova foundation | SA1-SA5, SW0, PF1, HW1 | about 13x |
-| 2 | 2.0 | The I/O half in Nova, real machines | SA6-SA9, HW2, HW3, SE1, NT1 | about 19x |
-| 3 | 2.1 | The core in Nova, server parity, connections at scale | SA10, SA11, NT2, LX1, LX2, PF2, PF3, SW1, MS1-MS4 | about 24x |
+| 1 | 2.0-alpha | The CeeSafe foundation | SA1-SA5, SW0, PF1, HW1 | about 13x |
+| 2 | 2.0 | The I/O half in CeeSafe, real machines | SA6-SA9, HW2, HW3, SE1, NT1 | about 19x |
+| 3 | 2.1 | The core in CeeSafe, server parity, connections at scale | SA10, SA11, NT2, LX1, LX2, PF2, PF3, SW1, MS1-MS4 | about 24x |
 | 4 | 2.2 | No C left; containers, observability, storage; the messaging server | SA12, SA13, SE2, CT1, CT2, OB1, OB2, ST1, ST2, SW2, MS5, MS6 | about 22x |
 | 5 | 2.3 | Virtualization, and the hybrid kernel's other half | VM1, VM2, UK1 | about 6x |
 
@@ -215,54 +221,54 @@ to thirteen months.
 
 ---
 
-## SA. Safety: the kernel in Nova
+## SA. Safety: the kernel in CeeSafe
 
-### SA1 Measure, gate, and build from Nova
+### SA1 Measure, gate, and build from CeeSafe
 
-`scripts/nova-share.py` counts ring-0 lines per tree and per subsystem:
-Nova, the floor (assembly and the named C wrappers), and C still to
-convert. CI's `nova-share` job prints the table on every PR and fails one
-that adds a line of C outside the floor. The build runs the pinned novac
-itself and the generated C leaves the tree (the Nova rule, point 7);
-`make reproducible` checks that two builds agree. A panic in Nova code
-names the Nova file and line in the crash report on both architectures.
+`scripts/cee-share.py` counts ring-0 lines per tree and per subsystem:
+CeeSafe, the floor (assembly and the named C wrappers), and C still to
+convert. CI's `cee-share` job prints the table on every PR and fails one
+that adds a line of C outside the floor. The build runs the pinned ceesafec
+itself and the generated C leaves the tree (the CeeSafe rule, point 7);
+`make reproducible` checks that two builds agree. A panic in CeeSafe code
+names the CeeSafe file and line in the crash report on both architectures.
 
-- [x] **Acceptance:** CI's `nova-share` job runs on every PR and on main
+- [x] **Acceptance:** CI's `cee-share` job runs on every PR and on main
   and fails a test PR that adds a C function under `kernel-services/`; a
-  clean checkout builds with only the pinned novac and the cross
-  toolchain, and `make reproducible` passes; `crash-nova` (a self-test
-  behind `CONFIG_SELFTEST`) fails a Nova bounds check and the harness
-  finds the Nova file:line in the serial log on both architectures.
+  clean checkout builds with only the pinned ceesafec and the cross
+  toolchain, and `make reproducible` passes; `crash-cee` (a self-test
+  behind `CONFIG_SELFTEST`) fails a CeeSafe bounds check and the harness
+  finds the CeeSafe file:line in the serial log on both architectures.
 
-Progress: `scripts/nova-share.py` and CI's `nova-share` job, which runs on
+Progress: `scripts/cee-share.py` and CI's `cee-share` job, which runs on
 every pull request and push and fails one whose tree has more C to
 convert than the commit it started from; a test commit adding a C
 function under `kernel-services/` failed it (+5 lines), one removing a
-line passed (2026-10-31). On main that day ring 0 was 3,946 lines of Nova,
-a floor of 3,494 (assembly and Nova's runtime shim) and 190,560 lines of
-C to convert (631 of them the ports' `*_floor.c`): 2.0% Nova. Then
-`crash-nova`: a `CRASH_TEST=5` kernel calls `kernel/nova/crash_test.nova`
+line passed (2026-10-31). On main that day ring 0 was 3,946 lines of CeeSafe,
+a floor of 3,494 (assembly and CeeSafe's runtime shim) and 190,560 lines of
+C to convert (631 of them the ports' `*_floor.c`): 2.0% CeeSafe. Then
+`crash-cee`: a `CRASH_TEST=5` kernel calls `kernel/ceesafe/crash_test.cee`
 with an index past its table before the self-tests run, and `make
-test-crash-nova` (CI's stress part) requires `KERNEL PANIC: nova panic:
-index out of bounds at kernel/nova/crash_test.nova:10:18`, the line the
+test-crash-cee` (CI's stress part) requires `KERNEL PANIC: ceesafe panic:
+index out of bounds at kernel/ceesafe/crash_test.cee:10:18`, the line the
 source marks; it passes on x86_64 and aarch64 (2026-10-31). Its hook in
 `kernel_main` is C (self-tests and `CRASH_TEST` are C's), so the same
-change ports the framebuffer validator (`kernel/core/fbvalid.nova`, Nova's
+change ports the framebuffer validator (`kernel/core/fbvalid.cee`, CeeSafe's
 C6 port, held there to the C's host test, fuzz target and a 20,000-case
-differential test) and `kernel/` has less C to convert, not more. Then the build runs the pinned novac and the generated C leaves the
-tree (`build/nova.mk`, into `out/nova`; the CI image carries novac), and
+differential test) and `kernel/` has less C to convert, not more. Then the build runs the pinned ceesafec and the generated C leaves the
+tree (`build/cee.mk`, into `out/cee`; the CI image carries ceesafec), and
 `make dist` writes a source tarball with the generated C beside each
 source, which releases publish and which builds with no novac (Nova's ADR
 0023). `make reproducible` builds its second tree from such a tarball,
-with a `novac` that fails if run, and found every output the same
-(2026-10-31). Met 2026-10-31: the `nova-share` job runs on every PR and
-push; a clean checkout builds with the pinned novac and the cross
+with a `ceesafec` that fails if run, and found every output the same
+(2026-10-31). Met 2026-10-31: the `cee-share` job runs on every PR and
+push; a clean checkout builds with the pinned ceesafec and the cross
 toolchain, and `make reproducible` passes in CI on both architectures;
-`crash-nova` names its Nova file:line on both.
+`crash-cee` names its CeeSafe file:line on both.
 
 Size: about 0.7x.
 
-### SA2 Allocation and object lifetimes in Nova
+### SA2 Allocation and object lifetimes in CeeSafe
 
 Nova's C5 `KernelHeap`, a new `ObjectCache<T>` over `kmem_cache`, and C7's
 `KRef<T>` (a counted kobject reference whose drop is the release) come into
@@ -273,16 +279,16 @@ panic. The proving conversion has real allocation and lifetimes: the
 kernel object and handle layer (`kernel/object/object.c`, `handle.c`;
 495 lines, used at 159 `HANDLE_RIGHT_*` sites), with its census tests.
 
-- [x] **Acceptance:** the object and handle layer in Nova passes its
+- [x] **Acceptance:** the object and handle layer in CeeSafe passes its
   self-tests and a fault-injection sweep (every allocation failed in turn)
   with no leak in the object census; the differential host test against
   the C agrees on a recorded trace of 10,000 operations before the C is
   deleted; the matrix on both architectures.
 
 Progress: the object census, `kobject_discard` and the recorded trace
-(#491); the object layer in Nova (`kernel/object/object.nova`, over
+(#491); the object layer in CeeSafe (`kernel/object/object.cee`, over
 `object_floor.c`), which gives the recorded digest (#493, 2026-10-30);
-the handle table in Nova (`kernel/object/handle.nova`, a Nova-owned type C
+the handle table in CeeSafe (`kernel/object/handle.cee`, a CeeSafe-owned type C
 embeds by value, with novac 0.5.0's ADR 0029), which gives it too
 (2026-10-30). The hand-written C of both is gone. The sweep,
 `object-fault-sweep` (`kernel/core/faulttest.c`), fails every allocation
@@ -294,7 +300,7 @@ architectures, SA2's acceptance is met.
 
 Size: about 1.0x.
 
-### SA3 Locks, waits and quiescence in Nova
+### SA3 Locks, waits and quiescence in CeeSafe
 
 Mutexes, read-write locks, wait queues, completions and quiescence
 (`kernel/core/`'s synchronisation above the spin-lock primitive) are
@@ -307,13 +313,13 @@ as the first users.
 
 - [x] **Acceptance:** `test-smp2`, `test-chaos` and every lock, wait,
   quiescence, pipe and FIFO self-test pass on both architectures with the
-  Nova versions and the C deleted; lockdep's graph self-tests pass; a
+  CeeSafe versions and the C deleted; lockdep's graph self-tests pass; a
   negative compile test refuses a sleep under a spin lock's guard.
   Met 2026-10-31: with every SA3 port in (wait queues, completions,
   semaphores, the mutex, quiescence, pipes and FIFOs: their C is now
-  generated from Nova), `test-smp2` and `test-chaos` pass on x86_64 and
+  generated from CeeSafe), `test-smp2` and `test-chaos` pass on x86_64 and
   aarch64 (debug), as do their lock, wait, quiescence, pipe, FIFO and
-  lockdep self-tests; `tests/nova/negative/sleep-under-spin.nova` is the
+  lockdep self-tests; `tests/ceesafe/negative/sleep-under-spin.cee` is the
   negative test. Two `test-chaos` boots first failed on time bounds
   (`process-user`, `irqpoll-boost`) at a host load average near 30, and
   passed when rerun on a quieter host.
@@ -324,37 +330,37 @@ Scope (2026-10-30): CosmoOS has no read-write lock, so none is converted
 callers stay. Progress: a host test first, `tests/host/test_sync.c`:
 wait queues, completions, semaphores and the mutex on a deterministic
 one-CPU scheduler, 300 seeds per workload, with a recorded trace digest
-the Nova versions must reproduce. It found a spurious priority-donation
+the CeeSafe versions must reproduce. It found a spurious priority-donation
 cycle warning after a mutex handoff, fixed in `mutex.c`. Then the wait
-queues in Nova (`kernel/scheduler/wait.nova`, over `wait_floor.c`; novac
+queues in CeeSafe (`kernel/scheduler/wait.cee`, over `wait_floor.c`; ceesafec
 0.6.0's ADR 0030), which give the recorded digest (2026-10-30); and the
-completions and semaphores in Nova (`completion.nova`, `semaphore.nova`),
+completions and semaphores in CeeSafe (`completion.cee`, `semaphore.cee`),
 which give it too (2026-10-30); and the mutex with its priority
-inheritance (`mutex.nova`), which gives it as well (2026-10-30). Then
-quiescence (`kernel/core/quiesce.nova`, over `quiesce_floor.c`), the
+inheritance (`mutex.cee`), which gives it as well (2026-10-30). Then
+quiescence (`kernel/core/quiesce.cee`, over `quiesce_floor.c`), the
 first port drafted by Nova's `c2nova port` and finished by hand; its
 self-tests pass on both architectures (2026-10-30). Then the pipe's ring
-and anonymous pipes (`kernel/ipc/pipe.nova`, over `pipe_floor.c` and a
+and anonymous pipes (`kernel/ipc/pipe.cee`, over `pipe_floor.c` and a
 killable wait in `wait_floor.c`; 2026-10-31), and named pipes
-(`kernel/ipc/fifo.nova`, over `fifo_floor.c`; 2026-10-31). The negative
-compile test is `tests/nova/negative/sleep-under-spin.nova`, which `make
-nova-check` (CI's "Nova sources" job) holds to exactly its seven refusals:
+(`kernel/ipc/fifo.cee`, over `fifo_floor.c`; 2026-10-31). The negative
+compile test is `tests/ceesafe/negative/sleep-under-spin.cee`, which `make
+cee-check` (CI's "CeeSafe sources" job) holds to exactly its seven refusals:
 a mutex, a grace period, a completion, a semaphore and a sleep under spin
 and interrupt-saving spin guards, interrupts off and preemption off, with
 the same calls accepted where sleeping is allowed (2026-10-31).
 
 Size: about 1.5x.
 
-### SA4 Driver modules in Nova
+### SA4 Driver modules in CeeSafe
 
 Nova's C8 loaded and unloaded a Nova `.ko` 1,000 times against CosmoOS on
 both architectures. SA4 makes that the way drivers are written: the
-module ABI and the device API as Nova interfaces, a template under
-`drivers/nova-template/`, signing through `modsign.py` as today. The
+module ABI and the device API as CeeSafe interfaces, a template under
+`drivers/ceesafe-template/`, signing through `modsign.py` as today. The
 proving driver is virtio-rng (`drivers/virtio/virtio_rng.c`), small and
 present on every CI boot.
 
-- [ ] **Acceptance:** `virtio_rng.ko` from Nova passes `test-modcycle`
+- [ ] **Acceptance:** `virtio_rng.ko` from CeeSafe passes `test-modcycle`
   (1,000 cycles, both architectures) and the randomness self-tests, with
   the C driver deleted.
 
@@ -373,7 +379,7 @@ metadata (`fuzz_cosmofs`); virtqueues, USB descriptors and ACPI tables
 (`fuzz_pkg`); LZ4 and framebuffer descriptions (`fuzz_lz4`,
 `fuzz_fbvalid`; Nova's C6 already wrote both). GPT is done.
 
-- [ ] **Acceptance:** every fuzz target in `tests/fuzz/` drives Nova code
+- [ ] **Acceptance:** every fuzz target in `tests/fuzz/` drives CeeSafe code
   and none drives C; each family's benchmark within the rule's 5%.
 
 Size: about 3.0x.
@@ -384,7 +390,7 @@ Size: about 3.0x.
 mbufs, interfaces, ARP and neighbour discovery, IPv4 and IPv6, ICMP, UDP,
 TCP, the firewall and NAT, sockets, AF_UNIX, the per-CPU receive workers.
 The self-tests convert after the code they test, so the C tests check the
-Nova first.
+CeeSafe first.
 
 - [ ] **Acceptance:** the network harness, `test-net-login`, `nettest`'s
   self-tests and the net fuzz targets pass on both architectures with no C
@@ -405,7 +411,7 @@ suites.
 - [ ] **Acceptance:** `test-install`, `test-upgrade`, `test-snapshot`,
   `test-fsck`, `test-mirror`, `test-encrypt` and `test-large` pass on both
   architectures with no C left in those trees; an image written by the C
-  build mounts and checks clean under the Nova build, and the reverse
+  build mounts and checks clean under the CeeSafe build, and the reverse
   (until 2.0's format break, if SA7 takes it).
 
 Size: about 4.5x.
@@ -425,10 +431,10 @@ Size: about 1.5x.
 ### SA9 Every driver
 
 `drivers/` (15,328 lines): PCI, ACPI, the IOMMUs (VT-d, SMMUv3), NVMe,
-AHCI, e1000e, USB and the virtio drivers, each a Nova module (SA4). HW2's
-new drivers are written in Nova from the start, in the same stream.
+AHCI, e1000e, USB and the virtio drivers, each a CeeSafe module (SA4). HW2's
+new drivers are written in CeeSafe from the start, in the same stream.
 
-- [ ] **Acceptance:** every driver module is built from Nova and passes
+- [ ] **Acceptance:** every driver module is built from CeeSafe and passes
   `test-modcycle`, its device tests and the platform boots (`q35`, `virt`,
   Parallels); no C left in `drivers/`.
 
@@ -457,7 +463,7 @@ and `kernel-services/virtualization/` (5,231): SVM, VMX, AArch64 EL2, the
 device backends' kernel side. The world switches stay assembly.
 
 - [ ] **Acceptance:** the matrix and the hypervisor's guest tests on both
-  architectures; `nova-share.py` reports only the floor in
+  architectures; `cee-share.py` reports only the floor in
   `kernel/arch/` and `kernel-services/virtualization/`.
 
 Size: about 2.5x.
@@ -466,9 +472,9 @@ Size: about 2.5x.
 
 `libc/` (5,949 lines), `userland/` (26,611: the native tools, `init`,
 `svc`, `syslogd`, `netcfg`, `cosmo-upgrade`, `cosmo-snap`,
-`fsck.cosmofs`, `cosmo-pool`, `cosmo-key`) and `pkg/` (3,505), on Nova's
+`fsck.cosmofs`, `cosmo-pool`, `cosmo-key`) and `pkg/` (3,505), on CeeSafe's
 hosted profile. libc keeps a C ABI for the ports that link it; its
-implementation is Nova, and it gains the `math.h` it lacks (in Nova).
+implementation is CeeSafe, and it gains the `math.h` it lacks (in CeeSafe).
 
 - [ ] **Acceptance:** `test-upgrade`, `test-install`, the `pkg` tests and
   the native-tool tests pass on both architectures with no C left in
@@ -478,12 +484,12 @@ Size: about 3.0x.
 
 ### SA13 The last C
 
-Headers become Nova interfaces, with C headers kept only for the floor
+Headers become CeeSafe interfaces, with C headers kept only for the floor
 and for libc's public ABI; the floor is audited function by function (each
-one's `/// Safety:` contract against its callers); `nova-share.py`'s
+one's `/// Safety:` contract against its callers); `cee-share.py`'s
 number for ring 0 is the floor and nothing else.
 
-- [ ] **Acceptance:** `nova-share.py` on main reports zero lines of
+- [ ] **Acceptance:** `cee-share.py` on main reports zero lines of
   convertible C in ring 0 and in CosmoOS's own userland; a dated report
   lists the floor, its size, and each function's contract.
 
@@ -497,7 +503,7 @@ Size: about 1.0x.
 `make` and the build tools, a ports tree that builds on CosmoOS, nano and
 curl, OpenSSH and git, Python. They run in the features stream from the
 start of phase 1, not before it, and new CosmoOS-side code they need is
-in Nova.
+in CeeSafe.
 
 - [ ] **Acceptance:** 1.2's A2-A6 acceptance tests, each green on main.
 
@@ -514,7 +520,7 @@ Roadmap 1.2 deferred these as C2, C4, C5 and C6; they move here.
 KASLR (1.2's C2, BOOT-1): a relocatable kernel, the slide chosen by the
 loader from `EFI_RNG_PROTOCOL` or the CPU, symbolisation adjusted. The
 loader signed for UEFI Secure Boot with a documented key enrolment
-(BOOT-2). The relocation processing in the loader is written in Nova (an
+(BOOT-2). The relocation processing in the loader is written in CeeSafe (an
 ELF relocation parser is untrusted input to the loader).
 
 - [ ] **Acceptance:** `test-security` boots three times and requires three
@@ -524,16 +530,16 @@ ELF relocation parser is untrusted input to the loader).
 
 Size: about 1.0x.
 
-### HW2 Server drivers, in Nova
+### HW2 Server drivers, in CeeSafe
 
-Drivers for the hardware HW3's machines have, written as Nova modules
+Drivers for the hardware HW3's machines have, written as CeeSafe modules
 (SA4): one Intel and one other common server NIC (for example `igc` or
 `ixgbe` class, and a Broadcom or Mellanox ConnectX class, chosen with the
-machines), AHCI and NVMe on real controllers (on SA9's Nova drivers),
+machines), AHCI and NVMe on real controllers (on SA9's CeeSafe drivers),
 xHCI for a USB console and install media, and an AML interpreter for ACPI
 power-off and the DSDT-described devices (DRV-4; a parser of firmware
 input, fuzzed). On AArch64, device-tree discovery (DRV-5) if the chosen
-machine needs it. All in Nova, in the conversion stream beside SA9.
+machine needs it. All in CeeSafe, in the conversion stream beside SA9.
 
 - [ ] **Acceptance:** each driver has a QEMU device test where QEMU emulates
   it (e1000e, NVMe, AHCI, xHCI) and runs on HW3's machines; the AML
@@ -591,7 +597,7 @@ with measured benefit). The likely candidates, in the order PF1 is likely
 to show them: zero-copy I/O (`sendfile`, `splice`, user-mapped buffers;
 NET-19), multiqueue NVMe with interrupt moderation (multiqueue
 virtio-net is MS4's), TSO and LRO, page-cache read-ahead, and the scheduler's wake-up path. New code in
-Nova; a hot path's Nova port held to the rule's 5%.
+CeeSafe; a hot path's CeeSafe port held to the rule's 5%.
 
 - [ ] **Acceptance:** PF1's report shows CosmoOS within 15% of the better
   of Linux and FreeBSD on each benchmark, and no worse than 1.5x on any,
@@ -607,7 +613,7 @@ node-aware allocation and placement (MEM-5); user huge pages, asked for
 by the program (MEM-4; MS5 adds transparent promotion);
 swap to a file or partition (MEM-6, without compression or deduplication
 at first). The NUMA policy, the huge-page allocator's accounting and
-the swap slot allocator are new code, in Nova.
+the swap slot allocator are new code, in CeeSafe.
 
 - [ ] **Acceptance:** QEMU boots with 256 vCPUs and two NUMA nodes and
   passes `test-smp2`-class tests at that size; a self-test shows memory
@@ -628,7 +634,7 @@ TCP window scaling, SACK, timestamps, ECN, fast recovery and sender Nagle
 discovery against a real peer (NET-10); `setsockopt` and `getsockopt` for
 the options server software sets (LX-8: `SO_REUSEADDR`, `SO_REUSEPORT`,
 `SO_RCVBUF`, `SO_SNDBUF`, `SO_KEEPALIVE`, `TCP_NODELAY`, `IPV6_V6ONLY`).
-The option parsers are written in Nova as part of SA5's network family.
+The option parsers are written in CeeSafe as part of SA5's network family.
 
 - [ ] **Acceptance:** a harness against a Linux peer checks each TCP option
   on the wire (window scale, SACK blocks after injected loss, timestamps);
@@ -641,7 +647,7 @@ Size: about 2.0x.
 
 `AF_NETLINK` route sockets (LX-7) so Linux tools (`ip` from iproute2,
 BusyBox `ip`) work; a DHCPv6 client and a caching resolver (NET-18, part).
-The netlink message parser is in Nova.
+The netlink message parser is in CeeSafe.
 
 - [ ] **Acceptance:** iproute2's `ip addr`, `ip route` and `ip link`
   report and change the guest's configuration; a guest gets an address
@@ -663,7 +669,7 @@ the `*xattr` family, `mlock`, `capget`/`capset`, `unshare`; and `rseq`
 and `clone3` return `-ENOSYS`. LX1 implements them and runs glibc-linked
 programs taken unchanged from a mainstream distribution's packages (for
 example Debian's coreutils, findutils and grep). The new handlers are
-written in Nova (they decode user memory: SA5's second family).
+written in CeeSafe (they decode user memory: SA5's second family).
 
 - [ ] **Acceptance:** a chosen subset of the Linux Test Project's syscall
   tests (the list checked in, each exclusion named with its reason) passes
@@ -704,13 +710,13 @@ Size: about 1.5x.
 
 Go and Rust toolchains on the target (both need the Linux calls LX1 adds,
 threads and `futex` at scale, and `mmap` behaviour the runtimes depend
-on), and Nova itself: `novac` built and run on CosmoOS, so that Nova code
+on), and CeeSafe itself: `ceesafec` built and run on CosmoOS, so that CeeSafe code
 can be developed on the system it runs on.
 
 - [ ] **Acceptance:** Go's `go test std` subset and Rust's `cargo test` on
-  a chosen crate set pass on the target; `novac` built on CosmoOS
-  regenerates every `.nova` port in the tree byte for byte
-  (`make nova-check` on the target).
+  a chosen crate set pass on the target; `ceesafec` built on CosmoOS
+  regenerates every `.cee` port in the tree byte for byte
+  (`make cee-check` on the target).
 
 Size: about 2.0x.
 
@@ -727,10 +733,10 @@ million connections as at a thousand, event notification that scales with
 the active connections rather than the registered ones, the network path
 spread across CPUs, and large pages under a large heap.
 
-**Built here, in Nova; not imported.** FreeBSD's `netinet` is not taken
+**Built here, in CeeSafe; not imported.** FreeBSD's `netinet` is not taken
 into the tree. It depends on FreeBSD's mbufs, UMA allocator, epoch
 reclamation, callouts, taskqueues, `ifnet` and VNET, so porting it means
-porting a large slice of FreeBSD's kernel as C, against the Nova rule.
+porting a large slice of FreeBSD's kernel as C, against the CeeSafe rule.
 What made FreeBSD fit that workload is a short list of mechanisms (kqueue,
 a 4-tuple connection table, per-CPU timer wheels, receive-side scaling,
 superpages, large descriptor limits), and each is a milestone below. The
@@ -763,7 +769,7 @@ settable up to 16 million and the Linux personality's limit following it.
 Socket buffers are allocated when data arrives, not when the socket is
 made, and returned when they drain, so an idle connection costs its pcb,
 its socket and its handle. The table, its growth and its lookup are in
-Nova (SA2's allocation and object lifetimes; the socket-buffer part on
+CeeSafe (SA2's allocation and object lifetimes; the socket-buffer part on
 SA6's converted stack).
 
 - [ ] **Acceptance:** one process holds 1,000,000 established TCP
@@ -782,7 +788,7 @@ quiescence, as FreeBSD's `in_pcblookup` reads under its network epoch);
 listeners in their own table, with `SO_REUSEPORT` groups so that each CPU
 can accept on its own listener (NT1 parses the option; MS2 distributes
 by it); the backlog and the SYN cache sized by the administrator
-(`somaxconn`). In Nova, on SA6's converted stack.
+(`somaxconn`). In CeeSafe, on SA6's converted stack.
 
 - [ ] **Acceptance:** a self-test measures the cost of a lookup with
   1,000 and with 1,000,000 connections in the table, and the second is
@@ -801,7 +807,7 @@ filters, and `EV_CLEAR`, `EV_ONESHOT` and `EV_DISPATCH`. They are built on
 the callback wait entries and ready lists epoll already uses, so that
 their cost follows the active events, not the registered ones; CosmoOS's
 libc exposes them with FreeBSD's `<sys/event.h>`. Linux programs keep
-epoll. In Nova.
+epoll. In CeeSafe.
 
 - [ ] **Acceptance:** libkqueue's test suite, built against the native
   calls, passes on both architectures; a self-test registers 1,000,000
@@ -819,7 +825,7 @@ connection's processing and its timers kept on the CPU its packets
 arrive at; and the per-CPU timer queues replaced by hierarchical timer
 wheels, as FreeBSD's callout wheel is per CPU, so that arming,
 re-arming and cancelling a timer is constant time. pcbs come from a
-per-CPU cache. In Nova. This takes the multiqueue virtio-net part of
+per-CPU cache. In CeeSafe. This takes the multiqueue virtio-net part of
 NET-19 from PF2.
 
 - [ ] **Acceptance:** on a KVM host with 8 vCPUs and 8 queue pairs, PF1's
@@ -838,7 +844,7 @@ large mapping reserves the physical range, the range fills with 4 KiB
 pages, and when it is full the mapping is promoted to one 2 MiB entry;
 demotion on a partial `munmap`, `mprotect` or memory pressure. Both
 architectures. Builds on PF3's huge-page allocator; the reservation logic
-is in Nova.
+is in CeeSafe.
 
 - [ ] **Acceptance:** a self-test touches a 1 GiB anonymous mapping and
   finds it mapped by 2 MiB entries on both architectures, then splits one
@@ -883,7 +889,7 @@ Measured boot into the TPM (BOOT-3) and the encrypted root's key sealed to
 the measurements (BOOT-9); the root file system verified as a tree, with
 cosmofs's checksummed metadata rooted in a signed hash (BOOT-4); signature
 versions against rollback (BOOT-5). The manifest, the tree-root signature
-and the TPM event log parsers are in Nova.
+and the TPM event log parsers are in CeeSafe.
 
 - [ ] **Acceptance:** with swtpm under QEMU, an unchanged system unlocks
   its root unattended and a changed kernel does not; changing one block of
@@ -900,7 +906,7 @@ Capsicum (a process that enters it reaches only what its handles allow),
 a syscall filter in the style of seccomp for Linux programs, multiple
 users with login, and audit logging of privileged operations (SEC-2).
 Fix the `/etc` escalation (SEC-1). The filter's rule language and its
-evaluator are in Nova.
+evaluator are in CeeSafe.
 
 - [ ] **Acceptance:** a process in capability mode cannot open a path it
   holds no directory handle for, on both personalities; OpenSSH's
@@ -917,7 +923,7 @@ Size: about 2.5x.
 
 PID, network and IPC namespaces beside the mount and UTS namespaces that
 exist, and a cgroups-v2-compatible hierarchy for CPU, memory and I/O
-limits (SEC-10). New code in Nova.
+limits (SEC-10). New code in CeeSafe.
 
 - [ ] **Acceptance:** a process in new PID and network namespaces sees PID
   1 and only its own interfaces; a memory limit stops a process at its
@@ -927,7 +933,7 @@ Size: about 2.0x.
 
 ### CT2 An OCI runtime
 
-An OCI runtime (crun, or a native one in Nova) over CT1, SE2's filter and
+An OCI runtime (crun, or a native one in CeeSafe) over CT1, SE2's filter and
 cosmofs clones for image layers; then a container image pulled and run
 (SEC-11).
 
@@ -954,18 +960,18 @@ remote workflow per architecture (OBS-2).
 
 Size: about 2.0x.
 
-### OB2 Programmable probes, in Nova
+### OB2 Programmable probes, in CeeSafe
 
 Linux's eBPF and FreeBSD's DTrace both run user-supplied code in the
 kernel behind a verifier or an interpreter. CosmoOS can do this
-differently: a probe is a small Nova program, checked by novac's borrow
+differently: a probe is a small CeeSafe program, checked by ceesafec's borrow
 checker and context effects (no sleep in an atomic probe), compiled and
 signed as a module, and attached to OB1's tracepoints with a bounded run
-time (OBS-5). What eBPF's verifier proves at load time, Nova's checker
+time (OBS-5). What eBPF's verifier proves at load time, CeeSafe's checker
 proves at compile time; the signature replaces load-time trust.
 
 - [ ] **Acceptance:** a probe counting system calls by process, written in
-  Nova, built on the target with `novac` (SW2), attaches, reports and
+  CeeSafe, built on the target with `ceesafec` (SW2), attaches, reports and
   detaches 1,000 times without a leak; a probe that sleeps in an atomic
   tracepoint is refused at compile time.
 
@@ -979,7 +985,7 @@ Size: about 1.5x.
 
 Incremental snapshot send and receive (CFS-12): a stream format, ancestry
 checks, recovery from an interrupted receive. The stream parser is in
-Nova.
+CeeSafe.
 
 - [ ] **Acceptance:** a snapshot stream sent from one guest is received by
   another and the trees compare equal; a truncated or corrupted stream is
@@ -1033,11 +1039,11 @@ Size: about 2.5x.
 
 The master prompt asks for a hybrid kernel, not a monolithic one; today
 nothing runs outside ring 0 except the VM device backends, `syslogd` and
-`svc`. With drivers in Nova, the case for moving them to user space is
+`svc`. With drivers in CeeSafe, the case for moving them to user space is
 weaker than it is for C, since memory safety removes a large share of
 what isolation protects against. UK1 measures that trade instead of
 assuming it: one driver (a NIC) runs as a user-space server over the
-IOMMU, beside its in-kernel Nova version, and PF1 compares them.
+IOMMU, beside its in-kernel CeeSafe version, and PF1 compares them.
 
 - [ ] **Acceptance:** a report with the two versions' PF1 numbers, the
   failure-isolation test (the user-space driver killed and restarted under
@@ -1049,29 +1055,29 @@ Size: about 1.5x.
 
 ## Risks
 
-- **Nova's maturity.** Nova's README says "early development, not
-  production-ready". Every milestone that depends on a Nova feature must
+- **CeeSafe's maturity.** CeeSafe's README says "early development, not
+  production-ready". Every milestone that depends on a CeeSafe feature must
   find any compiler defect, not hide it: the differential test against C
-  and novac's own reference interpreter (Nova M7) are the guard. A defect
-  is fixed in Nova and the pin moved, never worked around in generated C.
+  and ceesafec's own reference interpreter (CeeSafe M7) are the guard. A defect
+  is fixed in CeeSafe and the pin moved, never worked around in generated C.
 - **Converting working code.** About 190,000 lines that pass today's
   tests will be rewritten. Every conversion can bring back a defect the C
   had fixed. The guards: the differential test against the C until it is
   deleted, the self-tests converted after the code they check, the
   probes' `--old` history (each fixed defect has a test that failed
-  before its fix; those tests must pass against the Nova), and the
+  before its fix; those tests must pass against the CeeSafe), and the
   validation matrix per PR.
-- **Two projects in step.** The kernel in Nova makes Nova's compiler part
+- **Two projects in step.** The kernel in CeeSafe makes CeeSafe's compiler part
   of CosmoOS's trusted base and its schedule part of CosmoOS's. A CosmoOS
-  milestone that waits for a Nova feature says so in its first PR, and the
+  milestone that waits for a CeeSafe feature says so in its first PR, and the
   Nova side is its own change in Nova's repository. A miscompile is now a
-  kernel defect: Nova's random-program fuzzer and reference interpreter
-  (Nova M7) run on every pin bump.
+  kernel defect: CeeSafe's random-program fuzzer and reference interpreter
+  (CeeSafe M7) run on every pin bump.
 - **Performance of checks.** Bounds and overflow checks stay on in every
   build, in every hot path, once the scheduler, memory and network are
-  Nova. PF2's targets may need the compiler to remove more of them by
+  CeeSafe. PF2's targets may need the compiler to remove more of them by
   proof; if a hot path cannot meet 5%, the owner decides, with the number.
-- **Build time.** Building from Nova (the rule's point 7) adds novac to
+- **Build time.** Building from CeeSafe (the rule's point 7) adds ceesafec to
   every build and every CI job; SA1 measures it.
 - **Testing under TCG.** Most CI runs under TCG, where timing differs from
   hardware and PF1's numbers are meaningless. PF1 needs a KVM host; HW3
@@ -1096,12 +1102,12 @@ Size: about 1.5x.
 
 ## Recommendation
 
-Adopt it, rewrite `AGENTS.md`'s scope rules and `build/nova.md`'s kernel
+Adopt it, rewrite `AGENTS.md`'s scope rules and `build/ceesafe.md`'s kernel
 rules to match in the first PR, and start three streams at once: SA1
-(the gate and the Nova build), PF1 (the benchmark set every later
+(the gate and the CeeSafe build), PF1 (the benchmark set every later
 performance claim needs) and SW0 (self-hosting, already under way). Then
-SA2-SA4, which make allocation, locks and drivers possible in Nova:
+SA2-SA4, which make allocation, locks and drivers possible in CeeSafe:
 without them the conversion can reach only parsers and pure functions,
 as it does today. SA2-SA4 wait for Nova's N1 and N3 (Nova 0.2.0), so the
 conversion stream's first work is SA5, the parsers, which needs nothing
-new from Nova.
+new from CeeSafe.

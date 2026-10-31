@@ -2834,7 +2834,7 @@ static int64_t lx_getrusage(struct syscall_args *a)
     return copy_to_user(a->a[1], &ru, sizeof(ru)) ? -EFAULT : 0;
 }
 
-/* --- nice values (roadmap 1.2 A5, LX-13; the rules are Nova's, kernel/process/nice.c) --- */
+/* --- nice values (roadmap 1.2 A5, LX-13; the rules are CeeSafe's, kernel/process/nice.c) --- */
 
 /* The id getpriority and setpriority walk for `which` and `who` (Linux's
  * `who` is an int; 0 names the caller's process, group or real uid), or

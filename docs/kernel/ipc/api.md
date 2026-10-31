@@ -46,7 +46,7 @@ the contract of the end operations below and `nonblock` the caller's
 mode (the thread's I/O-ring mode is applied inside). **`unsigned
 pipe_ring_ready_rd(p)`** / **`pipe_ring_ready_wr(p)`** are the two
 readiness answers below. The anonymous pipe's ends are one client;
-`kernel/ipc/fifo.nova` is the other.
+`kernel/ipc/fifo.cee` is the other.
 
 ### `int pipe_create(struct kobject **read_end, struct kobject **write_end)`
 - Purpose: allocate a pipe (`struct pipe` plus a `PIPE_SIZE` buffer from

@@ -318,12 +318,12 @@ struct process {
     uint64_t itimer_interval_ns;       /* atomic */
     /* CPU time, split into user and system time, and the CPU-time timers
      * ITIMER_VIRTUAL and ITIMER_PROF (kernel/process/cpu_account.c; the
-     * arithmetic is Nova's, kernel/process/cputime.c). Under `lock`: the
+     * arithmetic is CeeSafe's, kernel/process/cputime.c). Under `lock`: the
      * tick takes it in interrupt context, as signal_send does. A fork
      * starts zeroed; exec keeps it all. */
     struct cputime cputime;
     /* The nice value, NICE_MIN..NICE_MAX (kernel/include/kernel/nice.h;
-     * the rules are Nova's, kernel/process/nice.c). Under `lock`. A fork
+     * the rules are CeeSafe's, kernel/process/nice.c). Under `lock`. A fork
      * and a spawn copy the parent's; exec keeps it. */
     int32_t nice;
     /* vfork (docs/kernel/process/design.md, "fork"): the parent waits on

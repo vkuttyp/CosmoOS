@@ -43,7 +43,7 @@
 #include <kernel/random.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
-#include <nova/crash_test.h>
+#include <ceesafe/crash_test.h>
 #include <kernel/tty.h>
 #include <arch/console.h>
 #include <kernel/smp.h>
@@ -370,9 +370,9 @@ void kernel_main(const struct cosmoboot_info *info)
     failed++;
 #endif
 #if CONFIG_CRASH_TEST == 5 && CONFIG_SELFTEST
-    kinfo("crash test: a Nova bounds check on purpose"); /* SA1's crash-nova (make test-crash-nova) */
-    crash_nova_index(*(volatile size_t *)&(size_t){4});   /* past its table; neither compiler sees the 4 */
-    kerror("crash test: the Nova bounds check did not stop the kernel");
+    kinfo("crash test: a CeeSafe bounds check on purpose"); /* SA1's crash-cee (make test-crash-cee) */
+    crash_cee_index(*(volatile size_t *)&(size_t){4});   /* past its table; neither compiler sees the 4 */
+    kerror("crash test: the CeeSafe bounds check did not stop the kernel");
     failed++;
 #endif
 #if CONFIG_SELFTEST

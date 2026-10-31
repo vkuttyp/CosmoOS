@@ -702,31 +702,31 @@ SMASH_FORBIDDEN_MARKERS = [
     r"KERNEL PANIC \(recursive\)",
     r"cosmoboot: FATAL",
 ]
-# --expect-panic nova (CRASH_TEST=5 kernel; roadmap 2.0 SA1's crash-nova):
-# a Nova bounds check fails on purpose and Nova's panic hook stops the
-# kernel naming the Nova source: the report must give the file and the
-# line kernel/nova/crash_test.nova marks, not a fault from a read past the
+# --expect-panic ceesafe (CRASH_TEST=5 kernel; roadmap 2.0 SA1's crash-cee):
+# a CeeSafe bounds check fails on purpose and CeeSafe's panic hook stops the
+# kernel naming the CeeSafe source: the report must give the file and the
+# line kernel/ceesafe/crash_test.cee marks, not a fault from a read past the
 # table.
-NOVA_CRASH_SOURCE = "kernel/nova/crash_test.nova"
+CEE_CRASH_SOURCE = "kernel/ceesafe/crash_test.cee"
 
 
-def nova_crash_markers():
-    """The required markers, with the line of NOVA_CRASH_SOURCE that its comment marks."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", NOVA_CRASH_SOURCE)
+def cee_crash_markers():
+    """The required markers, with the line of CEE_CRASH_SOURCE that its comment marks."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", CEE_CRASH_SOURCE)
     with open(path, encoding="utf-8") as f:
-        line = next(n for n, text in enumerate(f, 1) if "crash-nova: the bounds check that fails" in text)
+        line = next(n for n, text in enumerate(f, 1) if "crash-cee: the bounds check that fails" in text)
     return BOOT_MARKERS + [
         PANIC_CONTEXT_MARKER,
-        r"^\[ INFO\] crash test: a Nova bounds check on purpose",
-        rf"^KERNEL PANIC: nova panic: index out of bounds at {re.escape(NOVA_CRASH_SOURCE)}:{line}:\d+",
+        r"^\[ INFO\] crash test: a CeeSafe bounds check on purpose",
+        rf"^KERNEL PANIC: ceesafe panic: index out of bounds at {re.escape(CEE_CRASH_SOURCE)}:{line}:\d+",
         r"^stack trace:",
         r"^halting\.",
     ]
 
 
-NOVA_FORBIDDEN_MARKERS = [
+CEE_FORBIDDEN_MARKERS = [
     r"^\[ INFO\] boot complete",
-    r"crash test: the Nova bounds check did not stop the kernel",
+    r"crash test: the CeeSafe bounds check did not stop the kernel",
     r"KERNEL PANIC: page fault",
     r"KERNEL PANIC \(recursive\)",
     r"cosmoboot: FATAL",
@@ -990,7 +990,7 @@ def main():
     ap.add_argument("--harness-retry", action="store_true",
                     help="a HARNESS_BREAK=1 image: require that net-harness's first back-connection "
                          "attempt was broken on purpose and that a later one carried the exchange")
-    ap.add_argument("--expect-panic", nargs="?", const="fault", default=None, choices=["fault", "wxn", "smash", "nova"],
+    ap.add_argument("--expect-panic", nargs="?", const="fault", default=None, choices=["fault", "wxn", "smash", "ceesafe"],
                     help="the kernel was built to crash on purpose: require that crash's panic report "
                          "and the failure exit code instead of a clean boot. 'fault' (the default: "
                          "CRASH_TEST=1, an unmapped write) or 'wxn' (CRASH_TEST=2, a writable page "
@@ -1009,8 +1009,8 @@ def main():
         required, forbidden = SMASH_REQUIRED_MARKERS, SMASH_FORBIDDEN_MARKERS
         expected_exit = EXIT_FAILURE_VALUE
         args.expect_selftest = "no"
-    elif args.expect_panic == "nova":
-        required, forbidden = nova_crash_markers(), NOVA_FORBIDDEN_MARKERS
+    elif args.expect_panic == "ceesafe":
+        required, forbidden = cee_crash_markers(), CEE_FORBIDDEN_MARKERS
         expected_exit = EXIT_FAILURE_VALUE
         args.expect_selftest = "no"
     elif args.expect_panic == "wxn":

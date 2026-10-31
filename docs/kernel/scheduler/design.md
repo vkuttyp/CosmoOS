@@ -177,8 +177,8 @@ That is every level but one: `SCHED_PRIO_DEFAULT` is the fair level.
 Roadmap 1.2 A5's third PR (backlog LX-13). Every user thread and most
 kernel workers run at `SCHED_PRIO_DEFAULT`, so that level shares a CPU
 by weight instead of by turns: Linux's CFS, without its groups. The
-arithmetic is Nova's (`kernel/scheduler/fair.nova`, from which `make
-nova` generates `fair.c`; API `kernel/include/kernel/fair.h`), the lists
+arithmetic is CeeSafe's (`kernel/scheduler/fair.cee`, from which `make
+ceesafe` generates `fair.c`; API `kernel/include/kernel/fair.h`), the lists
 and locks `policy_rr.c`. The other 63 levels are unchanged, and a
 better level always runs first.
 
@@ -539,7 +539,7 @@ and `sched_dump`'s per-CPU line carries the load.
 ## 4. Wait queues
 
 ```c
-struct wait_entry { struct list_node link; struct thread *thread; wait_callback_fn callback; };  /* kernel/scheduler/wait.nova */
+struct wait_entry { struct list_node link; struct thread *thread; wait_callback_fn callback; };  /* kernel/scheduler/wait.cee */
 struct waitqueue { spinlock_t lock; struct list_node waiters; struct list_node callbacks; };
 
 #define wait_event(wq, cond)                          \

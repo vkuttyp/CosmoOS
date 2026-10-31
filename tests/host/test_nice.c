@@ -1,6 +1,6 @@
 /*
  * test_nice.c - Nice values' rules (kernel/process/nice.c, generated from
- * Nova) on the host: the range, the permission rules, and how setpriority
+ * CeeSafe) on the host: the range, the permission rules, and how setpriority
  * and getpriority report a group. The inputs that matter are few enough
  * to try them all against Linux's rules written out here
  * (kernel/sys.c: set_one_prio_perm, can_nice, set_one_prio, getpriority),

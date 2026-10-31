@@ -1,9 +1,9 @@
 // Roadmap 2.0 SA3's negative compile test: nothing that may sleep compiles under a spin lock's guard, with interrupts
-// off, or with preemption off (Nova type-system.md §32.3). `make nova-check` checks this file with the pinned novac
-// (scripts/nova-gen.py): every line marked `// error[N…]` must be refused with that code, and nothing else may be.
+// off, or with preemption off (CeeSafe type-system.md §32.3). `make cee-check` checks this file with the pinned ceesafec
+// (scripts/cee-gen.py): every line marked `// error[N…]` must be refused with that code, and nothing else may be.
 //
-// The sleeping calls are the SA3 primitives as kernel Nova reaches them: lib/kernel's Mutex and Quiesce, and the
-// C interface of completion.nova and semaphore.nova declared with the sleep effect, as a port calling them declares it.
+// The sleeping calls are the SA3 primitives as kernel CeeSafe reaches them: lib/kernel's Mutex and Quiesce, and the
+// C interface of completion.cee and semaphore.cee declared with the sleep effect, as a port calling them declares it.
 
 @header("kernel/completion.h", "kernel/semaphore.h", "kernel/sched.h")
 extern "C" {
@@ -22,9 +22,9 @@ struct Table {
     count: u64;
 }
 
-static SPIN: SpinLock<Table> = SpinLock<Table>.constant("nova-negative.spin\0".ptr as *CChar, Table { count: 0 });
-static IRQSPIN: IrqSpinLock<Table> = IrqSpinLock<Table>.constant("nova-negative.irqspin\0".ptr as *CChar, Table { count: 0 });
-static MUTEX: Mutex<Table> = Mutex<Table>.constant("nova-negative.mutex\0".ptr as *CChar, Table { count: 0 });
+static SPIN: SpinLock<Table> = SpinLock<Table>.constant("ceesafe-negative.spin\0".ptr as *CChar, Table { count: 0 });
+static IRQSPIN: IrqSpinLock<Table> = IrqSpinLock<Table>.constant("ceesafe-negative.irqspin\0".ptr as *CChar, Table { count: 0 });
+static MUTEX: Mutex<Table> = Mutex<Table>.constant("ceesafe-negative.mutex\0".ptr as *CChar, Table { count: 0 });
 
 // --- refused -----------------------------------------------------------------------------------------------------------
 

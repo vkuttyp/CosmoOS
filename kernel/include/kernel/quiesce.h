@@ -29,10 +29,10 @@
 #include <kernel/percpu.h>
 
 /* struct quiesce_head { next; callback (run after the grace period; was
- * `fn`, a Nova keyword); pending (submitted and not yet run: a second
+ * `fn`, a CeeSafe keyword); pending (submitted and not yet run: a second
  * call_quiesce panics); } and struct quiesce_stats (each counter described
- * there) are defined in Nova (kernel/core/quiesce.nova) and generated into
- * quiesce_types.h (roadmap 2.0 SA3; Nova ADR 0029, 0030). */
+ * there) are defined in CeeSafe (kernel/core/quiesce.cee) and generated into
+ * quiesce_types.h (roadmap 2.0 SA3; CeeSafe ADR 0029, 0030). */
 #include <kernel/quiesce_types.h>
 
 /* After sched_init: the callback worker thread. */

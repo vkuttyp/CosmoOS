@@ -1,10 +1,10 @@
 /*
- * kcore_selftest.c - The self-test nova-kcore: Nova's kernel library
+ * kcore_selftest.c - The self-test cee-kcore: CeeSafe's kernel library
  * (lib/kernel) in code built into the kernel.
  *
- * The checks are Nova (kernel/nova/kcore_test.nova, generated into
- * kcore_test.c by `make nova`); this names the one that failed. First it
- * checks, in C, that MUTEX_INIT_AT, which Nova's static Mutex uses, leaves
+ * The checks are CeeSafe (kernel/ceesafe/kcore_test.cee, generated into
+ * kcore_test.c by `make cee`); this names the one that failed. First it
+ * checks, in C, that MUTEX_INIT_AT, which CeeSafe's static Mutex uses, leaves
  * a mutex as mutex_init does.
  */
 
@@ -14,7 +14,7 @@
 #include "kernel/mutex.h"
 #include "kernel/selftest.h"
 
-uint32_t kcore_nova_selftest(void);
+uint32_t kcore_cee_selftest(void);
 
 static const char *const kcore_failures[] = {
     [1] = "a static spin-locked table gave the wrong slots",
@@ -31,7 +31,7 @@ static const char *const kcore_failures[] = {
     [12] = "an object cache box's drop did not drop its value once",
 };
 
-static struct mutex kcore_static_mutex = MUTEX_INIT_AT(&kcore_static_mutex, "nova.kcore.init-at");
+static struct mutex kcore_static_mutex = MUTEX_INIT_AT(&kcore_static_mutex, "cee.kcore.init-at");
 
 static bool same_spinlock(const spinlock_t *a, const spinlock_t *b)
 {
@@ -50,7 +50,7 @@ static const char *mutex_init_at_matches(void)
 {
     struct mutex made;
 
-    mutex_init(&made, "nova.kcore.init-at");
+    mutex_init(&made, "cee.kcore.init-at");
     const struct mutex *s = &kcore_static_mutex;
     if (!same_spinlock(&s->lock, &made.lock) || s->owner != made.owner || s->name != made.name || s->lock_class != made.lock_class
         || s->pi_active != made.pi_active || s->handoff != made.handoff)
@@ -65,7 +65,7 @@ static const char *mutex_init_at_matches(void)
     return NULL;
 }
 
-bool selftest_nova_kcore(const char **reason)
+bool selftest_cee_kcore(const char **reason)
 {
     const char *init_at = mutex_init_at_matches();
 
@@ -73,7 +73,7 @@ bool selftest_nova_kcore(const char **reason)
         *reason = init_at;
         return false;
     }
-    uint32_t failed = kcore_nova_selftest();
+    uint32_t failed = kcore_cee_selftest();
 
     if (failed == 0)
         return true;

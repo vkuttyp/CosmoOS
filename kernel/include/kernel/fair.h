@@ -15,7 +15,7 @@
  * `min_vruntime` minus FAIR_WAKE_BONUS_NS, so a long sleep earns a short
  * lead, not a monopoly.
  *
- * The functions are Nova's (kernel/scheduler/fair.c, generated). They keep
+ * The functions are CeeSafe's (kernel/scheduler/fair.c, generated). They keep
  * no state and cannot fail; the caller holds the run-queue lock, often in
  * the tick.
  */

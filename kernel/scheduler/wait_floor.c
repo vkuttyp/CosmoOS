@@ -1,10 +1,10 @@
 /*
- * wait_floor.c - The C under kernel/scheduler/wait.nova (roadmap 2.0 SA3).
+ * wait_floor.c - The C under kernel/scheduler/wait.cee (roadmap 2.0 SA3).
  *
- * The wait queues and their types are Nova (wait.nova, generated into
+ * The wait queues and their types are CeeSafe (wait.cee, generated into
  * wait.c and kernel/include/kernel/wait_types.h). What stays here reads
  * fields of struct thread and struct percpu, whose headers include wait.h
- * (so wait.nova cannot name them: the generated header would include them
+ * (so wait.cee cannot name them: the generated header would include them
  * back), formats panic's message, and keeps the two timed sleeps, which
  * are C over the wait_event macros. Each is a few lines and no decision.
  */
@@ -19,7 +19,7 @@
 #include <kernel/wait.h>
 
 
-/* Declared for wait.nova only; not part of wait.h's interface. */
+/* Declared for wait.cee only; not part of wait.h's interface. */
 struct thread *wait_floor_enter_sleep(uintptr_t ip);
 void wait_floor_set_waiting_on(struct thread *t, struct waitqueue *wq);
 void wait_floor_fatal(const char *what);
@@ -47,8 +47,8 @@ void wait_floor_check_sleep(uintptr_t ip, const char *what)
     }
 }
 
-/* wait_event and wait_event_timeout for Nova ports, whose wait entry and
- * timer must be C's stack objects (a Nova local cannot hold C state). */
+/* wait_event and wait_event_timeout for CeeSafe ports, whose wait entry and
+ * timer must be C's stack objects (a CeeSafe local cannot hold C state). */
 void wait_floor_until(struct waitqueue *wq, bool (*cond)(void *), void *arg)
 {
     wait_event(wq, cond(arg));

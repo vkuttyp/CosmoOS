@@ -1,0 +1,11 @@
+// The crash test crash-cee (roadmap 2.0 SA1; make test-crash-cee): a CeeSafe bounds check that fails on purpose. A
+// CRASH_TEST=5 kernel calls indexPast with an index one past the table, from C through a volatile so that neither
+// compiler can see it; CeeSafe's check stops the kernel through ceesafe_panic (kernel/ceesafe/ceesafe_panic.c), and the harness
+// requires this file and the line marked below in the panic report.
+
+/// The table's entry `i`; the check on `table[i]` is what crash-cee makes fail.
+@export("crash_cee_index")
+fn indexPast(i: usize) -> u8 {
+    let table: [u8; 4] = [1, 2, 3, 4];
+    return table[i]; // crash-cee: the bounds check that fails
+}

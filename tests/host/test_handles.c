@@ -11,7 +11,7 @@
  * handle counts it leaves, which releases, flushes and epoll notices ran --
  * is a line, and the lines' FNV-1a digest is recorded below. This is the
  * differential test of roadmap 2.0 SA2: an implementation of this layer in
- * Nova must give the same digest before the C is deleted.
+ * CeeSafe must give the same digest before the C is deleted.
  * HANDLES_TRACE_DUMP=1 prints the lines.
  */
 

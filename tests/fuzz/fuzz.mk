@@ -42,9 +42,9 @@ FUZZ_LINUX_SRCS   := tests/fuzz/fuzz_linux.c compat/linux/convert.c $(FUZZ_COMMO
 FUZZ_VIRTQ_SRCS   := tests/fuzz/fuzz_virtq.c drivers/virtio/virtqueue.c $(FUZZ_COMMON)
 FUZZ_LZ4_SRCS     := tests/fuzz/fuzz_lz4.c kernel/core/lz4.c $(FUZZ_DRIVER)
 FUZZ_USB_DESC_SRCS := tests/fuzz/fuzz_usb_desc.c drivers/usb/usb_desc.c $(FUZZ_COMMON)
-FUZZ_FBVALID_SRCS := tests/fuzz/fuzz_fbvalid.c kernel/core/fbvalid.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c $(FUZZ_COMMON)
-FUZZ_CPUTIME_SRCS := tests/fuzz/fuzz_cputime.c kernel/process/cputime.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c $(FUZZ_DRIVER)
-FUZZ_GPT_SRCS := tests/fuzz/fuzz_gpt.c kernel/block/gpt.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c $(FUZZ_DRIVER)
+FUZZ_FBVALID_SRCS := tests/fuzz/fuzz_fbvalid.c kernel/core/fbvalid.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
+FUZZ_CPUTIME_SRCS := tests/fuzz/fuzz_cputime.c kernel/process/cputime.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_DRIVER)
+FUZZ_GPT_SRCS := tests/fuzz/fuzz_gpt.c kernel/block/gpt.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_DRIVER)
 FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
@@ -59,7 +59,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel/security/chacha20.c \
 	kernel/security/sha512.c \
 	kernel/security/blake2b.c \
-	kernel/core/crc32c.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c kernel/memory/slab.c kernel/memory/kmalloc.c $(FUZZ_COMMON)
+	kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c kernel/memory/slab.c kernel/memory/kmalloc.c $(FUZZ_COMMON)
 
 # The network stack on the host (docs/verification/design.md, "The network
 # targets"): the protocol layers unchanged, over tests/fuzz/shim_net.c.
@@ -79,32 +79,32 @@ FUZZ_TARGETS := $(FUZZ_OUT)/fuzz_modelf $(FUZZ_OUT)/fuzz_elf $(FUZZ_OUT)/fuzz_pk
 	$(FUZZ_OUT)/fuzz_virtq $(FUZZ_OUT)/fuzz_cosmofs $(FUZZ_OUT)/fuzz_lz4 $(FUZZ_OUT)/fuzz_usb_desc $(FUZZ_OUT)/fuzz_fbvalid $(FUZZ_OUT)/fuzz_gpt $(FUZZ_OUT)/fuzz_cputime \
 	$(FUZZ_OUT)/fuzz_net_frame $(FUZZ_OUT)/fuzz_tcp_segments $(FUZZ_OUT)/fuzz_dhcp_dns $(FUZZ_OUT)/fuzz_net_config
 
-$(FUZZ_OUT)/fuzz_gpt: $(call src_paths,$(FUZZ_GPT_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_gpt: $(call src_paths,$(FUZZ_GPT_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(call src_paths,$(FUZZ_GPT_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_cputime: $(call src_paths,$(FUZZ_CPUTIME_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_cputime: $(call src_paths,$(FUZZ_CPUTIME_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(call src_paths,$(FUZZ_CPUTIME_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_fbvalid: $(call src_paths,$(FUZZ_FBVALID_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_fbvalid: $(call src_paths,$(FUZZ_FBVALID_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(call src_paths,$(FUZZ_FBVALID_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_modelf: $(call src_paths,$(FUZZ_MODELF_SRCS)) $(ROOT)/tests/host/modelf_image.h | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_modelf: $(call src_paths,$(FUZZ_MODELF_SRCS)) $(ROOT)/tests/host/modelf_image.h | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DMODELF_HOST_TEST=1 $(call src_paths,$(FUZZ_MODELF_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_elf: $(call src_paths,$(FUZZ_ELF_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_elf: $(call src_paths,$(FUZZ_ELF_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DELF_HOST_TEST=1 $(call src_paths,$(FUZZ_ELF_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_pkg: $(call src_paths,$(FUZZ_PKG_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_pkg: $(call src_paths,$(FUZZ_PKG_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) -std=c11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
@@ -112,27 +112,27 @@ $(FUZZ_OUT)/fuzz_pkg: $(call src_paths,$(FUZZ_PKG_SRCS)) | $(NOVA_STAMP)
 		$(if $(filter libfuzzer,$(FUZZ_ENGINE)),-fsanitize=fuzzer,) \
 		$(call src_paths,$(FUZZ_PKG_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_linux: $(call src_paths,$(FUZZ_LINUX_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_linux: $(call src_paths,$(FUZZ_LINUX_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -I$(ROOT)/compat/linux $(call src_paths,$(FUZZ_LINUX_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_lz4: $(call src_paths,$(FUZZ_LZ4_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_lz4: $(call src_paths,$(FUZZ_LZ4_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(call src_paths,$(FUZZ_LZ4_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_virtq: $(call src_paths,$(FUZZ_VIRTQ_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_virtq: $(call src_paths,$(FUZZ_VIRTQ_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -I$(ROOT)/drivers/include $(call src_paths,$(FUZZ_VIRTQ_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_usb_desc: $(call src_paths,$(FUZZ_USB_DESC_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_usb_desc: $(call src_paths,$(FUZZ_USB_DESC_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -I$(ROOT)/drivers/include $(call src_paths,$(FUZZ_USB_DESC_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_cosmofs: $(call src_paths,$(FUZZ_COSMOFS_SRCS)) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_cosmofs: $(call src_paths,$(FUZZ_COSMOFS_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -I$(ROOT)/kernel-services/filesystem/cosmofs \
@@ -140,22 +140,22 @@ $(FUZZ_OUT)/fuzz_cosmofs: $(call src_paths,$(FUZZ_COSMOFS_SRCS)) | $(NOVA_STAMP)
 
 FUZZ_NET_HDRS := $(ROOT)/tests/fuzz/shim_net.h $(ROOT)/tests/fuzz/netpkt.h
 
-$(FUZZ_OUT)/fuzz_net_frame: $(call src_paths,$(FUZZ_NET_FRAME_SRCS)) $(FUZZ_NET_HDRS) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_net_frame: $(call src_paths,$(FUZZ_NET_FRAME_SRCS)) $(FUZZ_NET_HDRS) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(call src_paths,$(FUZZ_NET_FRAME_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_tcp_segments: $(call src_paths,$(FUZZ_TCP_SEGMENTS_SRCS)) $(FUZZ_NET_HDRS) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_tcp_segments: $(call src_paths,$(FUZZ_TCP_SEGMENTS_SRCS)) $(FUZZ_NET_HDRS) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DTCP_HOST_TEST=1 $(call src_paths,$(FUZZ_TCP_SEGMENTS_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_net_config: $(call src_paths,$(FUZZ_NET_CONFIG_SRCS)) $(FUZZ_NET_HDRS) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_net_config: $(call src_paths,$(FUZZ_NET_CONFIG_SRCS)) $(FUZZ_NET_HDRS) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DFW_HOST_TEST=1 $(call src_paths,$(FUZZ_NET_CONFIG_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
-$(FUZZ_OUT)/fuzz_dhcp_dns: $(call src_paths,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_NET_HDRS) | $(NOVA_STAMP)
+$(FUZZ_OUT)/fuzz_dhcp_dns: $(call src_paths,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_NET_HDRS) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DTAPSVC_HOST_TEST=1 $(call src_paths,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_LDFLAGS) -o $@

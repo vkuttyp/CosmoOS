@@ -1,14 +1,14 @@
-// Is this framebuffer description one we may write to? (kernel/include/kernel/bootinfo.h), in Nova (roadmap 2.0
-// SA1's offset for crash-nova's C hook, and one of SA5's parsers of untrusted input: the loader reports what the
+// Is this framebuffer description one we may write to? (kernel/include/kernel/bootinfo.h), in CeeSafe (roadmap 2.0
+// SA1's offset for crash-cee's C hook, and one of SA5's parsers of untrusted input: the loader reports what the
 // firmware told it). Everything the kernel later does to the display -- every pixel written by the console sink -- is
 // bounded by the answer this file gives, so it is a pure function of the boot fields: it compiles into the kernel, the
 // host test (tests/host/test_fbvalid.c) and the fuzz target (tests/fuzz/fuzz_fbvalid.c). The failure this prevents is
 // writing outside the mapping on someone else's firmware, the kind of bug a machine with no serial port cannot report.
 //
-// Nova's C6 wrote this port (its docs/cosmoos/c6-report.md) and held it to the C original's host test and fuzz target
+// CeeSafe's C6 wrote this port (its docs/cosmoos/c6-report.md) and held it to the C original's host test and fuzz target
 // and a differential test, 20,000 cases with no mismatch, before the C was deleted. The boot protocol's structs are
-// imported from CosmoOS's own headers: Nova names the fields it reads and writes, and the C compiler checks each of
-// them against the header. Where the C relied on a sum wrapping (`fb_phys + fb_size < fb_phys`), the Nova asks the
+// imported from CosmoOS's own headers: CeeSafe names the fields it reads and writes, and the C compiler checks each of
+// them against the header. Where the C relied on a sum wrapping (`fb_phys + fb_size < fb_phys`), the CeeSafe asks the
 // question without wrapping.
 
 @header("kernel/bootinfo.h")

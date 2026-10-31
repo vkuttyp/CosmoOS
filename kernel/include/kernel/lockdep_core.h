@@ -20,9 +20,9 @@
  * first 320 before callback classes existed, and 382 of 384 when the 38
  * completion classes arrived (2026-10-07). At 512, main's debug boots
  * peaked at about 500, past the 90% warning, and the self-test
- * nova-kcore's few classes took them to 506-507; a later lock of the
+ * cee-kcore's few classes took them to 506-507; a later lock of the
  * boot (lxtest's 'sigsuspend', x86-64) then overflowed the table
- * (2026-10-29; docs/audit/2026-10-29-nova-kcore-report.md). */
+ * (2026-10-29; docs/audit/2026-10-29-cee-kcore-report.md). */
 #define LOCKDEP_MAX_CLASSES    640u
 #define LOCKDEP_SUBCLASSES     5u   /* 0..4: a chain of EPOLL_MAX_NESTS (5) epoll sets wakes at subclasses 0..4 */
 #define LOCKDEP_MAX_NODES      (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)

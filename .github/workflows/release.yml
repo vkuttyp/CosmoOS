@@ -310,9 +310,9 @@ jobs:
             for f in sets/release-$arch-a/cosmoos-*; do cp "$f" dist/; done
             cat sets/release-$arch-a/SHA256SUMS >> dist/SHA256SUMS
           done
-          # The source tarball (make dist): the generated C beside each .nova
+          # The source tarball (make dist): the generated C beside each .cee
           # source, so a build from it, a self-hosted one included, needs no
-          # novac (Nova's ADR 0023). In the signed SHA256SUMS with the sets.
+          # ceesafec (CeeSafe's ADR 0023). In the signed SHA256SUMS with the sets.
           python3 scripts/dist.py --out dist
           (cd dist && sha256sum cosmoos-*-src.tar.gz >> SHA256SUMS)
           (cd dist && sha256sum -c SHA256SUMS)

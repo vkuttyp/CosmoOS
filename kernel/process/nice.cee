@@ -1,7 +1,7 @@
-// nice.nova - Nice values in Nova: the source of kernel/process/nice.c, which `make nova` generates
-// (docs/kernel/process/design.md, "Nice values"; scripts/nova-gen.py). The rules of getpriority(2) and
+// nice.cee - Nice values in CeeSafe: the source of kernel/process/nice.c, which `make cee` generates
+// (docs/kernel/process/design.md, "Nice values"; scripts/cee-gen.py). The rules of getpriority(2) and
 // setpriority(2): the range, who may set a process's value and how low, and how a group's or a user's outcome is
-// reported. The API and the structs are kernel/include/kernel/nice.h, imported (Nova's type-system.md §31). The
+// reported. The API and the structs are kernel/include/kernel/nice.h, imported (CeeSafe's type-system.md §31). The
 // caller holds the target's lock, a spin lock: nothing here allocates, blocks or panics on any input, and `unsafe`
 // appears only where nice.h's pointers become references.
 

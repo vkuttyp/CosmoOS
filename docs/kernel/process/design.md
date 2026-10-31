@@ -1078,12 +1078,12 @@ clamps there, as Linux accepts "never". `ITIMER_VIRTUAL` and
 ### CPU time
 
 `kernel/process/cpu_account.c`, with the arithmetic and the CPU-time
-timers' state machine in Nova (`kernel/process/cputime.nova`, from which `make nova` generates
+timers' state machine in CeeSafe (`kernel/process/cputime.cee`, from which `make cee` generates
 `kernel/process/cputime.c`; the API and structs are
 `kernel/include/kernel/cputime.h`). Roadmap 1.2 A5's first PR;
-backlog LX-14. Do not edit `cputime.c`: change `cputime.nova` and run
-`make nova` (`docs/build/design.md`, "Nova sources"). A failed Nova check, which no input
-reaches (every sum saturates), would be a kernel panic naming the Nova
+backlog LX-14. Do not edit `cputime.c`: change `cputime.cee` and run
+`make cee` (`docs/build/design.md`, "CeeSafe sources"). A failed CeeSafe check, which no input
+reaches (every sum saturates), would be a kernel panic naming the CeeSafe
 line.
 
 - **The measure.** A thread's run time is exact: the scheduler charges
@@ -1134,8 +1134,8 @@ line.
 ### Nice values
 
 A process's nice value, `nice` in `struct process`, from -20 (the most
-favoured) to 19, 0 by default. The rules are Nova's
-(`kernel/process/nice.nova`, from which `make nova` generates
+favoured) to 19, 0 by default. The rules are CeeSafe's
+(`kernel/process/nice.cee`, from which `make cee` generates
 `kernel/process/nice.c`; the API and structs are
 `kernel/include/kernel/nice.h`); the walks, the locks and the system
 calls are C. Roadmap 1.2 A5's second PR; backlog LX-13. Linux's rules

@@ -53,7 +53,7 @@ which ready thread runs next, how long, what a tick does. The one
 policy is fixed priority over 64 levels: round-robin with a fixed time
 slice inside every level but `SCHED_PRIO_DEFAULT`, which shares the CPU
 by weight from the nice value (the fair level: `fair.c`, generated from
-`fair.nova`; `design.md`, "The fair level", invariant S35). Deadlines,
+`fair.cee`; `design.md`, "The fair level", invariant S35). Deadlines,
 real-time classes and interactivity are not implemented.
 
 ## 4. Responsibilities
@@ -79,7 +79,7 @@ real-time classes and interactivity are not implemented.
 - CPU selection at creation: the least-loaded CPU in the affinity mask.
   No periodic rebalancing yet.
 
-**Synchronisation** (`wait.nova` with `wait_floor.c`, `mutex.nova`, `semaphore.nova`, `completion.nova`)
+**Synchronisation** (`wait.cee` with `wait_floor.c`, `mutex.cee`, `semaphore.cee`, `completion.cee`)
 - Wait queues with a lost-wakeup-free `wait_event()` protocol.
 - Mutex (sleeping lock, owner tracked, not recursive), counting
   semaphore, completion (one-shot broadcast), all built on wait queues.

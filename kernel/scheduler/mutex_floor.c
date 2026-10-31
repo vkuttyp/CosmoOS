@@ -1,11 +1,11 @@
 /*
- * mutex_floor.c - The C under kernel/scheduler/mutex.nova (roadmap 2.0 SA3).
+ * mutex_floor.c - The C under kernel/scheduler/mutex.cee (roadmap 2.0 SA3).
  *
- * The mutex and its priority inheritance are Nova (mutex.nova, generated
+ * The mutex and its priority inheritance are CeeSafe (mutex.cee, generated
  * into mutex.c and kernel/include/kernel/mutex_types.h). What stays here is
  * panic's and WARN's formatted messages, the interrupt and might-sleep
  * checks, which read the CPU's fields, and the module exports. It also
- * checks the constants mutex.nova copies.
+ * checks the constants mutex.cee copies.
  */
 
 #include <kernel/lockdep.h>
@@ -16,9 +16,9 @@
 #include <kernel/percpu.h>
 #include <kernel/thread.h>
 
-_Static_assert(LOCKDEP_KIND_MUTEX == 1u && SCHED_PRIO_COUNT == 64, "mutex.nova's constants");
+_Static_assert(LOCKDEP_KIND_MUTEX == 1u && SCHED_PRIO_COUNT == 64, "mutex.cee's constants");
 
-/* Declared for mutex.nova only; not part of mutex.h's interface. */
+/* Declared for mutex.cee only; not part of mutex.h's interface. */
 void mutex_floor_check_lock(const struct mutex *m, uintptr_t ip);
 void mutex_floor_recursive(const struct mutex *m, const struct thread *cur);
 void mutex_floor_bad_unlock(const struct mutex *m, const struct thread *cur);

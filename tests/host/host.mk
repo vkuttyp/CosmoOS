@@ -12,7 +12,7 @@ HOST_CFLAGS := \
 	-DCONFIG_DEBUG=1 -DCONFIG_SELFTEST=0 -DCONFIG_CRASH_TEST=0 -DCONFIG_FAULTINJECT=0 -DCONFIG_PERCPU_WARN=0 -DCONFIG_SCHED_CHAOS=0 \
 	-I$(ROOT)/tests/host/shim \
 	-I$(ROOT)/tests/host \
-	$(NOVA_CFLAGS) \
+	$(CEE_CFLAGS) \
 	-I$(ROOT)/kernel/include \
 	-I$(ROOT)/kernel/memory \
 	-I$(ROOT)/boot/protocol
@@ -27,7 +27,7 @@ HOST_COMMON_SRCS := \
 HOST_BUDDY_SRCS := $(HOST_COMMON_SRCS) tests/host/test_buddy.c
 HOST_SLAB_SRCS  := $(HOST_COMMON_SRCS) kernel/memory/slab.c kernel/memory/kmalloc.c tests/host/test_slab.c
 HOST_CRYPTO_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c kernel/security/blake2b.c \
-	kernel/core/crc32c.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_crypto.c
+	kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_crypto.c
 HOST_RELSIG_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c userland/system/relsig.c tests/host/test_relsig.c
 HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c tests/host/test_modelf.c
 HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) tests/host/test_cosmofs.c
@@ -48,92 +48,92 @@ HOST_RELOC_A64_SRCS := $(HOST_COMMON_SRCS) kernel/arch/aarch64/modreloc.c tests/
 HOST_VIRTQ_SRCS := $(HOST_COMMON_SRCS) drivers/virtio/virtqueue.c tests/host/test_virtq.c
 HOST_CRED_SRCS := $(HOST_COMMON_SRCS) kernel/process/cred.c tests/host/test_cred.c
 HOST_QUIESCE_SRCS := $(HOST_COMMON_SRCS) tests/host/test_quiesce.c
-HOST_SYNC_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/wait.c kernel/scheduler/wait_floor.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c kernel/scheduler/completion.c kernel/scheduler/completion_floor.c kernel/scheduler/semaphore.c \
+HOST_SYNC_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/wait.c kernel/scheduler/wait_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c kernel/scheduler/completion.c kernel/scheduler/completion_floor.c kernel/scheduler/semaphore.c \
 	kernel/scheduler/mutex.c kernel/scheduler/mutex_floor.c tests/host/sync_baton.c tests/host/sync_sched.c tests/host/test_sync.c
 HOST_LOCKDEP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockdep.c
 HOST_LOCKUP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockup.c
-HOST_FBVALID_SRCS := $(HOST_COMMON_SRCS) kernel/core/fbvalid.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_fbvalid.c
+HOST_FBVALID_SRCS := $(HOST_COMMON_SRCS) kernel/core/fbvalid.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_fbvalid.c
 HOST_DISPLAY_SRCS := $(HOST_COMMON_SRCS) boot/uefi/display_pick.c tests/host/test_display.c
-HOST_GPT_SRCS := $(HOST_COMMON_SRCS) kernel/block/gpt.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c kernel/core/cmdline.c tests/host/test_gpt.c
-HOST_CPUTIME_SRCS := $(HOST_COMMON_SRCS) kernel/process/cputime.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_cputime.c
-HOST_NICE_SRCS := $(HOST_COMMON_SRCS) kernel/process/nice.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_nice.c
-HOST_FAIR_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/fair.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_fair.c
+HOST_GPT_SRCS := $(HOST_COMMON_SRCS) kernel/block/gpt.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c kernel/core/cmdline.c tests/host/test_gpt.c
+HOST_CPUTIME_SRCS := $(HOST_COMMON_SRCS) kernel/process/cputime.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cputime.c
+HOST_NICE_SRCS := $(HOST_COMMON_SRCS) kernel/process/nice.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_nice.c
+HOST_FAIR_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/fair.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_fair.c
 HOST_UPBE_SRCS := $(HOST_COMMON_SRCS) userland/system/upgrade_be.c tests/host/test_upgrade_be.c
-HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/object_floor.c kernel/object/handle.c kernel/object/handle_floor.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c tests/host/test_handles.c
+HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/object_floor.c kernel/object/handle.c kernel/object/handle_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_handles.c
 HOST_PCI_BAR_SRCS := $(HOST_COMMON_SRCS) tests/host/test_pci_bar.c
 HOST_JITTER_SRCS := $(HOST_COMMON_SRCS) kernel/core/jitter.c tests/host/test_jitter.c
 
 HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_keyslot $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_cputime $(HOST_OUT)/test_nice $(HOST_OUT)/test_fair $(HOST_OUT)/test_upgrade_be $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter $(HOST_OUT)/test_handles $(HOST_OUT)/test_sync
 
-$(HOST_OUT)/test_fbvalid: $(call src_paths,$(HOST_FBVALID_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_fbvalid: $(call src_paths,$(HOST_FBVALID_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
 # The loader's display mode decisions: boot/uefi, which the kernel's
 # include path does not reach.
-$(HOST_OUT)/test_display: $(call src_paths,$(HOST_DISPLAY_SRCS)) $(ROOT)/boot/uefi/display_pick.h $(ROOT)/boot/uefi/efi.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_display: $(call src_paths,$(HOST_DISPLAY_SRCS)) $(ROOT)/boot/uefi/display_pick.h $(ROOT)/boot/uefi/efi.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/boot/uefi $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_jitter: $(call src_paths,$(HOST_JITTER_SRCS)) $(ROOT)/kernel/include/kernel/jitter.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_jitter: $(call src_paths,$(HOST_JITTER_SRCS)) $(ROOT)/kernel/include/kernel/jitter.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -DJITTER_HOST_TEST=1 $(call src_paths,$(HOST_JITTER_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_pci_bar: $(call src_paths,$(HOST_PCI_BAR_SRCS)) $(ROOT)/kernel/include/kernel/pci_bar.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_pci_bar: $(call src_paths,$(HOST_PCI_BAR_SRCS)) $(ROOT)/kernel/include/kernel/pci_bar.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(call src_paths,$(HOST_PCI_BAR_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_upgrade_be: $(call src_paths,$(HOST_UPBE_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_upgrade_be: $(call src_paths,$(HOST_UPBE_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_gpt: $(call src_paths,$(HOST_GPT_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_gpt: $(call src_paths,$(HOST_GPT_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -DCMDLINE_HOST_TEST=1 $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_cputime: $(call src_paths,$(HOST_CPUTIME_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_cputime: $(call src_paths,$(HOST_CPUTIME_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_nice: $(call src_paths,$(HOST_NICE_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_nice: $(call src_paths,$(HOST_NICE_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_fair: $(call src_paths,$(HOST_FAIR_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_fair: $(call src_paths,$(HOST_FAIR_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_buddy: $(call src_paths,$(HOST_BUDDY_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_buddy: $(call src_paths,$(HOST_BUDDY_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_slab: $(call src_paths,$(HOST_SLAB_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_slab: $(call src_paths,$(HOST_SLAB_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_crypto: $(call src_paths,$(HOST_CRYPTO_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_crypto: $(call src_paths,$(HOST_CRYPTO_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
 # relsig.c reads the key ring with opendir: POSIX, which glibc hides under -std=c11.
-$(HOST_OUT)/test_relsig: $(call src_paths,$(HOST_RELSIG_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_relsig: $(call src_paths,$(HOST_RELSIG_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_modelf: $(call src_paths,$(HOST_MODELF_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_modelf: $(call src_paths,$(HOST_MODELF_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -DMODELF_HOST_TEST=1 $^ $(HOST_LDFLAGS) -o $@
@@ -154,7 +154,7 @@ $(HOST_OUT)/test_modelf: $(call src_paths,$(HOST_MODELF_SRCS)) | $(NOVA_STAMP)
 #
 -include $(HOST_OUT)/test_libc.d
 
-$(HOST_OUT)/test_libc: $(call src_paths,$(HOST_LIBC_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_libc: $(call src_paths,$(HOST_LIBC_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) -std=c11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
@@ -162,88 +162,88 @@ $(HOST_OUT)/test_libc: $(call src_paths,$(HOST_LIBC_SRCS)) | $(NOVA_STAMP)
 		-MMD -MF $@.d -MT $@ \
 		-DLIBC_HOST_TEST=1 $< $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_pkg: $(call src_paths,$(HOST_PKG_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_pkg: $(call src_paths,$(HOST_PKG_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) -std=c11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 		-Wall -Wextra -Werror -Wno-missing-prototypes -I$(ROOT)/pkg $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_linux: $(call src_paths,$(HOST_LINUX_SRCS)) | $(NOVA_STAMP)
+$(HOST_OUT)/test_linux: $(call src_paths,$(HOST_LINUX_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/compat/linux $(call src_paths,$(HOST_LINUX_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_fdt: $(call src_paths,$(HOST_FDT_SRCS)) $(ROOT)/tools/fdt/fdt.h $(ROOT)/kernel/include/uapi/cosmo/hv_machine.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_fdt: $(call src_paths,$(HOST_FDT_SRCS)) $(ROOT)/tools/fdt/fdt.h $(ROOT)/kernel/include/uapi/cosmo/hv_machine.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/tools/fdt $(call src_paths,$(HOST_FDT_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_vblk_dev: $(call src_paths,$(HOST_VBLK_SRCS)) $(ROOT)/userland/system/vblk.h $(ROOT)/userland/system/vq.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_vblk_dev: $(call src_paths,$(HOST_VBLK_SRCS)) $(ROOT)/userland/system/vblk.h $(ROOT)/userland/system/vq.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(call src_paths,$(HOST_VBLK_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_vnet_dev: $(call src_paths,$(HOST_VNET_SRCS)) $(ROOT)/userland/system/vnet.h $(ROOT)/userland/system/vq.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_vnet_dev: $(call src_paths,$(HOST_VNET_SRCS)) $(ROOT)/userland/system/vnet.h $(ROOT)/userland/system/vq.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(call src_paths,$(HOST_VNET_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_hv: $(call src_paths,$(HOST_HV_SRCS)) $(ROOT)/kernel/arch/x86_64/include/x86/svm.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_hv: $(call src_paths,$(HOST_HV_SRCS)) $(ROOT)/kernel/arch/x86_64/include/x86/svm.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel/arch/x86_64/include $(call src_paths,$(HOST_HV_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_vmx: $(call src_paths,$(HOST_VMX_SRCS)) $(ROOT)/kernel/arch/x86_64/include/x86/vmx.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_vmx: $(call src_paths,$(HOST_VMX_SRCS)) $(ROOT)/kernel/arch/x86_64/include/x86/vmx.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel/arch/x86_64/include $(call src_paths,$(HOST_VMX_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_hv_s2: $(call src_paths,$(HOST_HV_S2_SRCS)) $(ROOT)/kernel/arch/aarch64/include/aarch64/hv_s2.h $(ROOT)/kernel/include/arch/hv_s2_core.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_hv_s2: $(call src_paths,$(HOST_HV_S2_SRCS)) $(ROOT)/kernel/arch/aarch64/include/aarch64/hv_s2.h $(ROOT)/kernel/include/arch/hv_s2_core.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel/arch/aarch64/include $(call src_paths,$(HOST_HV_S2_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_reloc_aarch64: $(call src_paths,$(HOST_RELOC_A64_SRCS)) $(ROOT)/kernel/arch/aarch64/include/aarch64/modreloc.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_reloc_aarch64: $(call src_paths,$(HOST_RELOC_A64_SRCS)) $(ROOT)/kernel/arch/aarch64/include/aarch64/modreloc.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel/arch/aarch64/include $(call src_paths,$(HOST_RELOC_A64_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_virtq: $(call src_paths,$(HOST_VIRTQ_SRCS)) $(ROOT)/drivers/include/drivers/virtio.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_virtq: $(call src_paths,$(HOST_VIRTQ_SRCS)) $(ROOT)/drivers/include/drivers/virtio.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/drivers/include $(call src_paths,$(HOST_VIRTQ_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_handles: $(call src_paths,$(HOST_HANDLES_SRCS)) $(ROOT)/kernel/include/kernel/object.h $(ROOT)/kernel/include/kernel/handle.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_handles: $(call src_paths,$(HOST_HANDLES_SRCS)) $(ROOT)/kernel/include/kernel/object.h $(ROOT)/kernel/include/kernel/handle.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(call src_paths,$(HOST_HANDLES_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_cred: $(call src_paths,$(HOST_CRED_SRCS)) $(ROOT)/kernel/include/kernel/cred.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_cred: $(call src_paths,$(HOST_CRED_SRCS)) $(ROOT)/kernel/include/kernel/cred.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(call src_paths,$(HOST_CRED_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_sync: $(call src_paths,$(HOST_SYNC_SRCS)) $(ROOT)/tests/host/sync_sched.h $(ROOT)/kernel/include/kernel/wait.h $(ROOT)/kernel/include/kernel/mutex.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_sync: $(call src_paths,$(HOST_SYNC_SRCS)) $(ROOT)/tests/host/sync_sched.h $(ROOT)/kernel/include/kernel/wait.h $(ROOT)/kernel/include/kernel/mutex.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -pthread $(call src_paths,$(HOST_SYNC_SRCS)) $(HOST_LDFLAGS) -pthread -o $@
 
-$(HOST_OUT)/test_quiesce: $(call src_paths,$(HOST_QUIESCE_SRCS)) $(ROOT)/kernel/include/kernel/quiesce_core.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_quiesce: $(call src_paths,$(HOST_QUIESCE_SRCS)) $(ROOT)/kernel/include/kernel/quiesce_core.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -pthread $(call src_paths,$(HOST_QUIESCE_SRCS)) $(HOST_LDFLAGS) -pthread -o $@
 
-$(HOST_OUT)/test_lockdep: $(call src_paths,$(HOST_LOCKDEP_SRCS)) $(ROOT)/kernel/include/kernel/lockdep_core.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_lockdep: $(call src_paths,$(HOST_LOCKDEP_SRCS)) $(ROOT)/kernel/include/kernel/lockdep_core.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(call src_paths,$(HOST_LOCKDEP_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_lockup: $(call src_paths,$(HOST_LOCKUP_SRCS)) $(ROOT)/kernel/include/kernel/lockup_core.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_lockup: $(call src_paths,$(HOST_LOCKUP_SRCS)) $(ROOT)/kernel/include/kernel/lockup_core.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(call src_paths,$(HOST_LOCKUP_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_chacha20: $(call src_paths,$(HOST_CHACHA_SRCS)) $(ROOT)/kernel/include/kernel/chacha20.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_chacha20: $(call src_paths,$(HOST_CHACHA_SRCS)) $(ROOT)/kernel/include/kernel/chacha20.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
@@ -255,7 +255,7 @@ $(HOST_OUT)/test_keyslot: $(call src_paths,$(HOST_KEYSLOT_SRCS)) $(ROOT)/userlan
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter-out %/secret.c,$(filter %.c,$^)) $(HOST_LDFLAGS) -o $@   # the test includes secret.c
 
-$(HOST_OUT)/test_lz4: $(call src_paths,$(HOST_LZ4_SRCS)) $(ROOT)/kernel/include/kernel/lz4.h | $(NOVA_STAMP)
+$(HOST_OUT)/test_lz4: $(call src_paths,$(HOST_LZ4_SRCS)) $(ROOT)/kernel/include/kernel/lz4.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
@@ -359,17 +359,17 @@ host-test-lockdep-tsan: $(HOST_OUT)/test_lockdep_threads_tsan
 QUIESCE_TSAN_CFLAGS = $(filter-out $(HOST_LDFLAGS) -fno-sanitize-recover=undefined,$(HOST_CFLAGS)) -fsanitize=thread -pthread
 QUIESCE_TSAN_DEPS = $(call src_paths,$(HOST_QUIESCE_SRCS)) $(ROOT)/kernel/include/kernel/quiesce_core.h
 
-$(HOST_OUT)/test_quiesce_tsan: $(QUIESCE_TSAN_DEPS) | $(NOVA_STAMP)
+$(HOST_OUT)/test_quiesce_tsan: $(QUIESCE_TSAN_DEPS) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(QUIESCE_TSAN_CFLAGS) $(call src_paths,$(HOST_QUIESCE_SRCS)) -o $@
 
-$(HOST_OUT)/test_quiesce_tsan_neg_q2: $(QUIESCE_TSAN_DEPS) | $(NOVA_STAMP)
+$(HOST_OUT)/test_quiesce_tsan_neg_q2: $(QUIESCE_TSAN_DEPS) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(QUIESCE_TSAN_CFLAGS) -DQUIESCE_MO_Q2=__ATOMIC_RELAXED $(call src_paths,$(HOST_QUIESCE_SRCS)) -o $@
 
-$(HOST_OUT)/test_quiesce_tsan_neg_w2: $(QUIESCE_TSAN_DEPS) | $(NOVA_STAMP)
+$(HOST_OUT)/test_quiesce_tsan_neg_w2: $(QUIESCE_TSAN_DEPS) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(QUIESCE_TSAN_CFLAGS) -DQUIESCE_MO_W2=__ATOMIC_RELAXED $(call src_paths,$(HOST_QUIESCE_SRCS)) -o $@
@@ -405,5 +405,5 @@ host-test-interrupt-tsan: $(HOST_OUT)/test_interrupt_tsan
 	$(Q)TSAN_OPTIONS=halt_on_error=1 $<
 
 # These rules' prerequisites run on past one line, so the generation is added here.
-$(HOST_OUT)/test_keyslot: | $(NOVA_STAMP)
-$(HOST_OUT)/test_cosmofs: | $(NOVA_STAMP)
+$(HOST_OUT)/test_keyslot: | $(CEE_STAMP)
+$(HOST_OUT)/test_cosmofs: | $(CEE_STAMP)

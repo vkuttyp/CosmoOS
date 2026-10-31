@@ -4,10 +4,10 @@ All interfaces are kernel-internal (**ABI stability: internal**); user
 space sees only handle integers through the system-call layer. Each
 entry follows constitution section 52.
 
-## Objects (`kernel/include/kernel/object.h`, `kernel/object/object.nova`)
+## Objects (`kernel/include/kernel/object.h`, `kernel/object/object.cee`)
 
-The functions below are written in Nova (`object.nova`; `make nova`
-generates `object.c` from it). `object_floor.c` keeps what Nova cannot say
+The functions below are written in CeeSafe (`object.cee`; `make cee`
+generates `object.c` from it). `object_floor.c` keeps what CeeSafe cannot say
 yet: calls through the type's function pointers (the release and the I/O
 operations), `panic`'s formatted message, and the `EXPORT_SYMBOL` lines.
 The C interface is unchanged.
@@ -197,17 +197,17 @@ module's type can be named after the module is gone. Raised by
   killed); `stat` reports `COSMO_DT_CHR`, mode 0620, one link. `buf` is
   kernel memory (the syscall layer bounces user data).
 
-## Handle tables (`kernel/include/kernel/handle.h`, `kernel/object/handle.nova`)
+## Handle tables (`kernel/include/kernel/handle.h`, `kernel/object/handle.cee`)
 
-The table and its functions are written in Nova (`handle.nova`). `make
-nova` generates `handle.c` and `kernel/include/kernel/handle_types.h`,
-which defines `struct handle_entry` and `struct handle_table` for C (Nova
-ADR 0029: a Nova struct that holds a `spinlock_t` and an array, which C
+The table and its functions are written in CeeSafe (`handle.cee`). `make
+ceesafe` generates `handle.c` and `kernel/include/kernel/handle_types.h`,
+which defines `struct handle_entry` and `struct handle_table` for C (CeeSafe
+ADR 0029: a CeeSafe struct that holds a `spinlock_t` and an array, which C
 embeds by value). `handle.h` includes it and checks that its table has
 `HANDLE_TABLE_SIZE` slots. `handle_floor.c` keeps the flush (a call through
 the type's function pointer), the last close's fence before it reads
 `watched`, and the assertion's panic, and checks the constants
-`handle.nova` copies. The C interface is unchanged.
+`handle.cee` copies. The C interface is unchanged.
 
 `struct handle_table`: spinlock, `HANDLE_TABLE_SIZE` (64) entries of
 `{ struct kobject *obj; unsigned rights; unsigned flags; }` with `NULL`

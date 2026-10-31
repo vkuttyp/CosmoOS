@@ -12,7 +12,7 @@
  * report. The CPU-time timers run on the samples: ITIMER_VIRTUAL on user
  * time, ITIMER_PROF on both.
  *
- * The functions are Nova's (kernel/process/cputime.c, generated); callers
+ * The functions are CeeSafe's (kernel/process/cputime.c, generated); callers
  * hold the lock that guards the structs (a process's `lock`).
  */
 

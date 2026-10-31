@@ -1,12 +1,12 @@
 /*
- * handle_floor.c - The C under kernel/object/handle.nova (roadmap 2.0 SA2).
+ * handle_floor.c - The C under kernel/object/handle.cee (roadmap 2.0 SA2).
  *
- * The handle table and its code are Nova (handle.nova, generated into
+ * The handle table and its code are CeeSafe (handle.cee, generated into
  * handle.c and kernel/include/kernel/handle_types.h). What stays here is
- * what Nova cannot express yet: the flush, a call through the object
- * type's function pointer (Nova type-system.md §31.1); the last close's
- * fence before it reads `watched`, which Nova has no fence for; and a
- * formatted panic. It also checks that the constants handle.nova copies
+ * what CeeSafe cannot express yet: the flush, a call through the object
+ * type's function pointer (CeeSafe type-system.md §31.1); the last close's
+ * fence before it reads `watched`, which CeeSafe has no fence for; and a
+ * formatted panic. It also checks that the constants handle.cee copies
  * are C's.
  */
 
@@ -16,11 +16,11 @@
 #include <kernel/object.h>
 #include <kernel/panic.h>
 
-_Static_assert(EPERM == 1 && EBADF == 9 && EBUSY == 16 && EMFILE == 24, "handle.nova's errno values");
+_Static_assert(EPERM == 1 && EBADF == 9 && EBUSY == 16 && EMFILE == 24, "handle.cee's errno values");
 _Static_assert(HANDLE_RIGHT_TRANSFER == 8u && COSMO_RIGHTS_SAME == 0u && HANDLE_FLAG_CLOEXEC == 1u,
-               "handle.nova's rights and flags");
+               "handle.cee's rights and flags");
 
-/* Declared for handle.nova only; not part of handle.h's interface. */
+/* Declared for handle.cee only; not part of handle.h's interface. */
 int handle_floor_flush(struct kobject *obj);
 void handle_floor_last_closed(struct kobject *obj);
 void handle_floor_fatal(const char *what);

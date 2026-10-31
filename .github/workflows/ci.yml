@@ -112,40 +112,40 @@ jobs:
         id: image
         run: scripts/ci-image.sh "ghcr.io/${{ github.repository_owner }}/cosmoos-ci"
 
-  # The kernel's Nova sources compile with the pinned novac and the negative
-  # sources are refused (docs/build/design.md, "Nova sources"), on the
+  # The kernel's CeeSafe sources compile with the pinned ceesafec and the negative
+  # sources are refused (docs/build/design.md, "CeeSafe sources"), on the
   # runner, with the release's Linux x64 archive verified against its
   # SHA-256. Every other job builds in the CI image, which has the same
-  # novac (ci/Dockerfile); `make reproducible` checks that a dist tarball
+  # ceesafec (ci/Dockerfile); `make reproducible` checks that a dist tarball
   # builds the same bytes with none.
-  nova:
-    name: Nova sources
+  ceesafe:
+    name: CeeSafe sources
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Install the pinned novac
+      - name: Install the pinned ceesafec
         env:
-          NOVAC_SHA256: 977472da73d96eea4a43230aa083820da6c85872690960960cf8eaf9882c193c   # novac-linux-x64.tar.gz of the pinned release
+          CEESAFEC_SHA256: 2e898a239f36fb7d0c39262d8ac59c98d8b98219e1fc4f0e4993136aec3e18cd   # ceesafec-linux-x64.tar.gz of the pinned release
         run: |
-          v=$(python3 scripts/nova-gen.py --pinned)
-          curl -fsSL -o novac.tar.gz "https://github.com/vkuttyp/Nova/releases/download/v$v/novac-linux-x64.tar.gz"
-          echo "$NOVAC_SHA256  novac.tar.gz" | sha256sum -c -
-          mkdir -p "$RUNNER_TEMP/novac" && tar -xzf novac.tar.gz -C "$RUNNER_TEMP/novac" && rm novac.tar.gz
-          echo "NOVAC=$RUNNER_TEMP/novac/novac" >> "$GITHUB_ENV"
+          v=$(python3 scripts/cee-gen.py --pinned)
+          curl -fsSL -o ceesafec.tar.gz "https://github.com/vkuttyp/CeeSafe/releases/download/v$v/ceesafec-linux-x64.tar.gz"
+          echo "$CEESAFEC_SHA256  ceesafec.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/ceesafec" && tar -xzf ceesafec.tar.gz -C "$RUNNER_TEMP/ceesafec" && rm ceesafec.tar.gz
+          echo "CEESAFEC=$RUNNER_TEMP/ceesafec/ceesafec" >> "$GITHUB_ENV"
 
-      - name: Every Nova source compiles, and the negative sources are refused
-        run: python3 scripts/nova-gen.py --out out/nova
+      - name: Every CeeSafe source compiles, and the negative sources are refused
+        run: python3 scripts/cee-gen.py --out out/cee
 
-  # Roadmap 2.0 SA1 (docs/roadmap-2.0.md, "The Nova rule"): how much of ring
-  # 0 and of CosmoOS's own userland is Nova (scripts/nova-share.py), and no
+  # Roadmap 2.0 SA1 (docs/roadmap-2.0.md, "The CeeSafe rule"): how much of ring
+  # 0 and of CosmoOS's own userland is CeeSafe (scripts/cee-share.py), and no
   # change adds C to convert to any tree: a pull request against the commit
   # it branched from, a push to main against the commit before it. On every
-  # run, like the Nova sources check.
-  nova-share:
-    name: nova-share
+  # run, like the CeeSafe sources check.
+  cee-share:
+    name: cee-share
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -154,7 +154,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: The Nova share, and no new C to convert
+      - name: The CeeSafe share, and no new C to convert
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE: ${{ github.event.before }}
@@ -166,7 +166,7 @@ jobs:
           else
             base=HEAD
           fi
-          python3 scripts/nova-share.py --gate "$base"
+          python3 scripts/cee-share.py --gate "$base"
 
   build-and-boot:
     name: build, boot, analyze (${{ matrix.arch }}, ${{ matrix.part }})
@@ -351,11 +351,11 @@ jobs:
         if: matrix.part == 'stress'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-stackprot
 
-      # A Nova bounds check failing on purpose must stop the kernel naming
-      # the Nova file and line (roadmap 2.0 SA1's crash-nova).
-      - name: Nova panic test
+      # A CeeSafe bounds check failing on purpose must stop the kernel naming
+      # the CeeSafe file and line (roadmap 2.0 SA1's crash-cee).
+      - name: CeeSafe panic test
         if: matrix.part == 'stress'
-        run: make ARCH=${{ matrix.arch }} BUILD=debug test-crash-nova
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-crash-cee
 
       # AArch64: a page mapped writable and executable on purpose must
       # not execute (SCTLR_EL1.WXN). A no-op on x86-64.

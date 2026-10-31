@@ -11,7 +11,7 @@
  * is the fair level (docs/kernel/scheduler/design.md, "The fair level";
  * roadmap 1.2 A5): its list is kept in virtual-run-time order, a thread's
  * run time counting 1024 / its nice value's weight, so each receives CPU
- * time in proportion to its weight. The arithmetic is Nova's
+ * time in proportion to its weight. The arithmetic is CeeSafe's
  * (kernel/include/kernel/fair.h, kernel/scheduler/fair.c, generated); the
  * lists are here. This is the whole policy; the mechanism in sched.c does
  * the rest.

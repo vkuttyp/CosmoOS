@@ -130,6 +130,6 @@ userland: $(USER_ELFS)
 
 -include $(USER_OBJS:.o=.d)
 
-# install_gpt.c includes the GPT code generated from kernel/block/gpt.nova, and Nova's runtime, and
-# blkid_crc32c.c the CRC-32C from kernel/core/crc32c.nova, from where the build generated them (build/nova.mk).
-$(foreach f,install_gpt blkid_crc32c,$(OUT)/userland/system/$(f).o $(OUT)/userland/system/$(f).analyzed): EXTRA_CFLAGS += -I$(NOVA_GEN) $(NOVA_CFLAGS)
+# install_gpt.c includes the GPT code generated from kernel/block/gpt.cee, and CeeSafe's runtime, and
+# blkid_crc32c.c the CRC-32C from kernel/core/crc32c.cee, from where the build generated them (build/cee.mk).
+$(foreach f,install_gpt blkid_crc32c,$(OUT)/userland/system/$(f).o $(OUT)/userland/system/$(f).analyzed): EXTRA_CFLAGS += -I$(CEE_GEN) $(CEE_CFLAGS)

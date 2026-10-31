@@ -1,8 +1,8 @@
 // Sleeping mutexes on a wait queue, with priority inheritance (kernel/include/kernel/mutex.h;
-// docs/kernel/scheduler/design.md), in Nova (roadmap 2.0 SA3). struct mutex is Nova's, generated into
-// kernel/include/kernel/mutex_types.h, which mutex.h includes (Nova ADR 0029, 0030), so MUTEX_INIT_AT and every caller
-// are unchanged; its wait queue is the C type wait.nova defines. The contended wait goes through wait_floor.c's
-// wait_floor_loop, since a wait entry is C state no Nova local may hold. mutex_floor.c keeps panic's and WARN's
+// docs/kernel/scheduler/design.md), in CeeSafe (roadmap 2.0 SA3). struct mutex is CeeSafe's, generated into
+// kernel/include/kernel/mutex_types.h, which mutex.h includes (CeeSafe ADR 0029, 0030), so MUTEX_INIT_AT and every caller
+// are unchanged; its wait queue is the C type wait.cee defines. The contended wait goes through wait_floor.c's
+// wait_floor_loop, since a wait entry is C state no CeeSafe local may hold. mutex_floor.c keeps panic's and WARN's
 // messages, the interrupt and might-sleep checks, and the module exports.
 //
 // The C this replaces is held to tests/host/test_sync.c's recorded trace.

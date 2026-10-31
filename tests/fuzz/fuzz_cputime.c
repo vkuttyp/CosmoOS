@@ -1,11 +1,11 @@
 /*
  * fuzz_cputime.c - CPU-time accounting (kernel/process/cputime.c, generated
- * from Nova) driven by arbitrary operations.
+ * from CeeSafe) driven by arbitrary operations.
  *
  * The input is a program: each step's first byte picks a tick (user or
  * system), a setitimer, a getitimer or a split, and the next eight bytes
- * are its operand. Checked after every step: no Nova check fails (a failed
- * one aborts through tests/host/nova_panic.c), the exact scaling agrees
+ * are its operand. Checked after every step: no CeeSafe check fails (a failed
+ * one aborts through tests/host/ceesafe_panic.c), the exact scaling agrees
  * with 128-bit arithmetic, a split adds up to the run time and never goes
  * below an earlier one, a disarmed timer reads 0 and never fires, and an
  * armed one never reads 0.

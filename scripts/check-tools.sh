@@ -28,17 +28,17 @@ need mcopy "install mtools"
 need qemu-system-x86_64 "install qemu"
 need "$python" "install python3"
 
-echo "Nova:"
+echo "CeeSafe:"
 root=$(cd "$(dirname "$0")/.." && pwd)
-if [ -f "$root/.nova-dist" ]; then
-    printf '  ok       a make dist tree: the generated C is here, no novac needed\n'
+if [ -f "$root/.cee-dist" ]; then
+    printf '  ok       a make dist tree: the generated C is here, no ceesafec needed\n'
 else
-    pinned=$("$python" "$root/scripts/nova-gen.py" --pinned)
-    novac=${NOVAC:-$(command -v novac 2>/dev/null || true)}
-    if [ -n "$novac" ] && [ "$("$novac" --version 2>/dev/null)" = "novac $pinned" ]; then
-        printf '  ok       novac %s (%s)\n' "$pinned" "$novac"
+    pinned=$("$python" "$root/scripts/cee-gen.py" --pinned)
+    ceesafec=${CEESAFEC:-$(command -v ceesafec 2>/dev/null || true)}
+    if [ -n "$ceesafec" ] && [ "$("$ceesafec" --version 2>/dev/null)" = "ceesafec $pinned" ]; then
+        printf '  ok       ceesafec %s (%s)\n' "$pinned" "$ceesafec"
     else
-        printf '  MISSING  novac %s - the build runs it: curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v%s sh (or set NOVAC)\n' "$pinned" "$pinned"
+        printf '  MISSING  ceesafec %s - the build runs it: curl -fsSL https://vkuttyp.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v%s sh (or set CEESAFEC)\n' "$pinned" "$pinned"
         status=1
     fi
 fi

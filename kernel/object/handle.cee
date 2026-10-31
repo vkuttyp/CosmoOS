@@ -1,8 +1,8 @@
-// The per-process handle table (kernel/include/kernel/handle.h; docs/kernel/object/), in Nova (roadmap 2.0 SA2). The
-// table is Nova's type: `struct handle_table` and `struct handle_entry` are defined here and generated into
-// kernel/include/kernel/handle_types.h, which handle.h includes, so C embeds the table by value as before (Nova ADR
+// The per-process handle table (kernel/include/kernel/handle.h; docs/kernel/object/), in CeeSafe (roadmap 2.0 SA2). The
+// table is CeeSafe's type: `struct handle_table` and `struct handle_entry` are defined here and generated into
+// kernel/include/kernel/handle_types.h, which handle.h includes, so C embeds the table by value as before (CeeSafe ADR
 // 0029). The table's spin lock (irqsave) protects every slot. handle_floor.c keeps a call through a function pointer
-// (the flush), the fenced last-close check, which Nova has no fence for, and the assertion's panic.
+// (the flush), the fenced last-close check, which CeeSafe has no fence for, and the assertion's panic.
 
 @header("kernel/spinlock.h", "kernel/object.h")
 extern "C" {

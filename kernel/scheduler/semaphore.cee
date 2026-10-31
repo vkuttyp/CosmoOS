@@ -1,7 +1,7 @@
-// Counting semaphores on a wait queue (kernel/include/kernel/semaphore.h), in Nova (roadmap 2.0 SA3). struct semaphore
-// is Nova's, generated into kernel/include/kernel/semaphore_types.h, which semaphore.h includes (Nova ADR 0029, 0030);
-// its wait queue is the C type that wait.nova defines. The wait goes through wait_floor.c's wait_event helper, since a
-// wait entry is C state no Nova local may hold.
+// Counting semaphores on a wait queue (kernel/include/kernel/semaphore.h), in CeeSafe (roadmap 2.0 SA3). struct semaphore
+// is CeeSafe's, generated into kernel/include/kernel/semaphore_types.h, which semaphore.h includes (CeeSafe ADR 0029, 0030);
+// its wait queue is the C type that wait.cee defines. The wait goes through wait_floor.c's wait_event helper, since a
+// wait entry is C state no CeeSafe local may hold.
 //
 // The C this replaces is held to tests/host/test_sync.c's recorded trace.
 

@@ -98,7 +98,7 @@ endif
 # CRASH_TEST=1 makes kernel_main fault on purpose after the self-tests so
 # the panic path and the harness's failure detection can be verified. The
 # other values: 2 W+X (test-wxn), 3 lockdep (test-crash), 4 a stack
-# overrun (test-stackprot), 5 a failed Nova bounds check (test-crash-nova).
+# overrun (test-stackprot), 5 a failed CeeSafe bounds check (test-crash-cee).
 # Never enable in a build you intend to run for real.
 CRASH_TEST ?= 0
 # COSMOFS_STOP=1 builds a kernel that stops a cosmofs rollback's switch

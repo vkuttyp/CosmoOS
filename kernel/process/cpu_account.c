@@ -5,7 +5,7 @@
  *
  * The process side: the tick's hook, the totals a report reads, a waited-for
  * child's time reaching its parent, and the timers' system-call entry
- * points. The arithmetic and the timers' state machine are Nova's
+ * points. The arithmetic and the timers' state machine are CeeSafe's
  * (kernel/process/cputime.c, generated), called under the process's lock.
  *
  * The tick samples the thread it interrupted: TICK_NS of user time if it

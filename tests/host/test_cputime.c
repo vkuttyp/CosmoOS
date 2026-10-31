@@ -1,6 +1,6 @@
 /*
  * test_cputime.c - CPU-time accounting (kernel/process/cputime.c, generated
- * from Nova) on the host: the tick's sample, ITIMER_VIRTUAL and ITIMER_PROF,
+ * from CeeSafe) on the host: the tick's sample, ITIMER_VIRTUAL and ITIMER_PROF,
  * the user/system split, and the exact scaling under it.
  */
 

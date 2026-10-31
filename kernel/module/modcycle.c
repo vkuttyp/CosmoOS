@@ -7,7 +7,7 @@
  * Two callers: the self-test module-cycle, on the cosmotest fixture, and
  * module_cycle_boot, which takes `module.cycle=<archive entry>:<count>
  * [:<hold ms>]` from the kernel command line so that a module built
- * outside this tree (Nova's C8 module, for one) can be cycled by the
+ * outside this tree (CeeSafe's C8 module, for one) can be cycled by the
  * kernel itself. The loader API stays unexported.
  */
 

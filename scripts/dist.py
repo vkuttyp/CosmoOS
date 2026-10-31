@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""dist.py -- a source tarball that builds with no Nova compiler (`make dist`; Nova's ADR 0023, roadmap 2.0's Nova
+"""dist.py -- a source tarball that builds with no CeeSafe compiler (`make dist`; CeeSafe's ADR 0023, roadmap 2.0's CeeSafe
 rule, point 7).
 
-The tree holds the kernel's .nova sources and not the C made from them: the build runs the pinned novac
-(build/nova.mk). A self-hosted CosmoOS has no novac, so it builds from this tarball, which carries the generated C
-beside each source, as the pinned novac makes it now (scripts/nova-gen.py), and two files the tree does not:
+The tree holds the kernel's .cee sources and not the C made from them: the build runs the pinned ceesafec
+(build/cee.mk). A self-hosted CosmoOS has no ceesafec, so it builds from this tarball, which carries the generated C
+beside each source, as the pinned ceesafec makes it now (scripts/cee-gen.py), and two files the tree does not:
 
-  .nova-dist   tells the build its generated C is in the tree (build/nova.mk: no novac is run);
+  .cee-dist   tells the build its generated C is in the tree (build/cee.mk: no ceesafec is run);
   .build-id    the commit's `git describe --always --dirty`, which the build would otherwise ask git for.
 
 The files are the working tree's, tracked and untracked but not ignored, so a tarball of a tree with changes matches
@@ -49,10 +49,10 @@ def stage(into: Path, bid: str):
         target = into / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / rel, target)
-    subprocess.run([sys.executable, str(ROOT / "scripts" / "nova-gen.py"), "--out", str(into), "--no-negative"],
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "cee-gen.py"), "--out", str(into), "--no-negative"],
                    cwd=ROOT, check=True)
-    (into / ".nova-dist").write_text("The generated C of every .nova source is beside it: this tree builds with no "
-                                     "novac (scripts/dist.py).\n")
+    (into / ".cee-dist").write_text("The generated C of every .cee source is beside it: this tree builds with no "
+                                     "ceesafec (scripts/dist.py).\n")
     (into / ".build-id").write_text(bid + "\n")
 
 
@@ -76,7 +76,7 @@ def pack(staged: Path, name: str, tarball: Path):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="A source tarball that builds with no Nova compiler.")
+    parser = argparse.ArgumentParser(description="A source tarball that builds with no CeeSafe compiler.")
     parser.add_argument("--out", default="out/dist", help="where the tarball goes (default out/dist)")
     parser.add_argument("--dir", help="unpack the tree into this directory instead of writing a tarball")
     args = parser.parse_args()
@@ -88,7 +88,7 @@ def main() -> int:
             shutil.rmtree(into)
         into.mkdir(parents=True)
         stage(into, bid)
-        print(f"dist: {into} ({name}, the generated C of {len(nova_outputs())} files beside its sources)")
+        print(f"dist: {into} ({name}, the generated C of {len(cee_outputs())} files beside its sources)")
         return 0
     with tempfile.TemporaryDirectory() as temp:
         staged = Path(temp) / name
@@ -100,8 +100,8 @@ def main() -> int:
     return 0
 
 
-def nova_outputs() -> list[str]:
-    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "nova-gen.py"), "--list"], cwd=ROOT, check=True,
+def cee_outputs() -> list[str]:
+    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "cee-gen.py"), "--list"], cwd=ROOT, check=True,
                          capture_output=True, text=True).stdout
     return out.split()
 

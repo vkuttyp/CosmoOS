@@ -28,8 +28,8 @@ choosing modes is the beginning of the display driver section 60 defers
 -- and reports base, size, geometry and the pixel format as three
 (shift, bits) pairs in boot protocol v6. Everything the console then
 writes is bounded by `bootinfo_fb_validate`, a pure function of those
-fields (`kernel/core/fbvalid.nova`, in Nova since roadmap 2.0 SA1; `make
-nova` generates its C), which is also a host test and a fuzz target: the failure it prevents is writing outside the mapping on
+fields (`kernel/core/fbvalid.cee`, in CeeSafe since roadmap 2.0 SA1; `make
+ceesafe` generates its C), which is also a host test and a fuzz target: the failure it prevents is writing outside the mapping on
 someone else's firmware, which is exactly the bug a machine with no
 serial port cannot report.
 

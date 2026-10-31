@@ -1,6 +1,6 @@
-// gpt.nova - The GUID Partition Table's parser and writer, in Nova: the source of kernel/block/gpt.c, which
-// `make nova` generates (docs/kernel/device/design.md, "Partitions"; scripts/nova-gen.py). It replaced the C original
-// (Nova's docs/cosmoos/c9-report.md) with the same API (kernel/include/kernel/gpt.h), the same answers, the same
+// gpt.cee - The GUID Partition Table's parser and writer, in CeeSafe: the source of kernel/block/gpt.c, which
+// `make cee` generates (docs/kernel/device/design.md, "Partitions"; scripts/cee-gen.py). It replaced the C original
+// (CeeSafe's docs/cosmoos/c9-report.md) with the same API (kernel/include/kernel/gpt.h), the same answers, the same
 // reasons, and the same reads, writes and buffer contents. The parser reads untrusted disks: every byte it reads is bounds-checked,
 // every size computation overflow-checked, and the disk's sectors reach it only through slices of the caller's
 // scratch buffer. `unsafe` appears only where gpt.h's raw pointers become slices and references, and where the

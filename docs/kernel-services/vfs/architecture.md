@@ -78,7 +78,7 @@ committed root describes a completely valid state.
 - **System calls**: the native personality grows from 11 to 23 calls;
   numbers stay stable. Files carry handle rights derived from the open
   flags; `mount`/`umount` require uid 0.
-- **CRC32C** (`kernel/core/crc32c.nova`, in Nova; a constant table): the integrity checksum, host
+- **CRC32C** (`kernel/core/crc32c.cee`, in CeeSafe; a constant table): the integrity checksum, host
   tested.
 
 ## Non-responsibilities

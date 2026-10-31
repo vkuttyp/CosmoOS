@@ -4,7 +4,7 @@ All interfaces are kernel-internal unless marked *(exported)*, in which
 case they are part of the module ABI (`docs/kernel/module/api.md`). Each
 entry follows constitution section 52.
 
-## Grace periods (`kernel/include/kernel/quiesce.h`, `kernel/core/quiesce.nova`)
+## Grace periods (`kernel/include/kernel/quiesce.h`, `kernel/core/quiesce.cee`)
 
 ### `void quiesce_init(void)`
 - Purpose: create the `quiesce` callback worker thread. Called by

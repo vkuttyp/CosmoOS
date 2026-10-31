@@ -71,9 +71,9 @@ the lines, to find the first that differs. At the end every table is
 destroyed and every reference dropped: each object released exactly once
 and the census back where it started. In the recorded run every operation
 both succeeds and fails in each of its ways at least once (closes: 325
-ok, 47 `-EIO`, 695 `-EBADF`). The object layer in Nova (`object.nova`,
+ok, 47 `-EIO`, 695 `-EBADF`). The object layer in CeeSafe (`object.cee`,
 SA2's second step) gives the recorded digest with the C handle table, and
-so does the handle table in Nova (`handle.nova`, the third step) over it
+so does the handle table in CeeSafe (`handle.cee`, the third step) over it
 (2026-10-30).
 
 ## Target self-tests

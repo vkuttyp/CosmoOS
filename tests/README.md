@@ -48,10 +48,10 @@ Host unit tests, host fuzz targets, kernel integration tests, QEMU boot tests. E
   (`docs/kernel-services/virtualization/testing.md`). x86-64 only: the
   `ARCH=aarch64` build leaves them out and `rc.test` prints
   `HVTEST: skipped`.
-- `nova/negative/`: Nova sources the kernel must refuse, checked by
-  `make nova-check` with the pinned novac (`docs/build/design.md`, "Nova
+- `ceesafe/negative/`: CeeSafe sources the kernel must refuse, checked by
+  `make cee-check` with the pinned ceesafec (`docs/build/design.md`, "CeeSafe
   sources"): every line marked `// error[N…]` must be refused with that
-  code and nothing else may be. `sleep-under-spin.nova` is roadmap 2.0
+  code and nothing else may be. `sleep-under-spin.cee` is roadmap 2.0
   SA3's: nothing that may sleep (a mutex, a grace period, a completion,
   a semaphore) compiles under a spin lock's guard, with interrupts off or
   with preemption off.

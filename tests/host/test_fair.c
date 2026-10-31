@@ -1,6 +1,6 @@
 /*
  * test_fair.c - The fair level's arithmetic (kernel/scheduler/fair.c,
- * generated from Nova) on the host: Linux's weights, the exact weighted
+ * generated from CeeSafe) on the host: Linux's weights, the exact weighted
  * charge against 128-bit arithmetic, placement, rebasing, the order and
  * the preemption rule; then one CPU simulated tick by tick with the
  * policy's rules (policy_rr.c's fair level) over these functions, where

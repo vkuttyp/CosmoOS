@@ -1,8 +1,8 @@
 // Named pipes: the pipe's ring behind a filesystem node (kernel/include/kernel/fifo.h, docs/kernel/ipc/design.md,
-// "Named pipes"; invariant I9), in Nova (roadmap 2.0 SA3). struct fifo and the per-open state are Nova's, generated
+// "Named pipes"; invariant I9), in CeeSafe (roadmap 2.0 SA3). struct fifo and the per-open state are CeeSafe's, generated
 // into kernel/include/kernel/fifo_types.h, which only the generated fifo.c includes: to the rest of the kernel a fifo
 // stays opaque (fifo.h). The open's wait goes through wait_floor.c's killable wait, since a wait entry is C state no
-// Nova local may hold; fifo_floor.c keeps the panic.
+// CeeSafe local may hold; fifo_floor.c keeps the panic.
 //
 // The ring is made by the first open and freed by the last release, and its reader and writer counts are the live opens
 // of each side. Both facts change together, so they change under one lock order: the fifo's lock (the ring pointer)

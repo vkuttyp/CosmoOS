@@ -47,7 +47,7 @@ COMMON_CFLAGS := \
 	-std=c11 -ffreestanding -nostdlib -nostdinc \
 	-fno-stack-protector -fno-omit-frame-pointer -fno-strict-aliasing \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables \
-	$(NOVA_PREFIX_MAP) -ffile-prefix-map=$(ROOT)=/cosmo $(NOVA_PREFIX_MAP) \
+	$(CEE_PREFIX_MAP) -ffile-prefix-map=$(ROOT)=/cosmo $(CEE_PREFIX_MAP) \
 	-DCOSMO_BUILD_ID=\"$(BUILD_ID)\" \
 	-DCOSMO_BUILD_TYPE=\"$(BUILD)\" \
 	-DCONFIG_SELFTEST=$(SELFTEST) \
@@ -82,7 +82,7 @@ KERNEL_CFLAGS := \
 	$(COMMON_CFLAGS) \
 	-Wframe-larger-than=$(KERNEL_FRAME_LIMIT) \
 	$(KERNEL_ARCH_CFLAGS) \
-	$(NOVA_CFLAGS) \
+	$(CEE_CFLAGS) \
 	-I$(ROOT)/kernel/include \
 	-I$(ROOT)/drivers/include \
 	-I$(ROOT)/boot/protocol
