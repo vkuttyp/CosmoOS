@@ -16,8 +16,14 @@
 
 #include "linux_abi.h"
 
-/* Linux O_* to COSMO_O_*; -1 when a flag the kernel cannot honour is set. */
-int lx_open_flags(unsigned lx, unsigned *native);
+/* Linux O_* to COSMO_O_*; -1 when a flag the kernel cannot honour is set.
+ * O_DIRECTORY, O_NOFOLLOW and O_LARGEFILE are not the same bits on x86-64
+ * and AArch64 (linux_abi.h), so the decoder takes this architecture's. */
+int lx_open_flags_for(unsigned lx, unsigned o_directory, unsigned o_nofollow, unsigned o_largefile, unsigned *native);
+static inline int lx_open_flags(unsigned lx, unsigned *native)
+{
+    return lx_open_flags_for(lx, LX_O_DIRECTORY, LX_O_NOFOLLOW, LX_O_LARGEFILE, native);
+}
 /* Native stat record to the Linux struct stat. */
 void lx_stat_from_native(const struct cosmo_stat *st, struct lx_stat *out);
 /* Native stat record to the Linux struct statx. `mask` is the caller's

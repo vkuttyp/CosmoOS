@@ -37,7 +37,7 @@ HOST_KEYSLOT_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c kernel/secur
 	userland/lib/keyslot.c tests/host/test_keyslot.c
 HOST_LIBC_SRCS := tests/host/test_libc.c
 HOST_PKG_SRCS := tests/host/test_pkg.c pkg/manifest.c pkg/version.c pkg/tar.c
-HOST_LINUX_SRCS := tests/host/test_linux.c compat/linux/convert.c
+HOST_LINUX_SRCS := tests/host/test_linux.c compat/linux/convert.c compat/linux/lxconv.c
 HOST_HV_SRCS := $(HOST_COMMON_SRCS) kernel/arch/x86_64/svm_npt.c tests/host/test_hv.c
 HOST_FDT_SRCS := $(HOST_COMMON_SRCS) tools/fdt/fdt.c tools/fdt/fdt_read.c tests/host/test_fdt.c
 HOST_VBLK_SRCS := $(HOST_COMMON_SRCS) userland/system/vq.c userland/system/vblk.c tests/host/test_vblk_dev.c

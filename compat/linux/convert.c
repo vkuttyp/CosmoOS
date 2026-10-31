@@ -1,44 +1,12 @@
-/* convert.c - Pure Linux/native conversions (compiled in the kernel and by tests/host/test_linux.c). */
+/* convert.c - Pure Linux/native conversions (compiled in the kernel and by tests/host/test_linux.c): the encoders
+ * whose Linux layout differs between the architectures (stat, statx) and the terminal's modes out. The decoders and
+ * the rest are lxconv's (roadmap 2.0 SA5). */
 
 #include <kernel/errno.h>
 #include <kernel/string.h>
 #include <stddef.h>
 
 #include "convert.h"
-
-int lx_open_flags(unsigned lx, unsigned *native)
-{
-    unsigned n = 0;
-    switch (lx & LX_O_ACCMODE) {
-    case LX_O_RDONLY: n = COSMO_O_RDONLY; break;
-    case LX_O_WRONLY: n = COSMO_O_WRONLY; break;
-    case LX_O_RDWR: n = COSMO_O_RDWR; break;
-    default: return -1;
-    }
-    if (lx & LX_O_CREAT)
-        n |= COSMO_O_CREAT;
-    if (lx & LX_O_EXCL)
-        n |= COSMO_O_EXCL;
-    if (lx & LX_O_TRUNC)
-        n |= COSMO_O_TRUNC;
-    if (lx & LX_O_APPEND)
-        n |= COSMO_O_APPEND;
-    if (lx & LX_O_DIRECTORY)
-        n |= COSMO_O_DIRECTORY;
-    if (lx & LX_O_NOFOLLOW)
-        n |= COSMO_O_NOFOLLOW;
-    if (lx & LX_O_NONBLOCK)
-        n |= COSMO_O_NONBLOCK;   /* a FIFO's open rules, and the open's mode (the named-pipes unit) */
-    if (lx & LX_O_NOCTTY)
-        n |= COSMO_O_NOCTTY;     /* a session leader opening a terminal does not take it (roadmap M4) */
-    /* Accepted and dropped: no effect on this kernel. */
-    unsigned known = LX_O_ACCMODE | LX_O_CREAT | LX_O_EXCL | LX_O_TRUNC | LX_O_APPEND | LX_O_DIRECTORY | LX_O_CLOEXEC |
-                     LX_O_NONBLOCK | LX_O_NOCTTY | LX_O_LARGEFILE | LX_O_NOFOLLOW;
-    if (lx & ~known)
-        return -1;
-    *native = n;
-    return 0;
-}
 
 /* Linux's makedev (glibc's and musl's encoding): the minor's low byte, the
  * major's twelve bits, then the minor's rest. A file's device is
@@ -113,22 +81,6 @@ void lx_statx_from_native(const struct cosmo_stat *st, uint32_t mask, struct lx_
     out->stx_mask = LX_STATX_SUPPORTED;
 }
 
-int lx_wait_status(int native_status)
-{
-    /* The two job-control outcomes sit above the byte the exit and kill
-     * encodings use, so they are tested first and cannot be mistaken
-     * for either (docs/kernel/process/design.md, "Stopping"). */
-    if (COSMO_STATUS_IS_STOPPED(native_status))
-        return (COSMO_STATUS_STOPSIG(native_status) << 8) | 0x7f;   /* WIFSTOPPED */
-    if (COSMO_STATUS_IS_CONTINUED(native_status))
-        return 0xffff;                      /* WIFCONTINUED */
-    if (native_status == COSMO_EXIT_FAULT)
-        return LX_SIGSEGV;                  /* terminated by SIGSEGV */
-    if (native_status > 128 && native_status < 128 + 64)
-        return native_status - 128;         /* terminated by that signal */
-    return (native_status & 0xff) << 8;     /* exited normally */
-}
-
 /*
  * The terminal's modes, both ways. Linux's structure has four flag
  * words and nineteen control characters; this kernel has four flags and
@@ -173,114 +125,3 @@ void lx_termios_from_native(struct lx_termios *out, const struct cosmo_termios *
     out->c_cc[LX_VTIME] = in->vtime;
 }
 
-void lx_termios_to_native(struct cosmo_termios *out, const struct lx_termios *in)
-{
-    memset(out, 0, sizeof(*out));
-    out->modes = ((in->c_iflag & LX_ICRNL) ? COSMO_TTY_ICRNL : 0) |
-                 ((in->c_lflag & LX_ISIG) ? COSMO_TTY_ISIG : 0) |
-                 ((in->c_lflag & LX_ICANON) ? COSMO_TTY_ICANON : 0) |
-                 ((in->c_lflag & LX_ECHO) ? COSMO_TTY_ECHO : 0) |
-                 ((in->c_lflag & LX_TOSTOP) ? COSMO_TTY_TOSTOP : 0) |
-                 ((in->c_oflag & LX_OPOST) && (in->c_oflag & LX_ONLCR) ? COSMO_TTY_OPOST : 0);
-    out->vmin = in->c_cc[LX_VMIN];
-    out->vtime = in->c_cc[LX_VTIME];
-}
-
-int lx_sockaddr_to_netaddr(const void *sa, size_t len, struct netaddr *out)
-{
-    memset(out, 0, sizeof(*out));
-    if (len < 2)
-        return -EINVAL;
-    uint16_t family;
-    memcpy(&family, sa, 2);
-    if (family == LX_AF_INET) {
-        if (len < sizeof(struct lx_sockaddr_in))
-            return -EINVAL;
-        const struct lx_sockaddr_in *in = sa;
-        out->family = COSMO_AF_INET;
-        out->port = ntohs(in->sin_port);
-        out->v4 = in->sin_addr;
-        return 0;
-    }
-    if (family == LX_AF_INET6) {
-        if (len < sizeof(struct lx_sockaddr_in6))
-            return -EINVAL;
-        const struct lx_sockaddr_in6 *in6 = sa;
-        out->family = COSMO_AF_INET6;
-        out->port = ntohs(in6->sin6_port);
-        memcpy(out->v6.s6_addr, in6->sin6_addr, 16);
-        return 0;
-    }
-    return -EAFNOSUPPORT;
-}
-
-size_t lx_sockaddr_from_netaddr(const struct netaddr *in, void *out, size_t cap)
-{
-    if (in->family == COSMO_AF_INET6) {
-        struct lx_sockaddr_in6 a6;
-        memset(&a6, 0, sizeof(a6));
-        a6.sin6_family = LX_AF_INET6;
-        a6.sin6_port = htons(in->port);
-        memcpy(a6.sin6_addr, in->v6.s6_addr, 16);
-        memcpy(out, &a6, cap < sizeof(a6) ? cap : sizeof(a6));
-        return sizeof(a6);
-    }
-    struct lx_sockaddr_in a4;
-    memset(&a4, 0, sizeof(a4));
-    a4.sin_family = LX_AF_INET;
-    a4.sin_port = htons(in->port);
-    a4.sin_addr = in->v4;
-    memcpy(out, &a4, cap < sizeof(a4) ? cap : sizeof(a4));
-    return sizeof(a4);
-}
-
-uint8_t lx_dirent_type(uint8_t native)
-{
-    switch (native) {
-    case COSMO_DT_REG: return LX_DT_REG;
-    case COSMO_DT_DIR: return LX_DT_DIR;
-    case COSMO_DT_CHR: return LX_DT_CHR;
-    case COSMO_DT_FIFO: return LX_DT_FIFO;
-    case COSMO_DT_SOCK: return LX_DT_SOCK;
-    case COSMO_DT_LNK: return LX_DT_LNK;
-    default: return LX_DT_UNKNOWN;
-    }
-}
-
-size_t lx_dirents_from_native(const uint8_t *in, size_t inlen, uint8_t *out, size_t outcap)
-{
-    size_t ip = 0, op = 0;
-    while (ip + sizeof(struct cosmo_dirent) <= inlen) {
-        struct cosmo_dirent d;
-        memcpy(&d, in + ip, sizeof(d));
-        const size_t hdr = offsetof(struct cosmo_dirent, name);   /* 12: the name follows the packed header */
-        if (d.reclen < hdr || ip + d.reclen > inlen || d.namelen > d.reclen - hdr)
-            break;
-        size_t rec = (19 + (size_t)d.namelen + 1 + 7) & ~(size_t)7;   /* header 19 bytes + name + NUL, 8-aligned */
-        if (op + rec > outcap)
-            break;
-        struct lx_dirent64 h = { .d_ino = d.ino, .d_off = (int64_t)(op + rec), .d_reclen = (uint16_t)rec,
-                                 .d_type = lx_dirent_type(d.type) };
-        memcpy(out + op, &h, 19);
-        memcpy(out + op + 19, in + ip + hdr, d.namelen);
-        memset(out + op + 19 + d.namelen, 0, rec - 19 - d.namelen);
-        op += rec;
-        ip += d.reclen;
-    }
-    return op;
-}
-
-int lx_prot(unsigned lx, int *native)
-{
-    if (lx & ~(LX_PROT_READ | LX_PROT_WRITE | LX_PROT_EXEC))
-        return -1;
-    int n = 0;
-    if (lx & LX_PROT_READ)
-        n |= COSMO_PROT_READ;
-    if (lx & LX_PROT_WRITE)
-        n |= COSMO_PROT_WRITE;
-    if (lx & LX_PROT_EXEC)
-        n |= COSMO_PROT_EXEC;
-    *native = n;
-    return 0;
-}

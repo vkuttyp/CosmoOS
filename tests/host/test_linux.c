@@ -2,6 +2,15 @@
  * test_linux.c - Host test of the Linux personality's pure conversions
  * (docs/compat/linux/testing.md): open flags, stat, wait status,
  * sockaddr both ways, getdents64 records, PROT bits. ASan and UBSan.
+ *
+ * Besides direct checks, a recorded digest (roadmap 2.0 SA5, the
+ * differential test of the Linux-syscall-argument family): 100,000
+ * inputs from a seeded generator through every conversion lxconv
+ * holds -- open flags under both architectures' encodings, PROT bits,
+ * wait statuses, socket addresses in and out at every cut, the guest's
+ * termios, getdents64 records from native ones of good and bad lengths.
+ * The C gave it (lxconv.c); the CeeSafe (lxconv.cee) must give the same.
+ * LINUX_DUMP=1 prints the lines; LINUX_BENCH=1 times the conversions.
  */
 
 #include <stddef.h>
@@ -12,6 +21,10 @@
 
 #include "convert.h"
 
+/* After the kernel's headers: the host's define htons as a macro, which inet.h's functions would collide with. */
+#include <stdlib.h>
+#include <time.h>
+
 static int g_failures;
 #define CHECK(c)                                                                          \
     do {                                                                                  \
@@ -21,8 +34,210 @@ static int g_failures;
         }                                                                                 \
     } while (0)
 
+/* --- the recorded digest --------------------------------------------------- */
+
+#define ROUNDS 100000
+#define SEED 0x11C0FFEE5A520261ull
+/* The digest of the C conversions (lxconv.c, 2026-10-31). */
+#define LINUX_DIGEST 0x3a72da1935783ee6ull
+
+/* x86-64's and AArch64's O_DIRECTORY, O_NOFOLLOW, O_LARGEFILE (linux_abi.h). */
+static const unsigned O_BITS[2][3] = { { 040000, 0100000, 0400000 }, { 0200000, 0400000, 0100000 } };
+
+static uint64_t g_rng;
+
+static uint64_t next(void)
+{
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 7;
+    g_rng ^= g_rng << 17;
+    return g_rng;
+}
+
+struct input {
+    uint32_t word;
+    uint8_t sa[32];
+    size_t sa_len;
+    size_t cap;
+    struct lx_termios tio;
+    uint8_t dirents[160];
+    size_t dlen;
+    size_t dcap;
+};
+
+/* Native getdents records of right and wrong lengths, names of every size. */
+static void make_dirents(struct input *in)
+{
+    size_t ip = 0;
+    memset(in->dirents, 0, sizeof(in->dirents));
+    while (ip + 12 < sizeof(in->dirents) && next() % 5) {
+        uint8_t namelen = (uint8_t)(next() % 20);
+        size_t reclen = (12 + namelen + 7) & ~(size_t)7;
+        if (next() % 6 == 0)
+            reclen = (size_t)(next() % 48);
+        if (ip + 12 > sizeof(in->dirents))
+            break;
+        uint64_t ino = next();
+        memcpy(in->dirents + ip, &ino, 8);
+        uint16_t rl = (uint16_t)reclen;
+        memcpy(in->dirents + ip + 8, &rl, 2);
+        in->dirents[ip + 10] = (uint8_t)(next() % 8);
+        in->dirents[ip + 11] = next() % 8 ? namelen : (uint8_t)next();
+        for (size_t k = 0; k < namelen && ip + 12 + k < sizeof(in->dirents); k++)
+            in->dirents[ip + 12 + k] = (uint8_t)('a' + next() % 26);
+        if (reclen == 0)
+            break;
+        ip += reclen;
+    }
+    in->dlen = next() % 4 ? (ip < sizeof(in->dirents) ? ip : sizeof(in->dirents)) : (size_t)(next() % sizeof(in->dirents));
+    in->dcap = (size_t)(next() % 200);
+}
+
+static void make_input(struct input *in)
+{
+    in->word = (uint32_t)next();
+    switch (next() % 4) {   /* flags and statuses near the meaningful values */
+    case 0: in->word &= 0x7ffff; break;
+    case 1: in->word &= 0x3ff; break;
+    case 2: in->word = (uint32_t)(next() % 8); break;
+    default: break;
+    }
+    for (size_t i = 0; i < sizeof(in->sa); i += 8) {
+        uint64_t r = next();
+        memcpy(in->sa + i, &r, 8);
+    }
+    uint16_t fam = (uint16_t)(next() % 3 == 0 ? 2 : next() % 2 ? 10 : next() % 16);
+    memcpy(in->sa, &fam, 2);
+    in->sa_len = (size_t)(next() % 33);
+    in->cap = (size_t)(next() % 33);
+    memset(&in->tio, 0, sizeof(in->tio));
+    in->tio.c_iflag = (uint32_t)next();
+    in->tio.c_oflag = (uint32_t)next();
+    in->tio.c_cflag = (uint32_t)next();
+    in->tio.c_lflag = (uint32_t)next();
+    for (int i = 0; i < LX_NCCS; i++)
+        in->tio.c_cc[i] = (uint8_t)next();
+    make_dirents(in);
+}
+
+static uint64_t g_digest;
+static bool g_dump;
+
+static void emit(const char *line, int n)
+{
+    for (int i = 0; i < n; i++) {
+        g_digest ^= (uint8_t)line[i];
+        g_digest *= 0x100000001b3ull;
+    }
+    g_digest ^= '\n';
+    g_digest *= 0x100000001b3ull;
+    if (g_dump)
+        printf("%s\n", line);
+}
+
+static void run_one(const struct input *in)
+{
+    char line[1024];
+    int n = 0;
+    for (int a = 0; a < 2; a++) {
+        unsigned native = 0xdead;
+        int rc = lx_open_flags_for(in->word, O_BITS[a][0], O_BITS[a][1], O_BITS[a][2], &native);
+        n += snprintf(line + n, sizeof(line) - (size_t)n, "o%d:%x ", rc, rc == 0 ? native : 0);
+    }
+    int prot = 0;
+    int prc = lx_prot(in->word, &prot);
+    n += snprintf(line + n, sizeof(line) - (size_t)n, "p%d:%d w%d d%u ", prc, prc == 0 ? prot : 0,
+                  lx_wait_status((int)in->word), lx_dirent_type((uint8_t)in->word));
+    struct netaddr na;
+    int src = lx_sockaddr_to_netaddr(in->sa, in->sa_len, &na);
+    n += snprintf(line + n, sizeof(line) - (size_t)n, "s%d:%u:%u:", src, na.family, na.port);
+    for (int i = 0; i < 16; i++)
+        n += snprintf(line + n, sizeof(line) - (size_t)n, "%02x", na.v6.s6_addr[i]);
+    if (src == 0) {
+        uint8_t out[32];
+        memset(out, 0xa5, sizeof(out));
+        size_t full = lx_sockaddr_from_netaddr(&na, out, in->cap);
+        n += snprintf(line + n, sizeof(line) - (size_t)n, " f%zu:", full);
+        for (size_t i = 0; i < sizeof(out); i++)
+            n += snprintf(line + n, sizeof(line) - (size_t)n, "%02x", out[i]);
+    }
+    struct cosmo_termios ct;
+    memset(&ct, 0xa5, sizeof(ct));
+    lx_termios_to_native(&ct, &in->tio);
+    n += snprintf(line + n, sizeof(line) - (size_t)n, " t%x:%u:%u:%u", ct.modes, ct.vmin, ct.vtime, ct.reserved);
+    uint8_t dout[200];
+    memset(dout, 0xa5, sizeof(dout));
+    size_t dn = lx_dirents_from_native(in->dirents, in->dlen, dout, in->dcap);
+    n += snprintf(line + n, sizeof(line) - (size_t)n, " g%zu:", dn);
+    for (size_t i = 0; i < dn; i++)
+        n += snprintf(line + n, sizeof(line) - (size_t)n, "%02x", dout[i]);
+    CHECK(n > 0 && (size_t)n < sizeof(line));
+    emit(line, n);
+}
+
+static void run_digest(void)
+{
+    g_dump = getenv("LINUX_DUMP") != NULL;
+    g_digest = 0xcbf29ce484222325ull;
+    g_rng = SEED;
+    for (unsigned r = 0; r < ROUNDS; r++) {
+        struct input in;
+        make_input(&in);
+        run_one(&in);
+    }
+    printf("  linux digest 0x%016llx over %u inputs\n", (unsigned long long)g_digest, ROUNDS);
+    CHECK(g_digest == LINUX_DIGEST);
+}
+
+static volatile uint64_t g_sink;
+
+/* LINUX_BENCH=1: every conversion on the same inputs, best of 9, ns per input. */
+static int bench(void)
+{
+    struct input *ins = malloc(sizeof(*ins) * ROUNDS);
+    if (ins == NULL)
+        return 1;
+    g_rng = SEED;
+    for (unsigned r = 0; r < ROUNDS; r++)
+        make_input(&ins[r]);
+    double best = 1e30;
+    for (int run = 0; run < 9; run++) {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        uint64_t acc = 0;
+        for (unsigned r = 0; r < ROUNDS; r++) {
+            const struct input *in = &ins[r];
+            unsigned native;
+            acc += (unsigned)lx_open_flags_for(in->word, 040000, 0100000, 0400000, &native);
+            int prot;
+            acc += (unsigned)lx_prot(in->word, &prot);
+            acc += (unsigned)lx_wait_status((int)in->word) + lx_dirent_type((uint8_t)in->word);
+            struct netaddr na;
+            if (lx_sockaddr_to_netaddr(in->sa, in->sa_len, &na) == 0) {
+                uint8_t out[32];
+                acc += lx_sockaddr_from_netaddr(&na, out, in->cap);
+            }
+            struct cosmo_termios ct;
+            lx_termios_to_native(&ct, &in->tio);
+            acc += ct.modes;
+            uint8_t dout[200];
+            acc += lx_dirents_from_native(in->dirents, in->dlen, dout, in->dcap);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        g_sink += acc;
+        double ns = (double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec);
+        if (ns < best)
+            best = ns;
+    }
+    printf("linux bench: %.2f ns per input (best of 9 runs of %u)\n", best / ROUNDS, ROUNDS);
+    free(ins);
+    return 0;
+}
+
 int main(void)
 {
+    if (getenv("LINUX_BENCH") != NULL)
+        return bench();
     /* layouts */
     CHECK(sizeof(struct lx_stat) == LX_STAT_SIZE);
     CHECK(sizeof(struct lx_utsname) == 390);
@@ -124,6 +339,8 @@ int main(void)
     int p;
     CHECK(lx_prot(LX_PROT_READ | LX_PROT_WRITE, &p) == 0 && p == (COSMO_PROT_READ | COSMO_PROT_WRITE));
     CHECK(lx_prot(0x10, &p) < 0);
+
+    run_digest();
 
     if (g_failures) {
         printf("linux                         FAIL (%d)\n", g_failures);
