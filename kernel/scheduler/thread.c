@@ -67,6 +67,8 @@ static bool reap_pending(void)
     return pending;
 }
 
+static unsigned g_reaps_queued, g_reaps_done;   /* atomic; thread_reaper_idle */
+
 static void reaper_main(void *arg)
 {
     (void)arg;
@@ -79,12 +81,19 @@ static void reaper_main(void *arg)
         if (n == NULL)
             continue;
         thread_put(list_entry(n, struct thread, rq_link));
+        __atomic_add_fetch(&g_reaps_done, 1, __ATOMIC_RELEASE);   /* after the stack's free and its shootdown */
     }
+}
+
+bool thread_reaper_idle(void)
+{
+    return __atomic_load_n(&g_reaps_done, __ATOMIC_ACQUIRE) == __atomic_load_n(&g_reaps_queued, __ATOMIC_ACQUIRE);
 }
 
 void thread_reap_later(struct thread *t)
 {
     KASSERT(t->state == THREAD_EXITED);
+    __atomic_add_fetch(&g_reaps_queued, 1, __ATOMIC_RELEASE);
     arch_irq_state_t s = spin_lock_irqsave(&g_reap_lock);
     list_push_back(&g_reap_list, &t->rq_link);
     spin_unlock_irqrestore(&g_reap_lock, s);

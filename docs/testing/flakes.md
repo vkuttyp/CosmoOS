@@ -367,6 +367,39 @@ bytes a hold; the self-test `console-lines` asserts it
 (`tools/console-lines-probe.py`). The shootdown's one-second deadline is
 unchanged: it caught a real defect.
 
+**The second instrumented sighting, 2026-10-31, CI** (PR #504's run
+41156610256, job "entropy boots (x86_64)", 16.5 s into the boot, in the
+lockup self-tests; its kernel code identical to main's; the rerun passed):
+
+```text
+mmu: TLB shootdown of 0xffffc000104c8000+0x4000: 2 of 3 CPUs acknowledged within 1 s
+cpu 3: did not acknowledge; running thread 3052 'lockup-spin', irq_depth 0, preempt_count 0, last tick 1006 ms ago at pc 0xffffffff80169713
+[ WARN] sched: stall: 'lockup-spin' (prio 32, flags 0x0) READY on cpu 0 for 1006 ms behind 'reaper' (prio 24, preempt 2, irq_depth 1, slice 10000 us)
+KERNEL PANIC: mmu: TLB shootdown of 0xffffc000104c8000+0x4000 acknowledged by 2 of 3 CPUs; not by cpu 3
+CPU: 0  context: thread  thread: 3 'reaper'  irq_depth: 0  preempt_count: 1
+```
+
+The harness's table names CPU 3's sampled frames `spin_here` and
+`spinner_main` (`kernel/core/lockuptest.c`): a spinner with interrupts
+masked. **Attributed: the self-test, against the reaper.**
+`lockup-sample-busy` joins its two racer threads and then starts two
+masked spinners, on CPUs 3 and 0 (the test pinned to CPU 2). The racers'
+last references are the reaper's, which frees each stack after the join
+returns (the window `threads_settled` documents: the thread count falls
+before the stack goes). Here the spinner on CPU 3 masked interrupts; the
+reaper, on CPU 0, freed a racer's stack and waited for CPU 3's
+acknowledgement of the shootdown; the second spinner, pinned to CPU 0, sat
+READY behind it; and the test, in `start_spinner`, waited for that spinner
+to run before it could stop the first. Nothing moved until the deadline.
+The test already stopped both spinners before joining either for this
+reason ("a join frees a stack"); it did not account for a free still
+pending from before. **Fixed 2026-10-31:** `thread_reaper_idle()`
+(`kernel/scheduler/thread.c`) is true once every thread handed to the
+reaper has been put, its stack freed and the shootdown done (a count
+queued and a count finished), and `start_spinner` waits for it, up to 2 s,
+before a masked spinner starts. `lockup-sample-irqoff`'s single masked
+spinner takes the same wait. The deadline is unchanged.
+
 **Observed once, not yet on the list: `timer-cancel-sync`'s lower
 bound.** `kernel/core/quiescetest.c:960` asserts that a `timer_cancel_sync`
 against a callback holding for 20 ms on another CPU took at least

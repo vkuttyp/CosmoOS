@@ -110,8 +110,15 @@ static bool in_fn(uintptr_t pc, const void *fn, unsigned bound)
     return pc >= (uintptr_t)fn && pc < (uintptr_t)fn + bound;
 }
 
+/* A masked spinner's CPU cannot take a TLB shootdown's IPI, so none may be
+ * in flight: the reaper freeing the stack of a thread joined just before
+ * (this test's racers, the test before's spinner) did one on CPU 0 while
+ * the next spinner waited behind it, and the shootdown's deadline panicked
+ * (docs/testing/flakes.md, the TLB shootdown deadline, 2026-10-31). */
 static struct thread *start_spinner(struct spinner *s, unsigned cpu, int prio, bool masked)
 {
+    for (uint64_t end = clock_now_ns() + 2000000000ull; masked && !thread_reaper_idle() && clock_now_ns() < end;)
+        sched_yield();
     memset(s, 0, sizeof(*s));
     s->cpu = cpu;
     s->priority = prio;

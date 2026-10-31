@@ -59,7 +59,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel/security/chacha20.c \
 	kernel/security/sha512.c \
 	kernel/security/blake2b.c \
-	kernel/core/crc32c.c kernel/memory/slab.c kernel/memory/kmalloc.c $(FUZZ_COMMON)
+	kernel/core/crc32c.c kernel/nova/nova_rt_core.c tests/host/nova_panic.c kernel/memory/slab.c kernel/memory/kmalloc.c $(FUZZ_COMMON)
 
 # The network stack on the host (docs/verification/design.md, "The network
 # targets"): the protocol layers unchanged, over tests/fuzz/shim_net.c.
