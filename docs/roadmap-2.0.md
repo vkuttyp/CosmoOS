@@ -419,7 +419,14 @@ and fields and the options walk (`netparse_tcp`, `netparse_tcp_mss`),
 with a digest of their own over 200,000 headers and option lists
 (`0x35875a1cf041750b`, the C's); 0.97x the C on arm64 and 0.95x on
 x86-64 (Rosetta). tcp_input keeps the decoded fields, not the raw
-header, so the reset it builds reads them too.
+header, so the reset it builds reads them too. DHCP and DNS
+(2026-10-31): the options walk both ends share (dhcp.h's `dhcp_opt` is a
+wrapper over it), the tap server's frame and message checks, the
+client's message and lease with the host name a server offers, the DNS
+proxy's id and its resolver address; a digest of their own over 100,000
+inputs (`0x27c8c7e8ec420cdd`, the C's); 1.01x the C on arm64 and 1.03x
+on x86-64 (Rosetta). The DNS proxy reads only the id: the queries and
+answers it relays are not parsed here.
 
 Size: about 3.0x.
 

@@ -1,7 +1,9 @@
-// netparse.cee - the network receive path's decoders (kernel/net/netparse.h; roadmap 2.0 SA5, the network-frame and
-// TCP-segment families). Every check and field read the stack makes on bytes a frame brought: ether_input, arp_input, ipv4_input,
+// netparse.cee - the network receive path's decoders (kernel/net/netparse.h; roadmap 2.0 SA5, the network-frame,
+// TCP-segment, and DHCP-and-DNS families). Every check and field read the stack makes on bytes a frame brought: ether_input, arp_input, ipv4_input,
 // the quoted headers of ICMP errors (icmp_quoted_flow, nat_in_icmp_error), ipv6_input, nd_input_ns and nd_input_na,
-// udp_input, the transport identifiers NAT and the firewall key on, and TCP's header and options (tcp_input, parse_mss). The callers keep the mbufs, the tables and the
+// udp_input, the transport identifiers NAT and the firewall key on, TCP's header and options (tcp_input, parse_mss),
+// and DHCP and DNS: the options walk both ends share, the tap server's frame and message checks, the client's message
+// and lease, a host name a server offers, the DNS proxy's id, and the resolver address it is configured with. The callers keep the mbufs, the tables and the
 // policy.
 //
 // Each decoder is a safe function over a slice of exactly the bytes the header's comment names; the exports below make
@@ -36,6 +38,31 @@ extern "C" {
         flags: u8;
         win: u16;
     }
+    struct netparse_dhcp {
+        msg_type: u8;
+        xid: [u8; 4];
+        flags: u16;
+        ciaddr: [u8; 4];
+        yiaddr: [u8; 4];
+        chaddr: [u8; 6];
+        server: [u8; 4];
+        has_server: bool;
+        reqip: [u8; 4];
+        has_reqip: bool;
+    }
+    struct netparse_dhcp_lease {
+        addr: [u8; 4];
+        lease: u32;
+        mask: [u8; 4];
+        has_mask: bool;
+        router: [u8; 4];
+        has_router: bool;
+        ndns: u8;
+        dns: [u8; 12];
+        hostname: [u8; 64];
+        t1: u32;
+        t2: u32;
+    }
     struct netparse_l4 {
         sport: u16;
         dport: u16;
@@ -68,6 +95,26 @@ const L4_MIN: usize = 8;
 const L4_TCP_FLAGS: usize = 14;
 const TCP_HLEN: usize = 20;
 const TCP_MIN_MSS: u16 = 536;
+
+// DHCP (dhcp.h): the BOOTP header's fields, the cookie, the options.
+const BOOTP_REQUEST: u8 = 1;
+const DHCP_FIXED: usize = 240;
+const DHCP_HTYPE_ETHER: u8 = 1;
+const DHCP_SERVER_PORT: u16 = 67;
+const OPT_PAD: u8 = 0;
+const OPT_END: u8 = 255;
+const OPT_SUBNET: u8 = 1;
+const OPT_ROUTER: u8 = 3;
+const OPT_DNS: u8 = 6;
+const OPT_HOSTNAME: u8 = 12;
+const OPT_REQIP: u8 = 50;
+const OPT_LEASE: u8 = 51;
+const OPT_MSGTYPE: u8 = 53;
+const OPT_SERVERID: u8 = 54;
+const OPT_T1: u8 = 58;
+const OPT_T2: u8 = 59;
+const DHCP_MAX_DNS: u8 = 3;
+const DHCP_HOSTNAME_MAX: usize = 64;
 
 /// The big-endian 16-bit field at `at`.
 fn be16(b: Slice<u8>, at: usize) -> u16 => (b[at] as u16) << 8 | b[at + 1] as u16;
@@ -196,6 +243,254 @@ fn tcpMss(o: Slice<u8>, dflt: u16) -> u16 {
     return dflt;
 }
 
+// --- DHCP and DNS ---------------------------------------------------------------------------------------------------
+
+/// Where option `code` is in the options `o`: its value's offset, with its length in `olen`. The walk stops at the end
+/// option, skips pads, and ends at an option whose length byte is missing or whose value runs past the options.
+fn dhcpOpt(o: Slice<u8>, code: u8, olen: borrow mut u8) -> usize? {
+    var i: usize = 0;
+    while (i < o.length) {
+        let c = o[i];
+        i += 1;
+        if (c == OPT_END) {
+            return null;
+        }
+        if (c == OPT_PAD) {
+            continue;
+        }
+        if (i >= o.length) {
+            return null;
+        }
+        let l = o[i];
+        i += 1;
+        if (l as usize > o.length - i) {
+            return null;
+        }
+        if (c == code) {
+            olen = l;
+            return i;
+        }
+        i += l as usize;
+    }
+    return null;
+}
+
+/// Four bytes of `from` at `at` into `to`, as four stores: the fields here are 4 bytes, and a copy call of a length
+/// known only at run time costs more than the stores (each still bounds-checked).
+fn put4(to: SliceMut<u8>, from: Slice<u8>, at: usize) {
+    to[0] = from[at];
+    to[1] = from[at + 1];
+    to[2] = from[at + 2];
+    to[3] = from[at + 3];
+}
+
+/// Option `code` when it is exactly 4 bytes, into `out`.
+fn opt4(o: Slice<u8>, code: u8, out: SliceMut<u8>) -> bool {
+    var l: u8 = 0;
+    match (dhcpOpt(o, code, borrow mut l)) {
+        Some(at) => {
+            if (l != 4) {
+                return false;
+            }
+            put4(out, o, at);
+            return true;
+        }
+        null => { return false; }
+    }
+}
+
+/// A DHCP message whose op is `op`: its fields, or BAD (dhcp_filter's and dhcp_client_input's checks).
+fn dhcp(dh: Slice<u8>, op: u8, m: borrow mut netparse_dhcp) -> u32 {
+    if (dh.length < DHCP_FIXED) {
+        return BAD;
+    }
+    // The cookie byte by byte (0x63825363): under the length check above these reads need no bounds checks.
+    if (dh[0] != op ||
+        dh[1] != DHCP_HTYPE_ETHER || dh[2] != 6 || dh[236] != 0x63 || dh[237] != 0x82 || dh[238] != 0x53 ||
+        dh[239] != 0x63) {
+        return BAD;
+    }
+    let o = dh[DHCP_FIXED..];
+    var l: u8 = 0;
+    match (dhcpOpt(o, OPT_MSGTYPE, borrow mut l)) {
+        Some(at) => {
+            if (l != 1) {
+                return BAD;
+            }
+            m.msg_type = o[at];
+        }
+        null => { return BAD; }
+    }
+    put4(mut m.xid[..], dh, 4);
+    m.flags = (dh[10] as u16) << 8 | dh[11] as u16;
+    put4(mut m.ciaddr[..], dh, 12);
+    put4(mut m.yiaddr[..], dh, 16);
+    put4(mut m.chaddr[..], dh, 28);
+    m.chaddr[4] = dh[32];
+    m.chaddr[5] = dh[33];
+    m.has_server = opt4(o, OPT_SERVERID, mut m.server[..]);
+    if (!m.has_server) {
+        m.server[..].fill(0);
+    }
+    m.has_reqip = opt4(o, OPT_REQIP, mut m.reqip[..]);
+    if (!m.has_reqip) {
+        m.reqip[..].fill(0);
+    }
+    return OK;
+}
+
+/// A host name a server offers (option 12), into `name` with its NUL: kept only when it is 1-63 letters, digits, '-'
+/// and '.' after an optional trailing NUL is dropped (RFC 1123's characters); else `name` is left empty. It lands in
+/// /etc/hostname and at prompts, so nothing else is let through.
+fn hostname(v: Slice<u8>, name: SliceMut<u8>) {
+    name[0] = 0;
+    var l = v.length;
+    if (l > 0 && v[l - 1] == 0) {
+        l -= 1;
+    }
+    if (l == 0 || l >= DHCP_HOSTNAME_MAX) {
+        return;
+    }
+    for (i in 0..l) {
+        let ch = v[i];
+        let ok = (ch >= 0x61 && ch <= 0x7a) || (ch >= 0x41 && ch <= 0x5a) || (ch >= 0x30 && ch <= 0x39) || ch == 0x2d ||
+            ch == 0x2e;
+        if (!ok) {
+            return;
+        }
+    }
+    name[..l].copyFrom(v[..l]);
+    name[l] = 0;
+}
+
+/// An ACK's lease: false with no address, no lease time, or a lease of 0 (RFC 2131 table 3).
+fn dhcpLease(dh: Slice<u8>, ls: borrow mut netparse_dhcp_lease) -> bool {
+    let o = dh[DHCP_FIXED..];
+    put4(mut ls.addr[..], dh, 16);
+    ls.lease = 0;
+    ls.mask[..].fill(0);
+    ls.has_mask = false;
+    ls.router[..].fill(0);
+    ls.has_router = false;
+    ls.ndns = 0;
+    ls.dns[..].fill(0);
+    ls.hostname[..].fill(0);
+    ls.t1 = 0;
+    ls.t2 = 0;
+    let yi = be32(dh, 16);
+    var lease: [u8; 4] = [0, 0, 0, 0];
+    if (yi == 0 || yi == 0xffffffff || !opt4(o, OPT_LEASE, mut lease[..])) {
+        return false;
+    }
+    ls.lease = be32(lease[..], 0);
+    if (ls.lease == 0) {
+        return false;
+    }
+    ls.has_mask = opt4(o, OPT_SUBNET, mut ls.mask[..]);
+    var ol: u8 = 0;
+    match (dhcpOpt(o, OPT_ROUTER, borrow mut ol)) {
+        Some(at) => {
+            if (ol >= 4) {
+                put4(mut ls.router[..], o, at); // the first router
+                ls.has_router = true;
+            }
+        }
+        null => {}
+    }
+    match (dhcpOpt(o, OPT_DNS, borrow mut ol)) {
+        Some(at) => {
+            let l = ol as usize;
+            var i: usize = 0;
+            var n: u8 = 0;
+            while (i + 4 <= l && n < DHCP_MAX_DNS) {
+                let k = 4 * n as usize;
+                put4(mut ls.dns[k..k + 4], o, at + i);
+                n += 1;
+                i += 4;
+            }
+            ls.ndns = n;
+        }
+        null => {}
+    }
+    match (dhcpOpt(o, OPT_HOSTNAME, borrow mut ol)) {
+        Some(at) => { hostname(o[at..at + ol as usize], mut ls.hostname[..]); }
+        null => {}
+    }
+    var t: [u8; 4] = [0, 0, 0, 0];
+    if (opt4(o, OPT_T1, mut t[..])) {
+        ls.t1 = be32(t[..], 0);
+    }
+    if (opt4(o, OPT_T2, mut t[..])) {
+        ls.t2 = be32(t[..], 0);
+    }
+    return true;
+}
+
+/// A guest's frame to the tap: whether it is an IPv4 UDP datagram to the DHCP server port with its headers whole,
+/// and where its DHCP message starts.
+fn dhcpFrame(f: Slice<u8>, dhOff: borrow mut u32) -> bool {
+    if (f.length < ETH_HLEN + IPV4_MIN + UDP_HLEN) {
+        return false;
+    }
+    if (f[12] != 0x08 || f[13] != 0x00) {
+        return false;
+    }
+    let ihl = ((f[14] & 0xf) as u32) * 4;
+    if ((f[14] >> 4) != 4 || ihl < 20 || f[14 + 9] != 17) {
+        return false;
+    }
+    let off = 14 + ihl + 8; // at most 14 + 60 + 8
+    if (off as usize > f.length) {
+        return false;
+    }
+    // The destination port, read in place: be16 is a call clang does not inline here, and this check runs on every
+    // frame a guest sends.
+    let port = off as usize - 6;
+    if (f[port] != 0 || f[port + 1] as u16 != DHCP_SERVER_PORT) {
+        return false;
+    }
+    dhOff = off;
+    return true;
+}
+
+/// A dotted quad: four decimal parts of at most 255, each with a digit, nothing else.
+fn ipv4Text(s: Slice<u8>, out: SliceMut<u8>) -> bool {
+    var o: [u8; 4] = [0, 0, 0, 0];
+    var part: usize = 0;
+    var digits: u32 = 0;
+    var v: u32 = 0;
+    var i: usize = 0;
+    while (true) {
+        let c = if (i < s.length) s[i] else 0;
+        if (c >= 0x30 && c <= 0x39) {
+            v = v * 10 + (c - 0x30) as u32;
+            digits += 1;
+            if (v > 255) {
+                return false;
+            }
+        } else if (c == 0x2e || c == 0) {
+            if (digits == 0 || part > 3) {
+                return false;
+            }
+            o[part] = truncate<u8>(v); // at most 255, checked as each digit was added
+            part += 1;
+            v = 0;
+            digits = 0;
+            if (c == 0) {
+                break;
+            }
+        } else {
+            return false;
+        }
+        i += 1;
+    }
+    if (part != 4) {
+        return false;
+    }
+    out.copyFrom(o[..]);
+    return true;
+}
+
 // --- the exports -----------------------------------------------------------------------------------------------------
 
 /// Safety: `hdr` points to ETH_HLEN readable bytes and `mac` to 6 (netparse.h); `etherType` is writable.
@@ -305,3 +600,37 @@ unsafe fn tcpC(hdr: *u8, segLen: u32, out: *mut netparse_tcp) -> u32 {
 /// Safety: `opts` points to `optlen` readable bytes (at most 40: the header's options).
 @export("netparse_tcp_mss")
 unsafe fn tcpMssC(opts: *u8, optlen: u32, dflt: u16) -> u16 => tcpMss(Slice.fromRaw(opts, optlen as usize), dflt);
+
+/// Safety: `opts` points to `len` readable bytes and `olen` is writable.
+@export("netparse_dhcp_opt")
+unsafe fn dhcpOptC(opts: *u8, len: u32, code: u8, olen: *mut u8) -> i32 {
+    match (dhcpOpt(Slice.fromRaw(opts, len as usize), code, Ptr.toBorrowMut(olen))) {
+        // An offset into a u32-sized buffer; one past i32's range (no DHCP message is 2 GiB) reads as absent.
+        Some(at) => { return if (at <= 0x7fffffff) truncate<i32>(at) else -1; }
+        null => { return -1; }
+    }
+}
+
+/// Safety: `dh` points to `dhlen` readable bytes and `out` to a writable struct.
+@export("netparse_dhcp")
+unsafe fn dhcpC(dh: *u8, dhlen: u32, op: u8, out: *mut netparse_dhcp) -> u32 =>
+    dhcp(Slice.fromRaw(dh, dhlen as usize), op, Ptr.toBorrowMut(out));
+
+/// Safety: `dh` points to `dhlen` readable bytes, at least DHCP_FIXED, and `out` to a writable struct.
+@export("netparse_dhcp_lease")
+unsafe fn dhcpLeaseC(dh: *u8, dhlen: u32, out: *mut netparse_dhcp_lease) -> bool =>
+    dhcpLease(Slice.fromRaw(dh, dhlen as usize), Ptr.toBorrowMut(out));
+
+/// Safety: `frame` points to `len` readable bytes and `dhOff` is writable.
+@export("netparse_dhcp_frame")
+unsafe fn dhcpFrameC(frame: *u8, len: u32, dhOff: *mut u32) -> bool =>
+    dhcpFrame(Slice.fromRaw(frame, len as usize), Ptr.toBorrowMut(dhOff));
+
+/// Safety: `msg` points to `len` readable bytes, at least the 12-byte header.
+@export("netparse_dns_id")
+unsafe fn dnsIdC(msg: *u8, len: u32) -> u16 => be16(Slice.fromRaw(msg, len as usize), 0);
+
+/// Safety: `s` points to `len` readable characters and `out` to 4 writable bytes.
+@export("netparse_ipv4_text")
+unsafe fn ipv4TextC(s: *CChar, len: u32, out: *mut u8) -> bool =>
+    ipv4Text(Slice.fromRaw(s as *u8, len as usize), SliceMut.fromRaw(out, 4));

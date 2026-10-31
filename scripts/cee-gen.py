@@ -93,7 +93,7 @@ PORTS = [
      "kernel/include/kernel/fifo_types.h", False),
     ("kernel/core/crc32c.cee", "kernel/core/crc32c.c", "CRC-32C (crc32c.h)", None, False),
     ("kernel-services/network/netparse.cee", "kernel-services/network/netparse.c",
-     "The network receive path's decoders: frames and TCP segments (netparse.h)", None, False),
+     "The network receive path's decoders: frames, TCP segments, DHCP and DNS (netparse.h)", None, False),
     ("kernel/core/fbvalid.cee", "kernel/core/fbvalid.c", "The framebuffer validator (bootinfo.h)", None, False),
     ("kernel/ceesafe/crash_test.cee", "kernel/ceesafe/crash_test.c",
      "The crash test crash-cee: a CeeSafe bounds check that fails on purpose (CRASH_TEST=5)",

@@ -1208,6 +1208,21 @@ with lengths right and wrong: the C's (`0x35875a1cf041750b`,
 bench`) was 0.97x the C on arm64 (15.8 ns against 16.3) and 0.95x on
 x86-64 under Rosetta (18.5 against 19.5).
 
+DHCP and DNS have a digest of their own over 100,000 inputs: frames to
+the tap's server port, messages with the options both ends read
+(lengths right and wrong, host names good and bad), and resolver
+addresses as text. The C's (`0x27c8c7e8ec420cdd`, 2026-10-31) is the
+CeeSafe's. The `dhcp bench` line was 1.01x the C on arm64 (78.5 ns
+against 78.1) and 1.03x on x86-64 under Rosetta (90.0 against 87.6).
+The first port was 1.03x and 1.11x: the fixed-size fields were copied
+with a copy of run-time length (a memmove call) where the C copied 4
+bytes inline, and the small big-endian readers were calls clang did
+not inline. Four bounds-checked stores, and the frame's port and the
+cookie read in place under their length checks, took it back. Walking
+the options once for all of them instead of once per option was
+tried and was slower (1.27x and 1.48x): the table it fills costs more
+than the walks it saves, since the message type comes first.
+
 ## Releases however a test returns (the net-leftover unit)
 
 `CHECK` returns at once. A network test used to release what it made

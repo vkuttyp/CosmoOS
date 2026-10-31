@@ -18,7 +18,8 @@
  *
  * The DHCP and DNS family has one too ("dhcp digest"): 100,000 DHCP
  * messages, the frames that carry them to the tap's server, and resolver
- * addresses as text, recorded from the C (netparse_dhcp.c).
+ * addresses as text, recorded from the C (netparse_dhcp.c), which
+ * netparse.cee gives too.
  *
  * NETPARSE_BENCH=1 times the decoders instead: the same inputs, every
  * decoder on each, best of 9 runs, in nanoseconds per input (the 5% rule).
@@ -520,7 +521,7 @@ static void test_tcp_digest(void)
     EXPECT(digest == TCP_DIGEST);
 }
 
-/* The DHCP and DNS family's digest (netparse_dhcp.c, 2026-10-31). */
+/* The DHCP and DNS family's digest: the C's (2026-10-31), which netparse.cee gives too. */
 #define DHCP_ROUNDS 100000
 #define DHCP_SEED 0xD4C9D45E2026A11Full
 #define DHCP_DIGEST 0x27c8c7e8ec420cddull
