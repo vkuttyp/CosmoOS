@@ -279,10 +279,18 @@ acquisition with today's classes, callback classes and completion classes
 (L21). Pipes and FIFOs (`kernel/ipc/pipe.c`, `fifo.c`) convert with them,
 as the first users.
 
-- [ ] **Acceptance:** `test-smp2`, `test-chaos` and every lock, wait,
+- [x] **Acceptance:** `test-smp2`, `test-chaos` and every lock, wait,
   quiescence, pipe and FIFO self-test pass on both architectures with the
   Nova versions and the C deleted; lockdep's graph self-tests pass; a
   negative compile test refuses a sleep under a spin lock's guard.
+  Met 2026-10-31: with every SA3 port in (wait queues, completions,
+  semaphores, the mutex, quiescence, pipes and FIFOs: their C is now
+  generated from Nova), `test-smp2` and `test-chaos` pass on x86_64 and
+  aarch64 (debug), as do their lock, wait, quiescence, pipe, FIFO and
+  lockdep self-tests; `tests/nova/negative/sleep-under-spin.nova` is the
+  negative test. Two `test-chaos` boots first failed on time bounds
+  (`process-user`, `irqpoll-boost`) at a host load average near 30, and
+  passed when rerun on a quieter host.
 
 Scope (2026-10-30): CosmoOS has no read-write lock, so none is converted
 (none is added either). The types become Nova's, as SA2's did (Nova ADR
