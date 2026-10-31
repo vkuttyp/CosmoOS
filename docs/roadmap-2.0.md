@@ -240,7 +240,12 @@ convert than the commit it started from; a test commit adding a C
 function under `kernel-services/` failed it (+5 lines), one removing a
 line passed (2026-10-31). On main that day ring 0 was 3,946 lines of Nova,
 a floor of 3,494 (assembly and Nova's runtime shim) and 190,560 lines of
-C to convert (631 of them the ports' `*_floor.c`): 2.0% Nova.
+C to convert (631 of them the ports' `*_floor.c`): 2.0% Nova. Then
+`crash-nova`: a `CRASH_TEST=5` kernel calls `kernel/nova/crash_test.nova`
+with an index past its table before the self-tests run, and `make
+test-crash-nova` (CI's stress part) requires `KERNEL PANIC: nova panic:
+index out of bounds at kernel/nova/crash_test.nova:10:18`, the line the
+source marks; it passes on x86_64 and aarch64 (2026-10-31).
 
 Size: about 0.7x.
 

@@ -348,6 +348,12 @@ jobs:
         if: matrix.part == 'stress'
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-stackprot
 
+      # A Nova bounds check failing on purpose must stop the kernel naming
+      # the Nova file and line (roadmap 2.0 SA1's crash-nova).
+      - name: Nova panic test
+        if: matrix.part == 'stress'
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-crash-nova
+
       # AArch64: a page mapped writable and executable on purpose must
       # not execute (SCTLR_EL1.WXN). A no-op on x86-64.
       - name: WXN test

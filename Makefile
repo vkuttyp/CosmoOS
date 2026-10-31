@@ -27,6 +27,7 @@
 #   make test-pkg-net  roadmap 1.1 P6: pkg against HTTPS repositories served by the harness (CI: BUILD=release)
 #   make test-display  virtio-gpu: the console on the display's own size, read back from a screendump (CI: BUILD=release)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
+#   make test-crash-nova SA1: a Nova bounds check failing on purpose must panic naming its Nova file:line
 #   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
 #   make test-chaos   debug suite under a migrator that moves ready threads between CPUs every few ticks
 #   make test-harness-retry  boot with net-harness's first back-connection broken on purpose
@@ -55,7 +56,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-selfhost test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-stackprot test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-selfhost test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-crash-nova test-stackprot test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -681,6 +682,17 @@ test-stackprot:
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic smash --timeout $(CRASH_TIMEOUT) \
 		--image $(OUT)-stackprot/cosmoos.img --log $(OUT)-stackprot/boot-test-stackprot.log \
 		--kernel $(OUT)-stackprot/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
+
+# crash-nova (roadmap 2.0 SA1): a kernel whose Nova bounds check fails on
+# purpose (CRASH_TEST=5, kernel/nova/crash_test.nova); the harness requires
+# Nova's panic naming that file and the line it marks. Both architectures.
+test-crash-nova:
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		CRASH_TEST=5 OUT=$(OUT)-crash-nova image
+	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic nova --timeout $(CRASH_TIMEOUT) \
+		--image $(OUT)-crash-nova/cosmoos.img --log $(OUT)-crash-nova/boot-test-crash-nova.log \
+		--kernel $(OUT)-crash-nova/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
 # AArch64: build a kernel that maps one page writable and executable on
 # purpose and executes it (CRASH_TEST=2); SCTLR_EL1.WXN must make that
