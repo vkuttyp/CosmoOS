@@ -142,16 +142,21 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         vnode_put(root);
         FUZZ_ASSERT(mnt->nr_vnodes == 0);   /* every vnode the walk touched is gone */
     } else {
-        FUZZ_ASSERT(rc == -EIO || rc == -EINVAL || rc == -ENOMEM);
+        /* -ENOKEY: a version-14 pool sealed by a MAC, whose key is not
+         * loaded -- refused before any of its metadata is read (seed 1). */
+        FUZZ_ASSERT(rc == -EIO || rc == -EINVAL || rc == -ENOMEM || rc == -ENOKEY);
         FUZZ_ASSERT(mnt->fs_priv == NULL && mnt->root == NULL);
     }
     kfree(mnt);
     return 0;
 }
 
+/* Seed 0: a freshly formatted image. Seed 1: the same with both
+ * superblock slots claiming a version-14 pool sealed by a MAC (key_root
+ * set), whose key is not loaded: the mount refuses it -ENOKEY. */
 size_t fuzz_seed(unsigned i, uint8_t *buf, size_t cap)
 {
-    if (i != 0 || cap < IMAGE_BLOCKS * 4096u)
+    if (i > 1 || cap < IMAGE_BLOCKS * 4096u)
         return 0;
     static const uint8_t zero[1] = { 0 };
     shim_image_set(zero, 0, IMAGE_BLOCKS);
@@ -160,5 +165,14 @@ size_t fuzz_seed(unsigned i, uint8_t *buf, size_t cap)
     uint64_t n;
     const uint8_t *img = shim_image_get(&n);
     memcpy(buf, img, IMAGE_BLOCKS * 4096u);
+    if (i == 1) {
+        for (unsigned slot = CFS_SUPER_A; slot <= CFS_SUPER_B; slot++) {
+            struct cfs_super sb;
+            memcpy(&sb, buf + slot * 4096u, sizeof(sb));
+            sb.version = 14;
+            sb.key_root = CFS_DVA(0, 3);
+            memcpy(buf + slot * 4096u, &sb, sizeof(sb));
+        }
+    }
     return IMAGE_BLOCKS * 4096u;
 }
