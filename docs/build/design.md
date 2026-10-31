@@ -203,42 +203,55 @@ the large definition is wrapped.
 ## Nova sources
 
 Some kernel code is written in Nova, a memory-safe language compiled to C
-(https://github.com/vkuttyp/Nova): the GPT parser and writer
-(`kernel/block/gpt.nova`), CPU-time accounting
-(`kernel/process/cputime.nova`), the rules of nice values
-(`kernel/process/nice.nova`) and the scheduler's fair level
-(`kernel/scheduler/fair.nova`). Each `NAME.nova` sits beside the
-`NAME.c` it generates, and the generated C is checked in with a "do not
-edit" banner naming its source, so **building CosmoOS needs no Nova
-compiler**: the C compiles like any other file, and every target, host
-test and fuzz target that links it is unchanged. Nova's runtime is
-generated too: `kernel/include/nova/rt.h` and `kernel/nova/nova_rt_core.c`.
+(https://github.com/vkuttyp/Nova): the object and handle layer, wait
+queues, completions, semaphores, the mutex, quiescence, pipes and named
+pipes, the GPT parser and writer, CPU-time accounting, nice values, the
+scheduler's fair level and the framebuffer validator, each a `NAME.nova`
+(the list is `PORTS` in `scripts/nova-gen.py`). Since roadmap 2.0 SA1 the
+tree holds the `.nova` files and **not the C made from them** (the Nova
+rule's point 7): **building CosmoOS runs the pinned Nova compiler.**
+`build/nova.mk` runs `scripts/nova-gen.py`, which compiles each source with
+`novac build --profile freestanding --no-float --emit c` and adds a "do
+not edit" banner naming the source, into `out/nova/`, at the path the file
+would have in the tree (`out/nova/kernel/core/fbvalid.c`). Every object,
+host test and fuzz target made from a generated file takes it from there,
+and the generated headers (`kernel/include/kernel/NAME_types.h`, Nova's
+runtime `kernel/include/nova/rt.h`) are on the include path before the
+tree's. Nova's runtime is generated too (`kernel/nova/nova_rt_core.c`).
 Each environment supplies its own panic hook, called when a Nova check
 fails (`kernel/nova/nova_panic.c` panics the kernel, naming the Nova line;
-`tests/host/nova_panic.c` aborts).
+`tests/host/nova_panic.c` aborts). A prefix map gives the generated C the
+paths it has in the tree, so a build from `out/nova` and one from a source
+tarball are the same bytes.
 
-How to write a port, its header and its tests is
-[`nova.md`](nova.md). Changing a `.nova` file needs the pinned compiler: `make nova` runs
-`scripts/nova-gen.py`, which compiles each source with `novac build
---profile freestanding --no-float --emit c`, adds the banner and writes
-the results. A new port is one line in the script's `PORTS`. The compiler
-is pinned (`NOVAC_VERSION` in the script; `make nova` refuses any other):
-generated C is a pure function of the source and the compiler, so the
-pinned novac reproduces the checked-in files byte for byte. Moving to a
-newer novac is a change of its own: bump the pin and the CI job's
-`NOVAC_SHA256` (the release's `SHA256SUMS`), `make nova`, review the diff,
-run the matrix. The pinned release is installed with
+How to write a port, its header and its tests is [`nova.md`](nova.md). A
+new port is one line in the script's `PORTS`. The compiler is pinned
+(`NOVAC_VERSION` in the script; the build refuses any other): generated C
+is a pure function of the source and the compiler. Moving to a newer novac
+is a change of its own: bump the pin, the CI job's `NOVAC_SHA256` and the
+CI image's (`ci/Dockerfile`; the release's `SHA256SUMS`), build, run the
+matrix. The pinned release is installed with
 
 ```sh
 curl -fsSL https://vkuttyp.github.io/Nova/install.sh | NOVA_VERSION=v0.6.0 sh
 ```
 
-or named with `NOVAC=<path>`. `make nova-check` only compares, and CI's
-"Nova sources" job runs it with the pinned release (its Linux x64 archive,
-verified against the release's SHA-256), so a `.nova` change without its
-regenerated C, or a hand edit to generated C, fails CI.
+or named with `NOVAC=<path>`; the CI image has it (`ci/Dockerfile`).
 
-`make nova` and `make nova-check` also check the Nova sources the kernel
+**Building without novac.** novac does not run on CosmoOS, so a
+self-hosted build cannot run it (Nova's ADR 0023). `make dist`
+(`scripts/dist.py`) writes `out/dist/cosmoos-<build id>-src.tar.gz`: the
+tree with the generated C beside each `.nova` source, `.nova-dist` (which
+tells `build/nova.mk` the C is there, so no novac is run) and `.build-id`
+(the commit's `git describe`, which the build would otherwise ask git for).
+A release publishes it beside the release sets, in the signed
+`SHA256SUMS`. `make reproducible` builds its second tree from such a
+tarball, with a `novac` that fails if anything runs it, and requires every
+output to be the same bytes as the first tree's
+(`scripts/check-reproducible.sh`): so a tarball builds with no novac, and
+its C is what the pinned novac makes. CI runs it on both architectures.
+
+`make nova-check` (and CI's "Nova sources" job) also checks the Nova sources the kernel
 must refuse, `tests/nova/negative/*.nova`: each line marked `//
 error[N…]` must be refused with that code by `novac check` (with the
 kernel library), and no other line may be, so the accepted cases beside

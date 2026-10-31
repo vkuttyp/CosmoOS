@@ -17,16 +17,19 @@ image (`find-firmware.sh`), and that the compiler can actually produce an
 object for `x86_64-unknown-none-elf` and `x86_64-unknown-windows`. Every
 missing item is listed; the script exits 1 if any is missing.
 
-## Generated C
+## Nova sources
 
 ```sh
 make nova-check
 ```
 
-`scripts/nova-gen.py --check` recompiles every Nova source with the pinned
-novac and fails if a checked-in generated file differs
-(`docs/build/design.md`, "Nova sources"). CI's "Nova sources" job runs it;
-locally it needs the pinned novac.
+`scripts/nova-gen.py` compiles every Nova source with the pinned novac
+into `out/nova` and checks the sources the kernel must refuse
+(`tests/nova/negative/*.nova`: exactly the errors their `// error[N…]`
+lines name). CI's "Nova sources" job runs it; locally it needs the pinned
+novac, as every build does (`docs/build/design.md`, "Nova sources"). That
+the generated C is what a source tarball carries, and builds the same
+bytes with no novac, is `make reproducible`'s (below).
 
 ## The Nova share
 
@@ -84,8 +87,11 @@ make reproducible            # or scripts/check-reproducible.sh x86_64 debug
 ```
 
 Builds the tree twice into `out/repro-a` and `out/repro-b` and compares
-`kernel/kernel.elf` and `boot/BOOTX64.EFI` with `cmp`. Current result:
-identical. If this fails, the diff usually points at a new absolute path
+every output of the release set with `cmp` (`scripts/check-reproducible.sh`
+lists them). The second build is of a `make dist` tree
+(`out/repro-src`, the generated C beside each `.nova` source), with a
+`novac` that fails if run: so a source tarball builds with no novac, and
+its C is the pinned novac's. Current result: identical. If this fails, the diff usually points at a new absolute path
 or timestamp; `llvm-objdump -s` on both files locates the differing
 section.
 

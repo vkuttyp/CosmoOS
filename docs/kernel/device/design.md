@@ -219,12 +219,11 @@ Roadmap M2. A disk's GUID Partition Table is read by `gpt_parse`
 through a callback, so the host tests, the fuzzer (`fuzz_gpt`) and the
 installer link the same file. Since 2026-10-26 the parser and writer are
 written in Nova, a memory-safe language compiled to C: `gpt.c` is Nova's
-generated C, checked in so the build needs no Nova compiler, with Nova's
+generated C, made by the build (`out/nova/kernel/block/gpt.c`), with Nova's
 runtime (`kernel/include/nova/rt.h`, `kernel/nova/`). Every index, length
 and arithmetic step is checked; a failed check is a kernel panic naming
 the Nova source line (`kernel/nova/nova_panic.c`), never a read or write
-outside the buffers. Do not edit `gpt.c`: change its source, `kernel/block/gpt.nova`, and
-run `make nova` (`docs/build/design.md`, "Nova sources"; the method and
+outside the buffers. Change its source, `kernel/block/gpt.nova`; the build regenerates `gpt.c` (`docs/build/design.md`, "Nova sources"; the method and
 the comparison against the C original are Nova's
 `docs/cosmoos/c9-report.md`). The checks, their order and their reasons
 are the C original's. A table is accepted only whole: a

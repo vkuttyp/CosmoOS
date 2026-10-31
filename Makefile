@@ -42,7 +42,9 @@
 #   make check-tools  verify the cross toolchain is usable (and run check-secrets)
 #   make check-secrets  fail if a private or revoked module-signing key is tracked
 #   make check-docs   every subsystem in docs/README.md has its five documentation files
-#   make nova         regenerate the C of the kernel's Nova sources with the pinned novac (nova-check: compare only)
+#   make nova         generate the C of the kernel's Nova sources into out/nova with the pinned novac (the build does)
+#   make nova-check   the same, and the negative sources (tests/nova/negative) refused as they say
+#   make dist         a source tarball with the generated C beside each source, which builds with no novac
 #   make test-stackprot BUILD-1: a stack buffer overrun on purpose must panic as one (the stack protector)
 #   make clang-eval   roadmap 1.2 A1: a static musl clang+lld for ARCH, for the evaluation (tools/clang-eval/)
 #   make test-clang-eval  run that clang on this build installed (BUILD=release)
@@ -53,10 +55,11 @@
 ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 
 include $(ROOT)/build/config.mk
+include $(ROOT)/build/nova.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-selfhost test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-crash-nova test-stackprot test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check clean help litmus
+.PHONY: FORCE all kernel boot modules image run test test-entropy test-modcycle test-install test-encrypt test-encrypt-b1b4 test-snapshot test-fsck test-pci-hotplug test-mirror test-pkgtx test-be test-large test-fill test-selfhost test-upgrade test-security test-busybox test-net-login test-pkg-net test-display test-gic test-platforms test-guard test-smp2 test-crash test-crash-nova test-stackprot test-wxn test-chaos test-harness-retry analyze analysis-gate reproducible release release-set compile-commands check-tools check-secrets check-docs nova nova-check dist clean help litmus
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -730,7 +733,7 @@ analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE) $(
 	$(Q)$(MAKE) --no-print-directory analysis-gate
 
 reproducible:
-	$(Q)$(ROOT)/scripts/check-reproducible.sh $(ARCH) $(BUILD)
+	$(Q)MAKE="$(MAKE)" $(ROOT)/scripts/check-reproducible.sh $(ARCH) $(BUILD)
 
 check-docs:
 	$(Q)$(PYTHON) $(ROOT)/scripts/check-docs.py $(ROOT)
@@ -738,21 +741,30 @@ check-docs:
 # The C generated from the kernel's Nova sources (docs/build/design.md, "Nova sources"): nova
 # regenerates it with the pinned novac; nova-check only compares.
 nova:
-	$(Q)$(PYTHON) $(ROOT)/scripts/nova-gen.py
+	$(Q)$(PYTHON) $(ROOT)/scripts/nova-gen.py --out out/nova
+	$(Q)touch $(NOVA_STAMP)
 
+# Every Nova source compiles with the pinned novac and the negative sources are refused as they say; that a build from
+# the generated C is the same bytes as one from a dist tarball is make reproducible's.
 nova-check:
-	$(Q)$(PYTHON) $(ROOT)/scripts/nova-gen.py --check
+	$(Q)$(PYTHON) $(ROOT)/scripts/nova-gen.py --out out/nova
+	$(Q)touch $(NOVA_STAMP)
+
+# A source tarball that builds with no novac: the generated C beside each .nova source (scripts/dist.py; Nova's ADR
+# 0023). make reproducible builds its second tree from one.
+dist:
+	$(Q)$(PYTHON) $(ROOT)/scripts/dist.py
 
 # compile_commands.json for clangd/IDEs, using the real cross flags so
 # editor diagnostics match the build. The file is git-ignored.
 ARCH_INC := -I$(ROOT)/kernel/arch/$(ARCH)/include
-compile-commands:
+compile-commands: | $(NOVA_STAMP)
 	$(call log,GEN,$(ROOT)/compile_commands.json)
 	$(Q)( \
-	  $(foreach s,$(KERNEL_GENERIC_SRCS),printf '%s\t%s\n' '$(s)' '$(KERNEL_CFLAGS)';) \
+	  $(foreach s,$(KERNEL_GENERIC_SRCS),printf '%s\t%s\n' '$(patsubst $(ROOT)/%,%,$(call src_paths,$(s)))' '$(KERNEL_CFLAGS)';) \
 	  $(foreach s,$(filter %.c,$(KERNEL_ARCH_SRCS)),printf '%s\t%s\n' '$(s)' '$(KERNEL_CFLAGS) $(ARCH_INC)';) \
 	  $(foreach s,$(LOADER_SRCS),printf '%s\t%s\n' '$(s)' '$(LOADER_CFLAGS)';) \
-	  $(foreach m,$(MODULES),$(foreach s,$(MODULE_$(m)_SRCS),printf '%s\t%s\n' '$(s)' '$(MODULE_CFLAGS)';)) \
+	  $(foreach m,$(MODULES),$(foreach s,$(MODULE_$(m)_SRCS),printf '%s\t%s\n' '$(patsubst $(ROOT)/%,%,$(call src_paths,$(s)))' '$(MODULE_CFLAGS)';)) \
 	) | $(PYTHON) $(ROOT)/scripts/gen-compile-commands.py $(ROOT) $(CC) > $(ROOT)/compile_commands.json
 
 check-tools:

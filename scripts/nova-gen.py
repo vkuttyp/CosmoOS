@@ -164,36 +164,52 @@ def refused(exe: str) -> list[str]:
     return wrong
 
 
+def outputs() -> list[str]:
+    """Every generated file's path, relative to the tree, without running novac (make's list)."""
+    paths = [target for _, target, _, _, _ in PORTS] + [h for _, _, _, h, _ in PORTS if h] + [p for _, p in RUNTIME]
+    return sorted(set(paths))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate the C of CosmoOS's Nova sources.")
-    parser.add_argument("--check", action="store_true", help="compare with the checked-in files instead of writing")
+    parser.add_argument("--out", default="out/nova",
+                        help="the directory the generated files go under, at their paths in the tree (default out/nova; "
+                             "`make dist` writes them into the tree it packs)")
+    parser.add_argument("--check", action="store_true", help="compare with the files under --out instead of writing")
+    parser.add_argument("--list", action="store_true", help="print each generated file's path and exit (no novac)")
+    parser.add_argument("--no-negative", action="store_true", help="skip the negative sources (the build's own run)")
     parser.add_argument("--pinned", action="store_true", help="print the pinned novac version and exit")
     args = parser.parse_args()
     if args.pinned:
         print(NOVAC_VERSION)
         return 0
+    if args.list:
+        print("\n".join(outputs()))
+        return 0
+    out = (ROOT / args.out).resolve()
     exe = novac()
     with tempfile.TemporaryDirectory() as temp:
         files = generated(exe, Path(temp))
     stale = []
     for path, text in files.items():
-        target = ROOT / path
+        target = out / path
         if target.exists() and target.read_text() == text:
             continue
         stale.append(path)
         if not args.check:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text)
+    where = out.relative_to(ROOT) if out.is_relative_to(ROOT) else out
     for path in stale:
-        print(f"nova-gen: {'differs from its Nova source' if args.check else 'wrote'}: {path}")
+        print(f"nova-gen: {'differs from its Nova source' if args.check else 'wrote'}: {where}/{path}")
     if not stale:
-        print(f"nova-gen: {len(files)} generated files match their Nova sources (novac {NOVAC_VERSION})")
+        print(f"nova-gen: {len(files)} generated files under {where} match their Nova sources (novac {NOVAC_VERSION})")
     elif args.check:
-        print("nova-gen: run `make nova` with the pinned novac and commit the result")
-    wrong = refused(exe)
+        print(f"nova-gen: {where} is not what the pinned novac makes of the Nova sources")
+    wrong = [] if args.no_negative else refused(exe)
     for line in wrong:
         print(f"nova-gen: {line}")
-    if not wrong:
+    if not wrong and not args.no_negative:
         print(f"nova-gen: {len(NEGATIVE)} negative source(s) refused as their annotations say")
     return 1 if (args.check and stale) or wrong else 0
 
