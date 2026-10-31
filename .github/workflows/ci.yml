@@ -136,6 +136,35 @@ jobs:
       - name: Generated C matches its Nova sources
         run: python3 scripts/nova-gen.py --check
 
+  # Roadmap 2.0 SA1 (docs/roadmap-2.0.md, "The Nova rule"): how much of ring
+  # 0 and of CosmoOS's own userland is Nova (scripts/nova-share.py), and no
+  # change adds C to convert to any tree: a pull request against the commit
+  # it branched from, a push to main against the commit before it. On every
+  # run, like the Nova sources check.
+  nova-share:
+    name: nova-share
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: The Nova share, and no new C to convert
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            base=$(git merge-base "$PR_BASE" HEAD)
+          elif [ -n "$PUSH_BEFORE" ] && ! printf '%s' "$PUSH_BEFORE" | grep -qx '0*'; then
+            base=$PUSH_BEFORE
+          else
+            base=HEAD
+          fi
+          python3 scripts/nova-share.py --gate "$base"
+
   build-and-boot:
     name: build, boot, analyze (${{ matrix.arch }}, ${{ matrix.part }})
     runs-on: ${{ matrix.os }}
