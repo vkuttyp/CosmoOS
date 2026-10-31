@@ -68,12 +68,12 @@ static const char *strtab_get(const void *file, const struct elf64_shdr *strtab,
     return base + off;
 }
 
-int modelf_validate(const void *file, size_t size, struct modelf_layout *out, const char **why)
+int modelf_validate_for(const void *file, size_t size, uint16_t machine, const char *not_machine,
+                        struct modelf_layout *out, const char **why)
 {
     const uint8_t *bytes = file;
     if (why)
         *why = "";
-    memset(out, 0, sizeof(*out));
 
     REJECT(size < sizeof(struct elf64_ehdr), "file shorter than an ELF header");
     const struct elf64_ehdr *eh = file;
@@ -82,7 +82,7 @@ int modelf_validate(const void *file, size_t size, struct modelf_layout *out, co
     REJECT(eh->e_ident[EI_DATA] != ELFDATA2LSB, "not little endian");
     REJECT(eh->e_ident[EI_VERSION] != EV_CURRENT || eh->e_version != EV_CURRENT, "bad ELF version");
     REJECT(eh->e_type != ET_REL, "not a relocatable object (ET_REL)");
-    REJECT(eh->e_machine != ELF_MACHINE_NATIVE, "not a native (" ELF_MACHINE_NATIVE_NAME ") object");
+    REJECT(eh->e_machine != machine, not_machine);
     REJECT(eh->e_ehsize != sizeof(struct elf64_ehdr), "bad e_ehsize");
     REJECT(eh->e_shentsize != sizeof(struct elf64_shdr), "bad e_shentsize");
     REJECT(eh->e_shnum < 2, "no sections");
@@ -218,19 +218,20 @@ static bool name_char_ok(char c)
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
 }
 
-int modelf_check_info(const struct cosmo_module_info *info, const char **why)
+int modelf_check_info_for(const uint8_t *magic, uint32_t abi_version, const uint8_t *name, const uint8_t *version,
+                          const uint8_t *deps_text, const uint64_t *reserved, const char **why)
 {
-    REJECT(memcmp(info->magic, COSMO_MODULE_MAGIC, sizeof(info->magic)) != 0, "bad module metadata magic");
-    REJECT(info->abi_version != COSMO_MODULE_ABI_VERSION, "module ABI version mismatch");
-    REJECT(memchr(info->name, '\0', sizeof(info->name)) == NULL, "module name not terminated");
-    REJECT(info->name[0] == '\0', "empty module name");
-    for (const char *p = info->name; *p; p++)
+    REJECT(memcmp(magic, COSMO_MODULE_MAGIC, 8) != 0, "bad module metadata magic");
+    REJECT(abi_version != COSMO_MODULE_ABI_VERSION, "module ABI version mismatch");
+    REJECT(memchr(name, '\0', MODULE_NAME_MAX) == NULL, "module name not terminated");
+    REJECT(name[0] == '\0', "empty module name");
+    for (const char *p = (const char *)name; *p; p++)
         REJECT(!name_char_ok(*p), "module name has characters outside [A-Za-z0-9_-]");
-    REJECT(memchr(info->version, '\0', sizeof(info->version)) == NULL, "module version not terminated");
-    REJECT(memchr(info->deps, '\0', sizeof(info->deps)) == NULL, "module deps not terminated");
+    REJECT(memchr(version, '\0', MODULE_VERSION_MAX) == NULL, "module version not terminated");
+    REJECT(memchr(deps_text, '\0', MODULE_DEPS_MAX) == NULL, "module deps not terminated");
     unsigned deps = 0;
     unsigned run = 0;
-    for (const char *p = info->deps; *p; p++) {
+    for (const char *p = (const char *)deps_text; *p; p++) {
         if (*p == ',') {
             REJECT(run == 0, "empty dependency name");
             deps++;
@@ -247,6 +248,6 @@ int modelf_check_info(const struct cosmo_module_info *info, const char **why)
         REJECT(deps > 0, "trailing comma in deps");
     REJECT(deps > MODULE_MAX_DEPS, "too many dependencies");
     for (unsigned i = 0; i < 4; i++)
-        REJECT(info->reserved[i] != 0, "reserved metadata words are not zero");
+        REJECT(reserved[i] != 0, "reserved metadata words are not zero");
     return 0;
 }

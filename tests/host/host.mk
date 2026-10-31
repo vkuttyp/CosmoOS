@@ -138,7 +138,7 @@ $(HOST_OUT)/test_relsig: $(call src_paths,$(HOST_RELSIG_SRCS)) | $(CEE_STAMP)
 $(HOST_OUT)/test_modelf: $(call src_paths,$(HOST_MODELF_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -DMODELF_HOST_TEST=1 $^ $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE -DMODELF_HOST_TEST=1 $^ $(HOST_LDFLAGS) -o $@
 
 #
 # This test is one translation unit that `#include`s the library sources it

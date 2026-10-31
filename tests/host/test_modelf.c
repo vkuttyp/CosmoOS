@@ -3,6 +3,16 @@
  * ET_REL images on the host under ASan/UBSan. A tiny builder assembles a
  * well-formed module image; each test mutates one thing and asserts on
  * the exact rule the validator reports.
+ *
+ * And a recorded digest (roadmap 2.0 SA5's differential test for the
+ * module-ELF family): 50,000 images from a seeded generator -- the
+ * builder's, with header, section-header and symbol fields set to edge
+ * values, bytes flipped, the size cut -- through modelf_validate_for under
+ * both machines, the accessors on what it accepts, and modelf_check_info_for
+ * on metadata records with names, versions and dependency lists good and
+ * bad. Every result is a line; the lines' FNV-1a digest is recorded below.
+ * The C gave it (modelf.c); the CeeSafe must give the same. MODELF_DUMP=1
+ * prints the lines; MODELF_BENCH=1 times the validator.
  */
 
 #include "harness.h"
@@ -14,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int validate(const struct image *img, struct modelf_layout *l, const char **why)
 {
@@ -281,6 +292,211 @@ static void test_info_rules(void)
     EXPECT(modelf_check_info(&bad, &why) == -ENOEXEC && strcmp(why, "reserved metadata words are not zero") == 0);
 }
 
+/* --- the recorded digest --------------------------------------------------- */
+
+#define ROUNDS 50000
+#define SEED 0x40DE1F5A52026E11ull
+/* The digest of the C validator (modelf.c, 2026-10-31). */
+#define MODELF_DIGEST 0xeaa7bf3ed05aa6ffull
+
+static uint64_t g_rng;
+
+static uint64_t next(void)
+{
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 7;
+    g_rng ^= g_rng << 17;
+    return g_rng;
+}
+
+static const uint64_t EDGES[] = { 0, 1, 2, 3, 4, 7, 8, 9, 16, 24, 64, 0x1000, 0x1001, 0xff00, 0xffff, 0x40000000,
+                                  0x80000001, 0xffffffff, 0xffffffffffffffffull, 0x8000000000000000ull };
+
+static uint64_t value(void)
+{
+    return next() % 2 ? EDGES[next() % (sizeof(EDGES) / sizeof(EDGES[0]))] : next() % 4096;
+}
+
+/* The builder's image, changed: an ELF header field, a section header's field, a symbol's, a flipped byte, a cut. */
+static struct image make_image(uint16_t *machine)
+{
+    struct image img = build_image();
+    *machine = next() % 4 ? EM_X86_64 : EM_AARCH64;
+    unsigned edits = (unsigned)(next() % 4);
+    for (unsigned k = 0; k < edits && img.size > 0; k++) {
+        uint64_t v = value();
+        switch (next() % 6) {
+        case 0: {
+            switch (next() % 7) {
+            case 0: img.eh->e_type = (uint16_t)v; break;
+            case 1: img.eh->e_shoff = v; break;
+            case 2: img.eh->e_shnum = (uint16_t)v; break;
+            case 3: img.eh->e_shstrndx = (uint16_t)v; break;
+            case 4: img.eh->e_shentsize = (uint16_t)v; break;
+            case 5: img.eh->e_ehsize = (uint16_t)v; break;
+            default: img.eh->e_version = (uint32_t)v; break;
+            }
+            break;
+        }
+        case 1:
+        case 2: {
+            uint16_t shnum = 11;   /* S_COUNT */
+            struct elf64_shdr *sh = &img.sh[next() % shnum];
+            switch (next() % 9) {
+            case 0: sh->sh_name = (uint32_t)v; break;
+            case 1: sh->sh_type = (uint32_t)v; break;
+            case 2: sh->sh_flags = v; break;
+            case 3: sh->sh_offset = v; break;
+            case 4: sh->sh_size = v; break;
+            case 5: sh->sh_link = (uint32_t)v; break;
+            case 6: sh->sh_info = (uint32_t)v; break;
+            case 7: sh->sh_addralign = v; break;
+            default: sh->sh_entsize = v; break;
+            }
+            break;
+        }
+        case 3:
+        case 4:
+            img.bytes[next() % img.size] ^= (uint8_t)(1u << (next() % 8));
+            break;
+        default:
+            img.size = (size_t)(next() % (img.size + 1));
+            break;
+        }
+    }
+    return img;
+}
+
+static void emit(uint64_t *digest, const char *line, int n, bool dump)
+{
+    for (int i = 0; i < n; i++) {
+        *digest ^= (uint8_t)line[i];
+        *digest *= 0x100000001b3ull;
+    }
+    *digest ^= '\n';
+    *digest *= 0x100000001b3ull;
+    if (dump)
+        printf("%s\n", line);
+}
+
+static int validate_for(const struct image *img, uint16_t machine, struct modelf_layout *l, const char **why)
+{
+    memset(l, 0, sizeof(*l));
+    return modelf_validate_for(img->bytes, img->size, machine, "not this machine", l, why);
+}
+
+static void run_image(uint64_t *digest, bool dump, unsigned *accepted)
+{
+    uint16_t machine;
+    struct image img = make_image(&machine);
+    struct modelf_layout l;
+    const char *why = NULL;
+    int rc = validate_for(&img, machine, &l, &why);
+    char line[4096];
+    int n = snprintf(line, sizeof(line), "v%d %s g%llx:%llx:%llx n%u s%u t%u h%u i%u k%u o%llx y%u", rc, why ? why : "-",
+                     (unsigned long long)l.group_size[0], (unsigned long long)l.group_size[1],
+                     (unsigned long long)l.group_size[2], l.nr_sections, l.symtab, l.strtab, l.shstrtab, l.info_section,
+                     l.ksymtab_section, (unsigned long long)l.info_file_off, l.nr_symbols);
+    for (unsigned i = 0; i < l.nr_sections && i < MODELF_MAX_SECTIONS; i++) {
+        const struct modelf_section *s = &l.sections[i];
+        n += snprintf(line + n, sizeof(line) - (size_t)n, " [%u %u %d %llx %llx %llx %llx]", s->index, s->group,
+                      s->nobits, (unsigned long long)s->offset, (unsigned long long)s->size,
+                      (unsigned long long)s->file_off, (unsigned long long)s->align);
+    }
+    if (rc == 0) {
+        *accepted += 1;
+        uint16_t shnum = ((const struct elf64_ehdr *)img.bytes)->e_shnum;
+        for (uint32_t i = 0; i < shnum; i++) {
+            const struct modelf_section *f = modelf_find_section(&l, i);
+            n += snprintf(line + n, sizeof(line) - (size_t)n, " (%s %td %td)", modelf_section_name(img.bytes, &l, i),
+                          f ? f - l.sections : -1, (const uint8_t *)modelf_shdr(img.bytes, i) - img.bytes);
+        }
+    }
+    EXPECT(n > 0 && (size_t)n < sizeof(line));
+    emit(digest, line, n, dump);
+    free(img.bytes);
+}
+
+/* A metadata record: magic, ABI version, name, version, dependencies, reserved words, each good or bad. */
+static void run_info(uint64_t *digest, bool dump, unsigned *accepted)
+{
+    struct cosmo_module_info info;
+    memset(&info, 0, sizeof(info));
+    memcpy(info.magic, next() % 8 ? COSMO_MODULE_MAGIC : "COSMOMOX", 8);
+    info.abi_version = next() % 8 ? COSMO_MODULE_ABI_VERSION : (uint32_t)next();
+    static const char alphabet[] = "abcXYZ019_-,. /";
+    size_t nl = next() % 8 ? (size_t)(next() % MODULE_NAME_MAX) : MODULE_NAME_MAX;
+    for (size_t i = 0; i < nl; i++)
+        info.name[i] = next() % 16 ? alphabet[next() % 10] : alphabet[next() % (sizeof(alphabet) - 1)];
+    size_t vl = (size_t)(next() % (MODULE_VERSION_MAX + 1));
+    for (size_t i = 0; i < vl; i++)
+        info.version[i] = (char)('0' + next() % 10);
+    size_t dl = next() % 3 ? (size_t)(next() % 64) : (size_t)(next() % (MODULE_DEPS_MAX + 1));
+    for (size_t i = 0; i < dl; i++)
+        info.deps[i] = next() % 6 ? alphabet[next() % 10] : alphabet[10 + next() % 5];
+    if (next() % 8 == 0)
+        info.reserved[next() % 4] = next();
+    const char *why = NULL;
+    int rc = modelf_check_info_for((const uint8_t *)info.magic, info.abi_version, (const uint8_t *)info.name,
+                                   (const uint8_t *)info.version, (const uint8_t *)info.deps, info.reserved, &why);
+    *accepted += rc == 0;
+    char line[256];
+    int n = snprintf(line, sizeof(line), "c%d %s", rc, rc == 0 ? "-" : why);
+    emit(digest, line, n, dump);
+}
+
+static void test_recorded_digest(void)
+{
+    bool dump = getenv("MODELF_DUMP") != NULL;
+    uint64_t digest = 0xcbf29ce484222325ull;
+    unsigned images = 0, infos = 0;
+    g_rng = SEED;
+    for (unsigned r = 0; r < ROUNDS; r++) {
+        run_image(&digest, dump, &images);
+        run_info(&digest, dump, &infos);
+    }
+    printf("  modelf digest 0x%016llx over %u images and records (accepted %u images, %u records)\n",
+           (unsigned long long)digest, ROUNDS, images, infos);
+    EXPECT(images > 1000 && infos > 1000);
+    EXPECT(digest == MODELF_DIGEST);
+}
+
+static volatile uint64_t g_sink;
+
+static int bench(void)
+{
+    enum { N = 20000 };
+    struct image *imgs = malloc(sizeof(*imgs) * N);
+    uint16_t *machines = malloc(sizeof(*machines) * N);
+    if (imgs == NULL || machines == NULL)
+        return 1;
+    g_rng = SEED;
+    for (unsigned r = 0; r < N; r++)
+        imgs[r] = make_image(&machines[r]);
+    double best = 1e30;
+    for (int run = 0; run < 15; run++) {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        uint64_t acc = 0;
+        for (unsigned r = 0; r < N; r++) {
+            struct modelf_layout l;
+            const char *why;
+            acc += (uint64_t)validate_for(&imgs[r], machines[r], &l, &why) + l.nr_sections;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        g_sink += acc;
+        double ns = (double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec);
+        if (ns < best)
+            best = ns;
+    }
+    printf("modelf bench: %.2f ns per image (best of 15 runs of %u)\n", best / N, N);
+    for (unsigned r = 0; r < N; r++)
+        free(imgs[r].bytes);
+    free(imgs);
+    free(machines);
+    return 0;
+}
+
 static const struct host_test tests[] = {
     { "unaligned-tables", test_unaligned_tables },
     { "modelf-good", test_good_image },
@@ -288,9 +504,12 @@ static const struct host_test tests[] = {
     { "modelf-sections", test_section_rules },
     { "modelf-symbols", test_symbol_rules },
     { "modelf-info", test_info_rules },
+    { "recorded digest", test_recorded_digest },
 };
 
 int main(void)
 {
+    if (getenv("MODELF_BENCH") != NULL)
+        return bench();
     return harness_run(tests, sizeof(tests) / sizeof(tests[0]));
 }

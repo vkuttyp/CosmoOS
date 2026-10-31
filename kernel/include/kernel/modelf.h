@@ -48,11 +48,26 @@ struct modelf_layout {
     uint32_t nr_symbols;                  /* entries in .symtab, incl. index 0 */
 };
 
-int modelf_validate(const void *file, size_t size, struct modelf_layout *out, const char **why);
+/* The validator takes this architecture's machine and its refusal
+ * message; modelf_validate zeroes the layout and passes them. */
+int modelf_validate_for(const void *file, size_t size, uint16_t machine, const char *not_machine,
+                        struct modelf_layout *out, const char **why);
+static inline int modelf_validate(const void *file, size_t size, struct modelf_layout *out, const char **why)
+{
+    __builtin_memset(out, 0, sizeof(*out));
+    return modelf_validate_for(file, size, ELF_MACHINE_NATIVE, "not a native (" ELF_MACHINE_NATIVE_NAME ") object", out,
+                               why);
+}
 
 /* Metadata rules: magic, ABI version, name syntax, deps syntax and
  * count, reserved words zero. -ENOEXEC and `why` on failure. */
-int modelf_check_info(const struct cosmo_module_info *info, const char **why);
+int modelf_check_info_for(const uint8_t *magic, uint32_t abi_version, const uint8_t *name, const uint8_t *version,
+                          const uint8_t *deps, const uint64_t *reserved, const char **why);
+static inline int modelf_check_info(const struct cosmo_module_info *info, const char **why)
+{
+    return modelf_check_info_for((const uint8_t *)info->magic, info->abi_version, (const uint8_t *)info->name,
+                                 (const uint8_t *)info->version, (const uint8_t *)info->deps, info->reserved, why);
+}
 
 /* Allocatable section by ELF index, or NULL. */
 const struct modelf_section *modelf_find_section(const struct modelf_layout *l, uint32_t index);
