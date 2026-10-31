@@ -397,6 +397,25 @@ metadata (`fuzz_cosmofs`); virtqueues, USB descriptors and ACPI tables
 - [ ] **Acceptance:** every fuzz target in `tests/fuzz/` drives CeeSafe code
   and none drives C; each family's benchmark within the rule's 5%.
 
+Scope (the owner, 2026-10-31): SA5 converts the **decoders**, every check
+and field read on input bytes, not the subsystems around them. A fuzz
+target over the network stack, cosmofs or the Linux layer still drives
+those subsystems' C until SA6-SA8 convert them; what SA5 requires is that
+every parser it reaches is CeeSafe. Each family: the C decoders moved
+unchanged behind a header, a host test with a digest recorded from that
+C over seeded inputs, the CeeSafe port giving the same digest, the
+benchmark, then the C deleted.
+
+Progress: network frames (2026-10-31): `kernel-services/network/netparse.cee`
+behind `kernel/net/netparse.h` -- Ethernet, ARP, the IPv4 header and its
+checksum and fragment check, IPv4 headers quoted in ICMP errors, IPv6,
+neighbour solicitations and advertisements, the UDP header, and the
+transport identifiers NAT and the firewall key on. `tests/host/test_netparse.c`'s
+digest over 200,000 inputs is the C's; the benchmark is 0.98x the C on
+arm64 and on x86-64 (Rosetta), after bulk copies and 48-bit MAC compares
+took the first port's 1.07-1.09x back. All four network fuzz targets
+run it.
+
 Size: about 3.0x.
 
 ### SA6 The network stack

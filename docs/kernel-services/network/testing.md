@@ -1184,6 +1184,22 @@ two defects, both fixed:
 `tools/net-fuzz-probe.py --old pf-clear|tap-release-order` puts each one
 back. `tools/fuzz-coverage.py` reports a target's line coverage by file.
 
+## The decoders (`tests/host/test_netparse.c`)
+
+The receive path's decoders (`netparse.cee`, `kernel/net/netparse.h`)
+have a host test of their own: direct checks of each, and a recorded
+digest over 200,000 seeded inputs, half of them a valid header of a
+layer with a few bytes changed so that the accepting paths are reached.
+The C decoders gave the digest (`0xb332eb59d8cf9149`, 2026-10-31) and
+the CeeSafe ones that replaced them give the same: roadmap 2.0's
+differential test. A change that moves it changes what the stack
+accepts; `NETPARSE_DUMP=1` prints every line to find the first that
+differs. `NETPARSE_BENCH=1` times the decoders (nanoseconds per input,
+best of 9 runs) for the 5% rule: the CeeSafe decoders took 0.98x the
+C's time at -O2 on arm64 (22.8 ns against 23.3 ns) and on x86-64 under
+Rosetta (33.5 against 34.0). Every fuzz target over the network stack
+runs them.
+
 ## Releases however a test returns (the net-leftover unit)
 
 `CHECK` returns at once. A network test used to release what it made

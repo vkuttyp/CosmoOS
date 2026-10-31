@@ -2197,7 +2197,13 @@ CPU later, pcb hashing) are the ones to optimise.
 
 Every header field that sizes anything is checked against the mbuf
 before use, headers are pulled up before they are cast, and options
-are skipped by length with bounds checks. ISNs come from
+are skipped by length with bounds checks. The receive path's decoders
+-- every check and field read on frame bytes, from the Ethernet header
+to the transport identifiers NAT and the firewall key on -- are CeeSafe
+(`netparse.cee` behind `kernel/net/netparse.h`; roadmap 2.0 SA5): each
+reads a slice of exactly the bytes its caller made contiguous, so an
+index past them is a bounds panic, not a read of another buffer. The
+callers keep the mbufs, the tables and the policy. ISNs come from
 `random_u64()`. Ports below 1024 require uid 0. Loopback addresses are
 never accepted from a real interface (martian filter). The stack drops
 packets whose source is one of our own addresses arriving from `eth0`.

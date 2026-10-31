@@ -9,8 +9,8 @@
  * refusals), every decoder run on each with lengths, MACs and option types
  * the generator also picks. Every result is a line, and the lines' FNV-1a
  * digest is recorded below: the differential test of the rule's point 5.
- * The C decoders gave it; the CeeSafe ones (netparse.cee) must give the
- * same before the C is deleted. NETPARSE_DUMP=1 prints the lines.
+ * The C decoders gave it (2026-10-31), and the CeeSafe ones that replaced
+ * them (netparse.cee) give the same. NETPARSE_DUMP=1 prints the lines.
  *
  * NETPARSE_BENCH=1 times the decoders instead: the same inputs, every
  * decoder on each, best of 9 runs, in nanoseconds per input (the 5% rule).
@@ -192,9 +192,9 @@ static void test_transports(void)
 
 #define ROUNDS 200000
 #define DIGEST_SEED 0x5A5E7F4A3E202610ull
-/* The digest of the C decoders (netparse.c, 2026-10-31). An implementation
- * that disagrees changes it: find the first differing line with
- * NETPARSE_DUMP=1 against the C. */
+/* The digest of the C decoders (2026-10-31), which netparse.cee gives too.
+ * A change that disagrees changes what the stack accepts: find the first
+ * differing line with NETPARSE_DUMP=1 against the commit before it. */
 #define NETPARSE_DIGEST 0xb332eb59d8cf9149ull
 
 struct input {

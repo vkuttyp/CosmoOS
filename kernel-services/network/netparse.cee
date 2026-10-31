@@ -1,0 +1,242 @@
+// netparse.cee - the network receive path's decoders (kernel/net/netparse.h; roadmap 2.0 SA5, the network-frame
+// family). Every check and field read the stack makes on bytes a frame brought: ether_input, arp_input, ipv4_input,
+// the quoted headers of ICMP errors (icmp_quoted_flow, nat_in_icmp_error), ipv6_input, nd_input_ns and nd_input_na,
+// udp_input, and the transport identifiers NAT and the firewall key on. The callers keep the mbufs, the tables and the
+// policy.
+//
+// Each decoder is a safe function over a slice of exactly the bytes the header's comment names; the exports below make
+// those slices from the caller's pointer, so an index past them is a bounds panic, never a read of another buffer.
+// tests/host/test_netparse.c holds them to the C they replaced: the same digest over 200,000 inputs.
+
+@header("kernel/net/netparse.h")
+extern "C" {
+    struct netparse_arp {
+        op: u16;
+        sha: [u8; 6];
+        spa: [u8; 4];
+        tpa: [u8; 4];
+    }
+    struct netparse_nd {
+        target: [u8; 16];
+        mac: [u8; 6];
+        has_mac: bool;
+    }
+    struct netparse_udp {
+        len: u16;
+        sport: u16;
+        dport: u16;
+        has_cksum: bool;
+    }
+    struct netparse_l4 {
+        sport: u16;
+        dport: u16;
+        seq: u32;
+        icmp_type: u8;
+        icmp_id: u16;
+        tcp_flags: u8;
+    }
+}
+
+// netparse.h's results.
+const ETH_OTHER: u32 = 0;
+const ETH_OWN: u32 = 1;
+const ETH_UNICAST: u32 = 2;
+const ETH_BROADCAST: u32 = 3;
+const ETH_MULTICAST: u32 = 4;
+const OK: u32 = 0;
+const BAD: u32 = 1;
+const BAD_CKSUM: u32 = 2;
+const FRAGMENT: u32 = 3;
+
+// The sizes of what each decoder reads.
+const ETH_HLEN: usize = 14;
+const ARP_LEN: usize = 28;
+const IPV4_MIN: usize = 20;
+const IPV6_HLEN: usize = 40;
+const ND_LEN: usize = 32;
+const UDP_HLEN: usize = 8;
+const L4_MIN: usize = 8;
+const L4_TCP_FLAGS: usize = 14;
+
+/// The big-endian 16-bit field at `at`.
+fn be16(b: Slice<u8>, at: usize) -> u16 => (b[at] as u16) << 8 | b[at + 1] as u16;
+
+/// The big-endian 32-bit field at `at`.
+fn be32(b: Slice<u8>, at: usize) -> u32 =>
+    (b[at] as u32) << 24 | (b[at + 1] as u32) << 16 | (b[at + 2] as u32) << 8 | b[at + 3] as u32;
+
+/// The six bytes at `at` as one 48-bit integer, so a MAC is compared in one operation (as memcmp does).
+fn mac48(b: Slice<u8>, at: usize) -> u64 =>
+    (b[at] as u64) << 40 | (b[at + 1] as u64) << 32 | (b[at + 2] as u64) << 24 | (b[at + 3] as u64) << 16 |
+        (b[at + 4] as u64) << 8 | b[at + 5] as u64;
+
+// --- Ethernet --------------------------------------------------------------------------------------------------------
+
+/// The header of a frame arriving on an interface whose MAC is `mac`: its class, and its EtherType in `etherType`.
+fn ether(hdr: Slice<u8>, mac: Slice<u8>, etherType: borrow mut u16) -> u32 {
+    let dst = mac48(hdr, 0);
+    let self = mac48(mac, 0);
+    let bcast = dst == 0xffffffffffff;
+    let mcast = (hdr[0] & 1) != 0;
+    etherType = be16(hdr, 12);
+    if (!bcast && !mcast && dst != self) {
+        return ETH_OTHER;
+    }
+    if (mac48(hdr, 6) == self) {
+        return ETH_OWN;
+    }
+    if (bcast) {
+        return ETH_BROADCAST;
+    }
+    if (mcast) {
+        return ETH_MULTICAST;
+    }
+    return ETH_UNICAST;
+}
+
+// --- IPv4 ------------------------------------------------------------------------------------------------------------
+
+/// The header length the first byte gives, in bytes (0-60).
+fn ihlOf(b: Slice<u8>) -> u32 => ((b[0] & 0xf) as u32) * 4;
+
+/// The fixed part of an IPv4 header in a packet of `pktLen` bytes.
+fn ipv4Outer(hdr: Slice<u8>, pktLen: u32, ihl: borrow mut u32, total: borrow mut u32) -> u32 {
+    let hl = ihlOf(hdr);
+    let len = be16(hdr, 2) as u32;
+    if ((hdr[0] >> 4) != 4 || hl < 20 || len < hl || len > pktLen) {
+        return BAD;
+    }
+    ihl = hl;
+    total = len;
+    return OK;
+}
+
+/// The whole header: its checksum (RFC 1071: a correct header sums to 0xffff), then its fragment fields.
+fn ipv4Header(hdr: Slice<u8>) -> u32 {
+    var sum: u32 = 0;
+    var i: usize = 0;
+    while (i + 1 < hdr.length) {
+        sum += be16(hdr, i) as u32;
+        i += 2;
+    }
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    if (sum != 0xffff) {
+        return BAD_CKSUM;
+    }
+    if ((be16(hdr, 6) & 0x3fff) != 0) {
+        return FRAGMENT;
+    }
+    return OK;
+}
+
+/// A quoted IPv4 header: version 4 and at least 20 bytes.
+fn ipv4Quote(q: Slice<u8>, ihl: borrow mut u32) -> bool {
+    let hl = ihlOf(q);
+    if ((q[0] >> 4) != 4 || hl < 20) {
+        return false;
+    }
+    ihl = hl;
+    return true;
+}
+
+// --- IPv6 ------------------------------------------------------------------------------------------------------------
+
+/// The fixed header of a packet of `pktLen` bytes.
+fn ipv6(hdr: Slice<u8>, pktLen: u32, plen: borrow mut u32) -> u32 {
+    let len = be16(hdr, 4) as u32;
+    // pktLen is a packet's length, under 2^32 - 40 by far; widened so the sum cannot overflow.
+    if ((hdr[0] >> 4) != 6 || (len as u64) + 40 > pktLen as u64) {
+        return BAD;
+    }
+    plen = len;
+    return OK;
+}
+
+// --- the exports -----------------------------------------------------------------------------------------------------
+
+/// Safety: `hdr` points to ETH_HLEN readable bytes and `mac` to 6 (netparse.h); `etherType` is writable.
+@export("netparse_ether")
+unsafe fn etherC(hdr: *u8, mac: *u8, etherType: *mut u16) -> u32 =>
+    ether(Slice.fromRaw(hdr, ETH_HLEN), Slice.fromRaw(mac, 6), Ptr.toBorrowMut(etherType));
+
+/// Safety: `pkt` points to ARP_LEN readable bytes and `out` to a writable struct (netparse.h).
+@export("netparse_arp")
+unsafe fn arpC(pkt: *u8, out: *mut netparse_arp) -> bool {
+    let p = Slice.fromRaw(pkt, ARP_LEN);
+    // htype 1 (Ethernet), ptype 0x0800 (IPv4), hlen 6, plen 4.
+    if (be16(p, 0) != 1 || be16(p, 2) != 0x0800 || p[4] != 6 || p[5] != 4) {
+        return false;
+    }
+    let a = Ptr.toBorrowMut(out);
+    a.op = be16(p, 6);
+    a.sha[..].copyFrom(p[8..14]);
+    a.spa[..].copyFrom(p[14..18]);
+    a.tpa[..].copyFrom(p[24..28]);
+    return true;
+}
+
+/// Safety: `hdr` points to IPV4_MIN readable bytes; `ihl` and `total` are writable.
+@export("netparse_ipv4_outer")
+unsafe fn ipv4OuterC(hdr: *u8, pktLen: u32, ihl: *mut u32, total: *mut u32) -> u32 =>
+    ipv4Outer(Slice.fromRaw(hdr, IPV4_MIN), pktLen, Ptr.toBorrowMut(ihl), Ptr.toBorrowMut(total));
+
+/// Safety: `hdr` points to `ihl` readable bytes, as netparse_ipv4_outer gave it (20-60).
+@export("netparse_ipv4_header")
+unsafe fn ipv4HeaderC(hdr: *u8, ihl: u32) -> u32 => ipv4Header(Slice.fromRaw(hdr, ihl as usize));
+
+/// Safety: `q` points to IPV4_MIN readable bytes; `ihl` is writable.
+@export("netparse_ipv4_quote")
+unsafe fn ipv4QuoteC(q: *u8, ihl: *mut u32) -> bool => ipv4Quote(Slice.fromRaw(q, IPV4_MIN), Ptr.toBorrowMut(ihl));
+
+/// Safety: `hdr` points to IPV6_HLEN readable bytes; `plen` is writable.
+@export("netparse_ipv6")
+unsafe fn ipv6C(hdr: *u8, pktLen: u32, plen: *mut u32) -> u32 =>
+    ipv6(Slice.fromRaw(hdr, IPV6_HLEN), pktLen, Ptr.toBorrowMut(plen));
+
+/// Safety: `msg` points to ND_LEN readable bytes and `out` to a writable struct.
+@export("netparse_nd")
+unsafe fn ndC(msg: *u8, optType: u8, out: *mut netparse_nd) {
+    let m = Slice.fromRaw(msg, ND_LEN);
+    let nd = Ptr.toBorrowMut(out);
+    // Bulk copies: one check each rather than one per byte (type-system.md §16.5).
+    nd.target[..].copyFrom(m[8..24]);
+    let hasMac = m[24] == optType && m[25] == 1;
+    nd.has_mac = hasMac;
+    if (hasMac) {
+        nd.mac[..].copyFrom(m[26..32]);
+    } else {
+        nd.mac[..].fill(0);
+    }
+}
+
+/// Safety: `hdr` points to UDP_HLEN readable bytes and `out` to a writable struct.
+@export("netparse_udp")
+unsafe fn udpC(hdr: *u8, pktLen: u32, out: *mut netparse_udp) -> u32 {
+    let h = Slice.fromRaw(hdr, UDP_HLEN);
+    let len = be16(h, 4);
+    if (len < 8 || len as u32 > pktLen) {
+        return BAD;
+    }
+    let u = Ptr.toBorrowMut(out);
+    u.len = len;
+    u.sport = be16(h, 0);
+    u.dport = be16(h, 2);
+    u.has_cksum = h[6] != 0 || h[7] != 0;
+    return OK;
+}
+
+/// Safety: `b` points to `avail` readable bytes, at least L4_MIN, and `out` to a writable struct.
+@export("netparse_l4")
+unsafe fn l4C(b: *u8, avail: u32, out: *mut netparse_l4) {
+    let n = if (avail as usize >= L4_TCP_FLAGS) L4_TCP_FLAGS else L4_MIN;
+    let h = Slice.fromRaw(b, n);
+    let l = Ptr.toBorrowMut(out);
+    l.sport = be16(h, 0);
+    l.dport = be16(h, 2);
+    l.seq = be32(h, 4);
+    l.icmp_type = h[0];
+    l.icmp_id = be16(h, 4);
+    l.tcp_flags = if (n == L4_TCP_FLAGS) h[13] else 0;
+}
