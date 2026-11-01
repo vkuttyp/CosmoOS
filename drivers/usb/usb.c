@@ -360,11 +360,14 @@ static int usb_enumerate(struct usb_device *udev)
         goto out;
     }
     udev->raw_len = total;
-    rc = usb_parse_config(udev);
+    unsigned dropped;
+    rc = usb_parse_config(udev, &dropped);
     if (rc) {
         kerror("usb: %s: malformed configuration descriptor", udev->dev.name);
         goto out;
     }
+    if (dropped)
+        kwarn("usb: %s: %u interface(s)/endpoint(s) beyond the limits were dropped", udev->dev.name, dropped);
 
     rc = hcd->ops->configure(hcd, udev);
     if (rc) {

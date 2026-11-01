@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-int usb_parse_config(struct usb_device *udev);
 
 size_t fuzz_max_len(void)
 {
@@ -36,7 +35,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     memcpy(udev->raw_config, data, n);
     udev->raw_len = (unsigned)size;   /* may exceed the buffer: the parser must refuse it first */
 
-    int rc = usb_parse_config(udev);
+    unsigned dropped;
+    int rc = usb_parse_config(udev, &dropped);
     FUZZ_ASSERT(udev->nr_intf <= USB_MAX_INTERFACES);
     if (rc == 0) {
         FUZZ_ASSERT(size >= sizeof(struct usb_config_descriptor) && size <= USB_CONFIG_MAX);

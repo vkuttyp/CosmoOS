@@ -8,7 +8,6 @@
  */
 
 #include <kernel/errno.h>
-#include <kernel/log.h>
 #include <kernel/string.h>
 
 #include <drivers/usb.h>
@@ -17,17 +16,19 @@
  * Walk the configuration by bLength. Every descriptor must fit in what
  * was read and be at least its own header long; the walk refuses
  * anything else rather than reading past the buffer. Interfaces and
- * endpoints beyond the limits are counted in the log and dropped;
+ * endpoints beyond the limits are counted in *dropped, for the caller
+ * to log, and dropped;
  * alternate settings other than 0 and unknown descriptor types are
  * skipped by their bLength.
  */
-int usb_parse_config(struct usb_device *udev)
+int usb_parse_config(struct usb_device *udev, unsigned *dropped_out)
 {
     const uint8_t *p = udev->raw_config;
     unsigned len = udev->raw_len, off = 0, dropped = 0;
     struct usb_interface *cur = NULL;
     udev->nr_intf = 0;
 
+    *dropped_out = 0;
     if (len < sizeof(struct usb_config_descriptor) || len > USB_CONFIG_MAX)
         return -EINVAL;
     memcpy(&udev->config, p, sizeof(udev->config));
@@ -37,8 +38,10 @@ int usb_parse_config(struct usb_device *udev)
 
     while (off + 2 <= len) {
         uint8_t dlen = p[off], dtype = p[off + 1];
-        if (dlen < 2 || off + dlen > len)
+        if (dlen < 2 || off + dlen > len) {
+            *dropped_out = dropped;
             return -EINVAL;
+        }
         if (dtype == USB_DT_INTERFACE && dlen >= sizeof(struct usb_interface_descriptor)) {
             const struct usb_interface_descriptor *d = (const void *)(p + off);
             if (d->bAlternateSetting != 0) {
@@ -62,9 +65,8 @@ int usb_parse_config(struct usb_device *udev)
         }
         off += dlen;
     }
+    *dropped_out = dropped;
     if (off != len)
         return -EINVAL;   /* a trailing byte that is not a descriptor */
-    if (dropped)
-        kwarn("usb: %s: %u interface(s)/endpoint(s) beyond the limits were dropped", udev->dev.name, dropped);
     return 0;
 }

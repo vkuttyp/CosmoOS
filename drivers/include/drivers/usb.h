@@ -315,8 +315,9 @@ unsigned usb_ep0_mps(enum usb_speed speed);
 void usb_core_init(void);
 
 /* Parse udev->raw_config (raw_len bytes) into config, intf[] and their
- * endpoints (usb_desc.c; fuzzed on the host). -EINVAL for anything that
- * does not walk cleanly to the end. */
-int usb_parse_config(struct usb_device *udev);
+ * endpoints (usb_desc; fuzzed on the host). -EINVAL for anything that
+ * does not walk cleanly to the end. *dropped: the interfaces and
+ * endpoints past the limits, for the caller to log. */
+int usb_parse_config(struct usb_device *udev, unsigned *dropped);
 
 #endif /* DRIVERS_USB_H */
