@@ -55,7 +55,7 @@ struct netif {
     uint8_t mac[6];
     uint32_t mtu;
     unsigned flags;
-    struct {
+    struct netif_ip4 {                  /* named, so CeeSafe can import it (its type-system.md §31.1) */
         uint32_t addr, mask, gateway;   /* network byte order; 0 = unset */
     } ip4;
     struct in6_addr ip6_ll;
