@@ -28,8 +28,8 @@ RUN apt-get update \
 # (build/cee.mk). Its Linux x64 release archive (github.com/vkuttyp/CeeSafe), checked against the release's SHA256SUMS;
 # one native executable built from C, needing glibc 2.35 or newer, which the image has. A bump changes this file, so
 # the image is rebuilt.
-ARG CEESAFEC_VERSION=0.3.2
-ARG CEESAFEC_SHA256=59c1810bba0bb90ec96756eda28869c847a0a332fd9e055043a18a5f45b09d22
+ARG CEESAFEC_VERSION=0.4.1
+ARG CEESAFEC_SHA256=f1074a837813d29c4dfbf12f6386743f8e8247342b036f9d9877441fb444e85c
 RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/vkuttyp/CeeSafe/releases/download/v${CEESAFEC_VERSION}/ceesafec-linux-x64.tar.gz', '/tmp/ceesafec.tar.gz')" \
  && echo "${CEESAFEC_SHA256}  /tmp/ceesafec.tar.gz" | sha256sum -c - \
  && mkdir -p /opt/ceesafec && tar -xzf /tmp/ceesafec.tar.gz -C /opt/ceesafec && rm /tmp/ceesafec.tar.gz \
