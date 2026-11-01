@@ -105,6 +105,7 @@ PORTS = [
      "The network receive path's decoders: frames, TCP segments, DHCP and DNS (netparse_types.h)",
      "kernel/include/kernel/net/netparse_types.h", False),
     ("kernel/core/fbvalid.cee", "kernel/core/fbvalid.c", "The framebuffer validator (bootinfo.h)", None, False),
+    ("kernel/core/lz4_decode.cee", "kernel/core/lz4_decode.c", "The LZ4 block decoder (lz4.h)", None, False),
     ("drivers/virtio/virtq_used.cee", "drivers/virtio/virtq_used.c",
      "The virtqueue's decoder of used elements (virtio.h; linked into the virtio module)", None, False),
     ("drivers/usb/usb_desc.cee", "drivers/usb/usb_desc.c",

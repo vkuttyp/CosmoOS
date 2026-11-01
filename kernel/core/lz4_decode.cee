@@ -1,0 +1,86 @@
+// The LZ4 block decoder (kernel/include/kernel/lz4.h), in CeeSafe: roadmap 2.0 SA5's last family, a parser of bytes
+// that came off a disk (cosmofs's compressed blocks). The compressor, which only reads the filesystem's own data, is
+// lz4.c, which also describes the format: a token byte (high nibble the literal length, low nibble the match length
+// less 4; 15 means "more", continued in bytes while each is 255), the literals, a two-byte little-endian offset back
+// into the output, and a match copied from there, which may overlap what it writes.
+//
+// The decoder is safe CeeSafe over slices, with the C's checks in the C's order: every offset and length is checked
+// against both buffers, so no input makes it read or write outside them. `unsafe` is only where the C API's
+// pointers become slices. tests/host/test_lz4.c holds it to the digest of the C it replaced; fuzz_lz4 drives it.
+
+@header("kernel/lz4.h")
+extern "C" {
+}
+
+const MIN_MATCH: usize = 4;
+
+/// A length nibble of 15 continued: the bytes after `ip`, added while each is 255. Null if the input ends first,
+/// or if the length would wrap (a length that wraps is not a length).
+fn moreLength(src: Slice<u8>, ip: borrow mut usize, start: usize) -> usize? {
+    var total = start;
+    loop {
+        if (ip >= src.length) { return null; }
+        let b = src[ip] as usize;
+        ip += 1;
+        match (total.checkedAdd(b)) {
+            null => { return null; }
+            Some(sum) => { total = sum; }
+        }
+        if (b != 255) { return total; }
+    }
+}
+
+/// lz4_decompress: the decompressed length, or 0 for input that is malformed or would write past the end. Decoding
+/// stops when the output is full or the input ends at a sequence boundary.
+public fn decompress(src: Slice<u8>, out: SliceMut<u8>) -> usize {
+    let slen = src.length;
+    let dcap = out.length;
+    var ip: usize = 0;
+    var op: usize = 0;
+    while (op < dcap && ip < slen) {
+        let token = src[ip] as usize;
+        ip += 1;
+        var lit = token >> 4;
+        if (lit == 15) {
+            match (moreLength(src, mut ip, lit)) {
+                null => { return 0; }
+                Some(total) => { lit = total; }
+            }
+        }
+        if (lit > slen - ip || lit > dcap - op) { return 0; }
+        out[op..op + lit].copyFrom(src[ip..ip + lit]);
+        ip += lit;
+        op += lit;
+        if (op == dcap) { return op; } // the output is complete
+        if (ip == slen) { return op; } // the last sequence has no match
+        if (slen - ip < 2) { return 0; }
+
+        let offset = (src[ip] as usize) | ((src[ip + 1] as usize) << 8);
+        ip += 2;
+        if (offset == 0 || offset > op) { return 0; } // a match before the start of the output
+        var mlen = token & 15;
+        if (mlen == 15) {
+            match (moreLength(src, mut ip, mlen)) {
+                null => { return 0; }
+                Some(total) => { mlen = total; }
+            }
+        }
+        // mlen is at most the input's length plus 15, far below usize's limit, so adding 4 cannot wrap.
+        mlen = mlen.wrappingAdd(MIN_MATCH);
+        if (mlen > dcap - op) { return 0; }
+        // Byte by byte, and deliberately: a match may overlap the position being written (that codes a run).
+        let from = op - offset;
+        for (i in 0..mlen) { out[op + i] = out[from + i]; }
+        op += mlen;
+    }
+    return op;
+}
+
+// ---- The C API of kernel/include/kernel/lz4.h ----
+
+/// Safety: lz4.h's contract: `src` points to `slen` readable bytes and `dst` to `dcap` writable bytes that nothing
+/// else uses during the call, and the two do not overlap.
+@export("lz4_decompress")
+unsafe fn decompressC(src: *void, slen: usize, dst: *mut void, dcap: usize) -> usize {
+    return decompress(Slice.fromRaw(src as *u8, slen), SliceMut.fromRaw(dst as *mut u8, dcap));
+}

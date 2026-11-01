@@ -7,7 +7,9 @@
  * dictionary -- the caller knows the sizes and checks the data, which
  * here is the filesystem's business and not the codec's.
  *
- * Pure: no allocation, no locks, no globals. Compiled on the host by
+ * Pure: no allocation, no locks, no globals. The compressor is lz4.c; the
+ * decompressor, which reads bytes off a disk, is CeeSafe
+ * (kernel/core/lz4_decode.cee; roadmap 2.0 SA5). Compiled on the host by
  * tests/host/test_lz4.c and fuzzed by tests/fuzz/fuzz_lz4.c, which is
  * where the evidence for the decompressor's bounds comes from.
  */

@@ -394,8 +394,13 @@ metadata (`fuzz_cosmofs`); virtqueues, USB descriptors and ACPI tables
 (`fuzz_pkg`); LZ4 and framebuffer descriptions (`fuzz_lz4`,
 `fuzz_fbvalid`; Nova's C6 already wrote both). GPT is done.
 
-- [ ] **Acceptance:** every fuzz target in `tests/fuzz/` drives CeeSafe code
+- [x] **Acceptance:** every fuzz target in `tests/fuzz/` drives CeeSafe code
   and none drives C; each family's benchmark within the rule's 5%.
+  Met 2026-11-01 with LZ4, the last family, as the scope below defines it:
+  every decoder the fifteen fuzz targets reach is CeeSafe. Every benchmark
+  is within 5% but three the owner accepted with their numbers recorded:
+  the Linux decoders (1.05x native x86-64), the ACPI MADT decoder (1.13x)
+  and pkg's `version_cmp` (1.25x).
 
 Scope (the owner, 2026-10-31): SA5 converts the **decoders**, every check
 and field read on input bytes, not the subsystems around them. A fuzz
@@ -437,8 +442,11 @@ data rather than decode a guest's). Digest `0x3a72da1935783ee6` over
 against 37.5); 1.07x on x86-64 under Rosetta (50.4 against 47.1),
 where identical machine code (`lx_wait_status`, the same instructions
 in both builds) measured 4 ns apart, so Rosetta's figure is not a
-native one: a native x86-64 run is owed before the owner's ruling on
-the 5%.
+native one. Native x86-64 (2026-11-01; Debian 12, clang 14 at -O2, the
+C from 03380f69's parent and the port's C from ceesafec 0.3.2, both the
+recorded digest, pinned to one core): 1.05x (46.0 ns against 43.9, the
+median of nine runs, 1.04-1.06), accepted by the owner (2026-11-01),
+as the rule allows.
 No new C (the CeeSafe rule's point 1, cee-share's gate): the decoders'
 header is ceesafec's, with results as bools and named facts rather than
 codes C would need a hand header for, and the `module.cycle=` parsers
@@ -540,6 +548,17 @@ where an earlier check bounds the value, took the first port's 1.18x
 (manifest, arm64) and 1.30x (tar, Rosetta) back; four other shapes of
 the version loop were no faster. `version_cmp` runs once a dependency
 check; the 1.25x was accepted by the owner (2026-11-01), as the rule allows.
+LZ4 (2026-11-01): `kernel/core/lz4_decode.cee` -- the block decoder that
+reads cosmofs's compressed blocks off the disk, whole; the compressor,
+which reads only the filesystem's own data, stays C in `lz4.c` (the C
+step moved the decoder into `lz4_decode.c` unchanged). Digest
+`0xcd72ee02e42e9ec3` over 20,000 rounds of valid, cut, padded and
+damaged streams, built streams and noise, of the result and the whole
+output buffer: the C's, with clang and gcc. `LZ4_BENCH=1`, the median
+of nine runs: 1.045x the C on arm64 (3,146 ns a 4 KiB block against
+3,000) and 1.039x on x86-64 (Rosetta). The framebuffer validator was
+already CeeSafe (`kernel/core/fbvalid.cee`, SA1), so `fuzz_lz4` and
+`fuzz_fbvalid` drive no C decoder.
 
 Size: about 3.0x.
 
