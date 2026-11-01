@@ -620,6 +620,17 @@ inputs and `netif_transmit`, and checks every mbuf freed: digest
 `0xd21f822ad04f292a` over 20,000 rounds, the C's (macOS clang, Linux
 gcc). `ETHER_BENCH=1`, median of nine at -O2 with each mbuf's allocation:
 1.00x the C both ways on arm64, 1.01x and 1.00x on x86-64 (Rosetta).
+Loopback (2026-11-02, with ceesafec 0.5.0, whose ADR 0042 lets CeeSafe
+define the C objects a kernel defines): `kernel-services/network/loopback.cee`
+-- `lo` and its ops table are `static mut` C objects with C's designated
+initialisers (the transmit a `@callback`, the release C's
+`netif_release_static`), the test filter a nullable C function pointer, and
+`loopback_init` sets the addresses and registers it. `netif.h`'s anonymous
+address struct is named (`struct netif_ip4`) so CeeSafe can import it.
+`tests/host/test_loopback.c` checks every field C reads of the registered
+interface and the transmit over 20,000 packets with and without a filter:
+digest `0x92930b5a63e79528`, the C's (macOS clang, Linux gcc). No
+benchmark: the transmit is a flag change and a call, with no loop.
 
 Size: about 3.0x.
 

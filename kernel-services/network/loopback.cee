@@ -1,0 +1,117 @@
+// loopback.cee - the `lo` interface (kernel/include/kernel/netif.h), in CeeSafe: roadmap 2.0 SA6. A packet sent on it
+// goes straight back into the receive path; a test's filter can drop it first. tests/host/test_loopback.c holds it to
+// the digest of the C it replaced.
+//
+// The interface and its ops table are C objects that CeeSafe defines (CeeSafe's ADR 0042): `static mut` items with C's
+// designated initialisers, which the interface layer registers, links and changes. CeeSafe touches them only in
+// loopback_init, before registration, and through the pointers C passes back.
+
+@header("kernel/netif.h", "kernel/net/ether.h", "kernel/net/ip.h")
+extern "C" {
+    /// kernel/include/kernel/mbuf.h: what transmit changes.
+    struct mbuf {
+        flags: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbuf_pkt {
+        csum_flags: u16;
+    }
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    /// kernel/include/kernel/netif.h: the fields loopback sets; C zeroes the rest.
+    struct netif_ops {
+        transmit: extern "C" fn(*mut netif, *mut mbuf) -> i32;
+        release: extern "C" fn(*mut netif);
+    }
+    struct netif_ip4 {
+        addr: u32;
+        mask: u32;
+    }
+    struct netif {
+        name: [u8; 8];
+        mtu: u32;
+        flags: u32;
+        ip4: netif_ip4;
+        ip6_ll: in6_addr;
+        ops: *netif_ops;
+        caps: u32;
+    }
+
+    fn m_freem(m: *mut mbuf);
+    fn netif_rx(nif: *mut netif, m: *mut mbuf);
+    fn netif_register(nif: *mut netif) -> i32;
+    fn netif_release_static(nif: *mut netif);
+}
+
+/// netif.h's NETIF_* and NETIF_CAP_*; mbuf.h's M_CSUM_OK and NET_CSUM_TX.
+const NETIF_UP: u32 = 1;
+const NETIF_LOOPBACK: u32 = 2;
+const NETIF_NOARP: u32 = 4;
+const NETIF_CAP_TXCSUM: u32 = 1;
+const NETIF_CAP_RXCSUM: u32 = 2;
+const M_CSUM_OK: u32 = 16;
+const NET_CSUM_TX: u16 = 3;
+/// 127.0.0.1 and 255.0.0.0 in network order, as they lie in a little-endian u32 (inet.h's INADDR_LOOPBACK_N and
+/// htonl(0xff000000); CosmoOS's targets are little-endian, as htonl assumes).
+const INADDR_LOOPBACK_N: u32 = 0x0100007f;
+const LOOPBACK_MASK_N: u32 = 0x000000ff;
+
+/// The test hook: a filter that keeps a packet when it returns true, and its argument. nettest sets and clears it
+/// while the self-tests run, as the C's plain globals were.
+static mut FILTER: extern "C" fn(*mut mbuf, *mut void) -> bool = 0 as extern "C" fn(*mut mbuf, *mut void) -> bool;
+static mut FILTER_ARG: *mut void = 0 as *mut void;
+
+/// `lo`: up, no ARP, loopback; the transport checksum left partial (NETIF_CAP_TXCSUM) and trusted on receive
+/// (NETIF_CAP_RXCSUM), as Linux's lo does. Its addresses are set by loopback_init.
+static mut LO: netif = netif {
+    name: "lo",
+    mtu: 65535,
+    flags: NETIF_LOOPBACK | NETIF_NOARP | NETIF_UP,
+    caps: NETIF_CAP_TXCSUM | NETIF_CAP_RXCSUM,
+    ops: borrow LO_OPS as *netif_ops,
+};
+static mut LO_OPS: netif_ops = netif_ops { transmit: transmit, release: netif_release_static };
+
+/// Sends a packet back in: through the filter, if one is set, then to the receive path with its checksum trusted.
+/// Safety: the interface layer calls it with `lo` and a packet it hands over, which nothing else uses. The filter and
+/// its argument are read as the C read them: nettest changes them only between its tests.
+@callback
+unsafe fn transmit(nif: *mut netif, m: *mut mbuf) -> i32 {
+    let filter = FILTER;
+    let arg = FILTER_ARG;
+    if (!filter.isNull() && !filter(m, arg)) {
+        m_freem(m);
+        return 0; // "sent" and lost
+    }
+    // Nothing is checked between two ends of one machine: the transport checksum is left in its partial form and the
+    // receiver trusts it (M_CSUM_OK).
+    let packet = Ptr.toBorrowMut(m);
+    packet.flags = packet.flags | M_CSUM_OK;
+    packet.pkt.csum_flags = packet.pkt.csum_flags & (NET_CSUM_TX ^ 0xffff);
+    netif_rx(nif, m);
+    return 0;
+}
+
+/// netif.h's loopback_set_filter: a filter (or null) and its argument.
+/// Safety: as transmit says, nettest sets the hook between its tests.
+@export("loopback_set_filter")
+fn setFilter(filter: extern "C" fn(*mut mbuf, *mut void) -> bool, arg: *mut void) {
+    unsafe {
+        FILTER = filter;
+        FILTER_ARG = arg;
+    }
+}
+
+/// netif.h's loopback_init: lo's addresses, 127.0.0.1/8 and ::1, then its registration.
+/// Safety: net_init calls it once, before anything else reaches `lo`; from registration on, the interface layer owns it.
+@export("loopback_init")
+fn init() {
+    unsafe {
+        LO.ip4.addr = INADDR_LOOPBACK_N;
+        LO.ip4.mask = LOOPBACK_MASK_N;
+        LO.ip6_ll.s6_addr = [0; 16];
+        LO.ip6_ll.s6_addr[15] = 1; // ::1
+        netif_register(borrow mut LO as *mut netif);
+    }
+}
