@@ -194,6 +194,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/mbuf.c \
 	kernel-services/network/cksum.c \
 	kernel-services/network/cksum_floor.c \
+	kernel-services/network/mbuf_floor.c \
 	kernel-services/network/inet.c \
 	kernel-services/network/netif.c \
 	kernel-services/network/loopback.c \

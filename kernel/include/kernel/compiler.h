@@ -45,6 +45,15 @@
 #define STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+/* The build's switches as C constant macros, which CeeSafe code can call in a static initialiser (CeeSafe's
+ * type-system.md §39.4): `@constant fn COSMO_CONFIG_DEBUG() -> bool;`, then `static DEBUG: bool = COSMO_CONFIG_DEBUG();`,
+ * which the C compiler folds as it folds `#if CONFIG_DEBUG`. */
+#if CONFIG_DEBUG
+#define COSMO_CONFIG_DEBUG() true
+#else
+#define COSMO_CONFIG_DEBUG() false
+#endif
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 #define ALIGN_DOWN(x, a) ((x) & ~((__typeof__(x))(a) - 1))

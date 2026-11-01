@@ -631,6 +631,24 @@ address struct is named (`struct netif_ip4`) so CeeSafe can import it.
 interface and the transmit over 20,000 packets with and without a filter:
 digest `0x92930b5a63e79528`, the C's (macOS clang, Linux gcc). No
 benchmark: the transmit is a flag change and a call, with no loop.
+Packet buffers (2026-11-02): `kernel-services/network/mbuf.cee` -- mbufs,
+clusters, chains (prepend, pullup, adjust, copy out, append, copy), shared
+references and queues, with `mbuf_floor.c` keeping the module exports. The
+reference counts are atomic fields shared with C; the statistics an
+`IrqSpinLock` (one lock per operation where the C took two or three, so a
+snapshot is still one instant); a packet header is copied by C's own size
+of it (`layoutOf`), so a field added in C cannot be missed. The double-free
+check stays debug-only through `COSMO_CONFIG_DEBUG()`, a C constant macro
+`compiler.h` gains for CeeSafe. The double-enqueue warning no longer names
+the queue (lib/kernel imports `spinlock_t` opaque); the refusal and the
+count, which `net-mbufq-double` tests, are unchanged.
+`tests/host/test_mbuf.c`: 4,000 histories of 24 steps over every
+operation, the queues, and allocation failures (52,656 allocations, 1,699
+failed), every buffer's length, flags, room and bytes after each step, and
+every mbuf and cluster freed: digest `0xfd419bfa31e68b04`, the C's (macOS
+clang, Linux gcc). `MBUF_BENCH=1`, median of nine at -O2: receive 0.93x
+the C, send 0.93x, copy out 1.00x, queue 0.92x on arm64; 0.95x, 0.96x,
+1.01x, 0.93x on x86-64 (Rosetta).
 
 Size: about 3.0x.
 

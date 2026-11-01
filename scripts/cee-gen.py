@@ -114,6 +114,8 @@ PORTS = [
      "Ethernet framing and dispatch: ether_input, ether_output, eth_broadcast (ether.h)", None, False),
     ("kernel-services/network/loopback.cee", "kernel-services/network/loopback.c",
      "The lo interface: its static netif and ops table, transmit and the test filter (netif.h)", None, False),
+    ("kernel-services/network/mbuf.cee", "kernel-services/network/mbuf.c",
+     "Packet buffers: mbufs, clusters, chains, queues and their statistics (mbuf.h)", None, True),
     ("drivers/virtio/virtq_used.cee", "drivers/virtio/virtq_used.c",
      "The virtqueue's decoder of used elements (virtio.h; linked into the virtio module)", None, False),
     ("drivers/usb/usb_desc.cee", "drivers/usb/usb_desc.c",
