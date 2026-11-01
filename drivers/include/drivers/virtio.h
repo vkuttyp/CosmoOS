@@ -240,6 +240,15 @@ void *virtq_pop(struct virtqueue *vq, uint32_t *len);
 int virtq_add_panic(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie);
 void *virtq_pop_panic(struct virtqueue *vq, uint32_t *len);
 unsigned virtq_free_count(struct virtqueue *vq);
+
+/* The decoder of a used element (virtq_used; roadmap 2.0 SA5), for
+ * virtqueue.c and its tests: the element judged against the driver's
+ * records -- VIRTQ_USED_OK, _CLAMPED (*written is the chain's writable
+ * bytes) or _BAD_ID (skip it) -- and a completed chain's reclaim, lock
+ * held. */
+enum { VIRTQ_USED_OK = 0, VIRTQ_USED_BAD_ID = 1, VIRTQ_USED_CLAMPED = 2 };
+int virtq_used_check(const struct virtqueue *vq, uint32_t id, uint32_t len, bool legacy, uint32_t *written);
+void virtq_reclaim(struct virtqueue *vq, uint16_t head);
 #if CONFIG_DEBUG
 /* Finished by the device, not yet popped: a test seam, debug builds only. */
 unsigned virtq_unconsumed(struct virtqueue *vq);

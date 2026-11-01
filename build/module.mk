@@ -27,7 +27,7 @@ endif
 MODULES := hello virtio virtio_blk virtio_rng virtio_console virtio_net virtio_gpu nvme e1000e xhci usb_storage usb_hid usb_hub ahci cosmotest cosmotest_dep cosmotest_fail
 
 MODULE_hello_SRCS          := modules/hello/hello.c
-MODULE_virtio_SRCS         := drivers/virtio/virtio.c drivers/virtio/virtqueue.c drivers/virtio/virtio_pci.c
+MODULE_virtio_SRCS         := drivers/virtio/virtio.c drivers/virtio/virtqueue.c drivers/virtio/virtq_used.c drivers/virtio/virtio_pci.c
 MODULE_virtio_blk_SRCS     := drivers/virtio/virtio_blk.c
 MODULE_virtio_rng_SRCS     := drivers/virtio/virtio_rng.c   # generated from virtio_rng.cee (scripts/cee-gen.py)
 MODULE_virtio_console_SRCS := drivers/virtio/virtio_console.c

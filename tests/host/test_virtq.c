@@ -19,8 +19,10 @@
 
 #include <drivers/virtio.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* --- host services the queue code needs --- */
 
@@ -425,6 +427,181 @@ static void test_legacy_queue_size(void)
     virtq_free(vq);
 }
 
+/* --- the decoder of used elements (virtq_used; roadmap 2.0 SA5) --------- */
+
+/* A recorded digest over seeded queues: records of chains in flight, free
+ * heads and cleared cookies, used elements with every kind of id and
+ * length, legacy and modern; then each confirmed chain reclaimed. Every
+ * result is a line, the lines' FNV-1a digest recorded. VIRTQ_DUMP=1 prints
+ * them; VIRTQ_BENCH=1 times the decoder alone. */
+#define USED_ROUNDS 20000
+#define USED_SEED 0xC05F5FA2026B0004ull
+/* The digest of the C decoder (virtq_used.c, 2026-11-01). */
+#define USED_DIGEST 0xb37c1a028a201a5aull
+
+static uint64_t g_rng;
+static uint64_t g_digest;
+static bool g_dump;
+
+static uint64_t next(void)
+{
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 7;
+    g_rng ^= g_rng << 17;
+    return g_rng;
+}
+
+static void emit(const char *line, int n)
+{
+    EXPECT(n > 0 && n < 256);
+    for (int i = 0; i < n; i++) {
+        g_digest ^= (uint8_t)line[i];
+        g_digest *= 0x100000001b3ull;
+    }
+    g_digest ^= '\n';
+    g_digest *= 0x100000001b3ull;
+    if (g_dump)
+        printf("%s\n", line);
+}
+
+#define QMAX 256u
+static uint16_t g_next[QMAX], g_chain[QMAX];
+static uint32_t g_in[QMAX];
+static void *g_cookie[QMAX];
+static int g_token[QMAX];
+
+/* A queue's records as the driver keeps them: links below its size, chains
+ * of 1-4 descriptors or free, writable bytes near every bound. */
+static void gen_queue(struct virtqueue *vq)
+{
+    memset(vq, 0, sizeof(*vq));
+    vq->size = 1u << (next() % 9);   /* 1 .. 256 */
+    vq->shadow_next = g_next;
+    vq->chain_len = g_chain;
+    vq->in_bytes = g_in;
+    vq->cookies = g_cookie;
+    static const uint32_t edge[] = { 0, 1, 511, 512, 4096, 65536, 0x7fffffff, 0xffffffffu };
+    for (unsigned i = 0; i < vq->size; i++) {
+        g_next[i] = (uint16_t)(next() % vq->size);
+        g_chain[i] = (uint16_t)(next() % 3 ? 1 + next() % 4 : 0);
+        g_in[i] = next() % 2 ? edge[next() % 8] : (uint32_t)(next() % 100000);
+        g_cookie[i] = next() % 8 ? &g_token[i] : NULL;
+    }
+    vq->free_head = (uint16_t)(next() % vq->size);
+    vq->num_free = (uint16_t)(next() % (vq->size + 1));
+}
+
+static uint64_t records_hash(const struct virtqueue *vq)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (unsigned i = 0; i < vq->size; i++) {
+        uint64_t w = (uint64_t)g_next[i] | (uint64_t)g_chain[i] << 16 | (uint64_t)g_in[i] << 32;
+        h = (h ^ w) * 0x100000001b3ull;
+        h = (h ^ (g_cookie[i] == NULL ? 0u : (unsigned)(i + 1))) * 0x100000001b3ull;
+    }
+    return h;
+}
+
+static void run_used(void)
+{
+    static struct virtqueue vq;
+    char line[128];
+    gen_queue(&vq);
+    for (unsigned k = 0; k < 4; k++) {
+        uint32_t id;
+        switch (next() % 4) {
+        case 0: id = (uint32_t)next(); break;
+        case 1: id = vq.size + (uint32_t)(next() % 4); break;
+        default: id = (uint32_t)(next() % vq.size); break;
+        }
+        uint32_t in = id < vq.size ? g_in[id] : 0;
+        uint32_t len;
+        switch (next() % 5) {
+        case 0: len = in; break;
+        case 1: len = in + 1; break;
+        case 2: len = in ? in - 1 : 0; break;
+        case 3: len = 0; break;
+        default: len = (uint32_t)next(); break;
+        }
+        bool legacy = next() % 3 == 0;
+        uint32_t written = 0xa5a5a5a5u;
+        int v = virtq_used_check(&vq, id, len, legacy, &written);
+        int n = snprintf(line, sizeof(line), "u%d %08x", v, v == VIRTQ_USED_BAD_ID ? 0 : written);
+        emit(line, n);
+        if (v != VIRTQ_USED_BAD_ID) {
+            virtq_reclaim(&vq, (uint16_t)id);
+            n = snprintf(line, sizeof(line), "r%u %u %016llx", vq.free_head, vq.num_free,
+                         (unsigned long long)records_hash(&vq));
+            emit(line, n);
+        }
+    }
+}
+
+static void test_used_digest(void)
+{
+    g_dump = getenv("VIRTQ_DUMP") != NULL;
+    g_digest = 0xcbf29ce484222325ull;
+    g_rng = USED_SEED;
+    for (unsigned r = 0; r < USED_ROUNDS; r++)
+        run_used();
+    printf("  virtq used digest 0x%016llx over %u rounds\n", (unsigned long long)g_digest, USED_ROUNDS);
+    EXPECT(g_digest == USED_DIGEST);
+}
+
+static volatile uint64_t g_sink;
+
+/* VIRTQ_BENCH=1: the check and the reclaim alone, on queues made beforehand (best of 15). */
+static int bench_used(void)
+{
+    enum { N = 4096 };
+    static struct virtqueue vq;
+    struct elem { uint32_t id, len; bool legacy; } *es = malloc(sizeof(*es) * N);
+    if (es == NULL)
+        return 1;
+    g_rng = USED_SEED;
+    gen_queue(&vq);
+    while (vq.size < 64)
+        gen_queue(&vq);
+    for (unsigned i = 0; i < N; i++) {
+        es[i].id = (uint32_t)(next() % (vq.size + 2));
+        es[i].len = (uint32_t)(next() % 70000);
+        es[i].legacy = next() % 3 == 0;
+    }
+    uint16_t chain0[QMAX], next0[QMAX];
+    uint32_t in0[QMAX];
+    void *cookie0[QMAX];
+    memcpy(chain0, g_chain, sizeof(chain0));
+    memcpy(next0, g_next, sizeof(next0));
+    memcpy(in0, g_in, sizeof(in0));
+    memcpy(cookie0, g_cookie, sizeof(cookie0));
+    double best = 1e30;
+    for (int run = 0; run < 15; run++) {
+        struct timespec t0, t1;
+        uint64_t acc = 0;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (unsigned i = 0; i < N; i++) {
+            uint32_t w = 0;
+            int v = virtq_used_check(&vq, es[i].id, es[i].len, es[i].legacy, &w);
+            acc += (uint64_t)v + w;
+            if (v != VIRTQ_USED_BAD_ID) {
+                virtq_reclaim(&vq, (uint16_t)es[i].id);
+                g_chain[es[i].id] = chain0[es[i].id];   /* in flight again, for the next element */
+                g_in[es[i].id] = in0[es[i].id];
+                g_cookie[es[i].id] = cookie0[es[i].id];
+            }
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        g_sink += acc;
+        memcpy(g_next, next0, sizeof(next0));
+        double ns = (double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec);
+        if (ns < best)
+            best = ns;
+    }
+    printf("virtq used bench: %.2f ns per element (best of 15 runs of %u)\n", best / N, N);
+    free(es);
+    return 0;
+}
+
 static const struct host_test tests[] = {
     { "virtq-alloc-free", test_alloc_free },
     { "virtq-normal-chain", test_normal_chain },
@@ -434,9 +611,12 @@ static const struct host_test tests[] = {
     { "virtq-churn", test_churn },
     { "virtq-readonly-chain-length", test_readonly_chain_length },
     { "virtq-legacy-queue-size", test_legacy_queue_size },
+    { "virtq-used-digest", test_used_digest },
 };
 
 int main(void)
 {
+    if (getenv("VIRTQ_BENCH") != NULL)
+        return bench_used();
     return harness_run(tests, sizeof(tests) / sizeof(tests[0]));
 }

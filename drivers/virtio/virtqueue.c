@@ -249,23 +249,6 @@ void virtq_kick(struct virtqueue *vq)
     }
 }
 
-/* Lock held. Return a completed chain to the free list using only the
- * driver's records: chain_len bounds the walk, shadow_next supplies the
- * links, so nothing the device wrote can steer it. */
-static void reclaim_chain(struct virtqueue *vq, uint16_t head)
-{
-    uint16_t len = vq->chain_len[head];
-    uint16_t last = head;
-    for (uint16_t k = 1; k < len; k++)
-        last = vq->shadow_next[last];
-    vq->shadow_next[last] = vq->free_head;
-    vq->free_head = head;
-    vq->num_free = (uint16_t)(vq->num_free + len);
-    vq->chain_len[head] = 0;
-    vq->in_bytes[head] = 0;
-    vq->cookies[head] = NULL;
-}
-
 /* Lock held. */
 static void *pop_locked(struct virtqueue *vq, uint32_t *len)
 {
@@ -292,7 +275,10 @@ static void *pop_locked(struct virtqueue *vq, uint32_t *len)
          * the driver's records do not confirm: an index outside the table,
          * a head that is not in flight (never posted, completed already, or
          * completed twice). */
-        if (e.id >= vq->size || vq->chain_len[e.id] == 0 || vq->cookies[e.id] == NULL) {
+        bool legacy = vq->vdev->tr != NULL && vq->vdev->tr->legacy;
+        uint32_t written;
+        int verdict = virtq_used_check(vq, e.id, e.len, legacy, &written);
+        if (verdict == VIRTQ_USED_BAD_ID) {
             vq->bad_used++;
             kerror("virtio: %s: queue %u: device returned bad descriptor id %u", vq->vdev->dev.name, vq->index,
                    e.id);
@@ -300,22 +286,12 @@ static void *pop_locked(struct virtqueue *vq, uint32_t *len)
         }
         uint16_t head = (uint16_t)e.id;
         void *cookie = vq->cookies[head];
-        uint32_t written = e.len;
-        if (written > vq->in_bytes[head] && vq->in_bytes[head] == 0 && vq->vdev->tr != NULL && vq->vdev->tr->legacy) {
-            /* A legacy device may report the bytes it read from a chain it
-             * may only read (Parallels Desktop's network adapter does, for
-             * every transmit); the spec tells legacy drivers to ignore the
-             * length where they can (2.7.8.2). Nothing was written. */
-            written = 0;
-        } else if (written > vq->in_bytes[head]) {
-            /* The device claims more than the chain could hold: count it
-             * and report what the buffers can actually contain. */
+        if (verdict == VIRTQ_USED_CLAMPED) {
             vq->bad_used++;
             kerror("virtio: %s: queue %u: device wrote %u bytes into a %u-byte chain at %u", vq->vdev->dev.name,
-                   vq->index, written, vq->in_bytes[head], head);
-            written = vq->in_bytes[head];
+                   vq->index, e.len, written, head);
         }
-        reclaim_chain(vq, head);
+        virtq_reclaim(vq, head);
         if (len)
             *len = written;
         return cookie;
