@@ -1,0 +1,95 @@
+// virtq_used.cee - The split virtqueue's decoder of what the device returns (roadmap 2.0 SA5, the virtq/USB/ACPI
+// family): a used-ring element judged against the driver's own records, and the completed chain's return to the free
+// list by those records alone. virtqueue.c keeps the ring's single read of each element, its barriers, the lock, the
+// counter and the log (docs/drivers/virtio/design.md, "Virtqueues").
+//
+// The records are the driver's: arrays of vq->size entries the device never sees. An element's id is checked against
+// that size before any record is read; a link in shadow_next is the driver's own, and a slice of vq->size entries
+// keeps even a corrupt one inside the arrays. tests/host/test_virtq.c holds this to the C it replaced: the same digest
+// over 20,000 seeded queues.
+
+@header("drivers/virtio.h")
+extern "C" {
+    struct virtqueue {
+        size: u32;
+        shadow_next: *mut u16;
+        chain_len: *mut u16;
+        in_bytes: *mut u32;
+        free_head: u16;
+        num_free: u16;
+        cookies: *mut *mut void;
+    }
+}
+
+// The verdicts (virtio.h).
+const USED_OK: i32 = 0;
+const USED_BAD_ID: i32 = 1;
+const USED_CLAMPED: i32 = 2;
+
+/// A verdict and the bytes written.
+struct Used {
+    verdict: i32;
+    written: u32;
+}
+
+/// What a confirmed head's element says was written, against the chain's writable bytes `inBytes`: the length, or
+/// none for a legacy device reporting what it read from a chain it may only read (VirtIO 2.7.8.2), or the chain's
+/// bytes when the device claims more than it could hold (clamped).
+fn written(inBytes: u32, len: u32, legacy: bool) -> Used {
+    if (len > inBytes && inBytes == 0 && legacy) {
+        return Used { verdict: USED_OK, written: 0 };
+    }
+    if (len > inBytes) {
+        return Used { verdict: USED_CLAMPED, written: inBytes };
+    }
+    return Used { verdict: USED_OK, written: len };
+}
+
+/// A used element (id, len) as read once from the ring. "Bad" is anything the driver's records do not confirm: an
+/// index outside the table, a head that is not in flight (never posted, completed already, or completed twice).
+/// Safety: `vq`'s records hold vq->size entries; `out` is writable.
+@export("virtq_used_check")
+unsafe fn usedCheckC(vq: *virtqueue, id: u32, len: u32, legacy: bool, out: *mut u32) -> i32 {
+    let q = Ptr.toBorrow(vq);
+    if (id >= q.size) {
+        return USED_BAD_ID;
+    }
+    let n = q.size as usize;
+    let i = id as usize;
+    let chain = Slice.fromRaw(q.chain_len as *u16, n);
+    let cookies = Slice.fromRaw(q.cookies as **mut void, n);
+    if (chain[i] == 0 || cookies[i].isNull()) {
+        return USED_BAD_ID;
+    }
+    let inBytes = Slice.fromRaw(q.in_bytes as *u32, n);
+    let u = written(inBytes[i], len, legacy);
+    out.write(u.written);
+    return u.verdict;
+}
+
+/// Return a completed chain to the free list using only the driver's records: chain_len bounds the walk, shadow_next
+/// supplies the links, so nothing the device wrote can steer it. The free count wraps as the C's 16-bit one did.
+/// Safety: the queue's lock is held; its records hold vq->size entries; `head` is one virtq_used_check confirmed.
+@export("virtq_reclaim")
+unsafe fn reclaimC(vq: *mut virtqueue, head: u16) {
+    let q = Ptr.toBorrowMut(vq);
+    let n = q.size as usize;
+    let links = SliceMut.fromRaw(q.shadow_next, n);
+    let chain = SliceMut.fromRaw(q.chain_len, n);
+    let inBytes = SliceMut.fromRaw(q.in_bytes, n);
+    let cookies = SliceMut.fromRaw(q.cookies, n);
+    let h = head as usize;
+    let len = chain[h];
+    var last = h;
+    var k: u16 = 1;
+    while (k < len) {
+        last = links[last] as usize;
+        k += 1;
+    }
+    links[last] = q.free_head;
+    q.free_head = head;
+    q.num_free = truncate<u16>(q.num_free as u32 + len as u32);
+    chain[h] = 0;
+    inBytes[h] = 0;
+    cookies[h] = 0 as *mut void;
+}

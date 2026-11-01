@@ -16,6 +16,7 @@ VirtIO 1.1 (OASIS), sections 2.1 (status), 2.6 (split virtqueues),
                       │                  │                  │                  │
                 virtio.ko:  virtio.c     the "virtio" bus, device init, drivers
                             virtqueue.c  split rings: alloc/add/kick/pop/free
+                            virtq_used.cee  the used-element decoder and reclaim, in CeeSafe (SA5)
                             virtio_pci.c the virtio-pci modern and legacy transports, module entry
                       │
    kernel       drivers/pci (pci bus, BARs, capabilities, MSI-X)

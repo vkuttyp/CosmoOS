@@ -488,6 +488,19 @@ on x86-64 (Rosetta), the rollback record (mostly its CRC) 1.00x and
 1.02x, the key slot 0.57x and 1.00x. The cosmofs family's decoders are
 CeeSafe; the copy-state check stays C (it reads the live device's region
 size).
+virtq/USB/ACPI, part 1, the virtqueue (2026-11-01):
+`drivers/virtio/virtq_used.cee` -- what the driver decides about a
+used-ring element the device returned (`virtq_used_check`: an id outside
+the table or not in flight is skipped, a length beyond the chain's
+writable bytes clamped, a legacy device's on a read-only chain taken as
+nothing written) and the chain's reclaim by the driver's records alone
+(`virtq_reclaim`); the C step was `virtq_used.c`. The ring's single
+read, its barriers, the lock and the log stay in `virtqueue.c`. The
+virtio module links CeeSafe's runtime and the driver floor, as the
+CeeSafe driver modules do. Digest `0xb37c1a028a201a5a` over 20,000
+queues, the C's. `VIRTQ_BENCH=1`: the CeeSafe 3.2 ns an element against
+the C's 6.1 on arm64, 4.6 against 9.8 on x86-64 (Rosetta), best of five
+noisy runs.
 
 Size: about 3.0x.
 

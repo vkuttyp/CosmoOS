@@ -71,6 +71,8 @@ CEE_MODULES := virtio_rng
 CEE_MODULE_COMMON_OBJS := $(call objs_of,drivers/ceesafe/ceesafe_rt_core.c drivers/ceesafe/driver_floor.c)
 $(eval $(call compile_rules,$(CEE_MODULE_COMMON_OBJS),MODULE_CFLAGS))
 $(foreach m,$(CEE_MODULES),$(eval MODULE_$(m)_LINK := $(CEE_MODULE_COMMON_OBJS)))
+# C modules with a CeeSafe part (roadmap 2.0 SA5's decoders: virtio's virtq_used.cee) link the same runtime and floor.
+MODULE_virtio_LINK := $(CEE_MODULE_COMMON_OBJS)
 
 # $(1) module name
 define module_rules

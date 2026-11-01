@@ -105,6 +105,8 @@ PORTS = [
      "The network receive path's decoders: frames, TCP segments, DHCP and DNS (netparse_types.h)",
      "kernel/include/kernel/net/netparse_types.h", False),
     ("kernel/core/fbvalid.cee", "kernel/core/fbvalid.c", "The framebuffer validator (bootinfo.h)", None, False),
+    ("drivers/virtio/virtq_used.cee", "drivers/virtio/virtq_used.c",
+     "The virtqueue's decoder of used elements (virtio.h; linked into the virtio module)", None, False),
     ("kernel/ceesafe/crash_test.cee", "kernel/ceesafe/crash_test.c",
      "The crash test crash-cee: a CeeSafe bounds check that fails on purpose (CRASH_TEST=5)",
      "kernel/include/ceesafe/crash_test.h", False),
