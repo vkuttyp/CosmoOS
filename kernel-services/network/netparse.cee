@@ -505,6 +505,21 @@ fn ipv4Text(s: Slice<u8>, out: SliceMut<u8>) -> bool {
 unsafe fn etherC(hdr: *u8, mac: *u8, out: *mut netparse_eth) =>
     ether(Slice.fromRaw(hdr, ETH_HLEN), Slice.fromRaw(mac, 6), Ptr.toBorrowMut(out));
 
+/// netparse_ether's verdict as one word, for a caller that holds no `netparse_eth` (ether.cee): the EtherType in bits
+/// 0-15, then `other` (bit 16), `reflected` (17), `broadcast` (18) and `multicast` (19).
+/// Safety: as netparse_ether.
+@export("netparse_ether_word")
+unsafe fn etherWordC(hdr: *u8, mac: *u8) -> u32 {
+    var e = netparse_eth { etype: 0, other: false, reflected: false, broadcast: false, multicast: false };
+    ether(Slice.fromRaw(hdr, ETH_HLEN), Slice.fromRaw(mac, 6), mut e);
+    var word = e.etype as u32;
+    if (e.other) { word = word | (1 << 16); }
+    if (e.reflected) { word = word | (1 << 17); }
+    if (e.broadcast) { word = word | (1 << 18); }
+    if (e.multicast) { word = word | (1 << 19); }
+    return word;
+}
+
 /// Safety: `pkt` points to ARP_LEN readable bytes and `out` to a writable struct.
 @export("netparse_arp")
 unsafe fn arpC(pkt: *u8, out: *mut netparse_arp) -> bool {

@@ -1,0 +1,142 @@
+// ether.cee - Ethernet framing and dispatch (kernel/include/kernel/net/ether.h), in CeeSafe: roadmap 2.0 SA6.
+// ether_input checks a received frame's header with netparse's decoder, drops what is not for this host, and hands
+// the rest to ARP, IPv4 or IPv6; ether_output puts a header in front of a packet, pads a runt to the minimum frame
+// and sends it. tests/host/test_ether.c holds them to the digest of the C they replaced.
+//
+// The mbufs, the interface and the protocols stay C for now: they are reached through their C API, and an mbuf's
+// bytes only through a slice of the length the call has made sure of (ETH_HLEN after m_pullup or m_prepend).
+
+@header("kernel/net/ether.h", "kernel/net/ip.h")
+extern "C" {
+    /// kernel/include/kernel/mbuf.h: the fields framing reads and writes.
+    struct mbuf {
+        data: *mut u8;
+        flags: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+        csum_flags: u16;
+        csum_start: u16;
+    }
+    /// kernel/include/kernel/netif.h: other CPUs count into the statistics too, atomically (ADR 0041 §3.1).
+    struct netif_stats {
+        rx_errors: AtomicU64;
+    }
+    struct netif {
+        mac: [u8; 6];
+        stats: netif_stats;
+    }
+
+    fn m_pullup(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_prepend(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_adj(m: *mut mbuf, n: i32);
+    fn m_append(m: *mut mbuf, src: *void, len: u32) -> i32;
+    fn m_freem(m: *mut mbuf);
+    fn netif_transmit(nif: *mut netif, m: *mut mbuf) -> i32;
+    fn ipv4_input(nif: *mut netif, m: *mut mbuf);
+    fn ipv6_input(nif: *mut netif, m: *mut mbuf);
+    fn arp_input(nif: *mut netif, m: *mut mbuf);
+}
+
+extern "C" {
+    /// netparse.cee: the verdict on the ETH_HLEN bytes at `hdr` for the interface whose address is at `mac`, as one
+    /// word: the EtherType in bits 0-15, then other (16), reflected (17), broadcast (18) and multicast (19).
+    fn netparse_ether_word(hdr: *u8, mac: *u8) -> u32;
+}
+
+const VERDICT_OTHER: u32 = 1 << 16;
+const VERDICT_REFLECTED: u32 = 1 << 17;
+const VERDICT_BROADCAST: u32 = 1 << 18;
+const VERDICT_MULTICAST: u32 = 1 << 19;
+
+const ETH_ALEN: usize = 6;
+const ETH_HLEN: u32 = 14;
+const ETH_ZLEN: u32 = 60;
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_ARP: u16 = 0x0806;
+const ETH_P_IPV6: u16 = 0x86DD;
+/// mbuf.h's M_BCAST and M_MCAST; NET_CSUM_TX, the transport checksums a transmit asks to be completed.
+const M_BCAST: u32 = 4;
+const M_MCAST: u32 = 8;
+const NET_CSUM_TX: u16 = 3;
+/// kernel/errno.h's ENOMEM.
+const ENOMEM: i32 = 12;
+
+/// ether.h's eth_broadcast: the all-ones address.
+@export("eth_broadcast")
+const ETH_BROADCAST: [u8; 6] = [0xff; 6];
+
+/// What pads a runt: ETH_ZLEN zero bytes, which m_append copies.
+static ZEROS: [u8; 60] = [0; 60];
+
+/// Safety: ether.h's contract: `nif` is a registered interface, `m` a packet the caller hands over (it is freed or
+/// passed on, never returned), whose mbufs nothing else uses.
+@export("ether_input")
+unsafe fn inputC(nif: *mut netif, received: *mut mbuf) {
+    let m = m_pullup(received, ETH_HLEN); // the header in the first mbuf, or the packet freed
+    if (m.isNull()) {
+        Ptr.toBorrow(nif).stats.rx_errors.fetchAddWith(1, Ordering.Relaxed);
+        return;
+    }
+    let verdict = netparse_ether_word(Ptr.toBorrow(m).data as *u8, borrow Ptr.toBorrow(nif).mac as *[u8; 6] as *u8);
+    let etype = truncate<u16>(verdict);
+    if ((verdict & (VERDICT_OTHER | VERDICT_REFLECTED)) != 0) {
+        m_freem(m); // a promiscuous device's other frames; our own, never accepted
+        return;
+    }
+    {
+        let packet = Ptr.toBorrowMut(m);
+        if ((verdict & VERDICT_BROADCAST) != 0) {
+            packet.flags = packet.flags | M_BCAST;
+        } else if ((verdict & VERDICT_MULTICAST) != 0) {
+            packet.flags = packet.flags | M_MCAST;
+        }
+        packet.pkt.proto = etype;
+    }
+    m_adj(m, truncate<i32>(ETH_HLEN));
+    if (etype == ETH_P_IP) {
+        ipv4_input(nif, m);
+    } else if (etype == ETH_P_ARP) {
+        arp_input(nif, m);
+    } else if (etype == ETH_P_IPV6) {
+        ipv6_input(nif, m);
+    } else {
+        m_freem(m);
+    }
+}
+
+/// Safety: ether.h's contract: `nif` is a registered interface, `packet` a packet the caller hands over, `dst` points
+/// to ETH_ALEN readable bytes.
+@export("ether_output")
+unsafe fn outputC(nif: *mut netif, packet: *mut mbuf, dst: *u8, etype: u16) -> i32 {
+    let m = m_prepend(packet, ETH_HLEN); // room for the header in front, or the packet freed
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    var length: u32 = 0;
+    {
+        let frame = Ptr.toBorrowMut(m);
+        let header = SliceMut.fromRaw(frame.data, ETH_HLEN as usize);
+        header[..ETH_ALEN].copyFrom(Slice.fromRaw(dst, ETH_ALEN));
+        let mac = Ptr.toBorrow(nif).mac;
+        header[ETH_ALEN..2 * ETH_ALEN].copyFrom(mac[..]);
+        header[12] = truncate<u8>(etype >> 8); // network order
+        header[13] = truncate<u8>(etype);
+        if ((frame.pkt.csum_flags & NET_CSUM_TX) != 0) {
+            // The transport header moved by the Ethernet header (a u16, wrapping as the C's did).
+            frame.pkt.csum_start = frame.pkt.csum_start.wrappingAdd(truncate<u16>(ETH_HLEN));
+        }
+        length = frame.pkt.len;
+    }
+    // Minimum frame size (60 bytes before the FCS): switches and virtual backends drop runts, and QEMU's user-mode
+    // network is one of them.
+    if (length < ETH_ZLEN) {
+        if (m_append(m, borrow ZEROS as *[u8; 60] as *void, ETH_ZLEN - length) != 0) {
+            m_freem(m);
+            return -ENOMEM;
+        }
+    }
+    return netif_transmit(nif, m);
+}

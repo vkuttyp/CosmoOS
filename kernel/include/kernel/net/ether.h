@@ -26,7 +26,9 @@ extern const uint8_t eth_broadcast[ETH_ALEN];
 /* Worker thread: parse and dispatch. Takes the packet. */
 void ether_input(struct netif *nif, struct mbuf *m);
 /* Prepend a header and transmit. Takes the packet. */
-int ether_output(struct netif *nif, struct mbuf *m, const uint8_t dst[ETH_ALEN], uint16_t type);
+/* dst: ETH_ALEN bytes. A pointer, not an array parameter: ether_output is CeeSafe, whose generated definition
+ * declares a pointer, and gcc's -Warray-parameter refuses the two together. */
+int ether_output(struct netif *nif, struct mbuf *m, const uint8_t *dst, uint16_t type);
 
 /* ARP (RFC 826). Entries are keyed by (interface, address): the same
  * address on two links is two neighbours (invariant N25). */

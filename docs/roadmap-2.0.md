@@ -607,6 +607,19 @@ gcc on Linux). `INET_BENCH=1`, median of nine at -O2: `netaddr_equal`
 0.97x the C on arm64 and x86-64 (Rosetta); the user-shape round trip
 0.92x and 0.58x, after the first port's 1.06-1.16x (byte stores through
 pointers that may alias, and a local array's stack-protector check).
+Ethernet (2026-11-01): `kernel-services/network/ether.cee` --
+`ether_input`, `ether_output` and `eth_broadcast`, over the C mbufs and
+protocols; the interface's receive-error counter is an atomic field
+shared with C. netparse gains `netparse_ether_word`, its Ethernet verdict
+as one word, since an imported struct cannot be a CeeSafe local, and
+`ether_output`'s `dst` is declared a pointer in `ether.h` (gcc's
+-Warray-parameter refuses an array parameter beside the generated
+pointer). `tests/host/test_ether.c` runs `mbuf.c` on the host over a
+malloc-backed cache with allocation failures, stubs for the protocol
+inputs and `netif_transmit`, and checks every mbuf freed: digest
+`0xd21f822ad04f292a` over 20,000 rounds, the C's (macOS clang, Linux
+gcc). `ETHER_BENCH=1`, median of nine at -O2 with each mbuf's allocation:
+1.00x the C both ways on arm64, 1.01x and 1.00x on x86-64 (Rosetta).
 
 Size: about 3.0x.
 

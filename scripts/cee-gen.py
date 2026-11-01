@@ -110,6 +110,8 @@ PORTS = [
      "The Internet checksum over buffers and mbuf chains (cksum.h)", None, False),
     ("kernel-services/network/inet.cee", "kernel-services/network/inet.c",
      "The address helpers: netaddr equality, the user's sockaddr shape, and netaddr_str (inet.h)", None, False),
+    ("kernel-services/network/ether.cee", "kernel-services/network/ether.c",
+     "Ethernet framing and dispatch: ether_input, ether_output, eth_broadcast (ether.h)", None, False),
     ("drivers/virtio/virtq_used.cee", "drivers/virtio/virtq_used.c",
      "The virtqueue's decoder of used elements (virtio.h; linked into the virtio module)", None, False),
     ("drivers/usb/usb_desc.cee", "drivers/usb/usb_desc.c",
