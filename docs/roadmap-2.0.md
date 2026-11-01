@@ -521,7 +521,8 @@ the C's. `ACPI_BENCH=1`, the MADT decoder: 1.13x the C on arm64 (102 ns
 a table against 90) and 1.10x on x86-64 (Rosetta), after each entry's
 fields were read from a slice of the length its type needs; 1.62x
 under Rosetta before, and a copy into a fixed buffer was slower still.
-The MADT is decoded once a boot.
+The MADT is decoded once a boot; the 1.13x was accepted by the owner
+(2026-11-01), as the rule allows.
 
 Size: about 3.0x.
 
