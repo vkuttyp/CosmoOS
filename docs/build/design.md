@@ -234,7 +234,7 @@ CI image's (`ci/Dockerfile`; the release's `SHA256SUMS`), build, run the
 matrix. The pinned release is installed with
 
 ```sh
-curl -fsSL https://vkuttyp.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v0.4.1 sh
+curl -fsSL https://vkuttyp.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v0.5.0 sh
 ```
 
 or named with `CEESAFEC=<path>`; the CI image has it (`ci/Dockerfile`).
