@@ -61,12 +61,18 @@ Use GNU make (`gmake` on macOS), as described in
 
 ## Gaps
 
-- No host test and no fuzzer covers `acpi.c`. Host-side ACPI table
-  fuzzing is listed as remaining work in [docs/plan.md](../../plan.md)
+- `tests/host/test_acpi.c` (`make host-test`) drives the decoders
+  (`acpi_parse.cee`) on the host: a recorded digest
+  (`0x117ff5b066c8c9ab`, the C's they replaced) over 20,000 rounds of
+  RSDPs of both revisions with right and wrong signatures and
+  checksums, root tables of both widths, and MADTs of every entry type
+  at lengths around each one's own, past 64 CPUs and 8 IOAPICs, short,
+  and stopped by a bad entry; and q35's MADT. `ACPI_BENCH=1` times the
+  MADT decoder. No fuzzer drives them yet: host-side table fuzzing is
+  listed as remaining work in [docs/plan.md](../../plan.md)
   ("Implementation — missing fuzz/property coverage").
-- Nothing drives the failure paths: bad table checksum, bad RSDP,
-  truncated or malformed MADT entries, array overflow, the panic on a
-  missing MADT. They are covered by review only.
+- In the kernel, nothing drives the failure paths -- a bad table
+  checksum, a bad RSDP, the panic on a missing MADT -- but review.
 - The RSDT (32-bit) path runs only on firmware with a revision 0 or 1
   RSDP or no XSDT; the x86-64 boot uses the XSDT (the log line above),
   and no test checks which root table AArch64 uses.

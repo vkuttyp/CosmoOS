@@ -511,6 +511,17 @@ configurations, the C's. `USBDESC_BENCH=1`, best of the runs: 1.04x the
 C on arm64 (26.5 ns against 25.5), 0.94x on x86-64 (Rosetta); recording
 from the bytes without the copy was 0.86x on arm64 but 1.08x under
 Rosetta.
+virtq/USB/ACPI, part 3, ACPI tables (2026-11-01):
+`drivers/acpi/acpi_parse.cee` -- the checksum, the RSDP's signature and
+checksums, the root table's entries and the MADT walk, into a state
+`acpi.c` keeps and logs from (the C step, `acpi_parse.c`, made the walk
+report what it used to log). The generated C finds `acpi_internal.h`
+through `kernel.mk`. Digest `0x117ff5b066c8c9ab` over 20,000 rounds,
+the C's. `ACPI_BENCH=1`, the MADT decoder: 1.13x the C on arm64 (102 ns
+a table against 90) and 1.10x on x86-64 (Rosetta), after each entry's
+fields were read from a slice of the length its type needs; 1.62x
+under Rosetta before, and a copy into a fixed buffer was slower still.
+The MADT is decoded once a boot.
 
 Size: about 3.0x.
 

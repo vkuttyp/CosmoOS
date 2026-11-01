@@ -272,6 +272,9 @@ kernel: $(KERNEL_ELF)
 # includes by name: its object, and its analysis, look in compat/linux too.
 $(OUT)/compat/linux/lxconv.o $(OUT)/compat/linux/lxconv.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
 
+# drivers/acpi/acpi_parse.c likewise, from acpi_parse.cee, away from the acpi_internal.h it includes.
+$(OUT)/drivers/acpi/acpi_parse.o $(OUT)/drivers/acpi/acpi_parse.analyzed: EXTRA_CFLAGS += -I$(ROOT)/drivers/acpi
+
 # kernel-services/filesystem/cosmofs/cfsparse.c is generated from cfsparse.cee into out/cee (scripts/cee-gen.py), away
 # from the cosmofs_internal.h it includes by name: its object, and its analysis, look in the cosmofs directory too.
 $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.o $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.analyzed: \

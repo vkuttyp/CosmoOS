@@ -1,0 +1,306 @@
+// acpi_parse.cee - The ACPI table walker's decoders of what firmware wrote (roadmap 2.0 SA5, the virtq/USB/ACPI
+// family): the checksum, the RSDP's signature and checksums, the root table's entries and the MADT. acpi.c maps the
+// tables, panics and logs (acpi_internal.h); these read only the bytes they are given, as slices of the length each was
+// checked to have, so no entry can be read past its table or its table past what was mapped. The integers are
+// little-endian, as ACPI's are. tests/host/test_acpi.c holds them to the C they replaced: the same digest over 20,000
+// rounds of RSDPs, root tables and MADTs.
+
+@header("acpi_internal.h")
+extern "C" {
+    struct acpi_sdt_header {
+        length: u32;
+    }
+    struct acpi_rsdp;
+    struct acpi_madt;
+    struct acpi_madt_cpu {
+        apic_id: u32;
+        acpi_id: u32;
+        x2apic: bool;
+    }
+    struct acpi_madt_ioapic {
+        id: u8;
+        address: u64;
+        gsi_base: u32;
+    }
+    struct acpi_madt_override {
+        bus: u8;
+        source: u8;
+        gsi: u32;
+        flags: u16;
+    }
+    struct acpi_gic {
+        version: u32;
+        gicd_base: u64;
+        gicc_base: u64;
+        v2m_base: u64;
+        v2m_spi_base: u32;
+        v2m_spi_count: u32;
+        gicr_base: u64;
+        gicr_length: u64;
+        gicc_gicr_base: u64;
+        its_base: u64;
+        its_id: u32;
+        gicv_base: u64;
+        gich_base: u64;
+        maint_gsiv: u32;
+    }
+    struct acpi_madt_state {
+        lapic_base: u64;
+        cpus: [acpi_madt_cpu; 64];
+        cpu_count: usize;
+        ioapics: [acpi_madt_ioapic; 8];
+        ioapic_count: usize;
+        overrides: [acpi_madt_override; 24];
+        override_count: usize;
+        gic: acpi_gic;
+        gic_present: bool;
+        too_short: bool;
+        stopped: bool;
+        bad_entry_len: u32;
+        extra_cpus: u32;
+        extra_ioapics: u32;
+    }
+}
+
+const SDT_HEADER: usize = 36;                   // sizeof(struct acpi_sdt_header)
+const RSDP: usize = 36;                         // sizeof(struct acpi_rsdp)
+const MADT_FIXED: usize = 44;                   // sizeof(struct acpi_madt)
+const RSDP_SIGNATURE: u64 = 0x2052545020445352; // "RSD PTR "
+const MAX_CPUS: usize = 64;                     // ACPI_MAX_CPUS
+const MAX_IOAPICS: usize = 8;                   // ACPI_MAX_IOAPICS
+const MAX_OVERRIDES: usize = 24;                // ACPI_MAX_OVERRIDES
+
+// Why an RSDP is refused (acpi_internal.h).
+const RSDP_OK: i32 = 0;
+const RSDP_BAD_SIGNATURE: i32 = 1;
+const RSDP_BAD_CHECKSUM: i32 = 2;
+const RSDP_BAD_EXT_CHECKSUM: i32 = 3;
+
+// MADT entry types.
+const MADT_LAPIC: u8 = 0;
+const MADT_IOAPIC: u8 = 1;
+const MADT_ISO: u8 = 2;
+const MADT_LAPIC_OVERRIDE: u8 = 5;
+const MADT_X2APIC: u8 = 9;
+const MADT_GICC: u8 = 11;
+const MADT_GICD: u8 = 12;
+const MADT_GIC_MSI_FRAME: u8 = 13;
+const MADT_GICR: u8 = 14;
+const MADT_GIC_ITS: u8 = 15;
+
+const CPU_ENABLED: u32 = 1;         // bit 0
+const CPU_ONLINE_CAPABLE: u32 = 2;  // bit 1: LAPIC and x2APIC entries
+const GICC_ONLINE_CAPABLE: u32 = 8; // bit 3: GICC entries (bit 1 there is the performance interrupt's trigger mode)
+
+fn le16(b: Slice<u8>, at: usize) -> u16 => b[at] as u16 | (b[at + 1] as u16) << 8;
+
+fn le32(b: Slice<u8>, at: usize) -> u32 =>
+    b[at] as u32 | (b[at + 1] as u32) << 8 | (b[at + 2] as u32) << 16 | (b[at + 3] as u32) << 24;
+
+fn le64(b: Slice<u8>, at: usize) -> u64 => le32(b, at) as u64 | (le32(b, at + 4) as u64) << 32;
+
+/// The byte sum, modulo 256: 0 for a table that checks.
+fn sum(b: Slice<u8>) -> u8 {
+    var s: u32 = 0;
+    for (i in 0..b.length) {
+        s = (s + b[i] as u32) & 0xff;
+    }
+    return truncate<u8>(s);
+}
+
+/// A CPU the MADT enables, or one more past the limit.
+fn addCpu(st: borrow mut acpi_madt_state, acpiId: u32, apicId: u32, x2apic: bool) {
+    if (st.cpu_count < MAX_CPUS) {
+        let c = borrow mut st.cpus[st.cpu_count];
+        c.acpi_id = acpiId;
+        c.apic_id = apicId;
+        c.x2apic = x2apic;
+        st.cpu_count += 1;
+    } else {
+        st.extra_cpus += 1;
+    }
+}
+
+/// The MADT entry of `len` bytes (at least 2) at `off` in `t`, into the state. Once an entry is known long enough for
+/// its type's fields, they are read from a slice of exactly that many bytes, a length the C compiler knows, so each
+/// field's check folds away.
+fn madtEntry(st: borrow mut acpi_madt_state, t: Slice<u8>, off: usize, len: usize) {
+    let kind = t[off];
+    if (kind == MADT_LAPIC) {
+        if (len >= 8) {
+            let e = t[off..off + 8];
+            if ((le32(e, 4) & (CPU_ENABLED | CPU_ONLINE_CAPABLE)) != 0) {
+                addCpu(st, e[2] as u32, e[3] as u32, false);
+            }
+        }
+    } else if (kind == MADT_X2APIC) {
+        if (len >= 16) {
+            let e = t[off..off + 16];
+            if ((le32(e, 8) & (CPU_ENABLED | CPU_ONLINE_CAPABLE)) != 0) {
+                addCpu(st, le32(e, 12), le32(e, 4), true);
+            }
+        }
+    } else if (kind == MADT_IOAPIC) {
+        if (len >= 12) {
+            if (st.ioapic_count < MAX_IOAPICS) {
+                let e = t[off..off + 12];
+                let io = borrow mut st.ioapics[st.ioapic_count];
+                io.id = e[2];
+                io.address = le32(e, 4) as u64;
+                io.gsi_base = le32(e, 8);
+                st.ioapic_count += 1;
+            } else {
+                st.extra_ioapics += 1;
+            }
+        }
+    } else if (kind == MADT_ISO) {
+        if (len >= 10 && st.override_count < MAX_OVERRIDES) {
+            let e = t[off..off + 10];
+            let o = borrow mut st.overrides[st.override_count];
+            o.bus = e[2];
+            o.source = e[3];
+            o.gsi = le32(e, 4);
+            o.flags = le16(e, 8);
+            st.override_count += 1;
+        }
+    } else if (kind == MADT_LAPIC_OVERRIDE) {
+        if (len >= 12) {
+            let e = t[off..off + 12];
+            st.lapic_base = le64(e, 4);
+        }
+    } else if (kind == MADT_GICC) {
+        // CPU interface number 4, ACPI UID 8, flags 12, parking version 16, performance GSIV 20, parked address 24,
+        // physical base 32, GICV 40, GICH 48, VGIC maintenance 56, GICR base 60, MPIDR 68 (76 bytes in ACPI 5.1, 80
+        // in 6.x).
+        if (len >= 76) {
+            let e = t[off..off + 76];
+            let g = borrow mut st.gic;
+            if (g.gicc_base == 0) {
+                g.gicc_base = le64(e, 32);
+            }
+            // Virtualisation, from the first entry that offers it: every CPU's frames are the same on the machines
+            // this runs on.
+            if (g.gich_base == 0) {
+                g.gicv_base = le64(e, 40);
+                g.gich_base = le64(e, 48);
+                g.maint_gsiv = le32(e, 56);
+            }
+            // GICv3: each CPU's redistributor may be named here instead of by a GICR entry.
+            if (g.gicc_gicr_base == 0) {
+                g.gicc_gicr_base = le64(e, 60);
+            }
+            if ((le32(e, 12) & (CPU_ENABLED | GICC_ONLINE_CAPABLE)) != 0) {
+                // hw_id: the MPIDR affinity fields (Aff0-2 in bits 0-23, Aff3 in 24-31).
+                let mpidr = le64(e, 68);
+                addCpu(st, le32(e, 8), truncate<u32>((mpidr & 0xffffff) | ((mpidr >> 8) & 0xff000000)), false);
+            }
+        }
+    } else if (kind == MADT_GICD) {
+        if (len >= 24) {
+            let e = t[off..off + 24];
+            st.gic.gicd_base = le64(e, 8);
+            st.gic.version = e[20] as u32;
+            st.gic_present = true;
+        }
+    } else if (kind == MADT_GIC_MSI_FRAME) {
+        if (len >= 24 && st.gic.v2m_base == 0) {
+            let e = t[off..off + 24];
+            st.gic.v2m_base = le64(e, 8);
+            if ((le32(e, 16) & 1) != 0) {
+                st.gic.v2m_spi_count = le16(e, 20) as u32;
+                st.gic.v2m_spi_base = le16(e, 22) as u32;
+            }
+        }
+    } else if (kind == MADT_GICR) {
+        // Discovery window base 4, length 12.
+        if (len >= 16 && st.gic.gicr_base == 0) {
+            let e = t[off..off + 16];
+            st.gic.gicr_base = le64(e, 4);
+            st.gic.gicr_length = le32(e, 12) as u64;
+        }
+    } else if (kind == MADT_GIC_ITS) {
+        // Id 4, physical base 8.
+        if (len >= 16 && st.gic.its_base == 0) {
+            let e = t[off..off + 16];
+            st.gic.its_id = le32(e, 4);
+            st.gic.its_base = le64(e, 8);
+        }
+    }
+}
+
+/// The MADT's `t` (its whole length) into the state: the fixed fields, then each entry by its length, stopping at one
+/// whose length is under its own header or past the table.
+fn madtDecode(t: Slice<u8>, st: borrow mut acpi_madt_state) {
+    if (t.length < MADT_FIXED) {
+        st.too_short = true;
+        return;
+    }
+    st.lapic_base = le32(t, 36) as u64;
+    var off = MADT_FIXED;
+    while (off + 2 <= t.length) {
+        let entryLen = t[off + 1];
+        let len = entryLen as usize;
+        if (len < 2 || off + len > t.length) {
+            st.stopped = true;
+            st.bad_entry_len = entryLen as u32;
+            return;
+        }
+        madtEntry(st, t, off, len);
+        off += len;
+    }
+}
+
+// --- the exports -----------------------------------------------------------------------------------------------------
+
+/// Safety: `p` points to `len` readable bytes.
+@export("acpi_checksum")
+unsafe fn checksumC(p: *void, len: usize) -> u8 => sum(Slice.fromRaw(p as *u8, len));
+
+/// The RSDP's signature and checksums; on RSDP_OK the root table's address and the width of its entries.
+/// Safety: `rsdp` points to sizeof(struct acpi_rsdp) readable bytes; `root` and `entrySize` are writable.
+@export("acpi_rsdp_decode")
+unsafe fn rsdpDecodeC(rsdp: *acpi_rsdp, root: *mut u64, entrySize: *mut u32) -> i32 {
+    let r = Slice.fromRaw(rsdp as *u8, RSDP);
+    if (le64(r, 0) != RSDP_SIGNATURE) {
+        return RSDP_BAD_SIGNATURE;
+    }
+    if (sum(r[..20]) != 0) {
+        return RSDP_BAD_CHECKSUM;
+    }
+    let xsdt = le64(r, 24);
+    if (r[15] >= 2 && xsdt != 0) {
+        let length = le32(r, 20) as usize;
+        if (sum(r[..if (length < RSDP) length else RSDP]) != 0) {
+            return RSDP_BAD_EXT_CHECKSUM;
+        }
+        root.write(xsdt);
+        entrySize.write(8);
+    } else {
+        root.write(le32(r, 16) as u64);
+        entrySize.write(4);
+    }
+    return RSDP_OK;
+}
+
+/// A checked root table's entries: how many.
+/// Safety: `root` is a mapped, checked table (its length at least its header's).
+@export("acpi_root_count")
+unsafe fn rootCountC(root: *acpi_sdt_header, entrySize: u32) -> usize =>
+    (Ptr.toBorrow(root).length as usize - SDT_HEADER) / entrySize as usize;
+
+/// The i-th table's address in a checked root table.
+/// Safety: as acpi_root_count; `i` is below its count.
+@export("acpi_root_entry")
+unsafe fn rootEntryC(root: *acpi_sdt_header, entrySize: u32, i: usize) -> u64 {
+    let t = Slice.fromRaw(root as *u8, Ptr.toBorrow(root).length as usize);
+    let at = SDT_HEADER + i * entrySize as usize;
+    return if (entrySize == 8) le64(t, at) else le32(t, at) as u64;
+}
+
+/// The MADT (hdr.length bytes, checksummed) into `st`, which starts zeroed.
+/// Safety: `madt` is a mapped table of its header's length; `st` is writable.
+@export("acpi_madt_decode")
+unsafe fn madtDecodeC(madt: *acpi_madt, st: *mut acpi_madt_state) {
+    let len = Ptr.toBorrow(madt as *acpi_sdt_header).length as usize;
+    madtDecode(Slice.fromRaw(madt as *u8, len), Ptr.toBorrowMut(st));
+}

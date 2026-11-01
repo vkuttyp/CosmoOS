@@ -9,7 +9,10 @@ interpreter, no power management, no device tree of ACPI objects.
 ## Position
 
 `drivers/acpi/acpi.c` sits below the interrupt controllers and SMP
-bring-up and above the memory subsystem. Its only input is
+bring-up and above the memory subsystem. What it decodes from
+firmware's bytes -- the checksum, the RSDP, the root table's entries
+and the MADT -- is `acpi_parse.cee`, in CeeSafe since roadmap 2.0 SA5
+(`acpi_internal.h`); `acpi.c` maps the tables, panics and logs. Its only input is
 `cosmoboot_info.acpi_rsdp`. It reads tables through the direct map when
 they lie in RAM-typed memory (ACPI reclaim and NVS count as RAM, and the
 direct map covers all RAM after `vmm_init`), and through a read-only

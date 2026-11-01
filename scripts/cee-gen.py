@@ -109,6 +109,8 @@ PORTS = [
      "The virtqueue's decoder of used elements (virtio.h; linked into the virtio module)", None, False),
     ("drivers/usb/usb_desc.cee", "drivers/usb/usb_desc.c",
      "The USB configuration descriptor decoder (usb.h; linked into the xhci module)", None, False),
+    ("drivers/acpi/acpi_parse.cee", "drivers/acpi/acpi_parse.c",
+     "The ACPI table walker's decoders: checksum, RSDP, root table, MADT (acpi_internal.h)", None, False),
     ("kernel/ceesafe/crash_test.cee", "kernel/ceesafe/crash_test.c",
      "The crash test crash-cee: a CeeSafe bounds check that fails on purpose (CRASH_TEST=5)",
      "kernel/include/ceesafe/crash_test.h", False),

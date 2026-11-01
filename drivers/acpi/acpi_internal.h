@@ -2,9 +2,10 @@
  * acpi_internal.h - The ACPI table walker's private structures, and its
  * decoders of what firmware wrote (roadmap 2.0 SA5, the virtq/USB/ACPI
  * family): the checksum, the RSDP, the root table's entries and the
- * MADT. acpi.c maps the tables, panics and logs; the decoders read only
- * the bytes they are given, each within the length it was checked to
- * have. tests/host/test_acpi.c holds them to a recorded digest.
+ * MADT, in CeeSafe (acpi_parse.cee). acpi.c maps the tables, panics and
+ * logs; the decoders read only the bytes they are given, each within the
+ * length it was checked to have. tests/host/test_acpi.c holds them to a
+ * recorded digest.
  */
 
 #ifndef DRIVERS_ACPI_INTERNAL_H
