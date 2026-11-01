@@ -1,5 +1,5 @@
 /*
- * test_cksum.c - The Internet checksum (kernel-services/network/cksum.c,
+ * test_cksum.c - The Internet checksum (kernel-services/network/cksum.cee,
  * kernel/include/kernel/net/cksum.h) on the host: roadmap 2.0 SA6's first
  * port. A digest over seeded inputs, recorded from the C: cksum_partial and
  * in_cksum over buffers of every length, alignment and starting sum;
@@ -19,7 +19,7 @@
 #include <string.h>
 #include <time.h>
 
-/* The digest of the C (cksum.c, 2026-11-01). */
+/* The digest of the C (cksum.c, 2026-11-01), which the CeeSafe port gives. */
 #define CKSUM_DIGEST 0xee64aae0b44b750full
 #define ROUNDS 20000u
 #define SEED 0xC05F5FA2026B0008ull

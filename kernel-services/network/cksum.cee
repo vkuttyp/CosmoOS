@@ -1,0 +1,170 @@
+// The Internet checksum (RFC 1071) over buffers and mbuf chains (kernel/include/kernel/net/cksum.h), in CeeSafe:
+// roadmap 2.0 SA6's first port. Every received and sent packet's IPv4 header, TCP and UDP segment and ICMP message is
+// summed here, so it is a hot path; tests/host/test_cksum.c holds it to the digest of the C it replaced, and
+// CKSUM_BENCH=1 times it.
+//
+// The sum is a running 32-bit sum of big-endian 16-bit words, which wraps as the C's uint32_t did (a sum longer than
+// 128 KiB is not meaningful, and no caller makes one); folding it gives the 16-bit ones' complement. CosmoOS's
+// targets are little-endian, as its htons assumes: the folded checksum is returned with its bytes swapped, ready to
+// store, and an address copied into a pseudo-header is taken in its memory order.
+
+@header("kernel/net/cksum.h")
+extern "C" {
+    /// kernel/include/kernel/mbuf.h: a buffer of a chain, and the packet header its first one carries.
+    struct mbuf {
+        next: *mut mbuf;
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbuf_pkt {
+        len: u32;
+        csum_flags: u16;
+        csum_start: u16;
+        csum_offset: u16;
+    }
+    /// kernel/include/kernel/net/inet.h.
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+}
+
+/// mbuf.h's NET_CSUM_*: the transport checksums a transmit asks to be completed.
+const NET_CSUM_TCP: u16 = 1;
+const NET_CSUM_UDP: u16 = 2;
+const NET_CSUM_TX: u16 = 3;
+
+/// The running sum of `data`'s big-endian 16-bit words, continuing `sum`; a last odd byte is a word's high byte.
+fn partial(data: Slice<u8>, sum: u32) -> u32 {
+    // A byte at an even place is its word's high byte, at an odd one the low: weighting it by 256 or 1 sums the same
+    // words as the C's pairs, in one counted loop the compiler proves free of bounds checks (optimisations.md §2) and
+    // vectorises. `i & 1` is 0 or 1, so the weight is 256 or 1 and a byte times it is at most 65,280: the arithmetic
+    // cannot wrap, and is written wrapping so that it carries no checks.
+    var s = sum;
+    for (i in 0..data.length) {
+        let weight = 256usize.wrappingSub(255usize.wrappingMul(i & 1));
+        s = s.wrappingAdd(truncate<u32>((data[i] as usize).wrappingMul(weight)));
+    }
+    return s;
+}
+
+/// The ones' complement of the folded sum, in network byte order (as cksum.c's htons(~fold)).
+fn fold(sum: u32) -> u16 {
+    var s = sum;
+    while ((s >> 16) != 0) {
+        s = (s & 0xffff) + (s >> 16);
+    }
+    let host = truncate<u16>(s) ^ 0xffff;
+    return (host << 8) | (host >> 8);
+}
+
+/// The running sum over `want` bytes of the chain from `first`, starting `off` bytes in, continuing `sum`. A word
+/// may straddle two buffers: its high byte ends one, its low byte starts the next.
+/// Safety: `first` is null or the first of a chain of live mbufs whose `data` points to `len` readable bytes.
+unsafe fn chainPartial(first: *mbuf, off: u32, want: u32, sum: u32) -> u32 {
+    var m = first;
+    var skip = off;
+    while (!m.isNull() && skip >= Ptr.toBorrow(m).len) {
+        skip -= Ptr.toBorrow(m).len;
+        m = Ptr.toBorrow(m).next as *mbuf;
+    }
+    var s = sum;
+    var left = want;
+    var odd = false;
+    while (left > 0 && !m.isNull()) {
+        let buffer = Ptr.toBorrow(m);
+        let room = buffer.len - skip;
+        let take = if (room < left) room else left;
+        let whole = Slice.fromRaw(buffer.data as *u8, buffer.len as usize);
+        let bytes = whole[skip as usize..(skip + take) as usize];
+        var from: usize = 0;
+        if (odd && take > 0) {
+            s = s.wrappingAdd(bytes[0] as u32); // the low byte of a word the last buffer began
+            from = 1;
+            odd = false;
+        }
+        let rest = bytes[from..];
+        s = partial(rest, s);
+        if (rest.length % 2 == 1) { odd = true; } // its last byte begins a word the next buffer ends
+        left -= take;
+        skip = 0;
+        m = buffer.next as *mbuf;
+    }
+    return s;
+}
+
+/// A u32's four bytes in memory order (little-endian: CosmoOS's targets).
+fn putMemory(to: SliceMut<u8>, at: usize, v: u32) {
+    to[at] = truncate<u8>(v);
+    to[at + 1] = truncate<u8>(v >> 8);
+    to[at + 2] = truncate<u8>(v >> 16);
+    to[at + 3] = truncate<u8>(v >> 24);
+}
+
+// ---- The C API of kernel/include/kernel/net/cksum.h ----
+
+/// Safety: cksum.h's contract: `data` points to `len` readable bytes (or `len` is 0).
+@export("cksum_partial")
+unsafe fn partialC(data: *void, len: usize, sum: u32) -> u32 => partial(Slice.fromRaw(data as *u8, len), sum);
+
+@export("cksum_fold")
+fn foldC(sum: u32) -> u16 => fold(sum);
+
+/// Safety: as cksum_partial.
+@export("in_cksum")
+unsafe fn inCksumC(data: *void, len: usize) -> u16 => fold(partial(Slice.fromRaw(data as *u8, len), 0));
+
+/// Safety: `m` is null or the first of a chain of live mbufs, each's `data` pointing to `len` readable bytes.
+@export("m_cksum_partial")
+unsafe fn chainPartialC(m: *mbuf, off: u32, len: u32, sum: u32) -> u32 => chainPartial(m, off, len, sum);
+
+/// The IPv4 pseudo-header's sum: the addresses as they lie in memory (network order), zero, the protocol, the length.
+@export("cksum_pseudo4")
+fn pseudo4C(src: u32, dst: u32, proto: u8, len: u16) -> u32 {
+    var ph: [u8; 12] = [0; 12];
+    putMemory(mut ph[..], 0, src);
+    putMemory(mut ph[..], 4, dst);
+    ph[9] = proto;
+    ph[10] = truncate<u8>(len >> 8);
+    ph[11] = truncate<u8>(len);
+    return partial(ph[..], 0);
+}
+
+/// Safety: `src` and `dst` point to live addresses.
+@export("cksum_pseudo6")
+unsafe fn pseudo6C(src: *in6_addr, dst: *in6_addr, proto: u8, len: u32) -> u32 {
+    var ph: [u8; 40] = [0; 40];
+    let a = Ptr.toBorrow(src);
+    let b = Ptr.toBorrow(dst);
+    let sixteen: usize = 16;
+    for (i in 0..sixteen) {
+        ph[i] = a.s6_addr[i];
+        ph[16 + i] = b.s6_addr[i];
+    }
+    ph[32] = truncate<u8>(len >> 24);
+    ph[33] = truncate<u8>(len >> 16);
+    ph[34] = truncate<u8>(len >> 8);
+    ph[35] = truncate<u8>(len);
+    ph[39] = proto;
+    return partial(ph[..], 0);
+}
+
+/// Finishes a packet's requested transport checksum in software: the sum over [csum_start, pkt.len), written at
+/// csum_start + csum_offset, which must lie in the first buffer; a UDP checksum of zero is sent as 0xffff. False,
+/// with the packet untouched, when the offsets are out of range.
+/// Safety: `m` points to the first of a chain of live mbufs, each's `data` pointing to `len` bytes, the first's
+/// writable, that nothing else uses during the call.
+@export("m_csum_complete")
+unsafe fn completeC(m: *mut mbuf) -> bool {
+    let first = Ptr.toBorrowMut(m);
+    let start = first.pkt.csum_start as u32;
+    let field = start + first.pkt.csum_offset as u32;
+    if (start >= first.pkt.len || field + 2 > first.len) { return false; }
+    var c = fold(chainPartial(m as *mbuf, start, first.pkt.len - start, 0));
+    if ((first.pkt.csum_flags & NET_CSUM_UDP) != 0 && c == 0) { c = 0xffff; }
+    let bytes = SliceMut.fromRaw(first.data, first.len as usize);
+    bytes[field as usize] = truncate<u8>(c);       // the u16 in memory order, as the C's memcpy stored it
+    bytes[field as usize + 1] = truncate<u8>(c >> 8);
+    first.pkt.csum_flags = first.pkt.csum_flags & (NET_CSUM_TX ^ 0xffff);
+    return true;
+}

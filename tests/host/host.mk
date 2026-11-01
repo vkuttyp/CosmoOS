@@ -31,7 +31,8 @@ HOST_CRYPTO_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security
 HOST_RELSIG_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c userland/system/relsig.c tests/host/test_relsig.c
 HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_modelf.c
 HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cosmofs.c
-HOST_CKSUM_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/cksum.c tests/host/test_cksum.c
+HOST_CKSUM_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/cksum.c kernel/ceesafe/ceesafe_rt_core.c \
+	tests/host/ceesafe_panic.c tests/host/test_cksum.c
 HOST_LZ4_SRCS := $(HOST_COMMON_SRCS) kernel/core/lz4.c kernel/core/lz4_decode.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_lz4.c
 HOST_CHACHA_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c tests/host/test_chacha20.c

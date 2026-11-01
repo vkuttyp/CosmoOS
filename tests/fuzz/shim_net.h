@@ -4,7 +4,7 @@
  * "Host fuzzing").
  *
  * The protocol layers (ether.c, arp.c, ipv4.c, ipv6.c, udp.c, tcp.c, nat.c,
- * fw.c, mbuf.c, cksum.c, inet.c) compile unchanged. What they need from the
+ * fw.c, mbuf.c, inet.c, and cksum.cee's C) compile unchanged. What they need from the
  * rest of the kernel -- the interface registry (netif.c), the worker's work
  * queue, timers, the clock, the allocator, kobjects, sockets to wake -- is
  * supplied here in a shape a single-threaded fuzz target controls: timers

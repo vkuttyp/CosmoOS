@@ -575,6 +575,28 @@ CeeSafe first.
   left in `kernel-services/network/`; PF1's network numbers within 5% of
   the C build's.
 
+Order (2026-11-01): bottom-up, so each module's callers are still the C
+its tests already exercise -- the checksum, Ethernet, loopback and the
+address helpers; mbufs, interfaces, ARP and neighbour discovery, IPv4
+and IPv6 with ICMP; UDP, raw sockets, the firewall and NAT, sockets,
+TCP; DHCP, the tap services, `procnet`; then `nettest`. Each port has a
+host test with a digest recorded from its C, unless one exists, and a
+benchmark of its hot paths. PF1 does not exist yet: its network numbers
+are owed before this phase's acceptance, against the C build of a commit
+before the first port.
+
+Progress: the checksum (2026-11-01): `kernel-services/network/cksum.cee`
+-- buffer and chain sums, the pseudo-headers, `m_csum_complete`, with
+`cksum_floor.c` keeping its export to modules; `struct mbuf`'s packet
+header is named (`struct mbuf_pkt`) so CeeSafe can import it.
+`tests/host/test_cksum.c`'s digest `0xee64aae0b44b750f` over 20,000
+rounds, the C's (lines and branches 100%). `CKSUM_BENCH=1`, median of
+nine: 1.066x the C on arm64 for 1,500 bytes, 1.091x for 64 KiB, 1.061x
+for a 64 KiB chain; 0.85-0.88x on x86-64 (Rosetta). On arm64 clang
+vectorises the C's pair loop with `ld2`, which no loop CeeSafe emits
+today reaches (eight forms were measured; the fastest weighs each byte by
+its place); accepted by the owner (2026-11-01), as the rule allows.
+
 Size: about 3.0x.
 
 ### SA7 Storage: cosmofs, VFS, block and pools

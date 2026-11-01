@@ -8,7 +8,7 @@ The network stack (Phase 8): a layered design over an mbuf abstraction
 |---|---|
 | `mbuf.c` | Packet buffers: reference-counted, chained, 2 KiB clusters, queues (`kernel/mbuf.h`) |
 | `inet.c` | `struct netaddr` helpers and the UAPI `cosmo_sockaddr` conversion (`kernel/net/inet.h`) |
-| `cksum.c` | The Internet checksum over buffers and chains, pseudo headers (`kernel/net/cksum.h`) |
+| `cksum.cee` | The Internet checksum over buffers and chains, pseudo headers (`kernel/net/cksum.h`); in CeeSafe (roadmap 2.0 SA6), with `cksum_floor.c` exporting `m_csum_complete` to modules |
 | `netif.c` | Interface registry, the 512-packet receive queue, deferred work, the `netrx` worker thread, fw_cfg address configuration (`kernel/netif.h`) |
 | `loopback.c` | The `lo` interface and the test filter hook |
 | `netparse.cee` | The receive path's decoders, in CeeSafe (roadmap 2.0 SA5): every check and field read on frame bytes, from Ethernet to the transport identifiers NAT and the firewall key on, TCP's header and options, and DHCP and DNS (the options walk, the tap server's and the client's messages, a lease and the host name it offers, the DNS proxy's id and resolver address) (`kernel/net/netparse.h`) |
