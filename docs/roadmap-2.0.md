@@ -538,8 +538,8 @@ of 15: a manifest of 200 files 0.85x the C on arm64 and 0.59x on x86-64
 and 1.12x. A 256-entry table for hex digits, and wrapping arithmetic
 where an earlier check bounds the value, took the first port's 1.18x
 (manifest, arm64) and 1.30x (tar, Rosetta) back; four other shapes of
-the version loop were no faster. `version_cmp`'s 1.25x awaits the
-owner.
+the version loop were no faster. `version_cmp` runs once a dependency
+check; the 1.25x was accepted by the owner (2026-11-01), as the rule allows.
 
 Size: about 3.0x.
 
