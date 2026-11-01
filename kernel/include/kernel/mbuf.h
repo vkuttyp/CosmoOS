@@ -54,7 +54,7 @@ struct mbuf {
     uint32_t refcount;         /* atomic; the pointer holder's references */
     uint8_t *buf;
     uint32_t size;
-    struct {
+    struct mbuf_pkt {          /* named, so CeeSafe can import it (its type-system.md §31.1) */
         uint32_t len;
         struct netif *rcvif;
         uint64_t rx_ns;
