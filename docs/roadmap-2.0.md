@@ -523,6 +523,23 @@ fields were read from a slice of the length its type needs; 1.62x
 under Rosetta before, and a copy into a fixed buffer was slower still.
 The MADT is decoded once a boot; the 1.13x was accepted by the owner
 (2026-11-01), as the rule allows.
+`pkg` archives and the INDEX (2026-11-01): `pkg/pkgparse.cee` -- the
+ustar header decoder, versions and their comparison, dependency
+constraints, names, sonames, path confinement, hex, times, and the
+manifest and INDEX stanzas (the C step, `pkgparse.c`, moved them out of
+`manifest.c`, `version.c` and `tar.c` behind `pkgparse.h`, which reports
+why it refuses for `manifest.c` and `tar.c` to word). `pkg.elf` is the
+first user program to link CeeSafe code: the generated C, CeeSafe's
+runtime and a panic hook that aborts (`pkg/ceesafe_panic.c`). Digest
+`0xced1250ae40a6b1c` over 20,000 rounds, the C's. `PKG_BENCH=1`, best
+of 15: a manifest of 200 files 0.85x the C on arm64 and 0.59x on x86-64
+(Rosetta), an INDEX of 300 entries 0.77x and 0.55x, a tar of 40 members
+0.27x and 0.54x (the header checksum vectorises), `version_cmp` 1.25x
+and 1.12x. A 256-entry table for hex digits, and wrapping arithmetic
+where an earlier check bounds the value, took the first port's 1.18x
+(manifest, arm64) and 1.30x (tar, Rosetta) back; four other shapes of
+the version loop were no faster. `version_cmp`'s 1.25x awaits the
+owner.
 
 Size: about 3.0x.
 

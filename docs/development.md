@@ -106,8 +106,8 @@ against synthetic module images, built with `-DMODELF_HOST_TEST=1`), and
 inode-map arithmetic, extent mapping), and `test_libc` (the C library's
 `printf.c`, `malloc.c` over a fake `mmap`, and `conv.c`, included with
 renamed symbols so they coexist with the host libc; `docs/libc/testing.md`),
-and `test_pkg` (the package manager's `manifest.c`, `version.c` and
-`tar.c`: formats, constraints, path confinement, the ustar reader;
+and `test_pkg` (the package manager's `manifest.c`, `tar.c` and the
+decoders in `pkgparse.cee`: formats, constraints, path confinement, the ustar reader;
 `docs/pkg/testing.md`), and `test_linux` (the Linux personality's pure
 conversions in `compat/linux/convert.c`: open flags, `struct stat`,
 wait status, sockaddr, `getdents64` records, `PROT_*`;

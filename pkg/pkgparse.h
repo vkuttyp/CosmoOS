@@ -2,7 +2,8 @@
  * pkgparse.h - The package manager's decoders of what a repository, a
  * package or an installed record says (roadmap 2.0 SA5, the pkg family):
  * the ustar reader, versions and dependencies, names, paths, sonames, hex,
- * times, manifests and the INDEX. They read only the bytes they are given
+ * times, manifests and the INDEX, in CeeSafe (pkg/pkgparse.cee; the C
+ * is generated, build/cee.mk). They read only the bytes they are given
  * and report why they refuse, with the line and the key; manifest.c and
  * tar.c allocate, word the messages and keep the API of pkg.h.
  * tests/host/test_pkg.c holds them to a recorded digest; fuzz_pkg drives

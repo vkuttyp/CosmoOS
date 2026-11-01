@@ -1,8 +1,9 @@
 /*
  * pkg.h - Internal declarations of the package manager (docs/pkg/design.md).
  *
- * manifest.c, version.c and tar.c depend only on standard headers so the
- * host test (tests/host/test_pkg.c) can compile them unchanged.
+ * manifest.c, tar.c and the C generated from pkgparse.cee depend only on
+ * standard headers and CeeSafe's runtime, so the host test
+ * (tests/host/test_pkg.c) can compile them unchanged.
  */
 
 #ifndef PKG_H
@@ -57,7 +58,7 @@
 #define EXIT_USAGE   2
 #define EXIT_REFUSED 3
 
-/* --- version.c --- */
+/* --- versions (pkgparse.cee) --- */
 
 struct version {
     unsigned comp[8];

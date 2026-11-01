@@ -37,7 +37,8 @@ FUZZ_COMMON := $(FUZZ_DRIVER) tests/host/harness.c tests/host/shim_spinlock.c ke
 
 FUZZ_MODELF_SRCS  := tests/fuzz/fuzz_modelf.c kernel/module/modelf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
 FUZZ_ELF_SRCS     := tests/fuzz/fuzz_elf.c kernel/process/elfparse.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
-FUZZ_PKG_SRCS     := tests/fuzz/fuzz_pkg.c pkg/manifest.c pkg/pkgparse.c pkg/tar.c $(FUZZ_DRIVER)
+FUZZ_PKG_SRCS     := tests/fuzz/fuzz_pkg.c pkg/manifest.c pkg/pkgparse.c pkg/tar.c kernel/ceesafe/ceesafe_rt_core.c \
+	tests/host/ceesafe_panic.c $(FUZZ_DRIVER)
 FUZZ_LINUX_SRCS   := tests/fuzz/fuzz_linux.c compat/linux/lxconv.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
 FUZZ_VIRTQ_SRCS   := tests/fuzz/fuzz_virtq.c drivers/virtio/virtqueue.c drivers/virtio/virtq_used.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
 FUZZ_LZ4_SRCS     := tests/fuzz/fuzz_lz4.c kernel/core/lz4.c $(FUZZ_DRIVER)
@@ -110,7 +111,7 @@ $(FUZZ_OUT)/fuzz_pkg: $(call src_paths,$(FUZZ_PKG_SRCS)) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) -std=c11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
-		-Wall -Wextra -Werror -Wno-missing-prototypes -I$(ROOT)/pkg -I$(ROOT)/tests/fuzz \
+		-Wall -Wextra -Werror -Wno-missing-prototypes $(CEE_CFLAGS) -I$(ROOT)/pkg -I$(ROOT)/tests/fuzz \
 		$(if $(filter libfuzzer,$(FUZZ_ENGINE)),-fsanitize=fuzzer,) \
 		$(call src_paths,$(FUZZ_PKG_SRCS)) $(FUZZ_LDFLAGS) -o $@
 

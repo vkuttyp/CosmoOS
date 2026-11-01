@@ -6,7 +6,7 @@ bad).
 
 | Level | What | How to run |
 |---|---|---|
-| Host, parsers | `tests/host/test_pkg.c` over `pkg/pkgparse.c` (the decoders, held to a recorded digest), `manifest.c`, `tar.c` under ASan/UBSan | `make host-test` |
+| Host, parsers | `tests/host/test_pkg.c` over `pkg/pkgparse.cee` (the decoders, in CeeSafe, held to the digest recorded from the C they replaced, `0xced1250ae40a6b1c`), `manifest.c`, `tar.c` under ASan/UBSan | `make host-test` |
 | Host, crypto | the SHA-512 and Ed25519 code `pkg` links is the kernel's, covered by `test_crypto` | `make host-test` |
 | Host, reproducibility | `INDEX`, `hello-1.1.cpk`, `fortune-1.0.cpk`, `pkg.elf` byte-identical across two builds | `make reproducible` |
 | Target, scripted | the package section of `/etc/rc.test` (self-test builds) | `make test` |

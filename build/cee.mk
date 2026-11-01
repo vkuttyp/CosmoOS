@@ -22,7 +22,7 @@ CEE_STAMP :=
 else
 CEE_GEN := $(ROOT)/out/cee
 CEE_STAMP := $(CEE_GEN)/.stamp
-CEE_SOURCES := $(shell find $(ROOT)/kernel $(ROOT)/kernel-services $(ROOT)/drivers -name '*.cee' 2>/dev/null)
+CEE_SOURCES := $(shell find $(ROOT)/kernel $(ROOT)/kernel-services $(ROOT)/drivers $(ROOT)/compat $(ROOT)/pkg -name '*.cee' 2>/dev/null)
 
 $(CEE_STAMP): $(CEE_SOURCES) $(ROOT)/scripts/cee-gen.py
 	$(call log,CEE,$(CEE_GEN))

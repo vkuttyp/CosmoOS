@@ -212,9 +212,12 @@ pkg/
   pkg.h        limits, exit statuses, paths, the structures and the C interfaces below
   pkg.c        main, the commands, the database (/var/db/pkg records, lock) and the file helpers
                (read whole file, write through rename, mkdir -p with a record, remove empty directories)
-  manifest.c   parsers: manifest and index stanzas (key: value lines), path confinement, hex
-  version.c    version parsing and comparison, dependency constraints, name validation
-  tar.c        ustar reader over an in-memory buffer: iterate (name, mode, size, data)
+  pkgparse.cee the decoders, in CeeSafe (roadmap 2.0 SA5; C interface pkgparse.h): manifest and index
+               stanzas (key: value lines), versions and their comparison, dependency constraints, names,
+               sonames, path confinement, hex, times, and the ustar header
+  manifest.c   the manifest and index around the decoders: allocation, the messages, formatting, repos.conf
+  tar.c        ustar reader over an in-memory buffer: iterate (name, mode, size, data) through the decoder
+  ceesafe_panic.c  CeeSafe's panic hook in pkg: print the reason and the source line, abort
   verify.c/.h  COSMOSIG trailer: split, key ring lookup (/etc/pkg/keys), ed25519_verify; sha512 helper
   pkg.mk       builds /sbin/pkg from these plus kernel/security/{sha512,ed25519}.c; the ports target
 ```
@@ -243,7 +246,7 @@ Only after every check passes is anything written. The index checksum
 package came from a repository, so a corrupted download is reported as
 such rather than as a bad signature.
 
-### Version and constraints (`version.c`)
+### Version and constraints (`pkgparse.cee`)
 
 `1.2.3-4`: dotted numeric components compared left to right (missing
 components are 0), then the revision. Constraint grammar: `name`,

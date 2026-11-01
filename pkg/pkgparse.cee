@@ -1,0 +1,1218 @@
+// pkgparse.cee - The package manager's decoders (pkg/pkgparse.h; roadmap 2.0 SA5, the pkg family): the ustar reader,
+// versions and dependencies, names, paths, sonames, hex, times, manifests and the INDEX (docs/pkg/design.md
+// "Formats"). They read only the bytes they are given and say why they refuse; manifest.c and tar.c allocate and word
+// the messages. A line's key and value are read where they lie in the text, each up to its first NUL, as the C read
+// its copies of them. tests/host/test_pkg.c holds them to the C's digest; fuzz_pkg drives them.
+
+@header("pkgparse.h", "string.h")
+extern "C" {
+    @effects()
+    fn strlen(s: *CChar) -> usize;
+
+    struct version {
+        comp: [u32; 8];
+        ncomp: i32;
+        rev: u32;
+    }
+    struct depend {
+        name: [u8; 64];
+        op: u32;
+        version: [u8; 32];
+    }
+    struct file_entry {
+        path: [u8; 256];
+        mode: u32;
+        size: u64;
+        sha: [u8; 64];
+    }
+    struct dirlist {
+        n: i32;
+    }
+    struct manifest {
+        name: [u8; 64];
+        version: [u8; 32];
+        summary: [u8; 128];
+        depends: [depend; 64];
+        ndepends: i32;
+        nprovides: i32;
+        nrequires: i32;
+        files: *mut file_entry;
+        nfiles: i32;
+        dirs: *mut dirlist;
+    }
+    struct index_entry {
+        name: [u8; 64];
+        version: [u8; 32];
+        summary: [u8; 128];
+        file: [u8; 128];
+        depends: [depend; 64];
+        ndepends: i32;
+        size: u64;
+        sha: [u8; 64];
+    }
+    struct index_header {
+        present: bool;
+        serial: u64;
+        published: i64;
+        expires: i64;
+    }
+    struct index {
+        entries: *mut index_entry;
+        n: i32;
+        header: index_header;
+    }
+    struct pkg_perr {
+        why: i32;
+        line: i32;
+        key_at: usize;
+        key_len: usize;
+    }
+    struct tar_reader {
+        buf: *u8;
+        len: usize;
+        pos: usize;
+        name: [u8; 101];
+    }
+    struct tar_decoded {
+        mode: u32;
+        size: u64;
+        data: usize;
+        next: usize;
+    }
+}
+
+// pkg.h's bounds.
+const NAME_MAX: usize = 64;
+const VERSION_MAX: usize = 32;
+const SUMMARY_MAX: usize = 128;
+const PATH_MAX: usize = 256;
+const FILE_MAX: usize = 128;
+const SONAME_MAX: usize = 64;
+const MAX_DEPENDS: u8 = 64;
+const MAX_LIBS: u8 = 32;
+const MAX_FILES: u16 = 4096;
+const MAX_DIRS: u16 = 256;
+const MAX_INDEX: u16 = 1024;
+const PACKAGE_LIMIT: u64 = 67108864; // PKG_PACKAGE_LIMIT, 64 MiB
+const KEY_MAX: usize = 32;           // the C's key buffer: a key is shorter
+const VALUE_MAX: usize = 1024;       // and its value buffer
+
+// pkgparse.h's reasons.
+const PE_LINE: i32 = 1;
+const PE_ENTRY: i32 = 2;
+const PE_NAME_VERSION: i32 = 3;
+const PE_HEADER_KEY: i32 = 4;
+const PE_HEADER_BAD: i32 = 5;
+const PE_LACKS_SERIAL: i32 = 6;
+const PE_LACKS_PUBLISHED: i32 = 7;
+const PE_LACKS_EXPIRES: i32 = 8;
+const PE_TOO_MANY: i32 = 9;
+const PE_INCOMPLETE: i32 = 10;
+
+const TAR_END: i32 = 0;
+const TAR_MEMBER: i32 = 1;
+const TAR_TRUNCATED: i32 = 2;
+const TAR_NOT_USTAR: i32 = 3;
+const TAR_CHECKSUM_FIELD: i32 = 4;
+const TAR_CHECKSUM: i32 = 5;
+const TAR_NOT_REGULAR: i32 = 6;
+const TAR_MODE_SIZE: i32 = 7;
+const TAR_NAME: i32 = 8;
+const TAR_PAST_END: i32 = 9;
+
+// enum cmp_op
+const OP_NONE: u32 = 0;
+const OP_EQ: u32 = 1;
+const OP_GE: u32 = 2;
+const OP_LE: u32 = 3;
+const OP_LT: u32 = 4;
+const OP_GT: u32 = 5;
+
+const NL: u8 = 0x0a;
+const SP: u8 = 0x20;
+const DOT: u8 = 0x2e;
+const DASH: u8 = 0x2d;
+const PLUS: u8 = 0x2b;
+const SLASH: u8 = 0x2f;
+const COLON: u8 = 0x3a;
+const LT: u8 = 0x3c;
+const EQ: u8 = 0x3d;
+const GT: u8 = 0x3e;
+const BLOCK: usize = 512;
+const U64_MAX: u64 = 0xffffffffffffffff;
+
+// --- bytes --------------------------------------------------------------------------------------------------------
+
+/// The byte at `i`, or the NUL that ends a C string past the end.
+fn at(s: Slice<u8>, i: usize) -> u8 => if (i < s.length) s[i] else 0;
+
+fn isDigit(c: u8) -> bool => c >= 0x30 && c <= 0x39;
+
+fn isLower(c: u8) -> bool => c >= 0x61 && c <= 0x7a;
+
+/// The length of `s` up to its first NUL.
+fn clen(s: Slice<u8>) -> usize {
+    for (i in 0..s.length) {
+        if (s[i] == 0) {
+            return i;
+        }
+    }
+    return s.length;
+}
+
+fn equals(a: Slice<u8>, b: StringView) -> bool {
+    let w = b.bytes();
+    if (a.length != w.length) {
+        return false;
+    }
+    for (i in 0..a.length) {
+        if (a[i] != w[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn startsWith(a: Slice<u8>, b: StringView) -> bool {
+    let w = b.bytes();
+    return a.length >= w.length && equals(a[..w.length], b);
+}
+
+fn contains(s: Slice<u8>, c: u8) -> bool {
+    for (x in s) {
+        if (x == c) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// strcmp's sign over two strings without NULs.
+fn compare(a: Slice<u8>, b: Slice<u8>) -> i32 {
+    let n = if (a.length < b.length) a.length else b.length;
+    for (i in 0..n) {
+        if (a[i] != b[i]) {
+            return if (a[i] < b[i]) -1 else 1;
+        }
+    }
+    return if (a.length < b.length) -1 else if (a.length > b.length) 1 else 0;
+}
+
+/// `s` and its NUL into `dst`, which has room (the caller checked).
+fn putString(dst: SliceMut<u8>, s: Slice<u8>) {
+    dst[..s.length].copyFrom(s);
+    dst[s.length] = 0;
+}
+
+/// What strtoull (strtoul on LP64) reads of `s`, a string without NULs: white space, a sign, digits of `base`.
+/// `end` is where it stopped, 0 when there were no digits; an overflow gives U64_MAX.
+struct Number {
+    value: u64;
+    end: usize;
+    range: bool;
+}
+
+fn strtou(s: Slice<u8>, base: u64) -> Number {
+    var i: usize = 0;
+    while (i < s.length && (s[i] == SP || (s[i] >= 0x09 && s[i] <= 0x0d))) {
+        i += 1;
+    }
+    var neg = false;
+    if (i < s.length && (s[i] == PLUS || s[i] == DASH)) {
+        neg = s[i] == DASH;
+        i += 1;
+    }
+    let start = i;
+    var v: u64 = 0;
+    var range = false;
+    while (i < s.length && s[i] >= 0x30 && ((s[i] - 0x30) as u64) < base) {
+        let d = (s[i] - 0x30) as u64;
+        if (range || v > (U64_MAX - d) / base) {
+            range = true;
+        } else {
+            v = v * base + d;
+        }
+        i += 1;
+    }
+    if (i == start) {
+        return Number { value: 0, end: 0, range: false };
+    }
+    if (range) {
+        return Number { value: U64_MAX, end: i, range: true };
+    }
+    if (neg && v != 0) {
+        v = (v ^ U64_MAX) + 1; // strtoull negates in the unsigned type
+    }
+    return Number { value: v, end: i, range: false };
+}
+
+// --- names, versions, dependencies --------------------------------------------------------------------------------
+
+fn nameValid(s: Slice<u8>) -> bool {
+    if (s.length == 0 || s.length >= NAME_MAX) {
+        return false;
+    }
+    if (!(isLower(s[0]) || isDigit(s[0]))) {
+        return false;
+    }
+    for (c in s) {
+        if (!(isLower(c) || isDigit(c) || c == PLUS || c == DOT || c == 0x5f || c == DASH)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// A version as version_parse leaves it, also when it refuses.
+struct Ver {
+    comp: [u32; 8];
+    ncomp: u8;
+    rev: u32;
+}
+
+fn newVer() -> Ver => Ver { comp: [0; 8], ncomp: 0, rev: 0 };
+
+const REFUSED: u32 = 0xffffffff;
+
+/// The digits at `p` (at least one, the caller checked) to a number, `p` past them; REFUSED for a digit after more
+/// than 100000000, as in the C. So a number never passes 1000000009 and its arithmetic cannot wrap.
+fn number(s: Slice<u8>, p: borrow mut usize) -> u32 {
+    var n: u32 = 0;
+    while (p < s.length) {
+        let d = s[p].wrappingSub(0x30);
+        if (d > 9) {
+            break;
+        }
+        if (n > 100000000) {
+            return REFUSED;
+        }
+        n = n.wrappingMul(10).wrappingAdd(d as u32);
+        p += 1;
+    }
+    return n;
+}
+
+/// `s`, a string without NULs. The count of components is kept in `k` and stored on the way out, as far as it got.
+fn versionParse(s: Slice<u8>, v: borrow mut Ver) -> bool {
+    let len = s.length;
+    if (len == 0 || len >= VERSION_MAX) {
+        return false;
+    }
+    var p: usize = 0;
+    var k: u8 = 0;
+    var ok = false;
+    while (true) {
+        if (p >= len || s[p].wrappingSub(0x30) > 9 || k == 8) {
+            break;
+        }
+        let n = number(s, mut p);
+        if (n == REFUSED) {
+            break;
+        }
+        v.comp[k as usize] = n;
+        k += 1;
+        if (p < len && s[p] == DOT) {
+            p += 1;
+            continue;
+        }
+        ok = true;
+        break;
+    }
+    v.ncomp = k;
+    if (!ok) {
+        return false;
+    }
+    if (p < len && s[p] == DASH) {
+        p += 1;
+        if (p >= len || s[p].wrappingSub(0x30) > 9) {
+            return false;
+        }
+        let n = number(s, mut p);
+        if (n == REFUSED) {
+            return false;
+        }
+        v.rev = n;
+    }
+    return p == len;
+}
+
+fn versionCmp(a: Slice<u8>, b: Slice<u8>) -> i32 {
+    var va = newVer();
+    var vb = newVer();
+    if (!versionParse(a, mut va) || !versionParse(b, mut vb)) {
+        return compare(a, b);
+    }
+    let n = if (va.ncomp > vb.ncomp) va.ncomp else vb.ncomp;
+    for (i in 0..n as usize) {
+        let x = if (i < va.ncomp as usize) va.comp[i] else 0;
+        let y = if (i < vb.ncomp as usize) vb.comp[i] else 0;
+        if (x != y) {
+            return if (x < y) -1 else 1;
+        }
+    }
+    if (va.rev != vb.rev) {
+        return if (va.rev < vb.rev) -1 else 1;
+    }
+    return 0;
+}
+
+fn skipSpaces(s: Slice<u8>, start: usize) -> usize {
+    var p = start;
+    while (at(s, p) == SP) {
+        p += 1;
+    }
+    return p;
+}
+
+/// "name" or "name OP version" from `text`, a string without NULs.
+fn dependParse(text: Slice<u8>, d: borrow mut depend) -> bool {
+    for (i in 0..NAME_MAX) {
+        d.name[i] = 0;
+    }
+    d.op = OP_NONE;
+    for (i in 0..VERSION_MAX) {
+        d.version[i] = 0;
+    }
+    var p = skipSpaces(text, 0);
+    var n: usize = 0;
+    while (n < NAME_MAX - 1) {
+        let c = at(text, p);
+        if (c == 0 || c == SP || c == EQ || c == LT || c == GT) {
+            break;
+        }
+        d.name[n] = c;
+        n += 1;
+        p += 1;
+    }
+    if (!nameValid(d.name[..n])) {
+        return false;
+    }
+    p = skipSpaces(text, p);
+    let c = at(text, p);
+    if (c == 0) {
+        return true;
+    }
+    let c1 = at(text, p + 1);
+    if (c == GT && c1 == EQ) {
+        d.op = OP_GE;
+        p += 2;
+    } else if (c == LT && c1 == EQ) {
+        d.op = OP_LE;
+        p += 2;
+    } else if (c == EQ) {
+        d.op = OP_EQ;
+        p += 1;
+    } else if (c == LT) {
+        d.op = OP_LT;
+        p += 1;
+    } else if (c == GT) {
+        d.op = OP_GT;
+        p += 1;
+    } else {
+        return false;
+    }
+    p = skipSpaces(text, p);
+    n = 0;
+    while (n < VERSION_MAX - 1) {
+        let v = at(text, p);
+        if (v == 0 || v == SP) {
+            break;
+        }
+        d.version[n] = v;
+        n += 1;
+        p += 1;
+    }
+    p = skipSpaces(text, p);
+    var w = newVer();
+    return at(text, p) == 0 && versionParse(d.version[..n], mut w);
+}
+
+fn dependSatisfied(d: borrow depend, version: Slice<u8>) -> bool {
+    let want = d.version[..];
+    let c = versionCmp(version, want[..clen(want)]);
+    let op = d.op;
+    if (op == OP_NONE) {
+        return true;
+    }
+    if (op == OP_EQ) {
+        return c == 0;
+    }
+    if (op == OP_GE) {
+        return c >= 0;
+    }
+    if (op == OP_LE) {
+        return c <= 0;
+    }
+    if (op == OP_LT) {
+        return c < 0;
+    }
+    return op == OP_GT && c > 0;
+}
+
+// --- hex, paths, sonames ------------------------------------------------------------------------------------------
+
+/// Each byte's hex digit value, or 16.
+const HEXV: [u8; 256] = [
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 16, 16, 16, 16, 16,
+    16, 10, 11, 12, 13, 14, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 10, 11, 12, 13, 14, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+];
+
+/// Exactly 2 * out.length hex digits into `out`, which keeps what was decoded before a bad digit.
+fn hexDecode(hex: Slice<u8>, out: SliceMut<u8>) -> bool {
+    if (hex.length % 2 != 0 || hex.length / 2 != out.length) {
+        return false;
+    }
+    let table = HEXV;
+    var j: usize = 0;
+    for (i in 0..out.length) {
+        let hi = table[hex[j] as usize];
+        let lo = table[hex[j + 1] as usize];
+        if ((hi | lo) > 15) {
+            return false;
+        }
+        out[i] = (hi << 4) | lo;
+        j += 2;
+    }
+    return true;
+}
+
+/// Relative, below PATH_MAX, no empty, "." or ".." component, printable, not under boot/, dev/, tmp/ or mnt/.
+fn pathAllowed(path: Slice<u8>) -> bool {
+    let n = path.length;
+    if (n == 0 || n >= PATH_MAX || path[0] == SLASH || path[n - 1] == SLASH) {
+        return false;
+    }
+    var p: usize = 0;
+    while (p < n) {
+        var e = p;
+        while (e < n && path[e] != SLASH) {
+            e += 1;
+        }
+        let cl = e - p;
+        if (cl == 0 || (cl == 1 && path[p] == DOT) || (cl == 2 && path[p] == DOT && path[p + 1] == DOT)) {
+            return false;
+        }
+        for (c in path[p..e]) {
+            if (c < 0x21 || c > 0x7e) {
+                return false;
+            }
+        }
+        p = if (e < n) e + 1 else e;
+    }
+    return !(startsWith(path, "boot/") || startsWith(path, "dev/") || startsWith(path, "tmp/") ||
+        startsWith(path, "mnt/"));
+}
+
+/// A library's soname: name characters, and ".so" in it (libc.so, libz.so.1).
+fn sonameValid(s: Slice<u8>) -> bool {
+    let n = s.length;
+    if (n == 0 || n >= SONAME_MAX || s[0] == DOT) {
+        return false;
+    }
+    var so = false;
+    for (i in 2..n) {
+        if (s[i - 2] == DOT && s[i - 1] == 0x73 && s[i] == 0x6f) {
+            so = true;
+        }
+    }
+    if (!so) {
+        return false;
+    }
+    for (c in s) {
+        if (!(isLower(c) || (c >= 0x41 && c <= 0x5a) || isDigit(c) || c == DOT || c == 0x5f || c == DASH ||
+            c == PLUS)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// --- time (YYYY-MM-DDTHH:MM:SSZ, UTC) -----------------------------------------------------------------------------
+
+/// Days since 1970-01-01 of a proleptic Gregorian date from 1970 (Howard Hinnant's days_from_civil). From 1970 every
+/// quantity is non-negative, so it is computed unsigned.
+fn daysFromCivil(year: u64, m: u64, d: u64) -> u64 {
+    let y = if (m <= 2) year - 1 else year;
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if (m > 2) m - 3 else m + 9) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/// A digit's value: 0 to 9 for a digit, more for any other byte.
+fn digit(c: u8) -> u32 => c.wrappingSub(0x30) as u32;
+
+/// The days in month `mo` (1 to 12) of a leap year.
+fn monthDays(mo: u32) -> u32 {
+    if (mo == 2) {
+        return 29;
+    }
+    return if (mo == 4 || mo == 6 || mo == 9 || mo == 11) 30 else 31;
+}
+
+fn timeParse(s: Slice<u8>, t: borrow mut i64) -> bool {
+    if (s.length != 20 || s[4] != DASH || s[7] != DASH || s[10] != 0x54 || s[13] != COLON || s[16] != COLON ||
+        s[19] != 0x5a) {
+        return false;
+    }
+    let d0 = digit(s[0]);
+    let d1 = digit(s[1]);
+    let d2 = digit(s[2]);
+    let d3 = digit(s[3]);
+    let d5 = digit(s[5]);
+    let d6 = digit(s[6]);
+    let d8 = digit(s[8]);
+    let d9 = digit(s[9]);
+    let d11 = digit(s[11]);
+    let d12 = digit(s[12]);
+    let d14 = digit(s[14]);
+    let d15 = digit(s[15]);
+    let d17 = digit(s[17]);
+    let d18 = digit(s[18]);
+    if (d0 > 9 || d1 > 9 || d2 > 9 || d3 > 9 || d5 > 9 || d6 > 9 || d8 > 9 || d9 > 9 || d11 > 9 || d12 > 9 ||
+        d14 > 9 || d15 > 9 || d17 > 9 || d18 > 9) {
+        return false;
+    }
+    let y0 = d0 * 10 + d1;
+    let y1 = d2 * 10 + d3;
+    let mo = d5 * 10 + d6;
+    let d = d8 * 10 + d9;
+    let h = d11 * 10 + d12;
+    let mi = d14 * 10 + d15;
+    let se = d17 * 10 + d18;
+    let y = y0 * 100 + y1;
+    if (y < 1970 || mo < 1 || mo > 12 || d < 1 || d > monthDays(mo) || h > 23 || mi > 59 || se > 59) {
+        return false;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    if (mo == 2 && d == 29 && !leap) {
+        return false;
+    }
+    let secs = daysFromCivil(y as u64, mo as u64, d as u64) * 86400 + (h * 3600 + mi * 60 + se) as u64;
+    t = truncate<i64>(secs); // below 2^63: a year has four digits
+    return true;
+}
+
+// --- the ustar reader ---------------------------------------------------------------------------------------------
+
+/// An octal field: spaces, octal digits, then NULs or spaces only; null for anything else.
+fn octalField(f: Slice<u8>) -> u64? {
+    var i: usize = 0;
+    while (i < f.length && f[i] == SP) {
+        i += 1;
+    }
+    if (i == f.length || f[i] < 0x30 || f[i] > 0x37) {
+        return null;
+    }
+    var v: u64 = 0;
+    while (i < f.length && f[i] >= 0x30 && f[i] <= 0x37) {
+        if (v > (U64_MAX >> 3)) {
+            return null;
+        }
+        v = v * 8 + (f[i] - 0x30) as u64;
+        i += 1;
+    }
+    while (i < f.length) {
+        if (f[i] != 0 && f[i] != SP) {
+            return null;
+        }
+        i += 1;
+    }
+    return v;
+}
+
+fn tarDecode(buf: Slice<u8>, r: borrow mut tar_reader, d: borrow mut tar_decoded) -> i32 {
+    let pos = r.pos;
+    if (pos == buf.length) {
+        return TAR_END; // no end-of-archive blocks: the buffer simply ends
+    }
+    if (pos > buf.length || buf.length - pos < BLOCK) {
+        return TAR_TRUNCATED;
+    }
+    let h = buf[pos..pos + BLOCK];
+    var zero = true;
+    for (c in h) {
+        if (c != 0) {
+            zero = false;
+            break;
+        }
+    }
+    if (zero) {
+        return TAR_END; // end of archive
+    }
+    if (!equals(h[257..262], "ustar")) {
+        return TAR_NOT_USTAR;
+    }
+    // The header checksum: the sum of all bytes with the checksum field as spaces.
+    var want: u64 = 0;
+    match (octalField(h[148..156])) {
+        Some(v) => { want = v; }
+        null => { return TAR_CHECKSUM_FIELD; }
+    }
+    // 512 bytes of at most 255 each: the sum cannot wrap, and the wrapping adds let the loops vectorise.
+    var sum: u64 = 8 * 32;
+    for (c in h[..148]) {
+        sum = sum.wrappingAdd(c as u64);
+    }
+    for (c in h[156..BLOCK]) {
+        sum = sum.wrappingAdd(c as u64);
+    }
+    if (sum != want) {
+        return TAR_CHECKSUM;
+    }
+    if (h[156] != 0x30 && h[156] != 0) {
+        return TAR_NOT_REGULAR;
+    }
+    var mode: u64 = 0;
+    var size: u64 = 0;
+    match (octalField(h[100..108])) {
+        Some(v) => { mode = v; }
+        null => { return TAR_MODE_SIZE; }
+    }
+    match (octalField(h[124..136])) {
+        Some(v) => { size = v; }
+        null => { return TAR_MODE_SIZE; }
+    }
+    var nlen: usize = 0;
+    while (nlen < 100 && h[nlen] != 0) {
+        nlen += 1;
+    }
+    if (nlen == 0 || h[345] != 0) {
+        return TAR_NAME; // no prefix field: names are 100 bytes at most
+    }
+    r.name[..nlen].copyFrom(h[..nlen]);
+    r.name[nlen] = 0;
+    let data = pos + BLOCK;
+    if (size > buf.length as u64) {
+        return TAR_PAST_END;
+    }
+    let padded = truncate<usize>((size + 511) / 512 * 512); // at most the buffer's length and a block
+    if (data + padded > buf.length) {
+        return TAR_PAST_END;
+    }
+    d.mode = truncate<u32>(mode & 0xfff);
+    d.size = size;
+    d.data = data;
+    d.next = data + padded;
+    return TAR_MEMBER;
+}
+
+// --- manifests and the index --------------------------------------------------------------------------------------
+
+/// One "key: value" line of the text at `pos`: `kind` 1 a line (possibly blank), 0 the end, -1 malformed. The key
+/// and the value are where they lie in the text, each up to its first NUL.
+struct Line {
+    kind: i32;
+    blank: bool;
+    keyAt: usize;
+    keyEnd: usize;
+    valAt: usize;
+    valEnd: usize;
+    next: usize;
+}
+
+fn nextLine(text: Slice<u8>, pos: usize) -> Line {
+    if (pos >= text.length) {
+        return Line { kind: 0, blank: false, keyAt: pos, keyEnd: pos, valAt: pos, valEnd: pos, next: pos };
+    }
+    // One pass: the newline and the first colon before it.
+    var end = pos;
+    var colon = text.length;
+    while (end < text.length) {
+        let c = text[end];
+        if (c == NL) {
+            break;
+        }
+        if (c == COLON && colon == text.length) {
+            colon = end;
+        }
+        end += 1;
+    }
+    let next = if (end < text.length) end + 1 else end;
+    if (end == pos) {
+        return Line { kind: 1, blank: true, keyAt: pos, keyEnd: pos, valAt: pos, valEnd: pos, next: next };
+    }
+    if (colon == text.length || colon == pos || colon - pos >= KEY_MAX) {
+        return Line { kind: -1, blank: false, keyAt: pos, keyEnd: pos, valAt: pos, valEnd: pos, next: next };
+    }
+    var vs = colon + 1;
+    while (vs < end && text[vs] == SP) {
+        vs += 1;
+    }
+    if (end - vs >= VALUE_MAX) {
+        return Line { kind: -1, blank: false, keyAt: pos, keyEnd: pos, valAt: pos, valEnd: pos, next: next };
+    }
+    return Line {
+        kind: 1,
+        blank: false,
+        keyAt: pos,
+        keyEnd: pos + clen(text[pos..colon]),
+        valAt: vs,
+        valEnd: vs + clen(text[vs..end]),
+        next: next,
+    };
+}
+
+/// Why a manifest or an index is refused (pkg_perr).
+struct Refusal {
+    why: i32;
+    line: i32;
+    keyAt: usize;
+    keyLen: usize;
+}
+
+fn accepted() -> Refusal => Refusal { why: 0, line: 0, keyAt: 0, keyLen: 0 };
+
+fn refused(why: i32, line: i32) -> Refusal => Refusal { why: why, line: line, keyAt: 0, keyLen: 0 };
+
+fn refusedAt(why: i32, line: i32, l: borrow Line) -> Refusal =>
+    Refusal { why: why, line: line, keyAt: l.keyAt, keyLen: l.keyEnd - l.keyAt };
+
+/// `v` into `dst` (a C string of `cap` bytes) when it fits.
+fn setString(dst: SliceMut<u8>, v: Slice<u8>) -> bool {
+    if (v.length >= dst.length) {
+        return false;
+    }
+    putString(dst, v);
+    return true;
+}
+
+/// A file line's four space-separated fields: path, mode, size, sha512.
+struct Fields {
+    ok: bool;
+    s: [usize; 4];
+    e: [usize; 4];
+}
+
+fn splitFields(v: Slice<u8>) -> Fields {
+    let caps: [usize; 4] = [256, 8, 24, 132];
+    var f = Fields { ok: false, s: [0; 4], e: [0; 4] };
+    var p: usize = 0;
+    for (k in 0..caps.length) {
+        p = skipSpaces(v, p);
+        var e = p;
+        while (e < v.length && v[e] != SP) {
+            e += 1;
+        }
+        if (e == p || e - p >= caps[k]) {
+            return f;
+        }
+        f.s[k] = p;
+        f.e[k] = e;
+        p = e;
+    }
+    f.ok = skipSpaces(v, p) == v.length;
+    return f;
+}
+
+fn fileEntry(v: Slice<u8>, f: borrow mut file_entry) -> bool {
+    let fs = splitFields(v);
+    if (!fs.ok) {
+        return false;
+    }
+    let path = v[fs.s[0]..fs.e[0]];
+    if (!pathAllowed(path)) {
+        return false;
+    }
+    putString(mut f.path[..], path);
+    let mode = v[fs.s[1]..fs.e[1]];
+    let md = strtou(mode, 8);
+    if (md.end != mode.length || md.value > 0xfff) {
+        return false;
+    }
+    f.mode = truncate<u32>(md.value);
+    let size = v[fs.s[2]..fs.e[2]];
+    let sz = strtou(size, 10);
+    if (sz.end != size.length || sz.value > PACKAGE_LIMIT) {
+        return false;
+    }
+    f.size = sz.value;
+    return hexDecode(v[fs.s[3]..fs.e[3]], mut f.sha[..]);
+}
+
+/// A manifest into `m` and the rows beside it.
+/// Safety: `files` points to MAX_FILES writable entries.
+unsafe fn manifestDecode(
+    text: Slice<u8>,
+    m: borrow mut manifest,
+    files: *mut file_entry,
+    provides: SliceMut<u8>,
+    requires: SliceMut<u8>,
+    dirs: SliceMut<u8>,
+    dl: borrow mut dirlist,
+) -> Refusal {
+    var pos: usize = 0;
+    var lineno: i32 = 0;
+    var nd: u8 = 0;
+    var np: u8 = 0;
+    var nr: u8 = 0;
+    var nf: u16 = 0;
+    var ndir: u16 = 0;
+    while (true) {
+        let l = nextLine(text, pos);
+        if (l.kind == 0) {
+            break;
+        }
+        pos = l.next;
+        lineno += 1;
+        if (l.kind < 0) {
+            return refused(PE_LINE, lineno);
+        }
+        if (l.blank) {
+            continue;
+        }
+        let key = text[l.keyAt..l.keyEnd];
+        let v = text[l.valAt..l.valEnd];
+        var ok = false;
+        if (equals(key, "name")) {
+            ok = nameValid(v) && setString(mut m.name[..], v);
+        } else if (equals(key, "version")) {
+            var w = newVer();
+            ok = versionParse(v, mut w) && setString(mut m.version[..], v);
+        } else if (equals(key, "summary")) {
+            ok = setString(mut m.summary[..], v);
+        } else if (equals(key, "depends")) {
+            if (nd < MAX_DEPENDS && dependParse(v, mut m.depends[nd as usize])) {
+                nd += 1;
+                m.ndepends = nd as i32;
+                ok = true;
+            }
+        } else if (equals(key, "provides")) {
+            if (np < MAX_LIBS && sonameValid(v)) {
+                putString(mut provides[np as usize * SONAME_MAX..(np as usize + 1) * SONAME_MAX], v);
+                np += 1;
+                m.nprovides = np as i32;
+                ok = true;
+            }
+        } else if (equals(key, "requires")) {
+            if (nr < MAX_LIBS && sonameValid(v)) {
+                putString(mut requires[nr as usize * SONAME_MAX..(nr as usize + 1) * SONAME_MAX], v);
+                nr += 1;
+                m.nrequires = nr as i32;
+                ok = true;
+            }
+        } else if (equals(key, "file")) {
+            // nf is below MAX_FILES, the entries `files` has.
+            if (nf < MAX_FILES && fileEntry(v, Ptr.toBorrowMut(files.add(nf as usize)))) {
+                nf += 1;
+                m.nfiles = nf as i32;
+                ok = true;
+            }
+        } else if (equals(key, "dir")) {
+            // installed records only: a directory this package created
+            if (at(v, 0) == SLASH && v.length < PATH_MAX && ndir < MAX_DIRS) {
+                putString(mut dirs[ndir as usize * PATH_MAX..(ndir as usize + 1) * PATH_MAX], v);
+                ndir += 1;
+                dl.n = ndir as i32;
+                ok = true;
+            }
+        }
+        if (!ok) {
+            return refusedAt(PE_ENTRY, lineno, borrow l);
+        }
+    }
+    if (m.name[0] == 0 || m.version[0] == 0) {
+        return refused(PE_NAME_VERSION, lineno);
+    }
+    return accepted();
+}
+
+fn headerKey(key: Slice<u8>) -> bool => equals(key, "serial") || equals(key, "published") || equals(key, "expires");
+
+/// The header stanza, when the index starts with one; `after` is where the package stanzas begin (0 without one).
+fn headerScan(text: Slice<u8>, h: borrow mut index_header, after: borrow mut usize) -> Refusal {
+    h.present = false;
+    h.serial = 0;
+    h.published = 0;
+    h.expires = 0;
+    after = 0;
+    var pos: usize = 0;
+    var lineno: i32 = 0;
+    var seenSerial = false;
+    var seenPub = false;
+    var seenExp = false;
+    while (true) {
+        let l = nextLine(text, pos);
+        pos = l.next;
+        lineno += 1;
+        if (l.kind == 0 || l.blank) {
+            if (!h.present) {
+                return accepted();
+            }
+            break;
+        }
+        if (l.kind < 0) {
+            if (!h.present) {
+                return accepted(); // index_decode reports it
+            }
+            return refused(PE_LINE, lineno);
+        }
+        let key = text[l.keyAt..l.keyEnd];
+        let v = text[l.valAt..l.valEnd];
+        if (!headerKey(key)) {
+            if (!h.present) {
+                return accepted(); // no header: the first stanza is a package
+            }
+            return refusedAt(PE_HEADER_KEY, lineno, borrow l);
+        }
+        h.present = true;
+        var ok = false;
+        if (equals(key, "serial")) {
+            let n = strtou(v, 10);
+            if (!seenSerial && at(v, 0) >= 0x31 && at(v, 0) <= 0x39 && n.end == v.length && n.value != 0 &&
+                !n.range) {
+                h.serial = n.value;
+                seenSerial = true;
+                ok = true;
+            }
+        } else if (equals(key, "published")) {
+            if (!seenPub && timeParse(v, mut h.published)) {
+                seenPub = true;
+                ok = true;
+            }
+        } else {
+            if (!seenExp && timeParse(v, mut h.expires)) {
+                seenExp = true;
+                ok = true;
+            }
+        }
+        if (!ok) {
+            return refusedAt(PE_HEADER_BAD, lineno, borrow l);
+        }
+    }
+    if (!seenSerial) {
+        return refused(PE_LACKS_SERIAL, lineno);
+    }
+    if (!seenPub) {
+        return refused(PE_LACKS_PUBLISHED, lineno);
+    }
+    if (!seenExp) {
+        return refused(PE_LACKS_EXPIRES, lineno);
+    }
+    after = pos;
+    return accepted();
+}
+
+/// An index line's value into its entry; false for a bad one.
+fn indexField(key: Slice<u8>, v: Slice<u8>, e: borrow mut index_entry) -> bool {
+    if (equals(key, "name")) {
+        return nameValid(v) && setString(mut e.name[..], v);
+    }
+    if (equals(key, "version")) {
+        var w = newVer();
+        return versionParse(v, mut w) && setString(mut e.version[..], v);
+    }
+    if (equals(key, "summary")) {
+        return setString(mut e.summary[..], v);
+    }
+    if (equals(key, "depends")) {
+        if (e.ndepends == MAX_DEPENDS as i32) {
+            return false;
+        }
+        let k = truncate<u8>(e.ndepends); // 0 to 63
+        if (!dependParse(v, mut e.depends[k as usize])) {
+            return false;
+        }
+        e.ndepends += 1;
+        return true;
+    }
+    if (equals(key, "file")) {
+        return !contains(v, SLASH) && setString(mut e.file[..], v) && at(v, 0) != DOT;
+    }
+    if (equals(key, "size")) {
+        let n = strtou(v, 10);
+        if (n.end != v.length || n.value == 0 || n.value > PACKAGE_LIMIT) {
+            return false;
+        }
+        e.size = n.value;
+        return true;
+    }
+    if (equals(key, "sha512")) {
+        return hexDecode(v, mut e.sha[..]);
+    }
+    return false;
+}
+
+/// An index into `ix`.
+/// Safety: `entries` points to MAX_INDEX writable entries, zeroed.
+unsafe fn indexDecode(text: Slice<u8>, ix: borrow mut index, entries: *mut index_entry) -> Refusal {
+    var pos: usize = 0;
+    let r = headerScan(text, mut ix.header, mut pos);
+    if (r.why != 0) {
+        return r;
+    }
+    var lineno: i32 = 0;
+    for (c in text[..pos]) {
+        if (c == NL) {
+            lineno += 1;
+        }
+    }
+    var inStanza = false;
+    var n: u16 = 0;
+    while (true) {
+        let l = nextLine(text, pos);
+        if (l.kind == 0) {
+            break;
+        }
+        pos = l.next;
+        lineno += 1;
+        if (l.kind < 0) {
+            return refused(PE_LINE, lineno);
+        }
+        if (l.blank) {
+            inStanza = false;
+            continue;
+        }
+        if (!inStanza) {
+            if (n == MAX_INDEX) {
+                return refused(PE_TOO_MANY, lineno);
+            }
+            n += 1;
+            ix.n = n as i32;
+            inStanza = true;
+        }
+        let e = Ptr.toBorrowMut(entries.add((n - 1) as usize)); // n is at most MAX_INDEX
+        if (!indexField(text[l.keyAt..l.keyEnd], text[l.valAt..l.valEnd], e)) {
+            return refusedAt(PE_ENTRY, lineno, borrow l);
+        }
+    }
+    for (i in 0..n as usize) {
+        let e = Ptr.toBorrow(entries.add(i));
+        if (e.name[0] == 0 || e.version[0] == 0 || e.file[0] == 0 || e.size == 0) {
+            return refused(PE_INCOMPLETE, truncate<i32>(i + 1)); // at most MAX_INDEX
+        }
+    }
+    return accepted();
+}
+
+// --- the C interface (pkg.h, pkgparse.h) --------------------------------------------------------------------------
+
+/// The decoder's refusal into `pe`: 0, or -1.
+/// Safety: `pe` is writable.
+unsafe fn report(pe: *mut pkg_perr, r: Refusal) -> i32 {
+    if (r.why == 0) {
+        return 0;
+    }
+    let p = Ptr.toBorrowMut(pe);
+    p.why = r.why;
+    p.line = r.line;
+    p.key_at = r.keyAt;
+    p.key_len = r.keyLen;
+    return -1;
+}
+
+/// Safety: `s` is a NUL-terminated string.
+@export("name_valid")
+unsafe fn nameValidC(s: *CChar) -> bool => nameValid(Slice.fromRaw(s as *u8, strlen(s)));
+
+/// Safety: `s` is a NUL-terminated string and `v` is writable.
+@export("version_parse")
+unsafe fn versionParseC(s: *CChar, v: *mut version) -> bool {
+    var w = newVer();
+    let ok = versionParse(Slice.fromRaw(s as *u8, strlen(s)), mut w);
+    let out = Ptr.toBorrowMut(v);
+    for (i in 0..w.comp.length) {
+        out.comp[i] = w.comp[i];
+    }
+    out.ncomp = w.ncomp as i32;
+    out.rev = w.rev;
+    return ok;
+}
+
+/// Safety: `a` and `b` are NUL-terminated strings.
+@export("version_cmp")
+unsafe fn versionCmpC(a: *CChar, b: *CChar) -> i32 =>
+    versionCmp(Slice.fromRaw(a as *u8, strlen(a)), Slice.fromRaw(b as *u8, strlen(b)));
+
+/// Safety: `text` is a NUL-terminated string and `d` is writable.
+@export("depend_parse")
+unsafe fn dependParseC(text: *CChar, d: *mut depend) -> bool =>
+    dependParse(Slice.fromRaw(text as *u8, strlen(text)), Ptr.toBorrowMut(d));
+
+/// Safety: `d` is a parsed dependency and `version` a NUL-terminated string.
+@export("depend_satisfied")
+unsafe fn dependSatisfiedC(d: *depend, version: *CChar) -> bool =>
+    dependSatisfied(Ptr.toBorrow(d), Slice.fromRaw(version as *u8, strlen(version)));
+
+/// Safety: `hex` is a NUL-terminated string and `out` has `n` writable bytes.
+@export("hex_decode")
+unsafe fn hexDecodeC(hex: *CChar, out: *mut u8, n: usize) -> bool =>
+    hexDecode(Slice.fromRaw(hex as *u8, strlen(hex)), SliceMut.fromRaw(out, n));
+
+/// Safety: `path` is a NUL-terminated string.
+@export("path_allowed")
+unsafe fn pathAllowedC(path: *CChar) -> bool => pathAllowed(Slice.fromRaw(path as *u8, strlen(path)));
+
+/// Safety: `s` is a NUL-terminated string.
+@export("soname_valid")
+unsafe fn sonameValidC(s: *CChar) -> bool => sonameValid(Slice.fromRaw(s as *u8, strlen(s)));
+
+/// Safety: `s` is a NUL-terminated string and `t` is writable.
+@export("time_parse")
+unsafe fn timeParseC(s: *CChar, t: *mut i64) -> bool {
+    var v: i64 = 0;
+    if (!timeParse(Slice.fromRaw(s as *u8, strlen(s)), mut v)) {
+        return false;
+    }
+    t.write(v);
+    return true;
+}
+
+/// Safety: `r` is an open reader, whose buffer has `len` readable bytes; `d` is writable.
+@export("tar_decode")
+unsafe fn tarDecodeC(r: *mut tar_reader, d: *mut tar_decoded) -> i32 {
+    let rd = Ptr.toBorrowMut(r);
+    let buf = Slice.fromRaw(rd.buf, rd.len);
+    return tarDecode(buf, rd, Ptr.toBorrowMut(d));
+}
+
+/// Safety: `text` has `len` readable bytes; `m` is writable, its `files` has MAX_FILES entries and its `dirs` is
+/// writable; `provides` and `requires` are m's rows (MAX_LIBS of SONAME_MAX bytes), `dirs` m->dirs's (MAX_DIRS of
+/// PATH_MAX); `pe` is writable.
+@export("manifest_decode")
+unsafe fn manifestDecodeC(
+    text: *CChar,
+    len: usize,
+    m: *mut manifest,
+    provides: *mut CChar,
+    requires: *mut CChar,
+    dirs: *mut CChar,
+    pe: *mut pkg_perr,
+) -> i32 {
+    let mm = Ptr.toBorrowMut(m);
+    let files = mm.files;
+    let dl = Ptr.toBorrowMut(mm.dirs);
+    let r = manifestDecode(
+        Slice.fromRaw(text as *u8, len),
+        mm,
+        files,
+        SliceMut.fromRaw(provides as *mut u8, MAX_LIBS as usize * SONAME_MAX),
+        SliceMut.fromRaw(requires as *mut u8, MAX_LIBS as usize * SONAME_MAX),
+        SliceMut.fromRaw(dirs as *mut u8, MAX_DIRS as usize * PATH_MAX),
+        dl,
+    );
+    return report(pe, r);
+}
+
+/// Safety: `text` has `len` readable bytes; `h` and `pe` are writable.
+@export("index_header_decode")
+unsafe fn indexHeaderDecodeC(text: *CChar, len: usize, h: *mut index_header, pe: *mut pkg_perr) -> i32 {
+    var after: usize = 0;
+    return report(pe, headerScan(Slice.fromRaw(text as *u8, len), Ptr.toBorrowMut(h), mut after));
+}
+
+/// Safety: `text` has `len` readable bytes; `ix` is writable and its `entries` has MAX_INDEX zeroed entries; `pe` is
+/// writable.
+@export("index_decode")
+unsafe fn indexDecodeC(text: *CChar, len: usize, ix: *mut index, pe: *mut pkg_perr) -> i32 {
+    let x = Ptr.toBorrowMut(ix);
+    let entries = x.entries;
+    return report(pe, indexDecode(Slice.fromRaw(text as *u8, len), x, entries));
+}

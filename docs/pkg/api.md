@@ -235,8 +235,9 @@ repository: `INDEX.90` with `--days 90` and `INDEX` with `--days 30`.
 
 ## C interfaces (`pkg/pkg.h`)
 
-Compiled on the host by `tests/host/test_pkg.c` (`manifest.c`,
-`version.c`, `tar.c` depend only on standard headers).
+Compiled on the host by `tests/host/test_pkg.c` (`manifest.c`, `tar.c`
+and the C generated from `pkgparse.cee` depend only on standard headers
+and CeeSafe's runtime).
 
 | Function | Contract |
 |---|---|

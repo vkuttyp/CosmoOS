@@ -10,26 +10,35 @@ PKG_ELF  := $(OUT)/userland/pkg.elf
 PKG_REPO := $(OUT)/pkg/repo
 PKGBUILD := $(PYTHON) $(ROOT)/tools/pkgbuild.py
 
-PKG_SRCS := pkg/pkg.c pkg/manifest.c pkg/pkgparse.c pkg/tar.c pkg/verify.c userland/lib/fetch.c userland/lib/rootsnap.c \
-	kernel/security/sha512.c kernel/security/ed25519.c
+PKG_SRCS := pkg/pkg.c pkg/manifest.c pkg/tar.c pkg/verify.c pkg/ceesafe_panic.c userland/lib/fetch.c \
+	userland/lib/rootsnap.c kernel/security/sha512.c kernel/security/ed25519.c
+# Generated from CeeSafe (build/cee.mk): the decoders (pkg/pkgparse.cee) and CeeSafe's runtime; ceesafe_panic.c is
+# the panic hook they need in a user program.
+PKG_CEE_SRCS := pkg/pkgparse.c kernel/ceesafe/ceesafe_rt_core.c
 PKG_OBJS := $(addprefix $(OUT)/pkgprog/,$(patsubst %.c,%.o,$(PKG_SRCS)))
+PKG_CEE_OBJS := $(addprefix $(OUT)/pkgprog/,$(patsubst %.c,%.o,$(PKG_CEE_SRCS)))
 
-# Compiled into a separate object tree: the crypto sources also exist as kernel objects.
-$(OUT)/pkgprog/%.o: $(ROOT)/%.c
+# Compiled into a separate object tree: the crypto sources and the runtime also exist as kernel objects.
+$(PKG_OBJS): $(OUT)/pkgprog/%.o: $(ROOT)/%.c | $(CEE_STAMP)
 	$(call log,CC,$<)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(CC) $(USER_CFLAGS) -I$(ROOT)/pkg -MMD -MP -c $< -o $@
+	$(Q)$(CC) $(USER_CFLAGS) $(CEE_CFLAGS) -I$(ROOT)/pkg -MMD -MP -c $< -o $@
 
-$(PKG_ELF): $(PKG_OBJS) $(LIBC_CRT0) $(LIBC_A) $(USER_LD)
+$(PKG_CEE_OBJS): $(OUT)/pkgprog/%.o: $(CEE_GEN)/%.c | $(CEE_STAMP)
+	$(call log,CC,$<)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(CC) $(USER_CFLAGS) $(CEE_CFLAGS) -I$(ROOT)/pkg -MMD -MP -c $< -o $@
+
+$(PKG_ELF): $(PKG_OBJS) $(PKG_CEE_OBJS) $(LIBC_CRT0) $(LIBC_A) $(USER_LD)
 	$(call log,LD,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(LD) $(USER_LDFLAGS) -T $(USER_LD) -o $@ $(LIBC_CRT0) $(PKG_OBJS) $(LIBC_A)
+	$(Q)$(LD) $(USER_LDFLAGS) -T $(USER_LD) -o $@ $(LIBC_CRT0) $(PKG_OBJS) $(PKG_CEE_OBJS) $(LIBC_A)
 
 PKG_ANALYZE := $(addprefix $(OUT)/pkgprog/,$(patsubst %.c,%.analyzed,$(filter pkg/%,$(PKG_SRCS))))
 $(OUT)/pkgprog/%.analyzed: $(ROOT)/%.c analyze-force
 	$(call log,ANALYZE,$<)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(CC) $(USER_CFLAGS) -I$(ROOT)/pkg --analyze -Xanalyzer -analyzer-output=plist-multi-file $< -o $@.tmp
+	$(Q)$(CC) $(USER_CFLAGS) $(CEE_CFLAGS) -I$(ROOT)/pkg --analyze -Xanalyzer -analyzer-output=plist-multi-file $< -o $@.tmp
 	$(Q)mv $@.tmp $@
 
 # --- ports -> repository ---------------------------------------------------------
@@ -81,4 +90,4 @@ ifeq ($(SELFTEST),1)
 PKG_FIXTURE_ARCHIVE_ENTRIES := tests/pkg/libdemo-2.0.cpk=$(PKG_FIXTURE_DIR)/libdemo-2.0.cpk
 endif
 
--include $(PKG_OBJS:.o=.d)
+-include $(PKG_OBJS:.o=.d) $(PKG_CEE_OBJS:.o=.d)

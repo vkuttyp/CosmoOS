@@ -45,7 +45,8 @@ static void tar_header(unsigned char *h, const char *name, size_t size, unsigned
 /* --- the decoders' digest (roadmap 2.0 SA5, the pkg family) ------------------------------- */
 
 /* The digest of the C decoders (manifest.c, version.c and tar.c before the
- * split, and pkgparse.c after it; 2026-11-01): every parser over seeded
+ * split, and pkgparse.c after it; 2026-11-01), which the CeeSafe port
+ * (pkgparse.cee) gives too: every parser over seeded
  * manifests, indexes, archives and strings, made near valid and then
  * damaged. What each one returned, the message and everything it decoded
  * go into an FNV-1a digest. */
