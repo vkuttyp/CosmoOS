@@ -149,6 +149,9 @@ KERNEL_GENERIC_SRCS := \
 	kernel/ceesafe/crash_test.c \
 	kernel/ceesafe/kcore_test.c \
 	kernel/ceesafe/kcore_selftest.c \
+	kernel/ceesafe/ceesafe_rt_async.c \
+	kernel/ceesafe/async_test.c \
+	kernel/ceesafe/async_selftest.c \
 	kernel/block/part.c \
 	kernel/block/ramblk.c \
 	kernel/block/blktest.c \

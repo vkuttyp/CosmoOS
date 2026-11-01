@@ -39,6 +39,7 @@ bool selftest_uaccess(const char **reason);    /* kernel/syscall/uaccesstest.c: 
 bool selftest_uaccess_guard(const char **reason);   /* the guard on kernel access to user memory, where the CPU has one */
 bool selftest_kmalloc(const char **reason);
 bool selftest_cee_kcore(const char **reason);   /* kernel/ceesafe/kcore_selftest.c: CeeSafe's kernel library */
+bool selftest_cee_async(const char **reason);   /* kernel/ceesafe/async_selftest.c: CeeSafe's async executor */
 
 /* Phase 3: kernel/scheduler/schedtest.c */
 bool selftest_acpi(const char **reason);

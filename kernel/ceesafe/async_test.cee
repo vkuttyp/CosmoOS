@@ -1,0 +1,97 @@
+// The boot self-test cee-async (CeeSafe ADR 0039): CeeSafe's async executor in the kernel, over the hooks of
+// kernel/ceesafe/async_selftest.c (the clock, a wait queue, its wake). Children come from kmalloc through
+// Async.scopeIn; tasks sleep, race and are cancelled; and one waits on an AsyncSignal that a kernel timer's callback
+// raises, in interrupt context. kasync_cee_selftest returns 0, or the number of the check that failed.
+
+extern "C" {
+    @effects(alloc)
+    fn kasync_alloc(size: usize, align: usize) -> *mut void;
+    @effects()
+    fn kasync_free(p: *mut void);
+    @effects()
+    fn kasync_arm_timer(ms: u32); // its callback calls kasync_raise, in interrupt context
+}
+
+/// The kernel heap, for the tasks' frames.
+struct KernelHeap {}
+
+impl Allocator for KernelHeap {
+    /// Safety: kasync_alloc returns null or a block of layout.size bytes aligned to layout.align (kmalloc's 16 at
+    /// least, which is all a frame asks).
+    fn allocate(borrow this, layout: Layout) -> Result<*mut u8, AllocError> {
+        let p = unsafe { kasync_alloc(layout.size, layout.align) } as *mut u8;
+        return if (p.isNull()) Err(AllocError.OutOfMemory) else Ok(p);
+    }
+
+    /// Safety: the blocks come back from allocate, once each.
+    unsafe fn deallocate(borrow this, p: *mut u8, layout: Layout) { kasync_free(p as *mut void); }
+}
+
+static READY: AsyncSignal = AsyncSignal.constant();
+
+/// The timer's callback: an interrupt handler raising the signal a task waits on.
+@export("kasync_raise")
+@context(irq)
+fn raise() { READY.raise(); }
+
+async fn tick(n: u32, ms: u64) -> Result<u32, AsyncError> {
+    await Timer.sleep(ms)?;
+    return Ok(n);
+}
+
+async fn breaker() -> Result<void, AsyncError> {
+    await Timer.sleep(5)?;
+    return Err(AsyncError.TimedOut);
+}
+
+async fn sleeper(done: borrow mut u32) -> Result<void, AsyncError> {
+    await Timer.sleep(10000)?; // cancelled long before
+    done += 1;
+    return Ok();
+}
+
+/// Safety: kasync_arm_timer only arms the glue's timer, whose callback raises READY.
+async fn checks() -> Result<u32, AsyncError> {
+    var a: u32 = 0;
+    var b: u32 = 0;
+    let first = await Async.scopeIn(KernelHeap {}, AsyncError.TimedOut, (s) => {
+        s.spawn(async () => { a = await tick(1, 3)?; return Ok(); });
+        s.spawn(async () => { b = await tick(2, 6)?; return Ok(); });
+    });
+    match (first) {
+        Ok() => {}
+        Err(AsyncError.TimedOut) => { return Ok(5); } // a child's frame could not be allocated
+        Err(_) => { return Ok(6); }
+    }
+    if (a + b != 3) {
+        return Ok(1);
+    }
+    let r = await Async.race(async () => await tick(10, 2), async () => await tick(20, 500));
+    if (r?.value != 10) {
+        return Ok(2);
+    }
+    var never: u32 = 0;
+    let cancelled = await Async.scopeIn(KernelHeap {}, AsyncError.Cancelled, (s) => {
+        s.spawn(async () => await sleeper(mut never));
+        s.spawn(async () => await breaker());
+    });
+    let timedOut = match (cancelled) {
+        Err(AsyncError.TimedOut) => true,
+        _ => false,
+    };
+    if (!timedOut || never != 0) {
+        return Ok(3);
+    }
+    unsafe { kasync_arm_timer(5); }
+    match (await READY.wait()) {
+        Ok() => {}
+        Err(_) => { return Ok(7); }
+    }
+    return Ok(0);
+}
+
+@export("kasync_cee_selftest")
+fn selftest() -> u32 => match (Async.run(checks())) {
+    Ok(failed) => failed,
+    Err(_) => 4,
+};

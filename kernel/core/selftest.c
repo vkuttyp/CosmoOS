@@ -581,6 +581,7 @@ static const struct selftest tests[] = {
     { "quiesce-grace",   selftest_quiesce_grace },
     { "quiesce-call",    selftest_quiesce_call },
     { "cee-kcore",      selftest_cee_kcore },
+    { "cee-async",      selftest_cee_async },
     { "irq-sync",        selftest_irq_sync },
     { "irq-writers",     selftest_irq_writers },
     { "irq-unhandled",   selftest_irq_unhandled },

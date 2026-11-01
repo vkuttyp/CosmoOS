@@ -61,7 +61,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-CEESAFEC_VERSION = "0.2.0"
+CEESAFEC_VERSION = "0.3.0-dev"
 
 # Each port: its CeeSafe source, the C it generates, what that C is, the header ceesafec generates for it (None
 # when the port's header is hand-written C, imported by the source), and whether it uses CeeSafe's kernel library
@@ -116,8 +116,12 @@ PORTS = [
      "kernel/include/ceesafe/crash_test.h", False),
     ("kernel/ceesafe/kcore_test.cee", "kernel/ceesafe/kcore_test.c",
      "The boot self-test of CeeSafe's kernel library (selftest cee-kcore)", None, True),
+    ("kernel/ceesafe/async_test.cee", "kernel/ceesafe/async_test.c",
+     "The boot self-test of CeeSafe's async executor (selftest cee-async; CeeSafe ADR 0039)", None, False),
 ]
 RUNTIME = [("ceesafe/rt.h", "kernel/include/ceesafe/rt.h"), ("ceesafe_rt_core.c", "kernel/ceesafe/ceesafe_rt_core.c")]
+# The async executor (CeeSafe ADR 0039), which only a port that uses async emits: the same from each that does.
+ASYNC_RUNTIME = ("ceesafe_rt_async.c", "kernel/ceesafe/ceesafe_rt_async.c")
 
 # The device API every CeeSafe driver module is compiled with (drivers/ceesafe/README.md).
 DEVICE_API = ["drivers/ceesafe/driver.cee", "drivers/ceesafe/virtio.cee"]
@@ -195,6 +199,11 @@ def generated(exe: str, work: Path) -> dict[str, str]:
             text = (out / made).read_text()
             if files.setdefault(path, text) != text:
                 sys.exit(f"cee-gen: {source}'s {path} differs from the other ports'")
+        made, path = ASYNC_RUNTIME
+        if (out / made).exists():
+            text = (out / made).read_text()
+            if files.setdefault(path, text) != text:
+                sys.exit(f"cee-gen: {source}'s {path} differs from the other async ports'")
     for i, (name, source, target, title, version, deps, caps) in enumerate(MODULES):
         out = work / f"module-{i}"
         subprocess.run([exe, "build", "--profile", "freestanding", "--no-float", "--kernel", "cosmoos", "--emit", "c",
@@ -243,6 +252,7 @@ def refused(exe: str) -> list[str]:
 def outputs() -> list[str]:
     """Every generated file's path, relative to the tree, without running ceesafec (make's list)."""
     paths = [target for _, target, _, _, _ in PORTS] + [h for _, _, _, h, _ in PORTS if h] + [p for _, p in RUNTIME]
+    paths.append(ASYNC_RUNTIME[1])  # kernel/ceesafe/async_test.cee uses async
     paths += [target for _, _, target, _, _, _, _ in MODULES] + ([MODULE_RUNTIME[1]] if MODULES else [])
     return sorted(set(paths))
 
