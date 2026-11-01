@@ -473,8 +473,21 @@ identity (the C step was `cfsmount.c`, now gone). Digest
 the field checks 0.88x the C on arm64 and 0.85x on x86-64 (Rosetta),
 read as imported struct fields; with the block CRCs, the same C crc32c
 in both, 1.00x. The copy-state check stays C: it compares a record with
-the live device's region size. Still C, for batch 3: snapshot and
-rollback records, keyslots.
+the live device's region size.
+cosmofs metadata, batch 3 (2026-11-01): the records snapshots, rollback
+and encryption keep, added to `cfsparse.cee` -- a snapshot list's entry
+under either layout (`cfs_snaplist_get`), the rollback record and its
+CRC32C (`cfs_rollback_parse`, `cfs_rollback_crc`) and a key slot's shape
+(`cfs_keyslot_valid`; the C step was `cfsrecs.c`, now gone). Digest
+`0xb62644e6cd01c30c` over 50,000 rounds, the C's. Found on the way and
+fixed in the C first: a key slot's `8 * lanes` wrapped in 32 bits, so
+0x20000000 lanes passed with any memory cost; lanes are now held to
+Argon2id's 2^24 - 1, as user space's are. `CFSPARSE_BENCH=records`, best
+of five alternated runs: the list entry 0.88x the C on arm64 and 1.00x
+on x86-64 (Rosetta), the rollback record (mostly its CRC) 1.00x and
+1.02x, the key slot 0.57x and 1.00x. The cosmofs family's decoders are
+CeeSafe; the copy-state check stays C (it reads the live device's region
+size).
 
 Size: about 3.0x.
 

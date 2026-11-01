@@ -77,6 +77,18 @@ every limit, counts and inode slots: the C's (`0x5d91f9b738036dfe`,
 checks alone (0.88x the C on arm64, 0.85x under Rosetta) and with the
 block CRCs (1.00x).
 
+So are the records snapshots, rollback and encryption keep (batch 3): a
+snapshot list's entry under version 11's layout or version 12's
+(`cfs_snaplist_get`), the rollback record and its CRC32C
+(`cfs_rollback_parse`, `cfs_rollback_crc`) and a key slot's shape
+(`cfs_keyslot_valid`). The "records digest" covers 50,000 rounds of list
+blocks of random entries read under every version and at indexes past
+both layouts' ends, rollback records near a valid one and key slots near
+every parameter's bound: the C's (`0xb62644e6cd01c30c`, 2026-11-01) is
+the CeeSafe's. "keyslot lanes" holds a passphrase slot to Argon2id's
+2^24 - 1 lanes, so `8 * lanes` cannot wrap into a memory cost every slot
+meets. `CFSPARSE_BENCH=records` times each decoder alone.
+
 ## Target self-tests
 
 All are registered in `kernel/core/selftest.c` and run in debug builds.

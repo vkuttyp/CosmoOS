@@ -477,7 +477,7 @@ static void test_mount_digest(void)
 
 #define RECS_ROUNDS 50000
 #define RECS_SEED 0xC05F5FA2026B0003ull
-/* The digest of the C decoders (cfsrecs.c, 2026-11-01). */
+/* The digest of the C decoders (cfsrecs.c, 2026-11-01), which cfsparse.cee replaced. */
 #define RECS_DIGEST 0xb62644e6cd01c30cull
 
 /* One round's inputs: a snapshot list block read under a pool version, a

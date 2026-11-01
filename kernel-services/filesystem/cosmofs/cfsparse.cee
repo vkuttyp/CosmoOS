@@ -1,12 +1,13 @@
 // cfsparse.cee - cosmofs's decoders of on-disk metadata (roadmap 2.0 SA5, the cosmofs family): metadata block headers
 // and their CRC, directory entries, block addresses, and extents (batch 1); the records a mount reads first -- the
-// superblock, a member label, the member table, the free and orphan records' counts, an inode slot (batch 2) -- every
-// check made on bytes read from disk before they are trusted. They read the pool's geometry (fs->mem, fs->nmembers) and nothing else of its state; the
+// superblock, a member label, the member table, the free and orphan records' counts, an inode slot (batch 2); the
+// records snapshots, rollback and encryption keep -- a snapshot list's entries, the rollback record, a key slot
+// (batch 3) -- every check made on bytes read from disk before they are trusted. They read the pool's geometry (fs->mem, fs->nmembers) and nothing else of its state; the
 // version-14 MAC, which needs the pool's key, stays with its caller (cosmofs_core.c's cfs_mhdr_fault_of).
 //
 // A block is a slice of exactly CFS_BLOCK bytes, so no decoder can read past it. The on-disk integers are the
 // structures' own, little-endian on both CosmoOS targets (cosmofs_format.h). tests/host/test_cfsparse.c holds these to
-// the C they replaced: the same digests, over 20,000 rounds (batch 1) and 50,000 (batch 2). The copy-state check stays
+// the C they replaced: the same digests, over 20,000 rounds (batch 1) and 50,000 (batches 2 and 3). The copy-state check stays
 // C: it compares a record with the live device's region size.
 
 @header("kernel/crc32c.h", "cosmofs_internal.h")
@@ -20,10 +21,7 @@ extern "C" {
         first_usable: u64;
         base: u64;
     }
-    struct cfs {
-        mem: *mut cfs_memstate;
-        nmembers: u32;
-    }
+
     struct cfs_extent {
         start: u64;
         count: u32;
@@ -52,6 +50,28 @@ extern "C" {
         members: u64;
         key_root: u64;
         crc: u32;
+    }
+    struct cfs {
+        sb: cfs_super;
+        mem: *mut cfs_memstate;
+        nmembers: u32;
+    }
+    struct cfs_buf {
+        data: *mut u8;
+    }
+    struct cfs_rollback {
+        magic: u32;
+        version: u32;
+        state: u32;
+        flags: u32;
+        crc: u32;
+    }
+    struct cfs_snapshot;
+    struct cfs_keyslot {
+        kind: u32;
+        t_cost: u32;
+        m_cost_kib: u32;
+        lanes: u32;
     }
     struct cfs_label {
         magic: [u8; 8];
@@ -365,6 +385,99 @@ fn memberSane(m: borrow cfs_member, v: u32, nmembers: u32) -> bool {
     return m.copies <= MAX_COPIES && m.free_blocks <= m.nblocks;
 }
 
+// --- snapshots, rollback and key slots (batch 3) ---------------------------------------------------------------------
+
+const MHDR_SIZE: usize = 32;     // CFS_MHDR_SIZE
+const SNAP: usize = 128;         // sizeof(struct cfs_snapshot)
+const SNAP_NAME: usize = 96;     // offsetof(struct cfs_snapshot, name)
+const SNAP11: usize = 96;        // sizeof(struct cfs_snapshot_v11)
+const SNAP11_NAME: usize = 64;   // offsetof(struct cfs_snapshot_v11, name)
+const SNAPS2: u32 = 31;          // CFS_SNAPS_PER_BLOCK2
+const SNAPS: u32 = 42;           // CFS_SNAPS_PER_BLOCK
+const SNAP_NAME_MAX: usize = 31; // CFS_SNAP_NAME_MAX
+
+const ROLLBACK: usize = 120;            // sizeof(struct cfs_rollback)
+const ROLLBACK_CRC_AT: usize = 112;     // offsetof(struct cfs_rollback, crc)
+const ROLLBACK_MAGIC: u32 = 0x42524643; // "CFRB"
+const ROLLBACK_PENDING: u32 = 1;
+const ROLLBACK_HELD: u32 = 2;
+const ROLLBACK_F_FROM_HELD: u32 = 1;
+const TARGET_UUID: usize = 16; // offsetof(struct cfs_rollback, target_uuid)
+const SAFETY_UUID: usize = 32; // offsetof(struct cfs_rollback, safety_uuid)
+const EIO: i32 = 5;
+
+const KEYSLOT_EMPTY: u32 = 0;
+const KEYSLOT_PASSPHRASE: u32 = 1;
+const KEYSLOT_KEYFILE: u32 = 2;
+const ARGON2_LANES_MAX: u32 = 0xffffff; // RFC 9106: lanes below 2^24, so 8 * lanes stays below 2^27
+
+/// Entry `i` of a snapshot list's payload into `out` (a struct cfs_snapshot's bytes), false when the slot is empty or
+/// past the layout's end, and then `out` is untouched. From version 12 an entry is the in-memory one; before, the
+/// version-11 entry is widened: its eight words, then its name, the fields it lacks zero.
+fn snaplistGet(version: u32, data: Slice<u8>, i: u32, out: SliceMut<u8>) -> bool {
+    if (version >= 12) {
+        if (i >= SNAPS2) {
+            return false;
+        }
+        let at = MHDR_SIZE + 16 + i as usize * SNAP;
+        if (data[at + SNAP_NAME] == 0) {
+            return false;
+        }
+        out.copyFrom(data[at..at + SNAP]);
+    } else {
+        if (i >= SNAPS) {
+            return false;
+        }
+        let at = MHDR_SIZE + 8 + i as usize * SNAP11;
+        if (data[at + SNAP11_NAME] == 0) {
+            return false;
+        }
+        out.fill(0);
+        out[0..SNAP11_NAME].copyFrom(data[at..at + SNAP11_NAME]);
+        out[SNAP_NAME..SNAP].copyFrom(data[at + SNAP11_NAME..at + SNAP11]);
+    }
+    out[SNAP_NAME + SNAP_NAME_MAX] = 0;
+    return true;
+}
+
+fn uuidZero(r: Slice<u8>, at: usize) -> bool => le64(r, at) == 0 && le64(r, at + 8) == 0;
+
+/// The rollback record `r` (ROLLBACK bytes), whose fields `o` are: 0, or -EIO when it is damaged or means nothing --
+/// a wrong magic, version or CRC, an unknown state or flag, a held record with a flag, no safety snapshot, or a pending
+/// one with no target or whose target is its safety snapshot (it would keep nothing of the tree it replaces).
+fn rollbackCheck(r: Slice<u8>, o: borrow cfs_rollback) -> i32 {
+    if (o.magic != ROLLBACK_MAGIC || o.version != 1 || blockCrc(r, ROLLBACK_CRC_AT) != o.crc) {
+        return -EIO;
+    }
+    if (o.state != ROLLBACK_PENDING && o.state != ROLLBACK_HELD) {
+        return -EIO;
+    }
+    if ((o.flags & (ROLLBACK_F_FROM_HELD ^ 0xffffffff)) != 0 || (o.state == ROLLBACK_HELD && o.flags != 0)) {
+        return -EIO;
+    }
+    if (uuidZero(r, SAFETY_UUID)) {
+        return -EIO;
+    }
+    if (o.state == ROLLBACK_PENDING &&
+        (uuidZero(r, TARGET_UUID) ||
+            (le64(r, TARGET_UUID) == le64(r, SAFETY_UUID) && le64(r, TARGET_UUID + 8) == le64(r, SAFETY_UUID + 8)))) {
+        return -EIO;
+    }
+    return 0;
+}
+
+/// A key slot's shape, as user space sealed it (the kernel cannot open one: that needs the passphrase): empty; a
+/// passphrase's Argon2id parameters user space can derive with (userland/lib/argon2.c); or a key file, in slot 0 only.
+fn keyslotValid(index: u32, s: borrow cfs_keyslot) -> bool {
+    if (s.kind == KEYSLOT_EMPTY) {
+        return true;
+    }
+    if (s.kind == KEYSLOT_PASSPHRASE) {
+        return s.t_cost >= 1 && s.lanes >= 1 && s.lanes <= ARGON2_LANES_MAX && s.m_cost_kib >= 8 * s.lanes;
+    }
+    return s.kind == KEYSLOT_KEYFILE && index == 0;
+}
+
 // --- the exports -----------------------------------------------------------------------------------------------------
 
 /// Safety: `block` points to CFS_BLOCK readable bytes.
@@ -520,3 +633,33 @@ unsafe fn inodeSlotOkC(inode: *cfs_inode, ino: u64) -> bool {
     let i = Ptr.toBorrow(inode);
     return i.ino == ino && i.nlink != 0;
 }
+
+/// The rollback record's CRC32C: over the record with its crc field zero.
+/// Safety: `r` points to a readable struct cfs_rollback.
+@export("cfs_rollback_crc")
+unsafe fn rollbackCrcC(r: *cfs_rollback) -> u32 => blockCrc(Slice.fromRaw(r as *u8, ROLLBACK), ROLLBACK_CRC_AT);
+
+/// The record at `payload` copied into `out`, and checked: 0 or -EIO.
+/// Safety: `payload` points to ROLLBACK readable bytes, `out` to a writable struct cfs_rollback apart from them.
+@export("cfs_rollback_parse")
+unsafe fn rollbackParseC(payload: *void, out: *mut cfs_rollback) -> i32 {
+    let o = SliceMut.fromRaw(out as *mut u8, ROLLBACK);
+    o.copyFrom(Slice.fromRaw(payload as *u8, ROLLBACK));
+    return rollbackCheck(Slice.fromRaw(out as *u8, ROLLBACK), Ptr.toBorrow(out as *cfs_rollback));
+}
+
+/// Entry `i` of a list block, false when the slot is empty; by the pool's version.
+/// Safety: `fs` is a mounted pool's (or a test's); `b` holds a CFS_BLOCK block; `out` is a writable struct
+/// cfs_snapshot.
+@export("cfs_snaplist_get")
+unsafe fn snaplistGetC(fs: *cfs, b: *cfs_buf, i: u32, out: *mut cfs_snapshot) -> bool =>
+    snaplistGet(
+        Ptr.toBorrow(fs).sb.version,
+        Slice.fromRaw(Ptr.toBorrow(b).data as *u8, BLOCK),
+        i,
+        SliceMut.fromRaw(out as *mut u8, SNAP),
+    );
+
+/// Safety: `s` is readable.
+@export("cfs_keyslot_valid")
+unsafe fn keyslotValidC(index: u32, s: *cfs_keyslot) -> bool => keyslotValid(index, Ptr.toBorrow(s));
