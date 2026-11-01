@@ -596,6 +596,17 @@ for a 64 KiB chain; 0.85-0.88x on x86-64 (Rosetta). On arm64 clang
 vectorises the C's pair loop with `ld2`, which no loop CeeSafe emits
 today reaches (eight forms were measured; the fastest weighs each byte by
 its place); accepted by the owner (2026-11-01), as the rule allows.
+The address helpers (2026-11-01, with ceesafec 0.4.1, whose ADR 0041 adds
+imported unions, atomic fields and the log line SA6 needs):
+`kernel-services/network/inet.cee` -- netaddr equality, the unspecified
+test, the conversions from and to the user's sockaddr shape, and
+`netaddr_str` with lib/core's `TextWriter` in place of ksnprintf.
+`struct netaddr`'s union is imported as it is. `tests/host/test_inet.c`'s
+digest `0x5bff0d7e00d6e5df` over 20,000 rounds, the C's (clang on macOS,
+gcc on Linux). `INET_BENCH=1`, median of nine at -O2: `netaddr_equal`
+0.97x the C on arm64 and x86-64 (Rosetta); the user-shape round trip
+0.92x and 0.58x, after the first port's 1.06-1.16x (byte stores through
+pointers that may alias, and a local array's stack-protector check).
 
 Size: about 3.0x.
 

@@ -108,6 +108,8 @@ PORTS = [
     ("kernel/core/lz4_decode.cee", "kernel/core/lz4_decode.c", "The LZ4 block decoder (lz4.h)", None, False),
     ("kernel-services/network/cksum.cee", "kernel-services/network/cksum.c",
      "The Internet checksum over buffers and mbuf chains (cksum.h)", None, False),
+    ("kernel-services/network/inet.cee", "kernel-services/network/inet.c",
+     "The address helpers: netaddr equality, the user's sockaddr shape, and netaddr_str (inet.h)", None, False),
     ("drivers/virtio/virtq_used.cee", "drivers/virtio/virtq_used.c",
      "The virtqueue's decoder of used elements (virtio.h; linked into the virtio module)", None, False),
     ("drivers/usb/usb_desc.cee", "drivers/usb/usb_desc.c",

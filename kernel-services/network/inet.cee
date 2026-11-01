@@ -1,0 +1,195 @@
+// inet.cee - the address helpers (kernel/include/kernel/net/inet.h), in CeeSafe: roadmap 2.0 SA6. Equality and the
+// unspecified test over `struct netaddr`, the conversions between it and the user's `struct cosmo_sockaddr`, and its
+// text for logs. tests/host/test_inet.c holds them to the digest of the C they replaced.
+//
+// `struct netaddr` keeps its IPv4 and IPv6 addresses in one anonymous union (CeeSafe's ADR 0041 §3.2): `v4` is the
+// first four bytes of `v6`'s storage, in network order. The conversions copy those bytes through `v6.s6_addr`, so they
+// are the bytes C's memcpy copied whatever the host's byte order.
+
+@header("kernel/net/inet.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct netaddr {
+        family: u16;
+        port: u16;
+        union {
+            v4: u32;
+            v6: in6_addr;
+        }
+    }
+    /// uapi/cosmo/syscall.h: the address a socket call takes and gives.
+    struct cosmo_sockaddr {
+        family: u16;
+        port: u16;
+        flowinfo: u32;
+        addr: [u8; 16];
+        scope: u32;
+    }
+}
+
+/// uapi/cosmo/syscall.h's COSMO_AF_INET and COSMO_AF_INET6.
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+/// kernel/errno.h's EAFNOSUPPORT.
+const EAFNOSUPPORT: i32 = 97;
+/// An IPv4 address's bytes; an IPv6 address's 16-bit groups.
+const V4_BYTES: usize = 4;
+const V6_GROUPS: usize = 8;
+
+/// Bytes `at`..`at + 8` of an address as one integer, in a fixed order: equal words are equal bytes, and the
+/// compiler reads the eight as one load.
+fn word(a: borrow [u8; 16], at: usize) -> u64 =>
+    (a[at] as u64) | ((a[at + 1] as u64) << 8) | ((a[at + 2] as u64) << 16) | ((a[at + 3] as u64) << 24) |
+        ((a[at + 4] as u64) << 32) | ((a[at + 5] as u64) << 40) | ((a[at + 6] as u64) << 48) |
+        ((a[at + 7] as u64) << 56);
+
+fn sameBytes(a: borrow [u8; 16], b: borrow [u8; 16]) -> bool => word(a, 0) == word(b, 0) && word(a, 8) == word(b, 8);
+
+fn allZero(a: borrow [u8; 16]) -> bool => (word(a, 0) | word(a, 8)) == 0;
+
+/// The same family and address, whatever the ports.
+fn addrEqual(a: borrow netaddr, b: borrow netaddr) -> bool {
+    if (a.family != b.family) {
+        return false;
+    }
+    if (a.family == AF_INET) {
+        return a.v4 == b.v4;
+    }
+    return sameBytes(a.v6.s6_addr, b.v6.s6_addr);
+}
+
+/// No address: IPv4's 0.0.0.0, IPv6's ::, or no family.
+fn isUnspecified(a: borrow netaddr) -> bool {
+    if (a.family == AF_INET) {
+        return a.v4 == 0;
+    }
+    if (a.family == AF_INET6) {
+        return allZero(a.v6.s6_addr);
+    }
+    return true;
+}
+
+/// Bytes 0..4 as the u32 they make in memory: CosmoOS's targets are little-endian (inet.h's htonl assumes it too), and
+/// the compiler reads the four as one load.
+fn memoryWord(a: borrow [u8; 16]) -> u32 =>
+    (a[0] as u32) | ((a[1] as u32) << 8) | ((a[2] as u32) << 16) | ((a[3] as u32) << 24);
+
+/// `out` from the user's shape: 0, or -EAFNOSUPPORT for another family (with `out` cleared). `input` is read before
+/// `out` is written: both are C's, so a store through one could change the other.
+fn fromUserShape(out: borrow mut netaddr, input: borrow cosmo_sockaddr) -> i32 {
+    let family = input.family;
+    let port = input.port;
+    if (family == AF_INET) {
+        let v4 = memoryWord(input.addr); // the bytes C's memcpy copied
+        out.family = family;
+        out.port = port;
+        out.v6.s6_addr = [0; 16]; // the whole union: the other twelve bytes are zero
+        out.v4 = v4;
+        return 0;
+    }
+    if (family == AF_INET6) {
+        out.v6.s6_addr = input.addr; // one copy, with no local array (which would cost a stack-protector check)
+        out.family = family;
+        out.port = port;
+        return 0;
+    }
+    out.family = 0;
+    out.port = 0;
+    out.v6.s6_addr = [0; 16];
+    return -EAFNOSUPPORT;
+}
+
+/// The user's shape of `input`; an unknown family gives its family and port and no address.
+fn toUserShape(out: borrow mut cosmo_sockaddr, input: borrow netaddr) {
+    let family = input.family;
+    let port = input.port;
+    let v4 = input.v4;
+    if (family == AF_INET6) {
+        out.addr = input.v6.s6_addr; // one copy, with no local array (which would cost a stack-protector check)
+    }
+    out.family = family;
+    out.port = port;
+    out.flowinfo = 0;
+    out.scope = 0;
+    if (family == AF_INET6) {
+        return;
+    }
+    out.addr = [0; 16];
+    if (family == AF_INET) {
+        // v4's bytes, as they lie in memory (little-endian targets, as memoryWord says).
+        out.addr[0] = truncate<u8>(v4);
+        out.addr[1] = truncate<u8>(v4 >> 8);
+        out.addr[2] = truncate<u8>(v4 >> 16);
+        out.addr[3] = truncate<u8>(v4 >> 24);
+    }
+}
+
+/// `a` as text: `10.0.2.15:8080`, `[fe80:0:0:0:0:0:0:1]:22`, or `<unspec>:22`, cut to the writer's buffer.
+fn describe(a: borrow netaddr, w: borrow mut TextWriter) {
+    if (a.family == AF_INET) {
+        let b = a.v6.s6_addr; // v4's bytes in network order
+        for (i in 0..V4_BYTES) {
+            if (i > 0) {
+                w.byte(46); // '.'
+            }
+            w.decimal(b[i] as u64);
+        }
+    } else if (a.family == AF_INET6) {
+        w.byte(91); // '['
+        for (k in 0..V6_GROUPS) {
+            if (k > 0) {
+                w.byte(58); // ':'
+            }
+            let i = k * 2;
+            w.hex(((a.v6.s6_addr[i] as u64) << 8) | a.v6.s6_addr[i + 1] as u64, 0);
+        }
+        w.byte(93); // ']'
+    } else {
+        w.text("<unspec>");
+    }
+    w.byte(58); // ':'
+    w.decimal(a.port as u64);
+}
+
+// ---- The C API of kernel/include/kernel/net/inet.h ----
+
+/// Safety: inet.h's contract: both point to live addresses.
+@export("netaddr_addr_equal")
+unsafe fn addrEqualC(a: *netaddr, b: *netaddr) -> bool => addrEqual(Ptr.toBorrow(a), Ptr.toBorrow(b));
+
+/// Safety: as netaddr_addr_equal.
+@export("netaddr_equal")
+unsafe fn equalC(a: *netaddr, b: *netaddr) -> bool {
+    let x = Ptr.toBorrow(a);
+    let y = Ptr.toBorrow(b);
+    return x.port == y.port && addrEqual(x, y);
+}
+
+/// Safety: `a` points to a live address.
+@export("netaddr_is_unspecified")
+unsafe fn isUnspecifiedC(a: *netaddr) -> bool => isUnspecified(Ptr.toBorrow(a));
+
+/// Safety: `out` points to an address nothing else uses during the call, `input` to a live sockaddr.
+@export("netaddr_from_user_shape")
+unsafe fn fromUserShapeC(out: *mut netaddr, input: *cosmo_sockaddr) -> i32 =>
+    fromUserShape(Ptr.toBorrowMut(out), Ptr.toBorrow(input));
+
+/// Safety: `out` points to a sockaddr nothing else uses during the call, `input` to a live address.
+@export("netaddr_to_user_shape")
+unsafe fn toUserShapeC(out: *mut cosmo_sockaddr, input: *netaddr) {
+    toUserShape(Ptr.toBorrowMut(out), Ptr.toBorrow(input));
+}
+
+/// The text of `a` in `buf`, as ksnprintf would write it: cut to `len` bytes with the zero; `buf` itself.
+/// Safety: `a` points to a live address, and `buf` to `len` writable bytes (any pointer when `len` is 0) that nothing
+/// else uses during the call.
+@export("netaddr_str")
+unsafe fn strC(a: *netaddr, buf: *mut CChar, len: usize) -> *CChar {
+    if (len > 0) {
+        var w = TextWriter.create(SliceMut.fromRaw(buf as *mut u8, len));
+        describe(Ptr.toBorrow(a), mut w);
+    }
+    return buf as *CChar;
+}
