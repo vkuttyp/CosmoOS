@@ -1,6 +1,6 @@
 /*
- * fuzz_pkg.c - The package system's parsers (pkg/manifest.c, pkg/tar.c,
- * pkg/version.c) under fuzzing. The input is fed to every parser; a tar
+ * fuzz_pkg.c - The package system's parsers (pkg/pkgparse.h, through
+ * manifest.c and tar.c) under fuzzing. The input is fed to every parser; a tar
  * member the reader returns must lie inside the buffer.
  */
 

@@ -1,35 +1,14 @@
-/* manifest.c - Manifest and index parsing (docs/pkg/design.md "Formats"). */
+/*
+ * manifest.c - Manifests and the index (docs/pkg/design.md "Formats"): the
+ * allocation and the messages around the decoders in pkgparse.h, the text
+ * a manifest is written as, times, the index's freshness and repos.conf.
+ */
 
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "pkg.h"
-
-static int hexval(char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    return -1;
-}
-
-bool hex_decode(const char *hex, uint8_t *out, size_t n)
-{
-    if (strlen(hex) != 2 * n)
-        return false;
-    for (size_t i = 0; i < n; i++) {
-        int hi = hexval(hex[2 * i]), lo = hexval(hex[2 * i + 1]);
-        if (hi < 0 || lo < 0)
-            return false;
-        out[i] = (uint8_t)(hi * 16 + lo);
-    }
-    return hex[2 * n] == '\0';
-}
+#include "pkgparse.h"
 
 void hex_encode(const uint8_t *in, size_t n, char *out)
 {
@@ -41,102 +20,6 @@ void hex_encode(const uint8_t *in, size_t n, char *out)
     out[2 * n] = '\0';
 }
 
-bool path_allowed(const char *path)
-{
-    size_t n = strlen(path);
-    if (n == 0 || n >= PKG_PATH_MAX || path[0] == '/' || path[n - 1] == '/')
-        return false;
-    const char *p = path;
-    while (*p) {
-        const char *e = strchr(p, '/');
-        size_t cl = e ? (size_t)(e - p) : strlen(p);
-        if (cl == 0 || (cl == 1 && p[0] == '.') || (cl == 2 && p[0] == '.' && p[1] == '.'))
-            return false;
-        for (size_t i = 0; i < cl; i++)
-            if ((unsigned char)p[i] < 0x21 || (unsigned char)p[i] > 0x7e)
-                return false;
-        p = e ? e + 1 : p + cl;
-    }
-    static const char *const forbidden[] = { "boot/", "dev/", "tmp/", "mnt/" };
-    for (size_t i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++)
-        if (strncmp(path, forbidden[i], strlen(forbidden[i])) == 0)
-            return false;
-    return true;
-}
-
-/* One "key: value" line out of `text`; advances *pos past the newline.
- * Returns 1 (a line, possibly blank), 0 at the end, -1 for a malformed line. */
-static int next_line(const char *text, size_t len, size_t *pos, char *key, size_t keylen, char *value,
-                     size_t vallen, bool *blank)
-{
-    memset(key, 0, keylen);
-    memset(value, 0, vallen);
-    if (*pos >= len)
-        return 0;
-    size_t end = *pos;
-    while (end < len && text[end] != '\n')
-        end++;
-    size_t n = end - *pos;
-    const char *line = text + *pos;
-    *pos = end < len ? end + 1 : end;
-    *blank = n == 0;
-    key[0] = value[0] = '\0';
-    if (n == 0)
-        return 1;
-    size_t colon = 0;
-    while (colon < n && line[colon] != ':')
-        colon++;
-    if (colon == n || colon == 0 || colon >= keylen)
-        return -1;
-    memcpy(key, line, colon);
-    key[colon] = '\0';
-    size_t vs = colon + 1;
-    while (vs < n && line[vs] == ' ')
-        vs++;
-    if (n - vs >= vallen)
-        return -1;
-    memcpy(value, line + vs, n - vs);
-    value[n - vs] = '\0';
-    return 1;
-}
-
-/* Split `value` into exactly `n` space-separated fields. */
-static bool split_fields(const char *value, char *fields[], const size_t caps[], int n)
-{
-    const char *p = value;
-    for (int i = 0; i < n; i++) {
-        while (*p == ' ')
-            p++;
-        size_t len = 0;
-        while (p[len] && p[len] != ' ')
-            len++;
-        if (len == 0 || len >= caps[i])
-            return false;
-        memcpy(fields[i], p, len);
-        fields[i][len] = '\0';
-        p += len;
-    }
-    while (*p == ' ')
-        p++;
-    return *p == '\0';
-}
-
-/* A library's soname: name characters, and ".so" in it (libc.so,
- * libz.so.1). */
-bool soname_valid(const char *s)
-{
-    size_t n = strlen(s);
-    if (n == 0 || n >= PKG_SONAME_MAX || strstr(s, ".so") == NULL || s[0] == '.')
-        return false;
-    for (const char *p = s; *p; p++) {
-        char c = *p;
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' ||
-              c == '-' || c == '+'))
-            return false;
-    }
-    return true;
-}
-
 static bool set_str(char *dst, size_t cap, const char *src)
 {
     if (strlen(src) >= cap)
@@ -145,97 +28,80 @@ static bool set_str(char *dst, size_t cap, const char *src)
     return true;
 }
 
+const char *op_text(enum cmp_op op)
+{
+    switch (op) {
+    case OP_EQ: return "=";
+    case OP_GE: return ">=";
+    case OP_LE: return "<=";
+    case OP_LT: return "<";
+    case OP_GT: return ">";
+    default: return "";
+    }
+}
+
+/* A decoder's refusal (pkgparse.h) in words; `what` is "manifest" or "index". */
+static void perr_format(const char *what, const char *text, const struct pkg_perr *pe, char *err, size_t errlen)
+{
+    int kl = (int)pe->key_len;
+    const char *key = text + pe->key_at;
+    switch (pe->why) {
+    case PKG_PE_LINE:
+        snprintf(err, errlen, "%s line %d: not 'key: value'", what, pe->line);
+        break;
+    case PKG_PE_ENTRY:
+        snprintf(err, errlen, "%s line %d: bad '%.*s' entry", what, pe->line, kl, key);
+        break;
+    case PKG_PE_NAME_VERSION:
+        snprintf(err, errlen, "manifest lacks name or version");
+        break;
+    case PKG_PE_HEADER_KEY:
+        snprintf(err, errlen, "index line %d: '%.*s' in the header", pe->line, kl, key);
+        break;
+    case PKG_PE_HEADER_BAD:
+        snprintf(err, errlen, "index line %d: bad '%.*s' header", pe->line, kl, key);
+        break;
+    case PKG_PE_LACKS_SERIAL:
+        snprintf(err, errlen, "the index header lacks serial");
+        break;
+    case PKG_PE_LACKS_PUBLISHED:
+        snprintf(err, errlen, "the index header lacks published");
+        break;
+    case PKG_PE_LACKS_EXPIRES:
+        snprintf(err, errlen, "the index header lacks expires");
+        break;
+    case PKG_PE_TOO_MANY:
+        snprintf(err, errlen, "index has more than %d entries", PKG_MAX_INDEX);
+        break;
+    case PKG_PE_INCOMPLETE:
+        snprintf(err, errlen, "index entry %d is incomplete", pe->line);
+        break;
+    default:
+        snprintf(err, errlen, "%s refused", what);
+        break;
+    }
+}
+
 int manifest_parse(const char *text, size_t len, struct manifest *m, char *err, size_t errlen)
 {
     memset(m, 0, sizeof(*m));
+    /* "dir:" lines come only in installed records: the list is dropped again when there are none. */
     m->files = calloc(PKG_MAX_FILES, sizeof(*m->files));
-    if (m->files == NULL) {
+    m->dirs = calloc(1, sizeof(*m->dirs));
+    if (m->files == NULL || m->dirs == NULL) {
         snprintf(err, errlen, "out of memory");
-        return -1;
-    }
-    size_t pos = 0;
-    char key[32], value[1024];
-    bool blank;
-    int lineno = 0;
-    int got;
-    while ((got = next_line(text, len, &pos, key, sizeof(key), value, sizeof(value), &blank)) != 0) {
-        lineno++;
-        if (got < 0) {
-            snprintf(err, errlen, "manifest line %d: not 'key: value'", lineno);
-            manifest_free(m);
-            return -1;
-        }
-        if (blank)
-            continue;
-        if (strcmp(key, "name") == 0) {
-            if (!name_valid(value) || !set_str(m->name, sizeof(m->name), value))
-                goto bad;
-        } else if (strcmp(key, "version") == 0) {
-            struct version v;
-            if (!version_parse(value, &v) || !set_str(m->version, sizeof(m->version), value))
-                goto bad;
-        } else if (strcmp(key, "summary") == 0) {
-            if (!set_str(m->summary, sizeof(m->summary), value))
-                goto bad;
-        } else if (strcmp(key, "depends") == 0) {
-            if (m->ndepends == PKG_MAX_DEPENDS || !depend_parse(value, &m->depends[m->ndepends]))
-                goto bad;
-            m->ndepends++;
-        } else if (strcmp(key, "provides") == 0) {
-            if (m->nprovides == PKG_MAX_LIBS || !soname_valid(value))
-                goto bad;
-            strcpy(m->provides[m->nprovides++], value);
-        } else if (strcmp(key, "requires") == 0) {
-            if (m->nrequires == PKG_MAX_LIBS || !soname_valid(value))
-                goto bad;
-            strcpy(m->requires[m->nrequires++], value);
-        } else if (strcmp(key, "file") == 0) {
-            if (m->nfiles == PKG_MAX_FILES)
-                goto bad;
-            struct file_entry *f = &m->files[m->nfiles];
-            char path[PKG_PATH_MAX], mode[8], size[24], sha[132];
-            char *fields[4] = { path, mode, size, sha };
-            size_t caps[4] = { sizeof(path), sizeof(mode), sizeof(size), sizeof(sha) };
-            if (!split_fields(value, fields, caps, 4))
-                goto bad;
-            if (!path_allowed(path))
-                goto bad;
-            strcpy(f->path, path);
-            char *end;
-            unsigned long md = strtoul(mode, &end, 8);
-            if (*end || md > 07777)
-                goto bad;
-            f->mode = (unsigned)md;
-            unsigned long long sz = strtoull(size, &end, 10);
-            if (*end || sz > PKG_PACKAGE_LIMIT)
-                goto bad;
-            f->size = sz;
-            if (!hex_decode(sha, f->sha, SHA512_LEN))
-                goto bad;
-            m->nfiles++;
-        } else if (strcmp(key, "dir") == 0) {
-            /* installed records only: a directory this package created */
-            if (m->dirs == NULL) {
-                m->dirs = calloc(1, sizeof(*m->dirs));
-                if (m->dirs == NULL)
-                    goto bad;
-            }
-            if (value[0] != '/' || strlen(value) >= PKG_PATH_MAX || m->dirs->n == PKG_MAX_DIRS)
-                goto bad;
-            strcpy(m->dirs->paths[m->dirs->n++], value);
-        } else {
-            goto bad;
-        }
-        continue;
-    bad:
-        snprintf(err, errlen, "manifest line %d: bad '%s' entry", lineno, key);
         manifest_free(m);
         return -1;
     }
-    if (m->name[0] == '\0' || m->version[0] == '\0') {
-        snprintf(err, errlen, "manifest lacks name or version");
+    struct pkg_perr pe;
+    if (manifest_decode(text, len, m, m->provides[0], m->requires[0], m->dirs->paths[0], &pe) < 0) {
+        perr_format("manifest", text, &pe, err, errlen);
         manifest_free(m);
         return -1;
+    }
+    if (m->dirs->n == 0) {
+        free(m->dirs);
+        m->dirs = NULL;
     }
     return 0;
 }
@@ -285,49 +151,6 @@ int manifest_format(const struct manifest *m, const struct dirlist *dirs, char *
 
 /* --- time (YYYY-MM-DDTHH:MM:SSZ, UTC) --------------------------------------------- */
 
-/* Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's
- * days_from_civil). */
-static int64_t days_from_civil(int64_t y, unsigned m, unsigned d)
-{
-    y -= m <= 2;
-    int64_t era = (y >= 0 ? y : y - 399) / 400;
-    unsigned yoe = (unsigned)(y - era * 400);
-    unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return era * 146097 + (int64_t)doe - 719468;
-}
-
-static bool digits(const char *s, int n, unsigned *out)
-{
-    unsigned v = 0;
-    for (int i = 0; i < n; i++) {
-        if (s[i] < '0' || s[i] > '9')
-            return false;
-        v = v * 10 + (unsigned)(s[i] - '0');
-    }
-    *out = v;
-    return true;
-}
-
-bool time_parse(const char *s, int64_t *t)
-{
-    static const unsigned mdays[] = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    unsigned y, mo, d, h, mi, se;
-    if (strlen(s) != 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':' ||
-        s[19] != 'Z')
-        return false;
-    if (!digits(s, 4, &y) || !digits(s + 5, 2, &mo) || !digits(s + 8, 2, &d) || !digits(s + 11, 2, &h) ||
-        !digits(s + 14, 2, &mi) || !digits(s + 17, 2, &se))
-        return false;
-    if (y < 1970 || mo < 1 || mo > 12 || d < 1 || d > mdays[mo - 1] || h > 23 || mi > 59 || se > 59)
-        return false;
-    bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    if (mo == 2 && d == 29 && !leap)
-        return false;
-    *t = days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + se;
-    return true;
-}
-
 void time_format(int64_t t, char out[21])
 {
     int64_t days = t >= 0 ? t / 86400 : (t - 86399) / 86400;
@@ -349,77 +172,14 @@ void time_format(int64_t t, char out[21])
 
 /* --- the index's header (PK10) ------------------------------------------------------ */
 
-static bool header_key(const char *key)
-{
-    return strcmp(key, "serial") == 0 || strcmp(key, "published") == 0 || strcmp(key, "expires") == 0;
-}
-
-/* The header stanza, when the index starts with one; *after is where the
- * package stanzas begin (0 without a header). */
-static int header_scan(const char *text, size_t len, struct index_header *h, size_t *after, char *err,
-                       size_t errlen)
-{
-    memset(h, 0, sizeof(*h));
-    *after = 0;
-    size_t pos = 0;
-    char key[32], value[1024];
-    bool blank, seen_serial = false, seen_pub = false, seen_exp = false;
-    int lineno = 0, got;
-    for (;;) {
-        got = next_line(text, len, &pos, key, sizeof(key), value, sizeof(value), &blank);
-        lineno++;
-        if (got == 0 || blank) {
-            if (!h->present)
-                return 0;
-            break;
-        }
-        if (got < 0) {
-            if (!h->present)
-                return 0;   /* index_parse reports it */
-            snprintf(err, errlen, "index line %d: not 'key: value'", lineno);
-            return -1;
-        }
-        if (!header_key(key)) {
-            if (!h->present)
-                return 0;   /* no header: the first stanza is a package */
-            snprintf(err, errlen, "index line %d: '%s' in the header", lineno, key);
-            return -1;
-        }
-        h->present = true;
-        if (strcmp(key, "serial") == 0) {
-            char *end;
-            errno = 0;
-            unsigned long long v = strtoull(value, &end, 10);
-            if (seen_serial || value[0] < '1' || value[0] > '9' || *end || v == 0 || errno == ERANGE)
-                goto bad;
-            h->serial = v;
-            seen_serial = true;
-        } else if (strcmp(key, "published") == 0) {
-            if (seen_pub || !time_parse(value, &h->published))
-                goto bad;
-            seen_pub = true;
-        } else {
-            if (seen_exp || !time_parse(value, &h->expires))
-                goto bad;
-            seen_exp = true;
-        }
-        continue;
-    bad:
-        snprintf(err, errlen, "index line %d: bad '%s' header", lineno, key);
-        return -1;
-    }
-    if (!seen_serial || !seen_pub || !seen_exp) {
-        snprintf(err, errlen, "the index header lacks %s", !seen_serial ? "serial" : !seen_pub ? "published" : "expires");
-        return -1;
-    }
-    *after = pos;
-    return 0;
-}
-
 int index_header_parse(const char *text, size_t len, struct index_header *h, char *err, size_t errlen)
 {
-    size_t after;
-    return header_scan(text, len, h, &after, err, errlen);
+    struct pkg_perr pe;
+    if (index_header_decode(text, len, h, &pe) < 0) {
+        perr_format("index", text, &pe, err, errlen);
+        return -1;
+    }
+    return 0;
 }
 
 int index_fresh(const struct index_header *h, uint64_t last_serial, int64_t now, char *err, size_t errlen)
@@ -565,81 +325,11 @@ int index_parse(const char *text, size_t len, struct index *ix, char *err, size_
         snprintf(err, errlen, "out of memory");
         return -1;
     }
-    size_t pos = 0;
-    if (header_scan(text, len, &ix->header, &pos, err, errlen) < 0) {
+    struct pkg_perr pe;
+    if (index_decode(text, len, ix, &pe) < 0) {
+        perr_format("index", text, &pe, err, errlen);
         index_free(ix);
         return -1;
-    }
-    char key[32], value[1024];
-    bool blank;
-    int lineno = 0;
-    for (size_t i = 0; i < pos; i++)
-        lineno += text[i] == '\n';
-    bool in_stanza = false;
-    struct index_entry *e = NULL;
-    int got;
-    while ((got = next_line(text, len, &pos, key, sizeof(key), value, sizeof(value), &blank)) != 0) {
-        lineno++;
-        if (got < 0) {
-            snprintf(err, errlen, "index line %d: not 'key: value'", lineno);
-            index_free(ix);
-            return -1;
-        }
-        if (blank) {
-            in_stanza = false;
-            continue;
-        }
-        if (!in_stanza) {
-            if (ix->n == PKG_MAX_INDEX) {
-                snprintf(err, errlen, "index has more than %d entries", PKG_MAX_INDEX);
-                index_free(ix);
-                return -1;
-            }
-            e = &ix->entries[ix->n++];
-            in_stanza = true;
-        }
-        if (strcmp(key, "name") == 0) {
-            if (!name_valid(value) || !set_str(e->name, sizeof(e->name), value))
-                goto bad;
-        } else if (strcmp(key, "version") == 0) {
-            struct version v;
-            if (!version_parse(value, &v) || !set_str(e->version, sizeof(e->version), value))
-                goto bad;
-        } else if (strcmp(key, "summary") == 0) {
-            if (!set_str(e->summary, sizeof(e->summary), value))
-                goto bad;
-        } else if (strcmp(key, "depends") == 0) {
-            if (e->ndepends == PKG_MAX_DEPENDS || !depend_parse(value, &e->depends[e->ndepends]))
-                goto bad;
-            e->ndepends++;
-        } else if (strcmp(key, "file") == 0) {
-            if (strchr(value, '/') || !set_str(e->file, sizeof(e->file), value) || value[0] == '.')
-                goto bad;
-        } else if (strcmp(key, "size") == 0) {
-            char *end;
-            unsigned long long sz = strtoull(value, &end, 10);
-            if (*end || sz == 0 || sz > PKG_PACKAGE_LIMIT)
-                goto bad;
-            e->size = sz;
-        } else if (strcmp(key, "sha512") == 0) {
-            if (!hex_decode(value, e->sha, SHA512_LEN))
-                goto bad;
-        } else {
-            goto bad;
-        }
-        continue;
-    bad:
-        snprintf(err, errlen, "index line %d: bad '%s' entry", lineno, key);
-        index_free(ix);
-        return -1;
-    }
-    for (int i = 0; i < ix->n; i++) {
-        e = &ix->entries[i];
-        if (e->name[0] == '\0' || e->version[0] == '\0' || e->file[0] == '\0' || e->size == 0) {
-            snprintf(err, errlen, "index entry %d is incomplete", i + 1);
-            index_free(ix);
-            return -1;
-        }
     }
     return 0;
 }

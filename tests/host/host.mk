@@ -36,7 +36,7 @@ HOST_CHACHA_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c tests/host/te
 HOST_KEYSLOT_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c kernel/security/blake2b.c userland/lib/argon2.c \
 	userland/lib/keyslot.c tests/host/test_keyslot.c
 HOST_LIBC_SRCS := tests/host/test_libc.c
-HOST_PKG_SRCS := tests/host/test_pkg.c pkg/manifest.c pkg/version.c pkg/tar.c
+HOST_PKG_SRCS := tests/host/test_pkg.c pkg/manifest.c pkg/pkgparse.c pkg/tar.c
 HOST_LINUX_SRCS := tests/host/test_linux.c compat/linux/convert.c compat/linux/lxconv.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c
 HOST_HV_SRCS := $(HOST_COMMON_SRCS) kernel/arch/x86_64/svm_npt.c tests/host/test_hv.c
 HOST_FDT_SRCS := $(HOST_COMMON_SRCS) tools/fdt/fdt.c tools/fdt/fdt_read.c tests/host/test_fdt.c
@@ -167,11 +167,13 @@ $(HOST_OUT)/test_libc: $(call src_paths,$(HOST_LIBC_SRCS)) | $(CEE_STAMP)
 		-MMD -MF $@.d -MT $@ \
 		-DLIBC_HOST_TEST=1 $< $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_pkg: $(call src_paths,$(HOST_PKG_SRCS)) | $(CEE_STAMP)
+# PKG_BENCH times the decoders with clock_gettime: POSIX, which glibc hides under -std=c11.
+$(HOST_OUT)/test_pkg: $(call src_paths,$(HOST_PKG_SRCS)) $(ROOT)/pkg/pkg.h $(ROOT)/pkg/pkgparse.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) -std=c11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
-		-Wall -Wextra -Werror -Wno-missing-prototypes -I$(ROOT)/pkg $^ $(HOST_LDFLAGS) -o $@
+		-Wall -Wextra -Werror -Wno-missing-prototypes -D_DEFAULT_SOURCE -I$(ROOT)/pkg \
+		$(call src_paths,$(HOST_PKG_SRCS)) $(HOST_LDFLAGS) -o $@
 
 # test_linux and test_netparse time their conversions with clock_gettime (LINUX_BENCH, NETPARSE_BENCH): POSIX, which
 # glibc hides under -std=c11, as for test_relsig.
