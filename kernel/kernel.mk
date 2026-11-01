@@ -160,6 +160,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/random.c \
 	kernel/core/crc32c.c \
 	kernel/core/lz4.c \
+	kernel/core/lz4_decode.c \
 	kernel/security/chacha20.c \
 	kernel/security/blake2b.c \
 	kernel/core/fwcfg.c \

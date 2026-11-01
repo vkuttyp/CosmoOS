@@ -31,7 +31,7 @@ HOST_CRYPTO_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security
 HOST_RELSIG_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c userland/system/relsig.c tests/host/test_relsig.c
 HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_modelf.c
 HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cosmofs.c
-HOST_LZ4_SRCS := $(HOST_COMMON_SRCS) kernel/core/lz4.c tests/host/test_lz4.c
+HOST_LZ4_SRCS := $(HOST_COMMON_SRCS) kernel/core/lz4.c kernel/core/lz4_decode.c tests/host/test_lz4.c
 HOST_CHACHA_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c tests/host/test_chacha20.c
 HOST_KEYSLOT_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c kernel/security/blake2b.c userland/lib/argon2.c \
 	userland/lib/keyslot.c tests/host/test_keyslot.c
@@ -291,10 +291,11 @@ $(HOST_OUT)/test_keyslot: $(call src_paths,$(HOST_KEYSLOT_SRCS)) $(ROOT)/userlan
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter-out %/secret.c,$(filter %.c,$^)) $(HOST_LDFLAGS) -o $@   # the test includes secret.c
 
+# LZ4_BENCH times the decoder with clock_gettime: POSIX, which glibc hides under -std=c11.
 $(HOST_OUT)/test_lz4: $(call src_paths,$(HOST_LZ4_SRCS)) $(ROOT)/kernel/include/kernel/lz4.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
 # The format header is the thing under test here: without it as a
 # prerequisite a stale binary passes an assertion the header no longer

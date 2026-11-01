@@ -41,7 +41,7 @@ FUZZ_PKG_SRCS     := tests/fuzz/fuzz_pkg.c pkg/manifest.c pkg/pkgparse.c pkg/tar
 	tests/host/ceesafe_panic.c $(FUZZ_DRIVER)
 FUZZ_LINUX_SRCS   := tests/fuzz/fuzz_linux.c compat/linux/lxconv.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
 FUZZ_VIRTQ_SRCS   := tests/fuzz/fuzz_virtq.c drivers/virtio/virtqueue.c drivers/virtio/virtq_used.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
-FUZZ_LZ4_SRCS     := tests/fuzz/fuzz_lz4.c kernel/core/lz4.c $(FUZZ_DRIVER)
+FUZZ_LZ4_SRCS     := tests/fuzz/fuzz_lz4.c kernel/core/lz4.c kernel/core/lz4_decode.c $(FUZZ_DRIVER)
 FUZZ_USB_DESC_SRCS := tests/fuzz/fuzz_usb_desc.c drivers/usb/usb_desc.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
 FUZZ_FBVALID_SRCS := tests/fuzz/fuzz_fbvalid.c kernel/core/fbvalid.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_COMMON)
 FUZZ_CPUTIME_SRCS := tests/fuzz/fuzz_cputime.c kernel/process/cputime.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_DRIVER)
@@ -55,6 +55,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_member.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c \
 	kernel/core/lz4.c \
+	kernel/core/lz4_decode.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
 	kernel-services/filesystem/cosmofs/cosmofs_check.c \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
