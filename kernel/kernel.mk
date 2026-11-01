@@ -209,6 +209,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/socket.c \
 	kernel-services/network/nettest.c \
 	drivers/acpi/acpi.c \
+	drivers/acpi/acpi_parse.c \
 	drivers/pci/pci.c \
 	kernel/iommu/iommu.c \
 	kernel/iommu/pt.c \

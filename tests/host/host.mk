@@ -61,13 +61,14 @@ HOST_FAIR_SRCS := $(HOST_COMMON_SRCS) kernel/scheduler/fair.c kernel/ceesafe/cee
 HOST_UPBE_SRCS := $(HOST_COMMON_SRCS) userland/system/upgrade_be.c tests/host/test_upgrade_be.c
 HOST_NETPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/netparse.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_netparse.c
 HOST_ELF_SRCS := $(HOST_COMMON_SRCS) kernel/process/elfparse.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_elf.c
+HOST_ACPI_SRCS := $(HOST_COMMON_SRCS) drivers/acpi/acpi_parse.c tests/host/test_acpi.c
 HOST_USBDESC_SRCS := $(HOST_COMMON_SRCS) drivers/usb/usb_desc.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_usbdesc.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c
 HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/object_floor.c kernel/object/handle.c kernel/object/handle_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_handles.c
 HOST_PCI_BAR_SRCS := $(HOST_COMMON_SRCS) tests/host/test_pci_bar.c
 HOST_JITTER_SRCS := $(HOST_COMMON_SRCS) kernel/core/jitter.c tests/host/test_jitter.c
 
-HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_keyslot $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_cputime $(HOST_OUT)/test_nice $(HOST_OUT)/test_fair $(HOST_OUT)/test_upgrade_be $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter $(HOST_OUT)/test_handles $(HOST_OUT)/test_netparse $(HOST_OUT)/test_elf $(HOST_OUT)/test_cfsparse $(HOST_OUT)/test_usbdesc $(HOST_OUT)/test_sync
+HOST_TESTS := $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_keyslot $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_cputime $(HOST_OUT)/test_nice $(HOST_OUT)/test_fair $(HOST_OUT)/test_upgrade_be $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter $(HOST_OUT)/test_handles $(HOST_OUT)/test_netparse $(HOST_OUT)/test_elf $(HOST_OUT)/test_cfsparse $(HOST_OUT)/test_usbdesc $(HOST_OUT)/test_acpi $(HOST_OUT)/test_sync
 
 $(HOST_OUT)/test_fbvalid: $(call src_paths,$(HOST_FBVALID_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
@@ -228,6 +229,11 @@ $(HOST_OUT)/test_elf: $(call src_paths,$(HOST_ELF_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(call src_paths,$(HOST_ELF_SRCS)) $(HOST_LDFLAGS) -o $@
+
+$(HOST_OUT)/test_acpi: $(call src_paths,$(HOST_ACPI_SRCS)) $(ROOT)/drivers/acpi/acpi_internal.h | $(CEE_STAMP)
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/drivers/acpi $(call src_paths,$(HOST_ACPI_SRCS)) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_usbdesc: $(call src_paths,$(HOST_USBDESC_SRCS)) $(ROOT)/drivers/include/drivers/usb.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
