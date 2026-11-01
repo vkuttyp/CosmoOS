@@ -217,10 +217,12 @@ $(HOST_OUT)/test_reloc_aarch64: $(call src_paths,$(HOST_RELOC_A64_SRCS)) $(ROOT)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel/arch/aarch64/include $(call src_paths,$(HOST_RELOC_A64_SRCS)) $(HOST_LDFLAGS) -o $@
 
+# test_virtq, test_usbdesc and test_acpi time their decoders with clock_gettime (VIRTQ_BENCH, USBDESC_BENCH,
+# ACPI_BENCH): POSIX, which glibc hides under -std=c11.
 $(HOST_OUT)/test_virtq: $(call src_paths,$(HOST_VIRTQ_SRCS)) $(ROOT)/drivers/include/drivers/virtio.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/drivers/include $(call src_paths,$(HOST_VIRTQ_SRCS)) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE -I$(ROOT)/drivers/include $(call src_paths,$(HOST_VIRTQ_SRCS)) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_netparse: $(call src_paths,$(HOST_NETPARSE_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
@@ -235,12 +237,12 @@ $(HOST_OUT)/test_elf: $(call src_paths,$(HOST_ELF_SRCS)) | $(CEE_STAMP)
 $(HOST_OUT)/test_acpi: $(call src_paths,$(HOST_ACPI_SRCS)) $(ROOT)/drivers/acpi/acpi_internal.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/drivers/acpi $(call src_paths,$(HOST_ACPI_SRCS)) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE -I$(ROOT)/drivers/acpi $(call src_paths,$(HOST_ACPI_SRCS)) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_usbdesc: $(call src_paths,$(HOST_USBDESC_SRCS)) $(ROOT)/drivers/include/drivers/usb.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/drivers/include $(call src_paths,$(HOST_USBDESC_SRCS)) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE -I$(ROOT)/drivers/include $(call src_paths,$(HOST_USBDESC_SRCS)) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_cfsparse: $(call src_paths,$(HOST_CFSPARSE_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
@@ -284,7 +286,7 @@ $(HOST_OUT)/test_chacha20: $(call src_paths,$(HOST_CHACHA_SRCS)) $(ROOT)/kernel/
 
 $(HOST_OUT)/test_keyslot: $(call src_paths,$(HOST_KEYSLOT_SRCS)) $(ROOT)/userland/lib/keyslot.h \
 	$(ROOT)/userland/lib/argon2.h $(ROOT)/kernel-services/filesystem/cosmofs/cosmofs_format.h \
-	$(ROOT)/userland/lib/secret.c $(ROOT)/userland/lib/secret.h
+	$(ROOT)/userland/lib/secret.c $(ROOT)/userland/lib/secret.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter-out %/secret.c,$(filter %.c,$^)) $(HOST_LDFLAGS) -o $@   # the test includes secret.c
@@ -298,7 +300,7 @@ $(HOST_OUT)/test_lz4: $(call src_paths,$(HOST_LZ4_SRCS)) $(ROOT)/kernel/include/
 # prerequisite a stale binary passes an assertion the header no longer
 # satisfies, which is exactly what happened when the version last moved.
 $(HOST_OUT)/test_cosmofs: $(call src_paths,$(HOST_COSMOFS_SRCS)) \
-	$(ROOT)/kernel-services/filesystem/cosmofs/cosmofs_format.h
+	$(ROOT)/kernel-services/filesystem/cosmofs/cosmofs_format.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel-services/filesystem/cosmofs $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
@@ -369,12 +371,12 @@ host-test-fetch: $(HOST_OUT)/cosmo-fetch
 		--workdir $(HOST_OUT)/fetch-test
 
 # Keep TSan in a distinct binary: it cannot be combined with ASan.
-$(HOST_OUT)/test_lockdep_threads: $(ROOT)/tests/host/test_lockdep_threads.c $(ROOT)/kernel/include/kernel/lockdep_core.h
+$(HOST_OUT)/test_lockdep_threads: $(ROOT)/tests/host/test_lockdep_threads.c $(ROOT)/kernel/include/kernel/lockdep_core.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -pthread $< $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_lockdep_threads_tsan: $(ROOT)/tests/host/test_lockdep_threads.c $(ROOT)/kernel/include/kernel/lockdep_core.h
+$(HOST_OUT)/test_lockdep_threads_tsan: $(ROOT)/tests/host/test_lockdep_threads.c $(ROOT)/kernel/include/kernel/lockdep_core.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(filter-out $(HOST_LDFLAGS) -fno-sanitize-recover=undefined,$(HOST_CFLAGS)) -fsanitize=thread -pthread $< -o $@
@@ -424,12 +426,12 @@ host-test-quiesce-tsan: $(HOST_OUT)/test_quiesce_tsan $(HOST_OUT)/test_quiesce_t
 	done
 
 HOST_INTERRUPT_SRCS := $(ROOT)/tests/host/test_interrupt.c $(ROOT)/kernel/interrupt/interrupt.c
-$(HOST_OUT)/test_interrupt: $(HOST_INTERRUPT_SRCS)
+$(HOST_OUT)/test_interrupt: $(HOST_INTERRUPT_SRCS) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -pthread $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_interrupt_tsan: $(HOST_INTERRUPT_SRCS)
+$(HOST_OUT)/test_interrupt_tsan: $(HOST_INTERRUPT_SRCS) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(filter-out $(HOST_LDFLAGS) -fno-sanitize-recover=undefined,$(HOST_CFLAGS)) -fsanitize=thread -pthread $^ -o $@

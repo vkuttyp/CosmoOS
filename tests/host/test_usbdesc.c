@@ -76,7 +76,11 @@ static void gen_config(struct usb_device *u)
     uint8_t *b = u->raw_config;
     memset(b, 0, USB_CONFIG_MAX);
     unsigned off = 0;
-    put(b, &off, next() % 8 ? 9 : (unsigned)(next() % 12), next() % 8 ? USB_DT_CONFIG : (uint8_t)next());
+    /* Each draw in its own statement: C leaves the order of a call's arguments open (gcc and clang differ), and
+     * the recorded stream is left to right. */
+    unsigned hlen = next() % 8 ? 9 : (unsigned)(next() % 12);
+    uint8_t htype = next() % 8 ? USB_DT_CONFIG : (uint8_t)next();
+    put(b, &off, hlen, htype);
     unsigned n = (unsigned)(next() % 24);
     for (unsigned d = 0; d < n; d++) {
         unsigned r = (unsigned)(next() % 16);
@@ -91,9 +95,11 @@ static void gen_config(struct usb_device *u)
         } else if (r < 13) {
             ok = put(b, &off, 6, 0x30);   /* a SuperSpeed endpoint companion */
         } else if (r < 15) {
-            ok = put(b, &off, (unsigned)(next() % 12), (uint8_t)next());
+            unsigned len = (unsigned)(next() % 12);
+            ok = put(b, &off, len, (uint8_t)next());
         } else {
-            ok = put(b, &off, (unsigned)(next() % 256), (uint8_t)next());   /* may run past the end */
+            unsigned len = (unsigned)(next() % 256);
+            ok = put(b, &off, len, (uint8_t)next());   /* may run past the end */
         }
         if (!ok)
             break;
