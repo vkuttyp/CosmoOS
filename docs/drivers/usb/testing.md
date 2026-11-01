@@ -215,8 +215,13 @@ works.
   disk works through the identity path.
 - `QEMU_SMP=1`, release, `test-crash`, `analyze`, `reproducible`: the
   usual chain.
+- `gmake host-test`: `test_usbdesc` holds the configuration parser
+  (`drivers/usb/usb_desc.cee`) to the C it replaced: the same FNV-1a
+  digest (`0x7758cfbcf4bd5d6d`) over 20,000 seeded configurations of
+  every field it records, its drop count and its return; and QEMU's
+  mass-storage configuration. `USBDESC_BENCH=1` times it alone.
 - `gmake fuzz`: `fuzz_usb_desc` runs the configuration parser
-  (`drivers/usb/usb_desc.c`, the same object the module links) on the
+  (`drivers/usb/usb_desc.cee`'s C, the same object the module links) on the
   host under ASan/UBSan against the input as a configuration descriptor:
   never a read past the buffer, never more than the limits recorded,
   every accepted descriptor inside the input and at least its header

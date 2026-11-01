@@ -501,6 +501,16 @@ CeeSafe driver modules do. Digest `0xb37c1a028a201a5a` over 20,000
 queues, the C's. `VIRTQ_BENCH=1`: the CeeSafe 3.2 ns an element against
 the C's 6.1 on arm64, 4.6 against 9.8 on x86-64 (Rosetta), best of five
 noisy runs.
+virtq/USB/ACPI, part 2, USB descriptors (2026-11-01):
+`drivers/usb/usb_desc.cee` -- the configuration descriptor walk
+(`usb_parse_config`, U5), whole; the C step made it return what it
+dropped past the limits for `usb.c` to log. Each descriptor is copied
+out once and recorded field by field. The xhci module links CeeSafe's
+runtime and the driver floor. Digest `0x7758cfbcf4bd5d6d` over 20,000
+configurations, the C's. `USBDESC_BENCH=1`, best of the runs: 1.04x the
+C on arm64 (26.5 ns against 25.5), 0.94x on x86-64 (Rosetta); recording
+from the bytes without the copy was 0.86x on arm64 but 1.08x under
+Rosetta.
 
 Size: about 3.0x.
 

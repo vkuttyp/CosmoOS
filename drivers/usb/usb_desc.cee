@@ -1,0 +1,192 @@
+// usb_desc.cee - The USB configuration descriptor decoder (invariant U5; roadmap 2.0 SA5, the virtq/USB/ACPI family).
+//
+// The bytes come from the device: the decoder never reads past what was received (raw_len, itself no more than the
+// USB_CONFIG_MAX bytes of raw_config) or records more than the static limits hold. It walks the configuration by
+// bLength: every descriptor must fit in what was read and be at least its own header long, or the whole is refused.
+// Interfaces and endpoints beyond the limits are counted, for the caller to log, and dropped; alternate settings other
+// than 0 and unknown descriptor types are skipped by their bLength. Each descriptor is recorded field by field from
+// its bytes (little-endian, as USB's are). tests/host/test_usbdesc.c holds this to the C it replaced: the same digest
+// over 20,000 seeded configurations; tests/fuzz/fuzz_usb_desc.c drives it against hostile bytes.
+
+@header("drivers/usb.h")
+extern "C" {
+    struct usb_config_descriptor {
+        bLength: u8;
+        bDescriptorType: u8;
+        wTotalLength: u16;
+        bNumInterfaces: u8;
+        bConfigurationValue: u8;
+        iConfiguration: u8;
+        bmAttributes: u8;
+        bMaxPower: u8;
+    }
+    struct usb_interface_descriptor {
+        bLength: u8;
+        bDescriptorType: u8;
+        bInterfaceNumber: u8;
+        bAlternateSetting: u8;
+        bNumEndpoints: u8;
+        bInterfaceClass: u8;
+        bInterfaceSubClass: u8;
+        bInterfaceProtocol: u8;
+        iInterface: u8;
+    }
+    struct usb_endpoint_descriptor {
+        bLength: u8;
+        bDescriptorType: u8;
+        bEndpointAddress: u8;
+        bmAttributes: u8;
+        wMaxPacketSize: u16;
+        bInterval: u8;
+    }
+    struct usb_endpoint {
+        desc: usb_endpoint_descriptor;
+    }
+    struct usb_interface {
+        desc: usb_interface_descriptor;
+        ep: [usb_endpoint; 8];
+        nr_ep: u32;
+        udev: *mut usb_device;
+    }
+    struct usb_device {
+        config: usb_config_descriptor;
+        intf: [usb_interface; 4];
+        nr_intf: u32;
+        raw_config: [u8; 512];
+        raw_len: u32;
+    }
+}
+
+const EINVAL: i32 = 22;
+const CONFIG_MAX: u32 = 512;   // USB_CONFIG_MAX
+const MAX_INTERFACES: u32 = 4; // USB_MAX_INTERFACES
+const MAX_ENDPOINTS: u32 = 8;  // USB_MAX_ENDPOINTS
+const DT_CONFIG: u8 = 2;
+const DT_INTERFACE: u8 = 4;
+const DT_ENDPOINT: u8 = 5;
+const CONFIG_LEN: u32 = 9;    // sizeof(struct usb_config_descriptor)
+const INTERFACE_LEN: u32 = 9; // sizeof(struct usb_interface_descriptor)
+const ENDPOINT_LEN: u32 = 7;  // sizeof(struct usb_endpoint_descriptor)
+const NONE: u32 = 0xffffffff; // no interface to give endpoints to
+
+/// The decoder's answer: 0 or -EINVAL, and how many interfaces and endpoints past the limits it dropped.
+struct Parsed {
+    rc: i32;
+    dropped: u32;
+}
+
+fn le16(b: borrow [u8; 512], at: usize) -> u16 => b[at] as u16 | (b[at + 1] as u16) << 8;
+
+/// Endpoint descriptor `e` from its ENDPOINT_LEN bytes.
+fn setEndpoint(e: borrow mut usb_endpoint_descriptor, d: borrow [u8; 7]) {
+    e.bLength = d[0];
+    e.bDescriptorType = d[1];
+    e.bEndpointAddress = d[2];
+    e.bmAttributes = d[3];
+    e.wMaxPacketSize = d[4] as u16 | (d[5] as u16) << 8;
+    e.bInterval = d[6];
+}
+
+/// An endpoint slot of no descriptor: what the C's memset of a new interface left in each.
+fn clearEndpoint(e: borrow mut usb_endpoint_descriptor) {
+    e.bLength = 0;
+    e.bDescriptorType = 0;
+    e.bEndpointAddress = 0;
+    e.bmAttributes = 0;
+    e.wMaxPacketSize = 0;
+    e.bInterval = 0;
+}
+
+/// Interface descriptor `i` from its INTERFACE_LEN bytes.
+fn setInterface(i: borrow mut usb_interface_descriptor, d: borrow [u8; 9]) {
+    i.bLength = d[0];
+    i.bDescriptorType = d[1];
+    i.bInterfaceNumber = d[2];
+    i.bAlternateSetting = d[3];
+    i.bNumEndpoints = d[4];
+    i.bInterfaceClass = d[5];
+    i.bInterfaceSubClass = d[6];
+    i.bInterfaceProtocol = d[7];
+    i.iInterface = d[8];
+}
+
+fn setConfig(c: borrow mut usb_config_descriptor, p: borrow [u8; 512]) {
+    c.bLength = p[0];
+    c.bDescriptorType = p[1];
+    c.wTotalLength = le16(p, 2);
+    c.bNumInterfaces = p[4];
+    c.bConfigurationValue = p[5];
+    c.iConfiguration = p[6];
+    c.bmAttributes = p[7];
+    c.bMaxPower = p[8];
+}
+
+fn decode(u: borrow mut usb_device, me: *mut usb_device) -> Parsed {
+    let len = u.raw_len;
+    u.nr_intf = 0;
+    if (len < CONFIG_LEN || len > CONFIG_MAX) {
+        return Parsed { rc: -EINVAL, dropped: 0 };
+    }
+    let p = borrow u.raw_config;
+    setConfig(borrow mut u.config, p);
+    if (u.config.bDescriptorType != DT_CONFIG || (u.config.bLength as u32) < CONFIG_LEN ||
+        u.config.wTotalLength as u32 != len) {
+        return Parsed { rc: -EINVAL, dropped: 0 };
+    }
+    var off: u32 = 0;
+    var dropped: u32 = 0;
+    var cur: u32 = NONE;
+    while (off + 2 <= len) {
+        let at = off as usize;
+        let dlen = p[at] as u32;
+        let dtype = p[at + 1];
+        if (dlen < 2 || off + dlen > len) {
+            return Parsed { rc: -EINVAL, dropped: dropped };
+        }
+        if (dtype == DT_INTERFACE && dlen >= INTERFACE_LEN) {
+            if (p[at + 3] != 0) {
+                cur = NONE; // alternate settings are recorded nowhere; their endpoints are skipped
+            } else if (u.nr_intf < MAX_INTERFACES) {
+                cur = u.nr_intf;
+                u.nr_intf += 1;
+                let f = borrow mut u.intf[cur as usize];
+                var d: [u8; 9] = [0; 9];
+                d[..].copyFrom(p[at..at + 9]);
+                setInterface(borrow mut f.desc, borrow d);
+                for (k in 0..MAX_ENDPOINTS) {
+                    clearEndpoint(borrow mut f.ep[k as usize].desc);
+                }
+                f.nr_ep = 0;
+                f.udev = me;
+            } else {
+                cur = NONE;
+                dropped += 1;
+            }
+        } else if (dtype == DT_ENDPOINT && dlen >= ENDPOINT_LEN && cur != NONE) {
+            let f = borrow mut u.intf[cur as usize];
+            if (f.nr_ep < MAX_ENDPOINTS) {
+                var d: [u8; 7] = [0; 7];
+                d[..].copyFrom(p[at..at + 7]);
+                setEndpoint(borrow mut f.ep[f.nr_ep as usize].desc, borrow d);
+                f.nr_ep += 1;
+            } else {
+                dropped += 1;
+            }
+        }
+        off += dlen;
+    }
+    if (off != len) {
+        return Parsed { rc: -EINVAL, dropped: dropped }; // a trailing byte that is not a descriptor
+    }
+    return Parsed { rc: 0, dropped: dropped };
+}
+
+/// Parse udev->raw_config (raw_len bytes) into config, intf[] and their endpoints; -EINVAL for anything that does not
+/// walk cleanly to the end. `*dropped`: the interfaces and endpoints past the limits, for the caller to log.
+/// Safety: `udev` is a device being enumerated, whose raw_config and raw_len it read; `dropped` is writable.
+@export("usb_parse_config")
+unsafe fn parseConfigC(udev: *mut usb_device, dropped: *mut u32) -> i32 {
+    let r = decode(Ptr.toBorrowMut(udev), udev);
+    dropped.write(r.dropped);
+    return r.rc;
+}

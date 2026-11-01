@@ -15,8 +15,8 @@ bulk-only transport; HID boot protocol.
         │ blk_register       │ tty_input            │ usb_hub_port_connected
    usb_storage.c          usb_hid.c             usb_hub.c        class drivers
         │  usb_control_msg, usb_bulk_msg, usb_submit, usb_cancel, usb_dma_dev
-   usb.c + usb_desc.c     the "usb" bus, struct usb_device, enumeration,
-        │                 configuration parsing, class-driver binding
+   usb.c + usb_desc.cee   the "usb" bus, struct usb_device, enumeration,
+        │                 configuration parsing (CeeSafe), class-driver binding
         │  struct usb_hcd_ops (internal to the xhci module)
    xhci.c                 rings, contexts, commands, event ring, ports,
         │                 worker thread xhci/<n>
@@ -29,7 +29,7 @@ from the boot archive, after `e1000e`:
 
 | Module | Sources | Depends on |
 |---|---|---|
-| `xhci` (`modules/xhci.ko`) | `drivers/usb/usb.c`, `usb_desc.c`, `xhci.c` | nothing |
+| `xhci` (`modules/xhci.ko`) | `drivers/usb/usb.c`, `usb_desc.cee`, `xhci.c` | nothing |
 | `usb_storage` | `drivers/usb/usb_storage.c` | `xhci` |
 | `usb_hid` | `drivers/usb/usb_hid.c` | `xhci` |
 | `usb_hub` | `drivers/usb/usb_hub.c` | `xhci` |
@@ -57,7 +57,8 @@ on it that the system uses: a disk, a keyboard and hubs.
 - The core: the `usb` bus (`usb_bus`), one `struct usb_device` per
   attached device named by its path (`usb0-1`, `usb0-6.1`),
   enumeration through `usb_hcd_ops`, configuration parsing of
-  untrusted bytes (`usb_parse_config` in `usb_desc.c`, U5), matching
+  untrusted bytes (`usb_parse_config` in `usb_desc.cee`, CeeSafe since
+  roadmap 2.0 SA5; U5), matching
   `struct usb_driver` id tables, synchronous and asynchronous transfers
   and their cancellation (U2, U10).
 - Topology: `parent`, `port`, `root_port`, `route` and `depth` on each
