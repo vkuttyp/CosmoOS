@@ -27,6 +27,7 @@
 #include <kernel/netif.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/netif_cpu.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
 #include <kernel/quiesce.h>
@@ -49,21 +50,8 @@
 static LIST_HEAD(g_netifs);
 static spinlock_t g_netif_lock = SPINLOCK_INIT("netifs");
 static unsigned g_next_index = 1;
-/* One receive queue, work list and worker per CPU (unit 11). CPU 0's
- * worker starts in net_init; the others in net_start_workers after SMP
- * bring-up. A packet steered to a CPU whose worker is not ready yet goes
- * to CPU 0. */
-struct net_cpu {
-    struct mbufq rxq;
-    struct list_node work;
-    spinlock_t work_lock;
-    struct waitqueue wq;
-    struct thread *worker;
-    volatile bool ready;
-    struct net_cpu_stats stats;
-    unsigned id;
-    char name[16];
-};
+/* One receive queue, work list and worker per CPU (struct net_cpu, in
+ * kernel/net/netif_cpu.h). */
 static struct net_cpu g_cpu[CONFIG_MAX_CPUS];
 static unsigned g_ncpu = 1;            /* CPUs with a queue (workers may still be starting) */
 /* netif_unregister runs one at a time (it sleeps). */
