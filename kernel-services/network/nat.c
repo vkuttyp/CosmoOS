@@ -523,9 +523,12 @@ static bool nat_in_icmp_error(struct mbuf *m, unsigned ihl, uint16_t total)
         inl4[0] = (uint8_t)(snap.orig_port >> 8);
         inl4[1] = (uint8_t)snap.orig_port;
     }
+    /* Over the chain: only the quote was pulled up, and the rest of the
+     * message may lie in the mbufs after it (in_cksum over icmp_len bytes
+     * from oic read past the first mbuf's buffer). */
     uint16_t icmp_len = (uint16_t)(total - ihl);
     oic->cksum = 0;
-    oic->cksum = in_cksum(oic, icmp_len);
+    oic->cksum = cksum_fold(m_cksum_partial(m, icmp_off, icmp_len, 0));
 
     struct ipv4_hdr *outer = (struct ipv4_hdr *)base;
     STAT(in_icmp_error);
