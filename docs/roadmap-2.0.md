@@ -720,6 +720,27 @@ address compare that folds every byte's difference lets clang compare
 words, as the C's `in6_equal` did (an early-exit byte loop was 1.22x
 under Rosetta); a solicitation for us answered 0.98-1.00x and
 0.97-1.01x.
+No new C, repaid and owed (2026-11-03). The push of 2026-11-03 (the
+installed-system fixes: init as pid 1, the self-tests' skips, the AHCI
+rescan, test disks by serial; and SA6's netif headers) added 309 lines
+of C to convert (`cee-share --gate cd5e99db`: kernel/ +175, drivers/
++90, userland/ +44), against this section's rule. Repaid: `netif_cpu.h`
+moved beside `netif.cee`, its only user (kernel/ -66); the test-disk
+lookup and the serial decoding moved into `kernel/block/blkserial.cee`
+(kernel/ -24, drivers/ -12); and `drivers/storage/diskid.cee`, the ATA
+IDENTIFY, NVMe Identify and SCSI INQUIRY and READ CAPACITY decoders three
+drivers had (drivers/ -63; its host test's
+digest `0x4949c54aa80780f2`, the C's, macOS clang and Linux gcc; NVMe and
+SCSI at or under the C's cost, ATA IDENTIFY 2.0x, 25 ns against 13 on
+arm64, once a disk attach: accepted by the owner, 2026-11-03, as the rule
+allows). Owed: drivers/ +15 (virtio-blk's GET_ID
+request and USB storage's string-descriptor request) until SA9 converts
+those drivers; kernel/ +85 (`devtest.c`'s and
+`iommutest.c`'s skips and rescan, init as pid 1 in `process.c`, the
+`COSMO_CONFIG_*()` macros CeeSafe needs) until SA10 converts those
+files, and userland/ +44 (init's test-disk check) until SA12; a CeeSafe
+check in init now would need its own object tree and panic hook and
+repay less than half.
 
 Size: about 3.0x.
 

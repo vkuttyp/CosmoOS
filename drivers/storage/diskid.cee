@@ -1,0 +1,201 @@
+// diskid.cee - What a disk's device reports about itself, decoded, in CeeSafe: ATA IDENTIFY DEVICE (ahci), NVMe
+// Identify Controller and Namespace (nvme), SCSI INQUIRY and READ CAPACITY (10) (usb_storage). The answers are the
+// device's bytes: each decoder reads them through a slice of the answer's fixed size, so a hostile or broken device
+// can make a decoder refuse the disk, never read past its answer. Its C interface, kernel/include/kernel/diskid.h, is
+// ceesafec's; it is linked into each of the three driver modules (build/module.mk). tests/host/test_diskid.c holds it
+// to the digest of the C it replaced.
+
+/// ATA IDENTIFY DEVICE's 256 words, decoded. `usable`: a capacity, and a logical sector of 512 to 4096 bytes, a power
+/// of two.
+@repr(C)
+public struct ata_identity {
+    sectors: u64;
+    sector_size: u32;
+    qdepth: u32; // NCQ's queue depth, 1-32
+    lba48: bool;
+    wcache: bool;
+    ncq: bool;
+    usable: bool;
+}
+
+/// NVMe Identify Controller's 4096 bytes, decoded. `max_pages`: per request, from MDTS, at most the caller's limit.
+@repr(C)
+public struct nvme_ctrl_identity {
+    max_pages: u32;
+    nn: u32; // the number of namespaces
+}
+
+/// NVMe Identify Namespace's 4096 bytes: the formatted LBA format's fields. `usable`: blocks, no metadata, 512 to 4096
+/// bytes a block.
+@repr(C)
+public struct nvme_ns_identity {
+    nsze: u64;
+    ms: u32;
+    lbads: u32;
+    usable: bool;
+}
+
+// ATA IDENTIFY DEVICE's words (ACS-3 §7.12.7).
+const ID_SERIAL: usize = 10;       // 10 words
+const ID_MODEL: usize = 27;        // 20 words
+const ID_LBA28_COUNT: usize = 60;  // 2 words
+const ID_QUEUE_DEPTH: usize = 75;  // bits 0-4: depth - 1
+const ID_SATA_CAP: usize = 76;     // bit 8: NCQ
+const ID_CMD_SET_2: usize = 83;    // bit 10: LBA48
+const ID_CMD_SET_EN_2: usize = 85; // bit 5: write cache enabled
+const ID_LBA48_COUNT: usize = 100; // 4 words
+const ID_SECTOR_INFO: usize = 106; // bit 14 valid / bit 15 clear, bit 12: logical sector > 256 words
+const ID_SECTOR_SIZE: usize = 117; // 2 words: logical sector size in words
+const ATA_WORDS: usize = 256;
+
+// NVMe Identify (NVMe 1.4 §5.15).
+const NVME_ID_CTRL_SN: usize = 4;    // 20 bytes
+const NVME_ID_CTRL_MN: usize = 24;   // 40 bytes
+const NVME_ID_CTRL_MDTS: usize = 77; // a power of two of 4 KiB pages; 0: no limit
+const NVME_ID_CTRL_NN: usize = 516;  // u32
+const NVME_ID_NS_NSZE: usize = 0;
+const NVME_ID_NS_FLBAS: usize = 26;
+const NVME_ID_NS_LBAF: usize = 128;
+const NVME_ID_BYTES: usize = 4096;
+
+const SPACE: u8 = 0x20;
+
+/// A u16, u32 or u64 from little-endian bytes (NVMe's fields).
+fn le(b: Slice<u8>, at: usize, n: usize) -> u64 {
+    var v: u64 = 0;
+    for (k in 0..n) {
+        v = v | ((b[at + k] as u64) << (8 * k as u64));
+    }
+    return v;
+}
+
+/// A sector or block size the block layer takes: 512 to 4096 bytes, a power of two.
+fn goodSize(size: u32) -> bool => size >= 512 && size <= 4096 && (size & (size - 1)) == 0;
+
+/// An ATA string of `count` words into `out` (2 × count + 1 bytes), as C: each word's high byte first, then a NUL,
+/// the spaces at the end made NULs, and the string after its leading spaces moved to the front with its NUL. (Finding
+/// the bounds first and copying once measured slower: each formulation's per-byte checks stay in its loops.)
+fn ataString(out: SliceMut<u8>, words: Slice<u16>, count: usize) {
+    for (i in 0..count) {
+        out[2 * i] = truncate<u8>(words[i] >> 8);
+        out[2 * i + 1] = truncate<u8>(words[i]);
+    }
+    let n = 2 * count;
+    out[n] = 0;
+    var e = n;
+    while (e > 0 && out[e - 1] == SPACE) {
+        out[e - 1] = 0;
+        e -= 1;
+    }
+    var s: usize = 0;
+    while (out[s] == SPACE) {
+        s += 1; // stops at out[n], a NUL, at the latest
+    }
+    if (s != 0) {
+        var end = s;
+        while (out[end] != 0) {
+            end += 1;
+        }
+        for (k in 0..end - s + 1) { // the string after the spaces, and its NUL
+            out[k] = out[s + k];
+        }
+    }
+}
+
+/// `width` bytes of a device's string into `out` (width + 1 bytes), a NUL after them, and its trailing spaces made NULs.
+fn paddedString(out: SliceMut<u8>, from: Slice<u8>, width: usize) {
+    out[..width].copyFrom(from[..width]);
+    out[width] = 0;
+    var e = width;
+    while (e > 0 && out[e - 1] == SPACE) {
+        out[e - 1] = 0;
+        e -= 1;
+    }
+}
+
+/// Safety: `id` points to ATA_WORDS readable words; `model` to 41 and `serial` to 21 writable bytes; `out` to a
+/// writable record.
+@export("ata_identity_decode")
+unsafe fn ataIdentity(id: *u16, model: *mut CChar, serial: *mut CChar, out: *mut ata_identity) {
+    let w = Slice.fromRaw(id, ATA_WORDS);
+    ataString(SliceMut.fromRaw(model as *mut u8, 41), w[ID_MODEL..ID_MODEL + 20], 20);
+    ataString(SliceMut.fromRaw(serial as *mut u8, 21), w[ID_SERIAL..ID_SERIAL + 10], 10);
+    let lba48 = (w[ID_CMD_SET_2] & (1 << 10)) != 0;
+    var sectors: u64 = 0;
+    if (lba48) {
+        for (k in 0..4usize) {
+            sectors = sectors | ((w[ID_LBA48_COUNT + k] as u64) << (16 * k as u64));
+        }
+    } else {
+        sectors = (w[ID_LBA28_COUNT] as u64) | ((w[ID_LBA28_COUNT + 1] as u64) << 16);
+    }
+    var size: u32 = 512;
+    let info = w[ID_SECTOR_INFO];
+    if ((info & 0xc000) == 0x4000 && (info & (1 << 12)) != 0) {
+        let words = (w[ID_SECTOR_SIZE] as u32) | ((w[ID_SECTOR_SIZE + 1] as u32) << 16);
+        size = words.wrappingMul(2); // as the C's u32 multiplication
+    }
+    let a = Ptr.toBorrowMut(out);
+    a.sectors = sectors;
+    a.sector_size = size;
+    a.qdepth = ((w[ID_QUEUE_DEPTH] & 0x1f) as u32) + 1;
+    a.lba48 = lba48;
+    a.wcache = (w[ID_CMD_SET_EN_2] & (1 << 5)) != 0;
+    a.ncq = (w[ID_SATA_CAP] & (1 << 8)) != 0;
+    a.usable = sectors != 0 && goodSize(size);
+}
+
+/// Safety: `id` points to NVME_ID_BYTES readable bytes; `serial` to 21 and `model` to 41 writable bytes; `out` to a
+/// writable record.
+@export("nvme_ctrl_identity_decode")
+unsafe fn nvmeController(id: *u8, limit: u32, serial: *mut CChar, model: *mut CChar, out: *mut nvme_ctrl_identity) {
+    let b = Slice.fromRaw(id, NVME_ID_BYTES);
+    paddedString(SliceMut.fromRaw(serial as *mut u8, 21), b[NVME_ID_CTRL_SN..NVME_ID_CTRL_SN + 20], 20);
+    paddedString(SliceMut.fromRaw(model as *mut u8, 41), b[NVME_ID_CTRL_MN..NVME_ID_CTRL_MN + 40], 40);
+    let mdts = b[NVME_ID_CTRL_MDTS] as u32;
+    var pages = if (mdts == 0 || mdts >= 7) limit else 1 << mdts;
+    if (pages > limit) {
+        pages = limit;
+    }
+    let c = Ptr.toBorrowMut(out);
+    c.max_pages = pages;
+    c.nn = truncate<u32>(le(b, NVME_ID_CTRL_NN, 4));
+}
+
+/// Safety: `id` points to NVME_ID_BYTES readable bytes and `out` to a writable record.
+@export("nvme_ns_identity_decode")
+unsafe fn nvmeNamespace(id: *u8, out: *mut nvme_ns_identity) {
+    let b = Slice.fromRaw(id, NVME_ID_BYTES);
+    let format = NVME_ID_NS_LBAF + 4 * ((b[NVME_ID_NS_FLBAS] & 0xf) as usize);
+    let nsze = le(b, NVME_ID_NS_NSZE, 8);
+    let ms = truncate<u32>(le(b, format, 2));
+    let lbads = b[format + 2] as u32;
+    let n = Ptr.toBorrowMut(out);
+    n.nsze = nsze;
+    n.ms = ms;
+    n.lbads = lbads;
+    n.usable = nsze != 0 && ms == 0 && lbads >= 9 && lbads <= 12;
+}
+
+/// Safety: `inq` points to 36 readable bytes; `vendor`, `product` and `rev` to 9, 17 and 5 writable ones.
+@export("scsi_inquiry_decode")
+unsafe fn scsiInquiry(inq: *u8, vendor: *mut CChar, product: *mut CChar, rev: *mut CChar) -> u32 {
+    let b = Slice.fromRaw(inq, 36);
+    paddedString(SliceMut.fromRaw(vendor as *mut u8, 9), b[8..16], 8);
+    paddedString(SliceMut.fromRaw(product as *mut u8, 17), b[16..32], 16);
+    let r = SliceMut.fromRaw(rev as *mut u8, 5);
+    r[..4].copyFrom(b[32..36]); // the revision keeps its spaces, as the C's did
+    r[4] = 0;
+    return (b[0] & 0x1f) as u32;
+}
+
+/// Safety: `buf` points to 8 readable bytes; `last` and `blockSize` are writable.
+@export("scsi_capacity10_decode")
+unsafe fn scsiCapacity10(buf: *u8, last: *mut u32, blockSize: *mut u32) -> bool {
+    let b = Slice.fromRaw(buf, 8);
+    let l = ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32);
+    let size = ((b[4] as u32) << 24) | ((b[5] as u32) << 16) | ((b[6] as u32) << 8) | (b[7] as u32);
+    last.write(l);
+    blockSize.write(size);
+    return goodSize(size) && l != 0xffffffff;
+}

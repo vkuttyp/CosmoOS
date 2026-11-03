@@ -326,7 +326,7 @@ $(HOST_OUT)/test_nd: $(call src_paths,$(HOST_ND_SRCS)) $(ROOT)/kernel/include/ke
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_diskid: $(call src_paths,$(HOST_DISKID_SRCS)) $(ROOT)/kernel/include/kernel/diskid.h | $(CEE_STAMP)
+$(HOST_OUT)/test_diskid: $(call src_paths,$(HOST_DISKID_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(filter %.c,$^) $(HOST_LDFLAGS) -o $@

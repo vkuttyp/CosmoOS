@@ -75,12 +75,13 @@ $(foreach m,$(CEE_MODULES),$(eval MODULE_$(m)_LINK := $(CEE_MODULE_COMMON_OBJS))
 # same runtime and floor.
 MODULE_virtio_LINK := $(CEE_MODULE_COMMON_OBJS)
 MODULE_xhci_LINK := $(CEE_MODULE_COMMON_OBJS)
-# The disks' identity decoders (kernel/diskid.h), compiled once and linked into the three disk drivers.
+# The disks' identity decoders (drivers/storage/diskid.cee, kernel/diskid.h), compiled once and linked into the three
+# disk drivers with the same runtime and floor.
 DISKID_OBJS := $(call objs_of,drivers/storage/diskid.c)
 $(eval $(call compile_rules,$(DISKID_OBJS),MODULE_CFLAGS))
-MODULE_ahci_LINK := $(DISKID_OBJS)
-MODULE_nvme_LINK := $(DISKID_OBJS)
-MODULE_usb_storage_LINK := $(DISKID_OBJS)
+MODULE_ahci_LINK := $(DISKID_OBJS) $(CEE_MODULE_COMMON_OBJS)
+MODULE_nvme_LINK := $(DISKID_OBJS) $(CEE_MODULE_COMMON_OBJS)
+MODULE_usb_storage_LINK := $(DISKID_OBJS) $(CEE_MODULE_COMMON_OBJS)
 
 # $(1) module name
 define module_rules
