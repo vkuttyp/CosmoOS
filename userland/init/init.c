@@ -895,6 +895,10 @@ static void proc_selftest(void)
      * exit 0. */
     int mstatus = 0;
     CHECK(waitpid(mpid, &mstatus, 0) == mpid && mstatus != 0);
+    /* Gone again: a mount left under /tmp keeps init from switching to a
+     * disk root after the tests ("a mount on the old root is not at its
+     * top level"), so a debug build's installed boot stayed live. */
+    CHECK(cosmo_umount("/tmp/mjail") == 0 && rmdir("/tmp/mjail") == 0);
 
     /* A relative path from where the child starts cannot reach outside
      * either: ../../etc is the same directory as /etc from a root, and
