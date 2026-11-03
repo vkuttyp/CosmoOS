@@ -81,6 +81,16 @@ worktree and require `dma_frees=12` plus exactly the expected self-test
 failure. This checks that a device which did not acknowledge stop never
 loses DMA memory while it may still own it.
 
+Both tests leave the controller as they found it, partitions included: a
+re-probe registers the disks but not their partitions (scans happen at
+boot and on request, `kernel/include/kernel/part.h`), so after their last
+rebind they read the partition tables of the controller's disks again. On
+`q35` the live image's disk is on this controller. Before this rescan, an
+x86-64 debug build had lost its boot ESP by the time user space started,
+and every debug install test (`test-install`'s family: `test-pkgtx`,
+`test-pkg-net`, `test-fsck`, ...) failed with `cosmo-install: the loader
+was not read from a GPT partition` (2026-11-03).
+
 **`iommu`** (unchanged): it walks every blkdev with `debug_dma` and now
 provokes faults through `ahci0p0` and `ahci0p1` as well, each attributed
 to the controller's requester (`00fa`, `pci:00:1f.2` on `q35`).

@@ -13,6 +13,7 @@
 #include <kernel/faultinject.h>
 #include <kernel/iommu.h>
 #include <kernel/kmalloc.h>
+#include <kernel/part.h>
 #include <kernel/pmm.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
@@ -3428,6 +3429,30 @@ bool selftest_ahci_reset(const char **reason)
 }
 
 /*
+ * After an AHCI self-test has removed and re-probed the controller, read the
+ * partition tables of its disks again. A re-probe registers the disks but not
+ * their partitions (part.h: scans happen at boot and on request), and on q35
+ * the live image's disk is on this controller: without the scan, its ESP --
+ * the partition the loader was read from -- is gone, and cosmo-install in a
+ * debug build refuses ("the loader was not read from a GPT partition").
+ */
+#if CONFIG_DEBUG && CONFIG_FAULTINJECT
+static void ahci_rescan_partitions(struct pci_device *pdev)
+{
+    if (pdev->dev.state != DEV_BOUND)
+        return;
+    for (unsigned i = 0;; i++) {
+        struct blkdev *bd = blk_nth(i);
+        if (bd == NULL)
+            break;
+        if (bd->dev == &pdev->dev && !blk_is_partition(bd))
+            (void)blk_part_scan(bd, NULL);
+        blkdev_put(bd);
+    }
+}
+#endif
+
+/*
  * Fail the second AHCI probe after its ports are live and after a COMRESET
  * leaves a port event pending. The controller-wide interrupt gate is still
  * off and no disk/bio has been published, so the status cannot dispatch the
@@ -3459,6 +3484,7 @@ bool selftest_ahci_probe_rollback(const char **reason)
     }
     if (pdev->dev.state != DEV_BOUND)
         ok = false;
+    ahci_rescan_partitions(pdev);
     if (ok)
         kinfo("selftest: ahci-probe-rollback: failed after port start with a pending event and GHC.IE clear");
     else
@@ -3500,6 +3526,7 @@ bool selftest_ahci_stop_ack(const char **reason)
     bool retry_rebound = pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 &&
                          pdev->dev.state == DEV_BOUND;
     if (retry_removed != 0 || retry_st.hits != 1 || retry_freed == 0 || !retry_rebound) {
+        ahci_rescan_partitions(pdev);
         *reason = "ahci-stop-ack: single failure was not retried and cleaned up safely";
         return false;
     }
@@ -3522,6 +3549,7 @@ bool selftest_ahci_stop_ack(const char **reason)
     bool bound = pdev->dev.state == DEV_BOUND ||
                  (pdev->dev.state == DEV_UNBOUND && pci_test_rebind(pdev) == 0 && pdev->dev.state == DEV_BOUND);
     uint64_t freed = after.frees - before.frees;
+    ahci_rescan_partitions(pdev);
     bool ok = removed == 0 && st.hits > 0 && freed == 0 && refused && bound;
     kinfo("AHCI-STOP-ACK: %s retry_hits=%llu retry_frees=%llu retry_rebound=%u persistent_hits=%llu dma_frees=%llu "
           "rebind_refused=%u rebound=%u",
