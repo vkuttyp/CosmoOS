@@ -883,6 +883,37 @@ and gcc); 99.7% of the C's lines and 95% of its branches, all but the
 error word's two compare-exchange retries, which need a second thread.
 The whole history runs in the C's time (41 ms on arm64; 55 against 57
 on x86-64, Rosetta); the transports carry a socket call's cost.
+TCP (2026-11-03): `kernel-services/network/tcp.cee` -- the RFC 793
+state machine, the RFC 6298 retransmission timer, slow start,
+congestion avoidance and fast retransmit, delayed ACKs, TIME_WAIT,
+RFC 5961 challenge ACKs, the SYN cache and its cookies, keepalive, the
+orphaned FIN_WAIT_2 timeout, out-of-order reassembly and path-MTU
+notifications, over pcbs that stay C objects (struct tcp_pcb) reached
+by their fields, each under its own spin lock, with the table's lock
+inside it. What CeeSafe cannot hold stays in `tcp_floor.c`, called
+through functions: the pcb fields only some builds have (the debug
+builds' liveness mark, the self-test builds' arming time), the host
+targets' state-change hook (TCP_HOST_TEST), and the debug builds'
+self-test seams (a held timer callback, a held ACK), as tcp.c had them.
+netparse gains `netparse_tcp_words`. A batch's packet is held as an
+address, so the empty batch every call starts from is a static: building
+it field by field cost the port 10% against the C's in-place zeroing.
+The C step's host test runs TCP over the TCP fuzz target's host
+(`tests/fuzz/shim_net.c`) with the rest of the stack as the kernel's:
+four histories of a listener and up to six connections to two peers --
+opens of every kind (SYN floods past the cache, cookies, simultaneous
+SYNs, resets, silence), the peer's segments of every flag, offset,
+window, option and length, in order and out, corrupted and malformed,
+the host's calls, duplicate ACKs, simultaneous close, TIME_WAIT, ICMP,
+the firewall's OUTPUT chain refusing the host's segments -- every frame
+transmitted with correct checksums and nothing left allocated: digest
+`0x62a476ae9c5d6fbd`, the C's (macOS clang, Linux clang and gcc);
+89.9% of the C's lines, the rest IPv6 (the shim's link has none), a pcb
+ended between lookup and lock, pullup failures and the debug builds'
+self-test seams. `TCP_BENCH=1`, the median of five interleaved runs on
+one connection through the whole host stack: a 1,400-byte segment
+received and read 1.03x the C and one sent and acknowledged 1.05x on
+arm64; 1.02x and 1.00x on x86-64 (Rosetta).
 
 Size: about 3.0x.
 

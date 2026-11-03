@@ -215,6 +215,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/udp.c \
 	kernel-services/network/raw.c \
 	kernel-services/network/tcp.c \
+	kernel-services/network/tcp_floor.c \
 	kernel-services/network/socket.c \
 	kernel-services/network/socket_floor.c \
 	kernel-services/network/nettest.c \

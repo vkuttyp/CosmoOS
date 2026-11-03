@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "harness.h"
 #include "netpkt.h"
@@ -77,8 +78,12 @@ static void mix(const void *bytes, size_t n)
 static void mix32(uint32_t v) { mix(&v, sizeof(v)); }
 static void mix64(uint64_t v) { mix(&v, sizeof(v)); }
 
+static bool g_benching;
+
 static void note(uint32_t which, uint64_t value)
 {
+    if (g_benching)
+        return;
     mix32(0x6100u + which);
     mix64(value);
 }
@@ -103,10 +108,11 @@ static uint32_t g_last_tx_len;
 static void on_frame(struct fz_netif *f, const uint8_t *frame, uint32_t len)
 {
     (void)f;
-    if (np_check_checksums(frame, len) != 0)
+    if (!g_benching && np_check_checksums(frame, len) != 0)
         g_bad_frames++;
     note(1, len);
-    mix(frame, len < 128 ? len : 128);
+    if (!g_benching)
+        mix(frame, len < 128 ? len : 128);
     if (len >= NP_ETH + NP_IPV4 + NP_TCP && np_get16(frame + 12) == ETH_P_IP && frame[NP_ETH + 9] == IPPROTO_TCP) {
         g_last_tx_len = len;
         memcpy(g_last_tx, frame, len);
@@ -810,8 +816,85 @@ static void test_digest(void)
     EXPECT(g_digest == TCP_DIGEST);
 }
 
+/* TCP_BENCH=1: the median of nine runs of 20,000 rounds on one established connection -- an in-order 1,400-byte
+ * segment from the peer and the host's read of it; the host's 1,400-byte send and the peer's ACK of it. Through the
+ * whole host stack, as the C's was. */
+static double ns_since(const struct timespec *t0)
+{
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (double)(t1.tv_sec - t0->tv_sec) * 1e9 + (double)(t1.tv_nsec - t0->tv_nsec);
+}
+
+static int cmp_double(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void tcp_bench(void)
+{
+    g_rng = SEED;
+    fz_net_init();
+    size_t baseline = fz_allocs_live();
+    setup(0);
+    g_benching = true;
+    struct conn *c = &g_conns[0];
+    struct tcp_pcb *pcb = tcp_pcb_new(COSMO_AF_INET);
+    c->peer = 0;
+    c->peer_port = 7000;
+    own(c, pcb);
+    pcb->sock = &c->sock;
+    struct netaddr a;
+    memset(&a, 0, sizeof(a));
+    a.family = COSMO_AF_INET;
+    EXPECT(tcp_bind(pcb, &a) == 0);
+    a.port = 7000;
+    a.v4 = peer_ip(0);
+    EXPECT(tcp_connect(pcb, &a) == 0);
+    c->host_port = pcb->local.port;
+    uint32_t seq, ack;
+    uint8_t flags;
+    EXPECT(last_to(0, 7000, &seq, &ack, &flags));
+    segment(0, 7000, c->host_port, 1000, seq + 1, TH_SYN | TH_ACK, 65535, NULL, 0, NULL, 0, false);
+    EXPECT(tcp_state_of(pcb) == TCP_ESTABLISHED);
+    static uint8_t data[1400];
+    memset(data, 'd', sizeof(data));
+    double in[9], out[9];
+    for (unsigned t = 0; t < 9; t++) {
+        struct timespec t0;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (unsigned i = 0; i < 20000; i++) {
+            segment(0, 7000, c->host_port, pcb->rcv_nxt, pcb->snd_nxt, TH_ACK | TH_PSH, 65535, NULL, 0, data, sizeof(data),
+                    false);
+            bool eof = false;
+            (void)tcp_recv(pcb, g_buf, sizeof(g_buf), &eof);
+            fz_run_work();
+        }
+        in[t] = ns_since(&t0) / 20000;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (unsigned i = 0; i < 20000; i++) {
+            (void)tcp_send(pcb, data, sizeof(data));
+            segment(0, 7000, c->host_port, pcb->rcv_nxt, pcb->snd_nxt, TH_ACK, 65535, NULL, 0, NULL, 0, false);
+            fz_run_work();
+        }
+        out[t] = ns_since(&t0) / 20000;
+    }
+    qsort(in, 9, sizeof(double), cmp_double);
+    qsort(out, 9, sizeof(double), cmp_double);
+    teardown(baseline);
+    g_benching = false;
+    printf("  bench a segment received and read %.1f ns, a segment sent and acknowledged %.1f ns\n", in[4], out[4]);
+}
+
 static const struct host_test tests[] = {
     { "tcp digest", test_digest },
 };
 
-int main(void) { return harness_run(tests, sizeof(tests) / sizeof(tests[0])); }
+int main(void)
+{
+    int rc = harness_run(tests, sizeof(tests) / sizeof(tests[0]));
+    if (getenv("TCP_BENCH") != NULL)
+        tcp_bench();
+    return rc;
+}

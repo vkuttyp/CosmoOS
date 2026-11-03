@@ -69,9 +69,10 @@ HOST_SOCKET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/socket.c kernel-
 HOST_TCP_SRCS := $(HOST_COMMON_SRCS) tests/fuzz/shim_net.c kernel-services/network/ether.c kernel-services/network/arp.c \
 	kernel-services/network/nd.c kernel-services/network/ipv4.c kernel-services/network/ipv6.c \
 	kernel-services/network/udp.c kernel-services/network/raw.c kernel-services/network/tcp.c \
-	kernel-services/network/nat.c kernel-services/network/fw.c kernel-services/network/mbuf.c \
-	kernel-services/network/cksum.c kernel-services/network/inet.c kernel-services/network/dhcp.c \
-	kernel-services/network/netparse.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_tcp.c
+	kernel-services/network/tcp_floor.c kernel-services/network/nat.c kernel-services/network/fw.c \
+	kernel-services/network/mbuf.c kernel-services/network/cksum.c kernel-services/network/inet.c \
+	kernel-services/network/dhcp.c kernel-services/network/netparse.c kernel/ceesafe/ceesafe_rt_core.c \
+	tests/host/ceesafe_panic.c tests/host/test_tcp.c
 HOST_INET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/inet.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_inet.c
 HOST_CKSUM_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/cksum.c kernel/ceesafe/ceesafe_rt_core.c \
