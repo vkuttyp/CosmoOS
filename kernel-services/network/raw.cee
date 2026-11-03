@@ -1,0 +1,302 @@
+// raw.cee - Raw ICMP sockets over IPv4, what `ping` opens (kernel/include/kernel/net/raw.h;
+// docs/kernel-services/network/design.md, "Raw ICMP sockets"; invariant N31), in CeeSafe: roadmap 2.0 SA6. A pcb per
+// socket on this file's list, in id order, under its spin lock; sends as built; and a copy of each ICMP message for
+// every raw ICMP socket. tests/host/test_raw.c holds it to the digest of the C it replaced.
+//
+// Delivery takes the sockets sixteen at a time: their wake references under the lock, the copies after it, so nothing
+// allocates under a spin lock with interrupts off; the next batch starts after the last id taken. A pcb travels with
+// its socket's reference: the socket's release frees it, so it lives as long as that reference.
+
+@header("kernel/net/raw.h", "kernel/socket.h", "kernel/kmalloc.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    /// inet.h: family and port in host order, then the address (v4 is the first word of v6's bytes).
+    struct netaddr {
+        family: u16;
+        port: u16;
+        v4: u32;
+        v6: in6_addr;
+    }
+    /// kernel/include/kernel/mbuf.h: the fields raw sockets write.
+    struct mbuf_pkt {
+        len: u32;
+        src: netaddr;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbufq;
+    struct raw_pcb {
+        id: u64;
+        proto: u8;
+        rxq: mbufq;
+        sock: *mut socket;
+        link: list_node;
+        /// Bumped by delivery after the lock, read by none of this file's paths under it.
+        rx_dropped: AtomicU64;
+    }
+    /// socket.h: the field a raw pcb is published in.
+    struct socket {
+        raw: *mut raw_pcb;
+    }
+    /// ip.h's header, packed: the fields delivery reads.
+    struct ipv4_hdr {
+        vhl: u8;
+        src: u32;
+    }
+    struct raw_stats {
+        rx_delivered: u64;
+        rx_queue_full: u64;
+        rx_nomem: u64;
+        tx: u64;
+    }
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn mbufq_init(q: *mut mbufq, maxlen: u32, name: *CChar);
+    fn mbufq_enqueue(q: *mut mbufq, m: *mut mbuf) -> bool;
+    fn mbufq_dequeue(q: *mut mbufq) -> *mut mbuf;
+    fn mbufq_drain(q: *mut mbufq);
+    fn m_getcl() -> *mut mbuf;
+    fn m_append(m: *mut mbuf, src: *void, len: u32) -> i32;
+    fn m_freem(m: *mut mbuf);
+    fn m_copypacket(m: *mbuf) -> *mut mbuf;
+    fn m_prepend(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn netaddr_is_unspecified(a: *netaddr) -> bool;
+    fn ipv4_source_for(dst: u32) -> u32;
+    fn ipv4_output(m: *mut mbuf, src: u32, dst: u32, proto: u8, ttl: u8) -> i32;
+    fn sock_wake_ref(s: *mut socket) -> *mut socket;
+    fn sock_wake_unref(s: *mut socket);
+    fn sock_wake(s: *mut socket);
+}
+
+// ---- Constants (the C headers') ----
+
+/// uapi/cosmo/syscall.h.
+const AF_INET: u16 = 2;
+/// ip.h.
+const IPPROTO_ICMP: u8 = 1;
+const IP_DEFAULT_TTL: u8 = 64;
+const IPV4_HLEN: usize = 20;
+/// raw.h.
+const RAW_RXQ_MAX: u32 = 64;
+/// Raw sockets taken per batch of delivery.
+const DELIVER_MAX: usize = 16;
+/// kernel/errno.h.
+const ENOMEM: i32 = 12;
+const EINVAL: i32 = 22;
+const EDESTADDRREQ: i32 = 89;
+const EMSGSIZE: i32 = 90;
+const EAFNOSUPPORT: i32 = 97;
+const ENETUNREACH: i32 = 101;
+
+// ---- The state ----
+
+/// The pcbs, in id order, under PCBS_LOCK.
+static mut PCBS: list_node = list_node {
+    next: borrow mut PCBS as *mut list_node,
+    prev: borrow mut PCBS as *mut list_node,
+};
+static mut PCBS_LOCK: spinlock_t = SPINLOCK_INIT("raw\0".ptr as *CChar);
+/// The next pcb's id, taken under PCBS_LOCK so the list stays in id order.
+static NEXT_ID: AtomicU64 = AtomicU64.constant(1);
+
+static RX_DELIVERED: AtomicU64 = AtomicU64.constant(0);
+static RX_QUEUE_FULL: AtomicU64 = AtomicU64.constant(0);
+static RX_NOMEM: AtomicU64 = AtomicU64.constant(0);
+static TX: AtomicU64 = AtomicU64.constant(0);
+
+fn count(c: borrow AtomicU64) {
+    c.fetchAddWith(1, Ordering.Relaxed);
+}
+
+/// The list's head.
+/// Safety: only its address is taken; the list is used under PCBS_LOCK.
+fn pcbs() -> *mut list_node => unsafe { borrow mut PCBS as *mut list_node };
+
+/// The list's lock.
+/// Safety: only its address is taken, for spin_lock_irqsave.
+fn pcbsLock() -> *mut spinlock_t => unsafe { borrow mut PCBS_LOCK as *mut spinlock_t };
+
+/// The link after `node`: a walk starts at the head's and ends back at the head (list_for_each).
+/// Safety: `node` is on the list, under its lock.
+unsafe fn linkAfter(node: *mut list_node) -> *mut list_node => Ptr.toBorrow(node as *list_node).next;
+
+/// The pcb whose link `node` is.
+/// Safety: `node` is a listed pcb's link.
+unsafe fn ofLink(node: *mut list_node) -> *mut raw_pcb => containerOf(node, offsetOf<raw_pcb>(link)) as *mut raw_pcb;
+
+// ---- Control blocks ----
+
+/// raw.h's raw_pcb_new: a pcb for `proto` on the list, or null without memory. Sets sock->raw before the pcb is
+/// published.
+/// Safety: `sock` is a socket being created, which nothing else reaches yet.
+@export("raw_pcb_new")
+unsafe fn pcbNew(sock: *mut socket, proto: u8) -> *mut raw_pcb {
+    let pcb = kzalloc(layoutOf<raw_pcb>().size) as *mut raw_pcb;
+    if (pcb.isNull()) {
+        return pcb;
+    }
+    let p = Ptr.toBorrowMut(pcb);
+    p.proto = proto;
+    p.sock = sock;
+    mbufq_init(borrow mut p.rxq as *mut mbufq, RAW_RXQ_MAX, "raw-rxq\0".ptr as *CChar);
+    List.init(borrow mut p.link as *mut list_node);
+    let owner = Ptr.toBorrowMut(sock);
+    owner.raw = pcb; // set before anything can find it on the list
+    let s = spin_lock_irqsave(pcbsLock());
+    p.id = NEXT_ID.fetchAddWith(1, Ordering.Relaxed);
+    List.pushBack(pcbs(), borrow mut p.link as *mut list_node);
+    spin_unlock_irqrestore(pcbsLock(), s);
+    return pcb;
+}
+
+/// raw.h's raw_pcb_free: off the list, its queue freed, the pcb with it.
+/// Safety: `pcb` is null or a pcb raw_pcb_new made, which the caller gives up.
+@export("raw_pcb_free")
+unsafe fn pcbFree(pcb: *mut raw_pcb) {
+    if (pcb.isNull()) {
+        return;
+    }
+    let p = Ptr.toBorrowMut(pcb);
+    let s = spin_lock_irqsave(pcbsLock());
+    List.remove(borrow mut p.link as *mut list_node);
+    p.sock = 0 as *mut socket;
+    spin_unlock_irqrestore(pcbsLock(), s);
+    mbufq_drain(borrow mut p.rxq as *mut mbufq);
+    kfree(pcb as *mut void);
+}
+
+// ---- Sending and receiving ----
+
+/// raw.h's raw_sendto: `len` bytes (the ICMP message, as built) to `to`.
+/// Safety: `pcb` is a pcb raw_pcb_new made; `data` has `len` readable bytes; `to` is null or points to a netaddr.
+@export("raw_sendto")
+unsafe fn sendTo(pcb: *mut raw_pcb, data: *void, len: usize, to: *netaddr) -> i32 {
+    if (to.isNull()) {
+        return -EDESTADDRREQ;
+    }
+    let t = Ptr.toBorrow(to);
+    if (t.family != AF_INET) {
+        return -EAFNOSUPPORT;
+    }
+    if (netaddr_is_unspecified(to)) {
+        return -EINVAL;
+    }
+    if (len > 65535 - IPV4_HLEN) {
+        return -EMSGSIZE;
+    }
+    let src = ipv4_source_for(t.v4);
+    if (src == 0) {
+        return -ENETUNREACH;
+    }
+    let m = m_getcl();
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    let mb = Ptr.toBorrowMut(m);
+    mb.len = 0;
+    mb.pkt.len = 0;
+    let rc = m_append(m, data, truncate<u32>(len));
+    if (rc != 0) {
+        m_freem(m);
+        return rc;
+    }
+    count(borrow TX);
+    return ipv4_output(m, src, t.v4, Ptr.toBorrow(pcb as *raw_pcb).proto, IP_DEFAULT_TTL);
+}
+
+/// raw.h's raw_recv: one queued message, or null.
+/// Safety: `pcb` is a pcb raw_pcb_new made.
+@export("raw_recv")
+unsafe fn recv(pcb: *mut raw_pcb) -> *mut mbuf => mbufq_dequeue(borrow mut Ptr.toBorrowMut(pcb).rxq as *mut mbufq);
+
+/// One copy of the message, its IPv4 header in front and its sender in pkt.src, queued for `pcb`; `sock` woken.
+/// Safety: as raw_icmp_input; `pcb` and `sock` are held by the wake reference taken for them.
+unsafe fn deliver(m: *mbuf, iph: *ipv4_hdr, hlen: u32, pcb: *mut raw_pcb, sock: *mut socket) {
+    var c = m_copypacket(m);
+    if (!c.isNull()) {
+        c = m_prepend(c, hlen);
+    }
+    if (c.isNull()) {
+        count(borrow RX_NOMEM);
+        return;
+    }
+    let cb = Ptr.toBorrowMut(c);
+    SliceMut.fromRaw(cb.data, hlen as usize).copyFrom(Slice.fromRaw(iph as *u8, hlen as usize));
+    let from = Ptr.toBorrowMut(borrow mut cb.pkt.src as *mut netaddr);
+    from.family = AF_INET;
+    from.port = 0;
+    from.v6.s6_addr = [0; 16];
+    from.v4 = Ptr.toBorrow(iph).src;
+    let p = Ptr.toBorrowMut(pcb);
+    if (mbufq_enqueue(borrow mut p.rxq as *mut mbufq, c)) {
+        count(borrow RX_DELIVERED);
+        sock_wake(sock);
+    } else {
+        // mbufq_enqueue freed it (mbuf.h): freeing it here too was a double free (net-raw-icmp, one boot in eight).
+        p.rx_dropped.fetchAddWith(1, Ordering.Relaxed);
+        count(borrow RX_QUEUE_FULL);
+    }
+}
+
+/// raw.h's raw_icmp_input: from icmp_input, after its checksum and quiet checks, a copy of the message (`m` holds the
+/// ICMP part, `iph` its header) for each raw ICMP socket. `m` is not consumed or changed (N31).
+/// Safety: `m` is a packet the caller keeps; `iph` points to its IPv4 header, options included.
+@export("raw_icmp_input")
+unsafe fn icmpInput(m: *mbuf, iph: *ipv4_hdr) {
+    let hlen = ((Ptr.toBorrow(iph).vhl & 0xf) as u32) * 4;
+    var after: u64 = 0; // the last pcb id visited: the list is in id order
+    while (true) {
+        var socks: [*mut socket; 16] = [0 as *mut socket; 16];
+        var held: [*mut raw_pcb; 16] = [0 as *mut raw_pcb; 16];
+        var n: usize = 0;
+        var more = false;
+        let s = spin_lock_irqsave(pcbsLock());
+        var node = linkAfter(pcbs());
+        while (node != pcbs()) {
+            let pcb = ofLink(node);
+            node = linkAfter(node);
+            let p = Ptr.toBorrow(pcb as *raw_pcb);
+            if (p.id <= after || p.proto != IPPROTO_ICMP) {
+                continue;
+            }
+            if (n == DELIVER_MAX) {
+                more = true;
+                break;
+            }
+            after = p.id;
+            // A tryget: a release clears pcb->sock under this lock but starts at count zero, as UDP's does
+            // (design.md, "UDP").
+            let sock = sock_wake_ref(p.sock);
+            if (!sock.isNull()) {
+                socks[n] = sock;
+                held[n] = pcb;
+                n += 1;
+            }
+        }
+        spin_unlock_irqrestore(pcbsLock(), s);
+
+        for (i in 0..n) {
+            deliver(m, iph, hlen, held[i], socks[i]);
+            sock_wake_unref(socks[i]);
+        }
+        if (!more) {
+            break;
+        }
+    }
+}
+
+/// raw.h's raw_get_stats.
+/// Safety: `out` is writable.
+@export("raw_get_stats")
+unsafe fn getStats(out: *mut raw_stats) {
+    let o = Ptr.toBorrowMut(out);
+    o.rx_delivered = RX_DELIVERED.loadWith(LoadOrdering.Relaxed);
+    o.rx_queue_full = RX_QUEUE_FULL.loadWith(LoadOrdering.Relaxed);
+    o.rx_nomem = RX_NOMEM.loadWith(LoadOrdering.Relaxed);
+    o.tx = TX.loadWith(LoadOrdering.Relaxed);
+}

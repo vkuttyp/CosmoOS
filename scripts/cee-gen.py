@@ -137,6 +137,8 @@ PORTS = [
     ("kernel-services/network/udp.cee", "kernel-services/network/udp.c",
      "UDP over IPv4 and IPv6: binding, ephemeral ports, sending, the receive path, ICMP errors, the listing (udp.h)",
      None, True),
+    ("kernel-services/network/raw.cee", "kernel-services/network/raw.c",
+     "Raw ICMP sockets over IPv4: their pcbs, sends, and a copy of each ICMP message for every one (raw.h)", None, True),
     ("drivers/virtio/virtq_used.cee", "drivers/virtio/virtq_used.c",
      "The virtqueue's decoder of used elements (virtio.h; linked into the virtio module)", None, False),
     ("drivers/usb/usb_desc.cee", "drivers/usb/usb_desc.c",

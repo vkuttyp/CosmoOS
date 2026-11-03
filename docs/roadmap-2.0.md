@@ -802,6 +802,21 @@ all but the ephemeral range exhausted (16,383 bound sockets).
 `UDP_BENCH=1`, the median of five interleaved runs: a 512-byte datagram
 received and read 1.01x the C and one sent 1.01x on arm64; 0.99x and
 1.00x on x86-64 (Rosetta).
+Raw ICMP sockets (2026-11-03): `kernel-services/network/raw.cee` -- the
+pcbs on their id-ordered list, sends as built, and delivery of a copy
+of each ICMP message to every raw ICMP socket, sixteen at a time: wake
+references under the lock, copies after it, the next batch after the
+last id taken. The pcb is allocated with `kzalloc(layoutOf<raw_pcb>())`,
+the C's `sizeof`. `tests/host/test_raw.c`: 20,000 rounds over up to
+forty sockets -- pcbs made and freed with messages queued, sends refused
+every way, messages delivered with copies and prepends failing, sockets
+being released and queues full, the message handed in unchanged (N31)
+-- every mbuf and pcb freed and every wake reference given back: digest
+`0x51770db96e3ebf5e`, the C's (macOS clang, Linux clang and gcc); 100%
+of the C's lines and branches. `RAW_BENCH=1`, the median of five
+interleaved runs: a 64-byte echo reply delivered to four sockets 1.03x
+the C and a message sent 0.99x on arm64; 0.97x and 1.00x on x86-64
+(Rosetta).
 
 Size: about 3.0x.
 
