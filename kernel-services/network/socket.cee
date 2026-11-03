@@ -1,0 +1,1212 @@
+// socket.cee - The socket layer (kernel/include/kernel/socket.h), in CeeSafe: roadmap 2.0 SA6. Blocking semantics over
+// the TCP, UDP, raw and unix transports, each socket a kobject a handle table holds; the asynchronous error delivered
+// once (invariant N21); the wake references the transports hold across a wake; the debug builds' held-wake seam.
+// tests/host/test_socket.c holds it to the digest of the C it replaced.
+//
+// Sockets are C objects (struct socket, socket.h) this file allocates; their kobject type, a constant C object of
+// this file's exported operations, and the type test socket_from_kobject stay in socket_floor.c, since CeeSafe
+// cannot build a static of a C type (as pipe_floor.c). Waits go through wait_floor.c's killable wait over a
+// condition function, since a wait entry is C state no CeeSafe local may hold. sock->lock serialises callers; the
+// conditions, the error word and the shut bits are read without it, the last two atomically.
+
+@header("kernel/socket.h", "kernel/net/tcp.h", "kernel/net/raw.h", "kernel/cred.h", "kernel/thread.h", "kernel/unix.h", "kernel/wait.h", "kernel/kmalloc.h", "kernel/string.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct netaddr {
+        family: u16;
+        port: u16;
+        v6: in6_addr;
+    }
+    struct mbuf_pkt {
+        len: u32;
+        src: netaddr;
+    }
+    struct mbuf {
+        pkt: mbuf_pkt;
+    }
+    struct mbufq;
+    struct waitqueue;
+    struct credentials;
+    struct unix_sock;
+    struct unix_addr;
+    struct unix_handles;
+    struct udp_pcb {
+        local: netaddr;
+        remote: netaddr;
+        rxq: mbufq;
+        sock: *mut socket;
+    }
+    struct tcp_pcb {
+        state: u32;
+        local: netaddr;
+        remote: netaddr;
+        fin_rcvd: bool;
+        /// Written with __atomic_store_n by tcp.c; read here through tcpError.
+        error: i32;
+        sock: *mut socket;
+    }
+    struct raw_pcb {
+        rxq: mbufq;
+    }
+    struct socket {
+        obj: kobject;
+        family: i32;
+        @cname ("type") kind: i32;
+        state: u32;
+        udp: udp_pcb;
+        tcp: *mut tcp_pcb;
+        raw: *mut raw_pcb;
+        un: *mut unix_sock;
+        wait: waitqueue;
+        /// The pending error: the errno in the low 32 bits, a generation bumped by every write in the high 32 (N21).
+        error: AtomicU64;
+        /// 1 = RD, 2 = WR: written under `lock`, read without it.
+        shut: AtomicU32;
+        /// A property of the object, shared by every handle to it (a bool held in a word, accessed atomically).
+        nonblock: AtomicU32;
+        lock: mutex;
+        uid: u32;
+    }
+    struct cosmo_stat {
+        @cname ("type") kind: u32;
+        mode: u32;
+        nlink: u32;
+    }
+
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+    @constant
+    fn COSMO_CONFIG_SELFTEST() -> bool;
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn kobject_tryget(obj: *mut kobject) -> bool;
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn waitqueue_wake_all(wq: *mut waitqueue) -> u32;
+    fn wait_floor_until_killable(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void) -> i32;
+    fn wait_floor_until_timeout(
+        wq: *mut waitqueue,
+        cond: extern "C" fn(*mut void) -> bool,
+        arg: *mut void,
+        ns: u64,
+    ) -> bool;
+    fn wait_floor_until(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void);
+    fn io_nonblocking(nonblock: bool) -> bool;
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, privilege: u32) -> bool;
+    fn mbufq_len(q: *mut mbufq) -> u32;
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn m_freem(m: *mut mbuf);
+    fn socket_floor_type() -> *kobject_type;
+
+    fn udp_pcb_init(pcb: *mut udp_pcb, family: u16) -> i32;
+    fn udp_unbind(pcb: *mut udp_pcb);
+    fn udp_bind(pcb: *mut udp_pcb, local: *netaddr) -> i32;
+    fn udp_set_remote(pcb: *mut udp_pcb, remote: *netaddr);
+    fn udp_sendto(pcb: *mut udp_pcb, data: *void, len: usize, to: *netaddr) -> i32;
+    fn udp_recv(pcb: *mut udp_pcb) -> *mut mbuf;
+    fn raw_pcb_new(sock: *mut socket, proto: u8) -> *mut raw_pcb;
+    fn raw_pcb_free(pcb: *mut raw_pcb);
+    fn raw_sendto(pcb: *mut raw_pcb, data: *void, len: usize, to: *netaddr) -> i32;
+    fn raw_recv(pcb: *mut raw_pcb) -> *mut mbuf;
+    fn tcp_pcb_new(family: u16) -> *mut tcp_pcb;
+    fn tcp_close(pcb: *mut tcp_pcb);
+    fn tcp_bind(pcb: *mut tcp_pcb, local: *netaddr) -> i32;
+    fn tcp_listen(pcb: *mut tcp_pcb, backlog: u32) -> i32;
+    fn tcp_accept(pcb: *mut tcp_pcb, owner: *mut socket) -> *mut tcp_pcb;
+    fn tcp_accept_ready(pcb: *mut tcp_pcb) -> bool;
+    fn tcp_connect(pcb: *mut tcp_pcb, remote: *netaddr) -> i32;
+    fn tcp_send(pcb: *mut tcp_pcb, data: *void, len: usize) -> i64;
+    fn tcp_send_space(pcb: *mut tcp_pcb) -> u32;
+    fn tcp_recv(pcb: *mut tcp_pcb, data: *mut void, len: usize, peerClosed: *mut bool) -> i64;
+    fn tcp_recv_avail(pcb: *mut tcp_pcb) -> u32;
+    fn tcp_state_of(pcb: *mut tcp_pcb) -> u32;
+    fn tcp_shutdown_write(pcb: *mut tcp_pcb) -> i32;
+    fn tcp_ready(pcb: *mut tcp_pcb) -> u32;
+    fn unix_create(s: *mut socket) -> i32;
+    fn unix_release(s: *mut socket);
+    fn unix_listen(s: *mut socket, backlog: i32) -> i32;
+    fn unix_accept(s: *mut socket, out: *mut *mut socket) -> i32;
+    fn unix_send(s: *mut socket, buf: *void, len: usize, to: *unix_addr, h: *mut unix_handles, dontwait: bool) -> i64;
+    fn unix_recv(
+        s: *mut socket,
+        buf: *mut void,
+        len: usize,
+        from: *mut unix_addr,
+        h: *mut unix_handles,
+        flags: *mut u32,
+        dontwait: bool,
+    ) -> i64;
+    fn unix_shutdown(s: *mut socket, how: i32) -> i32;
+    fn unix_ready(s: *mut socket) -> u32;
+}
+
+// ---- Constants (the C headers') ----
+
+/// uapi/cosmo/syscall.h.
+const AF_UNIX: i32 = 1;
+const AF_INET: i32 = 2;
+const AF_INET6: i32 = 10;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
+const SOCK_RAW: i32 = 3;
+const SHUT_RD: i32 = 0;
+const SHUT_WR: i32 = 1;
+const SHUT_RDWR: i32 = 2;
+const IO_READABLE: u32 = 1;
+const IO_WRITABLE: u32 = 2;
+const IO_HANGUP: u32 = 4;
+const IO_ERROR: u32 = 8;
+const DT_SOCK: u32 = 5;
+const PRIV_NET: u32 = 4;
+/// ip.h.
+const IPPROTO_ICMP: i32 = 1;
+/// socket.h's enum socket_state.
+const SS_UNCONNECTED: u32 = 0;
+const SS_BOUND: u32 = 1;
+const SS_LISTENING: u32 = 2;
+const SS_CONNECTING: u32 = 3;
+const SS_CONNECTED: u32 = 4;
+/// tcp.h's enum tcp_state.
+const TCP_CLOSED: u32 = 0;
+const TCP_SYN_SENT: u32 = 2;
+const TCP_SYN_RCVD: u32 = 3;
+const TCP_ESTABLISHED: u32 = 4;
+const TCP_CLOSE_WAIT: u32 = 7;
+/// kernel/errno.h.
+const EPERM: i32 = 1;
+const EAGAIN: i32 = 11;
+const ENOMEM: i32 = 12;
+const EINVAL: i32 = 22;
+const EPIPE: i32 = 32;
+const EPROTONOSUPPORT: i32 = 93;
+const ESOCKTNOSUPPORT: i32 = 94;
+const EOPNOTSUPP: i32 = 95;
+const EAFNOSUPPORT: i32 = 97;
+const EISCONN: i32 = 106;
+const ENOTCONN: i32 = 107;
+const ECONNREFUSED: i32 = 111;
+const EALREADY: i32 = 114;
+const EINPROGRESS: i32 = 115;
+
+static DEBUG: bool = COSMO_CONFIG_DEBUG();
+static SELFTEST: bool = COSMO_CONFIG_SELFTEST();
+
+/// Live sockets.
+static COUNT: AtomicU32 = AtomicU32.constant(0);
+/// sock_wake_ref references held; counted only in a self-test build, whose census is its one reader.
+static WAKE_REFS: AtomicU32 = AtomicU32.constant(0);
+
+// ---- Helpers ----
+
+/// The socket's state, written under its mutex.
+/// Safety: `s` is a live socket.
+unsafe fn setState(s: *mut socket, state: u32) {
+    let b = Ptr.toBorrowMut(s);
+    b.state = state;
+}
+
+/// Safety: as sock.
+unsafe fn lockOf(s: *mut socket) -> *mut mutex => borrow mut Ptr.toBorrowMut(s).lock as *mut mutex;
+
+/// Safety: as sock.
+unsafe fn waitOf(s: *mut socket) -> *mut waitqueue => borrow mut Ptr.toBorrowMut(s).wait as *mut waitqueue;
+
+/// Safety: as sock.
+unsafe fn shutOf(s: *mut socket) -> u32 => Ptr.toBorrow(s as *socket).shut.loadWith(LoadOrdering.Relaxed);
+
+/// Safety: as sock.
+unsafe fn nonblockOf(s: *mut socket) -> bool => Ptr.toBorrow(s as *socket).nonblock.loadWith(LoadOrdering.Relaxed) != 0;
+
+/// The pcb's sticky error, written with __atomic_store_n by tcp.c (tcp.h, `error`).
+/// Safety: `pcb` is a live pcb.
+unsafe fn tcpError(pcb: *mut tcp_pcb, order: LoadOrdering) -> i32 {
+    let word = Ptr.toBorrow(borrow Ptr.toBorrow(pcb as *tcp_pcb).error as *i32 as *AtomicU32);
+    return truncate<i32>(word.loadWith(order));
+}
+
+/// `*to = *from`.
+/// Safety: both point to netaddrs.
+unsafe fn copyAddr(to: *mut netaddr, from: *netaddr) {
+    let f = Ptr.toBorrow(from);
+    let t = Ptr.toBorrowMut(to);
+    t.family = f.family;
+    t.port = f.port;
+    t.v6.s6_addr = f.v6.s6_addr;
+}
+
+/// A netaddr zeroed.
+/// Safety: `a` points to a writable netaddr.
+unsafe fn clearAddr(a: *mut netaddr) {
+    let t = Ptr.toBorrowMut(a);
+    t.family = 0;
+    t.port = 0;
+    t.v6.s6_addr = [0; 16];
+}
+
+// ---- The object ----
+
+/// The socket's release, its kobject's last put: its transport detached and freed, the socket with it.
+/// Safety: `obj` is a socket's kobject, the first field, whose count has reached zero.
+@export("socket_obj_release")
+unsafe fn socketRelease(obj: *mut kobject) {
+    let s = obj as *mut socket;
+    let b = Ptr.toBorrowMut(s);
+    if (b.family == AF_UNIX) {
+        unix_release(s);
+    } else if (b.kind == SOCK_RAW) {
+        raw_pcb_free(b.raw); // off the list first: no delivery can reach it after
+        b.raw = 0 as *mut raw_pcb;
+    } else if (b.kind == SOCK_DGRAM) {
+        b.udp.sock = 0 as *mut socket;
+        udp_unbind(borrow mut b.udp as *mut udp_pcb);
+    } else if (!b.tcp.isNull()) {
+        tcp_close(b.tcp); // detaches the socket; the pcb frees itself
+        b.tcp = 0 as *mut tcp_pcb;
+    }
+    COUNT.fetchSubWith(1, Ordering.Relaxed);
+    kfree(s as *mut void);
+}
+
+/// Safety: `obj` is a socket's kobject; `buf` has room for `len` bytes.
+@export("socket_obj_read")
+unsafe fn objRead(obj: *mut kobject, buf: *mut void, len: usize) -> i64 =>
+    recvFrom(obj as *mut socket, buf, len, 0 as *mut netaddr);
+
+/// Safety: `obj` is a socket's kobject; `buf` has `len` readable bytes.
+@export("socket_obj_write")
+unsafe fn objWrite(obj: *mut kobject, buf: *void, len: usize) -> i64 =>
+    sendTo(obj as *mut socket, buf, len, 0 as *netaddr);
+
+/// Safety: `st` is writable.
+@export("socket_obj_stat")
+unsafe fn objStat(obj: *mut kobject, st: *mut cosmo_stat) -> i32 {
+    memset(st as *mut void, 0, layoutOf<cosmo_stat>().size);
+    let o = Ptr.toBorrowMut(st);
+    o.kind = DT_SOCK;
+    o.mode = 384; // 0600
+    o.nlink = 1;
+    return 0;
+}
+
+/// Safety: `obj` is a socket's kobject.
+@export("socket_obj_ready")
+unsafe fn objReady(obj: *mut kobject) -> u32 => ready(obj as *mut socket);
+
+/// Safety: `obj` is a socket's kobject.
+@export("socket_obj_set_nonblock")
+unsafe fn objSetNonblock(obj: *mut kobject, on: i32) -> i32 {
+    let s = obj as *mut socket;
+    let was = if (nonblockOf(s)) 1 else 0;
+    if (on >= 0) {
+        setNonblock(s, on != 0);
+    }
+    return was;
+}
+
+/// One queue for every condition.
+/// Safety: `obj` is a socket's kobject.
+@export("socket_obj_poll_wq")
+unsafe fn objPollWq(obj: *mut kobject, events: u32) -> *mut waitqueue => waitOf(obj as *mut socket);
+
+/// socket.h's socket_init.
+@export("socket_init")
+fn init() {}
+
+/// A socket of `family` and `kind`, its count 1, unconnected; null without memory.
+/// Safety: kzalloc's memory is zeroed and the socket's own.
+unsafe fn allocSocket(family: i32, kind: i32, uid: u32) -> *mut socket {
+    let s = kzalloc(layoutOf<socket>().size) as *mut socket;
+    if (s.isNull()) {
+        return s;
+    }
+    kobject_init(borrow mut Ptr.toBorrowMut(s).obj as *mut kobject, socket_floor_type());
+    let b = Ptr.toBorrowMut(s);
+    b.family = family;
+    b.kind = kind;
+    b.uid = uid;
+    b.state = SS_UNCONNECTED;
+    waitqueue_init(waitOf(s), "socket\0".ptr as *CChar);
+    mutex_init(lockOf(s), "socket\0".ptr as *CChar);
+    COUNT.fetchAddWith(1, Ordering.Relaxed);
+    return s;
+}
+
+/// socket.h's ksock_put, an inline there.
+/// Safety: the caller holds a reference to `s`, which it gives up.
+unsafe fn put(s: *mut socket) {
+    kobject_put(borrow mut Ptr.toBorrowMut(s).obj as *mut kobject);
+}
+
+/// socket.h's ksock_create.
+/// Safety: `out` is writable.
+@export("ksock_create")
+unsafe fn create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32 {
+    if (family != AF_INET && family != AF_INET6 && family != AF_UNIX) {
+        return -EAFNOSUPPORT;
+    }
+    if (kind != SOCK_STREAM && kind != SOCK_DGRAM) {
+        return if (family == AF_UNIX) -ESOCKTNOSUPPORT else -EINVAL;
+    }
+    let s = allocSocket(family, kind, uid);
+    if (s.isNull()) {
+        return -ENOMEM;
+    }
+    if (family == AF_UNIX) {
+        let rc = unix_create(s);
+        if (rc != 0) {
+            put(s);
+            return rc;
+        }
+    } else if (kind == SOCK_DGRAM) {
+        let b = Ptr.toBorrowMut(s);
+        udp_pcb_init(borrow mut b.udp as *mut udp_pcb, truncate<u16>(family));
+        b.udp.sock = s;
+    } else {
+        let pcb = tcp_pcb_new(truncate<u16>(family));
+        if (pcb.isNull()) {
+            put(s);
+            return -ENOMEM;
+        }
+        let b = Ptr.toBorrowMut(s);
+        b.tcp = pcb;
+        let p = Ptr.toBorrowMut(pcb);
+        p.sock = s;
+    }
+    let o = SliceMut.fromRaw(out, 1);
+    o[0] = s;
+    return 0;
+}
+
+/// socket.h's ksock_create_raw: AF_INET and ICMP only, and only for a caller holding PRIV_NET.
+/// Safety: `out` is writable.
+@export("ksock_create_raw")
+unsafe fn createRaw(family: i32, proto: i32, uid: u32, out: *mut *mut socket) -> i32 {
+    if (family != AF_INET || proto != IPPROTO_ICMP) {
+        return -EPROTONOSUPPORT;
+    }
+    if (!cred_has(cred_current(), PRIV_NET)) {
+        return -EPERM;
+    }
+    let s = allocSocket(family, SOCK_RAW, uid);
+    if (s.isNull()) {
+        return -ENOMEM;
+    }
+    let pcb = raw_pcb_new(s, truncate<u8>(proto));
+    let b = Ptr.toBorrowMut(s);
+    b.raw = pcb;
+    if (pcb.isNull()) {
+        put(s);
+        return -ENOMEM;
+    }
+    let o = SliceMut.fromRaw(out, 1);
+    o[0] = s;
+    return 0;
+}
+
+// ---- Wakes and the asynchronous error (N21) ----
+
+/// socket.h's sock_wake: every waiter woken (any context).
+/// Safety: `s` is a live socket.
+@export("sock_wake")
+unsafe fn wake(s: *mut socket) {
+    waitqueue_wake_all(waitOf(s));
+}
+
+fn errPack(e: i32, generation: u32) -> u64 => ((generation as u64) << 32) | (truncate<u32>(e) as u64);
+
+fn errVal(w: u64) -> i32 => truncate<i32>(truncate<u32>(w));
+
+fn errGen(w: u64) -> u32 => truncate<u32>(w >> 32);
+
+/// socket.h's sock_set_error: `err` pending, a new generation, and the waiters woken.
+/// Safety: `s` is a live socket.
+@export("sock_set_error")
+unsafe fn setError(s: *mut socket, err: i32) {
+    let word = borrow Ptr.toBorrow(s as *socket).error;
+    var old = word.loadWith(LoadOrdering.Relaxed);
+    var done = false;
+    while (!done) {
+        match (word.compareExchangeWith(old, errPack(err, errGen(old).wrappingAdd(1)), Ordering.Release)) {
+            Ok(previous) => { done = true; }
+            Err(seen) => { old = seen; } // reloaded by the failed exchange
+        }
+    }
+    wake(s);
+}
+
+/// Whether an error is pending: a test, never a clear (a wait's condition, a readiness mask).
+/// Safety: `s` is a live socket.
+unsafe fn errorPending(s: *mut socket) -> bool =>
+    errVal(Ptr.toBorrow(s as *socket).error.loadWith(LoadOrdering.Acquire)) != 0;
+
+/// socket.h's ksock_error: the pending error, read once and cleared (the exchange is what makes "once" true); else
+/// a stream socket's sticky pcb error, which is not cleared. No lock (N21).
+/// Safety: `s` is a live socket.
+@export("ksock_error")
+unsafe fn error(s: *mut socket) -> i32 {
+    let word = borrow Ptr.toBorrow(s as *socket).error;
+    var old = word.loadWith(LoadOrdering.Acquire);
+    var done = false;
+    while (!done && errVal(old) != 0) {
+        match (word.compareExchangeWith(old, errPack(0, errGen(old).wrappingAdd(1)), Ordering.AcquireRelease)) {
+            Ok(previous) => { done = true; }
+            Err(seen) => { old = seen; }
+        }
+    }
+    var e = errVal(old);
+    let pcb = Ptr.toBorrow(s as *socket).tcp;
+    if (e == 0 && !pcb.isNull()) {
+        e = tcpError(pcb, LoadOrdering.Acquire);
+    }
+    return e;
+}
+
+/// socket.h's ksock_error_peek: the error without clearing it, and a token naming exactly what was read.
+/// Safety: `s` is a live socket; `token` is writable.
+@export("ksock_error_peek")
+unsafe fn errorPeek(s: *mut socket, token: *mut u64) -> i32 {
+    let w = Ptr.toBorrow(s as *socket).error.loadWith(LoadOrdering.Acquire);
+    let t = SliceMut.fromRaw(token, 1);
+    t[0] = w;
+    var e = errVal(w);
+    let pcb = Ptr.toBorrow(s as *socket).tcp;
+    if (e == 0 && !pcb.isNull()) {
+        e = tcpError(pcb, LoadOrdering.Acquire);
+    }
+    return e;
+}
+
+/// socket.h's ksock_error_delivered: the clear committed only if the token still names what is there -- the same
+/// errno and the same generation; a verdict stored while it was being copied out survives.
+/// Safety: `s` is a live socket.
+@export("ksock_error_delivered")
+unsafe fn errorDelivered(s: *mut socket, token: u64) {
+    if (errVal(token) == 0) {
+        return; // nothing to clear: the verdict was the sticky pcb one, or none
+    }
+    let word = borrow Ptr.toBorrow(s as *socket).error;
+    match (word.compareExchangeWith(token, errPack(0, errGen(token).wrappingAdd(1)), Ordering.AcquireRelease)) {
+        Ok(previous) => {}
+        Err(seen) => {} // a newer verdict, told to nobody: it survives
+    }
+}
+
+// ---- The waits' conditions (read without the lock, as wait_event's are) ----
+
+/// Safety: `arg` is a live listening stream socket.
+@callback
+unsafe fn acceptCond(arg: *mut void) -> bool {
+    let s = arg as *mut socket;
+    return tcp_accept_ready(Ptr.toBorrowMut(s).tcp) || errorPending(s) || (shutOf(s) & 1) != 0;
+}
+
+/// Safety: `arg` is a live stream socket.
+@callback
+unsafe fn connectCond(arg: *mut void) -> bool {
+    let st = tcp_state_of(Ptr.toBorrowMut(arg as *mut socket).tcp);
+    return st != TCP_SYN_SENT && st != TCP_SYN_RCVD;
+}
+
+/// Safety: as connectCond.
+@callback
+unsafe fn sendCond(arg: *mut void) -> bool {
+    let pcb = Ptr.toBorrowMut(arg as *mut socket).tcp;
+    return tcp_send_space(pcb) > 0 || tcpError(pcb, LoadOrdering.Relaxed) != 0 || tcp_state_of(pcb) == TCP_CLOSED;
+}
+
+/// Safety: `arg` is a live raw socket.
+@callback
+unsafe fn rawRecvCond(arg: *mut void) -> bool {
+    let s = arg as *mut socket;
+    return mbufq_len(borrow mut Ptr.toBorrowMut(Ptr.toBorrowMut(s).raw).rxq as *mut mbufq) > 0 || (shutOf(s) & 1) != 0;
+}
+
+/// Safety: `arg` is a live datagram socket.
+@callback
+unsafe fn udpRecvCond(arg: *mut void) -> bool {
+    let s = arg as *mut socket;
+    return mbufq_len(
+        borrow mut Ptr.toBorrowMut(s).udp.rxq as *mut mbufq,
+    ) > 0 || errorPending(s) || (shutOf(s) & 1) != 0;
+}
+
+/// Safety: as connectCond.
+@callback
+unsafe fn tcpRecvCond(arg: *mut void) -> bool {
+    let s = arg as *mut socket;
+    let pcb = Ptr.toBorrowMut(s).tcp;
+    let p = Ptr.toBorrow(pcb as *tcp_pcb);
+    return tcp_recv_avail(pcb) > 0 || p.fin_rcvd || tcpError(pcb, LoadOrdering.Relaxed) != 0 || p.state == TCP_CLOSED ||
+        (shutOf(s) & 1) != 0;
+}
+
+// ---- The calls ----
+
+/// A non-blocking connect that finished since connect returned becomes SS_CONNECTED here, under the socket mutex.
+/// Safety: `s` is a live stream socket.
+unsafe fn settleConnecting(s: *mut socket) {
+    mutex_lock(lockOf(s));
+    if (Ptr.toBorrowMut(s).state == SS_CONNECTING) {
+        let st = tcp_state_of(Ptr.toBorrowMut(s).tcp);
+        if (st == TCP_ESTABLISHED || st == TCP_CLOSE_WAIT) {
+            setState(s, SS_CONNECTED);
+        }
+    }
+    mutex_unlock(lockOf(s));
+}
+
+/// socket.h's ksock_bind. Reserved ports are judged on the caller's credentials now, not on who made the socket.
+/// Safety: `s` is a live socket; `addr` points to a netaddr.
+@export("ksock_bind")
+unsafe fn bind(s: *mut socket, addr: *netaddr) -> i32 {
+    let a = Ptr.toBorrow(addr);
+    let family = Ptr.toBorrowMut(s).family;
+    if (a.family as i32 != family || family == AF_UNIX) {
+        return -EAFNOSUPPORT;
+    }
+    if (Ptr.toBorrowMut(s).kind == SOCK_RAW) {
+        return -EOPNOTSUPP;
+    }
+    if (a.port != 0 && a.port < 1024 && !cred_has(cred_current(), PRIV_NET)) {
+        return -EPERM;
+    }
+    mutex_lock(lockOf(s));
+    var rc = -EINVAL;
+    if (Ptr.toBorrowMut(s).state == SS_UNCONNECTED) {
+        rc = if (Ptr.toBorrowMut(s).kind == SOCK_DGRAM) udp_bind(
+            borrow mut Ptr.toBorrowMut(s).udp as *mut udp_pcb,
+            addr,
+        ) else tcp_bind(Ptr.toBorrowMut(s).tcp, addr);
+        if (rc == 0) {
+            setState(s, SS_BOUND);
+        }
+    }
+    mutex_unlock(lockOf(s));
+    return rc;
+}
+
+/// socket.h's ksock_listen.
+/// Safety: `s` is a live socket.
+@export("ksock_listen")
+unsafe fn listen(s: *mut socket, backlog: i32) -> i32 {
+    if (Ptr.toBorrowMut(s).family == AF_UNIX) {
+        return unix_listen(s, backlog);
+    }
+    if (Ptr.toBorrowMut(s).kind != SOCK_STREAM) {
+        return -EOPNOTSUPP;
+    }
+    mutex_lock(lockOf(s));
+    var rc = -EINVAL;
+    if (Ptr.toBorrowMut(s).state == SS_BOUND) {
+        rc = tcp_listen(Ptr.toBorrowMut(s).tcp, if (backlog < 0) 0 else truncate<u32>(backlog));
+        if (rc == 0) {
+            setState(s, SS_LISTENING);
+        }
+    }
+    mutex_unlock(lockOf(s));
+    return rc;
+}
+
+/// socket.h's ksock_accept: blocks for a connection. The child socket exists before the pcb is dequeued, so the pcb
+/// is never without an owner (tcp_accept attaches it under the TCP lock).
+/// Safety: `s` is a live socket; `out` is writable; `peer` is null or writable.
+@export("ksock_accept")
+unsafe fn accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32 {
+    if (Ptr.toBorrowMut(s).family == AF_UNIX) {
+        if (!peer.isNull()) {
+            clearAddr(peer); // the unix name is asked for through unix_getpeername
+        }
+        return unix_accept(s, out);
+    }
+    if (Ptr.toBorrowMut(s).kind != SOCK_STREAM) {
+        return -EOPNOTSUPP;
+    }
+    if (Ptr.toBorrowMut(s).state != SS_LISTENING) {
+        return -EINVAL;
+    }
+    let c = allocSocket(Ptr.toBorrowMut(s).family, SOCK_STREAM, Ptr.toBorrowMut(s).uid);
+    if (c.isNull()) {
+        return -ENOMEM;
+    }
+    var child = 0 as *mut tcp_pcb;
+    while (true) {
+        child = tcp_accept(Ptr.toBorrowMut(s).tcp, c);
+        if (!child.isNull()) {
+            break;
+        }
+        if (errorPending(s) || (shutOf(s) & 1) != 0) {
+            put(c);
+            // Bound, not called twice: ksock_error clears as it reads.
+            let e = error(s);
+            return if (e != 0) e else -EINVAL;
+        }
+        if (io_nonblocking(nonblockOf(s))) {
+            put(c);
+            return -EAGAIN;
+        }
+        let w = wait_floor_until_killable(waitOf(s), acceptCond, s as *mut void);
+        if (w != 0) {
+            put(c);
+            return w;
+        }
+    }
+    let cb = Ptr.toBorrowMut(c);
+    cb.tcp = child;
+    setState(c, SS_CONNECTED);
+    if (!peer.isNull()) {
+        copyAddr(peer, borrow Ptr.toBorrow(child as *tcp_pcb).remote as *netaddr);
+    }
+    let o = SliceMut.fromRaw(out, 1);
+    o[0] = c;
+    return 0;
+}
+
+/// After a connect's wait or a non-blocking check: established, else the error (or -ECONNREFUSED) and unconnected.
+/// Under the socket mutex.
+/// Safety: `s` is a live stream socket.
+unsafe fn connectOutcome(s: *mut socket) -> i32 {
+    let st = tcp_state_of(Ptr.toBorrowMut(s).tcp);
+    if (st == TCP_ESTABLISHED || st == TCP_CLOSE_WAIT) {
+        setState(s, SS_CONNECTED);
+        return 0;
+    }
+    let e = error(s);
+    setState(s, SS_UNCONNECTED);
+    return if (e != 0) e else -ECONNREFUSED;
+}
+
+/// socket.h's ksock_connect: blocks until the connection is made or refused (non-blocking: -EINPROGRESS).
+/// Safety: `s` is a live socket; `addr` points to a netaddr.
+@export("ksock_connect")
+unsafe fn connect(s: *mut socket, addr: *netaddr) -> i32 {
+    let family = Ptr.toBorrowMut(s).family;
+    if (Ptr.toBorrow(addr).family as i32 != family || family == AF_UNIX) {
+        return -EAFNOSUPPORT;
+    }
+    if (Ptr.toBorrowMut(s).kind == SOCK_RAW) {
+        return -EOPNOTSUPP;
+    }
+    mutex_lock(lockOf(s));
+    var rc: i32 = 0;
+    let state = Ptr.toBorrowMut(s).state;
+    if (Ptr.toBorrowMut(s).kind == SOCK_DGRAM) {
+        udp_set_remote(borrow mut Ptr.toBorrowMut(s).udp as *mut udp_pcb, addr); // under the list lock input's lookup reads it with
+        setState(s, SS_CONNECTED);
+    } else if (state == SS_CONNECTED) {
+        rc = -EISCONN;
+    } else if (state == SS_LISTENING) {
+        rc = -EINVAL;
+    } else if (state == SS_CONNECTING) {
+        // A non-blocking connect in progress, or finished since.
+        let st = tcp_state_of(Ptr.toBorrowMut(s).tcp);
+        if (st == TCP_SYN_SENT || st == TCP_SYN_RCVD) {
+            rc = -EALREADY;
+        } else if (st == TCP_ESTABLISHED || st == TCP_CLOSE_WAIT) {
+            setState(s, SS_CONNECTED);
+            rc = -EISCONN;
+        } else {
+            rc = connectOutcome(s);
+        }
+    } else {
+        rc = tcp_connect(Ptr.toBorrowMut(s).tcp, addr);
+        if (rc == 0 && io_nonblocking(nonblockOf(s))) {
+            let st = tcp_state_of(Ptr.toBorrowMut(s).tcp);
+            if (st == TCP_SYN_SENT || st == TCP_SYN_RCVD) {
+                setState(s, SS_CONNECTING);
+                rc = -EINPROGRESS;
+            } else if (st == TCP_ESTABLISHED || st == TCP_CLOSE_WAIT) {
+                setState(s, SS_CONNECTED);
+            } else {
+                let e = error(s);
+                rc = if (e != 0) e else -ECONNREFUSED;
+            }
+        } else if (rc == 0) {
+            setState(s, SS_CONNECTING);
+            mutex_unlock(lockOf(s));
+            let w = wait_floor_until_killable(waitOf(s), connectCond, s as *mut void);
+            mutex_lock(lockOf(s));
+            if (w != 0) {
+                mutex_unlock(lockOf(s));
+                return w; // being killed; the pcb finishes or times out on its own
+            }
+            rc = connectOutcome(s);
+        }
+    }
+    mutex_unlock(lockOf(s));
+    return rc;
+}
+
+/// socket.h's ksock_sendto: a datagram, or a stream's bytes (blocking until all are queued, unless non-blocking).
+/// Safety: `s` is a live socket; `buf` has `len` readable bytes; `to` is null or points to a netaddr.
+@export("ksock_sendto")
+unsafe fn sendTo(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64 {
+    if (Ptr.toBorrowMut(s).family == AF_UNIX) {
+        if (!to.isNull()) {
+            return -EAFNOSUPPORT as i64; // an inet address cannot name a unix peer
+        }
+        if ((shutOf(s) & 2) != 0) {
+            return -EPIPE as i64;
+        }
+        return unix_send(s, buf, len, 0 as *unix_addr, 0 as *mut unix_handles, false);
+    }
+    if ((shutOf(s) & 2) != 0) {
+        return -EPIPE as i64;
+    }
+    let kind = Ptr.toBorrowMut(s).kind;
+    if (kind == SOCK_RAW) {
+        let rc = raw_sendto(Ptr.toBorrowMut(s).raw, buf, len, to); // -EDESTADDRREQ without `to`
+        return if (rc != 0) rc as i64 else truncate<i64>(len);
+    }
+    if (kind == SOCK_DGRAM) {
+        var dst = to;
+        if (dst.isNull()) {
+            if (Ptr.toBorrowMut(s).state != SS_CONNECTED) {
+                return -ENOTCONN as i64;
+            }
+            dst = borrow Ptr.toBorrowMut(s).udp.remote as *netaddr;
+        }
+        mutex_lock(lockOf(s));
+        let rc = udp_sendto(borrow mut Ptr.toBorrowMut(s).udp as *mut udp_pcb, buf, len, dst);
+        if (rc == 0 && Ptr.toBorrowMut(s).state == SS_UNCONNECTED) {
+            setState(s, SS_BOUND);
+        }
+        mutex_unlock(lockOf(s));
+        return if (rc != 0) rc as i64 else truncate<i64>(len);
+    }
+    if (!to.isNull()) {
+        return -EISCONN as i64;
+    }
+    if (Ptr.toBorrowMut(s).state == SS_CONNECTING) {
+        settleConnecting(s);
+    }
+    if (Ptr.toBorrowMut(s).state != SS_CONNECTED) {
+        return -ENOTCONN as i64;
+    }
+    let p = buf as *u8;
+    var done: usize = 0;
+    while (done < len) {
+        var n = tcp_send(Ptr.toBorrowMut(s).tcp, p.add(done) as *void, len - done);
+        if (n < 0) {
+            if (n == -EAGAIN as i64) {
+                n = 0;
+            } else {
+                return if (done != 0) truncate<i64>(done) else n;
+            }
+        }
+        done += truncate<usize>(n);
+        if (done < len) {
+            if (io_nonblocking(nonblockOf(s))) {
+                return if (done != 0) truncate<i64>(done) else -EAGAIN as i64;
+            }
+            let w = wait_floor_until_killable(waitOf(s), sendCond, s as *mut void);
+            if (w != 0) {
+                return if (done != 0) truncate<i64>(done) else w as i64;
+            }
+            let pcb = Ptr.toBorrowMut(s).tcp;
+            let e = tcpError(pcb, LoadOrdering.Relaxed);
+            if (e != 0 || tcp_state_of(pcb) == TCP_CLOSED) {
+                return if (done != 0) truncate<i64>(done) else if (e != 0) e as i64 else -EPIPE as i64;
+            }
+        }
+    }
+    return truncate<i64>(done);
+}
+
+/// A queued datagram copied out (as much as fits), its sender in `from`, and freed.
+/// Safety: `m` is a datagram the caller hands over; `buf` has room for `len`; `from` is null or writable.
+unsafe fn deliverDatagram(m: *mut mbuf, buf: *mut void, len: usize, from: *mut netaddr) -> i64 {
+    let plen = Ptr.toBorrow(m as *mbuf).pkt.len;
+    let n: u32 = if ((plen as usize) < len) plen else truncate<u32>(len);
+    m_copydata(m as *mbuf, 0, n, buf);
+    if (!from.isNull()) {
+        copyAddr(from, borrow Ptr.toBorrow(m as *mbuf).pkt.src as *netaddr);
+    }
+    m_freem(m);
+    return n as i64;
+}
+
+/// socket.h's ksock_recvfrom: blocks for a datagram or a stream's bytes; 0 at the end of the stream. `from` is
+/// defined on every return, since the doors copy it out even for 0.
+/// Safety: `s` is a live socket; `buf` has room for `len` bytes; `from` is null or writable.
+@export("ksock_recvfrom")
+unsafe fn recvFrom(s: *mut socket, buf: *mut void, len: usize, from: *mut netaddr) -> i64 {
+    if (!from.isNull()) {
+        clearAddr(from);
+    }
+    if (Ptr.toBorrowMut(s).family == AF_UNIX) {
+        return unix_recv(s, buf, len, 0 as *mut unix_addr, 0 as *mut unix_handles, 0 as *mut u32, false);
+    }
+    let kind = Ptr.toBorrowMut(s).kind;
+    if (kind == SOCK_RAW) {
+        var m = 0 as *mut mbuf;
+        while (true) {
+            m = raw_recv(Ptr.toBorrowMut(s).raw);
+            if (!m.isNull()) {
+                break;
+            }
+            if ((shutOf(s) & 1) != 0) {
+                return 0;
+            }
+            if (io_nonblocking(nonblockOf(s))) {
+                return -EAGAIN as i64;
+            }
+            let w = wait_floor_until_killable(waitOf(s), rawRecvCond, s as *mut void);
+            if (w != 0) {
+                return w as i64;
+            }
+        }
+        return deliverDatagram(m, buf, len, from);
+    }
+    if (kind == SOCK_DGRAM) {
+        if (Ptr.toBorrowMut(s).udp.local.port == 0) {
+            return -EINVAL as i64; // unbound: nothing can arrive
+        }
+        var m = 0 as *mut mbuf;
+        while (true) {
+            m = udp_recv(borrow mut Ptr.toBorrowMut(s).udp as *mut udp_pcb);
+            if (!m.isNull()) {
+                break;
+            }
+            if ((shutOf(s) & 1) != 0) {
+                return 0;
+            }
+            if (errorPending(s)) {
+                return error(s) as i64;
+            }
+            if (io_nonblocking(nonblockOf(s))) {
+                return -EAGAIN as i64;
+            }
+            let w = wait_floor_until_killable(waitOf(s), udpRecvCond, s as *mut void);
+            if (w != 0) {
+                return w as i64;
+            }
+        }
+        return deliverDatagram(m, buf, len, from);
+    }
+    if (Ptr.toBorrowMut(s).state == SS_CONNECTING) {
+        settleConnecting(s);
+    }
+    if (Ptr.toBorrowMut(s).state != SS_CONNECTED) {
+        return -ENOTCONN as i64;
+    }
+    while (true) {
+        var closed = false;
+        let pcb = Ptr.toBorrowMut(s).tcp;
+        let n = tcp_recv(pcb, buf, len, borrow mut closed as *mut bool);
+        if (n > 0) {
+            if (!from.isNull()) {
+                copyAddr(from, borrow Ptr.toBorrow(pcb as *tcp_pcb).remote as *netaddr);
+            }
+            return n;
+        }
+        if (n < 0) {
+            return n;
+        }
+        if (closed || (shutOf(s) & 1) != 0) {
+            return 0;
+        }
+        if (Ptr.toBorrow(pcb as *tcp_pcb).state == TCP_CLOSED) {
+            return tcpError(pcb, LoadOrdering.Relaxed) as i64;
+        }
+        if (io_nonblocking(nonblockOf(s))) {
+            return -EAGAIN as i64;
+        }
+        let w = wait_floor_until_killable(waitOf(s), tcpRecvCond, s as *mut void);
+        if (w != 0) {
+            return w as i64;
+        }
+    }
+    return 0;
+}
+
+/// socket.h's ksock_shutdown.
+/// Safety: `s` is a live socket.
+@export("ksock_shutdown")
+unsafe fn shutdown(s: *mut socket, how: i32) -> i32 {
+    if (how < SHUT_RD || how > SHUT_RDWR) {
+        return -EINVAL;
+    }
+    mutex_lock(lockOf(s));
+    var rc: i32 = 0;
+    let shut = borrow Ptr.toBorrow(s as *socket).shut;
+    if (how == SHUT_RD || how == SHUT_RDWR) {
+        shut.fetchOrWith(1, Ordering.Relaxed);
+    }
+    if (how == SHUT_WR || how == SHUT_RDWR) {
+        shut.fetchOrWith(2, Ordering.Relaxed);
+        if (Ptr.toBorrowMut(
+            s,
+        ).family != AF_UNIX && Ptr.toBorrowMut(s).kind == SOCK_STREAM && Ptr.toBorrowMut(s).state == SS_CONNECTED) {
+            rc = tcp_shutdown_write(Ptr.toBorrowMut(s).tcp);
+        }
+    }
+    mutex_unlock(lockOf(s));
+    if (Ptr.toBorrowMut(s).family == AF_UNIX) {
+        return unix_shutdown(s, how); // closes the queues and wakes both ends
+    }
+    wake(s);
+    return rc;
+}
+
+/// socket.h's ksock_getsockname.
+/// Safety: `s` is a live socket; `out` is writable.
+@export("ksock_getsockname")
+unsafe fn getSockName(s: *mut socket, out: *mut netaddr) -> i32 {
+    if (Ptr.toBorrowMut(s).family == AF_UNIX) {
+        return -EAFNOSUPPORT; // unix_getsockname
+    }
+    let kind = Ptr.toBorrowMut(s).kind;
+    if (kind == SOCK_RAW) {
+        clearAddr(out);
+        let o = Ptr.toBorrowMut(out);
+        o.family = truncate<u16>(Ptr.toBorrowMut(s).family); // never bound: the wildcard, port 0
+        return 0;
+    }
+    if (kind == SOCK_DGRAM) {
+        copyAddr(out, borrow Ptr.toBorrowMut(s).udp.local as *netaddr);
+    } else {
+        copyAddr(out, borrow Ptr.toBorrow(Ptr.toBorrowMut(s).tcp as *tcp_pcb).local as *netaddr);
+    }
+    return 0;
+}
+
+/// socket.h's ksock_getpeername.
+/// Safety: `s` is a live socket; `out` is writable.
+@export("ksock_getpeername")
+unsafe fn getPeerName(s: *mut socket, out: *mut netaddr) -> i32 {
+    if (Ptr.toBorrowMut(s).family == AF_UNIX) {
+        return -EAFNOSUPPORT; // unix_getpeername
+    }
+    let kind = Ptr.toBorrowMut(s).kind;
+    if (kind == SOCK_RAW || Ptr.toBorrowMut(s).state != SS_CONNECTED) {
+        return -ENOTCONN;
+    }
+    if (kind == SOCK_DGRAM) {
+        copyAddr(out, borrow Ptr.toBorrowMut(s).udp.remote as *netaddr);
+    } else {
+        copyAddr(out, borrow Ptr.toBorrow(Ptr.toBorrowMut(s).tcp as *tcp_pcb).remote as *netaddr);
+    }
+    return 0;
+}
+
+/// socket.h's ksock_set_nonblock.
+/// Safety: `s` is a live socket.
+@export("ksock_set_nonblock")
+unsafe fn setNonblock(s: *mut socket, on: bool) {
+    Ptr.toBorrow(s as *socket).nonblock.storeWith(if (on) 1 else 0, StoreOrdering.Relaxed);
+}
+
+/// socket.h's ksock_ready: the COSMO_IO_* bits that would not block now.
+/// Safety: `s` is a live socket.
+@export("ksock_ready")
+unsafe fn ready(s: *mut socket) -> u32 {
+    if (Ptr.toBorrowMut(s).family == AF_UNIX) {
+        return unix_ready(s);
+    }
+    var r: u32 = 0;
+    let kind = Ptr.toBorrowMut(s).kind;
+    if (kind == SOCK_RAW) {
+        if (mbufq_len(borrow mut Ptr.toBorrowMut(Ptr.toBorrowMut(s).raw).rxq as *mut mbufq) > 0) {
+            r |= IO_READABLE;
+        }
+        r |= IO_WRITABLE;
+    } else if (kind == SOCK_DGRAM) {
+        if (mbufq_len(borrow mut Ptr.toBorrowMut(s).udp.rxq as *mut mbufq) > 0) {
+            r |= IO_READABLE;
+        }
+        r |= IO_WRITABLE;
+    } else {
+        r = tcp_ready(Ptr.toBorrowMut(s).tcp);
+        let st = Ptr.toBorrowMut(s).state;
+        if (st != SS_CONNECTED && st != SS_LISTENING && st != SS_CONNECTING) {
+            r |= IO_WRITABLE; // a write fails at once with -ENOTCONN
+        }
+    }
+    if (errorPending(s)) {
+        r |= IO_READABLE | IO_WRITABLE | IO_ERROR;
+    }
+    let shut = shutOf(s);
+    if ((shut & 1) != 0) {
+        r |= IO_READABLE | IO_HANGUP;
+    }
+    if ((shut & 2) != 0) {
+        r |= IO_WRITABLE;
+    }
+    return r;
+}
+
+/// socket.h's socket_count.
+@export("socket_count")
+fn socketCount() -> u32 => COUNT.loadWith(LoadOrdering.Relaxed);
+
+// ---- Wake references ----
+
+/// socket.h's sock_wake_ref: a reference held across a wake made after a transport's own lock is dropped; a tryget,
+/// so null for a null or dying socket. Counted before the tryget and uncounted after the put, so there is no instant
+/// at which a wake reference exists and the count says none does.
+/// Safety: `s` is null or a socket whose memory is live.
+@export("sock_wake_ref")
+unsafe fn wakeRef(s: *mut socket) -> *mut socket {
+    if (s.isNull()) {
+        return s;
+    }
+    if (SELFTEST) {
+        WAKE_REFS.fetchAddWith(1, Ordering.Relaxed);
+    }
+    if (kobject_tryget(borrow mut Ptr.toBorrowMut(s).obj as *mut kobject)) {
+        return s;
+    }
+    if (SELFTEST) {
+        WAKE_REFS.fetchSubWith(1, Ordering.Release);
+    }
+    return 0 as *mut socket;
+}
+
+/// socket.h's sock_wake_unref.
+/// Safety: `s` was returned by sock_wake_ref and not yet given back.
+@export("sock_wake_unref")
+unsafe fn wakeUnref(s: *mut socket) {
+    wakeHold(s);
+    put(s);
+    if (SELFTEST) {
+        WAKE_REFS.fetchSubWith(1, Ordering.Release);
+    }
+}
+
+/// socket.h's socket_wake_refs: the wake references held now (a self-test build's; 0 otherwise).
+@export("socket_wake_refs")
+fn wakeRefs() -> u32 => if (SELFTEST) WAKE_REFS.loadWith(LoadOrdering.Acquire) else 0;
+
+// ---- The held-wake seam (debug builds; `net-census-wake-ref`) ----
+
+/// The seam's state. Both sides wait on the armed socket's own queue (a static cannot hold a C wait queue): the held
+/// side holds a reference to it until release, and every wait rechecks its condition, so other wakes there are
+/// harmless.
+struct Hold {
+    held: bool;
+    released: bool;
+    resumed: bool;
+    timedOut: bool;
+}
+
+static HOLD: IrqSpinLock<Hold> =
+    IrqSpinLock<Hold>.constant(
+        "sock-wake-hold\0".ptr as *CChar,
+        Hold { held: false, released: false, resumed: false, timedOut: false },
+    );
+/// The socket armed for, as an address; 0 when idle. Read without the lock on every wake.
+static HOLD_TARGET: AtomicUSize = AtomicUSize.constant(0);
+/// The flags the waits read without the lock, mirrored from HOLD.
+static HOLD_HELD: AtomicBool = AtomicBool.constant(false);
+static HOLD_RELEASED: AtomicBool = AtomicBool.constant(false);
+static HOLD_RESUMED: AtomicBool = AtomicBool.constant(false);
+
+/// Safety: no argument is read.
+@callback
+unsafe fn holdReleased(arg: *mut void) -> bool => HOLD_RELEASED.loadWith(LoadOrdering.Acquire);
+
+/// Safety: no argument is read.
+@callback
+unsafe fn holdResumed(arg: *mut void) -> bool => HOLD_RESUMED.loadWith(LoadOrdering.Acquire);
+
+/// Safety: no argument is read.
+@callback
+unsafe fn holdHeld(arg: *mut void) -> bool => HOLD_HELD.loadWith(LoadOrdering.Acquire);
+
+/// Armed for `s`, the next wake's unref of it stops after the wake and before its put, holding the reference, until
+/// release (at most 10 s, a timeout recorded). Unarmed, the common case: one load and no lock.
+/// Safety: `s` is a live socket; the caller may sleep.
+unsafe fn wakeHold(s: *mut socket) {
+    if (!DEBUG || HOLD_TARGET.loadWith(LoadOrdering.Acquire) != s as usize) {
+        return;
+    }
+    var mine = false;
+    {
+        var guard = HOLD.lock();
+        let h = guard.data();
+        mine = HOLD_TARGET.loadWith(LoadOrdering.Relaxed) == s as usize && !h.held;
+        if (mine) {
+            h.held = true;
+            HOLD_HELD.storeWith(true, StoreOrdering.Release);
+        }
+    }
+    if (!mine) {
+        return;
+    }
+    waitqueue_wake_all(waitOf(s));
+    let ok = wait_floor_until_timeout(waitOf(s), holdReleased, 0 as *mut void, 10000000000);
+    {
+        var guard = HOLD.lock();
+        let h = guard.data();
+        h.timedOut = !ok;
+        h.resumed = true;
+        HOLD_RESUMED.storeWith(true, StoreOrdering.Release);
+    }
+    waitqueue_wake_all(waitOf(s));
+}
+
+/// socket.h's sock_test_wake_hold_arm (debug builds; a no-op otherwise).
+/// Safety: `s` is a live socket, which the caller keeps until release.
+@export("sock_test_wake_hold_arm")
+unsafe fn testWakeHoldArm(s: *mut socket) {
+    if (!DEBUG) {
+        return;
+    }
+    var guard = HOLD.lock();
+    let h = guard.data();
+    h.held = false;
+    h.released = false;
+    h.resumed = false;
+    h.timedOut = false;
+    HOLD_HELD.storeWith(false, StoreOrdering.Relaxed);
+    HOLD_RELEASED.storeWith(false, StoreOrdering.Relaxed);
+    HOLD_RESUMED.storeWith(false, StoreOrdering.Relaxed);
+    HOLD_TARGET.storeWith(s as usize, StoreOrdering.Release);
+}
+
+/// socket.h's sock_test_wake_hold_wait: until a wake is held, to `ns` (debug builds; false otherwise, and when
+/// nothing is armed).
+/// Safety: the caller may sleep.
+@export("sock_test_wake_hold_wait")
+unsafe fn testWakeHoldWait(ns: u64) -> bool {
+    let target = HOLD_TARGET.loadWith(LoadOrdering.Acquire) as *mut socket;
+    if (!DEBUG || target.isNull()) {
+        return false;
+    }
+    return wait_floor_until_timeout(waitOf(target), holdHeld, 0 as *mut void, ns);
+}
+
+/// socket.h's sock_test_wake_hold_release: disarmed, and the held side resumed; false if it gave up waiting (debug
+/// builds; true otherwise).
+/// Safety: the caller may sleep.
+@export("sock_test_wake_hold_release")
+unsafe fn testWakeHoldRelease() -> bool {
+    if (!DEBUG) {
+        return true;
+    }
+    var held = false;
+    var target = 0 as *mut socket;
+    {
+        var guard = HOLD.lock();
+        let h = guard.data();
+        held = h.held;
+        target = HOLD_TARGET.loadWith(LoadOrdering.Relaxed) as *mut socket;
+        HOLD_TARGET.storeWith(0, StoreOrdering.Release); // nothing new is held from here
+        h.released = true;
+        HOLD_RELEASED.storeWith(true, StoreOrdering.Release);
+    }
+    if (!held || target.isNull()) {
+        return true;
+    }
+    waitqueue_wake_all(waitOf(target));
+    wait_floor_until(waitOf(target), holdResumed, 0 as *mut void);
+    var timedOut = false;
+    {
+        var guard = HOLD.lock();
+        timedOut = guard.data().timedOut;
+    }
+    return !timedOut;
+}

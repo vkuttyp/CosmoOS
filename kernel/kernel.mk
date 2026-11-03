@@ -216,6 +216,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/raw.c \
 	kernel-services/network/tcp.c \
 	kernel-services/network/socket.c \
+	kernel-services/network/socket_floor.c \
 	kernel-services/network/nettest.c \
 	drivers/acpi/acpi.c \
 	drivers/acpi/acpi_parse.c \

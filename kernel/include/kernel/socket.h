@@ -50,7 +50,7 @@ struct socket {
      * identical errno that arrived while it was being copied out. */
     uint64_t error;
     unsigned shut;              /* 1 = RD, 2 = WR */
-    bool nonblock;              /* a property of the object, shared by every handle to it */
+    uint32_t nonblock;          /* a property of the object, shared by every handle to it: a bool, accessed atomically */
     struct mutex lock;
     uint32_t uid;               /* creator's effective uid, informational (reserved ports are judged on the
                                    caller's credentials at bind time) */

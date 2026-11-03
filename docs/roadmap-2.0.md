@@ -862,6 +862,27 @@ for word; 99.8% of the C's lines and 95.9% of its branches, all but a
 guard the next port never trips. `NAT_BENCH=1`, the median of five
 interleaved runs: a datagram masqueraded 0.95x the C and its reply
 1.03x on arm64; 0.97x and 1.00x on x86-64 (Rosetta).
+Sockets (2026-11-03): `kernel-services/network/socket.cee` -- the
+blocking calls over the TCP, UDP, raw and unix transports, the
+asynchronous error word delivered once (N21) with its peek-and-commit
+pair, the wake references and the debug build's held wake. The C step
+moved the seven waits onto `wait_floor.c`'s killable wait over
+condition functions, as pipe.c's were. What CeeSafe 0.6.0 cannot build
+stays in `socket_floor.c`: the socket's kobject type (a constant C
+object of the port's exported operations) and the type test against
+it, as `pipe_floor.c` keeps the pipe's. `socket.h`'s `nonblock` became
+a word (CeeSafe's atomic bool is one), the struct's `type` field is
+declared with `@cname`, and the held wake now waits on the armed
+socket's own queue, so it allocates nothing. `tests/host/test_socket.c`:
+20,000 rounds over up to eight sockets of every family and type, over
+stub transports whose world moves between a wait's asks -- connections
+made and refused, data and datagrams arriving, errors and shutdowns
+landing, waiters killed -- every socket, pcb and mbuf freed and no mutex
+held: digest `0xc27cb34a9bd69c1d`, the C's (macOS clang, Linux clang
+and gcc); 99.7% of the C's lines and 95% of its branches, all but the
+error word's two compare-exchange retries, which need a second thread.
+The whole history runs in the C's time (41 ms on arm64; 55 against 57
+on x86-64, Rosetta); the transports carry a socket call's cost.
 
 Size: about 3.0x.
 

@@ -62,7 +62,8 @@ HOST_FW_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/fw.c kernel-services
 HOST_NAT_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/nat.c kernel-services/network/mbuf.c \
 	kernel-services/network/cksum.c kernel-services/network/netparse.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_nat.c
-HOST_SOCKET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/socket.c kernel-services/network/mbuf.c \
+HOST_SOCKET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/socket.c kernel-services/network/socket_floor.c \
+	kernel-services/network/mbuf.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_socket.c
 HOST_INET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/inet.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_inet.c
