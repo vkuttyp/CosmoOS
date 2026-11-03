@@ -327,7 +327,7 @@ $(HOST_OUT)/test_nd: $(call src_paths,$(HOST_ND_SRCS)) $(ROOT)/kernel/include/ke
 $(HOST_OUT)/test_netif: $(call src_paths,$(HOST_NETIF_SRCS)) $(ROOT)/kernel/include/kernel/netif.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE -I$(ROOT)/kernel-services/network $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
 # MBUF_BENCH times the packet buffers with clock_gettime: POSIX, which glibc hides under -std=c11.
 $(HOST_OUT)/test_mbuf: $(call src_paths,$(HOST_MBUF_SRCS)) $(ROOT)/kernel/include/kernel/mbuf.h | $(CEE_STAMP)

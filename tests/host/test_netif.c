@@ -30,7 +30,7 @@
 #include <kernel/net/dhcp.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
-#include <kernel/net/netif_cpu.h>
+#include "netif_cpu.h"   /* kernel-services/network, through -I */
 #include <kernel/netif.h>
 #include <kernel/object.h>
 #include <kernel/percpu.h>

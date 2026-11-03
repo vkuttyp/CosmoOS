@@ -1,12 +1,12 @@
 /*
  * netif_cpu.h - The interface layer's own state (kernel-services/network/netif.cee): one receive queue, work list and
  * worker per CPU, and the barrier items net_workers_barrier posts to them. In a header, rather than netif's file, so
- * CeeSafe can import the C layout it defines statics of (CeeSafe's type-system.md §31, ADR 0042). Nothing else
- * includes it.
+ * CeeSafe can import the C layout it defines statics of (CeeSafe's type-system.md §31, ADR 0042). Private to netif:
+ * beside it, not under kernel/include; its generated C and its host test reach it with -I kernel-services/network.
  */
 
-#ifndef KERNEL_NET_NETIF_CPU_H
-#define KERNEL_NET_NETIF_CPU_H
+#ifndef KERNEL_SERVICES_NETWORK_NETIF_CPU_H
+#define KERNEL_SERVICES_NETWORK_NETIF_CPU_H
 
 #include <kernel/completion.h>
 #include <kernel/faultinject.h>
@@ -63,4 +63,4 @@ struct net_barriers {
 #define NETIF_WORKER_PRIO() (NET_WORKER_PRIO)
 #define NETIF_FI_RX_DUP() (FI_NET_RX_DUP)
 
-#endif /* KERNEL_NET_NETIF_CPU_H */
+#endif /* KERNEL_SERVICES_NETWORK_NETIF_CPU_H */
