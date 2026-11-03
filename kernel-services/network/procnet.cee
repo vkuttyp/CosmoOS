@@ -1,0 +1,647 @@
+// procnet.cee - /proc/net in Linux's formats (kernel/include/kernel/net/procnet.h; shell completeness S1; design.md,
+// "Inspecting the stack"), in CeeSafe: roadmap 2.0 SA6. tests/host/test_procnet.c holds it to the digest of the C it
+// replaced, formatted by the kernel's own kvsnprintf.
+//
+// Each file is what BusyBox's ifconfig, route, netstat and arp parse, laid out as Linux 6.x lays it out, from the
+// stack's listings: a copy under each table's lock, then formatting with no lock held. What the stack does not have
+// is written as Linux writes its absence -- zero counters, uid 0 and inode 0 for every socket (a socket here records
+// no inode and its pcb no owner) -- never invented. The file names (procnet_names, data) are procnet_floor.c's.
+
+@header("kernel/net/procnet.h", "kernel/net/ether.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/netif.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct netaddr {
+        family: u16;
+        port: u16;
+        v4: u32;
+        v6: in6_addr;
+    }
+    struct netif_stats {
+        rx_packets: AtomicU64;
+        rx_bytes: AtomicU64;
+        rx_dropped: AtomicU64;
+        rx_errors: AtomicU64;
+        tx_packets: AtomicU64;
+        tx_bytes: AtomicU64;
+        tx_dropped: AtomicU64;
+        tx_errors: AtomicU64;
+    }
+    struct netif_info {
+        name: [u8; 8];
+        index: u32;
+        flags: u32;
+        ip6_ll: in6_addr;
+        stats: netif_stats;
+    }
+    struct ipv4_route_info {
+        ifname: [u8; 8];
+        dst: u32;
+        mask: u32;
+        gateway: u32;
+        flags: u32;
+    }
+    struct arp_info {
+        ip: u32;
+        mac: [u8; 6];
+        complete: bool;
+        ifname: [u8; 8];
+    }
+    struct tcp_sock_info {
+        local: netaddr;
+        remote: netaddr;
+        state: u32;
+        txq: u32;
+        rxq: u32;
+    }
+    struct udp_sock_info {
+        local: netaddr;
+        remote: netaddr;
+        rxq: u32;
+        drops: u64;
+    }
+
+    fn netif_list(out: *mut netif_info, max: u32) -> u32;
+    fn ipv4_route_list(out: *mut ipv4_route_info, max: u32) -> u32;
+    fn arp_list(out: *mut arp_info, max: u32) -> u32;
+    fn tcp_list(out: *mut tcp_sock_info, max: u32, family: u16) -> u32;
+    fn udp_list(out: *mut udp_sock_info, max: u32, family: u16) -> u32;
+}
+
+// ---- procnet.h, errno.h, netif.h, ip.h, ether.h, socket.h (test_procnet.c asserts these against the headers) ----
+
+const ENOENT: i32 = 2;
+const ENOMEM: i32 = 12;
+/// The most one file renders: a listing longer than this ends at its last whole line.
+const PROCNET_TEXT_MAX: usize = 64 * 1024 - 64;
+const PROCNET_DEV: u32 = 0;
+const PROCNET_ROUTE: u32 = 1;
+const PROCNET_ARP: u32 = 2;
+const PROCNET_TCP: u32 = 3;
+const PROCNET_TCP6: u32 = 4;
+const PROCNET_UDP: u32 = 5;
+const PROCNET_UDP6: u32 = 6;
+const PROCNET_IF_INET6: u32 = 7;
+const NETIF_MAX: u32 = 32;
+const NETIF_LOOPBACK: u32 = 2;
+const IPV4_ROUTES_MAX: u32 = 33;
+const ARP_TABLE_SIZE: u32 = 64;
+const COSMO_AF_INET: u16 = 2;
+const COSMO_AF_INET6: u16 = 10;
+/// enum tcp_state.
+const TCP_LISTEN: u32 = 1;
+const TCP_SYN_SENT: u32 = 2;
+const TCP_SYN_RCVD: u32 = 3;
+const TCP_ESTABLISHED: u32 = 4;
+const TCP_FIN_WAIT_1: u32 = 5;
+const TCP_FIN_WAIT_2: u32 = 6;
+const TCP_CLOSE_WAIT: u32 = 7;
+const TCP_CLOSING: u32 = 8;
+const TCP_LAST_ACK: u32 = 9;
+const TCP_TIME_WAIT: u32 = 10;
+
+/// Sockets listed per file: what PROCNET_TEXT_MAX holds.
+const SOCKS_MAX: u32 = 400;
+/// The text starts at a page and doubles up to PROCNET_TEXT_MAX as lines need it.
+const TEXT_FIRST: usize = 4096;
+/// One line is formatted whole before it is appended: Linux's lines are shorter.
+const LINE_MAX: usize = 256;
+
+// ---- The text ----
+
+/// The text so far; a line is appended whole or not at all.
+struct Text {
+    buf: *mut u8;
+    n: usize;
+    len: usize;
+    full: bool;
+    nomem: bool;
+}
+
+/// A line appended whole, the text grown (doubling, up to PROCNET_TEXT_MAX) if it must be; a line that does not fit
+/// in LINE_MAX, or a text that cannot grow, ends the listing at its last whole line.
+/// Safety: `t.buf` holds `t.n` bytes, `t.len` of them text and a zero; a grown buffer replaces it whole.
+fn append(t: borrow mut Text, line: borrow TextWriter) {
+    if (t.full) {
+        return;
+    }
+    if (line.truncated()) {
+        t.full = true;
+        return;
+    }
+    let k = line.length();
+    while (t.len + k >= t.n) {
+        if (t.n >= PROCNET_TEXT_MAX) {
+            t.full = true; // the listing ends at its last whole line
+            return;
+        }
+        let n = if (t.n * 2 < PROCNET_TEXT_MAX) t.n * 2 else PROCNET_TEXT_MAX;
+        let b = unsafe { kmalloc(n, 0) as *mut u8 };
+        if (b.isNull()) {
+            t.full = true;
+            t.nomem = true;
+            return;
+        }
+        unsafe {
+            SliceMut.fromRaw(b, t.len + 1).copyFrom(Slice.fromRaw(t.buf as *u8, t.len + 1));
+            kfree(t.buf as *mut void);
+        }
+        t.buf = b;
+        t.n = n;
+    }
+    unsafe {
+        let dst = SliceMut.fromRaw(t.buf.add(t.len), k + 1);
+        dst[..k].copyFrom(line.written());
+        dst[k] = 0;
+    }
+    t.len = t.len + k;
+}
+
+// ---- Fields, as kvsnprintf writes them ----
+
+/// The bytes of a C name: up to its zero, or all of them.
+fn cName(name: Slice<u8>) -> Slice<u8> {
+    for (i in 0..name.length) {
+        if (name[i] == 0) {
+            return name[..i];
+        }
+    }
+    return name;
+}
+
+/// `n` spaces.
+fn spaces(w: borrow mut TextWriter, n: usize) {
+    for (i in 0..n) {
+        w.byte(32);
+    }
+}
+
+/// The digits of `v` in decimal, how many.
+fn decimalWidth(v: u64) -> usize {
+    var n: usize = 1;
+    var x = v;
+    while (x >= 10) {
+        x = x / 10;
+        n = n + 1;
+    }
+    return n;
+}
+
+/// `%<width>llu`: right-aligned in `width`.
+fn number(w: borrow mut TextWriter, v: u64, width: usize) {
+    let d = decimalWidth(v);
+    if (d < width) {
+        spaces(w, width - d);
+    }
+    w.decimal(v);
+}
+
+/// `%d` of a value known to be 0 or more.
+fn plain(w: borrow mut TextWriter, v: u64) {
+    w.decimal(v);
+}
+
+/// `%0<digits>X`: uppercase hexadecimal, at least `digits` digits.
+fn hexUpper(w: borrow mut TextWriter, v: u64, digits: usize) {
+    var buf: [u8; 16] = [0; 16];
+    var count: usize = 0;
+    var x = v;
+    loop {
+        let d = truncate<u8>(x & 15);
+        buf[count] = if (d < 10) d + 48 else d + 55;
+        count = count + 1;
+        x = x >> 4;
+        if (x == 0) {
+            break;
+        }
+    }
+    var pad = digits;
+    while (pad > count) {
+        w.byte(48);
+        pad = pad - 1;
+    }
+    while (count > 0) {
+        count = count - 1;
+        w.byte(buf[count]);
+    }
+}
+
+/// `%-<width>x`: lowercase hexadecimal, left-aligned in `width`.
+fn hexLeft(w: borrow mut TextWriter, v: u64, width: usize) {
+    let start = w.length();
+    w.hex(v, 1);
+    let used = w.length() - start;
+    if (used < width) {
+        spaces(w, width - used);
+    }
+}
+
+/// `%<width>s` (right-aligned) or `%-<width>s` (left-aligned).
+fn field(w: borrow mut TextWriter, s: Slice<u8>, width: usize, left: bool) {
+    if (!left && s.length < width) {
+        spaces(w, width - s.length);
+    }
+    w.bytes(s);
+    if (left && s.length < width) {
+        spaces(w, width - s.length);
+    }
+}
+
+/// `%-<width>s` of what `w` holds past `start`, then the newline: a line padded as Linux pads it.
+fn padLine(w: borrow mut TextWriter, start: usize, width: usize) {
+    let used = w.length() - start;
+    if (used < width) {
+        spaces(w, width - used);
+    }
+    w.byte(10);
+}
+
+/// The u32 lying in memory at `at` (a word of an address, as stored).
+fn word(b: Slice<u8>, at: usize) -> u32 =>
+    (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) | ((b[at + 3] as u32) << 24);
+
+/// An address as Linux's /proc/net files print it: each 32-bit word of the address as stored, as a native-endian
+/// number (both architectures here are little-endian, so 10.0.2.15 reads 0F02000A).
+fn hexAddr(w: borrow mut TextWriter, a: borrow netaddr) {
+    if (a.family == COSMO_AF_INET6) {
+        let b = a.v6.s6_addr;
+        for (i in 0..4) {
+            hexUpper(w, word(b[..], truncate<usize>(4 * i)) as u64, 8);
+        }
+    } else {
+        hexUpper(w, (if (a.family == COSMO_AF_INET) a.v4 else 0) as u64, 8);
+    }
+}
+
+/// An address dotted, its bytes as they lie in memory.
+fn dotted(w: borrow mut TextWriter, a: u32) {
+    w.decimal((a & 0xff) as u64);
+    w.byte(46);
+    w.decimal(((a >> 8) & 0xff) as u64);
+    w.byte(46);
+    w.decimal(((a >> 16) & 0xff) as u64);
+    w.byte(46);
+    w.decimal((a >> 24) as u64);
+}
+
+/// The counters' values, read as the listing copied them.
+fn get(c: borrow AtomicU64) -> u64 => c.loadWith(LoadOrdering.Relaxed);
+
+// ---- The files ----
+
+/// /proc/net/dev: per-interface counters (the ones the stack does not keep, zero).
+/// Safety: the listing's buffer is allocated and freed here.
+fn renderDev(t: borrow mut Text) -> i32 {
+    let ifs = unsafe { kmalloc(NETIF_MAX as usize * layoutOf<netif_info>().size, 0) as *mut netif_info };
+    if (ifs.isNull()) {
+        return -ENOMEM;
+    }
+    let n = unsafe { netif_list(ifs, NETIF_MAX) }; // every interface: the registry holds no more
+    var buffer: [u8; 256] = [0; 256];
+    var head = TextWriter.create(mut buffer[..]);
+    head.text("Inter-|   Receive                                                |  Transmit\n");
+    append(t, borrow head);
+    var buffer2: [u8; 256] = [0; 256];
+    var head2 = TextWriter.create(mut buffer2[..]);
+    head2.text(
+        " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls ",
+    );
+    head2.text("carrier compressed\n");
+    append(t, borrow head2);
+    for (i in 0..n as usize) {
+        let f = unsafe { Ptr.toBorrow(ifs.add(i) as *netif_info) };
+        let s = borrow f.stats;
+        var lb: [u8; 256] = [0; 256];
+        var l = TextWriter.create(mut lb[..]);
+        let name = f.name;
+        field(mut l, cName(name[..]), 6, false);
+        l.byte(58);
+        number(mut l, get(borrow s.rx_bytes), 8);
+        l.byte(32);
+        number(mut l, get(borrow s.rx_packets), 7);
+        l.byte(32);
+        number(mut l, get(borrow s.rx_errors), 4);
+        l.byte(32);
+        number(mut l, get(borrow s.rx_dropped), 4);
+        l.text("    0     0          0         0 ");
+        number(mut l, get(borrow s.tx_bytes), 8);
+        l.byte(32);
+        number(mut l, get(borrow s.tx_packets), 7);
+        l.byte(32);
+        number(mut l, get(borrow s.tx_errors), 4);
+        l.byte(32);
+        number(mut l, get(borrow s.tx_dropped), 4);
+        l.text("    0     0       0          0\n");
+        append(t, borrow l);
+    }
+    unsafe { kfree(ifs as *mut void); }
+    return 0;
+}
+
+/// /proc/net/route: IPv4 routes, every line padded to 127 characters as Linux pads them.
+/// Safety: the listing's buffer is allocated and freed here.
+fn renderRoute(t: borrow mut Text) -> i32 {
+    let r = unsafe { kmalloc(IPV4_ROUTES_MAX as usize * layoutOf<ipv4_route_info>().size, 0) as *mut ipv4_route_info };
+    if (r.isNull()) {
+        return -ENOMEM;
+    }
+    let n = unsafe { ipv4_route_list(r, IPV4_ROUTES_MAX) };
+    var hb: [u8; 256] = [0; 256];
+    var h = TextWriter.create(mut hb[..]);
+    h.text("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT");
+    padLine(mut h, 0, 127);
+    append(t, borrow h);
+    for (i in 0..n as usize) {
+        let e = unsafe { Ptr.toBorrow(r.add(i) as *ipv4_route_info) };
+        var lb: [u8; 256] = [0; 256];
+        var l = TextWriter.create(mut lb[..]);
+        let name = e.ifname;
+        l.bytes(cName(name[..]));
+        l.byte(9);
+        hexUpper(mut l, e.dst as u64, 8);
+        l.byte(9);
+        hexUpper(mut l, e.gateway as u64, 8);
+        l.byte(9);
+        hexUpper(mut l, e.flags as u64, 4);
+        l.text("\t0\t0\t0\t");
+        hexUpper(mut l, e.mask as u64, 8);
+        l.text("\t0\t0\t0");
+        padLine(mut l, 0, 127);
+        append(t, borrow l);
+    }
+    unsafe { kfree(r as *mut void); }
+    return 0;
+}
+
+/// /proc/net/arp: the ARP table (HW type 1 is Ethernet; flag 0x2, ATF_COM, a completed entry).
+/// Safety: the listing's buffer is allocated and freed here.
+fn renderArp(t: borrow mut Text) -> i32 {
+    let a = unsafe { kmalloc(ARP_TABLE_SIZE as usize * layoutOf<arp_info>().size, 0) as *mut arp_info };
+    if (a.isNull()) {
+        return -ENOMEM;
+    }
+    var n = unsafe { arp_list(a, ARP_TABLE_SIZE) };
+    if (n > ARP_TABLE_SIZE) {
+        n = ARP_TABLE_SIZE;
+    }
+    var hb: [u8; 256] = [0; 256];
+    var h = TextWriter.create(mut hb[..]);
+    h.text("IP address       HW type     Flags       HW address            Mask     Device\n");
+    append(t, borrow h);
+    for (i in 0..n as usize) {
+        let e = unsafe { Ptr.toBorrow(a.add(i) as *arp_info) };
+        var ib: [u8; 16] = [0; 16];
+        var ip = TextWriter.create(mut ib[..]);
+        dotted(mut ip, e.ip);
+        var mb: [u8; 18] = [0; 18];
+        var mac = TextWriter.create(mut mb[..]);
+        for (k in 0..6) {
+            if (k != 0) {
+                mac.byte(58);
+            }
+            mac.hex(e.mac[truncate<usize>(k)] as u64, 2);
+        }
+        var lb: [u8; 256] = [0; 256];
+        var l = TextWriter.create(mut lb[..]);
+        field(mut l, ip.written(), 16, true);
+        l.text(" 0x");
+        hexLeft(mut l, 1, 10);
+        l.text("0x");
+        hexLeft(mut l, if (e.complete) 2 else 0, 10);
+        field(mut l, mac.written(), 17, true);
+        l.text("     ");
+        field(mut l, "*".bytes(), 8, true);
+        l.byte(32);
+        let name = e.ifname;
+        l.bytes(cName(name[..]));
+        l.byte(10);
+        append(t, borrow l);
+    }
+    unsafe { kfree(a as *mut void); }
+    return 0;
+}
+
+/// Linux's TCP_* numbers in /proc/net/tcp's st column.
+fn linuxTcpState(s: u32) -> u32 {
+    if (s == TCP_ESTABLISHED) {
+        return 0x01;
+    }
+    if (s == TCP_SYN_SENT) {
+        return 0x02;
+    }
+    if (s == TCP_SYN_RCVD) {
+        return 0x03;
+    }
+    if (s == TCP_FIN_WAIT_1) {
+        return 0x04;
+    }
+    if (s == TCP_FIN_WAIT_2) {
+        return 0x05;
+    }
+    if (s == TCP_TIME_WAIT) {
+        return 0x06;
+    }
+    if (s == TCP_CLOSE_WAIT) {
+        return 0x08;
+    }
+    if (s == TCP_LAST_ACK) {
+        return 0x09;
+    }
+    if (s == TCP_LISTEN) {
+        return 0x0A;
+    }
+    if (s == TCP_CLOSING) {
+        return 0x0B;
+    }
+    return 0x07; // TCP_CLOSE
+}
+
+/// One socket line, padded as Linux pads them (to 149 characters for tcp, 127 for udp): sl, local, remote, st,
+/// tx_queue:rx_queue, tr:when, retrnsmt, uid, timeout, inode, then the fields no parser here reads.
+fn sockLine(
+    t: borrow mut Text, sl: u32, l: borrow netaddr, r: borrow netaddr, st: u32, txq: u32, rxq: u32,
+    tcp: bool, drops: u64,
+) {
+    var lb: [u8; 256] = [0; 256];
+    var w = TextWriter.create(mut lb[..]);
+    number(mut w, sl as u64, if (tcp) 4 else 5);
+    w.text(": ");
+    hexAddr(mut w, l);
+    w.byte(58);
+    hexUpper(mut w, l.port as u64, 4);
+    w.byte(32);
+    hexAddr(mut w, r);
+    w.byte(58);
+    hexUpper(mut w, r.port as u64, 4);
+    w.byte(32);
+    hexUpper(mut w, st as u64, 2);
+    w.byte(32);
+    hexUpper(mut w, txq as u64, 8);
+    w.byte(58);
+    hexUpper(mut w, rxq as u64, 8);
+    w.text(" 00:00000000 00000000     0        0 0 ");
+    if (tcp) {
+        w.text("1 0000000000000000 100 0 0 10 0");
+        padLine(mut w, 0, 149);
+    } else {
+        w.text("2 0000000000000000 ");
+        plain(mut w, drops);
+        padLine(mut w, 0, 127);
+    }
+    append(t, borrow w);
+}
+
+/// /proc/net/tcp or tcp6: this family's sockets alone, chosen under the lock.
+/// Safety: the listing's buffer is allocated and freed here.
+fn renderTcp(t: borrow mut Text, family: u16) -> i32 {
+    let s = unsafe { kmalloc(SOCKS_MAX as usize * layoutOf<tcp_sock_info>().size, 0) as *mut tcp_sock_info };
+    if (s.isNull()) {
+        return -ENOMEM;
+    }
+    var n = unsafe { tcp_list(s, SOCKS_MAX, family) };
+    if (n > SOCKS_MAX) {
+        n = SOCKS_MAX;
+    }
+    var hb: [u8; 256] = [0; 256];
+    var h = TextWriter.create(mut hb[..]);
+    h.text("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode");
+    padLine(mut h, 0, 149);
+    append(t, borrow h);
+    for (i in 0..n as usize) {
+        let e = unsafe { Ptr.toBorrow(s.add(i) as *tcp_sock_info) };
+        sockLine(t, truncate<u32>(i), borrow e.local, borrow e.remote, linuxTcpState(e.state), e.txq, e.rxq, true, 0);
+    }
+    unsafe { kfree(s as *mut void); }
+    return 0;
+}
+
+/// /proc/net/udp or udp6: 01 (ESTABLISHED) once connected, else 07 (CLOSE), as Linux shows a UDP socket.
+/// Safety: the listing's buffer is allocated and freed here; the remote address is rewritten in it, as the C's copy.
+fn renderUdp(t: borrow mut Text, family: u16) -> i32 {
+    let s = unsafe { kmalloc(SOCKS_MAX as usize * layoutOf<udp_sock_info>().size, 0) as *mut udp_sock_info };
+    if (s.isNull()) {
+        return -ENOMEM;
+    }
+    var n = unsafe { udp_list(s, SOCKS_MAX, family) };
+    if (n > SOCKS_MAX) {
+        n = SOCKS_MAX;
+    }
+    var hb: [u8; 256] = [0; 256];
+    var h = TextWriter.create(mut hb[..]);
+    h.text("   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout ");
+    h.text("inode ref pointer drops");
+    padLine(mut h, 0, 127);
+    append(t, borrow h);
+    for (i in 0..n as usize) {
+        let e = unsafe { Ptr.toBorrowMut(s.add(i)) };
+        let st: u32 = if (e.remote.port != 0) 0x01 else 0x07;
+        e.remote.family = family;
+        sockLine(t, truncate<u32>(i), borrow e.local, borrow e.remote, st, 0, e.rxq, false, e.drops);
+    }
+    unsafe { kfree(s as *mut void); }
+    return 0;
+}
+
+fn unspecified(a: borrow in6_addr) -> bool {
+    for (i in 0..16) {
+        if (a.s6_addr[truncate<usize>(i)] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// /proc/net/if_inet6: address, ifindex, prefix length, scope (0x10 host, 0x20 link) and flags (0x80 permanent),
+/// all hex, then the name right-aligned in eight.
+/// Safety: the listing's buffer is allocated and freed here.
+fn renderIfInet6(t: borrow mut Text) -> i32 {
+    let ifs = unsafe { kmalloc(NETIF_MAX as usize * layoutOf<netif_info>().size, 0) as *mut netif_info };
+    if (ifs.isNull()) {
+        return -ENOMEM;
+    }
+    let n = unsafe { netif_list(ifs, NETIF_MAX) }; // every interface: the registry holds no more
+    for (i in 0..n as usize) {
+        let f = unsafe { Ptr.toBorrow(ifs.add(i) as *netif_info) };
+        var a: [u8; 16] = [0; 16];
+        var prefix: u64 = 0;
+        var scope: u64 = 0;
+        if ((f.flags & NETIF_LOOPBACK) != 0) {
+            a[15] = 1; // ::1, which netif_owns_ipv6 answers for
+            prefix = 128;
+            scope = 0x10;
+        } else if (!unspecified(borrow f.ip6_ll)) {
+            a = f.ip6_ll.s6_addr;
+            prefix = 64;
+            scope = 0x20;
+        } else {
+            continue;
+        }
+        var lb: [u8; 256] = [0; 256];
+        var l = TextWriter.create(mut lb[..]);
+        for (k in 0..16) {
+            l.hex(a[truncate<usize>(k)] as u64, 2);
+        }
+        l.byte(32);
+        l.hex(f.index as u64, 2);
+        l.byte(32);
+        l.hex(prefix, 2);
+        l.byte(32);
+        l.hex(scope, 2);
+        l.text(" 80 ");
+        let name = f.name;
+        field(mut l, cName(name[..]), 8, false);
+        l.byte(10);
+        append(t, borrow l);
+    }
+    unsafe { kfree(ifs as *mut void); }
+    return 0;
+}
+
+/// procnet.h's procnet_render: file `f` into a buffer that starts at a page and doubles as the text needs, up to
+/// PROCNET_TEXT_MAX. The length, with *out the text (zero-terminated, the caller's to kfree); -ENOENT for no such
+/// file, -ENOMEM.
+/// Safety: `out` is writable.
+@export("procnet_render")
+unsafe fn render(f: u32, out: *mut *mut CChar) -> i32 {
+    let buf = kmalloc(TEXT_FIRST, 0) as *mut u8;
+    if (buf.isNull()) {
+        return -ENOMEM;
+    }
+    let first = SliceMut.fromRaw(buf, 1);
+    first[0] = 0;
+    var t = Text { buf: buf, n: TEXT_FIRST, len: 0, full: false, nomem: false };
+    var rc: i32 = 0;
+    if (f == PROCNET_DEV) {
+        rc = renderDev(mut t);
+    } else if (f == PROCNET_ROUTE) {
+        rc = renderRoute(mut t);
+    } else if (f == PROCNET_ARP) {
+        rc = renderArp(mut t);
+    } else if (f == PROCNET_TCP) {
+        rc = renderTcp(mut t, COSMO_AF_INET);
+    } else if (f == PROCNET_TCP6) {
+        rc = renderTcp(mut t, COSMO_AF_INET6);
+    } else if (f == PROCNET_UDP) {
+        rc = renderUdp(mut t, COSMO_AF_INET);
+    } else if (f == PROCNET_UDP6) {
+        rc = renderUdp(mut t, COSMO_AF_INET6);
+    } else if (f == PROCNET_IF_INET6) {
+        rc = renderIfInet6(mut t);
+    } else {
+        rc = -ENOENT;
+    }
+    if (rc == 0 && t.nomem) {
+        rc = -ENOMEM; // a listing cut short for want of memory is not served as whole
+    }
+    if (rc < 0) {
+        kfree(t.buf as *mut void);
+        return rc;
+    }
+    store(Ptr.toBorrowMut(out), t.buf as *mut CChar);
+    return truncate<i32>(t.len);
+}
+
+fn store(o: borrow mut *mut CChar, b: *mut CChar) {
+    o = b;
+}

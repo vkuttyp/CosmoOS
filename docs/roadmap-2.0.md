@@ -999,6 +999,23 @@ gcc); 99.1% of the C's lines, the rest two unreachable branches.
 1.01x the C on arm64, 0.98x on x86-64 (Rosetta), 1.00x on native x86-64
 (Linux gcc).
 
+`/proc/net` (2026-11-04): `kernel-services/network/procnet.cee` -- the
+eight files BusyBox's ifconfig, route, netstat and arp parse, in Linux
+6.x's layout, from the stack's listings. Its fields are written by small
+formatters of its own (padded decimal, upper-case hexadecimal, padded
+strings, Linux's line padding) rather than a format string;
+`procnet_floor.c` keeps `procnet_names`, data procfs reads. The C step's
+host test renders through the kernel's own `kvsnprintf` (linked in;
+the harness's `ksnprintf` is weak for it), and the digest is the same
+through the host's: listings of every size and value, a file that does
+not exist, the allocator failing at any allocation, the text's form
+checked line by line; digest `0x4b8286238c3a895b`, the C's (macOS clang,
+Linux clang and gcc); 98.6% of the C's lines, the rest a line too long
+for any format here. `PROCNET_BENCH=1`: /proc/net/tcp with 400 sockets
+0.91x the C on arm64 and 0.81x on x86-64 (Rosetta), /proc/net/dev with
+32 interfaces 0.92x and 0.86x -- no format string to parse.
+`test-net-login` reads it through BusyBox.
+
 Size: about 3.0x.
 
 ### SA7 Storage: cosmofs, VFS, block and pools

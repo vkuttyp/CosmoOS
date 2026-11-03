@@ -37,6 +37,17 @@
 
 #include "harness.h"
 
+/* The values procnet.cee writes as its own constants, each the header's. */
+_Static_assert(PROCNET_TEXT_MAX == 64u * 1024u - 64u && PROCNET_DEV == 0 && PROCNET_ROUTE == 1 && PROCNET_ARP == 2 &&
+               PROCNET_TCP == 3 && PROCNET_TCP6 == 4 && PROCNET_UDP == 5 && PROCNET_UDP6 == 6 &&
+               PROCNET_IF_INET6 == 7 && PROCNET_COUNT == 8, "procnet.cee's procnet.h values");
+_Static_assert(NETIF_MAX == 32 && NETIF_LOOPBACK == 2 && IPV4_ROUTES_MAX == 33 && ARP_TABLE_SIZE == 64 &&
+               COSMO_AF_INET == 2 && COSMO_AF_INET6 == 10 && ENOENT == 2 && ENOMEM == 12,
+               "procnet.cee's interface, route, ARP, family and errno values");
+_Static_assert(TCP_CLOSED == 0 && TCP_LISTEN == 1 && TCP_SYN_SENT == 2 && TCP_SYN_RCVD == 3 && TCP_ESTABLISHED == 4 &&
+               TCP_FIN_WAIT_1 == 5 && TCP_FIN_WAIT_2 == 6 && TCP_CLOSE_WAIT == 7 && TCP_CLOSING == 8 &&
+               TCP_LAST_ACK == 9 && TCP_TIME_WAIT == 10, "procnet.cee's enum tcp_state");
+
 /* The digest of the C (procnet.c, 2026-11-04), which the CeeSafe port gives. */
 #define PROCNET_DIGEST 0x4b8286238c3a895bull
 #define ROUNDS 3000u

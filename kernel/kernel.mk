@@ -209,6 +209,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/arp.c \
 	kernel-services/network/nd.c \
 	kernel-services/network/procnet.c \
+	kernel-services/network/procnet_floor.c \
 	kernel-services/network/ipv4.c \
 	kernel-services/network/nat.c \
 	kernel-services/network/fw.c \

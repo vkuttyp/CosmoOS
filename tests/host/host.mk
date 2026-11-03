@@ -82,7 +82,7 @@ HOST_TAPSVC_SRCS := $(filter-out tests/host/test_dhcp.c,$(HOST_DHCP_SRCS)) kerne
 HOST_TAP_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/tap.c kernel-services/network/tap_floor.c kernel-services/network/mbuf.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_tap.c
 # /proc/net's renderer alone: the listings and the allocator are the test's.
-HOST_PROCNET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/procnet.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
+HOST_PROCNET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/procnet.c kernel-services/network/procnet_floor.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_procnet.c
 HOST_INET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/inet.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_inet.c
