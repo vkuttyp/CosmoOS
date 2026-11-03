@@ -536,6 +536,24 @@ unsafe fn arpC(pkt: *u8, out: *mut netparse_arp) -> bool {
     return true;
 }
 
+/// netparse_arp's fields as 16 bytes, for a caller that holds no `netparse_arp` (arp.cee): the op in network order
+/// (bytes 0-1), then sha (2-7), spa (8-11) and tpa (12-15); nothing is written when the packet is refused.
+/// Safety: `pkt` points to ARP_LEN readable bytes and `out` to 16 writable ones.
+@export("netparse_arp_bytes")
+unsafe fn arpBytesC(pkt: *u8, out: *mut u8) -> bool {
+    var a = netparse_arp { op: 0, sha: [0; 6], spa: [0; 4], tpa: [0; 4] };
+    if (!arpC(pkt, borrow mut a as *mut netparse_arp)) {
+        return false;
+    }
+    let o = SliceMut.fromRaw(out, 16);
+    o[0] = truncate<u8>(a.op >> 8);
+    o[1] = truncate<u8>(a.op);
+    o[2..8].copyFrom(a.sha[..]);
+    o[8..12].copyFrom(a.spa[..]);
+    o[12..16].copyFrom(a.tpa[..]);
+    return true;
+}
+
 /// Safety: `hdr` points to IPV4_MIN readable bytes; `ihl` and `total` are writable.
 @export("netparse_ipv4_outer")
 unsafe fn ipv4OuterC(hdr: *u8, pktLen: u32, ihl: *mut u32, total: *mut u32) -> bool =>

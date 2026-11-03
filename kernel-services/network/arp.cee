@@ -1,0 +1,706 @@
+// arp.cee - Address resolution (RFC 826; kernel/include/kernel/net/ether.h's ARP half), in CeeSafe: roadmap 2.0 SA6.
+// A table of 64 neighbours keyed by (interface, address); resolutions that park one packet while a request is out,
+// replies and requests that teach the table what RFC 826 allows, and the ageing pass the network worker runs every
+// second, which retries, times out and expires entries and runs the other protocols' ageing.
+// tests/host/test_arp.c holds it to the digest of the C it replaced.
+//
+// The table is an IrqSpinLock's data. Packets and interfaces stay C objects, held in the table by address: the
+// table owns a parked packet, and an entry's interface outlives it (arp_flush empties an interface's entries under
+// the lock before netif_unregister lets the interface go; invariant N25).
+
+@header("kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/fw.h", "kernel/net/nat.h", "kernel/net/tapsvc.h", "kernel/timer.h", "arch/cpu.h")
+extern "C" {
+    /// kernel/include/kernel/mbuf.h: the fields resolution reads and writes.
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbuf_pkt {
+        len: u32;
+    }
+    /// kernel/include/kernel/netif.h: the flag word and the IPv4 address, which other CPUs change atomically (ADR
+    /// 0041 §3.1); the name and the MAC, fixed while the interface is registered.
+    struct netif_ip4 {
+        addr: AtomicU32;
+        mask: AtomicU32;
+    }
+    struct netif {
+        obj: kobject;
+        name: [u8; 8];
+        mac: [u8; 6];
+        flags: AtomicU32;
+        ip4: netif_ip4;
+    }
+    /// ether.h's records for the listing and the statistics.
+    struct arp_info {
+        ip: u32;
+        mac: [u8; 6];
+        complete: bool;
+        ifname: [u8; 8];
+    }
+    struct arp_stats {
+        requests_sent: u64;
+        replies_sent: u64;
+        requests_rcvd: u64;
+        replies_rcvd: u64;
+        entries: u64;
+        pending_dropped: u64;
+        timeouts: u64;
+        unsolicited: u64;
+    }
+    struct timer;
+    struct net_work;
+
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+
+    fn m_getcl() -> *mut mbuf;
+    fn m_pullup(m: *mut mbuf, n: u32) -> *mut mbuf;
+    /// Frees to the slab caches, which take interrupt-safe locks of their own: the C freed under this table's lock.
+    @effects()
+    fn m_freem(m: *mut mbuf);
+    fn ether_output(nif: *mut netif, m: *mut mbuf, dst: *u8, etype: u16) -> i32;
+    /// Reads the clock: callable in any context.
+    @effects()
+    fn clock_now_ns() -> u64;
+    fn timer_setup(t: *mut timer, run: extern "C" fn(*mut timer, *mut void), arg: *mut void);
+    fn timer_start(t: *mut timer, delayNs: u64);
+    fn net_work_init(w: *mut net_work, run: extern "C" fn(*mut void), arg: *mut void);
+    fn net_work_queue(w: *mut net_work) -> bool;
+    fn nd_age(now: u64);
+    fn nat_age(now: u64);
+    fn fw_age(now: u64);
+    fn tapsvc_dns_age(now: u64);
+    fn arch_cpu_relax();
+}
+
+extern "C" {
+    /// netparse.cee's decoder of an ARP packet's 28 bytes (netparse_types.h): Ethernet and IPv4 addresses of their
+    /// sizes; the op in network order, then sha, spa and tpa, into 16 bytes (netparse_arp's fields, for a caller
+    /// that holds no `struct netparse_arp`).
+    fn netparse_arp_bytes(pkt: *u8, out: *mut u8) -> bool;
+}
+
+const ETH_ALEN: usize = 6;
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_ARP: u16 = 0x0806;
+const ARP_HW_ETHER: u16 = 1;
+const ARP_OP_REQUEST: u16 = 1;
+const ARP_OP_REPLY: u16 = 2;
+/// The packet: htype, ptype, hlen, plen, op, sha, spa, tha, tpa.
+const ARP_LEN: u32 = 28;
+const ARP_REACHABLE_NS: u64 = 20 * 60 * 1000000000;
+const ARP_RETRY_NS: u64 = 1000000000;
+const ARP_MAX_TRIES: u32 = 3;
+const ARP_TABLE_SIZE: usize = 64;
+/// netif.h's NETIF_UP; errno.h's codes.
+const NETIF_UP: u32 = 1;
+const ENOMEM: i32 = 12;
+const ENETUNREACH: i32 = 101;
+const EINPROGRESS: i32 = 115;
+/// INADDR_BROADCAST_N: 255.255.255.255, the same in either byte order.
+const BROADCAST: u32 = 0xffffffff;
+
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
+
+/// ether.h's eth_broadcast, which ether.cee defines.
+static BROADCAST_MAC: [u8; 6] = [0xff; 6];
+static ZERO_MAC: [u8; 6] = [0; 6];
+
+// ---- The table ----
+
+/// An entry's state: free (all zeros, as the C's memset left it), a resolution in flight, or a known MAC.
+const FREE: u8 = 0;
+const INCOMPLETE: u8 = 1;
+const REACHABLE: u8 = 2;
+
+/// One neighbour: the interface and the packet are C objects held by address (a usize, so the table is Send). A
+/// free entry is all zeros, as the C's memset left it.
+struct Entry {
+    ip: u32;        // network order, as nif->ip4.addr
+    mac: [u8; 6];
+    state: u8;
+    updatedNs: u64;
+    pending: usize; // an mbuf the entry owns, parked until the neighbour answers; 0 for none
+    tries: u32;
+    nif: usize;     // the interface, whose flush removes the entry before the interface goes
+}
+
+@constant
+fn freeEntry() -> Entry => Entry { ip: 0, mac: [0; 6], state: FREE, updatedNs: 0, pending: 0, tries: 0, nif: 0 };
+
+/// The counters the table's lock covers; the others are atomics, counted outside it (as the C's __atomic_fetch_add).
+struct Table {
+    entries: [Entry; 64];
+    count: u64;          // arp_stats.entries
+    pendingDropped: u64;
+    timeouts: u64;
+    unsolicited: u64;
+}
+
+static TABLE: IrqSpinLock<Table> = IrqSpinLock<Table>.constant(
+    "arp\0".ptr as *CChar,
+    Table { entries: [freeEntry(); 64], count: 0, pendingDropped: 0, timeouts: 0, unsolicited: 0 },
+);
+static REQUESTS_SENT: AtomicU64 = AtomicU64.constant(0);
+static REPLIES_SENT: AtomicU64 = AtomicU64.constant(0);
+static REQUESTS_RCVD: AtomicU64 = AtomicU64.constant(0);
+static REPLIES_RCVD: AtomicU64 = AtomicU64.constant(0);
+
+/// The ageing timer and the work item it queues: C objects arp_init sets up once.
+static mut AGE_TIMER: timer = timer {};
+static mut AGE_WORK: net_work = net_work {};
+
+fn isState(e: borrow Entry, state: u8) -> bool => e.state == state;
+
+/// The index of `nif`'s entry for `ip`, if there is one.
+fn find(t: borrow Table, nif: usize, ip: u32) -> usize? {
+    for (i in 0..ARP_TABLE_SIZE) {
+        let e = borrow t.entries[i];
+        if (!isState(e, FREE) && e.ip == ip && e.nif == nif) {
+            return i;
+        }
+    }
+    return null;
+}
+
+/// clock_delta_ns: how long ago `stamp` was at `now`, never negative.
+fn delta(now: u64, stamp: u64) -> u64 => if (now > stamp) now - stamp else 0;
+
+/// Frees the packet an entry parks (m_freem takes NULL) and makes the entry free.
+/// Safety: `pending` is an mbuf the entry owns, or 0.
+unsafe fn clear(e: borrow mut Entry) {
+    m_freem(e.pending as *mut mbuf);
+    e.ip = 0;
+    e.mac = [0; 6];
+    e.state = FREE;
+    e.updatedNs = 0;
+    e.pending = 0;
+    e.tries = 0;
+    e.nif = 0;
+}
+
+/// A free slot, or with `evict` the least recently updated reachable entry (an incomplete one has a resolution in
+/// flight). Without `evict` a full table yields null: traffic we did not ask for never displaces an entry.
+/// Safety: the table's packets are its own.
+unsafe fn allocate(t: borrow mut Table, ip: u32, nif: usize, evict: bool) -> usize? {
+    var victim: usize? = null;
+    for (i in 0..ARP_TABLE_SIZE) {
+        if (isState(borrow t.entries[i], FREE)) {
+            victim = i;
+            break;
+        }
+        if (!evict) {
+            continue;
+        }
+        match (victim) {
+            null => { victim = i; }
+            Some(v) => {
+                let old = borrow t.entries[v];
+                let e = borrow t.entries[i];
+                let better = isState(old, INCOMPLETE) && isState(e, REACHABLE);
+                let sameState = isState(old, INCOMPLETE) == isState(e, INCOMPLETE);
+                if (better || (sameState && e.updatedNs < old.updatedNs)) {
+                    victim = i;
+                }
+            }
+        }
+    }
+    let v = victim?;
+    if (!isState(borrow t.entries[v], FREE)) {
+        m_freem(t.entries[v].pending as *mut mbuf);
+        t.entries[v].pending = 0;
+        t.count = t.count.wrappingSub(1);
+    }
+    clear(mut t.entries[v]);
+    t.entries[v].ip = ip;
+    t.entries[v].nif = nif;
+    t.entries[v].state = INCOMPLETE;
+    t.entries[v].updatedNs = clock_now_ns();
+    t.count = t.count.wrappingAdd(1);
+    return v;
+}
+
+// ---- Packets ----
+
+/// Stores a u16 in network order.
+fn put16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+/// Stores a u32 as it lies in memory (an address already in network order).
+fn put32(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// A u32 from four bytes as they lie in memory.
+fn get32(b: Slice<u8>) -> u32 => (b[0] as u32) | ((b[1] as u32) << 8) | ((b[2] as u32) << 16) | ((b[3] as u32) << 24);
+
+/// Sends an ARP packet from `nif`: `op` for `tpa`, whose hardware address is `tha`, to the frame destination `dst`.
+/// Safety: `nif` is a registered interface the caller holds; `tha` and `dst` point to ETH_ALEN readable bytes.
+unsafe fn send(nif: *mut netif, op: u16, tpa: u32, tha: *u8, dst: *u8) -> i32 {
+    let m = m_getcl();
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    {
+        let packet = Ptr.toBorrowMut(m);
+        let a = SliceMut.fromRaw(packet.data, ARP_LEN as usize); // a cluster's room is far more than 28 bytes
+        put16(a, 0, ARP_HW_ETHER);
+        put16(a, 2, ETH_P_IP);
+        a[4] = 6;
+        a[5] = 4;
+        put16(a, 6, op);
+        let mac = Ptr.toBorrow(nif).mac;
+        a[8..14].copyFrom(mac[..]);
+        put32(a, 14, Ptr.toBorrow(nif).ip4.addr.loadWith(LoadOrdering.Relaxed));
+        a[18..24].copyFrom(Slice.fromRaw(tha, ETH_ALEN));
+        put32(a, 24, tpa);
+        packet.len = ARP_LEN;
+        packet.pkt.len = ARP_LEN;
+    }
+    return ether_output(nif, m, dst, ETH_P_ARP);
+}
+
+/// Whether `nif` is up, read under the table's lock: it orders against netif_set_up(false), which clears the flag
+/// before its flush takes this lock (N25).
+/// Safety: `nif` is a registered interface.
+unsafe fn isUp(nif: *netif) -> bool => (Ptr.toBorrow(nif).flags.loadWith(LoadOrdering.Acquire) & NETIF_UP) != 0;
+
+// ---- The interface ----
+
+/// Safety: ether.h's contract: `nif` is a registered interface; `mac` points to ETH_ALEN writable bytes; `packet`, if
+/// not NULL, is a packet the caller hands over unless the result is 0.
+@export("arp_resolve")
+unsafe fn resolve(nif: *mut netif, ip: u32, mac: *mut u8, packet: *mut mbuf) -> i32 {
+    let mask = Ptr.toBorrow(nif).ip4.mask.loadWith(LoadOrdering.Relaxed);
+    if (ip == BROADCAST || (mask != 0 && (ip | mask) == BROADCAST)) {
+        SliceMut.fromRaw(mac, ETH_ALEN).copyFrom(BROADCAST_MAC[..]);
+        return 0;
+    }
+    if (DEBUG_BUILD) {
+        parkBeforeLock(nif as *netif);
+    }
+    var send_ = false;
+    var down = false;
+    {
+        var guard = TABLE.lock();
+        let t = guard.data();
+        // Under the table lock, so it orders against netif_set_up(false): whichever of the two critical sections is
+        // second sees the other's effect. No entry is made for a down interface, and the packet does not wait for a
+        // link that is not there.
+        if (!isUp(nif as *netif)) {
+            if (!packet.isNull()) {
+                t.pendingDropped = t.pendingDropped.wrappingAdd(1); // counted like the flush and the timeout
+            }
+            down = true;
+        } else {
+            let key = nif as usize;
+            var at = find(t, key, ip);
+            match (at) {
+                Some(i) => {
+                    if (isState(borrow t.entries[i], REACHABLE)) {
+                        SliceMut.fromRaw(mac, ETH_ALEN).copyFrom(t.entries[i].mac[..]);
+                        return 0;
+                    }
+                }
+                null => {
+                    at = allocate(t, ip, key, true); // with eviction there is always a slot
+                    send_ = true;
+                }
+            }
+            let i = at!;
+            if (!packet.isNull()) {
+                if (t.entries[i].pending != 0) {
+                    m_freem(t.entries[i].pending as *mut mbuf);
+                    t.pendingDropped = t.pendingDropped.wrappingAdd(1);
+                }
+                t.entries[i].pending = packet as usize;
+            }
+            if (send_) {
+                t.entries[i].tries = 1;
+                t.entries[i].updatedNs = clock_now_ns();
+            }
+        }
+    }
+    if (down) {
+        m_freem(packet);
+        return -ENETUNREACH;
+    }
+    if (send_) {
+        REQUESTS_SENT.fetchAddWith(1, Ordering.Relaxed);
+        send(nif, ARP_OP_REQUEST, ip, borrow ZERO_MAC as *[u8; 6] as *u8, borrow BROADCAST_MAC as *[u8; 6] as *u8);
+    }
+    return -EINPROGRESS;
+}
+
+/// Safety: `nif` is a registered interface; `mac` points to ETH_ALEN writable bytes.
+@export("arp_lookup")
+unsafe fn lookup(nif: *netif, ip: u32, mac: *mut u8) -> bool {
+    var guard = TABLE.lock();
+    let t = guard.data();
+    match (find(t, nif as usize, ip)) {
+        Some(i) => {
+            if (isState(borrow t.entries[i], REACHABLE)) {
+                SliceMut.fromRaw(mac, ETH_ALEN).copyFrom(t.entries[i].mac[..]);
+                return true;
+            }
+        }
+        null => {}
+    }
+    return false;
+}
+
+/// Safety: ether.h's contract: `nif` is a registered interface, `received` a packet the caller hands over.
+@export("arp_input")
+unsafe fn input(nif: *mut netif, received: *mut mbuf) {
+    let m = m_pullup(received, ARP_LEN); // the packet in the first mbuf, or the packet freed
+    if (m.isNull()) {
+        return;
+    }
+    var facts = [0u8; 16];
+    let ok = netparse_arp_bytes(Ptr.toBorrow(m).data as *u8, borrow mut facts as *mut [u8; 16] as *mut u8);
+    m_freem(m);
+    if (!ok) {
+        return;
+    }
+    var sha = [0u8; 6];
+    sha[..].copyFrom(facts[2..8]);
+    let spa = get32(facts[8..12]); // network order, as nif->ip4.addr
+    let tpa = get32(facts[12..16]);
+    let op = ((facts[0] as u16) << 8) | (facts[1] as u16);
+    let ours = Ptr.toBorrow(nif).ip4.addr.loadWith(LoadOrdering.Relaxed);
+    if (spa == 0 || spa == ours) {
+        return; // probes and our own address: nothing to learn
+    }
+    let forUs = tpa == ours && ours != 0;
+    var pending: usize = 0;
+    if (DEBUG_BUILD) {
+        parkBeforeLock(nif as *netif);
+    }
+    {
+        var guard = TABLE.lock();
+        let t = guard.data();
+        // A frame queued before the interface went down can arrive after the down flushed its entries; learning from
+        // it would carry a MAC across the down into the link's return (N25). Nothing is learned or answered on an
+        // interface that is not up, read under the lock that orders it against the down's flush.
+        if (!isUp(nif as *netif)) {
+            return;
+        }
+        let key = nif as usize;
+        var at = find(t, key, spa); // this interface's entry: a reply here completes no other's
+        // ARP carries no authentication, so the table learns only what RFC 826 requires: a request addressed to us
+        // records (or refreshes) the asker, and a reply addressed to us completes an entry we are resolving.
+        // Unsolicited replies and requests for other hosts change nothing, and learning an asker never evicts an entry
+        // in use.
+        var learn = false;
+        if (op == ARP_OP_REQUEST) {
+            learn = forUs;
+        } else if (op == ARP_OP_REPLY) {
+            learn = forUs && match (at) {
+                Some(i) => isState(borrow t.entries[i], INCOMPLETE),
+                null => false,
+            };
+            if (!learn) {
+                t.unsolicited = t.unsolicited.wrappingAdd(1);
+            }
+        }
+        if (learn) {
+            match (at) {
+                Some(_) => {}
+                null => { at = allocate(t, spa, key, false); } // null when the table is full
+            }
+        }
+        if (learn) {
+            match (at) {
+                Some(i) => {
+                    let e = borrow mut t.entries[i];
+                    e.mac = sha;
+                    e.state = REACHABLE;
+                    e.updatedNs = clock_now_ns();
+                    e.nif = key;
+                    pending = e.pending;
+                    e.pending = 0;
+                }
+                null => {}
+            }
+        }
+    }
+    let shaAt = borrow sha as *[u8; 6] as *u8;
+    if (op == ARP_OP_REQUEST) {
+        REQUESTS_RCVD.fetchAddWith(1, Ordering.Relaxed);
+        if (forUs) {
+            REPLIES_SENT.fetchAddWith(1, Ordering.Relaxed);
+            send(nif, ARP_OP_REPLY, spa, shaAt, shaAt);
+        }
+    } else if (op == ARP_OP_REPLY) {
+        REPLIES_RCVD.fetchAddWith(1, Ordering.Relaxed);
+    }
+    if (pending != 0) {
+        ether_output(nif, pending as *mut mbuf, shaAt, ETH_P_IP);
+    }
+}
+
+/// Safety: `nif` is a registered interface (or one being unregistered, whose entries this removes).
+@export("arp_flush")
+unsafe fn flush(nif: *mut netif) {
+    var guard = TABLE.lock();
+    let t = guard.data();
+    let key = nif as usize;
+    for (i in 0..ARP_TABLE_SIZE) {
+        if (!isState(borrow t.entries[i], FREE) && t.entries[i].nif == key) {
+            // Counted, like the timeout path: a packet that vanishes because its interface went is not less gone than
+            // one whose resolution timed out (docs/audit/next-subsystem-arp-netif-ref.md).
+            if (t.entries[i].pending != 0) {
+                t.pendingDropped = t.pendingDropped.wrappingAdd(1);
+            }
+            clear(mut t.entries[i]);
+            t.count = t.count.wrappingSub(1);
+        }
+    }
+}
+
+/// Safety: `out` points to `max` writable records.
+@export("arp_list")
+unsafe fn list(out: *mut arp_info, max: u32) -> u32 {
+    var n: u32 = 0;
+    var guard = TABLE.lock();
+    let t = guard.data();
+    for (i in 0..ARP_TABLE_SIZE) {
+        let e = borrow t.entries[i];
+        if (isState(e, FREE)) {
+            continue;
+        }
+        if (n < max) {
+            // An entry's interface outlives it: the flush at unregister empties its entries under this lock before
+            // the registry lets go (N25).
+            let o = Ptr.toBorrowMut(out.offset(n as isize));
+            o.ip = e.ip;
+            let complete = isState(e, REACHABLE);
+            o.complete = complete;
+            o.mac = if (complete) e.mac else [0; 6];
+            // strlcpy into the record: the name's bytes before its NUL, at most 7, then zeros.
+            let name = Ptr.toBorrow(e.nif as *netif).name;
+            var ifname = [0u8; 8];
+            for (k in 0..7usize) {
+                if (name[k] == 0) {
+                    break;
+                }
+                ifname[k] = name[k];
+            }
+            o.ifname = ifname;
+        }
+        n += 1;
+    }
+    return n;
+}
+
+/// Safety: `nif` is a registered interface.
+@export("arp_delete")
+unsafe fn remove(nif: *netif, ip: u32) {
+    var guard = TABLE.lock();
+    let t = guard.data();
+    match (find(t, nif as usize, ip)) {
+        Some(i) => {
+            if (t.entries[i].pending != 0) {
+                t.pendingDropped = t.pendingDropped.wrappingAdd(1); // counted like the flush and the timeout
+            }
+            clear(mut t.entries[i]);
+            t.count = t.count.wrappingSub(1);
+        }
+        null => {}
+    }
+}
+
+// ---- The debug build's hooks ----
+
+/// The window the N25 follow-up closes, held open on purpose: between a caller of arp_input or arp_resolve deciding to
+/// proceed and its taking of the table lock. The test parks the next such caller there, takes the interface down, and
+/// releases it. One caller per arming, like the retry hook below.
+static TEST_HOLD_LOCK_ENTRY: AtomicUSize = AtomicUSize.constant(0); // the interface armed for; 0: disarmed
+static TEST_LOCK_ENTRY_PARKED: AtomicU32 = AtomicU32.constant(0);
+static TEST_LOCK_ENTRY_RELEASE: AtomicU32 = AtomicU32.constant(0);
+
+@cfg("CONFIG_DEBUG")
+@export("arp_test_hold_lock_entry")
+fn testHoldLockEntry(nif: *netif) {
+    TEST_LOCK_ENTRY_PARKED.storeWith(0, StoreOrdering.Release);
+    TEST_LOCK_ENTRY_RELEASE.storeWith(0, StoreOrdering.Release);
+    TEST_HOLD_LOCK_ENTRY.storeWith(nif as usize, StoreOrdering.Release);
+}
+
+@cfg("CONFIG_DEBUG")
+@export("arp_test_lock_entry_parked")
+fn testLockEntryParked() -> bool => TEST_LOCK_ENTRY_PARKED.loadWith(LoadOrdering.Acquire) != 0;
+
+@cfg("CONFIG_DEBUG")
+@export("arp_test_release_lock_entry")
+fn testReleaseLockEntry() {
+    TEST_LOCK_ENTRY_RELEASE.storeWith(1, StoreOrdering.Release);
+}
+
+/// Safety: arch_cpu_relax is a pause instruction.
+fn parkBeforeLock(nif: *netif) {
+    let armed = TEST_HOLD_LOCK_ENTRY.loadWith(LoadOrdering.Relaxed);
+    if (armed == 0 || armed != nif as usize) {
+        return; // not armed, the common case, or armed for another interface: no read-modify-write
+    }
+    match (TEST_HOLD_LOCK_ENTRY.compareExchangeWith(armed, 0, Ordering.AcquireRelease)) {
+        Ok(_) => {}
+        Err(_) => { return; } // another caller on this interface took the arming
+    }
+    TEST_LOCK_ENTRY_PARKED.storeWith(1, StoreOrdering.Release);
+    while (TEST_LOCK_ENTRY_RELEASE.loadWith(LoadOrdering.Acquire) == 0) {
+        unsafe { arch_cpu_relax(); }
+    }
+}
+
+/// The window the retry's interface reference closes, held open on purpose: exactly one unlock wide, between arp_age
+/// releasing the lock with an interface copied out and the send that uses it, so the test stops the retry there
+/// rather than racing netif_unregister against the work item (docs/testing/flakes.md).
+static TEST_HOLD_RETRY: AtomicU32 = AtomicU32.constant(0);    // park the next retry batch
+static TEST_RETRY_PARKED: AtomicU32 = AtomicU32.constant(0);  // it is parked, references taken
+static TEST_RETRY_RELEASE: AtomicU32 = AtomicU32.constant(0); // let it send
+
+@cfg("CONFIG_DEBUG")
+@export("arp_test_hold_retry")
+fn testHoldRetry(on: bool) {
+    TEST_RETRY_PARKED.storeWith(0, StoreOrdering.Release);
+    TEST_RETRY_RELEASE.storeWith(0, StoreOrdering.Release);
+    TEST_HOLD_RETRY.storeWith(if (on) 1 else 0, StoreOrdering.Release);
+}
+
+@cfg("CONFIG_DEBUG")
+@export("arp_test_retry_parked")
+fn testRetryParked() -> bool => TEST_RETRY_PARKED.loadWith(LoadOrdering.Acquire) != 0;
+
+@cfg("CONFIG_DEBUG")
+@export("arp_test_release_retry")
+fn testReleaseRetry() {
+    TEST_RETRY_RELEASE.storeWith(1, StoreOrdering.Release);
+}
+
+/// Safety: arch_cpu_relax is a pause instruction.
+fn parkRetry(count: usize) {
+    if (count == 0 || TEST_HOLD_RETRY.loadWith(LoadOrdering.Acquire) == 0) {
+        return;
+    }
+    TEST_HOLD_RETRY.storeWith(0, StoreOrdering.Release); // one batch
+    TEST_RETRY_PARKED.storeWith(1, StoreOrdering.Release);
+    while (TEST_RETRY_RELEASE.loadWith(LoadOrdering.Acquire) == 0) {
+        unsafe { arch_cpu_relax(); }
+    }
+}
+
+// ---- Ageing ----
+
+/// A retry the pass sends after the lock: the interface, referenced, and the address.
+struct Retry {
+    nif: usize;
+    ip: u32;
+}
+
+/// The worker's pass: retries incomplete entries, expires stale ones.
+/// Safety: every entry's interface is registered while the entry is in the table (arp_flush runs before
+/// netif_unregister lets it go), so the reference taken here is on a live object.
+@export("arp_age")
+unsafe fn age(now: u64) {
+    var retries = [Retry { nif: 0, ip: 0 }; 64];
+    var count: usize = 0;
+    {
+        var guard = TABLE.lock();
+        let t = guard.data();
+        for (i in 0..ARP_TABLE_SIZE) {
+            if (isState(borrow t.entries[i], FREE)) {
+                continue;
+            }
+            if (isState(borrow t.entries[i], REACHABLE)) {
+                if (delta(now, t.entries[i].updatedNs) > ARP_REACHABLE_NS) {
+                    clear(mut t.entries[i]);
+                    t.count = t.count.wrappingSub(1);
+                }
+                continue;
+            }
+            if (delta(now, t.entries[i].updatedNs) < ARP_RETRY_NS) {
+                continue;
+            }
+            if (t.entries[i].tries >= ARP_MAX_TRIES) {
+                if (t.entries[i].pending != 0) {
+                    t.pendingDropped = t.pendingDropped.wrappingAdd(1);
+                }
+                t.timeouts = t.timeouts.wrappingAdd(1);
+                clear(mut t.entries[i]);
+                t.count = t.count.wrappingSub(1);
+                continue;
+            }
+            t.entries[i].tries += 1;
+            t.entries[i].updatedNs = now;
+            // A reference, because this pointer is about to outlive the lock that makes it safe. Taking it is sound:
+            // arp_flush takes this lock too, so while the entry is here netif_unregister's flush (its step 5) has not
+            // run for the interface, nor its kobject_put (step 6) after it. Without it the send below would read the
+            // interface after the lock, and the retry could begin after unregister's barrier (invariant N22).
+            let nif = t.entries[i].nif as *mut netif;
+            kobject_get(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject);
+            retries[count] = Retry { nif: t.entries[i].nif, ip: t.entries[i].ip };
+            count += 1;
+        }
+    }
+    if (DEBUG_BUILD) {
+        parkRetry(count);
+    }
+    for (k in 0..count) {
+        let nif = retries[k].nif as *mut netif;
+        REQUESTS_SENT.fetchAddWith(1, Ordering.Relaxed);
+        send(nif, ARP_OP_REQUEST, retries[k].ip, borrow ZERO_MAC as *[u8; 6] as *u8, borrow BROADCAST_MAC as *[u8; 6] as *u8);
+        kobject_put(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject);
+    }
+}
+
+/// The work item: every protocol's ageing pass, then the timer again.
+/// Safety: AGE_TIMER is arp_init's, armed only from here and there.
+@callback
+unsafe fn ageWork(arg: *mut void) {
+    let now = clock_now_ns();
+    age(now);
+    nd_age(now);
+    nat_age(now);
+    fw_age(now);
+    tapsvc_dns_age(now);
+    timer_start(borrow mut AGE_TIMER as *mut timer, ARP_RETRY_NS);
+}
+
+/// The timer, in interrupt context: queue the work item for a network worker.
+/// Safety: AGE_WORK is arp_init's.
+@callback
+unsafe fn ageTimer(t: *mut timer, arg: *mut void) {
+    net_work_queue(borrow mut AGE_WORK as *mut net_work);
+}
+
+/// Safety: net_init calls it once, before the interfaces come up.
+@export("arp_init")
+unsafe fn init() {
+    net_work_init(borrow mut AGE_WORK as *mut net_work, ageWork, 0 as *mut void);
+    timer_setup(borrow mut AGE_TIMER as *mut timer, ageTimer, 0 as *mut void);
+    timer_start(borrow mut AGE_TIMER as *mut timer, ARP_RETRY_NS);
+}
+
+/// Safety: `out` points to a writable record.
+@export("arp_get_stats")
+unsafe fn getStats(out: *mut arp_stats) {
+    var guard = TABLE.lock();
+    let t = guard.data();
+    let o = Ptr.toBorrowMut(out);
+    o.requests_sent = REQUESTS_SENT.loadWith(LoadOrdering.Relaxed);
+    o.replies_sent = REPLIES_SENT.loadWith(LoadOrdering.Relaxed);
+    o.requests_rcvd = REQUESTS_RCVD.loadWith(LoadOrdering.Relaxed);
+    o.replies_rcvd = REPLIES_RCVD.loadWith(LoadOrdering.Relaxed);
+    o.entries = t.count;
+    o.pending_dropped = t.pendingDropped;
+    o.timeouts = t.timeouts;
+    o.unsolicited = t.unsolicited;
+}

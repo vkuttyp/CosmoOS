@@ -677,6 +677,26 @@ receive 0.96x the C, transmit 0.99x, find 1.02x, flow hash 0.79x, owns
 1.00x, connected 1.00x on arm64; 0.97x, 1.00x, 1.05x, 0.70x, 0.98x, 1.03x on
 x86-64 (Rosetta). The flow hash reads a frame's first segment in place where
 the C copied it.
+Address resolution (2026-11-03): `kernel-services/network/arp.cee` -- the
+neighbour table keyed by (interface, address), resolutions that park a
+packet while a request is out, what requests and replies may teach it
+(RFC 826, N25), and the ageing pass with its retries, timeouts and
+expiry, which runs the other protocols' ageing too. The table and the
+counters its lock covered are an `IrqSpinLock`'s data, interfaces and
+parked packets held by address; the four counters the C added outside
+the lock are atomics. The debug build's two park hooks are `@cfg`
+exports, as in the C. netparse gains `netparse_arp_bytes`, the ARP
+decoder's fields as 16 bytes, since an imported `struct netparse_arp`
+cannot be a CeeSafe local; `ether.h` declares `arp_resolve`'s and
+`arp_lookup`'s MAC as a pointer, as `ether_output`'s.
+`tests/host/test_arp.c`: 20,000 rounds over three interfaces and 96
+neighbours, more than the table holds -- resolutions, bursts that evict,
+lookups, frames in of every kind, flushes, deletions, listings, ageing
+and the work item, the hooks, allocation failures -- every mbuf freed and
+every interface reference given back: digest `0xc5ce56f4e28bdf48`, the
+C's (macOS clang, Linux gcc). `ARP_BENCH=1`, the median of nine at -O2: a
+reachable resolution 1.00x the C, a request for us answered 1.00-1.03x on
+arm64; 1.01-1.03x and 0.98-1.02x on x86-64 (Rosetta).
 
 Size: about 3.0x.
 

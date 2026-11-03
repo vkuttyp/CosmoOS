@@ -39,9 +39,9 @@ void arp_input(struct netif *nif, struct mbuf *m);
  * and a request sent (ownership taken). Other errno: `m` freed --
  * -ENETUNREACH when `nif` is down (decided under the table lock, so a
  * resolve never leaves an entry on a down interface; N25). */
-int arp_resolve(struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN], struct mbuf *m);
+int arp_resolve(struct netif *nif, uint32_t ip, uint8_t *mac, struct mbuf *m);   /* mac: ETH_ALEN bytes */
 /* `nif`'s entry for `ip`, reachable: mac filled. Reads the table without sending. */
-bool arp_lookup(const struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN]);
+bool arp_lookup(const struct netif *nif, uint32_t ip, uint8_t *mac);   /* mac: ETH_ALEN bytes */
 /* Drop every entry naming the interface: netif_unregister (step 5) and
  * netif_set_up(false) -- a neighbour learned over a link that is down is
  * not known to be there when it comes back, and a packet parked on one
