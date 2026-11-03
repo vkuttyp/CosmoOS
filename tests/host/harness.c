@@ -66,8 +66,18 @@ void backtrace_print(const struct arch_trap_frame *from)
  * warnings are the expected outcome twenty thousand times over. */
 int harness_klog_min = KLOG_WARN;
 
+void (*harness_klog_hook)(int level, const char *line);
+
 void klog(enum klog_level level, const char *fmt, ...)
 {
+    if (harness_klog_hook != NULL) {
+        char line[512];
+        va_list hp;
+        va_start(hp, fmt);
+        vsnprintf(line, sizeof(line), fmt, hp);
+        va_end(hp);
+        harness_klog_hook((int)level, line);
+    }
     if ((int)level < harness_klog_min)
         return;
     va_list ap;

@@ -593,9 +593,11 @@ bool dhcp_client_input(struct netif *nif, struct mbuf *m, unsigned ihl)
         dhcp_send(nif, &tx);
     if (bound_now) {
         const uint8_t *p = (const uint8_t *)&a, *d = (const uint8_t *)&dns0;
-        kinfo("dhcp: %s: bound to %u.%u.%u.%u for %u s, %u DNS server(s)%s%u.%u.%u.%u", nif->name, p[0], p[1], p[2],
-              p[3], lease, ndns, ndns ? ", first " : "", ndns ? d[0] : 0, ndns ? d[1] : 0, ndns ? d[2] : 0,
-              ndns ? d[3] : 0);
+        if (ndns)
+            kinfo("dhcp: %s: bound to %u.%u.%u.%u for %u s, %u DNS server(s), first %u.%u.%u.%u", nif->name, p[0],
+                  p[1], p[2], p[3], lease, ndns, d[0], d[1], d[2], d[3]);
+        else
+            kinfo("dhcp: %s: bound to %u.%u.%u.%u for %u s, no DNS server", nif->name, p[0], p[1], p[2], p[3], lease);
     }
     return true;
 }

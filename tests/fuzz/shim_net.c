@@ -322,8 +322,9 @@ void net_workers_barrier(void)
     fz_run_work();
 }
 
-/* dhcp_boot_wait sleeps between looks; it is never called here. */
-void thread_sleep_ns(uint64_t ns)
+/* dhcp_boot_wait sleeps between looks; it is never called here (a host
+ * test that calls it supplies a sleep that moves the clock). */
+__attribute__((weak)) void thread_sleep_ns(uint64_t ns)
 {
     (void)ns;
     panic("fuzz: thread_sleep_ns");
