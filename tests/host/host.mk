@@ -62,6 +62,8 @@ HOST_FW_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/fw.c kernel-services
 HOST_NAT_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/nat.c kernel-services/network/mbuf.c \
 	kernel-services/network/cksum.c kernel-services/network/netparse.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_nat.c
+HOST_SOCKET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/socket.c kernel-services/network/mbuf.c \
+	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_socket.c
 HOST_INET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/inet.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_inet.c
 HOST_CKSUM_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/cksum.c kernel/ceesafe/ceesafe_rt_core.c \
@@ -104,7 +106,7 @@ HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/ob
 HOST_PCI_BAR_SRCS := $(HOST_COMMON_SRCS) tests/host/test_pci_bar.c
 HOST_JITTER_SRCS := $(HOST_COMMON_SRCS) kernel/core/jitter.c tests/host/test_jitter.c
 
-HOST_TESTS := $(HOST_OUT)/test_cksum $(HOST_OUT)/test_inet $(HOST_OUT)/test_ether $(HOST_OUT)/test_loopback $(HOST_OUT)/test_mbuf $(HOST_OUT)/test_netif $(HOST_OUT)/test_arp $(HOST_OUT)/test_nd $(HOST_OUT)/test_diskid $(HOST_OUT)/test_ipv6 $(HOST_OUT)/test_ipv4 $(HOST_OUT)/test_udp $(HOST_OUT)/test_raw $(HOST_OUT)/test_fw $(HOST_OUT)/test_nat $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_keyslot $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_cputime $(HOST_OUT)/test_nice $(HOST_OUT)/test_fair $(HOST_OUT)/test_upgrade_be $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter $(HOST_OUT)/test_handles $(HOST_OUT)/test_netparse $(HOST_OUT)/test_elf $(HOST_OUT)/test_cfsparse $(HOST_OUT)/test_usbdesc $(HOST_OUT)/test_acpi $(HOST_OUT)/test_sync
+HOST_TESTS := $(HOST_OUT)/test_cksum $(HOST_OUT)/test_inet $(HOST_OUT)/test_ether $(HOST_OUT)/test_loopback $(HOST_OUT)/test_mbuf $(HOST_OUT)/test_netif $(HOST_OUT)/test_arp $(HOST_OUT)/test_nd $(HOST_OUT)/test_diskid $(HOST_OUT)/test_ipv6 $(HOST_OUT)/test_ipv4 $(HOST_OUT)/test_udp $(HOST_OUT)/test_raw $(HOST_OUT)/test_fw $(HOST_OUT)/test_nat $(HOST_OUT)/test_socket $(HOST_OUT)/test_interrupt $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_relsig $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lockdep_threads $(HOST_OUT)/test_lockup $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_keyslot $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_display $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev $(HOST_OUT)/test_gpt $(HOST_OUT)/test_cputime $(HOST_OUT)/test_nice $(HOST_OUT)/test_fair $(HOST_OUT)/test_upgrade_be $(HOST_OUT)/test_pci_bar $(HOST_OUT)/test_jitter $(HOST_OUT)/test_handles $(HOST_OUT)/test_netparse $(HOST_OUT)/test_elf $(HOST_OUT)/test_cfsparse $(HOST_OUT)/test_usbdesc $(HOST_OUT)/test_acpi $(HOST_OUT)/test_sync
 
 $(HOST_OUT)/test_fbvalid: $(call src_paths,$(HOST_FBVALID_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
@@ -373,6 +375,11 @@ $(HOST_OUT)/test_fw: $(call src_paths,$(HOST_FW_SRCS)) $(ROOT)/kernel/include/ke
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_nat: $(call src_paths,$(HOST_NAT_SRCS)) $(ROOT)/kernel/include/kernel/net/nat.h | $(CEE_STAMP)
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
+
+$(HOST_OUT)/test_socket: $(call src_paths,$(HOST_SOCKET_SRCS)) $(ROOT)/kernel/include/kernel/socket.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(filter %.c,$^) $(HOST_LDFLAGS) -o $@

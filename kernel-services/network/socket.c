@@ -214,6 +214,46 @@ static inline bool sock_error_pending(struct socket *s)
  * the call sites would give, since two of the five hold none. The
  * generation is carried forward rather than zeroed, so it stays
  * monotonic and a token from before this call can never match again. */
+/* The blocking calls' wait conditions, as wait_floor_until_killable takes
+ * them (kernel/wait.h): read without s->lock, as wait_event's are. */
+static bool accept_cond(void *arg)
+{
+    struct socket *s = arg;
+    return tcp_accept_ready(s->tcp) || sock_error_pending(s) || (s->shut & 1);
+}
+
+static bool connect_cond(void *arg)
+{
+    struct socket *s = arg;
+    enum tcp_state st = tcp_state_of(s->tcp);
+    return st != TCP_SYN_SENT && st != TCP_SYN_RCVD;
+}
+
+static bool send_cond(void *arg)
+{
+    struct socket *s = arg;
+    return tcp_send_space(s->tcp) > 0 || s->tcp->error || tcp_state_of(s->tcp) == TCP_CLOSED;
+}
+
+static bool raw_recv_cond(void *arg)
+{
+    struct socket *s = arg;
+    return mbufq_len(&s->raw->rxq) > 0 || (s->shut & 1);
+}
+
+static bool udp_recv_cond(void *arg)
+{
+    struct socket *s = arg;
+    return mbufq_len(&s->udp.rxq) > 0 || sock_error_pending(s) || (s->shut & 1);
+}
+
+static bool tcp_recv_cond(void *arg)
+{
+    struct socket *s = arg;
+    return tcp_recv_avail(s->tcp) > 0 || s->tcp->fin_rcvd || s->tcp->error || s->tcp->state == TCP_CLOSED ||
+           (s->shut & 1);
+}
+
 int ksock_error(struct socket *s)
 {
     uint64_t old = __atomic_load_n(&s->error, __ATOMIC_ACQUIRE);
@@ -340,7 +380,7 @@ int ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer)
             ksock_put(c);
             return -EAGAIN;
         }
-        int w = wait_event_killable(&s->wait, tcp_accept_ready(s->tcp) || sock_error_pending(s) || (s->shut & 1));
+        int w = wait_floor_until_killable(&s->wait, accept_cond, s);
         if (w) {
             ksock_put(c);
             return w;
@@ -401,8 +441,7 @@ int ksock_connect(struct socket *s, const struct netaddr *addr)
         } else if (rc == 0) {
             s->state = SS_CONNECTING;
             mutex_unlock(&s->lock);
-            int w = wait_event_killable(&s->wait,
-                                        tcp_state_of(s->tcp) != TCP_SYN_SENT && tcp_state_of(s->tcp) != TCP_SYN_RCVD);
+            int w = wait_floor_until_killable(&s->wait, connect_cond, s);
             mutex_lock(&s->lock);
             if (w) {
                 mutex_unlock(&s->lock);
@@ -471,8 +510,7 @@ int64_t ksock_sendto(struct socket *s, const void *buf, size_t len, const struct
         if (done < len) {
             if (io_nonblocking(s->nonblock))
                 return done ? (int64_t)done : -EAGAIN;
-            int w = wait_event_killable(&s->wait, tcp_send_space(s->tcp) > 0 || s->tcp->error ||
-                                                      tcp_state_of(s->tcp) == TCP_CLOSED);
+            int w = wait_floor_until_killable(&s->wait, send_cond, s);
             if (w)
                 return done ? (int64_t)done : w;
             if (s->tcp->error || tcp_state_of(s->tcp) == TCP_CLOSED)
@@ -501,7 +539,7 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
                 return 0;
             if (io_nonblocking(s->nonblock))
                 return -EAGAIN;
-            int w = wait_event_killable(&s->wait, mbufq_len(&s->raw->rxq) > 0 || (s->shut & 1));
+            int w = wait_floor_until_killable(&s->wait, raw_recv_cond, s);
             if (w)
                 return w;
         }
@@ -526,7 +564,7 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
                 return ksock_error(s);
             if (io_nonblocking(s->nonblock))
                 return -EAGAIN;
-            int w = wait_event_killable(&s->wait, mbufq_len(&s->udp.rxq) > 0 || sock_error_pending(s) || (s->shut & 1));
+            int w = wait_floor_until_killable(&s->wait, udp_recv_cond, s);
             if (w)
                 return w;
         }
@@ -557,8 +595,7 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
             return s->tcp->error ? s->tcp->error : 0;
         if (io_nonblocking(s->nonblock))
             return -EAGAIN;
-        int w = wait_event_killable(&s->wait, tcp_recv_avail(s->tcp) > 0 || s->tcp->fin_rcvd || s->tcp->error ||
-                                                  s->tcp->state == TCP_CLOSED || (s->shut & 1));
+        int w = wait_floor_until_killable(&s->wait, tcp_recv_cond, s);
         if (w)
             return w;
     }
@@ -669,6 +706,10 @@ static struct {
     struct waitqueue wq;     /* both sides wait here */
 } g_wake_hold = { .lock = SPINLOCK_INIT("sock-wake-hold") };
 
+static bool hold_released(void *arg) { (void)arg; return __atomic_load_n(&g_wake_hold.released, __ATOMIC_ACQUIRE); }
+static bool hold_resumed(void *arg) { (void)arg; return __atomic_load_n(&g_wake_hold.resumed, __ATOMIC_ACQUIRE); }
+static bool hold_held(void *arg) { (void)arg; return __atomic_load_n(&g_wake_hold.held, __ATOMIC_ACQUIRE); }
+
 static void wake_hold(struct socket *s)
 {
     /* Unarmed, the common case: one load, no lock on the wake path. The
@@ -686,8 +727,7 @@ static void wake_hold(struct socket *s)
     if (!mine)
         return;
     waitqueue_wake_all(&g_wake_hold.wq);
-    bool ok = wait_event_timeout(&g_wake_hold.wq, __atomic_load_n(&g_wake_hold.released, __ATOMIC_ACQUIRE),
-                                 10ull * 1000 * 1000 * 1000);
+    bool ok = wait_floor_until_timeout(&g_wake_hold.wq, hold_released, NULL, 10ull * 1000 * 1000 * 1000);
     st = spin_lock_irqsave(&g_wake_hold.lock);
     g_wake_hold.timed_out = !ok;
     g_wake_hold.resumed = true;
@@ -709,7 +749,7 @@ void sock_test_wake_hold_arm(struct socket *s)
 
 bool sock_test_wake_hold_wait(uint64_t ns)
 {
-    return wait_event_timeout(&g_wake_hold.wq, __atomic_load_n(&g_wake_hold.held, __ATOMIC_ACQUIRE), ns);
+    return wait_floor_until_timeout(&g_wake_hold.wq, hold_held, NULL, ns);
 }
 
 bool sock_test_wake_hold_release(void)
@@ -722,7 +762,7 @@ bool sock_test_wake_hold_release(void)
     if (!held)
         return true;
     waitqueue_wake_all(&g_wake_hold.wq);
-    wait_event(&g_wake_hold.wq, __atomic_load_n(&g_wake_hold.resumed, __ATOMIC_ACQUIRE));
+    wait_floor_until(&g_wake_hold.wq, hold_resumed, NULL);
     return !g_wake_hold.timed_out;
 }
 #else
