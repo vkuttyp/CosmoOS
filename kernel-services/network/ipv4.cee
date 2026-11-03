@@ -1,0 +1,1205 @@
+// ipv4.cee - IPv4 (RFC 791) input, output and route selection, ICMP echo and destination unreachable (RFC 792) behind a
+// rate limit, path MTU discovery (RFC 1191) from "fragmentation needed" messages, and forwarding (RFC 1812) with the
+// firewall and NAT around it (kernel/include/kernel/net/ip.h's IPv4 half), in CeeSafe: roadmap 2.0 SA6.
+// tests/host/test_ipv4.c holds it to the digest of the C it replaced.
+//
+// Headers are read and written as bytes. A received header is copied to a local array and handed on by address
+// (`struct ipv4_hdr` is packed, so its C layout is its bytes); a `struct netaddr` this file builds is a local array of
+// words, its C layout (family, port, then the IPv4 address in the union), and the firewall's host flow likewise. The
+// firewall's verdicts are C enums, unsigned ints with FW_DROP 0.
+
+@header("kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/cksum.h", "kernel/net/dhcp.h", "kernel/net/fw.h", "kernel/net/nat.h", "kernel/net/raw.h", "kernel/net/tcp.h", "kernel/net/udp.h", "arch/cpu.h")
+extern "C" {
+    /// kernel/include/kernel/mbuf.h: the fields IPv4 reads and writes.
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        flags: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+        csum_flags: u16;
+        csum_start: u16;
+    }
+    /// kernel/include/kernel/netif.h: the flag word and the IPv4 triple, which other CPUs change atomically (ADR 0041
+    /// §3.1); the index and the MTU, fixed while the interface is registered.
+    struct netif_ip4 {
+        addr: AtomicU32;
+        mask: AtomicU32;
+        gateway: AtomicU32;
+    }
+    struct netif {
+        obj: kobject;
+        index: u32;
+        mtu: u32;
+        flags: AtomicU32;
+        ip4: netif_ip4;
+    }
+    struct netif_info {
+        name: [u8; 8];
+        index: u32;
+        flags: u32;
+        addr: u32;
+        mask: u32;
+        gateway: u32;
+    }
+    struct ipv4_route_info {
+        ifname: [u8; 8];
+        dst: u32;
+        mask: u32;
+        gateway: u32;
+        src: u32;
+        flags: u32;
+    }
+    struct ipv4_hdr;
+    struct ipv6_hdr;
+    struct netaddr;
+    struct fw_host_flow;
+    /// ip.h's statistics: the fields IPv4 counts; the others are zero in its copy.
+    struct ip_stats {
+        rx: u64;
+        rx_bad_header: u64;
+        rx_bad_cksum: u64;
+        rx_not_for_us: u64;
+        rx_fragments: u64;
+        rx_unknown_proto: u64;
+        tx: u64;
+        tx_no_route: u64;
+        icmp_echo_rcvd: u64;
+        icmp_echo_replied: u64;
+        icmp_unreach_sent: u64;
+        icmp_ratelimited: u64;
+        icmp_needfrag_rcvd: u64;
+        pmtu_updates: u64;
+        icmp_unreach_delivered: u64;
+        fwd: u64;
+        fwd_ttl_exceeded: u64;
+        fwd_no_route: u64;
+        fwd_hairpin: u64;
+        fwd_nat_drop: u64;
+        fwd_spoofed: u64;
+        fwd_filtered: u64;
+        in_filtered: u64;
+        tx_filtered: u64;
+        rx_offlink: u64;
+        hin_quiet: u64;
+        hin_filtered: u64;
+        icmp_quiet_dropped: u64;
+    }
+
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+
+    fn m_getcl() -> *mut mbuf;
+    fn m_pullup(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_prepend(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_adj(m: *mut mbuf, n: i32);
+    /// Frees to the slab caches, which take interrupt-safe locks of their own.
+    @effects()
+    fn m_freem(m: *mut mbuf);
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn m_cksum_partial(m: *mbuf, off: u32, len: u32, sum: u32) -> u32;
+    fn cksum_fold(sum: u32) -> u16;
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn netparse_ipv4_outer(hdr: *u8, len: u32, ihl: *mut u32, total: *mut u32) -> bool;
+    fn netparse_ipv4_cksum_ok(hdr: *u8, ihl: u32) -> bool;
+    fn netparse_ipv4_fragment(hdr: *u8) -> bool;
+    fn netparse_ipv4_quote(quote: *u8, ihl: *mut u32) -> bool;
+    fn netparse_l4_flow(b: *u8, avail: u32) -> u64;
+    fn netif_loopback() -> *mut netif;
+    fn netif_connected(dst: u32) -> *mut netif;
+    fn netif_default_ipv4() -> *mut netif;
+    fn netif_owns_ipv4(addr: u32) -> bool;
+    fn netif_list(out: *mut netif_info, max: u32) -> u32;
+    fn netif_transmit(nif: *mut netif, m: *mut mbuf) -> i32;
+    fn arp_resolve(nif: *mut netif, ip: u32, mac: *mut u8, m: *mut mbuf) -> i32;
+    fn ether_output(nif: *mut netif, m: *mut mbuf, dst: *u8, etype: u16) -> i32;
+    fn fw_output_verdict(out: *mut netif, outFlags: u32, m: *mut mbuf, src: u32, dst: u32, proto: u8) -> u32;
+    fn fw_host_flow_of(out: *mut netif, outFlags: u32, m: *mut mbuf, src: u32, dst: u32, proto: u8, f: *mut fw_host_flow) -> bool;
+    fn fw_host_record(f: *fw_host_flow);
+    fn fw_forward_verdict(input: *mut netif, out: *mut netif, outFlags: u32, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32) -> u32;
+    fn fw_input_verdict(nif: *mut netif, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32) -> u32;
+    fn fw_host_verdict(nif: *mut netif, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32) -> u32;
+    fn nat_out(input: *mut netif, inFlags: u32, out: *mut netif, outFlags: u32, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32, newSrc: *mut u32) -> i32;
+    fn nat_in(nif: *mut netif, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32, total: u16) -> bool;
+    fn dhcp_client_input(nif: *mut netif, m: *mut mbuf, ihl: u32) -> bool;
+    fn raw_icmp_input(m: *mbuf, iph: *ipv4_hdr);
+    fn udp_error_notify(local: *netaddr, remote: *netaddr, err: i32) -> bool;
+    fn tcp_pmtu_notify(local: *netaddr, remote: *netaddr, seq: u32, mtu: u16) -> bool;
+    fn udp_input(nif: *mut netif, m: *mut mbuf, ip4: *ipv4_hdr, ip6: *ipv6_hdr);
+    fn tcp_input(nif: *mut netif, m: *mut mbuf, ip4: *ipv4_hdr, ip6: *ipv6_hdr);
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    /// Reads the clock: callable in any context.
+    @effects()
+    fn clock_now_ns() -> u64;
+    fn arch_cpu_relax();
+}
+
+const IPV4_HLEN: u32 = 20;
+const ICMP_HLEN: u32 = 8;
+const ETH_P_IP: u16 = 0x0800;
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const IP_DEFAULT_TTL: u8 = 64;
+const ICMP_ECHO_REPLY: u8 = 0;
+const ICMP_DEST_UNREACH: u8 = 3;
+const ICMP_ECHO: u8 = 8;
+const ICMP_TIME_EXCEEDED: u8 = 11;
+const ICMP_TIMXCEED_INTRANS: u8 = 0;
+const ICMP_UNREACH_NET: u8 = 0;
+const ICMP_UNREACH_HOST: u8 = 1;
+const ICMP_UNREACH_PROTO: u8 = 2;
+const ICMP_UNREACH_PORT: u8 = 3;
+const ICMP_UNREACH_NEEDFRAG: u8 = 4;
+const ICMP_RATE_PER_SEC: u32 = 100;
+const IPV4_PMTU_ENTRIES: usize = 16;
+const IPV4_PMTU_TTL_NS: u64 = 600 * 1000000000;
+const IPV4_PMTU_MIN: u32 = 576;
+const IPV4_RTF_UP: u32 = 1;
+const IPV4_RTF_GATEWAY: u32 = 2;
+const NETIF_MAX: u32 = 32;
+/// netif.h's flags; mbuf.h's; fw.h's FW_DROP; errno.h's codes.
+const NETIF_UP: u32 = 1;
+const NETIF_LOOPBACK: u32 = 2;
+const NETIF_FORWARD: u32 = 32;
+const NETIF_MASQUERADE: u32 = 64;
+const M_BCAST: u32 = 4;
+const M_MCAST: u32 = 8;
+const M_FW_QUIET: u32 = 32;
+const NET_CSUM_TX: u16 = 3;
+const FW_DROP: u32 = 0;
+const EPERM: i32 = 1;
+const ENOMEM: i32 = 12;
+const EMSGSIZE: i32 = 90;
+const ENETUNREACH: i32 = 101;
+const ECONNREFUSED: i32 = 111;
+const EHOSTUNREACH: i32 = 113;
+const EINPROGRESS: i32 = 115;
+const COSMO_AF_INET: u32 = 2;
+/// INADDR_BROADCAST_N; INADDR_LOOPBACK_N, 127.0.0.1 as it lies in a little-endian u32; tapsvc.h's guest, <subnet>.15,
+/// as htonl(15).
+const BROADCAST: u32 = 0xffffffff;
+const LOOPBACK_N: u32 = 0x0100007f;
+const GUEST_HOST_N: u32 = 0x0f000000;
+
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
+
+// ---- Statistics: every CPU counts, relaxed, as the C's __atomic_fetch_add ----
+
+static RX: AtomicU64 = AtomicU64.constant(0);
+static RX_BAD_HEADER: AtomicU64 = AtomicU64.constant(0);
+static RX_BAD_CKSUM: AtomicU64 = AtomicU64.constant(0);
+static RX_NOT_FOR_US: AtomicU64 = AtomicU64.constant(0);
+static RX_FRAGMENTS: AtomicU64 = AtomicU64.constant(0);
+static RX_UNKNOWN_PROTO: AtomicU64 = AtomicU64.constant(0);
+static TX: AtomicU64 = AtomicU64.constant(0);
+static TX_NO_ROUTE: AtomicU64 = AtomicU64.constant(0);
+static ECHO_RCVD: AtomicU64 = AtomicU64.constant(0);
+static ECHO_REPLIED: AtomicU64 = AtomicU64.constant(0);
+static UNREACH_SENT: AtomicU64 = AtomicU64.constant(0);
+static RATELIMITED: AtomicU64 = AtomicU64.constant(0);
+static NEEDFRAG_RCVD: AtomicU64 = AtomicU64.constant(0);
+static PMTU_UPDATES: AtomicU64 = AtomicU64.constant(0);
+static UNREACH_DELIVERED: AtomicU64 = AtomicU64.constant(0);
+static FWD: AtomicU64 = AtomicU64.constant(0);
+static FWD_TTL_EXCEEDED: AtomicU64 = AtomicU64.constant(0);
+static FWD_NO_ROUTE: AtomicU64 = AtomicU64.constant(0);
+static FWD_HAIRPIN: AtomicU64 = AtomicU64.constant(0);
+static FWD_NAT_DROP: AtomicU64 = AtomicU64.constant(0);
+static FWD_SPOOFED: AtomicU64 = AtomicU64.constant(0);
+static FWD_FILTERED: AtomicU64 = AtomicU64.constant(0);
+static IN_FILTERED: AtomicU64 = AtomicU64.constant(0);
+static TX_FILTERED: AtomicU64 = AtomicU64.constant(0);
+static RX_OFFLINK: AtomicU64 = AtomicU64.constant(0);
+static HIN_QUIET: AtomicU64 = AtomicU64.constant(0);
+static HIN_FILTERED: AtomicU64 = AtomicU64.constant(0);
+static ICMP_QUIET_DROPPED: AtomicU64 = AtomicU64.constant(0);
+
+/// The identification field's counter: a u16 in the C, here the low 16 bits of a u32 that wraps the same way.
+static IP_ID: AtomicU32 = AtomicU32.constant(0);
+
+fn count(c: borrow AtomicU64) {
+    c.fetchAddWith(1, Ordering.Relaxed);
+}
+
+// ---- Bytes ----
+
+fn be16(b: Slice<u8>, at: usize) -> u32 => ((b[at] as u32) << 8) | (b[at + 1] as u32);
+
+/// A u32 as it lies in memory (an address, already in network order).
+fn word(b: Slice<u8>, at: usize) -> u32 =>
+    (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) | ((b[at + 3] as u32) << 24);
+
+fn putBe16(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+fn putWord(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// A checksum as C stores the u16 in_cksum and cksum_fold return (already in network order) into two bytes.
+fn putNative16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+/// Whether an address is in 127/8: its first byte in network order.
+fn isLoopbackNet(a: u32) -> bool => (a & 0xff) == 127;
+
+/// clock_delta_ns.
+fn delta(now: u64, stamp: u64) -> u64 => if (now > stamp) now - stamp else 0;
+
+// ---- Interfaces ----
+
+/// netif_put, an inline in netif.h.
+/// Safety: `nif` is referenced by the caller.
+unsafe fn put(nif: *mut netif) {
+    kobject_put(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject);
+}
+
+/// The interface's flag word, read once (N26).
+/// Safety: `nif` is a registered interface.
+unsafe fn flagsOf(nif: *mut netif) -> u32 => Ptr.toBorrow(nif).flags.loadWith(LoadOrdering.Relaxed);
+
+/// Safety: as flagsOf.
+unsafe fn addrOf(nif: *mut netif) -> u32 => Ptr.toBorrow(nif).ip4.addr.loadWith(LoadOrdering.Relaxed);
+
+/// Safety: as flagsOf.
+unsafe fn maskOf(nif: *mut netif) -> u32 => Ptr.toBorrow(nif).ip4.mask.loadWith(LoadOrdering.Relaxed);
+
+/// Safety: as flagsOf.
+unsafe fn gatewayOf(nif: *mut netif) -> u32 => Ptr.toBorrow(nif).ip4.gateway.loadWith(LoadOrdering.Relaxed);
+
+// ---- The ICMP rate limit and the path MTU cache ----
+
+struct Rate {
+    windowNs: u64;
+    count: u32;
+}
+
+static RATE: IrqSpinLock<Rate> = IrqSpinLock<Rate>.constant("icmp-rate\0".ptr as *CChar, Rate { windowNs: 0, count: 0 });
+
+/// Unreachables and echo replies, ICMP_RATE_PER_SEC a second host-wide (IPv4 and IPv6).
+/// Safety: clock_now_ns only reads the clock.
+@export("icmp_ratelimit_allow")
+fn rateLimitAllow() -> bool {
+    let now = unsafe { clock_now_ns() };
+    var ok = false;
+    {
+        var guard = RATE.lock();
+        let r = guard.data();
+        if (delta(now, r.windowNs) >= 1000000000) {
+            r.windowNs = now;
+            r.count = 0;
+        }
+        ok = r.count < ICMP_RATE_PER_SEC;
+        if (ok) {
+            r.count += 1;
+        }
+    }
+    if (!ok) {
+        count(borrow RATELIMITED);
+    }
+    return ok;
+}
+
+struct PmtuEntry {
+    dst: u32;
+    mtu: u32;
+    expiresNs: u64; // 0: free
+}
+
+@constant
+fn freePmtu() -> PmtuEntry => PmtuEntry { dst: 0, mtu: 0, expiresNs: 0 };
+
+struct PmtuCache {
+    entries: [PmtuEntry; 16];
+}
+
+static PMTU: IrqSpinLock<PmtuCache> =
+    IrqSpinLock<PmtuCache>.constant("ipv4-pmtu\0".ptr as *CChar, PmtuCache { entries: [freePmtu(); 16] });
+
+/// What the cache knows of `dst`: its MTU, or 0; an expired entry is freed on the way.
+/// Safety: clock_now_ns only reads the clock.
+fn pmtuLookup(dst: u32) -> u32 {
+    let now = unsafe { clock_now_ns() };
+    var mtu: u32 = 0;
+    var guard = PMTU.lock();
+    let c = guard.data();
+    for (i in 0..IPV4_PMTU_ENTRIES) {
+        if (c.entries[i].expiresNs != 0 && c.entries[i].dst == dst) {
+            if (now < c.entries[i].expiresNs) {
+                mtu = c.entries[i].mtu;
+            } else {
+                c.entries[i].expiresNs = 0;
+            }
+            break;
+        }
+    }
+    return mtu;
+}
+
+/// Records `mtu` (at least IPV4_PMTU_MIN) for `dst`: its own entry, a free or expired one, or the one nearest expiry.
+/// A live entry only lowers.
+/// Safety: clock_now_ns only reads the clock.
+@export("ipv4_pmtu_update")
+fn pmtuUpdate(dst: u32, given: u32) {
+    let mtu = if (given < IPV4_PMTU_MIN) IPV4_PMTU_MIN else given;
+    let now = unsafe { clock_now_ns() };
+    {
+        var guard = PMTU.lock();
+        let c = guard.data();
+        var slot: usize? = null;
+        var oldest: usize = 0;
+        for (i in 0..IPV4_PMTU_ENTRIES) {
+            let e = borrow c.entries[i];
+            if (e.expiresNs != 0 && e.dst == dst) {
+                slot = i;
+                break;
+            }
+            if (e.expiresNs == 0 || now >= e.expiresNs) {
+                match (slot) {
+                    null => { slot = i; }
+                    Some(_) => {}
+                }
+            } else if (e.expiresNs < c.entries[oldest].expiresNs) {
+                oldest = i;
+            }
+        }
+        let s = match (slot) {
+            Some(v) => v,
+            null => oldest,
+        };
+        let e = borrow mut c.entries[s];
+        if (e.expiresNs == 0 || e.dst != dst || now >= e.expiresNs || mtu < e.mtu) {
+            e.mtu = mtu;
+        }
+        e.dst = dst;
+        e.expiresNs = now + IPV4_PMTU_TTL_NS;
+    }
+    count(borrow PMTU_UPDATES);
+}
+
+@export("ipv4_pmtu_flush")
+fn pmtuFlush() {
+    var guard = PMTU.lock();
+    let c = guard.data();
+    for (i in 0..IPV4_PMTU_ENTRIES) {
+        c.entries[i] = freePmtu();
+    }
+}
+
+/// What a datagram to `dst` may carry: the cache's MTU, else the route's, else IPV4_PMTU_MIN.
+/// Safety: the route's interface is referenced until it is put.
+@export("ipv4_path_mtu")
+unsafe fn pathMtu(dst: u32) -> u32 {
+    let cached = pmtuLookup(dst);
+    if (cached != 0) {
+        return cached;
+    }
+    let nif = route(dst);
+    if (nif.isNull()) {
+        return IPV4_PMTU_MIN;
+    }
+    let mtu = Ptr.toBorrow(nif).mtu;
+    put(nif);
+    return mtu;
+}
+
+/// RFC 1191's plateau table, for routers that report no MTU: the first plateau below `length`.
+fn plateauBelow(length: u32) -> u32 {
+    let plateaus: [u32; 11] = [65535, 32000, 17914, 8166, 4352, 2002, 1492, 1006, 508, 296, 68];
+    for (p in plateaus) {
+        if (p < length) {
+            return p;
+        }
+    }
+    return 68;
+}
+
+// ---- Routing ----
+
+/// A referenced interface (netif_put when done) or NULL: the loopback for 127/8 and our addresses, a connected subnet
+/// (the longest prefix), else the default.
+/// Safety: the registry's references are given back by the caller.
+@export("ipv4_route")
+unsafe fn route(dst: u32) -> *mut netif {
+    if (isLoopbackNet(dst) || netif_owns_ipv4(dst)) {
+        return netif_loopback();
+    }
+    let nif = netif_connected(dst);
+    if (!nif.isNull()) {
+        return nif;
+    }
+    return netif_default_ipv4();
+}
+
+/// The name in a netif_info into a route's ifname, as strlcpy into a zeroed field: at most 7 bytes and a NUL.
+fn copyName(to: borrow mut [u8; 8], from: borrow [u8; 8]) {
+    for (k in 0..7usize) {
+        if (from[k] == 0) {
+            break;
+        }
+        to[k] = from[k];
+    }
+}
+
+/// The routing table as routes: the default through its gateway, then each connected subnet.
+/// Safety: `out` points to `max` writable records.
+@export("ipv4_route_list")
+unsafe fn routeList(out: *mut ipv4_route_info, max: u32) -> u32 {
+    let cap = NETIF_MAX;
+    let ifs = kmalloc((cap as usize) * layoutOf<netif_info>().size, 0) as *mut netif_info;
+    if (ifs.isNull()) {
+        return 0;
+    }
+    var listed = netif_list(ifs, cap);
+    if (listed > cap) {
+        listed = cap;
+    }
+    var n: u32 = 0;
+    let def = netif_default_ipv4();
+    if (!def.isNull()) {
+        let index = Ptr.toBorrow(def).index;
+        var i: u32 = 0;
+        while (i < listed && n < max) {
+            let f = Ptr.toBorrow(ifs.offset(i as isize) as *netif_info);
+            i += 1;
+            if (f.index != index || f.addr == 0 || f.gateway == 0) {
+                continue; // the copy is the one listed; a default without a gateway routes nothing off-link
+            }
+            let o = Ptr.toBorrowMut(out.offset(n as isize));
+            var name = [0u8; 8];
+            copyName(mut name, borrow f.name);
+            o.ifname = name;
+            o.dst = 0;
+            o.mask = 0;
+            o.gateway = f.gateway;
+            o.src = f.addr;
+            o.flags = IPV4_RTF_UP | IPV4_RTF_GATEWAY;
+            n += 1;
+        }
+        put(def);
+    }
+    var i: u32 = 0;
+    while (i < listed && n < max) {
+        let f = Ptr.toBorrow(ifs.offset(i as isize) as *netif_info);
+        i += 1;
+        if ((f.flags & NETIF_LOOPBACK) != 0 || (f.flags & NETIF_UP) == 0 || f.addr == 0 || f.mask == 0) {
+            continue; // netif_connected's rule
+        }
+        let o = Ptr.toBorrowMut(out.offset(n as isize));
+        var name = [0u8; 8];
+        copyName(mut name, borrow f.name);
+        o.ifname = name;
+        o.dst = f.addr & f.mask;
+        o.mask = f.mask;
+        o.gateway = 0;
+        o.src = f.addr;
+        o.flags = IPV4_RTF_UP;
+        n += 1;
+    }
+    kfree(ifs as *mut void);
+    return n;
+}
+
+/// The source for `dst`: 0 without a route; on the loopback the destination itself when it is ours, else 127.0.0.1;
+/// otherwise the route's address.
+/// Safety: as route.
+@export("ipv4_source_for")
+unsafe fn sourceFor(dst: u32) -> u32 {
+    let nif = route(dst);
+    if (nif.isNull()) {
+        return 0;
+    }
+    var src: u32 = 0;
+    if ((flagsOf(nif) & NETIF_LOOPBACK) != 0) {
+        src = if (netif_owns_ipv4(dst)) dst else LOOPBACK_N;
+    } else {
+        src = addrOf(nif);
+    }
+    put(nif);
+    return src;
+}
+
+// ---- Output ----
+
+/// Safety: ip.h's contract: `m` is a packet the caller hands over.
+@export("ipv4_output")
+unsafe fn output(m: *mut mbuf, src: u32, dst: u32, proto: u8, ttl: u8) -> i32 {
+    let nif = route(dst);
+    if (nif.isNull()) {
+        count(borrow TX_NO_ROUTE);
+        m_freem(m);
+        return -ENETUNREACH;
+    }
+    // The source the header will carry, resolved once and handed to the firewall's OUTPUT verdict, the host chain's
+    // flow read and outputOn, so a source-prefix rule judges the address the wire carries.
+    let from = if (src != 0) src else sourceFor(dst);
+    let flags = flagsOf(nif); // once per datagram (N26)
+    // The firewall's OUTPUT chain: what the host itself may send, after the route (the egress is the scope a rule may
+    // name) and before the flow read and the link. The sender is local, so it is told: -EPERM. Loopback is not offered.
+    if ((flags & NETIF_LOOPBACK) == 0 && fw_output_verdict(nif, flags, m, from, dst, proto) == FW_DROP) {
+        count(borrow TX_FILTERED);
+        m_freem(m);
+        put(nif);
+        return -EPERM;
+    }
+    // The host chain's state: read here, the one door every datagram the host originates passes, and recorded only
+    // once outputOn has accepted the datagram: a send refused for its size or a missing next hop opens nothing.
+    var flow: [u32; 4] = [0; 4]; // struct fw_host_flow: two addresses, two ports, the protocol (16 bytes)
+    let flowAt = borrow mut flow as *mut [u32; 4] as *mut fw_host_flow;
+    let track = fw_host_flow_of(nif, flags, m, from, dst, proto, flowAt);
+    let rc = outputOn(nif, m, from, dst, proto, ttl);
+    if (track && rc == 0) {
+        fw_host_record(flowAt as *fw_host_flow);
+    }
+    put(nif);
+    return rc;
+}
+
+/// The header in front of `packet` (`src` already the address for the wire), then out through the loopback, or ARP and
+/// Ethernet to the destination on the link or to the gateway.
+/// Safety: `nif` is referenced by the caller; `packet` is handed over.
+unsafe fn outputOn(nif: *mut netif, packet: *mut mbuf, src: u32, dst: u32, proto: u8, ttl: u8) -> i32 {
+    let total = Ptr.toBorrow(packet).pkt.len as u64 + IPV4_HLEN as u64;
+    if (total > (Ptr.toBorrow(nif).mtu as u64) || total > 65535) {
+        m_freem(packet);
+        return -EMSGSIZE;
+    }
+    let m = m_prepend(packet, IPV4_HLEN); // room for the header in front, or the packet freed
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    {
+        let p = Ptr.toBorrowMut(m);
+        let h = SliceMut.fromRaw(p.data, IPV4_HLEN as usize);
+        h[0] = 0x45;
+        h[1] = 0;
+        putBe16(h, 2, truncate<u32>(total));
+        putBe16(h, 4, IP_ID.fetchAddWith(1, Ordering.Relaxed) & 0xffff);
+        putBe16(h, 6, 0x4000); // don't fragment
+        h[8] = ttl;
+        h[9] = proto;
+        h[10] = 0;
+        h[11] = 0;
+        putWord(h, 12, src);
+        putWord(h, 16, dst);
+        putNative16(h, 10, in_cksum(p.data as *void, IPV4_HLEN as usize));
+        p.pkt.proto = ETH_P_IP;
+        if ((p.pkt.csum_flags & NET_CSUM_TX) != 0) {
+            p.pkt.csum_start = p.pkt.csum_start.wrappingAdd(truncate<u16>(IPV4_HLEN)); // as the C's u16 sum
+        }
+    }
+    count(borrow TX);
+    if ((flagsOf(nif) & NETIF_LOOPBACK) != 0) {
+        return netif_transmit(nif, m);
+    }
+    var nextHop = dst;
+    let onLink = ((dst ^ addrOf(nif)) & maskOf(nif)) == 0 || dst == BROADCAST;
+    if (!onLink) {
+        let gateway = gatewayOf(nif);
+        if (gateway == 0) {
+            count(borrow TX_NO_ROUTE);
+            m_freem(m);
+            return -ENETUNREACH;
+        }
+        nextHop = gateway;
+    }
+    var mac = [0u8; 6];
+    let rc = arp_resolve(nif, nextHop, borrow mut mac as *mut [u8; 6] as *mut u8, m);
+    if (rc == -EINPROGRESS) {
+        return 0; // queued on the ARP entry; sent when it resolves
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    return ether_output(nif, m, borrow mac as *[u8; 6] as *u8, ETH_P_IP);
+}
+
+// ---- ICMP ----
+
+/// An error about `orig` back to its sender: the ICMP header (`kind`, `code`), then the original IP header and its
+/// first 8 bytes. Nothing for a broadcast or a loopback destination, nor past the rate limit.
+/// Safety: `orig` is a packet the caller keeps; `iph` points to its IPv4 header.
+unsafe fn sendError(orig: *mut mbuf, iph: *ipv4_hdr, kind: u8, code: u8, sent: borrow AtomicU64) {
+    let h = Slice.fromRaw(iph as *u8, IPV4_HLEN as usize);
+    let dst = word(h, 16);
+    if (dst == BROADCAST || isLoopbackNet(dst)) {
+        return;
+    }
+    if (!rateLimitAllow()) {
+        return;
+    }
+    let ihl = ((h[0] & 0xf) as u32) * 4;
+    var quote = ihl + 8;
+    let length = Ptr.toBorrow(orig).pkt.len;
+    if (quote > length) {
+        quote = length;
+    }
+    let m = m_getcl();
+    if (m.isNull()) {
+        return;
+    }
+    let data = Ptr.toBorrow(m).data;
+    let ic = SliceMut.fromRaw(data, ICMP_HLEN as usize);
+    ic.fill(0);
+    ic[0] = kind;
+    ic[1] = code;
+    if (!m_copydata(orig as *mbuf, 0, quote, data.offset(ICMP_HLEN as isize) as *mut void)) {
+        m_freem(m);
+        return;
+    }
+    {
+        let p = Ptr.toBorrowMut(m);
+        p.len = ICMP_HLEN + quote; // its one buffer
+        p.pkt.len = ICMP_HLEN + quote;
+    }
+    putNative16(ic, 2, in_cksum(data as *void, (ICMP_HLEN + quote) as usize));
+    count(sent);
+    output(m, dst, word(h, 12), IPPROTO_ICMP, IP_DEFAULT_TTL);
+}
+
+/// Safety: ip.h's contract, as sendError.
+@export("icmp_send_unreach")
+unsafe fn sendUnreach(orig: *mut mbuf, iph: *ipv4_hdr, code: u8) {
+    sendError(orig, iph, ICMP_DEST_UNREACH, code, borrow UNREACH_SENT);
+}
+
+/// Safety: ip.h's contract, as sendError.
+@export("icmp_send_timxceed")
+unsafe fn sendTimeExceeded(orig: *mut mbuf, iph: *ipv4_hdr) {
+    sendError(orig, iph, ICMP_TIME_EXCEEDED, ICMP_TIMXCEED_INTRANS, borrow FWD_TTL_EXCEEDED);
+}
+
+/// The flow an ICMP error quotes, as this host's own: the quoted packet is one we sent, so its source is our local end
+/// and its destination the peer; null unless the quote is a well-formed IPv4 header this host could have sent and the
+/// transport's first 8 bytes are there.
+struct QuotedFlow {
+    local: [u32; 5];  // struct netaddr: family and port, then the address (20 bytes)
+    remote: [u32; 5];
+    proto: u8;
+    seq: u32;
+    quotedLength: u32;
+    remoteAddress: u32;
+}
+
+/// Safety: `m` holds an ICMP message whose header is in the first mbuf.
+unsafe fn quotedFlow(m: *mut mbuf) -> QuotedFlow? {
+    var quote = [0u8; 28]; // an IPv4 header and 8 bytes
+    if (!m_copydata(m as *mbuf, ICMP_HLEN, 28, borrow mut quote as *mut [u8; 28] as *mut void)) {
+        return null;
+    }
+    var ihl: u32 = 0;
+    let q = quote[..];
+    if (!netparse_ipv4_quote(borrow quote as *[u8; 28] as *u8, borrow mut ihl as *mut u32) || !netif_owns_ipv4(word(q, 12))) {
+        return null;
+    }
+    var th = [0u8; 8];
+    if (!m_copydata(m as *mbuf, ICMP_HLEN + ihl, 8, borrow mut th as *mut [u8; 8] as *mut void)) {
+        return null;
+    }
+    let l4 = netparse_l4_flow(borrow th as *[u8; 8] as *u8, 8);
+    let sport = l4 & 0xffff;
+    let dport = (l4 >> 16) & 0xffff;
+    let src = word(q, 12);
+    let dst = word(q, 16);
+    return QuotedFlow {
+        local: [COSMO_AF_INET | (truncate<u32>(sport) << 16), src, 0, 0, 0],
+        remote: [COSMO_AF_INET | (truncate<u32>(dport) << 16), dst, 0, 0, 0],
+        proto: q[9],
+        seq: truncate<u32>(l4 >> 32),
+        quotedLength: be16(q, 2),
+        remoteAddress: dst,
+    };
+}
+
+/// A destination-unreachable for a flow of this host's: only a connected UDP socket takes one. TCP keeps its verdict
+/// from the segments themselves (RFC 1122 §4.2.3.9; RFC 5927).
+/// Safety: as quotedFlow.
+unsafe fn unreachable(m: *mut mbuf, code: u8) {
+    let f = match (quotedFlow(m)) {
+        Some(v) => v,
+        null => { return; }
+    };
+    if (f.proto != IPPROTO_UDP) {
+        return;
+    }
+    var err: i32 = 0;
+    if (code == ICMP_UNREACH_NET) {
+        err = -ENETUNREACH;
+    } else if (code == ICMP_UNREACH_HOST) {
+        err = -EHOSTUNREACH;
+    } else if (code == ICMP_UNREACH_PROTO || code == ICMP_UNREACH_PORT) {
+        err = -ECONNREFUSED; // nothing speaks UDP there: as refused as a port
+    } else {
+        return;
+    }
+    if (udp_error_notify(borrow f.local as *[u32; 5] as *netaddr, borrow f.remote as *[u32; 5] as *netaddr, err)) {
+        count(borrow UNREACH_DELIVERED);
+    }
+}
+
+/// Fragmentation needed (RFC 1191): recorded only after TCP confirms the quoted segment is one of ours still in flight
+/// (RFC 5927), since a blind sender can forge any quote.
+/// Safety: as quotedFlow; `nextHopMtu` is the header's last 16 bits.
+unsafe fn needFragmentation(m: *mut mbuf, nextHopMtu: u32) {
+    count(borrow NEEDFRAG_RCVD);
+    let f = match (quotedFlow(m)) {
+        Some(v) => v,
+        null => { return; }
+    };
+    if (f.proto != IPPROTO_TCP) {
+        return;
+    }
+    var mtu = nextHopMtu;
+    if (mtu == 0) {
+        mtu = plateauBelow(f.quotedLength);
+    }
+    if (mtu < IPV4_PMTU_MIN) {
+        mtu = IPV4_PMTU_MIN;
+    }
+    let told = truncate<u16>(if (mtu > 65535) 65535 else mtu);
+    if (tcp_pmtu_notify(borrow f.local as *[u32; 5] as *netaddr, borrow f.remote as *[u32; 5] as *netaddr, f.seq, told)) {
+        pmtuUpdate(f.remoteAddress, mtu); // confirmed by a live connection: remember it for the next ones
+    }
+}
+
+/// Safety: ip.h's contract: `nif` is a registered interface, `received` a packet the caller hands over, `iph` its IPv4
+/// header, copied by ipv4_input.
+@export("icmp_input")
+unsafe fn icmpInput(nif: *mut netif, received: *mut mbuf, iph: *ipv4_hdr) {
+    let length = Ptr.toBorrow(received).pkt.len;
+    if (length < ICMP_HLEN) {
+        m_freem(received);
+        return;
+    }
+    if (cksum_fold(m_cksum_partial(received as *mbuf, 0, length, 0)) != 0) {
+        count(borrow RX_BAD_CKSUM);
+        m_freem(received);
+        return;
+    }
+    let m = m_pullup(received, ICMP_HLEN); // the header in the first mbuf, or the packet freed
+    if (m.isNull()) {
+        return;
+    }
+    let ic = SliceMut.fromRaw(Ptr.toBorrow(m).data, ICMP_HLEN as usize);
+    let kind = ic[0];
+    let code = ic[1];
+    let quiet = (Ptr.toBorrow(m).flags & M_FW_QUIET) != 0;
+    if (kind == ICMP_DEST_UNREACH && code == ICMP_UNREACH_NEEDFRAG) {
+        if (!quiet) {
+            raw_icmp_input(m as *mbuf, iph); // raw sockets see it as they see any accepted message (N31)
+        }
+        needFragmentation(m, be16(ic, 6)); // admits nothing TCP does not confirm, and answers nothing
+        m_freem(m);
+        return;
+    }
+    // The host firewall said DROP (M_FW_QUIET) and no flow claimed it: nothing else runs -- not the echo reply, whose
+    // rate-limit budget a refused probe must not spend, not the reply hook.
+    if (quiet) {
+        count(borrow ICMP_QUIET_DROPPED);
+        m_freem(m);
+        return;
+    }
+    // Raw ICMP sockets get a copy of what the stack accepted, before the echo reply rewrites it in place (N31).
+    raw_icmp_input(m as *mbuf, iph);
+    if (kind == ICMP_DEST_UNREACH) {
+        unreachable(m, code); // a connected UDP flow's, or nothing
+        m_freem(m);
+        return;
+    }
+    let h = Slice.fromRaw(iph as *u8, IPV4_HLEN as usize);
+    if (kind == ICMP_ECHO && code == 0 && (Ptr.toBorrow(m).flags & M_BCAST) == 0) {
+        count(borrow ECHO_RCVD);
+        if (!rateLimitAllow()) {
+            m_freem(m);
+            return;
+        }
+        // The request turned into the reply in place.
+        ic[0] = ICMP_ECHO_REPLY;
+        ic[2] = 0;
+        ic[3] = 0;
+        putNative16(ic, 2, cksum_fold(m_cksum_partial(m as *mbuf, 0, length, 0)));
+        {
+            let p = Ptr.toBorrowMut(m);
+            p.flags = p.flags & ((M_BCAST | M_MCAST) ^ 0xffffffff);
+        }
+        count(borrow ECHO_REPLIED);
+        output(m, word(h, 16), word(h, 12), IPPROTO_ICMP, IP_DEFAULT_TTL);
+        return;
+    }
+    if (kind == ICMP_ECHO_REPLY) {
+        echoReplyHook(word(h, 12), truncate<u16>(be16(ic, 4)), truncate<u16>(be16(ic, 6)));
+    }
+    m_freem(m);
+}
+
+/// The echo-reply hook (an icmp_echo_reply_fn's address; 0 for none), set once by its one user.
+static ECHO_HOOK: AtomicUSize = AtomicUSize.constant(0);
+
+@export("icmp_set_echo_reply_hook")
+fn setEchoReplyHook(hook: extern "C" fn(u32, u16, u16)) {
+    ECHO_HOOK.storeWith(hook as usize, StoreOrdering.Release);
+}
+
+/// Safety: a hook set is a function of icmp_echo_reply_fn's type.
+@export("icmp_echo_reply_hook")
+unsafe fn echoReplyHook(src: u32, id: u16, seq: u16) {
+    let hook = ECHO_HOOK.loadWith(LoadOrdering.Acquire);
+    if (hook != 0) {
+        let f = hook as extern "C" fn(u32, u16, u16);
+        f(src, id, seq);
+    }
+}
+
+/// Safety: `payload` points to `length` readable bytes.
+@export("icmp_send_echo")
+unsafe fn sendEcho(dst: u32, id: u16, seq: u16, payload: *void, length: usize) -> i32 {
+    if (length > 1400) {
+        return -EMSGSIZE;
+    }
+    let m = m_getcl();
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    let data = Ptr.toBorrow(m).data;
+    let total = ICMP_HLEN + truncate<u32>(length);
+    let b = SliceMut.fromRaw(data, total as usize); // a cluster's room is far more than 1408 bytes
+    b[0] = ICMP_ECHO;
+    b[1] = 0;
+    b[2] = 0;
+    b[3] = 0;
+    putBe16(b, 4, id as u32);
+    putBe16(b, 6, seq as u32);
+    if (length != 0) {
+        b[8..].copyFrom(Slice.fromRaw(payload as *u8, length));
+    }
+    {
+        let p = Ptr.toBorrowMut(m);
+        p.len = total; // its one buffer
+        p.pkt.len = total;
+    }
+    putNative16(b, 2, in_cksum(data as *void, total as usize));
+    return output(m, 0, dst, IPPROTO_ICMP, IP_DEFAULT_TTL);
+}
+
+// ---- Forwarding ----
+
+/// The debug build's forwarding hook: park the next forwarded packet between the anti-spoof check and the masquerade
+/// decision, where per-check reads of the flag word could see a toggle land (N26, net-netif-flags).
+static TEST_HOLD_FORWARD: AtomicU32 = AtomicU32.constant(0);
+static TEST_FORWARD_PARKED: AtomicU32 = AtomicU32.constant(0);
+static TEST_FORWARD_RELEASE: AtomicU32 = AtomicU32.constant(0);
+
+/// Arming resets the park state; disarming leaves it, since a parked worker may not have seen the release yet.
+@cfg("CONFIG_DEBUG")
+@export("ipv4_test_hold_forward")
+fn testHoldForward(on: bool) {
+    if (on) {
+        TEST_FORWARD_PARKED.storeWith(0, StoreOrdering.Release);
+        TEST_FORWARD_RELEASE.storeWith(0, StoreOrdering.Release);
+    }
+    TEST_HOLD_FORWARD.storeWith(if (on) 1 else 0, StoreOrdering.Release);
+}
+
+@cfg("CONFIG_DEBUG")
+@export("ipv4_test_forward_parked")
+fn testForwardParked() -> bool => TEST_FORWARD_PARKED.loadWith(LoadOrdering.Acquire) != 0;
+
+@cfg("CONFIG_DEBUG")
+@export("ipv4_test_release_forward")
+fn testReleaseForward() {
+    TEST_FORWARD_RELEASE.storeWith(1, StoreOrdering.Release);
+}
+
+/// Safety: arch_cpu_relax is a pause instruction.
+fn parkForward() {
+    if (TEST_HOLD_FORWARD.loadWith(LoadOrdering.Relaxed) == 0) {
+        return; // not armed, the common case
+    }
+    match (TEST_HOLD_FORWARD.compareExchangeWith(1, 0, Ordering.AcquireRelease)) {
+        Ok(_) => {}
+        Err(_) => { return; }
+    }
+    TEST_FORWARD_PARKED.storeWith(1, StoreOrdering.Release);
+    while (TEST_FORWARD_RELEASE.loadWith(LoadOrdering.Acquire) == 0) {
+        unsafe { arch_cpu_relax(); }
+    }
+}
+
+/// Forwards a unicast datagram not for this host, from an interface marked NETIF_FORWARD (RFC 1812): anti-spoof, the
+/// TTL, the route, no hairpin, the FORWARD verdict, NAT on the way out, then out again with a new header. `inFlags` is
+/// the ingress's flag word as ipv4_input read it, once (N26). Consumes `packet`.
+/// Safety: `input` is registered; `packet` holds the whole header (`ihl` bytes of `total`), checked by ipv4_input.
+unsafe fn forward(input: *mut netif, inFlags: u32, packet: *mut mbuf, ihl: u32, total: u32) {
+    count(borrow FWD);
+    var m = packet;
+    let h = Slice.fromRaw(Ptr.toBorrow(m).data as *u8, IPV4_HLEN as usize);
+    let src = word(h, 12);
+    let dst = word(h, 16);
+    let proto = h[9];
+    let ttlIn = h[8];
+    // Anti-spoof (strict reverse path): a masquerading tap's one guest is <subnet>.15; a bare forwarder takes "a source
+    // on my subnet"; one without a configured subnet is not gated.
+    let inAddr = addrOf(input);
+    let inMask = maskOf(input);
+    if (inAddr != 0 && inMask != 0) {
+        let net = inAddr & inMask;
+        let bad = if ((inFlags & NETIF_MASQUERADE) != 0) src != (net | GUEST_HOST_N) else ((src ^ inAddr) & inMask) != 0;
+        if (bad) {
+            count(borrow FWD_SPOOFED);
+            m_freem(m);
+            return;
+        }
+    }
+    if (ttlIn <= 1) { // would reach zero in transit
+        sendTimeExceeded(m, Ptr.toBorrow(m).data as *ipv4_hdr);
+        m_freem(m);
+        return;
+    }
+    let ttl = ttlIn - 1;
+    if (DEBUG_BUILD) {
+        parkForward();
+    }
+    let out = route(dst);
+    if (out.isNull()) {
+        sendUnreach(m, Ptr.toBorrow(m).data as *ipv4_hdr, ICMP_UNREACH_NET);
+        count(borrow FWD_NO_ROUTE);
+        m_freem(m);
+        return;
+    }
+    let outFlags = flagsOf(out); // once, for the egress (N26)
+    if (out == input || (outFlags & NETIF_LOOPBACK) != 0) {
+        // Back out the arrival interface (a redirect we do not do), or a martian routing to loopback: dropped.
+        count(borrow FWD_HAIRPIN);
+        put(out);
+        m_freem(m);
+        return;
+    }
+    // The forwarding firewall, on the datagram as the guest sent it: after anti-spoof and routing, before any rewrite.
+    if (fw_forward_verdict(input, out, outFlags, m, Ptr.toBorrow(m).data as *ipv4_hdr, ihl) == FW_DROP) {
+        count(borrow FWD_FILTERED);
+        put(out);
+        m_freem(m);
+        return;
+    }
+    // NAT on the way out, per packet: a DNAT reply's source rewritten back, a flow from a masquerading interface off its
+    // subnet masqueraded; what cannot be masqueraded where it must be is dropped rather than leak a private source.
+    var newSrc = src;
+    if ((inFlags & NETIF_MASQUERADE) != 0) {
+        let l4min: u32 = if (proto == IPPROTO_TCP) 20 else 8;
+        let natable = (proto == IPPROTO_UDP || proto == IPPROTO_TCP || proto == IPPROTO_ICMP) &&
+            Ptr.toBorrow(m).pkt.len >= ihl + l4min;
+        if (natable) {
+            m = m_pullup(m, ihl + l4min);
+            if (m.isNull()) {
+                put(out);
+                return;
+            }
+            if (nat_out(input, inFlags, out, outFlags, m, Ptr.toBorrow(m).data as *ipv4_hdr, ihl, borrow mut newSrc as *mut u32) != 0) {
+                count(borrow FWD_NAT_DROP);
+                put(out);
+                m_freem(m);
+                return;
+            }
+        } else {
+            let outAddr = addrOf(out);
+            let outMask = maskOf(out);
+            let onEgress = outAddr != 0 && outMask != 0 && ((src ^ outAddr) & outMask) == 0;
+            if (!onEgress && outAddr != 0) {
+                count(borrow FWD_NAT_DROP);
+                put(out);
+                m_freem(m);
+                return;
+            }
+        }
+    }
+    // Trim any link padding, strip the header, re-emit with the decremented TTL on the chosen interface.
+    let length = Ptr.toBorrow(m).pkt.len;
+    if (total < length) {
+        m_adj(m, 0 - truncate<i32>(length - total));
+    }
+    m_adj(m, truncate<i32>(ihl));
+    outputOn(out, m, newSrc, dst, proto, ttl);
+    put(out);
+}
+
+// ---- Input ----
+
+/// Safety: ether.h's contract: `nif` is a registered interface, `received` a packet the caller hands over.
+@export("ipv4_input")
+unsafe fn input(nif: *mut netif, received: *mut mbuf) {
+    count(borrow RX);
+    var m = m_pullup(received, IPV4_HLEN); // the header in the first mbuf, or the packet freed
+    if (m.isNull()) {
+        count(borrow RX_BAD_HEADER);
+        return;
+    }
+    var ihl: u32 = 0;
+    var total: u32 = 0;
+    if (!netparse_ipv4_outer(Ptr.toBorrow(m).data as *u8, Ptr.toBorrow(m).pkt.len, borrow mut ihl as *mut u32,
+        borrow mut total as *mut u32)) {
+        count(borrow RX_BAD_HEADER);
+        m_freem(m);
+        return;
+    }
+    m = m_pullup(m, ihl);
+    if (m.isNull()) {
+        count(borrow RX_BAD_HEADER);
+        return;
+    }
+    let data = Ptr.toBorrow(m).data;
+    if (!netparse_ipv4_cksum_ok(data as *u8, ihl)) {
+        count(borrow RX_BAD_CKSUM);
+        m_freem(m);
+        return;
+    }
+    if (netparse_ipv4_fragment(data as *u8)) { // fragments unsupported
+        count(borrow RX_FRAGMENTS);
+        m_freem(m);
+        return;
+    }
+    // Trim link padding to the total length before anyone downstream reads past it.
+    let length = Ptr.toBorrow(m).pkt.len;
+    if (total < length) {
+        m_adj(m, 0 - truncate<i32>(length - total));
+    }
+    let h = Slice.fromRaw(data as *u8, IPV4_HLEN as usize);
+    let iph = data as *ipv4_hdr;
+    let proto = h[9];
+    let src = word(h, 12);
+    let dst = word(h, 16);
+    let flags = flagsOf(nif); // the ingress's flag word, read once for this packet (N26)
+    // A DHCP server's reply to this interface's client, before the address checks (RFC 2131 §4.1).
+    if (proto == IPPROTO_UDP && (flags & NETIF_LOOPBACK) == 0 && dhcp_client_input(nif, m, ihl)) {
+        return;
+    }
+    // Martians: loopback or our own addresses arriving from a real link.
+    if ((flags & NETIF_LOOPBACK) == 0 && (isLoopbackNet(src) || netif_owns_ipv4(src))) {
+        count(borrow RX_BAD_HEADER);
+        m_freem(m);
+        return;
+    }
+    let addr = addrOf(nif);
+    let mask = maskOf(nif);
+    let bcast = dst == BROADCAST || (mask != 0 && addr != 0 && (dst | mask) == BROADCAST && ((dst ^ addr) & mask) == 0);
+    if (!bcast && !netif_owns_ipv4(dst)) {
+        if ((flags & NETIF_FORWARD) != 0) {
+            forward(nif, flags, m, ihl, total);
+            return;
+        }
+        count(borrow RX_NOT_FOR_US);
+        m_freem(m);
+        return;
+    }
+    if (bcast) {
+        let p = Ptr.toBorrowMut(m);
+        p.flags = p.flags | M_BCAST;
+    }
+    // The off-link invariant: a datagram arriving on a link is for an address on that link -- the ingress's own, or a
+    // broadcast. Loopback ingress is the host talking to itself and is exempt.
+    if (!bcast && (flags & NETIF_LOOPBACK) == 0 && dst != addr) {
+        count(borrow RX_OFFLINK);
+        m_freem(m);
+        return;
+    }
+    // A reply to a masqueraded guest flow (or an ICMP error quoting one): nat_in rewrites it back and forwards it.
+    if (!bcast && netif_owns_ipv4(dst) && nat_in(nif, m, iph, ihl, truncate<u16>(total))) {
+        return;
+    }
+    // The firewall's INPUT chain: a guest tap delivering to the host itself.
+    if ((flags & NETIF_MASQUERADE) != 0 && fw_input_verdict(nif, m, iph, ihl) == FW_DROP) {
+        count(borrow IN_FILTERED);
+        m_freem(m);
+        return;
+    }
+    // The host chain: a real, non-guest link delivering to the host itself. A DROP is quiet: TCP, UDP and ICMP are
+    // delivered marked M_FW_QUIET, for the transport (or the path-MTU confirmation) to admit only into what exists;
+    // anything else is freed.
+    if ((flags & (NETIF_MASQUERADE | NETIF_LOOPBACK)) == 0 && fw_host_verdict(nif, m, iph, ihl) == FW_DROP) {
+        if (proto == IPPROTO_TCP || proto == IPPROTO_UDP || proto == IPPROTO_ICMP) {
+            let p = Ptr.toBorrowMut(m);
+            p.flags = p.flags | M_FW_QUIET;
+            count(borrow HIN_QUIET);
+        } else {
+            count(borrow HIN_FILTERED);
+            m_freem(m);
+            return;
+        }
+    }
+    // Trim link padding, drop the header, deliver. The whole header, options included, is copied out (60 bytes at most)
+    // so that an ICMP error can quote exactly what arrived.
+    let now = Ptr.toBorrow(m).pkt.len;
+    if (total < now) {
+        m_adj(m, 0 - truncate<i32>(now - total));
+    }
+    var hdr = [0u8; 60];
+    hdr[..ihl as usize].copyFrom(Slice.fromRaw(Ptr.toBorrow(m).data as *u8, ihl as usize));
+    let at = borrow hdr as *[u8; 60] as *ipv4_hdr;
+    m_adj(m, truncate<i32>(ihl));
+    if (proto == IPPROTO_ICMP) {
+        icmpInput(nif, m, at);
+    } else if (proto == IPPROTO_UDP) {
+        udp_input(nif, m, at, 0 as *ipv6_hdr);
+    } else if (proto == IPPROTO_TCP) {
+        tcp_input(nif, m, at, 0 as *ipv6_hdr);
+    } else {
+        count(borrow RX_UNKNOWN_PROTO);
+        if (!bcast) {
+            // The header quoted again, for the ICMP error.
+            let q = m_prepend(m, ihl);
+            if (!q.isNull()) {
+                SliceMut.fromRaw(Ptr.toBorrow(q).data, ihl as usize).copyFrom(hdr[..ihl as usize]);
+                sendUnreach(q, at, ICMP_UNREACH_PROTO);
+                m_freem(q);
+            }
+        } else {
+            m_freem(m);
+        }
+    }
+}
+
+/// IPv4's statistics into `out`: its counters, zero for the rest (IPv6's).
+/// Safety: `out` points to a writable record.
+@export("ipv4_get_stats")
+unsafe fn getStats(out: *mut ip_stats) {
+    memset(out as *mut void, 0, layoutOf<ip_stats>().size);
+    let s = Ptr.toBorrowMut(out);
+    s.rx = RX.loadWith(LoadOrdering.Relaxed);
+    s.rx_bad_header = RX_BAD_HEADER.loadWith(LoadOrdering.Relaxed);
+    s.rx_bad_cksum = RX_BAD_CKSUM.loadWith(LoadOrdering.Relaxed);
+    s.rx_not_for_us = RX_NOT_FOR_US.loadWith(LoadOrdering.Relaxed);
+    s.rx_fragments = RX_FRAGMENTS.loadWith(LoadOrdering.Relaxed);
+    s.rx_unknown_proto = RX_UNKNOWN_PROTO.loadWith(LoadOrdering.Relaxed);
+    s.tx = TX.loadWith(LoadOrdering.Relaxed);
+    s.tx_no_route = TX_NO_ROUTE.loadWith(LoadOrdering.Relaxed);
+    s.icmp_echo_rcvd = ECHO_RCVD.loadWith(LoadOrdering.Relaxed);
+    s.icmp_echo_replied = ECHO_REPLIED.loadWith(LoadOrdering.Relaxed);
+    s.icmp_unreach_sent = UNREACH_SENT.loadWith(LoadOrdering.Relaxed);
+    s.icmp_ratelimited = RATELIMITED.loadWith(LoadOrdering.Relaxed);
+    s.icmp_needfrag_rcvd = NEEDFRAG_RCVD.loadWith(LoadOrdering.Relaxed);
+    s.pmtu_updates = PMTU_UPDATES.loadWith(LoadOrdering.Relaxed);
+    s.icmp_unreach_delivered = UNREACH_DELIVERED.loadWith(LoadOrdering.Relaxed);
+    s.fwd = FWD.loadWith(LoadOrdering.Relaxed);
+    s.fwd_ttl_exceeded = FWD_TTL_EXCEEDED.loadWith(LoadOrdering.Relaxed);
+    s.fwd_no_route = FWD_NO_ROUTE.loadWith(LoadOrdering.Relaxed);
+    s.fwd_hairpin = FWD_HAIRPIN.loadWith(LoadOrdering.Relaxed);
+    s.fwd_nat_drop = FWD_NAT_DROP.loadWith(LoadOrdering.Relaxed);
+    s.fwd_spoofed = FWD_SPOOFED.loadWith(LoadOrdering.Relaxed);
+    s.fwd_filtered = FWD_FILTERED.loadWith(LoadOrdering.Relaxed);
+    s.in_filtered = IN_FILTERED.loadWith(LoadOrdering.Relaxed);
+    s.tx_filtered = TX_FILTERED.loadWith(LoadOrdering.Relaxed);
+    s.rx_offlink = RX_OFFLINK.loadWith(LoadOrdering.Relaxed);
+    s.hin_quiet = HIN_QUIET.loadWith(LoadOrdering.Relaxed);
+    s.hin_filtered = HIN_FILTERED.loadWith(LoadOrdering.Relaxed);
+    s.icmp_quiet_dropped = ICMP_QUIET_DROPPED.loadWith(LoadOrdering.Relaxed);
+}

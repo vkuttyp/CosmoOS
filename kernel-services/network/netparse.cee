@@ -636,6 +636,16 @@ unsafe fn l4C(b: *u8, avail: u32, out: *mut netparse_l4) {
     l.tcp_flags = if (n == L4_TCP_FLAGS) h[13] else 0;
 }
 
+/// netparse_l4's ports and sequence as one word, for a caller that holds no `netparse_l4` (ipv4.cee): sport in bits
+/// 0-15, dport in 16-31, seq in 32-63, each as netparse_l4 gives it.
+/// Safety: as netparse_l4.
+@export("netparse_l4_flow")
+unsafe fn l4FlowC(b: *u8, avail: u32) -> u64 {
+    var l = netparse_l4 { sport: 0, dport: 0, seq: 0, icmp_type: 0, icmp_id: 0, tcp_flags: 0 };
+    l4C(b, avail, borrow mut l as *mut netparse_l4);
+    return (l.sport as u64) | ((l.dport as u64) << 16) | ((l.seq as u64) << 32);
+}
+
 /// Safety: `hdr` points to TCP_HLEN readable bytes and `out` to a writable struct.
 @export("netparse_tcp")
 unsafe fn tcpC(hdr: *u8, segLen: u32, out: *mut netparse_tcp) -> bool {

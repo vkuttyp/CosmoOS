@@ -759,6 +759,28 @@ the C's lines and branches. `IPV6_BENCH=1`, the median of five runs'
 medians: an echo answered 1.04x the C and a 512-byte datagram sent
 1.02x on arm64; 1.03x and 1.02x on x86-64 (Rosetta), after reading the
 addresses in place took the first port's 1.05-1.13x back.
+IPv4 and ICMP (2026-11-03): `kernel-services/network/ipv4.cee` -- the
+ICMP rate limit and the path MTU cache (each an `IrqSpinLock`'s data),
+routing and the route list, the source choice, output through the
+firewall's OUTPUT verdict and host flow, ARP or the loopback, ICMP
+errors, echo and fragmentation-needed with its quoted-flow
+confirmation, forwarding with anti-spoof, the FORWARD verdict and NAT,
+input with DHCP, NAT's return path and the INPUT and host chains, and
+the debug build's forwarding hook. Headers are read and written as
+bytes; a received one is copied to a local array and handed on by
+address (`struct ipv4_hdr` is packed), as are the `struct netaddr` and
+host flow it builds (their C layouts as words). The firewall's verdicts,
+C enums with no negative values, are declared `u32`, an `unsigned int`
+for clang and gcc alike. netparse gains `netparse_l4_flow`, the ports
+and sequence as one word. `tests/host/test_ipv4.c`: 20,000 rounds over a
+loopback, an uplink, a masquerading tap and a forwarding link, every
+hook a seeded stub -- every mbuf and allocation freed and every
+reference given back: digest `0x003b7ba636ab8d7a`, the C's (macOS clang,
+Linux gcc); 98.6% of the C's lines and 96.1% of its branches, the rest
+unreachable from the host or a second thread's. `IPV4_BENCH=1`, the
+median of five runs' medians: an echo answered 1.01x the C and a
+512-byte datagram sent 1.02x on arm64; 1.01x and 1.00x on x86-64
+(Rosetta).
 
 Size: about 3.0x.
 
