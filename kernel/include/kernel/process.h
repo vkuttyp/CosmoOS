@@ -387,6 +387,11 @@ struct process_spawn_attr {
     uint32_t uid, gid;
     uint32_t priv_drop;                            /* PRIV_* the child does not get (COSMO_SPAWN_DROPPRIV) */
     const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
+    /* The kernel's init (kernel/core/main.c): pid 1, which POSIX gives
+     * init and BusyBox's poweroff, reboot and halt signal. Every other
+     * process is numbered from 2, so the processes a debug build's
+     * self-tests start first cannot take it. Once: -EEXIST after. */
+    bool init;
 };
 
 /* The credentials a spawn request names for the child. */

@@ -430,7 +430,8 @@ void kernel_main(const struct cosmoboot_info *info)
     if (bootarchive_find("init", &image, &image_size)) {
         static const char *const argv[] = { "init", NULL };
         struct process *init = NULL;
-        int rc = process_create_from_elf(image, image_size, "init", argv, NULL, NULL, &init);
+        static const struct process_spawn_attr init_attr = { .init = true };   /* pid 1 */
+        int rc = process_create_from_elf(image, image_size, "init", argv, NULL, &init_attr, &init);
         if (rc == 0) {
             process_set_init(init);
             int status = process_wait_exit(init);

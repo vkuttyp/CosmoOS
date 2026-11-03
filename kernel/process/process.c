@@ -64,7 +64,8 @@ static void apply_space_limits(struct vm_space *space, const struct rlimits *rli
                         mem == COSMO_RLIM_INFINITY ? UINT64_MAX : mem / PAGE_SIZE);
 }
 static spinlock_t g_process_table_lock = SPINLOCK_INIT("process_table");
-static pid_t g_next_pid = 1;
+static pid_t g_next_pid = 2;   /* 1 is init's (process_spawn_attr.init) */
+static bool g_pid1_taken;
 static unsigned g_process_count;
 
 /* --- object type --- */
@@ -816,7 +817,16 @@ static int process_publish(struct process *p, struct process *parent, const stru
             return -EAGAIN;
         }
     }
-    p->pid = g_next_pid++;
+    if (attr && attr->init) {
+        if (g_pid1_taken) {
+            spin_unlock_irqrestore(&g_process_table_lock, s);
+            return -EEXIST;
+        }
+        g_pid1_taken = true;
+        p->pid = 1;
+    } else {
+        p->pid = g_next_pid++;
+    }
     /* The group and the session: a child joins its parent's, and a
      * process with no parent -- init, and anything the kernel starts --
      * begins a session and a group of its own, so that every process
