@@ -30,28 +30,8 @@
 #include <kernel/vfs.h>
 #include <kernel/wait.h>
 
-/* The UAPI's snapshot bounds are promises about these tables; keep them true. */
-_Static_assert(COSMO_NETCTL_MAX_FORWARDS == NAT_PF_MAX, "netctl.h forward bound drifted from NAT_PF_MAX");
-_Static_assert(COSMO_NETCTL_MAX_GUESTS == FW_MAX_GUESTS, "netctl.h guest bound drifted from FW_MAX_GUESTS");
-_Static_assert(COSMO_NETCTL_MAX_RULES_PER_GUEST == FW_RULES_PER_GUEST,
-               "netctl.h rules-per-guest bound drifted from FW_RULES_PER_GUEST");
-_Static_assert(COSMO_NETCTL_HOST_ADDR == FW_HOST_GUEST_IP, "netctl.h host sentinel drifted from FW_HOST_GUEST_IP");
-_Static_assert(COSMO_NETCTL_MAX_NAT_FLOWS == NAT_TABLE_SIZE, "netctl.h NAT flow bound drifted from NAT_TABLE_SIZE");
-_Static_assert(COSMO_NETCTL_MAX_FW_FLOWS == FW_FLOW_MAX, "netctl.h firewall flow bound drifted from FW_FLOW_MAX");
-_Static_assert(COSMO_NETCTL_PROTO_ICMP == IPPROTO_ICMP && COSMO_NETCTL_PROTO_TCP == IPPROTO_TCP &&
-               COSMO_NETCTL_PROTO_UDP == IPPROTO_UDP, "netctl.h protocol values are the IP protocol numbers");
-/* One read is one object call through the syscall bounce, which offers at
- * most IO_BOUNCE_MAX: a snapshot that could outgrow it could never be read. */
-_Static_assert(COSMO_NETCTL_SNAPSHOT_MAX <= IO_BOUNCE_MAX, "the netctl snapshot must fit one read");
-_Static_assert(sizeof(struct cosmo_netctl_flow) == 32, "cosmo_netctl_flow is 32 bytes in version 6");
-_Static_assert(sizeof(struct cosmo_netctl_flow_list) == 128, "cosmo_netctl_flow_list is 128 bytes in version 6");
-/* The record sizes are the ABI; a writer of the previous version must be
- * refused by size, never misread. Version 5 spent one of the command's and
- * the rule's three reserved bytes on `scope` (so those two are unchanged)
- * and grew the policy record, which had none left, from 8 to 12. */
-_Static_assert(sizeof(struct cosmo_netctl_filter) == 28, "cosmo_netctl_filter is 28 bytes in version 5");
-_Static_assert(sizeof(struct cosmo_netctl_filter_rule) == 24, "cosmo_netctl_filter_rule is 24 bytes in version 5");
-_Static_assert(sizeof(struct cosmo_netctl_filter_guest) == 12, "cosmo_netctl_filter_guest is 12 bytes in version 5");
+/* The UAPI's bounds and record sizes this file relies on are asserted by
+ * tests/host/test_tap.c, which builds against the same headers. */
 
 #define TAP_TXQ_MAX 64u   /* frames the stack has queued for the reader; drops when full */
 
@@ -132,7 +112,8 @@ int tap_inject(struct tap *t, const void *frame, uint32_t len)
     }
     memcpy(m->data, frame, len);
     m->len = m->pkt.len = len;
-    if (t->in_filter && t->in_filter(t, m->data, len, t->in_arg)) {
+    tap_input_fn filter = __atomic_load_n(&t->in_filter, __ATOMIC_ACQUIRE);
+    if (filter && filter(t, m->data, len, __atomic_load_n(&t->in_arg, __ATOMIC_ACQUIRE))) {
         m_freem(m);                  /* the filter claimed it (and copied what it needed) */
         return 0;
     }
@@ -145,13 +126,18 @@ struct mbuf *tap_recv(struct tap *t)
     return mbufq_dequeue(&t->txq);
 }
 
+static bool tap_has_frame(void *arg)
+{
+    return mbufq_len(&((struct tap *)arg)->txq) > 0;
+}
+
 int tap_recv_wait(struct tap *t, bool nonblock, struct mbuf **out)
 {
     struct mbuf *m = mbufq_dequeue(&t->txq);
     while (m == NULL && !nonblock) {
         /* No lock across the wait; the queue's own lock orders the dequeue
          * against the enqueue, and the wake comes after the enqueue. */
-        int rc = wait_event_killable(&t->rx_wait, mbufq_len(&t->txq) > 0);
+        int rc = wait_floor_until_killable(&t->rx_wait, tap_has_frame, t);
         if (rc)
             return rc;
         m = mbufq_dequeue(&t->txq);   /* another reader may have taken it: wait again */
@@ -175,10 +161,17 @@ struct netif *tap_netif(struct tap *t)
     return &t->nif;
 }
 
+/* Published function last (an injector that sees it sees its argument),
+ * cleared function first. Clearing does not wait for a call in flight: the
+ * caller guarantees there is none -- tapsvc_stop runs at the owner's last
+ * close, after which no write, and so no tap_inject, reaches the tap. */
 void tap_set_input_filter(struct tap *t, tap_input_fn fn, void *arg)
 {
-    t->in_arg = arg;
-    t->in_filter = fn;   /* arg set first: the filter sees a consistent (fn, arg) */
+    if (fn == NULL)
+        __atomic_store_n(&t->in_filter, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->in_arg, arg, __ATOMIC_RELEASE);
+    if (fn != NULL)
+        __atomic_store_n(&t->in_filter, fn, __ATOMIC_RELEASE);
 }
 
 /* --- /dev/net/tap: a tap per open, the owner's frame channel ------------- */
@@ -535,12 +528,6 @@ static int64_t tap_ctl_flows(uint8_t *p, size_t room)
 
 /* The lease section (version 7): the kernel's DHCP clients, each copied
  * under its own lock at one `now`. Returns the bytes written or -EMSGSIZE. */
-_Static_assert(COSMO_NETCTL_MAX_LEASES == DHCP_MAX_CLIENTS && COSMO_NETCTL_MAX_DNS == DHCP_MAX_DNS,
-               "the lease section's bounds are the client table's");
-_Static_assert(COSMO_NETCTL_DHCP_INIT == DHCP_S_INIT && COSMO_NETCTL_DHCP_SELECTING == DHCP_S_SELECTING &&
-               COSMO_NETCTL_DHCP_REQUESTING == DHCP_S_REQUESTING && COSMO_NETCTL_DHCP_BOUND == DHCP_S_BOUND &&
-               COSMO_NETCTL_DHCP_RENEWING == DHCP_S_RENEWING && COSMO_NETCTL_DHCP_REBINDING == DHCP_S_REBINDING,
-               "the UAPI's DHCP states are the client's");
 static int64_t tap_ctl_leases(uint8_t *p, size_t room)
 {
     struct dhcp_lease_info l[DHCP_MAX_CLIENTS];
@@ -568,11 +555,6 @@ static int64_t tap_ctl_leases(uint8_t *p, size_t room)
 /* The interface, route and neighbour sections (version 8), from the
  * stack's listings (design.md, "Inspecting the stack"): what `ip` prints.
  * Each returns the bytes written or -EMSGSIZE. */
-_Static_assert(COSMO_NETCTL_MAX_ROUTES == IPV4_ROUTES_MAX && COSMO_NETCTL_MAX_NEIGH == ARP_TABLE_SIZE &&
-               COSMO_NETCTL_MAX_IFS == NETIF_MAX, "the version-8 sections' bounds are the listings', whole");
-_Static_assert(sizeof(struct cosmo_netctl_lease) == 128 && sizeof(struct cosmo_netctl_if) == 120 &&
-               sizeof(struct cosmo_netctl_route) == 32 && sizeof(struct cosmo_netctl_neigh) == 20,
-               "the version-8 records' sizes are the ABI");
 static int64_t tap_ctl_ifs(uint8_t *p, size_t room)
 {
     struct netif_info *f = kmalloc(COSMO_NETCTL_MAX_IFS * sizeof(*f), 0);
