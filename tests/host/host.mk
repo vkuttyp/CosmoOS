@@ -367,7 +367,7 @@ $(HOST_OUT)/test_raw: $(call src_paths,$(HOST_RAW_SRCS)) $(ROOT)/kernel/include/
 $(HOST_OUT)/test_fw: $(call src_paths,$(HOST_FW_SRCS)) $(ROOT)/kernel/include/kernel/net/fw.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE -DFW_HOST_TEST=1 $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -D_DEFAULT_SOURCE $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_netif: $(call src_paths,$(HOST_NETIF_SRCS)) $(ROOT)/kernel/include/kernel/netif.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)

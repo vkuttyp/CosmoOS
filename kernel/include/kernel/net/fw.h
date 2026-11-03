@@ -157,13 +157,9 @@ int fw_policy_get(uint32_t guest_ip, uint8_t *to_uplink, uint8_t *to_guest, uint
 /* The attached guests' addresses (the host object is not among them); the
  * count written. */
 unsigned fw_guest_list(uint32_t *out, unsigned max);
-#ifdef FW_HOST_TEST
-/* The configuration fuzz target's doors (fw.c): the hook told of every rule
- * that decides a verdict, with its owner, under the firewall's lock (NULL
- * removes it; it must not call back into the firewall), and the OUTPUT fast
- * path's state. */
-typedef void (*fw_rule_matched_fn)(uint32_t owner_ip, const struct fw_rule *r);
-void fw_test_set_rule_matched(fw_rule_matched_fn hook);
+#if CONFIG_DEBUG
+/* Debug builds' doors for the fuzz target (fw.cee): the rule hook, called after the lock is released (NULL: none). */
+void fw_test_set_rule_matched(void (*hook)(uint32_t owner_ip, const struct fw_rule *r));
 bool fw_test_out_fast(void);
 #endif
 

@@ -1,0 +1,1301 @@
+// fw.cee - The firewall (kernel/include/kernel/net/fw.h; docs/audit/next-subsystem-firewall.md,
+// next-subsystem-input-chain.md, next-subsystem-host-input.md), in CeeSafe: roadmap 2.0 SA6. A stateful packet filter
+// over the guest taps and the host's uplink: per-guest ordered rules and default policies, the host's own object, the
+// FORWARD, INPUT, host and OUTPUT chains, and a bounded flow table shared by the guests and the host.
+// tests/host/test_fw.c holds it to the digest of the C it replaced.
+//
+// Everything is one IrqSpinLock's data (the C's g_fw_lock): the guests, the host object as a ninth guest slot no
+// datagram's source can name, and the flow table. Order against the rest of the stack: the firewall's lock before
+// NAT's, and the verdict path takes no other. Transport headers are read by copy (m_copydata), so the packet is never
+// re-pointed. The OUTPUT fast path and the statistics are atomics read without the lock.
+
+@header("kernel/net/fw.h", "kernel/net/nat.h", "kernel/net/tapsvc.h", "kernel/net/ip.h", "kernel/netif.h", "kernel/timer.h")
+extern "C" {
+    struct netif_ip4 {
+        addr: AtomicU32;
+        mask: AtomicU32;
+        gateway: AtomicU32;
+    }
+    struct netif {
+        ip4: netif_ip4;
+    }
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        pkt: mbuf_pkt;
+    }
+    /// ip.h's header, packed: the fields the chains read.
+    struct ipv4_hdr {
+        proto: u8;
+        src: u32;
+        dst: u32;
+    }
+    struct fw_rule {
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_ip: u32;
+        dst_port: u16;
+        src_prefix: u8;
+        scope: u8;
+        src_ip: u32;
+    }
+    struct fw_host_flow {
+        src: u32;
+        dst: u32;
+        a_port: u16;
+        b_port: u16;
+        proto: u8;
+    }
+    struct fw_flow_info {
+        guest_ip: u32;
+        a_ip: u32;
+        b_ip: u32;
+        a_port: u16;
+        b_port: u16;
+        proto: u8;
+        est: bool;
+        expires_ns: u64;
+    }
+    struct fw_stats {
+        accept_rule: u64;
+        drop_rule: u64;
+        accept_default: u64;
+        drop_default: u64;
+        accept_established: u64;
+        flow_new: u64;
+        flow_drop_share: u64;
+        flow_drop_table: u64;
+        expired: u64;
+        in_accept_rule: u64;
+        in_drop_rule: u64;
+        in_accept_default: u64;
+        in_drop_default: u64;
+        in_spoofed: u64;
+        hin_accept_rule: u64;
+        hin_drop_rule: u64;
+        hin_accept_default: u64;
+        hin_drop_default: u64;
+        hin_accept_established: u64;
+        hin_flow_new: u64;
+        hin_flow_unrecorded: u64;
+        out_accept_rule: u64;
+        out_drop_rule: u64;
+        out_accept_default: u64;
+        out_drop_default: u64;
+        flows: u32;
+        rules: u32;
+    }
+
+    /// Debug builds carry the fuzz target's doors (fw.h).
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+
+    fn clock_now_ns() -> u64;
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn netparse_l4_view(b: *u8, avail: u32) -> u64;
+}
+
+// ---- Constants (the C headers') ----
+
+/// fw.h.
+const MAX_GUESTS: usize = 8;
+const RULES_PER_GUEST: usize = 32;
+const FLOW_QUOTA_PER_GUEST: u32 = 32;
+const FLOW_QUOTA_HOST: u32 = 64;
+const FLOW_MAX: usize = 320;
+const ICMP_TYPE_ANY: u16 = 0xffff;
+const HOST_GUEST_IP: u32 = 0;
+const DROP: u8 = 0;
+const ACCEPT: u8 = 1;
+const DIR_ANY: u8 = 0;
+const DIR_TO_UPLINK: u8 = 1;
+const DIR_TO_GUEST: u8 = 2;
+const DIR_TO_HOST: u8 = 3;
+const DIR_FROM_UPLINK: u8 = 4;
+const DIR_OUTPUT: u8 = 5;
+const DIR_COUNT: usize = 5;
+const SCOPE_ANY: u8 = 0;
+const SCOPE_WORLD: u8 = 1;
+const SCOPE_GUEST: u8 = 2;
+/// ip.h and tcp.h.
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const ICMP_ECHO_REPLY: u8 = 0;
+const ICMP_ECHO: u8 = 8;
+const TH_SYN: u8 = 0x02;
+const TH_ACK: u8 = 0x10;
+/// netif.h.
+const NETIF_LOOPBACK: u32 = 2;
+const NETIF_FORWARD: u32 = 32;
+const NETIF_MASQUERADE: u32 = 64;
+/// tapsvc.h: the guest is <subnet>.15.
+const TAPSVC_GUEST_HOST: u32 = 15;
+/// nat.h's timeouts, which the flows share.
+const TIMEOUT_UDP_NS: u64 = 30000000000;
+const TIMEOUT_ICMP_NS: u64 = 30000000000;
+const TIMEOUT_TCP_NS: u64 = 30000000000;
+const TIMEOUT_TCPEST_NS: u64 = 300000000000;
+/// kernel/errno.h.
+const ENOENT: i32 = 2;
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+
+/// The defaults: the world stays reachable; a neighbour and the host's own services do not -- except what the tap
+/// offers, seeded as rules. The host chain and the host's own egress accept; the operator hardens by rule.
+const POLICY_TO_UPLINK_DEFAULT: u8 = ACCEPT;
+const POLICY_TO_GUEST_DEFAULT: u8 = DROP;
+const POLICY_TO_HOST_DEFAULT: u8 = DROP;
+const POLICY_FROM_UPLINK_DEFAULT: u8 = ACCEPT;
+const POLICY_OUTPUT_DEFAULT: u8 = ACCEPT;
+
+/// The host object's slot, after the guests'; a guest search never reaches it.
+const HOST: usize = 8;
+/// No slot, no flow.
+const NONE: usize = 0xffffffff;
+
+// ---- The state ----
+
+/// One rule: fw.h's struct fw_rule.
+struct Rule {
+    direction: u8;
+    proto: u8;
+    dstPrefix: u8;
+    verdict: u8;
+    dstIp: u32;
+    dstPort: u16;
+    srcPrefix: u8;
+    scope: u8;
+    srcIp: u32;
+}
+
+@constant
+fn noRule() -> Rule =>
+    Rule { direction: 0, proto: 0, dstPrefix: 0, verdict: 0, dstIp: 0, dstPort: 0, srcPrefix: 0, scope: 0, srcIp: 0 };
+
+/// A policy object: a guest, or the host. policy: [0] TO_UPLINK, [1] TO_GUEST, [2] TO_HOST, [3] FROM_UPLINK and
+/// [4] OUTPUT (the host's).
+struct Guest {
+    attached: bool;
+    ip: u32;
+    gateway: u32;
+    policy: [u8; 5];
+    nrules: usize;
+    rules: [Rule; 32];
+}
+
+@constant
+fn noGuest() -> Guest => Guest { attached: false, ip: 0, gateway: 0, policy: [0; 5], nrules: 0, rules: [noRule(); 32] };
+
+/// The host object as shipped: its defaults and no rules -- there is no small known set of services the uplink is
+/// offered, so nothing is seeded.
+@constant
+fn hostShipped() -> Guest =>
+    Guest {
+        attached: true,
+        ip: HOST_GUEST_IP,
+        gateway: 0,
+        policy: [0, 0, 0, POLICY_FROM_UPLINK_DEFAULT, POLICY_OUTPUT_DEFAULT],
+        nrules: 0,
+        rules: [noRule(); 32],
+    };
+
+/// A tracked flow: `a` sent the accepted first packet to `b`; for ICMP echo aPort is the identifier and bPort 0.
+/// guestIp is the initiator, whose share it counts against: a guest (a guest-to-guest flow the FORWARD chain
+/// recorded), or HOST_GUEST_IP (a flow the host opened, recorded at ipv4_output).
+struct Flow {
+    inUse: bool;
+    est: bool; // TCP: an ACK without SYN has passed
+    proto: u8;
+    guestIp: u32;
+    aIp: u32;
+    bIp: u32;
+    aPort: u16;
+    bPort: u16;
+    expiresNs: u64;
+}
+
+@constant
+fn noFlow() -> Flow =>
+    Flow { inUse: false, est: false, proto: 0, guestIp: 0, aIp: 0, bIp: 0, aPort: 0, bPort: 0, expiresNs: 0 };
+
+struct State {
+    /// The guests, then the host object (HOST).
+    guests: [Guest; 9];
+    flows: [Flow; 320];
+    /// The host's most recent flow, or NONE: a one-entry cache for the host's send path (the same tuple again), and,
+    /// NONE until the host has any flow, the answer to "is there host state to look for?" on the receive path. A
+    /// hint, validated before use.
+    hostLast: usize;
+}
+
+@constant
+fn initial() -> State =>
+    State {
+        guests: [
+            noGuest(),
+            noGuest(),
+            noGuest(),
+            noGuest(),
+            noGuest(),
+            noGuest(),
+            noGuest(),
+            noGuest(),
+            hostShipped(),
+        ],
+        flows: [noFlow(); 320],
+        hostLast: NONE,
+    };
+
+static FW: IrqSpinLock<State> = IrqSpinLock<State>.constant("fw\0".ptr as *CChar, initial());
+
+/// "The OUTPUT chain has nothing to say": no host rule names OUTPUT and its default is ACCEPT. Written under the lock
+/// on every change to the host object, read without it by every send.
+static OUT_FAST: AtomicU32 = AtomicU32.constant(1);
+
+static TEST_HOOKS: bool = COSMO_CONFIG_DEBUG();
+/// Debug builds: the rule-matched hook (fw.h's fw_test_set_rule_matched), or 0.
+static TEST_RULE_MATCHED: AtomicUSize = AtomicUSize.constant(0);
+
+static ACCEPT_RULE: AtomicU64 = AtomicU64.constant(0);
+static DROP_RULE: AtomicU64 = AtomicU64.constant(0);
+static ACCEPT_DEFAULT: AtomicU64 = AtomicU64.constant(0);
+static DROP_DEFAULT: AtomicU64 = AtomicU64.constant(0);
+static ACCEPT_ESTABLISHED: AtomicU64 = AtomicU64.constant(0);
+static FLOW_NEW: AtomicU64 = AtomicU64.constant(0);
+static FLOW_DROP_SHARE: AtomicU64 = AtomicU64.constant(0);
+static FLOW_DROP_TABLE: AtomicU64 = AtomicU64.constant(0);
+static EXPIRED: AtomicU64 = AtomicU64.constant(0);
+static IN_ACCEPT_RULE: AtomicU64 = AtomicU64.constant(0);
+static IN_DROP_RULE: AtomicU64 = AtomicU64.constant(0);
+static IN_ACCEPT_DEFAULT: AtomicU64 = AtomicU64.constant(0);
+static IN_DROP_DEFAULT: AtomicU64 = AtomicU64.constant(0);
+static IN_SPOOFED: AtomicU64 = AtomicU64.constant(0);
+static HIN_ACCEPT_RULE: AtomicU64 = AtomicU64.constant(0);
+static HIN_DROP_RULE: AtomicU64 = AtomicU64.constant(0);
+static HIN_ACCEPT_DEFAULT: AtomicU64 = AtomicU64.constant(0);
+static HIN_DROP_DEFAULT: AtomicU64 = AtomicU64.constant(0);
+static HIN_ACCEPT_ESTABLISHED: AtomicU64 = AtomicU64.constant(0);
+static HIN_FLOW_NEW: AtomicU64 = AtomicU64.constant(0);
+static HIN_FLOW_UNRECORDED: AtomicU64 = AtomicU64.constant(0);
+static OUT_ACCEPT_RULE: AtomicU64 = AtomicU64.constant(0);
+static OUT_DROP_RULE: AtomicU64 = AtomicU64.constant(0);
+static OUT_ACCEPT_DEFAULT: AtomicU64 = AtomicU64.constant(0);
+static OUT_DROP_DEFAULT: AtomicU64 = AtomicU64.constant(0);
+
+fn count(c: borrow AtomicU64) {
+    c.fetchAddWith(1, Ordering.Relaxed);
+}
+
+fn read(c: borrow AtomicU64) -> u64 => c.loadWith(LoadOrdering.Relaxed);
+
+/// A verdict's statistic: by a rule or by the default, accepted or dropped.
+fn countVerdict(
+    verdict: u8,
+    byRule: bool,
+    acceptRule: borrow AtomicU64,
+    acceptDefault: borrow AtomicU64,
+    dropRule: borrow AtomicU64,
+    dropDefault: borrow AtomicU64,
+) {
+    if (verdict == ACCEPT) {
+        count(if (byRule) acceptRule else acceptDefault);
+    } else {
+        count(if (byRule) dropRule else dropDefault);
+    }
+}
+
+/// inet.h's htonl: the byte swap of the targets, all little-endian.
+fn htonl(v: u32) -> u32 => ((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >> 8) & 0xff00) | (v >> 24);
+
+fn dirSlot(dir: u8) -> usize =>
+    if (dir ==
+        DIR_TO_GUEST) 1 else if (dir ==
+        DIR_TO_HOST) 2 else if (dir == DIR_FROM_UPLINK) 3 else if (dir == DIR_OUTPUT) 4 else 0;
+
+// ---- Guests (under the lock) ----
+
+/// A datagram's guest, by its source address: never the host object.
+fn guestFind(st: borrow State, ip: u32) -> usize {
+    for (i in 0..MAX_GUESTS) {
+        if (st.guests[i].attached && st.guests[i].ip == ip) {
+            return i;
+        }
+    }
+    return NONE;
+}
+
+/// A control operation's policy object: the host for HOST_GUEST_IP, else the attached guest of that address.
+fn policyFind(st: borrow State, ip: u32) -> usize => if (ip == HOST_GUEST_IP) HOST else guestFind(st, ip);
+
+/// Recompute the OUTPUT fast path, after anything that changes the host's rules or its OUTPUT default.
+fn outFastUpdate(st: borrow State) {
+    let host = borrow st.guests[HOST];
+    var fast = host.policy[4] == ACCEPT;
+    for (i in 0..host.nrules) {
+        fast = fast && host.rules[i].direction != DIR_OUTPUT;
+    }
+    OUT_FAST.storeWith(if (fast) 1 else 0, StoreOrdering.Relaxed);
+}
+
+/// "As attached": the defaults, and the two TO_HOST rules that keep the tap's own services reachable through a
+/// default-deny INPUT chain (udp gateway/32 :53, icmp gateway/32 type 8) -- ordinary rules, listed and deletable.
+fn guestReset(g: borrow mut Guest, ip: u32, gateway: u32) {
+    g.attached = true;
+    g.ip = ip;
+    g.gateway = gateway;
+    g.policy = [POLICY_TO_UPLINK_DEFAULT, POLICY_TO_GUEST_DEFAULT, POLICY_TO_HOST_DEFAULT, 0, 0];
+    g.rules = [noRule(); 32];
+    g.rules[0] = Rule {
+        direction: DIR_TO_HOST,
+        proto: IPPROTO_UDP,
+        dstPrefix: 32,
+        verdict: ACCEPT,
+        dstIp: gateway,
+        dstPort: 53,
+        srcPrefix: 0,
+        scope: SCOPE_ANY,
+        srcIp: 0,
+    };
+    g.rules[1] = Rule {
+        direction: DIR_TO_HOST,
+        proto: IPPROTO_ICMP,
+        dstPrefix: 32,
+        verdict: ACCEPT,
+        dstIp: gateway,
+        dstPort: ICMP_ECHO as u16,
+        srcPrefix: 0,
+        scope: SCOPE_ANY,
+        srcIp: 0,
+    };
+    g.nrules = 2;
+}
+
+/// fw.h's fw_guest_attach: the guest reset to "as attached", in its slot or a free one.
+@export("fw_guest_attach")
+fn guestAttach(guestIp: u32, gatewayIp: u32) {
+    var found = NONE;
+    {
+        var guard = FW.lock();
+        let st = guard.data();
+        found = guestFind(st, guestIp);
+        if (found == NONE) {
+            for (i in 0..MAX_GUESTS) {
+                if (found == NONE && !st.guests[i].attached) {
+                    found = i;
+                }
+            }
+        }
+        if (found != NONE) {
+            guestReset(borrow mut st.guests[found], guestIp, gatewayIp);
+        }
+    }
+    if (found == NONE) {
+        KernelLog.write(LogLevel.Warn, "fw: no guest slot for a new tap; its traffic takes the built-in defaults");
+    }
+}
+
+/// fw.h's fw_guest_purge: the guest detached, and every flow with its address on either side dropped -- a peer's
+/// flow to it must not outlive it, since the address is about to be reused.
+@export("fw_guest_purge")
+fn guestPurge(guestIp: u32) {
+    var guard = FW.lock();
+    let st = guard.data();
+    let i = guestFind(st, guestIp);
+    if (i != NONE) {
+        st.guests[i] = noGuest();
+    }
+    for (k in 0..FLOW_MAX) {
+        let f = borrow mut st.flows[k];
+        if (f.inUse && (f.aIp == guestIp || f.bIp == guestIp)) {
+            f.inUse = false;
+        }
+    }
+}
+
+// ---- Rules ----
+
+/// A C rule's fields.
+/// Safety: `r` points to a struct fw_rule.
+unsafe fn ruleOf(r: *fw_rule) -> Rule {
+    let c = Ptr.toBorrow(r);
+    return Rule {
+        direction: c.direction,
+        proto: c.proto,
+        dstPrefix: c.dst_prefix,
+        verdict: c.verdict,
+        dstIp: c.dst_ip,
+        dstPort: c.dst_port,
+        srcPrefix: c.src_prefix,
+        scope: c.scope,
+        srcIp: c.src_ip,
+    };
+}
+
+/// A rule written into a C one.
+/// Safety: `out` points to a writable struct fw_rule.
+unsafe fn putRule(out: *mut fw_rule, r: borrow Rule) {
+    let c = Ptr.toBorrowMut(out);
+    c.direction = r.direction;
+    c.proto = r.proto;
+    c.dst_prefix = r.dstPrefix;
+    c.verdict = r.verdict;
+    c.dst_ip = r.dstIp;
+    c.dst_port = r.dstPort;
+    c.src_prefix = r.srcPrefix;
+    c.scope = r.scope;
+    c.src_ip = r.srcIp;
+}
+
+/// A well-formed rule for its owner. FROM_UPLINK and OUTPUT are the host's and nothing else is; only the host's rules
+/// may name a source; a scope narrows an OUTPUT rule and must be ANY everywhere else.
+fn ruleValid(r: borrow Rule, hostScoped: bool) -> bool {
+    if (r.direction > DIR_OUTPUT || r.verdict > ACCEPT || r.dstPrefix > 32 || r.srcPrefix > 32) {
+        return false;
+    }
+    if (r.scope > SCOPE_GUEST) {
+        return false;
+    }
+    let hostDir = r.direction == DIR_FROM_UPLINK || r.direction == DIR_OUTPUT;
+    if (hostDir != hostScoped) {
+        return false;
+    }
+    if (r.scope != SCOPE_ANY && r.direction != DIR_OUTPUT) {
+        return false;
+    }
+    if (r.proto != 0 && r.proto != IPPROTO_TCP && r.proto != IPPROTO_UDP && r.proto != IPPROTO_ICMP) {
+        return false;
+    }
+    if (r.proto == IPPROTO_ICMP && r.dstPort > 255 && r.dstPort != ICMP_TYPE_ANY) {
+        return false; // for ICMP the selector is a type, or the wildcard
+    }
+    if (r.dstPrefix == 0 && r.dstIp != 0) {
+        return false; // "any destination" is written as 0/0
+    }
+    if (r.srcPrefix == 0 && r.srcIp != 0) {
+        return false; // "any source" likewise
+    }
+    return hostScoped || r.srcPrefix == 0; // a guest's source is the guest
+}
+
+fn ruleSame(a: borrow Rule, b: borrow Rule) -> bool =>
+    a.direction == b.direction && a.proto == b.proto && a.dstPrefix == b.dstPrefix && a.verdict == b.verdict &&
+        a.dstIp == b.dstIp && a.dstPort == b.dstPort && a.srcPrefix == b.srcPrefix && a.srcIp == b.srcIp &&
+        a.scope == b.scope;
+
+/// fw.h's fw_rule_add: `r` inserted at `atIndex` (past the end appends). 0, -EINVAL, -ENOENT, -EEXIST or -ENOSPC.
+/// Liveness and insertion under one hold, so a release's purge either ran first or removes what was inserted.
+/// Safety: `r` points to a struct fw_rule.
+@export("fw_rule_add")
+unsafe fn ruleAdd(guestIp: u32, atIndex: u32, r: *fw_rule) -> i32 {
+    let rule = ruleOf(r);
+    if (!ruleValid(borrow rule, guestIp == HOST_GUEST_IP)) {
+        return -EINVAL;
+    }
+    var guard = FW.lock();
+    let st = guard.data();
+    let gi = policyFind(st, guestIp);
+    if (gi == NONE) {
+        return -ENOENT;
+    }
+    let g = borrow mut st.guests[gi];
+    for (i in 0..g.nrules) {
+        if (ruleSame(borrow g.rules[i], borrow rule)) {
+            return -EEXIST;
+        }
+    }
+    if (g.nrules >= RULES_PER_GUEST) {
+        return -ENOSPC;
+    }
+    let at = if (atIndex as usize > g.nrules) g.nrules else atIndex as usize; // clamp: append
+    var i = g.nrules;
+    while (i > at) {
+        g.rules[i] = g.rules[i - 1];
+        i -= 1;
+    }
+    g.rules[at] = rule;
+    g.nrules += 1;
+    outFastUpdate(st);
+    return 0;
+}
+
+/// fw.h's fw_rule_del: the rule whose tuple equals `match` removed; 0, or -ENOENT.
+/// Safety: `wanted` points to a struct fw_rule.
+@export("fw_rule_del")
+unsafe fn ruleDel(guestIp: u32, wanted: *fw_rule) -> i32 {
+    let rule = ruleOf(wanted);
+    var guard = FW.lock();
+    let st = guard.data();
+    let gi = policyFind(st, guestIp);
+    if (gi == NONE) {
+        return -ENOENT;
+    }
+    let g = borrow mut st.guests[gi];
+    for (i in 0..g.nrules) {
+        if (ruleSame(borrow g.rules[i], borrow rule)) {
+            for (j in i + 1..g.nrules) {
+                g.rules[j - 1] = g.rules[j];
+            }
+            g.nrules -= 1;
+            outFastUpdate(st);
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
+/// fw.h's fw_rule_list: the rules in evaluation order; how many were written.
+/// Safety: `out` has room for `max`.
+@export("fw_rule_list")
+unsafe fn ruleList(guestIp: u32, out: *mut fw_rule, max: u32) -> u32 {
+    var guard = FW.lock();
+    let st = guard.data();
+    let gi = policyFind(st, guestIp);
+    var n: u32 = 0;
+    if (gi != NONE) {
+        let g = borrow st.guests[gi];
+        while ((n as usize) < g.nrules && n < max) {
+            putRule(out.add(n as usize), borrow g.rules[n as usize]);
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// fw.h's fw_policy_set: the host's FROM_UPLINK or OUTPUT default, or a guest's TO_UPLINK, TO_GUEST or TO_HOST.
+@export("fw_policy_set")
+fn policySet(guestIp: u32, direction: u8, verdict: u8) -> i32 {
+    if (verdict > ACCEPT) {
+        return -EINVAL;
+    }
+    let hostScoped = guestIp == HOST_GUEST_IP;
+    let owned =
+        if (hostScoped) direction == DIR_FROM_UPLINK ||
+            direction == DIR_OUTPUT else direction >= DIR_TO_UPLINK && direction <= DIR_TO_HOST;
+    if (!owned) {
+        return -EINVAL;
+    }
+    var guard = FW.lock();
+    let st = guard.data();
+    let gi = policyFind(st, guestIp);
+    if (gi == NONE) {
+        return -ENOENT;
+    }
+    st.guests[gi].policy[dirSlot(direction)] = verdict;
+    outFastUpdate(st);
+    return 0;
+}
+
+/// `*p = v`.
+/// Safety: `p` is writable.
+unsafe fn store8(p: *mut u8, v: u8) {
+    let s = SliceMut.fromRaw(p, 1);
+    s[0] = v;
+}
+
+/// `*p = v`.
+/// Safety: `p` is writable.
+unsafe fn store32(p: *mut u32, v: u32) {
+    let s = SliceMut.fromRaw(p, 1);
+    s[0] = v;
+}
+
+/// fw.h's fw_policy_get: every slot; -ENOENT if the guest is not attached.
+/// Safety: each pointer is writable.
+@export("fw_policy_get")
+unsafe fn policyGet(
+    guestIp: u32,
+    toUplink: *mut u8,
+    toGuest: *mut u8,
+    toHost: *mut u8,
+    fromUplink: *mut u8,
+    output: *mut u8,
+) -> i32 {
+    var guard = FW.lock();
+    let st = guard.data();
+    let gi = policyFind(st, guestIp);
+    if (gi == NONE) {
+        return -ENOENT;
+    }
+    let p = st.guests[gi].policy;
+    store8(toUplink, p[0]);
+    store8(toGuest, p[1]);
+    store8(toHost, p[2]);
+    store8(fromUplink, p[3]);
+    store8(output, p[4]);
+    return 0;
+}
+
+/// fw.h's fw_guest_list: the attached guests' addresses; how many were written.
+/// Safety: `out` has room for `max`.
+@export("fw_guest_list")
+unsafe fn guestList(out: *mut u32, max: u32) -> u32 {
+    var guard = FW.lock();
+    let st = guard.data();
+    var n: u32 = 0;
+    for (i in 0..MAX_GUESTS) {
+        if (n < max && st.guests[i].attached) {
+            store32(out.add(n as usize), st.guests[i].ip);
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// ---- The debug builds' doors (the configuration fuzz target's) ----
+
+/// fw.h's fw_test_set_rule_matched: the hook told of every rule that decides a verdict (0 removes it).
+@cfg("CONFIG_DEBUG")
+@export("fw_test_set_rule_matched")
+fn testSetRuleMatched(hook: extern "C" fn(u32, *fw_rule)) {
+    TEST_RULE_MATCHED.storeWith(hook as usize, StoreOrdering.Relaxed);
+}
+
+/// fw.h's fw_test_out_fast: the OUTPUT fast path's state.
+@cfg("CONFIG_DEBUG")
+@export("fw_test_out_fast")
+fn testOutFast() -> bool => OUT_FAST.loadWith(LoadOrdering.Relaxed) != 0;
+
+/// The hook, if this build has one and it is set, told that `r` (of `owner`) decided a verdict. Called after the
+/// lock is released (a C function pointer may do anything, so not under a spin lock), before the verdict is counted.
+/// Safety: a hook set has fw_test_set_rule_matched's parameter type.
+fn matched(owner: u32, r: borrow Rule) {
+    if (!TEST_HOOKS) {
+        return;
+    }
+    let hook = TEST_RULE_MATCHED.loadWith(LoadOrdering.Relaxed);
+    if (hook != 0) {
+        var words: [u32; 4] = [0; 4];
+        let c = borrow mut words as *mut [u32; 4] as *mut fw_rule;
+        unsafe {
+            putRule(c, r);
+            let f = hook as extern "C" fn(u32, *fw_rule);
+            f(owner, c as *fw_rule);
+        }
+    }
+}
+
+// ---- The verdict ----
+
+/// What the verdict needs from the transport header, read by copy.
+struct View {
+    ok: bool;    // enough bytes were present
+    ports: bool; // TCP/UDP: sport and dport are valid
+    sport: u16;
+    dport: u16;
+    tcpFlags: u8;
+    icmpType: u8;
+    icmpId: u16;
+}
+
+fn noView() -> View => View { ok: false, ports: false, sport: 0, dport: 0, tcpFlags: 0, icmpType: 0, icmpId: 0 };
+
+/// The transport header at `ihl` of a datagram of `proto`: through the TCP flags byte, the UDP header or the ICMP id.
+/// Safety: `m` is a packet the caller holds.
+unsafe fn l4Read(m: *mbuf, ihl: u32, proto: u8) -> View {
+    var v = noView();
+    let need: u32 = if (proto == IPPROTO_TCP) 14 else 8;
+    if (proto != IPPROTO_TCP && proto != IPPROTO_UDP && proto != IPPROTO_ICMP) {
+        return v;
+    }
+    var b: [u8; 20] = [0; 20];
+    if (Ptr.toBorrow(m).pkt.len < ihl + need || !m_copydata(m, ihl, need, borrow mut b as *mut [u8; 20] as *mut void)) {
+        return v;
+    }
+    v.ok = true;
+    let w = netparse_l4_view(borrow b as *[u8; 20] as *u8, need);
+    if (proto == IPPROTO_ICMP) {
+        v.icmpType = truncate<u8>(w >> 48);
+        v.icmpId = truncate<u16>(w >> 32);
+        return v;
+    }
+    v.ports = true;
+    v.sport = truncate<u16>(w);
+    v.dport = truncate<u16>(w >> 16);
+    if (proto == IPPROTO_TCP) {
+        v.tcpFlags = truncate<u8>(w >> 56);
+    }
+    return v;
+}
+
+/// A datagram's addresses and protocol: from its header, or, on the send path where none is built yet, the caller's.
+struct Key {
+    proto: u8;
+    src: u32;
+    dst: u32;
+}
+
+/// Safety: `iph` points to an IPv4 header.
+unsafe fn keyOf(iph: *ipv4_hdr) -> Key {
+    let h = Ptr.toBorrow(iph);
+    return Key { proto: h.proto, src: h.src, dst: h.dst };
+}
+
+fn prefixMatches(addr: u32, net: u32, prefix: u8) -> bool {
+    if (prefix == 0) {
+        return true;
+    }
+    let mask = htonl(if (prefix == 32) 0xffffffff else (0xffffffff >> prefix) ^ 0xffffffff);
+    return ((addr ^ net) & mask) == 0;
+}
+
+fn ruleMatches(r: borrow Rule, dir: u8, k: borrow Key, v: borrow View, scope: u8) -> bool {
+    // An OUTPUT rule may name the egress it applies to; every other rule carries SCOPE_ANY.
+    if (r.scope != SCOPE_ANY && r.scope != scope) {
+        return false;
+    }
+    // ANY keeps its original meaning -- either forwarding direction -- and never reaches the host.
+    let dirOk = if (r.direction == DIR_ANY) dir == DIR_TO_UPLINK || dir == DIR_TO_GUEST else r.direction == dir;
+    if (!dirOk) {
+        return false;
+    }
+    if (r.proto != 0 && r.proto != k.proto) {
+        return false;
+    }
+    if (!prefixMatches(k.dst, r.dstIp, r.dstPrefix) || !prefixMatches(k.src, r.srcIp, r.srcPrefix)) {
+        return false;
+    }
+    // The transport selector follows the protocol: an ICMP rule names a type (or the wildcard) and matches only a
+    // datagram whose ICMP header was read; a TCP/UDP/any rule naming a port never matches one that has none.
+    if (r.proto == IPPROTO_ICMP) {
+        return v.ok && (r.dstPort == ICMP_TYPE_ANY || v.icmpType as u16 == r.dstPort);
+    }
+    return r.dstPort == 0 || (v.ports && v.dport == r.dstPort);
+}
+
+/// The first of a policy object's rules matching (`byRule`, the rule in `hit`), or its default for the direction.
+fn judge(
+    g: borrow Guest,
+    dir: u8,
+    k: borrow Key,
+    v: borrow View,
+    scope: u8,
+    byRule: borrow mut bool,
+    hit: borrow mut Rule,
+) -> u8 {
+    for (i in 0..g.nrules) {
+        if (ruleMatches(borrow g.rules[i], dir, k, v, scope)) {
+            byRule = true;
+            hit = g.rules[i];
+            return g.rules[i].verdict;
+        }
+    }
+    return g.policy[dirSlot(dir)];
+}
+
+fn flowTimeout(f: borrow Flow) -> u64 {
+    if (f.proto == IPPROTO_TCP) {
+        return if (f.est) TIMEOUT_TCPEST_NS else TIMEOUT_TCP_NS;
+    }
+    return if (f.proto == IPPROTO_UDP) TIMEOUT_UDP_NS else TIMEOUT_ICMP_NS;
+}
+
+/// The flow a datagram belongs to, or NONE; `reverse` says whether it travels b -> a (a reply). ICMP: a type-8
+/// request matches only forward and a type-0 reply only reverse, both on the echo id.
+fn flowFind(st: borrow State, k: borrow Key, v: borrow View, now: u64, reverse: borrow mut bool) -> usize {
+    for (i in 0..FLOW_MAX) {
+        let f = borrow st.flows[i];
+        if (!f.inUse || now >= f.expiresNs || f.proto != k.proto) {
+            continue;
+        }
+        if (k.proto == IPPROTO_ICMP) {
+            if (f.aIp == k.src && f.bIp == k.dst && v.icmpType == ICMP_ECHO && f.aPort == v.icmpId) {
+                reverse = false;
+                return i;
+            }
+            if (f.aIp == k.dst && f.bIp == k.src && v.icmpType == ICMP_ECHO_REPLY && f.aPort == v.icmpId) {
+                reverse = true;
+                return i;
+            }
+            continue;
+        }
+        if (f.aIp == k.src && f.bIp == k.dst && f.aPort == v.sport && f.bPort == v.dport) {
+            reverse = false;
+            return i;
+        }
+        if (f.aIp == k.dst && f.bIp == k.src && f.aPort == v.dport && f.bPort == v.sport) {
+            reverse = true;
+            return i;
+        }
+    }
+    return NONE;
+}
+
+/// Only these can be tracked: TCP/UDP with ports, and an ICMP echo request.
+fn flowTrackable(proto: u8, v: borrow View) -> bool {
+    if (!v.ok) {
+        return false;
+    }
+    return if (proto == IPPROTO_ICMP) v.icmpType == ICMP_ECHO else v.ports;
+}
+
+/// A free slot for a new flow if this initiator is within its share, else NONE; `shareFull` says which reason.
+fn flowSlot(st: borrow State, initiator: u32, quota: u32, now: u64, shareFull: borrow mut bool) -> usize {
+    var mine: u32 = 0;
+    var slot = NONE;
+    for (i in 0..FLOW_MAX) {
+        let f = borrow st.flows[i];
+        if (f.inUse && now < f.expiresNs) {
+            if (f.guestIp == initiator) {
+                mine += 1;
+            }
+        } else if (slot == NONE) {
+            slot = i;
+        }
+    }
+    shareFull = mine >= quota;
+    return if (shareFull) NONE else slot;
+}
+
+/// A slot filled with a flow `a` opened to `b`.
+fn flowFill(f: borrow mut Flow, initiator: u32, k: borrow Key, v: borrow View, now: u64) {
+    f.inUse = true;
+    f.est = false;
+    f.proto = k.proto;
+    f.guestIp = initiator;
+    f.aIp = k.src;
+    f.bIp = k.dst;
+    if (k.proto == IPPROTO_ICMP) {
+        f.aPort = v.icmpId;
+        f.bPort = 0;
+    } else {
+        f.aPort = v.sport;
+        f.bPort = v.dport;
+    }
+    f.expiresNs = now + flowTimeout(f);
+}
+
+/// fw.h's fw_forward_verdict: the FORWARD chain, for a datagram forwarded out an interface whose flags the caller
+/// read once (N26). Its source has passed the anti-spoof, so it is the ingress guest.
+/// Safety: `m` is a packet the caller holds with its whole IP header, described by `iph` and `ihl`.
+@export("fw_forward_verdict")
+unsafe fn forwardVerdict(
+    inNif: *mut netif,
+    outNif: *mut netif,
+    outFlags: u32,
+    m: *mut mbuf,
+    iph: *ipv4_hdr,
+    ihl: u32,
+) -> u32 {
+    let dir = if ((outFlags & NETIF_FORWARD) != 0) DIR_TO_GUEST else DIR_TO_UPLINK;
+    let k = keyOf(iph);
+    let v = l4Read(m as *mbuf, ihl, k.proto);
+    let now = clock_now_ns();
+    var verdict = DROP;
+    var byRule = false;
+    var established = false;
+    var refused = false;
+    var hit = noRule();
+    {
+        var guard = FW.lock();
+        let st = guard.data();
+        // Guest-to-guest: is this half of a flow already accepted? Both halves of an un-NAT'd flow pass here. A TCP
+        // segment with SYN set and ACK clear opens a connection and is never a reply, so a reverse bare SYN on an
+        // accepted flow's ports is a new flow from the other guest and takes its rules.
+        if (dir == DIR_TO_GUEST && v.ok) {
+            var rev = false;
+            let fi = flowFind(st, borrow k, borrow v, now, borrow mut rev);
+            let bareSyn = k.proto == IPPROTO_TCP && (v.tcpFlags & TH_SYN) != 0 && (v.tcpFlags & TH_ACK) == 0;
+            if (fi != NONE && !(rev && bareSyn)) {
+                let f = borrow mut st.flows[fi];
+                if (k.proto == IPPROTO_TCP && (v.tcpFlags & TH_ACK) != 0 && (v.tcpFlags & TH_SYN) == 0) {
+                    f.est = true;
+                }
+                f.expiresNs = now + flowTimeout(f);
+                established = true;
+            }
+        }
+        if (!established) {
+            // A NEW datagram: the guest's rules first-match, else its default; a guest never attached takes the
+            // built-in defaults with no rules.
+            let gi = guestFind(st, k.src);
+            verdict = if (gi != NONE) judge(
+                borrow st.guests[gi],
+                dir,
+                borrow k,
+                borrow v,
+                SCOPE_ANY,
+                borrow mut byRule,
+                borrow mut hit,
+            ) else if (dir == DIR_TO_GUEST) POLICY_TO_GUEST_DEFAULT else POLICY_TO_UPLINK_DEFAULT;
+            // Record an accepted guest-to-guest flow so its reply is admitted; no room in the guest's share refuses
+            // the flow outright, so a flood starves only its sender.
+            if (verdict == ACCEPT && dir == DIR_TO_GUEST && flowTrackable(k.proto, borrow v)) {
+                var shareFull = false;
+                let slot = flowSlot(st, k.src, FLOW_QUOTA_PER_GUEST, now, borrow mut shareFull);
+                if (slot == NONE) {
+                    refused = true;
+                    count(if (shareFull) borrow FLOW_DROP_SHARE else borrow FLOW_DROP_TABLE);
+                } else {
+                    flowFill(borrow mut st.flows[slot], k.src, borrow k, borrow v, now);
+                    count(borrow FLOW_NEW);
+                }
+            }
+        }
+    }
+    if (byRule) {
+        matched(k.src, borrow hit);
+    }
+    if (refused) {
+        return DROP as u32;
+    }
+    if (established) {
+        count(borrow ACCEPT_ESTABLISHED);
+        return ACCEPT as u32;
+    }
+    countVerdict(verdict, byRule, borrow ACCEPT_RULE, borrow ACCEPT_DEFAULT, borrow DROP_RULE, borrow DROP_DEFAULT);
+    return verdict as u32;
+}
+
+/// fw.h's fw_input_verdict: the INPUT chain, for a datagram a guest tap delivers to the host. The anti-spoof first
+/// (the source must be the tap's guest, <subnet>.15), then the guest's TO_HOST rules, else its default; a guest never
+/// attached fails closed. Stateless: the host's reply passes no filter.
+/// Safety: `nif` is a registered interface; `m` and `iph` as fw_forward_verdict.
+@export("fw_input_verdict")
+unsafe fn inputVerdict(nif: *mut netif, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32) -> u32 {
+    let n = Ptr.toBorrow(nif as *netif);
+    let addr = n.ip4.addr.loadWith(LoadOrdering.Relaxed);
+    let mask = n.ip4.mask.loadWith(LoadOrdering.Relaxed);
+    let k = keyOf(iph);
+    if (addr != 0 && mask != 0 && k.src != ((addr & mask) | htonl(TAPSVC_GUEST_HOST))) {
+        count(borrow IN_SPOOFED);
+        return DROP as u32;
+    }
+    let v = l4Read(m as *mbuf, ihl, k.proto);
+    var verdict = POLICY_TO_HOST_DEFAULT;
+    var byRule = false;
+    var hit = noRule();
+    {
+        var guard = FW.lock();
+        let st = guard.data();
+        let gi = guestFind(st, k.src);
+        if (gi != NONE) {
+            verdict = judge(
+                borrow st.guests[gi],
+                DIR_TO_HOST,
+                borrow k,
+                borrow v,
+                SCOPE_ANY,
+                borrow mut byRule,
+                borrow mut hit,
+            );
+        }
+    }
+    if (byRule) {
+        matched(k.src, borrow hit);
+    }
+    countVerdict(
+        verdict,
+        byRule,
+        borrow IN_ACCEPT_RULE,
+        borrow IN_ACCEPT_DEFAULT,
+        borrow IN_DROP_RULE,
+        borrow IN_DROP_DEFAULT,
+    );
+    return verdict as u32;
+}
+
+// ---- The host chain ----
+
+/// fw.h's fw_host_flow_of: the flow a datagram the host is sending would open, if any -- only on the world's links,
+/// and only UDP (by its ports) or an ICMP echo request (by its identifier); TCP deliberately not. No lock.
+/// Safety: `m` holds the transport header at offset 0; `f` is writable.
+@export("fw_host_flow_of")
+unsafe fn hostFlowOf(
+    outNif: *mut netif,
+    outFlags: u32,
+    m: *mut mbuf,
+    src: u32,
+    dst: u32,
+    proto: u8,
+    f: *mut fw_host_flow,
+) -> bool {
+    if ((outFlags & (NETIF_MASQUERADE | NETIF_LOOPBACK)) != 0) {
+        return false;
+    }
+    if (proto != IPPROTO_UDP && proto != IPPROTO_ICMP) {
+        return false; // see fw.h: TCP is deliberately not recorded
+    }
+    let v = l4Read(m as *mbuf, 0, proto); // the IP header is prepended after this
+    if (!flowTrackable(proto, borrow v)) {
+        return false;
+    }
+    SliceMut.fromRaw(f as *mut u8, layoutOf<fw_host_flow>().size).fill(0);
+    let o = Ptr.toBorrowMut(f);
+    o.proto = proto;
+    o.src = src;
+    o.dst = dst;
+    if (proto == IPPROTO_ICMP) {
+        o.a_port = v.icmpId;
+    } else {
+        o.a_port = v.sport;
+        o.b_port = v.dport;
+    }
+    return true;
+}
+
+/// fw.h's fw_host_record: the stack accepted that datagram for transmission; its flow recorded, or refreshed if live.
+/// A send is never refused for the firewall's sake: no room in the host's share leaves the reply to the rules.
+/// Safety: `hf` points to a flow fw_host_flow_of filled.
+@export("fw_host_record")
+unsafe fn hostRecord(hf: *fw_host_flow) {
+    let h = Ptr.toBorrow(hf);
+    let k = Key { proto: h.proto, src: h.src, dst: h.dst };
+    var v = noView();
+    v.ok = true;
+    if (k.proto == IPPROTO_ICMP) {
+        v.icmpType = ICMP_ECHO;
+        v.icmpId = h.a_port;
+    } else {
+        v.ports = true;
+        v.sport = h.a_port;
+        v.dport = h.b_port;
+    }
+    let now = clock_now_ns();
+    var recorded = false;
+    {
+        var guard = FW.lock();
+        let st = guard.data();
+        // The same tuple again: refresh without walking the table (the host's ordinary case).
+        let li = st.hostLast;
+        if (li != NONE) {
+            let last = borrow mut st.flows[li];
+            let same = last.inUse && now < last.expiresNs && last.guestIp == HOST_GUEST_IP && last.proto == k.proto &&
+                last.aIp == k.src && last.bIp == k.dst &&
+                (if (k.proto == IPPROTO_ICMP) last.aPort == v.icmpId else last.aPort == v.sport &&
+                    last.bPort == v.dport);
+            if (same) {
+                last.expiresNs = now + flowTimeout(last);
+                return;
+            }
+        }
+        var rev = false;
+        let fi = flowFind(st, borrow k, borrow v, now, borrow mut rev);
+        if (fi != NONE && !rev) {
+            let f = borrow mut st.flows[fi];
+            f.expiresNs = now + flowTimeout(f); // a send on a live flow refreshes it
+            st.hostLast = fi;
+            return;
+        }
+        var shareFull = false;
+        let slot = flowSlot(st, HOST_GUEST_IP, FLOW_QUOTA_HOST, now, borrow mut shareFull);
+        if (slot != NONE) {
+            flowFill(borrow mut st.flows[slot], HOST_GUEST_IP, borrow k, borrow v, now);
+            st.hostLast = slot;
+            recorded = true;
+        }
+    }
+    count(if (recorded) borrow HIN_FLOW_NEW else borrow HIN_FLOW_UNRECORDED);
+}
+
+/// fw.h's fw_host_verdict: the host chain, for a datagram a real, non-guest link delivers to the host. The reverse of
+/// a flow the host opened is admitted first; else the host's FROM_UPLINK rules, else its default. On DROP the caller
+/// delivers a TCP/UDP datagram quiet (M_FW_QUIET).
+/// Safety: `m` and `iph` as fw_forward_verdict.
+@export("fw_host_verdict")
+unsafe fn hostVerdict(nif: *mut netif, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32) -> u32 {
+    let k = keyOf(iph);
+    let v = l4Read(m as *mbuf, ihl, k.proto);
+    let now = clock_now_ns();
+    var verdict = DROP;
+    var byRule = false;
+    var hit = noRule();
+    {
+        var guard = FW.lock();
+        let st = guard.data();
+        // State before rules: a reply to a flow the host opened. NONE: no host flow was ever recorded.
+        if (v.ok && st.hostLast != NONE) {
+            var rev = false;
+            let fi = flowFind(st, borrow k, borrow v, now, borrow mut rev);
+            if (fi != NONE && rev && st.flows[fi].guestIp == HOST_GUEST_IP) {
+                let f = borrow mut st.flows[fi];
+                f.expiresNs = now + flowTimeout(f);
+                count(borrow HIN_ACCEPT_ESTABLISHED);
+                return ACCEPT as u32;
+            }
+        }
+        verdict = judge(
+            borrow st.guests[HOST],
+            DIR_FROM_UPLINK,
+            borrow k,
+            borrow v,
+            SCOPE_ANY,
+            borrow mut byRule,
+            borrow mut hit,
+        );
+    }
+    if (byRule) {
+        matched(HOST_GUEST_IP, borrow hit);
+    }
+    countVerdict(
+        verdict,
+        byRule,
+        borrow HIN_ACCEPT_RULE,
+        borrow HIN_ACCEPT_DEFAULT,
+        borrow HIN_DROP_RULE,
+        borrow HIN_DROP_DEFAULT,
+    );
+    return verdict as u32;
+}
+
+// ---- The OUTPUT chain ----
+
+/// fw.h's fw_output_verdict: the OUTPUT chain, for a datagram the host is about to send out an interface whose flags
+/// the caller read once; the egress is the scope. With nothing to decide (the fast path) every datagram is accepted
+/// without the lock; the verdict is still counted.
+/// Safety: `m` holds the transport header at offset 0.
+@export("fw_output_verdict")
+unsafe fn outputVerdict(outNif: *mut netif, outFlags: u32, m: *mut mbuf, src: u32, dst: u32, proto: u8) -> u32 {
+    if (OUT_FAST.loadWith(LoadOrdering.Relaxed) != 0) {
+        count(borrow OUT_ACCEPT_DEFAULT);
+        return ACCEPT as u32;
+    }
+    let scope = if ((outFlags & NETIF_MASQUERADE) != 0) SCOPE_GUEST else SCOPE_WORLD;
+    let k = Key { proto: proto, src: src, dst: dst };
+    let v = l4Read(m as *mbuf, 0, proto);
+    var verdict = DROP;
+    var byRule = false;
+    var hit = noRule();
+    {
+        var guard = FW.lock();
+        let st = guard.data();
+        verdict = judge(
+            borrow st.guests[HOST],
+            DIR_OUTPUT,
+            borrow k,
+            borrow v,
+            scope,
+            borrow mut byRule,
+            borrow mut hit,
+        );
+    }
+    if (byRule) {
+        matched(HOST_GUEST_IP, borrow hit);
+    }
+    countVerdict(
+        verdict,
+        byRule,
+        borrow OUT_ACCEPT_RULE,
+        borrow OUT_ACCEPT_DEFAULT,
+        borrow OUT_DROP_RULE,
+        borrow OUT_DROP_DEFAULT,
+    );
+    return verdict as u32;
+}
+
+// ---- Maintenance ----
+
+/// fw.h's fw_flow_list: up to `max` of the flows live at `now` (N24: what flowSlot counts), under one hold.
+/// Safety: `out` has room for `max`.
+@export("fw_flow_list")
+unsafe fn flowList(out: *mut fw_flow_info, max: u32, now: u64) -> u32 {
+    var n: u32 = 0;
+    var guard = FW.lock();
+    let st = guard.data();
+    for (i in 0..FLOW_MAX) {
+        let f = borrow st.flows[i];
+        if (n >= max || !f.inUse || now >= f.expiresNs) {
+            continue;
+        }
+        let at = out.add(n as usize);
+        SliceMut.fromRaw(at as *mut u8, layoutOf<fw_flow_info>().size).fill(0);
+        let o = Ptr.toBorrowMut(at);
+        o.guest_ip = f.guestIp;
+        o.a_ip = f.aIp;
+        o.b_ip = f.bIp;
+        o.a_port = f.aPort;
+        o.b_port = f.bPort;
+        o.proto = f.proto;
+        o.est = f.est;
+        o.expires_ns = f.expiresNs;
+        n += 1;
+    }
+    return n;
+}
+
+/// fw.h's fw_age: expired flows reclaimed (the network worker's tick, beside nat_age).
+@export("fw_age")
+fn age(nowNs: u64) {
+    var guard = FW.lock();
+    let st = guard.data();
+    for (i in 0..FLOW_MAX) {
+        let f = borrow mut st.flows[i];
+        if (f.inUse && nowNs >= f.expiresNs) {
+            f.inUse = false;
+            count(borrow EXPIRED);
+        }
+    }
+}
+
+/// fw.h's fw_flush: every flow dropped, every attached guest reset to "as attached", the host object to its defaults
+/// with no rules (test isolation).
+@export("fw_flush")
+fn flush() {
+    var guard = FW.lock();
+    let st = guard.data();
+    st.flows = [noFlow(); 320];
+    st.hostLast = NONE;
+    for (i in 0..MAX_GUESTS) {
+        if (st.guests[i].attached) {
+            let ip = st.guests[i].ip;
+            let gateway = st.guests[i].gateway;
+            guestReset(borrow mut st.guests[i], ip, gateway);
+        }
+    }
+    st.guests[HOST] = hostShipped();
+    outFastUpdate(st);
+}
+
+/// fw.h's fw_get_stats: the counters, and the live flows and installed rules counted under the lock.
+/// Safety: `out` is writable; clock_now_ns only reads the clock.
+@export("fw_get_stats")
+unsafe fn getStats(out: *mut fw_stats) {
+    let now = clock_now_ns();
+    var guard = FW.lock();
+    let st = guard.data();
+    let o = Ptr.toBorrowMut(out);
+    o.accept_rule = read(borrow ACCEPT_RULE);
+    o.drop_rule = read(borrow DROP_RULE);
+    o.accept_default = read(borrow ACCEPT_DEFAULT);
+    o.drop_default = read(borrow DROP_DEFAULT);
+    o.accept_established = read(borrow ACCEPT_ESTABLISHED);
+    o.flow_new = read(borrow FLOW_NEW);
+    o.flow_drop_share = read(borrow FLOW_DROP_SHARE);
+    o.flow_drop_table = read(borrow FLOW_DROP_TABLE);
+    o.expired = read(borrow EXPIRED);
+    o.in_accept_rule = read(borrow IN_ACCEPT_RULE);
+    o.in_drop_rule = read(borrow IN_DROP_RULE);
+    o.in_accept_default = read(borrow IN_ACCEPT_DEFAULT);
+    o.in_drop_default = read(borrow IN_DROP_DEFAULT);
+    o.in_spoofed = read(borrow IN_SPOOFED);
+    o.hin_accept_rule = read(borrow HIN_ACCEPT_RULE);
+    o.hin_drop_rule = read(borrow HIN_DROP_RULE);
+    o.hin_accept_default = read(borrow HIN_ACCEPT_DEFAULT);
+    o.hin_drop_default = read(borrow HIN_DROP_DEFAULT);
+    o.hin_accept_established = read(borrow HIN_ACCEPT_ESTABLISHED);
+    o.hin_flow_new = read(borrow HIN_FLOW_NEW);
+    o.hin_flow_unrecorded = read(borrow HIN_FLOW_UNRECORDED);
+    o.out_accept_rule = read(borrow OUT_ACCEPT_RULE);
+    o.out_drop_rule = read(borrow OUT_DROP_RULE);
+    o.out_accept_default = read(borrow OUT_ACCEPT_DEFAULT);
+    o.out_drop_default = read(borrow OUT_DROP_DEFAULT);
+    var flows: u32 = 0;
+    for (i in 0..FLOW_MAX) {
+        if (st.flows[i].inUse && now < st.flows[i].expiresNs) {
+            flows += 1;
+        }
+    }
+    var rules: usize = 0;
+    for (i in 0..MAX_GUESTS) {
+        if (st.guests[i].attached) {
+            rules += st.guests[i].nrules;
+        }
+    }
+    rules += st.guests[HOST].nrules;
+    o.flows = flows;
+    o.rules = truncate<u32>(rules);
+}

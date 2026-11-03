@@ -817,6 +817,28 @@ of the C's lines and branches. `RAW_BENCH=1`, the median of five
 interleaved runs: a 64-byte echo reply delivered to four sockets 1.03x
 the C and a message sent 0.99x on arm64; 0.97x and 1.00x on x86-64
 (Rosetta).
+The firewall (2026-11-03): `kernel-services/network/fw.cee` -- the
+guests' and the host's rule lists and default policies, attachment and
+purge, and the FORWARD, INPUT, host and OUTPUT chains over a bounded
+flow table shared by the guests' and the host's quotas, with the
+OUTPUT fast path an atomic read without the lock. Everything else is one
+`IrqSpinLock`'s data, the host object a ninth guest slot no datagram
+can name. netparse gains `netparse_l4_view`. The configuration fuzz
+target's doors are the debug builds' (as ipv4's test exports are), and
+its rule hook a setter (`fw_test_set_rule_matched`); the port calls it
+just after the lock is released, since a C function pointer carries no
+effect list and may not be called under a spin lock (CeeSafe's
+type-system.md §32). `tests/host/test_fw.c`: 20,000 rounds over ten
+guest addresses competing for eight slots, their taps, an uplink and
+the world -- rules by every owner, every chain, replies to recorded
+flows, floods past both shares, ageing and flushes -- every mbuf freed:
+digest `0xc99643fb9523e2f5`, the C's (macOS clang, Linux clang and gcc);
+99.7% of the C's lines and 96.8% of its branches, all but a refusal for
+a full table with the initiator's share unspent, which the shares
+(summing to the table) leave unreachable. `FW_BENCH=1`, the median of
+five interleaved runs: a datagram on a recorded flow 0.99x the C and one
+judged by a full rule list 0.97x on arm64; 1.00x and 0.98x on x86-64
+(Rosetta).
 
 Size: about 3.0x.
 

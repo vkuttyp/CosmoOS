@@ -158,7 +158,7 @@ $(FUZZ_OUT)/fuzz_tcp_segments: $(call src_paths,$(FUZZ_TCP_SEGMENTS_SRCS)) $(FUZ
 $(FUZZ_OUT)/fuzz_net_config: $(call src_paths,$(FUZZ_NET_CONFIG_SRCS)) $(FUZZ_NET_HDRS) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DFW_HOST_TEST=1 $(call src_paths,$(FUZZ_NET_CONFIG_SRCS)) $(FUZZ_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(call src_paths,$(FUZZ_NET_CONFIG_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
 $(FUZZ_OUT)/fuzz_dhcp_dns: $(call src_paths,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_NET_HDRS) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)

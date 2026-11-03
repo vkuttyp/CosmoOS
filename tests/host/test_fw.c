@@ -18,7 +18,7 @@
  *   - the OUTPUT chain, with its fast path and with rules scoped to the world
  *     or a guest;
  *   - the flow listing, ageing across every timeout, flushes, the statistics,
- *     and every rule that decides a verdict (the FW_HOST_TEST hook).
+ *     and every rule that decides a verdict (the debug builds' rule hook).
  *
  * mbuf.c and netparse are real; the clock and the interfaces are the test's.
  * Every mbuf is freed and no lock held at the end. Not reached: a flow refused
