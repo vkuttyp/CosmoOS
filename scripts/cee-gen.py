@@ -116,6 +116,8 @@ PORTS = [
      "The lo interface: its static netif and ops table, transmit and the test filter (netif.h)", None, False),
     ("kernel-services/network/mbuf.cee", "kernel-services/network/mbuf.c",
      "Packet buffers: mbufs, clusters, chains, queues and their statistics (mbuf.h)", None, True),
+    ("kernel-services/network/netif.cee", "kernel-services/network/netif.c",
+     "The interface layer: the registry, the per-CPU receive queues and workers, transmit, work items (netif.h)", None, True),
     ("drivers/virtio/virtq_used.cee", "drivers/virtio/virtq_used.c",
      "The virtqueue's decoder of used elements (virtio.h; linked into the virtio module)", None, False),
     ("drivers/usb/usb_desc.cee", "drivers/usb/usb_desc.c",

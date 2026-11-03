@@ -54,6 +54,11 @@
 #else
 #define COSMO_CONFIG_DEBUG() false
 #endif
+#if CONFIG_SELFTEST
+#define COSMO_CONFIG_SELFTEST() true
+#else
+#define COSMO_CONFIG_SELFTEST() false
+#endif
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 #define ALIGN_DOWN(x, a) ((x) & ~((__typeof__(x))(a) - 1))

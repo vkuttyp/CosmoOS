@@ -649,6 +649,34 @@ every mbuf and cluster freed: digest `0xfd419bfa31e68b04`, the C's (macOS
 clang, Linux gcc). `MBUF_BENCH=1`, median of nine at -O2: receive 0.93x
 the C, send 0.93x, copy out 1.00x, queue 0.92x on arm64; 0.95x, 0.96x,
 1.01x, 0.93x on x86-64 (Rosetta).
+The interface layer (2026-11-02, with ceesafec 0.6.0, whose ADR 0043
+emits an export only in the builds whose C had it):
+`kernel-services/network/netif.cee` -- the registry, the per-CPU receive
+queues and their workers, the transmit path, work items and the barrier,
+with `netif_floor.c` keeping the module exports. The C state is CeeSafe's
+own `static mut` C objects: the registry's list and spin lock, the per-CPU
+array (`struct net_cpu`, moved to `kernel/net/netif_cpu.h` so both sides see
+one layout), the barrier items. What the data paths read without a lock is
+atomic: an interface's flag word, IPv4 address and counters, a work item's
+claim (`net_work.queued` is now a `uint32_t`), a worker's readiness, and
+the hooks, kept as addresses in atomics and called back as C function
+pointers. `netif_tx_probe_*` exist only `#if CONFIG_SELFTEST` and
+`netif_test_worker_hooks_set` only `#if CONFIG_DEBUG` (`@cfg`); the
+self-test timing and the debug hooks fold away through
+`COSMO_CONFIG_SELFTEST()` and `COSMO_CONFIG_DEBUG()`. `wait_event` is
+written out (prepare, test, block, finish). `netif_owns_ipv4/6` take no
+reference, as in the C.
+`tests/host/test_netif.c`: 6,000 steps over up to eight interfaces --
+registration (valid and refused), fw_cfg and DHCP configuration, lookups,
+default and connected routes, addresses, up and down, forwarding, owned
+addresses, listings, transmits (checksum finished or not, up, down, gone),
+receives queued and purged, unregistering, work items -- with every kernel
+service it calls a stub folded into the digest: `0x83fa866653f4b673`, the
+C's (macOS clang, Linux gcc). `NETIF_BENCH=1`, median of nine at -O2:
+receive 0.96x the C, transmit 0.99x, find 1.02x, flow hash 0.79x, owns
+1.00x, connected 1.00x on arm64; 0.97x, 1.00x, 1.05x, 0.70x, 0.98x, 1.03x on
+x86-64 (Rosetta). The flow hash reads a frame's first segment in place where
+the C copied it.
 
 Size: about 3.0x.
 

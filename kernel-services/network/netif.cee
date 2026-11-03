@@ -1,0 +1,1605 @@
+// netif.cee - the interface layer (kernel/include/kernel/netif.h), in CeeSafe: roadmap 2.0 SA6. The registry of
+// interfaces and their configuration; the receive path, which steers each packet to a CPU's queue for that CPU's
+// worker thread; the transmit path; and the work items protocols queue to the workers. tests/host/test_netif.c holds
+// it to the digest of the C it replaced; the boot tests run its workers.
+//
+// Interfaces are C objects drivers own and register; the registry, the per-CPU state and the barrier items are C
+// objects this file defines (CeeSafe's ADR 0042), reached through pointers under the locks the C used. What the data
+// paths read without a lock, every CPU changes atomically (ADR 0041 §3.1): an interface's flag word and address, its
+// counters, a work item's claim, a worker's readiness.
+
+@header("kernel/net/netif_cpu.h", "kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/cksum.h", "kernel/net/dhcp.h", "kernel/fwcfg.h", "kernel/timer.h", "kernel/string.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct netif_ip4 {
+        addr: AtomicU32;
+        mask: AtomicU32;
+        gateway: AtomicU32;
+    }
+    struct netif_stats {
+        rx_packets: AtomicU64;
+        rx_bytes: AtomicU64;
+        rx_dropped: AtomicU64;
+        rx_errors: AtomicU64;
+        tx_packets: AtomicU64;
+        tx_bytes: AtomicU64;
+        tx_dropped: AtomicU64;
+        tx_errors: AtomicU64;
+    }
+    struct netif_ops {
+        transmit: extern "C" fn(*mut netif, *mut mbuf) -> i32;
+        release: extern "C" fn(*mut netif);
+        tx_pending: extern "C" fn(*mut netif, *mut u32) -> u32;
+    }
+    struct netif {
+        obj: kobject;
+        name: [u8; 8];
+        index: u32;
+        mac: [u8; 6];
+        mtu: u32;
+        flags: AtomicU32;
+        ip4: netif_ip4;
+        ip6_ll: in6_addr;
+        ops: *netif_ops;
+        caps: u32;
+        stats: netif_stats;
+        link: list_node;
+        lock: spinlock_t;
+    }
+    struct netif_info {
+        name: [u8; 8];
+        index: u32;
+        flags: u32;
+        mtu: u32;
+        mac: [u8; 6];
+        addr: u32;
+        mask: u32;
+        gateway: u32;
+        ip6_ll: in6_addr;
+        stats: netif_stats;
+    }
+    struct net_cpu_stats {
+        rx_queued: AtomicU64;
+        rx_dropped: AtomicU64;
+        rx_steered_here: AtomicU64;
+        work_runs: AtomicU64;
+    }
+    struct netif_tx_probe {
+        calls: u64;
+        ns_total: u64;
+        ns_max: u64;
+        refused: u64;
+    }
+    struct mbuf {
+        nextpkt: *mut mbuf;
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbuf_pkt {
+        len: u32;
+        rcvif: *mut netif;
+        rx_ns: u64;
+        proto: u16;
+        csum_flags: u16;
+        flow_hash: u32;
+    }
+    struct mbufq {
+        head: *mut mbuf;
+        lock: spinlock_t;
+    }
+    struct net_work {
+        link: list_node;
+        @cname ("fn") run: extern "C" fn(*mut void);
+        arg: *mut void;
+        queued: AtomicU32;
+    }
+    struct waitqueue;
+    struct wait_entry;
+    struct completion;
+    struct thread;
+    struct net_cpu {
+        rxq: mbufq;
+        work: list_node;
+        work_lock: spinlock_t;
+        wq: waitqueue;
+        waiting: wait_entry;
+        worker: *mut thread;
+        ready: AtomicU32;
+        stats: net_cpu_stats;
+        id: u32;
+        name: [u8; 16];
+    }
+    struct net_cpus {
+        cpu: [net_cpu; 64];
+    }
+    struct net_barrier {
+        work: net_work;
+        done: completion;
+    }
+    struct net_barriers {
+        barrier: [net_barrier; 64];
+    }
+
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+    @constant
+    fn COSMO_CONFIG_SELFTEST() -> bool;
+    @constant
+    fn NETIF_WORKER_PRIO() -> i32;
+    @constant
+    fn NETIF_FI_RX_DUP() -> u32;
+
+    fn kobject_track_code(obj: *mut kobject, code: usize);
+    fn fwcfg_get_string(key: *CChar, buf: *mut CChar, len: usize) -> bool;
+    fn dhcp_client_start(nif: *mut netif) -> i32;
+    fn dhcp_client_stop(nif: *mut netif);
+    fn dhcp_client_kick(nif: *mut netif);
+    fn arp_flush(nif: *mut netif);
+    fn nd_flush(nif: *mut netif);
+    fn arp_init();
+    fn nd_init();
+    fn udp_init();
+    fn tcp_init();
+    fn socket_init();
+    fn loopback_init();
+    fn mbuf_init();
+    fn m_freem(m: *mut mbuf);
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn m_copypacket(m: *mbuf) -> *mut mbuf;
+    fn mbufq_init(q: *mut mbufq, maxlen: u32, name: *CChar);
+    fn mbufq_enqueue(q: *mut mbufq, m: *mut mbuf) -> bool;
+    fn mbufq_dequeue(q: *mut mbufq) -> *mut mbuf;
+    fn mbufq_len(q: *mut mbufq) -> u32;
+    fn m_csum_complete(m: *mut mbuf) -> bool;
+    fn ipv4_input(nif: *mut netif, m: *mut mbuf);
+    fn ipv6_input(nif: *mut netif, m: *mut mbuf);
+    fn ether_input(nif: *mut netif, m: *mut mbuf);
+    fn quiesce_read_lock();
+    fn quiesce_read_unlock();
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn raw_cpu_id() -> u32;
+    fn thread_current() -> *mut thread;
+    fn cpu_count() -> u32;
+    fn thread_create_on(
+        entry: extern "C" fn(*mut void),
+        arg: *mut void,
+        name: *CChar,
+        priority: i32,
+        mask: u64,
+    ) -> *mut thread;
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn waitqueue_wake_one(wq: *mut waitqueue) -> u32;
+    fn wait_entry_init(e: *mut wait_entry);
+    fn waitqueue_prepare(wq: *mut waitqueue, e: *mut wait_entry);
+    fn waitqueue_finish(wq: *mut waitqueue, e: *mut wait_entry);
+    fn sched_block_current();
+    fn completion_init(c: *mut completion, name: *CChar);
+    fn complete(c: *mut completion);
+    fn wait_for_completion(c: *mut completion);
+    fn sched_dump_register(name: *CChar, dump: extern "C" fn());
+    fn faultinject_should_fail(kind: u32) -> bool;
+    fn kprintf(format: *CChar, ...);
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+}
+
+/// netif.h's flags and capabilities; mbuf.h's NET_CSUM_TX; errno.h's codes; ether.h's EtherTypes and ip.h's
+/// protocols.
+const NETIF_UP: u32 = 1;
+const NETIF_LOOPBACK: u32 = 2;
+const NETIF_GONE: u32 = 8;
+const NETIF_NODEFAULT: u32 = 16;
+const NETIF_FORWARD: u32 = 32;
+const NETIF_MASQUERADE: u32 = 64;
+const NETIF_AUTOCONF: u32 = 128;
+const NETIF_CAP_TXCSUM: u32 = 1;
+const NETIF_MAX: u32 = 32;
+const NET_CSUM_TX: u16 = 3;
+const EINVAL: i32 = 22;
+const EEXIST: i32 = 17;
+const ENOSPC: i32 = 28;
+const ENODEV: i32 = 19;
+const ENETUNREACH: i32 = 101;
+const ENOBUFS: i32 = 105;
+const ETH_HLEN: u32 = 14;
+const ETH_P_IP: u32 = 0x0800;
+const ETH_P_IPV6: u32 = 0x86DD;
+const IPPROTO_TCP: u32 = 6;
+const IPPROTO_UDP: u32 = 17;
+/// The receive queues' bound. The CPUs there is state for are lib/kernel's MAX_CPUS (percpu.h's CONFIG_MAX_CPUS),
+/// which the import of `struct net_cpus` checks.
+const NET_RXQ_MAX: u32 = 512;
+/// 127.0.0.1 in network order, as it lies in a little-endian u32 (inet.h's INADDR_LOOPBACK_N).
+const INADDR_LOOPBACK_N: u32 = 0x0100007f;
+
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
+static SELFTEST_BUILD: bool = COSMO_CONFIG_SELFTEST();
+static WORKER_PRIO: i32 = NETIF_WORKER_PRIO();
+static FI_RX_DUP: u32 = NETIF_FI_RX_DUP();
+
+// ---- The state ----
+
+/// The registry: the interfaces, and the index the next one gets, under NETIFS_LOCK. A spin lock, not a mutex:
+/// netif_owns_*, netif_default and netif_find are predicates routing and address checks call from thread context, and
+/// must stay callable from any context that does not sleep. Nothing under it sleeps.
+static mut NETIFS: list_node = list_node {
+    next: borrow mut NETIFS as *mut list_node,
+    prev: borrow mut NETIFS as *mut list_node,
+};
+static mut NETIFS_LOCK: spinlock_t = SPINLOCK_INIT("netifs\0".ptr as *CChar);
+static mut NEXT_INDEX: u32 = 1;
+
+/// One receive queue, work list and worker per CPU; CPUs with a queue (workers may still be starting).
+static mut CPUS: net_cpus = net_cpus {};
+static NCPU: AtomicU32 = AtomicU32.constant(1);
+
+/// netif_unregister runs one at a time (it sleeps); net_workers_barrier too, its barrier items being static, so
+/// tearing an interface down never depends on an allocation. Initialised by net_init.
+static mut UNREGISTER_LOCK: mutex = mutex {};
+static mut BARRIER_LOCK: mutex = mutex {};
+static mut BARRIERS: net_barriers = net_barriers {};
+
+static STEER: AtomicU32 = AtomicU32.constant(1);
+/// The receive hook (a netif_rx_hook_fn's address) and its argument; the debug builds' worker hooks.
+static RX_HOOK: AtomicUSize = AtomicUSize.constant(0);
+static RX_HOOK_ARG: AtomicUSize = AtomicUSize.constant(0);
+static TEST_INPUT_HOOK: AtomicUSize = AtomicUSize.constant(0);
+static TEST_BARRIER_HOOK: AtomicUSize = AtomicUSize.constant(0);
+static TEST_HOOK_ARG: AtomicUSize = AtomicUSize.constant(0);
+
+/// The self-test builds' transmit probe: one thread's sends on one interface, the benchmark's.
+struct TxProbe {
+    calls: AtomicU64;
+    nsTotal: AtomicU64;
+    nsMax: AtomicU64;
+    refused: AtomicU64;
+}
+static TX_PROBE_NIF: AtomicUSize = AtomicUSize.constant(0);
+static TX_PROBE_THREAD: AtomicUSize = AtomicUSize.constant(0);
+static TX_PROBE: TxProbe = TxProbe {
+    calls: AtomicU64.constant(0),
+    nsTotal: AtomicU64.constant(0),
+    nsMax: AtomicU64.constant(0),
+    refused: AtomicU64.constant(0),
+};
+
+static mut NETIF_TYPE: kobject_type = kobject_type { name: "netif\0".ptr as *CChar, release: releaseObject };
+
+// ---- Helpers ----
+
+/// The registry's head.
+/// Safety: only its address is taken; the list is used under NETIFS_LOCK, as the callers' comments say.
+fn registry() -> *mut list_node => unsafe { borrow mut NETIFS as *mut list_node };
+
+/// The registry's lock.
+/// Safety: only its address is taken, for spin_lock_irqsave.
+fn registryLock() -> *mut spinlock_t => unsafe { borrow mut NETIFS_LOCK as *mut spinlock_t };
+
+/// CPU `i`'s state.
+/// Safety: only the address; `i` < MAX_CPUS.
+fn cpu(i: u32) -> *mut net_cpu => unsafe { borrow mut CPUS.cpu[i as usize] as *mut net_cpu };
+
+/// The link after `node`: a walk of the registry starts at the head's and ends back at the head (list_for_each).
+/// Safety: `node` is on the registry, under its lock.
+unsafe fn linkAfter(node: *mut list_node) -> *mut list_node => Ptr.toBorrow(node as *list_node).next;
+
+/// The interface whose registry link `node` is.
+/// Safety: `node` is a registered interface's link.
+unsafe fn ofLink(node: *mut list_node) -> *mut netif => containerOf(node, offsetOf<netif>(link)) as *mut netif;
+
+/// The C string in `bytes`: its bytes before the first zero (all of them if there is none).
+fn cText(bytes: Slice<u8>) -> Slice<u8> {
+    for (i in 0..bytes.length) {
+        if (bytes[i] == 0) {
+            return bytes[..i];
+        }
+    }
+    return bytes;
+}
+
+fn sameBytes(a: Slice<u8>, b: Slice<u8>) -> bool {
+    if (a.length != b.length) {
+        return false;
+    }
+    for (i in 0..a.length) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// A line to the kernel log at the info level (the C's kinfo).
+fn info(line: borrow TextWriter) {
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// The four bytes of an address as they lie in memory (network order), dotted.
+fn dotted(w: borrow mut TextWriter, a: u32) {
+    w.decimal((a & 0xff) as u64);
+    w.byte(46);
+    w.decimal(((a >> 8) & 0xff) as u64);
+    w.byte(46);
+    w.decimal(((a >> 16) & 0xff) as u64);
+    w.byte(46);
+    w.decimal((a >> 24) as u64);
+}
+
+/// The byte order swap of a u32 (inet.h's htonl and ntohl on CosmoOS's little-endian targets).
+fn swap32(v: u32) -> u32 => ((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >> 8) & 0xff00) | (v >> 24);
+
+// ---- Interfaces ----
+
+/// The registry's release of an interface: the last reference is gone, after netif_unregister.
+/// Safety: the kobject is the first field of an interface (netif.h), which the driver owns until its release.
+@callback
+unsafe fn releaseObject(obj: *mut kobject) {
+    let nif = obj as *mut netif;
+    let release = Ptr.toBorrow(Ptr.toBorrow(nif as *netif).ops).release;
+    release(nif);
+}
+
+/// netif.h's netif_release_static: the release of an interface whose storage is static.
+@export("netif_release_static")
+fn releaseStatic(nif: *mut netif) {}
+
+/// "a.b.c.d" at `at` in `s`: its network-order address and where it ends, or null.
+fn parseIpv4(s: Slice<u8>, at: usize, out: borrow mut u32) -> usize? {
+    var v: u32 = 0;
+    var i = at;
+    for (part in 0..4u32) {
+        var n: u32 = 0;
+        var digits: u32 = 0;
+        while (i < s.length && s[i] >= 48 && s[i] <= 57 && digits < 3) {
+            n = n * 10 + (s[i] - 48) as u32;
+            i += 1;
+            digits += 1;
+        }
+        if (digits == 0 || n > 255) {
+            return null;
+        }
+        v = (v << 8) | n;
+        if (part < 3) {
+            if (i >= s.length || s[i] != 46) {
+                return null;
+            }
+            i += 1;
+        }
+    }
+    out = swap32(v);
+    return i;
+}
+
+/// IPv4 configuration for a NIC driver's interface (NETIF_AUTOCONF): fw_cfg "opt/cosmo/ipv4" as
+/// "addr/prefix,gateway" -- the override a boot can name -- else the DHCP client, which configures it when a server
+/// answers. A malformed override is ignored, and DHCP runs.
+/// Safety: `nif` is a registered interface.
+unsafe fn autoconfig(nif: *mut netif) {
+    var cfg: [u8; 64] = [0; 64];
+    let raw = borrow mut cfg as *mut [u8; 64] as *mut CChar;
+    if (fwcfg_get_string("ipv4\0".ptr as *CChar, raw, 64)) {
+        let text = cText(cfg[..]);
+        var a: u32 = 0;
+        var g: u32 = 0;
+        let p = parseIpv4(text, 0, mut a);
+        var prefix: u32 = 24;
+        var at: usize = 0;
+        var ok = false;
+        match (p) {
+            Some(end) => {
+                at = end;
+                if (at < text.length && text[at] == 47) {
+                    prefix = 0;
+                    at += 1;
+                    while (at < text.length && text[at] >= 48 && text[at] <= 57) {
+                        prefix = prefix.wrappingMul(10).wrappingAdd((text[at] - 48) as u32);
+                        at += 1;
+                    }
+                }
+                if (at < text.length && text[at] == 44) {
+                    match (parseIpv4(text, at + 1, mut g)) {
+                        Some(_) => { ok = prefix <= 32; }
+                        null => {}
+                    }
+                }
+            }
+            null => {}
+        }
+        let b = Ptr.toBorrow(nif as *netif);
+        if (ok) {
+            var buffer: [u8; 128] = [0; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("net: ");
+            line.bytes(cText(b.name[..]));
+            line.text(": address from fw_cfg opt/cosmo/ipv4");
+            info(line);
+            let mask = if (prefix == 0) 0 else swap32(0xffffffff << (32 - prefix));
+            setIpv4(nif, a, mask, g);
+            return;
+        }
+        var buffer: [u8; 160] = [0; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("net: ");
+        line.bytes(cText(b.name[..]));
+        line.text(": ignoring malformed opt/cosmo/ipv4 '");
+        line.bytes(text);
+        line.text("'");
+        KernelLog.send(LogLevel.Warn, line);
+    }
+    dhcp_client_start(nif);
+}
+
+/// netif.h's netif_register: 0, or -EINVAL (a name not ending inside its array, no ops, an MTU below 68), -EEXIST (the
+/// name is taken) or -ENOSPC (NETIF_MAX are registered), with the object untouched.
+/// Safety: `nif` is an interface its driver owns, initialised as netif.h says, not registered.
+@export("netif_register")
+unsafe fn register(nif: *mut netif) -> i32 {
+    let b = Ptr.toBorrowMut(nif);
+    // A name must end inside its array: every reader takes it as a string.
+    var terminated = false;
+    for (c in b.name[..]) {
+        if (c == 0) {
+            terminated = true;
+        }
+    }
+    let ops = b.ops;
+    if (b.name[0] == 0 || !terminated || ops.isNull() || Ptr.toBorrow(ops).transmit.isNull() ||
+        Ptr.toBorrow(ops).release.isNull() || b.mtu < 68) {
+        return -EINVAL;
+    }
+    let name = cText(b.name[..]);
+    let s = spin_lock_irqsave(registryLock());
+    var count: u32 = 0;
+    var node = linkAfter(registry());
+    while (node != registry()) {
+        let other = Ptr.toBorrow(ofLink(node) as *netif);
+        if (sameBytes(cText(other.name[..]), name)) {
+            spin_unlock_irqrestore(registryLock(), s);
+            return -EEXIST; // the object is untouched: no kobject, no owner count
+        }
+        count += 1;
+        node = linkAfter(node);
+    }
+    if (count >= NETIF_MAX) {
+        spin_unlock_irqrestore(registryLock(), s);
+        return -ENOSPC;
+    }
+    // Accepted: only now does the object exist (reference 1 to the creator, the owner module's count raised).
+    let obj = borrow mut b.obj as *mut kobject;
+    kobject_init(obj, borrow NETIF_TYPE as *kobject_type);
+    kobject_track_code(obj, Ptr.toBorrow(ops).release as usize);
+    b.flags.storeWith(b.flags.loadWith(LoadOrdering.Relaxed) & (NETIF_GONE ^ 0xffffffff), StoreOrdering.Relaxed);
+    b.index = NEXT_INDEX;
+    NEXT_INDEX += 1;
+    spinlock_init(borrow mut b.lock as *mut spinlock_t, "netif\0".ptr as *CChar);
+    let link = borrow mut b.link as *mut list_node;
+    List.init(link);
+    b.stats.rx_packets.storeWith(0, StoreOrdering.Relaxed);
+    b.stats.rx_bytes.storeWith(0, StoreOrdering.Relaxed);
+    b.stats.rx_dropped.storeWith(0, StoreOrdering.Relaxed);
+    b.stats.rx_errors.storeWith(0, StoreOrdering.Relaxed);
+    b.stats.tx_packets.storeWith(0, StoreOrdering.Relaxed);
+    b.stats.tx_bytes.storeWith(0, StoreOrdering.Relaxed);
+    b.stats.tx_dropped.storeWith(0, StoreOrdering.Relaxed);
+    b.stats.tx_errors.storeWith(0, StoreOrdering.Relaxed);
+    if ((b.flags.loadWith(LoadOrdering.Relaxed) & NETIF_LOOPBACK) == 0) {
+        // Link-local IPv6 from the MAC (modified EUI-64).
+        var ll: [u8; 16] = [0; 16];
+        ll[0] = 0xfe;
+        ll[1] = 0x80;
+        ll[8] = b.mac[0] ^ 0x02;
+        ll[9] = b.mac[1];
+        ll[10] = b.mac[2];
+        ll[11] = 0xff;
+        ll[12] = 0xfe;
+        ll[13] = b.mac[3];
+        ll[14] = b.mac[4];
+        ll[15] = b.mac[5];
+        b.ip6_ll.s6_addr = ll;
+    }
+    List.pushBack(registry(), link);
+    kobject_get(obj); // the registry's reference
+    spin_unlock_irqrestore(registryLock(), s);
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("net: ");
+    line.bytes(name);
+    line.text(" registered (");
+    for (i in 0..6u32) {
+        if (i > 0) {
+            line.byte(58);
+        }
+        line.hex(b.mac[i as usize] as u64, 2);
+    }
+    line.text(", mtu ");
+    line.decimal(b.mtu as u64);
+    line.text(")");
+    info(line);
+    let flags = b.flags.loadWith(LoadOrdering.Relaxed);
+    if ((flags & NETIF_AUTOCONF) != 0 && (flags & NETIF_LOOPBACK) == 0 &&
+        b.ip4.addr.loadWith(LoadOrdering.Relaxed) == 0) {
+        autoconfig(nif);
+    }
+    return 0;
+}
+
+/// A barrier item's handler: its waiter may go on.
+/// Safety: `arg` is the item's net_barrier (workersBarrier).
+@callback
+unsafe fn barrierDone(arg: *mut void) {
+    complete(borrow mut Ptr.toBorrowMut(arg as *mut net_barrier).done as *mut completion);
+}
+
+/// Drops every queued receive packet that arrived on `nif`, on every CPU's queue: each queue is drained and rebuilt
+/// in order (they are short, NET_RXQ_MAX).
+/// Safety: `nif` is being unregistered: nothing new is queued for it.
+unsafe fn rxqPurge(nif: *mut netif) -> u32 {
+    var keep: [u64; 8] = [0; 8]; // a struct mbufq's storage, which mbufq_init initialises (checked below)
+    let kept = borrow mut keep as *mut [u64; 8] as *mut mbufq;
+    mbufq_init(kept, NET_RXQ_MAX, "net-rxq-keep\0".ptr as *CChar);
+    var dropped: u32 = 0;
+    let n = NCPU.loadWith(LoadOrdering.Relaxed);
+    for (i in 0..n) {
+        let q = borrow mut Ptr.toBorrowMut(cpu(i)).rxq as *mut mbufq;
+        loop {
+            let m = mbufq_dequeue(q);
+            if (m.isNull()) {
+                break;
+            }
+            if (Ptr.toBorrow(m as *mbuf).pkt.rcvif == nif) {
+                m_freem(m);
+                dropped += 1;
+            } else {
+                mbufq_enqueue(kept, m); // frees it when full (mbuf.h)
+            }
+        }
+        loop {
+            let m = mbufq_dequeue(kept);
+            if (m.isNull()) {
+                break;
+            }
+            mbufq_enqueue(q, m); // likewise: a packet that no longer fits is freed by the enqueue
+        }
+    }
+    return dropped;
+}
+
+/// netif.h's netif_rxq_count: `nif`'s packets on every CPU's queue.
+/// Safety: `nif` is a live interface.
+@export("netif_rxq_count")
+unsafe fn rxqCount(nif: *netif) -> u32 {
+    var n: u32 = 0;
+    let count = NCPU.loadWith(LoadOrdering.Relaxed);
+    for (i in 0..count) {
+        let q = borrow mut Ptr.toBorrowMut(cpu(i)).rxq as *mut mbufq;
+        let lock = borrow mut Ptr.toBorrowMut(q).lock as *mut spinlock_t;
+        let s = spin_lock_irqsave(lock);
+        var m = Ptr.toBorrow(q as *mbufq).head;
+        while (!m.isNull()) {
+            let b = Ptr.toBorrow(m as *mbuf);
+            if (b.pkt.rcvif as *netif == nif) {
+                n += 1;
+            }
+            m = b.nextpkt;
+        }
+        spin_unlock_irqrestore(lock, s);
+    }
+    return n;
+}
+
+/// netif.h's net_workers_barrier: returns when every running worker has finished what was queued before (a worker
+/// whose thread is not running yet has dequeued nothing).
+/// Safety: thread context: it sleeps; BARRIER_LOCK makes its static items one caller's.
+@export("net_workers_barrier")
+unsafe fn workersBarrier() {
+    var posted: [bool; 64] = [false; 64];
+    let lock = borrow mut BARRIER_LOCK as *mut mutex;
+    mutex_lock(lock);
+    let n = NCPU.loadWith(LoadOrdering.Relaxed);
+    for (i in 0..n) {
+        let c = cpu(i);
+        if (Ptr.toBorrow(c as *net_cpu).ready.loadWith(LoadOrdering.Acquire) == 0) {
+            continue;
+        }
+        let item = borrow mut BARRIERS.barrier[i as usize] as *mut net_barrier;
+        let b = Ptr.toBorrowMut(item);
+        workInit(borrow mut b.work as *mut net_work, barrierDone, item as *mut void);
+        completion_init(borrow mut b.done as *mut completion, "netif-barrier\0".ptr as *CChar);
+        posted[i as usize] = workQueueOn(borrow mut b.work as *mut net_work, c);
+    }
+    for (i in 0..n) {
+        if (posted[i as usize]) {
+            wait_for_completion(borrow mut BARRIERS.barrier[i as usize].done as *mut completion);
+        }
+    }
+    mutex_unlock(lock);
+}
+
+/// netif.h's netif_unregister: down, out of the registry, its DHCP client stopped, a grace period for the transmits and
+/// receives that saw it live, its queued packets dropped, every worker past what it had started, its neighbours
+/// forgotten, and the registry's reference put.
+/// Safety: thread context; `nif` is registered, and its driver keeps it until its release.
+@export("netif_unregister")
+unsafe fn unregister(nif: *mut netif) {
+    let serial = borrow mut UNREGISTER_LOCK as *mut mutex;
+    mutex_lock(serial);
+    let b = Ptr.toBorrowMut(nif);
+    // 1. Down and gone: netif_transmit and netif_rx refuse from here.
+    let lock = borrow mut b.lock as *mut spinlock_t;
+    var s = spin_lock_irqsave(lock);
+    let flags = b.flags.loadWith(LoadOrdering.Relaxed);
+    b.flags.storeWith((flags & (NETIF_UP ^ 0xffffffff)) | NETIF_GONE, StoreOrdering.Release);
+    spin_unlock_irqrestore(lock, s);
+    // 2. Out of the registry: no new lookups.
+    s = spin_lock_irqsave(registryLock());
+    let link = borrow mut b.link as *mut list_node;
+    List.remove(link);
+    List.init(link);
+    spin_unlock_irqrestore(registryLock(), s);
+    // 2a. Its DHCP client: no timer or work of it runs after this.
+    dhcp_client_stop(nif);
+    // 3. A transmit or netif_rx that read the flags before step 1 runs in a read-side section; after one grace period
+    //    none is in flight.
+    synchronize_quiesce();
+    // 4. Nothing of its left in any receive queue, and every worker past any input_one it had started.
+    let dropped = rxqPurge(nif);
+    if (DEBUG_BUILD) {
+        let hook = TEST_BARRIER_HOOK.loadWith(LoadOrdering.Acquire);
+        if (hook != 0) {
+            let f = hook as extern "C" fn(*mut netif, *mut void);
+            f(nif, TEST_HOOK_ARG.loadWith(LoadOrdering.Acquire) as *mut void);
+        }
+    }
+    workersBarrier();
+    // 5. Tables that name the interface.
+    arp_flush(nif);
+    nd_flush(nif);
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("net: ");
+    line.bytes(cText(b.name[..]));
+    line.text(" unregistered (");
+    line.decimal(dropped as u64);
+    line.text(" queued packets dropped)");
+    info(line);
+    // 6. The registry's reference.
+    kobject_put(borrow mut b.obj as *mut kobject);
+    mutex_unlock(serial);
+}
+
+/// netif.h's netif_names: the interfaces' names, comma-separated, as many as fit in `buf` (`n` bytes); their count.
+/// Safety: `buf` has `n` writable bytes (any pointer when `n` is 0).
+@export("netif_names")
+unsafe fn names(buf: *mut CChar, n: usize) -> u32 {
+    var count: u32 = 0;
+    var off: usize = 0;
+    let out = if (n > 0) SliceMut.fromRaw(buf as *mut u8, n) else SliceMut.fromRaw(buf as *mut u8, 0);
+    if (n > 0) {
+        out[0] = 0;
+    }
+    let s = spin_lock_irqsave(registryLock());
+    var node = linkAfter(registry());
+    while (node != registry()) {
+        count += 1;
+        let other = Ptr.toBorrow(ofLink(node) as *netif);
+        let name = cText(other.name[..]);
+        let len = name.length;
+        if (n > 0 && off + len + 2 < n) {
+            if (off > 0) {
+                out[off] = 44;
+                off += 1;
+            }
+            out[off..off + len].copyFrom(name);
+            off += len;
+            out[off] = 0;
+        }
+        node = linkAfter(node);
+    }
+    spin_unlock_irqrestore(registryLock(), s);
+    return count;
+}
+
+/// The first registered interface `test` accepts, referenced; or null. Under the registry lock.
+/// Safety: `test` only reads the interface.
+unsafe fn findWhere(test: borrow mut fn(borrow netif) -> bool) -> *mut netif {
+    var found = 0 as *mut netif;
+    let s = spin_lock_irqsave(registryLock());
+    var node = linkAfter(registry());
+    while (node != registry()) {
+        let nif = ofLink(node);
+        if (test(Ptr.toBorrow(nif as *netif))) {
+            found = nif;
+            kobject_get(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject);
+            break;
+        }
+        node = linkAfter(node);
+    }
+    spin_unlock_irqrestore(registryLock(), s);
+    return found;
+}
+
+/// Whether a registered interface satisfies `test`, under the registry lock; no reference is taken.
+/// Safety: `test` only reads the interface.
+unsafe fn anyWhere(test: borrow mut fn(borrow netif) -> bool) -> bool {
+    var found = false;
+    let s = spin_lock_irqsave(registryLock());
+    var node = linkAfter(registry());
+    while (node != registry()) {
+        if (test(Ptr.toBorrow(ofLink(node) as *netif))) {
+            found = true;
+            break;
+        }
+        node = linkAfter(node);
+    }
+    spin_unlock_irqrestore(registryLock(), s);
+    return found;
+}
+
+/// Whether an interface's name is the C string `s` (the C's strcmp, which the kernel's string.h provides).
+/// Safety: `s` points to a zero-terminated string; a registered name ends inside its array (register checks it).
+unsafe fn isNamed(name: borrow [u8; 8], s: *CChar) -> bool => strcmp(name as *[u8; 8] as *CChar, s) == 0;
+
+/// netif.h's netif_find: the interface named `name`, referenced, or null.
+/// Safety: `name` is a zero-terminated string.
+@export("netif_find")
+unsafe fn find(name: *CChar) -> *mut netif {
+    var found = 0 as *mut netif;
+    let s = spin_lock_irqsave(registryLock());
+    var node = linkAfter(registry());
+    while (node != registry()) {
+        let nif = ofLink(node);
+        if (isNamed(Ptr.toBorrow(nif as *netif).name, name)) {
+            found = nif;
+            kobject_get(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject);
+            break;
+        }
+        node = linkAfter(node);
+    }
+    spin_unlock_irqrestore(registryLock(), s);
+    return found;
+}
+
+/// netif.h's netif_default: the first non-loopback, non-NODEFAULT interface that is up, referenced, or null.
+/// Safety: the registry's lock is taken here.
+@export("netif_default")
+unsafe fn defaultInterface() -> *mut netif => findWhere((n) => {
+    let flags = n.flags.loadWith(LoadOrdering.Relaxed);
+    return (flags & (NETIF_LOOPBACK | NETIF_NODEFAULT)) == 0 && (flags & NETIF_UP) != 0;
+});
+
+/// netif.h's netif_default_ipv4: as netif_default, with an IPv4 address.
+/// Safety: as netif_default.
+@export("netif_default_ipv4")
+unsafe fn defaultIpv4() -> *mut netif => findWhere((n) => {
+    let flags = n.flags.loadWith(LoadOrdering.Relaxed);
+    return (flags & (NETIF_LOOPBACK | NETIF_NODEFAULT)) == 0 && (flags & NETIF_UP) != 0 &&
+        n.ip4.addr.loadWith(LoadOrdering.Acquire) != 0;
+});
+
+/// netif.h's netif_loopback: `lo`, referenced, or null.
+/// Safety: as netif_find.
+@export("netif_loopback")
+unsafe fn loopback() -> *mut netif => find("lo\0".ptr as *CChar);
+
+/// netif.h's netif_connected: the up, non-loopback interface on whose subnet `dst` falls, by longest prefix (the
+/// registry allows overlapping masks in registration order), referenced, or null. A NETIF_NODEFAULT interface is a
+/// connected route like any other.
+/// Safety: the registry's lock is taken here.
+@export("netif_connected")
+unsafe fn connected(dst: u32) -> *mut netif {
+    var best = 0 as *mut netif;
+    var bestMask: u32 = 0;
+    let s = spin_lock_irqsave(registryLock());
+    var node = linkAfter(registry());
+    while (node != registry()) {
+        let nif = ofLink(node);
+        let n = Ptr.toBorrow(nif as *netif);
+        node = linkAfter(node);
+        let flags = n.flags.loadWith(LoadOrdering.Relaxed);
+        if ((flags & NETIF_LOOPBACK) != 0 || (flags & NETIF_UP) == 0) {
+            continue;
+        }
+        let addr = n.ip4.addr.loadWith(LoadOrdering.Relaxed);
+        let mask = n.ip4.mask.loadWith(LoadOrdering.Relaxed);
+        if (addr == 0 || mask == 0) {
+            continue;
+        }
+        if (((dst ^ addr) & mask) != 0) {
+            continue; // dst is not on this interface's subnet
+        }
+        let m = swap32(mask);
+        if (best.isNull() || m > bestMask) {
+            best = nif;
+            bestMask = m;
+        }
+    }
+    if (!best.isNull()) {
+        kobject_get(borrow mut Ptr.toBorrowMut(best).obj as *mut kobject);
+    }
+    spin_unlock_irqrestore(registryLock(), s);
+    return best;
+}
+
+/// netif.h's netif_set_ipv4. The packet paths read these without the lock; the DHCP client changes them on a live
+/// interface, so the address is published last and withdrawn first, each field a single store: a reader that sees an
+/// address sees a mask and gateway that went with an address.
+/// Safety: `nif` is a registered interface.
+@export("netif_set_ipv4")
+unsafe fn setIpv4(nif: *mut netif, addr: u32, mask: u32, gateway: u32) {
+    let b = Ptr.toBorrowMut(nif);
+    let lock = borrow mut b.lock as *mut spinlock_t;
+    let s = spin_lock_irqsave(lock);
+    if (addr == 0 || b.ip4.addr.loadWith(LoadOrdering.Relaxed) != 0) {
+        b.ip4.addr.storeWith(0, StoreOrdering.Release);
+    }
+    b.ip4.mask.storeWith(mask, StoreOrdering.Release);
+    b.ip4.gateway.storeWith(gateway, StoreOrdering.Release);
+    b.ip4.addr.storeWith(addr, StoreOrdering.Release);
+    spin_unlock_irqrestore(lock, s);
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("net: ");
+    line.bytes(cText(b.name[..]));
+    line.text(": ");
+    dotted(mut line, addr);
+    line.text(" gateway ");
+    dotted(mut line, gateway);
+    info(line);
+}
+
+/// Sets or clears `bit` of the flag word under the interface's lock, published with a release store (readers outside
+/// the lock see a whole word).
+/// Safety: `nif` is a registered interface.
+unsafe fn setFlag(nif: *mut netif, bit: u32, on: bool) {
+    let b = Ptr.toBorrowMut(nif);
+    let lock = borrow mut b.lock as *mut spinlock_t;
+    let s = spin_lock_irqsave(lock);
+    let flags = b.flags.loadWith(LoadOrdering.Relaxed);
+    b.flags.storeWith(if (on) flags | bit else flags & (bit ^ 0xffffffff), StoreOrdering.Release);
+    spin_unlock_irqrestore(lock, s);
+}
+
+/// netif.h's netif_set_up. Down drops the interface's neighbours, as unregister does: a MAC learned over a link that is
+/// down is not known to be there when it comes back. Up kicks a DHCP client whose first DISCOVER the down link lost.
+/// Safety: `nif` is a registered interface.
+@export("netif_set_up")
+unsafe fn setUp(nif: *mut netif, up: bool) {
+    setFlag(nif, NETIF_UP, up);
+    if (!up) {
+        arp_flush(nif);
+        nd_flush(nif);
+    } else {
+        dhcp_client_kick(nif);
+    }
+}
+
+/// netif.h's netif_set_forward.
+/// Safety: `nif` is a registered interface.
+@export("netif_set_forward")
+unsafe fn setForward(nif: *mut netif, on: bool) {
+    setFlag(nif, NETIF_FORWARD, on);
+}
+
+/// netif.h's netif_set_masquerade.
+/// Safety: `nif` is a registered interface.
+@export("netif_set_masquerade")
+unsafe fn setMasquerade(nif: *mut netif, on: bool) {
+    setFlag(nif, NETIF_MASQUERADE, on);
+}
+
+/// netif.h's netif_owns_ipv4: one of our addresses (any interface), or 127/8.
+/// Safety: the registry's lock is taken here.
+@export("netif_owns_ipv4")
+unsafe fn ownsIpv4(addr: u32) -> bool {
+    if (addr == INADDR_LOOPBACK_N || (swap32(addr) >> 24) == 127) {
+        return true;
+    }
+    return anyWhere((n) => {
+        let a = n.ip4.addr.loadWith(LoadOrdering.Relaxed);
+        return a != 0 && a == addr;
+    });
+}
+
+/// netif.h's netif_owns_ipv6: ::1, or a non-loopback interface's link-local address.
+/// Safety: `a` points to an address.
+@export("netif_owns_ipv6")
+unsafe fn ownsIpv6(a: *in6_addr) -> bool {
+    let wanted = Ptr.toBorrow(a).s6_addr;
+    var loop1 = true;
+    for (i in 0..15u32) {
+        if (wanted[i as usize] != 0) {
+            loop1 = false;
+        }
+    }
+    if (loop1 && wanted[15] == 1) {
+        return true;
+    }
+    return anyWhere((n) => (n.flags.loadWith(LoadOrdering.Relaxed) & NETIF_LOOPBACK) == 0 &&
+        sameBytes(n.ip6_ll.s6_addr[..], wanted[..]));
+}
+
+// ---- The receive path ----
+
+fn mix32(h: u32, v: u32) -> u32 {
+    var x = h ^ v;
+    x = x.wrappingMul(0x9E3779B1);
+    return x ^ (x >> 15);
+}
+
+/// A u32 from four bytes as they lie in memory (little-endian targets, as the C's memcpy read them).
+fn memoryWord(b: Slice<u8>, at: usize) -> u32 =>
+    (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) | ((b[at + 3] as u32) << 24);
+
+/// netif.h's net_flow_hash: a packet's flow, from its addresses, protocol and (not fragmented) ports; never 0 for a
+/// hashed flow, 0 for one too short to hash.
+/// Safety: `m` is a live packet.
+@export("net_flow_hash")
+unsafe fn flowHash(m: *mbuf, ether: bool) -> u32 {
+    let p = Ptr.toBorrow(m);
+    let n = if (p.pkt.len < 96) p.pkt.len else 96;
+    if (n == 0) {
+        return 0;
+    }
+    if (p.len >= n) {
+        // The first n bytes are in the first mbuf (as a received frame's are): read them in place.
+        return hashFrame(Slice.fromRaw(p.data as *u8, n as usize), ether, p.pkt.proto as u32);
+    }
+    var b: [u8; 96] = [0; 96];
+    if (!m_copydata(m, 0, n, borrow mut b as *mut [u8; 96] as *mut void)) {
+        return 0;
+    }
+    return hashFrame(b[..n as usize], ether, p.pkt.proto as u32);
+}
+
+/// net_flow_hash over a frame's first bytes (at most 96); `pktProto` is the EtherType of a frame without a link
+/// layer.
+fn hashFrame(bytes: Slice<u8>, ether: bool, pktProto: u32) -> u32 {
+    let n = truncate<u32>(bytes.length);
+    var off: u32 = 0;
+    var kind: u32 = 0;
+    if (ether) {
+        if (n < ETH_HLEN) {
+            return 0;
+        }
+        kind = ((bytes[12] as u32) << 8) | bytes[13] as u32;
+        off = ETH_HLEN;
+    } else {
+        kind = pktProto;
+    }
+    var h: u32 = 0x811C9DC5;
+    var proto: u32 = 0;
+    var portsAt: u32 = 0;
+    let o = off as usize;
+    if (kind == ETH_P_IP) {
+        if (n < off + 20) {
+            return 0;
+        }
+        let ihl = ((bytes[o] & 0xf) as u32) * 4;
+        proto = bytes[o + 9] as u32;
+        h = mix32(mix32(h, memoryWord(bytes, o + 12)), memoryWord(bytes, o + 16));
+        if (!((bytes[o + 6] & 0x3f) != 0 || bytes[o + 7] != 0)) {
+            portsAt = off + ihl; // not a fragment: ports are here
+        }
+    } else if (kind == ETH_P_IPV6) {
+        if (n < off + 40) {
+            return 0;
+        }
+        for (k in 0..8u32) {
+            h = mix32(h, memoryWord(bytes, o + 8 + 4 * k as usize));
+        }
+        proto = bytes[o + 6] as u32;
+        portsAt = off + 40; // extension headers: ports left out
+    } else {
+        return mix32(h, kind);
+    }
+    h = mix32(h, proto);
+    if ((proto == IPPROTO_TCP || proto == IPPROTO_UDP) && portsAt != 0 && portsAt + 4 <= n) {
+        h = mix32(h, memoryWord(bytes, portsAt as usize));
+    }
+    return if (h != 0) h else 1;
+}
+
+/// The queue a packet goes to: the flow's CPU when steering is on and that CPU's worker runs, else CPU 0's.
+/// Safety: `m` is a live packet the caller holds.
+unsafe fn steer(nif: *netif, m: *mut mbuf, wanted: i32) -> *mut net_cpu {
+    let n = NCPU.loadWith(LoadOrdering.Relaxed);
+    var c = wanted;
+    if (c < 0) {
+        if (STEER.loadWith(LoadOrdering.Relaxed) == 0 || n <= 1) {
+            return cpu(0);
+        }
+        let loopbackIf = (Ptr.toBorrow(nif).flags.loadWith(LoadOrdering.Relaxed) & NETIF_LOOPBACK) != 0;
+        let hash = flowHash(m as *mbuf, !loopbackIf);
+        let p = Ptr.toBorrowMut(m);
+        p.pkt.flow_hash = hash;
+        c = truncate<i32>(hash % n);
+    }
+    let chosen = cpu(if (truncate<u32>(c) < n) truncate<u32>(c) else 0);
+    return if (Ptr.toBorrow(chosen as *net_cpu).ready.loadWith(LoadOrdering.Relaxed) != 0) chosen else cpu(0);
+}
+
+/// Safety: `nif` is a registered interface (or one being unregistered: refused), `m` a packet handed over.
+unsafe fn rxCommon(nif: *mut netif, m: *mut mbuf, wanted: i32) {
+    // Read-side section: netif_unregister's grace period waits for it.
+    quiesce_read_lock();
+    let n = Ptr.toBorrow(nif as *netif);
+    if ((n.flags.loadWith(LoadOrdering.Acquire) & NETIF_GONE) != 0) {
+        quiesce_read_unlock();
+        m_freem(m);
+        return;
+    }
+    let p = Ptr.toBorrowMut(m);
+    p.pkt.rcvif = nif;
+    p.pkt.rx_ns = clock_now_ns();
+    n.stats.rx_packets.fetchAddWith(1, Ordering.Relaxed);
+    n.stats.rx_bytes.fetchAddWith(p.pkt.len as u64, Ordering.Relaxed);
+    let c = steer(nif as *netif, m, wanted);
+    let state = Ptr.toBorrowMut(c);
+    if (state.id == raw_cpu_id()) {
+        state.stats.rx_steered_here.fetchAddWith(1, Ordering.Relaxed); // steered to the CPU that received it
+    }
+    // Fault injection (FI_NET_RX_DUP): a second copy of the frame, made before m is queued (a worker may dequeue and
+    // free m at once), queued right behind it.
+    let dup = if (faultinject_should_fail(FI_RX_DUP)) m_copypacket(m as *mbuf) else 0 as *mut mbuf;
+    let q = borrow mut state.rxq as *mut mbufq;
+    if (!mbufq_enqueue(q, m)) {
+        n.stats.rx_dropped.fetchAddWith(1, Ordering.Relaxed);
+        state.stats.rx_dropped.fetchAddWith(1, Ordering.Relaxed);
+        if (!dup.isNull()) {
+            m_freem(dup);
+        }
+        quiesce_read_unlock();
+        return;
+    }
+    state.stats.rx_queued.fetchAddWith(1, Ordering.Relaxed);
+    if (!dup.isNull()) {
+        if (mbufq_enqueue(q, dup)) {
+            state.stats.rx_queued.fetchAddWith(1, Ordering.Relaxed);
+        } else {
+            n.stats.rx_dropped.fetchAddWith(1, Ordering.Relaxed);
+            state.stats.rx_dropped.fetchAddWith(1, Ordering.Relaxed);
+        }
+    }
+    quiesce_read_unlock();
+    waitqueue_wake_one(borrow mut state.wq as *mut waitqueue);
+}
+
+/// netif.h's netif_rx: a received packet, steered by its flow.
+/// Safety: as rxCommon.
+@export("netif_rx")
+unsafe fn rx(nif: *mut netif, m: *mut mbuf) {
+    rxCommon(nif, m, -1);
+}
+
+/// netif.h's netif_rx_on: a received packet, for CPU `on`'s queue.
+/// Safety: as rxCommon.
+@export("netif_rx_on")
+unsafe fn rxOn(nif: *mut netif, m: *mut mbuf, on: u32) {
+    rxCommon(nif, m, if (on > 0x7fffffff) -1 else truncate<i32>(on));
+}
+
+@export("netif_set_steering")
+fn setSteering(on: bool) {
+    STEER.storeWith(if (on) 1 else 0, StoreOrdering.Relaxed);
+}
+
+@export("netif_steering")
+fn steering() -> bool => STEER.loadWith(LoadOrdering.Relaxed) != 0;
+
+/// netif.h's netif_cpu_stats: CPU `which`'s counters, false if it has no running worker.
+/// Safety: `out` is writable.
+@export("netif_cpu_stats")
+unsafe fn cpuStats(which: u32, out: *mut net_cpu_stats) -> bool {
+    if (which >= NCPU.loadWith(LoadOrdering.Relaxed) ||
+        Ptr.toBorrow(cpu(which) as *net_cpu).ready.loadWith(LoadOrdering.Relaxed) == 0) {
+        return false;
+    }
+    let from = Ptr.toBorrow(cpu(which) as *net_cpu);
+    let o = Ptr.toBorrowMut(out);
+    o.rx_queued.storeWith(from.stats.rx_queued.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.rx_dropped.storeWith(from.stats.rx_dropped.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.rx_steered_here.storeWith(from.stats.rx_steered_here.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.work_runs.storeWith(from.stats.work_runs.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    return true;
+}
+
+/// netif.h's netif_set_rx_hook. Install: the argument first, then the function, so a worker that sees the function
+/// sees its argument. Uninstall: clear the function, then a grace period: workers run the hook inside a read-side
+/// section, so when this returns none is inside the old hook, and its context may be freed.
+/// Safety: thread context when uninstalling (it waits a grace period).
+@export("netif_set_rx_hook")
+unsafe fn setRxHook(hook: extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool, arg: *mut void) {
+    if (hook.isNull()) {
+        RX_HOOK.storeWith(0, StoreOrdering.Release);
+        synchronize_quiesce();
+        RX_HOOK_ARG.storeWith(0, StoreOrdering.Relaxed);
+        return;
+    }
+    RX_HOOK_ARG.storeWith(arg as usize, StoreOrdering.Relaxed);
+    RX_HOOK.storeWith(hook as usize, StoreOrdering.Release);
+}
+
+/// netif.h's netif_test_worker_hooks_set (debug builds): hooks a test runs in the worker before each input and in
+/// unregister before its barrier.
+@export("netif_test_worker_hooks_set")
+@cfg("CONFIG_DEBUG")
+fn testWorkerHooksSet(
+    input: extern "C" fn(*mut netif, *mut void),
+    barrier: extern "C" fn(*mut netif, *mut void),
+    arg: *mut void,
+) {
+    if (input.isNull() && barrier.isNull()) {
+        TEST_INPUT_HOOK.storeWith(0, StoreOrdering.Release);
+        TEST_BARRIER_HOOK.storeWith(0, StoreOrdering.Release);
+        TEST_HOOK_ARG.storeWith(0, StoreOrdering.Release);
+        return;
+    }
+    TEST_HOOK_ARG.storeWith(arg as usize, StoreOrdering.Relaxed);
+    TEST_BARRIER_HOOK.storeWith(barrier as usize, StoreOrdering.Release);
+    TEST_INPUT_HOOK.storeWith(input as usize, StoreOrdering.Release);
+}
+
+/// netif.h's netif_tx_probe_set (self-test builds): an interface, zeroed and started for the calling thread; null,
+/// stopped.
+/// Safety: thread_current is the calling thread.
+@export("netif_tx_probe_set")
+@cfg("CONFIG_SELFTEST")
+unsafe fn txProbeSet(nif: *mut netif) {
+    if (!nif.isNull()) {
+        TX_PROBE.calls.storeWith(0, StoreOrdering.Relaxed);
+        TX_PROBE.nsTotal.storeWith(0, StoreOrdering.Relaxed);
+        TX_PROBE.nsMax.storeWith(0, StoreOrdering.Relaxed);
+        TX_PROBE.refused.storeWith(0, StoreOrdering.Relaxed);
+        TX_PROBE_THREAD.storeWith(thread_current() as usize, StoreOrdering.Relaxed);
+    }
+    TX_PROBE_NIF.storeWith(nif as usize, StoreOrdering.Release);
+}
+
+/// netif.h's netif_tx_probe_read (self-test builds).
+/// Safety: `out` is writable.
+@export("netif_tx_probe_read")
+@cfg("CONFIG_SELFTEST")
+unsafe fn txProbeRead(out: *mut netif_tx_probe) {
+    let o = Ptr.toBorrowMut(out);
+    o.calls = TX_PROBE.calls.loadWith(LoadOrdering.Relaxed);
+    o.ns_total = TX_PROBE.nsTotal.loadWith(LoadOrdering.Relaxed);
+    o.ns_max = TX_PROBE.nsMax.loadWith(LoadOrdering.Relaxed);
+    o.refused = TX_PROBE.refused.loadWith(LoadOrdering.Relaxed);
+}
+
+/// netif.h's netif_tx_pending: the driver's descriptors in flight and its ring's capacity, read in a read-side section
+/// (netif_unregister waits a grace period before the driver frees its queues); false if it cannot say or is gone.
+/// Safety: `nif` is a referenced interface; `pending` and `capacity` are writable.
+@export("netif_tx_pending")
+unsafe fn txPending(nif: *mut netif, pending: *mut u32, capacity: *mut u32) -> bool {
+    let n = Ptr.toBorrow(nif as *netif);
+    let ask = Ptr.toBorrow(n.ops).tx_pending;
+    if (ask.isNull()) {
+        return false;
+    }
+    quiesce_read_lock();
+    let live = (n.flags.loadWith(LoadOrdering.Acquire) & NETIF_GONE) == 0;
+    if (live) {
+        let got = ask(nif, capacity);
+        pending.write(got);
+    }
+    quiesce_read_unlock();
+    return live;
+}
+
+/// netif.h's netif_transmit: hands a packet to the driver, in a read-side section (netif_unregister sets GONE, then
+/// waits a grace period before the driver frees its queues), finishing a transport checksum the device cannot.
+/// Safety: `nif` is a referenced interface; `m` a packet handed over.
+@export("netif_transmit")
+unsafe fn transmit(nif: *mut netif, m: *mut mbuf) -> i32 {
+    quiesce_read_lock();
+    let n = Ptr.toBorrow(nif as *netif);
+    let flags = n.flags.loadWith(LoadOrdering.Acquire);
+    if ((flags & NETIF_GONE) != 0) {
+        quiesce_read_unlock();
+        m_freem(m);
+        return -ENODEV;
+    }
+    if ((flags & NETIF_UP) == 0) {
+        quiesce_read_unlock();
+        m_freem(m);
+        n.stats.tx_dropped.fetchAddWith(1, Ordering.Relaxed);
+        return -ENETUNREACH;
+    }
+    let p = Ptr.toBorrow(m as *mbuf);
+    if ((p.pkt.csum_flags & NET_CSUM_TX) != 0 && (n.caps & NETIF_CAP_TXCSUM) == 0 && !m_csum_complete(m)) {
+        quiesce_read_unlock();
+        m_freem(m);
+        n.stats.tx_errors.fetchAddWith(1, Ordering.Relaxed);
+        return -EINVAL;
+    }
+    let len = p.pkt.len;
+    let probe = SELFTEST_BUILD && TX_PROBE_NIF.loadWith(LoadOrdering.Acquire) == nif as usize &&
+        TX_PROBE_THREAD.loadWith(LoadOrdering.Relaxed) == thread_current() as usize;
+    let t0 = if (probe) clock_now_ns() else 0;
+    let send = Ptr.toBorrow(n.ops).transmit;
+    let rc = send(nif, m);
+    if (probe) {
+        // Only the probing thread's sends on the probed interface reach here; atomic so another CPU never sees a torn
+        // counter.
+        let dt = clock_since_ns(t0);
+        TX_PROBE.calls.fetchAddWith(1, Ordering.Relaxed);
+        TX_PROBE.nsTotal.fetchAddWith(dt, Ordering.Relaxed);
+        if (dt > TX_PROBE.nsMax.loadWith(LoadOrdering.Relaxed)) {
+            TX_PROBE.nsMax.storeWith(dt, StoreOrdering.Relaxed);
+        }
+        if (rc == -ENOBUFS) {
+            TX_PROBE.refused.fetchAddWith(1, Ordering.Relaxed);
+        }
+    }
+    quiesce_read_unlock();
+    if (rc != 0) {
+        n.stats.tx_errors.fetchAddWith(1, Ordering.Relaxed);
+    } else {
+        n.stats.tx_packets.fetchAddWith(1, Ordering.Relaxed);
+        n.stats.tx_bytes.fetchAddWith(len as u64, Ordering.Relaxed);
+    }
+    return rc;
+}
+
+// ---- Work items and the workers ----
+
+/// netif.h's net_work_init.
+/// Safety: `w` is an item on no list.
+@export("net_work_init")
+unsafe fn workInit(w: *mut net_work, run: extern "C" fn(*mut void), arg: *mut void) {
+    let b = Ptr.toBorrowMut(w);
+    List.init(borrow mut b.link as *mut list_node);
+    b.run = run;
+    b.arg = arg;
+    b.queued.storeWith(0, StoreOrdering.Relaxed);
+}
+
+/// Queues `w` on CPU `c`'s worker. The item is claimed with one atomic flag before any list is touched: two CPUs
+/// queueing the same item take different work locks, so the flag decides who links it, and the item runs once.
+/// Safety: `w` is an initialised item; `c` a CPU's state.
+unsafe fn workQueueOn(w: *mut net_work, c: *mut net_cpu) -> bool {
+    let b = Ptr.toBorrowMut(w);
+    if (b.queued.swapWith(1, Ordering.AcquireRelease) != 0) {
+        return false;
+    }
+    let state = Ptr.toBorrowMut(c);
+    let lock = borrow mut state.work_lock as *mut spinlock_t;
+    let s = spin_lock_irqsave(lock);
+    List.pushBack(borrow mut state.work as *mut list_node, borrow mut b.link as *mut list_node);
+    spin_unlock_irqrestore(lock, s);
+    waitqueue_wake_one(borrow mut state.wq as *mut waitqueue);
+    return true;
+}
+
+/// netif.h's net_work_queue: on the calling CPU's worker (a timer fires on the CPU that armed it), or CPU 0's if that
+/// one is not ready; false while the item is already queued.
+/// Safety: `w` is an initialised item.
+@export("net_work_queue")
+unsafe fn workQueue(w: *mut net_work) -> bool {
+    let here = raw_cpu_id(); // a preference, not a claim: any ready worker serves the item
+    let n = NCPU.loadWith(LoadOrdering.Relaxed);
+    var c = cpu(if (here < n) here else 0);
+    if (Ptr.toBorrow(c as *net_cpu).ready.loadWith(LoadOrdering.Relaxed) == 0) {
+        c = cpu(0);
+    }
+    return workQueueOn(w, c);
+}
+
+/// Safety: `c` is a CPU's state.
+unsafe fn workPending(c: *mut net_cpu) -> bool {
+    let state = Ptr.toBorrowMut(c);
+    let lock = borrow mut state.work_lock as *mut spinlock_t;
+    let s = spin_lock_irqsave(lock);
+    let pending = !List.isEmpty(borrow state.work as *list_node);
+    spin_unlock_irqrestore(lock, s);
+    return pending;
+}
+
+/// Runs every queued item; an item may queue itself again from its handler.
+/// Safety: on `c`'s worker.
+unsafe fn runWork(c: *mut net_cpu) {
+    let state = Ptr.toBorrowMut(c);
+    let lock = borrow mut state.work_lock as *mut spinlock_t;
+    let head = borrow mut state.work as *mut list_node;
+    loop {
+        let s = spin_lock_irqsave(lock);
+        let node = List.first(head as *list_node);
+        if (node.isNull()) {
+            spin_unlock_irqrestore(lock, s);
+            return;
+        }
+        let w = containerOf(node, offsetOf<net_work>(link)) as *mut net_work;
+        List.remove(node);
+        List.init(node);
+        let item = Ptr.toBorrowMut(w);
+        item.queued.storeWith(0, StoreOrdering.Release); // the handler may queue it again
+        let run = item.run;
+        let arg = item.arg;
+        spin_unlock_irqrestore(lock, s);
+        state.stats.work_runs.fetchAddWith(1, Ordering.Relaxed);
+        run(arg);
+    }
+}
+
+/// One received packet to its protocol, after the receive hook (which may take it) and, in debug builds, the test hook.
+/// Safety: on a worker; `m` a packet from a receive queue.
+unsafe fn inputOne(m: *mut mbuf) {
+    let nif = Ptr.toBorrow(m as *mbuf).pkt.rcvif;
+    // Read-side section around the hook: netif_set_rx_hook(NULL) waits a grace period after clearing it, so a hook
+    // never runs after the call that removed it returned. The hook must not block.
+    quiesce_read_lock();
+    let hook = RX_HOOK.loadWith(LoadOrdering.Acquire);
+    var taken = false;
+    if (hook != 0) {
+        let f = hook as extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool;
+        taken = !f(nif, m, RX_HOOK_ARG.loadWith(LoadOrdering.Relaxed) as *mut void);
+    }
+    quiesce_read_unlock();
+    if (taken) {
+        return;
+    }
+    if (DEBUG_BUILD) {
+        let test = TEST_INPUT_HOOK.loadWith(LoadOrdering.Acquire);
+        if (test != 0) {
+            let f = test as extern "C" fn(*mut netif, *mut void);
+            f(nif, TEST_HOOK_ARG.loadWith(LoadOrdering.Acquire) as *mut void);
+        }
+    }
+    if ((Ptr.toBorrow(nif as *netif).flags.loadWith(LoadOrdering.Relaxed) & NETIF_LOOPBACK) != 0) {
+        // No link layer: pkt.proto carries the EtherType.
+        let proto = Ptr.toBorrow(m as *mbuf).pkt.proto as u32;
+        if (proto == ETH_P_IP) {
+            ipv4_input(nif, m);
+        } else if (proto == ETH_P_IPV6) {
+            ipv6_input(nif, m);
+        } else {
+            m_freem(m);
+        }
+        return;
+    }
+    ether_input(nif, m);
+}
+
+/// A CPU's worker: sleeps until its queue has a packet or its list an item, then takes up to 64 packets and every
+/// item.
+/// Safety: started by startWorker with its CPU's state.
+@callback
+unsafe fn workerMain(arg: *mut void) {
+    let c = arg as *mut net_cpu;
+    let state = Ptr.toBorrowMut(c);
+    state.ready.storeWith(1, StoreOrdering.Release);
+    let q = borrow mut state.rxq as *mut mbufq;
+    let wq = borrow mut state.wq as *mut waitqueue;
+    let entry = borrow mut state.waiting as *mut wait_entry;
+    loop {
+        // wait_event(&c->wq, mbufq_len(&c->rxq) > 0 || work_pending(c))
+        wait_entry_init(entry);
+        loop {
+            waitqueue_prepare(wq, entry);
+            if (mbufq_len(q) > 0 || workPending(c)) {
+                break;
+            }
+            sched_block_current();
+        }
+        waitqueue_finish(wq, entry);
+        var budget: u32 = 64;
+        while (budget > 0) {
+            budget -= 1;
+            let m = mbufq_dequeue(q);
+            if (m.isNull()) {
+                break;
+            }
+            inputOne(m);
+        }
+        runWork(c);
+    }
+}
+
+/// Safety: `c` is CPU `id`'s state, which no worker uses yet.
+unsafe fn cpuInit(c: *mut net_cpu, id: u32) {
+    let state = Ptr.toBorrowMut(c);
+    state.id = id;
+    mbufq_init(borrow mut state.rxq as *mut mbufq, NET_RXQ_MAX, "net-rxq\0".ptr as *CChar);
+    List.init(borrow mut state.work as *mut list_node);
+    spinlock_init(borrow mut state.work_lock as *mut spinlock_t, "network\0".ptr as *CChar);
+    waitqueue_init(borrow mut state.wq as *mut waitqueue, "netrx\0".ptr as *CChar);
+    var name = TextWriter.create(mut state.name[..]);
+    name.text("netrx/");
+    name.decimal(id as u64);
+}
+
+/// Safety: as cpuInit, after it.
+unsafe fn startWorker(c: *mut net_cpu) {
+    let state = Ptr.toBorrowMut(c);
+    let name = borrow state.name as *[u8; 16] as *CChar;
+    state.worker = thread_create_on(workerMain, c as *mut void, name, WORKER_PRIO, 1u64 << (state.id as u64));
+    if (state.worker.isNull()) {
+        var buffer: [u8; 80] = [0; 80];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("net: cannot create the worker thread for CPU ");
+        line.decimal(state.id as u64);
+        KernelLog.panic(line);
+    }
+}
+
+/// netif.h's net_start_workers: after SMP bring-up, a queue and a pinned worker per online CPU.
+/// Safety: called once, after net_init.
+@export("net_start_workers")
+unsafe fn startWorkers() {
+    var n = cpu_count();
+    if (n as usize > MAX_CPUS) {
+        n = truncate<u32>(MAX_CPUS);
+    }
+    for (i in 1..n) {
+        cpuInit(cpu(i), i);
+        startWorker(cpu(i));
+    }
+    NCPU.storeWith(n, StoreOrdering.Release);
+    var buffer: [u8; 48] = [0; 48];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("net: ");
+    line.decimal(n as u64);
+    line.text(" receive queues");
+    info(line);
+}
+
+/// netif.h's net_init: mbufs, CPU 0's worker, loopback, protocols.
+/// Safety: called once at start-up.
+@export("net_init")
+unsafe fn init() {
+    cpuInit(cpu(0), 0);
+    mutex_init(borrow mut UNREGISTER_LOCK as *mut mutex, "netif-unregister\0".ptr as *CChar);
+    mutex_init(borrow mut BARRIER_LOCK as *mut mutex, "net-barrier\0".ptr as *CChar);
+    mbuf_init();
+    arp_init();
+    nd_init();
+    udp_init();
+    tcp_init();
+    socket_init();
+    startWorker(cpu(0));
+    sched_dump_register("net\0".ptr as *CChar, dumpCpus);
+    loopback_init();
+    KernelLog.write(LogLevel.Info, "net: stack ready");
+}
+
+/// A line of raw kernel output (kprintf, no level).
+/// Safety: the format is "%s" and the argument the writer's zero-terminated text.
+fn print(line: borrow TextWriter) {
+    unsafe { kprintf("%s\0".ptr as *CChar, line.cText()); }
+}
+
+/// The per-CPU counters, lock-free (relaxed loads of the workers' atomic updates), for sched_dump: a watchdog or
+/// lockup report shows what each worker has been doing.
+/// Safety: the CPUs' state lives as long as the kernel.
+@callback
+unsafe fn dumpCpus() {
+    let n = NCPU.loadWith(LoadOrdering.Relaxed);
+    for (i in 0..n) {
+        let state = Ptr.toBorrow(cpu(i) as *net_cpu);
+        var buffer: [u8; 160] = [0; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("netrx/");
+        line.decimal(i as u64);
+        line.text(if (state.ready.loadWith(LoadOrdering.Relaxed) != 0) ": up queued " else ": starting queued ");
+        line.decimal(state.stats.rx_queued.loadWith(LoadOrdering.Relaxed));
+        line.text(" drop ");
+        line.decimal(state.stats.rx_dropped.loadWith(LoadOrdering.Relaxed));
+        line.text(" local ");
+        line.decimal(state.stats.rx_steered_here.loadWith(LoadOrdering.Relaxed));
+        line.text(" work ");
+        line.decimal(state.stats.work_runs.loadWith(LoadOrdering.Relaxed));
+        line.byte(10);
+        print(line);
+    }
+}
+
+/// The fields a listing shows, read as their writers publish them. Under the registry lock.
+/// Safety: `o` is writable.
+unsafe fn infoOf(n: borrow netif, out: *mut netif_info) {
+    let size = layoutOf<netif_info>().size;
+    SliceMut.fromRaw(out as *mut u8, size).fill(0);
+    let o = Ptr.toBorrowMut(out);
+    let name = cText(n.name[..]);
+    let k = if (name.length < 7) name.length else 7; // strlcpy into 8 bytes
+    o.name[..k].copyFrom(name[..k]);
+    o.index = n.index;
+    o.flags = n.flags.loadWith(LoadOrdering.Acquire);
+    o.mtu = n.mtu;
+    o.mac = n.mac;
+    o.addr = n.ip4.addr.loadWith(LoadOrdering.Acquire);
+    o.mask = n.ip4.mask.loadWith(LoadOrdering.Acquire);
+    o.gateway = n.ip4.gateway.loadWith(LoadOrdering.Acquire);
+    o.ip6_ll.s6_addr = n.ip6_ll.s6_addr;
+    o.stats.rx_packets.storeWith(n.stats.rx_packets.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.stats.rx_bytes.storeWith(n.stats.rx_bytes.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.stats.rx_dropped.storeWith(n.stats.rx_dropped.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.stats.rx_errors.storeWith(n.stats.rx_errors.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.stats.tx_packets.storeWith(n.stats.tx_packets.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.stats.tx_bytes.storeWith(n.stats.tx_bytes.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.stats.tx_dropped.storeWith(n.stats.tx_dropped.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+    o.stats.tx_errors.storeWith(n.stats.tx_errors.loadWith(LoadOrdering.Relaxed), StoreOrdering.Relaxed);
+}
+
+/// netif.h's netif_list: up to `max` interfaces' information in `out`; how many there are.
+/// Safety: `out` has room for `max`.
+@export("netif_list")
+unsafe fn list(out: *mut netif_info, max: u32) -> u32 {
+    var count: u32 = 0;
+    let s = spin_lock_irqsave(registryLock());
+    var node = linkAfter(registry());
+    while (node != registry()) {
+        if (count < max) {
+            infoOf(Ptr.toBorrow(ofLink(node) as *netif), out.add(count as usize));
+        }
+        count += 1;
+        node = linkAfter(node);
+    }
+    spin_unlock_irqrestore(registryLock(), s);
+    return count;
+}
+
+/// The information of the interface named `name` (when not null) or numbered `index`; false if there is none.
+/// Safety: `name` is null or zero-terminated; `out` is writable.
+unsafe fn infoFind(name: *CChar, index: u32, out: *mut netif_info) -> bool {
+    var found = false;
+    let s = spin_lock_irqsave(registryLock());
+    var node = linkAfter(registry());
+    while (node != registry()) {
+        let n = Ptr.toBorrow(ofLink(node) as *netif);
+        if (if (!name.isNull()) isNamed(n.name, name) else n.index == index) {
+            infoOf(n, out);
+            found = true;
+            break;
+        }
+        node = linkAfter(node);
+    }
+    spin_unlock_irqrestore(registryLock(), s);
+    return found;
+}
+
+/// Safety: as infoFind.
+@export("netif_info_by_name")
+unsafe fn infoByName(name: *CChar, out: *mut netif_info) -> bool => infoFind(name, 0, out);
+
+/// Safety: as infoFind.
+@export("netif_info_by_index")
+unsafe fn infoByIndex(index: u32, out: *mut netif_info) -> bool => infoFind(0 as *CChar, index, out);
+
+/// netif.h's netif_dump: each interface's line, then the workers'.
+/// Safety: the registry's lock is taken here.
+@export("netif_dump")
+unsafe fn dump() {
+    let s = spin_lock_irqsave(registryLock());
+    var node = linkAfter(registry());
+    while (node != registry()) {
+        let n = Ptr.toBorrow(ofLink(node) as *netif);
+        var buffer: [u8; 192] = [0; 192];
+        var line = TextWriter.create(mut buffer[..]);
+        line.bytes(cText(n.name[..]));
+        line.text(if ((n.flags.loadWith(LoadOrdering.Relaxed) & NETIF_UP) != 0) ": up mtu " else ": down mtu ");
+        line.decimal(n.mtu as u64);
+        line.text("  ");
+        dotted(mut line, n.ip4.addr.loadWith(LoadOrdering.Relaxed));
+        line.text("  rx ");
+        line.decimal(n.stats.rx_packets.loadWith(LoadOrdering.Relaxed));
+        line.byte(47);
+        line.decimal(n.stats.rx_bytes.loadWith(LoadOrdering.Relaxed));
+        line.text(" drop ");
+        line.decimal(n.stats.rx_dropped.loadWith(LoadOrdering.Relaxed));
+        line.text("  tx ");
+        line.decimal(n.stats.tx_packets.loadWith(LoadOrdering.Relaxed));
+        line.byte(47);
+        line.decimal(n.stats.tx_bytes.loadWith(LoadOrdering.Relaxed));
+        line.text(" err ");
+        line.decimal(n.stats.tx_errors.loadWith(LoadOrdering.Relaxed));
+        line.byte(10);
+        print(line);
+        node = linkAfter(node);
+    }
+    spin_unlock_irqrestore(registryLock(), s);
+    dumpCpus();
+}

@@ -197,6 +197,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/mbuf_floor.c \
 	kernel-services/network/inet.c \
 	kernel-services/network/netif.c \
+	kernel-services/network/netif_floor.c \
 	kernel-services/network/loopback.c \
 	kernel-services/network/tap.c \
 	kernel-services/network/tapsvc.c \
