@@ -741,6 +741,24 @@ those drivers; kernel/ +85 (`devtest.c`'s and
 files, and userland/ +44 (init's test-disk check) until SA12; a CeeSafe
 check in init now would need its own object tree and panic hook and
 repay less than half.
+IPv6 (2026-11-03): `kernel-services/network/ipv6.cee` -- routing (the
+loopback for our addresses, the default interface for link-local and
+multicast ones), the source choice, output through ND or the loopback,
+input with its checks and its dispatch to ICMPv6, UDP and TCP, and
+ICMPv6's echo and the dispatch of ND's messages. A received header is
+copied to a 40-byte local and handed on by address (`struct ipv6_hdr`
+is packed); addresses are read in place through slices. The counters
+are atomics; `ipv6_get_stats` zeroes the record and fills IPv6's fields.
+`tests/host/test_ipv6.c`: 20,000 rounds over a loopback and an Ethernet
+interface -- datagrams in of every shape and destination, ICMPv6 echoes
+and ND messages, datagrams out past the MTU and past 65,535 bytes,
+through ND's three answers, with and without headroom, the routing and
+source choices -- every mbuf freed and every reference given back:
+digest `0x58f5b59e3be23bcc`, the C's (macOS clang, Linux gcc), 100% of
+the C's lines and branches. `IPV6_BENCH=1`, the median of five runs'
+medians: an echo answered 1.04x the C and a 512-byte datagram sent
+1.02x on arm64; 1.03x and 1.02x on x86-64 (Rosetta), after reading the
+addresses in place took the first port's 1.05-1.13x back.
 
 Size: about 3.0x.
 

@@ -1,0 +1,418 @@
+// ipv6.cee - IPv6 (RFC 8200) input and output and ICMPv6 echo (RFC 4443) (kernel/include/kernel/net/ip.h's IPv6
+// half), in CeeSafe: roadmap 2.0 SA6. Routing (the loopback for our own addresses, the default interface for
+// link-local and multicast ones, nothing global yet), the source choice, output through neighbour discovery or the
+// loopback, input with its checks and its dispatch to ICMPv6, UDP and TCP, and ICMPv6's echo and the dispatch of
+// neighbour discovery's messages (nd.cee). tests/host/test_ipv6.c holds it to the digest of the C it replaced.
+//
+// A received header is copied to a 40-byte local and handed on by address: `struct ipv6_hdr` is packed, so its C
+// layout is those 40 bytes.
+
+@header("kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/cksum.h", "kernel/net/tcp.h", "kernel/net/udp.h")
+extern "C" {
+    /// kernel/include/kernel/mbuf.h: the fields IPv6 reads and writes.
+    struct mbuf {
+        data: *mut u8;
+        flags: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+        csum_flags: u16;
+        csum_start: u16;
+    }
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    /// kernel/include/kernel/netif.h: the flag word, which other CPUs change atomically (ADR 0041 §3.1); the MTU and
+    /// the link-local address, fixed while the interface is registered.
+    struct netif {
+        obj: kobject;
+        mtu: u32;
+        flags: AtomicU32;
+        ip6_ll: in6_addr;
+    }
+    /// ip.h's IPv6 header (packed: 40 bytes), read through a received copy.
+    struct ipv6_hdr {
+        hoplimit: u8;
+        src: in6_addr;
+        dst: in6_addr;
+    }
+    struct ipv4_hdr;
+    /// ip.h's statistics: the fields IPv6 counts; the others are zero in its copy.
+    struct ip_stats {
+        rx: u64;
+        rx_bad_header: u64;
+        rx_bad_cksum: u64;
+        rx_not_for_us: u64;
+        rx_unknown_proto: u64;
+        tx: u64;
+        tx_no_route: u64;
+        icmp_echo_rcvd: u64;
+        icmp_echo_replied: u64;
+        nd_pending_dropped: u64;
+    }
+
+    fn m_pullup(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_prepend(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_adj(m: *mut mbuf, n: i32);
+    fn m_freem(m: *mut mbuf);
+    fn m_cksum_partial(m: *mbuf, off: u32, len: u32, sum: u32) -> u32;
+    fn cksum_fold(sum: u32) -> u16;
+    fn cksum_pseudo6(src: *in6_addr, dst: *in6_addr, proto: u8, len: u32) -> u32;
+    fn netparse_ipv6(hdr: *u8, len: u32, plen: *mut u32) -> bool;
+    fn netif_loopback() -> *mut netif;
+    fn netif_default() -> *mut netif;
+    fn netif_owns_ipv6(a: *in6_addr) -> bool;
+    fn netif_transmit(nif: *mut netif, m: *mut mbuf) -> i32;
+    fn ether_output(nif: *mut netif, m: *mut mbuf, dst: *u8, etype: u16) -> i32;
+    fn nd_resolve(nif: *mut netif, ip: *in6_addr, mac: *mut u8, m: *mut mbuf) -> i32;
+    fn nd_input_ns(nif: *mut netif, m: *mut mbuf, ip6: *ipv6_hdr);
+    fn nd_input_na(nif: *mut netif, m: *mut mbuf, ip6: *ipv6_hdr);
+    fn nd_pending_count() -> u64;
+    fn udp_input(nif: *mut netif, m: *mut mbuf, ip4: *ipv4_hdr, ip6: *ipv6_hdr);
+    fn tcp_input(nif: *mut netif, m: *mut mbuf, ip4: *ipv4_hdr, ip6: *ipv6_hdr);
+    fn icmp_ratelimit_allow() -> bool;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+}
+
+const IPV6_HLEN: u32 = 40;
+const ICMP_HLEN: u32 = 8;
+const ETH_ALEN: usize = 6;
+const ETH_P_IPV6: u16 = 0x86DD;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const IPPROTO_ICMPV6: u8 = 58;
+const ICMPV6_ECHO: u8 = 128;
+const ICMPV6_ECHO_REPLY: u8 = 129;
+const ICMPV6_NS: u8 = 135;
+const ICMPV6_NA: u8 = 136;
+/// netif.h's NETIF_LOOPBACK; mbuf.h's flags and NET_CSUM_TX; errno.h's codes.
+const NETIF_LOOPBACK: u32 = 2;
+const M_BCAST: u32 = 4;
+const M_MCAST: u32 = 8;
+const NET_CSUM_TX: u16 = 3;
+const ENOMEM: i32 = 12;
+const EMSGSIZE: i32 = 90;
+const ENETUNREACH: i32 = 101;
+const EINPROGRESS: i32 = 115;
+
+// ---- Statistics: every CPU counts, relaxed, as the C's __atomic_fetch_add ----
+
+static RX: AtomicU64 = AtomicU64.constant(0);
+static RX_BAD_HEADER: AtomicU64 = AtomicU64.constant(0);
+static RX_BAD_CKSUM: AtomicU64 = AtomicU64.constant(0);
+static RX_NOT_FOR_US: AtomicU64 = AtomicU64.constant(0);
+static RX_UNKNOWN_PROTO: AtomicU64 = AtomicU64.constant(0);
+static TX: AtomicU64 = AtomicU64.constant(0);
+static TX_NO_ROUTE: AtomicU64 = AtomicU64.constant(0);
+static ECHO_RCVD: AtomicU64 = AtomicU64.constant(0);
+static ECHO_REPLIED: AtomicU64 = AtomicU64.constant(0);
+
+fn count(c: borrow AtomicU64) {
+    c.fetchAddWith(1, Ordering.Relaxed);
+}
+
+// ---- Addresses (inet.h's helpers) ----
+
+fn isLoopback(a: Slice<u8>) -> bool {
+    var rest: u8 = 0;
+    for (i in 0..15usize) {
+        rest = rest | a[i];
+    }
+    return rest == 0 && a[15] == 1;
+}
+
+fn isUnspecified(a: Slice<u8>) -> bool {
+    var any: u8 = 0;
+    for (i in 0..16usize) {
+        any = any | a[i];
+    }
+    return any == 0;
+}
+
+fn isLinkLocal(a: Slice<u8>) -> bool => a[0] == 0xfe && (a[1] & 0xc0) == 0x80;
+
+fn isMulticast(a: Slice<u8>) -> bool => a[0] == 0xff;
+
+/// The address an in6_addr is (its 16 bytes).
+/// Safety: `p` points to an address.
+unsafe fn bytesOf(p: *in6_addr) -> [u8; 16] => Ptr.toBorrow(p).s6_addr;
+
+/// The in6_addr at the start of a slice of an address's 16 bytes.
+fn asIn6(a: Slice<u8>) -> *in6_addr => a.ptr as *in6_addr;
+
+/// netif_put, an inline in netif.h: the reference netif_loopback or netif_default took.
+/// Safety: `nif` is referenced by the caller.
+unsafe fn put(nif: *mut netif) {
+    kobject_put(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject);
+}
+
+/// Safety: `nif` is a registered interface.
+unsafe fn flagsOf(nif: *netif) -> u32 => Ptr.toBorrow(nif).flags.loadWith(LoadOrdering.Relaxed);
+
+// ---- Routing ----
+
+/// A referenced interface (netif_put when done) or NULL: the loopback for the loopback address and our own, the
+/// default interface for link-local and multicast ones, nothing for the rest (no global routing in this phase).
+/// Safety: `dst` points to an address.
+@export("ipv6_route")
+unsafe fn route(dst: *in6_addr) -> *mut netif {
+    let d = Slice.fromRaw(dst as *u8, 16);
+    if (isLoopback(d) || netif_owns_ipv6(dst)) {
+        return netif_loopback();
+    }
+    if (isLinkLocal(d) || isMulticast(d)) {
+        return netif_default();
+    }
+    return 0 as *mut netif;
+}
+
+/// The source address for `dst` into `src`: the unspecified address without a route; the destination itself when it is
+/// one of ours, on the loopback; otherwise the route's link-local address.
+/// Safety: `dst` points to an address and `src` to a writable one.
+@export("ipv6_source_for")
+unsafe fn sourceFor(dst: *in6_addr, src: *mut in6_addr) {
+    let out = Ptr.toBorrowMut(src);
+    out.s6_addr = [0; 16];
+    let nif = route(dst);
+    if (nif.isNull()) {
+        return;
+    }
+    if ((flagsOf(nif as *netif) & NETIF_LOOPBACK) != 0 && netif_owns_ipv6(dst)) {
+        out.s6_addr = bytesOf(dst);
+    } else {
+        out.s6_addr = Ptr.toBorrow(nif).ip6_ll.s6_addr;
+    }
+    put(nif);
+}
+
+// ---- Output ----
+
+/// Safety: ip.h's contract: `m` is a packet the caller hands over; `src`, if not NULL, and `dst` point to addresses.
+@export("ipv6_output")
+unsafe fn output(m: *mut mbuf, src: *in6_addr, dst: *in6_addr, proto: u8, hoplimit: u8) -> i32 {
+    let nif = route(dst);
+    if (nif.isNull()) {
+        count(borrow TX_NO_ROUTE);
+        m_freem(m);
+        return -ENETUNREACH;
+    }
+    let rc = outputOn(nif, m, src, dst, proto, hoplimit);
+    put(nif);
+    return rc;
+}
+
+/// The header in front of `packet`, then out through the loopback or through neighbour discovery and Ethernet.
+/// Safety: `nif` is referenced by the caller; the rest as ipv6_output.
+unsafe fn outputOn(nif: *mut netif, packet: *mut mbuf, srcAt: *in6_addr, dst: *in6_addr, proto: u8, hoplimit: u8) -> i32 {
+    var chosen: [u8; 16] = [0; 16];
+    var source = srcAt;
+    if (srcAt.isNull() || isUnspecified(Slice.fromRaw(srcAt as *u8, 16))) {
+        sourceFor(dst, borrow mut chosen as *mut [u8; 16] as *mut in6_addr);
+        source = borrow chosen as *[u8; 16] as *in6_addr;
+    }
+    let length = Ptr.toBorrow(packet).pkt.len;
+    if (length > 65535 || (length as u64) + (IPV6_HLEN as u64) > (Ptr.toBorrow(nif).mtu as u64)) {
+        m_freem(packet);
+        return -EMSGSIZE;
+    }
+    let m = m_prepend(packet, IPV6_HLEN); // room for the header in front, or the packet freed
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    {
+        let p = Ptr.toBorrowMut(m);
+        let h = SliceMut.fromRaw(p.data, IPV6_HLEN as usize);
+        h[0] = 0x60; // version 6, no traffic class, no flow label
+        h[1] = 0;
+        h[2] = 0;
+        h[3] = 0;
+        let plen = p.pkt.len - IPV6_HLEN;
+        h[4] = truncate<u8>(plen >> 8);
+        h[5] = truncate<u8>(plen);
+        h[6] = proto;
+        h[7] = hoplimit;
+        h[8..24].copyFrom(Slice.fromRaw(source as *u8, 16));
+        h[24..40].copyFrom(Slice.fromRaw(dst as *u8, 16));
+        p.pkt.proto = ETH_P_IPV6;
+        if ((p.pkt.csum_flags & NET_CSUM_TX) != 0) {
+            p.pkt.csum_start = p.pkt.csum_start.wrappingAdd(truncate<u16>(IPV6_HLEN)); // as the C's u16 sum
+        }
+    }
+    count(borrow TX);
+    if ((flagsOf(nif as *netif) & NETIF_LOOPBACK) != 0) {
+        return netif_transmit(nif, m);
+    }
+    var mac = [0u8; 6];
+    let rc = nd_resolve(nif, dst, borrow mut mac as *mut [u8; 6] as *mut u8, m);
+    if (rc == -EINPROGRESS) {
+        return 0; // parked: neighbour discovery sends it when the neighbour answers
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    return ether_output(nif, m, borrow mac as *[u8; 6] as *u8, ETH_P_IPV6);
+}
+
+// ---- ICMPv6 ----
+
+/// An ICMPv6 message from `src` to `dst`: its checksum, then IPv6 output (echo replies). Neighbour discovery sends its
+/// messages to a known link-layer address itself (nd.cee).
+/// Safety: `m` is a packet the caller hands over, its ICMPv6 header in the first mbuf; the addresses are readable.
+unsafe fn icmpSend(m: *mut mbuf, src: *in6_addr, dst: *in6_addr) -> i32 {
+    let length = Ptr.toBorrow(m).pkt.len;
+    let b = SliceMut.fromRaw(Ptr.toBorrow(m).data, ICMP_HLEN as usize);
+    b[2] = 0;
+    b[3] = 0;
+    let sum = cksum_pseudo6(src, dst, IPPROTO_ICMPV6, length);
+    let folded = cksum_fold(m_cksum_partial(m as *mbuf, 0, length, sum)); // in network order already
+    b[2] = truncate<u8>(folded);
+    b[3] = truncate<u8>(folded >> 8);
+    return output(m, src, dst, IPPROTO_ICMPV6, 255);
+}
+
+/// Safety: ip.h's contract: `nif` is a registered interface, `received` a packet the caller hands over, `ip6` its IPv6
+/// header, copied by ipv6_input.
+@export("icmpv6_input")
+unsafe fn icmpInput(nif: *mut netif, received: *mut mbuf, ip6: *ipv6_hdr) {
+    let length = Ptr.toBorrow(received).pkt.len;
+    if (length < ICMP_HLEN) {
+        m_freem(received);
+        return;
+    }
+    let h = Ptr.toBorrow(ip6);
+    let srcAt = borrow h.src as *in6_addr;
+    let dstAt = borrow h.dst as *in6_addr;
+    let sum = cksum_pseudo6(srcAt, dstAt, IPPROTO_ICMPV6, length);
+    if (cksum_fold(m_cksum_partial(received as *mbuf, 0, length, sum)) != 0) {
+        count(borrow RX_BAD_CKSUM);
+        m_freem(received);
+        return;
+    }
+    let m = m_pullup(received, ICMP_HLEN); // the header in the first mbuf, or the packet freed
+    if (m.isNull()) {
+        return;
+    }
+    let ic = SliceMut.fromRaw(Ptr.toBorrow(m).data, ICMP_HLEN as usize);
+    let kind = ic[0];
+    if (kind == ICMPV6_ECHO) {
+        count(borrow ECHO_RCVD);
+        if (!icmp_ratelimit_allow()) {
+            m_freem(m);
+            return;
+        }
+        ic[0] = ICMPV6_ECHO_REPLY;
+        {
+            let p = Ptr.toBorrowMut(m);
+            p.flags = p.flags & ((M_BCAST | M_MCAST) ^ 0xffffffff);
+        }
+        count(borrow ECHO_REPLIED);
+        let from = if (isMulticast(Slice.fromRaw(dstAt as *u8, 16))) borrow Ptr.toBorrow(nif).ip6_ll as *in6_addr else dstAt;
+        icmpSend(m, from, srcAt);
+    } else if (kind == ICMPV6_NS) {
+        if (h.hoplimit == 255) {
+            nd_input_ns(nif, m, ip6);
+        } else {
+            m_freem(m);
+        }
+    } else if (kind == ICMPV6_NA) {
+        if (h.hoplimit == 255) {
+            nd_input_na(nif, m, ip6);
+        } else {
+            m_freem(m);
+        }
+    } else {
+        m_freem(m);
+    }
+}
+
+// ---- Input ----
+
+/// The all-nodes group, ff02::1.
+static ALL_NODES: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+/// Safety: ether.h's contract: `nif` is a registered interface, `received` a packet the caller hands over.
+@export("ipv6_input")
+unsafe fn input(nif: *mut netif, received: *mut mbuf) {
+    count(borrow RX);
+    let m = m_pullup(received, IPV6_HLEN); // the header in the first mbuf, or the packet freed
+    if (m.isNull()) {
+        count(borrow RX_BAD_HEADER);
+        return;
+    }
+    var plen: u32 = 0;
+    let length = Ptr.toBorrow(m).pkt.len;
+    if (!netparse_ipv6(Ptr.toBorrow(m).data as *u8, length, borrow mut plen as *mut u32)) {
+        count(borrow RX_BAD_HEADER);
+        m_freem(m);
+        return;
+    }
+    // The header's 40 bytes, copied: what the protocols are handed, by address, after the header leaves the packet.
+    var hdr = [0u8; 40];
+    hdr[..].copyFrom(Slice.fromRaw(Ptr.toBorrow(m).data as *u8, IPV6_HLEN as usize));
+    let src = hdr[8..24];
+    let dst = hdr[24..40];
+    if ((flagsOf(nif as *netif) & NETIF_LOOPBACK) == 0 && (isLoopback(src) || netif_owns_ipv6(asIn6(src)))) {
+        count(borrow RX_BAD_HEADER);
+        m_freem(m);
+        return;
+    }
+    var forUs = netif_owns_ipv6(asIn6(dst));
+    if (isMulticast(dst)) {
+        // All-nodes or our solicited-node group.
+        let ll = Ptr.toBorrow(nif).ip6_ll.s6_addr;
+        let solicited = dst[11] == 1 && dst[12] == 0xff && dst[13] == ll[13] && dst[14] == ll[14] && dst[15] == ll[15];
+        var allNodes = true;
+        let all = ALL_NODES;
+        for (i in 0..16usize) {
+            if (dst[i] != all[i]) {
+                allNodes = false;
+            }
+        }
+        forUs = allNodes || solicited;
+        if (forUs) {
+            let p = Ptr.toBorrowMut(m);
+            p.flags = p.flags | M_MCAST;
+        }
+    }
+    if (!forUs) {
+        count(borrow RX_NOT_FOR_US);
+        m_freem(m);
+        return;
+    }
+    if ((plen as u64) + (IPV6_HLEN as u64) < (length as u64)) {
+        m_adj(m, 0 - truncate<i32>(length - plen - IPV6_HLEN)); // the link's padding after the payload
+    }
+    m_adj(m, truncate<i32>(IPV6_HLEN));
+    let at = borrow hdr as *[u8; 40] as *ipv6_hdr;
+    let next = hdr[6];
+    if (next == IPPROTO_ICMPV6) {
+        icmpInput(nif, m, at);
+    } else if (next == IPPROTO_UDP) {
+        udp_input(nif, m, 0 as *ipv4_hdr, at);
+    } else if (next == IPPROTO_TCP) {
+        tcp_input(nif, m, 0 as *ipv4_hdr, at);
+    } else {
+        count(borrow RX_UNKNOWN_PROTO); // extension headers are not parsed in this phase
+        m_freem(m);
+    }
+}
+
+/// IPv6's statistics into `out`: its counters, ND's drop count, zero for the rest (IPv4's).
+/// Safety: `out` points to a writable record.
+@export("ipv6_get_stats")
+unsafe fn getStats(out: *mut ip_stats) {
+    memset(out as *mut void, 0, layoutOf<ip_stats>().size);
+    let s = Ptr.toBorrowMut(out);
+    s.rx = RX.loadWith(LoadOrdering.Relaxed);
+    s.rx_bad_header = RX_BAD_HEADER.loadWith(LoadOrdering.Relaxed);
+    s.rx_bad_cksum = RX_BAD_CKSUM.loadWith(LoadOrdering.Relaxed);
+    s.rx_not_for_us = RX_NOT_FOR_US.loadWith(LoadOrdering.Relaxed);
+    s.rx_unknown_proto = RX_UNKNOWN_PROTO.loadWith(LoadOrdering.Relaxed);
+    s.tx = TX.loadWith(LoadOrdering.Relaxed);
+    s.tx_no_route = TX_NO_ROUTE.loadWith(LoadOrdering.Relaxed);
+    s.icmp_echo_rcvd = ECHO_RCVD.loadWith(LoadOrdering.Relaxed);
+    s.icmp_echo_replied = ECHO_REPLIED.loadWith(LoadOrdering.Relaxed);
+    s.nd_pending_dropped = nd_pending_count();
+}

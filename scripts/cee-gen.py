@@ -129,6 +129,8 @@ PORTS = [
     ("drivers/storage/diskid.cee", "drivers/storage/diskid.c",
      "What a disk's device reports about itself: ATA IDENTIFY, NVMe Identify, SCSI INQUIRY and READ CAPACITY (diskid.h)",
      "kernel/include/kernel/diskid.h", False),
+    ("kernel-services/network/ipv6.cee", "kernel-services/network/ipv6.c",
+     "IPv6 input and output, ICMPv6 echo and the dispatch of neighbour discovery (ip.h's IPv6 half)", None, True),
     ("drivers/virtio/virtq_used.cee", "drivers/virtio/virtq_used.c",
      "The virtqueue's decoder of used elements (virtio.h; linked into the virtio module)", None, False),
     ("drivers/usb/usb_desc.cee", "drivers/usb/usb_desc.c",
