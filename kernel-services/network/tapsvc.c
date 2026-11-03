@@ -37,6 +37,11 @@
 #define DNS_TIMEOUT_NS  (5ull * 1000000000ull)
 #define DNS_PORT 53
 #define DNS_HDR 12                 /* the fixed DNS header: id, flags, 4 counts */
+/* A whole datagram, whichever side it comes from. ksock_recvfrom cuts a
+ * datagram to the buffer and says nothing, so a 512-byte buffer relayed an
+ * EDNS answer cut short (no TC bit: malformed to the guest). IPv4 drops
+ * fragments, so nothing larger than a link's MTU arrives: 2048 holds any. */
+#define DNS_MSG_MAX 2048u
 
 struct dns_pending {
     bool in_use;
@@ -338,7 +343,7 @@ static void dns_up_one(struct tapsvc *svc, uint8_t *buf, uint32_t n, const struc
 static void dns_guest_main(void *arg)
 {
     struct tapsvc *svc = arg;
-    uint8_t buf[512];
+    uint8_t buf[DNS_MSG_MAX];
     while (svc->running) {
         struct netaddr from;
         int64_t n = ksock_recvfrom(svc->gsock, buf, sizeof(buf), &from);
@@ -352,7 +357,7 @@ static void dns_guest_main(void *arg)
 static void dns_up_main(void *arg)
 {
     struct tapsvc *svc = arg;
-    uint8_t buf[512];
+    uint8_t buf[DNS_MSG_MAX];
     while (svc->running) {
         struct netaddr from;
         int64_t n = ksock_recvfrom(svc->usock, buf, sizeof(buf), &from);
@@ -559,7 +564,20 @@ unsigned tapsvc_count(void)
 
 void tapsvc_get_stats(struct tapsvc_stats *out)
 {
-    *out = g_stats;
+    /* Each counter as it was added to: atomically (a plain copy of the
+     * struct raced the adds). */
+    out->dhcp_discover = __atomic_load_n(&g_stats.dhcp_discover, __ATOMIC_RELAXED);
+    out->dhcp_offer = __atomic_load_n(&g_stats.dhcp_offer, __ATOMIC_RELAXED);
+    out->dhcp_request = __atomic_load_n(&g_stats.dhcp_request, __ATOMIC_RELAXED);
+    out->dhcp_ack = __atomic_load_n(&g_stats.dhcp_ack, __ATOMIC_RELAXED);
+    out->dhcp_nak = __atomic_load_n(&g_stats.dhcp_nak, __ATOMIC_RELAXED);
+    out->dhcp_release = __atomic_load_n(&g_stats.dhcp_release, __ATOMIC_RELAXED);
+    out->dhcp_ignored = __atomic_load_n(&g_stats.dhcp_ignored, __ATOMIC_RELAXED);
+    out->dns_query = __atomic_load_n(&g_stats.dns_query, __ATOMIC_RELAXED);
+    out->dns_answer = __atomic_load_n(&g_stats.dns_answer, __ATOMIC_RELAXED);
+    out->dns_servfail = __atomic_load_n(&g_stats.dns_servfail, __ATOMIC_RELAXED);
+    out->dns_drop_full = __atomic_load_n(&g_stats.dns_drop_full, __ATOMIC_RELAXED);
+    out->dns_expired = __atomic_load_n(&g_stats.dns_expired, __ATOMIC_RELAXED);
     uint32_t live = 0;
     uint64_t now = clock_now_ns();
     arch_irq_state_t s = spin_lock_irqsave(&g_svcs_lock);

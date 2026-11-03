@@ -461,7 +461,7 @@ __attribute__((weak)) void tapsvc_dns_age(uint64_t now_ns)
 
 /* --- the interface registry --------------------------------------------- */
 
-#define FZ_NETIFS_MAX 4u
+#define FZ_NETIFS_MAX 10u   /* test_tapsvc: nine taps */
 static struct fz_netif *g_ifs[FZ_NETIFS_MAX];
 static unsigned g_nifs;
 static unsigned g_next_index = 1;
