@@ -570,13 +570,7 @@ static void usbs_serial(struct usb_device *udev, char *out, size_t out_len)
                             (uint16_t)((USB_DT_STRING << 8) | udev->desc.iSerialNumber), 0x0409, buf, 255, 0);
     if (n >= 2 && buf[1] == USB_DT_STRING) {
         unsigned len = buf[0] < (unsigned)n ? buf[0] : (unsigned)n;
-        size_t o = 0;
-        for (unsigned i = 2; i + 1 < len && o + 1 < out_len; i += 2) {
-            if (buf[i + 1] != 0 || buf[i] < 0x20 || buf[i] >= 0x7f)
-                break;
-            out[o++] = (char)buf[i];
-        }
-        out[o] = '\0';
+        blk_serial_ascii(buf + 2, len >= 2 ? (len - 2) / 2 : 0, 2, (uint8_t *)out, (uint32_t)out_len);
     }
     kfree(buf);
 }

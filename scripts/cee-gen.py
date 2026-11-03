@@ -68,6 +68,9 @@ CEESAFEC_VERSION = "0.6.0"
 # (lib/kernel: locks, per-CPU values, kernel objects; ceesafec --kernel cosmoos).
 PORTS = [
     ("kernel/block/gpt.cee", "kernel/block/gpt.c", "The GUID Partition Table (gpt.h)", None, False),
+    ("kernel/block/blkserial.cee", "kernel/block/blkserial.c",
+     "Disk serials: the printable ASCII drivers keep, and the self-tests' test disks (blk.h)",
+     "kernel/include/kernel/blkserial.h", True),
     ("kernel/process/cputime.cee", "kernel/process/cputime.c",
      "CPU time and the CPU-time interval timers (cputime.h)", None, False),
     ("kernel/process/nice.cee", "kernel/process/nice.c", "The rules of nice values (nice.h)", None, False),

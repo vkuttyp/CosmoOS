@@ -411,14 +411,8 @@ static void vblk_read_serial(struct vblk *vb)
         kerror("virtio-blk: %s: no answer to GET_ID in 2 s; every request fails", vb->vdev->dev.name);
         return;
     }
-    if (sl->status == VIRTIO_BLK_S_OK) {
-        unsigned n = 0;
-        while (n < VBLK_ID_BYTES && n < sizeof(vb->bd.serial) - 1 && id[n] >= 0x20 && id[n] < 0x7f) {
-            vb->bd.serial[n] = id[n];
-            n++;
-        }
-        vb->bd.serial[n] = '\0';
-    }
+    if (sl->status == VIRTIO_BLK_S_OK)
+        blk_serial_ascii((const uint8_t *)id, VBLK_ID_BYTES, 1, (uint8_t *)vb->bd.serial, sizeof(vb->bd.serial));
     dma_free(&vb->vdev->dev, VBLK_ID_BYTES, id, id_dma);
 }
 

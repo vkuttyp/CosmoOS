@@ -872,20 +872,6 @@ struct blkdev *blk_find(const char *name)
     return found;
 }
 
-bool blk_is_test_disk(const struct blkdev *bd)
-{
-    return strncmp(bd->serial, BLK_TEST_SERIAL_PREFIX, sizeof(BLK_TEST_SERIAL_PREFIX) - 1) == 0;
-}
-
-struct blkdev *blk_find_test(const char *name)
-{
-    struct blkdev *bd = blk_find(name);
-    if (bd == NULL || blk_is_test_disk(bd))
-        return bd;
-    kinfo("blk: %s is not a test disk (serial \"%s\"); the self-tests leave it alone", name, bd->serial);
-    blkdev_put(bd);
-    return NULL;
-}
 
 /* The i'th registered device, referenced, or NULL past the end. The
  * registry can change between calls, so this is for enumeration that
@@ -947,3 +933,4 @@ EXPORT_SYMBOL(blk_write);
 EXPORT_SYMBOL(blk_write_flags);
 EXPORT_SYMBOL(blk_flush);
 EXPORT_SYMBOL(blk_find);
+EXPORT_SYMBOL(blk_serial_ascii);   /* blkserial.cee: a driver decodes its device's serial with it */

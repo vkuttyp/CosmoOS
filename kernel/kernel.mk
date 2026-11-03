@@ -143,6 +143,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/device/dma.c \
 	kernel/device/devtest.c \
 	kernel/block/blk.c \
+	kernel/block/blkserial.c \
 	kernel/block/gpt.c \
 	kernel/ceesafe/ceesafe_rt_core.c \
 	kernel/ceesafe/ceesafe_panic.c \
