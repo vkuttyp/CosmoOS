@@ -697,6 +697,29 @@ every interface reference given back: digest `0xc5ce56f4e28bdf48`, the
 C's (macOS clang, Linux gcc). `ARP_BENCH=1`, the median of nine at -O2: a
 reachable resolution 1.00x the C, a request for us answered 1.00-1.03x on
 arm64; 1.01-1.03x and 0.98-1.02x on x86-64 (Rosetta).
+Neighbour discovery (2026-11-03): the C step moved it out of `ipv6.c`
+into `nd.c` with its own output (the direct-to-MAC half of
+`icmpv6_send`, which only ND used) and its own counter
+(`ip_stats.nd_pending_dropped`, read through `nd_pending_count`), and
+fixed a leak its host test found: a solicitation that taught the table
+an asker whose entry was incomplete left the packet parked on the
+now-reachable entry, never sent, and lost when the entry expired; it is
+sent now, as ARP's is. Then `kernel-services/network/nd.cee`: the table
+of 32 link-local neighbours keyed by (interface, address), resolutions,
+solicitations and advertisements in, ageing, and the debug build's park
+hooks, as the ARP port (an `IrqSpinLock` over the table, interfaces and
+packets by address). netparse gains `netparse_nd_bytes`, as
+`netparse_arp_bytes`. `tests/host/test_nd.c`: 20,000 rounds over three
+interfaces and 48 neighbours -- resolutions, bursts that evict,
+lookups, solicitations and advertisements of every kind, flushes,
+ageing, the hooks, allocation failures -- every mbuf freed and every
+reference given back: digest `0xc4e59aaf81eb00c3`, the fixed C's (macOS
+clang, Linux gcc). `ND_BENCH=1`, the median of nine at -O2: a reachable
+resolution 0.70x the C on arm64 and 0.75x on x86-64 (Rosetta), where an
+address compare that folds every byte's difference lets clang compare
+words, as the C's `in6_equal` did (an early-exit byte loop was 1.22x
+under Rosetta); a solicitation for us answered 0.98-1.00x and
+0.97-1.01x.
 
 Size: about 3.0x.
 

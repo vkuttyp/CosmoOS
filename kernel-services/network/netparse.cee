@@ -593,6 +593,19 @@ unsafe fn ndC(msg: *u8, optType: u8, out: *mut netparse_nd) {
     }
 }
 
+/// netparse_nd's fields as 22 bytes, for a caller that holds no `netparse_nd` (nd.cee): the target (bytes 0-15),
+/// then the link-layer address (16-21, zero without the option); the result is has_mac.
+/// Safety: `msg` points to ND_LEN readable bytes and `out` to 22 writable ones.
+@export("netparse_nd_bytes")
+unsafe fn ndBytesC(msg: *u8, optType: u8, out: *mut u8) -> bool {
+    var nd = netparse_nd { target: [0; 16], mac: [0; 6], has_mac: false };
+    ndC(msg, optType, borrow mut nd as *mut netparse_nd);
+    let o = SliceMut.fromRaw(out, 22);
+    o[0..16].copyFrom(nd.target[..]);
+    o[16..22].copyFrom(nd.mac[..]);
+    return nd.has_mac;
+}
+
 /// Safety: `hdr` points to UDP_HLEN readable bytes and `out` to a writable struct.
 @export("netparse_udp")
 unsafe fn udpC(hdr: *u8, pktLen: u32, out: *mut netparse_udp) -> bool {

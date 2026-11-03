@@ -15,6 +15,8 @@
 #include <kernel/string.h>
 #include <kernel/timer.h>
 
+uint64_t nd_pending_count(void);   /* nd.cee's: ip_stats.nd_pending_dropped, read only here */
+
 static struct ip_stats g_stats;
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
 

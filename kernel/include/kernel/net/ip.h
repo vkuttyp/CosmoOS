@@ -121,14 +121,13 @@ int icmp_send_echo(uint32_t dst, uint16_t id, uint16_t seq, const void *payload,
 
 /* Neighbour discovery: like ARP for IPv6. */
 void nd_init(void);
-int nd_resolve(struct netif *nif, const struct in6_addr *ip, uint8_t mac[6], struct mbuf *m);
+int nd_resolve(struct netif *nif, const struct in6_addr *ip, uint8_t *mac, struct mbuf *m);   /* mac: 6 bytes */
 /* arp_lookup's twin: is `ip` a reachable neighbour on `nif`, and its MAC. */
-bool nd_lookup(const struct netif *nif, const struct in6_addr *ip, uint8_t mac[6]);
+bool nd_lookup(const struct netif *nif, const struct in6_addr *ip, uint8_t *mac);   /* mac: 6 bytes */
 void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6);
 void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6);
 void nd_age(uint64_t now_ns);
 void nd_flush(struct netif *nif);   /* drop every entry that names the interface */
-uint64_t nd_pending_count(void);     /* packets dropped while resolving: ip_stats.nd_pending_dropped */
 #if CONFIG_DEBUG
 /* Park the next forwarded packet between ipv4_forward's anti-spoof check
  * and its masquerade decision, while a test toggles the interface's flags

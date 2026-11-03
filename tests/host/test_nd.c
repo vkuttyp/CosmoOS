@@ -37,6 +37,9 @@
 #include <string.h>
 #include <time.h>
 
+/* nd.cee's counter, which ipv6.c reads for ip_stats.nd_pending_dropped (no header declares it). */
+uint64_t nd_pending_count(void);
+
 /* The digest of the C (nd.c, 2026-11-03), which the CeeSafe port gives. */
 #define ND_DIGEST 0xc4e59aaf81eb00c3ull
 #define ROUNDS 20000u

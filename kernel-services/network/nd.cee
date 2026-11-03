@@ -1,0 +1,646 @@
+// nd.cee - Neighbour discovery (RFC 4861) for link-local addresses (kernel/include/kernel/net/ip.h's ND half), in
+// CeeSafe: roadmap 2.0 SA6. A table of 32 neighbours keyed by (interface, address); resolutions that park one packet
+// while a solicitation is out; solicitations and advertisements in, which teach the table what they may (N25); and
+// the ageing pass arp.cee's work item runs, which retries, times out and expires entries.
+// tests/host/test_nd.c holds it to the digest of the C it replaced.
+//
+// The table is an IrqSpinLock's data, as ARP's. Packets and interfaces stay C objects, held by address: the table owns
+// a parked packet, and an entry's interface outlives it (nd_flush empties an interface's entries under the lock before
+// netif_unregister lets the interface go).
+
+@header("kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/cksum.h", "arch/cpu.h")
+extern "C" {
+    /// kernel/include/kernel/mbuf.h: the fields the messages read and write.
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+    }
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    /// kernel/include/kernel/netif.h: the flag word, which other CPUs change atomically (ADR 0041 §3.1); the MAC and
+    /// the link-local address, fixed while the interface is registered.
+    struct netif {
+        obj: kobject;
+        mac: [u8; 6];
+        flags: AtomicU32;
+        ip6_ll: in6_addr;
+    }
+    /// ip.h's copy of a received packet's IPv6 header, which ipv6_input made before it handed the payload on.
+    struct ipv6_hdr {
+        src: in6_addr;
+    }
+
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+
+    fn m_getcl() -> *mut mbuf;
+    fn m_pullup(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_prepend(m: *mut mbuf, n: u32) -> *mut mbuf;
+    /// Frees to the slab caches, which take interrupt-safe locks of their own: the C freed under this table's lock.
+    @effects()
+    fn m_freem(m: *mut mbuf);
+    fn m_cksum_partial(m: *mbuf, off: u32, len: u32, sum: u32) -> u32;
+    fn cksum_fold(sum: u32) -> u16;
+    fn cksum_pseudo6(src: *in6_addr, dst: *in6_addr, proto: u8, len: u32) -> u32;
+    fn ether_output(nif: *mut netif, m: *mut mbuf, dst: *u8, etype: u16) -> i32;
+    /// Reads the clock: callable in any context.
+    @effects()
+    fn clock_now_ns() -> u64;
+    fn arch_cpu_relax();
+}
+
+extern "C" {
+    /// netparse.cee's decoder of an ND message's 32 bytes (netparse_types.h): the target, then the link-layer address
+    /// of the option `optType` (zero without it), into 22 bytes; the result is whether the option was there.
+    fn netparse_nd_bytes(msg: *u8, optType: u8, out: *mut u8) -> bool;
+}
+
+const ETH_ALEN: usize = 6;
+const ETH_P_IPV6: u16 = 0x86DD;
+const IPPROTO_ICMPV6: u8 = 58;
+const ICMPV6_NS: u8 = 135;
+const ICMPV6_NA: u8 = 136;
+/// An ND message: type, code, checksum, flags, the target, one link-layer address option of 8 bytes.
+const ND_LEN: u32 = 32;
+const IPV6_HLEN: u32 = 40;
+const ND_TABLE_SIZE: usize = 32;
+const ND_RETRY_NS: u64 = 1000000000;
+const ND_MAX_TRIES: u32 = 3;
+const ND_REACHABLE_NS: u64 = 20 * 60 * 1000000000;
+/// netif.h's NETIF_UP; errno.h's codes.
+const NETIF_UP: u32 = 1;
+const ENOMEM: i32 = 12;
+const ENETUNREACH: i32 = 101;
+const EINPROGRESS: i32 = 115;
+
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
+
+// ---- The table ----
+
+/// An entry's state: free (all zeros, as the C's memset left it), a resolution in flight, or a known MAC.
+const FREE: u8 = 0;
+const INCOMPLETE: u8 = 1;
+const REACHABLE: u8 = 2;
+
+/// One neighbour: the interface and the packet are C objects held by address (a usize, so the table is Send).
+struct Entry {
+    ip: [u8; 16];
+    mac: [u8; 6];
+    state: u8;
+    updatedNs: u64;
+    pending: usize; // an mbuf the entry owns, parked until the neighbour answers; 0 for none
+    tries: u32;
+    nif: usize;     // the interface, whose flush removes the entry before the interface goes
+}
+
+@constant
+fn freeEntry() -> Entry => Entry { ip: [0; 16], mac: [0; 6], state: FREE, updatedNs: 0, pending: 0, tries: 0, nif: 0 };
+
+struct Table {
+    entries: [Entry; 32];
+}
+
+static TABLE: IrqSpinLock<Table> = IrqSpinLock<Table>.constant("nd\0".ptr as *CChar, Table { entries: [freeEntry(); 32] });
+/// ip_stats.nd_pending_dropped: packets dropped while their neighbour was being resolved.
+static PENDING_DROPPED: AtomicU64 = AtomicU64.constant(0);
+
+/// Whether two addresses are equal: every byte's difference folded together, with no early exit, so the compiler
+/// compares the 16 bytes as words, as the C's in6_equal did.
+fn sameAddress(a: borrow [u8; 16], b: borrow [u8; 16]) -> bool {
+    var diff: u8 = 0;
+    for (i in 0..16usize) {
+        diff = diff | (a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
+/// The index of `nif`'s entry for `ip`, if there is one. Keyed by (interface, address), as ARP's: a link-local address
+/// is per link by definition, and the same one on two links is two neighbours (N25).
+fn find(t: borrow Table, nif: usize, ip: borrow [u8; 16]) -> usize? {
+    for (i in 0..ND_TABLE_SIZE) {
+        let e = borrow t.entries[i];
+        if (e.state != FREE && e.nif == nif && sameAddress(borrow e.ip, ip)) {
+            return i;
+        }
+    }
+    return null;
+}
+
+/// clock_delta_ns: how long ago `stamp` was at `now`, never negative.
+fn delta(now: u64, stamp: u64) -> u64 => if (now > stamp) now - stamp else 0;
+
+/// Makes an entry free, as the C's memset; its packet, if any, is the caller's to have freed or moved.
+fn wipe(e: borrow mut Entry) {
+    e.ip = [0; 16];
+    e.mac = [0; 6];
+    e.state = FREE;
+    e.updatedNs = 0;
+    e.pending = 0;
+    e.tries = 0;
+    e.nif = 0;
+}
+
+/// A free slot, or with `evict` the least recently updated reachable entry (an incomplete one has a resolution in
+/// flight). Without `evict` a full table yields null.
+/// Safety: the table's packets are its own.
+unsafe fn allocate(t: borrow mut Table, ip: borrow [u8; 16], nif: usize, evict: bool) -> usize? {
+    var victim: usize? = null;
+    for (i in 0..ND_TABLE_SIZE) {
+        if (t.entries[i].state == FREE) {
+            victim = i;
+            break;
+        }
+        if (!evict) {
+            continue;
+        }
+        match (victim) {
+            null => { victim = i; }
+            Some(v) => {
+                let old = borrow t.entries[v];
+                let e = borrow t.entries[i];
+                if ((old.state == INCOMPLETE && e.state == REACHABLE) ||
+                    (old.state == e.state && e.updatedNs < old.updatedNs)) {
+                    victim = i;
+                }
+            }
+        }
+    }
+    let v = victim?;
+    if (t.entries[v].state != FREE) {
+        m_freem(t.entries[v].pending as *mut mbuf);
+    }
+    wipe(mut t.entries[v]);
+    t.entries[v].ip = ip;
+    t.entries[v].nif = nif;
+    t.entries[v].state = INCOMPLETE;
+    t.entries[v].updatedNs = clock_now_ns();
+    return v;
+}
+
+// ---- Messages ----
+
+/// The solicited-node multicast address of `ip` (ff02::1:ffXX:XXXX).
+fn solicitedGroup(ip: borrow [u8; 16]) -> [u8; 16] => [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, ip[13], ip[14], ip[15]];
+
+/// That group's MAC (33:33:ff:XX:XX:XX).
+fn solicitedMac(ip: borrow [u8; 16]) -> [u8; 6] => [0x33, 0x33, 0xff, ip[13], ip[14], ip[15]];
+
+/// An ND message from `src` to `dst`: its ICMPv6 checksum, then an IPv6 header, sent directly to the link-layer
+/// address `dstMac` (no routing, no resolution).
+/// Safety: `nif` is a registered interface the caller holds; `m` a packet it hands over, its message in the first
+/// mbuf; `src`, `dst` and `dstMac` point to 16, 16 and 6 readable bytes.
+unsafe fn output(nif: *mut netif, message: *mut mbuf, src: *in6_addr, dst: *in6_addr, dstMac: *u8) -> i32 {
+    let length = Ptr.toBorrow(message).pkt.len;
+    let sum = cksum_pseudo6(src, dst, IPPROTO_ICMPV6, length);
+    {
+        let b = SliceMut.fromRaw(Ptr.toBorrow(message).data, 4);
+        b[2] = 0;
+        b[3] = 0;
+        let folded = cksum_fold(m_cksum_partial(message as *mbuf, 0, length, sum)); // in network order already
+        b[2] = truncate<u8>(folded);
+        b[3] = truncate<u8>(folded >> 8);
+    }
+    let m = m_prepend(message, IPV6_HLEN); // room for the header in front, or the packet freed
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    {
+        let packet = Ptr.toBorrowMut(m);
+        let h = SliceMut.fromRaw(packet.data, IPV6_HLEN as usize);
+        h[0] = 0x60; // version 6, no traffic class, no flow label
+        h[1] = 0;
+        h[2] = 0;
+        h[3] = 0;
+        let plen = packet.pkt.len - IPV6_HLEN;
+        h[4] = truncate<u8>(plen >> 8);
+        h[5] = truncate<u8>(plen);
+        h[6] = IPPROTO_ICMPV6;
+        h[7] = 255; // the hop limit ND requires
+        let from = Ptr.toBorrow(src).s6_addr;
+        let to = Ptr.toBorrow(dst).s6_addr;
+        h[8..24].copyFrom(from[..]);
+        h[24..40].copyFrom(to[..]);
+        packet.pkt.proto = ETH_P_IPV6;
+    }
+    return ether_output(nif, m, dstMac, ETH_P_IPV6);
+}
+
+/// Sends a solicitation for `target` or an advertisement of it, from the interface's link-local address, with its
+/// MAC in the option.
+/// Safety: as `output`; `target` and `dst` point to 16 readable bytes.
+unsafe fn send(nif: *mut netif, kind: u8, target: *in6_addr, dst: *in6_addr, dstMac: *u8) -> i32 {
+    let m = m_getcl();
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    {
+        let packet = Ptr.toBorrowMut(m);
+        let msg = SliceMut.fromRaw(packet.data, ND_LEN as usize); // a cluster's room is far more than 32 bytes
+        msg.fill(0);
+        msg[0] = kind;
+        if (kind == ICMPV6_NA) {
+            msg[4] = 0x60; // solicited and override
+        }
+        let address = Ptr.toBorrow(target).s6_addr;
+        msg[8..24].copyFrom(address[..]);
+        msg[24] = if (kind == ICMPV6_NS) 1 else 2; // a source, or a target, link-layer address
+        msg[25] = 1;
+        let mac = Ptr.toBorrow(nif).mac;
+        msg[26..32].copyFrom(mac[..]);
+        packet.len = ND_LEN;
+        packet.pkt.len = ND_LEN;
+    }
+    return output(nif, m, borrow Ptr.toBorrow(nif).ip6_ll as *in6_addr, dst, dstMac);
+}
+
+/// A solicitation for `ip` to its solicited-node group.
+/// Safety: as `send`.
+unsafe fn solicit(nif: *mut netif, ip: borrow [u8; 16]) {
+    var target = in6Bytes(ip);
+    var group = solicitedGroup(ip);
+    var mac = solicitedMac(ip);
+    send(nif, ICMPV6_NS, borrow target as *[u8; 16] as *in6_addr, borrow group as *[u8; 16] as *in6_addr, borrow mac as *[u8; 6] as *u8);
+}
+
+/// An address's bytes, as a value to take the address of (an in6_addr is its 16 bytes).
+fn in6Bytes(ip: borrow [u8; 16]) -> [u8; 16] => ip;
+
+/// Whether `nif` is up, read under the table's lock: it orders against netif_set_up(false), which clears the flag
+/// before its flush takes this lock (N25).
+/// Safety: `nif` is a registered interface.
+unsafe fn isUp(nif: *netif) -> bool => (Ptr.toBorrow(nif).flags.loadWith(LoadOrdering.Acquire) & NETIF_UP) != 0;
+
+// ---- The interface ----
+
+/// Safety: ip.h's contract: `nif` is a registered interface; `ip` points to an address and `mac` to 6 writable
+/// bytes; `packet`, if not NULL, is a packet the caller hands over unless the result is 0.
+@export("nd_resolve")
+unsafe fn resolve(nif: *mut netif, ipAt: *in6_addr, mac: *mut u8, packet: *mut mbuf) -> i32 {
+    let ip = Ptr.toBorrow(ipAt).s6_addr;
+    if (ip[0] == 0xff) {
+        // Multicast: 33:33 and the address's last four bytes (RFC 2464 §7).
+        let out = SliceMut.fromRaw(mac, ETH_ALEN);
+        out[0] = 0x33;
+        out[1] = 0x33;
+        out[2..6].copyFrom(ip[12..16]);
+        return 0;
+    }
+    if (DEBUG_BUILD) {
+        parkBeforeLock(nif as *netif);
+    }
+    var sendNow = false;
+    var down = false;
+    {
+        var guard = TABLE.lock();
+        let t = guard.data();
+        if (!isUp(nif as *netif)) { // under the lock, as arp_resolve (N25)
+            if (!packet.isNull()) {
+                PENDING_DROPPED.fetchAddWith(1, Ordering.Relaxed);
+            }
+            down = true;
+        } else {
+            let key = nif as usize;
+            var at = find(t, key, borrow ip);
+            match (at) {
+                Some(i) => {
+                    if (t.entries[i].state == REACHABLE) {
+                        SliceMut.fromRaw(mac, ETH_ALEN).copyFrom(t.entries[i].mac[..]);
+                        return 0;
+                    }
+                }
+                null => {
+                    at = allocate(t, borrow ip, key, true); // with eviction there is always a slot
+                    sendNow = true;
+                }
+            }
+            let i = at!;
+            if (!packet.isNull()) {
+                m_freem(t.entries[i].pending as *mut mbuf); // the newer packet replaces the parked one, uncounted
+                t.entries[i].pending = packet as usize;
+            }
+            if (sendNow) {
+                t.entries[i].tries = 1;
+            }
+        }
+    }
+    if (down) {
+        m_freem(packet);
+        return -ENETUNREACH;
+    }
+    if (sendNow) {
+        solicit(nif, borrow ip);
+    }
+    return -EINPROGRESS;
+}
+
+/// Safety: `nif` is a registered interface; `ip` points to an address and `mac` to 6 writable bytes.
+@export("nd_lookup")
+unsafe fn lookup(nif: *netif, ipAt: *in6_addr, mac: *mut u8) -> bool {
+    let ip = Ptr.toBorrow(ipAt).s6_addr;
+    var guard = TABLE.lock();
+    let t = guard.data();
+    match (find(t, nif as usize, borrow ip)) {
+        Some(i) => {
+            if (t.entries[i].state == REACHABLE) {
+                SliceMut.fromRaw(mac, ETH_ALEN).copyFrom(t.entries[i].mac[..]);
+                return true;
+            }
+        }
+        null => {}
+    }
+    return false;
+}
+
+/// The decoded message: the target and the option's link-layer address, if the message reached ND_LEN bytes.
+struct Decoded {
+    target: [u8; 16];
+    mac: [u8; 6];
+    hasMac: bool;
+}
+
+/// Pulls the message up and decodes it with the option `optType`, freeing the packet; null if it was too short.
+/// Safety: `received` is a packet the caller hands over.
+unsafe fn decode(received: *mut mbuf, optType: u8) -> Decoded? {
+    let m = m_pullup(received, ND_LEN); // the message in the first mbuf, or the packet freed
+    if (m.isNull()) {
+        return null;
+    }
+    var bytes = [0u8; 22];
+    let hasMac = netparse_nd_bytes(Ptr.toBorrow(m).data as *u8, optType, borrow mut bytes as *mut [u8; 22] as *mut u8);
+    m_freem(m);
+    var d = Decoded { target: [0; 16], mac: [0; 6], hasMac: hasMac };
+    d.target[..].copyFrom(bytes[0..16]);
+    d.mac[..].copyFrom(bytes[16..22]);
+    return d;
+}
+
+/// Safety: ip.h's contract: `nif` is a registered interface, `received` a packet the caller hands over, `ip6` the
+/// packet's IPv6 header, copied by ipv6_input.
+@export("nd_input_ns")
+unsafe fn inputSolicitation(nif: *mut netif, received: *mut mbuf, ip6: *ipv6_hdr) {
+    let d = match (decode(received, 1)) { // a source link-layer address option
+        Some(v) => v,
+        null => { return; }
+    };
+    let src = Ptr.toBorrow(ip6).src.s6_addr;
+    let ours = Ptr.toBorrow(nif).ip6_ll.s6_addr;
+    let unspecified = [0u8; 16];
+    if (!sameAddress(borrow d.target, borrow ours) || sameAddress(borrow src, borrow unspecified)) {
+        return;
+    }
+    // Learn the asker (never at the cost of an entry in use), answer with our address. A packet parked on the asker's
+    // incomplete entry goes now, as ARP's does when a request teaches it the asker.
+    if (!d.hasMac) {
+        return;
+    }
+    var pending: usize = 0;
+    if (DEBUG_BUILD) {
+        parkBeforeLock(nif as *netif);
+    }
+    {
+        var guard = TABLE.lock();
+        let t = guard.data();
+        if (!isUp(nif as *netif)) {
+            return; // queued input on a down interface learns nothing (N25): read under the lock
+        }
+        let key = nif as usize;
+        var at = find(t, key, borrow src);
+        match (at) {
+            Some(_) => {}
+            null => { at = allocate(t, borrow src, key, false); } // null when the table is full
+        }
+        match (at) {
+            Some(i) => {
+                let e = borrow mut t.entries[i];
+                e.mac = d.mac;
+                e.state = REACHABLE;
+                e.updatedNs = clock_now_ns();
+                pending = e.pending;
+                e.pending = 0;
+            }
+            null => {}
+        }
+    }
+    var asker = in6Bytes(borrow src);
+    send(nif, ICMPV6_NA, borrow Ptr.toBorrow(nif).ip6_ll as *in6_addr, borrow asker as *[u8; 16] as *in6_addr,
+        borrow d.mac as *[u8; 6] as *u8);
+    if (pending != 0) {
+        ether_output(nif, pending as *mut mbuf, borrow d.mac as *[u8; 6] as *u8, ETH_P_IPV6);
+    }
+}
+
+/// Safety: as nd_input_ns.
+@export("nd_input_na")
+unsafe fn inputAdvertisement(nif: *mut netif, received: *mut mbuf, ip6: *ipv6_hdr) {
+    let d = match (decode(received, 2)) { // a target link-layer address option
+        Some(v) => v,
+        null => { return; }
+    };
+    if (!d.hasMac) {
+        return;
+    }
+    var pending: usize = 0;
+    if (DEBUG_BUILD) {
+        parkBeforeLock(nif as *netif);
+    }
+    {
+        var guard = TABLE.lock();
+        let t = guard.data();
+        if (!isUp(nif as *netif)) {
+            return; // as nd_input_ns
+        }
+        // This interface's entry: an advertisement here completes no other's, and only the answer to our own
+        // solicitation (an incomplete entry) is taken.
+        match (find(t, nif as usize, borrow d.target)) {
+            Some(i) => {
+                let e = borrow mut t.entries[i];
+                if (e.state == INCOMPLETE) {
+                    e.mac = d.mac;
+                    e.state = REACHABLE;
+                    e.updatedNs = clock_now_ns();
+                    pending = e.pending;
+                    e.pending = 0;
+                }
+            }
+            null => {}
+        }
+    }
+    if (pending != 0) {
+        ether_output(nif, pending as *mut mbuf, borrow d.mac as *[u8; 6] as *u8, ETH_P_IPV6);
+    }
+}
+
+// ---- The debug build's hooks ----
+
+/// ND's twin of arp_test_park_before_lock (N25 follow-up): one caller per arming, on the interface armed for.
+static TEST_HOLD_LOCK_ENTRY: AtomicUSize = AtomicUSize.constant(0); // the interface armed for; 0: disarmed
+static TEST_LOCK_ENTRY_PARKED: AtomicU32 = AtomicU32.constant(0);
+static TEST_LOCK_ENTRY_RELEASE: AtomicU32 = AtomicU32.constant(0);
+
+@cfg("CONFIG_DEBUG")
+@export("nd_test_hold_lock_entry")
+fn testHoldLockEntry(nif: *netif) {
+    TEST_LOCK_ENTRY_PARKED.storeWith(0, StoreOrdering.Release);
+    TEST_LOCK_ENTRY_RELEASE.storeWith(0, StoreOrdering.Release);
+    TEST_HOLD_LOCK_ENTRY.storeWith(nif as usize, StoreOrdering.Release);
+}
+
+@cfg("CONFIG_DEBUG")
+@export("nd_test_lock_entry_parked")
+fn testLockEntryParked() -> bool => TEST_LOCK_ENTRY_PARKED.loadWith(LoadOrdering.Acquire) != 0;
+
+@cfg("CONFIG_DEBUG")
+@export("nd_test_release_lock_entry")
+fn testReleaseLockEntry() {
+    TEST_LOCK_ENTRY_RELEASE.storeWith(1, StoreOrdering.Release);
+}
+
+/// Safety: arch_cpu_relax is a pause instruction.
+fn parkBeforeLock(nif: *netif) {
+    let armed = TEST_HOLD_LOCK_ENTRY.loadWith(LoadOrdering.Relaxed);
+    if (armed == 0 || armed != nif as usize) {
+        return; // not armed, the common case, or armed for another interface: no read-modify-write
+    }
+    match (TEST_HOLD_LOCK_ENTRY.compareExchangeWith(armed, 0, Ordering.AcquireRelease)) {
+        Ok(_) => {}
+        Err(_) => { return; } // another caller on this interface took the arming
+    }
+    TEST_LOCK_ENTRY_PARKED.storeWith(1, StoreOrdering.Release);
+    while (TEST_LOCK_ENTRY_RELEASE.loadWith(LoadOrdering.Acquire) == 0) {
+        unsafe { arch_cpu_relax(); }
+    }
+}
+
+/// ND's twin of arp_test_park_retry: the same one-unlock window, parked the same way, because the defect was in both
+/// and a fix proved in one is half a proof (invariant N22).
+static TEST_HOLD_RETRY: AtomicU32 = AtomicU32.constant(0);
+static TEST_RETRY_PARKED: AtomicU32 = AtomicU32.constant(0);
+static TEST_RETRY_RELEASE: AtomicU32 = AtomicU32.constant(0);
+
+@cfg("CONFIG_DEBUG")
+@export("nd_test_hold_retry")
+fn testHoldRetry(on: bool) {
+    TEST_RETRY_PARKED.storeWith(0, StoreOrdering.Release);
+    TEST_RETRY_RELEASE.storeWith(0, StoreOrdering.Release);
+    TEST_HOLD_RETRY.storeWith(if (on) 1 else 0, StoreOrdering.Release);
+}
+
+@cfg("CONFIG_DEBUG")
+@export("nd_test_retry_parked")
+fn testRetryParked() -> bool => TEST_RETRY_PARKED.loadWith(LoadOrdering.Acquire) != 0;
+
+@cfg("CONFIG_DEBUG")
+@export("nd_test_release_retry")
+fn testReleaseRetry() {
+    TEST_RETRY_RELEASE.storeWith(1, StoreOrdering.Release);
+}
+
+/// Safety: arch_cpu_relax is a pause instruction.
+fn parkRetry(count: usize) {
+    if (count == 0 || TEST_HOLD_RETRY.loadWith(LoadOrdering.Acquire) == 0) {
+        return;
+    }
+    TEST_HOLD_RETRY.storeWith(0, StoreOrdering.Release);
+    TEST_RETRY_PARKED.storeWith(1, StoreOrdering.Release);
+    while (TEST_RETRY_RELEASE.loadWith(LoadOrdering.Acquire) == 0) {
+        unsafe { arch_cpu_relax(); }
+    }
+}
+
+// ---- Flush and ageing ----
+
+/// Safety: `nif` is a registered interface (or one being unregistered, whose entries this removes).
+@export("nd_flush")
+unsafe fn flush(nif: *mut netif) {
+    var guard = TABLE.lock();
+    let t = guard.data();
+    let key = nif as usize;
+    for (i in 0..ND_TABLE_SIZE) {
+        if (t.entries[i].state != FREE && t.entries[i].nif == key) {
+            // Counted, like ARP's flush counts its own (docs/audit/next-subsystem-arp-netif-ref.md).
+            if (t.entries[i].pending != 0) {
+                PENDING_DROPPED.fetchAddWith(1, Ordering.Relaxed);
+            }
+            m_freem(t.entries[i].pending as *mut mbuf);
+            wipe(mut t.entries[i]);
+        }
+    }
+}
+
+/// A retry the pass sends after the lock: the interface, referenced, and the address.
+struct Retry {
+    nif: usize;
+    ip: [u8; 16];
+}
+
+/// The worker's pass (from arp.cee's work item): retries incomplete entries, expires stale ones.
+/// Safety: every entry's interface is registered while the entry is in the table (nd_flush runs before
+/// netif_unregister lets it go), so the reference taken here is on a live object.
+@export("nd_age")
+unsafe fn age(now: u64) {
+    var retries = [Retry { nif: 0, ip: [0; 16] }; 32];
+    var count: usize = 0;
+    {
+        var guard = TABLE.lock();
+        let t = guard.data();
+        for (i in 0..ND_TABLE_SIZE) {
+            let state = t.entries[i].state;
+            if (state == FREE) {
+                continue;
+            }
+            if (state == REACHABLE) {
+                if (delta(now, t.entries[i].updatedNs) > ND_REACHABLE_NS) {
+                    wipe(mut t.entries[i]); // a reachable entry parks nothing: its packet went when it completed
+                }
+                continue;
+            }
+            if (delta(now, t.entries[i].updatedNs) < ND_RETRY_NS) {
+                continue;
+            }
+            if (t.entries[i].tries >= ND_MAX_TRIES) {
+                if (t.entries[i].pending != 0) {
+                    PENDING_DROPPED.fetchAddWith(1, Ordering.Relaxed); // the give-up path, for symmetry
+                }
+                m_freem(t.entries[i].pending as *mut mbuf);
+                wipe(mut t.entries[i]);
+                continue;
+            }
+            t.entries[i].tries += 1;
+            t.entries[i].updatedNs = now;
+            // A reference: this pointer outlives the lock, and the send below uses it. Sound for the same reason as
+            // ARP's: nd_flush takes this lock, so an entry present under it means netif_unregister's flush (step 5)
+            // has not run and its put (step 6) is still to come (invariant N22).
+            let nif = t.entries[i].nif as *mut netif;
+            kobject_get(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject);
+            retries[count] = Retry { nif: t.entries[i].nif, ip: t.entries[i].ip };
+            count += 1;
+        }
+    }
+    if (DEBUG_BUILD) {
+        parkRetry(count);
+    }
+    for (k in 0..count) {
+        let nif = retries[k].nif as *mut netif;
+        solicit(nif, borrow retries[k].ip);
+        kobject_put(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject);
+    }
+}
+
+/// Every entry free, as the C's memset (net_init's, before any interface).
+@export("nd_init")
+fn init() {
+    var guard = TABLE.lock();
+    let t = guard.data();
+    for (i in 0..ND_TABLE_SIZE) {
+        wipe(mut t.entries[i]);
+    }
+}
+
+@export("nd_pending_count")
+fn pendingCount() -> u64 => PENDING_DROPPED.loadWith(LoadOrdering.Relaxed);
