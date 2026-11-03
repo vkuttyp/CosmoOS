@@ -15,6 +15,10 @@ ls /etc/hostname > /tmp/.rc.probe 2>&1 && hostname -F /etc/hostname
 # resolver reads (roadmap M4; docs/userland/design.md, "netcfg"), and its
 # host name, if it has one, into /etc/hostname.
 netcfg
-# The shell test script exists only in self-test builds (SELFTEST=1).
-ls /etc/rc.test 2> /tmp/.rc.probe && cosmo-sh /etc/rc.test
+# The shell test script exists only in self-test builds (SELFTEST=1), and
+# runs only on the live system: what it exercises (/boot/tests: packages,
+# compilers, native and Linux programs, guests) is in the boot archive,
+# which an installed system's root does not carry.
+ls /etc/rc.test 2> /tmp/.rc.probe && ls -d /boot/tests > /tmp/.rc.probe 2>&1 && cosmo-sh /etc/rc.test
+ls /etc/rc.test > /tmp/.rc.probe 2>&1 && cosmo-sh -c 'ls -d /boot/tests > /tmp/.rc.probe 2>&1 || echo "SHTEST: skipped (no /boot/tests: not the live system)"'
 rm /tmp/.rc.probe
