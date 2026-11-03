@@ -248,6 +248,10 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         return;
     }
     uint16_t ulen = uh.len;
+    /* The header a port-unreachable quotes: m_prepend keeps the bytes in
+     * front of the data only when it prepends in place. */
+    uint8_t quoted[sizeof(struct udp_hdr)];
+    memcpy(quoted, m->data, sizeof(quoted));
     if (ulen < len)
         m_adj(m, -(int)(len - ulen));
 
@@ -314,6 +318,7 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             struct mbuf *q = m_prepend(m, (uint32_t)sizeof(struct udp_hdr) + IPV4_HDR_LEN(ip4));
             if (q) {
                 memcpy(q->data, ip4, IPV4_HDR_LEN(ip4));
+                memcpy(q->data + IPV4_HDR_LEN(ip4), quoted, sizeof(quoted));
                 icmp_send_unreach(q, ip4, ICMP_UNREACH_PORT);
                 m_freem(q);
             }
