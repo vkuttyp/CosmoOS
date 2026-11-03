@@ -820,13 +820,13 @@ static void setup(void)
     announce(&g_f0, k_peer_mac, PEER, IP0);
     announce(&g_f1, k_guest_a_mac, GUEST_A, IP1);
     announce(&g_f2, k_guest_b_mac, GUEST_B, IP2);
-    fw_test_rule_matched = on_rule_matched;
+    fw_test_set_rule_matched(on_rule_matched);
     check_model();
 }
 
 static void teardown(void)
 {
-    fw_test_rule_matched = NULL;
+    fw_test_set_rule_matched(NULL);
     udp_unbind(&g_udp7);
     struct mbuf *m;
     while ((m = udp_recv(&g_udp7)) != NULL)

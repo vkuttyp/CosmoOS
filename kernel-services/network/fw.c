@@ -101,8 +101,13 @@ static struct fw_stats g_stats;
 /* The configuration fuzz target's view (tests/fuzz/fuzz_net_config.c):
  * every rule that decides a verdict, with its owner, as it decides it --
  * under g_fw_lock, so the hook must not call back into the firewall. */
-void (*fw_test_rule_matched)(uint32_t owner_ip, const struct fw_rule *r);
-#define TEST_MATCHED(owner, r) do { if (fw_test_rule_matched) fw_test_rule_matched((owner), (r)); } while (0)
+static fw_rule_matched_fn g_test_rule_matched;
+void fw_test_set_rule_matched(fw_rule_matched_fn hook)
+{
+    __atomic_store_n(&g_test_rule_matched, hook, __ATOMIC_RELAXED);
+}
+#define TEST_MATCHED(owner, r) do { fw_rule_matched_fn h_ = __atomic_load_n(&g_test_rule_matched, __ATOMIC_RELAXED); \
+                                    if (h_) h_((owner), (r)); } while (0)
 bool fw_test_out_fast(void)
 {
     return __atomic_load_n(&g_out_fast, __ATOMIC_RELAXED) != 0;
