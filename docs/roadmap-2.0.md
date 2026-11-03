@@ -915,6 +915,30 @@ one connection through the whole host stack: a 1,400-byte segment
 received and read 1.03x the C and one sent and acknowledged 1.05x on
 arm64; 1.02x and 1.00x on x86-64 (Rosetta).
 
+DHCP (2026-11-03): `kernel-services/network/dhcp.cee` -- the client, one
+per autoconfigured interface: DISCOVER, OFFER, REQUEST and ACK, the
+retransmission backoff, the give-up in REQUESTING, renewal unicast to
+the server (through the lease's router when the server is off the
+link), rebinding, the lease's end, NAKs, the boot wait. The four slots
+are a CeeSafe table holding the C's timer, work item and lock by value,
+each slot's lock set up once; a timer only queues the work, and every
+message is built after the lock is dropped, as the C did. netparse gains
+`netparse_dhcp_bytes` and `netparse_dhcp_lease_bytes` (a header's C type
+cannot be a CeeSafe local), checked against the structs in
+`test_netparse.c`. The C step fixed a log line: an ACK naming no DNS
+server logged "0 DNS server(s)0.0.0.0". Its host test runs the client
+over the TCP target's host with the stack as the kernel's: four
+interfaces with two servers each, a router and a server beyond it,
+replies mostly right and otherwise wrong in every field, length and
+checksum, ARP answered or not, full rings, time in small and long steps,
+kicks, stops and restarts, the fifth client refused, the boot wait; every
+frame, logged line, return, lease list and address in the digest,
+`0x10330ab4022bbc46`, the C's (macOS clang, Linux clang and gcc); 98.7% of
+the C's lines, the rest two cross-CPU windows, `m_getcl` failing and an
+unreachable default. `DHCP_BENCH=1`, the median of five interleaved runs
+of an exchange (NAK, OFFER, ACK) through the host stack: 1.04x the C on
+arm64, 1.03x on x86-64 (Rosetta).
+
 Size: about 3.0x.
 
 ### SA7 Storage: cosmofs, VFS, block and pools

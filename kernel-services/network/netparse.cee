@@ -731,6 +731,65 @@ unsafe fn dhcpC(dh: *u8, dhlen: u32, op: u8, out: *mut netparse_dhcp) -> bool =>
 unsafe fn dhcpLeaseC(dh: *u8, dhlen: u32, out: *mut netparse_dhcp_lease) -> bool =>
     dhcpLease(Slice.fromRaw(dh, dhlen as usize), Ptr.toBorrowMut(out));
 
+/// netparse_dhcp's fields the client reads, as 20 bytes, for a caller that holds no `netparse_dhcp` (dhcp.cee):
+/// msg_type (byte 0), has_server (1), xid (2-5), yiaddr (6-9), chaddr (10-15), server (16-19), as netparse_dhcp gives
+/// them. The result is netparse_dhcp's; the bytes are written either way.
+/// Safety: as netparse_dhcp, and `out` points to 20 writable bytes.
+@export("netparse_dhcp_bytes")
+unsafe fn dhcpBytesC(dh: *u8, dhlen: u32, op: u8, out: *mut u8) -> bool {
+    var m = netparse_dhcp {
+        msg_type: 0, xid: [0; 4], flags: 0, ciaddr: [0; 4], yiaddr: [0; 4], chaddr: [0; 6], server: [0; 4],
+        has_server: false, reqip: [0; 4], has_reqip: false,
+    };
+    let ok = dhcpC(dh, dhlen, op, borrow mut m as *mut netparse_dhcp);
+    let o = SliceMut.fromRaw(out, 20);
+    o[0] = m.msg_type;
+    o[1] = if (m.has_server) 1 else 0;
+    o[2..6].copyFrom(m.xid[..]);
+    o[6..10].copyFrom(m.yiaddr[..]);
+    o[10..16].copyFrom(m.chaddr[..]);
+    o[16..20].copyFrom(m.server[..]);
+    return ok;
+}
+
+/// A u32 in network order at `at`.
+fn putBe32(o: SliceMut<u8>, at: usize, v: u32) {
+    o[at] = truncate<u8>(v >> 24);
+    o[at + 1] = truncate<u8>(v >> 16);
+    o[at + 2] = truncate<u8>(v >> 8);
+    o[at + 3] = truncate<u8>(v);
+}
+
+/// netparse_dhcp_lease's fields as 102 bytes, for a caller that holds no `netparse_dhcp_lease` (dhcp.cee): addr
+/// (bytes 0-3), lease (4-7, network order), mask (8-11), router (12-15), has_mask in bit 0 of byte 16 and has_router
+/// in bit 1, ndns (17), dns (18-29), t1 (30-33) and t2 (34-37, network order), hostname (38-101). Nothing is written
+/// when the lease is refused.
+/// Safety: as netparse_dhcp_lease, and `out` points to 102 writable bytes.
+@export("netparse_dhcp_lease_bytes")
+unsafe fn dhcpLeaseBytesC(dh: *u8, dhlen: u32, out: *mut u8) -> bool {
+    var ls = netparse_dhcp_lease {
+        addr: [0; 4], lease: 0, mask: [0; 4], has_mask: false, router: [0; 4], has_router: false, ndns: 0,
+        dns: [0; 12], hostname: [0; 64], t1: 0, t2: 0,
+    };
+    if (!dhcpLeaseC(dh, dhlen, borrow mut ls as *mut netparse_dhcp_lease)) {
+        return false;
+    }
+    let o = SliceMut.fromRaw(out, 102);
+    o[0..4].copyFrom(ls.addr[..]);
+    putBe32(o, 4, ls.lease);
+    o[8..12].copyFrom(ls.mask[..]);
+    o[12..16].copyFrom(ls.router[..]);
+    let maskBit: u8 = if (ls.has_mask) 1 else 0;
+    let routerBit: u8 = if (ls.has_router) 2 else 0;
+    o[16] = maskBit | routerBit;
+    o[17] = ls.ndns;
+    o[18..30].copyFrom(ls.dns[..]);
+    putBe32(o, 30, ls.t1);
+    putBe32(o, 34, ls.t2);
+    o[38..102].copyFrom(ls.hostname[..]);
+    return true;
+}
+
 /// Safety: `frame` points to `len` readable bytes and `dhOff` is writable.
 @export("netparse_dhcp_frame")
 unsafe fn dhcpFrameC(frame: *u8, len: u32, dhOff: *mut u32) -> bool =>

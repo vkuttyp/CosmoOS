@@ -1,0 +1,1283 @@
+// dhcp.cee - the kernel's DHCP client (kernel/include/kernel/net/dhcp.h; design.md, "The DHCP client"), in CeeSafe:
+// roadmap 2.0 SA6. tests/host/test_dhcp.c holds it to the digest of the C it replaced.
+//
+// One client per autoconfigured interface, in a small static table. Its state machine runs in two places, both on the
+// network workers: the input path (a reply, claimed by ipv4_input through dhcp_client_input) and the client's
+// deferred work (its timer, which only queues the work -- timers never send). Both take the client's lock, decide, and
+// leave what to send in a Tx; the message is built and transmitted after the lock is dropped, since no lock is held
+// across a transmit.
+//
+// Messages are built at the frame level, as the tap's server builds its replies: a DISCOVER or a REQUEST before the
+// ACK comes from 0.0.0.0 to the limited broadcast, which IP routing cannot carry (ipv4_route has no address to pick a
+// source from, and sends 255.255.255.255 to the default interface, not this one). A renewal is unicast from the
+// leased address to the server, its link address resolved by ARP like any datagram's.
+//
+// A slot's lock is set up once and never again: a caller that found the slot by its interface (clientOf) and is about
+// to lock it must find a lock, whatever happened to the slot meanwhile. Everything else is reset under that lock, and
+// every user checks under it that the slot is still the client of the interface it looked for (lockClient). The
+// slots, their timers, work items and locks are C objects in a static table, reached through pointers under the locks
+// the C used (CeeSafe's ADR 0042). Addresses are u32s in network order, as they lie in memory; messages are bytes.
+
+@header("kernel/net/dhcp.h", "kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/udp.h", "kernel/net/cksum.h", "kernel/net/netparse_types.h", "kernel/netif.h", "kernel/random.h", "kernel/timer.h", "kernel/wait.h")
+extern "C" {
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ip4 {
+        addr: AtomicU32;
+        mask: AtomicU32;
+        gateway: AtomicU32;
+    }
+    struct netif {
+        obj: kobject;
+        name: [u8; 8];
+        mac: [u8; 6];
+        ip4: netif_ip4;
+    }
+    // Declared by their first field, so the table's initialiser names it (gcc's -Wmissing-braces).
+    struct timer {
+        link: list_node;
+    }
+    struct net_work {
+        link: list_node;
+    }
+    struct dhcp_lease_info {
+        ifname: [u8; 8];
+        state: u8;
+        ndns: u8;
+        addr: u32;
+        mask: u32;
+        router: u32;
+        server: u32;
+        dns: [u32; 3];
+        lease_s: u32;
+        t1_s: u32;
+        t2_s: u32;
+        remaining_ms: u32;
+        t1_ms: u32;
+        t2_ms: u32;
+        hostname: [u8; 64];
+    }
+    struct dhcp_stats {
+        discovers: u64;
+        requests: u64;
+        offers: u64;
+        acks: u64;
+        naks: u64;
+        renews: u64;
+        rebinds: u64;
+        expiries: u64;
+        ignored: u64;
+    }
+
+    @effects()
+    fn m_getcl() -> *mut mbuf;
+    @effects()
+    fn m_freem(m: *mut mbuf);
+    @effects()
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn cksum_partial(data: *void, len: usize, sum: u32) -> u32;
+    fn cksum_fold(sum: u32) -> u16;
+    fn cksum_pseudo4(src: u32, dst: u32, proto: u8, len: u16) -> u32;
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn ether_output(nif: *mut netif, m: *mut mbuf, dst: *u8, etype: u16) -> i32;
+    fn arp_resolve(nif: *mut netif, ip: u32, mac: *mut u8, m: *mut mbuf) -> i32;
+    @effects()
+    fn arp_flush(nif: *mut netif);
+    @effects()
+    fn netif_set_ipv4(nif: *mut netif, addr: u32, mask: u32, gateway: u32);
+    @effects()
+    fn random_u64() -> u64;
+    @effects()
+    fn clock_now_ns() -> u64;
+    fn clock_deadline_ns(budget: u64) -> u64;
+    fn clock_deadline_passed(deadline: u64) -> bool;
+    fn thread_sleep_ns(ns: u64);
+    fn net_workers_barrier();
+    @effects()
+    fn timer_setup(t: *mut timer, cb: extern "C" fn(*mut timer, *mut void), arg: *mut void);
+    @effects()
+    fn timer_start(t: *mut timer, delay: u64);
+    @effects()
+    fn timer_cancel(t: *mut timer) -> bool;
+    fn timer_cancel_sync(t: *mut timer) -> bool;
+    @effects()
+    fn net_work_init(w: *mut net_work, cb: extern "C" fn(*mut void), arg: *mut void);
+    @effects()
+    fn net_work_queue(w: *mut net_work) -> bool;
+    fn netparse_l4_flow(b: *u8, avail: u32) -> u64;
+    fn netparse_udp_flow(hdr: *u8, len: u32) -> u64;
+    fn netparse_dhcp_bytes(dh: *u8, len: u32, op: u8, out: *mut u8) -> bool;
+    @effects()
+    fn netparse_dhcp_lease_bytes(dh: *u8, len: u32, out: *mut u8) -> bool;
+}
+
+// ---- dhcp.h, ether.h, ip.h, udp.h ----
+
+const ENOSPC: i32 = 28;
+const ENOENT: i32 = 2;
+const ETH_P_IP: u16 = 0x0800;
+const IPPROTO_UDP: u8 = 17;
+const IP_DEFAULT_TTL: u8 = 64;
+const IPV4_HLEN: u32 = 20;
+const UDP_HLEN: u32 = 8;
+/// INADDR_BROADCAST_N: 255.255.255.255, the same in either byte order.
+const BROADCAST: u32 = 0xffffffff;
+
+const BOOTP_REQUEST: u8 = 1;
+const BOOTP_REPLY: u8 = 2;
+const DHCP_HTYPE_ETHER: u8 = 1;
+const DHCP_DISCOVER: u8 = 1;
+const DHCP_OFFER: u8 = 2;
+const DHCP_REQUEST: u8 = 3;
+const DHCP_ACK: u8 = 5;
+const DHCP_NAK: u8 = 6;
+const OPT_PAD: u8 = 0;
+const OPT_SUBNET: u8 = 1;
+const OPT_ROUTER: u8 = 3;
+const OPT_DNS: u8 = 6;
+const OPT_HOSTNAME: u8 = 12;
+const OPT_REQIP: u8 = 50;
+const OPT_LEASE: u8 = 51;
+const OPT_MSGTYPE: u8 = 53;
+const OPT_SERVERID: u8 = 54;
+const OPT_PARAMS: u8 = 55;
+const OPT_T1: u8 = 58;
+const OPT_T2: u8 = 59;
+const OPT_CLIENTID: u8 = 61;
+const OPT_END: u8 = 255;
+const DHCP_SPORT: u16 = 67;
+const DHCP_CPORT: u16 = 68;
+const BOOTP_LEN: usize = 236;
+const DHCP_FIXED: usize = 240;
+const DHCP_FIXED_LEN: u32 = 240;
+const BOOTP_OFF_OP: usize = 0;
+const BOOTP_OFF_HTYPE: usize = 1;
+const BOOTP_OFF_HLEN: usize = 2;
+const BOOTP_OFF_XID: usize = 4;
+const BOOTP_OFF_SECS: usize = 8;
+const BOOTP_OFF_CIADDR: usize = 12;
+const BOOTP_OFF_CHADDR: usize = 28;
+/// BOOTP's minimum message, which some relays still expect.
+const BOOTP_MIN: usize = 300;
+
+/// enum dhcp_state.
+const S_INIT: u32 = 1;
+const S_SELECTING: u32 = 2;
+const S_REQUESTING: u32 = 3;
+const S_BOUND: u32 = 4;
+const S_RENEWING: u32 = 5;
+const S_REBINDING: u32 = 6;
+
+const MAX_CLIENTS: usize = 4;
+const MAX_DNS: usize = 3;
+const HOSTNAME_MAX: usize = 64;
+const RETX_FIRST_NS: u64 = 2 * 1000000000;
+const RETX_MAX_NS: u64 = 64 * 1000000000;
+const REQUEST_TRIES: u32 = 4;
+const RENEW_MIN_NS: u64 = 60 * 1000000000;
+const BOOT_WAIT_NS: u64 = 10 * 1000000000;
+const NS_PER_S: u64 = 1000000000;
+const U64_MAX: u64 = 0xffffffffffffffff;
+const U32_MAX: u32 = 0xffffffff;
+
+/// enum dhcp_test_event.
+const TEST_RETX: u32 = 0;
+const TEST_T2: u32 = 2;
+const TEST_EXPIRE: u32 = 3;
+
+/// ether.h's eth_broadcast, which ether.cee defines.
+static BROADCAST_MAC: [u8; 6] = [0xff; 6];
+
+// ---- The table ----
+
+/// One interface's client. `nif` is referenced while the slot is in use; `stopping` is dhcp_client_stop's: no more
+/// sends, no re-arm.
+struct Client {
+    nif: *mut netif;
+    in_use: AtomicBool;
+    stopping: bool;
+    state: u32;
+    xid: u32;
+    tries: u32;    // retransmissions of the current message
+    next_ns: u64;  // the current message's retransmission
+    start_ns: u64; // the exchange's first message (the secs field)
+    req_ns: u64;   // its first REQUEST: what the lease's times count from (RFC 2131 §4.4.1)
+    // The offer being requested, then the lease.
+    offer_addr: u32;
+    server: u32;
+    addr: u32;
+    mask: u32;
+    router: u32;
+    dns: [u32; 3];
+    ndns: u8;
+    hostname: [u8; 64]; // option 12 as the ACK named it, or empty
+    lease_s: u32;
+    t1_s: u32;
+    t2_s: u32;
+    t1_at: u64; // absolute, clock_now_ns
+    t2_at: u64;
+    end_at: u64;
+    timer: timer;
+    work: net_work;
+    lock: spinlock_t;
+}
+
+static mut CLIENTS: [Client; 4] = [Client {
+    nif: 0 as *mut netif, in_use: AtomicBool.constant(false), stopping: false, state: 0, xid: 0, tries: 0,
+    next_ns: 0, start_ns: 0, req_ns: 0, offer_addr: 0, server: 0, addr: 0, mask: 0, router: 0, dns: [0; 3],
+    ndns: 0, hostname: [0; 64], lease_s: 0, t1_s: 0, t2_s: 0, t1_at: 0, t2_at: 0, end_at: 0, timer: timer {
+        link: list_node { next: 0 as *mut list_node, prev: 0 as *mut list_node },
+    },
+    work: net_work {
+        link: list_node { next: 0 as *mut list_node, prev: 0 as *mut list_node },
+    }, lock: SPINLOCK_INIT("dhcp-client\0".ptr as *CChar),
+}; 4];
+static SLOTS_READY: AtomicBool = AtomicBool.constant(false);
+static mut TABLE_LOCK: spinlock_t = SPINLOCK_INIT("dhcp-table\0".ptr as *CChar);
+
+static DISCOVERS: AtomicU64 = AtomicU64.constant(0);
+static REQUESTS: AtomicU64 = AtomicU64.constant(0);
+static OFFERS: AtomicU64 = AtomicU64.constant(0);
+static ACKS: AtomicU64 = AtomicU64.constant(0);
+static NAKS: AtomicU64 = AtomicU64.constant(0);
+static RENEWS: AtomicU64 = AtomicU64.constant(0);
+static REBINDS: AtomicU64 = AtomicU64.constant(0);
+static EXPIRIES: AtomicU64 = AtomicU64.constant(0);
+/// A reply that was not for us, malformed, or unexpected in this state.
+static IGNORED: AtomicU64 = AtomicU64.constant(0);
+
+fn count(stat: borrow AtomicU64) {
+    stat.fetchAddWith(1, Ordering.Relaxed);
+}
+
+fn read(stat: borrow AtomicU64) -> u64 => stat.loadWith(LoadOrdering.Relaxed);
+
+/// The table's lock.
+/// Safety: only its address is taken.
+fn tableLock() -> *mut spinlock_t => unsafe { borrow mut TABLE_LOCK as *mut spinlock_t };
+
+/// Slot `i`.
+/// Safety: only its address is taken; every field is read and written through it under the locks the C used.
+fn slot(i: usize) -> *mut Client => unsafe { borrow mut CLIENTS[i] as *mut Client };
+
+/// A client's lock.
+/// Safety: `c` is a slot, whose lock is set up for good.
+unsafe fn lockOf(c: *mut Client) -> *mut spinlock_t => borrow mut Ptr.toBorrowMut(c).lock as *mut spinlock_t;
+
+/// The retransmission after `tries` of them: 2 s, doubled each time, at most 64 s.
+fn backoffNs(tries: u32) -> u64 {
+    let d = RETX_FIRST_NS << (if (tries < 6) tries else 6) as u64;
+    return if (d > RETX_MAX_NS) RETX_MAX_NS else d;
+}
+
+/// The interface's client, or null.
+/// Safety: `nif` is only compared.
+unsafe fn clientOf(nif: *netif) -> *mut Client {
+    if (!SLOTS_READY.loadWith(LoadOrdering.Acquire)) {
+        return 0 as *mut Client;
+    }
+    for (i in 0..MAX_CLIENTS) {
+        let c = slot(i);
+        if (Ptr.toBorrow(c as *Client).in_use.loadWith(LoadOrdering.Acquire) &&
+            Ptr.toBorrow(c as *Client).nif as usize == nif as usize) {
+            return c;
+        }
+    }
+    return 0 as *mut Client;
+}
+
+/// The interface's client, locked (the saved state in `s`), or null: found, then confirmed under its own lock to still
+/// be this interface's and not stopping -- a slot can be stopped and handed to another interface between the two.
+/// Safety: as clientOf.
+unsafe fn lockClient(nif: *netif, s: borrow mut usize) -> *mut Client {
+    let c = clientOf(nif);
+    if (c.isNull()) {
+        return c;
+    }
+    s = spin_lock_irqsave(lockOf(c));
+    let b = Ptr.toBorrow(c as *Client);
+    if (b.in_use.loadWith(LoadOrdering.Relaxed) && b.nif as usize == nif as usize && !b.stopping) {
+        return c;
+    }
+    spin_unlock_irqrestore(lockOf(c), s);
+    return 0 as *mut Client;
+}
+
+/// The exchange's seconds so far, for the secs field. clock_now_ns is comparable across CPUs to within the measured
+/// skew, so a reading on another worker may be a hair earlier: that is 0.
+fn secsSince(c: borrow Client, now: u64) -> u16 {
+    let s = if (now > c.start_ns) (now - c.start_ns) / NS_PER_S else 0;
+    return if (s > 0xffff) 0xffff else truncate<u16>(s);
+}
+
+// ---- Sending ----
+
+/// What one decision sends, built after the lock is dropped: `kind` 0 is nothing; `unicast` is to `server` from
+/// `ciaddr` (renewing), else from 0.0.0.0 (or the address held) to the broadcast.
+struct Tx {
+    kind: u8;
+    unicast: bool;
+    xid: u32;
+    ciaddr: u32;
+    reqip: u32;
+    server_opt: u32;
+    server: u32;
+    secs: u16;
+}
+
+fn noTx() -> Tx => Tx { kind: 0, unicast: false, xid: 0, ciaddr: 0, reqip: 0, server_opt: 0, server: 0, secs: 0 };
+
+/// The four bytes of a u32 as it lies in memory (an address, network order) at `at`.
+fn putWord(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// A u16 in network order at `at`.
+fn putBe16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+/// A u16 as it lies in memory (a checksum) at `at`.
+fn putNative16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+/// The u32 in network order at `at`.
+fn be32(b: Slice<u8>, at: usize) -> u32 =>
+    ((b[at] as u32) << 24) | ((b[at + 1] as u32) << 16) | ((b[at + 2] as u32) << 8) | (b[at + 3] as u32);
+
+/// The u32 lying in memory at `at` (an address, network order).
+fn word(b: Slice<u8>, at: usize) -> u32 =>
+    (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) | ((b[at + 3] as u32) << 24);
+
+/// An option with a four-byte value lying as `v` does in memory; returns the offset past it.
+fn putOpt4(b: SliceMut<u8>, at: usize, code: u8, v: u32) -> usize {
+    b[at] = code;
+    b[at + 1] = 4;
+    putWord(b, at + 2, v);
+    return at + 6;
+}
+
+/// The message `tx` describes, sent out of `nif`.
+/// Safety: `nif` is referenced (the client's).
+unsafe fn send(nif: *mut netif, tx: borrow Tx) {
+    let m = m_getcl();
+    if (m.isNull()) {
+        return;
+    }
+    let iface = Ptr.toBorrow(nif as *netif);
+    let mac = iface.mac;
+    let frame = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, BOOTP_MIN + (IPV4_HLEN + UDP_HLEN) as usize + 64);
+    let dhAt = (IPV4_HLEN + UDP_HLEN) as usize;
+    for (i in 0..DHCP_FIXED) {
+        frame[dhAt + i] = 0;
+    }
+    frame[dhAt + BOOTP_OFF_OP] = BOOTP_REQUEST;
+    frame[dhAt + BOOTP_OFF_HTYPE] = DHCP_HTYPE_ETHER;
+    frame[dhAt + BOOTP_OFF_HLEN] = 6;
+    putWord(frame, dhAt + BOOTP_OFF_XID, tx.xid);
+    putBe16(frame, dhAt + BOOTP_OFF_SECS, tx.secs);
+    putWord(frame, dhAt + BOOTP_OFF_CIADDR, tx.ciaddr); // flags 0: the reply may be unicast (input takes either)
+    frame[dhAt + BOOTP_OFF_CHADDR..dhAt + BOOTP_OFF_CHADDR + 6].copyFrom(mac[..]);
+    frame[dhAt + BOOTP_LEN] = 0x63; // the magic cookie, 99.130.83.99
+    frame[dhAt + BOOTP_LEN + 1] = 0x82;
+    frame[dhAt + BOOTP_LEN + 2] = 0x53;
+    frame[dhAt + BOOTP_LEN + 3] = 0x63;
+
+    var o = dhAt + DHCP_FIXED;
+    frame[o] = OPT_MSGTYPE;
+    frame[o + 1] = 1;
+    frame[o + 2] = tx.kind;
+    o = o + 3;
+    frame[o] = OPT_CLIENTID;
+    frame[o + 1] = 7;
+    frame[o + 2] = DHCP_HTYPE_ETHER;
+    frame[o + 3..o + 9].copyFrom(mac[..]);
+    o = o + 9;
+    if (tx.reqip != 0) {
+        o = putOpt4(frame, o, OPT_REQIP, tx.reqip);
+    }
+    if (tx.server_opt != 0) {
+        o = putOpt4(frame, o, OPT_SERVERID, tx.server_opt);
+    }
+    frame[o] = OPT_PARAMS;
+    frame[o + 1] = 7;
+    frame[o + 2] = OPT_SUBNET;
+    frame[o + 3] = OPT_ROUTER;
+    frame[o + 4] = OPT_DNS;
+    frame[o + 5] = OPT_HOSTNAME;
+    frame[o + 6] = OPT_LEASE;
+    frame[o + 7] = OPT_T1;
+    frame[o + 8] = OPT_T2;
+    o = o + 9;
+    frame[o] = OPT_END;
+    o = o + 1;
+    while (o - dhAt < BOOTP_MIN) {
+        frame[o] = OPT_PAD;
+        o = o + 1;
+    }
+    let dhlen = truncate<u32>(o - dhAt);
+
+    // A client holding an address sends from it, broadcast (REBINDING) or not (RFC 2131 4.4.5); 0.0.0.0 only before
+    // it has one.
+    let src = tx.ciaddr;
+    let dst = if (tx.unicast) tx.server else BROADCAST;
+    let udplen = UDP_HLEN + dhlen;
+    let iplen = IPV4_HLEN + udplen;
+    let udpAt = IPV4_HLEN as usize;
+    putBe16(frame, udpAt, DHCP_CPORT);
+    putBe16(frame, udpAt + 2, DHCP_SPORT);
+    putBe16(frame, udpAt + 4, truncate<u16>(udplen));
+    frame[udpAt + 6] = 0;
+    frame[udpAt + 7] = 0;
+    let udpData = (Ptr.toBorrow(m as *mbuf).data as *u8).add(udpAt);
+    let c = cksum_fold(cksum_partial(udpData as *void, udplen as usize, cksum_pseudo4(
+        src, dst, IPPROTO_UDP,
+        truncate<u16>(udplen),
+    )));
+    putNative16(frame, udpAt + 6, if (c != 0) c else 0xffff);
+
+    frame[0] = 0x45;
+    frame[1] = 0;
+    putBe16(frame, 2, truncate<u16>(iplen));
+    putBe16(frame, 4, 0);
+    putBe16(frame, 6, 0);
+    frame[8] = IP_DEFAULT_TTL;
+    frame[9] = IPPROTO_UDP;
+    frame[10] = 0;
+    frame[11] = 0;
+    putWord(frame, 12, src);
+    putWord(frame, 16, dst);
+    putNative16(frame, 10, in_cksum(Ptr.toBorrow(m as *mbuf).data as *void, IPV4_HLEN as usize));
+    let mm = Ptr.toBorrowMut(m);
+    mm.len = iplen;
+    mm.pkt.len = iplen;
+    mm.pkt.proto = ETH_P_IP;
+
+    if (!tx.unicast) {
+        ether_output(nif, m, borrow BROADCAST_MAC as *[u8; 6] as *u8, ETH_P_IP);
+        return;
+    }
+    // The server is on the link the lease is on (RFC 2131 §4.4.5 unicasts the renewal to it); if not, through the
+    // router the lease named.
+    let mine = iface.ip4.addr.loadWith(LoadOrdering.Relaxed);
+    let mask = iface.ip4.mask.loadWith(LoadOrdering.Relaxed);
+    let gateway = iface.ip4.gateway.loadWith(LoadOrdering.Relaxed);
+    let hop = if (((dst ^ mine) & mask) == 0 || gateway == 0) dst else gateway;
+    var next: [u8; 6] = [0; 6];
+    let rc = arp_resolve(nif, hop, borrow mut next as *mut [u8; 6] as *mut u8, m);
+    if (rc == 0) {
+        ether_output(nif, m, borrow next as *[u8; 6] as *u8, ETH_P_IP);
+    }
+    // -EINPROGRESS: queued on the ARP entry; any other error freed it, and the retransmission tries again.
+}
+
+// ---- The state machine (under the client's lock) ----
+
+/// Safety: random_u64 takes no arguments.
+fn newExchange(c: borrow mut Client, now: u64) {
+    c.xid = truncate<u32>(unsafe { random_u64() });
+    c.tries = 0;
+    c.start_ns = now;
+    c.req_ns = now; // a renewal's or rebind's first message is its REQUEST
+}
+
+fn txDiscover(c: borrow mut Client, now: u64, tx: borrow mut Tx) {
+    tx = noTx();
+    tx.kind = DHCP_DISCOVER;
+    tx.xid = c.xid;
+    tx.secs = secsSince(c, now);
+    c.next_ns = now + backoffNs(c.tries);
+    count(borrow DISCOVERS);
+}
+
+fn txRequestSelecting(c: borrow mut Client, now: u64, tx: borrow mut Tx) {
+    if (c.tries == 0) {
+        c.req_ns = now; // the lease counts from this REQUEST, not from the DISCOVER
+    }
+    tx = noTx();
+    tx.kind = DHCP_REQUEST;
+    tx.xid = c.xid;
+    tx.reqip = c.offer_addr;
+    tx.server_opt = c.server;
+    tx.secs = secsSince(c, now);
+    c.next_ns = now + backoffNs(c.tries);
+    count(borrow REQUESTS);
+}
+
+/// RENEWING (unicast to the server) or REBINDING (broadcast): ciaddr is the address held, and neither the
+/// requested-address nor the server option is sent (RFC 2131 §4.3.2). The retransmission is half the time left to T2
+/// (renewing) or to the lease's end (rebinding), 60 s at least, and never past that deadline.
+fn txRequestBound(c: borrow mut Client, now: u64, tx: borrow mut Tx) {
+    let renew = c.state == S_RENEWING;
+    tx = noTx();
+    tx.kind = DHCP_REQUEST;
+    tx.unicast = renew;
+    tx.xid = c.xid;
+    tx.ciaddr = c.addr;
+    tx.server = c.server;
+    tx.secs = secsSince(c, now);
+    let until = if (renew) c.t2_at else c.end_at;
+    var wait = if (until > now) (until - now) / 2 else 0;
+    if (wait < RENEW_MIN_NS) {
+        wait = RENEW_MIN_NS;
+    }
+    c.next_ns = if (now + wait < until) now + wait else until;
+    if (renew) {
+        count(borrow RENEWS);
+    } else {
+        count(borrow REBINDS);
+    }
+}
+
+/// Safety: `c.nif` is referenced while the slot is in use.
+fn loseLease(c: borrow mut Client) {
+    c.addr = 0;
+    c.mask = 0;
+    c.router = 0;
+    c.ndns = 0;
+    c.hostname[0] = 0;
+    c.lease_s = 0;
+    c.t1_s = 0;
+    c.t2_s = 0;
+    unsafe {
+        netif_set_ipv4(c.nif, 0, 0, 0);
+        arp_flush(c.nif);
+    }
+}
+
+/// Restart from INIT: a fresh exchange and its DISCOVER now.
+fn restart(c: borrow mut Client, now: u64, tx: borrow mut Tx) {
+    c.state = S_SELECTING;
+    newExchange(c, now);
+    txDiscover(c, now, tx);
+}
+
+/// The bytes of a C name: up to its zero, or all of them.
+fn cName(name: Slice<u8>) -> Slice<u8> {
+    for (i in 0..name.length) {
+        if (name[i] == 0) {
+            return name[..i];
+        }
+    }
+    return name;
+}
+
+/// The four bytes of an address as they lie in memory (network order), dotted.
+fn dotted(w: borrow mut TextWriter, a: u32) {
+    w.decimal((a & 0xff) as u64);
+    w.byte(46);
+    w.decimal(((a >> 8) & 0xff) as u64);
+    w.byte(46);
+    w.decimal(((a >> 16) & 0xff) as u64);
+    w.byte(46);
+    w.decimal((a >> 24) as u64);
+}
+
+/// "dhcp: <the interface's name>: " in `w`.
+/// Safety: `nif` is referenced.
+unsafe fn prefix(w: borrow mut TextWriter, nif: *netif) {
+    w.text("dhcp: ");
+    let name = Ptr.toBorrow(nif).name;
+    w.bytes(cName(name[..]));
+    w.text(": ");
+}
+
+/// The timer's or a test's turn: whatever deadline has passed.
+/// Safety: `c.nif` is referenced while the slot is in use.
+fn step(c: borrow mut Client, now: u64, tx: borrow mut Tx) {
+    if (c.state == S_INIT) {
+        restart(c, now, tx);
+    } else if (c.state == S_SELECTING) {
+        if (now >= c.next_ns) {
+            c.tries = c.tries + 1;
+            txDiscover(c, now, tx);
+        }
+    } else if (c.state == S_REQUESTING) {
+        if (now >= c.next_ns) {
+            c.tries = c.tries + 1;
+            if (c.tries >= REQUEST_TRIES) {
+                restart(c, now, tx);
+            } else {
+                txRequestSelecting(c, now, tx);
+            }
+        }
+    } else if (c.state == S_BOUND || c.state == S_RENEWING || c.state == S_REBINDING) {
+        if (now >= c.end_at) {
+            var buffer: [u8; 128] = [0; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            unsafe { prefix(mut line, c.nif as *netif); }
+            line.text("the lease on ");
+            dotted(mut line, c.addr);
+            line.text(" ended; the address is removed");
+            KernelLog.send(LogLevel.Info, line);
+            count(borrow EXPIRIES);
+            loseLease(c);
+            restart(c, now, tx);
+        } else if (now >= c.t2_at && c.state != S_REBINDING) {
+            c.state = S_REBINDING;
+            newExchange(c, now);
+            txRequestBound(c, now, tx);
+        } else if (now >= c.t1_at && c.state == S_BOUND) {
+            c.state = S_RENEWING;
+            newExchange(c, now);
+            txRequestBound(c, now, tx);
+        } else if (c.state != S_BOUND && now >= c.next_ns) {
+            c.tries = c.tries + 1;
+            txRequestBound(c, now, tx);
+        }
+    }
+}
+
+/// When the client next needs to run.
+fn nextDeadline(c: borrow Client) -> u64 {
+    if (c.state == S_SELECTING || c.state == S_REQUESTING) {
+        return c.next_ns;
+    }
+    if (c.state == S_BOUND) {
+        return c.t1_at;
+    }
+    if (c.state == S_RENEWING) {
+        return if (c.next_ns < c.t2_at) c.next_ns else c.t2_at;
+    }
+    if (c.state == S_REBINDING) {
+        return if (c.next_ns < c.end_at) c.next_ns else c.end_at;
+    }
+    return 0;
+}
+
+/// The timer, at the next deadline. It may be pending (an input re-arms before it fires): cancel first. A callback
+/// already past its start only queues the work, which finds nothing due and re-arms -- harmless.
+/// Safety: the timer is the slot's, set up by dhcp_client_start.
+fn arm(c: borrow mut Client, now: u64) {
+    let at = nextDeadline(c);
+    let t = borrow mut c.timer as *mut timer;
+    unsafe {
+        timer_cancel(t);
+        timer_start(t, if (at > now) at - now else 0);
+    }
+}
+
+/// The client's deferred work, on a network worker.
+/// Safety: `arg` is a slot (dhcp_client_start's net_work_init).
+@callback
+unsafe fn work(arg: *mut void) {
+    let cp = arg as *mut Client;
+    var tx = noTx();
+    let s = spin_lock_irqsave(lockOf(cp));
+    let c = Ptr.toBorrowMut(cp);
+    if (c.stopping || !c.in_use.loadWith(LoadOrdering.Relaxed)) {
+        spin_unlock_irqrestore(lockOf(cp), s);
+        return;
+    }
+    let now = clock_now_ns();
+    step(c, now, mut tx);
+    arm(c, now);
+    let nif = c.nif;
+    spin_unlock_irqrestore(lockOf(cp), s);
+    if (tx.kind != 0) {
+        send(nif, borrow tx);
+    }
+}
+
+/// The client's timer. Under the client's lock, and only while it is live: a callback still running on the CPU the
+/// timer was armed on before arm() moved it can outlast stop's timer_cancel_sync, but it cannot queue the work once
+/// stop has set `stopping` -- so the barrier is the last of the work. Callbacks run with the timer queue's lock
+/// dropped (timer.c).
+/// Safety: `arg` is a slot (dhcp_client_start's timer_setup).
+@callback
+unsafe fn fired(t: *mut timer, arg: *mut void) {
+    let cp = arg as *mut Client;
+    let s = spin_lock_irqsave(lockOf(cp));
+    let c = Ptr.toBorrowMut(cp);
+    if (c.in_use.loadWith(LoadOrdering.Relaxed) && !c.stopping) {
+        net_work_queue(borrow mut c.work as *mut net_work);
+    }
+    spin_unlock_irqrestore(lockOf(cp), s);
+}
+
+// ---- Receiving ----
+
+/// The byte order swap of a u32 (inet.h's htonl and ntohl on CosmoOS's little-endian targets).
+fn swap32(v: u32) -> u32 => ((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >> 8) & 0xff00) | (v >> 24);
+
+/// The natural mask of an address's class, for an ACK without option 1.
+fn classMask(addr: u32) -> u32 {
+    let a = swap32(addr);
+    return swap32(if (a < 0x80000000) 0xff000000 else if (a < 0xc0000000) 0xffff0000 else 0xffffff00);
+}
+
+/// An ACK: take the lease (under the client's lock). False when it is unusable.
+///
+/// The lease's parameters, decoded (netparse_dhcp_lease): false for an ACK with no address or no lease time (RFC 2131
+/// table 3). Option 12 is kept only when it is a name sethostname and a file can take as it is (1-63 letters, digits,
+/// '-' and '.'): it lands in /etc/hostname and at prompts, and a server is not trusted with what lands there.
+/// Safety: `dh` points to `dhlen` readable bytes.
+unsafe fn bindLease(c: borrow mut Client, dh: *u8, dhlen: u32) -> bool {
+    var ls: [u8; 102] = [0; 102]; // netparse_dhcp_lease_bytes's layout
+    if (!netparse_dhcp_lease_bytes(dh, dhlen, borrow mut ls as *mut [u8; 102] as *mut u8)) {
+        return false;
+    }
+    let yi = word(ls[..], 0);
+    let lease = be32(ls[..], 4);
+    let mask = if ((ls[16] & 1) != 0) word(ls[..], 8) else classMask(yi);
+    let router = if ((ls[16] & 2) != 0) word(ls[..], 12) else 0; // the first router
+    let ndns = ls[17];
+    for (i in 0..ndns as usize) {
+        c.dns[i] = word(ls[..], 18 + 4 * i);
+    }
+    c.ndns = ndns;
+    c.hostname[..].copyFrom(ls[38..102]);
+    // T1 and T2: the server's when they are ordered (T1 < T2 < lease), else the RFC's 0.5 and 0.875 of the lease --
+    // in nanoseconds, so a lease of a second or two still has a T1 before its T2. 0xffffffff is infinite.
+    let leaseNs = lease as u64 * NS_PER_S;
+    var t1Ns = leaseNs / 2;
+    var t2Ns = leaseNs / 8 * 7;
+    let st1 = be32(ls[..], 30);
+    let st2 = be32(ls[..], 34);
+    if (st1 != 0 && st2 != 0 && st1 < st2 && st2 < lease) {
+        t1Ns = st1 as u64 * NS_PER_S;
+        t2Ns = st2 as u64 * NS_PER_S;
+    }
+    let changed = c.addr != yi || c.mask != mask || c.router != router;
+    c.addr = yi;
+    c.mask = mask;
+    c.router = router;
+    c.lease_s = lease;
+    c.t1_s = truncate<u32>(t1Ns / NS_PER_S);
+    c.t2_s = truncate<u32>(t2Ns / NS_PER_S);
+    // Times count from the time the REQUEST was sent (RFC 2131 §4.4.1), not the DISCOVER: an offer that was slow to
+    // come takes nothing off the lease. An infinite lease never reaches T1.
+    let base = c.req_ns;
+    if (lease == U32_MAX) {
+        c.t1_at = U64_MAX;
+        c.t2_at = U64_MAX;
+        c.end_at = U64_MAX;
+    } else {
+        c.t1_at = base + t1Ns;
+        c.t2_at = base + t2Ns;
+        c.end_at = base + leaseNs;
+    }
+    c.state = S_BOUND;
+    c.tries = 0;
+    if (changed) {
+        netif_set_ipv4(c.nif, yi, mask, router);
+        arp_flush(c.nif); // neighbours learned under the old address or router
+    }
+    return true;
+}
+
+/// An ACK or a NAK may answer only a REQUEST, and only from a server the client asked: the server it selected
+/// (REQUESTING) or the one that granted the lease (RENEWING, which unicast to it); a REBINDING client asked every
+/// server. The server identifier is required (RFC 2131 §4.3.1). Under the client's lock.
+fn fromServer(c: borrow Client, server: u32) -> bool {
+    if (server == 0) {
+        return false;
+    }
+    if (c.state == S_REQUESTING || c.state == S_RENEWING) {
+        return server == c.server;
+    }
+    return c.state == S_REBINDING;
+}
+
+fn sameMac(a: Slice<u8>, b: Slice<u8>) -> bool {
+    for (i in 0..a.length) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// dhcp.h's dhcp_client_input: ipv4_input's, for a UDP datagram arriving on a non-loopback interface. True when the
+/// datagram is a server's reply for this interface's client: claimed (and freed), whatever becomes of it.
+/// Safety: `nif` is the receiving interface, `m` a packet whose IPv4 header (`ihl` bytes) is in its first mbuf.
+@export("dhcp_client_input")
+unsafe fn input(nif: *mut netif, m: *mut mbuf, ihl: u32) -> bool {
+    var ports: [u8; 8] = [0; 8];
+    if (!m_copydata(m as *mbuf, ihl, 4, borrow mut ports as *mut [u8; 8] as *mut void)) {
+        return false;
+    }
+    let flow = netparse_l4_flow(borrow ports as *[u8; 8] as *u8, 8); // the first four bytes: the ports
+    if (truncate<u16>(flow) != DHCP_SPORT || truncate<u16>(flow >> 16) != DHCP_CPORT) {
+        return false;
+    }
+    if (clientOf(nif as *netif).isNull()) {
+        return false;
+    }
+    // Only a datagram for this host: the limited broadcast, the address it holds, or anything while it holds none (an
+    // offer may be unicast to the address offered). Anything else takes the ordinary path -- forwarding, its
+    // firewall, or the not-for-us drop.
+    var dstBytes: [u8; 4] = [0; 4];
+    if (!m_copydata(m as *mbuf, 16, 4, borrow mut dstBytes as *mut [u8; 4] as *mut void)) {
+        return false;
+    }
+    let dst = word(dstBytes[..], 0);
+    let mine = Ptr.toBorrow(nif as *netif).ip4.addr.loadWith(LoadOrdering.Acquire);
+    if (dst != BROADCAST && mine != 0 && dst != mine) {
+        return false;
+    }
+
+    // A server-to-client datagram for this interface's client: claimed, whatever becomes of it. Copied out whole (an
+    // Ethernet frame at most).
+    let total = Ptr.toBorrow(m as *mbuf).pkt.len;
+    let fits = total > ihl + UDP_HLEN + DHCP_FIXED_LEN && total <= 1600;
+    let buf = if (fits) kmalloc(total as usize, 0) as *mut u8 else 0 as *mut u8;
+    if (buf.isNull() || !m_copydata(m as *mbuf, 0, total, buf as *mut void)) {
+        count(borrow IGNORED);
+        kfree(buf as *mut void);
+        m_freem(m);
+        return true;
+    }
+    m_freem(m);
+    let whole = Slice.fromRaw(buf as *u8, total as usize);
+    let src = word(whole, 12);
+    let ipDst = word(whole, 16);
+    let udp = (buf as *u8).add(ihl as usize);
+    let uh = netparse_udp_flow(udp, total - ihl); // len in bits 0-15, has_cksum in 48, accepted in 63
+    let ulen = truncate<u16>(uh);
+    // cksum_fold complements: a valid datagram sums to 0.
+    if ((uh >> 63) == 0 || (ulen as u32) < UDP_HLEN + DHCP_FIXED_LEN ||
+        (((uh >> 48) & 1) != 0 &&
+            cksum_fold(
+                cksum_partial(udp as *void, ulen as usize, cksum_pseudo4(src, ipDst, IPPROTO_UDP, ulen)),
+            ) != 0)) {
+        count(borrow IGNORED);
+        kfree(buf as *mut void);
+        return true;
+    }
+    let dh = udp.add(UDP_HLEN as usize);
+    let dhlen = ulen as u32 - UDP_HLEN;
+    var msg: [u8; 20] = [0; 20]; // netparse_dhcp_bytes's layout
+    let wellFormed = netparse_dhcp_bytes(dh, dhlen, BOOTP_REPLY, borrow mut msg as *mut [u8; 20] as *mut u8);
+    let xid = if (wellFormed) word(msg[..], 2) else 0;
+
+    var tx = noTx();
+    var s: usize = 0;
+    let cp = lockClient(nif as *netif, mut s);
+    if (cp.isNull()) {
+        kfree(buf as *mut void);
+        return true; // the client stopped while the datagram was copied
+    }
+    let c = Ptr.toBorrowMut(cp);
+    let now = clock_now_ns();
+    let mac = Ptr.toBorrow(nif as *netif).mac;
+    let ours = wellFormed && xid == c.xid && sameMac(msg[10..16], mac[..]);
+    var used = false;
+    if (ours) {
+        let server = if (msg[1] != 0) word(msg[..], 16) else 0;
+        let kind = msg[0];
+        if (kind == DHCP_OFFER) {
+            if (c.state == S_SELECTING && server != 0) {
+                let yi = word(msg[..], 6);
+                if (yi != 0 && yi != BROADCAST) {
+                    count(borrow OFFERS);
+                    c.offer_addr = yi;
+                    c.server = server;
+                    c.state = S_REQUESTING;
+                    c.tries = 0;
+                    txRequestSelecting(c, now, mut tx);
+                    used = true;
+                }
+            }
+        } else if (kind == DHCP_ACK) {
+            if (fromServer(c, server) && bindLease(c, dh, dhlen)) {
+                if (server != 0) {
+                    c.server = server; // rebinding may be answered by another server
+                }
+                count(borrow ACKS);
+                used = true;
+            }
+        } else if (kind == DHCP_NAK) {
+            if (fromServer(c, server)) {
+                count(borrow NAKS);
+                var buffer: [u8; 64] = [0; 64];
+                var line = TextWriter.create(mut buffer[..]);
+                prefix(mut line, nif as *netif);
+                line.text("NAK; starting over");
+                KernelLog.send(LogLevel.Info, line);
+                if (c.addr != 0) {
+                    loseLease(c);
+                }
+                restart(c, now, mut tx);
+                used = true;
+            }
+        }
+    }
+    if (used) {
+        arm(c, now);
+    } else {
+        count(borrow IGNORED);
+    }
+    let boundNow = used && c.state == S_BOUND;
+    let a = c.addr;
+    let lease = c.lease_s;
+    let ndns = c.ndns;
+    let dns0 = c.dns[0];
+    spin_unlock_irqrestore(lockOf(cp), s);
+    kfree(buf as *mut void);
+    if (tx.kind != 0) {
+        send(nif, borrow tx);
+    }
+    if (boundNow) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        prefix(mut line, nif as *netif);
+        line.text("bound to ");
+        dotted(mut line, a);
+        line.text(" for ");
+        line.decimal(lease as u64);
+        if (ndns != 0) {
+            line.text(" s, ");
+            line.decimal(ndns as u64);
+            line.text(" DNS server(s), first ");
+            dotted(mut line, dns0);
+        } else {
+            line.text(" s, no DNS server");
+        }
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return true;
+}
+
+// ---- Lifetime ----
+
+/// dhcp.h's dhcp_client_start: netif_register's, for an interface marked NETIF_AUTOCONF with no fw_cfg address.
+/// -ENOSPC when MAX_CLIENTS are running.
+/// Safety: `nif` is a registered interface.
+@export("dhcp_client_start")
+unsafe fn start(nif: *mut netif) -> i32 {
+    var cp = 0 as *mut Client;
+    let s = spin_lock_irqsave(tableLock());
+    if (!SLOTS_READY.loadWith(LoadOrdering.Relaxed)) {
+        for (i in 0..MAX_CLIENTS) {
+            spinlock_init(lockOf(slot(i)), "dhcp-client\0".ptr as *CChar);
+        }
+        SLOTS_READY.storeWith(true, StoreOrdering.Release);
+    }
+    for (i in 0..MAX_CLIENTS) {
+        let b = Ptr.toBorrow(slot(i) as *Client);
+        if (!b.in_use.loadWith(LoadOrdering.Relaxed) && b.nif.isNull()) {
+            cp = slot(i);
+            break;
+        }
+    }
+    if (cp.isNull()) {
+        spin_unlock_irqrestore(tableLock(), s);
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        prefix(mut line, nif as *netif);
+        line.decimal(MAX_CLIENTS as u64);
+        line.text(" clients already run; no DHCP on it");
+        KernelLog.send(LogLevel.Warn, line);
+        return -ENOSPC;
+    }
+    kobject_get(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject); // netif_get
+    // Every field but the lock, under the lock (see the table).
+    let cs = spin_lock_irqsave(lockOf(cp));
+    let c = Ptr.toBorrowMut(cp);
+    c.stopping = false;
+    c.xid = 0;
+    c.tries = 0;
+    c.next_ns = 0;
+    c.start_ns = 0;
+    c.req_ns = 0;
+    c.offer_addr = 0;
+    c.server = 0;
+    c.addr = 0;
+    c.mask = 0;
+    c.router = 0;
+    c.dns = [0; 3];
+    c.ndns = 0;
+    c.hostname[0] = 0;
+    c.lease_s = 0;
+    c.t1_s = 0;
+    c.t2_s = 0;
+    c.t1_at = 0;
+    c.t2_at = 0;
+    c.end_at = 0;
+    timer_setup(borrow mut c.timer as *mut timer, fired, cp as *mut void);
+    net_work_init(borrow mut c.work as *mut net_work, work, cp as *mut void);
+    c.nif = nif;
+    c.state = S_INIT;
+    c.in_use.storeWith(true, StoreOrdering.Release);
+    spin_unlock_irqrestore(lockOf(cp), cs);
+    spin_unlock_irqrestore(tableLock(), s);
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    prefix(mut line, nif as *netif);
+    line.text("no configured address; discovering");
+    KernelLog.send(LogLevel.Info, line);
+    net_work_queue(borrow mut c.work as *mut net_work);
+    return 0;
+}
+
+/// dhcp.h's dhcp_client_stop: netif_unregister's. The client stops and lets go of the interface; on return nothing of
+/// it runs anywhere.
+/// Safety: `nif` is a registered interface.
+@export("dhcp_client_stop")
+unsafe fn stop(nif: *mut netif) {
+    let cp = clientOf(nif as *netif);
+    if (cp.isNull()) {
+        return;
+    }
+    var s = spin_lock_irqsave(lockOf(cp));
+    let live = Ptr.toBorrowMut(cp);
+    live.stopping = true;
+    spin_unlock_irqrestore(lockOf(cp), s);
+    // From here nothing queues the work: the timer callback and the kicks queue it under the lock and only while not
+    // `stopping`. Work queued before runs, sees `stopping` and neither sends nor re-arms; after the barrier nothing
+    // of the client runs anywhere.
+    let t = borrow mut Ptr.toBorrowMut(cp).timer as *mut timer;
+    timer_cancel_sync(t);
+    net_workers_barrier();
+    timer_cancel_sync(t);
+    s = spin_lock_irqsave(tableLock());
+    let cs = spin_lock_irqsave(lockOf(cp));
+    let c = Ptr.toBorrowMut(cp);
+    c.in_use.storeWith(false, StoreOrdering.Release);
+    c.nif = 0 as *mut netif;
+    spin_unlock_irqrestore(lockOf(cp), cs);
+    spin_unlock_irqrestore(tableLock(), s);
+    kobject_put(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject); // netif_put
+}
+
+/// dhcp.h's dhcp_client_kick: netif_set_up(true)'s. A DISCOVER or REQUEST waiting for its retransmission goes now.
+/// Queued under the lock lockClient found the client live under: stop sets `stopping` under it before its barrier, so
+/// no kick queues the work after the barrier (or into a reused slot).
+/// Safety: `nif` is a registered interface.
+@export("dhcp_client_kick")
+unsafe fn kick(nif: *mut netif) {
+    var s: usize = 0;
+    let cp = lockClient(nif as *netif, mut s);
+    if (cp.isNull()) {
+        return;
+    }
+    let c = Ptr.toBorrowMut(cp);
+    if (c.state == S_SELECTING || c.state == S_REQUESTING) {
+        c.next_ns = clock_now_ns();
+        net_work_queue(borrow mut c.work as *mut net_work);
+    }
+    spin_unlock_irqrestore(lockOf(cp), s);
+}
+
+/// The milliseconds from `now` to `at`: 0xffffffff for an infinite lease's, 0 once passed, and a finite time beyond
+/// 49.7 days one below the infinite (COSMO_NETCTL_LEASE_MS_MAX).
+fn msTo(at: u64, now: u64) -> u32 {
+    if (at == U64_MAX) {
+        return U32_MAX;
+    }
+    if (at <= now) {
+        return 0;
+    }
+    let ms = (at - now) / 1000000;
+    return if (ms >= U32_MAX as u64) U32_MAX - 1 else truncate<u32>(ms);
+}
+
+/// strlcpy into `to`: as much of `from`'s C string as fits before a terminating zero.
+fn copyName(to: SliceMut<u8>, from: Slice<u8>) {
+    let name = cName(from);
+    let n = if (name.length < to.length - 1) name.length else to.length - 1;
+    for (i in 0..n) {
+        to[i] = name[i];
+    }
+    to[n] = 0;
+}
+
+/// dhcp.h's dhcp_lease_list: every client, at one `now`. Returns how many were written. Any context.
+/// Safety: `out` points to `max` writable dhcp_lease_infos.
+@export("dhcp_lease_list")
+unsafe fn leaseList(out: *mut dhcp_lease_info, max: u32) -> u32 {
+    var n: u32 = 0;
+    let now = clock_now_ns();
+    for (i in 0..MAX_CLIENTS) {
+        if (n >= max) {
+            break;
+        }
+        let cp = slot(i);
+        let s = spin_lock_irqsave(tableLock());
+        let b = Ptr.toBorrow(cp as *Client);
+        let live = b.in_use.loadWith(LoadOrdering.Relaxed) && !b.stopping;
+        if (!live) {
+            spin_unlock_irqrestore(tableLock(), s);
+            continue;
+        }
+        let s2 = spin_lock_irqsave(lockOf(cp));
+        let c = Ptr.toBorrow(cp as *Client);
+        let o = Ptr.toBorrowMut(out.add(n as usize));
+        n = n + 1;
+        o.ifname = [0; 8];
+        let name = Ptr.toBorrow(c.nif as *netif).name;
+        copyName(mut o.ifname[..], name[..]);
+        o.state = truncate<u8>(c.state);
+        o.ndns = 0;
+        o.addr = 0;
+        o.mask = 0;
+        o.router = 0;
+        o.server = 0;
+        o.dns = [0; 3];
+        o.lease_s = 0;
+        o.t1_s = 0;
+        o.t2_s = 0;
+        o.remaining_ms = 0;
+        o.t1_ms = 0;
+        o.t2_ms = 0;
+        o.hostname = [0; 64];
+        let held = c.state == S_BOUND || c.state == S_RENEWING || c.state == S_REBINDING;
+        if (held) {
+            o.addr = c.addr;
+            o.mask = c.mask;
+            o.router = c.router;
+            o.server = c.server;
+            o.ndns = c.ndns;
+            o.dns = c.dns;
+            o.lease_s = c.lease_s;
+            o.t1_s = c.t1_s;
+            o.t2_s = c.t2_s;
+            copyName(mut o.hostname[..], c.hostname[..]);
+            o.remaining_ms = msTo(c.end_at, now);
+            o.t1_ms = msTo(c.t1_at, now);
+            o.t2_ms = msTo(c.t2_at, now);
+        }
+        spin_unlock_irqrestore(lockOf(cp), s2);
+        spin_unlock_irqrestore(tableLock(), s);
+    }
+    return n;
+}
+
+/// The live clients (in `clients`) and how many of them hold a lease: dhcp_lease_list's walk, as the C's boot wait
+/// read it, under the same locks.
+/// Safety: the locks are set up for good (a slot's by its first start, before in_use is ever set), and the slots are
+/// read under them as dhcp_lease_list reads them.
+fn countBound(clients: borrow mut u32) -> u32 {
+    var bound: u32 = 0;
+    clients = 0;
+    for (i in 0..MAX_CLIENTS) {
+        let cp = slot(i);
+        unsafe {
+            let s = spin_lock_irqsave(tableLock());
+            let b = Ptr.toBorrow(cp as *Client);
+            if (b.in_use.loadWith(LoadOrdering.Relaxed) && !b.stopping) {
+                let s2 = spin_lock_irqsave(lockOf(cp));
+                let st = Ptr.toBorrow(cp as *Client).state;
+                clients = clients + 1;
+                if (st == S_BOUND || st == S_RENEWING || st == S_REBINDING) {
+                    bound = bound + 1;
+                }
+                spin_unlock_irqrestore(lockOf(cp), s2);
+            }
+            spin_unlock_irqrestore(tableLock(), s);
+        }
+    }
+    return bound;
+}
+
+/// dhcp.h's dhcp_boot_wait: boot composition's, after the boot modules: wait (BOOT_WAIT_NS at most) for every client
+/// to hold a lease.
+/// Safety: the clock, deadline and sleep calls take values only.
+@export("dhcp_boot_wait")
+fn bootWait() {
+    let deadline = unsafe { clock_deadline_ns(BOOT_WAIT_NS) };
+    loop {
+        var clients: u32 = 0;
+        let bound = countBound(mut clients);
+        if (bound == clients) {
+            if (clients != 0) {
+                var buffer: [u8; 64] = [0; 64];
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("dhcp: ");
+                line.decimal(bound as u64);
+                line.text(" interface(s) bound");
+                KernelLog.send(LogLevel.Info, line);
+            }
+            return;
+        }
+        if (unsafe { clock_deadline_passed(deadline) }) {
+            var buffer: [u8; 96] = [0; 96];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("dhcp: ");
+            line.decimal((clients - bound) as u64);
+            line.text(" of ");
+            line.decimal(clients as u64);
+            line.text(" interface(s) unbound after ");
+            line.decimal(BOOT_WAIT_NS / NS_PER_S);
+            line.text(" s; they keep trying");
+            KernelLog.send(LogLevel.Warn, line);
+            return;
+        }
+        unsafe { thread_sleep_ns(10 * 1000000); } // thread_sleep_ms(10)
+    }
+}
+
+/// dhcp.h's dhcp_get_stats.
+/// Safety: `out` points to a writable dhcp_stats.
+@export("dhcp_get_stats")
+unsafe fn getStats(out: *mut dhcp_stats) {
+    let o = Ptr.toBorrowMut(out);
+    o.discovers = read(borrow DISCOVERS);
+    o.requests = read(borrow REQUESTS);
+    o.offers = read(borrow OFFERS);
+    o.acks = read(borrow ACKS);
+    o.naks = read(borrow NAKS);
+    o.renews = read(borrow RENEWS);
+    o.rebinds = read(borrow REBINDS);
+    o.expiries = read(borrow EXPIRIES);
+    o.ignored = read(borrow IGNORED);
+}
+
+/// dhcp.h's dhcp_test_fire (CONFIG_SELFTEST): run the client's next deadline now -- T1, T2, the lease's end, or the
+/// retransmission. Each deadline brings the earlier ones with it: the lease's end is past T2, and T2 past T1.
+/// Safety: `nif` is a registered interface.
+@cfg("CONFIG_SELFTEST")
+@export("dhcp_test_fire")
+unsafe fn testFire(nif: *mut netif, ev: u32) -> i32 {
+    var s: usize = 0;
+    let cp = lockClient(nif as *netif, mut s);
+    if (cp.isNull()) {
+        return -ENOENT;
+    }
+    let c = Ptr.toBorrowMut(cp);
+    let now = clock_now_ns();
+    if (ev == TEST_EXPIRE) {
+        c.end_at = now;
+    }
+    if ((ev == TEST_EXPIRE || ev == TEST_T2) && c.t2_at > now) {
+        c.t2_at = now;
+    }
+    if (ev != TEST_RETX && c.t1_at > now) {
+        c.t1_at = now;
+    }
+    if (ev == TEST_RETX) {
+        c.next_ns = now;
+    }
+    net_work_queue(borrow mut c.work as *mut net_work); // under the lock, as kick
+    spin_unlock_irqrestore(lockOf(cp), s);
+    return 0;
+}
+
+/// dhcp.h's dhcp_test_state (CONFIG_SELFTEST): the client's state, or 0 without one.
+/// Safety: `nif` is a registered interface.
+@cfg("CONFIG_SELFTEST")
+@export("dhcp_test_state")
+unsafe fn testState(nif: *mut netif) -> i32 {
+    var s: usize = 0;
+    let cp = lockClient(nif as *netif, mut s);
+    if (cp.isNull()) {
+        return 0;
+    }
+    let st = truncate<i32>(Ptr.toBorrow(cp as *Client).state);
+    spin_unlock_irqrestore(lockOf(cp), s);
+    return st;
+}

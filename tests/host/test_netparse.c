@@ -72,6 +72,8 @@ static uint32_t ipv4_header_code(const uint8_t *hdr, uint32_t ihl)
 #include <string.h>
 #include <time.h>
 
+static uint32_t be32_at(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+
 /* --- direct checks --------------------------------------------------------- */
 
 static const uint8_t OWN[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
@@ -653,6 +655,24 @@ static void test_dhcp_digest(void)
         struct netparse_dhcp_lease ls;
         memset(&ls, 0, sizeof(ls));
         bool lease = in.dhlen >= DHCP_FIXED && netparse_dhcp_lease(dh, in.dhlen, &ls);
+        /* The bytes forms dhcp.cee reads agree with the structs. */
+        uint8_t mb[20];
+        memset(mb, 0xa5, sizeof(mb));
+        EXPECT(netparse_dhcp_bytes(dh, in.dhlen, in.op, mb) == (rc == NETPARSE_OK));
+        EXPECT(mb[0] == m.msg_type && mb[1] == m.has_server && memcmp(mb + 2, m.xid, 4) == 0 &&
+               memcmp(mb + 6, m.yiaddr, 4) == 0 && memcmp(mb + 10, m.chaddr, 6) == 0 && memcmp(mb + 16, m.server, 4) == 0);
+        if (in.dhlen >= DHCP_FIXED) {
+            uint8_t lb[102];
+            memset(lb, 0xa5, sizeof(lb));
+            EXPECT(netparse_dhcp_lease_bytes(dh, in.dhlen, lb) == lease);
+            if (lease)
+                EXPECT(memcmp(lb, ls.addr, 4) == 0 && be32_at(lb + 4) == ls.lease && memcmp(lb + 8, ls.mask, 4) == 0 &&
+                       memcmp(lb + 12, ls.router, 4) == 0 && lb[16] == (ls.has_mask | ls.has_router << 1) &&
+                       lb[17] == ls.ndns && memcmp(lb + 18, ls.dns, 12) == 0 && be32_at(lb + 30) == ls.t1 &&
+                       be32_at(lb + 34) == ls.t2 && memcmp(lb + 38, ls.hostname, 64) == 0);
+            else
+                EXPECT(lb[0] == 0xa5 && lb[101] == 0xa5);   /* nothing written */
+        }
         uint8_t ol = 0;
         int32_t at = in.dhlen >= DHCP_FIXED ? netparse_dhcp_opt(dh + DHCP_FIXED, in.dhlen - DHCP_FIXED, in.code, &ol) : -2;
         uint8_t a[4] = { 0, 0, 0, 0 };
