@@ -131,7 +131,7 @@ bool selftest_iommu(const char **reason)
      * cannot be mistaken for the next device's, because each is asked
      * whether *its own* count rose. */
     unsigned long long faulted = 0;
-    unsigned provoked = 0;
+    unsigned provoked = 0, candidates = 0;
     const char *why = NULL;
     for (unsigned i = 0; why == NULL; i++) {
         struct blkdev *bd = blk_nth(i);
@@ -141,6 +141,7 @@ bool selftest_iommu(const char **reason)
             blkdev_put(bd);
             continue;
         }
+        candidates++;
         uint32_t sid = bd->dev->iommu_sid;
         uint64_t bad = IOMMU_IOVA_HI - PAGE_SIZE;      /* the last page: the allocator hands out the lowest */
         uint8_t *sec = kmalloc(512, 0);
@@ -217,7 +218,13 @@ bool selftest_iommu(const char **reason)
     }
     iommu_get_stats(&s1);
     faulted = (unsigned long long)(s1.faults - s0.faults);
-    if (why == NULL && provoked == 0)
+    /* No disk with the hook behind the unit -- an installed system's boot
+     * with its own virtio disk alone (virtio-blk has no debug_dma) -- is a
+     * machine this test cannot exercise, not a failure of the unit. */
+    if (why == NULL && candidates == 0) {
+        kinfo("selftest: iommu: no block device here can provoke a fault (none has debug_dma behind the unit); "
+              "skipping the fault half");
+    } else if (why == NULL && provoked == 0)
         why = "no block device could provoke a fault";
     if (why != NULL) {
         *reason = why;

@@ -3469,8 +3469,12 @@ bool selftest_ahci_probe_rollback(const char **reason)
             break;
         }
     }
-    if (pdev == NULL || pdev->dev.state != DEV_BOUND) {
-        *reason = "ahci-probe-rollback: no bound AHCI controller";
+    if (pdev == NULL) {   /* a machine without one: aarch64's virt has AHCI only with the SATA test disk */
+        kinfo("selftest: ahci-probe-rollback: no AHCI controller; skipping");
+        return true;
+    }
+    if (pdev->dev.state != DEV_BOUND) {
+        *reason = "ahci-probe-rollback: the AHCI controller is not bound";
         return false;
     }
     bool ok = pci_test_remove(pdev) == 0;
@@ -3507,8 +3511,12 @@ bool selftest_ahci_stop_ack(const char **reason)
             break;
         }
     }
-    if (pdev == NULL || pdev->dev.state != DEV_BOUND) {
-        *reason = "ahci-stop-ack: no bound AHCI controller";
+    if (pdev == NULL) {   /* a machine without one: aarch64's virt has AHCI only with the SATA test disk */
+        kinfo("selftest: ahci-stop-ack: no AHCI controller; skipping");
+        return true;
+    }
+    if (pdev->dev.state != DEV_BOUND) {
+        *reason = "ahci-stop-ack: the AHCI controller is not bound";
         return false;
     }
 
@@ -3571,8 +3579,8 @@ bool selftest_ahci_comreset_ack(const char **reason)
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT
     struct blkdev *bd = blk_find("ahci0p1");
     if (bd == NULL) {
-        *reason = "ahci-comreset-ack: no ahci0p1 disk";
-        return false;
+        kinfo("selftest: ahci-comreset-ack: no ahci0p1; skipping");
+        return true;
     }
     bool (*recover)(struct blkdev *, struct bio *, struct bio *) =
         (bool (*)(struct blkdev *, struct bio *, struct bio *))module_symbol_lookup("ahci_test_comreset_recovery", NULL);
@@ -3707,8 +3715,8 @@ bool selftest_ahci_error_reset(const char **reason)
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT
     struct blkdev *bd = blk_find("ahci0p1");
     if (bd == NULL) {
-        *reason = "ahci-error-reset: no ahci0p1 disk";
-        return false;
+        kinfo("selftest: ahci-error-reset: no ahci0p1; skipping");
+        return true;
     }
     bool (*recover)(struct blkdev *, struct bio *, struct bio *) =
         (bool (*)(struct blkdev *, struct bio *, struct bio *))module_symbol_lookup("ahci_test_comreset_recovery", NULL);
