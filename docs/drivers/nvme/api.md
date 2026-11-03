@@ -50,7 +50,7 @@ status says nothing; the point is the transaction. Thread context.
 
 ```text
 [ INFO] blk: nvme0n1: 16384 sectors of 512 bytes (8 MiB)
-[ INFO] nvme0: pci:00:03.0: QEMU NVMe Ctrl (cosmo-nvme0), 1 namespace(s) of 256, 4 I/O queue(s) of depth 32, 512 KiB per request
+[ INFO] nvme0: pci:00:03.0: QEMU NVMe Ctrl (cosmo-test-nvme0), 1 namespace(s) of 256, 4 I/O queue(s) of depth 32, 512 KiB per request
 [ INFO] module: loaded nvme 1.0 (...)
 ```
 

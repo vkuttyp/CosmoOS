@@ -551,6 +551,36 @@ static const struct blkdev_ops usbs_ops = {
 
 /* --- probe and remove ---------------------------------------------------------------- */
 
+/*
+ * The device's serial number (its iSerialNumber string descriptor, in US
+ * English, USB 2.0 9.6.7) into `out`: the printable ASCII of its UTF-16LE,
+ * at most out_len - 1 characters. "" when the device names none or the
+ * request fails: a serial is what marks a test disk, and none is the safe
+ * answer.
+ */
+static void usbs_serial(struct usb_device *udev, char *out, size_t out_len)
+{
+    out[0] = '\0';
+    if (udev->desc.iSerialNumber == 0)
+        return;
+    uint8_t *buf = kmalloc(255, KMEM_ZERO);
+    if (buf == NULL)
+        return;
+    int n = usb_control_msg(udev, USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE, USB_REQ_GET_DESCRIPTOR,
+                            (uint16_t)((USB_DT_STRING << 8) | udev->desc.iSerialNumber), 0x0409, buf, 255, 0);
+    if (n >= 2 && buf[1] == USB_DT_STRING) {
+        unsigned len = buf[0] < (unsigned)n ? buf[0] : (unsigned)n;
+        size_t o = 0;
+        for (unsigned i = 2; i + 1 < len && o + 1 < out_len; i += 2) {
+            if (buf[i + 1] != 0 || buf[i] < 0x20 || buf[i] >= 0x7f)
+                break;
+            out[o++] = (char)buf[i];
+        }
+        out[o] = '\0';
+    }
+    kfree(buf);
+}
+
 static int usbs_identify(struct usbs *s, uint64_t *capacity, uint32_t *block_size, bool *write_protect)
 {
     uint8_t *buf = kzalloc(64);
@@ -670,6 +700,7 @@ static int usbs_probe(struct usb_device *udev, struct usb_interface *intf, const
     }
 
     s->bd.dev = usb_dma_dev(udev);   /* the controller: what the block layer's DMA checks must see (U1) */
+    usbs_serial(udev, s->bd.serial, sizeof(s->bd.serial));
     s->bd.ops = &usbs_ops;
     s->bd.sector_size = bs;
     s->bd.capacity = capacity;

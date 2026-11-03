@@ -38,7 +38,7 @@ crash-consistency harness).
   `QEMU_VCON` (`boot-test.log.vcon` under the harness);
 - since Phase 8, `virtio-net-pci` on QEMU user-mode networking
   (`docs/kernel-services/network/testing.md`);
-- since milestone 9, `nvme` (`serial=cosmo-nvme0`) over `QEMU_NVMEDISK`
+- since milestone 9, `nvme` (`serial=cosmo-test-nvme0`) over `QEMU_NVMEDISK`
   (a fresh 8 MiB `boot-test.log.nvme.img` per harness run;
   `docs/drivers/nvme/testing.md`);
 - since the virtio-removal unit, **last of all**, a second
@@ -64,6 +64,33 @@ had taken `00:03.0` at milestone 9 and the USB and second NIC came
 later, so it had been describing an older machine for some time. The
 removal disk's own arrival moved nothing.) The tests do not depend on
 the VGA beyond enumerating it.
+
+## Test disks
+
+A self-test writes only to a disk made for it, and it knows one by its
+serial number, never by its name. `scripts/qemu-run.sh` gives every disk
+it attaches for the tests a serial beginning `cosmo-test-`:
+`cosmo-test-vda` (the scratch virtio-blk), `cosmo-test-nvme0`,
+`cosmo-test-usb`, `cosmo-test-sata` and `cosmo-test-rm` (the removal
+disk). Each driver reads its device's serial into `blkdev.serial` before
+registering it: ATA IDENTIFY (AHCI), NVMe Identify Controller, virtio-blk's
+`VIRTIO_BLK_T_GET_ID`, the USB device's `iSerialNumber` string.
+
+The tests reach their disks through `blk_find_test(name)`
+(`kernel/include/kernel/blk.h`), which returns the disk only when
+`blk_is_test_disk` says so and otherwise logs `blk: NAME is not a test
+disk` and returns NULL: the test skips as it does when the disk is absent.
+`/dev/blkctl` lists such a disk with `COSMO_BLKCTL_TEST` (`cosmo-install
+--list` prints `test`), and the user-space tests ask for it the same way:
+init's (`test_disk` in `userland/init/init.c`) before they mount, fsck or
+write `vda`, and `/etc/rc.test` before it mounts `nvme0n1`.
+
+A name is only where a disk landed. The installed-system boots of
+`test-install`'s family attach the installed disk alone
+(`QEMU_DISKS=boot`), so on `virt` it is `vda`; before this rule a debug
+build's self-tests formatted it there and wrote over its partition table
+(2026-11-03). On real hardware or another hypervisor a debug kernel would
+have done the same to `vda`, `sda` or `nvme0n1`, whoever's they were.
 
 ## Self-tests (`kernel/device/devtest.c`)
 

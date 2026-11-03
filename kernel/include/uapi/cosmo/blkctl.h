@@ -70,6 +70,7 @@ struct cosmo_blkctl_keyed {
 #define COSMO_BLKCTL_RDONLY   (1u << 1)
 #define COSMO_BLKCTL_BOOT     (1u << 2)   /* the partition the loader was read from */
 #define COSMO_BLKCTL_MOUNTED  (1u << 3)   /* it, its disk or one of its partitions is mounted */
+#define COSMO_BLKCTL_TEST     (1u << 4)   /* a disk made for the self-tests: its serial begins "cosmo-test-" */
 
 struct cosmo_blkctl_dev {
     char name[COSMO_BLKCTL_NAME];

@@ -2,7 +2,7 @@
 
 ## The QEMU configuration
 
-`scripts/qemu-run.sh` attaches `-device nvme,drive=nvme0,serial=cosmo-nvme0`
+`scripts/qemu-run.sh` attaches `-device nvme,drive=nvme0,serial=cosmo-test-nvme0`
 over a raw 8 MiB file (`QEMU_NVMEDISK`, a fresh
 `boot-test.log.nvme.img` per harness run) on both `q35` and `virt`. The
 controller reports 256 namespace slots, one active, `MQES` 2047, MSI-X

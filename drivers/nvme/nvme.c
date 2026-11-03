@@ -803,6 +803,7 @@ static int add_namespace(struct nvme_ctrl *c, uint32_t nsid, uint8_t *id, dma_ad
     ns->nsid = nsid;
     ns->lba_shift = lbads;
     ns->bd.dev = &c->pdev->dev;
+    strlcpy(ns->bd.serial, c->serial, sizeof(ns->bd.serial));   /* the controller's: a namespace has none of its own */
     ns->bd.ops = &nvme_ops;
     ns->bd.sector_size = 1u << lbads;
     ns->bd.capacity = nsze;

@@ -294,7 +294,7 @@ bool selftest_dma(const char **reason)
 
     /* Every mapping a driver takes for a request is undone at completion:
      * a burst of I/O on the real disk leaves maps - unmaps where it was. */
-    struct blkdev *bd = blk_find("vda");
+    struct blkdev *bd = blk_find_test("vda");
     if (bd) {
         uint8_t *buf = kmalloc(8192, 0);
         CHECK(buf != NULL);
@@ -376,7 +376,7 @@ bool selftest_random_seed(const char **reason)
 
 bool selftest_blk(const char **reason)
 {
-    struct blkdev *bd = blk_find("vda");
+    struct blkdev *bd = blk_find_test("vda");
     if (bd == NULL) {
         kinfo("selftest: blk: no vda; skipping");
         return true;
@@ -473,7 +473,7 @@ bool selftest_nvme_admin_poll(const char **reason)
     kinfo("selftest: nvme-admin-poll: fault injection compiled out of this build; skipping");
     return true;
 #else
-    struct blkdev *bd = blk_find("nvme0n1");
+    struct blkdev *bd = blk_find_test("nvme0n1");
     if (bd == NULL) {
         kinfo("selftest: nvme-admin-poll: no nvme0n1; skipping");
         return true;
@@ -588,7 +588,7 @@ static bool nvme_run_workers(struct blkdev *bd, unsigned ncpu, unsigned *started
 bool selftest_nvme_worker_cleanup(const char **reason)
 {
 #if CONFIG_SELFTEST && CONFIG_FAULTINJECT
-    struct blkdev *bd = blk_find("nvme0n1");
+    struct blkdev *bd = blk_find_test("nvme0n1");
     if (!bd) {
         kinfo("selftest: nvme-worker-cleanup: no nvme0n1; skipping");
         return true;
@@ -621,7 +621,7 @@ bool selftest_nvme_worker_cleanup(const char **reason)
 
 bool selftest_nvme(const char **reason)
 {
-    struct blkdev *bd = blk_find("nvme0n1");
+    struct blkdev *bd = blk_find_test("nvme0n1");
     if (bd == NULL) {
         kinfo("selftest: nvme: no nvme0n1; skipping");
         return true;
@@ -1426,7 +1426,7 @@ static struct blkdev *rm_find(void)
 {
     static const char *const names[] = { "vdb", "vdc", "vdd", "vde" };
     for (unsigned k = 0; k < ARRAY_SIZE(names); k++) {
-        struct blkdev *bd = blk_find(names[k]);
+        struct blkdev *bd = blk_find_test(names[k]);
         if (bd == NULL)
             continue;
         if (bd->capacity == RM_CAPACITY && !bd->read_only && bd->sector_size == 512)
@@ -2091,7 +2091,7 @@ bool selftest_blk_irq_budget(const char **reason)
         kinfo("selftest: blk-irq-budget: virtio_blk published no test seams; skipping");
         return true;
     }
-    struct blkdev *bd = blk_find("vda");
+    struct blkdev *bd = blk_find_test("vda");
     if (bd == NULL) {
         kinfo("selftest: blk-irq-budget: no vda; skipping");
         return true;
@@ -2547,7 +2547,7 @@ bool selftest_usb_enum(const char **reason)
  */
 bool selftest_usb_storage(const char **reason)
 {
-    struct blkdev *bd = blk_find("sda");
+    struct blkdev *bd = blk_find_test("sda");
     if (bd == NULL) {
         kinfo("selftest: usb-storage: no sda; skipping");
         return true;
@@ -2754,7 +2754,7 @@ static bool disk_timeout_common(const char *name, enum fi_kind kind, const char 
     kinfo("selftest: %s: no fault injection in this build; skipping", tag);
     return true;
 #else
-    struct blkdev *bd = blk_find(name);
+    struct blkdev *bd = blk_find_test(name);
     if (bd == NULL) {
         kinfo("selftest: %s: no %s; skipping", tag, name);
         return true;
@@ -2880,7 +2880,7 @@ bool selftest_usb_unplug(const char **reason)
     }
     bool ok = true;
 #define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-unplug: step failed at line %d", __LINE__); ok = false; } } while (0)
-    struct blkdev *bd = blk_find("sda");
+    struct blkdev *bd = blk_find_test("sda");
     STEP(bd != NULL);
     uint64_t released0 = hcd->released, enumerated0 = hcd->enumerated;
     struct bus_type *bus = bus_find("usb");
@@ -2921,7 +2921,7 @@ bool selftest_usb_unplug(const char **reason)
         thread_sleep_ms(1);
     STEP(mk.done);   /* without injection the bio may have finished first; it must have finished */
 #endif
-    struct blkdev *gone = blk_find("sda");
+    struct blkdev *gone = blk_find_test("sda");
     STEP(gone == NULL);
     if (gone)
         blkdev_put(gone);
@@ -2936,7 +2936,7 @@ bool selftest_usb_unplug(const char **reason)
     STEP(hcd->ops->debug_port(hcd, port, true) == 0);
     STEP(hcd->enumerated == enumerated0 + 1);
     STEP(device_count(bus) == devices0);
-    struct blkdev *again = blk_find("sda");
+    struct blkdev *again = blk_find_test("sda");
     STEP(again != NULL);
     if (again != NULL) {
         STEP(buf && blk_read(again, 0, 8, buf) == 0);
@@ -3137,7 +3137,7 @@ bool selftest_blk_bench(const char **reason)
     for (unsigned i = 0; i < 65536; i++)
         buf[i] = (uint8_t)(i * 13 + 1);
     for (unsigned k = 0; k < ARRAY_SIZE(names); k++) {
-        struct blkdev *bd = blk_find(names[k]);
+        struct blkdev *bd = blk_find_test(names[k]);
         if (bd == NULL)
             continue;
         bool writes = k <= 1;   /* the USB and SATA disks only: the others carry filesystems later tests use */
@@ -3164,7 +3164,7 @@ bool selftest_blk_bench(const char **reason)
  */
 bool selftest_ahci_identify(const char **reason)
 {
-    struct blkdev *bd = blk_find("ahci0p1");
+    struct blkdev *bd = blk_find_test("ahci0p1");
     if (bd == NULL) {
         kinfo("selftest: ahci-identify: no ahci0p1; skipping");
         return true;
@@ -3192,7 +3192,7 @@ bool selftest_ahci_identify(const char **reason)
 /* The disk through the block layer, as usb-storage checks its disk. */
 bool selftest_ahci_io(const char **reason)
 {
-    struct blkdev *bd = blk_find("ahci0p1");
+    struct blkdev *bd = blk_find_test("ahci0p1");
     if (bd == NULL) {
         kinfo("selftest: ahci-io: no ahci0p1; skipping");
         return true;
@@ -3288,7 +3288,7 @@ bool selftest_ahci_io(const char **reason)
  */
 bool selftest_ahci_unplug(const char **reason)
 {
-    struct blkdev *bd = blk_find("ahci0p1");
+    struct blkdev *bd = blk_find_test("ahci0p1");
     if (bd == NULL) {
         kinfo("selftest: ahci-unplug: no ahci0p1; skipping");
         return true;
@@ -3329,7 +3329,7 @@ bool selftest_ahci_unplug(const char **reason)
         thread_sleep_ms(1);
     STEP(mk.done);
 #endif
-    struct blkdev *gone = blk_find("ahci0p1");
+    struct blkdev *gone = blk_find_test("ahci0p1");
     STEP(gone == NULL);
     if (gone)
         blkdev_put(gone);
@@ -3339,7 +3339,7 @@ bool selftest_ahci_unplug(const char **reason)
     /* The disk is still physically there: probe the port through the old
      * object -- it only names the port -- and a new blkdev appears. */
     STEP(bd->ops->debug_presence(bd, true) == 0);
-    struct blkdev *again = blk_find("ahci0p1");
+    struct blkdev *again = blk_find_test("ahci0p1");
     STEP(again != NULL && again != bd);
     STEP(blk_count() == count0);
     if (again) {
@@ -3368,7 +3368,7 @@ bool selftest_ahci_unplug(const char **reason)
  */
 bool selftest_ahci_reset(const char **reason)
 {
-    struct blkdev *bd = blk_find("ahci0p1");
+    struct blkdev *bd = blk_find_test("ahci0p1");
     if (bd == NULL) {
         kinfo("selftest: ahci-reset: no ahci0p1; skipping");
         return true;
@@ -3409,7 +3409,7 @@ bool selftest_ahci_reset(const char **reason)
         thread_sleep_ms(1);
     STEP(mk.done);
 #endif
-    struct blkdev *same = blk_find("ahci0p1");
+    struct blkdev *same = blk_find_test("ahci0p1");
     STEP(same == bd);
     if (same)
         blkdev_put(same);
@@ -3577,7 +3577,7 @@ bool selftest_ahci_stop_ack(const char **reason)
 bool selftest_ahci_comreset_ack(const char **reason)
 {
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT
-    struct blkdev *bd = blk_find("ahci0p1");
+    struct blkdev *bd = blk_find_test("ahci0p1");
     if (bd == NULL) {
         kinfo("selftest: ahci-comreset-ack: no ahci0p1; skipping");
         return true;
@@ -3713,7 +3713,7 @@ bool selftest_ahci_comreset_ack(const char **reason)
 bool selftest_ahci_error_reset(const char **reason)
 {
 #if CONFIG_DEBUG && CONFIG_FAULTINJECT
-    struct blkdev *bd = blk_find("ahci0p1");
+    struct blkdev *bd = blk_find_test("ahci0p1");
     if (bd == NULL) {
         kinfo("selftest: ahci-error-reset: no ahci0p1; skipping");
         return true;

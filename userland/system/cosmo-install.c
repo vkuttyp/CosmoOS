@@ -514,10 +514,11 @@ static void print_list(void)
         char uuid[GPT_GUID_TEXT] = "";
         if (d->flags & COSMO_BLKCTL_PART)
             gpt_guid_format(d->uuid, uuid);
-        printf("%-12s %-10s %12llu %6u  %s%s%s%s%s\n", d->name, d->disk[0] ? d->disk : "-",
+        printf("%-12s %-10s %12llu %6u  %s%s%s%s%s%s\n", d->name, d->disk[0] ? d->disk : "-",
                (unsigned long long)d->sectors, d->sector_size,
                (d->flags & COSMO_BLKCTL_RDONLY) ? "ro " : "", (d->flags & COSMO_BLKCTL_BOOT) ? "boot " : "",
-               (d->flags & COSMO_BLKCTL_MOUNTED) ? "mounted " : "", uuid[0] ? "partuuid=" : "", uuid);
+               (d->flags & COSMO_BLKCTL_MOUNTED) ? "mounted " : "", (d->flags & COSMO_BLKCTL_TEST) ? "test " : "",
+               uuid[0] ? "partuuid=" : "", uuid);
     }
 }
 

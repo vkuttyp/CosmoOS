@@ -51,6 +51,13 @@ no_reboot="-no-reboot"
 [ "${QEMU_REBOOT:-0}" = "1" ] && no_reboot=""
 firmware=$("$here/find-firmware.sh" "$arch")
 
+# Every disk made here for the self-tests carries a serial beginning
+# "cosmo-test-" (virtio-blk's GET_ID, ATA IDENTIFY, NVMe Identify, the USB
+# serial string): it is the only thing that lets a self-test write to a
+# disk. A disk without one -- the boot image, an installed system's disk,
+# real hardware's -- is never touched, whatever name it gets
+# (docs/kernel/device/testing.md, "Test disks").
+#
 # Phase 6 devices: a scratch virtio-blk disk (8 MiB, created next to the
 # image unless QEMU_TESTDISK names one), a virtio-rng, and a virtio
 # console whose output lands in QEMU_VCON (default: vcon.log next to
@@ -67,7 +74,7 @@ fi
 testdisk=${QEMU_TESTDISK:-$outdir/testdisk.img}
 test_devs=""
 if [ "$testdisk" != 0 ]; then
-    test_devs="-drive if=none,id=testdisk,format=raw,file=$testdisk -device virtio-blk-pci,drive=testdisk"
+    test_devs="-drive if=none,id=testdisk,format=raw,file=$testdisk -device virtio-blk-pci,drive=testdisk,serial=cosmo-test-vda"
 fi
 if [ "$testdisk" != 0 ] && [ ! -f "$testdisk" ]; then
     dd if=/dev/zero of="$testdisk" bs=1048576 count=8 status=none 2>/dev/null \
@@ -96,7 +103,7 @@ if [ "$nvmedisk" != 0 ]; then
         dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 status=none 2>/dev/null \
             || dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 2>/dev/null
     fi
-    nvme_devs="-drive if=none,id=nvme0,format=raw,file=$nvmedisk -device nvme,drive=nvme0,serial=cosmo-nvme0${QEMU_NVME_OPTS:-}"
+    nvme_devs="-drive if=none,id=nvme0,format=raw,file=$nvmedisk -device nvme,drive=nvme0,serial=cosmo-test-nvme0${QEMU_NVME_OPTS:-}"
 fi
 
 # Phase 8: QEMU user-mode networking on a virtio-net NIC. The harness
@@ -162,7 +169,7 @@ if [ "$usb" != "0" ]; then
     nec) xhci_model=nec-usb-xhci ;;
     *)   xhci_model=qemu-xhci ;;
     esac
-    usb_devs="-device $xhci_model,id=xhci0 -drive if=none,id=usbdisk,format=raw,file=$usbdisk -device usb-storage,bus=xhci0.0,drive=usbdisk"
+    usb_devs="-device $xhci_model,id=xhci0 -drive if=none,id=usbdisk,format=raw,file=$usbdisk -device usb-storage,bus=xhci0.0,drive=usbdisk,serial=cosmo-test-usb"
     # The keyboard (docs/drivers/usb/api.md, "The keyboard"): QEMU_KBD is
     # root (default: a usb-kbd on a root port), hub (the same keyboard
     # behind a usb-hub, which is where the route string is exercised), or
@@ -203,8 +210,8 @@ if [ "$sata" != "0" ]; then
     *)  sata_model=ide-hd ;;
     esac
     sata_drive="-drive if=none,id=sata0,format=raw,file=$satadisk"
-    sata_dev_x86="-device $sata_model,drive=sata0,bus=ide.1"
-    sata_dev_a64="-device ahci,id=ahci0 -device $sata_model,drive=sata0,bus=ahci0.1"
+    sata_dev_x86="-device $sata_model,drive=sata0,bus=ide.1,serial=cosmo-test-sata"
+    sata_dev_a64="-device ahci,id=ahci0 -device $sata_model,drive=sata0,bus=ahci0.1,serial=cosmo-test-sata"
 fi
 # The removal disk (docs/audit/next-subsystem-virtio-remove-inflight.md):
 # a second virtio-blk that exists to be removed with I/O outstanding by
@@ -222,7 +229,7 @@ if [ "$rmdisk" != "0" ]; then
         dd if=/dev/zero of="$rmdisk" bs=1048576 count=4 status=none 2>/dev/null \
             || dd if=/dev/zero of="$rmdisk" bs=1048576 count=4 2>/dev/null
     fi
-    rm_devs="-drive if=none,id=rmdisk,format=raw,file=$rmdisk -device virtio-blk-pci,drive=rmdisk"
+    rm_devs="-drive if=none,id=rmdisk,format=raw,file=$rmdisk -device virtio-blk-pci,drive=rmdisk,serial=cosmo-test-rm"
 fi
 # The display (docs/kernel/diagnostics/design.md, "The framebuffer
 # console"): whatever device the firmware lights and hands the loader as

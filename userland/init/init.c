@@ -14,6 +14,7 @@
 #include <cosmo/procinfo.h>
 #include <cosmo/syscall.h>
 #include <cosmo/thread.h>
+#include <uapi/cosmo/blkctl.h>
 #include <uapi/cosmo/fsctl.h>
 #include <cosmo/sysctl.h>
 #include <dirent.h>
@@ -50,6 +51,43 @@ static void check(int cond, const char *what)
 }
 
 #define CHECK(c) check((c), #c)
+
+/*
+ * Whether `name` is a disk made for these tests: /dev/blkctl lists it with
+ * COSMO_BLKCTL_TEST, its serial being one scripts/qemu-run.sh gives. The
+ * tests that format, write or check "vda" ask first. A name is only where
+ * a disk landed: with the installed system's disk alone attached, "vda" is
+ * that disk, and on real hardware it may be anyone's
+ * (docs/kernel/device/testing.md, "Test disks").
+ */
+static bool test_disk(const char *name)
+{
+    int fd = open("/dev/blkctl", O_RDWR);
+    if (fd < 0)
+        return false;
+    struct cosmo_blkctl cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_BLKCTL_VERSION;
+    cmd.op = COSMO_BLKCTL_LIST;
+    static char res[sizeof(struct cosmo_blkctl_list) + 128 * sizeof(struct cosmo_blkctl_dev)];
+    bool found = false;
+    long n = write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd) ? read(fd, res, sizeof(res)) : -1;
+    if (n >= (long)sizeof(struct cosmo_blkctl_list)) {
+        struct cosmo_blkctl_list hdr;
+        memcpy(&hdr, res, sizeof(hdr));
+        for (uint32_t i = 0; i < hdr.count && sizeof(hdr) + (i + 1) * sizeof(struct cosmo_blkctl_dev) <= (size_t)n;
+             i++) {
+            struct cosmo_blkctl_dev d;
+            memcpy(&d, res + sizeof(hdr) + i * sizeof(d), sizeof(d));
+            if (strcmp(d.name, name) == 0)
+                found = (d.flags & COSMO_BLKCTL_TEST) != 0;
+        }
+    }
+    close(fd);
+    if (!found)
+        printf("usertest: %s is not a test disk; the tests that write to it are skipped\n", name);
+    return found;
+}
 
 /* Phase 7: the filesystem calls on ramfs, then the scratch disk. */
 static void fs_selftest(void)
@@ -281,7 +319,8 @@ static void fs_selftest(void)
         CHECK(unlink("/tmp/stdio.txt") == 0);
     }
 
-    long m = cosmo_mount("vda", "/mnt", "cosmofs", 0);
+    bool vda_test = test_disk("vda");
+    long m = vda_test ? cosmo_mount("vda", "/mnt", "cosmofs", 0) : -1;
     if (m == 0) {
         h = cosmo_open("/mnt/hello.txt", COSMO_O_RDONLY, 0);
         CHECK(h >= 3);
@@ -321,7 +360,7 @@ static void fs_selftest(void)
         CHECK(cosmo_umount("/mnt") == 0);
         CHECK(cosmo_stat("/mnt/hello.txt", &st) == -COSMO_ENOENT);
         puts("usertest: cosmofs mounted and read from user mode");
-    } else {
+    } else if (vda_test) {
         CHECK(m == -COSMO_ENODEV || m == -COSMO_EIO);
         puts("usertest: no cosmofs to mount");
     }
@@ -4354,7 +4393,7 @@ static void fsctl_selftest(void)
      * test disk here: a check that only ever ran against filesystems
      * with no passes would prove the refusal and nothing else.
      */
-    if (checkable == 0 && cosmo_mount("vda", "/mnt", "cosmofs", 0) == 0) {
+    if (checkable == 0 && test_disk("vda") && cosmo_mount("vda", "/mnt", "cosmofs", 0) == 0) {
         memset(&cmd, 0, sizeof(cmd));
         cmd.version = COSMO_FSCTL_VERSION;
         cmd.op = COSMO_FSCTL_LIST;
@@ -5079,7 +5118,7 @@ static void mmap_selftest(void)
     CHECK(cosmo_unlink("/tmp/mm-short") == 0 && cosmo_unlink("/tmp/mm-trunc") == 0);
 
     /* msync writes, and the re-dirtying fault, on cosmofs. */
-    if (cosmo_mount("vda", "/mnt", "cosmofs", 0) == 0) {
+    if (test_disk("vda") && cosmo_mount("vda", "/mnt", "cosmofs", 0) == 0) {
         int cfd = (int)cosmo_open("/mnt/mm-sync", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
         CHECK(cfd >= 0);
         CHECK(cosmo_write(cfd, pat, 2 * P) == (long)(2 * P));

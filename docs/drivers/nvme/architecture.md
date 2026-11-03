@@ -22,7 +22,7 @@ commands §5, NVM command set §6, queues §7.6).
 
 The driver is a boot module (`modules/nvme.ko`, after the virtio
 modules); everything it uses is an exported symbol. QEMU attaches one
-controller (`-device nvme,serial=cosmo-nvme0`) with one 8 MiB namespace
+controller (`-device nvme,serial=cosmo-test-nvme0`) with one 8 MiB namespace
 on both machines.
 
 ## Purpose

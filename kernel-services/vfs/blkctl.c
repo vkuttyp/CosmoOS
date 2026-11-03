@@ -81,6 +81,8 @@ static void fill_dev(struct cosmo_blkctl_dev *d, struct blkdev *bd, const uint8_
         d->flags |= COSMO_BLKCTL_RDONLY;
     if (vfs_bdev_mounted(bd))
         d->flags |= COSMO_BLKCTL_MOUNTED;
+    if (blk_is_test_disk(bd))
+        d->flags |= COSMO_BLKCTL_TEST;
     struct blk_part_info pi;
     if (blk_part_info(bd, &pi)) {
         d->flags |= COSMO_BLKCTL_PART;

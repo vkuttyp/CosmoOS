@@ -589,6 +589,7 @@ static int disk_attach(struct ahci_port *p)
         return rc;
     }
     d->bd.dev = &p->hba->pdev->dev;   /* the controller does the DMA; a port has no identity of its own */
+    strlcpy(d->bd.serial, d->serial, sizeof(d->bd.serial));
     d->bd.ops = &ahci_blk_ops;
     d->bd.sector_size = sector;
     d->bd.capacity = capacity;

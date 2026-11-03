@@ -11,6 +11,7 @@
  */
 
 #include <kernel/blk.h>
+#include <kernel/completion.h>
 #include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
@@ -35,6 +36,10 @@
 #define VIRTIO_BLK_T_IN    0u
 #define VIRTIO_BLK_T_OUT   1u
 #define VIRTIO_BLK_T_FLUSH 4u
+#define VIRTIO_BLK_T_GET_ID 8u
+
+#define VBLK_ID_BYTES      20u                        /* GET_ID's answer: NUL-padded, unterminated at 20 */
+#define VBLK_ID_TIMEOUT_NS (2000ull * 1000 * 1000)
 
 #define VIRTIO_BLK_S_OK     0u
 #define VIRTIO_BLK_S_IOERR  1u
@@ -79,6 +84,7 @@ struct vblk {
     spinlock_t lock;
     bool flush;
     bool dead;                  /* a request timed out: the device was reset and every request fails */
+    struct completion id_done;  /* the probe's GET_ID completed; its address is that request's cookie */
     /* Completions popped per vblk_done call: the most in one call, and how
      * many calls popped more than the ring holds -- a call that outlives
      * the ring is being refilled while it runs (docs/testing/flakes.md,
@@ -302,6 +308,10 @@ static unsigned vblk_done(struct virtqueue *vq, unsigned budget)
 #endif
         if ((bio = virtq_pop(vq, &len)) == NULL)
             break;
+        if ((void *)bio == (void *)&vb->id_done) {   /* the probe's GET_ID, not a bio */
+            complete(&vb->id_done);
+            continue;
+        }
         /* Ownership is decided under the lock, by pointer, before the bio
          * is touched: the timeout path may have completed it already (and
          * a synchronous caller freed its stack frame), so neither its
@@ -366,6 +376,52 @@ static const struct blkdev_ops vblk_ops = {
     .timeout = vblk_timeout,
 };
 
+/*
+ * The device's serial (VIRTIO_BLK_T_GET_ID, VirtIO 1.1 5.2.6) into
+ * vb->bd.serial, before blk_register: slot 0's header and status are
+ * free then. A device that answers anything but OK has none ("").
+ * One that does not answer is broken: its buffers may still be the
+ * device's, so they are kept, and every request fails, as after a
+ * timeout.
+ */
+static void vblk_read_serial(struct vblk *vb)
+{
+    dma_addr_t id_dma;
+    char *id = dma_alloc(&vb->vdev->dev, VBLK_ID_BYTES, &id_dma, DMA_ZERO);
+    if (id == NULL)
+        return;
+    struct vblk_slot *sl = &vb->slots[0];
+    sl->hdr.type = VIRTIO_BLK_T_GET_ID;
+    sl->hdr.reserved = 0;
+    sl->hdr.sector = 0;
+    sl->status = 0xff;
+    struct virtq_sg sg[3] = {
+        { .addr = vb->slots_dma, .len = sizeof(sl->hdr) },
+        { .addr = id_dma, .len = VBLK_ID_BYTES },
+        { .addr = vb->slots_dma + offsetof(struct vblk_slot, status), .len = 1 },
+    };
+    completion_init(&vb->id_done, "vblk-id");
+    if (virtq_add(vb->vq, sg, 1, 2, &vb->id_done) != 0) {
+        dma_free(&vb->vdev->dev, VBLK_ID_BYTES, id, id_dma);
+        return;
+    }
+    virtq_kick(vb->vq);
+    if (!wait_for_completion_timeout(&vb->id_done, VBLK_ID_TIMEOUT_NS)) {
+        __atomic_store_n(&vb->dead, true, __ATOMIC_RELEASE);
+        kerror("virtio-blk: %s: no answer to GET_ID in 2 s; every request fails", vb->vdev->dev.name);
+        return;
+    }
+    if (sl->status == VIRTIO_BLK_S_OK) {
+        unsigned n = 0;
+        while (n < VBLK_ID_BYTES && n < sizeof(vb->bd.serial) - 1 && id[n] >= 0x20 && id[n] < 0x7f) {
+            vb->bd.serial[n] = id[n];
+            n++;
+        }
+        vb->bd.serial[n] = '\0';
+    }
+    dma_free(&vb->vdev->dev, VBLK_ID_BYTES, id, id_dma);
+}
+
 static int vblk_probe(struct virtio_device *vdev)
 {
     struct vblk *vb = kzalloc(sizeof(*vb));
@@ -413,6 +469,7 @@ static int vblk_probe(struct virtio_device *vdev)
     }
 
     virtio_device_ready(vdev);
+    vblk_read_serial(vb);
 
     vb->bd.dev = &vdev->dev;
     vb->bd.ops = &vblk_ops;
@@ -425,8 +482,8 @@ static int vblk_probe(struct virtio_device *vdev)
     rc = blk_register(&vb->bd, "vd");
     if (rc)
         goto fail_vq;
-    kinfo("virtio-blk: %s is %s%s, %u segments", vdev->dev.name, vb->bd.name, vb->flush ? " (flush)" : "",
-          vb->seg_max);
+    kinfo("virtio-blk: %s is %s%s, %u segments%s%s", vdev->dev.name, vb->bd.name, vb->flush ? " (flush)" : "",
+          vb->seg_max, vb->bd.serial[0] ? ", serial " : "", vb->bd.serial);
     return 0;
 
 fail_vq:

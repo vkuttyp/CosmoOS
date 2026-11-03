@@ -36,7 +36,7 @@
 
 static struct blkdev *scratch(void)
 {
-    return blk_find("vda");
+    return blk_find_test("vda");
 }
 
 bool selftest_pool(const char **reason)

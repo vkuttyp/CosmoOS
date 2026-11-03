@@ -101,11 +101,23 @@ struct blkdev_ops {
 };
 
 #define BLKDEV_NAME_MAX 16
+/* A disk's serial number as its hardware reports it: ATA IDENTIFY's and
+ * NVMe Identify Controller's 20 characters, virtio-blk's GET_ID string,
+ * a USB device's iSerialNumber; at most 20 characters, NUL-terminated,
+ * "" when the device gives none (partitions, RAM disks). */
+#define BLKDEV_SERIAL_MAX 21
+/* The serials scripts/qemu-run.sh gives the disks the self-tests may
+ * write to. Nothing else marks a disk as theirs: a name ("vda", "sda")
+ * is only where it landed, and on a machine with other disks -- the
+ * installed system's, real hardware's -- it names one of those
+ * (docs/kernel/device/testing.md, "Test disks"). */
+#define BLK_TEST_SERIAL_PREFIX "cosmo-test-"
 
 struct blkdev {
     struct kobject obj;
     char name[BLKDEV_NAME_MAX];
     struct device *dev;              /* the hardware behind it, may be NULL */
+    char serial[BLKDEV_SERIAL_MAX];  /* set by the driver before blk_register; "" for none */
     const struct blkdev_ops *ops;
     uint32_t sector_size;            /* power of two, >= 512 */
     uint64_t capacity;               /* sectors */
@@ -241,6 +253,13 @@ int blk_flush(struct blkdev *bd);
 struct blkdev *blk_find(const char *name);
 static inline void blkdev_get(struct blkdev *bd) { kobject_get(&bd->obj); }
 static inline void blkdev_put(struct blkdev *bd) { kobject_put(&bd->obj); }
+/* A disk made for the self-tests: its serial begins with
+ * BLK_TEST_SERIAL_PREFIX. Never a partition. */
+bool blk_is_test_disk(const struct blkdev *bd);
+/* blk_find for a self-test that writes: the disk named `name` when it is
+ * a test disk, referenced; NULL when there is no such disk, and NULL with
+ * a line in the log when there is one that is not a test disk. Sleeps. */
+struct blkdev *blk_find_test(const char *name);
 /* The i'th registered device, referenced, or NULL past the end; for
  * enumeration that tolerates a changing registry (pool assembly). */
 struct blkdev *blk_nth(unsigned i);

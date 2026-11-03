@@ -174,7 +174,7 @@ pointer; the controller may still own them.
 
 ## QEMU
 
-`scripts/qemu-run.sh` adds `-device nvme,drive=nvme0,serial=cosmo-nvme0`
+`scripts/qemu-run.sh` adds `-device nvme,drive=nvme0,serial=cosmo-test-nvme0`
 over a fresh 8 MiB raw file on both machines (q35 and virt), with
 `QEMU_NVME_OPTS` appended: `make test-smp2` sets `,msix_qsize=1`, one
 MSI-X vector, so every NVMe self-test also runs in one-vector mode on

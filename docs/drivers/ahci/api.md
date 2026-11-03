@@ -36,7 +36,7 @@ detached and the port probed anew).
 
 ```text
 [ INFO] ahci0: pci:00:1f.2: AHCI 1.0, 6 port(s) implemented of 6, 32 slots, 64-bit DMA, NCQ capable
-[ INFO] ahci0: port 1: QEMU HARDDISK (QM00003) is ahci0p1: 16384 sectors of 512 bytes, LBA48, write cache, NCQ yes depth 32
+[ INFO] ahci0: port 1: QEMU HARDDISK (cosmo-test-sata) is ahci0p1: 16384 sectors of 512 bytes, LBA48, write cache, NCQ yes depth 32
 [ INFO] blk: ahci0p1: 16384 sectors of 512 bytes (8 MiB)
 [ INFO] ahci0: port 1: an ATAPI device (signature 0xeb140101) is not driven
 [ INFO] ahci0: no disk on any port

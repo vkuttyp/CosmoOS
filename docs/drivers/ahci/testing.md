@@ -6,7 +6,7 @@ With `QEMU_SATA=disk` (the default) the boot test requires the module to
 load, the controller to come up (`ahci0: pci:00:1f.2: AHCI 1.0, 6
 port(s) implemented of 6, 32 slots, 64-bit DMA, NCQ capable`), and the
 test disk on port 1 to be identified and registered (`ahci0: port 1:
-QEMU HARDDISK (QM00003) is ahci0p1: 16384 sectors of 512 bytes …`,
+QEMU HARDDISK (cosmo-test-sata) is ahci0p1: 16384 sectors of 512 bytes …`,
 `blk: ahci0p1: …`). On `q35` it also requires port 0, because the boot
 image is a SATA disk on the ICH9's first port: the driver drives the
 medium the machine booted from, as `ahci0p0` (64 MiB), and the IOMMU
