@@ -781,6 +781,27 @@ unreachable from the host or a second thread's. `IPV4_BENCH=1`, the
 median of five runs' medians: an echo answered 1.01x the C and a
 512-byte datagram sent 1.02x on arm64; 1.01x and 1.00x on x86-64
 (Rosetta).
+UDP (2026-11-03): `kernel-services/network/udp.cee` -- binding with
+ephemeral ports, connecting, sending over IPv4 and IPv6, the receive
+path (exact address over wildcard, connected sockets only from their
+peer, quiet datagrams only for a connected socket), port-unreachables,
+ICMP errors for a connected flow, NAT's port question and the
+/proc/net listing. The pcbs stay C objects each socket embeds, on this
+file's list under its spin lock as before; a `struct netaddr` is read
+and written by its fields, one built here a local of five words. netparse
+gains `netparse_udp_flow`, its UDP fields as one word. The C step fixed
+a bug: a port-unreachable quoted the UDP header from the bytes in front
+of the data, which are stale heap when `m_prepend` has to allocate; the
+header is now kept and written into the quote. `tests/host/test_udp.c`:
+20,000 rounds over eight sockets of both families -- binds, connects,
+sends, datagrams in of every length, checksum and destination, queues
+overflowing, sockets being released -- every mbuf freed and every wake
+reference given back: digest `0x653e074bd035e785`, the C's (macOS clang,
+Linux clang and gcc); 98.2% of the C's lines and 95.7% of its branches,
+all but the ephemeral range exhausted (16,383 bound sockets).
+`UDP_BENCH=1`, the median of five interleaved runs: a 512-byte datagram
+received and read 1.01x the C and one sent 1.01x on arm64; 0.99x and
+1.00x on x86-64 (Rosetta).
 
 Size: about 3.0x.
 

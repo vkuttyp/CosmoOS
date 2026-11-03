@@ -622,6 +622,19 @@ unsafe fn udpC(hdr: *u8, pktLen: u32, out: *mut netparse_udp) -> bool {
     return true;
 }
 
+/// netparse_udp's fields as one word, for a caller that holds no `netparse_udp` (udp.cee): len in bits 0-15, sport in
+/// 16-31, dport in 32-47, has_cksum in bit 48, and bit 63 set when the header is accepted (the word is 0 otherwise).
+/// Safety: as netparse_udp.
+@export("netparse_udp_flow")
+unsafe fn udpFlowC(hdr: *u8, pktLen: u32) -> u64 {
+    var u = netparse_udp { len: 0, sport: 0, dport: 0, has_cksum: false };
+    if (!udpC(hdr, pktLen, borrow mut u as *mut netparse_udp)) {
+        return 0;
+    }
+    let cksum: u64 = if (u.has_cksum) 0x1000000000000 else 0;
+    return (u.len as u64) | ((u.sport as u64) << 16) | ((u.dport as u64) << 32) | cksum | 0x8000000000000000;
+}
+
 /// Safety: `b` points to `avail` readable bytes, at least L4_MIN, and `out` to a writable struct.
 @export("netparse_l4")
 unsafe fn l4C(b: *u8, avail: u32, out: *mut netparse_l4) {

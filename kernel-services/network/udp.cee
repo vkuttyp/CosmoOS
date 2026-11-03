@@ -1,0 +1,640 @@
+// udp.cee - UDP (RFC 768) over IPv4 and IPv6 (kernel/include/kernel/net/udp.h), in CeeSafe: roadmap 2.0 SA6. Binding,
+// ephemeral ports, connecting, sending, and the receive path that queues a datagram on the best socket or answers with
+// a port-unreachable; ICMP errors for a connected flow; the listing /proc/net reads. tests/host/test_udp.c holds it to
+// the digest of the C it replaced.
+//
+// The protocol control blocks are C objects each socket embeds (socket.h), linked on this file's list under its spin
+// lock, as the C had them; nothing under the lock sleeps. A `struct netaddr` is read and written by its fields: the
+// family, the port, and the address as the 16 bytes of v6, which the union's v4 shares. One this file builds is a
+// local array of five words, its C size. The UDP header is bytes.
+
+@header("kernel/net/udp.h", "kernel/net/cksum.h", "kernel/netif.h", "kernel/random.h", "kernel/socket.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    /// inet.h: family and port in host order, then the address (v4 is the first word of v6's bytes).
+    struct netaddr {
+        family: u16;
+        port: u16;
+        v4: u32;
+        v6: in6_addr;
+    }
+    /// kernel/include/kernel/mbuf.h: the fields UDP reads and writes.
+    struct mbuf_pkt {
+        len: u32;
+        src: netaddr;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        flags: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbufq;
+    struct socket;
+    struct netif;
+    struct udp_pcb {
+        local: netaddr;
+        remote: netaddr;
+        rxq: mbufq;
+        sock: *mut socket;
+        link: list_node;
+        rx_dropped: u64;
+    }
+    /// ip.h's headers, packed: the fields UDP reads.
+    struct ipv4_hdr {
+        vhl: u8;
+        src: u32;
+        dst: u32;
+    }
+    struct ipv6_hdr {
+        src: in6_addr;
+        dst: in6_addr;
+    }
+    struct udp_stats {
+        rx: u64;
+        rx_bad_len: u64;
+        rx_bad_cksum: u64;
+        rx_no_port: u64;
+        rx_queue_full: u64;
+        tx: u64;
+        quiet_dropped: u64;
+    }
+    struct udp_sock_info {
+        local: netaddr;
+        remote: netaddr;
+        rxq: u32;
+        drops: u64;
+    }
+
+    fn random_u64() -> u64;
+    fn mbufq_init(q: *mut mbufq, maxlen: u32, name: *CChar);
+    fn mbufq_enqueue(q: *mut mbufq, m: *mut mbuf) -> bool;
+    fn mbufq_dequeue(q: *mut mbufq) -> *mut mbuf;
+    fn mbufq_drain(q: *mut mbufq);
+    fn mbufq_len(q: *mut mbufq) -> u32;
+    fn m_getcl() -> *mut mbuf;
+    fn m_append(m: *mut mbuf, src: *void, len: u32) -> i32;
+    fn m_freem(m: *mut mbuf);
+    fn m_pullup(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_prepend(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_adj(m: *mut mbuf, n: i32);
+    fn m_cksum_partial(m: *mbuf, off: u32, len: u32, sum: u32) -> u32;
+    fn cksum_fold(sum: u32) -> u16;
+    fn cksum_pseudo4(src: u32, dst: u32, proto: u8, len: u16) -> u32;
+    fn cksum_pseudo6(src: *in6_addr, dst: *in6_addr, proto: u8, len: u32) -> u32;
+    fn netparse_udp_flow(hdr: *u8, pktLen: u32) -> u64;
+    fn netaddr_equal(a: *netaddr, b: *netaddr) -> bool;
+    fn netaddr_addr_equal(a: *netaddr, b: *netaddr) -> bool;
+    fn netaddr_is_unspecified(a: *netaddr) -> bool;
+    fn netif_owns_ipv4(addr: u32) -> bool;
+    fn netif_owns_ipv6(a: *in6_addr) -> bool;
+    fn ipv4_source_for(dst: u32) -> u32;
+    fn ipv6_source_for(dst: *in6_addr, src: *mut in6_addr);
+    fn ipv4_output(m: *mut mbuf, src: u32, dst: u32, proto: u8, ttl: u8) -> i32;
+    fn ipv6_output(m: *mut mbuf, src: *in6_addr, dst: *in6_addr, proto: u8, hoplimit: u8) -> i32;
+    fn icmp_send_unreach(orig: *mut mbuf, iph: *ipv4_hdr, code: u8);
+    fn sock_wake_ref(s: *mut socket) -> *mut socket;
+    fn sock_wake_unref(s: *mut socket);
+    fn sock_wake(s: *mut socket);
+    fn sock_set_error(s: *mut socket, err: i32);
+}
+
+// ---- Constants (the C headers') ----
+
+/// uapi/cosmo/syscall.h's families.
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+/// ip.h.
+const IPPROTO_UDP: u8 = 17;
+const IP_DEFAULT_TTL: u8 = 64;
+const ICMP_UNREACH_PORT: u8 = 3;
+/// mbuf.h's flags.
+const M_BCAST: u32 = 4;
+const M_CSUM_OK: u32 = 16;
+const M_FW_QUIET: u32 = 32;
+/// udp.h.
+const UDP_HLEN: u32 = 8;
+const UDP_RXQ_MAX: u32 = 64;
+const EPHEMERAL_LO: u32 = 49152;
+const EPHEMERAL_HI: u32 = 65535;
+/// kernel/errno.h.
+const ENOMEM: i32 = 12;
+const EINVAL: i32 = 22;
+const EMSGSIZE: i32 = 90;
+const EAFNOSUPPORT: i32 = 97;
+const EADDRINUSE: i32 = 98;
+const EADDRNOTAVAIL: i32 = 99;
+const ENETUNREACH: i32 = 101;
+/// netparse_udp_flow's word: the header was accepted, and it has a checksum.
+const FLOW_OK: u64 = 0x8000000000000000;
+const FLOW_CKSUM: u64 = 0x1000000000000;
+
+// ---- The state ----
+
+/// The bound pcbs, under PCBS_LOCK, which every writer of a listed pcb's addresses holds too (udp.h).
+static mut PCBS: list_node = list_node {
+    next: borrow mut PCBS as *mut list_node,
+    prev: borrow mut PCBS as *mut list_node,
+};
+static mut PCBS_LOCK: spinlock_t = SPINLOCK_INIT("udp\0".ptr as *CChar);
+/// The next ephemeral port to try; advanced under PCBS_LOCK, set once by udp_init.
+static NEXT_EPHEMERAL: AtomicU32 = AtomicU32.constant(EPHEMERAL_LO);
+
+static RX: AtomicU64 = AtomicU64.constant(0);
+static RX_BAD_LEN: AtomicU64 = AtomicU64.constant(0);
+static RX_BAD_CKSUM: AtomicU64 = AtomicU64.constant(0);
+static RX_NO_PORT: AtomicU64 = AtomicU64.constant(0);
+static RX_QUEUE_FULL: AtomicU64 = AtomicU64.constant(0);
+static TX: AtomicU64 = AtomicU64.constant(0);
+static QUIET_DROPPED: AtomicU64 = AtomicU64.constant(0);
+
+fn count(c: borrow AtomicU64) {
+    c.fetchAddWith(1, Ordering.Relaxed);
+}
+
+/// The list's head.
+/// Safety: only its address is taken; the list is used under PCBS_LOCK.
+fn pcbs() -> *mut list_node => unsafe { borrow mut PCBS as *mut list_node };
+
+/// The list's lock.
+/// Safety: only its address is taken, for spin_lock_irqsave.
+fn pcbsLock() -> *mut spinlock_t => unsafe { borrow mut PCBS_LOCK as *mut spinlock_t };
+
+/// The link after `node`: a walk starts at the head's and ends back at the head (list_for_each).
+/// Safety: `node` is on the list, under its lock.
+unsafe fn linkAfter(node: *mut list_node) -> *mut list_node => Ptr.toBorrow(node as *list_node).next;
+
+/// The pcb whose link `node` is.
+/// Safety: `node` is a bound pcb's link.
+unsafe fn ofLink(node: *mut list_node) -> *mut udp_pcb => containerOf(node, offsetOf<udp_pcb>(link)) as *mut udp_pcb;
+
+// ---- Bytes and addresses ----
+
+fn putBe16(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+/// A checksum as C stores the u16 cksum_fold returns (already in network order) into two bytes.
+fn putNative16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+/// `*to = *from`.
+/// Safety: both point to netaddrs; they are not the same one.
+unsafe fn copyAddr(to: *mut netaddr, from: *netaddr) {
+    let f = Ptr.toBorrow(from);
+    let t = Ptr.toBorrowMut(to);
+    t.family = f.family;
+    t.port = f.port;
+    t.v6.s6_addr = f.v6.s6_addr;
+}
+
+/// The netaddr in a local array of five words, zeroed: struct netaddr's size.
+fn addrIn(words: borrow mut [u32; 5]) -> *mut netaddr => words as *mut [u32; 5] as *mut netaddr;
+
+// ---- Control blocks ----
+
+/// udp.h's udp_init: the ephemeral ports start somewhere random.
+/// Safety: random_u64 takes no pointer.
+@export("udp_init")
+fn init() {
+    let start = (EPHEMERAL_LO as u64) + unsafe { random_u64() } % ((EPHEMERAL_HI - EPHEMERAL_LO) as u64);
+    NEXT_EPHEMERAL.storeWith(truncate<u32>(start), StoreOrdering.Relaxed);
+}
+
+/// udp.h's udp_pcb_init: every field cleared, the family set on both addresses, the queue ready, on no list.
+/// Safety: `pcb` is writable and on no list.
+@export("udp_pcb_init")
+unsafe fn pcbInit(pcb: *mut udp_pcb, family: u16) -> i32 {
+    let p = Ptr.toBorrowMut(pcb);
+    for (a in [borrow mut p.local as *mut netaddr, borrow mut p.remote as *mut netaddr]) {
+        let b = Ptr.toBorrowMut(a);
+        b.family = family;
+        b.port = 0;
+        b.v6.s6_addr = [0; 16];
+    }
+    p.sock = 0 as *mut socket;
+    p.rx_dropped = 0;
+    mbufq_init(borrow mut p.rxq as *mut mbufq, UDP_RXQ_MAX, "udp-rxq\0".ptr as *CChar);
+    List.init(borrow mut p.link as *mut list_node);
+    return 0;
+}
+
+/// A bound pcb using this local (address, port)? Under the lock.
+/// Safety: `addr` points to a netaddr.
+unsafe fn portInUse(family: u16, port: u16, addr: *netaddr) -> bool {
+    var node = linkAfter(pcbs());
+    while (node != pcbs()) {
+        let p = Ptr.toBorrow(ofLink(node) as *udp_pcb);
+        if (p.local.family == family && p.local.port == port) {
+            let local = borrow p.local as *netaddr;
+            if (netaddr_is_unspecified(local) || netaddr_is_unspecified(addr) || netaddr_addr_equal(local, addr)) {
+                return true;
+            }
+        }
+        node = linkAfter(node);
+    }
+    return false;
+}
+
+/// udp.h's udp_port_in_use: for NAT, which must not lend a port a host socket already holds.
+/// Safety: `addr` points to a netaddr.
+@export("udp_port_in_use")
+unsafe fn portInUseLocked(family: u16, port: u16, addr: *netaddr) -> bool {
+    let s = spin_lock_irqsave(pcbsLock());
+    let r = portInUse(family, port, addr);
+    spin_unlock_irqrestore(pcbsLock(), s);
+    return r;
+}
+
+/// The next ephemeral port free for (family, addr), or 0 when every one is taken. Under the lock.
+/// Safety: `addr` points to a netaddr.
+unsafe fn pickEphemeral(family: u16, addr: *netaddr) -> u16 {
+    var n: u32 = 0;
+    while (n < EPHEMERAL_HI - EPHEMERAL_LO) {
+        let port = NEXT_EPHEMERAL.loadWith(LoadOrdering.Relaxed);
+        NEXT_EPHEMERAL.storeWith(if (port >= EPHEMERAL_HI) EPHEMERAL_LO else port + 1, StoreOrdering.Relaxed);
+        if (!portInUse(family, truncate<u16>(port), addr)) {
+            return truncate<u16>(port);
+        }
+        n += 1;
+    }
+    return 0;
+}
+
+/// udp.h's udp_bind: port 0 picks an ephemeral one. -EAFNOSUPPORT, -EADDRNOTAVAIL, -EINVAL (bound), -EADDRINUSE.
+/// Safety: `pcb` is a pcb udp_pcb_init made; `local` points to a netaddr that is not its own.
+@export("udp_bind")
+unsafe fn bind(pcb: *mut udp_pcb, local: *netaddr) -> i32 {
+    let l = Ptr.toBorrow(local);
+    let p = Ptr.toBorrowMut(pcb);
+    if (l.family != p.local.family) {
+        return -EAFNOSUPPORT;
+    }
+    if (!netaddr_is_unspecified(local)) {
+        let ours = if (l.family == AF_INET) netif_owns_ipv4(l.v4) else netif_owns_ipv6(borrow l.v6 as *in6_addr);
+        if (!ours) {
+            return -EADDRNOTAVAIL;
+        }
+    }
+    let s = spin_lock_irqsave(pcbsLock());
+    if (p.local.port != 0) {
+        spin_unlock_irqrestore(pcbsLock(), s);
+        return -EINVAL; // already bound
+    }
+    var port = l.port;
+    if (port == 0) {
+        port = pickEphemeral(l.family, local);
+        if (port == 0) {
+            spin_unlock_irqrestore(pcbsLock(), s);
+            return -EADDRINUSE;
+        }
+    } else if (portInUse(l.family, port, local)) {
+        spin_unlock_irqrestore(pcbsLock(), s);
+        return -EADDRINUSE;
+    }
+    copyAddr(borrow mut p.local as *mut netaddr, local);
+    p.local.port = port;
+    List.pushBack(pcbs(), borrow mut p.link as *mut list_node);
+    spin_unlock_irqrestore(pcbsLock(), s);
+    return 0;
+}
+
+/// udp.h's udp_unbind: off the list, its queue freed.
+/// Safety: `pcb` is a pcb udp_pcb_init made.
+@export("udp_unbind")
+unsafe fn unbind(pcb: *mut udp_pcb) {
+    let p = Ptr.toBorrowMut(pcb);
+    let s = spin_lock_irqsave(pcbsLock());
+    if (p.local.port != 0) {
+        let link = borrow mut p.link as *mut list_node;
+        List.remove(link);
+        List.init(link);
+        p.local.port = 0;
+    }
+    spin_unlock_irqrestore(pcbsLock(), s);
+    mbufq_drain(borrow mut p.rxq as *mut mbufq);
+}
+
+/// udp.h's udp_set_remote: the peer, written under the lock input's lookup and udp_list read it under.
+/// Safety: `pcb` is a pcb udp_pcb_init made; `remote` points to another netaddr.
+@export("udp_set_remote")
+unsafe fn setRemote(pcb: *mut udp_pcb, remote: *netaddr) {
+    let s = spin_lock_irqsave(pcbsLock());
+    copyAddr(borrow mut Ptr.toBorrowMut(pcb).remote as *mut netaddr, remote);
+    spin_unlock_irqrestore(pcbsLock(), s);
+}
+
+// ---- Sending and receiving ----
+
+/// The checksum field's value for a sum: 0 means none in UDP, so a computed 0 is sent as 0xffff.
+/// Safety: cksum_fold takes no pointer.
+fn checksumField(sum: u32) -> u16 {
+    let c = unsafe { cksum_fold(sum) };
+    return if (c == 0) 0xffff else c;
+}
+
+/// udp.h's udp_sendto: one datagram to `to`, binding an ephemeral port first if the pcb has none.
+/// Safety: `pcb` is a pcb udp_pcb_init made; `data` has `len` readable bytes; `to` points to a netaddr.
+@export("udp_sendto")
+unsafe fn sendTo(pcb: *mut udp_pcb, data: *void, len: usize, to: *netaddr) -> i32 {
+    let t = Ptr.toBorrow(to);
+    let family = Ptr.toBorrow(pcb as *udp_pcb).local.family;
+    if (t.family != family) {
+        return -EAFNOSUPPORT;
+    }
+    if (t.port == 0 || netaddr_is_unspecified(to)) {
+        return -EINVAL;
+    }
+    if (len > (65535 - UDP_HLEN) as usize) {
+        return -EMSGSIZE;
+    }
+    if (Ptr.toBorrow(pcb as *udp_pcb).local.port == 0) {
+        var any: [u32; 5] = [0; 5];
+        let a = addrIn(borrow mut any);
+        let ab = Ptr.toBorrowMut(a);
+        ab.family = family;
+        let rc = bind(pcb, a as *netaddr);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+
+    let m = m_getcl();
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    let total = UDP_HLEN + truncate<u32>(len);
+    let mb = Ptr.toBorrowMut(m);
+    let h = SliceMut.fromRaw(mb.data, UDP_HLEN as usize);
+    putBe16(h, 0, Ptr.toBorrow(pcb as *udp_pcb).local.port as u32);
+    putBe16(h, 2, t.port as u32);
+    putBe16(h, 4, total);
+    putNative16(h, 6, 0);
+    mb.len = UDP_HLEN;
+    mb.pkt.len = UDP_HLEN;
+    let rc = m_append(m, data, truncate<u32>(len));
+    if (rc != 0) {
+        m_freem(m);
+        return rc;
+    }
+    let local = borrow Ptr.toBorrow(pcb as *udp_pcb).local as *netaddr;
+    if (t.family == AF_INET) {
+        let src = if (netaddr_is_unspecified(local)) ipv4_source_for(t.v4) else Ptr.toBorrow(local).v4;
+        if (src == 0) {
+            m_freem(m);
+            return -ENETUNREACH;
+        }
+        let sum = m_cksum_partial(
+            m as *mbuf,
+            0,
+            mb.pkt.len,
+            cksum_pseudo4(src, t.v4, IPPROTO_UDP, truncate<u16>(total)),
+        );
+        putNative16(h, 6, checksumField(sum));
+        count(borrow TX);
+        return ipv4_output(m, src, t.v4, IPPROTO_UDP, IP_DEFAULT_TTL);
+    }
+    var chosen: [u8; 16] = [0; 16];
+    let srcAt = borrow mut chosen as *mut [u8; 16] as *mut in6_addr;
+    if (netaddr_is_unspecified(local)) {
+        ipv6_source_for(borrow t.v6 as *in6_addr, srcAt);
+    } else {
+        chosen = Ptr.toBorrow(local).v6.s6_addr;
+    }
+    var unspecified = true;
+    for (i in 0..chosen.length) {
+        unspecified = unspecified && chosen[i] == 0;
+    }
+    if (unspecified) {
+        m_freem(m);
+        return -ENETUNREACH;
+    }
+    let src = srcAt as *in6_addr;
+    let sum = m_cksum_partial(
+        m as *mbuf,
+        0,
+        mb.pkt.len,
+        cksum_pseudo6(src, borrow t.v6 as *in6_addr, IPPROTO_UDP, total),
+    );
+    putNative16(h, 6, checksumField(sum));
+    count(borrow TX);
+    return ipv6_output(m, src, borrow t.v6 as *in6_addr, IPPROTO_UDP, IP_DEFAULT_TTL);
+}
+
+/// udp.h's udp_recv: one queued datagram, or null; its pkt.src is the sender.
+/// Safety: `pcb` is a pcb udp_pcb_init made.
+@export("udp_recv")
+unsafe fn recv(pcb: *mut udp_pcb) -> *mut mbuf => mbufq_dequeue(borrow mut Ptr.toBorrowMut(pcb).rxq as *mut mbufq);
+
+/// Whether a pcb is bound to the wildcard address.
+/// Safety: `pcb` is a pcb udp_pcb_init made.
+unsafe fn isWildcard(pcb: *mut udp_pcb) -> bool =>
+    netaddr_is_unspecified(borrow Ptr.toBorrow(pcb as *udp_pcb).local as *netaddr);
+
+/// The best pcb for a destination, under the lock: an exact address beats the wildcard; a connected pcb takes only
+/// its peer's datagrams. `connectedOnly` (an M_FW_QUIET datagram) admits only a pcb connected to the sender: a
+/// listener or an unconnected socket does not exist for it.
+/// Safety: `dst` and `src` point to netaddrs.
+unsafe fn lookup(family: u16, dst: *netaddr, src: *netaddr, connectedOnly: bool) -> *mut udp_pcb {
+    let dport = Ptr.toBorrow(dst).port;
+    var best = 0 as *mut udp_pcb;
+    var node = linkAfter(pcbs());
+    while (node != pcbs()) {
+        let pcb = ofLink(node);
+        let p = Ptr.toBorrow(pcb as *udp_pcb);
+        let local = borrow p.local as *netaddr;
+        let fits = p.local.family == family && p.local.port == dport &&
+            (netaddr_is_unspecified(local) || netaddr_addr_equal(local, dst)) &&
+            (p.remote.port == 0 || netaddr_equal(borrow p.remote as *netaddr, src)) &&
+            !(connectedOnly && p.remote.port == 0);
+        if (fits && (best.isNull() || isWildcard(best))) {
+            best = pcb;
+        }
+        node = linkAfter(node);
+    }
+    return best;
+}
+
+/// udp.h's udp_error_notify: an ICMP error quoting one of this host's flows becomes the pending error of the socket
+/// connected on that four-tuple, which is woken; true if one took it. Only a connected pcb qualifies (RFC 5927).
+/// Safety: `local` and `remote` point to netaddrs.
+@export("udp_error_notify")
+unsafe fn errorNotify(local: *netaddr, remote: *netaddr, err: i32) -> bool {
+    let s = spin_lock_irqsave(pcbsLock());
+    let pcb = lookup(Ptr.toBorrow(local).family, local, remote, true);
+    // Held across the unlock, and a tryget: a release clears pcb->sock under the lock but starts at count zero
+    // (design.md, "UDP").
+    let sock = if (pcb.isNull()) 0 as *mut socket else sock_wake_ref(Ptr.toBorrow(pcb as *udp_pcb).sock);
+    spin_unlock_irqrestore(pcbsLock(), s);
+    if (sock.isNull()) {
+        return false;
+    }
+    sock_set_error(sock, err); // wakes; invariant N21
+    sock_wake_unref(sock);
+    return true;
+}
+
+/// udp.h's udp_input: a datagram from IPv4 (`ip4`) or IPv6 (`ip6`), its header at the packet's start.
+/// Safety: `packet` is a packet the caller hands over; exactly one of `ip4` and `ip6` points to its IP header.
+@export("udp_input")
+unsafe fn input(nif: *mut netif, packet: *mut mbuf, ip4: *ipv4_hdr, ip6: *ipv6_hdr) {
+    count(borrow RX);
+    let len = Ptr.toBorrow(packet as *mbuf).pkt.len;
+    if (len < UDP_HLEN) {
+        count(borrow RX_BAD_LEN);
+        m_freem(packet);
+        return;
+    }
+    let m = m_pullup(packet, UDP_HLEN);
+    if (m.isNull()) {
+        return;
+    }
+    let mb = Ptr.toBorrowMut(m);
+    let flow = netparse_udp_flow(mb.data as *u8, len);
+    if ((flow & FLOW_OK) == 0) {
+        count(borrow RX_BAD_LEN);
+        m_freem(m);
+        return;
+    }
+    let ulen = truncate<u16>(flow);
+    let hasCksum = (flow & FLOW_CKSUM) != 0;
+    // The header a port-unreachable quotes: m_prepend keeps the bytes in front of the data only in place.
+    var quoted: [u8; 8] = [0; 8];
+    quoted[..].copyFrom(Slice.fromRaw(mb.data as *u8, UDP_HLEN as usize));
+    if ((ulen as u32) < len) {
+        m_adj(m, 0 - truncate<i32>(len - ulen as u32));
+    }
+
+    var srcWords: [u32; 5] = [0; 5];
+    var dstWords: [u32; 5] = [0; 5];
+    let src = addrIn(borrow mut srcWords);
+    let dst = addrIn(borrow mut dstWords);
+    let sb = Ptr.toBorrowMut(src);
+    let db = Ptr.toBorrowMut(dst);
+    var sum: u32 = 0;
+    if (!ip4.isNull()) {
+        let h = Ptr.toBorrow(ip4);
+        let sa = h.src;
+        let da = h.dst;
+        sb.family = AF_INET;
+        db.family = AF_INET;
+        sb.v4 = sa;
+        db.v4 = da;
+        if (hasCksum) {
+            sum = cksum_pseudo4(sa, da, IPPROTO_UDP, ulen);
+        }
+    } else {
+        let h = Ptr.toBorrow(ip6);
+        sb.family = AF_INET6;
+        db.family = AF_INET6;
+        sb.v6.s6_addr = h.src.s6_addr;
+        db.v6.s6_addr = h.dst.s6_addr;
+        if (!hasCksum) {
+            count(borrow RX_BAD_CKSUM); // mandatory on IPv6
+            m_freem(m);
+            return;
+        }
+        sum = cksum_pseudo6(borrow h.src as *in6_addr, borrow h.dst as *in6_addr, IPPROTO_UDP, ulen as u32);
+    }
+    if (hasCksum && (mb.flags & M_CSUM_OK) == 0 && cksum_fold(m_cksum_partial(m as *mbuf, 0, ulen as u32, sum)) != 0) {
+        count(borrow RX_BAD_CKSUM);
+        m_freem(m);
+        return;
+    }
+    sb.port = truncate<u16>(flow >> 16);
+    db.port = truncate<u16>(flow >> 32);
+    m_adj(m, truncate<i32>(UDP_HLEN));
+    copyAddr(borrow mut mb.pkt.src as *mut netaddr, src as *netaddr);
+
+    // The host firewall said DROP (M_FW_QUIET): the datagram exists only for a socket connected to its sender -- a
+    // reply to the host's own flow -- and draws no port-unreachable otherwise.
+    let flags = mb.flags;
+    let quiet = (flags & M_FW_QUIET) != 0;
+    let s = spin_lock_irqsave(pcbsLock());
+    let pcb = lookup(db.family, dst as *netaddr, src as *netaddr, quiet);
+    var sock = 0 as *mut socket;
+    if (!pcb.isNull()) {
+        let p = Ptr.toBorrowMut(pcb);
+        if (mbufq_enqueue(borrow mut p.rxq as *mut mbufq, m)) {
+            // The wake happens after the unlock; hold the socket across it. Its release clears pcb->sock under the
+            // lock but starts at count zero, so only a tryget is safe here (design.md, "UDP").
+            sock = sock_wake_ref(p.sock);
+        } else {
+            p.rx_dropped += 1;
+            count(borrow RX_QUEUE_FULL);
+        }
+    }
+    spin_unlock_irqrestore(pcbsLock(), s);
+    if (pcb.isNull()) {
+        if (quiet) {
+            count(borrow QUIET_DROPPED);
+            m_freem(m);
+            return;
+        }
+        count(borrow RX_NO_PORT);
+        if (ip4.isNull() || (flags & M_BCAST) != 0) {
+            m_freem(m);
+            return;
+        }
+        let ihl = ((Ptr.toBorrow(ip4).vhl & 0xf) as u32) * 4;
+        let q = m_prepend(m, UDP_HLEN + ihl);
+        if (!q.isNull()) {
+            let d = SliceMut.fromRaw(Ptr.toBorrow(q as *mbuf).data, (ihl + UDP_HLEN) as usize);
+            d[..ihl as usize].copyFrom(Slice.fromRaw(ip4 as *u8, ihl as usize));
+            d[ihl as usize..].copyFrom(quoted[..]);
+            icmp_send_unreach(q, ip4, ICMP_UNREACH_PORT);
+            m_freem(q);
+        }
+        return;
+    }
+    if (!sock.isNull()) {
+        sock_wake(sock);
+        sock_wake_unref(sock);
+    }
+}
+
+// ---- Statistics and the listing ----
+
+/// udp.h's udp_get_stats.
+/// Safety: `out` is writable.
+@export("udp_get_stats")
+unsafe fn getStats(out: *mut udp_stats) {
+    let o = Ptr.toBorrowMut(out);
+    o.rx = RX.loadWith(LoadOrdering.Relaxed);
+    o.rx_bad_len = RX_BAD_LEN.loadWith(LoadOrdering.Relaxed);
+    o.rx_bad_cksum = RX_BAD_CKSUM.loadWith(LoadOrdering.Relaxed);
+    o.rx_no_port = RX_NO_PORT.loadWith(LoadOrdering.Relaxed);
+    o.rx_queue_full = RX_QUEUE_FULL.loadWith(LoadOrdering.Relaxed);
+    o.tx = TX.loadWith(LoadOrdering.Relaxed);
+    o.quiet_dropped = QUIET_DROPPED.loadWith(LoadOrdering.Relaxed);
+}
+
+/// udp.h's udp_list: every bound pcb of `family`, chosen under the lock; writes at most `max`, returns how many.
+/// Safety: `out` has room for `max`.
+@export("udp_list")
+unsafe fn list(out: *mut udp_sock_info, max: u32, family: u16) -> u32 {
+    var n: u32 = 0;
+    let s = spin_lock_irqsave(pcbsLock());
+    var node = linkAfter(pcbs());
+    while (node != pcbs()) {
+        let p = Ptr.toBorrowMut(ofLink(node));
+        if (p.local.family == family) {
+            if (n < max) {
+                let o = Ptr.toBorrowMut(out.add(n as usize));
+                copyAddr(borrow mut o.local as *mut netaddr, borrow p.local as *netaddr);
+                copyAddr(borrow mut o.remote as *mut netaddr, borrow p.remote as *netaddr);
+                o.rxq = mbufq_len(borrow mut p.rxq as *mut mbufq);
+                o.drops = p.rx_dropped; // bumped under this lock (udp_input)
+            }
+            n += 1;
+        }
+        node = linkAfter(node);
+    }
+    spin_unlock_irqrestore(pcbsLock(), s);
+    return n;
+}
