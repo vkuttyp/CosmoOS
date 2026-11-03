@@ -1,0 +1,606 @@
+// nettest_base.cee - the network self-tests of the stack's base, in CeeSafe: roadmap 2.0 SA6 (nettest, the first
+// batch). net-mbuf, net-mbufq-double, net-cksum and net-arp, as nettest.c had them; the runner (kernel/core/
+// selftest.c) calls each as `bool selftest_net_*(const char **reason)`, and a check that fails names itself in
+// `*reason` as the C's CHECK did. A C struct no CeeSafe local holds (a queue, the counters) is built in a zeroed,
+// aligned scratch of this file's.
+
+@header("kernel/mbuf.h", "kernel/net/cksum.h", "kernel/net/ether.h", "kernel/net/inet.h", "kernel/netif.h", "kernel/selftest.h", "kernel/wait.h")
+extern "C" {
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        next: *mut mbuf;
+        data: *mut u8;
+        len: u32;
+        flags: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbufq;
+    struct mbuf_stats {
+        mbufs_alive: u64;
+        clusters_alive: u64;
+        double_enqueues: u64;
+    }
+    struct netif_ip4 {
+        addr: AtomicU32;
+        gateway: AtomicU32;
+    }
+    struct netif {
+        obj: kobject;
+        mac: [u8; 6];
+        ip4: netif_ip4;
+    }
+    struct arp_stats {
+        requests_sent: u64;
+        replies_sent: u64;
+        replies_rcvd: u64;
+        entries: u64;
+        pending_dropped: u64;
+        timeouts: u64;
+        unsolicited: u64;
+    }
+
+    @effects()
+    fn m_get() -> *mut mbuf;
+    @effects()
+    fn m_getcl() -> *mut mbuf;
+    @effects()
+    fn m_freem(m: *mut mbuf);
+    fn m_append(m: *mut mbuf, src: *void, len: u32) -> i32;
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn m_prepend(m: *mut mbuf, len: u32) -> *mut mbuf;
+    fn m_adj(m: *mut mbuf, n: i32);
+    fn m_pullup(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_copypacket(m: *mbuf) -> *mut mbuf;
+    fn m_ref(m: *mut mbuf) -> *mut mbuf;
+    fn m_length(m: *mbuf) -> u32;
+    fn m_leadingspace(m: *mbuf) -> u32;
+    fn mbufq_init(q: *mut mbufq, maxlen: u32, name: *CChar);
+    fn mbufq_enqueue(q: *mut mbufq, m: *mut mbuf) -> bool;
+    fn mbufq_dequeue(q: *mut mbufq) -> *mut mbuf;
+    fn mbufq_drain(q: *mut mbufq);
+    fn mbufq_len(q: *mut mbufq) -> u32;
+    fn mbuf_get_stats(out: *mut mbuf_stats);
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn cksum_partial(data: *void, len: usize, sum: u32) -> u32;
+    fn cksum_fold(sum: u32) -> u16;
+    fn m_cksum_partial(m: *mbuf, off: u32, len: u32, sum: u32) -> u32;
+    fn netif_default() -> *mut netif;
+    fn netif_dump();
+    fn arp_lookup(nif: *netif, ip: u32, mac: *mut u8) -> bool;
+    fn arp_resolve(nif: *mut netif, ip: u32, mac: *mut u8, m: *mut mbuf) -> i32;
+    fn arp_get_stats(out: *mut arp_stats);
+    fn arp_age(now: u64);
+    fn arp_input(nif: *mut netif, m: *mut mbuf);
+    fn arp_delete(nif: *netif, ip: u32);
+    fn clock_now_ns() -> u64;
+    fn thread_sleep_ns(ns: u64);
+}
+
+// ---- mbuf.h, errno.h (the values are asserted against the headers in nettest.c) ----
+
+const M_PKTHDR: u32 = 1;
+const M_EXT: u32 = 2;
+const M_QUEUED: u32 = 1 << 6;
+const NET_HEADROOM: u32 = 128;
+const EINPROGRESS: i32 = 115;
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// An aligned, zeroed scratch for one C struct no CeeSafe local holds.
+struct NtScratch {
+    words: [u64; 32];
+}
+
+fn scratch() -> NtScratch => NtScratch { words: [0; 32] };
+
+/// The scratch's bytes, after checking `bytes` of them fit: the caller casts them to its C struct.
+fn at(s: borrow mut NtScratch, bytes: usize) -> *mut u8 {
+    if (bytes > 256) {
+        var buffer: [u8; 64] = [0; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("nettest: a scratch is too small");
+        KernelLog.panic(line);
+    }
+    return borrow mut s.words as *mut [u64; 32] as *mut u8;
+}
+
+/// The first `n` bytes of two buffers are the same.
+/// Safety: both point to `n` readable bytes.
+unsafe fn same(a: *u8, b: *u8, n: usize) -> bool {
+    let x = Slice.fromRaw(a, n);
+    let y = Slice.fromRaw(b, n);
+    for (i in 0..n) {
+        if (x[i] != y[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ---- net-mbuf ----
+
+// Off the 16 KiB kernel stack (scripts/frame-baseline.txt); the runner runs one test at a time.
+static mut PAT: [u8; 3000] = [0; 3000];
+static mut OUT: [u8; 3000] = [0; 3000];
+
+/// Safety: the runner runs one test at a time, so PAT and OUT are this test's.
+fn pat() -> *mut u8 => unsafe { borrow mut PAT as *mut [u8; 3000] as *mut u8 };
+
+/// Safety: as pat.
+fn out() -> *mut u8 => unsafe { borrow mut OUT as *mut [u8; 3000] as *mut u8 };
+
+/// net-mbuf: clusters, chains, copies, prepends past the headroom, adjustments, pullups, shared clusters, a queue.
+/// Safety: the mbufs are this test's; the statics are (see pat).
+@export("selftest_net_mbuf")
+unsafe fn mbufTest(reason: *mut *CChar) -> bool {
+    var s0s = scratch();
+    var s1s = scratch();
+    let s0 = at(mut s0s, layoutOf<mbuf_stats>().size) as *mut mbuf_stats;
+    let s1 = at(mut s1s, layoutOf<mbuf_stats>().size) as *mut mbuf_stats;
+    mbuf_get_stats(s0);
+
+    var m = m_getcl();
+    if (m.isNull() || (Ptr.toBorrow(m as *mbuf).flags & (M_PKTHDR | M_EXT)) != (M_PKTHDR | M_EXT)) {
+        return failed(reason, "check failed: a cluster mbuf has a packet header and a cluster\0");
+    }
+    if (m_leadingspace(m as *mbuf) != NET_HEADROOM || Ptr.toBorrow(m as *mbuf).len != 0) {
+        return failed(reason, "check failed: a fresh cluster has the headroom and no data\0");
+    }
+    let p = SliceMut.fromRaw(pat(), 3000);
+    for (i in 0..3000) {
+        p[truncate<usize>(i)] = truncate<u8>(truncate<u32>(i) * 13);
+    }
+    if (m_append(m, pat() as *void, 3000) != 0) {
+        return failed(reason, "check failed: m_append of 3000 bytes\0");
+    }
+    if (Ptr.toBorrow(
+        m as *mbuf,
+    ).pkt.len != 3000 || m_length(m as *mbuf) != 3000 || Ptr.toBorrow(m as *mbuf).next.isNull()) {
+        return failed(reason, "check failed: 3000 bytes are two clusters\0"); // two clusters
+    }
+    if (!m_copydata(m as *mbuf, 0, 3000, out() as *mut void) || !same(out() as *u8, pat() as *u8, 3000)) {
+        return failed(reason, "check failed: the chain copies out whole\0");
+    }
+    if (!m_copydata(m as *mbuf, 2990, 10, out() as *mut void) || !same(out() as *u8, pat().add(2990) as *u8, 10)) {
+        return failed(reason, "check failed: the chain's tail copies out\0");
+    }
+    if (m_copydata(m as *mbuf, 2990, 11, out() as *mut void)) {
+        return failed(reason, "check failed: a copy past the end is refused\0");
+    }
+
+    // Prepend within headroom, then beyond it.
+    m = m_prepend(m, 14);
+    if (m.isNull() || Ptr.toBorrow(m as *mbuf).pkt.len != 3014 || m_leadingspace(m as *mbuf) != NET_HEADROOM - 14) {
+        return failed(reason, "check failed: a prepend within the headroom\0");
+    }
+    m = m_prepend(m, 100);
+    if (m.isNull() || Ptr.toBorrow(m as *mbuf).pkt.len != 3114 || m_leadingspace(m as *mbuf) != NET_HEADROOM - 114) {
+        return failed(reason, "check failed: a second prepend stays in place (unit 11: 128 of headroom)\0");
+    }
+    m = m_prepend(m, 200);
+    if (m.isNull() || Ptr.toBorrow(m as *mbuf).pkt.len != 3314 || Ptr.toBorrow(m as *mbuf).len != 200) {
+        return failed(reason, "check failed: a prepend past the headroom takes a new leading buffer\0");
+    }
+    m_adj(m, 314);
+    if (Ptr.toBorrow(m as *mbuf).pkt.len != 3000 || !m_copydata(m as *mbuf, 0, 3000, out() as *mut void) ||
+        !same(out() as *u8, pat() as *u8, 3000)) {
+        return failed(reason, "check failed: trimming the prepends gives the data back\0");
+    }
+
+    // Pullup across buffers, keeping the headroom for a later prepend (unit 11).
+    m = m_pullup(m, 1900); // the first buffer holds 1920: this crosses into the second
+    if (m.isNull() || Ptr.toBorrow(m as *mbuf).len < 1900 || !same(
+        Ptr.toBorrow(m as *mbuf).data as *u8,
+        pat() as *u8,
+        1900,
+    ) ||
+        m_length(m as *mbuf) != 3000) {
+        return failed(reason, "check failed: a pullup across buffers\0");
+    }
+    if (m_leadingspace(m as *mbuf) != NET_HEADROOM) {
+        return failed(reason, "check failed: a pullup keeps the headroom\0");
+    }
+    // vnet + Ethernet + IPv6 + TCP with options fit the headroom: 12 + 14 + 40 + 60 <= NET_HEADROOM, a constant.
+    {
+        let big = m_copypacket(m as *mbuf); // 3000 bytes: a chain of clusters, contents intact
+        if (big.isNull() || Ptr.toBorrow(big as *mbuf).pkt.len != 3000 || Ptr.toBorrow(big as *mbuf).next.isNull() ||
+            !m_copydata(big as *mbuf, 0, 3000, out() as *mut void) || !same(out() as *u8, pat() as *u8, 3000)) {
+            return failed(reason, "check failed: a copy of the chain is whole\0");
+        }
+        m_freem(big);
+    }
+    if (!m_pullup(m_get(), 2049).isNull()) {
+        return failed(reason, "check failed: a pullup beyond one cluster is refused\0");
+    }
+    m_adj(m, -1000);
+    if (Ptr.toBorrow(m as *mbuf).pkt.len != 2000 || m_length(m as *mbuf) != 2000) {
+        return failed(reason, "check failed: trimming the tail\0");
+    }
+
+    // Shared clusters survive the original's free.
+    let r = m_ref(m);
+    if (r.isNull() || Ptr.toBorrow(r as *mbuf).data as usize != Ptr.toBorrow(m as *mbuf).data as usize) {
+        return failed(reason, "check failed: a reference shares the cluster\0");
+    }
+    m_freem(m);
+    if (Slice.fromRaw(Ptr.toBorrow(r as *mbuf).data as *u8, 1)[0] != p[0]) {
+        return failed(reason, "check failed: a shared cluster survives the original's free\0");
+    }
+    m_freem(r);
+
+    let lin = m_getcl();
+    if (lin.isNull() || m_append(lin, pat() as *void, 1500) != 0) {
+        return failed(reason, "check failed: 1500 bytes in one cluster\0");
+    }
+    let copy = m_copypacket(lin as *mbuf);
+    if (copy.isNull() || Ptr.toBorrow(copy as *mbuf).len != 1500 || !same(
+        Ptr.toBorrow(copy as *mbuf).data as *u8,
+        pat() as *u8,
+        1500,
+    )) {
+        return failed(reason, "check failed: a copy of one cluster\0");
+    }
+    m_freem(lin);
+    m_freem(copy);
+
+    var qs = scratch();
+    let q = at(mut qs, layoutOf<mbufq>().size) as *mut mbufq;
+    mbufq_init(q, 2, "test\0".ptr as *CChar);
+    if (!mbufq_enqueue(q, m_get()) || !mbufq_enqueue(q, m_get()) || mbufq_enqueue(q, m_get())) {
+        return failed(reason, "check failed: a queue of two takes two and refuses a third\0");
+    }
+    if (mbufq_len(q) != 2) {
+        return failed(reason, "check failed: the queue holds two\0");
+    }
+    mbufq_drain(q);
+    if (!mbufq_dequeue(q).isNull()) {
+        return failed(reason, "check failed: a drained queue is empty\0");
+    }
+
+    mbuf_get_stats(s1);
+    let a0 = Ptr.toBorrow(s0 as *mbuf_stats);
+    let a1 = Ptr.toBorrow(s1 as *mbuf_stats);
+    if (a1.mbufs_alive != a0.mbufs_alive || a1.clusters_alive != a0.clusters_alive) {
+        return failed(reason, "check failed: nothing is left alive\0");
+    }
+    return true;
+}
+
+// ---- net-mbufq-double ----
+
+/// net-mbufq-double: an mbuf enqueued while already on a queue is refused and the queue stays whole -- count and
+/// list agree, order is kept, nothing leaks. The mechanism of the network worker's latent spin (docs/audit/
+/// next-subsystem-lockup.md): before, the second enqueue cleared the mbuf's link and orphaned everything behind it.
+/// Safety: the mbufs and the queue are this test's.
+@export("selftest_net_mbufq_double")
+unsafe fn mbufqDouble(reason: *mut *CChar) -> bool {
+    var s0s = scratch();
+    var s1s = scratch();
+    let s0 = at(mut s0s, layoutOf<mbuf_stats>().size) as *mut mbuf_stats;
+    let s1 = at(mut s1s, layoutOf<mbuf_stats>().size) as *mut mbuf_stats;
+    mbuf_get_stats(s0);
+    var qs = scratch();
+    let q = at(mut qs, layoutOf<mbufq>().size) as *mut mbufq;
+    mbufq_init(q, 8, "test-double\0".ptr as *CChar);
+    let a = m_get();
+    let b = m_get();
+    let c = m_get();
+    if (a.isNull() || b.isNull() || c.isNull()) {
+        return failed(reason, "check failed: a && b && c\0");
+    }
+    if (!mbufq_enqueue(q, a) || !mbufq_enqueue(q, b) || !mbufq_enqueue(q, c)) {
+        return failed(reason, "check failed: three enqueue\0");
+    }
+    if ((Ptr.toBorrow(b as *mbuf).flags & M_QUEUED) == 0) {
+        return failed(reason, "check failed: b->flags & M_QUEUED\0");
+    }
+    // The second enqueue of b, mid-queue: refused, b untouched.
+    if (mbufq_enqueue(q, b)) {
+        return failed(reason, "check failed: !mbufq_enqueue(&q, b)\0");
+    }
+    mbuf_get_stats(s1);
+    if (Ptr.toBorrow(s1 as *mbuf_stats).double_enqueues != Ptr.toBorrow(s0 as *mbuf_stats).double_enqueues + 1) {
+        return failed(reason, "check failed: s1.double_enqueues == s0.double_enqueues + 1\0");
+    }
+    if (mbufq_len(q) != 3) {
+        return failed(reason, "check failed: mbufq_len(&q) == 3\0");
+    }
+    // Drained in order, and the count reaches zero with the list.
+    if (mbufq_dequeue(q) as usize != a as usize) {
+        return failed(reason, "check failed: mbufq_dequeue(&q) == a\0");
+    }
+    if (mbufq_dequeue(q) as usize != b as usize) {
+        return failed(reason, "check failed: mbufq_dequeue(&q) == b\0");
+    }
+    if ((Ptr.toBorrow(b as *mbuf).flags & M_QUEUED) != 0) {
+        return failed(reason, "check failed: !(b->flags & M_QUEUED)\0");
+    }
+    if (mbufq_dequeue(q) as usize != c as usize) {
+        return failed(reason, "check failed: mbufq_dequeue(&q) == c\0");
+    }
+    if (mbufq_len(q) != 0) {
+        return failed(reason, "check failed: mbufq_len(&q) == 0\0");
+    }
+    if (!mbufq_dequeue(q).isNull()) {
+        return failed(reason, "check failed: mbufq_dequeue(&q) == NULL\0");
+    }
+    // Once off a queue, b may go on one again.
+    if (!mbufq_enqueue(q, b) || mbufq_len(q) != 1 || mbufq_dequeue(q) as usize != b as usize) {
+        return failed(reason, "check failed: b goes on a queue again\0");
+    }
+    m_freem(a);
+    m_freem(b);
+    m_freem(c);
+    mbuf_get_stats(s1);
+    if (Ptr.toBorrow(s1 as *mbuf_stats).mbufs_alive != Ptr.toBorrow(s0 as *mbuf_stats).mbufs_alive) {
+        return failed(reason, "check failed: s1.mbufs_alive == s0.mbufs_alive\0");
+    }
+    return true;
+}
+
+// ---- net-cksum ----
+
+/// The byte order swap of a u16 (inet.h's htons on CosmoOS's little-endian targets).
+fn swap16(v: u16) -> u16 => (v << 8) | (v >> 8);
+
+/// net-cksum: RFC 1071's example, an odd length that verifies to zero, and a chain's sum equal to the flat sum
+/// across odd buffer boundaries.
+/// Safety: the buffers and mbufs are this test's.
+@export("selftest_net_cksum")
+unsafe fn cksumTest(reason: *mut *CChar) -> bool {
+    // RFC 1071 example: 0001 f203 f4f5 f6f7 -> ~sum = 220d.
+    let ex: [u8; 8] = [0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7];
+    if (in_cksum(borrow ex as *[u8; 8] as *void, 8) != swap16(0x220d)) {
+        return failed(reason, "check failed: in_cksum(ex, sizeof(ex)) == htons(0x220d)\0");
+    }
+    // Odd length and a verified checksum folds to zero.
+    let buf: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    let c: u16 = in_cksum(borrow buf as *[u8; 11] as *void, 9);
+    if (cksum_fold(
+        cksum_partial(borrow c as *u16 as *void, 2, cksum_partial(borrow buf as *[u8; 11] as *void, 9, 0)),
+    ) !=
+        0) {
+        return failed(reason, "check failed: an odd length with its checksum folds to zero\0");
+    }
+    // The chain sum equals the flat sum across odd buffer boundaries.
+    let m = m_getcl();
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    var data: [u8; 1000] = [0; 1000];
+    for (i in 0..1000) {
+        data[truncate<usize>(i)] = truncate<u8>(truncate<u32>(i) * 7 + 1);
+    }
+    let d = borrow data as *[u8; 1000] as *u8;
+    let mm = Ptr.toBorrowMut(m);
+    mm.len = 0;
+    mm.pkt.len = 0;
+    if (m_append(m, d as *void, 333) != 0) {
+        return failed(reason, "check failed: m_append(m, data, 333) == 0\0");
+    }
+    let t = m_get();
+    if (t.isNull()) {
+        return failed(reason, "check failed: t != NULL\0");
+    }
+    let tt = Ptr.toBorrowMut(t);
+    SliceMut.fromRaw(tt.data, 100).copyFrom(Slice.fromRaw(d.add(333), 100));
+    tt.len = 100;
+    mm.next = t;
+    mm.pkt.len = 433;
+    if (m_append(m, d.add(433) as *void, 567) != 0) {
+        return failed(reason, "check failed: m_append(m, data + 433, 567) == 0\0");
+    }
+    if (m_length(m as *mbuf) != 1000) {
+        return failed(reason, "check failed: m_length(m) == 1000\0");
+    }
+    if (cksum_fold(m_cksum_partial(m as *mbuf, 0, 1000, 0)) != in_cksum(d as *void, 1000)) {
+        return failed(reason, "check failed: the chain's sum is the flat sum\0");
+    }
+    if (cksum_fold(m_cksum_partial(m as *mbuf, 7, 900, 0)) != in_cksum(d.add(7) as *void, 900)) {
+        return failed(reason, "check failed: a chain's partial sum is the flat partial sum\0");
+    }
+    m_freem(m);
+    return true;
+}
+
+// ---- net-arp ----
+
+/// An address from its four octets, as it lies in memory (inet.h's IPV4_ADDR).
+fn ipv4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+/// The four bytes of a u32 as it lies in memory, at `at`.
+fn putWord(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// An ARP frame of `op` (1 request, 2 reply) from `sha`/`spa`, its target the interface itself (the reply's target
+/// MAC too), handed straight to arp_input.
+/// Safety: `nif` is live; `sha` is 6 bytes.
+unsafe fn arpFrame(nif: *mut netif, op: u8, sha: Slice<u8>, spa: u32, reply: bool) -> bool {
+    let f = m_getcl();
+    if (f.isNull()) {
+        return false;
+    }
+    let ff = Ptr.toBorrowMut(f);
+    ff.len = 28;
+    ff.pkt.len = 28;
+    let b = SliceMut.fromRaw(ff.data, 28);
+    for (i in 0..28) {
+        b[truncate<usize>(i)] = 0;
+    }
+    b[1] = 1;    // Ethernet
+    b[2] = 0x08; // IPv4
+    b[4] = 6;
+    b[5] = 4;
+    b[7] = op;
+    b[8..14].copyFrom(sha);
+    putWord(b, 14, spa);
+    let n = Ptr.toBorrow(nif as *netif);
+    if (reply) {
+        let mac = n.mac;
+        b[18..24].copyFrom(mac[..]);
+    }
+    putWord(b, 24, n.ip4.addr.loadWith(LoadOrdering.Relaxed));
+    arp_input(nif, f);
+    return true;
+}
+
+/// "selftest: net-arp: gateway is xx:xx:xx:xx:xx:xx".
+fn gatewayLine(mac: Slice<u8>) {
+    var buffer: [u8; 80] = [0; 80];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-arp: gateway is ");
+    for (i in 0..6) {
+        if (i != 0) {
+            line.byte(58);
+        }
+        line.hex(mac[truncate<usize>(i)] as u64, 2);
+    }
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// net-arp: an unknown host's request sent, its packet parked and aged out after three tries; an unsolicited reply
+/// teaches nothing; a request addressed to us records the asker; the gateway resolves for real when a NIC is
+/// present (asynchronous).
+/// Safety: the interface is eth0, never unregistered while the tests run; the frames and mbufs are this test's.
+@export("selftest_net_arp")
+unsafe fn arpTest(reason: *mut *CChar) -> bool {
+    var mac: [u8; 6] = [0; 6];
+    let macp = borrow mut mac as *mut [u8; 6] as *mut u8;
+    let ip = ipv4(10, 99, 0, 7);
+    let nif = netif_default();
+    if (nif.isNull()) {
+        var buffer: [u8; 80] = [0; 80];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: net-arp: no ethernet interface; table logic only");
+        KernelLog.send(LogLevel.Info, line);
+        return true;
+    }
+    if (arp_lookup(nif as *netif, ip, macp)) {
+        return failed(reason, "check failed: !arp_lookup(nif, ip, mac)\0");
+    }
+    // eth0 is never unregistered while the tests run; a borrowed pointer is enough here.
+    kobject_put(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject); // netif_put
+    var s0s = scratch();
+    var s1s = scratch();
+    let s0 = at(mut s0s, layoutOf<arp_stats>().size) as *mut arp_stats;
+    let s1 = at(mut s1s, layoutOf<arp_stats>().size) as *mut arp_stats;
+    arp_get_stats(s0);
+    let a0 = Ptr.toBorrow(s0 as *arp_stats);
+    let a1 = Ptr.toBorrow(s1 as *arp_stats);
+    let m = m_getcl();
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    let mm = Ptr.toBorrowMut(m);
+    mm.len = 20;
+    mm.pkt.len = 20;
+    // Unknown host: request sent, packet parked, then aged out.
+    if (arp_resolve(nif, ip, macp, m) != -EINPROGRESS) {
+        return failed(reason, "check failed: arp_resolve(nif, ip, mac, m) == -EINPROGRESS\0");
+    }
+    arp_get_stats(s1);
+    if (a1.requests_sent != a0.requests_sent + 1 || a1.entries != a0.entries + 1) {
+        return failed(
+            reason,
+            "check failed: s1.requests_sent == s0.requests_sent + 1 && s1.entries == s0.entries + 1\0",
+        );
+    }
+    let now = clock_now_ns();
+    arp_age(now + 2 * 1000000000); // second try
+    arp_age(now + 4 * 1000000000); // third try
+    arp_age(now + 6 * 1000000000); // give up: pending packet freed
+    arp_get_stats(s1);
+    if (a1.timeouts != a0.timeouts + 1 || a1.entries != a0.entries || a1.pending_dropped != a0.pending_dropped + 1) {
+        return failed(reason, "check failed: the request timed out, its packet dropped, its entry gone\0");
+    }
+    if (arp_lookup(nif as *netif, ip, macp)) {
+        return failed(reason, "check failed: !arp_lookup(nif, ip, mac)\0");
+    }
+
+    // Admission: an unsolicited reply teaches nothing; a request addressed to us records the asker. Frames are
+    // handed straight to arp_input.
+    let forged: [u8; 6] = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01];
+    let liar = ipv4(10, 99, 0, 8);
+    let asker = ipv4(10, 99, 0, 9);
+    if (!arpFrame(nif, 2, forged[..], liar, true)) {
+        return failed(reason, "check failed: f != NULL\0");
+    }
+    if (arp_lookup(nif as *netif, liar, macp)) {
+        return failed(reason, "check failed: !arp_lookup(nif, liar, mac)\0");
+    }
+    arp_get_stats(s1);
+    if (a1.unsolicited != a0.unsolicited + 1 || a1.entries != a0.entries) {
+        return failed(reason, "check failed: s1.unsolicited == s0.unsolicited + 1 && s1.entries == s0.entries\0");
+    }
+    if (!arpFrame(nif, 1, forged[..], asker, false)) {
+        return failed(reason, "check failed: f != NULL\0");
+    }
+    if (!arp_lookup(nif as *netif, asker, macp) || !same(macp as *u8, borrow forged as *[u8; 6] as *u8, 6)) {
+        return failed(reason, "check failed: arp_lookup(nif, asker, mac) && memcmp(mac, forged_mac, 6) == 0\0");
+    }
+    arp_get_stats(s1);
+    if (a1.replies_sent != a0.replies_sent + 1 || a1.entries != a0.entries + 1) {
+        return failed(reason, "check failed: s1.replies_sent == s0.replies_sent + 1 && s1.entries == s0.entries + 1\0");
+    }
+    arp_delete(nif as *netif, asker); // remove only the entry this test added, not a real gateway entry
+    // The gateway resolves for real when a NIC is present (asynchronous).
+    let gateway = Ptr.toBorrow(nif as *netif).ip4.gateway.loadWith(LoadOrdering.Relaxed);
+    if (gateway != 0) {
+        let probe = m_getcl();
+        if (probe.isNull()) {
+            return failed(reason, "check failed: probe != NULL\0");
+        }
+        let pp = Ptr.toBorrowMut(probe);
+        pp.len = 20;
+        pp.pkt.len = 20;
+        let rc = arp_resolve(nif, gateway, macp, probe);
+        if (rc != 0 && rc != -EINPROGRESS) {
+            return failed(reason, "check failed: rc == 0 || rc == -EINPROGRESS\0");
+        }
+        if (rc == 0) {
+            m_freem(probe); // already resolved (gateway still cached): arp_resolve took no ownership
+        }
+        var i: u32 = 0;
+        while (i < 50 && !arp_lookup(nif as *netif, gateway, macp)) {
+            thread_sleep_ns(10 * 1000000); // thread_sleep_ms(10)
+            i = i + 1;
+        }
+        if (arp_lookup(nif as *netif, gateway, macp)) {
+            gatewayLine(mac[..]);
+        } else {
+            var ss = scratch();
+            let st = at(mut ss, layoutOf<arp_stats>().size) as *mut arp_stats;
+            arp_get_stats(st);
+            var buffer: [u8; 128] = [0; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("selftest: net-arp: gateway did not answer (requests ");
+            line.decimal(Ptr.toBorrow(st as *arp_stats).requests_sent);
+            line.text(", replies ");
+            line.decimal(Ptr.toBorrow(st as *arp_stats).replies_rcvd);
+            line.text(")");
+            KernelLog.send(LogLevel.Info, line);
+            netif_dump();
+        }
+    }
+    return true;
+}

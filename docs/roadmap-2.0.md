@@ -1016,6 +1016,18 @@ for any format here. `PROCNET_BENCH=1`: /proc/net/tcp with 400 sockets
 32 interfaces 0.92x and 0.86x -- no format string to parse.
 `test-net-login` reads it through BusyBox.
 
+The self-tests (`nettest`, begun 2026-11-04), in batches by area, each
+leaving the rest C: a batch's evidence is the debug boot on both
+architectures (525/525) with each of its tests' log lines what the C's
+were, timings aside, its frames under the kernel's 2 KiB, and the values
+it writes as its own constants asserted in `nettest.c` against the
+headers. The C's shared release machinery (the `nt_*` wrappers and the
+census) stays C until the last batch. Batch 1, `nettest_base.cee`:
+net-mbuf, net-mbufq-double, net-cksum and net-arp; a C struct no
+CeeSafe local holds (a queue, the counters) is built in an aligned,
+zeroed scratch, and a failed check names itself in words rather than a
+line number.
+
 Size: about 3.0x.
 
 ### SA7 Storage: cosmofs, VFS, block and pools
