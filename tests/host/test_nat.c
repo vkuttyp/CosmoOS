@@ -46,6 +46,9 @@
 #include <string.h>
 #include <time.h>
 
+/* nat.c held this, and nat.cee cannot: a lent port must never be one the host's own outbound flows source from. */
+_Static_assert(NAT_PORT_MAX < NET_EPHEMERAL_LO, "NAT ports must not overlap the host ephemeral range");
+
 /* The digest of the C (nat.c, 2026-11-03), which the CeeSafe port gives. */
 #define NAT_DIGEST 0xea7a64d4cbe6636aull
 #define ROUNDS 20000u

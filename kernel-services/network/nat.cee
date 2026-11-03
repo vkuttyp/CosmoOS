@@ -1,0 +1,1269 @@
+// nat.cee - Masquerade (source) NAT and inbound port forwarding over a bounded conntrack table
+// (kernel/include/kernel/net/nat.h; docs/audit/next-subsystem-nat.md, next-subsystem-dnat.md), in CeeSafe: roadmap 2.0
+// SA6. A guest datagram forwarded out the uplink has its private source rewritten to the uplink's address and its
+// transport identifier (TCP/UDP port, ICMP echo id) to a value the NAT lends; the reply, arriving for that value, is
+// rewritten back and forwarded to the guest, as is an ICMP error quoting it. A connection to a forwarded host port is
+// rewritten to its guest, and the guest's reply back. tests/host/test_nat.c holds it to the digest of the C it
+// replaced.
+//
+// The conntrack table and the port-forward rules are two IrqSpinLocks' data (the C's g_nat_lock and g_pf_lock),
+// always taken rules first. Transport checksums are patched incrementally (RFC 1624) as the pseudo-header and the
+// identifier change, on big-endian 16-bit words; the IP header checksum is rebuilt downstream by ipv4_output. Headers
+// are bytes: addresses are kept as they lie in memory (network order, read as little-endian words), and turned into
+// numbers (host order) only where a checksum is patched.
+
+@header("kernel/net/nat.h", "kernel/net/ip.h", "kernel/net/cksum.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/netif.h", "kernel/timer.h")
+extern "C" {
+    struct netif_ip4 {
+        addr: AtomicU32;
+        mask: AtomicU32;
+        gateway: AtomicU32;
+    }
+    struct netif {
+        obj: kobject;
+        flags: AtomicU32;
+        ip4: netif_ip4;
+    }
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        data: *mut u8;
+        pkt: mbuf_pkt;
+    }
+    /// ip.h's header, packed: the fields NAT reads.
+    struct ipv4_hdr {
+        proto: u8;
+        src: u32;
+        dst: u32;
+    }
+    /// inet.h's address: the fields a port question sets.
+    struct netaddr {
+        family: u16;
+        port: u16;
+        v4: u32;
+    }
+    struct nat_pf_rule {
+        proto: u8;
+        host_port: u16;
+        guest_port: u16;
+        guest_ip: u32;
+    }
+    struct nat_flow {
+        kind: u8;
+        proto: u8;
+        est: bool;
+        orig_port: u16;
+        nat_port: u16;
+        peer_port: u16;
+        orig_ip: u32;
+        nat_ip: u32;
+        peer_ip: u32;
+        expires_ns: u64;
+    }
+    struct nat_stats {
+        out_new: u64;
+        out_reuse: u64;
+        out_drop_share: u64;
+        out_drop_table: u64;
+        out_drop_noport: u64;
+        in_translated: u64;
+        in_no_match: u64;
+        in_icmp_error: u64;
+        dnat_in: u64;
+        dnat_reply: u64;
+        dnat_drop_ambiguous: u64;
+        dnat_drop_share: u64;
+        dnat_drop_table: u64;
+        expired: u64;
+        entries: u32;
+    }
+
+    fn clock_now_ns() -> u64;
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn m_pullup(m: *mut mbuf, n: u32) -> *mut mbuf;
+    fn m_adj(m: *mut mbuf, n: i32);
+    fn m_freem(m: *mut mbuf);
+    fn m_cksum_partial(m: *mbuf, off: u32, len: u32, sum: u32) -> u32;
+    fn cksum_fold(sum: u32) -> u16;
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn netparse_l4_view(b: *u8, avail: u32) -> u64;
+    fn netparse_ipv4_quote(q: *u8, ihl: *mut u32) -> bool;
+    fn ipv4_output(m: *mut mbuf, src: u32, dst: u32, proto: u8, ttl: u8) -> i32;
+    fn netif_connected(dst: u32) -> *mut netif;
+    /// Called under the conntrack lock: each takes its own transport's spin lock, never NAT's, and does not sleep.
+    @effects()
+    fn udp_port_in_use(family: u16, port: u16, addr: *netaddr) -> bool;
+    @effects()
+    fn tcp_port_in_use(family: u16, port: u16, addr: *netaddr) -> bool;
+}
+
+// ---- Constants (the C headers') ----
+
+/// nat.h.
+const TABLE_SIZE: usize = 256;
+const PORT_MIN: u32 = 40000;
+const PORT_MAX: u32 = 49151;
+const TIMEOUT_UDP_NS: u64 = 30000000000;
+const TIMEOUT_ICMP_NS: u64 = 30000000000;
+const TIMEOUT_TCP_NS: u64 = 30000000000;
+const TIMEOUT_TCPEST_NS: u64 = 300000000000;
+const PF_MAX: usize = 16;
+const QUOTA_PER_GUEST: u32 = 32;
+const KIND_MASQ: u8 = 0;
+const KIND_DNAT: u8 = 1;
+/// ip.h, tcp.h, netif.h and uapi/cosmo/syscall.h.
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const ICMP_ECHO_REPLY: u8 = 0;
+const ICMP_DEST_UNREACH: u8 = 3;
+const ICMP_ECHO: u8 = 8;
+const ICMP_TIME_EXCEEDED: u8 = 11;
+const ICMP_HLEN: u32 = 8;
+const IPV4_HLEN: u32 = 20;
+const TH_SYN: u8 = 0x02;
+const TH_RST: u8 = 0x04;
+const TH_ACK: u8 = 0x10;
+const NETIF_FORWARD: u32 = 32;
+const NETIF_MASQUERADE: u32 = 64;
+const AF_INET: u16 = 2;
+/// kernel/errno.h.
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const ENOTSUP: i32 = 95;
+
+/// No entry.
+const NONE: usize = 0xffffffff;
+
+// ---- The state ----
+
+struct Entry {
+    inUse: bool;
+    tcpEst: bool;     // a non-SYN segment has passed: the longer timeout
+    dnatSynack: bool; // DNAT: the guest's SYN-ACK has passed back (see dnatIn)
+    kind: u8;
+    proto: u8;
+    origPort: u16; // the guest's source port, or ICMP echo id
+    natPort: u16;  // the value lent on the uplink (MASQ), or the host port dialled (DNAT)
+    origIp: u32;   // the guest
+    natIp: u32;    // the uplink address masqueraded as (MASQ), or the host address dialled (DNAT)
+    peerIp: u32;   // the far side
+    peerPort: u16; // the far side's port; 0 for ICMP
+    expiresNs: u64;
+}
+
+@constant
+fn noEntry() -> Entry =>
+    Entry {
+        inUse: false,
+        tcpEst: false,
+        dnatSynack: false,
+        kind: 0,
+        proto: 0,
+        origPort: 0,
+        natPort: 0,
+        origIp: 0,
+        natIp: 0,
+        peerIp: 0,
+        peerPort: 0,
+        expiresNs: 0,
+    };
+
+struct Table {
+    entries: [Entry; 256];
+    /// The next identifier to try lending.
+    portNext: u32;
+}
+
+static NAT: IrqSpinLock<Table> =
+    IrqSpinLock<Table>.constant("nat\0".ptr as *CChar, Table { entries: [noEntry(); 256], portNext: PORT_MIN });
+
+/// One port-forward rule: a client dialling `hostPort` on any host address is forwarded to guestIp:guestPort.
+struct Pf {
+    inUse: bool;
+    proto: u8;
+    hostPort: u16;
+    guestIp: u32;
+    guestPort: u16;
+}
+
+@constant
+fn noPf() -> Pf => Pf { inUse: false, proto: 0, hostPort: 0, guestIp: 0, guestPort: 0 };
+
+struct PfTable {
+    rules: [Pf; 16];
+}
+
+static PF: IrqSpinLock<PfTable> = IrqSpinLock<PfTable>.constant(
+    "nat-pf\0".ptr as *CChar,
+    PfTable { rules: [noPf(); 16] },
+);
+
+static OUT_NEW: AtomicU64 = AtomicU64.constant(0);
+static OUT_REUSE: AtomicU64 = AtomicU64.constant(0);
+static OUT_DROP_SHARE: AtomicU64 = AtomicU64.constant(0);
+static OUT_DROP_TABLE: AtomicU64 = AtomicU64.constant(0);
+static OUT_DROP_NOPORT: AtomicU64 = AtomicU64.constant(0);
+static IN_TRANSLATED: AtomicU64 = AtomicU64.constant(0);
+static IN_NO_MATCH: AtomicU64 = AtomicU64.constant(0);
+static IN_ICMP_ERROR: AtomicU64 = AtomicU64.constant(0);
+static DNAT_IN: AtomicU64 = AtomicU64.constant(0);
+static DNAT_REPLY: AtomicU64 = AtomicU64.constant(0);
+static DNAT_DROP_AMBIGUOUS: AtomicU64 = AtomicU64.constant(0);
+static DNAT_DROP_SHARE: AtomicU64 = AtomicU64.constant(0);
+static DNAT_DROP_TABLE: AtomicU64 = AtomicU64.constant(0);
+static EXPIRED: AtomicU64 = AtomicU64.constant(0);
+
+fn count(c: borrow AtomicU64) {
+    c.fetchAddWith(1, Ordering.Relaxed);
+}
+
+fn read(c: borrow AtomicU64) -> u64 => c.loadWith(LoadOrdering.Relaxed);
+
+// ---- Bytes and checksums ----
+
+fn be16(b: SliceMut<u8>, at: usize) -> u32 => ((b[at] as u32) << 8) | (b[at + 1] as u32);
+
+fn putBe16(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+/// A u32 as it lies in memory (an address, already in network order).
+fn word(b: SliceMut<u8>, at: usize) -> u32 =>
+    (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) | ((b[at + 3] as u32) << 24);
+
+fn putWord(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// A checksum as C stores the u16 in_cksum and cksum_fold return (already in network order) into two bytes.
+fn putNative16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+/// inet.h's ntohl, an address's number: the byte swap of the targets, all little-endian.
+fn ntohl(v: u32) -> u32 => ((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >> 8) & 0xff00) | (v >> 24);
+
+/// RFC 1624: the checksum field `sum` (its big-endian value) for a 16-bit word changing from `wold` to `wnew`.
+fn patch16(sum: u32, wold: u32, wnew: u32) -> u32 {
+    var x = (sum ^ 0xffff) & 0xffff;
+    x += (wold ^ 0xffff) & 0xffff;
+    x += wnew & 0xffff;
+    while ((x >> 16) != 0) {
+        x = (x & 0xffff) + (x >> 16);
+    }
+    return (x ^ 0xffff) & 0xffff;
+}
+
+/// The same for a 32-bit field (two big-endian words); `old` and `neu` are numbers (host order).
+fn patch32(sum: u32, old: u32, neu: u32) -> u32 =>
+    patch16(patch16(sum, old >> 16, neu >> 16), old & 0xffff, neu & 0xffff);
+
+/// `*p = v`.
+/// Safety: `p` is writable.
+unsafe fn store32(p: *mut u32, v: u32) {
+    let s = SliceMut.fromRaw(p, 1);
+    s[0] = v;
+}
+
+// ---- The table (under its lock) ----
+
+fn timeout(e: borrow Entry) -> u64 {
+    if (e.proto == IPPROTO_TCP) {
+        return if (e.tcpEst) TIMEOUT_TCPEST_NS else TIMEOUT_TCP_NS;
+    }
+    return if (e.proto == IPPROTO_UDP) TIMEOUT_UDP_NS else TIMEOUT_ICMP_NS;
+}
+
+fn live(e: borrow Entry, now: u64) -> bool => e.inUse && now < e.expiresNs;
+
+/// An outbound flow's entry (the guest's five-tuple), or NONE.
+fn findOut(t: borrow Table, proto: u8, origIp: u32, origPort: u16, peerIp: u32, peerPort: u16, now: u64) -> usize {
+    for (i in 0..TABLE_SIZE) {
+        let e = borrow t.entries[i];
+        if (live(e, now) && e.kind == KIND_MASQ && e.proto == proto && e.origIp == origIp && e.origPort == origPort &&
+            e.peerIp == peerIp && e.peerPort == peerPort) {
+            return i;
+        }
+    }
+    return NONE;
+}
+
+/// The reply's entry: keyed by what a reply carries (our address and lent identifier, the far side as source).
+fn findReply(t: borrow Table, proto: u8, natIp: u32, natPort: u16, peerIp: u32, peerPort: u16, now: u64) -> usize {
+    for (i in 0..TABLE_SIZE) {
+        let e = borrow t.entries[i];
+        if (live(e, now) && e.kind == KIND_MASQ && e.proto == proto && e.natIp == natIp && e.natPort == natPort &&
+            e.peerIp == peerIp && e.peerPort == peerPort) {
+            return i;
+        }
+    }
+    return NONE;
+}
+
+/// Whether some live entry already lends this (proto, natIp, natPort).
+fn portTaken(t: borrow Table, proto: u8, natIp: u32, natPort: u16, now: u64) -> bool {
+    for (i in 0..TABLE_SIZE) {
+        let e = borrow t.entries[i];
+        if (live(e, now) && e.proto == proto && e.natIp == natIp && e.natPort == natPort) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether a host transport socket is bound to this (proto, natIp, port): the NAT must not lend a port a host service
+/// holds, or that service's reply would be matched here and redirected to the guest.
+/// Safety: the port questions read their own tables under their own locks.
+fn localPortTaken(proto: u8, natIp: u32, port: u16) -> bool {
+    var words: [u32; 5] = [0; 5];
+    let a = borrow mut words as *mut [u32; 5] as *mut netaddr;
+    unsafe {
+        let b = Ptr.toBorrowMut(a);
+        b.family = AF_INET;
+        b.v4 = natIp;
+        if (proto == IPPROTO_UDP) {
+            return udp_port_in_use(AF_INET, port, a as *netaddr);
+        }
+        if (proto == IPPROTO_TCP) {
+            return tcp_port_in_use(AF_INET, port, a as *netaddr);
+        }
+    }
+    return false; // ICMP ids have no host namespace to collide with
+}
+
+/// A reclaimable slot (free or expired), or NONE when the table is full.
+fn freeSlot(t: borrow Table, now: u64) -> usize {
+    for (i in 0..TABLE_SIZE) {
+        if (!live(borrow t.entries[i], now)) {
+            return i;
+        }
+    }
+    return NONE;
+}
+
+/// An established inbound DNAT flow (client -> host:P), or NONE.
+fn findDnatIn(
+    t: borrow Table,
+    proto: u8,
+    hostIp: u32,
+    hostPort: u16,
+    clientIp: u32,
+    clientPort: u16,
+    now: u64,
+) -> usize {
+    for (i in 0..TABLE_SIZE) {
+        let e = borrow t.entries[i];
+        if (live(e, now) && e.kind == KIND_DNAT && e.proto == proto && e.natIp == hostIp && e.natPort == hostPort &&
+            e.peerIp == clientIp && e.peerPort == clientPort) {
+            return i;
+        }
+    }
+    return NONE;
+}
+
+/// The guest side of a DNAT flow (guest:Q -> client), for the reply; NONE if none.
+fn findDnatReply(
+    t: borrow Table,
+    proto: u8,
+    guestIp: u32,
+    guestPort: u16,
+    clientIp: u32,
+    clientPort: u16,
+    now: u64,
+) -> usize {
+    for (i in 0..TABLE_SIZE) {
+        let e = borrow t.entries[i];
+        if (live(e, now) && e.kind == KIND_DNAT && e.proto == proto && e.origIp == guestIp &&
+            e.origPort == guestPort && e.peerIp == clientIp && e.peerPort == clientPort) {
+            return i;
+        }
+    }
+    return NONE;
+}
+
+/// The entries a guest holds: its address is always the orig side, of a masquerade and of a DNAT flow alike, so one
+/// count bounds its whole footprint in the shared table.
+fn guestCount(t: borrow Table, guestIp: u32, now: u64) -> u32 {
+    var n: u32 = 0;
+    for (i in 0..TABLE_SIZE) {
+        if (live(borrow t.entries[i], now) && t.entries[i].origIp == guestIp) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// A DNAT entry for a new inbound flow, or NONE: its reverse key already in use (the guest's reply carries no host
+/// port, so two such flows could not be told apart), the target guest over its share, or the table full.
+fn dnatCreate(
+    t: borrow mut Table,
+    proto: u8,
+    hostIp: u32,
+    hostPort: u16,
+    clientIp: u32,
+    clientPort: u16,
+    guestIp: u32,
+    guestPort: u16,
+    now: u64,
+) -> usize {
+    if (findDnatReply(t, proto, guestIp, guestPort, clientIp, clientPort, now) != NONE) {
+        count(borrow DNAT_DROP_AMBIGUOUS);
+        return NONE;
+    }
+    if (guestCount(t, guestIp, now) >= QUOTA_PER_GUEST) {
+        count(borrow DNAT_DROP_SHARE);
+        return NONE;
+    }
+    let i = freeSlot(t, now);
+    if (i == NONE) {
+        count(borrow DNAT_DROP_TABLE);
+        return NONE;
+    }
+    let e = borrow mut t.entries[i];
+    e.inUse = true;
+    e.tcpEst = false;
+    e.dnatSynack = false;
+    e.kind = KIND_DNAT;
+    e.proto = proto;
+    e.natIp = hostIp; // what the client dialled
+    e.natPort = hostPort;
+    e.origIp = guestIp; // where it is forwarded
+    e.origPort = guestPort;
+    e.peerIp = clientIp;
+    e.peerPort = clientPort;
+    e.expiresNs = now + timeout(e);
+    return i;
+}
+
+/// A free entry with a NAT identifier lent, or NONE when the table is full or no identifier is free. The guest's own
+/// port is preferred when it is free (it helps protocols that assume it).
+fn alloc(t: borrow mut Table, proto: u8, natIp: u32, want: u16, now: u64) -> usize {
+    let slot = freeSlot(t, now);
+    if (slot == NONE) {
+        count(borrow OUT_DROP_TABLE);
+        return NONE;
+    }
+    var port: u32 = 0;
+    if (want as u32 >= PORT_MIN && want as u32 <= PORT_MAX && !portTaken(t, proto, natIp, want, now) &&
+        !localPortTaken(proto, natIp, want)) {
+        port = want as u32;
+    }
+    var tries: u32 = 0;
+    while (port == 0 && tries < PORT_MAX - PORT_MIN + 1) {
+        var cand = t.portNext;
+        t.portNext += 1;
+        if (t.portNext > PORT_MAX) {
+            t.portNext = PORT_MIN;
+        }
+        if (cand < PORT_MIN) {
+            cand = PORT_MIN;
+        }
+        if (!portTaken(
+            t,
+            proto,
+            natIp,
+            truncate<u16>(cand),
+            now,
+        ) && !localPortTaken(proto, natIp, truncate<u16>(cand))) {
+            port = cand;
+        }
+        tries += 1;
+    }
+    if (port == 0) {
+        count(borrow OUT_DROP_NOPORT);
+        return NONE;
+    }
+    let e = borrow mut t.entries[slot];
+    if (e.inUse) {
+        count(borrow EXPIRED); // reclaiming an expired slot
+    }
+    e.inUse = true;
+    e.tcpEst = false;
+    e.dnatSynack = false;
+    e.kind = KIND_MASQ;
+    e.proto = proto;
+    e.natIp = natIp;
+    e.natPort = truncate<u16>(port);
+    e.origIp = 0;
+    e.origPort = 0;
+    e.peerIp = 0;
+    e.peerPort = 0;
+    e.expiresNs = 0;
+    return slot;
+}
+
+// ---- Outbound ----
+
+/// nat.h's nat_out: a DNAT reply's source rewritten back to what the client dialled, else a flow from a masquerading
+/// interface leaving the uplink off its subnet masqueraded. *newSrc: the source output_on stamps. 0, or -ENOSPC /
+/// -ENOTSUP when a needed entry cannot be made or the protocol cannot be masqueraded (the caller drops the packet).
+/// Safety: `m`'s first buffer holds the IP header and the transport header's minimum (ipv4_forward pulls them up);
+/// `iph` is that header; `outNif` is referenced; `newSrc` is writable.
+@export("nat_out")
+unsafe fn natOut(
+    inNif: *mut netif,
+    inFlags: u32,
+    outNif: *mut netif,
+    outFlags: u32,
+    m: *mut mbuf,
+    iph: *ipv4_hdr,
+    ihl: u32,
+    newSrc: *mut u32,
+) -> i32 {
+    let h = Ptr.toBorrow(iph);
+    let proto = h.proto;
+    let src = h.src;
+    let dst = h.dst;
+    store32(newSrc, src);
+
+    // A DNAT reply takes precedence over masquerade: a forwarded guest packet that is the guest side of a
+    // port-forward has its source rewritten back to host:P -- even on the egress subnet, where a two-tap client sits.
+    if (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
+        let l4len: usize = if (proto == IPPROTO_TCP) 20 else 8;
+        let l4 = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data.add(ihl as usize), l4len);
+        let w = netparse_l4_view(
+            Ptr.toBorrow(m as *mbuf).data.add(ihl as usize) as *u8,
+            if (proto == IPPROTO_TCP) 14 else 8,
+        );
+        let sport = truncate<u16>(w);       // guest port Q
+        let dport = truncate<u16>(w >> 16); // the client's port
+        let flags = truncate<u8>(w >> 56);
+        let now = clock_now_ns();
+        var have = false;
+        var natIp: u32 = 0;
+        var natPort: u16 = 0;
+        {
+            var guard = NAT.lock();
+            let t = guard.data();
+            let i = findDnatReply(t, proto, src, sport, dst, dport, now);
+            if (i != NONE) {
+                let e = borrow mut t.entries[i];
+                if (proto == IPPROTO_TCP && (flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK)) {
+                    e.dnatSynack = true; // the guest accepted; the client's ACK completes it
+                }
+                e.expiresNs = now + timeout(e);
+                natIp = e.natIp;
+                natPort = e.natPort;
+                have = true;
+            }
+        }
+        if (have) {
+            let coff: usize = if (proto == IPPROTO_TCP) 16 else 6;
+            let ck = be16(l4, coff);
+            if (!(proto == IPPROTO_UDP && ck == 0)) {
+                putBe16(l4, coff, patch16(patch32(ck, ntohl(src), ntohl(natIp)), sport as u32, natPort as u32));
+            }
+            putBe16(l4, 0, natPort as u32); // source port Q -> P
+            store32(newSrc, natIp);
+            count(borrow DNAT_REPLY);
+            return 0;
+        }
+    }
+
+    // Masquerade only flows from a NETIF_MASQUERADE interface leaving an interface whose subnet does not hold the
+    // source, toward the uplink: a flow leaving another forwarding tap is guest-to-guest and keeps its source.
+    let o = Ptr.toBorrow(outNif as *netif);
+    let outAddr = o.ip4.addr.loadWith(LoadOrdering.Relaxed);
+    let outMask = o.ip4.mask.loadWith(LoadOrdering.Relaxed);
+    let onEgress = outAddr != 0 && outMask != 0 && ((src ^ outAddr) & outMask) == 0;
+    if ((inFlags & NETIF_MASQUERADE) == 0 || onEgress || outAddr == 0 || (outFlags & NETIF_FORWARD) != 0) {
+        return 0;
+    }
+
+    if (proto != IPPROTO_UDP && proto != IPPROTO_TCP && proto != IPPROTO_ICMP) {
+        return -ENOTSUP;
+    }
+    let l4len: usize = if (proto == IPPROTO_TCP) 20 else 8;
+    let l4 = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data.add(ihl as usize), l4len);
+    let w = netparse_l4_view(
+        Ptr.toBorrow(m as *mbuf).data.add(ihl as usize) as *u8,
+        if (proto == IPPROTO_TCP) 14 else 8,
+    );
+    var origPort = truncate<u16>(w);
+    var peerPort = truncate<u16>(w >> 16);
+    var foff: usize = 0;
+    var coff: usize = 6;
+    var est = false;
+    if (proto == IPPROTO_TCP) {
+        coff = 16;
+        let flags = truncate<u8>(w >> 56);
+        est = (flags & TH_ACK) != 0 && (flags & TH_SYN) == 0;
+    } else if (proto == IPPROTO_ICMP) {
+        if (truncate<u8>(w >> 48) != ICMP_ECHO) {
+            return -ENOTSUP; // only echo is masqueraded
+        }
+        origPort = truncate<u16>(w >> 32);
+        peerPort = 0;
+        foff = 4;
+        coff = 2;
+    }
+
+    let now = clock_now_ns();
+    var fresh = false;
+    var natPort: u16 = 0;
+    {
+        var guard = NAT.lock();
+        let t = guard.data();
+        var i = findOut(t, proto, src, origPort, dst, peerPort, now);
+        if (i == NONE) {
+            // No guest may hold more than its share, so one guest's flood drops only its own new flows; the count
+            // spans its outbound flows and the inbound flows to its forwards alike.
+            if (guestCount(t, src, now) >= QUOTA_PER_GUEST) {
+                count(borrow OUT_DROP_SHARE);
+                return -ENOSPC;
+            }
+            i = alloc(t, proto, outAddr, origPort, now);
+            if (i == NONE) {
+                return -ENOSPC;
+            }
+            let e = borrow mut t.entries[i];
+            e.origIp = src;
+            e.origPort = origPort;
+            e.peerIp = dst;
+            e.peerPort = peerPort;
+            fresh = true;
+        }
+        let e = borrow mut t.entries[i];
+        if (est) {
+            e.tcpEst = true;
+        }
+        natPort = e.natPort;
+        e.expiresNs = now + timeout(e);
+    }
+    count(if (fresh) borrow OUT_NEW else borrow OUT_REUSE);
+
+    // The identifier and, for the pseudo-header protocols, the source address patched into the transport checksum,
+    // then the field. ICMP has no pseudo-header; a UDP datagram with no checksum (0) is left unchecked.
+    let ck = be16(l4, coff);
+    if (!(proto == IPPROTO_UDP && ck == 0)) {
+        let addressed = if (proto == IPPROTO_ICMP) ck else patch32(ck, ntohl(src), ntohl(outAddr));
+        putBe16(l4, coff, patch16(addressed, origPort as u32, natPort as u32));
+    }
+    putBe16(l4, foff, natPort as u32);
+    store32(newSrc, outAddr);
+    return 0;
+}
+
+// ---- Inbound ----
+
+/// The translated datagram forwarded to `dst` from `src`, its IP header stripped and its TTL decremented; consumed.
+/// Safety: `m` is a packet the caller hands over, `ihl` its header's length and `total` its datagram's.
+unsafe fn forwardTo(m: *mut mbuf, ihl: u32, total: u16, src: u32, dst: u32, proto: u8, ttl: u8) {
+    if (ttl <= 1) {
+        m_freem(m); // would expire in transit: drop the reply
+        return;
+    }
+    let len = Ptr.toBorrow(m as *mbuf).pkt.len;
+    if ((total as u32) < len) {
+        m_adj(m, 0 - truncate<i32>(len - total as u32));
+    }
+    m_adj(m, truncate<i32>(ihl));
+    ipv4_output(m, src, dst, proto, ttl - 1);
+}
+
+/// An ICMP error (type 3 or 11) quoting a datagram we masqueraded, translated back to the guest: true (m consumed)
+/// when handled.
+/// Safety: `m` holds the whole outer IP header, `ihl` and `total` describe it.
+unsafe fn icmpError(packet: *mut mbuf, ihl: u32, total: u16) -> bool {
+    let icmpOff = ihl;
+    var hdr: [u8; 36] = [0; 36]; // the ICMP header, the quoted IPv4 header's minimum, 8 bytes of its transport
+    if (!m_copydata(packet as *mbuf, icmpOff, 36, borrow mut hdr as *mut [u8; 36] as *mut void)) {
+        return false;
+    }
+    let quote = hdr[ICMP_HLEN as usize..];
+    var qihl: u32 = 0;
+    if (!netparse_ipv4_quote(quote.ptr, borrow mut qihl as *mut u32)) {
+        return false;
+    }
+    // The quote is the packet we sent (its source our address); its transport source identifier the value we lent.
+    var ql4: [u8; 8] = [0; 8];
+    if (!m_copydata(packet as *mbuf, icmpOff + ICMP_HLEN + qihl, 8, borrow mut ql4 as *mut [u8; 8] as *mut void)) {
+        return false;
+    }
+    let qproto = quote[9];
+    let qsrc = (quote[12] as u32) | ((quote[13] as u32) << 8) | ((quote[14] as u32) << 16) | ((quote[15] as u32) << 24);
+    let qdst = (quote[16] as u32) | ((quote[17] as u32) << 8) | ((quote[18] as u32) << 16) | ((quote[19] as u32) << 24);
+    let w = netparse_l4_view(borrow ql4 as *[u8; 8] as *u8, 8);
+    let natId = if (qproto == IPPROTO_ICMP) truncate<u16>(w >> 32) else truncate<u16>(w);
+    let peerPort = if (qproto == IPPROTO_ICMP) 0 else truncate<u16>(w >> 16);
+
+    let now = clock_now_ns();
+    var found = false;
+    var origIp: u32 = 0;
+    var origPort: u16 = 0;
+    {
+        var guard = NAT.lock();
+        let t = guard.data();
+        let i = findReply(t, qproto, qsrc, natId, qdst, peerPort, now);
+        if (i != NONE) {
+            origIp = t.entries[i].origIp;
+            origPort = t.entries[i].origPort;
+            found = true;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+
+    // The quoted datagram rewritten so the guest recognises its own packet: its source -> the guest, its transport
+    // source identifier -> the guest's; the inner IP checksum and the outer ICMP checksum recomputed.
+    let pulled = icmpOff + ICMP_HLEN + qihl + 8;
+    let m = m_pullup(packet, pulled);
+    if (m.isNull()) {
+        return true; // ours now; dropped
+    }
+    let base = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, pulled as usize);
+    let inq = (icmpOff + ICMP_HLEN) as usize;
+    putWord(base, inq + 12, origIp);
+    putNative16(base, inq + 10, 0);
+    let inner = in_cksum(Ptr.toBorrow(m as *mbuf).data.add(inq) as *void, qihl as usize);
+    putNative16(base, inq + 10, inner);
+    let inl4 = inq + qihl as usize;
+    let idAt = if (qproto == IPPROTO_ICMP) inl4 + 4 else inl4;
+    putBe16(base, idAt, origPort as u32);
+    // Over the chain: only the quote was pulled up, and the rest of the message may lie in the mbufs after it.
+    let icmpLen = truncate<u16>((total as u32).wrappingSub(ihl));
+    putNative16(base, icmpOff as usize + 2, 0);
+    putNative16(base, icmpOff as usize + 2, cksum_fold(m_cksum_partial(m as *mbuf, icmpOff, icmpLen as u32, 0)));
+
+    let outerSrc = word(base, 12);
+    let ttl = base[8];
+    count(borrow IN_ICMP_ERROR);
+    count(borrow IN_TRANSLATED);
+    forwardTo(m, ihl, total, outerSrc, origIp, IPPROTO_ICMP, ttl);
+    return true;
+}
+
+/// Inbound DNAT: a TCP/UDP packet to one of our addresses whose `hostPort` matched no masquerade reply. If a
+/// port-forward rule or an established DNAT flow claims it, its destination is rewritten to the guest and it is
+/// forwarded out the tap: true (m consumed).
+/// Safety: as icmpError; `hostIp` and `clientIp` are its destination and source.
+unsafe fn dnatIn(
+    packet: *mut mbuf,
+    hostIp: u32,
+    clientIp: u32,
+    ihl: u32,
+    total: u16,
+    proto: u8,
+    clientPort: u16,
+    hostPort: u16,
+) -> bool {
+    let now = clock_now_ns();
+    // Established means the handshake completed in order: the guest's SYN-ACK went back (natOut records it), then the
+    // client's ACK without SYN arrived. The opener is an outside party, so neither half alone earns the longer hold.
+    var ack = false;
+    if (proto == IPPROTO_TCP) {
+        var fl: [u8; 1] = [0; 1];
+        ack = m_copydata(packet as *mbuf, ihl + 13, 1, borrow mut fl as *mut [u8; 1] as *mut void) &&
+            (fl[0] & TH_ACK) != 0 && (fl[0] & (TH_SYN | TH_RST)) == 0;
+    }
+
+    // The rules' lock held across the conntrack create: a delete reaps under it, so it cannot complete between
+    // reading the rule here and creating the entry, which would resurrect a deleted forward. Rules, then conntrack.
+    var hasRule = false;
+    var have = false;
+    var origIp: u32 = 0;
+    var origPort: u16 = 0;
+    {
+        var pfGuard = PF.lock();
+        let pf = pfGuard.data();
+        var guestIp: u32 = 0;
+        var guestPort: u16 = 0;
+        for (i in 0..PF_MAX) {
+            if (!hasRule && pf.rules[i].inUse && pf.rules[i].proto == proto && pf.rules[i].hostPort == hostPort) {
+                guestIp = pf.rules[i].guestIp;
+                guestPort = pf.rules[i].guestPort;
+                hasRule = true;
+            }
+        }
+        var guard = NAT.lock();
+        let t = guard.data();
+        var i = findDnatIn(t, proto, hostIp, hostPort, clientIp, clientPort, now);
+        if (i == NONE && hasRule) {
+            i = dnatCreate(t, proto, hostIp, hostPort, clientIp, clientPort, guestIp, guestPort, now);
+        }
+        if (i != NONE) {
+            let e = borrow mut t.entries[i];
+            if (ack && e.dnatSynack) {
+                e.tcpEst = true;
+            }
+            e.expiresNs = now + timeout(e); // refreshed per packet
+            origIp = e.origIp;
+            origPort = e.origPort;
+            have = true;
+        }
+    }
+    if (!have) {
+        if (hasRule) {
+            // Forwarded, but no flow could be made (counted in dnatCreate): meant for the guest, not for a host
+            // service that binds the same port, so dropped rather than leaked to local delivery.
+            m_freem(packet);
+            return true;
+        }
+        count(borrow IN_NO_MATCH);
+        return false; // no rule and no flow: delivered to the host
+    }
+
+    let l4min: u32 = if (proto == IPPROTO_TCP) 20 else 8;
+    let m = m_pullup(packet, ihl + l4min);
+    if (m.isNull()) {
+        return true; // ours; dropped
+    }
+    let base = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, (ihl + l4min) as usize);
+    let mp = ihl as usize;
+    let field: usize = if (proto == IPPROTO_TCP) 16 else 6;
+    let coff = mp + field;
+    let ck = be16(base, coff);
+    if (!(proto == IPPROTO_UDP && ck == 0)) {
+        let addressed = patch32(ck, ntohl(word(base, 16)), ntohl(origIp)); // host -> guest
+        let dialled = be16(base, mp + 2);
+        putBe16(base, coff, patch16(addressed, dialled, origPort as u32)); // P -> Q
+    }
+    putBe16(base, mp + 2, origPort as u32); // dport -> Q
+    let ttl = base[8];
+    count(borrow DNAT_IN);
+    forwardTo(m, ihl, total, clientIp, origIp, proto, ttl);
+    return true;
+}
+
+/// nat.h's nat_in: a datagram to one of our addresses -- the reply to a masqueraded flow, an ICMP error quoting one,
+/// or a connection to a forwarded port -- translated and forwarded to its guest: true (m consumed). False when it is
+/// not NAT traffic and the host delivers it normally; `m` is then untouched.
+/// Safety: `m` is a packet the caller hands over (on true) whose IP header `iph`, `ihl` and `total` describe.
+@export("nat_in")
+unsafe fn natIn(nif: *mut netif, packet: *mut mbuf, iph: *ipv4_hdr, ihl: u32, total: u16) -> bool {
+    let h = Ptr.toBorrow(iph);
+    let proto = h.proto;
+    let hsrc = h.src;
+    let hdst = h.dst;
+    if (proto != IPPROTO_UDP && proto != IPPROTO_TCP && proto != IPPROTO_ICMP) {
+        return false;
+    }
+    var l4: [u8; 8] = [0; 8];
+    if (!m_copydata(packet as *mbuf, ihl, 8, borrow mut l4 as *mut [u8; 8] as *mut void)) {
+        return false;
+    }
+    let w = netparse_l4_view(borrow l4 as *[u8; 8] as *u8, 8);
+    let icmpType = truncate<u8>(w >> 48);
+
+    // An ICMP message we might translate must pass the checksum check the normal path applies: the error path
+    // recomputes it wholesale, which would launder a corrupt message for the guest. A bad one is left to be dropped.
+    if (proto == IPPROTO_ICMP) {
+        let icmpLen = truncate<u16>((total as u32).wrappingSub(ihl));
+        if (cksum_fold(m_cksum_partial(packet as *mbuf, ihl, icmpLen as u32, 0)) != 0) {
+            return false;
+        }
+        if (icmpType == ICMP_DEST_UNREACH || icmpType == ICMP_TIME_EXCEEDED) {
+            return icmpError(packet, ihl, total);
+        }
+        if (icmpType != ICMP_ECHO_REPLY) {
+            return false;
+        }
+    }
+    let natPort = if (proto == IPPROTO_ICMP) truncate<u16>(w >> 32) else truncate<u16>(w >> 16); // the lent id
+    let peerPort = if (proto == IPPROTO_ICMP) 0 else truncate<u16>(w);                           // the reply's source port
+
+    let now = clock_now_ns();
+    var found = false;
+    var origIp: u32 = 0;
+    var origPort: u16 = 0;
+    {
+        var guard = NAT.lock();
+        let t = guard.data();
+        let i = findReply(t, proto, hdst, natPort, hsrc, peerPort, now);
+        if (i != NONE) {
+            let e = borrow mut t.entries[i];
+            if (proto == IPPROTO_TCP) {
+                e.tcpEst = true;
+            }
+            e.expiresNs = now + timeout(e);
+            origIp = e.origIp;
+            origPort = e.origPort;
+            found = true;
+        }
+    }
+    if (!found) {
+        // Not a masquerade reply: a connection into a guest, on a forwarded port?
+        if (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
+            return dnatIn(packet, hdst, hsrc, ihl, total, proto, peerPort, natPort);
+        }
+        count(borrow IN_NO_MATCH);
+        return false;
+    }
+
+    // Commit: the transport header pulled up and its destination rewritten back to the guest, its checksum patched.
+    let l4min: u32 = if (proto == IPPROTO_TCP) 20 else 8;
+    let m = m_pullup(packet, ihl + l4min);
+    if (m.isNull()) {
+        return true; // ours; dropped
+    }
+    let base = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, (ihl + l4min) as usize);
+    let mp = ihl as usize;
+    let oldDst = ntohl(word(base, 16));
+    let newDst = ntohl(origIp);
+    if (proto == IPPROTO_UDP) {
+        let ck = be16(base, mp + 6);
+        if (ck != 0) {
+            let natPortWas = be16(base, mp + 2);
+            putBe16(base, mp + 6, patch16(patch32(ck, oldDst, newDst), natPortWas, origPort as u32));
+        }
+        putBe16(base, mp + 2, origPort as u32); // dport
+    } else if (proto == IPPROTO_TCP) {
+        let ck = be16(base, mp + 16);
+        let natPortWas = be16(base, mp + 2);
+        putBe16(base, mp + 16, patch16(patch32(ck, oldDst, newDst), natPortWas, origPort as u32));
+        putBe16(base, mp + 2, origPort as u32);
+    } else {
+        // An ICMP echo reply: the id at +4, the checksum at +2.
+        let ck = be16(base, mp + 2);
+        let idWas = be16(base, mp + 4);
+        putBe16(base, mp + 2, patch16(ck, idWas, origPort as u32));
+        putBe16(base, mp + 4, origPort as u32);
+    }
+    let peer = word(base, 12);
+    let ttl = base[8];
+    count(borrow IN_TRANSLATED);
+    forwardTo(m, ihl, total, peer, origIp, proto, ttl);
+    return true;
+}
+
+// ---- Port forwarding ----
+
+/// nat.h's nat_pf_clear: every rule, and every DNAT entry the rules made, under rules -> conntrack as a delete is, so
+/// a cleared forward translates nothing more.
+@export("nat_pf_clear")
+fn pfClear() {
+    var pfGuard = PF.lock();
+    let pf = pfGuard.data();
+    pf.rules = [noPf(); 16];
+    var guard = NAT.lock();
+    let t = guard.data();
+    for (i in 0..TABLE_SIZE) {
+        if (t.entries[i].inUse && t.entries[i].kind == KIND_DNAT) {
+            t.entries[i].inUse = false;
+        }
+    }
+}
+
+/// nat.h's nat_pf_add: 0, -EINVAL (a bad field, or the target not on a guest tap's subnet), -EEXIST or -ENOSPC.
+/// Safety: netif_connected returns a referenced interface or null.
+@export("nat_pf_add")
+fn pfAdd(proto: u8, hostPort: u16, guestIp: u32, guestPort: u16) -> i32 {
+    if ((proto != IPPROTO_TCP && proto != IPPROTO_UDP) || hostPort == 0 || guestPort == 0 || guestIp == 0) {
+        return -EINVAL;
+    }
+    // The target must sit on a guest tap's own subnet, a connected interface that forwards: a rule pointing at the
+    // uplink or a peer would relay a host port to another machine on the real network.
+    var onGuestTap = false;
+    unsafe {
+        let n = netif_connected(guestIp);
+        if (!n.isNull()) {
+            onGuestTap = (Ptr.toBorrow(n as *netif).flags.loadWith(LoadOrdering.Relaxed) & NETIF_FORWARD) != 0;
+            kobject_put(borrow mut Ptr.toBorrowMut(n).obj as *mut kobject); // netif_put
+        }
+    }
+    if (!onGuestTap) {
+        return -EINVAL;
+    }
+    var guard = PF.lock();
+    let pf = guard.data();
+    var free = NONE;
+    for (i in 0..PF_MAX) {
+        if (pf.rules[i].inUse) {
+            if (pf.rules[i].proto == proto && pf.rules[i].hostPort == hostPort) {
+                return -EEXIST; // (proto, hostPort) is already bound
+            }
+        } else if (free == NONE) {
+            free = i;
+        }
+    }
+    if (free == NONE) {
+        return -ENOSPC;
+    }
+    pf.rules[free] = Pf { inUse: true, proto: proto, hostPort: hostPort, guestIp: guestIp, guestPort: guestPort };
+    return 0;
+}
+
+/// nat.h's nat_pf_del: the rule bound to (proto, hostPort) removed and its DNAT entries reaped, under the rules' lock
+/// together so a concurrent dnatIn cannot make a fresh entry from it in between. False if there is none.
+@export("nat_pf_del")
+fn pfDel(proto: u8, hostPort: u16) -> bool {
+    var pfGuard = PF.lock();
+    let pf = pfGuard.data();
+    var found = false;
+    for (i in 0..PF_MAX) {
+        if (!found && pf.rules[i].inUse && pf.rules[i].proto == proto && pf.rules[i].hostPort == hostPort) {
+            pf.rules[i].inUse = false;
+            found = true;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    var guard = NAT.lock();
+    let t = guard.data();
+    for (i in 0..TABLE_SIZE) {
+        let e = borrow mut t.entries[i];
+        if (e.inUse && e.kind == KIND_DNAT && e.proto == proto && e.natPort == hostPort) {
+            e.inUse = false;
+        }
+    }
+    return true;
+}
+
+/// nat.h's nat_guest_purge: every rule targeting the guest and every entry whose guest side it is, under the rules'
+/// lock across both so a create cannot slip one back in mid-purge.
+@export("nat_guest_purge")
+fn guestPurge(guestIp: u32) {
+    var pfGuard = PF.lock();
+    let pf = pfGuard.data();
+    for (i in 0..PF_MAX) {
+        if (pf.rules[i].inUse && pf.rules[i].guestIp == guestIp) {
+            pf.rules[i].inUse = false;
+        }
+    }
+    var guard = NAT.lock();
+    let t = guard.data();
+    for (i in 0..TABLE_SIZE) {
+        if (t.entries[i].inUse && t.entries[i].origIp == guestIp) {
+            t.entries[i].inUse = false; // the guest side: masquerade and DNAT both
+        }
+    }
+}
+
+/// nat.h's nat_pf_list: the live rules; how many were written.
+/// Safety: `out` has room for `max`.
+@export("nat_pf_list")
+unsafe fn pfList(out: *mut nat_pf_rule, max: u32) -> u32 {
+    var n: u32 = 0;
+    var guard = PF.lock();
+    let pf = guard.data();
+    for (i in 0..PF_MAX) {
+        if (n < max && pf.rules[i].inUse) {
+            let o = Ptr.toBorrowMut(out.add(n as usize));
+            o.proto = pf.rules[i].proto;
+            o.host_port = pf.rules[i].hostPort;
+            o.guest_port = pf.rules[i].guestPort;
+            o.guest_ip = pf.rules[i].guestIp;
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// The byte at `at` of the configuration, or 0 past its end (the C string's terminator).
+fn at(s: Slice<u8>, i: usize) -> u8 => if (i < s.length) s[i] else 0;
+
+fn isDigit(c: u8) -> bool => c >= 48 && c <= 57;
+
+/// A decimal in [0, max] at *p, advancing *p past it; false (with *p unmoved) on none or overflow.
+fn pfNum(s: Slice<u8>, p: borrow mut usize, out: borrow mut u32, max: u32) -> bool {
+    var i: usize = p;
+    if (!isDigit(at(s, i))) {
+        return false;
+    }
+    var v: u32 = 0;
+    while (isDigit(at(s, i))) {
+        v = v * 10 + (at(s, i) - 48) as u32;
+        i += 1;
+        if (v > max) {
+            return false;
+        }
+    }
+    p = i;
+    out = v;
+    return true;
+}
+
+/// `a.b.c.d` at *p, advancing *p (as far as it parsed, on failure); the address as it lies in memory.
+fn pfIp(s: Slice<u8>, p: borrow mut usize, out: borrow mut u32) -> bool {
+    var o: [u32; 4] = [0; 4];
+    for (k in 0..o.length) {
+        var v: u32 = 0;
+        if (!pfNum(s, p, borrow mut v, 255)) {
+            return false;
+        }
+        o[k] = v;
+        if (k < 3) {
+            if (at(s, p) != 46) {
+                return false;
+            }
+            p += 1;
+        }
+    }
+    out = o[0] | (o[1] << 8) | (o[2] << 16) | (o[3] << 24);
+    return true;
+}
+
+/// Whether the configuration has `word` at `i`.
+fn hasAt(s: Slice<u8>, i: usize, w: StringView) -> bool {
+    let b = w.bytes();
+    for (k in 0..b.length) {
+        if (at(s, i + k) != b[k]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The rules in a configuration string, `proto:hostport:guestaddr:guestport[,...]` (proto tcp|udp), each added; a
+/// rule already bound or targeting a tap that is not up is skipped, a malformed one reported and skipped.
+/// Safety: `cfg` is null or a zero-terminated string.
+unsafe fn pfParseApply(cfg: *CChar) {
+    if (cfg.isNull()) {
+        return;
+    }
+    let bytes = cfg as *u8;
+    var len: usize = 0;
+    while (Slice.fromRaw(bytes.add(len), 1)[0] != 0) {
+        len += 1;
+    }
+    let s = Slice.fromRaw(bytes, len);
+    var p: usize = 0;
+    while (p < len) {
+        var proto: u8 = 0;
+        if (hasAt(s, p, "tcp:")) {
+            proto = IPPROTO_TCP;
+            p += 4;
+        } else if (hasAt(s, p, "udp:")) {
+            proto = IPPROTO_UDP;
+            p += 4;
+        }
+        var hport: u32 = 0;
+        var gip: u32 = 0;
+        var gport: u32 = 0;
+        var ok = proto != 0 && pfNum(s, borrow mut p, borrow mut hport, 65535) && at(s, p) == 58;
+        if (ok) {
+            p += 1;
+            ok = pfIp(s, borrow mut p, borrow mut gip) && at(s, p) == 58;
+        }
+        if (ok) {
+            p += 1;
+            ok = pfNum(s, borrow mut p, borrow mut gport, 65535);
+        }
+        if (ok) {
+            pfAdd(proto, truncate<u16>(hport), gip, truncate<u16>(gport)); // a duplicate or a tap not yet up: skipped
+        } else {
+            var buffer: [u8; 256] = [0; 256];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("nat: ignoring malformed port-forward rule near '");
+            line.bytes(s[p..]);
+            line.text("'");
+            KernelLog.send(LogLevel.Warn, line);
+        }
+        while (p < len && s[p] != 44) {
+            p += 1; // to the next rule
+        }
+        if (p < len) {
+            p += 1;
+        }
+    }
+}
+
+/// nat.h's nat_portforward_config: the table replaced by the configuration's rules.
+/// Safety: `cfg` is null or a zero-terminated string.
+@export("nat_portforward_config")
+unsafe fn portforwardConfig(cfg: *CChar) {
+    pfClear();
+    pfParseApply(cfg);
+}
+
+/// nat.h's nat_portforward_apply: the configuration's rules added to the table.
+/// Safety: `cfg` is null or a zero-terminated string.
+@export("nat_portforward_apply")
+unsafe fn portforwardApply(cfg: *CChar) {
+    pfParseApply(cfg);
+}
+
+// ---- Maintenance ----
+
+/// nat.h's nat_flow_list: up to `max` of the entries live at `now` (N24: what a share counts), under one hold.
+/// Safety: `out` has room for `max`.
+@export("nat_flow_list")
+unsafe fn flowList(out: *mut nat_flow, max: u32, now: u64) -> u32 {
+    var n: u32 = 0;
+    var guard = NAT.lock();
+    let t = guard.data();
+    for (i in 0..TABLE_SIZE) {
+        let e = borrow t.entries[i];
+        if (n >= max || !live(e, now)) {
+            continue;
+        }
+        let at = out.add(n as usize);
+        SliceMut.fromRaw(at as *mut u8, layoutOf<nat_flow>().size).fill(0);
+        let o = Ptr.toBorrowMut(at);
+        o.kind = e.kind;
+        o.proto = e.proto;
+        o.est = e.tcpEst;
+        o.orig_port = e.origPort;
+        o.nat_port = e.natPort;
+        o.peer_port = e.peerPort;
+        o.orig_ip = e.origIp;
+        o.nat_ip = e.natIp;
+        o.peer_ip = e.peerIp;
+        o.expires_ns = e.expiresNs;
+        n += 1;
+    }
+    return n;
+}
+
+/// nat.h's nat_age: entries whose idle timeout has passed reclaimed.
+@export("nat_age")
+fn age(nowNs: u64) {
+    var guard = NAT.lock();
+    let t = guard.data();
+    for (i in 0..TABLE_SIZE) {
+        let e = borrow mut t.entries[i];
+        if (e.inUse && nowNs >= e.expiresNs) {
+            e.inUse = false;
+            count(borrow EXPIRED);
+        }
+    }
+}
+
+/// nat.h's nat_flush: every entry dropped; the statistics kept.
+@export("nat_flush")
+fn flush() {
+    var guard = NAT.lock();
+    let t = guard.data();
+    t.entries = [noEntry(); 256];
+}
+
+/// nat.h's nat_get_stats: the counters, and the live entries counted under the lock.
+/// Safety: `out` is writable; clock_now_ns only reads the clock.
+@export("nat_get_stats")
+unsafe fn getStats(out: *mut nat_stats) {
+    let now = clock_now_ns();
+    var guard = NAT.lock();
+    let t = guard.data();
+    var entries: u32 = 0;
+    for (i in 0..TABLE_SIZE) {
+        if (live(borrow t.entries[i], now)) {
+            entries += 1;
+        }
+    }
+    let o = Ptr.toBorrowMut(out);
+    o.out_new = read(borrow OUT_NEW);
+    o.out_reuse = read(borrow OUT_REUSE);
+    o.out_drop_share = read(borrow OUT_DROP_SHARE);
+    o.out_drop_table = read(borrow OUT_DROP_TABLE);
+    o.out_drop_noport = read(borrow OUT_DROP_NOPORT);
+    o.in_translated = read(borrow IN_TRANSLATED);
+    o.in_no_match = read(borrow IN_NO_MATCH);
+    o.in_icmp_error = read(borrow IN_ICMP_ERROR);
+    o.dnat_in = read(borrow DNAT_IN);
+    o.dnat_reply = read(borrow DNAT_REPLY);
+    o.dnat_drop_ambiguous = read(borrow DNAT_DROP_AMBIGUOUS);
+    o.dnat_drop_share = read(borrow DNAT_DROP_SHARE);
+    o.dnat_drop_table = read(borrow DNAT_DROP_TABLE);
+    o.expired = read(borrow EXPIRED);
+    o.entries = entries;
+}

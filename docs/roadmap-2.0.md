@@ -839,6 +839,29 @@ a full table with the initiator's share unspent, which the shares
 five interleaved runs: a datagram on a recorded flow 0.99x the C and one
 judged by a full rule list 0.97x on arm64; 1.00x and 0.98x on x86-64
 (Rosetta).
+NAT (2026-11-03): `kernel-services/network/nat.cee` -- masquerade of
+guest UDP, TCP and ICMP echo out the uplink and the replies and ICMP
+errors back, inbound port forwarding with its handshake-gated hold, the
+port-forward rules and their configuration strings, and the guests'
+shares of the conntrack table; the table and the rules are two
+`IrqSpinLock`s' data, taken rules first as before. Checksums are patched
+incrementally (RFC 1624) on big-endian words. The C step fixed a bug: an
+ICMP error quoting a masqueraded flow had its checksum recomputed over
+the whole message from the first mbuf though only the quote was pulled
+up, reading past it on a chained packet (AddressSanitizer); it is summed
+over the chain. `nat.c`'s static assertion that lent ports stay below
+the host's ephemeral range moved to `tests/host/test_nat.c` (CeeSafe has
+none, and a header would be new C). `tests/host/test_nat.c`: 20,000
+rounds over ten guests, an uplink and the world -- masquerades and
+refusals, replies and errors split across mbufs, forwarded connections
+through a full handshake, floods past a share and the table, every port
+lent, rules added, deleted, cleared and parsed -- every mbuf freed and
+every reference given back: digest `0xea7a64d4cbe6636a`, the C's (macOS
+clang, Linux clang and gcc), and the parser's 412 warnings the C's word
+for word; 99.8% of the C's lines and 95.9% of its branches, all but a
+guard the next port never trips. `NAT_BENCH=1`, the median of five
+interleaved runs: a datagram masqueraded 0.95x the C and its reply
+1.03x on arm64; 0.97x and 1.00x on x86-64 (Rosetta).
 
 Size: about 3.0x.
 
