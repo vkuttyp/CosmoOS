@@ -968,6 +968,37 @@ of interleaved runs of a round (DISCOVER, REQUEST, a query and its
 answer): 1.01x the C on arm64, 1.04x on x86-64 (Rosetta) and 1.05x on
 native x86-64 (Linux gcc).
 
+The tap (2026-11-04): `kernel-services/network/tap.cee` -- the tap
+interface (a netif whose far end is userland), `/dev/net/tap` (a tap per
+open, its subnet, forwarding, masquerade, services and firewall
+attachment, all of it gone at the last close) and `/dev/net/tapctl` (a
+command applied whole or refused; the snapshot of the stack's tables in
+the netctl.h records). A tap is a CeeSafe object behind `tap.h`'s
+opaque struct, its netif first; each netctl record is built in a zeroed
+scratch through its C type's fields and copied out at its own size, so
+no padding of the stack reaches userland. The snapshot's sections share
+one record scratch and one table scratch in turn: the first build gave
+each its own and the kernel's 2 KiB frame limit refused `ctlRead` (8 KiB);
+it is now about 1.5 KiB in one frame, against the C's 1.9 KiB over two. `tap_floor.c` keeps the debug
+builds' release seam (two exported variables). The C step published the
+input filter with release stores and acquire loads (function last,
+cleared first) and stated the caller's contract, moved the reader's wait
+to `wait_floor_until_killable`, and moved the UAPI assertions into the
+host test, which now also asserts every value `tap.cee` writes as its
+own constant against the headers -- the first build of the port failed
+one (`NETIF_NODEFAULT` is bit 4). `tap.h` declares the MAC as a pointer
+(gcc's -Warray-parameter). The host test runs `tap.c` alone over real
+mbufs, the stack around it seeded stubs: opens to the ninth, failing
+registrations, services and allocations, writes of every length and
+privilege, reads blocking, killed and non-blocking, the queue past 64,
+every control command right and wrong, the snapshot into buffers of
+every size; every call with its arguments, frame and returned byte in
+the digest, `0xedefcf1c515836e7`, the C's (macOS clang, Linux clang and
+gcc); 99.1% of the C's lines, the rest two unreachable branches.
+`TAP_BENCH=1` (a frame in, a frame out, a snapshot every 64 rounds):
+1.01x the C on arm64, 0.98x on x86-64 (Rosetta), 1.00x on native x86-64
+(Linux gcc).
+
 Size: about 3.0x.
 
 ### SA7 Storage: cosmofs, VFS, block and pools

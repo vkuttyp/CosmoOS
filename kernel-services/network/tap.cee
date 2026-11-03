@@ -1,0 +1,1550 @@
+// tap.cee - a tap interface and its devices (kernel/include/kernel/net/tap.h), in CeeSafe: roadmap 2.0 SA6.
+// tests/host/test_tap.c holds it to the digest of the C it replaced.
+//
+// A tap is a netif whose far end is userland: transmit queues the frame for the far end to read; tap_inject hands a
+// frame from the far end to netif_rx. The stack does everything else -- ARP, IP, the transport -- over an interface
+// whose driver is a reader and a writer rather than a device.
+//
+// /dev/net/tap is a tap per open: its own subnet 10.0.(3+k).0/24 (host .1, guest .15), forwarding and masquerade on,
+// its own DHCP and DNS service, its firewall attachment; the last close takes all of it down. /dev/net/tapctl is the
+// owner's network-control channel: a write is one command (a port-forward, a firewall rule or policy), applied whole
+// or refused; a read is the whole snapshot of the stack's tables in the netctl.h records.
+//
+// A tap is a CeeSafe object behind tap.h's opaque struct, its netif first (the interface's ops reach the tap from
+// it). A netctl record is built in a zeroed scratch through its C type's fields, then copied out whole: the snapshot
+// is bytes at offsets the records' own sizes give. What CeeSafe cannot hold stays in tap_floor.c: the debug builds'
+// release seam, two exported variables.
+
+@header("kernel/net/tap.h", "kernel/net/tapsvc.h", "kernel/net/dhcp.h", "kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/fw.h", "kernel/net/nat.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/cred.h", "kernel/fwcfg.h", "kernel/thread.h", "kernel/vfs.h", "kernel/wait.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbufq;
+    struct waitqueue;
+    struct netif_ops {
+        transmit: extern "C" fn(*mut netif, *mut mbuf) -> i32;
+        release: extern "C" fn(*mut netif);
+    }
+    struct netif_ip4 {
+        addr: AtomicU32;
+        mask: AtomicU32;
+    }
+    struct netif {
+        obj: kobject;
+        name: [u8; 8];
+        mac: [u8; 6];
+        mtu: u32;
+        flags: AtomicU32;
+        ip4: netif_ip4;
+        ops: *netif_ops;
+    }
+    struct netif_stats {
+        rx_packets: AtomicU64;
+        rx_bytes: AtomicU64;
+        rx_dropped: AtomicU64;
+        rx_errors: AtomicU64;
+        tx_packets: AtomicU64;
+        tx_bytes: AtomicU64;
+        tx_dropped: AtomicU64;
+        tx_errors: AtomicU64;
+    }
+    struct netif_info {
+        name: [u8; 8];
+        index: u32;
+        flags: u32;
+        mtu: u32;
+        mac: [u8; 6];
+        addr: u32;
+        mask: u32;
+        ip6_ll: in6_addr;
+        stats: netif_stats;
+    }
+    struct tapsvc;
+    struct vnode;
+    struct file {
+        priv: *mut void;
+    }
+    struct credentials;
+    struct nat_pf_rule {
+        proto: u8;
+        host_port: u16;
+        guest_port: u16;
+        guest_ip: u32;
+    }
+    struct nat_flow {
+        kind: u8;
+        proto: u8;
+        est: bool;
+        orig_port: u16;
+        nat_port: u16;
+        peer_port: u16;
+        orig_ip: u32;
+        nat_ip: u32;
+        peer_ip: u32;
+        expires_ns: u64;
+    }
+    struct fw_flow_info {
+        guest_ip: u32;
+        a_ip: u32;
+        b_ip: u32;
+        a_port: u16;
+        b_port: u16;
+        proto: u8;
+        est: bool;
+        expires_ns: u64;
+    }
+    struct nat_stats {
+        out_new: u64;
+        out_drop_share: u64;
+        out_drop_table: u64;
+        out_drop_noport: u64;
+        dnat_drop_ambiguous: u64;
+        dnat_drop_share: u64;
+        dnat_drop_table: u64;
+        expired: u64;
+    }
+    struct fw_stats {
+        flow_new: u64;
+        flow_drop_share: u64;
+        flow_drop_table: u64;
+        expired: u64;
+        hin_flow_new: u64;
+        hin_flow_unrecorded: u64;
+    }
+    struct fw_rule {
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_ip: u32;
+        dst_port: u16;
+        src_prefix: u8;
+        scope: u8;
+        src_ip: u32;
+    }
+    struct dhcp_lease_info {
+        ifname: [u8; 8];
+        state: u8;
+        ndns: u8;
+        addr: u32;
+        mask: u32;
+        router: u32;
+        server: u32;
+        dns: [u32; 3];
+        lease_s: u32;
+        t1_s: u32;
+        t2_s: u32;
+        remaining_ms: u32;
+        t1_ms: u32;
+        t2_ms: u32;
+        hostname: [u8; 64];
+    }
+    struct ipv4_route_info {
+        ifname: [u8; 8];
+        dst: u32;
+        mask: u32;
+        gateway: u32;
+        src: u32;
+        flags: u32;
+    }
+    struct arp_info {
+        ip: u32;
+        mac: [u8; 6];
+        complete: bool;
+        ifname: [u8; 8];
+    }
+    struct chrdev_ops {
+        read: extern "C" fn(*mut vnode, u64, *mut void, usize) -> i64;
+        write: extern "C" fn(*mut vnode, u64, *void, usize) -> i64;
+        open: extern "C" fn(*mut vnode, *mut file) -> i32;
+        release: extern "C" fn(*mut vnode, *mut file);
+        open_priv: u32;
+        read_file: extern "C" fn(*mut vnode, *mut file, u64, *mut void, usize) -> i64;
+        write_file: extern "C" fn(*mut vnode, *mut file, u64, *void, usize) -> i64;
+        ready: extern "C" fn(*mut vnode, *mut file) -> u32;
+        poll_wq: extern "C" fn(*mut vnode, *mut file, u32) -> *mut waitqueue;
+        set_nonblock: extern "C" fn(*mut vnode, *mut file, i32) -> i32;
+    }
+
+    // The netctl.h records.
+    struct cosmo_netctl {
+        version: u16;
+        op: u16;
+        proto: u8;
+        reserved: u8;
+        host_port: u16;
+        guest_port: u16;
+        reserved2: u16;
+        guest_addr: u32;
+    }
+    struct cosmo_netctl_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_rule {
+        proto: u8;
+        reserved: u8;
+        host_port: u16;
+        guest_port: u16;
+        reserved2: u16;
+        guest_addr: u32;
+    }
+    struct cosmo_netctl_filter {
+        version: u16;
+        op: u16;
+        guest_addr: u32;
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_addr: u32;
+        dst_port: u16;
+        at_index: u16;
+        src_addr: u32;
+        src_prefix: u8;
+        scope: u8;
+        reserved: [u8; 2];
+    }
+    struct cosmo_netctl_filter_list {
+        version: u16;
+        rule_count: u16;
+        guest_count: u16;
+    }
+    struct cosmo_netctl_filter_guest {
+        guest_addr: u32;
+        policy_to_uplink: u8;
+        policy_to_guest: u8;
+        policy_to_host: u8;
+        policy_from_uplink: u8;
+        policy_output: u8;
+    }
+    struct cosmo_netctl_filter_rule {
+        guest_addr: u32;
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_addr: u32;
+        dst_port: u16;
+        index: u16;
+        src_addr: u32;
+        src_prefix: u8;
+        scope: u8;
+    }
+    struct cosmo_netctl_flow_counters {
+        masq_new: u64;
+        masq_drop_share: u64;
+        masq_drop_table: u64;
+        masq_drop_noport: u64;
+        dnat_drop_share: u64;
+        dnat_drop_table: u64;
+        dnat_drop_ambiguous: u64;
+        nat_expired: u64;
+        fw_new: u64;
+        fw_drop_share: u64;
+        fw_drop_table: u64;
+        fw_host_new: u64;
+        fw_host_unrecorded: u64;
+        fw_expired: u64;
+    }
+    struct cosmo_netctl_flow_list {
+        version: u16;
+        count: u16;
+        nat_quota: u16;
+        fw_quota: u16;
+        fw_host_quota: u16;
+        counters: cosmo_netctl_flow_counters;
+    }
+    struct cosmo_netctl_flow {
+        table: u8;
+        kind: u8;
+        proto: u8;
+        flags: u8;
+        guest_addr: u32;
+        src_addr: u32;
+        dst_addr: u32;
+        src_port: u16;
+        dst_port: u16;
+        nat_addr: u32;
+        nat_port: u16;
+        expires_ms: u32;
+    }
+    struct cosmo_netctl_lease_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_lease {
+        ifname: [u8; 8];
+        state: u8;
+        dns_count: u8;
+        addr: u32;
+        mask: u32;
+        router: u32;
+        server: u32;
+        dns: [u32; 3];
+        lease_s: u32;
+        t1_s: u32;
+        t2_s: u32;
+        remaining_ms: u32;
+        t1_ms: u32;
+        t2_ms: u32;
+        hostname: [u8; 64];
+    }
+    struct cosmo_netctl_if_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_if {
+        name: [u8; 8];
+        index: u32;
+        flags: u32;
+        mtu: u32;
+        mac: [u8; 6];
+        addr: u32;
+        mask: u32;
+        ip6_ll: [u8; 16];
+        rx_packets: u64;
+        rx_bytes: u64;
+        rx_dropped: u64;
+        rx_errors: u64;
+        tx_packets: u64;
+        tx_bytes: u64;
+        tx_dropped: u64;
+        tx_errors: u64;
+    }
+    struct cosmo_netctl_route_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_route {
+        ifname: [u8; 8];
+        dst: u32;
+        mask: u32;
+        gateway: u32;
+        src: u32;
+        flags: u32;
+    }
+    struct cosmo_netctl_neigh_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_neigh {
+        ifname: [u8; 8];
+        addr: u32;
+        mac: [u8; 6];
+        state: u8;
+    }
+
+    @effects()
+    fn m_getcl() -> *mut mbuf;
+    @effects()
+    fn m_freem(m: *mut mbuf);
+    fn m_length(m: *mbuf) -> u32;
+    fn m_trailingspace(m: *mbuf) -> u32;
+    @effects()
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn mbufq_init(q: *mut mbufq, maxlen: u32, name: *CChar);
+    fn mbufq_enqueue(q: *mut mbufq, m: *mut mbuf) -> bool;
+    fn mbufq_dequeue(q: *mut mbufq) -> *mut mbuf;
+    fn mbufq_drain(q: *mut mbufq);
+    fn mbufq_len(q: *mut mbufq) -> u32;
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn waitqueue_wake_all(wq: *mut waitqueue) -> u32;
+    fn wait_floor_until_killable(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void) -> i32;
+    fn netif_register(nif: *mut netif) -> i32;
+    fn netif_unregister(nif: *mut netif);
+    fn netif_set_ipv4(nif: *mut netif, addr: u32, mask: u32, gateway: u32);
+    fn netif_set_up(nif: *mut netif, up: bool);
+    fn netif_set_forward(nif: *mut netif, on: bool);
+    fn netif_set_masquerade(nif: *mut netif, on: bool);
+    fn netif_rx(nif: *mut netif, m: *mut mbuf);
+    fn netif_list(out: *mut netif_info, max: u32) -> u32;
+    fn tapsvc_start(t: *mut tap) -> *mut tapsvc;
+    fn tapsvc_stop(svc: *mut tapsvc);
+    fn fwcfg_get_string(key: *CChar, buf: *mut CChar, len: usize) -> bool;
+    fn nat_portforward_apply(cfg: *CChar);
+    fn nat_guest_purge(guest: u32);
+    fn nat_pf_add(proto: u8, hostPort: u16, guest: u32, guestPort: u16) -> i32;
+    fn nat_pf_del(proto: u8, hostPort: u16) -> bool;
+    fn nat_pf_list(out: *mut nat_pf_rule, max: u32) -> u32;
+    fn nat_flow_list(out: *mut nat_flow, max: u32, now: u64) -> u32;
+    fn nat_get_stats(out: *mut nat_stats);
+    fn fw_guest_attach(guest: u32, gateway: u32);
+    fn fw_guest_purge(guest: u32);
+    fn fw_rule_add(guest: u32, at: u32, r: *fw_rule) -> i32;
+    fn fw_rule_del(guest: u32, r: *fw_rule) -> i32;
+    fn fw_rule_list(guest: u32, out: *mut fw_rule, max: u32) -> u32;
+    fn fw_policy_set(guest: u32, direction: u8, verdict: u8) -> i32;
+    fn fw_policy_get(
+        guest: u32, toUplink: *mut u8, toGuest: *mut u8, toHost: *mut u8, fromUplink: *mut u8,
+        output: *mut u8,
+    ) -> i32;
+    fn fw_guest_list(out: *mut u32, max: u32) -> u32;
+    fn fw_flow_list(out: *mut fw_flow_info, max: u32, now: u64) -> u32;
+    fn fw_get_stats(out: *mut fw_stats);
+    fn dhcp_lease_list(out: *mut dhcp_lease_info, max: u32) -> u32;
+    fn ipv4_route_list(out: *mut ipv4_route_info, max: u32) -> u32;
+    fn arp_list(out: *mut arp_info, max: u32) -> u32;
+    fn clock_now_ns() -> u64;
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, privilege: u32) -> bool;
+    fn io_nonblocking(nonblock: bool) -> bool;
+    fn file_nonblocking(f: *file) -> bool;
+    fn file_set_nonblock(f: *mut file, on: i32) -> i32;
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
+    fn tap_floor_after_purge();
+}
+
+// ---- The constants: errno.h, netif.h, ip.h, nat.h, fw.h, dhcp.h, cred.h, netctl.h ----
+
+const EPERM: i32 = 1;
+const ENOENT: i32 = 2;
+const ENOMEM: i32 = 12;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const EMSGSIZE: i32 = 90;
+const ENOTSUP: i32 = 95;
+const ETH_HLEN: u32 = 14;
+const NETIF_UP: u32 = 1;
+const NETIF_LOOPBACK: u32 = 2;
+const NETIF_NOARP: u32 = 4;
+const NETIF_NODEFAULT: u32 = 1 << 4;
+const NETIF_MAX: u32 = 32;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const IPV4_ROUTES_MAX: u32 = 33;
+const IPV4_RTF_GATEWAY: u32 = 2;
+const ARP_TABLE_SIZE: u32 = 64;
+const NAT_PF_MAX: u32 = 16;
+const NAT_TABLE_SIZE: u32 = 256;
+const NAT_KIND_DNAT: u8 = 1;
+const FW_MAX_GUESTS: u32 = 8;
+const FW_RULES_PER_GUEST: u32 = 32;
+const FW_HOST_GUEST_IP: u32 = 0;
+const DHCP_MAX_CLIENTS: u32 = 4;
+const TAPSVC_GUEST_HOST: u32 = 15;
+const PRIV_NET: u32 = 1 << 2;
+const PRIV_DEVICE: u32 = 1 << 5;
+const COSMO_IO_READABLE: u32 = 1;
+const COSMO_IO_WRITABLE: u32 = 2;
+const KMEM_ZERO: u32 = 1;
+
+const NETCTL_VERSION: u16 = 8;
+const FORWARD_ADD: u16 = 1;
+const FORWARD_DEL: u16 = 2;
+const FILTER_ADD: u16 = 3;
+const FILTER_DEL: u16 = 4;
+const FILTER_POLICY: u16 = 5;
+const PROTO_TCP: u8 = 6;
+const PROTO_UDP: u8 = 17;
+const FLOW_NAT: u8 = 1;
+const FLOW_FW: u8 = 2;
+const FLOW_MASQ: u8 = 1;
+const FLOW_DNAT: u8 = 2;
+const FLOW_GUEST: u8 = 3;
+const FLOW_HOST: u8 = 4;
+const FLOW_ESTABLISHED: u8 = 1;
+const IF_UP: u32 = 1;
+const IF_LOOPBACK: u32 = 2;
+const IF_NOARP: u32 = 4;
+const IF_TAP: u32 = 8;
+const RT_GATEWAY: u32 = 2;
+const NEIGH_INCOMPLETE: u8 = 1;
+const NEIGH_REACHABLE: u8 = 2;
+const HOST_ADDR: u32 = 0;
+
+/// Frames the stack may queue for the reader; drops when full.
+const TAP_TXQ_MAX: u32 = 64;
+/// /dev/net/tap's owners: one tap, one subnet each.
+const TAP_MAX_GUESTS: usize = 8;
+
+// ---- The tap ----
+
+/// One tap: its interface first (the ops reach the tap from it), the frames queued for the far end, its readers,
+/// and the far end's input filter (the tap services' DHCP), published as a pair.
+@repr(C)
+struct tap {
+    nif: netif;
+    txq: mbufq;
+    rx_wait: waitqueue;     // the far end's readers, woken per frame queued (the device-readiness unit)
+    in_filter: AtomicUSize; // tap_input_fn, or 0: claims far-end frames before the stack
+    in_arg: AtomicUSize;
+}
+
+/// The tap whose interface `nif` is.
+/// Safety: `nif` is a tap's interface, which is the tap's first field.
+fn tapOf(nif: *mut netif) -> *mut tap => nif as usize as *mut tap;
+
+/// The interface's address and mask, as they lie in memory.
+/// Safety: `t` is a live tap.
+unsafe fn addrOf(t: *mut tap) -> u32 => Ptr.toBorrow(t as *tap).nif.ip4.addr.loadWith(LoadOrdering.Relaxed);
+
+/// Safety: `t` is a live tap.
+unsafe fn maskOf(t: *mut tap) -> u32 => Ptr.toBorrow(t as *tap).nif.ip4.mask.loadWith(LoadOrdering.Relaxed);
+
+/// The byte order swap of a u32 (inet.h's htonl on CosmoOS's little-endian targets).
+fn swap32(v: u32) -> u32 => ((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >> 8) & 0xff00) | (v >> 24);
+
+/// An IPv4 address from its four octets, as it lies in memory (inet.h's IPV4_ADDR).
+fn ipv4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+/// The txq's and the wait queue's addresses.
+/// Safety: `t` is a live tap.
+unsafe fn txqOf(t: *mut tap) -> *mut mbufq => borrow mut Ptr.toBorrowMut(t).txq as *mut mbufq;
+
+/// Safety: `t` is a live tap.
+unsafe fn waitOf(t: *mut tap) -> *mut waitqueue => borrow mut Ptr.toBorrowMut(t).rx_wait as *mut waitqueue;
+
+/// Stack -> tap: the stack is sending a frame out the interface. Queue it for the far end; drop when the queue is
+/// full, as a NIC drops when it has nowhere to put a frame -- mbufq_enqueue frees it then (mbuf.h). Runs in a
+/// read-side section: no sleeping.
+/// Safety: `nif` is a tap's interface; `m` is the stack's packet, given away.
+@callback
+unsafe fn transmit(nif: *mut netif, m: *mut mbuf) -> i32 {
+    let t = tapOf(nif);
+    if (mbufq_enqueue(txqOf(t), m)) {  // "sent", and dropped (freed) when the queue is full
+        waitqueue_wake_all(waitOf(t)); // a reader blocked, a poller, the ring: a frame waits
+    }
+    return 0;
+}
+
+/// The interface's release: the last reference is gone.
+/// Safety: `nif` is a tap's interface, used by nothing after this.
+@callback
+unsafe fn tapRelease(nif: *mut netif) {
+    let t = tapOf(nif);
+    mbufq_drain(txqOf(t));
+    kfree(t as *mut void);
+}
+
+static mut TAP_OPS: netif_ops = netif_ops { transmit: transmit, release: tapRelease };
+
+/// tap.h's tap_create: an up tap interface `name` with IPv4 `ip`/`mask` (network order) and `mac`, registered; null
+/// when memory is short or the registration refuses it.
+/// Safety: `name` is a C string; `mac` points to 6 bytes.
+@export("tap_create")
+unsafe fn create(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap {
+    let t = kmalloc(layoutOf<tap>().size, KMEM_ZERO) as *mut tap;
+    if (t.isNull()) {
+        return t;
+    }
+    let tb = Ptr.toBorrowMut(t);
+    let src = Slice.fromRaw(name as *u8, 8);
+    var n: usize = 0;
+    while (n < 7 && src[n] != 0) { // strlcpy into the 8-byte name
+        tb.nif.name[n] = src[n];
+        n = n + 1;
+    }
+    tb.nif.name[n] = 0;
+    tb.nif.mac[..].copyFrom(Slice.fromRaw(mac, 6));
+    tb.nif.mtu = 1500;
+    // A tap is a point-to-point link to one owner, never the machine's route to the world: keep it out of
+    // default-interface selection, so a tap can never swallow the host's outbound traffic, whatever the registration
+    // order (and whatever the lifetime -- a tap lives only while its owner holds the channel).
+    tb.nif.flags.storeWith(NETIF_NODEFAULT, StoreOrdering.Relaxed);
+    tb.nif.ops = borrow TAP_OPS as *netif_ops;
+    mbufq_init(txqOf(t), TAP_TXQ_MAX, "tap-tx\0".ptr as *CChar);
+    waitqueue_init(waitOf(t), "tap-rx\0".ptr as *CChar);
+    let nif = borrow mut tb.nif as *mut netif;
+    if (netif_register(nif) != 0) {
+        kfree(t as *mut void);
+        return 0 as *mut tap;
+    }
+    netif_set_ipv4(nif, ip, mask, 0);
+    netif_set_up(nif, true);
+    return t;
+}
+
+/// tap.h's tap_destroy: unregistered and freed (no transmit or receive after this returns).
+/// Safety: `t` is null or a live tap, used by nothing after this.
+@export("tap_destroy")
+unsafe fn destroy(t: *mut tap) {
+    if (t.isNull()) {
+        return;
+    }
+    let nif = borrow mut Ptr.toBorrowMut(t).nif as *mut netif;
+    netif_unregister(nif);                                            // down and gone; drops the registry's reference
+    kobject_put(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject); // netif_put: the creator's -> release frees t
+}
+
+/// tap.h's tap_inject: one Ethernet frame from the far end, into the stack (netif_rx) unless the filter claims it.
+/// Safety: `t` is a live tap; `frame` points to `len` readable bytes.
+@export("tap_inject")
+unsafe fn inject(t: *mut tap, frame: *void, len: u32) -> i32 {
+    let tb = Ptr.toBorrow(t as *tap);
+    if (len < ETH_HLEN || len > tb.nif.mtu + ETH_HLEN) {
+        return -EMSGSIZE;
+    }
+    let m = m_getcl();
+    if (m.isNull()) {
+        return -ENOMEM;
+    }
+    if (len > m_trailingspace(m as *mbuf)) { // a cluster holds a full frame; this cannot happen
+        m_freem(m);
+        return -EMSGSIZE;
+    }
+    let mb = Ptr.toBorrowMut(m);
+    SliceMut.fromRaw(mb.data, len as usize).copyFrom(Slice.fromRaw(frame as *u8, len as usize));
+    mb.len = len;
+    mb.pkt.len = len;
+    let filter = tb.in_filter.loadWith(LoadOrdering.Acquire);
+    if (filter != 0) {
+        let run = filter as extern "C" fn(*mut tap, *void, u32, *mut void) -> bool;
+        let arg = tb.in_arg.loadWith(LoadOrdering.Acquire) as *mut void;
+        if (run(t, mb.data as *void, len, arg)) {
+            m_freem(m); // the filter claimed it (and copied what it needed)
+            return 0;
+        }
+    }
+    netif_rx(borrow mut Ptr.toBorrowMut(t).nif as *mut netif, m); // into the stack, as a driver's completion would
+    return 0;
+}
+
+/// tap.h's tap_recv: the next frame the stack transmitted out the tap (the far end's to read), or null.
+/// Safety: `t` is a live tap.
+@export("tap_recv")
+unsafe fn recv(t: *mut tap) -> *mut mbuf => mbufq_dequeue(txqOf(t));
+
+/// The wait's condition: a frame waits.
+/// Safety: `arg` is a live tap.
+@callback
+unsafe fn hasFrame(arg: *mut void) -> bool => mbufq_len(txqOf(arg as *mut tap)) > 0;
+
+/// tap.h's tap_recv_wait: as tap_recv, waiting for a frame unless `nonblock` (killable). No lock across the wait; the
+/// queue's own lock orders the dequeue against the enqueue, and the wake comes after the enqueue.
+/// Safety: `t` is a live tap; `out` is writable.
+@export("tap_recv_wait")
+unsafe fn recvWait(t: *mut tap, nonblock: bool, out: *mut *mut mbuf) -> i32 {
+    var m = mbufq_dequeue(txqOf(t));
+    while (m.isNull() && !nonblock) {
+        let rc = wait_floor_until_killable(waitOf(t), hasFrame, t as *mut void);
+        if (rc != 0) {
+            return rc;
+        }
+        m = mbufq_dequeue(txqOf(t)); // another reader may have taken it: wait again
+    }
+    store(Ptr.toBorrowMut(out), m);
+    return 0;
+}
+
+fn store(o: borrow mut *mut mbuf, m: *mut mbuf) {
+    o = m;
+}
+
+/// tap.h's tap_ready: WRITABLE always (an injected frame is taken or dropped at once), READABLE while a frame waits.
+/// Safety: `t` is a live tap.
+@export("tap_ready")
+unsafe fn ready(t: *mut tap) -> u32 => COSMO_IO_WRITABLE | (if (mbufq_len(txqOf(t)) > 0) COSMO_IO_READABLE else 0);
+
+/// tap.h's tap_poll_wq.
+/// Safety: `t` is a live tap.
+@export("tap_poll_wq")
+unsafe fn pollWq(t: *mut tap) -> *mut waitqueue => waitOf(t);
+
+/// tap.h's tap_netif.
+/// Safety: `t` is a live tap.
+@export("tap_netif")
+unsafe fn netifOf(t: *mut tap) -> *mut netif => borrow mut Ptr.toBorrowMut(t).nif as *mut netif;
+
+/// tap.h's tap_set_input_filter: published function last (an injector that sees it sees its argument), cleared
+/// function first. Clearing does not wait for a call in flight: the caller guarantees there is none -- tapsvc_stop
+/// runs at the owner's last close, after which no write, and so no tap_inject, reaches the tap.
+/// Safety: `t` is a live tap; `run` is null or a filter `arg` suits.
+@export("tap_set_input_filter")
+unsafe fn setInputFilter(t: *mut tap, run: extern "C" fn(*mut tap, *void, u32, *mut void) -> bool, arg: *mut void) {
+    let tb = Ptr.toBorrow(t as *tap);
+    if (run.isNull()) {
+        tb.in_filter.storeWith(0, StoreOrdering.Release);
+    }
+    tb.in_arg.storeWith(arg as usize, StoreOrdering.Release);
+    if (!run.isNull()) {
+        tb.in_filter.storeWith(run as usize, StoreOrdering.Release);
+    }
+}
+
+// ---- /dev/net/tap: a tap per open, the owner's frame channel ----
+
+/// struct file::priv for /dev/net/tap.
+@repr(C)
+struct TapOpen {
+    tap: *mut tap;
+    svc: *mut tapsvc;
+    slot: usize;
+}
+
+static mut SLOTS: [bool; 8] = [false; 8];
+static mut SLOT_LOCK: spinlock_t = SPINLOCK_INIT("tap-slots\0".ptr as *CChar);
+static mut TAP_NODE: usize = 0;
+static mut CTL_NODE: usize = 0;
+
+/// The slots' lock.
+/// Safety: only its address is taken.
+fn slotLock() -> *mut spinlock_t => unsafe { borrow mut SLOT_LOCK as *mut spinlock_t };
+
+/// Slot `i` given back.
+/// Safety: under the slots' lock.
+fn freeSlot(i: usize) {
+    unsafe {
+        let s = spin_lock_irqsave(slotLock());
+        SLOTS[i] = false;
+        spin_unlock_irqrestore(slotLock(), s);
+    }
+}
+
+/// The open's instance.
+/// Safety: `f` is an open file of /dev/net/tap.
+unsafe fn openOf(f: *mut file) -> *mut TapOpen => Ptr.toBorrow(f as *file).priv as *mut TapOpen;
+
+/// /dev/net/tap's open: a tap of its own on a subnet of its own, forwarding and masquerade on, its services, the
+/// boot-time port-forwards that land on it, and the firewall's attachment. -ENOSPC for the ninth guest.
+/// Safety: `f` is the file being opened.
+@callback
+unsafe fn chrOpen(vn: *mut vnode, f: *mut file) -> i32 {
+    var slot: usize = TAP_MAX_GUESTS;
+    let s = spin_lock_irqsave(slotLock());
+    for (i in 0..TAP_MAX_GUESTS) {
+        if (!SLOTS[i]) {
+            SLOTS[i] = true;
+            slot = i;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(slotLock(), s);
+    if (slot == TAP_MAX_GUESTS) {
+        return -ENOSPC; // the ninth guest
+    }
+    let o = kmalloc(layoutOf<TapOpen>().size, KMEM_ZERO) as *mut TapOpen;
+    if (o.isNull()) {
+        freeSlot(slot);
+        return -ENOMEM;
+    }
+    var name: [u8; 8] = [0; 8];
+    var w = TextWriter.create(mut name[..7]);
+    w.text("tap");
+    w.decimal(slot as u64);
+    let k = truncate<u32>(slot);
+    let mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, truncate<u8>(0xcc + k)];
+    let ob = Ptr.toBorrowMut(o);
+    ob.slot = slot;
+    ob.tap = create(
+        borrow name as *[u8; 8] as *CChar, ipv4(10, 0, 3 + k, 1), swap32(0xffffff00),
+        borrow mac as *[u8; 6] as *u8,
+    );
+    if (ob.tap.isNull()) {
+        kfree(o as *mut void);
+        freeSlot(slot);
+        return -ENOMEM;
+    }
+    // The guest's ingress: forward its packets, masquerade them out the host's real interface. The flags are the
+    // tap's, never the NIC's.
+    let nif = netifOf(ob.tap);
+    netif_set_forward(nif, true);
+    netif_set_masquerade(nif, true);
+    ob.svc = tapsvc_start(ob.tap);
+    if (ob.svc.isNull()) {
+        destroy(ob.tap);
+        kfree(o as *mut void);
+        freeSlot(slot);
+        return -ENOMEM;
+    }
+    // Boot-time port-forwards (fw_cfg) name a guest by address; apply the ones that land on this tap now that it
+    // exists (others are skipped).
+    var pf: [u8; 128] = [0; 128];
+    if (fwcfg_get_string("portforward\0".ptr as *CChar, borrow mut pf as *mut [u8; 128] as *mut CChar, 128)) {
+        nat_portforward_apply(borrow pf as *[u8; 128] as *CChar);
+    }
+    // Attach the guest to the forwarding firewall (its rules and default policy live from here to the last close).
+    // Last, after every step that can fail, so an attachment never outlives a tap that failed to come up.
+    let addr = addrOf(ob.tap);
+    fw_guest_attach((addr & maskOf(ob.tap)) | swap32(TAPSVC_GUEST_HOST), addr);
+    let fb = Ptr.toBorrowMut(f);
+    fb.priv = o as *mut void;
+    return 0;
+}
+
+/// /dev/net/tap's last close: the services first (their threads and DHCP filter must be gone before the tap they
+/// point at), then the tap, then the guest's NAT and firewall state, then the subnet. The tap before the purges: once
+/// tap_destroy returns no frame of the guest's is queued or in flight (netif_unregister's barrier), so nothing can
+/// make a translation or a flow for the address after the purge has cleared it (fuzz_net_config;
+/// net-tap-release-order).
+/// Safety: `f` is the file closing.
+@callback
+unsafe fn chrRelease(vn: *mut vnode, f: *mut file) {
+    let o = openOf(f);
+    if (o.isNull()) {
+        return;
+    }
+    let ob = Ptr.toBorrow(o as *TapOpen);
+    let guest = (addrOf(ob.tap) & maskOf(ob.tap)) | swap32(15);
+    tapsvc_stop(ob.svc);
+    destroy(ob.tap);
+    nat_guest_purge(guest);  // no stale rules or flows for a reused subnet
+    fw_guest_purge(guest);   // detach: its firewall rules, policy and flows go with it
+    tap_floor_after_purge(); // the debug builds' seam: a frame arriving now must make nothing
+    freeSlot(ob.slot);
+    kfree(o as *mut void);
+    let fb = Ptr.toBorrowMut(f);
+    fb.priv = 0 as *mut void;
+}
+
+/// /dev/net/tap's read: one frame the stack transmitted out this owner's tap. A blocking open waits for one
+/// (killable); a non-blocking open -- or a read from inside the I/O ring -- returns 0 when none waits (a frame is
+/// never zero-length, so 0 is unambiguous; vmctl's poll loop relies on it).
+/// Safety: `f` is an open file; `buf` has room for `len` bytes.
+@callback
+unsafe fn chrRead(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void, len: usize) -> i64 {
+    if (!cred_has(cred_current(), PRIV_DEVICE)) {
+        return -EPERM as i64; // a handle may outlive the privilege that opened it
+    }
+    var m = 0 as *mut mbuf;
+    let rc = recvWait(
+        Ptr.toBorrow(openOf(f) as *TapOpen).tap, io_nonblocking(file_nonblocking(f as *file)),
+        borrow mut m as *mut *mut mbuf,
+    );
+    if (rc != 0) {
+        return rc as i64;
+    }
+    if (m.isNull()) {
+        return 0;
+    }
+    let fl = m_length(m as *mbuf);
+    if (fl as usize > len) { // the owner must offer a frame-sized buffer
+        m_freem(m);
+        return -EMSGSIZE as i64;
+    }
+    m_copydata(m as *mbuf, 0, fl, buf);
+    m_freem(m);
+    return fl as i64;
+}
+
+/// /dev/net/tap's write: one frame from this owner's guest, into the stack.
+/// Safety: `f` is an open file; `buf` points to `len` readable bytes.
+@callback
+unsafe fn chrWrite(vn: *mut vnode, f: *mut file, off: u64, buf: *void, len: usize) -> i64 {
+    if (!cred_has(cred_current(), PRIV_DEVICE)) {
+        return -EPERM as i64; // as for a read
+    }
+    let rc = inject(Ptr.toBorrow(openOf(f) as *TapOpen).tap, buf, truncate<u32>(len));
+    return if (rc != 0) rc as i64 else truncate<i64>(len);
+}
+
+/// /dev/net/tap's readiness: the tap's (the open file's non-blocking bit is the per-open mode).
+/// Safety: `f` is an open file.
+@callback
+unsafe fn chrReady(vn: *mut vnode, f: *mut file) -> u32 => ready(Ptr.toBorrow(openOf(f) as *TapOpen).tap);
+
+/// Safety: `f` is an open file.
+@callback
+unsafe fn chrPollWq(vn: *mut vnode, f: *mut file, events: u32) -> *mut waitqueue {
+    if ((events & COSMO_IO_READABLE) == 0) {
+        return 0 as *mut waitqueue; // always writable
+    }
+    return pollWq(Ptr.toBorrow(openOf(f) as *TapOpen).tap);
+}
+
+/// Safety: `f` is an open file.
+@callback
+unsafe fn chrSetNonblock(vn: *mut vnode, f: *mut file, on: i32) -> i32 => file_set_nonblock(f, on);
+
+static mut TAP_CHR_OPS: chrdev_ops = chrdev_ops {
+    read: 0 as extern "C" fn(*mut vnode, u64, *mut void, usize) -> i64,
+    write: 0 as extern "C" fn(*mut vnode, u64, *void, usize) -> i64,
+    open: chrOpen,
+    release: chrRelease,
+    open_priv: PRIV_DEVICE,
+    read_file: chrRead,
+    write_file: chrWrite,
+    ready: chrReady,
+    poll_wq: chrPollWq,
+    set_nonblock: chrSetNonblock,
+};
+
+// ---- /dev/net/tapctl: the owner's runtime network-control channel ----
+
+/// The scratches the records of C types no CeeSafe value holds are built in, eight-byte aligned and zeroed: one
+/// netctl record (or a command), and a table (NAT's forwards, a guest's firewall rules, the counters, the DHCP
+/// leases). The snapshot's sections share one of each, in turn: the kernel's frame limit is 2 KiB.
+struct TapRecord {
+    words: [u64; 16];
+}
+
+struct TapTable {
+    words: [u64; 64];
+}
+
+fn record() -> TapRecord => TapRecord { words: [0; 16] };
+
+fn table() -> TapTable => TapTable { words: [0; 64] };
+
+/// A scratch's bytes, after checking `bytes` of them fit: the caller casts them to the C record it builds.
+fn recordAt(s: borrow mut TapRecord, bytes: usize) -> *mut u8 {
+    check(bytes <= 128, "a tapctl record scratch holds the record");
+    return borrow mut s.words as *mut [u64; 16] as *mut u8;
+}
+
+fn tableAt(s: borrow mut TapTable, bytes: usize) -> *mut u8 {
+    check(bytes <= 512, "a tapctl table scratch holds the listing");
+    return borrow mut s.words as *mut [u64; 64] as *mut u8;
+}
+
+/// The panic of a broken invariant.
+fn check(ok: bool, what: StringView) {
+    if (!ok) {
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("tap: assertion failed: ");
+        line.text(what);
+        KernelLog.panic(line);
+    }
+}
+
+/// The first `n` bytes of a scratch, copied to `p`.
+/// Safety: `p` has room for `n` bytes.
+unsafe fn put(p: *mut u8, s: borrow mut TapRecord, n: usize) {
+    SliceMut.fromRaw(p, n).copyFrom(Slice.fromRaw(recordAt(s, n) as *u8, n));
+}
+
+/// A port-forward command (FORWARD_ADD / FORWARD_DEL): exactly one struct cosmo_netctl, applied whole.
+/// Safety: `buf` points to `len` readable bytes.
+unsafe fn ctlForward(buf: *void, len: usize) -> i64 {
+    if (len != layoutOf<cosmo_netctl>().size) {
+        return -EINVAL as i64; // a command is exactly one struct, applied whole
+    }
+    var s = scratchFrom(buf, len);
+    let c = Ptr.toBorrow((recordAt(mut s, layoutOf<cosmo_netctl>().size * (1)) as *mut cosmo_netctl) as *cosmo_netctl);
+    if (c.reserved != 0 || c.reserved2 != 0) {
+        return -EINVAL as i64;
+    }
+    if (c.proto != PROTO_TCP && c.proto != PROTO_UDP) {
+        return -EINVAL as i64;
+    }
+    let proto = if (c.proto == PROTO_TCP) IPPROTO_TCP else IPPROTO_UDP;
+    if (c.op == FORWARD_ADD) {
+        if (c.host_port == 0 || c.guest_port == 0 || c.guest_addr == 0) {
+            return -EINVAL as i64;
+        }
+        let rc = nat_pf_add(proto, c.host_port, c.guest_addr, c.guest_port);
+        if (rc != 0) {
+            return rc as i64; // -EINVAL off-tap, -EEXIST dup, -ENOSPC full
+        }
+        return truncate<i64>(len);
+    }
+    if (c.op == FORWARD_DEL) {
+        if (c.host_port == 0) {
+            return -EINVAL as i64;
+        }
+        if (!nat_pf_del(proto, c.host_port)) {
+            return -ENOENT as i64;
+        }
+        return truncate<i64>(len);
+    }
+    return -EINVAL as i64;
+}
+
+/// A record scratch holding `len` (at most 128) bytes from `buf`.
+/// Safety: `buf` points to `len` readable bytes.
+unsafe fn scratchFrom(buf: *void, len: usize) -> TapRecord {
+    var s = record();
+    let n = if (len < 128) len else 128;
+    SliceMut.fromRaw(recordAt(mut s, n), n).copyFrom(Slice.fromRaw(buf as *u8, n));
+    return s;
+}
+
+/// A firewall command (FILTER_ADD / FILTER_DEL / FILTER_POLICY): exactly one struct cosmo_netctl_filter. The guest is
+/// named by address in the payload, as a forward names its target -- or the host, by COSMO_NETCTL_HOST_ADDR (0), the
+/// one address no guest or forward can mean; the netctl direction, proto and verdict values are fw.h's (fw_rule_add
+/// validates them, and the scope they may name).
+/// Safety: `buf` points to `len` readable bytes.
+unsafe fn ctlFilter(buf: *void, len: usize) -> i64 {
+    if (len != layoutOf<cosmo_netctl_filter>().size) {
+        return -EINVAL as i64;
+    }
+    var s = scratchFrom(buf, len);
+    let c = Ptr.toBorrow(
+        (recordAt(
+            mut s,
+            layoutOf<cosmo_netctl_filter>().size * (1),
+        ) as *mut cosmo_netctl_filter) as *cosmo_netctl_filter,
+    );
+    if (c.reserved[0] != 0 || c.reserved[1] != 0) {
+        return -EINVAL as i64;
+    }
+    var rc: i32 = 0;
+    if (c.op == FILTER_POLICY) {
+        rc = fw_policy_set(c.guest_addr, c.direction, c.verdict);
+    } else {
+        var rs = record();
+        let r = Ptr.toBorrowMut((recordAt(mut rs, layoutOf<fw_rule>().size * (1)) as *mut fw_rule));
+        r.direction = c.direction;
+        r.proto = c.proto;
+        r.dst_prefix = c.dst_prefix;
+        r.verdict = c.verdict;
+        r.dst_ip = c.dst_addr;
+        r.dst_port = c.dst_port;
+        r.src_prefix = c.src_prefix;
+        r.src_ip = c.src_addr;
+        r.scope = c.scope;
+        let rp = (recordAt(mut rs, layoutOf<fw_rule>().size * (1)) as *mut fw_rule) as *fw_rule;
+        rc = if (c.op == FILTER_ADD) fw_rule_add(
+            c.guest_addr,
+            c.at_index as u32,
+            rp,
+        ) else fw_rule_del(c.guest_addr, rp);
+    }
+    return if (rc != 0) rc as i64 else truncate<i64>(len);
+}
+
+/// /dev/net/tapctl's write: every command begins (version, op); each op is exactly its own struct, applied whole --
+/// a short, long or wrong-versioned write changes nothing.
+/// Safety: `buf` points to `len` readable bytes.
+@callback
+unsafe fn ctlWrite(vn: *mut vnode, off: u64, buf: *void, len: usize) -> i64 {
+    if (!cred_has(cred_current(), PRIV_NET)) {
+        return -EPERM as i64;
+    }
+    if (len < 4) {
+        return -EINVAL as i64;
+    }
+    let h = Slice.fromRaw(buf as *u8, 4);
+    let version = (h[0] as u16) | ((h[1] as u16) << 8);
+    let op = (h[2] as u16) | ((h[3] as u16) << 8);
+    if (version != NETCTL_VERSION) {
+        return -ENOTSUP as i64;
+    }
+    if (op == FORWARD_ADD || op == FORWARD_DEL) {
+        return ctlForward(buf, len);
+    }
+    if (op == FILTER_ADD || op == FILTER_DEL || op == FILTER_POLICY) {
+        return ctlFilter(buf, len);
+    }
+    return -EINVAL as i64;
+}
+
+/// The milliseconds left to a live expiry (expires > now, so at least 1), at most 0xffffffff.
+fn msLeft(expires: u64, now: u64) -> u32 {
+    let ms = (expires - now + 999999) / 1000000;
+    return if (ms > 0xffffffff) 0xffffffff else truncate<u32>(ms);
+}
+
+/// The flow section (version 6): a header with the shares and the refusal counters, then every live flow, NAT's
+/// table then the firewall's, each copied in one hold of its own lock at one `now` (N24). Returns the bytes written
+/// at `p`, or -EMSGSIZE / -ENOMEM.
+/// Safety: `p` has room for `room` bytes.
+unsafe fn ctlFlows(p: *mut u8, room: usize, r: borrow mut TapRecord, t: borrow mut TapTable) -> i64 {
+    let nf = kmalloc(NAT_TABLE_SIZE as usize * layoutOf<nat_flow>().size, 0) as *mut nat_flow;
+    let ff = kmalloc(flowMax() as usize * layoutOf<fw_flow_info>().size, 0) as *mut fw_flow_info;
+    if (nf.isNull() || ff.isNull()) {
+        kfree(nf as *mut void);
+        kfree(ff as *mut void);
+        return -ENOMEM as i64;
+    }
+    let now = clock_now_ns();
+    let nn = nat_flow_list(nf, NAT_TABLE_SIZE, now);
+    let fnn = fw_flow_list(ff, flowMax(), now);
+    // The two counters' structs share the table scratch, free here: NAT's at 0, the firewall's at 128.
+    t = table();
+    check(layoutOf<nat_stats>().size <= 128, "nat_stats fits its half of the table scratch");
+    let at = tableAt(t, 128 + layoutOf<fw_stats>().size);
+    let ns = at as *mut nat_stats;
+    let fs = at.add(128) as *mut fw_stats;
+    nat_get_stats(ns);
+    fw_get_stats(fs);
+    var rc: i64 = -EMSGSIZE as i64;
+    let headSize = layoutOf<cosmo_netctl_flow_list>().size;
+    let flowSize = layoutOf<cosmo_netctl_flow>().size;
+    let need = headSize + (nn + fnn) as usize * flowSize;
+    if (room >= need) {
+        let n = Ptr.toBorrow(ns as *nat_stats);
+        let f = Ptr.toBorrow(fs as *fw_stats);
+        r = record();
+        let h = Ptr.toBorrowMut(
+            (recordAt(r, layoutOf<cosmo_netctl_flow_list>().size * (1)) as *mut cosmo_netctl_flow_list),
+        );
+        h.version = NETCTL_VERSION;
+        h.count = truncate<u16>(nn + fnn);
+        h.nat_quota = truncate<u16>(natQuota());
+        h.fw_quota = truncate<u16>(fwQuota());
+        h.fw_host_quota = truncate<u16>(fwHostQuota());
+        h.counters.masq_new = n.out_new;
+        h.counters.masq_drop_share = n.out_drop_share;
+        h.counters.masq_drop_table = n.out_drop_table;
+        h.counters.masq_drop_noport = n.out_drop_noport;
+        h.counters.dnat_drop_share = n.dnat_drop_share;
+        h.counters.dnat_drop_table = n.dnat_drop_table;
+        h.counters.dnat_drop_ambiguous = n.dnat_drop_ambiguous;
+        h.counters.nat_expired = n.expired;
+        h.counters.fw_new = f.flow_new;
+        h.counters.fw_drop_share = f.flow_drop_share;
+        h.counters.fw_drop_table = f.flow_drop_table;
+        h.counters.fw_host_new = f.hin_flow_new;
+        h.counters.fw_host_unrecorded = f.hin_flow_unrecorded;
+        h.counters.fw_expired = f.expired;
+        put(p, r, headSize);
+        var q = p.add(headSize);
+        for (i in 0..nn as usize) {
+            let e = Ptr.toBorrow(nf.add(i) as *nat_flow);
+            let dnat = e.kind == NAT_KIND_DNAT;
+            // Who opened it to whom: a masqueraded flow is the guest's to its peer; a forwarded one is the client's
+            // to the guest.
+            r = record();
+            let o = Ptr.toBorrowMut(
+                (recordAt(r, layoutOf<cosmo_netctl_flow>().size * (1)) as *mut cosmo_netctl_flow),
+            );
+            o.table = FLOW_NAT;
+            o.kind = if (dnat) FLOW_DNAT else FLOW_MASQ;
+            o.proto = e.proto;
+            o.flags = if (e.est) FLOW_ESTABLISHED else 0;
+            o.guest_addr = e.orig_ip;
+            o.src_addr = if (dnat) e.peer_ip else e.orig_ip;
+            o.dst_addr = if (dnat) e.orig_ip else e.peer_ip;
+            o.src_port = if (dnat) e.peer_port else e.orig_port;
+            o.dst_port = if (dnat) e.orig_port else e.peer_port;
+            o.nat_addr = e.nat_ip;
+            o.nat_port = e.nat_port;
+            o.expires_ms = msLeft(e.expires_ns, now);
+            put(q, r, flowSize);
+            q = q.add(flowSize);
+        }
+        for (i in 0..fnn as usize) {
+            let e = Ptr.toBorrow(ff.add(i) as *fw_flow_info);
+            r = record();
+            let o = Ptr.toBorrowMut(
+                (recordAt(r, layoutOf<cosmo_netctl_flow>().size * (1)) as *mut cosmo_netctl_flow),
+            );
+            o.table = FLOW_FW;
+            o.kind = if (e.guest_ip == FW_HOST_GUEST_IP) FLOW_HOST else FLOW_GUEST;
+            o.proto = e.proto;
+            o.flags = if (e.est) FLOW_ESTABLISHED else 0;
+            o.guest_addr = e.guest_ip;
+            o.src_addr = e.a_ip;
+            o.dst_addr = e.b_ip;
+            o.src_port = e.a_port;
+            o.dst_port = e.b_port;
+            o.expires_ms = msLeft(e.expires_ns, now);
+            put(q, r, flowSize);
+            q = q.add(flowSize);
+        }
+        rc = truncate<i64>(need);
+    }
+    kfree(nf as *mut void);
+    kfree(ff as *mut void);
+    return rc;
+}
+
+// fw.h's and nat.h's table bounds and shares (test_tap.c asserts them against the headers).
+const FW_FLOW_MAX: u32 = 320;
+const NAT_QUOTA_PER_GUEST: u32 = 32;
+const FW_FLOW_QUOTA_PER_GUEST: u32 = 32;
+const FW_FLOW_QUOTA_HOST: u32 = 64;
+
+fn flowMax() -> u32 => FW_FLOW_MAX;
+fn natQuota() -> u32 => NAT_QUOTA_PER_GUEST;
+fn fwQuota() -> u32 => FW_FLOW_QUOTA_PER_GUEST;
+fn fwHostQuota() -> u32 => FW_FLOW_QUOTA_HOST;
+
+/// The C string in `from` (at most `to.length - 1` bytes of it), terminated, into `to`: strlcpy.
+fn copyName(to: SliceMut<u8>, from: Slice<u8>) {
+    var n: usize = 0;
+    while (n + 1 < to.length && n < from.length && from[n] != 0) {
+        to[n] = from[n];
+        n = n + 1;
+    }
+    to[n] = 0;
+}
+
+/// The lease section (version 7): the kernel's DHCP clients, each copied under its own lock at one `now`. Returns the
+/// bytes written or -EMSGSIZE.
+/// Safety: `p` has room for `room` bytes.
+unsafe fn ctlLeases(p: *mut u8, room: usize, r: borrow mut TapRecord, t: borrow mut TapTable) -> i64 {
+    t = table();
+    let l = (tableAt(t, layoutOf<dhcp_lease_info>().size * (DHCP_MAX_CLIENTS as usize)) as *mut dhcp_lease_info);
+    let n = dhcp_lease_list(l, DHCP_MAX_CLIENTS);
+    let headSize = layoutOf<cosmo_netctl_lease_list>().size;
+    let recSize = layoutOf<cosmo_netctl_lease>().size;
+    let need = headSize + n as usize * recSize;
+    if (room < need) {
+        return -EMSGSIZE as i64;
+    }
+    r = record();
+    let h = Ptr.toBorrowMut(
+        (recordAt(r, layoutOf<cosmo_netctl_lease_list>().size * (1)) as *mut cosmo_netctl_lease_list),
+    );
+    h.version = NETCTL_VERSION;
+    h.count = truncate<u16>(n);
+    put(p, r, headSize);
+    var q = p.add(headSize);
+    for (i in 0..n as usize) {
+        let e = Ptr.toBorrow(l.add(i) as *dhcp_lease_info);
+        r = record();
+        let o = Ptr.toBorrowMut(
+            (recordAt(r, layoutOf<cosmo_netctl_lease>().size * (1)) as *mut cosmo_netctl_lease),
+        );
+        o.state = e.state;
+        o.dns_count = e.ndns;
+        o.addr = e.addr;
+        o.mask = e.mask;
+        o.router = e.router;
+        o.server = e.server;
+        o.lease_s = e.lease_s;
+        o.t1_s = e.t1_s;
+        o.t2_s = e.t2_s;
+        o.remaining_ms = e.remaining_ms;
+        o.t1_ms = e.t1_ms;
+        o.t2_ms = e.t2_ms;
+        o.ifname = e.ifname;
+        o.dns = e.dns;
+        copyName(mut o.hostname[..], e.hostname[..]);
+        put(q, r, recSize);
+        q = q.add(recSize);
+    }
+    return truncate<i64>(need);
+}
+
+/// The interface section (version 8), from the stack's listing: what `ip` prints.
+/// Safety: `p` has room for `room` bytes.
+unsafe fn ctlIfs(p: *mut u8, room: usize, r: borrow mut TapRecord) -> i64 {
+    let f = kmalloc(NETIF_MAX as usize * layoutOf<netif_info>().size, 0) as *mut netif_info;
+    if (f.isNull()) {
+        return -ENOMEM as i64;
+    }
+    var n = netif_list(f, NETIF_MAX);
+    if (n > NETIF_MAX) {
+        n = NETIF_MAX;
+    }
+    let headSize = layoutOf<cosmo_netctl_if_list>().size;
+    let recSize = layoutOf<cosmo_netctl_if>().size;
+    let need = headSize + n as usize * recSize;
+    if (room < need) {
+        kfree(f as *mut void);
+        return -EMSGSIZE as i64;
+    }
+    r = record();
+    let h = Ptr.toBorrowMut(
+        (recordAt(r, layoutOf<cosmo_netctl_if_list>().size * (1)) as *mut cosmo_netctl_if_list),
+    );
+    h.version = NETCTL_VERSION;
+    h.count = truncate<u16>(n);
+    put(p, r, headSize);
+    var q = p.add(headSize);
+    for (i in 0..n as usize) {
+        let e = Ptr.toBorrow(f.add(i) as *netif_info);
+        r = record();
+        let o = Ptr.toBorrowMut((recordAt(r, layoutOf<cosmo_netctl_if>().size * (1)) as *mut cosmo_netctl_if));
+        o.index = e.index;
+        o.mtu = e.mtu;
+        o.addr = e.addr;
+        o.mask = e.mask;
+        o.flags =
+            (if ((e.flags & NETIF_UP) != 0) IF_UP else 0) | (if ((e.flags & NETIF_LOOPBACK) != 0) IF_LOOPBACK else 0) |
+                (if ((e.flags & NETIF_NOARP) != 0) IF_NOARP else 0) |
+                (if ((e.flags & NETIF_NODEFAULT) != 0) IF_TAP else 0);
+        o.rx_packets = e.stats.rx_packets.loadWith(LoadOrdering.Relaxed);
+        o.rx_bytes = e.stats.rx_bytes.loadWith(LoadOrdering.Relaxed);
+        o.rx_dropped = e.stats.rx_dropped.loadWith(LoadOrdering.Relaxed);
+        o.rx_errors = e.stats.rx_errors.loadWith(LoadOrdering.Relaxed);
+        o.tx_packets = e.stats.tx_packets.loadWith(LoadOrdering.Relaxed);
+        o.tx_bytes = e.stats.tx_bytes.loadWith(LoadOrdering.Relaxed);
+        o.tx_dropped = e.stats.tx_dropped.loadWith(LoadOrdering.Relaxed);
+        o.tx_errors = e.stats.tx_errors.loadWith(LoadOrdering.Relaxed);
+        o.name = e.name;
+        o.mac = e.mac;
+        o.ip6_ll = e.ip6_ll.s6_addr;
+        put(q, r, recSize);
+        q = q.add(recSize);
+    }
+    kfree(f as *mut void);
+    return truncate<i64>(need);
+}
+
+/// The route section (version 8).
+/// Safety: `p` has room for `room` bytes.
+unsafe fn ctlRoutes(p: *mut u8, room: usize, r: borrow mut TapRecord) -> i64 {
+    let routes = kmalloc(IPV4_ROUTES_MAX as usize * layoutOf<ipv4_route_info>().size, 0) as *mut ipv4_route_info;
+    if (routes.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let n = ipv4_route_list(routes, IPV4_ROUTES_MAX);
+    let headSize = layoutOf<cosmo_netctl_route_list>().size;
+    let recSize = layoutOf<cosmo_netctl_route>().size;
+    let need = headSize + n as usize * recSize;
+    if (room < need) {
+        kfree(routes as *mut void);
+        return -EMSGSIZE as i64;
+    }
+    r = record();
+    let h = Ptr.toBorrowMut(
+        (recordAt(r, layoutOf<cosmo_netctl_route_list>().size * (1)) as *mut cosmo_netctl_route_list),
+    );
+    h.version = NETCTL_VERSION;
+    h.count = truncate<u16>(n);
+    put(p, r, headSize);
+    var q = p.add(headSize);
+    for (i in 0..n as usize) {
+        let e = Ptr.toBorrow(routes.add(i) as *ipv4_route_info);
+        r = record();
+        let o = Ptr.toBorrowMut(
+            (recordAt(r, layoutOf<cosmo_netctl_route>().size * (1)) as *mut cosmo_netctl_route),
+        );
+        o.dst = e.dst;
+        o.mask = e.mask;
+        o.gateway = e.gateway;
+        o.src = e.src;
+        o.flags = if ((e.flags & IPV4_RTF_GATEWAY) != 0) RT_GATEWAY else 0;
+        o.ifname = e.ifname;
+        put(q, r, recSize);
+        q = q.add(recSize);
+    }
+    kfree(routes as *mut void);
+    return truncate<i64>(need);
+}
+
+/// The neighbour section (version 8).
+/// Safety: `p` has room for `room` bytes.
+unsafe fn ctlNeighs(p: *mut u8, room: usize, r: borrow mut TapRecord) -> i64 {
+    let a = kmalloc(ARP_TABLE_SIZE as usize * layoutOf<arp_info>().size, 0) as *mut arp_info;
+    if (a.isNull()) {
+        return -ENOMEM as i64;
+    }
+    var n = arp_list(a, ARP_TABLE_SIZE);
+    if (n > ARP_TABLE_SIZE) {
+        n = ARP_TABLE_SIZE;
+    }
+    let headSize = layoutOf<cosmo_netctl_neigh_list>().size;
+    let recSize = layoutOf<cosmo_netctl_neigh>().size;
+    let need = headSize + n as usize * recSize;
+    if (room < need) {
+        kfree(a as *mut void);
+        return -EMSGSIZE as i64;
+    }
+    r = record();
+    let h = Ptr.toBorrowMut(
+        (recordAt(r, layoutOf<cosmo_netctl_neigh_list>().size * (1)) as *mut cosmo_netctl_neigh_list),
+    );
+    h.version = NETCTL_VERSION;
+    h.count = truncate<u16>(n);
+    put(p, r, headSize);
+    var q = p.add(headSize);
+    for (i in 0..n as usize) {
+        let e = Ptr.toBorrow(a.add(i) as *arp_info);
+        r = record();
+        let o = Ptr.toBorrowMut(
+            (recordAt(r, layoutOf<cosmo_netctl_neigh>().size * (1)) as *mut cosmo_netctl_neigh),
+        );
+        o.addr = e.ip;
+        o.state = if (e.complete) NEIGH_REACHABLE else NEIGH_INCOMPLETE;
+        o.ifname = e.ifname;
+        o.mac = e.mac;
+        put(q, r, recSize);
+        q = q.add(recSize);
+    }
+    kfree(a as *mut void);
+    return truncate<i64>(need);
+}
+
+/// /dev/net/tapctl's read: the whole snapshot -- the port-forward list (a struct cosmo_netctl_list header and its
+/// rules) followed by the filter section (a struct cosmo_netctl_filter_list; the host record (guest_addr 0) and then
+/// the attached guests' policies; then every rule in evaluation order, the host's first), then the flow section
+/// (version 6), the lease section (version 7), then the interface, route and neighbour sections (version 8) -- or
+/// -EMSGSIZE if the buffer is too small.
+/// Safety: `buf` has room for `len` bytes.
+@callback
+unsafe fn ctlRead(vn: *mut vnode, off: u64, buf: *mut void, len: usize) -> i64 {
+    var r = record(); // the one record scratch, every section's in turn
+    var t = table();  // the one table scratch: the forwards, then each guest's rules, then the leases
+    let rules = (tableAt(mut t, layoutOf<nat_pf_rule>().size * (NAT_PF_MAX as usize)) as *mut nat_pf_rule);
+    let n = nat_pf_list(rules, NAT_PF_MAX);
+    let listSize = layoutOf<cosmo_netctl_list>().size;
+    let ruleSize = layoutOf<cosmo_netctl_rule>().size;
+    let total = listSize + n as usize * ruleSize;
+    if (len < total) {
+        return -EMSGSIZE as i64;
+    }
+    let base = buf as *mut u8;
+    r = record();
+    let h = Ptr.toBorrowMut((recordAt(mut r, layoutOf<cosmo_netctl_list>().size * (1)) as *mut cosmo_netctl_list));
+    h.version = NETCTL_VERSION;
+    h.count = truncate<u16>(n);
+    put(base, mut r, listSize);
+    for (i in 0..n as usize) {
+        let e = Ptr.toBorrow(rules.add(i) as *nat_pf_rule);
+        r = record();
+        let o = Ptr.toBorrowMut(
+            (recordAt(mut r, layoutOf<cosmo_netctl_rule>().size * (1)) as *mut cosmo_netctl_rule),
+        );
+        o.proto = if (e.proto == IPPROTO_TCP) PROTO_TCP else PROTO_UDP;
+        o.host_port = e.host_port;
+        o.guest_port = e.guest_port;
+        o.guest_addr = e.guest_ip;
+        put(base.add(listSize + i * ruleSize), mut r, ruleSize);
+    }
+
+    // The filter section. Emitted rule by rule with room checks; the header's counts are what was actually written,
+    // so the snapshot is self-consistent even if a rule lands between two guests' listings.
+    var p = base.add(total);
+    var room = len - total;
+    var guests: [u32; 9] = [0; 9];
+    guests[0] = HOST_ADDR; // the host object, always present, listed first
+    let ng = 1 + fw_guest_list((borrow mut guests as *mut [u32; 9] as *mut u32).add(1), FW_MAX_GUESTS);
+    let flSize = layoutOf<cosmo_netctl_filter_list>().size;
+    let fgSize = layoutOf<cosmo_netctl_filter_guest>().size;
+    let frSize = layoutOf<cosmo_netctl_filter_rule>().size;
+    let need = flSize + ng as usize * fgSize;
+    if (room < need) {
+        return -EMSGSIZE as i64;
+    }
+    let fhAt = p; // the header, patched last
+    p = p.add(flSize);
+    for (i in 0..ng as usize) {
+        r = record();
+        let g = Ptr.toBorrowMut(
+            (recordAt(mut r, layoutOf<cosmo_netctl_filter_guest>().size * (1)) as *mut cosmo_netctl_filter_guest),
+        );
+        g.guest_addr = guests[i];
+        fw_policy_get(
+            guests[i], borrow mut g.policy_to_uplink as *mut u8, borrow mut g.policy_to_guest as *mut u8,
+            borrow mut g.policy_to_host as *mut u8, borrow mut g.policy_from_uplink as *mut u8,
+            borrow mut g.policy_output as *mut u8,
+        );
+        put(p, mut r, fgSize);
+        p = p.add(fgSize);
+    }
+    room = room - need;
+    var nr: u32 = 0;
+    for (i in 0..ng as usize) {
+        t = table();
+        let rsp = (tableAt(mut t, layoutOf<fw_rule>().size * (FW_RULES_PER_GUEST as usize)) as *mut fw_rule);
+        let k = fw_rule_list(guests[i], rsp, FW_RULES_PER_GUEST);
+        if (room < k as usize * frSize) {
+            return -EMSGSIZE as i64;
+        }
+        for (j in 0..k as usize) {
+            let e = Ptr.toBorrow(rsp.add(j) as *fw_rule);
+            r = record();
+            let o = Ptr.toBorrowMut(
+                (recordAt(mut r, layoutOf<cosmo_netctl_filter_rule>().size * (1)) as *mut cosmo_netctl_filter_rule),
+            );
+            o.guest_addr = guests[i];
+            o.direction = e.direction;
+            o.proto = e.proto;
+            o.dst_prefix = e.dst_prefix;
+            o.verdict = e.verdict;
+            o.dst_addr = e.dst_ip;
+            o.dst_port = e.dst_port;
+            o.index = truncate<u16>(j);
+            o.src_addr = e.src_ip;
+            o.src_prefix = e.src_prefix;
+            o.scope = e.scope;
+            put(p, mut r, frSize);
+            p = p.add(frSize);
+            room = room - frSize;
+            nr = nr + 1;
+        }
+    }
+    r = record();
+    let fh = Ptr.toBorrowMut(
+        (recordAt(mut r, layoutOf<cosmo_netctl_filter_list>().size * (1)) as *mut cosmo_netctl_filter_list),
+    );
+    fh.version = NETCTL_VERSION;
+    fh.rule_count = truncate<u16>(nr);
+    fh.guest_count = truncate<u16>(ng);
+    put(fhAt, mut r, flSize);
+
+    var rc = ctlFlows(p, room, mut r, mut t);
+    if (rc < 0) {
+        return rc;
+    }
+    p = p.add(truncate<usize>(rc));
+    room = room - truncate<usize>(rc);
+    rc = ctlLeases(p, room, mut r, mut t);
+    if (rc < 0) {
+        return rc;
+    }
+    p = p.add(truncate<usize>(rc));
+    room = room - truncate<usize>(rc);
+    rc = ctlIfs(p, room, mut r);
+    if (rc < 0) {
+        return rc;
+    }
+    p = p.add(truncate<usize>(rc));
+    room = room - truncate<usize>(rc);
+    rc = ctlRoutes(p, room, mut r);
+    if (rc < 0) {
+        return rc;
+    }
+    p = p.add(truncate<usize>(rc));
+    room = room - truncate<usize>(rc);
+    rc = ctlNeighs(p, room, mut r);
+    if (rc < 0) {
+        return rc;
+    }
+    p = p.add(truncate<usize>(rc));
+    return truncate<i64>(p as usize - base as usize);
+}
+
+/// netctl configuration is PRIV_NET's (roadmap M5): at the open, and again at each write, since a handle may outlive
+/// the privilege that opened it.
+static mut TAP_CTL_OPS: chrdev_ops = chrdev_ops {
+    read: ctlRead,
+    write: ctlWrite,
+    open: 0 as extern "C" fn(*mut vnode, *mut file) -> i32,
+    release: 0 as extern "C" fn(*mut vnode, *mut file),
+    open_priv: PRIV_NET,
+    read_file: 0 as extern "C" fn(*mut vnode, *mut file, u64, *mut void, usize) -> i64,
+    write_file: 0 as extern "C" fn(*mut vnode, *mut file, u64, *void, usize) -> i64,
+    ready: 0 as extern "C" fn(*mut vnode, *mut file) -> u32,
+    poll_wq: 0 as extern "C" fn(*mut vnode, *mut file, u32) -> *mut waitqueue,
+    set_nonblock: 0 as extern "C" fn(*mut vnode, *mut file, i32) -> i32,
+};
+
+/// "tap: cannot create <path> (<rc>)" at the warning level.
+fn cannotCreate(path: StringView, rc: i32) {
+    var buffer: [u8; 80] = [0; 80];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("tap: cannot create ");
+    line.text(path);
+    line.text(" (");
+    if (rc < 0) {
+        line.byte(45);
+        line.decimal(truncate<u64>(0 - rc));
+    } else {
+        line.decimal(truncate<u64>(rc));
+    }
+    line.text(")");
+    KernelLog.send(LogLevel.Warn, line);
+}
+
+/// tap.h's tap_dev_init: the /dev/net/tap and /dev/net/tapctl nodes, at boot.
+/// Safety: boot, once; the nodes' addresses are kept in statics.
+@export("tap_dev_init")
+fn devInit() {
+    unsafe {
+        vfs_mkdir(0 as *mut vnode, "/dev/net\0".ptr as *CChar, 493); // -EEXIST is fine
+        var node = 0 as *mut vnode;
+        var rc = ramfs_mkchr(
+            "/dev/net/tap\0".ptr as *CChar, 384, borrow TAP_CHR_OPS as *chrdev_ops, 0 as *mut void,
+            borrow mut node as *mut *mut vnode,
+        );
+        TAP_NODE = node as usize;
+        if (rc != 0) {
+            cannotCreate("/dev/net/tap", rc);
+        }
+        rc = ramfs_mkchr(
+            "/dev/net/tapctl\0".ptr as *CChar, 384, borrow TAP_CTL_OPS as *chrdev_ops, 0 as *mut void,
+            borrow mut node as *mut *mut vnode,
+        );
+        CTL_NODE = node as usize;
+        if (rc != 0) {
+            cannotCreate("/dev/net/tapctl", rc);
+        }
+    }
+}

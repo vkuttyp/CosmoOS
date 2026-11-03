@@ -101,6 +101,28 @@ _Static_assert(sizeof(struct cosmo_netctl_lease) == 128 && sizeof(struct cosmo_n
                sizeof(struct cosmo_netctl_route) == 32 && sizeof(struct cosmo_netctl_neigh) == 20,
                "the version-8 records' sizes are the ABI");
 
+/* The values tap.cee writes as its own constants, each the header's. */
+_Static_assert(FW_FLOW_MAX == 320 && NAT_QUOTA_PER_GUEST == 32 && FW_FLOW_QUOTA_PER_GUEST == 32 &&
+               FW_FLOW_QUOTA_HOST == 64, "tap.cee's fw.h and nat.h bounds");
+_Static_assert(NAT_PF_MAX == 16 && NAT_TABLE_SIZE == 256 && NAT_KIND_DNAT == 1 && FW_MAX_GUESTS == 8 &&
+               FW_RULES_PER_GUEST == 32 && FW_HOST_GUEST_IP == 0 && DHCP_MAX_CLIENTS == 4 && TAPSVC_GUEST_HOST == 15,
+               "tap.cee's NAT, firewall, DHCP and tap-services constants");
+_Static_assert(IPV4_ROUTES_MAX == 33 && IPV4_RTF_GATEWAY == 2 && ARP_TABLE_SIZE == 64 && NETIF_MAX == 32 &&
+               NETIF_UP == 1 && NETIF_LOOPBACK == 2 && NETIF_NOARP == 4 && NETIF_NODEFAULT == (1u << 4) &&
+               ETH_HLEN == 14 && TAP_TXQ_MAX == 64, "tap.cee's interface, route and ARP constants");
+_Static_assert(PRIV_NET == (1u << 2) && PRIV_DEVICE == (1u << 5) && COSMO_IO_READABLE == 1 &&
+               COSMO_IO_WRITABLE == 2 && KMEM_ZERO == 1, "tap.cee's privilege, readiness and allocation bits");
+_Static_assert(COSMO_NETCTL_VERSION == 8 && COSMO_NETCTL_FORWARD_ADD == 1 && COSMO_NETCTL_FORWARD_DEL == 2 &&
+               COSMO_NETCTL_FILTER_ADD == 3 && COSMO_NETCTL_FILTER_DEL == 4 && COSMO_NETCTL_FILTER_POLICY == 5 &&
+               COSMO_NETCTL_FLOW_NAT == 1 && COSMO_NETCTL_FLOW_FW == 2 && COSMO_NETCTL_FLOW_MASQ == 1 &&
+               COSMO_NETCTL_FLOW_DNAT == 2 && COSMO_NETCTL_FLOW_GUEST == 3 && COSMO_NETCTL_FLOW_HOST == 4 &&
+               COSMO_NETCTL_FLOW_ESTABLISHED == 1 && COSMO_NETCTL_IF_UP == 1 && COSMO_NETCTL_IF_LOOPBACK == 2 &&
+               COSMO_NETCTL_IF_NOARP == 4 && COSMO_NETCTL_IF_TAP == 8 && COSMO_NETCTL_RT_GATEWAY == 2 &&
+               COSMO_NETCTL_NEIGH_INCOMPLETE == 1 && COSMO_NETCTL_NEIGH_REACHABLE == 2 && COSMO_NETCTL_HOST_ADDR == 0,
+               "tap.cee's netctl.h values");
+_Static_assert(EPERM == 1 && ENOENT == 2 && ENOMEM == 12 && EINVAL == 22 && ENOSPC == 28 && EMSGSIZE == 90 &&
+               ENOTSUP == 95, "tap.cee's errno values");
+
 /* The digest of the C (tap.c, 2026-11-04), which the CeeSafe port gives. */
 #define TAP_DIGEST 0xedefcf1c515836e7ull
 #define HISTORIES 3u

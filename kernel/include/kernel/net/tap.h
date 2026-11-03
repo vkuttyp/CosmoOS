@@ -23,7 +23,7 @@ struct tap;
 
 /* Create and register an up tap interface `name` with IPv4 `ip`/`mask` and
  * link address `mac`. NULL on no memory or a duplicate name. */
-struct tap *tap_create(const char *name, uint32_t ip, uint32_t mask, const uint8_t mac[6]);
+struct tap *tap_create(const char *name, uint32_t ip, uint32_t mask, const uint8_t *mac);   /* mac: 6 bytes */
 /* Unregister and free it (no transmit or receive after this returns). */
 void tap_destroy(struct tap *t);
 
