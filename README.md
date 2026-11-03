@@ -64,7 +64,8 @@ observability, security, portability, performance, optimization.
 
 1.0 is the [1.0 roadmap](docs/roadmap-1.0.md) completed; the
 [1.1 roadmap](docs/roadmap-1.1.md) is complete too. The work now is the
-[1.2 roadmap](docs/roadmap-1.2.md); open defects and gaps are in
+[2.0 roadmap](docs/roadmap-2.0.md): a memory-safe server operating system
+with its kernel converted to a memory-safe language; open defects and gaps are in
 [`docs/backlog.md`](docs/backlog.md).
 
 ## Targets
@@ -124,7 +125,8 @@ Pass `ARCH=aarch64` for AArch64 and `BUILD=release` for a release build;
 | [`docs/guide/`](docs/guide/README.md) | The user guide: installing, the shell, networking, ssh, packages, privileges, known limitations |
 | [`docs/roadmap-1.0.md`](docs/roadmap-1.0.md) | The 1.0 definition of done and its milestones |
 | [`docs/roadmap-1.1.md`](docs/roadmap-1.1.md) | What merged after 1.0 and the 1.1 units (complete) |
-| [`docs/roadmap-1.2.md`](docs/roadmap-1.2.md) | The current roadmap: storage depth (B, complete) and self-hosting (A) |
+| [`docs/roadmap-1.2.md`](docs/roadmap-1.2.md) | Storage depth (B, complete) and self-hosting (A, folded into 2.0's SW0); superseded |
+| [`docs/roadmap-2.0.md`](docs/roadmap-2.0.md) | The current roadmap: a memory-safe server OS, its tracks, milestones and acceptance tests |
 | [`docs/backlog.md`](docs/backlog.md) | Open defects and gaps, by subsystem |
 | [`docs/plan.md`](docs/plan.md) | Work after 1.0, grouped by area (historical record) |
 | [`docs/audit/`](docs/audit/README.md) | Architecture audits, the deferred-work inventory and per-unit reports |
