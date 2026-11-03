@@ -95,7 +95,8 @@ void kprintf(const char *fmt, ...)
     va_end(ap);
 }
 
-int ksnprintf(char *buf, size_t size, const char *fmt, ...)
+/* Weak: a test that links the kernel's own formatter (kernel/core/printf.c) uses its. */
+__attribute__((weak)) int ksnprintf(char *buf, size_t size, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
