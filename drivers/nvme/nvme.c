@@ -37,6 +37,7 @@
 #include <drivers/pci.h>
 
 #include "nvme.h"
+#include <kernel/diskid.h>
 
 #define NVME_ADMIN_DEPTH   32u
 #define NVME_IO_DEPTH      32u
@@ -785,17 +786,15 @@ static int add_namespace(struct nvme_ctrl *c, uint32_t nsid, uint8_t *id, dma_ad
     int rc = identify(c, NVME_CNS_NAMESPACE, nsid, id, id_dma);
     if (rc)
         return rc;
-    uint64_t nsze;
-    memcpy(&nsze, id + NVME_ID_NS_NSZE, sizeof(nsze));
-    unsigned flbas = id[NVME_ID_NS_FLBAS] & 0xf;
-    uint16_t ms;
-    memcpy(&ms, id + NVME_ID_NS_LBAF + 4 * flbas, sizeof(ms));
-    unsigned lbads = id[NVME_ID_NS_LBAF + 4 * flbas + 2];
-    if (nsze == 0 || ms != 0 || lbads < 9 || lbads > 12) {
+    struct nvme_ns_identity n;
+    nvme_ns_identity_decode(id, &n);   /* diskid.h */
+    if (!n.usable) {
         kwarn("nvme%u: namespace %u refused (blocks %llu, metadata %u, block size 2^%u)", c->index, nsid,
-              (unsigned long long)nsze, ms, lbads);
+              (unsigned long long)n.nsze, n.ms, n.lbads);
         return -ENOTSUP;
     }
+    uint64_t nsze = n.nsze;
+    unsigned lbads = n.lbads;
     struct nvme_ns *ns = kzalloc(sizeof(*ns));
     if (ns == NULL)
         return -ENOMEM;
@@ -938,18 +937,10 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
         kerror("nvme: %s: Identify Controller failed (%d)", pdev->dev.name, rc);
         goto fail_msix;
     }
-    memcpy(c->serial, idbuf + NVME_ID_CTRL_SN, 20);
-    memcpy(c->model, idbuf + NVME_ID_CTRL_MN, 40);
-    for (int i = 19; i >= 0 && c->serial[i] == ' '; i--)
-        c->serial[i] = '\0';
-    for (int i = 39; i >= 0 && c->model[i] == ' '; i--)
-        c->model[i] = '\0';
-    unsigned mdts = idbuf[NVME_ID_CTRL_MDTS];
-    c->max_pages = mdts == 0 || mdts >= 7 ? NVME_MAX_PAGES : (1u << mdts);
-    if (c->max_pages > NVME_MAX_PAGES)
-        c->max_pages = NVME_MAX_PAGES;
-    uint32_t nn;
-    memcpy(&nn, idbuf + NVME_ID_CTRL_NN, sizeof(nn));
+    struct nvme_ctrl_identity ci;
+    nvme_ctrl_identity_decode(idbuf, NVME_MAX_PAGES, c->serial, c->model, &ci);   /* diskid.h */
+    c->max_pages = ci.max_pages;
+    uint32_t nn = ci.nn;
 
     /* I/O queues: ask, take what is granted, create one per CPU. */
     struct nvme_sqe sqe;

@@ -40,6 +40,7 @@
 #include <drivers/pci.h>
 
 #include "ahci.h"
+#include <kernel/diskid.h>
 
 #define AHCI_MAX_PORTS     32u
 #define AHCI_MAX_SLOTS     32u
@@ -505,22 +506,6 @@ static int cmd_sync(struct ahci_port *p, uint8_t cmd, uint64_t lba, uint32_t cou
 
 static struct ahci_disk *disk_of(struct blkdev *bd) { return bd->priv; }
 
-static void ata_string(char *out, const uint16_t *words, unsigned nwords)
-{
-    for (unsigned i = 0; i < nwords; i++) {
-        out[2 * i] = (char)(words[i] >> 8);
-        out[2 * i + 1] = (char)(words[i] & 0xff);
-    }
-    out[2 * nwords] = '\0';
-    for (char *e = out + 2 * nwords - 1; e >= out && *e == ' '; e--)
-        *e = '\0';
-    char *s = out;
-    while (*s == ' ')
-        s++;
-    if (s != out)
-        memmove(out, s, strlen(s) + 1);
-}
-
 static int disk_identify(struct ahci_port *p, struct ahci_disk *d, uint64_t *capacity, uint32_t *sector)
 {
     uint16_t *id = kmalloc(512, KMEM_ZERO);
@@ -531,33 +516,20 @@ static int disk_identify(struct ahci_port *p, struct ahci_disk *d, uint64_t *cap
         kfree(id);
         return rc;
     }
-    ata_string(d->model, id + ID_MODEL, 20);
-    ata_string(d->serial, id + ID_SERIAL, 10);
-    d->lba48 = (id[ID_CMD_SET_2] & (1u << 10)) != 0;
-    uint64_t sectors;
-    if (d->lba48) {
-        sectors = (uint64_t)id[ID_LBA48_COUNT] | ((uint64_t)id[ID_LBA48_COUNT + 1] << 16) |
-                  ((uint64_t)id[ID_LBA48_COUNT + 2] << 32) | ((uint64_t)id[ID_LBA48_COUNT + 3] << 48);
-    } else {
-        sectors = (uint64_t)id[ID_LBA28_COUNT] | ((uint64_t)id[ID_LBA28_COUNT + 1] << 16);
-    }
-    uint32_t ss = 512;
-    uint16_t info = id[ID_SECTOR_INFO];
-    if ((info & 0xc000u) == 0x4000u && (info & (1u << 12))) {
-        uint32_t words = (uint32_t)id[ID_SECTOR_SIZE] | ((uint32_t)id[ID_SECTOR_SIZE + 1] << 16);
-        ss = words * 2;
-    }
-    d->wcache = (id[ID_CMD_SET_EN_2] & (1u << 5)) != 0;
-    d->ncq = (id[ID_SATA_CAP] & (1u << 8)) != 0;
-    d->qdepth = (id[ID_QUEUE_DEPTH] & 0x1fu) + 1;
+    struct ata_identity a;
+    ata_identity_decode(id, d->model, d->serial, &a);   /* diskid.h */
     kfree(id);
-    if (sectors == 0 || ss < 512 || ss > 4096 || (ss & (ss - 1)) != 0) {
+    d->lba48 = a.lba48;
+    d->wcache = a.wcache;
+    d->ncq = a.ncq;
+    d->qdepth = a.qdepth;
+    if (!a.usable) {
         kwarn("ahci%u: port %u: geometry refused (%llu sectors of %u bytes)", p->hba->index, p->index,
-              (unsigned long long)sectors, ss);
+              (unsigned long long)a.sectors, a.sector_size);
         return -ENOTSUP;
     }
-    *capacity = sectors;
-    *sector = ss;
+    *capacity = a.sectors;
+    *sector = a.sector_size;
     return 0;
 }
 

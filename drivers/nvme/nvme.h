@@ -78,18 +78,6 @@ struct nvme_cqe {
     uint32_t dw3;       /* cid 0-15, phase 16, status 17-31 */
 } __packed;
 
-/* Identify Controller (4096 bytes): the fields the driver reads. */
-#define NVME_ID_CTRL_SN    4     /* 20 bytes */
-#define NVME_ID_CTRL_MN    24    /* 40 bytes */
-#define NVME_ID_CTRL_FR    64    /* 8 bytes */
-#define NVME_ID_CTRL_MDTS  77    /* power of two, 4 KiB pages; 0 = no limit */
-#define NVME_ID_CTRL_SQES  512
-#define NVME_ID_CTRL_CQES  513
-#define NVME_ID_CTRL_NN    516   /* u32 */
-
-/* Identify Namespace: NSZE u64 at 0, FLBAS at 26, LBAF[i] at 128 + 4 i (MS u16, LBADS u8, RP u8). */
-#define NVME_ID_NS_NSZE  0
-#define NVME_ID_NS_FLBAS 26
-#define NVME_ID_NS_LBAF  128
+/* Identify Controller and Namespace are decoded by kernel/diskid.h's nvme_*_identity_decode. */
 
 #endif /* DRIVERS_NVME_H */

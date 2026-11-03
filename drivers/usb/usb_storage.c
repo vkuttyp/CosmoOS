@@ -28,6 +28,7 @@
 #include <kernel/wait.h>
 
 #include <drivers/usb.h>
+#include <kernel/diskid.h>
 
 #define USBS_CBW_SIG      0x43425355u   /* "USBC" */
 #define USBS_CSW_SIG      0x53425355u   /* "USBS" */
@@ -93,7 +94,6 @@ struct usbs {
     char vendor[9], product[17], rev[5];
 };
 
-static inline uint32_t be32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 static inline void put_be32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
 static inline void put_be16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
 
@@ -588,13 +588,9 @@ static int usbs_identify(struct usbs *s, uint64_t *capacity, uint32_t *block_siz
     if (rc < 0)
         goto out;
     if (rc == 0 && got >= 36) {
-        memcpy(s->vendor, buf + 8, 8);
-        memcpy(s->product, buf + 16, 16);
-        memcpy(s->rev, buf + 32, 4);
-        for (char *p = s->vendor + 7; p >= s->vendor && *p == ' '; p--) *p = '\0';
-        for (char *p = s->product + 15; p >= s->product && *p == ' '; p--) *p = '\0';
-        if ((buf[0] & 0x1f) != 0x00 && (buf[0] & 0x1f) != 0x0e) {
-            kwarn("usb-storage: %s: peripheral type 0x%02x is not a disk; refused", s->udev->dev.name, buf[0] & 0x1f);
+        uint32_t type = scsi_inquiry_decode(buf, s->vendor, s->product, s->rev);   /* diskid.h */
+        if (type != 0x00 && type != 0x0e) {
+            kwarn("usb-storage: %s: peripheral type 0x%02x is not a disk; refused", s->udev->dev.name, type);
             rc = -ENOTSUP;
             goto out;
         }
@@ -628,8 +624,8 @@ static int usbs_identify(struct usbs *s, uint64_t *capacity, uint32_t *block_siz
         rc = -EIO;
         goto out;
     }
-    uint32_t last = be32(buf), bs = be32(buf + 4);
-    if (bs < 512 || bs > 4096 || (bs & (bs - 1)) != 0 || last == 0xffffffffu) {
+    uint32_t last, bs;
+    if (!scsi_capacity10_decode(buf, &last, &bs)) {   /* diskid.h */
         kwarn("usb-storage: %s: capacity refused (last block %u, block size %u)", s->udev->dev.name, last, bs);
         rc = -ENOTSUP;
         goto out;

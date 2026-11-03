@@ -137,16 +137,6 @@ struct ahci_cmd_table {
 #define ATA_CMD_FLUSH_CACHE_EXT 0xea
 #define ATA_CMD_IDENTIFY       0xec
 
-/* IDENTIFY DEVICE words (ATA8-ACS §7.16) */
-#define ID_SERIAL        10   /* 10 words */
-#define ID_MODEL         27   /* 20 words */
-#define ID_LBA28_COUNT   60   /* 2 words */
-#define ID_QUEUE_DEPTH   75   /* bits 0-4: depth - 1 */
-#define ID_SATA_CAP      76   /* bit 8: NCQ */
-#define ID_CMD_SET_2     83   /* bit 10: LBA48 */
-#define ID_CMD_SET_EN_2  85   /* bit 5: write cache enabled */
-#define ID_LBA48_COUNT   100  /* 4 words */
-#define ID_SECTOR_INFO   106  /* bit 14 valid / bit 15 clear, bit 12: logical sector > 256 words */
-#define ID_SECTOR_SIZE   117  /* 2 words: logical sector size in words */
+/* IDENTIFY DEVICE's words are decoded by kernel/diskid.h's ata_identity_decode. */
 
 #endif /* DRIVERS_STORAGE_AHCI_H */

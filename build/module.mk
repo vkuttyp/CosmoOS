@@ -75,6 +75,12 @@ $(foreach m,$(CEE_MODULES),$(eval MODULE_$(m)_LINK := $(CEE_MODULE_COMMON_OBJS))
 # same runtime and floor.
 MODULE_virtio_LINK := $(CEE_MODULE_COMMON_OBJS)
 MODULE_xhci_LINK := $(CEE_MODULE_COMMON_OBJS)
+# The disks' identity decoders (kernel/diskid.h), compiled once and linked into the three disk drivers.
+DISKID_OBJS := $(call objs_of,drivers/storage/diskid.c)
+$(eval $(call compile_rules,$(DISKID_OBJS),MODULE_CFLAGS))
+MODULE_ahci_LINK := $(DISKID_OBJS)
+MODULE_nvme_LINK := $(DISKID_OBJS)
+MODULE_usb_storage_LINK := $(DISKID_OBJS)
 
 # $(1) module name
 define module_rules
@@ -93,8 +99,8 @@ endef
 
 MODULE_KOS :=
 MODULE_ANALYZE :=
-MODULE_ALL_OBJS := $(CEE_MODULE_COMMON_OBJS)
-MODULE_ANALYZE += $(patsubst %.o,%.analyzed,$(CEE_MODULE_COMMON_OBJS))
+MODULE_ALL_OBJS := $(CEE_MODULE_COMMON_OBJS) $(DISKID_OBJS)
+MODULE_ANALYZE += $(patsubst %.o,%.analyzed,$(CEE_MODULE_COMMON_OBJS) $(DISKID_OBJS))
 $(foreach m,$(MODULES),$(eval $(call module_rules,$(m))))
 
 .PHONY: modules
