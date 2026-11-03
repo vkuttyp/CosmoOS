@@ -656,11 +656,13 @@ static void test_dhcp_digest(void)
         memset(&ls, 0, sizeof(ls));
         bool lease = in.dhlen >= DHCP_FIXED && netparse_dhcp_lease(dh, in.dhlen, &ls);
         /* The bytes forms dhcp.cee reads agree with the structs. */
-        uint8_t mb[20];
+        uint8_t mb[32];
         memset(mb, 0xa5, sizeof(mb));
         EXPECT(netparse_dhcp_bytes(dh, in.dhlen, in.op, mb) == (rc == NETPARSE_OK));
         EXPECT(mb[0] == m.msg_type && mb[1] == m.has_server && memcmp(mb + 2, m.xid, 4) == 0 &&
                memcmp(mb + 6, m.yiaddr, 4) == 0 && memcmp(mb + 10, m.chaddr, 6) == 0 && memcmp(mb + 16, m.server, 4) == 0);
+        EXPECT((mb[20] << 8 | mb[21]) == m.flags && memcmp(mb + 22, m.ciaddr, 4) == 0 && memcmp(mb + 26, m.reqip, 4) == 0 &&
+               mb[30] == m.has_reqip && mb[31] == 0);
         if (in.dhlen >= DHCP_FIXED) {
             uint8_t lb[102];
             memset(lb, 0xa5, sizeof(lb));

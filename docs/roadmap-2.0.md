@@ -939,6 +939,35 @@ unreachable default. `DHCP_BENCH=1`, the median of five interleaved runs
 of an exchange (NAK, OFFER, ACK) through the host stack: 1.04x the C on
 arm64, 1.03x on x86-64 (Rosetta).
 
+The tap services (2026-11-03): `kernel-services/network/tapsvc.cee` --
+the DHCP server a tap's input filter runs for its one guest, and the DNS
+proxy's two threads (a query upstream under an id lent at random, an
+answer back only from the configured upstream, SERVFAIL without one).
+An instance is a CeeSafe object behind `tapsvc.h`'s opaque struct (its
+generated `tapsvc_types.h` gives C its layout), allocated zeroed, under
+the C's three locks; each side's datagram buffer is the instance's, off
+its thread's stack. The C step fixed two things: the proxy read
+datagrams into 512 bytes, which `ksock_recvfrom` cuts to silently, so an
+EDNS answer reached the guest cut short and malformed (the buffer is
+now 2048: IPv4 drops fragments, so nothing longer than a link's MTU
+arrives); and the counters were copied as a plain struct while added to
+atomically. The `TAPSVC_HOST_TEST` doors are gone from `tapsvc.h`:
+`fuzz_dhcp_dns` now drives the service through `tapsvc_start`, as the
+host test does, with the tap, sockets, threads and firmware
+configuration its own and the proxy's loops run in place. netparse's
+`netparse_dhcp_bytes` grows to the fields the server reads. The host
+test: nine taps (the ninth refused), sockets and threads failing at
+every step of the start, resolver strings of every shape, every DHCP
+message from the guest holding the lease or a second, queries and
+answers of every size from the upstream, a stranger or the wrong port,
+the pending table filled and expiring; every frame, datagram, logged
+line and return in the digest, `0x2d2700174801ec6b`, the C's (macOS
+clang, Linux clang and gcc); 98.6% of the C's lines, the rest allocation
+failures and the 4,096 tries for a free id. `TAPSVC_BENCH=1`, the median
+of interleaved runs of a round (DISCOVER, REQUEST, a query and its
+answer): 1.01x the C on arm64, 1.04x on x86-64 (Rosetta) and 1.05x on
+native x86-64 (Linux gcc).
+
 Size: about 3.0x.
 
 ### SA7 Storage: cosmofs, VFS, block and pools

@@ -731,10 +731,11 @@ unsafe fn dhcpC(dh: *u8, dhlen: u32, op: u8, out: *mut netparse_dhcp) -> bool =>
 unsafe fn dhcpLeaseC(dh: *u8, dhlen: u32, out: *mut netparse_dhcp_lease) -> bool =>
     dhcpLease(Slice.fromRaw(dh, dhlen as usize), Ptr.toBorrowMut(out));
 
-/// netparse_dhcp's fields the client reads, as 20 bytes, for a caller that holds no `netparse_dhcp` (dhcp.cee):
-/// msg_type (byte 0), has_server (1), xid (2-5), yiaddr (6-9), chaddr (10-15), server (16-19), as netparse_dhcp gives
-/// them. The result is netparse_dhcp's; the bytes are written either way.
-/// Safety: as netparse_dhcp, and `out` points to 20 writable bytes.
+/// netparse_dhcp's fields as 32 bytes, for a caller that holds no `netparse_dhcp` (dhcp.cee, tapsvc.cee): msg_type
+/// (byte 0), has_server (1), xid (2-5), yiaddr (6-9), chaddr (10-15), server (16-19), flags (20-21, network order),
+/// ciaddr (22-25), reqip (26-29), has_reqip (30), and a zero (31), as netparse_dhcp gives them. The result is
+/// netparse_dhcp's; the bytes are written either way.
+/// Safety: as netparse_dhcp, and `out` points to 32 writable bytes.
 @export("netparse_dhcp_bytes")
 unsafe fn dhcpBytesC(dh: *u8, dhlen: u32, op: u8, out: *mut u8) -> bool {
     var m = netparse_dhcp {
@@ -742,13 +743,19 @@ unsafe fn dhcpBytesC(dh: *u8, dhlen: u32, op: u8, out: *mut u8) -> bool {
         has_server: false, reqip: [0; 4], has_reqip: false,
     };
     let ok = dhcpC(dh, dhlen, op, borrow mut m as *mut netparse_dhcp);
-    let o = SliceMut.fromRaw(out, 20);
+    let o = SliceMut.fromRaw(out, 32);
     o[0] = m.msg_type;
     o[1] = if (m.has_server) 1 else 0;
     o[2..6].copyFrom(m.xid[..]);
     o[6..10].copyFrom(m.yiaddr[..]);
     o[10..16].copyFrom(m.chaddr[..]);
     o[16..20].copyFrom(m.server[..]);
+    o[20] = truncate<u8>(m.flags >> 8);
+    o[21] = truncate<u8>(m.flags);
+    o[22..26].copyFrom(m.ciaddr[..]);
+    o[26..30].copyFrom(m.reqip[..]);
+    o[30] = if (m.has_reqip) 1 else 0;
+    o[31] = 0;
     return ok;
 }
 

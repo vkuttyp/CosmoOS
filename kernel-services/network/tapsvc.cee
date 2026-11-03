@@ -1,0 +1,949 @@
+// tapsvc.cee - the tap's autoconfiguration service (kernel/include/kernel/net/tapsvc.h), in CeeSafe: roadmap 2.0 SA6.
+// tests/host/test_tapsvc.c holds it to the digest of the C it replaced.
+//
+// DHCP server: a tap input filter claims the guest's UDP-to-port-67 frames, answers DISCOVER and REQUEST for the one
+// guest slot, and sends the reply back out the tap with ether_output -- never through IP routing, since the guest has
+// no address yet and the tap is NETIF_NODEFAULT. The reply's destination follows the client's broadcast flag at both
+// layers (RFC 2131 §4.1).
+//
+// DNS proxy: a socket bound to the tap's own gateway address, port 53, faces the guest; another faces the upstream
+// resolver (the firmware's opt/cosmo/resolver). A thread on each side reads a datagram and relays it: a query goes
+// upstream under an id lent at random (an off-path attacker cannot guess it), an answer goes back to the guest that
+// asked, with its id restored, and only from the configured upstream. Without an upstream the proxy answers SERVFAIL.
+//
+// An instance is a CeeSafe object behind tapsvc.h's opaque struct, allocated zeroed, reached through its pointer under
+// the locks the C used: the DHCP binding's, the pending queries', and the instance list's. Addresses are u32s in
+// network order, as they lie in memory; messages are bytes.
+
+@header("kernel/net/tapsvc.h", "kernel/net/tap.h", "kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/udp.h", "kernel/net/cksum.h", "kernel/net/netparse_types.h", "kernel/netif.h", "kernel/socket.h", "kernel/thread.h", "kernel/random.h", "kernel/fwcfg.h", "kernel/timer.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct netaddr {
+        family: u16;
+        port: u16;
+        v6: in6_addr;
+    }
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ip4 {
+        addr: AtomicU32;
+        mask: AtomicU32;
+    }
+    struct netif {
+        name: [u8; 8];
+        ip4: netif_ip4;
+    }
+    struct tap;
+    struct socket {
+        obj: kobject;
+    }
+    struct thread;
+    struct tapsvc_stats {
+        dhcp_discover: u64;
+        dhcp_offer: u64;
+        dhcp_request: u64;
+        dhcp_ack: u64;
+        dhcp_nak: u64;
+        dhcp_release: u64;
+        dhcp_ignored: u64;
+        dns_query: u64;
+        dns_answer: u64;
+        dns_servfail: u64;
+        dns_drop_full: u64;
+        dns_expired: u64;
+        dns_pending: u32;
+    }
+
+    @effects()
+    fn m_getcl() -> *mut mbuf;
+    fn cksum_partial(data: *void, len: usize, sum: u32) -> u32;
+    fn cksum_fold(sum: u32) -> u16;
+    fn cksum_pseudo4(src: u32, dst: u32, proto: u8, len: u16) -> u32;
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn ether_output(nif: *mut netif, m: *mut mbuf, dst: *u8, etype: u16) -> i32;
+    @effects()
+    fn random_u64() -> u64;
+    fn clock_now_ns() -> u64;
+    fn tap_netif(t: *mut tap) -> *mut netif;
+    fn tap_set_input_filter(t: *mut tap, run: extern "C" fn(*mut tap, *void, u32, *mut void) -> bool, arg: *mut void);
+    fn fwcfg_get_string(key: *CChar, buf: *mut CChar, len: usize) -> bool;
+    fn ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_bind(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn ksock_recvfrom(s: *mut socket, buf: *mut void, len: usize, from: *mut netaddr) -> i64;
+    fn ksock_shutdown(s: *mut socket, how: i32) -> i32;
+    fn thread_create(run: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_exit(code: i32);
+    fn netparse_dhcp_frame(frame: *u8, len: u32, dhOff: *mut u32) -> bool;
+    fn netparse_dhcp_bytes(dh: *u8, len: u32, op: u8, out: *mut u8) -> bool;
+    fn netparse_dns_id(msg: *u8, len: u32) -> u16;
+    fn netparse_ipv4_text(s: *CChar, len: u32, out: *mut u8) -> bool;
+}
+
+// ---- tapsvc.h, dhcp.h, ether.h, ip.h, socket.h ----
+
+const TAPSVC_GUEST_HOST: u32 = 15; // the guest is <subnet>.15, the host <subnet>.1
+const TAPSVC_LEASE_SECS: u32 = 3600;
+const ETH_P_IP: u16 = 0x0800;
+const IPPROTO_UDP: u8 = 17;
+const IP_DEFAULT_TTL: u8 = 64;
+const IPV4_HLEN: usize = 20;
+const UDP_HLEN: usize = 8;
+/// INADDR_BROADCAST_N: 255.255.255.255, the same in either byte order.
+const BROADCAST: u32 = 0xffffffff;
+const COSMO_AF_INET: u16 = 2;
+const COSMO_SOCK_DGRAM: i32 = 2;
+const COSMO_SHUT_RD: i32 = 0;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const KMEM_ZERO: u32 = 1;
+
+const BOOTP_REQUEST: u8 = 1;
+const BOOTP_REPLY: u8 = 2;
+const DHCP_HTYPE_ETHER: u8 = 1;
+const DHCP_DISCOVER: u8 = 1;
+const DHCP_OFFER: u8 = 2;
+const DHCP_REQUEST: u8 = 3;
+const DHCP_DECLINE: u8 = 4;
+const DHCP_ACK: u8 = 5;
+const DHCP_NAK: u8 = 6;
+const DHCP_RELEASE: u8 = 7;
+const DHCP_FLAG_BROADCAST: u16 = 0x8000;
+const OPT_SUBNET: u8 = 1;
+const OPT_ROUTER: u8 = 3;
+const OPT_DNS: u8 = 6;
+const OPT_LEASE: u8 = 51;
+const OPT_MSGTYPE: u8 = 53;
+const OPT_SERVERID: u8 = 54;
+const OPT_END: u8 = 255;
+const DHCP_SPORT: u16 = 67;
+const DHCP_CPORT: u16 = 68;
+const BOOTP_LEN: usize = 236;
+const DHCP_FIXED: usize = 240;
+const BOOTP_OFF_OP: usize = 0;
+const BOOTP_OFF_HTYPE: usize = 1;
+const BOOTP_OFF_HLEN: usize = 2;
+const BOOTP_OFF_XID: usize = 4;
+const BOOTP_OFF_FLAGS: usize = 10;
+const BOOTP_OFF_YIADDR: usize = 16;
+const BOOTP_OFF_SIADDR: usize = 20;
+const BOOTP_OFF_CHADDR: usize = 28;
+
+// ---- The DNS proxy's constants ----
+
+const DNS_PENDING_MAX: usize = 128;
+const DNS_TIMEOUT_NS: u64 = 5 * 1000000000;
+const DNS_PORT: u16 = 53;
+/// The fixed DNS header: id, flags, four counts.
+const DNS_HDR: i64 = 12;
+/// A whole datagram, whichever side it comes from: ksock_recvfrom cuts a datagram to the buffer and says nothing, and
+/// IPv4 drops fragments, so nothing larger than a link's MTU arrives.
+const DNS_MSG_MAX: usize = 2048;
+
+/// The live instances, for the periodic age sweep and the aggregate counters: more than taps can exist.
+const TAPSVC_MAX: usize = 8;
+
+// ---- The objects ----
+
+/// An address as struct netaddr holds one (the IPv4 address in the first four bytes).
+@repr(C)
+struct TapsvcAddr {
+    family: u16;
+    port: u16;
+    bytes: [u8; 16];
+}
+
+/// A guest's query in flight upstream.
+@repr(C)
+struct TapsvcPending {
+    in_use: bool;
+    guest_id: u16;     // the id the guest used (host order)
+    up_id: u16;        // the id lent upstream (host order)
+    guest: TapsvcAddr; // where the answer goes back
+    expires_ns: u64;
+}
+
+/// One service instance per tap: its DHCP binding and its DNS proxy.
+@repr(C)
+struct tapsvc {
+    tap: *mut tap;
+    nif: *mut netif;
+    gateway: u32; // the tap's host address (network order)
+    mask: u32;
+    guest: u32;  // the one guest's address (network order)
+    bound: bool; // a client has taken the lease
+    client_mac: [u8; 6];
+    lock: spinlock_t; // the DHCP binding
+    dns_tab: [TapsvcPending; 128];
+    dns_lock: spinlock_t;
+    gsock: *mut socket; // bound gateway:53, faces the guest
+    usock: *mut socket; // faces the upstream resolver
+    gth: *mut thread;
+    uth: *mut thread;
+    up_ip: u32;
+    up_port: u16;
+    up_set: bool;
+    running: AtomicU32; // 1 while the proxy threads should run
+    gbuf: [u8; 2048];   // the guest side\'s datagram, its thread\'s alone
+    ubuf: [u8; 2048];   // the upstream side\'s
+}
+
+static mut SVCS: [usize; 8] = [0; 8]; // the instances' addresses, 0 when free
+static mut SVCS_LOCK: spinlock_t = SPINLOCK_INIT("tapsvc-list\0".ptr as *CChar);
+
+static DHCP_DISCOVERS: AtomicU64 = AtomicU64.constant(0);
+static DHCP_OFFERS: AtomicU64 = AtomicU64.constant(0);
+static DHCP_REQUESTS: AtomicU64 = AtomicU64.constant(0);
+static DHCP_ACKS: AtomicU64 = AtomicU64.constant(0);
+static DHCP_NAKS: AtomicU64 = AtomicU64.constant(0);
+static DHCP_RELEASES: AtomicU64 = AtomicU64.constant(0);
+/// A second client, or a malformed packet.
+static DHCP_IGNORED: AtomicU64 = AtomicU64.constant(0);
+static DNS_QUERIES: AtomicU64 = AtomicU64.constant(0);
+static DNS_ANSWERS: AtomicU64 = AtomicU64.constant(0);
+static DNS_SERVFAILS: AtomicU64 = AtomicU64.constant(0);
+static DNS_DROPS_FULL: AtomicU64 = AtomicU64.constant(0);
+static DNS_EXPIRED: AtomicU64 = AtomicU64.constant(0);
+
+fn count(stat: borrow AtomicU64) {
+    stat.fetchAddWith(1, Ordering.Relaxed);
+}
+
+fn read(stat: borrow AtomicU64) -> u64 => stat.loadWith(LoadOrdering.Relaxed);
+
+/// The instance list's lock.
+/// Safety: only its address is taken.
+fn svcsLock() -> *mut spinlock_t => unsafe { borrow mut SVCS_LOCK as *mut spinlock_t };
+
+/// Slot `i` of the instance list: an instance, or null. Under the list's lock.
+/// Safety: read under the lock the writes take.
+fn svcAt(i: usize) -> *mut tapsvc => unsafe { SVCS[i] as *mut tapsvc };
+
+/// Slot `i` set to `svc` (null to free it). Under the list's lock.
+/// Safety: written under the lock the reads take.
+fn setSvc(i: usize, svc: *mut tapsvc) {
+    unsafe {
+        SVCS[i] = svc as usize;
+    }
+}
+
+// ---- Bytes and addresses ----
+
+/// The u32 lying in memory at `at` (an address, network order).
+fn word(b: Slice<u8>, at: usize) -> u32 =>
+    (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) | ((b[at + 3] as u32) << 24);
+
+/// The four bytes of a u32 as it lies in memory (an address, network order) at `at`.
+fn putWord(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// A u16 in network order at `at`.
+fn putBe16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+/// A u16 as it lies in memory (a checksum) at `at`.
+fn putNative16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+/// An option with a four-byte value lying as `v` does in memory; returns the offset past it.
+fn putOpt4(b: SliceMut<u8>, at: usize, code: u8, v: u32) -> usize {
+    b[at] = code;
+    b[at + 1] = 4;
+    putWord(b, at + 2, v);
+    return at + 6;
+}
+
+/// The byte order swap of a u32 (inet.h's htonl and ntohl on CosmoOS's little-endian targets).
+fn swap32(v: u32) -> u32 => ((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >> 8) & 0xff00) | (v >> 24);
+
+/// The IPv4 address an TapsvcAddr holds, as it lies in memory.
+fn v4Of(a: borrow TapsvcAddr) -> u32 => word(a.bytes[..], 0);
+
+/// The TapsvcAddr a netaddr holds.
+/// Safety: `a` points to a netaddr.
+unsafe fn addrOf(a: *netaddr) -> TapsvcAddr {
+    let n = Ptr.toBorrow(a);
+    return TapsvcAddr { family: n.family, port: n.port, bytes: n.v6.s6_addr };
+}
+
+/// A local five-word netaddr holding `a`, for the C calls that take one.
+/// Safety: the five words are struct netaddr's size and alignment.
+fn naOf(words: borrow mut [u32; 5], a: borrow TapsvcAddr) -> *mut netaddr {
+    let p = words as *mut [u32; 5] as *mut netaddr;
+    unsafe {
+        let n = Ptr.toBorrowMut(p);
+        n.family = a.family;
+        n.port = a.port;
+        n.v6.s6_addr = a.bytes;
+    }
+    return p;
+}
+
+/// An IPv4 TapsvcAddr: `ip` as it lies in memory, `port` in host order.
+fn inet(ip: u32, port: u16) -> TapsvcAddr {
+    var a = TapsvcAddr { family: COSMO_AF_INET, port: port, bytes: [0; 16] };
+    a.bytes[0] = truncate<u8>(ip);
+    a.bytes[1] = truncate<u8>(ip >> 8);
+    a.bytes[2] = truncate<u8>(ip >> 16);
+    a.bytes[3] = truncate<u8>(ip >> 24);
+    return a;
+}
+
+/// The bytes of a C name: up to its zero, or all of them.
+fn cName(name: Slice<u8>) -> Slice<u8> {
+    for (i in 0..name.length) {
+        if (name[i] == 0) {
+            return name[..i];
+        }
+    }
+    return name;
+}
+
+/// The four bytes of an address as they lie in memory (network order), dotted.
+fn dotted(w: borrow mut TextWriter, a: u32) {
+    w.decimal((a & 0xff) as u64);
+    w.byte(46);
+    w.decimal(((a >> 8) & 0xff) as u64);
+    w.byte(46);
+    w.decimal(((a >> 16) & 0xff) as u64);
+    w.byte(46);
+    w.decimal((a >> 24) as u64);
+}
+
+// ---- The DHCP server ----
+
+/// Build and send a DHCP reply of `kind` out the tap. `req` is the request's DHCP payload (BOOTP header onward, at
+/// least DHCP_FIXED bytes), for its xid, flags and chaddr; `msg` netparse_dhcp_bytes's fields of it.
+/// Safety: `s` is a live instance.
+unsafe fn reply(s: *mut tapsvc, req: Slice<u8>, msg: Slice<u8>, kind: u8) {
+    let svc = Ptr.toBorrow(s as *tapsvc);
+    let flags = ((msg[20] as u16) << 8) | (msg[21] as u16);
+    let bcast = (flags & DHCP_FLAG_BROADCAST) != 0 || kind == DHCP_NAK;
+    let m = m_getcl();
+    if (m.isNull()) {
+        return;
+    }
+    let frame = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, IPV4_HLEN + UDP_HLEN + DHCP_FIXED + 64);
+    let dhAt = IPV4_HLEN + UDP_HLEN;
+    for (i in 0..DHCP_FIXED) {
+        frame[dhAt + i] = 0;
+    }
+    frame[dhAt + BOOTP_OFF_OP] = BOOTP_REPLY;
+    frame[dhAt + BOOTP_OFF_HTYPE] = DHCP_HTYPE_ETHER;
+    frame[dhAt + BOOTP_OFF_HLEN] = 6;
+    frame[dhAt + BOOTP_OFF_XID..dhAt + BOOTP_OFF_XID + 4].copyFrom(req[BOOTP_OFF_XID..BOOTP_OFF_XID + 4]);
+    frame[dhAt + BOOTP_OFF_FLAGS] = req[BOOTP_OFF_FLAGS];
+    frame[dhAt + BOOTP_OFF_FLAGS + 1] = req[BOOTP_OFF_FLAGS + 1];
+    if (kind != DHCP_NAK) {
+        putWord(frame, dhAt + BOOTP_OFF_YIADDR, svc.guest);
+    }
+    putWord(frame, dhAt + BOOTP_OFF_SIADDR, svc.gateway);
+    frame[dhAt + BOOTP_OFF_CHADDR..dhAt + BOOTP_OFF_CHADDR + 16].copyFrom(
+        req[BOOTP_OFF_CHADDR..BOOTP_OFF_CHADDR + 16],
+    );
+    frame[dhAt + BOOTP_LEN] = 0x63; // the magic cookie, 99.130.83.99
+    frame[dhAt + BOOTP_LEN + 1] = 0x82;
+    frame[dhAt + BOOTP_LEN + 2] = 0x53;
+    frame[dhAt + BOOTP_LEN + 3] = 0x63;
+
+    var o = dhAt + DHCP_FIXED;
+    frame[o] = OPT_MSGTYPE;
+    frame[o + 1] = 1;
+    frame[o + 2] = kind;
+    o = putOpt4(frame, o + 3, OPT_SERVERID, svc.gateway);
+    if (kind == DHCP_OFFER || kind == DHCP_ACK) {
+        o = putOpt4(frame, o, OPT_LEASE, swap32(TAPSVC_LEASE_SECS));
+        o = putOpt4(frame, o, OPT_SUBNET, svc.mask);
+        o = putOpt4(frame, o, OPT_ROUTER, svc.gateway);
+        o = putOpt4(frame, o, OPT_DNS, svc.gateway);
+    }
+    frame[o] = OPT_END;
+    o = o + 1;
+    let dhlen = o - dhAt;
+
+    let udplen = UDP_HLEN + dhlen;
+    let iplen = IPV4_HLEN + udplen;
+    let dst = if (bcast) BROADCAST else svc.guest;
+    putBe16(frame, IPV4_HLEN, DHCP_SPORT);
+    putBe16(frame, IPV4_HLEN + 2, DHCP_CPORT);
+    putBe16(frame, IPV4_HLEN + 4, truncate<u16>(udplen));
+    frame[IPV4_HLEN + 6] = 0;
+    frame[IPV4_HLEN + 7] = 0;
+    let sum = cksum_pseudo4(svc.gateway, dst, IPPROTO_UDP, truncate<u16>(udplen));
+    let udp = (Ptr.toBorrow(m as *mbuf).data as *u8).add(IPV4_HLEN);
+    let c = cksum_fold(cksum_partial(udp as *void, udplen, sum));
+    putNative16(frame, IPV4_HLEN + 6, if (c != 0) c else 0xffff);
+
+    frame[0] = 0x45;
+    frame[1] = 0;
+    putBe16(frame, 2, truncate<u16>(iplen));
+    putBe16(frame, 4, 0);
+    putBe16(frame, 6, 0);
+    frame[8] = IP_DEFAULT_TTL;
+    frame[9] = IPPROTO_UDP;
+    frame[10] = 0;
+    frame[11] = 0;
+    putWord(frame, 12, svc.gateway);
+    putWord(frame, 16, dst);
+    putNative16(frame, 10, in_cksum(Ptr.toBorrow(m as *mbuf).data as *void, IPV4_HLEN));
+    let mm = Ptr.toBorrowMut(m);
+    mm.len = truncate<u32>(iplen);
+    mm.pkt.len = truncate<u32>(iplen);
+    var dstmac: [u8; 6] = [0xff; 6];
+    if (!bcast) {
+        dstmac[..].copyFrom(msg[10..16]); // the client's hardware address
+    }
+    ether_output(svc.nif, m, borrow dstmac as *[u8; 6] as *u8, ETH_P_IP);
+}
+
+fn sameMac(a: Slice<u8>, b: Slice<u8>) -> bool {
+    for (i in 0..a.length) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The input filter: claim the guest's DHCP-to-server frames, answer them. True when the frame is claimed.
+/// Safety: `frame` points to `len` readable bytes; `arg` is the instance tapsvc_start set it up with.
+@callback
+unsafe fn filter(t: *mut tap, frame: *void, len: u32, arg: *mut void) -> bool {
+    let s = arg as *mut tapsvc;
+    var off: u32 = 0;
+    if (!netparse_dhcp_frame(frame as *u8, len, borrow mut off as *mut u32)) {
+        return false; // not DHCP-to-server: left to the stack
+    }
+    // From here the frame is ours (claimed), whatever its contents.
+    let dhlen = len - off;
+    let dh = (frame as *u8).add(off as usize);
+    var msg: [u8; 32] = [0; 32]; // netparse_dhcp_bytes's layout
+    if (!netparse_dhcp_bytes(dh, dhlen, BOOTP_REQUEST, borrow mut msg as *mut [u8; 32] as *mut u8)) {
+        count(borrow DHCP_IGNORED);
+        return true;
+    }
+    let req = Slice.fromRaw(dh, dhlen as usize); // at least DHCP_FIXED bytes: netparse_dhcp took it
+    let lock = borrow mut Ptr.toBorrowMut(s).lock as *mut spinlock_t;
+    let st = spin_lock_irqsave(lock);
+    let svc = Ptr.toBorrowMut(s);
+    // One binding: a second, different client is offered nothing.
+    let mine = !svc.bound || sameMac(svc.client_mac[..], msg[10..16]);
+    let kind = msg[0];
+    if (kind == DHCP_DISCOVER) {
+        count(borrow DHCP_DISCOVERS);
+        if (!mine) {
+            count(borrow DHCP_IGNORED);
+            spin_unlock_irqrestore(lock, st);
+            return true;
+        }
+        spin_unlock_irqrestore(lock, st);
+        count(borrow DHCP_OFFERS);
+        reply(s, req, msg[..], DHCP_OFFER);
+        return true;
+    }
+    if (kind == DHCP_REQUEST) {
+        count(borrow DHCP_REQUESTS);
+        // The address the client is asking for: option 50, else ciaddr.
+        let want = if (msg[30] != 0) word(msg[..], 26) else word(msg[..], 22);
+        let ok = mine && want == svc.guest;
+        if (ok) {
+            svc.bound = true;
+            svc.client_mac[..].copyFrom(msg[10..16]);
+        }
+        spin_unlock_irqrestore(lock, st);
+        if (ok) {
+            count(borrow DHCP_ACKS);
+            reply(s, req, msg[..], DHCP_ACK);
+        } else {
+            count(borrow DHCP_NAKS);
+            reply(s, req, msg[..], DHCP_NAK);
+        }
+        return true;
+    }
+    if (kind == DHCP_DECLINE || kind == DHCP_RELEASE) {
+        count(borrow DHCP_RELEASES);
+        if (mine) {
+            svc.bound = false;
+        }
+        spin_unlock_irqrestore(lock, st);
+        return true;
+    }
+    count(borrow DHCP_IGNORED);
+    spin_unlock_irqrestore(lock, st);
+    return true;
+}
+
+// ---- The DNS proxy ----
+
+/// The pending queries' lock.
+/// Safety: `s` is a live instance.
+unsafe fn dnsLock(s: *mut tapsvc) -> *mut spinlock_t => borrow mut Ptr.toBorrowMut(s).dns_lock as *mut spinlock_t;
+
+/// True if some live entry already lent this upstream id. Under the pending queries' lock.
+fn idTaken(svc: borrow tapsvc, id: u16, now: u64) -> bool {
+    for (i in 0..DNS_PENDING_MAX) {
+        let e = borrow svc.dns_tab[i];
+        if (e.in_use && now < e.expires_ns && e.up_id == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Record a guest query; lend it a unique random upstream id (0 when the table is full or no id is free).
+/// Safety: `s` is a live instance.
+unsafe fn alloc(s: *mut tapsvc, guestId: u16, from: borrow TapsvcAddr) -> u16 {
+    let now = clock_now_ns();
+    let st = spin_lock_irqsave(dnsLock(s));
+    let svc = Ptr.toBorrowMut(s);
+    var slot: usize = DNS_PENDING_MAX;
+    for (i in 0..DNS_PENDING_MAX) {
+        if (!svc.dns_tab[i].in_use || now >= svc.dns_tab[i].expires_ns) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == DNS_PENDING_MAX) {
+        spin_unlock_irqrestore(dnsLock(s), st);
+        return 0;
+    }
+    // A random id (not a predictable counter) so an off-path attacker cannot guess the outstanding value and race a
+    // forged answer.
+    var id: u16 = 0;
+    for (tries in 0..4096) {
+        let cand = truncate<u16>(random_u64());
+        if (cand != 0 && !idTaken(svc, cand, now)) {
+            id = cand;
+            break;
+        }
+    }
+    if (id == 0) {
+        spin_unlock_irqrestore(dnsLock(s), st);
+        return 0;
+    }
+    let e = borrow mut svc.dns_tab[slot];
+    e.in_use = true;
+    e.guest_id = guestId;
+    e.up_id = id;
+    e.guest = TapsvcAddr { family: from.family, port: from.port, bytes: from.bytes };
+    e.expires_ns = now + DNS_TIMEOUT_NS;
+    spin_unlock_irqrestore(dnsLock(s), st);
+    return id;
+}
+
+/// Find and consume the entry for upstream id `uid`: true with the guest's address and id, false if none is live.
+/// Safety: `s` is a live instance.
+unsafe fn take(s: *mut tapsvc, uid: u16, guest: borrow mut TapsvcAddr, guestId: borrow mut u16) -> bool {
+    let now = clock_now_ns();
+    let st = spin_lock_irqsave(dnsLock(s));
+    let svc = Ptr.toBorrowMut(s);
+    for (i in 0..DNS_PENDING_MAX) {
+        let e = borrow mut svc.dns_tab[i];
+        if (e.in_use && now < e.expires_ns && e.up_id == uid) {
+            guest = TapsvcAddr { family: e.guest.family, port: e.guest.port, bytes: e.guest.bytes };
+            guestId = e.guest_id;
+            e.in_use = false;
+            spin_unlock_irqrestore(dnsLock(s), st);
+            return true;
+        }
+    }
+    spin_unlock_irqrestore(dnsLock(s), st);
+    return false;
+}
+
+/// Reclaim one instance's expired queries.
+/// Safety: `s` is a live instance.
+unsafe fn ageOne(s: *mut tapsvc, now: u64) {
+    let st = spin_lock_irqsave(dnsLock(s));
+    let svc = Ptr.toBorrowMut(s);
+    for (i in 0..DNS_PENDING_MAX) {
+        let e = borrow mut svc.dns_tab[i];
+        if (e.in_use && now >= e.expires_ns) {
+            e.in_use = false;
+            count(borrow DNS_EXPIRED);
+        }
+    }
+    spin_unlock_irqrestore(dnsLock(s), st);
+}
+
+/// tapsvc.h's tapsvc_dns_age: reclaim expired pending queries across every live instance.
+/// Safety: the list holds live instances only, under its lock.
+@export("tapsvc_dns_age")
+fn dnsAge(now: u64) {
+    unsafe {
+        let st = spin_lock_irqsave(svcsLock());
+        for (i in 0..TAPSVC_MAX) {
+            let s = svcAt(i);
+            if (!s.isNull()) {
+                ageOne(s, now);
+            }
+        }
+        spin_unlock_irqrestore(svcsLock(), st);
+    }
+}
+
+/// No upstream configured: answer the guest itself with SERVFAIL.
+/// Safety: `s` is a live instance with its sockets.
+unsafe fn servfail(s: *mut tapsvc, buf: SliceMut<u8>, n: usize, to: borrow TapsvcAddr) {
+    buf[2] = buf[2] | 0x80;       // QR: a response
+    buf[3] = (buf[3] & 0xf0) | 2; // RCODE 2: server failure
+    count(borrow DNS_SERVFAILS);
+    var words: [u32; 5] = [0; 5];
+    ksock_sendto(Ptr.toBorrow(s as *tapsvc).gsock, buf.ptr as *void, n, naOf(mut words, to) as *netaddr);
+}
+
+/// One query from the guest (`n` >= DNS_HDR bytes in `buf`, from `from`): lend an upstream id and forward it, or
+/// answer SERVFAIL.
+/// Safety: `s` is a live instance with its sockets.
+unsafe fn fromGuest(s: *mut tapsvc, buf: SliceMut<u8>, n: usize, from: borrow TapsvcAddr) {
+    count(borrow DNS_QUERIES);
+    let svc = Ptr.toBorrow(s as *tapsvc);
+    if (!svc.up_set) {
+        servfail(s, buf, n, from);
+        return;
+    }
+    let gid = netparse_dns_id(buf.ptr as *u8, truncate<u32>(n));
+    let uid = alloc(s, gid, from);
+    if (uid == 0) {
+        count(borrow DNS_DROPS_FULL);
+        return;
+    }
+    buf[0] = truncate<u8>(uid >> 8);
+    buf[1] = truncate<u8>(uid);
+    let up = inet(svc.up_ip, svc.up_port);
+    var words: [u32; 5] = [0; 5];
+    ksock_sendto(svc.usock, buf.ptr as *void, n, naOf(mut words, borrow up) as *netaddr);
+}
+
+/// One answer from the upstream side: restore the guest's id, relay it back.
+///
+/// Only the configured upstream may answer: an unconnected socket accepts packets from anyone, and matching on the id
+/// alone would let a reachable attacker race a forged response into the guest.
+/// Safety: `s` is a live instance with its sockets.
+unsafe fn fromUpstream(s: *mut tapsvc, buf: SliceMut<u8>, n: usize, from: borrow TapsvcAddr) {
+    let svc = Ptr.toBorrow(s as *tapsvc);
+    if (v4Of(from) != svc.up_ip || from.port != svc.up_port) {
+        return;
+    }
+    let uid = netparse_dns_id(buf.ptr as *u8, truncate<u32>(n));
+    var guest = TapsvcAddr { family: 0, port: 0, bytes: [0; 16] };
+    var gid: u16 = 0;
+    if (!take(s, uid, mut guest, mut gid)) {
+        return; // no live entry: dropped
+    }
+    buf[0] = truncate<u8>(gid >> 8);
+    buf[1] = truncate<u8>(gid);
+    count(borrow DNS_ANSWERS);
+    var words: [u32; 5] = [0; 5];
+    ksock_sendto(svc.gsock, buf.ptr as *void, n, naOf(mut words, borrow guest) as *netaddr);
+}
+
+/// A proxy thread's loop: read a datagram from `sock` and hand it on, until the socket is shut down (a read of 0 or
+/// an error) or the service stops; then the thread exits.
+/// Safety: `s` is a live instance whose sockets outlive the thread (dns_stop joins it before putting them).
+unsafe fn relay(s: *mut tapsvc, upstream: bool) {
+    // The side's buffer is the instance's (off the thread's stack), and only this thread's.
+    let at = if (upstream) borrow mut Ptr.toBorrowMut(
+        s,
+    ).ubuf as *mut [u8; 2048] as *mut u8 else borrow mut Ptr.toBorrowMut(s).gbuf as *mut [u8; 2048] as *mut u8;
+    while (Ptr.toBorrow(s as *tapsvc).running.loadWith(LoadOrdering.Acquire) != 0) {
+        let svc = Ptr.toBorrow(s as *tapsvc);
+        let sock = if (upstream) svc.usock else svc.gsock;
+        var fromWords: [u32; 5] = [0; 5];
+        let fromPtr = borrow mut fromWords as *mut [u32; 5] as *mut netaddr;
+        let n = ksock_recvfrom(sock, at as *mut void, DNS_MSG_MAX, fromPtr);
+        if (n < DNS_HDR) {
+            if (n <= 0) {
+                break;
+            }
+            continue;
+        }
+        let from = addrOf(fromPtr as *netaddr);
+        let buf = SliceMut.fromRaw(at, DNS_MSG_MAX);
+        if (upstream) {
+            fromUpstream(s, buf, truncate<usize>(n), borrow from);
+        } else {
+            fromGuest(s, buf, truncate<usize>(n), borrow from);
+        }
+    }
+    thread_exit(0);
+}
+
+/// The guest side's thread: read a query, lend an upstream id, forward it.
+/// Safety: `arg` is the instance dns_start made the thread for.
+@callback
+unsafe fn guestMain(arg: *mut void) {
+    relay(arg as *mut tapsvc, false);
+}
+
+/// The upstream side's thread: read an answer, restore the guest's id, relay it back.
+/// Safety: as guestMain.
+@callback
+unsafe fn upMain(arg: *mut void) {
+    relay(arg as *mut tapsvc, true);
+}
+
+/// A dotted quad in `text` as a network-order address, or null on a malformed one.
+/// Safety: netparse_ipv4_text reads `text.length` bytes of it and writes four.
+fn parseIp(text: Slice<u8>) -> u32? {
+    var a: [u8; 4] = [0; 4];
+    let ok = unsafe { netparse_ipv4_text(
+        text.ptr as *CChar,
+        truncate<u32>(text.length),
+        borrow mut a as *mut [u8; 4] as *mut u8,
+    ) };
+    if (!ok) {
+        return null;
+    }
+    return word(a[..], 0); // network order, as IPV4_ADDR gives
+}
+
+/// The proxy stopped: no more reads, both threads joined, then the sockets let go.
+/// Safety: `s` is a live instance.
+unsafe fn dnsStop(s: *mut tapsvc) {
+    let svc = Ptr.toBorrowMut(s);
+    svc.running.storeWith(0, StoreOrdering.Release);
+    if (!svc.gsock.isNull()) {
+        ksock_shutdown(svc.gsock, COSMO_SHUT_RD);
+    }
+    if (!svc.usock.isNull()) {
+        ksock_shutdown(svc.usock, COSMO_SHUT_RD);
+    }
+    if (!svc.gth.isNull()) {
+        thread_join(svc.gth);
+        svc.gth = 0 as *mut thread;
+    }
+    if (!svc.uth.isNull()) {
+        thread_join(svc.uth);
+        svc.uth = 0 as *mut thread;
+    }
+    if (!svc.gsock.isNull()) {
+        kobject_put(borrow mut Ptr.toBorrowMut(svc.gsock).obj as *mut kobject); // ksock_put
+        svc.gsock = 0 as *mut socket;
+    }
+    if (!svc.usock.isNull()) {
+        kobject_put(borrow mut Ptr.toBorrowMut(svc.usock).obj as *mut kobject);
+        svc.usock = 0 as *mut socket;
+    }
+}
+
+/// "tapsvc: <what> <the interface's name>" in `w`.
+/// Safety: `nif` is the tap's interface.
+unsafe fn named(w: borrow mut TextWriter, what: StringView, nif: *netif) {
+    let name = Ptr.toBorrow(nif).name;
+    w.text("tapsvc: ");
+    w.text(what);
+    w.bytes(cName(name[..]));
+}
+
+/// The proxy started: the upstream from the firmware, the two sockets, the two threads.
+/// Safety: `s` is a live instance.
+unsafe fn dnsStart(s: *mut tapsvc) {
+    let svc = Ptr.toBorrowMut(s);
+    var cfg: [u8; 32] = [0; 32];
+    if (fwcfg_get_string("resolver\0".ptr as *CChar, borrow mut cfg as *mut [u8; 32] as *mut CChar, 32)) {
+        match (parseIp(cName(cfg[..]))) {
+            Some(ip) => {
+                svc.up_ip = ip;
+                svc.up_port = DNS_PORT;
+                svc.up_set = true;
+            }
+            null => {}
+        }
+    }
+    // Bound to this tap's own gateway address: a proxy on 0.0.0.0:53 would also answer DNS on the host's real
+    // interface, exposing a resolver.
+    let me = inet(svc.gateway, DNS_PORT);
+    var words: [u32; 5] = [0; 5];
+    if (ksock_create(COSMO_AF_INET as i32, COSMO_SOCK_DGRAM, 0, borrow mut svc.gsock as *mut *mut socket) != 0) {
+        return;
+    }
+    if (ksock_bind(svc.gsock, naOf(mut words, borrow me) as *netaddr) != 0) {
+        kobject_put(borrow mut Ptr.toBorrowMut(svc.gsock).obj as *mut kobject);
+        svc.gsock = 0 as *mut socket;
+        return;
+    }
+    if (ksock_create(COSMO_AF_INET as i32, COSMO_SOCK_DGRAM, 0, borrow mut svc.usock as *mut *mut socket) != 0) {
+        kobject_put(borrow mut Ptr.toBorrowMut(svc.gsock).obj as *mut kobject);
+        svc.gsock = 0 as *mut socket;
+        return;
+    }
+    let any = inet(0, 0);
+    ksock_bind(svc.usock, naOf(mut words, borrow any) as *netaddr); // an ephemeral local port
+
+    svc.running.storeWith(1, StoreOrdering.Release);
+    svc.gth = thread_create(guestMain, s as *mut void, "dns-guest\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    svc.uth = thread_create(upMain, s as *mut void, "dns-up\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    if (svc.gth.isNull() || svc.uth.isNull()) {
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        named(mut line, "DNS proxy threads not started on ", svc.nif as *netif);
+        line.text("; rolling back");
+        KernelLog.send(LogLevel.Warn, line);
+        dnsStop(s); // tear the half-started service fully down
+        return;
+    }
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    named(mut line, "DNS proxy on ", svc.nif as *netif);
+    line.text(if (svc.up_set) ":53 (upstream configured)" else ":53 (upstream unconfigured)");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// tapsvc.h's tapsvc_test_set_upstream: the upstream resolver (ip 0 clears it: the proxy then answers SERVFAIL).
+/// Safety: `s` is a live instance.
+@export("tapsvc_test_set_upstream")
+unsafe fn setUpstream(s: *mut tapsvc, ip: u32, port: u16) {
+    let svc = Ptr.toBorrowMut(s);
+    svc.up_ip = ip;
+    svc.up_port = port;
+    svc.up_set = ip != 0;
+}
+
+// ---- Lifetime ----
+
+/// tapsvc.h's tapsvc_start: the service on a tap (null when more instances than taps can exist would run, or memory
+/// is short).
+/// Safety: `t` is a live tap.
+@export("tapsvc_start")
+unsafe fn start(t: *mut tap) -> *mut tapsvc {
+    let nif = tap_netif(t);
+    let s = kmalloc(layoutOf<tapsvc>().size, KMEM_ZERO) as *mut tapsvc;
+    if (s.isNull()) {
+        return s;
+    }
+    spinlock_init(borrow mut Ptr.toBorrowMut(s).lock as *mut spinlock_t, "tapsvc\0".ptr as *CChar);
+    spinlock_init(dnsLock(s), "tapsvc-dns\0".ptr as *CChar);
+    let svc = Ptr.toBorrowMut(s);
+    let ip4 = borrow Ptr.toBorrow(nif as *netif).ip4;
+    let addr = ip4.addr.loadWith(LoadOrdering.Relaxed);
+    let mask = ip4.mask.loadWith(LoadOrdering.Relaxed);
+    svc.tap = t;
+    svc.nif = nif;
+    svc.gateway = addr;
+    svc.mask = mask;
+    svc.guest = (addr & mask) | swap32(TAPSVC_GUEST_HOST);
+
+    let st = spin_lock_irqsave(svcsLock());
+    var placed = false;
+    for (i in 0..TAPSVC_MAX) {
+        if (svcAt(i).isNull()) {
+            setSvc(i, s);
+            placed = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(svcsLock(), st);
+    if (!placed) { // more instances than taps can exist
+        kfree(s as *mut void);
+        return 0 as *mut tapsvc;
+    }
+
+    tap_set_input_filter(t, filter, s as *mut void);
+    dnsStart(s);
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    named(mut line, "DHCP up on ", nif as *netif);
+    line.text(" (gateway ");
+    dotted(mut line, svc.gateway);
+    line.text(", guest .");
+    line.decimal(TAPSVC_GUEST_HOST as u64);
+    line.text(")");
+    KernelLog.send(LogLevel.Info, line);
+    return s;
+}
+
+/// tapsvc.h's tapsvc_stop: the service stopped (the DHCP filter first, so no reply is built for a tap about to go,
+/// then the DNS threads joined before their sockets drop) and freed. The caller destroys the tap afterwards.
+/// Safety: `s` is null or a live instance, used by nothing after this.
+@export("tapsvc_stop")
+unsafe fn stop(s: *mut tapsvc) {
+    if (s.isNull()) {
+        return;
+    }
+    let st = spin_lock_irqsave(svcsLock());
+    for (i in 0..TAPSVC_MAX) {
+        if (svcAt(i) as usize == s as usize) {
+            setSvc(i, 0 as *mut tapsvc);
+            break;
+        }
+    }
+    spin_unlock_irqrestore(svcsLock(), st);
+    tap_set_input_filter(
+        Ptr.toBorrow(s as *tapsvc).tap, 0 as extern "C" fn(*mut tap, *void, u32, *mut void) -> bool,
+        0 as *mut void,
+    );
+    dnsStop(s);
+    kfree(s as *mut void);
+}
+
+/// tapsvc.h's tapsvc_count: the live instances.
+/// Safety: the list is read under its lock.
+@export("tapsvc_count")
+fn countLive() -> u32 {
+    var n: u32 = 0;
+    unsafe {
+        let st = spin_lock_irqsave(svcsLock());
+        for (i in 0..TAPSVC_MAX) {
+            if (!svcAt(i).isNull()) {
+                n = n + 1;
+            }
+        }
+        spin_unlock_irqrestore(svcsLock(), st);
+    }
+    return n;
+}
+
+/// tapsvc.h's tapsvc_get_stats: the counters, and the live pending queries right now.
+/// Safety: `out` points to a writable tapsvc_stats; the list holds live instances, read under its lock.
+@export("tapsvc_get_stats")
+unsafe fn getStats(out: *mut tapsvc_stats) {
+    let o = Ptr.toBorrowMut(out);
+    o.dhcp_discover = read(borrow DHCP_DISCOVERS);
+    o.dhcp_offer = read(borrow DHCP_OFFERS);
+    o.dhcp_request = read(borrow DHCP_REQUESTS);
+    o.dhcp_ack = read(borrow DHCP_ACKS);
+    o.dhcp_nak = read(borrow DHCP_NAKS);
+    o.dhcp_release = read(borrow DHCP_RELEASES);
+    o.dhcp_ignored = read(borrow DHCP_IGNORED);
+    o.dns_query = read(borrow DNS_QUERIES);
+    o.dns_answer = read(borrow DNS_ANSWERS);
+    o.dns_servfail = read(borrow DNS_SERVFAILS);
+    o.dns_drop_full = read(borrow DNS_DROPS_FULL);
+    o.dns_expired = read(borrow DNS_EXPIRED);
+    var live: u32 = 0;
+    let now = clock_now_ns();
+    let st = spin_lock_irqsave(svcsLock());
+    for (k in 0..TAPSVC_MAX) {
+        let s = svcAt(k);
+        if (s.isNull()) {
+            continue;
+        }
+        let d = spin_lock_irqsave(dnsLock(s));
+        let svc = Ptr.toBorrow(s as *tapsvc);
+        for (i in 0..DNS_PENDING_MAX) {
+            if (svc.dns_tab[i].in_use && now < svc.dns_tab[i].expires_ns) {
+                live = live + 1;
+            }
+        }
+        spin_unlock_irqrestore(dnsLock(s), d);
+    }
+    spin_unlock_irqrestore(svcsLock(), st);
+    o.dns_pending = live;
+}

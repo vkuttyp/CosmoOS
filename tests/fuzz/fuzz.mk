@@ -164,7 +164,7 @@ $(FUZZ_OUT)/fuzz_net_config: $(call src_paths,$(FUZZ_NET_CONFIG_SRCS)) $(FUZZ_NE
 $(FUZZ_OUT)/fuzz_dhcp_dns: $(call src_paths,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_NET_HDRS) | $(CEE_STAMP)
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -DTAPSVC_HOST_TEST=1 $(call src_paths,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(call src_paths,$(FUZZ_DHCP_DNS_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
 .PHONY: fuzz fuzz-build
 fuzz-build: $(FUZZ_TARGETS)

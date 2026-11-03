@@ -860,8 +860,8 @@ unsafe fn input(nif: *mut netif, m: *mut mbuf, ihl: u32) -> bool {
     }
     let dh = udp.add(UDP_HLEN as usize);
     let dhlen = ulen as u32 - UDP_HLEN;
-    var msg: [u8; 20] = [0; 20]; // netparse_dhcp_bytes's layout
-    let wellFormed = netparse_dhcp_bytes(dh, dhlen, BOOTP_REPLY, borrow mut msg as *mut [u8; 20] as *mut u8);
+    var msg: [u8; 32] = [0; 32]; // netparse_dhcp_bytes's layout
+    let wellFormed = netparse_dhcp_bytes(dh, dhlen, BOOTP_REPLY, borrow mut msg as *mut [u8; 32] as *mut u8);
     let xid = if (wellFormed) word(msg[..], 2) else 0;
 
     var tx = noTx();

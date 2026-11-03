@@ -1157,7 +1157,8 @@ corpus of frames from a boot's capture (`tests/fuzz/corpus/net_frame`,
 `tools/pcap-to-seeds.py`); `fuzz_tcp_segments` feeds a program of segments
 and host actions into one connection, with every state change checked
 against RFC 793's machine through `tcp_test_state_change` (`TCP_HOST_TEST`);
-`fuzz_dhcp_dns` feeds the DHCP filter and the DNS proxy (`TAPSVC_HOST_TEST`).
+`fuzz_dhcp_dns` feeds the DHCP filter and the DNS proxy through `tapsvc_start`,
+with the tap, sockets and threads its own (the proxy's thread loops run in place).
 The oracles -- lock balance, well-formed and checksummed output, bounded
 tables, no leak after teardown, the TCP machine -- the input formats, the
 corpus, the runs and the finding above are in

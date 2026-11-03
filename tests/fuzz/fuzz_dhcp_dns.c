@@ -1,14 +1,17 @@
 /*
  * fuzz_dhcp_dns.c - The tap services' two parsers: DHCP and the DNS proxy.
  *
- * tapsvc.c (TAPSVC_HOST_TEST) over a bare interface on the host
- * (shim_net.c): no tap, no sockets, no threads. The instance serves the
- * guest 10.75.0.15 behind the gateway 10.75.0.1; its DHCP filter is fed
- * frames as the tap's far end would inject them, and each side of the DNS
- * proxy is fed one datagram at a time, as its thread would read it from
- * its socket. Replies are captured: a DHCP reply as the frame the stack
- * transmits out the interface, a DNS relay as the datagram the proxy sends
- * through its (stubbed) socket.
+ * The tap services (tapsvc.h) through tapsvc_start and tapsvc_stop, over
+ * an interface on the host (shim_net.c) that a tap of this file's wraps,
+ * with sockets, threads and the firmware configuration this file's. The
+ * instance serves the guest 10.75.0.15 behind the gateway 10.75.0.1; the
+ * DHCP filter it installs on the tap is fed frames as the tap's far end
+ * would inject them, and each side of the DNS proxy is fed one datagram at
+ * a time: queued on its socket, its thread's loop run until the socket has
+ * nothing more (a read of 0, as a shut-down socket's), its thread_exit
+ * jumping back here. Replies are captured: a DHCP reply as the frame the
+ * stack transmits out the interface, a DNS relay as the datagram the proxy
+ * sends through its (stubbed) socket.
  *
  * The input is a sequence of records (up to 256): a kind byte, a
  * little-endian 16-bit length, the payload.
@@ -19,7 +22,8 @@
  *      proxy most recently lent upstream (so an answer finds its query)
  *   3  time passes: ms in the payload's first two bytes (pending queries
  *      expire; the age sweep runs)
- *   4  the resolver address string from the firmware configuration
+ *   4  the resolver address string from the firmware configuration: the
+ *      service restarted with it (a lease and pending queries are lost)
  *   5  the upstream resolver is configured (payload byte 0 odd) or not
  *   6  an Ethernet frame to the kernel's DHCP client (dhcp.c) on a second
  *      interface with no address; bit 5 of the kind byte stamps the xid of
@@ -56,6 +60,7 @@
 #include <kernel/fwcfg.h>
 #include <kernel/net/tap.h>
 
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,16 +95,19 @@ static size_t g_baseline;
 static struct tapsvc *g_svc;
 static unsigned g_bad_frames;
 
-/* --- the stubs tapsvc.c links against ------------------------------------- */
+/* --- the stubs the tap services link against ---------------------------- */
 
 static const struct kobject_type g_sock_type = { .name = "fz-socket" };
 static struct socket g_gsock, g_usock;
+static unsigned g_socks_made;   /* the service makes the guest's socket first, then the upstream's */
+
+#define DGRAM_MAX 2048u   /* tapsvc's DNS_MSG_MAX: a whole datagram */
 
 /* What the proxy sent, through which socket, to whom. */
 struct sent {
     struct socket *via;
     struct netaddr to;
-    uint8_t buf[512];
+    uint8_t buf[DGRAM_MAX];
     size_t n;
 };
 static struct sent g_sent[8];
@@ -118,20 +126,86 @@ int64_t ksock_sendto(struct socket *s, const void *buf, size_t len, const struct
 
 int ksock_create(int family, int type, uint32_t uid, struct socket **out)
 {
-    (void)family; (void)type; (void)uid; (void)out;
-    return -ENOSYS;   /* dns_start is never called here */
+    (void)family; (void)type; (void)uid;
+    struct socket *s = g_socks_made++ % 2 == 0 ? &g_gsock : &g_usock;
+    memset(s, 0, sizeof(*s));
+    kobject_init(&s->obj, &g_sock_type);
+    *out = s;
+    return 0;
 }
-int ksock_bind(struct socket *s, const struct netaddr *addr) { (void)s; (void)addr; return -ENOSYS; }
+int ksock_bind(struct socket *s, const struct netaddr *addr) { (void)s; (void)addr; return 0; }
+
+/* One datagram waiting on each socket, or none. */
+static struct { bool full; struct netaddr from; uint8_t buf[DGRAM_MAX]; size_t n; } g_mail[2];
+
 int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *from)
-{ (void)s; (void)buf; (void)len; (void)from; return -ENOSYS; }
+{
+    unsigned k = s == &g_usock;
+    memset(from, 0, sizeof(*from));
+    if (!g_mail[k].full)
+        return 0;   /* nothing more: the thread's loop ends */
+    g_mail[k].full = false;
+    *from = g_mail[k].from;
+    size_t n = g_mail[k].n < len ? g_mail[k].n : len;
+    memcpy(buf, g_mail[k].buf, n);
+    return (int64_t)n;
+}
 int ksock_shutdown(struct socket *s, int how) { (void)s; (void)how; return 0; }
+
+/* The proxy's two threads: made, never scheduled; run here, one datagram at a time. */
+static struct fz_thread { void (*entry)(void *); void *arg; bool live; } g_threads[2];
+static jmp_buf g_thread_jmp;
+
 struct thread *thread_create(void (*entry)(void *arg), void *arg, const char *name, int priority)
-{ (void)entry; (void)arg; (void)name; (void)priority; return NULL; }
-void thread_exit(int code) { (void)code; abort(); }
-int thread_join(struct thread *t) { (void)t; return 0; }
-bool fwcfg_get_string(const char *key, char *buf, size_t len) { (void)key; (void)buf; (void)len; return false; }
-struct netif *tap_netif(struct tap *t) { (void)t; return NULL; }
-void tap_set_input_filter(struct tap *t, tap_input_fn fn, void *arg) { (void)t; (void)fn; (void)arg; }
+{
+    (void)priority;
+    struct fz_thread *t = &g_threads[strcmp(name, "dns-up") == 0];
+    t->entry = entry;
+    t->arg = arg;
+    t->live = true;
+    return (struct thread *)(void *)t;
+}
+void thread_exit(int code) { (void)code; longjmp(g_thread_jmp, 1); }
+int thread_join(struct thread *t) { ((struct fz_thread *)(void *)t)->live = false; return 0; }
+
+/* Datagram `p` (n bytes, from `from`) read by side `k`'s thread (0: the guest's, 1: the upstream's). */
+static void run_side(unsigned k, const uint8_t *p, size_t n, const struct netaddr *from)
+{
+    g_mail[k].full = true;
+    g_mail[k].from = *from;
+    g_mail[k].n = n;
+    memcpy(g_mail[k].buf, p, n);
+    FUZZ_ASSERT(g_threads[k].live);
+    if (setjmp(g_thread_jmp) == 0) {
+        g_threads[k].entry(g_threads[k].arg);
+        FUZZ_ASSERT(!"a proxy thread returned without thread_exit");
+    }
+    FUZZ_ASSERT(!g_mail[k].full);
+}
+
+static const char *g_resolver;   /* the firmware's opt/cosmo/resolver, or NULL */
+
+bool fwcfg_get_string(const char *key, char *buf, size_t len)
+{
+    if (strcmp(key, "resolver") != 0 || g_resolver == NULL || len == 0)
+        return false;
+    size_t n = strlen(g_resolver);
+    if (n > len - 1)
+        n = len - 1;   /* as fwcfg.c: what fits, terminated */
+    memcpy(buf, g_resolver, n);
+    buf[n] = '\0';
+    return true;
+}
+
+/* The tap: the interface it wraps and the filter the service sets on it. */
+struct tap {
+    struct fz_netif *f;
+    tap_input_fn fn;
+    void *arg;
+};
+static struct tap g_tap;
+struct netif *tap_netif(struct tap *t) { return &t->f->nif; }
+void tap_set_input_filter(struct tap *t, tap_input_fn fn, void *arg) { t->fn = fn; t->arg = arg; }
 
 /* --- the DHCP reply oracle ------------------------------------------------- */
 
@@ -274,18 +348,16 @@ static void setup(void)
     g_last_lent = 0;
     fz_netif_register(&g_f1, "fz1", k_mac1, IP1, MASK24, 0, NETIF_NODEFAULT);
     g_f1.on_frame = on_frame;
-    memset(&g_gsock, 0, sizeof(g_gsock));
-    memset(&g_usock, 0, sizeof(g_usock));
-    kobject_init(&g_gsock.obj, &g_sock_type);
-    kobject_init(&g_usock.obj, &g_sock_type);
     fz_netif_register(&g_f2, "fz2", k_mac2, 0, 0, 0, NETIF_NODEFAULT);
     g_f2.on_frame = on_client_frame;
     g_client_xid = 0;
     FUZZ_ASSERT(dhcp_client_start(&g_f2.nif) == 0);
     fz_run_work();   /* the first DISCOVER */
-    g_svc = tapsvc_test_new(&g_f1.nif);
-    FUZZ_ASSERT(g_svc != NULL);
-    tapsvc_test_set_sockets(g_svc, &g_gsock, &g_usock);
+    g_tap.f = &g_f1;
+    g_resolver = NULL;
+    g_socks_made = 0;
+    g_svc = tapsvc_start(&g_tap);
+    FUZZ_ASSERT(g_svc != NULL && g_tap.fn != NULL && g_threads[0].live && g_threads[1].live);
     tapsvc_test_set_upstream(g_svc, UPSTREAM, 53);
     g_up_set = true;
 }
@@ -298,8 +370,10 @@ static void teardown(void)
     tapsvc_dns_age(fz_now() + 10ull * 1000000000ull);   /* every pending query is past its 5 s */
     tapsvc_get_stats(&st);
     FUZZ_ASSERT(st.dns_pending == 0);
-    tapsvc_test_free(g_svc);
+    tapsvc_stop(g_svc);
     g_svc = NULL;
+    FUZZ_ASSERT(g_tap.fn == NULL && !g_threads[0].live && !g_threads[1].live);
+    FUZZ_ASSERT(g_gsock.obj.refcount == 0 && g_usock.obj.refcount == 0);   /* both sockets let go */
     client_check();
     dhcp_client_stop(&g_f2.nif);
     struct dhcp_lease_info gone[DHCP_MAX_CLIENTS];
@@ -332,7 +406,7 @@ static void dhcp_record(const uint8_t *p, size_t n)
     }
     unsigned tx = g_f1.transmits;
     g_claimed = true;   /* provisionally: the filter answers only what it claims, checked below */
-    bool claimed = tapsvc_test_dhcp(g_svc, frame, (uint32_t)n);
+    bool claimed = g_tap.fn(&g_tap, frame, (uint32_t)n, g_tap.arg);
     g_claimed = false;
     if (!claimed)
         FUZZ_ASSERT(g_f1.transmits == tx);   /* a frame left to the stack drew no reply from the filter */
@@ -341,7 +415,7 @@ static void dhcp_record(const uint8_t *p, size_t n)
 
 static void dns_query(const uint8_t *p, size_t n)
 {
-    uint8_t buf[512];
+    uint8_t buf[DGRAM_MAX];
     if (n > sizeof(buf))
         n = sizeof(buf);
     memcpy(buf, p, n);
@@ -353,9 +427,9 @@ static void dns_query(const uint8_t *p, size_t n)
     struct tapsvc_stats s0, s1;
     tapsvc_get_stats(&s0);
     unsigned sent0 = g_nsent;
-    uint8_t orig[512];
+    uint8_t orig[DGRAM_MAX];
     memcpy(orig, buf, n);
-    tapsvc_test_dns_query(g_svc, buf, (uint32_t)n, &from);
+    run_side(0, buf, n, &from);
     tapsvc_get_stats(&s1);
     if (n < 12) {
         FUZZ_ASSERT(g_nsent == sent0);   /* shorter than a header: not a query */
@@ -397,7 +471,7 @@ static void dns_query(const uint8_t *p, size_t n)
 
 static void dns_answer(const uint8_t *p, size_t n, bool stranger, bool lent)
 {
-    uint8_t buf[512];
+    uint8_t buf[DGRAM_MAX];
     if (n > sizeof(buf))
         n = sizeof(buf);
     memcpy(buf, p, n);
@@ -413,7 +487,7 @@ static void dns_answer(const uint8_t *p, size_t n, bool stranger, bool lent)
     struct tapsvc_stats s0, s1;
     tapsvc_get_stats(&s0);
     unsigned sent0 = g_nsent;
-    tapsvc_test_dns_answer(g_svc, buf, (uint32_t)n, &from);
+    run_side(1, buf, n, &from);
     tapsvc_get_stats(&s1);
     if (n < 12 || stranger) {
         FUZZ_ASSERT(g_nsent == sent0 && s1.dns_answer == s0.dns_answer);
@@ -429,6 +503,40 @@ static void dns_answer(const uint8_t *p, size_t n, bool stranger, bool lent)
     FUZZ_ASSERT(e->via == &g_gsock && e->to.v4 == GUEST && e->to.port == 40000 && e->n == n);
     FUZZ_ASSERT(memcmp(e->buf + 2, p + 2, n - 2) == 0);
     FUZZ_ASSERT(s1.dns_pending + 1 == s0.dns_pending);
+}
+
+/* The service restarted with resolver string `s`: an upstream it takes is
+ * the string's four octets (a probe query goes there, port 53); one it
+ * refuses leaves it answering SERVFAIL. Then the upstream as it was. */
+static void resolver_record(const char *s)
+{
+    tapsvc_stop(g_svc);
+    g_resolver = s;
+    g_socks_made = 0;
+    g_svc = tapsvc_start(&g_tap);
+    g_resolver = NULL;
+    FUZZ_ASSERT(g_svc != NULL);
+    static const uint8_t probe[] = { 0x55, 0x66, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0 };
+    struct netaddr from;
+    memset(&from, 0, sizeof(from));
+    from.family = COSMO_AF_INET;
+    from.port = 40001;
+    from.v4 = GUEST;
+    unsigned sent0 = g_nsent;
+    run_side(0, probe, sizeof(probe), &from);
+    FUZZ_ASSERT(g_nsent == sent0 + 1);
+    struct sent *e = &g_sent[sent0 % 8];
+    if (e->via == &g_usock) {
+        /* As fwcfg.c, the service read at most 31 characters of it. */
+        char t[32];
+        snprintf(t, sizeof(t), "%s", s);
+        unsigned o[4] = { 0 };
+        FUZZ_ASSERT(sscanf(t, "%u.%u.%u.%u", &o[0], &o[1], &o[2], &o[3]) == 4);
+        FUZZ_ASSERT(e->to.v4 == IPV4_ADDR(o[0], o[1], o[2], o[3]) && e->to.port == 53);
+    } else {
+        FUZZ_ASSERT(e->via == &g_gsock && (e->buf[3] & 0xf) == 2);   /* SERVFAIL */
+    }
+    tapsvc_test_set_upstream(g_svc, g_up_set ? UPSTREAM : 0, 53);
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
@@ -468,13 +576,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             size_t m = len < sizeof(s) - 1 ? len : sizeof(s) - 1;
             memcpy(s, p, m);
             s[m] = '\0';
-            uint32_t ip;
-            if (tapsvc_test_parse_ip(s, &ip)) {
-                /* A parse that succeeds reproduces the string's four octets. */
-                unsigned o[4] = { 0 };
-                sscanf(s, "%u.%u.%u.%u", &o[0], &o[1], &o[2], &o[3]);
-                FUZZ_ASSERT(ip == IPV4_ADDR(o[0], o[1], o[2], o[3]));
-            }
+            resolver_record(s);
             break;
         }
         case 6:

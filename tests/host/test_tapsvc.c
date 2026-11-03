@@ -32,8 +32,8 @@
  * history nothing is allocated beyond the baseline, every socket is
  * released and no mbuf is alive.
  *
- * Not reached: kmalloc failing, and the TAPSVC_HOST_TEST doors (the fuzz
- * target's).
+ * Not reached: kmalloc and m_getcl failing, and the 4,096 tries for a
+ * free DNS id.
  */
 
 #include <kernel/errno.h>
