@@ -46,7 +46,7 @@ port 22 forwarded to a host port:
      DHCP server names the machine (option 12, QEMU_NET_HOSTNAME): `ip a`
      shows eth0 with its DHCP address, `ip r` the default and the subnet,
      `ip neigh` the gateway; BusyBox `ifconfig`, `route -n`, `netstat
-     -tuln` (dropbear on :22), `arp -a` (the gateway) and `hostname` print
+     -tuln` (dropbear on :22), `arp -an` (the gateway) and `hostname` print
      the same machine; `ifconfig eth0 down` fails with EPERM with PRIV_NET
      dropped, then works as root, and `up` brings the link back (a ping of
      the gateway answers).
@@ -545,13 +545,15 @@ def stage_inspect(b, results):
     need(out, r"^tcp\s+0\s+\d+\s+:::22\s+:::\*\s+LISTEN\s*$", "netstat -tuln: dropbear on [::]:22 (/proc/net/tcp6)")
     if "bogus data" in out or "can't open" in out:
         raise Fail(f"netstat -tuln could not read /proc/net: {out!r}")
-    out = b.run("arp -a")
-    need(out, rf"^\? \(10\.0\.2\.2\) at {gw_mac} \[ether\]\s+on eth0$", "arp -a: the gateway")
+    # -n: no reverse lookup. Without it BusyBox asks the resolver for a name,
+    # and the CI runner's (through QEMU's DNS proxy) may give 10.0.2.2 one.
+    out = b.run("arp -an")
+    need(out, rf"^\? \(10\.0\.2\.2\) at {gw_mac} \[ether\]\s+on eth0$", "arp -an: the gateway")
     out = b.run("hostname; hostname -s; cat /etc/hostname")
     if out.count(HOSTNAME) < 3:
         raise Fail(f"hostname, hostname -s and /etc/hostname should each say {HOSTNAME}: {out!r}")
     results.append(f"g. busybox: ifconfig eth0 10.0.2.15 Bcast 10.0.2.255 Mask 255.255.255.0; route -n default "
-                   f"UG and subnet U; netstat -tuln dropbear on 0.0.0.0:22 and :::22; arp -a 10.0.2.2 {gw_mac}; hostname {HOSTNAME} "
+                   f"UG and subnet U; netstat -tuln dropbear on 0.0.0.0:22 and :::22; arp -an 10.0.2.2 {gw_mac}; hostname {HOSTNAME} "
                    f"(DHCP option 12, /etc/hostname)")
 
     out = b.status("priv -d net -- ifconfig eth0 down", "down-noprv")

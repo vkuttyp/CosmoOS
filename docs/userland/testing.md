@@ -415,8 +415,9 @@ networking with no fw_cfg address, so the kernel's DHCP client configures
   `REACHABLE`; `ip addr add` is refused (exit 2). BusyBox: `ifconfig`
   (eth0's MAC, address, broadcast, mask, flags and a non-zero RX count,
   and `lo`), `route -n` (the default `UG` and the subnet `U`), `netstat
-  -tuln` (dropbear on `0.0.0.0:22` and `:::22`, no "bogus data"), `arp -a`
-  (the gateway at the MAC `ip neigh` gave), `hostname`, `hostname -s` and
+  -tuln` (dropbear on `0.0.0.0:22` and `:::22`, no "bogus data"), `arp -an`
+  (the gateway at the MAC `ip neigh` gave; `-n` because the host's
+  resolver may name 10.0.2.2), `hostname`, `hostname -s` and
   `/etc/hostname` (`cosmo-s1`). `priv -d net -- ifconfig eth0 down` must
   fail with `SIOCSIFFLAGS: Operation not permitted` and leave eth0 up;
   `ifconfig eth0 down` as root must show `state DOWN` in `ip link` and no
