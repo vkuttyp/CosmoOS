@@ -1056,7 +1056,13 @@ object the batch defines as `lo` is (`static mut` with designated
 initialisers, its ops table CeeSafe callbacks), zeroed and filled in
 at the test's start as the C's memset did; registration, the
 creator's reference and the kept packet go through the release
-framework.
+framework. Batch 6, `nettest_tap.cee`: the frame builders every tap
+test uses (`nettest_wrap`, `nettest_mk_udp`, `nettest_mk_tcp`,
+`nettest_mk_icmp`, `nettest_l4cksum`, `nettest_l4_ok`,
+`nettest_seed_arp`, `nettest_build_udp`, `nettest_recv_ip`,
+`nettest_mk_dns`), exported under the C's names so the tap tests still
+in `nettest.c` build their frames in CeeSafe, and selftest_tap,
+net-route, net-forward, tap-filter, net-dhcp and net-dns.
 
 Size: about 3.0x.
 

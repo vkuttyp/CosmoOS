@@ -13,6 +13,8 @@
 #include <kernel/socket.h>
 #include <kernel/spinlock.h>
 #include <kernel/thread.h>
+#include <kernel/net/tap.h>
+#include <kernel/net/tapsvc.h>
 
 /* A loopback test's server thread. Its storage outlives any frame (the
  * thread may run after the test returns), and nettest_tcp_server_start
@@ -52,6 +54,10 @@ int nettest_ksock_accept(struct socket *s, struct socket **out, struct netaddr *
 void nettest_ksock_put(struct socket *s);
 void nettest_loopback_set_filter(lo_filter_fn fn, void *arg);
 void nettest_netif_set_rx_hook(netif_rx_hook_fn fn, void *arg);
+struct tap *nettest_tap_create(const char *name, uint32_t ip, uint32_t mask, const uint8_t *mac);
+void nettest_tap_destroy(struct tap *t);
+struct tapsvc *nettest_tapsvc_start(struct tap *t);
+void nettest_tapsvc_stop(struct tapsvc *svc);
 int nettest_netif_register(struct netif *nif);
 void nettest_netif_unregister(struct netif *nif);
 bool nettest_netif_hold(struct nt_netif_ref *r, struct netif *nif);
@@ -74,5 +80,21 @@ bool nettest_lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool
  * check the connection's end, lingering `linger_ms` past it (net-lo-tcp,
  * net-lo-tcp-loss, net-rx-dup, net-tcp-reorder). */
 bool nettest_tcp_transfer(const char **reason, const struct netaddr *addr, uint32_t bytes, uint32_t linger_ms);
+
+/* nettest_tap.cee: the tap tests' frame builders. Each writes exactly the
+ * bytes its frame has and returns that length; a MAC is 6 bytes. */
+uint16_t nettest_l4cksum(uint32_t sip, uint32_t dip, uint8_t proto, const void *l4, uint16_t len);
+bool nettest_l4_ok(uint32_t sip, uint32_t dip, uint8_t proto, const void *l4, uint16_t len);
+uint32_t nettest_wrap(uint8_t *frame, const uint8_t *dmac, const uint8_t *smac, uint32_t sip, uint32_t dip, uint8_t ttl,
+                      uint8_t proto, const void *l4, uint16_t l4len);
+uint16_t nettest_mk_udp(uint8_t *l4, uint32_t sip, uint32_t dip, uint16_t sp, uint16_t dp, const uint8_t *pl,
+                        uint16_t pllen);
+uint16_t nettest_mk_tcp(uint8_t *l4, uint32_t sip, uint32_t dip, uint16_t sp, uint16_t dp, uint8_t flags);
+uint16_t nettest_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id, uint16_t seq, const uint8_t *pl, uint16_t pllen);
+void nettest_seed_arp(struct netif *nif, uint32_t peer_ip, const uint8_t *peer_mac);
+uint32_t nettest_build_udp(uint8_t *buf, const uint8_t *dstmac, const uint8_t *srcmac, uint32_t sip, uint32_t dip,
+                           uint8_t ttl, uint16_t sport, uint16_t dport, const uint8_t *pl, uint32_t pllen);
+struct mbuf *nettest_recv_ip(struct tap *t);
+uint32_t nettest_mk_dns(uint8_t *msg, uint16_t id);
 
 #endif

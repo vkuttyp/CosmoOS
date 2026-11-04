@@ -1,0 +1,1467 @@
+// nettest_tap.cee - the frame builders and the first tap self-tests, in CeeSafe: roadmap 2.0 SA6 (nettest, the sixth
+// batch). selftest_tap, net-route, net-forward, tap-filter, net-dhcp and net-dns, as nettest.c had them, and the
+// Ethernet/IPv4/UDP/TCP/ICMP/DNS frame builders every tap test uses -- exported under the C's names
+// (nettest_wrap, nettest_mk_udp, ...; nettest.h), so the tests still in nettest.c build their frames here. A builder
+// takes C's pointers and writes exactly the bytes its frame has (the length it returns), as the C did.
+//
+// An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest.c): the family and the port (host
+// order) in its first word as they lie in memory, the IPv4 address in the second.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/net/tap.h", "kernel/net/tapsvc.h", "kernel/net/dhcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/wait.h")
+extern "C" {
+    struct netaddr;
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ip4 {
+        addr: u32;
+    }
+    struct netif {
+        obj: kobject;
+        flags: u32;
+        ip4: netif_ip4;
+    }
+    struct tap;
+    struct tapsvc;
+    struct socket;
+    struct thread;
+    struct ip_stats {
+        rx_not_for_us: u64;
+        fwd: u64;
+        fwd_ttl_exceeded: u64;
+    }
+    struct tapsvc_stats {
+        dhcp_ignored: u64;
+        dns_answer: u64;
+        dns_drop_full: u64;
+        dns_expired: u64;
+        dns_pending: u32;
+    }
+
+    fn nettest_tap_create(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap;
+    fn nettest_tap_destroy(t: *mut tap);
+    fn nettest_tapsvc_start(t: *mut tap) -> *mut tapsvc;
+    fn nettest_tapsvc_stop(svc: *mut tapsvc);
+    fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_put(s: *mut socket);
+    fn selftest_defer(run: extern "C" fn(*mut void), arg: *mut void) -> bool;
+    fn selftest_release(arg: *mut void) -> bool;
+
+    fn tap_netif(t: *mut tap) -> *mut netif;
+    fn tap_inject(t: *mut tap, frame: *void, len: u32) -> i32;
+    fn tap_recv(t: *mut tap) -> *mut mbuf;
+    fn tap_set_input_filter(t: *mut tap, run: extern "C" fn(*mut tap, *void, u32, *mut void) -> bool, arg: *mut void);
+    fn tapsvc_get_stats(out: *mut tapsvc_stats);
+    fn tapsvc_test_set_upstream(svc: *mut tapsvc, ip: u32, port: u16);
+    fn tapsvc_dns_age(nowNs: u64);
+    fn ksock_bind(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn ksock_recvfrom(s: *mut socket, buf: *mut void, len: usize, from: *mut netaddr) -> i64;
+    fn ksock_shutdown(s: *mut socket, how: i32) -> i32;
+    fn netif_default() -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_transmit(nif: *mut netif, m: *mut mbuf) -> i32;
+    fn netif_set_forward(nif: *mut netif, on: bool);
+    fn ipv4_route(dst: u32) -> *mut netif;
+    fn ipv4_get_stats(out: *mut ip_stats);
+    fn arp_input(nif: *mut netif, m: *mut mbuf);
+    fn ether_output(nif: *mut netif, m: *mut mbuf, dst: *u8, kind: u16) -> i32;
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn m_length(m: *mbuf) -> u32;
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn cksum_partial(data: *void, len: usize, sum: u32) -> u32;
+    fn cksum_fold(sum: u32) -> u16;
+    fn cksum_pseudo4(src: u32, dst: u32, proto: u8, len: u16) -> u32;
+    fn thread_create(run: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_exit(code: i32);
+    fn thread_sleep_ns(ns: u64);
+    fn clock_now_ns() -> u64;
+}
+
+// ---- netif.h, ip.h, ether.h, tap.h, dhcp.h, socket values (asserted against the headers in nettest.c) ----
+
+const NETIF_LOOPBACK: u32 = 2;
+const ETH_HLEN: usize = 14;
+const ETH_P_IP: u16 = 0x0800;
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const ICMP_TIME_EXCEEDED: u8 = 11;
+const ICMP_TIMXCEED_INTRANS: u8 = 0;
+const TAP_TXQ_MAX: u32 = 64;
+const DHCP_DISCOVER: u8 = 1;
+const DHCP_OFFER: u8 = 2;
+const DHCP_REQUEST: u8 = 3;
+const DHCP_ACK: u8 = 5;
+const DHCP_NAK: u8 = 6;
+const INADDR_BROADCAST_N: u32 = 0xffffffff;
+const NS_PER_SEC: u64 = 1000000000;
+const AF_INET: u32 = 2;
+const SOCK_DGRAM: i32 = 2;
+const SHUT_RD: i32 = 0;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+/// htonl(0xffffff00): a /24 mask as it lies in a little-endian u32.
+const MASK24_N: u32 = 0x00ffffff;
+const MASK16_N: u32 = 0x0000ffff;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * 1000000);
+    }
+}
+
+fn says(text: StringView) {
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// A C counter struct's room on the stack: aligned and zeroed.
+struct Room {
+    words: [u64; 48];
+}
+
+fn room(bytes: usize) -> Room {
+    if (bytes > 384) {
+        var buffer: [u8; 64] = [0; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("nettest: a scratch is too small");
+        KernelLog.panic(line);
+    }
+    return Room { words: [0; 48] };
+}
+
+/// The IPv4 counters net-forward reads.
+struct Ip {
+    rxNotForUs: u64;
+    fwd: u64;
+    fwdTtlExceeded: u64;
+}
+
+/// Safety: the room holds a struct ip_stats (room checks).
+fn ipNow() -> Ip {
+    var r = room(layoutOf<ip_stats>().size);
+    let p = borrow mut r.words as *mut [u64; 48] as *mut ip_stats;
+    unsafe {
+        ipv4_get_stats(p);
+        let s = Ptr.toBorrow(p as *ip_stats);
+        return Ip { rxNotForUs: s.rx_not_for_us, fwd: s.fwd, fwdTtlExceeded: s.fwd_ttl_exceeded };
+    }
+}
+
+/// The tap services' counters.
+struct Svc {
+    dhcpIgnored: u64;
+    dnsAnswer: u64;
+    dnsDropFull: u64;
+    dnsExpired: u64;
+    dnsPending: u32;
+}
+
+/// Safety: the room holds a struct tapsvc_stats (room checks).
+fn svcNow() -> Svc {
+    var r = room(layoutOf<tapsvc_stats>().size);
+    let p = borrow mut r.words as *mut [u64; 48] as *mut tapsvc_stats;
+    unsafe {
+        tapsvc_get_stats(p);
+        let s = Ptr.toBorrow(p as *tapsvc_stats);
+        return Svc {
+            dhcpIgnored: s.dhcp_ignored,
+            dnsAnswer: s.dns_answer,
+            dnsDropFull: s.dns_drop_full,
+            dnsExpired: s.dns_expired,
+            dnsPending: s.dns_pending,
+        };
+    }
+}
+
+// ---- Bytes ----
+
+fn be16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+fn be32(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v >> 24);
+    b[at + 1] = truncate<u8>(v >> 16);
+    b[at + 2] = truncate<u8>(v >> 8);
+    b[at + 3] = truncate<u8>(v);
+}
+
+/// A u32 or u16 as it lies in memory (an address in network order, a checksum in_cksum returned).
+fn word(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+fn half(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+fn rd16(b: Slice<u8>, at: usize) -> u16 => ((b[at] as u16) << 8) | (b[at + 1] as u16);
+
+fn wordOf(b: Slice<u8>, at: usize) -> u32 => (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) |
+    ((b[at + 3] as u32) << 24);
+
+/// The first `n` bytes of two buffers are the same.
+fn sameAt(a: Slice<u8>, at: usize, b: Slice<u8>, n: usize) -> bool {
+    for (i in 0..n) {
+        if (a[at + i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Copy `n` bytes from C's `src` into `dst` at `at`.
+/// Safety: `src` points to `n` readable bytes.
+unsafe fn copyIn(dst: SliceMut<u8>, at: usize, src: *u8, n: usize) {
+    let s = Slice.fromRaw(src, n);
+    for (i in 0..n) {
+        dst[at + i] = s[i];
+    }
+}
+
+/// Twenty bytes of IPv4 header at `at`: version 4, five words, `total` long, `id`, `ttl`, `proto`, from `sip` to
+/// `dip`, checksummed.
+/// Safety: `b` is a frame of C's, `at + 20` bytes long at least.
+unsafe fn ipHeader(b: SliceMut<u8>, at: usize, total: u16, id: u16, ttl: u8, proto: u8, sip: u32, dip: u32) {
+    for (i in 0..20) {
+        b[at + truncate<usize>(i)] = 0;
+    }
+    b[at] = 0x45;
+    be16(b, at + 2, total);
+    be16(b, at + 4, id);
+    b[at + 8] = ttl;
+    b[at + 9] = proto;
+    word(b, at + 12, sip);
+    word(b, at + 16, dip);
+    let sum = in_cksum(b[at..at + 20].ptr as *void, 20);
+    half(b, at + 10, sum);
+}
+
+/// The Ethernet header: to `dmac`, from `smac`, `kind`.
+/// Safety: both MACs point to 6 readable bytes.
+unsafe fn ethHeader(b: SliceMut<u8>, dmac: *u8, smac: *u8, kind: u16) {
+    copyIn(b, 0, dmac, 6);
+    copyIn(b, 6, smac, 6);
+    be16(b, 12, kind);
+}
+
+// ---- The frame builders, for every tap test (nettest.h) ----
+
+/// The transport checksum (as it lies in memory) for an L4 buffer of `len` bytes carrying its own zeroed checksum
+/// field, under the IPv4 pseudo-header.
+/// Safety: `l4` points to `len` readable bytes.
+@export("nettest_l4cksum")
+unsafe fn l4cksum(sip: u32, dip: u32, proto: u8, l4: *void, len: u16) -> u16 => cksum_fold(
+    cksum_partial(l4, len as usize, cksum_pseudo4(sip, dip, proto, len)),
+);
+
+/// An L4 buffer's checksum (in place) is valid under the pseudo-header.
+/// Safety: as l4cksum.
+@export("nettest_l4_ok")
+unsafe fn l4Ok(sip: u32, dip: u32, proto: u8, l4: *void, len: u16) -> bool => l4cksum(sip, dip, proto, l4, len) == 0;
+
+/// Wrap an already-built L4 buffer in Ethernet + IPv4 (id 0x2000); the frame's length.
+/// Safety: `frame` has room for 34 + `l4len` bytes, the MACs 6 readable bytes each, `l4` `l4len`.
+@export("nettest_wrap")
+unsafe fn wrap(
+    frame: *mut u8,
+    dmac: *u8,
+    smac: *u8,
+    sip: u32,
+    dip: u32,
+    ttl: u8,
+    proto: u8,
+    l4: *void,
+    l4len: u16,
+) -> u32 {
+    let total = 20 + (l4len as usize);
+    let b = SliceMut.fromRaw(frame, ETH_HLEN + total);
+    ethHeader(b, dmac, smac, ETH_P_IP);
+    ipHeader(b, ETH_HLEN, truncate<u16>(total), 0x2000, ttl, proto, sip, dip);
+    copyIn(b, ETH_HLEN + 20, l4 as *u8, l4len as usize);
+    return truncate<u32>(ETH_HLEN + total);
+}
+
+/// A UDP datagram (header and payload) into `l4`, its checksum valid (0 sent as 0xffff); its length.
+/// Safety: `l4` has room for 8 + `pllen` bytes, `pl` `pllen` readable ones.
+@export("nettest_mk_udp")
+unsafe fn mkUdp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, pl: *u8, pllen: u16) -> u16 {
+    let len = 8 + pllen;
+    let b = SliceMut.fromRaw(l4, len as usize);
+    be16(b, 0, sp);
+    be16(b, 2, dp);
+    be16(b, 4, len);
+    half(b, 6, 0);
+    copyIn(b, 8, pl, pllen as usize);
+    let c = l4cksum(sip, dip, IPPROTO_UDP, l4 as *void, len);
+    half(b, 6, if (c != 0) c else 0xffff);
+    return len;
+}
+
+/// A bare TCP segment (the flags given, no payload) into `l4`, its checksum valid; its length, 20.
+/// Safety: `l4` has room for 20 bytes.
+@export("nettest_mk_tcp")
+unsafe fn mkTcp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, flags: u8) -> u16 {
+    let b = SliceMut.fromRaw(l4, 20);
+    for (i in 0..20) {
+        b[truncate<usize>(i)] = 0;
+    }
+    be16(b, 0, sp);
+    be16(b, 2, dp);
+    be32(b, 4, 0x11223344);
+    b[12] = 5 << 4;
+    b[13] = flags;
+    be16(b, 14, 64240);
+    half(b, 16, l4cksum(sip, dip, IPPROTO_TCP, l4 as *void, 20));
+    return 20;
+}
+
+/// An ICMP echo (type 8) or reply (type 0) into `l4`, its checksum valid (ICMPv4: no pseudo-header); its length.
+/// Safety: `l4` has room for 8 + `pllen` bytes, `pl` `pllen` readable ones.
+@export("nettest_mk_icmp")
+unsafe fn mkIcmp(l4: *mut u8, kind: u8, id: u16, seq: u16, pl: *u8, pllen: u16) -> u16 {
+    let len = 8 + pllen;
+    let b = SliceMut.fromRaw(l4, len as usize);
+    b[0] = kind;
+    b[1] = 0;
+    half(b, 2, 0);
+    be16(b, 4, id);
+    be16(b, 6, seq);
+    copyIn(b, 8, pl, pllen as usize);
+    half(b, 2, in_cksum(l4 as *void, len as usize));
+    return len;
+}
+
+/// Teach the stack a neighbour `peerIp` -> `peerMac` reachable on `nif`, by feeding arp_input a request from that peer
+/// to the interface's own address (a request addressed to us records the asker). The stack answers with a reply
+/// queued for the tap reader; nettest_recv_ip skips it.
+/// Safety: `nif` is a registered interface of the test's; `peerMac` points to 6 readable bytes.
+@export("nettest_seed_arp")
+unsafe fn seedArp(nif: *mut netif, peerIp: u32, peerMac: *u8) {
+    let f = m_getcl();
+    if (f.isNull()) {
+        return;
+    }
+    let b = SliceMut.fromRaw(Ptr.toBorrow(f as *mbuf).data, 28);
+    for (i in 0..28) {
+        b[truncate<usize>(i)] = 0;
+    }
+    {
+        let ff = Ptr.toBorrowMut(f);
+        ff.len = 28;
+        ff.pkt.len = 28;
+    }
+    b[1] = 1;    // htype Ethernet
+    b[2] = 0x08; // ptype IPv4
+    b[4] = 6;
+    b[5] = 4;
+    b[7] = 1;                                          // op request
+    copyIn(b, 8, peerMac, 6);                          // sha = the neighbour
+    word(b, 14, peerIp);                               // spa
+    word(b, 24, Ptr.toBorrow(nif as *netif).ip4.addr); // tpa = us
+    arp_input(nif, f);
+}
+
+/// An Ethernet + IPv4 + UDP frame (id 0x1234) into `buf`; its length. The IP header checksum is valid (ipv4_input
+/// verifies it); the UDP checksum is left 0 (optional over IPv4), since forwarding does not inspect it.
+/// Safety: `buf` has room for 42 + `pllen` bytes, the MACs 6 readable bytes each, `pl` `pllen`.
+@export("nettest_build_udp")
+unsafe fn buildUdp(
+    buf: *mut u8,
+    dstmac: *u8,
+    srcmac: *u8,
+    sip: u32,
+    dip: u32,
+    ttl: u8,
+    sport: u16,
+    dport: u16,
+    pl: *u8,
+    pllen: u32,
+) -> u32 {
+    let total = 20 + 8 + (pllen as usize);
+    let b = SliceMut.fromRaw(buf, ETH_HLEN + total);
+    ethHeader(b, dstmac, srcmac, ETH_P_IP);
+    ipHeader(b, ETH_HLEN, truncate<u16>(total), 0x1234, ttl, IPPROTO_UDP, sip, dip);
+    be16(b, 34, sport);
+    be16(b, 36, dport);
+    be16(b, 38, truncate<u16>(8 + pllen));
+    half(b, 40, 0);
+    copyIn(b, 42, pl, pllen as usize);
+    return truncate<u32>(ETH_HLEN + total);
+}
+
+/// The next IPv4 frame read back from tap `t`, skipping the ARP the stack queued while resolving; null after about
+/// 500 ms of nothing. The caller frees it.
+/// Safety: `t` is a tap of the test's.
+@export("nettest_recv_ip")
+unsafe fn recvIp(t: *mut tap) -> *mut mbuf {
+    for (i in 0..50) {
+        var m = tap_recv(t);
+        while (!m.isNull()) {
+            var kind: [u8; 2] = [0; 2];
+            if (m_copydata(m as *mbuf, 12, 2, borrow mut kind as *mut [u8; 2] as *mut void) && kind[0] == 0x08 &&
+                kind[1] == 0x00) {
+                return m; // IPv4
+            }
+            m_freem(m); // an ARP reply from seeding: skip
+            m = tap_recv(t);
+        }
+        sleepMs(10);
+    }
+    return 0 as *mut mbuf;
+}
+
+/// A fixed DNS query for "www.example.com" A IN, with the given id and RD set, into `msg`; its length, 33.
+/// Safety: `msg` has room for 33 bytes.
+@export("nettest_mk_dns")
+unsafe fn mkDns(msg: *mut u8, id: u16) -> u32 {
+    let qname: [u8; 17] = [3, 119, 119, 119, 7, 101, 120, 97, 109, 112, 108, 101, 3, 99, 111, 109, 0];
+    let b = SliceMut.fromRaw(msg, 33);
+    be16(b, 0, id);
+    b[2] = 0x01; // flags: RD
+    b[3] = 0x00;
+    be16(b, 4, 1); // qdcount 1
+    for (i in 6..12) {
+        b[truncate<usize>(i)] = 0;
+    }
+    for (i in 0..17) {
+        b[12 + truncate<usize>(i)] = qname[truncate<usize>(i)];
+    }
+    be16(b, 29, 1); // qtype A
+    be16(b, 31, 1); // qclass IN
+    return 33;
+}
+
+// ---- Taps ----
+
+/// A tap of the test's, released however it returns.
+/// Safety: thread context; `mac` 6 bytes.
+unsafe fn tapOf(name: StringView, ip: u32, mask: u32, mac: borrow [u8; 6]) -> *mut tap => nettest_tap_create(
+    name.ptr as *CChar,
+    ip,
+    mask,
+    mac as *[u8; 6] as *u8,
+);
+
+fn macAt(m: borrow [u8; 6]) -> *u8 => m as *[u8; 6] as *u8;
+
+/// Read a frame of up to `cap` bytes into `out`; its length, or 0 when none came or it did not fit.
+/// Safety: `out` has room for `cap` bytes; the frame is the caller's to free (freed here).
+unsafe fn take(m: *mut mbuf, out: *mut u8, cap: u32) -> u32 {
+    let n = m_length(m as *mbuf);
+    let ok = n <= cap && m_copydata(m as *mbuf, 0, n, out as *mut void);
+    m_freem(m);
+    return if (ok) n else 0;
+}
+
+/// An ARP request from the guest for `tpa` into a 42-byte frame.
+fn arpRequest(req: borrow mut [u8; 42], guestMac: borrow [u8; 6], spa: u32, tpa: u32) {
+    for (i in 0..42) {
+        req[truncate<usize>(i)] = 0;
+    }
+    for (i in 0..6) {
+        req[truncate<usize>(i)] = 0xff;                              // dst broadcast
+        req[6 + truncate<usize>(i)] = guestMac[truncate<usize>(i)];  // src
+        req[22 + truncate<usize>(i)] = guestMac[truncate<usize>(i)]; // sha
+    }
+    req[12] = 0x08;
+    req[13] = 0x06; // ethertype ARP
+    req[15] = 1;    // htype Ethernet
+    req[16] = 0x08; // ptype IPv4
+    req[18] = 6;
+    req[19] = 4; // hlen, plen
+    req[21] = 1; // op request
+    word(mut req[..], 28, spa);
+    word(mut req[..], 38, tpa);
+}
+
+/// Up to 500 ms for a frame from the tap.
+/// Safety: `t` is a tap of the test's.
+unsafe fn awaitFrame(t: *mut tap) -> *mut mbuf {
+    var m = 0 as *mut mbuf;
+    var i: u32 = 0;
+    while (i < 50 && m.isNull()) {
+        m = tap_recv(t);
+        if (m.isNull()) {
+            sleepMs(10);
+        }
+        i += 1;
+    }
+    return m;
+}
+
+// ---- tap ----
+
+/// tap: an interface whose far end is userland. A frame the stack transmits out the tap is read back; an ARP request
+/// injected for the tap's own IP is answered by the stack out the tap; the transmit queue caps rather than grows
+/// without bound. The owner's frame channel and the guest are proved elsewhere (the /dev/net/tap device and
+/// el2-tap-host); this is the tap itself against the real stack.
+/// Safety: the runner's `reason`.
+@export("selftest_tap")
+unsafe fn tapTest(reason: *mut *CChar) -> bool {
+    let hostMac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x00, 0x00, 0x01];
+    let hostIp = ip4(10, 0, 3, 1);
+    let guestIp = ip4(10, 0, 3, 15);
+    let t = tapOf("taptest\0", hostIp, MASK24_N, borrow hostMac);
+    if (t.isNull()) {
+        return failed(reason, "check failed: tap: a tap\0");
+    }
+    let nif = tap_netif(t);
+
+    // A tap is a point-to-point owner link, never the machine's default interface -- even brought up, a tap cannot
+    // swallow the host's outbound traffic.
+    let def = netif_default();
+    if (def as usize == nif as usize) {
+        return failed(reason, "check failed: tap: a tap is never the default interface\0");
+    }
+    if (!def.isNull()) {
+        netif_put(def);
+    }
+
+    // (1) stack -> tap: a frame transmitted out the tap is there to read.
+    let m = m_getcl();
+    if (m.isNull()) {
+        return failed(reason, "check failed: tap: a buffer\0");
+    }
+    var probe: [u8; 64] = [0; 64];
+    for (i in 0..6) {
+        probe[truncate<usize>(i)] = guestMac[truncate<usize>(i)];
+        probe[6 + truncate<usize>(i)] = hostMac[truncate<usize>(i)];
+    }
+    probe[12] = 0x08;
+    for (i in 14..64) {
+        probe[truncate<usize>(i)] = truncate<u8>(i);
+    }
+    copyIn(SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, 64), 0, borrow probe as *[u8; 64] as *u8, 64);
+    {
+        let mm = Ptr.toBorrowMut(m);
+        mm.len = 64;
+        mm.pkt.len = 64;
+    }
+    if (netif_transmit(nif, m) != 0) {
+        return failed(reason, "check failed: tap: a frame is transmitted out the tap\0");
+    }
+    let got = tap_recv(t);
+    if (got.isNull()) {
+        return failed(reason, "check failed: tap: and is there to read\0");
+    }
+    var out: [u8; 64] = [0; 64];
+    let read = m_copydata(got as *mbuf, 0, 64, borrow mut out as *mut [u8; 64] as *mut void);
+    m_freem(got);
+    if (!read || !sameAt(out[..], 0, probe[..], 64)) {
+        return failed(reason, "check failed: tap: the frame read back is the one sent\0");
+    }
+    if (!tap_recv(t).isNull()) {
+        return failed(reason, "check failed: tap: and only it\0");
+    }
+
+    // (2) tap -> stack -> tap: an ARP request for the tap's IP is answered.
+    var req: [u8; 42] = [0; 42];
+    arpRequest(mut req, borrow guestMac, guestIp, hostIp);
+    if (tap_inject(t, borrow req as *[u8; 42] as *void, 42) != 0) {
+        return failed(reason, "check failed: tap: an ARP request is injected\0");
+    }
+    let reply = awaitFrame(t);
+    if (reply.isNull()) {
+        return failed(reason, "check failed: tap: the stack answers it\0");
+    }
+    var r: [u8; 42] = [0; 42];
+    let readR = m_copydata(reply as *mbuf, 0, 42, borrow mut r as *mut [u8; 42] as *mut void);
+    m_freem(reply);
+    if (!readR) {
+        return failed(reason, "check failed: tap: the reply is whole\0");
+    }
+    if (!sameAt(r[..], 0, guestMac[..], 6)) {
+        return failed(reason, "check failed: tap: to the guest\0");
+    }
+    if (r[12] != 0x08 || r[13] != 0x06 || r[21] != 2) {
+        return failed(reason, "check failed: tap: an ARP reply\0");
+    }
+    if (!sameAt(r[..], 22, hostMac[..], 6) || wordOf(r[..], 28) != hostIp) {
+        return failed(reason, "check failed: tap: from the tap's MAC and IP\0");
+    }
+    if (!sameAt(r[..], 32, guestMac[..], 6)) {
+        return failed(reason, "check failed: tap: to the asker\0");
+    }
+
+    // (3) the transmit queue caps rather than growing without bound.
+    for (i in 0..TAP_TXQ_MAX + 8) {
+        let f = m_getcl();
+        if (f.isNull()) {
+            break;
+        }
+        let ff = Ptr.toBorrowMut(f);
+        ff.len = 64;
+        ff.pkt.len = 64;
+        netif_transmit(nif, f);
+    }
+    var held: u32 = 0;
+    var d = tap_recv(t);
+    while (!d.isNull()) {
+        m_freem(d);
+        held += 1;
+        d = tap_recv(t);
+    }
+    if (held != TAP_TXQ_MAX) {
+        return failed(reason, "check failed: tap: the queue caps at TAP_TXQ_MAX\0");
+    }
+
+    nettest_tap_destroy(t);
+    var buffer: [u8; 160] = [0; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(
+        "selftest: tap: a transmitted frame was read back, an injected ARP was answered by the stack, and the queue capped at ",
+    );
+    line.decimal(TAP_TXQ_MAX as u64);
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- net-route ----
+
+/// net-route: connected routing picks the longest prefix, not the first interface registered. Two taps with
+/// overlapping subnets -- a broad /16 first, a specific /24 second -- and an address in both must route to the /24. An
+/// address only in the /16 routes to it; loopback is unchanged.
+/// Safety: the runner's `reason`.
+@export("selftest_net_route")
+unsafe fn route(reason: *mut *CChar) -> bool {
+    let macA: [u8; 6] = [0x52, 0x54, 0x00, 0x0a, 0x00, 0x01];
+    let macB: [u8; 6] = [0x52, 0x54, 0x00, 0x0a, 0x00, 0x02];
+    let a = tapOf("rtbroad\0", ip4(10, 9, 0, 1), MASK16_N, borrow macA); // 10.9.0.0/16
+    if (a.isNull()) {
+        return failed(reason, "check failed: net-route: the /16 tap\0");
+    }
+    let b = tapOf("rtnarrow\0", ip4(10, 9, 5, 1), MASK24_N, borrow macB); // 10.9.5.0/24 (later)
+    if (b.isNull()) {
+        return failed(reason, "check failed: net-route: the /24 tap\0");
+    }
+
+    var r = ipv4_route(ip4(10, 9, 5, 7)); // in both: the /24 wins
+    let narrow = r as usize == tap_netif(b) as usize;
+    if (!r.isNull()) {
+        netif_put(r);
+    }
+    if (!narrow) {
+        return failed(reason, "check failed: net-route: an address in both routes to the /24\0");
+    }
+    r = ipv4_route(ip4(10, 9, 9, 9)); // only the /16
+    let broad = r as usize == tap_netif(a) as usize;
+    if (!r.isNull()) {
+        netif_put(r);
+    }
+    if (!broad) {
+        return failed(reason, "check failed: net-route: an address only in the /16 routes to it\0");
+    }
+    r = ipv4_route(ip4(127, 0, 0, 1)); // loopback unchanged
+    let lo = !r.isNull() && (Ptr.toBorrow(r as *netif).flags & NETIF_LOOPBACK) != 0;
+    if (!r.isNull()) {
+        netif_put(r);
+    }
+    if (!lo) {
+        return failed(reason, "check failed: net-route: loopback is unchanged\0");
+    }
+
+    nettest_tap_destroy(b);
+    nettest_tap_destroy(a);
+    says("selftest: net-route: longest-prefix connected routing picks the /24 over the /16");
+    return true;
+}
+
+// ---- net-forward ----
+
+/// net-forward: a guest datagram is forwarded (TTL down one), a TTL-1 datagram draws a time-exceeded, and a
+/// non-forwarding interface's ingress is never forwarded.
+/// Safety: the runner's `reason`.
+@export("selftest_net_forward")
+unsafe fn forward(reason: *mut *CChar) -> bool {
+    let gGwMac: [u8; 6] = [0x52, 0x54, 0x00, 0x03, 0x00, 0x01];   // guest-side tap
+    let uGwMac: [u8; 6] = [0x52, 0x54, 0x00, 0x02, 0x00, 0x01];   // uplink tap
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x03, 0x00, 0x0f]; // the guest neighbour
+    let peerMac: [u8; 6] = [0x52, 0x54, 0x00, 0x02, 0x00, 0x63];  // a host on the uplink
+    // Private subnets chosen to collide with neither the QEMU user-net NIC (10.0.2.0/24) nor the real tap0
+    // (10.0.3.0/24), so netif_connected routes to these test taps and not to a live interface.
+    let gwIp = ip4(10, 77, 3, 1);
+    let guestIp = ip4(10, 77, 3, 15);
+    let upIp = ip4(10, 77, 4, 1);
+    let peerIp = ip4(10, 77, 4, 99);
+
+    let g = tapOf("fwdg\0", gwIp, MASK24_N, borrow gGwMac);
+    if (g.isNull()) {
+        return failed(reason, "check failed: net-forward: the guest-side tap\0");
+    }
+    let u = tapOf("fwdu\0", upIp, MASK24_N, borrow uGwMac);
+    if (u.isNull()) {
+        return failed(reason, "check failed: net-forward: the uplink tap\0");
+    }
+    netif_set_forward(tap_netif(g), true); // guest side forwards; uplink deliberately does not
+
+    seedArp(tap_netif(u), peerIp, macAt(borrow peerMac)); // so forwarding transmits at once
+    seedArp(tap_netif(g), guestIp, macAt(borrow guestMac));
+
+    var payload: [u8; 16] = [0; 16];
+    for (i in 0..16) {
+        payload[truncate<usize>(i)] = truncate<u8>(0xa0 + i);
+    }
+    let pl = borrow payload as *[u8; 16] as *u8;
+    var frame: [u8; 128] = [0; 128];
+    let fr = borrow mut frame as *mut [u8; 128] as *mut u8;
+
+    // (1) a guest datagram to the uplink subnet is forwarded out the uplink, its TTL down one, its addresses and
+    // payload intact (no NAT yet).
+    var s0 = ipNow();
+    var len = buildUdp(fr, macAt(borrow gGwMac), macAt(borrow guestMac), guestIp, peerIp, 64, 4000, 5000, pl, 16);
+    if (tap_inject(g, fr as *void, len) != 0) {
+        return failed(reason, "check failed: net-forward: the guest's datagram is injected\0");
+    }
+    let out = recvIp(u);
+    if (out.isNull()) {
+        return failed(reason, "check failed: net-forward: it leaves the uplink\0");
+    }
+    var hdr: [u8; 58] = [0; 58]; // Ethernet + IPv4 + UDP + the payload
+    let read = m_copydata(out as *mbuf, 0, 58, borrow mut hdr as *mut [u8; 58] as *mut void);
+    m_freem(out);
+    if (!read) {
+        return failed(reason, "check failed: net-forward: whole\0");
+    }
+    if (wordOf(hdr[..], 26) != guestIp || wordOf(hdr[..], 30) != peerIp) {
+        return failed(reason, "check failed: net-forward: its addresses intact\0");
+    }
+    if (hdr[22] != 63) {
+        return failed(reason, "check failed: net-forward: its TTL decremented by one\0");
+    }
+    if (in_cksum((borrow hdr as *[u8; 58] as *u8).add(14) as *void, 20) != 0) {
+        return failed(reason, "check failed: net-forward: its header checksum recomputed\0");
+    }
+    if (!sameAt(hdr[..], 42, payload[..], 16)) {
+        return failed(reason, "check failed: net-forward: its payload intact\0");
+    }
+    var s1 = ipNow();
+    if (s1.fwd != s0.fwd + 1) {
+        return failed(reason, "check failed: net-forward: one forwarded\0");
+    }
+
+    // (2) a TTL-1 datagram dies in transit: no frame on the uplink, an ICMP time-exceeded back to the guest instead.
+    s0 = ipNow();
+    len = buildUdp(fr, macAt(borrow gGwMac), macAt(borrow guestMac), guestIp, peerIp, 1, 4001, 5000, pl, 16);
+    if (tap_inject(g, fr as *void, len) != 0) {
+        return failed(reason, "check failed: net-forward: the TTL-1 datagram is injected\0");
+    }
+    let err = recvIp(g);
+    if (err.isNull()) {
+        return failed(reason, "check failed: net-forward: an error comes back to the guest\0");
+    }
+    var ebuf: [u8; 42] = [0; 42]; // Ethernet + IPv4 + ICMP
+    let readE = m_copydata(err as *mbuf, 0, 42, borrow mut ebuf as *mut [u8; 42] as *mut void);
+    m_freem(err);
+    if (!readE || ebuf[23] != IPPROTO_ICMP || wordOf(ebuf[..], 30) != guestIp) {
+        return failed(reason, "check failed: net-forward: ICMP to the guest\0");
+    }
+    if (ebuf[34] != ICMP_TIME_EXCEEDED || ebuf[35] != ICMP_TIMXCEED_INTRANS) {
+        return failed(reason, "check failed: net-forward: time exceeded in transit\0");
+    }
+    if (!recvIp(u).isNull()) {
+        return failed(reason, "check failed: net-forward: nothing forwarded\0");
+    }
+    s1 = ipNow();
+    if (s1.fwdTtlExceeded != s0.fwdTtlExceeded + 1) {
+        return failed(reason, "check failed: net-forward: one TTL exceeded\0");
+    }
+
+    // (3) the gate: a datagram arriving on the non-forwarding uplink, bound for the guest subnet, is dropped as
+    // not-for-us -- never forwarded, so a real NIC's ingress cannot turn the host into a router.
+    s0 = ipNow();
+    len = buildUdp(fr, macAt(borrow uGwMac), macAt(borrow peerMac), peerIp, guestIp, 64, 5000, 4000, pl, 16);
+    if (tap_inject(u, fr as *void, len) != 0) {
+        return failed(reason, "check failed: net-forward: the uplink's datagram is injected\0");
+    }
+    if (!recvIp(g).isNull()) {
+        return failed(reason, "check failed: net-forward: not forwarded to the guest\0");
+    }
+    s1 = ipNow();
+    if (s1.rxNotForUs != s0.rxNotForUs + 1 || s1.fwd != s0.fwd) {
+        return failed(reason, "check failed: net-forward: dropped as not for us\0");
+    }
+
+    nettest_tap_destroy(u);
+    nettest_tap_destroy(g);
+    says(
+        "selftest: net-forward: a guest datagram was forwarded (TTL 64->63), a TTL-1 datagram drew a time-exceeded, and non-forwarding ingress stayed a non-router",
+    );
+    return true;
+}
+
+// ---- tap-filter ----
+
+/// Claim frames of a private ethertype and answer each with a canned reply built and sent back out the tap; pass
+/// everything else to the stack.
+const TAPFILT_ETYPE: u16 = 0x88b5;
+
+static FILTER_CALLS: AtomicU32 = AtomicU32.constant(0); // the C's `calls`, the hook's argument
+
+/// The tap input filter.
+/// Safety: the tap calls it on the injector's context with the frame (at least 14 bytes) it is about to deliver.
+@callback
+unsafe fn tapfiltHook(t: *mut tap, frame: *void, len: u32, arg: *mut void) -> bool {
+    let f = Slice.fromRaw(frame as *u8, 14);
+    if (rd16(f, 12) != TAPFILT_ETYPE) {
+        return false; // not ours: let the stack have it
+    }
+    FILTER_CALLS.fetchAddWith(1, Ordering.Relaxed);
+    let m = m_getcl();
+    if (!m.isNull()) {
+        let b = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, 4);
+        b[0] = 0xC0;
+        b[1] = 0xDE;
+        b[2] = 0xCA;
+        b[3] = 0xFE;
+        let mm = Ptr.toBorrowMut(m);
+        mm.len = 4;
+        mm.pkt.len = 4;
+        var dst: [u8; 6] = [0; 6];
+        for (i in 0..6) {
+            dst[truncate<usize>(i)] = f[6 + truncate<usize>(i)]; // reply to the injector's source MAC
+        }
+        ether_output(tap_netif(t), m, borrow dst as *[u8; 6] as *u8, TAPFILT_ETYPE);
+    }
+    return true; // claimed
+}
+
+/// tap-filter: a claimed frame is answered out the tap, an unclaimed frame reaches the stack, and clearing the filter
+/// lets a formerly claimed frame through.
+/// Safety: the runner's `reason`.
+@export("selftest_tap_filter")
+unsafe fn tapFilter(reason: *mut *CChar) -> bool {
+    let hostMac: [u8; 6] = [0x52, 0x54, 0x00, 0x05, 0x00, 0x01];
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x05, 0x00, 0x0f];
+    let hostIp = ip4(10, 88, 0, 1);
+    let guestIp = ip4(10, 88, 0, 15);
+    let t = tapOf("filt\0", hostIp, MASK24_N, borrow hostMac);
+    if (t.isNull()) {
+        return failed(reason, "check failed: tap-filter: a tap\0");
+    }
+    FILTER_CALLS.storeWith(0, StoreOrdering.Relaxed);
+    tap_set_input_filter(t, tapfiltHook, 0 as *mut void);
+
+    // (1) a claimed frame is answered out the tap, and the stack never sees it.
+    var f: [u8; 60] = [0; 60];
+    for (i in 0..6) {
+        f[truncate<usize>(i)] = hostMac[truncate<usize>(i)];
+        f[6 + truncate<usize>(i)] = guestMac[truncate<usize>(i)];
+    }
+    f[12] = 0x88;
+    f[13] = 0xb5;
+    let fp = borrow f as *[u8; 60] as *void;
+    if (tap_inject(t, fp, 60) != 0 || FILTER_CALLS.loadWith(LoadOrdering.Relaxed) != 1) {
+        return failed(reason, "check failed: tap-filter: the filter claims its frame\0");
+    }
+    let r = tap_recv(t);
+    if (r.isNull()) {
+        return failed(reason, "check failed: tap-filter: and answers it\0");
+    }
+    var out: [u8; 18] = [0; 18];
+    let read = m_copydata(r as *mbuf, 0, 18, borrow mut out as *mut [u8; 18] as *mut void);
+    m_freem(r);
+    let canned: [u8; 4] = [0xC0, 0xDE, 0xCA, 0xFE];
+    if (!read || !sameAt(out[..], 0, guestMac[..], 6) || out[12] != 0x88 || out[13] != 0xb5 ||
+        !sameAt(out[..], 14, canned[..], 4)) {
+        return failed(reason, "check failed: tap-filter: the canned reply, to the injector\0");
+    }
+    if (!tap_recv(t).isNull()) {
+        return failed(reason, "check failed: tap-filter: and nothing else\0");
+    }
+
+    // (2) an unclaimed frame reaches the stack: an ARP request for the tap IP is answered by the stack itself, not the
+    // filter.
+    var req: [u8; 42] = [0; 42];
+    arpRequest(mut req, borrow guestMac, guestIp, hostIp);
+    if (tap_inject(t, borrow req as *[u8; 42] as *void, 42) != 0) {
+        return failed(reason, "check failed: tap-filter: an ARP request is injected\0");
+    }
+    let arp = awaitFrame(t);
+    if (arp.isNull()) {
+        return failed(reason, "check failed: tap-filter: the stack answers it\0");
+    }
+    var a: [u8; 42] = [0; 42];
+    let readA = m_copydata(arp as *mbuf, 0, 42, borrow mut a as *mut [u8; 42] as *mut void);
+    m_freem(arp);
+    if (!readA || a[12] != 0x08 || a[13] != 0x06 || a[21] != 2) {
+        return failed(reason, "check failed: tap-filter: with an ARP reply\0");
+    }
+    if (FILTER_CALLS.loadWith(LoadOrdering.Relaxed) != 1) {
+        return failed(reason, "check failed: tap-filter: the filter did not touch the ARP\0");
+    }
+
+    // (3) clearing the filter lets a formerly-claimed frame reach the stack.
+    tap_set_input_filter(t, 0 as extern "C" fn(*mut tap, *void, u32, *mut void) -> bool, 0 as *mut void);
+    if (tap_inject(t, fp, 60) != 0) {
+        return failed(reason, "check failed: tap-filter: the frame is injected again\0");
+    }
+    if (FILTER_CALLS.loadWith(LoadOrdering.Relaxed) != 1 || !tap_recv(t).isNull()) {
+        return failed(reason, "check failed: tap-filter: no reply: the stack drops the unknown type\0");
+    }
+
+    nettest_tap_destroy(t);
+    says("selftest: tap-filter: a claimed frame answered out the tap, an unclaimed frame reached the stack");
+    return true;
+}
+
+// ---- net-dhcp ----
+
+// Off the stack: the runner runs one test at a time.
+static mut DFRAME: [u8; 400] = [0; 400];
+static mut DRX: [u8; 400] = [0; 400];
+
+/// Safety: the runner runs one test at a time, so DFRAME is this test's.
+fn dframe() -> *mut u8 => unsafe { borrow mut DFRAME as *mut [u8; 400] as *mut u8 };
+
+/// Safety: as dframe.
+fn drx() -> *mut u8 => unsafe { borrow mut DRX as *mut [u8; 400] as *mut u8 };
+
+/// A DHCP client frame (Ethernet + IP + UDP + BOOTP + cookie + options) into DFRAME; its length. The DHCP server (a
+/// tap input filter) does not verify the UDP checksum, so it is left 0; the IP header checksum is valid.
+/// Safety: as dframe.
+unsafe fn mkDhcp(smac: borrow [u8; 6], msgtype: u8, xid: u32, bcast: bool, chaddr: borrow [u8; 6], reqIp: u32) -> u32 {
+    let b = SliceMut.fromRaw(dframe(), 400);
+    for (i in 0..400) {
+        b[truncate<usize>(i)] = 0;
+    }
+    for (i in 0..6) {
+        b[truncate<usize>(i)] = 0xff;
+    }
+    copyIn(b, 6, macAt(smac), 6);
+    be16(b, 12, ETH_P_IP);
+    let dh: usize = 14 + 20 + 8;
+    b[dh] = 1;     // op BOOTREQUEST
+    b[dh + 1] = 1; // htype ETHER
+    b[dh + 2] = 6; // hlen 6
+    word(b, dh + 4, xid);
+    be16(b, dh + 10, if (bcast) 0x8000 else 0);
+    copyIn(b, dh + 28, macAt(chaddr), 6);
+    be32(b, dh + 236, 0x63825363);
+    var o = dh + 240;
+    b[o] = 53;
+    b[o + 1] = 1;
+    b[o + 2] = msgtype;
+    o += 3;
+    if (reqIp != 0) {
+        b[o] = 50;
+        b[o + 1] = 4;
+        word(b, o + 2, reqIp);
+        o += 6;
+    }
+    b[o] = 255;
+    o += 1;
+    let dhlen = o - dh;
+    let udplen = 8 + dhlen;
+    let iplen = 20 + udplen;
+    be16(b, 34, 68);
+    be16(b, 36, 67);
+    be16(b, 38, truncate<u16>(udplen));
+    half(b, 40, 0);
+    ipHeader(b, 14, truncate<u16>(iplen), 0, 64, IPPROTO_UDP, 0, INADDR_BROADCAST_N);
+    return truncate<u32>(14 + iplen);
+}
+
+/// Find DHCP option `code` in a received reply's BOOTP message (`dh` of `dhlen` bytes): its offset, with its length in
+/// `olen`, or 0 when it is not there (an option is past the 240 bytes of BOOTP and cookie).
+fn dhcpOpt(dh: Slice<u8>, dhlen: usize, code: u8, olen: borrow mut usize) -> usize {
+    var i: usize = 240; // past BOOTP + cookie
+    while (i < dhlen) {
+        let c = dh[i];
+        i += 1;
+        if (c == 255) {
+            break;
+        }
+        if (c == 0) {
+            continue;
+        }
+        if (i >= dhlen) {
+            break;
+        }
+        let l = dh[i] as usize;
+        i += 1;
+        if (i + l > dhlen) {
+            break;
+        }
+        if (c == code) {
+            olen = l;
+            return i;
+        }
+        i += l;
+    }
+    return 0;
+}
+
+/// Inject a frame and read its one reply into DRX: the reply's length, or 0 when none came or it did not fit.
+/// Safety: as dframe; `t` is the test's tap.
+unsafe fn exchange(t: *mut tap, len: u32) -> u32 {
+    if (tap_inject(t, dframe() as *void, len) != 0) {
+        return 0;
+    }
+    let r = tap_recv(t);
+    if (r.isNull()) {
+        return 0;
+    }
+    return take(r, drx(), 400);
+}
+
+/// The reply's option `code`: present with `want` length (any length when `want` is 0), and its first byte is
+/// `first` (any when `first` is 256) or its four bytes are `word` (when `word` is not 0).
+/// Safety: as dframe; `rl` is the reply's length.
+unsafe fn optIs(rl: u32, code: u8, want: usize, first: u32, word4: u32) -> bool {
+    let rx = Slice.fromRaw(drx() as *u8, 400);
+    let dhStart: usize = 14 + 20 + 8;
+    if ((rl as usize) < dhStart) {
+        return false;
+    }
+    let dh = rx[dhStart..];
+    var l: usize = 0;
+    let at = dhcpOpt(dh, rl as usize - dhStart, code, mut l);
+    if (at == 0 || (want != 0 && l != want)) {
+        return false;
+    }
+    if (first != 256 && dh[at] as u32 != first) {
+        return false;
+    }
+    if (word4 != 0 && wordOf(dh, at) != word4) {
+        return false;
+    }
+    return true;
+}
+
+/// net-dhcp: DORA completes with the guest's config, a wrong REQUEST is NAK'd, the flag-clear reply is a chaddr
+/// unicast, a second client is refused.
+/// Safety: the runner's `reason`.
+@export("selftest_net_dhcp")
+unsafe fn dhcp(reason: *mut *CChar) -> bool {
+    let hostMac: [u8; 6] = [0x52, 0x54, 0x00, 0x06, 0x00, 0x01];
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x06, 0x00, 0x0f];
+    let otherMac: [u8; 6] = [0x52, 0x54, 0x00, 0x06, 0x00, 0xaa];
+    let hostIp = ip4(10, 88, 1, 1);
+    let mask = MASK24_N;
+    let guestIp = ip4(10, 88, 1, 15);
+    let t = tapOf("dhcp\0", hostIp, mask, borrow hostMac);
+    if (t.isNull()) {
+        return failed(reason, "check failed: net-dhcp: a tap\0");
+    }
+    let svc = nettest_tapsvc_start(t);
+    if (svc.isNull()) {
+        return failed(reason, "check failed: net-dhcp: its services\0");
+    }
+    let rx = Slice.fromRaw(drx() as *u8, 400);
+
+    // (1) DISCOVER with the broadcast flag -> OFFER as the limited broadcast at both layers, carrying the guest
+    // address and the right options.
+    var rl = exchange(t, mkDhcp(borrow guestMac, DHCP_DISCOVER, 0xAABBCCDD, true, borrow guestMac, 0));
+    if (rl == 0) {
+        return failed(reason, "check failed: net-dhcp: a DISCOVER is answered\0");
+    }
+    let bcast: [u8; 6] = [0xff; 6];
+    if (!sameAt(rx, 0, bcast[..], 6)) {
+        return failed(reason, "check failed: net-dhcp: as an Ethernet broadcast\0");
+    }
+    if (wordOf(rx, 30) != INADDR_BROADCAST_N || wordOf(rx, 26) != hostIp) {
+        return failed(reason, "check failed: net-dhcp: and the IP limited broadcast, from the host\0");
+    }
+    let dh: usize = 14 + 20 + 8;
+    if (rx[dh] != 2) {
+        return failed(reason, "check failed: net-dhcp: a BOOTREPLY\0");
+    }
+    if (wordOf(rx, dh + 16) != guestIp) {
+        return failed(reason, "check failed: net-dhcp: yiaddr is the guest\0");
+    }
+    if (!optIs(rl, 53, 1, DHCP_OFFER as u32, 0)) {
+        return failed(reason, "check failed: net-dhcp: an OFFER\0");
+    }
+    if (!optIs(rl, 54, 4, 256, hostIp)) {
+        return failed(reason, "check failed: net-dhcp: the server identifier is the host\0");
+    }
+    if (!optIs(rl, 1, 4, 256, mask)) {
+        return failed(reason, "check failed: net-dhcp: the mask\0");
+    }
+    if (!optIs(rl, 3, 4, 256, hostIp)) {
+        return failed(reason, "check failed: net-dhcp: the router is the host\0");
+    }
+    if (!optIs(rl, 6, 4, 256, hostIp)) {
+        return failed(reason, "check failed: net-dhcp: the DNS server is the host\0");
+    }
+    if (!optIs(rl, 51, 4, 256, 0)) {
+        return failed(reason, "check failed: net-dhcp: a lease time\0");
+    }
+
+    // (2) REQUEST for that address -> ACK.
+    rl = exchange(t, mkDhcp(borrow guestMac, DHCP_REQUEST, 0xAABBCCDD, true, borrow guestMac, guestIp));
+    if (rl == 0 || !optIs(rl, 53, 0, DHCP_ACK as u32, 0)) {
+        return failed(reason, "check failed: net-dhcp: the REQUEST is ACKed\0");
+    }
+
+    // (3) REQUEST for a different address -> NAK (always broadcast).
+    rl = exchange(t, mkDhcp(borrow guestMac, DHCP_REQUEST, 0xAABBCCDD, true, borrow guestMac, ip4(10, 88, 1, 200)));
+    if (rl == 0 || !optIs(rl, 53, 0, DHCP_NAK as u32, 0)) {
+        return failed(reason, "check failed: net-dhcp: a wrong REQUEST is NAKed\0");
+    }
+
+    // (4) A DISCOVER with the flag clear -> OFFER unicast to chaddr, IP to yiaddr.
+    rl = exchange(t, mkDhcp(borrow guestMac, DHCP_DISCOVER, 0x11223344, false, borrow guestMac, 0));
+    if (rl == 0) {
+        return failed(reason, "check failed: net-dhcp: a flag-clear DISCOVER is answered\0");
+    }
+    if (!sameAt(rx, 0, guestMac[..], 6)) {
+        return failed(reason, "check failed: net-dhcp: link-unicast to the client\0");
+    }
+    if (wordOf(rx, 30) != guestIp) {
+        return failed(reason, "check failed: net-dhcp: IP unicast to yiaddr\0");
+    }
+
+    // (5) A second, different client is offered nothing (the lease is taken).
+    let s0 = svcNow();
+    let len = mkDhcp(borrow otherMac, DHCP_DISCOVER, 0x99999999, true, borrow otherMac, 0);
+    if (tap_inject(t, dframe() as *void, len) != 0) {
+        return failed(reason, "check failed: net-dhcp: a second client's DISCOVER is injected\0");
+    }
+    if (!tap_recv(t).isNull()) {
+        return failed(reason, "check failed: net-dhcp: and not answered\0");
+    }
+    let s1 = svcNow();
+    if (s1.dhcpIgnored <= s0.dhcpIgnored) {
+        return failed(reason, "check failed: net-dhcp: but ignored\0");
+    }
+
+    nettest_tapsvc_stop(svc);
+    nettest_tap_destroy(t);
+    says(
+        "selftest: net-dhcp: DORA completes with the guest's config, a wrong REQUEST is NAK'd, the flag-clear reply is a chaddr unicast, a second client is refused",
+    );
+    return true;
+}
+
+// ---- net-dns ----
+
+/// The test upstream resolver: it echoes each query as an answer with one A record, 93.184.216.34.
+static DNS_ANSWER: [u8; 4] = [93, 184, 216, 34];
+
+// The responder's state (the C's g_dnsresp): its sockets and thread are the test's, its flags read by its thread.
+static mut DNS_SOCK: *mut socket = 0 as *mut socket;
+static mut DNS_SPOOF: *mut socket = 0 as *mut socket;
+static mut DNS_TH: *mut thread = 0 as *mut thread;
+static DNS_RUNNING: AtomicU32 = AtomicU32.constant(0);
+static DNS_SPOOFING: AtomicU32 = AtomicU32.constant(0);
+
+/// The release key: the responder's thread slot.
+/// Safety: only its address is taken.
+fn dnsKey() -> *mut void => unsafe { borrow mut DNS_TH as *mut *mut thread as *mut void };
+
+/// The responder's release (the net-leftover unit): registered after its thread, so it runs before the sockets it reads
+/// are put.
+/// Safety: the runner calls it once, with dnsKey.
+@callback
+unsafe fn dnsRelease(arg: *mut void) {
+    DNS_RUNNING.storeWith(0, StoreOrdering.Release);
+    if (!DNS_SOCK.isNull()) {
+        ksock_shutdown(DNS_SOCK, SHUT_RD); // its blocked recv returns
+    }
+    if (!DNS_TH.isNull()) {
+        thread_join(DNS_TH);
+    }
+    DNS_TH = 0 as *mut thread;
+}
+
+/// An IPv4 netaddr: the family and port (host order) as they lie in memory, then the address.
+fn addr4(ip: u32, port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), ip, 0, 0, 0];
+
+fn na(a: borrow [u32; 5]) -> *netaddr => a as *[u32; 5] as *netaddr;
+
+/// Build each answer in place: keep the id and question, set the response flags, ancount 1, and append an A record
+/// pointing at the question name; reply from the upstream, or in spoof mode from another source.
+/// Safety: the responder's thread; the sockets are the test's until its release joins this thread.
+@callback
+unsafe fn dnsResponderMain(arg: *mut void) {
+    var q: [u8; 512] = [0; 512];
+    while (DNS_RUNNING.loadWith(LoadOrdering.Acquire) != 0) {
+        var from: [u32; 5] = [0; 5];
+        let n = ksock_recvfrom(
+            DNS_SOCK, borrow mut q as *mut [u8; 512] as *mut void, 512,
+            borrow mut from as *mut [u32; 5] as *mut netaddr,
+        );
+        if (n < 12) {
+            if (n <= 0) {
+                break;
+            }
+            continue;
+        }
+        q[2] = 0x81; // QR + RD + RA
+        q[3] = 0x80;
+        q[6] = 0; // ancount 1
+        q[7] = 1;
+        var o = truncate<usize>(n);
+        let tail: [u8; 12] = [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 4, 0, 4]; // name pointer, type A, class IN, ttl, rdlength
+        for (i in 0..12) {
+            q[o + truncate<usize>(i)] = tail[truncate<usize>(i)];
+        }
+        o += 12;
+        for (i in 0..4) {
+            q[o + truncate<usize>(i)] = DNS_ANSWER[truncate<usize>(i)];
+        }
+        o += 4;
+        let s = if (DNS_SPOOFING.loadWith(LoadOrdering.Acquire) != 0) DNS_SPOOF else DNS_SOCK;
+        ksock_sendto(s, borrow q as *[u8; 512] as *void, o, na(borrow from));
+    }
+    thread_exit(0);
+}
+
+// The test's frames, off the stack.
+static mut QMSG: [u8; 64] = [0; 64];
+static mut QL4: [u8; 128] = [0; 128];
+static mut QFRAME: [u8; 256] = [0; 256];
+static mut QRX: [u8; 256] = [0; 256];
+
+/// A guest query with `id` from `sport`, wrapped and injected into `t`.
+/// Safety: the statics are this test's; `t` the test's tap.
+unsafe fn query(
+    t: *mut tap,
+    hostMac: borrow [u8; 6],
+    guestMac: borrow [u8; 6],
+    guestIp: u32,
+    hostIp: u32,
+    id: u16,
+    sport: u16,
+) -> bool {
+    let msg = borrow mut QMSG as *mut [u8; 64] as *mut u8;
+    let l4 = borrow mut QL4 as *mut [u8; 128] as *mut u8;
+    let frame = borrow mut QFRAME as *mut [u8; 256] as *mut u8;
+    let mlen = mkDns(msg, id);
+    let l4len = mkUdp(l4, guestIp, hostIp, sport, 53, msg as *u8, truncate<u16>(mlen));
+    let flen = wrap(frame, macAt(hostMac), macAt(guestMac), guestIp, hostIp, 64, IPPROTO_UDP, l4 as *void, l4len);
+    return tap_inject(t, frame as *void, flen) == 0;
+}
+
+/// The next IPv4 frame from the tap, its first `n` bytes in QRX: its length, or 0 when none came or it was shorter.
+/// Safety: as query.
+unsafe fn answer(t: *mut tap, n: u32) -> u32 {
+    let r = recvIp(t);
+    if (r.isNull()) {
+        return 0;
+    }
+    let len = m_length(r as *mbuf);
+    let want = if (n == 0) len else n;
+    let ok = want <= 256 && m_copydata(r as *mbuf, 0, want, borrow mut QRX as *mut [u8; 256] as *mut void);
+    m_freem(r);
+    return if (ok) len else 0;
+}
+
+/// Safety: as query.
+fn qrxAt() -> *u8 => unsafe { borrow QRX as *[u8; 256] as *u8 };
+
+/// net-dns: a query is relayed and its answer restored to the guest, two queries sharing an id stay unambiguous, an
+/// unconfigured upstream is SERVFAIL, an answer from another source is rejected, the table bounds and expires.
+/// Safety: the runner's `reason`.
+@export("selftest_net_dns")
+unsafe fn dns(reason: *mut *CChar) -> bool {
+    let hostMac: [u8; 6] = [0x52, 0x54, 0x00, 0x07, 0x00, 0x01];
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x07, 0x00, 0x0f];
+    let hostIp = ip4(10, 88, 2, 1);
+    let guestIp = ip4(10, 88, 2, 15);
+    let loopback = ip4(127, 0, 0, 1);
+    let t = tapOf("dns\0", hostIp, MASK24_N, borrow hostMac);
+    if (t.isNull()) {
+        return failed(reason, "check failed: net-dns: a tap\0");
+    }
+    seedArp(tap_netif(t), guestIp, macAt(borrow guestMac)); // so replies reach the guest
+    let svc = nettest_tapsvc_start(t);
+    if (svc.isNull()) {
+        return failed(reason, "check failed: net-dns: its services\0");
+    }
+
+    // A loopback upstream resolver the proxy will forward to.
+    let rl = addr4(loopback, 5300);
+    if (nettest_ksock_create(truncate<i32>(AF_INET), SOCK_DGRAM, 0, borrow mut DNS_SOCK as *mut *mut socket) != 0 ||
+        ksock_bind(DNS_SOCK, na(borrow rl)) != 0) {
+        return failed(reason, "check failed: net-dns: the upstream's socket\0");
+    }
+    let sp = addr4(loopback, 5301);
+    if (nettest_ksock_create(truncate<i32>(AF_INET), SOCK_DGRAM, 0, borrow mut DNS_SPOOF as *mut *mut socket) != 0 ||
+        ksock_bind(DNS_SPOOF, na(borrow sp)) != 0) {
+        return failed(reason, "check failed: net-dns: the spoofer's socket\0");
+    }
+    DNS_RUNNING.storeWith(1, StoreOrdering.Release);
+    DNS_TH = thread_create(dnsResponderMain, 0 as *mut void, "dns-resp\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    if (DNS_TH.isNull()) {
+        return failed(reason, "check failed: net-dns: the responder's thread\0");
+    }
+    if (!selftest_defer(dnsRelease, dnsKey())) {
+        dnsRelease(dnsKey());
+        return failed(reason, "its release list was full\0");
+    }
+    tapsvc_test_set_upstream(svc, loopback, 5300);
+    let hm = borrow hostMac;
+    let gm = borrow guestMac;
+
+    // (1) a guest query is relayed and the answer returns with the guest's original id and the upstream's A record.
+    if (!query(t, hm, gm, guestIp, hostIp, 0x1234, 4444)) {
+        return failed(reason, "check failed: net-dns: a query is injected\0");
+    }
+    let rl2 = answer(t, 0);
+    if (rl2 == 0) {
+        return failed(reason, "check failed: net-dns: an answer comes back\0");
+    }
+    let rx = Slice.fromRaw(qrxAt(), 256);
+    if (wordOf(rx, 30) != guestIp || rx[23] != IPPROTO_UDP) {
+        return failed(reason, "check failed: net-dns: to the guest, over UDP\0");
+    }
+    if (rd16(rx, 36) != 4444) {
+        return failed(reason, "check failed: net-dns: back to the guest's port\0");
+    }
+    if (rd16(rx, 42) != 0x1234) {
+        return failed(reason, "check failed: net-dns: with the guest's original id\0");
+    }
+    if ((rx[44] & 0x80) == 0 || rd16(rx, 48) < 1) {
+        return failed(reason, "check failed: net-dns: a response with answers\0");
+    }
+    let end = rl2 as usize;
+    if (end - (14 + 20 + 8) < 4 || !sameAt(rx, end - 4, DNS_ANSWER[..], 4)) {
+        return failed(reason, "check failed: net-dns: the A record's address\0");
+    }
+
+    // (2) two queries sharing an id but different source ports stay unambiguous: both answers come back to the right
+    // ports.
+    if (!query(t, hm, gm, guestIp, hostIp, 0x5555, 5001) || !query(t, hm, gm, guestIp, hostIp, 0x5555, 5002)) {
+        return failed(reason, "check failed: net-dns: two queries sharing an id are injected\0");
+    }
+    var seenPorts: u32 = 0;
+    for (got in 0..2) {
+        if (answer(t, 14 + 20 + 8 + 2) == 0) {
+            return failed(reason, "check failed: net-dns: both are answered\0");
+        }
+        let port = rd16(Slice.fromRaw(qrxAt(), 256), 36);
+        if (rd16(Slice.fromRaw(qrxAt(), 256), 42) != 0x5555) {
+            return failed(reason, "check failed: net-dns: each with the shared id\0");
+        }
+        if (port == 5001) {
+            seenPorts = seenPorts | 1;
+        }
+        if (port == 5002) {
+            seenPorts = seenPorts | 2;
+        }
+    }
+    if (seenPorts != 3) {
+        return failed(reason, "check failed: net-dns: both, unambiguous\0");
+    }
+
+    // (3) with no upstream configured, the proxy answers SERVFAIL itself.
+    tapsvc_test_set_upstream(svc, 0, 0); // clear the upstream
+    if (!query(t, hm, gm, guestIp, hostIp, 0x7777, 6001) || answer(t, 14 + 20 + 8 + 4) == 0) {
+        return failed(reason, "check failed: net-dns: an unconfigured upstream still answers\0");
+    }
+    if (rd16(Slice.fromRaw(qrxAt(), 256), 42) != 0x7777) {
+        return failed(reason, "check failed: net-dns: id preserved\0");
+    }
+    if ((Slice.fromRaw(qrxAt(), 256)[44] & 0x80) == 0 || (Slice.fromRaw(qrxAt(), 256)[45] & 0x0f) != 2) {
+        return failed(reason, "check failed: net-dns: QR + RCODE 2 (SERVFAIL)\0");
+    }
+
+    // (3b) a response from a source other than the configured upstream is rejected -- an off-path attacker cannot
+    // race a forged answer into the guest even if it guesses the id.
+    tapsvc_test_set_upstream(svc, loopback, 5300);
+    let sp0 = svcNow();
+    DNS_SPOOFING.storeWith(1, StoreOrdering.Release); // the responder replies from :5301
+    if (!query(t, hm, gm, guestIp, hostIp, 0x2468, 6002)) {
+        return failed(reason, "check failed: net-dns: a query to be spoofed is injected\0");
+    }
+    if (!recvIp(t).isNull()) {
+        return failed(reason, "check failed: net-dns: the forged-source answer is dropped\0");
+    }
+    let sp1 = svcNow();
+    if (sp1.dnsAnswer != sp0.dnsAnswer) {
+        return failed(reason, "check failed: net-dns: nothing was relayed\0");
+    }
+    DNS_SPOOFING.storeWith(0, StoreOrdering.Release);
+
+    // (4) table bound: with the upstream a black hole, a flood fills the pending table and further queries drop; it
+    // never exceeds the bound.
+    tapsvc_test_set_upstream(svc, loopback, 1); // nothing answers there
+    let s0 = svcNow();
+    for (i in 0..400) {
+        let n = truncate<u32>(i);
+        query(t, hm, gm, guestIp, hostIp, truncate<u16>(0x8000 + n), truncate<u16>(20000 + n));
+        if ((n & 15) == 15) {
+            sleepMs(5); // let the guest thread drain
+        }
+    }
+    for (i in 0..100) {
+        if (svcNow().dnsDropFull > s0.dnsDropFull) {
+            break;
+        }
+        sleepMs(10);
+    }
+    let s1 = svcNow();
+    if (s1.dnsPending > 128) {
+        return failed(reason, "check failed: net-dns: the table never exceeds its bound\0");
+    }
+    if (s1.dnsDropFull <= s0.dnsDropFull) {
+        return failed(reason, "check failed: net-dns: the flood was dropped\0");
+    }
+
+    // (5) expiry reclaims the pending entries: every entry pending before the aging is reclaimed by it. The table is
+    // not asserted empty after: the wait above ends at the first drop, and the rest of the flood may still be queued
+    // for the service -- a query that lands after the aging takes a freed slot, as it should
+    // (docs/audit/next-subsystem-net-leftover.md).
+    let a0 = svcNow();
+    if (a0.dnsPending == 0) {
+        return failed(reason, "check failed: net-dns: entries are pending\0");
+    }
+    tapsvc_dns_age(clock_now_ns() + 2 * 5 * NS_PER_SEC);
+    let a1 = svcNow();
+    if (a1.dnsExpired - a0.dnsExpired < a0.dnsPending as u64) {
+        return failed(reason, "check failed: net-dns: the aging reclaims every one\0");
+    }
+
+    // Tear down the responder and the service.
+    selftest_release(dnsKey()); // stop, unblock, join
+    nettest_ksock_put(DNS_SOCK);
+    nettest_ksock_put(DNS_SPOOF);
+    DNS_SOCK = 0 as *mut socket;
+    DNS_SPOOF = 0 as *mut socket;
+    nettest_tapsvc_stop(svc);
+    nettest_tap_destroy(t);
+    says(
+        "selftest: net-dns: a query is relayed and its answer restored to the guest, two queries sharing an id stay unambiguous, an unconfigured upstream is SERVFAIL, the table bounds and expires",
+    );
+    return true;
+}
