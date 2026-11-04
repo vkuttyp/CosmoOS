@@ -1070,7 +1070,12 @@ the chain tests still in C. A firewall rule or control command the
 kernel takes is built in a zeroed room, as the C's designated
 initialisers zeroed what they did not name; the NAT-state release and
 the control snapshot's length stay C (tap-release-order and tapctl
-use them).
+use them). Batch 8, `nettest_ctl.cee`: net-tapctl, and the walk of a
+control snapshot's sections, exported as `nettest_netctl_flows_off`
+and `nettest_netctl_snapshot_len` for the flow-listing tests still in
+C. A section header may lie at any offset its predecessors leave (the
+flow section's carries 64-bit counters), so each is copied into an
+aligned room before it is read, as the C memcpy'd it.
 
 Size: about 3.0x.
 

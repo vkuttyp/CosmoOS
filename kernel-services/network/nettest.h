@@ -64,8 +64,6 @@ void nettest_file_put(struct file *f);
 /* The NAT and firewall state, cleared however the test returns; cleared now. */
 bool nettest_defer_nat_state(void);
 void nettest_release_nat_state(void);
-/* The byte length a /dev/net/tapctl snapshot with `pf_rules` forwards should have. */
-int64_t nettest_netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules);
 int nettest_netif_register(struct netif *nif);
 void nettest_netif_unregister(struct netif *nif);
 bool nettest_netif_hold(struct nt_netif_ref *r, struct netif *nif);
@@ -111,5 +109,11 @@ bool nettest_fwt_send(struct file *from, const uint8_t *tapmac, const uint8_t *g
                       uint8_t proto, const uint8_t *l4, uint16_t l4len);
 int64_t nettest_fwt_recv(struct file *to, uint8_t *rx, size_t cap, unsigned tries);
 uint16_t nettest_fwt_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id);
+
+/* nettest_ctl.cee: where a /dev/net/tapctl snapshot with `pf_rules`
+ * forwards has its flow section, and the byte length it should have (-1:
+ * a section of another version). */
+size_t nettest_netctl_flows_off(const uint8_t *buf, unsigned pf_rules);
+int64_t nettest_netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules);
 
 #endif

@@ -4181,237 +4181,17 @@ int nettest_vfs_open(const char *path, unsigned flags, struct file **out)
 
 void nettest_file_put(struct file *f) { nt_file_put(f); }
 
-/* --- the runtime network control channel (/dev/net/tapctl) ---------------- */
-
-/* Where a /dev/net/tapctl snapshot's flow section (version 6) starts, given
- * `pf_rules` port-forwards: after the port-forward list and the filter
- * section, whose counts are read from the buffer itself (attached guests and
- * rules vary with what other tests left open). */
-static size_t netctl_flows_off(const uint8_t *buf, unsigned pf_rules)
-{
-    size_t off = sizeof(struct cosmo_netctl_list) + (size_t)pf_rules * sizeof(struct cosmo_netctl_rule);
-    struct cosmo_netctl_filter_list fh;
-    memcpy(&fh, buf + off, sizeof(fh));
-    return off + sizeof(fh) + (size_t)fh.guest_count * sizeof(struct cosmo_netctl_filter_guest) +
-           (size_t)fh.rule_count * sizeof(struct cosmo_netctl_filter_rule);
-}
-
-/* Where the lease section (version 7) starts: after the flow section. */
-static size_t netctl_leases_off(const uint8_t *buf, unsigned pf_rules)
-{
-    size_t off = netctl_flows_off(buf, pf_rules);
-    struct cosmo_netctl_flow_list lh;
-    memcpy(&lh, buf + off, sizeof(lh));
-    return off + sizeof(lh) + (size_t)lh.count * sizeof(struct cosmo_netctl_flow);
-}
-
-/* Where the interface section (version 8) starts: after the lease section. */
-static size_t netctl_ifs_off(const uint8_t *buf, unsigned pf_rules)
-{
-    size_t off = netctl_leases_off(buf, pf_rules);
-    struct cosmo_netctl_lease_list ll;
-    memcpy(&ll, buf + off, sizeof(ll));
-    return off + sizeof(ll) + (size_t)ll.count * sizeof(struct cosmo_netctl_lease);
-}
-
-/* The byte length the whole snapshot should have: the seven sections, each
- * section's count read from its own header, each header's version checked. */
-static int64_t netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules)
-{
-    size_t off = netctl_leases_off(buf, pf_rules);
-    struct cosmo_netctl_lease_list ll;
-    memcpy(&ll, buf + off, sizeof(ll));
-    if (ll.version != COSMO_NETCTL_VERSION)
-        return -1;
-    off = netctl_ifs_off(buf, pf_rules);
-    struct cosmo_netctl_if_list ih;
-    memcpy(&ih, buf + off, sizeof(ih));
-    off += sizeof(ih) + (size_t)ih.count * sizeof(struct cosmo_netctl_if);
-    struct cosmo_netctl_route_list rh;
-    memcpy(&rh, buf + off, sizeof(rh));
-    off += sizeof(rh) + (size_t)rh.count * sizeof(struct cosmo_netctl_route);
-    struct cosmo_netctl_neigh_list nh;
-    memcpy(&nh, buf + off, sizeof(nh));
-    off += sizeof(nh) + (size_t)nh.count * sizeof(struct cosmo_netctl_neigh);
-    if (ih.version != COSMO_NETCTL_VERSION || rh.version != COSMO_NETCTL_VERSION || nh.version != COSMO_NETCTL_VERSION)
-        return -1;
-    return (int64_t)off;
-}
-
-int64_t nettest_netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules) { return netctl_snapshot_len(buf, pf_rules); }
-
-bool selftest_net_tapctl(const char **reason)
-{
-    static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x0a, 0x00, 0x01 };
-    static const uint8_t u_mac[6]     = { 0x52, 0x54, 0x00, 0x0b, 0x00, 0x01 };
-    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x0a, 0x00, 0x0f };
-    static const uint8_t client_mac[6]= { 0x52, 0x54, 0x00, 0x0b, 0x00, 0x63 };
-    uint32_t mask = htonl(0xffffff00u);
-    uint32_t g_ip = IPV4_ADDR(10, 77, 7, 1), guest = IPV4_ADDR(10, 77, 7, 15);
-    uint32_t u_ip = IPV4_ADDR(10, 77, 8, 1), client = IPV4_ADDR(10, 77, 8, 99);
-
-    struct tap *g = nt_tap_create("nctlg", g_ip, mask, g_mac);
-    CHECK(g != NULL);
-    struct tap *u = nt_tap_create("nctlu", u_ip, mask, u_mac);
-    CHECK(u != NULL);
-    netif_set_forward(tap_netif(g), true);        /* the guest tap: the only valid target */
-    netif_set_masquerade(tap_netif(g), true);
-    nettest_seed_arp(tap_netif(g), guest, guest_mac);
-    nettest_seed_arp(tap_netif(u), client, client_mac);
-    nat_flush();
-    nat_pf_clear();
-
-    struct file *f = NULL;
-    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
-
-    struct cosmo_netctl cmd;
-    /* Room for the whole snapshot: the port-forward list, the filter section
-     * and (version 6) the flow section, which lists every live flow. */
-    static uint8_t rbuf[COSMO_NETCTL_SNAPSHOT_MAX];
-
-    /* (1) FORWARD_ADD through the device installs a rule. */
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.version = COSMO_NETCTL_VERSION; cmd.op = COSMO_NETCTL_FORWARD_ADD;
-    cmd.proto = COSMO_NETCTL_PROTO_TCP; cmd.host_port = 8080; cmd.guest_port = 80; cmd.guest_addr = guest;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-
-    /* (2) the read listing shows exactly that rule. */
-    int64_t rn = file_read(f, rbuf, sizeof(rbuf));
-    CHECK(rn == netctl_snapshot_len(rbuf, 1));      /* one forward, then the filter and flow sections */
-    struct cosmo_netctl_list *hdr = (struct cosmo_netctl_list *)rbuf;
-    CHECK(hdr->version == COSMO_NETCTL_VERSION && hdr->count == 1);
-    struct cosmo_netctl_rule *r0 = (struct cosmo_netctl_rule *)(rbuf + sizeof(*hdr));
-    CHECK(r0->proto == COSMO_NETCTL_PROTO_TCP && r0->host_port == 8080 &&
-          r0->guest_port == 80 && r0->guest_addr == guest);
-    /* Version 8: the interface section lists lo first, index 1, loopback
-     * and up, at 127.0.0.1/8 -- registered at net_init, before anything a
-     * test adds. */
-    {
-        size_t io = netctl_ifs_off(rbuf, 1);
-        struct cosmo_netctl_if_list ih;
-        memcpy(&ih, rbuf + io, sizeof(ih));
-        CHECK(ih.count >= 1);
-        struct cosmo_netctl_if lo;
-        memcpy(&lo, rbuf + io + sizeof(ih), sizeof(lo));
-        CHECK(strcmp(lo.name, "lo") == 0 && lo.index == 1 &&
-              (lo.flags & (COSMO_NETCTL_IF_LOOPBACK | COSMO_NETCTL_IF_UP)) ==
-                  (COSMO_NETCTL_IF_LOOPBACK | COSMO_NETCTL_IF_UP) &&
-              lo.addr == INADDR_LOOPBACK_N && lo.mask == htonl(0xff000000u));
-    }
-
-    /* (3) a client SYN to the host port is DNAT'd to the guest (the rule took
-     * effect through the device). */
-    uint8_t l4[128], frame[256], rx[256];
-    uint16_t l4len = nettest_mk_tcp(l4, client, u_ip, 40001, 8080, TH_SYN);
-    uint32_t flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    struct mbuf *m = nettest_recv_ip(g);
-    CHECK(m != NULL);
-    CHECK(m_copydata(m, 0, ETH_HLEN + 20 + 20, rx)); m_freem(m);
-    CHECK(((struct ipv4_hdr *)(rx + ETH_HLEN))->dst == guest);
-    CHECK((uint16_t)(rx[ETH_HLEN + 22] << 8 | rx[ETH_HLEN + 23]) == 80);   /* dport -> 80 */
-
-    /* (3b) the flow section lists that flow as the client's to the guest,
-     * through the port it dialled (version 6); a buffer one byte short of the
-     * whole snapshot is refused, never truncated. */
-    rn = file_read(f, rbuf, sizeof(rbuf));
-    CHECK(rn == netctl_snapshot_len(rbuf, 1));
-    {
-        size_t off = netctl_flows_off(rbuf, 1);
-        struct cosmo_netctl_flow_list lh;
-        memcpy(&lh, rbuf + off, sizeof(lh));
-        CHECK(lh.version == COSMO_NETCTL_VERSION && lh.nat_quota == NAT_QUOTA_PER_GUEST);
-        bool seen = false;
-        for (unsigned i = 0; i < lh.count; i++) {
-            struct cosmo_netctl_flow fl;
-            memcpy(&fl, rbuf + off + sizeof(lh) + i * sizeof(fl), sizeof(fl));
-            if (fl.table == COSMO_NETCTL_FLOW_NAT && fl.kind == COSMO_NETCTL_FLOW_DNAT && fl.src_port == 40001)
-                seen = fl.proto == COSMO_NETCTL_PROTO_TCP && fl.src_addr == client && fl.dst_addr == guest &&
-                       fl.dst_port == 80 && fl.nat_addr == u_ip && fl.nat_port == 8080 &&
-                       fl.guest_addr == guest && fl.expires_ms > 0 &&
-                       !(fl.flags & COSMO_NETCTL_FLOW_ESTABLISHED);      /* a SYN alone: half-open */
-        }
-        CHECK(seen);
-    }
-    CHECK(file_read(f, rbuf, (size_t)rn - 1) == -EMSGSIZE);
-
-    /* (3c) the client's ACK without SYN, with no SYN-ACK from the guest in
-     * between, does not make the flow established: an outside party alone
-     * cannot earn the longer hold on the guest's share. Listed half-open,
-     * with no more than the half-open timeout left. */
-    l4len = nettest_mk_tcp(l4, client, u_ip, 40001, 8080, TH_ACK);
-    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    m = nettest_recv_ip(g);
-    CHECK(m != NULL);
-    m_freem(m);
-    rn = file_read(f, rbuf, sizeof(rbuf));
-    CHECK(rn == netctl_snapshot_len(rbuf, 1));
-    {
-        size_t off = netctl_flows_off(rbuf, 1);
-        struct cosmo_netctl_flow_list lh;
-        memcpy(&lh, rbuf + off, sizeof(lh));
-        bool half_open = false;
-        for (unsigned i = 0; i < lh.count; i++) {
-            struct cosmo_netctl_flow fl;
-            memcpy(&fl, rbuf + off + sizeof(lh) + i * sizeof(fl), sizeof(fl));
-            if (fl.table == COSMO_NETCTL_FLOW_NAT && fl.kind == COSMO_NETCTL_FLOW_DNAT && fl.src_port == 40001)
-                half_open = !(fl.flags & COSMO_NETCTL_FLOW_ESTABLISHED) &&
-                      fl.expires_ms <= NAT_TIMEOUT_TCP_NS / 1000000u;      /* the short timeout */
-        }
-        CHECK(half_open);
-    }
-
-    /* (4) FORWARD_DEL removes it and reaps the flow it created. */
-    struct nat_stats ns0, ns1;
-    nat_get_stats(&ns0);
-    CHECK(ns0.entries >= 1);                        /* the flow from (3) */
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.version = COSMO_NETCTL_VERSION; cmd.op = COSMO_NETCTL_FORWARD_DEL;
-    cmd.proto = COSMO_NETCTL_PROTO_TCP; cmd.host_port = 8080;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
-    nat_get_stats(&ns1);
-    CHECK(ns1.entries < ns0.entries);               /* the rule's entries reaped */
-
-    /* (5) the listing is empty and a client SYN now stays local. */
-    rn = file_read(f, rbuf, sizeof(rbuf));
-    CHECK(rn == netctl_snapshot_len(rbuf, 0));      /* no forwards, then the filter section */
-    CHECK(((struct cosmo_netctl_list *)rbuf)->count == 0);
-    { struct mbuf *d; while ((d = tap_recv(g)) != NULL) m_freem(d); }   /* nothing stale queued */
-    l4len = nettest_mk_tcp(l4, client, u_ip, 40002, 8080, TH_SYN);
-    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    CHECK(nettest_recv_ip(g) == NULL);              /* no rule: not forwarded */
-
-    /* (6) refusals: a duplicate, an off-tap target, a short write, a bad
-     * version -- each refused, the table unchanged. */
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.version = COSMO_NETCTL_VERSION; cmd.op = COSMO_NETCTL_FORWARD_ADD;
-    cmd.proto = COSMO_NETCTL_PROTO_TCP; cmd.host_port = 8080; cmd.guest_port = 80; cmd.guest_addr = guest;
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));     /* re-add ok */
-    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EEXIST);                  /* duplicate */
-    struct cosmo_netctl bad = cmd;
-    bad.host_port = 9000; bad.guest_addr = u_ip;                        /* off the guest tap */
-    CHECK(file_write(f, &bad, sizeof(bad)) == -EINVAL);                  /* off-tap: distinct from dup */
-    CHECK(file_write(f, &cmd, 4) == -EINVAL);                            /* short */
-    uint8_t big[sizeof(cmd) + 8];
-    memcpy(big, &cmd, sizeof(cmd)); memset(big + sizeof(cmd), 0, 8);
-    CHECK(file_write(f, big, sizeof(big)) == -EINVAL);                   /* oversized: not applied */
-    bad = cmd; bad.version = 99;
-    CHECK(file_write(f, &bad, sizeof(bad)) == -ENOTSUP);                 /* wrong version */
-    rn = file_read(f, rbuf, sizeof(rbuf));
-    CHECK(rn == netctl_snapshot_len(rbuf, 1));
-    CHECK(((struct cosmo_netctl_list *)rbuf)->count == 1);              /* only the re-added rule */
-
-    nt_file_put(f);
-    nat_pf_clear();
-    nat_flush();
-    nt_tap_destroy(u);
-    nt_tap_destroy(g);
-    kinfo("selftest: net-tapctl: a forward added through /dev/net/tapctl took effect and listed, "
-          "delete reaped its flow, and duplicate/off-tap/short/bad-version commands were refused");
-    return true;
-}
+/* --- the runtime network control channel (/dev/net/tapctl) ----------------
+ *
+ * net-tapctl is CeeSafe (nettest_ctl.cee), with the walk of a snapshot's
+ * sections (nettest_netctl_flows_off, nettest_netctl_snapshot_len;
+ * nettest.h) the flow-listing tests below use. The values it writes as
+ * its own constants: */
+_Static_assert(EMSGSIZE == 90 && COSMO_NETCTL_FORWARD_ADD == 1 && COSMO_NETCTL_FORWARD_DEL == 2 &&
+               COSMO_NETCTL_IF_UP == 0x1 && COSMO_NETCTL_IF_LOOPBACK == 0x2 && COSMO_NETCTL_FLOW_NAT == 1 &&
+               COSMO_NETCTL_FLOW_DNAT == 2 && COSMO_NETCTL_FLOW_ESTABLISHED == 0x01 &&
+               NAT_TIMEOUT_TCP_NS / 1000000u == 30000 && sizeof(((struct cosmo_netctl_if *)0)->name) == 8,
+               "nettest_ctl.cee's errno.h, netctl.h and nat.h values");
 
 /* --- a tap's release against a frame still in flight --------------------------------
  *
@@ -6464,7 +6244,7 @@ static size_t flows_read(uint8_t *snap, size_t cap, int64_t *len)
         return 0;
     struct cosmo_netctl_list ph;
     memcpy(&ph, snap, sizeof(ph));
-    return netctl_flows_off(snap, ph.count);
+    return nettest_netctl_flows_off(snap, ph.count);
 }
 
 bool selftest_net_flows_nat(const char **reason)
@@ -6542,7 +6322,7 @@ bool selftest_net_flows_nat(const char **reason)
     static uint8_t snap[COSMO_NETCTL_SNAPSHOT_MAX];
     int64_t len = 0;
     size_t off = flows_read(snap, sizeof(snap), &len);
-    CHECK(off > 0 && len == netctl_snapshot_len(snap, ((struct cosmo_netctl_list *)snap)->count));
+    CHECK(off > 0 && len == nettest_netctl_snapshot_len(snap, ((struct cosmo_netctl_list *)snap)->count));
     struct cosmo_netctl_flow_list lh;
     memcpy(&lh, snap + off, sizeof(lh));
     CHECK(lh.version == COSMO_NETCTL_VERSION && lh.nat_quota == NAT_QUOTA_PER_GUEST);

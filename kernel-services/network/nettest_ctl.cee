@@ -1,0 +1,609 @@
+// nettest_ctl.cee - the runtime network control channel (/dev/net/tapctl), in CeeSafe: roadmap 2.0 SA6 (nettest, the
+// eighth batch). net-tapctl, as nettest.c had it, and the walk of a control snapshot's sections -- exported as
+// nettest_netctl_flows_off and nettest_netctl_snapshot_len (nettest.h), which the flow-listing tests still in C use.
+// A snapshot is a run of sections whose offsets follow from the counts in their own headers, so a header may lie at
+// any offset its predecessors leave; each is copied into an aligned room before it is read, as the C memcpy'd it.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tap.h", "kernel/net/nat.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/vfs.h", "kernel/selftest.h")
+extern "C" {
+    struct mbuf;
+    struct netif;
+    struct tap;
+    struct file;
+    struct nat_stats {
+        entries: u32;
+    }
+    struct cosmo_netctl {
+        version: u16;
+        op: u16;
+        proto: u8;
+        host_port: u16;
+        guest_port: u16;
+        guest_addr: u32;
+    }
+    struct cosmo_netctl_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_rule {
+        proto: u8;
+        host_port: u16;
+        guest_port: u16;
+        guest_addr: u32;
+    }
+    struct cosmo_netctl_filter_list {
+        rule_count: u16;
+        guest_count: u16;
+    }
+    struct cosmo_netctl_filter_guest {
+        guest_addr: u32;
+    }
+    struct cosmo_netctl_filter_rule {
+        guest_addr: u32;
+    }
+    struct cosmo_netctl_flow_list {
+        version: u16;
+        count: u16;
+        nat_quota: u16;
+    }
+    struct cosmo_netctl_flow {
+        table: u8;
+        kind: u8;
+        proto: u8;
+        flags: u8;
+        guest_addr: u32;
+        src_addr: u32;
+        dst_addr: u32;
+        src_port: u16;
+        dst_port: u16;
+        nat_addr: u32;
+        nat_port: u16;
+        expires_ms: u32;
+    }
+    struct cosmo_netctl_lease_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_lease {
+        state: u8;
+    }
+    struct cosmo_netctl_if_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_if {
+        name: [u8; 8];
+        index: u32;
+        flags: u32;
+        addr: u32;
+        mask: u32;
+    }
+    struct cosmo_netctl_route_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_route {
+        flags: u32;
+    }
+    struct cosmo_netctl_neigh_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_neigh {
+        addr: u32;
+    }
+
+    fn nettest_tap_create(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap;
+    fn nettest_tap_destroy(t: *mut tap);
+    fn nettest_vfs_open(path: *CChar, flags: u32, out: *mut *mut file) -> i32;
+    fn nettest_file_put(f: *mut file);
+    fn nettest_wrap(
+        frame: *mut u8,
+        dmac: *u8,
+        smac: *u8,
+        sip: u32,
+        dip: u32,
+        ttl: u8,
+        proto: u8,
+        l4: *void,
+        l4len: u16,
+    ) -> u32;
+    fn nettest_mk_tcp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, flags: u8) -> u16;
+    fn nettest_seed_arp(nif: *mut netif, peerIp: u32, peerMac: *u8);
+    fn nettest_recv_ip(t: *mut tap) -> *mut mbuf;
+
+    fn tap_netif(t: *mut tap) -> *mut netif;
+    fn tap_inject(t: *mut tap, frame: *void, len: u32) -> i32;
+    fn tap_recv(t: *mut tap) -> *mut mbuf;
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn netif_set_forward(nif: *mut netif, on: bool);
+    fn netif_set_masquerade(nif: *mut netif, on: bool);
+    fn nat_flush();
+    fn nat_pf_clear();
+    fn nat_get_stats(out: *mut nat_stats);
+    fn m_freem(m: *mut mbuf);
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+}
+
+// ---- errno.h, ip.h, tcp.h, nat.h, netctl.h, syscall.h (asserted against the headers in nettest.c) ----
+
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+const EMSGSIZE: i32 = 90;
+const ENOTSUP: i32 = 95;
+const ETH_HLEN: usize = 14;
+const IPPROTO_TCP: u8 = 6;
+const TH_SYN: u8 = 0x02;
+const TH_ACK: u8 = 0x10;
+const NAT_QUOTA_PER_GUEST: u16 = 32;
+const NAT_TIMEOUT_TCP_MS: u32 = 30 * 1000;
+const NETCTL_VERSION: u16 = 8;
+const NETCTL_FORWARD_ADD: u16 = 1;
+const NETCTL_FORWARD_DEL: u16 = 2;
+const NETCTL_PROTO_TCP: u8 = 6;
+const NETCTL_IF_UP: u32 = 0x1;
+const NETCTL_IF_LOOPBACK: u32 = 0x2;
+const NETCTL_FLOW_NAT: u8 = 1;
+const NETCTL_FLOW_DNAT: u8 = 2;
+const NETCTL_FLOW_ESTABLISHED: u8 = 0x01;
+const O_RDWR: u32 = 0x0002;
+/// A /24 and a /8 mask, and 127.0.0.1, as they lie in a little-endian u32 (htonl and inet.h's IPV4_ADDR).
+const MASK24_N: u32 = 0x00ffffff;
+const MASK8_N: u32 = 0x000000ff;
+const LOOPBACK_N: u32 = 0x0100007f;
+
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+/// A C struct's room on the stack: aligned and zeroed.
+struct Room {
+    words: [u64; 24];
+}
+
+/// A room holding a copy of the `bytes` at `src` (the C's memcpy into a local).
+/// Safety: `src` points to `bytes` readable bytes.
+unsafe fn copied(src: *u8, bytes: usize) -> Room {
+    if (bytes > 192) {
+        tooSmall();
+    }
+    var r = Room { words: [0; 24] };
+    let to = SliceMut.fromRaw(borrow mut r.words as *mut [u64; 24] as *mut u8, bytes);
+    let from = Slice.fromRaw(src, bytes);
+    for (i in 0..bytes) {
+        to[i] = from[i];
+    }
+    return r;
+}
+
+fn roomAt(r: borrow Room) -> *u8 => borrow r.words as *[u64; 24] as *u8;
+
+// ---- The snapshot's sections ----
+
+/// The count and version of a section header (every one begins `u16 version; u16 count`), read from a copy.
+struct Header {
+    version: u16;
+    count: u16;
+}
+
+/// Safety: `at` points to a section header of at least 4 bytes.
+unsafe fn header(at: *u8) -> Header {
+    let r = copied(at, 4);
+    let h = Ptr.toBorrow(roomAt(borrow r) as *cosmo_netctl_list);
+    return Header { version: h.version, count: h.count };
+}
+
+/// Where a snapshot's flow section (version 6) starts, given `pfRules` port-forwards: after the port-forward list and
+/// the filter section, whose counts are read from the buffer itself (attached guests and rules vary with what other
+/// tests left open).
+/// Safety: `buf` holds a snapshot with `pfRules` forwards.
+@export("nettest_netctl_flows_off")
+unsafe fn flowsOff(buf: *u8, pfRules: u32) -> usize {
+    let off = layoutOf<cosmo_netctl_list>().size + (pfRules as usize) * layoutOf<cosmo_netctl_rule>().size;
+    let r = copied(buf.add(off), layoutOf<cosmo_netctl_filter_list>().size);
+    let fh = Ptr.toBorrow(roomAt(borrow r) as *cosmo_netctl_filter_list);
+    return off + layoutOf<cosmo_netctl_filter_list>().size + (fh.guest_count as usize) *
+        layoutOf<cosmo_netctl_filter_guest>().size +
+        (fh.rule_count as usize) * layoutOf<cosmo_netctl_filter_rule>().size;
+}
+
+/// Where the lease section (version 7) starts: after the flow section.
+/// Safety: as flowsOff.
+unsafe fn leasesOff(buf: *u8, pfRules: u32) -> usize {
+    let off = flowsOff(buf, pfRules);
+    let lh = header(buf.add(off));
+    return off + layoutOf<cosmo_netctl_flow_list>().size + (lh.count as usize) * layoutOf<cosmo_netctl_flow>().size;
+}
+
+/// Where the interface section (version 8) starts: after the lease section.
+/// Safety: as flowsOff.
+unsafe fn ifsOff(buf: *u8, pfRules: u32) -> usize {
+    let off = leasesOff(buf, pfRules);
+    let ll = header(buf.add(off));
+    return off + layoutOf<cosmo_netctl_lease_list>().size + (ll.count as usize) * layoutOf<cosmo_netctl_lease>().size;
+}
+
+/// The byte length the whole snapshot should have: the seven sections, each section's count read from its own header,
+/// each header's version checked; -1 when one is not this version.
+/// Safety: as flowsOff.
+@export("nettest_netctl_snapshot_len")
+unsafe fn snapshotLen(buf: *u8, pfRules: u32) -> i64 {
+    let ll = header(buf.add(leasesOff(buf, pfRules)));
+    if (ll.version != NETCTL_VERSION) {
+        return -1;
+    }
+    var off = ifsOff(buf, pfRules);
+    let ih = header(buf.add(off));
+    off += layoutOf<cosmo_netctl_if_list>().size + (ih.count as usize) * layoutOf<cosmo_netctl_if>().size;
+    let rh = header(buf.add(off));
+    off += layoutOf<cosmo_netctl_route_list>().size + (rh.count as usize) * layoutOf<cosmo_netctl_route>().size;
+    let nh = header(buf.add(off));
+    off += layoutOf<cosmo_netctl_neigh_list>().size + (nh.count as usize) * layoutOf<cosmo_netctl_neigh>().size;
+    if (ih.version != NETCTL_VERSION || rh.version != NETCTL_VERSION || nh.version != NETCTL_VERSION) {
+        return -1;
+    }
+    return truncate<i64>(off);
+}
+
+// ---- net-tapctl ----
+
+// The snapshot's room (COSMO_NETCTL_SNAPSHOT_MAX fits, asserted in nettest.c) and the frames, off the stack.
+static mut RBUF: [u8; 65536] = [0; 65536];
+static mut L4: [u8; 128] = [0; 128];
+static mut FRAME: [u8; 256] = [0; 256];
+static mut RX: [u8; 256] = [0; 256];
+static mut CTL: *mut file = 0 as *mut file;
+
+/// Safety: the runner runs one test at a time, so the statics are this test's.
+fn rbuf() -> *mut u8 => unsafe { borrow mut RBUF as *mut [u8; 65536] as *mut u8 };
+
+/// Read the snapshot into RBUF with room for `cap` bytes: what file_read returned.
+/// Safety: as rbuf; CTL is open.
+unsafe fn snapshot(cap: usize) -> i64 => file_read(CTL, rbuf() as *mut void, cap);
+
+/// Read a whole snapshot and check its length against its sections with `pfRules` forwards: its length, or -1.
+/// Safety: as snapshot.
+unsafe fn wholeSnapshot(pfRules: u32) -> i64 {
+    let rn = snapshot(65536);
+    return if (rn == snapshotLen(rbuf() as *u8, pfRules)) rn else -1;
+}
+
+/// A forwarding command in a zeroed room: version, op, TCP, the host port, and the guest's port and address.
+/// Safety: the room holds a struct cosmo_netctl (checked).
+fn forwardCmd(r: borrow mut Room, version: u16, op: u16, hostPort: u16, guestPort: u16, guest: u32) -> *cosmo_netctl {
+    if (layoutOf<cosmo_netctl>().size + 8 > 192) {
+        tooSmall();
+    }
+    r.words = [0; 24];
+    let p = borrow mut r.words as *mut [u64; 24] as *mut cosmo_netctl;
+    unsafe {
+        let w = Ptr.toBorrowMut(p);
+        w.version = version;
+        w.op = op;
+        w.proto = NETCTL_PROTO_TCP;
+        w.host_port = hostPort;
+        w.guest_port = guestPort;
+        w.guest_addr = guest;
+    }
+    return p as *cosmo_netctl;
+}
+
+/// Write `len` bytes of a command: what file_write returned.
+/// Safety: CTL is open; the room holds `len` bytes.
+unsafe fn write(c: *cosmo_netctl, len: usize) -> i64 => file_write(CTL, c as *void, len);
+
+fn cmdLen() -> usize => layoutOf<cosmo_netctl>().size;
+
+/// A TCP segment from the client to host:8080 (or a port of its choosing) on the uplink.
+/// Safety: as rbuf.
+unsafe fn clientTcp(
+    u: *mut tap,
+    uMac: borrow [u8; 6],
+    clientMac: borrow [u8; 6],
+    client: u32,
+    uIp: u32,
+    sp: u16,
+    flags: u8,
+) -> bool {
+    let l4 = borrow mut L4 as *mut [u8; 128] as *mut u8;
+    let frame = borrow mut FRAME as *mut [u8; 256] as *mut u8;
+    let len = nettest_mk_tcp(l4, client, uIp, sp, 8080, flags);
+    let flen = nettest_wrap(
+        frame,
+        uMac as *[u8; 6] as *u8,
+        clientMac as *[u8; 6] as *u8,
+        client,
+        uIp,
+        64,
+        IPPROTO_TCP,
+        l4 as *void,
+        len,
+    );
+    return tap_inject(u, frame as *void, flen) == 0;
+}
+
+/// The DNAT flow from `sport` in the flow section of RBUF (with `pfRules` forwards): whether it is listed and passes
+/// `est` (true: the C's (3b) check of the whole flow; false: half-open within the short timeout).
+/// Safety: as rbuf; RBUF holds a whole snapshot.
+unsafe fn dnatListed(pfRules: u32, sport: u16, client: u32, guest: u32, uIp: u32, whole: bool) -> bool {
+    let buf = rbuf() as *u8;
+    let off = flowsOff(buf, pfRules);
+    let lr = copied(buf.add(off), layoutOf<cosmo_netctl_flow_list>().size);
+    let lh = Ptr.toBorrow(roomAt(borrow lr) as *cosmo_netctl_flow_list);
+    if (whole && (lh.version != NETCTL_VERSION || lh.nat_quota != NAT_QUOTA_PER_GUEST)) {
+        return false;
+    }
+    let count = lh.count;
+    let size = layoutOf<cosmo_netctl_flow>().size;
+    var found = false;
+    for (i in 0..count as usize) {
+        let fr = copied(buf.add(off + layoutOf<cosmo_netctl_flow_list>().size + i * size), size);
+        let fl = Ptr.toBorrow(roomAt(borrow fr) as *cosmo_netctl_flow);
+        if (fl.table == NETCTL_FLOW_NAT && fl.kind == NETCTL_FLOW_DNAT && fl.src_port == sport) {
+            let halfOpen = (fl.flags & NETCTL_FLOW_ESTABLISHED) == 0;
+            found = if (whole) fl.proto == NETCTL_PROTO_TCP && fl.src_addr == client && fl.dst_addr == guest &&
+                fl.dst_port == 80 && fl.nat_addr == uIp && fl.nat_port == 8080 && fl.guest_addr == guest &&
+                fl.expires_ms > 0 && halfOpen else halfOpen && fl.expires_ms <= NAT_TIMEOUT_TCP_MS;
+        }
+    }
+    return found;
+}
+
+/// Version 8: the interface section lists lo first, index 1, loopback and up, at 127.0.0.1/8 -- registered at
+/// net_init, before anything a test adds.
+/// Safety: as dnatListed.
+unsafe fn loFirst(pfRules: u32) -> bool {
+    let buf = rbuf() as *u8;
+    let io = ifsOff(buf, pfRules);
+    let ih = header(buf.add(io));
+    if (ih.count < 1) {
+        return false;
+    }
+    let lr = copied(buf.add(io + layoutOf<cosmo_netctl_if_list>().size), layoutOf<cosmo_netctl_if>().size);
+    let lo = Ptr.toBorrow(roomAt(borrow lr) as *cosmo_netctl_if);
+    let both = NETCTL_IF_LOOPBACK | NETCTL_IF_UP;
+    return lo.name[0] == 108 && lo.name[1] == 111 && lo.name[2] == 0 && lo.index == 1 && (lo.flags & both) == both &&
+        lo.addr == LOOPBACK_N && lo.mask == MASK8_N;
+}
+
+/// The forward count RBUF's listing begins with, and its first rule's fields.
+/// Safety: as dnatListed.
+unsafe fn listHead() -> Header => header(rbuf() as *u8);
+
+/// The live NAT entries.
+/// Safety: the room holds a struct nat_stats (checked).
+unsafe fn natEntries() -> u32 {
+    if (layoutOf<nat_stats>().size > 192) {
+        tooSmall();
+    }
+    var r = Room { words: [0; 24] };
+    let p = borrow mut r.words as *mut [u64; 24] as *mut nat_stats;
+    nat_get_stats(p);
+    return Ptr.toBorrow(p as *nat_stats).entries;
+}
+
+/// Free whatever the tap has queued.
+/// Safety: `t` is the test's tap.
+unsafe fn drain(t: *mut tap) {
+    var d = tap_recv(t);
+    while (!d.isNull()) {
+        m_freem(d);
+        d = tap_recv(t);
+    }
+}
+
+/// The body of net-tapctl, with CTL open.
+/// Safety: the runner's `reason`; the taps are the test's.
+unsafe fn tapctlBody(
+    reason: *mut *CChar,
+    g: *mut tap,
+    u: *mut tap,
+    guest: u32,
+    uIp: u32,
+    client: u32,
+    uMac: borrow [u8; 6],
+    clientMac: borrow [u8; 6],
+) -> bool {
+    var cmdRoom = Room { words: [0; 24] };
+
+    // (1) FORWARD_ADD through the device installs a rule.
+    var cmd = forwardCmd(mut cmdRoom, NETCTL_VERSION, NETCTL_FORWARD_ADD, 8080, 80, guest);
+    if (write(cmd, cmdLen()) != truncate<i64>(cmdLen())) {
+        return failed(reason, "check failed: net-tapctl: FORWARD_ADD through the device\0");
+    }
+
+    // (2) the read listing shows exactly that rule.
+    var rn = wholeSnapshot(1); // one forward, then the filter and flow sections
+    if (rn < 0) {
+        return failed(reason, "check failed: net-tapctl: the listing is whole\0");
+    }
+    let hdr = listHead();
+    if (hdr.version != NETCTL_VERSION || hdr.count != 1) {
+        return failed(reason, "check failed: net-tapctl: one rule listed\0");
+    }
+    {
+        let rr = copied((rbuf() as *u8).add(layoutOf<cosmo_netctl_list>().size), layoutOf<cosmo_netctl_rule>().size);
+        let r0 = Ptr.toBorrow(roomAt(borrow rr) as *cosmo_netctl_rule);
+        if (r0.proto != NETCTL_PROTO_TCP || r0.host_port != 8080 || r0.guest_port != 80 || r0.guest_addr != guest) {
+            return failed(reason, "check failed: net-tapctl: exactly that rule\0");
+        }
+    }
+    if (!loFirst(1)) {
+        return failed(reason, "check failed: net-tapctl: lo first, index 1, loopback and up, 127.0.0.1/8\0");
+    }
+
+    // (3) a client SYN to the host port is DNAT'd to the guest (the rule took effect through the device).
+    if (!clientTcp(u, uMac, clientMac, client, uIp, 40001, TH_SYN)) {
+        return failed(reason, "check failed: net-tapctl: a client SYN is injected\0");
+    }
+    let m = nettest_recv_ip(g);
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-tapctl: it reaches the guest\0");
+    }
+    let rxp = borrow mut RX as *mut [u8; 256] as *mut u8;
+    let read = m_copydata(m as *mbuf, 0, truncate<u32>(ETH_HLEN + 40), rxp as *mut void);
+    m_freem(m);
+    let rx = Slice.fromRaw(rxp as *u8, 256);
+    let dst = (rx[30] as u32) | ((rx[31] as u32) << 8) | ((rx[32] as u32) << 16) | ((rx[33] as u32) << 24);
+    if (!read || dst != guest || rx[ETH_HLEN + 22] != 0 || rx[ETH_HLEN + 23] != 80) {
+        return failed(reason, "check failed: net-tapctl: DNAT'd to the guest's port 80\0");
+    }
+
+    // (3b) the flow section lists that flow as the client's to the guest, through the port it dialled (version 6); a
+    // buffer one byte short of the whole snapshot is refused, never truncated.
+    rn = wholeSnapshot(1);
+    if (rn < 0 || !dnatListed(1, 40001, client, guest, uIp, true)) {
+        return failed(reason, "check failed: net-tapctl: the flow is listed, half-open\0");
+    }
+    if (snapshot(truncate<usize>(rn) - 1) != -(EMSGSIZE as i64)) {
+        return failed(reason, "check failed: net-tapctl: a short buffer is refused\0");
+    }
+
+    // (3c) the client's ACK without SYN, with no SYN-ACK from the guest in between, does not make the flow
+    // established: an outside party alone cannot earn the longer hold on the guest's share. Listed half-open, with no
+    // more than the half-open timeout left.
+    if (!clientTcp(u, uMac, clientMac, client, uIp, 40001, TH_ACK)) {
+        return failed(reason, "check failed: net-tapctl: the client's ACK is injected\0");
+    }
+    let m2 = nettest_recv_ip(g);
+    if (m2.isNull()) {
+        return failed(reason, "check failed: net-tapctl: it reaches the guest too\0");
+    }
+    m_freem(m2);
+    if (wholeSnapshot(1) < 0 || !dnatListed(1, 40001, client, guest, uIp, false)) {
+        return failed(reason, "check failed: net-tapctl: still half-open, the short timeout\0");
+    }
+
+    // (4) FORWARD_DEL removes it and reaps the flow it created.
+    let e0 = natEntries();
+    if (e0 < 1) {
+        return failed(reason, "check failed: net-tapctl: the flow from (3)\0");
+    }
+    cmd = forwardCmd(mut cmdRoom, NETCTL_VERSION, NETCTL_FORWARD_DEL, 8080, 0, 0);
+    if (write(cmd, cmdLen()) != truncate<i64>(cmdLen())) {
+        return failed(reason, "check failed: net-tapctl: FORWARD_DEL through the device\0");
+    }
+    if (natEntries() >= e0) {
+        return failed(reason, "check failed: net-tapctl: the rule's entries reaped\0");
+    }
+
+    // (5) the listing is empty and a client SYN now stays local.
+    if (wholeSnapshot(0) < 0 || listHead().count != 0) {
+        return failed(reason, "check failed: net-tapctl: no forwards listed\0");
+    }
+    drain(g); // nothing stale queued
+    if (!clientTcp(u, uMac, clientMac, client, uIp, 40002, TH_SYN)) {
+        return failed(reason, "check failed: net-tapctl: a second SYN is injected\0");
+    }
+    let m3 = nettest_recv_ip(g);
+    if (!m3.isNull()) {
+        m_freem(m3);
+        return failed(reason, "check failed: net-tapctl: no rule: not forwarded\0");
+    }
+
+    // (6) refusals: a duplicate, an off-tap target, a short write, a bad version -- each refused, the table unchanged.
+    cmd = forwardCmd(mut cmdRoom, NETCTL_VERSION, NETCTL_FORWARD_ADD, 8080, 80, guest);
+    if (write(cmd, cmdLen()) != truncate<i64>(cmdLen())) {
+        return failed(reason, "check failed: net-tapctl: re-add ok\0");
+    }
+    if (write(cmd, cmdLen()) != -(EEXIST as i64)) {
+        return failed(reason, "check failed: net-tapctl: a duplicate is refused\0");
+    }
+    var badRoom = Room { words: [0; 24] };
+    let bad = forwardCmd(mut badRoom, NETCTL_VERSION, NETCTL_FORWARD_ADD, 9000, 80, uIp); // off the guest tap
+    if (write(bad, cmdLen()) != -(EINVAL as i64)) {
+        return failed(reason, "check failed: net-tapctl: an off-tap target is refused\0");
+    }
+    if (write(cmd, 4) != -(EINVAL as i64)) {
+        return failed(reason, "check failed: net-tapctl: a short command is refused\0");
+    }
+    if (write(cmd, cmdLen() + 8) != -(EINVAL as i64)) {
+        return failed(reason, "check failed: net-tapctl: an oversized command is not applied\0"); // the room's zeroes follow
+    }
+    let wrong = forwardCmd(mut badRoom, 99, NETCTL_FORWARD_ADD, 8080, 80, guest);
+    if (write(wrong, cmdLen()) != -(ENOTSUP as i64)) {
+        return failed(reason, "check failed: net-tapctl: a wrong version is refused\0");
+    }
+    if (wholeSnapshot(1) < 0 || listHead().count != 1) {
+        return failed(reason, "check failed: net-tapctl: only the re-added rule\0");
+    }
+    return true;
+}
+
+/// net-tapctl: a forward added through /dev/net/tapctl takes effect and is listed with its flow, delete reaps the flow,
+/// and duplicate, off-tap, short, oversized and bad-version commands are refused.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tapctl")
+unsafe fn tapctl(reason: *mut *CChar) -> bool {
+    let gMac: [u8; 6] = [0x52, 0x54, 0x00, 0x0a, 0x00, 0x01];
+    let uMac: [u8; 6] = [0x52, 0x54, 0x00, 0x0b, 0x00, 0x01];
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x0a, 0x00, 0x0f];
+    let clientMac: [u8; 6] = [0x52, 0x54, 0x00, 0x0b, 0x00, 0x63];
+    let gIp = ip4(10, 77, 7, 1);
+    let guest = ip4(10, 77, 7, 15);
+    let uIp = ip4(10, 77, 8, 1);
+    let client = ip4(10, 77, 8, 99);
+
+    let g = nettest_tap_create("nctlg\0".ptr as *CChar, gIp, MASK24_N, borrow gMac as *[u8; 6] as *u8);
+    if (g.isNull()) {
+        return failed(reason, "check failed: net-tapctl: the guest-side tap\0");
+    }
+    let u = nettest_tap_create("nctlu\0".ptr as *CChar, uIp, MASK24_N, borrow uMac as *[u8; 6] as *u8);
+    if (u.isNull()) {
+        return failed(reason, "check failed: net-tapctl: the uplink tap\0");
+    }
+    netif_set_forward(tap_netif(g), true); // the guest tap: the only valid target
+    netif_set_masquerade(tap_netif(g), true);
+    nettest_seed_arp(tap_netif(g), guest, borrow guestMac as *[u8; 6] as *u8);
+    nettest_seed_arp(tap_netif(u), client, borrow clientMac as *[u8; 6] as *u8);
+    nat_flush();
+    nat_pf_clear();
+
+    CTL = 0 as *mut file;
+    if (nettest_vfs_open(
+        "/dev/net/tapctl\0".ptr as *CChar,
+        O_RDWR,
+        borrow mut CTL as *mut *mut file,
+    ) != 0 || CTL.isNull()) {
+        return failed(reason, "check failed: net-tapctl: the control device opens\0");
+    }
+    if (!tapctlBody(reason, g, u, guest, uIp, client, borrow uMac, borrow clientMac)) {
+        return false;
+    }
+
+    nettest_file_put(CTL);
+    CTL = 0 as *mut file;
+    nat_pf_clear();
+    nat_flush();
+    nettest_tap_destroy(u);
+    nettest_tap_destroy(g);
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(
+        "selftest: net-tapctl: a forward added through /dev/net/tapctl took effect and listed, delete reaped its flow, and duplicate/off-tap/short/bad-version commands were refused",
+    );
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
