@@ -117,6 +117,42 @@ uint16_t nettest_fwt_mk_icmp_ck(uint8_t *l4, uint8_t type, uint16_t id);
 uint16_t nettest_fwt_mk_needfrag(uint8_t *l4, uint32_t host_ip, uint32_t guest_ip, uint16_t mtu);
 bool nettest_fwt_recv_echo_reply(struct file *f, unsigned tries);
 
+/* nettest_hostin.cee: the world side of the uplink tap. One datagram as
+ * read back from it: the world's view of what the host answered. For TCP
+ * the header fields and up to 64 bytes of payload; for UDP the ports and
+ * payload length; for ICMP the type in `flags`. */
+struct hin_seg {
+    uint32_t src, dst;
+    uint8_t  proto, flags;
+    uint16_t sport, dport, win, paylen;
+    uint32_t seq, ack;
+    uint8_t  pay[64];
+};
+/* A TCP segment with every field the world side needs (its length); one
+ * IPv4 datagram in on the tap; the next datagram of `proto` toward world
+ * port `wport` (0 = any) in tries x 10 ms; the tap emptied; every byte of
+ * [base, base + total) arriving, `covered` already seen and `have` saying
+ * `sg` holds an uncounted segment; an awaited accept (NULL: none) and
+ * receive (-EAGAIN: nothing in tries x 10 ms); non-blocking listeners,
+ * released however the test returns. */
+uint16_t nettest_hin_mk_tcp(uint8_t *l4, uint32_t sip, uint32_t dip, uint16_t sp, uint16_t dp, uint32_t seq,
+                            uint32_t ack, uint8_t flags, uint16_t win, const void *pl, uint16_t pllen);
+bool nettest_hin_send(struct tap *u, const uint8_t *umac, const uint8_t *wmac, uint32_t sip, uint32_t dip,
+                      uint8_t proto, const uint8_t *l4, uint16_t l4len);
+bool nettest_hin_recv(struct tap *u, uint8_t proto, uint16_t wport, struct hin_seg *o, unsigned tries);
+void nettest_hin_drain(struct tap *u);
+bool nettest_hin_recv_stream(struct tap *u, uint16_t wport, uint32_t base, uint32_t covered, uint32_t total,
+                             struct hin_seg *sg, bool have);
+struct socket *nettest_hin_accept(struct socket *ls);
+int64_t nettest_hin_recv_sock(struct socket *s, void *buf, size_t cap, unsigned tries);
+bool nettest_hin_udp_listener(struct socket **out, uint32_t ip, uint16_t port);
+bool nettest_hin_tcp_listener(struct socket **out, uint16_t port);
+/* nettest.c: net-hostinput's outbound connect on its own thread, one at a
+ * time: started, done (with its result), and joined (its socket). */
+bool nettest_hin_connect(uint32_t ip, uint16_t port, const char *name);
+bool nettest_hin_connect_done(int *rc);
+struct socket *nettest_hin_connect_join(void);
+
 /* nettest_ctl.cee: where a /dev/net/tapctl snapshot with `pf_rules`
  * forwards has its flow section, and the byte length it should have (-1:
  * a section of another version). */

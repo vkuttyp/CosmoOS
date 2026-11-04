@@ -1081,7 +1081,15 @@ ICMP messages the host chains test with, exported as
 `nettest_fwt_ones_sum`, `nettest_fwt_mk_icmp_ck`,
 `nettest_fwt_mk_needfrag` and `nettest_fwt_recv_echo_reply`. The C's
 `FWT_RISES` counter wait is one function over a `Counter` enum (it
-stays a macro in `nettest.c` for the tests there).
+stays a macro in `nettest.c` for the tests there). Batch 10,
+`nettest_hostin.cee`: net-hostinput (the host chain), and the world side
+of the uplink tap the host-state tests drive a connection with, exported
+as `nettest_hin_mk_tcp`, `nettest_hin_send`, `nettest_hin_recv`,
+`nettest_hin_drain`, `nettest_hin_recv_stream`, `nettest_hin_accept`,
+`nettest_hin_recv_sock` and the two listeners; the datagram read back,
+`struct hin_seg`, moves to `nettest.h`. The host's outbound connect, whose
+thread may outlive the test, stays in `nettest.c` behind
+`nettest_hin_connect`, `_done` and `_join`.
 
 Size: about 3.0x.
 

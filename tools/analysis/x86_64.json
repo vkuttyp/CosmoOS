@@ -24,15 +24,6 @@
           "reason": "The fs_ array is allocated with KMEM_ZERO; the slab and large-allocation paths guarantee zero initialization, including untouched slots on partial setup failure."
         },
         {
-          "translation_unit": "kernel-services/network/nettest.c",
-          "checker": "core.NullDereference",
-          "file": "kernel-services/network/nettest.c",
-          "function": "selftest_net_tcpverdict",
-          "message": "Access to field 'tcp' results in a dereference of a null pointer (loaded from field 's')",
-          "count": 1,
-          "reason": "The connection worker publishes s only after successful socket creation; this test waits for rc==0 and joins the worker before dereferencing the published socket. The analyzer does not model that synchronization."
-        },
-        {
           "translation_unit": "kernel-services/network/tcp.c",
           "checker": "unix.Malloc",
           "file": "out/cee/kernel-services/network/tcp.c",
@@ -126,15 +117,6 @@
           "message": "Branch condition evaluates to a garbage value",
           "count": 1,
           "reason": "The fs_ array is allocated with KMEM_ZERO; the slab and large-allocation paths guarantee zero initialization, including untouched slots on partial setup failure."
-        },
-        {
-          "translation_unit": "kernel-services/network/nettest.c",
-          "checker": "core.NullDereference",
-          "file": "kernel-services/network/nettest.c",
-          "function": "selftest_net_tcpverdict",
-          "message": "Access to field 'tcp' results in a dereference of a null pointer (loaded from field 's')",
-          "count": 1,
-          "reason": "The connection worker publishes s only after successful socket creation; this test waits for rc==0 and joins the worker before dereferencing the published socket. The analyzer does not model that synchronization."
         },
         {
           "translation_unit": "kernel-services/network/tcp.c",
