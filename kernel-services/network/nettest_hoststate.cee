@@ -1,0 +1,1479 @@
+// nettest_hoststate.cee - the host's own state, in CeeSafe: roadmap 2.0 SA6 (nettest, the eleventh batch).
+// net-zero-window-probe, net-tcp-sws, net-fin-acks-last-data and net-hoststate, as nettest.c had them
+// (docs/audit/next-subsystem-zero-window.md, docs/audit/next-subsystem-host-state.md), with what only they used: the
+// host's echo-reply hook, the Need-Fragmentation and port-unreachable quoting a host segment, and the wait for the next
+// data segment. The world side of the uplink tap is nettest_hostin.cee's (nettest_hin_*); the host's outbound connect
+// is nettest.c's (nettest_hin_connect, _done, _join).
+//
+// An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest.c): the family and the port (host
+// order) in its first word as they lie in memory, the IPv4 address in the second.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/net/tap.h", "kernel/net/tapsvc.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
+extern "C" {
+    struct netaddr;
+    struct netif;
+    struct file;
+    struct tap;
+    struct tapsvc;
+    struct mbuf;
+    struct tcp_pcb {
+        mss: u16;
+    }
+    struct socket {
+        tcp: *mut tcp_pcb;
+    }
+    struct hin_seg {
+        src: u32;
+        dst: u32;
+        proto: u8;
+        flags: u8;
+        sport: u16;
+        dport: u16;
+        win: u16;
+        paylen: u16;
+        seq: u32;
+        ack: u32;
+    }
+    struct fw_stats {
+        flow_new: u64;
+        flows: u32;
+        hin_accept_rule: u64;
+        hin_drop_rule: u64;
+        hin_accept_established: u64;
+        hin_flow_new: u64;
+        hin_flow_unrecorded: u64;
+    }
+    struct ip_stats {
+        rx_bad_header: u64;
+        pmtu_updates: u64;
+        icmp_echo_rcvd: u64;
+        icmp_echo_replied: u64;
+        icmp_needfrag_rcvd: u64;
+        icmp_quiet_dropped: u64;
+    }
+    struct tcp_stats {
+        pmtu_updates: u64;
+    }
+    struct udp_stats {
+        quiet_dropped: u64;
+    }
+    struct fw_rule {
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_ip: u32;
+        dst_port: u16;
+        src_prefix: u8;
+        src_ip: u32;
+    }
+
+    fn nettest_tap_create(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap;
+    fn nettest_tap_destroy(t: *mut tap);
+    fn nettest_tapsvc_start(t: *mut tap) -> *mut tapsvc;
+    fn nettest_tapsvc_stop(svc: *mut tapsvc);
+    fn nettest_vfs_open(path: *CChar, flags: u32, out: *mut *mut file) -> i32;
+    fn nettest_file_put(f: *mut file);
+    fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_put(s: *mut socket);
+    fn nettest_tcp_retransmits(pcb: *mut tcp_pcb) -> u64;
+    fn nettest_hin_connect(ip: u32, port: u16, name: *CChar) -> bool;
+    fn nettest_hin_connect_done(rc: *mut i32) -> bool;
+    fn nettest_hin_connect_join() -> *mut socket;
+    fn nettest_hin_mk_tcp(
+        l4: *mut u8,
+        sip: u32,
+        dip: u32,
+        sp: u16,
+        dp: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+        win: u16,
+        pl: *void,
+        pllen: u16,
+    ) -> u16;
+    fn nettest_hin_send(u: *mut tap, umac: *u8, wmac: *u8, sip: u32, dip: u32, proto: u8, l4: *u8, l4len: u16) -> bool;
+    fn nettest_hin_recv(u: *mut tap, proto: u8, wport: u16, o: *mut hin_seg, tries: u32) -> bool;
+    fn nettest_hin_drain(u: *mut tap);
+    fn nettest_hin_recv_stream(
+        u: *mut tap,
+        wport: u16,
+        base: u32,
+        covered: u32,
+        total: u32,
+        sg: *mut hin_seg,
+        have: bool,
+    ) -> bool;
+    fn nettest_hin_accept(ls: *mut socket) -> *mut socket;
+    fn nettest_hin_recv_sock(s: *mut socket, buf: *mut void, cap: usize, tries: u32) -> i64;
+    fn nettest_hin_udp_listener(out: *mut *mut socket, ip: u32, port: u16) -> bool;
+    fn nettest_hin_tcp_listener(out: *mut *mut socket, port: u16) -> bool;
+    fn nettest_seed_arp(nif: *mut netif, peerIp: u32, peerMac: *u8);
+    fn nettest_wrap(
+        frame: *mut u8,
+        dmac: *u8,
+        smac: *u8,
+        sip: u32,
+        dip: u32,
+        ttl: u8,
+        proto: u8,
+        l4: *void,
+        l4len: u16,
+    ) -> u32;
+    fn nettest_mk_udp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, pl: *u8, pllen: u16) -> u16;
+    fn nettest_mk_dns(msg: *mut u8, id: u16) -> u32;
+    fn nettest_recv_ip(t: *mut tap) -> *mut mbuf;
+    fn nettest_fwt_send(
+        from: *mut file,
+        tapmac: *u8,
+        gmac: *u8,
+        sip: u32,
+        dip: u32,
+        proto: u8,
+        l4: *u8,
+        l4len: u16,
+    ) -> bool;
+    fn nettest_fwt_ones_sum(p: *u8, n: u32) -> u16;
+    fn nettest_fwt_mk_icmp_ck(l4: *mut u8, kind: u8, id: u16) -> u16;
+
+    fn tap_netif(t: *mut tap) -> *mut netif;
+    fn tap_inject(t: *mut tap, frame: *void, len: u32) -> i32;
+    fn tapsvc_test_set_upstream(svc: *mut tapsvc, ip: u32, port: u16);
+    fn m_freem(m: *mut mbuf);
+    fn m_length(m: *mbuf) -> u32;
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn ksock_set_nonblock(s: *mut socket, on: bool);
+    fn tcp_port_in_use(family: u16, port: u16, addr: *netaddr) -> bool;
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn icmp_set_echo_reply_hook(hook: extern "C" fn(u32, u16, u16));
+    fn icmp_send_echo(dst: u32, id: u16, seq: u16, payload: *void, len: usize) -> i32;
+    fn ipv4_get_stats(out: *mut ip_stats);
+    fn tcp_get_stats(out: *mut tcp_stats);
+    fn udp_get_stats(out: *mut udp_stats);
+    fn nat_flush();
+    fn fw_flush();
+    fn fw_age(nowNs: u64);
+    fn fw_get_stats(out: *mut fw_stats);
+    fn fw_policy_set(guestIp: u32, direction: u8, verdict: u8) -> i32;
+    fn fw_rule_add(guestIp: u32, atIndex: u32, r: *fw_rule) -> i32;
+    fn clock_now_ns() -> u64;
+    fn thread_sleep_ns(ns: u64);
+}
+
+// ---- errno.h, ip.h, tcp.h, fw.h, socket values (asserted against the headers in nettest.c) ----
+
+const EAGAIN: i32 = 11;
+const EMSGSIZE: i32 = 90;
+const ETH_HLEN: usize = 14;
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const ICMP_ECHO_REPLY: u8 = 0;
+const ICMP_DEST_UNREACH: u8 = 3;
+const ICMP_UNREACH_PORT: u8 = 3;
+const ICMP_UNREACH_NEEDFRAG: u8 = 4;
+const ICMP_ECHO: u8 = 8;
+const TH_FIN: u8 = 0x01;
+const TH_SYN: u8 = 0x02;
+const TH_RST: u8 = 0x04;
+const TH_ACK: u8 = 0x10;
+const FW_DROP: u8 = 0;
+const FW_ACCEPT: u8 = 1;
+const FW_DIR_TO_GUEST: u8 = 2;
+const FW_DIR_FROM_UPLINK: u8 = 4;
+const FW_HOST_GUEST_IP: u32 = 0;
+const FW_FLOW_QUOTA_HOST: u32 = 64;
+const O_RDWR: u32 = 0x0002;
+const O_NONBLOCK: u32 = 0x0800;
+const AF_INET: u32 = 2;
+const AF_INET_S: i32 = 2;
+const AF_INET16: u16 = 2;
+const SOCK_DGRAM: i32 = 2;
+/// The C's HIN_TRIES: how long a *positive* wait polls (it returns as soon as what it waits for arrives).
+const HIN_TRIES: u32 = 200;
+/// htonl(0xffffff00): a /24 mask as it lies in a little-endian u32.
+const MASK24_N: u32 = 0x00ffffff;
+const NS_PER_SEC: u64 = 1000000000;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+/// The address net-dns's upstream answers with (93.184.216.34).
+fn dnsAnswerIp() -> [u8; 4] => [93, 184, 216, 34];
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * 1000000);
+    }
+}
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+/// A small C struct's room (a rule).
+struct Cmd {
+    words: [u64; 8];
+}
+
+fn cmd(bytes: usize) -> Cmd {
+    if (bytes > 64) {
+        tooSmall();
+    }
+    return Cmd { words: [0; 8] };
+}
+
+// ---- Bytes and addresses ----
+
+fn rd16(b: Slice<u8>, at: usize) -> u16 => ((b[at] as u16) << 8) | (b[at + 1] as u16);
+
+/// A u32 as it lies in memory (an address in network order).
+fn wordOf(b: Slice<u8>, at: usize) -> u32 => (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) |
+    ((b[at + 3] as u32) << 24);
+
+/// struct netaddr for an IPv4 address and port.
+fn v4addr(ip: u32, port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), ip, 0, 0, 0];
+
+fn na(a: borrow [u32; 5]) -> *netaddr => a as *[u32; 5] as *netaddr;
+
+// ---- The counters ----
+
+/// A counter the host-state tests await or compare: the firewall's flows and host-chain verdicts, and the IP, TCP and
+/// UDP sides' drops and path-MTU updates.
+enum Counter {
+    FlowNew,
+    Flows,
+    HinAcceptRule,
+    HinDropRule,
+    HinAcceptEstablished,
+    HinFlowNew,
+    HinFlowUnrecorded,
+    RxBadHeader,
+    IpPmtuUpdates,
+    IcmpEchoRcvd,
+    IcmpEchoReplied,
+    IcmpNeedfragRcvd,
+    IcmpQuietDropped,
+    TcpPmtuUpdates,
+    UdpQuietDropped,
+}
+
+// The four statistics structs' rooms, off the stack: 1 KiB each (checked).
+static mut STATS: [u64; 512] = [0; 512];
+
+/// The `i`th of the four rooms.
+/// Safety: the runner runs one test at a time, so the statics are this test's.
+unsafe fn statsRoom(i: usize, bytes: usize) -> *mut u8 {
+    if (bytes > 1024) {
+        tooSmall();
+    }
+    return (borrow mut STATS as *mut [u64; 512] as *mut u8).add(i * 1024);
+}
+
+/// Safety: as statsRoom.
+unsafe fn fwNow() -> *fw_stats {
+    let p = statsRoom(0, layoutOf<fw_stats>().size) as *mut fw_stats;
+    fw_get_stats(p);
+    return p as *fw_stats;
+}
+
+/// Safety: as statsRoom.
+unsafe fn ipNow() -> *ip_stats {
+    let p = statsRoom(1, layoutOf<ip_stats>().size) as *mut ip_stats;
+    ipv4_get_stats(p);
+    return p as *ip_stats;
+}
+
+/// Safety: as statsRoom.
+unsafe fn tcpNow() -> *tcp_stats {
+    let p = statsRoom(2, layoutOf<tcp_stats>().size) as *mut tcp_stats;
+    tcp_get_stats(p);
+    return p as *tcp_stats;
+}
+
+/// Safety: as statsRoom.
+unsafe fn udpNow() -> *udp_stats {
+    let p = statsRoom(3, layoutOf<udp_stats>().size) as *mut udp_stats;
+    udp_get_stats(p);
+    return p as *udp_stats;
+}
+
+/// The counter's value now.
+/// Safety: the rooms hold the statistics structs (statsRoom checks).
+fn now(c: Counter) -> u64 {
+    unsafe {
+        return match (c) {
+            Counter.FlowNew => Ptr.toBorrow(fwNow()).flow_new,
+            Counter.Flows => Ptr.toBorrow(fwNow()).flows as u64,
+            Counter.HinAcceptRule => Ptr.toBorrow(fwNow()).hin_accept_rule,
+            Counter.HinDropRule => Ptr.toBorrow(fwNow()).hin_drop_rule,
+            Counter.HinAcceptEstablished => Ptr.toBorrow(fwNow()).hin_accept_established,
+            Counter.HinFlowNew => Ptr.toBorrow(fwNow()).hin_flow_new,
+            Counter.HinFlowUnrecorded => Ptr.toBorrow(fwNow()).hin_flow_unrecorded,
+            Counter.RxBadHeader => Ptr.toBorrow(ipNow()).rx_bad_header,
+            Counter.IpPmtuUpdates => Ptr.toBorrow(ipNow()).pmtu_updates,
+            Counter.IcmpEchoRcvd => Ptr.toBorrow(ipNow()).icmp_echo_rcvd,
+            Counter.IcmpEchoReplied => Ptr.toBorrow(ipNow()).icmp_echo_replied,
+            Counter.IcmpNeedfragRcvd => Ptr.toBorrow(ipNow()).icmp_needfrag_rcvd,
+            Counter.IcmpQuietDropped => Ptr.toBorrow(ipNow()).icmp_quiet_dropped,
+            Counter.TcpPmtuUpdates => Ptr.toBorrow(tcpNow()).pmtu_updates,
+            Counter.UdpQuietDropped => Ptr.toBorrow(udpNow()).quiet_dropped,
+        };
+    }
+}
+
+/// The C's FWT_RISES: true once the counter exceeds `base`, read up to 40 times 10 ms apart.
+fn rises(c: Counter, base: u64) -> bool {
+    for (i in 0..40) {
+        if (now(c) > base) {
+            return true;
+        }
+        sleepMs(10);
+    }
+    return false;
+}
+
+// ---- The uplink and the world behind it ----
+
+static mut L4: [u8; 160] = [0; 160];
+static mut BUF: [u8; 256] = [0; 256];
+// The datagram read back: a struct hin_seg (92 bytes, asserted in nettest.c).
+static mut SG: [u64; 16] = [0; 16];
+
+/// Safety: the runner runs one test at a time, so the statics are this test's.
+fn l4() -> *mut u8 => unsafe { borrow mut L4 as *mut [u8; 160] as *mut u8 };
+
+/// Safety: as l4.
+fn buf() -> *mut u8 => unsafe { borrow mut BUF as *mut [u8; 256] as *mut u8 };
+
+/// Safety: as l4; the room holds a struct hin_seg.
+fn sg() -> *mut hin_seg => unsafe { borrow mut SG as *mut [u64; 16] as *mut hin_seg };
+
+/// The datagram read back: its fields.
+/// Safety: as sg.
+fn sgFlags() -> u8 => unsafe { Ptr.toBorrow(sg() as *hin_seg).flags };
+
+/// Safety: as sg.
+fn sgSeq() -> u32 => unsafe { Ptr.toBorrow(sg() as *hin_seg).seq };
+
+/// Safety: as sg.
+fn sgAck() -> u32 => unsafe { Ptr.toBorrow(sg() as *hin_seg).ack };
+
+/// Safety: as sg.
+fn sgPaylen() -> u16 => unsafe { Ptr.toBorrow(sg() as *hin_seg).paylen };
+
+/// Safety: as sg.
+fn sgSport() -> u16 => unsafe { Ptr.toBorrow(sg() as *hin_seg).sport };
+
+/// Safety: as sg.
+fn sgSrc() -> u32 => unsafe { Ptr.toBorrow(sg() as *hin_seg).src };
+
+/// A test's uplink tap, its address and MAC, and the one world peer behind it.
+struct Link {
+    u: *mut tap;
+    uip: u32;
+    w: u32;
+    umac: [u8; 6];
+    wmac: [u8; 6];
+}
+
+fn umacOf(x: borrow Link) -> *u8 => borrow x.umac as *[u8; 6] as *u8;
+
+fn wmacOf(x: borrow Link) -> *u8 => borrow x.wmac as *[u8; 6] as *u8;
+
+/// The uplink tap `name` with the world peer seeded behind it; false when it could not be made.
+/// Safety: thread context; the tap is released however the test returns.
+unsafe fn uplink(x: borrow mut Link, name: StringView) -> bool {
+    x.u = nettest_tap_create(name.ptr as *CChar, x.uip, MASK24_N, borrow x.umac as *[u8; 6] as *u8);
+    if (x.u.isNull()) {
+        return false;
+    }
+    nettest_seed_arp(tap_netif(x.u), x.w, borrow x.wmac as *[u8; 6] as *u8);
+    return true;
+}
+
+/// A segment from `sip` (behind the world peer's MAC) to the host.
+/// Safety: the link's tap is the test's.
+unsafe fn tcpFrom(x: borrow Link, sip: u32, sp: u16, dp: u16, seq: u32, ack: u32, flags: u8, win: u16) -> bool {
+    let len = nettest_hin_mk_tcp(l4(), sip, x.uip, sp, dp, seq, ack, flags, win, 0 as *void, 0);
+    return nettest_hin_send(x.u, umacOf(x), wmacOf(x), sip, x.uip, IPPROTO_TCP, l4() as *u8, len);
+}
+
+/// A segment from the world peer.
+/// Safety: as tcpFrom.
+unsafe fn tcpIn(x: borrow Link, sp: u16, dp: u16, seq: u32, ack: u32, flags: u8, win: u16) -> bool =>
+    tcpFrom(x, x.w, sp, dp, seq, ack, flags, win);
+
+/// A datagram from `sip` to the host's `dp`, the payload `pl`.
+/// Safety: as tcpFrom; `pl` has `n` readable bytes.
+unsafe fn udpFrom(x: borrow Link, sip: u32, sp: u16, dp: u16, pl: *u8, n: u16) -> bool {
+    let len = nettest_mk_udp(l4(), sip, x.uip, sp, dp, pl, n);
+    return nettest_hin_send(x.u, umacOf(x), wmacOf(x), sip, x.uip, IPPROTO_UDP, l4() as *u8, len);
+}
+
+/// An ICMP message already built in L4, `len` bytes, from the world peer.
+/// Safety: as tcpFrom.
+unsafe fn icmpIn(x: borrow Link, len: u16) -> bool =>
+    nettest_hin_send(x.u, umacOf(x), wmacOf(x), x.w, x.uip, IPPROTO_ICMP, l4() as *u8, len);
+
+/// The next datagram of `proto` toward world port `wport`, into SG.
+/// Safety: as tcpFrom.
+unsafe fn heard(x: borrow Link, proto: u8, wport: u16, tries: u32) -> bool =>
+    nettest_hin_recv(x.u, proto, wport, sg(), tries);
+
+/// The world's side of a handshake to the host's `port` from world port `wport` with window `win`: the host's ISS, or
+/// false (`iss` untouched) when its SYN-ACK did not come or acknowledged something else.
+/// Safety: as tcpFrom.
+unsafe fn handshake(x: borrow Link, wport: u16, port: u16, seq: u32, win: u16, iss: borrow mut u32) -> bool {
+    if (!tcpIn(x, wport, port, seq, 0, TH_SYN, win) || !heard(x, IPPROTO_TCP, wport, HIN_TRIES) ||
+        (sgFlags() & (TH_SYN | TH_ACK)) != (TH_SYN | TH_ACK) || sgAck() != seq.wrappingAdd(1)) {
+        return false;
+    }
+    iss = sgSeq();
+    return tcpIn(x, wport, port, seq.wrappingAdd(1), iss.wrappingAdd(1), TH_ACK, win);
+}
+
+/// The accepted connection, non-blocking, with its pcb; null when none came.
+/// Safety: `ls` is the test's listener.
+unsafe fn accepted(ls: *mut socket) -> *mut socket {
+    let a = nettest_hin_accept(ls);
+    if (a.isNull() || Ptr.toBorrow(a as *socket).tcp.isNull()) {
+        return 0 as *mut socket;
+    }
+    ksock_set_nonblock(a, true);
+    return a;
+}
+
+/// A test's pattern: byte i is i.
+/// Safety: `p` has room for `n` bytes.
+unsafe fn pattern(p: *mut u8, n: usize) {
+    let b = SliceMut.fromRaw(p, n);
+    for (i in 0..n) {
+        b[i] = truncate<u8>(i);
+    }
+}
+
+/// The C's kinfo: one line, as it is.
+fn info(text: StringView) {
+    var buffer: [u8; 768] = [0; 768];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+// ---- net-zero-window-probe ----
+
+/// A zero window with data waiting sends a one-byte probe on the retransmit timer, and the data after a window update
+/// resumes past it (docs/audit/next-subsystem-zero-window.md). net-hostinput's window-update check tolerates the probe;
+/// this proves it exists and what follows it. The timer fires by itself: each wait is for the probe, not a stopwatch.
+/// Safety: the runner's `reason`.
+@export("selftest_net_zero_window_probe")
+unsafe fn zeroWindowProbe(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    fw_flush();
+    nat_flush();
+    var x = Link {
+        u: 0 as *mut tap,
+        uip: ip4(10, 77, 12, 1),
+        w: ip4(10, 77, 12, 99),
+        umac: [0x52, 0x54, 0x00, 0x1e, 0x00, 0x01],
+        wmac: [0x52, 0x54, 0x00, 0x1e, 0x00, 0x63],
+    };
+    if (!uplink(mut x, "zwpu\0")) {
+        return failed(reason, "check failed: net-zero-window-probe: the uplink tap\0");
+    }
+    var ls = 0 as *mut socket;
+    if (!nettest_hin_tcp_listener(borrow mut ls as *mut *mut socket, 2230)) {
+        return failed(reason, "check failed: net-zero-window-probe: the listener\0");
+    }
+    var data: [u8; 150] = [0; 150];
+    let dp = borrow mut data as *mut [u8; 150] as *mut u8;
+    pattern(dp, 150);
+    let xb = borrow x;
+    nettest_hin_drain(xb.u);
+
+    // The handshake, the world side by hand; then the world closes its window.
+    var iss: u32 = 0;
+    if (!handshake(xb, 41001, 2230, 5000, 64240, mut iss)) {
+        return failed(reason, "check failed: net-zero-window-probe: the handshake\0");
+    }
+    let a = accepted(ls);
+    if (a.isNull()) {
+        return failed(reason, "check failed: net-zero-window-probe: accepted\0");
+    }
+    let pcb = Ptr.toBorrow(a as *socket).tcp;
+    if (!tcpIn(xb, 41001, 2230, 5001, iss.wrappingAdd(1), TH_ACK, 0)) { // window 0
+        return failed(reason, "check failed: net-zero-window-probe: the window closes\0");
+    }
+    nettest_hin_drain(xb.u);
+
+    // (1) the probe: one byte at snd_una, sent by the retransmit timer and counted as one of its retransmissions.
+    let rx0 = nettest_tcp_retransmits(pcb);
+    if (ksock_sendto(a, dp as *void, 50, 0 as *netaddr) != 50) {
+        return failed(reason, "check failed: net-zero-window-probe: 50 bytes are queued\0");
+    }
+    if (!heard(xb, IPPROTO_TCP, 41001, HIN_TRIES) || sgPaylen() != 1 || sgSeq() != iss.wrappingAdd(1)) {
+        return failed(reason, "check failed: net-zero-window-probe: the probe\0");
+    }
+    if (nettest_tcp_retransmits(pcb) <= rx0) {
+        return failed(reason, "check failed: net-zero-window-probe: counted as a retransmission\0");
+    }
+
+    // (2) an update that does not ack the probe byte: every one of the 50 bytes from iss + 1, the probe counted -- its
+    // byte may come again.
+    if (!tcpIn(xb, 41001, 2230, 5001, iss.wrappingAdd(1), TH_ACK, 64240) ||
+        !nettest_hin_recv_stream(xb.u, 41001, iss.wrappingAdd(1), 1, 50, sg(), false)) {
+        return failed(reason, "check failed: net-zero-window-probe: the update without the probe byte\0");
+    }
+    if (!tcpIn(xb, 41001, 2230, 5001, iss.wrappingAdd(51), TH_ACK, 0)) { // all acked, window 0
+        return failed(reason, "check failed: net-zero-window-probe: all acked, window 0\0");
+    }
+    nettest_hin_drain(xb.u);
+
+    // (3) an update that acks the probe byte: the rest resumes exactly past it, and no acked byte is sent again. A
+    // probe that did not advance snd_nxt would leave snd_max behind this ACK, which RFC 5961 refuses (a challenge ACK,
+    // passed over here), and no data would follow.
+    if (ksock_sendto(a, dp.add(50) as *void, 50, 0 as *netaddr) != 50) {
+        return failed(reason, "check failed: net-zero-window-probe: 50 more are queued\0");
+    }
+    if (!heard(xb, IPPROTO_TCP, 41001, HIN_TRIES) || sgPaylen() != 1 || sgSeq() != iss.wrappingAdd(51)) {
+        return failed(reason, "check failed: net-zero-window-probe: the second probe\0");
+    }
+    if (!tcpIn(xb, 41001, 2230, 5001, iss.wrappingAdd(52), TH_ACK, 64240) ||
+        !nettest_hin_recv_stream(xb.u, 41001, iss.wrappingAdd(52), 0, 49, sg(), false)) {
+        return failed(reason, "check failed: net-zero-window-probe: the update acking the probe byte\0");
+    }
+    if (!tcpIn(xb, 41001, 2230, 5001, iss.wrappingAdd(101), TH_ACK, 0)) { // all acked, window 0
+        return failed(reason, "check failed: net-zero-window-probe: all acked, window 0 again\0");
+    }
+    nettest_hin_drain(xb.u);
+
+    // (4) the probe not yet counted when the update arrives -- net-hostinput on a slow host, where the blocked check
+    // missed it. The probe is on the wire before the update is sent (read off the tap: the retransmit count rises under
+    // the pcb's lock, but the probe is sent after it), and the helper counts it as the run's first segment.
+    if (ksock_sendto(a, dp.add(100) as *void, 50, 0 as *netaddr) != 50) {
+        return failed(reason, "check failed: net-zero-window-probe: the last 50 are queued\0");
+    }
+    if (!heard(xb, IPPROTO_TCP, 41001, HIN_TRIES) || sgPaylen() != 1 || sgSeq() != iss.wrappingAdd(101)) {
+        return failed(reason, "check failed: net-zero-window-probe: the third probe\0");
+    }
+    if (!tcpIn(xb, 41001, 2230, 5001, iss.wrappingAdd(101), TH_ACK, 64240) ||
+        !nettest_hin_recv_stream(xb.u, 41001, iss.wrappingAdd(101), 0, 50, sg(), true)) {
+        return failed(reason, "check failed: net-zero-window-probe: the update before the probe was read\0");
+    }
+
+    // The world resets the connection (seq == rcv_nxt), acking everything.
+    if (!tcpIn(xb, 41001, 2230, 5001, iss.wrappingAdd(151), TH_RST | TH_ACK, 0)) {
+        return failed(reason, "check failed: net-zero-window-probe: the reset\0");
+    }
+    nettest_ksock_put(a);
+    info(
+        "selftest: net-zero-window-probe: the probe went out on the timer, and the data resumed past it whether the update acked it, did not, or came before it was read\n",
+    );
+    return true;
+}
+
+// ---- net-tcp-sws ----
+
+// The data the host sends: more than two segments, off the stack.
+static mut DATA: [u8; 4000] = [0; 4000];
+
+/// The next data segment toward `wport`, passing over bare ACKs, into SG.
+/// Safety: as tcpFrom.
+unsafe fn nextData(x: borrow Link, wport: u16) -> bool {
+    for (i in 0..16) {
+        if (!heard(x, IPPROTO_TCP, wport, HIN_TRIES)) {
+            return false;
+        }
+        if (sgPaylen() > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Sender silly-window avoidance (RFC 1122 4.2.3.4). The world has offered a large window, so half of it is far above
+/// a segment; it now offers one segment's worth and acknowledges 200 of the bytes in flight: the window's right edge
+/// moves by 200. A sender without the rule sends a 200-byte segment at once, and the next acknowledgement opens
+/// another sliver -- the stream net-bench saw at 1 MiB/s in 300-byte segments on slow CI boots
+/// (docs/testing/flakes.md, 2026-10-10). With it, the 200 bytes wait, and when the world acknowledges the rest a full
+/// segment goes out.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tcp_sws")
+unsafe fn tcpSws(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    fw_flush();
+    nat_flush();
+    var x = Link {
+        u: 0 as *mut tap,
+        uip: ip4(10, 77, 41, 1),
+        w: ip4(10, 77, 41, 99),
+        umac: [0x52, 0x54, 0x00, 0x41, 0x00, 0x01],
+        wmac: [0x52, 0x54, 0x00, 0x41, 0x00, 0x63],
+    };
+    if (!uplink(mut x, "swsu\0")) {
+        return failed(reason, "check failed: net-tcp-sws: the uplink tap\0");
+    }
+    var ls = 0 as *mut socket;
+    if (!nettest_hin_tcp_listener(borrow mut ls as *mut *mut socket, 2232)) {
+        return failed(reason, "check failed: net-tcp-sws: the listener\0");
+    }
+    let dp = borrow mut DATA as *mut [u8; 4000] as *mut u8;
+    pattern(dp, 4000);
+    let xb = borrow x;
+    nettest_hin_drain(xb.u);
+
+    // The handshake with a large window; then the world offers one segment.
+    var iss: u32 = 0;
+    if (!handshake(xb, 41003, 2232, 9000, 64240, mut iss)) {
+        return failed(reason, "check failed: net-tcp-sws: the handshake\0");
+    }
+    let a = accepted(ls);
+    if (a.isNull()) {
+        return failed(reason, "check failed: net-tcp-sws: accepted\0");
+    }
+    let mss16 = Ptr.toBorrow(Ptr.toBorrow(a as *socket).tcp as *tcp_pcb).mss;
+    let mss = mss16 as u32;
+    if (mss <= 200 || 2 * mss >= 4000) {
+        return failed(reason, "check failed: net-tcp-sws: the MSS\0");
+    }
+    if (!tcpIn(xb, 41003, 2232, 9001, iss.wrappingAdd(1), TH_ACK, mss16)) {
+        return failed(reason, "check failed: net-tcp-sws: one segment's window\0");
+    }
+    nettest_hin_drain(xb.u);
+
+    // (1) One full segment fills the window.
+    if (ksock_sendto(a, dp as *void, 4000, 0 as *netaddr) != 4000) {
+        return failed(reason, "check failed: net-tcp-sws: the data is queued\0");
+    }
+    if (!nextData(xb, 41003) || sgSeq() != iss.wrappingAdd(1) || sgPaylen() as u32 != mss) {
+        return failed(reason, "check failed: net-tcp-sws: one full segment\0");
+    }
+
+    // (2) 200 of it acknowledged, the window still one segment: 200 bytes of room with the rest in flight. Then all of
+    // it acknowledged.
+    if (!tcpIn(xb, 41003, 2232, 9001, iss.wrappingAdd(1 + 200), TH_ACK, mss16) ||
+        !tcpIn(xb, 41003, 2232, 9001, iss.wrappingAdd(1 + mss), TH_ACK, mss16)) {
+        return failed(reason, "check failed: net-tcp-sws: the acknowledgements\0");
+    }
+
+    // (3) The next data is a full segment from where the first ended -- not the 200-byte sliver the partial
+    // acknowledgement opened.
+    if (!nextData(xb, 41003)) {
+        return failed(reason, "check failed: net-tcp-sws: the next data\0");
+    }
+    let at = sgSeq();
+    let n = sgPaylen() as u32;
+    if (at != iss.wrappingAdd(1 + mss) || n != mss) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("net-tcp-sws: next data at +");
+        line.decimal(at.wrappingSub(iss).wrappingSub(1) as u64);
+        line.text(", ");
+        line.decimal(n as u64);
+        line.text(" bytes (mss ");
+        line.decimal(mss as u64);
+        line.text(")");
+        KernelLog.send(LogLevel.Warn, line);
+    }
+    if (at != iss.wrappingAdd(1 + mss)) {
+        return failed(reason, "check failed: net-tcp-sws: from where the first ended\0");
+    }
+    if (n != mss) {
+        return failed(reason, "check failed: net-tcp-sws: a full segment\0");
+    }
+
+    if (!tcpIn(xb, 41003, 2232, 9001, iss.wrappingAdd(1 + 2 * mss), TH_RST | TH_ACK, 0)) {
+        return failed(reason, "check failed: net-tcp-sws: the reset\0");
+    }
+    nettest_ksock_put(a);
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-tcp-sws: a 200-byte opening with a segment in flight waited, and a full ");
+    line.decimal(mss as u64);
+    line.text("-byte segment followed the acknowledgement\n");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- net-fin-acks-last-data ----
+
+/// The world's FIN arrives while the host, having closed, still holds data it could not send -- the world's window held
+/// it back -- and that FIN acknowledges the last segment in flight. Until 2026-10-07 the FIN branch of tcp_input built
+/// a bare acknowledgement and did not run the output, and nothing else ever would: the host had closed, so no send was
+/// coming; the world had acknowledged everything in flight, so no acknowledgement was coming; and the retransmit timer,
+/// finding nothing in flight, retransmitted nothing and re-armed nothing. The 40 bytes and the host's own FIN stayed
+/// queued, the connection sat in CLOSING with its buffers and its table slot for ever, and the world waited for a FIN
+/// that never came. Found by fuzz_tcp_segments (docs/audit/2026-10-07-net-fuzz-report.md).
+/// Safety: the runner's `reason`.
+@export("selftest_net_fin_acks_last_data")
+unsafe fn finAcksLastData(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    fw_flush();
+    nat_flush();
+    var x = Link {
+        u: 0 as *mut tap,
+        uip: ip4(10, 77, 13, 1),
+        w: ip4(10, 77, 13, 99),
+        umac: [0x52, 0x54, 0x00, 0x1f, 0x00, 0x01],
+        wmac: [0x52, 0x54, 0x00, 0x1f, 0x00, 0x63],
+    };
+    if (!uplink(mut x, "falu\0")) {
+        return failed(reason, "check failed: net-fin-acks-last-data: the uplink tap\0");
+    }
+    var ls = 0 as *mut socket;
+    if (!nettest_hin_tcp_listener(borrow mut ls as *mut *mut socket, 2231)) {
+        return failed(reason, "check failed: net-fin-acks-last-data: the listener\0");
+    }
+    var data: [u8; 60] = [0; 60];
+    let dp = borrow mut data as *mut [u8; 60] as *mut u8;
+    pattern(dp, 60);
+    let xb = borrow x;
+    nettest_hin_drain(xb.u);
+
+    // The handshake, the world side by hand, with a window of 20 bytes.
+    var iss: u32 = 0;
+    if (!handshake(xb, 41002, 2231, 7000, 20, mut iss)) {
+        return failed(reason, "check failed: net-fin-acks-last-data: the handshake\0");
+    }
+    let a = accepted(ls);
+    if (a.isNull()) {
+        return failed(reason, "check failed: net-fin-acks-last-data: accepted\0");
+    }
+
+    // (1) 60 bytes into a window of 20: 20 go out, 40 wait. The host closes: its FIN queues behind the 40.
+    if (ksock_sendto(a, dp as *void, 60, 0 as *netaddr) != 60 ||
+        !nettest_hin_recv_stream(xb.u, 41002, iss.wrappingAdd(1), 0, 20, sg(), false)) {
+        return failed(reason, "check failed: net-fin-acks-last-data: 20 of 60 go out\0");
+    }
+    nettest_ksock_put(a); // FIN_WAIT_1
+
+    // (2) The world's FIN acknowledges the 20 in flight and opens its window. The 40 bytes follow (a retransmission of
+    // the first 20 may come too, and is allowed), then the host's FIN at iss + 61, acknowledging the world's. Before
+    // the fix nothing but a bare acknowledgement came.
+    if (!tcpIn(xb, 41002, 2231, 7001, iss.wrappingAdd(21), TH_FIN | TH_ACK, 64240) ||
+        !nettest_hin_recv_stream(xb.u, 41002, iss.wrappingAdd(1), 20, 60, sg(), false)) {
+        return failed(reason, "check failed: net-fin-acks-last-data: the 40 bytes follow\0");
+    }
+    var fin = false;
+    var k = 0;
+    while (k < 8 && !fin) {
+        if (!heard(xb, IPPROTO_TCP, 41002, HIN_TRIES)) {
+            return failed(reason, "check failed: net-fin-acks-last-data: a segment after the data\0");
+        }
+        fin = (sgFlags() & TH_FIN) != 0;
+        k += 1;
+    }
+    if (!fin || sgSeq() != iss.wrappingAdd(61) || sgAck() != 7002) {
+        return failed(reason, "check failed: net-fin-acks-last-data: the host's FIN\0");
+    }
+
+    // (3) The world acknowledges the FIN: the connection is over. Seen through the port: with the listener closed, the
+    // connection is the one pcb on 2231, and tcp_port_in_use passes over a TIME_WAIT pcb (the port may be bound again)
+    // but not a CLOSING one -- which is where the old tree left it, for ever. Asked of the table, not of a pcb pointer
+    // the host no longer owns.
+    if (!tcpIn(xb, 41002, 2231, 7002, iss.wrappingAdd(62), TH_ACK, 64240)) {
+        return failed(reason, "check failed: net-fin-acks-last-data: the FIN's acknowledgement\0");
+    }
+    nettest_ksock_put(ls);
+    let any2231 = v4addr(0, 2231);
+    var over = false;
+    var t: u32 = 0;
+    while (t < HIN_TRIES && !over) {
+        over = !tcp_port_in_use(AF_INET16, 2231, na(borrow any2231));
+        if (!over) {
+            sleepMs(10);
+        }
+        t += 1;
+    }
+    if (!over) {
+        return failed(reason, "check failed: net-fin-acks-last-data: the connection ended\0");
+    }
+    info(
+        "selftest: net-fin-acks-last-data: the world's FIN that acknowledged the last segment in flight drew the 40 bytes held by its window and then the host's FIN; the connection ended\n",
+    );
+    return true;
+}
+
+// ---- net-hoststate ----
+
+// The host's echo-reply hook: what reached it, and how often (written on the network worker).
+static ECHO_SRC: AtomicU32 = AtomicU32.constant(0);
+static ECHO_ID: AtomicU32 = AtomicU32.constant(0);
+static ECHO_N: AtomicU32 = AtomicU32.constant(0);
+
+/// Safety: called by icmp_input on the network worker.
+@callback
+unsafe fn echoHook(src: u32, id: u16, seq: u16) {
+    ECHO_SRC.storeWith(src, StoreOrdering.Relaxed);
+    ECHO_ID.storeWith(id as u32, StoreOrdering.Relaxed);
+    ECHO_N.fetchAddWith(1, Ordering.AcquireRelease);
+}
+
+fn noEchoHook() -> extern "C" fn(u32, u16, u16) => 0 as extern "C" fn(u32, u16, u16);
+
+/// An echo reply reached the hook past `base`, within tries x 10 ms.
+fn echoArrived(base: u32, tries: u32) -> bool {
+    for (i in 0..tries) {
+        if (ECHO_N.loadWith(LoadOrdering.Acquire) > base) {
+            return true;
+        }
+        sleepMs(10);
+    }
+    return false;
+}
+
+fn be16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+/// A u32 as it lies in memory (an address in network order).
+fn word(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// Store a checksum big-endian at bytes 2 and 3.
+/// Safety: `l4` has `n` readable bytes.
+unsafe fn checksum(l4: *mut u8, b: SliceMut<u8>, n: u32) {
+    b[2] = 0;
+    b[3] = 0;
+    be16(b, 2, nettest_fwt_ones_sum(l4 as *u8, n));
+}
+
+/// An ICMP Need-Fragmentation (type 3 code 4, next-hop MTU `mtu`) quoting a TCP segment the host sent: the IP header
+/// the host wrote plus the first 8 bytes of the segment (ports and sequence), which is all icmp_needfrag reads. 36
+/// bytes, checksummed -- icmp_input validates it.
+/// Safety: `l4` has room for 36 bytes.
+unsafe fn mkNeedfragTcp(l4: *mut u8, hostIp: u32, peerIp: u32, sport: u16, dport: u16, seq: u32, mtu: u16) -> u16 {
+    let b = SliceMut.fromRaw(l4, 36);
+    for (i in 0..36) {
+        b[truncate<usize>(i)] = 0;
+    }
+    b[0] = ICMP_DEST_UNREACH;
+    b[1] = ICMP_UNREACH_NEEDFRAG;
+    be16(b, 6, mtu); // the header's last 16 bits: the next-hop MTU
+    b[8] = 0x45;
+    be16(b, 10, 1240);
+    b[16] = 64;
+    b[17] = IPPROTO_TCP;
+    word(b, 20, hostIp);
+    word(b, 24, peerIp);
+    be16(b, 28, sport);
+    be16(b, 30, dport);
+    b[32] = truncate<u8>(seq >> 24);
+    b[33] = truncate<u8>(seq >> 16);
+    b[34] = truncate<u8>(seq >> 8);
+    b[35] = truncate<u8>(seq);
+    checksum(l4, b, 36);
+    return 36;
+}
+
+/// An ICMP port-unreachable quoting a TCP segment: an error with no consumer.
+/// Safety: as mkNeedfragTcp.
+unsafe fn mkUnreachTcp(l4: *mut u8, hostIp: u32, peerIp: u32, sport: u16, dport: u16, seq: u32) -> u16 {
+    let n = mkNeedfragTcp(l4, hostIp, peerIp, sport, dport, seq, 0);
+    let b = SliceMut.fromRaw(l4, 36);
+    b[1] = ICMP_UNREACH_PORT;
+    b[6] = 0;
+    b[7] = 0;
+    checksum(l4, b, n as u32);
+    return n;
+}
+
+/// A firewall rule in a zeroed room.
+/// Safety: the room holds a struct fw_rule (cmd checks).
+fn fwRule(
+    r: borrow mut Cmd,
+    direction: u8,
+    proto: u8,
+    verdict: u8,
+    dip: u32,
+    dprefix: u8,
+    port: u16,
+    sip: u32,
+    sprefix: u8,
+) -> *fw_rule {
+    r.words = [0; 8];
+    let p = borrow mut r.words as *mut [u64; 8] as *mut fw_rule;
+    unsafe {
+        let w = Ptr.toBorrowMut(p);
+        w.direction = direction;
+        w.proto = proto;
+        w.verdict = verdict;
+        w.dst_ip = dip;
+        w.dst_prefix = dprefix;
+        w.dst_port = port;
+        w.src_ip = sip;
+        w.src_prefix = sprefix;
+    }
+    return p as *fw_rule;
+}
+
+/// The host's UDP sockets: cs bound to 7100, never connected; cs2 and cs3 on 7101 and 7102.
+struct Socks {
+    cs: *mut socket;
+    cs2: *mut socket;
+    cs3: *mut socket;
+}
+
+/// `ping` from the host's cs to the world peer's `port`: whether all of it was sent.
+/// Safety: cs is the test's.
+unsafe fn sendPing(k: borrow Socks, ip: u32, port: u16) -> bool {
+    let pl: [u8; 4] = [0x70, 0x69, 0x6e, 0x67];
+    let to = v4addr(ip, port);
+    return ksock_sendto(k.cs, borrow pl as *[u8; 4] as *void, 4, na(borrow to)) == 4;
+}
+
+/// `ping` from the world (`sip`:`sp`) to the host's `dp`.
+/// Safety: as tcpFrom.
+unsafe fn pingIn(x: borrow Link, sip: u32, sp: u16, dp: u16) -> bool {
+    let pl: [u8; 4] = [0x70, 0x69, 0x6e, 0x67];
+    return udpFrom(x, sip, sp, dp, borrow pl as *[u8; 4] as *u8, 4);
+}
+
+/// What `s` received within tries x 10 ms (into BUF).
+/// Safety: `s` is the test's.
+unsafe fn got(s: *mut socket, tries: u32) -> i64 => nettest_hin_recv_sock(s, buf() as *mut void, 256, tries);
+
+/// A datagram the world sends to a host port no flow covers: the socket hears nothing, and UDP drops it quiet.
+/// Safety: as tcpFrom; `s` is the test's.
+unsafe fn unadmitted(x: borrow Link, sip: u32, sp: u16, dp: u16, s: *mut socket) -> bool {
+    let uq = now(Counter.UdpQuietDropped);
+    return pingIn(x, sip, sp, dp) && got(s, 10) == -(EAGAIN as i64) && rises(Counter.UdpQuietDropped, uq);
+}
+
+/// (6) the DNS proxy end to end under the DROP: a guest's query, the proxy's relay out the uplink from its
+/// *unconnected* socket, the upstream's answer admitted by the host's flow, the guest's answer with its own id. The
+/// socket is unconnected by design (it authenticates the sender itself), so nothing but this state could admit the
+/// answer.
+/// Safety: the runner's `reason`; the link is the test's.
+unsafe fn dnsProxy(reason: *mut *CChar, x: borrow Link) -> bool {
+    let gtmac: [u8; 6] = [0x52, 0x54, 0x00, 0x1b, 0x00, 0x11];
+    let gmac: [u8; 6] = [0x52, 0x54, 0x00, 0x1b, 0x00, 0x1f];
+    let gtm = borrow gtmac as *[u8; 6] as *u8;
+    let gm = borrow gmac as *[u8; 6] as *u8;
+    let gIp = ip4(10, 88, 9, 1);
+    let guest = ip4(10, 88, 9, 15);
+    let gt = nettest_tap_create("hstg\0".ptr as *CChar, gIp, MASK24_N, gtm);
+    if (gt.isNull()) {
+        return failed(reason, "check failed: net-hoststate: the guest's tap\0");
+    }
+    nettest_seed_arp(tap_netif(gt), guest, gm);
+    let svc = nettest_tapsvc_start(gt);
+    if (svc.isNull()) {
+        return failed(reason, "check failed: net-hoststate: the tap's services\0");
+    }
+    tapsvc_test_set_upstream(svc, x.w, 5300);
+    var msg: [u8; 64] = [0; 64];
+    let mp = borrow mut msg as *mut [u8; 64] as *mut u8;
+    let mlen = nettest_mk_dns(mp, 0x1357);
+    let len = nettest_mk_udp(l4(), guest, gIp, 4444, 53, mp as *u8, truncate<u16>(mlen));
+    var frame: [u8; 512] = [0; 512];
+    let fp = borrow mut frame as *mut [u8; 512] as *mut u8;
+    let flen = nettest_wrap(fp, gtm, gm, guest, gIp, 64, IPPROTO_UDP, l4() as *void, len);
+    let flows = now(Counter.HinFlowNew);
+    if (tap_inject(gt, fp as *void, flen) != 0 || !heard(x, IPPROTO_UDP, 5300, HIN_TRIES) || sgPaylen() < 12 ||
+        sgPaylen() > 64) {
+        return failed(reason, "check failed: net-hoststate: the proxy relays the query\0");
+    }
+    if (now(Counter.HinFlowNew) != flows + 1) {
+        return failed(reason, "check failed: net-hoststate: its send is recorded\0");
+    }
+    // The upstream's answer to the port the proxy sent from, built from the relayed query as net-dns's responder builds
+    // it.
+    var ans: [u8; 128] = [0; 128];
+    let alen = sgPaylen() as usize;
+    let pay = Slice.fromRaw((sg() as *u8).add(28), 64);
+    for (i in 0..alen) {
+        ans[i] = pay[i];
+    }
+    ans[2] = 0x81; // QR + RD + RA
+    ans[3] = 0x80;
+    ans[6] = 0; // ancount 1
+    ans[7] = 1;
+    let answer: [u8; 16] = [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 4, 0, 4, 93, 184, 216, 34]; // a name pointer, A, IN, TTL 4,
+    for (i in 0..16) {
+        let j = truncate<usize>(i);
+        ans[alen + j] = answer[j]; // ... 4 bytes of address
+    }
+    let o = alen + 16;
+    let est = now(Counter.HinAcceptEstablished);
+    let alen4 = nettest_mk_udp(l4(), x.w, x.uip, 5300, sgSport(), borrow ans as *[u8; 128] as *u8, truncate<u16>(o));
+    if (!nettest_hin_send(x.u, umacOf(x), wmacOf(x), x.w, x.uip, IPPROTO_UDP, l4() as *u8, alen4) ||
+        !rises(Counter.HinAcceptEstablished, est)) {
+        return failed(reason, "check failed: net-hoststate: the upstream's answer is admitted by state\0");
+    }
+    let r = nettest_recv_ip(gt);
+    if (r.isNull()) {
+        return failed(reason, "check failed: net-hoststate: the guest's answer\0");
+    }
+    let rl = m_length(r as *mbuf);
+    let copied = rl <= 256 && m_copydata(r as *mbuf, 0, rl, buf() as *mut void);
+    m_freem(r);
+    if (!copied) {
+        return failed(reason, "check failed: net-hoststate: the guest's answer fits\0");
+    }
+    let rx = Slice.fromRaw(buf() as *u8, 256);
+    if (wordOf(rx, ETH_HLEN + 16) != guest || rx[ETH_HLEN + 9] != IPPROTO_UDP) {
+        return failed(reason, "check failed: net-hoststate: to the guest\0");
+    }
+    let udp = ETH_HLEN + 20;
+    let dns = udp + 8;
+    let ip = dnsAnswerIp();
+    let end = rl as usize;
+    if (rd16(rx, udp + 2) != 4444 || rd16(rx, dns) != 0x1357 || (rx[dns + 2] & 0x80) == 0 || rx[end - 4] != ip[0] ||
+        rx[end - 3] != ip[1] || rx[end - 2] != ip[2] || rx[end - 1] != ip[3]) {
+        return failed(reason, "check failed: net-hoststate: with the guest's own id\0");
+    }
+    nettest_tapsvc_stop(svc);
+    nettest_tap_destroy(gt);
+    return true;
+}
+
+/// The body, with the uplink, the world rule and the host's sockets made.
+/// Safety: the runner's `reason`.
+unsafe fn hoststateBody(reason: *mut *CChar, x: borrow Link, k: borrow Socks, rWorld: *fw_rule) -> bool {
+    let uip = x.uip;
+    let w = x.w;
+    let w2 = ip4(10, 77, 9, 98);
+    nettest_hin_drain(x.u);
+
+    // (1) an unconnected UDP client's reply survives the DROP. The send is recorded on its way out; the reply on that
+    // one tuple is admitted by state, with no rule anywhere.
+    var flows = now(Counter.HinFlowNew);
+    if (!sendPing(k, w, 5300) || !heard(x, IPPROTO_UDP, 5300, HIN_TRIES) || sgSport() != 7100 || sgSrc() != uip) {
+        return failed(reason, "check failed: net-hoststate: the host's datagram goes out\0");
+    }
+    if (now(Counter.HinFlowNew) != flows + 1) {
+        return failed(reason, "check failed: net-hoststate: and is recorded\0");
+    }
+    var est = now(Counter.HinAcceptEstablished);
+    if (!pingIn(x, w, 5300, 7100) || got(k.cs, HIN_TRIES) != 4 || !rises(Counter.HinAcceptEstablished, est)) {
+        return failed(reason, "check failed: net-hoststate: the reply is admitted by state\0");
+    }
+
+    // The tuple is exactly one: another port at that peer, another peer, and another local port match no flow and take
+    // the default.
+    if (!unadmitted(x, w, 5301, 7100, k.cs)) {
+        return failed(reason, "check failed: net-hoststate: another port at the peer\0");
+    }
+    if (!unadmitted(x, w2, 5300, 7100, k.cs)) {
+        return failed(reason, "check failed: net-hoststate: another peer\0");
+    }
+    if (!unadmitted(x, w, 5300, 7101, k.cs2)) {
+        return failed(reason, "check failed: net-hoststate: another local port\0");
+    }
+
+    // A send the stack refuses opens nothing: the tuple is read before output_on and recorded only after it accepts, so
+    // an oversized datagram -- rejected with -EMSGSIZE, never on the wire -- leaves no state and its reverse tuple stays
+    // closed.
+    flows = now(Counter.HinFlowNew);
+    let toobig = v4addr(w, 5600);
+    if (ksock_sendto(k.cs, borrow OVERSIZE as *[u8; 2000] as *void, 2000, na(borrow toobig)) != -(EMSGSIZE as i64)) {
+        return failed(reason, "check failed: net-hoststate: an oversized datagram is refused\0");
+    }
+    if (now(Counter.HinFlowNew) != flows) {
+        return failed(reason, "check failed: net-hoststate: and opens nothing\0");
+    }
+    if (!unadmitted(x, w, 5600, 7100, k.cs)) {
+        return failed(reason, "check failed: net-hoststate: its reverse tuple stays closed\0");
+    }
+
+    // (2) one tuple, and no notion of intent: a second unsolicited datagram on the open tuple is admitted too (the
+    // socket's own validation is the second line), while the world initiating to a port the host never sent from takes
+    // the rules.
+    est = now(Counter.HinAcceptEstablished);
+    if (!pingIn(x, w, 5300, 7100) || got(k.cs, HIN_TRIES) != 4 || !rises(Counter.HinAcceptEstablished, est)) {
+        return failed(reason, "check failed: net-hoststate: a second datagram on the open tuple\0");
+    }
+    if (!unadmitted(x, w, 5400, 7102, k.cs3)) {
+        return failed(reason, "check failed: net-hoststate: the world initiating takes the rules\0");
+    }
+    // The only other match flow_find can report is the *forward* one -- the host's own tuple arriving inbound -- which
+    // on a real link means a datagram carrying one of our addresses as its source: ipv4_input drops it as a martian
+    // before any chain, which is why the state step need admit on the reverse match alone.
+    let bad = now(Counter.RxBadHeader);
+    est = now(Counter.HinAcceptEstablished);
+    let dropRule = now(Counter.HinDropRule);
+    let acceptRule = now(Counter.HinAcceptRule);
+    if (!pingIn(x, uip, 7100, 5300) || !rises(Counter.RxBadHeader, bad)) {
+        return failed(reason, "check failed: net-hoststate: the forward tuple is a martian\0");
+    }
+    if (now(Counter.HinAcceptEstablished) != est || now(Counter.HinDropRule) != dropRule ||
+        now(Counter.HinAcceptRule) != acceptRule) {
+        return failed(reason, "check failed: net-hoststate: before any chain\0");
+    }
+
+    // (3) the host can ping under the DROP: its echo request is recorded by identifier and the reply reaches the hook.
+    icmp_set_echo_reply_hook(echoHook);
+    var echoes = ECHO_N.loadWith(LoadOrdering.Acquire);
+    flows = now(Counter.HinFlowNew);
+    let q: [u8; 1] = [0x71];
+    if (icmp_send_echo(w, 0x7a7a, 1, borrow q as *[u8; 1] as *void, 1) != 0 || !heard(x, IPPROTO_ICMP, 0, HIN_TRIES) ||
+        sgFlags() != ICMP_ECHO) {
+        return failed(reason, "check failed: net-hoststate: the host's echo request\0");
+    }
+    if (now(Counter.HinFlowNew) != flows + 1) {
+        return failed(reason, "check failed: net-hoststate: recorded by identifier\0");
+    }
+    est = now(Counter.HinAcceptEstablished);
+    if (!icmpIn(x, nettest_fwt_mk_icmp_ck(l4(), ICMP_ECHO_REPLY, 0x7a7a)) || !echoArrived(echoes, 50)) {
+        return failed(reason, "check failed: net-hoststate: the reply reaches the hook\0");
+    }
+    if (ECHO_ID.loadWith(LoadOrdering.Relaxed) != 0x7a7a || ECHO_SRC.loadWith(LoadOrdering.Relaxed) != w) {
+        return failed(reason, "check failed: net-hoststate: from the peer, with the identifier\0");
+    }
+    if (!rises(Counter.HinAcceptEstablished, est)) {
+        return failed(reason, "check failed: net-hoststate: admitted by state\0");
+    }
+    // A reply carrying another identifier matches no flow: freed, no hook.
+    echoes = ECHO_N.loadWith(LoadOrdering.Acquire);
+    var iq = now(Counter.IcmpQuietDropped);
+    if (!icmpIn(x, nettest_fwt_mk_icmp_ck(l4(), ICMP_ECHO_REPLY, 0x7a7b)) || !rises(Counter.IcmpQuietDropped, iq)) {
+        return failed(reason, "check failed: net-hoststate: another identifier is freed\0");
+    }
+    if (echoArrived(echoes, 5)) {
+        return failed(reason, "check failed: net-hoststate: no hook\0");
+    }
+
+    // (4) an echo *request* is a request, not a reply: quiet delivery reaches icmp_input, which answers nothing and
+    // does not spend the host-wide echo-reply budget.
+    nettest_hin_drain(x.u);
+    iq = now(Counter.IcmpQuietDropped);
+    let replied = now(Counter.IcmpEchoReplied);
+    let rcvd = now(Counter.IcmpEchoRcvd);
+    if (!icmpIn(x, nettest_fwt_mk_icmp_ck(l4(), ICMP_ECHO, 0x5050)) || !rises(Counter.IcmpQuietDropped, iq)) {
+        return failed(reason, "check failed: net-hoststate: an echo request is delivered quiet\0");
+    }
+    if (heard(x, IPPROTO_ICMP, 0, 10)) {
+        return failed(reason, "check failed: net-hoststate: and answers nothing\0");
+    }
+    if (now(Counter.IcmpEchoReplied) != replied || now(Counter.IcmpEchoRcvd) != rcvd) {
+        return failed(reason, "check failed: net-hoststate: no budget spent\0");
+    }
+
+    // (5) path-MTU discovery survives the DROP. The host opens a connection outbound (PR #107's SYN_SENT acceptance
+    // point admits the SYN+ACK), sends a large segment, and the router's Need-Fragmentation -- delivered quiet -- is
+    // consumed only because TCP confirms the quoted segment is one of its own in flight.
+    nettest_hin_drain(x.u);
+    flows = now(Counter.HinFlowNew);
+    if (!nettest_hin_connect(w, 9100, "hst-connect\0".ptr as *CChar)) {
+        return failed(reason, "check failed: net-hoststate: the connect thread starts\0");
+    }
+    if (!heard(x, IPPROTO_TCP, 9100, HIN_TRIES) || sgFlags() != TH_SYN) {
+        return failed(reason, "check failed: net-hoststate: the host's SYN\0");
+    }
+    let hiss = sgSeq();
+    let hport = sgSport();
+    if (!tcpIn(x, 9100, hport, 6000, hiss.wrappingAdd(1), TH_SYN | TH_ACK, 64240) ||
+        !heard(x, IPPROTO_TCP, 9100, HIN_TRIES) || sgFlags() != TH_ACK || sgAck() != 6001) {
+        return failed(reason, "check failed: net-hoststate: the handshake completes\0");
+    }
+    var rc: i32 = -1;
+    var done = false;
+    for (i in 0..100) {
+        done = nettest_hin_connect_done(borrow mut rc as *mut i32);
+        if (done) {
+            break;
+        }
+        sleepMs(10);
+    }
+    if (!done || rc != 0) {
+        return failed(reason, "check failed: net-hoststate: the host's connect completes\0");
+    }
+    let cn = nettest_hin_connect_join();
+    if (cn.isNull()) {
+        return failed(reason, "check failed: net-hoststate: the connection's release is deferred\0"); // else put at once
+    }
+    if (now(Counter.HinFlowNew) != flows) {
+        return failed(reason, "check failed: net-hoststate: TCP is not recorded\0"); // no lock on that send path
+    }
+    if (ksock_sendto(cn, borrow BIG as *[u8; 1200] as *void, 1200, 0 as *netaddr) != 1200) {
+        return failed(reason, "check failed: net-hoststate: 1200 bytes are queued\0");
+    }
+    if (!heard(x, IPPROTO_TCP, 9100, HIN_TRIES) || sgPaylen() <= 600) {
+        return failed(reason, "check failed: net-hoststate: a large segment goes out\0");
+    }
+    let qseq = sgSeq();
+    // A Need-Fragmentation quoting a tuple with no connection reaches the consumer (the firewall admitted it to the
+    // layer that can tell) and is refused there: the cache does not move.
+    var needfrag = now(Counter.IcmpNeedfragRcvd);
+    var tcpPmtu = now(Counter.TcpPmtuUpdates);
+    var ipPmtu = now(Counter.IpPmtuUpdates);
+    if (!icmpIn(x, mkNeedfragTcp(l4(), uip, w, 9999, 9100, qseq, 576)) || !rises(Counter.IcmpNeedfragRcvd, needfrag)) {
+        return failed(reason, "check failed: net-hoststate: a stray need-frag reaches the consumer\0");
+    }
+    if (now(Counter.TcpPmtuUpdates) != tcpPmtu || now(Counter.IpPmtuUpdates) != ipPmtu) {
+        return failed(reason, "check failed: net-hoststate: and is refused there\0");
+    }
+    // The one quoting the live connection's in-flight segment is consumed, and the segment is retransmitted inside the
+    // new path MTU.
+    nettest_hin_drain(x.u);
+    tcpPmtu = now(Counter.TcpPmtuUpdates);
+    ipPmtu = now(Counter.IpPmtuUpdates);
+    if (!icmpIn(x, mkNeedfragTcp(l4(), uip, w, hport, 9100, qseq, 576)) || !rises(Counter.TcpPmtuUpdates, tcpPmtu) ||
+        !rises(Counter.IpPmtuUpdates, ipPmtu)) {
+        return failed(reason, "check failed: net-hoststate: the live connection's need-frag is consumed\0");
+    }
+    if (!heard(x, IPPROTO_TCP, 9100, HIN_TRIES) || sgSeq() != qseq || sgPaylen() > 536) {
+        return failed(reason, "check failed: net-hoststate: retransmitted inside the new path MTU\0");
+    }
+    // An ICMP error with no consumer is freed under the flag: nothing parses it, nothing is answered.
+    iq = now(Counter.IcmpQuietDropped);
+    if (!icmpIn(x, mkUnreachTcp(l4(), uip, w, hport, 9100, qseq)) || !rises(Counter.IcmpQuietDropped, iq)) {
+        return failed(reason, "check failed: net-hoststate: an error with no consumer is freed\0");
+    }
+    nettest_ksock_put(cn);
+    nettest_hin_drain(x.u);
+
+    if (!dnsProxy(reason, x)) {
+        return false;
+    }
+    nettest_hin_drain(x.u);
+
+    // (7) a send on a live flow refreshes it rather than recording a second; expiry closes the tuple, and a fresh send
+    // opens it again.
+    flows = now(Counter.HinFlowNew);
+    let live = now(Counter.Flows);
+    if (!sendPing(k, w, 5300)) {
+        return failed(reason, "check failed: net-hoststate: a send on the live flow\0");
+    }
+    if (now(Counter.HinFlowNew) != flows || now(Counter.Flows) != live) {
+        return failed(reason, "check failed: net-hoststate: refreshes it\0");
+    }
+    fw_age(clock_now_ns() + 31 * NS_PER_SEC);
+    if (!unadmitted(x, w, 5300, 7100, k.cs)) {
+        return failed(reason, "check failed: net-hoststate: expiry closes the tuple\0");
+    }
+    flows = now(Counter.HinFlowNew);
+    if (!sendPing(k, w, 5300) || now(Counter.HinFlowNew) != flows + 1) {
+        return failed(reason, "check failed: net-hoststate: a fresh send opens it again\0");
+    }
+    if (!pingIn(x, w, 5300, 7100) || got(k.cs, HIN_TRIES) != 4) {
+        return failed(reason, "check failed: net-hoststate: and the reply is admitted\0");
+    }
+    nettest_hin_drain(x.u);
+
+    // (8) neither a forwarded guest flow nor a loopback send is the host's: a masqueraded guest-to-world flow leaves
+    // through output_on, not ipv4_output, and loopback never reaches a chain.
+    var fa = 0 as *mut file;
+    var fb = 0 as *mut file;
+    let tapPath = "/dev/net/tap\0".ptr as *CChar;
+    if (nettest_vfs_open(tapPath, O_RDWR | O_NONBLOCK, borrow mut fa as *mut *mut file) != 0 || fa.isNull() ||
+        nettest_vfs_open(tapPath, O_RDWR | O_NONBLOCK, borrow mut fb as *mut *mut file) != 0 || fb.isNull()) {
+        return failed(reason, "check failed: net-hoststate: two guests open their taps\0");
+    }
+    let ga = ip4(10, 0, 3, 15);
+    let gb = ip4(10, 0, 4, 15);
+    let amac: [u8; 6] = [0x52, 0x54, 0x00, 0x1b, 0x00, 0x2a];
+    let bmac: [u8; 6] = [0x52, 0x54, 0x00, 0x1b, 0x00, 0x2b];
+    let tap0mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
+    let am = borrow amac as *[u8; 6] as *u8;
+    let t0 = borrow tap0mac as *[u8; 6] as *u8;
+    let pl: [u8; 4] = [0x70, 0x69, 0x6e, 0x67];
+    let plp = borrow pl as *[u8; 4] as *u8;
+    if (!seed("tap0\0", ga, am)) {
+        return failed(reason, "check failed: net-hoststate: tap0\0");
+    }
+    flows = now(Counter.HinFlowNew);
+    var len = nettest_mk_udp(l4(), ga, w, 4500, 5300, plp, 4);
+    let out = nettest_fwt_send(fa, t0, am, ga, w, IPPROTO_UDP, l4() as *u8, len);
+    if (!out || !heard(x, IPPROTO_UDP, 5300, HIN_TRIES) ||
+        sgSrc() != uip || sgSport() == 4500) {
+        return failed(reason, "check failed: net-hoststate: the guest's datagram is masqueraded\0");
+    }
+    if (now(Counter.HinFlowNew) != flows) {
+        return failed(reason, "check failed: net-hoststate: not the host's flow\0");
+    }
+    flows = now(Counter.HinFlowNew);
+    var lo = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET_S, SOCK_DGRAM, 0, borrow mut lo as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-hoststate: a loopback socket\0");
+    }
+    let toLo = v4addr(ip4(127, 0, 0, 1), 7100);
+    if (ksock_sendto(lo, plp as *void, 4, na(borrow toLo)) != 4 || got(k.cs, HIN_TRIES) != 4) {
+        return failed(reason, "check failed: net-hoststate: the loopback send arrives\0");
+    }
+    nettest_ksock_put(lo);
+    if (now(Counter.HinFlowNew) != flows) {
+        return failed(reason, "check failed: net-hoststate: loopback records nothing\0");
+    }
+
+    // (9) the host's share is its own: 64 flows record, the 65th does not -- its datagram still leaves, only its reply
+    // then takes the rules -- and the guests' pool is untouched.
+    fw_flush();
+    if (fw_rule_add(FW_HOST_GUEST_IP, 0, rWorld) != 0) { // fw_flush cleared it
+        return failed(reason, "check failed: net-hoststate: the world rule again\0");
+    }
+    flows = now(Counter.HinFlowNew);
+    for (i in 0..FW_FLOW_QUOTA_HOST) {
+        if (!sendPing(k, w, truncate<u16>(6000 + i))) {
+            return failed(reason, "check failed: net-hoststate: a send toward the quota\0");
+        }
+    }
+    if (now(Counter.HinFlowNew) != flows + (FW_FLOW_QUOTA_HOST as u64) ||
+        now(Counter.Flows) != FW_FLOW_QUOTA_HOST as u64) {
+        return failed(reason, "check failed: net-hoststate: 64 flows record\0");
+    }
+    nettest_hin_drain(x.u);
+    flows = now(Counter.HinFlowNew);
+    let unrecorded = now(Counter.HinFlowUnrecorded);
+    let last = truncate<u16>(6000 + FW_FLOW_QUOTA_HOST);
+    if (!sendPing(k, w, last)) {
+        return failed(reason, "check failed: net-hoststate: the 65th send\0");
+    }
+    if (now(Counter.HinFlowUnrecorded) != unrecorded + 1 || now(Counter.HinFlowNew) != flows) {
+        return failed(reason, "check failed: net-hoststate: the 65th does not record\0");
+    }
+    if (!heard(x, IPPROTO_UDP, last, HIN_TRIES)) {
+        return failed(reason, "check failed: net-hoststate: still sent\0");
+    }
+    // A guest-to-guest flow still records with the host's share full.
+    if (!seed("tap1\0", gb, borrow bmac as *[u8; 6] as *u8)) {
+        return failed(reason, "check failed: net-hoststate: tap1\0");
+    }
+    var abRoom = cmd(layoutOf<fw_rule>().size);
+    let aToB = fwRule(mut abRoom, FW_DIR_TO_GUEST, IPPROTO_UDP, FW_ACCEPT, gb, 32, 7300, 0, 0);
+    if (fw_rule_add(ga, 0, aToB) != 0) {
+        return failed(reason, "check failed: net-hoststate: the A-to-B rule\0");
+    }
+    let flowNew = now(Counter.FlowNew);
+    let unrecorded2 = now(Counter.HinFlowUnrecorded);
+    len = nettest_mk_udp(l4(), ga, gb, 4600, 7300, plp, 4);
+    if (!nettest_fwt_send(fa, t0, am, ga, gb, IPPROTO_UDP, l4() as *u8, len) || !rises(Counter.FlowNew, flowNew)) {
+        return failed(reason, "check failed: net-hoststate: a guest-to-guest flow still records\0");
+    }
+    if (now(Counter.HinFlowUnrecorded) != unrecorded2) {
+        return failed(reason, "check failed: net-hoststate: not from the host's share\0");
+    }
+
+    // (10) state beats the hardened *default* too, not only a rule. A clean share first -- step (9) deliberately spent
+    // the host's, and a flow that is never recorded is exactly what the default then drops. The verdicts are taken and
+    // the default restored before anything is asserted, so no failure here can leave the machine hardened.
+    fw_flush();
+    while (got(k.cs, 1) > 0) {
+        // nothing of an earlier step's left queued
+    }
+    if (fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_FROM_UPLINK, FW_DROP) != 0) {
+        return failed(reason, "check failed: net-hoststate: the hardened default\0");
+    }
+    let sent = sendPing(k, w, 5500);
+    let injected = pingIn(x, w, 5500, 7100);
+    let reply = got(k.cs, HIN_TRIES);
+    let unsolicited = pingIn(x, w, 5501, 7100);
+    let none = got(k.cs, 10);
+    let restored = fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_FROM_UPLINK, FW_ACCEPT);
+    if (restored != 0) {
+        return failed(reason, "check failed: net-hoststate: the default is restored\0");
+    }
+    if (!sent || !injected || reply != 4) {
+        return failed(reason, "check failed: net-hoststate: state beats the hardened default\0");
+    }
+    if (!unsolicited || none != -(EAGAIN as i64)) {
+        return failed(reason, "check failed: net-hoststate: which still drops the unsolicited\0");
+    }
+    nettest_file_put(fa);
+    nettest_file_put(fb);
+    return true;
+}
+
+// Off the stack: a datagram over the path MTU, and the large segment.
+static mut OVERSIZE: [u8; 2000] = [0; 2000];
+static mut BIG: [u8; 1200] = [0; 1200];
+
+/// The tap `name`'s guest `guest` seeded behind it.
+/// Safety: thread context.
+unsafe fn seed(name: StringView, guest: u32, mac: *u8) -> bool {
+    let n = netif_find(name.ptr as *CChar);
+    if (n.isNull()) {
+        return false;
+    }
+    nettest_seed_arp(n, guest, mac);
+    netif_put(n);
+    return true;
+}
+
+/// net-hoststate: under a hardened host the replies to its own unconnected UDP sends and echo requests are admitted by
+/// state on exactly one tuple, the DNS proxy relays and answers end to end, a Need-Fragmentation is consumed only where
+/// TCP confirms the quoted segment, an echo request draws nothing, a send refreshes rather than re-records, expiry
+/// closes the tuple, and the host's share holds while the guests' pool stays its own.
+/// Safety: the runner's `reason`.
+@export("selftest_net_hoststate")
+unsafe fn hoststate(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    fw_flush();
+    nat_flush();
+
+    // The uplink: a real, non-guest link, the world on its far side.
+    var x = Link {
+        u: 0 as *mut tap,
+        uip: ip4(10, 77, 9, 1),
+        w: ip4(10, 77, 9, 99),
+        umac: [0x52, 0x54, 0x00, 0x1b, 0x00, 0x01],
+        wmac: [0x52, 0x54, 0x00, 0x1b, 0x00, 0x63],
+    };
+    if (!uplink(mut x, "hstu\0")) {
+        return failed(reason, "check failed: net-hoststate: the uplink tap\0");
+    }
+    nettest_seed_arp(tap_netif(x.u), ip4(10, 77, 9, 98), borrow x.wmac as *[u8; 6] as *u8);
+
+    // A DROP rule covering this test's world, so every admission below is the host's own state and nothing else -- and
+    // scoped by source rather than left as the machine-wide default, so that a failing assertion here cannot harden the
+    // real uplink for every test that follows. (The hardened *default* is exercised at the end, with its verdicts taken
+    // before anything is asserted.)
+    var worldRoom = cmd(layoutOf<fw_rule>().size);
+    let rWorld = fwRule(mut worldRoom, FW_DIR_FROM_UPLINK, 0, FW_DROP, 0, 0, 0, ip4(10, 77, 9, 0), 24);
+    if (fw_rule_add(FW_HOST_GUEST_IP, 0, rWorld) != 0) {
+        return failed(reason, "check failed: net-hoststate: the world rule\0");
+    }
+    var k = Socks { cs: 0 as *mut socket, cs2: 0 as *mut socket, cs3: 0 as *mut socket };
+    if (!nettest_hin_udp_listener(borrow mut k.cs as *mut *mut socket, 0, 7100) || // bound, never connected
+        !nettest_hin_udp_listener(borrow mut k.cs2 as *mut *mut socket, 0, 7101) ||
+        !nettest_hin_udp_listener(borrow mut k.cs3 as *mut *mut socket, 0, 7102)) {
+        return failed(reason, "check failed: net-hoststate: the host's UDP sockets\0");
+    }
+    pattern(borrow mut BIG as *mut [u8; 1200] as *mut u8, 1200);
+    let ok = hoststateBody(reason, borrow x, borrow k, rWorld);
+    icmp_set_echo_reply_hook(noEchoHook());
+    if (!ok) {
+        return false;
+    }
+    nettest_ksock_put(k.cs);
+    nettest_ksock_put(k.cs2);
+    nettest_ksock_put(k.cs3);
+    nettest_hin_drain(x.u);
+    nettest_tap_destroy(x.u);
+    fw_flush();
+    nat_flush();
+    info(
+        "selftest: net-hoststate: under a hardened host the replies to its own unconnected UDP sends and echo requests were admitted by state on exactly one tuple (another port, peer or local port was not), the DNS proxy relayed and answered end to end through its unconnected socket, a Need-Fragmentation was consumed only where TCP confirmed the quoted segment and the segment came back inside the new MTU, an echo request drew nothing and spent no budget, a send refreshed rather than re-recorded, expiry closed the tuple, and the host's share held while the guests' pool stayed its own",
+    );
+    return true;
+}

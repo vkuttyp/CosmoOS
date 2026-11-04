@@ -1089,7 +1089,13 @@ as `nettest_hin_mk_tcp`, `nettest_hin_send`, `nettest_hin_recv`,
 `nettest_hin_recv_sock` and the two listeners; the datagram read back,
 `struct hin_seg`, moves to `nettest.h`. The host's outbound connect, whose
 thread may outlive the test, stays in `nettest.c` behind
-`nettest_hin_connect`, `_done` and `_join`.
+`nettest_hin_connect`, `_done` and `_join`. Batch 11,
+`nettest_hoststate.cee`: net-zero-window-probe, net-tcp-sws,
+net-fin-acks-last-data and net-hoststate (the host's own state), with the
+echo-reply hook (a callback writing atomics), the Need-Fragmentation and
+port-unreachable quoting a host segment, and the wait for the next data
+segment; a pcb's retransmit count is read atomically through
+`nettest_tcp_retransmits`, as the C read it.
 
 Size: about 3.0x.
 

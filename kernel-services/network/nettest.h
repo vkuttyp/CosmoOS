@@ -153,6 +153,9 @@ bool nettest_hin_connect(uint32_t ip, uint16_t port, const char *name);
 bool nettest_hin_connect_done(int *rc);
 struct socket *nettest_hin_connect_join(void);
 
+/* nettest.c: a pcb's retransmit count, read atomically (nettest_hoststate.cee). */
+uint64_t nettest_tcp_retransmits(struct tcp_pcb *pcb);
+
 /* nettest_ctl.cee: where a /dev/net/tapctl snapshot with `pf_rules`
  * forwards has its flow section, and the byte length it should have (-1:
  * a section of another version). */
