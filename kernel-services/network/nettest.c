@@ -543,227 +543,23 @@ void nettest_netif_set_steering(bool on) { nt_netif_set_steering(on); }
 
 bool nettest_defer_mbuf_slot(struct mbuf **slot) { return selftest_defer(nt_rel_mbuf_slot, slot); }
 
-/* --- the pcb and its timers -----------------------------------------------
+/* --- the pcb and its timers, and a duplicated received frame -----------------
  *
- * docs/audit/next-subsystem-lifetime-windows.md. pcb_kill_locked cancels
- * four timers in a row, and each timer_cancel_sync must return only once
- * the callback is not running -- or the callback dereferences a pcb the
- * caller is about to free.
- *
- * timer_cancel_sync itself is tested, on a probe object, in the quiesce
- * suite. What is not tested is the integration, and aiming a test at it
- * takes care: timer_kick's first act is pcb_get, so a hold placed after
- * it measures reference counting and would pass with timer_cancel_sync
- * stubbed out. The hook this uses is placed *before* the acquisition,
- * and the callback checks the pcb's mark after the held interval as well
- * as on entry -- so the interval belongs to synchronous cancellation
- * alone, and an entry-only check is not mistaken for evidence about it.
+ * tcp-pcb-timer-free and net-rx-dup are CeeSafe (nettest_hooks.cee), each
+ * exported only where its hooks exist: the timer test's body under
+ * CONFIG_DEBUG, net-rx-dup under CONFIG_FAULTINJECT. Without them the C's
+ * skips stand here. The pinning wrapper is this file's.
  */
+bool nettest_tcp_pcb_timer_free_pinned(const char **reason);
 
-#if CONFIG_DEBUG
-struct tcp_releaser {
-    volatile unsigned stop;
-};
-
-struct tcp_armer {
-    struct tcp_pcb *pcb;
-    struct tcp_pcb *decoy;
-};
-
-static void tcp_armer_main(void *arg)
-{
-    struct tcp_armer *a = arg;
-    /* A stranger first: the decoy's timer fires a tick before the test
-     * pcb's, while the hold is armed. That is the sighting's shape -- a
-     * connection an earlier test left behind fired first and was held
-     * in the test's place -- made certain rather than waited for. The
-     * hold, armed by identity, must let it through. */
-    tcp_test_arm_rexmit(a->decoy, 1000000ULL);             /* 1 ms, on this CPU's queue */
-    tcp_test_arm_rexmit(a->pcb, 1000000ULL + TICK_NS);     /* a tick later, same queue */
-    /*
-     * Stay alive on this CPU past the tick that fires the timer, on
-     * purpose. The callback then parks in interrupt context ABOVE this
-     * thread, which is the placement that hung the boot twice on
-     * 2026-09-23 (docs/testing/flakes.md, "tcp-pcb-timer-free's held
-     * callback parked on a CPU nobody could release it from"): the test
-     * used to join this thread before it created the releaser, so a
-     * 1 ms timer that fired before this thread had finished exiting left
-     * nothing in the machine that could let the callback go. Making the
-     * placement certain is what makes the fix a proof rather than a
-     * rerun; the releaser now exists before the timer is armed, and this
-     * thread is joined only after the release.
-     */
-    uint64_t until = clock_now_ns() + 1000000ULL + 3 * TICK_NS;
-    while (clock_now_ns() < until)
-        arch_cpu_relax();
-}
-
-/* Lets the parked callback go, but only once a cancel is demonstrably
- * waiting for it. Releasing on a timer would let the callback leave
- * before any cancel looked, and the test would pass having raced
- * nothing. */
-static void tcp_releaser_main(void *arg)
-{
-    struct tcp_releaser *r = arg;
-    /* Bounded, and the bound is a failure rather than a fallback: if no
-     * cancel ever spins, the callback is released so the machine does
-     * not hang, and the test's own assertion on the spin count is what
-     * reports it. */
-    uint64_t deadline = clock_now_ns() + 5000000000ULL;
-    while (!__atomic_load_n(&r->stop, __ATOMIC_ACQUIRE)) {
-        if (timer_test_cancel_spins() > 0 || clock_now_ns() > deadline) {
-            tcp_test_release_callback();
-            return;
-        }
-        sched_yield();
-    }
-    tcp_test_release_callback();   /* never leave a callback parked */
-}
-#endif /* CONFIG_DEBUG */
-
-static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
-{
 #if !CONFIG_DEBUG
+bool nettest_tcp_pcb_timer_free_pinned(const char **reason)
+{
     (void)reason;
     kinfo("selftest: tcp-pcb-timer-free: no test hooks in this build; skipping");
     return true;
-#else
-    unsigned threads0 = thread_count();
-    /*
-     * Three CPUs, and each has a job the other two cannot do.
-     *
-     * The callback parks on `cpu` and spins there, so nothing else on
-     * that CPU can run -- the releaser cannot live with it. This CPU
-     * calls tcp_close, which cancels under pcb->lock with interrupts
-     * disabled and then spins in timer_cancel_sync, so the releaser
-     * cannot live here either. It needs a third. Putting it beside the
-     * callback is what hung the first version of this test.
-     */
-    unsigned here = arch_cpu_id();   /* pinned by the wrapper: this thread stays off both CPUs below */
-    unsigned cpu = 0, rel_cpu = 0;
-    bool have_cpu = false, have_rel = false;
-    for (unsigned c = 0; c < cpu_count(); c++) {
-        if (c == here || !cpu_online(c))
-            continue;
-        if (!have_cpu) {
-            cpu = c;
-            have_cpu = true;
-        } else if (!have_rel) {
-            rel_cpu = c;
-            have_rel = true;
-        }
-    }
-    if (!have_cpu || !have_rel) {
-        kinfo("selftest: tcp-pcb-timer-free: needs three CPUs (callback, closer, releaser), have %u", cpu_count());
-        return true;
-    }
-
-    struct tcp_pcb *pcb = tcp_pcb_new(COSMO_AF_INET);
-    CHECK(pcb != NULL);
-    struct tcp_pcb *decoy = tcp_pcb_new(COSMO_AF_INET);
-    if (decoy == NULL) {
-        tcp_close(pcb);
-        CHECK(decoy != NULL);
-    }
-
-    timer_test_reset_cancel_spins();
-    tcp_test_hold_callback(pcb);
-
-    /*
-     * The releaser FIRST, before anything can park: it is the one thread
-     * that can end a hold, and it must exist whatever CPU the callback
-     * lands on and whatever this thread is blocked in. The first version
-     * created it only after joining the armer, and a callback that fired
-     * above the still-live armer took the armer, the join, and the
-     * releaser that was never made with it -- a hard lockup at ten
-     * seconds or an unanswered shootdown at one (flakes.md).
-     */
-    struct tcp_releaser rel = { 0 };
-    struct thread *rt = thread_create_on(tcp_releaser_main, &rel, "tcprel", SCHED_PRIO_DEFAULT, CPUMASK_OF(rel_cpu));
-    if (rt == NULL) {
-        /* No timer is armed yet: disarm and close both, then fail
-         * (found in review: the decoy leaked here, and so did the pcb). */
-        tcp_test_hold_callback(NULL);
-        tcp_close(decoy);
-        tcp_close(pcb);
-        CHECK(rt != NULL);
-    }
-
-    /* Arm the rexmit timer *from* the other CPU, because a timer lands on
-     * the queue of the CPU that starts it and this window needs the
-     * callback somewhere other than the closer. The armer lingers past
-     * the tick on purpose (see it), so the callback parks above it; it
-     * is joined only after the release, below. */
-    struct tcp_armer arm = { .pcb = pcb, .decoy = decoy };
-    struct thread *at = thread_create_on(tcp_armer_main, &arm, "tcparm", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
-    if (at == NULL) {
-        /* The releaser holds a pointer into this frame; no return leaves
-         * it running (found in review). */
-        __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
-        thread_join(rt);
-        tcp_test_hold_callback(NULL);
-        tcp_close(decoy);
-        tcp_close(pcb);
-        CHECK(at != NULL);
-    }
-
-    uint64_t deadline = clock_now_ns() + 2000000000ULL;
-    while (!tcp_test_callback_entered()) {
-        if (clock_now_ns() > deadline) {
-            tcp_test_release_callback();
-            __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
-            thread_join(rt);
-            thread_join(at);
-            tcp_test_hold_callback(NULL);
-            tcp_close(decoy);
-            tcp_close(pcb);   /* cancels its timer, whatever state it is in */
-            *reason = "the timer callback never entered the hold";
-            return false;
-        }
-        sched_yield();
-    }
-    unsigned cb_cpu = tcp_test_callback_cpu();
-
-    /* The close cancels all four timers; the first must wait for the
-     * callback that is inside the object. */
-    tcp_close(pcb);
-    __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
-
-    /* Both threads joined BEFORE anything is judged: a failing check
-     * returns from this frame, and the releaser reads `rel` in it (found
-     * in review). The armer is joinable now because the close released
-     * the callback it was under. */
-    thread_join(rt);
-    thread_join(at);
-    /* Read before the hold is dropped: tcp_test_hold_callback(NULL)
-     * resets these counters. */
-    unsigned spins = timer_test_cancel_spins();
-    unsigned checked = tcp_test_callback_checked();
-    unsigned saw_dead = tcp_test_callback_saw_dead();
-    unsigned passed = tcp_test_callback_passed();
-    tcp_test_hold_callback(NULL);
-    tcp_close(decoy);
-
-    CHECK(passed >= 1);                            /* the decoy fired while armed, and was let through */
-    CHECK(spins > 0);                              /* a cancel really waited */
-    CHECK(checked >= 1);                           /* and the callback checked after the hold */
-    CHECK(saw_dead == 0);                          /* the claim: it never saw the poison */
-    /* The placement, asserted rather than assumed: the callback ran on
-     * the armer's CPU, and neither on this thread's nor the releaser's. */
-    CHECK(cb_cpu == cpu);
-
-    uint64_t settle = clock_now_ns() + 500000000ULL;
-    while (thread_count() != threads0 && clock_now_ns() < settle)
-        sched_yield();
-    CHECK(thread_count() == threads0);
-
-    kinfo("selftest: tcp-pcb-timer-free: a cancel spun %u time(s) for a callback holding the pcb, which stayed live "
-          "through the interval; callback on cpu %u above its armer, closer on %u, releaser on %u; "
-          "%u other callback(s) let through",
-          spins, cb_cpu, here, rel_cpu, passed);
-    return true;
-#endif
 }
+#endif
 
 /* Pinned for the whole test: "another CPU than mine" is a claim about
  * this thread's CPU that must outlive its sleeps (S25); a callback or a
@@ -772,10 +568,25 @@ static bool selftest_tcp_pcb_timer_free_pinned(const char **reason)
 bool selftest_tcp_pcb_timer_free(const char **reason)
 {
     cpumask_t saved = thread_pin_self();
-    bool r = selftest_tcp_pcb_timer_free_pinned(reason);
+    bool r = nettest_tcp_pcb_timer_free_pinned(reason);
     thread_set_affinity_self(saved);
     return r;
 }
+
+#if !CONFIG_FAULTINJECT
+bool selftest_net_rx_dup(const char **reason)
+{
+    (void)reason;
+    kinfo("selftest: net-rx-dup: fault injection compiled out of this build; skipping");
+    return true;
+}
+#endif
+
+/* The values nettest_hooks.cee writes as its own constants, and its room: */
+_Static_assert(SCHED_PRIO_DEFAULT == 32 && TICK_NS == 4000000 && FI_NET_RX_DUP == 12 && COSMO_AF_INET == 2 &&
+                   ETH_HLEN == 14 && sizeof(cpumask_t) == 8,
+               "nettest_hooks.cee's thread.h, timer.h, faultinject.h and ether.h values");
+_Static_assert(sizeof(struct fi_stats) <= 512 && sizeof(struct arp_stats) <= 512, "nettest_hooks.cee's rooms");
 
 
 static void sort_u64(uint64_t *v, unsigned n)
@@ -789,108 +600,6 @@ static void sort_u64(uint64_t *v, unsigned n)
         }
         v[j] = x;
     }
-}
-
-/* --- a duplicated received frame (FI_NET_RX_DUP) ----------------------------
- *
- * A frame delivered twice -- a link-layer retransmit, a switch flooding --
- * must leave the stack as a single delivery would: TCP hands a duplicated
- * segment to the socket once (sequence dedup), ARP keeps one cache entry.
- * The injection in rx_common duplicates every frame the armed thread
- * receives in thread context; the test drives it over loopback (where the
- * hook fires) and, when an ethernet interface exists, once through the
- * ethernet receive path for ARP. The rule is armed for this thread only, so
- * concurrent network work is untouched.
- */
-bool selftest_net_rx_dup(const char **reason)
-{
-#if !CONFIG_FAULTINJECT
-    (void)reason;
-    kinfo("selftest: net-rx-dup: fault injection compiled out of this build; skipping");
-    return true;
-#else
-    unsigned socks0 = socket_count();
-
-    /* Arm the duplication for this thread, then move a pattern stream over
-     * loopback. Every frame this thread delivers to rx_common is doubled;
-     * tcp_sink_thread verifies the pattern and that exactly the bytes sent
-     * arrived, so a re-delivered duplicate would overshoot or break it. */
-    faultinject_set(FI_NET_RX_DUP, 1, 0, thread_current());
-    struct netaddr dst = v4addr(INADDR_LOOPBACK_N, 6070);
-    bool tcp_ok = nettest_tcp_transfer(reason, &dst, 256u * 1024u, 0);   /* nettest_lo.cee's */
-    struct fi_stats fst;
-    faultinject_stats(FI_NET_RX_DUP, &fst);
-
-    /* ARP idempotency, when an ethernet interface is present: feed one
-     * request addressed to us through the full receive path (netif_rx ->
-     * ether_input -> arp_input). The injection doubles it, so arp_input runs
-     * twice and two replies go out -- proof the duplicate was delivered --
-     * but the asker is recorded once. */
-    bool arp_present = false, arp_doubled = false, arp_one_entry = false;
-    struct netif *nif = (tcp_ok ? netif_default() : NULL);
-    if (nif != NULL) {
-        netif_put(nif);   /* borrowed: the default nif is not unregistered under the tests */
-        arp_present = true;
-        static const uint8_t asker_mac[ETH_ALEN] = { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x42 };
-        uint32_t asker = IPV4_ADDR(10, 99, 0, 70);
-        struct arp_stats a0, a1 = {0};
-        arp_get_stats(&a0);
-        struct mbuf *f = m_getcl();
-        if (f != NULL) {
-            f->len = f->pkt.len = ETH_HLEN + 28;
-            uint8_t *p = f->data;
-            memset(p, 0, ETH_HLEN + 28);
-            memcpy(p, nif->mac, ETH_ALEN);        /* dst = us */
-            memcpy(p + ETH_ALEN, asker_mac, ETH_ALEN);
-            p[12] = 0x08; p[13] = 0x06;           /* ethertype ARP */
-            uint8_t *a = p + ETH_HLEN;
-            a[1] = 1;     /* htype ethernet */
-            a[2] = 0x08;  /* ptype IPv4 */
-            a[4] = ETH_ALEN;
-            a[5] = 4;
-            a[7] = 1;     /* op: request */
-            memcpy(a + 8, asker_mac, ETH_ALEN);
-            memcpy(a + 14, &asker, 4);
-            memcpy(a + 24, &nif->ip4.addr, 4);
-            netif_rx(nif, f);
-            /* Wait on the counter (not a fixed settle): one request in, two
-             * replies out is the duplicate delivered. */
-            for (unsigned i = 0; i < 500; i++) {
-                arp_get_stats(&a1);
-                if (a1.replies_sent >= a0.replies_sent + 2)
-                    break;
-                thread_sleep_ms(10);
-                sched_watchdog_kick();
-            }
-            uint8_t mac[ETH_ALEN];
-            arp_doubled = a1.replies_sent >= a0.replies_sent + 2;
-            arp_one_entry = arp_lookup(nif, asker, mac) && memcmp(mac, asker_mac, ETH_ALEN) == 0
-                            && a1.entries == a0.entries + 1;
-            arp_delete(nif, asker);   /* remove only the entry this test added */
-        }
-    }
-
-    faultinject_clear(FI_NET_RX_DUP);
-
-    if (!tcp_ok)
-        return false;   /* tcp_transfer set *reason */
-    CHECK(fst.hits > 0);   /* not vacuous: the injection fired */
-    /* That a delivered duplicate reaches the stack is proved by the ARP
-     * phase below (one request in, two replies out): a wholly-duplicate TCP
-     * segment is trimmed against rcv_nxt and absorbed silently, so no TCP
-     * counter isolates it -- the ARP path, which replies per request, does.
-     * The TCP phase proves the dedup is correct given that delivery. */
-    if (arp_present) {
-        CHECK(arp_doubled);     /* the duplicated request yielded two replies */
-        CHECK(arp_one_entry);   /* ... but one cache entry */
-    }
-    thread_sleep_ms(50);
-    CHECK(socket_count() == socks0);
-    kinfo("selftest: net-rx-dup: %llu frames doubled, TCP delivered 262144 bytes once%s",
-          (unsigned long long)fst.hits,
-          arp_present ? ", ARP kept one entry across a doubled request" : " (no ethernet interface: ARP skipped)");
-    return true;
-#endif
 }
 
 /* --- harness-driven echo over the real interface --------------------------------------- */

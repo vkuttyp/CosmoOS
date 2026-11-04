@@ -1105,7 +1105,13 @@ with the OUTPUT rule they build; and `nettest_tapdev.cee`, tap-ready (the
 tap's file waited on, a killed reader) and net-dhcp-client (the kernel's
 client against a fixture interface, whose transmit is a callback), the
 latter exported only under `CONFIG_SELFTEST` (`@cfg`), where `nettest.c`
-keeps the C's skip otherwise.
+keeps the C's skip otherwise. Batch 14, `nettest_hooks.cee`:
+tcp-pcb-timer-free and net-rx-dup, the two that need the debug and
+fault-injection builds' hooks, each body exported only where its hooks
+exist (`@cfg("CONFIG_DEBUG")`, `@cfg("CONFIG_FAULTINJECT")`) and the C's
+skip kept in `nettest.c` otherwise, with the timer test's pinning
+wrapper; its armer and releaser threads read static state, not the
+test's frame.
 
 Size: about 3.0x.
 

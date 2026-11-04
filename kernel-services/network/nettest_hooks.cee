@@ -1,0 +1,528 @@
+// nettest_hooks.cee - the self-tests that need the debug and fault-injection builds' hooks, in CeeSafe: roadmap 2.0
+// SA6 (nettest, the fourteenth batch). tcp-pcb-timer-free and net-rx-dup, as nettest.c had them
+// (docs/audit/next-subsystem-lifetime-windows.md). Each body is exported only where its hooks exist -- tcp-pcb-timer-free's
+// under CONFIG_DEBUG, net-rx-dup's under CONFIG_FAULTINJECT (@cfg) -- and nettest.c keeps the C's skip otherwise.
+// tcp-pcb-timer-free's pinning wrapper stays in nettest.c, which calls the body by its export. An address is a [u32; 5], struct netaddr's size
+// and alignment (asserted in nettest.c).
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/sched.h", "kernel/percpu.h", "kernel/timer.h", "kernel/faultinject.h")
+extern "C" {
+    struct netaddr;
+    struct thread;
+    struct tcp_pcb;
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ip4 {
+        addr: u32;
+    }
+    struct netif {
+        mac: [u8; 6];
+        ip4: netif_ip4;
+    }
+    struct fi_stats {
+        hits: u64;
+    }
+    struct arp_stats {
+        replies_sent: u64;
+        entries: u64;
+    }
+
+    fn nettest_tcp_transfer(reason: *mut *CChar, addr: *netaddr, bytes: u32, lingerMs: u32) -> bool;
+
+    fn thread_create_on(
+        entry: extern "C" fn(*mut void),
+        arg: *mut void,
+        name: *CChar,
+        priority: i32,
+        affinity: u64,
+    ) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_count() -> u32;
+    fn thread_current() -> *mut thread;
+    fn thread_sleep_ns(ns: u64);
+    fn sched_yield();
+    fn sched_watchdog_kick();
+    fn arch_cpu_relax();
+    fn cpu_count() -> u32;
+    fn cpu_online(cpu: u32) -> bool;
+    fn clock_now_ns() -> u64;
+    fn tcp_pcb_new(family: u16) -> *mut tcp_pcb;
+    fn tcp_close(pcb: *mut tcp_pcb);
+    fn tcp_test_hold_callback(pcb: *mut tcp_pcb);
+    fn tcp_test_callback_passed() -> u32;
+    fn tcp_test_callback_entered() -> bool;
+    fn tcp_test_release_callback();
+    fn tcp_test_callback_saw_dead() -> u32;
+    fn tcp_test_callback_checked() -> u32;
+    fn tcp_test_callback_cpu() -> u32;
+    fn tcp_test_arm_rexmit(pcb: *mut tcp_pcb, ns: u64);
+    fn timer_test_reset_cancel_spins();
+    fn timer_test_cancel_spins() -> u32;
+    fn faultinject_set(kind: u32, every: u32, budget: u32, only: *mut thread);
+    fn faultinject_clear(kind: u32);
+    fn faultinject_stats(kind: u32, out: *mut fi_stats);
+    fn socket_count() -> u32;
+    fn netif_default() -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_rx(nif: *mut netif, m: *mut mbuf);
+    fn m_getcl() -> *mut mbuf;
+    fn arp_get_stats(out: *mut arp_stats);
+    fn arp_lookup(nif: *netif, ip: u32, mac: *mut u8) -> bool;
+    fn arp_delete(nif: *netif, ip: u32);
+}
+
+// ---- thread.h, timer.h, faultinject.h, socket and ether.h values (asserted against the headers in nettest.c) ----
+
+const SCHED_PRIO_DEFAULT: i32 = 32;
+/// TICK_NS: NS_PER_SEC / CONFIG_HZ, at 250 Hz.
+const TICK_NS: u64 = 4000000;
+const FI_NET_RX_DUP: u32 = 12;
+const AF_INET: u32 = 2;
+const AF_INET16: u16 = 2;
+const ETH_HLEN: usize = 14;
+const MS: u64 = 1000000;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+/// struct netaddr for an IPv4 address and port.
+fn v4addr(ip: u32, port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), ip, 0, 0, 0];
+
+fn na(a: borrow [u32; 5]) -> *netaddr => a as *[u32; 5] as *netaddr;
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * MS);
+    }
+}
+
+/// Safety: the monotonic clock.
+fn now() -> u64 => unsafe { clock_now_ns() };
+
+// ---- tcp-pcb-timer-free ----
+
+// The armer's two pcbs and the releaser's stop flag (the C's struct tcp_armer and struct tcp_releaser, which lived in
+// the test's frame): static, so no thread can outlive what it reads. The pcbs are written before the armer is created.
+static mut ARM_PCB: usize = 0;
+static mut ARM_DECOY: usize = 0;
+static REL_STOP: AtomicU32 = AtomicU32.constant(0);
+
+/// The armer: a stranger first -- the decoy's timer fires a tick before the test pcb's, while the hold is armed. That
+/// is the sighting's shape -- a connection an earlier test left behind fired first and was held in the test's place --
+/// made certain rather than waited for. The hold, armed by identity, must let it through.
+///
+/// Then it stays alive on this CPU past the tick that fires the timer, on purpose. The callback then parks in interrupt
+/// context ABOVE this thread, which is the placement that hung the boot twice on 2026-09-23 (docs/testing/flakes.md,
+/// "tcp-pcb-timer-free's held callback parked on a CPU nobody could release it from"): the test used to join this
+/// thread before it created the releaser, so a 1 ms timer that fired before this thread had finished exiting left
+/// nothing in the machine that could let the callback go. Making the placement certain is what makes the fix a proof
+/// rather than a rerun; the releaser now exists before the timer is armed, and this thread is joined only after the
+/// release.
+/// Safety: ARM_PCB and ARM_DECOY are the test's live pcbs.
+@callback
+unsafe fn armerMain(arg: *mut void) {
+    tcp_test_arm_rexmit(ARM_DECOY as *mut tcp_pcb, MS);         // 1 ms, on this CPU's queue
+    tcp_test_arm_rexmit(ARM_PCB as *mut tcp_pcb, MS + TICK_NS); // a tick later, same queue
+    let until = now() + MS + 3 * TICK_NS;
+    while (now() < until) {
+        arch_cpu_relax();
+    }
+}
+
+/// The releaser lets the parked callback go, but only once a cancel is demonstrably waiting for it. Releasing on a
+/// timer would let the callback leave before any cancel looked, and the test would pass having raced nothing.
+///
+/// Bounded, and the bound is a failure rather than a fallback: if no cancel ever spins, the callback is released so the
+/// machine does not hang, and the test's own assertion on the spin count is what reports it.
+/// Safety: the debug build's hooks.
+@callback
+unsafe fn releaserMain(arg: *mut void) {
+    let deadline = now() + 5000 * MS;
+    while (REL_STOP.loadWith(LoadOrdering.Acquire) == 0) {
+        if (timer_test_cancel_spins() > 0 || now() > deadline) {
+            tcp_test_release_callback();
+            return;
+        }
+        sched_yield();
+    }
+    tcp_test_release_callback(); // never leave a callback parked
+}
+
+/// Stop the releaser and wait for it.
+/// Safety: `rt` is the releaser.
+unsafe fn stopReleaser(rt: *mut thread) {
+    REL_STOP.storeWith(1, StoreOrdering.Release);
+    thread_join(rt);
+}
+
+/// Disarm the hold and close both pcbs.
+/// Safety: the pcbs are the test's.
+unsafe fn closeBoth(pcb: *mut tcp_pcb, decoy: *mut tcp_pcb) {
+    tcp_test_hold_callback(0 as *mut tcp_pcb);
+    tcp_close(decoy);
+    tcp_close(pcb);
+}
+
+/// The CPUs the test needs besides this one: the callback's and the releaser's.
+struct Cpus {
+    found: bool;
+    cpu: u32;
+    rel: u32;
+}
+
+/// Three CPUs, and each has a job the other two cannot do.
+///
+/// The callback parks on `cpu` and spins there, so nothing else on that CPU can run -- the releaser cannot live with
+/// it. This CPU calls tcp_close, which cancels under pcb->lock with interrupts disabled and then spins in
+/// timer_cancel_sync, so the releaser cannot live here either. It needs a third. Putting it beside the callback is what
+/// hung the first version of this test.
+/// Safety: `here` is this pinned thread's CPU.
+unsafe fn otherCpus(here: u32) -> Cpus {
+    var c = Cpus { found: false, cpu: 0, rel: 0 };
+    var haveCpu = false;
+    for (i in 0..cpu_count()) {
+        if (i == here || !cpu_online(i)) {
+            continue;
+        }
+        if (!haveCpu) {
+            c.cpu = i;
+            haveCpu = true;
+        } else if (!c.found) {
+            c.rel = i;
+            c.found = true;
+        }
+    }
+    return c;
+}
+
+/// pcb_kill_locked cancels four timers in a row, and each timer_cancel_sync must return only once the callback is not
+/// running -- or the callback dereferences a pcb the caller is about to free.
+///
+/// timer_cancel_sync itself is tested, on a probe object, in the quiesce suite. What is not tested is the integration,
+/// and aiming a test at it takes care: timer_kick's first act is pcb_get, so a hold placed after it measures reference
+/// counting and would pass with timer_cancel_sync stubbed out. The hook this uses is placed *before* the acquisition,
+/// and the callback checks the pcb's mark after the held interval as well as on entry -- so the interval belongs to
+/// synchronous cancellation alone, and an entry-only check is not mistaken for evidence about it.
+/// Safety: the runner's `reason`, on a thread the wrapper pinned.
+@cfg("CONFIG_DEBUG")
+@export("nettest_tcp_pcb_timer_free_pinned")
+unsafe fn tcpPcbTimerFreePinned(reason: *mut *CChar) -> bool {
+    let threads0 = thread_count();
+    let here = arch_cpu_id(); // pinned by the wrapper: this thread stays off both CPUs below
+    let cpus = otherCpus(here);
+    if (!cpus.found) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: tcp-pcb-timer-free: needs three CPUs (callback, closer, releaser), have ");
+        line.decimal(cpu_count() as u64);
+        KernelLog.send(LogLevel.Info, line);
+        return true;
+    }
+
+    let pcb = tcp_pcb_new(AF_INET16);
+    if (pcb.isNull()) {
+        return failed(reason, "check failed: tcp-pcb-timer-free: the pcb\0");
+    }
+    let decoy = tcp_pcb_new(AF_INET16);
+    if (decoy.isNull()) {
+        tcp_close(pcb);
+        return failed(reason, "check failed: tcp-pcb-timer-free: the decoy\0");
+    }
+
+    timer_test_reset_cancel_spins();
+    tcp_test_hold_callback(pcb);
+
+    // The releaser FIRST, before anything can park: it is the one thread that can end a hold, and it must exist
+    // whatever CPU the callback lands on and whatever this thread is blocked in. The first version created it only
+    // after joining the armer, and a callback that fired above the still-live armer took the armer, the join, and the
+    // releaser that was never made with it -- a hard lockup at ten seconds or an unanswered shootdown at one
+    // (flakes.md).
+    REL_STOP.storeWith(0, StoreOrdering.Release);
+    let rtMask = (1 as u64) << (cpus.rel as u64);
+    let rt = thread_create_on(releaserMain, 0 as *mut void, "tcprel\0".ptr as *CChar, SCHED_PRIO_DEFAULT, rtMask);
+    if (rt.isNull()) {
+        // No timer is armed yet: disarm and close both, then fail (found in review: the decoy leaked here, and so did
+        // the pcb).
+        closeBoth(pcb, decoy);
+        return failed(reason, "check failed: tcp-pcb-timer-free: the releaser\0");
+    }
+
+    // Arm the rexmit timer *from* the other CPU, because a timer lands on the queue of the CPU that starts it and this
+    // window needs the callback somewhere other than the closer. The armer lingers past the tick on purpose (see it),
+    // so the callback parks above it; it is joined only after the release, below.
+    ARM_PCB = pcb as usize;
+    ARM_DECOY = decoy as usize;
+    let atMask = (1 as u64) << (cpus.cpu as u64);
+    let at = thread_create_on(armerMain, 0 as *mut void, "tcparm\0".ptr as *CChar, SCHED_PRIO_DEFAULT, atMask);
+    if (at.isNull()) {
+        stopReleaser(rt);
+        closeBoth(pcb, decoy);
+        return failed(reason, "check failed: tcp-pcb-timer-free: the armer\0");
+    }
+
+    let deadline = now() + 2000 * MS;
+    while (!tcp_test_callback_entered()) {
+        if (now() > deadline) {
+            tcp_test_release_callback();
+            stopReleaser(rt);
+            thread_join(at);
+            closeBoth(pcb, decoy); // the close cancels its timer, whatever state it is in
+            return failed(reason, "the timer callback never entered the hold\0");
+        }
+        sched_yield();
+    }
+    let cbCpu = tcp_test_callback_cpu();
+
+    // The close cancels all four timers; the first must wait for the callback that is inside the object.
+    tcp_close(pcb);
+    // Both threads joined BEFORE anything is judged. The armer is joinable now because the close released the callback
+    // it was under.
+    stopReleaser(rt);
+    thread_join(at);
+    // Read before the hold is dropped: tcp_test_hold_callback(NULL) resets these counters.
+    let spins = timer_test_cancel_spins();
+    let checked = tcp_test_callback_checked();
+    let sawDead = tcp_test_callback_saw_dead();
+    let passed = tcp_test_callback_passed();
+    tcp_test_hold_callback(0 as *mut tcp_pcb);
+    tcp_close(decoy);
+
+    if (passed < 1) { // the decoy fired while armed, and was let through
+        return failed(reason, "check failed: tcp-pcb-timer-free: the decoy was let through\0");
+    }
+    if (spins == 0) { // a cancel really waited
+        return failed(reason, "check failed: tcp-pcb-timer-free: a cancel waited\0");
+    }
+    if (checked < 1) { // and the callback checked after the hold
+        return failed(reason, "check failed: tcp-pcb-timer-free: the callback checked after the hold\0");
+    }
+    if (sawDead != 0) { // the claim: it never saw the poison
+        return failed(reason, "check failed: tcp-pcb-timer-free: the callback never saw the poison\0");
+    }
+    // The placement, asserted rather than assumed: the callback ran on the armer's CPU, and neither on this thread's
+    // nor the releaser's.
+    if (cbCpu != cpus.cpu) {
+        return failed(reason, "check failed: tcp-pcb-timer-free: the callback ran on the armer's CPU\0");
+    }
+
+    let settle = now() + 500 * MS;
+    while (thread_count() != threads0 && now() < settle) {
+        sched_yield();
+    }
+    if (thread_count() != threads0) {
+        return failed(reason, "check failed: tcp-pcb-timer-free: every thread gone\0");
+    }
+
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: tcp-pcb-timer-free: a cancel spun ");
+    line.decimal(spins as u64);
+    line.text(" time(s) for a callback holding the pcb, which stayed live through the interval; callback on cpu ");
+    line.decimal(cbCpu as u64);
+    line.text(" above its armer, closer on ");
+    line.decimal(here as u64);
+    line.text(", releaser on ");
+    line.decimal(cpus.rel as u64);
+    line.text("; ");
+    line.decimal(passed as u64);
+    line.text(" other callback(s) let through");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- net-rx-dup ----
+
+// The injection's statistics and ARP's (1 KiB, checked), off the stack.
+static mut STATS: [u64; 128] = [0; 128];
+
+/// Safety: the runner runs one test at a time, so the statics are this test's.
+unsafe fn statsRoom(i: usize, bytes: usize) -> *mut u8 {
+    if (bytes > 512) {
+        var buffer: [u8; 64] = [0; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("nettest: a scratch is too small");
+        KernelLog.panic(line);
+    }
+    return (borrow mut STATS as *mut [u64; 128] as *mut u8).add(i * 512);
+}
+
+/// The injection's hit count.
+/// Safety: as statsRoom.
+unsafe fn dupHits() -> u64 {
+    let p = statsRoom(0, layoutOf<fi_stats>().size) as *mut fi_stats;
+    faultinject_stats(FI_NET_RX_DUP, p);
+    return Ptr.toBorrow(p as *fi_stats).hits;
+}
+
+/// ARP's counters: the replies sent and the entries.
+struct Arp {
+    replies: u64;
+    entries: u64;
+}
+
+/// Safety: as statsRoom.
+unsafe fn arpNow() -> Arp {
+    let p = statsRoom(1, layoutOf<arp_stats>().size) as *mut arp_stats;
+    arp_get_stats(p);
+    let s = Ptr.toBorrow(p as *arp_stats);
+    return Arp { replies: s.replies_sent, entries: s.entries };
+}
+
+/// What the ARP phase found.
+struct ArpPhase {
+    present: bool;
+    doubled: bool;
+    oneEntry: bool;
+}
+
+/// ARP idempotency, when an ethernet interface is present: feed one request addressed to us through the full receive
+/// path (netif_rx -> ether_input -> arp_input). The injection doubles it, so arp_input runs twice and two replies go
+/// out -- proof the duplicate was delivered -- but the asker is recorded once.
+/// Safety: thread context, the injection armed for this thread.
+unsafe fn arpPhase() -> ArpPhase {
+    var r = ArpPhase { present: false, doubled: false, oneEntry: false };
+    let nif = netif_default();
+    if (nif.isNull()) {
+        return r;
+    }
+    netif_put(nif); // borrowed: the default nif is not unregistered under the tests
+    r.present = true;
+    let askerMac: [u8; 6] = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x42];
+    let asker = ip4(10, 99, 0, 70);
+    let a0 = arpNow();
+    let f = m_getcl();
+    if (f.isNull()) {
+        return r;
+    }
+    let n = ETH_HLEN + 28;
+    {
+        let mm = Ptr.toBorrowMut(f);
+        mm.len = truncate<u32>(n);
+        mm.pkt.len = truncate<u32>(n);
+    }
+    let me = Ptr.toBorrow(nif as *netif);
+    let p = SliceMut.fromRaw(Ptr.toBorrow(f as *mbuf).data, n);
+    for (i in 0..n) {
+        p[i] = 0;
+    }
+    for (i in 0..6) {
+        p[i] = me.mac[i]; // dst = us
+        p[6 + i] = askerMac[i];
+    }
+    p[12] = 0x08; // ethertype ARP
+    p[13] = 0x06;
+    let a = ETH_HLEN;
+    p[a + 1] = 1;    // htype ethernet
+    p[a + 2] = 0x08; // ptype IPv4
+    p[a + 4] = 6;
+    p[a + 5] = 4;
+    p[a + 7] = 1; // op: request
+    let tpa = me.ip4.addr;
+    for (i in 0..6) {
+        p[a + 8 + i] = askerMac[i];
+    }
+    for (i in 0..4) {
+        p[a + 14 + i] = truncate<u8>(asker >> (8 * truncate<u32>(i)));
+        p[a + 24 + i] = truncate<u8>(tpa >> (8 * truncate<u32>(i)));
+    }
+    netif_rx(nif, f);
+    // Wait on the counter (not a fixed settle): one request in, two replies out is the duplicate delivered.
+    var a1 = arpNow();
+    for (i in 0..500) {
+        a1 = arpNow();
+        if (a1.replies >= a0.replies + 2) {
+            break;
+        }
+        sleepMs(10);
+        sched_watchdog_kick();
+    }
+    var mac: [u8; 6] = [0; 6];
+    r.doubled = a1.replies >= a0.replies + 2;
+    let found = arp_lookup(nif as *netif, asker, borrow mut mac as *mut [u8; 6] as *mut u8);
+    var same = true;
+    for (i in 0..6) {
+        if (mac[i] != askerMac[i]) {
+            same = false;
+        }
+    }
+    r.oneEntry = found && same && a1.entries == a0.entries + 1;
+    arp_delete(nif as *netif, asker); // remove only the entry this test added
+    return r;
+}
+
+/// A frame delivered twice -- a link-layer retransmit, a switch flooding -- must leave the stack as a single delivery
+/// would: TCP hands a duplicated segment to the socket once (sequence dedup), ARP keeps one cache entry. The injection
+/// in rx_common duplicates every frame the armed thread receives in thread context; the test drives it over loopback
+/// (where the hook fires) and, when an ethernet interface exists, once through the ethernet receive path for ARP. The
+/// rule is armed for this thread only, so concurrent network work is untouched.
+/// Safety: the runner's `reason`.
+@cfg("CONFIG_FAULTINJECT")
+@export("selftest_net_rx_dup")
+unsafe fn rxDup(reason: *mut *CChar) -> bool {
+    let socks0 = socket_count();
+
+    // Arm the duplication for this thread, then move a pattern stream over loopback. Every frame this thread delivers
+    // to rx_common is doubled; tcp_sink_thread verifies the pattern and that exactly the bytes sent arrived, so a
+    // re-delivered duplicate would overshoot or break it.
+    faultinject_set(FI_NET_RX_DUP, 1, 0, thread_current());
+    let dst = v4addr(ip4(127, 0, 0, 1), 6070);
+    let tcpOk = nettest_tcp_transfer(reason, na(borrow dst), 256 * 1024, 0); // nettest_lo.cee's
+    let hits = dupHits();
+    let arp = if (tcpOk) arpPhase() else ArpPhase { present: false, doubled: false, oneEntry: false };
+    faultinject_clear(FI_NET_RX_DUP);
+
+    if (!tcpOk) {
+        return false; // tcp_transfer set *reason
+    }
+    if (hits == 0) { // not vacuous: the injection fired
+        return failed(reason, "check failed: net-rx-dup: the injection fired\0");
+    }
+    // That a delivered duplicate reaches the stack is proved by the ARP phase (one request in, two replies out): a
+    // wholly-duplicate TCP segment is trimmed against rcv_nxt and absorbed silently, so no TCP counter isolates it --
+    // the ARP path, which replies per request, does. The TCP phase proves the dedup is correct given that delivery.
+    if (arp.present) {
+        if (!arp.doubled) { // the duplicated request yielded two replies
+            return failed(reason, "check failed: net-rx-dup: the doubled request yielded two replies\0");
+        }
+        if (!arp.oneEntry) { // ... but one cache entry
+            return failed(reason, "check failed: net-rx-dup: one cache entry\0");
+        }
+    }
+    sleepMs(50);
+    if (socket_count() != socks0) {
+        return failed(reason, "check failed: net-rx-dup: every socket gone\0");
+    }
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-rx-dup: ");
+    line.decimal(hits);
+    line.text(" frames doubled, TCP delivered 262144 bytes once");
+    line.text(
+        if (arp.present) ", ARP kept one entry across a doubled request" else " (no ethernet interface: ARP skipped)",
+    );
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}

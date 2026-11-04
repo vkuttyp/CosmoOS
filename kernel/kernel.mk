@@ -235,6 +235,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/nettest_flows.c \
 	kernel-services/network/nettest_output.c \
 	kernel-services/network/nettest_tapdev.c \
+	kernel-services/network/nettest_hooks.c \
 	drivers/acpi/acpi.c \
 	drivers/acpi/acpi_parse.c \
 	drivers/pci/pci.c \
@@ -317,6 +318,7 @@ $(OUT)/kernel-services/network/nettest_hoststate.o $(OUT)/kernel-services/networ
 $(OUT)/kernel-services/network/nettest_flows.o $(OUT)/kernel-services/network/nettest_flows.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 $(OUT)/kernel-services/network/nettest_output.o $(OUT)/kernel-services/network/nettest_output.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 $(OUT)/kernel-services/network/nettest_tapdev.o $(OUT)/kernel-services/network/nettest_tapdev.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
+$(OUT)/kernel-services/network/nettest_hooks.o $(OUT)/kernel-services/network/nettest_hooks.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 
 # kernel-services/filesystem/cosmofs/cfsparse.c is generated from cfsparse.cee into out/cee (scripts/cee-gen.py), away
 # from the cosmofs_internal.h it includes by name: its object, and its analysis, look in the cosmofs directory too.
