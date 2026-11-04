@@ -3,7 +3,7 @@
 cee-gen.py - the C that CosmoOS's CeeSafe sources generate (docs/build/ceesafe.md).
 
 Kernel code is written in CeeSafe, a memory-safe language compiled to C
-(https://github.com/vkuttyp/CeeSafe; roadmap 2.0's CeeSafe rule). The tree
+(https://github.com/CeeSafe/CeeSafe; roadmap 2.0's CeeSafe rule). The tree
 holds the .cee files only: the build runs this script with the pinned
 ceesafec (build/cee.mk) and compiles the generated C from out/cee. A
 `make dist` tarball carries the generated C beside each source instead, so
@@ -15,7 +15,7 @@ runtime, generated too:
   kernel/block/gpt.cee              -> kernel/block/gpt.c
   kernel/object/handle.cee          -> kernel/object/handle.c, kernel/include/kernel/handle_types.h
   kernel/ceesafe/kcore_test.cee     -> kernel/ceesafe/kcore_test.c   (with CeeSafe's kernel library)
-  (every port)                      -> kernel/include/ceesafe/rt.h, kernel/ceesafe/ceesafe_rt_core.c
+  (every port)                      -> kernel/include/ceesafe/rt.h, foreign.h, kernel/ceesafe/ceesafe_rt_core.c
 
 The generated C needs a ceesafe_panic for the environment it is linked into
 (kernel/ceesafe/ceesafe_panic.c in the kernel, tests/host/ceesafe_panic.c in
@@ -46,7 +46,7 @@ Usage:
     python3 scripts/cee-gen.py --list                  # the generated files' paths (no ceesafec needed)
     python3 scripts/cee-gen.py --pinned                # print the pinned version
 The ceesafec used is $CEESAFEC, else `ceesafec` on PATH. To install the pinned one:
-    curl -fsSL https://vkuttyp.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v<pinned> sh
+    curl -fsSL https://ceesafe.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v<pinned> sh
 """
 
 import argparse
@@ -61,7 +61,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-CEESAFEC_VERSION = "0.6.0"
+CEESAFEC_VERSION = "0.12.0"
 
 # Each port: its CeeSafe source, the C it generates, what that C is, the header ceesafec generates for it (None
 # when the port's header is hand-written C, imported by the source), and whether it uses CeeSafe's kernel library
@@ -207,7 +207,10 @@ PORTS = [
     ("kernel/ceesafe/async_test.cee", "kernel/ceesafe/async_test.c",
      "The boot self-test of CeeSafe's async executor (selftest cee-async; CeeSafe ADR 0039)", None, False),
 ]
-RUNTIME = [("ceesafe/rt.h", "kernel/include/ceesafe/rt.h"), ("ceesafe_rt_core.c", "kernel/ceesafe/ceesafe_rt_core.c")]
+# ceesafe/foreign.h (CeeSafe ADRs 0060-0061, ceesafec 0.12.0) is the C side's allocation calls, which rt.h includes from
+# beside itself.
+RUNTIME = [("ceesafe/rt.h", "kernel/include/ceesafe/rt.h"), ("ceesafe/foreign.h", "kernel/include/ceesafe/foreign.h"),
+           ("ceesafe_rt_core.c", "kernel/ceesafe/ceesafe_rt_core.c")]
 # The async executor (CeeSafe ADR 0039), which only a port that uses async emits: the same from each that does.
 ASYNC_RUNTIME = ("ceesafe_rt_async.c", "kernel/ceesafe/ceesafe_rt_async.c")
 

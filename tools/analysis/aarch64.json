@@ -191,6 +191,15 @@
           "reason": "CeeSafe's runtime: only a run's root task has a NULL scope (children are spawned into one, cee_task's scope is set at spawn), and the run loop leaves at t == root before cee_child_done, whose caller it is; the analyzer splits on the loop's earlier `t->scope == NULL` test without linking the two."
         },
         {
+          "translation_unit": "kernel/ceesafe/ceesafe_rt_async.c",
+          "checker": "core.NullDereference",
+          "file": "out/cee/kernel/ceesafe/ceesafe_rt_async.c",
+          "function": "cee_child_unlink",
+          "message": "Access to field 'children' results in a dereference of a null pointer (loaded from field 'scope')",
+          "count": 1,
+          "reason": "CeeSafe's runtime (ceesafec 0.12.0, ADR 0062): t->scope is read only for a listed task with no previous sibling, and only cee_child_link lists a task, called from cee_spawn with the scope it has already dereferenced and set as the task's scope; the root task, the one task with a NULL scope, is never listed. The analyzer does not link `listed` to a non-NULL scope."
+        },
+        {
           "translation_unit": "kernel/ceesafe/kcore_test.c",
           "checker": "unix.Malloc",
           "file": "out/cee/kernel/ceesafe/kcore_test.c",

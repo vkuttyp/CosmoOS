@@ -2,8 +2,8 @@
 
 The kernel is being written in CeeSafe, a memory-safe systems language with
 C#/Java/TypeScript-like syntax that compiles to C
-(https://github.com/vkuttyp/CeeSafe; documentation at
-https://vkuttyp.github.io/CeeSafe/). CeeSafe is the fork of Nova 0.6.0,
+(https://github.com/CeeSafe/CeeSafe; documentation at
+https://ceesafe.github.io/CeeSafe/). CeeSafe is the fork of Nova 0.6.0,
 the language this tree's first ports were written in; since 2026-10-31
 it is the kernel's language, and Nova is no longer developed. This page tells a contributor, human or
 AI agent, how to write it, how it becomes the C the build compiles, and
@@ -69,7 +69,7 @@ Install the pinned compiler, the version in `scripts/cee-gen.py`
 (`python3 scripts/cee-gen.py --pinned`); `make cee` refuses any other:
 
 ```sh
-curl -fsSL https://vkuttyp.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v0.6.0 sh   # into ~/.ceesafe/bin
+curl -fsSL https://ceesafe.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v0.12.0 sh   # into ~/.ceesafe/bin
 export PATH="$HOME/.ceesafe/bin:$PATH"     # or: export CEESAFEC=~/.ceesafe/bin/ceesafec
 ```
 
@@ -280,7 +280,7 @@ MODCYCLE_ENTRY=modules/<name>.ko` cycles a driver 1,000 times.
   `@repr(C)`, FFI-safe types), §31 imported C structs (`@header`), §32
   context effects, §33 C state embedded by value, §6 overflow arithmetic.
 - `spec/unsafe.md`: what `unsafe` permits and the safety-comment rule.
-- The guide's pages: https://vkuttyp.github.io/CeeSafe/guide/kernel (kernel
+- The guide's pages: https://ceesafe.github.io/CeeSafe/guide/kernel (kernel
   code: contexts, locks, C state), .../guide/unsafe-and-c (C interop), and
   .../guide/for-agents (the mistakes agents make most often).
 - Port reports from before the fork are Nova's, at its v0.6.0:

@@ -136,7 +136,7 @@ servers) stay as their upstreams write them.
 ## Nova prerequisites
 
 > **Since 2026-10-31 the language is CeeSafe**, the fork of Nova 0.6.0
-> (github.com/vkuttyp/CeeSafe): Nova is no longer developed, and the tree
+> (github.com/CeeSafe/CeeSafe): Nova is no longer developed, and the tree
 > moved to the pinned ceesafec in one change (`docs/build/ceesafe.md`). This
 > section is the record of the 2026-10-29 review of Nova's compiler; N1-N3
 > were met in Nova 0.2.0-0.6.0, and the open items (N4-N6) are CeeSafe's.

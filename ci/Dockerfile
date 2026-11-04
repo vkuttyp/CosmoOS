@@ -25,12 +25,12 @@ RUN apt-get update \
  && mkdir -p /usr/share/cosmoos-ci \
  && dpkg-query -W -f '${Package} ${Version}\n' > /usr/share/cosmoos-ci/packages.txt
 # The pinned ceesafec (scripts/cee-gen.py's CEESAFEC_VERSION; docs/build/design.md, "CeeSafe sources"): every build runs it
-# (build/cee.mk). Its Linux x64 release archive (github.com/vkuttyp/CeeSafe), checked against the release's SHA256SUMS;
+# (build/cee.mk). Its Linux x64 release archive (github.com/CeeSafe/CeeSafe), checked against the release's SHA256SUMS;
 # one native executable built from C, needing glibc 2.35 or newer, which the image has. A bump changes this file, so
 # the image is rebuilt.
-ARG CEESAFEC_VERSION=0.6.0
-ARG CEESAFEC_SHA256=ae8b15ca649de4d6a7a3599ff42185e2dd4f5763bd250555d1d980ccb293eddf
-RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/vkuttyp/CeeSafe/releases/download/v${CEESAFEC_VERSION}/ceesafec-linux-x64.tar.gz', '/tmp/ceesafec.tar.gz')" \
+ARG CEESAFEC_VERSION=0.12.0
+ARG CEESAFEC_SHA256=d101321461b0e0e0711d07b428d98a98d259aa98d2e9b7e8d7606de61e11540e
+RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/CeeSafe/CeeSafe/releases/download/v${CEESAFEC_VERSION}/ceesafec-linux-x64.tar.gz', '/tmp/ceesafec.tar.gz')" \
  && echo "${CEESAFEC_SHA256}  /tmp/ceesafec.tar.gz" | sha256sum -c - \
  && mkdir -p /opt/ceesafec && tar -xzf /tmp/ceesafec.tar.gz -C /opt/ceesafec && rm /tmp/ceesafec.tar.gz \
  && ln -s /opt/ceesafec/ceesafec /usr/local/bin/ceesafec \

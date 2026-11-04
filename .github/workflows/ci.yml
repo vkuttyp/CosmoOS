@@ -128,10 +128,10 @@ jobs:
 
       - name: Install the pinned ceesafec
         env:
-          CEESAFEC_SHA256: ae8b15ca649de4d6a7a3599ff42185e2dd4f5763bd250555d1d980ccb293eddf   # ceesafec-linux-x64.tar.gz of the pinned release
+          CEESAFEC_SHA256: d101321461b0e0e0711d07b428d98a98d259aa98d2e9b7e8d7606de61e11540e   # ceesafec-linux-x64.tar.gz of the pinned release
         run: |
           v=$(python3 scripts/cee-gen.py --pinned)
-          curl -fsSL -o ceesafec.tar.gz "https://github.com/vkuttyp/CeeSafe/releases/download/v$v/ceesafec-linux-x64.tar.gz"
+          curl -fsSL -o ceesafec.tar.gz "https://github.com/CeeSafe/CeeSafe/releases/download/v$v/ceesafec-linux-x64.tar.gz"
           echo "$CEESAFEC_SHA256  ceesafec.tar.gz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/ceesafec" && tar -xzf ceesafec.tar.gz -C "$RUNNER_TEMP/ceesafec" && rm ceesafec.tar.gz
           echo "CEESAFEC=$RUNNER_TEMP/ceesafec/ceesafec" >> "$GITHUB_ENV"

@@ -38,7 +38,7 @@ else
     if [ -n "$ceesafec" ] && [ "$("$ceesafec" --version 2>/dev/null)" = "ceesafec $pinned" ]; then
         printf '  ok       ceesafec %s (%s)\n' "$pinned" "$ceesafec"
     else
-        printf '  MISSING  ceesafec %s - the build runs it: curl -fsSL https://vkuttyp.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v%s sh (or set CEESAFEC)\n' "$pinned" "$pinned"
+        printf '  MISSING  ceesafec %s - the build runs it: curl -fsSL https://ceesafe.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v%s sh (or set CEESAFEC)\n' "$pinned" "$pinned"
         status=1
     fi
 fi
