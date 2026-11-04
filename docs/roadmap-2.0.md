@@ -1099,6 +1099,13 @@ segment; a pcb's retransmit count is read atomically through
 `nettest_flows.cee`: net-flows-nat and net-flows-fw (the operator's flow
 listing), with the read of the whole `/dev/net/tapctl` snapshot they
 share; the snapshot's sections are walked by `nettest_ctl.cee`'s exports.
+Batch 13, two files: `nettest_output.cee`, net-output and net-tcpverdict
+(the OUTPUT chain, and its verdict carried back into the connection),
+with the OUTPUT rule they build; and `nettest_tapdev.cee`, tap-ready (the
+tap's file waited on, a killed reader) and net-dhcp-client (the kernel's
+client against a fixture interface, whose transmit is a callback), the
+latter exported only under `CONFIG_SELFTEST` (`@cfg`), where `nettest.c`
+keeps the C's skip otherwise.
 
 Size: about 3.0x.
 

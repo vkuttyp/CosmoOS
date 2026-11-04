@@ -1,0 +1,1154 @@
+// nettest_tapdev.cee - the tap's file and the kernel's DHCP client, in CeeSafe: roadmap 2.0 SA6 (nettest, the
+// thirteenth batch). tap-ready and net-dhcp-client, as nettest.c had them (docs/audit/next-subsystem-device-readiness.md,
+// kernel/net/dhcp.h).
+//
+// tap-ready opens /dev/net/tap as a file and waits on it: readiness, the wait queue, a blocking read in a thread of its
+// own that waits for a frame the stack transmits, io_poll, the non-blocking mode, and a process killed inside the read.
+// The reader's state is static, not the test's frame: a reader a mutation leaves inside its read is never joined, and
+// must not write a dead stack.
+//
+// net-dhcp-client registers a fixture interface with no address, as nettest_nif.cee's fake interfaces are: the
+// interface and its ops table are C objects this file defines (CeeSafe's ADR 0042), `static mut` items zeroed and
+// filled in at the test's start as the C's memset did. The test is the client's server: every frame the client sends
+// is captured (under a lock: the client transmits from the network worker) and read back; the server's replies are
+// built here and received through netif_rx like any frame. ARP requests for the server are answered by the fixture.
+// The client's test seams exist only with CONFIG_SELFTEST, and so does this test; nettest.c keeps the skip without them.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/udp.h", "kernel/net/dhcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h", "kernel/poll.h", "kernel/process.h", "kernel/bootarchive.h", "kernel/completion.h", "kernel/object.h")
+extern "C" {
+    struct file;
+    struct thread;
+    struct waitqueue;
+    struct completion;
+    struct process_spawn_attr;
+    struct process {
+        exited: completion;
+    }
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ops {
+        transmit: extern "C" fn(*mut netif, *mut mbuf) -> i32;
+        release: extern "C" fn(*mut netif);
+    }
+    struct netif_ip4 {
+        addr: u32;
+        mask: u32;
+        gateway: u32;
+    }
+    struct netif {
+        name: [u8; 8];
+        mac: [u8; 6];
+        mtu: u32;
+        flags: u32;
+        ip4: netif_ip4;
+        ops: *netif_ops;
+    }
+    struct io_pollfd {
+        obj: *mut kobject;
+        events: u32;
+        revents: u32;
+    }
+    struct dhcp_lease_info {
+        ifname: [u8; 8];
+        state: u8;
+        ndns: u8;
+        addr: u32;
+        server: u32;
+        dns: [u32; 3];
+        lease_s: u32;
+        t1_s: u32;
+        t2_s: u32;
+        remaining_ms: u32;
+        t1_ms: u32;
+    }
+    struct dhcp_stats {
+        offers: u64;
+        acks: u64;
+        naks: u64;
+        expiries: u64;
+        ignored: u64;
+    }
+
+    fn nettest_vfs_open(path: *CChar, flags: u32, out: *mut *mut file) -> i32;
+    fn nettest_file_put(f: *mut file);
+    fn nettest_netif_register(nif: *mut netif) -> i32;
+    fn nettest_netif_unregister(nif: *mut netif);
+    fn nettest_l4_ok(sip: u32, dip: u32, proto: u8, l4: *void, len: u16) -> bool;
+    fn nettest_wrap(
+        frame: *mut u8,
+        dmac: *u8,
+        smac: *u8,
+        sip: u32,
+        dip: u32,
+        ttl: u8,
+        proto: u8,
+        l4: *void,
+        l4len: u16,
+    ) -> u32;
+    fn nettest_mk_udp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, pl: *u8, pllen: u16) -> u16;
+
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn kobject_ready(obj: *mut kobject) -> u32;
+    fn kobject_set_nonblock(obj: *mut kobject, on: i32) -> i32;
+    fn kobject_poll_wq(obj: *mut kobject, events: u32) -> *mut waitqueue;
+    fn io_poll(fds: *mut io_pollfd, n: u32, timeoutNs: u64) -> i32;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_exit(code: i32);
+    fn thread_sleep_ns(ns: u64);
+    fn clock_now_ns() -> u64;
+    fn bootarchive_find(name: *CChar, data: *mut *void, size: *mut usize) -> bool;
+    fn process_create_from_elf(
+        image: *void,
+        size: usize,
+        name: *CChar,
+        argv: **CChar,
+        envp: **CChar,
+        attr: *process_spawn_attr,
+        out: *mut *mut process,
+    ) -> i32;
+    fn process_kill(p: *mut process, sig: i32);
+    fn process_wait_exit(p: *mut process) -> i32;
+    fn completion_done(c: *mut completion) -> bool;
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_transmit(nif: *mut netif, m: *mut mbuf) -> i32;
+    fn netif_rx(nif: *mut netif, m: *mut mbuf);
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn netparse_dhcp_opt(opts: *u8, len: u32, code: u8, olen: *mut u8) -> i32;
+    fn dhcp_client_start(nif: *mut netif) -> i32;
+    fn dhcp_lease_list(out: *mut dhcp_lease_info, max: u32) -> u32;
+    fn dhcp_get_stats(out: *mut dhcp_stats);
+    fn dhcp_test_fire(nif: *mut netif, ev: u32) -> i32;
+    fn dhcp_test_state(nif: *mut netif) -> i32;
+}
+
+// ---- syscall.h, ether.h, ip.h, netif.h and dhcp.h values (asserted against the headers in nettest.c) ----
+
+const O_RDWR: u32 = 0x0002;
+const O_NONBLOCK: u32 = 0x0800;
+const IO_READABLE: u32 = 1;
+const IO_WRITABLE: u32 = 2;
+const SIGKILL: i32 = 9;
+const ETH_HLEN: usize = 14;
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_ARP: u16 = 0x0806;
+const IPPROTO_UDP: u8 = 17;
+const INADDR_BROADCAST_N: u32 = 0xffffffff;
+const NETIF_UP: u32 = 1;
+const NETIF_NODEFAULT: u32 = 0x10;
+const BOOTP_REQUEST: u8 = 1;
+const BOOTP_REPLY: u8 = 2;
+const DHCP_HTYPE_ETHER: u8 = 1;
+const DHCP_DISCOVER: u8 = 1;
+const DHCP_OFFER: u8 = 2;
+const DHCP_REQUEST: u8 = 3;
+const DHCP_ACK: u8 = 5;
+const DHCP_NAK: u8 = 6;
+const OPT_SUBNET: u8 = 1;
+const OPT_ROUTER: u8 = 3;
+const OPT_DNS: u8 = 6;
+const OPT_REQIP: u8 = 50;
+const OPT_LEASE: u8 = 51;
+const OPT_MSGTYPE: u8 = 53;
+const OPT_SERVERID: u8 = 54;
+const OPT_END: u8 = 255;
+const DHCP_SPORT: u16 = 67;
+const DHCP_CPORT: u16 = 68;
+const BOOTP_LEN: usize = 236;
+const DHCP_FIXED: usize = 240;
+const BOOTP_OFF_OP: usize = 0;
+const BOOTP_OFF_HTYPE: usize = 1;
+const BOOTP_OFF_HLEN: usize = 2;
+const BOOTP_OFF_XID: usize = 4;
+const BOOTP_OFF_CIADDR: usize = 12;
+const BOOTP_OFF_YIADDR: usize = 16;
+const BOOTP_OFF_CHADDR: usize = 28;
+const DHCP_MAX_CLIENTS: u32 = 4;
+const DHCP_S_SELECTING: i32 = 2;
+const DHCP_S_REQUESTING: i32 = 3;
+const DHCP_S_BOUND: i32 = 4;
+const DHCP_S_RENEWING: i32 = 5;
+const DHCP_S_REBINDING: i32 = 6;
+const DHCP_TEST_RETX: u32 = 0;
+const DHCP_TEST_T1: u32 = 1;
+const DHCP_TEST_T2: u32 = 2;
+const DHCP_TEST_EXPIRE: u32 = 3;
+const MS: u64 = 1000000;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * MS);
+    }
+}
+
+/// Safety: the clock.
+fn now() -> u64 => unsafe { clock_now_ns() };
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+/// The C's kinfo: one line, as it is.
+fn info(text: StringView) {
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+// ---- Bytes ----
+
+fn rd16(b: Slice<u8>, at: usize) -> u16 => ((b[at] as u16) << 8) | (b[at + 1] as u16);
+
+/// A u32 as it lies in memory (an address in network order).
+fn wordOf(b: Slice<u8>, at: usize) -> u32 => (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) |
+    ((b[at + 3] as u32) << 24);
+
+/// Write a u32 as it lies in memory.
+fn putWord(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// Write a u32 most significant byte first (htonl, as it lies in memory).
+fn putBe32(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v >> 24);
+    b[at + 1] = truncate<u8>(v >> 16);
+    b[at + 2] = truncate<u8>(v >> 8);
+    b[at + 3] = truncate<u8>(v);
+}
+
+// ---- tap-ready ----
+
+// The reader thread's state (the C's struct tapready_reader): the file, its buffer and the count are written before
+// DONE is stored with release, and read after it is loaded with acquire.
+static mut RD_FILE: usize = 0;
+static mut RD_BUF: [u8; 128] = [0; 128];
+static mut RD_GOT: i64 = 0;
+static RD_DONE: AtomicU32 = AtomicU32.constant(0);
+// The test's own read buffer and poll entry, off the stack.
+static mut BUF: [u8; 128] = [0; 128];
+static mut PF: io_pollfd = io_pollfd { events: 0, revents: 0 };
+
+/// The reader: one blocking read of the tap's file, then done.
+/// Safety: RD_FILE is the test's open file, which outlives the read (the test leaves it to a reader it cannot join).
+@callback
+unsafe fn readerMain(arg: *mut void) {
+    let f = RD_FILE as *mut file;
+    RD_GOT = file_read(f, borrow mut RD_BUF as *mut [u8; 128] as *mut void, 128);
+    RD_DONE.storeWith(1, StoreOrdering.Release);
+    thread_exit(0);
+}
+
+/// Whether the reader is done within `ms` milliseconds.
+fn doneWithin(ms: u64) -> bool {
+    let end = now() + ms * MS;
+    while (RD_DONE.loadWith(LoadOrdering.Acquire) == 0) {
+        if (now() > end) {
+            return false;
+        }
+        sleepMs(1);
+    }
+    return true;
+}
+
+/// One 64-byte frame transmitted out the tap `nif` (the shape the `tap` test uses).
+/// Safety: `nif` is a reference the test holds.
+unsafe fn transmit(nif: *mut netif, tag: u8) -> bool {
+    let m = m_getcl();
+    if (m.isNull()) {
+        return false;
+    }
+    let b = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, 64);
+    for (i in 0..64) {
+        b[truncate<usize>(i)] = 0;
+    }
+    b[12] = 0x08;
+    b[14] = tag;
+    let mm = Ptr.toBorrowMut(m);
+    mm.len = 64;
+    mm.pkt.len = 64;
+    return netif_transmit(nif, m) == 0;
+}
+
+/// The tap's file as its object (the kobject is a file's first member, vfs.h).
+fn objOf(f: *mut file) -> *mut kobject => f as *mut kobject;
+
+/// Safety: as the runner's static state; the file is the test's.
+unsafe fn readBuf(f: *mut file) -> i64 => file_read(f, borrow mut BUF as *mut [u8; 128] as *mut void, 128);
+
+/// Safety: as readBuf.
+fn tagOf() -> u8 => unsafe { BUF[14] };
+
+/// What tap-ready holds, released however it returns.
+struct Held {
+    f: *mut file;
+    th: *mut thread;
+    p: *mut process;
+    nif: *mut netif;
+}
+
+/// The process's exit, signalled.
+/// Safety: `p` is a process the test holds.
+unsafe fn exited(p: *mut process) -> bool => completion_done(borrow mut Ptr.toBorrowMut(p).exited as *mut completion);
+
+/// The interface `tap0`, held; null when there is none.
+/// Safety: thread context.
+unsafe fn tap0() -> *mut netif => netif_find("tap0\0".ptr as *CChar);
+
+/// The body of tap-ready, every reference it takes kept in `h`.
+/// Safety: the runner's `reason`; thread context.
+unsafe fn tapReadyBody(reason: *mut *CChar, h: borrow mut Held) -> bool {
+    if (!tap0().isNull()) { // no tap open: the probe's will be tap0
+        return failed(reason, "tap-ready: netif_find(\"tap0\") == NULL\0");
+    }
+    let path = "/dev/net/tap\0";
+    if (nettest_vfs_open(path.ptr as *CChar, O_RDWR, borrow mut h.f as *mut *mut file) != 0) { // blocking: the default
+        return failed(reason, "tap-ready: nt_vfs_open(NULL, \"/dev/net/tap\", COSMO_O_RDWR, 0, &f) == 0\0");
+    }
+    h.nif = tap0();
+    if (h.nif.isNull()) {
+        return failed(reason, "tap-ready: nif != NULL\0");
+    }
+    let f = h.f;
+    // Readiness: writable always, not readable with nothing queued; a queue to wait on.
+    if (kobject_ready(objOf(f)) != IO_WRITABLE) {
+        return failed(reason, "tap-ready: kobject_ready(&f->obj) == COSMO_IO_WRITABLE\0");
+    }
+    if (kobject_poll_wq(objOf(f), IO_READABLE).isNull()) {
+        return failed(reason, "tap-ready: kobject_poll_wq(&f->obj, COSMO_IO_READABLE) != NULL\0");
+    }
+    if (!kobject_poll_wq(objOf(f), IO_WRITABLE).isNull()) {
+        return failed(reason, "tap-ready: kobject_poll_wq(&f->obj, COSMO_IO_WRITABLE) == NULL\0");
+    }
+    // A blocking read waits for a frame, and returns it once the stack transmits one.
+    RD_FILE = f as usize;
+    RD_GOT = 0;
+    RD_DONE.storeWith(0, StoreOrdering.Release);
+    h.th = thread_create(readerMain, 0 as *mut void, "tapready-rd\0".ptr as *CChar, 32);
+    if (h.th.isNull()) {
+        return failed(reason, "tap-ready: th != NULL\0");
+    }
+    if (doneWithin(30)) {
+        return failed(reason, "tap-ready: !tapready_flag_within(&rd.done, 30)\0");
+    }
+    if (!transmit(h.nif, 0x11)) {
+        return failed(reason, "tap-ready: tapready_transmit(nif, 0x11)\0");
+    }
+    if (!doneWithin(2000)) {
+        return failed(reason, "tap-ready: tapready_flag_within(&rd.done, 2000)\0");
+    }
+    thread_join(h.th);
+    h.th = 0 as *mut thread;
+    if (RD_GOT != 64 || RD_BUF[14] != 0x11) {
+        return failed(reason, "tap-ready: rd.got == 64 && rd.buf[14] == 0x11\0");
+    }
+    // io_poll: nothing ready times out; a transmit wakes it.
+    PF.obj = objOf(f);
+    PF.events = IO_READABLE;
+    PF.revents = 0;
+    let pf = borrow mut PF as *mut io_pollfd;
+    if (io_poll(pf, 1, 20 * MS) != 0) {
+        return failed(reason, "tap-ready: io_poll(&pf, 1, 20 * 1000000ull) == 0\0");
+    }
+    if (!transmit(h.nif, 0x22)) {
+        return failed(reason, "tap-ready: tapready_transmit(nif, 0x22)\0");
+    }
+    if (io_poll(pf, 1, 2000 * MS) != 1 || (PF.revents & IO_READABLE) == 0) {
+        return failed(reason, "tap-ready: io_poll(&pf, 1, 2000 ms) == 1 && (pf.revents & COSMO_IO_READABLE)\0");
+    }
+    if (kobject_ready(objOf(f)) != (IO_WRITABLE | IO_READABLE)) {
+        return failed(reason, "tap-ready: kobject_ready(&f->obj) == (COSMO_IO_WRITABLE | COSMO_IO_READABLE)\0");
+    }
+    // Non-blocking: the frame, then 0 when none waits (the tap unit's contract, kept).
+    if (kobject_set_nonblock(objOf(f), 1) != 0) {
+        return failed(reason, "tap-ready: kobject_set_nonblock(&f->obj, 1) == 0\0");
+    }
+    if (readBuf(f) != 64 || tagOf() != 0x22) {
+        return failed(reason, "tap-ready: file_read(f, buf, sizeof(buf)) == 64 && buf[14] == 0x22\0");
+    }
+    if (readBuf(f) != 0) {
+        return failed(reason, "tap-ready: file_read(f, buf, sizeof(buf)) == 0\0");
+    }
+    if (kobject_ready(objOf(f)) != IO_WRITABLE) {
+        return failed(reason, "tap-ready: kobject_ready(&f->obj) == COSMO_IO_WRITABLE\0");
+    }
+    if (kobject_set_nonblock(objOf(f), 0) != 1) {
+        return failed(reason, "tap-ready: kobject_set_nonblock(&f->obj, 0) == 1\0");
+    }
+    // The mode is the open file's: a second open made non-blocking at open answers so while the first, blocking, does
+    // not, and reads 0 at once.
+    var f2 = 0 as *mut file;
+    if (nettest_vfs_open(path.ptr as *CChar, O_RDWR | O_NONBLOCK, borrow mut f2 as *mut *mut file) != 0) {
+        return failed(reason, "tap-ready: nt_vfs_open(\"/dev/net/tap\", O_RDWR | O_NONBLOCK, &f2) == 0\0");
+    }
+    let perOpen = kobject_set_nonblock(objOf(f2), -1) == 1 && kobject_set_nonblock(objOf(f), -1) == 0 &&
+        readBuf(f2) == 0;
+    nettest_file_put(f2);
+    if (!perOpen) {
+        return failed(reason, "tap-ready: per_open\0");
+    }
+    netif_put(h.nif);
+    h.nif = 0 as *mut netif;
+    nettest_file_put(f);
+    h.f = 0 as *mut file;
+    if (!tap0().isNull()) {
+        return failed(reason, "tap-ready: netif_find(\"tap0\") == NULL\0");
+    }
+
+    // A process blocked in the tap's read (its own tap, no frame coming) is killed: the read returns -EINTR, the
+    // process exits 137, and the tap it held goes only after -- the reader held the file.
+    var image = 0 as *void;
+    var imageSize: usize = 0;
+    if (bootarchive_find("init\0".ptr as *CChar, borrow mut image as *mut *void, borrow mut imageSize as *mut usize)) {
+        let argv: [*CChar; 4] = [
+            "init\0".ptr as *CChar,
+            "--probe\0".ptr as *CChar,
+            "devices-tapread\0".ptr as *CChar,
+            0 as *CChar,
+        ];
+        let args = borrow argv as *[*CChar; 4] as **CChar;
+        let out = borrow mut h.p as *mut *mut process;
+        let rc = process_create_from_elf(image, imageSize, argv[0], args, 0 as **CChar, 0 as *process_spawn_attr, out);
+        if (rc != 0) {
+            return failed(reason, "tap-ready: process_create_from_elf(image, size, \"init\", argv, ...) == 0\0");
+        }
+        // Until its open made a tap and its read is waiting.
+        var end = now() + 5000 * MS;
+        var held = tap0();
+        while (held.isNull() && now() < end) {
+            sleepMs(1);
+            held = tap0();
+        }
+        if (held.isNull()) {
+            return failed(reason, "tap-ready: held != NULL\0");
+        }
+        netif_put(held);
+        sleepMs(30);
+        if (exited(h.p)) {
+            return failed(reason, "tap-ready: !completion_done(&p->exited)\0");
+        }
+        held = tap0(); // still held by the blocked reader
+        if (held.isNull()) {
+            return failed(reason, "tap-ready: held != NULL\0");
+        }
+        netif_put(held);
+        process_kill(h.p, SIGKILL);
+        // Bounded: a read the kill cannot end (a mutation) fails here rather than hanging the boot in
+        // process_wait_exit.
+        end = now() + 3000 * MS;
+        while (!exited(h.p) && now() < end) {
+            sleepMs(1);
+        }
+        if (!exited(h.p)) {
+            return failed(reason, "tap-ready: completion_done(&p->exited)\0");
+        }
+        let status = process_wait_exit(h.p);
+        if (status != 128 + SIGKILL) {
+            return failed(reason, "tap-ready: status == 128 + COSMO_SIGKILL\0");
+        }
+        kobject_put(h.p as *mut kobject); // process_put: the kobject is a process's first member
+        h.p = 0 as *mut process;
+        end = now() + 2000 * MS;
+        held = tap0();
+        while (!held.isNull() && now() < end) {
+            netif_put(held);
+            sleepMs(1);
+            held = tap0();
+        }
+        if (!held.isNull()) { // released after the reader went
+            return failed(reason, "tap-ready: held == NULL\0");
+        }
+    }
+    info(
+        "selftest: tap-ready: the tap's file is readable exactly when a frame waits, a blocking read waits for one, io_poll wakes on a transmit, a killed reader returns -EINTR and releases the tap after",
+    );
+    return true;
+}
+
+/// tap-ready: the tap's file can be waited on (the device-readiness unit).
+/// Safety: the runner's `reason`.
+@export("selftest_tap_ready")
+unsafe fn tapReady(reason: *mut *CChar) -> bool {
+    var h = Held { f: 0 as *mut file, th: 0 as *mut thread, p: 0 as *mut process, nif: 0 as *mut netif };
+    let ok = tapReadyBody(reason, mut h);
+    // A reader thread still inside its read (a mutation that lost the wake) cannot be joined, and the file it reads
+    // through must outlive it: both are left, the file with them. A process a kill could not end is left too.
+    if (!h.th.isNull() && RD_DONE.loadWith(LoadOrdering.Acquire) != 0) {
+        thread_join(h.th);
+    } else if (!h.th.isNull()) {
+        h.f = 0 as *mut file;
+    }
+    if (!h.nif.isNull()) {
+        netif_put(h.nif);
+    }
+    if (!h.f.isNull()) {
+        nettest_file_put(h.f);
+    }
+    if (!h.p.isNull()) {
+        process_kill(h.p, SIGKILL);
+        if (exited(h.p)) {
+            process_wait_exit(h.p);
+            kobject_put(h.p as *mut kobject);
+        }
+    }
+    return ok;
+}
+
+// ---- net-dhcp-client ----
+
+const FRAMES: u32 = 8;
+const FRAME_MAX: usize = 700;
+const FRAME_MAX_U32: u32 = 700;
+
+/// The fixture's link address, and its server's.
+fn clientMac() -> [u8; 6] => [0x02, 0xd4, 0xc9, 0x00, 0x00, 0x01];
+
+fn serverMac() -> [u8; 6] => [0x02, 0xd4, 0xc9, 0x00, 0x00, 0x02];
+
+fn server() -> u32 => ip4(10, 77, 0, 1);
+
+fn offered() -> u32 => ip4(10, 77, 0, 15);
+
+static mut DHCPT_NIF: netif = netif { name: "dhcpt0", mtu: 1500 };
+static mut DHCPT_OPS: netif_ops = netif_ops { transmit: dhcptTransmit, release: dhcptRelease };
+// The captured frames [TAIL, HEAD), under DHCPT_LOCK: the client transmits from the network worker, the test reads.
+static mut DHCPT_LOCK: spinlock_t = SPINLOCK_INIT("dhcpt\0".ptr as *CChar);
+static mut HEAD: u32 = 0;
+static mut TAIL: u32 = 0;
+static mut LENS: [u32; 8] = [0; 8];
+static mut CAPTURED: [u8; 5600] = [0; 5600];
+static ARP_ANSWERED: AtomicU32 = AtomicU32.constant(0);
+// The frame read back, the lease listing and the statistics, off the stack.
+static mut B: [u8; 700] = [0; 700];
+static mut LEASES: [u64; 128] = [0; 128];
+static mut STATS: [u64; 32] = [0; 32];
+
+/// Safety: the address of the test's static interface; nothing is read through it here.
+fn dnif() -> *mut netif => unsafe { borrow mut DHCPT_NIF as *mut netif };
+
+/// Safety: the lock's address.
+fn dlock() -> *mut spinlock_t => unsafe { borrow mut DHCPT_LOCK as *mut spinlock_t };
+
+/// The fixture's transmit: an ARP request for the server is answered as the server would; any other frame is
+/// captured (up to FRAMES waiting; more are dropped).
+/// Safety: the interface layer hands over the packet; the captured frames are under DHCPT_LOCK.
+@callback
+unsafe fn dhcptTransmit(nif: *mut netif, m: *mut mbuf) -> i32 {
+    var b: [u8; 700] = [0; 700];
+    let len = Ptr.toBorrow(m as *mbuf).pkt.len;
+    let n = if (len < FRAME_MAX_U32) len else FRAME_MAX_U32;
+    let ok = m_copydata(m as *mbuf, 0, n, borrow mut b as *mut [u8; 700] as *mut void);
+    m_freem(m);
+    if (!ok) {
+        return 0;
+    }
+    if (rd16(b[..], 12) == ETH_P_ARP && (n as usize) >= ETH_HLEN + 28) {
+        // An ARP request for the server: answer it as the server would.
+        let tpa = wordOf(b[..], ETH_HLEN + 24);
+        if (b[ETH_HLEN + 6] == 0 && b[ETH_HLEN + 7] == 1 && tpa == server()) {
+            let r = m_getcl();
+            if (!r.isNull()) {
+                let p = SliceMut.fromRaw(Ptr.toBorrow(r as *mbuf).data, 60);
+                let smac = serverMac();
+                for (i in 0..6) {
+                    let k = truncate<usize>(i);
+                    p[k] = b[6 + k]; // to the asker
+                    p[6 + k] = smac[k];
+                    p[14 + k] = b[ETH_HLEN + k]; // htype, ptype, hlen, plen
+                    p[22 + k] = smac[k];
+                }
+                p[12] = 0x08;
+                p[13] = 0x06;
+                p[20] = 0;
+                p[21] = 2; // reply
+                putWord(p, 28, tpa);
+                for (i in 0..10) {
+                    let k = truncate<usize>(i);
+                    p[32 + k] = b[ETH_HLEN + 8 + k]; // the asker's sha and spa
+                }
+                for (i in 42..60) {
+                    p[truncate<usize>(i)] = 0;
+                }
+                let rr = Ptr.toBorrowMut(r);
+                rr.len = 60;
+                rr.pkt.len = 60;
+                ARP_ANSWERED.fetchAddWith(1, Ordering.Relaxed);
+                netif_rx(nif, r);
+            }
+        }
+        return 0;
+    }
+    let s = spin_lock_irqsave(dlock());
+    if (HEAD - TAIL < FRAMES) {
+        let i = (HEAD % FRAMES) as usize;
+        HEAD += 1;
+        for (k in 0..n as usize) {
+            CAPTURED[i * FRAME_MAX + k] = b[k];
+        }
+        LENS[i] = n;
+    }
+    spin_unlock_irqrestore(dlock(), s);
+    return 0;
+}
+
+/// The fixture's release: nothing (the storage is static).
+/// Safety: the interface layer calls it once, after the last reference.
+@callback
+unsafe fn dhcptRelease(nif: *mut netif) {}
+
+/// The next captured frame, in B (2 s at most): its length, 0 for none.
+/// Safety: the captured frames are under DHCPT_LOCK; B is the test's.
+unsafe fn next() -> u32 {
+    let deadline = now() + 2000 * MS;
+    while (true) {
+        let s = spin_lock_irqsave(dlock());
+        if (TAIL != HEAD) {
+            let i = (TAIL % FRAMES) as usize;
+            TAIL += 1;
+            let n = LENS[i];
+            for (k in 0..n as usize) {
+                B[k] = CAPTURED[i * FRAME_MAX + k];
+            }
+            spin_unlock_irqrestore(dlock(), s);
+            return n;
+        }
+        spin_unlock_irqrestore(dlock(), s);
+        if (now() > deadline) {
+            return 0;
+        }
+        sleepMs(1);
+    }
+    return 0;
+}
+
+/// What the test reads from a captured client message (the C's struct dhcpt_msg); `ok` false when it is not one.
+struct Msg {
+    ok: bool;
+    kind: u8;
+    xid: u32;
+    ciaddr: u32;
+    ipSrc: u32;
+    ipDst: u32;
+    reqip: u32;
+    server: u32;
+    ethBcast: bool;
+    ethToServer: bool;
+    hasReqip: bool;
+    hasServer: bool;
+}
+
+fn noMsg() -> Msg => Msg {
+    ok: false,
+    kind: 0,
+    xid: 0,
+    ciaddr: 0,
+    ipSrc: 0,
+    ipDst: 0,
+    reqip: 0,
+    server: 0,
+    ethBcast: false,
+    ethToServer: false,
+    hasReqip: false,
+    hasServer: false,
+};
+
+/// The option `code` of the options at `opts` (`len` bytes): its offset and length, or -1.
+/// Safety: `opts` points to `len` readable bytes.
+unsafe fn opt(opts: *u8, len: u32, code: u8, olen: borrow mut u8) -> i32 =>
+    netparse_dhcp_opt(opts, len, code, olen as *mut u8);
+
+/// The `n` bytes of B, parsed as a client message.
+/// Safety: B is the test's.
+unsafe fn parse(n: u32) -> Msg {
+    var o = noMsg();
+    if ((n as usize) < ETH_HLEN + 20 + 8 + DHCP_FIXED + 3) {
+        return o;
+    }
+    let b = Slice.fromRaw(borrow B as *[u8; 700] as *u8, n as usize);
+    let ipAt = ETH_HLEN;
+    let udpAt = ETH_HLEN + 20;
+    let ulen = rd16(b, udpAt + 4);
+    let ipSrc = wordOf(b, ipAt + 12);
+    let ipDst = wordOf(b, ipAt + 16);
+    let base = borrow B as *[u8; 700] as *u8;
+    if (rd16(b, 12) != ETH_P_IP || b[ipAt + 9] != IPPROTO_UDP || rd16(b, udpAt) != DHCP_CPORT ||
+        rd16(b, udpAt + 2) != DHCP_SPORT || udpAt + (ulen as usize) > (n as usize) ||
+        in_cksum(base.add(ipAt) as *void, 20) != 0 ||
+        !nettest_l4_ok(ipSrc, ipDst, IPPROTO_UDP, base.add(udpAt) as *void, ulen)) {
+        return o;
+    }
+    // The C's ulen - 8 - DHCP_FIXED, unsigned: a UDP length too short for the fixed part is no message.
+    if ((ulen as usize) < 8 + DHCP_FIXED) {
+        return o;
+    }
+    let dh = udpAt + 8;
+    let cm = clientMac();
+    if (b[dh + BOOTP_OFF_OP] != BOOTP_REQUEST) {
+        return o;
+    }
+    for (i in 0..6) {
+        if (b[dh + BOOTP_OFF_CHADDR + truncate<usize>(i)] != cm[truncate<usize>(i)]) {
+            return o;
+        }
+    }
+    let sm = serverMac();
+    var bcast = true;
+    var toServer = true;
+    for (i in 0..6) {
+        let k = truncate<usize>(i);
+        bcast = bcast && b[k] == 0xff;
+        toServer = toServer && b[k] == sm[k];
+    }
+    o.ethBcast = bcast;
+    o.ethToServer = toServer;
+    o.ipSrc = ipSrc;
+    o.ipDst = ipDst;
+    o.xid = wordOf(b, dh + BOOTP_OFF_XID);
+    o.ciaddr = wordOf(b, dh + BOOTP_OFF_CIADDR);
+    let opts = base.add(dh + DHCP_FIXED);
+    let optlen = (ulen as u32) - 8 - truncate<u32>(DHCP_FIXED);
+    var l: u8 = 0;
+    let at = opt(opts, optlen, OPT_MSGTYPE, mut l);
+    if (at < 0 || l != 1) {
+        return o;
+    }
+    let ob = Slice.fromRaw(opts, optlen as usize);
+    o.kind = ob[truncate<usize>(at)];
+    let rq = opt(opts, optlen, OPT_REQIP, mut l);
+    if (rq >= 0 && l == 4) {
+        o.hasReqip = true;
+        o.reqip = wordOf(ob, truncate<usize>(rq));
+    }
+    let sv = opt(opts, optlen, OPT_SERVERID, mut l);
+    if (sv >= 0 && l == 4) {
+        o.hasServer = true;
+        o.server = wordOf(ob, truncate<usize>(sv));
+    }
+    o.ok = true;
+    return o;
+}
+
+/// The next captured frame, parsed (the C's `n && dhcpt_parse(b, n, &msg)`).
+/// Safety: as next.
+unsafe fn nextMsg() -> Msg {
+    let n = next();
+    if (n == 0) {
+        return noMsg();
+    }
+    return parse(n);
+}
+
+/// The server's reply of `kind` to `xid`, as `from` names itself (the frame still comes from the fixture's server),
+/// received on the fixture.
+/// Safety: the fixture is registered.
+unsafe fn replyFrom(kind: u8, xid: u32, yiaddr: u32, lease: u32, from: u32) {
+    var dh: [u8; 304] = [0; 304];
+    var l4: [u8; 312] = [0; 312];
+    var frame: [u8; 376] = [0; 376];
+    let d = SliceMut.fromRaw(borrow mut dh as *mut [u8; 304] as *mut u8, 304);
+    d[BOOTP_OFF_OP] = BOOTP_REPLY;
+    d[BOOTP_OFF_HTYPE] = DHCP_HTYPE_ETHER;
+    d[BOOTP_OFF_HLEN] = 6;
+    putWord(d, BOOTP_OFF_XID, xid);
+    putWord(d, BOOTP_OFF_YIADDR, yiaddr);
+    let cm = clientMac();
+    for (i in 0..6) {
+        d[BOOTP_OFF_CHADDR + truncate<usize>(i)] = cm[truncate<usize>(i)];
+    }
+    putBe32(d, BOOTP_LEN, 0x63825363); // DHCP_MAGIC
+    var o = DHCP_FIXED;
+    d[o] = OPT_MSGTYPE;
+    d[o + 1] = 1;
+    d[o + 2] = kind;
+    d[o + 3] = OPT_SERVERID;
+    d[o + 4] = 4;
+    putWord(d, o + 5, from);
+    o += 9;
+    if (kind != DHCP_NAK) {
+        d[o] = OPT_LEASE;
+        d[o + 1] = 4;
+        putBe32(d, o + 2, lease);
+        d[o + 6] = OPT_SUBNET;
+        d[o + 7] = 4;
+        putBe32(d, o + 8, 0xffffff00);
+        d[o + 12] = OPT_ROUTER;
+        d[o + 13] = 4;
+        putWord(d, o + 14, from);
+        d[o + 18] = OPT_DNS;
+        d[o + 19] = 8;
+        putWord(d, o + 20, ip4(10, 77, 0, 53));
+        putWord(d, o + 24, ip4(10, 77, 0, 54));
+        o += 28;
+    }
+    d[o] = OPT_END;
+    o += 1;
+    // The reply goes to the address offered, link-unicast to the client: the client must take it before it holds that
+    // address.
+    let to = if (yiaddr != 0) yiaddr else INADDR_BROADCAST_N;
+    let sm = serverMac();
+    let l4p = borrow mut l4 as *mut [u8; 312] as *mut u8;
+    let l4len = nettest_mk_udp(l4p, from, to, DHCP_SPORT, DHCP_CPORT, borrow dh as *[u8; 304] as *u8, truncate<u16>(o));
+    let fp = borrow mut frame as *mut [u8; 376] as *mut u8;
+    let cmp = borrow cm as *[u8; 6] as *u8;
+    let smp = borrow sm as *[u8; 6] as *u8;
+    let flen = nettest_wrap(fp, cmp, smp, from, to, 64, IPPROTO_UDP, l4p as *void, l4len);
+    let m = m_getcl();
+    if (m.isNull()) {
+        return;
+    }
+    let p = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, flen as usize);
+    for (i in 0..flen as usize) {
+        p[i] = frame[i];
+    }
+    let mm = Ptr.toBorrowMut(m);
+    mm.len = flen;
+    mm.pkt.len = flen;
+    netif_rx(dnif(), m);
+}
+
+/// The server's reply as the fixture's server names itself.
+/// Safety: as replyFrom.
+unsafe fn reply(kind: u8, xid: u32, yiaddr: u32, lease: u32) {
+    replyFrom(kind, xid, yiaddr, lease, server());
+}
+
+/// The fixture's lease as the listing gives it (the C's struct dhcp_lease_info, the fields the test reads); `found`
+/// false when it is not listed.
+struct Lease {
+    found: bool;
+    state: u8;
+    ndns: u8;
+    addr: u32;
+    server: u32;
+    dns0: u32;
+    dns1: u32;
+    leaseS: u32;
+    t1S: u32;
+    t2S: u32;
+    remainingMs: u32;
+    t1Ms: u32;
+}
+
+/// Safety: LEASES is the test's.
+unsafe fn lease() -> Lease {
+    let size = layoutOf<dhcp_lease_info>().size;
+    if (size * (DHCP_MAX_CLIENTS as usize) > 1024) {
+        tooSmall();
+    }
+    let base = borrow mut LEASES as *mut [u64; 128] as *mut u8;
+    let n = dhcp_lease_list(base as *mut dhcp_lease_info, DHCP_MAX_CLIENTS);
+    let name = "dhcpt0\0";
+    for (i in 0..n as usize) {
+        let l = Ptr.toBorrow(base.add(i * size) as *dhcp_lease_info);
+        var same = true;
+        for (k in 0..name.length) {
+            same = same && l.ifname[k] == name.bytes()[k];
+        }
+        if (same) {
+            return Lease {
+                found: true,
+                state: l.state,
+                ndns: l.ndns,
+                addr: l.addr,
+                server: l.server,
+                dns0: l.dns[0],
+                dns1: l.dns[1],
+                leaseS: l.lease_s,
+                t1S: l.t1_s,
+                t2S: l.t2_s,
+                remainingMs: l.remaining_ms,
+                t1Ms: l.t1_ms,
+            };
+        }
+    }
+    return Lease {
+        found: false,
+        state: 0,
+        ndns: 0,
+        addr: 0,
+        server: 0,
+        dns0: 0,
+        dns1: 0,
+        leaseS: 0,
+        t1S: 0,
+        t2S: 0,
+        remainingMs: 0,
+        t1Ms: 0,
+    };
+}
+
+/// The client's counters at one read.
+struct Counts {
+    offers: u64;
+    acks: u64;
+    naks: u64;
+    expiries: u64;
+    ignored: u64;
+}
+
+/// Safety: STATS is the test's.
+unsafe fn counts() -> Counts {
+    if (layoutOf<dhcp_stats>().size > 256) {
+        tooSmall();
+    }
+    let p = borrow mut STATS as *mut [u64; 32] as *mut dhcp_stats;
+    dhcp_get_stats(p);
+    let s = Ptr.toBorrow(p as *dhcp_stats);
+    return Counts { offers: s.offers, acks: s.acks, naks: s.naks, expiries: s.expiries, ignored: s.ignored };
+}
+
+/// The fixture's address, mask and router.
+/// Safety: the fixture is the test's.
+unsafe fn ip4Of() -> netifAddr {
+    let n = Ptr.toBorrow(dnif() as *netif);
+    return netifAddr { addr: n.ip4.addr, mask: n.ip4.mask, gateway: n.ip4.gateway };
+}
+
+struct netifAddr {
+    addr: u32;
+    mask: u32;
+    gateway: u32;
+}
+
+/// The fixture, zeroed and filled in (the C's memset and assignments), its captures and counter reset.
+/// Safety: the fixture is not registered.
+unsafe fn fixture() {
+    let b = SliceMut.fromRaw(dnif() as *mut u8, layoutOf<netif>().size);
+    for (i in 0..b.length) {
+        b[i] = 0;
+    }
+    let n = Ptr.toBorrowMut(dnif());
+    let name = "dhcpt0";
+    for (i in 0..name.length) {
+        n.name[i] = name.bytes()[i];
+    }
+    let mac = clientMac();
+    for (i in 0..6) {
+        n.mac[truncate<usize>(i)] = mac[truncate<usize>(i)];
+    }
+    n.mtu = 1500;
+    n.ops = borrow DHCPT_OPS as *netif_ops;
+    n.flags = NETIF_UP | NETIF_NODEFAULT; // no NETIF_AUTOCONF: the test starts the client
+    HEAD = 0;
+    TAIL = 0;
+    ARP_ANSWERED.storeWith(0, StoreOrdering.Relaxed);
+}
+
+/// net-dhcp-client: the kernel's DHCP client against the test as its server -- DISCOVER, its retransmission, the
+/// REQUEST for this exchange's offer, the selected server's ACK binding the lease, RENEWING at T1, REBINDING at T2, the
+/// lease's end, a NAK starting over, and unregistering stopping the client.
+/// Safety: the runner's `reason`.
+@cfg("CONFIG_SELFTEST")
+@export("selftest_net_dhcp_client")
+unsafe fn dhcpClient(reason: *mut *CChar) -> bool {
+    fixture();
+    let nif = dnif();
+    if (nettest_netif_register(nif) != 0) {
+        return failed(reason, "check failed: net-dhcp-client: the fixture registers\0");
+    }
+    if (ip4Of().addr != 0 || dhcp_test_state(nif) != 0) {
+        return failed(reason, "check failed: net-dhcp-client: no address and no client yet\0");
+    }
+    let st0 = counts();
+    if (dhcp_client_start(nif) != 0) {
+        return failed(reason, "check failed: net-dhcp-client: the client starts\0");
+    }
+
+    // (1) DISCOVER: from 0.0.0.0 to the limited broadcast at both layers.
+    var msg = nextMsg();
+    if (!msg.ok || msg.kind != DHCP_DISCOVER) {
+        return failed(reason, "check failed: net-dhcp-client: a DISCOVER\0");
+    }
+    if (!msg.ethBcast || msg.ipSrc != 0 || msg.ipDst != INADDR_BROADCAST_N || msg.ciaddr != 0) {
+        return failed(reason, "check failed: net-dhcp-client: the DISCOVER broadcast from 0.0.0.0\0");
+    }
+    if (dhcp_test_state(nif) != DHCP_S_SELECTING) {
+        return failed(reason, "check failed: net-dhcp-client: SELECTING\0");
+    }
+    var xid = msg.xid;
+
+    // (2) A retransmission is the same exchange (the same xid).
+    if (dhcp_test_fire(nif, DHCP_TEST_RETX) != 0) {
+        return failed(reason, "check failed: net-dhcp-client: the retransmission fires\0");
+    }
+    msg = nextMsg();
+    if (!msg.ok || msg.kind != DHCP_DISCOVER || msg.xid != xid) {
+        return failed(reason, "check failed: net-dhcp-client: the DISCOVER again, the same xid\0");
+    }
+
+    // (3) An OFFER for another exchange is ignored; this one's is requested, naming the offer and its server.
+    reply(DHCP_OFFER, xid ^ 1, offered(), 1000);
+    reply(DHCP_OFFER, xid, offered(), 1000);
+    msg = nextMsg();
+    if (!msg.ok || msg.kind != DHCP_REQUEST || msg.xid != xid) {
+        return failed(reason, "check failed: net-dhcp-client: a REQUEST for this exchange\0");
+    }
+    if (!msg.ethBcast || msg.ipSrc != 0 || !msg.hasReqip || msg.reqip != offered() || !msg.hasServer ||
+        msg.server != server() || msg.ciaddr != 0) {
+        return failed(reason, "check failed: net-dhcp-client: the REQUEST names the offer and its server\0");
+    }
+    if (dhcp_test_state(nif) != DHCP_S_REQUESTING) {
+        return failed(reason, "check failed: net-dhcp-client: REQUESTING\0");
+    }
+    var st1 = counts();
+    if (st1.ignored < st0.ignored + 1 || st1.offers != st0.offers + 1) {
+        return failed(reason, "check failed: net-dhcp-client: the other exchange's offer ignored\0");
+    }
+
+    // (4) An ACK from a server the client did not select changes nothing; the selected server's binds: the
+    // interface's address, mask and router are the lease's, and the lease lists the DNS servers and the RFC's T1/T2.
+    replyFrom(DHCP_ACK, xid, ip4(10, 77, 0, 99), 1000, ip4(10, 77, 0, 2));
+    replyFrom(DHCP_NAK, xid, 0, 0, ip4(10, 77, 0, 2));
+    sleepMs(20);
+    if (dhcp_test_state(nif) != DHCP_S_REQUESTING || ip4Of().addr != 0) {
+        return failed(reason, "check failed: net-dhcp-client: another server's ACK and NAK change nothing\0");
+    }
+    reply(DHCP_ACK, xid, offered(), 1000);
+    let deadline1 = now() + 2000 * MS; // the C's dhcpt_wait_state
+    while (dhcp_test_state(nif) != DHCP_S_BOUND && now() <= deadline1) {
+        sleepMs(1);
+    }
+    if (dhcp_test_state(nif) != DHCP_S_BOUND) {
+        return failed(reason, "check failed: net-dhcp-client: BOUND\0");
+    }
+    let a = ip4Of();
+    if (a.addr != offered() || a.mask != 0x00ffffff || a.gateway != server()) {
+        return failed(reason, "check failed: net-dhcp-client: the lease's address, mask and router\0");
+    }
+    var li = lease();
+    if (!li.found || li.state as i32 != DHCP_S_BOUND || li.addr != offered() || li.server != server()) {
+        return failed(reason, "check failed: net-dhcp-client: the lease listed, BOUND\0");
+    }
+    if (li.ndns != 2 || li.dns0 != ip4(10, 77, 0, 53) || li.dns1 != ip4(10, 77, 0, 54)) {
+        return failed(reason, "check failed: net-dhcp-client: the lease's DNS servers\0");
+    }
+    if (li.leaseS != 1000 || li.t1S != 500 || li.t2S != 875 || li.remainingMs <= 990000 || li.t1Ms == 0) {
+        return failed(reason, "check failed: net-dhcp-client: the lease's times\0");
+    }
+
+    // (5) T1: RENEWING, a REQUEST unicast from the address to the server (its link address by ARP), ciaddr set, no
+    // requested-address or server option. Its ACK extends the lease.
+    if (dhcp_test_fire(nif, DHCP_TEST_T1) != 0) {
+        return failed(reason, "check failed: net-dhcp-client: T1 fires\0");
+    }
+    msg = nextMsg();
+    if (!msg.ok || msg.kind != DHCP_REQUEST) {
+        return failed(reason, "check failed: net-dhcp-client: a renewing REQUEST\0");
+    }
+    if (msg.ethBcast || !msg.ethToServer || msg.ipSrc != offered() || msg.ipDst != server() ||
+        msg.ciaddr != offered() || msg.hasReqip || msg.hasServer || msg.xid == xid) {
+        return failed(reason, "check failed: net-dhcp-client: the renewal unicast to the server\0");
+    }
+    if (ARP_ANSWERED.loadWith(LoadOrdering.Relaxed) < 1 || dhcp_test_state(nif) != DHCP_S_RENEWING) {
+        return failed(reason, "check failed: net-dhcp-client: RENEWING, the server resolved\0");
+    }
+    xid = msg.xid;
+    reply(DHCP_ACK, xid, offered(), 2000);
+    let deadline2 = now() + 2000 * MS; // the C's dhcpt_wait_state
+    while (dhcp_test_state(nif) != DHCP_S_BOUND && now() <= deadline2) {
+        sleepMs(1);
+    }
+    if (dhcp_test_state(nif) != DHCP_S_BOUND) {
+        return failed(reason, "check failed: net-dhcp-client: BOUND again\0");
+    }
+    li = lease();
+    if (!li.found || li.leaseS != 2000 || ip4Of().addr != offered()) {
+        return failed(reason, "check failed: net-dhcp-client: the lease extended\0");
+    }
+
+    // (6) T2: REBINDING, the REQUEST broadcast with ciaddr set.
+    if (dhcp_test_fire(nif, DHCP_TEST_T2) != 0) {
+        return failed(reason, "check failed: net-dhcp-client: T2 fires\0");
+    }
+    msg = nextMsg();
+    if (!msg.ok || msg.kind != DHCP_REQUEST) {
+        return failed(reason, "check failed: net-dhcp-client: a rebinding REQUEST\0");
+    }
+    if (!msg.ethBcast || msg.ipDst != INADDR_BROADCAST_N || msg.ciaddr != offered() || msg.hasReqip) {
+        return failed(reason, "check failed: net-dhcp-client: the rebinding broadcast\0");
+    }
+    if (dhcp_test_state(nif) != DHCP_S_REBINDING) {
+        return failed(reason, "check failed: net-dhcp-client: REBINDING\0");
+    }
+
+    // (7) The lease's end: the address is removed and discovery restarts.
+    if (dhcp_test_fire(nif, DHCP_TEST_EXPIRE) != 0) {
+        return failed(reason, "check failed: net-dhcp-client: the lease's end fires\0");
+    }
+    msg = nextMsg();
+    if (!msg.ok || msg.kind != DHCP_DISCOVER || msg.ipSrc != 0) {
+        return failed(reason, "check failed: net-dhcp-client: a DISCOVER after the lease's end\0");
+    }
+    let e = ip4Of();
+    if (e.addr != 0 || e.gateway != 0 || dhcp_test_state(nif) != DHCP_S_SELECTING) {
+        return failed(reason, "check failed: net-dhcp-client: the address removed, SELECTING\0");
+    }
+    li = lease();
+    if (!li.found || li.addr != 0 || li.ndns != 0 || li.remainingMs != 0) {
+        return failed(reason, "check failed: net-dhcp-client: the lease listed empty\0");
+    }
+    xid = msg.xid;
+
+    // (8) A NAK to the REQUEST starts over: no address, a new DISCOVER.
+    reply(DHCP_OFFER, xid, offered(), 1000);
+    msg = nextMsg();
+    if (!msg.ok || msg.kind != DHCP_REQUEST) {
+        return failed(reason, "check failed: net-dhcp-client: a REQUEST for the new offer\0");
+    }
+    reply(DHCP_NAK, xid, 0, 0);
+    msg = nextMsg();
+    if (!msg.ok || msg.kind != DHCP_DISCOVER || msg.xid == xid) {
+        return failed(reason, "check failed: net-dhcp-client: a new DISCOVER after the NAK\0");
+    }
+    if (ip4Of().addr != 0 || dhcp_test_state(nif) != DHCP_S_SELECTING) {
+        return failed(reason, "check failed: net-dhcp-client: no address after the NAK, SELECTING\0");
+    }
+
+    // (9) Unregistering stops the client: no state, no lease listed.
+    nettest_netif_unregister(nif);
+    kobject_put(nif as *mut kobject); // the creator's reference (netif_register), as the other tests drop it
+    if (dhcp_test_state(nif) != 0 || lease().found) {
+        return failed(reason, "check failed: net-dhcp-client: unregistering stops the client\0");
+    }
+    st1 = counts();
+    if (st1.acks != st0.acks + 2 || st1.naks != st0.naks + 1 || st1.expiries != st0.expiries + 1) {
+        return failed(reason, "check failed: net-dhcp-client: the client's counters\0");
+    }
+    return true;
+}

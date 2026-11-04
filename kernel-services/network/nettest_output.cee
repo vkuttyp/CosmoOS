@@ -1,0 +1,1673 @@
+// nettest_output.cee - the OUTPUT chain and its verdict in the connection, in CeeSafe: roadmap 2.0 SA6 (nettest, the
+// thirteenth batch). net-output and net-tcpverdict, as nettest.c had them (docs/audit/next-subsystem-output-chain.md),
+// with the OUTPUT rule they build and the drain of a guest's tap file only they used. The world side of the uplink tap
+// is nettest_hostin.cee's (nettest_hin_*), the guest's frames nettest_fwd.cee's (nettest_fwt_*), the host's outbound
+// connect nettest.c's (nettest_hin_connect, _done, _join).
+//
+// A C struct the kernel takes (a firewall rule, a control command) is built in a zeroed room, as the C's designated
+// initialisers zeroed what they did not name; one it fills (the counters, the snapshot) is read in a room of this
+// file's, field by field. An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest.c).
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/net/tap.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
+extern "C" {
+    struct netaddr;
+    struct netif;
+    struct file;
+    struct tap;
+    struct tcp_pcb;
+    struct socket {
+        tcp: *mut tcp_pcb;
+    }
+    struct hin_seg {
+        src: u32;
+        flags: u8;
+        sport: u16;
+        seq: u32;
+        ack: u32;
+    }
+    struct fw_stats {
+        out_drop_rule: u64;
+        out_accept_default: u64;
+        out_drop_default: u64;
+        hin_flow_new: u64;
+    }
+    struct ip_stats {
+        tx_filtered: u64;
+    }
+    struct tcp_stats {
+        syn_cached: u64;
+        out_refused: u64;
+        out_aborted: u64;
+        out_recorded: u64;
+        out_cleared: u64;
+        syn_refused: u64;
+    }
+    struct fw_rule {
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_ip: u32;
+        dst_port: u16;
+        src_prefix: u8;
+        scope: u8;
+        src_ip: u32;
+    }
+    struct cosmo_netctl_filter {
+        version: u16;
+        op: u16;
+        guest_addr: u32;
+        direction: u8;
+        proto: u8;
+        verdict: u8;
+        dst_port: u16;
+        scope: u8;
+    }
+    struct cosmo_netctl_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_rule;
+    struct cosmo_netctl_filter_list {
+        version: u16;
+        rule_count: u16;
+        guest_count: u16;
+    }
+    struct cosmo_netctl_filter_guest {
+        guest_addr: u32;
+        policy_from_uplink: u8;
+        policy_output: u8;
+    }
+    struct cosmo_netctl_filter_rule {
+        guest_addr: u32;
+        direction: u8;
+        dst_port: u16;
+        scope: u8;
+    }
+
+    fn nettest_tap_create(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap;
+    fn nettest_tap_destroy(t: *mut tap);
+    fn nettest_vfs_open(path: *CChar, flags: u32, out: *mut *mut file) -> i32;
+    fn nettest_file_put(f: *mut file);
+    fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn nettest_ksock_put(s: *mut socket);
+    fn nettest_seed_arp(nif: *mut netif, peerIp: u32, peerMac: *u8);
+    fn nettest_mk_udp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, pl: *u8, pllen: u16) -> u16;
+    fn nettest_mk_dns(msg: *mut u8, id: u16) -> u32;
+    fn nettest_fwt_send(
+        from: *mut file,
+        tapmac: *u8,
+        gmac: *u8,
+        sip: u32,
+        dip: u32,
+        proto: u8,
+        l4: *u8,
+        l4len: u16,
+    ) -> bool;
+    fn nettest_fwt_recv(to: *mut file, rx: *mut u8, cap: usize, tries: u32) -> i64;
+    fn nettest_hin_connect(ip: u32, port: u16, name: *CChar) -> bool;
+    fn nettest_hin_connect_done(rc: *mut i32) -> bool;
+    fn nettest_hin_connect_join() -> *mut socket;
+    fn nettest_hin_mk_tcp(
+        l4: *mut u8,
+        sip: u32,
+        dip: u32,
+        sp: u16,
+        dp: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+        win: u16,
+        pl: *void,
+        pllen: u16,
+    ) -> u16;
+    fn nettest_hin_send(u: *mut tap, umac: *u8, wmac: *u8, sip: u32, dip: u32, proto: u8, l4: *u8, l4len: u16) -> bool;
+    fn nettest_hin_recv(u: *mut tap, proto: u8, wport: u16, o: *mut hin_seg, tries: u32) -> bool;
+    fn nettest_hin_drain(u: *mut tap);
+    fn nettest_hin_recv_sock(s: *mut socket, buf: *mut void, cap: usize, tries: u32) -> i64;
+    fn nettest_hin_udp_listener(out: *mut *mut socket, ip: u32, port: u16) -> bool;
+    fn nettest_hin_tcp_listener(out: *mut *mut socket, port: u16) -> bool;
+
+    fn tap_netif(t: *mut tap) -> *mut netif;
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn ksock_recvfrom(s: *mut socket, buf: *mut void, len: usize, from: *mut netaddr) -> i64;
+    fn ksock_connect(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_set_nonblock(s: *mut socket, on: bool);
+    fn ksock_ready(s: *mut socket) -> u32;
+    fn socket_count() -> u32;
+    fn tcp_state_of(pcb: *mut tcp_pcb) -> u32;
+    fn tcp_recv_avail(pcb: *mut tcp_pcb) -> u32;
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn icmp_send_echo(dst: u32, id: u16, seq: u16, payload: *void, len: usize) -> i32;
+    fn ipv4_get_stats(out: *mut ip_stats);
+    fn tcp_get_stats(out: *mut tcp_stats);
+    fn nat_flush();
+    fn nat_pf_add(proto: u8, hostPort: u16, guestIp: u32, guestPort: u16) -> i32;
+    fn nat_pf_del(proto: u8, hostPort: u16) -> bool;
+    fn nat_pf_clear();
+    fn fw_flush();
+    fn fw_get_stats(out: *mut fw_stats);
+    fn fw_rule_add(guestIp: u32, atIndex: u32, r: *fw_rule) -> i32;
+    fn fw_rule_del(guestIp: u32, r: *fw_rule) -> i32;
+    fn fw_policy_set(guestIp: u32, direction: u8, verdict: u8) -> i32;
+    fn fw_policy_get(
+        guest: u32,
+        toUp: *mut u8,
+        toGuest: *mut u8,
+        toHost: *mut u8,
+        fromUp: *mut u8,
+        out: *mut u8,
+    ) -> i32;
+    fn thread_sleep_ns(ns: u64);
+}
+
+// ---- errno.h, ip.h, tcp.h, fw.h, netctl.h, socket and poll values (asserted against the headers in nettest.c) ----
+
+const EPERM: i32 = 1;
+const EAGAIN: i32 = 11;
+const EINVAL: i32 = 22;
+const EMSGSIZE: i32 = 90;
+const ENOTSUP: i32 = 95;
+const EINPROGRESS: i32 = 115;
+const ETH_HLEN: i64 = 14;
+const ETH_HLEN_U: usize = 14;
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const ICMP_ECHO: u8 = 8;
+const TH_SYN: u8 = 0x02;
+const TH_PSH: u8 = 0x08;
+const TH_ACK: u8 = 0x10;
+const TCP_ESTABLISHED: u32 = 4;
+const FW_DROP: u8 = 0;
+const FW_ACCEPT: u8 = 1;
+const FW_DIR_TO_HOST: u8 = 3;
+const FW_DIR_FROM_UPLINK: u8 = 4;
+const FW_DIR_OUTPUT: u8 = 5;
+const FW_SCOPE_ANY: u8 = 0;
+const FW_SCOPE_WORLD: u8 = 1;
+const FW_SCOPE_GUEST: u8 = 2;
+const FW_HOST_GUEST_IP: u32 = 0;
+const NETCTL_VERSION: u16 = 8;
+const NETCTL_FILTER_ADD: u16 = 3;
+const NETCTL_FILTER_DEL: u16 = 4;
+const NETCTL_PROTO_UDP: u8 = 17;
+const NETCTL_DIR_OUTPUT: u8 = 5;
+const NETCTL_VERDICT_DROP: u8 = 0;
+const NETCTL_VERDICT_ACCEPT: u8 = 1;
+const NETCTL_SCOPE_GUEST: u8 = 2;
+const NETCTL_HOST_ADDR: u32 = 0;
+const O_RDWR: u32 = 0x0002;
+const O_NONBLOCK: u32 = 0x0800;
+const AF_INET: u32 = 2;
+const AF_INET_S: i32 = 2;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
+const IO_ERROR: u32 = 8;
+/// The C's HIN_TRIES: how long a *positive* wait polls (it returns as soon as what it waits for arrives).
+const HIN_TRIES: u32 = 200;
+/// htonl(0xffffff00): a /24 mask as it lies in a little-endian u32.
+const MASK24_N: u32 = 0x00ffffff;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+/// INADDR_LOOPBACK_N.
+fn loopback() -> u32 => ip4(127, 0, 0, 1);
+
+/// struct netaddr for an IPv4 address and port.
+fn v4addr(ip: u32, port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), ip, 0, 0, 0];
+
+fn na(a: borrow [u32; 5]) -> *netaddr => a as *[u32; 5] as *netaddr;
+
+fn macOf(m: borrow [u8; 6]) -> *u8 => m as *[u8; 6] as *u8;
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * 1000000);
+    }
+}
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+/// The C's kinfo: one line, as it is.
+fn info(text: StringView) {
+    var buffer: [u8; 768] = [0; 768];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+// ---- The rooms, off the stack ----
+
+// The statistics structs (1 KiB each, checked), the L4 header built, the frames and bytes read back, the DNS query,
+// the oversized datagram, the datagram the world side read (a struct hin_seg, 92 bytes, asserted in nettest.c), and
+// the whole snapshot (COSMO_NETCTL_SNAPSHOT_MAX fits, asserted in nettest.c).
+static mut STATS: [u64; 384] = [0; 384];
+static mut L4: [u8; 160] = [0; 160];
+static mut BUF: [u8; 256] = [0; 256];
+static mut RX: [u8; 160] = [0; 160];
+static mut MSG: [u8; 64] = [0; 64];
+static mut OVERSIZE: [u8; 2000] = [0; 2000];
+static mut SG: [u64; 16] = [0; 16];
+static mut ENTRY: [u64; 8] = [0; 8];
+static mut SNAP: [u8; 65536] = [0; 65536];
+
+/// The `i`th statistics room.
+/// Safety: the runner runs one test at a time, so the statics are this test's.
+unsafe fn statsRoom(i: usize, bytes: usize) -> *mut u8 {
+    if (bytes > 1024) {
+        tooSmall();
+    }
+    return (borrow mut STATS as *mut [u64; 384] as *mut u8).add(i * 1024);
+}
+
+/// Safety: as statsRoom.
+fn l4() -> *mut u8 => unsafe { borrow mut L4 as *mut [u8; 160] as *mut u8 };
+
+/// Safety: as statsRoom.
+fn buf() -> *mut u8 => unsafe { borrow mut BUF as *mut [u8; 256] as *mut u8 };
+
+/// Safety: as statsRoom.
+fn rx() -> *mut u8 => unsafe { borrow mut RX as *mut [u8; 160] as *mut u8 };
+
+/// Safety: as statsRoom.
+fn msg() -> *mut u8 => unsafe { borrow mut MSG as *mut [u8; 64] as *mut u8 };
+
+/// Safety: as statsRoom; the room holds a struct hin_seg.
+fn sg() -> *mut hin_seg => unsafe { borrow mut SG as *mut [u64; 16] as *mut hin_seg };
+
+/// Safety: as statsRoom.
+fn snap() -> *mut u8 => unsafe { borrow mut SNAP as *mut [u8; 65536] as *mut u8 };
+
+/// The datagram the world side read: its fields.
+/// Safety: as sg.
+fn sgFlags() -> u8 => unsafe { Ptr.toBorrow(sg() as *hin_seg).flags };
+
+/// Safety: as sg.
+fn sgSport() -> u16 => unsafe { Ptr.toBorrow(sg() as *hin_seg).sport };
+
+/// Safety: as sg.
+fn sgSrc() -> u32 => unsafe { Ptr.toBorrow(sg() as *hin_seg).src };
+
+/// Safety: as sg.
+fn sgSeq() -> u32 => unsafe { Ptr.toBorrow(sg() as *hin_seg).seq };
+
+/// Safety: as sg.
+fn sgAck() -> u32 => unsafe { Ptr.toBorrow(sg() as *hin_seg).ack };
+
+/// Whether the first `n` bytes of BUF are `text`'s.
+/// Safety: as statsRoom.
+unsafe fn bufIs(text: StringView) -> bool {
+    let b = Slice.fromRaw(buf() as *u8, text.length);
+    for (i in 0..text.length) {
+        if (b[i] != text[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// A copy of the `bytes` at `src` in ENTRY (the C's memcpy into a local).
+/// Safety: as statsRoom; `src` points to `bytes` readable bytes.
+unsafe fn copied(src: *u8, bytes: usize) -> *u8 {
+    if (bytes > 64) {
+        tooSmall();
+    }
+    let room = borrow mut ENTRY as *mut [u64; 8] as *mut u8;
+    let to = SliceMut.fromRaw(room, bytes);
+    let from = Slice.fromRaw(src, bytes);
+    for (i in 0..bytes) {
+        to[i] = from[i];
+    }
+    return room as *u8;
+}
+
+// ---- The counters ----
+
+/// The counters both tests compare, at one read of the firewall's, IPv4's and TCP's statistics.
+struct Snap {
+    outDropRule: u64;
+    outAcceptDefault: u64;
+    outDropDefault: u64;
+    hinFlowNew: u64;
+    txFiltered: u64;
+    synCached: u64;
+    outRefused: u64;
+    outAborted: u64;
+    outRecorded: u64;
+    outCleared: u64;
+    synRefused: u64;
+}
+
+/// Safety: as statsRoom.
+unsafe fn snapNow() -> Snap {
+    let f = statsRoom(0, layoutOf<fw_stats>().size) as *mut fw_stats;
+    let i = statsRoom(1, layoutOf<ip_stats>().size) as *mut ip_stats;
+    let t = statsRoom(2, layoutOf<tcp_stats>().size) as *mut tcp_stats;
+    fw_get_stats(f);
+    ipv4_get_stats(i);
+    tcp_get_stats(t);
+    let fs = Ptr.toBorrow(f as *fw_stats);
+    let is = Ptr.toBorrow(i as *ip_stats);
+    let ts = Ptr.toBorrow(t as *tcp_stats);
+    return Snap {
+        outDropRule: fs.out_drop_rule,
+        outAcceptDefault: fs.out_accept_default,
+        outDropDefault: fs.out_drop_default,
+        hinFlowNew: fs.hin_flow_new,
+        txFiltered: is.tx_filtered,
+        synCached: ts.syn_cached,
+        outRefused: ts.out_refused,
+        outAborted: ts.out_aborted,
+        outRecorded: ts.out_recorded,
+        outCleared: ts.out_cleared,
+        synRefused: ts.syn_refused,
+    };
+}
+
+/// A counter a wait watches.
+enum Counter {
+    OutDropRule,
+    OutAcceptDefault,
+    TxFiltered,
+    SynCached,
+    OutRefused,
+    OutAborted,
+    OutRecorded,
+    OutCleared,
+    SynRefused,
+}
+
+fn value(s: borrow Snap, c: Counter) -> u64 => match (c) {
+    Counter.OutDropRule => s.outDropRule,
+    Counter.OutAcceptDefault => s.outAcceptDefault,
+    Counter.TxFiltered => s.txFiltered,
+    Counter.SynCached => s.synCached,
+    Counter.OutRefused => s.outRefused,
+    Counter.OutAborted => s.outAborted,
+    Counter.OutRecorded => s.outRecorded,
+    Counter.OutCleared => s.outCleared,
+    Counter.SynRefused => s.synRefused,
+};
+
+/// The C's FWT_RISES: whether `c` passed `base` (read up to 40 times 10 ms apart), and the counters at the last read.
+struct Rise {
+    ok: bool;
+    s: Snap;
+}
+
+/// Safety: as statsRoom.
+unsafe fn rises(c: Counter, base: u64) -> Rise {
+    var s = snapNow();
+    for (i in 0..40) {
+        s = snapNow();
+        if (value(borrow s, c) > base) {
+            return Rise { ok: true, s: s };
+        }
+        sleepMs(10);
+    }
+    return Rise { ok: false, s: s };
+}
+
+// ---- Rules and commands ----
+
+/// A small C struct's room (a rule, a control command).
+struct Cmd {
+    words: [u64; 8];
+}
+
+fn cmd() -> Cmd => Cmd { words: [0; 8] };
+
+/// A firewall rule in a zeroed room.
+/// Safety: the room holds a struct fw_rule (checked).
+fn fwRule(
+    r: borrow mut Cmd,
+    direction: u8,
+    proto: u8,
+    verdict: u8,
+    dip: u32,
+    dprefix: u8,
+    port: u16,
+    sip: u32,
+    sprefix: u8,
+    scope: u8,
+) -> *fw_rule {
+    if (layoutOf<fw_rule>().size > 64) {
+        tooSmall();
+    }
+    r.words = [0; 8];
+    let p = borrow mut r.words as *mut [u64; 8] as *mut fw_rule;
+    unsafe {
+        let w = Ptr.toBorrowMut(p);
+        w.direction = direction;
+        w.proto = proto;
+        w.verdict = verdict;
+        w.dst_ip = dip;
+        w.dst_prefix = dprefix;
+        w.dst_port = port;
+        w.src_ip = sip;
+        w.src_prefix = sprefix;
+        w.scope = scope;
+    }
+    return p as *fw_rule;
+}
+
+/// The C's OUT_RULE: an OUTPUT rule.
+fn outRule(
+    r: borrow mut Cmd,
+    proto: u8,
+    sip: u32,
+    sprefix: u8,
+    dip: u32,
+    dprefix: u8,
+    port: u16,
+    verdict: u8,
+    scope: u8,
+) -> *fw_rule => fwRule(r, FW_DIR_OUTPUT, proto, verdict, dip, dprefix, port, sip, sprefix, scope);
+
+/// Add the host's rule: what fw_rule_add returned.
+/// Safety: the rule's room is live.
+unsafe fn addHost(r: *fw_rule) -> i32 => fw_rule_add(FW_HOST_GUEST_IP, 0, r);
+
+/// Delete the host's rule by its tuple: what fw_rule_del returned.
+/// Safety: as addHost.
+unsafe fn delHost(r: *fw_rule) -> i32 => fw_rule_del(FW_HOST_GUEST_IP, r);
+
+/// A UDP OUTPUT filter command for `guest`'s port `port`, in a zeroed room.
+/// Safety: the room holds a struct cosmo_netctl_filter (checked).
+fn filterCmd(r: borrow mut Cmd, version: u16, op: u16, guest: u32, port: u16) -> *cosmo_netctl_filter {
+    if (layoutOf<cosmo_netctl_filter>().size > 64) {
+        tooSmall();
+    }
+    r.words = [0; 8];
+    let p = borrow mut r.words as *mut [u64; 8] as *mut cosmo_netctl_filter;
+    unsafe {
+        let c = Ptr.toBorrowMut(p);
+        c.version = version;
+        c.op = op;
+        c.guest_addr = guest;
+        c.direction = NETCTL_DIR_OUTPUT;
+        c.proto = NETCTL_PROTO_UDP;
+        c.verdict = NETCTL_VERDICT_DROP;
+        c.dst_port = port;
+        c.scope = NETCTL_SCOPE_GUEST;
+    }
+    return p as *cosmo_netctl_filter;
+}
+
+/// Write the command: what file_write returned.
+/// Safety: the file and the room are live.
+unsafe fn writeCmd(f: *mut file, c: *cosmo_netctl_filter) -> i64 =>
+    file_write(f, c as *void, layoutOf<cosmo_netctl_filter>().size);
+
+// ---- The host's sends ----
+
+/// The host's datagram of `n` bytes at `pl` to `ip`:`port`: what ksock_sendto returned.
+/// Safety: the socket is the test's; `pl` has `n` readable bytes.
+unsafe fn sendTo(cs: *mut socket, pl: *void, n: usize, ip: u32, port: u16) -> i64 {
+    let to = v4addr(ip, port);
+    return ksock_sendto(cs, pl, n, na(borrow to));
+}
+
+/// The datagram net-output sends ("out!").
+/// Safety: as sendTo.
+unsafe fn sendOut(cs: *mut socket, ip: u32, port: u16) -> i64 => sendTo(cs, "out!".ptr as *void, 4, ip, port);
+
+/// Bytes on a connected socket: what ksock_sendto returned.
+/// Safety: the socket is the test's.
+unsafe fn sendOn(s: *mut socket, text: StringView) -> i64 =>
+    ksock_sendto(s, text.ptr as *void, text.length, 0 as *netaddr);
+
+/// An echo request of one byte ("q").
+/// Safety: thread context.
+unsafe fn echo(w: u32, id: u16) -> i32 => icmp_send_echo(w, id, 1, "q".ptr as *void, 1);
+
+// ---- The world and the guest ----
+
+/// A test's uplink tap, its address and MAC, and the one world peer behind it.
+struct Link {
+    u: *mut tap;
+    uip: u32;
+    w: u32;
+    umac: [u8; 6];
+    wmac: [u8; 6];
+}
+
+/// The uplink tap `name` with the world peer seeded behind it; false when it could not be made.
+/// Safety: thread context; the tap is released however the test returns.
+unsafe fn uplink(x: borrow mut Link, name: StringView) -> bool {
+    x.u = nettest_tap_create(name.ptr as *CChar, x.uip, MASK24_N, borrow x.umac as *[u8; 6] as *u8);
+    if (x.u.isNull()) {
+        return false;
+    }
+    nettest_seed_arp(tap_netif(x.u), x.w, borrow x.wmac as *[u8; 6] as *u8);
+    return true;
+}
+
+/// A datagram from the world peer to the host, the payload "out!".
+/// Safety: the link's tap is the test's.
+unsafe fn udpIn(x: borrow Link, sp: u16, dp: u16) -> bool {
+    let pl: [u8; 4] = [0x6f, 0x75, 0x74, 0x21]; // "out!"
+    let len = nettest_mk_udp(l4(), x.w, x.uip, sp, dp, borrow pl as *[u8; 4] as *u8, 4);
+    let um = macOf(borrow x.umac);
+    let wm = macOf(borrow x.wmac);
+    return nettest_hin_send(x.u, um, wm, x.w, x.uip, IPPROTO_UDP, l4() as *u8, len);
+}
+
+/// A segment from the world peer to the host, with the payload `pl`.
+/// Safety: as udpIn.
+unsafe fn tcpIn(x: borrow Link, sp: u16, dp: u16, seq: u32, ack: u32, flags: u8, pl: StringView) -> bool {
+    let n = truncate<u16>(pl.length);
+    let len = nettest_hin_mk_tcp(l4(), x.w, x.uip, sp, dp, seq, ack, flags, 64240, pl.ptr as *void, n);
+    let um = macOf(borrow x.umac);
+    let wm = macOf(borrow x.wmac);
+    return nettest_hin_send(x.u, um, wm, x.w, x.uip, IPPROTO_TCP, l4() as *u8, len);
+}
+
+/// Whether the world side reads a datagram of `proto` to `wport` within `tries`.
+/// Safety: as udpIn.
+unsafe fn seen(x: borrow Link, proto: u8, wport: u16, tries: u32) -> bool =>
+    nettest_hin_recv(x.u, proto, wport, sg(), tries);
+
+/// Seed the guest `ip` at `mac` behind the interface `name`; false when it is not there.
+/// Safety: thread context.
+unsafe fn seedOn(name: StringView, ip: u32, mac: *u8) -> bool {
+    let nn = netif_find(name.ptr as *CChar);
+    if (nn.isNull()) {
+        return false;
+    }
+    nettest_seed_arp(nn, ip, mac);
+    netif_put(nn);
+    return true;
+}
+
+/// The C's out_drain_file: nothing an earlier step left queued -- a read-back assertion must see the frame this step
+/// produced, not the one before it.
+/// Safety: the file is the test's.
+unsafe fn drainFile(f: *mut file) {
+    sleepMs(20);
+    while (file_read(f, rx() as *mut void, 160) > 0) {}
+}
+
+/// The guest's DNS query `id` to the proxy, from port 4444.
+/// Safety: the file is the test's.
+unsafe fn dnsQuery(fa: *mut file, tm: *u8, am: *u8, ga: u32, gwa: u32, id: u16) -> bool {
+    let mlen = nettest_mk_dns(msg(), id);
+    let len = nettest_mk_udp(l4(), ga, gwa, 4444, 53, msg() as *u8, truncate<u16>(mlen));
+    return nettest_fwt_send(fa, tm, am, ga, gwa, IPPROTO_UDP, l4() as *u8, len);
+}
+
+/// What the guest's tap read within `tries`: its length (0 for nothing).
+/// Safety: the file is the test's.
+unsafe fn guestRead(fa: *mut file, tries: u32) -> i64 => nettest_fwt_recv(fa, rx(), 160, tries);
+
+/// A byte of what the guest's tap read.
+/// Safety: as statsRoom.
+unsafe fn rxAt(i: usize) -> u8 => Slice.fromRaw(rx() as *u8, 160)[i];
+
+/// A u32 of what the guest's tap read, as it lies in memory.
+/// Safety: as statsRoom.
+unsafe fn rxWord(i: usize) -> u32 => (rxAt(i) as u32) | ((rxAt(i + 1) as u32) << 8) | ((rxAt(i + 2) as u32) << 16) |
+    ((rxAt(i + 3) as u32) << 24);
+
+// ---- net-output ----
+
+/// The test's guest file and sockets.
+struct Held {
+    fa: *mut file;
+    cs: *mut socket;
+}
+
+/// The host's own egress takes a verdict: the default lets everything out, a rule refuses a send with -EPERM and
+/// leaves neither a frame nor reply state, an ICMP rule refuses an echo, the scope tells a guest's tap from the world,
+/// the proxy's answer to a guest is silenced, a failure that is not a verdict is not counted as one, loopback passes no
+/// chain, a refused TCP connect is told, a DNAT'd delivery is this chain's traffic too, the scopes hold, and the
+/// listing carries the fifth policy with the rule's egress.
+/// Safety: the runner's `reason`.
+@export("selftest_net_output")
+unsafe fn output(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    fw_flush();
+    nat_flush();
+    nat_pf_clear();
+
+    // An uplink tap (the world) and a guest through /dev/net/tap -- so the guest's tap masquerades, which is what makes
+    // the host's sends to it FW_SCOPE_GUEST, and its INPUT seeds let its DNS query through.
+    var x = Link {
+        u: 0 as *mut tap,
+        uip: ip4(10, 77, 10, 1),
+        w: ip4(10, 77, 10, 99),
+        umac: [0x52, 0x54, 0x00, 0x1c, 0x00, 0x01],
+        wmac: [0x52, 0x54, 0x00, 0x1c, 0x00, 0x63],
+    };
+    if (!uplink(mut x, "outu\0")) {
+        return failed(reason, "check failed: net-output: the uplink tap\0");
+    }
+    var h = Held { fa: 0 as *mut file, cs: 0 as *mut socket };
+    let rc = nettest_vfs_open("/dev/net/tap\0".ptr as *CChar, O_RDWR | O_NONBLOCK, borrow mut h.fa as *mut *mut file);
+    if (rc != 0 || h.fa.isNull()) {
+        return failed(reason, "check failed: net-output: the guest's tap\0");
+    }
+    let amac: [u8; 6] = [0x52, 0x54, 0x00, 0x1c, 0x00, 0x0a];
+    let tap0mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
+    let ga = ip4(10, 0, 3, 15);
+    let gwa = ip4(10, 0, 3, 1);
+    if (!seedOn("tap0\0", ga, macOf(borrow amac))) {
+        return failed(reason, "check failed: net-output: the guest's interface\0");
+    }
+    if (!nettest_hin_udp_listener(borrow mut h.cs as *mut *mut socket, 0, 7200)) { // bound, never connected
+        return failed(reason, "check failed: net-output: the host's UDP socket\0");
+    }
+    nettest_hin_drain(x.u);
+    if (!outputBody(reason, borrow x, borrow h, ga, gwa, macOf(borrow amac), macOf(borrow tap0mac))) {
+        return false;
+    }
+    nettest_ksock_put(h.cs);
+    nettest_file_put(h.fa);
+    nettest_hin_drain(x.u);
+    nettest_tap_destroy(x.u);
+    fw_flush();
+    nat_flush();
+    nat_pf_clear();
+    info(
+        "selftest: net-output: the host's own egress takes a verdict -- the default let everything out, a rule refused a send with -EPERM and left neither a frame nor reply state, an ICMP rule refused an echo, the scope told a guest's tap from the world (and a destination prefix still worked), the proxy's answer to a guest was silenced, no route stayed -ENETUNREACH, loopback passed no chain, a refused TCP connect was told -EPERM, a DNAT'd delivery was this chain's traffic too, the scopes held, and the listing carried the fifth policy with the rule's egress",
+    );
+    return true;
+}
+
+/// net-output's steps (1) to (11), with the link, the guest's file and the host's socket made.
+/// Safety: as output.
+unsafe fn outputBody(
+    reason: *mut *CChar,
+    x: borrow Link,
+    h: borrow Held,
+    ga: u32,
+    gwa: u32,
+    am: *u8,
+    tm: *u8,
+) -> bool {
+    let cs = h.cs;
+    let fa = h.fa;
+    let w = x.w;
+    let wnet = ip4(10, 77, 10, 0);
+
+    // (1) the default is ACCEPT and changes nothing: the host's datagram to the world leaves as before.
+    var s0 = snapNow();
+    if (sendOut(cs, w, 5300) != 4) {
+        return failed(reason, "check failed: net-output: (1) the send\0");
+    }
+    if (!seen(x, IPPROTO_UDP, 5300, HIN_TRIES) || sgSport() != 7200 || sgSrc() != x.uip) {
+        return failed(reason, "check failed: net-output: (1) it leaves as before\0");
+    }
+    if (!rises(Counter.OutAcceptDefault, s0.outAcceptDefault).ok) {
+        return failed(reason, "check failed: net-output: (1) by the default\0");
+    }
+
+    // (2) a rule refuses the send, and the sender is told. Nothing reaches the link, and -- because the verdict
+    // precedes the flow read -- nothing is recorded for a reply that can never come: with the host chain closed for
+    // this world, the reply that would have been admitted by that flow is dropped instead.
+    var worldRoom = cmd();
+    let rWorld = fwRule(mut worldRoom, FW_DIR_FROM_UPLINK, 0, FW_DROP, 0, 0, 0, wnet, 24, FW_SCOPE_ANY);
+    if (addHost(rWorld) != 0) {
+        return failed(reason, "check failed: net-output: (2) the world rule\0");
+    }
+    // A tuple of its own: step (1)'s successful send to :5300 left a live flow, and that flow -- not the refused send
+    // -- would have admitted the reply below.
+    var r5301 = cmd();
+    let out5301 = outRule(mut r5301, IPPROTO_UDP, 0, 0, wnet, 24, 5301, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(out5301) != 0) {
+        return failed(reason, "check failed: net-output: (2) the OUTPUT rule\0");
+    }
+    nettest_hin_drain(x.u);
+    s0 = snapNow();
+    if (sendOut(cs, w, 5301) != -EPERM as i64) {
+        return failed(reason, "check failed: net-output: (2) the send is refused\0");
+    }
+    var s1 = snapNow();
+    if (s1.outDropRule != s0.outDropRule + 1) {
+        return failed(reason, "check failed: net-output: (2) counted as the rule's\0");
+    }
+    if (s1.txFiltered != s0.txFiltered + 1) {
+        return failed(reason, "check failed: net-output: (2) counted as filtered\0");
+    }
+    if (s1.hinFlowNew != s0.hinFlowNew) { // no reply state for a refused send
+        return failed(reason, "check failed: net-output: (2) no reply state\0");
+    }
+    if (seen(x, IPPROTO_UDP, 5301, 15)) { // and nothing on the link
+        return failed(reason, "check failed: net-output: (2) nothing on the link\0");
+    }
+    if (!udpIn(x, 5301, 7200)) {
+        return failed(reason, "check failed: net-output: (2) the reply is sent\0");
+    }
+    if (nettest_hin_recv_sock(cs, buf() as *mut void, 256, 10) != -EAGAIN as i64) {
+        return failed(reason, "check failed: net-output: (2) the reply is dropped\0");
+    }
+    // Without the OUTPUT rule the same send records its flow and the same reply is admitted by it -- the ordering
+    // asserted from both sides.
+    if (delHost(out5301) != 0) {
+        return failed(reason, "check failed: net-output: (2) the OUTPUT rule deleted\0");
+    }
+    s0 = snapNow();
+    if (sendOut(cs, w, 5301) != 4) {
+        return failed(reason, "check failed: net-output: (2) the send without the rule\0");
+    }
+    s1 = snapNow();
+    if (s1.hinFlowNew != s0.hinFlowNew + 1) {
+        return failed(reason, "check failed: net-output: (2) its flow recorded\0");
+    }
+    if (!udpIn(x, 5301, 7200)) {
+        return failed(reason, "check failed: net-output: (2) the reply is sent again\0");
+    }
+    if (nettest_hin_recv_sock(cs, buf() as *mut void, 256, HIN_TRIES) != 4) {
+        return failed(reason, "check failed: net-output: (2) the reply is admitted\0");
+    }
+    if (delHost(rWorld) != 0) {
+        return failed(reason, "check failed: net-output: (2) the world rule deleted\0");
+    }
+
+    // (3) an ICMP rule refuses an echo request, and icmp_send_echo says so.
+    var echoRoom = cmd();
+    let outEcho = outRule(mut echoRoom, IPPROTO_ICMP, 0, 0, 0, 0, ICMP_ECHO as u16, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outEcho) != 0) {
+        return failed(reason, "check failed: net-output: (3) the ICMP rule\0");
+    }
+    s0 = snapNow();
+    if (echo(w, 0x6161) != -EPERM) {
+        return failed(reason, "check failed: net-output: (3) the echo is refused\0");
+    }
+    if (!rises(Counter.TxFiltered, s0.txFiltered).ok) {
+        return failed(reason, "check failed: net-output: (3) counted as filtered\0");
+    }
+    if (seen(x, IPPROTO_ICMP, 0, 15)) {
+        return failed(reason, "check failed: net-output: (3) nothing on the link\0");
+    }
+    if (delHost(outEcho) != 0) {
+        return failed(reason, "check failed: net-output: (3) the ICMP rule deleted\0");
+    }
+    if (echo(w, 0x6162) != 0) { // and without it, out it goes
+        return failed(reason, "check failed: net-output: (3) the echo without the rule\0");
+    }
+    if (!seen(x, IPPROTO_ICMP, 0, HIN_TRIES) || sgFlags() != ICMP_ECHO) {
+        return failed(reason, "check failed: net-output: (3) it leaves\0");
+    }
+    // A source-prefix rule judges the address the wire will carry, not the unspecified one the sender passed:
+    // icmp_send_echo leaves the source to the route, and a rule naming this link's own address must still match.
+    var srcRoom = cmd();
+    let outSrc = outRule(mut srcRoom, IPPROTO_ICMP, x.uip, 32, 0, 0, ICMP_ECHO as u16, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outSrc) != 0) {
+        return failed(reason, "check failed: net-output: (3) the source rule\0");
+    }
+    if (echo(w, 0x6163) != -EPERM) {
+        return failed(reason, "check failed: net-output: (3) the source rule matches the route's source\0");
+    }
+    if (delHost(outSrc) != 0) {
+        return failed(reason, "check failed: net-output: (3) the source rule deleted\0");
+    }
+
+    // (4) the scope separates the two egresses. The same datagram, to a guest and to the world, under one rule at a
+    // time.
+    if (!scopes(reason, cs, ga, w)) {
+        return false;
+    }
+
+    // (5) the host's reply to a guest is filterable -- the case the INPUT and host chains both named and neither could
+    // express. The guest's DNS query reaches the proxy through INPUT's seed; the proxy's answer leaves through this
+    // chain, so a scope-guest rule on the guest's own port silences it. (No upstream is configured, so the answer is the
+    // proxy's own SERVFAIL -- which is still the host answering a guest.)
+    drainFile(fa); // the scope tests' datagrams are not this step's
+    if (!dnsQuery(fa, tm, am, ga, gwa, 0x2468)) {
+        return failed(reason, "check failed: net-output: (5) the guest's query\0");
+    }
+    let n = guestRead(fa, HIN_TRIES); // the proxy answered
+    if (n < ETH_HLEN + 20 + 8) {
+        return failed(reason, "check failed: net-output: (5) the proxy answered\0");
+    }
+    let at = ETH_HLEN_U + 20;
+    if (((rxAt(at + 2) as u16) << 8 | (rxAt(at + 3) as u16)) != 4444) {
+        return failed(reason, "check failed: net-output: (5) to the guest's port\0");
+    }
+    var replyRoom = cmd();
+    let outReply = outRule(mut replyRoom, IPPROTO_UDP, 0, 0, 0, 0, 4444, FW_DROP, FW_SCOPE_GUEST);
+    if (addHost(outReply) != 0) {
+        return failed(reason, "check failed: net-output: (5) the reply rule\0");
+    }
+    drainFile(fa);
+    s0 = snapNow();
+    if (!dnsQuery(fa, tm, am, ga, gwa, 0x2469)) {
+        return failed(reason, "check failed: net-output: (5) the guest's second query\0");
+    }
+    if (!rises(Counter.TxFiltered, s0.txFiltered).ok) {
+        return failed(reason, "check failed: net-output: (5) the answer is filtered\0");
+    }
+    if (guestRead(fa, 15) != 0) { // the answer never reached A
+        return failed(reason, "check failed: net-output: (5) the answer never reached the guest\0");
+    }
+    if (delHost(outReply) != 0) {
+        return failed(reason, "check failed: net-output: (5) the reply rule deleted\0");
+    }
+
+    // (6) a failure that is not a verdict is not counted as one. A true no-route send cannot be produced from a socket
+    // here -- the NIC carries a default route, so every address routes somewhere -- so the case is made with the other
+    // non-policy failure on this path: an oversized datagram, which the chain accepts and output_on then refuses.
+    // Neither tx_filtered nor a flow may move for it.
+    s0 = snapNow();
+    if (sendTo(cs, borrow OVERSIZE as *[u8; 2000] as *void, 2000, w, 5999) != -EMSGSIZE as i64) {
+        return failed(reason, "check failed: net-output: (6) the oversized send\0");
+    }
+    s1 = snapNow();
+    if (s1.txFiltered != s0.txFiltered || s1.hinFlowNew != s0.hinFlowNew) {
+        return failed(reason, "check failed: net-output: (6) not counted as a verdict\0");
+    }
+    if (s1.outAcceptDefault <= s0.outAcceptDefault) { // the chain did see it, and accepted
+        return failed(reason, "check failed: net-output: (6) the chain accepted it\0");
+    }
+
+    // (7) loopback passes no chain: a rule that matches by every other field does not touch the host talking to
+    // itself.
+    if (!loopbackUdp(reason)) {
+        return false;
+    }
+
+    // (8) TCP is told too, since the verdict unit: batch_send reports what the link refused and tcp_connect returns
+    // it, so a nonblocking connect to a refused peer fails outright with -EPERM on its first call rather than reporting
+    // an open in progress. The rule is counted per attempt and no SYN reaches the link. net-tcpverdict owns the rest of
+    // that behaviour; this step only keeps the chain's end of it honest.
+    var tcpRoom = cmd();
+    let outTcp = outRule(mut tcpRoom, IPPROTO_TCP, 0, 0, wnet, 24, 9200, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outTcp) != 0) {
+        return failed(reason, "check failed: net-output: (8) the TCP rule\0");
+    }
+    nettest_hin_drain(x.u);
+    s0 = snapNow();
+    var c = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET_S, SOCK_STREAM, 0, borrow mut c as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-output: (8) the TCP socket\0");
+    }
+    ksock_set_nonblock(c, true);
+    let peer = v4addr(w, 9200);
+    if (ksock_connect(c, na(borrow peer)) != -EPERM) { // told, not left connecting
+        return failed(reason, "check failed: net-output: (8) the connect is told\0");
+    }
+    if (!rises(Counter.OutDropRule, s0.outDropRule).ok) {
+        return failed(reason, "check failed: net-output: (8) counted as the rule's\0");
+    }
+    if (seen(x, IPPROTO_TCP, 9200, 15)) { // the SYN never left
+        return failed(reason, "check failed: net-output: (8) the SYN never left\0");
+    }
+    nettest_ksock_put(c);
+    if (delHost(outTcp) != 0) {
+        return failed(reason, "check failed: net-output: (8) the TCP rule deleted\0");
+    }
+
+    // (9) nat_in's delivery to a guest is this chain's traffic too: it re-emits through ipv4_output, so a scope-guest
+    // rule stops a DNAT'd connection on its way to the guest. The sharp edge, asserted.
+    if (nat_pf_add(IPPROTO_TCP, 8080, ga, 80) != 0) {
+        return failed(reason, "check failed: net-output: (9) the port-forward\0");
+    }
+    drainFile(fa);
+    if (!tcpIn(x, 40100, 8080, 3000, 0, TH_SYN, "")) {
+        return failed(reason, "check failed: net-output: (9) the client's SYN\0");
+    }
+    let m = guestRead(fa, HIN_TRIES); // without a rule it arrives
+    if (m < ETH_HLEN + 40) {
+        return failed(reason, "check failed: net-output: (9) it arrives\0");
+    }
+    if (rxWord(ETH_HLEN_U + 16) != ga) {
+        return failed(reason, "check failed: net-output: (9) at the guest\0");
+    }
+    var dnatRoom = cmd();
+    let outDnat = outRule(mut dnatRoom, IPPROTO_TCP, 0, 0, 0, 0, 80, FW_DROP, FW_SCOPE_GUEST);
+    if (addHost(outDnat) != 0) {
+        return failed(reason, "check failed: net-output: (9) the DNAT rule\0");
+    }
+    drainFile(fa);
+    s0 = snapNow();
+    if (!tcpIn(x, 40101, 8080, 3000, 0, TH_SYN, "")) {
+        return failed(reason, "check failed: net-output: (9) the second SYN\0");
+    }
+    if (!rises(Counter.TxFiltered, s0.txFiltered).ok) {
+        return failed(reason, "check failed: net-output: (9) filtered\0");
+    }
+    if (guestRead(fa, 15) != 0) { // and with one it does not
+        return failed(reason, "check failed: net-output: (9) and with a rule it does not arrive\0");
+    }
+    if (delHost(outDnat) != 0) {
+        return failed(reason, "check failed: net-output: (9) the DNAT rule deleted\0");
+    }
+    if (!nat_pf_del(IPPROTO_TCP, 8080)) {
+        return failed(reason, "check failed: net-output: (9) the port-forward deleted\0");
+    }
+
+    // (10) and (10b): the scope discipline and the hardened default.
+    if (!discipline(reason, cs, ga, gwa, w)) {
+        return false;
+    }
+
+    // (11) the control channel.
+    return controlChannel(reason, ga);
+}
+
+/// net-output (4): the scope separates the two egresses.
+/// Safety: as output.
+unsafe fn scopes(reason: *mut *CChar, cs: *mut socket, ga: u32, w: u32) -> bool {
+    var room = cmd();
+    let outG = outRule(mut room, IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, FW_SCOPE_GUEST);
+    if (addHost(outG) != 0) {
+        return failed(reason, "check failed: net-output: (4) the guest-scoped rule\0");
+    }
+    if (sendOut(cs, ga, 7300) != -EPERM as i64 || sendOut(cs, w, 7300) != 4) {
+        return failed(reason, "check failed: net-output: (4) the guest scope refuses only the guest\0");
+    }
+    if (delHost(outG) != 0) {
+        return failed(reason, "check failed: net-output: (4) the guest-scoped rule deleted\0");
+    }
+    let outW = outRule(mut room, IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, FW_SCOPE_WORLD);
+    if (addHost(outW) != 0) {
+        return failed(reason, "check failed: net-output: (4) the world-scoped rule\0");
+    }
+    if (sendOut(cs, w, 7300) != -EPERM as i64 || sendOut(cs, ga, 7300) != 4) {
+        return failed(reason, "check failed: net-output: (4) the world scope refuses only the world\0");
+    }
+    if (delHost(outW) != 0) {
+        return failed(reason, "check failed: net-output: (4) the world-scoped rule deleted\0");
+    }
+    let outAny = outRule(mut room, IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outAny) != 0) {
+        return failed(reason, "check failed: net-output: (4) the unscoped rule\0");
+    }
+    if (sendOut(cs, ga, 7300) != -EPERM as i64 || sendOut(cs, w, 7300) != -EPERM as i64) {
+        return failed(reason, "check failed: net-output: (4) no scope refuses both\0");
+    }
+    if (delHost(outAny) != 0) {
+        return failed(reason, "check failed: net-output: (4) the unscoped rule deleted\0");
+    }
+    // The scope is part of a rule's identity: two rules alike but for it are two rules, each deletable by its own
+    // tuple.
+    var roomW = cmd();
+    let twoG = outRule(mut room, IPPROTO_UDP, 0, 0, 0, 0, 7302, FW_DROP, FW_SCOPE_GUEST);
+    let twoW = outRule(mut roomW, IPPROTO_UDP, 0, 0, 0, 0, 7302, FW_DROP, FW_SCOPE_WORLD);
+    if (addHost(twoG) != 0 || addHost(twoW) != 0) { // not -EEXIST: a different rule
+        return failed(reason, "check failed: net-output: (4) two rules alike but for the scope\0");
+    }
+    if (sendOut(cs, ga, 7302) != -EPERM as i64 || sendOut(cs, w, 7302) != -EPERM as i64) {
+        return failed(reason, "check failed: net-output: (4) both scopes refuse\0");
+    }
+    if (delHost(twoG) != 0 || delHost(twoW) != 0) { // each by its own tuple
+        return failed(reason, "check failed: net-output: (4) each deleted by its own tuple\0");
+    }
+    // A rule that names a destination prefix instead still works: the scope adds a dimension rather than replacing
+    // one.
+    let outPfx = outRule(mut room, IPPROTO_UDP, 0, 0, ip4(10, 0, 3, 0), 24, 7300, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outPfx) != 0) {
+        return failed(reason, "check failed: net-output: (4) the prefix rule\0");
+    }
+    if (sendOut(cs, ga, 7300) != -EPERM as i64 || sendOut(cs, w, 7300) != 4) {
+        return failed(reason, "check failed: net-output: (4) the prefix still works\0");
+    }
+    if (delHost(outPfx) != 0) {
+        return failed(reason, "check failed: net-output: (4) the prefix rule deleted\0");
+    }
+    return true;
+}
+
+/// net-output (7): loopback passes no chain.
+/// Safety: as output.
+unsafe fn loopbackUdp(reason: *mut *CChar) -> bool {
+    var lo = 0 as *mut socket;
+    if (!nettest_hin_udp_listener(borrow mut lo as *mut *mut socket, loopback(), 7201)) {
+        return failed(reason, "check failed: net-output: (7) the loopback listener\0");
+    }
+    var room = cmd();
+    let outLo = outRule(mut room, IPPROTO_UDP, 0, 0, 0, 0, 7201, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outLo) != 0) {
+        return failed(reason, "check failed: net-output: (7) the loopback rule\0");
+    }
+    var tx = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET_S, SOCK_DGRAM, 0, borrow mut tx as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-output: (7) the sender\0");
+    }
+    if (sendOut(tx, loopback(), 7201) != 4) {
+        return failed(reason, "check failed: net-output: (7) the loopback send\0");
+    }
+    if (nettest_hin_recv_sock(lo, buf() as *mut void, 256, HIN_TRIES) != 4) {
+        return failed(reason, "check failed: net-output: (7) it arrives\0");
+    }
+    nettest_ksock_put(tx);
+    if (delHost(outLo) != 0) {
+        return failed(reason, "check failed: net-output: (7) the loopback rule deleted\0");
+    }
+    nettest_ksock_put(lo);
+    return true;
+}
+
+/// net-output (10) and (10b): the scope belongs to OUTPUT, OUTPUT belongs to the host, and the policy follows the same
+/// rule; with no rule at all, the OUTPUT policy's DROP stops the machine sending anything.
+/// Safety: as output.
+unsafe fn discipline(reason: *mut *CChar, cs: *mut socket, ga: u32, gwa: u32, w: u32) -> bool {
+    var room = cmd();
+    let badScope = fwRule(mut room, FW_DIR_TO_HOST, IPPROTO_UDP, FW_ACCEPT, gwa, 32, 53, 0, 0, FW_SCOPE_GUEST);
+    if (fw_rule_add(ga, 0, badScope) != -EINVAL) {
+        return failed(reason, "check failed: net-output: (10) a scope outside OUTPUT\0");
+    }
+    let badFromUplink = fwRule(mut room, FW_DIR_FROM_UPLINK, 0, FW_DROP, 0, 0, 0, 0, 0, FW_SCOPE_WORLD);
+    if (addHost(badFromUplink) != -EINVAL) {
+        return failed(reason, "check failed: net-output: (10) a scope on the host chain\0");
+    }
+    let guestOut = outRule(mut room, IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, FW_SCOPE_ANY);
+    if (fw_rule_add(ga, 0, guestOut) != -EINVAL) {
+        return failed(reason, "check failed: net-output: (10) a guest's OUTPUT rule\0");
+    }
+    let badScopeVal = outRule(mut room, IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, 3);
+    if (addHost(badScopeVal) != -EINVAL) {
+        return failed(reason, "check failed: net-output: (10) an unknown scope\0");
+    }
+    if (fw_policy_set(ga, FW_DIR_OUTPUT, FW_DROP) != -EINVAL) {
+        return failed(reason, "check failed: net-output: (10) a guest's OUTPUT policy\0");
+    }
+    var pol: [u8; 5] = [0; 5];
+    let p = borrow mut pol as *mut [u8; 5] as *mut u8;
+    if (fw_policy_get(FW_HOST_GUEST_IP, p, p.add(1), p.add(2), p.add(3), p.add(4)) != 0 || pol[4] != FW_ACCEPT) {
+        return failed(reason, "check failed: net-output: (10) the host's OUTPUT policy accepts\0");
+    }
+
+    // (10b) the hardened default: with no rule at all, flipping the OUTPUT policy to DROP stops the machine sending
+    // anything -- so the verdicts are taken into locals and the default restored *before* any assertion, because a
+    // failure here would otherwise leave this machine mute for every test that follows. (It is also what makes the fast
+    // path honest: a policy flip with no rules must invalidate it.)
+    if (fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_OUTPUT, FW_DROP) != 0) {
+        return failed(reason, "check failed: net-output: (10b) the OUTPUT policy dropped\0");
+    }
+    let s0 = snapNow();
+    let refused = sendOut(cs, w, 5998);
+    let s1 = snapNow();
+    let restored = fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_OUTPUT, FW_ACCEPT);
+    let allowed = sendOut(cs, w, 5998);
+    if (restored != 0) {
+        return failed(reason, "check failed: net-output: (10b) the default restored\0");
+    }
+    if (refused != -EPERM as i64 || s1.outDropDefault <= s0.outDropDefault) {
+        return failed(reason, "check failed: net-output: (10b) refused by the default\0");
+    }
+    if (allowed != 4) {
+        return failed(reason, "check failed: net-output: (10b) allowed again\0");
+    }
+    return true;
+}
+
+/// net-output (11): an OUTPUT rule with a scope round-trips the control channel, the host record carries the fifth
+/// policy, a version-4 writer is refused by version (the command's size did not change), and the policy record is the
+/// version-5 one.
+/// Safety: as output.
+unsafe fn controlChannel(reason: *mut *CChar, ga: u32) -> bool {
+    var fctl = 0 as *mut file;
+    let rc = nettest_vfs_open("/dev/net/tapctl\0".ptr as *CChar, O_RDWR, borrow mut fctl as *mut *mut file);
+    if (rc != 0 || fctl.isNull()) {
+        return failed(reason, "check failed: net-output: (11) the control device\0");
+    }
+    let size = truncate<i64>(layoutOf<cosmo_netctl_filter>().size);
+    var room = cmd();
+    if (writeCmd(fctl, filterCmd(mut room, NETCTL_VERSION, NETCTL_FILTER_ADD, NETCTL_HOST_ADDR, 7400)) != size) {
+        return failed(reason, "check failed: net-output: (11) the rule added through the device\0");
+    }
+    if (writeCmd(fctl, filterCmd(mut room, 4, NETCTL_FILTER_ADD, NETCTL_HOST_ADDR, 7400)) != -ENOTSUP as i64) {
+        return failed(reason, "check failed: net-output: (11) a version-4 writer refused by version\0");
+    }
+    if (writeCmd(fctl, filterCmd(mut room, NETCTL_VERSION, NETCTL_FILTER_ADD, ga, 7401)) != -EINVAL as i64) {
+        return failed(reason, "check failed: net-output: (11) a guest may not name OUTPUT\0");
+    }
+    if (file_read(fctl, snap() as *mut void, 65536) <= 0) {
+        return failed(reason, "check failed: net-output: (11) the snapshot\0");
+    }
+    let s = snap() as *u8;
+    let count = Ptr.toBorrow(copied(s, layoutOf<cosmo_netctl_list>().size) as *cosmo_netctl_list).count;
+    var off = layoutOf<cosmo_netctl_list>().size + (count as usize) * layoutOf<cosmo_netctl_rule>().size;
+    let fh = Ptr.toBorrow(copied(s.add(off), layoutOf<cosmo_netctl_filter_list>().size) as *cosmo_netctl_filter_list);
+    let version = fh.version;
+    let guests = fh.guest_count;
+    let rules = fh.rule_count;
+    if (version != NETCTL_VERSION) {
+        return failed(reason, "check failed: net-output: (11) the filter section's version\0");
+    }
+    off += layoutOf<cosmo_netctl_filter_list>().size;
+    var hostSeen = false;
+    let gsize = layoutOf<cosmo_netctl_filter_guest>().size;
+    for (i in 0..guests as usize) {
+        let fg = Ptr.toBorrow(copied(s.add(off), gsize) as *cosmo_netctl_filter_guest);
+        if (fg.guest_addr == NETCTL_HOST_ADDR) {
+            hostSeen = fg.policy_output == NETCTL_VERDICT_ACCEPT && fg.policy_from_uplink == NETCTL_VERDICT_ACCEPT;
+        }
+        off += gsize;
+    }
+    if (!hostSeen) {
+        return failed(reason, "check failed: net-output: (11) the host's record carries the fifth policy\0");
+    }
+    var ruleSeen = false;
+    let rsize = layoutOf<cosmo_netctl_filter_rule>().size;
+    for (i in 0..rules as usize) {
+        let fr = Ptr.toBorrow(copied(s.add(off + i * rsize), rsize) as *cosmo_netctl_filter_rule);
+        if (fr.guest_addr == NETCTL_HOST_ADDR && fr.dst_port == 7400) {
+            ruleSeen = fr.direction == NETCTL_DIR_OUTPUT && fr.scope == NETCTL_SCOPE_GUEST;
+        }
+    }
+    if (!ruleSeen) {
+        return failed(reason, "check failed: net-output: (11) the rule listed with its egress\0");
+    }
+    if (writeCmd(fctl, filterCmd(mut room, NETCTL_VERSION, NETCTL_FILTER_DEL, NETCTL_HOST_ADDR, 7400)) != size) {
+        return failed(reason, "check failed: net-output: (11) the rule deleted through the device\0");
+    }
+    nettest_file_put(fctl);
+    return true;
+}
+
+// ---- net-tcpverdict ----
+
+/// The host's outbound connect to `port`, waited for `tries` times 10 ms: whether it finished, and its result in `rc`.
+/// Safety: thread context; nettest.c's one connect at a time.
+unsafe fn connectWait(tries: u32, rc: borrow mut i32) -> bool {
+    var r: i32 = 0;
+    var done = nettest_hin_connect_done(borrow mut r as *mut i32);
+    var i: u32 = 0;
+    while (i < tries && !done) {
+        sleepMs(10);
+        done = nettest_hin_connect_done(borrow mut r as *mut i32);
+        i += 1;
+    }
+    rc = r;
+    return done;
+}
+
+/// A nonblocking connect to `w`:`port`: what ksock_connect returned, and the socket in `out`.
+/// Safety: thread context.
+unsafe fn nonblockingConnect(w: u32, port: u16, out: borrow mut *mut socket) -> i32 {
+    var c = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET_S, SOCK_STREAM, 0, borrow mut c as *mut *mut socket) != 0) {
+        return 1;
+    }
+    out = c;
+    ksock_set_nonblock(c, true);
+    let peer = v4addr(w, port);
+    return ksock_connect(c, na(borrow peer));
+}
+
+/// The chain's refusal reaches the connection: a blocking connect is told -EPERM at once, a connect already waiting is
+/// woken by the refusal of its retransmission, a nonblocking connect fails outright, a refused SYN-ACK drops its
+/// half-open instead of holding it, a rule added mid-connection is recorded without tearing the connection down,
+/// deleting the rule lets the next segment clear the record, a stray reset's refusal tells nobody, loopback passes no
+/// chain, and a refused UDP send is still immediate.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tcpverdict")
+unsafe fn tcpverdict(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    fw_flush();
+    nat_flush();
+    nat_pf_clear();
+
+    // One uplink tap is enough. Every property here is what a *connection* does with a refusal; the scope dimension --
+    // a guest's tap told from the world -- is net-output's, and a SYN arriving from the world needs no INPUT seed, which
+    // keeps the passive-open case deterministic.
+    var x = Link {
+        u: 0 as *mut tap,
+        uip: ip4(10, 77, 11, 1),
+        w: ip4(10, 77, 11, 99),
+        umac: [0x52, 0x54, 0x00, 0x1d, 0x00, 0x01],
+        wmac: [0x52, 0x54, 0x00, 0x1d, 0x00, 0x63],
+    };
+    if (!uplink(mut x, "tvu\0")) {
+        return failed(reason, "check failed: net-tcpverdict: the uplink tap\0");
+    }
+    let socks0 = socket_count();
+    nettest_hin_drain(x.u);
+    if (!connects(reason, borrow x) || !passive(reason, borrow x) || !established(reason, borrow x) ||
+        !untouched(reason, borrow x)) {
+        return false;
+    }
+
+    // Every socket this test made is gone: a refusal takes a reference to the socket it has to wake, and one already
+    // taken is kept rather than replaced -- replacing it would leak exactly one per refused flush that arrives with a
+    // reader waiting, which the step above arranges.
+    var i = 0;
+    while (i < 40 && socket_count() > socks0) {
+        sleepMs(10);
+        i += 1;
+    }
+    if (socket_count() != socks0) {
+        return failed(reason, "check failed: net-tcpverdict: every socket this test made is gone\0");
+    }
+
+    nettest_hin_drain(x.u);
+    nettest_tap_destroy(x.u);
+    fw_flush();
+    nat_flush();
+    nat_pf_clear();
+    info(
+        "selftest: net-tcpverdict: the chain's refusal reaches the connection -- a blocking connect was told -EPERM at once, a connect already waiting was woken by the refusal of its retransmission, a nonblocking connect failed outright, a refused SYN-ACK dropped its half-open instead of holding it, a rule added mid-connection was recorded without tearing the connection down (the send that met it kept its count, the next was told, buffered bytes still read), deleting the rule let the next segment clear the record, a stray reset's refusal told nobody, loopback passed no chain, and a refused UDP send was still immediate",
+    );
+    return true;
+}
+
+/// net-tcpverdict (1), (1b) and (2): the active opens.
+/// Safety: as tcpverdict.
+unsafe fn connects(reason: *mut *CChar, x: borrow Link) -> bool {
+    let w = x.w;
+    let wnet = ip4(10, 77, 11, 0);
+    // (1) A blocking connect is told, and told at once. Before the verdict reached the pcb this took the whole
+    // retransmit budget -- eight tries with a doubling RTO, about three minutes -- so a test that finishes inside two
+    // seconds *is* the assertion.
+    var roomC = cmd();
+    let outC = outRule(mut roomC, IPPROTO_TCP, 0, 0, wnet, 24, 9300, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outC) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (1) the rule\0");
+    }
+    var s0 = snapNow();
+    if (!nettest_hin_connect(w, 9300, "tv-connect\0".ptr as *CChar)) {
+        return failed(reason, "check failed: net-tcpverdict: (1) the connect thread\0");
+    }
+    var rc: i32 = 0;
+    if (!connectWait(HIN_TRIES, mut rc) || rc != -EPERM) {
+        return failed(reason, "check failed: net-tcpverdict: (1) the blocking connect is told -EPERM\0");
+    }
+    let cn = nettest_hin_connect_join();
+    let r = rises(Counter.OutRefused, s0.outRefused);
+    if (!r.ok) {
+        return failed(reason, "check failed: net-tcpverdict: (1) counted as refused\0");
+    }
+    if (r.s.outAborted <= s0.outAborted) {
+        return failed(reason, "check failed: net-tcpverdict: (1) counted as aborted\0");
+    }
+    if (!rises(Counter.TxFiltered, s0.txFiltered).ok) {
+        return failed(reason, "check failed: net-tcpverdict: (1) counted as filtered\0");
+    }
+    if (seen(x, IPPROTO_TCP, 9300, 15)) { // the SYN never left
+        return failed(reason, "check failed: net-tcpverdict: (1) the SYN never left\0");
+    }
+    nettest_ksock_put(cn);
+
+    // (1b) The abort earns its keep on a connect already waiting. Here the first SYN left before the rule existed, so
+    // the caller is blocked on the state -- ksock_connect's wait watches the state, not the error -- and it is the
+    // refusal of the *retransmission* that ends the wait. The direct return in tcp_connect cannot serve this case: that
+    // call is long past.
+    nettest_hin_drain(x.u);
+    if (!nettest_hin_connect(w, 9303, "tv-connw\0".ptr as *CChar)) {
+        return failed(reason, "check failed: net-tcpverdict: (1b) the connect thread\0");
+    }
+    if (!seen(x, IPPROTO_TCP, 9303, HIN_TRIES) || sgFlags() != TH_SYN) { // it left
+        return failed(reason, "check failed: net-tcpverdict: (1b) the first SYN left\0");
+    }
+    var roomW = cmd();
+    let outW = outRule(mut roomW, IPPROTO_TCP, 0, 0, wnet, 24, 9303, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outW) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (1b) the rule\0");
+    }
+    s0 = snapNow();
+    if (!connectWait(250, mut rc) || rc != -EPERM) { // the first RTO is a second
+        return failed(reason, "check failed: net-tcpverdict: (1b) the waiting connect is told -EPERM\0");
+    }
+    let cnw = nettest_hin_connect_join();
+    if (!rises(Counter.OutAborted, s0.outAborted).ok) {
+        return failed(reason, "check failed: net-tcpverdict: (1b) counted as aborted\0");
+    }
+    if (delHost(outW) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (1b) the rule deleted\0");
+    }
+    nettest_ksock_put(cnw);
+
+    // (2) A nonblocking connect fails outright, rather than reporting an open already abandoned: tcp_connect returns the
+    // refusal and ksock_connect hands it straight back. Poll says so too. Delete the rule and the same call reports an
+    // open in progress, with the SYN on the link.
+    var c = 0 as *mut socket;
+    if (nonblockingConnect(w, 9300, mut c) != -EPERM) {
+        return failed(reason, "check failed: net-tcpverdict: (2) the nonblocking connect fails outright\0");
+    }
+    if ((ksock_ready(c) & IO_ERROR) == 0) {
+        return failed(reason, "check failed: net-tcpverdict: (2) poll says so\0");
+    }
+    nettest_ksock_put(c);
+    if (delHost(outC) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (2) the rule deleted\0");
+    }
+    nettest_hin_drain(x.u);
+    var c2 = 0 as *mut socket;
+    if (nonblockingConnect(w, 9300, mut c2) != -EINPROGRESS) {
+        return failed(reason, "check failed: net-tcpverdict: (2) an open in progress\0");
+    }
+    if (!seen(x, IPPROTO_TCP, 9300, HIN_TRIES) || sgFlags() != TH_SYN) {
+        return failed(reason, "check failed: net-tcpverdict: (2) the SYN on the link\0");
+    }
+    nettest_ksock_put(c2);
+    return true;
+}
+
+/// net-tcpverdict (3): a refused SYN-ACK has no connection to tell -- a passive open's half-open lives in the
+/// listener's SYN cache, and the child pcb is only created when the ACK completes -- so the half-open is dropped
+/// instead of held for its full eight seconds. The rule names the *client's* port, because that is the destination of
+/// the segment being refused.
+/// Safety: as tcpverdict.
+unsafe fn passive(reason: *mut *CChar, x: borrow Link) -> bool {
+    var ls = 0 as *mut socket;
+    if (!nettest_hin_tcp_listener(borrow mut ls as *mut *mut socket, 9301)) {
+        return failed(reason, "check failed: net-tcpverdict: (3) the listener\0");
+    }
+    var room = cmd();
+    let outSa = outRule(mut room, IPPROTO_TCP, 0, 0, ip4(10, 77, 11, 0), 24, 40300, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outSa) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (3) the rule\0");
+    }
+    nettest_hin_drain(x.u);
+    var s0 = snapNow();
+    if (!tcpIn(x, 40300, 9301, 7000, 0, TH_SYN, "")) {
+        return failed(reason, "check failed: net-tcpverdict: (3) the SYN\0");
+    }
+    let r = rises(Counter.SynRefused, s0.synRefused);
+    if (!r.ok) {
+        return failed(reason, "check failed: net-tcpverdict: (3) the half-open dropped\0");
+    }
+    if (r.s.outRefused <= s0.outRefused) {
+        return failed(reason, "check failed: net-tcpverdict: (3) counted as refused\0");
+    }
+    if (r.s.outAborted != s0.outAborted || r.s.outRecorded != s0.outRecorded) {
+        return failed(reason, "check failed: net-tcpverdict: (3) neither aborted nor recorded\0");
+    }
+    if (seen(x, IPPROTO_TCP, 40300, 15)) { // no SYN-ACK left
+        return failed(reason, "check failed: net-tcpverdict: (3) no SYN-ACK left\0");
+    }
+    var a = 0 as *mut socket;
+    if (nettest_ksock_accept(ls, borrow mut a as *mut *mut socket, 0 as *mut netaddr) != -EAGAIN) { // and nothing to accept
+        return failed(reason, "check failed: net-tcpverdict: (3) nothing to accept\0");
+    }
+    // The same SYN again, under the same rule: the slot the first one used is free, so it is cached anew. This is the
+    // assertion the drop is *for* -- a refusal that counted without dropping would leave the entry live, and
+    // listen_input would answer from it (reusing its ISS) without touching syn_cached.
+    s0 = snapNow();
+    if (!tcpIn(x, 40300, 9301, 7000, 0, TH_SYN, "")) {
+        return failed(reason, "check failed: net-tcpverdict: (3) the SYN again\0");
+    }
+    if (!rises(Counter.SynCached, s0.synCached).ok) {
+        return failed(reason, "check failed: net-tcpverdict: (3) cached anew\0");
+    }
+    if (seen(x, IPPROTO_TCP, 40300, 15)) {
+        return failed(reason, "check failed: net-tcpverdict: (3) still no SYN-ACK\0");
+    }
+
+    // Without the rule the same SYN is answered, which is what makes the assertions above about the rule and not about
+    // the fixture.
+    if (delHost(outSa) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (3) the rule deleted\0");
+    }
+    if (!tcpIn(x, 40301, 9301, 7100, 0, TH_SYN, "")) {
+        return failed(reason, "check failed: net-tcpverdict: (3) the SYN without the rule\0");
+    }
+    if (!seen(x, IPPROTO_TCP, 40301, HIN_TRIES) || sgFlags() != (TH_SYN | TH_ACK)) {
+        return failed(reason, "check failed: net-tcpverdict: (3) answered\0");
+    }
+    nettest_ksock_put(ls);
+    return true;
+}
+
+/// Read two bytes from the connection and compare them with `text`.
+/// Safety: the socket is the test's.
+unsafe fn readTwo(s: *mut socket, text: StringView) -> bool =>
+    nettest_hin_recv_sock(s, buf() as *mut void, 64, 5) == 2 && bufIs(text);
+
+/// net-tcpverdict (4), (5) and (5b): an established connection of the host's own, driven from the world side.
+/// Safety: as tcpverdict.
+unsafe fn established(reason: *mut *CChar, x: borrow Link) -> bool {
+    let w = x.w;
+    nettest_hin_drain(x.u);
+    if (!nettest_hin_connect(w, 9302, "tv-conn2\0".ptr as *CChar)) {
+        return failed(reason, "check failed: net-tcpverdict: the connection's thread\0");
+    }
+    if (!seen(x, IPPROTO_TCP, 9302, HIN_TRIES) || sgFlags() != TH_SYN) {
+        return failed(reason, "check failed: net-tcpverdict: the connection's SYN\0");
+    }
+    let hiss = sgSeq();
+    let hport = sgSport();
+    let ack = hiss.wrappingAdd(1);
+    if (!tcpIn(x, 9302, hport, 5000, ack, TH_SYN | TH_ACK, "")) {
+        return failed(reason, "check failed: net-tcpverdict: the world's SYN-ACK\0");
+    }
+    if (!seen(x, IPPROTO_TCP, 9302, HIN_TRIES) || sgFlags() != TH_ACK) {
+        return failed(reason, "check failed: net-tcpverdict: the host's ACK\0");
+    }
+    var rc: i32 = 1;
+    if (!connectWait(HIN_TRIES, mut rc) || rc != 0) {
+        return failed(reason, "check failed: net-tcpverdict: the connection is open\0");
+    }
+    let s = nettest_hin_connect_join();
+    if (s.isNull()) { // NULL when its release could not be deferred: put at once
+        return failed(reason, "check failed: net-tcpverdict: the connection's socket\0");
+    }
+    ksock_set_nonblock(s, true);
+    let pcb = Ptr.toBorrow(s as *socket).tcp;
+    // Two bytes from the peer, in before the rule: they must stay readable.
+    if (!tcpIn(x, 9302, hport, 5001, ack, TH_ACK | TH_PSH, "hi")) {
+        return failed(reason, "check failed: net-tcpverdict: the peer's two bytes\0");
+    }
+    var i = 0;
+    while (i < 40 && tcp_recv_avail(pcb) < 2) {
+        sleepMs(10);
+        i += 1;
+    }
+    if (tcp_recv_avail(pcb) != 2) {
+        return failed(reason, "check failed: net-tcpverdict: the two bytes arrived\0");
+    }
+    // Their acknowledgement on the wire before the rule. Unread, the two bytes are acknowledged by the delayed-ACK
+    // timer, TCP_DELACK_NS after they arrived; a rule added first refuses that ACK, and its verdict is then the one the
+    // send below is told of (-EPERM where 3 is checked). The window was the rule plus nettest_hin_drain's 20 ms sleep
+    // against the timer's 40 ms, about 10 ms of slack (docs/testing/flakes.md, "net-tcpverdict"). Waited for, not timed.
+    var hiAcked = false;
+    i = 0;
+    while (i < 4 && !hiAcked) {
+        hiAcked = seen(x, IPPROTO_TCP, 9302, HIN_TRIES) && (sgFlags() & TH_ACK) != 0 && sgAck() == 5003;
+        i += 1;
+    }
+    if (!hiAcked) {
+        return failed(reason, "check failed: net-tcpverdict: the two bytes acknowledged\0");
+    }
+
+    // (4) A rule added mid-connection records the verdict and leaves the connection standing. The send that meets the
+    // rule still returns its count -- those bytes are in the send buffer and will be retransmitted, so failing them
+    // would either lose them or invite a double-send -- and the *next* call is the one that is told.
+    var room = cmd();
+    let outE = outRule(mut room, IPPROTO_TCP, 0, 0, ip4(10, 77, 11, 0), 24, 9302, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outE) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (4) the rule\0");
+    }
+    nettest_hin_drain(x.u);
+    var s0 = snapNow();
+    if (sendOn(s, "abc") != 3) {
+        return failed(reason, "check failed: net-tcpverdict: (4) the send that meets the rule keeps its count\0");
+    }
+    let r = rises(Counter.OutRecorded, s0.outRecorded);
+    if (!r.ok) {
+        return failed(reason, "check failed: net-tcpverdict: (4) recorded\0");
+    }
+    if (r.s.outRefused <= s0.outRefused) {
+        return failed(reason, "check failed: net-tcpverdict: (4) counted as refused\0");
+    }
+    if (seen(x, IPPROTO_TCP, 9302, 15)) { // nothing reached the link
+        return failed(reason, "check failed: net-tcpverdict: (4) nothing reached the link\0");
+    }
+    if (tcp_state_of(pcb) != TCP_ESTABLISHED) { // and nothing was torn down
+        return failed(reason, "check failed: net-tcpverdict: (4) nothing was torn down\0");
+    }
+    if ((ksock_ready(s) & IO_ERROR) == 0) {
+        return failed(reason, "check failed: net-tcpverdict: (4) poll says so\0");
+    }
+    if (sendOn(s, "de") != -EPERM as i64) { // the next call is told
+        return failed(reason, "check failed: net-tcpverdict: (4) the next call is told\0");
+    }
+    if (!readTwo(s, "hi")) {
+        return failed(reason, "check failed: net-tcpverdict: (4) buffered bytes still read\0");
+    }
+    if (ksock_recvfrom(s, buf() as *mut void, 64, 0 as *mut netaddr) != -EPERM as i64) { // drained, then told
+        return failed(reason, "check failed: net-tcpverdict: (4) drained, then told\0");
+    }
+
+    // The peer keeps talking under the rule, and the acknowledgment the host owes it is refused in turn. This is the one
+    // path where the refusal meets a wake already taken -- for the reader of the data that just arrived -- so the rule
+    // that the waiter is *kept* rather than replaced is exercised here, and the socket count at the end of the test is
+    // what shows the reference it holds was not dropped on the floor. The bytes arrive whatever the chain says about
+    // the answer: ingress is not this chain's business.
+    s0 = snapNow();
+    if (!tcpIn(x, 9302, hport, 5003, ack, TH_ACK | TH_PSH, "jk")) {
+        return failed(reason, "check failed: net-tcpverdict: (4) the peer keeps talking\0");
+    }
+    if (!rises(Counter.OutRefused, s0.outRefused).ok) {
+        return failed(reason, "check failed: net-tcpverdict: (4) the acknowledgment refused\0");
+    }
+    if (!readTwo(s, "jk")) {
+        return failed(reason, "check failed: net-tcpverdict: (4) the bytes arrive\0");
+    }
+    if (tcp_state_of(pcb) != TCP_ESTABLISHED) {
+        return failed(reason, "check failed: net-tcpverdict: (4) still established\0");
+    }
+
+    // (5) The rule deleted, the connection resumes: the next segment that reaches the link clears the record. The
+    // peer's own data is the trigger -- the host's acknowledgment of it is that segment -- because the application
+    // cannot send its way out of a recorded verdict.
+    if (delHost(outE) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (5) the rule deleted\0");
+    }
+    s0 = snapNow();
+    if (!tcpIn(x, 9302, hport, 5005, ack, TH_ACK | TH_PSH, "yo")) {
+        return failed(reason, "check failed: net-tcpverdict: (5) the peer's data\0");
+    }
+    if (!rises(Counter.OutCleared, s0.outCleared).ok) {
+        return failed(reason, "check failed: net-tcpverdict: (5) the record cleared\0");
+    }
+    if (sendOn(s, "de") != 2) { // usable again
+        return failed(reason, "check failed: net-tcpverdict: (5) usable again\0");
+    }
+    if ((ksock_ready(s) & IO_ERROR) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (5) no error polled\0");
+    }
+    if (!readTwo(s, "yo")) {
+        return failed(reason, "check failed: net-tcpverdict: (5) the bytes read\0");
+    }
+
+    // (5b) A refusal that *records* while a wake is already taken. The record above is cleared, so the peer's next
+    // segment is the first thing refused this time: tcp_input takes a reference for the reader of that data, then the
+    // acknowledgment it owes is refused and the record is made with that waiter already in hand. Keeping it rather than
+    // replacing it is the rule under test, and a replacement would leak exactly one socket reference -- which is what
+    // the count below sees. (The earlier refusal under a rule could not exercise this: the record already existed, so
+    // no reference was taken at all.)
+    if (addHost(outE) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (5b) the rule again\0");
+    }
+    s0 = snapNow();
+    if (!tcpIn(x, 9302, hport, 5007, ack, TH_ACK | TH_PSH, "pq")) {
+        return failed(reason, "check failed: net-tcpverdict: (5b) the peer's data\0");
+    }
+    if (!rises(Counter.OutRecorded, s0.outRecorded).ok) {
+        return failed(reason, "check failed: net-tcpverdict: (5b) recorded\0");
+    }
+    if (!readTwo(s, "pq")) {
+        return failed(reason, "check failed: net-tcpverdict: (5b) the bytes read\0");
+    }
+    if (delHost(outE) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (5b) the rule deleted\0");
+    }
+    nettest_ksock_put(s);
+    return true;
+}
+
+/// net-tcpverdict (6), (7) and (8): a stray reset, loopback, and UDP.
+/// Safety: as tcpverdict.
+unsafe fn untouched(reason: *mut *CChar, x: borrow Link) -> bool {
+    let wnet = ip4(10, 77, 11, 0);
+    // (6) A stray segment's reset is refused with no connection to tell: counted, and nothing else happens.
+    nettest_hin_drain(x.u);
+    var room = cmd();
+    let outR = outRule(mut room, IPPROTO_TCP, 0, 0, wnet, 24, 40310, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outR) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (6) the rule\0");
+    }
+    let s0 = snapNow();
+    if (!tcpIn(x, 40310, 9399, 8000, 8000, TH_ACK, "")) {
+        return failed(reason, "check failed: net-tcpverdict: (6) the stray segment\0");
+    }
+    let r = rises(Counter.OutRefused, s0.outRefused);
+    if (!r.ok) {
+        return failed(reason, "check failed: net-tcpverdict: (6) the reset refused\0");
+    }
+    if (r.s.outAborted != s0.outAborted || r.s.outRecorded != s0.outRecorded || r.s.outCleared != s0.outCleared ||
+        r.s.synRefused != s0.synRefused) {
+        return failed(reason, "check failed: net-tcpverdict: (6) nothing else happens\0");
+    }
+    if (seen(x, IPPROTO_TCP, 40310, 15)) {
+        return failed(reason, "check failed: net-tcpverdict: (6) no reset left\0");
+    }
+    if (delHost(outR) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (6) the rule deleted\0");
+    }
+
+    // (7) Loopback passes no chain, which is what keeps every other TCP selftest meaningful: a rule matching by every
+    // other field does not touch a connection to 127.0.0.1.
+    var loLs = 0 as *mut socket;
+    if (!nettest_hin_tcp_listener(borrow mut loLs as *mut *mut socket, 9310)) {
+        return failed(reason, "check failed: net-tcpverdict: (7) the loopback listener\0");
+    }
+    let outLo = outRule(mut room, IPPROTO_TCP, 0, 0, 0, 0, 9310, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outLo) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (7) the rule\0");
+    }
+    var loC = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET_S, SOCK_STREAM, 0, borrow mut loC as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (7) the client\0");
+    }
+    let loA = v4addr(loopback(), 9310);
+    if (ksock_connect(loC, na(borrow loA)) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (7) the loopback connect\0");
+    }
+    if (delHost(outLo) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (7) the rule deleted\0");
+    }
+    nettest_ksock_put(loC);
+    nettest_ksock_put(loLs);
+
+    // (8) The datagram protocols are untouched by this unit: a refused UDP send is still told at once, by the same
+    // -EPERM this unit gave a new meaning to inside TCP.
+    var us = 0 as *mut socket;
+    if (!nettest_hin_udp_listener(borrow mut us as *mut *mut socket, 0, 7400)) {
+        return failed(reason, "check failed: net-tcpverdict: (8) the UDP socket\0");
+    }
+    let outU = outRule(mut room, IPPROTO_UDP, 0, 0, wnet, 24, 7401, FW_DROP, FW_SCOPE_ANY);
+    if (addHost(outU) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (8) the rule\0");
+    }
+    if (sendTo(us, "x".ptr as *void, 1, x.w, 7401) != -EPERM as i64) {
+        return failed(reason, "check failed: net-tcpverdict: (8) the UDP send is told at once\0");
+    }
+    if (delHost(outU) != 0) {
+        return failed(reason, "check failed: net-tcpverdict: (8) the rule deleted\0");
+    }
+    nettest_ksock_put(us);
+    return true;
+}
