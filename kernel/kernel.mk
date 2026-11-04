@@ -222,6 +222,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/socket_floor.c \
 	kernel-services/network/nettest.c \
 	kernel-services/network/nettest_base.c \
+	kernel-services/network/nettest_lo.c \
 	drivers/acpi/acpi.c \
 	drivers/acpi/acpi_parse.c \
 	drivers/pci/pci.c \
@@ -290,6 +291,8 @@ $(OUT)/compat/linux/lxconv.o $(OUT)/compat/linux/lxconv.analyzed: EXTRA_CFLAGS +
 $(OUT)/drivers/acpi/acpi_parse.o $(OUT)/drivers/acpi/acpi_parse.analyzed: EXTRA_CFLAGS += -I$(ROOT)/drivers/acpi
 # kernel-services/network/netif.c likewise, from netif.cee, away from the netif_cpu.h it includes.
 $(OUT)/kernel-services/network/netif.o $(OUT)/kernel-services/network/netif.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
+# kernel-services/network/nettest_lo.c likewise, from nettest_lo.cee, away from the nettest.h it includes.
+$(OUT)/kernel-services/network/nettest_lo.o $(OUT)/kernel-services/network/nettest_lo.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 
 # kernel-services/filesystem/cosmofs/cfsparse.c is generated from cfsparse.cee into out/cee (scripts/cee-gen.py), away
 # from the cosmofs_internal.h it includes by name: its object, and its analysis, look in the cosmofs directory too.

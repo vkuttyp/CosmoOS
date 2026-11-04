@@ -1026,7 +1026,16 @@ census) stays C until the last batch. Batch 1, `nettest_base.cee`:
 net-mbuf, net-mbufq-double, net-cksum and net-arp; a C struct no
 CeeSafe local holds (a queue, the counters) is built in an aligned,
 zeroed scratch, and a failed check names itself in words rather than a
-line number.
+line number. Batch 2, `nettest_lo.cee`: net-lo-udp, net-lo-tcp,
+net-tcp-delack, net-tcp-nagle-peer, net-tcp-mss and net-lo-tcp-loss,
+with the bulk transfer they share with net-rx-dup and net-tcp-reorder
+(`nettest_tcp_transfer`, exported back to the C). The test servers'
+state (`struct tcp_server`) moved to a private `nettest.h` with the
+framework wrappers the batch calls; a server lives in a static room of
+the batch's, since its thread can outlive the test, and an address in
+`NettestAddr`, `struct netaddr`'s layout asserted in `nettest.c`.
+tcp-pcb-timer-free and net-rx-dup, which need the debug and
+fault-injection builds' hooks, wait for a batch of their own.
 
 Size: about 3.0x.
 

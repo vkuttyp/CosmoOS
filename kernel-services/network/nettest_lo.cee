@@ -1,0 +1,1272 @@
+// nettest_lo.cee - the network self-tests over loopback, in CeeSafe: roadmap 2.0 SA6 (nettest, the second batch).
+// net-lo-udp, net-lo-tcp, net-tcp-delack, net-tcp-nagle-peer, net-tcp-mss and net-lo-tcp-loss, as nettest.c had
+// them, and the bulk transfer they share with the C tests still in nettest.c (nettest_tcp_transfer). A server's state
+// is nettest.c's struct tcp_server (nettest.h), started and released by its framework, which stays C until the last
+// batch; it lives in a static scratch of this file's, since its thread may outlive the test's frame. An address is
+// an NettestAddr, struct netaddr's layout (asserted in nettest.c), so a test can hold one.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/sched.h", "kernel/selftest.h", "kernel/thread.h", "kernel/wait.h", "kernel/kmalloc.h")
+extern "C" {
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct netaddr {
+        family: u16;
+        port: u16;
+    }
+    struct tcp_pcb {
+        mss: u16;
+        path_mss: u16;
+    }
+    struct socket {
+        tcp: *mut tcp_pcb;
+    }
+    struct thread;
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+    }
+    struct mbuf {
+        data: *mut u8;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ip4 {
+        addr: u32;
+        gateway: u32;
+    }
+    struct netif {
+        obj: kobject;
+        ip4: netif_ip4;
+        ip6_ll: in6_addr;
+    }
+    struct tcp_server {
+        addr: netaddr;
+        bytes_seen: u32;
+        result: i32;
+        done: bool;
+        param: u32;
+        stop: bool;
+        ls: *mut socket;
+        c: *mut socket;
+    }
+    struct udp_stats {
+        rx_bad_cksum: u64;
+        rx_no_port: u64;
+    }
+    struct tcp_stats {
+        segs_out: u64;
+        retransmits: u64;
+        bad_cksum: u64;
+        rsts_in: u64;
+        conns_established: u64;
+    }
+
+    fn nettest_tcp_server_start(srv: *mut tcp_server, run: extern "C" fn(*mut void), name: *CChar, prio: i32) -> bool;
+    fn nettest_tcp_server_publish(srv: *mut tcp_server, listener: bool, sock: *mut socket);
+    fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn nettest_ksock_put(s: *mut socket);
+    fn nettest_loopback_set_filter(run: extern "C" fn(*mut mbuf, *mut void) -> bool, arg: *mut void);
+    fn nettest_lo_tcp_backlog(reason: *mut *CChar, port: u16, force: bool, acceptedFirst: *mut bool) -> bool;
+    fn selftest_release(arg: *mut void) -> bool;
+
+    fn ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_bind(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_listen(s: *mut socket, backlog: i32) -> i32;
+    fn ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn ksock_connect(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn ksock_recvfrom(s: *mut socket, buf: *mut void, len: usize, from: *mut netaddr) -> i64;
+    fn ksock_shutdown(s: *mut socket, how: i32) -> i32;
+    fn ksock_getsockname(s: *mut socket, out: *mut netaddr) -> i32;
+    fn ksock_getpeername(s: *mut socket, out: *mut netaddr) -> i32;
+    fn ksock_put(s: *mut socket);
+    fn socket_count() -> u32;
+    fn udp_get_stats(out: *mut udp_stats);
+    fn tcp_get_stats(out: *mut tcp_stats);
+    fn tcp_send_space(pcb: *mut tcp_pcb) -> u32;
+    fn tcp_path_mss(family: u16, remote: *netaddr) -> u16;
+    fn netif_default() -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn clock_now_ns() -> u64;
+    fn thread_sleep_ns(ns: u64);
+    fn thread_exit(code: i32);
+    fn sched_yield();
+    fn sched_watchdog_kick();
+}
+
+// ---- errno.h, uapi/cosmo, tcp.h, udp.h, ether.h, ip.h, inet.h (asserted against the headers in nettest.c) ----
+
+const EIO: i32 = 5;
+const EPIPE: i32 = 32;
+const EINVAL: i32 = 22;
+const EMSGSIZE: i32 = 90;
+const EADDRINUSE: i32 = 98;
+const EISCONN: i32 = 106;
+const ECONNREFUSED: i32 = 111;
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
+const SHUT_RD: i32 = 0;
+const SHUT_WR: i32 = 1;
+const TCP_SNDBUF: u32 = 65536;
+const TCP_MSS_V4: u16 = 1460;
+const TCP_MSS_V6: u16 = 1440;
+const TCP_MSS_LO: u16 = 16384;
+const TCP_DELACK_NS: u64 = 40 * 1000000;
+const NET_EPHEMERAL_LO: u16 = 49152;
+const ETH_P_IP: u16 = 0x0800;
+const IPPROTO_TCP: u8 = 6;
+/// INADDR_LOOPBACK_N: 127.0.0.1 as it lies in a little-endian u32 (ipv4.cee's LOOPBACK_N).
+const LOOPBACK_N: u32 = 0x0100007f;
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * 1000000);
+    }
+}
+
+/// A C struct's room on the stack: aligned and zeroed (the counters).
+struct LoStats {
+    words: [u64; 48];
+}
+
+fn stats() -> LoStats => LoStats { words: [0; 48] };
+
+/// The scratch's bytes, after checking `bytes` of them fit: the caller casts them to its C struct.
+fn statsAt(s: borrow mut LoStats, bytes: usize) -> *mut u8 {
+    if (bytes > 384) {
+        tooSmall();
+    }
+    return borrow mut s.words as *mut [u64; 48] as *mut u8;
+}
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+/// Safety: the scratch holds a udp_stats (statsAt checks).
+fn udpStats(s: borrow mut LoStats) -> *mut udp_stats {
+    let p = statsAt(mut s, layoutOf<udp_stats>().size) as *mut udp_stats;
+    unsafe {
+        udp_get_stats(p);
+    }
+    return p;
+}
+
+/// Safety: the scratch holds a tcp_stats (statsAt checks).
+fn tcpStats(s: borrow mut LoStats) -> *mut tcp_stats {
+    let p = statsAt(mut s, layoutOf<tcp_stats>().size) as *mut tcp_stats;
+    unsafe {
+        tcp_get_stats(p);
+    }
+    return p;
+}
+
+/// A counter of a tcpStats scratch.
+/// Safety: `p` is one of tcpStats's, and its scratch is live.
+unsafe fn rstsIn(p: *mut tcp_stats) -> u64 => Ptr.toBorrow(p as *tcp_stats).rsts_in;
+
+/// Safety: as rstsIn.
+unsafe fn retransmits(p: *mut tcp_stats) -> u64 => Ptr.toBorrow(p as *tcp_stats).retransmits;
+
+/// Safety: as rstsIn.
+unsafe fn segsOut(p: *mut tcp_stats) -> u64 => Ptr.toBorrow(p as *tcp_stats).segs_out;
+
+// ---- Addresses ----
+
+/// struct netaddr's layout: the family, the port (host order), and the IPv4 address (network order) or the IPv6 one.
+@repr(C)
+struct NettestAddr {
+    family: u16;
+    port: u16;
+    words: [u32; 4];
+}
+
+fn v4addr(ip: u32, port: u16) -> NettestAddr => NettestAddr { family: AF_INET, port: port, words: [ip, 0, 0, 0] };
+
+/// ::1, port `port`.
+/// Safety: the 16 bytes written are the address's own words.
+fn v6loop(port: u16) -> NettestAddr {
+    var a = NettestAddr { family: AF_INET6, port: port, words: [0; 4] };
+    unsafe {
+        let bytes = SliceMut.fromRaw(borrow mut a.words as *mut [u32; 4] as *mut u8, 16);
+        bytes[15] = 1;
+    }
+    return a;
+}
+
+fn na(a: borrow NettestAddr) -> *netaddr => a as *NettestAddr as *netaddr;
+
+fn naMut(a: borrow mut NettestAddr) -> *mut netaddr => a as *mut NettestAddr as *mut netaddr;
+
+fn zeroAddr() -> NettestAddr => NettestAddr { family: 0, port: 0, words: [0; 4] };
+
+// ---- The servers ----
+
+/// A server's static scratch, room for struct tcp_server (asserted in nettest.c).
+struct ServerRoom {
+    words: [u64; 64];
+}
+
+// The servers outlive their tests' frames; the runner runs one test at a time, and each user of a room joins its
+// thread (selftest_release) before the room is used again.
+static mut SINK: ServerRoom = ServerRoom { words: [0; 64] };
+static mut QUIET: ServerRoom = ServerRoom { words: [0; 64] };
+static mut WWR_READING: ServerRoom = ServerRoom { words: [0; 64] };
+static mut WWR_BUSY: ServerRoom = ServerRoom { words: [0; 64] };
+
+/// A room cleared for a new server listening on `addr`: struct tcp_server zeroed, as the C's memset.
+/// Safety: the room holds a struct tcp_server (checked), and its address field is struct netaddr's layout (NettestAddr).
+fn freshServer(room: borrow mut ServerRoom, addr: borrow NettestAddr, param: u32) -> *mut tcp_server {
+    if (layoutOf<tcp_server>().size > 512) {
+        tooSmall();
+    }
+    for (i in 0..room.words.length) {
+        room.words[i] = 0;
+    }
+    let s = borrow mut room.words as *mut [u64; 64] as *mut tcp_server;
+    unsafe {
+        let a = SliceMut.fromRaw(borrow mut Ptr.toBorrowMut(s).addr as *mut netaddr as *mut NettestAddr, 1);
+        a[0] = NettestAddr { family: addr.family, port: addr.port, words: addr.words };
+        let srv = Ptr.toBorrowMut(s);
+        srv.param = param;
+    }
+    return s;
+}
+
+/// The server's address.
+/// Safety: `s` is a live server.
+unsafe fn serverAddr(s: *mut tcp_server) -> *netaddr => borrow Ptr.toBorrow(s as *tcp_server).addr as *netaddr;
+
+/// Publish the server's listener or connection for its release (nettest.c takes the server's lock).
+/// Safety: `s` is a live server.
+fn publish(s: *mut tcp_server, listener: bool, sock: *mut socket) {
+    unsafe {
+        nettest_tcp_server_publish(s, listener, sock);
+    }
+}
+
+/// Listen on the server's address and accept one connection, publishing both for the release. Null (with the result
+/// set) when any step failed.
+/// Safety: `s` is the calling thread's server.
+unsafe fn acceptOne(s: *mut tcp_server, backlog: i32) -> *mut socket {
+    var ls = 0 as *mut socket;
+    var c = 0 as *mut socket;
+    var rc = ksock_create(
+        Ptr.toBorrow(s as *tcp_server).addr.family as i32,
+        SOCK_STREAM,
+        0,
+        borrow mut ls as *mut *mut socket,
+    );
+    if (rc != 0) {
+        setResult(s, rc);
+        return 0 as *mut socket;
+    }
+    publish(s, true, ls);
+    rc = ksock_bind(ls, serverAddr(s));
+    if (rc == 0) {
+        rc = ksock_listen(ls, backlog);
+    }
+    if (rc == 0) {
+        rc = ksock_accept(ls, borrow mut c as *mut *mut socket, 0 as *mut netaddr);
+    }
+    setResult(s, rc);
+    if (rc != 0) {
+        publish(s, true, 0 as *mut socket);
+        ksock_put(ls);
+        return 0 as *mut socket;
+    }
+    publish(s, false, c);
+    return c;
+}
+
+/// Safety: `s` is the calling thread's server.
+unsafe fn setResult(s: *mut tcp_server, rc: i32) {
+    let w = Ptr.toBorrowMut(s);
+    w.result = rc;
+}
+
+/// Unpublish and put the server's two sockets.
+/// Safety: `s` is the calling thread's server, and `c` the connection acceptOne gave it.
+unsafe fn closeBoth(s: *mut tcp_server, c: *mut socket) {
+    let ls = Ptr.toBorrow(s as *tcp_server).ls;
+    publish(s, false, 0 as *mut socket);
+    publish(s, true, 0 as *mut socket);
+    ksock_put(c);
+    ksock_put(ls);
+}
+
+/// The thread's last act: done, for the test and the release.
+/// Safety: `s` is the calling thread's server.
+unsafe fn serverDone(s: *mut tcp_server) {
+    let w = Ptr.toBorrowMut(s);
+    w.done = true;
+    thread_exit(0);
+}
+
+/// Wait up to `tries` x 10 ms for the server to be done.
+/// Safety: `s` is a live server.
+unsafe fn waitDone(s: *mut tcp_server, tries: u32, kick: bool) {
+    var i: u32 = 0;
+    while (i < tries && !Ptr.toBorrow(s as *tcp_server).done) {
+        sleepMs(10);
+        if (kick) {
+            sched_watchdog_kick();
+        }
+        i += 1;
+    }
+}
+
+// ---- UDP over loopback ----
+
+// Off the 16 KiB kernel stack: the runner runs one test at a time, and the two callers run one after the other.
+static mut MSG: [u8; 1400] = [0; 1400];
+static mut BUF: [u8; 1500] = [0; 1500];
+
+/// Safety: the runner runs one test at a time, so MSG and BUF are this test's.
+fn msg() -> *mut u8 => unsafe { borrow mut MSG as *mut [u8; 1400] as *mut u8 };
+
+/// Safety: as msg.
+fn buf() -> *mut u8 => unsafe { borrow mut BUF as *mut [u8; 1500] as *mut u8 };
+
+/// The first `n` bytes of two buffers are the same.
+/// Safety: both point to `n` readable bytes.
+unsafe fn same(a: *u8, b: *u8, n: usize) -> bool {
+    let x = Slice.fromRaw(a, n);
+    let y = Slice.fromRaw(b, n);
+    for (i in 0..n) {
+        if (x[i] != y[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Safety: `s` is a socket of the test's.
+unsafe fn sendTo(s: *mut socket, p: *u8, n: usize, to: borrow NettestAddr) -> i64 =>
+    ksock_sendto(s, p as *void, n, na(to));
+
+/// Safety: `s` is a socket of the test's.
+unsafe fn sendLit(s: *mut socket, text: StringView) -> i64 => ksock_sendto(
+    s,
+    text.ptr as *void,
+    text.length,
+    0 as *netaddr,
+);
+
+/// Binds, sends, receives and the errors, one family.
+/// Safety: the runner's `reason`; the statics are this test's (see msg).
+unsafe fn udpRoundtrip(reason: *mut *CChar, srvAddr: borrow NettestAddr, cliAddr: borrow NettestAddr) -> bool {
+    var srv = 0 as *mut socket;
+    var cli = 0 as *mut socket;
+    if (nettest_ksock_create(srvAddr.family as i32, SOCK_DGRAM, 0, borrow mut srv as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-lo-udp: the server socket\0");
+    }
+    if (nettest_ksock_create(cliAddr.family as i32, SOCK_DGRAM, 0, borrow mut cli as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-lo-udp: the client socket\0");
+    }
+    if (ksock_bind(srv, na(srvAddr)) != 0) {
+        return failed(reason, "check failed: net-lo-udp: the server binds\0");
+    }
+    if (ksock_bind(srv, na(srvAddr)) != -EINVAL) {
+        return failed(reason, "check failed: net-lo-udp: a second bind is EINVAL\0"); // twice
+    }
+    var dup = 0 as *mut socket;
+    if (nettest_ksock_create(srvAddr.family as i32, SOCK_DGRAM, 0, borrow mut dup as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-lo-udp: a third socket\0");
+    }
+    if (ksock_bind(dup, na(srvAddr)) != -EADDRINUSE) {
+        return failed(reason, "check failed: net-lo-udp: a bound port is EADDRINUSE\0");
+    }
+    nettest_ksock_put(dup);
+    var name = zeroAddr();
+    if (ksock_getsockname(srv, naMut(mut name)) != 0 || name.port != srvAddr.port) {
+        return failed(reason, "check failed: net-lo-udp: the server's name\0");
+    }
+
+    let m = SliceMut.fromRaw(msg(), 1400);
+    for (i in 0..1400) {
+        m[truncate<usize>(i)] = truncate<u8>(97 + truncate<u32>(i) % 26);
+    }
+    if (sendTo(cli, msg() as *u8, 5, srvAddr) != 5) {
+        return failed(reason, "check failed: net-lo-udp: 5 bytes sent\0");
+    }
+    if (sendTo(cli, msg() as *u8, 1400, srvAddr) != 1400) {
+        return failed(reason, "check failed: net-lo-udp: 1400 bytes sent\0");
+    }
+    var from = zeroAddr();
+    if (ksock_recvfrom(srv, buf() as *mut void, 1500, naMut(mut from)) != 5 || !same(buf() as *u8, msg() as *u8, 5)) {
+        return failed(reason, "check failed: net-lo-udp: the 5 bytes arrive\0");
+    }
+    if (from.family != cliAddr.family || from.port < NET_EPHEMERAL_LO) {
+        return failed(reason, "check failed: net-lo-udp: from the client's ephemeral port\0");
+    }
+    if (ksock_recvfrom(srv, buf() as *mut void, 1500, naMut(mut from)) != 1400 || !same(
+        buf() as *u8,
+        msg() as *u8,
+        1400,
+    )) {
+        return failed(reason, "check failed: net-lo-udp: the 1400 bytes arrive\0");
+    }
+    // Reply to the sender's ephemeral port.
+    let pong = "pong";
+    if (ksock_sendto(srv, pong.ptr as *void, 4, na(borrow from)) != 4) {
+        return failed(reason, "check failed: net-lo-udp: the reply is sent\0");
+    }
+    if (ksock_recvfrom(cli, buf() as *mut void, 1500, 0 as *mut netaddr) != 4 || !same(buf() as *u8, pong.ptr, 4)) {
+        return failed(reason, "check failed: net-lo-udp: the reply arrives\0");
+    }
+    // Truncation on a short buffer.
+    if (sendTo(cli, msg() as *u8, 100, srvAddr) != 100) {
+        return failed(reason, "check failed: net-lo-udp: 100 bytes sent\0");
+    }
+    if (ksock_recvfrom(srv, buf() as *mut void, 10, 0 as *mut netaddr) != 10) {
+        return failed(reason, "check failed: net-lo-udp: a short buffer truncates\0");
+    }
+    // Errors.
+    var bad = NettestAddr { family: srvAddr.family, port: 0, words: srvAddr.words };
+    if (sendTo(cli, msg() as *u8, 1, borrow bad) != -(EINVAL as i64)) {
+        return failed(reason, "check failed: net-lo-udp: port 0 is EINVAL\0");
+    }
+    bad.port = srvAddr.port;
+    if (sendTo(cli, msg() as *u8, 70000, borrow bad) != -(EMSGSIZE as i64)) {
+        return failed(reason, "check failed: net-lo-udp: 70000 bytes is EMSGSIZE\0");
+    }
+    var unbound = 0 as *mut socket;
+    if (nettest_ksock_create(srvAddr.family as i32, SOCK_DGRAM, 0, borrow mut unbound as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-lo-udp: an unbound socket\0");
+    }
+    if (ksock_recvfrom(unbound, buf() as *mut void, 10, 0 as *mut netaddr) != -(EINVAL as i64)) {
+        return failed(reason, "check failed: net-lo-udp: an unbound receive is EINVAL\0");
+    }
+    nettest_ksock_put(unbound);
+    // A datagram to a closed port is dropped (v4 replies with ICMP).
+    let closed = NettestAddr { family: srvAddr.family, port: 9, words: srvAddr.words };
+    if (sendTo(cli, msg() as *u8, 3, borrow closed) != 3) {
+        return failed(reason, "check failed: net-lo-udp: a datagram to a closed port is sent\0");
+    }
+    sleepMs(20);
+    nettest_ksock_put(cli);
+    nettest_ksock_put(srv);
+    return true;
+}
+
+/// net-lo-udp: both families, a reserved port, the counters, and nothing left.
+/// Safety: the runner's `reason`.
+@export("selftest_net_lo_udp")
+unsafe fn loUdp(reason: *mut *CChar) -> bool {
+    let socks0 = socket_count();
+    var s0 = stats();
+    var s1 = stats();
+    let u0 = udpStats(mut s0);
+    let srv4 = v4addr(LOOPBACK_N, 5000);
+    let cli4 = v4addr(0, 0);
+    if (!udpRoundtrip(reason, borrow srv4, borrow cli4)) {
+        return false;
+    }
+    let srv6 = v6loop(5001);
+    let cli6 = v6loop(0);
+    if (!udpRoundtrip(reason, borrow srv6, borrow cli6)) {
+        return false;
+    }
+    // A reserved port is judged on the caller's credentials at bind time, not on the socket's creator: this kernel
+    // thread is privileged, so the bind succeeds whatever uid the socket records. The refusal for an unprivileged
+    // caller is exercised by init --unpriv-test.
+    var s = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET as i32, SOCK_DGRAM, 1000, borrow mut s as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-lo-udp: a socket for uid 1000\0");
+    }
+    let low = v4addr(0, 80);
+    if (ksock_bind(s, na(borrow low)) != 0) {
+        return failed(reason, "check failed: net-lo-udp: a privileged thread binds port 80\0");
+    }
+    nettest_ksock_put(s);
+    let u1 = udpStats(mut s1);
+    let a = Ptr.toBorrow(u0 as *udp_stats);
+    let b = Ptr.toBorrow(u1 as *udp_stats);
+    if (b.rx_no_port < a.rx_no_port + 2 || b.rx_bad_cksum != a.rx_bad_cksum) {
+        return failed(reason, "check failed: net-lo-udp: two datagrams found no port, none a bad checksum\0");
+    }
+    sleepMs(10);
+    if (socket_count() != socks0) {
+        return failed(reason, "check failed: net-lo-udp: the sockets are all put\0");
+    }
+    return true;
+}
+
+// ---- TCP over loopback ----
+
+const TCP_TEST_BYTES: u32 = 1024 * 1024;
+
+/// The transfer's byte `i`.
+fn pattern(i: u32) -> u8 => truncate<u8>(i.wrappingMul(2654435761) >> 24);
+
+/// Accept one connection, verify the pattern stream, send the count back.
+/// Safety: `arg` is the server nettest_tcp_server_start made the thread for.
+@callback
+unsafe fn sinkMain(arg: *mut void) {
+    let s = arg as *mut tcp_server;
+    let c = acceptOne(s, 4);
+    if (c.isNull()) {
+        serverDone(s);
+        return;
+    }
+    let mem = kmalloc(8192, 0) as *mut u8;
+    let data = SliceMut.fromRaw(mem, 8192);
+    while (true) {
+        let n = ksock_recvfrom(c, mem as *mut void, 8192, 0 as *mut netaddr);
+        if (n <= 0) {
+            if (n < 0) {
+                let w = Ptr.toBorrowMut(s);
+                w.result = truncate<i32>(n);
+            }
+            break;
+        }
+        let seen = Ptr.toBorrow(s as *tcp_server).bytes_seen;
+        for (i in 0..truncate<usize>(n)) {
+            if (data[i] != pattern(seen.wrappingAdd(truncate<u32>(i)))) {
+                let w = Ptr.toBorrowMut(s);
+                w.result = -EIO;
+                break;
+            }
+        }
+        let w = Ptr.toBorrowMut(s);
+        w.bytes_seen = seen.wrappingAdd(truncate<u32>(n));
+    }
+    var total: u32 = Ptr.toBorrow(s as *tcp_server).bytes_seen;
+    ksock_sendto(c, borrow total as *u32 as *void, 4, 0 as *netaddr);
+    ksock_shutdown(c, SHUT_WR);
+    // Wait for the peer's close so both sides run the full sequence.
+    ksock_recvfrom(c, mem as *mut void, 16, 0 as *mut netaddr);
+    kfree(mem as *mut void);
+    closeBoth(s, c);
+    serverDone(s);
+}
+
+/// The first 4 bytes of a scratch as the u32 they make in memory.
+fn word4(b: Slice<u8>) -> u32 => (b[0] as u32) | ((b[1] as u32) << 8) | ((b[2] as u32) << 16) | ((b[3] as u32) << 24);
+
+/// Move `bytes` of the pattern to a sink on `addr` in sends of varied sizes, read its count back, and check the end of
+/// the connection, lingering `lingerMs` past it; then wait until the port is free for the next caller. The C tests
+/// still in nettest.c call it too (net-rx-dup, net-tcp-reorder).
+/// Safety: the runner's `reason`; `addrPtr` points to an address for the call.
+@export("nettest_tcp_transfer")
+unsafe fn tcpTransfer(reason: *mut *CChar, addrPtr: *netaddr, bytes: u32, lingerMs: u32) -> bool {
+    let given = Ptr.toBorrow(addrPtr as *NettestAddr);
+    let addr = NettestAddr { family: given.family, port: given.port, words: given.words };
+    let srv = freshServer(mut SINK, borrow addr, 0);
+    if (!nettest_tcp_server_start(srv, sinkMain, "tcp-sink\0".ptr as *CChar, 32)) {
+        return failed(reason, "check failed: tcp transfer: the sink starts\0");
+    }
+    sleepMs(20); // let it listen
+
+    var c = 0 as *mut socket;
+    if (nettest_ksock_create(addr.family as i32, SOCK_STREAM, 0, borrow mut c as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: tcp transfer: the client socket\0");
+    }
+    if (ksock_connect(c, na(borrow addr)) != 0) {
+        return failed(reason, "check failed: tcp transfer: the client connects\0");
+    }
+    var peer = zeroAddr();
+    var me = zeroAddr();
+    if (ksock_getpeername(c, naMut(mut peer)) != 0 || peer.port != addr.port) {
+        return failed(reason, "check failed: tcp transfer: the peer's name\0");
+    }
+    if (ksock_getsockname(c, naMut(mut me)) != 0 || me.port < NET_EPHEMERAL_LO) {
+        return failed(reason, "check failed: tcp transfer: an ephemeral port\0");
+    }
+    if (ksock_connect(c, na(borrow addr)) != -EISCONN) {
+        return failed(reason, "check failed: tcp transfer: a second connect is EISCONN\0");
+    }
+
+    let chunk = kmalloc(9000, 0) as *mut u8;
+    if (chunk.isNull()) {
+        return failed(reason, "check failed: tcp transfer: 9000 bytes for a send\0");
+    }
+    let out = SliceMut.fromRaw(chunk, 9000);
+    var sent: u32 = 0;
+    var step: u32 = 1;
+    while (sent < bytes) {
+        var n = (step * 613) % 9000 + 1;
+        if (n > bytes - sent) {
+            n = bytes - sent;
+        }
+        for (i in 0..n) {
+            out[i as usize] = pattern(sent + i);
+        }
+        let w = ksock_sendto(c, chunk as *void, n as usize, 0 as *netaddr);
+        if (w != n as i64) {
+            kfree(chunk as *mut void);
+            return failed(reason, "tcp send failed\0");
+        }
+        sent += n;
+        step += 1;
+    }
+    kfree(chunk as *mut void);
+    if (ksock_shutdown(c, SHUT_WR) != 0) {
+        return failed(reason, "check failed: tcp transfer: the write side shuts\0");
+    }
+    var tmp: [u8; 8] = [0; 8];
+    var got: i64 = 0;
+    while (got < 4) {
+        let n = ksock_recvfrom(
+            c,
+            (borrow mut tmp as *mut [u8; 8] as *mut u8).add(truncate<usize>(got)) as *mut void,
+            4 - truncate<usize>(got),
+            0 as *mut netaddr,
+        );
+        if (n <= 0) {
+            break;
+        }
+        got += n;
+    }
+    if (got != 4 || word4(tmp[..]) != bytes) {
+        return failed(reason, "check failed: tcp transfer: the sink counted every byte\0");
+    }
+    if (ksock_recvfrom(c, borrow mut tmp as *mut [u8; 8] as *mut void, 8, 0 as *mut netaddr) != 0) {
+        return failed(reason, "check failed: tcp transfer: then EOF\0"); // EOF
+    }
+    if (sendLit(c, "x") != -(EPIPE as i64)) {
+        return failed(reason, "check failed: tcp transfer: a send after EOF is EPIPE\0");
+    }
+    // Keep the socket past TIME_WAIT: the pcb must stay valid until close.
+    var waited: u32 = 0;
+    while (waited < lingerMs) {
+        sleepMs(100);
+        sched_watchdog_kick();
+        waited += 100;
+    }
+    if (lingerMs != 0) {
+        if (ksock_getsockname(c, naMut(mut me)) != 0 || me.port < NET_EPHEMERAL_LO) {
+            return failed(reason, "check failed: tcp transfer: the name past TIME_WAIT\0");
+        }
+        if (ksock_recvfrom(c, borrow mut tmp as *mut [u8; 8] as *mut void, 8, 0 as *mut netaddr) != 0) {
+            return failed(reason, "check failed: tcp transfer: EOF past TIME_WAIT\0");
+        }
+        if (sendLit(c, "x") != -(EPIPE as i64)) {
+            return failed(reason, "check failed: tcp transfer: EPIPE past TIME_WAIT\0");
+        }
+        // The ended connection no longer reserves its port.
+        var again = 0 as *mut socket;
+        if (nettest_ksock_create(addr.family as i32, SOCK_STREAM, 0, borrow mut again as *mut *mut socket) != 0) {
+            return failed(reason, "check failed: tcp transfer: a socket to rebind\0");
+        }
+        if (ksock_bind(again, na(borrow me)) != 0) {
+            return failed(reason, "check failed: tcp transfer: the ended connection's port binds\0");
+        }
+        nettest_ksock_put(again);
+    }
+    nettest_ksock_put(c);
+    waitDone(srv, 500, true);
+    let st = Ptr.toBorrow(srv as *tcp_server);
+    if (!st.done || st.result != 0 || st.bytes_seen != bytes) {
+        return failed(reason, "check failed: tcp transfer: the sink saw the pattern whole\0");
+    }
+    selftest_release(srv as *mut void); // joined here: the next call reuses the room
+
+    // The server's child leaves LAST_ACK when the network worker processes our final ACK. The worker runs below this
+    // thread's priority and is preempted as soon as it wakes us, so the port can still be reserved for a moment after
+    // `done`; the next caller of this helper binds it again. Wait for that condition, bounded.
+    var rc = -EADDRINUSE;
+    var i: u32 = 0;
+    while (i < 2000 && rc == -EADDRINUSE) {
+        var probe = 0 as *mut socket;
+        if (nettest_ksock_create(addr.family as i32, SOCK_STREAM, 0, borrow mut probe as *mut *mut socket) != 0) {
+            return failed(reason, "check failed: tcp transfer: a socket to probe the port\0");
+        }
+        rc = ksock_bind(probe, na(borrow addr));
+        nettest_ksock_put(probe);
+        if (rc == -EADDRINUSE) {
+            sleepMs(1);
+        }
+        i += 1;
+    }
+    if (rc != 0) {
+        return failed(reason, "check failed: tcp transfer: the port is free again\0");
+    }
+    return true;
+}
+
+/// net-lo-tcp: a refused connect, a megabyte over IPv4, a quarter over IPv6 lingering past TIME_WAIT, the backlog.
+/// Safety: the runner's `reason`.
+@export("selftest_net_lo_tcp")
+unsafe fn loTcp(reason: *mut *CChar) -> bool {
+    let socks0 = socket_count();
+    var s0 = stats();
+    var s1 = stats();
+    let t0 = tcpStats(mut s0);
+
+    // A connection to a closed port is refused with a reset.
+    var c = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET as i32, SOCK_STREAM, 0, borrow mut c as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-lo-tcp: a socket\0");
+    }
+    let closed = v4addr(LOOPBACK_N, 5999);
+    if (ksock_connect(c, na(borrow closed)) != -ECONNREFUSED) {
+        return failed(reason, "check failed: net-lo-tcp: a closed port refuses\0");
+    }
+    nettest_ksock_put(c);
+    var t1 = tcpStats(mut s1);
+    if (rstsIn(t1) != rstsIn(t0) + 1) {
+        return failed(reason, "check failed: net-lo-tcp: with one reset\0");
+    }
+
+    let a4 = v4addr(LOOPBACK_N, 6000);
+    if (!tcpTransfer(reason, na(borrow a4), TCP_TEST_BYTES, 0)) {
+        return false;
+    }
+    let a6 = v6loop(6001);
+    if (!tcpTransfer(reason, na(borrow a6), 256 * 1024, 2500)) {
+        return false;
+    }
+
+    // The listen backlog, in whichever order the handshakes complete.
+    var acceptedFirst = false;
+    if (!nettest_lo_tcp_backlog(reason, 6002, false, borrow mut acceptedFirst as *mut bool)) {
+        return false;
+    }
+
+    sleepMs(50);
+    if (socket_count() != socks0) {
+        return failed(reason, "check failed: net-lo-tcp: the sockets are all put\0");
+    }
+    t1 = tcpStats(mut s1);
+    let a = Ptr.toBorrow(t0 as *tcp_stats);
+    let b = Ptr.toBorrow(t1 as *tcp_stats);
+    if (b.conns_established < a.conns_established + 4 || b.bad_cksum != a.bad_cksum) {
+        return failed(reason, "check failed: net-lo-tcp: four connections, no bad checksum\0");
+    }
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-lo-tcp: ");
+    line.decimal(b.segs_out - a.segs_out);
+    line.text(" segments, ");
+    line.decimal(b.retransmits - a.retransmits);
+    line.text(" retransmits");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- net-tcp-delack: the delayed acknowledgement ----
+//
+// A receiver that takes one segment and sends nothing acknowledges it from the delayed-ACK timer, TCP_DELACK_NS after
+// the segment (tcp.cee: the first in-order segment arms it; the second, or any output, acknowledges at once and
+// cancels it). Every other exchange in the suite acknowledges by output before the timer fires, so until this test
+// the callback (delack_timer) never ran in a boot and had no class of its own in the lock graph
+// (docs/audit/2026-10-07-lockdep-completion-waits-report.md, "Timer callbacks"). This server accepts and then does
+// nothing until the test says so.
+
+/// Accept, stay quiet up to 2 s (or until stopped), then read what came.
+/// Safety: as sinkMain.
+@callback
+unsafe fn quietMain(arg: *mut void) {
+    let s = arg as *mut tcp_server;
+    let c = acceptOne(s, 1);
+    if (c.isNull()) {
+        serverDone(s);
+        return;
+    }
+    // Quiet: no read, no write, so nothing but the timer acknowledges.
+    var i: u32 = 0;
+    while (i < 400 && !Ptr.toBorrow(s as *tcp_server).stop) {
+        sleepMs(5);
+        i += 1;
+    }
+    var rest: [u8; 16] = [0; 16];
+    let n = ksock_recvfrom(c, borrow mut rest as *mut [u8; 16] as *mut void, 16, 0 as *mut netaddr);
+    if (n > 0) {
+        let w = Ptr.toBorrowMut(s);
+        w.bytes_seen += truncate<u32>(n);
+    }
+    closeBoth(s, c);
+    serverDone(s);
+}
+
+/// Poll the host-wide segment count until it is `n` past `t0`'s, sleeping `stepMs` between at most `tries` looks;
+/// the clock when it was, or 0.
+/// Safety: `t0` and `t1` are tcpStats scratches.
+unsafe fn segsReached(t0: *mut tcp_stats, t1: *mut tcp_stats, tries: u32, stepMs: u64) -> u64 {
+    var i: u32 = 0;
+    while (i < tries) {
+        tcp_get_stats(t1);
+        if (segsOut(t1) >= segsOut(t0) + 2) {
+            return clock_now_ns();
+        }
+        sleepMs(stepMs);
+        i += 1;
+    }
+    return 0;
+}
+
+/// net-tcp-delack: the odd segment to a silent receiver is acknowledged by the timer, not before it.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tcp_delack")
+unsafe fn tcpDelack(reason: *mut *CChar) -> bool {
+    let socks0 = socket_count();
+    let addr = v4addr(LOOPBACK_N, 6095);
+    let srv = freshServer(mut QUIET, borrow addr, 0);
+    if (!nettest_tcp_server_start(srv, quietMain, "tcp-quiet\0".ptr as *CChar, 32)) {
+        return failed(reason, "check failed: net-tcp-delack: the server starts\0");
+    }
+    sleepMs(20); // let it listen
+
+    var c = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET as i32, SOCK_STREAM, 0, borrow mut c as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-tcp-delack: a socket\0");
+    }
+    if (ksock_connect(c, na(borrow addr)) != 0) {
+        return failed(reason, "check failed: net-tcp-delack: it connects\0");
+    }
+    sleepMs(20); // the handshake's last segment is the worker's; let it leave before counting
+
+    // The receiver acknowledges every second segment at once and arms the timer for the odd one; the handshake's last
+    // segment counts as one, so the first data segment is acknowledged immediately and the second is the one the
+    // timer acknowledges. Send one, wait for its acknowledgement, then send the second and time the acknowledgement
+    // that nothing but the timer can produce. Segments are counted host-wide: the data segment, then the
+    // acknowledgement.
+    var s0 = stats();
+    var s1 = stats();
+    var t0 = tcpStats(mut s0);
+    let t1 = statsAt(mut s1, layoutOf<tcp_stats>().size) as *mut tcp_stats;
+    if (sendLit(c, "a") != 1) {
+        return failed(reason, "check failed: net-tcp-delack: the first byte is sent\0");
+    }
+    if (segsReached(t0, t1, 200, 5) == 0) {
+        return failed(reason, "check failed: net-tcp-delack: the first byte is acknowledged\0");
+    }
+    t0 = tcpStats(mut s0);
+    let sentAt = clock_now_ns();
+    if (sendLit(c, "b") != 1) {
+        return failed(reason, "check failed: net-tcp-delack: the second byte is sent\0");
+    }
+    let ackedAt = segsReached(t0, t1, 400, 2);
+    if (ackedAt == 0) {
+        return failed(reason, "check failed: net-tcp-delack: the acknowledgement came within a second\0");
+    }
+    let delayMs = (ackedAt - sentAt) / 1000000;
+    if (delayMs < TCP_DELACK_NS / 1000000 - 10) {
+        return failed(reason, "check failed: net-tcp-delack: not before the timer could fire\0");
+    }
+    if (retransmits(t1) != retransmits(t0)) {
+        return failed(reason, "check failed: net-tcp-delack: nor as a retransmission\0");
+    }
+
+    let w = Ptr.toBorrowMut(srv);
+
+    w.stop = true;
+    waitDone(srv, 300, false);
+    let st = Ptr.toBorrow(srv as *tcp_server);
+    if (!st.done || st.result != 0 || st.bytes_seen != 2) {
+        return failed(reason, "check failed: net-tcp-delack: the server read both bytes\0");
+    }
+    nettest_ksock_put(c);
+    sleepMs(50);
+    if (socket_count() != socks0) {
+        return failed(reason, "check failed: net-tcp-delack: the sockets are all put\0");
+    }
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-tcp-delack: a silent receiver acknowledged the odd segment after ");
+    line.decimal(delayMs);
+    line.text(" ms, from the delayed-ACK timer");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- net-tcp-nagle-peer: a Nagle sender's write-write-read ----
+//
+// A peer with Nagle on (Linux and macOS by default) that writes a small request in two parts holds the second part
+// until the first is acknowledged, so a receiver that only acknowledges from the delayed-ACK timer costs it
+// TCP_DELACK_NS per request. This stack has no Nagle of its own and QEMU's user-mode backend disables it on the
+// connections it proxies (libslirp tcp_output.c: `(1 || idle || TF_NODELAY)`), so no peer in the suite can show the
+// interaction; this test builds the peer. The client is a Nagle sender by construction: it sends the first half,
+// waits until the send buffer is acknowledged (TCP_SNDBUF free again), and only then sends the second. The server
+// reads both halves and replies, either as soon as the data arrives or after `param` ms away from the socket -- a
+// busy application. The owed acknowledgement must leave with the read (tcp_recv, as Linux's tcp_cleanup_rbuf), so in
+// both modes the first half is acknowledged before the timer could, and the exchange costs the server's delay and
+// not TCP_DELACK_NS on top of it (docs/kernel-services/network/design.md, "TCP", N27).
+
+const NAGLE_HALF: usize = 16;
+const NAGLE_ROUNDS: usize = 20;
+
+/// Read each two-half request whole and send it back, `param` ms away from the socket first.
+/// Safety: as sinkMain.
+@callback
+unsafe fn wwrMain(arg: *mut void) {
+    let s = arg as *mut tcp_server;
+    let c = acceptOne(s, 1);
+    if (c.isNull()) {
+        serverDone(s);
+        return;
+    }
+    var req: [u8; 32] = [0; 32];
+    let at = borrow mut req as *mut [u8; 32] as *mut u8;
+    var open = true;
+    while (open && !Ptr.toBorrow(s as *tcp_server).stop) {
+        // A busy application: away from the socket while the request's first half arrives, so nothing but the read
+        // can acknowledge it.
+        let busy = Ptr.toBorrow(s as *tcp_server).param;
+        if (busy != 0) {
+            sleepMs(busy as u64);
+        }
+        var have: usize = 0;
+        while (open && have < 2 * NAGLE_HALF) {
+            let n = ksock_recvfrom(c, at.add(have) as *mut void, 2 * NAGLE_HALF - have, 0 as *mut netaddr);
+            if (n <= 0) {
+                open = false;
+            } else {
+                have += truncate<usize>(n);
+            }
+        }
+        if (open) {
+            let w = Ptr.toBorrowMut(s);
+            w.bytes_seen += truncate<u32>(have);
+            if (ksock_sendto(c, at as *void, 2 * NAGLE_HALF, 0 as *netaddr) != truncate<i64>(2 * NAGLE_HALF)) {
+                open = false;
+            }
+        }
+    }
+    closeBoth(s, c);
+    serverDone(s);
+}
+
+/// Insertion sort, as the C's.
+fn sortU64(v: borrow mut [u64; 20]) {
+    for (i in 1..v.length) {
+        let x = v[i];
+        var j = i;
+        while (j > 0 && v[j - 1] > x) {
+            v[j] = v[j - 1];
+            j -= 1;
+        }
+        v[j] = x;
+    }
+}
+
+/// The client's socket's pcb.
+/// Safety: `c` is a connected stream socket of the test's.
+unsafe fn pcbOf(c: *mut socket) -> *mut tcp_pcb => Ptr.toBorrow(c as *socket).tcp;
+
+/// One mode: `busyMs` is how long the server stays away from the socket before reading each request. Fills the sorted
+/// per-round acknowledgement and exchange times (us).
+/// Safety: the runner's `reason`.
+unsafe fn naglePeerMode(
+    reason: *mut *CChar,
+    port: u16,
+    busyMs: u32,
+    ackUs: borrow mut [u64; 20],
+    rttUs: borrow mut [u64; 20],
+) -> bool {
+    let addr = v4addr(LOOPBACK_N, port);
+    let srv = if (busyMs != 0) freshServer(mut WWR_BUSY, borrow addr, busyMs) else freshServer(
+        mut WWR_READING,
+        borrow addr,
+        0,
+    );
+    if (!nettest_tcp_server_start(srv, wwrMain, "tcp-wwr\0".ptr as *CChar, 32)) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: the server starts\0");
+    }
+    sleepMs(20); // let it listen
+
+    var c = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET as i32, SOCK_STREAM, 0, borrow mut c as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: a socket\0");
+    }
+    if (ksock_connect(c, na(borrow addr)) != 0) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: it connects\0");
+    }
+    sleepMs(20); // the handshake's last segment is the worker's
+
+    var half: [u8; 16] = [110; 16]; // 'n'
+    var reply: [u8; 32] = [0; 32];
+    let halfAt = borrow half as *[u8; 16] as *u8;
+    let replyAt = borrow mut reply as *mut [u8; 32] as *mut u8;
+    var ok = true;
+    var r: usize = 0;
+    while (r < NAGLE_ROUNDS && ok) {
+        let t0 = clock_now_ns();
+        ok = ksock_sendto(c, halfAt as *void, NAGLE_HALF, 0 as *netaddr) == truncate<i64>(NAGLE_HALF);
+        // Nagle: the second small write waits for the first's acknowledgement (the send buffer whole again). Polled
+        // with yields, not sleeps: a sleep is quantised to the 4 ms tick (CONFIG_HZ) and would be most of the
+        // reading. Bounded at a second.
+        var acked: u64 = 0;
+        while (ok && clock_now_ns() - t0 < 1000000000) {
+            if (tcp_send_space(pcbOf(c)) == TCP_SNDBUF) {
+                acked = clock_now_ns();
+                break;
+            }
+            sched_yield();
+        }
+        ok = ok && acked != 0;
+        ok = ok && ksock_sendto(c, halfAt as *void, NAGLE_HALF, 0 as *netaddr) == truncate<i64>(NAGLE_HALF);
+        var have: usize = 0;
+        while (ok && have < 2 * NAGLE_HALF) {
+            let n = ksock_recvfrom(c, replyAt.add(have) as *mut void, 2 * NAGLE_HALF - have, 0 as *mut netaddr);
+            ok = n > 0;
+            if (ok) {
+                have += truncate<usize>(n);
+            }
+        }
+        // The answer is the request: both halves, in order.
+        ok = ok && same(replyAt as *u8, halfAt, NAGLE_HALF) && same(replyAt.add(NAGLE_HALF) as *u8, halfAt, NAGLE_HALF);
+        let t1 = clock_now_ns();
+        ackUs[r] = if (acked >= t0) (acked - t0) / 1000 else 0;
+        rttUs[r] = (t1 - t0) / 1000;
+        r += 1;
+    }
+    let w = Ptr.toBorrowMut(srv);
+    w.stop = true;
+    ksock_shutdown(c, SHUT_WR); // the server's read returns 0
+    waitDone(srv, 300, false);
+    nettest_ksock_put(c);
+    if (!ok) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: every round's exchange\0");
+    }
+    let st = Ptr.toBorrow(srv as *tcp_server);
+    if (!st.done || st.result != 0 || st.bytes_seen != truncate<u32>(NAGLE_ROUNDS * 2 * NAGLE_HALF)) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: the server read every request\0");
+    }
+    sortU64(mut ackUs);
+    sortU64(mut rttUs);
+    return true;
+}
+
+/// "selftest: net-tcp-nagle-peer: server ...: first half acknowledged after a/b/c us, exchange d/e/f us (min/median/max
+/// of 20)".
+fn nagleLine(busy: bool, ack: borrow [u64; 20], rtt: borrow [u64; 20]) {
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-tcp-nagle-peer: server ");
+    line.text(if (busy) "busy 5 ms before each read" else "reading at once");
+    line.text(": first half acknowledged after ");
+    line.decimal(ack[0]);
+    line.byte(47);
+    line.decimal(ack[NAGLE_ROUNDS / 2]);
+    line.byte(47);
+    line.decimal(ack[NAGLE_ROUNDS - 1]);
+    line.text(" us, exchange ");
+    line.decimal(rtt[0]);
+    line.byte(47);
+    line.decimal(rtt[NAGLE_ROUNDS / 2]);
+    line.byte(47);
+    line.decimal(rtt[NAGLE_ROUNDS - 1]);
+    line.text(" us (min/median/max of ");
+    line.decimal(NAGLE_ROUNDS as u64);
+    line.text(")");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// net-tcp-nagle-peer: a reading server and a busy one both acknowledge the first half by their read.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tcp_nagle_peer")
+unsafe fn tcpNaglePeer(reason: *mut *CChar) -> bool {
+    let socks0 = socket_count();
+    var ack0: [u64; 20] = [0; 20];
+    var rtt0: [u64; 20] = [0; 20];
+    var ack1: [u64; 20] = [0; 20];
+    var rtt1: [u64; 20] = [0; 20];
+    if (!naglePeerMode(reason, 6096, 0, mut ack0, mut rtt0)) {
+        return false;
+    }
+    nagleLine(false, borrow ack0, borrow rtt0);
+    if (!naglePeerMode(reason, 6097, 5, mut ack1, mut rtt1)) {
+        return false;
+    }
+    nagleLine(true, borrow ack1, borrow rtt1);
+    // The medians: a receiver acknowledging only from the timer costs every round TCP_DELACK_NS (40 ms); the
+    // read-driven acknowledgement costs the busy server's own delay and nothing more. A single slow round under load
+    // does not move a median of twenty.
+    let boundUs = TCP_DELACK_NS / 1000 / 2; // 20 ms: half the timer
+    if (ack0[NAGLE_ROUNDS / 2] >= boundUs) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: a reading server acknowledges at once\0");
+    }
+    if (rtt0[NAGLE_ROUNDS / 2] >= boundUs) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: a reading server's exchange is quick\0");
+    }
+    if (ack1[NAGLE_ROUNDS / 2] >= boundUs) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: a busy server acknowledges by its read\0");
+    }
+    if (rtt1[NAGLE_ROUNDS / 2] >= boundUs) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: a busy server's exchange costs its delay only\0");
+    }
+    sleepMs(50);
+    if (socket_count() != socks0) {
+        return failed(reason, "check failed: net-tcp-nagle-peer: the sockets are all put\0");
+    }
+    return true;
+}
+
+// ---- The path MSS is decided outside the TCP lock (Prompt #3, 3.1) ----
+
+/// Two IPv6 addresses are the same.
+/// Safety: `b` points to a live struct in6_addr's 16 bytes.
+fn sameV6(a: borrow NettestAddr, b: *in6_addr) -> bool {
+    unsafe {
+        return same(borrow a.words as *[u32; 4] as *u8, b as *u8, 16);
+    }
+}
+
+/// net-tcp-mss: the path MSS of loopback, our own address, the gateway and a link-local peer, and both ends of a
+/// loopback connection.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tcp_mss")
+unsafe fn tcpMss(reason: *mut *CChar) -> bool {
+    // tcp_path_mss reads the netif registry, so it is called with no spinlock held; under the TCP lock only the cached
+    // pcb->path_mss is consulted. Every mutex_lock now asserts preempt_count == 0, so the loopback handshake below
+    // would panic if that rule were broken.
+    var a = v4addr(LOOPBACK_N, 1);
+    if (tcp_path_mss(AF_INET, na(borrow a)) != TCP_MSS_LO) {
+        return failed(reason, "check failed: net-tcp-mss: loopback's is TCP_MSS_LO\0");
+    }
+    let eth = netif_default();
+    if (!eth.isNull()) {
+        netif_put(eth); // see net-arp: eth0 outlives the tests
+    }
+    if (!eth.isNull() && Ptr.toBorrow(eth as *netif).ip4.addr != 0) {
+        a.words[0] = Ptr.toBorrow(eth as *netif).ip4.addr;
+        if (tcp_path_mss(AF_INET, na(borrow a)) != TCP_MSS_LO) {
+            return failed(reason, "check failed: net-tcp-mss: our own address is local delivery\0");
+        }
+        a.words[0] = Ptr.toBorrow(eth as *netif).ip4.gateway;
+        if (tcp_path_mss(AF_INET, na(borrow a)) != TCP_MSS_V4) {
+            return failed(reason, "check failed: net-tcp-mss: the gateway's is TCP_MSS_V4\0");
+        }
+    }
+    var b = v6loop(1);
+    if (tcp_path_mss(AF_INET6, na(borrow b)) != TCP_MSS_LO) {
+        return failed(reason, "check failed: net-tcp-mss: ::1's is TCP_MSS_LO\0");
+    }
+    b.words = [0; 4];
+    unsafe {
+        let v6 = SliceMut.fromRaw(borrow mut b.words as *mut [u32; 4] as *mut u8, 16);
+        v6[0] = 0xfe;
+        v6[1] = 0x80;
+        v6[15] = 0x77;
+    }
+    if (eth.isNull() || !sameV6(borrow b, borrow Ptr.toBorrow(eth as *netif).ip6_ll as *in6_addr)) {
+        if (tcp_path_mss(AF_INET6, na(borrow b)) != TCP_MSS_V6) {
+            return failed(reason, "check failed: net-tcp-mss: a link-local peer's is TCP_MSS_V6\0");
+        }
+    }
+
+    // Both ends of a loopback connection settle on TCP_MSS_LO: the active end from the route (before its lock), the
+    // passive one from the interface the SYN arrived on (before its lock).
+    var ls = 0 as *mut socket;
+    var c = 0 as *mut socket;
+    var acc = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET as i32, SOCK_STREAM, 0, borrow mut ls as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: net-tcp-mss: a listener\0");
+    }
+    let la = v4addr(LOOPBACK_N, 6010);
+    if (ksock_bind(ls, na(borrow la)) != 0 || ksock_listen(ls, 1) != 0) {
+        return failed(reason, "check failed: net-tcp-mss: it listens\0");
+    }
+    if (nettest_ksock_create(AF_INET as i32, SOCK_STREAM, 0, borrow mut c as *mut *mut socket) != 0 ||
+        ksock_connect(c, na(borrow la)) != 0) {
+        return failed(reason, "check failed: net-tcp-mss: a client connects\0");
+    }
+    var peer = zeroAddr();
+    if (nettest_ksock_accept(ls, borrow mut acc as *mut *mut socket, naMut(mut peer)) != 0) {
+        return failed(reason, "check failed: net-tcp-mss: the listener accepts\0");
+    }
+    let cp = Ptr.toBorrow(pcbOf(c) as *tcp_pcb);
+    if (cp.path_mss != TCP_MSS_LO || cp.mss != TCP_MSS_LO) {
+        return failed(reason, "check failed: net-tcp-mss: the active end's is TCP_MSS_LO\0");
+    }
+    let ap = Ptr.toBorrow(pcbOf(acc) as *tcp_pcb);
+    if (ap.path_mss != TCP_MSS_LO || ap.mss != TCP_MSS_LO) {
+        return failed(reason, "check failed: net-tcp-mss: the passive end's is TCP_MSS_LO\0");
+    }
+    nettest_ksock_put(acc);
+    nettest_ksock_put(c);
+    nettest_ksock_put(ls);
+    sleepMs(20);
+    return true;
+}
+
+// ---- Loss injection: drop every DROP_EVERYth TCP data segment ----
+
+static SEEN: AtomicU32 = AtomicU32.constant(0);
+static DROPPED: AtomicU32 = AtomicU32.constant(0);
+const DROP_EVERY: u32 = 7;
+
+/// The loopback filter: false drops the packet. Pure ACKs, SYNs and FINs pass.
+/// Safety: loopback calls it with a packet whose data holds its IP header (or less than 40 bytes of packet).
+@callback
+unsafe fn lossyFilter(m: *mut mbuf, arg: *mut void) -> bool {
+    let mb = Ptr.toBorrow(m as *mbuf);
+    if (mb.pkt.proto != ETH_P_IP || mb.pkt.len < 40) {
+        return true;
+    }
+    let ip = Slice.fromRaw(mb.data as *u8, 20);
+    if (ip[9] != IPPROTO_TCP) {
+        return true;
+    }
+    let ihl = ((ip[0] & 0xf) as u32) * 4;
+    let total = ((ip[2] as u32) << 8) | (ip[3] as u32);
+    if (total <= ihl + 20) {
+        return true; // keep pure ACKs, SYNs and FINs
+    }
+    if ((SEEN.fetchAddWith(1, Ordering.Relaxed) + 1) % DROP_EVERY == 0) {
+        DROPPED.fetchAddWith(1, Ordering.Relaxed);
+        return false;
+    }
+    return true;
+}
+
+/// net-lo-tcp-loss: a quarter megabyte with every seventh data segment dropped arrives whole, by retransmission.
+/// Safety: the runner's `reason`.
+@export("selftest_net_lo_tcp_loss")
+unsafe fn loTcpLoss(reason: *mut *CChar) -> bool {
+    var s0 = stats();
+    var s1 = stats();
+    let t0 = tcpStats(mut s0);
+    SEEN.storeWith(0, StoreOrdering.Relaxed);
+    DROPPED.storeWith(0, StoreOrdering.Relaxed);
+    nettest_loopback_set_filter(lossyFilter, 0 as *mut void);
+    let addr = v4addr(LOOPBACK_N, 6010);
+    let ok = tcpTransfer(reason, na(borrow addr), 256 * 1024, 0);
+    nettest_loopback_set_filter(0 as extern "C" fn(*mut mbuf, *mut void) -> bool, 0 as *mut void);
+    if (!ok) {
+        return false;
+    }
+    let t1 = tcpStats(mut s1);
+    let dropped = DROPPED.loadWith(LoadOrdering.Relaxed);
+    if (dropped == 0) {
+        return failed(reason, "check failed: net-lo-tcp-loss: segments were dropped\0");
+    }
+    if (retransmits(t1) <= retransmits(t0)) {
+        return failed(reason, "check failed: net-lo-tcp-loss: and retransmitted\0");
+    }
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-lo-tcp-loss: dropped ");
+    line.decimal(dropped as u64);
+    line.text(" data segments, ");
+    line.decimal(retransmits(t1) - retransmits(t0));
+    line.text(" retransmissions");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
