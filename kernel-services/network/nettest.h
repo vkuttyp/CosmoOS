@@ -9,6 +9,7 @@
 
 #include <kernel/net/inet.h>
 #include <kernel/netif.h>
+#include <kernel/object.h>
 #include <kernel/socket.h>
 #include <kernel/spinlock.h>
 #include <kernel/thread.h>
@@ -42,6 +43,14 @@ int nettest_ksock_accept(struct socket *s, struct socket **out, struct netaddr *
 void nettest_ksock_put(struct socket *s);
 void nettest_loopback_set_filter(lo_filter_fn fn, void *arg);
 void nettest_netif_set_rx_hook(netif_rx_hook_fn fn, void *arg);
+int nettest_ksock_create_raw(int family, int proto, struct socket **out);
+void nettest_tcp_set_keepalive(uint64_t idle_ns, uint64_t intvl_ns, unsigned cnt);
+void nettest_tcp_set_fin_wait2(uint64_t ns);
+/* A raw socket's queued copies; a kernel object's read and write (CeeSafe
+ * cannot call the io type's function-pointer fields). */
+unsigned nettest_raw_queued(struct socket *s);
+int64_t nettest_kobject_read(struct kobject *obj, void *buf, size_t len);
+int64_t nettest_kobject_write(struct kobject *obj, const void *buf, size_t len);
 /* net-lo-tcp's and net-accept-order's listen backlog (nettest.c). */
 bool nettest_lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool *accepted_first);
 

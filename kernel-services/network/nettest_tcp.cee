@@ -1,0 +1,1821 @@
+// nettest_tcp.cee - the network stack's hardening self-tests, in CeeSafe: roadmap 2.0 SA6 (nettest, the fourth
+// batch; milestone 8). net-tcp-syncache, net-tcp-rfc5961, net-tcp-reorder, net-tcp-keepalive, net-icmp-limit,
+// net-raw-icmp and net-nonblock, as nettest.c had them, with what only they used: the injected TCP segment, the
+// loopback filters, the holding server, and the waits. nettest.c's wait_until (docs/audit/next-subsystem-suite-
+// waits.md) is here as waitUntil over a Pred, one case per predicate the C had; its contract is the C's: a predicate
+// reads one field, or a monotone sum of monotonic ones, and the multi-field assertion stays after the wait. A C
+// counter struct is read into a room and copied out into this file's snapshot (Tcp, Ip, Raw), so no frame holds two.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/net/tcp.h", "kernel/net/raw.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/object.h", "kernel/pipe.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/wait.h")
+extern "C" {
+    struct netaddr {
+        family: u16;
+        port: u16;
+    }
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif;
+    struct tcp_pcb {
+        snd_una: u32;
+        snd_nxt: u32;
+        rcv_nxt: u32;
+        mss: u16;
+        path_mss: u16;
+    }
+    struct socket {
+        tcp: *mut tcp_pcb;
+    }
+    struct tcp_server {
+        addr: netaddr;
+        result: i32;
+        done: bool;
+        stop: bool;
+        ls: *mut socket;
+    }
+    struct tcp_stats {
+        retransmits: u64;
+        rsts_in: u64;
+        conns_passive: u64;
+        timeouts: u64;
+        syn_cached: u64;
+        syn_cookies_sent: u64;
+        syn_cookies_ok: u64;
+        syn_bad_ack: u64;
+        challenge_acks: u64;
+        ooo_queued: u64;
+        keepalive_probes: u64;
+        fin_wait2_timeouts: u64;
+        pmtu_updates: u64;
+    }
+    struct ip_stats {
+        icmp_echo_rcvd: u64;
+        icmp_echo_replied: u64;
+        icmp_ratelimited: u64;
+        icmp_needfrag_rcvd: u64;
+        pmtu_updates: u64;
+    }
+    struct raw_stats {
+        rx_delivered: u64;
+        rx_queue_full: u64;
+        rx_nomem: u64;
+    }
+
+    fn nettest_tcp_server_start(srv: *mut tcp_server, run: extern "C" fn(*mut void), name: *CChar, prio: i32) -> bool;
+    fn nettest_tcp_server_publish(srv: *mut tcp_server, listener: bool, sock: *mut socket);
+    fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_create_raw(family: i32, proto: i32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn nettest_ksock_put(s: *mut socket);
+    fn nettest_loopback_set_filter(run: extern "C" fn(*mut mbuf, *mut void) -> bool, arg: *mut void);
+    fn nettest_tcp_set_keepalive(idleNs: u64, intvlNs: u64, cnt: u32);
+    fn nettest_tcp_set_fin_wait2(ns: u64);
+    fn nettest_tcp_transfer(reason: *mut *CChar, addr: *netaddr, bytes: u32, lingerMs: u32) -> bool;
+    fn nettest_raw_queued(s: *mut socket) -> u32;
+    fn nettest_kobject_read(obj: *mut kobject, buf: *mut void, len: usize) -> i64;
+    fn nettest_kobject_write(obj: *mut kobject, buf: *void, len: usize) -> i64;
+    fn selftest_release(arg: *mut void) -> bool;
+
+    fn ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_create_raw(family: i32, proto: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_bind(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_listen(s: *mut socket, backlog: i32) -> i32;
+    fn ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn ksock_connect(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn ksock_recvfrom(s: *mut socket, buf: *mut void, len: usize, from: *mut netaddr) -> i64;
+    fn ksock_shutdown(s: *mut socket, how: i32) -> i32;
+    fn ksock_getsockname(s: *mut socket, out: *mut netaddr) -> i32;
+    fn ksock_set_nonblock(s: *mut socket, on: bool);
+    fn ksock_ready(s: *mut socket) -> u32;
+    fn ksock_put(s: *mut socket);
+    fn tcp_get_stats(out: *mut tcp_stats);
+    fn tcp_state_of(pcb: *mut tcp_pcb) -> u32;
+    fn tcp_accept_ready(pcb: *mut tcp_pcb) -> bool;
+    fn tcp_path_mss(family: u16, remote: *netaddr) -> u16;
+    fn ipv4_get_stats(out: *mut ip_stats);
+    fn ipv4_output(m: *mut mbuf, src: u32, dst: u32, proto: u8, ttl: u8) -> i32;
+    fn ipv4_path_mtu(dst: u32) -> u32;
+    fn ipv4_pmtu_flush();
+    fn icmp_send_echo(dst: u32, id: u16, seq: u16, payload: *void, len: usize) -> i32;
+    fn raw_get_stats(out: *mut raw_stats);
+    fn netif_loopback() -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_rx(nif: *mut netif, m: *mut mbuf);
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn m_copypacket(m: *mbuf) -> *mut mbuf;
+    fn m_cksum_partial(m: *mbuf, off: u32, len: u32, sum: u32) -> u32;
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn cksum_fold(sum: u32) -> u16;
+    fn cksum_pseudo4(src: u32, dst: u32, proto: u8, len: u16) -> u32;
+    fn pipe_create(readEnd: *mut *mut kobject, writeEnd: *mut *mut kobject) -> i32;
+    fn kobject_set_nonblock(obj: *mut kobject, on: i32) -> i32;
+    fn kobject_ready(obj: *mut kobject) -> u32;
+    fn console_object() -> *mut kobject;
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn thread_sleep_ns(ns: u64);
+    fn thread_exit(code: i32);
+    fn sched_watchdog_kick();
+}
+
+// ---- errno.h, uapi/cosmo, tcp.h, ip.h, raw.h, pipe.h, thread.h (asserted against the headers in nettest.c) ----
+
+const EAGAIN: i32 = 11;
+const EDESTADDRREQ: i32 = 89;
+const EPROTONOSUPPORT: i32 = 93;
+const EOPNOTSUPP: i32 = 95;
+const ECONNRESET: i32 = 104;
+const EISCONN: i32 = 106;
+const ETIMEDOUT: i32 = 110;
+const EALREADY: i32 = 114;
+const EINPROGRESS: i32 = 115;
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
+const SHUT_RD: i32 = 0;
+const IO_READABLE: u32 = 1;
+const IO_WRITABLE: u32 = 2;
+const IO_HANGUP: u32 = 4;
+const TH_SYN: u8 = 0x02;
+const TH_RST: u8 = 0x04;
+const TH_ACK: u8 = 0x10;
+const TCP_CLOSED: u32 = 0;
+const TCP_ESTABLISHED: u32 = 4;
+const TCP_SYNCACHE_SIZE: u64 = 64;
+const TCP_MSS_LO: u16 = 16384;
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const IP_DEFAULT_TTL: u8 = 64;
+const ICMP_ECHO_REPLY: u8 = 0;
+const ICMP_ECHO: u8 = 8;
+const ICMP_DEST_UNREACH: u8 = 3;
+const ICMP_UNREACH_NEEDFRAG: u8 = 4;
+const ICMP_RATE_PER_SEC: u32 = 100;
+const RAW_RXQ_MAX: u32 = 64;
+const PIPE_SIZE: u64 = 16384;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const ETH_P_IP: u16 = 0x0800;
+/// INADDR_LOOPBACK_N: 127.0.0.1 as it lies in a little-endian u32 (ipv4.cee's LOOPBACK_N).
+const LOOPBACK_N: u32 = 0x0100007f;
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * 1000000);
+    }
+}
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+/// A C counter struct's room on the stack: aligned and zeroed.
+struct Room {
+    words: [u64; 48];
+}
+
+fn room(bytes: usize) -> Room {
+    if (bytes > 384) {
+        tooSmall();
+    }
+    return Room { words: [0; 48] };
+}
+
+fn roomAt(r: borrow mut Room) -> *mut u8 => borrow mut r.words as *mut [u64; 48] as *mut u8;
+
+/// The TCP counters this file reads, as tcp_get_stats had them at one instant.
+struct Tcp {
+    retransmits: u64;
+    rstsIn: u64;
+    connsPassive: u64;
+    timeouts: u64;
+    synCached: u64;
+    synCookiesSent: u64;
+    synCookiesOk: u64;
+    synBadAck: u64;
+    challengeAcks: u64;
+    oooQueued: u64;
+    keepaliveProbes: u64;
+    finWait2Timeouts: u64;
+    pmtuUpdates: u64;
+}
+
+/// Safety: the room holds a struct tcp_stats (room checks).
+fn tcpNow() -> Tcp {
+    var r = room(layoutOf<tcp_stats>().size);
+    let p = roomAt(mut r) as *mut tcp_stats;
+    unsafe {
+        tcp_get_stats(p);
+        let t = Ptr.toBorrow(p as *tcp_stats);
+        return Tcp {
+            retransmits: t.retransmits,
+            rstsIn: t.rsts_in,
+            connsPassive: t.conns_passive,
+            timeouts: t.timeouts,
+            synCached: t.syn_cached,
+            synCookiesSent: t.syn_cookies_sent,
+            synCookiesOk: t.syn_cookies_ok,
+            synBadAck: t.syn_bad_ack,
+            challengeAcks: t.challenge_acks,
+            oooQueued: t.ooo_queued,
+            keepaliveProbes: t.keepalive_probes,
+            finWait2Timeouts: t.fin_wait2_timeouts,
+            pmtuUpdates: t.pmtu_updates,
+        };
+    }
+}
+
+/// The IPv4 counters this file reads.
+struct Ip {
+    echoRcvd: u64;
+    echoReplied: u64;
+    ratelimited: u64;
+    needfragRcvd: u64;
+    pmtuUpdates: u64;
+}
+
+/// Safety: the room holds a struct ip_stats (room checks).
+fn ipNow() -> Ip {
+    var r = room(layoutOf<ip_stats>().size);
+    let p = roomAt(mut r) as *mut ip_stats;
+    unsafe {
+        ipv4_get_stats(p);
+        let i = Ptr.toBorrow(p as *ip_stats);
+        return Ip {
+            echoRcvd: i.icmp_echo_rcvd,
+            echoReplied: i.icmp_echo_replied,
+            ratelimited: i.icmp_ratelimited,
+            needfragRcvd: i.icmp_needfrag_rcvd,
+            pmtuUpdates: i.pmtu_updates,
+        };
+    }
+}
+
+/// The raw sockets' counters.
+struct Raw {
+    rxDelivered: u64;
+    rxQueueFull: u64;
+    rxNomem: u64;
+}
+
+/// Safety: the room holds a struct raw_stats (room checks).
+fn rawNow() -> Raw {
+    var r = room(layoutOf<raw_stats>().size);
+    let p = roomAt(mut r) as *mut raw_stats;
+    unsafe {
+        raw_get_stats(p);
+        let s = Ptr.toBorrow(p as *raw_stats);
+        return Raw { rxDelivered: s.rx_delivered, rxQueueFull: s.rx_queue_full, rxNomem: s.rx_nomem };
+    }
+}
+
+// ---- Addresses and sockets ----
+
+/// struct netaddr's layout (asserted in nettest.c): the family, the port (host order), the address.
+@repr(C)
+struct TcpTestAddr {
+    family: u16;
+    port: u16;
+    words: [u32; 4];
+}
+
+fn v4addr(ip: u32, port: u16) -> TcpTestAddr => TcpTestAddr { family: AF_INET, port: port, words: [ip, 0, 0, 0] };
+
+fn na(a: borrow TcpTestAddr) -> *netaddr => a as *TcpTestAddr as *netaddr;
+
+fn naMut(a: borrow mut TcpTestAddr) -> *mut netaddr => a as *mut TcpTestAddr as *mut netaddr;
+
+/// A new stream or datagram socket, released however the test returns; null when it could not be made.
+/// Safety: thread context.
+unsafe fn socketOf(kind: i32) -> *mut socket {
+    var s = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET as i32, kind, 0, borrow mut s as *mut *mut socket) != 0) {
+        return 0 as *mut socket;
+    }
+    return s;
+}
+
+/// A new raw ICMP socket, released however the test returns; null when it could not be made.
+/// Safety: thread context.
+unsafe fn rawSocket() -> *mut socket {
+    var s = 0 as *mut socket;
+    if (nettest_ksock_create_raw(AF_INET as i32, IPPROTO_ICMP as i32, borrow mut s as *mut *mut socket) != 0) {
+        return 0 as *mut socket;
+    }
+    return s;
+}
+
+/// Safety: `s` is a stream socket of the test's.
+unsafe fn pcb(s: *mut socket) -> *mut tcp_pcb => Ptr.toBorrow(s as *socket).tcp;
+
+/// Safety: as pcb.
+unsafe fn stateOf(s: *mut socket) -> u32 => tcp_state_of(pcb(s));
+
+/// Safety: as pcb.
+unsafe fn pcbOf(s: *mut socket) -> tcp_pcb_view {
+    let p = Ptr.toBorrow(pcb(s) as *tcp_pcb);
+    return tcp_pcb_view { sndUna: p.snd_una, sndNxt: p.snd_nxt, rcvNxt: p.rcv_nxt, mss: p.mss, pathMss: p.path_mss };
+}
+
+/// A pcb's sequence numbers and segment sizes, read field by field.
+struct tcp_pcb_view {
+    sndUna: u32;
+    sndNxt: u32;
+    rcvNxt: u32;
+    mss: u16;
+    pathMss: u16;
+}
+
+/// Send a short literal on a connected socket.
+/// Safety: `s` is a socket of the test's.
+unsafe fn sendLit(s: *mut socket, text: StringView, to: *netaddr) -> i64 => ksock_sendto(
+    s,
+    text.ptr as *void,
+    text.length,
+    to,
+);
+
+// ---- The waits ----
+
+/// What a wait waits for: one case per predicate nettest.c had, each over one field or a monotone sum of monotonic
+/// ones (wait_until's contract).
+enum Pred {
+    Ready(*mut socket, u32),           // ready_has: every bit of the mask
+    StateIs(*mut socket, u32),         // tcp_state_is: reached (not merely left) a state
+    LeftEstablished(*mut socket),      // tcp_left_established
+    SentSince(*mut socket, u32, u32),  // tcp_sent_since: snd_nxt, one field
+    AckedSince(*mut socket, u32, u32), // tcp_acked_since: snd_una, one field
+    SynBadAck(u64, u64),               // tcp_counter_reached (TC_SYN_BAD_ACK)
+    TcpPmtu(u64, u64),                 // tcp_counter_reached (TC_PMTU_UPDATES)
+    FinWait2Timeouts(u64, u64),        // tcp_counter_reached (TC_FIN_WAIT2_TIMEOUTS)
+    ConnsPassive(u64, u64),            // tcp_counter_reached (TC_CONNS_PASSIVE)
+    SynAnswered(u64, u64, u64),        // syn_answered: cached + cookies, a monotone sum
+    ChallengeAcks(u64, u64),           // challenge_acks_reached
+    Retransmits(u64, u64),             // retransmit_happened
+    Needfrag(u64, u64),                // needfrag_received
+    IpPmtu(u64, u64),                  // ip_pmtu_reached
+    EchoesDecided(u64, u64, u64),      // echoes_decided: replied + refused, a monotone sum
+    RawQueueAt(*mut socket, u32),      // raw_queue_at
+    RawAllHave,                        // raw_all_have, over MANY
+    RawStackAndDrop(u64, u64),         // raw_stack_and_drop: the stack took it and the copy was dropped
+}
+
+/// Whether the predicate holds now.
+/// Safety: every socket a case names is the test's.
+unsafe fn holds(p: borrow Pred) -> bool {
+    return match (p) {
+        Pred.Ready(s, mask) => (ksock_ready(s) & mask) == mask,
+        Pred.StateIs(s, want) => stateOf(s) == want,
+        Pred.LeftEstablished(s) => stateOf(s) != TCP_ESTABLISHED,
+        Pred.SentSince(s, base, bytes) => Ptr.toBorrow(pcb(s) as *tcp_pcb).snd_nxt.wrappingSub(base) >= bytes,
+        Pred.AckedSince(s, base, bytes) => Ptr.toBorrow(pcb(s) as *tcp_pcb).snd_una.wrappingSub(base) >= bytes,
+        Pred.SynBadAck(base, want) => tcpNow().synBadAck - base >= want,
+        Pred.TcpPmtu(base, want) => tcpNow().pmtuUpdates - base >= want,
+        Pred.FinWait2Timeouts(base, want) => tcpNow().finWait2Timeouts - base >= want,
+        Pred.ConnsPassive(base, want) => tcpNow().connsPassive - base >= want,
+        Pred.SynAnswered(cached, cookies, want) => synAnswered(cached, cookies, want),
+        Pred.ChallengeAcks(base, want) => tcpNow().challengeAcks - base >= want,
+        Pred.Retransmits(base, want) => tcpNow().retransmits - base >= want,
+        Pred.Needfrag(base, want) => ipNow().needfragRcvd - base >= want,
+        Pred.IpPmtu(base, want) => ipNow().pmtuUpdates - base >= want,
+        Pred.EchoesDecided(replied, limited, want) => echoesDecided(replied, limited, want),
+        Pred.RawQueueAt(s, want) => nettest_raw_queued(s) >= want,
+        Pred.RawAllHave => rawAllHave(),
+        Pred.RawStackAndDrop(echo, full) => ipNow().echoRcvd > echo && rawNow().rxQueueFull > full,
+    };
+}
+
+fn synAnswered(cached: u64, cookies: u64, want: u64) -> bool {
+    let now = tcpNow();
+    return (now.synCached - cached) + (now.synCookiesSent - cookies) >= want;
+}
+
+fn echoesDecided(replied: u64, limited: u64, want: u64) -> bool {
+    let now = ipNow();
+    return (now.echoReplied - replied) + (now.ratelimited - limited) >= want;
+}
+
+/// nettest.c's wait_until: until the predicate holds or the budget passes, a millisecond at a time, kicking the
+/// watchdog; a wait that used more than half its budget says so.
+/// Safety: as holds.
+unsafe fn waitUntil(p: Pred, budgetMs: u32) -> bool {
+    let t0 = clock_now_ns();
+    let deadline = t0 + (budgetMs as u64) * 1000000;
+    while (!holds(borrow p)) {
+        if (clock_now_ns() > deadline) {
+            return false;
+        }
+        sleepMs(1);
+        sched_watchdog_kick();
+    }
+    let waitedMs = truncate<u32>(clock_since_ns(t0) / 1000000);
+    if (waitedMs * 2 > budgetMs) {
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: wait_until: waited ");
+        line.decimal(waitedMs as u64);
+        line.text(" ms of a ");
+        line.decimal(budgetMs as u64);
+        line.text(" ms budget");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return true;
+}
+
+// ---- Packets ----
+
+fn be16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+fn be32(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v >> 24);
+    b[at + 1] = truncate<u8>(v >> 16);
+    b[at + 2] = truncate<u8>(v >> 8);
+    b[at + 3] = truncate<u8>(v);
+}
+
+/// A u32 or u16 as it lies in memory (an address in network order, a checksum in_cksum returned).
+fn word(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+fn half(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+fn rd16(b: Slice<u8>, at: usize) -> u16 => ((b[at] as u16) << 8) | (b[at + 1] as u16);
+
+/// A raw IPv4 TCP segment from 127.0.0.1:sport to 127.0.0.1:dport, through ipv4_output.
+/// Safety: thread context.
+unsafe fn injectTcp(sport: u16, dport: u16, seq: u32, ack: u32, flags: u8, mssOpt: u16) {
+    let m = m_getcl();
+    if (m.isNull()) {
+        return;
+    }
+    let hlen: u32 = if (mssOpt != 0) 24 else 20;
+    let b = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, 24);
+    for (i in 0..hlen) {
+        b[i as usize] = 0;
+    }
+    be16(b, 0, sport);
+    be16(b, 2, dport);
+    be32(b, 4, seq);
+    be32(b, 8, ack);
+    b[12] = truncate<u8>((hlen / 4) << 4);
+    b[13] = flags;
+    be16(b, 14, 8192);
+    if (mssOpt != 0) {
+        b[20] = 2;
+        b[21] = 4;
+        be16(b, 22, mssOpt);
+    }
+    {
+        let mm = Ptr.toBorrowMut(m);
+        mm.len = hlen;
+        mm.pkt.len = hlen;
+    }
+    let sum = cksum_pseudo4(LOOPBACK_N, LOOPBACK_N, IPPROTO_TCP, truncate<u16>(hlen));
+    half(b, 16, cksum_fold(m_cksum_partial(m as *mbuf, 0, hlen, sum)));
+    ipv4_output(m, LOOPBACK_N, LOOPBACK_N, IPPROTO_TCP, IP_DEFAULT_TTL);
+}
+
+/// A TCP segment over IPv4 in a loopback packet: the length of the IP header before it, or 0 when it is not one.
+/// Safety: the loopback filter's packet, whose data holds its IP header.
+unsafe fn tcpOf(m: *mut mbuf) -> usize {
+    let mb = Ptr.toBorrow(m as *mbuf);
+    if (mb.pkt.proto != ETH_P_IP || mb.pkt.len < 40) {
+        return 0;
+    }
+    let ip = Slice.fromRaw(mb.data as *u8, 20);
+    if (ip[9] != IPPROTO_TCP) {
+        return 0;
+    }
+    return ((ip[0] & 0xf) as usize) * 4;
+}
+
+// ---- The loopback filters ----
+
+/// The port the filters guard: the flood's listener (drop its resets), or a black-holed connection.
+static GUARD_PORT: AtomicU32 = AtomicU32.constant(0);
+
+/// Drop TCP resets addressed to the guarded port (the flood's SYN-ACKs would otherwise be reset by this host and
+/// clear the cache).
+/// Safety: loopback calls it with a packet whose data holds its IP header.
+@callback
+unsafe fn dropRstFilter(m: *mut mbuf, arg: *mut void) -> bool {
+    let ihl = tcpOf(m);
+    if (ihl == 0) {
+        return true;
+    }
+    let th = Slice.fromRaw(Ptr.toBorrow(m as *mbuf).data.add(ihl) as *u8, 20);
+    return !((th[13] & TH_RST) != 0 && rd16(th, 2) as u32 == GUARD_PORT.loadWith(LoadOrdering.Relaxed));
+}
+
+/// A black hole for every segment of the guarded connection (both directions).
+/// Safety: as dropRstFilter.
+@callback
+unsafe fn blackholeFilter(m: *mut mbuf, arg: *mut void) -> bool {
+    let ihl = tcpOf(m);
+    if (ihl == 0) {
+        return true;
+    }
+    let th = Slice.fromRaw(Ptr.toBorrow(m as *mbuf).data.add(ihl) as *u8, 20);
+    let guard = GUARD_PORT.loadWith(LoadOrdering.Relaxed);
+    return rd16(th, 2) as u32 != guard && rd16(th, 0) as u32 != guard;
+}
+
+fn noFilter() -> extern "C" fn(*mut mbuf, *mut void) -> bool => 0 as extern "C" fn(*mut mbuf, *mut void) -> bool;
+
+// ---- The holding server ----
+
+/// A server's static room, struct tcp_server's (asserted in nettest.c).
+struct ServerRoom {
+    words: [u64; 64];
+}
+
+// Each test's: a server's thread may outlive its frame, and each test joins it (selftest_release) before it returns.
+static mut RFC5961_SRV: ServerRoom = ServerRoom { words: [0; 64] };
+static mut KEEP_SRV: ServerRoom = ServerRoom { words: [0; 64] };
+static mut FW2_SRV: ServerRoom = ServerRoom { words: [0; 64] };
+static mut PMTU_SRV: ServerRoom = ServerRoom { words: [0; 64] };
+
+/// A room cleared for a server on `addr`, as the C's memset.
+/// Safety: the room holds a struct tcp_server (checked), whose address field is struct netaddr's layout.
+fn freshServer(r: borrow mut ServerRoom, addr: borrow TcpTestAddr) -> *mut tcp_server {
+    if (layoutOf<tcp_server>().size > 512) {
+        tooSmall();
+    }
+    for (i in 0..r.words.length) {
+        r.words[i] = 0;
+    }
+    let s = borrow mut r.words as *mut [u64; 64] as *mut tcp_server;
+    unsafe {
+        let a = SliceMut.fromRaw(borrow mut Ptr.toBorrowMut(s).addr as *mut netaddr as *mut TcpTestAddr, 1);
+        a[0] = TcpTestAddr { family: addr.family, port: addr.port, words: addr.words };
+    }
+    return s;
+}
+
+/// Safety: `s` is the calling thread's server.
+unsafe fn setResult(s: *mut tcp_server, rc: i32) {
+    let w = Ptr.toBorrowMut(s);
+    w.result = rc;
+}
+
+/// Safety: `s` is a live server.
+unsafe fn serverOk(s: *mut tcp_server) -> bool {
+    let st = Ptr.toBorrow(s as *tcp_server);
+    return st.done && st.result == 0;
+}
+
+/// Accept one connection and hold it until told to stop.
+/// Safety: `arg` is the server nettest_tcp_server_start made the thread for.
+@callback
+unsafe fn holdingMain(arg: *mut void) {
+    let s = arg as *mut tcp_server;
+    var ls = 0 as *mut socket;
+    var c = 0 as *mut socket;
+    var rc = ksock_create(AF_INET as i32, SOCK_STREAM, 0, borrow mut ls as *mut *mut socket);
+    if (rc == 0) {
+        nettest_tcp_server_publish(s, true, ls);
+        rc = ksock_bind(ls, borrow Ptr.toBorrow(s as *tcp_server).addr as *netaddr);
+    }
+    if (rc == 0) {
+        rc = ksock_listen(ls, 4);
+    }
+    if (rc == 0) {
+        rc = ksock_accept(ls, borrow mut c as *mut *mut socket, 0 as *mut netaddr);
+    }
+    if (rc == 0) {
+        nettest_tcp_server_publish(s, false, c);
+    }
+    setResult(s, rc);
+    while (!Ptr.toBorrow(s as *tcp_server).stop) {
+        sleepMs(10);
+        sched_watchdog_kick();
+    }
+    nettest_tcp_server_publish(s, false, 0 as *mut socket);
+    nettest_tcp_server_publish(s, true, 0 as *mut socket);
+    if (!c.isNull()) {
+        ksock_put(c);
+    }
+    if (!ls.isNull()) {
+        ksock_put(ls);
+    }
+    let w = Ptr.toBorrowMut(s);
+    w.done = true;
+    thread_exit(0);
+}
+
+/// Start a holding server in `r` on 127.0.0.1:`port` and let it listen.
+/// Safety: the room is the calling test's.
+unsafe fn holding(r: borrow mut ServerRoom, port: u16, name: StringView) -> *mut tcp_server {
+    let addr = v4addr(LOOPBACK_N, port);
+    let s = freshServer(mut r, borrow addr);
+    if (!nettest_tcp_server_start(s, holdingMain, name.ptr as *CChar, SCHED_PRIO_DEFAULT)) {
+        return 0 as *mut tcp_server;
+    }
+    sleepMs(20);
+    return s;
+}
+
+/// Safety: `s` is a live server.
+unsafe fn serverAddr(s: *mut tcp_server) -> *netaddr => borrow Ptr.toBorrow(s as *tcp_server).addr as *netaddr;
+
+/// The info line a test ends with, built by the caller.
+fn send(line: borrow mut TextWriter) {
+    KernelLog.send(LogLevel.Info, line);
+}
+
+// ---- net-tcp-syncache ----
+
+/// net-tcp-syncache: 300 SYNs from sources that never answer fill the cache and are answered with cookies; nothing is
+/// allocated per SYN, a real client still connects, and a completing ACK that matches nothing is refused.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tcp_syncache")
+unsafe fn tcpSyncache(reason: *mut *CChar) -> bool {
+    let ls = socketOf(SOCK_STREAM);
+    if (ls.isNull()) {
+        return failed(reason, "check failed: net-tcp-syncache: a listener\0");
+    }
+    let addr = v4addr(LOOPBACK_N, 6020);
+    if (ksock_bind(ls, na(borrow addr)) != 0 || ksock_listen(ls, 4) != 0) {
+        return failed(reason, "check failed: net-tcp-syncache: it listens\0");
+    }
+    GUARD_PORT.storeWith(6020, StoreOrdering.Relaxed);
+    nettest_loopback_set_filter(dropRstFilter, 0 as *mut void);
+    let t0 = tcpNow();
+    // 300 SYNs from 300 sources that will never answer.
+    for (i in 0..300) {
+        let n = truncate<u32>(i);
+        injectTcp(truncate<u16>(20000 + n), 6020, 1000 + n, 0, TH_SYN, 1460);
+    }
+    // Wait for the stack to have answered all three hundred: cached plus cookie-answered, a monotone sum of two
+    // monotonic counters (wait_until's exception), so a torn read can only under-count and make the wait longer.
+    if (!waitUntil(Pred.SynAnswered(t0.synCached, t0.synCookiesSent, 300), 5000)) {
+        return failed(reason, "check failed: net-tcp-syncache: the stack answered all 300 SYNs\0");
+    }
+    let t1 = tcpNow();
+    let cached = t1.synCached - t0.synCached;
+    let cookies = t1.synCookiesSent - t0.synCookiesSent;
+    if (cached == 0 || cached > TCP_SYNCACHE_SIZE) {
+        return failed(reason, "check failed: net-tcp-syncache: some cached, no more than the cache holds\0");
+    }
+    if (cookies == 0 || cached + cookies != 300) {
+        return failed(reason, "check failed: net-tcp-syncache: the rest answered with cookies\0");
+    }
+    if (t1.connsPassive != t0.connsPassive) {
+        return failed(reason, "check failed: net-tcp-syncache: nothing allocated per SYN\0");
+    }
+    if (tcp_accept_ready(pcb(ls))) {
+        return failed(reason, "check failed: net-tcp-syncache: nothing to accept\0");
+    }
+    // A real client still connects, through a cache slot or a cookie.
+    let c = socketOf(SOCK_STREAM);
+    if (c.isNull() || ksock_connect(c, na(borrow addr)) != 0) {
+        return failed(reason, "check failed: net-tcp-syncache: a real client connects\0");
+    }
+    var a = 0 as *mut socket;
+    var peer = v4addr(0, 0);
+    if (nettest_ksock_accept(ls, borrow mut a as *mut *mut socket, naMut(mut peer)) != 0 || peer.port == 0) {
+        return failed(reason, "check failed: net-tcp-syncache: it is accepted\0");
+    }
+    if (sendLit(c, "hello", 0 as *netaddr) != 5) {
+        return failed(reason, "check failed: net-tcp-syncache: it sends\0");
+    }
+    var buf: [u8; 8] = [0; 8];
+    if (ksock_recvfrom(a, borrow mut buf as *mut [u8; 8] as *mut void, 8, 0 as *mut netaddr) != 5 || buf[0] != 104 ||
+        buf[1] != 101 || buf[2] != 108 || buf[3] != 108 || buf[4] != 111) {
+        return failed(reason, "check failed: net-tcp-syncache: and the server reads hello\0");
+    }
+    let t1b = tcpNow();
+    if (t1b.connsPassive != t0.connsPassive + 1) {
+        return failed(reason, "check failed: net-tcp-syncache: one passive connection\0");
+    }
+    // A completing ACK that matches nothing is refused.
+    injectTcp(30001, 6020, 5000, 12345, TH_ACK, 0);
+    if (!waitUntil(Pred.SynBadAck(t1b.synBadAck, 1), 5000)) {
+        return failed(reason, "check failed: net-tcp-syncache: the stray ACK was looked at\0");
+    }
+    let t2 = tcpNow();
+    if (t2.synBadAck != t1b.synBadAck + 1 || t2.connsPassive != t1b.connsPassive) {
+        return failed(reason, "check failed: net-tcp-syncache: and refused\0");
+    }
+    nettest_loopback_set_filter(noFilter(), 0 as *mut void);
+    nettest_ksock_put(a);
+    nettest_ksock_put(c);
+    nettest_ksock_put(ls);
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-tcp-syncache: ");
+    line.decimal(cached);
+    line.text(" SYNs cached, ");
+    line.decimal(cookies);
+    line.text(" answered with cookies, ");
+    line.decimal(t2.synCookiesOk - t0.synCookiesOk);
+    line.text(" cookies accepted");
+    send(mut line);
+    return true;
+}
+
+// ---- net-tcp-rfc5961 ----
+
+/// net-tcp-rfc5961: a reset inside the window but not at rcv_nxt, a SYN inside the window, and an ACK for data never
+/// sent are each challenged and change nothing; the exact reset ends the connection. Each injection is waited for by
+/// the challenge it must draw, since the state assertions after it are negative.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tcp_rfc5961")
+unsafe fn tcpRfc5961(reason: *mut *CChar) -> bool {
+    let srv = holding(mut RFC5961_SRV, 6021, "rfc5961-srv\0");
+    if (srv.isNull()) {
+        return failed(reason, "check failed: net-tcp-rfc5961: the server starts\0");
+    }
+    let c = socketOf(SOCK_STREAM);
+    if (c.isNull() || ksock_connect(c, serverAddr(srv)) != 0) {
+        return failed(reason, "check failed: net-tcp-rfc5961: it connects\0");
+    }
+    var me = v4addr(0, 0);
+    if (ksock_getsockname(c, naMut(mut me)) != 0) {
+        return failed(reason, "check failed: net-tcp-rfc5961: its name\0");
+    }
+    let t0 = tcpNow();
+    let p = pcbOf(c);
+    let rcvNxt = p.rcvNxt;
+    let sndNxt = p.sndNxt;
+    // A reset inside the window but not at rcv_nxt: a challenge, no reset.
+    injectTcp(6021, me.port, rcvNxt + 1000, sndNxt, TH_RST, 0);
+    if (!waitUntil(Pred.ChallengeAcks(t0.challengeAcks, 1), 5000)) {
+        return failed(reason, "check failed: net-tcp-rfc5961: the in-window reset is challenged\0");
+    }
+    if (stateOf(c) != TCP_ESTABLISHED) {
+        return failed(reason, "check failed: net-tcp-rfc5961: and the connection stays\0");
+    }
+    // A SYN inside the window: a challenge, no reset.
+    injectTcp(6021, me.port, rcvNxt + 10, sndNxt, TH_SYN, 0);
+    if (!waitUntil(Pred.ChallengeAcks(t0.challengeAcks, 2), 5000)) {
+        return failed(reason, "check failed: net-tcp-rfc5961: the in-window SYN is challenged\0");
+    }
+    if (stateOf(c) != TCP_ESTABLISHED) {
+        return failed(reason, "check failed: net-tcp-rfc5961: and the connection stays after the SYN\0");
+    }
+    // An ACK for data never sent: a challenge, not processed.
+    injectTcp(6021, me.port, rcvNxt, sndNxt + 100000, TH_ACK, 0);
+    if (!waitUntil(Pred.ChallengeAcks(t0.challengeAcks, 3), 5000)) {
+        return failed(reason, "check failed: net-tcp-rfc5961: the ACK for unsent data is challenged\0");
+    }
+    if (stateOf(c) != TCP_ESTABLISHED || pcbOf(c).sndUna != sndNxt) {
+        return failed(reason, "check failed: net-tcp-rfc5961: and not processed\0");
+    }
+    var t1 = tcpNow();
+    if (t1.challengeAcks != t0.challengeAcks + 3) {
+        return failed(reason, "check failed: net-tcp-rfc5961: three challenges\0");
+    }
+    if (t1.rstsIn != t0.rstsIn) {
+        return failed(reason, "check failed: net-tcp-rfc5961: no reset taken\0");
+    }
+    // The exact reset ends the connection.
+    injectTcp(6021, me.port, rcvNxt, sndNxt, TH_RST, 0);
+    if (!waitUntil(Pred.LeftEstablished(c), 5000)) {
+        return failed(reason, "check failed: net-tcp-rfc5961: the exact reset ends it\0");
+    }
+    var buf: [u8; 4] = [0; 4];
+    if (ksock_recvfrom(c, borrow mut buf as *mut [u8; 4] as *mut void, 4, 0 as *mut netaddr) != -(ECONNRESET as i64)) {
+        return failed(reason, "check failed: net-tcp-rfc5961: a read is ECONNRESET\0");
+    }
+    t1 = tcpNow();
+    if (t1.rstsIn != t0.rstsIn + 1) {
+        return failed(reason, "check failed: net-tcp-rfc5961: one reset taken\0");
+    }
+    nettest_ksock_put(c);
+    selftest_release(srv as *mut void); // its close sends a FIN into the void and is reset
+    if (!serverOk(srv)) {
+        return failed(reason, "check failed: net-tcp-rfc5961: the server ended cleanly\0");
+    }
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-tcp-rfc5961: three blind segments challenged, the exact reset accepted");
+    send(mut line);
+    return true;
+}
+
+// ---- net-tcp-reorder ----
+//
+// Hold every fifth data segment and deliver it after the next one. The filter runs on every CPU that transmits
+// through the loopback -- the sending thread and any worker sending an ACK -- so its state is under a lock. It was
+// not: two CPUs both took the held copy and both injected it, the second enqueue cut the receive queue behind it,
+// and that CPU's worker spun on a queue whose count said non-empty for the rest of the boot
+// (docs/audit/next-subsystem-lockup.md, the spin at priority 31; the stack now refuses the second enqueue,
+// net-mbufq-double).
+
+static mut REORDER_LOCK: spinlock_t = SPINLOCK_INIT("reorder-test\0".ptr as *CChar);
+static mut HELD: usize = 0; // the held copy's address, 0 when none
+static mut REORDER_SEEN: u32 = 0;
+static mut REORDERED: u32 = 0;
+static mut PASS_ONE: bool = false;
+
+/// Safety: the statics are under REORDER_LOCK, or the filter is not installed.
+fn reorderLock() -> *mut spinlock_t => unsafe { borrow mut REORDER_LOCK as *mut spinlock_t };
+
+/// The reordering filter: `arg` is the loopback interface, into which a held copy is released.
+/// Safety: as dropRstFilter; the statics are taken under REORDER_LOCK.
+@callback
+unsafe fn reorderFilter(m: *mut mbuf, arg: *mut void) -> bool {
+    let ihl = tcpOf(m);
+    if (ihl == 0) {
+        return true;
+    }
+    let data = Ptr.toBorrow(m as *mbuf).data;
+    let ip = Slice.fromRaw(data as *u8, 20);
+    if (rd16(ip, 2) as usize <= ihl + 20) {
+        return true; // pure ACKs and control segments pass
+    }
+    let th = Slice.fromRaw(data.add(ihl) as *u8, 20);
+    if (rd16(th, 2) != 6022) {
+        return true; // only the client's data
+    }
+    var release: usize = 0;
+    var pass = true;
+    let st = spin_lock_irqsave(reorderLock());
+    if (HELD != 0) {
+        if (PASS_ONE) {
+            PASS_ONE = false; // the segment after the held one overtakes it
+        } else {
+            release = HELD; // the held one goes first, then this one
+            HELD = 0;
+        }
+    } else {
+        REORDER_SEEN += 1;
+        if (REORDER_SEEN % 5 == 0) {
+            let copy = m_copypacket(m as *mbuf);
+            if (!copy.isNull()) {
+                HELD = copy as usize;
+                REORDERED += 1;
+                PASS_ONE = true;
+                pass = false; // the original is dropped; the copy arrives one segment late
+            }
+        }
+    }
+    spin_unlock_irqrestore(reorderLock(), st);
+    if (release != 0) {
+        netif_rx(arg as *mut netif, release as *mut mbuf);
+    }
+    return pass;
+}
+
+/// net-tcp-reorder: half a megabyte with every fifth data segment delivered a segment late arrives whole, the late
+/// ones queued out of order.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tcp_reorder")
+unsafe fn tcpReorder(reason: *mut *CChar) -> bool {
+    let t0 = tcpNow();
+    let lo = netif_loopback();
+    if (lo.isNull()) {
+        return failed(reason, "check failed: net-tcp-reorder: the loopback interface\0");
+    }
+    HELD = 0;
+    REORDER_SEEN = 0;
+    REORDERED = 0;
+    PASS_ONE = false;
+    nettest_loopback_set_filter(reorderFilter, lo as *mut void);
+    let addr = v4addr(LOOPBACK_N, 6022);
+    let ok = nettest_tcp_transfer(reason, na(borrow addr), 512 * 1024, 0);
+    nettest_loopback_set_filter(noFilter(), 0 as *mut void);
+    if (HELD != 0) {
+        m_freem(HELD as *mut mbuf);
+        HELD = 0;
+    }
+    netif_put(lo);
+    if (!ok) {
+        return false;
+    }
+    let t1 = tcpNow();
+    if (REORDERED == 0) {
+        return failed(reason, "check failed: net-tcp-reorder: segments were delayed\0");
+    }
+    if (t1.oooQueued <= t0.oooQueued) {
+        return failed(reason, "check failed: net-tcp-reorder: and queued out of order\0");
+    }
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-tcp-reorder: ");
+    line.decimal(REORDERED as u64);
+    line.text(" segments delayed, ");
+    line.decimal(t1.oooQueued - t0.oooQueued);
+    line.text(" queued out of order, ");
+    line.decimal(t1.retransmits - t0.retransmits);
+    line.text(" retransmissions");
+    send(mut line);
+    return true;
+}
+
+// ---- net-tcp-keepalive ----
+
+/// net-tcp-keepalive: an idle connection whose peer vanished times out after its probes, and an orphaned FIN_WAIT_2
+/// ends on its own.
+/// Safety: the runner's `reason`.
+@export("selftest_net_tcp_keepalive")
+unsafe fn tcpKeepalive(reason: *mut *CChar) -> bool {
+    var srv = holding(mut KEEP_SRV, 6023, "keep-srv\0");
+    if (srv.isNull()) {
+        return failed(reason, "check failed: net-tcp-keepalive: the server starts\0");
+    }
+    // The idle timer is armed when a connection is established: shorten it first.
+    nettest_tcp_set_keepalive(150 * 1000000, 50 * 1000000, 3);
+    var tb = tcpNow();
+    var c = socketOf(SOCK_STREAM);
+    if (c.isNull() || ksock_connect(c, serverAddr(srv)) != 0) {
+        return failed(reason, "check failed: net-tcp-keepalive: it connects\0");
+    }
+    // connect returns when *this* side is established: the handshake's third segment is still the worker's to send.
+    // The black hole must not swallow it -- a server side left in SYN_RCVD never wakes its accept and the join at the
+    // end waits forever (found at priority 31 by the lockup unit, docs/audit/next-subsystem-lockup.md). Wait for the
+    // passive side to be established, then black-hole.
+    if (!waitUntil(Pred.ConnsPassive(tb.connsPassive, 1), 5000)) {
+        return failed(reason, "check failed: net-tcp-keepalive: the server side is established\0");
+    }
+    var t0 = tcpNow();
+    GUARD_PORT.storeWith(6023, StoreOrdering.Relaxed);
+    nettest_loopback_set_filter(blackholeFilter, 0 as *mut void);
+    if (!waitUntil(Pred.StateIs(c, TCP_CLOSED), 5000)) {
+        return failed(reason, "check failed: net-tcp-keepalive: the connection closes\0");
+    }
+    if (stateOf(c) != TCP_CLOSED) {
+        return failed(reason, "check failed: net-tcp-keepalive: and stays closed\0");
+    }
+    var buf: [u8; 4] = [0; 4];
+    if (ksock_recvfrom(c, borrow mut buf as *mut [u8; 4] as *mut void, 4, 0 as *mut netaddr) != -(ETIMEDOUT as i64)) {
+        return failed(reason, "check failed: net-tcp-keepalive: a read is ETIMEDOUT\0");
+    }
+    var t1 = tcpNow();
+    if (t1.timeouts <= t0.timeouts) {
+        return failed(reason, "check failed: net-tcp-keepalive: a timeout was counted\0");
+    }
+    let probes = t1.keepaliveProbes - t0.keepaliveProbes;
+    if (probes < 3) {
+        return failed(reason, "check failed: net-tcp-keepalive: after three probes\0");
+    }
+    nettest_loopback_set_filter(noFilter(), 0 as *mut void);
+    nettest_tcp_set_keepalive(0, 0, 0);
+    nettest_ksock_put(c);
+    selftest_release(srv as *mut void); // stop, unblock and join
+    if (!serverOk(srv)) {
+        return failed(reason, "check failed: net-tcp-keepalive: the server ended cleanly\0");
+    }
+
+    // An orphaned FIN_WAIT_2 ends on its own.
+    srv = holding(mut FW2_SRV, 6024, "fw2-srv\0");
+    if (srv.isNull()) {
+        return failed(reason, "check failed: net-tcp-keepalive: the second server starts\0");
+    }
+    tb = tcpNow();
+    c = socketOf(SOCK_STREAM);
+    if (c.isNull() || ksock_connect(c, serverAddr(srv)) != 0) {
+        return failed(reason, "check failed: net-tcp-keepalive: the second client connects\0");
+    }
+    // The server side established before the close (as above).
+    if (!waitUntil(Pred.ConnsPassive(tb.connsPassive, 1), 5000)) {
+        return failed(reason, "check failed: net-tcp-keepalive: the second server side is established\0");
+    }
+    t0 = tcpNow();
+    nettest_tcp_set_fin_wait2(100 * 1000000);
+    nettest_ksock_put(c); // close: FIN; the server never answers with its own
+    if (!waitUntil(Pred.FinWait2Timeouts(t0.finWait2Timeouts, 1), 5000)) {
+        return failed(reason, "check failed: net-tcp-keepalive: the orphaned FIN_WAIT_2 is reaped\0");
+    }
+    t1 = tcpNow();
+    nettest_tcp_set_fin_wait2(0);
+    if (t1.finWait2Timeouts != t0.finWait2Timeouts + 1) {
+        return failed(reason, "check failed: net-tcp-keepalive: once\0");
+    }
+    selftest_release(srv as *mut void); // stop, unblock and join
+    if (!serverOk(srv)) {
+        return failed(reason, "check failed: net-tcp-keepalive: the second server ended cleanly\0");
+    }
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-tcp-keepalive: ");
+    line.decimal(probes);
+    line.text(" probes unanswered, one orphaned FIN_WAIT_2 reaped");
+    send(mut line);
+    return true;
+}
+
+// ---- net-icmp-limit ----
+
+/// What a probe found.
+enum Probe {
+    Replied,
+    Refused,
+    Undecided, // not sent, or not decided within the wait
+}
+
+fn decided(p: borrow Probe) -> bool => match (p) {
+    Probe.Replied => true,
+    Probe.Refused => true,
+    Probe.Undecided => false,
+};
+
+fn replied(p: borrow Probe) -> bool => match (p) {
+    Probe.Replied => true,
+    Probe.Refused => false,
+    Probe.Undecided => false,
+};
+
+/// One echo, decided: replied or refused, or Undecided when the wait failed. The limiter's window (ipv4.cee) is a
+/// fixed second that starts with the first ICMP after a second of quiet, so an echo refused and then one replied means
+/// a fresh window has just begun -- which is the one fact a burst against the limiter needs.
+/// Safety: thread context.
+unsafe fn icmpProbe(seq: u16) -> Probe {
+    let a = ipNow();
+    let q = "q";
+    if (icmp_send_echo(LOOPBACK_N, 0x4d39, seq, q.ptr as *void, 1) != 0) {
+        return Probe.Undecided;
+    }
+    if (!waitUntil(Pred.EchoesDecided(a.echoReplied, a.ratelimited, 1), 5000)) {
+        return Probe.Undecided;
+    }
+    return if (ipNow().echoReplied > a.echoReplied) Probe.Replied else Probe.Refused;
+}
+
+// Off the 16 KiB kernel stack: the runner runs one test at a time.
+static mut BIG: [u8; 2000] = [0; 2000];
+
+/// Safety: the runner runs one test at a time, so BIG is this test's.
+fn big() -> *mut u8 => unsafe { borrow mut BIG as *mut [u8; 2000] as *mut u8 };
+
+/// The rate limiter's burst inside a window made fresh, as net-icmp-limit's first half: false (with the reason) on a
+/// failed check. Gives back the replies and refusals of the 300.
+/// Safety: the runner's `reason`.
+unsafe fn icmpBurst(reason: *mut *CChar, i0: borrow mut Ip, sent: borrow mut u64, limited: borrow mut u64) -> bool {
+    // 300 echo requests in a burst: at most ICMP_RATE_PER_SEC replies (an unreachable is never sent for 127/8, so the
+    // echo path carries the test). The claim is exact -- at most one window's worth -- so the burst must fall inside
+    // one window, and the window's phase is not the test's to choose. So the phase is *made* known, in two halves
+    // that must both be observed. First a probe must be *refused*: fill the window (a burst of RATE echoes, every one
+    // decided) and probe; if the probe is accepted, the window rolled somewhere inside the fill and is of unknown
+    // age, so fill and probe again until one is refused. Then a probe must be *accepted*: one echo every ten
+    // milliseconds until one is replied, which says the window rolled between two probes and is at most that old.
+    // Only the refusal followed by the acceptance is a fresh window. Then flood into it (docs/testing/flakes.md
+    // records the site).
+    let probeDeadline = clock_now_ns() + 5000000000; // the window is a second; a hang guard
+    let f = "f";
+    var refused = false;
+    var seq: u16 = 0;
+    while (!refused) {
+        if (clock_now_ns() >= probeDeadline) {
+            return failed(reason, "check failed: net-icmp-limit: a probe was refused within 5 s\0");
+        }
+        let fill = ipNow();
+        for (i in 0..ICMP_RATE_PER_SEC) {
+            if (icmp_send_echo(LOOPBACK_N, 0x4d37, truncate<u16>(i), f.ptr as *void, 1) != 0) {
+                return failed(reason, "check failed: net-icmp-limit: a filling echo is sent\0");
+            }
+        }
+        if (!waitUntil(Pred.EchoesDecided(fill.echoReplied, fill.ratelimited, ICMP_RATE_PER_SEC as u64), 5000)) {
+            return failed(reason, "check failed: net-icmp-limit: the fill was decided\0");
+        }
+        let found = icmpProbe(seq);
+        if (!decided(borrow found)) {
+            return failed(reason, "check failed: net-icmp-limit: a probe was decided\0");
+        }
+        refused = !replied(borrow found);
+        seq = seq.wrappingAdd(1);
+    }
+    var fresh = false;
+    seq = 0;
+    while (!fresh) {
+        if (clock_now_ns() >= probeDeadline) {
+            return failed(reason, "check failed: net-icmp-limit: a probe was accepted within 5 s\0");
+        }
+        let found = icmpProbe(seq);
+        if (!decided(borrow found)) {
+            return failed(reason, "check failed: net-icmp-limit: a probe was decided\0");
+        }
+        fresh = replied(borrow found);
+        if (!fresh) {
+            sleepMs(10);
+        }
+        seq = seq.wrappingAdd(1);
+    }
+
+    i0 = ipNow();
+    let p = "p";
+    for (i in 0..300) {
+        if (icmp_send_echo(LOOPBACK_N, 0x4d38, truncate<u16>(i), p.ptr as *void, 1) != 0) {
+            return failed(reason, "check failed: net-icmp-limit: a flooding echo is sent\0");
+        }
+    }
+    // Wait for all three hundred to be decided. This is what makes the two assertions below mean anything: `sent <=
+    // ICMP_RATE_PER_SEC` passes spuriously when the flood has not landed, and `limited >= 300 - ICMP_RATE_PER_SEC`
+    // fails for the same reason.
+    if (!waitUntil(Pred.EchoesDecided(i0.echoReplied, i0.ratelimited, 300), 5000)) {
+        return failed(reason, "check failed: net-icmp-limit: the flood was decided\0");
+    }
+    let i1 = ipNow();
+    sent = i1.echoReplied - i0.echoReplied;
+    limited = i1.ratelimited - i0.ratelimited;
+    if (i1.echoRcvd - i0.echoRcvd != 300) {
+        return failed(reason, "check failed: net-icmp-limit: all 300 were received\0");
+    }
+    if (sent > ICMP_RATE_PER_SEC as u64 || limited < 300 - ICMP_RATE_PER_SEC as u64) {
+        return failed(reason, "check failed: net-icmp-limit: at most one window's replies, the rest refused\0");
+    }
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-icmp-limit: ");
+    line.decimal(sent);
+    line.text(" replied, ");
+    line.decimal(limited);
+    line.text(" refused of 300 in a fresh window");
+    send(mut line);
+    return true;
+}
+
+/// The fragmentation-needed message: type 3 code 4, MTU 1500, quoting IP + 8 bytes of TCP from `port` to 6026 at
+/// sequence `seq`, its checksum 0 (the caller sums it).
+/// Safety: `m` is a fresh cluster of the test's.
+unsafe fn needfrag(m: *mut mbuf, port: u16, seq: u32) {
+    let b = SliceMut.fromRaw(Ptr.toBorrow(m as *mbuf).data, 36);
+    for (i in 0..36) {
+        b[truncate<usize>(i)] = 0;
+    }
+    b[0] = ICMP_DEST_UNREACH;
+    b[1] = ICMP_UNREACH_NEEDFRAG;
+    be16(b, 6, 1500);
+    b[8] = 0x45;
+    be16(b, 10, 2040);
+    b[16] = 64;
+    b[17] = IPPROTO_TCP;
+    word(b, 20, LOOPBACK_N);
+    word(b, 24, LOOPBACK_N);
+    be16(b, 28, port);
+    be16(b, 30, 6026);
+    be32(b, 32, seq);
+    let mm = Ptr.toBorrowMut(m);
+    mm.len = 36;
+    mm.pkt.len = 36;
+}
+
+/// Name the quoted sequence and sum the message again.
+/// Safety: `m` is needfrag's.
+unsafe fn requote(m: *mut mbuf, seq: u32) {
+    let data = Ptr.toBorrow(m as *mbuf).data;
+    let b = SliceMut.fromRaw(data, 36);
+    be32(b, 32, seq);
+    half(b, 2, 0);
+    half(b, 2, in_cksum(data as *void, 36));
+}
+
+/// net-icmp-limit: the rate limiter holds a burst inside a fresh window to one window's replies; then path MTU
+/// discovery: a fragmentation-needed quoting a segment in flight lowers the connection's MSS, one quoting nothing in
+/// flight is ignored.
+/// Safety: the runner's `reason`.
+@export("selftest_net_icmp_limit")
+unsafe fn icmpLimit(reason: *mut *CChar) -> bool {
+    var i0 = Ip { echoRcvd: 0, echoReplied: 0, ratelimited: 0, needfragRcvd: 0, pmtuUpdates: 0 };
+    var sent: u64 = 0;
+    var limited: u64 = 0;
+    if (!icmpBurst(reason, mut i0, mut sent, mut limited)) {
+        return false;
+    }
+
+    // Path MTU discovery.
+    let srv = holding(mut PMTU_SRV, 6026, "pmtu-srv\0");
+    if (srv.isNull()) {
+        return failed(reason, "check failed: net-icmp-limit: the server starts\0");
+    }
+    let c = socketOf(SOCK_STREAM);
+    if (c.isNull() || ksock_connect(c, serverAddr(srv)) != 0) {
+        return failed(reason, "check failed: net-icmp-limit: it connects\0");
+    }
+    var me = v4addr(0, 0);
+    if (ksock_getsockname(c, naMut(mut me)) != 0) {
+        return failed(reason, "check failed: net-icmp-limit: its name\0");
+    }
+    if (pcbOf(c).mss != TCP_MSS_LO || ipv4_path_mtu(LOOPBACK_N) != 65535) {
+        return failed(reason, "check failed: net-icmp-limit: loopback's MSS and path MTU to begin with\0");
+    }
+    GUARD_PORT.storeWith(6026, StoreOrdering.Relaxed);
+    nettest_loopback_set_filter(blackholeFilter, 0 as *mut void); // the data stays in flight
+    let bytes = SliceMut.fromRaw(big(), 2000);
+    for (i in 0..2000) {
+        bytes[truncate<usize>(i)] = 109; // 'm'
+    }
+    let nxt0 = pcbOf(c).sndNxt; // the baseline, taken before the send
+    if (ksock_sendto(c, big() as *void, 2000, 0 as *netaddr) != 2000) {
+        return failed(reason, "check failed: net-icmp-limit: 2000 bytes are sent\0");
+    }
+    // The filter blackholes the data, so nothing is acknowledged and it stays in flight; wait for it to be *sent*
+    // before taking the sequence the forged quote will name.
+    if (!waitUntil(Pred.SentSince(c, nxt0, 2000), 5000)) {
+        return failed(reason, "check failed: net-icmp-limit: the data left\0");
+    }
+    let seq = pcbOf(c).sndUna;
+    let t0 = tcpNow();
+    let m = m_getcl();
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-icmp-limit: a buffer for the message\0");
+    }
+    needfrag(m, me.port, seq - 5000);
+    let good = m_copypacket(m as *mbuf);
+    if (good.isNull()) {
+        return failed(reason, "check failed: net-icmp-limit: a copy of the message\0");
+    }
+    {
+        let data = Ptr.toBorrow(m as *mbuf).data;
+        half(SliceMut.fromRaw(data, 36), 2, in_cksum(data as *void, 36));
+    }
+    // Baseline taken *here*, not at the top of the function: the counter is global, and a stale baseline lets any
+    // earlier fragmentation-needed satisfy the wait before the forged quote has been looked at.
+    let ib = ipNow();
+    ipv4_output(m, 0, LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL); // quotes a sequence never sent
+    if (!waitUntil(Pred.Needfrag(ib.needfragRcvd, 1), 5000)) {
+        return failed(reason, "check failed: net-icmp-limit: the forged quote arrived\0"); // now assert it did nothing
+    }
+    var t1 = tcpNow();
+    var i1 = ipNow();
+    if (t1.pmtuUpdates != t0.pmtuUpdates || pcbOf(c).mss != TCP_MSS_LO) {
+        return failed(reason, "check failed: net-icmp-limit: the forged quote changed no connection\0");
+    }
+    // A forged quote poisons nothing: the cache is untouched too.
+    if (ipv4_path_mtu(LOOPBACK_N) != 65535 || i1.pmtuUpdates != i0.pmtuUpdates) {
+        return failed(reason, "check failed: net-icmp-limit: nor the path MTU cache\0");
+    }
+    requote(good, seq);
+    ipv4_output(good, 0, LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL);
+    // Wait for the message to be processed, bounded, rather than a fixed 30 ms: the check is that the counters moved
+    // by exactly one, not that the netrx worker made a window on a loaded host.
+    if (!waitUntil(Pred.TcpPmtu(t0.pmtuUpdates, 1), 5000)) {
+        return failed(reason, "check failed: net-icmp-limit: the connection took the quote\0");
+    }
+    // And the IP side's record, which is a separate counter that lands separately.
+    if (!waitUntil(Pred.IpPmtu(i0.pmtuUpdates, 1), 5000)) {
+        return failed(reason, "check failed: net-icmp-limit: the path MTU cache took it\0");
+    }
+    t1 = tcpNow();
+    i1 = ipNow();
+    if (t1.pmtuUpdates != t0.pmtuUpdates + 1 || i1.pmtuUpdates != i0.pmtuUpdates + 1) {
+        return failed(reason, "check failed: net-icmp-limit: one update each\0");
+    }
+    if (ipv4_path_mtu(LOOPBACK_N) != 1500) {
+        return failed(reason, "check failed: net-icmp-limit: recorded once the connection confirmed it\0");
+    }
+    let p = pcbOf(c);
+    if (p.mss != 1460 || p.pathMss != 1460) {
+        return failed(reason, "check failed: net-icmp-limit: the MSS is 1460\0");
+    }
+    if (tcp_path_mss(AF_INET, serverAddr(srv)) != 1460) {
+        return failed(reason, "check failed: net-icmp-limit: new connections start there\0");
+    }
+    nettest_loopback_set_filter(noFilter(), 0 as *mut void);
+    // The retransmission delivers the data in 1460-byte segments: the counter says it was scheduled, the peer's
+    // acknowledgement past the quoted sequence says it was delivered.
+    if (!waitUntil(Pred.Retransmits(t1.retransmits, 1), 5000)) {
+        return failed(reason, "check failed: net-icmp-limit: the data is retransmitted\0");
+    }
+    if (!waitUntil(Pred.AckedSince(c, seq, 2000), 5000)) {
+        return failed(reason, "check failed: net-icmp-limit: and acknowledged\0");
+    }
+    ipv4_pmtu_flush();
+    if (tcp_path_mss(AF_INET, serverAddr(srv)) != TCP_MSS_LO) {
+        return failed(reason, "check failed: net-icmp-limit: the flush restores loopback's MSS\0");
+    }
+    nettest_ksock_put(c);
+    selftest_release(srv as *mut void); // stop, unblock and join
+    if (!serverOk(srv)) {
+        return failed(reason, "check failed: net-icmp-limit: the server ended cleanly\0");
+    }
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-icmp-limit: ");
+    line.decimal(sent);
+    line.text(" echo replies sent, ");
+    line.decimal(limited);
+    line.text(" suppressed; MSS lowered to 1460 by PMTUD");
+    send(mut line);
+    return true;
+}
+
+// ---- net-raw-icmp ----
+//
+// N31; design.md, "Raw ICMP sockets": what ping does, at the socket. A raw ICMP socket refuses another protocol,
+// IPv6, bind, connect and an addressless send; an echo it sends to the loopback address comes back to it twice -- the
+// request as the stack received it and the reply -- each behind its IPv4 header, from 127.0.0.1, port 0. The stack
+// answers as it would with no raw socket. A full raw queue drops the copy, and the stack still takes the message
+// (icmp_echo_rcvd). The rate limiter can withhold a reply (net-icmp-limit may have spent the window), so the echo is
+// sent again, a new sequence each time, until one is answered.
+
+const RAW_TEST_ID: u16 = 0x7261;
+const RAW_TEST_MANY: usize = 20; // more than a delivery batch (RAW_DELIVER_MAX, 16)
+
+// Off the stack, as the C's statics.
+static mut RAWBUF: [u8; 256] = [0; 256];
+static mut MANY: [usize; 20] = [0; 20];
+
+/// Safety: the runner runs one test at a time, so RAWBUF is this test's.
+fn rawBuf() -> *mut u8 => unsafe { borrow mut RAWBUF as *mut [u8; 256] as *mut u8 };
+
+/// Safety: as rawBuf.
+fn manyAt(i: usize) -> *mut *mut socket =>
+    unsafe { (borrow mut MANY as *mut [usize; 20] as *mut usize).add(i) as *mut *mut socket };
+
+/// Safety: as rawBuf.
+fn rawAllHave() -> bool {
+    unsafe {
+        for (i in 0..RAW_TEST_MANY) {
+            if (nettest_raw_queued(MANY[i] as *mut socket) == 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// An echo request from the raw socket to 127.0.0.1: id RAW_TEST_ID, `seq`, four bytes "raw!".
+/// Safety: `s` is a raw socket of the test's.
+unsafe fn rawSendEcho(s: *mut socket, seq: u16) -> i64 {
+    var e: [u8; 12] = [0; 12];
+    e[0] = ICMP_ECHO;
+    be16(mut e[..], 4, RAW_TEST_ID);
+    be16(mut e[..], 6, seq);
+    e[8] = 114;  // r
+    e[9] = 97;   // a
+    e[10] = 119; // w
+    e[11] = 33;  // !
+    let sum = in_cksum(borrow e as *[u8; 12] as *void, 12);
+    half(mut e[..], 2, sum);
+    let to = v4addr(LOOPBACK_N, 0);
+    return ksock_sendto(s, borrow e as *[u8; 12] as *void, 12, na(borrow to));
+}
+
+/// The echo exchange: read until the request and its reply have both come back raw, or a check fails.
+/// Safety: the runner's `reason`; `s` is the test's raw socket.
+unsafe fn rawExchange(reason: *mut *CChar, s: *mut socket) -> bool {
+    var gotReq = false;
+    var gotReply = false;
+    let b = Slice.fromRaw(rawBuf() as *u8, 256);
+    var seq: u16 = 1;
+    while (seq <= 15 && !gotReply) {
+        if (rawSendEcho(s, seq) != 12) {
+            return failed(reason, "check failed: net-raw-icmp: an echo is sent\0");
+        }
+        let until = clock_now_ns() + 200000000;
+        while (!gotReply && clock_now_ns() < until) {
+            var from = v4addr(0, 0);
+            let n = ksock_recvfrom(s, rawBuf() as *mut void, 256, naMut(mut from));
+            if (n == -(EAGAIN as i64)) {
+                sleepMs(1);
+                sched_watchdog_kick();
+                continue;
+            }
+            if (n < 28) {
+                return failed(reason, "check failed: net-raw-icmp: a copy holds an IPv4 and an ICMP header\0");
+            }
+            if (b[0] != 0x45 || b[9] != IPPROTO_ICMP) {
+                return failed(reason, "check failed: net-raw-icmp: the IPv4 header, no options\0");
+            }
+            if (from.family != AF_INET || from.words[0] != LOOPBACK_N || from.port != 0) {
+                return failed(reason, "check failed: net-raw-icmp: from 127.0.0.1, port 0\0");
+            }
+            if (rd16(b, 24) != RAW_TEST_ID) {
+                continue;
+            }
+            if (n != 32 || b[28] != 114 || b[29] != 97 || b[30] != 119 || b[31] != 33) {
+                return failed(reason, "check failed: net-raw-icmp: the echo's four bytes\0");
+            }
+            if (b[20] == ICMP_ECHO && rd16(b, 26) == 1) {
+                gotReq = true;
+            }
+            if (b[20] == ICMP_ECHO_REPLY) {
+                gotReply = true;
+            }
+        }
+        seq += 1;
+    }
+    if (!gotReq || !gotReply) {
+        return failed(reason, "check failed: net-raw-icmp: the request and the reply came back\0");
+    }
+    return true;
+}
+
+/// net-raw-icmp: the refusals, the echo read raw, every raw socket's copy, a read-shut socket, a full queue.
+/// Safety: the runner's `reason`.
+@export("selftest_net_raw_icmp")
+unsafe fn rawIcmp(reason: *mut *CChar) -> bool {
+    var s = 0 as *mut socket;
+    if (ksock_create_raw(AF_INET as i32, IPPROTO_UDP as i32, 0, borrow mut s as *mut *mut socket) != -EPROTONOSUPPORT) {
+        return failed(reason, "check failed: net-raw-icmp: another protocol is refused\0");
+    }
+    if (ksock_create_raw(
+        AF_INET6 as i32,
+        IPPROTO_ICMP as i32,
+        0,
+        borrow mut s as *mut *mut socket,
+    ) != -EPROTONOSUPPORT) {
+        return failed(reason, "check failed: net-raw-icmp: IPv6 is refused\0");
+    }
+    s = rawSocket();
+    if (s.isNull()) {
+        return failed(reason, "check failed: net-raw-icmp: a raw ICMP socket\0");
+    }
+    ksock_set_nonblock(s, true);
+    let any = v4addr(0, 0);
+    if (ksock_bind(s, na(borrow any)) != -EOPNOTSUPP || ksock_connect(s, na(borrow any)) != -EOPNOTSUPP) {
+        return failed(reason, "check failed: net-raw-icmp: bind and connect are refused\0");
+    }
+    if (sendLit(s, "x", 0 as *netaddr) != -(EDESTADDRREQ as i64)) {
+        return failed(reason, "check failed: net-raw-icmp: an addressless send is refused\0");
+    }
+    if (ksock_recvfrom(s, 0 as *mut void, 0, 0 as *mut netaddr) != -(EAGAIN as i64)) {
+        return failed(reason, "check failed: net-raw-icmp: nothing to read yet\0");
+    }
+
+    let a = ipNow();
+    if (!rawExchange(reason, s)) {
+        return false;
+    }
+    let b = ipNow();
+    if (b.echoRcvd <= a.echoRcvd || b.echoReplied <= a.echoReplied) {
+        return failed(reason, "check failed: net-raw-icmp: the stack answered as with no raw socket\0");
+    }
+
+    // Every raw socket gets its copy, however many there are: more of them than one delivery batch holds. (Sixteen
+    // used to be a ceiling: the seventeenth never received anything.)
+    for (i in 0..RAW_TEST_MANY) {
+        if (nettest_ksock_create_raw(AF_INET as i32, IPPROTO_ICMP as i32, manyAt(i)) != 0) {
+            return failed(reason, "check failed: net-raw-icmp: twenty raw sockets\0");
+        }
+        ksock_set_nonblock(MANY[i] as *mut socket, true);
+    }
+    if (rawSendEcho(MANY[0] as *mut socket, 300) <= 0) {
+        return failed(reason, "check failed: net-raw-icmp: an echo from the first of them\0");
+    }
+    if (!waitUntil(Pred.RawAllHave, 5000)) {
+        return failed(reason, "check failed: net-raw-icmp: every one of them has a copy\0");
+    }
+    // A read-shut raw socket returns 0, and the source address is defined (zero), not whatever the caller's buffer
+    // held.
+    let shut = rawSocket();
+    if (shut.isNull() || ksock_shutdown(shut, SHUT_RD) != 0) {
+        return failed(reason, "check failed: net-raw-icmp: a read-shut raw socket\0");
+    }
+    var f = TcpTestAddr { family: 0xabab, port: 0xabab, words: [0xabababab; 4] };
+    if (ksock_recvfrom(shut, rawBuf() as *mut void, 256, naMut(mut f)) != 0) {
+        return failed(reason, "check failed: net-raw-icmp: it reads 0\0");
+    }
+    if (f.family != 0 || f.port != 0 || f.words[0] != 0) {
+        return failed(reason, "check failed: net-raw-icmp: and the source is zero\0");
+    }
+
+    // Fill the queue with requests nobody reads, then one more echo: the stack takes it and the raw copy is dropped.
+    while (ksock_recvfrom(s, rawBuf() as *mut void, 256, 0 as *mut netaddr) > 0) {}
+    for (i in 0..RAW_RXQ_MAX) {
+        if (rawSendEcho(s, truncate<u16>(100 + i)) <= 0) {
+            return failed(reason, "check failed: net-raw-icmp: a filling echo is sent\0");
+        }
+    }
+    if (!waitUntil(Pred.RawQueueAt(s, RAW_RXQ_MAX), 5000)) {
+        return failed(reason, "check failed: net-raw-icmp: the queue fills\0");
+    }
+    let a2 = ipNow();
+    let r0 = rawNow();
+    if (rawSendEcho(s, 200) <= 0) {
+        return failed(reason, "check failed: net-raw-icmp: the extra echo is sent\0");
+    }
+    if (!waitUntil(Pred.RawStackAndDrop(a2.echoRcvd, r0.rxQueueFull), 5000)) {
+        // Which half did not happen, and what the raw path did instead.
+        let i1 = ipNow();
+        let r1 = rawNow();
+        var buffer: [u8; 192] = [0; 192];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: net-raw-icmp: the extra echo: echo_rcvd ");
+        line.decimal(a2.echoRcvd);
+        line.text(" -> ");
+        line.decimal(i1.echoRcvd);
+        line.text(", rx_queue_full ");
+        line.decimal(r0.rxQueueFull);
+        line.text(" -> ");
+        line.decimal(r1.rxQueueFull);
+        line.text(", rx_nomem ");
+        line.decimal(r0.rxNomem);
+        line.text(" -> ");
+        line.decimal(r1.rxNomem);
+        line.text(", rx_delivered ");
+        line.decimal(r0.rxDelivered);
+        line.text(" -> ");
+        line.decimal(r1.rxDelivered);
+        line.text(", queue ");
+        line.decimal(nettest_raw_queued(s) as u64);
+        send(mut line);
+        return failed(reason, "the extra echo: the stack did not count it, or its copy was not dropped as full\0");
+    }
+    if (nettest_raw_queued(s) != RAW_RXQ_MAX) {
+        return failed(reason, "check failed: net-raw-icmp: the full queue kept its length\0");
+    }
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-raw-icmp: request and reply read raw with their IPv4 header; a full queue drops the copy");
+    send(mut line);
+    return true;
+}
+
+// ---- net-nonblock ----
+
+// Off the stack, as the C's static.
+static mut NBUF: [u8; 4096] = [0; 4096];
+
+/// Safety: the runner runs one test at a time, so NBUF is this test's.
+fn nbuf() -> *mut u8 => unsafe { borrow mut NBUF as *mut [u8; 4096] as *mut u8 };
+
+/// Safety: `s` is a socket of the test's.
+unsafe fn recvN(s: *mut socket, len: usize) -> i64 => ksock_recvfrom(s, nbuf() as *mut void, len, 0 as *mut netaddr);
+
+/// Budget left to a deadline, in ms.
+fn leftMs(deadline: u64, now: u64) -> u32 => truncate<u32>((deadline - now) / 1000000);
+
+/// The stream half: a non-blocking listener, connect, accept, receive, a pipe filled to refusal and drained, a hangup.
+/// Safety: the runner's `reason`.
+unsafe fn nonblockStream(reason: *mut *CChar) -> bool {
+    let addr = v4addr(LOOPBACK_N, 6027);
+    let ls = socketOf(SOCK_STREAM);
+    if (ls.isNull()) {
+        return failed(reason, "check failed: net-nonblock: a listener\0");
+    }
+    ksock_set_nonblock(ls, true);
+    if (ksock_bind(ls, na(borrow addr)) != 0 || ksock_listen(ls, 2) != 0) {
+        return failed(reason, "check failed: net-nonblock: it listens\0");
+    }
+    var a = 0 as *mut socket;
+    if (nettest_ksock_accept(ls, borrow mut a as *mut *mut socket, 0 as *mut netaddr) != -EAGAIN) {
+        return failed(reason, "check failed: net-nonblock: nothing to accept is EAGAIN\0");
+    }
+    if (ksock_ready(ls) != 0) {
+        return failed(reason, "check failed: net-nonblock: and the listener is not ready\0");
+    }
+    let c = socketOf(SOCK_STREAM);
+    if (c.isNull()) {
+        return failed(reason, "check failed: net-nonblock: a client\0");
+    }
+    ksock_set_nonblock(c, true);
+    let rc = ksock_connect(c, na(borrow addr));
+    if (rc != 0 && rc != -EINPROGRESS) {
+        return failed(reason, "check failed: net-nonblock: connect is done or in progress\0");
+    }
+    if (rc == -EINPROGRESS) {
+        if (ksock_connect(c, na(borrow addr)) != -EALREADY && ksock_connect(c, na(borrow addr)) != -EISCONN) {
+            return failed(reason, "check failed: net-nonblock: a second connect is EALREADY or EISCONN\0");
+        }
+    }
+    if (!waitUntil(Pred.Ready(c, IO_WRITABLE), 5000) || (ksock_ready(c) & IO_WRITABLE) == 0) {
+        return failed(reason, "check failed: net-nonblock: the client becomes writable\0");
+    }
+    if (ksock_connect(c, na(borrow addr)) != -EISCONN) {
+        return failed(reason, "check failed: net-nonblock: then connect is EISCONN\0");
+    }
+    if (!waitUntil(Pred.Ready(ls, IO_READABLE), 5000) || (ksock_ready(ls) & IO_READABLE) == 0) {
+        return failed(reason, "check failed: net-nonblock: the listener becomes readable\0");
+    }
+    if (nettest_ksock_accept(ls, borrow mut a as *mut *mut socket, 0 as *mut netaddr) != 0) {
+        return failed(reason, "check failed: net-nonblock: and accepts\0");
+    }
+    ksock_set_nonblock(a, true);
+    if (recvN(c, 4096) != -(EAGAIN as i64) || (ksock_ready(c) & IO_READABLE) != 0) {
+        return failed(reason, "check failed: net-nonblock: nothing to read is EAGAIN\0");
+    }
+    if (sendLit(a, "hello", 0 as *netaddr) != 5) {
+        return failed(reason, "check failed: net-nonblock: the server sends\0");
+    }
+    if (!waitUntil(Pred.Ready(c, IO_READABLE), 5000)) {
+        return failed(reason, "check failed: net-nonblock: the client becomes readable\0");
+    }
+    if (recvN(c, 4096) != 5) {
+        return failed(reason, "check failed: net-nonblock: and reads 5\0");
+    }
+    // Fill the pipe: a non-blocking send returns what fits, then -EAGAIN. The peer never reads here, so its window
+    // closes and the socket ends up unwritable for good -- but getting there is not instant, because an ACK still in
+    // flight frees send space again. So converge on the state instead of sampling it: keep sending while readiness
+    // says there is room, and stop the moment it says there is none. One deadline for the whole fill, and every
+    // readiness wait is checked against it.
+    let fill = SliceMut.fromRaw(nbuf(), 4096);
+    for (i in 0..4096) {
+        fill[truncate<usize>(i)] = 102; // 'f'
+    }
+    var pushed: u64 = 0;
+    var full = false;
+    let fillDeadline = clock_now_ns() + 5000 * 1000000;
+    var i: u32 = 0;
+    while (i < 400 && !full) {
+        i += 1;
+        if ((ksock_ready(c) & IO_WRITABLE) == 0) {
+            full = true;
+            break;
+        }
+        let n = ksock_sendto(c, nbuf() as *void, 4096, 0 as *netaddr);
+        if (n > 0) {
+            pushed += truncate<u64>(n);
+        } else if (n == -(EAGAIN as i64)) {
+            // The loop's own termination is `full`; on a transient refusal wait for the socket to say it is writable
+            // again rather than sleeping and guessing.
+            let now = clock_now_ns();
+            if (now >= fillDeadline) {
+                return failed(reason, "check failed: net-nonblock: the fill within its deadline\0");
+            }
+            if (!waitUntil(Pred.Ready(c, IO_WRITABLE), leftMs(fillDeadline, now))) {
+                return failed(reason, "check failed: net-nonblock: writable again within the fill's deadline\0");
+            }
+        } else {
+            return failed(reason, "check failed: net-nonblock: a send fails only with EAGAIN\0");
+        }
+    }
+    if (!full || pushed == 0) {
+        return failed(reason, "check failed: net-nonblock: the pipe filled\0");
+    }
+    var drained: u64 = 0;
+    let drainDeadline = clock_now_ns() + 5000 * 1000000;
+    i = 0;
+    while (i < 2000 && drained < pushed) {
+        i += 1;
+        let n = recvN(a, 4096);
+        if (n == -(EAGAIN as i64)) {
+            let now = clock_now_ns();
+            if (now >= drainDeadline) {
+                return failed(reason, "check failed: net-nonblock: the drain within its deadline\0");
+            }
+            if (!waitUntil(Pred.Ready(a, IO_READABLE), leftMs(drainDeadline, now))) {
+                return failed(reason, "check failed: net-nonblock: readable again within the drain's deadline\0");
+            }
+        } else if (n > 0) {
+            drained += truncate<u64>(n);
+        } else {
+            return failed(reason, "check failed: net-nonblock: a read fails only with EAGAIN\0");
+        }
+    }
+    if (drained != pushed) {
+        return failed(reason, "check failed: net-nonblock: every byte pushed was drained\0");
+    }
+    if (!waitUntil(Pred.Ready(c, IO_WRITABLE), 5000) || (ksock_ready(c) & IO_WRITABLE) == 0) {
+        return failed(reason, "check failed: net-nonblock: writable once the peer drained\0");
+    }
+    nettest_ksock_put(a);
+    if (!waitUntil(Pred.Ready(c, IO_HANGUP), 5000)) {
+        return failed(reason, "check failed: net-nonblock: the client sees the hangup\0");
+    }
+    if ((ksock_ready(c) & IO_HANGUP) == 0 || recvN(c, 4096) != 0) {
+        return failed(reason, "check failed: net-nonblock: and reads EOF\0");
+    }
+    nettest_ksock_put(c);
+    nettest_ksock_put(ls);
+    return true;
+}
+
+/// The pipe half, through the object operations.
+/// Safety: the runner's `reason`.
+unsafe fn nonblockPipe(reason: *mut *CChar) -> bool {
+    var rd = 0 as *mut kobject;
+    var wr = 0 as *mut kobject;
+    if (pipe_create(borrow mut rd as *mut *mut kobject, borrow mut wr as *mut *mut kobject) != 0) {
+        return failed(reason, "check failed: net-nonblock: a pipe\0");
+    }
+    if (kobject_set_nonblock(rd, 1) != 0 || kobject_set_nonblock(wr, 1) != 0) {
+        return failed(reason, "check failed: net-nonblock: both ends non-blocking\0");
+    }
+    if (kobject_set_nonblock(rd, -1) != 1) {
+        return failed(reason, "check failed: net-nonblock: asking says so\0");
+    }
+    if (nettest_kobject_read(rd, nbuf() as *mut void, 8) != -(EAGAIN as i64)) {
+        return failed(reason, "check failed: net-nonblock: an empty pipe's read is EAGAIN\0");
+    }
+    if (kobject_ready(rd) != 0 || kobject_ready(wr) != IO_WRITABLE) {
+        return failed(reason, "check failed: net-nonblock: an empty pipe's readiness\0");
+    }
+    var wrote: u64 = 0;
+    for (i in 0..64) {
+        let n = nettest_kobject_write(wr, nbuf() as *void, 4096);
+        if (n == -(EAGAIN as i64)) {
+            break;
+        }
+        if (n <= 0) {
+            return failed(reason, "check failed: net-nonblock: a pipe write fails only with EAGAIN\0");
+        }
+        wrote += truncate<u64>(n);
+    }
+    if (wrote != PIPE_SIZE) {
+        return failed(reason, "check failed: net-nonblock: the pipe takes PIPE_SIZE\0");
+    }
+    if (kobject_ready(wr) != 0 || (kobject_ready(rd) & IO_READABLE) == 0) {
+        return failed(reason, "check failed: net-nonblock: a full pipe's readiness\0");
+    }
+    if (nettest_kobject_read(rd, nbuf() as *mut void, 4096) != 4096) {
+        return failed(reason, "check failed: net-nonblock: a full pipe reads 4096\0");
+    }
+    if (kobject_ready(wr) != IO_WRITABLE) {
+        return failed(reason, "check failed: net-nonblock: and is writable again\0");
+    }
+    kobject_put(wr);
+    if ((kobject_ready(rd) & IO_HANGUP) == 0) {
+        return failed(reason, "check failed: net-nonblock: the reader sees the hangup\0");
+    }
+    var left: u64 = 0;
+    for (i in 0..8) {
+        let n = nettest_kobject_read(rd, nbuf() as *mut void, 4096);
+        if (n == 0) {
+            break;
+        }
+        if (n < 0) {
+            return failed(reason, "check failed: net-nonblock: the rest reads\0");
+        }
+        left += truncate<u64>(n);
+    }
+    if (left != PIPE_SIZE - 4096) {
+        return failed(reason, "check failed: net-nonblock: what was left\0");
+    }
+    if (nettest_kobject_read(rd, nbuf() as *mut void, 8) != 0) {
+        return failed(reason, "check failed: net-nonblock: then EOF\0"); // EOF
+    }
+    kobject_put(rd);
+    if ((kobject_ready(console_object()) & IO_WRITABLE) == 0) {
+        return failed(reason, "check failed: net-nonblock: the console is writable\0");
+    }
+    if (kobject_set_nonblock(console_object(), 1) != -EOPNOTSUPP) {
+        return failed(reason, "check failed: net-nonblock: and has no non-blocking mode\0");
+    }
+    return true;
+}
+
+/// net-nonblock: sockets, datagrams and pipe ends report readiness and never block.
+/// Safety: the runner's `reason`.
+@export("selftest_net_nonblock")
+unsafe fn nonblock(reason: *mut *CChar) -> bool {
+    if (!nonblockStream(reason)) {
+        return false;
+    }
+    // Datagrams.
+    let u = socketOf(SOCK_DGRAM);
+    if (u.isNull()) {
+        return failed(reason, "check failed: net-nonblock: a datagram socket\0");
+    }
+    ksock_set_nonblock(u, true);
+    let ua = v4addr(LOOPBACK_N, 6028);
+    if (ksock_bind(u, na(borrow ua)) != 0) {
+        return failed(reason, "check failed: net-nonblock: it binds\0");
+    }
+    if (recvN(u, 4096) != -(EAGAIN as i64)) {
+        return failed(reason, "check failed: net-nonblock: nothing to read is EAGAIN\0");
+    }
+    if (ksock_ready(u) != IO_WRITABLE) {
+        return failed(reason, "check failed: net-nonblock: an idle datagram socket is writable only\0");
+    }
+    if (sendLit(u, "d", na(borrow ua)) != 1) {
+        return failed(reason, "check failed: net-nonblock: it sends to itself\0");
+    }
+    if (!waitUntil(Pred.Ready(u, IO_READABLE), 5000)) {
+        return failed(reason, "check failed: net-nonblock: and becomes readable\0");
+    }
+    if (recvN(u, 4096) != 1) {
+        return failed(reason, "check failed: net-nonblock: and reads it\0");
+    }
+    nettest_ksock_put(u);
+
+    if (!nonblockPipe(reason)) {
+        return false;
+    }
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-nonblock: sockets, datagrams and pipe ends report readiness and never block");
+    send(mut line);
+    return true;
+}

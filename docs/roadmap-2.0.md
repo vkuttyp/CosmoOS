@@ -1041,7 +1041,16 @@ net-sockerr-accept, net-sockerr-locking and net-rxhook-grace, with the
 hand-built ICMP unreachable the first two inject and their own
 `wait_until` for a socket's error. A socket the C put on every path is
 held in a slot of the test's and put after the test's body, however
-the body ended.
+the body ended. Batch 4, `nettest_tcp.cee` (milestone 8's hardening):
+net-tcp-syncache, net-tcp-rfc5961, net-tcp-reorder, net-tcp-keepalive,
+net-icmp-limit, net-raw-icmp and net-nonblock, with the injected
+segment, the loopback filters and the holding server. `wait_until`
+is a `Pred` enum matched in one `holds`, a case per predicate the C
+had, under the C's contract (one field, or a monotone sum of monotonic
+ones); a counter struct is read into a room and copied out into the
+batch's own snapshot, so no frame holds two. The pipe ends' read and
+write, function-pointer fields CeeSafe cannot call, go through two
+wrappers in `nettest.c`.
 
 Size: about 3.0x.
 
