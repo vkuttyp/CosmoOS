@@ -1,0 +1,972 @@
+// nettest_flows.cee - the operator's flow listing, in CeeSafe: roadmap 2.0 SA6 (nettest, the twelfth batch).
+// net-flows-nat and net-flows-fw, as nettest.c had them (docs/audit/next-subsystem-net-flows.md), with the read of the
+// whole /dev/net/tapctl snapshot that only they used. The snapshot's sections are walked by nettest_ctl.cee
+// (nettest_netctl_flows_off, nettest_netctl_snapshot_len); the world side of an uplink is nettest_hostin.cee's
+// (nettest_hin_*), the guests' frames nettest_fwd.cee's (nettest_fwt_send).
+//
+// A C struct the kernel fills (the NAT and firewall listings and counters, the snapshot's flow section) is read in a
+// room of this file's, field by field; a rule it takes is built in a zeroed room, as the C's designated initialiser
+// zeroed what it did not name. An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest.c).
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/net/tap.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
+extern "C" {
+    struct netaddr;
+    struct file;
+    struct tap;
+    struct mbuf;
+    struct socket;
+    struct hin_seg;
+    /// kernel/include/kernel/netif.h: other CPUs count into the statistics too, atomically (ADR 0041 §3.1).
+    struct netif_stats {
+        rx_dropped: AtomicU64;
+    }
+    struct netif {
+        stats: netif_stats;
+    }
+    struct nat_stats {
+        out_new: u64;
+        out_drop_share: u64;
+        out_drop_table: u64;
+        out_drop_noport: u64;
+        entries: u32;
+    }
+    struct nat_flow {
+        kind: u8;
+        proto: u8;
+        est: bool;
+        orig_port: u16;
+        nat_port: u16;
+        peer_port: u16;
+        orig_ip: u32;
+        nat_ip: u32;
+        peer_ip: u32;
+        expires_ns: u64;
+    }
+    struct fw_stats {
+        accept_established: u64;
+        flow_new: u64;
+        flow_drop_share: u64;
+        flow_drop_table: u64;
+        hin_flow_new: u64;
+    }
+    struct fw_flow_info {
+        guest_ip: u32;
+        a_ip: u32;
+        b_ip: u32;
+        a_port: u16;
+        b_port: u16;
+        proto: u8;
+        est: bool;
+    }
+    struct fw_rule {
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_ip: u32;
+    }
+    struct cosmo_netctl_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_flow_counters {
+        masq_drop_share: u64;
+        masq_drop_table: u64;
+    }
+    struct cosmo_netctl_flow_list {
+        version: u16;
+        count: u16;
+        nat_quota: u16;
+        fw_quota: u16;
+        fw_host_quota: u16;
+        counters: cosmo_netctl_flow_counters;
+    }
+    struct cosmo_netctl_flow {
+        table: u8;
+        kind: u8;
+        proto: u8;
+        flags: u8;
+        guest_addr: u32;
+        src_addr: u32;
+        dst_addr: u32;
+        src_port: u16;
+        dst_port: u16;
+        nat_addr: u32;
+        nat_port: u16;
+        expires_ms: u32;
+    }
+
+    fn nettest_tap_create(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap;
+    fn nettest_tap_destroy(t: *mut tap);
+    fn nettest_vfs_open(path: *CChar, flags: u32, out: *mut *mut file) -> i32;
+    fn nettest_file_put(f: *mut file);
+    fn nettest_ksock_put(s: *mut socket);
+    fn nettest_seed_arp(nif: *mut netif, peerIp: u32, peerMac: *u8);
+    fn nettest_wrap(
+        frame: *mut u8,
+        dmac: *u8,
+        smac: *u8,
+        sip: u32,
+        dip: u32,
+        ttl: u8,
+        proto: u8,
+        l4: *void,
+        l4len: u16,
+    ) -> u32;
+    fn nettest_mk_udp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, pl: *u8, pllen: u16) -> u16;
+    fn nettest_mk_tcp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, flags: u8) -> u16;
+    fn nettest_fwt_send(
+        from: *mut file,
+        tapmac: *u8,
+        gmac: *u8,
+        sip: u32,
+        dip: u32,
+        proto: u8,
+        l4: *u8,
+        l4len: u16,
+    ) -> bool;
+    fn nettest_hin_recv(u: *mut tap, proto: u8, wport: u16, o: *mut hin_seg, tries: u32) -> bool;
+    fn nettest_hin_drain(u: *mut tap);
+    fn nettest_hin_udp_listener(out: *mut *mut socket, ip: u32, port: u16) -> bool;
+    fn nettest_netctl_flows_off(buf: *u8, pfRules: u32) -> usize;
+    fn nettest_netctl_snapshot_len(buf: *u8, pfRules: u32) -> i64;
+
+    fn tap_netif(t: *mut tap) -> *mut netif;
+    fn tap_inject(t: *mut tap, frame: *void, len: u32) -> i32;
+    fn tap_recv(t: *mut tap) -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_set_forward(nif: *mut netif, on: bool);
+    fn netif_set_masquerade(nif: *mut netif, on: bool);
+    fn nat_flush();
+    fn nat_get_stats(out: *mut nat_stats);
+    fn nat_flow_list(out: *mut nat_flow, max: u32, nowNs: u64) -> u32;
+    fn fw_flush();
+    fn fw_get_stats(out: *mut fw_stats);
+    fn fw_rule_add(guestIp: u32, atIndex: u32, r: *fw_rule) -> i32;
+    fn fw_flow_list(out: *mut fw_flow_info, max: u32, nowNs: u64) -> u32;
+    fn clock_now_ns() -> u64;
+    fn thread_sleep_ns(ns: u64);
+}
+
+// ---- ip.h, tcp.h, nat.h, fw.h, netctl.h and socket values (asserted against the headers in nettest.c) ----
+
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const TH_SYN: u8 = 0x02;
+const TH_ACK: u8 = 0x10;
+const NAT_TABLE_SIZE: u32 = 256;
+const NAT_QUOTA_PER_GUEST: u32 = 32;
+const NAT_PORT_MIN: u16 = 40000;
+const NAT_PORT_MAX: u16 = 49151;
+const NAT_TIMEOUT_UDP_NS: u64 = 30000000000;
+const NAT_KIND_MASQ: u8 = 0;
+const FW_ACCEPT: u8 = 1;
+const FW_DIR_TO_GUEST: u8 = 2;
+const FW_HOST_GUEST_IP: u32 = 0;
+const FW_FLOW_QUOTA_PER_GUEST: u32 = 32;
+const FW_FLOW_QUOTA_HOST: u16 = 64;
+const FW_FLOW_MAX: u32 = 320;
+const NETCTL_VERSION: u16 = 8;
+const NETCTL_FLOW_NAT: u8 = 1;
+const NETCTL_FLOW_FW: u8 = 2;
+const NETCTL_FLOW_MASQ: u8 = 1;
+const NETCTL_FLOW_GUEST: u8 = 3;
+const NETCTL_FLOW_HOST: u8 = 4;
+const NETCTL_FLOW_ESTABLISHED: u8 = 0x01;
+const NETCTL_PROTO_TCP: u8 = 6;
+const NETCTL_PROTO_UDP: u8 = 17;
+const NETCTL_HOST_ADDR: u32 = 0;
+const O_RDWR: u32 = 0x0002;
+const O_NONBLOCK: u32 = 0x0800;
+const AF_INET: u32 = 2;
+/// The C's HIN_TRIES: how long a *positive* wait polls (it returns as soon as what it waits for arrives).
+const HIN_TRIES: u32 = 200;
+/// htonl(0xffffff00): a /24 mask as it lies in a little-endian u32.
+const MASK24_N: u32 = 0x00ffffff;
+const NS_PER_SEC: u64 = 1000000000;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+/// struct netaddr for an IPv4 address and port.
+fn v4addr(ip: u32, port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), ip, 0, 0, 0];
+
+fn na(a: borrow [u32; 5]) -> *netaddr => a as *[u32; 5] as *netaddr;
+
+fn macOf(m: borrow [u8; 6]) -> *u8 => m as *[u8; 6] as *u8;
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * 1000000);
+    }
+}
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+/// The C's kinfo: one line, as it is.
+fn info(text: StringView) {
+    var buffer: [u8; 512] = [0; 512];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+// ---- The rooms, off the stack ----
+
+// A statistics struct (1 KiB, checked), a rule (64 bytes, checked), the L4 header and frame built, the datagram read
+// back (a struct hin_seg, 92 bytes, asserted in nettest.c), a listing's entries (NAT_TABLE_SIZE struct nat_flow or
+// FW_FLOW_MAX struct fw_flow_info, checked), one snapshot entry's copy, and the whole snapshot (COSMO_NETCTL_SNAPSHOT_MAX
+// fits, asserted in nettest.c).
+static mut STATS: [u64; 128] = [0; 128];
+static mut RULE: [u64; 8] = [0; 8];
+static mut L4: [u8; 64] = [0; 64];
+static mut FRAME: [u8; 160] = [0; 160];
+static mut SG: [u64; 16] = [0; 16];
+static mut LIST: [u64; 1280] = [0; 1280];
+static mut ENTRY: [u64; 24] = [0; 24];
+static mut SNAP: [u8; 65536] = [0; 65536];
+
+/// Safety: the runner runs one test at a time, so the statics are this test's.
+unsafe fn statsRoom(bytes: usize) -> *mut u8 {
+    if (bytes > 1024) {
+        tooSmall();
+    }
+    return borrow mut STATS as *mut [u64; 128] as *mut u8;
+}
+
+/// Safety: as statsRoom.
+fn l4() -> *mut u8 => unsafe { borrow mut L4 as *mut [u8; 64] as *mut u8 };
+
+/// Safety: as statsRoom.
+fn frame() -> *mut u8 => unsafe { borrow mut FRAME as *mut [u8; 160] as *mut u8 };
+
+/// Safety: as statsRoom; the room holds a struct hin_seg.
+fn sg() -> *mut hin_seg => unsafe { borrow mut SG as *mut [u64; 16] as *mut hin_seg };
+
+/// Safety: as statsRoom.
+fn list() -> *mut u8 => unsafe { borrow mut LIST as *mut [u64; 1280] as *mut u8 };
+
+/// Safety: as statsRoom.
+fn snap() -> *mut u8 => unsafe { borrow mut SNAP as *mut [u8; 65536] as *mut u8 };
+
+/// A copy of the `bytes` at `src` in ENTRY (the C's memcpy into a local).
+/// Safety: as statsRoom; `src` points to `bytes` readable bytes.
+unsafe fn copied(src: *u8, bytes: usize) -> *u8 {
+    if (bytes > 192) {
+        tooSmall();
+    }
+    let room = borrow mut ENTRY as *mut [u64; 24] as *mut u8;
+    let to = SliceMut.fromRaw(room, bytes);
+    let from = Slice.fromRaw(src, bytes);
+    for (i in 0..bytes) {
+        to[i] = from[i];
+    }
+    return room as *u8;
+}
+
+// ---- The counters ----
+
+/// NAT's counters at one read.
+struct Nat {
+    created: u64;
+    share: u64;
+    table: u64;
+    noport: u64;
+    entries: u32;
+}
+
+/// Safety: as statsRoom.
+unsafe fn natNow() -> Nat {
+    let p = statsRoom(layoutOf<nat_stats>().size) as *mut nat_stats;
+    nat_get_stats(p);
+    let s = Ptr.toBorrow(p as *nat_stats);
+    return Nat {
+        created: s.out_new,
+        share: s.out_drop_share,
+        table: s.out_drop_table,
+        noport: s.out_drop_noport,
+        entries: s.entries,
+    };
+}
+
+/// The firewall's counters at one read.
+struct Fw {
+    established: u64;
+    created: u64;
+    share: u64;
+    table: u64;
+    hostNew: u64;
+}
+
+/// Safety: as statsRoom.
+unsafe fn fwNow() -> Fw {
+    let p = statsRoom(layoutOf<fw_stats>().size) as *mut fw_stats;
+    fw_get_stats(p);
+    let s = Ptr.toBorrow(p as *fw_stats);
+    return Fw {
+        established: s.accept_established,
+        created: s.flow_new,
+        share: s.flow_drop_share,
+        table: s.flow_drop_table,
+        hostNew: s.hin_flow_new,
+    };
+}
+
+/// A firewall counter a wait watches.
+enum FwCounter {
+    Established,
+    Created,
+    Share,
+}
+
+fn fwValue(s: borrow Fw, c: FwCounter) -> u64 => match (c) {
+    FwCounter.Established => s.established,
+    FwCounter.Created => s.created,
+    FwCounter.Share => s.share,
+};
+
+/// The C's FWT_RISES: whether `c` passed `base` (read up to 40 times 10 ms apart), and the counters at the last read.
+struct Rise {
+    ok: bool;
+    s: Fw;
+}
+
+/// Safety: as statsRoom.
+unsafe fn rises(c: FwCounter, base: u64) -> Rise {
+    var s = fwNow();
+    for (i in 0..40) {
+        s = fwNow();
+        if (fwValue(borrow s, c) > base) {
+            return Rise { ok: true, s: s };
+        }
+        sleepMs(10);
+    }
+    return Rise { ok: false, s: s };
+}
+
+/// Free whatever the tap has queued toward the world.
+/// Safety: `t` is the test's.
+unsafe fn drain(t: *mut tap) {
+    var d = tap_recv(t);
+    while (!d.isNull()) {
+        m_freem(d);
+        d = tap_recv(t);
+    }
+}
+
+// ---- The snapshot ----
+
+/// Read the whole /dev/net/tapctl snapshot into SNAP: where its flow section starts (0 on a failed read), and its
+/// length in `len`.
+/// Safety: as statsRoom.
+unsafe fn flowsRead(len: borrow mut i64) -> usize {
+    var f = 0 as *mut file;
+    let path = "/dev/net/tapctl\0";
+    let rc = nettest_vfs_open(path.ptr as *CChar, O_RDWR, borrow mut f as *mut *mut file);
+    if (rc != 0 || f.isNull()) {
+        return 0;
+    }
+    len = file_read(f, snap() as *mut void, 65536);
+    nettest_file_put(f);
+    if (len <= 0) {
+        return 0;
+    }
+    return nettest_netctl_flows_off(snap() as *u8, forwards() as u32);
+}
+
+/// The forward count the snapshot begins with.
+/// Safety: as statsRoom; SNAP holds a snapshot.
+unsafe fn forwards() -> u16 =>
+    Ptr.toBorrow(copied(snap() as *u8, layoutOf<cosmo_netctl_list>().size) as *cosmo_netctl_list).count;
+
+/// The flow section's header, as the fields the tests read.
+struct Section {
+    version: u16;
+    count: u16;
+    natQuota: u16;
+    fwQuota: u16;
+    fwHostQuota: u16;
+    masqShare: u64;
+    masqTable: u64;
+}
+
+/// Safety: as statsRoom; SNAP holds a snapshot whose flow section starts at `off`.
+unsafe fn section(off: usize) -> Section {
+    let h = Ptr.toBorrow(
+        copied((snap() as *u8).add(off), layoutOf<cosmo_netctl_flow_list>().size) as *cosmo_netctl_flow_list,
+    );
+    return Section {
+        version: h.version,
+        count: h.count,
+        natQuota: h.nat_quota,
+        fwQuota: h.fw_quota,
+        fwHostQuota: h.fw_host_quota,
+        masqShare: h.counters.masq_drop_share,
+        masqTable: h.counters.masq_drop_table,
+    };
+}
+
+/// The `i`th flow of the section at `off`, copied.
+/// Safety: as section; `i` is below its count.
+unsafe fn flowAt(off: usize, i: usize) -> *cosmo_netctl_flow {
+    let size = layoutOf<cosmo_netctl_flow>().size;
+    let at = (snap() as *u8).add(off + layoutOf<cosmo_netctl_flow_list>().size + i * size);
+    return copied(at, size) as *cosmo_netctl_flow;
+}
+
+// ---- The listings ----
+
+/// NAT's flows live at `now`, in LIST: how many.
+/// Safety: as statsRoom.
+unsafe fn natList(now: u64) -> u32 {
+    if (layoutOf<nat_flow>().size * (NAT_TABLE_SIZE as usize) > 10240) {
+        tooSmall();
+    }
+    return nat_flow_list(list() as *mut nat_flow, NAT_TABLE_SIZE, now);
+}
+
+/// Safety: as natList; `i` is below what it listed.
+unsafe fn natAt(i: usize) -> *nat_flow => (list() as *u8).add(i * layoutOf<nat_flow>().size) as *nat_flow;
+
+/// The firewall's flows live at `now`, in LIST: how many.
+/// Safety: as statsRoom.
+unsafe fn fwList(now: u64) -> u32 {
+    if (layoutOf<fw_flow_info>().size * (FW_FLOW_MAX as usize) > 10240) {
+        tooSmall();
+    }
+    return fw_flow_list(list() as *mut fw_flow_info, FW_FLOW_MAX, now);
+}
+
+/// Safety: as fwList; `i` is below what it listed.
+unsafe fn fwAt(i: usize) -> *fw_flow_info => (list() as *u8).add(i * layoutOf<fw_flow_info>().size) as *fw_flow_info;
+
+// ---- net-flows-nat ----
+
+/// The datagrams `flood` floods: from `src` port `sport`, to the peer's port 9, through `t`.
+/// Safety: the tap is the test's.
+unsafe fn udpOut(t: *mut tap, tapMac: *u8, guestMac: *u8, src: u32, peer: u32, sport: u16) -> bool {
+    var payload: [u8; 4] = [0x66, 0x6c, 0x6f, 0x77]; // "flow"
+    let l4len = nettest_mk_udp(l4(), src, peer, sport, 9, borrow payload as *[u8; 4] as *u8, 4);
+    let flen = nettest_wrap(frame(), tapMac, guestMac, src, peer, 64, IPPROTO_UDP, l4() as *void, l4len);
+    return tap_inject(t, frame() as *void, flen) == 0;
+}
+
+/// The eight more guests' taps (step 5).
+struct Extra {
+    t: [*mut tap; 8];
+}
+
+/// The MAC of step 5's guest `k`, and of its tap.
+fn xmac(k: usize) -> [u8; 6] => [0x52, 0x54, 0x00, 0x24, truncate<u8>(k), 0x01];
+
+/// A guest flooding past its NAT share is listed at exactly its share, its refusals counted as the share's and none as
+/// the table's, none listed past expiry, the device lists the same flows and counters, and a ninth source finds the
+/// whole table full and is counted as the table's.
+/// Safety: the runner's `reason`.
+@export("selftest_net_flows_nat")
+unsafe fn flowsNat(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    let gMac: [u8; 6] = [0x52, 0x54, 0x00, 0x21, 0x00, 0x01];
+    let uMac: [u8; 6] = [0x52, 0x54, 0x00, 0x22, 0x00, 0x01];
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x21, 0x00, 0x0f];
+    let peerMac: [u8; 6] = [0x52, 0x54, 0x00, 0x22, 0x00, 0x63];
+    let gIp = ip4(10, 77, 31, 1);
+    let guest = ip4(10, 77, 31, 15);
+    let uIp = ip4(10, 77, 32, 1);
+    let peer = ip4(10, 77, 32, 99);
+    let flood = NAT_TABLE_SIZE + 8;
+
+    let g = nettest_tap_create("flwg\0".ptr as *CChar, gIp, MASK24_N, macOf(borrow gMac));
+    if (g.isNull()) {
+        return failed(reason, "check failed: net-flows-nat: the guest's tap\0");
+    }
+    let u = nettest_tap_create("flwu\0".ptr as *CChar, uIp, MASK24_N, macOf(borrow uMac));
+    if (u.isNull()) {
+        return failed(reason, "check failed: net-flows-nat: the uplink tap\0");
+    }
+    netif_set_forward(tap_netif(g), true);
+    netif_set_masquerade(tap_netif(g), true);
+    nettest_seed_arp(tap_netif(u), peer, macOf(borrow peerMac));
+    nettest_seed_arp(tap_netif(g), guest, macOf(borrow guestMac));
+    nat_flush();
+
+    // (1) one guest floods past its share: `flood` distinct UDP flows.
+    let ns0 = natNow();
+    for (i in 0..flood) {
+        if (!udpOut(g, macOf(borrow gMac), macOf(borrow guestMac), guest, peer, truncate<u16>(10000 + i))) {
+            return failed(reason, "check failed: net-flows-nat: a flooded datagram is injected\0");
+        }
+        if ((i & 31) == 31) {
+            drain(u);
+        }
+    }
+    for (i in 0..200) { // every injected datagram decided
+        drain(u);
+        let ns = natNow();
+        if ((ns.created - ns0.created) + (ns.share - ns0.share) >= flood as u64) {
+            break;
+        }
+        sleepMs(10);
+    }
+    var ns1 = natNow();
+    if (ns1.created - ns0.created != NAT_QUOTA_PER_GUEST as u64) {
+        return failed(reason, "check failed: net-flows-nat: the share's flows are created\0");
+    }
+    if (ns1.share - ns0.share != (flood - NAT_QUOTA_PER_GUEST) as u64) { // 232, each by name
+        return failed(reason, "check failed: net-flows-nat: the rest refused as the share's\0");
+    }
+    if (ns1.table != ns0.table) { // the share, not the table
+        return failed(reason, "check failed: net-flows-nat: none refused as the table's\0");
+    }
+
+    // (2) the listing is exactly the share: NAT_QUOTA_PER_GUEST masqueraded flows of this guest, each a flooded source
+    // port, each lent a NAT port.
+    let now = clock_now_ns();
+    let n = natList(now);
+    if (n != NAT_QUOTA_PER_GUEST) {
+        return failed(reason, "check failed: net-flows-nat: the share is listed\0");
+    }
+    for (i in 0..n as usize) {
+        let f = Ptr.toBorrow(natAt(i));
+        if (f.kind != NAT_KIND_MASQ || f.proto != IPPROTO_UDP || f.est) {
+            return failed(reason, "check failed: net-flows-nat: a masqueraded UDP flow, not established\0");
+        }
+        if (f.orig_ip != guest || f.orig_port < 10000 || (f.orig_port as u32) >= 10000 + flood) {
+            return failed(reason, "check failed: net-flows-nat: from a flooded source port\0");
+        }
+        if (f.peer_ip != peer || f.peer_port != 9 || f.nat_ip != uIp) {
+            return failed(reason, "check failed: net-flows-nat: to the peer, as the uplink\0");
+        }
+        if (f.nat_port < NAT_PORT_MIN || f.nat_port > NAT_PORT_MAX) {
+            return failed(reason, "check failed: net-flows-nat: a lent NAT port\0");
+        }
+        if (f.expires_ns <= now) {
+            return failed(reason, "check failed: net-flows-nat: not yet expired\0");
+        }
+    }
+
+    // (3) N24: listed exactly when the share counts it. At an instant past the timeout, with nothing aged, the entries
+    // are still in use -- the table still holds them -- yet none is listed, because none holds a share any more.
+    if (natList(now + NAT_TIMEOUT_UDP_NS + 1) != 0) {
+        return failed(reason, "check failed: net-flows-nat: none listed past the timeout\0");
+    }
+    if (natNow().entries != NAT_QUOTA_PER_GUEST) { // still in use at the real now
+        return failed(reason, "check failed: net-flows-nat: the entries still in use\0");
+    }
+
+    // (4) through the device: the same flows, the share and the counters.
+    var len: i64 = 0;
+    let off = flowsRead(mut len);
+    if (off == 0 || len != nettest_netctl_snapshot_len(snap() as *u8, forwards() as u32)) {
+        return failed(reason, "check failed: net-flows-nat: the snapshot is whole\0");
+    }
+    let lh = section(off);
+    if (lh.version != NETCTL_VERSION || lh.natQuota != truncate<u16>(NAT_QUOTA_PER_GUEST)) {
+        return failed(reason, "check failed: net-flows-nat: the flow section's version and NAT share\0");
+    }
+    ns1 = natNow();
+    if (lh.masqShare != ns1.share || lh.masqTable != ns1.table) {
+        return failed(reason, "check failed: net-flows-nat: the device's refusal counters\0");
+    }
+    var mine: u32 = 0;
+    for (i in 0..lh.count as usize) {
+        let fl = Ptr.toBorrow(flowAt(off, i));
+        if (fl.table != NETCTL_FLOW_NAT || fl.guest_addr != guest) {
+            continue;
+        }
+        if (fl.kind != NETCTL_FLOW_MASQ || fl.proto != NETCTL_PROTO_UDP) {
+            return failed(reason, "check failed: net-flows-nat: the device lists a masqueraded UDP flow\0");
+        }
+        if (fl.src_addr != guest || fl.dst_addr != peer || fl.dst_port != 9) { // the guest opened it
+            return failed(reason, "check failed: net-flows-nat: the device lists it as the guest's to the peer\0");
+        }
+        if (fl.nat_addr != uIp || fl.nat_port < NAT_PORT_MIN || fl.expires_ms == 0) {
+            return failed(reason, "check failed: net-flows-nat: the device lists its NAT identity and expiry\0");
+        }
+        mine += 1;
+    }
+    if (mine != NAT_QUOTA_PER_GUEST) {
+        return failed(reason, "check failed: net-flows-nat: the device lists the share\0");
+    }
+
+    // (5) the other cause: the whole table. The table is exactly eight shares, so only a ninth guest can find it full
+    // with its own share unspent. A masquerading tap forwards only its one guest (.15; the anti-spoof rule in
+    // ipv4_forward), so the eight more guests are eight more taps: seven fill the table, the eighth's every flow is
+    // refused -- as the table's.
+    let extra = (NAT_TABLE_SIZE / NAT_QUOTA_PER_GUEST) as usize;
+    var xt = Extra { t: [0 as *mut tap; 8] };
+    var made = true;
+    var k: usize = 0;
+    while (k < extra && made) {
+        var name: [u8; 8] = [0x66, 0x6c, 0x77, 0x78, 0x30, 0, 0, 0]; // "flwx0"
+        name[4] = truncate<u8>(0x30 + k);
+        let mac = xmac(k);
+        let ip = ip4(10, 77, 40 + truncate<u32>(k), 1);
+        xt.t[k] = nettest_tap_create(borrow name as *[u8; 8] as *CChar, ip, MASK24_N, macOf(borrow mac));
+        made = !xt.t[k].isNull();
+        if (made) {
+            netif_set_forward(tap_netif(xt.t[k]), true);
+            netif_set_masquerade(tap_netif(xt.t[k]), true);
+        }
+        k += 1;
+    }
+    // One guest at a time, each decided in full before the next sends: which guest the full table refuses is then the
+    // eighth by construction, not by the network worker's order across eight interfaces, and no burst of 256 frames
+    // crosses them at once.
+    let nx0 = natNow();
+    var decided = true;
+    k = 0;
+    while (k < extra && made && decided) {
+        let src = ip4(10, 77, 40 + truncate<u32>(k), 15);
+        let mac = xmac(k);
+        for (i in 0..NAT_QUOTA_PER_GUEST) {
+            let sent = udpOut(xt.t[k], macOf(borrow mac), macOf(borrow guestMac), src, peer, truncate<u16>(20000 + i));
+            made = sent && made;
+        }
+        decided = false;
+        var w = 0;
+        while (w < 500 && !decided) { // returns as soon as all are decided
+            drain(u);
+            let ns = natNow();
+            decided = (ns.created - nx0.created) + (ns.share - nx0.share) + (ns.table - nx0.table) >=
+                ((k as u64) + 1) * (NAT_QUOTA_PER_GUEST as u64);
+            if (!decided) {
+                sleepMs(10);
+            }
+            w += 1;
+        }
+        k += 1;
+    }
+    let nx1 = natNow();
+    var rxDropped: u64 = 0;
+    for (j in 0..extra) {
+        if (!xt.t[j].isNull()) {
+            rxDropped += Ptr.toBorrow(tap_netif(xt.t[j])).stats.rx_dropped.loadWith(LoadOrdering.Relaxed);
+        }
+    }
+    let listedAll = natList(clock_now_ns());
+    // Said before any check, so a failure names where the datagrams went.
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-flows-nat: table step new ");
+    line.decimal(nx1.created - nx0.created);
+    line.text(" share ");
+    line.decimal(nx1.share - nx0.share);
+    line.text(" table ");
+    line.decimal(nx1.table - nx0.table);
+    line.text(" noport ");
+    line.decimal(nx1.noport - nx0.noport);
+    line.text(", tap rx_dropped ");
+    line.decimal(rxDropped);
+    line.text(", listed ");
+    line.decimal(listedAll as u64);
+    line.text(", every guest decided: ");
+    line.text(if (decided) "yes" else "no");
+    KernelLog.send(LogLevel.Info, line);
+    nat_flush();
+    for (j in 0..extra) {
+        if (!xt.t[j].isNull()) {
+            nettest_tap_destroy(xt.t[j]);
+        }
+    }
+    if (!made || !decided) {
+        return failed(reason, "check failed: net-flows-nat: every guest's tap made and every datagram decided\0");
+    }
+    if (nx1.created - nx0.created != (NAT_TABLE_SIZE - NAT_QUOTA_PER_GUEST) as u64) { // seven more shares
+        return failed(reason, "check failed: net-flows-nat: seven more shares created\0");
+    }
+    if (nx1.table - nx0.table != NAT_QUOTA_PER_GUEST as u64) { // the eighth, by the table
+        return failed(reason, "check failed: net-flows-nat: the eighth refused as the table's\0");
+    }
+    if (nx1.share != nx0.share) { // never by a share
+        return failed(reason, "check failed: net-flows-nat: none refused as a share's\0");
+    }
+    if (listedAll != NAT_TABLE_SIZE) {
+        return failed(reason, "check failed: net-flows-nat: the whole table listed\0");
+    }
+
+    nat_flush();
+    nettest_tap_destroy(u);
+    nettest_tap_destroy(g);
+    var done: [u8; 320] = [0; 320];
+    var last = TextWriter.create(mut done[..]);
+    last.text("selftest: net-flows-nat: a guest flooding ");
+    last.decimal(flood as u64);
+    last.text(" flows was listed at exactly its share of ");
+    last.decimal(NAT_QUOTA_PER_GUEST as u64);
+    last.text(", ");
+    last.decimal((flood - NAT_QUOTA_PER_GUEST) as u64);
+    last.text(
+        " refusals counted as the share's and none as the table's, none listed past expiry, and a ninth source refused by the full table counted as the table's",
+    );
+    KernelLog.send(LogLevel.Info, last);
+    return true;
+}
+
+// ---- net-flows-fw ----
+
+/// A guest's datagram from `ga`:`sp` to `gb`:`dp`, through `fa`.
+/// Safety: the file is the test's.
+unsafe fn guestUdp(fa: *mut file, tapMac: *u8, aMac: *u8, ga: u32, gb: u32, sp: u16, dp: u16) -> bool {
+    var pl: [u8; 4] = [0x66, 0x6c, 0x6f, 0x77]; // "flow"
+    let len = nettest_mk_udp(l4(), ga, gb, sp, dp, borrow pl as *[u8; 4] as *u8, 4);
+    return nettest_fwt_send(fa, tapMac, aMac, ga, gb, IPPROTO_UDP, l4() as *u8, len);
+}
+
+/// A guest's segment with `flags`, through `fa`.
+/// Safety: the file is the test's.
+unsafe fn guestTcp(fa: *mut file, tapMac: *u8, aMac: *u8, ga: u32, gb: u32, sp: u16, dp: u16, flags: u8) -> bool {
+    let len = nettest_mk_tcp(l4(), ga, gb, sp, dp, flags);
+    return nettest_fwt_send(fa, tapMac, aMac, ga, gb, IPPROTO_TCP, l4() as *u8, len);
+}
+
+/// Seed the guest `ip` at `mac` behind the interface `name`; false when it is not there.
+/// Safety: thread context.
+unsafe fn seedOn(name: StringView, ip: u32, mac: *u8) -> bool {
+    let nn = netif_find(name.ptr as *CChar);
+    if (nn.isNull()) {
+        return false;
+    }
+    nettest_seed_arp(nn, ip, mac);
+    netif_put(nn);
+    return true;
+}
+
+/// The test's two guest files and the host's socket.
+struct Held {
+    fa: *mut file;
+    fb: *mut file;
+    cs: *mut socket;
+}
+
+/// A flow the host opened is listed as the host's, guest-to-guest UDP and TCP are listed as the guest's (TCP
+/// established after its ACK), the device lists each against its opener, a spent share is refused as the share's, and
+/// none is listed past expiry.
+/// Safety: the runner's `reason`.
+@export("selftest_net_flows_fw")
+unsafe fn flowsFw(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    fw_flush();
+    nat_flush();
+    let uMac: [u8; 6] = [0x52, 0x54, 0x00, 0x23, 0x00, 0x01];
+    let wMac: [u8; 6] = [0x52, 0x54, 0x00, 0x23, 0x00, 0x63];
+    let uIp = ip4(10, 77, 33, 1);
+    let w = ip4(10, 77, 33, 99);
+    let u = nettest_tap_create("flwh\0".ptr as *CChar, uIp, MASK24_N, macOf(borrow uMac));
+    if (u.isNull()) {
+        return failed(reason, "check failed: net-flows-fw: the uplink tap\0");
+    }
+    nettest_seed_arp(tap_netif(u), w, macOf(borrow wMac));
+
+    // (1) a flow the host opened: its own UDP send to the world.
+    var h = Held { fa: 0 as *mut file, fb: 0 as *mut file, cs: 0 as *mut socket };
+    if (!nettest_hin_udp_listener(borrow mut h.cs as *mut *mut socket, 0, 7150)) {
+        return failed(reason, "check failed: net-flows-fw: the host's UDP socket\0");
+    }
+    var pl: [u8; 4] = [0x66, 0x6c, 0x6f, 0x77]; // "flow"
+    let to = v4addr(w, 5350);
+    let fs0 = fwNow();
+    if (ksock_sendto(h.cs, borrow pl as *[u8; 4] as *void, 4, na(borrow to)) != 4) {
+        return failed(reason, "check failed: net-flows-fw: the host's send\0");
+    }
+    if (!nettest_hin_recv(u, IPPROTO_UDP, 5350, sg(), HIN_TRIES)) {
+        return failed(reason, "check failed: net-flows-fw: the host's datagram reaches the world\0");
+    }
+    if (fwNow().hostNew != fs0.hostNew + 1) {
+        return failed(reason, "check failed: net-flows-fw: the host's flow recorded\0");
+    }
+
+    // (2) a guest-to-guest flow, UDP, and a TCP one that becomes established once an ACK without SYN has passed.
+    if (nettest_vfs_open("/dev/net/tap\0".ptr as *CChar, O_RDWR | O_NONBLOCK, borrow mut h.fa as *mut *mut file) != 0 ||
+        h.fa.isNull()) {
+        return failed(reason, "check failed: net-flows-fw: guest a's tap\0");
+    }
+    if (nettest_vfs_open("/dev/net/tap\0".ptr as *CChar, O_RDWR | O_NONBLOCK, borrow mut h.fb as *mut *mut file) != 0 ||
+        h.fb.isNull()) {
+        return failed(reason, "check failed: net-flows-fw: guest b's tap\0");
+    }
+    let ga = ip4(10, 0, 3, 15);
+    let gb = ip4(10, 0, 4, 15);
+    let aMac: [u8; 6] = [0x52, 0x54, 0x00, 0x23, 0x00, 0x2a];
+    let bMac: [u8; 6] = [0x52, 0x54, 0x00, 0x23, 0x00, 0x2b];
+    let tap0Mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
+    let am = macOf(borrow aMac);
+    let tm = macOf(borrow tap0Mac);
+    if (!seedOn("tap0\0", ga, am) || !seedOn("tap1\0", gb, macOf(borrow bMac))) {
+        return failed(reason, "check failed: net-flows-fw: the guests' interfaces\0");
+    }
+    if (layoutOf<fw_rule>().size > 64) {
+        tooSmall();
+    }
+    RULE = [0; 8];
+    let r = borrow mut RULE as *mut [u64; 8] as *mut fw_rule;
+    {
+        let rr = Ptr.toBorrowMut(r);
+        rr.direction = FW_DIR_TO_GUEST;
+        rr.proto = 0;
+        rr.dst_prefix = 32;
+        rr.verdict = FW_ACCEPT;
+        rr.dst_ip = gb;
+    }
+    if (fw_rule_add(ga, 0, r as *fw_rule) != 0) {
+        return failed(reason, "check failed: net-flows-fw: a's rule toward b\0");
+    }
+    var base = fwNow().created;
+    if (!guestUdp(h.fa, tm, am, ga, gb, 4650, 7350) || !rises(FwCounter.Created, base).ok) {
+        return failed(reason, "check failed: net-flows-fw: the guests' UDP flow recorded\0");
+    }
+    base = fwNow().created;
+    if (!guestTcp(h.fa, tm, am, ga, gb, 4651, 7351, TH_SYN) || !rises(FwCounter.Created, base).ok) {
+        return failed(reason, "check failed: net-flows-fw: the guests' TCP flow recorded\0");
+    }
+
+    var n = fwList(clock_now_ns());
+    var hostSeen = false;
+    var udpSeen = false;
+    var tcpNew = false;
+    for (i in 0..n as usize) {
+        let f = Ptr.toBorrow(fwAt(i));
+        if (f.guest_ip == FW_HOST_GUEST_IP && f.a_ip == uIp && f.b_ip == w) {
+            hostSeen = f.proto == IPPROTO_UDP && f.a_port == 7150 && f.b_port == 5350;
+        }
+        if (f.guest_ip == ga && f.proto == IPPROTO_UDP) {
+            udpSeen = f.a_ip == ga && f.b_ip == gb && f.a_port == 4650 && f.b_port == 7350;
+        }
+        if (f.guest_ip == ga && f.proto == IPPROTO_TCP) {
+            tcpNew = f.a_port == 4651 && f.b_port == 7351 && !f.est;
+        }
+    }
+    if (!hostSeen || !udpSeen || !tcpNew) {
+        return failed(reason, "check failed: net-flows-fw: the host's, the UDP and the new TCP flow listed\0");
+    }
+
+    base = fwNow().established;
+    if (!guestTcp(h.fa, tm, am, ga, gb, 4651, 7351, TH_ACK) || !rises(FwCounter.Established, base).ok) {
+        return failed(reason, "check failed: net-flows-fw: the ACK passes as established\0");
+    }
+    n = fwList(clock_now_ns());
+    var tcpEst = false;
+    for (i in 0..n as usize) {
+        let f = Ptr.toBorrow(fwAt(i));
+        if (f.guest_ip == ga && f.proto == IPPROTO_TCP && f.a_port == 4651) {
+            tcpEst = f.est;
+        }
+    }
+    if (!tcpEst) {
+        return failed(reason, "check failed: net-flows-fw: the TCP flow listed established\0");
+    }
+
+    // (3) through the device: the host's flow counts against the host (0), the guest's against the guest, each as its
+    // opener to its peer.
+    var len: i64 = 0;
+    let off = flowsRead(mut len);
+    if (off == 0) {
+        return failed(reason, "check failed: net-flows-fw: the snapshot\0");
+    }
+    let lh = section(off);
+    if (lh.fwQuota != truncate<u16>(FW_FLOW_QUOTA_PER_GUEST) || lh.fwHostQuota != FW_FLOW_QUOTA_HOST) {
+        return failed(reason, "check failed: net-flows-fw: the device's flow shares\0");
+    }
+    var devHost = false;
+    var devGuest = false;
+    for (i in 0..lh.count as usize) {
+        let fl = Ptr.toBorrow(flowAt(off, i));
+        if (fl.table != NETCTL_FLOW_FW) {
+            continue;
+        }
+        if (fl.src_addr == uIp && fl.dst_addr == w && fl.src_port == 7150) {
+            devHost = fl.kind == NETCTL_FLOW_HOST && fl.guest_addr == NETCTL_HOST_ADDR;
+        }
+        if (fl.src_addr == ga && fl.proto == NETCTL_PROTO_TCP && fl.src_port == 4651) {
+            devGuest =
+                fl.kind == NETCTL_FLOW_GUEST && fl.guest_addr == ga && fl.dst_addr == gb && fl.dst_port == 7351 &&
+                    (fl.flags & NETCTL_FLOW_ESTABLISHED) != 0 && fl.nat_addr == 0;
+        }
+    }
+    if (!devHost || !devGuest) {
+        return failed(reason, "check failed: net-flows-fw: the device lists the host's and the guest's flow\0");
+    }
+
+    // (4) the guest's share, spent: FW_FLOW_QUOTA_PER_GUEST flows record (two already have), the next is refused and
+    // counted as the share's.
+    let fs2 = fwNow();
+    let have: u32 = 2;
+    for (i in have..FW_FLOW_QUOTA_PER_GUEST) {
+        if (!guestUdp(h.fa, tm, am, ga, gb, truncate<u16>(4700 + i), 7350)) {
+            return failed(reason, "check failed: net-flows-fw: a datagram of the share is sent\0");
+        }
+    }
+    var fs3 = fwNow();
+    for (i in 0..100) {
+        fs3 = fwNow();
+        if (fs3.created - fs2.created >= (FW_FLOW_QUOTA_PER_GUEST - have) as u64) {
+            break;
+        }
+        sleepMs(10);
+    }
+    if (fs3.created - fs2.created != (FW_FLOW_QUOTA_PER_GUEST - have) as u64) {
+        return failed(reason, "check failed: net-flows-fw: the share's flows recorded\0");
+    }
+    let fs4 = fwNow();
+    if (!guestUdp(h.fa, tm, am, ga, gb, 4699, 7350)) {
+        return failed(reason, "check failed: net-flows-fw: the datagram past the share is sent\0");
+    }
+    let refused = rises(FwCounter.Share, fs4.share);
+    if (!refused.ok) {
+        return failed(reason, "check failed: net-flows-fw: the datagram past the share is refused\0");
+    }
+    if (refused.s.share != fs4.share + 1 || refused.s.table != fs4.table) {
+        return failed(reason, "check failed: net-flows-fw: refused once, as the share's, not the table's\0");
+    }
+    var gaListed: u32 = 0;
+    n = fwList(clock_now_ns());
+    for (i in 0..n as usize) {
+        if (Ptr.toBorrow(fwAt(i)).guest_ip == ga) {
+            gaListed += 1;
+        }
+    }
+    if (gaListed != FW_FLOW_QUOTA_PER_GUEST) { // the share the refusal saw
+        return failed(reason, "check failed: net-flows-fw: the guest's share listed\0");
+    }
+    if (fwList(clock_now_ns() + 3600 * NS_PER_SEC) != 0) { // N24
+        return failed(reason, "check failed: net-flows-fw: none listed past expiry\0");
+    }
+
+    nettest_file_put(h.fa);
+    nettest_file_put(h.fb);
+    nettest_ksock_put(h.cs);
+    nettest_hin_drain(u);
+    nettest_tap_destroy(u);
+    fw_flush();
+    nat_flush();
+    info(
+        "selftest: net-flows-fw: a flow the host opened listed as the host's, guest-to-guest UDP and TCP listed as the guest's (TCP established after its ACK), a spent share refused as the share's, none past expiry",
+    );
+    return true;
+}

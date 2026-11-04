@@ -1095,7 +1095,10 @@ net-fin-acks-last-data and net-hoststate (the host's own state), with the
 echo-reply hook (a callback writing atomics), the Need-Fragmentation and
 port-unreachable quoting a host segment, and the wait for the next data
 segment; a pcb's retransmit count is read atomically through
-`nettest_tcp_retransmits`, as the C read it.
+`nettest_tcp_retransmits`, as the C read it. Batch 12,
+`nettest_flows.cee`: net-flows-nat and net-flows-fw (the operator's flow
+listing), with the read of the whole `/dev/net/tapctl` snapshot they
+share; the snapshot's sections are walked by `nettest_ctl.cee`'s exports.
 
 Size: about 3.0x.
 
