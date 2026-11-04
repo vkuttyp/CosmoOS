@@ -1,0 +1,714 @@
+// nettest_sockerr.cee - the socket's pending error and the receive hook's grace period, in CeeSafe: roadmap 2.0 SA6
+// (nettest, the third batch). net-sockerr-udp, net-sockerr-spoof, net-sockerr-accept, net-sockerr-locking and
+// net-rxhook-grace, as nettest.c had them, with the hand-built ICMP unreachable the first two inject. A socket the C
+// put on every path is held in a slot of the test's and put after its body, however the body ended; the release
+// framework (nettest.h) registers each socket with the runner as well.
+//
+// docs/audit/next-subsystem-socket-verdict.md (invariant N21). Four things had to be true together and none of them
+// was: the field is written by somebody, the accessor delivers it once, an ICMP error reaches the socket it is about
+// and only that socket, and a caller can ask.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/wait.h", "arch/cpu.h")
+extern "C" {
+    struct netaddr {
+        family: u16;
+        port: u16;
+    }
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+    }
+    struct mbuf {
+        data: *mut u8;
+        buf: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif;
+    struct socket {
+        lock: mutex;
+    }
+    struct ip_stats {
+        icmp_unreach_delivered: u64;
+    }
+
+    fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn nettest_ksock_put(s: *mut socket);
+    fn nettest_netif_set_rx_hook(run: extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool, arg: *mut void);
+
+    fn ksock_bind(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_listen(s: *mut socket, backlog: i32) -> i32;
+    fn ksock_connect(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_ready(s: *mut socket) -> u32;
+    fn ksock_set_nonblock(s: *mut socket, on: bool);
+    fn ksock_error(s: *mut socket) -> i32;
+    fn ksock_error_peek(s: *mut socket, token: *mut u64) -> i32;
+    fn ksock_error_delivered(s: *mut socket, token: u64);
+    fn sock_set_error(s: *mut socket, err: i32);
+    fn ipv4_get_stats(out: *mut ip_stats);
+    fn netif_loopback() -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_rx(nif: *mut netif, m: *mut mbuf);
+    fn netif_rx_on(nif: *mut netif, m: *mut mbuf, cpu: u32);
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn m_prepend(m: *mut mbuf, len: u32) -> *mut mbuf;
+    fn m_cksum_partial(m: *mbuf, off: u32, len: u32, sum: u32) -> u32;
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn cksum_fold(sum: u32) -> u16;
+    fn cpu_count() -> u32;
+    fn raw_cpu_id() -> u32;
+    fn arch_cpu_relax();
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn thread_sleep_ns(ns: u64);
+    fn sched_watchdog_kick();
+}
+
+// ---- errno.h, uapi/cosmo, ip.h, ether.h, inet.h (asserted against the headers in nettest.c) ----
+
+const EAGAIN: i32 = 11;
+const ENETUNREACH: i32 = 101;
+const ECONNABORTED: i32 = 103;
+const ECONNREFUSED: i32 = 111;
+const EHOSTUNREACH: i32 = 113;
+const AF_INET: u16 = 2;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
+const IO_ERROR: u32 = 8;
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const ICMP_DEST_UNREACH: u8 = 3;
+const ICMP_UNREACH_PORT: u8 = 3;
+const ICMP_UNREACH_HOST: u8 = 1;
+const ETH_P_IP: u16 = 0x0800;
+/// INADDR_LOOPBACK_N: 127.0.0.1 as it lies in a little-endian u32 (ipv4.cee's LOOPBACK_N).
+const LOOPBACK_N: u32 = 0x0100007f;
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// The info line a test ends with.
+fn says(text: StringView) {
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// inet.h's htonl: the byte swap of the targets, all little-endian (fw.cee's).
+fn htonl(v: u32) -> u32 => ((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >> 8) & 0xff00) | (v >> 24);
+
+/// An IPv4 address and port as struct netaddr holds them (its layout, asserted in nettest.c).
+@repr(C)
+struct SockerrAddr {
+    family: u16;
+    port: u16;
+    words: [u32; 4];
+}
+
+fn v4addr(ip: u32, port: u16) -> SockerrAddr => SockerrAddr { family: AF_INET, port: port, words: [ip, 0, 0, 0] };
+
+fn na(a: borrow SockerrAddr) -> *netaddr => a as *SockerrAddr as *netaddr;
+
+/// The loopback interface's IPv4 counters' room: aligned and zeroed.
+struct StatsRoom {
+    words: [u64; 48];
+}
+
+fn statsRoom() -> StatsRoom => StatsRoom { words: [0; 48] };
+
+/// Read the IPv4 counters into the room; the unreachables delivered to a socket.
+/// Safety: the room holds a struct ip_stats (checked).
+fn unreachDelivered(room: borrow mut StatsRoom) -> u64 {
+    if (layoutOf<ip_stats>().size > 384) {
+        var buffer: [u8; 64] = [0; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("nettest: a scratch is too small");
+        KernelLog.panic(line);
+    }
+    let p = borrow mut room.words as *mut [u64; 48] as *mut ip_stats;
+    unsafe {
+        ipv4_get_stats(p);
+        return Ptr.toBorrow(p as *ip_stats).icmp_unreach_delivered;
+    }
+}
+
+/// Put the socket in a slot, if any.
+/// Safety: the slot holds null or a socket of the test's.
+unsafe fn putSlot(s: *mut socket) {
+    if (!s.isNull()) {
+        nettest_ksock_put(s);
+    }
+}
+
+/// Write a socket into an out-slot.
+fn store(slot: borrow mut *mut socket, s: *mut socket) {
+    slot = s;
+}
+
+/// Create a datagram or stream socket into `slot` (it is put by the slot's owner).
+/// Safety: `slot` is the test's.
+unsafe fn create(slot: *mut *mut socket, kind: i32) -> bool => nettest_ksock_create(AF_INET as i32, kind, 0, slot) == 0;
+
+/// Safety: `slot` is a live slot of the test's.
+unsafe fn slotOf(slot: *mut *mut socket) -> *mut socket => Ptr.toBorrow(slot as **mut socket);
+
+/// wait_until(sock_error_ready, s, budget) in nettest.c: poll the socket's readiness for an error, a millisecond at a
+/// time, kicking the watchdog; a wait past half its budget says so.
+/// Safety: `s` is a socket of the test's.
+unsafe fn waitError(s: *mut socket, budgetMs: u32) -> bool {
+    let t0 = clock_now_ns();
+    let deadline = t0 + (budgetMs as u64) * 1000000;
+    while ((ksock_ready(s) & IO_ERROR) == 0) {
+        if (clock_now_ns() > deadline) {
+            return false;
+        }
+        thread_sleep_ns(1000000);
+        sched_watchdog_kick();
+    }
+    let waitedMs = truncate<u32>(clock_since_ns(t0) / 1000000);
+    if (waitedMs * 2 > budgetMs) {
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: wait_until: waited ");
+        line.decimal(waitedMs as u64);
+        line.text(" ms of a ");
+        line.decimal(budgetMs as u64);
+        line.text(" ms budget");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return true;
+}
+
+// ---- The ICMP unreachable ----
+
+/// Store a u16 in network order, a u32 as it lies in memory.
+fn be16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+fn word(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// A u16 checksum, stored as it lies in memory (in_cksum's result is already in network order).
+fn sum16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+/// Twenty bytes of IPv4 header: version 4, five words, `total` long, `ttl`, `proto`, from `src` to `dst`, checksummed.
+/// Safety: `h` holds 20 writable bytes.
+unsafe fn ipHeader(h: *mut u8, total: u16, ttl: u8, proto: u8, src: u32, dst: u32) {
+    let b = SliceMut.fromRaw(h, 20);
+    for (i in 0..20) {
+        b[truncate<usize>(i)] = 0;
+    }
+    b[0] = 0x45;
+    be16(b, 2, total);
+    b[8] = ttl;
+    b[9] = proto;
+    word(b, 12, src);
+    word(b, 16, dst);
+    sum16(b, 10, in_cksum(h as *void, 20));
+}
+
+/// An inbound ICMP destination-unreachable over the loopback, quoting a datagram this host sent from qsrc:qsport to
+/// qdst:qdport. Built by hand because that is what an attacker would do: the spoof cases differ from the delivering
+/// one only in the quoted four-tuple. Null when no buffer was free.
+/// Safety: thread context; the packet is the caller's.
+unsafe fn unreachFrame(code: u8, qsrc: u32, qsport: u16, qdst: u32, qdport: u16, qproto: u8) -> *mut mbuf {
+    var m = m_getcl();
+    if (m.isNull()) {
+        return m;
+    }
+    let iclen: u32 = 8 + 20 + 8;
+    let ic = Ptr.toBorrow(m as *mbuf).data;
+    let b = SliceMut.fromRaw(ic, 36);
+    for (i in 0..36) {
+        b[truncate<usize>(i)] = 0;
+    }
+    b[0] = ICMP_DEST_UNREACH;
+    b[1] = code;
+    ipHeader(ic.add(8), 28, 63, qproto, qsrc, qdst);
+    be16(b, 28, qsport);
+    be16(b, 30, qdport);
+    {
+        let mm = Ptr.toBorrowMut(m);
+        mm.len = iclen;
+        mm.pkt.len = iclen;
+    }
+    sum16(b, 2, cksum_fold(m_cksum_partial(m as *mbuf, 0, iclen, 0)));
+    m = m_prepend(m, 20);
+    if (m.isNull()) {
+        return m;
+    }
+    ipHeader(Ptr.toBorrow(m as *mbuf).data, truncate<u16>(20 + iclen), 64, IPPROTO_ICMP, LOOPBACK_N, LOOPBACK_N);
+    let mm = Ptr.toBorrowMut(m);
+    mm.pkt.proto = ETH_P_IP;
+    return m;
+}
+
+// ---- net-sockerr-udp ----
+
+/// The body: a connected socket takes ECONNREFUSED, once, then EHOSTUNREACH.
+/// Safety: the runner's `reason`; `lo` is held; `slot` is the test's.
+unsafe fn udpBody(reason: *mut *CChar, lo: *mut netif, slot: *mut *mut socket) -> bool {
+    if (!create(slot, SOCK_DGRAM)) {
+        return failed(reason, "check failed: net-sockerr-udp: a socket\0");
+    }
+    let s = slotOf(slot);
+    let me = v4addr(LOOPBACK_N, 40410);
+    let peer = v4addr(LOOPBACK_N, 40411);
+    if (ksock_bind(s, na(borrow me)) != 0) {
+        return failed(reason, "check failed: net-sockerr-udp: it binds\0");
+    }
+    // Connected: the flow the ICMP error will be about.
+    if (ksock_connect(s, na(borrow peer)) != 0) {
+        return failed(reason, "check failed: net-sockerr-udp: it connects\0");
+    }
+    if ((ksock_ready(s) & IO_ERROR) != 0) {
+        return failed(reason, "check failed: net-sockerr-udp: no error to begin with\0");
+    }
+
+    var m = unreachFrame(ICMP_UNREACH_PORT, LOOPBACK_N, 40410, LOOPBACK_N, 40411, IPPROTO_UDP);
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-sockerr-udp: a port unreachable\0");
+    }
+    netif_rx(lo, m);
+    if (!waitError(s, 2000)) {
+        return failed(reason, "check failed: net-sockerr-udp: the socket becomes ready with an error\0");
+    }
+    // Readiness says *that*; the accessor says *which*.
+    if ((ksock_ready(s) & IO_ERROR) == 0) {
+        return failed(reason, "check failed: net-sockerr-udp: the error bit is set\0");
+    }
+    if (ksock_error(s) != -ECONNREFUSED) {
+        return failed(reason, "check failed: net-sockerr-udp: the error is ECONNREFUSED\0");
+    }
+    // Delivered once: the second ask is empty, and the readiness bit with it.
+    if (ksock_error(s) != 0) {
+        return failed(reason, "check failed: net-sockerr-udp: and delivered once\0");
+    }
+    if ((ksock_ready(s) & IO_ERROR) != 0) {
+        return failed(reason, "check failed: net-sockerr-udp: the error bit goes with it\0");
+    }
+
+    // Host- and net-unreachable carry their own errnos.
+    m = unreachFrame(ICMP_UNREACH_HOST, LOOPBACK_N, 40410, LOOPBACK_N, 40411, IPPROTO_UDP);
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-sockerr-udp: a host unreachable\0");
+    }
+    netif_rx(lo, m);
+    if (!waitError(s, 2000)) {
+        return failed(reason, "check failed: net-sockerr-udp: the socket becomes ready again\0");
+    }
+    if (ksock_error(s) != -EHOSTUNREACH) {
+        return failed(reason, "check failed: net-sockerr-udp: the error is EHOSTUNREACH\0");
+    }
+    return true;
+}
+
+/// net-sockerr-udp: a connected UDP socket learns that the port it is talking to is closed. Before this unit the stack
+/// SENT port-unreachables and consumed none, so this socket waited forever.
+/// Safety: the runner's `reason`.
+@export("selftest_net_sockerr_udp")
+unsafe fn sockerrUdp(reason: *mut *CChar) -> bool {
+    let lo = netif_loopback();
+    if (lo.isNull()) {
+        return failed(reason, "check failed: net-sockerr-udp: the loopback interface\0");
+    }
+    var room = statsRoom();
+    let d0 = unreachDelivered(mut room);
+    var s = 0 as *mut socket;
+    let pass = udpBody(reason, lo, borrow mut s as *mut *mut socket);
+    putSlot(s);
+    netif_put(lo);
+    if (!pass) {
+        return false;
+    }
+    if (unreachDelivered(mut room) != d0 + 2) {
+        return failed(reason, "check failed: net-sockerr-udp: two unreachables were delivered\0");
+    }
+    says(
+        "selftest: net-sockerr-udp: a connected UDP socket takes ECONNREFUSED and EHOSTUNREACH from an ICMP unreachable, and each verdict is delivered once",
+    );
+    return true;
+}
+
+// ---- net-sockerr-spoof ----
+
+/// One spoofed quote: a single field of the quoted four-tuple differs from the delivering one.
+struct Quote {
+    qsrc: u32;
+    qsport: u16;
+    qdst: u32;
+    qdport: u16;
+    proto: u8;
+}
+
+/// The body: six unreachables differing in one field change nothing; the seventh, which matches, is delivered once.
+/// Safety: the runner's `reason`; `lo` is held; the slots are the test's.
+unsafe fn spoofBody(
+    reason: *mut *CChar,
+    lo: *mut netif,
+    connSlot: *mut *mut socket,
+    unconnSlot: *mut *mut socket,
+) -> bool {
+    if (!create(connSlot, SOCK_DGRAM)) {
+        return failed(reason, "check failed: net-sockerr-spoof: a socket\0");
+    }
+    let conn = slotOf(connSlot);
+    let me = v4addr(LOOPBACK_N, 40420);
+    let peer = v4addr(LOOPBACK_N, 40421);
+    if (ksock_bind(conn, na(borrow me)) != 0) {
+        return failed(reason, "check failed: net-sockerr-spoof: it binds\0");
+    }
+    if (ksock_connect(conn, na(borrow peer)) != 0) {
+        return failed(reason, "check failed: net-sockerr-spoof: it connects\0");
+    }
+
+    // An UNCONNECTED socket on its own port: it has no flow, so no message can be about it.
+    if (!create(unconnSlot, SOCK_DGRAM)) {
+        return failed(reason, "check failed: net-sockerr-spoof: an unconnected socket\0");
+    }
+    let unconn = slotOf(unconnSlot);
+    let other = v4addr(LOOPBACK_N, 40422);
+    if (ksock_bind(unconn, na(borrow other)) != 0) {
+        return failed(reason, "check failed: net-sockerr-spoof: it binds its own port\0");
+    }
+
+    // The wrong peer port, the wrong local port, the wrong peer address, a source this host does not own, the wrong
+    // protocol, an unconnected socket.
+    let bad: [Quote; 6] = [
+        Quote { qsrc: LOOPBACK_N, qsport: 40420, qdst: LOOPBACK_N, qdport: 40499, proto: IPPROTO_UDP },
+        Quote { qsrc: LOOPBACK_N, qsport: 40498, qdst: LOOPBACK_N, qdport: 40421, proto: IPPROTO_UDP },
+        Quote { qsrc: LOOPBACK_N, qsport: 40420, qdst: htonl(0x0a000201), qdport: 40421, proto: IPPROTO_UDP },
+        Quote { qsrc: htonl(0x0a000202), qsport: 40420, qdst: LOOPBACK_N, qdport: 40421, proto: IPPROTO_UDP },
+        Quote { qsrc: LOOPBACK_N, qsport: 40420, qdst: LOOPBACK_N, qdport: 40421, proto: IPPROTO_TCP },
+        Quote { qsrc: LOOPBACK_N, qsport: 40422, qdst: LOOPBACK_N, qdport: 40421, proto: IPPROTO_UDP },
+    ];
+    var injected: usize = 0;
+    for (i in 0..bad.length) {
+        let q = bad[i];
+        let m = unreachFrame(ICMP_UNREACH_PORT, q.qsrc, q.qsport, q.qdst, q.qdport, q.proto);
+        if (m.isNull()) {
+            break; // the count below is what fails the test
+        }
+        netif_rx(lo, m);
+        injected += 1;
+    }
+    // Counted rather than checked inside the loop, as the C: six that were never sent cannot show that six change
+    // nothing.
+    if (injected != bad.length) {
+        return failed(reason, "check failed: net-sockerr-spoof: all six spoofed unreachables were sent\0");
+    }
+    // Nothing to wait *for*, so wait for something that would have been ordered behind it: one message that does
+    // deliver.
+    let good = unreachFrame(ICMP_UNREACH_PORT, LOOPBACK_N, 40420, LOOPBACK_N, 40421, IPPROTO_UDP);
+    if (good.isNull()) {
+        return failed(reason, "check failed: net-sockerr-spoof: the matching unreachable\0");
+    }
+    netif_rx(lo, good);
+    if (!waitError(conn, 2000)) {
+        return failed(reason, "check failed: net-sockerr-spoof: the connected socket becomes ready with an error\0");
+    }
+    if (ksock_error(conn) != -ECONNREFUSED) {
+        return failed(reason, "check failed: net-sockerr-spoof: the good one, once\0");
+    }
+    if (ksock_error(conn) != 0) {
+        return failed(reason, "check failed: net-sockerr-spoof: and none of the six\0");
+    }
+    if ((ksock_ready(unconn) & IO_ERROR) != 0) {
+        return failed(reason, "check failed: net-sockerr-spoof: the unconnected socket has no error\0");
+    }
+    return true;
+}
+
+/// net-sockerr-spoof: and only the socket the message is about. Every case differs from the delivering one in a single
+/// field of the quoted four-tuple -- which is the whole of the RFC 5927 argument, so it is the whole of the test.
+/// Safety: the runner's `reason`.
+@export("selftest_net_sockerr_spoof")
+unsafe fn sockerrSpoof(reason: *mut *CChar) -> bool {
+    let lo = netif_loopback();
+    if (lo.isNull()) {
+        return failed(reason, "check failed: net-sockerr-spoof: the loopback interface\0");
+    }
+    var room = statsRoom();
+    let d0 = unreachDelivered(mut room);
+    var conn = 0 as *mut socket;
+    var unconn = 0 as *mut socket;
+    let pass = spoofBody(reason, lo, borrow mut conn as *mut *mut socket, borrow mut unconn as *mut *mut socket);
+    putSlot(conn);
+    putSlot(unconn);
+    netif_put(lo);
+    if (!pass) {
+        return false;
+    }
+    if (unreachDelivered(mut room) != d0 + 1) {
+        return failed(reason, "check failed: net-sockerr-spoof: one of seven was delivered\0");
+    }
+    says(
+        "selftest: net-sockerr-spoof: six unreachables differing in one field of the quoted four-tuple change nothing; the seventh, which matches, is delivered",
+    );
+    return true;
+}
+
+// ---- net-sockerr-accept ----
+
+/// The sentinel an accept that fails must leave in its out-slot.
+const UNTOUCHED: usize = 0xdeadbeef;
+
+/// The body: EAGAIN with nothing pending, then the pending error, and the slot untouched both times.
+/// Safety: the runner's `reason`; `slot` is the test's.
+unsafe fn acceptBody(reason: *mut *CChar, slot: *mut *mut socket) -> bool {
+    if (!create(slot, SOCK_STREAM)) {
+        return failed(reason, "check failed: net-sockerr-accept: a socket\0");
+    }
+    let ls = slotOf(slot);
+    let me = v4addr(LOOPBACK_N, 40430);
+    if (ksock_bind(ls, na(borrow me)) != 0) {
+        return failed(reason, "check failed: net-sockerr-accept: it binds\0");
+    }
+    if (ksock_listen(ls, 1) != 0) {
+        return failed(reason, "check failed: net-sockerr-accept: it listens\0");
+    }
+    ksock_set_nonblock(ls, true);
+    // Nothing pending: the ordinary answer.
+    var c = UNTOUCHED as *mut socket;
+    if (nettest_ksock_accept(ls, borrow mut c as *mut *mut socket, 0 as *mut netaddr) != -EAGAIN) {
+        return failed(reason, "check failed: net-sockerr-accept: nothing pending is EAGAIN\0");
+    }
+    if (c as usize != UNTOUCHED) {
+        return failed(reason, "check failed: net-sockerr-accept: the slot is untouched\0");
+    }
+
+    // The writer this unit gave the field.
+    sock_set_error(ls, -ECONNABORTED);
+    let rc = nettest_ksock_accept(ls, borrow mut c as *mut *mut socket, 0 as *mut netaddr);
+    // The bug returned 0 here. Both halves are checked, because a caller that trusts the return reads the pointer: an
+    // errno-only assertion would pass against `return 0` with *out written.
+    if (rc != -ECONNABORTED) {
+        return failed(reason, "check failed: net-sockerr-accept: the pending error is the answer\0");
+    }
+    if (c as usize != UNTOUCHED) {
+        return failed(reason, "check failed: net-sockerr-accept: and the slot is untouched\0");
+    }
+    if (ksock_error(ls) != 0) {
+        return failed(reason, "check failed: net-sockerr-accept: consumed by the accept\0");
+    }
+    return true;
+}
+
+/// net-sockerr-accept: a listening socket with a pending error must report it, and before this unit it reported
+/// success with *out unassigned -- because take_error clears as it reads and the expression called it twice.
+/// Safety: the runner's `reason`.
+@export("selftest_net_sockerr_accept")
+unsafe fn sockerrAccept(reason: *mut *CChar) -> bool {
+    var ls = 0 as *mut socket;
+    let pass = acceptBody(reason, borrow mut ls as *mut *mut socket);
+    putSlot(ls);
+    if (!pass) {
+        return false;
+    }
+    says(
+        "selftest: net-sockerr-accept: a pending error reaches accept as an errno, and accept never reports success without a socket",
+    );
+    return true;
+}
+
+// ---- net-sockerr-locking ----
+
+/// Safety: `s` is a socket of the test's.
+unsafe fn sockLock(s: *mut socket) -> *mut mutex => borrow mut Ptr.toBorrowMut(s).lock as *mut mutex;
+
+/// The body: once, with and without s->lock, and the peek-and-commit pair a syscall uses.
+/// Safety: the runner's `reason`; `slot` is the test's.
+unsafe fn lockingBody(reason: *mut *CChar, slot: *mut *mut socket) -> bool {
+    if (!create(slot, SOCK_DGRAM)) {
+        return failed(reason, "check failed: net-sockerr-locking: a socket\0");
+    }
+    let s = slotOf(slot);
+    // Without the mutex.
+    sock_set_error(s, -EHOSTUNREACH);
+    if (ksock_error(s) != -EHOSTUNREACH) {
+        return failed(reason, "check failed: net-sockerr-locking: the error without the lock\0");
+    }
+    if (ksock_error(s) != 0) {
+        return failed(reason, "check failed: net-sockerr-locking: once without the lock\0");
+    }
+    // And with it held, which is how ksock_connect's three completion paths call it. An accessor that took s->lock
+    // would stop the kernel here rather than answer.
+    sock_set_error(s, -ENETUNREACH);
+    mutex_lock(sockLock(s));
+    let held = ksock_error(s);
+    let again = ksock_error(s);
+    mutex_unlock(sockLock(s));
+    if (held != -ENETUNREACH) {
+        return failed(reason, "check failed: net-sockerr-locking: the error with the lock held\0");
+    }
+    if (again != 0) {
+        return failed(reason, "check failed: net-sockerr-locking: once with the lock held\0");
+    }
+
+    // The pair a syscall uses, because its delivery can fail after every check has passed. Peek does not clear -- so
+    // a caller whose copy faults leaves the verdict for the next asker, and no concurrent asker is ever told 0 while
+    // one is pending.
+    var tok: u64 = 0;
+    var tok2: u64 = 0;
+    let tokAt = borrow mut tok as *mut u64;
+    let tok2At = borrow mut tok2 as *mut u64;
+    sock_set_error(s, -ECONNREFUSED);
+    if (ksock_error_peek(s, tokAt) != -ECONNREFUSED) {
+        return failed(reason, "check failed: net-sockerr-locking: a peek sees the error\0");
+    }
+    if (ksock_error_peek(s, tok2At) != -ECONNREFUSED) {
+        return failed(reason, "check failed: net-sockerr-locking: twice: it did not clear\0");
+    }
+    ksock_error_delivered(s, Ptr.toBorrow(tokAt as *u64));
+    if (ksock_error_peek(s, tok2At) != 0) {
+        return failed(reason, "check failed: net-sockerr-locking: the commit cleared it\0");
+    }
+
+    // And the commit clears only what it delivered. This is the case that makes two concurrent askers safe: one reads
+    // a verdict, a newer one arrives while it is being copied out, and the commit must not destroy the newer one --
+    // which a plain store of 0 would. Deterministic here because the "concurrent" write is simply made between the
+    // peek and the commit.
+    sock_set_error(s, -EHOSTUNREACH);
+    if (ksock_error_peek(s, tokAt) != -EHOSTUNREACH) {
+        return failed(reason, "check failed: net-sockerr-locking: a peek of the older error\0");
+    }
+    sock_set_error(s, -ENETUNREACH);                       // newer, undelivered
+    ksock_error_delivered(s, Ptr.toBorrow(tokAt as *u64)); // commits the older one
+    if (ksock_error(s) != -ENETUNREACH) {
+        return failed(reason, "check failed: net-sockerr-locking: the newer one survived\0");
+    }
+
+    // The same, with the two verdicts EQUAL -- which is the case a commit comparing only the errno cannot see, and two
+    // ICMP messages about one flow carry the same errno readily. The token carries a generation for exactly this:
+    // without it the second ECONNREFUSED, told to nobody, is cleared by the first one's commit and the socket reports
+    // no error at all.
+    sock_set_error(s, -ECONNREFUSED);
+    if (ksock_error_peek(s, tokAt) != -ECONNREFUSED) {
+        return failed(reason, "check failed: net-sockerr-locking: a peek of the first of two equal errors\0");
+    }
+    sock_set_error(s, -ECONNREFUSED);                      // a second, undelivered
+    ksock_error_delivered(s, Ptr.toBorrow(tokAt as *u64)); // must not match it
+    if (ksock_error(s) != -ECONNREFUSED) {
+        return failed(reason, "check failed: net-sockerr-locking: the second equal error survived\0");
+    }
+    if (ksock_error(s) != 0) {
+        return failed(reason, "check failed: net-sockerr-locking: and is delivered once\0");
+    }
+    return true;
+}
+
+/// net-sockerr-locking: read once, and the same answer either way round the socket mutex. The accessor takes no lock
+/// precisely because its five callers disagree about holding one and its writer runs where a mutex cannot be taken.
+/// Safety: the runner's `reason`.
+@export("selftest_net_sockerr_locking")
+unsafe fn sockerrLocking(reason: *mut *CChar) -> bool {
+    var s = 0 as *mut socket;
+    let pass = lockingBody(reason, borrow mut s as *mut *mut socket);
+    putSlot(s);
+    if (!pass) {
+        return false;
+    }
+    says(
+        "selftest: net-sockerr-locking: the pending error reads the same with s->lock held and without it, and is delivered once either way",
+    );
+    return true;
+}
+
+// ---- net-rxhook-grace ----
+//
+// The guarantee the benchmark's per-round context rests on: once netif_set_rx_hook(NULL) has returned, the hook it
+// removed is not running on any worker. The hook lingers on purpose after announcing itself, the test removes it
+// while it is lingering, and the removal must not return before the hook has left.
+
+// The hook's: it may outlive the test's frame, so its state is static (the C's `static struct rxhook_grace_state`).
+static ENTERED: AtomicU32 = AtomicU32.constant(0);
+static EXITED: AtomicU32 = AtomicU32.constant(0);
+
+/// Announce, linger 10 ms, take the packet, leave.
+/// Safety: the receive path calls it with a packet the hook now owns.
+@callback
+unsafe fn graceHook(nif: *mut netif, m: *mut mbuf, arg: *mut void) -> bool {
+    ENTERED.storeWith(1, StoreOrdering.Release);
+    // Long enough for the test thread, on another CPU, to see ENTERED and call netif_set_rx_hook(NULL) while this is
+    // still running. A spin, not a sleep: a hook runs inside a read-side section.
+    let until = clock_now_ns() + 10 * 1000000;
+    while (clock_now_ns() < until) {
+        arch_cpu_relax();
+    }
+    m_freem(m);
+    EXITED.storeWith(1, StoreOrdering.Release);
+    return false;
+}
+
+/// net-rxhook-grace: removing the receive hook waits for a hook still running on another CPU.
+/// Safety: the runner's `reason`.
+@export("selftest_net_rxhook_grace")
+unsafe fn rxhookGrace(reason: *mut *CChar) -> bool {
+    let lo = netif_loopback();
+    if (lo.isNull()) {
+        return failed(reason, "check failed: net-rxhook-grace: the loopback interface\0");
+    }
+    ENTERED.storeWith(0, StoreOrdering.Relaxed);
+    EXITED.storeWith(0, StoreOrdering.Relaxed);
+    nettest_netif_set_rx_hook(graceHook, 0 as *mut void);
+    let m = m_getcl();
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-rxhook-grace: a packet\0");
+    }
+    {
+        let mm = Ptr.toBorrowMut(m);
+        mm.data = mm.buf.add(64);
+        mm.len = 64;
+        mm.pkt.len = 64;
+        mm.pkt.proto = ETH_P_IP; // never reaches IP: the hook takes it
+        let d = SliceMut.fromRaw(mm.data, 64);
+        for (i in 0..64) {
+            d[truncate<usize>(i)] = 0;
+        }
+    }
+    // To another CPU's worker when there is one. On the same CPU the hook, which does not yield, finishes before this
+    // thread runs again, and the removal has nothing to wait for.
+    let ncpu = cpu_count();
+    netif_rx_on(lo, m, if (ncpu > 1) (raw_cpu_id() + 1) % ncpu else 0); // some other CPU: any other serves
+    var i: u32 = 0;
+    while (i < 1000 && ENTERED.loadWith(LoadOrdering.Acquire) == 0) {
+        thread_sleep_ns(1000000);
+        i += 1;
+    }
+    if (ENTERED.loadWith(LoadOrdering.Acquire) != 1) {
+        return failed(reason, "check failed: net-rxhook-grace: the hook entered\0");
+    }
+    nettest_netif_set_rx_hook(0 as extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool, 0 as *mut void);
+    // Returned: the hook has finished, and its state may go. Without the grace period this fails on two or more CPUs.
+    if (EXITED.loadWith(LoadOrdering.Acquire) != 1) {
+        return failed(reason, "check failed: net-rxhook-grace: removing the hook waited for it to leave\0");
+    }
+    netif_put(lo);
+    return true;
+}

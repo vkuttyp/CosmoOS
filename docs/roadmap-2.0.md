@@ -1035,7 +1035,13 @@ framework wrappers the batch calls; a server lives in a static room of
 the batch's, since its thread can outlive the test, and an address in
 `NettestAddr`, `struct netaddr`'s layout asserted in `nettest.c`.
 tcp-pcb-timer-free and net-rx-dup, which need the debug and
-fault-injection builds' hooks, wait for a batch of their own.
+fault-injection builds' hooks, wait for a batch of their own. Batch 3,
+`nettest_sockerr.cee`: net-sockerr-udp, net-sockerr-spoof,
+net-sockerr-accept, net-sockerr-locking and net-rxhook-grace, with the
+hand-built ICMP unreachable the first two inject and their own
+`wait_until` for a socket's error. A socket the C put on every path is
+held in a slot of the test's and put after the test's body, however
+the body ended.
 
 Size: about 3.0x.
 

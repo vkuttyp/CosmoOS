@@ -41,6 +41,7 @@ int nettest_ksock_create(int family, int type, uint32_t uid, struct socket **out
 int nettest_ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer);
 void nettest_ksock_put(struct socket *s);
 void nettest_loopback_set_filter(lo_filter_fn fn, void *arg);
+void nettest_netif_set_rx_hook(netif_rx_hook_fn fn, void *arg);
 /* net-lo-tcp's and net-accept-order's listen backlog (nettest.c). */
 bool nettest_lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool *accepted_first);
 
