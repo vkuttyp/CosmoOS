@@ -1,0 +1,1572 @@
+// nettest_fwd.cee - inbound port forwarding, many guests and the forwarding firewall, in CeeSafe: roadmap 2.0 SA6
+// (nettest, the seventh batch). net-pf-clear, net-dnat, net-multiguest and net-firewall, as nettest.c had them, and
+// the firewall tests' guest helpers -- exported as nettest_fwt_send, nettest_fwt_recv and nettest_fwt_mk_icmp
+// (nettest.h), which the INPUT, host and OUTPUT chain tests still in nettest.c call. A C struct the kernel takes or
+// fills (a firewall rule, a control command, the NAT and firewall listings and counters) is built in a zeroed room of
+// this file's, as the C's designated initialisers zeroed what they did not name, and read back field by field.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tap.h", "kernel/net/nat.h", "kernel/net/fw.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/wait.h")
+extern "C" {
+    struct mbuf;
+    struct netif_ip4 {
+        addr: u32;
+    }
+    struct netif {
+        obj: kobject;
+        flags: u32;
+        ip4: netif_ip4;
+    }
+    struct tap;
+    struct file;
+    struct nat_flow {
+        kind: u8;
+        est: bool;
+        peer_port: u16;
+        orig_ip: u32;
+        peer_ip: u32;
+    }
+    struct nat_pf_rule {
+        guest_ip: u32;
+    }
+    struct nat_stats {
+        dnat_in: u64;
+        dnat_drop_ambiguous: u64;
+        dnat_drop_share: u64;
+        dnat_drop_table: u64;
+        expired: u64;
+        entries: u32;
+    }
+    struct fw_stats {
+        accept_rule: u64;
+        drop_rule: u64;
+        accept_default: u64;
+        drop_default: u64;
+        accept_established: u64;
+        flow_new: u64;
+    }
+    struct ip_stats {
+        fwd_spoofed: u64;
+        fwd_filtered: u64;
+    }
+    struct fw_rule {
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_ip: u32;
+        dst_port: u16;
+    }
+    struct cosmo_netctl_filter {
+        version: u16;
+        op: u16;
+        guest_addr: u32;
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_addr: u32;
+        dst_port: u16;
+        at_index: u16;
+    }
+    struct cosmo_netctl_list {
+        version: u16;
+        count: u16;
+    }
+    struct cosmo_netctl_rule {
+        proto: u8;
+    }
+    struct cosmo_netctl_filter_list {
+        version: u16;
+        rule_count: u16;
+        guest_count: u16;
+    }
+    struct cosmo_netctl_filter_guest {
+        guest_addr: u32;
+    }
+    struct cosmo_netctl_filter_rule {
+        guest_addr: u32;
+        proto: u8;
+        verdict: u8;
+        dst_addr: u32;
+        dst_port: u16;
+        index: u16;
+    }
+
+    fn nettest_tap_create(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap;
+    fn nettest_tap_destroy(t: *mut tap);
+    fn nettest_vfs_open(path: *CChar, flags: u32, out: *mut *mut file) -> i32;
+    fn nettest_file_put(f: *mut file);
+    fn nettest_defer_nat_state() -> bool;
+    fn nettest_release_nat_state();
+    fn nettest_netctl_snapshot_len(buf: *u8, pfRules: u32) -> i64;
+    fn nettest_wrap(
+        frame: *mut u8,
+        dmac: *u8,
+        smac: *u8,
+        sip: u32,
+        dip: u32,
+        ttl: u8,
+        proto: u8,
+        l4: *void,
+        l4len: u16,
+    ) -> u32;
+    fn nettest_mk_udp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, pl: *u8, pllen: u16) -> u16;
+    fn nettest_mk_tcp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, flags: u8) -> u16;
+    fn nettest_l4_ok(sip: u32, dip: u32, proto: u8, l4: *void, len: u16) -> bool;
+    fn nettest_seed_arp(nif: *mut netif, peerIp: u32, peerMac: *u8);
+    fn nettest_recv_ip(t: *mut tap) -> *mut mbuf;
+
+    fn tap_netif(t: *mut tap) -> *mut netif;
+    fn tap_inject(t: *mut tap, frame: *void, len: u32) -> i32;
+    fn tap_recv(t: *mut tap) -> *mut mbuf;
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_set_forward(nif: *mut netif, on: bool);
+    fn netif_set_masquerade(nif: *mut netif, on: bool);
+    fn net_workers_barrier();
+    fn ipv4_get_stats(out: *mut ip_stats);
+    fn nat_flush();
+    fn nat_pf_clear();
+    fn nat_pf_add(proto: u8, hostPort: u16, guestIp: u32, guestPort: u16) -> i32;
+    fn nat_pf_list(out: *mut nat_pf_rule, max: u32) -> u32;
+    fn nat_flow_list(out: *mut nat_flow, max: u32, now: u64) -> u32;
+    fn nat_get_stats(out: *mut nat_stats);
+    fn nat_age(nowNs: u64);
+    fn fw_flush();
+    fn fw_get_stats(out: *mut fw_stats);
+    fn fw_policy_set(guestIp: u32, direction: u8, verdict: u8) -> i32;
+    fn fw_guest_list(out: *mut u32, max: u32) -> u32;
+    fn fw_rule_add(guestIp: u32, atIndex: u32, r: *fw_rule) -> i32;
+    fn fw_rule_del(guestIp: u32, r: *fw_rule) -> i32;
+    fn fw_rule_list(guestIp: u32, out: *mut fw_rule, max: u32) -> u32;
+    fn m_freem(m: *mut mbuf);
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn clock_now_ns() -> u64;
+    fn thread_sleep_ns(ns: u64);
+}
+
+// ---- errno.h, ip.h, tcp.h, nat.h, fw.h, netctl.h, netif.h, syscall.h (asserted against the headers in nettest.c) ----
+
+const ENOENT: i32 = 2;
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const ENOTSUP: i32 = 95;
+const ETH_HLEN: usize = 14;
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const ICMP_ECHO_REPLY: u8 = 0;
+const ICMP_ECHO: u8 = 8;
+const TH_SYN: u8 = 0x02;
+const TH_RST: u8 = 0x04;
+const TH_ACK: u8 = 0x10;
+const NAT_TABLE_SIZE: u32 = 256;
+const NAT_PF_MAX: u32 = 16;
+const NAT_QUOTA_PER_GUEST: u32 = 32;
+const NAT_TIMEOUT_TCP_NS: u64 = 30 * 1000000000;
+const NAT_KIND_DNAT: u8 = 1;
+const FW_DROP: u8 = 0;
+const FW_ACCEPT: u8 = 1;
+const FW_DIR_TO_GUEST: u8 = 2;
+const FW_DIR_TO_HOST: u8 = 3;
+const FW_ICMP_TYPE_ANY: u16 = 0xffff;
+const FW_MAX_GUESTS: u32 = 8;
+const FW_RULES_PER_GUEST: u32 = 32;
+const NETCTL_VERSION: u16 = 8;
+const NETCTL_FILTER_ADD: u16 = 3;
+const NETCTL_FILTER_DEL: u16 = 4;
+const NETCTL_FILTER_POLICY: u16 = 5;
+const NETCTL_PROTO_ICMP: u8 = 1;
+const NETCTL_PROTO_TCP: u8 = 6;
+const NETCTL_PROTO_UDP: u8 = 17;
+const NETCTL_DIR_TO_GUEST: u8 = 2;
+const NETCTL_VERDICT_DROP: u8 = 0;
+const NETCTL_VERDICT_ACCEPT: u8 = 1;
+const NETIF_FORWARD: u32 = 1 << 5;
+const O_RDWR: u32 = 0x0002;
+const O_NONBLOCK: u32 = 0x0800;
+const MG_MAX: usize = 8;
+/// A /24 mask as it lies in a little-endian u32 (htonl(0xffffff00)).
+const MASK24_N: u32 = 0x00ffffff;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * 1000000);
+    }
+}
+
+fn says(text: StringView) {
+    var buffer: [u8; 320] = [0; 320];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+/// A C struct's room on the stack: aligned and zeroed.
+struct Room {
+    words: [u64; 48];
+}
+
+fn room(bytes: usize) -> Room {
+    if (bytes > 384) {
+        tooSmall();
+    }
+    return Room { words: [0; 48] };
+}
+
+fn roomAt(r: borrow mut Room) -> *mut u8 => borrow mut r.words as *mut [u64; 48] as *mut u8;
+
+/// A small C struct's room (a firewall rule, a control command): aligned and zeroed.
+struct Cmd {
+    words: [u64; 8];
+}
+
+fn cmd(bytes: usize) -> Cmd {
+    if (bytes > 64) {
+        tooSmall();
+    }
+    return Cmd { words: [0; 8] };
+}
+
+fn cmdAt(r: borrow mut Cmd) -> *mut u8 => borrow mut r.words as *mut [u64; 8] as *mut u8;
+
+/// The NAT counters these tests read.
+struct Nat {
+    dnatIn: u64;
+    dnatDropAmbiguous: u64;
+    dnatDropShare: u64;
+    dnatDropTable: u64;
+    expired: u64;
+    entries: u32;
+}
+
+/// Safety: the room holds a struct nat_stats (room checks).
+fn natNow() -> Nat {
+    var r = room(layoutOf<nat_stats>().size);
+    let p = roomAt(mut r) as *mut nat_stats;
+    unsafe {
+        nat_get_stats(p);
+        let s = Ptr.toBorrow(p as *nat_stats);
+        return Nat {
+            dnatIn: s.dnat_in,
+            dnatDropAmbiguous: s.dnat_drop_ambiguous,
+            dnatDropShare: s.dnat_drop_share,
+            dnatDropTable: s.dnat_drop_table,
+            expired: s.expired,
+            entries: s.entries,
+        };
+    }
+}
+
+/// The firewall counters the FORWARD chain moves.
+struct Fw {
+    acceptRule: u64;
+    dropRule: u64;
+    acceptDefault: u64;
+    dropDefault: u64;
+    acceptEstablished: u64;
+    flowNew: u64;
+}
+
+/// Safety: the room holds a struct fw_stats (room checks).
+fn fwNow() -> Fw {
+    var r = room(layoutOf<fw_stats>().size);
+    let p = roomAt(mut r) as *mut fw_stats;
+    unsafe {
+        fw_get_stats(p);
+        let s = Ptr.toBorrow(p as *fw_stats);
+        return Fw {
+            acceptRule: s.accept_rule,
+            dropRule: s.drop_rule,
+            acceptDefault: s.accept_default,
+            dropDefault: s.drop_default,
+            acceptEstablished: s.accept_established,
+            flowNew: s.flow_new,
+        };
+    }
+}
+
+/// The IPv4 counters: forwards the firewall refused, and spoofed sources.
+struct Ip {
+    fwdSpoofed: u64;
+    fwdFiltered: u64;
+}
+
+/// Safety: the room holds a struct ip_stats (room checks).
+fn ipNow() -> Ip {
+    var r = room(layoutOf<ip_stats>().size);
+    let p = roomAt(mut r) as *mut ip_stats;
+    unsafe {
+        ipv4_get_stats(p);
+        let s = Ptr.toBorrow(p as *ip_stats);
+        return Ip { fwdSpoofed: s.fwd_spoofed, fwdFiltered: s.fwd_filtered };
+    }
+}
+
+// ---- Bytes and frames ----
+
+fn rd16(b: Slice<u8>, at: usize) -> u16 => ((b[at] as u16) << 8) | (b[at + 1] as u16);
+
+fn wordOf(b: Slice<u8>, at: usize) -> u32 => (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) |
+    ((b[at + 3] as u32) << 24);
+
+fn macAt(m: borrow [u8; 6]) -> *u8 => m as *[u8; 6] as *u8;
+
+// The tests' frames, off the stack: the runner runs one test at a time.
+static mut L4: [u8; 128] = [0; 128];
+static mut FRAME: [u8; 256] = [0; 256];
+static mut RX: [u8; 256] = [0; 256];
+
+/// Safety: the runner runs one test at a time, so L4, FRAME and RX are this test's.
+fn l4() -> *mut u8 => unsafe { borrow mut L4 as *mut [u8; 128] as *mut u8 };
+
+/// Safety: as l4.
+fn frame() -> *mut u8 => unsafe { borrow mut FRAME as *mut [u8; 256] as *mut u8 };
+
+/// Safety: as l4.
+fn rxAt() -> *mut u8 => unsafe { borrow mut RX as *mut [u8; 256] as *mut u8 };
+
+/// A tap of the test's, released however it returns.
+/// Safety: thread context.
+unsafe fn tapOf(name: StringView, ip: u32, mac: borrow [u8; 6]) -> *mut tap => nettest_tap_create(
+    name.ptr as *CChar,
+    ip,
+    MASK24_N,
+    macAt(mac),
+);
+
+/// A TCP segment (no payload) from `sip`:`sp` to `dip`:`dp`, wrapped from `smac` to `dmac` and injected into `t`.
+/// Safety: as l4; `t` is the test's tap.
+unsafe fn injectTcp(
+    t: *mut tap,
+    dmac: borrow [u8; 6],
+    smac: borrow [u8; 6],
+    sip: u32,
+    dip: u32,
+    sp: u16,
+    dp: u16,
+    flags: u8,
+) -> bool {
+    let len = nettest_mk_tcp(l4(), sip, dip, sp, dp, flags);
+    let flen = nettest_wrap(frame(), macAt(dmac), macAt(smac), sip, dip, 64, IPPROTO_TCP, l4() as *void, len);
+    return tap_inject(t, frame() as *void, flen) == 0;
+}
+
+/// A UDP datagram carrying `pl`, wrapped and injected into `t`.
+/// Safety: as injectTcp; `pl` is the test's.
+unsafe fn injectUdp(
+    t: *mut tap,
+    dmac: borrow [u8; 6],
+    smac: borrow [u8; 6],
+    sip: u32,
+    dip: u32,
+    sp: u16,
+    dp: u16,
+    pl: borrow [u8; 8],
+) -> bool {
+    let len = nettest_mk_udp(l4(), sip, dip, sp, dp, pl as *[u8; 8] as *u8, 8);
+    let flen = nettest_wrap(frame(), macAt(dmac), macAt(smac), sip, dip, 64, IPPROTO_UDP, l4() as *void, len);
+    return tap_inject(t, frame() as *void, flen) == 0;
+}
+
+/// The next IPv4 frame from the tap, its first `n` bytes in RX; false when none came.
+/// Safety: as l4.
+unsafe fn receive(t: *mut tap, n: u32) -> bool {
+    let m = nettest_recv_ip(t);
+    if (m.isNull()) {
+        return false;
+    }
+    let ok = m_copydata(m as *mbuf, 0, n, rxAt() as *mut void);
+    m_freem(m);
+    return ok;
+}
+
+/// Any IPv4 frame from the tap, dropped: true when one came.
+/// Safety: `t` is the test's tap.
+unsafe fn arrives(t: *mut tap) -> bool {
+    let m = nettest_recv_ip(t);
+    if (m.isNull()) {
+        return false;
+    }
+    m_freem(m);
+    return true;
+}
+
+/// Free whatever the tap has queued.
+/// Safety: `t` is the test's tap.
+unsafe fn drain(t: *mut tap) {
+    var d = tap_recv(t);
+    while (!d.isNull()) {
+        m_freem(d);
+        d = tap_recv(t);
+    }
+}
+
+/// An IPv4 frame the stack has sent out `t`, after every worker has finished what it was given: null means none was,
+/// not "none yet".
+/// Safety: `t` is the test's tap.
+unsafe fn sentIpNow(t: *mut tap) -> *mut mbuf {
+    net_workers_barrier();
+    var m = tap_recv(t);
+    while (!m.isNull()) {
+        var kind: [u8; 2] = [0; 2];
+        if (m_copydata(m as *mbuf, 12, 2, borrow mut kind as *mut [u8; 2] as *mut void) && kind[0] == 0x08 &&
+            kind[1] == 0x00) {
+            return m;
+        }
+        m_freem(m);
+        m = tap_recv(t);
+    }
+    return 0 as *mut mbuf;
+}
+
+// ---- NAT's listing ----
+
+// The flow listing's room: NAT_TABLE_SIZE struct nat_flow (checked).
+static mut FLOWS: [u64; 1024] = [0; 1024];
+
+/// The DNAT flow from `client`:`port`: 1 established, 0 not, -1 not listed.
+/// Safety: the runner runs one test at a time, so FLOWS is this test's.
+unsafe fn dnatFlowEst(client: u32, port: u16) -> i32 {
+    let size = layoutOf<nat_flow>().size;
+    if (size * (NAT_TABLE_SIZE as usize) > 8192) {
+        tooSmall();
+    }
+    let base = borrow mut FLOWS as *mut [u64; 1024] as *mut u8;
+    let n = nat_flow_list(base as *mut nat_flow, NAT_TABLE_SIZE, clock_now_ns());
+    for (i in 0..n as usize) {
+        let f = Ptr.toBorrow(base.add(i * size) as *nat_flow);
+        if (f.kind == NAT_KIND_DNAT && f.peer_ip == client && f.peer_port == port) {
+            return if (f.est) 1 else 0;
+        }
+    }
+    return -1;
+}
+
+// The port-forward listing's room: NAT_PF_MAX struct nat_pf_rule (checked).
+static mut PFS: [u64; 64] = [0; 64];
+
+/// The live port-forwards, and the first one's guest in `first`.
+/// Safety: as dnatFlowEst.
+unsafe fn pfList(first: borrow mut u32) -> u32 {
+    if (layoutOf<nat_pf_rule>().size * (NAT_PF_MAX as usize) > 512) {
+        tooSmall();
+    }
+    let base = borrow mut PFS as *mut [u64; 64] as *mut nat_pf_rule;
+    let n = nat_pf_list(base, NAT_PF_MAX);
+    first = if (n > 0) Ptr.toBorrow(base as *nat_pf_rule).guest_ip else 0;
+    return n;
+}
+
+// ---- net-pf-clear ----
+
+/// net-pf-clear: nat_pf_clear removed the rules and kept their translations: a client whose connection a forward had
+/// translated kept reaching the guest through a port the clear had closed (fuzz_net_config). It reaps them now, as
+/// nat_pf_del reaps one rule's.
+/// Safety: the runner's `reason`.
+@export("selftest_net_pf_clear")
+unsafe fn pfClear(reason: *mut *CChar) -> bool {
+    let gMac: [u8; 6] = [0x52, 0x54, 0x00, 0x08, 0x02, 0x01];
+    let uMac: [u8; 6] = [0x52, 0x54, 0x00, 0x09, 0x02, 0x01];
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x08, 0x02, 0x0f];
+    let clientMac: [u8; 6] = [0x52, 0x54, 0x00, 0x09, 0x02, 0x63];
+    let gIp = ip4(10, 77, 7, 1);
+    let guest = ip4(10, 77, 7, 15);
+    let uIp = ip4(10, 77, 8, 1);
+    let client = ip4(10, 77, 8, 99);
+    let g = tapOf("pfcg\0", gIp, borrow gMac);
+    if (g.isNull()) {
+        return failed(reason, "check failed: net-pf-clear: the guest-side tap\0");
+    }
+    let u = tapOf("pfcu\0", uIp, borrow uMac);
+    if (u.isNull()) {
+        return failed(reason, "check failed: net-pf-clear: the uplink tap\0");
+    }
+    netif_set_forward(tap_netif(g), true);
+    netif_set_masquerade(tap_netif(g), true);
+    nettest_seed_arp(tap_netif(g), guest, macAt(borrow guestMac));
+    nettest_seed_arp(tap_netif(u), client, macAt(borrow clientMac));
+    nat_flush();
+    nat_pf_clear();
+    if (!nettest_defer_nat_state()) {
+        return failed(reason, "check failed: net-pf-clear: the NAT state is cleared however it returns\0");
+    }
+    if (nat_pf_add(IPPROTO_TCP, 8080, guest, 80) != 0) {
+        return failed(reason, "check failed: net-pf-clear: a forward is added\0");
+    }
+
+    if (!injectTcp(u, borrow uMac, borrow clientMac, client, uIp, 23456, 8080, TH_SYN)) {
+        return failed(reason, "check failed: net-pf-clear: a SYN is injected\0");
+    }
+    var r = sentIpNow(g);
+    if (r.isNull()) {
+        return failed(reason, "check failed: net-pf-clear: translated to the guest\0");
+    }
+    m_freem(r);
+    if (dnatFlowEst(client, 23456) != 0) {
+        return failed(reason, "check failed: net-pf-clear: a half-open translation is listed\0");
+    }
+
+    nat_pf_clear();
+    var first: u32 = 0;
+    if (pfList(mut first) != 0) {
+        return failed(reason, "check failed: net-pf-clear: no forward is left\0");
+    }
+    if (dnatFlowEst(client, 23456) != -1) {
+        return failed(reason, "check failed: net-pf-clear: its translation went with it\0");
+    }
+    if (!injectTcp(u, borrow uMac, borrow clientMac, client, uIp, 23456, 8080, TH_ACK)) {
+        return failed(reason, "check failed: net-pf-clear: an ACK is injected\0");
+    }
+    r = sentIpNow(g);
+    if (!r.isNull()) {
+        m_freem(r);
+        return failed(reason, "check failed: net-pf-clear: the client reaches the guest no more\0");
+    }
+
+    nettest_release_nat_state();
+    nettest_tap_destroy(u);
+    nettest_tap_destroy(g);
+    says("selftest: net-pf-clear: a clear took the forward's live translation with it");
+    return true;
+}
+
+// ---- net-dnat ----
+
+/// net-dnat: a client connection is forwarded to the guest and its reply un-DNAT'd back from host:P (TCP and UDP), the
+/// handshake's halves decide established, an unruled port stays local, two forwards to one endpoint cannot alias, and
+/// one guest's inbound flood is bounded to its share of the table.
+/// Safety: the runner's `reason`.
+@export("selftest_net_dnat")
+unsafe fn dnat(reason: *mut *CChar) -> bool {
+    let gMac: [u8; 6] = [0x52, 0x54, 0x00, 0x08, 0x00, 0x01];
+    let uMac: [u8; 6] = [0x52, 0x54, 0x00, 0x09, 0x00, 0x01];
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x08, 0x00, 0x0f];
+    let clientMac: [u8; 6] = [0x52, 0x54, 0x00, 0x09, 0x00, 0x63];
+    let gIp = ip4(10, 77, 5, 1);
+    let guest = ip4(10, 77, 5, 15);
+    let uIp = ip4(10, 77, 6, 1);
+    let client = ip4(10, 77, 6, 99);
+    let um = borrow uMac;
+    let cm = borrow clientMac;
+    let gm = borrow gMac;
+    let qm = borrow guestMac;
+
+    let g = tapOf("dnatg\0", gIp, gm);
+    if (g.isNull()) {
+        return failed(reason, "check failed: net-dnat: the guest-side tap\0");
+    }
+    let u = tapOf("dnatu\0", uIp, um);
+    if (u.isNull()) {
+        return failed(reason, "check failed: net-dnat: the uplink tap\0");
+    }
+    netif_set_forward(tap_netif(g), true); // the guest side forwards its replies out
+    netif_set_masquerade(tap_netif(g), true);
+    nettest_seed_arp(tap_netif(g), guest, macAt(qm));  // DNAT'd packets reach the guest
+    nettest_seed_arp(tap_netif(u), client, macAt(cm)); // replies reach the client
+    nat_flush();
+    nat_pf_clear();
+    if (nat_pf_add(IPPROTO_TCP, 8080, guest, 80) != 0 || nat_pf_add(IPPROTO_UDP, 9090, guest, 53) != 0 ||
+        nat_pf_add(IPPROTO_TCP, 8081, guest, 80) != 0) {
+        return failed(reason, "check failed: net-dnat: the forwards are added\0"); // 8081: the same endpoint as 8080
+    }
+    // A rule whose target is not on a connected subnet (would route out the default uplink and stall) is refused.
+    if (nat_pf_add(IPPROTO_TCP, 7777, ip4(203, 0, 113, 5), 7777) == 0) {
+        return failed(reason, "check failed: net-dnat: an off-subnet target is refused\0");
+    }
+    let rx = Slice.fromRaw(rxAt() as *u8, 256);
+    let rl4 = ETH_HLEN + 20;
+
+    // (1) a client SYN to the host's uplink port 8080 is DNAT'd to the guest.
+    if (!injectTcp(u, um, cm, client, uIp, 12345, 8080, TH_SYN) || !receive(g, 54)) {
+        return failed(reason, "check failed: net-dnat: the SYN reaches the guest\0");
+    }
+    if (wordOf(rx, 26) != client || wordOf(rx, 30) != guest) {
+        return failed(reason, "check failed: net-dnat: dst rewritten to the guest\0");
+    }
+    if (rd16(rx, rl4) != 12345 || rd16(rx, rl4 + 2) != 80) {
+        return failed(reason, "check failed: net-dnat: source port intact, dest port the guest's\0");
+    }
+    if (!nettest_l4_ok(client, guest, IPPROTO_TCP, rx[rl4..].ptr as *void, 20)) {
+        return failed(reason, "check failed: net-dnat: the TCP checksum follows\0");
+    }
+    if (dnatFlowEst(client, 12345) != 0) {
+        return failed(reason, "check failed: net-dnat: a SYN alone: half-open\0");
+    }
+
+    // (2) the guest's SYN-ACK is un-DNAT'd back to the client from host:8080.
+    if (!injectTcp(g, gm, qm, guest, client, 80, 12345, TH_SYN | TH_ACK) || !receive(u, 54)) {
+        return failed(reason, "check failed: net-dnat: the SYN-ACK reaches the client\0");
+    }
+    if (wordOf(rx, 26) != uIp || wordOf(rx, 30) != client) {
+        return failed(reason, "check failed: net-dnat: source rewritten to the host\0");
+    }
+    if (rd16(rx, rl4) != 8080 || rd16(rx, rl4 + 2) != 12345) {
+        return failed(reason, "check failed: net-dnat: source port what the client dialed\0");
+    }
+    if (!nettest_l4_ok(uIp, client, IPPROTO_TCP, rx[rl4..].ptr as *void, 20)) {
+        return failed(reason, "check failed: net-dnat: the reply's TCP checksum follows\0");
+    }
+    if (dnatFlowEst(client, 12345) != 0) {
+        return failed(reason, "check failed: net-dnat: the guest's half alone: still half-open\0");
+    }
+
+    // (2b) the client's ACK completes the handshake in order: established.
+    if (!injectTcp(u, um, cm, client, uIp, 12345, 8080, TH_ACK) || !arrives(g)) {
+        return failed(reason, "check failed: net-dnat: the ACK reaches the guest\0");
+    }
+    if (dnatFlowEst(client, 12345) != 1) {
+        return failed(reason, "check failed: net-dnat: established\0");
+    }
+
+    // (2c) an unsolicited ACK -- no SYN, from a fresh client port -- makes an entry the guest never accepted: the
+    // guest's RST to it and a second ACK after that leave it half-open, held for the short timeout only.
+    if (!injectTcp(u, um, cm, client, uIp, 12399, 8080, TH_ACK) || !arrives(g)) {
+        return failed(reason, "check failed: net-dnat: an unsolicited ACK reaches the guest\0");
+    }
+    if (dnatFlowEst(client, 12399) != 0) {
+        return failed(reason, "check failed: net-dnat: half-open\0");
+    }
+    if (!injectTcp(g, gm, qm, guest, client, 80, 12399, TH_RST) || !arrives(u)) {
+        return failed(reason, "check failed: net-dnat: the guest's RST reaches the client\0");
+    }
+    if (!injectTcp(u, um, cm, client, uIp, 12399, 8080, TH_ACK) || !arrives(g)) {
+        return failed(reason, "check failed: net-dnat: a second ACK reaches the guest\0");
+    }
+    if (dnatFlowEst(client, 12399) != 0) {
+        return failed(reason, "check failed: net-dnat: still half-open\0");
+    }
+
+    // (3) a UDP round trip through the udp rule.
+    let payload: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    if (!injectUdp(u, um, cm, client, uIp, 5555, 9090, borrow payload) || !receive(g, 50)) {
+        return failed(reason, "check failed: net-dnat: the datagram reaches the guest\0");
+    }
+    if (wordOf(rx, 30) != guest || rd16(rx, rl4 + 2) != 53) {
+        return failed(reason, "check failed: net-dnat: to the guest's port\0");
+    }
+    if (!nettest_l4_ok(client, guest, IPPROTO_UDP, rx[rl4..].ptr as *void, 16)) {
+        return failed(reason, "check failed: net-dnat: the UDP checksum follows\0");
+    }
+    // The guest's UDP reply is un-DNAT'd back to the client from host:9090.
+    if (!injectUdp(g, gm, qm, guest, client, 53, 5555, borrow payload) || !receive(u, 50)) {
+        return failed(reason, "check failed: net-dnat: the reply reaches the client\0");
+    }
+    if (wordOf(rx, 26) != uIp || rd16(rx, rl4) != 9090) {
+        return failed(reason, "check failed: net-dnat: from host:9090\0");
+    }
+    if (!nettest_l4_ok(uIp, client, IPPROTO_UDP, rx[rl4..].ptr as *void, 16)) {
+        return failed(reason, "check failed: net-dnat: the reply's UDP checksum follows\0");
+    }
+
+    // (4) a connection to an unruled port is delivered to the host, not the guest.
+    if (!injectTcp(u, um, cm, client, uIp, 22222, 1234, TH_SYN)) {
+        return failed(reason, "check failed: net-dnat: an unruled SYN is injected\0");
+    }
+    if (arrives(g)) {
+        return failed(reason, "check failed: net-dnat: never forwarded to the guest\0");
+    }
+
+    // (4b) two forwards to the same guest endpoint cannot alias: a client reusing its source tuple on the second
+    // forward (8081, same guest:80 as the live 8080 flow from part 1) is refused, since the reply could not be told from
+    // the first flow's.
+    let as0 = natNow();
+    if (!injectTcp(u, um, cm, client, uIp, 12345, 8081, TH_SYN)) {
+        return failed(reason, "check failed: net-dnat: the aliasing SYN is injected\0");
+    }
+    if (arrives(g)) {
+        return failed(reason, "check failed: net-dnat: ambiguous: not forwarded\0");
+    }
+    let as1 = natNow();
+    if (as1.dnatDropAmbiguous != as0.dnatDropAmbiguous + 1) {
+        return failed(reason, "check failed: net-dnat: counted as what it was\0");
+    }
+    if (as1.dnatDropShare != as0.dnatDropShare || as1.dnatDropTable != as0.dnatDropTable) {
+        return failed(reason, "check failed: net-dnat: and as nothing else\0");
+    }
+
+    // (5) one guest's inbound flood is bounded to its share of the table, not the whole table: from an empty table, a
+    // flood of distinct client flows against one guest's forward settles at NAT_QUOTA_PER_GUEST DNAT entries (so a
+    // peer's slots survive) and further ones drop; then aging reclaims them.
+    nat_flush();
+    let ns0 = natNow();
+    for (i in 0..NAT_TABLE_SIZE + 16) {
+        injectTcp(u, um, cm, client, uIp, truncate<u16>(30000 + i), 8080, TH_SYN);
+        if ((i & 31) == 31) {
+            drain(g);
+        }
+    }
+    // The flood is asynchronous, and dnat_drop_share rising says only that *some* packet was refused -- not that every
+    // injected one has been processed. Every injected SYN ends as a translation or a refusal, so wait for that sum:
+    // aging while packets are still queued on the worker would expire the table and then see a fresh entry created
+    // behind it.
+    let injected = (NAT_TABLE_SIZE + 16) as u64;
+    for (i in 0..200) {
+        drain(g);
+        let ns = natNow();
+        if ((ns.dnatIn - ns0.dnatIn) + (ns.dnatDropShare - ns0.dnatDropShare) >= injected) {
+            break;
+        }
+        sleepMs(10);
+    }
+    let ns1 = natNow();
+    if (ns1.entries != NAT_QUOTA_PER_GUEST) {
+        return failed(reason, "check failed: net-dnat: capped to the guest's share, not 256\0");
+    }
+    if (ns1.dnatDropShare <= ns0.dnatDropShare) {
+        return failed(reason, "check failed: net-dnat: the flood past the share dropped\0");
+    }
+    if (ns1.dnatDropTable != ns0.dnatDropTable || ns1.dnatDropAmbiguous != ns0.dnatDropAmbiguous) {
+        return failed(reason, "check failed: net-dnat: as a share drop only\0");
+    }
+    if ((ns1.dnatIn - ns0.dnatIn) + (ns1.dnatDropShare - ns0.dnatDropShare) < injected) {
+        return failed(reason, "check failed: net-dnat: every SYN was decided\0");
+    }
+    let na0 = natNow();
+    if (na0.entries == 0) {
+        return failed(reason, "check failed: net-dnat: entries are live\0");
+    }
+    nat_age(clock_now_ns() + 2 * NAT_TIMEOUT_TCP_NS);
+    let na1 = natNow();
+    if (na1.entries != 0 || na1.expired <= na0.expired) {
+        return failed(reason, "check failed: net-dnat: aging reclaims them\0");
+    }
+
+    nat_pf_clear();
+    nat_flush();
+    nettest_tap_destroy(u);
+    nettest_tap_destroy(g);
+    says(
+        "selftest: net-dnat: a client connection was forwarded to the guest and its reply un-DNAT'd back from host:P (TCP and UDP), an unruled port stayed local, the table bounded",
+    );
+    return true;
+}
+
+// ---- The guests' files ----
+
+/// Open /dev/net/tap (or tapctl) into `slot`: 0, or the open's error.
+/// Safety: `slot` is the test's.
+unsafe fn open(path: StringView, flags: u32, slot: *mut *mut file) -> i32 => nettest_vfs_open(
+    path.ptr as *CChar,
+    flags,
+    slot,
+);
+
+/// A guest's tap file: /dev/net/tap, read-write and non-blocking.
+/// Safety: `slot` is the test's.
+unsafe fn openTap(slot: *mut *mut file) -> i32 => open("/dev/net/tap\0", O_RDWR | O_NONBLOCK, slot);
+
+/// The interface named `name` (up to seven bytes), referenced, or null.
+/// Safety: thread context.
+unsafe fn find(name: StringView) -> *mut netif => netif_find(name.ptr as *CChar);
+
+/// "tap0" .. "tap7".
+fn tapName(k: usize, out: borrow mut [u8; 8]) {
+    out[0] = 116; // t
+    out[1] = 97;  // a
+    out[2] = 112; // p
+    out[3] = truncate<u8>(48 + k);
+    out[4] = 0;
+}
+
+/// Inject one datagram from a guest (its file) toward the stack, addressed to its tap's MAC as a real guest would send
+/// to its gateway.
+/// Safety: `from` is a tap file of the test's; the MACs 6 readable bytes, `l4` `l4len`.
+@export("nettest_fwt_send")
+unsafe fn fwtSend(from: *mut file, tapmac: *u8, gmac: *u8, sip: u32, dip: u32, proto: u8, l4: *u8, l4len: u16) -> bool {
+    var f: [u8; 128] = [0; 128];
+    let fp = borrow mut f as *mut [u8; 128] as *mut u8;
+    let flen = nettest_wrap(fp, tapmac, gmac, sip, dip, 64, proto, l4 as *void, l4len);
+    return file_write(from, fp as *void, flen as usize) == flen as i64;
+}
+
+/// Poll a guest's file for a forwarded IPv4 datagram, skipping anything else the stack emits on the tap (ARP, ND). Its
+/// length, or 0 when none arrived in `tries` reads.
+/// Safety: `to` is a tap file of the test's; `rx` has room for `cap` bytes, at least 14.
+@export("nettest_fwt_recv")
+unsafe fn fwtRecv(to: *mut file, rx: *mut u8, cap: usize, tries: u32) -> i64 {
+    let b = Slice.fromRaw(rx as *u8, cap);
+    for (i in 0..tries) {
+        let n = file_read(to, rx as *mut void, cap);
+        if (n >= truncate<i64>(ETH_HLEN + 20) && b[12] == 0x08 && b[13] == 0x00) {
+            return n;
+        }
+        if (n <= 0) {
+            sleepMs(10);
+        }
+    }
+    return 0;
+}
+
+/// An ICMP echo of `kind` with identifier `id` (checksum left zero: the forwarding path does not validate it). 16
+/// bytes.
+/// Safety: `l4` has room for 16 bytes.
+@export("nettest_fwt_mk_icmp")
+unsafe fn fwtMkIcmp(l4: *mut u8, kind: u8, id: u16) -> u16 {
+    let b = SliceMut.fromRaw(l4, 16);
+    for (i in 0..16) {
+        b[truncate<usize>(i)] = 0;
+    }
+    b[0] = kind;
+    b[4] = truncate<u8>(id >> 8);
+    b[5] = truncate<u8>(id);
+    b[7] = 1; // sequence
+    return 16;
+}
+
+// ---- net-multiguest ----
+
+// The guests' files (struct file *), the test's.
+static mut FILES: [usize; 8] = [0; 8];
+
+/// Safety: the runner runs one test at a time, so FILES is this test's.
+fn fileSlot(k: usize) -> *mut *mut file =>
+    unsafe { (borrow mut FILES as *mut [usize; 8] as *mut usize).add(k) as *mut *mut file };
+
+/// Safety: as fileSlot.
+fn fileAt(k: usize) -> *mut file => unsafe { FILES[k] as *mut file };
+
+/// A guest's datagram through its file: UDP `pl` from `sip` to `dip`.
+/// Safety: as fwtSend.
+unsafe fn guestUdp(
+    f: *mut file,
+    tapmac: borrow [u8; 6],
+    gmac: borrow [u8; 6],
+    sip: u32,
+    dip: u32,
+    sp: u16,
+    dp: u16,
+    pl: borrow [u8; 4],
+) -> bool {
+    let len = nettest_mk_udp(l4(), sip, dip, sp, dp, pl as *[u8; 4] as *u8, 4);
+    return fwtSend(f, macAt(tapmac), macAt(gmac), sip, dip, IPPROTO_UDP, l4() as *u8, len);
+}
+
+/// The ARP request from `smac` (`spa`) for `tpa`, 42 bytes.
+fn arpReq(req: borrow mut [u8; 42], smac: borrow [u8; 6], spa: u32, tpa: u32) {
+    for (i in 0..42) {
+        req[truncate<usize>(i)] = 0;
+    }
+    for (i in 0..6) {
+        req[truncate<usize>(i)] = 0xff;
+        req[6 + truncate<usize>(i)] = smac[truncate<usize>(i)];
+        req[22 + truncate<usize>(i)] = smac[truncate<usize>(i)];
+    }
+    req[12] = 0x08;
+    req[13] = 0x06;
+    req[15] = 1;
+    req[16] = 0x08;
+    req[18] = 6;
+    req[19] = 4;
+    req[21] = 1;
+    for (i in 0..4) {
+        req[28 + truncate<usize>(i)] = truncate<u8>(spa >> (8 * truncate<u32>(i)));
+        req[38 + truncate<usize>(i)] = truncate<u8>(tpa >> (8 * truncate<u32>(i)));
+    }
+}
+
+/// Read up to `tries` times from a guest's file for a forwarded IPv4 datagram into RX.
+/// Safety: as fileSlot; `f` is the test's.
+unsafe fn ipFrom(f: *mut file, tries: u32) -> bool {
+    let rx = Slice.fromRaw(rxAt() as *u8, 128);
+    for (i in 0..tries) {
+        let n = file_read(f, rxAt() as *mut void, 128);
+        if (n >= truncate<i64>(ETH_HLEN + 20) && rx[12] == 0x08 && rx[13] == 0x00) {
+            return true;
+        }
+        if (n <= 0) {
+            sleepMs(10);
+        }
+    }
+    return false;
+}
+
+/// net-multiguest: eight opens are eight taps on eight subnets, a ninth is refused, frames stay on their own tap,
+/// guest-to-guest is routed with real addresses and never forged, and a close destroys only its own.
+/// Safety: the runner's `reason`.
+@export("selftest_net_multiguest")
+unsafe fn multiguest(reason: *mut *CChar) -> bool {
+    FILES = [0; 8];
+
+    // (1) eight opens are eight taps on eight distinct subnets; a ninth is refused.
+    var name: [u8; 8] = [0; 8];
+    for (k in 0..MG_MAX) {
+        if (openTap(fileSlot(k)) != 0 || fileAt(k).isNull()) {
+            return failed(reason, "check failed: net-multiguest: eight opens\0");
+        }
+        tapName(k, mut name);
+        let n = netif_find(borrow name as *[u8; 8] as *CChar);
+        if (n.isNull()) {
+            return failed(reason, "check failed: net-multiguest: each a tap\0");
+        }
+        let nn = Ptr.toBorrow(n as *netif);
+        let ok = nn.ip4.addr == ip4(10, 0, 3 + truncate<u32>(k), 1) && (nn.flags & NETIF_FORWARD) != 0;
+        netif_put(n);
+        if (!ok) {
+            return failed(reason, "check failed: net-multiguest: on its own subnet, forwarding\0");
+        }
+    }
+    var ninth = 0 as *mut file;
+    if (openTap(borrow mut ninth as *mut *mut file) != -ENOSPC || !ninth.isNull()) {
+        return failed(reason, "check failed: net-multiguest: a ninth is refused\0");
+    }
+
+    // (2) a frame written to one file reaches only that file's tap: an ARP for tap0's address answered on file 0,
+    // nothing on file 1.
+    let gmac: [u8; 6] = [0x52, 0x54, 0x00, 0x0c, 0x00, 0x0f];
+    var req: [u8; 42] = [0; 42];
+    var rep: [u8; 64] = [0; 64];
+    arpReq(mut req, borrow gmac, ip4(10, 0, 3, 15), ip4(10, 0, 3, 1));
+    if (file_write(fileAt(0), borrow req as *[u8; 42] as *void, 42) != 42) {
+        return failed(reason, "check failed: net-multiguest: an ARP request is written\0");
+    }
+    var n: i64 = 0;
+    var i: u32 = 0;
+    while (i < 50 && n <= 0) {
+        n = file_read(fileAt(0), borrow mut rep as *mut [u8; 64] as *mut void, 64);
+        if (n <= 0) {
+            sleepMs(10);
+        }
+        i += 1;
+    }
+    if (n < 42 || rep[12] != 0x08 || rep[13] != 0x06 || rep[21] != 2) {
+        return failed(reason, "check failed: net-multiguest: an ARP reply (padded to 60)\0");
+    }
+    if (rep[28] != 10 || rep[29] != 0 || rep[30] != 3 || rep[31] != 1) {
+        return failed(reason, "check failed: net-multiguest: from 10.0.3.1\0");
+    }
+    if (file_read(fileAt(1), borrow mut rep as *mut [u8; 64] as *mut void, 64) != 0) {
+        return failed(reason, "check failed: net-multiguest: tap1 saw nothing\0");
+    }
+
+    // (2b) guest-to-guest is routed with real addresses, not masqueraded: a datagram from tap0's guest to tap1's guest
+    // leaves tap1 with its source intact (both taps forward, so the egress is not the uplink).
+    let g1mac: [u8; 6] = [0x52, 0x54, 0x00, 0x0c, 0x00, 0x1f];
+    let tap0mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
+    let ga = ip4(10, 0, 3, 15);
+    let gb = ip4(10, 0, 4, 15);
+    // The forwarding firewall drops inter-guest traffic by default (its own unit, net-firewall, proves that); open A's
+    // to-guest policy here so this step asserts routing and the absence of masquerade, not policy.
+    if (fw_policy_set(ga, FW_DIR_TO_GUEST, FW_ACCEPT) != 0) {
+        return failed(reason, "check failed: net-multiguest: A's to-guest policy opens\0");
+    }
+    let n1 = find("tap1\0");
+    if (n1.isNull()) {
+        return failed(reason, "check failed: net-multiguest: tap1 is there\0");
+    }
+    nettest_seed_arp(n1, gb, macAt(borrow g1mac));
+    netif_put(n1);
+    let pl: [u8; 4] = [9, 8, 7, 6];
+    if (!guestUdp(fileAt(0), borrow tap0mac, borrow gmac, ga, gb, 7000, 7001, borrow pl)) {
+        return failed(reason, "check failed: net-multiguest: A's datagram is written\0");
+    }
+    // Read file 1, skipping the ARP the stack queues while resolving, to the forwarded IPv4 datagram.
+    if (!ipFrom(fileAt(1), 60)) {
+        return failed(reason, "check failed: net-multiguest: it reaches B\0");
+    }
+    if (wordOf(Slice.fromRaw(rxAt() as *u8, 128), 26) != ga) {
+        return failed(reason, "check failed: net-multiguest: real source, not masqueraded\0");
+    }
+
+    // (2b') a guest cannot forge a same-subnet identity toward a peer: a frame from tap0's guest sourced as 10.0.3.50
+    // (not its assigned .15) is dropped as spoofed and never reaches tap1.
+    let mgs0 = ipNow();
+    let forged = ip4(10, 0, 3, 50);
+    if (!guestUdp(fileAt(0), borrow tap0mac, borrow gmac, forged, gb, 7000, 7001, borrow pl)) {
+        return failed(reason, "check failed: net-multiguest: the forged datagram is written\0");
+    }
+    let leaked = ipFrom(fileAt(1), 30);
+    let mgs1 = ipNow();
+    if (leaked || mgs1.fwdSpoofed <= mgs0.fwdSpoofed) {
+        return failed(reason, "check failed: net-multiguest: dropped as spoofed, never reaching the peer\0");
+    }
+
+    // (2c) a forward rule per guest; closing tap0's owner purges only its guest's rule, tap1's remains.
+    nat_pf_clear();
+    if (nat_pf_add(IPPROTO_TCP, 2222, ga, 22) != 0 || nat_pf_add(IPPROTO_TCP, 3333, gb, 22) != 0) {
+        return failed(reason, "check failed: net-multiguest: a forward per guest\0");
+    }
+    var first: u32 = 0;
+    if (pfList(mut first) != 2) {
+        return failed(reason, "check failed: net-multiguest: both listed\0");
+    }
+
+    // (3) the last close of one file destroys only its tap, purges only its guest's NAT state, and frees its slot; the
+    // others live on.
+    nettest_file_put(fileAt(0));
+    FILES[0] = 0;
+    let gone = find("tap0\0");
+    let kept = find("tap1\0");
+    let destroyed = gone.isNull() && !kept.isNull();
+    if (!gone.isNull()) {
+        netif_put(gone);
+    }
+    if (!kept.isNull()) {
+        netif_put(kept);
+    }
+    if (!destroyed) {
+        return failed(reason, "check failed: net-multiguest: the close destroyed tap0 only\0");
+    }
+    if (pfList(mut first) != 1 || first != gb) {
+        return failed(reason, "check failed: net-multiguest: tap0's guest purged, tap1's kept\0");
+    }
+    if (openTap(fileSlot(0)) != 0) {
+        return failed(reason, "check failed: net-multiguest: the slot is free again\0");
+    }
+    let again = find("tap0\0");
+    if (again.isNull()) {
+        return failed(reason, "check failed: net-multiguest: tap0 again\0");
+    }
+    let reused = Ptr.toBorrow(again as *netif).ip4.addr == ip4(10, 0, 3, 1);
+    netif_put(again);
+    if (!reused) {
+        return failed(reason, "check failed: net-multiguest: on its subnet\0");
+    }
+
+    for (k in 0..MG_MAX) {
+        if (!fileAt(k).isNull()) {
+            nettest_file_put(fileAt(k));
+        }
+    }
+    let left0 = find("tap0\0");
+    let left7 = find("tap7\0");
+    let allGone = left0.isNull() && left7.isNull();
+    if (!left0.isNull()) {
+        netif_put(left0);
+    }
+    if (!left7.isNull()) {
+        netif_put(left7);
+    }
+    if (!allGone) {
+        return failed(reason, "check failed: net-multiguest: every tap went with its file\0");
+    }
+    says(
+        "selftest: net-multiguest: eight opens gave eight taps on eight subnets, a ninth was refused, frames stayed on their own tap, a close destroyed only its own and its slot was reused",
+    );
+    return true;
+}
+
+// ---- net-firewall ----
+
+/// A firewall rule in a zeroed room: what the C's designated initialiser named, the rest zero.
+/// Safety: the room holds a struct fw_rule (room checks).
+fn fwRule(r: borrow mut Cmd, direction: u8, proto: u8, verdict: u8, dstIp: u32, dstPort: u16) -> *fw_rule {
+    let p = cmdAt(mut r) as *mut fw_rule;
+    unsafe {
+        let w = Ptr.toBorrowMut(p);
+        w.direction = direction;
+        w.proto = proto;
+        w.dst_prefix = 32;
+        w.verdict = verdict;
+        w.dst_ip = dstIp;
+        w.dst_port = dstPort;
+    }
+    return p as *fw_rule;
+}
+
+/// A control command in a zeroed room.
+/// Safety: the room holds a struct cosmo_netctl_filter (room checks).
+fn filterCmd(
+    r: borrow mut Cmd,
+    version: u16,
+    op: u16,
+    guest: u32,
+    proto: u8,
+    verdict: u8,
+    dst: u32,
+    port: u16,
+) -> *cosmo_netctl_filter {
+    r.words = [0; 8];
+    let p = cmdAt(mut r) as *mut cosmo_netctl_filter;
+    unsafe {
+        let w = Ptr.toBorrowMut(p);
+        w.version = version;
+        w.op = op;
+        w.guest_addr = guest;
+        w.direction = NETCTL_DIR_TO_GUEST;
+        w.proto = proto;
+        w.dst_prefix = if (op == NETCTL_FILTER_POLICY) 0 else 32;
+        w.verdict = verdict;
+        w.dst_addr = dst;
+        w.dst_port = port;
+    }
+    return p as *cosmo_netctl_filter;
+}
+
+/// Write a control command: what file_write returned.
+/// Safety: `f` is the test's tapctl file.
+unsafe fn command(f: *mut file, c: *cosmo_netctl_filter, len: usize) -> i64 => file_write(f, c as *void, len);
+
+fn filterLen() -> usize => layoutOf<cosmo_netctl_filter>().size;
+
+// The rule listing's room: FW_RULES_PER_GUEST struct fw_rule (checked), and the snapshot's.
+static mut RULES: [u64; 128] = [0; 128];
+static mut SNAP: [u8; 65536] = [0; 65536];
+
+/// List a guest's rules into RULES: the count.
+/// Safety: the runner runs one test at a time, so RULES is this test's.
+unsafe fn ruleList(guest: u32) -> u32 {
+    if (layoutOf<fw_rule>().size * (FW_RULES_PER_GUEST as usize) > 1024) {
+        tooSmall();
+    }
+    return fw_rule_list(guest, borrow mut RULES as *mut [u64; 128] as *mut fw_rule, FW_RULES_PER_GUEST);
+}
+
+/// The `i`th listed rule.
+/// Safety: as ruleList, after it.
+unsafe fn listed(i: usize) -> *fw_rule =>
+    (borrow RULES as *[u64; 128] as *u8).add(i * layoutOf<fw_rule>().size) as *fw_rule;
+
+/// Safety: as listed.
+unsafe fn ruleDir(i: usize) -> u8 => Ptr.toBorrow(listed(i)).direction;
+
+/// Whether the attached guests include both `a` and `b`.
+/// Safety: thread context.
+unsafe fn bothAttached(a: u32, b: u32) -> bool {
+    var attached: [u32; 8] = [0; 8];
+    let n = fw_guest_list(borrow mut attached as *mut [u32; 8] as *mut u32, FW_MAX_GUESTS);
+    var hasA = false;
+    var hasB = false;
+    for (i in 0..n as usize) {
+        hasA = hasA || attached[i] == a;
+        hasB = hasB || attached[i] == b;
+    }
+    return hasA && hasB;
+}
+
+/// The tap `name` is on `addr`, and the guest `guest` is seeded behind it.
+/// Safety: thread context.
+unsafe fn seedGuest(name: StringView, addr: u32, guest: u32, mac: borrow [u8; 6]) -> bool {
+    let n = find(name);
+    if (n.isNull()) {
+        return false;
+    }
+    let ok = Ptr.toBorrow(n as *netif).ip4.addr == addr;
+    if (ok) {
+        nettest_seed_arp(n, guest, macAt(mac));
+    }
+    netif_put(n);
+    return ok;
+}
+
+/// A guest's segment or message through its file: TCP with `flags`, or an ICMP echo of `kind` and `id`.
+/// Safety: as fwtSend.
+unsafe fn guestTcp(
+    f: *mut file,
+    tapmac: borrow [u8; 6],
+    gmac: borrow [u8; 6],
+    sip: u32,
+    dip: u32,
+    sp: u16,
+    dp: u16,
+    flags: u8,
+) -> bool {
+    let len = nettest_mk_tcp(l4(), sip, dip, sp, dp, flags);
+    return fwtSend(f, macAt(tapmac), macAt(gmac), sip, dip, IPPROTO_TCP, l4() as *u8, len);
+}
+
+/// Safety: as fwtSend.
+unsafe fn guestIcmp(
+    f: *mut file,
+    tapmac: borrow [u8; 6],
+    gmac: borrow [u8; 6],
+    sip: u32,
+    dip: u32,
+    kind: u8,
+    id: u16,
+) -> bool {
+    let len = fwtMkIcmp(l4(), kind, id);
+    return fwtSend(f, macAt(tapmac), macAt(gmac), sip, dip, IPPROTO_ICMP, l4() as *u8, len);
+}
+
+/// Whether a forwarded datagram reaches the guest's file within `tries` reads (into RX).
+/// Safety: `f` is the test's.
+unsafe fn reaches(f: *mut file, tries: u32) -> bool => fwtRecv(f, rxAt(), 128, tries) > 0;
+
+/// The snapshot's filter section: the guests and rules counted, and whether a rule for `ga` with TCP/445 is listed at
+/// index 0 accepting toward `gb`; the snapshot's length checked against its sections.
+/// Safety: SNAP holds a snapshot of `sn` bytes.
+unsafe fn snapshotSeen(sn: i64, ga: u32, gb: u32) -> bool {
+    let snap = borrow SNAP as *[u8; 65536] as *u8;
+    let ph = Ptr.toBorrow(snap as *cosmo_netctl_list);
+    let count = ph.count;
+    var off = layoutOf<cosmo_netctl_list>().size + (count as usize) * layoutOf<cosmo_netctl_rule>().size;
+    let fh = Ptr.toBorrow(snap.add(off) as *cosmo_netctl_filter_list);
+    if (fh.version != NETCTL_VERSION || fh.guest_count < 2 || fh.rule_count < 5) {
+        return false; // incl. two seeds per guest
+    }
+    let rules = fh.rule_count;
+    off +=
+        layoutOf<cosmo_netctl_filter_list>().size +
+            (fh.guest_count as usize) * layoutOf<cosmo_netctl_filter_guest>().size;
+    var seen = false;
+    for (i in 0..rules as usize) {
+        let fr = Ptr.toBorrow(
+            snap.add(off + i * layoutOf<cosmo_netctl_filter_rule>().size) as *cosmo_netctl_filter_rule,
+        );
+        if (fr.guest_addr == ga && fr.proto == NETCTL_PROTO_TCP && fr.dst_port == 445) {
+            seen = fr.index == 0 && fr.verdict == NETCTL_VERDICT_ACCEPT && fr.dst_addr == gb;
+        }
+    }
+    return seen && sn == nettest_netctl_snapshot_len(snap, count as u32);
+}
+
+/// The firewall test's two guests' files -- A on tap0 (10.0.3.15), B on tap1 (10.0.4.15) -- and its control file.
+static mut FA: *mut file = 0 as *mut file;
+static mut FB: *mut file = 0 as *mut file;
+static mut FCTL: *mut file = 0 as *mut file;
+
+/// The firewall's FORWARD verdicts, the rules and their order, a rule's binding to its guest, and the control
+/// channel's round trip; the guests' files are FA and FB, the control FCTL (the test's statics).
+/// Safety: the runner's `reason`.
+unsafe fn firewallBody(reason: *mut *CChar) -> bool {
+    let ga = ip4(10, 0, 3, 15);
+    let gb = ip4(10, 0, 4, 15);
+    let amac: [u8; 6] = [0x52, 0x54, 0x00, 0x0d, 0x00, 0x0a];
+    let bmac: [u8; 6] = [0x52, 0x54, 0x00, 0x0d, 0x00, 0x0b];
+    let tap0mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
+    let tap1mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcd];
+    let am = borrow amac;
+    let bm = borrow bmac;
+    let t0 = borrow tap0mac;
+    let t1 = borrow tap1mac;
+    if (!seedGuest("tap0\0", ip4(10, 0, 3, 1), ga, am) || !seedGuest("tap1\0", ip4(10, 0, 4, 1), gb, bm)) {
+        return failed(reason, "check failed: net-firewall: the two taps on their subnets\0");
+    }
+    if (!bothAttached(ga, gb)) {
+        return failed(reason, "check failed: net-firewall: both opens attached\0");
+    }
+    let pl: [u8; 4] = [1, 2, 3, 4];
+    let p = borrow pl;
+
+    // (1) the default: a guest cannot reach its neighbour. A -> B is dropped by the default policy, counted on both the
+    // filter and the IP side.
+    var fs0 = fwNow();
+    let is0 = ipNow();
+    if (!guestUdp(FA, t0, am, ga, gb, 7000, 7001, p) || reaches(FB, 15)) {
+        return failed(reason, "check failed: net-firewall: A -> B is dropped by default\0");
+    }
+    var fs1 = fwNow();
+    let is1 = ipNow();
+    if (fs1.dropDefault <= fs0.dropDefault || is1.fwdFiltered <= is0.fwdFiltered) {
+        return failed(reason, "check failed: net-firewall: counted on the filter and the IP side\0");
+    }
+
+    // (2) the default toward the uplink is unchanged: A -> the world is accepted (the verdict is what is asserted; the
+    // NIC carries it on).
+    fs0 = fwNow();
+    let world = ip4(10, 0, 2, 2);
+    let len = nettest_mk_udp(l4(), ga, world, 7000, 53, p as *[u8; 4] as *u8, 4);
+    if (!fwtSend(FA, macAt(t0), macAt(am), ga, world, IPPROTO_UDP, l4() as *u8, len)) {
+        return failed(reason, "check failed: net-firewall: A's datagram to the world is written\0");
+    }
+    for (i in 0..20) {
+        fs1 = fwNow();
+        if (fs1.acceptDefault > fs0.acceptDefault) {
+            break;
+        }
+        sleepMs(10);
+    }
+    if (fs1.acceptDefault <= fs0.acceptDefault) {
+        return failed(reason, "check failed: net-firewall: A -> the world is accepted\0");
+    }
+
+    // (3) one rule punches one hole: A -> B udp/7001 accepted, udp/7002 still dropped.
+    var allowUdpRoom = cmd(layoutOf<fw_rule>().size);
+    let allowUdp = fwRule(mut allowUdpRoom, FW_DIR_TO_GUEST, IPPROTO_UDP, FW_ACCEPT, gb, 7001);
+    if (fw_rule_add(ga, 0, allowUdp) != 0) {
+        return failed(reason, "check failed: net-firewall: the UDP rule is added\0");
+    }
+    fs0 = fwNow();
+    if (!guestUdp(FA, t0, am, ga, gb, 7000, 7001, p) || !reaches(FB, 40)) {
+        return failed(reason, "check failed: net-firewall: A -> B udp/7001 is accepted\0");
+    }
+    let rx = Slice.fromRaw(rxAt() as *u8, 128);
+    if (wordOf(rx, 26) != ga || wordOf(rx, 30) != gb) {
+        return failed(reason, "check failed: net-firewall: from A to B\0");
+    }
+    fs1 = fwNow();
+    if (fs1.acceptRule <= fs0.acceptRule || fs1.flowNew <= fs0.flowNew) {
+        return failed(reason, "check failed: net-firewall: by the rule, a new flow\0");
+    }
+    if (!guestUdp(FA, t0, am, ga, gb, 7000, 7002, p) || reaches(FB, 15)) {
+        return failed(reason, "check failed: net-firewall: udp/7002 is still dropped\0");
+    }
+
+    // (4) stateful return, the guest-to-guest direction: B's reply to the accepted flow reaches A with no rule for B;
+    // an unsolicited B -> A does not.
+    fs0 = fwNow();
+    if (!guestUdp(FB, t1, bm, gb, ga, 7001, 7000, p) || !reaches(FA, 40)) {
+        return failed(reason, "check failed: net-firewall: B's reply reaches A\0");
+    }
+    if (wordOf(rx, 26) != gb) {
+        return failed(reason, "check failed: net-firewall: from B\0");
+    }
+    fs1 = fwNow();
+    if (fs1.acceptEstablished <= fs0.acceptEstablished) {
+        return failed(reason, "check failed: net-firewall: as established\0");
+    }
+    if (!guestUdp(FB, t1, bm, gb, ga, 9000, 9001, p) || reaches(FA, 15)) {
+        return failed(reason, "check failed: net-firewall: an unsolicited B -> A is dropped\0");
+    }
+
+    // (4b) TCP: a reverse-direction bare SYN is a new connection, not a reply. On an accepted A -> B flow, B's SYN-ACK
+    // and ACK are established; a SYN from B on the reversed ports is B opening a connection and takes B's default drop,
+    // whatever the tuple says.
+    var allowTcpRoom = cmd(layoutOf<fw_rule>().size);
+    let allowTcp = fwRule(mut allowTcpRoom, FW_DIR_TO_GUEST, IPPROTO_TCP, FW_ACCEPT, gb, 8443);
+    if (fw_rule_add(ga, 0, allowTcp) != 0) {
+        return failed(reason, "check failed: net-firewall: the TCP rule is added\0");
+    }
+    if (!guestTcp(FA, t0, am, ga, gb, 40000, 8443, TH_SYN) || !reaches(FB, 40)) {
+        return failed(reason, "check failed: net-firewall: A's SYN, by rule\0");
+    }
+    if (!guestTcp(FB, t1, bm, gb, ga, 8443, 40000, TH_SYN | TH_ACK) || !reaches(FA, 40)) {
+        return failed(reason, "check failed: net-firewall: B's SYN-ACK: a reply\0");
+    }
+    if (!guestTcp(FB, t1, bm, gb, ga, 8443, 40000, TH_SYN) || reaches(FA, 15)) {
+        return failed(reason, "check failed: net-firewall: B's bare SYN: not a reply\0");
+    }
+    if (!guestTcp(FB, t1, bm, gb, ga, 8443, 40000, TH_ACK) || !reaches(FA, 40)) {
+        return failed(reason, "check failed: net-firewall: B's ACK: still established\0");
+    }
+    if (fw_rule_del(ga, allowTcp) != 0) {
+        return failed(reason, "check failed: net-firewall: the TCP rule is deleted\0");
+    }
+
+    // (5) ICMP echo is stateful on the identifier, not a bare reverse tuple.
+    var allowIcmpRoom = cmd(layoutOf<fw_rule>().size);
+    let allowIcmp = fwRule(mut allowIcmpRoom, FW_DIR_TO_GUEST, IPPROTO_ICMP, FW_ACCEPT, gb, FW_ICMP_TYPE_ANY);
+    if (fw_rule_add(ga, 99, allowIcmp) != 0) {
+        return failed(reason, "check failed: net-firewall: out-of-range index appends\0");
+    }
+    if (!guestIcmp(FA, t0, am, ga, gb, ICMP_ECHO, 0x1234) || !reaches(FB, 40)) {
+        return failed(reason, "check failed: net-firewall: the request, by rule\0");
+    }
+    if (!guestIcmp(FB, t1, bm, gb, ga, ICMP_ECHO_REPLY, 0x1234) || !reaches(FA, 40)) {
+        return failed(reason, "check failed: net-firewall: the reply: established\0");
+    }
+    if (!guestIcmp(FB, t1, bm, gb, ga, ICMP_ECHO, 0x1234) || reaches(FA, 15)) {
+        return failed(reason, "check failed: net-firewall: a reverse request is not a reply\0");
+    }
+    if (!guestIcmp(FB, t1, bm, gb, ga, ICMP_ECHO_REPLY, 0x9999) || reaches(FA, 15)) {
+        return failed(reason, "check failed: net-firewall: wrong id: no flow\0");
+    }
+
+    // (6) ordering and identity: a DROP inserted at index 0 wins first-match for a new flow; deleting it by tuple
+    // restores the ACCEPT; a duplicate tuple is refused.
+    var denyUdpRoom = cmd(layoutOf<fw_rule>().size);
+    let denyUdp = fwRule(mut denyUdpRoom, FW_DIR_TO_GUEST, IPPROTO_UDP, FW_DROP, gb, 7001);
+    if (fw_rule_add(ga, 0, denyUdp) != 0) {
+        return failed(reason, "check failed: net-firewall: the DROP is inserted first\0");
+    }
+    // The list: the DROP just inserted at 0, the UDP ACCEPT it pushed to 1, the two TO_HOST seeds attach installed
+    // (DNS, echo-request), and the ICMP ACCEPT appended last.
+    if (ruleList(ga) != 5 || Ptr.toBorrow(
+        listed(0),
+    ).verdict != FW_DROP || Ptr.toBorrow(listed(1)).verdict != FW_ACCEPT ||
+        Ptr.toBorrow(listed(1)).proto != IPPROTO_UDP || ruleDir(2) != FW_DIR_TO_HOST || ruleDir(3) != FW_DIR_TO_HOST ||
+        Ptr.toBorrow(listed(4)).proto != IPPROTO_ICMP || ruleDir(4) != FW_DIR_TO_GUEST) {
+        return failed(reason, "check failed: net-firewall: the list in its order\0");
+    }
+    fs0 = fwNow();
+    if (!guestUdp(FA, t0, am, ga, gb, 7100, 7001, p) || reaches(FB, 15)) {
+        return failed(reason, "check failed: net-firewall: a new flow takes the DROP\0"); // not the live one
+    }
+    fs1 = fwNow();
+    if (fs1.dropRule <= fs0.dropRule) {
+        return failed(reason, "check failed: net-firewall: by the rule\0");
+    }
+    if (fw_rule_del(ga, denyUdp) != 0 || fw_rule_del(ga, denyUdp) != -ENOENT) {
+        return failed(reason, "check failed: net-firewall: the DROP is deleted by tuple, once\0");
+    }
+    if (fw_rule_add(ga, 0, allowUdp) != -EEXIST) {
+        return failed(reason, "check failed: net-firewall: a duplicate tuple is refused\0");
+    }
+    if (!guestUdp(FA, t0, am, ga, gb, 7101, 7001, p) || !reaches(FB, 40)) {
+        return failed(reason, "check failed: net-firewall: the ACCEPT is back\0");
+    }
+
+    // (7) a rule is bound to a guest by address, not to the control handle: added for B through /dev/net/tapctl, it
+    // takes effect after that handle is closed; B's release purges it, an add for the departed B is refused, and a fresh
+    // tap at B's address starts with no rules.
+    if (open("/dev/net/tapctl\0", O_RDWR, borrow mut FCTL as *mut *mut file) != 0 || FCTL.isNull()) {
+        return failed(reason, "check failed: net-firewall: the control device opens\0");
+    }
+    var cRoom = cmd(layoutOf<cosmo_netctl_filter>().size);
+    var c = filterCmd(
+        mut cRoom,
+        NETCTL_VERSION,
+        NETCTL_FILTER_ADD,
+        gb,
+        NETCTL_PROTO_UDP,
+        NETCTL_VERDICT_ACCEPT,
+        ga,
+        5000,
+    );
+    if (command(FCTL, c, filterLen()) != truncate<i64>(filterLen())) {
+        return failed(reason, "check failed: net-firewall: B's rule through the device\0");
+    }
+    nettest_file_put(FCTL); // the transient handle vmctl would close
+    FCTL = 0 as *mut file;
+    if (!guestUdp(FB, t1, bm, gb, ga, 5001, 5000, p) || !reaches(FA, 40)) {
+        return failed(reason, "check failed: net-firewall: the rule outlived its handle\0");
+    }
+    nettest_file_put(FB); // B departs: purged and detached
+    FB = 0 as *mut file;
+    var bRuleRoom = cmd(layoutOf<fw_rule>().size);
+    let bRule = fwRule(mut bRuleRoom, FW_DIR_TO_GUEST, IPPROTO_UDP, FW_ACCEPT, ga, 5000);
+    if (fw_rule_add(gb, 0, bRule) != -ENOENT) {
+        return failed(reason, "check failed: net-firewall: an add after teardown is refused\0");
+    }
+    if (ruleList(gb) != 0) {
+        return failed(reason, "check failed: net-firewall: B's rules went with it\0");
+    }
+    if (openTap(borrow mut FB as *mut *mut file) != 0 || FB.isNull()) {
+        return failed(reason, "check failed: net-firewall: slot 1 reused\0");
+    }
+    if (!seedGuest("tap1\0", ip4(10, 0, 4, 1), gb, bm)) {
+        return failed(reason, "check failed: net-firewall: tap1 at B's subnet again\0");
+    }
+    if (ruleList(gb) != 2 || ruleDir(0) != FW_DIR_TO_HOST || ruleDir(1) != FW_DIR_TO_HOST) {
+        return failed(reason, "check failed: net-firewall: the reused address inherits only the fresh seeds\0");
+    }
+    if (!guestUdp(FB, t1, bm, gb, ga, 5001, 5000, p) || reaches(FA, 15)) {
+        return failed(reason, "check failed: net-firewall: no stale rule, no stale flow\0");
+    }
+
+    // (8) the control round trip: an ADD is listed with its guest and index; POLICY flips the default and the next
+    // verdict follows; bad writes change nothing.
+    if (open("/dev/net/tapctl\0", O_RDWR, borrow mut FCTL as *mut *mut file) != 0 || FCTL.isNull()) {
+        return failed(reason, "check failed: net-firewall: the control device opens again\0");
+    }
+    c = filterCmd(mut cRoom, NETCTL_VERSION, NETCTL_FILTER_ADD, ga, NETCTL_PROTO_TCP, NETCTL_VERDICT_ACCEPT, gb, 445);
+    if (command(FCTL, c, filterLen()) != truncate<i64>(filterLen())) {
+        return failed(reason, "check failed: net-firewall: A's TCP/445 rule through the device\0");
+    }
+    let sn = file_read(FCTL, borrow mut SNAP as *mut [u8; 65536] as *mut void, 65536);
+    if (sn <= 0 || !snapshotSeen(sn, ga, gb)) {
+        return failed(reason, "check failed: net-firewall: listed with its guest and index\0");
+    }
+    var polRoom = cmd(layoutOf<cosmo_netctl_filter>().size);
+    var pol = filterCmd(mut polRoom, NETCTL_VERSION, NETCTL_FILTER_POLICY, ga, 0, NETCTL_VERDICT_ACCEPT, 0, 0);
+    if (command(FCTL, pol, filterLen()) != truncate<i64>(filterLen())) {
+        return failed(reason, "check failed: net-firewall: POLICY accept\0");
+    }
+    if (!guestUdp(FA, t0, am, ga, gb, 7200, 7777, p) || !reaches(FB, 40)) {
+        return failed(reason, "check failed: net-firewall: no rule: the default decides, accept\0");
+    }
+    pol = filterCmd(mut polRoom, NETCTL_VERSION, NETCTL_FILTER_POLICY, ga, 0, NETCTL_VERDICT_DROP, 0, 0);
+    if (command(FCTL, pol, filterLen()) != truncate<i64>(filterLen())) {
+        return failed(reason, "check failed: net-firewall: POLICY drop\0");
+    }
+    if (!guestUdp(FA, t0, am, ga, gb, 7201, 7777, p) || reaches(FB, 15)) {
+        return failed(reason, "check failed: net-firewall: and the next verdict follows\0");
+    }
+    if (command(FCTL, c, 4) != -(EINVAL as i64)) {
+        return failed(reason, "check failed: net-firewall: a short command is refused\0");
+    }
+    var badRoom = cmd(layoutOf<cosmo_netctl_filter>().size);
+    var bad = filterCmd(mut badRoom, 99, NETCTL_FILTER_ADD, ga, NETCTL_PROTO_TCP, NETCTL_VERDICT_ACCEPT, gb, 445);
+    if (command(FCTL, bad, filterLen()) != -(ENOTSUP as i64)) {
+        return failed(reason, "check failed: net-firewall: a wrong version is refused\0");
+    }
+    bad = filterCmd(
+        mut badRoom,
+        NETCTL_VERSION,
+        NETCTL_FILTER_ADD,
+        ip4(10, 0, 9, 15),
+        NETCTL_PROTO_TCP,
+        NETCTL_VERDICT_ACCEPT,
+        gb,
+        445,
+    );
+    if (command(FCTL, bad, filterLen()) != -(ENOENT as i64)) {
+        return failed(reason, "check failed: net-firewall: not an attached guest\0");
+    }
+    bad = filterCmd(
+        mut badRoom,
+        NETCTL_VERSION,
+        NETCTL_FILTER_DEL,
+        ga,
+        NETCTL_PROTO_TCP,
+        NETCTL_VERDICT_ACCEPT,
+        gb,
+        446,
+    );
+    if (command(FCTL, bad, filterLen()) != -(ENOENT as i64)) {
+        return failed(reason, "check failed: net-firewall: no such tuple\0");
+    }
+    bad = filterCmd(
+        mut badRoom,
+        NETCTL_VERSION,
+        NETCTL_FILTER_ADD,
+        ga,
+        NETCTL_PROTO_ICMP,
+        NETCTL_VERDICT_ACCEPT,
+        gb,
+        300,
+    );
+    if (command(FCTL, bad, filterLen()) != -(EINVAL as i64)) {
+        return failed(reason, "check failed: net-firewall: an ICMP selector is a type <= 255 or ANY\0");
+    }
+    nettest_file_put(FCTL);
+    FCTL = 0 as *mut file;
+    return true;
+}
+
+/// net-firewall: the forwarding firewall between two guests opened through /dev/net/tap, as vmctl opens them.
+/// Safety: the runner's `reason`.
+@export("selftest_net_firewall")
+unsafe fn firewall(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    fw_flush();
+    nat_flush();
+    FA = 0 as *mut file;
+    FB = 0 as *mut file;
+    FCTL = 0 as *mut file;
+    if (openTap(borrow mut FA as *mut *mut file) != 0 || FA.isNull() || openTap(borrow mut FB as *mut *mut file) != 0 ||
+        FB.isNull()) {
+        return failed(reason, "check failed: net-firewall: two guests open their taps\0");
+    }
+    if (!firewallBody(reason)) {
+        return false;
+    }
+    nettest_file_put(FA);
+    nettest_file_put(FB);
+    fw_flush();
+    says(
+        "selftest: net-firewall: inter-guest dropped by default and uplink accepted, one rule punched one hole, a reply was admitted by state (echo by id, not a reverse request), a DROP inserted first won and was deleted by tuple, a rule outlived its handle but not its guest, and the control listing round-tripped",
+    );
+    return true;
+}

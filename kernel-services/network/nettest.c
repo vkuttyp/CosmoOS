@@ -4134,33 +4134,24 @@ bool selftest_net_nat(const char **reason)
  * with the same address; the tests below check it). */
 static const uint8_t dns_answer_ip[4] = { 93, 184, 216, 34 };
 
-/* --- inbound port forwarding (DNAT) --------------------------------------- */
-
-/* The DNAT flow from `client`:`port`: 1 established, 0 not, -1 not listed. */
-static int dnat_flow_est(uint32_t client, uint16_t port)
-{
-    static struct nat_flow nf[NAT_TABLE_SIZE];
-    unsigned n = nat_flow_list(nf, NAT_TABLE_SIZE, clock_now_ns());
-    for (unsigned i = 0; i < n; i++)
-        if (nf[i].kind == NAT_KIND_DNAT && nf[i].peer_ip == client && nf[i].peer_port == port)
-            return nf[i].est ? 1 : 0;
-    return -1;
-}
-
-/* An IPv4 frame the stack has sent out `t`, after every worker has finished
- * what it was given: NULL means none was, not "none yet". */
-static struct mbuf *nettest_sent_ip_now(struct tap *t)
-{
-    net_workers_barrier();
-    struct mbuf *m;
-    while ((m = tap_recv(t)) != NULL) {
-        uint8_t type[2];
-        if (m_copydata(m, 12, 2, type) && type[0] == 0x08 && type[1] == 0x00)
-            return m;
-        m_freem(m);
-    }
-    return NULL;
-}
+/* --- inbound port forwarding, many guests, the forwarding firewall ----------
+ *
+ * net-pf-clear, net-dnat, net-multiguest and net-firewall are CeeSafe
+ * (nettest_fwd.cee), with the firewall tests' guest helpers
+ * (nettest_fwt_send, nettest_fwt_recv, nettest_fwt_mk_icmp; nettest.h) the
+ * chain tests below call. The values it writes as its own constants: */
+_Static_assert(ENOENT == 2 && EEXIST == 17 && ENOSPC == 28 && ENOTSUP == 95 && NAT_TABLE_SIZE == 256 &&
+               NAT_PF_MAX == 16 && NAT_QUOTA_PER_GUEST == 32 && NAT_TIMEOUT_TCP_NS == 30ull * 1000000000ull &&
+               NAT_KIND_DNAT == 1, "nettest_fwd.cee's errno.h and nat.h values");
+_Static_assert(FW_DROP == 0 && FW_ACCEPT == 1 && FW_DIR_TO_GUEST == 2 && FW_DIR_TO_HOST == 3 &&
+               FW_ICMP_TYPE_ANY == 0xffff && FW_MAX_GUESTS == 8 && FW_RULES_PER_GUEST == 32 &&
+               NETIF_FORWARD == (1u << 5) && COSMO_O_RDWR == 0x0002 && COSMO_O_NONBLOCK == 0x0800,
+               "nettest_fwd.cee's fw.h, netif.h and syscall.h values");
+_Static_assert(COSMO_NETCTL_VERSION == 8 && COSMO_NETCTL_FILTER_ADD == 3 && COSMO_NETCTL_FILTER_DEL == 4 &&
+               COSMO_NETCTL_FILTER_POLICY == 5 && COSMO_NETCTL_PROTO_ICMP == 1 && COSMO_NETCTL_PROTO_TCP == 6 &&
+               COSMO_NETCTL_PROTO_UDP == 17 && COSMO_NETCTL_DIR_TO_GUEST == 2 && COSMO_NETCTL_VERDICT_DROP == 0 &&
+               COSMO_NETCTL_VERDICT_ACCEPT == 1 && COSMO_NETCTL_SNAPSHOT_MAX <= 65536,
+               "nettest_fwd.cee's netctl.h values, and its snapshot room");
 
 /* The NAT and firewall state a test changed, cleared however it returns:
  * a forward or a translation left behind would decide the next test's
@@ -4175,249 +4166,20 @@ static void nt_rel_nat_state(void *arg)
     fw_flush();
 }
 
-/*
- * nat_pf_clear removed the rules and kept their translations: a client
- * whose connection a forward had translated kept reaching the guest through
- * a port the clear had closed (fuzz_net_config). It reaps them now, as
- * nat_pf_del reaps one rule's.
- */
-bool selftest_net_pf_clear(const char **reason)
+bool nettest_defer_nat_state(void) { return selftest_defer(nt_rel_nat_state, &g_nat_state_marker); }
+
+void nettest_release_nat_state(void)
 {
-    static const uint8_t g_mac[6]      = { 0x52, 0x54, 0x00, 0x08, 0x02, 0x01 };
-    static const uint8_t u_mac[6]      = { 0x52, 0x54, 0x00, 0x09, 0x02, 0x01 };
-    static const uint8_t guest_mac[6]  = { 0x52, 0x54, 0x00, 0x08, 0x02, 0x0f };
-    static const uint8_t client_mac[6] = { 0x52, 0x54, 0x00, 0x09, 0x02, 0x63 };
-    uint32_t mask = htonl(0xffffff00u);
-    uint32_t g_ip = IPV4_ADDR(10, 77, 7, 1), guest = IPV4_ADDR(10, 77, 7, 15);
-    uint32_t u_ip = IPV4_ADDR(10, 77, 8, 1), client = IPV4_ADDR(10, 77, 8, 99);
-    struct tap *g = nt_tap_create("pfcg", g_ip, mask, g_mac);
-    CHECK(g != NULL);
-    struct tap *u = nt_tap_create("pfcu", u_ip, mask, u_mac);
-    CHECK(u != NULL);
-    netif_set_forward(tap_netif(g), true);
-    netif_set_masquerade(tap_netif(g), true);
-    nettest_seed_arp(tap_netif(g), guest, guest_mac);
-    nettest_seed_arp(tap_netif(u), client, client_mac);
-    nat_flush();
-    nat_pf_clear();
-    CHECK(selftest_defer(nt_rel_nat_state, &g_nat_state_marker));
-    CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80) == 0);
-
-    uint8_t l4[64], frame[128];
-    uint16_t l4len = nettest_mk_tcp(l4, client, u_ip, 23456, 8080, TH_SYN);
-    uint32_t flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    struct mbuf *r = nettest_sent_ip_now(g);
-    CHECK(r != NULL);   /* translated to the guest */
-    m_freem(r);
-    CHECK(dnat_flow_est(client, 23456) == 0);
-
-    nat_pf_clear();
-    struct nat_pf_rule pf[1];
-    CHECK(nat_pf_list(pf, 1) == 0);
-    CHECK(dnat_flow_est(client, 23456) == -1);   /* its translation went with it */
-    l4len = nettest_mk_tcp(l4, client, u_ip, 23456, 8080, TH_ACK);
-    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    r = nettest_sent_ip_now(g);
-    if (r != NULL)
-        m_freem(r);
-    CHECK(r == NULL);   /* the client reaches the guest no more */
-
     if (!selftest_release(&g_nat_state_marker))
         nt_rel_nat_state(NULL);
-    nt_tap_destroy(u);
-    nt_tap_destroy(g);
-    kinfo("selftest: net-pf-clear: a clear took the forward's live translation with it");
-    return true;
 }
 
-bool selftest_net_dnat(const char **reason)
+int nettest_vfs_open(const char *path, unsigned flags, struct file **out)
 {
-    static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x08, 0x00, 0x01 };
-    static const uint8_t u_mac[6]     = { 0x52, 0x54, 0x00, 0x09, 0x00, 0x01 };
-    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x08, 0x00, 0x0f };
-    static const uint8_t client_mac[6]= { 0x52, 0x54, 0x00, 0x09, 0x00, 0x63 };
-    uint32_t mask = htonl(0xffffff00u);
-    uint32_t g_ip = IPV4_ADDR(10, 77, 5, 1), guest = IPV4_ADDR(10, 77, 5, 15);
-    uint32_t u_ip = IPV4_ADDR(10, 77, 6, 1), client = IPV4_ADDR(10, 77, 6, 99);
-
-    struct tap *g = nt_tap_create("dnatg", g_ip, mask, g_mac);
-    CHECK(g != NULL);
-    struct tap *u = nt_tap_create("dnatu", u_ip, mask, u_mac);
-    CHECK(u != NULL);
-    netif_set_forward(tap_netif(g), true);        /* the guest side forwards its replies out */
-    netif_set_masquerade(tap_netif(g), true);
-    nettest_seed_arp(tap_netif(g), guest, guest_mac);    /* DNAT'd packets reach the guest */
-    nettest_seed_arp(tap_netif(u), client, client_mac);  /* replies reach the client */
-    nat_flush();
-    nat_pf_clear();
-    CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80) == 0);
-    CHECK(nat_pf_add(IPPROTO_UDP, 9090, guest, 53) == 0);
-    CHECK(nat_pf_add(IPPROTO_TCP, 8081, guest, 80) == 0);   /* same guest endpoint as 8080 */
-    /* A rule whose target is not on a connected subnet (would route out the
-     * default uplink and stall) is refused. */
-    CHECK(nat_pf_add(IPPROTO_TCP, 7777, IPV4_ADDR(203, 0, 113, 5), 7777) != 0);
-
-    uint8_t l4[128], frame[256], rx[256];
-
-    /* (1) a client SYN to the host's uplink port 8080 is DNAT'd to the guest. */
-    uint16_t l4len = nettest_mk_tcp(l4, client, u_ip, 12345, 8080, TH_SYN);
-    uint32_t flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    struct mbuf *r = nettest_recv_ip(g);
-    CHECK(r != NULL);
-    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 20, rx)); m_freem(r);
-    struct ipv4_hdr *ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
-    CHECK(ri->src == client && ri->dst == guest);          /* dst rewritten to the guest */
-    uint8_t *rl4 = rx + ETH_HLEN + 20;
-    CHECK((uint16_t)(rl4[0] << 8 | rl4[1]) == 12345);      /* source port intact */
-    CHECK((uint16_t)(rl4[2] << 8 | rl4[3]) == 80);         /* dest port rewritten to the guest's */
-    CHECK(nettest_l4_ok(client, guest, IPPROTO_TCP, rl4, sizeof(struct tcp_hdr)));
-    CHECK(dnat_flow_est(client, 12345) == 0);             /* a SYN alone: half-open */
-
-    /* (2) the guest's SYN-ACK is un-DNAT'd back to the client from host:8080. */
-    l4len = nettest_mk_tcp(l4, guest, client, 80, 12345, TH_SYN | TH_ACK);
-    flen = nettest_wrap(frame, g_mac, guest_mac, guest, client, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(g, frame, flen) == 0);
-    r = nettest_recv_ip(u);
-    CHECK(r != NULL);
-    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 20, rx)); m_freem(r);
-    ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
-    CHECK(ri->src == u_ip && ri->dst == client);           /* source rewritten to the host */
-    rl4 = rx + ETH_HLEN + 20;
-    CHECK((uint16_t)(rl4[0] << 8 | rl4[1]) == 8080);       /* source port = what the client dialed */
-    CHECK((uint16_t)(rl4[2] << 8 | rl4[3]) == 12345);
-    CHECK(nettest_l4_ok(u_ip, client, IPPROTO_TCP, rl4, sizeof(struct tcp_hdr)));
-    CHECK(dnat_flow_est(client, 12345) == 0);             /* the guest's half alone: still half-open */
-
-    /* (2b) the client's ACK completes the handshake in order: established. */
-    l4len = nettest_mk_tcp(l4, client, u_ip, 12345, 8080, TH_ACK);
-    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    r = nettest_recv_ip(g);
-    CHECK(r != NULL);
-    m_freem(r);
-    CHECK(dnat_flow_est(client, 12345) == 1);
-
-    /* (2c) an unsolicited ACK -- no SYN, from a fresh client port -- makes an
-     * entry the guest never accepted: the guest's RST to it and a second ACK
-     * after that leave it half-open, held for the short timeout only. */
-    l4len = nettest_mk_tcp(l4, client, u_ip, 12399, 8080, TH_ACK);
-    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    r = nettest_recv_ip(g);
-    CHECK(r != NULL);
-    m_freem(r);
-    CHECK(dnat_flow_est(client, 12399) == 0);
-    l4len = nettest_mk_tcp(l4, guest, client, 80, 12399, TH_RST);
-    flen = nettest_wrap(frame, g_mac, guest_mac, guest, client, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(g, frame, flen) == 0);
-    r = nettest_recv_ip(u);
-    CHECK(r != NULL);
-    m_freem(r);
-    l4len = nettest_mk_tcp(l4, client, u_ip, 12399, 8080, TH_ACK);
-    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    r = nettest_recv_ip(g);
-    CHECK(r != NULL);
-    m_freem(r);
-    CHECK(dnat_flow_est(client, 12399) == 0);
-
-    /* (3) a UDP round trip through the udp rule. */
-    uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
-    l4len = nettest_mk_udp(l4, client, u_ip, 5555, 9090, payload, sizeof(payload));
-    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    r = nettest_recv_ip(g);
-    CHECK(r != NULL);
-    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 8 + (int)sizeof(payload), rx)); m_freem(r);
-    ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
-    rl4 = rx + ETH_HLEN + 20;
-    CHECK(ri->dst == guest && (uint16_t)(rl4[2] << 8 | rl4[3]) == 53);
-    CHECK(nettest_l4_ok(client, guest, IPPROTO_UDP, rl4, (uint16_t)(8 + sizeof(payload))));
-    /* the guest's UDP reply is un-DNAT'd back to the client from host:9090. */
-    l4len = nettest_mk_udp(l4, guest, client, 53, 5555, payload, sizeof(payload));
-    flen = nettest_wrap(frame, g_mac, guest_mac, guest, client, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(tap_inject(g, frame, flen) == 0);
-    r = nettest_recv_ip(u);
-    CHECK(r != NULL);
-    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 8 + (int)sizeof(payload), rx)); m_freem(r);
-    ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
-    rl4 = rx + ETH_HLEN + 20;
-    CHECK(ri->src == u_ip && (uint16_t)(rl4[0] << 8 | rl4[1]) == 9090);
-    CHECK(nettest_l4_ok(u_ip, client, IPPROTO_UDP, rl4, (uint16_t)(8 + sizeof(payload))));
-
-    /* (4) a connection to an unruled port is delivered to the host, not the guest. */
-    l4len = nettest_mk_tcp(l4, client, u_ip, 22222, 1234, TH_SYN);
-    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    CHECK(nettest_recv_ip(g) == NULL);                     /* never forwarded to the guest */
-
-    /* (4b) two forwards to the same guest endpoint cannot alias: a client
-     * reusing its source tuple on the second forward (8081, same guest:80 as
-     * the live 8080 flow from part 1) is refused, since the reply could not
-     * be told from the first flow's. */
-    struct nat_stats as0, as1;
-    nat_get_stats(&as0);
-    l4len = nettest_mk_tcp(l4, client, u_ip, 12345, 8081, TH_SYN);
-    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    CHECK(nettest_recv_ip(g) == NULL);                     /* ambiguous: not forwarded */
-    nat_get_stats(&as1);
-    CHECK(as1.dnat_drop_ambiguous == as0.dnat_drop_ambiguous + 1);   /* counted as what it was */
-    CHECK(as1.dnat_drop_share == as0.dnat_drop_share && as1.dnat_drop_table == as0.dnat_drop_table);
-
-    /* (5) one guest's inbound flood is bounded to its share of the table, not
-     * the whole table: from an empty table, a flood of distinct client flows
-     * against one guest's forward settles at NAT_QUOTA_PER_GUEST DNAT entries
-     * (so a peer's slots survive) and further ones drop; then aging reclaims
-     * them. */
-    struct nat_stats ns0, ns1;
-    nat_flush();
-    nat_get_stats(&ns0);
-    for (unsigned i = 0; i < NAT_TABLE_SIZE + 16; i++) {
-        l4len = nettest_mk_tcp(l4, client, u_ip, (uint16_t)(30000 + i), 8080, TH_SYN);
-        flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
-        tap_inject(u, frame, flen);
-        if ((i & 31) == 31) {
-            struct mbuf *d;
-            while ((d = tap_recv(g)) != NULL) m_freem(d);
-        }
-    }
-    /* The flood is asynchronous, and `dnat_drop_share` rising says only that
-     * *some* packet was refused -- not that every injected one has been
-     * processed. Every injected SYN ends as a translation or a refusal, so
-     * wait for that sum: aging while packets are still queued on the worker
-     * would expire the table and then see a fresh entry created behind it. */
-    uint64_t injected = NAT_TABLE_SIZE + 16;
-    for (unsigned i = 0; i < 200; i++) {
-        struct mbuf *d;
-        while ((d = tap_recv(g)) != NULL) m_freem(d);
-        nat_get_stats(&ns1);
-        if ((ns1.dnat_in - ns0.dnat_in) + (ns1.dnat_drop_share - ns0.dnat_drop_share) >= injected)
-            break;
-        thread_sleep_ms(10);
-    }
-    nat_get_stats(&ns1);
-    CHECK(ns1.entries == NAT_QUOTA_PER_GUEST);            /* capped to the guest's share, not 256 */
-    CHECK(ns1.dnat_drop_share > ns0.dnat_drop_share);      /* the flood past the share dropped */
-    CHECK(ns1.dnat_drop_table == ns0.dnat_drop_table && ns1.dnat_drop_ambiguous == ns0.dnat_drop_ambiguous);
-    CHECK((ns1.dnat_in - ns0.dnat_in) + (ns1.dnat_drop_share - ns0.dnat_drop_share) >= injected);
-    nat_get_stats(&ns0);
-    CHECK(ns0.entries > 0);
-    nat_age(clock_now_ns() + 2ull * NAT_TIMEOUT_TCP_NS);
-    nat_get_stats(&ns1);
-    CHECK(ns1.entries == 0 && ns1.expired > ns0.expired);
-
-    nat_pf_clear();
-    nat_flush();
-    nt_tap_destroy(u);
-    nt_tap_destroy(g);
-    kinfo("selftest: net-dnat: a client connection was forwarded to the guest and its reply "
-          "un-DNAT'd back from host:P (TCP and UDP), an unruled port stayed local, the table bounded");
-    return true;
+    return nt_vfs_open(NULL, path, flags, 0, out);
 }
+
+void nettest_file_put(struct file *f) { nt_file_put(f); }
 
 /* --- the runtime network control channel (/dev/net/tapctl) ---------------- */
 
@@ -4475,6 +4237,8 @@ static int64_t netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules)
         return -1;
     return (int64_t)off;
 }
+
+int64_t nettest_netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules) { return netctl_snapshot_len(buf, pf_rules); }
 
 bool selftest_net_tapctl(const char **reason)
 {
@@ -4649,167 +4413,6 @@ bool selftest_net_tapctl(const char **reason)
     return true;
 }
 
-/* --- many guests: a tap per open of /dev/net/tap ---------------------------- */
-
-#define MG_MAX 8u
-
-/* An ARP request from `smac` for the host address `tpa`, 42 bytes. */
-static void mg_arp_req(uint8_t *req, const uint8_t smac[6], uint32_t spa, uint32_t tpa)
-{
-    memset(req, 0, 42);
-    memset(req, 0xff, 6); memcpy(req + 6, smac, 6);
-    req[12] = 0x08; req[13] = 0x06; req[15] = 1; req[16] = 0x08; req[18] = 6; req[19] = 4; req[21] = 1;
-    memcpy(req + 22, smac, 6); memcpy(req + 28, &spa, 4); memcpy(req + 38, &tpa, 4);
-}
-
-bool selftest_net_multiguest(const char **reason)
-{
-    struct file *f[MG_MAX];
-    memset(f, 0, sizeof(f));
-
-    /* (1) eight opens are eight taps on eight distinct subnets; a ninth is refused. */
-    for (unsigned k = 0; k < MG_MAX; k++) {
-        CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f[k]) == 0 && f[k] != NULL);
-        char name[8];
-        ksnprintf(name, sizeof(name), "tap%u", k);
-        struct netif *n = netif_find(name);
-        CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 3 + k, 1) && (n->flags & NETIF_FORWARD));
-        netif_put(n);
-    }
-    struct file *ninth = NULL;
-    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &ninth) == -ENOSPC && ninth == NULL);
-
-    /* (2) a frame written to one file reaches only that file's tap: an ARP
-     * for tap0's address answered on file 0, nothing on file 1. */
-    static const uint8_t gmac[6] = { 0x52, 0x54, 0x00, 0x0c, 0x00, 0x0f };
-    uint8_t req[42], rep[64];
-    mg_arp_req(req, gmac, IPV4_ADDR(10, 0, 3, 15), IPV4_ADDR(10, 0, 3, 1));
-    CHECK(file_write(f[0], req, sizeof(req)) == (int64_t)sizeof(req));
-    int64_t n = 0;
-    for (unsigned i = 0; i < 50 && n <= 0; i++) {
-        n = file_read(f[0], rep, sizeof(rep));
-        if (n <= 0) thread_sleep_ms(10);
-    }
-    CHECK(n >= 42 && rep[12] == 0x08 && rep[13] == 0x06 && rep[21] == 2);   /* an ARP reply (padded to 60) */
-    CHECK(memcmp(rep + 28, "\x0a\x00\x03\x01", 4) == 0);                    /* from 10.0.3.1 */
-    CHECK(file_read(f[1], rep, sizeof(rep)) == 0);                            /* tap1 saw nothing */
-
-    /* (2b) guest-to-guest is routed with real addresses, not masqueraded:
-     * a datagram from tap0's guest to tap1's guest leaves tap1 with its
-     * source intact (both taps forward, so the egress is not the uplink). */
-    static const uint8_t g1mac[6] = { 0x52, 0x54, 0x00, 0x0c, 0x00, 0x1f };
-    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
-    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
-    /* The forwarding firewall drops inter-guest traffic by default (its own
-     * unit, net-firewall, proves that); open A's to-guest policy here so this
-     * step asserts routing and the absence of masquerade, not policy. */
-    CHECK(fw_policy_set(ga, FW_DIR_TO_GUEST, FW_ACCEPT) == 0);
-    { struct netif *n1 = netif_find("tap1"); CHECK(n1 != NULL); nettest_seed_arp(n1, gb, g1mac); netif_put(n1); }
-    uint8_t pl[4] = { 9, 8, 7, 6 }, l4[64], frame[128], rx[128];
-    uint16_t l4len = nettest_mk_udp(l4, ga, gb, 7000, 7001, pl, sizeof(pl));
-    uint32_t flen = nettest_wrap(frame, tap0mac, gmac, ga, gb, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(file_write(f[0], frame, flen) == (int64_t)flen);
-    /* read f[1], skipping the ARP the stack queues while resolving, to the
-     * forwarded IPv4 datagram. */
-    int64_t gn = 0; bool got = false;
-    for (unsigned i = 0; i < 60 && !got; i++) {
-        gn = file_read(f[1], rx, sizeof(rx));
-        if (gn >= ETH_HLEN + 20 && rx[12] == 0x08 && rx[13] == 0x00)
-            got = true;
-        else if (gn <= 0)
-            thread_sleep_ms(10);
-    }
-    CHECK(got);
-    CHECK(((struct ipv4_hdr *)(rx + ETH_HLEN))->src == ga);   /* real source, not masqueraded */
-
-    /* (2b') a guest cannot forge a same-subnet identity toward a peer: a frame
-     * from tap0's guest sourced as 10.0.3.50 (not its assigned .15) is dropped
-     * as spoofed and never reaches tap1. */
-    struct ip_stats mgs0, mgs1;
-    ipv4_get_stats(&mgs0);
-    uint32_t forged = IPV4_ADDR(10, 0, 3, 50);
-    l4len = nettest_mk_udp(l4, forged, gb, 7000, 7001, pl, sizeof(pl));
-    flen = nettest_wrap(frame, tap0mac, gmac, forged, gb, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(file_write(f[0], frame, flen) == (int64_t)flen);
-    bool leaked = false;
-    for (unsigned i = 0; i < 30 && !leaked; i++) {
-        int64_t sn = file_read(f[1], rx, sizeof(rx));
-        if (sn >= ETH_HLEN + 20 && rx[12] == 0x08 && rx[13] == 0x00)
-            leaked = true;                       /* the forged datagram reached the peer */
-        else if (sn <= 0)
-            thread_sleep_ms(10);
-    }
-    ipv4_get_stats(&mgs1);
-    CHECK(!leaked && mgs1.fwd_spoofed > mgs0.fwd_spoofed);
-
-    /* (2c) a forward rule per guest; closing tap0's owner purges only its
-     * guest's rule, tap1's remains. */
-    nat_pf_clear();
-    CHECK(nat_pf_add(IPPROTO_TCP, 2222, ga, 22) == 0);
-    CHECK(nat_pf_add(IPPROTO_TCP, 3333, gb, 22) == 0);
-    struct nat_pf_rule rules[NAT_PF_MAX];
-    CHECK(nat_pf_list(rules, NAT_PF_MAX) == 2);
-
-    /* (3) the last close of one file destroys only its tap, purges only its
-     * guest's NAT state, and frees its slot; the others live on. */
-    nt_file_put(f[0]); f[0] = NULL;
-    struct netif *gone = netif_find("tap0"), *kept = netif_find("tap1");
-    CHECK(gone == NULL && kept != NULL);
-    netif_put(kept);
-    unsigned nr = nat_pf_list(rules, NAT_PF_MAX);
-    CHECK(nr == 1 && rules[0].guest_ip == gb);   /* tap0's guest purged, tap1's kept */
-    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &f[0]) == 0);
-    struct netif *again = netif_find("tap0");
-    CHECK(again != NULL && again->ip4.addr == IPV4_ADDR(10, 0, 3, 1));
-    netif_put(again);
-
-    for (unsigned k = 0; k < MG_MAX; k++)
-        if (f[k]) nt_file_put(f[k]);
-    CHECK(netif_find("tap0") == NULL && netif_find("tap7") == NULL);
-
-    kinfo("selftest: net-multiguest: eight opens gave eight taps on eight subnets, a ninth was refused, "
-          "frames stayed on their own tap, a close destroyed only its own and its slot was reused");
-    return true;
-}
-
-/* --- the forwarding firewall (docs/audit/next-subsystem-firewall.md) ----- */
-
-/* Inject one datagram from a guest (its file) toward the stack, addressed to
- * its tap's MAC as a real guest would send to its gateway. */
-static bool fwt_send(struct file *from, const uint8_t tapmac[6], const uint8_t gmac[6],
-                     uint32_t sip, uint32_t dip, uint8_t proto, const uint8_t *l4, uint16_t l4len)
-{
-    uint8_t frame[128];
-    uint32_t flen = nettest_wrap(frame, tapmac, gmac, sip, dip, 64, proto, l4, l4len);
-    return file_write(from, frame, flen) == (int64_t)flen;
-}
-
-/* Poll a guest's file for a forwarded IPv4 datagram, skipping anything else
- * the stack emits on the tap (ARP, ND). Length, or 0 when none arrived. */
-static int64_t fwt_recv(struct file *to, uint8_t *rx, size_t cap, unsigned tries)
-{
-    for (unsigned i = 0; i < tries; i++) {
-        int64_t n = file_read(to, rx, cap);
-        if (n >= ETH_HLEN + 20 && rx[12] == 0x08 && rx[13] == 0x00)
-            return n;
-        if (n <= 0)
-            thread_sleep_ms(10);
-    }
-    return 0;
-}
-
-/* An ICMP echo of `type` with identifier `id` (checksum left zero: the
- * forwarding path does not validate it). 16 bytes. */
-static uint16_t fwt_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id)
-{
-    memset(l4, 0, 16);
-    l4[0] = type;
-    l4[4] = (uint8_t)(id >> 8);
-    l4[5] = (uint8_t)id;
-    l4[7] = 1;                              /* sequence */
-    return 16;
-}
-
 /* --- a tap's release against a frame still in flight --------------------------------
  *
  * tap_chr_release purged the guest's NAT and firewall state and then
@@ -4891,7 +4494,7 @@ bool selftest_net_tap_release_order(const char **reason)
     uint8_t pl[4] = { 1, 2, 3, 4 }, l4[32];
     uint16_t l4len = nettest_mk_udp(l4, ga, world, 7100, 53, pl, sizeof(pl));
     c.flen = nettest_wrap(c.frame, tap0mac, amac, ga, world, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, world, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, world, IPPROTO_UDP, l4, l4len));
     net_workers_barrier();
     unsigned before = tro_naming(ga);
     CHECK(before > 0);      /* a translation (and a flow) for the guest: the frame is one that makes state */
@@ -4919,229 +4522,6 @@ bool selftest_net_tap_release_order(const char **reason)
 #endif
 }
 
-bool selftest_net_firewall(const char **reason)
-{
-    *reason = NULL;
-    fw_flush();
-    nat_flush();
-
-    /* Two guests through /dev/net/tap, as vmctl opens them (so each attaches
-     * to the firewall): A on tap0 (10.0.3.15), B on tap1 (10.0.4.15). */
-    struct file *fa = NULL, *fb = NULL;
-    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
-    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
-    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
-    static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x00, 0x0a };
-    static const uint8_t bmac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x00, 0x0b };
-    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
-    static const uint8_t tap1mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcd };
-    { struct netif *n = netif_find("tap0"); CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 3, 1)); nettest_seed_arp(n, ga, amac); netif_put(n); }
-    { struct netif *n = netif_find("tap1"); CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 4, 1)); nettest_seed_arp(n, gb, bmac); netif_put(n); }
-    uint32_t attached[FW_MAX_GUESTS];
-    unsigned na = fw_guest_list(attached, FW_MAX_GUESTS);
-    bool has_a = false, has_b = false;
-    for (unsigned i = 0; i < na; i++) { has_a |= attached[i] == ga; has_b |= attached[i] == gb; }
-    CHECK(has_a && has_b);                               /* both opens attached */
-
-    uint8_t pl[4] = { 1, 2, 3, 4 }, l4[32], rx[128];
-    uint16_t l4len;
-    struct fw_stats fs0, fs1;
-    struct ip_stats is0, is1;
-
-    /* (1) the default: a guest cannot reach its neighbour. A -> B is dropped
-     * by the default policy, counted on both the filter and the IP side. */
-    fw_get_stats(&fs0); ipv4_get_stats(&is0);
-    l4len = nettest_mk_udp(l4, ga, gb, 7000, 7001, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fb, rx, sizeof(rx), 15) == 0);
-    fw_get_stats(&fs1); ipv4_get_stats(&is1);
-    CHECK(fs1.drop_default > fs0.drop_default && is1.fwd_filtered > is0.fwd_filtered);
-
-    /* (2) the default toward the uplink is unchanged: A -> the world is
-     * accepted (the verdict is what is asserted; the NIC carries it on). */
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_udp(l4, ga, IPV4_ADDR(10, 0, 2, 2), 7000, 53, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, IPV4_ADDR(10, 0, 2, 2), IPPROTO_UDP, l4, l4len));
-    for (unsigned i = 0; i < 20; i++) { fw_get_stats(&fs1); if (fs1.accept_default > fs0.accept_default) break; thread_sleep_ms(10); }
-    CHECK(fs1.accept_default > fs0.accept_default);
-
-    /* (3) one rule punches one hole: A -> B udp/7001 accepted, udp/7002 still dropped. */
-    struct fw_rule allow_udp = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_UDP, .dst_prefix = 32,
-                                 .verdict = FW_ACCEPT, .dst_ip = gb, .dst_port = 7001 };
-    CHECK(fw_rule_add(ga, 0, &allow_udp) == 0);
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_udp(l4, ga, gb, 7000, 7001, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);
-    CHECK(((struct ipv4_hdr *)(rx + ETH_HLEN))->src == ga && ((struct ipv4_hdr *)(rx + ETH_HLEN))->dst == gb);
-    fw_get_stats(&fs1);
-    CHECK(fs1.accept_rule > fs0.accept_rule && fs1.flow_new > fs0.flow_new);
-    l4len = nettest_mk_udp(l4, ga, gb, 7000, 7002, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fb, rx, sizeof(rx), 15) == 0);
-
-    /* (4) stateful return, the guest-to-guest direction: B's reply to the
-     * accepted flow reaches A with no rule for B; an unsolicited B -> A does not. */
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_udp(l4, gb, ga, 7001, 7000, pl, sizeof(pl));
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);
-    CHECK(((struct ipv4_hdr *)(rx + ETH_HLEN))->src == gb);
-    fw_get_stats(&fs1);
-    CHECK(fs1.accept_established > fs0.accept_established);
-    l4len = nettest_mk_udp(l4, gb, ga, 9000, 9001, pl, sizeof(pl));
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);
-
-    /* (4b) TCP: a reverse-direction bare SYN is a new connection, not a
-     * reply. On an accepted A -> B flow, B's SYN-ACK and ACK are established;
-     * a SYN from B on the reversed ports is B opening a connection and takes
-     * B's default drop, whatever the tuple says. */
-    struct fw_rule allow_tcp = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_TCP, .dst_prefix = 32,
-                                 .verdict = FW_ACCEPT, .dst_ip = gb, .dst_port = 8443 };
-    CHECK(fw_rule_add(ga, 0, &allow_tcp) == 0);
-    l4len = nettest_mk_tcp(l4, ga, gb, 40000, 8443, TH_SYN);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_TCP, l4, l4len));
-    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);                        /* A's SYN, by rule */
-    l4len = nettest_mk_tcp(l4, gb, ga, 8443, 40000, TH_SYN | TH_ACK);
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_TCP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);                        /* B's SYN-ACK: a reply */
-    l4len = nettest_mk_tcp(l4, gb, ga, 8443, 40000, TH_SYN);
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_TCP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);                       /* B's bare SYN: not a reply */
-    l4len = nettest_mk_tcp(l4, gb, ga, 8443, 40000, TH_ACK);
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_TCP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);                        /* B's ACK: still established */
-    CHECK(fw_rule_del(ga, &allow_tcp) == 0);
-
-    /* (5) ICMP echo is stateful on the identifier, not a bare reverse tuple. */
-    struct fw_rule allow_icmp = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_ICMP, .dst_prefix = 32,
-                                  .verdict = FW_ACCEPT, .dst_ip = gb, .dst_port = FW_ICMP_TYPE_ANY };
-    CHECK(fw_rule_add(ga, 99, &allow_icmp) == 0);       /* out-of-range index appends */
-    l4len = fwt_mk_icmp(l4, ICMP_ECHO, 0x1234);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_ICMP, l4, l4len));
-    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);        /* the request, by rule */
-    l4len = fwt_mk_icmp(l4, ICMP_ECHO_REPLY, 0x1234);
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_ICMP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);        /* the reply: established */
-    l4len = fwt_mk_icmp(l4, ICMP_ECHO, 0x1234);
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_ICMP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);       /* a reverse *request* is not a reply */
-    l4len = fwt_mk_icmp(l4, ICMP_ECHO_REPLY, 0x9999);
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_ICMP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);       /* wrong id: no flow */
-
-    /* (6) ordering and identity: a DROP inserted at index 0 wins first-match
-     * for a new flow; deleting it by tuple restores the ACCEPT; a duplicate
-     * tuple is refused. */
-    struct fw_rule deny_udp = allow_udp;
-    deny_udp.verdict = FW_DROP;
-    CHECK(fw_rule_add(ga, 0, &deny_udp) == 0);
-    struct fw_rule listed[FW_RULES_PER_GUEST];
-    /* The list: the DROP just inserted at 0, the UDP ACCEPT it pushed to 1, the
-     * two TO_HOST seeds attach installed (DNS, echo-request), and the ICMP
-     * ACCEPT appended last. */
-    CHECK(fw_rule_list(ga, listed, FW_RULES_PER_GUEST) == 5 && listed[0].verdict == FW_DROP &&
-          listed[1].verdict == FW_ACCEPT && listed[1].proto == IPPROTO_UDP &&
-          listed[2].direction == FW_DIR_TO_HOST && listed[3].direction == FW_DIR_TO_HOST &&
-          listed[4].proto == IPPROTO_ICMP && listed[4].direction == FW_DIR_TO_GUEST);
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_udp(l4, ga, gb, 7100, 7001, pl, sizeof(pl));   /* a new flow, not the live one */
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fb, rx, sizeof(rx), 15) == 0);
-    fw_get_stats(&fs1);
-    CHECK(fs1.drop_rule > fs0.drop_rule);
-    CHECK(fw_rule_del(ga, &deny_udp) == 0);
-    CHECK(fw_rule_del(ga, &deny_udp) == -ENOENT);
-    CHECK(fw_rule_add(ga, 0, &allow_udp) == -EEXIST);
-    l4len = nettest_mk_udp(l4, ga, gb, 7101, 7001, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);
-
-    /* (7) a rule is bound to a guest by address, not to the control handle:
-     * added for B through /dev/net/tapctl, it takes effect after that handle
-     * is closed; B's release purges it, an add for the departed B is refused,
-     * and a fresh tap at B's address starts with no rules. */
-    struct file *fctl = NULL;
-    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
-    struct cosmo_netctl_filter c = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_ADD,
-                                     .guest_addr = gb, .direction = COSMO_NETCTL_DIR_TO_GUEST,
-                                     .proto = COSMO_NETCTL_PROTO_UDP, .dst_prefix = 32,
-                                     .verdict = COSMO_NETCTL_VERDICT_ACCEPT, .dst_addr = ga, .dst_port = 5000 };
-    CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
-    nt_file_put(fctl); fctl = NULL;                         /* the transient handle vmctl would close */
-    l4len = nettest_mk_udp(l4, gb, ga, 5001, 5000, pl, sizeof(pl));
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);        /* the rule outlived its handle */
-    nt_file_put(fb); fb = NULL;                             /* B departs: purged and detached */
-    struct fw_rule b_rule = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_UDP, .dst_prefix = 32,
-                              .verdict = FW_ACCEPT, .dst_ip = ga, .dst_port = 5000 };
-    CHECK(fw_rule_add(gb, 0, &b_rule) == -ENOENT);       /* an add after teardown is refused */
-    CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 0);
-    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);   /* slot 1 reused */
-    { struct netif *n = netif_find("tap1"); CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 4, 1)); nettest_seed_arp(n, gb, bmac); netif_put(n); }
-    CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 2 &&   /* the reused address inherits nothing: */
-          listed[0].direction == FW_DIR_TO_HOST && listed[1].direction == FW_DIR_TO_HOST);   /* only the fresh seeds */
-    l4len = nettest_mk_udp(l4, gb, ga, 5001, 5000, pl, sizeof(pl));
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);       /* no stale rule, no stale flow */
-
-    /* (8) the control round trip: an ADD is listed with its guest and index;
-     * POLICY flips the default and the next verdict follows; bad writes change nothing. */
-    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
-    c.guest_addr = ga; c.proto = COSMO_NETCTL_PROTO_TCP; c.dst_addr = gb; c.dst_port = 445; c.at_index = 0;
-    CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
-    static uint8_t snap[COSMO_NETCTL_SNAPSHOT_MAX];
-    int64_t sn = file_read(fctl, snap, sizeof(snap));
-    CHECK(sn > 0);
-    {
-        struct cosmo_netctl_list ph; memcpy(&ph, snap, sizeof(ph));
-        size_t off = sizeof(ph) + (size_t)ph.count * sizeof(struct cosmo_netctl_rule);
-        struct cosmo_netctl_filter_list fh; memcpy(&fh, snap + off, sizeof(fh));
-        CHECK(fh.version == COSMO_NETCTL_VERSION && fh.guest_count >= 2 && fh.rule_count >= 5);   /* incl. two seeds per guest */
-        off += sizeof(fh) + (size_t)fh.guest_count * sizeof(struct cosmo_netctl_filter_guest);
-        bool seen = false;
-        for (unsigned i = 0; i < fh.rule_count; i++) {
-            struct cosmo_netctl_filter_rule fr; memcpy(&fr, snap + off + i * sizeof(fr), sizeof(fr));
-            if (fr.guest_addr == ga && fr.proto == COSMO_NETCTL_PROTO_TCP && fr.dst_port == 445)
-                seen = fr.index == 0 && fr.verdict == COSMO_NETCTL_VERDICT_ACCEPT && fr.dst_addr == gb;
-        }
-        CHECK(seen);
-        CHECK(sn == netctl_snapshot_len(snap, ph.count));
-    }
-    struct cosmo_netctl_filter pol = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_POLICY,
-                                       .guest_addr = ga, .direction = COSMO_NETCTL_DIR_TO_GUEST,
-                                       .verdict = COSMO_NETCTL_VERDICT_ACCEPT };
-    CHECK(file_write(fctl, &pol, sizeof(pol)) == (int64_t)sizeof(pol));
-    l4len = nettest_mk_udp(l4, ga, gb, 7200, 7777, pl, sizeof(pl));   /* no rule: the default decides */
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);
-    pol.verdict = COSMO_NETCTL_VERDICT_DROP;
-    CHECK(file_write(fctl, &pol, sizeof(pol)) == (int64_t)sizeof(pol));
-    l4len = nettest_mk_udp(l4, ga, gb, 7201, 7777, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
-    CHECK(fwt_recv(fb, rx, sizeof(rx), 15) == 0);
-    CHECK(file_write(fctl, &c, 4) == -EINVAL);                          /* short */
-    struct cosmo_netctl_filter bad = c;
-    bad.version = 99;
-    CHECK(file_write(fctl, &bad, sizeof(bad)) == -ENOTSUP);             /* wrong version */
-    bad = c; bad.guest_addr = IPV4_ADDR(10, 0, 9, 15);
-    CHECK(file_write(fctl, &bad, sizeof(bad)) == -ENOENT);              /* not an attached guest */
-    bad = c; bad.op = COSMO_NETCTL_FILTER_DEL; bad.dst_port = 446;
-    CHECK(file_write(fctl, &bad, sizeof(bad)) == -ENOENT);              /* no such tuple */
-    bad = c; bad.proto = COSMO_NETCTL_PROTO_ICMP; bad.dst_port = 300;
-    CHECK(file_write(fctl, &bad, sizeof(bad)) == -EINVAL);              /* an ICMP selector is a type <= 255 or ANY */
-    nt_file_put(fctl);
-
-    nt_file_put(fa);
-    nt_file_put(fb);
-    fw_flush();
-    kinfo("selftest: net-firewall: inter-guest dropped by default and uplink accepted, one rule punched one hole, "
-          "a reply was admitted by state (echo by id, not a reverse request), a DROP inserted first won and was "
-          "deleted by tuple, a rule outlived its handle but not its guest, and the control listing round-tripped");
-    return true;
-}
-
 /* --- the INPUT chain (docs/audit/next-subsystem-input-chain.md) ---------- */
 
 /* The ones-complement checksum of `n` bytes as big-endian words, complemented
@@ -5161,7 +4541,7 @@ static uint16_t fwt_ones_sum(const uint8_t *p, unsigned n)
 /* An ICMP echo with a valid checksum: the host answers only a well-formed one. */
 static uint16_t fwt_mk_icmp_ck(uint8_t *l4, uint8_t type, uint16_t id)
 {
-    uint16_t n = fwt_mk_icmp(l4, type, id);
+    uint16_t n = nettest_fwt_mk_icmp(l4, type, id);
     uint16_t ck = fwt_ones_sum(l4, n);
     l4[2] = (uint8_t)(ck >> 8);
     l4[3] = (uint8_t)ck;
@@ -5252,10 +4632,10 @@ bool selftest_net_input(const char **reason)
      * rule; an echo request to the gateway draws an echo reply. */
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, gwa, 4000, 53, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
     l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x4242);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
     CHECK(fwt_recv_echo_reply(fa, 40));
 
     /* (3) everything else is closed by default: UDP to gateway:7000, a TCP SYN
@@ -5263,12 +4643,12 @@ bool selftest_net_input(const char **reason)
      * on the filter and on the IP side. */
     fw_get_stats(&fs0); ipv4_get_stats(&is0);
     l4len = nettest_mk_udp(l4, ga, gwa, 4001, 7000, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
     CHECK(FWT_RISES(ipv4_get_stats, is1, in_filtered, is0.in_filtered));
     fw_get_stats(&fs0);
     l4len = nettest_mk_tcp(l4, ga, gwa, 40000, 2222, TH_SYN);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
     /* A datagram to the host's *uplink* address is not this tap's to deliver:
      * the off-link invariant drops it before any chain (the host chain's
@@ -5277,7 +4657,7 @@ bool selftest_net_input(const char **reason)
     if (netif_owns_ipv4(uplink)) {                    /* the NIC's autoconfigured address, when present */
         fw_get_stats(&fs0); ipv4_get_stats(&is0);
         l4len = nettest_mk_udp(l4, ga, uplink, 4002, 7000, pl, sizeof(pl));
-        CHECK(fwt_send(fa, tap0mac, amac, ga, uplink, IPPROTO_UDP, l4, l4len));
+        CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, uplink, IPPROTO_UDP, l4, l4len));
         CHECK(FWT_RISES(ipv4_get_stats, is1, rx_offlink, is0.rx_offlink));
         fw_get_stats(&fs1);
         CHECK(fs1.in_drop_default == fs0.in_drop_default);
@@ -5290,11 +4670,11 @@ bool selftest_net_input(const char **reason)
     CHECK(fw_rule_add(ga, 0, &open_tcp) == 0);
     fw_get_stats(&fs0);
     l4len = nettest_mk_tcp(l4, ga, gwa, 40001, 2222, TH_SYN);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
     fw_get_stats(&fs0);
     l4len = nettest_mk_tcp(l4, ga, gwa, 40001, 2222, TH_ACK);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
 
     /* (4c) the ANY direction keeps its forwarding-only meaning: a wildcard
@@ -5306,7 +4686,7 @@ bool selftest_net_input(const char **reason)
     CHECK(fw_rule_add(ga, 0, &any_udp) == 0);
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, gwa, 4003, 7003, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));   /* ANY did not reach the host */
     CHECK(fw_rule_del(ga, &any_udp) == 0);
     struct fw_rule host_udp = any_udp;
@@ -5314,7 +4694,7 @@ bool selftest_net_input(const char **reason)
     CHECK(fw_rule_add(ga, 0, &host_udp) == 0);
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, gwa, 4004, 7003, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));     /* TO_HOST does */
     CHECK(fw_rule_del(ga, &host_udp) == 0);
 
@@ -5325,12 +4705,12 @@ bool selftest_net_input(const char **reason)
     CHECK(fw_rule_del(ga, &seed_echo) == 0);
     fw_get_stats(&fs0);
     l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x4243);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
     CHECK(!fwt_recv_echo_reply(fa, 10));
     CHECK(fw_rule_add(ga, 0, &seed_echo) == 0);
     l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x4244);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
     CHECK(fwt_recv_echo_reply(fa, 40));
 
     /* (6) the ICMP selector is a type: a guest echo *reply* and a guest
@@ -5339,11 +4719,11 @@ bool selftest_net_input(const char **reason)
      * the wildcard admits Need-Fragmentation too. */
     fw_get_stats(&fs0); ipv4_get_stats(&is0);
     l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x4242);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
     fw_get_stats(&fs0);
     l4len = fwt_mk_needfrag(l4, gwa, ga, 576);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
     ipv4_get_stats(&is1);
     CHECK(is1.pmtu_updates == is0.pmtu_updates);          /* never reached ipv4_pmtu_update */
@@ -5352,11 +4732,11 @@ bool selftest_net_input(const char **reason)
     CHECK(fw_rule_add(ga, 0, &type0) == 0);
     fw_get_stats(&fs0);
     l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x4242);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
     fw_get_stats(&fs0);
     l4len = fwt_mk_needfrag(l4, gwa, ga, 576);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));   /* type 3 still closed */
     CHECK(fw_rule_del(ga, &type0) == 0);
     struct fw_rule anyicmp = type0;
@@ -5364,7 +4744,7 @@ bool selftest_net_input(const char **reason)
     CHECK(fw_rule_add(ga, 0, &anyicmp) == 0);
     fw_get_stats(&fs0);
     l4len = fwt_mk_needfrag(l4, gwa, ga, 576);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
     CHECK(fw_rule_del(ga, &anyicmp) == 0);
 
@@ -5381,7 +4761,7 @@ bool selftest_net_input(const char **reason)
     for (unsigned i = 0; i < 3; i++) {
         uint64_t base = fs0.in_spoofed + i;
         l4len = nettest_mk_udp(l4, forged[i], gwa, 4100, 53, pl, sizeof(pl));
-        CHECK(fwt_send(fa, tap0mac, amac, forged[i], gwa, IPPROTO_UDP, l4, l4len));
+        CHECK(nettest_fwt_send(fa, tap0mac, amac, forged[i], gwa, IPPROTO_UDP, l4, l4len));
         CHECK(FWT_RISES(fw_get_stats, fs1, in_spoofed, base));
     }
     CHECK(FWT_RISES(ipv4_get_stats, is1, in_filtered, is0.in_filtered));
@@ -5391,14 +4771,14 @@ bool selftest_net_input(const char **reason)
      * martian first -- a stronger drop, counted upstream. */
     ipv4_get_stats(&is0);
     l4len = nettest_mk_udp(l4, gwa, gwa, 4100, 53, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, gwa, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, gwa, gwa, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(ipv4_get_stats, is1, rx_bad_header, is0.rx_bad_header));
 
     /* (8) per guest: A's TCP rule does not open B's path; B's release purges
      * its seeds; a reopened B re-seeds cleanly. */
     fw_get_stats(&fs0);
     l4len = nettest_mk_tcp(l4, gb, gwb, 40000, 2222, TH_SYN);
-    CHECK(fwt_send(fb, tap1mac, bmac, gb, gwb, IPPROTO_TCP, l4, l4len));
+    CHECK(nettest_fwt_send(fb, tap1mac, bmac, gb, gwb, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
     nt_file_put(fb); fb = NULL;
     CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 0);
@@ -5411,12 +4791,12 @@ bool selftest_net_input(const char **reason)
     CHECK(fw_policy_set(ga, FW_DIR_TO_HOST, FW_ACCEPT) == 0);
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, gwa, 4200, 7001, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_default, fs0.in_accept_default));
     CHECK(fw_policy_set(ga, FW_DIR_TO_HOST, FW_DROP) == 0);
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, gwa, 4201, 7002, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
     CHECK(fw_policy_set(ga, FW_DIR_ANY, FW_ACCEPT) == -EINVAL);
 
@@ -6195,11 +5575,11 @@ bool selftest_net_hostinput(const char **reason)
     }
     ipv4_get_stats(&is0);
     l4len = nettest_mk_udp(l4, ga, INADDR_LOOPBACK_N, 6102, 7002, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, INADDR_LOOPBACK_N, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, INADDR_LOOPBACK_N, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(ipv4_get_stats, is1, rx_offlink, is0.rx_offlink));
     ipv4_get_stats(&is0);
     l4len = nettest_mk_udp(l4, ga, u_ip, 6103, 7000, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, u_ip, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(ipv4_get_stats, is1, rx_offlink, is0.rx_offlink));
     CHECK(is1.in_filtered == is0.in_filtered);                           /* not INPUT's default any more */
     fw_get_stats(&fs1);
@@ -6210,7 +5590,7 @@ bool selftest_net_hostinput(const char **reason)
      * do not move for it. */
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, gwa, 6104, 53, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
     CHECK(fs1.hin_accept_default == fs0.hin_accept_default && fs1.hin_drop_default == fs0.hin_drop_default);
 
@@ -6225,7 +5605,7 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
     {
         uint8_t rx[160];
-        int64_t n = fwt_recv(fa, rx, sizeof(rx), 50);
+        int64_t n = nettest_fwt_recv(fa, rx, sizeof(rx), 50);
         CHECK(n >= ETH_HLEN + 40);
         const struct ipv4_hdr *ri = (const struct ipv4_hdr *)(rx + ETH_HLEN);
         CHECK(ri->src == w[0] && ri->dst == ga && ri->proto == IPPROTO_TCP);
@@ -6980,7 +6360,7 @@ bool selftest_net_hoststate(const char **reason)
     { struct netif *n = netif_find("tap0"); CHECK(n != NULL); nettest_seed_arp(n, ga, amac); netif_put(n); }
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, w, 4500, 5300, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, w, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, w, IPPROTO_UDP, l4, l4len));
     CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, HIN_TRIES) && sg.src == u_ip && sg.sport != 4500);   /* masqueraded */
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new);                  /* not the host's flow */
@@ -7024,7 +6404,7 @@ bool selftest_net_hoststate(const char **reason)
     CHECK(fw_rule_add(ga, 0, &a_to_b) == 0);
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, gb, 4600, 7300, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, flow_new, fs0.flow_new));
     CHECK(fs1.hin_flow_unrecorded == fs0.hin_flow_unrecorded);
 
@@ -7301,11 +6681,11 @@ bool selftest_net_flows_fw(const char **reason)
     CHECK(fw_rule_add(ga, 0, &a_to_b) == 0);
     fw_get_stats(&fs0);
     uint16_t l4len = nettest_mk_udp(l4, ga, gb, 4650, 7350, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, flow_new, fs0.flow_new));
     fw_get_stats(&fs0);
     l4len = nettest_mk_tcp(l4, ga, gb, 4651, 7351, TH_SYN);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_TCP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, flow_new, fs0.flow_new));
 
     static struct fw_flow_info ff[FW_FLOW_MAX];
@@ -7324,7 +6704,7 @@ bool selftest_net_flows_fw(const char **reason)
 
     fw_get_stats(&fs0);
     l4len = nettest_mk_tcp(l4, ga, gb, 4651, 7351, TH_ACK);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_TCP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, accept_established, fs0.accept_established));
     n = fw_flow_list(ff, FW_FLOW_MAX, clock_now_ns());
     bool tcp_est = false;
@@ -7362,7 +6742,7 @@ bool selftest_net_flows_fw(const char **reason)
     unsigned have = 2;
     for (unsigned i = have; i < FW_FLOW_QUOTA_PER_GUEST; i++) {
         l4len = nettest_mk_udp(l4, ga, gb, (uint16_t)(4700 + i), 7350, pl, sizeof(pl));
-        CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+        CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
     }
     for (unsigned i = 0; i < 100; i++) {
         fw_get_stats(&fs1);
@@ -7373,7 +6753,7 @@ bool selftest_net_flows_fw(const char **reason)
     CHECK(fs1.flow_new - fs0.flow_new == FW_FLOW_QUOTA_PER_GUEST - have);
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, gb, 4699, 7350, pl, sizeof(pl));
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, flow_drop_share, fs0.flow_drop_share));
     CHECK(fs1.flow_drop_share == fs0.flow_drop_share + 1 && fs1.flow_drop_table == fs0.flow_drop_table);
     unsigned ga_listed = 0;
@@ -7563,10 +6943,10 @@ bool selftest_net_output(const char **reason)
     out_drain_file(fa);                           /* the scope tests' datagrams are not this step's */
     uint32_t mlen = nettest_mk_dns(msg, 0x2468);
     l4len = nettest_mk_udp(l4, ga, gwa, 4444, 53, msg, (uint16_t)mlen);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
     {
         uint8_t rx[160];
-        int64_t n = fwt_recv(fa, rx, sizeof(rx), HIN_TRIES);   /* the proxy answered */
+        int64_t n = nettest_fwt_recv(fa, rx, sizeof(rx), HIN_TRIES);   /* the proxy answered */
         CHECK(n >= ETH_HLEN + 20 + 8);
         const uint8_t *rudp = rx + ETH_HLEN + 20;
         CHECK((uint16_t)(rudp[2] << 8 | rudp[3]) == 4444);
@@ -7577,11 +6957,11 @@ bool selftest_net_output(const char **reason)
     ipv4_get_stats(&is0);
     mlen = nettest_mk_dns(msg, 0x2469);
     l4len = nettest_mk_udp(l4, ga, gwa, 4444, 53, msg, (uint16_t)mlen);
-    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
     CHECK(FWT_RISES(ipv4_get_stats, is1, tx_filtered, is0.tx_filtered));
     {
         uint8_t rx[160];
-        CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);          /* the answer never reached A */
+        CHECK(nettest_fwt_recv(fa, rx, sizeof(rx), 15) == 0);          /* the answer never reached A */
     }
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_reply) == 0);
 
@@ -7647,7 +7027,7 @@ bool selftest_net_output(const char **reason)
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
     {
         uint8_t rx[160];
-        int64_t n = fwt_recv(fa, rx, sizeof(rx), HIN_TRIES);   /* without a rule it arrives */
+        int64_t n = nettest_fwt_recv(fa, rx, sizeof(rx), HIN_TRIES);   /* without a rule it arrives */
         CHECK(n >= ETH_HLEN + 40);
         const struct ipv4_hdr *ri = (const struct ipv4_hdr *)(rx + ETH_HLEN);
         CHECK(ri->dst == ga);
@@ -7661,7 +7041,7 @@ bool selftest_net_output(const char **reason)
     CHECK(FWT_RISES(ipv4_get_stats, is1, tx_filtered, is0.tx_filtered));
     {
         uint8_t rx[160];
-        CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);          /* and with one it does not */
+        CHECK(nettest_fwt_recv(fa, rx, sizeof(rx), 15) == 0);          /* and with one it does not */
     }
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_dnat) == 0);
     CHECK(nat_pf_del(IPPROTO_TCP, 8080));

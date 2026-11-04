@@ -1062,7 +1062,15 @@ test uses (`nettest_wrap`, `nettest_mk_udp`, `nettest_mk_tcp`,
 `nettest_seed_arp`, `nettest_build_udp`, `nettest_recv_ip`,
 `nettest_mk_dns`), exported under the C's names so the tap tests still
 in `nettest.c` build their frames in CeeSafe, and selftest_tap,
-net-route, net-forward, tap-filter, net-dhcp and net-dns.
+net-route, net-forward, tap-filter, net-dhcp and net-dns. Batch 7,
+`nettest_fwd.cee`: net-pf-clear, net-dnat, net-multiguest and
+net-firewall, with the firewall tests' guest helpers exported as
+`nettest_fwt_send`, `nettest_fwt_recv` and `nettest_fwt_mk_icmp` for
+the chain tests still in C. A firewall rule or control command the
+kernel takes is built in a zeroed room, as the C's designated
+initialisers zeroed what they did not name; the NAT-state release and
+the control snapshot's length stay C (tap-release-order and tapctl
+use them).
 
 Size: about 3.0x.
 

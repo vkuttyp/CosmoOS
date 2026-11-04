@@ -10,6 +10,7 @@
 #include <kernel/net/inet.h>
 #include <kernel/netif.h>
 #include <kernel/object.h>
+#include <kernel/vfs.h>
 #include <kernel/socket.h>
 #include <kernel/spinlock.h>
 #include <kernel/thread.h>
@@ -58,6 +59,13 @@ struct tap *nettest_tap_create(const char *name, uint32_t ip, uint32_t mask, con
 void nettest_tap_destroy(struct tap *t);
 struct tapsvc *nettest_tapsvc_start(struct tap *t);
 void nettest_tapsvc_stop(struct tapsvc *svc);
+int nettest_vfs_open(const char *path, unsigned flags, struct file **out);
+void nettest_file_put(struct file *f);
+/* The NAT and firewall state, cleared however the test returns; cleared now. */
+bool nettest_defer_nat_state(void);
+void nettest_release_nat_state(void);
+/* The byte length a /dev/net/tapctl snapshot with `pf_rules` forwards should have. */
+int64_t nettest_netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules);
 int nettest_netif_register(struct netif *nif);
 void nettest_netif_unregister(struct netif *nif);
 bool nettest_netif_hold(struct nt_netif_ref *r, struct netif *nif);
@@ -96,5 +104,12 @@ uint32_t nettest_build_udp(uint8_t *buf, const uint8_t *dstmac, const uint8_t *s
                            uint8_t ttl, uint16_t sport, uint16_t dport, const uint8_t *pl, uint32_t pllen);
 struct mbuf *nettest_recv_ip(struct tap *t);
 uint32_t nettest_mk_dns(uint8_t *msg, uint16_t id);
+
+/* nettest_fwd.cee: a guest's datagram through its tap file, a forwarded one
+ * read back (0: none in `tries` reads), an ICMP echo of 16 bytes. */
+bool nettest_fwt_send(struct file *from, const uint8_t *tapmac, const uint8_t *gmac, uint32_t sip, uint32_t dip,
+                      uint8_t proto, const uint8_t *l4, uint16_t l4len);
+int64_t nettest_fwt_recv(struct file *to, uint8_t *rx, size_t cap, unsigned tries);
+uint16_t nettest_fwt_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id);
 
 #endif
