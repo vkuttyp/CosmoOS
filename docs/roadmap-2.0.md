@@ -1050,7 +1050,13 @@ had, under the C's contract (one field, or a monotone sum of monotonic
 ones); a counter struct is read into a room and copied out into the
 batch's own snapshot, so no frame holds two. The pipe ends' read and
 write, function-pointer fields CeeSafe cannot call, go through two
-wrappers in `nettest.c`.
+wrappers in `nettest.c`. Batch 5, `nettest_nif.cee` (unit 11):
+net-steer and net-csum-offload. Each registers a fake interface, a C
+object the batch defines as `lo` is (`static mut` with designated
+initialisers, its ops table CeeSafe callbacks), zeroed and filled in
+at the test's start as the C's memset did; registration, the
+creator's reference and the kept packet go through the release
+framework.
 
 Size: about 3.0x.
 

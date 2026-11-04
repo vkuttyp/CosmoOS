@@ -1,0 +1,770 @@
+// nettest_nif.cee - receive steering and checksum offload (unit 11), in CeeSafe: roadmap 2.0 SA6 (nettest, the fifth
+// batch). net-steer and net-csum-offload, as nettest.c had them. Each registers a fake interface: the interface and its
+// ops table are C objects this file defines (CeeSafe's ADR 0042, as loopback.cee's `lo`), `static mut` items the
+// interface layer registers, links and releases -- static because a release may run after the test's frame is gone --
+// zeroed and filled in at the test's start as the C's memset did. The receive hook's state is static for the same
+// reason. Registration, the creator's reference and the kept packet go through nettest.c's release framework
+// (nettest.h), so a failed check leaves nothing registered.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/net/tcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/percpu.h", "kernel/selftest.h", "kernel/thread.h", "kernel/wait.h")
+extern "C" {
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+        csum_flags: u16;
+        csum_start: u16;
+        csum_offset: u16;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        flags: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ops {
+        transmit: extern "C" fn(*mut netif, *mut mbuf) -> i32;
+        release: extern "C" fn(*mut netif);
+    }
+    struct netif_ip4 {
+        addr: u32;
+    }
+    struct netif {
+        name: [u8; 8];
+        mac: [u8; 6];
+        mtu: u32;
+        flags: u32;
+        ip4: netif_ip4;
+        ops: *netif_ops;
+        caps: u32;
+    }
+    struct nt_netif_ref {
+        nif: *mut netif;
+    }
+    struct tcp_stats {
+        bad_cksum: u64;
+        dropped_no_pcb: u64;
+    }
+    struct net_cpu_stats {
+        rx_queued: u64;
+    }
+    struct thread;
+
+    fn nettest_netif_register(nif: *mut netif) -> i32;
+    fn nettest_netif_unregister(nif: *mut netif);
+    fn nettest_netif_hold(r: *mut nt_netif_ref, nif: *mut netif) -> bool;
+    fn nettest_netif_ref_put(r: *mut nt_netif_ref);
+    fn nettest_netif_set_rx_hook(run: extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool, arg: *mut void);
+    fn nettest_netif_set_steering(on: bool);
+    fn nettest_defer_mbuf_slot(slot: *mut *mut mbuf) -> bool;
+    fn selftest_release(arg: *mut void) -> bool;
+
+    fn netif_set_ipv4(nif: *mut netif, addr: u32, mask: u32, gateway: u32);
+    fn netif_set_up(nif: *mut netif, up: bool);
+    fn netif_rx(nif: *mut netif, m: *mut mbuf);
+    fn netif_rx_on(nif: *mut netif, m: *mut mbuf, cpu: u32);
+    fn netif_transmit(nif: *mut netif, m: *mut mbuf) -> i32;
+    fn netif_loopback() -> *mut netif;
+    fn netif_cpu_stats(cpu: u32, out: *mut net_cpu_stats) -> bool;
+    fn net_flow_hash(m: *mbuf, ether: bool) -> u32;
+    fn tcp_get_stats(out: *mut tcp_stats);
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn m_prepend(m: *mut mbuf, len: u32) -> *mut mbuf;
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn m_cksum_partial(m: *mbuf, off: u32, len: u32, sum: u32) -> u32;
+    fn m_csum_complete(m: *mut mbuf) -> bool;
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn cksum_fold(sum: u32) -> u16;
+    fn cksum_pseudo4(src: u32, dst: u32, proto: u8, len: u16) -> u32;
+    fn cksum_partial_field(pseudo: u32) -> u16;
+    fn cpu_count() -> u32;
+    fn raw_cpu_id() -> u32;
+    fn thread_create_on(
+        entry: extern "C" fn(*mut void),
+        arg: *mut void,
+        name: *CChar,
+        priority: i32,
+        mask: u64,
+    ) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_exit(code: i32);
+    fn thread_sleep_ns(ns: u64);
+}
+
+// ---- errno.h, netif.h, mbuf.h, percpu.h, ip.h, tcp.h, ether.h, thread.h (asserted against the headers in nettest.c) ----
+
+const EINVAL: i32 = 22;
+const NETIF_LOOPBACK: u32 = 2;
+const NETIF_CAP_TXCSUM: u32 = 1;
+const NETIF_CAP_RXCSUM: u32 = 2;
+const M_CSUM_OK: u32 = 16;
+const NET_CSUM_TCP: u16 = 1;
+const NET_CSUM_TX: u16 = 3;
+const CONFIG_MAX_CPUS: u32 = 64;
+const IPPROTO_TCP: u8 = 6;
+const TH_ACK: u8 = 0x10;
+const ETH_P_IP: u16 = 0x0800;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+/// IPV4_ADDR(10, 9, 0, n) and the masks, in network order as they lie in a little-endian u32 (inet.h's IPV4_ADDR and
+/// htonl, which assume the targets' little-endian order).
+const MASK24_N: u32 = 0x00ffffff;
+
+fn net10_9(c: u32, d: u32) -> u32 => 10 | (9 << 8) | (c << 16) | (d << 24);
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * 1000000);
+    }
+}
+
+/// A C counter struct's room on the stack: aligned and zeroed.
+struct Room {
+    words: [u64; 48];
+}
+
+fn room(bytes: usize) -> Room {
+    if (bytes > 384) {
+        var buffer: [u8; 64] = [0; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("nettest: a scratch is too small");
+        KernelLog.panic(line);
+    }
+    return Room { words: [0; 48] };
+}
+
+/// The two TCP counters net-csum-offload reads.
+struct Tcp {
+    badCksum: u64;
+    droppedNoPcb: u64;
+}
+
+/// Safety: the room holds a struct tcp_stats (room checks).
+fn tcpNow() -> Tcp {
+    var r = room(layoutOf<tcp_stats>().size);
+    let p = borrow mut r.words as *mut [u64; 48] as *mut tcp_stats;
+    unsafe {
+        tcp_get_stats(p);
+        let t = Ptr.toBorrow(p as *tcp_stats);
+        return Tcp { badCksum: t.bad_cksum, droppedNoPcb: t.dropped_no_pcb };
+    }
+}
+
+/// A worker's receive-queue count, or false when there is no such worker.
+/// Safety: the room holds a struct net_cpu_stats (room checks).
+fn cpuQueued(cpu: u32, queued: borrow mut u64) -> bool {
+    var r = room(layoutOf<net_cpu_stats>().size);
+    let p = borrow mut r.words as *mut [u64; 48] as *mut net_cpu_stats;
+    unsafe {
+        if (!netif_cpu_stats(cpu, p)) {
+            return false;
+        }
+        queued = Ptr.toBorrow(p as *net_cpu_stats).rx_queued;
+    }
+    return true;
+}
+
+/// Zero a static interface, as the C's memset of its fake_nif.
+/// Safety: `nif` is one of this file's statics, not registered.
+unsafe fn zeroNif(nif: *mut netif) {
+    let b = SliceMut.fromRaw(nif as *mut u8, layoutOf<netif>().size);
+    for (i in 0..b.length) {
+        b[i] = 0;
+    }
+}
+
+/// Name an interface: up to seven bytes and the terminator.
+/// Safety: `nif` is one of this file's statics, not registered.
+unsafe fn nameNif(nif: *mut netif, name: StringView, mac: Slice<u8>) {
+    let n = Ptr.toBorrowMut(nif);
+    for (i in 0..name.length) {
+        n.name[i] = name.bytes()[i];
+    }
+    for (i in 0..6) {
+        n.mac[truncate<usize>(i)] = mac[truncate<usize>(i)];
+    }
+    n.mtu = 1500;
+}
+
+// ---- Packet bytes ----
+
+fn be16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v >> 8);
+    b[at + 1] = truncate<u8>(v);
+}
+
+/// A u32 or u16 as it lies in memory (an address in network order, a checksum in_cksum returned).
+fn word(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+fn half(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+fn wordOf(b: Slice<u8>, at: usize) -> u32 => (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) |
+    ((b[at + 3] as u32) << 24);
+
+/// Twenty bytes of IPv4 header at `h`: version 4, five words, `total` long, TTL 64, TCP, from `src` to `dst`,
+/// checksummed.
+/// Safety: `h` holds 20 writable bytes.
+unsafe fn ipHeader(h: *mut u8, total: u16, src: u32, dst: u32) {
+    let b = SliceMut.fromRaw(h, 20);
+    for (i in 0..20) {
+        b[truncate<usize>(i)] = 0;
+    }
+    b[0] = 0x45;
+    be16(b, 2, total);
+    b[8] = 64;
+    b[9] = IPPROTO_TCP;
+    word(b, 12, src);
+    word(b, 16, dst);
+    half(b, 10, in_cksum(h as *void, 20));
+}
+
+// ---- net-steer ----
+//
+// docs/kernel-services/network/design.md, "Receive scaling": one flow's packets reach one worker in order whatever CPU
+// injected them; flows spread over the queues; netif_rx_on lands where told; steering off sends everything to CPU 0.
+
+const STEER_FLOWS: usize = 8;
+const STEER_FLOWS_U32: u32 = 8;
+const STEER_PKTS: u32 = 16;
+
+static mut STEER_NIF: netif = netif { name: "steer0", mtu: 1500 };
+static mut STEER_OPS: netif_ops = netif_ops { transmit: steerTransmit, release: steerRelease };
+static mut STEER_CREATOR: nt_netif_ref = nt_netif_ref { nif: 0 as *mut netif };
+static STEER_TRANSMITS: AtomicU32 = AtomicU32.constant(0);
+static STEER_RELEASES: AtomicU32 = AtomicU32.constant(0);
+
+// The hook's state (the C's static struct steer_state): a flow's worker CPU + 1 (0: none yet) and next sequence are
+// one worker's at a time, as the C's plain fields were; the counters are atomic.
+static mut FLOW_CPU: [u32; 8] = [0; 8];
+static mut FLOW_NEXT: [u32; 8] = [0; 8];
+static ORDER_ERRORS: AtomicU32 = AtomicU32.constant(0);
+static CPU_ERRORS: AtomicU32 = AtomicU32.constant(0);
+static SEEN: AtomicU32 = AtomicU32.constant(0);
+
+/// The fake interface's transmit: count and free.
+/// Safety: the interface layer hands over the packet.
+@callback
+unsafe fn steerTransmit(nif: *mut netif, m: *mut mbuf) -> i32 {
+    STEER_TRANSMITS.fetchAddWith(1, Ordering.Relaxed);
+    m_freem(m);
+    return 0;
+}
+
+/// The fake interface's release: count it (the storage is static).
+/// Safety: the interface layer calls it once, after the last reference.
+@callback
+unsafe fn steerRelease(nif: *mut netif) {
+    STEER_RELEASES.fetchAddWith(1, Ordering.Relaxed);
+}
+
+/// Safety: the address of the test's static interface; nothing is read through it here.
+fn steerNif() -> *mut netif => unsafe { borrow mut STEER_NIF as *mut netif };
+
+/// A frame of flow `f` with sequence `seq`: Ethernet + IPv4 + TCP, the sequence in the payload; the ports select the
+/// flow. Null when no buffer was free.
+/// Safety: `nif` is the test's registered interface.
+unsafe fn steerFrame(nif: *mut netif, f: u32, seq: u32) -> *mut mbuf {
+    let m = m_getcl();
+    if (m.isNull()) {
+        return m;
+    }
+    let data = Ptr.toBorrow(m as *mbuf).data;
+    let p = SliceMut.fromRaw(data, 58);
+    let n = Ptr.toBorrow(nif as *netif);
+    for (i in 0..6) {
+        p[truncate<usize>(i)] = n.mac[truncate<usize>(i)];
+        p[truncate<usize>(i) + 6] = 0x22;
+    }
+    p[12] = 0x08;
+    p[13] = 0x00;
+    ipHeader(data.add(14), 20 + 20 + 4, net10_9(0, 100 + f), n.ip4.addr);
+    for (i in 34..54) {
+        p[truncate<usize>(i)] = 0;
+    }
+    be16(p, 34, truncate<u16>(40000 + f));
+    be16(p, 36, 7);
+    p[46] = 5 << 4;
+    p[47] = TH_ACK;
+    word(p, 54, seq);
+    let mm = Ptr.toBorrowMut(m);
+    mm.len = 58;
+    mm.pkt.len = 58;
+    mm.pkt.proto = ETH_P_IP;
+    return m;
+}
+
+/// The worker-side hook: record the CPU and check the order per flow. Takes every packet of the test's interface.
+/// Safety: called on a worker inside a read-side section with a packet the hook may take; a flow's slots are one
+/// worker's at a time (steering is what the test checks).
+@callback
+unsafe fn steerHook(nif: *mut netif, m: *mut mbuf, arg: *mut void) -> bool {
+    if (nif as usize != steerNif() as usize) {
+        return true;
+    }
+    var hdr: [u8; 58] = [0; 58];
+    if (!m_copydata(m as *mbuf, 0, 58, borrow mut hdr as *mut [u8; 58] as *mut void)) {
+        m_freem(m);
+        return false;
+    }
+    let sport = ((hdr[34] as u32) << 8) | (hdr[35] as u32);
+    let seq = wordOf(hdr[..], 54);
+    if (sport >= 40000 && sport - 40000 < STEER_FLOWS_U32) {
+        let f = (sport - 40000) as usize;
+        let cpu = raw_cpu_id() + 1;
+        if (FLOW_CPU[f] == 0) {
+            FLOW_CPU[f] = cpu;
+        } else if (FLOW_CPU[f] != cpu) {
+            CPU_ERRORS.fetchAddWith(1, Ordering.Relaxed);
+        }
+        if (seq != FLOW_NEXT[f]) {
+            ORDER_ERRORS.fetchAddWith(1, Ordering.Relaxed);
+        }
+        FLOW_NEXT[f] = seq + 1;
+        SEEN.fetchAddWith(1, Ordering.Relaxed);
+    }
+    m_freem(m);
+    return false;
+}
+
+/// Pinned to one CPU (its index is the argument): inject every flow's packets in sequence order.
+/// Safety: the test joins the thread before the next is made, so the frames' sequences are global per flow.
+@callback
+unsafe fn steerInjectMain(arg: *mut void) {
+    let cpu = truncate<u32>(arg as usize);
+    for (seq in 0..STEER_PKTS) {
+        for (f in 0u32..STEER_FLOWS_U32) {
+            let m = steerFrame(steerNif(), f, cpu * STEER_PKTS + seq);
+            if (!m.isNull()) {
+                netif_rx(steerNif(), m);
+            }
+        }
+    }
+    thread_exit(0);
+}
+
+/// Up to a second for the hook to have seen `want` packets.
+fn steerWait(want: u32) {
+    var i: u32 = 0;
+    while (i < 200 && SEEN.loadWith(LoadOrdering.Acquire) < want) {
+        sleepMs(5);
+        i += 1;
+    }
+}
+
+/// Forget what the hook saw.
+/// Safety: no packet of the test's interface is in flight.
+unsafe fn steerReset() {
+    FLOW_CPU = [0; 8];
+    FLOW_NEXT = [0; 8];
+    ORDER_ERRORS.storeWith(0, StoreOrdering.Relaxed);
+    CPU_ERRORS.storeWith(0, StoreOrdering.Relaxed);
+    SEEN.storeWith(0, StoreOrdering.Relaxed);
+}
+
+/// The hash is a function of the flow alone: the same frame from any CPU hashes the same, and two flows differ.
+/// Safety: `nif` is the test's registered interface.
+unsafe fn hashesAgree(nif: *mut netif) -> bool {
+    let a = steerFrame(nif, 3, 0);
+    let b = steerFrame(nif, 3, 99);
+    let c = steerFrame(nif, 4, 0);
+    var ok = !a.isNull() && !b.isNull() && !c.isNull();
+    if (ok) {
+        let ha = net_flow_hash(a as *mbuf, true);
+        let hb = net_flow_hash(b as *mbuf, true);
+        let hc = net_flow_hash(c as *mbuf, true);
+        ok = ha != 0 && ha == hb && ha != hc;
+    }
+    if (!a.isNull()) {
+        m_freem(a);
+    }
+    if (!b.isNull()) {
+        m_freem(b);
+    }
+    if (!c.isNull()) {
+        m_freem(c);
+    }
+    return ok;
+}
+
+/// net-steer: each flow on one worker in order, the flows spread, netif_rx_on where told, steering off to CPU 0.
+/// Safety: the runner's `reason`.
+@export("selftest_net_steer")
+unsafe fn steer(reason: *mut *CChar) -> bool {
+    let nif = steerNif();
+    zeroNif(nif);
+    let mac: [u8; 6] = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+    nameNif(nif, "steer0", mac[..]);
+    STEER_NIF.ops = borrow STEER_OPS as *netif_ops;
+    STEER_TRANSMITS.storeWith(0, StoreOrdering.Relaxed);
+    STEER_RELEASES.storeWith(0, StoreOrdering.Relaxed);
+    if (nettest_netif_register(nif) != 0) {
+        return failed(reason, "check failed: net-steer: the fake interface registers\0");
+    }
+    let creator = borrow mut STEER_CREATOR as *mut nt_netif_ref; // the creator's reference, released however it returns
+    if (!nettest_netif_hold(creator, nif)) {
+        return failed(reason, "check failed: net-steer: the creator's reference is held\0");
+    }
+    netif_set_ipv4(nif, net10_9(0, 1), MASK24_N, 0);
+    netif_set_up(nif, true);
+
+    steerReset();
+    nettest_netif_set_rx_hook(steerHook, 0 as *mut void);
+    if (!hashesAgree(nif)) {
+        return failed(reason, "check failed: net-steer: the hash is the flow's alone\0");
+    }
+
+    // Every CPU injects every flow, in sequence order per CPU: the hook must see each flow on one worker, in order,
+    // with steering on.
+    let ncpu = cpu_count();
+    for (i in 0..ncpu) {
+        let th = thread_create_on(
+            steerInjectMain,
+            i as usize as *mut void,
+            "steer-inj\0".ptr as *CChar,
+            SCHED_PRIO_DEFAULT,
+            1u64 << (i as u64),
+        );
+        if (th.isNull()) {
+            return failed(reason, "check failed: net-steer: an injector on every CPU\0");
+        }
+        thread_join(th); // one CPU at a time keeps each flow's sequence global
+    }
+    let all = ncpu * STEER_FLOWS_U32 * STEER_PKTS;
+    steerWait(all);
+    if (SEEN.loadWith(LoadOrdering.Acquire) != all) {
+        return failed(reason, "check failed: net-steer: the hook saw every packet\0");
+    }
+    if (CPU_ERRORS.loadWith(LoadOrdering.Relaxed) != 0 || ORDER_ERRORS.loadWith(LoadOrdering.Relaxed) != 0) {
+        return failed(reason, "check failed: net-steer: each flow on one worker, in order\0");
+    }
+    var used: u32 = 0;
+    for (k in 0..STEER_FLOWS) {
+        var first = true;
+        for (j in 0..k) {
+            if (FLOW_CPU[j] == FLOW_CPU[k]) {
+                first = false;
+            }
+        }
+        if (first) {
+            used += 1;
+        }
+    }
+    if (ncpu >= 2 && used < 2) {
+        return failed(reason, "check failed: net-steer: eight flows over several queues\0");
+    }
+    if (ncpu < 2 && used != 1) {
+        return failed(reason, "check failed: net-steer: one queue on one CPU\0");
+    }
+
+    // netif_rx_on lands on the named CPU; steering off puts everything on CPU 0.
+    if (ncpu >= 2) {
+        steerReset();
+        var m = steerFrame(nif, 0, 0);
+        if (m.isNull()) {
+            return failed(reason, "check failed: net-steer: a frame for CPU 1\0");
+        }
+        netif_rx_on(nif, m, 1);
+        steerWait(1);
+        if (SEEN.loadWith(LoadOrdering.Acquire) != 1 || FLOW_CPU[0] != 2) {
+            return failed(reason, "check failed: net-steer: netif_rx_on lands on CPU 1\0");
+        }
+        nettest_netif_set_steering(false);
+        steerReset();
+        for (k in 0u32..STEER_FLOWS_U32) {
+            m = steerFrame(nif, k, 0);
+            if (m.isNull()) {
+                return failed(reason, "check failed: net-steer: a frame per flow\0");
+            }
+            netif_rx(nif, m);
+        }
+        steerWait(STEER_FLOWS_U32);
+        nettest_netif_set_steering(true);
+        if (SEEN.loadWith(LoadOrdering.Acquire) != STEER_FLOWS_U32) {
+            return failed(reason, "check failed: net-steer: every flow arrived with steering off\0");
+        }
+        for (k in 0..STEER_FLOWS) {
+            if (FLOW_CPU[k] != 1) {
+                return failed(reason, "check failed: net-steer: steering off puts every flow on CPU 0\0");
+            }
+        }
+    }
+    var queued: u64 = 0;
+    if (!cpuQueued(0, mut queued) || queued == 0) {
+        return failed(reason, "check failed: net-steer: CPU 0's worker queued packets\0");
+    }
+    var none: u64 = 0;
+    if (cpuQueued(CONFIG_MAX_CPUS, mut none)) {
+        return failed(reason, "check failed: net-steer: no worker past CONFIG_MAX_CPUS\0");
+    }
+
+    nettest_netif_set_rx_hook(0 as extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool, 0 as *mut void);
+    nettest_netif_unregister(nif);
+    nettest_netif_ref_put(creator);
+    if (STEER_RELEASES.loadWith(LoadOrdering.Relaxed) != 1) {
+        return failed(reason, "check failed: net-steer: the interface was released once\0");
+    }
+    return true;
+}
+
+// ---- net-csum-offload ----
+
+static mut CSUM_NIF: netif = netif { name: "csum0", mtu: 1500 };
+static mut CSUM_OPS: netif_ops = netif_ops { transmit: csumTransmit, release: csumRelease };
+static mut CSUM_CREATOR: nt_netif_ref = nt_netif_ref { nif: 0 as *mut netif };
+static mut CSUM_LO: nt_netif_ref = nt_netif_ref { nif: 0 as *mut netif };
+static mut LAST: *mut mbuf = 0 as *mut mbuf; // the last transmitted packet, kept
+static CSUM_TRANSMITS: AtomicU32 = AtomicU32.constant(0);
+static CSUM_RELEASES: AtomicU32 = AtomicU32.constant(0);
+
+/// The offloading interface's transmit: keep the packet, freeing the one before.
+/// Safety: the interface layer hands over the packet; LAST is the test's, which reads it between transmits.
+@callback
+unsafe fn csumTransmit(nif: *mut netif, m: *mut mbuf) -> i32 {
+    CSUM_TRANSMITS.fetchAddWith(1, Ordering.Relaxed);
+    if (!LAST.isNull()) {
+        m_freem(LAST);
+    }
+    LAST = m;
+    return 0;
+}
+
+/// Safety: as steerRelease.
+@callback
+unsafe fn csumRelease(nif: *mut netif) {
+    CSUM_RELEASES.fetchAddWith(1, Ordering.Relaxed);
+}
+
+/// An IPv4 + TCP packet (no Ethernet) as a transport leaves it: the TCP checksum in the partial form and NET_CSUM_TCP
+/// requested, or whole; `corrupt` flips a payload byte after the sum was taken. Null when no buffer was free.
+/// Safety: thread context.
+unsafe fn csumPacket(src: u32, dst: u32, partial: bool, corrupt: bool) -> *mut mbuf {
+    var m = m_getcl();
+    if (m.isNull()) {
+        return m;
+    }
+    let payload = "checksum offload payload, 40 bytes long!";
+    let tlen: u32 = 20 + 40;
+    let data = Ptr.toBorrow(m as *mbuf).data;
+    let b = SliceMut.fromRaw(data, 60);
+    for (i in 0..20) {
+        b[truncate<usize>(i)] = 0;
+    }
+    be16(b, 0, 40100);
+    be16(b, 2, 7);
+    b[12] = 5 << 4;
+    b[13] = TH_ACK;
+    be16(b, 14, 1024);
+    for (i in 0..40) {
+        b[20 + truncate<usize>(i)] = payload.bytes()[truncate<usize>(i)];
+    }
+    {
+        let mm = Ptr.toBorrowMut(m);
+        mm.len = tlen;
+        mm.pkt.len = tlen;
+    }
+    let pseudo = cksum_pseudo4(src, dst, IPPROTO_TCP, truncate<u16>(tlen));
+    if (partial) {
+        half(b, 16, cksum_partial_field(pseudo));
+        let mm = Ptr.toBorrowMut(m);
+        mm.pkt.csum_flags = NET_CSUM_TCP;
+        mm.pkt.csum_start = 0;
+        mm.pkt.csum_offset = 16;
+    } else {
+        half(b, 16, cksum_fold(m_cksum_partial(m as *mbuf, 0, tlen, pseudo)));
+    }
+    if (corrupt) {
+        b[30] = b[30] ^ 0x5a;
+    }
+    // The IPv4 header, as output_on would add it.
+    m = m_prepend(m, 20);
+    if (m.isNull()) {
+        return m;
+    }
+    ipHeader(Ptr.toBorrow(m as *mbuf).data, truncate<u16>(20 + tlen), src, dst);
+    let mm = Ptr.toBorrowMut(m);
+    if ((mm.pkt.csum_flags & NET_CSUM_TX) != 0) {
+        mm.pkt.csum_start += 20;
+    }
+    mm.pkt.proto = ETH_P_IP;
+    return m;
+}
+
+/// Verify a transmitted IPv4 + TCP packet's checksum the receiver's way.
+/// Safety: `m` is a packet of the test's.
+unsafe fn csumValid(m: *mut mbuf) -> bool {
+    var hdr: [u8; 20] = [0; 20];
+    if (!m_copydata(m as *mbuf, 0, 20, borrow mut hdr as *mut [u8; 20] as *mut void)) {
+        return false;
+    }
+    let tlen = Ptr.toBorrow(m as *mbuf).pkt.len - 20;
+    let pseudo = cksum_pseudo4(wordOf(hdr[..], 12), wordOf(hdr[..], 16), IPPROTO_TCP, truncate<u16>(tlen));
+    return cksum_fold(m_cksum_partial(m as *mbuf, 20, tlen, pseudo)) == 0;
+}
+
+/// Safety: the test's; LAST is set by a transmit.
+unsafe fn lastPkt() -> mbuf_pkt_view {
+    let m = Ptr.toBorrow(LAST as *mbuf);
+    return mbuf_pkt_view { csumFlags: m.pkt.csum_flags, csumStart: m.pkt.csum_start, csumOffset: m.pkt.csum_offset };
+}
+
+/// A kept packet's offload fields.
+struct mbuf_pkt_view {
+    csumFlags: u16;
+    csumStart: u16;
+    csumOffset: u16;
+}
+
+/// net-csum-offload: transmit through an offloading interface and one without the capability, bad offsets refused,
+/// a wrong checksum dropped and counted unless the device verified it, and loopback offloading both ways.
+/// Safety: the runner's `reason`.
+@export("selftest_net_csum_offload")
+unsafe fn csumOffload(reason: *mut *CChar) -> bool {
+    let nif = borrow mut CSUM_NIF as *mut netif;
+    zeroNif(nif);
+    let mac: [u8; 6] = [0x02, 0x11, 0x22, 0x33, 0x44, 0x66];
+    nameNif(nif, "csum0", mac[..]);
+    CSUM_NIF.ops = borrow CSUM_OPS as *netif_ops;
+    CSUM_NIF.caps = NETIF_CAP_TXCSUM | NETIF_CAP_RXCSUM;
+    LAST = 0 as *mut mbuf;
+    CSUM_TRANSMITS.storeWith(0, StoreOrdering.Relaxed);
+    CSUM_RELEASES.storeWith(0, StoreOrdering.Relaxed);
+    if (nettest_netif_register(nif) != 0) {
+        return failed(reason, "check failed: net-csum-offload: the fake interface registers\0");
+    }
+    let creator = borrow mut CSUM_CREATOR as *mut nt_netif_ref; // the creator's reference, released however it returns
+    if (!nettest_netif_hold(creator, nif)) {
+        return failed(reason, "check failed: net-csum-offload: the creator's reference is held\0");
+    }
+    let lastSlot = borrow mut LAST as *mut *mut mbuf;
+    if (!nettest_defer_mbuf_slot(lastSlot)) {
+        return failed(reason, "check failed: net-csum-offload: the kept packet is freed after the unregister\0");
+    }
+    let me = net10_9(1, 1);
+    let peer = net10_9(1, 2);
+    netif_set_ipv4(nif, me, MASK24_N, 0);
+    netif_set_up(nif, true);
+
+    // Transmit through an offloading interface: the partial form arrives untouched, with the offsets a driver programs
+    // into its header.
+    var m = csumPacket(me, peer, true, false);
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-csum-offload: a partial packet\0");
+    }
+    if (netif_transmit(nif, m) != 0 || LAST.isNull()) {
+        return failed(reason, "check failed: net-csum-offload: it is transmitted\0");
+    }
+    let v = lastPkt();
+    if ((v.csumFlags & NET_CSUM_TCP) == 0 || v.csumStart != 20 || v.csumOffset != 16) {
+        return failed(reason, "check failed: net-csum-offload: the partial form arrives with its offsets\0");
+    }
+    if (csumValid(LAST)) {
+        return failed(reason, "check failed: net-csum-offload: only the pseudo-header sum so far\0");
+    }
+    if (!m_csum_complete(LAST) || !csumValid(LAST) || lastPkt().csumFlags != 0) {
+        return failed(reason, "check failed: net-csum-offload: completing it gives a valid sum\0");
+    }
+    // Through an interface without the capability: finished in software.
+    CSUM_NIF.caps = 0;
+    m = csumPacket(me, peer, true, false);
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-csum-offload: a second partial packet\0");
+    }
+    if (netif_transmit(nif, m) != 0 || lastPkt().csumFlags != 0 || !csumValid(LAST)) {
+        return failed(reason, "check failed: net-csum-offload: finished in software without the capability\0");
+    }
+    // Bad offsets are refused rather than written out of range.
+    m = csumPacket(me, peer, true, false);
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-csum-offload: a third partial packet\0");
+    }
+    {
+        let mm = Ptr.toBorrowMut(m);
+        mm.pkt.csum_start = truncate<u16>(mm.pkt.len);
+    }
+    let txBefore = CSUM_TRANSMITS.loadWith(LoadOrdering.Relaxed);
+    if (netif_transmit(nif, m) != -EINVAL || CSUM_TRANSMITS.loadWith(LoadOrdering.Relaxed) != txBefore) {
+        return failed(reason, "check failed: net-csum-offload: bad offsets are refused\0");
+    }
+    // The real transports leave the partial form: a TCP segment from the stack to this interface's peer is finished
+    // (no ARP for a directed frame here, so the segment is built by hand above; the stack's own path is covered by
+    // net-lo-tcp over the loopback, which offloads).
+
+    // Receive: a wrong checksum is dropped and counted; the same packet marked M_CSUM_OK (the device verified it) is
+    // accepted.
+    let t0 = tcpNow();
+    m = csumPacket(peer, me, false, true);
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-csum-offload: a corrupt packet\0");
+    }
+    // Feed it as the loopback does (no link layer): pkt.proto carries the type.
+    CSUM_NIF.flags = CSUM_NIF.flags | NETIF_LOOPBACK;
+    netif_rx(nif, m);
+    sleepMs(20);
+    var t1 = tcpNow();
+    if (t1.badCksum != t0.badCksum + 1) {
+        return failed(reason, "check failed: net-csum-offload: a wrong checksum is counted\0");
+    }
+    m = csumPacket(peer, me, false, true);
+    if (m.isNull()) {
+        return failed(reason, "check failed: net-csum-offload: a second corrupt packet\0");
+    }
+    {
+        let mm = Ptr.toBorrowMut(m);
+        mm.flags = mm.flags | M_CSUM_OK;
+    }
+    netif_rx(nif, m);
+    sleepMs(20);
+    t1 = tcpNow();
+    if (t1.badCksum != t0.badCksum + 1) {
+        return failed(reason, "check failed: net-csum-offload: a verified packet is trusted\0");
+    }
+    if (t1.droppedNoPcb < t0.droppedNoPcb + 1) {
+        return failed(reason, "check failed: net-csum-offload: it reached the pcb lookup\0");
+    }
+    CSUM_NIF.flags = CSUM_NIF.flags & (NETIF_LOOPBACK ^ 0xffffffff);
+
+    // The loopback interface offloads both ways: a transfer computes no transport checksum at all (net-lo-tcp exercises
+    // it).
+    let lo = borrow mut CSUM_LO as *mut nt_netif_ref;
+    if (!nettest_netif_hold(lo, netif_loopback())) {
+        return failed(reason, "check failed: net-csum-offload: a reference on lo\0");
+    }
+    let loNif = Ptr.toBorrow(lo as *nt_netif_ref).nif;
+    if (loNif.isNull() || (Ptr.toBorrow(loNif as *netif).caps & NETIF_CAP_TXCSUM) == 0 ||
+        (Ptr.toBorrow(loNif as *netif).caps & NETIF_CAP_RXCSUM) == 0) {
+        return failed(reason, "check failed: net-csum-offload: lo offloads both ways\0");
+    }
+    nettest_netif_ref_put(lo);
+
+    nettest_netif_unregister(nif);
+    selftest_release(lastSlot as *mut void);
+    nettest_netif_ref_put(creator);
+    if (CSUM_RELEASES.loadWith(LoadOrdering.Relaxed) != 1) {
+        return failed(reason, "check failed: net-csum-offload: the interface was released once\0");
+    }
+    return true;
+}

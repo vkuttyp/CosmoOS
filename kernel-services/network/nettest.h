@@ -34,6 +34,15 @@ struct tcp_server {
     struct socket *ls, *c;
 };
 
+/* A reference the test holds on an interface (a creator's, or one
+ * netif_find gave it), released however it returns. Keyed by a static
+ * holder, never by the interface: the interface's own address is its
+ * unregister's key, and netif_find can return the very interface the test
+ * registered. */
+struct nt_netif_ref {
+    struct netif *nif;
+};
+
 /* nettest.c's release framework (the nt_* wrappers), for the CeeSafe batches. */
 bool nettest_tcp_server_start(struct tcp_server *srv, void (*fn)(void *), const char *name, int prio);
 /* Publish the server's listener (or its connection) for the release, under its lock. */
@@ -43,6 +52,13 @@ int nettest_ksock_accept(struct socket *s, struct socket **out, struct netaddr *
 void nettest_ksock_put(struct socket *s);
 void nettest_loopback_set_filter(lo_filter_fn fn, void *arg);
 void nettest_netif_set_rx_hook(netif_rx_hook_fn fn, void *arg);
+int nettest_netif_register(struct netif *nif);
+void nettest_netif_unregister(struct netif *nif);
+bool nettest_netif_hold(struct nt_netif_ref *r, struct netif *nif);
+void nettest_netif_ref_put(struct nt_netif_ref *r);
+void nettest_netif_set_steering(bool on);
+/* A packet a fake interface keeps in `*slot`, freed however the test returns. */
+bool nettest_defer_mbuf_slot(struct mbuf **slot);
 int nettest_ksock_create_raw(int family, int proto, struct socket **out);
 void nettest_tcp_set_keepalive(uint64_t idle_ns, uint64_t intvl_ns, unsigned cnt);
 void nettest_tcp_set_fin_wait2(uint64_t ns);
