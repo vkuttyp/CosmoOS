@@ -4302,66 +4302,16 @@ bool selftest_net_tap_release_order(const char **reason)
 #endif
 }
 
-/* --- the INPUT chain (docs/audit/next-subsystem-input-chain.md) ---------- */
-
-/* The ones-complement checksum of `n` bytes as big-endian words, complemented
- * -- stored big-endian it is what icmp_input verifies. */
-static uint16_t fwt_ones_sum(const uint8_t *p, unsigned n)
-{
-    uint32_t s = 0;
-    for (unsigned i = 0; i + 1 < n; i += 2)
-        s += (uint32_t)(p[i] << 8 | p[i + 1]);
-    if (n & 1)
-        s += (uint32_t)(p[n - 1] << 8);
-    while (s >> 16)
-        s = (s & 0xffff) + (s >> 16);
-    return (uint16_t)~s;
-}
-
-/* An ICMP echo with a valid checksum: the host answers only a well-formed one. */
-static uint16_t fwt_mk_icmp_ck(uint8_t *l4, uint8_t type, uint16_t id)
-{
-    uint16_t n = nettest_fwt_mk_icmp(l4, type, id);
-    uint16_t ck = fwt_ones_sum(l4, n);
-    l4[2] = (uint8_t)(ck >> 8);
-    l4[3] = (uint8_t)ck;
-    return n;
-}
-
-/* An ICMP Need-Fragmentation (type 3 code 4, next-hop MTU `mtu`) quoting a
- * host -> guest datagram: what a guest would send to shrink the host's path
- * MTU toward it. 36 bytes, checksummed. */
-static uint16_t fwt_mk_needfrag(uint8_t *l4, uint32_t host_ip, uint32_t guest_ip, uint16_t mtu)
-{
-    memset(l4, 0, 36);
-    l4[0] = ICMP_DEST_UNREACH;
-    l4[1] = 4;
-    l4[6] = (uint8_t)(mtu >> 8);
-    l4[7] = (uint8_t)mtu;
-    struct ipv4_hdr *in = (struct ipv4_hdr *)(l4 + 8);
-    in->vhl = 0x45; in->len = htons(1500); in->ttl = 64; in->proto = IPPROTO_UDP;
-    in->src = host_ip; in->dst = guest_ip;
-    uint16_t ck = fwt_ones_sum(l4, 36);
-    l4[2] = (uint8_t)(ck >> 8);
-    l4[3] = (uint8_t)ck;
-    return 36;
-}
-
-/* Did the host answer an echo on this guest's tap? Skips everything else the
- * tap carries (ARP, the DNS proxy's replies, a RST). */
-static bool fwt_recv_echo_reply(struct file *f, unsigned tries)
-{
-    uint8_t rx[160];
-    for (unsigned i = 0; i < tries; i++) {
-        int64_t n = file_read(f, rx, sizeof(rx));
-        if (n >= ETH_HLEN + 20 + 8 && rx[12] == 0x08 && rx[13] == 0x00 &&
-            rx[ETH_HLEN + 9] == IPPROTO_ICMP && rx[ETH_HLEN + 20] == ICMP_ECHO_REPLY)
-            return true;
-        if (n <= 0)
-            thread_sleep_ms(10);
-    }
-    return false;
-}
+/* --- the INPUT chain (docs/audit/next-subsystem-input-chain.md) ----------
+ *
+ * net-input is CeeSafe (nettest_input.cee), with the checksummed ICMP
+ * messages the host chains test with (nettest_fwt_ones_sum,
+ * nettest_fwt_mk_icmp_ck, nettest_fwt_mk_needfrag,
+ * nettest_fwt_recv_echo_reply; nettest.h). The values it writes as its own
+ * constants: */
+_Static_assert(ICMP_DEST_UNREACH == 3 && FW_DIR_ANY == 0 && COSMO_NETCTL_DIR_ANY == 0 &&
+               COSMO_NETCTL_DIR_TO_HOST == 3 && COSMO_NETCTL_ICMP_TYPE_ANY == 0xffff,
+               "nettest_input.cee's ip.h, fw.h and netctl.h values");
 
 /* A verdict is taken on the network worker after file_write returns, so a
  * counter is awaited, not read at once. True once `st.field` exceeds `base`. */
@@ -4372,281 +4322,6 @@ static bool fwt_recv_echo_reply(struct file *f, unsigned tries)
         if ((st).field > (base)) r_ = true; else thread_sleep_ms(10);       \
     }                                                                       \
     r_; })
-
-bool selftest_net_input(const char **reason)
-{
-    *reason = NULL;
-    fw_flush();
-    nat_flush();
-
-    /* Two guests through /dev/net/tap (so each attaches): A on tap0, B on tap1. */
-    struct file *fa = NULL, *fb = NULL;
-    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
-    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
-    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gwa = IPV4_ADDR(10, 0, 3, 1);
-    uint32_t gb = IPV4_ADDR(10, 0, 4, 15), gwb = IPV4_ADDR(10, 0, 4, 1);
-    static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0e, 0x00, 0x0a };
-    static const uint8_t bmac[6] = { 0x52, 0x54, 0x00, 0x0e, 0x00, 0x0b };
-    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
-    static const uint8_t tap1mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcd };
-    { struct netif *n = netif_find("tap0"); CHECK(n != NULL); nettest_seed_arp(n, ga, amac); netif_put(n); }
-    { struct netif *n = netif_find("tap1"); CHECK(n != NULL); nettest_seed_arp(n, gb, bmac); netif_put(n); }
-
-    uint8_t pl[4] = { 1, 2, 3, 4 }, l4[48];
-    uint16_t l4len;
-    struct fw_stats fs0, fs1;
-    struct ip_stats is0, is1;
-    struct fw_rule listed[FW_RULES_PER_GUEST];
-
-    /* (1) attach seeded exactly the tap's two services, as TO_HOST rules on
-     * the gateway, and the TO_HOST default is DROP. */
-    CHECK(fw_rule_list(ga, listed, FW_RULES_PER_GUEST) == 2);
-    CHECK(listed[0].direction == FW_DIR_TO_HOST && listed[0].proto == IPPROTO_UDP &&
-          listed[0].dst_ip == gwa && listed[0].dst_prefix == 32 && listed[0].dst_port == 53);
-    CHECK(listed[1].direction == FW_DIR_TO_HOST && listed[1].proto == IPPROTO_ICMP &&
-          listed[1].dst_ip == gwa && listed[1].dst_port == ICMP_ECHO);
-    uint8_t pu, pg, ph, pw, po;
-    CHECK(fw_policy_get(ga, &pu, &pg, &ph, &pw, &po) == 0 && ph == FW_DROP && pu == FW_ACCEPT && pg == FW_DROP);
-
-    /* (2) the seeds reach the host: a DNS query to the gateway is accepted by
-     * rule; an echo request to the gateway draws an echo reply. */
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_udp(l4, ga, gwa, 4000, 53, pl, sizeof(pl));
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x4242);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
-    CHECK(fwt_recv_echo_reply(fa, 40));
-
-    /* (3) everything else is closed by default: UDP to gateway:7000, a TCP SYN
-     * to gateway:2222, and a datagram to the host's uplink address -- counted
-     * on the filter and on the IP side. */
-    fw_get_stats(&fs0); ipv4_get_stats(&is0);
-    l4len = nettest_mk_udp(l4, ga, gwa, 4001, 7000, pl, sizeof(pl));
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
-    CHECK(FWT_RISES(ipv4_get_stats, is1, in_filtered, is0.in_filtered));
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_tcp(l4, ga, gwa, 40000, 2222, TH_SYN);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
-    /* A datagram to the host's *uplink* address is not this tap's to deliver:
-     * the off-link invariant drops it before any chain (the host chain's
-     * unit), so INPUT's default is not what closes it any more. */
-    uint32_t uplink = IPV4_ADDR(10, 0, 2, 15);
-    if (netif_owns_ipv4(uplink)) {                    /* the NIC's autoconfigured address, when present */
-        fw_get_stats(&fs0); ipv4_get_stats(&is0);
-        l4len = nettest_mk_udp(l4, ga, uplink, 4002, 7000, pl, sizeof(pl));
-        CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, uplink, IPPROTO_UDP, l4, l4len));
-        CHECK(FWT_RISES(ipv4_get_stats, is1, rx_offlink, is0.rx_offlink));
-        fw_get_stats(&fs1);
-        CHECK(fs1.in_drop_default == fs0.in_drop_default);
-    }
-
-    /* (4) a rule opens a service, per datagram (stateless): a SYN and then a
-     * bare ACK to the ruled port are both admitted by the same rule. */
-    struct fw_rule open_tcp = { .direction = FW_DIR_TO_HOST, .proto = IPPROTO_TCP, .dst_prefix = 32,
-                                .verdict = FW_ACCEPT, .dst_ip = gwa, .dst_port = 2222 };
-    CHECK(fw_rule_add(ga, 0, &open_tcp) == 0);
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_tcp(l4, ga, gwa, 40001, 2222, TH_SYN);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_tcp(l4, ga, gwa, 40001, 2222, TH_ACK);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
-
-    /* (4c) the ANY direction keeps its forwarding-only meaning: a wildcard
-     * ACCEPT written to permit forwarding does not open a host port -- host
-     * traffic needs an explicit TO_HOST rule -- so no rule written before the
-     * INPUT chain existed silently opens the host. */
-    struct fw_rule any_udp = { .direction = FW_DIR_ANY, .proto = IPPROTO_UDP, .dst_prefix = 32,
-                               .verdict = FW_ACCEPT, .dst_ip = gwa, .dst_port = 7003 };
-    CHECK(fw_rule_add(ga, 0, &any_udp) == 0);
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_udp(l4, ga, gwa, 4003, 7003, pl, sizeof(pl));
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));   /* ANY did not reach the host */
-    CHECK(fw_rule_del(ga, &any_udp) == 0);
-    struct fw_rule host_udp = any_udp;
-    host_udp.direction = FW_DIR_TO_HOST;
-    CHECK(fw_rule_add(ga, 0, &host_udp) == 0);
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_udp(l4, ga, gwa, 4004, 7003, pl, sizeof(pl));
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));     /* TO_HOST does */
-    CHECK(fw_rule_del(ga, &host_udp) == 0);
-
-    /* (5) the seeds are real rules, not hard-coded holes: deleting the echo
-     * seed closes echo; re-adding it reopens it. */
-    struct fw_rule seed_echo = { .direction = FW_DIR_TO_HOST, .proto = IPPROTO_ICMP, .dst_prefix = 32,
-                                 .verdict = FW_ACCEPT, .dst_ip = gwa, .dst_port = ICMP_ECHO };
-    CHECK(fw_rule_del(ga, &seed_echo) == 0);
-    fw_get_stats(&fs0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x4243);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
-    CHECK(!fwt_recv_echo_reply(fa, 10));
-    CHECK(fw_rule_add(ga, 0, &seed_echo) == 0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x4244);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
-    CHECK(fwt_recv_echo_reply(fa, 40));
-
-    /* (6) the ICMP selector is a type: a guest echo *reply* and a guest
-     * Need-Fragmentation toward the gateway are dropped by default (the
-     * host's PMTU cache untouched); a type-0 rule admits the reply alone;
-     * the wildcard admits Need-Fragmentation too. */
-    fw_get_stats(&fs0); ipv4_get_stats(&is0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x4242);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
-    fw_get_stats(&fs0);
-    l4len = fwt_mk_needfrag(l4, gwa, ga, 576);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
-    ipv4_get_stats(&is1);
-    CHECK(is1.pmtu_updates == is0.pmtu_updates);          /* never reached ipv4_pmtu_update */
-    struct fw_rule type0 = { .direction = FW_DIR_TO_HOST, .proto = IPPROTO_ICMP, .dst_prefix = 32,
-                             .verdict = FW_ACCEPT, .dst_ip = gwa, .dst_port = ICMP_ECHO_REPLY };
-    CHECK(fw_rule_add(ga, 0, &type0) == 0);
-    fw_get_stats(&fs0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x4242);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
-    fw_get_stats(&fs0);
-    l4len = fwt_mk_needfrag(l4, gwa, ga, 576);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));   /* type 3 still closed */
-    CHECK(fw_rule_del(ga, &type0) == 0);
-    struct fw_rule anyicmp = type0;
-    anyicmp.dst_port = FW_ICMP_TYPE_ANY;
-    CHECK(fw_rule_add(ga, 0, &anyicmp) == 0);
-    fw_get_stats(&fs0);
-    l4len = fwt_mk_needfrag(l4, gwa, ga, 576);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_ICMP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
-    CHECK(fw_rule_del(ga, &anyicmp) == 0);
-
-    /* (7) anti-spoof on the local path: from A's tap, a source that is not A
-     * -- a stray, the host itself, the neighbour -- toward the gateway's DNS
-     * (a ruled port) is dropped as spoofed before any rule is read. */
-    /* Give B a rule that would admit exactly this datagram if it came from B:
-     * without the anti-spoof, A forging B's source would borrow B's policy. */
-    struct fw_rule b_dns_any = { .direction = FW_DIR_TO_HOST, .proto = IPPROTO_UDP, .dst_prefix = 0,
-                                 .verdict = FW_ACCEPT, .dst_ip = 0, .dst_port = 53 };
-    CHECK(fw_rule_add(gb, 0, &b_dns_any) == 0);
-    fw_get_stats(&fs0); ipv4_get_stats(&is0);
-    uint32_t forged[3] = { IPV4_ADDR(10, 0, 3, 50), gb, IPV4_ADDR(10, 0, 2, 2) };   /* a stray, the neighbour, the world */
-    for (unsigned i = 0; i < 3; i++) {
-        uint64_t base = fs0.in_spoofed + i;
-        l4len = nettest_mk_udp(l4, forged[i], gwa, 4100, 53, pl, sizeof(pl));
-        CHECK(nettest_fwt_send(fa, tap0mac, amac, forged[i], gwa, IPPROTO_UDP, l4, l4len));
-        CHECK(FWT_RISES(fw_get_stats, fs1, in_spoofed, base));
-    }
-    CHECK(FWT_RISES(ipv4_get_stats, is1, in_filtered, is0.in_filtered));
-    CHECK(fw_rule_del(gb, &b_dns_any) == 0);
-    /* Forged as the host itself, the datagram never reaches the firewall:
-     * ipv4_input drops one of our own addresses arriving from a link as a
-     * martian first -- a stronger drop, counted upstream. */
-    ipv4_get_stats(&is0);
-    l4len = nettest_mk_udp(l4, gwa, gwa, 4100, 53, pl, sizeof(pl));
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, gwa, gwa, IPPROTO_UDP, l4, l4len));
-    CHECK(FWT_RISES(ipv4_get_stats, is1, rx_bad_header, is0.rx_bad_header));
-
-    /* (8) per guest: A's TCP rule does not open B's path; B's release purges
-     * its seeds; a reopened B re-seeds cleanly. */
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_tcp(l4, gb, gwb, 40000, 2222, TH_SYN);
-    CHECK(nettest_fwt_send(fb, tap1mac, bmac, gb, gwb, IPPROTO_TCP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
-    nt_file_put(fb); fb = NULL;
-    CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 0);
-    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fb) == 0 && fb != NULL);
-    CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 2 &&
-          listed[0].direction == FW_DIR_TO_HOST && listed[1].direction == FW_DIR_TO_HOST);
-
-    /* (9) the policy flips: TO_HOST ACCEPT admits an unruled port, DROP
-     * closes it again; ANY is not a policy direction. */
-    CHECK(fw_policy_set(ga, FW_DIR_TO_HOST, FW_ACCEPT) == 0);
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_udp(l4, ga, gwa, 4200, 7001, pl, sizeof(pl));
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_default, fs0.in_accept_default));
-    CHECK(fw_policy_set(ga, FW_DIR_TO_HOST, FW_DROP) == 0);
-    fw_get_stats(&fs0);
-    l4len = nettest_mk_udp(l4, ga, gwa, 4201, 7002, pl, sizeof(pl));
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
-    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
-    CHECK(fw_policy_set(ga, FW_DIR_ANY, FW_ACCEPT) == -EINVAL);
-
-    /* (10) the control channel: a TO_HOST rule written through tapctl is
-     * listed with its direction beside a guest record carrying the third
-     * policy; the ICMP selector round-trips -- type 0 is writable, the
-     * wildcard is not mistaken for it, a type above 255 and ANY-as-policy-
-     * direction are refused. */
-    struct file *fctl = NULL;
-    CHECK(nt_vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
-    struct cosmo_netctl_filter c = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_ADD,
-                                     .guest_addr = ga, .direction = COSMO_NETCTL_DIR_TO_HOST,
-                                     .proto = COSMO_NETCTL_PROTO_TCP, .dst_prefix = 32,
-                                     .verdict = COSMO_NETCTL_VERDICT_ACCEPT, .dst_addr = gwa, .dst_port = 8080 };
-    CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
-    static uint8_t snap[COSMO_NETCTL_SNAPSHOT_MAX];
-    int64_t sn = file_read(fctl, snap, sizeof(snap));
-    CHECK(sn > 0);
-    {
-        struct cosmo_netctl_list phh; memcpy(&phh, snap, sizeof(phh));
-        size_t off = sizeof(phh) + (size_t)phh.count * sizeof(struct cosmo_netctl_rule);
-        struct cosmo_netctl_filter_list fh; memcpy(&fh, snap + off, sizeof(fh));
-        CHECK(fh.version == COSMO_NETCTL_VERSION);
-        off += sizeof(fh);
-        bool guest_seen = false;
-        for (unsigned i = 0; i < fh.guest_count; i++, off += sizeof(struct cosmo_netctl_filter_guest)) {
-            struct cosmo_netctl_filter_guest fg; memcpy(&fg, snap + off, sizeof(fg));
-            if (fg.guest_addr == ga)
-                guest_seen = fg.policy_to_host == COSMO_NETCTL_VERDICT_DROP &&
-                             fg.policy_to_uplink == COSMO_NETCTL_VERDICT_ACCEPT;
-        }
-        CHECK(guest_seen);
-        bool rule_seen = false;
-        for (unsigned i = 0; i < fh.rule_count; i++) {
-            struct cosmo_netctl_filter_rule fr; memcpy(&fr, snap + off + i * sizeof(fr), sizeof(fr));
-            if (fr.guest_addr == ga && fr.proto == COSMO_NETCTL_PROTO_TCP && fr.dst_port == 8080)
-                rule_seen = fr.direction == COSMO_NETCTL_DIR_TO_HOST && fr.dst_addr == gwa;
-        }
-        CHECK(rule_seen);
-    }
-    struct cosmo_netctl_filter ic = c;
-    ic.proto = COSMO_NETCTL_PROTO_ICMP; ic.dst_port = 0;                  /* echo-reply: type 0 is writable */
-    CHECK(file_write(fctl, &ic, sizeof(ic)) == (int64_t)sizeof(ic));
-    ic.op = COSMO_NETCTL_FILTER_DEL;
-    CHECK(file_write(fctl, &ic, sizeof(ic)) == (int64_t)sizeof(ic));
-    ic.op = COSMO_NETCTL_FILTER_ADD; ic.dst_port = COSMO_NETCTL_ICMP_TYPE_ANY;   /* the wildcard is distinct */
-    CHECK(file_write(fctl, &ic, sizeof(ic)) == (int64_t)sizeof(ic));
-    ic.op = COSMO_NETCTL_FILTER_DEL;
-    CHECK(file_write(fctl, &ic, sizeof(ic)) == (int64_t)sizeof(ic));
-    ic.op = COSMO_NETCTL_FILTER_ADD; ic.dst_port = 256;
-    CHECK(file_write(fctl, &ic, sizeof(ic)) == -EINVAL);                  /* not a type */
-    struct cosmo_netctl_filter pol = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_POLICY,
-                                       .guest_addr = ga, .direction = COSMO_NETCTL_DIR_ANY,
-                                       .verdict = COSMO_NETCTL_VERDICT_ACCEPT };
-    CHECK(file_write(fctl, &pol, sizeof(pol)) == -EINVAL);                /* ANY is not a policy direction */
-    pol.direction = COSMO_NETCTL_DIR_TO_HOST;
-    CHECK(file_write(fctl, &pol, sizeof(pol)) == (int64_t)sizeof(pol));
-    pol.verdict = COSMO_NETCTL_VERDICT_DROP;
-    CHECK(file_write(fctl, &pol, sizeof(pol)) == (int64_t)sizeof(pol));
-    nt_file_put(fctl);
-
-    nt_file_put(fa);
-    nt_file_put(fb);
-    fw_flush();
-    kinfo("selftest: net-input: the seeded DNS and echo reached the host and nothing else did, a rule opened a "
-          "port per datagram, the seeds were deletable, the ICMP selector was a type (echo reply and need-frag "
-          "dropped; type 0 and the wildcard admitted what they name), forged sources were dropped as spoofed, "
-          "policy was per guest and flippable, and the control listing carried the third direction");
-    return true;
-}
 
 /* --- the host chain (docs/audit/next-subsystem-host-input.md) ------------- */
 
@@ -5317,17 +4992,17 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_echo) == 0);
     hin_drain(u);
     fw_get_stats(&fs0); ipv4_get_stats(&is0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5151);
+    l4len = nettest_fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5151);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, hin_drop_rule, fs0.hin_drop_rule));
     CHECK(FWT_RISES(ipv4_get_stats, is1, icmp_quiet_dropped, is0.icmp_quiet_dropped));
     CHECK(!hin_recv(u, IPPROTO_ICMP, 0, &sg, 15));
     fw_get_stats(&fs0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x5151);
+    l4len = nettest_fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x5151);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_default, fs0.hin_accept_default));
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_echo) == 0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5152);
+    l4len = nettest_fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5152);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_ICMP, l4, l4len));
     CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, HIN_TRIES) && sg.flags == ICMP_ECHO_REPLY);
 
@@ -5541,7 +5216,7 @@ static uint16_t hst_mk_needfrag_tcp(uint8_t *l4, uint32_t host_ip, uint32_t peer
     th[2] = (uint8_t)(dport >> 8); th[3] = (uint8_t)dport;
     th[4] = (uint8_t)(seq >> 24); th[5] = (uint8_t)(seq >> 16);
     th[6] = (uint8_t)(seq >> 8);  th[7] = (uint8_t)seq;
-    uint16_t ck = fwt_ones_sum(l4, 36);
+    uint16_t ck = nettest_fwt_ones_sum(l4, 36);
     l4[2] = (uint8_t)(ck >> 8);
     l4[3] = (uint8_t)ck;
     return 36;
@@ -5555,7 +5230,7 @@ static uint16_t hst_mk_unreach_tcp(uint8_t *l4, uint32_t host_ip, uint32_t peer_
     l4[1] = ICMP_UNREACH_PORT;
     l4[6] = l4[7] = 0;
     l4[2] = l4[3] = 0;
-    uint16_t ck = fwt_ones_sum(l4, n);
+    uint16_t ck = nettest_fwt_ones_sum(l4, n);
     l4[2] = (uint8_t)(ck >> 8);
     l4[3] = (uint8_t)ck;
     return n;
@@ -5970,7 +5645,7 @@ bool selftest_net_hoststate(const char **reason)
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
     fw_get_stats(&fs0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x7a7a);
+    l4len = nettest_fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x7a7a);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
     CHECK(hst_echo_arrived(echoes, 50));
     CHECK(g_hst_echo.id == 0x7a7a && g_hst_echo.src == w);
@@ -5978,7 +5653,7 @@ bool selftest_net_hoststate(const char **reason)
     /* A reply carrying another identifier matches no flow: freed, no hook. */
     echoes = g_hst_echo.n;
     ipv4_get_stats(&is0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x7a7b);
+    l4len = nettest_fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x7a7b);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(ipv4_get_stats, is1, icmp_quiet_dropped, is0.icmp_quiet_dropped));
     CHECK(!hst_echo_arrived(echoes, 5));
@@ -5988,7 +5663,7 @@ bool selftest_net_hoststate(const char **reason)
      * echo-reply budget. */
     hin_drain(u);
     ipv4_get_stats(&is0);
-    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5050);
+    l4len = nettest_fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5050);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(ipv4_get_stats, is1, icmp_quiet_dropped, is0.icmp_quiet_dropped));
     CHECK(!hin_recv(u, IPPROTO_ICMP, 0, &sg, 10));

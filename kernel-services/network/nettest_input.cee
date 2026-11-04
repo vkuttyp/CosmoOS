@@ -1,0 +1,919 @@
+// nettest_input.cee - the INPUT chain, in CeeSafe: roadmap 2.0 SA6 (nettest, the ninth batch). net-input, as
+// nettest.c had it (docs/audit/next-subsystem-input-chain.md), and the checksummed ICMP messages the host chains test
+// with -- exported as nettest_fwt_ones_sum, nettest_fwt_mk_icmp_ck, nettest_fwt_mk_needfrag and
+// nettest_fwt_recv_echo_reply (nettest.h) for the host-chain and host-state tests still in nettest.c. A verdict is
+// taken on the network worker after file_write returns, so a counter is awaited, not read at once (rises, the C's
+// FWT_RISES, which stays in nettest.c for the tests there).
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/nat.h", "kernel/net/fw.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/vfs.h", "kernel/selftest.h")
+extern "C" {
+    struct netif;
+    struct file;
+    struct fw_stats {
+        in_accept_rule: u64;
+        in_drop_default: u64;
+        in_accept_default: u64;
+        in_spoofed: u64;
+    }
+    struct ip_stats {
+        rx_bad_header: u64;
+        pmtu_updates: u64;
+        in_filtered: u64;
+        rx_offlink: u64;
+    }
+    struct fw_rule {
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_ip: u32;
+        dst_port: u16;
+    }
+    struct cosmo_netctl_filter {
+        version: u16;
+        op: u16;
+        guest_addr: u32;
+        direction: u8;
+        proto: u8;
+        dst_prefix: u8;
+        verdict: u8;
+        dst_addr: u32;
+        dst_port: u16;
+    }
+    struct cosmo_netctl_list {
+        count: u16;
+    }
+    struct cosmo_netctl_rule {
+        proto: u8;
+    }
+    struct cosmo_netctl_filter_list {
+        version: u16;
+        rule_count: u16;
+        guest_count: u16;
+    }
+    struct cosmo_netctl_filter_guest {
+        guest_addr: u32;
+        policy_to_uplink: u8;
+        policy_to_host: u8;
+    }
+    struct cosmo_netctl_filter_rule {
+        guest_addr: u32;
+        direction: u8;
+        proto: u8;
+        dst_addr: u32;
+        dst_port: u16;
+    }
+
+    fn nettest_vfs_open(path: *CChar, flags: u32, out: *mut *mut file) -> i32;
+    fn nettest_file_put(f: *mut file);
+    fn nettest_seed_arp(nif: *mut netif, peerIp: u32, peerMac: *u8);
+    fn nettest_mk_udp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, pl: *u8, pllen: u16) -> u16;
+    fn nettest_mk_tcp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, flags: u8) -> u16;
+    fn nettest_fwt_send(
+        from: *mut file,
+        tapmac: *u8,
+        gmac: *u8,
+        sip: u32,
+        dip: u32,
+        proto: u8,
+        l4: *u8,
+        l4len: u16,
+    ) -> bool;
+    fn nettest_fwt_mk_icmp(l4: *mut u8, kind: u8, id: u16) -> u16;
+
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_owns_ipv4(addr: u32) -> bool;
+    fn ipv4_get_stats(out: *mut ip_stats);
+    fn nat_flush();
+    fn fw_flush();
+    fn fw_get_stats(out: *mut fw_stats);
+    fn fw_policy_set(guestIp: u32, direction: u8, verdict: u8) -> i32;
+    fn fw_policy_get(
+        guestIp: u32,
+        toUplink: *mut u8,
+        toGuest: *mut u8,
+        toHost: *mut u8,
+        fromUplink: *mut u8,
+        output: *mut u8,
+    ) -> i32;
+    fn fw_rule_add(guestIp: u32, atIndex: u32, r: *fw_rule) -> i32;
+    fn fw_rule_del(guestIp: u32, r: *fw_rule) -> i32;
+    fn fw_rule_list(guestIp: u32, out: *mut fw_rule, max: u32) -> u32;
+    fn thread_sleep_ns(ns: u64);
+}
+
+// ---- errno.h, ip.h, tcp.h, fw.h, netctl.h, syscall.h (asserted against the headers in nettest.c) ----
+
+const EINVAL: i32 = 22;
+const ETH_HLEN: usize = 14;
+const IPPROTO_ICMP: u8 = 1;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+const ICMP_ECHO_REPLY: u8 = 0;
+const ICMP_ECHO: u8 = 8;
+const ICMP_DEST_UNREACH: u8 = 3;
+const TH_SYN: u8 = 0x02;
+const TH_ACK: u8 = 0x10;
+const FW_DROP: u8 = 0;
+const FW_ACCEPT: u8 = 1;
+const FW_DIR_ANY: u8 = 0;
+const FW_DIR_TO_HOST: u8 = 3;
+const FW_ICMP_TYPE_ANY: u16 = 0xffff;
+const FW_RULES_PER_GUEST: u32 = 32;
+const NETCTL_VERSION: u16 = 8;
+const NETCTL_FILTER_ADD: u16 = 3;
+const NETCTL_FILTER_DEL: u16 = 4;
+const NETCTL_FILTER_POLICY: u16 = 5;
+const NETCTL_PROTO_ICMP: u8 = 1;
+const NETCTL_PROTO_TCP: u8 = 6;
+const NETCTL_DIR_ANY: u8 = 0;
+const NETCTL_DIR_TO_HOST: u8 = 3;
+const NETCTL_ICMP_TYPE_ANY: u16 = 0xffff;
+const NETCTL_VERDICT_DROP: u8 = 0;
+const NETCTL_VERDICT_ACCEPT: u8 = 1;
+const O_RDWR: u32 = 0x0002;
+const O_NONBLOCK: u32 = 0x0800;
+
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * 1000000);
+    }
+}
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+/// A C struct's room on the stack: aligned and zeroed.
+struct Room {
+    words: [u64; 48];
+}
+
+fn room(bytes: usize) -> Room {
+    if (bytes > 384) {
+        tooSmall();
+    }
+    return Room { words: [0; 48] };
+}
+
+/// A small C struct's room (a rule, a command).
+struct Cmd {
+    words: [u64; 8];
+}
+
+fn cmd(bytes: usize) -> Cmd {
+    if (bytes > 64) {
+        tooSmall();
+    }
+    return Cmd { words: [0; 8] };
+}
+
+// ---- The counters ----
+
+/// A counter net-input awaits: the INPUT chain's verdicts on the firewall's side, its drops on the IP side.
+enum Counter {
+    InAcceptRule,
+    InDropDefault,
+    InAcceptDefault,
+    InSpoofed,
+    InFiltered,
+    RxOfflink,
+    RxBadHeader,
+    PmtuUpdates,
+}
+
+/// The counter's value now.
+/// Safety: the rooms hold a struct fw_stats and a struct ip_stats (room checks).
+fn now(c: Counter) -> u64 {
+    var fr = room(layoutOf<fw_stats>().size);
+    var ir = room(layoutOf<ip_stats>().size);
+    let fp = borrow mut fr.words as *mut [u64; 48] as *mut fw_stats;
+    let ip = borrow mut ir.words as *mut [u64; 48] as *mut ip_stats;
+    unsafe {
+        fw_get_stats(fp);
+        ipv4_get_stats(ip);
+        let f = Ptr.toBorrow(fp as *fw_stats);
+        let i = Ptr.toBorrow(ip as *ip_stats);
+        return match (c) {
+            Counter.InAcceptRule => f.in_accept_rule,
+            Counter.InDropDefault => f.in_drop_default,
+            Counter.InAcceptDefault => f.in_accept_default,
+            Counter.InSpoofed => f.in_spoofed,
+            Counter.InFiltered => i.in_filtered,
+            Counter.RxOfflink => i.rx_offlink,
+            Counter.RxBadHeader => i.rx_bad_header,
+            Counter.PmtuUpdates => i.pmtu_updates,
+        };
+    }
+}
+
+/// The C's FWT_RISES: true once the counter exceeds `base`, read up to 40 times 10 ms apart.
+fn rises(c: Counter, base: u64) -> bool {
+    for (i in 0..40) {
+        if (now(c) > base) {
+            return true;
+        }
+        sleepMs(10);
+    }
+    return false;
+}
+
+// ---- The ICMP messages the host chains test with (nettest.h) ----
+
+/// The ones-complement checksum of `n` bytes as big-endian words, complemented -- stored big-endian it is what
+/// icmp_input verifies.
+/// Safety: `p` points to `n` readable bytes.
+@export("nettest_fwt_ones_sum")
+unsafe fn onesSum(p: *u8, n: u32) -> u16 {
+    let b = Slice.fromRaw(p, n as usize);
+    var s: u32 = 0;
+    var i: usize = 0;
+    while (i + 1 < n as usize) {
+        s += ((b[i] as u32) << 8) | (b[i + 1] as u32);
+        i += 2;
+    }
+    if ((n & 1) != 0) {
+        s += (b[(n - 1) as usize] as u32) << 8;
+    }
+    while ((s >> 16) != 0) {
+        s = (s & 0xffff) + (s >> 16);
+    }
+    return truncate<u16>(s ^ 0xffffffff);
+}
+
+/// Store a checksum big-endian at bytes 2 and 3.
+fn storeSum(b: SliceMut<u8>, ck: u16) {
+    b[2] = truncate<u8>(ck >> 8);
+    b[3] = truncate<u8>(ck);
+}
+
+/// An ICMP echo with a valid checksum: the host answers only a well-formed one. 16 bytes.
+/// Safety: `l4` has room for 16 bytes.
+@export("nettest_fwt_mk_icmp_ck")
+unsafe fn mkIcmpCk(l4: *mut u8, kind: u8, id: u16) -> u16 {
+    let n = nettest_fwt_mk_icmp(l4, kind, id);
+    storeSum(SliceMut.fromRaw(l4, 4), onesSum(l4 as *u8, n as u32));
+    return n;
+}
+
+/// An ICMP Need-Fragmentation (type 3 code 4, next-hop MTU `mtu`) quoting a host -> guest datagram: what a guest would
+/// send to shrink the host's path MTU toward it. 36 bytes, checksummed.
+/// Safety: `l4` has room for 36 bytes.
+@export("nettest_fwt_mk_needfrag")
+unsafe fn mkNeedfrag(l4: *mut u8, hostIp: u32, guestIp: u32, mtu: u16) -> u16 {
+    let b = SliceMut.fromRaw(l4, 36);
+    for (i in 0..36) {
+        b[truncate<usize>(i)] = 0;
+    }
+    b[0] = ICMP_DEST_UNREACH;
+    b[1] = 4;
+    b[6] = truncate<u8>(mtu >> 8);
+    b[7] = truncate<u8>(mtu);
+    b[8] = 0x45;  // the quoted header
+    b[10] = 0x05; // len htons(1500)
+    b[11] = 0xdc;
+    b[16] = 64;
+    b[17] = IPPROTO_UDP;
+    for (i in 0..4) {
+        b[20 + truncate<usize>(i)] = truncate<u8>(hostIp >> (8 * truncate<u32>(i)));
+        b[24 + truncate<usize>(i)] = truncate<u8>(guestIp >> (8 * truncate<u32>(i)));
+    }
+    storeSum(b, onesSum(l4 as *u8, 36));
+    return 36;
+}
+
+/// Did the host answer an echo on this guest's tap? Skips everything else the tap carries (ARP, the DNS proxy's
+/// replies, a RST).
+/// Safety: `f` is a tap file of the test's.
+@export("nettest_fwt_recv_echo_reply")
+unsafe fn recvEchoReply(f: *mut file, tries: u32) -> bool {
+    var rx: [u8; 160] = [0; 160];
+    for (i in 0..tries) {
+        let n = file_read(f, borrow mut rx as *mut [u8; 160] as *mut void, 160);
+        if (n >= truncate<i64>(ETH_HLEN + 28) && rx[12] == 0x08 && rx[13] == 0x00 && rx[ETH_HLEN + 9] == IPPROTO_ICMP &&
+            rx[ETH_HLEN + 20] == ICMP_ECHO_REPLY) {
+            return true;
+        }
+        if (n <= 0) {
+            sleepMs(10);
+        }
+    }
+    return false;
+}
+
+// ---- net-input ----
+
+static mut L4: [u8; 48] = [0; 48];
+static mut RULES: [u64; 128] = [0; 128];
+static mut SNAP: [u8; 65536] = [0; 65536];
+static mut FA: *mut file = 0 as *mut file;
+static mut FB: *mut file = 0 as *mut file;
+static mut FCTL: *mut file = 0 as *mut file;
+
+/// Safety: the runner runs one test at a time, so the statics are this test's.
+fn l4() -> *mut u8 => unsafe { borrow mut L4 as *mut [u8; 48] as *mut u8 };
+
+/// A firewall rule in a zeroed room: what the C's designated initialiser named, the rest zero.
+/// Safety: the room holds a struct fw_rule (cmd checks).
+fn fwRule(r: borrow mut Cmd, direction: u8, proto: u8, prefix: u8, ip: u32, port: u16) -> *fw_rule {
+    r.words = [0; 8];
+    let p = borrow mut r.words as *mut [u64; 8] as *mut fw_rule;
+    unsafe {
+        let w = Ptr.toBorrowMut(p);
+        w.direction = direction;
+        w.proto = proto;
+        w.dst_prefix = prefix;
+        w.verdict = FW_ACCEPT;
+        w.dst_ip = ip;
+        w.dst_port = port;
+    }
+    return p as *fw_rule;
+}
+
+/// A control command in a zeroed room.
+/// Safety: the room holds a struct cosmo_netctl_filter (cmd checks).
+fn filterCmd(
+    r: borrow mut Cmd,
+    op: u16,
+    guest: u32,
+    direction: u8,
+    proto: u8,
+    prefix: u8,
+    verdict: u8,
+    dst: u32,
+    port: u16,
+) -> *cosmo_netctl_filter {
+    r.words = [0; 8];
+    let p = borrow mut r.words as *mut [u64; 8] as *mut cosmo_netctl_filter;
+    unsafe {
+        let w = Ptr.toBorrowMut(p);
+        w.version = NETCTL_VERSION;
+        w.op = op;
+        w.guest_addr = guest;
+        w.direction = direction;
+        w.proto = proto;
+        w.dst_prefix = prefix;
+        w.verdict = verdict;
+        w.dst_addr = dst;
+        w.dst_port = port;
+    }
+    return p as *cosmo_netctl_filter;
+}
+
+fn filterLen() -> usize => layoutOf<cosmo_netctl_filter>().size;
+
+/// Write a control command: whether the whole of it was taken, or the error.
+/// Safety: FCTL is open.
+unsafe fn command(c: *cosmo_netctl_filter) -> i64 => file_write(FCTL, c as *void, filterLen());
+
+/// A guest's datagram, segment or message through its file to the gateway or another address.
+/// Safety: `f` is the test's tap file; L4 is the test's.
+unsafe fn sendUdp(
+    f: *mut file,
+    tapmac: borrow [u8; 6],
+    gmac: borrow [u8; 6],
+    sip: u32,
+    dip: u32,
+    sp: u16,
+    dp: u16,
+) -> bool {
+    let pl: [u8; 4] = [1, 2, 3, 4];
+    let len = nettest_mk_udp(l4(), sip, dip, sp, dp, borrow pl as *[u8; 4] as *u8, 4);
+    return nettest_fwt_send(
+        f,
+        tapmac as *[u8; 6] as *u8,
+        gmac as *[u8; 6] as *u8,
+        sip,
+        dip,
+        IPPROTO_UDP,
+        l4() as *u8,
+        len,
+    );
+}
+
+/// Safety: as sendUdp.
+unsafe fn sendTcp(
+    f: *mut file,
+    tapmac: borrow [u8; 6],
+    gmac: borrow [u8; 6],
+    sip: u32,
+    dip: u32,
+    sp: u16,
+    dp: u16,
+    flags: u8,
+) -> bool {
+    let len = nettest_mk_tcp(l4(), sip, dip, sp, dp, flags);
+    return nettest_fwt_send(
+        f,
+        tapmac as *[u8; 6] as *u8,
+        gmac as *[u8; 6] as *u8,
+        sip,
+        dip,
+        IPPROTO_TCP,
+        l4() as *u8,
+        len,
+    );
+}
+
+/// An ICMP message already built in L4, `len` bytes.
+/// Safety: as sendUdp.
+unsafe fn sendIcmp(f: *mut file, tapmac: borrow [u8; 6], gmac: borrow [u8; 6], sip: u32, dip: u32, len: u16) -> bool =>
+    nettest_fwt_send(f, tapmac as *[u8; 6] as *u8, gmac as *[u8; 6] as *u8, sip, dip, IPPROTO_ICMP, l4() as *u8, len);
+
+/// List a guest's rules into RULES: the count.
+/// Safety: as l4.
+unsafe fn ruleList(guest: u32) -> u32 {
+    if (layoutOf<fw_rule>().size * (FW_RULES_PER_GUEST as usize) > 1024) {
+        tooSmall();
+    }
+    return fw_rule_list(guest, borrow mut RULES as *mut [u64; 128] as *mut fw_rule, FW_RULES_PER_GUEST);
+}
+
+/// The `i`th listed rule.
+/// Safety: as ruleList, after it.
+unsafe fn listed(i: usize) -> *fw_rule =>
+    (borrow RULES as *[u64; 128] as *u8).add(i * layoutOf<fw_rule>().size) as *fw_rule;
+
+/// The tap `name`'s guest `guest` seeded behind it.
+/// Safety: thread context.
+unsafe fn seed(name: StringView, guest: u32, mac: borrow [u8; 6]) -> bool {
+    let n = netif_find(name.ptr as *CChar);
+    if (n.isNull()) {
+        return false;
+    }
+    nettest_seed_arp(n, guest, mac as *[u8; 6] as *u8);
+    netif_put(n);
+    return true;
+}
+
+/// The control snapshot carries A's guest record with the third policy, and the TO_HOST rule for TCP/8080 toward the
+/// gateway.
+/// Safety: SNAP holds a snapshot.
+unsafe fn snapshotCarries(ga: u32, gwa: u32) -> bool {
+    let snap = borrow SNAP as *[u8; 65536] as *u8;
+    let count = Ptr.toBorrow(snap as *cosmo_netctl_list).count;
+    var off = layoutOf<cosmo_netctl_list>().size + (count as usize) * layoutOf<cosmo_netctl_rule>().size;
+    let fh = Ptr.toBorrow(snap.add(off) as *cosmo_netctl_filter_list);
+    if (fh.version != NETCTL_VERSION) {
+        return false;
+    }
+    let guests = fh.guest_count;
+    let rules = fh.rule_count;
+    off += layoutOf<cosmo_netctl_filter_list>().size;
+    var guestSeen = false;
+    for (i in 0..guests as usize) {
+        let fg = Ptr.toBorrow(snap.add(off) as *cosmo_netctl_filter_guest);
+        if (fg.guest_addr == ga) {
+            guestSeen = fg.policy_to_host == NETCTL_VERDICT_DROP && fg.policy_to_uplink == NETCTL_VERDICT_ACCEPT;
+        }
+        off += layoutOf<cosmo_netctl_filter_guest>().size;
+    }
+    var ruleSeen = false;
+    for (i in 0..rules as usize) {
+        let fr = Ptr.toBorrow(
+            snap.add(off + i * layoutOf<cosmo_netctl_filter_rule>().size) as *cosmo_netctl_filter_rule,
+        );
+        if (fr.guest_addr == ga && fr.proto == NETCTL_PROTO_TCP && fr.dst_port == 8080) {
+            ruleSeen = fr.direction == NETCTL_DIR_TO_HOST && fr.dst_addr == gwa;
+        }
+    }
+    return guestSeen && ruleSeen;
+}
+
+/// The body, with FA and FB open.
+/// Safety: the runner's `reason`.
+unsafe fn inputBody(reason: *mut *CChar) -> bool {
+    let ga = ip4(10, 0, 3, 15);
+    let gwa = ip4(10, 0, 3, 1);
+    let gb = ip4(10, 0, 4, 15);
+    let gwb = ip4(10, 0, 4, 1);
+    let amac: [u8; 6] = [0x52, 0x54, 0x00, 0x0e, 0x00, 0x0a];
+    let bmac: [u8; 6] = [0x52, 0x54, 0x00, 0x0e, 0x00, 0x0b];
+    let tap0mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
+    let tap1mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcd];
+    let am = borrow amac;
+    let bm = borrow bmac;
+    let t0 = borrow tap0mac;
+    let t1 = borrow tap1mac;
+    if (!seed("tap0\0", ga, am) || !seed("tap1\0", gb, bm)) {
+        return failed(reason, "check failed: net-input: the two taps\0");
+    }
+
+    // (1) attach seeded exactly the tap's two services, as TO_HOST rules on the gateway, and the TO_HOST default is
+    // DROP.
+    if (ruleList(ga) != 2) {
+        return failed(reason, "check failed: net-input: two seeds\0");
+    }
+    let s0 = Ptr.toBorrow(listed(0));
+    if (s0.direction != FW_DIR_TO_HOST || s0.proto != IPPROTO_UDP || s0.dst_ip != gwa || s0.dst_prefix != 32 ||
+        s0.dst_port != 53) {
+        return failed(reason, "check failed: net-input: the DNS seed\0");
+    }
+    let s1 = Ptr.toBorrow(listed(1));
+    if (s1.direction != FW_DIR_TO_HOST || s1.proto != IPPROTO_ICMP || s1.dst_ip != gwa ||
+        s1.dst_port != ICMP_ECHO as u16) {
+        return failed(reason, "check failed: net-input: the echo seed\0");
+    }
+    var pol: [u8; 5] = [0; 5];
+    let pp = borrow mut pol as *mut [u8; 5] as *mut u8;
+    if (fw_policy_get(ga, pp, pp.add(1), pp.add(2), pp.add(3), pp.add(4)) != 0 || pol[2] != FW_DROP ||
+        pol[0] != FW_ACCEPT || pol[1] != FW_DROP) {
+        return failed(reason, "check failed: net-input: the defaults\0");
+    }
+
+    // (2) the seeds reach the host: a DNS query to the gateway is accepted by rule; an echo request to the gateway
+    // draws an echo reply.
+    var base = now(Counter.InAcceptRule);
+    if (!sendUdp(FA, t0, am, ga, gwa, 4000, 53) || !rises(Counter.InAcceptRule, base)) {
+        return failed(reason, "check failed: net-input: DNS to the gateway by rule\0");
+    }
+    if (!sendIcmp(FA, t0, am, ga, gwa, mkIcmpCk(l4(), ICMP_ECHO, 0x4242)) || !recvEchoReply(FA, 40)) {
+        return failed(reason, "check failed: net-input: the echo is answered\0");
+    }
+
+    // (3) everything else is closed by default: UDP to gateway:7000, a TCP SYN to gateway:2222, and a datagram to the
+    // host's uplink address -- counted on the filter and on the IP side.
+    base = now(Counter.InDropDefault);
+    var ipBase = now(Counter.InFiltered);
+    if (!sendUdp(FA, t0, am, ga, gwa, 4001, 7000) || !rises(Counter.InDropDefault, base) ||
+        !rises(Counter.InFiltered, ipBase)) {
+        return failed(reason, "check failed: net-input: UDP/7000 is dropped by default\0");
+    }
+    base = now(Counter.InDropDefault);
+    if (!sendTcp(FA, t0, am, ga, gwa, 40000, 2222, TH_SYN) || !rises(Counter.InDropDefault, base)) {
+        return failed(reason, "check failed: net-input: a SYN to 2222 is dropped by default\0");
+    }
+    // A datagram to the host's *uplink* address is not this tap's to deliver: the off-link invariant drops it before
+    // any chain (the host chain's unit), so INPUT's default is not what closes it any more.
+    let uplink = ip4(10, 0, 2, 15);
+    if (netif_owns_ipv4(uplink)) {
+        base = now(Counter.InDropDefault);
+        ipBase = now(Counter.RxOfflink);
+        if (!sendUdp(FA, t0, am, ga, uplink, 4002, 7000) || !rises(Counter.RxOfflink, ipBase)) {
+            return failed(reason, "check failed: net-input: the uplink address is off-link from a tap\0");
+        }
+        if (now(Counter.InDropDefault) != base) {
+            return failed(reason, "check failed: net-input: before any chain\0");
+        }
+    }
+
+    // (4) a rule opens a service, per datagram (stateless): a SYN and then a bare ACK to the ruled port are both
+    // admitted by the same rule.
+    var openTcpRoom = cmd(layoutOf<fw_rule>().size);
+    let openTcp = fwRule(mut openTcpRoom, FW_DIR_TO_HOST, IPPROTO_TCP, 32, gwa, 2222);
+    if (fw_rule_add(ga, 0, openTcp) != 0) {
+        return failed(reason, "check failed: net-input: the TCP rule is added\0");
+    }
+    base = now(Counter.InAcceptRule);
+    if (!sendTcp(FA, t0, am, ga, gwa, 40001, 2222, TH_SYN) || !rises(Counter.InAcceptRule, base)) {
+        return failed(reason, "check failed: net-input: the SYN by rule\0");
+    }
+    base = now(Counter.InAcceptRule);
+    if (!sendTcp(FA, t0, am, ga, gwa, 40001, 2222, TH_ACK) || !rises(Counter.InAcceptRule, base)) {
+        return failed(reason, "check failed: net-input: the bare ACK by the same rule\0");
+    }
+
+    // (4c) the ANY direction keeps its forwarding-only meaning: a wildcard ACCEPT written to permit forwarding does not
+    // open a host port -- host traffic needs an explicit TO_HOST rule -- so no rule written before the INPUT chain
+    // existed silently opens the host.
+    var anyRoom = cmd(layoutOf<fw_rule>().size);
+    let anyUdp = fwRule(mut anyRoom, FW_DIR_ANY, IPPROTO_UDP, 32, gwa, 7003);
+    if (fw_rule_add(ga, 0, anyUdp) != 0) {
+        return failed(reason, "check failed: net-input: the ANY rule is added\0");
+    }
+    base = now(Counter.InDropDefault);
+    if (!sendUdp(FA, t0, am, ga, gwa, 4003, 7003) || !rises(Counter.InDropDefault, base)) {
+        return failed(reason, "check failed: net-input: ANY did not reach the host\0");
+    }
+    if (fw_rule_del(ga, anyUdp) != 0) {
+        return failed(reason, "check failed: net-input: the ANY rule is deleted\0");
+    }
+    var hostRoom = cmd(layoutOf<fw_rule>().size);
+    let hostUdp = fwRule(mut hostRoom, FW_DIR_TO_HOST, IPPROTO_UDP, 32, gwa, 7003);
+    if (fw_rule_add(ga, 0, hostUdp) != 0) {
+        return failed(reason, "check failed: net-input: the TO_HOST rule is added\0");
+    }
+    base = now(Counter.InAcceptRule);
+    if (!sendUdp(FA, t0, am, ga, gwa, 4004, 7003) || !rises(Counter.InAcceptRule, base)) {
+        return failed(reason, "check failed: net-input: TO_HOST does\0");
+    }
+    if (fw_rule_del(ga, hostUdp) != 0) {
+        return failed(reason, "check failed: net-input: the TO_HOST rule is deleted\0");
+    }
+
+    // (5) the seeds are real rules, not hard-coded holes: deleting the echo seed closes echo; re-adding it reopens it.
+    var seedRoom = cmd(layoutOf<fw_rule>().size);
+    let seedEcho = fwRule(mut seedRoom, FW_DIR_TO_HOST, IPPROTO_ICMP, 32, gwa, ICMP_ECHO as u16);
+    if (fw_rule_del(ga, seedEcho) != 0) {
+        return failed(reason, "check failed: net-input: the echo seed is deleted\0");
+    }
+    base = now(Counter.InDropDefault);
+    if (!sendIcmp(FA, t0, am, ga, gwa, mkIcmpCk(l4(), ICMP_ECHO, 0x4243)) || !rises(Counter.InDropDefault, base)) {
+        return failed(reason, "check failed: net-input: echo is closed\0");
+    }
+    if (recvEchoReply(FA, 10)) {
+        return failed(reason, "check failed: net-input: and unanswered\0");
+    }
+    if (fw_rule_add(ga, 0, seedEcho) != 0) {
+        return failed(reason, "check failed: net-input: the echo seed is re-added\0");
+    }
+    if (!sendIcmp(FA, t0, am, ga, gwa, mkIcmpCk(l4(), ICMP_ECHO, 0x4244)) || !recvEchoReply(FA, 40)) {
+        return failed(reason, "check failed: net-input: echo is open again\0");
+    }
+
+    // (6) the ICMP selector is a type: a guest echo *reply* and a guest Need-Fragmentation toward the gateway are
+    // dropped by default (the host's PMTU cache untouched); a type-0 rule admits the reply alone; the wildcard admits
+    // Need-Fragmentation too.
+    base = now(Counter.InDropDefault);
+    let pmtu0 = now(Counter.PmtuUpdates);
+    if (!sendIcmp(
+        FA,
+        t0,
+        am,
+        ga,
+        gwa,
+        mkIcmpCk(l4(), ICMP_ECHO_REPLY, 0x4242),
+    ) || !rises(Counter.InDropDefault, base)) {
+        return failed(reason, "check failed: net-input: a guest echo reply is dropped\0");
+    }
+    base = now(Counter.InDropDefault);
+    if (!sendIcmp(FA, t0, am, ga, gwa, mkNeedfrag(l4(), gwa, ga, 576)) || !rises(Counter.InDropDefault, base)) {
+        return failed(reason, "check failed: net-input: a guest need-frag is dropped\0");
+    }
+    if (now(Counter.PmtuUpdates) != pmtu0) {
+        return failed(reason, "check failed: net-input: never reached ipv4_pmtu_update\0");
+    }
+    var type0Room = cmd(layoutOf<fw_rule>().size);
+    let type0 = fwRule(mut type0Room, FW_DIR_TO_HOST, IPPROTO_ICMP, 32, gwa, ICMP_ECHO_REPLY as u16);
+    if (fw_rule_add(ga, 0, type0) != 0) {
+        return failed(reason, "check failed: net-input: the type-0 rule is added\0");
+    }
+    base = now(Counter.InAcceptRule);
+    if (!sendIcmp(FA, t0, am, ga, gwa, mkIcmpCk(l4(), ICMP_ECHO_REPLY, 0x4242)) || !rises(Counter.InAcceptRule, base)) {
+        return failed(reason, "check failed: net-input: it admits the reply\0");
+    }
+    base = now(Counter.InDropDefault);
+    if (!sendIcmp(FA, t0, am, ga, gwa, mkNeedfrag(l4(), gwa, ga, 576)) || !rises(Counter.InDropDefault, base)) {
+        return failed(reason, "check failed: net-input: type 3 still closed\0");
+    }
+    if (fw_rule_del(ga, type0) != 0) {
+        return failed(reason, "check failed: net-input: the type-0 rule is deleted\0");
+    }
+    var anyIcmpRoom = cmd(layoutOf<fw_rule>().size);
+    let anyIcmp = fwRule(mut anyIcmpRoom, FW_DIR_TO_HOST, IPPROTO_ICMP, 32, gwa, FW_ICMP_TYPE_ANY);
+    if (fw_rule_add(ga, 0, anyIcmp) != 0) {
+        return failed(reason, "check failed: net-input: the wildcard rule is added\0");
+    }
+    base = now(Counter.InAcceptRule);
+    if (!sendIcmp(FA, t0, am, ga, gwa, mkNeedfrag(l4(), gwa, ga, 576)) || !rises(Counter.InAcceptRule, base)) {
+        return failed(reason, "check failed: net-input: the wildcard admits need-frag\0");
+    }
+    if (fw_rule_del(ga, anyIcmp) != 0) {
+        return failed(reason, "check failed: net-input: the wildcard rule is deleted\0");
+    }
+
+    // (7) anti-spoof on the local path: from A's tap, a source that is not A -- a stray, the neighbour, the world --
+    // toward the gateway's DNS (a ruled port) is dropped as spoofed before any rule is read. B gets a rule that would
+    // admit exactly this datagram if it came from B: without the anti-spoof, A forging B's source would borrow B's
+    // policy.
+    var bDnsRoom = cmd(layoutOf<fw_rule>().size);
+    let bDnsAny = fwRule(mut bDnsRoom, FW_DIR_TO_HOST, IPPROTO_UDP, 0, 0, 53);
+    if (fw_rule_add(gb, 0, bDnsAny) != 0) {
+        return failed(reason, "check failed: net-input: B's DNS rule is added\0");
+    }
+    let spoofed0 = now(Counter.InSpoofed);
+    ipBase = now(Counter.InFiltered);
+    let forged: [u32; 3] = [ip4(10, 0, 3, 50), gb, ip4(10, 0, 2, 2)];
+    for (i in 0..3) {
+        let k = truncate<usize>(i);
+        if (!sendUdp(FA, t0, am, forged[k], gwa, 4100, 53) || !rises(Counter.InSpoofed, spoofed0 + (k as u64))) {
+            return failed(reason, "check failed: net-input: a forged source is dropped as spoofed\0");
+        }
+    }
+    if (!rises(Counter.InFiltered, ipBase)) {
+        return failed(reason, "check failed: net-input: counted on the IP side\0");
+    }
+    if (fw_rule_del(gb, bDnsAny) != 0) {
+        return failed(reason, "check failed: net-input: B's DNS rule is deleted\0");
+    }
+    // Forged as the host itself, the datagram never reaches the firewall: ipv4_input drops one of our own addresses
+    // arriving from a link as a martian first -- a stronger drop, counted upstream.
+    ipBase = now(Counter.RxBadHeader);
+    if (!sendUdp(FA, t0, am, gwa, gwa, 4100, 53) || !rises(Counter.RxBadHeader, ipBase)) {
+        return failed(reason, "check failed: net-input: the host's own address from a link is a martian\0");
+    }
+
+    // (8) per guest: A's TCP rule does not open B's path; B's release purges its seeds; a reopened B re-seeds cleanly.
+    base = now(Counter.InDropDefault);
+    if (!sendTcp(FB, t1, bm, gb, gwb, 40000, 2222, TH_SYN) || !rises(Counter.InDropDefault, base)) {
+        return failed(reason, "check failed: net-input: A's rule does not open B's path\0");
+    }
+    nettest_file_put(FB);
+    FB = 0 as *mut file;
+    if (ruleList(gb) != 0) {
+        return failed(reason, "check failed: net-input: B's release purges its seeds\0");
+    }
+    if (nettest_vfs_open("/dev/net/tap\0".ptr as *CChar, O_RDWR | O_NONBLOCK, borrow mut FB as *mut *mut file) != 0 ||
+        FB.isNull()) {
+        return failed(reason, "check failed: net-input: B reopens\0");
+    }
+    if (ruleList(gb) != 2 || Ptr.toBorrow(listed(0)).direction != FW_DIR_TO_HOST ||
+        Ptr.toBorrow(listed(1)).direction != FW_DIR_TO_HOST) {
+        return failed(reason, "check failed: net-input: and re-seeds cleanly\0");
+    }
+
+    // (9) the policy flips: TO_HOST ACCEPT admits an unruled port, DROP closes it again; ANY is not a policy direction.
+    if (fw_policy_set(ga, FW_DIR_TO_HOST, FW_ACCEPT) != 0) {
+        return failed(reason, "check failed: net-input: the TO_HOST policy accepts\0");
+    }
+    base = now(Counter.InAcceptDefault);
+    if (!sendUdp(FA, t0, am, ga, gwa, 4200, 7001) || !rises(Counter.InAcceptDefault, base)) {
+        return failed(reason, "check failed: net-input: an unruled port is admitted\0");
+    }
+    if (fw_policy_set(ga, FW_DIR_TO_HOST, FW_DROP) != 0) {
+        return failed(reason, "check failed: net-input: the TO_HOST policy drops\0");
+    }
+    base = now(Counter.InDropDefault);
+    if (!sendUdp(FA, t0, am, ga, gwa, 4201, 7002) || !rises(Counter.InDropDefault, base)) {
+        return failed(reason, "check failed: net-input: and closed again\0");
+    }
+    if (fw_policy_set(ga, FW_DIR_ANY, FW_ACCEPT) != -EINVAL) {
+        return failed(reason, "check failed: net-input: ANY is not a policy direction\0");
+    }
+
+    // (10) the control channel: a TO_HOST rule written through tapctl is listed with its direction beside a guest
+    // record carrying the third policy; the ICMP selector round-trips -- type 0 is writable, the wildcard is not
+    // mistaken for it, a type above 255 and ANY-as-policy-direction are refused.
+    if (nettest_vfs_open(
+        "/dev/net/tapctl\0".ptr as *CChar,
+        O_RDWR,
+        borrow mut FCTL as *mut *mut file,
+    ) != 0 || FCTL.isNull()) {
+        return failed(reason, "check failed: net-input: the control device opens\0");
+    }
+    let whole = truncate<i64>(filterLen());
+    var cRoom = cmd(filterLen());
+    let c = filterCmd(
+        mut cRoom,
+        NETCTL_FILTER_ADD,
+        ga,
+        NETCTL_DIR_TO_HOST,
+        NETCTL_PROTO_TCP,
+        32,
+        NETCTL_VERDICT_ACCEPT,
+        gwa,
+        8080,
+    );
+    if (command(c) != whole) {
+        return failed(reason, "check failed: net-input: the TO_HOST rule through the device\0");
+    }
+    let sn = file_read(FCTL, borrow mut SNAP as *mut [u8; 65536] as *mut void, 65536);
+    if (sn <= 0 || !snapshotCarries(ga, gwa)) {
+        return failed(reason, "check failed: net-input: listed with its direction, beside the third policy\0");
+    }
+    var icRoom = cmd(filterLen());
+    var ic = filterCmd(
+        mut icRoom,
+        NETCTL_FILTER_ADD,
+        ga,
+        NETCTL_DIR_TO_HOST,
+        NETCTL_PROTO_ICMP,
+        32,
+        NETCTL_VERDICT_ACCEPT,
+        gwa,
+        0,
+    );
+    if (command(ic) != whole) {
+        return failed(reason, "check failed: net-input: type 0 is writable\0"); // echo-reply
+    }
+    ic = filterCmd(
+        mut icRoom,
+        NETCTL_FILTER_DEL,
+        ga,
+        NETCTL_DIR_TO_HOST,
+        NETCTL_PROTO_ICMP,
+        32,
+        NETCTL_VERDICT_ACCEPT,
+        gwa,
+        0,
+    );
+    if (command(ic) != whole) {
+        return failed(reason, "check failed: net-input: and deletable\0");
+    }
+    ic = filterCmd(
+        mut icRoom,
+        NETCTL_FILTER_ADD,
+        ga,
+        NETCTL_DIR_TO_HOST,
+        NETCTL_PROTO_ICMP,
+        32,
+        NETCTL_VERDICT_ACCEPT,
+        gwa,
+        NETCTL_ICMP_TYPE_ANY,
+    );
+    if (command(ic) != whole) {
+        return failed(reason, "check failed: net-input: the wildcard is distinct\0");
+    }
+    ic = filterCmd(
+        mut icRoom,
+        NETCTL_FILTER_DEL,
+        ga,
+        NETCTL_DIR_TO_HOST,
+        NETCTL_PROTO_ICMP,
+        32,
+        NETCTL_VERDICT_ACCEPT,
+        gwa,
+        NETCTL_ICMP_TYPE_ANY,
+    );
+    if (command(ic) != whole) {
+        return failed(reason, "check failed: net-input: and deletable too\0");
+    }
+    ic = filterCmd(
+        mut icRoom,
+        NETCTL_FILTER_ADD,
+        ga,
+        NETCTL_DIR_TO_HOST,
+        NETCTL_PROTO_ICMP,
+        32,
+        NETCTL_VERDICT_ACCEPT,
+        gwa,
+        256,
+    );
+    if (command(ic) != -(EINVAL as i64)) {
+        return failed(reason, "check failed: net-input: 256 is not a type\0");
+    }
+    var polRoom = cmd(filterLen());
+    var p = filterCmd(mut polRoom, NETCTL_FILTER_POLICY, ga, NETCTL_DIR_ANY, 0, 0, NETCTL_VERDICT_ACCEPT, 0, 0);
+    if (command(p) != -(EINVAL as i64)) {
+        return failed(reason, "check failed: net-input: ANY is not a policy direction, through the device\0");
+    }
+    p = filterCmd(mut polRoom, NETCTL_FILTER_POLICY, ga, NETCTL_DIR_TO_HOST, 0, 0, NETCTL_VERDICT_ACCEPT, 0, 0);
+    if (command(p) != whole) {
+        return failed(reason, "check failed: net-input: the TO_HOST policy through the device\0");
+    }
+    p = filterCmd(mut polRoom, NETCTL_FILTER_POLICY, ga, NETCTL_DIR_TO_HOST, 0, 0, NETCTL_VERDICT_DROP, 0, 0);
+    if (command(p) != whole) {
+        return failed(reason, "check failed: net-input: and back\0");
+    }
+    nettest_file_put(FCTL);
+    FCTL = 0 as *mut file;
+    return true;
+}
+
+/// net-input: the seeded DNS and echo reach the host and nothing else does, a rule opens a port per datagram, the
+/// seeds are deletable, the ICMP selector is a type, forged sources are dropped as spoofed, policy is per guest and
+/// flippable, and the control listing carries the third direction.
+/// Safety: the runner's `reason`.
+@export("selftest_net_input")
+unsafe fn input(reason: *mut *CChar) -> bool {
+    put(Ptr.toBorrowMut(reason), 0 as *CChar);
+    fw_flush();
+    nat_flush();
+    // Two guests through /dev/net/tap (so each attaches): A on tap0, B on tap1.
+    FA = 0 as *mut file;
+    FB = 0 as *mut file;
+    FCTL = 0 as *mut file;
+    let tap = "/dev/net/tap\0".ptr as *CChar;
+    if (nettest_vfs_open(tap, O_RDWR | O_NONBLOCK, borrow mut FA as *mut *mut file) != 0 || FA.isNull() ||
+        nettest_vfs_open(tap, O_RDWR | O_NONBLOCK, borrow mut FB as *mut *mut file) != 0 || FB.isNull()) {
+        return failed(reason, "check failed: net-input: two guests open their taps\0");
+    }
+    if (!inputBody(reason)) {
+        return false;
+    }
+    nettest_file_put(FA);
+    nettest_file_put(FB);
+    fw_flush();
+    var buffer: [u8; 384] = [0; 384];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(
+        "selftest: net-input: the seeded DNS and echo reached the host and nothing else did, a rule opened a port per datagram, the seeds were deletable, the ICMP selector was a type (echo reply and need-frag dropped; type 0 and the wildcard admitted what they name), forged sources were dropped as spoofed, policy was per guest and flippable, and the control listing carried the third direction",
+    );
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}

@@ -1075,7 +1075,13 @@ control snapshot's sections, exported as `nettest_netctl_flows_off`
 and `nettest_netctl_snapshot_len` for the flow-listing tests still in
 C. A section header may lie at any offset its predecessors leave (the
 flow section's carries 64-bit counters), so each is copied into an
-aligned room before it is read, as the C memcpy'd it.
+aligned room before it is read, as the C memcpy'd it. Batch 9,
+`nettest_input.cee`: net-input (the INPUT chain), and the checksummed
+ICMP messages the host chains test with, exported as
+`nettest_fwt_ones_sum`, `nettest_fwt_mk_icmp_ck`,
+`nettest_fwt_mk_needfrag` and `nettest_fwt_recv_echo_reply`. The C's
+`FWT_RISES` counter wait is one function over a `Counter` enum (it
+stays a macro in `nettest.c` for the tests there).
 
 Size: about 3.0x.
 

@@ -109,6 +109,13 @@ bool nettest_fwt_send(struct file *from, const uint8_t *tapmac, const uint8_t *g
                       uint8_t proto, const uint8_t *l4, uint16_t l4len);
 int64_t nettest_fwt_recv(struct file *to, uint8_t *rx, size_t cap, unsigned tries);
 uint16_t nettest_fwt_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id);
+/* nettest_input.cee: the big-endian ones-complement sum ICMP verifies, a
+ * checksummed echo (16 bytes), a checksummed need-frag quoting host ->
+ * guest (36 bytes), and whether the host answered an echo on a guest's tap. */
+uint16_t nettest_fwt_ones_sum(const uint8_t *p, unsigned n);
+uint16_t nettest_fwt_mk_icmp_ck(uint8_t *l4, uint8_t type, uint16_t id);
+uint16_t nettest_fwt_mk_needfrag(uint8_t *l4, uint32_t host_ip, uint32_t guest_ip, uint16_t mtu);
+bool nettest_fwt_recv_echo_reply(struct file *f, unsigned tries);
 
 /* nettest_ctl.cee: where a /dev/net/tapctl snapshot with `pf_rules`
  * forwards has its flow section, and the byte length it should have (-1:
