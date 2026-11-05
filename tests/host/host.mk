@@ -116,7 +116,8 @@ HOST_DISPLAY_SRCS := $(HOST_COMMON_SRCS) boot/uefi/display_pick.c tests/host/tes
 HOST_PART_SRCS := $(HOST_COMMON_SRCS) kernel/block/part.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_part.c
 # The RAM block device alone: the block layer, the threads and the allocator are the test's.
-HOST_RAMBLK_SRCS := $(HOST_COMMON_SRCS) kernel/block/ramblk.c tests/host/test_ramblk.c
+HOST_RAMBLK_SRCS := $(HOST_COMMON_SRCS) kernel/block/ramblk.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c \
+	tests/host/test_ramblk.c
 HOST_GPT_SRCS := $(HOST_COMMON_SRCS) kernel/block/gpt.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c kernel/core/cmdline.c tests/host/test_gpt.c
 HOST_CPUTIME_SRCS := $(HOST_COMMON_SRCS) kernel/process/cputime.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cputime.c
 HOST_NICE_SRCS := $(HOST_COMMON_SRCS) kernel/process/nice.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_nice.c

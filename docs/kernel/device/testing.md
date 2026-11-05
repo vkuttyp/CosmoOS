@@ -20,7 +20,7 @@ target asserts the driver only ever pops cookies it added and has not
 reclaimed and never counts more free descriptors than the queue holds.
 `fault-blk` (`kernel/core/faulttest.c`) injects `-EIO` at `blk_submit`
 and at completion under a cosmofs workload on a RAM block device
-(`kernel/block/ramblk.c`, debug builds: a registered block device backed
+(`kernel/block/ramblk.cee`, debug builds: a registered block device backed
 by kernel memory with a write recorder and snapshots for the
 crash-consistency harness).
 

@@ -1,5 +1,5 @@
 /*
- * test_ramblk.c - The RAM block device (kernel/block/ramblk.c,
+ * test_ramblk.c - The RAM block device (kernel/block/ramblk.cee,
  * kernel/include/kernel/ramblk.h) on the host: roadmap 2.0 SA7. A digest
  * recorded from the C over seeded rounds: devices created (and refused
  * when memory or the registry fails), bios of one buffer or several
@@ -28,6 +28,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values ramblk.cee writes as its own constants. */
+_Static_assert(EAGAIN == 11 && ETIMEDOUT == 110 && BIO_READ == 0 && BIO_WRITE == 1 && BIO_FLUSH == 2 &&
+                   RAMBLK_BLOCK == 4096 && KMEM_ZERO == 1 && SCHED_PRIO_DEFAULT == 32,
+               "ramblk.cee's errno.h, blk.h, ramblk.h, kmalloc.h and thread.h values");
 
 /* The digest of the C (ramblk.c, 2026-11-05), which the CeeSafe port gives. */
 #define RAMBLK_DIGEST 0x3e265dd7cda910d8ull

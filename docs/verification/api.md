@@ -78,7 +78,7 @@ One line per kind: `kmalloc every=0 budget=0 thread=all seen=N hits=M`.
 The sysctl exists in debug builds; release builds answer `-ENOENT`. There
 is no write path through `sysctl` (`invariants.md` F5).
 
-## The RAM block device (`kernel/include/kernel/ramblk.h`, `kernel/block/ramblk.c`)
+## The RAM block device (`kernel/include/kernel/ramblk.h`, `kernel/block/ramblk.cee`)
 
 ### `struct blkdev *ramblk_create(uint64_t nblocks)`, `void ramblk_destroy(struct blkdev *bd)`
 A registered block device (`ram<letter>`, 512-byte sectors, `nblocks`

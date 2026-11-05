@@ -1197,7 +1197,12 @@ defines, its blkdev first. `tests/host/test_part.c` holds it to the
 C's digest (0x003796d5fcf97df9, clang and gcc); the GPT type GUIDs are
 copied from `gpt.cee`, a C array not being importable by the pinned
 ceesafec, and `gpt.h` and `part.h` take their GUIDs as pointers, as
-the generated declarations do (gcc's -Warray-parameter).
+the generated declarations do (gcc's -Warray-parameter). `ramblk.cee`:
+the debug builds' RAM disk and write recorder, held to the C's digest by
+`tests/host/test_ramblk.c` (0x3e265dd7cda910d8); the C step fixed two
+bugs the test found -- a NULL `priv` released through when a creation
+failed part way, and deferred bios never completed after a stalled
+worker was stopped.
 
 Size: about 4.5x.
 

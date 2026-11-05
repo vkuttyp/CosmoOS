@@ -165,7 +165,7 @@ operation under test fails with a clean error (`-ENOMEM`, `-EIO`) or
 succeeds, never anything else, and after the rule is cleared and the
 successes undone the live-object count of the heap is what it was.
 
-## 3. The RAM block device and the write recorder (`kernel/block/ramblk.c`, debug builds)
+## 3. The RAM block device and the write recorder (`kernel/block/ramblk.cee`, debug builds)
 
 `ramblk_create(nblocks)` registers a `struct blkdev` named `ram<letter>`
 whose storage is `nblocks` kmalloc'd 4 KiB blocks (each DMA-mappable, so

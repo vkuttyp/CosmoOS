@@ -1,0 +1,625 @@
+// ramblk.cee - The RAM block device with a write recorder (kernel/include/kernel/ramblk.h; docs/verification/design.md,
+// "The RAM block device"), in CeeSafe: roadmap 2.0 SA7. Debug builds; used by the cosmofs crash-consistency harness,
+// the block layer's and the filesystems' self-tests and the block fault-injection test. tests/host/test_ramblk.c holds
+// it to the digest of the C it replaced.
+//
+// Storage is one 4 KiB allocation per device block, so every buffer is DMA-mappable and blk_submit's check passes.
+// submit copies and completes synchronously, under the device lock, so the recorded log is in completion order. A
+// device is a C object this file defines (CeeSafe's ADR 0042), its blkdev first: the block layer reaches it through the
+// blkdev's `priv`. Every export is the debug builds' alone (@cfg), as the C's #if CONFIG_DEBUG had it.
+
+@header("kernel/blk.h", "kernel/ramblk.h", "kernel/thread.h", "kernel/wait.h")
+extern "C" {
+    struct thread;
+    struct blkdev_ops {
+        submit: extern "C" fn(*mut blkdev, *mut bio) -> i32;
+        release: extern "C" fn(*mut blkdev);
+        timeout: extern "C" fn(*mut blkdev, *mut bio);
+    }
+    struct blkdev {
+        obj: kobject;
+        ops: *blkdev_ops;
+        sector_size: u32;
+        capacity: u64;
+        max_sectors: u32;
+        priv: *mut void;
+        max_segments: u32;
+    }
+    struct bio_vec {
+        buf: *mut void;
+        len: u32;
+    }
+    struct bio {
+        dev: *mut blkdev;
+        sector: u64;
+        nsectors: u32;
+        dir: u32;
+        buf: *mut void;
+        vecs: *mut bio_vec;
+        nr_vecs: u32;
+        link: list_node;
+    }
+    struct ramblk_write {
+        sector: u64;
+        nsectors: u32;
+        data: *mut u8;
+    }
+    struct ramblk_log {
+        w: *mut ramblk_write;
+        n: u32;
+        cap: u32;
+        dropped: u32;
+    }
+
+    fn blk_register(bd: *mut blkdev, prefix: *CChar) -> i32;
+    fn blk_unregister(bd: *mut blkdev);
+    fn bio_complete(b: *mut bio, status: i32);
+    fn kzalloc(size: usize) -> *mut void;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_sleep_ns(ns: u64);
+}
+
+// ---- errno.h, blk.h, ramblk.h, kmalloc.h and thread.h values (asserted in tests/host/test_ramblk.c) ----
+
+const EAGAIN: i32 = 11;
+const ETIMEDOUT: i32 = 110;
+const BIO_READ: u32 = 0;
+const BIO_WRITE: u32 = 1;
+const BIO_FLUSH: u32 = 2;
+const RAMBLK_BLOCK: u64 = 4096;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+/// The worker's pause between batches (the C's thread_sleep_ms(1)).
+const BATCH_NS: u64 = 1000000;
+
+// ---- The device ----
+
+/// One RAM disk: its blkdev first, its blocks, the recorder's log, and the deferred mode's state (tests of the block
+/// layer's queueing: completions run on a worker thread and submit refuses with -EAGAIN above `limit` requests in
+/// flight).
+@repr(C)
+struct ramblk {
+    bd: blkdev;
+    blocks: *mut *mut u8;
+    nblocks: u64;
+    lock: spinlock_t;
+    log: *mut ramblk_log; // recording when not null
+    limit: u32;           // 0: synchronous completion
+    inflight: u32;
+    deferred: list_node;
+    worker: *mut thread;
+    stop: AtomicU32;       // the worker's: set, it drains and returns
+    stall: bool;           // deferred mode: the worker completes nothing
+    refuseCompletes: bool; // deferred mode: a refusal first completes the oldest in-flight bio, synchronously
+    fail: i32;             // nonzero: every bio completes with this error and moves no data
+    failWrites: i32;       // nonzero: every write (not read, not flush) does
+}
+
+static mut RAMBLK_OPS: blkdev_ops = blkdev_ops { submit: submit, release: releaseDevice, timeout: timeout };
+
+/// The device behind a blkdev.
+/// Safety: `bd` is a RAM disk's blkdev.
+unsafe fn of(bd: *mut blkdev) -> *mut ramblk => Ptr.toBorrow(bd as *blkdev).priv as *mut ramblk;
+
+/// The device's lock, taken with interrupts off: the state below is changed under it.
+/// Safety: `r` is a live device.
+unsafe fn lock(r: *mut ramblk) -> usize => spin_lock_irqsave(borrow mut Ptr.toBorrowMut(r).lock as *mut spinlock_t);
+
+/// Safety: `r` is a live device whose lock the caller holds, taken by lock() with `state`.
+unsafe fn unlock(r: *mut ramblk, state: usize) {
+    spin_unlock_irqrestore(borrow mut Ptr.toBorrowMut(r).lock as *mut spinlock_t, state);
+}
+
+/// The deferred list's head.
+/// Safety: `r` is a live device.
+unsafe fn deferredOf(r: *mut ramblk) -> *mut list_node => borrow mut Ptr.toBorrowMut(r).deferred as *mut list_node;
+
+/// The bio whose link `node` is.
+/// Safety: `node` is a bio's link.
+unsafe fn bioOf(node: *mut list_node) -> *mut bio => containerOf(node, offsetOf<bio>(link)) as *mut bio;
+
+/// The oldest deferred bio, taken off the list (its link left as list_remove leaves it); null when there is none.
+/// Safety: `r` is a live device whose lock the caller holds.
+unsafe fn popFront(r: *mut ramblk) -> *mut bio {
+    let head = deferredOf(r);
+    let node = List.first(head as *list_node);
+    if (node.isNull()) {
+        return 0 as *mut bio;
+    }
+    List.remove(node);
+    return bioOf(node);
+}
+
+/// Block `blk`'s storage.
+/// Safety: `r` is a live device; `blk` < its nblocks.
+unsafe fn block(r: *mut ramblk, blk: u64) -> *mut u8 =>
+    Ptr.toBorrow(r as *ramblk).blocks.add(truncate<usize>(blk)).read();
+
+/// One segment of a bio: where its bytes are and how many.
+struct Segment {
+    buf: *mut u8;
+    len: usize;
+}
+
+/// The segments of a bio (blk.h's bio_segments).
+/// Safety: `b` is a live bio.
+unsafe fn segments(b: *bio) -> u32 {
+    let n = Ptr.toBorrow(b).nr_vecs;
+    return if (n != 0) n else 1;
+}
+
+/// Segment `i` of a bio as its buffer and length (blk.h's bio_segment: the single buffer of nsectors sectors, or the
+/// i-th of its vectors).
+/// Safety: `b` is a live bio; `i` < segments(b).
+unsafe fn segment(b: *bio, i: u32) -> Segment {
+    let o = Ptr.toBorrow(b);
+    if (o.nr_vecs == 0) {
+        return Segment {
+            buf: o.buf as *mut u8,
+            len: o.nsectors as usize * Ptr.toBorrow(o.dev as *blkdev).sector_size as usize,
+        };
+    }
+    let v = Ptr.toBorrow(o.vecs.add(i as usize) as *bio_vec);
+    return Segment { buf: v.buf as *mut u8, len: v.len as usize };
+}
+
+/// Copy `len` bytes between the device at byte `byte` and `buf`, a block at a time: into the device when `toDevice`.
+/// Safety: `r` is a live device whose lock the caller holds; the range lies within the device; `buf` has `len` bytes.
+unsafe fn copy(r: *mut ramblk, byte: u64, buf: *mut u8, len: usize, toDevice: bool) {
+    var at = byte;
+    var p = buf;
+    var left = len;
+    while (left != 0) {
+        let blk = at / RAMBLK_BLOCK;
+        let off = truncate<usize>(at % RAMBLK_BLOCK);
+        let room = RAMBLK_BLOCK as usize - off;
+        let chunk = if (room < left) room else left;
+        let device = SliceMut.fromRaw(block(r, blk).add(off), chunk);
+        let caller = SliceMut.fromRaw(p, chunk);
+        if (toDevice) {
+            device.copyFrom(caller);
+        } else {
+            caller.copyFrom(device);
+        }
+        at += chunk as u64;
+        p = p.add(chunk);
+        left -= chunk;
+    }
+}
+
+/// Record a completed write or flush, when recording.
+/// Safety: `r` is a live device whose lock the caller holds; `b` is the bio being completed.
+unsafe fn record(r: *mut ramblk, b: *bio) {
+    let log = Ptr.toBorrow(r as *ramblk).log;
+    if (log.isNull()) {
+        return;
+    }
+    let l = Ptr.toBorrowMut(log);
+    if (l.n == l.cap) {
+        l.dropped += 1;
+        return;
+    }
+    let o = Ptr.toBorrow(b);
+    let w = Ptr.toBorrowMut(l.w.add(l.n as usize));
+    w.sector = o.sector;
+    w.nsectors = if (o.dir == BIO_FLUSH) 0 else o.nsectors;
+    w.data = 0 as *mut u8;
+    if (w.nsectors != 0) {
+        w.data = kmalloc(w.nsectors as usize * 512, 0) as *mut u8;
+        if (w.data.isNull()) {
+            l.dropped += 1;
+            return;
+        }
+        var done: usize = 0;
+        for (i in 0..segments(b)) {
+            let v = segment(b, i);
+            SliceMut.fromRaw(w.data.add(done), v.len).copyFrom(SliceMut.fromRaw(v.buf, v.len));
+            done += v.len;
+        }
+    }
+    l.n += 1;
+}
+
+/// The device's submit.
+/// Safety: `bd` is a RAM disk's blkdev; `b` a bio the block layer validated against it.
+@callback
+unsafe fn submit(bd: *mut blkdev, b: *mut bio) -> i32 {
+    let r = of(bd);
+    let s = lock(r);
+    let rb = Ptr.toBorrowMut(r);
+    if (rb.limit != 0 && rb.inflight >= rb.limit) {
+        // The queue is full, like a virtqueue with every slot taken. With refuseCompletes (a block-layer test), the
+        // oldest request completes right here, before the refusal is returned: the completion's resubmission then finds
+        // the queue empty, which is the window the layer must survive (blk_queue, "lost wakeup").
+        var oldest = 0 as *mut bio;
+        if (rb.refuseCompletes) {
+            oldest = popFront(r);
+            if (!oldest.isNull()) {
+                List.init(borrow mut Ptr.toBorrowMut(oldest).link as *mut list_node);
+                rb.inflight -= 1;
+            }
+        }
+        unlock(r, s);
+        if (!oldest.isNull()) {
+            bio_complete(oldest, 0);
+        }
+        return -EAGAIN;
+    }
+    let dir = Ptr.toBorrow(b as *bio).dir;
+    if (rb.fail != 0 || (rb.failWrites != 0 && dir == BIO_WRITE)) {
+        let err = if (rb.fail != 0) rb.fail else rb.failWrites;
+        unlock(r, s);
+        bio_complete(b, err);
+        return 0;
+    }
+    if (dir != BIO_FLUSH) {
+        var byte = Ptr.toBorrow(b as *bio).sector * 512;
+        for (i in 0..segments(b as *bio)) {
+            let v = segment(b as *bio, i);
+            copy(r, byte, v.buf, v.len, dir == BIO_WRITE);
+            byte += v.len as u64;
+        }
+    }
+    if (dir != BIO_READ) {
+        record(r, b as *bio);
+    }
+    if (rb.limit != 0) {
+        rb.inflight += 1;
+        List.pushBack(deferredOf(r), borrow mut Ptr.toBorrowMut(b).link as *mut list_node); // the worker completes it
+        unlock(r, s);
+        return 0;
+    }
+    unlock(r, s);
+    bio_complete(b, 0);
+    return 0;
+}
+
+/// The deferred mode's worker: complete deferred bios in order, one batch per millisecond.
+/// Safety: `arg` is a device whose worker this is; it outlives the thread (ramblk_set_deferred joins it).
+@callback
+unsafe fn worker(arg: *mut void) {
+    let r = arg as *mut ramblk;
+    while (true) {
+        while (true) {
+            let s = lock(r);
+            var b = 0 as *mut bio;
+            if (!Ptr.toBorrow(r as *ramblk).stall) {
+                b = popFront(r);
+            }
+            if (!b.isNull()) {
+                let rb = Ptr.toBorrowMut(r);
+                rb.inflight -= 1;
+            }
+            unlock(r, s);
+            if (b.isNull()) {
+                break;
+            }
+            bio_complete(b, 0);
+        }
+        if (Ptr.toBorrow(r as *ramblk).stop.loadWith(LoadOrdering.Acquire) != 0) {
+            break;
+        }
+        thread_sleep_ns(BATCH_NS);
+    }
+}
+
+/// The block layer's timeout thread: the request is still ours only if it is on the deferred list; find it by pointer
+/// under the lock, never dereference it first (it may have completed on another CPU).
+/// Safety: `bd` is a RAM disk's blkdev; `victim` is compared, not read.
+@callback
+unsafe fn timeout(bd: *mut blkdev, victim: *mut bio) {
+    let r = of(bd);
+    var found = 0 as *mut bio;
+    let s = lock(r);
+    let head = deferredOf(r);
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        if (bioOf(node) == victim) {
+            found = victim;
+            break;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    if (!found.isNull()) {
+        let link = borrow mut Ptr.toBorrowMut(found).link as *mut list_node;
+        List.remove(link);
+        List.init(link);
+        let rb = Ptr.toBorrowMut(r);
+        rb.inflight -= 1;
+    }
+    unlock(r, s);
+    if (!found.isNull()) {
+        bio_complete(found, -ETIMEDOUT);
+    }
+}
+
+/// ramblk.h's ramblk_set_stall.
+/// Safety: `bd` is a RAM disk's blkdev.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_set_stall")
+unsafe fn setStall(bd: *mut blkdev, stall: bool) {
+    let r = of(bd);
+    let s = lock(r);
+    let rb = Ptr.toBorrowMut(r);
+    rb.stall = stall;
+    unlock(r, s);
+}
+
+/// ramblk.h's ramblk_set_fail.
+/// Safety: `bd` is a RAM disk's blkdev.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_set_fail")
+unsafe fn setFail(bd: *mut blkdev, err: i32) {
+    let r = of(bd);
+    let s = lock(r);
+    let rb = Ptr.toBorrowMut(r);
+    rb.fail = err;
+    unlock(r, s);
+}
+
+/// ramblk.h's ramblk_set_fail_writes.
+/// Safety: `bd` is a RAM disk's blkdev.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_set_fail_writes")
+unsafe fn setFailWrites(bd: *mut blkdev, err: i32) {
+    let r = of(bd);
+    let s = lock(r);
+    let rb = Ptr.toBorrowMut(r);
+    rb.failWrites = err;
+    unlock(r, s);
+}
+
+/// ramblk.h's ramblk_set_refuse_completes.
+/// Safety: `bd` is a RAM disk's blkdev.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_set_refuse_completes")
+unsafe fn setRefuseCompletes(bd: *mut blkdev, on: bool) {
+    let r = of(bd);
+    let s = lock(r);
+    let rb = Ptr.toBorrowMut(r);
+    rb.refuseCompletes = on;
+    unlock(r, s);
+}
+
+/// ramblk.h's ramblk_complete_one: complete the oldest deferred bio now, from the caller's context; false if none.
+/// Safety: `bd` is a RAM disk's blkdev.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_complete_one")
+unsafe fn completeOne(bd: *mut blkdev) -> bool {
+    let r = of(bd);
+    let s = lock(r);
+    let b = popFront(r);
+    if (!b.isNull()) {
+        List.init(borrow mut Ptr.toBorrowMut(b).link as *mut list_node);
+        let rb = Ptr.toBorrowMut(r);
+        rb.inflight -= 1;
+    }
+    unlock(r, s);
+    if (!b.isNull()) {
+        bio_complete(b, 0);
+    }
+    return !b.isNull();
+}
+
+/// ramblk.h's ramblk_set_deferred: deferred mode with `limit` requests in flight, or (0) synchronous completion again,
+/// after completing what is deferred.
+/// Safety: `bd` is a RAM disk's blkdev; one caller at a time.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_set_deferred")
+unsafe fn setDeferred(bd: *mut blkdev, limit: u32) {
+    let r = of(bd);
+    let rb = Ptr.toBorrowMut(r);
+    if (limit != 0 && rb.worker.isNull()) {
+        rb.stop.storeWith(0, StoreOrdering.Relaxed);
+        rb.limit = limit;
+        rb.worker = thread_create(worker, r as *mut void, "ramblk-worker\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+        if (rb.worker.isNull()) {
+            rb.limit = 0;
+        }
+        return;
+    }
+    if (limit == 0 && !rb.worker.isNull()) {
+        rb.stop.storeWith(1, StoreOrdering.Release);
+        thread_join(rb.worker); // drains what is still deferred, unless stalled
+        rb.worker = 0 as *mut thread;
+        rb.limit = 0;
+        // A stalled worker exits with the deferred bios still queued: complete them here, or with no worker and no
+        // limit left they never would be.
+        while (completeOne(bd)) {}
+    }
+}
+
+/// The device's release: the last reference is gone. Frees what was allocated; null blocks are fine to free, so it
+/// also undoes a creation that failed part way.
+/// Safety: `bd` is a RAM disk's blkdev, used by nothing after this.
+@callback
+unsafe fn releaseDevice(bd: *mut blkdev) {
+    let r = of(bd);
+    let rb = Ptr.toBorrow(r as *ramblk);
+    if (!rb.blocks.isNull()) {
+        for (i in 0..truncate<usize>(rb.nblocks)) {
+            kfree(rb.blocks.add(i).read() as *mut void);
+        }
+    }
+    kfree(rb.blocks as *mut void);
+    kfree(r as *mut void);
+}
+
+/// ramblk.h's ramblk_create: a device of `nblocks` 4 KiB blocks, registered (named ram<letter>); null when memory is
+/// short or the registration refuses it. The caller holds the creator's reference: ramblk_destroy drops it.
+/// Safety: called from thread context (it sleeps).
+@cfg("CONFIG_DEBUG")
+@export("ramblk_create")
+unsafe fn create(nblocks: u64) -> *mut blkdev {
+    let r = kzalloc(layoutOf<ramblk>().size) as *mut ramblk;
+    if (r.isNull()) {
+        return 0 as *mut blkdev;
+    }
+    let rb = Ptr.toBorrowMut(r);
+    let bd = borrow mut rb.bd as *mut blkdev;
+    rb.bd.priv = r as *mut void; // first: a failure below releases through it
+    rb.nblocks = nblocks;
+    rb.blocks = kzalloc(truncate<usize>(nblocks) * 8) as *mut *mut u8;
+    if (rb.blocks.isNull()) {
+        kfree(r as *mut void);
+        return 0 as *mut blkdev;
+    }
+    for (i in 0..truncate<usize>(nblocks)) {
+        let blk = kzalloc(RAMBLK_BLOCK as usize) as *mut u8;
+        rb.blocks.add(i).write(blk);
+        if (blk.isNull()) {
+            releaseDevice(bd); // frees what was allocated
+            return 0 as *mut blkdev;
+        }
+    }
+    spinlock_init(borrow mut rb.lock as *mut spinlock_t, "ramblk\0".ptr as *CChar);
+    List.init(deferredOf(r));
+    rb.bd.ops = borrow RAMBLK_OPS as *blkdev_ops;
+    rb.bd.sector_size = 512;
+    rb.bd.capacity = nblocks * (RAMBLK_BLOCK / 512);
+    rb.bd.max_sectors = 128;
+    rb.bd.max_segments = 8;
+    if (blk_register(bd, "ram\0".ptr as *CChar) != 0) {
+        releaseDevice(bd);
+        return 0 as *mut blkdev;
+    }
+    return bd;
+}
+
+/// ramblk.h's ramblk_destroy: complete anything deferred, unregister, and drop the creator's reference (release frees
+/// when the last holder is gone).
+/// Safety: `bd` is a RAM disk's blkdev whose creator's reference the caller holds.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_destroy")
+unsafe fn destroy(bd: *mut blkdev) {
+    setStall(bd, false);
+    setDeferred(bd, 0); // completes anything deferred first
+    blk_unregister(bd);
+    kobject_put(borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject); // blkdev_put: the creator's reference
+}
+
+/// ramblk.h's ramblk_record_start: record every completed write and flush from now on, up to `max` of them.
+/// Safety: `bd` is a RAM disk's blkdev, not recording.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_record_start")
+unsafe fn recordStart(bd: *mut blkdev, max: u32) {
+    let r = of(bd);
+    let log = kzalloc(layoutOf<ramblk_log>().size) as *mut ramblk_log;
+    if (log.isNull()) {
+        return;
+    }
+    let l = Ptr.toBorrowMut(log);
+    l.w = kzalloc(max as usize * layoutOf<ramblk_write>().size) as *mut ramblk_write;
+    if (l.w.isNull()) {
+        kfree(log as *mut void);
+        return;
+    }
+    l.cap = max;
+    let s = lock(r);
+    let rb = Ptr.toBorrowMut(r);
+    rb.log = log;
+    unlock(r, s);
+}
+
+/// ramblk.h's ramblk_record_stop: stop recording and hand the log over (the caller frees it with ramblk_log_free);
+/// null when nothing was recording.
+/// Safety: `bd` is a RAM disk's blkdev.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_record_stop")
+unsafe fn recordStop(bd: *mut blkdev) -> *mut ramblk_log {
+    let r = of(bd);
+    let s = lock(r);
+    let log = Ptr.toBorrow(r as *ramblk).log;
+    let rb = Ptr.toBorrowMut(r);
+    rb.log = 0 as *mut ramblk_log;
+    unlock(r, s);
+    return log;
+}
+
+/// ramblk.h's ramblk_record_count: the log's length right now.
+/// Safety: `bd` is a RAM disk's blkdev.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_record_count")
+unsafe fn recordCount(bd: *mut blkdev) -> u32 {
+    let r = of(bd);
+    let s = lock(r);
+    let log = Ptr.toBorrow(r as *ramblk).log;
+    let n = if (log.isNull()) 0 else Ptr.toBorrow(log as *ramblk_log).n;
+    unlock(r, s);
+    return n;
+}
+
+/// ramblk.h's ramblk_log_free.
+/// Safety: `log` is null or a log ramblk_record_stop handed over, used by nothing after this.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_log_free")
+unsafe fn logFree(log: *mut ramblk_log) {
+    if (log.isNull()) {
+        return;
+    }
+    let l = Ptr.toBorrow(log as *ramblk_log);
+    for (i in 0..l.n as usize) {
+        kfree(Ptr.toBorrow(l.w.add(i) as *ramblk_write).data as *mut void);
+    }
+    kfree(l.w as *mut void);
+    kfree(log as *mut void);
+}
+
+/// ramblk.h's ramblk_snapshot: a copy of the whole device (the caller frees it); null when memory is short.
+/// Safety: `bd` is a RAM disk's blkdev.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_snapshot")
+unsafe fn snapshot(bd: *mut blkdev) -> *mut u8 {
+    let r = of(bd);
+    let nblocks = truncate<usize>(Ptr.toBorrow(r as *ramblk).nblocks);
+    let size = RAMBLK_BLOCK as usize;
+    let img = kmalloc(nblocks * size, 0) as *mut u8;
+    if (img.isNull()) {
+        return img;
+    }
+    let s = lock(r);
+    for (i in 0..nblocks) {
+        SliceMut.fromRaw(img.add(i * size), size).copyFrom(SliceMut.fromRaw(block(r, i as u64), size));
+    }
+    unlock(r, s);
+    return img;
+}
+
+/// ramblk.h's ramblk_restore: the device made equal to a snapshot.
+/// Safety: `bd` is a RAM disk's blkdev; `image` holds its whole size.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_restore")
+unsafe fn restore(bd: *mut blkdev, image: *u8) {
+    let r = of(bd);
+    let nblocks = truncate<usize>(Ptr.toBorrow(r as *ramblk).nblocks);
+    let size = RAMBLK_BLOCK as usize;
+    let s = lock(r);
+    for (i in 0..nblocks) {
+        SliceMut.fromRaw(block(r, i as u64), size).copyFrom(Slice.fromRaw(image.add(i * size), size));
+    }
+    unlock(r, s);
+}
+
+/// ramblk.h's ramblk_replay: apply the first `count` entries of `log`; with `torn`, the last write is applied only up
+/// to half its sectors (rounded down, at least one).
+/// Safety: `bd` is a RAM disk's blkdev; `log` a log recorded from a device no larger.
+@cfg("CONFIG_DEBUG")
+@export("ramblk_replay")
+unsafe fn replay(bd: *mut blkdev, log: *ramblk_log, count: u32, torn: bool) {
+    let r = of(bd);
+    let l = Ptr.toBorrow(log);
+    let n = if (count > l.n) l.n else count;
+    let s = lock(r);
+    for (i in 0..n) {
+        let w = Ptr.toBorrow(l.w.add(i as usize) as *ramblk_write);
+        if (w.nsectors == 0) {
+            continue; // a flush changes no bytes
+        }
+        var ns = w.nsectors;
+        if (torn && i == n - 1 && ns > 1) {
+            ns = ns / 2;
+        }
+        copy(r, w.sector * 512, w.data, ns as usize * 512, true);
+    }
+    unlock(r, s);
+}

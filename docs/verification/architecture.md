@@ -13,7 +13,7 @@ machine.
   ────────────────────────────────                ─────────────────────────────────
   tests/fuzz/driver.c   portable corpus+mutation   kernel/core/faultinject.c   kmalloc / block-I/O faults,
                         driver, or libFuzzer                                   per thread, read by sysctl
-  tests/fuzz/fuzz_*.c   one LLVMFuzzerTestOneInput kernel/block/ramblk.c       RAM block device with a
+  tests/fuzz/fuzz_*.c   one LLVMFuzzerTestOneInput kernel/block/ramblk.cee     RAM block device with a
                         per parser: module ELF,                                write recorder and snapshots
                         user ELF, pkg manifest/    cosmofscrash.c              record → replay prefixes →
                         index/tar, Linux ABI                                   mount → check (crash consistency)
