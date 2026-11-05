@@ -1,0 +1,402 @@
+// nettest_worker.cee - an interface against the receive worker, in CeeSafe: roadmap 2.0 SA6 (nettest, the seventeenth
+// batch). netif-remove-worker and netif-rxq-count, as nettest.c had them. Both park CPU 0's receive worker inside
+// input_one on a fake interface's frame through the debug build's worker hooks, so both are exported only there
+// (@cfg); nettest.c keeps the C's silent passes otherwise. The interfaces, their ops table and the completions are C
+// objects this file defines (CeeSafe's ADR 0042, as nettest_lifetime.cee's), `static mut` items zeroed and filled in
+// at the test's start as the C's memset did; the hooks read the interface they wait for from a static (the C's struct
+// netif_remove_worker_state, whose address was the hooks' argument).
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ether.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/completion.h", "kernel/selftest.h", "kernel/thread.h")
+extern "C" {
+    struct thread;
+    struct completion;
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        buf: *mut u8;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ops {
+        transmit: extern "C" fn(*mut netif, *mut mbuf) -> i32;
+        release: extern "C" fn(*mut netif);
+    }
+    struct netif_ip4 {
+        addr: u32;
+        mask: u32;
+    }
+    struct netif {
+        name: [u8; 8];
+        mtu: u32;
+        flags: u32;
+        ip4: netif_ip4;
+        ops: *netif_ops;
+        priv: *mut void;
+    }
+
+    fn netif_register(nif: *mut netif) -> i32;
+    fn netif_unregister(nif: *mut netif);
+    fn netif_put(nif: *mut netif);
+    fn netif_rx_on(nif: *mut netif, m: *mut mbuf, cpu: u32);
+    fn netif_rxq_count(nif: *netif) -> u32;
+    fn netif_test_worker_hooks_set(
+        input: extern "C" fn(*mut netif, *mut void),
+        barrier: extern "C" fn(*mut netif, *mut void),
+        arg: *mut void,
+    );
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn completion_init(c: *mut completion, name: *CChar);
+    fn complete(c: *mut completion);
+    fn wait_for_completion(c: *mut completion);
+    fn wait_for_completion_timeout(c: *mut completion, ns: u64) -> bool;
+    fn completion_done(c: *mut completion) -> bool;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+}
+
+// ---- netif.h, ether.h, thread.h and time values (asserted against the headers in nettest.c) ----
+
+const NETIF_UP: u32 = 1;
+const NETIF_NODEFAULT: u32 = 16;
+const ETH_HLEN: u32 = 14;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const NS_PER_SEC: u64 = 1000000000;
+/// 255.255.255.0 in network order, as it lies in a little-endian u32.
+const MASK24_N: u32 = 0x00ffffff;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// 1 or 0, as the C printed a bool with %u.
+fn bit(b: bool) -> u64 => if (b) 1 else 0;
+
+// ---- The fake interfaces and the hooks' state ----
+//
+// The C's struct fake_nif: an interface whose transmit counts and frees and whose release counts, the counters indexed
+// by the interface's `priv`.
+
+const RMW: usize = 0;
+const DECOY: usize = 1;
+const OTHER: usize = 2;
+
+static mut RMW_NIF: netif = netif { mtu: 1500 };
+static mut DECOY_NIF: netif = netif { mtu: 1500 };
+static mut OTHER_NIF: netif = netif { mtu: 1500 };
+static mut FAKE_OPS: netif_ops = netif_ops { transmit: fakeTransmit, release: fakeRelease };
+static mut TRANSMITS: [u32; 3] = [0; 3];
+static mut RELEASES: [u32; 3] = [0; 3];
+// The interface the hooks wait for, and the handshakes: the worker entered input_one, the test lets it go, the
+// unregister reached its barrier, the unregister returned.
+static mut HOOK_NIF: usize = 0;
+static mut INPUT: completion = completion {};
+static mut RELEASE: completion = completion {};
+static mut AT_BARRIER: completion = completion {};
+static mut REMOVED: completion = completion {};
+
+/// Safety: the interface layer hands over the packet; `priv` is the interface's counter slot.
+@callback
+unsafe fn fakeTransmit(nif: *mut netif, m: *mut mbuf) -> i32 {
+    TRANSMITS[Ptr.toBorrow(nif as *netif).priv as usize] += 1;
+    m_freem(m);
+    return 0;
+}
+
+/// Safety: the interface layer calls it once, after the last reference.
+@callback
+unsafe fn fakeRelease(nif: *mut netif) {
+    RELEASES[Ptr.toBorrow(nif as *netif).priv as usize] += 1;
+}
+
+/// Zero `nif`, then name it and give it the fake ops, counter slot `slot` (reset), up, as the C's memset and
+/// assignments did.
+/// Safety: `nif` is one of this file's statics, not registered.
+unsafe fn fakeSetup(nif: *mut netif, slot: usize, name: StringView) {
+    let b = SliceMut.fromRaw(nif as *mut u8, layoutOf<netif>().size);
+    for (i in 0..b.length) {
+        b[i] = 0;
+    }
+    let n = Ptr.toBorrowMut(nif);
+    for (i in 0..name.length) {
+        n.name[i] = name.bytes()[i];
+    }
+    n.mtu = 1500;
+    n.ops = borrow FAKE_OPS as *netif_ops;
+    n.priv = slot as *mut void;
+    n.flags = NETIF_UP | NETIF_NODEFAULT;
+    TRANSMITS[slot] = 0;
+    RELEASES[slot] = 0;
+}
+
+/// The handshakes' addresses.
+/// Safety: the addresses of this file's completions; nothing is read through them here.
+fn input() -> *mut completion => unsafe { borrow mut INPUT as *mut completion };
+
+/// Safety: as input.
+fn letGo() -> *mut completion => unsafe { borrow mut RELEASE as *mut completion };
+
+/// Safety: as input.
+fn atBarrier() -> *mut completion => unsafe { borrow mut AT_BARRIER as *mut completion };
+
+/// Safety: as input.
+fn removed() -> *mut completion => unsafe { borrow mut REMOVED as *mut completion };
+
+/// Initialise a completion afresh (the C zeroed the state first; completion_init sets every field).
+/// Safety: no one waits on or completes `c`.
+unsafe fn fresh(c: *mut completion, name: StringView) {
+    completion_init(c, name.ptr as *CChar);
+}
+
+/// A frame of ETH_HLEN zero bytes -- an unknown EtherType, which input frees -- 64 bytes into its buffer, or null.
+/// Safety: a fresh buffer.
+unsafe fn unknownFrame() -> *mut mbuf {
+    let m = m_getcl();
+    if (!m.isNull()) {
+        let r = Ptr.toBorrowMut(m);
+        r.data = r.buf.add(64);
+        r.len = ETH_HLEN;
+        r.pkt.len = ETH_HLEN;
+        let p = SliceMut.fromRaw(r.data, ETH_HLEN as usize);
+        for (i in 0..p.length) {
+            p[i] = 0;
+        }
+    }
+    return m;
+}
+
+fn noHook() -> extern "C" fn(*mut netif, *mut void) => 0 as extern "C" fn(*mut netif, *mut void);
+
+// ---- netif-remove-worker ----
+//
+// Park a worker after its quiesce read section, then remove its interface. Reaching the explicit barrier seam proves
+// unregister has passed the grace-period wait and queue purge; it must still wait for this input_one.
+
+/// The worker's input hook: on the test's interface, say so and wait to be let go.
+/// Safety: the completions are initialised before the hooks are set.
+@callback
+unsafe fn removeInput(nif: *mut netif, arg: *mut void) {
+    if (nif as usize != HOOK_NIF) {
+        return;
+    }
+    complete(input());
+    wait_for_completion(letGo());
+}
+
+/// The unregister's barrier hook: on the test's interface, say it got there.
+/// Safety: as removeInput.
+@callback
+unsafe fn removeBarrier(nif: *mut netif, arg: *mut void) {
+    if (nif as usize == HOOK_NIF) {
+        complete(atBarrier());
+    }
+}
+
+/// The remover: unregister the test's interface, then say so.
+/// Safety: HOOK_NIF is the registered interface.
+@callback
+unsafe fn removeMain(arg: *mut void) {
+    netif_unregister(HOOK_NIF as *mut netif);
+    complete(removed());
+}
+
+/// netif-remove-worker: netif_unregister waits for an input_one in progress on its interface.
+/// Safety: the runner's `reason`; the debug build's hooks.
+@cfg("CONFIG_DEBUG")
+@export("selftest_netif_remove_worker")
+unsafe fn removeWorker(reason: *mut *CChar) -> bool {
+    let nif = borrow mut RMW_NIF as *mut netif;
+    // The C named it "rmworker0", which strlcpy cut to the array's seven bytes and a terminator.
+    fakeSetup(nif, RMW, "rmworke");
+    RMW_NIF.ip4.addr = ip4(10, 75, 0, 1);
+    RMW_NIF.ip4.mask = MASK24_N;
+    HOOK_NIF = nif as usize;
+    fresh(input(), "netif-remove-input\0");
+    fresh(letGo(), "netif-remove-release\0");
+    fresh(atBarrier(), "netif-remove-barrier\0");
+    fresh(removed(), "netif-remove-done\0");
+
+    if (netif_register(nif) != 0) {
+        return failed(reason, "netif-remove-worker: could not register the synthetic interface\0");
+    }
+    netif_test_worker_hooks_set(removeInput, removeBarrier, 0 as *mut void);
+    let m = unknownFrame();
+    if (m.isNull()) {
+        complete(letGo());
+        netif_unregister(nif);
+        netif_test_worker_hooks_set(noHook(), noHook(), 0 as *mut void);
+        netif_put(nif);
+        return failed(reason, "netif-remove-worker: could not allocate the synthetic frame\0");
+    }
+    netif_rx_on(nif, m, 0); // freed after the worker is released
+
+    let entered = wait_for_completion_timeout(input(), 2 * NS_PER_SEC);
+    var remover = 0 as *mut thread;
+    if (entered) {
+        remover = thread_create(removeMain, 0 as *mut void, "netif-remove\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    }
+    let barrier = !remover.isNull() && wait_for_completion_timeout(atBarrier(), 2 * NS_PER_SEC);
+    let blocked = barrier && !completion_done(removed());
+    complete(letGo());
+    if (!remover.isNull()) {
+        wait_for_completion(removed());
+        thread_join(remover);
+    } else {
+        netif_unregister(nif);
+    }
+    netif_test_worker_hooks_set(noHook(), noHook(), 0 as *mut void);
+    netif_put(nif);
+    let releases = RELEASES[RMW];
+    let ok = entered && barrier && blocked && releases == 1;
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("NETIF-REMOVE-WORKER: ");
+    line.text(if (ok) "PASS" else "FAIL");
+    line.text(" entered=");
+    line.decimal(bit(entered));
+    line.text(" barrier=");
+    line.decimal(bit(barrier));
+    line.text(" waited=");
+    line.decimal(bit(blocked));
+    line.text(" release=");
+    line.decimal(releases as u64);
+    KernelLog.send(LogLevel.Info, line);
+    if (!ok) {
+        return failed(reason, "netif-remove-worker: unregister did not wait for active input_one; see the log\0");
+    }
+    return true;
+}
+
+// ---- netif-rxq-count ----
+//
+// netif_rxq_count counts one interface's packets. CPU 0's worker is parked on the decoy's first packet, so its second
+// stays queued there; the other interface, which received nothing, must count 0 and the decoy 1. A count of every
+// queue (net-netif-lifetime's CI failure, the https unit) gives the second interface 1 every time.
+
+/// The worker's input hook: park on the decoy's first frame only.
+/// Safety: as removeInput.
+@callback
+unsafe fn countInput(nif: *mut netif, arg: *mut void) {
+    if (nif as usize != HOOK_NIF || completion_done(input())) {
+        return;
+    }
+    complete(input());
+    wait_for_completion(letGo());
+}
+
+/// Why netif-rxq-count failed.
+enum Why {
+    Nothing,
+    Register,
+    Alloc,
+    NotTaken,
+    Counted,
+}
+
+fn none(w: borrow Why) -> bool =>
+    match (w) {
+        Why.Nothing => true,
+        _ => false,
+    };
+
+fn reasonOf(w: Why) -> StringView =>
+    match (w) {
+        Why.Nothing => "\0",
+        Why.Register => "netif-rxq-count: could not register a synthetic interface\0",
+        Why.Alloc => "netif-rxq-count: could not allocate a synthetic frame\0",
+        Why.NotTaken => "netif-rxq-count: CPU 0's worker did not take the first frame\0",
+        Why.Counted => "netif-rxq-count: a count includes another interface's packets; see the log\0",
+    };
+
+/// The two frames on the decoy, the first parking CPU 0's worker and the second waiting behind it.
+/// Safety: the hooks are set; the decoy is registered.
+unsafe fn queueTwo(decoy: *mut netif) -> Why {
+    for (i in 0..2) {
+        let m = unknownFrame();
+        if (m.isNull()) {
+            return Why.Alloc;
+        }
+        netif_rx_on(decoy, m, 0); // unknown EtherType: input frees it
+        if (i == 0 && !wait_for_completion_timeout(input(), 2 * NS_PER_SEC)) {
+            return Why.NotTaken;
+        }
+    }
+    return Why.Nothing;
+}
+
+/// netif-rxq-count: netif_rxq_count counts only its interface's packets.
+/// Safety: the runner's `reason`; the debug build's hooks.
+@cfg("CONFIG_DEBUG")
+@export("selftest_netif_rxq_count")
+unsafe fn rxqCount(reason: *mut *CChar) -> bool {
+    let decoy = borrow mut DECOY_NIF as *mut netif;
+    let other = borrow mut OTHER_NIF as *mut netif;
+    HOOK_NIF = decoy as usize;
+    fresh(input(), "rxq-count-input\0");
+    fresh(letGo(), "rxq-count-release\0");
+    fakeSetup(decoy, DECOY, "rxqcnt0");
+    fakeSetup(other, OTHER, "rxqcnt1");
+    var ok = false;
+    var nDecoy: u32 = 0;
+    var nOther: u32 = 0;
+    var why = Why.Nothing;
+    let decoyIn = netif_register(decoy) == 0;
+    let otherIn = decoyIn && netif_register(other) == 0;
+    if (!otherIn) {
+        why = Why.Register;
+    } else {
+        netif_test_worker_hooks_set(countInput, noHook(), 0 as *mut void);
+        why = queueTwo(decoy);
+        if (none(borrow why)) {
+            nDecoy = netif_rxq_count(decoy as *netif);
+            nOther = netif_rxq_count(other as *netif);
+            ok = nDecoy == 1 && nOther == 0;
+            if (!ok) {
+                why = Why.Counted;
+            }
+        }
+    }
+    complete(letGo());
+    if (decoyIn) {
+        netif_unregister(decoy);
+    }
+    if (otherIn) {
+        netif_unregister(other);
+    }
+    netif_test_worker_hooks_set(noHook(), noHook(), 0 as *mut void);
+    if (decoyIn) {
+        netif_put(decoy);
+    }
+    if (otherIn) {
+        netif_put(other);
+    }
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("NETIF-RXQ-COUNT: ");
+    line.text(if (ok) "PASS" else "FAIL");
+    line.text(" decoy=");
+    line.decimal(nDecoy as u64);
+    line.text(" other=");
+    line.decimal(nOther as u64);
+    line.text(" (want 1 and 0)");
+    KernelLog.send(LogLevel.Info, line);
+    if (!ok) {
+        return failed(reason, reasonOf(why));
+    }
+    return true;
+}

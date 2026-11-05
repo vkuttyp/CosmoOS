@@ -1122,7 +1122,11 @@ checked byte for byte, the kernel library's `kobject` being opaque. Batch 16,
 net-arp-per-interface, net-nd-per-interface and net-neigh-down-race
 (debug-only, the C's skip kept) -- the ARP and ND messages built in
 CeeSafe and handed straight to the input functions; the racing caller's
-state is static and the park hooks are chosen by an enum of the two tables.
+state is static and the park hooks are chosen by an enum of the two tables. Batch 17,
+`nettest_worker.cee`: netif-remove-worker and netif-rxq-count, debug-only
+(the C's silent passes kept), which park CPU 0's receive worker through the
+worker hooks; their completions are static C objects, and `nettest.c`'s own
+fake interface, with no user left, is gone.
 
 Size: about 3.0x.
 

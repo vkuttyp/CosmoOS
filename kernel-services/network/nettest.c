@@ -961,34 +961,6 @@ bool selftest_net_harness(const char **reason)
     return true;
 }
 
-/* --- a fake interface --------------------------------------------------------
- *
- * One whose transmit counts and frees and whose release counts: the
- * receive-worker tests below register it, in debug builds only
- * (nettest_lifetime.cee has its own).
- */
-#if CONFIG_DEBUG
-struct fake_nif {
-    struct netif nif;
-    unsigned transmits;
-    unsigned releases;
-};
-
-static int fake_nif_transmit(struct netif *nif, struct mbuf *m)
-{
-    struct fake_nif *f = nif->priv;
-    f->transmits++;
-    m_freem(m);
-    return 0;
-}
-
-static void fake_nif_release(struct netif *nif)
-{
-    struct fake_nif *f = nif->priv;
-    f->releases++;
-}
-#endif
-
 /* --- the interface's lifetime against the neighbour tables -------------- *
  *
  * net-arp-retry-unregister, net-nd-retry-unregister, net-arp-flush-counts,
@@ -2332,192 +2304,29 @@ _Static_assert(IPPROTO_ICMP == 1 && IPPROTO_TCP == 6 && IPPROTO_UDP == 17 && ICM
                ICMP_UNREACH_PORT == 3 && ICMP_UNREACH_HOST == 1 && ETH_P_IP == 0x0800 && sizeof(struct ipv4_hdr) == 20,
                "nettest_sockerr.cee's ip.h and ether.h values");
 
-/* Park a worker after its quiesce read section, then remove its interface.
- * Reaching the explicit barrier seam proves unregister has passed the
- * grace-period wait and queue purge; it must still wait for this input_one. */
-#if CONFIG_DEBUG
-struct netif_remove_worker_state {
-    struct fake_nif *fake;
-    struct completion input, release, at_barrier, removed;
-};
-
-static void netif_remove_worker_input(struct netif *nif, void *arg)
-{
-    struct netif_remove_worker_state *st = arg;
-    if (nif != &st->fake->nif)
-        return;
-    complete(&st->input);
-    wait_for_completion(&st->release);
-}
-
-static void netif_remove_worker_barrier(struct netif *nif, void *arg)
-{
-    struct netif_remove_worker_state *st = arg;
-    if (nif == &st->fake->nif)
-        complete(&st->at_barrier);
-}
-
-static void netif_remove_worker_main(void *arg)
-{
-    struct netif_remove_worker_state *st = arg;
-    netif_unregister(&st->fake->nif);
-    complete(&st->removed);
-}
-#endif
-
+/* --- an interface against the receive worker ------------------------------
+ *
+ * netif-remove-worker and netif-rxq-count are CeeSafe (nettest_worker.cee),
+ * with fake interfaces of their own. Both need the debug build's worker
+ * hooks; without them they pass silently, as the C did. The values the port
+ * writes as its own constants:
+ */
+#if !CONFIG_DEBUG
 bool selftest_netif_remove_worker(const char **reason)
 {
-#if !CONFIG_DEBUG
     (void)reason;
     return true;
-#else
-    static struct fake_nif f;
-    static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
-    static struct netif_remove_worker_state st;
-    memset(&f, 0, sizeof(f));
-    memset(&st, 0, sizeof(st));
-    st.fake = &f;
-    completion_init(&st.input, "netif-remove-input");
-    completion_init(&st.release, "netif-remove-release");
-    completion_init(&st.at_barrier, "netif-remove-barrier");
-    completion_init(&st.removed, "netif-remove-done");
-    strlcpy(f.nif.name, "rmworker0", sizeof(f.nif.name));
-    f.nif.mtu = 1500;
-    f.nif.ops = &ops;
-    f.nif.priv = &f;
-    f.nif.flags = NETIF_UP | NETIF_NODEFAULT;
-    f.nif.ip4.addr = htonl(0x0a4b0001);
-    f.nif.ip4.mask = htonl(0xffffff00);
-
-    bool registered = netif_register(&f.nif) == 0;
-    if (!registered) {
-        *reason = "netif-remove-worker: could not register the synthetic interface";
-        return false;
-    }
-    netif_test_worker_hooks_set(netif_remove_worker_input, netif_remove_worker_barrier, &st);
-    struct mbuf *m = m_getcl();
-    if (m == NULL) {
-        *reason = "netif-remove-worker: could not allocate the synthetic frame";
-        goto cleanup;
-    }
-    m->data = m->buf + 64;
-    m->len = m->pkt.len = ETH_HLEN;
-    memset(m->data, 0, ETH_HLEN);   /* unknown EtherType: freed after the worker is released */
-    netif_rx_on(&f.nif, m, 0);
-
-    bool entered = wait_for_completion_timeout(&st.input, 2ull * 1000000000ull);
-    struct thread *remover = entered ? thread_create(netif_remove_worker_main, &st, "netif-remove", SCHED_PRIO_DEFAULT)
-                                     : NULL;
-    bool at_barrier = remover != NULL && wait_for_completion_timeout(&st.at_barrier, 2ull * 1000000000ull);
-    bool blocked = at_barrier && !completion_done(&st.removed);
-    complete(&st.release);
-    if (remover != NULL) {
-        wait_for_completion(&st.removed);
-        thread_join(remover);
-    } else if (registered) {
-        netif_unregister(&f.nif);
-    }
-    netif_test_worker_hooks_set(NULL, NULL, NULL);
-    netif_put(&f.nif);
-    bool ok = entered && at_barrier && blocked && f.releases == 1;
-    kinfo("NETIF-REMOVE-WORKER: %s entered=%u barrier=%u waited=%u release=%u", ok ? "PASS" : "FAIL", entered,
-          at_barrier, blocked, f.releases);
-    if (!ok)
-        *reason = "netif-remove-worker: unregister did not wait for active input_one; see the log";
-    return ok;
-
-cleanup:
-    complete(&st.release);
-    if (registered)
-        netif_unregister(&f.nif);
-    netif_test_worker_hooks_set(NULL, NULL, NULL);
-    netif_put(&f.nif);
-    return false;
-#endif
 }
-
-/* netif_rxq_count counts one interface's packets. CPU 0's worker is parked
- * on the decoy's first packet, so its second stays queued there; the
- * other interface, which received nothing, must count 0 and the decoy 1.
- * A count of every queue (net-netif-lifetime's CI failure, the https
- * unit) gives the second interface 1 every time. */
-#if CONFIG_DEBUG
-static void netif_rxq_count_input(struct netif *nif, void *arg)
-{
-    struct netif_remove_worker_state *st = arg;
-    if (nif != &st->fake->nif || completion_done(&st->input))
-        return;
-    complete(&st->input);
-    wait_for_completion(&st->release);
-}
-#endif
 
 bool selftest_netif_rxq_count(const char **reason)
 {
-#if !CONFIG_DEBUG
     (void)reason;
     return true;
-#else
-    static struct fake_nif decoy, other;
-    static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
-    static struct netif_remove_worker_state st;
-    struct fake_nif *fakes[2] = { &decoy, &other };
-    const char *names[2] = { "rxqcnt0", "rxqcnt1" };
-    bool registered[2] = { false, false };
-    bool ok = false;
-    unsigned n_decoy = 0, n_other = 0;
-    memset(&st, 0, sizeof(st));
-    st.fake = &decoy;
-    completion_init(&st.input, "rxq-count-input");
-    completion_init(&st.release, "rxq-count-release");
-    for (int i = 0; i < 2; i++) {
-        memset(fakes[i], 0, sizeof(*fakes[i]));
-        strlcpy(fakes[i]->nif.name, names[i], sizeof(fakes[i]->nif.name));
-        fakes[i]->nif.mtu = 1500;
-        fakes[i]->nif.ops = &ops;
-        fakes[i]->nif.priv = fakes[i];
-        fakes[i]->nif.flags = NETIF_UP | NETIF_NODEFAULT;
-        registered[i] = netif_register(&fakes[i]->nif) == 0;
-        if (!registered[i]) {
-            *reason = "netif-rxq-count: could not register a synthetic interface";
-            goto out;
-        }
-    }
-    netif_test_worker_hooks_set(netif_rxq_count_input, NULL, &st);
-    for (int i = 0; i < 2; i++) {
-        struct mbuf *m = m_getcl();
-        if (m == NULL) {
-            *reason = "netif-rxq-count: could not allocate a synthetic frame";
-            goto out;
-        }
-        m->data = m->buf + 64;
-        m->len = m->pkt.len = ETH_HLEN;
-        memset(m->data, 0, ETH_HLEN);   /* unknown EtherType: input frees it */
-        netif_rx_on(&decoy.nif, m, 0);
-        /* The first one parks CPU 0's worker; the second then waits behind it. */
-        if (i == 0 && !wait_for_completion_timeout(&st.input, 2ull * 1000000000ull)) {
-            *reason = "netif-rxq-count: CPU 0's worker did not take the first frame";
-            goto out;
-        }
-    }
-    n_decoy = netif_rxq_count(&decoy.nif);
-    n_other = netif_rxq_count(&other.nif);
-    ok = n_decoy == 1 && n_other == 0;
-    if (!ok)
-        *reason = "netif-rxq-count: a count includes another interface's packets; see the log";
-out:
-    complete(&st.release);
-    for (int i = 0; i < 2; i++)
-        if (registered[i])
-            netif_unregister(&fakes[i]->nif);
-    netif_test_worker_hooks_set(NULL, NULL, NULL);
-    for (int i = 0; i < 2; i++)
-        if (registered[i])
-            netif_put(&fakes[i]->nif);
-    kinfo("NETIF-RXQ-COUNT: %s decoy=%u other=%u (want 1 and 0)", ok ? "PASS" : "FAIL", n_decoy, n_other);
-    return ok;
-#endif
 }
+#endif
+_Static_assert(NETIF_UP == 1 && NETIF_NODEFAULT == 0x10 && ETH_HLEN == 14 && SCHED_PRIO_DEFAULT == 32 &&
+                   NS_PER_SEC == 1000000000ull,
+               "nettest_worker.cee's netif.h, ether.h, thread.h and time values");
 
 bool selftest_net_nicbench(const char **reason)
 {
