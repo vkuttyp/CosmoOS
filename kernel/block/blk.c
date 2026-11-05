@@ -718,6 +718,10 @@ static int submit_flagged(struct blkdev *bd, struct bio *bio)
     struct bio_seq *seq = kzalloc(sizeof(*seq));
     if (seq == NULL)
         return -ENOMEM;
+    /* A failed pre-flush completes the user's bio before it ever reaches
+     * the driver: bio_complete takes it off the in-flight list, which
+     * must find an empty link rather than whatever the caller left. */
+    list_init(&bio->inflight_link);
     seq->user = bio;
     seq->user_done = bio->done;
     seq->user_arg = bio->arg;

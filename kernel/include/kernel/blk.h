@@ -125,8 +125,8 @@ struct blkdev {
     uint64_t timeouts;               /* bios the timeout thread reported */
     uint64_t completed_local, completed_remote;   /* completions on the issuing CPU / elsewhere (queue locality) */
     unsigned nr_queues;              /* informational: hardware queues the driver uses (1 when it says nothing) */
-    bool gone;                       /* unregistered: blk_submit refuses (-ENODEV) */
-    bool recovering;                 /* the layer has decided a request timed out and the driver's
+    uint32_t gone;                   /* unregistered: blk_submit refuses (-ENODEV); atomic */
+    uint32_t recovering;             /* atomic: the layer has decided a request timed out and the driver's
                                       * recovery has not finished: new bios wait rather than be
                                       * accepted into a device that is about to fail everything */
     uint32_t submitting;             /* blk_submit calls inside ops->submit right now */

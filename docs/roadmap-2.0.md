@@ -1202,7 +1202,15 @@ the debug builds' RAM disk and write recorder, held to the C's digest by
 `tests/host/test_ramblk.c` (0x3e265dd7cda910d8); the C step fixed two
 bugs the test found -- a NULL `priv` released through when a creation
 failed part way, and deferred bios never completed after a stalled
-worker was stopped.
+worker was stopped. `blk.c`, the C step: `tests/host/test_blk.c` drives
+the registry, the checks, the pending queue, the timeout scan, resets,
+unregistration, the flush sequences and the synchronous helpers against
+drivers the test owns (0xf136565ff61bcea3, clang and gcc; every line but
+the parked submitter's spin, which needs a second CPU). It found a NULL
+dereference: a BIO_PREFLUSH write whose pre-flush failed completed the
+caller's bio with its in-flight link never initialised (a zeroed bio from
+`blk_write_flags` crashed); the sequence now initialises it. `gone` and
+`recovering` became `uint32_t`, so the port reaches them as atomics.
 
 Size: about 4.5x.
 
