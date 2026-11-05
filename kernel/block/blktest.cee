@@ -1,0 +1,702 @@
+// blktest.cee - The block layer's self-tests on the RAM device (docs/kernel-services/filesystem/cosmofs/design.md,
+// "The block layer"; docs/kernel/device/testing.md), in CeeSafe: roadmap 2.0 SA7. blk-queue (the pending queue, the
+// lost wakeup's redrain, flagged writes as flush, write, flush), blk-segments (multi-segment bios and their
+// refusals), blk-timeout and blk-timeout-skew (a silent device timed out; a stamp from a CPU ahead of the scanner's
+// not). The RAM device and the skew seam are the debug build's, so each test is exported in every build and passes at
+// once in the others, as the C's #if did, on a static the C compiler folds.
+//
+// The bios and segment tables live in kzalloc'd memory where the C kept them static or on the stack: a CeeSafe local
+// cannot hold C state (CeeSafe's type-system.md §33.1). The one stack buffer left is the C's: blk-segments' refusal of
+// a buffer outside the direct map.
+
+@header("kernel/blk.h", "kernel/compiler.h", "kernel/dma.h", "kernel/ramblk.h", "kernel/selftest.h", "kernel/string.h", "kernel/timer.h", "kernel/wait.h")
+extern "C" {
+    struct device;
+    struct blkdev {
+        capacity: u64;
+        max_segments: u32;
+        timeout_ns: u64;
+        timeouts: u64;
+        requeued: u64;
+        redrained: u64;
+    }
+    struct bio_vec {
+        buf: *mut void;
+        len: u32;
+    }
+    struct bio {
+        dev: *mut blkdev;
+        sector: u64;
+        nsectors: u32;
+        dir: u32;
+        flags: u32;
+        buf: *mut void;
+        vecs: *mut bio_vec;
+        nr_vecs: u32;
+        done: extern "C" fn(*mut bio);
+        arg: *mut void;
+        status: i32;
+        link: list_node;
+    }
+    struct ramblk_write {
+        sector: u64;
+        nsectors: u32;
+    }
+    struct ramblk_log {
+        w: *mut ramblk_write;
+        n: u32;
+    }
+
+    /// compiler.h: whether this is a debug build (CONFIG_DEBUG).
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+    fn blk_submit(b: *mut bio) -> i32;
+    fn blk_read(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *mut void) -> i32;
+    fn blk_write_flags(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *void, flags: u32) -> i32;
+    fn blk_test_set_issue_skew_ns(ns: u64);
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn ramblk_set_deferred(bd: *mut blkdev, limit: u32);
+    fn ramblk_set_stall(bd: *mut blkdev, stall: bool);
+    fn ramblk_set_refuse_completes(bd: *mut blkdev, on: bool);
+    fn ramblk_complete_one(bd: *mut blkdev) -> bool;
+    fn ramblk_record_start(bd: *mut blkdev, max: u32);
+    fn ramblk_record_stop(bd: *mut blkdev) -> *mut ramblk_log;
+    fn ramblk_log_free(log: *mut ramblk_log);
+    fn dma_alloc(dev: *mut device, size: usize, dma: *mut u64, flags: u32) -> *mut void;
+    fn dma_free(dev: *mut device, size: usize, va: *mut void, dma: u64);
+    fn kzalloc(size: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn thread_sleep_ns(ns: u64);
+}
+
+/// The build's CONFIG_DEBUG, folded by the C compiler: without the RAM device each test passes at once.
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
+
+// ---- errno.h, blk.h, page.h, dma.h and kmalloc.h values (asserted in blk_floor.c) ----
+
+const EINVAL: i32 = 22;
+const ETIMEDOUT: i32 = 110;
+const BIO_READ: u32 = 0;
+const BIO_WRITE: u32 = 1;
+const BIO_PREFLUSH: u32 = 1;
+const BIO_FUA: u32 = 2;
+const BLK_TIMEOUT_NS: u64 = 30000000000;
+const PAGE_SIZE: usize = 4096;
+const DMA_ZERO: u32 = 1;
+const KMEM_ZERO: u32 = 1;
+const MS: u64 = 1000000;
+/// How long a test waits for completions it expects (the C's 2 s deadlines).
+const WAIT_NS: u64 = 2000000000;
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+// ---- Completions: counted, the last error kept, the caller's arg seen ----
+
+static DONE_COUNT: AtomicU32 = AtomicU32.constant(0);
+static DONE_STATUS: AtomicU32 = AtomicU32.constant(0); // the last nonzero status, as its bits
+static ARG_SEEN: AtomicUSize = AtomicUSize.constant(0);
+
+fn resetDone() {
+    DONE_COUNT.store(0);
+    DONE_STATUS.store(0);
+}
+
+fn doneCount() -> u32 => DONE_COUNT.load();
+
+fn doneStatus() -> i32 => truncate<i32>(DONE_STATUS.load());
+
+/// Safety: the block layer calls it once per completed bio.
+@callback
+unsafe fn countDone(b: *mut bio) {
+    let status = Ptr.toBorrow(b as *bio).status;
+    if (status != 0) {
+        DONE_STATUS.store(truncate<u32>(status));
+    }
+    DONE_COUNT.fetchAdd(1);
+}
+
+/// Safety: as countDone.
+@callback
+unsafe fn argDone(b: *mut bio) {
+    ARG_SEEN.store(Ptr.toBorrow(b as *bio).arg as usize);
+    DONE_COUNT.fetchAdd(1);
+}
+
+/// Wait up to the deadline for `n` completions.
+/// Safety: reads the clock and sleeps, in thread context.
+fn waitDone(n: u32) {
+    unsafe {
+        let deadline = clock_now_ns() + WAIT_NS;
+        while (doneCount() < n && clock_now_ns() < deadline) {
+            thread_sleep_ns(MS);
+        }
+    }
+}
+
+/// Zero `b` and make it a request of `nsectors` at `sector` on `bd`, completing through `done`.
+/// Safety: `b` is writable bio storage the block layer does not hold.
+unsafe fn fillBio(
+    b: *mut bio,
+    bd: *mut blkdev,
+    dir: u32,
+    sector: u64,
+    nsectors: u32,
+    buf: *mut void,
+    done: extern "C" fn(*mut bio),
+) {
+    memset(b as *mut void, 0, layoutOf<bio>().size);
+    let o = Ptr.toBorrowMut(b);
+    o.dev = bd;
+    o.dir = dir;
+    o.sector = sector;
+    o.nsectors = nsectors;
+    o.buf = buf;
+    o.done = done;
+    List.init(borrow mut o.link as *mut list_node);
+}
+
+/// The i'th of `n` bios in one allocation.
+/// Safety: `bios` holds more than `i` bios.
+unsafe fn nthBio(bios: *mut bio, i: u32) -> *mut bio =>
+    (bios as *mut u8).add(i as usize * layoutOf<bio>().size) as *mut bio;
+
+/// Safety: `vecs` holds more than `i` segments.
+unsafe fn setVec(vecs: *mut bio_vec, i: u32, buf: *mut u8, len: usize) {
+    let v = Ptr.toBorrowMut(vecs.add(i as usize));
+    v.buf = buf as *mut void;
+    v.len = truncate<u32>(len);
+}
+
+/// Safety: `bd` is a live blkdev.
+unsafe fn dev(bd: *mut blkdev) -> borrow(static) blkdev => Ptr.toBorrow(bd as *blkdev);
+
+/// Safety: `bd` is a live blkdev the test owns.
+unsafe fn setTimeout(bd: *mut blkdev, ns: u64) {
+    let d = Ptr.toBorrowMut(bd);
+    d.timeout_ns = ns;
+}
+
+/// Entry `i` of a recorded log.
+/// Safety: `log` is a live log with more than `i` entries.
+unsafe fn entry(log: *mut ramblk_log, i: u32) -> borrow(static) ramblk_write =>
+    Ptr.toBorrow(Ptr.toBorrow(log as *ramblk_log).w.add(i as usize) as *ramblk_write);
+
+/// Safety: `log` is a live log.
+unsafe fn entries(log: *mut ramblk_log) -> u32 => Ptr.toBorrow(log as *ramblk_log).n;
+
+// ---- blk-queue ----
+
+const QUEUED: u32 = 8;
+
+/// blk-queue: eight writes into two slots wait in the pending queue and all complete, in order; the lost wakeup's
+/// redrain; flagged writes as flush, write, flush, in the deferred and the synchronous mode, the caller's `arg` given
+/// back; a flagged read and a flagged write past the end refused.
+/// Safety: the self-test runner's call; `reason` is its.
+@export("selftest_blk_queue")
+unsafe fn queueTest(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return true;
+    }
+    let bd = ramblk_create(64);
+    if (bd.isNull()) {
+        return failed(reason, "check failed: bd != NULL\0");
+    }
+    ramblk_set_deferred(bd, 2); // two in flight, the rest -EAGAIN at the driver
+
+    // Eight writes at once: the layer queues six and every one completes.
+    let bios = kzalloc(QUEUED as usize * layoutOf<bio>().size) as *mut bio;
+    let bufs = kmalloc(QUEUED as usize * 4096, 0) as *mut u8; // DMA-able: kmalloc, not the image's BSS
+    if (bios.isNull() || bufs.isNull()) {
+        kfree(bios as *mut void);
+        kfree(bufs as *mut void);
+        return failed(reason, "check failed: bufs != NULL\0");
+    }
+    resetDone();
+    let requeued0 = dev(bd).requeued;
+    // Nothing completes while the eight are submitted, so the two slots stay taken and the other six are refused and
+    // parked: the count is exact instead of a race with the worker's millisecond.
+    ramblk_set_stall(bd, true);
+    for (i in 0..QUEUED) {
+        let buf = bufs.add(i as usize * 4096);
+        memset(buf as *mut void, truncate<i32>(0x10 + i), 4096);
+        let b = nthBio(bios, i);
+        fillBio(b, bd, BIO_WRITE, i as u64 * 8, 8, buf as *mut void, countDone);
+        if (blk_submit(b) != 0) {
+            return failed(reason, "check failed: blk_submit(&bios[i]) == 0\0"); // never -EAGAIN
+        }
+    }
+    if (dev(bd).requeued - requeued0 != (QUEUED - 2) as u64) {
+        return failed(reason, "check failed: bd->requeued - requeued0 == N - 2\0");
+    }
+    ramblk_set_stall(bd, false);
+    waitDone(QUEUED);
+    if (doneCount() != QUEUED || doneStatus() != 0) {
+        return failed(reason, "check failed: g_done_count == N && g_done_status == 0\0");
+    }
+    if (dev(bd).requeued - requeued0 != (QUEUED - 2) as u64) {
+        return failed(reason, "check failed: bd->requeued - requeued0 == N - 2\0");
+    }
+    let back = kmalloc(4096, 0) as *mut u8;
+    if (back.isNull()) {
+        return failed(reason, "check failed: back != NULL\0");
+    }
+    for (i in 0..QUEUED) {
+        if (blk_read(bd, i as u64 * 8, 8, back as *mut void) != 0) {
+            return failed(reason, "check failed: blk_read(bd, i * 8, 8, back) == 0\0");
+        }
+        let want = truncate<u8>(0x10 + i);
+        if (back.read() != want || back.add(4095).read() != want) {
+            return failed(reason, "check failed: back[0] == 0x10 + i && back[4095] == 0x10 + i\0"); // in order, none lost
+        }
+    }
+    kfree(back as *mut void);
+    kfree(bufs as *mut void);
+    kfree(bios as *mut void);
+
+    // The lost wakeup (found by the USB storage driver, which refuses every bio while one exchange is in flight). One
+    // slot; A in flight, B and C queued. A's completion drains: B is accepted, then C is refused -- and inside that
+    // refusal B completes (the driver knob makes the completion synchronous; on real hardware it is another CPU's
+    // interrupt in the same window). B's completion drains an empty queue -- C is in the drainer's hands -- and finds
+    // nothing. The drainer then puts C back: with nothing in flight, nobody will ever drain it again unless the layer
+    // notices, which it does (blkdev.redrained). C must complete.
+    ramblk_set_deferred(bd, 0); // the limit is set at the worker's start: leave deferred mode, re-enter with one slot
+    ramblk_set_deferred(bd, 1);
+    ramblk_set_stall(bd, true);
+    let abc = kzalloc(3 * layoutOf<bio>().size) as *mut bio;
+    let abcbuf = kmalloc(3 * 4096, KMEM_ZERO) as *mut u8;
+    if (abc.isNull() || abcbuf.isNull()) {
+        kfree(abc as *mut void);
+        kfree(abcbuf as *mut void);
+        return failed(reason, "check failed: abcbuf != NULL\0");
+    }
+    resetDone();
+    for (i in 0..3u32) {
+        let b = nthBio(abc, i);
+        fillBio(b, bd, BIO_WRITE, 200 + i as u64 * 8, 8, abcbuf.add(i as usize * 4096) as *mut void, countDone);
+        if (blk_submit(b) != 0) {
+            return failed(reason, "check failed: blk_submit(&abc[i]) == 0\0");
+        }
+    }
+    if (doneCount() != 0) {
+        return failed(reason, "check failed: g_done_count == 0\0"); // A held by the stall; B and C queued
+    }
+    let redrained0 = dev(bd).redrained;
+    ramblk_set_refuse_completes(bd, true);
+    // A completes: the drain accepts B, refuses C, and B completes inside the refusal.
+    if (!ramblk_complete_one(bd)) {
+        return failed(reason, "check failed: ramblk_complete_one(bd)\0");
+    }
+    ramblk_set_refuse_completes(bd, false);
+    if (doneCount() != 2) {
+        return failed(reason, "check failed: g_done_count == 2\0"); // A and B
+    }
+    if (dev(bd).redrained != redrained0 + 1) {
+        // the layer noticed the empty in-flight list and tried C again
+        return failed(reason, "check failed: bd->redrained == redrained0 + 1\0");
+    }
+    ramblk_set_stall(bd, false); // C, accepted on the retry, completes on the worker
+    waitDone(3);
+    if (doneCount() != 3 || doneStatus() != 0) {
+        return failed(reason, "check failed: g_done_count == 3 && g_done_status == 0\0");
+    }
+    kfree(abcbuf as *mut void);
+    kfree(abc as *mut void);
+    ramblk_set_deferred(bd, 0);
+    ramblk_set_deferred(bd, 2);
+
+    // A flagged write in the deferred mode: flush, write, flush in the recorded stream, one completion for the caller.
+    ramblk_record_start(bd, 16);
+    var page = kmalloc(4096, KMEM_ZERO) as *mut u8;
+    if (page.isNull()) {
+        return failed(reason, "check failed: page != NULL\0");
+    }
+    memset(page as *mut void, 0x77, 4096);
+    if (blk_write_flags(bd, 128, 8, page as *void, BIO_PREFLUSH | BIO_FUA) != 0) {
+        return failed(reason, "check failed: blk_write_flags(bd, 128, 8, page, BIO_PREFLUSH | BIO_FUA) == 0\0");
+    }
+    var log = ramblk_record_stop(bd);
+    if (log.isNull() || entries(log) != 3) {
+        return failed(reason, "check failed: log != NULL && log->n == 3\0");
+    }
+    if (entry(log, 0).nsectors != 0 || entry(log, 1).nsectors != 8 || entry(log, 1).sector != 128 ||
+        entry(log, 2).nsectors != 0) {
+        return failed(reason, "check failed: the log is flush, the write at 128, flush\0");
+    }
+    ramblk_log_free(log);
+    kfree(page as *mut void);
+    ramblk_set_deferred(bd, 0);
+
+    // The caller's `arg` survives a flagged write (the sequence borrows the field and gives it back; Greptile on PR
+    // #22).
+    let flagged = kzalloc(layoutOf<bio>().size) as *mut bio;
+    let flaggedBuf = kmalloc(4096, KMEM_ZERO);
+    if (flagged.isNull() || flaggedBuf.isNull()) {
+        kfree(flagged as *mut void);
+        kfree(flaggedBuf);
+        return failed(reason, "check failed: flagged.buf != NULL\0");
+    }
+    let marker = flaggedBuf as usize + 1; // an address no one else hands out
+    fillBio(flagged, bd, BIO_WRITE, 144, 8, flaggedBuf, argDone);
+    let f = Ptr.toBorrowMut(flagged);
+    f.flags = BIO_PREFLUSH | BIO_FUA;
+    f.arg = marker as *mut void;
+    let doneWanted = Ptr.toBorrow(flagged as *bio).done as usize; // arg_done
+    ARG_SEEN.store(0);
+    DONE_COUNT.store(0);
+    if (blk_submit(flagged) != 0) {
+        return failed(reason, "check failed: blk_submit(&flagged) == 0\0");
+    }
+    waitDone(1);
+    let back1 = Ptr.toBorrow(flagged as *bio);
+    if (doneCount() != 1 || ARG_SEEN.load() != marker || back1.arg as usize != marker ||
+        back1.done as usize != doneWanted) {
+        return failed(
+            reason,
+            "check failed: g_done_count == 1 && g_arg_seen == &marker && flagged.arg == &marker && flagged.done == arg_done\0",
+        );
+    }
+    kfree(flaggedBuf);
+    kfree(flagged as *mut void);
+
+    // Synchronous mode: flags still mean flush, write, flush; a flagged read or a flagged write past the end is refused
+    // before anything.
+    ramblk_record_start(bd, 16);
+    page = kmalloc(4096, KMEM_ZERO) as *mut u8;
+    if (page.isNull()) {
+        return failed(reason, "check failed: page != NULL\0");
+    }
+    if (blk_write_flags(bd, 136, 8, page as *void, BIO_FUA) != 0) {
+        return failed(reason, "check failed: blk_write_flags(bd, 136, 8, page, BIO_FUA) == 0\0");
+    }
+    log = ramblk_record_stop(bd);
+    if (log.isNull() || entries(log) != 2 || entry(log, 0).nsectors != 8 || entry(log, 1).nsectors != 0) {
+        return failed(
+            reason,
+            "check failed: log != NULL && log->n == 2 && log->w[0].nsectors == 8 && log->w[1].nsectors == 0\0",
+        );
+    }
+    ramblk_log_free(log);
+    let bad = kzalloc(layoutOf<bio>().size) as *mut bio;
+    if (bad.isNull()) {
+        return failed(reason, "check failed: bad != NULL\0");
+    }
+    let b = Ptr.toBorrowMut(bad);
+    b.dev = bd;
+    b.dir = BIO_READ;
+    b.sector = 0;
+    b.nsectors = 8;
+    b.buf = page as *mut void;
+    b.flags = BIO_FUA;
+    b.done = countDone;
+    if (blk_submit(bad) != -EINVAL) {
+        return failed(reason, "check failed: blk_submit(&bad) == -EINVAL (a flagged read)\0");
+    }
+    let b2 = Ptr.toBorrowMut(bad);
+    b2.dir = BIO_WRITE;
+    b2.sector = dev(bd).capacity;
+    if (blk_submit(bad) != -EINVAL) {
+        return failed(reason, "check failed: blk_submit(&bad) == -EINVAL (past the end)\0");
+    }
+    kfree(bad as *mut void);
+    kfree(page as *mut void);
+    let waited = dev(bd).requeued - requeued0; // read before the device goes (the C read it after)
+    ramblk_destroy(bd);
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: blk-queue: ");
+    line.decimal(waited);
+    line.text(" bios waited in the pending queue; flagged writes are flush, write, flush");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- blk-segments ----
+
+/// Page-aligned, DMA-able test memory (kmalloc classes do not promise page alignment).
+/// Safety: `dma` is writable.
+unsafe fn pagesAlloc(n: usize, dma: *mut u64) -> *mut u8 =>
+    dma_alloc(0 as *mut device, n * PAGE_SIZE, dma, DMA_ZERO) as *mut u8;
+
+/// Safety: `bd` is a live blkdev; `b` and `vecs` are the test's.
+unsafe fn submitVecs(b: *mut bio, vecs: *mut bio_vec, n: u32) -> i32 {
+    let o = Ptr.toBorrowMut(b);
+    o.vecs = vecs;
+    o.nr_vecs = n;
+    return blk_submit(b);
+}
+
+/// blk-segments: a three-segment write read back flat and in two whole pages; five refusals (a middle segment not
+/// ending on a page, a later one not starting on one, a wrong total, too many segments, a stack buffer).
+/// Safety: the self-test runner's call; `reason` is its.
+@export("selftest_blk_segments")
+unsafe fn segmentsTest(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return true;
+    }
+    let bd = ramblk_create(64);
+    if (bd.isNull()) {
+        return failed(reason, "check failed: bd != NULL\0");
+    }
+    if (dev(bd).max_segments != 8) {
+        return failed(reason, "check failed: bd->max_segments == 8\0");
+    }
+    var d1: u64 = 0;
+    var d2: u64 = 0;
+    var d3: u64 = 0;
+    let a = pagesAlloc(2, borrow mut d1 as *mut u64);
+    let bb = pagesAlloc(2, borrow mut d2 as *mut u64);
+    let vecs = kzalloc(9 * layoutOf<bio_vec>().size) as *mut bio_vec;
+    let b = kzalloc(layoutOf<bio>().size) as *mut bio;
+    if (a.isNull() || bb.isNull() || vecs.isNull() || b.isNull()) {
+        return failed(reason, "check failed: a != NULL && b != NULL\0");
+    }
+    for (i in 0..2 * PAGE_SIZE) {
+        a.add(i).write(truncate<u8>(i * 3 + 1));
+        bb.add(i).write(truncate<u8>(i * 5 + 2));
+    }
+    // Three segments: half a page (from mid-page), a whole page, half a page: 4 KiB + 4 KiB = 16 sectors.
+    setVec(vecs, 0, a.add(PAGE_SIZE / 2), PAGE_SIZE / 2);
+    setVec(vecs, 1, bb, PAGE_SIZE);
+    setVec(vecs, 2, a.add(PAGE_SIZE), PAGE_SIZE / 2);
+    fillBio(b, bd, BIO_WRITE, 16, 16, 0 as *mut void, countDone);
+    resetDone();
+    if (submitVecs(b, vecs, 3) != 0) {
+        return failed(reason, "check failed: blk_submit(&bio) == 0\0");
+    }
+    if (doneCount() != 1 || doneStatus() != 0) {
+        return failed(reason, "check failed: g_done_count == 1 && g_done_status == 0\0");
+    }
+    // Read back flat and compare segment by segment.
+    let flat = pagesAlloc(2, borrow mut d3 as *mut u64);
+    if (flat.isNull()) {
+        return failed(reason, "check failed: flat != NULL\0");
+    }
+    if (blk_read(bd, 16, 16, flat as *mut void) != 0) {
+        return failed(reason, "check failed: blk_read(bd, 16, 16, flat) == 0\0");
+    }
+    if (memcmp(flat as *void, a.add(PAGE_SIZE / 2) as *void, PAGE_SIZE / 2) != 0 ||
+        memcmp(flat.add(PAGE_SIZE / 2) as *void, bb as *void, PAGE_SIZE) != 0 ||
+        memcmp(flat.add(PAGE_SIZE / 2 + PAGE_SIZE) as *void, a.add(PAGE_SIZE) as *void, PAGE_SIZE / 2) != 0) {
+        return failed(reason, "check failed: the flat read equals the three segments\0");
+    }
+    // And back through segments in another shape (two whole pages).
+    memset(a as *mut void, 0, 2 * PAGE_SIZE);
+    setVec(vecs, 0, a, PAGE_SIZE);
+    setVec(vecs, 1, a.add(PAGE_SIZE), PAGE_SIZE);
+    let r = Ptr.toBorrowMut(b);
+    r.dir = BIO_READ;
+    resetDone();
+    if (submitVecs(b, vecs, 2) != 0 || doneCount() != 1 || doneStatus() != 0) {
+        return failed(reason, "check failed: blk_submit(&bio) == 0 && g_done_count == 1 && g_done_status == 0\0");
+    }
+    if (memcmp(a as *void, flat as *void, 2 * PAGE_SIZE) != 0) {
+        return failed(reason, "check failed: memcmp(a, flat, 2 * PAGE_SIZE) == 0\0");
+    }
+    // Refusals: a middle segment not ending on a page, a later one not starting on one, a wrong total, too many
+    // segments, a stack buffer.
+    setVec(vecs, 0, a, PAGE_SIZE / 2);
+    setVec(vecs, 1, a.add(PAGE_SIZE), PAGE_SIZE + PAGE_SIZE / 2);
+    if (submitVecs(b, vecs, 2) != -EINVAL) {
+        return failed(reason, "check failed: blk_submit(&bio) == -EINVAL (bad1)\0");
+    }
+    setVec(vecs, 0, a, PAGE_SIZE);
+    setVec(vecs, 1, a.add(PAGE_SIZE + 8), PAGE_SIZE - 8);
+    if (submitVecs(b, vecs, 2) != -EINVAL) {
+        return failed(reason, "check failed: blk_submit(&bio) == -EINVAL (bad2)\0");
+    }
+    setVec(vecs, 0, a, PAGE_SIZE);
+    setVec(vecs, 1, a.add(PAGE_SIZE), PAGE_SIZE / 2);
+    if (submitVecs(b, vecs, 2) != -EINVAL) {
+        return failed(reason, "check failed: blk_submit(&bio) == -EINVAL (bad3)\0"); // 12 KiB promised, 6 KiB given
+    }
+    for (i in 0..9u32) {
+        setVec(vecs, i, a, 0);
+    }
+    if (submitVecs(b, vecs, 9) != -EINVAL) {
+        return failed(reason, "check failed: blk_submit(&bio) == -EINVAL (many)\0");
+    }
+    var stackbuf = [0u8; 512];
+    setVec(vecs, 0, borrow mut stackbuf as *mut [u8; 512] as *mut u8, 512);
+    let one = Ptr.toBorrowMut(b);
+    one.nsectors = 1;
+    if (submitVecs(b, vecs, 1) != -EINVAL) {
+        return failed(reason, "check failed: blk_submit(&bio) == -EINVAL (bad4)\0");
+    }
+    dma_free(0 as *mut device, 2 * PAGE_SIZE, a as *mut void, d1);
+    dma_free(0 as *mut device, 2 * PAGE_SIZE, bb as *mut void, d2);
+    dma_free(0 as *mut device, 2 * PAGE_SIZE, flat as *mut void, d3);
+    kfree(vecs as *mut void);
+    kfree(b as *mut void);
+    ramblk_destroy(bd);
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: blk-segments: three-segment write read back flat and in two pages; five refusals",
+    );
+    return true;
+}
+
+// ---- blk-timeout and blk-timeout-skew ----
+
+/// blk-timeout: a stalled request returns -ETIMEDOUT after the device's timeout; a fresh one completes once the
+/// device recovers.
+/// Safety: the self-test runner's call; `reason` is its.
+@export("selftest_blk_timeout")
+unsafe fn timeoutTest(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return true;
+    }
+    let bd = ramblk_create(16);
+    if (bd.isNull()) {
+        return failed(reason, "check failed: bd != NULL\0");
+    }
+    if (dev(bd).timeout_ns != BLK_TIMEOUT_NS) {
+        return failed(reason, "check failed: bd->timeout_ns == BLK_TIMEOUT_NS\0");
+    }
+    setTimeout(bd, 300 * MS); // 300 ms for the test
+    ramblk_set_deferred(bd, 4);
+    ramblk_set_stall(bd, true); // a silent device
+    let page = kmalloc(4096, KMEM_ZERO);
+    if (page.isNull()) {
+        return failed(reason, "check failed: page != NULL\0");
+    }
+    let t0 = clock_now_ns();
+    let timeouts0 = dev(bd).timeouts;
+    let rc = blk_read(bd, 0, 8, page); // would block for ever without the timeout
+    let tookMs = clock_since_ns(t0) / MS;
+    if (rc != -ETIMEDOUT) {
+        return failed(reason, "check failed: rc == -ETIMEDOUT\0");
+    }
+    if (dev(bd).timeouts != timeouts0 + 1) {
+        return failed(reason, "check failed: bd->timeouts == timeouts0 + 1\0");
+    }
+    if (tookMs < 300 || tookMs >= 3000) {
+        return failed(reason, "check failed: took_ms >= 300 && took_ms < 3000\0");
+    }
+    // The device recovers for the test's sake: a fresh request completes.
+    ramblk_set_stall(bd, false);
+    if (blk_read(bd, 0, 8, page) != 0) {
+        return failed(reason, "check failed: blk_read(bd, 0, 8, page) == 0\0");
+    }
+    ramblk_set_deferred(bd, 0);
+    kfree(page);
+    ramblk_destroy(bd);
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: blk-timeout: a stalled request returned -ETIMEDOUT after ");
+    line.decimal(tookMs);
+    line.text(" ms");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// blk-timeout-skew: a stamp from a CPU that reads ahead of the scanner's must not time the request out
+/// (docs/audit/next-subsystem-cpu-clock.md).
+///
+/// `issued_ns` is stamped by whichever CPU handed the bio to the driver and compared against a `now` read by the
+/// timeout thread on whatever CPU that thread is on. On x86-64 those are two raw TSCs with no correction between them,
+/// so the stamp can be ahead of `now`; a plain `now - issued_ns` then underflows to something near 2^64 ns, larger than
+/// any timeout, and the scan fails every in-flight request on the device at once. The saturating subtraction is what
+/// stops that, and this test injects the skew that would otherwise be a property of the machine.
+///
+/// Phase 2 is what makes phase 1 mean anything: the same device, the same scanner, a timeout short enough, do fire
+/// once the skew is gone, so phase 1's silence is a request that was not timed out rather than a scanner that was
+/// never running.
+/// Safety: the self-test runner's call; `reason` is its.
+@export("selftest_blk_timeout_skew")
+unsafe fn timeoutSkewTest(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return true;
+    }
+    let bd = ramblk_create(16);
+    if (bd.isNull()) {
+        return failed(reason, "check failed: bd != NULL\0");
+    }
+    // The device's timeout has to outlast the window this test watches, or the request is genuinely overdue and the
+    // scan backstop times it out for an honest reason. Five seconds against three 500 ms scans: the backstop can vouch
+    // for at most a second of that.
+    setTimeout(bd, 5000 * MS);
+    ramblk_set_deferred(bd, 4);
+    ramblk_set_stall(bd, true); // nothing completes on its own
+    let page = kmalloc(4096, KMEM_ZERO);
+    let b = kzalloc(layoutOf<bio>().size) as *mut bio;
+    if (page.isNull() || b.isNull()) {
+        kfree(page);
+        kfree(b as *mut void);
+        return failed(reason, "check failed: page != NULL\0");
+    }
+
+    // Phase 1: the issuing CPU's clock reads 10 s ahead of the scanner's.
+    fillBio(b, bd, BIO_READ, 0, 8, page, countDone);
+    resetDone();
+    let timeouts0 = dev(bd).timeouts;
+    blk_test_set_issue_skew_ns(10000 * MS);
+    if (blk_submit(b) != 0) {
+        return failed(reason, "check failed: blk_submit(&bio) == 0\0");
+    }
+    blk_test_set_issue_skew_ns(0); // the stamp is taken; later bios are honest
+
+    // The scan runs every 500 ms: three of them.
+    thread_sleep_ns(1700 * MS);
+    if (dev(bd).timeouts != timeouts0) {
+        var buffer = [0u8; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: blk-timeout-skew: a stamp 10 s ahead timed out ");
+        line.decimal(dev(bd).timeouts - timeouts0);
+        line.text(" request(s): the subtraction underflowed");
+        KernelLog.send(LogLevel.Error, line);
+        return failed(reason, "check failed: bd->timeouts == timeouts0\0");
+    }
+    if (doneCount() != 0) {
+        return failed(reason, "check failed: g_done_count == 0\0");
+    }
+
+    // Release it by hand -- the device is still silent.
+    if (!ramblk_complete_one(bd)) {
+        return failed(reason, "check failed: ramblk_complete_one(bd)\0");
+    }
+    var w = 0;
+    while (w < 2000 && doneCount() == 0) {
+        thread_sleep_ns(MS);
+        w += 1;
+    }
+    if (doneCount() != 1) {
+        return failed(reason, "check failed: g_done_count == 1\0");
+    }
+
+    // Phase 2, the control: no skew, and a timeout short enough to fire. Everything else is identical -- same device,
+    // same stalled driver, same scanner.
+    setTimeout(bd, 300 * MS);
+    let timeouts1 = dev(bd).timeouts;
+    if (blk_read(bd, 0, 8, page) != -ETIMEDOUT) {
+        return failed(reason, "check failed: rc == -ETIMEDOUT\0");
+    }
+    if (dev(bd).timeouts != timeouts1 + 1) {
+        return failed(reason, "check failed: bd->timeouts == timeouts1 + 1\0");
+    }
+    ramblk_set_stall(bd, false);
+    ramblk_set_deferred(bd, 0);
+    kfree(page);
+    kfree(b as *mut void);
+    ramblk_destroy(bd);
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: blk-timeout-skew: a stamp 10 s ahead of the scanner survived 3 scans of a 5 s timeout; the same device timed out a request without it",
+    );
+    return true;
+}

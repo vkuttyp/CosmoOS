@@ -145,7 +145,7 @@ two direct runs and re-seals the block, and mounts: both reads are
 `-EIO`; before the direct runs were validated on the map fast path the
 first block read as a hole of zeros (Greptile on PR #22).
 
-**`blk-queue`** (`kernel/block/blktest.c`): a RAM device in deferred
+**`blk-queue`** (`kernel/block/blktest.cee`): a RAM device in deferred
 mode with two slots takes eight concurrent writes through `blk_submit`
 without one `-EAGAIN`; all complete in order and six waited in the
 pending queue; a `BIO_PREFLUSH | BIO_FUA` write is recorded as flush,

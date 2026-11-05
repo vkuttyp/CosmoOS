@@ -1,0 +1,398 @@
+// parttest.cee - Partitions as block devices on the RAM disk (part.h; docs/kernel/device/testing.md, "Partitions"), in
+// CeeSafe: roadmap 2.0 SA7. One test, blk-gpt: a table built with gpt_build on a fresh RAM disk is scanned into
+// partition devices named by entry number; a bio is kept inside its partition and lands at the partition's offset; a
+// partition in use cannot be rescanned away; each way of damaging a table (either header, either entry array,
+// overlapping entries) is refused and leaves the disk with no partitions; removing the disk removes them. The RAM disk
+// is the debug build's, so the test passes at once in the others, as the C's #if did.
+//
+// The table's two entries and the partition's info live in kzalloc'd memory where the C kept them on the stack: a
+// CeeSafe local cannot hold C state (CeeSafe's type-system.md §33.1).
+
+@header("kernel/blk.h", "kernel/compiler.h", "kernel/gpt.h", "kernel/part.h", "kernel/ramblk.h", "kernel/selftest.h", "kernel/string.h")
+extern "C" {
+    struct blkdev {
+        obj: kobject;
+        name: [u8; 16];
+        sector_size: u32;
+        capacity: u64;
+    }
+    @ctype("blk_part_info_t")
+    struct PartInfo {
+        disk: [u8; 16];
+        index: u32;
+        start: u64;
+        uuid: [u8; 16];
+        @cname ("type") kind: [u8; 16];
+    }
+    struct gpt_build_part {
+        index: u32;
+        first_lba: u64;
+        last_lba: u64;
+        @cname ("type") kind: [u8; 16];
+        uuid: [u8; 16];
+    }
+
+    /// compiler.h: whether this is a debug build (CONFIG_DEBUG).
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+    fn blk_read(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *mut void) -> i32;
+    fn blk_write(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *void) -> i32;
+    fn blk_flush(bd: *mut blkdev) -> i32;
+    fn blk_find(name: *CChar) -> *mut blkdev;
+    fn blk_part_scan(disk: *mut blkdev, nparts: *mut u32) -> i32;
+    fn blk_is_partition(bd: *blkdev) -> bool;
+    fn blk_part_info(bd: *blkdev, out: *mut PartInfo) -> bool;
+    fn blk_find_partuuid(uuid: *u8) -> *mut blkdev;
+    fn gpt_build(
+        ss: u32, nsectors: u64, diskGuid: *u8, parts: *gpt_build_part, nparts: u32, head: *mut u8,
+        tail: *mut u8,
+    ) -> bool;
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn kzalloc(size: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+}
+
+/// The build's CONFIG_DEBUG, folded by the C compiler: without the RAM disk the test passes at once.
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
+
+// ---- errno.h, kmalloc.h and gpt.h values (asserted in blk_floor.c) ----
+
+const EINVAL: i32 = 22;
+const EBUSY: i32 = 16;
+const KMEM_ZERO: u32 = 1;
+const SS: u32 = 512;
+const DISK_SECTORS: u64 = 512; // ramblk_create(64): 64 blocks of 4 KiB
+/// GPT_BUILD_ARRAY_SECTORS(512), GPT_BUILD_HEAD_SECTORS(512) and GPT_BUILD_TAIL_SECTORS(512).
+const ARRAY_SECTORS: u64 = 32;
+const HEAD_SECTORS: u32 = 34;
+const TAIL_SECTORS: u32 = 33;
+const DISK_GUID: [u8; 16] = [0x11, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+/// gpt.h's gpt_type_esp and gpt_type_cosmo_root, gpt.cee's bytes (a C array is not imported).
+const TYPE_ESP: [u8; 16] = [
+    0x28,
+    0x73,
+    0x2a,
+    0xc1,
+    0x1f,
+    0xf8,
+    0xd2,
+    0x11,
+    0xba,
+    0x4b,
+    0x00,
+    0xa0,
+    0xc9,
+    0x3e,
+    0xc9,
+    0x3b,
+];
+const TYPE_COSMO_ROOT: [u8; 16] =
+    [0x24, 0x92, 0xb0, 0xc9, 0x0d, 0xe0, 0x8e, 0x41, 0x84, 0x6a, 0x9f, 0x1d, 0x9a, 0x61, 0xbf, 0xd5];
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// The test's buffers and C records, allocated once: the caller frees them, so an early return leaks nothing.
+struct Buffers {
+    head: *mut u8;
+    tail: *mut u8;
+    sec: *mut u8;               // two sectors; DMA-able: kmalloc, not the image's BSS
+    parts: *mut gpt_build_part; // two
+    info: *mut PartInfo;
+}
+
+/// The two entries: the ESP at 40..`p1Last` in entry 1, the root at 100..299 in entry 3 (entry 2 unused: names follow
+/// the entry, not the count).
+/// Safety: `parts` holds two entries.
+unsafe fn partTemplate(parts: *mut gpt_build_part, p1Last: u64) {
+    memset(parts as *mut void, 0, 2 * layoutOf<gpt_build_part>().size);
+    let p0 = Ptr.toBorrowMut(parts);
+    p0.index = 1;
+    p0.first_lba = 40;
+    p0.last_lba = p1Last;
+    p0.kind = TYPE_ESP;
+    for (i in 0..16usize) {
+        p0.uuid[i] = truncate<u8>(0xA0 + i);
+    }
+    let p1 = Ptr.toBorrowMut(parts.add(1));
+    p1.index = 3;
+    p1.first_lba = 100;
+    p1.last_lba = 299;
+    p1.kind = TYPE_COSMO_ROOT;
+    for (i in 0..16usize) {
+        p1.uuid[i] = truncate<u8>(0xC0 + i);
+    }
+}
+
+/// Write a table whose first partition ends at `p1Last` (99 for the good table; past 99 overlaps the second).
+/// Safety: `disk` is a live blkdev; `s` holds the buffers.
+unsafe fn writeTable(disk: *mut blkdev, s: borrow Buffers, p1Last: u64) -> i32 {
+    partTemplate(s.parts, p1Last);
+    if (!gpt_build(SS, DISK_SECTORS, DISK_GUID[..].ptr, s.parts as *gpt_build_part, 2, s.head, s.tail)) {
+        return -EINVAL;
+    }
+    var rc = blk_write(disk, 0, HEAD_SECTORS, s.head as *void);
+    if (rc == 0) {
+        rc = blk_write(disk, DISK_SECTORS - TAIL_SECTORS as u64, TAIL_SECTORS, s.tail as *void);
+    }
+    return rc;
+}
+
+/// Flip one byte of sector `lba` in place.
+/// Safety: `disk` is a live blkdev; `sec` holds a sector.
+unsafe fn corrupt(disk: *mut blkdev, lba: u64, off: usize, sec: *mut u8) -> i32 {
+    var rc = blk_read(disk, lba, 1, sec as *mut void);
+    if (rc == 0) {
+        sec.add(off).write(sec.add(off).read() ^ 0x5A);
+        rc = blk_write(disk, lba, 1, sec as *void);
+    }
+    return rc;
+}
+
+/// Whether a device named `name` is registered.
+/// Safety: `name` is a C string.
+unsafe fn exists(name: *CChar) -> bool {
+    let b = blk_find(name);
+    if (!b.isNull()) {
+        kobject_put(borrow mut Ptr.toBorrowMut(b).obj as *mut kobject);
+    }
+    return !b.isNull();
+}
+
+/// A name, NUL-terminated, as a C string's address.
+/// Safety: `name` lives while the result is used.
+unsafe fn cName(name: borrow [u8; 16]) -> *CChar => name as *[u8; 16] as *CChar;
+
+/// Safety: `bd` is a referenced blkdev, released here.
+unsafe fn blkdevPut(bd: *mut blkdev) {
+    kobject_put(borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject);
+}
+
+/// Whether two GUIDs are byte for byte the same.
+fn same(a: [u8; 16], b: [u8; 16]) -> bool {
+    for (i in 0..16usize) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// One way to damage a good table: a byte of sector `lba` at `off`.
+struct Damage {
+    lba: u64;
+    off: usize;
+}
+
+/// What the i'th damage case breaks, for the failure line.
+fn damageName(i: usize) -> StringView =>
+    match (i) {
+        0 => "primary header",
+        1 => "primary entry array",
+        2 => "backup header",
+        _ => "backup entry array",
+    };
+
+/// Everything but the disk's removal; the caller owns the buffers and the disk.
+/// Safety: `disk` is a live RAM disk of DISK_SECTORS sectors of SS bytes; `s` holds the buffers.
+unsafe fn gptBody(
+    disk: *mut blkdev,
+    s: borrow Buffers,
+    n1: borrow [u8; 16],
+    n2: borrow [u8; 16],
+    n3: borrow [u8; 16],
+    reason: *mut *CChar,
+) -> bool {
+    // A blank disk has no table, which is not an error.
+    var n: u32 = 99;
+    if (blk_part_scan(disk, borrow mut n as *mut u32) != 0 || n != 0 || exists(cName(n1))) {
+        return failed(reason, "check failed: blk_part_scan(disk, &n) == 0 && n == 0 && !exists(n1)\0");
+    }
+
+    // The good table: two partitions, named by entry.
+    if (writeTable(disk, s, 99) != 0) {
+        return failed(reason, "check failed: write_table(disk, head, tail, 99) == 0\0");
+    }
+    if (blk_part_scan(disk, borrow mut n as *mut u32) != 0 || n != 2) {
+        return failed(reason, "check failed: blk_part_scan(disk, &n) == 0 && n == 2\0");
+    }
+    if (!exists(cName(n1)) || exists(cName(n2)) || !exists(cName(n3))) {
+        return failed(reason, "check failed: exists(n1) && !exists(n2) && exists(n3)\0");
+    }
+    let p1 = blk_find(cName(n1));
+    let p3 = blk_find(cName(n3));
+    var ok = !p1.isNull() && !p3.isNull() && Ptr.toBorrow(p1 as *blkdev).capacity == 60 &&
+        Ptr.toBorrow(p3 as *blkdev).capacity == 200 && blk_is_partition(p3 as *blkdev) &&
+        !blk_is_partition(disk as *blkdev);
+    ok = ok && blk_part_info(p3 as *blkdev, s.info);
+    if (ok) {
+        let info = Ptr.toBorrow(s.info as *PartInfo);
+        let diskName = Ptr.toBorrow(disk as *blkdev).name;
+        let infoDisk = info.disk;
+        ok = info.index == 3 && info.start == 100 && strcmp(cName(borrow infoDisk), cName(borrow diskName)) == 0 &&
+            same(info.kind, TYPE_COSMO_ROOT);
+    }
+    let uuid = Ptr.toBorrow(s.info as *PartInfo).uuid;
+    let byId = if (ok) blk_find_partuuid(cName(borrow uuid) as *u8) else 0 as *mut blkdev;
+    ok = ok && byId == p3;
+    if (!byId.isNull()) {
+        blkdevPut(byId);
+    }
+
+    // Bounds (D16): the last sector of p1 is its own; one past, or a request that runs past, is refused before any
+    // translation.
+    let sec = s.sec as *mut void;
+    ok = ok && blk_read(p1, 59, 1, sec) == 0;
+    ok = ok && blk_read(p1, 60, 1, sec) == -EINVAL;
+    ok = ok && blk_read(p1, 59, 2, sec) == -EINVAL;
+    ok = ok && blk_read(p3, 200, 1, sec) == -EINVAL;
+
+    // Translation: p3's sector 0 is the disk's sector 100, and p1's last write does not reach p3.
+    if (ok) {
+        memset(sec, 0x3C, SS as usize);
+        ok = blk_write(p3, 0, 1, sec as *void) == 0 && blk_flush(p3) == 0;
+        memset(sec, 0xC3, SS as usize);
+        ok = ok && blk_write(p1, 59, 1, sec as *void) == 0 && blk_read(disk, 99, 2, sec) == 0;
+        let b = s.sec;
+        ok = ok && b.read() == 0xC3 && b.add(SS as usize - 1).read() == 0xC3 && b.add(SS as usize).read() == 0x3C &&
+            b.add(2 * SS as usize - 1).read() == 0x3C;
+    }
+
+    // In use: a partition someone holds is not rescanned away.
+    ok = ok && blk_part_scan(disk, borrow mut n as *mut u32) == -EBUSY && exists(cName(n1));
+    if (!p1.isNull()) {
+        blkdevPut(p1);
+    }
+    if (!p3.isNull()) {
+        blkdevPut(p3);
+    }
+    if (!ok) {
+        return failed(reason, "check failed: ok\0");
+    }
+    if (blk_part_scan(disk, borrow mut n as *mut u32) != 0 || n != 2) {
+        return failed(reason, "check failed: blk_part_scan(disk, &n) == 0 && n == 2\0");
+    }
+
+    // Damage, each case on a fresh good table; every refusal leaves the disk with no partitions.
+    let damage = [
+        Damage { lba: 1, off: 40 },
+        Damage { lba: 2, off: 16 },
+        Damage { lba: DISK_SECTORS - 1, off: 40 },
+        Damage { lba: DISK_SECTORS - 1 - ARRAY_SECTORS, off: 16 },
+    ];
+    for (i in 0..damage.length) {
+        if (writeTable(disk, s, 99) != 0) {
+            return failed(reason, "check failed: write_table(disk, head, tail, 99) == 0\0");
+        }
+        if (blk_part_scan(disk, borrow mut n as *mut u32) != 0 || n != 2) {
+            return failed(reason, "check failed: blk_part_scan(disk, &n) == 0 && n == 2\0");
+        }
+        if (corrupt(disk, damage[i].lba, damage[i].off, s.sec) != 0) {
+            return failed(reason, "check failed: corrupt(disk, damage[i].lba, damage[i].off, sec) == 0\0");
+        }
+        if (blk_part_scan(disk, borrow mut n as *mut u32) != -EINVAL || n != 0 || exists(cName(n1)) ||
+            exists(cName(n3))) {
+            var buffer = [0u8; 96];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("selftest: blk-gpt: a damaged ");
+            line.text(damageName(i));
+            line.text(" was not refused");
+            KernelLog.send(LogLevel.Error, line);
+            return failed(reason, "a damaged table was accepted\0");
+        }
+    }
+    // Overlapping entries under valid checksums: refused too.
+    if (writeTable(disk, s, 120) != 0) {
+        return failed(reason, "check failed: write_table(disk, head, tail, 120) == 0\0");
+    }
+    if (blk_part_scan(disk, borrow mut n as *mut u32) != -EINVAL || n != 0 || exists(cName(n1))) {
+        return failed(reason, "check failed: blk_part_scan(disk, &n) == -EINVAL && n == 0 && !exists(n1)\0");
+    }
+
+    // A good table again, for the removal the caller checks.
+    if (writeTable(disk, s, 99) != 0) {
+        return failed(reason, "check failed: write_table(disk, head, tail, 99) == 0\0");
+    }
+    if (blk_part_scan(disk, borrow mut n as *mut u32) != 0 || n != 2) {
+        return failed(reason, "check failed: blk_part_scan(disk, &n) == 0 && n == 2\0");
+    }
+    return true;
+}
+
+/// The disk's name and the partition number: "<disk><n>".
+fn partName(disk: borrow [u8; 16], n: u8) -> [u8; 16] {
+    var name = [0u8; 16];
+    var len: usize = 0;
+    while (len < 16 && disk[len] != 0) {
+        len += 1;
+    }
+    var w = TextWriter.create(mut name[..]);
+    w.bytes(disk[..len]);
+    w.byte(48 + n); // '0' + n
+    return name;
+}
+
+/// blk-gpt (part.h; docs/kernel/device/testing.md, "Partitions").
+/// Safety: the self-test runner's call; `reason` is its.
+@export("selftest_blk_gpt")
+unsafe fn gptTest(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return true;
+    }
+    let disk = ramblk_create(64);
+    if (disk.isNull()) {
+        return failed(reason, "check failed: disk != NULL\0");
+    }
+    let diskName = Ptr.toBorrow(disk as *blkdev).name;
+    let n1 = partName(diskName, 1);
+    let n2 = partName(diskName, 2);
+    let n3 = partName(diskName, 3);
+    let s = Buffers {
+        head: kmalloc(HEAD_SECTORS as usize * SS as usize, KMEM_ZERO) as *mut u8,
+        tail: kmalloc(TAIL_SECTORS as usize * SS as usize, KMEM_ZERO) as *mut u8,
+        sec: kmalloc(2 * SS as usize, KMEM_ZERO) as *mut u8,
+        parts: kzalloc(2 * layoutOf<gpt_build_part>().size) as *mut gpt_build_part,
+        info: kzalloc(layoutOf<PartInfo>().size) as *mut PartInfo,
+    };
+    var ok = false;
+    if (s.head.isNull() || s.tail.isNull() || s.sec.isNull() || s.parts.isNull() || s.info.isNull()) {
+        ok = failed(reason, "out of memory\0");
+    } else if (Ptr.toBorrow(
+        disk as *blkdev,
+    ).sector_size != SS || Ptr.toBorrow(disk as *blkdev).capacity != DISK_SECTORS) {
+        ok = failed(reason, "the RAM disk is not 512 sectors of 512 bytes\0");
+    } else {
+        ok = gptBody(disk, borrow s, borrow n1, borrow n2, borrow n3, reason);
+    }
+    kfree(s.head as *mut void);
+    kfree(s.tail as *mut void);
+    kfree(s.sec as *mut void);
+    kfree(s.parts as *mut void);
+    kfree(s.info as *mut void);
+    // Removing the disk removes its partitions (D17).
+    ramblk_destroy(disk);
+    if (!ok) {
+        return false;
+    }
+    if (exists(cName(borrow n1)) || exists(cName(borrow n3))) {
+        return failed(reason, "check failed: !exists(n1) && !exists(n3)\0");
+    }
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: blk-gpt: 2 partitions by entry number, bounds and offset held, busy rescan refused, 4 damaged copies and an overlap refused, partitions gone with their disk",
+    );
+    return true;
+}

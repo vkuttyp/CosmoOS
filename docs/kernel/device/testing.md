@@ -159,13 +159,13 @@ while the finder holds it; the finder's put runs it exactly once
 
 ### `blk-queue`
 
-`kernel/block/blktest.c`, on the RAM block device in deferred mode
+`kernel/block/blktest.cee`, on the RAM block device in deferred mode
 (`ramblk_set_deferred`): the pending queue and the bio flags
 (`docs/kernel-services/vfs/testing.md`).
 
 ### `blk-segments`
 
-`kernel/block/blktest.c`: a three-segment write (half a page from
+`kernel/block/blktest.cee`: a three-segment write (half a page from
 mid-page, a whole page, half a page) on the RAM device reads back flat
 and byte-exact, then back into two whole-page segments; a middle segment
 not ending on a page, a later one not starting on one, a wrong total,
@@ -174,7 +174,7 @@ nine segments against `max_segments` 8, and a stack buffer are each
 
 ### `blk-timeout`
 
-`kernel/block/blktest.c`: the RAM device in deferred mode with
+`kernel/block/blktest.cee`: the RAM device in deferred mode with
 `ramblk_set_stall` (the worker completes nothing) and a 300 ms
 `timeout_ns`: `blk_read` returns `-ETIMEDOUT` between 300 ms and 3 s,
 `timeouts` grew by one (the `blk-timeout` thread called the driver's
@@ -183,7 +183,7 @@ completes.
 
 ### `blk-gpt`
 
-`kernel/block/parttest.c`: on a fresh 512-sector RAM disk, a blank disk
+`kernel/block/parttest.cee`: on a fresh 512-sector RAM disk, a blank disk
 scans to no partitions without error; a table from `gpt_build` with
 entries 1 and 3 registers `<disk>1` (60 sectors) and `<disk>3` (200) and
 no `<disk>2`; `blk_part_info` and `blk_find_partuuid` agree; sector 59 of

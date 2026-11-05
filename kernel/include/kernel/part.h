@@ -57,6 +57,9 @@ struct blk_part_info {
     uint8_t uuid[16];        /* on-disk byte order (gpt.h) */
     uint8_t type[16];
 };
+/* Its name as a typedef: CeeSafe has one name for a struct and the function
+ * below, so parttest.cee imports the struct under this one. */
+typedef struct blk_part_info blk_part_info_t;
 
 /* False when `bd` is not a partition. */
 bool blk_part_info(const struct blkdev *bd, struct blk_part_info *out);

@@ -1216,6 +1216,15 @@ for it). `struct blkdev` and `struct bio` stay C, every driver filling
 them; the synchronous helpers keep their bio and completion in a zeroed
 stack slot of words, checked against their C size, since a CeeSafe local
 cannot hold C state; `blk_floor.c` keeps the module exports.
+`blktest.cee` and `parttest.cee`: the block layer's five self-tests
+(blk-queue, blk-segments, blk-timeout, blk-timeout-skew, blk-gpt), each
+exported in every build and passing at once outside the debug build, as
+SA6's skips do; their lines in the boot log are the C's (timings aside).
+Their bios and tables live in kzalloc'd memory where the C kept them on
+the stack, and `struct blk_part_info`, named like the function that fills
+it, is read as bytes at offsets `blk_floor.c` asserts. blk-queue's count
+is read before the RAM disk goes; the C read it after `ramblk_destroy`.
+`kernel/block/` has no C left but `blk_floor.c`.
 
 Size: about 4.5x.
 

@@ -71,6 +71,10 @@ PORTS = [
     ("kernel/block/blk.cee", "kernel/block/blk.c",
      "The block layer: the registry, bio checks, the pending queue, timeouts, resets, unregistration, the flush "
      "sequences, the synchronous helpers (blk.h)", None, True),
+    ("kernel/block/blktest.cee", "kernel/block/blktest.c",
+     "The block layer's self-tests: blk-queue, blk-segments, blk-timeout, blk-timeout-skew", None, True),
+    ("kernel/block/parttest.cee", "kernel/block/parttest.c",
+     "The partitions' self-test: blk-gpt", None, True),
     ("kernel/block/part.cee", "kernel/block/part.c",
      "Partitions as block devices: the scan, the forwarding driver, removal and the lookups (part.h)",
      "kernel/include/kernel/part_types.h", True),
