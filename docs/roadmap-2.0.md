@@ -1137,7 +1137,11 @@ net-netif-flags, net-tap-release-order (debug-only) and
 net-syncookie-seeded (CONFIG_SELFTEST-only), the C's skips kept; tap.h's
 after-purge seam is two C variables CeeSafe cannot assign, so `nettest.c`
 gains `nettest_tap_set_after_purge`, and the toggler's and the seam's state
-are static.
+are static. Batch 20, `nettest_nat.cee`: net-nat (UDP,
+TCP and ICMP masqueraded and restored, an ICMP error translated back,
+anti-spoof, the guest's share, expiry) and net-second-nic, the frames and
+read-back headers in rooms; `find_other_interface` stays in `nettest.c`
+for net-nicbench.
 
 Size: about 3.0x.
 

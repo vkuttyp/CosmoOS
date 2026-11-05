@@ -1419,14 +1419,8 @@ bool selftest_net_bench(const char **reason)
     return true;
 }
 
-/* --- a second interface (docs/drivers/e1000e/testing.md) -----------------------
- *
- * The half of the two-interface question a driver can be checked on:
- * when the default interface goes down, the other becomes the default
- * and carries traffic through its own rings. Written against no driver
- * in particular -- it finds whatever second non-loopback interface the
- * machine has -- because that is the claim being tested.
- */
+/* The first other non-loopback interface, referenced (net-nicbench's second
+ * interface; nettest_nat.cee's net-second-nic has its own). */
 static struct netif *find_other_interface(struct netif *not_this)
 {
     for (unsigned i = 0; i < 16; i++) {
@@ -1440,75 +1434,6 @@ static struct netif *find_other_interface(struct netif *not_this)
         netif_put(n);
     }
     return NULL;
-}
-
-static bool second_nic_body(const char **reason, struct netif *second)
-{
-    /* The other takes over as soon as the first is down. */
-    struct netif *now = netif_default();
-    CHECK(now == second);
-    netif_put(now);
-
-    /* The table is keyed by (interface, address) since N25, so the first
-     * interface's entry for the shared gateway address cannot satisfy
-     * this; only the second's own could, if an earlier test resolved it.
-     * Remove that one, so a frame must cross the second interface. */
-    uint8_t mac[ETH_ALEN];
-    uint32_t gw = second->ip4.gateway;
-    CHECK(gw != 0);
-    arp_delete(second, gw);
-    CHECK(!arp_lookup(second, gw, mac));
-
-    uint64_t rx0 = second->stats.rx_packets, tx0 = second->stats.tx_packets;
-    struct mbuf *m = m_getcl();
-    CHECK(m != NULL);
-    m->len = m->pkt.len = 20;
-    int rc = arp_resolve(second, gw, mac, m);   /* the request leaves through `second` */
-    CHECK(rc == -EINPROGRESS || rc == 0);
-    bool resolved = rc == 0;
-    for (unsigned waited = 0; waited < 2000 && !resolved; waited += 10) {
-        thread_sleep_ms(10);
-        resolved = arp_lookup(second, gw, mac);
-    }
-    CHECK(resolved);   /* the reply came back: a frame out and a frame in through its rings */
-    CHECK(second->stats.tx_packets > tx0);
-    CHECK(second->stats.rx_packets > rx0);
-    return true;
-}
-
-bool selftest_net_second_nic(const char **reason)
-{
-    struct netif *first = netif_default();
-    if (first == NULL) {
-        kinfo("selftest: net-second-nic: no ethernet interface; skipping");
-        return true;
-    }
-    struct netif *second = find_other_interface(first);
-    if (second == NULL) {
-        netif_put(first);
-        kinfo("selftest: net-second-nic: one interface; skipping");
-        return true;
-    }
-    netif_set_up(first, false);
-    bool ok = second_nic_body(reason, second);
-    /* Whatever happened, the machine leaves with its default interface
-     * back: a later test that finds it down would fail for this test's
-     * reason and say nothing about its own. */
-    netif_set_up(first, true);
-    struct netif *again = netif_default();
-    if (ok) {
-        ok = again == first;
-        if (!ok)
-            *reason = "the first interface did not become the default again";
-    }
-    if (again)
-        netif_put(again);
-    if (ok)
-        kinfo("selftest: net-second-nic: %s took over from %s and resolved the gateway through its own rings",
-              second->name, first->name);
-    netif_put(second);
-    netif_put(first);
-    return ok;
 }
 
 /* --- the NIC-path benchmark (design.md, "The NIC-path benchmark") ----------------
@@ -2024,219 +1949,18 @@ _Static_assert(ETH_HLEN == 14 && ICMP_TIME_EXCEEDED == 11 && ICMP_TIMXCEED_INTRA
                INADDR_BROADCAST_N == 0xffffffffu && NS_PER_SEC == 1000000000ull && sizeof(struct udp_hdr) == 8 &&
                sizeof(struct eth_hdr) == 14, "nettest_tap.cee's ether.h, ip.h, tap.h and dhcp.h values");
 
-bool selftest_net_nat(const char **reason)
-{
-    static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x03, 0x00, 0x01 };
-    static const uint8_t u_mac[6]     = { 0x52, 0x54, 0x00, 0x04, 0x00, 0x01 };
-    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x03, 0x00, 0x0f };
-    static const uint8_t peer_mac[6]  = { 0x52, 0x54, 0x00, 0x04, 0x00, 0x63 };
-    uint32_t mask = htonl(0xffffff00u);
-    uint32_t g_ip = IPV4_ADDR(10, 77, 3, 1), guest = IPV4_ADDR(10, 77, 3, 15);
-    uint32_t u_ip = IPV4_ADDR(10, 77, 4, 1), peer = IPV4_ADDR(10, 77, 4, 99);
-
-    struct tap *g = nt_tap_create("natg", g_ip, mask, g_mac);
-    CHECK(g != NULL);
-    struct tap *u = nt_tap_create("natu", u_ip, mask, u_mac);
-    CHECK(u != NULL);
-    netif_set_forward(tap_netif(g), true);
-    netif_set_masquerade(tap_netif(g), true);   /* masquerade flows forwarded from the guest tap */
-    nettest_seed_arp(tap_netif(u), peer, peer_mac);
-    nettest_seed_arp(tap_netif(g), guest, guest_mac);
-    nat_flush();
-
-    uint8_t payload[12];
-    for (unsigned i = 0; i < sizeof(payload); i++)
-        payload[i] = (uint8_t)(0x40 + i);
-    uint8_t frame[256], l4[128], hdr[ETH_HLEN + 20 + 40];
-
-    /* (1) UDP round trip: out masqueraded, reply un-masqueraded. */
-    uint16_t l4len = nettest_mk_udp(l4, guest, peer, 6001, 7001, payload, sizeof(payload));
-    uint32_t flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(tap_inject(g, frame, flen) == 0);
-    struct mbuf *out = nettest_recv_ip(u);
-    CHECK(out != NULL);
-    CHECK(m_copydata(out, 0, ETH_HLEN + 20 + (int)sizeof(payload) + 8, hdr));
-    struct ipv4_hdr *oi = (struct ipv4_hdr *)(hdr + ETH_HLEN);
-    CHECK(oi->src == u_ip && oi->dst == peer && oi->ttl == 63);     /* source masqueraded */
-    uint8_t *ol4 = hdr + ETH_HLEN + 20;
-    uint16_t nat_port = (uint16_t)(ol4[0] << 8 | ol4[1]);           /* the lent source port */
-    CHECK(nat_port >= NAT_PORT_MIN && nat_port <= NAT_PORT_MAX);
-    CHECK((uint16_t)(ol4[2] << 8 | ol4[3]) == 7001);               /* dest port unchanged */
-    CHECK(nettest_l4_ok(u_ip, peer, IPPROTO_UDP, ol4, (uint16_t)(sizeof(struct udp_hdr) + sizeof(payload))));
-    m_freem(out);
-
-    l4len = nettest_mk_udp(l4, peer, u_ip, 7001, nat_port, payload, sizeof(payload));
-    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    struct mbuf *back = nettest_recv_ip(g);
-    CHECK(back != NULL);
-    CHECK(m_copydata(back, 0, ETH_HLEN + 20 + (int)sizeof(payload) + 8, hdr));
-    struct ipv4_hdr *bi = (struct ipv4_hdr *)(hdr + ETH_HLEN);
-    CHECK(bi->src == peer && bi->dst == guest && bi->ttl == 63);    /* delivered to the guest */
-    uint8_t *bl4 = hdr + ETH_HLEN + 20;
-    CHECK((uint16_t)(bl4[2] << 8 | bl4[3]) == 6001);               /* original guest port restored */
-    CHECK(nettest_l4_ok(peer, guest, IPPROTO_UDP, bl4, (uint16_t)(sizeof(struct udp_hdr) + sizeof(payload))));
-    CHECK(memcmp(bl4 + sizeof(struct udp_hdr), payload, sizeof(payload)) == 0);
-    m_freem(back);
-
-    /* (2) TCP SYN out, SYN-ACK back. */
-    l4len = nettest_mk_tcp(l4, guest, peer, 6002, 80, TH_SYN);
-    flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(g, frame, flen) == 0);
-    out = nettest_recv_ip(u);
-    CHECK(out != NULL);
-    CHECK(m_copydata(out, 0, ETH_HLEN + 20 + 20, hdr));
-    ol4 = hdr + ETH_HLEN + 20;
-    uint16_t tcp_nat = (uint16_t)(ol4[0] << 8 | ol4[1]);
-    CHECK(((struct ipv4_hdr *)(hdr + ETH_HLEN))->src == u_ip);
-    CHECK(nettest_l4_ok(u_ip, peer, IPPROTO_TCP, ol4, sizeof(struct tcp_hdr)));
-    m_freem(out);
-
-    l4len = nettest_mk_tcp(l4, peer, u_ip, 80, tcp_nat, TH_SYN | TH_ACK);
-    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_TCP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    back = nettest_recv_ip(g);
-    CHECK(back != NULL);
-    CHECK(m_copydata(back, 0, ETH_HLEN + 20 + 20, hdr));
-    bl4 = hdr + ETH_HLEN + 20;
-    CHECK(((struct ipv4_hdr *)(hdr + ETH_HLEN))->dst == guest);
-    CHECK((uint16_t)(bl4[2] << 8 | bl4[3]) == 6002);
-    CHECK(nettest_l4_ok(peer, guest, IPPROTO_TCP, bl4, sizeof(struct tcp_hdr)));
-    m_freem(back);
-
-    /* (3) ICMP echo out, echo reply back (the id is the NAT identifier). */
-    l4len = nettest_mk_icmp(l4, ICMP_ECHO, 0x4321, 1, payload, sizeof(payload));
-    flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_ICMP, l4, l4len);
-    CHECK(tap_inject(g, frame, flen) == 0);
-    out = nettest_recv_ip(u);
-    CHECK(out != NULL);
-    CHECK(m_copydata(out, 0, ETH_HLEN + 20 + (int)sizeof(payload) + 8, hdr));
-    ol4 = hdr + ETH_HLEN + 20;
-    uint16_t icmp_nat = (uint16_t)(ol4[4] << 8 | ol4[5]);
-    CHECK(((struct ipv4_hdr *)(hdr + ETH_HLEN))->src == u_ip && ol4[0] == ICMP_ECHO);
-    CHECK(in_cksum(ol4, (uint16_t)(sizeof(struct icmp_hdr) + sizeof(payload))) == 0);
-    m_freem(out);
-
-    l4len = nettest_mk_icmp(l4, ICMP_ECHO_REPLY, icmp_nat, 1, payload, sizeof(payload));
-    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_ICMP, l4, l4len);
-    CHECK(tap_inject(u, frame, flen) == 0);
-    back = nettest_recv_ip(g);
-    CHECK(back != NULL);
-    CHECK(m_copydata(back, 0, ETH_HLEN + 20 + (int)sizeof(payload) + 8, hdr));
-    bl4 = hdr + ETH_HLEN + 20;
-    CHECK(((struct ipv4_hdr *)(hdr + ETH_HLEN))->dst == guest && bl4[0] == ICMP_ECHO_REPLY);
-    CHECK((uint16_t)(bl4[4] << 8 | bl4[5]) == 0x4321);            /* original id restored */
-    CHECK(in_cksum(bl4, (uint16_t)(sizeof(struct icmp_hdr) + sizeof(payload))) == 0);
-    m_freem(back);
-
-    /* (4) ICMP error quoting a NAT'd packet is translated back to the guest.
-     * First open a UDP flow, then deliver a dest-unreach whose quote is the
-     * packet we sent out. */
-    nat_flush();
-    l4len = nettest_mk_udp(l4, guest, peer, 6100, 53, payload, sizeof(payload));
-    flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(tap_inject(g, frame, flen) == 0);
-    out = nettest_recv_ip(u);
-    CHECK(out != NULL);
-    CHECK(m_copydata(out, 0, ETH_HLEN + 20 + 8, hdr));
-    ol4 = hdr + ETH_HLEN + 20;
-    uint16_t err_nat = (uint16_t)(ol4[0] << 8 | ol4[1]);
-    m_freem(out);
-    /* Build the ICMP error: [icmp hdr][quoted IP: u_ip->peer UDP][8 bytes of
-     * that UDP: sport=err_nat, dport=53]. */
-    uint8_t icmperr[8 + 20 + 8];
-    memset(icmperr, 0, sizeof(icmperr));
-    icmperr[0] = ICMP_DEST_UNREACH; icmperr[1] = ICMP_UNREACH_PORT;
-    struct ipv4_hdr *q = (struct ipv4_hdr *)(icmperr + 8);
-    q->vhl = 0x45; q->len = htons(20 + 8); q->ttl = 63; q->proto = IPPROTO_UDP;
-    q->src = u_ip; q->dst = peer; q->cksum = in_cksum(q, 20);
-    uint8_t *qudp = icmperr + 8 + 20;
-    qudp[0] = (uint8_t)(err_nat >> 8); qudp[1] = (uint8_t)err_nat;   /* sport = the lent port */
-    qudp[2] = 0; qudp[3] = 53;                                        /* dport */
-    uint16_t *ecs = (uint16_t *)(icmperr + 2);
-    *ecs = 0; *ecs = in_cksum(icmperr, sizeof(icmperr));
-    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_ICMP, icmperr, sizeof(icmperr));
-    CHECK(tap_inject(u, frame, flen) == 0);
-    back = nettest_recv_ip(g);
-    CHECK(back != NULL);
-    CHECK(m_copydata(back, 0, ETH_HLEN + 20 + 8 + 20 + 8, hdr));
-    bi = (struct ipv4_hdr *)(hdr + ETH_HLEN);
-    CHECK(bi->dst == guest && bi->proto == IPPROTO_ICMP);
-    struct ipv4_hdr *iq = (struct ipv4_hdr *)(hdr + ETH_HLEN + 20 + 8);
-    CHECK(iq->src == guest);                                         /* inner src un-NAT'd */
-    uint8_t *iu = hdr + ETH_HLEN + 20 + 8 + 20;
-    CHECK((uint16_t)(iu[0] << 8 | iu[1]) == 6100);                  /* inner source port restored */
-    m_freem(back);
-
-    /* (4b) Anti-spoof: a guest frame sourced from the uplink subnet (not the
-     * guest tap's own) is dropped on forwarding, never masqueraded or
-     * emitted with the forged source. */
-    struct ip_stats is0, is1;
-    ipv4_get_stats(&is0);
-    l4len = nettest_mk_udp(l4, IPV4_ADDR(10, 77, 4, 5), peer, 6200, 53, payload, sizeof(payload));
-    flen = nettest_wrap(frame, g_mac, guest_mac, IPV4_ADDR(10, 77, 4, 5), peer, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(tap_inject(g, frame, flen) == 0);
-    CHECK(nettest_recv_ip(u) == NULL);                             /* forged source never leaves */
-    ipv4_get_stats(&is1);
-    CHECK(is1.fwd_spoofed > is0.fwd_spoofed);
-
-    /* (4c) An ICMP error with a bad checksum is not translated (the normal
-     * receive path would drop it; nat_in must not launder it). Reuse the
-     * error frame but corrupt the ICMP checksum. */
-    *ecs = (uint16_t)(*ecs ^ htons(0x1));
-    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_ICMP, icmperr, sizeof(icmperr));
-    CHECK(tap_inject(u, frame, flen) == 0);
-    CHECK(nettest_recv_ip(g) == NULL);                             /* corrupt error not forwarded */
-
-    /* (5) Share exhaustion: distinct flows fill this guest's quota;
-     * further ones are dropped without consuming another guest's slots. */
-    nat_flush();
-    struct nat_stats ns0, ns1;
-    nat_get_stats(&ns0);
-    const unsigned injected = NAT_TABLE_SIZE + 8;
-    for (unsigned i = 0; i < injected; i++) {
-        l4len = nettest_mk_udp(l4, guest, peer, (uint16_t)(10000 + i), 9, payload, 4);
-        flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_UDP, l4, l4len);
-        CHECK(tap_inject(g, frame, flen) == 0);
-        if ((i & 31) == 31) {                 /* keep the uplink queue drained */
-            struct mbuf *d;
-            while ((d = tap_recv(u)) != NULL)
-                m_freem(d);
-        }
-    }
-    /* nat_flush clears entries, not lifetime counters. Count only this
-     * flood's outcomes: earlier round trips must not let us age the table
-     * while tail packets can still create entries behind that sweep. */
-    for (unsigned i = 0; i < 200; i++) {
-        struct mbuf *d;
-        while ((d = tap_recv(u)) != NULL)
-            m_freem(d);
-        nat_get_stats(&ns1);
-        if ((ns1.out_new - ns0.out_new) + (ns1.out_drop_share - ns0.out_drop_share) >= injected)
-            break;
-        thread_sleep_ms(10);
-    }
-    nat_get_stats(&ns1);
-    CHECK((ns1.out_new - ns0.out_new) + (ns1.out_drop_share - ns0.out_drop_share) == injected);
-    CHECK(ns1.entries == NAT_QUOTA_PER_GUEST);            /* one guest is capped at its quota */
-    CHECK(ns1.out_drop_share > ns0.out_drop_share);      /* new flows dropped once the share is full */
-    CHECK(ns1.out_drop_table == ns0.out_drop_table);      /* the share, not the table: 32 of 256 in use */
-
-    /* (6) Expiry: aging past the timeout reclaims the entries. */
-    nat_get_stats(&ns0);
-    CHECK(ns0.entries > 0);
-    nat_age(clock_now_ns() + 2ull * NAT_TIMEOUT_UDP_NS);
-    nat_get_stats(&ns1);
-    CHECK(ns1.entries == 0 && ns1.expired > ns0.expired);
-
-    nat_flush();
-    nt_tap_destroy(u);
-    nt_tap_destroy(g);
-    kinfo("selftest: net-nat: UDP/TCP/ICMP round trips masqueraded and restored (checksums valid), "
-          "an ICMP error translated back, the guest capped at %u entries and the flood accounted for before expiry",
-          NAT_QUOTA_PER_GUEST);
-    return true;
-}
+/* --- net-nat and net-second-nic: CeeSafe (nettest_nat.cee) -------------
+ *
+ * The values it writes as its own constants: */
+_Static_assert(IPPROTO_ICMP == 1 && IPPROTO_TCP == 6 && IPPROTO_UDP == 17 && ICMP_ECHO_REPLY == 0 &&
+                   ICMP_DEST_UNREACH == 3 && ICMP_UNREACH_PORT == 3 && ICMP_ECHO == 8 && TH_SYN == 0x02 &&
+                   TH_ACK == 0x10 && ETH_HLEN == 14 && sizeof(struct udp_hdr) == 8 && sizeof(struct tcp_hdr) == 20 &&
+                   sizeof(struct icmp_hdr) == 8 && sizeof(struct ipv4_hdr) == 20,
+               "nettest_nat.cee's ip.h, tcp.h and ether.h values");
+_Static_assert(NAT_PORT_MIN == 40000 && NAT_PORT_MAX == 49151 && NAT_TABLE_SIZE == 256 && NAT_QUOTA_PER_GUEST == 32 &&
+                   NAT_TIMEOUT_UDP_NS == 30000000000ull && NETIF_LOOPBACK == 2 && EINPROGRESS == 115 &&
+                   sizeof(struct nat_stats) <= 512 && sizeof(struct ip_stats) <= 512,
+               "nettest_nat.cee's nat.h, netif.h and errno.h values, and its rooms");
 
 /* --- tap-filter, net-dhcp, net-dns: CeeSafe (nettest_tap.cee) ------------ */
 
