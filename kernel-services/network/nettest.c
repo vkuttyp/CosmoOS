@@ -51,22 +51,6 @@
             return false;                                                      \
         }                                                                      \
     } while (0)
-/* The same, for a test whose cleanup follows a do/while(0): records the
- * reason and leaves *that* block. Deliberately not wrapped in a
- * do/while(0) of its own -- the break would leave the wrapper and the
- * check would pass by doing nothing. The `else (void)0` is what makes the
- * trailing semicolon and any enclosing if/else safe.
- *
- * The same reasoning is why this must not be used inside a loop: there
- * the break leaves the loop, and the test continues and can pass with
- * the remaining iterations never run. Review caught exactly that in
- * net-sockerr-spoof, three lines after this comment was written. Inside
- * a loop, count what happened and check the count after it. */
-#define CHECK_BREAK(cond)                                                      \
-    if (!(cond)) {                                                             \
-        *reason = "check failed: " #cond " at line " STR(__LINE__);            \
-        break;                                                                 \
-    } else (void)0
 
 /* --- releases however a test returns (the net-leftover unit) ------------
  *
@@ -977,12 +961,13 @@ bool selftest_net_harness(const char **reason)
     return true;
 }
 
-/* --- interface lifetime ------------------------------------------------------
+/* --- a fake interface --------------------------------------------------------
  *
- * docs/kernel/quiesce/design.md, "Network interfaces": lookups are
- * referenced, unregister stops transmit and receive and purges the
- * queue, and the driver's release runs when the last holder is gone.
+ * One whose transmit counts and frees and whose release counts: the
+ * receive-worker tests below register it, in debug builds only
+ * (nettest_lifetime.cee has its own).
  */
+#if CONFIG_DEBUG
 struct fake_nif {
     struct netif nif;
     unsigned transmits;
@@ -1002,242 +987,37 @@ static void fake_nif_release(struct netif *nif)
     struct fake_nif *f = nif->priv;
     f->releases++;
 }
-
-/* --- net-arp-retry-unregister / net-nd-retry-unregister ------------------- *
- *
- * The window invariant N22 closes, held open on purpose.
- *
- * `arp_age` copies a `struct netif *` out from under the ARP table lock,
- * releases the lock, and then dereferences it in `send_arp`. Between
- * those two points `netif_unregister` can run its flush and drop the
- * registry's reference -- and `age_work` re-arms every second, so the
- * per-CPU barrier in `netif_unregister` does not prevent a retry from
- * starting after it.
- *
- * The test does not race the two and hope. It parks the retry exactly
- * in that window and then runs `netif_unregister` to completion, so the
- * assertion is about a reference count rather than about whether a
- * crash happened to occur. Without the `netif_get` the driver's release
- * hook runs while the retry still holds the pointer, and `releases == 0`
- * below is what fails.
- */
-#if CONFIG_DEBUG
-struct retry_park {
-    volatile unsigned done;
-    uint64_t at_ns;
-};
-
-static void arp_retry_main(void *arg)
-{
-    struct retry_park *p = arg;
-    arp_age(p->at_ns);
-    __atomic_store_n(&p->done, 1u, __ATOMIC_RELEASE);
-}
 #endif
 
+/* --- the interface's lifetime against the neighbour tables -------------- *
+ *
+ * net-arp-retry-unregister, net-nd-retry-unregister, net-arp-flush-counts,
+ * net-nd-flush-counts and net-netif-lifetime are CeeSafe
+ * (nettest_lifetime.cee), with fake interfaces of their own. The two retry
+ * tests need the debug build's park hooks; without them the C's skips stand
+ * here. The values the port writes as its own constants, and its rooms:
+ */
+#if !CONFIG_DEBUG
 bool selftest_net_arp_retry_unregister(const char **reason)
 {
-#if !CONFIG_DEBUG
     (void)reason;
     kinfo("selftest: net-arp-retry-unregister: needs the debug retry hook; skipping");
     return true;
-#else
-    static struct fake_nif f;
-    static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
-    memset(&f, 0, sizeof(f));
-    strlcpy(f.nif.name, "arpref0", sizeof(f.nif.name));
-    f.nif.mtu = 1500;
-    f.nif.ops = &ops;
-    f.nif.priv = &f;
-    f.nif.flags = NETIF_UP | NETIF_NODEFAULT;
-    f.nif.ip4.addr = htonl(0x0a4a0001);          /* 10.74.0.1 */
-    f.nif.ip4.mask = htonl(0xffffff00);
-    CHECK(nt_netif_register(&f.nif) == 0);
-
-    /* One unresolved address on this interface, with a packet behind it. */
-    uint8_t mac[ETH_ALEN];
-    struct mbuf *m = m_getcl();
-    CHECK(m != NULL);
-    CHECK(arp_resolve(&f.nif, htonl(0x0a4a0002), mac, m) == -EINPROGRESS);
-
-    /* Park the next retry batch between its unlock and its send. */
-    arp_test_hold_retry(true);
-    struct retry_park park = { .done = 0, .at_ns = clock_now_ns() + 2ull * NS_PER_SEC };
-    struct thread *t = thread_create(arp_retry_main, &park, "arpretry", SCHED_PRIO_DEFAULT);
-    if (t == NULL) {
-        /* The hook is armed and the interface registered: neither may
-         * outlive a failure here. */
-        arp_test_hold_retry(false);
-        nt_netif_unregister(&f.nif);
-        kobject_put(&f.nif.obj);
-        *reason = "could not create the retry thread";
-        return false;
-    }
-    /* Bounded: a retry that never parks is a failure to report, not a
-     * boot to hang (docs/testing/flakes.md). */
-    uint64_t give_up = clock_now_ns() + 2ull * NS_PER_SEC;
-    while (!arp_test_retry_parked()) {
-        if (clock_now_ns() > give_up) {
-            arp_test_hold_retry(false);
-            arp_test_release_retry();
-            thread_join(t);
-            nt_netif_unregister(&f.nif);
-            kobject_put(&f.nif.obj);
-            *reason = "the ARP retry never parked";
-            return false;
-        }
-        sched_yield();
-    }
-
-    /* The retry holds a reference: creator + registry + retry. */
-    /*
-     * Everything from here runs inside a block whose every exit reaches
-     * the cleanup below, because a retry left parked spins forever in
-     * arp_test_park_retry. A failing assertion that wedges a thread and
-     * leaves an interface registered does not just fail this test -- it
-     * contaminates every test after it, and the failure it reports is
-     * the least of what it did. The bug-proof for this unit takes the
-     * very first of these exits.
-     */
-    bool ok = false;
-    bool unregistered = false;
-    do {
-        CHECK_BREAK(kobject_refcount(&f.nif.obj) == 3);   /* creator + registry + retry */
-
-        /* Tear the interface down completely while the retry is parked. */
-        nt_netif_unregister(&f.nif);
-        unregistered = true;
-
-        /* THE ASSERTION. The registry's reference is gone and the flush
-         * has run, but the retry still holds the pointer -- so the
-         * driver must not have been released. */
-        CHECK_BREAK(f.releases == 0);
-        CHECK_BREAK(kobject_refcount(&f.nif.obj) == 2);   /* creator + retry */
-        ok = true;
-    } while (0);
-
-    arp_test_release_retry();
-    thread_join(t);
-    if (!unregistered)
-        nt_netif_unregister(&f.nif);
-
-    if (ok) {
-        if (__atomic_load_n(&park.done, __ATOMIC_ACQUIRE) != 1) {
-            *reason = "the released retry never finished";
-            ok = false;
-        } else if (kobject_refcount(&f.nif.obj) != 1) {
-            *reason = "the retry did not put its reference back";
-            ok = false;
-        }
-    }
-    kobject_put(&f.nif.obj);                    /* the creator's */
-    if (ok && f.releases != 1) {
-        *reason = "the interface was not released once the last reference went";
-        ok = false;
-    }
-    if (!ok)
-        return false;
-
-    kinfo("selftest: net-arp-retry-unregister: a parked ARP retry kept the interface alive "
-          "across netif_unregister; released once, after it let go");
-    return true;
-#endif
 }
 
-/* --- net-arp-flush-counts / net-nd-flush-counts --------------------------- *
- *
- * A packet that vanishes because its interface went is not less gone
- * than one that vanishes because resolution timed out, and the timeout
- * path has always counted. ARP and ND keep the tally in different
- * structs -- `arp_stats.pending_dropped` and `ip_stats.nd_pending_dropped`
- * -- so these are two tests, because one covering "the flush counts"
- * would hide a half-done change.
- */
-bool selftest_net_arp_flush_counts(const char **reason)
+bool selftest_net_nd_retry_unregister(const char **reason)
 {
-    static struct fake_nif f;
-    static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
-    memset(&f, 0, sizeof(f));
-    strlcpy(f.nif.name, "arpfl0", sizeof(f.nif.name));
-    f.nif.mtu = 1500;
-    f.nif.ops = &ops;
-    f.nif.priv = &f;
-    f.nif.flags = NETIF_UP | NETIF_NODEFAULT;
-    f.nif.ip4.addr = htonl(0x0a4b0001);
-    f.nif.ip4.mask = htonl(0xffffff00);
-    CHECK(nt_netif_register(&f.nif) == 0);
-    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
-    CHECK(nt_netif_hold(&creator, &f.nif));
-
-    struct arp_stats s0, s1;
-    arp_get_stats(&s0);
-    uint8_t mac[ETH_ALEN];
-    struct mbuf *m = m_getcl();
-    CHECK(m != NULL);
-    CHECK(arp_resolve(&f.nif, htonl(0x0a4b0002), mac, m) == -EINPROGRESS);
-
-    nt_netif_unregister(&f.nif);     /* step 5 flushes the entry and its packet */
-    arp_get_stats(&s1);
-    CHECK(s1.pending_dropped == s0.pending_dropped + 1);
-
-    nt_netif_ref_put(&creator);
-    CHECK(f.releases == 1);
-    kinfo("selftest: net-arp-flush-counts: a flush with one packet pending moved "
-          "pending_dropped %llu -> %llu",
-          (unsigned long long)s0.pending_dropped, (unsigned long long)s1.pending_dropped);
+    (void)reason;
+    kinfo("selftest: net-nd-retry-unregister: needs the debug retry hook; skipping");
     return true;
-}
-
-#if CONFIG_DEBUG
-static void nd_retry_main(void *arg)
-{
-    struct retry_park *p = arg;
-    nd_age(p->at_ns);
-    __atomic_store_n(&p->done, 1u, __ATOMIC_RELEASE);
 }
 #endif
-
-static void nd_fake_setup(struct fake_nif *f, const struct netif_ops *ops, const char *name)
-{
-    memset(f, 0, sizeof(*f));
-    strlcpy(f->nif.name, name, sizeof(f->nif.name));
-    f->nif.mtu = 1500;
-    f->nif.ops = ops;
-    f->nif.priv = f;
-    f->nif.flags = NETIF_UP | NETIF_NODEFAULT;
-}
-
-bool selftest_net_nd_flush_counts(const char **reason)
-{
-    static struct fake_nif f;
-    static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
-    nd_fake_setup(&f, &ops, "ndfl0");
-    CHECK(nt_netif_register(&f.nif) == 0);
-    static struct nt_netif_ref creator;   /* the creator's reference, released however it returns */
-    CHECK(nt_netif_hold(&creator, &f.nif));
-
-    struct ip_stats s0, s1;
-    ipv6_get_stats(&s0);
-    struct in6_addr dst = { { 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 } };
-    uint8_t mac[ETH_ALEN];
-    struct mbuf *m = m_getcl();
-    CHECK(m != NULL);
-    int rc = nd_resolve(&f.nif, &dst, mac, m);
-    CHECK(rc != 0);              /* unresolved: the packet is now pending */
-
-    nt_netif_unregister(&f.nif);
-    ipv6_get_stats(&s1);
-    /* The counter ND did not have until this unit: ARP's lives in a
-     * different struct, so a fix in one is invisible to the other. */
-    CHECK(s1.nd_pending_dropped == s0.nd_pending_dropped + 1);
-
-    nt_netif_ref_put(&creator);
-    CHECK(f.releases == 1);
-    kinfo("selftest: net-nd-flush-counts: a flush with one packet pending moved "
-          "nd_pending_dropped %llu -> %llu",
-          (unsigned long long)s0.nd_pending_dropped, (unsigned long long)s1.nd_pending_dropped);
-    return true;
-}
+_Static_assert(EINVAL == 22 && EEXIST == 17 && ENODEV == 19 && EINPROGRESS == 115 && NETIF_UP == 1 &&
+                   NETIF_LOOPBACK == 2 && NETIF_NOARP == 4 && NETIF_GONE == 8 && NETIF_NODEFAULT == 0x10 &&
+                   SCHED_PRIO_DEFAULT == 32 && NS_PER_SEC == 1000000000ull,
+               "nettest_lifetime.cee's errno.h, netif.h, thread.h and time values");
+_Static_assert(__builtin_offsetof(struct netif, obj) == 0 && sizeof(struct arp_stats) <= 512 && sizeof(struct ip_stats) <= 512,
+               "nettest_lifetime.cee's object and rooms");
 
 /* --- net-arp-per-interface / net-nd-per-interface -------------------------- *
  *
@@ -1761,165 +1541,6 @@ bool selftest_net_nd_per_interface(const char **reason)
     return true;
 }
 
-
-bool selftest_net_nd_retry_unregister(const char **reason)
-{
-#if !CONFIG_DEBUG
-    (void)reason;
-    kinfo("selftest: net-nd-retry-unregister: needs the debug retry hook; skipping");
-    return true;
-#else
-    static struct fake_nif f;
-    static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
-    nd_fake_setup(&f, &ops, "ndref0");
-    CHECK(nt_netif_register(&f.nif) == 0);
-
-    struct in6_addr dst = { { 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 } };
-    uint8_t mac[ETH_ALEN];
-    struct mbuf *m = m_getcl();
-    CHECK(m != NULL);
-    CHECK(nd_resolve(&f.nif, &dst, mac, m) != 0);
-
-    nd_test_hold_retry(true);
-    struct retry_park park = { .done = 0, .at_ns = clock_now_ns() + 2ull * NS_PER_SEC };
-    struct thread *t = thread_create(nd_retry_main, &park, "ndretry", SCHED_PRIO_DEFAULT);
-    if (t == NULL) {
-        /* The hook is armed and the interface registered: neither may
-         * outlive a failure here. */
-        nd_test_hold_retry(false);
-        nt_netif_unregister(&f.nif);
-        kobject_put(&f.nif.obj);
-        *reason = "could not create the retry thread";
-        return false;
-    }
-    uint64_t give_up = clock_now_ns() + 2ull * NS_PER_SEC;
-    while (!nd_test_retry_parked()) {
-        if (clock_now_ns() > give_up) {
-            nd_test_hold_retry(false);
-            nd_test_release_retry();
-            thread_join(t);
-            nt_netif_unregister(&f.nif);
-            kobject_put(&f.nif.obj);
-            *reason = "the ND retry never parked";
-            return false;
-        }
-        sched_yield();
-    }
-
-    /* Same cleanup discipline as the ARP twin, for the same reason: a
-     * retry left parked spins forever. */
-    bool ok = false;
-    bool unregistered = false;
-    do {
-        CHECK_BREAK(kobject_refcount(&f.nif.obj) == 3);   /* creator + registry + retry */
-        nt_netif_unregister(&f.nif);
-        unregistered = true;
-        CHECK_BREAK(f.releases == 0);                     /* the retry still holds it */
-        CHECK_BREAK(kobject_refcount(&f.nif.obj) == 2);
-        ok = true;
-    } while (0);
-
-    nd_test_release_retry();
-    thread_join(t);
-    if (!unregistered)
-        nt_netif_unregister(&f.nif);
-
-    if (ok) {
-        if (__atomic_load_n(&park.done, __ATOMIC_ACQUIRE) != 1) {
-            *reason = "the released retry never finished";
-            ok = false;
-        } else if (kobject_refcount(&f.nif.obj) != 1) {
-            *reason = "the retry did not put its reference back";
-            ok = false;
-        }
-    }
-    kobject_put(&f.nif.obj);
-    if (ok && f.releases != 1) {
-        *reason = "the interface was not released once the last reference went";
-        ok = false;
-    }
-    if (!ok)
-        return false;
-
-    kinfo("selftest: net-nd-retry-unregister: a parked ND retry kept the interface alive "
-          "across netif_unregister; released once, after it let go");
-    return true;
-#endif
-}
-
-bool selftest_net_netif_lifetime(const char **reason)
-{
-    static struct fake_nif f;
-    static const struct netif_ops no_release = { .transmit = fake_nif_transmit };
-    static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
-    memset(&f, 0, sizeof(f));
-    strlcpy(f.nif.name, "test0", sizeof(f.nif.name));
-    f.nif.mtu = 1500;
-    f.nif.ops = &no_release;
-    f.nif.priv = &f;
-    /* Loopback-style: input_one frees an unknown protocol without a link layer. */
-    f.nif.flags = NETIF_LOOPBACK | NETIF_NOARP | NETIF_UP;
-    CHECK(nt_netif_register(&f.nif) == -EINVAL);   /* no release: refused */
-    f.nif.ops = &ops;
-    memcpy(f.nif.name, "tooLong8", sizeof(f.nif.name));   /* all 8 bytes, no terminator */
-    CHECK(nt_netif_register(&f.nif) == -EINVAL);   /* an unterminated name: refused */
-    strlcpy(f.nif.name, "test0", sizeof(f.nif.name));
-    CHECK(nt_netif_register(&f.nif) == 0);
-    static struct nt_netif_ref creator, found_ref;   /* released however it returns */
-    CHECK(nt_netif_hold(&creator, &f.nif));
-    CHECK(kobject_refcount(&f.nif.obj) == 2);   /* creator + registry */
-
-    /* A duplicate name is refused before the object exists: no kobject,
-     * no owner count for the driver's module to balance (its failure path
-     * frees the storage directly). */
-    static struct fake_nif dup;
-    memset(&dup, 0, sizeof(dup));
-    strlcpy(dup.nif.name, "test0", sizeof(dup.nif.name));
-    dup.nif.mtu = 1500;
-    dup.nif.ops = &ops;
-    dup.nif.priv = &dup;
-    CHECK(nt_netif_register(&dup.nif) == -EEXIST);
-    CHECK(dup.nif.obj.type == NULL && dup.nif.obj.refcount == 0 && dup.nif.obj.owner == NULL);
-
-    struct netif *found = netif_find("test0");
-    CHECK(nt_netif_hold(&found_ref, found));
-    CHECK(found == &f.nif && kobject_refcount(&f.nif.obj) == 3);
-
-    struct mbuf *m = m_getcl();
-    CHECK(m != NULL);
-    m->len = m->pkt.len = 16;
-    m->pkt.proto = 0x88B5;   /* experimental EtherType: input drops it */
-    CHECK(netif_transmit(found, m) == 0 && f.transmits == 1);
-    m = m_getcl();
-    CHECK(m != NULL);
-    m->len = m->pkt.len = 16;
-    m->pkt.proto = 0x88B5;
-    netif_rx(found, m);                          /* queued for the worker */
-
-    nt_netif_unregister(&f.nif);
-    CHECK(netif_find("test0") == NULL);
-    CHECK((f.nif.flags & NETIF_GONE) && !(f.nif.flags & NETIF_UP));
-    CHECK(kobject_refcount(&f.nif.obj) == 2);
-    m = m_getcl();
-    CHECK(m != NULL);
-    m->len = m->pkt.len = 16;
-    CHECK(netif_transmit(found, m) == -ENODEV && f.transmits == 1);
-    m = m_getcl();
-    CHECK(m != NULL);
-    m->len = m->pkt.len = 16;
-    /* Unregister purged its queued packet, if the worker had not taken
-     * it, and a packet to a gone interface is freed, not queued. */
-    CHECK(netif_rxq_count(found) == 0);
-    netif_rx(found, m);                          /* dropped: gone */
-    CHECK(netif_rxq_count(found) == 0);
-    CHECK(f.nif.stats.rx_packets == 1);
-
-    nt_netif_ref_put(&creator);                  /* the creator is done */
-    CHECK(f.releases == 0);
-    nt_netif_ref_put(&found_ref);
-    CHECK(f.releases == 1);
-    return true;
-}
 
 /* --- accept against a racing peer ------------------------------------------------
  *

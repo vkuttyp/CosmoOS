@@ -1111,7 +1111,13 @@ fault-injection builds' hooks, each body exported only where its hooks
 exist (`@cfg("CONFIG_DEBUG")`, `@cfg("CONFIG_FAULTINJECT")`) and the C's
 skip kept in `nettest.c` otherwise, with the timer test's pinning
 wrapper; its armer and releaser threads read static state, not the
-test's frame.
+test's frame. Batch 15, `nettest_lifetime.cee`: an interface's lifetime
+against the neighbour tables -- net-arp-retry-unregister and
+net-nd-retry-unregister (debug-only, the C's skips kept),
+net-arp-flush-counts, net-nd-flush-counts and net-netif-lifetime -- with
+fake interfaces of their own; the parked retry's deadline and done flag
+are static, and the refused duplicate's never-initialised object is
+checked byte for byte, the kernel library's `kobject` being opaque.
 
 Size: about 3.0x.
 

@@ -1,0 +1,701 @@
+// nettest_lifetime.cee - an interface's lifetime against the neighbour tables, in CeeSafe: roadmap 2.0 SA6 (nettest,
+// the fifteenth batch). net-arp-retry-unregister, net-nd-retry-unregister, net-arp-flush-counts, net-nd-flush-counts
+// and net-netif-lifetime, as nettest.c had them (docs/kernel/quiesce/design.md, "Network interfaces";
+// docs/audit/next-subsystem-arp-netif-ref.md). Each registers a fake interface: the interfaces and their ops table are
+// C objects this file defines (CeeSafe's ADR 0042, as nettest_nif.cee's), `static mut` items -- static because a
+// release may run after the test's frame is gone -- zeroed and filled in at the test's start as the C's memset did.
+// The two retry tests need the debug build's park hooks and are exported only there (@cfg); nettest.c keeps the C's
+// skip otherwise. The parked retry's deadline and its done flag (the C's struct retry_park, in the test's frame) are
+// static, so no thread outlives what it reads.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/object.h", "kernel/selftest.h", "kernel/thread.h", "kernel/sched.h", "kernel/timer.h")
+extern "C" {
+    struct thread;
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct mbuf_pkt {
+        len: u32;
+        proto: u16;
+    }
+    struct mbuf {
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ops {
+        transmit: extern "C" fn(*mut netif, *mut mbuf) -> i32;
+        release: extern "C" fn(*mut netif);
+    }
+    struct netif_ip4 {
+        addr: u32;
+        mask: u32;
+    }
+    struct netif_stats {
+        rx_packets: u64;
+    }
+    struct netif {
+        obj: kobject;
+        name: [u8; 8];
+        mtu: u32;
+        flags: u32;
+        ip4: netif_ip4;
+        ops: *netif_ops;
+        priv: *mut void;
+        stats: netif_stats;
+    }
+    struct nt_netif_ref {
+        nif: *mut netif;
+    }
+    struct arp_stats {
+        pending_dropped: u64;
+    }
+    struct ip_stats {
+        nd_pending_dropped: u64;
+    }
+
+    fn nettest_netif_register(nif: *mut netif) -> i32;
+    fn nettest_netif_unregister(nif: *mut netif);
+    fn nettest_netif_hold(r: *mut nt_netif_ref, nif: *mut netif) -> bool;
+    fn nettest_netif_ref_put(r: *mut nt_netif_ref);
+
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_transmit(nif: *mut netif, m: *mut mbuf) -> i32;
+    fn netif_rx(nif: *mut netif, m: *mut mbuf);
+    fn netif_rxq_count(nif: *netif) -> u32;
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn arp_resolve(nif: *mut netif, ip: u32, mac: *mut u8, m: *mut mbuf) -> i32;
+    fn arp_age(now: u64);
+    fn arp_get_stats(out: *mut arp_stats);
+    fn arp_test_hold_retry(on: bool);
+    fn arp_test_retry_parked() -> bool;
+    fn arp_test_release_retry();
+    fn nd_resolve(nif: *mut netif, ip: *in6_addr, mac: *mut u8, m: *mut mbuf) -> i32;
+    fn nd_age(now: u64);
+    fn ipv6_get_stats(out: *mut ip_stats);
+    fn nd_test_hold_retry(on: bool);
+    fn nd_test_retry_parked() -> bool;
+    fn nd_test_release_retry();
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn sched_yield();
+    fn clock_now_ns() -> u64;
+}
+
+// ---- errno.h, netif.h, thread.h and time values (asserted against the headers in nettest.c) ----
+
+const EINVAL: i32 = 22;
+const EEXIST: i32 = 17;
+const ENODEV: i32 = 19;
+const EINPROGRESS: i32 = 115;
+const NETIF_UP: u32 = 1;
+const NETIF_LOOPBACK: u32 = 2;
+const NETIF_NOARP: u32 = 4;
+const NETIF_GONE: u32 = 8;
+const NETIF_NODEFAULT: u32 = 16;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const NS_PER_SEC: u64 = 1000000000;
+/// An experimental EtherType: input drops it.
+const ETH_P_EXPERIMENTAL: u16 = 0x88B5;
+/// 255.255.255.0 in network order, as it lies in a little-endian u32.
+const MASK24_N: u32 = 0x00ffffff;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: the monotonic clock.
+fn now() -> u64 => unsafe { clock_now_ns() };
+
+/// One line to the kernel log.
+fn info(text: StringView) {
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+// ---- The fake interfaces ----
+//
+// The C's struct fake_nif: an interface whose transmit counts and frees, and whose release counts. The counters are
+// indexed by the interface's `priv`, one slot per static below.
+
+const ARPREF: usize = 0;
+const ARPFL: usize = 1;
+const NDFL: usize = 2;
+const NDREF: usize = 3;
+const LIFE: usize = 4;
+const DUP: usize = 5;
+
+static mut ARPREF_NIF: netif = netif { mtu: 1500 };
+static mut ARPFL_NIF: netif = netif { mtu: 1500 };
+static mut NDFL_NIF: netif = netif { mtu: 1500 };
+static mut NDREF_NIF: netif = netif { mtu: 1500 };
+static mut LIFE_NIF: netif = netif { mtu: 1500 };
+static mut DUP_NIF: netif = netif { mtu: 1500 };
+static mut FAKE_OPS: netif_ops = netif_ops { transmit: fakeTransmit, release: fakeRelease };
+static mut TRANSMITS: [u32; 6] = [0; 6];
+static mut RELEASES: [u32; 6] = [0; 6];
+// The creators' references, and the lookup's, released however a test returns.
+static mut ARPFL_CREATOR: nt_netif_ref = nt_netif_ref { nif: 0 as *mut netif };
+static mut NDFL_CREATOR: nt_netif_ref = nt_netif_ref { nif: 0 as *mut netif };
+static mut LIFE_CREATOR: nt_netif_ref = nt_netif_ref { nif: 0 as *mut netif };
+static mut LIFE_FOUND: nt_netif_ref = nt_netif_ref { nif: 0 as *mut netif };
+// The neighbour statistics before and after (512 bytes each, checked), off the stack.
+static mut STATS: [u64; 128] = [0; 128];
+
+/// The fake interface's transmit: count and free.
+/// Safety: the interface layer hands over the packet; `priv` is the interface's counter slot.
+@callback
+unsafe fn fakeTransmit(nif: *mut netif, m: *mut mbuf) -> i32 {
+    TRANSMITS[Ptr.toBorrow(nif as *netif).priv as usize] += 1;
+    m_freem(m);
+    return 0;
+}
+
+/// The fake interface's release: count it (the storage is static).
+/// Safety: the interface layer calls it once, after the last reference.
+@callback
+unsafe fn fakeRelease(nif: *mut netif) {
+    RELEASES[Ptr.toBorrow(nif as *netif).priv as usize] += 1;
+}
+
+/// The interface's object (the kobject is a netif's first member, netif.h).
+fn objOf(nif: *mut netif) -> *mut kobject => nif as *mut kobject;
+
+/// Zero `nif`, then name it and give it the fake ops, counter slot `slot` (reset) and `flags`, as the C's memset and
+/// assignments did.
+/// Safety: `nif` is one of this file's statics, not registered.
+unsafe fn fakeSetup(nif: *mut netif, slot: usize, name: StringView, flags: u32) {
+    let b = SliceMut.fromRaw(nif as *mut u8, layoutOf<netif>().size);
+    for (i in 0..b.length) {
+        b[i] = 0;
+    }
+    let n = Ptr.toBorrowMut(nif);
+    for (i in 0..name.length) {
+        n.name[i] = name.bytes()[i];
+    }
+    n.mtu = 1500;
+    n.ops = borrow FAKE_OPS as *netif_ops;
+    n.priv = slot as *mut void;
+    n.flags = flags;
+    TRANSMITS[slot] = 0;
+    RELEASES[slot] = 0;
+}
+
+/// Scratch `i` of STATS, for a struct of `bytes`.
+/// Safety: the runner runs one test at a time, so the statics are this test's.
+unsafe fn statsRoom(i: usize, bytes: usize) -> *mut u8 {
+    if (bytes > 512) {
+        var buffer: [u8; 64] = [0; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("nettest: a scratch is too small");
+        KernelLog.panic(line);
+    }
+    return (borrow mut STATS as *mut [u64; 128] as *mut u8).add(i * 512);
+}
+
+/// ARP's pending_dropped, read into scratch `i`.
+/// Safety: as statsRoom.
+unsafe fn arpPendingDropped(i: usize) -> u64 {
+    let p = statsRoom(i, layoutOf<arp_stats>().size) as *mut arp_stats;
+    arp_get_stats(p);
+    return Ptr.toBorrow(p as *arp_stats).pending_dropped;
+}
+
+/// IPv6's nd_pending_dropped, read into scratch `i`.
+/// Safety: as statsRoom.
+unsafe fn ndPendingDropped(i: usize) -> u64 {
+    let p = statsRoom(i, layoutOf<ip_stats>().size) as *mut ip_stats;
+    ipv6_get_stats(p);
+    return Ptr.toBorrow(p as *ip_stats).nd_pending_dropped;
+}
+
+// The unresolved IPv6 neighbour (the C's local struct in6_addr): CeeSafe makes a C struct only as a static.
+static mut DST: in6_addr = in6_addr { s6_addr: [0; 16] };
+
+/// fd00::n, in DST.
+/// Safety: the runner runs one test at a time, so DST is this test's.
+unsafe fn fd00(n: u8) -> *in6_addr {
+    for (i in 0..16) {
+        DST.s6_addr[truncate<usize>(i)] = 0;
+    }
+    DST.s6_addr[0] = 0xfd;
+    DST.s6_addr[15] = n;
+    return borrow DST as *in6_addr;
+}
+
+/// Whether the interface's object -- struct kobject, netif.h's first member: every byte before `name` -- is as
+/// fakeSetup zeroed it: never initialised, so no type, no count, no owner. The C named those three fields; the kernel
+/// library's kobject is opaque, so this reads the whole object, which netif_register's refusals never touch.
+/// Safety: `nif` is one of this file's statics.
+unsafe fn objectUntouched(nif: *mut netif) -> bool {
+    let n = Ptr.toBorrow(nif as *netif);
+    let size = (borrow n.name as *[u8; 8] as *u8 as usize) - (nif as *u8 as usize);
+    let b = Slice.fromRaw(nif as *u8, size);
+    for (c in b) {
+        if (c != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ---- net-arp-retry-unregister / net-nd-retry-unregister ----
+//
+// The window invariant N22 closes, held open on purpose.
+//
+// `arp_age` copies a `struct netif *` out from under the ARP table lock, releases the lock, and then dereferences it
+// in `send_arp`. Between those two points `netif_unregister` can run its flush and drop the registry's reference --
+// and `age_work` re-arms every second, so the per-CPU barrier in `netif_unregister` does not prevent a retry from
+// starting after it.
+//
+// The test does not race the two and hope. It parks the retry exactly in that window and then runs `netif_unregister`
+// to completion, so the assertion is about a reference count rather than about whether a crash happened to occur.
+// Without the `netif_get` the driver's release hook runs while the retry still holds the pointer, and `releases == 0`
+// below is what fails. ND's twin is the same window in `nd_age`.
+
+static mut PARK_AT: u64 = 0;
+static PARK_DONE: AtomicU32 = AtomicU32.constant(0);
+
+/// The ARP retry batch, run where the hook parks it.
+/// Safety: PARK_AT is written before the thread is created.
+@callback
+unsafe fn arpRetryMain(arg: *mut void) {
+    arp_age(PARK_AT);
+    PARK_DONE.storeWith(1, StoreOrdering.Release);
+}
+
+/// ND's.
+/// Safety: as arpRetryMain.
+@callback
+unsafe fn ndRetryMain(arg: *mut void) {
+    nd_age(PARK_AT);
+    PARK_DONE.storeWith(1, StoreOrdering.Release);
+}
+
+/// The retry's deadline two seconds out, and not yet done; the thread is created after.
+/// Safety: no retry thread is running.
+unsafe fn parkReset() {
+    PARK_AT = now() + 2 * NS_PER_SEC;
+    PARK_DONE.storeWith(0, StoreOrdering.Relaxed);
+}
+
+/// With the retry parked: tear the interface down completely and check the retry still keeps it. `unregistered` says
+/// whether the unregister ran. Every exit returns to the caller, which releases the retry: a retry left parked spins
+/// forever in the park hook, and a failing assertion that wedges a thread and leaves an interface registered
+/// contaminates every test after it. The bug-proof for this unit takes the very first of these exits.
+/// Safety: `nif` is the test's registered interface, counter slot `slot`.
+unsafe fn acrossUnregister(reason: *mut *CChar, nif: *mut netif, slot: usize, unregistered: borrow mut bool) -> bool {
+    if (kobject_refcount(objOf(nif) as *kobject) != 3) {
+        return failed(reason, "check failed: kobject_refcount(&f.nif.obj) == 3 (creator + registry + retry)\0");
+    }
+    nettest_netif_unregister(nif);
+    unregistered = true;
+    // THE ASSERTION. The registry's reference is gone and the flush has run, but the retry still holds the pointer --
+    // so the driver must not have been released.
+    if (RELEASES[slot] != 0) {
+        return failed(reason, "check failed: f.releases == 0 (the retry still holds it)\0");
+    }
+    if (kobject_refcount(objOf(nif) as *kobject) != 2) {
+        return failed(reason, "check failed: kobject_refcount(&f.nif.obj) == 2 (creator + retry)\0");
+    }
+    return true;
+}
+
+/// After the retry is released and joined: it finished, it put its reference back, and the creator's put released
+/// the interface once.
+/// Safety: as acrossUnregister; the interface is unregistered.
+unsafe fn afterRelease(reason: *mut *CChar, held: bool, nif: *mut netif, slot: usize) -> bool {
+    var ok = held;
+    if (ok) {
+        if (PARK_DONE.loadWith(LoadOrdering.Acquire) != 1) {
+            ok = failed(reason, "the released retry never finished\0");
+        } else if (kobject_refcount(objOf(nif) as *kobject) != 1) {
+            ok = failed(reason, "the retry did not put its reference back\0");
+        }
+    }
+    kobject_put(objOf(nif)); // the creator's
+    if (ok && RELEASES[slot] != 1) {
+        ok = failed(reason, "the interface was not released once the last reference went\0");
+    }
+    return ok;
+}
+
+/// net-arp-retry-unregister: a parked ARP retry keeps the interface alive across netif_unregister.
+/// Safety: the runner's `reason`; the debug build's hooks.
+@cfg("CONFIG_DEBUG")
+@export("selftest_net_arp_retry_unregister")
+unsafe fn arpRetryUnregister(reason: *mut *CChar) -> bool {
+    let nif = borrow mut ARPREF_NIF as *mut netif;
+    fakeSetup(nif, ARPREF, "arpref0", NETIF_UP | NETIF_NODEFAULT);
+    ARPREF_NIF.ip4.addr = ip4(10, 74, 0, 1);
+    ARPREF_NIF.ip4.mask = MASK24_N;
+    if (nettest_netif_register(nif) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&f.nif) == 0\0");
+    }
+
+    // One unresolved address on this interface, with a packet behind it.
+    var mac: [u8; 6] = [0; 6];
+    let m = m_getcl();
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    if (arp_resolve(nif, ip4(10, 74, 0, 2), borrow mut mac as *mut [u8; 6] as *mut u8, m) != -EINPROGRESS) {
+        return failed(reason, "check failed: arp_resolve(&f.nif, 10.74.0.2, mac, m) == -EINPROGRESS\0");
+    }
+
+    // Park the next retry batch between its unlock and its send.
+    arp_test_hold_retry(true);
+    parkReset();
+    let t = thread_create(arpRetryMain, 0 as *mut void, "arpretry\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    if (t.isNull()) {
+        // The hook is armed and the interface registered: neither may outlive a failure here.
+        arp_test_hold_retry(false);
+        nettest_netif_unregister(nif);
+        kobject_put(objOf(nif));
+        return failed(reason, "could not create the retry thread\0");
+    }
+    // Bounded: a retry that never parks is a failure to report, not a boot to hang (docs/testing/flakes.md).
+    let giveUp = now() + 2 * NS_PER_SEC;
+    while (!arp_test_retry_parked()) {
+        if (now() > giveUp) {
+            arp_test_hold_retry(false);
+            arp_test_release_retry();
+            thread_join(t);
+            nettest_netif_unregister(nif);
+            kobject_put(objOf(nif));
+            return failed(reason, "the ARP retry never parked\0");
+        }
+        sched_yield();
+    }
+
+    var unregistered = false;
+    let held = acrossUnregister(reason, nif, ARPREF, mut unregistered);
+    arp_test_release_retry();
+    thread_join(t);
+    if (!unregistered) {
+        nettest_netif_unregister(nif);
+    }
+    if (!afterRelease(reason, held, nif, ARPREF)) {
+        return false;
+    }
+    info(
+        "selftest: net-arp-retry-unregister: a parked ARP retry kept the interface alive across netif_unregister; released once, after it let go",
+    );
+    return true;
+}
+
+/// net-nd-retry-unregister: ND's twin.
+/// Safety: as arpRetryUnregister.
+@cfg("CONFIG_DEBUG")
+@export("selftest_net_nd_retry_unregister")
+unsafe fn ndRetryUnregister(reason: *mut *CChar) -> bool {
+    let nif = borrow mut NDREF_NIF as *mut netif;
+    fakeSetup(nif, NDREF, "ndref0", NETIF_UP | NETIF_NODEFAULT);
+    if (nettest_netif_register(nif) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&f.nif) == 0\0");
+    }
+
+    let dst = fd00(3);
+    var mac: [u8; 6] = [0; 6];
+    let m = m_getcl();
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    if (nd_resolve(nif, dst, borrow mut mac as *mut [u8; 6] as *mut u8, m) == 0) {
+        return failed(reason, "check failed: nd_resolve(&f.nif, &dst, mac, m) != 0\0");
+    }
+
+    nd_test_hold_retry(true);
+    parkReset();
+    let t = thread_create(ndRetryMain, 0 as *mut void, "ndretry\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    if (t.isNull()) {
+        // The hook is armed and the interface registered: neither may outlive a failure here.
+        nd_test_hold_retry(false);
+        nettest_netif_unregister(nif);
+        kobject_put(objOf(nif));
+        return failed(reason, "could not create the retry thread\0");
+    }
+    let giveUp = now() + 2 * NS_PER_SEC;
+    while (!nd_test_retry_parked()) {
+        if (now() > giveUp) {
+            nd_test_hold_retry(false);
+            nd_test_release_retry();
+            thread_join(t);
+            nettest_netif_unregister(nif);
+            kobject_put(objOf(nif));
+            return failed(reason, "the ND retry never parked\0");
+        }
+        sched_yield();
+    }
+
+    // Same cleanup discipline as the ARP twin, for the same reason: a retry left parked spins forever.
+    var unregistered = false;
+    let held = acrossUnregister(reason, nif, NDREF, mut unregistered);
+    nd_test_release_retry();
+    thread_join(t);
+    if (!unregistered) {
+        nettest_netif_unregister(nif);
+    }
+    if (!afterRelease(reason, held, nif, NDREF)) {
+        return false;
+    }
+    info(
+        "selftest: net-nd-retry-unregister: a parked ND retry kept the interface alive across netif_unregister; released once, after it let go",
+    );
+    return true;
+}
+
+// ---- net-arp-flush-counts / net-nd-flush-counts ----
+//
+// A packet that vanishes because its interface went is not less gone than one that vanishes because resolution timed
+// out, and the timeout path has always counted. ARP and ND keep the tally in different structs --
+// `arp_stats.pending_dropped` and `ip_stats.nd_pending_dropped` -- so these are two tests, because one covering "the
+// flush counts" would hide a half-done change.
+
+/// "...pending moved <counter> <before> -> <after>".
+fn flushLine(test: StringView, counter: StringView, before: u64, after: u64) {
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: ");
+    line.text(test);
+    line.text(": a flush with one packet pending moved ");
+    line.text(counter);
+    line.text(" ");
+    line.decimal(before);
+    line.text(" -> ");
+    line.decimal(after);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// net-arp-flush-counts: a flush with one packet pending counts it in arp_stats.pending_dropped.
+/// Safety: the runner's `reason`.
+@export("selftest_net_arp_flush_counts")
+unsafe fn arpFlushCounts(reason: *mut *CChar) -> bool {
+    let nif = borrow mut ARPFL_NIF as *mut netif;
+    fakeSetup(nif, ARPFL, "arpfl0", NETIF_UP | NETIF_NODEFAULT);
+    ARPFL_NIF.ip4.addr = ip4(10, 75, 0, 1);
+    ARPFL_NIF.ip4.mask = MASK24_N;
+    if (nettest_netif_register(nif) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&f.nif) == 0\0");
+    }
+    let creator = borrow mut ARPFL_CREATOR as *mut nt_netif_ref;
+    if (!nettest_netif_hold(creator, nif)) {
+        return failed(reason, "check failed: nt_netif_hold(&creator, &f.nif)\0");
+    }
+
+    let before = arpPendingDropped(0);
+    var mac: [u8; 6] = [0; 6];
+    let m = m_getcl();
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    if (arp_resolve(nif, ip4(10, 75, 0, 2), borrow mut mac as *mut [u8; 6] as *mut u8, m) != -EINPROGRESS) {
+        return failed(reason, "check failed: arp_resolve(&f.nif, 10.75.0.2, mac, m) == -EINPROGRESS\0");
+    }
+
+    nettest_netif_unregister(nif); // step 5 flushes the entry and its packet
+    let after = arpPendingDropped(1);
+    if (after != before + 1) {
+        return failed(reason, "check failed: s1.pending_dropped == s0.pending_dropped + 1\0");
+    }
+
+    nettest_netif_ref_put(creator);
+    if (RELEASES[ARPFL] != 1) {
+        return failed(reason, "check failed: f.releases == 1\0");
+    }
+    flushLine("net-arp-flush-counts", "pending_dropped", before, after);
+    return true;
+}
+
+/// net-nd-flush-counts: the same, in ip_stats.nd_pending_dropped.
+/// Safety: the runner's `reason`.
+@export("selftest_net_nd_flush_counts")
+unsafe fn ndFlushCounts(reason: *mut *CChar) -> bool {
+    let nif = borrow mut NDFL_NIF as *mut netif;
+    fakeSetup(nif, NDFL, "ndfl0", NETIF_UP | NETIF_NODEFAULT);
+    if (nettest_netif_register(nif) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&f.nif) == 0\0");
+    }
+    let creator = borrow mut NDFL_CREATOR as *mut nt_netif_ref;
+    if (!nettest_netif_hold(creator, nif)) {
+        return failed(reason, "check failed: nt_netif_hold(&creator, &f.nif)\0");
+    }
+
+    let before = ndPendingDropped(0);
+    let dst = fd00(2);
+    var mac: [u8; 6] = [0; 6];
+    let m = m_getcl();
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    if (nd_resolve(nif, dst, borrow mut mac as *mut [u8; 6] as *mut u8, m) == 0) {
+        return failed(reason, "check failed: rc != 0 (unresolved: the packet is now pending)\0");
+    }
+
+    nettest_netif_unregister(nif);
+    let after = ndPendingDropped(1);
+    // The counter ND did not have until this unit: ARP's lives in a different struct, so a fix in one is invisible to
+    // the other.
+    if (after != before + 1) {
+        return failed(reason, "check failed: s1.nd_pending_dropped == s0.nd_pending_dropped + 1\0");
+    }
+
+    nettest_netif_ref_put(creator);
+    if (RELEASES[NDFL] != 1) {
+        return failed(reason, "check failed: f.releases == 1\0");
+    }
+    flushLine("net-nd-flush-counts", "nd_pending_dropped", before, after);
+    return true;
+}
+
+// ---- net-netif-lifetime ----
+//
+// docs/kernel/quiesce/design.md, "Network interfaces": lookups are referenced, unregister stops transmit and receive
+// and purges the queue, and the driver's release runs when the last holder is gone.
+
+static mut NO_RELEASE_OPS: netif_ops = netif_ops { transmit: fakeTransmit };
+
+/// A 16-byte packet of the experimental EtherType, or null.
+/// Safety: a fresh buffer.
+unsafe fn probe(experimental: bool) -> *mut mbuf {
+    let m = m_getcl();
+    if (!m.isNull()) {
+        let r = Ptr.toBorrowMut(m);
+        r.len = 16;
+        r.pkt.len = 16;
+        if (experimental) {
+            r.pkt.proto = ETH_P_EXPERIMENTAL;
+        }
+    }
+    return m;
+}
+
+/// net-netif-lifetime: registration's refusals, referenced lookups, and unregister's stop, purge and release.
+/// Safety: the runner's `reason`.
+@export("selftest_net_netif_lifetime")
+unsafe fn netifLifetime(reason: *mut *CChar) -> bool {
+    let nif = borrow mut LIFE_NIF as *mut netif;
+    // Loopback-style: input_one frees an unknown protocol without a link layer.
+    fakeSetup(nif, LIFE, "test0", NETIF_LOOPBACK | NETIF_NOARP | NETIF_UP);
+    LIFE_NIF.ops = borrow NO_RELEASE_OPS as *netif_ops;
+    if (nettest_netif_register(nif) != -EINVAL) { // no release: refused
+        return failed(reason, "check failed: nt_netif_register(&f.nif) == -EINVAL (no release)\0");
+    }
+    LIFE_NIF.ops = borrow FAKE_OPS as *netif_ops;
+    let long = "tooLong8"; // all 8 bytes, no terminator
+    for (i in 0..8) {
+        LIFE_NIF.name[truncate<usize>(i)] = long.bytes()[truncate<usize>(i)];
+    }
+    if (nettest_netif_register(nif) != -EINVAL) { // an unterminated name: refused
+        return failed(reason, "check failed: nt_netif_register(&f.nif) == -EINVAL (an unterminated name)\0");
+    }
+    let name = "test0\0";
+    for (i in 0..8) {
+        let k = truncate<usize>(i);
+        LIFE_NIF.name[k] = if (k < name.length) name.bytes()[k] else 0;
+    }
+    if (nettest_netif_register(nif) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&f.nif) == 0\0");
+    }
+    let creator = borrow mut LIFE_CREATOR as *mut nt_netif_ref;
+    if (!nettest_netif_hold(creator, nif)) {
+        return failed(reason, "check failed: nt_netif_hold(&creator, &f.nif)\0");
+    }
+    if (kobject_refcount(objOf(nif) as *kobject) != 2) { // creator + registry
+        return failed(reason, "check failed: kobject_refcount(&f.nif.obj) == 2\0");
+    }
+
+    // A duplicate name is refused before the object exists: no kobject, no owner count for the driver's module to
+    // balance (its failure path frees the storage directly).
+    let dup = borrow mut DUP_NIF as *mut netif;
+    fakeSetup(dup, DUP, "test0", 0);
+    if (nettest_netif_register(dup) != -EEXIST) {
+        return failed(reason, "check failed: nt_netif_register(&dup.nif) == -EEXIST\0");
+    }
+    if (!objectUntouched(dup)) {
+        return failed(reason, "check failed: dup.nif.obj untouched (type == NULL, refcount == 0, owner == NULL)\0");
+    }
+
+    let found = netif_find("test0\0".ptr as *CChar);
+    let foundRef = borrow mut LIFE_FOUND as *mut nt_netif_ref;
+    if (!nettest_netif_hold(foundRef, found)) {
+        return failed(reason, "check failed: nt_netif_hold(&found_ref, found)\0");
+    }
+    if (found != nif || kobject_refcount(objOf(nif) as *kobject) != 3) {
+        return failed(reason, "check failed: found == &f.nif && kobject_refcount(&f.nif.obj) == 3\0");
+    }
+
+    var m = probe(true);
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    if (netif_transmit(found, m) != 0 || TRANSMITS[LIFE] != 1) {
+        return failed(reason, "check failed: netif_transmit(found, m) == 0 && f.transmits == 1\0");
+    }
+    m = probe(true);
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    netif_rx(found, m); // queued for the worker
+
+    nettest_netif_unregister(nif);
+    if (!netif_find("test0\0".ptr as *CChar).isNull()) {
+        return failed(reason, "check failed: netif_find(\"test0\") == NULL\0");
+    }
+    if ((LIFE_NIF.flags & NETIF_GONE) == 0 || (LIFE_NIF.flags & NETIF_UP) != 0) {
+        return failed(reason, "check failed: (f.nif.flags & NETIF_GONE) && !(f.nif.flags & NETIF_UP)\0");
+    }
+    if (kobject_refcount(objOf(nif) as *kobject) != 2) {
+        return failed(reason, "check failed: kobject_refcount(&f.nif.obj) == 2\0");
+    }
+    m = probe(false);
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    if (netif_transmit(found, m) != -ENODEV || TRANSMITS[LIFE] != 1) {
+        return failed(reason, "check failed: netif_transmit(found, m) == -ENODEV && f.transmits == 1\0");
+    }
+    m = probe(false);
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    // Unregister purged its queued packet, if the worker had not taken it, and a packet to a gone interface is freed,
+    // not queued.
+    if (netif_rxq_count(found as *netif) != 0) {
+        return failed(reason, "check failed: netif_rxq_count(found) == 0\0");
+    }
+    netif_rx(found, m); // dropped: gone
+    if (netif_rxq_count(found as *netif) != 0) {
+        return failed(reason, "check failed: netif_rxq_count(found) == 0 (after a receive while gone)\0");
+    }
+    if (LIFE_NIF.stats.rx_packets != 1) {
+        return failed(reason, "check failed: f.nif.stats.rx_packets == 1\0");
+    }
+
+    nettest_netif_ref_put(creator); // the creator is done
+    if (RELEASES[LIFE] != 0) {
+        return failed(reason, "check failed: f.releases == 0\0");
+    }
+    nettest_netif_ref_put(foundRef);
+    if (RELEASES[LIFE] != 1) {
+        return failed(reason, "check failed: f.releases == 1\0");
+    }
+    return true;
+}
