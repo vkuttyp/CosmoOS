@@ -196,10 +196,12 @@ def fetch_all(b, port, arch, variants=False, check=True):
     if not variants:
         return
     # The refused variants: links to the good files, the rest replaced.
-    # untrusting's comes later (fetch_variant): /tmp holds at most 64 MiB
-    # on v1.0.3 (RAMFS_MAX_PAGES), and the set's boot.tar with badtar's and
-    # untrusting's no longer fit at once (once the build carried the C
-    # compiler, roadmap 1.2 A1).
+    # badtar's and untrusting's come later (fetch_variant): /tmp holds at
+    # most 64 MiB on v1.0.3 (RAMFS_MAX_PAGES), and the set's boot.tar with
+    # badtar's and untrusting's no longer fit at once (once the build
+    # carried the C compiler, roadmap 1.2 A1), nor the set with badasset's
+    # kernel.elf and badtar's boot.tar (once the kernel passed 12 MB,
+    # 2026-11-05: about 66 MB).
     for d, _ in VARIANTS:
         if d not in LATE_VARIANTS:
             fetch_variant(b, url, arch, d)
@@ -229,8 +231,9 @@ VARIANTS = (("badasset", ("kernel.elf",)), ("badsums", ()), ("nosig", ()),
 # badasset keeps the set's own signed SHA256SUMS; badsums changes one of
 # its digests under the set's signature; nosig has no signature; the rest
 # have SHA256SUMS over their own files, signed by the throwaway variant key.
-# Fetched only once badtar's check is done and its files are gone.
-LATE_VARIANTS = ("untrusting",)
+# Fetched late: badtar's once badasset's check is done and its kernel.elf
+# is gone, untrusting's once badtar's is done and its boot.tar is gone.
+LATE_VARIANTS = ("badtar", "untrusting")
 SUMS_FILES = {d: (("SHA256SUMS",) if d == "nosig" else ("SHA256SUMS", "SHA256SUMS.sig")) for d, _ in VARIANTS}
 
 
@@ -280,6 +283,7 @@ def stage_refuse(args, results, port, keyid, otherid, vkeyid):
         out = sh(b, f"{TOOL} /tmp/badsums", "badsums", 3)
         need(out, r"^cosmo-upgrade: /tmp/badsums: SHA256SUMS: bad signature \(key \S+\); nothing written$",
              "a SHA256SUMS with one digest changed")
+        sh(b, f"rm -r /tmp/badasset /tmp/cosmoos-{arch}-kernel.elf", "rmbadasset")
         out = sh(b, f"{TOOL} /tmp/nosig", "nosig", 3)
         need(out, r"^cosmo-upgrade: /tmp/nosig: /tmp/nosig/SHA256SUMS\.sig: No such file or directory \(a release is "
                   r"checked against its signed SHA256SUMS\); nothing written$", "a set without SHA256SUMS.sig")
@@ -291,6 +295,7 @@ def stage_refuse(args, results, port, keyid, otherid, vkeyid):
         out = sh(b, f"{TOOL} /tmp/otherkey", "otherkey", 3)
         need(out, rf"^cosmo-upgrade: /tmp/otherkey: manifest: unknown signing key {otherid} \(not in "
                   r"/etc/pkg/keys\); nothing written$", "a manifest signed by another key")
+        fetch_variant(b, f"http://10.0.2.2:{port}", arch, "badtar")
         out = sh(b, f"{TOOL} /tmp/badtar", "badtar", 3)
         need(out, r"^cosmo-upgrade: /tmp/badtar: boot\.tar does not match the manifest \(SHA-512\); nothing written$",
              "an archive with one byte changed")
