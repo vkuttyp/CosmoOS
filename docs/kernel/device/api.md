@@ -190,7 +190,7 @@ allocation.
 (outstanding). `maps - unmaps` is the number of mappings in flight. Any
 context.
 
-## Block layer (`kernel/include/kernel/blk.h`, `kernel/block/blk.c`)
+## Block layer (`kernel/include/kernel/blk.h`, `kernel/block/blk.cee`)
 
 ### `void blk_init(void)`
 Registry mutex. Once, from `kernel_main` after `pci_init`.

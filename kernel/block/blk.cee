@@ -1,0 +1,1331 @@
+// blk.cee - The block layer (kernel/include/kernel/blk.h; docs/kernel/device/design.md, "The block layer"), in
+// CeeSafe: roadmap 2.0 SA7. The registry of block devices, the checks every bio passes, the pending queue of bios a
+// driver refused for the moment, the in-flight list and the thread that times its requests out, resets,
+// unregistration's barrier, BIO_PREFLUSH and BIO_FUA as sequences of flushes, the synchronous helpers and the lookups.
+// tests/host/test_blk.c holds it to the digest of the C it replaced.
+//
+// struct blkdev and struct bio stay C (blk.h): every driver fills them. The fields this file changes atomically
+// (`gone`, `recovering`, `submitting`, the completion counters) are reached as atomics through their addresses. The
+// synchronous helpers keep their bio and its completion on the stack, as the C did, in a zeroed slot of words: a
+// CeeSafe local cannot hold C state (CeeSafe's type-system.md §33.1). blk_floor.c keeps the module exports, a C macro.
+
+@header("kernel/blk.h", "kernel/completion.h", "kernel/compiler.h", "kernel/dma.h", "kernel/faultinject.h", "kernel/page.h", "kernel/part.h", "kernel/percpu.h", "kernel/printf.h", "kernel/sched.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h", "kernel/wait.h")
+extern "C" {
+    struct device;
+    struct thread;
+    struct completion {
+        done: u32;
+    }
+    struct blkdev_ops {
+        submit: extern "C" fn(*mut blkdev, *mut bio) -> i32;
+        release: extern "C" fn(*mut blkdev);
+        timeout: extern "C" fn(*mut blkdev, *mut bio);
+    }
+    struct blkdev {
+        obj: kobject;
+        name: [u8; 16];
+        dev: *mut device;
+        ops: *blkdev_ops;
+        sector_size: u32;
+        capacity: u64;
+        max_sectors: u32;
+        read_only: bool;
+        link: list_node;
+        max_segments: u32;
+        timeout_ns: u64;
+        reads: u64;
+        writes: u64;
+        flushes: u64;
+        errors: u64;
+        timeouts: u64;
+        completed_local: u64;
+        completed_remote: u64;
+        nr_queues: u32;
+        gone: u32;
+        recovering: u32;
+        submitting: u32;
+        pending: list_node;
+        inflight: list_node;
+        qlock: spinlock_t;
+        requeued: u64;
+        redrained: u64;
+        deferred: u64;
+    }
+    struct bio_vec {
+        buf: *mut void;
+        len: u32;
+    }
+    struct bio {
+        dev: *mut blkdev;
+        sector: u64;
+        nsectors: u32;
+        dir: u32;
+        flags: u32;
+        buf: *mut void;
+        vecs: *mut bio_vec;
+        nr_vecs: u32;
+        done: extern "C" fn(*mut bio);
+        arg: *mut void;
+        status: i32;
+        link: list_node;
+        inflight_link: list_node;
+        issued_ns: u64;
+        scans: u32;
+        issue_cpu: u32;
+    }
+    struct blk_test_driver_hooks {
+        driver: *CChar;
+    }
+
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+    fn blk_part_init();
+    fn blk_part_remove(disk: *mut blkdev);
+    fn kobject_track_code(obj: *mut kobject, code: usize);
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_sleep_ns(ns: u64);
+    fn clock_now_ns() -> u64;
+    fn clock_delta_ns(now: u64, stamp: u64) -> u64;
+    fn raw_cpu_id() -> u32;
+    fn arch_cpu_relax();
+    fn sched_yield();
+    fn dma_mappable(dev: *mut device, va: *void, len: usize) -> bool;
+    fn virt_is_direct_map(va: usize) -> bool;
+    fn faultinject_should_fail(kind: u32) -> bool;
+    fn completion_init(c: *mut completion, name: *CChar);
+    fn complete(c: *mut completion);
+    fn wait_for_completion(c: *mut completion);
+    fn kzalloc(size: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+    fn strlen(s: *CChar) -> usize;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn kprintf(format: *CChar, ...);
+}
+
+// ---- errno.h, blk.h, page.h, thread.h and faultinject.h values (asserted in tests/host/test_blk.c) ----
+
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const EEXIST: i32 = 17;
+const ENODEV: i32 = 19;
+const EROFS: i32 = 30;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EAGAIN: i32 = 11;
+const BIO_READ: u32 = 0;
+const BIO_WRITE: u32 = 1;
+const BIO_FLUSH: u32 = 2;
+const BIO_PREFLUSH: u32 = 1;
+const BIO_FUA: u32 = 2;
+/// The layer's own bio flag: the timeout thread has reported the bio.
+const BIO_TIMED_OUT: u32 = 0x40000000;
+const BLK_TIMEOUT_NS: u64 = 30000000000;
+const BLK_TIMEOUT_SCAN_NS: u64 = 500000000;
+const BLKDEV_NAME_MAX: usize = 16;
+const PAGE_SIZE: usize = 4096;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const FI_BLK_SUBMIT: u32 = 1;
+const FI_BLK_COMPLETE: u32 = 2;
+/// The overdue requests one scan of a device reports; the rest wait for the next scan.
+const EXPIRED_MAX: usize = 8;
+/// The synchronous helpers' stack slot for a bio and its completion, in words (checked against their C size).
+const SYNC_WORDS: usize = 64;
+
+/// The build's CONFIG_DEBUG, folded by the C compiler: the test hooks run in debug builds only.
+static DEBUG: bool = COSMO_CONFIG_DEBUG();
+
+// ---- The registry ----
+
+/// Every registered device, in registration order, under BLK_LOCK; the count beside it.
+static mut BLKDEVS: list_node = list_node {
+    next: borrow mut BLKDEVS as *mut list_node,
+    prev: borrow mut BLKDEVS as *mut list_node,
+};
+static mut BLK_LOCK: mutex = mutex {};
+static mut COUNT: u32 = 0;
+/// The timeout thread, started at the first registration.
+static mut TIMEOUT_THREAD: *mut thread = 0 as *mut thread;
+static mut BLKDEV_TYPE: kobject_type = kobject_type {
+    name: "blkdev\0".ptr as *CChar,
+    release: blkdevRelease,
+    flags: 0,
+};
+
+/// The registry's head.
+/// Safety: only its address is taken; the list is used under BLK_LOCK.
+fn blkdevs() -> *mut list_node => unsafe { borrow mut BLKDEVS as *mut list_node };
+
+/// The registry lock's address.
+/// Safety: only its address is taken, for mutex_lock and mutex_unlock.
+fn blkLock() -> *mut mutex => unsafe { borrow mut BLK_LOCK as *mut mutex };
+
+/// The device whose registry link `node` is.
+/// Safety: `node` is a blkdev's link.
+unsafe fn ofLink(node: *mut list_node) -> *mut blkdev => containerOf(node, offsetOf<blkdev>(link)) as *mut blkdev;
+
+/// The bio whose queue link `node` is.
+/// Safety: `node` is a bio's link.
+unsafe fn bioOfLink(node: *mut list_node) -> *mut bio => containerOf(node, offsetOf<bio>(link)) as *mut bio;
+
+/// The bio whose in-flight link `node` is.
+/// Safety: `node` is a bio's inflight_link.
+unsafe fn bioOfInflight(node: *mut list_node) -> *mut bio =>
+    containerOf(node, offsetOf<bio>(inflight_link)) as *mut bio;
+
+/// Safety: `bd` is a live blkdev.
+unsafe fn objOf(bd: *mut blkdev) -> *mut kobject => borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject;
+
+/// Safety: `bd` is a live blkdev.
+unsafe fn linkOf(bd: *mut blkdev) -> *mut list_node => borrow mut Ptr.toBorrowMut(bd).link as *mut list_node;
+
+/// The device's name, a C string of at most BLKDEV_NAME_MAX - 1 characters.
+/// Safety: `bd` is a live blkdev.
+unsafe fn nameOf(bd: *mut blkdev) -> *mut CChar => borrow mut Ptr.toBorrowMut(bd).name as *mut [u8; 16] as *mut CChar;
+
+/// Safety: `bd` is a live blkdev.
+unsafe fn opsOf(bd: *mut blkdev) -> borrow(static) blkdev_ops => Ptr.toBorrow(Ptr.toBorrow(bd as *blkdev).ops);
+
+/// Safety: `bd` is a live blkdev.
+unsafe fn pendingOf(bd: *mut blkdev) -> *mut list_node => borrow mut Ptr.toBorrowMut(bd).pending as *mut list_node;
+
+/// Safety: `bd` is a live blkdev.
+unsafe fn inflightOf(bd: *mut blkdev) -> *mut list_node =>
+    borrow mut Ptr.toBorrowMut(bd).inflight as *mut list_node;
+
+/// Safety: `b` is a live bio.
+unsafe fn queueLinkOf(b: *mut bio) -> *mut list_node => borrow mut Ptr.toBorrowMut(b).link as *mut list_node;
+
+/// Safety: `b` is a live bio.
+unsafe fn inflightLinkOf(b: *mut bio) -> *mut list_node =>
+    borrow mut Ptr.toBorrowMut(b).inflight_link as *mut list_node;
+
+/// The device's queue lock (the pending and in-flight lists), taken with interrupts off.
+/// Safety: `bd` is a registered blkdev.
+unsafe fn qlock(bd: *mut blkdev) -> usize => spin_lock_irqsave(borrow mut Ptr.toBorrowMut(bd).qlock as *mut spinlock_t);
+
+/// Safety: `bd`'s queue lock is held, taken by qlock() with `state`.
+unsafe fn qunlock(bd: *mut blkdev, state: usize) {
+    spin_unlock_irqrestore(borrow mut Ptr.toBorrowMut(bd).qlock as *mut spinlock_t, state);
+}
+
+// The fields changed atomically, as atomics.
+
+/// Safety: `bd` is a live blkdev, whose `gone` is only ever accessed atomically.
+unsafe fn gone(bd: *mut blkdev) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(bd).gone as *mut u32 as *AtomicU32);
+
+/// Safety: `bd` is a live blkdev, whose `recovering` is only ever accessed atomically.
+unsafe fn recovering(bd: *mut blkdev) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(bd).recovering as *mut u32 as *AtomicU32);
+
+/// Safety: `bd` is a live blkdev, whose `submitting` is only ever accessed atomically.
+unsafe fn submitting(bd: *mut blkdev) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(bd).submitting as *mut u32 as *AtomicU32);
+
+/// Safety: `field` is a live counter that is only ever changed atomically.
+unsafe fn counter(field: *mut u64) -> borrow(static) AtomicU64 => Ptr.toBorrow(field as *AtomicU64);
+
+/// A broken invariant (the C's KASSERT): the kernel stops.
+fn assertFailed(what: StringView) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("assertion failed: ");
+    line.text(what);
+    line.text(" (kernel/block/blk.cee)");
+    KernelLog.panic(line);
+}
+
+/// The kobject's release: the last reference to an unregistered device is gone, and its driver frees it.
+/// Safety: `obj` is a blkdev's kobject.
+@callback
+unsafe fn blkdevRelease(obj: *mut kobject) {
+    let bd = (obj as *mut u8).sub(offsetOf<blkdev>(obj)) as *mut blkdev;
+    if (!List.isEmpty(linkOf(bd) as *list_node)) {
+        assertFailed("list_empty(&bd->link)"); // unregistered before the last put
+    }
+    let release = opsOf(bd).release;
+    release(bd);
+}
+
+/// blk.h's blk_init.
+/// Safety: called once, at boot, before any other function here.
+@export("blk_init")
+fn init() {
+    unsafe {
+        mutex_init(blkLock(), "blkdevs\0".ptr as *CChar);
+        blk_part_init();
+    }
+}
+
+/// Whether a registered device has the name `name`.
+/// Safety: BLK_LOCK held.
+unsafe fn nameTaken(name: *CChar) -> bool {
+    let head = blkdevs();
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        if (strcmp(nameOf(ofLink(node)) as *CChar, name) == 0) {
+            return true;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    return false;
+}
+
+/// The driver's half of a registration is sound: the operations it must have, a sector size that is a power of two
+/// of at least 512, a capacity and a request size.
+/// Safety: `bd` is a blkdev the caller filled in.
+unsafe fn geometryOk(bd: *mut blkdev) -> bool {
+    let d = Ptr.toBorrow(bd as *blkdev);
+    if (d.ops.isNull()) {
+        return false;
+    }
+    let ops = Ptr.toBorrow(d.ops);
+    return !ops.submit.isNull() && !ops.release.isNull() && d.sector_size >= 512 &&
+        (d.sector_size & (d.sector_size - 1)) == 0 && d.capacity != 0 && d.max_sectors != 0;
+}
+
+/// Registry lock held, name chosen. Only now does the object exist (reference 1 to the creator, the owner module's
+/// live-object count raised); a failed registration leaves nothing to balance.
+/// Safety: BLK_LOCK held; `bd` passed geometryOk and is not registered.
+unsafe fn registerLocked(bd: *mut blkdev) {
+    kobject_init(objOf(bd), borrow BLKDEV_TYPE as *kobject_type);
+    kobject_track_code(objOf(bd), opsOf(bd).release as usize);
+    List.init(linkOf(bd));
+    let d = Ptr.toBorrowMut(bd);
+    d.reads = 0;
+    d.writes = 0;
+    d.flushes = 0;
+    d.errors = 0;
+    d.timeouts = 0;
+    d.recovering = 0;
+    d.deferred = 0;
+    d.completed_local = 0;
+    d.completed_remote = 0;
+    if (d.nr_queues == 0) {
+        d.nr_queues = 1;
+    }
+    d.gone = 0;
+    d.submitting = 0;
+    d.requeued = 0;
+    if (d.max_segments == 0) {
+        d.max_segments = 1;
+    }
+    if (d.timeout_ns == 0) {
+        d.timeout_ns = BLK_TIMEOUT_NS;
+    }
+    List.init(pendingOf(bd));
+    List.init(inflightOf(bd));
+    spinlock_init(borrow mut Ptr.toBorrowMut(bd).qlock as *mut spinlock_t, "blk-pending\0".ptr as *CChar);
+    List.pushBack(blkdevs(), linkOf(bd));
+    COUNT += 1;
+    kobject_get(objOf(bd)); // the registry's reference
+    if (TIMEOUT_THREAD.isNull()) {
+        TIMEOUT_THREAD = thread_create(
+            timeoutThread,
+            0 as *mut void,
+            "blk-timeout\0".ptr as *CChar,
+            SCHED_PRIO_DEFAULT,
+        );
+    }
+}
+
+/// "blk: <name>: <n> sectors of <size> bytes (<MiB> MiB)[, read-only]".
+/// Safety: `bd` is registered.
+unsafe fn announce(bd: *mut blkdev) {
+    let d = Ptr.toBorrow(bd as *blkdev);
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("blk: ");
+    line.bytes(Slice.fromRaw(nameOf(bd) as *u8, strlen(nameOf(bd) as *CChar)));
+    line.text(": ");
+    line.decimal(d.capacity);
+    line.text(" sectors of ");
+    line.decimal(d.sector_size as u64);
+    line.text(" bytes (");
+    line.decimal(d.capacity.wrappingMul(d.sector_size as u64) >> 20);
+    line.text(" MiB)");
+    if (d.read_only) {
+        line.text(", read-only");
+    }
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// blk.h's blk_register: the name is `prefix` and the first free letter.
+/// Safety: `bd` is a blkdev the caller filled in and does not share; `prefix` is a C string.
+@export("blk_register")
+unsafe fn register(bd: *mut blkdev, prefix: *CChar) -> i32 {
+    if (!geometryOk(bd) || strlen(prefix) + 2 > BLKDEV_NAME_MAX) {
+        return -EINVAL;
+    }
+    mutex_lock(blkLock());
+    let stem = Slice.fromRaw(prefix as *u8, strlen(prefix));
+    var letter: u8 = 97;    // 'a'
+    while (letter <= 122) { // 'z'
+        var name = [0u8; 16];
+        var w = TextWriter.create(mut name[..]);
+        w.bytes(stem);
+        w.byte(letter);
+        let d = Ptr.toBorrowMut(bd);
+        d.name = name;
+        if (!nameTaken(nameOf(bd) as *CChar)) {
+            break;
+        }
+        letter += 1;
+    }
+    if (letter > 122) {
+        mutex_unlock(blkLock());
+        return -ENOSPC; // the object is untouched: no kobject, no owner count; the caller frees its storage
+    }
+    registerLocked(bd);
+    mutex_unlock(blkLock());
+    announce(bd);
+    return 0;
+}
+
+/// blk.h's blk_register_named: exactly `name`.
+/// Safety: as register; `name` is a C string or null.
+@export("blk_register_named")
+unsafe fn registerNamed(bd: *mut blkdev, name: *CChar) -> i32 {
+    if (!geometryOk(bd) || name.isNull() || strlen(name) == 0 || strlen(name) >= BLKDEV_NAME_MAX) {
+        return -EINVAL;
+    }
+    mutex_lock(blkLock());
+    if (nameTaken(name)) {
+        mutex_unlock(blkLock());
+        return -EEXIST;
+    }
+    strlcpy(nameOf(bd), name, BLKDEV_NAME_MAX);
+    registerLocked(bd);
+    mutex_unlock(blkLock());
+    announce(bd);
+    return 0;
+}
+
+/// blk.h's bio_segment: segment `i` of a bio, its single buffer or its i-th vector.
+/// Safety: `b` is a live bio with its device; `out` is writable; `i` < bio_segments(b).
+@export("bio_segment")
+unsafe fn segment(b: *bio, i: u32, out: *mut bio_vec) {
+    let o = Ptr.toBorrow(b);
+    let v = Ptr.toBorrowMut(out);
+    if (o.nr_vecs == 0) {
+        if (i != 0) {
+            assertFailed("i == 0");
+        }
+        v.buf = o.buf;
+        v.len = o.nsectors.wrappingMul(Ptr.toBorrow(o.dev as *blkdev).sector_size);
+        return;
+    }
+    if (i >= o.nr_vecs) {
+        assertFailed("i < bio->nr_vecs");
+    }
+    let src = Ptr.toBorrow(o.vecs.add(i as usize) as *bio_vec);
+    v.buf = src.buf;
+    v.len = src.len;
+}
+
+/// A buffer the device can reach. A device with no hardware behind it (a RAM disk, a self-test's fake) copies with
+/// the CPU, so any memory the direct map covers will do; dma_mappable(NULL, ...) would apply the 32-bit default mask
+/// and refuse every buffer above 4 GiB, which on a machine with that much RAM is most of them.
+/// Safety: `bd` is a live blkdev.
+unsafe fn bufOk(bd: *mut blkdev, buf: *mut void, len: usize) -> bool {
+    let dev = Ptr.toBorrow(bd as *blkdev).dev;
+    if (dev.isNull()) {
+        return len != 0 && virt_is_direct_map(buf as usize) && virt_is_direct_map((buf as usize).wrappingAdd(len - 1));
+    }
+    return dma_mappable(dev, buf as *void, len);
+}
+
+/// The data buffer(s) of a read or write: total length, the segment rules (docs/kernel/device/design.md,
+/// "Multi-segment bios"), DMA-able.
+/// Safety: `bd` is `b`'s live device.
+unsafe fn dataOk(bd: *mut blkdev, b: *mut bio) -> bool {
+    let o = Ptr.toBorrow(b as *bio);
+    let total = o.nsectors as usize * Ptr.toBorrow(bd as *blkdev).sector_size as usize;
+    if (o.nr_vecs == 0) {
+        return !o.buf.isNull() && bufOk(bd, o.buf, total);
+    }
+    if (o.vecs.isNull() || o.nr_vecs > Ptr.toBorrow(bd as *blkdev).max_segments) {
+        return false;
+    }
+    var sum: usize = 0;
+    var i: u32 = 0;
+    while (i < o.nr_vecs) {
+        let v = Ptr.toBorrow(o.vecs.add(i as usize) as *bio_vec);
+        if (v.buf.isNull() || v.len == 0) {
+            return false;
+        }
+        let at = v.buf as usize;
+        if (i > 0 && (at & (PAGE_SIZE - 1)) != 0) {
+            return false; // every segment but the first starts on a page
+        }
+        if (i + 1 < o.nr_vecs && (at.wrappingAdd(v.len as usize) & (PAGE_SIZE - 1)) != 0) {
+            return false; // every segment but the last ends on one
+        }
+        if (!bufOk(bd, v.buf, v.len as usize)) {
+            return false;
+        }
+        sum += v.len as usize;
+        i += 1;
+    }
+    return sum == total;
+}
+
+// ---- The in-flight list and the timeout thread ----
+
+/// Debug builds: every bio is stamped this many ns in the future, as a CPU whose clock runs ahead would stamp it.
+static TEST_SKEW_NS: AtomicU64 = AtomicU64.constant(0);
+
+/// blk.h's blk_test_set_issue_skew_ns.
+@cfg("CONFIG_DEBUG")
+@export("blk_test_set_issue_skew_ns")
+fn setIssueSkew(ns: u64) {
+    TEST_SKEW_NS.storeWith(ns, StoreOrdering.Release);
+}
+
+/// Stamp the bio and put it on the device's in-flight list.
+/// Safety: `bd`'s queue lock is held; `b` is on no in-flight list.
+unsafe fn inflightAddLocked(bd: *mut blkdev, b: *mut bio) {
+    var issued = clock_now_ns();
+    if (DEBUG) {
+        issued = issued.wrappingAdd(TEST_SKEW_NS.loadWith(LoadOrdering.Acquire));
+    }
+    let cpu = arch_cpu_id();
+    let o = Ptr.toBorrowMut(b);
+    o.issued_ns = issued;
+    o.issue_cpu = cpu;
+    o.scans = 0;
+    o.flags = o.flags & (BIO_TIMED_OUT ^ 0xFFFFFFFF);
+    List.pushBack(inflightOf(bd), inflightLinkOf(b));
+}
+
+/// Take the bio off the in-flight list, if it is on it.
+/// Safety: `bd` is `b`'s registered device; `b`'s in-flight link is initialised.
+unsafe fn inflightRemove(bd: *mut blkdev, b: *mut bio) {
+    let s = qlock(bd);
+    if (!List.isEmpty(inflightLinkOf(b) as *list_node)) {
+        List.remove(inflightLinkOf(b));
+        List.init(inflightLinkOf(b));
+    }
+    qunlock(bd, s);
+}
+
+/// "blk: <name>: request timed out after <timeout> ms (at <now> ms)".
+/// Safety: `bd` is registered.
+unsafe fn warnTimedOut(bd: *mut blkdev, now: u64) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("blk: ");
+    line.bytes(Slice.fromRaw(nameOf(bd) as *u8, strlen(nameOf(bd) as *CChar)));
+    line.text(": request timed out after ");
+    line.decimal(Ptr.toBorrow(bd as *blkdev).timeout_ns / 1000000);
+    line.text(" ms (at ");
+    line.decimal(now / 1000000);
+    line.text(" ms)");
+    KernelLog.send(LogLevel.Warn, line);
+}
+
+/// One device's scan: the overdue bios are reported once and handed to the driver's timeout operation.
+///
+/// Two ages, and a request is overdue when either says so. `issued_ns` was stamped by whichever CPU handed the bio to
+/// the driver and `now` was read here; the clock's age saturates rather than underflow on residual skew, which would
+/// time out every request at once. But saturation trades that for the opposite failure: on a machine whose counter is
+/// not common across CPUs, an issuing CPU that runs ahead makes the age read zero for ever. So `scans` is a second age
+/// no clock can distort: this thread alone writes it, every 500 ms, counting the scans that have seen the bio in
+/// flight. The first sighting is worth nothing (a bio submitted a moment before a scan has been in flight for almost
+/// no time), so N sightings vouch for N-1 intervals. With two ages, "oldest first" no longer means "first to expire",
+/// so the walk does not stop at the first request that is not overdue.
+///
+/// From the decision to the end of the driver's recovery the device takes no new work: a recovery fails what the
+/// device holds, and a bio accepted in this window would die with the rest. The pending queue is where it waits.
+/// Safety: BLK_LOCK held; `bd` is registered.
+unsafe fn scanDevice(bd: *mut blkdev) {
+    let timeout = Ptr.toBorrow(bd as *blkdev).timeout_ns;
+    if (timeout == 0xFFFFFFFFFFFFFFFF || opsOf(bd).timeout.isNull()) {
+        return;
+    }
+    var expired = [0 as *mut bio; 8];
+    var n: usize = 0;
+    let now = clock_now_ns();
+    let s = qlock(bd);
+    let head = inflightOf(bd);
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let b = bioOfInflight(node);
+        let o = Ptr.toBorrowMut(b);
+        if (o.scans != 0xFFFFFFFF) {
+            o.scans += 1;
+        }
+        let byClock = clock_delta_ns(now, o.issued_ns);
+        let byScans = (o.scans - 1) as u64 * BLK_TIMEOUT_SCAN_NS;
+        if ((byClock >= timeout || byScans >= timeout) && (o.flags & BIO_TIMED_OUT) == 0) {
+            o.flags = o.flags | BIO_TIMED_OUT;
+            let d = Ptr.toBorrowMut(bd);
+            d.timeouts += 1;
+            expired[n] = b;
+            n += 1;
+            if (n == EXPIRED_MAX) {
+                break;
+            }
+        }
+        node = List.next(head as *list_node, node);
+    }
+    qunlock(bd, s);
+    if (n == 0) {
+        return;
+    }
+    recovering(bd).storeWith(1, StoreOrdering.Release);
+    for (i in 0..n) {
+        warnTimedOut(bd, now);
+        let timedOut = opsOf(bd).timeout;
+        timedOut(bd, expired[i]);
+    }
+    recovering(bd).storeWith(0, StoreOrdering.Release);
+    drainPending(bd); // whatever waited out the recovery
+}
+
+/// The timeout thread: every 500 ms, every registered device's scan. The driver receives a pointer it must find in its
+/// own in-flight records under its own lock before touching it: the request may complete on another CPU at any
+/// moment, and once it has the memory is the owner's.
+/// Safety: started once, by the first registration.
+@callback
+unsafe fn timeoutThread(arg: *mut void) {
+    while (true) {
+        thread_sleep_ns(BLK_TIMEOUT_SCAN_NS);
+        mutex_lock(blkLock());
+        let head = blkdevs();
+        var node = List.first(head as *list_node);
+        while (!node.isNull()) {
+            scanDevice(ofLink(node));
+            node = List.next(head as *list_node, node);
+        }
+        mutex_unlock(blkLock());
+    }
+}
+
+// ---- The test hooks (docs/audit/next-subsystem-lifetime-windows.md) ----
+//
+// The unregister barrier's two halves. The refusal half is reached by pausing between the `gone` store and the
+// `submitting` load: every submitter arriving then must be turned back. The drain half needs a submitter parked inside
+// the window (past the `gone` check, `submitting` raised) and a way for the test to know one is there and that the
+// unregister is really waiting for it. Its order is kept as positions in one sequence, not as two CPUs' clocks, which
+// this kernel does not promise agree (docs/audit/next-subsystem-cpu-clock.md, step 5).
+
+static TEST_PAUSE_MS: AtomicU32 = AtomicU32.constant(0);    // refusal half: pause inside the window
+static TEST_HOLD: AtomicU32 = AtomicU32.constant(0);        // drain half: park the next submitter
+static TEST_PARKED: AtomicU32 = AtomicU32.constant(0);      // a submitter is inside the window
+static TEST_RELEASE: AtomicU32 = AtomicU32.constant(0);     // let it out
+static TEST_UNREG_SPINS: AtomicU32 = AtomicU32.constant(0); // iterations blk_unregister spent draining
+static TEST_SEQ: AtomicU64 = AtomicU64.constant(0);
+static TEST_LEFT_SEQ: AtomicU64 = AtomicU64.constant(0);  // the parked submitter left
+static TEST_UNREG_SEQ: AtomicU64 = AtomicU64.constant(0); // blk_unregister returned
+static TEST_DRIVER_HOOKS: AtomicUSize = AtomicUSize.constant(0);
+
+/// blk.h's blk_test_tick: the next position in the one sequence every stamp a test compares is taken from.
+@cfg("CONFIG_DEBUG")
+@export("blk_test_tick")
+fn tick() -> u64 => TEST_SEQ.fetchAddWith(1, Ordering.SequentiallyConsistent) + 1;
+
+/// blk.h's blk_test_resubmit_from_done: from a bio's `done`, back to the tail of its device's pending queue.
+/// Safety: called from `b`'s done, its device registered.
+@cfg("CONFIG_DEBUG")
+@export("blk_test_resubmit_from_done")
+unsafe fn resubmitFromDone(b: *mut bio) {
+    let bd = Ptr.toBorrow(b as *bio).dev;
+    List.init(inflightLinkOf(b));
+    let s = qlock(bd);
+    List.pushBack(pendingOf(bd), queueLinkOf(b));
+    let d = Ptr.toBorrowMut(bd);
+    d.requeued += 1;
+    qunlock(bd, s);
+}
+
+/// blk.h's blk_test_driver_hooks_set.
+/// Safety: `h` is null or lives until it is replaced.
+@cfg("CONFIG_DEBUG")
+@export("blk_test_driver_hooks_set")
+unsafe fn driverHooksSet(h: *blk_test_driver_hooks) {
+    TEST_DRIVER_HOOKS.storeWith(h as usize, StoreOrdering.Release);
+}
+
+/// blk.h's blk_test_driver_hooks: the hooks published by `driver`, or null.
+/// Safety: `driver` is a C string.
+@cfg("CONFIG_DEBUG")
+@export("blk_test_driver_hooks")
+unsafe fn driverHooks(driver: *CChar) -> *blk_test_driver_hooks {
+    let h = TEST_DRIVER_HOOKS.loadWith(LoadOrdering.Acquire) as *blk_test_driver_hooks;
+    if (!h.isNull() && strcmp(Ptr.toBorrow(h).driver, driver) == 0) {
+        return h;
+    }
+    return 0 as *blk_test_driver_hooks;
+}
+
+@cfg("CONFIG_DEBUG")
+@export("blk_test_unregister_pause")
+fn unregisterPause(ms: u32) {
+    TEST_PAUSE_MS.storeWith(ms, StoreOrdering.Release);
+}
+
+@cfg("CONFIG_DEBUG")
+@export("blk_test_hold_in_driver")
+fn holdInDriver(on: bool) {
+    TEST_RELEASE.storeWith(0, StoreOrdering.Release);
+    TEST_PARKED.storeWith(0, StoreOrdering.Release);
+    TEST_UNREG_SPINS.storeWith(0, StoreOrdering.Release);
+    TEST_LEFT_SEQ.storeWith(0, StoreOrdering.Release);
+    TEST_UNREG_SEQ.storeWith(0, StoreOrdering.Release);
+    TEST_SEQ.storeWith(0, StoreOrdering.Release);
+    TEST_HOLD.storeWith(if (on) 1 else 0, StoreOrdering.Release);
+}
+
+@cfg("CONFIG_DEBUG")
+@export("blk_test_submitter_parked")
+fn submitterParked() -> bool => TEST_PARKED.loadWith(LoadOrdering.Acquire) != 0;
+
+@cfg("CONFIG_DEBUG")
+@export("blk_test_unregister_spins")
+fn unregisterSpins() -> u32 => TEST_UNREG_SPINS.loadWith(LoadOrdering.Acquire);
+
+@cfg("CONFIG_DEBUG")
+@export("blk_test_release_in_driver")
+fn releaseInDriver() {
+    TEST_RELEASE.storeWith(1, StoreOrdering.Release);
+}
+
+/// blk.h's blk_test_drain_ordered: did the unregister return after the parked submitter left?
+@cfg("CONFIG_DEBUG")
+@export("blk_test_drain_ordered")
+fn drainOrdered() -> bool {
+    let left = TEST_LEFT_SEQ.loadWith(LoadOrdering.Acquire);
+    let unreg = TEST_UNREG_SEQ.loadWith(LoadOrdering.Acquire);
+    return left != 0 && unreg != 0 && unreg > left;
+}
+
+/// From blk_submit with `submitting` raised and `gone` not seen, exactly the state the unregister must wait for: the
+/// first submitter after the hold is armed waits there until released.
+/// Safety: arch_cpu_relax only hints the CPU while it spins.
+fn testPark() -> bool {
+    match (TEST_HOLD.compareExchangeWith(1, 0, Ordering.AcquireRelease)) {
+        Ok(_) => {},
+        Err(_) => {
+            return false; // not the first submitter, or no hold armed
+        },
+    }
+    TEST_PARKED.storeWith(1, StoreOrdering.Release);
+    while (TEST_RELEASE.loadWith(LoadOrdering.Acquire) == 0) {
+        unsafe { arch_cpu_relax(); }
+    }
+    return true;
+}
+
+// ---- Unregistration, submission, the pending queue, resets ----
+
+/// "blk: <name> removed".
+/// Safety: `bd` is a live blkdev.
+unsafe fn announceRemoved(bd: *mut blkdev) {
+    var buffer = [0u8; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("blk: ");
+    line.bytes(Slice.fromRaw(nameOf(bd) as *u8, strlen(nameOf(bd) as *CChar)));
+    line.text(" removed");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// blk.h's blk_unregister. A disk's partitions go first: they forward to it (part.h). Then new submissions are
+/// refused and the ones inside the driver waited for. Both sides are sequentially consistent: a submitter that did not
+/// see `gone` has raised `submitting` before it is read here, or its increment is seen (docs/kernel/quiesce/design.md,
+/// "Block devices"). Nothing waiting in the pending queue will ever reach the driver: it completes with -ENODEV.
+/// Safety: `bd` is registered; the caller holds the creator's reference.
+@export("blk_unregister")
+unsafe fn unregister(bd: *mut blkdev) {
+    blk_part_remove(bd);
+    mutex_lock(blkLock());
+    List.remove(linkOf(bd));
+    List.init(linkOf(bd));
+    COUNT -= 1;
+    mutex_unlock(blkLock());
+
+    gone(bd).storeWith(1, StoreOrdering.SequentiallyConsistent);
+    if (DEBUG) {
+        // The refusal half's window, widened where the argument is.
+        let pause = TEST_PAUSE_MS.loadWith(LoadOrdering.Acquire);
+        if (pause != 0) {
+            let end = clock_now_ns() + pause as u64 * 1000000;
+            while (clock_now_ns() < end) {
+                sched_yield();
+            }
+        }
+    }
+    while (submitting(bd).loadWith(LoadOrdering.SequentiallyConsistent) != 0) {
+        if (DEBUG) {
+            // A test waits for this to move before releasing its parked submitter: the drain is really draining.
+            TEST_UNREG_SPINS.fetchAddWith(1, Ordering.AcquireRelease);
+        }
+        sched_yield();
+    }
+    while (true) {
+        let s = qlock(bd);
+        let node = List.first(pendingOf(bd) as *list_node);
+        if (!node.isNull()) {
+            List.remove(node);
+        }
+        qunlock(bd, s);
+        if (node.isNull()) {
+            break;
+        }
+        bioComplete(bioOfLink(node), -ENODEV);
+    }
+    announceRemoved(bd);
+    if (DEBUG) {
+        TEST_UNREG_SEQ.storeWith(tick(), StoreOrdering.Release);
+    }
+    kobject_put(objOf(bd)); // the registry's reference
+}
+
+/// blk.h's blk_submit: check the bio and hand it to the driver. Flagged writes become their flush sequence.
+/// Safety: `b` is a bio the caller owns until its done runs.
+@export("blk_submit")
+unsafe fn submit(b: *mut bio) -> i32 {
+    let bd = Ptr.toBorrow(b as *bio).dev;
+    if (bd.isNull() || Ptr.toBorrow(b as *bio).done.isNull()) {
+        return -EINVAL;
+    }
+    submitting(bd).fetchAddWith(1, Ordering.SequentiallyConsistent);
+    if (gone(bd).loadWith(LoadOrdering.SequentiallyConsistent) != 0) {
+        submitting(bd).fetchSubWith(1, Ordering.SequentiallyConsistent);
+        return -ENODEV;
+    }
+    var parked = false;
+    if (DEBUG) {
+        parked = testPark();
+    }
+    let flags = Ptr.toBorrow(b as *bio).flags;
+    let rc = if ((flags & (BIO_PREFLUSH | BIO_FUA)) != 0) submitFlagged(bd, b) else submitChecked(bd, b);
+    if (DEBUG && parked) {
+        // Stamped before the decrement: the unregister can return the moment `submitting` falls.
+        TEST_LEFT_SEQ.storeWith(tick(), StoreOrdering.Release);
+    }
+    submitting(bd).fetchSubWith(1, Ordering.SequentiallyConsistent);
+    return rc;
+}
+
+/// The pending queue (docs/kernel-services/filesystem/cosmofs/design.md, "The block layer"): a driver that refuses a
+/// bio with -EAGAIN has no slot for it; the bio waits here and every completion resubmits from the head. No lock is
+/// held across the driver's submit (it may complete synchronously and re-enter through bio_complete), so a
+/// resubmission refused again goes back to the head and the next completion tries once more.
+///
+/// The window: between the refusal and the push back, the queue is empty, and a completion that drains then finds
+/// nothing to resubmit. If it was the last bio the driver held, no further completion will come. So after the push the
+/// in-flight list is checked: empty means nothing can wake this queue, and the bio is tried again at once; otherwise a
+/// completion is still due and, the bio queued before the check, it is what the completion finds. Found by the USB
+/// storage driver, which refuses every bio while one exchange is in flight.
+/// Safety: `bd` is registered.
+unsafe fn drainPending(bd: *mut blkdev) {
+    while (true) {
+        // Nothing goes to a device the layer is recovering; the recovery drains the queue itself when it is done.
+        if (recovering(bd).loadWith(LoadOrdering.Acquire) != 0) {
+            return;
+        }
+        let s = qlock(bd);
+        let node = List.first(pendingOf(bd) as *list_node);
+        if (node.isNull()) {
+            qunlock(bd, s);
+            return;
+        }
+        List.remove(node);
+        qunlock(bd, s);
+        let b = bioOfLink(node);
+        let rc = toDriver(bd, b);
+        if (rc == -EAGAIN) {
+            let again = qlock(bd);
+            List.pushFront(pendingOf(bd), queueLinkOf(b));
+            let idle = List.isEmpty(inflightOf(bd) as *list_node);
+            qunlock(bd, again);
+            if (idle) {
+                let d = Ptr.toBorrowMut(bd);
+                d.redrained += 1;
+                continue; // nobody left to wake the queue: try again now
+            }
+            return;
+        }
+        if (rc != 0) {
+            bioComplete(b, rc); // the driver never owned it
+        }
+    }
+}
+
+/// blk.h's blk_reset. BLK_LOCK is held across the whole reset, as the timeout thread holds it across its recovery:
+/// both gate the device through `recovering`, so this keeps the two recovery paths from reopening each other's gate.
+/// The lock order is model_lock -> BLK_LOCK, the same as device_register -> blk_register; the submit path takes
+/// neither, so the drain still makes progress. Submissions wait in the pending queue meanwhile, and `reinit` (the
+/// driver resets the hardware and completes whatever was in flight) runs with nothing inside the driver.
+/// Safety: `bd` is registered; `reinit` keeps blk.h's contract.
+@export("blk_reset")
+unsafe fn reset(bd: *mut blkdev, reinit: extern "C" fn(*mut blkdev) -> i32) -> i32 {
+    mutex_lock(blkLock());
+    recovering(bd).storeWith(1, StoreOrdering.SequentiallyConsistent);
+    while (submitting(bd).loadWith(LoadOrdering.SequentiallyConsistent) != 0) {
+        sched_yield();
+    }
+    let rc = reinit(bd);
+    recovering(bd).storeWith(0, StoreOrdering.Release);
+    drainPending(bd); // resubmit whatever waited, onto the rebuilt queue
+    mutex_unlock(blkLock());
+    return rc;
+}
+
+/// Call the driver with the bio on the in-flight list: a driver may complete synchronously from inside submit, and
+/// the completion must find the bio there to take it off. A refusal takes it off again.
+/// Safety: `bd` is `b`'s registered device; `b` is checked and on no list.
+unsafe fn toDriver(bd: *mut blkdev, b: *mut bio) -> i32 {
+    let s = qlock(bd);
+    inflightAddLocked(bd, b);
+    qunlock(bd, s);
+    let submitOp = opsOf(bd).submit;
+    let rc = submitOp(bd, b);
+    if (rc != 0) {
+        inflightRemove(bd, b);
+    }
+    return rc;
+}
+
+/// Hand a checked bio to the driver; -EAGAIN parks it in the queue. A device whose timeout the layer has just
+/// declared is about to have everything it holds failed: the bio waits for that to be over instead.
+/// Safety: as toDriver.
+unsafe fn driverSubmit(bd: *mut blkdev, b: *mut bio) -> i32 {
+    List.init(inflightLinkOf(b));
+    let s = qlock(bd);
+    let isRecovering = recovering(bd).loadWith(LoadOrdering.Acquire) != 0;
+    if (isRecovering) {
+        let d = Ptr.toBorrowMut(bd);
+        d.deferred += 1;
+    }
+    let waiting = isRecovering || !List.isEmpty(pendingOf(bd) as *list_node);
+    if (waiting) {
+        List.pushBack(pendingOf(bd), queueLinkOf(b)); // keep the order behind those already waiting
+        let d = Ptr.toBorrowMut(bd);
+        d.requeued += 1;
+    }
+    qunlock(bd, s);
+    if (waiting) {
+        drainPending(bd); // a slot may have freed since the queue formed
+        return 0;
+    }
+    let rc = toDriver(bd, b);
+    if (rc != -EAGAIN) {
+        return rc;
+    }
+    let again = qlock(bd);
+    List.pushBack(pendingOf(bd), queueLinkOf(b));
+    let d = Ptr.toBorrowMut(bd);
+    d.requeued += 1;
+    qunlock(bd, again);
+    drainPending(bd); // closes the window between the refusal and the enqueue
+    return 0;
+}
+
+// ---- BIO_PREFLUSH and BIO_FUA: flush, the write, flush ----
+
+/// A flagged write's sequence. The user's bio keeps its own fields; its `done` and `arg` are parked here and given
+/// back before its done runs. A failure anywhere completes the user's bio with that status. Allocated zeroed, never
+/// made as a value (it holds a C bio).
+struct BioSeq {
+    flush: bio;
+    user: *mut bio;
+    userDone: extern "C" fn(*mut bio);
+    userArg: *mut void; // the caller's context, parked while the sequence borrows the field
+    pendingFlags: u32;
+}
+
+/// Safety: `seq` is a live sequence.
+unsafe fn flushOf(seq: *mut BioSeq) -> *mut bio => borrow mut Ptr.toBorrowMut(seq).flush as *mut bio;
+
+/// Give the user's bio its own done and arg back.
+/// Safety: `seq` is a live sequence.
+unsafe fn seqRestore(seq: *mut BioSeq) {
+    let q = Ptr.toBorrow(seq as *BioSeq);
+    let u = Ptr.toBorrowMut(q.user);
+    u.done = q.userDone;
+    u.arg = q.userArg;
+}
+
+/// Safety: `seq` is a live sequence, freed here.
+unsafe fn seqFinish(seq: *mut BioSeq, status: i32) {
+    let u = Ptr.toBorrow(seq as *BioSeq).user;
+    seqRestore(seq);
+    kfree(seq as *mut void);
+    bioComplete(u, status);
+}
+
+/// The sequence's flush bio, set up to run `done` on `dev`.
+/// Safety: `seq` is a live sequence whose flush bio is zeroed and on no list.
+unsafe fn setupFlush(seq: *mut BioSeq, dev: *mut blkdev, done: extern "C" fn(*mut bio)) {
+    let f = flushOf(seq);
+    let o = Ptr.toBorrowMut(f);
+    o.dev = dev;
+    o.dir = BIO_FLUSH;
+    o.done = done;
+    o.arg = seq as *mut void;
+    o.status = -EAGAIN;
+    List.init(queueLinkOf(f));
+}
+
+/// Safety: `b` is a sequence's flush bio, completed.
+@callback
+unsafe fn seqPostFlushDone(b: *mut bio) {
+    let o = Ptr.toBorrow(b as *bio);
+    seqFinish(o.arg as *mut BioSeq, o.status);
+}
+
+/// The write is done: with BIO_FUA, the flush after it.
+/// Safety: `b` is a sequence's user bio, completed.
+@callback
+unsafe fn seqWriteDone(b: *mut bio) {
+    let seq = Ptr.toBorrow(b as *bio).arg as *mut BioSeq;
+    let status = Ptr.toBorrow(b as *bio).status;
+    if (status != 0 || (Ptr.toBorrow(seq as *BioSeq).pendingFlags & BIO_FUA) == 0) {
+        seqFinish(seq, status);
+        return;
+    }
+    let dev = Ptr.toBorrow(b as *bio).dev;
+    memset(flushOf(seq) as *mut void, 0, layoutOf<bio>().size);
+    setupFlush(seq, dev, seqPostFlushDone);
+    let rc = driverSubmit(dev, flushOf(seq));
+    if (rc != 0) {
+        seqFinish(seq, rc);
+    }
+}
+
+/// The flush before is done: the write.
+/// Safety: `b` is a sequence's flush bio, completed.
+@callback
+unsafe fn seqPreFlushDone(b: *mut bio) {
+    let seq = Ptr.toBorrow(b as *bio).arg as *mut BioSeq;
+    let status = Ptr.toBorrow(b as *bio).status;
+    if (status != 0) {
+        seqFinish(seq, status);
+        return;
+    }
+    let u = Ptr.toBorrow(seq as *BioSeq).user;
+    let user = Ptr.toBorrowMut(u);
+    user.status = -EAGAIN;
+    let rc = driverSubmit(Ptr.toBorrow(u as *bio).dev, u);
+    if (rc != 0) {
+        seqFinish(seq, rc);
+    }
+}
+
+/// A write with BIO_PREFLUSH or BIO_FUA, checked as a write and then run as its sequence.
+/// Safety: `bd` is `b`'s registered device.
+unsafe fn submitFlagged(bd: *mut blkdev, b: *mut bio) -> i32 {
+    let o = Ptr.toBorrow(b as *bio);
+    let d = Ptr.toBorrow(bd as *blkdev);
+    if (o.dir != BIO_WRITE) {
+        return -EINVAL; // flags belong to writes
+    }
+    if (o.nsectors == 0 || o.nsectors > d.max_sectors) {
+        return -EINVAL;
+    }
+    if (o.sector >= d.capacity || d.capacity - o.sector < o.nsectors as u64) {
+        return -EINVAL;
+    }
+    if (d.read_only) {
+        return -EROFS;
+    }
+    if (!dataOk(bd, b)) {
+        return -EINVAL;
+    }
+    let seq = kzalloc(layoutOf<BioSeq>().size) as *mut BioSeq;
+    if (seq.isNull()) {
+        return -ENOMEM;
+    }
+    // A failed pre-flush completes the user's bio before it ever reaches the driver: bio_complete takes it off the
+    // in-flight list, which must find an empty link rather than whatever the caller left.
+    List.init(inflightLinkOf(b));
+    let q = Ptr.toBorrowMut(seq);
+    let u = Ptr.toBorrowMut(b);
+    q.user = b;
+    q.userDone = u.done;
+    q.userArg = u.arg;
+    q.pendingFlags = u.flags;
+    u.done = seqWriteDone;
+    u.arg = seq as *mut void; // borrowed until seqRestore; the caller's arg is parked in the sequence
+    u.status = -EAGAIN;
+    if ((u.flags & BIO_PREFLUSH) != 0) {
+        setupFlush(seq, bd, seqPreFlushDone);
+        let rc = driverSubmit(bd, flushOf(seq));
+        if (rc != 0) {
+            seqRestore(seq);
+            kfree(seq as *mut void);
+        }
+        return rc;
+    }
+    let rc = driverSubmit(bd, b);
+    if (rc != 0) {
+        seqRestore(seq);
+        kfree(seq as *mut void);
+    }
+    return rc;
+}
+
+/// An unflagged bio: a flush, or a read or write within the device, its buffers sound.
+/// Safety: `bd` is `b`'s registered device.
+unsafe fn submitChecked(bd: *mut blkdev, b: *mut bio) -> i32 {
+    let o = Ptr.toBorrow(b as *bio);
+    let d = Ptr.toBorrow(bd as *blkdev);
+    if (o.dir == BIO_FLUSH) {
+        if (o.nsectors != 0 || o.sector != 0) {
+            return -EINVAL;
+        }
+    } else {
+        if (o.nsectors == 0 || o.nsectors > d.max_sectors) {
+            return -EINVAL;
+        }
+        if (o.sector >= d.capacity || d.capacity - o.sector < o.nsectors as u64) {
+            return -EINVAL;
+        }
+        if (o.dir == BIO_WRITE && d.read_only) {
+            return -EROFS;
+        }
+        if (o.dir != BIO_READ && o.dir != BIO_WRITE) {
+            return -EINVAL;
+        }
+        if (!dataOk(bd, b)) {
+            return -EINVAL; // not DMA-able memory, or segments that break the rules
+        }
+    }
+    if (faultinject_should_fail(FI_BLK_SUBMIT)) {
+        return -EIO; // debug builds: an injected submission failure (docs/verification/)
+    }
+    let inFlight = Ptr.toBorrowMut(b);
+    inFlight.status = -EAGAIN; // in flight
+    return driverSubmit(bd, b);
+}
+
+/// blk.h's bio_complete: the driver is done with the bio. Any context.
+/// Safety: `b` is a bio its device's driver (or this layer) owns, completed once.
+@export("bio_complete")
+unsafe fn bioComplete(b: *mut bio, status: i32) {
+    let bd = Ptr.toBorrow(b as *bio).dev;
+    inflightRemove(bd, b);
+    let d = Ptr.toBorrowMut(bd);
+    if (Ptr.toBorrow(b as *bio).issue_cpu == raw_cpu_id()) { // a statistic: local vs remote completion, for the bench
+        counter(borrow mut d.completed_local as *mut u64).fetchAddWith(1, Ordering.Relaxed);
+    } else {
+        counter(borrow mut d.completed_remote as *mut u64).fetchAddWith(1, Ordering.Relaxed);
+    }
+    var st = status;
+    if (st == 0 && faultinject_should_fail(FI_BLK_COMPLETE)) {
+        st = -EIO; // debug builds: an injected device error (docs/verification/)
+    }
+    let finished = Ptr.toBorrowMut(b);
+    finished.status = st;
+    let dir = Ptr.toBorrow(b as *bio).dir;
+    if (st != 0) {
+        counter(borrow mut d.errors as *mut u64).fetchAddWith(1, Ordering.Relaxed);
+    } else if (dir == BIO_READ) {
+        counter(borrow mut d.reads as *mut u64).fetchAddWith(1, Ordering.Relaxed);
+    } else if (dir == BIO_WRITE) {
+        counter(borrow mut d.writes as *mut u64).fetchAddWith(1, Ordering.Relaxed);
+    } else {
+        counter(borrow mut d.flushes as *mut u64).fetchAddWith(1, Ordering.Relaxed);
+    }
+    let done = Ptr.toBorrow(b as *bio).done;
+    done(b);
+    drainPending(bd); // a slot is free: the next waiting bio goes in
+}
+
+// ---- The synchronous helpers ----
+
+/// A synchronous request: the bio first, so its done finds the completion.
+struct SyncBio {
+    bio: bio;
+    done: completion;
+}
+
+/// Safety: `s` is a live SyncBio.
+unsafe fn syncBioOf(s: *mut SyncBio) -> *mut bio => borrow mut Ptr.toBorrowMut(s).bio as *mut bio;
+
+/// Safety: `s` is a live SyncBio.
+unsafe fn syncDoneOf(s: *mut SyncBio) -> *mut completion => borrow mut Ptr.toBorrowMut(s).done as *mut completion;
+
+/// Safety: `b` is a SyncBio's bio, completed.
+@callback
+unsafe fn syncDone(b: *mut bio) {
+    complete(syncDoneOf(b as *mut SyncBio));
+}
+
+/// One request at a time, each at most the device's max_sectors, each waited for.
+/// Safety: `bd` is a live blkdev; `buf` has nsectors sectors (not for a flush).
+unsafe fn syncIo(bd: *mut blkdev, dir: u32, sector0: u64, nsectors0: u32, buf0: *mut void, flags: u32) -> i32 {
+    if (dir != BIO_FLUSH && (nsectors0 == 0 || buf0.isNull())) {
+        return -EINVAL;
+    }
+    if (layoutOf<SyncBio>().size > SYNC_WORDS * 8) {
+        assertFailed("sizeof(struct sync_bio) fits its slot");
+    }
+    var sector = sector0;
+    var nsectors = nsectors0;
+    var buf = buf0;
+    while (nsectors > 0 || dir == BIO_FLUSH) {
+        let max = Ptr.toBorrow(bd as *blkdev).max_sectors;
+        let n = if (nsectors < max) nsectors else max;
+        var slot = [0u64; 64]; // zeroed, as the C's memset of its bio
+        let s = borrow mut slot as *mut [u64; 64] as *mut SyncBio;
+        let b = syncBioOf(s);
+        let o = Ptr.toBorrowMut(b);
+        o.dev = bd;
+        o.dir = dir;
+        o.flags = if (dir == BIO_WRITE) flags else 0;
+        o.sector = if (dir == BIO_FLUSH) 0 else sector;
+        o.nsectors = if (dir == BIO_FLUSH) 0 else n;
+        o.buf = buf;
+        o.done = syncDone;
+        List.init(queueLinkOf(b));
+        completion_init(syncDoneOf(s), "blk-sync\0".ptr as *CChar);
+        let rc = submit(b);
+        if (rc != 0) {
+            return rc;
+        }
+        wait_for_completion(syncDoneOf(s));
+        let status = Ptr.toBorrow(b as *bio).status;
+        if (status != 0) {
+            return status;
+        }
+        if (dir == BIO_FLUSH) {
+            return 0;
+        }
+        sector += n as u64;
+        nsectors -= n;
+        buf = (buf as *mut u8).add(n as usize * Ptr.toBorrow(bd as *blkdev).sector_size as usize) as *mut void;
+    }
+    return 0;
+}
+
+/// Safety: as syncIo.
+@export("blk_read")
+unsafe fn read(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *mut void) -> i32 =>
+    syncIo(bd, BIO_READ, sector, nsectors, buf, 0);
+
+/// Safety: as syncIo.
+@export("blk_write")
+unsafe fn write(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *void) -> i32 =>
+    syncIo(bd, BIO_WRITE, sector, nsectors, buf as *mut void, 0);
+
+/// Safety: as syncIo.
+@export("blk_write_flags")
+unsafe fn writeFlags(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *void, flags: u32) -> i32 =>
+    syncIo(bd, BIO_WRITE, sector, nsectors, buf as *mut void, flags);
+
+/// Safety: `bd` is a live blkdev.
+@export("blk_flush")
+unsafe fn flush(bd: *mut blkdev) -> i32 => syncIo(bd, BIO_FLUSH, 0, 0, 0 as *mut void, 0);
+
+// ---- The lookups ----
+
+/// blk.h's blk_find: the device named `name`, referenced, or null.
+/// Safety: `name` is a C string.
+@export("blk_find")
+unsafe fn find(name: *CChar) -> *mut blkdev {
+    mutex_lock(blkLock());
+    var found = 0 as *mut blkdev;
+    let head = blkdevs();
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let b = ofLink(node);
+        if (strcmp(nameOf(b) as *CChar, name) == 0) {
+            found = b;
+            kobject_get(objOf(b));
+            break;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    mutex_unlock(blkLock());
+    return found;
+}
+
+/// blk.h's blk_nth: the i'th registered device, referenced, or null past the end. The registry can change between
+/// calls, so this is for enumeration that tolerates a moving set: pool assembly, which matches labels and rejects
+/// what it does not recognise.
+/// Safety: the registry is walked under its lock, and the device found is referenced before it is released.
+@export("blk_nth")
+fn nth(i: u32) -> *mut blkdev {
+    unsafe {
+        mutex_lock(blkLock());
+        var found = 0 as *mut blkdev;
+        var at: u32 = 0;
+        let head = blkdevs();
+        var node = List.first(head as *list_node);
+        while (!node.isNull()) {
+            if (at == i) {
+                found = ofLink(node);
+                kobject_get(objOf(found));
+                break;
+            }
+            at += 1;
+            node = List.next(head as *list_node, node);
+        }
+        mutex_unlock(blkLock());
+        return found;
+    }
+}
+
+/// Safety: the count is read under the registry lock.
+@export("blk_count")
+fn count() -> u32 {
+    unsafe {
+        mutex_lock(blkLock());
+        let n = COUNT;
+        mutex_unlock(blkLock());
+        return n;
+    }
+}
+
+/// blk.h's blk_dump: one line per device on the console.
+/// Safety: the registry is walked under its lock; names and counters are read from registered devices.
+@export("blk_dump")
+fn dump() {
+    unsafe {
+        mutex_lock(blkLock());
+        var heading = [0u8; 64];
+        var top = TextWriter.create(mut heading[..]);
+        top.text("block devices (");
+        top.decimal(COUNT as u64);
+        top.text("):");
+        kprintf("%s\n\0".ptr as *CChar, top.cText());
+        let head = blkdevs();
+        var node = List.first(head as *list_node);
+        while (!node.isNull()) {
+            let b = ofLink(node);
+            let d = Ptr.toBorrow(b as *blkdev);
+            let name = Slice.fromRaw(nameOf(b) as *u8, strlen(nameOf(b) as *CChar));
+            var buffer = [0u8; 192];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("  ");
+            line.bytes(name);
+            var pad = name.length;
+            while (pad < 8) { // the C's %-8s
+                line.byte(32);
+                pad += 1;
+            }
+            line.byte(32);
+            line.decimal(d.capacity);
+            line.text(" x ");
+            line.decimal(d.sector_size as u64);
+            if (d.read_only) {
+                line.text(" ro");
+            }
+            line.text("  reads ");
+            line.decimal(d.reads);
+            line.text(" writes ");
+            line.decimal(d.writes);
+            line.text(" flushes ");
+            line.decimal(d.flushes);
+            line.text(" errors ");
+            line.decimal(d.errors);
+            kprintf("%s\n\0".ptr as *CChar, line.cText());
+            node = List.next(head as *list_node, node);
+        }
+        mutex_unlock(blkLock());
+    }
+}

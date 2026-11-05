@@ -1211,6 +1211,11 @@ dereference: a BIO_PREFLUSH write whose pre-flush failed completed the
 caller's bio with its in-flight link never initialised (a zeroed bio from
 `blk_write_flags` crashed); the sequence now initialises it. `gone` and
 `recovering` became `uint32_t`, so the port reaches them as atomics.
+`blk.cee` gives that digest on both compilers (ceesafec 0.18.0, pinned
+for it). `struct blkdev` and `struct bio` stay C, every driver filling
+them; the synchronous helpers keep their bio and completion in a zeroed
+stack slot of words, checked against their C size, since a CeeSafe local
+cannot hold C state; `blk_floor.c` keeps the module exports.
 
 Size: about 4.5x.
 

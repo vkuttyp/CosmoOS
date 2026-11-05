@@ -12,7 +12,7 @@ error recovery §6.2.2.1) and ATA8-ACS.
 ```text
    filesystems / self-tests     blk_read, blk_write, blk_submit
         │
-   kernel/block/blk.c           validation, pending queue, timeouts
+   kernel/block/blk.cee         validation, pending queue, timeouts
         │                       struct blkdev "ahci<c>p<p>", one per disk
    drivers/storage/ahci.c  (module ahci)
         HBA bring-up, ports, 32 command slots, IDENTIFY,

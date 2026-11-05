@@ -163,6 +163,40 @@ void blk_unregister(struct blkdev *bd);
  * a non-zero result leaves the disk not serving I/O. */
 int blk_reset(struct blkdev *bd, int (*reinit)(struct blkdev *bd));
 
+/*
+ * A driver's own seams, published to the block layer at its module init
+ * so a kernel self-test can reach a driver that is a module -- the
+ * kernel image cannot name a module's symbols. NULL clears; a NULL
+ * entry is "not offered" and a test that needs it skips. One driver at
+ * a time is all any test has asked for
+ * (docs/audit/next-subsystem-virtio-remove-inflight.md). Defined in every
+ * build, as blk.cee is compiled in every build; only debug builds have the
+ * functions below that publish and look up a table.
+ */
+struct blk_test_driver_hooks {
+    const char *driver;                              /* "virtio_blk" */
+    void (*hold_completions)(struct blkdev *bd);     /* leave this device's finished requests unconsumed; NULL releases */
+    unsigned (*inflight_at_remove)(void);            /* what the last remove found in its slot table */
+    unsigned (*unconsumed)(struct blkdev *bd);       /* finished by the device, left unpopped by the hold */
+    uint64_t (*remove_seq)(void);                    /* blk_test_tick at the end of the last remove's leftover walk */
+    unsigned (*releases)(void);                      /* release hooks run so far */
+    unsigned (*nr_slots)(struct blkdev *bd);         /* the driver's in-flight capacity for this device */
+    /* The removal's teardown order, observable: when it entered the
+     * queue teardown (which masks the queue's interrupt and
+     * `synchronize_irq`s it) and when it began walking the slot table
+     * afterwards. A read-side section a test holds across the first must
+     * have ended before the second -- invariant Q11b. */
+    void (*stamps_reset)(void);
+    uint64_t (*before_irq_seq)(void);
+    uint64_t (*walk_seq)(void);
+    /* The most completions one call of the driver's completion handler
+     * consumed since the last reset (docs/testing/flakes.md, "held for
+     * 184 s"); and the calls that consumed more than the ring holds. */
+    void (*pops_reset)(struct blkdev *bd);
+    unsigned (*pops_max)(struct blkdev *bd);
+    uint64_t (*pops_over_ring)(struct blkdev *bd);
+};
+
 #if CONFIG_DEBUG
 /*
  * Test hooks for the unregister barrier's two halves
@@ -190,37 +224,6 @@ uint64_t blk_test_tick(void);
  * test instead (`blk-irq-budget`). */
 void blk_test_resubmit_from_done(struct bio *bio);
 
-/*
- * A driver's own seams, published to the block layer at its module init
- * so a kernel self-test can reach a driver that is a module -- the
- * kernel image cannot name a module's symbols. NULL clears; a NULL
- * entry is "not offered" and a test that needs it skips. One driver at
- * a time is all any test has asked for
- * (docs/audit/next-subsystem-virtio-remove-inflight.md).
- */
-struct blk_test_driver_hooks {
-    const char *driver;                              /* "virtio_blk" */
-    void (*hold_completions)(struct blkdev *bd);     /* leave this device's finished requests unconsumed; NULL releases */
-    unsigned (*inflight_at_remove)(void);            /* what the last remove found in its slot table */
-    unsigned (*unconsumed)(struct blkdev *bd);       /* finished by the device, left unpopped by the hold */
-    uint64_t (*remove_seq)(void);                    /* blk_test_tick at the end of the last remove's leftover walk */
-    unsigned (*releases)(void);                      /* release hooks run so far */
-    unsigned (*nr_slots)(struct blkdev *bd);         /* the driver's in-flight capacity for this device */
-    /* The removal's teardown order, observable: when it entered the
-     * queue teardown (which masks the queue's interrupt and
-     * `synchronize_irq`s it) and when it began walking the slot table
-     * afterwards. A read-side section a test holds across the first must
-     * have ended before the second -- invariant Q11b. */
-    void (*stamps_reset)(void);
-    uint64_t (*before_irq_seq)(void);
-    uint64_t (*walk_seq)(void);
-    /* The most completions one call of the driver's completion handler
-     * consumed since the last reset (docs/testing/flakes.md, "held for
-     * 184 s"); and the calls that consumed more than the ring holds. */
-    void (*pops_reset)(struct blkdev *bd);
-    unsigned (*pops_max)(struct blkdev *bd);
-    uint64_t (*pops_over_ring)(struct blkdev *bd);
-};
 void blk_test_driver_hooks_set(const struct blk_test_driver_hooks *h);
 const struct blk_test_driver_hooks *blk_test_driver_hooks(const char *driver);
 #endif

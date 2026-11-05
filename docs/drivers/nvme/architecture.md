@@ -12,7 +12,7 @@ commands §5, NVM command set §6, queues §7.6).
 ```text
    filesystems / self-tests     blk_read, blk_write, blk_submit (segments)
         │
-   kernel/block/blk.c           validation, pending queue, in-flight list, timeouts
+   kernel/block/blk.cee         validation, pending queue, in-flight list, timeouts
         │
    drivers/nvme/nvme.c  (module nvme)   controller, admin queue, one I/O queue per CPU,
                                         PRP construction, MSI-X per queue, abort/reset

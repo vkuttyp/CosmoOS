@@ -113,7 +113,7 @@ completions; a driver only ever sees `BIO_READ`, `BIO_WRITE`, `BIO_FLUSH`.
 Check: `blk-queue` (the RAM device's recorded stream shows flush, write,
 flush); review of the drivers (none reads `bio->flags`).
 
-**D8. The block layer knows no driver and no filesystem.** `blk.c`
+**D8. The block layer knows no driver and no filesystem.** `blk.cee`
 includes no driver header; drivers see only `struct blkdev`/`struct
 bio`. Check: review (the include list). Gap: none.
 

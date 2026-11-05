@@ -119,7 +119,8 @@ HOST_PART_SRCS := $(HOST_COMMON_SRCS) kernel/block/part.c kernel/core/printf.c k
 HOST_RAMBLK_SRCS := $(HOST_COMMON_SRCS) kernel/block/ramblk.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c \
 	tests/host/test_ramblk.c
 # The block layer alone: the drivers, the threads, the clock, the partitions and the allocator are the test's.
-HOST_BLK_SRCS := $(HOST_COMMON_SRCS) kernel/block/blk.c kernel/core/printf.c tests/host/test_blk.c
+HOST_BLK_SRCS := $(HOST_COMMON_SRCS) kernel/block/blk.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
+	tests/host/ceesafe_panic.c tests/host/test_blk.c
 HOST_GPT_SRCS := $(HOST_COMMON_SRCS) kernel/block/gpt.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c kernel/core/cmdline.c tests/host/test_gpt.c
 HOST_CPUTIME_SRCS := $(HOST_COMMON_SRCS) kernel/process/cputime.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cputime.c
 HOST_NICE_SRCS := $(HOST_COMMON_SRCS) kernel/process/nice.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_nice.c

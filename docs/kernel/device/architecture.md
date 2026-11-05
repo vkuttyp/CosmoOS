@@ -20,7 +20,7 @@ entry: PCI, DMA, VirtIO, block devices, console.
    drivers/pci/      pci.c      ECAM (ACPI MCFG) or legacy config, enumeration,
                                 BARs, capabilities, MSI/MSI-X, the "pci" bus
    kernel/interrupt/ irq.c      irq_request_msi(): a vector plus an MSI message
-   kernel/block/     blk.c      block devices, bio submission, synchronous helpers
+   kernel/block/     blk.cee    block devices, bio submission, synchronous helpers
    kernel/core/      random.c   entropy pool fed by hardware sources
                      console.c  sinks (serial, virtio-console)
    kernel/arch/x86_64/          pci_legacy.c (0xCF8/0xCFC), MSI message composition
