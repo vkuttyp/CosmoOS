@@ -126,7 +126,7 @@ extern "C" {
     fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
 }
 
-// ---- errno.h, ip.h, tcp.h, nat.h, netctl.h, syscall.h (asserted against the headers in nettest.c) ----
+// ---- errno.h, ip.h, tcp.h, nat.h, netctl.h, syscall.h (asserted in nettest_floor.c) ----
 
 const EEXIST: i32 = 17;
 const EINVAL: i32 = 22;
@@ -269,7 +269,7 @@ unsafe fn snapshotLen(buf: *u8, pfRules: u32) -> i64 {
 
 // ---- net-tapctl ----
 
-// The snapshot's room (COSMO_NETCTL_SNAPSHOT_MAX fits, asserted in nettest.c) and the frames, off the stack.
+// The snapshot's room (COSMO_NETCTL_SNAPSHOT_MAX fits, asserted in nettest_floor.c) and the frames, off the stack.
 static mut RBUF: [u8; 65536] = [0; 65536];
 static mut L4: [u8; 128] = [0; 128];
 static mut FRAME: [u8; 256] = [0; 256];

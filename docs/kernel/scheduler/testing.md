@@ -362,8 +362,8 @@ Individual test budgets and signal-response checks still apply; see
 ## Waits and time bounds
 
 A test waits for the property, never for an interval: a bounded deadline
-loop on an observable (`threads_settle` here, `wait_until` in
-`nettest.c`) whose expiry is `CHECK`ed. An upper bound on elapsed time is
+loop on an observable (`threads_settle` here, `waitUntil` in
+`nettest_tcp.cee`) whose expiry is checked. An upper bound on elapsed time is
 one of three things, decided at the site and written there: the property
 itself, or a guard so generous only a broken host fails it (kept); a
 proxy for something observable (restated as that); or genuinely temporal

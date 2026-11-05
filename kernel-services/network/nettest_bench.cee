@@ -71,7 +71,7 @@ extern "C" {
     fn clock_deadline_passed(deadline: u64) -> bool;
 }
 
-// ---- syscall.h, percpu.h, thread.h and the bench's values (asserted against the headers in nettest.c) ----
+// ---- syscall.h, percpu.h, thread.h and the bench's values (asserted in nettest_floor.c) ----
 
 const AF_INET: u32 = 2;
 const AF_INET_I32: i32 = 2;
@@ -99,8 +99,8 @@ fn sleepMs(ms: u64) {
     }
 }
 
-/// A struct netaddr for 127.0.0.1:`port`, as five words (its size and alignment, asserted in nettest.c): the family and
-/// the port (host order) in the first, as they lie in a little-endian u32, then the address.
+/// A struct netaddr for 127.0.0.1:`port`, as five words (its size and alignment, asserted in nettest_floor.c): the
+/// family and the port (host order) in the first, as they lie in a little-endian u32, then the address.
 fn loopback(port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), LOOPBACK_N, 0, 0, 0];
 
 // ---- The flows' state (the C's struct bench_sink and struct bench_client, one per flow) ----

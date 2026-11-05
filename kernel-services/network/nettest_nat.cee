@@ -82,7 +82,7 @@ extern "C" {
     fn clock_now_ns() -> u64;
 }
 
-// ---- ip.h, tcp.h, ether.h, nat.h, netif.h, errno.h and time values (asserted against the headers in nettest.c) ----
+// ---- ip.h, tcp.h, ether.h, nat.h, netif.h, errno.h and time values (asserted in nettest_floor.c) ----
 
 const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;

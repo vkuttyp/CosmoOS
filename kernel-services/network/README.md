@@ -19,7 +19,7 @@ The network stack (Phase 8): a layered design over an mbuf abstraction
 | `udp.c` | UDP pcbs, binding, checksums, per-socket receive queues (`kernel/net/udp.h`) |
 | `tcp.c` | TCP: state machine, send/receive rings, RTO, fast retransmit, congestion control, TIME_WAIT, accept queues (`kernel/net/tcp.h`) |
 | `socket.c` | `struct socket` kobjects and the blocking `ksock_*` API used by system calls 23–31 (`kernel/socket.h`) |
-| `nettest.c` | Self-tests `net-mbuf` … `net-harness` and the harness echo services |
+| `nettest_*.cee`, `nettest_floor.c` | Self-tests `net-mbuf` … `net-harness`, the harness echo services, and their release framework (`nettest_frame.cee`); the floor keeps the configured skips and the constants' asserts |
 
 Driver: `drivers/virtio/virtio_net.c` (`eth0`). System calls:
 `kernel/syscall/native.c`. Host harness: `tests/boot/nettest.py`.

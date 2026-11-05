@@ -1,8 +1,8 @@
 /*
- * nettest.h - What nettest.c shares with its CeeSafe batches (roadmap 2.0
- * SA6, nettest): the loopback test servers' state, the release framework's
- * wrappers a batch calls, and the bulk transfer nettest_lo.cee defines for
- * the C tests still here. Private to kernel-services/network.
+ * nettest.h - What the network self-tests share (roadmap 2.0 SA6, nettest):
+ * the loopback test servers' state, the release framework's wrappers
+ * (nettest_frame.cee), and what one nettest_*.cee port exports for others.
+ * Private to kernel-services/network.
  */
 #ifndef KERNEL_SERVICES_NETWORK_NETTEST_H
 #define KERNEL_SERVICES_NETWORK_NETTEST_H
@@ -46,7 +46,7 @@ struct nt_netif_ref {
     struct netif *nif;
 };
 
-/* nettest.c's release framework (the nt_* wrappers), for the CeeSafe batches. */
+/* The release framework (nettest_frame.cee), for the ports. */
 bool nettest_tcp_server_start(struct tcp_server *srv, void (*fn)(void *), const char *name, int prio);
 /* Publish the server's listener (or its connection) for the release, under its lock. */
 void nettest_tcp_server_publish(struct tcp_server *srv, bool listener, struct socket *sock);
@@ -162,13 +162,13 @@ struct socket *nettest_hin_accept(struct socket *ls);
 int64_t nettest_hin_recv_sock(struct socket *s, void *buf, size_t cap, unsigned tries);
 bool nettest_hin_udp_listener(struct socket **out, uint32_t ip, uint16_t port);
 bool nettest_hin_tcp_listener(struct socket **out, uint16_t port);
-/* nettest.c: net-hostinput's outbound connect on its own thread, one at a
+/* nettest_frame.cee: net-hostinput's outbound connect on its own thread, one at a
  * time: started, done (with its result), and joined (its socket). */
 bool nettest_hin_connect(uint32_t ip, uint16_t port, const char *name);
 bool nettest_hin_connect_done(int *rc);
 struct socket *nettest_hin_connect_join(void);
 
-/* nettest.c: a pcb's retransmit count, read atomically (nettest_hoststate.cee). */
+/* nettest_frame.cee: a pcb's retransmit count, read atomically (nettest_hoststate.cee). */
 uint64_t nettest_tcp_retransmits(struct tcp_pcb *pcb);
 
 /* nettest_ctl.cee: where a /dev/net/tapctl snapshot with `pf_rules`

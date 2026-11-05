@@ -1154,7 +1154,16 @@ static, the per-round RTO-backoff reset behind `COSMO_CONFIG_SELFTEST()`. Batch 
 echo services on ports 7 and 8 and the back-connection's retried
 exchange, its `NETTEST:` lines printed through kprintf byte for byte as
 the C printed them; the injected break of the first attempts
-(`make test-harness-retry`) is nettest.h's `NETTEST_HARNESS_BREAK()`.
+(`make test-harness-retry`) is nettest.h's `NETTEST_HARNESS_BREAK()`. The
+last batch, `nettest_frame.cee`: the release framework -- the census
+the runner takes around each test, the acquisitions that register their
+release with it in the same call, the hooks and settings restored however
+a test returns, the servers' threads, the host's outbound connect and
+its reap list. `nettest.c` is `nettest_floor.c`, which keeps the C
+CeeSafe cannot hold: the skips of tests whose seams a build lacks (an
+export under `#if !CONFIG_X`), the tap seam's setter, and every port's
+constants asserted against the headers, as `fifo_floor.c` keeps
+`fifo.cee`'s.
 
 Size: about 3.0x.
 

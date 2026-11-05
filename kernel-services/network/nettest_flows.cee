@@ -6,7 +6,8 @@
 //
 // A C struct the kernel fills (the NAT and firewall listings and counters, the snapshot's flow section) is read in a
 // room of this file's, field by field; a rule it takes is built in a zeroed room, as the C's designated initialiser
-// zeroed what it did not name. An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest.c).
+// zeroed what it did not name. An address is a [u32; 5], struct netaddr's size and alignment (asserted in
+// nettest_floor.c).
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/net/tap.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
 extern "C" {
@@ -152,7 +153,7 @@ extern "C" {
     fn thread_sleep_ns(ns: u64);
 }
 
-// ---- ip.h, tcp.h, nat.h, fw.h, netctl.h and socket values (asserted against the headers in nettest.c) ----
+// ---- ip.h, tcp.h, nat.h, fw.h, netctl.h and socket values (asserted in nettest_floor.c) ----
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -240,9 +241,9 @@ fn info(text: StringView) {
 // ---- The rooms, off the stack ----
 
 // A statistics struct (1 KiB, checked), a rule (64 bytes, checked), the L4 header and frame built, the datagram read
-// back (a struct hin_seg, 92 bytes, asserted in nettest.c), a listing's entries (NAT_TABLE_SIZE struct nat_flow or
-// FW_FLOW_MAX struct fw_flow_info, checked), one snapshot entry's copy, and the whole snapshot (COSMO_NETCTL_SNAPSHOT_MAX
-// fits, asserted in nettest.c).
+// back (a struct hin_seg, 92 bytes, asserted in nettest_floor.c), a listing's entries (NAT_TABLE_SIZE struct nat_flow
+// or FW_FLOW_MAX struct fw_flow_info, checked), one snapshot entry's copy, and the whole snapshot
+// (COSMO_NETCTL_SNAPSHOT_MAX fits, asserted in nettest_floor.c).
 static mut STATS: [u64; 128] = [0; 128];
 static mut RULE: [u64; 8] = [0; 8];
 static mut L4: [u8; 64] = [0; 64];

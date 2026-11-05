@@ -1,0 +1,886 @@
+// nettest_frame.cee - the network self-tests' release framework, in CeeSafe: roadmap 2.0 SA6 (nettest, the last
+// batch). What every nettest_*.cee port calls through nettest.h, and what the self-test runner calls through
+// selftest.h, as nettest.c had it: the census the runner takes around each test, the acquisitions that register their
+// release with the runner in the same call, the hooks and settings restored however a test returns, the servers'
+// threads, the host's outbound connect that may outlive its test, and the few accessors the ports cannot express (a
+// field written atomically by the worker, an object's io functions). nettest_floor.c keeps the C CeeSafe cannot hold:
+// the skips of tests whose seams a build lacks (an export under `#if !CONFIG_X`), the tap seam's variables' setter,
+// and the asserts of every port's copied constants against the headers.
+//
+// The net-leftover unit (docs/audit/next-subsystem-net-leftover.md): CHECK returned at once, and a test released what
+// it made only on its last lines: one failure kept a tap, a DHCP/DNS service slot and its sockets, and eight tests
+// after it failed for the slot. Every acquisition goes through one of these, which registers its release with the
+// runner (selftest_defer) in the same call, so no check can fall between the two. Every release goes through one too:
+// it runs the registered release early (selftest_release), where the test used to tear down, and falls back to the
+// plain call for anything not registered. What a test still holds when it returns, the runner releases, last acquired
+// first.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/tcp.h", "kernel/net/raw.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/net/tap.h", "kernel/net/tapsvc.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/object.h", "kernel/percpu.h", "kernel/selftest.h", "kernel/socket.h", "kernel/thread.h", "kernel/timer.h", "kernel/vfs.h")
+extern "C" {
+    struct netaddr;
+    struct thread;
+    struct tap;
+    struct tapsvc;
+    struct file;
+    struct vnode;
+    struct netif;
+    struct mbuf;
+    struct mbufq;
+    struct raw_pcb {
+        rxq: mbufq;
+    }
+    struct tcp_pcb {
+        retransmits: AtomicU64;
+    }
+    struct socket {
+        raw: *mut raw_pcb;
+    }
+    struct kobject_io_type {
+        read: extern "C" fn(*mut kobject, *mut void, usize) -> i64;
+        write: extern "C" fn(*mut kobject, *void, usize) -> i64;
+    }
+    struct tcp_server {
+        done: bool;
+        stop: bool;
+        th: *mut thread;
+        lock: spinlock_t;
+        ls: *mut socket;
+        c: *mut socket;
+    }
+    struct nt_netif_ref {
+        nif: *mut netif;
+    }
+    struct nettest_census {
+        netifs: [u8; 512];
+        nnetifs: u32;
+        services: u32;
+        sockets: u32;
+    }
+
+    fn nettest_tcp_pcb_timer_free_pinned(reason: *mut *CChar) -> bool;
+    fn selftest_defer(run: extern "C" fn(*mut void), arg: *mut void) -> bool;
+    fn selftest_release(arg: *mut void) -> bool;
+    fn selftest_forget(arg: *mut void) -> bool;
+
+    fn ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_create_raw(family: i32, proto: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn ksock_connect(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_shutdown(s: *mut socket, how: i32) -> i32;
+    fn ksock_get(s: *mut socket);
+    fn ksock_put(s: *mut socket);
+    fn socket_count() -> u32;
+    fn socket_wake_refs() -> u32;
+    fn tap_create(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap;
+    fn tap_destroy(t: *mut tap);
+    fn tapsvc_start(t: *mut tap) -> *mut tapsvc;
+    fn tapsvc_stop(svc: *mut tapsvc);
+    fn tapsvc_count() -> u32;
+    fn netif_register(nif: *mut netif) -> i32;
+    fn netif_unregister(nif: *mut netif);
+    fn netif_put(nif: *mut netif);
+    fn netif_names(buf: *mut CChar, n: usize) -> u32;
+    fn netif_set_rx_hook(run: extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool, arg: *mut void);
+    fn netif_set_steering(on: bool);
+    fn loopback_set_filter(run: extern "C" fn(*mut mbuf, *mut void) -> bool, arg: *mut void);
+    fn net_workers_barrier();
+    fn tcp_set_keepalive(idleNs: u64, intvlNs: u64, cnt: u32);
+    fn tcp_set_fin_wait2(ns: u64);
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn file_put(f: *mut file);
+    fn kobject_io_of(obj: *kobject) -> *kobject_io_type;
+    fn mbufq_len(q: *mut mbufq) -> u32;
+    fn m_freem(m: *mut mbuf);
+    fn nat_pf_clear();
+    fn nat_flush();
+    fn fw_flush();
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_put(t: *mut thread);
+    fn thread_exit(code: i32);
+    fn thread_sleep_ns(ns: u64);
+    fn thread_pin_self() -> u64;
+    fn thread_set_affinity_self(affinity: u64);
+    fn clock_now_ns() -> u64;
+}
+
+// ---- errno.h, syscall.h and thread.h values (asserted against the headers in nettest_floor.c) ----
+
+const ENOMEM: i32 = 12;
+const AF_INET: u32 = 2;
+const AF_INET_I32: i32 = 2;
+const SOCK_STREAM: i32 = 1;
+const SHUT_RD: i32 = 0;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const MS: u64 = 1000000;
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * MS);
+    }
+}
+
+/// Safety: the monotonic clock.
+fn now() -> u64 => unsafe { clock_now_ns() };
+
+/// A struct netaddr for `ip`:`port`, as five words (its size and alignment, asserted in nettest_floor.c): the family
+/// and the port (host order) in the first, as they lie in a little-endian u32, then the address.
+fn v4addr(ip: u32, port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), ip, 0, 0, 0];
+
+// ---- The census ----
+//
+// Sockets abandoned connect threads still hold (the census leaves them out: they close whenever their connect times
+// out, maybe during a later test, and must neither blame that test nor hide a socket it leaves). An abandoned thread
+// whose connect has returned hands its socket to the reap list and changes nothing else; the runner puts it at its next
+// census. So both counts the census reads change only on the runner's thread -- the one reading them -- however many
+// connects finish at once.
+
+const REAP_MAX: u32 = 16;
+static mut ABANDONED: u32 = 0;
+static mut REAP: [usize; 16] = [0; 16];
+static mut NREAP: u32 = 0;
+static mut REAP_LOCK: spinlock_t = SPINLOCK_INIT("nt-reap\0".ptr as *CChar);
+static mut FINISHED: bool = false; // the self-tests are over: no census will drain the list again
+
+/// Safety: the reap list's lock's address.
+fn reapLock() -> *mut spinlock_t => unsafe { borrow mut REAP_LOCK as *mut spinlock_t };
+
+/// Put the sockets the reap list holds, and count them no longer abandoned.
+/// Safety: the runner's thread, which alone changes ABANDONED.
+unsafe fn reapAbandoned() {
+    var take: [usize; 16] = [0; 16];
+    let s = spin_lock_irqsave(reapLock());
+    let n = NREAP;
+    for (i in 0..n as usize) {
+        take[i] = REAP[i];
+    }
+    NREAP = 0;
+    spin_unlock_irqrestore(reapLock(), s);
+    for (i in 0..n as usize) {
+        if (take[i] != 0) {
+            ksock_put(take[i] as *mut socket);
+        }
+        ABANDONED -= 1;
+    }
+}
+
+/// selftest.h's nettest_finish: after the last test, drain the list, and from now on an abandoned connect puts its own
+/// socket -- no census is left to drain it.
+/// Safety: the runner's thread.
+@export("nettest_finish")
+unsafe fn finish() {
+    let s = spin_lock_irqsave(reapLock());
+    FINISHED = true;
+    spin_unlock_irqrestore(reapLock(), s);
+    reapAbandoned();
+}
+
+/// selftest.h's nettest_census: the interfaces, the DHCP/DNS services and the sockets, as the runner compares them
+/// around each test.
+/// Safety: the runner's thread; `out` is its census.
+@export("nettest_census")
+unsafe fn census(out: *mut nettest_census) {
+    let o = Ptr.toBorrowMut(out);
+    o.nnetifs = netif_names(borrow mut o.netifs as *mut [u8; 512] as *mut CChar, 512);
+    o.services = tapsvc_count();
+    // The abandoned connects' sockets are subtracted. Any whose connect has returned are put first, here, so the socket
+    // count and the abandoned count both change only on this thread: they are read as one state without any retry.
+    reapAbandoned();
+    // A worker's wake reference (sock_wake_ref) is a socket's last for as long as the worker takes between sock_wake
+    // and its put: a test that has put every socket of its can return inside that window, and the count then holds one
+    // it does not own (`net-accept-race` under the chaos migrator, CI run 37679564267: "sockets 0 -> 1"). Counted only
+    // at an instant no wake reference is held: a barrier through every worker ends each window a worker had open, and
+    // a reference a thread holds across its own wake is waited out, to a deadline. Past it the count is taken anyway,
+    // and said to be -- a socket a wake reference never lets go of is a leak, and the comparison then reports it. The
+    // deadline bounds a thread's reference, not a worker: the barrier waits for every worker's step without one, as
+    // netif_unregister's does, and a worker that never finishes its step is a hang the runner's per-test watchdog
+    // (armed across this census) reports with a scheduler dump.
+    let deadline = now() + 2000 * MS;
+    while (socket_wake_refs() != 0) {
+        net_workers_barrier();
+        if (socket_wake_refs() == 0 || now() >= deadline) {
+            break;
+        }
+        sleepMs(1);
+    }
+    let held = socket_wake_refs();
+    if (held != 0) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: census: ");
+        line.decimal(held as u64);
+        line.text(" wake reference(s) still held after 2 s; counting anyway");
+        KernelLog.send(LogLevel.Warn, line);
+    }
+    let sockets = socket_count();
+    let o2 = Ptr.toBorrowMut(out);
+    o2.sockets = if (sockets > ABANDONED) sockets - ABANDONED else 0;
+}
+
+/// nettest.h's nettest_census_take: the census, under a name CeeSafe can import beside the struct's (selftest.h names
+/// both nettest_census).
+/// Safety: as census.
+@export("nettest_census_take")
+unsafe fn censusTake(out: *mut nettest_census) {
+    census(out);
+}
+
+/// The length of the zero-terminated text at `list[from..]`, to the next comma or its end; `comma` says which.
+fn nameEnd(list: borrow [u8; 512], from: usize) -> usize {
+    var k = from;
+    while (k < 512 && list[k] != 0 && list[k] != 0x2c) {
+        k += 1;
+    }
+    return k;
+}
+
+/// Is the name `after[at..at + n]` among `list`'s comma-separated names?
+fn censusHas(list: borrow [u8; 512], name: borrow [u8; 512], at: usize, n: usize) -> bool {
+    var p: usize = 0;
+    while (p < 512 && list[p] != 0) {
+        let q = nameEnd(list, p);
+        if (q - p == n) {
+            var same = true;
+            for (k in 0..n) {
+                if (list[p + k] != name[at + k]) {
+                    same = false;
+                }
+            }
+            if (same) {
+                return true;
+            }
+        }
+        if (q >= 512 || list[q] == 0) {
+            break;
+        }
+        p = q + 1;
+    }
+    return false;
+}
+
+/// selftest.h's nettest_census_equal: did the test leave anything? Only what it added counts. A later test that finds
+/// fewer -- a socket an abandoned connect finally put, an interface an earlier leftover's owner released -- has left
+/// nothing, and failing it for that would be the cross-test failure this check exists to end. The interface count is
+/// compared too: a name that did not fit the buffer still counts.
+/// Safety: two of the runner's censuses.
+@export("nettest_census_equal")
+unsafe fn censusEqual(before: *nettest_census, after: *nettest_census) -> bool {
+    let b = Ptr.toBorrow(before);
+    let a = Ptr.toBorrow(after);
+    if (a.nnetifs > b.nnetifs || a.services > b.services || a.sockets > b.sockets) {
+        return false;
+    }
+    var p: usize = 0;
+    while (p < 512 && a.netifs[p] != 0) {
+        let q = nameEnd(borrow a.netifs, p);
+        if (!censusHas(borrow b.netifs, borrow a.netifs, p, q - p)) {
+            return false; // a new name, even if another went
+        }
+        if (q >= 512 || a.netifs[q] == 0) {
+            break;
+        }
+        p = q + 1;
+    }
+    return true;
+}
+
+// ---- Acquisitions and their releases ----
+
+/// Safety: the runner calls each release once, with the object its registration named.
+@callback
+unsafe fn relTap(a: *mut void) {
+    tap_destroy(a as *mut tap);
+}
+
+/// Safety: as relTap.
+@callback
+unsafe fn relSvc(a: *mut void) {
+    tapsvc_stop(a as *mut tapsvc);
+}
+
+/// Safety: as relTap.
+@callback
+unsafe fn relSock(a: *mut void) {
+    ksock_put(a as *mut socket);
+}
+
+/// Safety: as relTap.
+@callback
+unsafe fn relNif(a: *mut void) {
+    netif_unregister(a as *mut netif);
+}
+
+/// Safety: as relTap.
+@callback
+unsafe fn relFile(a: *mut void) {
+    file_put(a as *mut file);
+}
+
+/// nettest.h's nettest_tap_create: a tap, destroyed however the test returns.
+/// Safety: thread context; `mac` is 6 bytes.
+@export("nettest_tap_create")
+unsafe fn tapCreate(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap {
+    let t = tap_create(name, ip, mask, mac);
+    if (!t.isNull() && !selftest_defer(relTap, t as *mut void)) {
+        tap_destroy(t);
+        return 0 as *mut tap;
+    }
+    return t;
+}
+
+/// Safety: `t` is the test's tap.
+@export("nettest_tap_destroy")
+unsafe fn tapDestroy(t: *mut tap) {
+    if (!selftest_release(t as *mut void)) {
+        tap_destroy(t);
+    }
+}
+
+/// nettest.h's nettest_tapsvc_start: a tap's DHCP/DNS service, stopped however the test returns.
+/// Safety: `t` is the test's tap.
+@export("nettest_tapsvc_start")
+unsafe fn tapsvcStart(t: *mut tap) -> *mut tapsvc {
+    let svc = tapsvc_start(t);
+    if (!svc.isNull() && !selftest_defer(relSvc, svc as *mut void)) {
+        tapsvc_stop(svc);
+        return 0 as *mut tapsvc;
+    }
+    return svc;
+}
+
+/// Safety: `svc` is the test's service.
+@export("nettest_tapsvc_stop")
+unsafe fn tapsvcStop(svc: *mut tapsvc) {
+    if (!selftest_release(svc as *mut void)) {
+        tapsvc_stop(svc);
+    }
+}
+
+/// A socket `make` just made in `out` (0: made), put however the test returns: -ENOMEM if its release could not be
+/// registered, and then none is made.
+/// Safety: `out` holds the socket when `rc` is 0.
+unsafe fn adoptSocket(rc: i32, out: *mut *mut socket) -> i32 {
+    if (rc == 0) {
+        let s = Ptr.toBorrowMut(out);
+        let made: *mut socket = s;
+        if (!selftest_defer(relSock, made as *mut void)) {
+            ksock_put(made);
+            s = 0 as *mut socket;
+            return -ENOMEM;
+        }
+    }
+    return rc;
+}
+
+/// nettest.h's nettest_ksock_create: a socket, put however the test returns.
+/// Safety: thread context; `out` is the caller's.
+@export("nettest_ksock_create")
+unsafe fn ksockCreate(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32 =>
+    adoptSocket(ksock_create(family, kind, uid, out), out);
+
+/// nettest.h's nettest_ksock_accept: a connection, put however the test returns.
+/// Safety: `s` is a listening socket of the test's; `out` and `peer` the caller's.
+@export("nettest_ksock_accept")
+unsafe fn ksockAccept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32 =>
+    adoptSocket(ksock_accept(s, out, peer), out);
+
+/// nettest.h's nettest_ksock_create_raw: a raw socket, put however the test returns.
+/// Safety: as ksockCreate.
+@export("nettest_ksock_create_raw")
+unsafe fn ksockCreateRaw(family: i32, proto: i32, out: *mut *mut socket) -> i32 =>
+    adoptSocket(ksock_create_raw(family, proto, 0, out), out);
+
+/// Safety: `s` is a socket of the test's.
+@export("nettest_ksock_put")
+unsafe fn ksockPut(s: *mut socket) {
+    if (!selftest_release(s as *mut void)) {
+        ksock_put(s);
+    }
+}
+
+/// nettest.h's nettest_netif_register: an interface, unregistered however the test returns.
+/// Safety: `nif` is the test's prepared interface.
+@export("nettest_netif_register")
+unsafe fn netifRegister(nif: *mut netif) -> i32 {
+    let rc = netif_register(nif);
+    if (rc == 0 && !selftest_defer(relNif, nif as *mut void)) {
+        netif_unregister(nif);
+        return -ENOMEM;
+    }
+    return rc;
+}
+
+/// Safety: `nif` is the test's registered interface.
+@export("nettest_netif_unregister")
+unsafe fn netifUnregister(nif: *mut netif) {
+    if (!selftest_release(nif as *mut void)) {
+        netif_unregister(nif);
+    }
+}
+
+/// A reference the test holds on an interface (a creator's, or one netif_find gave it), released however it returns.
+/// Keyed by a static holder, never by the interface: the interface's own address is its unregister's key, and
+/// netif_find can return the very interface the test registered.
+/// Safety: `arg` is the test's struct nt_netif_ref.
+@callback
+unsafe fn relNetifRef(arg: *mut void) {
+    let r = Ptr.toBorrowMut(arg as *mut nt_netif_ref);
+    if (!r.nif.isNull()) {
+        netif_put(r.nif);
+    }
+    r.nif = 0 as *mut netif;
+}
+
+/// Safety: `r` is a static holder of the test's; `nif` a reference it hands over.
+@export("nettest_netif_hold")
+unsafe fn netifHold(r: *mut nt_netif_ref, nif: *mut netif) -> bool {
+    let holder = Ptr.toBorrowMut(r);
+    holder.nif = nif;
+    if (!selftest_defer(relNetifRef, r as *mut void)) {
+        relNetifRef(r as *mut void);
+        return false;
+    }
+    return true;
+}
+
+/// Safety: `r` is the test's holder.
+@export("nettest_netif_ref_put")
+unsafe fn netifRefPut(r: *mut nt_netif_ref) {
+    if (!selftest_release(r as *mut void)) {
+        relNetifRef(r as *mut void);
+    }
+}
+
+/// A packet a fake interface kept, freed however the test returns.
+/// Safety: `slot` is the test's static slot.
+@callback
+unsafe fn relMbufSlot(slot: *mut void) {
+    let p = Ptr.toBorrowMut(slot as *mut *mut mbuf);
+    let kept: *mut mbuf = p;
+    if (!kept.isNull()) {
+        m_freem(kept);
+    }
+    p = 0 as *mut mbuf;
+}
+
+/// Safety: as relMbufSlot.
+@export("nettest_defer_mbuf_slot")
+unsafe fn deferMbufSlot(slot: *mut *mut mbuf) -> bool => selftest_defer(relMbufSlot, slot as *mut void);
+
+/// nettest.h's nettest_vfs_open: a file, put however the test returns.
+/// Safety: thread context; `out` is the caller's.
+@export("nettest_vfs_open")
+unsafe fn vfsOpen(path: *CChar, flags: u32, out: *mut *mut file) -> i32 {
+    let rc = vfs_open(0 as *mut vnode, path, flags, 0, out);
+    if (rc == 0) {
+        let f = Ptr.toBorrowMut(out);
+        let opened: *mut file = f;
+        if (!selftest_defer(relFile, opened as *mut void)) {
+            file_put(opened);
+            f = 0 as *mut file;
+            return -ENOMEM;
+        }
+    }
+    return rc;
+}
+
+/// Safety: `f` is a file of the test's.
+@export("nettest_file_put")
+unsafe fn filePut(f: *mut file) {
+    if (!selftest_release(f as *mut void)) {
+        file_put(f);
+    }
+}
+
+// The NAT and firewall state a test changed, cleared however it returns: a forward or a translation left behind would
+// decide the next test's frames.
+static mut NAT_STATE_KEY: u8 = 0;
+
+/// Safety: the key's address; nothing is read through it.
+fn natStateKey() -> *mut void => unsafe { borrow mut NAT_STATE_KEY as *mut u8 as *mut void };
+
+/// Safety: the runner's release.
+@callback
+unsafe fn relNatState(arg: *mut void) {
+    nat_pf_clear();
+    nat_flush();
+    fw_flush();
+}
+
+/// Safety: thread context.
+@export("nettest_defer_nat_state")
+unsafe fn deferNatState() -> bool => selftest_defer(relNatState, natStateKey());
+
+/// Safety: thread context.
+@export("nettest_release_nat_state")
+unsafe fn releaseNatState() {
+    if (!selftest_release(natStateKey())) {
+        relNatState(0 as *mut void);
+    }
+}
+
+// ---- Hooks and settings, restored however a test returns ----
+//
+// A hook left installed with a pointer into a dead frame is called by the next packet, and a lossy or black-hole
+// loopback filter left in place fails every loopback test after it. Changing one registers its restore; putting it back
+// runs that restore early.
+
+// The keys, by address: the loopback filter, the receive hook, steering, keepalive, FIN_WAIT_2.
+static mut KEYS: [u8; 5] = [0; 5];
+
+/// Safety: the keys' addresses; nothing is read through them.
+fn keyOf(k: usize) -> *mut void => unsafe { (borrow mut KEYS as *mut [u8; 5] as *mut u8).add(k) as *mut void };
+
+fn noFilter() -> extern "C" fn(*mut mbuf, *mut void) -> bool => 0 as extern "C" fn(*mut mbuf, *mut void) -> bool;
+
+fn noRxHook() -> extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool =>
+    0 as extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool;
+
+/// Safety: the runner's restore.
+@callback
+unsafe fn restoreLoFilter(k: *mut void) {
+    loopback_set_filter(noFilter(), 0 as *mut void);
+}
+
+/// Safety: as restoreLoFilter.
+@callback
+unsafe fn restoreRxHook(k: *mut void) {
+    netif_set_rx_hook(noRxHook(), 0 as *mut void);
+}
+
+/// Safety: as restoreLoFilter.
+@callback
+unsafe fn restoreSteering(k: *mut void) {
+    netif_set_steering(true);
+}
+
+/// Safety: as restoreLoFilter.
+@callback
+unsafe fn restoreKeepalive(k: *mut void) {
+    tcp_set_keepalive(0, 0, 0);
+}
+
+/// Safety: as restoreLoFilter.
+@callback
+unsafe fn restoreFinWait2(k: *mut void) {
+    tcp_set_fin_wait2(0);
+}
+
+/// Changed: register the restore once (a second change keeps one restore), or restore now when there is no room
+/// rather than leave it.
+/// Safety: thread context; `restore` is `key`'s.
+unsafe fn changed(key: *mut void, restore: extern "C" fn(*mut void)) {
+    selftest_forget(key);
+    if (!selftest_defer(restore, key)) {
+        restore(key);
+    }
+}
+
+/// Safety: thread context; `run` and `arg` are the test's filter.
+@export("nettest_loopback_set_filter")
+unsafe fn loopbackSetFilter(run: extern "C" fn(*mut mbuf, *mut void) -> bool, arg: *mut void) {
+    loopback_set_filter(run, arg);
+    if (!run.isNull()) {
+        changed(keyOf(0), restoreLoFilter);
+    } else {
+        selftest_forget(keyOf(0));
+    }
+}
+
+/// Safety: thread context; `run` and `arg` are the test's hook.
+@export("nettest_netif_set_rx_hook")
+unsafe fn netifSetRxHook(run: extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool, arg: *mut void) {
+    netif_set_rx_hook(run, arg);
+    if (!run.isNull()) {
+        changed(keyOf(1), restoreRxHook);
+    } else {
+        selftest_forget(keyOf(1));
+    }
+}
+
+/// Safety: thread context.
+@export("nettest_netif_set_steering")
+unsafe fn netifSetSteering(on: bool) {
+    netif_set_steering(on);
+    if (!on) {
+        changed(keyOf(2), restoreSteering);
+    } else {
+        selftest_forget(keyOf(2));
+    }
+}
+
+/// Safety: thread context.
+@export("nettest_tcp_set_keepalive")
+unsafe fn tcpSetKeepalive(idleNs: u64, intvlNs: u64, cnt: u32) {
+    tcp_set_keepalive(idleNs, intvlNs, cnt);
+    if (idleNs != 0 || intvlNs != 0 || cnt != 0) {
+        changed(keyOf(3), restoreKeepalive);
+    } else {
+        selftest_forget(keyOf(3));
+    }
+}
+
+/// Safety: thread context.
+@export("nettest_tcp_set_fin_wait2")
+unsafe fn tcpSetFinWait2(ns: u64) {
+    tcp_set_fin_wait2(ns);
+    if (ns != 0) {
+        changed(keyOf(4), restoreFinWait2);
+    } else {
+        selftest_forget(keyOf(4));
+    }
+}
+
+// ---- Accessors the ports cannot express ----
+
+/// nettest.h's nettest_raw_queued: a raw socket's queued copies.
+/// Safety: `s` is a raw socket of the test's.
+@export("nettest_raw_queued")
+unsafe fn rawQueued(s: *mut socket) -> u32 {
+    let raw = Ptr.toBorrowMut(Ptr.toBorrow(s as *socket).raw);
+    return mbufq_len(borrow mut raw.rxq as *mut mbufq);
+}
+
+/// nettest.h's nettest_kobject_read: an object's read, through its io type.
+/// Safety: `obj` is an io object of the test's; `buf` holds `len` bytes.
+@export("nettest_kobject_read")
+unsafe fn kobjectRead(obj: *mut kobject, buf: *mut void, len: usize) -> i64 {
+    let read = Ptr.toBorrow(kobject_io_of(obj as *kobject)).read;
+    return read(obj, buf, len);
+}
+
+/// nettest.h's nettest_kobject_write: an object's write, through its io type.
+/// Safety: as kobjectRead.
+@export("nettest_kobject_write")
+unsafe fn kobjectWrite(obj: *mut kobject, buf: *void, len: usize) -> i64 {
+    let write = Ptr.toBorrow(kobject_io_of(obj as *kobject)).write;
+    return write(obj, buf, len);
+}
+
+/// nettest.h's nettest_tcp_retransmits: a pcb's retransmit count, which the network worker writes, read atomically.
+/// Safety: `pcb` is a live pcb of the test's.
+@export("nettest_tcp_retransmits")
+unsafe fn tcpRetransmits(pcb: *mut tcp_pcb) -> u64 =>
+    Ptr.toBorrow(pcb as *tcp_pcb).retransmits.loadWith(LoadOrdering.Relaxed);
+
+/// tcp-pcb-timer-free, pinned for the whole test: "another CPU than mine" is a claim about this thread's CPU that must
+/// outlive its sleeps (S25); a callback or a spinner parked on that other CPU must never find this thread queued
+/// behind it. The body is nettest_hooks.cee's (a debug build's), or nettest_floor.c's skip.
+/// Safety: the runner's `reason`.
+@export("selftest_tcp_pcb_timer_free")
+unsafe fn tcpPcbTimerFree(reason: *mut *CChar) -> bool {
+    let saved = thread_pin_self();
+    let r = nettest_tcp_pcb_timer_free_pinned(reason);
+    thread_set_affinity_self(saved);
+    return r;
+}
+
+// ---- The servers' threads ----
+
+/// Safety: `srv` is a server of the test's.
+fn serverLock(srv: *mut tcp_server) -> *mut spinlock_t =>
+    unsafe { borrow mut Ptr.toBorrowMut(srv).lock as *mut spinlock_t };
+
+/// nettest.h's nettest_tcp_server_publish: the socket the server thread is blocked on, published under the lock so the
+/// release can take a reference and shut it without racing the thread's put.
+/// Safety: `srv` is the calling thread's server.
+@export("nettest_tcp_server_publish")
+unsafe fn tcpServerPublish(srv: *mut tcp_server, listener: bool, sock: *mut socket) {
+    let s = spin_lock_irqsave(serverLock(srv));
+    let v = Ptr.toBorrowMut(srv);
+    if (listener) {
+        v.ls = sock;
+    } else {
+        v.c = sock;
+    }
+    spin_unlock_irqrestore(serverLock(srv), s);
+}
+
+/// Stop a server thread and join it, however its test returned: `stop`, then shut the read side of whatever it is
+/// blocked on -- accept and recv both return on it -- until it says it is done (5 s at most), then join. A reference is
+/// taken under the lock, so a socket the thread puts meanwhile is never shut after it has gone.
+/// Safety: `arg` is the test's struct tcp_server, whose thread started.
+@callback
+unsafe fn tcpServerRelease(arg: *mut void) {
+    let srv = arg as *mut tcp_server;
+    let w = Ptr.toBorrowMut(srv);
+    w.stop = true;
+    for (i in 0..500) {
+        if (Ptr.toBorrow(srv as *tcp_server).done) {
+            break;
+        }
+        var held: [usize; 2] = [0; 2];
+        let s = spin_lock_irqsave(serverLock(srv));
+        let v = Ptr.toBorrow(srv as *tcp_server);
+        if (!v.ls.isNull()) {
+            held[0] = v.ls as usize;
+            ksock_get(v.ls);
+        }
+        if (!v.c.isNull()) {
+            held[1] = v.c as usize;
+            ksock_get(v.c);
+        }
+        spin_unlock_irqrestore(serverLock(srv), s);
+        for (k in 0..2) {
+            if (held[k] != 0) {
+                ksock_shutdown(held[k] as *mut socket, SHUT_RD);
+                ksock_put(held[k] as *mut socket);
+            }
+        }
+        sleepMs(10);
+    }
+    let v = Ptr.toBorrowMut(srv);
+    if (!v.th.isNull()) {
+        thread_join(v.th);
+    }
+    v.th = 0 as *mut thread;
+}
+
+/// nettest.h's nettest_tcp_server_start: a server's storage outlives any frame (its thread may run after the test
+/// returns), and its release is registered the moment it exists.
+/// Safety: `srv` is the test's static server; `run` its thread.
+@export("nettest_tcp_server_start")
+unsafe fn tcpServerStart(srv: *mut tcp_server, run: extern "C" fn(*mut void), name: *CChar, prio: i32) -> bool {
+    spinlock_init(serverLock(srv), "tcp-server\0".ptr as *CChar);
+    let th = thread_create(run, srv as *mut void, name, prio);
+    let w = Ptr.toBorrowMut(srv);
+    w.th = th;
+    if (th.isNull()) {
+        return false;
+    }
+    if (!selftest_defer(tcpServerRelease, srv as *mut void)) {
+        tcpServerRelease(srv as *mut void);
+        return false;
+    }
+    return true;
+}
+
+// ---- The host's outbound connect ----
+//
+// net-hostinput (nettest_hostin.cee) drives a connection from the host, on its own thread: connect blocks until the
+// peer's SYN+ACK is admitted, and the thread may outlive the test. One at a time, in static storage (the C's static
+// struct hin_conn): the peer, the socket, the connect's result, whether it returned, the thread, and who puts the
+// socket -- RUNNING, then DONE (the test) or ABANDONED (the thread).
+
+const HIN_RUNNING: u32 = 0;
+const HIN_DONE: u32 = 1;
+const HIN_ABANDONED: u32 = 2;
+static mut HIN_PEER: [u32; 5] = [0; 5];
+static mut HIN_SOCK: usize = 0;
+static mut HIN_RC: i32 = 0;
+static HIN_RETURNED: AtomicU32 = AtomicU32.constant(0);
+static mut HIN_THREAD: usize = 0;
+static HIN_OWNER: AtomicU32 = AtomicU32.constant(0);
+
+/// The connect's release key: its state, by address.
+/// Safety: the address of a static; nothing is read through it here.
+fn hinKey() -> *mut void => unsafe { borrow mut HIN_SOCK as *mut usize as *mut void };
+
+/// The connecting thread. Abandoned by a failed test while it connected, it hands its socket to the runner, which puts
+/// it at its next census: nothing the census reads changes on this thread.
+/// Safety: the HIN_ statics are written before the thread is created.
+@callback
+unsafe fn hinConnectMain(arg: *mut void) {
+    var s = 0 as *mut socket;
+    HIN_RC = ksock_create(AF_INET_I32, SOCK_STREAM, 0, borrow mut s as *mut *mut socket);
+    HIN_SOCK = s as usize;
+    if (HIN_RC == 0) {
+        HIN_RC = ksock_connect(s, borrow HIN_PEER as *[u32; 5] as *netaddr);
+    }
+    HIN_RETURNED.storeWith(1, StoreOrdering.Release);
+    if (HIN_OWNER.swapWith(HIN_DONE, Ordering.AcquireRelease) == HIN_ABANDONED) {
+        let sock = HIN_SOCK;
+        HIN_SOCK = 0;
+        let st = spin_lock_irqsave(reapLock());
+        let finished = FINISHED;
+        let queued = !finished && NREAP < REAP_MAX;
+        if (queued) {
+            REAP[NREAP as usize] = sock;
+            NREAP += 1;
+        }
+        spin_unlock_irqrestore(reapLock(), st);
+        if (finished && sock != 0) {
+            ksock_put(sock as *mut socket); // after the last census: nothing counts it now, so it is put here
+        } else if (!queued && sock != 0) {
+            // More at once than the list holds: kept, and still excused, so the counts agree.
+            var buffer: [u8; 96] = [0; 96];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("nettest: an abandoned connect's socket is kept: the reap list is full");
+            KernelLog.send(LogLevel.Warn, line);
+        }
+    }
+    thread_exit(0);
+}
+
+/// Its release, however the test returned (the net-leftover unit). A connect waits only for the TCP state to leave
+/// SYN_SENT -- nothing but the retransmit timeout ends it -- so the release gives the thread two seconds, then either
+/// joins it and puts its socket, or lets it go and leaves the socket to it. One exchange decides, so exactly one side
+/// puts.
+/// Safety: the runner's release, on the runner's thread (which alone changes ABANDONED).
+@callback
+unsafe fn hinConnRelease(arg: *mut void) {
+    for (i in 0..200) {
+        if (HIN_RETURNED.loadWith(LoadOrdering.Acquire) != 0) {
+            break;
+        }
+        sleepMs(10);
+    }
+    if (HIN_OWNER.swapWith(HIN_ABANDONED, Ordering.AcquireRelease) == HIN_DONE) {
+        thread_join(HIN_THREAD as *mut thread);
+        if (HIN_SOCK != 0) {
+            ksock_put(HIN_SOCK as *mut socket);
+        }
+        HIN_SOCK = 0;
+    } else {
+        ABANDONED += 1;                        // this runner thread's count: the census subtracts it
+        thread_put(HIN_THREAD as *mut thread); // it hands its socket to the runner when its connect returns
+    }
+    HIN_THREAD = 0;
+}
+
+/// nettest.h's nettest_hin_connect: start the connect to `ip`:`port` on a thread named `name`.
+/// Safety: thread context; no connect of a previous call is still the test's.
+@export("nettest_hin_connect")
+unsafe fn hinConnect(ip: u32, port: u16, name: *CChar) -> bool {
+    HIN_PEER = v4addr(ip, port);
+    HIN_SOCK = 0;
+    HIN_RC = 0;
+    HIN_RETURNED.storeWith(0, StoreOrdering.Relaxed);
+    HIN_THREAD = 0;
+    HIN_OWNER.storeWith(HIN_RUNNING, StoreOrdering.Relaxed);
+    let th = thread_create(hinConnectMain, 0 as *mut void, name, SCHED_PRIO_DEFAULT);
+    HIN_THREAD = th as usize;
+    if (th.isNull()) {
+        return false;
+    }
+    if (!selftest_defer(hinConnRelease, hinKey())) {
+        hinConnRelease(hinKey());
+        return false;
+    }
+    return true;
+}
+
+/// nettest.h's nettest_hin_connect_done: whether the connect returned, and its result.
+/// Safety: `rc` is the caller's.
+@export("nettest_hin_connect_done")
+unsafe fn hinConnectDone(rc: *mut i32) -> bool {
+    let out = Ptr.toBorrowMut(rc);
+    out = HIN_RC;
+    return HIN_RETURNED.loadWith(LoadOrdering.Acquire) != 0;
+}
+
+/// nettest.h's nettest_hin_connect_join: the success path, once the test has seen the connect return: the thread is
+/// joined, and its socket becomes an ordinary one of the test's, released by its put or by the runner.
+/// Safety: the connect returned.
+@export("nettest_hin_connect_join")
+unsafe fn hinConnectJoin() -> *mut socket {
+    selftest_forget(hinKey());
+    thread_join(HIN_THREAD as *mut thread);
+    HIN_THREAD = 0;
+    if (HIN_SOCK != 0 && !selftest_defer(relSock, HIN_SOCK as *mut void)) {
+        ksock_put(HIN_SOCK as *mut socket);
+        HIN_SOCK = 0;
+    }
+    return HIN_SOCK as *mut socket;
+}

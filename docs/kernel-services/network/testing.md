@@ -15,7 +15,7 @@ and before the tty, pipe and process tests
 (which run `init --selftest`), so init's socket test runs on a stack the
 kernel tests have already exercised.
 
-## Self-tests (`kernel-services/network/nettest.c`)
+## Self-tests (`kernel-services/network/nettest_*.cee`)
 
 **`net-mbuf`**: `m_getcl` gives `M_PKTHDR | M_EXT` with `NET_HEADROOM`
 of leading space; `m_append` of 3000 bytes spans two clusters and
@@ -1231,10 +1231,10 @@ only on its last lines, so a failure kept everything: one `net-dns`
 failure held a tap and a DHCP/DNS service slot, and eight tests after it
 failed for the slot (`docs/audit/next-subsystem-net-leftover.md`).
 
-- **Every acquisition registers its release in the same call.** In
-  `nettest.c`, taps, services, sockets (created or accepted),
-  interfaces and files go through `nt_` wrappers (`nt_tap_create`,
-  `nt_ksock_create`, ...), which call `selftest_defer`. The runner runs
+- **Every acquisition registers its release in the same call.** Taps,
+  services, sockets (created or accepted), interfaces and files go
+  through `nettest_frame.cee`'s wrappers (`nettest_tap_create`,
+  `nettest_ksock_create`, ...), which call `selftest_defer`. The runner runs
   what a test still holds after it returns, last acquired first.
 - **Every release goes through a wrapper too** (`nt_tap_destroy`,
   `nt_ksock_put`, ...). It runs the registered release early
@@ -1535,7 +1535,7 @@ which is why expiry was fatal rather than merely late.
 
 A request is two 16-byte halves written as two sends; the answer is the
 request, sent once both halves are in (`WWR_HALF`, `WWR_ROUNDS` = 50, the
-same two constants in `nettest.py` and `kernel-services/network/nettest.c`).
+same two constants in `nettest.py` and `kernel-services/network/nettest_harness.cee`).
 It runs both ways. **Host to guest**: `_wwr_client` connects to the
 guest's port-8 service (`h_wwr_thread`) with the default socket -- Nagle
 on, as Linux and macOS clients are -- for 50 rounds, and on a second

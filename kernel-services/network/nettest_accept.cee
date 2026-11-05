@@ -3,12 +3,12 @@
 // them, with the listen-backlog step net-lo-tcp shares (nettest_lo_tcp_backlog, nettest.h) and nettest.c's wait_until,
 // which only they still used (docs/audit/next-subsystem-suite-waits.md; its contract is nettest_tcp.cee's waitUntil's).
 //
-// net-census-wake-ref and net-accept-order need the debug build's seams and are exported only there (@cfg); nettest.c
-// keeps the C's skips otherwise. The backlog step is exported in every build, and its forced order needs the hold on
-// a client's final ACK that only a debug build has: the step takes those hooks as parameters, which the debug-only
-// net-accept-order passes, so no other build's code names them. Its all-builds export is the unforced order net-lo-tcp
-// runs, and refuses a forced one as the C did without the hold. The racing client's state, the census's result and
-// its completion are static (the C's static structs), so no thread outlives what it reads.
+// net-census-wake-ref and net-accept-order need the debug build's seams and are exported only there (@cfg);
+// nettest_floor.c keeps the C's skips otherwise. The backlog step is exported in every build, and its forced order
+// needs the hold on a client's final ACK that only a debug build has: the step takes those hooks as parameters, which
+// the debug-only net-accept-order passes, so no other build's code names them. Its all-builds export is the unforced
+// order net-lo-tcp runs, and refuses a forced one as the C did without the hold. The racing client's state, the
+// census's result and its completion are static (the C's static structs), so no thread outlives what it reads.
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/tcp.h", "kernel/completion.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h")
 extern "C" {
@@ -67,7 +67,7 @@ extern "C" {
     fn sched_watchdog_kick();
 }
 
-// ---- errno.h, syscall.h, inet.h, thread.h and time values (asserted against the headers in nettest.c) ----
+// ---- errno.h, syscall.h, inet.h, thread.h and time values (asserted in nettest_floor.c) ----
 
 const EINVAL: i32 = 22;
 const AF_INET: u16 = 2;
@@ -104,7 +104,7 @@ fn sleepMs(ms: u64) {
 
 // ---- Addresses and sockets ----
 
-/// A struct netaddr as five words (its size and alignment, asserted in nettest.c): the family and the port (host
+/// A struct netaddr as five words (its size and alignment, asserted in nettest_floor.c): the family and the port (host
 /// order) in the first, as they lie in a little-endian u32, then the address.
 fn v4addr(ip: u32, port: u16) -> [u32; 5] => [(AF_INET as u32) | ((port as u32) << 16), ip, 0, 0, 0];
 

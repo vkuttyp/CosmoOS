@@ -85,7 +85,7 @@ extern "C" {
     fn clock_deadline_passed(deadline: u64) -> bool;
 }
 
-// ---- syscall.h, errno.h, ether.h, netif.h and the benchmark's values (asserted against the headers in nettest.c) ----
+// ---- syscall.h, errno.h, ether.h, netif.h and the benchmark's values (asserted in nettest_floor.c) ----
 
 const AF_INET: u32 = 2;
 const AF_INET_I32: i32 = 2;
@@ -156,8 +156,8 @@ unsafe fn head(line: borrow mut TextWriter, nif: *mut netif) {
     line.bytes(name[..nameLen(borrow name)]);
 }
 
-/// A struct netaddr for `ip`:`port`, as five words (its size and alignment, asserted in nettest.c): the family and the
-/// port (host order) in the first, as they lie in a little-endian u32, then the address.
+/// A struct netaddr for `ip`:`port`, as five words (its size and alignment, asserted in nettest_floor.c): the family
+/// and the port (host order) in the first, as they lie in a little-endian u32, then the address.
 fn v4addr(ip: u32, port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), ip, 0, 0, 0];
 
 fn na(a: borrow [u32; 5]) -> *netaddr => a as *[u32; 5] as *netaddr;

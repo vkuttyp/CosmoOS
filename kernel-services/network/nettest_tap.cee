@@ -1,11 +1,11 @@
 // nettest_tap.cee - the frame builders and the first tap self-tests, in CeeSafe: roadmap 2.0 SA6 (nettest, the sixth
 // batch). selftest_tap, net-route, net-forward, tap-filter, net-dhcp and net-dns, as nettest.c had them, and the
 // Ethernet/IPv4/UDP/TCP/ICMP/DNS frame builders every tap test uses -- exported under the C's names
-// (nettest_wrap, nettest_mk_udp, ...; nettest.h), so the tests still in nettest.c build their frames here. A builder
+// (nettest_wrap, nettest_mk_udp, ...; nettest.h), so the other tap tests build their frames here. A builder
 // takes C's pointers and writes exactly the bytes its frame has (the length it returns), as the C did.
 //
-// An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest.c): the family and the port (host
-// order) in its first word as they lie in memory, the IPv4 address in the second.
+// An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest_floor.c): the family and the port
+// (host order) in its first word as they lie in memory, the IPv4 address in the second.
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/net/tap.h", "kernel/net/tapsvc.h", "kernel/net/dhcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/wait.h")
 extern "C" {
@@ -86,7 +86,7 @@ extern "C" {
     fn clock_now_ns() -> u64;
 }
 
-// ---- netif.h, ip.h, ether.h, tap.h, dhcp.h, socket values (asserted against the headers in nettest.c) ----
+// ---- netif.h, ip.h, ether.h, tap.h, dhcp.h, socket values (asserted in nettest_floor.c) ----
 
 const NETIF_LOOPBACK: u32 = 2;
 const ETH_HLEN: usize = 14;

@@ -1724,7 +1724,7 @@ unsafe fn workLocked(
     pb.retransmits += 1;
     count(borrow RETRANSMITS);
     if (SELFTEST) {
-        // net-bench's counters (nettest.c, bench_report): self-test builds only.
+        // net-bench's counters (nettest_bench.cee, report): self-test builds only.
         count(borrow RTO_FIRES);
         var m = RTO_BACKOFF_MAX.loadWith(LoadOrdering.Relaxed);
         while ((pb.rexmit_count as u64) > m) {

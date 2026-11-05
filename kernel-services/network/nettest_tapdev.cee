@@ -9,10 +9,11 @@
 //
 // net-dhcp-client registers a fixture interface with no address, as nettest_nif.cee's fake interfaces are: the
 // interface and its ops table are C objects this file defines (CeeSafe's ADR 0042), `static mut` items zeroed and
-// filled in at the test's start as the C's memset did. The test is the client's server: every frame the client sends
-// is captured (under a lock: the client transmits from the network worker) and read back; the server's replies are
-// built here and received through netif_rx like any frame. ARP requests for the server are answered by the fixture.
-// The client's test seams exist only with CONFIG_SELFTEST, and so does this test; nettest.c keeps the skip without them.
+// filled in at the test's start as the C's memset did. The test is the client's server: every frame the client sends is
+// captured (under a lock: the client transmits from the network worker) and read back; the server's replies are built
+// here and received through netif_rx like any frame. ARP requests for the server are answered by the fixture. The
+// client's test seams exist only with CONFIG_SELFTEST, and so does this test; nettest_floor.c keeps the skip without
+// them.
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/udp.h", "kernel/net/dhcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h", "kernel/poll.h", "kernel/process.h", "kernel/bootarchive.h", "kernel/completion.h", "kernel/object.h")
 extern "C" {
@@ -132,7 +133,7 @@ extern "C" {
     fn dhcp_test_state(nif: *mut netif) -> i32;
 }
 
-// ---- syscall.h, ether.h, ip.h, netif.h and dhcp.h values (asserted against the headers in nettest.c) ----
+// ---- syscall.h, ether.h, ip.h, netif.h and dhcp.h values (asserted in nettest_floor.c) ----
 
 const O_RDWR: u32 = 0x0002;
 const O_NONBLOCK: u32 = 0x0800;

@@ -78,7 +78,7 @@ extern "C" {
     fn thread_sleep_ns(ns: u64);
 }
 
-// ---- mbuf.h, errno.h (the values are asserted against the headers in nettest.c) ----
+// ---- mbuf.h, errno.h (the values are asserted against the headers in nettest_floor.c) ----
 
 const M_PKTHDR: u32 = 1;
 const M_EXT: u32 = 2;

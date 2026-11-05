@@ -1,7 +1,14 @@
 /*
- * nettest.c - Network self-tests: mbufs, checksums, ARP table, UDP and
- * TCP over loopback (with and without injected loss), and the
- * harness-driven echo services over the real interface.
+ * nettest_floor.c - What the network self-tests' CeeSafe ports cannot hold
+ * (roadmap 2.0 SA6). The tests are the nettest_*.cee files and their release
+ * framework nettest_frame.cee; this file keeps three kinds of C:
+ *
+ *   - the skips of tests whose seams a build lacks: an export defined under
+ *     `#if !CONFIG_X`, where CeeSafe's @cfg emits one only under `#if X`;
+ *   - the setter of tap.h's after-purge seam, two C variables CeeSafe
+ *     cannot assign;
+ *   - the asserts of every port's copied constants and rooms against the
+ *     headers, as fifo_floor.c holds fifo.cee's.
  */
 
 #include <kernel/compiler.h>
@@ -42,362 +49,11 @@
 
 #include "nettest.h"
 
-#define STR_(x) #x
-#define STR(x)  STR_(x)
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            *reason = "check failed: " #cond " at line " STR(__LINE__);        \
-            return false;                                                      \
-        }                                                                      \
-    } while (0)
-
-/* --- releases however a test returns (the net-leftover unit) ------------
- *
- * CHECK returns at once, and a test released what it made only on its last
- * lines: one failure kept a tap, a DHCP/DNS service slot and its sockets,
- * and eight tests after it failed for the slot (docs/audit/
- * next-subsystem-net-leftover.md). Every acquisition in this file goes
- * through one of these, which registers its release with the runner
- * (selftest_defer) in the same call, so no CHECK can fall between the two.
- * Every release goes through one too: it runs the registered release early
- * (selftest_release), where the test used to tear down, and falls back to
- * the plain call for anything not registered. What a test still holds when
- * it returns, the runner releases, last acquired first.
- */
-/* Sockets abandoned connect threads still hold (the census leaves them
- * out: they close whenever their connect times out, maybe during a later
- * test, and must neither blame that test nor hide a socket it leaves). */
-static unsigned g_nt_abandoned;
-/* An abandoned thread whose connect has returned hands its socket here
- * and changes nothing else; the runner puts it at its next census. So
- * both counts the census reads change only on the runner's thread --
- * the one reading them -- however many connects finish at once. */
-enum { NT_REAP_MAX = 16 };
-static struct socket *g_nt_reap[NT_REAP_MAX];
-static unsigned g_nt_nreap;
-static spinlock_t g_nt_reap_lock = SPINLOCK_INIT("nt-reap");
-
-static bool g_nt_finished;   /* the self-tests are over: no census will drain the list again */
-
-static void nt_reap_abandoned(void)
-{
-    struct socket *take[NT_REAP_MAX];
-    arch_irq_state_t s = spin_lock_irqsave(&g_nt_reap_lock);
-    unsigned n = g_nt_nreap;
-    for (unsigned i = 0; i < n; i++)
-        take[i] = g_nt_reap[i];
-    g_nt_nreap = 0;
-    spin_unlock_irqrestore(&g_nt_reap_lock, s);
-    for (unsigned i = 0; i < n; i++) {
-        if (take[i])
-            ksock_put(take[i]);
-        g_nt_abandoned--;
-    }
-}
-
-/* After the last test: drain the list, and from now on an abandoned
- * connect puts its own socket -- no census is left to drain it. */
-void nettest_finish(void)
-{
-    arch_irq_state_t st = spin_lock_irqsave(&g_nt_reap_lock);
-    g_nt_finished = true;
-    spin_unlock_irqrestore(&g_nt_reap_lock, st);
-    nt_reap_abandoned();
-}
-
-void nettest_census(struct nettest_census *out)
-{
-    out->nnetifs = netif_names(out->netifs, sizeof(out->netifs));
-    out->services = tapsvc_count();
-    /* The abandoned connects' sockets are subtracted. Any whose connect
-     * has returned are put first, here, so the socket count and the
-     * abandoned count both change only on this thread: they are read as
-     * one state without any retry. */
-    nt_reap_abandoned();
-    /* A worker's wake reference (sock_wake_ref) is a socket's last for as
-     * long as the worker takes between sock_wake and its put: a test that
-     * has put every socket of its can return inside that window, and the
-     * count then holds one it does not own (`net-accept-race` under the
-     * chaos migrator, CI run 37679564267: "sockets 0 -> 1"). Counted only
-     * at an instant no wake reference is held: a barrier through every
-     * worker ends each window a worker had open, and a reference a thread
-     * holds across its own wake is waited out, to a deadline. Past it the
-     * count is taken anyway, and said to be -- a socket a wake reference
-     * never lets go of is a leak, and the comparison then reports it. The
-     * deadline bounds a thread's reference, not a worker: the barrier waits
-     * for every worker's step without one, as netif_unregister's does, and
-     * a worker that never finishes its step is a hang the runner's per-test
-     * watchdog (armed across this census) reports with a scheduler dump. */
-    uint64_t deadline = clock_now_ns() + 2000ull * 1000 * 1000;
-    while (socket_wake_refs() != 0) {
-        net_workers_barrier();
-        if (socket_wake_refs() == 0 || clock_now_ns() >= deadline)
-            break;
-        thread_sleep_ms(1);
-    }
-    unsigned held = socket_wake_refs();
-    if (held != 0)
-        kwarn("selftest: census: %u wake reference(s) still held after 2 s; counting anyway", held);
-    unsigned sockets = socket_count();
-    out->sockets = sockets > g_nt_abandoned ? sockets - g_nt_abandoned : 0;
-}
-
-void nettest_census_take(struct nettest_census *out) { nettest_census(out); }
-
-/* Is interface `name` (length n) among `list`'s comma-separated names? */
-static bool census_has(const char *list, const char *name, size_t n)
-{
-    for (const char *p = list; *p;) {
-        const char *q = strchr(p, ',');
-        size_t len = q ? (size_t)(q - p) : strlen(p);
-        if (len == n && memcmp(p, name, n) == 0)
-            return true;
-        if (!q)
-            break;
-        p = q + 1;
-    }
-    return false;
-}
-
-/*
- * Did the test leave anything? Only what it added counts. A later test
- * that finds fewer -- a socket an abandoned connect finally put, an
- * interface an earlier leftover's owner released -- has left nothing, and
- * failing it for that would be the cross-test failure this check exists
- * to end. The interface count is compared too: a name that did not fit
- * the buffer still counts.
- */
-bool nettest_census_equal(const struct nettest_census *before, const struct nettest_census *after)
-{
-    if (after->nnetifs > before->nnetifs || after->services > before->services || after->sockets > before->sockets)
-        return false;
-    for (const char *p = after->netifs; *p;) {
-        const char *q = strchr(p, ',');
-        size_t len = q ? (size_t)(q - p) : strlen(p);
-        if (!census_has(before->netifs, p, len))
-            return false;   /* a new name, even if another went */
-        if (!q)
-            break;
-        p = q + 1;
-    }
-    return true;
-}
-
-static void nt_rel_tap(void *a) { tap_destroy(a); }
-static void nt_rel_svc(void *a) { tapsvc_stop(a); }
-static void nt_rel_sock(void *a) { ksock_put(a); }
-static void nt_rel_nif(void *a) { netif_unregister(a); }
-static void nt_rel_file(void *a) { file_put(a); }
-
-static struct tap *nt_tap_create(const char *name, uint32_t ip, uint32_t mask, const uint8_t mac[6])
-{
-    struct tap *t = tap_create(name, ip, mask, mac);
-    if (t != NULL && !selftest_defer(nt_rel_tap, t)) {
-        tap_destroy(t);
-        return NULL;
-    }
-    return t;
-}
-
-static void nt_tap_destroy(struct tap *t)
-{
-    if (!selftest_release(t))
-        tap_destroy(t);
-}
-
-static struct tapsvc *nt_tapsvc_start(struct tap *t)
-{
-    struct tapsvc *svc = tapsvc_start(t);
-    if (svc != NULL && !selftest_defer(nt_rel_svc, svc)) {
-        tapsvc_stop(svc);
-        return NULL;
-    }
-    return svc;
-}
-
-static void nt_tapsvc_stop(struct tapsvc *svc)
-{
-    if (!selftest_release(svc))
-        tapsvc_stop(svc);
-}
-
-static int nt_ksock_create(int family, int type, uint32_t uid, struct socket **out)
-{
-    int rc = ksock_create(family, type, uid, out);
-    if (rc == 0 && !selftest_defer(nt_rel_sock, *out)) {
-        ksock_put(*out);
-        *out = NULL;
-        return -ENOMEM;
-    }
-    return rc;
-}
-
-static int nt_ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer)
-{
-    int rc = ksock_accept(s, out, peer);
-    if (rc == 0 && !selftest_defer(nt_rel_sock, *out)) {
-        ksock_put(*out);
-        *out = NULL;
-        return -ENOMEM;
-    }
-    return rc;
-}
-
-static void nt_ksock_put(struct socket *s)
-{
-    if (!selftest_release(s))
-        ksock_put(s);
-}
-
-static int nt_netif_register(struct netif *nif)
-{
-    int rc = netif_register(nif);
-    if (rc == 0 && !selftest_defer(nt_rel_nif, nif)) {
-        netif_unregister(nif);
-        return -ENOMEM;
-    }
-    return rc;
-}
-
-static void nt_netif_unregister(struct netif *nif)
-{
-    if (!selftest_release(nif))
-        netif_unregister(nif);
-}
-
-/* A reference the test holds on an interface (a creator's, or one
- * netif_find gave it), released however it returns. Keyed by a static
- * holder, never by the interface: the interface's own address is its
- * unregister's key, and netif_find can return the very interface the test
- * registered. */
-/* struct nt_netif_ref is in nettest.h. */
-
-static void nt_rel_netif_ref(void *arg)
-{
-    struct nt_netif_ref *r = arg;
-    if (r->nif)
-        netif_put(r->nif);
-    r->nif = NULL;
-}
-
-static bool nt_netif_hold(struct nt_netif_ref *r, struct netif *nif)
-{
-    r->nif = nif;
-    if (!selftest_defer(nt_rel_netif_ref, r)) {
-        nt_rel_netif_ref(r);
-        return false;
-    }
-    return true;
-}
-
-static void nt_netif_ref_put(struct nt_netif_ref *r)
-{
-    if (!selftest_release(r))
-        nt_rel_netif_ref(r);
-}
-
-/* A packet a fake interface kept, freed however the test returns. */
-static void nt_rel_mbuf_slot(void *slot)
-{
-    struct mbuf **p = slot;
-    if (*p)
-        m_freem(*p);
-    *p = NULL;
-}
-
-static int nt_vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mode, struct file **out)
-{
-    int rc = vfs_open(start, path, flags, mode, out);
-    if (rc == 0 && !selftest_defer(nt_rel_file, *out)) {
-        file_put(*out);
-        *out = NULL;
-        return -ENOMEM;
-    }
-    return rc;
-}
-
-static void nt_file_put(struct file *f)
-{
-    if (!selftest_release(f))
-        file_put(f);
-}
-
-/* Hooks and settings a test changes are restored however it returns: a
- * hook left installed with a pointer into a dead frame is called by the
- * next packet, and a lossy or black-hole loopback filter left in place
- * fails every loopback test after it. Changing one registers its
- * restore; putting it back runs that restore early. */
-static char g_nt_lo_filter, g_nt_rx_hook, g_nt_steering, g_nt_keepalive, g_nt_fin_wait2;   /* keys */
-
-static void nt_restore_lo_filter(void *k) { (void)k; loopback_set_filter(NULL, NULL); }
-static void nt_restore_rx_hook(void *k) { (void)k; netif_set_rx_hook(NULL, NULL); }
-static void nt_restore_steering(void *k) { (void)k; netif_set_steering(true); }
-static void nt_restore_keepalive(void *k) { (void)k; tcp_set_keepalive(0, 0, 0); }
-static void nt_restore_fin_wait2(void *k) { (void)k; tcp_set_fin_wait2(0); }
-
-/* Changed: register the restore once. Put back: run it (or just put back). */
-static void nt_changed(void *key, void (*restore)(void *))
-{
-    selftest_forget(key);   /* a second change keeps one restore */
-    if (!selftest_defer(restore, key))
-        restore(key);       /* no room: restore now rather than leave it */
-}
-
-static void nt_loopback_set_filter(lo_filter_fn fn, void *arg)
-{
-    loopback_set_filter(fn, arg);
-    if (fn != NULL)
-        nt_changed(&g_nt_lo_filter, nt_restore_lo_filter);
-    else
-        selftest_forget(&g_nt_lo_filter);
-}
-
-static void nt_netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)
-{
-    netif_set_rx_hook(fn, arg);
-    if (fn != NULL)
-        nt_changed(&g_nt_rx_hook, nt_restore_rx_hook);
-    else
-        selftest_forget(&g_nt_rx_hook);
-}
-
-static void nt_netif_set_steering(bool on)
-{
-    netif_set_steering(on);
-    if (!on)
-        nt_changed(&g_nt_steering, nt_restore_steering);
-    else
-        selftest_forget(&g_nt_steering);
-}
-
-static void nt_tcp_set_keepalive(uint64_t idle_ns, uint64_t intvl_ns, unsigned cnt)
-{
-    tcp_set_keepalive(idle_ns, intvl_ns, cnt);
-    if (idle_ns || intvl_ns || cnt)
-        nt_changed(&g_nt_keepalive, nt_restore_keepalive);
-    else
-        selftest_forget(&g_nt_keepalive);
-}
-
-static void nt_tcp_set_fin_wait2(uint64_t ns)
-{
-    tcp_set_fin_wait2(ns);
-    if (ns)
-        nt_changed(&g_nt_fin_wait2, nt_restore_fin_wait2);
-    else
-        selftest_forget(&g_nt_fin_wait2);
-}
-
-static struct netaddr v4addr(uint32_t ip, uint16_t port)
-{
-    struct netaddr a;
-    memset(&a, 0, sizeof(a));
-    a.family = COSMO_AF_INET;
-    a.v4 = ip;
-    a.port = port;
-    return a;
-}
+/* The release framework (nettest_frame.cee): the values it writes as its
+ * own constants, and the census's interface list as it reads it. */
+_Static_assert(ENOMEM == 12 && COSMO_AF_INET == 2 && COSMO_SOCK_STREAM == 1 && COSMO_SHUT_RD == 0 &&
+                   SCHED_PRIO_DEFAULT == 32 && sizeof(((struct nettest_census *)0)->netifs) == 512,
+               "nettest_frame.cee's errno.h, syscall.h and thread.h values, and the census's list");
 
 /* net-mbuf, net-mbufq-double, net-cksum and net-arp are CeeSafe
  * (nettest_base.cee); the values it writes as its own constants: */
@@ -410,9 +66,9 @@ _Static_assert(M_PKTHDR == 1 && M_EXT == 2 && M_QUEUED == (1u << 6) && NET_HEADR
  * and net-lo-tcp-loss are CeeSafe (nettest_lo.cee), with the bulk
  * transfer they share with net-rx-dup and net-tcp-reorder
  * (nettest_tcp_transfer). Their servers' state, struct tcp_server, is in
- * nettest.h; the release framework below stays C, and nettest.h exports
- * the parts of it the batch calls. The values the batch writes as its own
- * constants, and struct netaddr's layout as its NettestAddr has it: */
+ * nettest.h, and the release framework they call is nettest_frame.cee's.
+ * The values the batch writes as its own constants, and struct netaddr's
+ * layout as its NettestAddr has it: */
 _Static_assert(EIO == 5 && EPIPE == 32 && EINVAL == 22 && EMSGSIZE == 90 && EADDRINUSE == 98 && EISCONN == 106 &&
                ECONNREFUSED == 111, "nettest_lo.cee's errno.h values");
 _Static_assert(COSMO_AF_INET == 2 && COSMO_AF_INET6 == 10 && COSMO_SOCK_STREAM == 1 && COSMO_SOCK_DGRAM == 2 &&
@@ -426,115 +82,12 @@ _Static_assert(sizeof(struct netaddr) == 20 && __builtin_offsetof(struct netaddr
 _Static_assert(sizeof(struct tcp_server) <= 512 && _Alignof(struct tcp_server) <= 8,
                "nettest_lo.cee's ServerRoom holds a struct tcp_server");
 
-/* --- TCP over loopback -------------------------------------------------------------- */
-
-static void tcp_server_publish(struct tcp_server *srv, struct socket **slot, struct socket *sock)
-{
-    arch_irq_state_t s = spin_lock_irqsave(&srv->lock);
-    *slot = sock;
-    spin_unlock_irqrestore(&srv->lock, s);
-}
-
-/*
- * Stop a server thread and join it, however its test returned: `stop`,
- * then shut the read side of whatever it is blocked on -- accept and recv
- * both return on it -- until it says it is done (5 s at most), then join.
- * A reference is taken under the lock, so a socket the thread puts
- * meanwhile is never shut after it has gone.
- */
-static void tcp_server_release(void *arg)
-{
-    struct tcp_server *srv = arg;
-    srv->stop = true;
-    for (unsigned i = 0; i < 500 && !srv->done; i++) {
-        struct socket *held[2] = { NULL, NULL };
-        arch_irq_state_t s = spin_lock_irqsave(&srv->lock);
-        if (srv->ls) { held[0] = srv->ls; ksock_get(held[0]); }
-        if (srv->c) { held[1] = srv->c; ksock_get(held[1]); }
-        spin_unlock_irqrestore(&srv->lock, s);
-        for (unsigned k = 0; k < 2; k++)
-            if (held[k]) {
-                ksock_shutdown(held[k], COSMO_SHUT_RD);
-                ksock_put(held[k]);
-            }
-        thread_sleep_ms(10);
-    }
-    if (srv->th)
-        thread_join(srv->th);
-    srv->th = NULL;
-}
-
-/* A server's storage outlives any frame (its thread may run after the
- * test returns), and its release is registered the moment it exists. */
-static bool tcp_server_start(struct tcp_server *srv, void (*fn)(void *), const char *name, int prio)
-{
-    spinlock_init(&srv->lock, "tcp-server");
-    srv->th = thread_create(fn, srv, name, prio);
-    if (srv->th == NULL)
-        return false;
-    if (!selftest_defer(tcp_server_release, srv)) {
-        tcp_server_release(srv);
-        return false;
-    }
-    return true;
-}
-
-/* The framework, for the CeeSafe batches (nettest.h). */
-bool nettest_tcp_server_start(struct tcp_server *srv, void (*fn)(void *), const char *name, int prio)
-{
-    return tcp_server_start(srv, fn, name, prio);
-}
-
-void nettest_tcp_server_publish(struct tcp_server *srv, bool listener, struct socket *sock)
-{
-    tcp_server_publish(srv, listener ? &srv->ls : &srv->c, sock);
-}
-
-int nettest_ksock_create(int family, int type, uint32_t uid, struct socket **out)
-{
-    return nt_ksock_create(family, type, uid, out);
-}
-
-int nettest_ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer)
-{
-    return nt_ksock_accept(s, out, peer);
-}
-
-void nettest_ksock_put(struct socket *s) { nt_ksock_put(s); }
-
-void nettest_loopback_set_filter(lo_filter_fn fn, void *arg) { nt_loopback_set_filter(fn, arg); }
-
-void nettest_netif_set_rx_hook(netif_rx_hook_fn fn, void *arg) { nt_netif_set_rx_hook(fn, arg); }
-
-struct tap *nettest_tap_create(const char *name, uint32_t ip, uint32_t mask, const uint8_t *mac)
-{
-    return nt_tap_create(name, ip, mask, mac);
-}
-
-void nettest_tap_destroy(struct tap *t) { nt_tap_destroy(t); }
-
-struct tapsvc *nettest_tapsvc_start(struct tap *t) { return nt_tapsvc_start(t); }
-
-void nettest_tapsvc_stop(struct tapsvc *svc) { nt_tapsvc_stop(svc); }
-
-int nettest_netif_register(struct netif *nif) { return nt_netif_register(nif); }
-
-void nettest_netif_unregister(struct netif *nif) { nt_netif_unregister(nif); }
-
-bool nettest_netif_hold(struct nt_netif_ref *r, struct netif *nif) { return nt_netif_hold(r, nif); }
-
-void nettest_netif_ref_put(struct nt_netif_ref *r) { nt_netif_ref_put(r); }
-
-void nettest_netif_set_steering(bool on) { nt_netif_set_steering(on); }
-
-bool nettest_defer_mbuf_slot(struct mbuf **slot) { return selftest_defer(nt_rel_mbuf_slot, slot); }
-
 /* --- the pcb and its timers, and a duplicated received frame -----------------
  *
  * tcp-pcb-timer-free and net-rx-dup are CeeSafe (nettest_hooks.cee), each
  * exported only where its hooks exist: the timer test's body under
  * CONFIG_DEBUG, net-rx-dup under CONFIG_FAULTINJECT. Without them the C's
- * skips stand here. The pinning wrapper is this file's.
+ * skips stand here; the pinning wrapper is nettest_frame.cee's.
  */
 bool nettest_tcp_pcb_timer_free_pinned(const char **reason);
 
@@ -546,18 +99,6 @@ bool nettest_tcp_pcb_timer_free_pinned(const char **reason)
     return true;
 }
 #endif
-
-/* Pinned for the whole test: "another CPU than mine" is a claim about
- * this thread's CPU that must outlive its sleeps (S25); a callback or a
- * spinner parked on that other CPU must never find this thread queued
- * behind it. */
-bool selftest_tcp_pcb_timer_free(const char **reason)
-{
-    cpumask_t saved = thread_pin_self();
-    bool r = nettest_tcp_pcb_timer_free_pinned(reason);
-    thread_set_affinity_self(saved);
-    return r;
-}
 
 #if !CONFIG_FAULTINJECT
 bool selftest_net_rx_dup(const char **reason)
@@ -685,37 +226,6 @@ _Static_assert(IPPROTO_ICMP == 1 && IPPROTO_UDP == 17 && IP_DEFAULT_TTL == 64 &&
                RAW_RXQ_MAX == 64 && PIPE_SIZE == 16384 && SCHED_PRIO_DEFAULT == 32,
                "nettest_tcp.cee's ip.h, raw.h, pipe.h and thread.h values");
 
-/* The framework for nettest_tcp.cee (nettest.h). */
-int nettest_ksock_create_raw(int family, int proto, struct socket **out)
-{
-    int rc = ksock_create_raw(family, proto, 0, out);
-    if (rc == 0 && !selftest_defer(nt_rel_sock, *out)) {
-        ksock_put(*out);
-        *out = NULL;
-        return -ENOMEM;
-    }
-    return rc;
-}
-
-void nettest_tcp_set_keepalive(uint64_t idle_ns, uint64_t intvl_ns, unsigned cnt)
-{
-    nt_tcp_set_keepalive(idle_ns, intvl_ns, cnt);
-}
-
-void nettest_tcp_set_fin_wait2(uint64_t ns) { nt_tcp_set_fin_wait2(ns); }
-
-unsigned nettest_raw_queued(struct socket *s) { return mbufq_len(&s->raw->rxq); }
-
-int64_t nettest_kobject_read(struct kobject *obj, void *buf, size_t len)
-{
-    return kobject_io_of(obj)->read(obj, buf, len);
-}
-
-int64_t nettest_kobject_write(struct kobject *obj, const void *buf, size_t len)
-{
-    return kobject_io_of(obj)->write(obj, buf, len);
-}
-
 /* --- receive steering and checksum offload (unit 11) ------------------------
  *
  * net-steer and net-csum-offload are CeeSafe (nettest_nif.cee). The
@@ -823,34 +333,6 @@ _Static_assert(COSMO_NETCTL_VERSION == 8 && COSMO_NETCTL_FILTER_ADD == 3 && COSM
                COSMO_NETCTL_VERDICT_ACCEPT == 1 && COSMO_NETCTL_SNAPSHOT_MAX <= 65536,
                "nettest_fwd.cee's netctl.h values, and its snapshot room");
 
-/* The NAT and firewall state a test changed, cleared however it returns:
- * a forward or a translation left behind would decide the next test's
- * frames. */
-static char g_nat_state_marker;
-
-static void nt_rel_nat_state(void *arg)
-{
-    (void)arg;
-    nat_pf_clear();
-    nat_flush();
-    fw_flush();
-}
-
-bool nettest_defer_nat_state(void) { return selftest_defer(nt_rel_nat_state, &g_nat_state_marker); }
-
-void nettest_release_nat_state(void)
-{
-    if (!selftest_release(&g_nat_state_marker))
-        nt_rel_nat_state(NULL);
-}
-
-int nettest_vfs_open(const char *path, unsigned flags, struct file **out)
-{
-    return nt_vfs_open(NULL, path, flags, 0, out);
-}
-
-void nettest_file_put(struct file *f) { nt_file_put(f); }
-
 /* --- the runtime network control channel (/dev/net/tapctl) ----------------
  *
  * net-tapctl is CeeSafe (nettest_ctl.cee), with the walk of a snapshot's
@@ -874,142 +356,7 @@ _Static_assert(ICMP_DEST_UNREACH == 3 && FW_DIR_ANY == 0 && COSMO_NETCTL_DIR_ANY
                COSMO_NETCTL_DIR_TO_HOST == 3 && COSMO_NETCTL_ICMP_TYPE_ANY == 0xffff,
                "nettest_input.cee's ip.h, fw.h and netctl.h values");
 
-/* A verdict is taken on the network worker after file_write returns, so a
- * counter is awaited, not read at once. True once `st.field` exceeds `base`. */
-#define FWT_RISES(fn, st, field, base) ({                                   \
-    bool r_ = false;                                                        \
-    for (unsigned i_ = 0; i_ < 40 && !r_; i_++) {                           \
-        fn(&(st));                                                          \
-        if ((st).field > (base)) r_ = true; else thread_sleep_ms(10);       \
-    }                                                                       \
-    r_; })
-
 /* --- the host chain (docs/audit/next-subsystem-host-input.md) ------------- */
-
-/* How long a *positive* wait polls: the loop returns as soon as what it
- * waits for arrives, so being patient costs nothing when the stack is
- * working and keeps a loaded machine (CI's shared runners, the GIC-variant
- * boot) from failing an assertion that would have passed. Negative waits --
- * "nothing arrives" -- keep their own short budgets. */
-#define HIN_TRIES 200u
-
-/* The host's own outbound connection, on its own thread (connect blocks
- * until the peer's SYN+ACK is admitted). */
-struct hin_conn {
-    struct netaddr peer;
-    struct socket *s;
-    int rc;
-    volatile bool done;
-    struct thread *th;
-    unsigned owner;   /* who puts `s`: HIN_RUNNING, then HIN_DONE (the test) or HIN_ABANDONED (the thread) */
-};
-enum { HIN_RUNNING, HIN_DONE, HIN_ABANDONED };
-
-static void hin_connect_thread(void *arg)
-{
-    struct hin_conn *c = arg;
-    c->rc = ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c->s);
-    if (c->rc == 0)
-        c->rc = ksock_connect(c->s, &c->peer);
-    c->done = true;
-    /* Abandoned by a failed test while it connected: the socket is its to put. */
-    if (__atomic_exchange_n(&c->owner, HIN_DONE, __ATOMIC_ACQ_REL) == HIN_ABANDONED) {
-        /* Hand the socket to the runner, which puts it at its next census:
-         * nothing the census reads changes on this thread. */
-        struct socket *sock = c->s;
-        c->s = NULL;
-        arch_irq_state_t st = spin_lock_irqsave(&g_nt_reap_lock);
-        bool finished = g_nt_finished;
-        bool queued = !finished && g_nt_nreap < NT_REAP_MAX;
-        if (queued)
-            g_nt_reap[g_nt_nreap++] = sock;
-        spin_unlock_irqrestore(&g_nt_reap_lock, st);
-        if (finished && sock)
-            ksock_put(sock);   /* after the last census: nothing counts it now, so it is put here */
-        else if (!queued && sock)   /* more at once than the list holds: kept, and still excused, so the counts agree */
-            kwarn("nettest: an abandoned connect's socket is kept: the reap list is full");
-    }
-    thread_exit(0);
-}
-
-/*
- * Its release, however the test returned (the net-leftover unit). A
- * connect waits only for the TCP state to leave SYN_SENT -- nothing but
- * the retransmit timeout ends it -- so the release gives the thread two
- * seconds, then either joins it and puts its socket, or lets it go and
- * leaves the socket to it. One exchange decides, so exactly one side puts.
- * The storage is static at every call site: the thread may outlive the
- * frame.
- */
-static void hin_conn_release(void *arg)
-{
-    struct hin_conn *c = arg;
-    for (unsigned i = 0; i < 200 && !c->done; i++)
-        thread_sleep_ms(10);
-    if (__atomic_exchange_n(&c->owner, HIN_ABANDONED, __ATOMIC_ACQ_REL) == HIN_DONE) {
-        thread_join(c->th);
-        if (c->s)
-            ksock_put(c->s);
-        c->s = NULL;
-    } else {
-        g_nt_abandoned++;    /* this runner thread's count: the census subtracts it */
-        thread_put(c->th);   /* it hands its socket to the runner when its connect returns */
-    }
-    c->th = NULL;
-}
-
-static bool hin_conn_start(struct hin_conn *c, const char *name)
-{
-    c->owner = HIN_RUNNING;
-    c->th = thread_create(hin_connect_thread, c, name, SCHED_PRIO_DEFAULT);
-    if (c->th == NULL)
-        return false;
-    if (!selftest_defer(hin_conn_release, c)) {
-        hin_conn_release(c);
-        return false;
-    }
-    return true;
-}
-
-/* The success path, once the test has seen `done`: the thread is joined,
- * and its socket becomes an ordinary one of the test's, released by its
- * put or by the runner. */
-static void hin_conn_join(struct hin_conn *c)
-{
-    selftest_forget(c);
-    thread_join(c->th);
-    c->th = NULL;
-    if (c->s != NULL && !selftest_defer(nt_rel_sock, c->s)) {
-        ksock_put(c->s);
-        c->s = NULL;
-    }
-}
-
-/*
- * net-hostinput is CeeSafe (nettest_hostin.cee), with the world side of the
- * uplink tap the host tests here drive a connection with (nettest_hin_*;
- * nettest.h). Its outbound connect stays here: the thread may outlive the
- * test, and its release is this file's. One at a time, in static storage.
- */
-static struct hin_conn g_hin_cn;
-
-bool nettest_hin_connect(uint32_t ip, uint16_t port, const char *name)
-{
-    g_hin_cn = (struct hin_conn){ .peer = v4addr(ip, port) };
-    return hin_conn_start(&g_hin_cn, name);
-}
-
-bool nettest_hin_connect_done(int *rc)
-{
-    *rc = g_hin_cn.rc;
-    return g_hin_cn.done;
-}
-
-struct socket *nettest_hin_connect_join(void)
-{
-    hin_conn_join(&g_hin_cn);
-    return g_hin_cn.s;
-}
 
 /* The values nettest_hostin.cee writes as its own constants, and struct
  * hin_seg's payload where it writes it: */
@@ -1024,7 +371,7 @@ _Static_assert(FW_DROP == 0 && FW_ACCEPT == 1 && FW_DIR_ANY == 0 && FW_DIR_TO_HO
                COSMO_NETCTL_DIR_FROM_UPLINK == 4 && COSMO_NETCTL_VERDICT_DROP == 0 &&
                COSMO_NETCTL_VERDICT_ACCEPT == 1 && COSMO_NETCTL_HOST_ADDR == 0 && COSMO_O_RDWR == 0x0002 &&
                COSMO_O_NONBLOCK == 0x0800 && COSMO_AF_INET == 2 && COSMO_SOCK_STREAM == 1 &&
-               COSMO_SOCK_DGRAM == 2 && HIN_TRIES == 200,
+               COSMO_SOCK_DGRAM == 2,
                "nettest_hostin.cee's fw.h, netctl.h and socket values");
 _Static_assert(__builtin_offsetof(struct hin_seg, pay) == 28 && sizeof(struct hin_seg) <= 128 &&
                    _Alignof(struct hin_seg) <= 8,
@@ -1032,15 +379,8 @@ _Static_assert(__builtin_offsetof(struct hin_seg, pay) == 28 && sizeof(struct hi
 
 /* --- the host's own state (docs/audit/next-subsystem-host-state.md) ------- */
 
-/*
- * net-zero-window-probe, net-tcp-sws, net-fin-acks-last-data and
- * net-hoststate are CeeSafe (nettest_hoststate.cee). A pcb's retransmit
- * count, which the network worker writes, read atomically as the C did: */
-uint64_t nettest_tcp_retransmits(struct tcp_pcb *pcb)
-{
-    return __atomic_load_n(&pcb->retransmits, __ATOMIC_RELAXED);
-}
-
+/* net-zero-window-probe, net-tcp-sws, net-fin-acks-last-data and
+ * net-hoststate are CeeSafe (nettest_hoststate.cee). */
 /* The values nettest_hoststate.cee writes as its own constants (net-dns's
  * upstream answers with the 93.184.216.34 it checks): */
 _Static_assert(EMSGSIZE == 90 && ICMP_UNREACH_PORT == 3 && ICMP_UNREACH_NEEDFRAG == 4 && FW_DIR_TO_GUEST == 2 &&
@@ -1064,7 +404,7 @@ _Static_assert(COSMO_NETCTL_VERSION == 8 && COSMO_NETCTL_FLOW_NAT == 1 && COSMO_
                    COSMO_NETCTL_FLOW_MASQ == 1 && COSMO_NETCTL_FLOW_GUEST == 3 && COSMO_NETCTL_FLOW_HOST == 4 &&
                    COSMO_NETCTL_FLOW_ESTABLISHED == 0x01 && COSMO_NETCTL_PROTO_TCP == 6 &&
                    COSMO_NETCTL_PROTO_UDP == 17 && COSMO_NETCTL_HOST_ADDR == 0 && COSMO_O_RDWR == 0x0002 &&
-                   COSMO_O_NONBLOCK == 0x0800 && COSMO_AF_INET == 2 && HIN_TRIES == 200,
+                   COSMO_O_NONBLOCK == 0x0800 && COSMO_AF_INET == 2,
                "nettest_flows.cee's netctl.h and socket values");
 _Static_assert(COSMO_NETCTL_SNAPSHOT_MAX <= 65536 && NAT_TABLE_SIZE * sizeof(struct nat_flow) <= 10240 &&
                    FW_FLOW_MAX * sizeof(struct fw_flow_info) <= 10240 &&
@@ -1090,7 +430,7 @@ _Static_assert(COSMO_NETCTL_VERSION == 8 && COSMO_NETCTL_FILTER_ADD == 3 && COSM
                    COSMO_NETCTL_PROTO_UDP == 17 && COSMO_NETCTL_DIR_OUTPUT == 5 && COSMO_NETCTL_VERDICT_DROP == 0 &&
                    COSMO_NETCTL_VERDICT_ACCEPT == 1 && COSMO_NETCTL_SCOPE_GUEST == 2 && COSMO_NETCTL_HOST_ADDR == 0 &&
                    COSMO_O_RDWR == 0x0002 && COSMO_O_NONBLOCK == 0x0800 && COSMO_AF_INET == 2 &&
-                   COSMO_SOCK_STREAM == 1 && COSMO_SOCK_DGRAM == 2 && COSMO_IO_ERROR == 8 && HIN_TRIES == 200,
+                   COSMO_SOCK_STREAM == 1 && COSMO_SOCK_DGRAM == 2 && COSMO_IO_ERROR == 8,
                "nettest_output.cee's netctl.h, socket and poll values");
 _Static_assert(sizeof(struct cosmo_netctl_filter_guest) == 12, "the v5 policy record is 12 bytes");
 _Static_assert(sizeof(struct fw_rule) <= 64 && sizeof(struct cosmo_netctl_filter) <= 64 &&

@@ -3,7 +3,7 @@
 // ops table are C objects this file defines (CeeSafe's ADR 0042, as loopback.cee's `lo`), `static mut` items the
 // interface layer registers, links and releases -- static because a release may run after the test's frame is gone --
 // zeroed and filled in at the test's start as the C's memset did. The receive hook's state is static for the same
-// reason. Registration, the creator's reference and the kept packet go through nettest.c's release framework
+// reason. Registration, the creator's reference and the kept packet go through nettest_frame.cee's release framework
 // (nettest.h), so a failed check leaves nothing registered.
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/net/tcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/percpu.h", "kernel/selftest.h", "kernel/thread.h", "kernel/wait.h")
@@ -91,7 +91,7 @@ extern "C" {
     fn thread_sleep_ns(ns: u64);
 }
 
-// ---- errno.h, netif.h, mbuf.h, percpu.h, ip.h, tcp.h, ether.h, thread.h (asserted against the headers in nettest.c) ----
+// ---- errno.h, netif.h, mbuf.h, percpu.h, ip.h, tcp.h, ether.h, thread.h (asserted in nettest_floor.c) ----
 
 const EINVAL: i32 = 22;
 const NETIF_LOOPBACK: u32 = 2;

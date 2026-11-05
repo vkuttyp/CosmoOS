@@ -83,7 +83,7 @@ the condition's word onto itself.
 
 ## Non-blocking mode and readiness (milestone 8)
 
-`net-nonblock` (`kernel-services/network/nettest.c`) drives the pipe ends
+`net-nonblock` (`kernel-services/network/nettest_tcp.cee`) drives the pipe ends
 through the object operations: `-EAGAIN` on an empty read, exactly
 `PIPE_SIZE` bytes written before `-EAGAIN`, `WRITABLE` clear when full
 and back after a read, `HANGUP` on the read end after the write end is

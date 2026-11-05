@@ -1,9 +1,8 @@
 // nettest_input.cee - the INPUT chain, in CeeSafe: roadmap 2.0 SA6 (nettest, the ninth batch). net-input, as
 // nettest.c had it (docs/audit/next-subsystem-input-chain.md), and the checksummed ICMP messages the host chains test
 // with -- exported as nettest_fwt_ones_sum, nettest_fwt_mk_icmp_ck, nettest_fwt_mk_needfrag and
-// nettest_fwt_recv_echo_reply (nettest.h) for the host-chain and host-state tests still in nettest.c. A verdict is
-// taken on the network worker after file_write returns, so a counter is awaited, not read at once (rises, the C's
-// FWT_RISES, which stays in nettest.c for the tests there).
+// nettest_fwt_recv_echo_reply (nettest.h) for the host-chain and host-state tests. A verdict is taken on the network
+// worker after file_write returns, so a counter is awaited, not read at once (rises, the C's FWT_RISES).
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/nat.h", "kernel/net/fw.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/vfs.h", "kernel/selftest.h")
 extern "C" {
@@ -105,7 +104,7 @@ extern "C" {
     fn thread_sleep_ns(ns: u64);
 }
 
-// ---- errno.h, ip.h, tcp.h, fw.h, netctl.h, syscall.h (asserted against the headers in nettest.c) ----
+// ---- errno.h, ip.h, tcp.h, fw.h, netctl.h, syscall.h (asserted in nettest_floor.c) ----
 
 const EINVAL: i32 = 22;
 const ETH_HLEN: usize = 14;

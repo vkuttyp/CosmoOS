@@ -1,9 +1,9 @@
 // nettest_worker.cee - an interface against the receive worker, in CeeSafe: roadmap 2.0 SA6 (nettest, the seventeenth
 // batch). netif-remove-worker and netif-rxq-count, as nettest.c had them. Both park CPU 0's receive worker inside
-// input_one on a fake interface's frame through the debug build's worker hooks, so both are exported only there
-// (@cfg); nettest.c keeps the C's silent passes otherwise. The interfaces, their ops table and the completions are C
-// objects this file defines (CeeSafe's ADR 0042, as nettest_lifetime.cee's), `static mut` items zeroed and filled in
-// at the test's start as the C's memset did; the hooks read the interface they wait for from a static (the C's struct
+// input_one on a fake interface's frame through the debug build's worker hooks, so both are exported only there (@cfg);
+// nettest_floor.c keeps the C's silent passes otherwise. The interfaces, their ops table and the completions are C
+// objects this file defines (CeeSafe's ADR 0042, as nettest_lifetime.cee's), `static mut` items zeroed and filled in at
+// the test's start as the C's memset did; the hooks read the interface they wait for from a static (the C's struct
 // netif_remove_worker_state, whose address was the hooks' argument).
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ether.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/completion.h", "kernel/selftest.h", "kernel/thread.h")
@@ -57,7 +57,7 @@ extern "C" {
     fn thread_join(t: *mut thread) -> i32;
 }
 
-// ---- netif.h, ether.h, thread.h and time values (asserted against the headers in nettest.c) ----
+// ---- netif.h, ether.h, thread.h and time values (asserted in nettest_floor.c) ----
 
 const NETIF_UP: u32 = 1;
 const NETIF_NODEFAULT: u32 = 16;

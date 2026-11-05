@@ -1,11 +1,12 @@
 // nettest_seam.cee - three tests held at a seam, in CeeSafe: roadmap 2.0 SA6 (nettest, the nineteenth batch).
 // net-netif-flags (a packet parked between two readings of its interface's flag word, N26), net-tap-release-order (a
 // frame delivered after a tap's purges, before its release ends) and net-syncookie-seeded (the SYN-cookie secret drawn
-// again once the pool seeds, NET-6), as nettest.c had them. The first two need the debug build's park and release
-// seams and the third the self-test build's cookie seam, so each is exported only where its seam exists (@cfg);
-// nettest.c keeps the C's skips otherwise. tap.h's after-purge seam is a pair of C variables, which nettest.c sets for
-// this file (nettest_tap_set_after_purge). The toggler's and the seam's state (the C's structs, one in the test's
-// frame) are static, so no thread or seam outlives what it reads; a C counter struct or listing is read into a room.
+// again once the pool seeds, NET-6), as nettest.c had them. The first two need the debug build's park and release seams
+// and the third the self-test build's cookie seam, so each is exported only where its seam exists (@cfg);
+// nettest_floor.c keeps the C's skips otherwise. tap.h's after-purge seam is a pair of C variables, which
+// nettest_floor.c sets for this file (nettest_tap_set_after_purge). The toggler's and the seam's state (the C's
+// structs, one in the test's frame) are static, so no thread or seam outlives what it reads; a C counter struct or
+// listing is read into a room.
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/tcp.h", "kernel/net/tap.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/random.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h")
 extern "C" {
@@ -122,7 +123,7 @@ extern "C" {
     fn clock_now_ns() -> u64;
 }
 
-// ---- syscall.h, ip.h, ether.h, nat.h, fw.h and thread.h values (asserted against the headers in nettest.c) ----
+// ---- syscall.h, ip.h, ether.h, nat.h, fw.h and thread.h values (asserted in nettest_floor.c) ----
 
 const O_RDWR: u32 = 0x0002;
 const O_NONBLOCK: u32 = 0x0800;

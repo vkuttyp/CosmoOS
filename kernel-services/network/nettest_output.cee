@@ -2,11 +2,11 @@
 // thirteenth batch). net-output and net-tcpverdict, as nettest.c had them (docs/audit/next-subsystem-output-chain.md),
 // with the OUTPUT rule they build and the drain of a guest's tap file only they used. The world side of the uplink tap
 // is nettest_hostin.cee's (nettest_hin_*), the guest's frames nettest_fwd.cee's (nettest_fwt_*), the host's outbound
-// connect nettest.c's (nettest_hin_connect, _done, _join).
+// connect nettest_frame.cee's (nettest_hin_connect, _done, _join).
 //
 // A C struct the kernel takes (a firewall rule, a control command) is built in a zeroed room, as the C's designated
 // initialisers zeroed what they did not name; one it fills (the counters, the snapshot) is read in a room of this
-// file's, field by field. An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest.c).
+// file's, field by field. An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest_floor.c).
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/net/tap.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
 extern "C" {
@@ -165,7 +165,7 @@ extern "C" {
     fn thread_sleep_ns(ns: u64);
 }
 
-// ---- errno.h, ip.h, tcp.h, fw.h, netctl.h, socket and poll values (asserted against the headers in nettest.c) ----
+// ---- errno.h, ip.h, tcp.h, fw.h, netctl.h, socket and poll values (asserted in nettest_floor.c) ----
 
 const EPERM: i32 = 1;
 const EAGAIN: i32 = 11;
@@ -266,9 +266,9 @@ fn info(text: StringView) {
 
 // ---- The rooms, off the stack ----
 
-// The statistics structs (1 KiB each, checked), the L4 header built, the frames and bytes read back, the DNS query,
-// the oversized datagram, the datagram the world side read (a struct hin_seg, 92 bytes, asserted in nettest.c), and
-// the whole snapshot (COSMO_NETCTL_SNAPSHOT_MAX fits, asserted in nettest.c).
+// The statistics structs (1 KiB each, checked), the L4 header built, the frames and bytes read back, the DNS query, the
+// oversized datagram, the datagram the world side read (a struct hin_seg, 92 bytes, asserted in nettest_floor.c), and
+// the whole snapshot (COSMO_NETCTL_SNAPSHOT_MAX fits, asserted in nettest_floor.c).
 static mut STATS: [u64; 384] = [0; 384];
 static mut L4: [u8; 160] = [0; 160];
 static mut BUF: [u8; 256] = [0; 256];
@@ -1189,7 +1189,7 @@ unsafe fn controlChannel(reason: *mut *CChar, ga: u32) -> bool {
 // ---- net-tcpverdict ----
 
 /// The host's outbound connect to `port`, waited for `tries` times 10 ms: whether it finished, and its result in `rc`.
-/// Safety: thread context; nettest.c's one connect at a time.
+/// Safety: thread context; nettest_frame.cee's one connect at a time.
 unsafe fn connectWait(tries: u32, rc: borrow mut i32) -> bool {
     var r: i32 = 0;
     var done = nettest_hin_connect_done(borrow mut r as *mut i32);

@@ -1,7 +1,7 @@
 // nettest_fwd.cee - inbound port forwarding, many guests and the forwarding firewall, in CeeSafe: roadmap 2.0 SA6
 // (nettest, the seventh batch). net-pf-clear, net-dnat, net-multiguest and net-firewall, as nettest.c had them, and
 // the firewall tests' guest helpers -- exported as nettest_fwt_send, nettest_fwt_recv and nettest_fwt_mk_icmp
-// (nettest.h), which the INPUT, host and OUTPUT chain tests still in nettest.c call. A C struct the kernel takes or
+// (nettest.h), which the INPUT, host and OUTPUT chain tests call. A C struct the kernel takes or
 // fills (a firewall rule, a control command, the NAT and firewall listings and counters) is built in a zeroed room of
 // this file's, as the C's designated initialisers zeroed what they did not name, and read back field by field.
 
@@ -147,7 +147,7 @@ extern "C" {
     fn thread_sleep_ns(ns: u64);
 }
 
-// ---- errno.h, ip.h, tcp.h, nat.h, fw.h, netctl.h, netif.h, syscall.h (asserted against the headers in nettest.c) ----
+// ---- errno.h, ip.h, tcp.h, nat.h, fw.h, netctl.h, netif.h, syscall.h (asserted in nettest_floor.c) ----
 
 const ENOENT: i32 = 2;
 const EEXIST: i32 = 17;

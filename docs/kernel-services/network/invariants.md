@@ -405,7 +405,7 @@ defect.
 reference; it is safe by explicit ordering — `tapsvc_stop` runs
 immediately before `tap_destroy` in the one teardown path
 (`tap.c`) — and that ordering, not a reference, is what a second teardown
-path would have to preserve. `nettest.c`'s two test fixtures hold one
+path would have to preserve. The self-tests' fake-interface fixtures hold one
 within the scope of a test that owns the interface.
 
 **Asserted by** `net-arp-retry-unregister` and `net-nd-retry-unregister`,

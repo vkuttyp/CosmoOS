@@ -126,7 +126,7 @@ extern "C" {
     fn sched_watchdog_kick();
 }
 
-// ---- errno.h, uapi/cosmo, tcp.h, ip.h, raw.h, pipe.h, thread.h (asserted against the headers in nettest.c) ----
+// ---- errno.h, uapi/cosmo, tcp.h, ip.h, raw.h, pipe.h, thread.h (asserted in nettest_floor.c) ----
 
 const EAGAIN: i32 = 11;
 const EDESTADDRREQ: i32 = 89;
@@ -300,7 +300,7 @@ fn rawNow() -> Raw {
 
 // ---- Addresses and sockets ----
 
-/// struct netaddr's layout (asserted in nettest.c): the family, the port (host order), the address.
+/// struct netaddr's layout (asserted in nettest_floor.c): the family, the port (host order), the address.
 @repr(C)
 struct TcpTestAddr {
     family: u16;
@@ -563,7 +563,7 @@ fn noFilter() -> extern "C" fn(*mut mbuf, *mut void) -> bool => 0 as extern "C" 
 
 // ---- The holding server ----
 
-/// A server's static room, struct tcp_server's (asserted in nettest.c).
+/// A server's static room, struct tcp_server's (asserted in nettest_floor.c).
 struct ServerRoom {
     words: [u64; 64];
 }
