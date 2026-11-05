@@ -1126,7 +1126,13 @@ state is static and the park hooks are chosen by an enum of the two tables. Batc
 `nettest_worker.cee`: netif-remove-worker and netif-rxq-count, debug-only
 (the C's silent passes kept), which park CPU 0's receive worker through the
 worker hooks; their completions are static C objects, and `nettest.c`'s own
-fake interface, with no user left, is gone.
+fake interface, with no user left, is gone. Batch 18, `nettest_accept.cee`:
+net-accept-race, net-census-wake-ref and net-accept-order (the latter two
+debug-only, the C's skips kept), with the listen-backlog step net-lo-tcp
+shares and the wait they used. The step takes the debug build's ACK hold
+as function parameters, so its all-builds export names no debug hook; a
+one-line `nettest_census_take` lets CeeSafe import the census beside its
+struct, which selftest.h gives the same name.
 
 Size: about 3.0x.
 

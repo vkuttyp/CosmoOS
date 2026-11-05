@@ -79,8 +79,13 @@ void nettest_tcp_set_fin_wait2(uint64_t ns);
 unsigned nettest_raw_queued(struct socket *s);
 int64_t nettest_kobject_read(struct kobject *obj, void *buf, size_t len);
 int64_t nettest_kobject_write(struct kobject *obj, const void *buf, size_t len);
-/* net-lo-tcp's and net-accept-order's listen backlog (nettest.c). */
+/* net-lo-tcp's listen backlog, unforced (nettest_accept.cee, which forces
+ * it for net-accept-order itself). */
 bool nettest_lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool *accepted_first);
+/* nettest_census under a name CeeSafe can import beside the struct's
+ * (selftest.h names both nettest_census). */
+struct nettest_census;
+void nettest_census_take(struct nettest_census *out);
 
 /* nettest_lo.cee: move `bytes` of a pattern to a sink thread on `addr` and
  * check the connection's end, lingering `linger_ms` past it (net-lo-tcp,

@@ -143,6 +143,8 @@ void nettest_census(struct nettest_census *out)
     out->sockets = sockets > g_nt_abandoned ? sockets - g_nt_abandoned : 0;
 }
 
+void nettest_census_take(struct nettest_census *out) { nettest_census(out); }
+
 /* Is interface `name` (length n) among `list`'s comma-separated names? */
 static bool census_has(const char *list, const char *name, size_t n)
 {
@@ -1016,184 +1018,41 @@ _Static_assert(sizeof(struct ipv6_hdr) == 40 && __builtin_offsetof(struct ipv6_h
                    sizeof(struct arp_stats) <= 512 && sizeof(struct ip_stats) <= 512,
                "nettest_neigh.cee's IPv6 header and rooms");
 
-/* --- accept against a racing peer ------------------------------------------------
+/* --- accept against its races, the census against a wake reference -------
  *
- * The audit's accept race: a child dequeued by tcp_accept had neither
- * listener nor socket until the caller attached one, so a reset in that
- * window freed the pcb under the accepting thread. tcp_accept now attaches
- * the owner under the TCP lock. The check below is the invariant (the pcb
- * names its socket when accept returns) plus a stress: clients that
- * connect and drop the connection at once while the server accepts.
+ * net-accept-race, net-census-wake-ref and net-accept-order are CeeSafe
+ * (nettest_accept.cee), with the listen-backlog step net-lo-tcp shares and
+ * the wait they used. The latter two need the debug build's seams; without
+ * them the C's skips stand here. The values the port writes as its own
+ * constants:
  */
-struct race_client {
-    unsigned rounds;
-    unsigned failures;
-    struct netaddr server;
-    volatile bool stop;      /* its release: finish the round and leave */
-    struct thread *th;
-};
-
-static void race_client_release(void *arg)
-{
-    struct race_client *rc = arg;
-    rc->stop = true;
-    if (rc->th)
-        thread_join(rc->th);
-    rc->th = NULL;
-}
-
-static void race_client_main(void *arg)
-{
-    struct race_client *rc = arg;
-    for (unsigned i = 0; i < rc->rounds && !rc->stop; i++) {
-        struct socket *c;
-        if (ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) != 0) {
-            rc->failures++;
-            continue;
-        }
-        if (ksock_connect(c, &rc->server) != 0)
-            rc->failures++;
-        else if (i & 1)
-            ksock_shutdown(c, 2);   /* FIN before the server accepts */
-        ksock_put(c);               /* close: FIN or, with unread data, RST */
-    }
-}
-
-bool selftest_net_accept_race(const char **reason)
-{
-    struct socket *ls;
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
-    struct netaddr any = v4addr(INADDR_LOOPBACK_N, 0);
-    CHECK(ksock_bind(ls, &any) == 0 && ksock_listen(ls, 8) == 0);
-    static struct race_client rc;   /* the client may outlive this frame */
-    memset(&rc, 0, sizeof(rc));
-    rc.rounds = 64;
-    CHECK(ksock_getsockname(ls, &rc.server) == 0);
-
-    rc.th = thread_create(race_client_main, &rc, "raceclient", SCHED_PRIO_DEFAULT);
-    CHECK(rc.th != NULL);
-    if (!selftest_defer(race_client_release, &rc)) {
-        race_client_release(&rc);
-        *reason = "its release list was full";
-        return false;
-    }
-    unsigned accepted = 0;
-    for (unsigned i = 0; i < rc.rounds; i++) {
-        struct socket *c;
-        struct netaddr peer;
-        int rc2 = nt_ksock_accept(ls, &c, &peer);
-        CHECK(rc2 == 0);
-        CHECK(c->tcp != NULL && c->tcp->sock == c);   /* attached under the lock */
-        CHECK(peer.family == COSMO_AF_INET && peer.port != 0);
-        accepted++;
-        nt_ksock_put(c);
-    }
-    selftest_release(&rc);   /* joined */
-    CHECK(rc.failures == 0);
-    nt_ksock_put(ls);
-    kinfo("selftest: net-accept-race: %u connections accepted against a dropping peer", accepted);
-    return true;
-}
-
-/* --- the census against a worker's wake reference ----------------------------------
- *
- * net-accept-race failed on CI (run 37679564267, x86-64, chaos migrator)
- * with every check passing: "left the network changed: ... sockets 0 ->
- * 1". A worker that wakes a socket holds a reference from under the pcb
- * lock until after the wake; a test that puts every socket of its while
- * one is held returns with the count one high, and the census blamed it.
- * The seam holds a worker there: the census must not return until it
- * lets go, and must then find nothing left. The census runs on a thread
- * of its own so the test can see whether it returned while the worker
- * held on -- without the fix it does, at once, with the count one high.
- */
-#if CONFIG_DEBUG
-struct census_job {
-    struct nettest_census out;
-    struct completion done;
-};
-
-static void census_job_main(void *arg)
-{
-    struct census_job *j = arg;
-    nettest_census(&j->out);
-    complete(&j->done);
-}
-
-static char g_wake_hold_marker;   /* the seam's release, by address */
-
-static void wake_hold_release_rel(void *arg)
-{
-    (void)arg;
-    (void)sock_test_wake_hold_release();
-}
-
-#endif /* CONFIG_DEBUG */
-
+#if !CONFIG_DEBUG
 bool selftest_net_census_wake_ref(const char **reason)
 {
-#if !CONFIG_DEBUG
     (void)reason;
     kinfo("selftest: net-census-wake-ref: no test hooks in this build; skipping");
     return true;
-#else
-    static struct nettest_census before;
-    nettest_census(&before);
-    struct socket *ls, *c, *s;
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
-    struct netaddr any = v4addr(INADDR_LOOPBACK_N, 0), srv, peer;
-    CHECK(ksock_bind(ls, &any) == 0 && ksock_listen(ls, 1) == 0);
-    CHECK(ksock_getsockname(ls, &srv) == 0);
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
-    CHECK(ksock_connect(c, &srv) == 0);
-    CHECK(nt_ksock_accept(ls, &s, &peer) == 0);
-
-    /* Registered after the sockets, so run before them (LIFO): a failed
-     * check never leaves a worker held while they are put. */
-    CHECK(selftest_defer(wake_hold_release_rel, &g_wake_hold_marker));
-    sock_test_wake_hold_arm(s);
-    CHECK(ksock_sendto(c, "x", 1, NULL) == 1);   /* its input wakes s */
-    CHECK(sock_test_wake_hold_wait(5ull * 1000 * 1000 * 1000));
-    unsigned refs = socket_wake_refs();
-    CHECK(refs >= 1);
-
-    /* Every reference of the test's: s lives on in the worker's hand only. */
-    nt_ksock_put(s);
-    nt_ksock_put(c);
-    nt_ksock_put(ls);
-
-    /* No check from here to the release: the census thread may be waiting
-     * on the held worker, and a return would put nothing that frees it. */
-    static struct census_job job;
-    memset(&job, 0, sizeof(job));
-    completion_init(&job.done, "census-job");
-    struct thread *t = thread_create(census_job_main, &job, "censusjob", SCHED_PRIO_DEFAULT);
-    /* Long enough for a census that does not wait to have returned. */
-    bool early = t != NULL && wait_for_completion_timeout(&job.done, 200ull * 1000 * 1000);
-    bool hold_ok = sock_test_wake_hold_release();
-    selftest_forget(&g_wake_hold_marker);
-    if (t != NULL) {
-        wait_for_completion(&job.done);
-        thread_join(t);
-    }
-    CHECK(t != NULL);
-    CHECK(hold_ok);    /* the worker was still held when it was let go */
-    CHECK(!early);     /* the census waited for the worker's put */
-    CHECK(nettest_census_equal(&before, &job.out));
-    kinfo("selftest: net-census-wake-ref: a worker held %u wake reference(s) past the test's last put; "
-          "the census waited for it and found sockets %u -> %u", refs, before.sockets, job.out.sockets);
-    return true;
-#endif
 }
+
+bool selftest_net_accept_order(const char **reason)
+{
+    (void)reason;
+    kinfo("selftest: net-accept-order: no test hooks in this build; skipping");
+    return true;
+}
+#endif
+_Static_assert(EINVAL == 22 && COSMO_AF_INET == 2 && COSMO_SOCK_STREAM == 1 && COSMO_IO_READABLE == 1 &&
+                   NET_EPHEMERAL_LO == 49152 && SCHED_PRIO_DEFAULT == 32,
+               "nettest_accept.cee's errno.h, syscall.h, inet.h and thread.h values");
 
 /* --- milestone 8: hardening -------------------------------------------------------- *
  *
  * net-tcp-syncache, net-tcp-rfc5961, net-tcp-reorder, net-tcp-keepalive,
  * net-icmp-limit, net-raw-icmp and net-nonblock are CeeSafe
  * (nettest_tcp.cee), with their injected segment, filters, holding server
- * and predicates; wait_until stays here for the tests still C, and
- * nettest_tcp.cee has its own under the same contract. The values it
- * writes as its own constants: */
+ * and predicates; nettest_tcp.cee and nettest_accept.cee each have
+ * nettest.c's old wait_until under its contract. The values it writes as
+ * its own constants: */
 _Static_assert(EAGAIN == 11 && EDESTADDRREQ == 89 && EPROTONOSUPPORT == 93 && EOPNOTSUPP == 95 && ECONNRESET == 104 &&
                EISCONN == 106 && ETIMEDOUT == 110 && EALREADY == 114 && EINPROGRESS == 115,
                "nettest_tcp.cee's errno.h values");
@@ -1237,205 +1096,6 @@ int64_t nettest_kobject_write(struct kobject *obj, const void *buf, size_t len)
     return kobject_io_of(obj)->write(obj, buf, len);
 }
 
-/*
- * Wait until `pred(arg)` holds, or `budget_ms` passes
- * (docs/audit/next-subsystem-suite-waits.md).
- *
- * The `settle(N)` this replaced waited for *time*; this waits for the *property*,
- * which is the difference between a test that asserts something about the
- * stack and one that asserts something about the host. There is no
- * relationship between 100 ms and 300 packets, and on a machine that has
- * been building and booting for hours there never was.
- *
- * **The budget is generous on purpose** -- seconds where the sleep was
- * tens of milliseconds. A deadline that is never reached on a healthy
- * host costs nothing, because the wait returns as soon as the predicate
- * holds; when it *is* reached the caller's `CHECK` fails on the wait
- * rather than on an arithmetic mismatch that reads like a protocol bug.
- *
- * **A predicate may not require a coherent view of more than one
- * field -- unless every field it reads is monotonic and the predicate is
- * monotone in them.** `tcp_get_stats` is `*out = g_stats;` with no lock
- * and `ksock_ready` reads socket state outside the socket mutex, so a
- * predicate over two fields can see them from either side of an update.
- * The danger is a torn read that *satisfies* the predicate early. With
- * monotonic fields and a monotone predicate a torn read can only
- * under-count, which delays termination and never causes it, so such a
- * predicate is safe (`syn_answered` is the one instance here, and says
- * so). Anything else waits on a single field, and the multi-field
- * *assertion* stays after the wait, where it is the test's claim and not
- * the wait's termination condition. A first version of this contract was
- * the absolute rule alone, and the file broke it two functions later.
- *
- * **The result must be CHECKed** (`warn_unused_result`, and the kernel
- * builds with -Werror): a wait whose expiry is dropped is `settle` in a
- * different hat. **A wait that used more than half its budget is
- * reported**: a test that habitually takes 1.9 s of a 2 s budget is a
- * finding -- a slowdown, or a budget that a widened deadline is hiding --
- * and the line is what makes it visible before it becomes a failure.
- */
-static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
-    __attribute__((warn_unused_result));
-static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
-{
-    uint64_t t0 = clock_now_ns();
-    uint64_t deadline = t0 + (uint64_t)budget_ms * 1000000ull;
-    while (!pred(arg)) {
-        if (clock_now_ns() > deadline)
-            return false;
-        thread_sleep_ms(1);
-        sched_watchdog_kick();
-    }
-    unsigned waited_ms = (unsigned)((clock_since_ns(t0)) / 1000000ull);
-    if (waited_ms * 2 > budget_ms)
-        kinfo("selftest: wait_until: waited %u ms of a %u ms budget", waited_ms, budget_ms);
-    return true;
-}
-
-/* A socket's readiness word has every bit in `mask` set. This is the
- * shape six hand-written waits in this file shared -- a header loop on
- * `ksock_ready` with `i < 100` standing in for a second. */
-struct ready_target { struct socket *s; unsigned mask; };
-static bool ready_has(void *arg)
-{
-    const struct ready_target *t = arg;
-    return (ksock_ready(t->s) & t->mask) == t->mask;
-}
-
-/* --- the listen backlog, in either accept order ----------------------------------
- *
- * A listener with backlog 2 that has not accepted still completes the
- * handshake for two clients; the test accepts one, exchanges `hi` with it,
- * and closing the listener resets the other.
- *
- * **Which one it accepts is not the client that connected first.** A
- * connection joins the accept queue when the listener processes that
- * client's final ACK, on the network worker the ACK's flow hashes to --
- * after the client's connect() has returned. The two clients' ACKs are
- * usually on different workers, so if the first's worker runs late the
- * second is queued, and accepted, first. This step used to receive `hi`
- * on `c1` regardless, and in that order it waited for data nobody would
- * send: a hang with every CPU idle
- * (docs/audit/next-subsystem-accept-order.md). It now asks which client
- * it accepted, and bounds the receive, so a wrong answer fails in seconds.
- *
- * `force` makes the second client first, deterministically: the first's
- * final ACK is held in tcp_input until the second is queued, then
- * delivered. `net-lo-tcp` runs this unforced and `net-accept-order`
- * forced -- one step, both orders.
- */
-#if CONFIG_DEBUG
-struct backlog_forced { struct socket *ls; };
-static bool backlog_second_queued(void *arg)
-{
-    /* Two fields, both monotone until the test acts: the ACK stays held
-     * until it is delivered below, and nothing accepts meanwhile, so the
-     * queue only grows (wait_until's contract). */
-    const struct backlog_forced *f = arg;
-    return tcp_test_ack_held() && (ksock_ready(f->ls) & COSMO_IO_READABLE);
-}
-
-static void backlog_release_hold(void *arg)
-{
-    (void)arg;
-    tcp_test_deliver_held_ack();   /* disarms, and a held ACK goes back in: nothing is left half-open */
-}
-#endif
-
-static bool lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool *accepted_first)
-{
-    const char *who = force ? "net-accept-order" : "net-lo-tcp";
-    struct socket *ls;
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
-    struct netaddr la = v4addr(INADDR_LOOPBACK_N, port);
-    CHECK(ksock_bind(ls, &la) == 0 && ksock_listen(ls, 2) == 0);
-    CHECK(ksock_listen(ls, 2) == -EINVAL);
-    if (force) {
-#if CONFIG_DEBUG
-        tcp_test_hold_ack(port, (uint16_t)(port + 1));   /* c1 is bound to port + 1 below */
-        if (!selftest_defer(backlog_release_hold, NULL)) {
-            backlog_release_hold(NULL);
-            *reason = "its release list was full";
-            return false;
-        }
-#else
-        *reason = "forcing the order needs the debug build's hold";
-        return false;
-#endif
-    }
-    struct socket *c1, *c2;
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c1) == 0);
-    if (force) {   /* a known port, so the hold takes c1's ACK and no other */
-        struct netaddr ca = v4addr(INADDR_LOOPBACK_N, (uint16_t)(port + 1));
-        CHECK(ksock_bind(c1, &ca) == 0);
-    }
-    CHECK(ksock_connect(c1, &la) == 0);
-    CHECK(nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c2) == 0 && ksock_connect(c2, &la) == 0);
-#if CONFIG_DEBUG
-    if (force) {
-        struct backlog_forced f = { .ls = ls };
-        bool second_first = wait_until(backlog_second_queued, &f, 2000);
-        bool delivered = tcp_test_deliver_held_ack();   /* either way: a failed wait must not strand c1 */
-        if (!second_first || !delivered) {
-            kerror("selftest: %s: the first client's ACK %s, the second %s", who, delivered ? "was held" : "was not held",
-                   second_first ? "was queued" : "was not queued in time");
-            *reason = "the forced order did not happen";
-            return false;
-        }
-    }
-#endif
-    struct socket *a1;
-    struct netaddr peer, n1, n2;
-    CHECK(nt_ksock_accept(ls, &a1, &peer) == 0);
-    CHECK(ksock_getsockname(c1, &n1) == 0 && ksock_getsockname(c2, &n2) == 0);
-    CHECK(n2.port >= NET_EPHEMERAL_LO && (force ? n1.port == port + 1 : n1.port >= NET_EPHEMERAL_LO));
-    CHECK(peer.port == n1.port || peer.port == n2.port);
-    *accepted_first = peer.port == n1.port;
-    struct socket *mine = *accepted_first ? c1 : c2, *other = *accepted_first ? c2 : c1;
-    kinfo("selftest: %s: accepted the %s client", who, *accepted_first ? "first" : "second");
-    CHECK(ksock_sendto(a1, "hi", 2, NULL) == 2);
-    /* Bounded: a step that picked the wrong client fails here, not at the
-     * harness's timeout. */
-    struct ready_target rt = { .s = mine, .mask = COSMO_IO_READABLE };
-    CHECK(wait_until(ready_has, &rt, 2000));
-    char b[4];
-    CHECK(ksock_recvfrom(mine, b, 4, NULL) == 2 && memcmp(b, "hi", 2) == 0);
-    /* Closing the listener resets the still-queued connection. */
-    nt_ksock_put(ls);
-    thread_sleep_ms(20);
-    CHECK(ksock_recvfrom(other, b, 4, NULL) < 0 || ksock_sendto(other, "x", 1, NULL) < 0);
-    nt_ksock_put(a1);
-    nt_ksock_put(c1);
-    nt_ksock_put(c2);
-    return true;
-}
-
-/* net-lo-tcp's backlog (nettest_lo.cee). */
-bool nettest_lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool *accepted_first)
-{
-    return lo_tcp_backlog(reason, port, force, accepted_first);
-}
-
-/* The backlog step in the order that hung it: the second client's
- * handshake completes first, and the accept follows completion, not
- * connect(). Ports 6004 (the listener) and 6005 (the first client). */
-bool selftest_net_accept_order(const char **reason)
-{
-#if !CONFIG_DEBUG
-    (void)reason;
-    kinfo("selftest: net-accept-order: no test hooks in this build; skipping");
-    return true;
-#else
-    unsigned socks0 = socket_count();
-    bool accepted_first;
-    if (!lo_tcp_backlog(reason, 6004, true, &accepted_first))
-        return false;
-    CHECK(!accepted_first);   /* completion order: the held client is accepted second */
-    thread_sleep_ms(50);
-    CHECK(socket_count() == socks0);
-    return true;
-#endif
-}
 /* --- receive steering and checksum offload (unit 11) ------------------------
  *
  * net-steer and net-csum-offload are CeeSafe (nettest_nif.cee). The

@@ -1,0 +1,640 @@
+// nettest_accept.cee - accept against its races, and the census against a worker's reference, in CeeSafe: roadmap 2.0
+// SA6 (nettest, the eighteenth batch). net-accept-race, net-census-wake-ref and net-accept-order, as nettest.c had
+// them, with the listen-backlog step net-lo-tcp shares (nettest_lo_tcp_backlog, nettest.h) and nettest.c's wait_until,
+// which only they still used (docs/audit/next-subsystem-suite-waits.md; its contract is nettest_tcp.cee's waitUntil's).
+//
+// net-census-wake-ref and net-accept-order need the debug build's seams and are exported only there (@cfg); nettest.c
+// keeps the C's skips otherwise. The backlog step is exported in every build, and its forced order needs the hold on
+// a client's final ACK that only a debug build has: the step takes those hooks as parameters, which the debug-only
+// net-accept-order passes, so no other build's code names them. Its all-builds export is the unforced order net-lo-tcp
+// runs, and refuses a forced one as the C did without the hold. The racing client's state, the census's result and
+// its completion are static (the C's static structs), so no thread outlives what it reads.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/tcp.h", "kernel/completion.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h")
+extern "C" {
+    struct thread;
+    struct completion;
+    struct netaddr {
+        family: u16;
+        port: u16;
+    }
+    struct tcp_pcb {
+        sock: *mut socket;
+    }
+    struct socket {
+        tcp: *mut tcp_pcb;
+    }
+    struct nettest_census {
+        sockets: u32;
+    }
+
+    fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn nettest_ksock_put(s: *mut socket);
+    fn nettest_census_take(out: *mut nettest_census);
+    fn nettest_census_equal(a: *nettest_census, b: *nettest_census) -> bool;
+    fn selftest_defer(run: extern "C" fn(*mut void), arg: *mut void) -> bool;
+    fn selftest_release(arg: *mut void) -> bool;
+    fn selftest_forget(arg: *mut void) -> bool;
+
+    fn ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_bind(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_listen(s: *mut socket, backlog: i32) -> i32;
+    fn ksock_connect(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn ksock_recvfrom(s: *mut socket, buf: *mut void, len: usize, from: *mut netaddr) -> i64;
+    fn ksock_shutdown(s: *mut socket, how: i32) -> i32;
+    fn ksock_getsockname(s: *mut socket, out: *mut netaddr) -> i32;
+    fn ksock_ready(s: *mut socket) -> u32;
+    fn ksock_put(s: *mut socket);
+    fn socket_count() -> u32;
+    fn socket_wake_refs() -> u32;
+    fn sock_test_wake_hold_arm(s: *mut socket);
+    fn sock_test_wake_hold_wait(ns: u64) -> bool;
+    fn sock_test_wake_hold_release() -> bool;
+    fn tcp_test_hold_ack(dport: u16, sport: u16);
+    fn tcp_test_ack_held() -> bool;
+    fn tcp_test_deliver_held_ack() -> bool;
+    fn completion_init(c: *mut completion, name: *CChar);
+    fn complete(c: *mut completion);
+    fn wait_for_completion(c: *mut completion);
+    fn wait_for_completion_timeout(c: *mut completion, ns: u64) -> bool;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_sleep_ns(ns: u64);
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn sched_watchdog_kick();
+}
+
+// ---- errno.h, syscall.h, inet.h, thread.h and time values (asserted against the headers in nettest.c) ----
+
+const EINVAL: i32 = 22;
+const AF_INET: u16 = 2;
+const SOCK_STREAM: i32 = 1;
+const IO_READABLE: u32 = 1;
+const NET_EPHEMERAL_LO: u16 = 49152;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const MS: u64 = 1000000;
+/// INADDR_LOOPBACK_N: 127.0.0.1 in network order, as it lies in a little-endian u32.
+const LOOPBACK_N: u32 = 0x0100007f;
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * MS);
+    }
+}
+
+// ---- Addresses and sockets ----
+
+/// A struct netaddr as five words (its size and alignment, asserted in nettest.c): the family and the port (host
+/// order) in the first, as they lie in a little-endian u32, then the address.
+fn v4addr(ip: u32, port: u16) -> [u32; 5] => [(AF_INET as u32) | ((port as u32) << 16), ip, 0, 0, 0];
+
+fn none() -> [u32; 5] => [0; 5];
+
+fn familyOf(a: borrow [u32; 5]) -> u16 => truncate<u16>(a[0]);
+
+fn portOf(a: borrow [u32; 5]) -> u16 => truncate<u16>(a[0] >> 16);
+
+fn na(a: borrow [u32; 5]) -> *netaddr => a as *[u32; 5] as *netaddr;
+
+fn naMut(a: borrow mut [u32; 5]) -> *mut netaddr => a as *mut [u32; 5] as *mut netaddr;
+
+/// A new stream socket, released however the test returns; null when it could not be made.
+/// Safety: thread context.
+unsafe fn stream() -> *mut socket {
+    var s = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET as i32, SOCK_STREAM, 0, borrow mut s as *mut *mut socket) != 0) {
+        return 0 as *mut socket;
+    }
+    return s;
+}
+
+/// The next connection on `ls`, released however the test returns, and its peer; null when accept failed.
+/// Safety: `ls` is a listening socket of the test's.
+unsafe fn accept(ls: *mut socket, peer: borrow mut [u32; 5]) -> *mut socket {
+    var s = 0 as *mut socket;
+    if (nettest_ksock_accept(ls, borrow mut s as *mut *mut socket, naMut(mut peer)) != 0) {
+        return 0 as *mut socket;
+    }
+    return s;
+}
+
+/// A listening socket on 127.0.0.1:`port` (0: any) with `backlog`; null when one step failed.
+/// Safety: thread context.
+unsafe fn listener(port: u16, backlog: i32) -> *mut socket {
+    let ls = stream();
+    if (ls.isNull()) {
+        return ls;
+    }
+    let a = v4addr(LOOPBACK_N, port);
+    if (ksock_bind(ls, na(borrow a)) != 0 || ksock_listen(ls, backlog) != 0) {
+        return 0 as *mut socket;
+    }
+    return ls;
+}
+
+/// The socket's local address.
+/// Safety: `s` is a socket of the test's.
+unsafe fn nameOf(s: *mut socket, out: borrow mut [u32; 5]) -> bool => ksock_getsockname(s, naMut(mut out)) == 0;
+
+// ---- The wait ----
+
+/// What waitUntil waits for (the C's two predicates over this file's tests).
+enum Pred {
+    Ready(*mut socket, u32),   // ready_has: every bit of the mask
+    SecondQueued(*mut socket), // backlog_second_queued: the first's ACK held and the listener readable
+}
+
+/// Safety: the predicate's socket is the test's; `hooks` is the backlog step's.
+unsafe fn holds(p: borrow Pred, hooks: extern "C" fn(u32, u32) -> u32) -> bool =>
+    match (p) {
+        Pred.Ready(s, mask) => (ksock_ready(s) & mask) == mask,
+        // Two fields, both monotone until the test acts: the ACK stays held until it is delivered, and nothing
+        // accepts meanwhile, so the queue only grows (the wait's contract).
+        Pred.SecondQueued(ls) => hooks(HOOK_HELD, 0) != 0 && (ksock_ready(ls) & IO_READABLE) != 0,
+    };
+
+/// Wait until `p` holds, or `budgetMs` passes: nettest.c's wait_until (docs/audit/next-subsystem-suite-waits.md). The
+/// budget is generous on purpose -- the wait returns as soon as the predicate holds -- and a wait that used more than
+/// half of it is reported.
+/// Safety: as holds.
+unsafe fn waitUntil(p: Pred, budgetMs: u32, hooks: extern "C" fn(u32, u32) -> u32) -> bool {
+    let t0 = clock_now_ns();
+    let deadline = t0 + (budgetMs as u64) * MS;
+    while (!holds(borrow p, hooks)) {
+        if (clock_now_ns() > deadline) {
+            return false;
+        }
+        sleepMs(1);
+        sched_watchdog_kick();
+    }
+    let waitedMs = truncate<u32>(clock_since_ns(t0) / MS);
+    if (waitedMs * 2 > budgetMs) {
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: wait_until: waited ");
+        line.decimal(waitedMs as u64);
+        line.text(" ms of a ");
+        line.decimal(budgetMs as u64);
+        line.text(" ms budget");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return true;
+}
+
+// ---- net-accept-race ----
+//
+// The audit's accept race: a child dequeued by tcp_accept had neither listener nor socket until the caller attached
+// one, so a reset in that window freed the pcb under the accepting thread. tcp_accept now attaches the owner under the
+// TCP lock. The check below is the invariant (the pcb names its socket when accept returns) plus a stress: clients
+// that connect and drop the connection at once while the server accepts.
+
+// The racing client (the C's static struct race_client): its rounds, failures and server, written before its thread
+// is created; its stop flag (its release: finish the round and leave); its thread, which the release joins.
+const RACE_ROUNDS: u32 = 64;
+static mut RACE_FAILURES: u32 = 0;
+static mut RACE_SERVER: [u32; 5] = [0; 5];
+static RACE_STOP: AtomicU32 = AtomicU32.constant(0);
+static mut RACE_THREAD: usize = 0;
+
+/// The release's key: the client's state, by address.
+/// Safety: the address of a static; nothing is read through it here.
+fn raceKey() -> *mut void => unsafe { borrow mut RACE_THREAD as *mut usize as *mut void };
+
+/// The client: connect and drop, `RACE_ROUNDS` times, a FIN before the server accepts on every other round.
+/// Safety: the RACE_ statics are written before the thread is created.
+@callback
+unsafe fn raceClientMain(arg: *mut void) {
+    for (i in 0..RACE_ROUNDS) {
+        if (RACE_STOP.loadWith(LoadOrdering.Relaxed) != 0) {
+            return;
+        }
+        var c = 0 as *mut socket;
+        if (ksock_create(AF_INET as i32, SOCK_STREAM, 0, borrow mut c as *mut *mut socket) != 0) {
+            RACE_FAILURES += 1;
+            continue;
+        }
+        if (ksock_connect(c, borrow RACE_SERVER as *[u32; 5] as *netaddr) != 0) {
+            RACE_FAILURES += 1;
+        } else if ((i & 1) != 0) {
+            ksock_shutdown(c, 2); // FIN before the server accepts
+        }
+        ksock_put(c); // close: FIN or, with unread data, RST
+    }
+}
+
+/// The client's release: stop it and join it.
+/// Safety: the runner calls it once, from the test's thread.
+@callback
+unsafe fn raceClientRelease(arg: *mut void) {
+    RACE_STOP.storeWith(1, StoreOrdering.Relaxed);
+    if (RACE_THREAD != 0) {
+        thread_join(RACE_THREAD as *mut thread);
+    }
+    RACE_THREAD = 0;
+}
+
+/// net-accept-race: accepted connections name their sockets, against a client dropping them.
+/// Safety: the runner's `reason`.
+@export("selftest_net_accept_race")
+unsafe fn acceptRace(reason: *mut *CChar) -> bool {
+    let ls = listener(0, 8);
+    if (ls.isNull()) {
+        return failed(reason, "check failed: a listener on 127.0.0.1\0");
+    }
+    RACE_FAILURES = 0;
+    RACE_STOP.storeWith(0, StoreOrdering.Relaxed);
+    RACE_THREAD = 0;
+    if (ksock_getsockname(ls, borrow mut RACE_SERVER as *mut [u32; 5] as *mut netaddr) != 0) {
+        return failed(reason, "check failed: ksock_getsockname(ls, &rc.server) == 0\0");
+    }
+
+    let th = thread_create(raceClientMain, 0 as *mut void, "raceclient\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    if (th.isNull()) {
+        return failed(reason, "check failed: rc.th != NULL\0");
+    }
+    RACE_THREAD = th as usize;
+    if (!selftest_defer(raceClientRelease, raceKey())) {
+        raceClientRelease(raceKey());
+        return failed(reason, "its release list was full\0");
+    }
+    var accepted: u32 = 0;
+    for (i in 0..RACE_ROUNDS) {
+        var peer = none();
+        let c = accept(ls, mut peer);
+        if (c.isNull()) {
+            return failed(reason, "check failed: rc2 == 0\0");
+        }
+        let pcb = Ptr.toBorrow(c as *socket).tcp;
+        if (pcb.isNull() || Ptr.toBorrow(pcb as *tcp_pcb).sock != c) { // attached under the lock
+            return failed(reason, "check failed: c->tcp != NULL && c->tcp->sock == c\0");
+        }
+        if (familyOf(borrow peer) != AF_INET || portOf(borrow peer) == 0) {
+            return failed(reason, "check failed: peer.family == COSMO_AF_INET && peer.port != 0\0");
+        }
+        accepted += 1;
+        nettest_ksock_put(c);
+    }
+    selftest_release(raceKey()); // joined
+    if (RACE_FAILURES != 0) {
+        return failed(reason, "check failed: rc.failures == 0\0");
+    }
+    nettest_ksock_put(ls);
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-accept-race: ");
+    line.decimal(accepted as u64);
+    line.text(" connections accepted against a dropping peer");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- net-census-wake-ref ----
+//
+// net-accept-race failed on CI (run 37679564267, x86-64, chaos migrator) with every check passing: "left the network
+// changed: ... sockets 0 -> 1". A worker that wakes a socket holds a reference from under the pcb lock until after the
+// wake; a test that puts every socket of its while one is held returns with the count one high, and the census blamed
+// it. The seam holds a worker there: the census must not return until it lets go, and must then find nothing left. The
+// census runs on a thread of its own so the test can see whether it returned while the worker held on -- without the
+// fix it does, at once, with the count one high.
+
+static mut BEFORE: nettest_census = nettest_census {};
+static mut AFTER: nettest_census = nettest_census {};
+static mut CENSUS_DONE: completion = completion {};
+static mut WAKE_HOLD_MARKER: u8 = 0; // the seam's release, by address
+
+/// Safety: the addresses of this file's statics; nothing is read through them here.
+fn censusDone() -> *mut completion => unsafe { borrow mut CENSUS_DONE as *mut completion };
+
+/// Safety: as censusDone.
+fn wakeHoldKey() -> *mut void => unsafe { borrow mut WAKE_HOLD_MARKER as *mut u8 as *mut void };
+
+/// The census thread: take the census, then say so.
+/// Safety: CENSUS_DONE is initialised before the thread is created.
+@callback
+unsafe fn censusJobMain(arg: *mut void) {
+    nettest_census_take(borrow mut AFTER as *mut nettest_census);
+    complete(censusDone());
+}
+
+/// The seam's release however the test returns: a failed check never leaves a worker held.
+/// Safety: the debug build's seam.
+@callback
+unsafe fn wakeHoldRelease(arg: *mut void) {
+    sock_test_wake_hold_release();
+}
+
+/// net-census-wake-ref: the census waits for a worker's wake reference, then finds nothing left.
+/// Safety: the runner's `reason`; the debug build's seam.
+@cfg("CONFIG_DEBUG")
+@export("selftest_net_census_wake_ref")
+unsafe fn censusWakeRef(reason: *mut *CChar) -> bool {
+    nettest_census_take(borrow mut BEFORE as *mut nettest_census);
+    let ls = listener(0, 1);
+    if (ls.isNull()) {
+        return failed(reason, "check failed: a listener on 127.0.0.1\0");
+    }
+    var srv = none();
+    if (!nameOf(ls, mut srv)) {
+        return failed(reason, "check failed: ksock_getsockname(ls, &srv) == 0\0");
+    }
+    let c = stream();
+    if (c.isNull() || ksock_connect(c, na(borrow srv)) != 0) {
+        return failed(reason, "check failed: ksock_connect(c, &srv) == 0\0");
+    }
+    var peer = none();
+    let s = accept(ls, mut peer);
+    if (s.isNull()) {
+        return failed(reason, "check failed: nt_ksock_accept(ls, &s, &peer) == 0\0");
+    }
+
+    // Registered after the sockets, so run before them (LIFO): a failed check never leaves a worker held while they
+    // are put.
+    if (!selftest_defer(wakeHoldRelease, wakeHoldKey())) {
+        return failed(reason, "check failed: selftest_defer(wake_hold_release_rel, &g_wake_hold_marker)\0");
+    }
+    sock_test_wake_hold_arm(s);
+    if (ksock_sendto(c, "x".ptr as *void, 1, 0 as *netaddr) != 1) { // its input wakes s
+        return failed(reason, "check failed: ksock_sendto(c, \"x\", 1, NULL) == 1\0");
+    }
+    if (!sock_test_wake_hold_wait(5000 * MS)) {
+        return failed(reason, "check failed: sock_test_wake_hold_wait(5 s)\0");
+    }
+    let refs = socket_wake_refs();
+    if (refs < 1) {
+        return failed(reason, "check failed: refs >= 1\0");
+    }
+
+    // Every reference of the test's: s lives on in the worker's hand only.
+    nettest_ksock_put(s);
+    nettest_ksock_put(c);
+    nettest_ksock_put(ls);
+
+    // No check from here to the release: the census thread may be waiting on the held worker, and a return would put
+    // nothing that frees it.
+    completion_init(censusDone(), "census-job\0".ptr as *CChar);
+    let t = thread_create(censusJobMain, 0 as *mut void, "censusjob\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    // Long enough for a census that does not wait to have returned.
+    let early = !t.isNull() && wait_for_completion_timeout(censusDone(), 200 * MS);
+    let holdOk = sock_test_wake_hold_release();
+    selftest_forget(wakeHoldKey());
+    if (!t.isNull()) {
+        wait_for_completion(censusDone());
+        thread_join(t);
+    }
+    if (t.isNull()) {
+        return failed(reason, "check failed: t != NULL\0");
+    }
+    if (!holdOk) { // the worker was still held when it was let go
+        return failed(reason, "check failed: hold_ok\0");
+    }
+    if (early) { // the census waited for the worker's put
+        return failed(reason, "check failed: !early\0");
+    }
+    if (!nettest_census_equal(borrow BEFORE as *nettest_census, borrow AFTER as *nettest_census)) {
+        return failed(reason, "check failed: nettest_census_equal(&before, &job.out)\0");
+    }
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-census-wake-ref: a worker held ");
+    line.decimal(refs as u64);
+    line.text(" wake reference(s) past the test's last put; the census waited for it and found sockets ");
+    line.decimal(BEFORE.sockets as u64);
+    line.text(" -> ");
+    line.decimal(AFTER.sockets as u64);
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- The listen backlog, in either accept order ----
+//
+// A listener with backlog 2 that has not accepted still completes the handshake for two clients; the test accepts one,
+// exchanges `hi` with it, and closing the listener resets the other.
+//
+// **Which one it accepts is not the client that connected first.** A connection joins the accept queue when the
+// listener processes that client's final ACK, on the network worker the ACK's flow hashes to -- after the client's
+// connect() has returned. The two clients' ACKs are usually on different workers, so if the first's worker runs late
+// the second is queued, and accepted, first. This step used to receive `hi` on `c1` regardless, and in that order it
+// waited for data nobody would send: a hang with every CPU idle (docs/audit/next-subsystem-accept-order.md). It now
+// asks which client it accepted, and bounds the receive, so a wrong answer fails in seconds.
+//
+// `force` makes the second client first, deterministically: the first's final ACK is held in tcp_input until the
+// second is queued, then delivered. `net-lo-tcp` runs this unforced and `net-accept-order` forced -- one step, both
+// orders.
+
+// The hooks' operations, through one function the forced order passes in: hold port + 1's ACK to `port`, whether one
+// is held, deliver it (false: nothing was held).
+const HOOK_HOLD: u32 = 0;
+const HOOK_HELD: u32 = 1;
+const HOOK_DELIVER: u32 = 2;
+
+/// The debug build's ACK hold, for the forced order.
+/// Safety: the debug build's hooks; only net-accept-order passes this.
+@callback
+unsafe fn ackHooks(op: u32, port: u32) -> u32 {
+    if (op == HOOK_HOLD) {
+        tcp_test_hold_ack(truncate<u16>(port), truncate<u16>(port + 1)); // c1 is bound to port + 1 below
+        return 1;
+    }
+    let r = if (op == HOOK_HELD) tcp_test_ack_held() else tcp_test_deliver_held_ack();
+    return if (r) 1 else 0;
+}
+
+/// The forced order's release however it returns: disarms, and a held ACK goes back in -- nothing is left half-open.
+/// Safety: as ackHooks.
+@callback
+unsafe fn ackRelease(arg: *mut void) {
+    tcp_test_deliver_held_ack();
+}
+
+/// No hooks: the unforced order never calls them.
+/// Safety: none needed; it touches nothing.
+@callback
+unsafe fn noHooks(op: u32, port: u32) -> u32 => 0;
+
+/// The step on 127.0.0.1:`port`; `acceptedFirst` says whether the client that connected first was accepted.
+/// `force` holds the first's ACK through `hooks`, with `release` its deferred release.
+/// Safety: the runner's `reason`; `hooks` and `release` are the debug build's when `force`.
+unsafe fn backlog(
+    reason: *mut *CChar,
+    port: u16,
+    force: bool,
+    hooks: extern "C" fn(u32, u32) -> u32,
+    release: extern "C" fn(*mut void),
+    acceptedFirst: borrow mut bool,
+) -> bool {
+    let who = if (force) "net-accept-order" else "net-lo-tcp";
+    let ls = stream();
+    if (ls.isNull()) {
+        return failed(reason, "check failed: nt_ksock_create(ls) == 0\0");
+    }
+    let la = v4addr(LOOPBACK_N, port);
+    if (ksock_bind(ls, na(borrow la)) != 0 || ksock_listen(ls, 2) != 0) {
+        return failed(reason, "check failed: ksock_bind(ls, &la) == 0 && ksock_listen(ls, 2) == 0\0");
+    }
+    if (ksock_listen(ls, 2) != -EINVAL) {
+        return failed(reason, "check failed: ksock_listen(ls, 2) == -EINVAL\0");
+    }
+    if (force) {
+        hooks(HOOK_HOLD, port as u32);
+        if (!selftest_defer(release, 0 as *mut void)) {
+            release(0 as *mut void);
+            return failed(reason, "its release list was full\0");
+        }
+    }
+    let c1 = stream();
+    if (c1.isNull()) {
+        return failed(reason, "check failed: nt_ksock_create(c1) == 0\0");
+    }
+    if (force) { // a known port, so the hold takes c1's ACK and no other
+        let ca = v4addr(LOOPBACK_N, port + 1);
+        if (ksock_bind(c1, na(borrow ca)) != 0) {
+            return failed(reason, "check failed: ksock_bind(c1, &ca) == 0\0");
+        }
+    }
+    if (ksock_connect(c1, na(borrow la)) != 0) {
+        return failed(reason, "check failed: ksock_connect(c1, &la) == 0\0");
+    }
+    let c2 = stream();
+    if (c2.isNull() || ksock_connect(c2, na(borrow la)) != 0) {
+        return failed(reason, "check failed: nt_ksock_create(c2) == 0 && ksock_connect(c2, &la) == 0\0");
+    }
+    if (force) {
+        let secondFirst = waitUntil(Pred.SecondQueued(ls), 2000, hooks);
+        let delivered = hooks(HOOK_DELIVER, 0) != 0; // either way: a failed wait must not strand c1
+        if (!secondFirst || !delivered) {
+            var buffer: [u8; 160] = [0; 160];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("selftest: ");
+            line.text(who);
+            line.text(": the first client's ACK ");
+            line.text(if (delivered) "was held" else "was not held");
+            line.text(", the second ");
+            line.text(if (secondFirst) "was queued" else "was not queued in time");
+            KernelLog.send(LogLevel.Error, line);
+            return failed(reason, "the forced order did not happen\0");
+        }
+    }
+    var peer = none();
+    let a1 = accept(ls, mut peer);
+    if (a1.isNull()) {
+        return failed(reason, "check failed: nt_ksock_accept(ls, &a1, &peer) == 0\0");
+    }
+    var n1 = none();
+    var n2 = none();
+    if (!nameOf(c1, mut n1) || !nameOf(c2, mut n2)) {
+        return failed(reason, "check failed: ksock_getsockname(c1, &n1) == 0 && ksock_getsockname(c2, &n2) == 0\0");
+    }
+    let p1 = portOf(borrow n1);
+    let p2 = portOf(borrow n2);
+    let pp = portOf(borrow peer);
+    let n1Ok = if (force) p1 == port + 1 else p1 >= NET_EPHEMERAL_LO;
+    if (p2 < NET_EPHEMERAL_LO || !n1Ok) {
+        return failed(
+            reason,
+            "check failed: n2.port >= NET_EPHEMERAL_LO && (force ? n1.port == port + 1 : n1.port >= NET_EPHEMERAL_LO)\0",
+        );
+    }
+    if (pp != p1 && pp != p2) {
+        return failed(reason, "check failed: peer.port == n1.port || peer.port == n2.port\0");
+    }
+    let first = pp == p1;
+    acceptedFirst = first;
+    let mine = if (first) c1 else c2;
+    let other = if (first) c2 else c1;
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: ");
+    line.text(who);
+    line.text(": accepted the ");
+    line.text(if (first) "first" else "second");
+    line.text(" client");
+    KernelLog.send(LogLevel.Info, line);
+    if (ksock_sendto(a1, "hi".ptr as *void, 2, 0 as *netaddr) != 2) {
+        return failed(reason, "check failed: ksock_sendto(a1, \"hi\", 2, NULL) == 2\0");
+    }
+    // Bounded: a step that picked the wrong client fails here, not at the harness's timeout.
+    if (!waitUntil(Pred.Ready(mine, IO_READABLE), 2000, hooks)) {
+        return failed(reason, "check failed: wait_until(ready_has, &rt, 2000)\0");
+    }
+    var b: [u8; 4] = [0; 4];
+    let got = ksock_recvfrom(mine, borrow mut b as *mut [u8; 4] as *mut void, 4, 0 as *mut netaddr);
+    if (got != 2 || b[0] != 0x68 || b[1] != 0x69) {
+        return failed(reason, "check failed: ksock_recvfrom(mine, b, 4, NULL) == 2 && memcmp(b, \"hi\", 2) == 0\0");
+    }
+    // Closing the listener resets the still-queued connection.
+    nettest_ksock_put(ls);
+    sleepMs(20);
+    if (ksock_recvfrom(other, borrow mut b as *mut [u8; 4] as *mut void, 4, 0 as *mut netaddr) >= 0 &&
+        ksock_sendto(other, "x".ptr as *void, 1, 0 as *netaddr) >= 0) {
+        return failed(
+            reason,
+            "check failed: ksock_recvfrom(other, b, 4, NULL) < 0 || ksock_sendto(other, \"x\", 1, NULL) < 0\0",
+        );
+    }
+    nettest_ksock_put(a1);
+    nettest_ksock_put(c1);
+    nettest_ksock_put(c2);
+    return true;
+}
+
+/// net-lo-tcp's backlog (nettest_lo.cee), in every build: the unforced order. A forced one needs the debug build's
+/// hold, which net-accept-order passes to the step itself; asked for here, it is refused, as the C refused it without
+/// the hold.
+/// Safety: the runner's `reason`; `acceptedFirst` the caller's.
+@export("nettest_lo_tcp_backlog")
+unsafe fn loTcpBacklog(reason: *mut *CChar, port: u16, force: bool, acceptedFirst: *mut bool) -> bool {
+    if (force) {
+        return failed(reason, "forcing the order needs the debug build's hold\0");
+    }
+    var first = false;
+    let ok = backlog(reason, port, false, noHooks, ackReleaseNone, mut first);
+    let out = Ptr.toBorrowMut(acceptedFirst);
+    out = first;
+    return ok;
+}
+
+/// No release: the unforced order defers none.
+/// Safety: none needed; it touches nothing.
+@callback
+unsafe fn ackReleaseNone(arg: *mut void) {}
+
+/// net-accept-order: the backlog step in the order that hung it -- the second client's handshake completes first, and
+/// the accept follows completion, not connect(). Ports 6004 (the listener) and 6005 (the first client).
+/// Safety: the runner's `reason`; the debug build's hooks.
+@cfg("CONFIG_DEBUG")
+@export("selftest_net_accept_order")
+unsafe fn acceptOrder(reason: *mut *CChar) -> bool {
+    let socks0 = socket_count();
+    var first = false;
+    if (!backlog(reason, 6004, true, ackHooks, ackRelease, mut first)) {
+        return false;
+    }
+    if (first) { // completion order: the held client is accepted second
+        return failed(reason, "check failed: !accepted_first\0");
+    }
+    sleepMs(50);
+    if (socket_count() != socks0) {
+        return failed(reason, "check failed: socket_count() == socks0\0");
+    }
+    return true;
+}
