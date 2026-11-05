@@ -1,5 +1,5 @@
 /*
- * test_part.c - Partitions as block devices (kernel/block/part.c,
+ * test_part.c - Partitions as block devices (kernel/block/part.cee,
  * kernel/include/kernel/part.h) on the host: roadmap 2.0 SA7. A digest
  * recorded from the C over seeded rounds against disks the test owns:
  * scans of every outcome (a table, none, a refused one, a read error, a
@@ -30,6 +30,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values part.cee writes as its own constants. */
+_Static_assert(EINVAL == 22 && ENOMEM == 12 && EBUSY == 16 && EIO == 5 && ENAMETOOLONG == 36 && BIO_FLUSH == 2 &&
+                   KMEM_ZERO == 1 && BLKDEV_NAME_MAX == 16 && GPT_OK == 0 && GPT_BAD == 2 && GPT_IO == 3 &&
+                   GPT_SCRATCH_BYTES == 36864 && GPT_GUID_TEXT == 37 && GPT_MAX_PARTS == 32 && SCHED_PRIO_DEFAULT == 32,
+               "part.cee's errno.h, blk.h, kmalloc.h, gpt.h and thread.h values");
 
 /* The digest of the C (part.c, 2026-11-05), which the CeeSafe port gives. */
 #define PART_DIGEST 0x003796d5fcf97df9ull
@@ -104,7 +110,7 @@ void kfree(void *p)
     free(p);
 }
 
-/* ---- the one mutex part.c has ---- */
+/* ---- the one mutex the partitions have ---- */
 
 static struct mutex *g_mutex;
 static bool g_mutex_held;
@@ -175,7 +181,7 @@ static int g_fail_register_in = -1;
 
 int blk_register_named(struct blkdev *bd, const char *name)
 {
-    EXPECT(g_mutex_held);   /* part.c registers under its lock, outside the registry's */
+    EXPECT(g_mutex_held);   /* partitions register under their lock, outside the registry's */
     note(4, strlen(name));
     mix(name, strlen(name));
     note(5, bd->sector_size);
@@ -309,7 +315,7 @@ static int disk_submit(struct blkdev *bd, struct bio *bio)
 {
     (void)bd;
     (void)bio;
-    EXPECT(!"a disk's own submit is not called by part.c");
+    EXPECT(!"a disk's own submit is not called by the partitions");
     return -EIO;
 }
 
@@ -330,7 +336,7 @@ const uint8_t gpt_type_cosmo_root[16] = { 0x24, 0x92, 0xb0, 0xc9, 0x0d, 0xe0, 0x
 static const uint8_t g_type_other[16] = { 0x0f, 0xc6, 0x3d, 0xaf, 0x84, 0x83, 0x47, 0x72,
                                           0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4 };
 
-void gpt_guid_format(const uint8_t guid[16], char out[GPT_GUID_TEXT])
+void gpt_guid_format(const uint8_t *guid, char *out)
 {
     static const unsigned order[16] = { 3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15 };
     static const char hex[] = "0123456789ABCDEF";
@@ -496,7 +502,7 @@ static void add_disk(unsigned slot)
         snprintf(name, sizeof(name), "%s", base);   /* ends in a letter or a digit as the base does */
     else
         snprintf(name, sizeof(name), "%s%u", base, g_disk_serial++ % 100);
-    g_mutex_held = true;   /* blk_register_named asserts part.c's lock; a disk's registration is the driver's */
+    g_mutex_held = true;   /* blk_register_named asserts the partitions' lock; a disk's registration is the driver's */
     int rc = blk_register_named(&d->bd, name);
     g_mutex_held = false;
     note(34, (uint64_t)(int64_t)rc);

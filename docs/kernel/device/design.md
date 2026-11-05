@@ -241,7 +241,7 @@ from one good copy: either copy damaged and the disk has no partitions
 (logged with the check that failed). Recovery is recorded in the
 inventory, not done; the installer writes both copies.
 
-`part.c` registers each used entry as a `struct blkdev` of its own,
+`part.cee` registers each used entry as a `struct blkdev` of its own,
 named after the disk and the entry's number (not its position among the
 used ones): `vda` → `vda1`, `nvme0n1` → `nvme0n1p1`, `ahci0p0` →
 `ahci0p0p1` ("p" when the disk's name ends in a digit). Its geometry is

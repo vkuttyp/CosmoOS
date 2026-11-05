@@ -113,7 +113,8 @@ HOST_LOCKUP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockup.c
 HOST_FBVALID_SRCS := $(HOST_COMMON_SRCS) kernel/core/fbvalid.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_fbvalid.c
 HOST_DISPLAY_SRCS := $(HOST_COMMON_SRCS) boot/uefi/display_pick.c tests/host/test_display.c
 # Partitions alone: the block layer, the GPT parser, the threads and the allocator are the test's.
-HOST_PART_SRCS := $(HOST_COMMON_SRCS) kernel/block/part.c kernel/core/printf.c tests/host/test_part.c
+HOST_PART_SRCS := $(HOST_COMMON_SRCS) kernel/block/part.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
+	tests/host/ceesafe_panic.c tests/host/test_part.c
 HOST_GPT_SRCS := $(HOST_COMMON_SRCS) kernel/block/gpt.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c kernel/core/cmdline.c tests/host/test_gpt.c
 HOST_CPUTIME_SRCS := $(HOST_COMMON_SRCS) kernel/process/cputime.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cputime.c
 HOST_NICE_SRCS := $(HOST_COMMON_SRCS) kernel/process/nice.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_nice.c

@@ -64,9 +64,10 @@ bool blk_part_info(const struct blkdev *bd, struct blk_part_info *out);
  * comparison: a removed disk's name may already be another's. */
 const struct blkdev *blk_part_disk(const struct blkdev *bd);
 
-/* The registered partition whose unique GUID is `uuid`, referenced, or
- * NULL. Sleeps. */
-struct blkdev *blk_find_partuuid(const uint8_t uuid[16]);
+/* The registered partition whose unique GUID is `uuid` (16 bytes),
+ * referenced, or NULL. Sleeps. The GUIDs are pointers, not [16] arrays:
+ * part.cee's generated declarations are (gcc's -Warray-parameter). */
+struct blkdev *blk_find_partuuid(const uint8_t *uuid);
 
 /* The one registered partition of `type` on the disk that holds the
  * partition whose unique GUID is `uuid`, referenced; NULL when there is no
@@ -74,6 +75,6 @@ struct blkdev *blk_find_partuuid(const uint8_t uuid[16]);
  * which disk is meant is unknown), or more than one of `type` there.
  * *matches (if not NULL) receives how many of `type` the disk has (0 when
  * `uuid` is unknown). root=boot-disk's resolution (bootfs.c). Sleeps. */
-struct blkdev *blk_find_sibling_typed(const uint8_t uuid[16], const uint8_t type[16], unsigned *matches);
+struct blkdev *blk_find_sibling_typed(const uint8_t *uuid, const uint8_t *type, unsigned *matches);
 
 #endif /* KERNEL_PART_H */

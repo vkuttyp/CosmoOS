@@ -1189,6 +1189,16 @@ suites.
   build mounts and checks clean under the CeeSafe build, and the reverse
   (until 2.0's format break, if SA7 takes it).
 
+Progress (the block layer first, each step on a host test holding the
+port to the C's digest, as SA6's were). `part.cee`: partitions as block
+devices -- the scan, the forwarding driver, removal waiting out the
+forwarded bios, the lookups -- each partition a C object the file
+defines, its blkdev first. `tests/host/test_part.c` holds it to the
+C's digest (0x003796d5fcf97df9, clang and gcc); the GPT type GUIDs are
+copied from `gpt.cee`, a C array not being importable by the pinned
+ceesafec, and `gpt.h` and `part.h` take their GUIDs as pointers, as
+the generated declarations do (gcc's -Warray-parameter).
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

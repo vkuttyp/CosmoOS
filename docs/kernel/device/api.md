@@ -290,7 +290,7 @@ in the layer allocates bios.
 `completed_local`, `completed_remote`; `nr_queues` as the driver set
 it.
 
-## Partitions (`kernel/include/kernel/part.h`, `kernel/block/part.c`; `kernel/include/kernel/gpt.h`, `kernel/block/gpt.c`)
+## Partitions (`kernel/include/kernel/part.h`, `kernel/block/part.cee`; `kernel/include/kernel/gpt.h`, `kernel/block/gpt.cee`)
 
 None of these is exported: the module ABI is unchanged.
 
@@ -313,11 +313,11 @@ forwarded bios (D17).
 Whether `bd` is a partition; its disk's name, entry number, first
 sector, unique GUID and type GUID.
 
-### `struct blkdev *blk_find_partuuid(const uint8_t uuid[16])`
+### `struct blkdev *blk_find_partuuid(const uint8_t *uuid)`
 The partition with that unique GUID (on-disk byte order), referenced, or
 NULL. Used to resolve `root=PARTUUID=`.
 
-`struct blkdev *blk_find_sibling_typed(const uint8_t uuid[16], const uint8_t type[16], unsigned *matches)`:
+`struct blkdev *blk_find_sibling_typed(const uint8_t *uuid, const uint8_t *type, unsigned *matches)`:
 the one partition of `type` on the disk holding partition `uuid`,
 referenced; NULL when there is none, `uuid` is unknown or carried by
 more than one partition (a cloned disk), or the disk has more than one
@@ -329,7 +329,7 @@ of `type` (`*matches` says how many). Used to resolve
 check), `GPT_IO`. `scratch` is `GPT_SCRATCH_BYTES`. Pure: no allocation,
 no kernel calls.
 
-### `bool gpt_build(uint32_t ss, uint64_t nsectors, const uint8_t disk_guid[16], const struct gpt_build_part *parts, unsigned nparts, uint8_t *head, uint8_t *tail)`
+### `bool gpt_build(uint32_t ss, uint64_t nsectors, const uint8_t *disk_guid, const struct gpt_build_part *parts, unsigned nparts, uint8_t *head, uint8_t *tail)`
 Lay out a table (128 entries of 128 bytes) into the head region (LBA 0
 on, `GPT_BUILD_HEAD_SECTORS`) and the tail region (the last
 `GPT_BUILD_TAIL_SECTORS`). Checks nothing about the parts. Used by the

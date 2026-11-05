@@ -1,0 +1,731 @@
+// part.cee - Partitions as block devices (kernel/include/kernel/part.h; docs/kernel/device/design.md,
+// "Partitions"), in CeeSafe: roadmap 2.0 SA7. tests/host/test_part.c holds it to the digest of the C it replaced.
+//
+// A partition is a struct blkdev whose driver is this file: it forwards each bio to the disk as a new bio at the
+// partition's offset and completes the original when the forwarded one completes. Being an ordinary block device is
+// the point: the block layer validates every bio against the partition's own capacity before this file sees it,
+// mounts and blk_find need nothing new, and pool assembly enumerates partitions like any other device.
+//
+// Lifetime follows the driver rules in blk.h: the scan holds the creator's reference; removal unregisters, waits for
+// the forwarded bios to complete (the disk completes them, with an error if it is going away), and only then drops
+// it. Each partition holds a reference on its disk until it is released. A partition is a C object this file defines
+// (CeeSafe's ADR 0042), its blkdev first: the block layer reaches it through the blkdev's `priv`.
+
+@header("kernel/blk.h", "kernel/gpt.h", "kernel/part.h", "kernel/thread.h", "kernel/wait.h")
+extern "C" {
+    struct device;
+    struct bio_vec;
+    struct thread;
+    struct blkdev_ops {
+        submit: extern "C" fn(*mut blkdev, *mut bio) -> i32;
+        release: extern "C" fn(*mut blkdev);
+    }
+    struct blkdev {
+        obj: kobject;
+        name: [u8; 16];
+        dev: *mut device;
+        ops: *blkdev_ops;
+        sector_size: u32;
+        capacity: u64;
+        max_sectors: u32;
+        read_only: bool;
+        priv: *mut void;
+        max_segments: u32;
+        timeout_ns: u64;
+    }
+    struct bio {
+        dev: *mut blkdev;
+        sector: u64;
+        nsectors: u32;
+        dir: u32;
+        buf: *mut void;
+        vecs: *mut bio_vec;
+        nr_vecs: u32;
+        done: extern "C" fn(*mut bio);
+        arg: *mut void;
+        status: i32;
+        link: list_node;
+    }
+    struct gpt_part {
+        index: u32;
+        first_lba: u64;
+        last_lba: u64;
+        @cname ("type") kind: [u8; 16];
+        uuid: [u8; 16];
+    }
+    struct gpt_table {
+        nparts: u32;
+        parts: [gpt_part; 32];
+    }
+    struct blk_part_info {
+        disk: [u8; 16];
+        index: u32;
+        start: u64;
+        uuid: [u8; 16];
+        @cname ("type") kind: [u8; 16];
+    }
+
+    fn blk_register_named(bd: *mut blkdev, name: *CChar) -> i32;
+    fn blk_unregister(bd: *mut blkdev);
+    fn blk_submit(b: *mut bio) -> i32;
+    fn bio_complete(b: *mut bio, status: i32);
+    fn blk_read(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *mut void) -> i32;
+    fn blk_nth(i: u32) -> *mut blkdev;
+    fn gpt_parse(
+        ss: u32,
+        n: u64,
+        read: extern "C" fn(*mut void, u64, u32, *mut void) -> i32,
+        ctx: *mut void,
+        scratch: *mut void,
+        out: *mut gpt_table,
+        why: *mut *CChar,
+    ) -> u32;
+    fn gpt_guid_format(guid: *u8, out: *mut CChar);
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_put(t: *mut thread);
+    fn thread_exit(code: i32);
+    fn thread_sleep_ns(ns: u64);
+}
+
+// ---- errno.h, blk.h, gpt.h and thread.h values (asserted in tests/host/test_part.c) ----
+
+const EINVAL: i32 = 22;
+const ENOMEM: i32 = 12;
+const EBUSY: i32 = 16;
+const EIO: i32 = 5;
+const ENAMETOOLONG: i32 = 36;
+const BIO_FLUSH: u32 = 2;
+const KMEM_ZERO: u32 = 1;
+const BLKDEV_NAME_MAX: usize = 16;
+const GPT_OK: u32 = 0;
+const GPT_BAD: u32 = 2;
+const GPT_IO: u32 = 3;
+const GPT_SCRATCH_BYTES: usize = 36864;
+const GPT_GUID_TEXT: usize = 37;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+/// gpt.h's gpt_type_esp and gpt_type_cosmo_root, gpt.cee's bytes (a C array is not imported).
+const TYPE_ESP: [u8; 16] = [
+    0x28,
+    0x73,
+    0x2a,
+    0xc1,
+    0x1f,
+    0xf8,
+    0xd2,
+    0x11,
+    0xba,
+    0x4b,
+    0x00,
+    0xa0,
+    0xc9,
+    0x3e,
+    0xc9,
+    0x3b,
+];
+const TYPE_COSMO_ROOT: [u8; 16] = [
+    0x24,
+    0x92,
+    0xb0,
+    0xc9,
+    0x0d,
+    0xe0,
+    0x8e,
+    0x41,
+    0x84,
+    0x6a,
+    0x9f,
+    0x1d,
+    0x9a,
+    0x61,
+    0xbf,
+    0xd5,
+];
+/// The reap's poll interval (the C's thread_sleep_ms(1)).
+const POLL_NS: u64 = 1000000;
+
+// ---- The partition ----
+
+/// One partition: its blkdev first (the block layer's object), the disk it forwards to, where it starts, its number
+/// and GUIDs, the forwarded bios not yet completed, and its link on PARTS.
+@repr(C)
+struct blkpart {
+    bd: blkdev;
+    disk: *mut blkdev; // referenced until release
+    start: u64;
+    index: u32;
+    uuid: [u8; 16];
+    kind: [u8; 16];
+    inflight: AtomicU32; // forwarded bios not yet completed
+    link: list_node;     // PARTS, under PART_LOCK
+}
+
+/// Every partition the scans registered and have not removed. The lock is taken outside the block registry's
+/// (blk_register and blk_unregister run under it), never inside.
+static mut PARTS: list_node = list_node {
+    next: borrow mut PARTS as *mut list_node,
+    prev: borrow mut PARTS as *mut list_node,
+};
+static mut PART_LOCK: mutex = mutex {};
+
+static mut PART_OPS: blkdev_ops = blkdev_ops { submit: partSubmit, release: partRelease };
+
+/// The list's head.
+/// Safety: only its address is taken; the list is used under PART_LOCK.
+fn parts() -> *mut list_node => unsafe { borrow mut PARTS as *mut list_node };
+
+/// The lock's address.
+/// Safety: only its address is taken, for mutex_lock and mutex_unlock.
+fn partLock() -> *mut mutex => unsafe { borrow mut PART_LOCK as *mut mutex };
+
+/// The partition whose link `node` is.
+/// Safety: `node` is a partition's link on PARTS.
+unsafe fn ofLink(node: *mut list_node) -> *mut blkpart => containerOf(node, offsetOf<blkpart>(link)) as *mut blkpart;
+
+/// The partition behind a partition's blkdev.
+/// Safety: `bd` is a partition's blkdev.
+unsafe fn partOf(bd: *blkdev) -> *mut blkpart => Ptr.toBorrow(bd).priv as *mut blkpart;
+
+/// blkdev_get and blkdev_put, inlines in blk.h.
+/// Safety: `bd` is a live blkdev.
+unsafe fn blkdevGet(bd: *mut blkdev) { kobject_get(borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject); }
+
+/// Safety: `bd` is a blkdev the caller holds a reference to, which this drops.
+unsafe fn blkdevPut(bd: *mut blkdev) { kobject_put(borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject); }
+
+/// The C string in `bytes`: its bytes before the first zero (all of them if there is none).
+fn cText(bytes: Slice<u8>) -> Slice<u8> {
+    for (i in 0..bytes.length) {
+        if (bytes[i] == 0) {
+            return bytes[..i];
+        }
+    }
+    return bytes;
+}
+
+fn same(a: Slice<u8>, b: Slice<u8>) -> bool {
+    if (a.length != b.length) {
+        return false;
+    }
+    for (i in 0..a.length) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// A blkdev's name (BLKDEV_NAME_MAX bytes, NUL-terminated), copied out.
+/// Safety: `bd` is a live blkdev, whose name is fixed while it is registered.
+unsafe fn nameOf(bd: *blkdev) -> [u8; 16] => Ptr.toBorrow(bd).name;
+
+/// A blkdev's name, written as text.
+/// Safety: as nameOf.
+unsafe fn writeName(w: borrow mut TextWriter, bd: *blkdev) {
+    let name = nameOf(bd);
+    w.bytes(cText(name[..]));
+}
+
+/// part.h's blk_part_init.
+/// Safety: called once, at boot, before any other function here (blk_init).
+@export("blk_part_init")
+fn init() {
+    unsafe { mutex_init(partLock(), "blk-parts\0".ptr as *CChar); }
+}
+
+/// part.h's blk_is_partition: whether this file is `bd`'s driver.
+/// Safety: `bd` is a live blkdev.
+@export("blk_is_partition")
+unsafe fn isPartition(bd: *blkdev) -> bool =>
+    Ptr.toBorrow(bd).ops as usize == borrow PART_OPS as *blkdev_ops as usize;
+
+// ---- The driver ----
+
+/// The forwarded bio's completion: the original completes with its status.
+/// Safety: `fwd` is a bio partSubmit forwarded, whose `arg` is the original; may run in interrupt context.
+@callback
+unsafe fn partDone(fwd: *mut bio) {
+    let orig = Ptr.toBorrow(fwd as *bio).arg as *mut bio;
+    let p = partOf(Ptr.toBorrow(orig as *bio).dev as *blkdev);
+    let status = Ptr.toBorrow(fwd as *bio).status;
+    kfree(fwd as *mut void);
+    bio_complete(orig, status);
+    // Last: removal waits for this to fall before dropping the reference that keeps `p` -- and the block layer's
+    // state for `orig` -- alive.
+    Ptr.toBorrow(p as *blkpart).inflight.fetchSubWith(1, Ordering.Release);
+}
+
+/// The partition's submit: the bio, forwarded to the disk at the partition's offset.
+/// Safety: `bd` is a partition's blkdev, `b` a bio the block layer hands it.
+@callback
+unsafe fn partSubmit(bd: *mut blkdev, b: *mut bio) -> i32 {
+    let p = partOf(bd as *blkdev);
+    let d = Ptr.toBorrow(bd as *blkdev);
+    let o = Ptr.toBorrow(b as *bio);
+    // blk_submit has checked the range against the capacity already (D16); a translation is only ever made from a
+    // checked range, so it is checked here as well rather than trusted from a distance.
+    if (o.dir != BIO_FLUSH && (o.sector >= d.capacity || d.capacity - o.sector < o.nsectors as u64)) {
+        return -EINVAL;
+    }
+    let fwd = kmalloc(layoutOf<bio>().size, KMEM_ZERO) as *mut bio;
+    if (fwd.isNull()) {
+        return -ENOMEM;
+    }
+    let f = Ptr.toBorrowMut(fwd);
+    f.dev = Ptr.toBorrow(p as *blkpart).disk;
+    f.dir = o.dir;
+    f.sector = if (o.dir == BIO_FLUSH) 0 else Ptr.toBorrow(p as *blkpart).start + o.sector;
+    f.nsectors = o.nsectors;
+    f.buf = o.buf;
+    f.vecs = o.vecs;
+    f.nr_vecs = o.nr_vecs;
+    f.done = partDone;
+    f.arg = b as *mut void;
+    List.init(borrow mut f.link as *mut list_node);
+    let inflight = borrow Ptr.toBorrow(p as *blkpart).inflight;
+    inflight.fetchAddWith(1, Ordering.AcquireRelease);
+    let rc = blk_submit(fwd);
+    if (rc != 0) {
+        inflight.fetchSubWith(1, Ordering.Release);
+        kfree(fwd as *mut void);
+    }
+    return rc;
+}
+
+/// The partition's release: the last reference is gone.
+/// Safety: `bd` is a partition's blkdev, used by nothing after this.
+@callback
+unsafe fn partRelease(bd: *mut blkdev) {
+    let p = partOf(bd as *blkdev);
+    blkdevPut(Ptr.toBorrow(p as *blkpart).disk);
+    kfree(p as *mut void);
+}
+
+// ---- Scanning ----
+
+/// The parser's read: sectors of the disk `ctx`.
+/// Safety: `ctx` is the disk being scanned, `buf` has room for `count` of its sectors.
+@callback
+unsafe fn readDisk(ctx: *mut void, lba: u64, count: u32, buf: *mut void) -> i32 =>
+    blk_read(ctx as *mut blkdev, lba, count, buf);
+
+/// The name of a partition type in the log.
+fn typeName(kind: Slice<u8>) -> StringView {
+    let esp = TYPE_ESP;
+    let root = TYPE_COSMO_ROOT;
+    if (same(kind, esp[..])) {
+        return "esp";
+    }
+    if (same(kind, root[..])) {
+        return "cosmo-root";
+    }
+    return "other";
+}
+
+/// Forwarded bios still at the disk.
+/// Safety: `p` is a live partition.
+unsafe fn inflightOf(p: *mut blkpart) -> u32 => Ptr.toBorrow(p as *blkpart).inflight.loadWith(LoadOrdering.Acquire);
+
+/// The scan's reference, dropped once nothing the partition forwarded is still at the disk. A thread of its own
+/// because the last completion may come from an interrupt, and the release this put can run may sleep.
+/// Safety: `arg` is a partition, unregistered, whose scan reference this thread now holds.
+@callback
+unsafe fn reapWhenIdle(arg: *mut void) {
+    let p = arg as *mut blkpart;
+    while (inflightOf(p) != 0) {
+        thread_sleep_ns(POLL_NS);
+    }
+    blkdevPut(borrow mut Ptr.toBorrowMut(p).bd as *mut blkdev);
+    thread_exit(0);
+}
+
+/// Unregister, then drop the scan's reference -- at once when nothing is in flight, else from a thread once the disk
+/// has completed it all. Never waits here: blk_unregister of a disk calls this first, and a driver may complete what
+/// it holds only after that returns (blk.h).
+/// Safety: PART_LOCK held; `p` is a registered partition, already off PARTS.
+unsafe fn removeOne(p: *mut blkpart) {
+    let bd = borrow mut Ptr.toBorrowMut(p).bd as *mut blkdev;
+    blk_unregister(bd);
+    if (inflightOf(p) == 0) {
+        blkdevPut(bd);
+        return;
+    }
+    let t = thread_create(reapWhenIdle, p as *mut void, "blk-part-reap\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    if (!t.isNull()) {
+        thread_put(t);
+        return;
+    }
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("part: ");
+    writeName(mut line, bd as *blkdev);
+    line.text(": no thread to wait out its requests; waiting here");
+    KernelLog.send(LogLevel.Warn, line);
+    while (inflightOf(p) != 0) {
+        thread_sleep_ns(POLL_NS);
+    }
+    blkdevPut(bd);
+}
+
+/// Removes every partition of `disk` (none in use, the caller checked).
+/// Safety: PART_LOCK held; `disk` is a live blkdev.
+unsafe fn removeAllLocked(disk: *mut blkdev) {
+    let head = parts();
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let after = List.next(head as *list_node, node);
+        let p = ofLink(node);
+        if (Ptr.toBorrow(p as *blkpart).disk == disk) {
+            List.remove(node);
+            removeOne(p);
+        }
+        node = after;
+    }
+}
+
+/// The number of decimal digits of `v`.
+fn digits(v: u32) -> usize {
+    var n: usize = 1;
+    var x = v;
+    while (x >= 10) {
+        x = x / 10;
+        n += 1;
+    }
+    return n;
+}
+
+/// Register the partition `gp` of `disk`, named after the disk ("vda1", "nvme0n1p1").
+/// Safety: PART_LOCK held; `disk` is a live blkdev.
+unsafe fn registerOne(disk: *mut blkdev, gp: borrow gpt_part) -> i32 {
+    let diskBytes = nameOf(disk as *blkdev);
+    let diskName = cText(diskBytes[..]);
+    let dl = diskName.length;
+    let digit = dl > 0 && diskName[dl - 1] >= 48 && diskName[dl - 1] <= 57;
+    // "%s%s%u" into BLKDEV_NAME_MAX bytes: refused when it would not fit with its NUL.
+    let length = dl + (if (digit) 1usize else 0usize) + digits(gp.index);
+    if (length >= BLKDEV_NAME_MAX) {
+        return -ENAMETOOLONG;
+    }
+    var name = [0u8; 16];
+    {
+        var w = TextWriter.create(mut name[..]); // the length is checked: its NUL stays
+        w.bytes(diskName);
+        if (digit) {
+            w.byte(112); // 'p'
+        }
+        w.decimal(gp.index as u64);
+    }
+    let p = kmalloc(layoutOf<blkpart>().size, KMEM_ZERO) as *mut blkpart;
+    if (p.isNull()) {
+        return -ENOMEM;
+    }
+    let pb = Ptr.toBorrowMut(p);
+    let db = Ptr.toBorrow(disk as *blkdev);
+    pb.disk = disk;
+    pb.start = gp.first_lba;
+    pb.index = gp.index;
+    pb.uuid[..].copyFrom(gp.uuid[..]);
+    pb.kind[..].copyFrom(gp.kind[..]);
+    pb.bd.dev = db.dev; // the same DMA rules as the disk the bios go to
+    pb.bd.ops = borrow PART_OPS as *blkdev_ops;
+    pb.bd.sector_size = db.sector_size;
+    pb.bd.capacity = gp.last_lba - gp.first_lba + 1;
+    pb.bd.max_sectors = db.max_sectors;
+    pb.bd.max_segments = db.max_segments;
+    pb.bd.read_only = db.read_only;
+    pb.bd.timeout_ns = 0xFFFFFFFFFFFFFFFF; // the disk times out the forwarded bio; a second clock would race it
+    pb.bd.priv = p as *mut void;
+    blkdevGet(disk);
+    let rc = blk_register_named(borrow mut pb.bd as *mut blkdev, name[..].ptr as *CChar);
+    if (rc != 0) {
+        blkdevPut(disk);
+        kfree(p as *mut void);
+        return rc;
+    }
+    List.pushBack(parts(), borrow mut pb.link as *mut list_node);
+    var uuid = [0u8; 37];
+    gpt_guid_format(pb.uuid[..].ptr, uuid[..].ptr as *mut CChar);
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("part: ");
+    line.bytes(cText(name[..]));
+    line.text(": ");
+    line.bytes(diskName);
+    line.text(" partition ");
+    line.decimal(gp.index as u64);
+    line.text(", sectors ");
+    line.decimal(gp.first_lba);
+    line.byte(45); // '-'
+    line.decimal(gp.last_lba);
+    line.text(", type ");
+    line.text(typeName(gp.kind[..]));
+    line.text(", partuuid ");
+    line.bytes(cText(uuid[..GPT_GUID_TEXT]));
+    KernelLog.send(LogLevel.Info, line);
+    return 0;
+}
+
+/// A warning about `disk`: "part: <disk>: <text>".
+/// Safety: `disk` is a live blkdev.
+unsafe fn warnDisk(disk: *mut blkdev, text: StringView) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("part: ");
+    writeName(mut line, disk as *blkdev);
+    line.text(": ");
+    line.text(text);
+    KernelLog.send(LogLevel.Warn, line);
+}
+
+/// part.h's blk_part_scan: read `disk`'s GPT and register a blkdev for each partition, replacing the ones a scan
+/// registered before (refused with -EBUSY while one of them is in use). `nparts`, when not null, receives how many
+/// were registered.
+/// Safety: `disk` is a live, registered blkdev; `nparts` is null or writable.
+@export("blk_part_scan")
+unsafe fn scan(disk: *mut blkdev, nparts: *mut u32) -> i32 {
+    if (!nparts.isNull()) {
+        nparts.write(0);
+    }
+    if (isPartition(disk as *blkdev)) {
+        return -EINVAL;
+    }
+    let scratch = kmalloc(GPT_SCRATCH_BYTES, 0);
+    let t = kmalloc(layoutOf<gpt_table>().size, KMEM_ZERO) as *mut gpt_table;
+    if (scratch.isNull() || t.isNull()) {
+        kfree(scratch);
+        kfree(t as *mut void);
+        return -ENOMEM;
+    }
+    mutex_lock(partLock());
+    // In use: a reference beyond the registry's and the scan's.
+    let head = parts();
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let p = ofLink(node);
+        let pb = Ptr.toBorrow(p as *blkpart);
+        if (pb.disk == disk && kobject_refcount(borrow pb.bd.obj as *kobject) > 2) {
+            mutex_unlock(partLock());
+            kfree(scratch);
+            kfree(t as *mut void);
+            return -EBUSY;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    removeAllLocked(disk);
+
+    var why = "\0".ptr as *CChar;
+    let d = Ptr.toBorrow(disk as *blkdev);
+    let r = gpt_parse(
+        d.sector_size,
+        d.capacity,
+        readDisk,
+        disk as *mut void,
+        scratch,
+        t,
+        borrow mut why as *mut *CChar,
+    );
+    var rc: i32 = 0;
+    if (r == GPT_IO) {
+        warnDisk(disk, "cannot read the partition table");
+        rc = -EIO;
+    } else if (r == GPT_BAD) {
+        var buffer = [0u8; 192];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("part: ");
+        writeName(mut line, disk as *blkdev);
+        line.text(": partition table refused: ");
+        let reason = why as *u8;
+        var n: usize = 0;
+        while (n < 128 && reason.add(n).read() != 0) {
+            n += 1;
+        }
+        line.bytes(Slice.fromRaw(reason, n));
+        KernelLog.send(LogLevel.Warn, line);
+        rc = -EINVAL;
+    } else if (r == GPT_OK) {
+        let table = Ptr.toBorrow(t as *gpt_table);
+        var n: u32 = 0;
+        for (i in 0..table.nparts as usize) {
+            let e = registerOne(disk, borrow table.parts[i]);
+            if (e != 0) {
+                var buffer = [0u8; 128];
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("part: ");
+                writeName(mut line, disk as *blkdev);
+                line.text(": partition ");
+                line.decimal(table.parts[i].index as u64);
+                line.text(" not registered (");
+                line.signed(e as i64);
+                line.byte(41); // ')'
+                KernelLog.send(LogLevel.Warn, line);
+            } else {
+                n += 1;
+            }
+        }
+        if (!nparts.isNull()) {
+            nparts.write(n);
+        }
+    }
+    mutex_unlock(partLock());
+    kfree(scratch);
+    kfree(t as *mut void);
+    return rc;
+}
+
+/// part.h's blk_part_scan_all: scan every registered disk.
+/// Safety: blk_nth hands back a referenced blkdev or null; each is put once.
+@export("blk_part_scan_all")
+fn scanAll() {
+    // Partitions are appended to the registry as they register and are skipped here, so walking by position while
+    // the set grows is safe.
+    var i: u32 = 0;
+    while (true) {
+        let bd = unsafe { blk_nth(i) };
+        if (bd.isNull()) {
+            break;
+        }
+        unsafe {
+            if (!isPartition(bd as *blkdev)) {
+                scan(bd, 0 as *mut u32);
+            }
+            blkdevPut(bd);
+        }
+        i += 1;
+    }
+}
+
+/// part.h's blk_part_remove: unregister `disk`'s partitions (none, for a partition).
+/// Safety: `disk` is a live blkdev.
+@export("blk_part_remove")
+unsafe fn remove(disk: *mut blkdev) {
+    if (isPartition(disk as *blkdev)) {
+        return;
+    }
+    mutex_lock(partLock());
+    removeAllLocked(disk);
+    mutex_unlock(partLock());
+}
+
+/// part.h's blk_part_any: whether `disk` has a registered partition.
+/// Safety: `disk` is a live blkdev.
+@export("blk_part_any")
+unsafe fn any(disk: *blkdev) -> bool {
+    var found = false;
+    mutex_lock(partLock());
+    let head = parts();
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        if (Ptr.toBorrow(ofLink(node) as *blkpart).disk as *blkdev == disk) {
+            found = true;
+            break;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    mutex_unlock(partLock());
+    return found;
+}
+
+/// part.h's blk_part_info: a partition's disk, number, start and GUIDs; false for a disk.
+/// Safety: `bd` is a live blkdev; `out` is writable.
+@export("blk_part_info")
+unsafe fn info(bd: *blkdev, out: *mut blk_part_info) -> bool {
+    if (!isPartition(bd)) {
+        return false;
+    }
+    let p = Ptr.toBorrow(partOf(bd) as *blkpart);
+    let o = Ptr.toBorrowMut(out);
+    let diskBytes = nameOf(p.disk as *blkdev); // strlcpy into the 16 bytes: the name always fits
+    let diskName = cText(diskBytes[..]);
+    let n = if (diskName.length < BLKDEV_NAME_MAX) diskName.length else BLKDEV_NAME_MAX - 1;
+    o.disk[..n].copyFrom(diskName[..n]);
+    o.disk[n] = 0;
+    o.index = p.index;
+    o.start = p.start;
+    o.uuid[..].copyFrom(p.uuid[..]);
+    o.kind[..].copyFrom(p.kind[..]);
+    return true;
+}
+
+/// part.h's blk_part_disk: the disk a partition forwards to; null for a disk.
+/// Safety: `bd` is a live blkdev.
+@export("blk_part_disk")
+unsafe fn diskOf(bd: *blkdev) -> *blkdev {
+    if (!isPartition(bd)) {
+        return 0 as *blkdev;
+    }
+    return Ptr.toBorrow(partOf(bd) as *blkpart).disk as *blkdev;
+}
+
+/// part.h's blk_find_sibling_typed: the one partition of type `kind` on the disk that holds the partition `uuid`,
+/// referenced; null when there is none, several, or when `uuid` names more than one partition (a cloned disk does not
+/// say which disk the loader came from: no answer rather than the first one enumerated, PR #368 review).
+/// `matches`, when not null, receives how many partitions of that type the disk has.
+/// Safety: `uuid` and `kind` point to 16 readable bytes; `matches` is null or writable.
+@export("blk_find_sibling_typed")
+unsafe fn findSiblingTyped(uuid: *u8, kind: *u8, matches: *mut u32) -> *mut blkdev {
+    let wantUuid = Slice.fromRaw(uuid, 16);
+    let wantKind = Slice.fromRaw(kind, 16);
+    var found = 0 as *mut blkdev;
+    var n: u32 = 0;
+    mutex_lock(partLock());
+    let head = parts();
+    var self = 0 as *mut blkpart;
+    var sameUuid: u32 = 0;
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let p = ofLink(node);
+        let pb = Ptr.toBorrow(p as *blkpart);
+        if (same(pb.uuid[..], wantUuid)) {
+            self = p;
+            sameUuid += 1;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    if (sameUuid > 1) {
+        self = 0 as *mut blkpart;
+    }
+    if (!self.isNull()) {
+        let selfDisk = Ptr.toBorrow(self as *blkpart).disk;
+        node = List.first(head as *list_node);
+        while (!node.isNull()) {
+            let p = ofLink(node);
+            let pb = Ptr.toBorrowMut(p);
+            if (pb.disk == selfDisk && same(pb.kind[..], wantKind)) {
+                n += 1;
+                found = borrow mut pb.bd as *mut blkdev;
+            }
+            node = List.next(head as *list_node, node);
+        }
+    }
+    if (n == 1) {
+        blkdevGet(found);
+    } else {
+        found = 0 as *mut blkdev;
+    }
+    mutex_unlock(partLock());
+    if (!matches.isNull()) {
+        matches.write(n);
+    }
+    return found;
+}
+
+/// part.h's blk_find_partuuid: the partition `uuid` names, referenced; null when none does.
+/// Safety: `uuid` points to 16 readable bytes.
+@export("blk_find_partuuid")
+unsafe fn findPartuuid(uuid: *u8) -> *mut blkdev {
+    let want = Slice.fromRaw(uuid, 16);
+    var found = 0 as *mut blkdev;
+    mutex_lock(partLock());
+    let head = parts();
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let pb = Ptr.toBorrowMut(ofLink(node));
+        if (same(pb.uuid[..], want)) {
+            found = borrow mut pb.bd as *mut blkdev;
+            blkdevGet(found);
+            break;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    mutex_unlock(partLock());
+    return found;
+}

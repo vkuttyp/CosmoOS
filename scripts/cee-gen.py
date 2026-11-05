@@ -68,6 +68,9 @@ CEESAFEC_VERSION = "0.12.0"
 # (lib/kernel: locks, per-CPU values, kernel objects; ceesafec --kernel cosmoos).
 PORTS = [
     ("kernel/block/gpt.cee", "kernel/block/gpt.c", "The GUID Partition Table (gpt.h)", None, False),
+    ("kernel/block/part.cee", "kernel/block/part.c",
+     "Partitions as block devices: the scan, the forwarding driver, removal and the lookups (part.h)",
+     "kernel/include/kernel/part_types.h", True),
     ("kernel/block/blkserial.cee", "kernel/block/blkserial.c",
      "Disk serials: the printable ASCII drivers keep, and the self-tests' test disks (blk.h)",
      "kernel/include/kernel/blkserial.h", True),

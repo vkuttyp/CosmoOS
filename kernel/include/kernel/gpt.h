@@ -3,7 +3,7 @@
  *
  * A parser with no kernel dependencies: it reads sectors through a
  * callback into a buffer the caller owns, so the same file is linked into
- * the kernel (kernel/block/part.c), the host tests, the fuzzer and the
+ * the kernel (kernel/block/part.cee), the host tests, the fuzzer and the
  * installer, which checks the table it has just written with it
  * (docs/kernel/device/design.md, "Partitions").
  *
@@ -100,7 +100,7 @@ uint64_t gpt_build_last_usable(uint32_t ss, uint64_t nsectors);
  * installer checks what it built by parsing it. False only for a sector
  * size, disk size or index the layout cannot express.
  */
-bool gpt_build(uint32_t ss, uint64_t nsectors, const uint8_t disk_guid[16], const struct gpt_build_part *parts,
+bool gpt_build(uint32_t ss, uint64_t nsectors, const uint8_t *disk_guid, const struct gpt_build_part *parts,
                unsigned nparts, uint8_t *head, uint8_t *tail);
 
 /* CRC-32 (IEEE 802.3, reflected 0xEDB88320, init and final xor ~0), the
@@ -112,10 +112,12 @@ uint32_t gpt_crc32_update(uint32_t crc, const void *data, size_t len);
  * case on input, lower case on output) in the mixed-endian GPT byte order:
  * the first three groups little-endian, the last two as written. */
 #define GPT_GUID_TEXT 37u   /* with the NUL */
-void gpt_guid_format(const uint8_t guid[16], char out[GPT_GUID_TEXT]);
+/* `guid` is 16 bytes, `out` GPT_GUID_TEXT: pointers, not arrays, as gpt.cee's
+ * exports and their CeeSafe callers declare them (gcc's -Warray-parameter). */
+void gpt_guid_format(const uint8_t *guid, char *out);
 /* Exactly 36 characters at `text` (the next character is not looked at).
  * False if any is not where a hex digit or a dash belongs. */
-bool gpt_guid_parse(const char *text, uint8_t guid[16]);
+bool gpt_guid_parse(const char *text, uint8_t *guid);
 
 /* Well-known partition type GUIDs, on-disk byte order. */
 extern const uint8_t gpt_type_esp[16];          /* C12A7328-F81F-11D2-BA4B-00A0C93EC93B */
