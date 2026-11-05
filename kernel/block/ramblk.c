@@ -243,9 +243,14 @@ void ramblk_set_deferred(struct blkdev *bd, unsigned limit)
     }
     if (limit == 0 && r->worker) {
         __atomic_store_n(&r->stop, true, __ATOMIC_RELEASE);
-        thread_join(r->worker);   /* drains what is still deferred */
+        thread_join(r->worker);   /* drains what is still deferred, unless stalled */
         r->worker = NULL;
         r->limit = 0;
+        /* A stalled worker exits with the deferred bios still queued:
+         * complete them here, or with no worker and no limit left they
+         * never would be. */
+        while (ramblk_complete_one(bd))
+            ;
     }
 }
 
@@ -269,6 +274,7 @@ struct blkdev *ramblk_create(uint64_t nblocks)
     struct ramblk *r = kzalloc(sizeof(*r));
     if (r == NULL)
         return NULL;
+    r->bd.priv = r;   /* first: a failure below releases through it */
     r->nblocks = nblocks;
     r->blocks = kzalloc(nblocks * sizeof(*r->blocks));
     if (r->blocks == NULL) {
@@ -289,7 +295,6 @@ struct blkdev *ramblk_create(uint64_t nblocks)
     r->bd.capacity = nblocks * (RAMBLK_BLOCK / 512);
     r->bd.max_sectors = 128;
     r->bd.max_segments = 8;
-    r->bd.priv = r;
     if (blk_register(&r->bd, "ram") != 0) {
         ramblk_release(&r->bd);
         return NULL;
