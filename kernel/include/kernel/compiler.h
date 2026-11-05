@@ -59,11 +59,6 @@
 #else
 #define COSMO_CONFIG_SELFTEST() false
 #endif
-#if defined(CONFIG_SCHED_CHAOS) && CONFIG_SCHED_CHAOS
-#define COSMO_CONFIG_SCHED_CHAOS() true
-#else
-#define COSMO_CONFIG_SCHED_CHAOS() false
-#endif
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 #define ALIGN_DOWN(x, a) ((x) & ~((__typeof__(x))(a) - 1))

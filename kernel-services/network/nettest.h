@@ -89,6 +89,10 @@ void nettest_census_take(struct nettest_census *out);
 /* tap.h's after-purge seam, set for nettest_seam.cee (debug builds; NULL
  * disarms). */
 void nettest_tap_set_after_purge(void (*fn)(void *), void *arg);
+/* CONFIG_SCHED_CHAOS as a C constant macro, which nettest_nicbench.cee
+ * reads in a static initialiser and the C compiler folds (compiler.h's
+ * COSMO_CONFIG_* for the other switches). */
+#define NETTEST_CONFIG_SCHED_CHAOS() (CONFIG_SCHED_CHAOS != 0)
 
 /* nettest_lo.cee: move `bytes` of a pattern to a sink thread on `addr` and
  * check the connection's end, lingering `linger_ms` past it (net-lo-tcp,

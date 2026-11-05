@@ -1144,8 +1144,9 @@ read-back headers in rooms; `find_other_interface` stays in `nettest.c`
 for net-nicbench. Batch 21, `nettest_nicbench.cee`:
 net-nicbench, the ARP phase's hook state static; the chaos build's
 reported-not-asserted reply count is the C's `#if CONFIG_SCHED_CHAOS`,
-now compiler.h's `COSMO_CONFIG_SCHED_CHAOS()` read into a static, which
-the C compiler folds. `find_other_interface` is gone from `nettest.c`.
+now nettest.h's `NETTEST_CONFIG_SCHED_CHAOS()` read into a static, which
+the C compiler folds (in nettest.h, not compiler.h, so no tree's C
+grows). `find_other_interface` is gone from `nettest.c`.
 
 Size: about 3.0x.
 

@@ -4,9 +4,9 @@
 // and the software checksum's share of a send, the number that gates a driver's transmit offload -- on the default
 // interface and then on any second one. The receive hook's state (the C's static struct nicbench_hook) is static, so a
 // return before its removal leaves nothing dangling; the payload is a room. The chaos build's relaxed assertion is the
-// C's `#if CONFIG_SCHED_CHAOS`, here compiler.h's constant macro read into a static, which the C compiler folds.
+// C's `#if CONFIG_SCHED_CHAOS`, here nettest.h's constant macro read into a static, which the C compiler folds.
 
-@header("nettest.h", "kernel/compiler.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
 extern "C" {
     struct socket;
     struct netaddr;
@@ -50,9 +50,9 @@ extern "C" {
         pending_dropped: u64;
     }
 
-    /// compiler.h: whether this build arms the scheduler's chaos migrator (CONFIG_SCHED_CHAOS).
+    /// nettest.h: whether this build arms the scheduler's chaos migrator (CONFIG_SCHED_CHAOS).
     @constant
-    fn COSMO_CONFIG_SCHED_CHAOS() -> bool;
+    fn NETTEST_CONFIG_SCHED_CHAOS() -> bool;
 
     fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
     fn nettest_ksock_put(s: *mut socket);
@@ -108,7 +108,7 @@ const NICBENCH_HIST: usize = 12; // log2 buckets: under 16 us, [16, 32) ... [8, 
 const MS: u64 = 1000000;
 const NS_PER_SEC: u64 = 1000000000;
 
-static SCHED_CHAOS: bool = COSMO_CONFIG_SCHED_CHAOS();
+static SCHED_CHAOS: bool = NETTEST_CONFIG_SCHED_CHAOS();
 
 // ---- The checks ----
 
