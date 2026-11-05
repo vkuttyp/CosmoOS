@@ -55,7 +55,13 @@ extern "C" {
     fn completion_done(c: *mut completion) -> bool;
     fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
     fn thread_join(t: *mut thread) -> i32;
+    /// compiler.h: whether this is a debug build (CONFIG_DEBUG).
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
 }
+
+// The build's switches, folded by the C compiler: a test whose seams a build lacks skips as the C's #if did.
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
 
 // ---- netif.h, ether.h, thread.h and time values (asserted in nettest_floor.c) ----
 
@@ -217,9 +223,11 @@ unsafe fn removeMain(arg: *mut void) {
 
 /// netif-remove-worker: netif_unregister waits for an input_one in progress on its interface.
 /// Safety: the runner's `reason`; the debug build's hooks.
-@cfg("CONFIG_DEBUG")
 @export("selftest_netif_remove_worker")
 unsafe fn removeWorker(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return true; // the C passed silently without the hooks
+    }
     let nif = borrow mut RMW_NIF as *mut netif;
     // The C named it "rmworker0", which strlcpy cut to the array's seven bytes and a terminator.
     fakeSetup(nif, RMW, "rmworke");
@@ -341,9 +349,11 @@ unsafe fn queueTwo(decoy: *mut netif) -> Why {
 
 /// netif-rxq-count: netif_rxq_count counts only its interface's packets.
 /// Safety: the runner's `reason`; the debug build's hooks.
-@cfg("CONFIG_DEBUG")
 @export("selftest_netif_rxq_count")
 unsafe fn rxqCount(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return true; // the C passed silently without the hooks
+    }
     let decoy = borrow mut DECOY_NIF as *mut netif;
     let other = borrow mut OTHER_NIF as *mut netif;
     HOOK_NIF = decoy as usize;

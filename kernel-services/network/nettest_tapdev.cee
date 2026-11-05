@@ -131,6 +131,21 @@ extern "C" {
     fn dhcp_get_stats(out: *mut dhcp_stats);
     fn dhcp_test_fire(nif: *mut netif, ev: u32) -> i32;
     fn dhcp_test_state(nif: *mut netif) -> i32;
+    /// compiler.h: whether this is a self-test build (CONFIG_SELFTEST).
+    @constant
+    fn COSMO_CONFIG_SELFTEST() -> bool;
+}
+
+// The build's switches, folded by the C compiler: a test whose seams a build lacks skips as the C's #if did.
+static SELFTEST_BUILD: bool = COSMO_CONFIG_SELFTEST();
+
+/// A test whose seams this build lacks: its skip line, as the C's skip printed it, and a pass.
+fn skipLine(text: StringView) -> bool {
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+    return true;
 }
 
 // ---- syscall.h, ether.h, ip.h, netif.h and dhcp.h values (asserted in nettest_floor.c) ----
@@ -975,9 +990,11 @@ unsafe fn fixture() {
 /// REQUEST for this exchange's offer, the selected server's ACK binding the lease, RENEWING at T1, REBINDING at T2, the
 /// lease's end, a NAK starting over, and unregistering stopping the client.
 /// Safety: the runner's `reason`.
-@cfg("CONFIG_SELFTEST")
 @export("selftest_net_dhcp_client")
 unsafe fn dhcpClient(reason: *mut *CChar) -> bool {
+    if (!SELFTEST_BUILD) {
+        return skipLine("selftest: net-dhcp-client: needs the client's test seams (CONFIG_SELFTEST); skipping");
+    }
     fixture();
     let nif = dnif();
     if (nettest_netif_register(nif) != 0) {

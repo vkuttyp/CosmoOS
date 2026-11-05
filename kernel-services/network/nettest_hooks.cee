@@ -1,9 +1,10 @@
 // nettest_hooks.cee - the self-tests that need the debug and fault-injection builds' hooks, in CeeSafe: roadmap 2.0 SA6
 // (nettest, the fourteenth batch). tcp-pcb-timer-free and net-rx-dup, as nettest.c had them
-// (docs/audit/next-subsystem-lifetime-windows.md). Each body is exported only where its hooks exist --
-// tcp-pcb-timer-free's under CONFIG_DEBUG, net-rx-dup's under CONFIG_FAULTINJECT (@cfg) -- and nettest_floor.c keeps
-// the C's skip otherwise. tcp-pcb-timer-free's pinning wrapper is nettest_frame.cee's, which calls the body by its
-// export. An address is a [u32; 5], struct netaddr's size and alignment (asserted in nettest_floor.c).
+// (docs/audit/next-subsystem-lifetime-windows.md). Each is exported in every build and, where its hooks do not exist --
+// tcp-pcb-timer-free's outside CONFIG_DEBUG, net-rx-dup's outside CONFIG_FAULTINJECT -- skips as the C's #if did, on a
+// static from the build's constant macro that the C compiler folds, so no other build's code names a hook.
+// tcp-pcb-timer-free's pinning wrapper is nettest_frame.cee's, which calls the body by its export. An address is a
+// [u32; 5], struct netaddr's size and alignment (asserted in nettest_floor.c).
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/sched.h", "kernel/percpu.h", "kernel/timer.h", "kernel/faultinject.h")
 extern "C" {
@@ -75,6 +76,25 @@ extern "C" {
     fn arp_get_stats(out: *mut arp_stats);
     fn arp_lookup(nif: *netif, ip: u32, mac: *mut u8) -> bool;
     fn arp_delete(nif: *netif, ip: u32);
+    /// compiler.h: whether this is a debug build (CONFIG_DEBUG).
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+    /// nettest.h: whether this build injects faults (CONFIG_FAULTINJECT).
+    @constant
+    fn NETTEST_CONFIG_FAULTINJECT() -> bool;
+}
+
+// The build's switches, folded by the C compiler: a test whose seams a build lacks skips as the C's #if did.
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
+static FAULTINJECT_BUILD: bool = NETTEST_CONFIG_FAULTINJECT();
+
+/// A test whose seams this build lacks: its skip line, as the C's skip printed it, and a pass.
+fn skipLine(text: StringView) -> bool {
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+    return true;
 }
 
 // ---- thread.h, timer.h, faultinject.h, socket and ether.h values (asserted in nettest_floor.c) ----
@@ -227,9 +247,11 @@ unsafe fn otherCpus(here: u32) -> Cpus {
 /// and the callback checks the pcb's mark after the held interval as well as on entry -- so the interval belongs to
 /// synchronous cancellation alone, and an entry-only check is not mistaken for evidence about it.
 /// Safety: the runner's `reason`, on a thread the wrapper pinned.
-@cfg("CONFIG_DEBUG")
 @export("nettest_tcp_pcb_timer_free_pinned")
 unsafe fn tcpPcbTimerFreePinned(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return skipLine("selftest: tcp-pcb-timer-free: no test hooks in this build; skipping");
+    }
     let threads0 = thread_count();
     let here = arch_cpu_id(); // pinned by the wrapper: this thread stays off both CPUs below
     let cpus = otherCpus(here);
@@ -479,9 +501,11 @@ unsafe fn arpPhase() -> ArpPhase {
 /// (where the hook fires) and, when an ethernet interface exists, once through the ethernet receive path for ARP. The
 /// rule is armed for this thread only, so concurrent network work is untouched.
 /// Safety: the runner's `reason`.
-@cfg("CONFIG_FAULTINJECT")
 @export("selftest_net_rx_dup")
 unsafe fn rxDup(reason: *mut *CChar) -> bool {
+    if (!FAULTINJECT_BUILD) {
+        return skipLine("selftest: net-rx-dup: fault injection compiled out of this build; skipping");
+    }
     let socks0 = socket_count();
 
     // Arm the duplication for this thread, then move a pattern stream over loopback. Every frame this thread delivers

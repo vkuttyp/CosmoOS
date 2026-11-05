@@ -28,11 +28,10 @@ struct tap *tap_create(const char *name, uint32_t ip, uint32_t mask, const uint8
 void tap_destroy(struct tap *t);
 
 #if CONFIG_DEBUG
-/* The release seam (net-tap-release-order): called by the last close of a
- * /dev/net/tap file just after the guest's NAT and firewall state is
- * purged. */
-extern void (*tap_test_after_purge)(void *arg);
-extern void *tap_test_after_purge_arg;
+/* The release seam (net-tap-release-order): `fn(arg)` is called by the last
+ * close of a /dev/net/tap file just after the guest's NAT and firewall state
+ * is purged. NULL disarms. */
+void tap_test_set_after_purge(void (*fn)(void *arg), void *arg);
 #endif
 
 /* Inject one Ethernet frame from the far end into the stack (netif_rx).

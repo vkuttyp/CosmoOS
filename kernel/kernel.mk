@@ -201,7 +201,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/netif_floor.c \
 	kernel-services/network/loopback.c \
 	kernel-services/network/tap.c \
-	kernel-services/network/tap_floor.c \
 	kernel-services/network/tapsvc.c \
 	kernel-services/network/dhcp.c \
 	kernel-services/network/netparse.c \

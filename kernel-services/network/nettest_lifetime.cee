@@ -4,9 +4,9 @@
 // docs/audit/next-subsystem-arp-netif-ref.md). Each registers a fake interface: the interfaces and their ops table are
 // C objects this file defines (CeeSafe's ADR 0042, as nettest_nif.cee's), `static mut` items -- static because a
 // release may run after the test's frame is gone -- zeroed and filled in at the test's start as the C's memset did. The
-// two retry tests need the debug build's park hooks and are exported only there (@cfg); nettest_floor.c keeps the C's
-// skip otherwise. The parked retry's deadline and its done flag (the C's struct retry_park, in the test's frame) are
-// static, so no thread outlives what it reads.
+// two retry tests need the debug build's park hooks and skip without them, as the C's #if did (a folded static from the
+// build's constant macro). The parked retry's deadline and its done flag (the C's struct retry_park, in the test's
+// frame) are static, so no thread outlives what it reads.
 
 @header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/object.h", "kernel/selftest.h", "kernel/thread.h", "kernel/sched.h", "kernel/timer.h")
 extern "C" {
@@ -80,6 +80,21 @@ extern "C" {
     fn thread_join(t: *mut thread) -> i32;
     fn sched_yield();
     fn clock_now_ns() -> u64;
+    /// compiler.h: whether this is a debug build (CONFIG_DEBUG).
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
+}
+
+// The build's switches, folded by the C compiler: a test whose seams a build lacks skips as the C's #if did.
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
+
+/// A test whose seams this build lacks: its skip line, as the C's skip printed it, and a pass.
+fn skipLine(text: StringView) -> bool {
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+    return true;
 }
 
 // ---- errno.h, netif.h, thread.h and time values (asserted in nettest_floor.c) ----
@@ -339,9 +354,11 @@ unsafe fn afterRelease(reason: *mut *CChar, held: bool, nif: *mut netif, slot: u
 
 /// net-arp-retry-unregister: a parked ARP retry keeps the interface alive across netif_unregister.
 /// Safety: the runner's `reason`; the debug build's hooks.
-@cfg("CONFIG_DEBUG")
 @export("selftest_net_arp_retry_unregister")
 unsafe fn arpRetryUnregister(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return skipLine("selftest: net-arp-retry-unregister: needs the debug retry hook; skipping");
+    }
     let nif = borrow mut ARPREF_NIF as *mut netif;
     fakeSetup(nif, ARPREF, "arpref0", NETIF_UP | NETIF_NODEFAULT);
     ARPREF_NIF.ip4.addr = ip4(10, 74, 0, 1);
@@ -403,9 +420,11 @@ unsafe fn arpRetryUnregister(reason: *mut *CChar) -> bool {
 
 /// net-nd-retry-unregister: ND's twin.
 /// Safety: as arpRetryUnregister.
-@cfg("CONFIG_DEBUG")
 @export("selftest_net_nd_retry_unregister")
 unsafe fn ndRetryUnregister(reason: *mut *CChar) -> bool {
+    if (!DEBUG_BUILD) {
+        return skipLine("selftest: net-nd-retry-unregister: needs the debug retry hook; skipping");
+    }
     let nif = borrow mut NDREF_NIF as *mut netif;
     fakeSetup(nif, NDREF, "ndref0", NETIF_UP | NETIF_NODEFAULT);
     if (nettest_netif_register(nif) != 0) {

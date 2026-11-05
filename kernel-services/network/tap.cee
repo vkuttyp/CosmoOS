@@ -12,8 +12,9 @@
 //
 // A tap is a CeeSafe object behind tap.h's opaque struct, its netif first (the interface's ops reach the tap from
 // it). A netctl record is built in a zeroed scratch through its C type's fields, then copied out whole: the snapshot
-// is bytes at offsets the records' own sizes give. What CeeSafe cannot hold stays in tap_floor.c: the debug builds'
-// release seam, two exported variables.
+// is bytes at offsets the records' own sizes give. The debug builds' release seam (net-tap-release-order) is this file's:
+// a hook the last close calls just after the guest's NAT and firewall state is purged, set through
+// tap_test_set_after_purge.
 
 @header("kernel/net/tap.h", "kernel/net/tapsvc.h", "kernel/net/dhcp.h", "kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/fw.h", "kernel/net/nat.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/cred.h", "kernel/fwcfg.h", "kernel/thread.h", "kernel/vfs.h", "kernel/wait.h")
 extern "C" {
@@ -402,7 +403,9 @@ extern "C" {
     fn file_set_nonblock(f: *mut file, on: i32) -> i32;
     fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
     fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
-    fn tap_floor_after_purge();
+    /// compiler.h: whether this is a debug build (CONFIG_DEBUG).
+    @constant
+    fn COSMO_CONFIG_DEBUG() -> bool;
 }
 
 // ---- The constants: errno.h, netif.h, ip.h, nat.h, fw.h, dhcp.h, cred.h, netctl.h ----
@@ -682,6 +685,40 @@ struct TapOpen {
     slot: usize;
 }
 
+// The debug builds' release seam (net-tap-release-order): a hook, `void (*)(void *)` as an address (0: none), and its
+// argument, which the last close calls just after the guest's NAT and firewall state is purged. The hook is set before
+// its argument is read: its store is the release, the call's load the acquire.
+static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
+static AFTER_PURGE: AtomicUSize = AtomicUSize.constant(0);
+static AFTER_PURGE_ARG: AtomicUSize = AtomicUSize.constant(0);
+
+/// tap.h's tap_test_set_after_purge: arm the seam with `run(arg)`, or disarm it (`run` null).
+/// Safety: `run` is a function the seam may call from a tap's last close, with `arg`.
+@cfg("CONFIG_DEBUG")
+@export("tap_test_set_after_purge")
+unsafe fn setAfterPurge(run: extern "C" fn(*mut void), arg: *mut void) {
+    if (run.isNull()) {
+        AFTER_PURGE.storeWith(0, StoreOrdering.Release);
+        AFTER_PURGE_ARG.storeWith(0, StoreOrdering.Relaxed);
+    } else {
+        AFTER_PURGE_ARG.storeWith(arg as usize, StoreOrdering.Relaxed);
+        AFTER_PURGE.storeWith(run as usize, StoreOrdering.Release);
+    }
+}
+
+/// After the last close's purges, before its slot is given back: a frame arriving now must make nothing
+/// (net-tap-release-order). Debug builds only; the C compiler folds it away elsewhere.
+/// Safety: a hook set by tap_test_set_after_purge.
+unsafe fn afterPurge() {
+    if (DEBUG_BUILD) {
+        let hook = AFTER_PURGE.loadWith(LoadOrdering.Acquire);
+        if (hook != 0) {
+            let run = hook as extern "C" fn(*mut void);
+            run(AFTER_PURGE_ARG.loadWith(LoadOrdering.Relaxed) as *mut void);
+        }
+    }
+}
+
 static mut SLOTS: [bool; 8] = [false; 8];
 static mut SLOT_LOCK: spinlock_t = SPINLOCK_INIT("tap-slots\0".ptr as *CChar);
 static mut TAP_NODE: usize = 0;
@@ -788,9 +825,9 @@ unsafe fn chrRelease(vn: *mut vnode, f: *mut file) {
     let guest = (addrOf(ob.tap) & maskOf(ob.tap)) | swap32(15);
     tapsvc_stop(ob.svc);
     destroy(ob.tap);
-    nat_guest_purge(guest);  // no stale rules or flows for a reused subnet
-    fw_guest_purge(guest);   // detach: its firewall rules, policy and flows go with it
-    tap_floor_after_purge(); // the debug builds' seam: a frame arriving now must make nothing
+    nat_guest_purge(guest); // no stale rules or flows for a reused subnet
+    fw_guest_purge(guest);  // detach: its firewall rules, policy and flows go with it
+    afterPurge();           // the debug builds' seam: a frame arriving now must make nothing
     freeSlot(ob.slot);
     kfree(o as *mut void);
     let fb = Ptr.toBorrowMut(f);

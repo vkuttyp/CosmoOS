@@ -1,14 +1,9 @@
 /*
  * nettest_floor.c - What the network self-tests' CeeSafe ports cannot hold
  * (roadmap 2.0 SA6). The tests are the nettest_*.cee files and their release
- * framework nettest_frame.cee; this file keeps three kinds of C:
- *
- *   - the skips of tests whose seams a build lacks: an export defined under
- *     `#if !CONFIG_X`, where CeeSafe's @cfg emits one only under `#if X`;
- *   - the setter of tap.h's after-purge seam, two C variables CeeSafe
- *     cannot assign;
- *   - the asserts of every port's copied constants and rooms against the
- *     headers, as fifo_floor.c holds fifo.cee's.
+ * framework nettest_frame.cee, which skip where a build lacks their seams;
+ * this file keeps the asserts of every port's copied constants and rooms
+ * against the headers, as fifo_floor.c holds fifo.cee's.
  */
 
 #include <kernel/compiler.h>
@@ -84,30 +79,10 @@ _Static_assert(sizeof(struct tcp_server) <= 512 && _Alignof(struct tcp_server) <
 
 /* --- the pcb and its timers, and a duplicated received frame -----------------
  *
- * tcp-pcb-timer-free and net-rx-dup are CeeSafe (nettest_hooks.cee), each
- * exported only where its hooks exist: the timer test's body under
- * CONFIG_DEBUG, net-rx-dup under CONFIG_FAULTINJECT. Without them the C's
- * skips stand here; the pinning wrapper is nettest_frame.cee's.
+ * tcp-pcb-timer-free and net-rx-dup are CeeSafe (nettest_hooks.cee), with
+ * their skips where a build lacks the hooks; the pinning wrapper is
+ * nettest_frame.cee's.
  */
-bool nettest_tcp_pcb_timer_free_pinned(const char **reason);
-
-#if !CONFIG_DEBUG
-bool nettest_tcp_pcb_timer_free_pinned(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: tcp-pcb-timer-free: no test hooks in this build; skipping");
-    return true;
-}
-#endif
-
-#if !CONFIG_FAULTINJECT
-bool selftest_net_rx_dup(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-rx-dup: fault injection compiled out of this build; skipping");
-    return true;
-}
-#endif
 
 /* The values nettest_hooks.cee writes as its own constants, and its room: */
 _Static_assert(SCHED_PRIO_DEFAULT == 32 && TICK_NS == 4000000 && FI_NET_RX_DUP == 12 && COSMO_AF_INET == 2 &&
@@ -129,24 +104,9 @@ _Static_assert(COSMO_AF_INET == 2 && COSMO_SOCK_STREAM == 1 && COSMO_SOCK_DGRAM 
  * net-arp-retry-unregister, net-nd-retry-unregister, net-arp-flush-counts,
  * net-nd-flush-counts and net-netif-lifetime are CeeSafe
  * (nettest_lifetime.cee), with fake interfaces of their own. The two retry
- * tests need the debug build's park hooks; without them the C's skips stand
- * here. The values the port writes as its own constants, and its rooms:
+ * tests need the debug build's park hooks and skip without them. The values
+ * the port writes as its own constants, and its rooms:
  */
-#if !CONFIG_DEBUG
-bool selftest_net_arp_retry_unregister(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-arp-retry-unregister: needs the debug retry hook; skipping");
-    return true;
-}
-
-bool selftest_net_nd_retry_unregister(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-nd-retry-unregister: needs the debug retry hook; skipping");
-    return true;
-}
-#endif
 _Static_assert(EINVAL == 22 && EEXIST == 17 && ENODEV == 19 && EINPROGRESS == 115 && NETIF_UP == 1 &&
                    NETIF_LOOPBACK == 2 && NETIF_NOARP == 4 && NETIF_GONE == 8 && NETIF_NODEFAULT == 0x10 &&
                    SCHED_PRIO_DEFAULT == 32 && NS_PER_SEC == 1000000000ull,
@@ -158,18 +118,10 @@ _Static_assert(__builtin_offsetof(struct netif, obj) == 0 && sizeof(struct arp_s
  *
  * net-arp-per-interface, net-nd-per-interface and net-neigh-down-race are
  * CeeSafe (nettest_neigh.cee), with fake interfaces of their own. The down
- * race needs the debug build's park hooks; without them the C's skip stands
- * here. The values the port writes as its own constants, its rooms and the
- * IPv6 header it builds:
+ * race needs the debug build's park hooks and skips without them. The values
+ * the port writes as its own constants, its rooms and the IPv6 header it
+ * builds:
  */
-#if !CONFIG_DEBUG
-bool selftest_net_neigh_down_race(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-neigh-down-race: needs the debug park hooks; skipping");
-    return true;
-}
-#endif
 _Static_assert(EINPROGRESS == 115 && ENETUNREACH == 101 && ENOMEM == 12 && NETIF_UP == 1 && NETIF_NODEFAULT == 0x10 &&
                    ETH_HLEN == 14 && ETH_P_IP == 0x0800 && ETH_P_ARP == 0x0806 && ETH_P_IPV6 == 0x86DD &&
                    ICMPV6_NS == 135 && ICMPV6_NA == 136 && SCHED_PRIO_DEFAULT == 32 && NS_PER_SEC == 1000000000ull,
@@ -183,25 +135,9 @@ _Static_assert(sizeof(struct ipv6_hdr) == 40 && __builtin_offsetof(struct ipv6_h
  *
  * net-accept-race, net-census-wake-ref and net-accept-order are CeeSafe
  * (nettest_accept.cee), with the listen-backlog step net-lo-tcp shares and
- * the wait they used. The latter two need the debug build's seams; without
- * them the C's skips stand here. The values the port writes as its own
- * constants:
+ * the wait they used. The latter two need the debug build's seams and skip
+ * without them. The values the port writes as its own constants:
  */
-#if !CONFIG_DEBUG
-bool selftest_net_census_wake_ref(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-census-wake-ref: no test hooks in this build; skipping");
-    return true;
-}
-
-bool selftest_net_accept_order(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-accept-order: no test hooks in this build; skipping");
-    return true;
-}
-#endif
 _Static_assert(EINVAL == 22 && COSMO_AF_INET == 2 && COSMO_SOCK_STREAM == 1 && COSMO_IO_READABLE == 1 &&
                    NET_EPHEMERAL_LO == 49152 && SCHED_PRIO_DEFAULT == 32,
                "nettest_accept.cee's errno.h, syscall.h, inet.h and thread.h values");
@@ -269,19 +205,6 @@ _Static_assert(IPPROTO_ICMP == 1 && IPPROTO_TCP == 6 && IPPROTO_UDP == 17 && ICM
  * hooks; without them they pass silently, as the C did. The values the port
  * writes as its own constants:
  */
-#if !CONFIG_DEBUG
-bool selftest_netif_remove_worker(const char **reason)
-{
-    (void)reason;
-    return true;
-}
-
-bool selftest_netif_rxq_count(const char **reason)
-{
-    (void)reason;
-    return true;
-}
-#endif
 _Static_assert(NETIF_UP == 1 && NETIF_NODEFAULT == 0x10 && ETH_HLEN == 14 && SCHED_PRIO_DEFAULT == 32 &&
                    NS_PER_SEC == 1000000000ull,
                "nettest_worker.cee's netif.h, ether.h, thread.h and time values");
@@ -465,58 +388,16 @@ _Static_assert(BOOTP_REQUEST == 1 && BOOTP_REPLY == 2 && DHCP_HTYPE_ETHER == 1 &
                "nettest_tapdev.cee's dhcp.h values");
 _Static_assert(DHCP_MAX_CLIENTS * sizeof(struct dhcp_lease_info) <= 1024 && sizeof(struct dhcp_stats) <= 256,
                "nettest_tapdev.cee's rooms");
-#else
-bool selftest_net_dhcp_client(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-dhcp-client: needs the client's test seams (CONFIG_SELFTEST); skipping");
-    return true;
-}
 #endif
 
 /* --- three tests held at a seam ---------------------------------------------
  *
  * net-netif-flags, net-tap-release-order and net-syncookie-seeded are
  * CeeSafe (nettest_seam.cee). The first two need the debug build's park and
- * release seams, the third the self-test build's cookie seam; without them
- * the C's skips stand here. tap.h's after-purge seam is two C variables,
- * which CeeSafe cannot assign: nettest_tap_set_after_purge sets them. The
- * values the port writes as its own constants:
+ * release seams, the third the self-test build's cookie seam; each skips
+ * without them. tap.h's after-purge seam is tap.cee's. The values the port
+ * writes as its own constants:
  */
-#if CONFIG_DEBUG
-void nettest_tap_set_after_purge(void (*fn)(void *), void *arg)
-{
-    if (fn == NULL) {
-        tap_test_after_purge = NULL;
-        tap_test_after_purge_arg = NULL;
-    } else {
-        tap_test_after_purge_arg = arg;
-        tap_test_after_purge = fn;
-    }
-}
-#else
-bool selftest_net_netif_flags(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-netif-flags: needs the debug park hook; skipping");
-    return true;
-}
-
-bool selftest_net_tap_release_order(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-tap-release-order: no test hooks in this build; skipping");
-    return true;
-}
-#endif
-#if !CONFIG_SELFTEST
-bool selftest_net_syncookie_seeded(const char **reason)
-{
-    (void)reason;
-    kinfo("selftest: net-syncookie-seeded: needs CONFIG_SELFTEST; skipping");
-    return true;
-}
-#endif
 _Static_assert(COSMO_O_RDWR == 0x0002 && COSMO_O_NONBLOCK == 0x0800 && IPPROTO_UDP == 17 && ETH_HLEN == 14 &&
                    sizeof(struct ipv4_hdr) == 20 && __builtin_offsetof(struct ipv4_hdr, src) == 12 &&
                    NAT_TABLE_SIZE == 256 && FW_FLOW_MAX == 320 && SCHED_PRIO_DEFAULT == 32,

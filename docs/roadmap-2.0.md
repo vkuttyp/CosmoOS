@@ -979,8 +979,9 @@ scratch through its C type's fields and copied out at its own size, so
 no padding of the stack reaches userland. The snapshot's sections share
 one record scratch and one table scratch in turn: the first build gave
 each its own and the kernel's 2 KiB frame limit refused `ctlRead` (8 KiB);
-it is now about 1.5 KiB in one frame, against the C's 1.9 KiB over two. `tap_floor.c` keeps the debug
-builds' release seam (two exported variables). The C step published the
+it is now about 1.5 KiB in one frame, against the C's 1.9 KiB over two. `tap_floor.c` kept the debug
+builds' release seam (two exported variables) until nettest's last
+batch, which moved it into `tap.cee`. The C step published the
 input filter with release stores and acquire loads (function last,
 cleared first) and stated the caller's contract, moved the reader's wait
 to `wait_floor_until_killable`, and moved the UAPI assertions into the
@@ -1163,7 +1164,13 @@ its reap list. `nettest.c` is `nettest_floor.c`, which keeps the C
 CeeSafe cannot hold: the skips of tests whose seams a build lacks (an
 export under `#if !CONFIG_X`), the tap seam's setter, and every port's
 constants asserted against the headers, as `fifo_floor.c` keeps
-`fifo.cee`'s.
+`fifo.cee`'s. Then the skips and the seam left the C: each test whose
+seams a build lacks skips in CeeSafe on a static from the build's constant
+macro (`COSMO_CONFIG_DEBUG()`, nettest.h's `NETTEST_CONFIG_FAULTINJECT()`),
+which the C compiler folds, so no other build's code names a hook; the
+tap's after-purge seam is `tap.cee`'s, an atomic hook and argument set
+through `tap_test_set_after_purge`, and `tap_floor.c` is gone.
+`nettest_floor.c` keeps only the asserts.
 
 Size: about 3.0x.
 

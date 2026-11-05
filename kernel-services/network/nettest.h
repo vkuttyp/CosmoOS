@@ -86,9 +86,6 @@ bool nettest_lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool
  * (selftest.h names both nettest_census). */
 struct nettest_census;
 void nettest_census_take(struct nettest_census *out);
-/* tap.h's after-purge seam, set for nettest_seam.cee (debug builds; NULL
- * disarms). */
-void nettest_tap_set_after_purge(void (*fn)(void *), void *arg);
 /* CONFIG_SCHED_CHAOS as a C constant macro, which nettest_nicbench.cee
  * reads in a static initialiser and the C compiler folds (compiler.h's
  * COSMO_CONFIG_* for the other switches). */
@@ -96,6 +93,9 @@ void nettest_tap_set_after_purge(void (*fn)(void *), void *arg);
 /* net-harness's injected break of its first attempts (CONFIG_HARNESS_BREAK,
  * `make test-harness-retry`), 0 outside a debug build. */
 #define NETTEST_HARNESS_BREAK() (CONFIG_DEBUG ? (unsigned)CONFIG_HARNESS_BREAK : 0u)
+/* CONFIG_FAULTINJECT (faultinject.h: CONFIG_DEBUG unless set), for
+ * net-rx-dup's skip (nettest_hooks.cee). */
+#define NETTEST_CONFIG_FAULTINJECT() (CONFIG_FAULTINJECT != 0)
 
 /* nettest_lo.cee: move `bytes` of a pattern to a sink thread on `addr` and
  * check the connection's end, lingering `linger_ms` past it (net-lo-tcp,

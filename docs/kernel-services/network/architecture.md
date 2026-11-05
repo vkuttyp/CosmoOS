@@ -26,8 +26,8 @@ IPv4, IPv6, UDP, TCP, sockets.
         cksum.c       the Internet checksum
         inet.c        address helpers and the UAPI address conversion
         loopback.c    the `lo` interface (127.0.0.1, ::1)
-        nettest_*.cee self-tests and the harness-driven echo services
-        nettest_floor.c  their configured skips and constants' asserts
+        nettest_*.cee self-tests, their configured skips, and the harness-driven echo services
+        nettest_floor.c  their constants' asserts
         │
         ▼
    drivers/virtio/virtio_net.c   virtio-net as a boot module: `eth0`
