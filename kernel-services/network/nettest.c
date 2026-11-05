@@ -2024,197 +2024,6 @@ _Static_assert(ETH_HLEN == 14 && ICMP_TIME_EXCEEDED == 11 && ICMP_TIMXCEED_INTRA
                INADDR_BROADCAST_N == 0xffffffffu && NS_PER_SEC == 1000000000ull && sizeof(struct udp_hdr) == 8 &&
                sizeof(struct eth_hdr) == 14, "nettest_tap.cee's ether.h, ip.h, tap.h and dhcp.h values");
 
-/* --- net-netif-flags: one reading of the flag word per packet (N26) ------
- *
- * ipv4_input reads the ingress interface's nif->flags once, and
- * ipv4_forward the egress's once, and every check of the packet -- the
- * anti-spoof, the forwarding firewall's direction, whether to masquerade
- * -- is made from those readings. Until 2026-10-07 each check read the
- * word again, so a toggle of masquerade landing between two of them gave
- * one packet half of each state: anti-spoofed as a plain forwarder (any
- * source on the subnet passes), then masqueraded (a source the masquerade
- * anti-spoof would have refused, translated). The park hook holds a packet
- * exactly there while the test flips the flag; a stream under a toggling
- * thread checks the same rule without the hook.
- */
-#if CONFIG_DEBUG   /* the park hook exists in debug builds; the test skips without it */
-struct flags_toggler {
-    struct netif *nif;
-    volatile bool stop;
-    unsigned flips;
-};
-
-static void flags_toggler_thread(void *arg)
-{
-    struct flags_toggler *t = arg;
-    bool on = false;
-    while (!t->stop) {
-        on = !on;
-        netif_set_masquerade(t->nif, on);
-        t->flips++;
-        thread_sleep_ms(1);
-    }
-    netif_set_masquerade(t->nif, false);
-    thread_exit(0);
-}
-
-/* Inject a datagram from `src` on `g`, parked in ipv4_forward between the
- * anti-spoof and the masquerade decision; flip masquerade to `masq` while
- * it is parked; release it. True when it was parked. */
-static bool flags_inject_parked(struct tap *g, const uint8_t gmac[6], const uint8_t smac[6], uint32_t src,
-                                uint32_t dst, bool masq)
-{
-    uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 }, frame[128];
-    ipv4_test_hold_forward(true);
-    uint32_t len = nettest_build_udp(frame, gmac, smac, src, dst, 64, 4100, 5100, payload, sizeof(payload));
-    if (tap_inject(g, frame, len) != 0) {
-        ipv4_test_hold_forward(false);
-        return false;
-    }
-    bool parked = false;
-    for (unsigned i = 0; i < 1000 && !parked; i++) {
-        parked = ipv4_test_forward_parked();
-        if (!parked)
-            thread_sleep_ms(1);
-    }
-    netif_set_masquerade(tap_netif(g), masq);
-    ipv4_test_release_forward();
-    ipv4_test_hold_forward(false);
-    return parked;
-}
-
-/* The source address of the next IPv4 frame on `u`, or 0 for none. */
-static uint32_t flags_recv_src(struct tap *u)
-{
-    struct mbuf *out = nettest_recv_ip(u);
-    if (out == NULL)
-        return 0;
-    uint8_t hdr[ETH_HLEN + sizeof(struct ipv4_hdr)];
-    uint32_t src = 0;
-    if (m_copydata(out, 0, sizeof(hdr), hdr))
-        src = ((struct ipv4_hdr *)(hdr + ETH_HLEN))->src;
-    m_freem(out);
-    return src;
-}
-#endif
-
-bool selftest_net_netif_flags(const char **reason)
-{
-#if !CONFIG_DEBUG
-    (void)reason;
-    kinfo("selftest: net-netif-flags: needs the debug park hook; skipping");
-    return true;
-#else
-    static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x01 };
-    static const uint8_t u_mac[6]     = { 0x52, 0x54, 0x00, 0x06, 0x00, 0x01 };
-    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x0f };
-    static const uint8_t other_mac[6] = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x14 };
-    static const uint8_t peer_mac[6]  = { 0x52, 0x54, 0x00, 0x06, 0x00, 0x63 };
-    uint32_t mask = htonl(0xffffff00u);
-    uint32_t g_ip = IPV4_ADDR(10, 77, 5, 1), guest = IPV4_ADDR(10, 77, 5, 15), other = IPV4_ADDR(10, 77, 5, 20);
-    uint32_t u_ip = IPV4_ADDR(10, 77, 6, 1), peer = IPV4_ADDR(10, 77, 6, 99);
-
-    struct tap *g = nt_tap_create("flgg", g_ip, mask, g_mac);
-    CHECK(g != NULL);
-    struct tap *u = nt_tap_create("flgu", u_ip, mask, u_mac);
-    CHECK(u != NULL);
-    netif_set_forward(tap_netif(g), true);   /* a plain forwarder to begin with: masquerade off */
-    nettest_seed_arp(tap_netif(u), peer, peer_mac);
-    nettest_seed_arp(tap_netif(g), guest, guest_mac);
-    nettest_seed_arp(tap_netif(g), other, other_mac);
-    nat_flush();
-    struct nat_stats n0, n1;
-    nat_get_stats(&n0);
-
-    /* 1. Masquerade turned on while a datagram from .20 -- on the subnet,
-     * so the plain forwarder's anti-spoof passed it -- is parked before
-     * the masquerade decision. One reading of the word: forwarded as the
-     * forwarder it entered under, its source intact, no flow made. Two
-     * readings: masqueraded, a source the masquerade's anti-spoof refuses
-     * translated and given a NAT flow. */
-    CHECK(flags_inject_parked(g, g_mac, other_mac, other, peer, true));
-    uint32_t src = flags_recv_src(u);
-    CHECK(src != 0);
-    CHECK(src == other);   /* two readings masquerade it: src == u_ip */
-    nat_get_stats(&n1);
-    CHECK(n1.out_new == n0.out_new);
-
-    /* 2. The mirror: masquerade turned off while the guest's (.15) datagram
-     * is parked. One reading: masqueraded, the state it entered under. */
-    CHECK(flags_inject_parked(g, g_mac, guest_mac, guest, peer, false));
-    src = flags_recv_src(u);
-    CHECK(src == u_ip);
-    nat_get_stats(&n1);
-    CHECK(n1.out_new == n0.out_new + 1);
-    netif_set_masquerade(tap_netif(g), false);
-
-    /* 3. A stream from .20 while another thread flips masquerade every
-     * millisecond, no hook. Each datagram is either forwarded with its own
-     * source (the forwarder's treatment) or refused by the masquerade's
-     * anti-spoof (the masquerader's); none is masqueraded, and no flow is
-     * made for .20. */
-    struct flags_toggler tg = { .nif = tap_netif(g) };
-    struct thread *th = thread_create(flags_toggler_thread, &tg, "flags-toggle", SCHED_PRIO_DEFAULT);
-    CHECK(th != NULL);
-    uint8_t payload[8] = { 9, 8, 7, 6, 5, 4, 3, 2 }, frame[128];
-    unsigned sent = 0, got = 0, masqueraded = 0, foreign = 0;
-    struct ip_stats i0, i1;
-    ipv4_get_stats(&i0);
-    for (unsigned i = 0; i < 300; i++) {
-        uint32_t len = nettest_build_udp(frame, g_mac, other_mac, other, peer, 64, (uint16_t)(4200 + (i & 63)), 5100,
-                                         payload, sizeof(payload));
-        if (tap_inject(g, frame, len) == 0)
-            sent++;
-        struct mbuf *m;
-        while ((m = tap_recv(u)) != NULL) {
-            uint8_t hdr[ETH_HLEN + sizeof(struct ipv4_hdr)];
-            if (m_copydata(m, 0, sizeof(hdr), hdr) && hdr[12] == 0x08 && hdr[13] == 0x00) {
-                uint32_t s = ((struct ipv4_hdr *)(hdr + ETH_HLEN))->src;
-                got++;
-                if (s == u_ip)
-                    masqueraded++;
-                else if (s != other)
-                    foreign++;
-            }
-            m_freem(m);
-        }
-        if ((i & 7) == 7)
-            thread_sleep_ms(1);
-    }
-    tg.stop = true;
-    thread_join(th);
-    for (unsigned i = 0; i < 30; i++) {   /* what the worker forwarded after the last inject */
-        struct mbuf *m;
-        while ((m = tap_recv(u)) != NULL) {
-            uint8_t hdr[ETH_HLEN + sizeof(struct ipv4_hdr)];
-            if (m_copydata(m, 0, sizeof(hdr), hdr) && hdr[12] == 0x08 && hdr[13] == 0x00) {
-                uint32_t s = ((struct ipv4_hdr *)(hdr + ETH_HLEN))->src;
-                got++;
-                if (s == u_ip)
-                    masqueraded++;
-                else if (s != other)
-                    foreign++;
-            }
-            m_freem(m);
-        }
-        thread_sleep_ms(10);
-    }
-    ipv4_get_stats(&i1);
-    nat_get_stats(&n1);
-    CHECK(sent == 300);
-    CHECK(masqueraded == 0);
-    CHECK(foreign == 0);
-    CHECK(got + (unsigned)(i1.fwd_spoofed - i0.fwd_spoofed) == sent);   /* every datagram: forwarded intact or refused */
-    CHECK(n1.out_new == n0.out_new + 1);                               /* still only the guest's flow */
-    CHECK(got >= 1 && i1.fwd_spoofed > i0.fwd_spoofed);                /* both treatments occurred */
-
-    kinfo("selftest: net-netif-flags: a toggle parked between two checks follows one reading of the word; "
-          "%u datagrams under %u flips: %u forwarded intact, %llu refused, none masqueraded",
-          sent, tg.flips, got, (unsigned long long)(i1.fwd_spoofed - i0.fwd_spoofed));
-    return true;
-#endif
-}
-
 bool selftest_net_nat(const char **reason)
 {
     static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x03, 0x00, 0x01 };
@@ -2490,115 +2299,6 @@ _Static_assert(EMSGSIZE == 90 && COSMO_NETCTL_FORWARD_ADD == 1 && COSMO_NETCTL_F
                NAT_TIMEOUT_TCP_NS / 1000000u == 30000 && sizeof(((struct cosmo_netctl_if *)0)->name) == 8,
                "nettest_ctl.cee's errno.h, netctl.h and nat.h values");
 
-/* --- a tap's release against a frame still in flight --------------------------------
- *
- * tap_chr_release purged the guest's NAT and firewall state and then
- * destroyed the tap; a frame the guest wrote before its last close, still
- * on a worker's queue, was masqueraded in between and its translation
- * outlived the tap -- the next tap given the subnet inherited it
- * (fuzz_net_config). The seam delivers such a frame through the tap's
- * interface just after the purges and waits for the workers: nothing may
- * name the guest when the close returns.
- */
-#if CONFIG_DEBUG
-struct tro_ctx {
-    struct netif *nif;      /* held across the close */
-    uint8_t frame[128];
-    uint32_t flen;
-    int delivered;          /* netif_rx was offered the frame */
-};
-
-static void tro_after_purge(void *arg)
-{
-    struct tro_ctx *c = arg;
-    struct mbuf *m = m_getcl();
-    if (m == NULL)
-        return;
-    memcpy(m->data, c->frame, c->flen);
-    m->len = m->pkt.len = c->flen;
-    netif_rx(c->nif, m);    /* the tap's own path in (tap_inject) */
-    c->delivered++;
-    net_workers_barrier();  /* whatever the stack makes of it is made */
-}
-
-static void tro_disarm(void *arg)
-{
-    (void)arg;
-    tap_test_after_purge = NULL;
-    tap_test_after_purge_arg = NULL;
-}
-
-static unsigned tro_naming(uint32_t guest)
-{
-    static struct nat_flow nf[NAT_TABLE_SIZE];
-    static struct fw_flow_info ff[FW_FLOW_MAX];
-    unsigned n = 0;
-    unsigned nn = nat_flow_list(nf, NAT_TABLE_SIZE, clock_now_ns());
-    for (unsigned i = 0; i < nn; i++)
-        n += nf[i].orig_ip == guest;
-    unsigned nfl = fw_flow_list(ff, FW_FLOW_MAX, clock_now_ns());
-    for (unsigned i = 0; i < nfl; i++)
-        n += ff[i].guest_ip == guest || ff[i].a_ip == guest || ff[i].b_ip == guest;
-    return n;
-}
-
-#endif /* CONFIG_DEBUG */
-
-bool selftest_net_tap_release_order(const char **reason)
-{
-#if !CONFIG_DEBUG
-    (void)reason;
-    kinfo("selftest: net-tap-release-order: no test hooks in this build; skipping");
-    return true;
-#else
-    fw_flush();
-    nat_flush();
-    CHECK(selftest_defer(nt_rel_nat_state, &g_nat_state_marker));
-    struct file *fa = NULL;
-    CHECK(nt_vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR | COSMO_O_NONBLOCK, 0, &fa) == 0 && fa != NULL);
-    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), world = IPV4_ADDR(10, 0, 2, 2);
-    static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x01, 0x0a };
-    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
-    static struct tro_ctx c;
-    memset(&c, 0, sizeof(c));
-    static struct nt_netif_ref held;
-    c.nif = netif_find("tap0");
-    CHECK(c.nif != NULL && nt_netif_hold(&held, c.nif));
-    CHECK(c.nif->ip4.addr == IPV4_ADDR(10, 0, 3, 1));
-    nettest_seed_arp(c.nif, ga, amac);
-
-    /* The control: the same frame before the close is masqueraded. */
-    uint8_t pl[4] = { 1, 2, 3, 4 }, l4[32];
-    uint16_t l4len = nettest_mk_udp(l4, ga, world, 7100, 53, pl, sizeof(pl));
-    c.flen = nettest_wrap(c.frame, tap0mac, amac, ga, world, 64, IPPROTO_UDP, l4, l4len);
-    CHECK(nettest_fwt_send(fa, tap0mac, amac, ga, world, IPPROTO_UDP, l4, l4len));
-    net_workers_barrier();
-    unsigned before = tro_naming(ga);
-    CHECK(before > 0);      /* a translation (and a flow) for the guest: the frame is one that makes state */
-    nat_flush();
-    fw_flush();
-    CHECK(tro_naming(ga) == 0);
-
-    CHECK(selftest_defer(tro_disarm, &c));
-    tap_test_after_purge_arg = &c;
-    tap_test_after_purge = tro_after_purge;
-    nt_file_put(fa);        /* the last close: the release, and the seam inside it */
-    tro_disarm(NULL);
-    selftest_forget(&c);
-    CHECK(c.delivered == 1);
-    unsigned left = tro_naming(ga);
-    if (left != 0)
-        kerror("selftest: net-tap-release-order: %u NAT entr(ies)/flow(s) name the released guest", left);
-    CHECK(left == 0);
-    if (!selftest_release(&g_nat_state_marker))
-        nt_rel_nat_state(NULL);
-    nt_netif_ref_put(&held);
-    kinfo("selftest: net-tap-release-order: a frame offered after the purges made nothing (the control made %u)",
-          before);
-    return true;
-#endif
-}
-
 /* --- the INPUT chain (docs/audit/next-subsystem-input-chain.md) ----------
  *
  * net-input is CeeSafe (nettest_input.cee), with the checksummed ICMP
@@ -2870,30 +2570,53 @@ bool selftest_net_dhcp_client(const char **reason)
 }
 #endif
 
-/* --- net-syncookie-seeded (NET-6) --------------------------------------------- *
+/* --- three tests held at a seam ---------------------------------------------
  *
- * tcp_init draws the SYN-cookie secret, and on a machine whose pool seeds
- * after it -- no firmware seed, no CPU random instruction -- that secret
- * came from an unseeded pool, predictable in principle, and was kept for
- * the life of the boot. A cookie made once the pool is seeded must use a
- * secret drawn from it. The seam marks the current secret as drawn
- * unseeded, the case such a machine starts in.
+ * net-netif-flags, net-tap-release-order and net-syncookie-seeded are
+ * CeeSafe (nettest_seam.cee). The first two need the debug build's park and
+ * release seams, the third the self-test build's cookie seam; without them
+ * the C's skips stand here. tap.h's after-purge seam is two C variables,
+ * which CeeSafe cannot assign: nettest_tap_set_after_purge sets them. The
+ * values the port writes as its own constants:
  */
+#if CONFIG_DEBUG
+void nettest_tap_set_after_purge(void (*fn)(void *), void *arg)
+{
+    if (fn == NULL) {
+        tap_test_after_purge = NULL;
+        tap_test_after_purge_arg = NULL;
+    } else {
+        tap_test_after_purge_arg = arg;
+        tap_test_after_purge = fn;
+    }
+}
+#else
+bool selftest_net_netif_flags(const char **reason)
+{
+    (void)reason;
+    kinfo("selftest: net-netif-flags: needs the debug park hook; skipping");
+    return true;
+}
+
+bool selftest_net_tap_release_order(const char **reason)
+{
+    (void)reason;
+    kinfo("selftest: net-tap-release-order: no test hooks in this build; skipping");
+    return true;
+}
+#endif
+#if !CONFIG_SELFTEST
 bool selftest_net_syncookie_seeded(const char **reason)
 {
-#if !CONFIG_SELFTEST
     (void)reason;
     kinfo("selftest: net-syncookie-seeded: needs CONFIG_SELFTEST; skipping");
     return true;
-#else
-    if (!random_ready()) {
-        kinfo("selftest: net-syncookie-seeded: the pool never seeded (S19 warned); skipping");
-        return true;
-    }
-    tcp_test_cookie_mark_unseeded();
-    (void)tcp_test_cookie_make();
-    CHECK(tcp_test_cookie_seeded());   /* main keeps tcp_init's secret, seeded or not */
-    kinfo("selftest: net-syncookie-seeded: a cookie made on a seeded pool used a secret drawn from it");
-    return true;
-#endif
 }
+#endif
+_Static_assert(COSMO_O_RDWR == 0x0002 && COSMO_O_NONBLOCK == 0x0800 && IPPROTO_UDP == 17 && ETH_HLEN == 14 &&
+                   sizeof(struct ipv4_hdr) == 20 && __builtin_offsetof(struct ipv4_hdr, src) == 12 &&
+                   NAT_TABLE_SIZE == 256 && FW_FLOW_MAX == 320 && SCHED_PRIO_DEFAULT == 32,
+               "nettest_seam.cee's syscall.h, ip.h, ether.h, nat.h, fw.h and thread.h values");
+_Static_assert(sizeof(struct nat_stats) <= 512 && sizeof(struct ip_stats) <= 512 &&
+                   NAT_TABLE_SIZE * sizeof(struct nat_flow) <= 8192 && FW_FLOW_MAX * sizeof(struct fw_flow_info) <= 12288,
+               "nettest_seam.cee's rooms");

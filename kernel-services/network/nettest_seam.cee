@@ -1,0 +1,676 @@
+// nettest_seam.cee - three tests held at a seam, in CeeSafe: roadmap 2.0 SA6 (nettest, the nineteenth batch).
+// net-netif-flags (a packet parked between two readings of its interface's flag word, N26), net-tap-release-order (a
+// frame delivered after a tap's purges, before its release ends) and net-syncookie-seeded (the SYN-cookie secret drawn
+// again once the pool seeds, NET-6), as nettest.c had them. The first two need the debug build's park and release
+// seams and the third the self-test build's cookie seam, so each is exported only where its seam exists (@cfg);
+// nettest.c keeps the C's skips otherwise. tap.h's after-purge seam is a pair of C variables, which nettest.c sets for
+// this file (nettest_tap_set_after_purge). The toggler's and the seam's state (the C's structs, one in the test's
+// frame) are static, so no thread or seam outlives what it reads; a C counter struct or listing is read into a room.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/tcp.h", "kernel/net/tap.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/random.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h")
+extern "C" {
+    struct thread;
+    struct tap;
+    struct file;
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ip4 {
+        addr: u32;
+    }
+    struct netif {
+        ip4: netif_ip4;
+    }
+    struct nt_netif_ref {
+        nif: *mut netif;
+    }
+    struct nat_stats {
+        out_new: u64;
+    }
+    struct ip_stats {
+        fwd_spoofed: u64;
+    }
+    struct nat_flow {
+        orig_ip: u32;
+    }
+    struct fw_flow_info {
+        guest_ip: u32;
+        a_ip: u32;
+        b_ip: u32;
+    }
+
+    fn nettest_tap_create(name: *CChar, ip: u32, mask: u32, mac: *u8) -> *mut tap;
+    fn nettest_vfs_open(path: *CChar, flags: u32, out: *mut *mut file) -> i32;
+    fn nettest_file_put(f: *mut file);
+    fn nettest_defer_nat_state() -> bool;
+    fn nettest_release_nat_state();
+    fn nettest_netif_hold(r: *mut nt_netif_ref, nif: *mut netif) -> bool;
+    fn nettest_netif_ref_put(r: *mut nt_netif_ref);
+    fn nettest_tap_set_after_purge(run: extern "C" fn(*mut void), arg: *mut void);
+    fn nettest_seed_arp(nif: *mut netif, peerIp: u32, peerMac: *u8);
+    fn nettest_build_udp(
+        buf: *mut u8,
+        dstmac: *u8,
+        srcmac: *u8,
+        sip: u32,
+        dip: u32,
+        ttl: u8,
+        sport: u16,
+        dport: u16,
+        pl: *u8,
+        pllen: u32,
+    ) -> u32;
+    fn nettest_recv_ip(t: *mut tap) -> *mut mbuf;
+    fn nettest_mk_udp(l4: *mut u8, sip: u32, dip: u32, sp: u16, dp: u16, pl: *u8, pllen: u16) -> u16;
+    fn nettest_wrap(
+        frame: *mut u8,
+        dmac: *u8,
+        smac: *u8,
+        sip: u32,
+        dip: u32,
+        ttl: u8,
+        proto: u8,
+        l4: *void,
+        l4len: u16,
+    ) -> u32;
+    fn nettest_fwt_send(
+        from: *mut file,
+        tapmac: *u8,
+        gmac: *u8,
+        sip: u32,
+        dip: u32,
+        proto: u8,
+        l4: *u8,
+        l4len: u16,
+    ) -> bool;
+    fn selftest_defer(run: extern "C" fn(*mut void), arg: *mut void) -> bool;
+    fn selftest_forget(arg: *mut void) -> bool;
+
+    fn tap_netif(t: *mut tap) -> *mut netif;
+    fn tap_inject(t: *mut tap, frame: *void, len: u32) -> i32;
+    fn tap_recv(t: *mut tap) -> *mut mbuf;
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_rx(nif: *mut netif, m: *mut mbuf);
+    fn netif_set_forward(nif: *mut netif, on: bool);
+    fn netif_set_masquerade(nif: *mut netif, on: bool);
+    fn net_workers_barrier();
+    fn ipv4_get_stats(out: *mut ip_stats);
+    fn ipv4_test_hold_forward(on: bool);
+    fn ipv4_test_forward_parked() -> bool;
+    fn ipv4_test_release_forward();
+    fn nat_flush();
+    fn nat_get_stats(out: *mut nat_stats);
+    fn nat_flow_list(out: *mut nat_flow, max: u32, now: u64) -> u32;
+    fn fw_flush();
+    fn fw_flow_list(out: *mut fw_flow_info, max: u32, now: u64) -> u32;
+    fn random_ready() -> bool;
+    fn tcp_test_cookie_mark_unseeded();
+    fn tcp_test_cookie_make() -> u32;
+    fn tcp_test_cookie_seeded() -> bool;
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_exit(code: i32);
+    fn thread_sleep_ns(ns: u64);
+    fn clock_now_ns() -> u64;
+}
+
+// ---- syscall.h, ip.h, ether.h, nat.h, fw.h and thread.h values (asserted against the headers in nettest.c) ----
+
+const O_RDWR: u32 = 0x0002;
+const O_NONBLOCK: u32 = 0x0800;
+const IPPROTO_UDP: u8 = 17;
+const ETH_HLEN: usize = 14;
+/// ETH_HLEN + sizeof(struct ipv4_hdr): what the tests read of a frame, the IPv4 source at ETH_HLEN + 12.
+const HDR: u32 = 34;
+const NAT_TABLE_SIZE: u32 = 256;
+const FW_FLOW_MAX: u32 = 320;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const MS: u64 = 1000000;
+/// 255.255.255.0 in network order, as it lies in a little-endian u32.
+const MASK24_N: u32 = 0x00ffffff;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * MS);
+    }
+}
+
+/// Safety: the monotonic clock.
+fn now() -> u64 => unsafe { clock_now_ns() };
+
+fn macAt(m: borrow [u8; 6]) -> *u8 => m as *[u8; 6] as *u8;
+
+fn wordOf(b: Slice<u8>, at: usize) -> u32 => (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) |
+    ((b[at + 3] as u32) << 24);
+
+fn tooSmall() {
+    var buffer: [u8; 64] = [0; 64];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("nettest: a scratch is too small");
+    KernelLog.panic(line);
+}
+
+// The tests' rooms, off the stack: the runner runs one test at a time.
+static mut FRAME: [u8; 128] = [0; 128];
+static mut L4: [u8; 32] = [0; 32];
+static mut STATS: [u64; 128] = [0; 128];
+static mut NAT_FLOWS: [u64; 1024] = [0; 1024];
+static mut FW_FLOWS: [u64; 1536] = [0; 1536];
+
+/// Safety: the runner runs one test at a time, so the rooms are this test's.
+fn frame() -> *mut u8 => unsafe { borrow mut FRAME as *mut [u8; 128] as *mut u8 };
+
+/// Safety: as frame.
+fn l4() -> *mut u8 => unsafe { borrow mut L4 as *mut [u8; 32] as *mut u8 };
+
+/// Scratch `i` of STATS, for a struct of `bytes`.
+/// Safety: as frame.
+unsafe fn statsRoom(i: usize, bytes: usize) -> *mut u8 {
+    if (bytes > 512) {
+        tooSmall();
+    }
+    return (borrow mut STATS as *mut [u64; 128] as *mut u8).add(i * 512);
+}
+
+/// NAT's new outbound translations.
+/// Safety: as statsRoom.
+unsafe fn natNew() -> u64 {
+    let p = statsRoom(0, layoutOf<nat_stats>().size) as *mut nat_stats;
+    nat_get_stats(p);
+    return Ptr.toBorrow(p as *nat_stats).out_new;
+}
+
+/// IPv4's forwarded datagrams the anti-spoof refused.
+/// Safety: as statsRoom.
+unsafe fn fwdSpoofed() -> u64 {
+    let p = statsRoom(1, layoutOf<ip_stats>().size) as *mut ip_stats;
+    ipv4_get_stats(p);
+    return Ptr.toBorrow(p as *ip_stats).fwd_spoofed;
+}
+
+// ---- net-netif-flags ----
+//
+// ipv4_input reads the ingress interface's nif->flags once, and ipv4_forward the egress's once, and every check of the
+// packet -- the anti-spoof, the forwarding firewall's direction, whether to masquerade -- is made from those readings.
+// Until 2026-10-07 each check read the word again, so a toggle of masquerade landing between two of them gave one
+// packet half of each state: anti-spoofed as a plain forwarder (any source on the subnet passes), then masqueraded (a
+// source the masquerade anti-spoof would have refused, translated). The park hook holds a packet exactly there while
+// the test flips the flag; a stream under a toggling thread checks the same rule without the hook.
+
+// The toggler (the C's struct flags_toggler, in the test's frame): its interface, written before its thread is
+// created; its stop flag; its flips, read after it is joined.
+static mut TG_NIF: usize = 0;
+static TG_STOP: AtomicU32 = AtomicU32.constant(0);
+static mut TG_FLIPS: u32 = 0;
+
+/// Flip masquerade every millisecond until told to stop, then leave it off.
+/// Safety: TG_NIF is the test's registered interface.
+@callback
+unsafe fn togglerMain(arg: *mut void) {
+    var on = false;
+    while (TG_STOP.loadWith(LoadOrdering.Relaxed) == 0) {
+        on = !on;
+        netif_set_masquerade(TG_NIF as *mut netif, on);
+        TG_FLIPS += 1;
+        sleepMs(1);
+    }
+    netif_set_masquerade(TG_NIF as *mut netif, false);
+    thread_exit(0);
+}
+
+/// Inject a datagram from `src` on `g`, parked in ipv4_forward between the anti-spoof and the masquerade decision;
+/// flip masquerade to `masq` while it is parked; release it. True when it was parked.
+/// Safety: `g` is the test's tap; the debug build's hook.
+unsafe fn injectParked(
+    g: *mut tap,
+    gmac: borrow [u8; 6],
+    smac: borrow [u8; 6],
+    src: u32,
+    dst: u32,
+    masq: bool,
+) -> bool {
+    let payload: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    ipv4_test_hold_forward(true);
+    let len = nettest_build_udp(
+        frame(),
+        macAt(gmac),
+        macAt(smac),
+        src,
+        dst,
+        64,
+        4100,
+        5100,
+        borrow payload as *[u8; 8] as *u8,
+        8,
+    );
+    if (tap_inject(g, frame() as *void, len) != 0) {
+        ipv4_test_hold_forward(false);
+        return false;
+    }
+    var parked = false;
+    for (i in 0..1000) {
+        if (parked) {
+            break;
+        }
+        parked = ipv4_test_forward_parked();
+        if (!parked) {
+            sleepMs(1);
+        }
+    }
+    netif_set_masquerade(tap_netif(g), masq);
+    ipv4_test_release_forward();
+    ipv4_test_hold_forward(false);
+    return parked;
+}
+
+/// The source address of the next IPv4 frame on `u`, or 0 for none.
+/// Safety: `u` is the test's tap.
+unsafe fn recvSrc(u: *mut tap) -> u32 {
+    let out = nettest_recv_ip(u);
+    if (out.isNull()) {
+        return 0;
+    }
+    var hdr: [u8; 34] = [0; 34];
+    var src: u32 = 0;
+    if (m_copydata(out as *mbuf, 0, HDR, borrow mut hdr as *mut [u8; 34] as *mut void)) {
+        src = wordOf(hdr[..], ETH_HLEN + 12);
+    }
+    m_freem(out);
+    return src;
+}
+
+/// What came out of `u` so far: IPv4 frames counted, those masqueraded (from `uIp`) and those from neither `uIp` nor
+/// `other`.
+struct Tally {
+    got: u32;
+    masqueraded: u32;
+    foreign: u32;
+}
+
+/// Safety: `u` is the test's tap.
+unsafe fn tally(u: *mut tap, uIp: u32, other: u32, t: borrow mut Tally) {
+    var m = tap_recv(u);
+    while (!m.isNull()) {
+        var hdr: [u8; 34] = [0; 34];
+        if (m_copydata(m as *mbuf, 0, HDR, borrow mut hdr as *mut [u8; 34] as *mut void) && hdr[12] == 0x08 &&
+            hdr[13] == 0x00) {
+            let s = wordOf(hdr[..], ETH_HLEN + 12);
+            t.got += 1;
+            if (s == uIp) {
+                t.masqueraded += 1;
+            } else if (s != other) {
+                t.foreign += 1;
+            }
+        }
+        m_freem(m);
+        m = tap_recv(u);
+    }
+}
+
+/// net-netif-flags: a packet follows one reading of its interface's flag word, parked or streamed under a toggle.
+/// Safety: the runner's `reason`; the debug build's hook.
+@cfg("CONFIG_DEBUG")
+@export("selftest_net_netif_flags")
+unsafe fn netifFlags(reason: *mut *CChar) -> bool {
+    let gMac: [u8; 6] = [0x52, 0x54, 0x00, 0x05, 0x00, 0x01];
+    let uMac: [u8; 6] = [0x52, 0x54, 0x00, 0x06, 0x00, 0x01];
+    let guestMac: [u8; 6] = [0x52, 0x54, 0x00, 0x05, 0x00, 0x0f];
+    let otherMac: [u8; 6] = [0x52, 0x54, 0x00, 0x05, 0x00, 0x14];
+    let peerMac: [u8; 6] = [0x52, 0x54, 0x00, 0x06, 0x00, 0x63];
+    let gIp = ip4(10, 77, 5, 1);
+    let guest = ip4(10, 77, 5, 15);
+    let other = ip4(10, 77, 5, 20);
+    let uIp = ip4(10, 77, 6, 1);
+    let peer = ip4(10, 77, 6, 99);
+
+    let g = nettest_tap_create("flgg\0".ptr as *CChar, gIp, MASK24_N, macAt(borrow gMac));
+    if (g.isNull()) {
+        return failed(reason, "check failed: g != NULL\0");
+    }
+    let u = nettest_tap_create("flgu\0".ptr as *CChar, uIp, MASK24_N, macAt(borrow uMac));
+    if (u.isNull()) {
+        return failed(reason, "check failed: u != NULL\0");
+    }
+    netif_set_forward(tap_netif(g), true); // a plain forwarder to begin with: masquerade off
+    nettest_seed_arp(tap_netif(u), peer, macAt(borrow peerMac));
+    nettest_seed_arp(tap_netif(g), guest, macAt(borrow guestMac));
+    nettest_seed_arp(tap_netif(g), other, macAt(borrow otherMac));
+    nat_flush();
+    let n0 = natNew();
+
+    // 1. Masquerade turned on while a datagram from .20 -- on the subnet, so the plain forwarder's anti-spoof passed
+    // it -- is parked before the masquerade decision. One reading of the word: forwarded as the forwarder it entered
+    // under, its source intact, no flow made. Two readings: masqueraded, a source the masquerade's anti-spoof refuses
+    // translated and given a NAT flow.
+    if (!injectParked(g, borrow gMac, borrow otherMac, other, peer, true)) {
+        return failed(reason, "check failed: flags_inject_parked(g, g_mac, other_mac, other, peer, true)\0");
+    }
+    var src = recvSrc(u);
+    if (src == 0) {
+        return failed(reason, "check failed: src != 0\0");
+    }
+    if (src != other) { // two readings masquerade it: src == u_ip
+        return failed(reason, "check failed: src == other\0");
+    }
+    if (natNew() != n0) {
+        return failed(reason, "check failed: n1.out_new == n0.out_new\0");
+    }
+
+    // 2. The mirror: masquerade turned off while the guest's (.15) datagram is parked. One reading: masqueraded, the
+    // state it entered under.
+    if (!injectParked(g, borrow gMac, borrow guestMac, guest, peer, false)) {
+        return failed(reason, "check failed: flags_inject_parked(g, g_mac, guest_mac, guest, peer, false)\0");
+    }
+    src = recvSrc(u);
+    if (src != uIp) {
+        return failed(reason, "check failed: src == u_ip\0");
+    }
+    if (natNew() != n0 + 1) {
+        return failed(reason, "check failed: n1.out_new == n0.out_new + 1\0");
+    }
+    netif_set_masquerade(tap_netif(g), false);
+
+    // 3. A stream from .20 while another thread flips masquerade every millisecond, no hook. Each datagram is either
+    // forwarded with its own source (the forwarder's treatment) or refused by the masquerade's anti-spoof (the
+    // masquerader's); none is masqueraded, and no flow is made for .20.
+    TG_NIF = tap_netif(g) as usize;
+    TG_STOP.storeWith(0, StoreOrdering.Relaxed);
+    TG_FLIPS = 0;
+    let th = thread_create(togglerMain, 0 as *mut void, "flags-toggle\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    if (th.isNull()) {
+        return failed(reason, "check failed: th != NULL\0");
+    }
+    let payload: [u8; 8] = [9, 8, 7, 6, 5, 4, 3, 2];
+    var sent: u32 = 0;
+    var t = Tally { got: 0, masqueraded: 0, foreign: 0 };
+    let i0 = fwdSpoofed();
+    for (k in 0..300) {
+        let i = truncate<u32>(k);
+        let sport = truncate<u16>(4200 + (i & 63));
+        let len = nettest_build_udp(
+            frame(),
+            macAt(borrow gMac),
+            macAt(borrow otherMac),
+            other,
+            peer,
+            64,
+            sport,
+            5100,
+            borrow payload as *[u8; 8] as *u8,
+            8,
+        );
+        if (tap_inject(g, frame() as *void, len) == 0) {
+            sent += 1;
+        }
+        tally(u, uIp, other, mut t);
+        if ((i & 7) == 7) {
+            sleepMs(1);
+        }
+    }
+    TG_STOP.storeWith(1, StoreOrdering.Relaxed);
+    thread_join(th);
+    for (i in 0..30) { // what the worker forwarded after the last inject
+        tally(u, uIp, other, mut t);
+        sleepMs(10);
+    }
+    let i1 = fwdSpoofed();
+    let n1 = natNew();
+    if (sent != 300) {
+        return failed(reason, "check failed: sent == 300\0");
+    }
+    if (t.masqueraded != 0) {
+        return failed(reason, "check failed: masqueraded == 0\0");
+    }
+    if (t.foreign != 0) {
+        return failed(reason, "check failed: foreign == 0\0");
+    }
+    let refused = i1 - i0;
+    if ((t.got as u64) + refused != (sent as u64)) { // every datagram: forwarded intact or refused
+        return failed(reason, "check failed: got + (i1.fwd_spoofed - i0.fwd_spoofed) == sent\0");
+    }
+    if (n1 != n0 + 1) { // still only the guest's flow
+        return failed(reason, "check failed: n1.out_new == n0.out_new + 1 (after the stream)\0");
+    }
+    if (t.got < 1 || i1 <= i0) { // both treatments occurred
+        return failed(reason, "check failed: got >= 1 && i1.fwd_spoofed > i0.fwd_spoofed\0");
+    }
+
+    var buffer: [u8; 224] = [0; 224];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-netif-flags: a toggle parked between two checks follows one reading of the word; ");
+    line.decimal(sent as u64);
+    line.text(" datagrams under ");
+    line.decimal(TG_FLIPS as u64);
+    line.text(" flips: ");
+    line.decimal(t.got as u64);
+    line.text(" forwarded intact, ");
+    line.decimal(refused);
+    line.text(" refused, none masqueraded");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- net-tap-release-order ----
+//
+// tap_chr_release purged the guest's NAT and firewall state and then destroyed the tap; a frame the guest wrote before
+// its last close, still on a worker's queue, was masqueraded in between and its translation outlived the tap -- the
+// next tap given the subnet inherited it (fuzz_net_config). The seam delivers such a frame through the tap's interface
+// just after the purges and waits for the workers: nothing may name the guest when the close returns.
+
+// The seam's state (the C's static struct tro_ctx): the interface held across the close, the frame and its length,
+// written before the seam is armed; how many times netif_rx was offered the frame.
+static mut TRO_NIF: usize = 0;
+static mut TRO_FRAME: [u8; 128] = [0; 128];
+static mut TRO_FLEN: u32 = 0;
+static mut TRO_DELIVERED: u32 = 0;
+static mut TRO_HELD: nt_netif_ref = nt_netif_ref { nif: 0 as *mut netif };
+
+/// The seam's key for the runner: its state, by address.
+/// Safety: the address of a static; nothing is read through it here.
+fn troKey() -> *mut void => unsafe { borrow mut TRO_DELIVERED as *mut u32 as *mut void };
+
+/// After the purges: the frame through the tap's own path in (tap_inject's), then whatever the stack makes of it is
+/// made.
+/// Safety: the TRO_ statics are written before the seam is armed; the release calls it on its thread.
+@callback
+unsafe fn troAfterPurge(arg: *mut void) {
+    let m = m_getcl();
+    if (m.isNull()) {
+        return;
+    }
+    let r = Ptr.toBorrowMut(m);
+    let to = SliceMut.fromRaw(r.data, TRO_FLEN as usize);
+    for (i in 0..to.length) {
+        to[i] = TRO_FRAME[i];
+    }
+    r.len = TRO_FLEN;
+    r.pkt.len = TRO_FLEN;
+    netif_rx(TRO_NIF as *mut netif, m);
+    TRO_DELIVERED += 1;
+    net_workers_barrier();
+}
+
+/// Disarm the seam, however the test returns.
+/// Safety: the debug build's seam.
+@callback
+unsafe fn troDisarm(arg: *mut void) {
+    nettest_tap_set_after_purge(0 as extern "C" fn(*mut void), 0 as *mut void);
+}
+
+/// How many NAT translations and firewall flows name `guest`.
+/// Safety: the runner runs one test at a time, so the listing rooms are this test's.
+unsafe fn naming(guest: u32) -> u32 {
+    let natSize = layoutOf<nat_flow>().size;
+    let fwSize = layoutOf<fw_flow_info>().size;
+    if (natSize * (NAT_TABLE_SIZE as usize) > 8192 || fwSize * (FW_FLOW_MAX as usize) > 12288) {
+        tooSmall();
+    }
+    var n: u32 = 0;
+    let nb = borrow mut NAT_FLOWS as *mut [u64; 1024] as *mut u8;
+    let nn = nat_flow_list(nb as *mut nat_flow, NAT_TABLE_SIZE, now());
+    for (i in 0..nn as usize) {
+        if (Ptr.toBorrow(nb.add(i * natSize) as *nat_flow).orig_ip == guest) {
+            n += 1;
+        }
+    }
+    let fb = borrow mut FW_FLOWS as *mut [u64; 1536] as *mut u8;
+    let nf = fw_flow_list(fb as *mut fw_flow_info, FW_FLOW_MAX, now());
+    for (i in 0..nf as usize) {
+        let f = Ptr.toBorrow(fb.add(i * fwSize) as *fw_flow_info);
+        if (f.guest_ip == guest || f.a_ip == guest || f.b_ip == guest) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// net-tap-release-order: a frame offered after a tap's purges, before its release ends, makes nothing.
+/// Safety: the runner's `reason`; the debug build's seam.
+@cfg("CONFIG_DEBUG")
+@export("selftest_net_tap_release_order")
+unsafe fn tapReleaseOrder(reason: *mut *CChar) -> bool {
+    fw_flush();
+    nat_flush();
+    if (!nettest_defer_nat_state()) {
+        return failed(reason, "check failed: selftest_defer(nt_rel_nat_state, &g_nat_state_marker)\0");
+    }
+    var fa = 0 as *mut file;
+    if (nettest_vfs_open("/dev/net/tap\0".ptr as *CChar, O_RDWR | O_NONBLOCK, borrow mut fa as *mut *mut file) != 0 ||
+        fa.isNull()) {
+        return failed(reason, "check failed: nt_vfs_open(\"/dev/net/tap\") == 0 && fa != NULL\0");
+    }
+    let ga = ip4(10, 0, 3, 15);
+    let world = ip4(10, 0, 2, 2);
+    let amac: [u8; 6] = [0x52, 0x54, 0x00, 0x0d, 0x01, 0x0a];
+    let tap0mac: [u8; 6] = [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc];
+    TRO_DELIVERED = 0;
+    TRO_FLEN = 0;
+    let nif = netif_find("tap0\0".ptr as *CChar);
+    TRO_NIF = nif as usize;
+    if (nif.isNull() || !nettest_netif_hold(borrow mut TRO_HELD as *mut nt_netif_ref, nif)) {
+        return failed(reason, "check failed: c.nif != NULL && nt_netif_hold(&held, c.nif)\0");
+    }
+    if (Ptr.toBorrow(nif as *netif).ip4.addr != ip4(10, 0, 3, 1)) {
+        return failed(reason, "check failed: c.nif->ip4.addr == IPV4_ADDR(10, 0, 3, 1)\0");
+    }
+    nettest_seed_arp(nif, ga, macAt(borrow amac));
+
+    // The control: the same frame before the close is masqueraded.
+    let pl: [u8; 4] = [1, 2, 3, 4];
+    let l4len = nettest_mk_udp(l4(), ga, world, 7100, 53, borrow pl as *[u8; 4] as *u8, 4);
+    TRO_FLEN = nettest_wrap(
+        borrow mut TRO_FRAME as *mut [u8; 128] as *mut u8,
+        macAt(borrow tap0mac),
+        macAt(borrow amac),
+        ga,
+        world,
+        64,
+        IPPROTO_UDP,
+        l4() as *void,
+        l4len,
+    );
+    if (!nettest_fwt_send(fa, macAt(borrow tap0mac), macAt(borrow amac), ga, world, IPPROTO_UDP, l4() as *u8, l4len)) {
+        return failed(reason, "check failed: nettest_fwt_send(fa, tap0mac, amac, ga, world, IPPROTO_UDP, l4, l4len)\0");
+    }
+    net_workers_barrier();
+    let before = naming(ga);
+    if (before == 0) { // a translation (and a flow) for the guest: the frame is one that makes state
+        return failed(reason, "check failed: before > 0\0");
+    }
+    nat_flush();
+    fw_flush();
+    if (naming(ga) != 0) {
+        return failed(reason, "check failed: tro_naming(ga) == 0\0");
+    }
+
+    if (!selftest_defer(troDisarm, troKey())) {
+        return failed(reason, "check failed: selftest_defer(tro_disarm, &c)\0");
+    }
+    nettest_tap_set_after_purge(troAfterPurge, 0 as *mut void);
+    nettest_file_put(fa); // the last close: the release, and the seam inside it
+    troDisarm(0 as *mut void);
+    selftest_forget(troKey());
+    if (TRO_DELIVERED != 1) {
+        return failed(reason, "check failed: c.delivered == 1\0");
+    }
+    let left = naming(ga);
+    if (left != 0) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: net-tap-release-order: ");
+        line.decimal(left as u64);
+        line.text(" NAT entr(ies)/flow(s) name the released guest");
+        KernelLog.send(LogLevel.Error, line);
+        return failed(reason, "check failed: left == 0\0");
+    }
+    nettest_release_nat_state();
+    nettest_netif_ref_put(borrow mut TRO_HELD as *mut nt_netif_ref);
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: net-tap-release-order: a frame offered after the purges made nothing (the control made ");
+    line.decimal(before as u64);
+    line.text(")");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- net-syncookie-seeded (NET-6) ----
+//
+// tcp_init draws the SYN-cookie secret, and on a machine whose pool seeds after it -- no firmware seed, no CPU random
+// instruction -- that secret came from an unseeded pool, predictable in principle, and was kept for the life of the
+// boot. A cookie made once the pool is seeded must use a secret drawn from it. The seam marks the current secret as
+// drawn unseeded, the case such a machine starts in.
+
+/// One line to the kernel log.
+fn info(text: StringView) {
+    var buffer: [u8; 128] = [0; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// net-syncookie-seeded: a cookie made on a seeded pool uses a secret drawn from it.
+/// Safety: the runner's `reason`; the self-test build's seam.
+@cfg("CONFIG_SELFTEST")
+@export("selftest_net_syncookie_seeded")
+unsafe fn syncookieSeeded(reason: *mut *CChar) -> bool {
+    if (!random_ready()) {
+        info("selftest: net-syncookie-seeded: the pool never seeded (S19 warned); skipping");
+        return true;
+    }
+    tcp_test_cookie_mark_unseeded();
+    tcp_test_cookie_make();
+    if (!tcp_test_cookie_seeded()) { // main keeps tcp_init's secret, seeded or not
+        return failed(reason, "check failed: tcp_test_cookie_seeded()\0");
+    }
+    info("selftest: net-syncookie-seeded: a cookie made on a seeded pool used a secret drawn from it");
+    return true;
+}

@@ -86,6 +86,9 @@ bool nettest_lo_tcp_backlog(const char **reason, uint16_t port, bool force, bool
  * (selftest.h names both nettest_census). */
 struct nettest_census;
 void nettest_census_take(struct nettest_census *out);
+/* tap.h's after-purge seam, set for nettest_seam.cee (debug builds; NULL
+ * disarms). */
+void nettest_tap_set_after_purge(void (*fn)(void *), void *arg);
 
 /* nettest_lo.cee: move `bytes` of a pattern to a sink thread on `addr` and
  * check the connection's end, lingering `linger_ms` past it (net-lo-tcp,

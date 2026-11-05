@@ -1132,7 +1132,12 @@ debug-only, the C's skips kept), with the listen-backlog step net-lo-tcp
 shares and the wait they used. The step takes the debug build's ACK hold
 as function parameters, so its all-builds export names no debug hook; a
 one-line `nettest_census_take` lets CeeSafe import the census beside its
-struct, which selftest.h gives the same name.
+struct, which selftest.h gives the same name. Batch 19, `nettest_seam.cee`:
+net-netif-flags, net-tap-release-order (debug-only) and
+net-syncookie-seeded (CONFIG_SELFTEST-only), the C's skips kept; tap.h's
+after-purge seam is two C variables CeeSafe cannot assign, so `nettest.c`
+gains `nettest_tap_set_after_purge`, and the toggler's and the seam's state
+are static.
 
 Size: about 3.0x.
 
