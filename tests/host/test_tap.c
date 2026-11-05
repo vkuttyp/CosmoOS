@@ -733,12 +733,11 @@ static void op_close(void)
         return;
     }
     static unsigned tag = 9;
-    tap_test_after_purge = pick(2) ? after_purge : NULL;
-    tap_test_after_purge_arg = &tag;
+    tap_test_set_after_purge(pick(2) ? after_purge : NULL, &tag);
     g_tap_ops->release(NULL, &g_files[i]);
     EXPECT(g_files[i].priv == NULL);
     g_open[i] = false;
-    tap_test_after_purge = NULL;
+    tap_test_set_after_purge(NULL, NULL);
     note(42, i);
 }
 
