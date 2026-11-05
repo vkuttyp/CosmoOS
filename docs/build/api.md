@@ -28,7 +28,13 @@ Purpose: build one component. Same inputs and failures as `all`.
 Purpose: assemble the boot medium.
 Inputs: the two binaries; `mformat`, `mmd`, `mcopy` on the PATH.
 Outputs: `$(OUT)/cosmoos.img`, a 64 MiB FAT32 image containing
-`/EFI/BOOT/BOOTX64.EFI` and `/cosmo/kernel.elf`.
+`/EFI/BOOT/BOOTX64.EFI` and `/cosmo/kernel.elf`. A release build's
+`/cosmo/kernel.elf`, like the manifest's and the release set's, is
+`$(OUT)/kernel/kernel.ship.elf`: `kernel.elf` without its debug
+sections (`llvm-objcopy --strip-debug`), since an upgrade holds two
+sets on the 64 MiB ESP at once. Its loaded bytes, symbols and addresses
+are `kernel.elf`'s, which crash logs are symbolized against. A debug
+build ships `kernel.elf` itself.
 Failure: mtools missing (`check-tools` reports it) or a write error;
 the image is built as `cosmoos.img.tmp` and renamed only on success.
 

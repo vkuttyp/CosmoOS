@@ -136,14 +136,14 @@ $(CMDLINE_FILE): FORCE
 # mkmanifest.py, docs/boot/design.md "Verified boot"), with the key that
 # signs modules: the loader trusts the ring the kernel trusts.
 MANIFEST := $(OUT)/manifest
-$(MANIFEST): $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MODSIGN_KEY) $(SIGNING_STAMP) $(ROOT)/scripts/mkmanifest.py \
+$(MANIFEST): $(KERNEL_SHIP_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MODSIGN_KEY) $(SIGNING_STAMP) $(ROOT)/scripts/mkmanifest.py \
 		$(ROOT)/scripts/modsign.py
 	$(call log,MANIFEST,$@)
-	$(Q)$(PYTHON) $(ROOT)/scripts/mkmanifest.py sign --key $(MODSIGN_KEY) --out $@ $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE)
+	$(Q)$(PYTHON) $(ROOT)/scripts/mkmanifest.py sign --key $(MODSIGN_KEY) --out $@ $(KERNEL_SHIP_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE)
 
-$(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(ROOT)/scripts/mkimage.sh $(ROOT)/scripts/mkgpt.py
+$(IMAGE): $(KERNEL_SHIP_ELF) $(LOADER_EFI) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(ROOT)/scripts/mkimage.sh $(ROOT)/scripts/mkgpt.py
 	$(call log,IMAGE,$@)
-	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST)
+	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_SHIP_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST)
 
 # Roadmap M6 (docs/development.md, "Releases"): one architecture's release
 # set -- the signed live image, the loader, kernel.elf, boot.tar, the
@@ -160,11 +160,11 @@ release:
 
 UPGRADE_ELF = $(call prog_elf,cosmo-upgrade)
 VERIFY_ELF = $(call prog_elf,cosmo-verify)
-release-set: $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(UPGRADE_ELF) $(VERIFY_ELF) \
+release-set: $(IMAGE) $(LOADER_EFI) $(KERNEL_SHIP_ELF) $(BOOT_ARCHIVE) $(CMDLINE_FILE) $(MANIFEST) $(UPGRADE_ELF) $(VERIFY_ELF) \
 		$(COSMO_FETCH_ELF) \
 		$(ROOT)/scripts/mkrelease.py $(ROOT)/tools/pkgbuild.py $(ROOT)/scripts/modsign.py
 	$(call log,RELEASE,$(RELEASE_DIR))
-	$(Q)$(PYTHON) $(ROOT)/scripts/mkrelease.py $(ARCH) $(RELEASE_DIR) $(IMAGE) $(LOADER_EFI) $(KERNEL_ELF) \
+	$(Q)$(PYTHON) $(ROOT)/scripts/mkrelease.py $(ARCH) $(RELEASE_DIR) $(IMAGE) $(LOADER_EFI) $(KERNEL_SHIP_ELF) \
 		$(BOOT_ARCHIVE) $(MANIFEST) $(CMDLINE_FILE) $(UPGRADE_ELF) $(VERIFY_ELF) $(COSMO_FETCH_ELF) $(MODSIGN_KEY) $(PKGSIGN_KEY) \
 		$(BUILD_ID)
 
@@ -415,7 +415,7 @@ test-snapshot: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/snapshot_test.py --image $(IMAGE) --workdir $(OUT)/test-snapshot \
 		--timeout $(BOOT_TIMEOUT) --key $(MODSIGN_KEY) \
-		--stop-kernel $(OUT)-stop/kernel/kernel.elf --stop-boot-tar $(OUT)-stop/boot.tar
+		--stop-kernel $(OUT)-stop/kernel/$(notdir $(KERNEL_SHIP_ELF)) --stop-boot-tar $(OUT)-stop/boot.tar
 
 # Roadmap 1.2 B2's acceptance test (tests/boot/fsck_test.py,
 # docs/kernel-services/filesystem/cosmofs/testing.md, "test-fsck"): an

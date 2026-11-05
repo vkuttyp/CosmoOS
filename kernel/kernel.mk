@@ -304,6 +304,19 @@ $(KERNEL_ELF): $(KERNEL_OBJS) $(KERNEL_LINKER_SCRIPT)
 
 kernel: $(KERNEL_ELF)
 
+# The kernel the image, the manifest and the release set carry. A release
+# build's is kernel.elf without its debug info: the ESP is 64 MiB on every
+# installed system (v1.0.3 on), and an upgrade holds two sets there at once
+# (\cosmo and the new one), which the DWARF of the CeeSafe ports' generated
+# C (most of kernel.elf's 12 MB) no longer let fit. Only debug sections go,
+# so its loaded image, symbols and addresses are kernel.elf's: crash logs
+# symbolize against kernel.elf as before. A debug build ships kernel.elf.
+KERNEL_SHIP_ELF := $(if $(filter release,$(BUILD)),$(OUT)/kernel/kernel.ship.elf,$(KERNEL_ELF))
+
+$(OUT)/kernel/kernel.ship.elf: $(KERNEL_ELF)
+	$(call log,STRIP,$@)
+	$(Q)$(OBJCOPY) --strip-debug $< $@
+
 -include $(KERNEL_OBJS:.o=.d)
 
 # compat/linux/lxconv.c is generated from lxconv.cee into out/cee (scripts/cee-gen.py), away from the convert.h it
