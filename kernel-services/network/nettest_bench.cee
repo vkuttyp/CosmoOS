@@ -1,0 +1,561 @@
+// nettest_bench.cee - the loopback benchmark, in CeeSafe: roadmap 2.0 SA6 (nettest, the twenty-second batch). net-bench,
+// as nettest.c had it (unit 11): loopback TCP throughput with one and with two concurrent flows, and UDP datagrams per
+// second, each with steering off (the single-queue architecture) and on. It reports and never fails on timing.
+//
+// The sinks', clients' and receiver's state (the C's structs in the bench's frame, each a thread's argument) are
+// static, indexed by flow, so no thread outlives what it reads; their buffers are static too, where the C's threads
+// took 16 KiB each from kmalloc. The per-round reset of the RTO backoff's maximum is a self-test build's seam, the C's
+// `#if CONFIG_SELFTEST`, here compiler.h's constant macro read into a static, which the C compiler folds.
+
+@header("nettest.h", "kernel/compiler.h", "kernel/net/inet.h", "kernel/net/tcp.h", "kernel/netif.h", "kernel/percpu.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
+extern "C" {
+    struct socket;
+    struct netaddr;
+    struct thread;
+    struct netif_stats {
+        rx_dropped: u64;
+        tx_dropped: u64;
+    }
+    struct netif {
+        stats: netif_stats;
+    }
+    struct net_cpu_stats {
+        rx_dropped: u64;
+    }
+    struct tcp_stats {
+        segs_in: u64;
+        segs_out: u64;
+        retransmits: u64;
+        out_of_order: u64;
+        timeouts: u64;
+        ooo_queued: u64;
+        ooo_dropped: u64;
+        rto_fires: u64;
+        rto_backoff_max: u64;
+        fast_retransmits: u64;
+        rto_wait_ns: u64;
+    }
+
+    /// compiler.h: whether this is a self-test build (CONFIG_SELFTEST).
+    @constant
+    fn COSMO_CONFIG_SELFTEST() -> bool;
+
+    fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_put(s: *mut socket);
+    fn nettest_netif_set_steering(on: bool);
+
+    fn ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_bind(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_listen(s: *mut socket, backlog: i32) -> i32;
+    fn ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn ksock_connect(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn ksock_recvfrom(s: *mut socket, buf: *mut void, len: usize, from: *mut netaddr) -> i64;
+    fn ksock_shutdown(s: *mut socket, how: i32) -> i32;
+    fn ksock_set_nonblock(s: *mut socket, on: bool);
+    fn ksock_put(s: *mut socket);
+    fn tcp_get_stats(out: *mut tcp_stats);
+    fn tcp_test_reset_rto_backoff_max();
+    fn netif_cpu_stats(cpu: u32, out: *mut net_cpu_stats) -> bool;
+    fn netif_loopback() -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn cpu_count() -> u32;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_exit(code: i32);
+    fn thread_sleep_ns(ns: u64);
+    fn sched_yield();
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn clock_deadline_ns(budget: u64) -> u64;
+    fn clock_deadline_passed(deadline: u64) -> bool;
+}
+
+// ---- syscall.h, percpu.h, thread.h and the bench's values (asserted against the headers in nettest.c) ----
+
+const AF_INET: u32 = 2;
+const AF_INET_I32: i32 = 2;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
+const SHUT_RD: i32 = 0;
+const SHUT_WR: i32 = 1;
+const CONFIG_MAX_CPUS: usize = 64;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const BENCH_TCP_WINDOW_NS: u64 = 300000000;
+const BENCH_UDP_WINDOW_NS: u64 = 300000000;
+const BUF: usize = 16384;
+const MS: u64 = 1000000;
+const NS_PER_SEC: u64 = 1000000000;
+const MIB: u64 = 1048576;
+/// INADDR_LOOPBACK_N: 127.0.0.1 in network order, as it lies in a little-endian u32.
+const LOOPBACK_N: u32 = 0x0100007f;
+
+static SELFTEST: bool = COSMO_CONFIG_SELFTEST();
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * MS);
+    }
+}
+
+/// A struct netaddr for 127.0.0.1:`port`, as five words (its size and alignment, asserted in nettest.c): the family and
+/// the port (host order) in the first, as they lie in a little-endian u32, then the address.
+fn loopback(port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), LOOPBACK_N, 0, 0, 0];
+
+// ---- The flows' state (the C's struct bench_sink and struct bench_client, one per flow) ----
+
+static mut ADDR: [u32; 10] = [0; 10]; // flow i's sink address, words 5 i .. 5 i + 4
+static mut SINK_BYTES: [u32; 2] = [0; 2];
+static mut SINK_ERR: [i32; 2] = [0; 2];
+static mut SENT: [u32; 2] = [0; 2];
+static mut CLIENT_ERR: [i32; 2] = [0; 2];
+static mut TOOK_NS: [u64; 2] = [0; 2]; // from the connection to the shutdown, measured by the client
+static mut SINK_BUF: [u8; 32768] = [0; 32768];
+static mut CLIENT_BUF: [u8; 32768] = [0; 32768];
+
+/// Flow `i`'s sink address.
+/// Safety: the flows' statics are written before their threads are created.
+unsafe fn addrOf(i: usize) -> *netaddr => (borrow ADDR as *[u32; 10] as *u32).add(i * 5) as *netaddr;
+
+/// The sink: accept one connection on flow `arg`'s address and count what arrives until it ends.
+/// Safety: `arg` is the flow's index; its statics are this thread's until it is joined.
+@callback
+unsafe fn sinkMain(arg: *mut void) {
+    let i = arg as usize;
+    var ls = 0 as *mut socket;
+    if (ksock_create(AF_INET_I32, SOCK_STREAM, 0, borrow mut ls as *mut *mut socket) == 0) {
+        var c = 0 as *mut socket;
+        if (ksock_bind(ls, addrOf(i)) == 0 && ksock_listen(ls, 2) == 0 &&
+            ksock_accept(ls, borrow mut c as *mut *mut socket, 0 as *mut netaddr) == 0) {
+            let buf = (borrow mut SINK_BUF as *mut [u8; 32768] as *mut u8).add(i * BUF) as *mut void;
+            while (true) {
+                let n = ksock_recvfrom(c, buf, BUF, 0 as *mut netaddr);
+                if (n <= 0) {
+                    SINK_ERR[i] = truncate<i32>(n);
+                    break;
+                }
+                SINK_BYTES[i] += truncate<u32>(n);
+            }
+            ksock_put(c);
+        } else {
+            SINK_ERR[i] = -1000;
+        }
+        ksock_put(ls);
+    } else {
+        SINK_ERR[i] = -1001;
+    }
+    thread_exit(0);
+}
+
+/// The client: connect to flow `arg`'s sink and send for BENCH_TCP_WINDOW_NS, then shut down.
+/// Safety: as sinkMain.
+@callback
+unsafe fn clientMain(arg: *mut void) {
+    let i = arg as usize;
+    let buf = (borrow CLIENT_BUF as *[u8; 32768] as *u8).add(i * BUF) as *void;
+    var c = 0 as *mut socket;
+    if (ksock_create(AF_INET_I32, SOCK_STREAM, 0, borrow mut c as *mut *mut socket) == 0) {
+        let rc = ksock_connect(c, addrOf(i));
+        if (rc == 0) {
+            // The window starts here, on this thread, and is read with the deadline helpers: a client that connected
+            // late still gets its whole window, and a migration cannot shorten it.
+            let t0 = clock_now_ns();
+            let until = clock_deadline_ns(BENCH_TCP_WINDOW_NS);
+            while (!clock_deadline_passed(until)) {
+                let w = ksock_sendto(c, buf, BUF, 0 as *netaddr);
+                if (w <= 0) {
+                    CLIENT_ERR[i] = truncate<i32>(w);
+                    break;
+                }
+                SENT[i] += truncate<u32>(w);
+            }
+            TOOK_NS[i] = clock_since_ns(t0);
+            ksock_shutdown(c, SHUT_WR);
+        } else {
+            CLIENT_ERR[i] = rc;
+        }
+        ksock_put(c);
+    }
+    thread_exit(0);
+}
+
+// ---- What a round lost time to ----
+//
+// What one net-bench round lost time to (the owner's net-bench question, 2026-10-11): TCP's retransmission timeouts and
+// their backoff, fast retransmits, the time senders waited on a retransmission timer, each netrx worker's receive-queue
+// drops and loopback's own drops, and the round's wall time. Taken before and after each round.
+
+/// TCP's counters the bench reads.
+struct Tcp {
+    segsIn: u64;
+    segsOut: u64;
+    retransmits: u64;
+    outOfOrder: u64;
+    timeouts: u64;
+    oooQueued: u64;
+    oooDropped: u64;
+    rtoFires: u64;
+    rtoBackoffMax: u64;
+    fastRetransmits: u64;
+    rtoWaitNs: u64;
+}
+
+/// A round's snapshot (the C's struct bench_snap).
+struct Snap {
+    t: Tcp;
+    cpuDrop: [u64; 64];
+    loDrop: u64;
+    atNs: u64;
+}
+
+// tcp_stats's and the per-CPU statistics' rooms (checked).
+static mut TCP_ROOM: [u64; 128] = [0; 128];
+static mut CPU_ROOM: [u64; 16] = [0; 16];
+
+/// Safety: the runner runs one test at a time, so the rooms are this test's.
+unsafe fn tcpNow() -> Tcp {
+    let p = borrow mut TCP_ROOM as *mut [u64; 128] as *mut tcp_stats;
+    tcp_get_stats(p);
+    let s = Ptr.toBorrow(p as *tcp_stats);
+    return Tcp {
+        segsIn: s.segs_in,
+        segsOut: s.segs_out,
+        retransmits: s.retransmits,
+        outOfOrder: s.out_of_order,
+        timeouts: s.timeouts,
+        oooQueued: s.ooo_queued,
+        oooDropped: s.ooo_dropped,
+        rtoFires: s.rto_fires,
+        rtoBackoffMax: s.rto_backoff_max,
+        fastRetransmits: s.fast_retransmits,
+        rtoWaitNs: s.rto_wait_ns,
+    };
+}
+
+/// CPU `c`'s worker's receive-queue drops, 0 for no such worker.
+/// Safety: as tcpNow.
+unsafe fn cpuDrops(c: u32) -> u64 {
+    let p = borrow mut CPU_ROOM as *mut [u64; 16] as *mut net_cpu_stats;
+    return if (netif_cpu_stats(c, p)) Ptr.toBorrow(p as *net_cpu_stats).rx_dropped else 0;
+}
+
+/// Every worker's receive-queue drops.
+/// Safety: as tcpNow.
+unsafe fn queueDrops() -> u64 {
+    var q: u64 = 0;
+    for (c in 0..CONFIG_MAX_CPUS) {
+        q += cpuDrops(truncate<u32>(c));
+    }
+    return q;
+}
+
+/// Safety: as tcpNow.
+unsafe fn snap() -> Snap {
+    var s = Snap { t: tcpNow(), cpuDrop: [0; 64], loDrop: 0, atNs: 0 };
+    for (c in 0..CONFIG_MAX_CPUS) {
+        s.cpuDrop[c] = cpuDrops(truncate<u32>(c));
+    }
+    let lo = netif_loopback();
+    if (!lo.isNull()) {
+        let l = Ptr.toBorrow(lo as *netif);
+        s.loDrop = l.stats.rx_dropped + l.stats.tx_dropped;
+        netif_put(lo);
+    }
+    s.atNs = clock_now_ns();
+    return s;
+}
+
+/// "net-bench: <what>: ..." for a round, from its two snapshots; `flows` names a TCP round, 0 the UDP one.
+/// Safety: thread context.
+unsafe fn report(flows: u32, a: borrow Snap, b: borrow Snap) {
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("net-bench: ");
+    if (flows == 0) {
+        line.text("udp");
+    } else {
+        line.text("tcp ");
+        line.decimal(flows as u64);
+        line.text(" flow(s)");
+    }
+    line.text(": ");
+    line.decimal((b.atNs - a.atNs) / MS);
+    line.text(" ms; rto fires ");
+    line.decimal(b.t.rtoFires - a.t.rtoFires);
+    line.text(" (max backoff ");
+    line.decimal(b.t.rtoBackoffMax);
+    line.text("), fast retransmits ");
+    line.decimal(b.t.fastRetransmits - a.t.fastRetransmits);
+    line.text(", retransmits ");
+    line.decimal(b.t.retransmits - a.t.retransmits);
+    line.text(", rto wait ");
+    line.decimal((b.t.rtoWaitNs - a.t.rtoWaitNs) / MS);
+    line.text(" ms; netrx drops [");
+    let n = cpu_count();
+    for (c in 0..CONFIG_MAX_CPUS) {
+        if (truncate<u32>(c) >= n) {
+            break;
+        }
+        if (c != 0) {
+            line.text(",");
+        }
+        line.decimal(b.cpuDrop[c] - a.cpuDrop[c]);
+    }
+    line.text("], loopback drops ");
+    line.decimal(b.loDrop - a.loDrop);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// Reset the RTO backoff's maximum, per round: a TCP round's peak is not the next one's (self-test builds).
+/// Safety: thread context.
+unsafe fn resetBackoffMax() {
+    if (SELFTEST) {
+        tcp_test_reset_rto_backoff_max();
+    }
+}
+
+// ---- Rounds ----
+//
+// Each phase is a fixed time window, not a fixed amount of work (restated 2026-10-11, as net-nicbench's UDP phase was
+// in PR #317): a TCP client sends until its window closes and the sink must then have received exactly what was sent;
+// the UDP sender sends until its window closes. The rates are over the window. A fixed amount of work made the bench's
+// wall time the host's speed -- on CI's aarch64 runners 6-8 s against the 8 s hang guard with every assertion passing,
+// and neither retransmission timeouts nor drops in the slow rounds (docs/testing/flakes.md). Each round still prints
+// its counters (report).
+
+/// `flows` concurrent transfers for BENCH_TCP_WINDOW_NS each, every one of which must arrive whole; MiB/s in total --
+/// each flow's bytes over its own window, summed -- or 0 on failure.
+/// Safety: thread context.
+unsafe fn benchTcp(want: u32, port: u16) -> u32 {
+    let flows = if (want > 2) 2 else want;
+    var ts: [usize; 2] = [0; 2];
+    var tc: [usize; 2] = [0; 2];
+    for (k in 0..flows) {
+        let i = k as usize;
+        SINK_BYTES[i] = 0;
+        SINK_ERR[i] = 0;
+        let a = loopback(port + truncate<u16>(k));
+        for (w in 0..5) {
+            ADDR[i * 5 + truncate<usize>(w)] = a[truncate<usize>(w)];
+        }
+        ts[i] = thread_create(sinkMain, i as *mut void, "bench-sink\0".ptr as *CChar, SCHED_PRIO_DEFAULT) as usize;
+    }
+    sleepMs(20);
+    resetBackoffMax();
+    let sa = snap();
+    let tb = tcpNow();
+    let qb = queueDrops();
+    let t0 = clock_now_ns();
+    for (k in 0..flows) {
+        let i = k as usize;
+        SENT[i] = 0;
+        CLIENT_ERR[i] = 0;
+        TOOK_NS[i] = 0;
+        tc[i] = thread_create(clientMain, i as *mut void, "bench-client\0".ptr as *CChar, SCHED_PRIO_DEFAULT) as usize;
+    }
+    var rate: u64 = 0;
+    var whole = true;
+    for (k in 0..flows) {
+        let i = k as usize;
+        if (tc[i] != 0) {
+            thread_join(tc[i] as *mut thread);
+        }
+        if (ts[i] != 0) {
+            thread_join(ts[i] as *mut thread);
+        }
+        // Each flow on its own: no error, something sent, and exactly that received -- a failed or empty flow beside a
+        // good one is a failure, not a lower rate.
+        if (tc[i] == 0 || ts[i] == 0 || CLIENT_ERR[i] != 0 || SENT[i] == 0 ||
+            SINK_BYTES[i] != SENT[i] || TOOK_NS[i] == 0) {
+            whole = false;
+        } else {
+            rate += (SENT[i] as u64) * NS_PER_SEC / TOOK_NS[i];
+        }
+    }
+    let dt = clock_since_ns(t0);
+    let sb = snap();
+    report(flows, borrow sa, borrow sb);
+    // What a slow run lost (docs/testing/flakes.md, 2026-10-10: some CI boots run one flow at 1 MiB/s): the TCP
+    // counters and the receive queues' drops over this run.
+    let ta = tcpNow();
+    let qa = queueDrops();
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("net-bench: tcp ");
+    line.decimal(flows as u64);
+    line.text(" flow(s) in ");
+    line.decimal(dt / MS);
+    line.text(" ms: segs in ");
+    line.decimal(ta.segsIn - tb.segsIn);
+    line.text(" out ");
+    line.decimal(ta.segsOut - tb.segsOut);
+    line.text(", retransmits ");
+    line.decimal(ta.retransmits - tb.retransmits);
+    line.text(", timeouts ");
+    line.decimal(ta.timeouts - tb.timeouts);
+    line.text(", out of order ");
+    line.decimal(ta.outOfOrder - tb.outOfOrder);
+    line.text(" (queued ");
+    line.decimal(ta.oooQueued - tb.oooQueued);
+    line.text(" dropped ");
+    line.decimal(ta.oooDropped - tb.oooDropped);
+    line.text("), receive-queue drops ");
+    line.decimal(qa - qb);
+    KernelLog.send(LogLevel.Info, line);
+    if (!whole || dt == 0) {
+        for (k in 0..flows) {
+            let i = k as usize;
+            var b2: [u8; 128] = [0; 128];
+            var l2 = TextWriter.create(mut b2[..]);
+            l2.text("net-bench: flow ");
+            l2.decimal(k as u64);
+            l2.text(": sink got ");
+            l2.decimal(SINK_BYTES[i] as u64);
+            l2.text(" (err ");
+            l2.signed(SINK_ERR[i] as i64);
+            l2.text("), client sent ");
+            l2.decimal(SENT[i] as u64);
+            l2.text(" (err ");
+            l2.signed(CLIENT_ERR[i] as i64);
+            l2.text(")");
+            KernelLog.send(LogLevel.Warn, l2);
+        }
+        return 0;
+    }
+    return truncate<u32>(rate / MIB);
+}
+
+// The UDP receiver (the C's struct bench_udp_rx): its socket, written before its thread is created; what it got; its
+// stop flag.
+static mut UDP_RX: usize = 0;
+static UDP_GOT: AtomicU32 = AtomicU32.constant(0);
+static UDP_STOP: AtomicU32 = AtomicU32.constant(0);
+
+/// The receiver: count datagrams until told to stop or its socket ends.
+/// Safety: UDP_RX is the bench's socket until the thread is joined.
+@callback
+unsafe fn udpRxMain(arg: *mut void) {
+    var buf: [u8; 128] = [0; 128];
+    while (UDP_STOP.loadWith(LoadOrdering.Relaxed) == 0) {
+        let n = ksock_recvfrom(
+            UDP_RX as *mut socket,
+            borrow mut buf as *mut [u8; 128] as *mut void,
+            128,
+            0 as *mut netaddr,
+        );
+        if (n <= 0) {
+            break;
+        }
+        UDP_GOT.fetchAddWith(1, Ordering.Relaxed);
+    }
+    thread_exit(0);
+}
+
+/// The UDP round's outcome: the send rate in datagrams per second (0 on failure), and how many the receiver got of how
+/// many were sent (the socket queue holds UDP_RXQ_MAX; the rest were dropped there).
+struct UdpRound {
+    pps: u32;
+    delivered: u32;
+    sent: u32;
+}
+
+/// Datagrams to a loopback receiver for BENCH_UDP_WINDOW_NS.
+/// Safety: thread context.
+unsafe fn benchUdp(port: u16) -> UdpRound {
+    var out = UdpRound { pps: 0, delivered: 0, sent: 0 };
+    let addr = loopback(port);
+    let na = borrow addr as *[u32; 5] as *netaddr;
+    var rx = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET_I32, SOCK_DGRAM, 0, borrow mut rx as *mut *mut socket) != 0) {
+        return out;
+    }
+    var tx = 0 as *mut socket;
+    if (ksock_bind(rx, na) != 0 || nettest_ksock_create(
+        AF_INET_I32,
+        SOCK_DGRAM,
+        0,
+        borrow mut tx as *mut *mut socket,
+    ) != 0) {
+        nettest_ksock_put(rx);
+        return out;
+    }
+    UDP_RX = rx as usize;
+    UDP_GOT.storeWith(0, StoreOrdering.Relaxed);
+    UDP_STOP.storeWith(0, StoreOrdering.Relaxed);
+    let t = thread_create(udpRxMain, 0 as *mut void, "bench-udp\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    let payload: [u8; 64] = [0; 64];
+    resetBackoffMax(); // per round: a TCP round's peak is not this one's
+    let sa = snap();
+    let t0 = clock_now_ns();
+    let until = clock_deadline_ns(BENCH_UDP_WINDOW_NS);
+    var sent: u32 = 0;
+    var i: u32 = 0;
+    while (!clock_deadline_passed(until)) {
+        if (ksock_sendto(tx, borrow payload as *[u8; 64] as *void, 64, na) == 64) {
+            sent += 1;
+        }
+        if ((i & 63) == 63) {
+            sched_yield(); // let the receiver drain: the socket queue is short
+        }
+        i += 1;
+    }
+    let dt = clock_since_ns(t0);
+    for (k in 0..50) {
+        if (UDP_GOT.loadWith(LoadOrdering.Relaxed) >= sent) {
+            break;
+        }
+        sleepMs(2);
+    }
+    let sb = snap();
+    report(0, borrow sa, borrow sb);
+    out.delivered = UDP_GOT.loadWith(LoadOrdering.Relaxed);
+    out.sent = sent;
+    UDP_STOP.storeWith(1, StoreOrdering.Relaxed);
+    ksock_set_nonblock(rx, true); // the receiver's blocked recv returns
+    ksock_shutdown(rx, SHUT_RD);
+    if (!t.isNull()) {
+        thread_join(t);
+    }
+    nettest_ksock_put(tx);
+    nettest_ksock_put(rx);
+    if (dt != 0) {
+        out.pps = truncate<u32>((sent as u64) * NS_PER_SEC / dt);
+    }
+    return out;
+}
+
+/// net-bench: every round with steering off, then on; reports, never fails.
+/// Safety: the runner's `reason`.
+@export("selftest_net_bench")
+unsafe fn bench(reason: *mut *CChar) -> bool {
+    let ncpu = cpu_count();
+    for (steer in 0..2) {
+        nettest_netif_set_steering(steer != 0);
+        // Fresh ports per round: the previous round's connections may still be in TIME_WAIT on theirs.
+        let base = truncate<u16>(6100 + 40 * steer);
+        let one = benchTcp(1, base);
+        let two = benchTcp(2, base + 10);
+        let u = benchUdp(base + 20);
+        var buffer: [u8; 192] = [0; 192];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("net-bench: steer=");
+        line.decimal(truncate<u64>(steer));
+        line.text(" cpus=");
+        line.decimal(ncpu as u64);
+        line.text(": tcp 1 flow ");
+        line.decimal(one as u64);
+        line.text(" MiB/s, 2 flows ");
+        line.decimal(two as u64);
+        line.text(" MiB/s total, udp ");
+        line.decimal(u.pps as u64);
+        line.text(" sends/s (");
+        line.decimal(u.delivered as u64);
+        line.text(" of ");
+        line.decimal(u.sent as u64);
+        line.text(" delivered)");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    nettest_netif_set_steering(true);
+    return true;
+}

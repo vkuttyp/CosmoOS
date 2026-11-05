@@ -1146,7 +1146,10 @@ net-nicbench, the ARP phase's hook state static; the chaos build's
 reported-not-asserted reply count is the C's `#if CONFIG_SCHED_CHAOS`,
 now nettest.h's `NETTEST_CONFIG_SCHED_CHAOS()` read into a static, which
 the C compiler folds (in nettest.h, not compiler.h, so no tree's C
-grows). `find_other_interface` is gone from `nettest.c`.
+grows). `find_other_interface` is gone from `nettest.c`. Batch 22,
+`nettest_bench.cee`: net-bench, the loopback benchmark (TCP with one and
+two flows, UDP, steering off and on); the flows' and the receiver's state
+static, the per-round RTO-backoff reset behind `COSMO_CONFIG_SELFTEST()`.
 
 Size: about 3.0x.
 
