@@ -1141,7 +1141,11 @@ are static. Batch 20, `nettest_nat.cee`: net-nat (UDP,
 TCP and ICMP masqueraded and restored, an ICMP error translated back,
 anti-spoof, the guest's share, expiry) and net-second-nic, the frames and
 read-back headers in rooms; `find_other_interface` stays in `nettest.c`
-for net-nicbench.
+for net-nicbench. Batch 21, `nettest_nicbench.cee`:
+net-nicbench, the ARP phase's hook state static; the chaos build's
+reported-not-asserted reply count is the C's `#if CONFIG_SCHED_CHAOS`,
+now compiler.h's `COSMO_CONFIG_SCHED_CHAOS()` read into a static, which
+the C compiler folds. `find_other_interface` is gone from `nettest.c`.
 
 Size: about 3.0x.
 

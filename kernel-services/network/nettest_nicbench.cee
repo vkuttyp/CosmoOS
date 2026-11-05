@@ -1,0 +1,872 @@
+// nettest_nicbench.cee - the NIC-path benchmark, in CeeSafe: roadmap 2.0 SA6 (nettest, the twenty-first batch).
+// net-nicbench, as nettest.c had it (docs/kernel-services/network/design.md, "The NIC-path benchmark"): traffic that
+// leaves the machine, per interface -- ARP round trips counted at the driver boundary, UDP sends through the whole stack,
+// and the software checksum's share of a send, the number that gates a driver's transmit offload -- on the default
+// interface and then on any second one. The receive hook's state (the C's static struct nicbench_hook) is static, so a
+// return before its removal leaves nothing dangling; the payload is a room. The chaos build's relaxed assertion is the
+// C's `#if CONFIG_SCHED_CHAOS`, here compiler.h's constant macro read into a static, which the C compiler folds.
+
+@header("nettest.h", "kernel/compiler.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
+extern "C" {
+    struct socket;
+    struct netaddr;
+    struct thread {
+        switches: u64;
+    }
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        buf: *mut u8;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ip4 {
+        addr: u32;
+        gateway: u32;
+    }
+    struct netif_stats {
+        rx_packets: AtomicU64;
+        tx_packets: AtomicU64;
+    }
+    struct netif {
+        name: [u8; 8];
+        mac: [u8; 6];
+        flags: u32;
+        ip4: netif_ip4;
+        caps: u32;
+        stats: netif_stats;
+    }
+    struct net_cpu_stats {
+        rx_dropped: u64;
+    }
+    struct netif_tx_probe {
+        calls: u64;
+        ns_total: u64;
+    }
+    struct arp_stats {
+        requests_sent: u64;
+        pending_dropped: u64;
+    }
+
+    /// compiler.h: whether this build arms the scheduler's chaos migrator (CONFIG_SCHED_CHAOS).
+    @constant
+    fn COSMO_CONFIG_SCHED_CHAOS() -> bool;
+
+    fn nettest_ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn nettest_ksock_put(s: *mut socket);
+    fn nettest_netif_set_rx_hook(run: extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool, arg: *mut void);
+
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_default() -> *mut netif;
+    fn netif_set_up(nif: *mut netif, up: bool);
+    fn netif_cpu_stats(cpu: u32, out: *mut net_cpu_stats) -> bool;
+    fn netif_tx_pending(nif: *mut netif, pending: *mut u32, capacity: *mut u32) -> bool;
+    fn netif_tx_probe_set(nif: *mut netif);
+    fn netif_tx_probe_read(out: *mut netif_tx_probe);
+    fn ether_output(nif: *mut netif, m: *mut mbuf, dst: *u8, kind: u16) -> i32;
+    fn arp_lookup(nif: *netif, ip: u32, mac: *mut u8) -> bool;
+    fn arp_get_stats(out: *mut arp_stats);
+    fn in_cksum(data: *void, len: usize) -> u16;
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn cpu_count() -> u32;
+    fn raw_cpu_id() -> u32;
+    fn thread_current() -> *mut thread;
+    fn thread_sleep_ns(ns: u64);
+    fn sched_yield();
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn clock_deadline_ns(budget: u64) -> u64;
+    fn clock_deadline_passed(deadline: u64) -> bool;
+}
+
+// ---- syscall.h, errno.h, ether.h, netif.h and the benchmark's values (asserted against the headers in nettest.c) ----
+
+const AF_INET: u32 = 2;
+const AF_INET_I32: i32 = 2;
+const SOCK_DGRAM: i32 = 2;
+const ENOBUFS: i64 = 105;
+const ETH_HLEN: u32 = 14;
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_ARP: u16 = 0x0806;
+const NETIF_LOOPBACK: u32 = 2;
+/// sizeof(struct arp_frame): the ARP payload, packed.
+const ARP_FRAME: u32 = 28;
+const NICBENCH_ARP: u32 = 2000;
+const NICBENCH_WINDOW: u32 = 64; // requests in flight: the receive queue is short, and an open loop overruns it
+const NICBENCH_UDP: u32 = 10000; // checksum samples (the UDP phase itself is a window: NICBENCH_UDP_WINDOW_NS)
+const NICBENCH_UDP_LEN: usize = 1024;
+const NICBENCH_UDP_LEN_I64: i64 = 1024;
+const NICBENCH_PORT: u16 = 33434; // nobody listens on the host; the send is the measurement
+const NICBENCH_UDP_WINDOW_NS: u64 = 500000000;
+const NICBENCH_HIST: usize = 12; // log2 buckets: under 16 us, [16, 32) ... [8, 16) ms, and 16 ms and up
+const MS: u64 = 1000000;
+const NS_PER_SEC: u64 = 1000000000;
+
+static SCHED_CHAOS: bool = COSMO_CONFIG_SCHED_CHAOS();
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: a sleep of the calling thread's.
+fn sleepMs(ms: u64) {
+    unsafe {
+        thread_sleep_ns(ms * MS);
+    }
+}
+
+/// Safety: the monotonic clock.
+fn now() -> u64 => unsafe { clock_now_ns() };
+
+/// Safety: as now.
+fn since(t: u64) -> u64 => unsafe { clock_since_ns(t) };
+
+/// The length of an interface's name, up to its terminator.
+fn nameLen(name: borrow [u8; 8]) -> usize {
+    var len: usize = 0;
+    while (len < 8 && name[len] != 0) {
+        len += 1;
+    }
+    return len;
+}
+
+/// "selftest: net-nicbench: <name>" at the start of `line`.
+/// Safety: `nif` is referenced.
+unsafe fn head(line: borrow mut TextWriter, nif: *mut netif) {
+    let name = Ptr.toBorrow(nif as *netif).name;
+    line.text("selftest: net-nicbench: ");
+    line.bytes(name[..nameLen(borrow name)]);
+}
+
+/// A struct netaddr for `ip`:`port`, as five words (its size and alignment, asserted in nettest.c): the family and the
+/// port (host order) in the first, as they lie in a little-endian u32, then the address.
+fn v4addr(ip: u32, port: u16) -> [u32; 5] => [AF_INET | ((port as u32) << 16), ip, 0, 0, 0];
+
+fn na(a: borrow [u32; 5]) -> *netaddr => a as *[u32; 5] as *netaddr;
+
+/// A u32 as it lies in memory (an address in network order).
+fn putWord(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+fn wordOf(b: Slice<u8>, at: usize) -> u32 => (b[at] as u32) | ((b[at + 1] as u32) << 8) | ((b[at + 2] as u32) << 16) |
+    ((b[at + 3] as u32) << 24);
+
+/// The first other non-loopback interface among eth0..eth15, referenced; null for none.
+/// Safety: thread context.
+unsafe fn otherInterface(notThis: *mut netif) -> *mut netif {
+    for (i in 0..16) {
+        var name: [u8; 8] = [0x65, 0x74, 0x68, 0, 0, 0, 0, 0]; // "eth" and the number
+        let k = truncate<u8>(i);
+        if (k < 10) {
+            name[3] = 0x30 + k;
+        } else {
+            name[3] = 0x31;
+            name[4] = 0x30 + (k - 10);
+        }
+        let n = netif_find(borrow name as *[u8; 8] as *CChar);
+        if (n.isNull()) {
+            continue;
+        }
+        if (n != notThis && (Ptr.toBorrow(n as *netif).flags & NETIF_LOOPBACK) == 0) {
+            return n;
+        }
+        netif_put(n);
+    }
+    return 0 as *mut netif;
+}
+
+// ---- The ARP phase ----
+
+// The hook's context: the interface, the gateway the reply we asked for is about, the requests out so far (replies are
+// never counted past it), and the replies (the worker of whichever CPU the flow hashes to).
+static mut HOOK_NIF: usize = 0;
+static mut HOOK_GATEWAY: u32 = 0;
+static HOOK_SENT: AtomicU32 = AtomicU32.constant(0);
+static HOOK_REPLIES: AtomicU32 = AtomicU32.constant(0);
+
+/// At the driver boundary, before any protocol layer: a reply to *us* about the *gateway*, from the interface under
+/// test, is counted and taken. Anything else -- another interface, an unsolicited reply, a reply about some other host
+/// -- goes on to the ARP layer untouched.
+/// Safety: the hook's statics are written before it is set; the worker hands over the packet when this takes it.
+@callback
+unsafe fn rxHook(nif: *mut netif, m: *mut mbuf, arg: *mut void) -> bool {
+    if (nif as usize != HOOK_NIF || Ptr.toBorrow(m as *mbuf).pkt.len < ETH_HLEN + ARP_FRAME) {
+        return true;
+    }
+    var hdr: [u8; 42] = [0; 42];
+    if (!m_copydata(m as *mbuf, 0, ETH_HLEN + ARP_FRAME, borrow mut hdr as *mut [u8; 42] as *mut void)) {
+        return true;
+    }
+    let a: usize = 14; // the ARP payload
+    if (hdr[12] != 0x08 || hdr[13] != 0x06 || hdr[a + 6] != 0 || hdr[a + 7] != 2) {
+        return true;
+    }
+    let mac = Ptr.toBorrow(nif as *netif).mac;
+    var ours = wordOf(hdr[..], a + 14) == HOOK_GATEWAY; // spa
+    for (i in 0..6) {
+        if (hdr[a + 18 + truncate<usize>(i)] != mac[truncate<usize>(i)]) { // tha
+            ours = false;
+        }
+    }
+    if (!ours) {
+        return true; // not the reply this benchmark asked for
+    }
+    // Never past what was sent: a duplicate cannot make the window arithmetic go negative or the count exceed the
+    // requests.
+    let seen = HOOK_REPLIES.loadWith(LoadOrdering.Relaxed);
+    if (seen >= HOOK_SENT.loadWith(LoadOrdering.Acquire)) {
+        return true;
+    }
+    HOOK_REPLIES.fetchAddWith(1, Ordering.Relaxed);
+    m_freem(m);
+    return false;
+}
+
+// The per-CPU statistics' room (checked).
+static mut CPU_STATS: [u64; 16] = [0; 16];
+
+/// Receive-queue drops across every CPU's worker: where an open-loop sender's replies go when they arrive faster than
+/// they are taken.
+/// Safety: CPU_STATS is this test's.
+unsafe fn rxqDropsTotal() -> u64 {
+    var total: u64 = 0;
+    let p = borrow mut CPU_STATS as *mut [u64; 16] as *mut net_cpu_stats;
+    for (cpu in 0..cpu_count()) {
+        if (netif_cpu_stats(cpu, p)) {
+            total += Ptr.toBorrow(p as *net_cpu_stats).rx_dropped;
+        }
+    }
+    return total;
+}
+
+/// The ARP phase's rates.
+struct Rates {
+    rtPerS: u32;
+    nsPerRt: u64;
+}
+
+/// One ARP request for the gateway, broadcast: false when no buffer or no send.
+/// Safety: `nif` is referenced.
+unsafe fn arpRequest(nif: *mut netif) -> bool {
+    let m = m_getcl();
+    if (m.isNull()) {
+        return false;
+    }
+    let r = Ptr.toBorrowMut(m);
+    r.data = r.buf.add(64); // headroom for the Ethernet header
+    let a = SliceMut.fromRaw(r.data, ARP_FRAME as usize);
+    let n = Ptr.toBorrow(nif as *netif);
+    a[0] = 0;
+    a[1] = 1; // htype
+    a[2] = 0x08;
+    a[3] = 0x00; // ptype
+    a[4] = 6;
+    a[5] = 4;
+    a[6] = 0;
+    a[7] = 1; // a request
+    for (i in 0..6) {
+        a[8 + truncate<usize>(i)] = n.mac[truncate<usize>(i)];
+        a[18 + truncate<usize>(i)] = 0;
+    }
+    putWord(a, 14, n.ip4.addr);
+    putWord(a, 24, n.ip4.gateway);
+    r.len = ARP_FRAME;
+    r.pkt.len = ARP_FRAME;
+    let bcast: [u8; 6] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+    return ether_output(nif, m, borrow bcast as *[u8; 6] as *u8, ETH_P_ARP) == 0;
+}
+
+/// Closed loop: at most NICBENCH_WINDOW requests outstanding. The first version sent all 2000 at once; the driver
+/// received every reply and the receive queue kept 512 of them, which measured the queue's depth and nothing about the
+/// NIC. A round trip is only a round trip if the reply is waited for.
+/// Safety: the runner's `reason`; `nif` is referenced.
+unsafe fn arpPhase(reason: *mut *CChar, nif: *mut netif, out: borrow mut Rates) -> bool {
+    // One context per round: netif_set_rx_hook(NULL) returns only after a grace period, so no worker is still inside
+    // the hook when the round ends -- a reply from this interface's round cannot be counted into the next interface's.
+    HOOK_NIF = nif as usize;
+    HOOK_GATEWAY = Ptr.toBorrow(nif as *netif).ip4.gateway;
+    HOOK_SENT.storeWith(0, StoreOrdering.Relaxed);
+    HOOK_REPLIES.storeWith(0, StoreOrdering.Relaxed);
+    let rx0 = Ptr.toBorrow(nif as *netif).stats.rx_packets.loadWith(LoadOrdering.Relaxed);
+    let drops0 = rxqDropsTotal();
+    nettest_netif_set_rx_hook(rxHook, 0 as *mut void);
+    let t0 = now();
+    var sent: u32 = 0;
+    var stop = false;
+    for (i in 0..NICBENCH_ARP) {
+        if (stop) {
+            break;
+        }
+        // Wait for the window to open; give up on this round if it never does.
+        let waitUntil = now() + 200 * MS;
+        var spins: u32 = 0;
+        while (sent - HOOK_REPLIES.loadWith(LoadOrdering.Relaxed) >= NICBENCH_WINDOW) {
+            if (now() > waitUntil) {
+                stop = true;
+                break;
+            }
+            spins += 1;
+            if (spins < 64) {
+                sched_yield();
+            } else {
+                sleepMs(1);
+            }
+        }
+        if (stop || !arpRequest(nif)) {
+            break;
+        }
+        sent += 1;
+        HOOK_SENT.storeWith(sent, StoreOrdering.Release);
+    }
+    // The clock stops when the replies have caught up, or when it is clear they are not going to.
+    let deadline = now() + 500 * MS;
+    while (HOOK_REPLIES.loadWith(LoadOrdering.Relaxed) < sent && now() < deadline) {
+        sleepMs(1);
+    }
+    let dt = since(t0);
+    nettest_netif_set_rx_hook(0 as extern "C" fn(*mut netif, *mut mbuf, *mut void) -> bool, 0 as *mut void);
+    let got = HOOK_REPLIES.loadWith(LoadOrdering.Relaxed);
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    head(mut line, nif);
+    line.text(": ");
+    line.decimal(sent as u64);
+    line.text(" ARP requests sent, ");
+    line.decimal(got as u64);
+    line.text(" replies counted at the boundary, ");
+    line.decimal(Ptr.toBorrow(nif as *netif).stats.rx_packets.loadWith(LoadOrdering.Relaxed) - rx0);
+    line.text(" frames received by the driver, ");
+    line.decimal(rxqDropsTotal() - drops0);
+    line.text(" dropped at the receive queue");
+    KernelLog.send(LogLevel.Info, line);
+    if (sent == 0) {
+        return failed(reason, "check failed: sent > 0\0");
+    }
+    if (SCHED_CHAOS) {
+        // A benchmark's rate is not a claim the migrator must keep: a sender moved behind the receive worker its own
+        // traffic keeps busy sends a fraction of its window on a slow host (CI's chaos boot: 64 sent, none back in
+        // time, 505 dropped at that worker's queue). Reported, not asserted, in this build; the plain boot asserts it.
+        if (got * 2 < sent) {
+            var b2: [u8; 256] = [0; 256];
+            var l2 = TextWriter.create(mut b2[..]);
+            head(mut l2, nif);
+            l2.text(": fewer than half the replies back in the window under the chaos migrator (");
+            l2.decimal(got as u64);
+            l2.text(" of ");
+            l2.decimal(sent as u64);
+            l2.text("): reported, not asserted");
+            KernelLog.send(LogLevel.Info, l2);
+        }
+    } else if (got * 2 < sent) { // fewer than half back is a broken path, not a slow one
+        return failed(reason, "check failed: got * 2 >= sent\0");
+    }
+    out.rtPerS = if (dt != 0) truncate<u32>((got as u64) * NS_PER_SEC / dt) else 0;
+    out.nsPerRt = if (got != 0) dt / (got as u64) else 0;
+    return true;
+}
+
+// ---- The UDP phase ----
+//
+// The UDP phase is a window, not a count. It used to send 10,000 datagrams and time them; its duration was then 10,000
+// times a cost the guest does not set -- the backend's per-datagram work on the host (QEMU's user-mode network sends
+// each one through an unconnected host socket; see docs/testing/flakes.md, "`net-nicbench`'s UDP rate") -- and a slow
+// host put the whole test over its budget while every number it printed was correct. A fixed window measures the same
+// rate and bounds the time. The histogram and the split below are the diagnosis a slow reading now carries with it.
+
+/// What the UDP phase saw (the C's struct nicbench_udp_stats).
+struct Udp {
+    attempts: u32;
+    accepted: u32;
+    refused: u32; // the driver's ring was full (-ENOBUFS)
+    failed: u32;
+    frames: u64; // the driver's own count of frames out
+    dtNs: u64;
+    hist: [u32; 12];
+    maxNs: u64;
+    slowN: u64; // sends of 1 ms or more, and the time they held
+    slowNs: u64;
+    driverNs: u64; // inside the driver's transmit (netif_tx_probe)
+    driverMaxNs: u64;
+    driverCalls: u64;
+    ringMax: u32; // transmit descriptors in flight, sampled after each send
+    ringCap: u32;
+    switches: u64; // times the sender was switched out and back
+    cpuMoves: u32;
+    gwBefore: bool; // the gateway's ARP entry reachable
+    gwAfter: bool;
+    gwWaitNs: u64;  // how long the warm-up waited for it
+    requests0: u64; // ARP's requests sent and pending dropped, before and after
+    dropped0: u64;
+    requests1: u64;
+    dropped1: u64;
+}
+
+fn noUdp() -> Udp => Udp {
+    attempts: 0,
+    accepted: 0,
+    refused: 0,
+    failed: 0,
+    frames: 0,
+    dtNs: 0,
+    hist: [0; 12],
+    maxNs: 0,
+    slowN: 0,
+    slowNs: 0,
+    driverNs: 0,
+    driverMaxNs: 0,
+    driverCalls: 0,
+    ringMax: 0,
+    ringCap: 0,
+    switches: 0,
+    cpuMoves: 0,
+    gwBefore: false,
+    gwAfter: false,
+    gwWaitNs: 0,
+    requests0: 0,
+    dropped0: 0,
+    requests1: 0,
+    dropped1: 0,
+};
+
+/// The bucket of a send of `ns`: 0 under 16 us, then [16, 32) us is bucket 1, up to the last.
+fn bucket(ns: u64) -> usize {
+    let us = ns / 1000;
+    if (us < 16) {
+        return 0;
+    }
+    var log: usize = 0; // floor(log2(us))
+    var v = us;
+    while (v > 1) {
+        v = v >> 1;
+        log += 1;
+    }
+    let b = log - 3;
+    return if (b < NICBENCH_HIST) b else NICBENCH_HIST - 1;
+}
+
+// The datagram, the probe readings and ARP's counters, off the stack.
+static mut PAYLOAD: [u8; 1024] = [0; 1024];
+static mut PROBE: [u64; 16] = [0; 16];
+static mut ARP_ROOM: [u64; 32] = [0; 32];
+
+/// Safety: the runner runs one test at a time, so the rooms are this test's.
+fn payload() -> *void => unsafe { borrow PAYLOAD as *[u8; 1024] as *void };
+
+/// ARP's requests sent and pending dropped.
+/// Safety: as payload.
+unsafe fn arpCounts(requests: borrow mut u64, dropped: borrow mut u64) {
+    let p = borrow mut ARP_ROOM as *mut [u64; 32] as *mut arp_stats;
+    arp_get_stats(p);
+    let s = Ptr.toBorrow(p as *arp_stats);
+    requests = s.requests_sent;
+    dropped = s.pending_dropped;
+}
+
+/// The probe's reading `i` (of two).
+/// Safety: as payload.
+unsafe fn probeRead(i: usize) -> *mut netif_tx_probe {
+    let p = (borrow mut PROBE as *mut [u64; 16] as *mut u8).add(i * 64) as *mut netif_tx_probe;
+    netif_tx_probe_read(p);
+    return p;
+}
+
+/// The UDP window on `nif`.
+/// Safety: the runner's `reason`; `nif` is referenced.
+unsafe fn udpPhase(reason: *mut *CChar, nif: *mut netif, st: borrow mut Udp) -> bool {
+    var tx = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET_I32, SOCK_DGRAM, 0, borrow mut tx as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0\0");
+    }
+    let n = Ptr.toBorrow(nif as *netif);
+    let gw = n.ip4.gateway;
+    let to = v4addr(gw, NICBENCH_PORT);
+    st = noUdp();
+    // The ARP counters from before the warm-up, so the report can say whether resolving the gateway sent a request at
+    // all (+0 with the entry still incomplete means an entry already there, on which arp_resolve sends nothing).
+    arpCounts(mut st.requests0, mut st.dropped0);
+    // Warm up: the first send resolves the gateway and parks behind it. Then wait for the entry: a window measured
+    // against an incomplete entry sends nothing (every datagram parks and evicts the one before) and the rate it would
+    // report is of frames that never left -- 5 of 325 x86-64 second-interface rounds in the two weeks before this wait
+    // existed read `0 of 10000 frames left the driver` under a normal-looking rate (docs/testing/flakes.md,
+    // "`net-nicbench`'s second interface reported a rate for frames that never left"). The bound covers one ARP retry
+    // (ARP_RETRY_NS, 1 s); past it the test fails (N25 made the entry this interface's own).
+    for (i in 0..8) {
+        ksock_sendto(tx, payload(), NICBENCH_UDP_LEN, na(borrow to));
+    }
+    var mac: [u8; 6] = [0; 6];
+    let macP = borrow mut mac as *mut [u8; 6] as *mut u8;
+    let tGw = now();
+    while (!arp_lookup(nif as *netif, gw, macP) && since(tGw) < 1500 * MS) {
+        sleepMs(1);
+    }
+    st.gwWaitNs = since(tGw);
+    st.gwBefore = arp_lookup(nif as *netif, gw, macP);
+    if (!st.gwBefore) {
+        // A failure, since N25: the entry is this interface's own, it was resolved before the ARP phase
+        // (resolveGateway), the phase just proved 2,000 round trips on this link, and the wait covers a retry -- so an
+        // entry still incomplete here is a lost reply twice over or a defect, not another interface's state. The line
+        // says which way the request count points.
+        var requests: u64 = 0;
+        var dropped: u64 = 0;
+        arpCounts(mut requests, mut dropped);
+        var buffer: [u8; 256] = [0; 256];
+        var line = TextWriter.create(mut buffer[..]);
+        head(mut line, nif);
+        line.text(": the gateway's ARP entry is still incomplete after ");
+        line.decimal(st.gwWaitNs / MS);
+        line.text(" ms (+");
+        line.decimal(requests - st.requests0);
+        line.text(" requests sent since the warm-up began, ");
+        line.decimal(dropped - st.dropped0);
+        line.text(" pending dropped)");
+        KernelLog.send(LogLevel.Error, line);
+        nettest_ksock_put(tx);
+        return failed(reason, "the gateway's ARP entry did not resolve within 1.5 s on this interface\0");
+    }
+    sleepMs(20);
+    let self = thread_current();
+    let switches0 = Ptr.toBorrow(self as *thread).switches;
+    var cpu = raw_cpu_id(); // a statistic: where the sender was, to count its moves
+    let tx0 = n.stats.tx_packets.loadWith(LoadOrdering.Relaxed);
+    netif_tx_probe_set(nif);
+    var pr0 = Ptr.toBorrow(probeRead(0) as *netif_tx_probe).ns_total;
+    let t0 = now();
+    let tEnd = t0 + NICBENCH_UDP_WINDOW_NS;
+    while (true) {
+        let a = now();
+        if (a >= tEnd) {
+            break;
+        }
+        let rc = ksock_sendto(tx, payload(), NICBENCH_UDP_LEN, na(borrow to));
+        let dt = since(a);
+        let pr1 = Ptr.toBorrow(probeRead(1) as *netif_tx_probe).ns_total;
+        st.attempts += 1;
+        if (rc == NICBENCH_UDP_LEN_I64) {
+            st.accepted += 1;
+        } else if (rc == -ENOBUFS) {
+            st.refused += 1;
+        } else {
+            st.failed += 1;
+        }
+        st.hist[bucket(dt)] += 1;
+        if (dt > st.maxNs) {
+            st.maxNs = dt;
+        }
+        if (dt >= MS) {
+            st.slowN += 1;
+            st.slowNs += dt;
+        }
+        let d = pr1 - pr0;
+        if (d > st.driverMaxNs) {
+            st.driverMaxNs = d;
+        }
+        pr0 = pr1;
+        var pending: u32 = 0;
+        var cap: u32 = 0;
+        if (netif_tx_pending(nif, borrow mut pending as *mut u32, borrow mut cap as *mut u32)) {
+            st.ringCap = cap;
+            if (pending > st.ringMax) {
+                st.ringMax = pending;
+            }
+        }
+        let nowCpu = raw_cpu_id(); // a statistic
+        if (nowCpu != cpu) {
+            st.cpuMoves += 1;
+            cpu = nowCpu;
+        }
+        if ((st.attempts & 63) == 0) {
+            sched_yield();
+        }
+    }
+    st.dtNs = since(t0);
+    let last = Ptr.toBorrow(probeRead(1) as *netif_tx_probe);
+    let driverNs = last.ns_total;
+    let driverCalls = last.calls;
+    netif_tx_probe_set(0 as *mut netif);
+    st.driverNs = driverNs;
+    st.driverCalls = driverCalls;
+    st.switches = Ptr.toBorrow(self as *thread).switches - switches0;
+    sleepMs(20); // the driver's completions and counters settle
+    st.frames = n.stats.tx_packets.loadWith(LoadOrdering.Relaxed) - tx0;
+    st.gwAfter = arp_lookup(nif as *netif, gw, macP);
+    arpCounts(mut st.requests1, mut st.dropped1);
+    nettest_ksock_put(tx);
+    if (st.attempts == 0) {
+        return failed(reason, "check failed: st->attempts > 0\0");
+    }
+    return true;
+}
+
+/// Four lines, each under the log's 256-byte line.
+/// Safety: `nif` is referenced.
+unsafe fn udpReport(nif: *mut netif, st: borrow Udp) {
+    var b1: [u8; 256] = [0; 256];
+    var l1 = TextWriter.create(mut b1[..]);
+    head(mut l1, nif);
+    l1.text(": udp window ");
+    l1.decimal(st.dtNs / MS);
+    l1.text(" ms: ");
+    l1.decimal(st.attempts as u64);
+    l1.text(" sends attempted, ");
+    l1.decimal(st.accepted as u64);
+    l1.text(" accepted, ");
+    l1.decimal(st.refused as u64);
+    l1.text(" refused by the driver (ring full), ");
+    l1.decimal(st.failed as u64);
+    l1.text(" failed otherwise, ");
+    l1.decimal(st.frames);
+    l1.text(" frames left the driver");
+    KernelLog.send(LogLevel.Info, l1);
+
+    var b2: [u8; 256] = [0; 256];
+    var l2 = TextWriter.create(mut b2[..]);
+    head(mut l2, nif);
+    l2.text(": udp ring occupancy max ");
+    l2.decimal(st.ringMax as u64);
+    l2.text(" of ");
+    l2.decimal(st.ringCap as u64);
+    l2.text("; sender switched out ");
+    l2.decimal(st.switches);
+    l2.text(" times, moved CPU ");
+    l2.decimal(st.cpuMoves as u64);
+    l2.text(" times; gateway arp ");
+    l2.text(if (st.gwBefore) "reachable" else "incomplete");
+    l2.text(" (after ");
+    l2.decimal(st.gwWaitNs / MS);
+    l2.text(" ms) -> ");
+    l2.text(if (st.gwAfter) "reachable" else "incomplete");
+    l2.text(", +");
+    l2.decimal(st.requests1 - st.requests0);
+    l2.text(" requests, +");
+    l2.decimal(st.dropped1 - st.dropped0);
+    l2.text(" pending dropped");
+    KernelLog.send(LogLevel.Info, l2);
+
+    var b3: [u8; 256] = [0; 256];
+    var l3 = TextWriter.create(mut b3[..]);
+    head(mut l3, nif);
+    l3.text(": udp us per send:");
+    for (b in 0..NICBENCH_HIST) {
+        let lo = (8u64) << (b as u64); // bucket b covers [lo, 2 lo) us; bucket 0 everything under 16
+        if (b + 1 == NICBENCH_HIST) {
+            l3.text(" >=");
+            l3.decimal(lo);
+        } else {
+            l3.text(" <");
+            l3.decimal(lo * 2);
+        }
+        l3.text(":");
+        l3.decimal(st.hist[b] as u64);
+    }
+    l3.text("; max ");
+    l3.decimal(st.maxNs / 1000);
+    KernelLog.send(LogLevel.Info, l3);
+
+    let driverPct = if (st.dtNs != 0) (st.driverNs * 100) / st.dtNs else 0;
+    var b4: [u8; 256] = [0; 256];
+    var l4 = TextWriter.create(mut b4[..]);
+    head(mut l4, nif);
+    l4.text(": udp ");
+    l4.decimal(st.slowN);
+    l4.text(" sends of 1 ms or more held ");
+    l4.decimal(st.slowNs / MS);
+    l4.text(" of ");
+    l4.decimal(st.dtNs / MS);
+    l4.text(" ms; in the driver ");
+    l4.decimal(truncate<u32>(driverPct) as u64);
+    l4.text("% of the window over ");
+    l4.decimal(st.driverCalls);
+    l4.text(" transmits (max ");
+    l4.decimal(st.driverMaxNs / 1000);
+    l4.text(" us)");
+    KernelLog.send(LogLevel.Info, l4);
+}
+
+// ---- The checksum, the gateway, one interface ----
+
+static mut CKSUM_BUF: [u8; 1024] = [0; 1024];
+static mut CKSUM_SINK: u32 = 0;
+
+/// in_cksum over a datagram's worth, by itself: what a transmit checksum offload could save per packet, and no more.
+/// Safety: the runner runs one test at a time, so the buffer is this test's.
+unsafe fn cksumNs() -> u64 {
+    var sink: u32 = 0;
+    let t0 = now();
+    for (i in 0..NICBENCH_UDP) {
+        CKSUM_BUF[(i as usize) & (NICBENCH_UDP_LEN - 1)] = truncate<u8>(i); // defeat a hoisted result
+        sink += in_cksum(borrow CKSUM_BUF as *[u8; 1024] as *void, NICBENCH_UDP_LEN) as u32;
+    }
+    CKSUM_SINK = sink; // the sums are used
+    return since(t0) / (NICBENCH_UDP as u64);
+}
+
+/// The gateway resolved on this interface before the ARP phase installs its hook. The hook takes every reply from the
+/// gateway to us -- it cannot tell its own from the stack's -- so a resolution the stack starts during the phase (any
+/// off-link send: the default route is this interface once the other is down) has its reply eaten and its entry left
+/// incomplete until the next retry, which ARP_RETRY_NS spacing can put past the UDP warm-up's bound. Seen 2026-10-09: a
+/// segment from a connection net-hostinput left behind, on an eth1 the e1000e rebind had left with no cached entry
+/// (docs/testing/flakes.md). With the entry reachable first, the phase and the warm-up depend on neither. The bound
+/// covers the first request and both retries (ARP_MAX_TRIES).
+/// Safety: the runner's `reason`; `nif` is referenced.
+unsafe fn resolveGateway(reason: *mut *CChar, nif: *mut netif) -> bool {
+    var mac: [u8; 6] = [0; 6];
+    let macP = borrow mut mac as *mut [u8; 6] as *mut u8;
+    let gw = Ptr.toBorrow(nif as *netif).ip4.gateway;
+    if (arp_lookup(nif as *netif, gw, macP)) {
+        return true;
+    }
+    var tx = 0 as *mut socket;
+    if (nettest_ksock_create(AF_INET_I32, SOCK_DGRAM, 0, borrow mut tx as *mut *mut socket) != 0) {
+        return failed(reason, "check failed: nt_ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0\0");
+    }
+    let to = v4addr(gw, NICBENCH_PORT);
+    let one: [u8; 1] = [0];
+    ksock_sendto(tx, borrow one as *[u8; 1] as *void, 1, na(borrow to));
+    let t0 = now();
+    while (!arp_lookup(nif as *netif, gw, macP) && since(t0) < 4500 * MS) {
+        sleepMs(1);
+    }
+    let resolved = arp_lookup(nif as *netif, gw, macP);
+    nettest_ksock_put(tx);
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    head(mut line, nif);
+    line.text(": gateway ");
+    line.text(if (resolved) "resolved" else "NOT resolved");
+    line.text(" before the benchmark (");
+    line.decimal(since(t0) / MS);
+    line.text(" ms)");
+    KernelLog.send(LogLevel.Info, line);
+    if (!resolved) {
+        return failed(
+            reason,
+            "the gateway's ARP entry did not resolve within 4.5 s, three requests, on this interface\0",
+        );
+    }
+    return true;
+}
+
+/// The benchmark on one interface.
+/// Safety: the runner's `reason`; `nif` is referenced.
+unsafe fn one(reason: *mut *CChar, nif: *mut netif, cksum: u64) -> bool {
+    var rates = Rates { rtPerS: 0, nsPerRt: 0 };
+    var st = noUdp();
+    if (!resolveGateway(reason, nif)) {
+        return false;
+    }
+    if (!arpPhase(reason, nif, mut rates)) {
+        return false;
+    }
+    if (!udpPhase(reason, nif, mut st)) {
+        return false;
+    }
+    udpReport(nif, borrow st);
+    let accepted = st.accepted;
+    let frames = st.frames;
+    let sendsS = if (st.dtNs != 0) truncate<u32>((accepted as u64) * NS_PER_SEC / st.dtNs) else 0;
+    let nsSend = if (accepted != 0) st.dtNs / (accepted as u64) else 0;
+    // Let this interface's echoes come home before the next interface's round: the UDP phase sends thousands of
+    // datagrams whose replies are still arriving for most of a second on a slow host, and the next interface's ARP
+    // replies then queue behind them on the same receive worker -- CI's guard-capable boot saw 64 requests sent, none
+    // counted back in the window and 2,659 frames dropped at the queue. Wait for this interface's receive count to hold
+    // still; the count is the receive path's atomic (netif.c rx_common), read the same way. A stream still moving after
+    // three seconds is not quiet, and the bench says so rather than starting the next round over it.
+    let n = Ptr.toBorrow(nif as *netif);
+    var last = n.stats.rx_packets.loadWith(LoadOrdering.Relaxed);
+    var quietNs: u64 = 0;
+    let tQ = clock_deadline_ns(3000 * MS);
+    while (quietNs < 30 * MS) {
+        if (clock_deadline_passed(tQ)) {
+            var buffer: [u8; 256] = [0; 256];
+            var line = TextWriter.create(mut buffer[..]);
+            head(mut line, nif);
+            line.text(": receive stream still moving after 3 s (rx ");
+            line.decimal(last);
+            line.text(")");
+            KernelLog.send(LogLevel.Info, line);
+            return failed(reason, "the receive stream did not go quiet between interfaces\0");
+        }
+        sleepMs(5);
+        let now2 = n.stats.rx_packets.loadWith(LoadOrdering.Relaxed);
+        if (now2 != last) {
+            last = now2;
+            quietNs = 0;
+        } else {
+            quietNs += 5 * MS;
+        }
+    }
+    let share = if (nsSend != 0) truncate<u32>((cksum * 100) / nsSend) else 0;
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    head(mut line, nif);
+    line.text(" (caps 0x");
+    line.hex(n.caps as u64, 1);
+    line.text("): arp ");
+    line.decimal(rates.rtPerS as u64);
+    line.text(" rt/s (");
+    line.decimal(rates.nsPerRt);
+    line.text(" ns per round trip); udp ");
+    line.decimal(sendsS as u64);
+    line.text(" sends/s (");
+    line.decimal(nsSend);
+    line.text(" ns per send, ");
+    line.decimal(frames);
+    line.text(" of ");
+    line.decimal(accepted as u64);
+    line.text(" frames left the driver); sw checksum of 1 KiB ");
+    line.decimal(cksum);
+    line.text(" ns = ");
+    line.decimal(share as u64);
+    line.text("% of a send");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// net-nicbench: the default interface, then the other one with the default down, as net-second-nic does.
+/// Safety: the runner's `reason`.
+@export("selftest_net_nicbench")
+unsafe fn nicbench(reason: *mut *CChar) -> bool {
+    let first = netif_default();
+    if (first.isNull()) {
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: net-nicbench: no ethernet interface; skipping");
+        KernelLog.send(LogLevel.Info, line);
+        return true;
+    }
+    let cksum = cksumNs();
+    var ok = one(reason, first, cksum);
+    let second = if (ok) otherInterface(first) else 0 as *mut netif;
+    if (!second.isNull()) {
+        // The same numbers over the other driver, on the same host and the same kind of backend: bring the default down
+        // so the stack routes through the second, as net-second-nic does.
+        netif_set_up(first, false); // down flushes the first's neighbours (N25); the second resolves its own
+        ok = one(reason, second, cksum);
+        netif_set_up(first, true);
+        netif_put(second);
+    }
+    netif_put(first);
+    return ok;
+}
