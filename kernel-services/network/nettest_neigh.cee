@@ -1,0 +1,992 @@
+// nettest_neigh.cee - a neighbour entry is (interface, address), in CeeSafe: roadmap 2.0 SA6 (nettest, the sixteenth
+// batch). net-arp-per-interface, net-nd-per-interface and net-neigh-down-race, as nettest.c had them (invariant N25 and
+// its follow-up; docs/audit/next-subsystem-arp-netif-ref.md). Each registers fake interfaces whose transmit records
+// what left and where: the interfaces and their ops table are C objects this file defines (CeeSafe's ADR 0042, as
+// nettest_lifetime.cee's), `static mut` items zeroed and filled in at the test's start as the C's memset did. The
+// replies, requests and advertisements are built here and handed straight to arp_input and nd_input_*. The down race
+// needs the debug build's park hooks and is exported only there (@cfg); nettest.c keeps the C's skip otherwise. Its
+// racing caller's state (the C's struct down_race, in the test's frame) is static, so no thread outlives what it reads.
+
+@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/selftest.h", "kernel/thread.h", "kernel/sched.h", "kernel/timer.h")
+extern "C" {
+    struct thread;
+    struct ipv6_hdr;
+    struct in6_addr {
+        s6_addr: [u8; 16];
+    }
+    struct mbuf_pkt {
+        len: u32;
+    }
+    struct mbuf {
+        data: *mut u8;
+        len: u32;
+        pkt: mbuf_pkt;
+    }
+    struct netif_ops {
+        transmit: extern "C" fn(*mut netif, *mut mbuf) -> i32;
+        release: extern "C" fn(*mut netif);
+    }
+    struct netif_ip4 {
+        addr: u32;
+        mask: u32;
+    }
+    struct netif {
+        name: [u8; 8];
+        mac: [u8; 6];
+        mtu: u32;
+        flags: u32;
+        ip4: netif_ip4;
+        ip6_ll: in6_addr;
+        ops: *netif_ops;
+        priv: *mut void;
+    }
+    struct arp_stats {
+        requests_sent: u64;
+        entries: u64;
+        pending_dropped: u64;
+    }
+    struct ip_stats {
+        nd_pending_dropped: u64;
+    }
+
+    fn nettest_netif_register(nif: *mut netif) -> i32;
+    fn nettest_netif_unregister(nif: *mut netif);
+
+    fn netif_set_up(nif: *mut netif, up: bool);
+    fn m_getcl() -> *mut mbuf;
+    fn m_freem(m: *mut mbuf);
+    fn m_copydata(m: *mbuf, off: u32, len: u32, to: *mut void) -> bool;
+    fn arp_input(nif: *mut netif, m: *mut mbuf);
+    fn arp_resolve(nif: *mut netif, ip: u32, mac: *mut u8, m: *mut mbuf) -> i32;
+    fn arp_lookup(nif: *netif, ip: u32, mac: *mut u8) -> bool;
+    fn arp_delete(nif: *netif, ip: u32);
+    fn arp_get_stats(out: *mut arp_stats);
+    fn arp_test_hold_lock_entry(nif: *netif);
+    fn arp_test_lock_entry_parked() -> bool;
+    fn arp_test_release_lock_entry();
+    fn nd_resolve(nif: *mut netif, ip: *in6_addr, mac: *mut u8, m: *mut mbuf) -> i32;
+    fn nd_input_ns(nif: *mut netif, m: *mut mbuf, ip6: *ipv6_hdr);
+    fn nd_input_na(nif: *mut netif, m: *mut mbuf, ip6: *ipv6_hdr);
+    fn ipv6_get_stats(out: *mut ip_stats);
+    fn nd_test_hold_lock_entry(nif: *netif);
+    fn nd_test_lock_entry_parked() -> bool;
+    fn nd_test_release_lock_entry();
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn sched_yield();
+    fn clock_now_ns() -> u64;
+}
+
+// ---- errno.h, netif.h, ether.h, ip.h, thread.h and time values (asserted against the headers in nettest.c) ----
+
+const EINPROGRESS: i32 = 115;
+const ENETUNREACH: i32 = 101;
+const ENOMEM: i32 = 12;
+const NETIF_UP: u32 = 1;
+const NETIF_NODEFAULT: u32 = 16;
+const ETH_HLEN: u32 = 14;
+const ETH_P_IP: u16 = 0x0800;
+const ETH_P_ARP: u16 = 0x0806;
+const ETH_P_IPV6: u16 = 0x86DD;
+const ICMPV6_NS: u8 = 135;
+const ICMPV6_NA: u8 = 136;
+/// struct ipv6_hdr: 40 bytes, packed, the source at 8 and the destination at 24.
+const IPV6_HDR: usize = 40;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const NS_PER_SEC: u64 = 1000000000;
+/// 255.255.255.0 in network order, as it lies in a little-endian u32.
+const MASK24_N: u32 = 0x00ffffff;
+
+/// IPV4_ADDR(a, b, c, d) as it lies in a little-endian u32 (inet.h's IPV4_ADDR and htonl assume the order).
+fn ip4(a: u32, b: u32, c: u32, d: u32) -> u32 => a | (b << 8) | (c << 16) | (d << 24);
+
+// ---- The checks ----
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// Safety: the monotonic clock.
+fn now() -> u64 => unsafe { clock_now_ns() };
+
+/// One line to the kernel log.
+fn info(text: StringView) {
+    var buffer: [u8; 160] = [0; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+fn sameMac(a: borrow [u8; 6], b: borrow [u8; 6]) -> bool {
+    for (i in 0..6) {
+        if (a[truncate<usize>(i)] != b[truncate<usize>(i)]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// A u32 as it lies in memory (an address in network order).
+fn putWord(b: SliceMut<u8>, at: usize, v: u32) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+    b[at + 2] = truncate<u8>(v >> 16);
+    b[at + 3] = truncate<u8>(v >> 24);
+}
+
+/// 16 bytes from `from` (a struct in6_addr) into `b` at `at`.
+/// Safety: `from` points to a live struct in6_addr.
+unsafe fn putV6(b: SliceMut<u8>, at: usize, from: *in6_addr) {
+    let s = Slice.fromRaw(from as *u8, 16);
+    for (i in 0..16) {
+        b[at + truncate<usize>(i)] = s[truncate<usize>(i)];
+    }
+}
+
+// ---- The interfaces ----
+//
+// The C's struct dual_nif: an interface whose transmit records how many frames left, the EtherType of the last and
+// its destination. The records are indexed by the interface's `priv`, one slot per static below.
+
+const ARPA: usize = 0;
+const ARPB: usize = 1;
+const NDA: usize = 2;
+const NDB: usize = 3;
+const DOWN: usize = 4;
+const DECOY: usize = 5;
+
+static mut ARPA_NIF: netif = netif { mtu: 1500 };
+static mut ARPB_NIF: netif = netif { mtu: 1500 };
+static mut NDA_NIF: netif = netif { mtu: 1500 };
+static mut NDB_NIF: netif = netif { mtu: 1500 };
+static mut DOWN_NIF: netif = netif { mtu: 1500 };
+static mut DECOY_NIF: netif = netif { mtu: 1500 };
+static mut DUAL_OPS: netif_ops = netif_ops { transmit: dualTransmit, release: dualRelease };
+static mut TRANSMITS: [u32; 6] = [0; 6];
+static mut LAST_TYPE: [u16; 6] = [0; 6];
+static mut LAST_DST: [u8; 36] = [0; 36];
+// The IPv6 header handed with a neighbour message (struct ipv6_hdr, packed), and the neighbour statistics (512 bytes
+// each, checked), off the stack.
+static mut IP6: [u8; 40] = [0; 40];
+static mut STATS: [u64; 128] = [0; 128];
+// The neighbours' IPv6 addresses (the C's local struct in6_addr): CeeSafe makes a C struct only as a static.
+static mut PEER6: in6_addr = in6_addr { s6_addr: [0; 16] };
+static mut DECOY6: in6_addr = in6_addr { s6_addr: [0; 16] };
+
+/// The interface's transmit: record the frame's EtherType and destination, count it, free it.
+/// Safety: the interface layer hands over the packet; `priv` is the interface's record slot.
+@callback
+unsafe fn dualTransmit(nif: *mut netif, m: *mut mbuf) -> i32 {
+    let slot = Ptr.toBorrow(nif as *netif).priv as usize;
+    var hdr: [u8; 14] = [0; 14];
+    if (m_copydata(m as *mbuf, 0, ETH_HLEN, borrow mut hdr as *mut [u8; 14] as *mut void)) {
+        for (i in 0..6) {
+            LAST_DST[slot * 6 + truncate<usize>(i)] = hdr[truncate<usize>(i)];
+        }
+        LAST_TYPE[slot] = ((hdr[12] as u16) << 8) | (hdr[13] as u16);
+    }
+    TRANSMITS[slot] += 1;
+    m_freem(m);
+    return 0;
+}
+
+/// The interface's release: nothing (the storage is static).
+/// Safety: the interface layer calls it once, after the last reference.
+@callback
+unsafe fn dualRelease(nif: *mut netif) {}
+
+/// Whether the last frame out of `slot` went to `mac`.
+/// Safety: the records are the test's.
+unsafe fn lastDstIs(slot: usize, mac: borrow [u8; 6]) -> bool {
+    for (i in 0..6) {
+        if (LAST_DST[slot * 6 + truncate<usize>(i)] != mac[truncate<usize>(i)]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Zero `nif`, then name it, give it the ops, record slot `slot` (reset), 02:4e:32:35:00:`macLast` and `ip`/24, up,
+/// as the C's dual_nif_init did.
+/// Safety: `nif` is one of this file's statics, not registered.
+unsafe fn dualInit(nif: *mut netif, slot: usize, name: StringView, macLast: u8, ip: u32) {
+    let b = SliceMut.fromRaw(nif as *mut u8, layoutOf<netif>().size);
+    for (i in 0..b.length) {
+        b[i] = 0;
+    }
+    let n = Ptr.toBorrowMut(nif);
+    for (i in 0..name.length) {
+        n.name[i] = name.bytes()[i];
+    }
+    n.mtu = 1500;
+    n.ops = borrow DUAL_OPS as *netif_ops;
+    n.priv = slot as *mut void;
+    n.flags = NETIF_UP | NETIF_NODEFAULT;
+    n.mac = [0x02, 0x4e, 0x32, 0x35, 0x00, macLast];
+    n.ip4.addr = ip;
+    n.ip4.mask = MASK24_N;
+    TRANSMITS[slot] = 0;
+    LAST_TYPE[slot] = 0;
+    for (i in 0..6) {
+        LAST_DST[slot * 6 + truncate<usize>(i)] = 0;
+    }
+}
+
+/// fe80::`c`:`d` in `a`.
+/// Safety: `a` is one of this file's statics.
+unsafe fn linkLocal(a: *mut in6_addr, c: u8, d: u8) -> *in6_addr {
+    let s = SliceMut.fromRaw(a as *mut u8, 16);
+    for (i in 0..16) {
+        s[truncate<usize>(i)] = 0;
+    }
+    s[0] = 0xfe;
+    s[1] = 0x80;
+    s[14] = c;
+    s[15] = d;
+    return a as *in6_addr;
+}
+
+/// A 20-byte packet to resolve for, or null.
+/// Safety: a fresh buffer.
+unsafe fn dualPacket() -> *mut mbuf {
+    let m = m_getcl();
+    if (!m.isNull()) {
+        let r = Ptr.toBorrowMut(m);
+        r.len = 20;
+        r.pkt.len = 20;
+    }
+    return m;
+}
+
+/// An ARP message from `spa` at `sha` to `nif`, handed straight to arp_input: a reply (`op` 2, addressed to the
+/// interface's MAC and address) or a request (`op` 1, for the interface's address: the asker is learned). False if
+/// no buffer was free.
+/// Safety: `nif` is the test's registered interface.
+unsafe fn arpMessage(nif: *mut netif, op: u8, spa: u32, sha: borrow [u8; 6]) -> bool {
+    let f = m_getcl();
+    if (f.isNull()) {
+        return false;
+    }
+    let p = SliceMut.fromRaw(Ptr.toBorrow(f as *mbuf).data, 28);
+    for (i in 0..28) {
+        p[truncate<usize>(i)] = 0;
+    }
+    let n = Ptr.toBorrow(nif as *netif);
+    p[1] = 1;
+    p[2] = 0x08;
+    p[4] = 6;
+    p[5] = 4;
+    p[7] = op;
+    for (i in 0..6) {
+        let k = truncate<usize>(i);
+        p[8 + k] = sha[k];
+        if (op == 2) {
+            p[18 + k] = n.mac[k];
+        }
+    }
+    putWord(p, 14, spa);
+    putWord(p, 24, n.ip4.addr);
+    let r = Ptr.toBorrowMut(f);
+    r.len = 28;
+    r.pkt.len = 28;
+    arp_input(nif, f);
+    return true;
+}
+
+/// A neighbour message handed to nd_input_* as `nif`'s: a solicitation for the interface's link-local address from
+/// `src` at `mac` (`solicit`), or an advertisement for `src` at `mac` (solicited and override). False if no buffer was
+/// free.
+/// Safety: `nif` is the test's registered interface; `src` a live struct in6_addr; IP6 is the test's.
+unsafe fn ndMessage(nif: *mut netif, solicit: bool, src: *in6_addr, mac: borrow [u8; 6]) -> bool {
+    let f = m_getcl();
+    if (f.isNull()) {
+        return false;
+    }
+    let ll = borrow Ptr.toBorrow(nif as *netif).ip6_ll as *in6_addr;
+    let p = SliceMut.fromRaw(Ptr.toBorrow(f as *mbuf).data, 32);
+    for (i in 0..32) {
+        p[truncate<usize>(i)] = 0;
+    }
+    p[0] = if (solicit) ICMPV6_NS else ICMPV6_NA;
+    if (!solicit) {
+        p[4] = 0x60; // htonl(0x60000000): solicited, override
+    }
+    putV6(p, 8, if (solicit) ll else src); // the target
+    p[24] = if (solicit) 1 else 2;         // the source or target link-layer address option
+    p[25] = 1;
+    for (i in 0..6) {
+        p[26 + truncate<usize>(i)] = mac[truncate<usize>(i)];
+    }
+    let r = Ptr.toBorrowMut(f);
+    r.len = 32;
+    r.pkt.len = 32;
+    let h = SliceMut.fromRaw(borrow mut IP6 as *mut [u8; 40] as *mut u8, IPV6_HDR);
+    for (i in 0..IPV6_HDR) {
+        h[i] = 0;
+    }
+    putV6(h, 8, src);
+    putV6(h, 24, ll);
+    let ip6 = borrow IP6 as *[u8; 40] as *ipv6_hdr;
+    if (solicit) {
+        nd_input_ns(nif, f, ip6);
+    } else {
+        nd_input_na(nif, f, ip6);
+    }
+    return true;
+}
+
+/// Scratch `i` of STATS, for a struct of `bytes`.
+/// Safety: the runner runs one test at a time, so the statics are this test's.
+unsafe fn statsRoom(i: usize, bytes: usize) -> *mut u8 {
+    if (bytes > 512) {
+        var buffer: [u8; 64] = [0; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("nettest: a scratch is too small");
+        KernelLog.panic(line);
+    }
+    return (borrow mut STATS as *mut [u64; 128] as *mut u8).add(i * 512);
+}
+
+/// ARP's counters the tests read.
+struct Arp {
+    entries: u64;
+    requests: u64;
+    dropped: u64;
+}
+
+/// Safety: as statsRoom.
+unsafe fn arpNow() -> Arp {
+    let p = statsRoom(0, layoutOf<arp_stats>().size) as *mut arp_stats;
+    arp_get_stats(p);
+    let s = Ptr.toBorrow(p as *arp_stats);
+    return Arp { entries: s.entries, requests: s.requests_sent, dropped: s.pending_dropped };
+}
+
+/// Safety: as statsRoom.
+unsafe fn ndDropped() -> u64 {
+    let p = statsRoom(1, layoutOf<ip_stats>().size) as *mut ip_stats;
+    ipv6_get_stats(p);
+    return Ptr.toBorrow(p as *ip_stats).nd_pending_dropped;
+}
+
+// ---- net-arp-per-interface / net-nd-per-interface ----
+//
+// Invariant N25: a neighbour entry is (interface, address). Two interfaces on links that both have a host at the same
+// address -- the ordinary case of two NICs each with a gateway at .1, and the boot test's own case, both QEMU backends
+// answering 10.0.2.2 -- resolve it separately, each sending its request out of itself, each transmitting to the MAC
+// its own link answered with, and a reply arriving on one never completes or changes the other's entry. Keyed by
+// address alone the second interface's resolution found the first's entry: it sent no request (the first's retries
+// went out on the first interface, down or not), and parked its packet where the first's reply would send it out of
+// the wrong interface to the wrong MAC. The replies are fed in by hand, one per interface, with different MACs.
+
+/// Whether `nif` has a complete ARP entry for `ip` at `want`.
+/// Safety: `nif` is registered.
+unsafe fn arpAt(nif: *mut netif, ip: u32, want: borrow [u8; 6]) -> bool {
+    var mac: [u8; 6] = [0; 6];
+    return arp_lookup(nif as *netif, ip, borrow mut mac as *mut [u8; 6] as *mut u8) && sameMac(borrow mac, want);
+}
+
+/// Whether `nif` has no complete ARP entry for `ip`.
+/// Safety: `nif` is registered.
+unsafe fn arpNone(nif: *mut netif, ip: u32) -> bool {
+    var mac: [u8; 6] = [0; 6];
+    return !arp_lookup(nif as *netif, ip, borrow mut mac as *mut [u8; 6] as *mut u8);
+}
+
+/// arp_resolve for a fresh packet: its result, or 1 if no buffer was free.
+/// Safety: `nif` is registered.
+unsafe fn arpResolve(nif: *mut netif, ip: u32) -> i32 {
+    let m = dualPacket();
+    if (m.isNull()) {
+        return 1;
+    }
+    var mac: [u8; 6] = [0; 6];
+    return arp_resolve(nif, ip, borrow mut mac as *mut [u8; 6] as *mut u8, m);
+}
+
+/// nd_resolve: for a fresh packet (`packet`), else a probe with none; its result, or 1 if no buffer was free.
+/// `mac` receives a resolved address.
+/// Safety: `nif` is registered; `ip` a live struct in6_addr.
+unsafe fn ndResolve(nif: *mut netif, ip: *in6_addr, packet: bool, mac: borrow mut [u8; 6]) -> i32 {
+    var m = 0 as *mut mbuf;
+    if (packet) {
+        m = dualPacket();
+        if (m.isNull()) {
+            return 1;
+        }
+    }
+    var got: [u8; 6] = [0; 6];
+    let rc = nd_resolve(nif, ip, borrow mut got as *mut [u8; 6] as *mut u8, m);
+    mac = got;
+    return rc;
+}
+
+/// net-arp-per-interface: one neighbour address on two links, resolved as two entries.
+/// Safety: the runner's `reason`.
+@export("selftest_net_arp_per_interface")
+unsafe fn arpPerInterface(reason: *mut *CChar) -> bool {
+    let macA: [u8; 6] = [0x02, 0xaa, 0x00, 0x00, 0x00, 0x0a];
+    let macB: [u8; 6] = [0x02, 0xbb, 0x00, 0x00, 0x00, 0x0b];
+    let bcast: [u8; 6] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+    let gw = ip4(10, 75, 0, 254); // the same address on both links
+    let a = borrow mut ARPA_NIF as *mut netif;
+    let b = borrow mut ARPB_NIF as *mut netif;
+    dualInit(a, ARPA, "arpa0", 0x0a, ip4(10, 75, 0, 1));
+    dualInit(b, ARPB, "arpb0", 0x0b, ip4(10, 75, 0, 2));
+    if (nettest_netif_register(a) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&a.nif) == 0\0");
+    }
+    if (nettest_netif_register(b) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&b.nif) == 0\0");
+    }
+    var s0 = arpNow();
+    if (!arpNone(a, gw) || !arpNone(b, gw)) {
+        return failed(reason, "check failed: !arp_lookup(&a.nif, gw, mac) && !arp_lookup(&b.nif, gw, mac)\0");
+    }
+
+    // 1. Each interface's resolution sends its own request out of itself.
+    if (arpResolve(a, gw) != -EINPROGRESS) {
+        return failed(reason, "check failed: arp_resolve(&a.nif, gw, mac, m) == -EINPROGRESS\0");
+    }
+    if (TRANSMITS[ARPA] != 1 || LAST_TYPE[ARPA] != ETH_P_ARP || !lastDstIs(ARPA, borrow bcast)) {
+        return failed(
+            reason,
+            "check failed: a.transmits == 1 && a.last_type == ETH_P_ARP && a.last_dst == eth_broadcast\0",
+        );
+    }
+    if (TRANSMITS[ARPB] != 0) {
+        return failed(reason, "check failed: b.transmits == 0\0");
+    }
+    if (arpResolve(b, gw) != -EINPROGRESS) {
+        return failed(reason, "check failed: arp_resolve(&b.nif, gw, mac, m) == -EINPROGRESS\0");
+    }
+    if (TRANSMITS[ARPB] != 1) { // keyed by address alone this is 0: the first's entry was found, nothing sent
+        return failed(reason, "check failed: b.transmits == 1\0");
+    }
+    if (LAST_TYPE[ARPB] != ETH_P_ARP) {
+        return failed(reason, "check failed: b.last_type == ETH_P_ARP\0");
+    }
+    if (TRANSMITS[ARPA] != 1) {
+        return failed(reason, "check failed: a.transmits == 1\0");
+    }
+    var s1 = arpNow();
+    if (s1.entries != s0.entries + 2 || s1.requests != s0.requests + 2) {
+        return failed(
+            reason,
+            "check failed: s1.entries == s0.entries + 2 && s1.requests_sent == s0.requests_sent + 2\0",
+        );
+    }
+
+    // (A retry goes out of the interface whose entry it is: arp_age keys the retry on e->nif, unchanged here and
+    // asserted by net-arp-retry-unregister. Not exercised with arp_age(now + x) from this test, because arp_age stamps
+    // every incomplete entry it retries with the clock it is given and clock_delta_ns clamps a future stamp: moving the
+    // shared table's clock delays every other interface's retries by that much, the hazard net-second-nic's
+    // hour-forward hack had. A test asserts on its own interfaces and leaves the table's clock alone.)
+
+    // 2. A reply on the first completes the first's entry and sends its packet out of the first to the first's MAC;
+    // the second's stays incomplete and nothing leaves it.
+    if (!arpMessage(a, 2, gw, borrow macA)) {
+        return failed(reason, "check failed: dual_arp_reply(&a.nif, gw, mac_a)\0");
+    }
+    if (!arpAt(a, gw, borrow macA)) {
+        return failed(reason, "check failed: arp_lookup(&a.nif, gw, mac) && mac == mac_a\0");
+    }
+    if (TRANSMITS[ARPA] != 2 || LAST_TYPE[ARPA] != ETH_P_IP || !lastDstIs(ARPA, borrow macA)) {
+        return failed(reason, "check failed: a.transmits == 2 && a.last_type == ETH_P_IP && a.last_dst == mac_a\0");
+    }
+    if (!arpNone(b, gw)) {
+        return failed(reason, "check failed: !arp_lookup(&b.nif, gw, mac)\0");
+    }
+    if (TRANSMITS[ARPB] != 1) {
+        return failed(reason, "check failed: b.transmits == 1\0");
+    }
+
+    // 3. The second's reply, with a different MAC, completes only the second's.
+    if (!arpMessage(b, 2, gw, borrow macB)) {
+        return failed(reason, "check failed: dual_arp_reply(&b.nif, gw, mac_b)\0");
+    }
+    if (!arpAt(b, gw, borrow macB)) {
+        return failed(reason, "check failed: arp_lookup(&b.nif, gw, mac) && mac == mac_b\0");
+    }
+    if (TRANSMITS[ARPB] != 2 || LAST_TYPE[ARPB] != ETH_P_IP || !lastDstIs(ARPB, borrow macB)) {
+        return failed(reason, "check failed: b.transmits == 2 && b.last_type == ETH_P_IP && b.last_dst == mac_b\0");
+    }
+    if (!arpAt(a, gw, borrow macA)) {
+        return failed(reason, "check failed: arp_lookup(&a.nif, gw, mac) && mac == mac_a (after the second's reply)\0");
+    }
+    if (TRANSMITS[ARPA] != 2) {
+        return failed(reason, "check failed: a.transmits == 2\0");
+    }
+
+    // 4. The sighting's shape: the first's entry incomplete and the first interface down, the second resolves. Down
+    // flushes the first's entries (its parked packet counted dropped); the second's resolution sends its own request
+    // and completes from its own link. A request arriving on the down interface learns nothing: queued input must not
+    // carry a MAC across the down transition.
+    arp_delete(a as *netif, gw);
+    arp_delete(b as *netif, gw);
+    s0 = arpNow();
+    if (arpResolve(a, gw) != -EINPROGRESS) {
+        return failed(reason, "check failed: arp_resolve(&a.nif, gw, mac, m) == -EINPROGRESS (step 4)\0");
+    }
+    if (TRANSMITS[ARPA] != 3) {
+        return failed(reason, "check failed: a.transmits == 3\0");
+    }
+    netif_set_up(a, false);
+    s1 = arpNow();
+    if (!arpNone(a, gw)) {
+        return failed(reason, "check failed: !arp_lookup(&a.nif, gw, mac) (down)\0");
+    }
+    if (s1.entries != s0.entries || s1.dropped != s0.dropped + 1) {
+        return failed(
+            reason,
+            "check failed: s1.entries == s0.entries && s1.pending_dropped == s0.pending_dropped + 1\0",
+        );
+    }
+    if (!arpMessage(a, 2, gw, borrow macA)) { // late input on the down interface
+        return failed(reason, "check failed: dual_arp_reply(&a.nif, gw, mac_a) (down)\0");
+    }
+    if (!arpNone(a, gw)) {
+        return failed(reason, "check failed: !arp_lookup(&a.nif, gw, mac) (after a reply while down)\0");
+    }
+    if (TRANSMITS[ARPA] != 3) {
+        return failed(reason, "check failed: a.transmits == 3 (down)\0");
+    }
+    if (arpResolve(b, gw) != -EINPROGRESS) {
+        return failed(reason, "check failed: arp_resolve(&b.nif, gw, mac, m) == -EINPROGRESS (step 4)\0");
+    }
+    if (TRANSMITS[ARPB] != 3 || LAST_TYPE[ARPB] != ETH_P_ARP) { // a request of its own, not a park on the first's entry
+        return failed(reason, "check failed: b.transmits == 3 && b.last_type == ETH_P_ARP\0");
+    }
+    if (!arpMessage(b, 2, gw, borrow macB)) {
+        return failed(reason, "check failed: dual_arp_reply(&b.nif, gw, mac_b) (step 4)\0");
+    }
+    if (!arpAt(b, gw, borrow macB)) {
+        return failed(reason, "check failed: arp_lookup(&b.nif, gw, mac) && mac == mac_b (step 4)\0");
+    }
+    if (TRANSMITS[ARPB] != 4 || !lastDstIs(ARPB, borrow macB)) {
+        return failed(reason, "check failed: b.transmits == 4 && b.last_dst == mac_b\0");
+    }
+    if (TRANSMITS[ARPA] != 3) { // nothing of the second's ever left the first
+        return failed(reason, "check failed: a.transmits == 3 (the end)\0");
+    }
+    netif_set_up(a, true);
+
+    nettest_netif_unregister(b);
+    nettest_netif_unregister(a);
+    kobject_put(b as *mut kobject);
+    kobject_put(a as *mut kobject);
+    info(
+        "selftest: net-arp-per-interface: two interfaces, one neighbour address, two MACs, each resolved on its own link",
+    );
+    return true;
+}
+
+/// net-nd-per-interface: fe80::1 on two links, resolved as two neighbours.
+/// Safety: the runner's `reason`.
+@export("selftest_net_nd_per_interface")
+unsafe fn ndPerInterface(reason: *mut *CChar) -> bool {
+    let macA: [u8; 6] = [0x02, 0xaa, 0x00, 0x00, 0x00, 0x1a];
+    let macB: [u8; 6] = [0x02, 0xbb, 0x00, 0x00, 0x00, 0x1b];
+    // fe80::1 on both links: a link-local address is per link, so this is two neighbours, and the commonest case
+    // there is.
+    let peer = linkLocal(borrow mut PEER6 as *mut in6_addr, 0, 1);
+    let a = borrow mut NDA_NIF as *mut netif;
+    let b = borrow mut NDB_NIF as *mut netif;
+    dualInit(a, NDA, "nda0", 0x1a, ip4(10, 76, 0, 1));
+    dualInit(b, NDB, "ndb0", 0x1b, ip4(10, 76, 0, 2));
+    if (nettest_netif_register(a) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&a.nif) == 0\0");
+    }
+    if (nettest_netif_register(b) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&b.nif) == 0\0");
+    }
+    var mac: [u8; 6] = [0; 6];
+
+    if (ndResolve(a, peer, true, mut mac) != -EINPROGRESS) {
+        return failed(reason, "check failed: nd_resolve(&a.nif, &peer, mac, m) == -EINPROGRESS\0");
+    }
+    if (TRANSMITS[NDA] != 1 || LAST_TYPE[NDA] != ETH_P_IPV6 || TRANSMITS[NDB] != 0) {
+        return failed(reason, "check failed: a.transmits == 1 && a.last_type == ETH_P_IPV6 && b.transmits == 0\0");
+    }
+    if (ndResolve(b, peer, true, mut mac) != -EINPROGRESS) {
+        return failed(reason, "check failed: nd_resolve(&b.nif, &peer, mac, m) == -EINPROGRESS\0");
+    }
+    if (TRANSMITS[NDB] != 1) { // keyed by address alone: 0, the first's entry found
+        return failed(reason, "check failed: b.transmits == 1\0");
+    }
+    if (LAST_TYPE[NDB] != ETH_P_IPV6 || TRANSMITS[NDA] != 1) {
+        return failed(reason, "check failed: b.last_type == ETH_P_IPV6 && a.transmits == 1\0");
+    }
+
+    if (!ndMessage(a, false, peer, borrow macA)) {
+        return failed(reason, "check failed: dual_nd_advert(&a.nif, &peer, mac_a)\0");
+    }
+    if (TRANSMITS[NDA] != 2 || LAST_TYPE[NDA] != ETH_P_IPV6 || !lastDstIs(NDA, borrow macA)) {
+        return failed(reason, "check failed: a.transmits == 2 && a.last_type == ETH_P_IPV6 && a.last_dst == mac_a\0");
+    }
+    if (TRANSMITS[NDB] != 1) {
+        return failed(reason, "check failed: b.transmits == 1 (after the first's advertisement)\0");
+    }
+    if (ndResolve(a, peer, false, mut mac) != 0 || !sameMac(borrow mac, borrow macA)) {
+        return failed(reason, "check failed: nd_resolve(&a.nif, &peer, mac, NULL) == 0 && mac == mac_a\0");
+    }
+    if (ndResolve(b, peer, true, mut mac) != -EINPROGRESS) { // still the second's own, still unresolved
+        return failed(reason, "check failed: nd_resolve(&b.nif, &peer, mac, m) == -EINPROGRESS (still unresolved)\0");
+    }
+    if (TRANSMITS[NDB] != 1) { // parked on its own incomplete entry: no second solicitation
+        return failed(reason, "check failed: b.transmits == 1 (no second solicitation)\0");
+    }
+
+    if (!ndMessage(b, false, peer, borrow macB)) {
+        return failed(reason, "check failed: dual_nd_advert(&b.nif, &peer, mac_b)\0");
+    }
+    if (TRANSMITS[NDB] != 2 || !lastDstIs(NDB, borrow macB)) {
+        return failed(reason, "check failed: b.transmits == 2 && b.last_dst == mac_b\0");
+    }
+    if (ndResolve(b, peer, false, mut mac) != 0 || !sameMac(borrow mac, borrow macB)) {
+        return failed(reason, "check failed: nd_resolve(&b.nif, &peer, mac, NULL) == 0 && mac == mac_b\0");
+    }
+    if (ndResolve(a, peer, false, mut mac) != 0 || !sameMac(borrow mac, borrow macA)) {
+        return failed(
+            reason,
+            "check failed: nd_resolve(&a.nif, &peer, mac, NULL) == 0 && mac == mac_a (after the second's)\0",
+        );
+    }
+    if (TRANSMITS[NDA] != 2) {
+        return failed(reason, "check failed: a.transmits == 2\0");
+    }
+
+    // Down flushes the interface's neighbours, as for ARP, and an advertisement arriving while it is down teaches
+    // nothing.
+    netif_set_up(a, false);
+    if (!ndMessage(a, false, peer, borrow macA)) {
+        return failed(reason, "check failed: dual_nd_advert(&a.nif, &peer, mac_a) (down)\0");
+    }
+    let m = dualPacket();
+    if (m.isNull()) {
+        return failed(reason, "check failed: m != NULL\0");
+    }
+    netif_set_up(a, true);
+    if (nd_resolve(a, peer, borrow mut mac as *mut [u8; 6] as *mut u8, m) != -EINPROGRESS) { // resolution starts over
+        return failed(reason, "check failed: nd_resolve(&a.nif, &peer, mac, m) == -EINPROGRESS (after the down)\0");
+    }
+    if (TRANSMITS[NDA] != 3) {
+        return failed(reason, "check failed: a.transmits == 3\0");
+    }
+    if (ndResolve(b, peer, false, mut mac) != 0) { // the second's entry untouched by the first's down
+        return failed(reason, "check failed: nd_resolve(&b.nif, &peer, mac, NULL) == 0 (the first's down)\0");
+    }
+
+    nettest_netif_unregister(b);
+    nettest_netif_unregister(a);
+    kobject_put(b as *mut kobject);
+    kobject_put(a as *mut kobject);
+    info("selftest: net-nd-per-interface: fe80::1 on two links resolved as two neighbours");
+    return true;
+}
+
+// ---- net-neigh-down-race ----
+//
+// The two windows the N25 follow-up closes. arp_input and nd_input_* used to test NETIF_UP before taking the table
+// lock; arp_resolve and nd_resolve did not test it at all. So an input that read "up", then lost the CPU while
+// netif_set_up(false) cleared the flag and flushed, learned a MAC on the down interface; and a resolve racing the down
+// allocated a fresh incomplete entry, packet parked, after the flush. Both decide under the table lock now, which the
+// flush also takes, and the flag is cleared before the flush: whichever critical section is second sees the other's
+// effect. The test parks each caller exactly between its old decision point and the lock (debug hooks), takes the
+// interface down, releases it, and looks for an entry on the down interface.
+
+// The racing caller's interface and neighbour, written before its thread is created; its result and done flag.
+static mut RACE_NIF: usize = 0;
+static mut RACE_IP4: u32 = 0;
+static mut RACE_IP6: usize = 0;
+static mut RACE_RC: i32 = 0;
+static RACE_DONE: AtomicU32 = AtomicU32.constant(0);
+
+/// Safety: RACE_NIF is the racing caller's registered interface.
+unsafe fn raceNif() -> *mut netif => RACE_NIF as *mut netif;
+
+/// Safety: RACE_IP6 is one of this file's statics.
+unsafe fn raceIp6() -> *in6_addr => RACE_IP6 as *in6_addr;
+
+/// A request addressed to the interface: the asker is learned.
+/// Safety: the RACE_ statics are written before the thread is created.
+@callback
+unsafe fn raceArpInput(arg: *mut void) {
+    let peer: [u8; 6] = [0x02, 0xdd, 0x00, 0x00, 0x00, 0x01];
+    arpMessage(raceNif(), 1, RACE_IP4, borrow peer);
+    RACE_DONE.storeWith(1, StoreOrdering.Release);
+}
+
+/// Safety: as raceArpInput.
+@callback
+unsafe fn raceArpResolve(arg: *mut void) {
+    let m = dualPacket();
+    var mac: [u8; 6] = [0; 6];
+    RACE_RC = if (m.isNull()) -ENOMEM else arp_resolve(
+        raceNif(),
+        RACE_IP4,
+        borrow mut mac as *mut [u8; 6] as *mut u8,
+        m,
+    );
+    RACE_DONE.storeWith(1, StoreOrdering.Release);
+}
+
+/// A solicitation for the interface's address: the asker is learned.
+/// Safety: as raceArpInput.
+@callback
+unsafe fn raceNdInput(arg: *mut void) {
+    let peer: [u8; 6] = [0x02, 0xdd, 0x00, 0x00, 0x00, 0x02];
+    ndMessage(raceNif(), true, raceIp6(), borrow peer);
+    RACE_DONE.storeWith(1, StoreOrdering.Release);
+}
+
+/// An advertisement for the entry resolve made.
+/// Safety: as raceArpInput.
+@callback
+unsafe fn raceNdAdvert(arg: *mut void) {
+    let peer: [u8; 6] = [0x02, 0xdd, 0x00, 0x00, 0x00, 0x03];
+    ndMessage(raceNif(), false, raceIp6(), borrow peer);
+    RACE_DONE.storeWith(1, StoreOrdering.Release);
+}
+
+/// Safety: as raceArpInput.
+@callback
+unsafe fn raceNdResolve(arg: *mut void) {
+    let m = dualPacket();
+    var mac: [u8; 6] = [0; 6];
+    RACE_RC = if (m.isNull()) -ENOMEM else nd_resolve(
+        raceNif(),
+        raceIp6(),
+        borrow mut mac as *mut [u8; 6] as *mut u8,
+        m,
+    );
+    RACE_DONE.storeWith(1, StoreOrdering.Release);
+}
+
+/// The table whose park hook a caller stops at.
+enum Table {
+    Arp,
+    Nd,
+}
+
+/// Arm the table's hook for `nif` (null: disarm).
+/// Safety: the debug build's hooks.
+unsafe fn arm(t: Table, nif: *mut netif) {
+    match (t) {
+        Table.Arp => { arp_test_hold_lock_entry(nif as *netif); }
+        Table.Nd => { nd_test_hold_lock_entry(nif as *netif); }
+    }
+}
+
+/// Safety: as arm.
+unsafe fn parked(t: Table) -> bool =>
+    match (t) {
+        Table.Arp => arp_test_lock_entry_parked(),
+        Table.Nd => nd_test_lock_entry_parked(),
+    };
+
+/// Safety: as arm.
+unsafe fn letGo(t: Table) {
+    match (t) {
+        Table.Arp => { arp_test_release_lock_entry(); }
+        Table.Nd => { nd_test_release_lock_entry(); }
+    }
+}
+
+/// The race's caller on `nif` for `ip4` and `ip6`.
+/// Safety: no racing thread is running.
+unsafe fn raceOn(nif: *mut netif, ip4: u32, ip6: *in6_addr) {
+    RACE_NIF = nif as usize;
+    RACE_IP4 = ip4;
+    RACE_IP6 = ip6 as usize;
+}
+
+/// TEST-3's control: armed for the test's interface, the hook must let a caller on another interface through (a
+/// debug boot's eth0 traffic, here a resolve on a decoy). True if that caller parked instead -- the arming taken by the
+/// wrong caller, so the test's own caller would run unparked.
+/// Safety: the RACE_ statics name the decoy.
+unsafe fn decoyParked(entry: extern "C" fn(*mut void), t: Table) -> bool {
+    RACE_DONE.storeWith(0, StoreOrdering.Relaxed);
+    let th = thread_create(entry, 0 as *mut void, "neighdecoy\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    if (th.isNull()) {
+        return false;
+    }
+    let giveUp = now() + NS_PER_SEC;
+    while (RACE_DONE.loadWith(LoadOrdering.Acquire) == 0 && !parked(t) && now() < giveUp) {
+        sched_yield();
+    }
+    let took = parked(t);
+    letGo(t); // whichever way it went, the decoy finishes
+    thread_join(th);
+    return took;
+}
+
+/// Run `entry` on a thread parked at the hook, take the interface down while it is parked, release it and join.
+/// False if it never parked.
+/// Safety: the RACE_ statics name the test's interface; the hook is armed for it.
+unsafe fn raceRun(entry: extern "C" fn(*mut void), t: Table) -> bool {
+    RACE_DONE.storeWith(0, StoreOrdering.Relaxed);
+    RACE_RC = 0;
+    let th = thread_create(entry, 0 as *mut void, "neighrace\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    if (th.isNull()) {
+        return false;
+    }
+    let giveUp = now() + 2 * NS_PER_SEC;
+    while (!parked(t) && now() < giveUp) {
+        sched_yield();
+    }
+    let wasParked = parked(t);
+    netif_set_up(raceNif(), false); // the flag cleared, then the flush -- while the caller stands before the lock
+    letGo(t);
+    thread_join(th);
+    return wasParked;
+}
+
+/// Arm, race `entry` against the down, disarm.
+/// Safety: as raceRun.
+unsafe fn raced(nif: *mut netif, entry: extern "C" fn(*mut void), t: Table) -> bool {
+    arm(t, nif);
+    let p = raceRun(entry, t);
+    arm(t, 0 as *mut netif);
+    return p;
+}
+
+/// net-neigh-down-race: input and resolve parked before the lock while the interface goes down leave no entry.
+/// Safety: the runner's `reason`; the debug build's hooks.
+@cfg("CONFIG_DEBUG")
+@export("selftest_net_neigh_down_race")
+unsafe fn neighDownRace(reason: *mut *CChar) -> bool {
+    let d = borrow mut DOWN_NIF as *mut netif;
+    dualInit(d, DOWN, "ndown0", 0x2d, ip4(10, 77, 0, 1)); // 10.77.0.1/24
+    if (nettest_netif_register(d) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&d.nif) == 0\0");
+    }
+    let peer4 = ip4(10, 77, 0, 2);
+    let peer6 = linkLocal(borrow mut PEER6 as *mut in6_addr, 0x4d, 2);
+    var mac: [u8; 6] = [0; 6];
+
+    // 0. The control (TEST-3): armed for ndown0, a resolve on a decoy interface passes the hook, ARP's and ND's
+    // alike. Parking whichever caller came first let eth0's own ARP work take the park in a debug boot while the
+    // test's resolve ran unparked (flakes.md).
+    let decoy = borrow mut DECOY_NIF as *mut netif;
+    dualInit(decoy, DECOY, "ndecoy0", 0x2e, ip4(10, 78, 0, 1)); // 10.78.0.1/24
+    if (nettest_netif_register(decoy) != 0) {
+        return failed(reason, "check failed: nt_netif_register(&decoy.nif) == 0\0");
+    }
+    raceOn(decoy, ip4(10, 78, 0, 2), linkLocal(borrow mut DECOY6 as *mut in6_addr, 0x4e, 2));
+    arm(Table.Arp, d); // armed for ndown0
+    let arpDecoy = decoyParked(raceArpResolve, Table.Arp);
+    arm(Table.Arp, 0 as *mut netif);
+    arm(Table.Nd, d);
+    let ndDecoy = decoyParked(raceNdResolve, Table.Nd);
+    arm(Table.Nd, 0 as *mut netif);
+    nettest_netif_unregister(decoy);
+    kobject_put(decoy as *mut kobject);
+    if (arpDecoy) { // the old hook: the decoy's resolve took the park meant for ndown0
+        return failed(reason, "check failed: !arp_decoy\0");
+    }
+    if (ndDecoy) {
+        return failed(reason, "check failed: !nd_decoy\0");
+    }
+
+    // 1. ARP input racing the down: the request's asker must not be learned.
+    raceOn(d, peer4, peer6);
+    var a0 = arpNow();
+    if (!raced(d, raceArpInput, Table.Arp)) {
+        return failed(reason, "check failed: parked (ARP input)\0");
+    }
+    if (!arpNone(d, peer4)) { // the old order leaves the asker reachable on the down interface
+        return failed(reason, "check failed: !arp_lookup(&d.nif, r.ip4, mac) (ARP input)\0");
+    }
+    var a1 = arpNow();
+    if (a1.entries != a0.entries) {
+        return failed(reason, "check failed: a1.entries == a0.entries\0");
+    }
+
+    // 2. ARP resolve racing the down: no entry, the packet freed and counted.
+    netif_set_up(d, true);
+    a0 = arpNow();
+    if (!raced(d, raceArpResolve, Table.Arp)) {
+        return failed(reason, "check failed: parked (ARP resolve)\0");
+    }
+    // The old order: -EINPROGRESS, an incomplete entry with a parked packet on a down interface.
+    if (RACE_RC != -ENETUNREACH) {
+        return failed(reason, "check failed: r.rc == -ENETUNREACH (ARP resolve)\0");
+    }
+    if (!arpNone(d, peer4)) {
+        return failed(reason, "check failed: !arp_lookup(&d.nif, r.ip4, mac) (ARP resolve)\0");
+    }
+    a1 = arpNow();
+    if (a1.entries != a0.entries || a1.dropped != a0.dropped + 1) {
+        return failed(
+            reason,
+            "check failed: a1.entries == a0.entries && a1.pending_dropped == a0.pending_dropped + 1\0",
+        );
+    }
+
+    // 3. ND input racing the down: the solicitation's asker must not be learned.
+    netif_set_up(d, true);
+    if (!raced(d, raceNdInput, Table.Nd)) {
+        return failed(reason, "check failed: parked (ND input)\0");
+    }
+    netif_set_up(d, true);
+    if (ndResolve(d, peer6, false, mut mac) != -EINPROGRESS) { // no entry: 0 would mean the asker was learned
+        return failed(reason, "check failed: nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS (ND input)\0");
+    }
+    netif_set_up(d, false); // drops the entry the probe above made
+
+    // 4. ND advertisement racing the down: an incomplete entry of ours exists (resolve made it), the advertisement
+    // that would complete it is parked before the lock, the down flushes the entry; the advertisement must complete
+    // nothing. (nd_input_na never allocates, so a flush leaves it nothing to complete under either order; the case
+    // pins the check's place under the lock.)
+    netif_set_up(d, true);
+    if (ndResolve(d, peer6, true, mut mac) != -EINPROGRESS) {
+        return failed(reason, "check failed: nd_resolve(&d.nif, &peer6, probe_mac, probe) == -EINPROGRESS\0");
+    }
+    if (!raced(d, raceNdAdvert, Table.Nd)) {
+        return failed(reason, "check failed: parked (ND advertisement)\0");
+    }
+    netif_set_up(d, true);
+    if (ndResolve(d, peer6, false, mut mac) != -EINPROGRESS) { // no reachable entry: it completed nothing
+        return failed(
+            reason,
+            "check failed: nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS (ND advertisement)\0",
+        );
+    }
+    netif_set_up(d, false);
+
+    // 5. ND resolve racing the down: refused, the packet counted dropped.
+    let n0 = ndDropped();
+    netif_set_up(d, true);
+    if (!raced(d, raceNdResolve, Table.Nd)) {
+        return failed(reason, "check failed: parked (ND resolve)\0");
+    }
+    if (RACE_RC != -ENETUNREACH) {
+        return failed(reason, "check failed: r.rc == -ENETUNREACH (ND resolve)\0");
+    }
+    if (ndDropped() != n0 + 1) {
+        return failed(reason, "check failed: n1.nd_pending_dropped == n0.nd_pending_dropped + 1\0");
+    }
+    netif_set_up(d, true);
+    if (ndResolve(d, peer6, false, mut mac) != -EINPROGRESS) { // nothing left behind by the refused resolve
+        return failed(reason, "check failed: nd_resolve(&d.nif, &peer6, mac, NULL) == -EINPROGRESS (ND resolve)\0");
+    }
+    netif_set_up(d, false);
+
+    nettest_netif_unregister(d);
+    kobject_put(d as *mut kobject);
+    info(
+        "selftest: net-neigh-down-race: input and resolve parked before the lock while the interface went down; no entry survived",
+    );
+    return true;
+}

@@ -1117,7 +1117,12 @@ net-nd-retry-unregister (debug-only, the C's skips kept),
 net-arp-flush-counts, net-nd-flush-counts and net-netif-lifetime -- with
 fake interfaces of their own; the parked retry's deadline and done flag
 are static, and the refused duplicate's never-initialised object is
-checked byte for byte, the kernel library's `kobject` being opaque.
+checked byte for byte, the kernel library's `kobject` being opaque. Batch 16,
+`nettest_neigh.cee`: a neighbour entry is (interface, address) --
+net-arp-per-interface, net-nd-per-interface and net-neigh-down-race
+(debug-only, the C's skip kept) -- the ARP and ND messages built in
+CeeSafe and handed straight to the input functions; the racing caller's
+state is static and the park hooks are chosen by an enum of the two tables.
 
 Size: about 3.0x.
 
