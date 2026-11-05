@@ -93,6 +93,9 @@ void nettest_tap_set_after_purge(void (*fn)(void *), void *arg);
  * reads in a static initialiser and the C compiler folds (compiler.h's
  * COSMO_CONFIG_* for the other switches). */
 #define NETTEST_CONFIG_SCHED_CHAOS() (CONFIG_SCHED_CHAOS != 0)
+/* net-harness's injected break of its first attempts (CONFIG_HARNESS_BREAK,
+ * `make test-harness-retry`), 0 outside a debug build. */
+#define NETTEST_HARNESS_BREAK() (CONFIG_DEBUG ? (unsigned)CONFIG_HARNESS_BREAK : 0u)
 
 /* nettest_lo.cee: move `bytes` of a pattern to a sink thread on `addr` and
  * check the connection's end, lingering `linger_ms` past it (net-lo-tcp,

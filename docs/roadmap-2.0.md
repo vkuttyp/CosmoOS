@@ -1149,7 +1149,12 @@ the C compiler folds (in nettest.h, not compiler.h, so no tree's C
 grows). `find_other_interface` is gone from `nettest.c`. Batch 22,
 `nettest_bench.cee`: net-bench, the loopback benchmark (TCP with one and
 two flows, UDP, steering off and on); the flows' and the receiver's state
-static, the per-round RTO-backoff reset behind `COSMO_CONFIG_SELFTEST()`.
+static, the per-round RTO-backoff reset behind `COSMO_CONFIG_SELFTEST()`. Batch 23,
+`nettest_harness.cee`: net-harness, the host harness's guest side -- the
+echo services on ports 7 and 8 and the back-connection's retried
+exchange, its `NETTEST:` lines printed through kprintf byte for byte as
+the C printed them; the injected break of the first attempts
+(`make test-harness-retry`) is nettest.h's `NETTEST_HARNESS_BREAK()`.
 
 Size: about 3.0x.
 
