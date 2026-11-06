@@ -1,5 +1,5 @@
 /*
- * test_cfsscrub.c - cosmofs's scrub (kernel-services/filesystem/cosmofs/cosmofs_scrub.c) on the host: roadmap 2.0
+ * test_cfsscrub.c - cosmofs's scrub (kernel-services/filesystem/cosmofs/cosmofs_scrub.cee) on the host: roadmap 2.0
  * SA7. A digest recorded from the C over seeded filesystems the test builds and owns: blocks with copies that do and do
  * not verify, superblock slots, allocation maps on one or two members, the live tree, snapshots and clones sharing its
  * blocks, deadlists, extent chains (one in a loop), checksum trees of one and two levels, data extents plain and
@@ -35,6 +35,21 @@ _Static_assert(EIO == 5 && EINVAL == 22 && ENOMEM == 12 && CFS_DVA_NONE == 0xFFF
                    CFS_MAX_EXTENTS == 4096 && CFS_SNAP_MAX_CHAIN == 4096 && POOL_MAX_COPIES == 4 &&
                    COSMOFS_SCRUB_RATE_DEFAULT == 4096 && COSMOFS_SCRUB_REPAIR == 1,
                "cosmofs_scrub's errno.h, cosmofs_format.h and storage.h values");
+_Static_assert(CFS_KIND_IMAP1 == 1 && CFS_KIND_IMAP0 == 2 && CFS_KIND_INODES == 3 && CFS_KIND_ALLOCIDX == 4 &&
+                   CFS_KIND_BITMAP == 5 && CFS_KIND_EXTENTS == 6 && CFS_KIND_CSUMIDX == 7 && CFS_KIND_CSUM == 8 &&
+                   CFS_KIND_DEADLIST == 10 && CFS_KIND_ROLLBACK == 16 && CFS_KIND_COPYSTATE == 17 &&
+                   CFS_KIND_CSUMIDX2 == 18 && CFS_EXT_COMPRESSED == 0x80000000u && CFS_EXT_PSIZE_SHIFT == 16 &&
+                   CFS_EXT_PSIZE_MASK == 0xFF && CFS_EXT_COUNT_MASK == 0xFFFF,
+               "cosmofs_scrub's block kinds and extent fields");
+_Static_assert(offsetof(struct cfs_mhdr, kind) == 4 && offsetof(struct cfs_extent_block, next) == 0 &&
+                   offsetof(struct cfs_dead_block, next) == 0,
+               "cosmofs_scrub.cee reads a header's kind and a chain's next at these offsets");
+/* cosmofs_scrub.cee keeps these in stack slots of words: the pacing state 4, the set 2, a snapshot entry 16, an inode
+ * 32, an extent 2. */
+_Static_assert(sizeof(struct cfs_pace) <= 4 * 8 && sizeof(struct cfs_bits) <= 2 * 8 &&
+                   sizeof(struct cfs_snapshot) <= 16 * 8 && sizeof(struct cfs_inode) <= 32 * 8 &&
+                   sizeof(struct cfs_extent) <= 2 * 8,
+               "cosmofs_scrub.cee's stack slots");
 
 /* The digest of the C (cosmofs_scrub.c, 2026-11-06), which the CeeSafe port gives. */
 #define SCRUB_DIGEST 0x036f8de81cde37d2ull

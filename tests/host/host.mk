@@ -144,7 +144,8 @@ HOST_CFSROLLBACK_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/
 	kernel-services/filesystem/cosmofs/cosmofs_rollback_floor.c kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsrollback.c
 # cosmofs's scrub alone: the blocks and their copies, the lists, the trees, the lock and the clock are the test's.
-HOST_CFSSCRUB_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_scrub.c kernel/ceesafe/ceesafe_rt_core.c \
+HOST_CFSSCRUB_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
+	kernel-services/filesystem/cosmofs/cosmofs_scrub_floor.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsscrub.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c
 HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/object_floor.c kernel/object/handle.c kernel/object/handle_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_handles.c

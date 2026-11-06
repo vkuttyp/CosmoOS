@@ -118,6 +118,8 @@ PORTS = [
     ("kernel-services/filesystem/cosmofs/cosmofs_rollback.cee", "kernel-services/filesystem/cosmofs/cosmofs_rollback.c",
      "cosmofs's rollback: the record, the request, cancel, BOOT_OK and the switch at mount (cosmofs_internal.h)", None,
      True),
+    ("kernel-services/filesystem/cosmofs/cosmofs_scrub.cee", "kernel-services/filesystem/cosmofs/cosmofs_scrub.c",
+     "cosmofs's scrub: every block of every tree, every copy, paced (cosmofs.h, cosmofs_internal.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cfsparse.cee", "kernel-services/filesystem/cosmofs/cfsparse.c",
      "cosmofs's decoders of on-disk metadata (cosmofs_internal.h)", None, False),
     ("kernel/process/elfparse.cee", "kernel/process/elfparse.c", "The user executable validator (elf.h)", None, False),

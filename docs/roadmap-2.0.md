@@ -1271,6 +1271,17 @@ inodes are stack slots of words checked against their C sizes;
 cannot write (`cfs_snapshot_new_uuid`'s pointer to arrays), and
 `cfs_snapshot_lookup_uuid` takes its uuid as a pointer, as the generated
 declaration does. `tools/b1-rollback-probe.py` patches the port.
+`cosmofs_scrub.cee`, the scrub: `tests/host/test_cfsscrub.c` builds the
+filesystems it walks -- copies that do and do not verify, superblock
+slots, one or two members' allocation maps, snapshots sharing the live
+tree's blocks, deadlists, extent chains, checksum trees of one and two
+levels, compressed extents, blocks the open transaction holds -- and
+runs it paced and unpaced, repairing and not, while a writer commits in
+every pause (0x036f8de81cde37d2, clang and gcc; every line, region and
+branch). The pacing state, the set of blocks seen, the entries, inodes
+and extents are stack slots of words checked against their C sizes;
+`cosmofs_scrub_floor.c` keeps `g_cosmofs_scrub_rate`, the sysctl's
+variable, which CeeSafe cannot export.
 
 Size: about 4.5x.
 

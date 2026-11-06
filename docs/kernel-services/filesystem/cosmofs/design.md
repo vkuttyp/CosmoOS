@@ -1151,8 +1151,8 @@ mirror is never something a later mount can find.
 
 ### Scrub
 
-Repair on read only finds what somebody reads. `cosmofs_scrub` reads
-everything reachable through the same verify-and-repair path: every
+Repair on read only finds what somebody reads. `cosmofs_scrub`
+(`cosmofs_scrub.cee`, roadmap 2.0 SA7) reads everything reachable through the same verify-and-repair path: every
 member's allocation index and bitmap, the snapshot list, and every
 inode — its metadata blocks by their own headers, its data blocks
 against its checksum tree. It reports blocks read, blocks repaired, and
