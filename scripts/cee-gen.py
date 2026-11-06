@@ -75,6 +75,9 @@ PORTS = [
      "The block layer's self-tests: blk-queue, blk-segments, blk-timeout, blk-timeout-skew", None, True),
     ("kernel/block/parttest.cee", "kernel/block/parttest.c",
      "The partitions' self-test: blk-gpt", None, True),
+    ("kernel-services/storage/pool.cee", "kernel-services/storage/pool.c",
+     "The storage pool: members, mirror copies and their states, the missed-region bitmaps, spares, the I/O "
+     "(storage.h)", None, True),
     ("kernel/block/part.cee", "kernel/block/part.c",
      "Partitions as block devices: the scan, the forwarding driver, removal and the lookups (part.h)",
      "kernel/include/kernel/part_types.h", True),

@@ -178,6 +178,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/vfs/memdev.c \
 	kernel-services/vfs/vfstest.c \
 	kernel-services/storage/pool.c \
+	kernel-services/storage/pool_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_reach.c \

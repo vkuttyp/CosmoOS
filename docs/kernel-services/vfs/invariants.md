@@ -238,7 +238,7 @@ keyboard and the hub").
 
 **V18. The pool is the only thing cosmofs addresses, and the pool
 addresses one device.** `cosmofs_core.c`/`cosmofs.c` call `pool_*` only;
-`pool.c` calls `blk_*` only. Check: `pool` self-test; review of
+`pool.cee` calls `blk_*` only. Check: `pool` self-test; review of
 includes. Gap: none.
 
 **V21. A snapshot's blocks are never handed out while the snapshot

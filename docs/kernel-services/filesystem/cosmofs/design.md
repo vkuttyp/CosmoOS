@@ -1961,7 +1961,7 @@ Resilvering, replacement and spares build on it.
 
 ### Where the state lives
 
-**In memory, in the pool** (`kernel-services/storage/pool.c`). Each
+**In memory, in the pool** (`kernel-services/storage/pool.cee`). Each
 copy of each member has a state:
 
 | State | Read from | Written to | Means |

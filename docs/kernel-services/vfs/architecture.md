@@ -23,7 +23,7 @@ storage pool.
                                           extents, bitmap allocator, transactions, checksums
         │
         ▼
-   kernel-services/storage/pool.c        the storage pool: block addressing over member devices
+   kernel-services/storage/pool.cee      the storage pool: block addressing over member devices
         │                                (one member in this phase)
         ▼
    kernel/block/ (Phase 6)  ──►  virtio_blk.ko  ──►  the scratch disk

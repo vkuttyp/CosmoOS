@@ -13,7 +13,7 @@ replacement the case names, and runs a debug `make test`:
            block of the commit that wrote it
   persist  the commit writes the record at all (cfs_copystate_prepare):  cosmofs-copy-bitmap
            without it a remount knows nothing of what the copy missed
-  resilver a write goes to a RESILVERING copy too (pool_write_flags):  cosmofs-resilver
+  resilver a write goes to a RESILVERING copy too (pool.cee's writeFlags):  cosmofs-resilver
            without it a block written during the resilver is never
            on the rebuilt copy
 
@@ -31,7 +31,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MEMBER = "kernel-services/filesystem/cosmofs/cosmofs_member.c"
-POOL = "kernel-services/storage/pool.c"
+POOL = "kernel-services/storage/pool.cee"
 
 # file, the text the rule is, what --old leaves instead, self-test, the
 # check its old run fails, other self-tests allowed to fail with it.
@@ -60,8 +60,10 @@ CASES = {
                 # mid-resilver finds its target or its cursor again.
                 ("cosmofs-degraded", "cosmofs-copy-import", "cosmofs-resilver-resume", "cosmofs-attach")),
     "resilver": (POOL,
-                 """        if (!writable(&m->copy[c])) {""",
-                 """        if (!readable(&m->copy[c])) {""",
+                 """        if (!writable(cp)) {
+            missed(m, c, blk);""",
+                 """        if (!readable(cp)) {
+            missed(m, c, blk);""",
                  "cosmofs-resilver",
                  r"raw_block(bd[1], CFS_DVA_BLK(dblk), y) && memcmp(y, during, CFS_BLOCK) == 0",
                  # The other resilvers end with copies that missed what

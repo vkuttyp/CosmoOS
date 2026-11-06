@@ -1226,6 +1226,22 @@ it, is read as bytes at offsets `blk_floor.c` asserts. blk-queue's count
 is read before the RAM disk goes; the C read it after `ramblk_destroy`.
 `kernel/block/` has no C left but `blk_floor.c`.
 
+`pool.cee`, the pool next: `tests/host/test_pool.c` drives members,
+copies and their states, the missed-region bitmaps, resilvers, spares and
+the I/O against devices of every geometry that fail some of the time,
+with allocations failing on request (0xb210836b3a1c3655, clang and gcc;
+every line but the clamp `region_set` notes cannot happen and the restore
+after an `attach` that `fits` already passed). The C step fixed a leak it
+found: `pool_set_copies` growing a member failed part way and kept the
+bitmaps of the slots it gave back, which nothing past `ncopies` frees.
+`struct spool` stays C, cosmofs reading and filling it; a copy is swapped
+through a stack slot of words, checked against its C size, and the
+detach's line names the device before the pool's reference on it goes
+(the C read the name after). `pool_floor.c` keeps the sysctl's
+`g_pool_fault_errors` and the spare slots, an array of pointers the
+pinned ceesafec does not import. `kernel-services/storage/` has no C left
+but `pool_floor.c`.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

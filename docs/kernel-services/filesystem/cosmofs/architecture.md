@@ -22,7 +22,7 @@ state"), 31 (checksums), 32 (snapshots as immutable roots).
         cosmofs_format.h the on-disk layout (host-testable, no kernel dependencies)
         cosmofs_internal.h shared in-memory state
         │
-   kernel-services/storage/pool.c   pool_read/write/flush in 4 KiB blocks
+   kernel-services/storage/pool.cee pool_read/write/flush in 4 KiB blocks
         │
    kernel/block/ → virtio_blk.ko → vda
 ```

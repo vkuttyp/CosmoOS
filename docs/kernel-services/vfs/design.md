@@ -382,7 +382,7 @@ durable `epoch` and a `state_seq` that advances at every copy state
 change. Reads and writes take a device-virtual address (`pool_read`,
 `pool_write`, `pool_read_copy`, `pool_write_copy`); copy states,
 resilvering and the region map of missed writes live in
-`kernel-services/storage/pool.c`. The header is the API reference; the
+`kernel-services/storage/pool.cee`. The header is the API reference; the
 design (members, device-virtual addresses, mirrors, resilvering) is in
 `docs/kernel-services/filesystem/cosmofs/design.md`.
 
