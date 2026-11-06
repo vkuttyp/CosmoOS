@@ -393,7 +393,7 @@ int cfs_rollback_boot_ok(struct cfs *fs, bool *released);
 bool cfs_rollback_protects(struct cfs *fs, const struct cfs_snapshot *s);
 int cfs_rollback_at_mount(struct cfs *fs, bool *switched);
 /*
- * Clones (cosmofs_clone.c; design.md, "Clones"). Under fs->lock: enter
+ * Clones (cosmofs_clone.cee; design.md, "Clones"). Under fs->lock: enter
  * swaps the clone's roots into the in-memory superblock, so every inode
  * and allocation path writes the clone; leave swaps them back and keeps
  * what moved. A free while one is entered keeps a block the origin's tree

@@ -1,5 +1,5 @@
 /*
- * test_cfsclone.c - cosmofs's writable clones (kernel-services/filesystem/cosmofs/cosmofs_clone.c) on the host:
+ * test_cfsclone.c - cosmofs's writable clones (kernel-services/filesystem/cosmofs/cosmofs_clone.cee) on the host:
  * roadmap 2.0 SA7. A digest recorded from the C over seeded rounds against a snapshot list, trees and a transaction
  * the test owns: clones created (of snapshots, of clones, of nothing, under names taken, on version-11 roots, with the
  * commits before and after failing), loaded from the list, entered and left with their roots moving, blocks freed
@@ -24,6 +24,7 @@
 _Static_assert(EIO == 5 && ENOENT == 2 && EINVAL == 22 && EEXIST == 17 && ENOMEM == 12 && EOPNOTSUPP == 95 &&
                    CFS_SNAP_F_CLONE == 1 && CFS_DVA_NONE == 0xFFFFFFFFFFFFFFFFull,
                "cosmofs_clone's errno.h and cosmofs_format.h values");
+_Static_assert(sizeof(struct cfs_snapshot) <= 16 * 8, "cosmofs_clone.cee keeps a snapshot entry in 16 words");
 
 /* The digest of the C (cosmofs_clone.c, 2026-11-06), which the CeeSafe port gives. */
 #define CLONE_DIGEST 0xf455c79b8ec77804ull

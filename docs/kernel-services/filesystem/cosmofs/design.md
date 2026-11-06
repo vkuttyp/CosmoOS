@@ -1771,7 +1771,7 @@ keeps a snapshot from being deleted. The scrub reads the block.
 
 ### Clones
 
-Built by B1's third pull request (`cosmofs_clone.c`).
+Built by B1's third pull request (`cosmofs_clone.c`, now `cosmofs_clone.cee`).
 
 `clone NAME CLONE` makes a writable tree that starts as snapshot NAME's
 and shares its blocks, read and written at `.snapshots/CLONE`. It is an

@@ -1643,7 +1643,7 @@ static unsigned snap_tag_of(struct vnode *vn)
 
 /*
  * The tree an operation on `vn` writes: the live tree, or a clone, which
- * it enters for the length of the operation (cosmofs_clone.c). A vnode
+ * it enters for the length of the operation (cosmofs_clone.cee). A vnode
  * of a snapshot is read-only, and so is one of a clone since deleted.
  */
 static bool tree_readonly(struct cfs *fs, struct vnode *vn)

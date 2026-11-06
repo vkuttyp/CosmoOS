@@ -1252,6 +1252,14 @@ or outside the pool -- and fakes the buffers and the address map
 (0x18b576f00e985902, clang and gcc; every line and branch). The port reads
 each block as a slice of CFS_BLOCK bytes at offsets the test asserts, so
 no read can leave it; its reasons for a bad block are an enum.
+`cosmofs_clone.cee`, the writable clones: `tests/host/test_cfsclone.c`
+fakes the snapshot list, the trees (what a root reaches follows from the
+root, and some cannot be walked) and the transaction, and drives
+creation, loading, entering and leaving with roots that move, frees
+inside and outside a clone, publishing, readiness and deletion
+(0xf455c79b8ec77804, clang and gcc; every line). A snapshot entry the C
+kept on the stack is a zeroed slot of words checked against its C size;
+the walks' marks and the list's write walk are `@callback` functions.
 
 Size: about 4.5x.
 
