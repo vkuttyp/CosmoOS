@@ -1400,6 +1400,16 @@ reached -- the orphan replay's "already gone" inode cannot, since
 decides: the debug build's stop-at-this-commit and `COSMOFS_STOP`'s
 crash point. `cfs_sync_vnodes` stayed in `cosmofs_core.c` with the VFS
 side of the mount.
+`cosmofs_format.cee`, the fourth, making a pool and its test hooks:
+`tests/host/test_cfsformat.c` runs it with the real key-slot check and
+CRC32C -- one device or many, mirrored or not, every format version,
+labels, pools in the clear, wrapped-key and with sealed slots, the hooks
+that write an older format or poison a free record, while opens, writes,
+flushes, kmalloc and the key and label writers fail
+(0x4d8818e293f81719, clang and gcc; every line and branch that can be
+reached). The user key the C passed through two statics is a parameter;
+the struct cfs it kept on the stack is a slot of words, checked against
+its C size. `cosmofs.h`'s two array parameters became pointers.
 
 Size: about 4.5x.
 

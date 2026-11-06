@@ -1,0 +1,706 @@
+// cosmofs_format.cee - Making a pool, in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfsformat.c holds it to the
+// digest of the C it replaced.
+//
+// One device or several, mirrored or not, at any format version this kernel writes, in the clear or encrypted with a
+// key the kernel wraps or slots user space sealed; and the test hooks that write an older format or poison a record.
+//
+// The pool, the devices, the member table's entries, the key slots and the superblock stay C (storage.h,
+// cosmofs_internal.h, cosmofs_format.h). The struct cfs the C kept on the stack for the seals and the root write is a
+// zeroed slot of words, checked against its C size: a CeeSafe local cannot hold C state. The user key the C passed
+// through two statics is a parameter here, which is what the statics were standing in for.
+
+@header("kernel/blk.h", "kernel/storage.h", "kernel/kmalloc.h", "kernel/random.h", "kernel/string.h",
+    "kernel/cosmofs.h", "uapi/cosmo/keyslot.h", "cosmofs_internal.h")
+extern "C" {
+    struct blkdev {
+        name: [u8; 16];
+    }
+    struct spool_member {
+        nblocks: u64;
+    }
+    struct spool {
+        m: *mut spool_member;
+    }
+    struct cfs_mac {
+        on: bool;
+    }
+    struct cfs_super {
+        magic: [u8; 8];
+        version: u32;
+        block_size: u32;
+        total_blocks: u64;
+        generation: u64;
+        imap_root: u64;
+        alloc_root: u64;
+        next_ino: u64;
+        inode_count: u64;
+        free_blocks: u64;
+        free_root: u64;
+        members: u64;
+        uuid: [u8; 16];
+        key_root: u64;
+        label: [u8; 16];
+        crc: u32;
+    }
+    struct cfs {
+        pool: *mut spool;
+        sb: cfs_super;
+        gen: u64;
+        mac: cfs_mac;
+    }
+    struct cfs_member {
+        uuid: [u8; 16];
+        nblocks: u64;
+        first_usable: u64;
+        alloc_root: u64;
+        free_blocks: u64;
+        copies: u32;
+    }
+    struct cfs_keyslot {
+        kind: u32;
+    }
+    struct cfs_format_keys {
+        uuid: [u8; 16];
+        master: [u8; 32];
+    }
+    struct cosmo_keyslot {
+        kind: u32;
+    }
+
+    fn pool_open(bd: *mut blkdev, out: *mut *mut spool) -> i32;
+    fn pool_add_member(p: *mut spool, bd: *mut blkdev, vdev: *mut u32) -> i32;
+    fn pool_add_copy(p: *mut spool, vdev: u32, bd: *mut blkdev) -> i32;
+    fn pool_close(p: *mut spool);
+    fn pool_read(p: *mut spool, dva: u64, buf: *mut void) -> i32;
+    fn pool_write(p: *mut spool, dva: u64, buf: *void) -> i32;
+    fn pool_flush(p: *mut spool) -> i32;
+    fn cfs_mhdr_seal(fs: *mut cfs, block: *mut u8, kind: u32, blkno: u64);
+    fn cfs_super_write(fs: *mut cfs, slot: u32, flags: u32) -> i32;
+    fn cfs_block_crc(block: *u8, crcAt: usize) -> u32;
+    fn cfs_label_write(pool: *mut spool, mac: *cfs_mac, vdev: u32, copy: u32, generation: u64, uuid: *u8,
+        nblocks: u64) -> i32;
+    fn cfs_mac_derive(master: *u8, out: *mut cfs_mac);
+    fn cfs_keyslot_valid(index: u32, s: *cfs_keyslot) -> bool;
+    fn cfs_keys2_write(pool: *mut spool, mac: *cfs_mac, dva: u64, generation: u64, uuid: *u8, slots: *cfs_keyslot)
+        -> i32;
+    fn cfs_keys_write(pool: *mut spool, dva: u64, generation: u64, master: *u8, userKey: *void, keyLen: usize) -> i32;
+    fn cfs_keytab_install(uuid: *u8, master: *u8) -> i32;
+    fn cfs_need_seeded(what: *CChar) -> i32;
+    fn random_get_bytes(buf: *mut void, len: usize);
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn strlen(s: *CChar) -> usize;
+    fn strnlen(s: *CChar, max: usize) -> usize;
+}
+
+// ---- errno.h, blk.h, kmalloc.h, cosmofs_internal.h and cosmofs_format.h values (asserted in
+// tests/host/test_cfsformat.c) ----
+
+const ENOENT: i32 = 2;
+const ENOMEM: i32 = 12;
+const EINVAL: i32 = 22;
+const KMEM_ZERO: u32 = 1;
+const BIO_PREFLUSH: u32 = 1;
+const BIO_FUA: u32 = 2;
+const CFS_DVA_VDEV_SHIFT: u32 = 56;
+const CFS_DVA_BLK_MASK: u64 = 0x00FFFFFFFFFFFFFF;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_BITS_PER_BITMAP: u64 = 32512;
+const CFS_PTRS_PER_BLOCK: u32 = 508;
+const CFS_INODE_SIZE: usize = 256;
+const CFS_MIN_BLOCKS: u64 = 64;
+const CFS_MAX_BLOCKS: u64 = 16516096; // CFS_PTRS_PER_BLOCK * CFS_BITS_PER_BITMAP
+const CFS_MAX_MEMBERS: u32 = 255;
+const CFS_MAX_COPIES: u32 = 4;
+const CFS_LABEL_MAX: usize = 16;
+const CFS_FORMAT_VERSION: u32 = 11;
+const CFS_VERSION_MIN: u32 = 2;
+const CFS_VERSION: u32 = 15;
+const CFS_SUPER_A: u32 = 0;
+const CFS_SUPER_B: u32 = 1;
+const CFS_ROOT_INO: u64 = 1;
+const CFS_TYPE_DIR: u32 = 2;
+const CFS_CSUM_CRC32C: u32 = 1;
+const CFS_CSUM_POLY1305: u32 = 2;
+const CFS_COMPRESS_NONE: u32 = 0;
+const CFS_KEY_SLOTS: u32 = 8;
+const CFS_KEYSLOT_EMPTY: u32 = 0;
+const CFS_KIND_IMAP1: u32 = 1;
+const CFS_KIND_IMAP0: u32 = 2;
+const CFS_KIND_INODES: u32 = 3;
+const CFS_KIND_ALLOCIDX: u32 = 4;
+const CFS_KIND_BITMAP: u32 = 5;
+const CFS_KIND_MEMBERS: u32 = 11;
+/// The magic a superblock starts with: "COSMOFS1".
+const CFS_MAGIC: StringView = "COSMOFS1";
+/// Where things are (struct cfs_member_block, cfs_inode, cfs_dead_block, cfs_mhdr, cfs_super), and the sizes of a key
+/// slot and a member: checked by the test.
+const MEMBERS_COUNT: usize = 0;
+const MEMBERS_M: usize = 8;
+const MEMBER_SIZE: usize = 64;
+const KEYSLOT_SIZE: usize = 96;
+const FK_SLOT: usize = 48;
+const INODE_MODE: usize = 0;
+const INODE_NLINK: usize = 4;
+const INODE_GENERATION: usize = 40;
+const INODE_INO: usize = 48;
+const INODE_PARENT: usize = 224;
+const INODE_CSUM_ALGO: usize = 232;
+const INODE_COMPRESS_ALGO: usize = 248;
+const DEAD_COUNT: usize = 8;
+const MHDR_CRC: usize = 24;
+const SUPER_CRC: usize = 160;
+
+/// The stack slot the format's struct cfs is kept in, in words.
+const CFS_WORDS: usize = 128;
+
+// ---- Helpers ----
+
+fn dva(vdev: u32, blk: u64) -> u64 => ((vdev as u64) << CFS_DVA_VDEV_SHIFT) | (blk & CFS_DVA_BLK_MASK);
+
+/// Safety: `p` is an open pool, `v` one of its members.
+unsafe fn memberBlocks(p: *mut spool, v: u32) -> u64 =>
+    Ptr.toBorrow(Ptr.toBorrow(p as *spool).m.add(v as usize) as *spool_member).nblocks;
+
+/// A block's bytes.
+/// Safety: `block` is CFS_BLOCK writable bytes.
+unsafe fn blockMut(block: *mut u8) -> SliceMut<static, u8> => SliceMut.fromRaw(block, CFS_BLOCK);
+
+/// Safety: `bd` is a device.
+unsafe fn devName(bd: *mut blkdev) -> *CChar => borrow Ptr.toBorrow(bd as *blkdev).name as *[u8; 16] as *CChar;
+
+/// Safety: `s` holds a terminated string.
+unsafe fn cText(line: borrow mut TextWriter, s: *CChar) { line.bytes(Slice.fromRaw(s as *u8, strlen(s))); }
+
+/// A label longer than a superblock holds.
+/// Safety: `label` null or a terminated string.
+unsafe fn labelTooLong(label: *CChar) -> bool => !label.isNull() && strlen(label) > CFS_LABEL_MAX;
+
+/// The seeding check's argument.
+fn seededWhat() -> *CChar => "create an encrypted pool\0".ptr as *CChar;
+
+// ---- Format ----
+
+/// Format `n` devices as one pool. Member 0 carries the superblocks, the member table and its own allocation metadata;
+/// every other member carries a label at block 0 and its own allocation metadata, so that losing one member does not
+/// take another's bitmap with it (design.md, "The member table").
+///
+/// `copies` devices per member, taken from `bd` member by member: with copies = 2 and n = 2, bd[0] and bd[1] are
+/// member 0's mirror and bd[2] and bd[3] are member 1's. `userKey` is the key an encrypted format wraps its master key
+/// with; null for a filesystem in the clear.
+/// Safety: `bd` is `n * copies` devices; `label` null or a terminated string; `fk` null or a key set; `userKey` null or
+/// `keyLen` readable bytes.
+unsafe fn formatAt(bd: *mut *mut blkdev, n: u32, copies: u32, version0: u32, label: *CChar, fk: *cfs_format_keys,
+    userKey: *void, keyLen: usize) -> i32 {
+    if (n == 0 || n > CFS_MAX_MEMBERS || copies == 0 || copies > CFS_MAX_COPIES) {
+        return -EINVAL;
+    }
+    if (version0 < 4 && (n != 1 || copies != 1)) {
+        return -EINVAL; // one device is all the older formats can name
+    }
+    if (version0 < 5 && copies != 1) {
+        return -EINVAL; // a mirror group is what version 5 adds
+    }
+    if (layoutOf<cfs>().size > CFS_WORDS * 8) {
+        return -EINVAL; // a struct cfs this file's stack slot cannot hold
+    }
+    var pool = 0 as *mut spool;
+    var rc = pool_open(bd.read(), borrow mut pool as *mut *mut spool);
+    if (rc != 0) {
+        return rc;
+    }
+    var c: u32 = 1;
+    while (c < copies && rc == 0) {
+        rc = pool_add_copy(pool, 0, bd.add(c as usize).read());
+        c += 1;
+    }
+    var v: u32 = 1;
+    while (v < n && rc == 0) {
+        rc = pool_add_member(pool, bd.add((v * copies) as usize).read(), 0 as *mut u32);
+        c = 1;
+        while (c < copies && rc == 0) {
+            rc = pool_add_copy(pool, v, bd.add((v * copies + c) as usize).read());
+            c += 1;
+        }
+        v += 1;
+    }
+    if (rc != 0) {
+        pool_close(pool);
+        return rc;
+    }
+
+    // On the heap: 255 members of 64 bytes are the whole of a 16 KiB kernel stack. A self-test's format never noticed;
+    // a format from a system call (/dev/blkctl, roadmap M2) double-faulted.
+    let mem = kmalloc(MEMBER_SIZE * n as usize, KMEM_ZERO) as *mut cfs_member;
+    if (mem.isNull()) {
+        pool_close(pool);
+        return -ENOMEM;
+    }
+    var uuid = [0u8; 16];
+    if (!fk.isNull()) {
+        uuid = Ptr.toBorrow(fk).uuid; // the slots were sealed for it
+    } else {
+        random_get_bytes(borrow mut uuid as *mut [u8; 16] as *mut void, 16);
+    }
+    var total: u64 = 0;
+    var freeTotal: u64 = 0;
+    for (m in 0u32..n) {
+        let nb = memberBlocks(pool, m);
+        if (nb < CFS_MIN_BLOCKS || nb > CFS_MAX_BLOCKS) {
+            kfree(mem as *mut void);
+            pool_close(pool);
+            return -EINVAL;
+        }
+        let chunks = truncate<u32>((nb + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
+        if (chunks > CFS_PTRS_PER_BLOCK) {
+            kfree(mem as *mut void);
+            pool_close(pool);
+            return -EINVAL;
+        }
+        let e = Ptr.toBorrowMut(mem.add(m as usize));
+        e.uuid = uuid;
+        e.nblocks = nb;
+        e.copies = copies;
+        e.first_usable = if (m == 0) 2 else 1;
+        total += nb;
+    }
+
+    // Member 0: 0,1 superblocks; 2 member table; 3 alloc index; 4.. bitmaps; then imap L1, imap L0, inode block 0.
+    // Member v>0: 0 label; 1 alloc index; 2.. bitmaps.
+    let chunks0 = truncate<u32>((Ptr.toBorrow(mem as *cfs_member).nblocks + CFS_BITS_PER_BITMAP - 1) /
+        CFS_BITS_PER_BITMAP);
+    let v4 = version0 >= 4;
+    // Version 14 (design.md, "Making an encrypted pool"): the master key and slots user space sealed, and every block
+    // MAC'd under it.
+    let keyed = !fk.isNull();
+    let version = if (keyed) 14 else version0;
+    let crypt = keyed || (version >= 7 && !userKey.isNull());
+    // Before version 4 there is no member table, and the allocation index is at block 2 where that format put it.
+    let membersBlk: u64 = 2;
+    let allocIdx: u64 = if (v4) 3 else 2;
+    let bitmap0: u64 = if (v4) 4 else 3;
+    let imap1 = bitmap0 + chunks0 as u64;
+    let imap0 = imap1 + 1;
+    let inodes0 = imap0 + 1;
+    let keysBlk = inodes0 + 1;
+    let used0 = if (crypt) keysBlk + 1 else inodes0 + 1;
+
+    let block = kmalloc(CFS_BLOCK, KMEM_ZERO) as *mut u8;
+    if (block.isNull()) {
+        kfree(mem as *mut void);
+        pool_close(pool);
+        return -ENOMEM;
+    }
+    var tmpSlot = [0u64; 128];
+    let tmp = borrow mut tmpSlot as *mut [u64; 128] as *mut cfs;
+    let t = Ptr.toBorrowMut(tmp);
+    t.gen = 1;
+    t.pool = pool;
+    if (keyed) {
+        cfs_mac_derive(borrow Ptr.toBorrow(fk).master as *[u8; 32] as *u8, borrow mut t.mac as *mut cfs_mac);
+    }
+    let mac = borrow t.mac as *cfs_mac;
+
+    v = 0;
+    while (v < n && rc == 0) {
+        let nb = Ptr.toBorrow(mem.add(v as usize) as *cfs_member).nblocks;
+        let chunks = truncate<u32>((nb + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
+        let idxBlk = if (v == 0) allocIdx else 1;
+        let bm0: u64 = if (v == 0) bitmap0 else 2;
+        let used = if (v == 0) used0 else bm0 + chunks as u64;
+        c = 0;
+        while (c < chunks && rc == 0) {
+            memset(block as *mut void, 0, CFS_BLOCK);
+            let bits = block.add(CFS_MHDR_SIZE);
+            let lo = c as u64 * CFS_BITS_PER_BITMAP;
+            for (i in lo..lo + CFS_BITS_PER_BITMAP) {
+                if (i >= nb || i < used) {
+                    // past-the-end bits stay allocated
+                    let at = bits.add(((i - lo) >> 3) as usize);
+                    at.write(at.read() | (1u8 << truncate<u8>((i - lo) & 7)));
+                }
+            }
+            cfs_mhdr_seal(tmp, block, CFS_KIND_BITMAP, dva(v, bm0 + c as u64));
+            rc = pool_write(pool, dva(v, bm0 + c as u64), block as *void);
+            c += 1;
+        }
+        if (rc == 0) {
+            memset(block as *mut void, 0, CFS_BLOCK);
+            let p = blockMut(block);
+            for (k in 0u32..chunks) {
+                ByteOrder.writeU64LE(p, CFS_MHDR_SIZE + k as usize * 8, dva(v, bm0 + k as u64));
+            }
+            cfs_mhdr_seal(tmp, block, CFS_KIND_ALLOCIDX, dva(v, idxBlk));
+            rc = pool_write(pool, dva(v, idxBlk), block as *void);
+        }
+        // Generation 1: the commit this device took part in.
+        c = 0;
+        while (c < copies && rc == 0 && v > 0) {
+            rc = cfs_label_write(pool, mac, v, c, 1, borrow uuid as *[u8; 16] as *u8, nb);
+            c += 1;
+        }
+        let e = Ptr.toBorrowMut(mem.add(v as usize));
+        e.alloc_root = dva(v, idxBlk);
+        e.free_blocks = nb - used;
+        freeTotal += nb - used;
+        v += 1;
+    }
+
+    // The member table.
+    if (rc == 0 && v4) {
+        memset(block as *mut void, 0, CFS_BLOCK);
+        ByteOrder.writeU64LE(blockMut(block), CFS_MHDR_SIZE + MEMBERS_COUNT, n as u64);
+        memcpy(block.add(CFS_MHDR_SIZE + MEMBERS_M) as *mut void, mem as *void, MEMBER_SIZE * n as usize);
+        cfs_mhdr_seal(tmp, block, CFS_KIND_MEMBERS, dva(0, membersBlk));
+        rc = pool_write(pool, dva(0, membersBlk), block as *void);
+    }
+    // Inode block 0 with the root directory (inode 1).
+    if (rc == 0) {
+        memset(block as *mut void, 0, CFS_BLOCK);
+        let p = blockMut(block);
+        let root = CFS_MHDR_SIZE + CFS_ROOT_INO as usize * CFS_INODE_SIZE;
+        ByteOrder.writeU32LE(p, root + INODE_MODE, (CFS_TYPE_DIR << 12) | 493); // 0755
+        ByteOrder.writeU32LE(p, root + INODE_NLINK, 2);
+        ByteOrder.writeU64LE(p, root + INODE_INO, CFS_ROOT_INO);
+        ByteOrder.writeU64LE(p, root + INODE_PARENT, CFS_ROOT_INO);
+        ByteOrder.writeU64LE(p, root + INODE_GENERATION, 1);
+        // An encrypted filesystem authenticates rather than checksums: a CRC cannot tell a deliberate change from an
+        // accident.
+        ByteOrder.writeU32LE(p, root + INODE_CSUM_ALGO, if (crypt) CFS_CSUM_POLY1305 else CFS_CSUM_CRC32C);
+        ByteOrder.writeU32LE(p, root + INODE_COMPRESS_ALGO, CFS_COMPRESS_NONE);
+        cfs_mhdr_seal(tmp, block, CFS_KIND_INODES, inodes0);
+        rc = pool_write(pool, inodes0, block as *void);
+    }
+    if (rc == 0) {
+        memset(block as *mut void, 0, CFS_BLOCK);
+        ByteOrder.writeU64LE(blockMut(block), CFS_MHDR_SIZE, inodes0);
+        cfs_mhdr_seal(tmp, block, CFS_KIND_IMAP0, imap0);
+        rc = pool_write(pool, imap0, block as *void);
+    }
+    if (rc == 0) {
+        memset(block as *mut void, 0, CFS_BLOCK);
+        ByteOrder.writeU64LE(blockMut(block), CFS_MHDR_SIZE, imap0);
+        cfs_mhdr_seal(tmp, block, CFS_KIND_IMAP1, imap1);
+        rc = pool_write(pool, imap1, block as *void);
+    }
+    if (rc == 0 && keyed) {
+        let slots = (fk as *u8).add(FK_SLOT) as *cfs_keyslot;
+        rc = cfs_keys2_write(pool, mac, dva(0, keysBlk), 1, borrow uuid as *[u8; 16] as *u8, slots);
+    } else if (rc == 0 && crypt) {
+        var master = [0u8; 32];
+        random_get_bytes(borrow mut master as *mut [u8; 32] as *mut void, 32);
+        rc = cfs_keys_write(pool, dva(0, keysBlk), 1, borrow master as *[u8; 32] as *u8, userKey, keyLen);
+        master = [0u8; 32];
+    }
+    if (rc == 0) {
+        rc = pool_flush(pool);
+    }
+    // Superblock A at generation 1; slot B zeroed. Member 0's addresses are numerically what they always were, so a
+    // version-3 reader sees the same layout it would have written.
+    if (rc == 0) {
+        let sb = borrow mut Ptr.toBorrowMut(tmp).sb as *mut cfs_super;
+        memset(sb as *mut void, 0, layoutOf<cfs_super>().size);
+        let s = Ptr.toBorrowMut(sb);
+        memcpy(borrow mut s.magic as *mut [u8; 8] as *mut void, CFS_MAGIC.ptr as *void, 8);
+        s.version = version;
+        s.block_size = truncate<u32>(CFS_BLOCK);
+        s.total_blocks = total;
+        s.generation = 1;
+        s.imap_root = imap1;
+        s.alloc_root = if (v4) 0 else dva(0, allocIdx);
+        s.next_ino = 2;
+        s.inode_count = 1;
+        s.free_blocks = freeTotal;
+        s.members = if (v4) dva(0, membersBlk) else 1;
+        s.key_root = if (crypt) dva(0, keysBlk) else 0;
+        if (v4) {
+            s.uuid = uuid;
+        }
+        if (!label.isNull()) {
+            memcpy(borrow mut s.label as *mut [u8; 16] as *mut void, label as *void, strnlen(label, CFS_LABEL_MAX));
+        }
+        memset(block as *mut void, 0, CFS_BLOCK);
+        rc = pool_write(pool, CFS_SUPER_B as u64, block as *void);
+        if (rc == 0) {
+            rc = cfs_super_write(tmp, CFS_SUPER_A, BIO_PREFLUSH | BIO_FUA);
+        }
+    }
+    // The installer mounts what it just made: the key is loaded, as the boot's unlock would load it.
+    if (rc == 0 && keyed) {
+        rc = cfs_keytab_install(borrow uuid as *[u8; 16] as *u8,
+            borrow Ptr.toBorrow(fk).master as *[u8; 32] as *u8);
+    }
+    memset(borrow mut Ptr.toBorrowMut(tmp).mac as *mut cfs_mac as *mut void, 0, layoutOf<cfs_mac>().size);
+    kfree(block as *mut void);
+    kfree(mem as *mut void);
+    pool_close(pool);
+    if (rc == 0) {
+        var buffer = [0u8; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: formatted ");
+        cText(mut line, devName(bd.read()));
+        if (n > 1) {
+            line.text(" and others");
+        }
+        line.text(": ");
+        line.decimal(n as u64);
+        line.text(" member(s), ");
+        line.decimal(total);
+        line.text(" blocks, ");
+        line.decimal(freeTotal);
+        line.text(" free");
+        if (keyed) {
+            line.text(", encrypted (format 14)");
+        }
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return rc;
+}
+
+/// Safety: `bd` is `n` devices.
+@export("cosmofs_format_pool")
+unsafe fn formatPool(bd: *mut *mut blkdev, n: u32) -> i32 =>
+    formatAt(bd, n, 1, CFS_FORMAT_VERSION, 0 as *CChar, 0 as *cfs_format_keys, 0 as *void, 0);
+
+/// Safety: `bd` is `n * copies` devices.
+@export("cosmofs_format_mirror")
+unsafe fn formatMirror(bd: *mut *mut blkdev, n: u32, copies: u32) -> i32 =>
+    formatAt(bd, n, copies, CFS_FORMAT_VERSION, 0 as *CChar, 0 as *cfs_format_keys, 0 as *void, 0);
+
+/// The VFS's mirror format: one member, a copy on each device, named `label` (null or "" for none; roadmap 1.2 B3, an
+/// installed mirrored root is named as a single one is).
+/// Safety: `bd` is `n` devices; `label` null or a terminated string.
+@export("cfs_format_mirror_devs")
+unsafe fn formatMirrorDevs(bd: *mut *mut blkdev, n: u32, label: *CChar) -> i32 {
+    if (labelTooLong(label)) {
+        return -EINVAL;
+    }
+    return formatAt(bd, 1, n, CFS_FORMAT_VERSION, label, 0 as *cfs_format_keys, 0 as *void, 0);
+}
+
+/// Safety: `bd` is a device.
+@export("cosmofs_format")
+unsafe fn format(bd: *mut blkdev) -> i32 {
+    var one = bd;
+    return formatAt(borrow mut one as *mut *mut blkdev, 1, 1, CFS_FORMAT_VERSION, 0 as *CChar, 0 as *cfs_format_keys,
+        0 as *void, 0);
+}
+
+/// A single-device pool named `label` (null or "" for none): the fs_type's format, which /dev/blkctl reaches (shell
+/// completeness S6).
+/// Safety: `bd` is a device; `label` null or a terminated string.
+@export("cosmofs_format_label")
+unsafe fn formatLabel(bd: *mut blkdev, label: *CChar) -> i32 {
+    if (labelTooLong(label)) {
+        return -EINVAL;
+    }
+    var one = bd;
+    return formatAt(borrow mut one as *mut *mut blkdev, 1, 1, CFS_FORMAT_VERSION, label, 0 as *cfs_format_keys,
+        0 as *void, 0);
+}
+
+/// Format with encryption: a random master key, wrapped with `key`.
+/// Safety: `bd` is a device; `key` null or `len` readable bytes.
+@export("cosmofs_format_encrypted")
+unsafe fn formatEncrypted(bd: *mut blkdev, key: *void, len: usize) -> i32 {
+    if (key.isNull() || len == 0) {
+        return -EINVAL;
+    }
+    let rc = cfs_need_seeded(seededWhat());
+    if (rc != 0) {
+        return rc;
+    }
+    var one = bd;
+    return formatAt(borrow mut one as *mut *mut blkdev, 1, 1, CFS_FORMAT_VERSION, 0 as *CChar, 0 as *cfs_format_keys,
+        key, len);
+}
+
+/// An encrypted pool (roadmap 1.2 B5): one member on `n` devices (a mirror when n is 2), version 14, the slots as user
+/// space sealed them. At least one slot must be usable; a key-file slot only at 0.
+/// Safety: `bd` is `n` devices; `label` null or a terminated string; `fk` a key set.
+@export("cosmofs_format_keyed")
+unsafe fn formatKeyed(bd: *mut *mut blkdev, n: u32, label: *CChar, fk: *cfs_format_keys) -> i32 {
+    if (labelTooLong(label)) {
+        return -EINVAL;
+    }
+    var usable: u32 = 0;
+    for (i in 0u32..CFS_KEY_SLOTS) {
+        let s = (fk as *u8).add(FK_SLOT + i as usize * KEYSLOT_SIZE) as *cfs_keyslot;
+        if (!cfs_keyslot_valid(i, s)) {
+            return -EINVAL;
+        }
+        if (Ptr.toBorrow(s).kind != CFS_KEYSLOT_EMPTY) {
+            usable += 1;
+        }
+    }
+    var zero = true;
+    for (b in Ptr.toBorrow(fk).uuid) {
+        if (b != 0) {
+            zero = false;
+        }
+    }
+    if (usable == 0 || zero) {
+        return -EINVAL; // no way in; or no uuid, which is how a pool before version 4 says it has none
+    }
+    let rc = cfs_need_seeded(seededWhat());
+    if (rc != 0) {
+        return rc;
+    }
+    return formatAt(bd, 1, n, 14, label, fk, 0 as *void, 0);
+}
+
+/// A key set on the heap from the uuid, the master key and the slots, cleared and freed once used.
+/// Safety: `uuid` is 16 bytes, `master` 32, `slots` CFS_KEY_SLOTS key slots.
+unsafe fn keySet(uuid: *u8, master: *u8, slots: *cosmo_keyslot) -> *mut u8 {
+    let size = FK_SLOT + CFS_KEY_SLOTS as usize * KEYSLOT_SIZE;
+    let fk = kmalloc(size, 0) as *mut u8;
+    if (fk.isNull()) {
+        return fk;
+    }
+    memcpy(fk as *mut void, uuid as *void, 16);
+    memcpy(fk.add(16) as *mut void, master as *void, 32);
+    memcpy(fk.add(FK_SLOT) as *mut void, slots as *void, CFS_KEY_SLOTS as usize * KEYSLOT_SIZE);
+    return fk;
+}
+
+/// Safety: as keySet.
+unsafe fn keySetFree(fk: *mut u8) {
+    memset(fk as *mut void, 0, FK_SLOT + CFS_KEY_SLOTS as usize * KEYSLOT_SIZE);
+    kfree(fk as *mut void);
+}
+
+/// An encrypted pool from /dev/blkctl's FORMAT_KEYED: `n` devices as one mirrored member, the uuid the slots were
+/// sealed for, the master key and the slots user space sealed.
+/// Safety: `bd` is `n` devices; `label` null or a terminated string; `uuid` 16 bytes, `master` 32, `slots` the key
+/// slots.
+@export("cosmofs_format_keys")
+unsafe fn formatKeys(bd: *mut *mut blkdev, n: u32, label: *CChar, uuid: *u8, master: *u8, slots: *cosmo_keyslot)
+    -> i32 {
+    let fk = keySet(uuid, master, slots);
+    if (fk.isNull()) {
+        return -ENOMEM;
+    }
+    let rc = formatKeyed(bd, n, label, fk as *cfs_format_keys);
+    keySetFree(fk);
+    return rc;
+}
+
+/// Test hook: an encrypted pool of `members` single-device members, so the labels -- which only a member past the
+/// first has -- are MAC'd and can be forged (cosmofs-encrypted-root).
+/// Safety: as formatKeys.
+@cfg("CONFIG_DEBUG")
+@export("cosmofs_test_format_keyed_members")
+unsafe fn testFormatKeyedMembers(bd: *mut *mut blkdev, members: u32, uuid: *u8, master: *u8, slots: *cosmo_keyslot)
+    -> i32 {
+    let fk = keySet(uuid, master, slots);
+    if (fk.isNull()) {
+        return -ENOMEM;
+    }
+    let rc = formatAt(bd, members, 1, 14, 0 as *CChar, fk as *cfs_format_keys, 0 as *void, 0);
+    keySetFree(fk);
+    return rc;
+}
+
+/// Test hook: write an older format, so that "versions 2 and 3 mount unchanged" is a claim something checks (design.md,
+/// "The DVA is 64 bits").
+/// Safety: `bd` is a device.
+@export("cosmofs_test_format_version")
+unsafe fn testFormatVersion(bd: *mut blkdev, version: u32) -> i32 {
+    if (version < CFS_VERSION_MIN || version > CFS_VERSION) {
+        return -EINVAL;
+    }
+    var one = bd;
+    return formatAt(borrow mut one as *mut *mut blkdev, 1, 1, version, 0 as *CChar, 0 as *cfs_format_keys, 0 as *void,
+        0);
+}
+
+/// A block read and given a fresh CRC32C at `crcAt` after `edit` changed it, written back and flushed.
+/// Safety: `pool` is an open pool; `block` CFS_BLOCK writable bytes.
+unsafe fn resealed(pool: *mut spool, at: u64, block: *mut u8, crcAt: usize) -> i32 {
+    let p = blockMut(block);
+    ByteOrder.writeU32LE(p, crcAt, 0);
+    ByteOrder.writeU32LE(p, crcAt, cfs_block_crc(block as *u8, crcAt));
+    var rc = pool_write(pool, at, block as *void);
+    if (rc == 0) {
+        rc = pool_flush(pool);
+    }
+    return rc;
+}
+
+/// Test hook: write a count past the payload into the record the live root names -- a block whose checksum is good
+/// and whose contents are not. The live root is the valid slot with the higher generation, which is not always slot 0:
+/// a commit writes the other one.
+///
+/// Every image this tree formats zeroes its reserved words, so the gate that stops an older filesystem's reserved zero
+/// being read as a chain head is unobservable without its sister hook below: the bug-proof for that gate passes on a
+/// zero either way. An image from another writer -- a later version that used the word, a different implementation --
+/// is what the gate is actually for, and that hook manufactures one.
+/// Safety: `bd` is a device.
+@export("cosmofs_test_poison_freelog_count")
+unsafe fn testPoisonFreelogCount(bd: *mut blkdev, count: u64) -> i32 {
+    var pool = 0 as *mut spool;
+    var rc = pool_open(bd, borrow mut pool as *mut *mut spool);
+    if (rc != 0) {
+        return rc;
+    }
+    let block = kmalloc(CFS_BLOCK, KMEM_ZERO) as *mut u8;
+    if (block.isNull()) {
+        pool_close(pool);
+        return -ENOMEM;
+    }
+    var at: u64 = 0;
+    var bestGen: u64 = 0;
+    for (slot in 0u64..2) {
+        if (pool_read(pool, slot, block as *mut void) != 0) {
+            continue;
+        }
+        let sb = Ptr.toBorrowMut(block as *mut cfs_super);
+        let want = sb.crc;
+        sb.crc = 0;
+        let have = cfs_block_crc(block as *u8, SUPER_CRC);
+        if (want != have || sb.generation == 0 || sb.generation < bestGen) {
+            continue;
+        }
+        bestGen = sb.generation;
+        at = sb.free_root;
+    }
+    rc = if (at == 0) -ENOENT else 0;
+    if (rc == 0) {
+        rc = pool_read(pool, at, block as *mut void);
+    }
+    if (rc == 0) {
+        ByteOrder.writeU64LE(blockMut(block), CFS_MHDR_SIZE + DEAD_COUNT, count);
+        rc = resealed(pool, at, block, MHDR_CRC);
+    }
+    kfree(block as *mut void);
+    pool_close(pool);
+    return rc;
+}
+
+/// Test hook: write a value into the superblock word that version 9 calls `free_root`, on a filesystem too old to have
+/// one (see cosmofs_test_poison_freelog_count).
+/// Safety: `bd` is a device.
+@export("cosmofs_test_poison_free_root")
+unsafe fn testPoisonFreeRoot(bd: *mut blkdev, value: u64) -> i32 {
+    var pool = 0 as *mut spool;
+    var rc = pool_open(bd, borrow mut pool as *mut *mut spool);
+    if (rc != 0) {
+        return rc;
+    }
+    let block = kmalloc(CFS_BLOCK, KMEM_ZERO) as *mut u8;
+    if (block.isNull()) {
+        pool_close(pool);
+        return -ENOMEM;
+    }
+    rc = pool_read(pool, 0, block as *mut void);
+    if (rc == 0) {
+        let sb = Ptr.toBorrowMut(block as *mut cfs_super);
+        sb.free_root = value;
+        rc = resealed(pool, 0, block, SUPER_CRC);
+    }
+    kfree(block as *mut void);
+    pool_close(pool);
+    return rc;
+}

@@ -1,5 +1,5 @@
 /*
- * test_cfsformat.c - cosmofs's format (kernel-services/filesystem/cosmofs/cosmofs_format.c) on the host: roadmap 2.0
+ * test_cfsformat.c - cosmofs's format (kernel-services/filesystem/cosmofs/cosmofs_format.cee) on the host: roadmap 2.0
  * SA7. A digest recorded from the C over formats the test asks for, with the real key-slot check and CRC32C
  * (cfsparse): one device or several members, mirrored or not, devices too small, too large or too many, every format
  * version, labels absent, empty, full and too long, pools in the clear, encrypted with a wrapped key and with the
@@ -18,12 +18,40 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/storage.h>
+#include <uapi/cosmo/keyslot.h>
 
 #include "cosmofs_internal.h"   /* before the C library's headers, as test_cfsparse.c: its signal.h is the kernel's */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(ENOENT == 2 && ENOMEM == 12 && EINVAL == 22 && KMEM_ZERO == 1 && BIO_PREFLUSH == 1 && BIO_FUA == 2,
+               "cosmofs_format's errno.h, kmalloc.h and blk.h values");
+_Static_assert(CFS_DVA_VDEV_SHIFT == 56 && CFS_DVA_BLK_MASK == 0x00FFFFFFFFFFFFFFull && CFS_BLOCK == 4096 &&
+                   CFS_MHDR_SIZE == 32 && CFS_BITS_PER_BITMAP == 32512 && CFS_PTRS_PER_BLOCK == 508 &&
+                   CFS_INODE_SIZE == 256 && CFS_MIN_BLOCKS == 64 && CFS_MAX_BLOCKS == 16516096 &&
+                   CFS_MAX_MEMBERS == 255 && CFS_MAX_COPIES == 4 && CFS_LABEL_MAX == 16 && CFS_FORMAT_VERSION == 11 &&
+                   CFS_VERSION_MIN == 2 && CFS_VERSION == 15 && CFS_SUPER_A == 0 && CFS_SUPER_B == 1 &&
+                   CFS_ROOT_INO == 1 && CFS_TYPE_DIR == 2 && CFS_MODE(CFS_TYPE_DIR, 0755) == ((2u << 12) | 493) &&
+                   CFS_CSUM_CRC32C == 1 && CFS_CSUM_POLY1305 == 2 && CFS_COMPRESS_NONE == 0 &&
+                   CFS_KEY_SLOTS == 8 && CFS_KEYSLOT_EMPTY == 0,
+               "cosmofs_format's cosmofs_format.h and cosmofs_internal.h values");
+_Static_assert(CFS_KIND_IMAP1 == 1 && CFS_KIND_IMAP0 == 2 && CFS_KIND_INODES == 3 && CFS_KIND_ALLOCIDX == 4 &&
+                   CFS_KIND_BITMAP == 5 && CFS_KIND_MEMBERS == 11,
+               "cosmofs_format's block kinds");
+_Static_assert(offsetof(struct cfs_member_block, count) == 0 && offsetof(struct cfs_member_block, m) == 8 &&
+                   sizeof(struct cfs_member) == 64 && sizeof(struct cfs_keyslot) == 96 &&
+                   sizeof(struct cosmo_keyslot) == 96 && offsetof(struct cfs_format_keys, slot) == 48 &&
+                   offsetof(struct cfs_inode, mode) == 0 && offsetof(struct cfs_inode, nlink) == 4 &&
+                   offsetof(struct cfs_inode, generation) == 40 && offsetof(struct cfs_inode, ino) == 48 &&
+                   offsetof(struct cfs_inode, parent) == 224 && offsetof(struct cfs_inode, csum_algo) == 232 &&
+                   offsetof(struct cfs_inode, compress_algo) == 248 && offsetof(struct cfs_dead_block, count) == 8 &&
+                   offsetof(struct cfs_mhdr, crc) == 24 && offsetof(struct cfs_super, crc) == 160,
+               "cosmofs_format.cee reads and writes these offsets and sizes");
+/* cosmofs_format.cee keeps a struct cfs in a stack slot of 128 words (and refuses to format if it outgrew it). */
+_Static_assert(sizeof(struct cfs) <= 128 * 8, "cosmofs_format.cee's stack slot");
 
 /* The digest of the C (cosmofs_format.c, 2026-11-07), which the CeeSafe port gives. */
 #define FORMAT_DIGEST 0x4d8818e293f81719ull

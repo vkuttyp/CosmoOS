@@ -56,12 +56,12 @@ int cosmofs_keyctl(struct blkdev *bd, struct mount *mnt, struct cosmofs_key_req 
 /* An encrypted pool from /dev/blkctl's FORMAT_KEYED: `n` devices as one
  * mirrored member, the uuid the slots were sealed for, the master key and
  * the slots user space sealed. */
-int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const uint8_t uuid[16], const uint8_t master[32],
+int cosmofs_format_keys(struct blkdev **bd, unsigned n, const char *label, const uint8_t *uuid, const uint8_t *master,
                         const struct cosmo_keyslot *slots);
 
 #if CONFIG_DEBUG
 /* Test hook: an encrypted pool of `members` members, one device each. */
-int cosmofs_test_format_keyed_members(struct blkdev **bd, unsigned members, const uint8_t uuid[16], const uint8_t master[32],
+int cosmofs_test_format_keyed_members(struct blkdev **bd, unsigned members, const uint8_t *uuid, const uint8_t *master,
                                       const struct cosmo_keyslot *slots);
 #endif
 
