@@ -1,0 +1,623 @@
+// cosmofs_alloc.cee - Allocation and the inode map, in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfsalloc.c holds it
+// to the digest of the C it replaced.
+//
+// The in-memory bitmap's first-fit runs across a pool's members and the metadata reserve, the lists of blocks the open
+// transaction frees (deferred and exempt) and of inodes it orphans, and the two-level map from an inode number to its
+// slot.
+//
+// struct cfs, the buffers and the inodes stay C (cosmofs_internal.h, cosmofs_format.h).
+
+@header("kernel/kmalloc.h", "kernel/string.h", "cosmofs_internal.h")
+extern "C" {
+    struct cfs_super {
+        imap_root: u64;
+        next_ino: u64;
+        inode_count: u64;
+    }
+    struct cfs_memstate {
+        nblocks: u64;
+        first_usable: u64;
+        base: u64;
+        chunk0: u32;
+        nchunks: u32;
+        free_blocks: u64;
+        alloc_hint: u64;
+    }
+    struct cfs_clone {
+        id: u64;
+    }
+    struct cfs {
+        sb: cfs_super;
+        gen: u64;
+        nblocks: u64;
+        bitmap: *mut u8;
+        bitmap_dirty: *mut u8;
+        free_blocks: u64;
+        alloc_hint: u64;
+        mem: *mut cfs_memstate;
+        nmembers: u32;
+        pending_free: *mut u64;
+        nr_pending: u32;
+        pending_cap: u32;
+        pending_exempt: *mut u64;
+        nr_exempt: u32;
+        exempt_cap: u32;
+        orphans: *mut u64;
+        nr_orphans: u32;
+        orphan_cap: u32;
+        cur_clone: *mut cfs_clone;
+        reserve: u64;
+    }
+    struct cfs_buf {
+        blkno: u64;
+        data: *mut u8;
+    }
+    struct cfs_inode {
+        generation: u64;
+    }
+
+    fn cfs_dva_valid(fs: *cfs, dva: u64) -> bool;
+    fn cfs_inode_slot_ok(inode: *cfs_inode, ino: u64) -> bool;
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_new(fs: *mut cfs, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_cow(fs: *mut cfs, bp: *mut *mut cfs_buf, parent_slot: *mut u64) -> i32;
+    fn cfs_note_dirty(fs: *mut cfs);
+    fn cfs_fail(fs: *mut cfs, rc: i32);
+    fn cfs_clone_free(fs: *mut cfs, dva: u64);
+    fn krealloc(ptr: *mut void, size: usize, flags: u32) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+}
+
+// ---- errno.h, cosmofs_internal.h and cosmofs_format.h values (asserted in tests/host/test_cfsalloc.c) ----
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOSPC: i32 = 28;
+const EROFS: i32 = 30;
+const CFS_DVA_VDEV_SHIFT: u32 = 56;
+const CFS_DVA_BLK_MASK: u64 = 0x00FFFFFFFFFFFFFF;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_PTRS_PER_BLOCK: u64 = 508;
+const CFS_INODES_PER_BLOCK: u64 = 15;
+const CFS_INODE_SIZE: usize = 256;
+const CFS_BITS_PER_BITMAP: u64 = 32512;
+const CFS_MAX_INODES: u64 = 3870960; // CFS_PTRS_PER_BLOCK * CFS_PTRS_PER_BLOCK * CFS_INODES_PER_BLOCK
+const CFS_SNAP_INO_SHIFT: u32 = 48;
+const CFS_KIND_IMAP1: u32 = 1;
+const CFS_KIND_IMAP0: u32 = 2;
+const CFS_KIND_INODES: u32 = 3;
+/// enum cfs_alloc_class.
+const CFS_ALLOC_DATA: u32 = 1;
+
+// ---- The C state, through its addresses ----
+
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn fsOf(fs: *mut cfs) -> borrow mut(static) cfs => Ptr.toBorrowMut(fs);
+
+/// Safety: `fs` is a mounted filesystem's state, `v` one of its members.
+unsafe fn memOf(fs: *mut cfs, v: u32) -> borrow mut(static) cfs_memstate =>
+    Ptr.toBorrowMut(fsOf(fs).mem.add(v as usize));
+
+fn dvaOf(vdev: u32, blk: u64) -> u64 => ((vdev as u64) << CFS_DVA_VDEV_SHIFT) | (blk & CFS_DVA_BLK_MASK);
+
+fn dvaVdev(dva: u64) -> u32 => truncate<u32>(dva >> CFS_DVA_VDEV_SHIFT);
+
+fn dvaBlk(dva: u64) -> u64 => dva & CFS_DVA_BLK_MASK;
+
+/// The inode number without a tree's tag (cosmofs_format.h's CFS_INO_OF).
+fn inoOf(ino: u64) -> u64 => ino & ((1u64 << CFS_SNAP_INO_SHIFT) - 1);
+
+/// The tree a tagged inode number names (CFS_SNAP_TAG).
+fn tagOf(ino: u64) -> u32 => truncate<u32>(ino >> CFS_SNAP_INO_SHIFT);
+
+/// Bit `i` of the bitmap.
+/// Safety: `fs` is a mounted filesystem's state, `i` within its bitmap.
+unsafe fn bitAt(fs: *mut cfs, i: u64) -> bool =>
+    ((fsOf(fs).bitmap.add((i >> 3) as usize).read() >> truncate<u8>(i & 7)) & 1) != 0;
+
+/// Safety: as bitAt.
+unsafe fn bitSet(fs: *mut cfs, i: u64) {
+    let at = fsOf(fs).bitmap.add((i >> 3) as usize);
+    at.write(at.read() | (1u8 << truncate<u8>(i & 7)));
+}
+
+// ---- Allocation ----
+
+/// Safety: `fs` is a filesystem's state.
+@export("cfs_bitmap_test")
+unsafe fn bitmapTest(fs: *cfs, lin: u64) -> bool {
+    let f = Ptr.toBorrow(fs);
+    return lin < f.nblocks && (f.bitmap.add((lin / 8) as usize).read() & (1u8 << truncate<u8>(lin % 8))) != 0;
+}
+
+/// The first free run in blocks [lo, hi) of member `v`, claimed. `hi` is never past the member's last block, so the
+/// padding at the end of its last bitmap chunk is unreachable.
+/// Safety: as bitAt; `v` a member.
+unsafe fn scanMember(fs: *mut cfs, v: u32, lo: u64, hi: u64, want: u32, start: *mut u64, got: *mut u64) -> bool {
+    let m = memOf(fs, v);
+    for (b in lo..hi) {
+        if (bitAt(fs, m.base + b)) {
+            continue;
+        }
+        var len: u64 = 1;
+        while (len < want as u64 && b + len < hi && !bitAt(fs, m.base + b + len)) {
+            len += 1;
+        }
+        for (k in 0u64..len) {
+            bitSet(fs, m.base + b + k);
+            fsOf(fs).bitmap_dirty.add((m.chunk0 as u64 + (b + k) / CFS_BITS_PER_BITMAP) as usize).write(1);
+        }
+        let f = fsOf(fs);
+        f.free_blocks = f.free_blocks.wrappingSub(len);
+        m.free_blocks = m.free_blocks.wrappingSub(len);
+        m.alloc_hint = b + len;
+        f.alloc_hint = m.base + b + len;
+        cfs_note_dirty(fs);
+        start.write(dvaOf(v, b));
+        got.write(len);
+        return true;
+    }
+    return false;
+}
+
+/// Where a run with no hint should come from: the member with the most room, so a pool fills evenly rather than
+/// filling member 0 first.
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn pickMember(fs: *mut cfs) -> u32 {
+    var best: u32 = 0;
+    for (v in 1u32..fsOf(fs).nmembers) {
+        if (memOf(fs, v).free_blocks > memOf(fs, best).free_blocks) {
+            best = v;
+        }
+    }
+    return best;
+}
+
+/// First fit from `hint` (or the running hint), taking up to `want` consecutive free blocks. Data allocations stop at
+/// half the reserve so deletion and commit always have metadata blocks (design.md, "Allocation: contiguity and the
+/// metadata reserve"). The whole reserve is kept at the write, where a dirty page is charged (cfs_dirty_check, CF34);
+/// the metadata a transaction takes after that charge comes from the same free blocks, so the write-back of a page
+/// charged may find them under the reserve, and takes from its upper half. A run never crosses a member: an extent's
+/// `count` counts blocks on one device (design.md, "One bitmap, many members").
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `start` and `got` writable.
+@export("cfs_alloc_run")
+unsafe fn allocRun(fs: *mut cfs, cls: u32, hint: u64, want0: u32, start: *mut u64, got: *mut u64) -> i32 {
+    let f = fsOf(fs);
+    let floor = if (cls == CFS_ALLOC_DATA) f.reserve / 2 else 0;
+    let usable = if (f.free_blocks > floor) f.free_blocks - floor else 0;
+    if (usable == 0) {
+        return -ENOSPC;
+    }
+    var want = want0;
+    if (want == 0) {
+        want = 1;
+    }
+    if (want as u64 > usable) {
+        want = truncate<u32>(usable);
+    }
+    let hinted = cfs_dva_valid(fs as *cfs, hint);
+    let first = if (hinted) dvaVdev(hint) else pickMember(fs);
+    for (n in 0u32..f.nmembers) {
+        let v = (first + n) % f.nmembers;
+        let m = memOf(fs, v);
+        var from = if (n == 0 && hinted) dvaBlk(hint) else m.alloc_hint;
+        if (from < m.first_usable || from >= m.nblocks) {
+            from = m.first_usable;
+        }
+        if (scanMember(fs, v, from, m.nblocks, want, start, got)) {
+            return 0;
+        }
+        if (scanMember(fs, v, m.first_usable, from, want, start, got)) {
+            return 0;
+        }
+    }
+    return -ENOSPC;
+}
+
+/// One metadata block.
+/// Safety: as allocRun; `out` writable.
+@export("cfs_alloc_block")
+unsafe fn allocBlock(fs: *mut cfs, out: *mut u64) -> i32 {
+    var got: u64 = 0;
+    return allocRun(fs, 0, 0, 1, out, borrow mut got as *mut u64);
+}
+
+/// Up to `want` consecutive data blocks at or after `hint`.
+/// Safety: as allocRun.
+@export("cfs_alloc_data")
+unsafe fn allocData(fs: *mut cfs, hint: u64, want: u32, start: *mut u64, got: *mut u64) -> i32 =>
+    allocRun(fs, CFS_ALLOC_DATA, hint, want, start, got);
+
+/// "cosmofs: leaking block <blk> (no memory for the free list)".
+fn leaking(blk: u64) {
+    var buffer = [0u8; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: leaking block ");
+    line.decimal(blk);
+    line.text(" (no memory for the free list)");
+    KernelLog.send(LogLevel.Error, line);
+}
+
+/// Free a block this transaction owns outright: a superseded free record. It waits for the root like any deferred free
+/// -- the current root still names it, so handing it to the allocator now would let a crash leave a root naming an
+/// overwritten record -- but it skips the snapshot filter phase 7 applies, and the reason is in `struct cfs` beside
+/// `pending_exempt`.
+/// Safety: as allocRun.
+@export("cfs_free_block_exempt")
+unsafe fn freeBlockExempt(fs: *mut cfs, blk: u64) {
+    if (!cfs_dva_valid(fs as *cfs, blk)) {
+        return;
+    }
+    let f = fsOf(fs);
+    if (f.nr_exempt == f.exempt_cap) {
+        let cap = if (f.exempt_cap != 0) f.exempt_cap.wrappingMul(2) else 16;
+        let n = krealloc(f.pending_exempt as *mut void, cap as usize * 8, 0) as *mut u64;
+        if (n.isNull()) {
+            leaking(blk);
+            return;
+        }
+        f.pending_exempt = n;
+        f.exempt_cap = cap;
+    }
+    f.pending_exempt.add(f.nr_exempt as usize).write(blk);
+    f.nr_exempt += 1;
+    cfs_note_dirty(fs);
+}
+
+/// Safety: `fs` is a filesystem's state.
+@export("cfs_orphan_named")
+unsafe fn orphanNamed(fs: *cfs, ino: u64) -> bool {
+    let f = Ptr.toBorrow(fs);
+    for (i in 0u32..f.nr_orphans) {
+        if (f.orphans.add(i as usize).read() == ino) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Room for one more, taken *before* the caller's point of no return.
+///
+/// The first version grew the array inside cfs_orphan_add and, when that failed, logged and returned while the unlink
+/// went on to commit a zero-link inode with nothing recording it -- which is this unit's own defect, reintroduced on an
+/// allocation failure. An unlink that cannot be recorded must not happen, so the memory is taken while the name is
+/// still there and -ENOMEM is still a clean answer.
+/// Safety: as allocRun.
+@export("cfs_orphan_reserve")
+unsafe fn orphanReserve(fs: *mut cfs) -> bool {
+    let f = fsOf(fs);
+    // The orphan record is the live tree's. A clone's unlinked-while-open inode is not recorded: its blocks are the
+    // clone's, and deleting the clone walks its whole tree, names or not (design.md, "Clones").
+    if (!f.cur_clone.isNull()) {
+        return true;
+    }
+    if (f.nr_orphans < f.orphan_cap) {
+        return true;
+    }
+    let cap = if (f.orphan_cap != 0) f.orphan_cap.wrappingMul(2) else 8;
+    let n = krealloc(f.orphans as *mut void, cap as usize * 8, 0) as *mut u64;
+    if (n.isNull()) {
+        return false;
+    }
+    f.orphans = n;
+    f.orphan_cap = cap;
+    return true;
+}
+
+/// Cannot fail: the caller reserved the room.
+/// Safety: as allocRun.
+@export("cfs_orphan_add")
+unsafe fn orphanAdd(fs: *mut cfs, ino: u64) {
+    let f = fsOf(fs);
+    if (!f.cur_clone.isNull()) {
+        return;
+    }
+    if (ino == 0 || orphanNamed(fs as *cfs, ino)) {
+        return;
+    }
+    if (f.nr_orphans == f.orphan_cap) {
+        var buffer = [0u8; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: orphan record has no room for inode ");
+        line.decimal(ino);
+        line.text("; it was not reserved");
+        KernelLog.send(LogLevel.Error, line);
+        cfs_fail(fs, -ENOSPC); // rather than commit a deletion nothing records
+        return;
+    }
+    f.orphans.add(f.nr_orphans as usize).write(ino);
+    f.nr_orphans += 1;
+    cfs_note_dirty(fs);
+}
+
+/// Safety: as allocRun.
+@export("cfs_orphan_remove")
+unsafe fn orphanRemove(fs: *mut cfs, ino: u64) {
+    let f = fsOf(fs);
+    if (!f.cur_clone.isNull()) {
+        return;
+    }
+    for (i in 0u32..f.nr_orphans) {
+        if (f.orphans.add(i as usize).read() != ino) {
+            continue;
+        }
+        f.orphans.add(i as usize).write(f.orphans.add((f.nr_orphans - 1) as usize).read());
+        f.nr_orphans -= 1;
+        return;
+    }
+}
+
+/// A block the open transaction frees: reusable once its root is on disk.
+/// Safety: as allocRun.
+@export("cfs_free_block_deferred")
+unsafe fn freeBlockDeferred(fs: *mut cfs, blk: u64) {
+    let f = fsOf(fs);
+    // A clone's frees are not the live tree's: no snapshot of the live tree is asked about them (design.md, "Clones").
+    if (!f.cur_clone.isNull()) {
+        cfs_clone_free(fs, blk);
+        return;
+    }
+    if (!cfs_dva_valid(fs as *cfs, blk)) {
+        return;
+    }
+    if (f.nr_pending == f.pending_cap) {
+        let cap = if (f.pending_cap != 0) f.pending_cap.wrappingMul(2) else 64;
+        let n = krealloc(f.pending_free as *mut void, cap as usize * 8, 0) as *mut u64;
+        if (n.isNull()) {
+            leaking(blk);
+            return;
+        }
+        f.pending_free = n;
+        f.pending_cap = cap;
+    }
+    f.pending_free.add(f.nr_pending as usize).write(blk);
+    f.nr_pending += 1;
+    cfs_note_dirty(fs);
+}
+
+// ---- The inode map ----
+
+/// Pointer `i`'s place in a held buffer's payload.
+/// Safety: `b` is a held buffer, `i` below CFS_PTRS_PER_BLOCK.
+unsafe fn ptrAt(b: *mut cfs_buf, i: u64) -> *mut u64 =>
+    (Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE) as *mut u64).add(i as usize);
+
+/// Fetch (and when `writable`, copy on write) the L1, L0 and inode block for `ino`. Missing L0 and inode blocks are
+/// created when `create` is set.
+///
+/// `imapRoot` is the live tree's, except for a read of a snapshot's inode, which passes that snapshot's root instead:
+/// its trees are ordinary trees, so nothing else in the walk changes (design.md, "Reading a snapshot").
+/// Safety: as allocRun; `out` writable.
+unsafe fn inodeBlockAt(fs: *mut cfs, imapRoot: u64, ino: u64, writable: bool, create: bool, out: *mut *mut cfs_buf)
+    -> i32 {
+    if (ino == 0 || ino >= CFS_MAX_INODES) {
+        return -EIO;
+    }
+    var l1 = 0 as *mut cfs_buf;
+    var l0 = 0 as *mut cfs_buf;
+    var ib = 0 as *mut cfs_buf;
+    var rc = cfs_buf_get(fs, imapRoot, CFS_KIND_IMAP1, borrow mut l1 as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    if (writable) {
+        rc = cfs_buf_cow(fs, borrow mut l1 as *mut *mut cfs_buf, borrow mut fsOf(fs).sb.imap_root as *mut u64);
+        if (rc != 0) {
+            cfs_buf_put(fs, l1);
+            return rc;
+        }
+    }
+    let block = ino / CFS_INODES_PER_BLOCK;
+    let l1p = ptrAt(l1, block / CFS_PTRS_PER_BLOCK);
+    if (l1p.read() == 0) {
+        if (!create) {
+            cfs_buf_put(fs, l1);
+            return -ENOENT;
+        }
+        rc = cfs_buf_new(fs, CFS_KIND_IMAP0, borrow mut l0 as *mut *mut cfs_buf);
+        if (rc != 0) {
+            cfs_buf_put(fs, l1);
+            return rc;
+        }
+        l1p.write(Ptr.toBorrow(l0 as *cfs_buf).blkno);
+    } else {
+        rc = cfs_buf_get(fs, l1p.read(), CFS_KIND_IMAP0, borrow mut l0 as *mut *mut cfs_buf);
+        if (rc != 0) {
+            cfs_buf_put(fs, l1);
+            return rc;
+        }
+        if (writable) {
+            rc = cfs_buf_cow(fs, borrow mut l0 as *mut *mut cfs_buf, l1p);
+            if (rc != 0) {
+                cfs_buf_put(fs, l0);
+                cfs_buf_put(fs, l1);
+                return rc;
+            }
+        }
+    }
+    let l0p = ptrAt(l0, block % CFS_PTRS_PER_BLOCK);
+    if (l0p.read() == 0) {
+        if (!create) {
+            rc = -ENOENT;
+        } else {
+            rc = cfs_buf_new(fs, CFS_KIND_INODES, borrow mut ib as *mut *mut cfs_buf);
+            if (rc == 0) {
+                l0p.write(Ptr.toBorrow(ib as *cfs_buf).blkno);
+                out.write(ib);
+            }
+        }
+    } else {
+        rc = cfs_buf_get(fs, l0p.read(), CFS_KIND_INODES, borrow mut ib as *mut *mut cfs_buf);
+        if (rc == 0 && writable) {
+            rc = cfs_buf_cow(fs, borrow mut ib as *mut *mut cfs_buf, l0p);
+            if (rc != 0) {
+                cfs_buf_put(fs, ib);
+            }
+        }
+        if (rc == 0) {
+            out.write(ib);
+        }
+    }
+    cfs_buf_put(fs, l0);
+    cfs_buf_put(fs, l1);
+    return rc;
+}
+
+/// Inode `ino`'s slot in its block.
+/// Safety: `ib` is a held inode block.
+unsafe fn inodeSlot(ib: *mut cfs_buf, ino: u64) -> *mut cfs_inode =>
+    Ptr.toBorrow(ib as *cfs_buf).data.add(CFS_MHDR_SIZE + (ino % CFS_INODES_PER_BLOCK) as usize * CFS_INODE_SIZE)
+        as *mut cfs_inode;
+
+/// Safety: as inodeBlockAt.
+unsafe fn inodeBlock(fs: *mut cfs, ino: u64, writable: bool, create: bool, out: *mut *mut cfs_buf) -> i32 =>
+    inodeBlockAt(fs, fsOf(fs).sb.imap_root, ino, writable, create, out);
+
+/// Safety: as allocRun; `out` an inode's storage.
+@export("cfs_inode_read_at")
+unsafe fn inodeReadAt(fs: *mut cfs, imapRoot: u64, nextIno: u64, ino: u64, out: *mut cfs_inode) -> i32 {
+    if (ino == 0 || ino >= nextIno) {
+        return -ENOENT;
+    }
+    var ib = 0 as *mut cfs_buf;
+    let rc = inodeBlockAt(fs, imapRoot, ino, false, false, borrow mut ib as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    memcpy(out as *mut void, inodeSlot(ib, ino) as *void, CFS_INODE_SIZE);
+    cfs_buf_put(fs, ib);
+    if (!cfs_inode_slot_ok(out as *cfs_inode, ino)) {
+        return -ENOENT;
+    }
+    return 0;
+}
+
+/// The slot as it is, links or no links. The ordinary read reports an inode with no links as absent, which is right
+/// for a lookup and wrong for the structural check: an inode with no links and blocks still allocated is exactly what
+/// it is looking for.
+/// Safety: as inodeReadAt.
+@export("cfs_inode_read_raw")
+unsafe fn inodeReadRaw(fs: *mut cfs, ino0: u64, out: *mut cfs_inode) -> i32 {
+    let ino = inoOf(ino0); // a clone's vnode carries its tag (design.md, "Clones")
+    // The same range the ordinary read accepts: numbers 1 to next_ino-1 have been handed out, and the two readers must
+    // agree about which numbers exist or the check would ask about a slot no lookup can.
+    if (ino == 0 || ino >= fsOf(fs).sb.next_ino) {
+        return -ENOENT;
+    }
+    var ib = 0 as *mut cfs_buf;
+    let rc = inodeBlock(fs, ino, false, false, borrow mut ib as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    memcpy(out as *mut void, inodeSlot(ib, ino) as *void, CFS_INODE_SIZE);
+    cfs_buf_put(fs, ib);
+    let slotIno = ByteOrder.readU64LE(Slice.fromRaw(out as *u8, CFS_INODE_SIZE), 48);
+    return if (slotIno == ino) 0 else -ENOENT;
+}
+
+/// Safety: as inodeReadAt.
+@export("cfs_inode_read")
+unsafe fn inodeRead(fs: *mut cfs, ino0: u64, out: *mut cfs_inode) -> i32 {
+    let ino = inoOf(ino0);
+    if (ino == 0 || ino >= fsOf(fs).sb.next_ino) {
+        return -ENOENT;
+    }
+    var ib = 0 as *mut cfs_buf;
+    let rc = inodeBlock(fs, ino, false, false, borrow mut ib as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    memcpy(out as *mut void, inodeSlot(ib, ino) as *void, CFS_INODE_SIZE);
+    cfs_buf_put(fs, ib);
+    if (!cfs_inode_slot_ok(out as *cfs_inode, ino)) {
+        return -ENOENT; // free slot
+    }
+    return 0;
+}
+
+/// Whether a tagged number may be written now: only while its tree is the one entered.
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn tagRefused(fs: *mut cfs, tag: u32) -> bool {
+    let clone = fsOf(fs).cur_clone;
+    return tag != 0 && (clone.isNull() || Ptr.toBorrow(clone as *cfs_clone).id != tag as u64);
+}
+
+/// Safety: as allocRun; `inode` an inode.
+@export("cfs_inode_write")
+unsafe fn inodeWrite(fs: *mut cfs, ino0: u64, inode: *cfs_inode) -> i32 {
+    // A tagged number names one tree: it is written only while that tree is the one entered. An untagged one is the
+    // entered tree's own. A snapshot's vnode, or a clone's written outside its clone, would otherwise land on the live
+    // inode with the same number.
+    let tag = tagOf(ino0);
+    if (tagRefused(fs, tag)) {
+        var buffer = [0u8; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: inode ");
+        line.decimal(inoOf(ino0));
+        line.text(" of tree ");
+        line.decimal(tag as u64);
+        line.text(" written outside that tree; refused");
+        KernelLog.send(LogLevel.Error, line);
+        return -EROFS;
+    }
+    let ino = inoOf(ino0);
+    var ib = 0 as *mut cfs_buf;
+    let rc = inodeBlock(fs, ino, true, true, borrow mut ib as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    let slot = inodeSlot(ib, ino);
+    memcpy(slot as *mut void, inode as *void, CFS_INODE_SIZE);
+    let s = Ptr.toBorrowMut(slot);
+    s.generation = fsOf(fs).gen;
+    cfs_buf_put(fs, ib);
+    return 0;
+}
+
+/// Make an inode's map path writable now, before an operation changes anything (CFS-6): every block from the root to
+/// the inode's slot is copied into this transaction, so the inode write that ends the operation only writes into dirty
+/// buffers -- which stay cached -- and cannot fail. The copies say what the old blocks said, so an operation that stops
+/// after this leaves nothing a commit should not publish.
+/// Safety: as allocRun.
+@export("cfs_inode_prepare")
+unsafe fn inodePrepare(fs: *mut cfs, ino: u64) -> i32 {
+    if (tagRefused(fs, tagOf(ino))) {
+        return -EROFS; // as cfs_inode_write refuses it
+    }
+    var ib = 0 as *mut cfs_buf;
+    let rc = inodeBlock(fs, inoOf(ino), true, true, borrow mut ib as *mut *mut cfs_buf);
+    if (rc == 0) {
+        cfs_buf_put(fs, ib);
+    }
+    return rc;
+}
+
+/// Safety: as allocRun; `ino` writable.
+@export("cfs_inode_alloc")
+unsafe fn inodeAlloc(fs: *mut cfs, ino: *mut u64) -> i32 {
+    let f = fsOf(fs);
+    if (f.sb.next_ino >= CFS_MAX_INODES) {
+        return -ENOSPC;
+    }
+    ino.write(f.sb.next_ino);
+    f.sb.next_ino += 1;
+    f.sb.inode_count = f.sb.inode_count.wrappingAdd(1);
+    return 0;
+}
+
+/// Give back an inode number a failed creation took. The allocator is a bump allocator and the caller holds fs->lock,
+/// so the number is still the last one handed out and rolling back is exact; a number that is not (a later allocation
+/// intervened, which cannot happen under the lock) is simply left, and the slot stays free because nothing ever wrote
+/// an inode with a nonzero nlink there.
+/// Safety: as allocRun.
+@export("cfs_inode_discard")
+unsafe fn inodeDiscard(fs: *mut cfs, ino: u64) {
+    let f = fsOf(fs);
+    if (ino != 0 && ino.wrappingAdd(1) == f.sb.next_ino) {
+        f.sb.next_ino = f.sb.next_ino.wrappingSub(1); // the C's unsigned arithmetic, whatever the number
+    }
+    if (f.sb.inode_count > 0) {
+        f.sb.inode_count -= 1;
+    }
+}

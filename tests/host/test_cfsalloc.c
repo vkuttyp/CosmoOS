@@ -1,5 +1,5 @@
 /*
- * test_cfsalloc.c - cosmofs's allocation and inode map (kernel-services/filesystem/cosmofs/cosmofs_alloc.c) on the
+ * test_cfsalloc.c - cosmofs's allocation and inode map (kernel-services/filesystem/cosmofs/cosmofs_alloc.cee) on the
  * host: roadmap 2.0 SA7. A digest recorded from the C over seeded filesystems the test builds and owns, with the real
  * address and inode-slot checks (cfsparse): pools of one to three members of very different sizes, some spanning
  * several bitmap chunks, partly allocated, with a metadata reserve; runs asked for with and without a hint, metadata and
@@ -23,6 +23,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(ENOENT == 2 && EIO == 5 && ENOSPC == 28 && EROFS == 30, "cosmofs_alloc's errno.h values");
+_Static_assert(CFS_DVA_VDEV_SHIFT == 56 && CFS_DVA_BLK_MASK == 0x00FFFFFFFFFFFFFFull && CFS_MHDR_SIZE == 32 &&
+                   CFS_PTRS_PER_BLOCK == 508 && CFS_INODES_PER_BLOCK == 15 && CFS_INODE_SIZE == 256 &&
+                   CFS_BITS_PER_BITMAP == 32512 && CFS_MAX_INODES == 3870960 && CFS_SNAP_INO_SHIFT == 48 &&
+                   CFS_KIND_IMAP1 == 1 && CFS_KIND_IMAP0 == 2 && CFS_KIND_INODES == 3 && CFS_ALLOC_META == 0 &&
+                   CFS_ALLOC_DATA == 1,
+               "cosmofs_alloc's cosmofs_format.h and cosmofs_internal.h values");
+_Static_assert(sizeof(struct cfs_inode) == 256 && offsetof(struct cfs_inode, ino) == 48,
+               "cosmofs_alloc.cee copies an inode whole and reads its number here");
 
 /* The digest of the C (cosmofs_alloc.c, 2026-11-07), which the CeeSafe port gives. */
 #define ALLOC_DIGEST 0x583d1da8b67f7b98ull

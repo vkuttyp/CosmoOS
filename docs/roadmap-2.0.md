@@ -1375,6 +1375,17 @@ line and branch that can be reached). `cosmofs_buf_floor.c` keeps the
 metadata MAC, whose domain is a C `char`; the set-aside's array of
 buffer pointers is reached by its offset, which an imported struct's
 field cannot be.
+`cosmofs_alloc.cee`, the second, allocation and the inode map:
+`tests/host/test_cfsalloc.c` runs it with the real address and slot
+checks over pools of one to three members, some spanning several bitmap
+chunks, partly allocated, with a reserve and now and then a free count
+the bitmap does not bear out; runs hinted and not, metadata and data,
+until full; blocks freed deferred and exempt, inside a clone and not,
+while krealloc fails; orphans; and an inode map with holes, read, written
+tagged and untagged, prepared, allocated and discarded
+(0x583d1da8b67f7b98, clang and gcc; every line and branch).
+`cfs_note_dirty` stayed in `cosmofs_core.c`: it starts the writeback
+thread.
 
 Size: about 4.5x.
 
