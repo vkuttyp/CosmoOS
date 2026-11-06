@@ -1,5 +1,5 @@
 /*
- * test_cfsrollback.c - cosmofs's rollback (kernel-services/filesystem/cosmofs/cosmofs_rollback.c) on the host: roadmap
+ * test_cfsrollback.c - cosmofs's rollback (kernel-services/filesystem/cosmofs/cosmofs_rollback.cee) on the host: roadmap
  * 2.0 SA7. A digest recorded from the C over seeded rounds against a snapshot list, trees, inodes, an orphan record,
  * deadlists, blocks and a transaction the test owns; the record's own checks (cfs_rollback_parse and
  * cfs_rollback_crc, cfsparse) are the real ones. Requests (to snapshots, clones and nothing, with safety names given,
@@ -33,6 +33,9 @@ _Static_assert(EIO == 5 && ENOENT == 2 && EINVAL == 22 && EEXIST == 17 && ENOMEM
                    CFS_ROLLBACK_PENDING == 1 && CFS_ROLLBACK_HELD == 2 && CFS_ROLLBACK_F_FROM_HELD == 1 &&
                    CFS_ROOT_INO == 1 && CFS_TYPE_DIR == 2 && CFS_SNAP_NAME_MAX == 31 && MOUNT_RDONLY == 1,
                "cosmofs_rollback's errno.h, vfs.h and cosmofs_format.h values");
+_Static_assert(sizeof(struct cfs_rollback) <= 16 * 8 && sizeof(struct cfs_snapshot) <= 16 * 8 &&
+                   sizeof(struct cfs_inode) <= 32 * 8,
+               "cosmofs_rollback.cee keeps a record and an entry in 16 words, an inode in 32");
 
 /* The digest of the C (cosmofs_rollback.c, 2026-11-06), which the CeeSafe port gives. */
 #define ROLLBACK_DIGEST 0x06458013d8846511ull
@@ -284,7 +287,7 @@ bool cfs_snapshot_find(struct cfs *fs, const char *name, struct cfs_snapshot *ou
     return false;
 }
 
-int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out)
+int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t *uuid, struct cfs_snapshot *out)
 {
     (void)fs;
     if (pick(40) == 0)

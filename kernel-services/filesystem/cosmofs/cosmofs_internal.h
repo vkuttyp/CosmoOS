@@ -368,12 +368,14 @@ int cfs_snapshot_create_ex(struct cfs *fs, const char *name, bool identity, bool
                            struct cfs_snapshot *out);
 bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
 /* The same, telling "not there" (-ENOENT) from "the list does not read"
- * (-EIO, a cycle included), which only the first may act on. */
-int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
+ * (-EIO, a cycle included), which only the first may act on. `uuid` is
+ * 16 bytes, taken as a pointer as cosmofs_rollback.cee's generated
+ * declaration does (gcc's -Warray-parameter). */
+int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t *uuid, struct cfs_snapshot *out);
 int cfs_snapshot_deadlists_filter(struct cfs *fs, bool (*live)(void *arg, uint64_t dva), void *arg,
                                   uint64_t *dropped);
 /*
- * Rollback (cosmofs_rollback.c; design.md, "Rollback"). The record is
+ * Rollback (cosmofs_rollback.cee; design.md, "Rollback"). The record is
  * read and checked by cfs_rollback_read (-ENOENT: none; -EIO: it does not
  * check out). A request writes a PENDING record and a safety snapshot in
  * one transaction; the mount's switch applies it and leaves a HELD

@@ -1659,7 +1659,7 @@ the walks for a caller that wants the pool record alone.
 
 ### Rollback
 
-Built by B1's second pull request (`cosmofs_rollback.c`).
+Built by B1's second pull request (`cosmofs_rollback.c`, now `cosmofs_rollback.cee`).
 
 `rollback NAME` does not change the mounted tree. It writes a
 **pending-rollback record** -- a `CFS_KIND_ROLLBACK` block named by the

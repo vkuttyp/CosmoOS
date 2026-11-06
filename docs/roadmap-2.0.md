@@ -1260,6 +1260,17 @@ inside and outside a clone, publishing, readiness and deletion
 (0xf455c79b8ec77804, clang and gcc; every line). A snapshot entry the C
 kept on the stack is a zeroed slot of words checked against its C size;
 the walks' marks and the list's write walk are `@callback` functions.
+`cosmofs_rollback.cee`, the rollback: `tests/host/test_cfsrollback.c`
+keeps the record's own checks (cfsparse's) and fakes the rest of cosmofs
+-- requests under every state of the record, cancels back to a hold,
+the checker's drop, BOOT_OK, the protection a record gives, and the
+switch at mount with every refusal and failure it has
+(0x06458013d8846511, clang and gcc; every line). Its record, entries and
+inodes are stack slots of words checked against their C sizes;
+`cosmofs_rollback_floor.c` makes the one call whose prototype CeeSafe
+cannot write (`cfs_snapshot_new_uuid`'s pointer to arrays), and
+`cfs_snapshot_lookup_uuid` takes its uuid as a pointer, as the generated
+declaration does. `tools/b1-rollback-probe.py` patches the port.
 
 Size: about 4.5x.
 

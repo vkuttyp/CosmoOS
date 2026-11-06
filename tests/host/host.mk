@@ -141,7 +141,7 @@ HOST_CFSCLONE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cos
 	tests/host/ceesafe_panic.c tests/host/test_cfsclone.c
 # cosmofs's rollback alone, with the record's real checks: the list, the trees, the inodes, the blocks and the transaction are the test's.
 HOST_CFSROLLBACK_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_rollback.c \
-	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
+	kernel-services/filesystem/cosmofs/cosmofs_rollback_floor.c kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsrollback.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c
 HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/object_floor.c kernel/object/handle.c kernel/object/handle_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_handles.c

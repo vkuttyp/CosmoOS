@@ -3455,7 +3455,7 @@ static int load_root(struct cfs *fs, struct vnode **root)
         return -ENOTDIR;
     }
     /* After a switch the record is the target's own orphans, which the
-     * switch's commit wrote (cosmofs_rollback.c). */
+     * switch's commit wrote (cosmofs_rollback.cee). */
     fs->load_stage = COSMO_FSCTL_STAGE_ORPHAN_RECORD;
     rc = orphan_replay(fs);
     if (rc)

@@ -5,7 +5,7 @@
 
 `rollback NAME` takes a safety snapshot of the live tree and writes a
 pending record naming it and the target, and both reach the disk in one
-transaction (cfs_rollback_request, cosmofs_rollback.c). The self-test
+transaction (cfs_rollback_request, cosmofs_rollback.cee). The self-test
 cosmofs-rollback-atomic stops the machine at every commit boundary the
 request crosses (cosmofs_test_commit_budget), mounts the filesystem again
 and requires either neither or both -- and a checker that finds no
@@ -34,46 +34,47 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = "kernel-services/filesystem/cosmofs/cosmofs_rollback.c"
+SOURCE = "kernel-services/filesystem/cosmofs/cosmofs_rollback.cee"
 OK = re.compile(r"^SELFTEST: cosmofs-rollback-atomic\s+\.\.\. ok ", re.M)
 FAILED = re.compile(r"^SELFTEST: cosmofs-rollback-atomic\s+\.\.\. FAIL: check failed: "
                     r"rep\.rollback_record\.count == 0 && rep\.hold\.count == 0 at line \d+", re.M)
 
 # The rule as built: the safety snapshot joins the open transaction, the
 # record joins it, one commit.
-ONE_COMMIT = """    struct cfs_snapshot s;
-    rc = cfs_snapshot_create_ex(fs, name, true, false, r.safety_uuid, &s);
-    if (rc)
+ONE_COMMIT = """    var rc = cfs_snapshot_create_ex(fs, borrow name as *[u8; 32] as *CChar, true, false, safetyUuid as *u8, s);
+    if (rc != 0) {
         return rc;
-    /* The raise to 12 can have happened just now, so the target is read
-     * again for its uuid. */
-    if (!cfs_snapshot_find(fs, target, &t)) {
+    }
+    // The raise to 12 can have happened just now, so the target is read again for its uuid.
+    if (!cfs_snapshot_find(fs, target, t)) {
         cfs_fail(fs, -EIO);
         return -EIO;
     }
-    memcpy(r.target_uuid, t.uuid, 16);
-    r.target_id = t.id;
-    r.safety_id = s.id;
-    r.generation = fs->sb.generation;
-    rc = rb_write(fs, &r);
-    if (rc) {
-        cfs_fail(fs, rc);   /* the safety entry is in the transaction: not without its record */
+    memcpy(borrow mut k.target_uuid as *mut [u8; 16] as *mut void, borrow snap(t).uuid as *[u8; 16] as *void, 16);
+    k.target_id = snap(t).id;
+    k.safety_id = snap(s).id;
+    k.generation = fsOf(fs).sb.generation;
+    rc = write(fs, r as *cfs_rollback);
+    if (rc != 0) {
+        cfs_fail(fs, rc); // the safety entry is in the transaction: not without its record
         return rc;
     }
-    rc = rb_commit(fs);"""
+    rc = commit(fs);"""
 
 # The rule split: the record committed on its own, then the snapshot.
-TWO_COMMITS = """    memcpy(r.target_uuid, t.uuid, 16);
-    r.target_id = t.id;
-    r.generation = fs->sb.generation;
-    rc = cfs_commit(fs);
-    if (rc == 0)
-        rc = rb_write(fs, &r);
-    if (rc == 0)
-        rc = rb_commit(fs);                 /* probe --old: the record alone */
-    struct cfs_snapshot s;
-    if (rc == 0)
-        rc = cfs_snapshot_create_ex(fs, name, true, true, r.safety_uuid, &s);   /* then the snapshot */"""
+TWO_COMMITS = """    memcpy(borrow mut k.target_uuid as *mut [u8; 16] as *mut void, borrow snap(t).uuid as *[u8; 16] as *void, 16);
+    k.target_id = snap(t).id;
+    k.generation = fsOf(fs).sb.generation;
+    var rc = cfs_commit(fs);
+    if (rc == 0) {
+        rc = write(fs, r as *cfs_rollback);
+    }
+    if (rc == 0) {
+        rc = commit(fs); // probe --old: the record alone
+    }
+    if (rc == 0) {
+        rc = cfs_snapshot_create_ex(fs, borrow name as *[u8; 32] as *CChar, true, true, safetyUuid as *u8, s); // then the snapshot
+    }"""
 
 
 def main():

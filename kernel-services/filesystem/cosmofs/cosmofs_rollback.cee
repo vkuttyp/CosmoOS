@@ -1,0 +1,780 @@
+// cosmofs_rollback.cee - Rolling the live tree back to a snapshot (docs/kernel-services/filesystem/cosmofs/design.md,
+// "Rollback"), in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfsrollback.c holds it to the digest of the C it replaced.
+//
+// A rollback never changes a mounted tree. `rollback NAME` writes a pending record and a safety snapshot of the live
+// tree in one transaction; the next mount makes the target's tree the live tree in its first transaction and leaves a
+// hold, which BOOT_OK clears. At every instant the superblock names one live root and at most one record, through
+// committed transactions (CF19), so a crash leaves a mount that can pick one consistent tree.
+//
+// struct cfs, the record, the snapshot entries and the inodes stay C (cosmofs_internal.h, cosmofs_format.h); the
+// record's checks are cfsparse's. What the C kept on the stack is kept in zeroed slots of words, checked against their
+// C sizes (tests/host/test_cfsrollback.c): a CeeSafe local cannot hold C state.
+
+@header("kernel/blk.h", "kernel/vfs.h", "cosmofs_internal.h")
+extern "C" {
+    struct blkdev {
+        name: [u8; 16];
+    }
+    struct mount {
+        bdev: *mut blkdev;
+        flags: u32;
+    }
+    struct cfs_super {
+        version: u32;
+        generation: u64;
+        imap_root: u64;
+        next_ino: u64;
+        inode_count: u64;
+        rollback_root: u64;
+    }
+    struct cfs {
+        mnt: *mut mount;
+        sb: cfs_super;
+        gen: u64;
+        nblocks: u64;
+        nr_orphans: u32;
+        lock: mutex;
+        switching: bool;
+        failed: i32;
+    }
+    struct cfs_buf {
+        blkno: u64;
+        data: *mut u8;
+    }
+    struct cfs_rollback {
+        magic: u32;
+        version: u32;
+        state: u32;
+        flags: u32;
+        target_uuid: [u8; 16];
+        safety_uuid: [u8; 16];
+        target_id: u64;
+        safety_id: u64;
+        generation: u64;
+        requested_ns: u64;
+        crc: u32;
+    }
+    struct cfs_snapshot {
+        generation: u64;
+        imap_root: u64;
+        next_ino: u64;
+        inode_count: u64;
+        id: u64;
+        uuid: [u8; 16];
+        flags: u32;
+        name: [u8; 32];
+    }
+    struct cfs_inode {
+        mode: u32;
+        nlink: u32;
+    }
+
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_new(fs: *mut cfs, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_rollback_crc(r: *cfs_rollback) -> u32;
+    fn cfs_rollback_parse(payload: *void, out: *mut cfs_rollback) -> i32;
+    fn cfs_commit(fs: *mut cfs) -> i32;
+    fn cfs_fail(fs: *mut cfs, rc: i32);
+    fn cfs_free_block_exempt(fs: *mut cfs, blk: u64);
+    fn cfs_free_block_deferred(fs: *mut cfs, blk: u64);
+    fn cfs_snapshot_find(fs: *mut cfs, name: *CChar, out: *mut cfs_snapshot) -> bool;
+    fn cfs_snapshot_lookup_uuid(fs: *mut cfs, uuid: *u8, out: *mut cfs_snapshot) -> i32;
+    /// cosmofs_rollback_floor.c: cfs_snapshot_new_uuid(fs, out, NULL, 0), whose `also` is a pointer to arrays.
+    fn cfs_rollback_floor_new_uuid(fs: *mut cfs, out: *mut u8);
+    fn cfs_snapshot_create_ex(
+        fs: *mut cfs,
+        name: *CChar,
+        identity: bool,
+        commit: bool,
+        uuid: *u8,
+        out: *mut cfs_snapshot,
+    ) -> i32;
+    fn cfs_snapshot_deadlists_filter(
+        fs: *mut cfs,
+        live: extern "C" fn(*mut void, u64) -> bool,
+        arg: *mut void,
+        revived: *mut u64,
+    ) -> i32;
+    fn cfs_tree_walk(
+        fs: *mut cfs,
+        imap_root: u64,
+        next_ino: u64,
+        mark: extern "C" fn(*mut void, u64),
+        arg: *mut void,
+    ) -> i32;
+    fn cfs_inode_read(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_inode_read_raw(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_orphan_reserve(fs: *mut cfs) -> bool;
+    fn cfs_orphan_add(fs: *mut cfs, ino: u64);
+    fn cfs_dva_lin(fs: *cfs, dva: u64) -> u64;
+    fn cfs_lin_dva(fs: *cfs, lin: u64) -> u64;
+    fn clock_realtime_ns() -> u64;
+    fn kzalloc(size: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn strlen(s: *CChar) -> usize;
+}
+
+// ---- errno.h, vfs.h and cosmofs_format.h values (asserted in tests/host/test_cfsrollback.c) ----
+
+const EIO: i32 = 5;
+const ENOENT: i32 = 2;
+const EINVAL: i32 = 22;
+const EEXIST: i32 = 17;
+const ENOMEM: i32 = 12;
+const EOPNOTSUPP: i32 = 95;
+const EBUSY: i32 = 16;
+const ENAMETOOLONG: i32 = 36;
+const MOUNT_RDONLY: u32 = 1;
+const CFS_SNAP_F_CLONE: u32 = 1;
+const CFS_DVA_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
+const CFS_KIND_ROLLBACK: u32 = 16;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_ROLLBACK_MAGIC: u32 = 0x42524643;
+const CFS_ROLLBACK_PENDING: u32 = 1;
+const CFS_ROLLBACK_HELD: u32 = 2;
+const CFS_ROLLBACK_F_FROM_HELD: u32 = 1;
+const CFS_ROOT_INO: u64 = 1;
+const CFS_TYPE_DIR: u32 = 2;
+const CFS_SNAP_NAME_MAX: usize = 31;
+/// The stack slots the C's records, entries and inodes are kept in, in words (checked against their C sizes).
+const RECORD_WORDS: usize = 16;
+const SNAP_WORDS: usize = 16;
+const INODE_WORDS: usize = 32;
+
+// ---- The C state, through its addresses ----
+
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn fsOf(fs: *mut cfs) -> borrow mut(static) cfs => Ptr.toBorrowMut(fs);
+
+/// Safety: `r` is a record.
+unsafe fn rec(r: *mut cfs_rollback) -> borrow mut(static) cfs_rollback => Ptr.toBorrowMut(r);
+
+/// Safety: `s` is a snapshot entry.
+unsafe fn snap(s: *mut cfs_snapshot) -> borrow mut(static) cfs_snapshot => Ptr.toBorrowMut(s);
+
+/// True when the C types fit the stack slots this file keeps them in (the test asserts it; a build where they do not
+/// refuses every operation rather than overrun a slot).
+fn slotsFit() -> bool =>
+    layoutOf<cfs_rollback>().size <= RECORD_WORDS * 8 && layoutOf<cfs_snapshot>().size <= SNAP_WORDS * 8 &&
+        layoutOf<cfs_inode>().size <= INODE_WORDS * 8;
+
+/// 16 bytes compared.
+/// Safety: both point to 16 readable bytes.
+unsafe fn same16(a: *u8, b: *u8) -> bool => memcmp(a as *void, b as *void, 16) == 0;
+
+/// A C string, appended.
+/// Safety: `s` is a C string.
+unsafe fn cText(line: borrow mut TextWriter, s: *CChar) { line.bytes(Slice.fromRaw(s as *u8, strlen(s))); }
+
+/// An entry's name.
+/// Safety: `s` is an entry, its name NUL-terminated within its array.
+unsafe fn nameOf(s: *mut cfs_snapshot) -> *CChar => borrow snap(s).name as *[u8; 32] as *CChar;
+
+// ---- The record ----
+
+/// cosmofs_internal.h's cfs_rollback_seal: the magic, the version and the checksum.
+/// Safety: `r` is a record.
+@export("cfs_rollback_seal")
+unsafe fn seal(r: *mut cfs_rollback) {
+    let k = rec(r);
+    k.magic = CFS_ROLLBACK_MAGIC;
+    k.version = 1;
+    k.crc = cfs_rollback_crc(r as *cfs_rollback);
+}
+
+/// cosmofs_internal.h's cfs_rollback_read: -ENOENT when there is none, -EIO when it does not check out.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `out` a record.
+@export("cfs_rollback_read")
+unsafe fn read(fs: *mut cfs, out: *mut cfs_rollback) -> i32 {
+    let root = fsOf(fs).sb.rollback_root;
+    if (fsOf(fs).sb.version < 12 || root == 0) {
+        return -ENOENT;
+    }
+    var b = 0 as *mut cfs_buf;
+    if (cfs_buf_get(fs, root, CFS_KIND_ROLLBACK, borrow mut b as *mut *mut cfs_buf) != 0) {
+        return -EIO;
+    }
+    let rc = cfs_rollback_parse(Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE) as *void, out);
+    cfs_buf_put(fs, b);
+    return rc;
+}
+
+/// Replace the record (null: remove it), in the open transaction. The old block is named by the superblock alone,
+/// which no snapshot preserves: exempt -- but only when it reads as a rollback block. A damaged pointer can name a
+/// block something else owns, and freeing that would hand live metadata to the allocator; such a block is let go of,
+/// and a leak is what the checker finds and repairs. Allocates, so before a commit's fixpoint only.
+/// Safety: as read; `r` null or a record.
+unsafe fn write(fs: *mut cfs, r: *cfs_rollback) -> i32 {
+    let root = fsOf(fs).sb.rollback_root;
+    if (root != 0) {
+        var old = 0 as *mut cfs_buf;
+        if (cfs_buf_get(fs, root, CFS_KIND_ROLLBACK, borrow mut old as *mut *mut cfs_buf) == 0) {
+            cfs_buf_put(fs, old);
+            cfs_free_block_exempt(fs, root);
+        } else {
+            var buffer = [0u8; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: the rollback record's block ");
+            line.decimal(root);
+            line.text(" is not one; dropped without freeing it");
+            KernelLog.send(LogLevel.Warn, line);
+        }
+        let f = fsOf(fs);
+        f.sb.rollback_root = 0;
+    }
+    if (r.isNull()) {
+        return 0;
+    }
+    var b = 0 as *mut cfs_buf;
+    let rc = cfs_buf_new(fs, CFS_KIND_ROLLBACK, borrow mut b as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    let size = layoutOf<cfs_rollback>().size;
+    var slot = [0u64; 16];
+    let copy = borrow mut slot as *mut [u64; 16] as *mut cfs_rollback;
+    memcpy(copy as *mut void, r as *void, size);
+    seal(copy);
+    let k = Ptr.toBorrow(b as *cfs_buf);
+    memcpy(k.data.add(CFS_MHDR_SIZE) as *mut void, copy as *void, size);
+    let f = fsOf(fs);
+    f.sb.rollback_root = k.blkno;
+    cfs_buf_put(fs, b);
+    return 0;
+}
+
+/// The commit every operation here ends with: one that fails after the transaction changed the record cannot be
+/// retried into a different state, so the mount is marked failed (the snapshot list's rule).
+/// Safety: as read.
+unsafe fn commit(fs: *mut cfs) -> i32 {
+    let rc = cfs_commit(fs);
+    if (rc != 0 && fsOf(fs).failed == 0) {
+        let f = fsOf(fs);
+        f.failed = rc;
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: a rollback change could not be committed (");
+        line.signed(rc as i64);
+        line.text("); the mount is now read-only");
+        KernelLog.send(LogLevel.Error, line);
+    }
+    return rc;
+}
+
+/// cosmofs_internal.h's cfs_rollback_protects: whether the record keeps snapshot `s` from deletion.
+/// Safety: as read; `s` an entry.
+@export("cfs_rollback_protects")
+unsafe fn protects(fs: *mut cfs, s: *cfs_snapshot) -> bool {
+    if (!slotsFit()) {
+        return true;
+    }
+    var slot = [0u64; 16];
+    let r = borrow mut slot as *mut [u64; 16] as *mut cfs_rollback;
+    let rc = read(fs, r);
+    if (rc == -ENOENT) {
+        return false;
+    }
+    if (rc != 0) {
+        return true; // a record that does not read may still name it: keep it until the checker decides
+    }
+    let k = rec(r);
+    let uuid = borrow Ptr.toBorrow(s).uuid as *[u8; 16] as *u8;
+    let safety = same16(borrow k.safety_uuid as *[u8; 16] as *u8, uuid);
+    let target = same16(borrow k.target_uuid as *[u8; 16] as *u8, uuid);
+    return if (k.state == CFS_ROLLBACK_PENDING) safety || target else safety;
+}
+
+// ---- The request ----
+
+/// cosmofs_internal.h's cfs_rollback_request: a pending record to `target` and a safety snapshot of the live tree,
+/// named `safety_name` or after the clock, in one transaction.
+/// Safety: as read; `target` a C string, `safety_name` null or one, `safety` null or writable.
+@export("cfs_rollback_request")
+unsafe fn request(fs: *mut cfs, target: *CChar, safety_name: *CChar, safety: *mut cfs_snapshot) -> i32 {
+    if (fsOf(fs).sb.version < 11) {
+        return -EOPNOTSUPP;
+    }
+    if (!slotsFit()) {
+        return -ENOMEM;
+    }
+    var tslot = [0u64; 16];
+    let t = borrow mut tslot as *mut [u64; 16] as *mut cfs_snapshot;
+    if (!cfs_snapshot_find(fs, target, t)) {
+        return -ENOENT;
+    }
+    if ((snap(t).flags & CFS_SNAP_F_CLONE) != 0) {
+        return -EINVAL; // a clone is not a point in the live tree's history (design.md, "Clones")
+    }
+    var curslot = [0u64; 16];
+    let cur = borrow mut curslot as *mut [u64; 16] as *mut cfs_rollback;
+    let curRc = read(fs, cur);
+    if (curRc == 0 && rec(cur).state == CFS_ROLLBACK_PENDING) {
+        return -EBUSY; // one at a time: cancel the pending one first
+    }
+    // While the boot after a rollback has not completed, the tree it replaced is held; the only rollback then is back
+    // to that tree, which the new record names as its target and so keeps. Any other would drop the hold before that
+    // boot completed.
+    let held = curRc == 0 && rec(cur).state == CFS_ROLLBACK_HELD;
+    if (held && !same16(borrow rec(cur).safety_uuid as *[u8; 16] as *u8, borrow snap(t).uuid as *[u8; 16] as *u8)) {
+        return -EBUSY;
+    }
+
+    var name = [0u8; 32];
+    if (!safety_name.isNull()) {
+        let n = strlen(safety_name);
+        if (n > CFS_SNAP_NAME_MAX) {
+            return -ENAMETOOLONG;
+        }
+        memcpy(borrow mut name as *mut [u8; 32] as *mut void, safety_name as *void, n);
+        if (cfs_snapshot_find(fs, borrow name as *[u8; 32] as *CChar, 0 as *mut cfs_snapshot)) {
+            return -EEXIST;
+        }
+    } else {
+        // pre-rollback-<seconds>, made unique if two land in one second.
+        let secs = clock_realtime_ns() / 1000000000;
+        {
+            var line = TextWriter.create(mut name[..]);
+            line.text("pre-rollback-");
+            line.decimal(secs);
+        }
+        var n: u32 = 2;
+        while (cfs_snapshot_find(fs, borrow name as *[u8; 32] as *CChar, 0 as *mut cfs_snapshot) && n < 100) {
+            var line = TextWriter.create(mut name[..]);
+            line.text("pre-rollback-");
+            line.decimal(secs);
+            line.text("-");
+            line.decimal(n as u64);
+            n += 1;
+        }
+    }
+
+    // The safety snapshot and the record in one transaction (CF19): the creation commits the open work first, then
+    // puts the entry in the next transaction without committing it; the record joins it, and one commit publishes
+    // both. Split in two, a crash between them leaves a record whose safety snapshot does not exist -- or a snapshot
+    // with no record, which is harmless but not what was asked.
+    var rslot = [0u64; 16];
+    let r = borrow mut rslot as *mut [u64; 16] as *mut cfs_rollback;
+    let k = rec(r);
+    k.state = CFS_ROLLBACK_PENDING;
+    if (held) {
+        k.flags = CFS_ROLLBACK_F_FROM_HELD; // its target is the held snapshot: a cancel holds it again
+    }
+    // The safety snapshot's uuid, drawn here so the record can name it: unique against the list now, and a raise below
+    // gives no converted entry the same one.
+    let safetyUuid = borrow mut k.safety_uuid as *mut [u8; 16] as *mut u8;
+    cfs_rollback_floor_new_uuid(fs, safetyUuid);
+    k.requested_ns = clock_realtime_ns();
+
+    var sslot = [0u64; 16];
+    let s = borrow mut sslot as *mut [u64; 16] as *mut cfs_snapshot;
+    var rc = cfs_snapshot_create_ex(fs, borrow name as *[u8; 32] as *CChar, true, false, safetyUuid as *u8, s);
+    if (rc != 0) {
+        return rc;
+    }
+    // The raise to 12 can have happened just now, so the target is read again for its uuid.
+    if (!cfs_snapshot_find(fs, target, t)) {
+        cfs_fail(fs, -EIO);
+        return -EIO;
+    }
+    memcpy(borrow mut k.target_uuid as *mut [u8; 16] as *mut void, borrow snap(t).uuid as *[u8; 16] as *void, 16);
+    k.target_id = snap(t).id;
+    k.safety_id = snap(s).id;
+    k.generation = fsOf(fs).sb.generation;
+    rc = write(fs, r as *cfs_rollback);
+    if (rc != 0) {
+        cfs_fail(fs, rc); // the safety entry is in the transaction: not without its record
+        return rc;
+    }
+    rc = commit(fs);
+    if (rc == 0) {
+        if (!safety.isNull()) {
+            memcpy(safety as *mut void, s as *void, layoutOf<cfs_snapshot>().size);
+        }
+        var buffer = [0u8; 192];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: rollback to snapshot '");
+        cText(mut line, nameOf(t));
+        line.text("' pending; the live tree is snapshot '");
+        cText(mut line, nameOf(s));
+        line.text("'; it applies at the next mount");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return rc;
+}
+
+/// cosmofs_internal.h's cfs_rollback_drop: the checker's repair -- the record goes, whatever it says, in the open
+/// transaction the check's caller commits.
+/// Safety: as read.
+@export("cfs_rollback_drop")
+unsafe fn dropRecord(fs: *mut cfs) -> i32 {
+    if (fsOf(fs).sb.version < 12 || fsOf(fs).sb.rollback_root == 0) {
+        return 0;
+    }
+    return write(fs, 0 as *cfs_rollback);
+}
+
+/// cosmofs_internal.h's cfs_rollback_cancel: the pending record withdrawn -- back to the hold it was asked under, if
+/// any.
+/// Safety: as read.
+@export("cfs_rollback_cancel")
+unsafe fn cancel(fs: *mut cfs) -> i32 {
+    if (!slotsFit()) {
+        return -ENOMEM;
+    }
+    var rslot = [0u64; 16];
+    let r = borrow mut rslot as *mut [u64; 16] as *mut cfs_rollback;
+    var rc = read(fs, r);
+    if (rc == -ENOENT || (rc == 0 && rec(r).state != CFS_ROLLBACK_PENDING)) {
+        return -ENOENT;
+    }
+    let sound = rc == 0;
+    // A record that does not check out is withdrawn too: it would only be refused at the next mount.
+    rc = cfs_commit(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    // One asked for while a hold was in place goes back to that hold: its target is the snapshot the hold kept, and
+    // the boot that would release it has still not completed.
+    var hslot = [0u64; 16];
+    let held = borrow mut hslot as *mut [u64; 16] as *mut cfs_rollback;
+    let rehold = sound && (rec(r).flags & CFS_ROLLBACK_F_FROM_HELD) != 0;
+    if (rehold) {
+        let h = rec(held);
+        h.state = CFS_ROLLBACK_HELD;
+        memcpy(
+            borrow mut h.safety_uuid as *mut [u8; 16] as *mut void,
+            borrow rec(r).target_uuid as *[u8; 16] as *void,
+            16,
+        );
+        h.safety_id = rec(r).target_id;
+        h.generation = fsOf(fs).sb.generation;
+        h.requested_ns = rec(r).requested_ns;
+    }
+    rc = write(fs, if (rehold) held as *cfs_rollback else 0 as *cfs_rollback);
+    if (rc == 0) {
+        rc = commit(fs);
+    }
+    if (rc == 0) {
+        var buffer = [0u8; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: the pending rollback is withdrawn (its safety snapshot stays)");
+        if (rehold) {
+            line.text("; the hold it was asked under is back");
+        }
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return rc;
+}
+
+/// cosmofs_internal.h's cfs_rollback_boot_ok: the hold released, once the boot after the rollback completed.
+/// Safety: as read; `released` writable.
+@export("cfs_rollback_boot_ok")
+unsafe fn bootOk(fs: *mut cfs, released: *mut bool) -> i32 {
+    released.write(false);
+    if (!slotsFit()) {
+        return 0;
+    }
+    var rslot = [0u64; 16];
+    let r = borrow mut rslot as *mut [u64; 16] as *mut cfs_rollback;
+    if (read(fs, r) != 0 || rec(r).state != CFS_ROLLBACK_HELD) {
+        return 0;
+    }
+    var rc = cfs_commit(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = write(fs, 0 as *cfs_rollback);
+    if (rc == 0) {
+        rc = commit(fs);
+    }
+    if (rc == 0) {
+        released.write(true);
+        var buffer = [0u8; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: the boot after the rollback completed; the hold on snapshot id ");
+        line.decimal(rec(r).safety_id);
+        line.text(" is released");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return rc;
+}
+
+// ---- The switch ----
+
+/// The target's set of blocks, and what the old live tree's walk released.
+struct ReachSet {
+    fs: *mut cfs;
+    bits: *mut u8;
+    nbits: u64;
+    released: u64;
+}
+
+/// Safety: `r.bits` holds `r.nbits` bits.
+unsafe fn has(r: borrow ReachSet, lin: u64) -> bool =>
+    lin < r.nbits && ((r.bits.add(truncate<usize>(lin / 8)).read() as u32 >> truncate<u32>(lin % 8)) & 1) != 0;
+
+/// The target's walk: every block its tree reaches.
+/// Safety: `arg` is a ReachSet.
+@callback
+unsafe fn reachSet(arg: *mut void, lin: u64) {
+    let r = Ptr.toBorrowMut(arg as *mut ReachSet);
+    if (lin < r.nbits) {
+        let q = r.bits.add(truncate<usize>(lin / 8));
+        q.write(q.read() | truncate<u8>(1u32 << truncate<u32>(lin % 8)));
+    }
+}
+
+/// The old live tree's walk: every block it reaches that the target does not is released, as a commit releases what
+/// the live tree drops. The commit then asks the newest snapshot -- the safety snapshot, unless one was taken since --
+/// whether it still names the block, and holds it on that snapshot's deadlist or frees it.
+/// Safety: as reachSet.
+@callback
+unsafe fn releaseUnlessTarget(arg: *mut void, lin: u64) {
+    let r = Ptr.toBorrowMut(arg as *mut ReachSet);
+    if (has(r, lin)) {
+        return;
+    }
+    let dva = cfs_lin_dva(r.fs as *cfs, lin);
+    if (dva == CFS_DVA_NONE) {
+        return;
+    }
+    cfs_free_block_deferred(r.fs, dva);
+    r.released += 1;
+}
+
+/// Deadlist entries the new live tree reaches are live again.
+/// Safety: as reachSet.
+@callback
+unsafe fn targetReaches(arg: *mut void, dva: u64) -> bool {
+    let r = Ptr.toBorrow(arg as *ReachSet);
+    let lin = cfs_dva_lin(r.fs as *cfs, dva);
+    return lin != CFS_DVA_NONE && has(r, lin);
+}
+
+/// "cosmofs: <device>: ", every mount line's start.
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn devStart(line: borrow mut TextWriter, fs: *mut cfs) {
+    line.text("cosmofs: ");
+    let mnt = fsOf(fs).mnt;
+    if (!mnt.isNull() && !Ptr.toBorrow(mnt as *mount).bdev.isNull()) {
+        cText(mut line, borrow Ptr.toBorrow(Ptr.toBorrow(mnt as *mount).bdev as *blkdev).name as *[u8; 16] as *CChar);
+    } else {
+        line.text("cosmofs");
+    }
+    line.text(": ");
+}
+
+/// A mount line at `level`: "cosmofs: <device>: <text>".
+/// Safety: as devStart.
+unsafe fn mountLine(level: LogLevel, fs: *mut cfs, text: StringView) {
+    var buffer = [0u8; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    devStart(mut line, fs);
+    line.text(text);
+    KernelLog.send(level, line);
+}
+
+/// cosmofs_internal.h's cfs_rollback_at_mount: a pending record applied in the mount's first transaction -- the
+/// target's tree made the live tree, the hold left -- or refused with the current tree mounted.
+/// Safety: `fs` is a filesystem being mounted, its lock not held; `switched` writable.
+@export("cfs_rollback_at_mount")
+unsafe fn atMount(fs: *mut cfs, switched: *mut bool) -> i32 {
+    switched.write(false);
+    if (!slotsFit()) {
+        return -ENOMEM;
+    }
+    // One line buffer and one inode slot for the whole switch: the kernel's frames are at most 2 KiB.
+    var buffer = [0u8; 320];
+    var islot = [0u64; 32];
+    let inodeSlot = borrow mut islot as *mut [u64; 32] as *mut cfs_inode;
+    var rslot = [0u64; 16];
+    let r = borrow mut rslot as *mut [u64; 16] as *mut cfs_rollback;
+    var rc = read(fs, r);
+    if (rc == -ENOENT) {
+        return 0;
+    }
+    if (rc != 0) {
+        mountLine(
+            LogLevel.Error,
+            fs,
+            "the rollback record does not check out; not applied, the current tree is mounted (fsctl check names it, and its repair removes it)",
+        );
+        return 0;
+    }
+    if (rec(r).state != CFS_ROLLBACK_PENDING) {
+        return 0; // a hold: BOOT_OK clears it
+    }
+    var tslot = [0u64; 16];
+    let t = borrow mut tslot as *mut [u64; 16] as *mut cfs_snapshot;
+    var sslot = [0u64; 16];
+    let s = borrow mut sslot as *mut [u64; 16] as *mut cfs_snapshot;
+    rc = cfs_snapshot_lookup_uuid(fs, borrow rec(r).target_uuid as *[u8; 16] as *u8, t);
+    if (rc != 0) {
+        var line = TextWriter.create(mut buffer[..]);
+        devStart(mut line, fs);
+        line.text("rollback refused: its target snapshot (id ");
+        line.decimal(rec(r).target_id);
+        line.text(") ");
+        line.text(if (rc == -ENOENT) "is not on the list" else "could not be looked up");
+        line.text("; the current tree is mounted");
+        KernelLog.send(LogLevel.Error, line);
+        return 0;
+    }
+    if (cfs_snapshot_lookup_uuid(fs, borrow rec(r).safety_uuid as *[u8; 16] as *u8, s) != 0) {
+        var line = TextWriter.create(mut buffer[..]);
+        devStart(mut line, fs);
+        line.text("rollback refused: its safety snapshot (id ");
+        line.decimal(rec(r).safety_id);
+        line.text(") is not on the list, so the tree before it could not be kept; the current tree is mounted");
+        KernelLog.send(LogLevel.Error, line);
+        return 0;
+    }
+    let mnt = fsOf(fs).mnt;
+    if (!mnt.isNull() && (Ptr.toBorrow(mnt as *mount).flags & MOUNT_RDONLY) != 0) {
+        var line = TextWriter.create(mut buffer[..]);
+        devStart(mut line, fs);
+        line.text("a rollback to snapshot '");
+        cText(mut line, nameOf(t));
+        line.text("' is pending; not applied on a read-only mount");
+        KernelLog.send(LogLevel.Warn, line);
+        return 0;
+    }
+
+    // The target must be a tree the mount can open: its root a directory. Asked with its roots in place and nothing
+    // changed, so a refusal leaves everything as it was.
+    {
+        let f = fsOf(fs);
+        let imap = f.sb.imap_root;
+        let next = f.sb.next_ino;
+        let count = f.sb.inode_count;
+        let target = snap(t);
+        f.sb.imap_root = target.imap_root;
+        f.sb.next_ino = target.next_ino;
+        f.sb.inode_count = target.inode_count;
+        let root = inodeSlot;
+        let rrc = if (target.imap_root == 0) -ENOENT else cfs_inode_read(fs, CFS_ROOT_INO, root);
+        let f2 = fsOf(fs);
+        f2.sb.imap_root = imap;
+        f2.sb.next_ino = next;
+        f2.sb.inode_count = count;
+        if (rrc != 0 || Ptr.toBorrow(root as *cfs_inode).mode >> 12 != CFS_TYPE_DIR) {
+            var line = TextWriter.create(mut buffer[..]);
+            devStart(mut line, fs);
+            line.text("rollback refused: snapshot '");
+            cText(mut line, nameOf(t));
+            line.text("' has no root directory (");
+            line.signed(rrc as i64);
+            line.text("); the current tree is mounted");
+            KernelLog.send(LogLevel.Error, line);
+            return 0;
+        }
+    }
+
+    // From here the transaction changes; a failure is reported to the mount, which abandons it and loads the current
+    // tree again.
+    let nblocks = fsOf(fs).nblocks;
+    var set = ReachSet { fs: fs, bits: 0 as *mut u8, nbits: nblocks, released: 0 };
+    set.bits = kzalloc(truncate<usize>((nblocks + 7) / 8)) as *mut u8;
+    if (set.bits.isNull()) {
+        return -ENOMEM;
+    }
+    let setArg = borrow mut set as *mut ReachSet as *mut void;
+    let lock = borrow mut fsOf(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    let target = snap(t);
+    rc = cfs_tree_walk(fs, target.imap_root, target.next_ino, reachSet, setArg);
+    if (rc == 0) {
+        rc = cfs_tree_walk(fs, fsOf(fs).sb.imap_root, fsOf(fs).sb.next_ino, releaseUnlessTarget, setArg);
+    }
+    var revived: u64 = 0;
+    var orphans: u32 = 0;
+    if (rc == 0) {
+        rc = cfs_snapshot_deadlists_filter(fs, targetReaches, setArg, borrow mut revived as *mut u64);
+    }
+    if (rc == 0) {
+        // The old live tree's orphan record goes with it: its inodes are the safety snapshot's now. The commit retires
+        // the chain.
+        let f = fsOf(fs);
+        f.nr_orphans = 0;
+        f.sb.imap_root = target.imap_root;
+        f.sb.next_ino = target.next_ino;
+        f.sb.inode_count = target.inode_count;
+        // The target's own orphans: a snapshot keeps an inode that was unlinked and still open when it was taken, but
+        // not the orphan record naming it (that is the live superblock's). Nothing has it open now, so each goes on
+        // the record this commit writes, and the mount's orphan replay releases it.
+        let inode = inodeSlot;
+        var ino = CFS_ROOT_INO + 1;
+        while (rc == 0 && ino < target.next_ino) {
+            let irc = cfs_inode_read_raw(fs, ino, inode);
+            if (irc == -ENOENT) {
+                ino += 1;
+                continue;
+            }
+            if (irc != 0) {
+                rc = irc;
+                break;
+            }
+            let k = Ptr.toBorrow(inode as *cfs_inode);
+            if (k.nlink != 0 || k.mode == 0) {
+                ino += 1;
+                continue;
+            }
+            if (!cfs_orphan_reserve(fs)) {
+                rc = -ENOMEM;
+                break;
+            }
+            cfs_orphan_add(fs, ino);
+            orphans += 1;
+            ino += 1;
+        }
+    }
+    if (rc == 0) {
+        var hslot = [0u64; 16];
+        let held = borrow mut hslot as *mut [u64; 16] as *mut cfs_rollback;
+        memcpy(held as *mut void, r as *void, layoutOf<cfs_rollback>().size);
+        let h = rec(held);
+        h.state = CFS_ROLLBACK_HELD;
+        h.generation = fsOf(fs).gen;
+        rc = write(fs, held as *cfs_rollback);
+    }
+    if (rc == 0) {
+        let f = fsOf(fs);
+        f.switching = true;
+        rc = cfs_commit(fs);
+        f.switching = false;
+    }
+    mutex_unlock(lock);
+    kfree(set.bits as *mut void);
+    if (rc != 0) {
+        var line = TextWriter.create(mut buffer[..]);
+        devStart(mut line, fs);
+        line.text("the rollback to snapshot '");
+        cText(mut line, nameOf(t));
+        line.text("' failed (");
+        line.signed(rc as i64);
+        line.text("); abandoned, the current tree is mounted");
+        KernelLog.send(LogLevel.Error, line);
+        return rc;
+    }
+    switched.write(true);
+    var line = TextWriter.create(mut buffer[..]);
+    devStart(mut line, fs);
+    line.text("rolled back: the live tree is snapshot '");
+    cText(mut line, nameOf(t));
+    line.text("' (generation ");
+    line.decimal(target.generation);
+    line.text("); the tree before it is snapshot '");
+    cText(mut line, nameOf(s));
+    line.text("', held until this boot completes; ");
+    line.decimal(set.released);
+    line.text(" block(s) released, ");
+    line.decimal(revived);
+    line.text(" deadlist entr(ies) live again, ");
+    line.decimal(orphans as u64);
+    line.text(" orphan(s) of the snapshot to release");
+    KernelLog.send(LogLevel.Info, line);
+    return 0;
+}

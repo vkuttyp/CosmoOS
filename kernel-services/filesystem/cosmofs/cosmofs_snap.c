@@ -162,7 +162,7 @@ static bool find_uuid(struct cfs_snapshot *s, void *arg)
 
 /* The snapshot with this uuid (version 12), or false. A zero uuid names
  * nothing. */
-int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out)
+int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t *uuid, struct cfs_snapshot *out)
 {
     static const uint8_t zero[16];
     if (fs->sb.version < 12 || memcmp(uuid, zero, 16) == 0)
