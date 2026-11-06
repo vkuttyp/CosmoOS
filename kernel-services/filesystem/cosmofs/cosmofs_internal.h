@@ -435,7 +435,7 @@ uint64_t cfs_snaplist_next(const struct cfs_buf *b);
 bool cfs_snaplist_get(const struct cfs *fs, const struct cfs_buf *b, unsigned i, struct cfs_snapshot *out);
 void cfs_snaplist_set(const struct cfs *fs, struct cfs_buf *b, unsigned i, const struct cfs_snapshot *s);
 /*
- * Every block one tree reaches (cosmofs_reach.c): its inode map, its
+ * Every block one tree reaches (cosmofs_reach.cee): its inode map, its
  * inode blocks, and each inode's extents, extent chain and checksum
  * tree. `mark` is called once per block per walk, with the block's
  * linear index; an unreadable block makes the walk return -EIO after

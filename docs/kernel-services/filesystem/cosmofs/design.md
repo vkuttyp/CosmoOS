@@ -1652,7 +1652,7 @@ snapshot's bitmap, which is the pool's at that commit. So the answer is
 a walk: every tree (the live one and every snapshot) is walked once into
 a per-block count of the trees reaching it, then each snapshot again,
 summing its blocks and those whose count is one (`cfs_tree_walk`,
-`cosmofs_reach.c`, the checker's walk without its accounting). Under the
+`cosmofs_reach.cee`, the checker's walk without its accounting). Under the
 mount's lock, and two walks per snapshot: `list` is an operator's
 command, not something the system runs on its own. `-F NO_SIZES` skips
 the walks for a caller that wants the pool record alone.

@@ -1,0 +1,315 @@
+// cosmofs_reach.cee - Every block one tree reaches (docs/kernel-services/filesystem/cosmofs/design.md, "Format version
+// 12"), in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfsreach.c holds it to the digest of the C it replaced.
+//
+// The question a snapshot's allocation bitmap answers only approximately: that bitmap is the pool's, as of the
+// snapshot's commit, so it also marks blocks other trees held then and blocks in flight in that commit's free record.
+// What a snapshot is worth, what a clone owns and what a rollback leaves behind are questions about one tree, and
+// this is the walk that answers them exactly -- the structural check's walk, without its accounting.
+//
+// A block is read as a slice of exactly CFS_BLOCK bytes, its integers little-endian as cosmofs_format.h lays them out
+// (the offsets are asserted in tests/host/test_cfsreach.c), so no read can leave it.
+
+@header("cosmofs_internal.h")
+extern "C" {
+    struct cfs_super {
+        version: u32;
+    }
+    struct cfs {
+        sb: cfs_super;
+    }
+    struct cfs_buf {
+        blkno: u64;
+        data: *mut u8;
+    }
+
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_dva_lin(fs: *cfs, dva: u64) -> u64;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+}
+
+// ---- errno.h and cosmofs_format.h values (asserted in tests/host/test_cfsreach.c) ----
+
+const EIO: i32 = 5;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_PTRS_PER_BLOCK: usize = 508;
+const CFS_INODES_PER_BLOCK: usize = 15;
+const CFS_INODE_SIZE: usize = 256;
+const CFS_EXTENTS_PER_BLOCK: usize = 253;
+const CFS_DIRECT: usize = 10;
+/// Extent blocks an inode's chain may have: CFS_MAX_EXTENTS (4096) / CFS_EXTENTS_PER_BLOCK + 2.
+const CHAIN_MAX: u32 = 18;
+const CFS_KIND_IMAP1: u32 = 1;
+const CFS_KIND_IMAP0: u32 = 2;
+const CFS_KIND_INODES: u32 = 3;
+const CFS_KIND_EXTENTS: u32 = 6;
+const CFS_KIND_CSUMIDX: u32 = 7;
+const CFS_KIND_CSUM: u32 = 8;
+const CFS_KIND_CSUMIDX2: u32 = 18;
+const CFS_DVA_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
+/// struct cfs_mhdr's `kind`.
+const MHDR_KIND: usize = 4;
+/// struct cfs_inode's `ino`, `direct`, `indirect` and `csum_root`.
+const INODE_INO: usize = 48;
+const INODE_DIRECT: usize = 56;
+const INODE_INDIRECT: usize = 216;
+const INODE_CSUM_ROOT: usize = 240;
+/// struct cfs_extent: 16 bytes, `start` then `count`.
+const EXTENT_SIZE: usize = 16;
+const EXTENT_COUNT: usize = 8;
+/// struct cfs_extent_block: `next`, then the extents.
+const EXTENTS_AT: usize = 8;
+const CFS_EXT_COMPRESSED: u32 = 0x80000000;
+const CFS_EXT_PSIZE_SHIFT: u32 = 16;
+const CFS_EXT_PSIZE_MASK: u32 = 0xFF;
+const CFS_EXT_COUNT_MASK: u32 = 0xFFFF;
+
+/// Why the walk could not use a block, for its line.
+enum Why {
+    OutsidePool,
+    Unreadable,
+    NotChecksumIndex,
+    OutOfMemory,
+    ChainTooLong,
+    SlotOutOfPlace,
+}
+
+fn whyText(why: Why) -> StringView => match (why) {
+    Why.OutsidePool => "outside the pool",
+    Why.Unreadable => "unreadable",
+    Why.NotChecksumIndex => "not a checksum index",
+    Why.OutOfMemory => "out of memory",
+    Why.ChainTooLong => "an extent chain too long",
+    Why.SlotOutOfPlace => "an inode slot out of place",
+};
+
+/// One walk: where it reports what it reaches, and the first block it could not use.
+struct Reach {
+    fs: *mut cfs;
+    arg: *mut void;
+    rc: i32;
+    firstBad: u64;
+    why: Why;
+}
+
+/// A held buffer's block.
+/// Safety: `b` is a buffer cfs_buf_get handed out and not yet put.
+unsafe fn blockOf(b: *mut cfs_buf) -> Slice<static, u8> =>
+    Slice.fromRaw(Ptr.toBorrow(b as *cfs_buf).data as *u8, CFS_BLOCK);
+
+fn u64At(s: Slice<u8>, at: usize) -> u64 => ByteOrder.readU64LE(s, at);
+
+fn u32At(s: Slice<u8>, at: usize) -> u32 => ByteOrder.readU32LE(s, at);
+
+fn fail(r: borrow mut Reach, dva: u64, why: Why) {
+    if (r.rc == 0) {
+        r.firstBad = dva;
+        r.why = why;
+    }
+    r.rc = -EIO;
+}
+
+/// Safety: `r.fs` is a mounted filesystem's state.
+unsafe fn mark(r: borrow mut Reach, marker: extern "C" fn(*mut void, u64), dva: u64) {
+    let lin = cfs_dva_lin(r.fs as *cfs, dva);
+    if (lin == CFS_DVA_NONE) {
+        fail(mut r, dva, Why.OutsidePool); // the tree is not sound
+        return;
+    }
+    marker(r.arg, lin);
+}
+
+/// The buffer of `dva`, or null when it cannot be read as `kind`.
+/// Safety: as mark.
+unsafe fn get(r: borrow mut Reach, dva: u64, kind: u32) -> *mut cfs_buf {
+    var b = 0 as *mut cfs_buf;
+    let rc = cfs_buf_get(r.fs, dva, kind, borrow mut b as *mut *mut cfs_buf);
+    if (rc != 0) {
+        fail(mut r, dva, Why.Unreadable);
+        return 0 as *mut cfs_buf;
+    }
+    return b;
+}
+
+/// A checksum tree: a one-level index (`depth` 1 or a root of unknown shape, 0) or a version-14 two-level root, every
+/// block read.
+/// Safety: as mark.
+unsafe fn csum(r: borrow mut Reach, marker: extern "C" fn(*mut void, u64), blk: u64, depth: u32) {
+    mark(mut r, marker, blk);
+    let idx = get(mut r, blk, if (depth != 0) CFS_KIND_CSUMIDX else 0);
+    if (idx.isNull()) {
+        return;
+    }
+    let kind = u32At(blockOf(idx), MHDR_KIND);
+    let two = depth == 0 && kind == CFS_KIND_CSUMIDX2 && Ptr.toBorrow(r.fs as *cfs).sb.version >= 14;
+    if (!two && kind != CFS_KIND_CSUMIDX) {
+        cfs_buf_put(r.fs, idx);
+        fail(mut r, blk, Why.NotChecksumIndex);
+        return;
+    }
+    // Copied out (on the heap: a block's worth): reading a leaf may evict the index's buffer.
+    let bytes = CFS_PTRS_PER_BLOCK * 8;
+    let copy = kmalloc(bytes, 0) as *mut u8;
+    if (copy.isNull()) {
+        cfs_buf_put(r.fs, idx);
+        fail(mut r, blk, Why.OutOfMemory);
+        return;
+    }
+    memcpy(copy as *mut void, Ptr.toBorrow(idx as *cfs_buf).data.add(CFS_MHDR_SIZE) as *void, bytes);
+    cfs_buf_put(r.fs, idx);
+    let slots = Slice.fromRaw(copy as *u8, bytes);
+    for (i in 0..CFS_PTRS_PER_BLOCK) {
+        let slot = u64At(slots, i * 8);
+        if (slot == 0) {
+            continue;
+        }
+        if (two) {
+            csum(mut r, marker, slot, 1);
+            continue;
+        }
+        mark(mut r, marker, slot);
+        // Read, not only counted: a walk that says it reached a leaf has read it, or it says it could not.
+        let leaf = get(mut r, slot, CFS_KIND_CSUM);
+        if (!leaf.isNull()) {
+            cfs_buf_put(r.fs, leaf);
+        }
+    }
+    kfree(copy as *mut void);
+}
+
+/// The extent at `at` in `s`: every physical block it occupies (cosmofs_format.h's cfs_ext_psize).
+/// Safety: as mark.
+unsafe fn extent(r: borrow mut Reach, marker: extern "C" fn(*mut void, u64), s: Slice<u8>, at: usize) {
+    let start = u64At(s, at);
+    let count = u32At(s, at + EXTENT_COUNT);
+    let compressed = (count & CFS_EXT_COMPRESSED) != 0;
+    let blocks = if (compressed) count & CFS_EXT_COUNT_MASK else count;
+    if (blocks == 0) {
+        return;
+    }
+    let psize = if (compressed) ((count >> CFS_EXT_PSIZE_SHIFT) & CFS_EXT_PSIZE_MASK) + 1 else blocks;
+    for (k in 0u32..psize) {
+        mark(mut r, marker, start.wrappingAdd(k as u64));
+    }
+}
+
+/// The inode at `at` in `s`: its extents, their chain and its checksum tree.
+/// Safety: as mark.
+unsafe fn inode(r: borrow mut Reach, marker: extern "C" fn(*mut void, u64), s: Slice<u8>, at: usize) {
+    for (i in 0..CFS_DIRECT) {
+        extent(mut r, marker, s, at + INODE_DIRECT + i * EXTENT_SIZE);
+    }
+    var next = u64At(s, at + INODE_INDIRECT);
+    var guard: u32 = 0;
+    while (next != 0) {
+        let over = guard > CHAIN_MAX;
+        guard += 1;
+        if (over) {
+            fail(mut r, next, Why.ChainTooLong);
+            break;
+        }
+        mark(mut r, marker, next);
+        let b = get(mut r, next, CFS_KIND_EXTENTS);
+        if (b.isNull()) {
+            break;
+        }
+        let eb = blockOf(b);
+        for (i in 0..CFS_EXTENTS_PER_BLOCK) {
+            extent(mut r, marker, eb, CFS_MHDR_SIZE + EXTENTS_AT + i * EXTENT_SIZE);
+        }
+        next = u64At(eb, CFS_MHDR_SIZE);
+        cfs_buf_put(r.fs, b);
+    }
+    let root = u64At(s, at + INODE_CSUM_ROOT);
+    if (root != 0) {
+        csum(mut r, marker, root, 0);
+    }
+}
+
+/// "cosmofs: tree walk from 0x<root>: ".
+fn lineStart(line: borrow mut TextWriter, root: u64) {
+    line.text("cosmofs: tree walk from 0x");
+    line.hex(root, 1);
+    line.text(": ");
+}
+
+/// cosmofs_internal.h's cfs_tree_walk: every block the tree rooted at `imap_root` reaches, as a linear index, to
+/// `marker`; -EIO when a block of it could not be used, after marking everything else.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `marker` may be called with `arg` for every block.
+@export("cfs_tree_walk")
+unsafe fn treeWalk(
+    fs: *mut cfs,
+    imap_root: u64,
+    next_ino: u64,
+    marker: extern "C" fn(*mut void, u64),
+    arg: *mut void,
+) -> i32 {
+    var r = Reach { fs: fs, arg: arg, rc: 0, firstBad: 0, why: Why.Unreadable };
+    if (imap_root == 0) {
+        return 0;
+    }
+    mark(mut r, marker, imap_root);
+    let b1 = get(mut r, imap_root, CFS_KIND_IMAP1);
+    if (b1.isNull()) {
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        lineStart(mut line, imap_root);
+        line.text("its inode map is unreadable");
+        KernelLog.send(LogLevel.Warn, line);
+        return r.rc;
+    }
+    let top = blockOf(b1);
+    for (i in 0..CFS_PTRS_PER_BLOCK) {
+        let l0 = u64At(top, CFS_MHDR_SIZE + i * 8);
+        if (l0 == 0) {
+            continue;
+        }
+        mark(mut r, marker, l0);
+        let b0 = get(mut r, l0, CFS_KIND_IMAP0);
+        if (b0.isNull()) {
+            continue;
+        }
+        let mid = blockOf(b0);
+        for (j in 0..CFS_PTRS_PER_BLOCK) {
+            let ib = u64At(mid, CFS_MHDR_SIZE + j * 8);
+            if (ib == 0) {
+                continue;
+            }
+            mark(mut r, marker, ib);
+            let bi = get(mut r, ib, CFS_KIND_INODES);
+            if (bi.isNull()) {
+                continue;
+            }
+            let slots = blockOf(bi);
+            for (k in 0..CFS_INODES_PER_BLOCK) {
+                let at = CFS_MHDR_SIZE + k * CFS_INODE_SIZE;
+                let ino = u64At(slots, at + INODE_INO);
+                if (ino == 0) {
+                    continue;
+                }
+                // A slot whose number is not its position, or past the tree's high-water mark, is not trusted for
+                // its blocks (the checker's rule, cosmofs_check.c walk_imap).
+                let expect = ((i * CFS_PTRS_PER_BLOCK + j) * CFS_INODES_PER_BLOCK + k) as u64;
+                if (ino != expect || expect >= next_ino) {
+                    fail(mut r, expect, Why.SlotOutOfPlace);
+                    continue;
+                }
+                inode(mut r, marker, slots, at);
+            }
+            cfs_buf_put(fs, bi);
+        }
+        cfs_buf_put(fs, b0);
+    }
+    cfs_buf_put(fs, b1);
+    if (r.rc != 0) {
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        lineStart(mut line, imap_root);
+        line.text(whyText(r.why));
+        line.text(" at 0x");
+        line.hex(r.firstBad, 1);
+        KernelLog.send(LogLevel.Warn, line);
+    }
+    return r.rc;
+}

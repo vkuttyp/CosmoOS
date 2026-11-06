@@ -1242,6 +1242,17 @@ detach's line names the device before the pool's reference on it goes
 pinned ceesafec does not import. `kernel-services/storage/` has no C left
 but `pool_floor.c`.
 
+cosmofs next, its files one at a time, leaves first, each on a host test
+where it can be held alone. `cosmofs_reach.cee`, the tree walk clones,
+rollbacks and the snapshot accounting use: `tests/host/test_cfsreach.c`
+builds trees in a block store it owns -- inode maps, slots in place and
+out of it, direct, compressed and chained extents, chains that loop,
+checksum trees of one level and two, blocks unreadable, of the wrong kind
+or outside the pool -- and fakes the buffers and the address map
+(0x18b576f00e985902, clang and gcc; every line and branch). The port reads
+each block as a slice of CFS_BLOCK bytes at offsets the test asserts, so
+no read can leave it; its reasons for a bad block are an enum.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

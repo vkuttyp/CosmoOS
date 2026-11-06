@@ -1,5 +1,5 @@
 /*
- * test_cfsreach.c - cosmofs's tree walk (kernel-services/filesystem/cosmofs/cosmofs_reach.c, cfs_tree_walk) on the
+ * test_cfsreach.c - cosmofs's tree walk (kernel-services/filesystem/cosmofs/cosmofs_reach.cee, cfs_tree_walk) on the
  * host: roadmap 2.0 SA7. A digest recorded from the C over seeded rounds, each a tree the test builds in a block
  * store it owns: inode maps of both levels, inode slots in place and out of it and past the high-water mark, direct,
  * compressed and chained extents, chains that loop, checksum trees of one level and two (on version-14 roots and
