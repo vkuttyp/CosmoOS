@@ -30,29 +30,35 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-MEMBER = "kernel-services/filesystem/cosmofs/cosmofs_member.c"
+MEMBER = "kernel-services/filesystem/cosmofs/cosmofs_member.cee"
 POOL = "kernel-services/storage/pool.cee"
 
 # file, the text the rule is, what --old leaves instead, self-test, the
 # check its old run fails, other self-tests allowed to fail with it.
 CASES = {
     "premark": (MEMBER,
-                """        list_for_each_entry(it, &fs->bufs, link)
-            if (it->dirty && CFS_DVA_VDEV(it->blkno) == v)
-                pool_mark_missed(fs->pool, it->blkno);
-        for (uint64_t blk = 0; blk < m->first_usable; blk++)
-            pool_mark_missed(fs->pool, CFS_DVA(v, blk));""",
-                """        (void)it;""",
+                """        var node = List.first(head as *list_node);
+        while (!node.isNull()) {
+            let it = Ptr.toBorrow(bufOfLink(node) as *cfs_buf);
+            if (it.dirty && vdevOf(it.blkno) == v as u64) {
+                pool_mark_missed(p, it.blkno);
+            }
+            node = List.next(head as *list_node, node);
+        }
+        for (blk in 0u64..memOf(fs, v).first_usable) {
+            pool_mark_missed(p, dva(v, blk));
+        }""",
+                """        let _ = head;""",
                 "cosmofs-copy-bitmap", r"m", ()),
     "persist": (MEMBER,
-                """int cfs_copystate_prepare(struct cfs *fs)
-{
-    if (fs->rdonly)
-        return 0;""",
-                """int cfs_copystate_prepare(struct cfs *fs)
-{
-    if (fs || fs->rdonly)
-        return 0;""",
+                """unsafe fn copystatePrepare(fs: *mut cfs) -> i32 {
+    if (fsOf(fs).rdonly) {
+        return 0;
+    }""",
+                """unsafe fn copystatePrepare(fs: *mut cfs) -> i32 {
+    if (!fs.isNull() || fsOf(fs).rdonly) {
+        return 0;
+    }""",
                 "cosmofs-copy-bitmap",
                 r"cp->state == POOL_COPY_RESILVERING && cp->dev == bd[1] && !cp->whole && cp->since == whole_at",
                 # Without a record nothing is raised to 13, FAULTED is not

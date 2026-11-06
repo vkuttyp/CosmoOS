@@ -1978,7 +1978,7 @@ A member is **degraded** when any of its copies is not `ONLINE`. The
 pool knows nothing of formats or generations; the filesystem calls it
 under its own lock (`cfs->lock`), which is what serialises the state.
 
-**On disk, in the filesystem** (`cosmofs_member.c`). Member 0 has no
+**On disk, in the filesystem** (`cosmofs_member.cee`). Member 0 has no
 label -- its copies carry the superblock slots at blocks 0 and 1, and its
 data starts at block 2 -- so per-copy state cannot live on the device it
 describes, and in any case the device it most needs to describe is the

@@ -1307,6 +1307,22 @@ branches that cannot be reached). `rs_stop` is a word, as `AtomicU32`
 is; `cosmofs_resilver_floor.c` keeps `g_cosmofs_resilver_rate` and makes
 the `cfs_pace` call (its name is the pacing state's too); the debug
 seams are `@cfg("CONFIG_DEBUG")` exports.
+`cosmofs_member.cee`, the members: `tests/host/test_cfsmember.c` runs
+the real label and member-table checks (cfsparse, CRC32C) over devices,
+superblocks, a pool, buffers and an allocator it owns -- labels written,
+cleared and read back sealed by CRC or MAC, member tables loaded valid
+and every way malformed, copies set up from their records, lagging,
+tagged and newer devices, spares, the copy-state records prepared and
+filled, tables stored, labels stamped, holds past the limit, the linear
+addresses, read repair and verify-all (0xf295f4d39f4bf4fd, clang and
+gcc; every line and branch that can be reached). The labels, superblock
+slots and table entries the C kept on the stack are slots of words
+checked against their C sizes; the buffer cache's list is walked with
+`List`; `cosmofs_member_floor.c` makes the two calls with a `char` domain
+(`cfs_mac_seal`, `cfs_mac_ok`) and keeps the record's asserts.
+`cfs_newer_member0` takes its uuid as a pointer.
+`tools/cfs31-probe.py` and `tools/b3-copystate-probe.py` patch the port;
+their `--old` texts compile.
 
 Size: about 4.5x.
 

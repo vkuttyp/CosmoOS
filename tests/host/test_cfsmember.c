@@ -1,6 +1,6 @@
 /*
- * test_cfsmember.c - cosmofs's members (kernel-services/filesystem/cosmofs/cosmofs_member.c) on the host: roadmap 2.0
- * SA7. A digest recorded from the C over seeded pools, with the real label and member-table checks (cfsparse, CRC32C)
+ * test_cfsmember.c - cosmofs's members (kernel-services/filesystem/cosmofs/cosmofs_member.cee) on the host: roadmap
+ * 2.0 SA7. A digest recorded from the C over seeded pools, with the real label and member-table checks (cfsparse, CRC32C)
  * and devices, superblocks, a pool, buffers and an allocator the test owns: labels written to copies and to devices,
  * cleared, read back sealed by CRC or by MAC; member tables loaded (valid, malformed, too big for the device, members
  * that are absent, stale, the wrong size), copies set up from records (ONLINE, missing, resilvering with and without
@@ -25,6 +25,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants, and the offsets and stack slots it relies on. */
+_Static_assert(EIO == 5 && ENOMEM == 12 && ENODEV == 19 && EINVAL == 22 && ENOENT == 2 && ENOSPC == 28 && KMEM_ZERO == 1,
+               "cosmofs_member's errno.h and kmalloc.h values");
+_Static_assert(POOL_COPY_ONLINE == 0 && POOL_COPY_MISSING == 1 && POOL_COPY_RESILVERING == 4 && POOL_COPY_NSTATES == 5 &&
+                   POOL_MAX_COPIES == 4 && MOUNT_HELD_MAX == 12 && CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 &&
+                   CFS_DVA_VDEV_SHIFT == 56 && CFS_DVA_NONE == 0xFFFFFFFFFFFFFFFFull && CFS_BITS_PER_BITMAP == 32512 &&
+                   CFS_FORMAT_VERSION == 11 && CFS_KIND_MEMBERS == 11 && CFS_KIND_COPYSTATE == 17 &&
+                   CFS_ALLOC_META == 0 && CFS_LABEL_RESILVER == 1 && CFS_LABEL_SPARE == 2 && CFS_COPY_WHOLE == 1 &&
+                   CFS_COPY_DETACH == 2 && CFS_COPY_DIRTY_BYTES == 944,
+               "cosmofs_member's storage.h, vfs.h and cosmofs_format.h values");
+_Static_assert(offsetof(struct cfs_member_block, m) == 8 && offsetof(struct cfs_copystate, copy) == 16 &&
+                   offsetof(struct cfs_label, crc) == 72 && sizeof(enum cfs_alloc_class) == 4 &&
+                   sizeof(((struct cfs *)0)->pool_name) == 17,
+               "cosmofs_member.cee reads a table's entries, a record set's records and a label's crc at these offsets");
+/* cosmofs_member.cee keeps these in stack slots of words: a label 10, a superblock 21, a member table entry 8. */
+_Static_assert(sizeof(struct cfs_label) <= 10 * 8 && sizeof(struct cfs_super) <= 21 * 8 &&
+                   sizeof(struct cfs_member) <= 8 * 8,
+               "cosmofs_member.cee's stack slots");
 
 /* The digest of the C (cosmofs_member.c, 2026-11-06), which the CeeSafe port gives. */
 #define MEMBER_DIGEST 0xf295f4d39f4bf4fdull

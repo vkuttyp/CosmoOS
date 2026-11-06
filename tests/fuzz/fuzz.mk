@@ -53,7 +53,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_reach.c \
 	kernel-services/filesystem/cosmofs/cosmofs_rollback.c kernel-services/filesystem/cosmofs/cosmofs_rollback_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_clone.c \
-	kernel-services/filesystem/cosmofs/cosmofs_member.c \
+	kernel-services/filesystem/cosmofs/cosmofs_member.c kernel-services/filesystem/cosmofs/cosmofs_member_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c \
 	kernel/core/lz4.c \
 	kernel/core/lz4_decode.c \

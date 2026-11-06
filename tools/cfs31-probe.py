@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prove the member table's seal is checked at mount (CFS-31).
 
-    cfs31-probe.py [--old] [--arch x86_64|aarch64] [--tree REV] [--fix REV]
+    cfs31-probe.py [--old] [--arch x86_64|aarch64] [--tree REV]
 
 cfs_members_load reads the member table raw -- the buffer cache checks an
 address against the very table it is loading -- and checked its magic,
@@ -15,9 +15,12 @@ requires the check's mount to refuse it -- fail, or fall back to the
 older root -- and forges an encrypted pool's with its CRC32C recomputed.
 
   fixed  a debug `make test`: cosmofs-encrypted-root passes.
-  --old  the fix commit's cosmofs_member.c reverse-applied in a throwaway
-         worktree: the plain pool's damaged table is ACCEPTED, and
-         cosmofs-encrypted-root is the only self-test that fails.
+  --old  in a throwaway worktree, cosmofs_member.cee's check put back to
+         what it was before the fix (magic, kind and address; no seal):
+         the plain pool's damaged table is ACCEPTED, and
+         cosmofs-encrypted-root is the only self-test that fails. (The
+         fix was made in cosmofs_member.c; the file is CeeSafe now,
+         roadmap 2.0 SA7, so the old check is written here in CeeSafe.)
 
 Logs stay under out/cfs31-probe/<arch>-<mode>. Exit 0 when the mode shows
 what it should, else 1.
@@ -30,8 +33,16 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBJECT = "cosmofs: the member table's seal is checked at mount (CFS-31)"
-SOURCES = ["kernel-services/filesystem/cosmofs/cosmofs_member.c"]
+MEMBER = "kernel-services/filesystem/cosmofs/cosmofs_member.cee"
+# The check as the fix made it, and as it was before: the header's magic, kind and address, and no seal.
+RULE = """    if (rc == 0 && !cfs_mhdr_ok(borrow fsOf(fs).mac as *cfs_mac, block as *void, at, CFS_KIND_MEMBERS)) {
+        rc = -EIO;
+    }"""
+OLD = """    let header = Slice.fromRaw(block as *u8, CFS_BLOCK);
+    if (rc == 0 && (ByteOrder.readU32LE(header, 0) != 0x4d534643 || ByteOrder.readU32LE(header, 4) != CFS_KIND_MEMBERS ||
+        ByteOrder.readU64LE(header, 16) != at)) {
+        rc = -EIO;
+    }"""
 ACCEPTED = re.compile(r"cosmofs-encrypted-root: a plain pool's member table damaged in place: ACCEPTED")
 REFUSED = re.compile(r"cosmofs-encrypted-root: a plain pool's member table damaged in place: refused")
 
@@ -41,7 +52,6 @@ def main():
     ap.add_argument("--old", action="store_true")
     ap.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64")
     ap.add_argument("--tree", default="HEAD")
-    ap.add_argument("--fix", help="the fix commit (default: found by its subject)")
     a = ap.parse_args()
     mode = "old" if a.old else "fixed"
     work = ROOT / "out" / "cfs31-probe" / f"{a.arch}-{mode}"
@@ -56,15 +66,11 @@ def main():
                    stdout=subprocess.DEVNULL)
     try:
         if a.old:
-            sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={SUBJECT}", a.tree],
-                text=True).strip()
-            if not sha:
-                sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}; name it with --fix")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + SOURCES)
-            if not patch:
-                sys.exit(f"commit {sha[:8]} does not change {SOURCES}")
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            src = tree / MEMBER
+            text = src.read_text()
+            if text.count(RULE) != 1:
+                sys.exit(f"{MEMBER}: the check's text is not there exactly once; the probe is stale")
+            src.write_text(text.replace(RULE, OLD))
         make = "gmake" if sys.platform == "darwin" else "make"
         out = tree / "out" / "o"
         args = [make, "-C", str(tree), "-j8", f"ARCH={a.arch}", f"OUT={out}",

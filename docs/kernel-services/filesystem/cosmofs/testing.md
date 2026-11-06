@@ -11,7 +11,7 @@ test holds are in `invariants.md`.
 | Level | What | Command |
 |---|---|---|
 | Host (ASan/UBSan) | `test_cosmofs`: the on-disk layout compiled natively | `make host-test` |
-| Host fuzz (ASan/UBSan) | `fuzz_cosmofs`: the real `cosmofs_core.c`, `cosmofs.c`, `cosmofs_snap.c`, `cosmofs_member.c`, `cosmofs_scrub.cee` (generated), `cosmofs_check.c` and `cosmofs_crypt.cee` (generated) mount, walk and read mutated images | `make fuzz` |
+| Host fuzz (ASan/UBSan) | `fuzz_cosmofs`: the real `cosmofs_core.c`, `cosmofs.c`, `cosmofs_snap.c`, `cosmofs_member.cee` (generated), `cosmofs_scrub.cee` (generated), `cosmofs_check.c` and `cosmofs_crypt.cee` (generated) mount, walk and read mutated images | `make fuzz` |
 | Target self-tests (debug builds) | 71 tests: 67 `cosmofs-*`, `pool`, and three `fsctl-*`, in `cosmofstest.c`, `cosmofscrash.c` and `vfstest.c`, listed below | `make test` |
 | Other target self-tests on cosmofs | tests of other subsystems that use cosmofs as the filesystem under them | `make test` |
 | User mode (debug builds) | `init --selftest` mounts the kernel tests' cosmofs, commits a compressible file, and drives `/sbin/fsctl` | `make test` |

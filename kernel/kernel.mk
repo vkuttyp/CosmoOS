@@ -186,6 +186,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_rollback_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_clone.c \
 	kernel-services/filesystem/cosmofs/cosmofs_member.c \
+	kernel-services/filesystem/cosmofs/cosmofs_member_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub_floor.c \
@@ -358,7 +359,7 @@ $(OUT)/kernel-services/network/nettest_bench.o $(OUT)/kernel-services/network/ne
 $(OUT)/kernel-services/network/nettest_harness.o $(OUT)/kernel-services/network/nettest_harness.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 $(OUT)/kernel-services/network/nettest_frame.o $(OUT)/kernel-services/network/nettest_frame.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 
-# kernel-services/filesystem/cosmofs/cfsparse.c, cosmofs_reach.c, cosmofs_clone.c, cosmofs_rollback.c, cosmofs_scrub.c, cosmofs_crypt.c and cosmofs_resilver.c are generated from their .cee into out/cee (scripts/cee-gen.py), away
+# kernel-services/filesystem/cosmofs/cfsparse.c, cosmofs_reach.c, cosmofs_clone.c, cosmofs_rollback.c, cosmofs_scrub.c, cosmofs_crypt.c, cosmofs_resilver.c and cosmofs_member.c are generated from their .cee into out/cee (scripts/cee-gen.py), away
 # from the cosmofs_internal.h they include by name: their objects, and their analyses, look in the cosmofs directory too.
 $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.o $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
@@ -373,4 +374,6 @@ $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_scrub.o $(OUT)/kernel-services
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_crypt.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_crypt.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_resilver.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_resilver.analyzed: \
+	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
+$(OUT)/kernel-services/filesystem/cosmofs/cosmofs_member.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_member.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs

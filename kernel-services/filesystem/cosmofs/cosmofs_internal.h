@@ -480,7 +480,7 @@ bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint6
  * deadlist append: cfs_snapshot_fill is the one caller that appends, and
  * it does so before the root. Kept for callers that only want to ask. */
 bool cfs_snapshot_holds(struct cfs *fs, uint64_t blk);
-/* Members and DVAs (cosmofs_member.c; design.md, "Format version 4"). */
+/* Members and DVAs (cosmofs_member.cee; design.md, "Format version 4"). */
 bool cfs_dva_valid(const struct cfs *fs, uint64_t dva);
 uint64_t cfs_dva_lin(const struct cfs *fs, uint64_t dva);   /* CFS_DVA_NONE if the DVA is not ours */
 /* Is the linear block allocated, per the in-memory bitmap that is
@@ -544,7 +544,7 @@ int cosmofs_poolctl(struct mount *mnt, struct cosmofs_pool_req *req);
 int cosmofs_commit_mount(struct mount *mnt);
 /* The newest member-0 device of the pool `uuid` names, if it is newer
  * than `gen` and is not `bd`: referenced, or NULL (CF27). */
-struct blkdev *cfs_newer_member0(struct blkdev *bd, const uint8_t uuid[16], uint64_t gen, uint64_t *newer);
+struct blkdev *cfs_newer_member0(struct blkdev *bd, const uint8_t *uuid, uint64_t gen, uint64_t *newer);   /* uuid: 16 bytes */
 /* Read `dva` into `buf` and check it with `verify`, trying the member's
  * copies in turn and writing the first good one back over the copies
  * that failed. -EIO when no copy satisfies `verify`. */

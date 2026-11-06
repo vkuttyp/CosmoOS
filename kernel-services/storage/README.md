@@ -9,7 +9,7 @@ block `b` is the same sector a single-device pool always addressed.
 Filesystems address the pool, never a `blkdev`. The pool is an ordered
 set of devices and nothing more: which devices belong together is the
 filesystem's question, because the identity is written in the
-filesystem's format (`cosmofs_member.c`). Redundancy attaches here next
+filesystem's format (`cosmofs_member.cee`). Redundancy attaches here next
 (constitution section 29). `pool_floor.c` keeps the C the port needs: the sysctl's
 `g_pool_fault_errors`, the spare slots' addresses and the asserted constants.
 `tests/host/test_pool.c` holds the port to the C's digest. Self-tests `pool` and
