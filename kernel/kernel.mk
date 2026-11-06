@@ -181,6 +181,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/storage/pool_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf.c \
+	kernel-services/filesystem/cosmofs/cosmofs_alloc.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap_floor.c \
