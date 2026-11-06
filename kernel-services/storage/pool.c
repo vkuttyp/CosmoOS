@@ -214,6 +214,12 @@ int pool_set_copies(struct spool *p, unsigned vdev, unsigned n)
     if (n > 1) {
         int rc = member_bitmaps(m);
         if (rc) {
+            /* The slots it did not get: their bitmaps too, which nothing
+             * past ncopies would free. */
+            for (unsigned c = was; c < n; c++) {
+                kfree(m->copy[c].dirty);
+                m->copy[c].dirty = NULL;
+            }
             m->ncopies = was;
             return rc;
         }
