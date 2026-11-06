@@ -1342,6 +1342,26 @@ the page allocator and gives it back (`kernel/page.h`'s conversions are
 inline). `tools/b3-mirror-probe.py` patches the port, and
 `tools/cosmofs-extent-fail-probe.py` takes the check's two lines out of
 it by their text; both `--old` texts compile.
+`cosmofs_snap.cee`, the snapshots: `tests/host/test_cfssnap.c` runs them
+with the real list decoders (cfsparse) over filesystems it builds and
+owns -- lists in both layouts, one block or several, in a loop, full or
+unreadable; entries with and without identity, clones among them;
+member tables and indexes whose bitmaps say what each snapshot holds;
+deadlists empty, short, one short of full, full, in a loop or outside
+the pool -- running every exported operation in random sequences while
+commits, copies, allocations, reads and kmalloc fail, then directed
+rounds that make the fill, a deletion and the identity repair fail at
+each step (0xcdbb968635a6b0f6, clang and gcc; every line and branch that
+can be reached). Entries the C kept on the stack are slots of words
+checked against the C size; the list walk's callbacks are `@callback`
+functions; `cosmofs_snap_floor.c` reads `test_no_raise`, a debug build's
+field. `cfs_snapshot_new_uuid` and `cfs_snapshot_find_uuid` take plain
+pointers (gcc's -Warray-parameter). Found on the way: the C passed
+`memcpy` a NULL destination for an empty deadlist block (fixed in the C
+step), and `deadlist_settle` returns -ENOMEM for one, since `kmalloc(0)`
+is NULL (kept; only a damaged pool has such a block).
+`tools/release-describe-probe.py` puts the message's old words back in
+the port by their text.
 
 Size: about 4.5x.
 

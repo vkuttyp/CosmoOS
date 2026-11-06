@@ -121,7 +121,7 @@ any write inside a snapshot or in `.snapshots`.
 - `symlink`: `-EOPNOTSUPP` on a filesystem whose superblock version is
   below 8. The target is written in the same transaction as the entry.
 - `mkdir`/`rmdir` **inside `.snapshots`** take and delete snapshots
-  (`cfs_snapshot_create`, `cfs_snapshot_delete` in `cosmofs_snap.c`).
+  (`cfs_snapshot_create`, `cfs_snapshot_delete` in `cosmofs_snap.cee`).
   Creation commits the open transaction first, then writes the list.
   Results: `-ENAMETOOLONG` above `CFS_SNAP_NAME_MAX` (31); `-EINVAL` for
   an empty name or one containing `/`; `-EEXIST`; `-ENOSPC` once ids

@@ -300,7 +300,7 @@ int cfs_snapshot_lookup_uuid(struct cfs *fs, const uint8_t *uuid, struct cfs_sna
     return -ENOENT;
 }
 
-void cfs_snapshot_new_uuid(struct cfs *fs, uint8_t out[16], const uint8_t (*also)[16], unsigned nalso)
+void cfs_snapshot_new_uuid(struct cfs *fs, uint8_t *out, const uint8_t *also, unsigned nalso)
 {
     (void)fs;
     note(21, also == NULL ? nalso : 1000 + nalso);

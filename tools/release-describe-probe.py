@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prove a release kernel names no build id but its own.
 
-    release-describe-probe.py [--old] [--arch x86_64|aarch64] [--tree REV] [--fix REV]
+    release-describe-probe.py [--old] [--arch x86_64|aarch64] [--tree REV]
 
 The release workflow requires every git-describe-shaped string in
 cosmoos-ARCH-kernel.elf to be the tag (scripts/check-release-version.py).
@@ -12,10 +12,10 @@ ran the check.
 
 This builds the release kernel of REV (default HEAD) in a throwaway
 worktree and runs check-release-version.py --kernel on it against the
-worktree's own `git describe --always --dirty`. --old reverse-applies the
-fix commit's change to cosmofs_snap.c (the whole of it, nothing else; the
-commit is the one that added "(CosmoOS 1.0.7 and older)" there), and
-the message says v1.0.7 again.
+worktree's own `git describe --always --dirty`. --old puts the message's
+old words back in cosmofs_snap.cee, by their text: the snapshots are
+CeeSafe now (roadmap 2.0 SA7), so the fix commit's C diff no longer
+applies. The message then says v1.0.7 again.
 
 Logs stay under out/release-describe-probe/<arch>-<mode>. Exit 0 when the
 mode shows what it should (fixed: the check passes; old: it fails naming
@@ -29,9 +29,10 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-# The fix is found by what it added (git log -S), which survives a squash merge.
+# The fixed words and the old ones, in the port (cosmofs_snap.cee).
+SOURCE = "kernel-services/filesystem/cosmofs/cosmofs_snap.cee"
 FIXED_TEXT = "(CosmoOS 1.0.7 and older)"
-SOURCES = ["kernel-services/filesystem/cosmofs/cosmofs_snap.c"]
+OLD_TEXT = "(v1.0.7 and older)"
 OTHER = re.compile(r"describe-shaped (.+), not its build id")
 
 
@@ -40,7 +41,6 @@ def main():
     ap.add_argument("--old", action="store_true")
     ap.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64")
     ap.add_argument("--tree", default="HEAD")
-    ap.add_argument("--fix", help="the commit that rewords the message (default: found by its subject)")
     a = ap.parse_args()
     mode = "old" if a.old else "fixed"
     work = ROOT / "out" / "release-describe-probe" / f"{a.arch}-{mode}"
@@ -53,15 +53,11 @@ def main():
                    stdout=subprocess.DEVNULL)
     try:
         if a.old:
-            sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", f"-S{FIXED_TEXT}", a.tree, "--"] + SOURCES,
-                text=True).strip()
-            if not sha:
-                sys.exit(f"no commit adding '{FIXED_TEXT}' to {SOURCES} reachable from {a.tree}; name it with --fix")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + SOURCES)
-            if not patch:
-                sys.exit(f"commit {sha[:8]} does not change {SOURCES}")
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            src = tree / SOURCE
+            body = src.read_text()
+            if body.count(FIXED_TEXT) != 1:
+                sys.exit(f"{SOURCE}: the fixed text is not there exactly once; the probe is stale")
+            src.write_text(body.replace(FIXED_TEXT, OLD_TEXT))
         make = "gmake" if sys.platform == "darwin" else "make"
         out = tree / "out" / "rel"
         with (work / "make.log").open("w") as log:

@@ -1,0 +1,2121 @@
+// cosmofs_snap.cee - Snapshots (docs/kernel-services/filesystem/cosmofs/design.md, "Format version 3"), in CeeSafe:
+// roadmap 2.0 SA7. tests/host/test_cfssnap.c holds it to the digest of the C it replaced.
+//
+// A snapshot is the tuple a commit publishes -- imap_root, alloc_root, next_ino, inode_count and the generation --
+// kept, plus a promise not to free what it still names. Nothing is copied to take one: every tree it points at is
+// already copy-on-write.
+//
+// While a snapshot exists, the commit's release loop appends the blocks it would have freed to the newest snapshot's
+// deadlist instead of clearing their bitmap bits, because a block reaches pending_free exactly when the previous tree
+// named it and the new one does not.
+//
+// struct cfs, the buffers, the reservation and the snapshot entries stay C (cosmofs_internal.h, cosmofs_format.h).
+// An entry the C kept on the stack is kept in a zeroed slot of words, checked against its C size
+// (tests/host/test_cfssnap.c): a CeeSafe local cannot hold C state. cosmofs_snap_floor.c reads the one field only a
+// debug build has.
+
+@header("kernel/timer.h", "kernel/random.h", "kernel/string.h", "cosmofs_internal.h")
+extern "C" {
+    struct cfs_super {
+        version: u32;
+        generation: u64;
+        imap_root: u64;
+        next_ino: u64;
+        inode_count: u64;
+        snap_root: u64;
+        members: u64;
+    }
+    struct cfs_memstate {
+        alloc_root: u64;
+    }
+    struct cfs {
+        sb: cfs_super;
+        gen: u64;
+        mem: *mut cfs_memstate;
+        pending_free: *mut u64;
+        failed: i32;
+        test_fail_snapfill: bool;
+        snap_count: u32;
+        snap_max_id: u64;
+        snap_walks: u64;
+        snap_verdicts: u64;
+    }
+    struct cfs_buf {
+        blkno: u64;
+        data: *mut u8;
+    }
+    struct cfs_res {
+        blk: *mut u64;
+        n: u32;
+        used: u32;
+    }
+    struct cfs_snapshot {
+        generation: u64;
+        imap_root: u64;
+        alloc_root: u64;
+        next_ino: u64;
+        inode_count: u64;
+        deadlist: u64;
+        created_ns: u64;
+        id: u64;
+        uuid: [u8; 16];
+        origin_id: u64;
+        flags: u32;
+        name: [u8; 32];
+    }
+
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_mark_dirty(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_new(fs: *mut cfs, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_new_at(fs: *mut cfs, kind: u32, blk: u64, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_cow_exempt(fs: *mut cfs, bp: *mut *mut cfs_buf, parent_slot: *mut u64, res: *mut cfs_res) -> i32;
+    fn cfs_res_take(r: *mut cfs_res) -> u64;
+    fn cfs_res_untake(r: *mut cfs_res);
+    fn cfs_free_block_deferred(fs: *mut cfs, blk: u64);
+    fn cfs_free_block_exempt(fs: *mut cfs, blk: u64);
+    fn cfs_dva_valid(fs: *cfs, dva: u64) -> bool;
+    fn cfs_dva_lin(fs: *cfs, dva: u64) -> u64;
+    fn cfs_bitmap_test(fs: *cfs, lin: u64) -> bool;
+    fn cfs_snaplist_get(fs: *cfs, b: *cfs_buf, i: u32, out: *mut cfs_snapshot) -> bool;
+    fn cfs_commit(fs: *mut cfs) -> i32;
+    fn cfs_fail(fs: *mut cfs, rc: i32);
+    fn cfs_rollback_protects(fs: *mut cfs, s: *cfs_snapshot) -> bool;
+    fn cfs_snapshot_has_clones(fs: *mut cfs, id: u64) -> bool;
+    fn cfs_clone_ready(fs: *mut cfs, id: u64) -> i32;
+    fn cfs_clone_delete(fs: *mut cfs, doomed: *cfs_snapshot, freed: *mut u64) -> i32;
+    fn random_get_bytes(buf: *mut void, len: usize);
+    fn clock_realtime_ns() -> u64;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+    fn strlen(s: *CChar) -> usize;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    /// cosmofs_snap_floor.c: struct cfs's test_no_raise in a debug build, false in a release one.
+    fn cfs_snap_floor_no_raise(fs: *cfs) -> bool;
+}
+
+// ---- errno.h and cosmofs_format.h values (asserted in tests/host/test_cfssnap.c) ----
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EBUSY: i32 = 16;
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const EOPNOTSUPP: i32 = 95;
+const CFS_DVA_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
+const CFS_DVA_VDEV_SHIFT: u32 = 56;
+const CFS_DVA_BLK_MASK: u64 = 0x00FFFFFFFFFFFFFF;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_PTRS_PER_BLOCK: usize = 508;
+const CFS_BITS_PER_BITMAP: u64 = 32512;
+const CFS_SNAPS_PER_BLOCK: u32 = 42;
+const CFS_SNAPS_PER_BLOCK2: u32 = 31;
+const CFS_SNAP_MAX_CHAIN: u32 = 4096;
+const CFS_SNAP_ID_MAX: u64 = 0xFFFE;
+const CFS_SNAP_NAME_MAX: usize = 31;
+const CFS_SNAP_F_CLONE: u32 = 1;
+const CFS_DEAD_PER_BLOCK: u64 = 506;
+const CFS_MEMBERS_PER_BLOCK: u64 = 63;
+const CFS_KIND_ALLOCIDX: u32 = 4;
+const CFS_KIND_BITMAP: u32 = 5;
+const CFS_KIND_SNAPLIST: u32 = 9;
+const CFS_KIND_DEADLIST: u32 = 10;
+const CFS_KIND_MEMBERS: u32 = 11;
+const CFS_KIND_SNAPLIST2: u32 = 15;
+/// The payloads' layouts (struct cfs_snap_block, cfs_snap_block2, cfs_snapshot_v11, cfs_snapshot, cfs_dead_block,
+/// cfs_member_block, cfs_member): checked by the test.
+const LIST_NEXT: usize = 0;
+const LIST2_MAX_ID: usize = 8;
+const LIST_SNAP: usize = 8;
+const LIST2_SNAP: usize = 16;
+const SNAP_SIZE: usize = 128;
+const SNAP11_SIZE: usize = 96;
+const SNAP11_NAME: usize = 64;
+const SNAP_NAME_SIZE: usize = 32;
+const DEAD_NEXT: usize = 0;
+const DEAD_COUNT: usize = 8;
+const DEAD_BLK: usize = 16;
+const MEMBERS_COUNT: usize = 0;
+const MEMBERS_M: usize = 8;
+const MEMBER_SIZE: usize = 64;
+const MEMBER_ALLOC_ROOT: usize = 32;
+/// alloc_walk's roots: CFS_MAX_MEMBERS (255), capped at 64.
+const ROOTS_MAX: u32 = 64;
+
+/// The stack slot a snapshot entry is kept in, in words (checked against the C size).
+const SNAP_WORDS: usize = 16;
+
+/// cfs_snapshot_new_uuid's counter, mixed into every draw.
+static UUID_COUNTER: AtomicU64 = AtomicU64.constant(0);
+
+// ---- The C state, through its addresses ----
+
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn fsOf(fs: *mut cfs) -> borrow mut(static) cfs => Ptr.toBorrowMut(fs);
+
+/// Safety: `s` is a snapshot entry.
+unsafe fn snapOf(s: *cfs_snapshot) -> borrow(static) cfs_snapshot => Ptr.toBorrow(s);
+
+/// Safety: as snapOf.
+unsafe fn snapMut(s: *mut cfs_snapshot) -> borrow mut(static) cfs_snapshot => Ptr.toBorrowMut(s);
+
+fn slotsFit() -> bool => layoutOf<cfs_snapshot>().size <= SNAP_WORDS * 8;
+
+/// A held buffer's payload, the block past its header.
+/// Safety: `b` is a buffer cfs_buf_get handed out and not yet put.
+unsafe fn payloadOf(b: *mut cfs_buf) -> *mut u8 => Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE);
+
+/// Word `at` (a byte offset) of a held buffer's payload.
+/// Safety: as payloadOf.
+unsafe fn word(b: *mut cfs_buf, at: usize) -> u64 =>
+    ByteOrder.readU64LE(Slice.fromRaw(payloadOf(b) as *u8, CFS_BLOCK - CFS_MHDR_SIZE), at);
+
+/// Safety: as payloadOf.
+unsafe fn setWord(b: *mut cfs_buf, at: usize, v: u64) {
+    ByteOrder.writeU64LE(SliceMut.fromRaw(payloadOf(b), CFS_BLOCK - CFS_MHDR_SIZE), at, v);
+}
+
+/// The buffer of `dva` read as `kind`, or the reason it could not be read.
+/// Safety: `fs` is a mounted filesystem's state, its lock held.
+unsafe fn get(fs: *mut cfs, dva: u64, kind: u32, out: borrow mut *mut cfs_buf) -> i32 =>
+    cfs_buf_get(fs, dva, kind, out as *mut *mut cfs_buf);
+
+fn dvaVdev(dva: u64) -> u32 => truncate<u32>(dva >> CFS_DVA_VDEV_SHIFT);
+
+fn dvaBlk(dva: u64) -> u64 => dva & CFS_DVA_BLK_MASK;
+
+/// The bytes of a C string, up to its terminator.
+/// Safety: `s` holds a terminated string.
+unsafe fn cText(line: borrow mut TextWriter, s: *CChar) { line.bytes(Slice.fromRaw(s as *u8, strlen(s))); }
+
+/// Safety: `u` is 16 readable bytes.
+unsafe fn uuidZero(u: *u8) -> bool {
+    var zero = true;
+    for (i in 0usize..16) {
+        if (u.add(i).read() != 0) {
+            zero = false;
+        }
+    }
+    return zero;
+}
+
+/// A name a snapshot may have: not empty, at most CFS_SNAP_NAME_MAX bytes, no '/'.
+/// Safety: `name` is null or a terminated string.
+unsafe fn nameOk(name: *CChar) -> bool {
+    if (name.isNull()) {
+        return false;
+    }
+    let n = strlen(name);
+    if (n == 0 || n > CFS_SNAP_NAME_MAX) {
+        return false;
+    }
+    for (i in 0..n) {
+        if ((name as *u8).add(i).read() == 47) {
+            return false; // '/'
+        }
+    }
+    return true;
+}
+
+// ---- The snapshot list ----
+//
+// Two layouts: version 11 and older keep 42 96-byte entries a block (CFS_KIND_SNAPLIST), version 12 keeps 31 128-byte
+// ones and the id high-water mark (CFS_KIND_SNAPLIST2). Everything here reads and writes an entry through the four
+// accessors below, which decide by the in-memory superblock's version -- the same field the raise to 12 sets in the
+// transaction that rewrites the list, so the two cannot disagree (design.md, "Format version 12").
+
+/// Safety: `fs` is a filesystem's state.
+@export("cfs_snaplist_kind")
+unsafe fn snaplistKind(fs: *cfs) -> u32 =>
+    if (Ptr.toBorrow(fs).sb.version >= 12) CFS_KIND_SNAPLIST2 else CFS_KIND_SNAPLIST;
+
+/// Safety: as snaplistKind.
+@export("cfs_snaplist_slots")
+unsafe fn snaplistSlots(fs: *cfs) -> u32 =>
+    if (Ptr.toBorrow(fs).sb.version >= 12) CFS_SNAPS_PER_BLOCK2 else CFS_SNAPS_PER_BLOCK;
+
+/// `next` is the first word of both payloads.
+/// Safety: `b` holds a list block.
+@export("cfs_snaplist_next")
+unsafe fn snaplistNext(b: *cfs_buf) -> u64 => word(b as *mut cfs_buf, LIST_NEXT);
+
+/// Write entry `i` (null: empty it). The caller marks the block dirty. A version-11 slot has no room for the identity
+/// fields and drops them, which is why nothing that sets them runs before the raise.
+/// Safety: `fs` is a filesystem's state, `b` holds a list block, `s` is null or an entry.
+@export("cfs_snaplist_set")
+unsafe fn snaplistSet(fs: *cfs, b: *mut cfs_buf, i: u32, s: *cfs_snapshot) {
+    let p = payloadOf(b);
+    if (Ptr.toBorrow(fs).sb.version >= 12) {
+        if (i >= CFS_SNAPS_PER_BLOCK2) {
+            return;
+        }
+        let at = p.add(LIST2_SNAP + i as usize * SNAP_SIZE);
+        if (s.isNull()) {
+            memset(at as *mut void, 0, SNAP_SIZE);
+        } else {
+            memcpy(at as *mut void, s as *void, SNAP_SIZE);
+        }
+        return;
+    }
+    if (i >= CFS_SNAPS_PER_BLOCK) {
+        return;
+    }
+    let o = p.add(LIST_SNAP + i as usize * SNAP11_SIZE);
+    memset(o as *mut void, 0, SNAP11_SIZE);
+    if (s.isNull()) {
+        return;
+    }
+    let e = snapOf(s);
+    let out = SliceMut.fromRaw(o, SNAP11_SIZE);
+    ByteOrder.writeU64LE(out, 0, e.generation);
+    ByteOrder.writeU64LE(out, 8, e.imap_root);
+    ByteOrder.writeU64LE(out, 16, e.alloc_root);
+    ByteOrder.writeU64LE(out, 24, e.next_ino);
+    ByteOrder.writeU64LE(out, 32, e.inode_count);
+    ByteOrder.writeU64LE(out, 40, e.deadlist);
+    ByteOrder.writeU64LE(out, 48, e.created_ns);
+    ByteOrder.writeU64LE(out, 56, e.id);
+    memcpy(o.add(SNAP11_NAME) as *mut void, borrow e.name as *[u8; 32] as *void, SNAP_NAME_SIZE);
+}
+
+/// A version-12 list's high-water mark, from its head block: the highest id ever handed out here, so a deleted newest
+/// snapshot's id is not reused after a remount (V22; inventory §3's "snapshot ids are unique per mount"). 0 below
+/// version 12 or with no list.
+/// Safety: as get.
+unsafe fn snaplistMaxId(fs: *mut cfs) -> u64 {
+    let f = fsOf(fs);
+    if (f.sb.version < 12 || f.sb.snap_root == 0) {
+        return 0;
+    }
+    var b = 0 as *mut cfs_buf;
+    if (get(fs, f.sb.snap_root, CFS_KIND_SNAPLIST2, mut b) != 0) {
+        return 0;
+    }
+    let m = word(b, LIST2_MAX_ID);
+    cfs_buf_put(fs, b);
+    return m;
+}
+
+/// Walk the list, calling `visit` for every live entry until it returns false. `visit` may modify the entry; the block
+/// is marked dirty then.
+/// Safety: as get; `arg` is what `visit` expects.
+unsafe fn snapWalk(fs: *mut cfs, visit: extern "C" fn(*mut cfs_snapshot, *mut void) -> bool, arg: *mut void,
+    write: bool) -> i32 {
+    var blkno = fsOf(fs).sb.snap_root;
+    let slots = snaplistSlots(fs as *cfs);
+    var guard: u32 = 0;
+    while (blkno != 0) {
+        let over = guard > CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            return -EIO; // a cycle: the checker names it (chain_cycle)
+        }
+        var b = 0 as *mut cfs_buf;
+        let rc = get(fs, blkno, snaplistKind(fs as *cfs), mut b);
+        if (rc != 0) {
+            return rc;
+        }
+        let next = snaplistNext(b as *cfs_buf);
+        for (i in 0u32..slots) {
+            var slot = [0u64; 16];
+            let s = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+            if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, i, s)) {
+                continue;
+            }
+            if (!visit(s, arg)) {
+                if (write) {
+                    // `visit` may have emptied it: a zeroed name is an empty slot.
+                    let keep = snapOf(s as *cfs_snapshot).name[0] != 0;
+                    snaplistSet(fs as *cfs, b, i, if (keep) s as *cfs_snapshot else 0 as *cfs_snapshot);
+                    cfs_buf_mark_dirty(fs, b);
+                }
+                cfs_buf_put(fs, b);
+                return 0;
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    return 0;
+}
+
+struct UuidCtx {
+    uuid: *u8;
+    found: *mut cfs_snapshot;
+    ok: bool;
+}
+
+/// Safety: `arg` is a UuidCtx, `s` an entry.
+@callback
+unsafe fn findUuidVisit(s: *mut cfs_snapshot, arg: *mut void) -> bool {
+    let c = Ptr.toBorrowMut(arg as *mut UuidCtx);
+    if (memcmp(borrow snapOf(s as *cfs_snapshot).uuid as *[u8; 16] as *void, c.uuid as *void, 16) != 0) {
+        return true;
+    }
+    memcpy(c.found as *mut void, s as *void, layoutOf<cfs_snapshot>().size);
+    c.ok = true;
+    return false;
+}
+
+/// The snapshot with this uuid (version 12), or -ENOENT. A zero uuid names nothing.
+/// Safety: as get; `uuid` is 16 bytes; `out` null or an entry.
+@export("cfs_snapshot_lookup_uuid")
+unsafe fn lookupUuid(fs: *mut cfs, uuid: *u8, out: *mut cfs_snapshot) -> i32 {
+    if (fsOf(fs).sb.version < 12 || uuidZero(uuid)) {
+        return -ENOENT;
+    }
+    var slot = [0u64; 16];
+    var c = UuidCtx { uuid: uuid, found: borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot, ok: false };
+    let rc = snapWalk(fs, findUuidVisit, borrow mut c as *mut UuidCtx as *mut void, false);
+    if (rc != 0) {
+        return rc;
+    }
+    if (!c.ok) {
+        return -ENOENT;
+    }
+    if (!out.isNull()) {
+        memcpy(out as *mut void, c.found as *void, layoutOf<cfs_snapshot>().size);
+    }
+    return 0;
+}
+
+/// Safety: as lookupUuid.
+@export("cfs_snapshot_find_uuid")
+unsafe fn findUuid(fs: *mut cfs, uuid: *u8, out: *mut cfs_snapshot) -> bool => lookupUuid(fs, uuid, out) == 0;
+
+/// A new snapshot uuid (CF18). What it must be is unique on this filesystem, which is checked, not hoped for: the bytes
+/// are drawn, mixed with the wall clock and a counter, and drawn again while any snapshot on the list -- or any of
+/// `also`, the ones a batch has handed out but not yet written -- has them. So a uuid needs no seeded pool: a boot with
+/// no entropy source (Parallels without jitter, the CI no-entropy boot) takes snapshots as before, with uuids that are
+/// unique here though not unpredictable, which nothing asks of them.
+/// Safety: as get; `out` is 16 writable bytes, `also` `nalso` uuids of 16 bytes each.
+@export("cfs_snapshot_new_uuid")
+unsafe fn newUuid(fs: *mut cfs, out: *mut u8, also: *u8, nalso: u32) {
+    while (true) {
+        random_get_bytes(out as *mut void, 16);
+        let count = UUID_COUNTER.fetchAdd(1).wrappingAdd(1);
+        let mix = clock_realtime_ns() ^ count.wrappingMul(0x9E3779B97F4A7C15);
+        for (k in 0usize..8) {
+            let at = out.add(k);
+            at.write(at.read() ^ truncate<u8>(mix >> (8 * k as u64)));
+        }
+        out.add(6).write((out.add(6).read() & 0x0F) | 0x40); // RFC 4122 version 4
+        out.add(8).write((out.add(8).read() & 0x3F) | 0x80);
+        var taken = uuidZero(out as *u8);
+        var k: u32 = 0;
+        while (k < nalso && !taken) {
+            taken = memcmp(also.add(k as usize * 16) as *void, out as *void, 16) == 0;
+            k += 1;
+        }
+        if (!taken && fsOf(fs).sb.version >= 12) {
+            taken = findUuid(fs, out as *u8, 0 as *mut cfs_snapshot);
+        }
+        if (!taken) {
+            return;
+        }
+    }
+}
+
+struct FindCtx {
+    name: *CChar;
+    found: *mut cfs_snapshot;
+    ok: bool;
+}
+
+/// Safety: `arg` is a FindCtx, `s` an entry.
+@callback
+unsafe fn findOneVisit(s: *mut cfs_snapshot, arg: *mut void) -> bool {
+    let c = Ptr.toBorrowMut(arg as *mut FindCtx);
+    if (strcmp(borrow snapOf(s as *cfs_snapshot).name as *[u8; 32] as *CChar, c.name) == 0) {
+        memcpy(c.found as *mut void, s as *void, layoutOf<cfs_snapshot>().size);
+        c.ok = true;
+        return false;
+    }
+    return true;
+}
+
+/// The snapshot named `name`, or false.
+/// Safety: as get; `name` a terminated string; `out` null or an entry.
+@export("cfs_snapshot_find")
+unsafe fn find(fs: *mut cfs, name: *CChar, out: *mut cfs_snapshot) -> bool {
+    var slot = [0u64; 16];
+    var c = FindCtx { name: name, found: borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot, ok: false };
+    if (snapWalk(fs, findOneVisit, borrow mut c as *mut FindCtx as *mut void, false) != 0) {
+        return false;
+    }
+    if (c.ok && !out.isNull()) {
+        memcpy(out as *mut void, c.found as *void, layoutOf<cfs_snapshot>().size);
+    }
+    return c.ok;
+}
+
+struct CountCtx {
+    out: *mut cfs_snapshot;
+    max: u32;
+    n: u32;
+    newestGen: u64;
+}
+
+/// Safety: `arg` is a CountCtx, `s` an entry.
+@callback
+unsafe fn collectVisit(s: *mut cfs_snapshot, arg: *mut void) -> bool {
+    let c = Ptr.toBorrowMut(arg as *mut CountCtx);
+    let size = layoutOf<cfs_snapshot>().size;
+    if (!c.out.isNull() && c.n < c.max) {
+        memcpy((c.out as *mut u8).add(c.n as usize * size) as *mut void, s as *void, size);
+    }
+    let g = snapOf(s as *cfs_snapshot).generation;
+    if (g >= c.newestGen) {
+        c.newestGen = g;
+    }
+    c.n = c.n.wrappingAdd(1);
+    return true;
+}
+
+/// Every live entry, the first `max` of them into `out`, and how many there are.
+/// Safety: as get; `out` null or `max` entries.
+@export("cfs_snapshot_list")
+unsafe fn list(fs: *mut cfs, out: *mut cfs_snapshot, max: u32, count: *mut u32) -> i32 {
+    var c = CountCtx { out: out, max: max, n: 0, newestGen: 0 };
+    let rc = snapWalk(fs, collectVisit, borrow mut c as *mut CountCtx as *mut void, false);
+    if (rc != 0) {
+        return rc;
+    }
+    count.write(c.n);
+    return 0;
+}
+
+/// Safety: as get.
+@export("cfs_has_snapshots")
+unsafe fn hasSnapshots(fs: *mut cfs) -> bool {
+    var n: u32 = 0;
+    if (list(fs, 0 as *mut cfs_snapshot, 0, borrow mut n as *mut u32) != 0) {
+        return false;
+    }
+    return n > 0;
+}
+
+// ---- What a snapshot references ----
+
+/// A snapshot's bitmap is the set of blocks its tree occupies: the allocator's bit is set for a block exactly while
+/// something reaches it, and a commit publishes the two together. So "does this snapshot still name that block" is
+/// one bitmap lookup in the tree the snapshot already recorded -- no birth times, no reference counts (design.md, "Not
+/// freeing what a snapshot names").
+///
+/// The ALLOCIDX root covering `vdev` in the tree a snapshot recorded: from version 4 that record is the member table of
+/// its generation, so each member's bitmap is found through the table the snapshot pinned; before it there was one
+/// member and one index.
+/// Safety: as get; `s` an entry.
+unsafe fn snapAllocRoot(fs: *mut cfs, s: *cfs_snapshot, vdev: u32, out: borrow mut u64, unknown: borrow mut bool)
+    -> bool {
+    unknown = false;
+    let e = snapOf(s);
+    if (fsOf(fs).sb.version < 4) {
+        if (vdev != 0) {
+            return false;
+        }
+        out = e.alloc_root;
+        return e.alloc_root != 0;
+    }
+    var mb = 0 as *mut cfs_buf;
+    if (get(fs, e.alloc_root, CFS_KIND_MEMBERS, mut mb) != 0) {
+        unknown = true; // unreadable: the answer is not "free it"
+        return false;
+    }
+    let count = word(mb, MEMBERS_COUNT);
+    var ok = false;
+    if ((vdev as u64) < count && count <= CFS_MEMBERS_PER_BLOCK) {
+        out = word(mb, MEMBERS_M + vdev as usize * MEMBER_SIZE + MEMBER_ALLOC_ROOT);
+        ok = out != 0;
+    }
+    cfs_buf_put(fs, mb);
+    return ok;
+}
+
+/// Safety: as get; `s` an entry.
+@export("cfs_snapshot_references")
+unsafe fn references(fs: *mut cfs, s: *cfs_snapshot, dva: u64) -> bool {
+    if (!cfs_dva_valid(fs as *cfs, dva) || snapOf(s).alloc_root == 0) {
+        return false;
+    }
+    var root: u64 = 0;
+    var unknown = false;
+    if (!snapAllocRoot(fs, s, dvaVdev(dva), mut root, mut unknown)) {
+        return unknown; // unreadable: assume it is needed rather than free it
+    }
+    // A member's index covers that member's blocks, so the chunk is counted from the member's own block 0.
+    let blk = dvaBlk(dva);
+    let chunk = truncate<u32>(blk / CFS_BITS_PER_BITMAP);
+    var idx = 0 as *mut cfs_buf;
+    if (get(fs, root, CFS_KIND_ALLOCIDX, mut idx) != 0) {
+        return true; // unreadable: assume it is needed rather than free it
+    }
+    let bmblk = word(idx, chunk as usize * 8);
+    cfs_buf_put(fs, idx);
+    if (bmblk == 0) {
+        return false;
+    }
+    var bm = 0 as *mut cfs_buf;
+    if (get(fs, bmblk, CFS_KIND_BITMAP, mut bm) != 0) {
+        return true;
+    }
+    let bit = blk % CFS_BITS_PER_BITMAP;
+    let byte = payloadOf(bm).add((bit / 8) as usize).read();
+    let set = ((byte >> truncate<u8>(bit % 8)) & 1) != 0;
+    cfs_buf_put(fs, bm);
+    return set;
+}
+
+// ---- Copying the list ----
+//
+// The snapshot list is named by `cfs_super.snap_root` and by nothing else, so a copy of it is published exactly when
+// the superblock is -- atomically, by the same root write as every other change in the transaction. Before this it was
+// the one metadata chain in the filesystem edited where it lay, which meant a crash between the block's write and the
+// root left the *previous* root naming a list that belongs to a transaction that did not happen
+// (docs/audit/next-subsystem-snap-deadlist.md).
+//
+// The whole chain is copied, not the one block that changes: the chain is singly linked, so copying a block in the
+// middle means rewriting the `next` of the block before it, and that is a copy too. At 42 entries a block the chain
+// is one block on every filesystem anyone has, so "copy the chain" is the cheap answer as well as the honest one.
+// Idempotent within a transaction, because cfs_buf_cow_exempt is: a block already stamped with this generation is
+// marked dirty and left where it is.
+
+/// Safety: as get; `res` null or the commit's reservation.
+unsafe fn snapCow(fs: *mut cfs, res: *mut cfs_res) -> i32 {
+    var slot = borrow mut fsOf(fs).sb.snap_root as *mut u64;
+    var prev = 0 as *mut cfs_buf;
+    var rc: i32 = 0;
+    var guard: u32 = 0;
+    while (slot.read() != 0) {
+        let over = guard > CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            var buffer = [0u8; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: snapshot list chain too long at ");
+            line.decimal(slot.read());
+            KernelLog.send(LogLevel.Error, line);
+            rc = -EIO;
+            break;
+        }
+        var b = 0 as *mut cfs_buf;
+        rc = get(fs, slot.read(), snaplistKind(fs as *cfs), mut b);
+        if (rc != 0) {
+            break;
+        }
+        // The parent slot is `fs->sb.snap_root` for the head and a `next` inside the block before it otherwise --
+        // which is held, so the pointer stays good, and already dirty from its own copy, so the write through it
+        // reaches the disk.
+        rc = cfs_buf_cow_exempt(fs, borrow mut b as *mut *mut cfs_buf, slot, res);
+        if (rc != 0) {
+            cfs_buf_put(fs, b);
+            break;
+        }
+        if (!prev.isNull()) {
+            cfs_buf_put(fs, prev);
+        }
+        prev = b;
+        slot = payloadOf(b).add(LIST_NEXT) as *mut u64;
+    }
+    if (!prev.isNull()) {
+        cfs_buf_put(fs, prev);
+    }
+    return rc;
+}
+
+// ---- Deadlists ----
+
+/// Append one block number to a snapshot's deadlist.
+///
+/// The head block is always **copied** before it is added to, because every caller runs inside a transaction and the
+/// block it would otherwise edit is one the *current* root names: a crash between that write and the next root leaves
+/// that root seeing an addition its own transaction never made -- one block on two deadlists, which a later pair of
+/// deletions frees twice, the second time under whatever the allocator has since put there.
+///
+/// There used to be one caller that could not copy, the commit's release loop, because it ran *after* its root was
+/// published and a copy there would allocate after the bitmap fixpoint. That caller is gone: the append now runs
+/// before the root, which is what makes copying both possible and necessary
+/// (docs/audit/next-subsystem-snap-deadlist.md).
+///
+/// `res` is where a block comes from -- the commit's reservation, or null to allocate, which only a caller running
+/// before the fixpoint may do. The caller holds the mount lock.
+/// Safety: as get; `head` a deadlist head's place.
+unsafe fn deadlistAppend(fs: *mut cfs, head: *mut u64, blk: u64, res: *mut cfs_res) -> i32 {
+    var b = 0 as *mut cfs_buf;
+    if (head.read() != 0) {
+        var rc = get(fs, head.read(), CFS_KIND_DEADLIST, mut b);
+        if (rc != 0) {
+            return rc;
+        }
+        if (word(b, DEAD_COUNT) < CFS_DEAD_PER_BLOCK) {
+            rc = cfs_buf_cow_exempt(fs, borrow mut b as *mut *mut cfs_buf, head, res);
+            if (rc != 0) {
+                cfs_buf_put(fs, b);
+                return rc;
+            }
+            let count = word(b, DEAD_COUNT);
+            setWord(b, DEAD_BLK + count as usize * 8, blk);
+            setWord(b, DEAD_COUNT, count + 1);
+            cfs_buf_mark_dirty(fs, b);
+            cfs_buf_put(fs, b);
+            return 0;
+        }
+        cfs_buf_put(fs, b);
+    }
+    var rc: i32 = 0;
+    if (!res.isNull()) {
+        let nb = cfs_res_take(res);
+        if (nb == 0) {
+            KernelLog.write(LogLevel.Error, "cosmofs: the commit's reservation is short of a deadlist block");
+            return -ENOSPC;
+        }
+        rc = cfs_buf_new_at(fs, CFS_KIND_DEADLIST, nb, borrow mut b as *mut *mut cfs_buf);
+        if (rc != 0) {
+            cfs_res_untake(res); // taken and unused: nothing would ever name it
+        }
+    } else {
+        rc = cfs_buf_new(fs, CFS_KIND_DEADLIST, borrow mut b as *mut *mut cfs_buf);
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    setWord(b, DEAD_NEXT, head.read());
+    setWord(b, DEAD_COUNT, 1);
+    setWord(b, DEAD_BLK, blk);
+    head.write(Ptr.toBorrow(b as *cfs_buf).blkno);
+    cfs_buf_put(fs, b);
+    return 0;
+}
+
+/// Settle a doomed snapshot's deadlist against the snapshots that remain: every block still occupied by one of them is
+/// handed to `keeper` (the oldest remaining snapshot, which will be asked the same question when it goes), and
+/// everything else goes back to the allocator. The chain's own blocks always go: nothing else names them.
+///
+/// This is exact. The first version of this code handed the whole list to the previous snapshot, which was safe but
+/// held blocks nothing referenced until that snapshot was deleted too; the bitmap each snapshot already records
+/// answers the question directly.
+/// Safety: as get; `remaining` `nrRemaining` entries.
+unsafe fn deadlistSettle(fs: *mut cfs, head0: u64, remaining: *cfs_snapshot, nrRemaining: u32,
+    keeperDeadlist: *mut u64, freed: borrow mut u64, kept: borrow mut u64) -> i32 {
+    let size = layoutOf<cfs_snapshot>().size;
+    var head = head0;
+    var guard: u32 = 0;
+    while (head != 0) {
+        let over = guard > CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            return -EIO; // a cycle (TEST-16): refused, not followed
+        }
+        var b = 0 as *mut cfs_buf;
+        var rc = get(fs, head, CFS_KIND_DEADLIST, mut b);
+        if (rc != 0) {
+            return rc;
+        }
+        let next = word(b, DEAD_NEXT);
+        let raw = word(b, DEAD_COUNT);
+        let count = if (raw < CFS_DEAD_PER_BLOCK) raw else CFS_DEAD_PER_BLOCK;
+        // Copy out: appending to the keeper's list may reuse buffers.
+        let blks = kmalloc(count as usize * 8, 0) as *mut u64;
+        if (blks.isNull()) {
+            cfs_buf_put(fs, b);
+            return -ENOMEM;
+        }
+        memcpy(blks as *mut void, payloadOf(b).add(DEAD_BLK) as *void, count as usize * 8);
+        cfs_buf_put(fs, b);
+        for (i in 0u64..count) {
+            let blk = blks.add(i as usize).read();
+            var needed = false;
+            var s: u32 = 0;
+            while (s < nrRemaining && !needed) {
+                needed = references(fs, (remaining as *u8).add(s as usize * size) as *cfs_snapshot, blk);
+                s += 1;
+            }
+            if (needed) {
+                rc = deadlistAppend(fs, keeperDeadlist, blk, 0 as *mut cfs_res);
+                if (rc != 0) {
+                    kfree(blks as *mut void);
+                    return rc;
+                }
+                kept += 1;
+            } else {
+                cfs_free_block_deferred(fs, blk);
+                freed += 1;
+            }
+        }
+        kfree(blks as *mut void);
+        // The chain's own block, which no snapshot's tree reaches: the filter would hold it on the deadlist it is part
+        // of.
+        cfs_free_block_exempt(fs, head);
+        head = next;
+    }
+    return 0;
+}
+
+/// Says the list cannot answer, and so the block is held.
+fn holding(what: StringView, blk: u64) {
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(what);
+    line.decimal(blk);
+    KernelLog.send(LogLevel.Error, line);
+}
+
+/// Does any snapshot still name this block? The question alone, with no deadlist append and nothing written.
+///
+/// cfs_snapshot_fill is this plus the append, and both now happen before the root: the verdict is taken once, per
+/// block, and the record, the deadlist and the release loop all read that one answer rather than each asking the list
+/// again (docs/audit/next-subsystem-snap-deadlist.md).
+///
+/// `bestAt` and `bestIx` come back naming the newest snapshot, so the caller that wants to append does not walk the
+/// list twice.
+/// Safety: as get; `bestAt` and `bestIx` null or writable.
+unsafe fn snapshotHolds(fs: *mut cfs, blk: u64, bestAt: *mut u64, bestIx: *mut u32) -> bool {
+    let f = fsOf(fs);
+    f.snap_walks = f.snap_walks.wrappingAdd(1);
+    var blkno = f.sb.snap_root;
+    var bestBlock: u64 = 0;
+    var bestIndex: u32 = 0;
+    var bestGen: u64 = 0;
+    var any = false;
+    var guard: u32 = 0;
+    while (blkno != 0) {
+        var b = 0 as *mut cfs_buf;
+        let over = guard > CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            // A cycle (TEST-16): the answer is as unknown as for an unreadable list, and gets the same one.
+            holding("cosmofs: snapshot list does not end; holding block ", blk);
+            return true;
+        }
+        if (get(fs, blkno, snaplistKind(fs as *cfs), mut b) != 0) {
+            // The list cannot be read, so which snapshot needs this block is unknown: hold it. Freeing on an
+            // unreadable list would hand a live snapshot's block to the allocator.
+            holding("cosmofs: snapshot list unreadable; holding block ", blk);
+            return true;
+        }
+        let next = snaplistNext(b as *cfs_buf);
+        let slots = snaplistSlots(fs as *cfs);
+        for (i in 0u32..slots) {
+            var slot = [0u64; 16];
+            let s = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+            // A clone is a tree of its own, not a point in the live tree's history: the live tree never reaches a block
+            // a clone was born with, so a clone is never the snapshot a live free belongs to (design.md, "Clones").
+            if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, i, s) ||
+                (snapOf(s as *cfs_snapshot).flags & CFS_SNAP_F_CLONE) != 0) {
+                continue;
+            }
+            let g = snapOf(s as *cfs_snapshot).generation;
+            if (!any || g >= bestGen) {
+                bestGen = g;
+                bestBlock = blkno;
+                bestIndex = i;
+                any = true;
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    if (!any) {
+        return false;
+    }
+    var b = 0 as *mut cfs_buf;
+    if (get(fs, bestBlock, snaplistKind(fs as *cfs), mut b) != 0) {
+        holding("cosmofs: snapshot list unreadable; holding block ", blk);
+        return true;
+    }
+    var slot = [0u64; 16];
+    let newest = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+    if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, bestIndex, newest)) {
+        // The entry the walk just found is gone: the list moved under the question, so the answer is unknown -- hold
+        // it.
+        cfs_buf_put(fs, b);
+        holding("cosmofs: snapshot list changed during a verdict; holding block ", blk);
+        return true;
+    }
+    // Testing the newest snapshot alone is exact here: a block reaching the commit's free list was in the live tree
+    // until now, so if the newest snapshot does not occupy it, it was born after that snapshot and no older one can
+    // name it either.
+    let held = references(fs, newest as *cfs_snapshot, blk);
+    cfs_buf_put(fs, b);
+    if (held && !bestAt.isNull()) {
+        bestAt.write(bestBlock);
+        bestIx.write(bestIndex);
+    }
+    return held;
+}
+
+/// Safety: as get.
+@export("cfs_snapshot_holds")
+unsafe fn holds(fs: *mut cfs, blk: u64) -> bool => snapshotHolds(fs, blk, 0 as *mut u64, 0 as *mut u32);
+
+/// Entries on every snapshot's deadlist: all of them when `of` is 0, or the ones naming that block.
+///
+/// A test hook, because nothing else can see this and one test needs it: a block a snapshot holds is not a leak and
+/// not a finding -- the checker claims a deadlist as metadata -- so a filesystem that held a block it should have freed
+/// is `clean` all the way down. `cosmofs-freelog-not-held` asks about one block by number, which is the only statement
+/// that distinguishes "freed, as a record should be" from "held, and gone until the snapshot is"
+/// (docs/audit/next-subsystem-unmount-leak.md).
+/// Safety: as get.
+@export("cfs_snapshot_deadlist_len")
+unsafe fn deadlistLen(fs: *mut cfs, of: u64) -> u64 {
+    var blkno = fsOf(fs).sb.snap_root;
+    var total: u64 = 0;
+    var guard: u32 = 0;
+    while (blkno != 0) {
+        let go = guard < CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (!go) {
+            break;
+        }
+        var b = 0 as *mut cfs_buf;
+        if (get(fs, blkno, snaplistKind(fs as *cfs), mut b) != 0) {
+            return total;
+        }
+        let next = snaplistNext(b as *cfs_buf);
+        let slots = snaplistSlots(fs as *cfs);
+        for (i in 0u32..slots) {
+            var slot = [0u64; 16];
+            let s = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+            if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, i, s)) {
+                continue;
+            }
+            var dl = snapOf(s as *cfs_snapshot).deadlist;
+            var dguard: u32 = 0;
+            while (dl != 0) {
+                let dgo = dguard < CFS_SNAP_MAX_CHAIN;
+                dguard += 1;
+                if (!dgo) {
+                    break;
+                }
+                var db = 0 as *mut cfs_buf;
+                if (get(fs, dl, CFS_KIND_DEADLIST, mut db) != 0) {
+                    break;
+                }
+                let count = word(db, DEAD_COUNT);
+                let n = if (count <= CFS_DEAD_PER_BLOCK) truncate<u32>(count) else 0;
+                if (of == 0) {
+                    total += n as u64;
+                } else {
+                    for (k in 0u32..n) {
+                        if (word(db, DEAD_BLK + k as usize * 8) == of) {
+                            total += 1;
+                        }
+                    }
+                }
+                dl = word(db, DEAD_NEXT);
+                cfs_buf_put(fs, db);
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    return total;
+}
+
+/// The invariant the copy makes true: **no block is named by more than one deadlist entry.** A block is on exactly one
+/// snapshot's deadlist, and a settle that hands it to the keeper takes it off the doomed snapshot's list by freeing
+/// that list's blocks outright.
+///
+/// Two entries for one block is what an interrupted keeper write-back left behind before this unit: the entry was
+/// appended to the keeper's head where it lay, so a crash before the root left the old root -- which still had the
+/// doomed snapshot, still naming the same block -- seeing both. Deleting the two snapshots in turn then frees it twice,
+/// the second time after the allocator has handed it to something else.
+///
+/// `cosmofs_check` cannot state this: it claims a deadlist's entries as non-live (cosmofs_check.cee), so the
+/// duplicate-claim finding never fires on them. So the crash suite asks here instead, per prefix.
+///
+/// `examined` is how many entries were looked at. A caller needs it: "no block is named twice" is also true of a
+/// filesystem with no deadlist at all, and a test that cannot tell those apart proves nothing
+/// (docs/audit/next-subsystem-snap-deadlist.md, "Vacuity").
+///
+/// Quadratic in the number of entries, and a test hook only.
+/// Safety: as get; `examined` and `first` null or writable.
+@export("cfs_snapshot_deadlist_dups")
+unsafe fn deadlistDups(fs: *mut cfs, examined: *mut u64, first: *mut u64) -> u64 {
+    var dups: u64 = 0;
+    var seen: u64 = 0;
+    if (!first.isNull()) {
+        first.write(0);
+    }
+    var blkno = fsOf(fs).sb.snap_root;
+    var guard: u32 = 0;
+    while (blkno != 0) {
+        let go = guard < CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (!go) {
+            break;
+        }
+        var b = 0 as *mut cfs_buf;
+        if (get(fs, blkno, snaplistKind(fs as *cfs), mut b) != 0) {
+            break;
+        }
+        let next = snaplistNext(b as *cfs_buf);
+        let slots = snaplistSlots(fs as *cfs);
+        for (i in 0u32..slots) {
+            var slot = [0u64; 16];
+            let s = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+            if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, i, s)) {
+                continue;
+            }
+            var dl = snapOf(s as *cfs_snapshot).deadlist;
+            var dguard: u32 = 0;
+            while (dl != 0) {
+                let dgo = dguard < CFS_SNAP_MAX_CHAIN;
+                dguard += 1;
+                if (!dgo) {
+                    break;
+                }
+                var db = 0 as *mut cfs_buf;
+                if (get(fs, dl, CFS_KIND_DEADLIST, mut db) != 0) {
+                    break;
+                }
+                let count = word(db, DEAD_COUNT);
+                let n = if (count <= CFS_DEAD_PER_BLOCK) truncate<u32>(count) else 0;
+                let dnext = word(db, DEAD_NEXT);
+                // Copied out and the buffer released before the counts, which walk the whole list and may evict it. A
+                // block's worth, on the heap: the stack is not 4 KiB to spare.
+                let blks = if (n != 0) kmalloc(n as usize * 8, 0) as *mut u64 else 0 as *mut u64;
+                if (n != 0 && blks.isNull()) {
+                    cfs_buf_put(fs, db);
+                    break;
+                }
+                for (k in 0u32..n) {
+                    blks.add(k as usize).write(word(db, DEAD_BLK + k as usize * 8));
+                }
+                cfs_buf_put(fs, db);
+                for (k in 0u32..n) {
+                    seen += 1;
+                    let blk = blks.add(k as usize).read();
+                    if (deadlistLen(fs, blk) > 1) {
+                        if (dups == 0 && !first.isNull()) {
+                            first.write(blk);
+                        }
+                        dups += 1;
+                    }
+                }
+                kfree(blks as *mut void);
+                dl = dnext;
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    if (!examined.isNull()) {
+        examined.write(seen);
+    }
+    return dups;
+}
+
+// ---- What the commit reserves, and what it then writes ----
+//
+// The deadlist append used to run in the commit's release loop, after the root was published. Two things were wrong
+// with that and only one of them was the leak.
+//
+// The leak: the block it allocated and the entry it dirtied belonged to a transaction already gone, so they waited for
+// the next commit, and at an unmount there is no next commit.
+//
+// The one the crash suite found once it had a snapshot in its workload: when the append allocated a *new* head, it
+// wrote that block number into the snapshot list where the list lay -- a block the published root still names. A
+// crash after that write and before the next root left the surviving root naming a deadlist head that had never been
+// written and whose bitmap bit it did not have: a block both unreadable and reachable-and-free, which is the direction
+// that hands live data to the allocator. Prefix 125 of the replay suite, block 23.
+//
+// So the append moves in front of the root, where every other statement a root makes is written -- which is possible
+// only because the blocks come from a reservation taken before the bitmap fixpoint, and safe only because the list is
+// now copied rather than edited.
+
+/// Blocks in the snapshot list's chain.
+/// Safety: as get.
+unsafe fn snapChainLen(fs: *mut cfs) -> u32 {
+    var n: u32 = 0;
+    var blkno = fsOf(fs).sb.snap_root;
+    while (blkno != 0 && n < CFS_SNAP_MAX_CHAIN) {
+        var b = 0 as *mut cfs_buf;
+        if (get(fs, blkno, snaplistKind(fs as *cfs), mut b) != 0) {
+            break;
+        }
+        blkno = snaplistNext(b as *cfs_buf);
+        cfs_buf_put(fs, b);
+        n += 1;
+    }
+    return n;
+}
+
+/// Safety: as get.
+@export("cfs_snapshot_reserve_bound")
+unsafe fn reserveBound(fs: *mut cfs, pendingBound: u32) -> u32 {
+    if (fsOf(fs).snap_count == 0) {
+        return 0;
+    }
+    // The chain's copy, the copied deadlist head, and a fresh deadlist block for every CFS_DEAD_PER_BLOCK blocks this
+    // commit could hold. Generous, like the record's own bound: what nobody takes is recorded as free by the same
+    // record.
+    return snapChainLen(fs).wrappingAdd(2).wrappingAdd(pendingBound / truncate<u32>(CFS_DEAD_PER_BLOCK));
+}
+
+/// Safety: as get.
+@export("cfs_snapshot_exempt_bound")
+unsafe fn exemptBound(fs: *mut cfs) -> u32 {
+    if (fsOf(fs).snap_count == 0) {
+        return 0;
+    }
+    return snapChainLen(fs).wrappingAdd(1); // the superseded chain, and the superseded head
+}
+
+/// A failure here is one of two things, and they need different answers.
+///
+/// Before the first append has landed, nothing has been written that a retry would write twice, so the error is
+/// returned and the commit fails cleanly -- the reservation is given back and the filesystem is as it was. `snapCow`
+/// runs on the first held block, before that block's append, so a failure there is always of this kind.
+///
+/// After it, some of this transaction's holds are recorded and some are not, and a retry would record the first ones
+/// a second time: one block on two deadlists, the corruption this unit exists to prevent. The transaction is abandoned
+/// instead, which is the answer this file already gives to a snapshot change it cannot publish whole (snapAbandon).
+/// Safety: as get; `res` null or the reservation; `held` `n` writable flags, one per pending_free entry.
+@export("cfs_snapshot_fill")
+unsafe fn fill(fs: *mut cfs, res: *mut cfs_res, held: *mut bool, n: u32, appendedOut: *mut u32) -> i32 {
+    appendedOut.write(0);
+    for (i in 0u32..n) {
+        held.add(i as usize).write(false);
+    }
+    if (fsOf(fs).snap_count == 0) {
+        return 0;
+    }
+    var copied = false;
+    var appended: u32 = 0;
+    for (i in 0u32..n) {
+        let dva = fsOf(fs).pending_free.add(i as usize).read();
+        let lin = cfs_dva_lin(fs as *cfs, dva);
+        if (lin == CFS_DVA_NONE || !cfs_bitmap_test(fs as *cfs, lin)) {
+            continue;
+        }
+        var at: u64 = 0;
+        var ix: u32 = 0;
+        let f = fsOf(fs);
+        f.snap_verdicts = f.snap_verdicts.wrappingAdd(1);
+        if (!snapshotHolds(fs, dva, borrow mut at as *mut u64, borrow mut ix as *mut u32)) {
+            continue;
+        }
+        // The verdict, once. The record and the release loop both read it out of `held` rather than asking the list
+        // again.
+        held.add(i as usize).write(true);
+        if (at == 0) {
+            continue; // held, but the list could not be read: never hand it back
+        }
+        if (!copied) {
+            let crc = snapCow(fs, res);
+            if (crc != 0) {
+                return crc;
+            }
+            copied = true;
+            // The chain moved, so where the entry lives moved with it.
+            at = 0;
+            if (!snapshotHolds(fs, dva, borrow mut at as *mut u64, borrow mut ix as *mut u32) || at == 0) {
+                continue;
+            }
+        }
+        var b = 0 as *mut cfs_buf;
+        var rc = get(fs, at, snaplistKind(fs as *cfs), mut b);
+        if (rc == 0) {
+            var slot = [0u64; 16];
+            let s = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+            var head: u64 = 0;
+            if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, ix, s)) {
+                rc = -EIO; // the entry the verdict named is gone
+            } else {
+                head = snapOf(s as *cfs_snapshot).deadlist;
+            }
+            if (rc == 0) {
+                let headAt = borrow mut head as *mut u64;
+                rc = if (fsOf(fs).test_fail_snapfill) -EIO else deadlistAppend(fs, headAt, dva, res);
+            }
+            if (rc == 0) {
+                let e = snapMut(s);
+                e.deadlist = head;
+                snaplistSet(fs as *cfs, b, ix, s as *cfs_snapshot);
+                cfs_buf_mark_dirty(fs, b);
+                appended += 1;
+                appendedOut.write(appended);
+            }
+            cfs_buf_put(fs, b);
+        }
+        if (rc != 0) {
+            if (appended > 0) {
+                cfs_fail(fs, rc); // half-recorded: a retry would double an entry
+            }
+            return rc;
+        }
+    }
+    return 0;
+}
+
+// ---- Create and delete ----
+
+/// "<what> (<rc>)<rest>", at error level.
+fn failure(what: StringView, rc: i32, rest: StringView) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(what);
+    line.text(" (");
+    line.signed(rc as i64);
+    line.text(")");
+    line.text(rest);
+    KernelLog.send(LogLevel.Error, line);
+}
+
+/// Both operations end by committing. If that fails the list has already been changed in memory, and a later commit
+/// would publish a snapshot mkdir reported as failed (or drop one rmdir did): the mount is marked failed instead, which
+/// is what every other unpublishable change here does.
+/// Safety: as get.
+unsafe fn snapCommit(fs: *mut cfs, rcSoFar: i32) -> i32 {
+    if (rcSoFar != 0) {
+        return rcSoFar;
+    }
+    let rc = cfs_commit(fs);
+    if (rc != 0 && fsOf(fs).failed == 0) {
+        let f = fsOf(fs);
+        f.failed = rc;
+        failure("cosmofs: a snapshot change could not be committed", rc, "; the mount is now read-only");
+    }
+    return rc;
+}
+
+/// A deletion that has begun releasing blocks cannot simply return an error: the frees are in the open transaction,
+/// and the entry that still names them is too. Committing one without the other would hand a live snapshot's blocks to
+/// the allocator, so a failure past that point abandons the transaction instead -- the same answer the mount gives to
+/// any other change it cannot publish whole.
+/// Safety: as get.
+unsafe fn snapAbandon(fs: *mut cfs, rc: i32) -> i32 {
+    let f = fsOf(fs);
+    if (f.failed == 0) {
+        f.failed = if (rc != 0) rc else -EIO;
+    }
+    failure("cosmofs: a snapshot deletion failed partway", rc, "; the transaction is abandoned");
+    return rc;
+}
+
+struct MaxIdCtx {
+    max: u64;
+    live: u32;
+}
+
+/// Safety: `arg` is a MaxIdCtx, `s` an entry.
+@callback
+unsafe fn maxIdVisit(s: *mut cfs_snapshot, arg: *mut void) -> bool {
+    let c = Ptr.toBorrowMut(arg as *mut MaxIdCtx);
+    let id = snapOf(s as *cfs_snapshot).id;
+    if (id > c.max) {
+        c.max = id;
+    }
+    c.live = c.live.wrappingAdd(1);
+    return true;
+}
+
+/// The highest id in use, over the whole chain. Ids are never reused, so this only rises; a deleted snapshot's id is
+/// not handed out again while the filesystem is mounted, which is what keeps cached vnodes honest.
+/// Safety: as get.
+unsafe fn snapMaxId(fs: *mut cfs, max: borrow mut u64, live: borrow mut u32) -> i32 {
+    var c = MaxIdCtx { max: fsOf(fs).snap_max_id, live: 0 };
+    let rc = snapWalk(fs, maxIdVisit, borrow mut c as *mut MaxIdCtx as *mut void, false);
+    if (rc != 0) {
+        return rc;
+    }
+    max = c.max;
+    live = c.live;
+    let f = fsOf(fs);
+    f.snap_max_id = c.max;
+    return 0;
+}
+
+/// Raise a version-11 pool to 12 (design.md, "Format version 12"): the list is rewritten in the version-12 layout,
+/// every existing snapshot given a uuid, and the superblock's version raised -- all in the open transaction, which the
+/// caller commits, so the raise and the operation that needed it reach the disk together or not at all.
+///
+/// Lazy on purpose: a kernel of v1.0.7 or older reads format 11 at most, so a pool is changed only by the first
+/// operation that needs what 12 adds, never by a mount. Below 11 nothing is raised: those formats differ in more than
+/// the list (version 4's DVAs, 9's and 10's records), and a snapshot with identity is refused there instead.
+///
+/// Everything that can fail without having changed anything runs first; past the first change a failure abandons the
+/// transaction (CF17). `reserved`, when not null, is a uuid already handed out for the snapshot this raise is for (a
+/// rollback's safety snapshot, drawn before the list had any): no converted entry is given it.
+/// Safety: as get; `reserved` null or 16 bytes.
+unsafe fn snapRaise(fs: *mut cfs, reserved: *u8) -> i32 {
+    if (fsOf(fs).sb.version >= 12) {
+        return 0;
+    }
+    if (fsOf(fs).sb.version < 11) {
+        return -EOPNOTSUPP;
+    }
+    let size = layoutOf<cfs_snapshot>().size;
+    var total: u32 = 0;
+    var rc = list(fs, 0 as *mut cfs_snapshot, 0, borrow mut total as *mut u32);
+    if (rc != 0) {
+        return rc;
+    }
+    let all = if (total != 0) kmalloc(total as usize * size, 0) as *mut u8 else 0 as *mut u8;
+    if (total != 0 && all.isNull()) {
+        return -ENOMEM;
+    }
+    var n: u32 = 0;
+    rc = list(fs, all as *mut cfs_snapshot, total, borrow mut n as *mut u32);
+    if (rc != 0 || n != total) {
+        kfree(all as *mut void);
+        return if (rc != 0) rc else -EIO;
+    }
+    var maxId = fsOf(fs).snap_max_id;
+    // Unique among those this raise has given so far and the reserved one; the list has none yet (it is version
+    // 11's). Kept apart from `all`, which the helper does not read.
+    let given = kmalloc((n as usize + 1) * 16, 0) as *mut u8;
+    if (given.isNull()) {
+        kfree(all as *mut void);
+        return -ENOMEM;
+    }
+    var ngiven: u32 = 0;
+    if (!reserved.isNull()) {
+        memcpy(given as *mut void, reserved as *void, 16);
+        ngiven += 1;
+    }
+    for (i in 0u32..n) {
+        let e = snapMut(all.add(i as usize * size) as *mut cfs_snapshot);
+        if (e.id > maxId) {
+            maxId = e.id;
+        }
+        newUuid(fs, given.add(ngiven as usize * 16), given as *u8, ngiven);
+        memcpy(borrow mut e.uuid as *mut [u8; 16] as *mut void, given.add(ngiven as usize * 16) as *void, 16);
+        ngiven += 1;
+    }
+    kfree(given as *mut void);
+
+    // From here the transaction holds the change. The old chain is named by the superblock alone, which no snapshot
+    // preserves: exempt.
+    var blk = fsOf(fs).sb.snap_root;
+    var guard: u32 = 0;
+    while (blk != 0 && rc == 0) {
+        let over = guard > CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            rc = -EIO;
+            break;
+        }
+        var b = 0 as *mut cfs_buf;
+        rc = get(fs, blk, CFS_KIND_SNAPLIST, mut b);
+        if (rc != 0) {
+            break;
+        }
+        let next = snaplistNext(b as *cfs_buf);
+        cfs_buf_put(fs, b);
+        cfs_free_block_exempt(fs, blk);
+        blk = next;
+    }
+    if (rc == 0) {
+        let f = fsOf(fs);
+        f.sb.snap_root = 0;
+        f.sb.version = 12;
+        var i: u32 = 0;
+        while (i < n && rc == 0) {
+            var b = 0 as *mut cfs_buf;
+            rc = cfs_buf_new(fs, CFS_KIND_SNAPLIST2, borrow mut b as *mut *mut cfs_buf);
+            if (rc != 0) {
+                break;
+            }
+            setWord(b, LIST_NEXT, fsOf(fs).sb.snap_root);
+            setWord(b, LIST2_MAX_ID, maxId);
+            var k: u32 = 0;
+            while (k < CFS_SNAPS_PER_BLOCK2 && i + k < n) {
+                memcpy(payloadOf(b).add(LIST2_SNAP + k as usize * SNAP_SIZE) as *mut void,
+                    all.add((i + k) as usize * size) as *void, SNAP_SIZE);
+                k += 1;
+            }
+            let g = fsOf(fs);
+            g.sb.snap_root = Ptr.toBorrow(b as *cfs_buf).blkno;
+            cfs_buf_put(fs, b);
+            i += CFS_SNAPS_PER_BLOCK2;
+        }
+    }
+    kfree(all as *mut void);
+    if (rc != 0) {
+        cfs_fail(fs, rc);
+        return rc;
+    }
+    let f = fsOf(fs);
+    f.snap_max_id = maxId;
+    // "CosmoOS 1.0.7", not the tag: every git-describe-shaped string in a release kernel must be its own build id
+    // (scripts/check-release-version.py).
+    var buffer = [0u8; 200];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: format version 11 -> 12 (snapshot identity, ");
+    line.decimal(n as u64);
+    line.text(" snapshot(s)); a kernel that reads format 11 at most (CosmoOS 1.0.7 and older) cannot mount this pool");
+    KernelLog.send(LogLevel.Info, line);
+    return 0;
+}
+
+/// The raise to 12 on its own, for a commit that needs 13 (design.md, "Format version 13"): no snapshot is being taken,
+/// so no uuid is reserved.
+/// Safety: as get.
+@export("cfs_snap_raise")
+unsafe fn raise(fs: *mut cfs) -> i32 => snapRaise(fs, 0 as *u8);
+
+/// Set the head block's high-water mark. The list was copied by this transaction (snapCow), so the head is this
+/// generation's to edit.
+/// Safety: as get.
+unsafe fn snaplistSetMaxId(fs: *mut cfs, id: u64) -> i32 {
+    let f = fsOf(fs);
+    if (f.sb.version < 12 || f.sb.snap_root == 0) {
+        return 0;
+    }
+    var b = 0 as *mut cfs_buf;
+    let rc = get(fs, f.sb.snap_root, CFS_KIND_SNAPLIST2, mut b);
+    if (rc != 0) {
+        return rc;
+    }
+    if (word(b, LIST2_MAX_ID) < id) {
+        setWord(b, LIST2_MAX_ID, id);
+        cfs_buf_mark_dirty(fs, b);
+    }
+    cfs_buf_put(fs, b);
+    return 0;
+}
+
+/// Put `s` in the first free slot of the list, or a new head block.
+/// Safety: as get; `s` an entry.
+unsafe fn snaplistInsert(fs: *mut cfs, s: *cfs_snapshot) -> i32 {
+    let kind = snaplistKind(fs as *cfs);
+    let slots = snaplistSlots(fs as *cfs);
+    var blkno = fsOf(fs).sb.snap_root;
+    var guard: u32 = 0;
+    while (blkno != 0) {
+        let over = guard > CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            return -EIO; // a cycle (TEST-16)
+        }
+        var b = 0 as *mut cfs_buf;
+        let rc = get(fs, blkno, kind, mut b);
+        if (rc != 0) {
+            return rc;
+        }
+        let next = snaplistNext(b as *cfs_buf);
+        for (i in 0u32..slots) {
+            var slot = [0u64; 16];
+            let cur = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+            if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, i, cur)) {
+                snaplistSet(fs as *cfs, b, i, s);
+                cfs_buf_mark_dirty(fs, b);
+                cfs_buf_put(fs, b);
+                return 0;
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    var b = 0 as *mut cfs_buf;
+    let rc = cfs_buf_new(fs, kind, borrow mut b as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    setWord(b, LIST_NEXT, fsOf(fs).sb.snap_root);
+    if (kind == CFS_KIND_SNAPLIST2) {
+        setWord(b, LIST2_MAX_ID, snapOf(s).id);
+    }
+    snaplistSet(fs as *cfs, b, 0, s);
+    let f = fsOf(fs);
+    f.sb.snap_root = Ptr.toBorrow(b as *cfs_buf).blkno;
+    cfs_buf_put(fs, b);
+    return 0;
+}
+
+/// Take snapshot `name` of the live tree. With `identity`, the pool is raised to version 12 first if it is at 11, and
+/// the snapshot gets a uuid; a pool older than 11 is refused (-EOPNOTSUPP). Without it -- the .snapshots directory on a
+/// pool older than 11 -- the snapshot is the version-3 kind it always was. `out`, when given, receives the entry.
+/// Safety: as get; `name` null or a terminated string; `out` null or an entry.
+@export("cfs_snapshot_create")
+unsafe fn create(fs: *mut cfs, name: *CChar, identity: bool, out: *mut cfs_snapshot) -> i32 =>
+    createEx(fs, name, identity, true, 0 as *u8, out);
+
+/// `commit` false: the snapshot is in the open transaction and the caller commits it, with whatever else that
+/// transaction must carry -- a rollback's record and its safety snapshot are one commit (CF19). The open work before it
+/// is still committed first, so the snapshot names a durable tree.
+/// Safety: as create; `uuid` null or 16 bytes.
+@export("cfs_snapshot_create_ex")
+unsafe fn createEx(fs: *mut cfs, name: *CChar, identity: bool, commit: bool, uuid: *u8, out: *mut cfs_snapshot)
+    -> i32 {
+    if (name.isNull() || (name as *u8).read() == 0 || strlen(name) > CFS_SNAP_NAME_MAX) {
+        return -EINVAL;
+    }
+    if (!nameOk(name)) {
+        return -EINVAL;
+    }
+    if (find(fs, name, 0 as *mut cfs_snapshot)) {
+        return -EEXIST;
+    }
+    if (identity && fsOf(fs).sb.version < 11) {
+        return -EOPNOTSUPP;
+    }
+
+    // A snapshot names a durable tree, so commit what is open first.
+    var rc = cfs_commit(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    let doRaise = fsOf(fs).sb.version == 11 && !cfs_snap_floor_no_raise(fs as *cfs);
+
+    // An id no snapshot has had on this filesystem: the tag this snapshot's vnodes carry. Before version 12 "on this
+    // filesystem" means "since this mount" (the list's ids and the mount's memory); from 12 the list's head carries the
+    // mark across remounts.
+    var maxId: u64 = 0;
+    var live: u32 = 0;
+    rc = snapMaxId(fs, mut maxId, mut live);
+    if (rc != 0) {
+        return rc;
+    }
+    let diskMax = snaplistMaxId(fs);
+    if (diskMax > maxId) {
+        maxId = diskMax;
+    }
+    if (maxId >= CFS_SNAP_ID_MAX) {
+        return -ENOSPC;
+    }
+
+    // The raise, when this is the first snapshot with identity; it rewrites the list as a copy, so the copy below is a
+    // no-op then.
+    if (doRaise) {
+        rc = snapRaise(fs, uuid);
+        if (rc != 0) {
+            return rc;
+        }
+        if (fsOf(fs).snap_max_id > maxId) {
+            maxId = fsOf(fs).snap_max_id;
+        }
+    }
+
+    // Every change to the list from here is a change to a copy of it, published by this transaction's root and by
+    // nothing earlier.
+    rc = snapCow(fs, 0 as *mut cfs_res);
+    if (rc != 0) {
+        return rc;
+    }
+
+    var slot = [0u64; 16];
+    let sp = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+    let f = fsOf(fs);
+    let s = snapMut(sp);
+    s.id = maxId + 1;
+    s.generation = f.sb.generation;
+    s.imap_root = f.sb.imap_root;
+    // From version 4 a snapshot pins the member table of its generation: every member's bitmap hangs off it, and the
+    // bitmap of a member *is* the set of blocks that member's tree reaches.
+    s.alloc_root = if (f.sb.version >= 4) f.sb.members else Ptr.toBorrow(f.mem as *cfs_memstate).alloc_root;
+    s.next_ino = f.sb.next_ino;
+    s.inode_count = f.sb.inode_count;
+    s.created_ns = clock_realtime_ns();
+    strlcpy(borrow mut s.name as *mut [u8; 32] as *mut CChar, name, SNAP_NAME_SIZE);
+    if (fsOf(fs).sb.version >= 12) {
+        let u = borrow mut s.uuid as *mut [u8; 16] as *mut u8;
+        if (!uuid.isNull()) {
+            memcpy(u as *mut void, uuid as *void, 16); // the caller drew it: a rollback names it first
+        } else {
+            newUuid(fs, u, 0 as *u8, 0);
+        }
+    }
+
+    rc = snaplistInsert(fs, sp as *cfs_snapshot);
+    if (rc == 0) {
+        rc = snaplistSetMaxId(fs, s.id);
+    }
+    if (rc != 0) {
+        // Nothing published yet, but the list copy may hold the entry.
+        cfs_fail(fs, rc);
+        return rc;
+    }
+    let g = fsOf(fs);
+    g.snap_count = g.snap_count.wrappingAdd(1);
+    g.snap_max_id = s.id;
+    if (!out.isNull()) {
+        memcpy(out as *mut void, sp as *void, layoutOf<cfs_snapshot>().size);
+    }
+    return if (commit) snapCommit(fs, 0) else 0;
+}
+
+/// Safety: `arg` is the name, a terminated string; `s` an entry.
+@callback
+unsafe fn clearVisit(s: *mut cfs_snapshot, arg: *mut void) -> bool {
+    if (strcmp(borrow snapOf(s as *cfs_snapshot).name as *[u8; 32] as *CChar, arg as *CChar) != 0) {
+        return true;
+    }
+    memset(s as *mut void, 0, layoutOf<cfs_snapshot>().size);
+    return false;
+}
+
+/// "cosmofs: <what> '<name>': ...", at debug level.
+/// Safety: `name` a terminated string.
+unsafe fn freedLine(what: StringView, name: *CChar, freed: u64, kept: u64, withKept: bool) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(what);
+    cText(mut line, name);
+    line.text("': ");
+    line.decimal(freed);
+    line.text(" block(s) freed");
+    if (withKept) {
+        line.text(", ");
+        line.decimal(kept);
+        line.text(" still held");
+    }
+    KernelLog.send(LogLevel.Debug, line);
+}
+
+/// Delete snapshot `name`: its deadlist settled against the snapshots that remain, its entry cleared, committed.
+/// Safety: as get; `name` null or a terminated string.
+@export("cfs_snapshot_delete")
+unsafe fn delete(fs: *mut cfs, name: *CChar) -> i32 {
+    if (name.isNull() || (name as *u8).read() == 0) {
+        return -EINVAL;
+    }
+    let size = layoutOf<cfs_snapshot>().size;
+
+    // The whole list, however many blocks it spans: a snapshot left out here would have its blocks freed while it
+    // still names them. Count first, then take exactly that many.
+    var total: u32 = 0;
+    var rc = list(fs, 0 as *mut cfs_snapshot, 0, borrow mut total as *mut u32);
+    if (rc != 0) {
+        return rc;
+    }
+    if (total == 0) {
+        return -ENOENT;
+    }
+    let all = kmalloc(total as usize * size, 0) as *mut u8;
+    if (all.isNull()) {
+        return -ENOMEM;
+    }
+    var n: u32 = 0;
+    rc = list(fs, all as *mut cfs_snapshot, total, borrow mut n as *mut u32);
+    if (rc != 0 || n != total) {
+        kfree(all as *mut void);
+        return if (rc != 0) rc else -EIO; // the list changed under the mount lock: refuse
+    }
+
+    var doomedSlot = [0u64; 16];
+    let doomed = borrow mut doomedSlot as *mut [u64; 16] as *mut cfs_snapshot;
+    let remaining = kmalloc(total as usize * size, 0) as *mut u8;
+    if (remaining.isNull()) {
+        kfree(all as *mut void);
+        return -ENOMEM;
+    }
+    var nrRemaining: u32 = 0;
+    var found = false;
+    var oldest: u32 = 0;
+    for (i in 0u32..n) {
+        let e = all.add(i as usize * size) as *cfs_snapshot;
+        if (!found && strcmp(borrow snapOf(e).name as *[u8; 32] as *CChar, name) == 0) {
+            memcpy(doomed as *mut void, e as *void, size);
+            found = true;
+            continue;
+        }
+        // A clone is not a holder of the live tree's history: what it shares is its origin's, which is on this list as
+        // long as the clone is (design.md, "Clones").
+        if ((snapOf(e).flags & CFS_SNAP_F_CLONE) != 0) {
+            continue;
+        }
+        if (nrRemaining == 0 ||
+            snapOf(e).generation < snapOf(remaining.add(oldest as usize * size) as *cfs_snapshot).generation) {
+            oldest = nrRemaining;
+        }
+        memcpy(remaining.add(nrRemaining as usize * size) as *mut void, e as *void, size);
+        nrRemaining += 1;
+    }
+    kfree(all as *mut void);
+    if (!found) {
+        kfree(remaining as *mut void);
+        return -ENOENT;
+    }
+
+    // A rollback's snapshots are kept while it needs them (CF19): the target and the safety snapshot while it is
+    // pending, the safety snapshot -- the tree the live one was rolled back from -- until the boot after the rollback
+    // completes.
+    if (cfs_rollback_protects(fs, doomed as *cfs_snapshot)) {
+        kfree(remaining as *mut void);
+        return -EBUSY;
+    }
+    let d = snapOf(doomed as *cfs_snapshot);
+    // An origin outlives its clones: their shared blocks are its.
+    if ((d.flags & CFS_SNAP_F_CLONE) == 0 && cfs_snapshot_has_clones(fs, d.id)) {
+        kfree(remaining as *mut void);
+        return -EBUSY;
+    }
+    if ((d.flags & CFS_SNAP_F_CLONE) != 0) {
+        kfree(remaining as *mut void);
+        // What can fail without a change fails first: a deletion refused for want of memory leaves the mount as it
+        // was, to try again.
+        var crc = cfs_clone_ready(fs, d.id);
+        if (crc != 0) {
+            return crc;
+        }
+        crc = snapCow(fs, 0 as *mut cfs_res);
+        if (crc != 0) {
+            return crc;
+        }
+        var cfreed: u64 = 0;
+        crc = cfs_clone_delete(fs, doomed as *cfs_snapshot, borrow mut cfreed as *mut u64);
+        if (crc != 0) {
+            return snapAbandon(fs, crc);
+        }
+        crc = snapWalk(fs, clearVisit, name as *mut void, true);
+        if (crc != 0) {
+            return snapAbandon(fs, crc);
+        }
+        let f = fsOf(fs);
+        if (f.snap_count != 0) {
+            f.snap_count -= 1;
+        }
+        freedLine("cosmofs: clone '", name, cfreed, 0, false);
+        return snapCommit(fs, 0);
+    }
+
+    // The name exists and the transaction is about to change the list, so copy it: the settle writes the keeper's new
+    // deadlist head into its entry, and an entry edited where it lies is one the *current* root can see. After the
+    // -ENOENT above, so a delete of a name that is not there changes nothing.
+    rc = snapCow(fs, 0 as *mut cfs_res);
+    if (rc != 0) {
+        kfree(remaining as *mut void);
+        return rc;
+    }
+
+    // From here the open transaction holds both the frees and the entry that still names them: they go together or not
+    // at all.
+    var freed: u64 = 0;
+    var kept: u64 = 0;
+    var keeperHead: u64 = 0;
+    if (nrRemaining == 0) {
+        // Nothing remains: everything the snapshot held goes back.
+        rc = deadlistSettle(fs, d.deadlist, 0 as *cfs_snapshot, 0, borrow mut keeperHead as *mut u64, mut freed,
+            mut kept);
+    } else {
+        // The oldest remaining snapshot keeps what any of them still occupies; it is asked the same question when it
+        // goes.
+        let keeper = snapOf(remaining.add(oldest as usize * size) as *cfs_snapshot);
+        keeperHead = keeper.deadlist;
+        rc = deadlistSettle(fs, d.deadlist, remaining as *cfs_snapshot, nrRemaining,
+            borrow mut keeperHead as *mut u64, mut freed, mut kept);
+        if (rc == 0 && keeperHead != keeper.deadlist) {
+            // Write the keeper's new deadlist head back into its entry, found by id: unique, where two entries can
+            // share a generation (a snapshot taken twice with nothing committed between).
+            let targetId = keeper.id;
+            var blkno = fsOf(fs).sb.snap_root;
+            let slots = snaplistSlots(fs as *cfs);
+            var done = false;
+            var guard: u32 = 0;
+            while (blkno != 0 && !done && rc == 0) {
+                let over = guard > CFS_SNAP_MAX_CHAIN;
+                guard += 1;
+                if (over) {
+                    rc = -EIO; // a cycle (TEST-16)
+                    break;
+                }
+                var b = 0 as *mut cfs_buf;
+                rc = get(fs, blkno, snaplistKind(fs as *cfs), mut b);
+                if (rc != 0) {
+                    break; // abandoned below: blocks are already released
+                }
+                let next = snaplistNext(b as *cfs_buf);
+                for (i in 0u32..slots) {
+                    var slot = [0u64; 16];
+                    let cur = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+                    if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, i, cur) ||
+                        snapOf(cur as *cfs_snapshot).id != targetId) {
+                        continue;
+                    }
+                    let c = snapMut(cur);
+                    c.deadlist = keeperHead;
+                    snaplistSet(fs as *cfs, b, i, cur as *cfs_snapshot);
+                    cfs_buf_mark_dirty(fs, b);
+                    done = true;
+                    break;
+                }
+                cfs_buf_put(fs, b);
+                blkno = next;
+            }
+        }
+    }
+    kfree(remaining as *mut void);
+    if (rc != 0) {
+        return snapAbandon(fs, rc);
+    }
+
+    rc = snapWalk(fs, clearVisit, name as *mut void, true);
+    if (rc != 0) {
+        return snapAbandon(fs, rc);
+    }
+    freedLine("cosmofs: snapshot '", name, freed, kept, true);
+    let f = fsOf(fs);
+    if (f.snap_count != 0) {
+        f.snap_count -= 1;
+    }
+    return snapCommit(fs, 0);
+}
+
+/// The checker's repair for snap_identity (design.md, "Format version 12"): a version-12 entry with no uuid, or one an
+/// earlier entry already has, gets a fresh one, and the head's high-water mark rises to the highest id on the list. On
+/// a copy of the list, in the open transaction.
+/// Safety: as get; `fixed` writable.
+@export("cfs_snapshot_fix_identity")
+unsafe fn fixIdentity(fs: *mut cfs, fixed: *mut u32) -> i32 {
+    fixed.write(0);
+    if (fsOf(fs).sb.version < 12 || fsOf(fs).sb.snap_root == 0) {
+        return 0;
+    }
+    // The highest id first: a repeated id is given one above it.
+    var live: u64 = 0;
+    var nlive: u32 = 0;
+    var rc = snapMaxId(fs, mut live, mut nlive);
+    if (rc != 0) {
+        return rc;
+    }
+    var maxId = if (live > snaplistMaxId(fs)) live else snaplistMaxId(fs);
+    rc = snapCow(fs, 0 as *mut cfs_res);
+    if (rc != 0) {
+        return rc;
+    }
+    let cap = nlive.wrappingAdd(8);
+    var nseen: u32 = 0;
+    let seen = kmalloc(cap as usize * 16, 0) as *mut u8;
+    let ids = kmalloc(cap as usize * 8, 0) as *mut u64;
+    if (seen.isNull() || ids.isNull()) {
+        kfree(seen as *mut void);
+        kfree(ids as *mut void);
+        return -ENOMEM;
+    }
+    var blkno = fsOf(fs).sb.snap_root;
+    var guard: u32 = 0;
+    while (blkno != 0 && rc == 0) {
+        let go = guard < CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (!go) {
+            break;
+        }
+        var b = 0 as *mut cfs_buf;
+        rc = get(fs, blkno, CFS_KIND_SNAPLIST2, mut b);
+        if (rc != 0) {
+            break;
+        }
+        let next = snaplistNext(b as *cfs_buf);
+        for (i in 0u32..CFS_SNAPS_PER_BLOCK2) {
+            var slot = [0u64; 16];
+            let sp = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+            if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, i, sp)) {
+                continue;
+            }
+            let s = snapMut(sp);
+            let uuid = borrow mut s.uuid as *mut [u8; 16] as *mut u8;
+            var badUuid = uuidZero(uuid as *u8);
+            var badId = false;
+            for (k in 0u32..nseen) {
+                badUuid = badUuid || memcmp(seen.add(k as usize * 16) as *void, uuid as *void, 16) == 0;
+                badId = badId || ids.add(k as usize).read() == s.id;
+            }
+            if (badUuid) {
+                newUuid(fs, uuid, seen as *u8, nseen);
+            }
+            if (badId && maxId < CFS_SNAP_ID_MAX) {
+                maxId += 1;
+                s.id = maxId; // a vnode tag of its own (design.md, "Reading a snapshot")
+            }
+            if (badUuid || badId) {
+                snaplistSet(fs as *cfs, b, i, sp as *cfs_snapshot);
+                cfs_buf_mark_dirty(fs, b);
+                fixed.write(fixed.read().wrappingAdd(1));
+            }
+            if (nseen < cap) {
+                memcpy(seen.add(nseen as usize * 16) as *mut void, uuid as *void, 16);
+                ids.add(nseen as usize).write(s.id);
+                nseen += 1;
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    kfree(seen as *mut void);
+    kfree(ids as *mut void);
+    if (rc == 0 && maxId > snaplistMaxId(fs)) {
+        rc = snaplistSetMaxId(fs, maxId);
+        if (rc == 0) {
+            fixed.write(fixed.read().wrappingAdd(1));
+        }
+    }
+    if (maxId > fsOf(fs).snap_max_id) {
+        let f = fsOf(fs);
+        f.snap_max_id = maxId;
+    }
+    return rc;
+}
+
+// ---- The allocation maps a root names ----
+//
+// From version 4 its member table and each member's index and bitmap blocks, before it the one index and its bitmaps --
+// for the listing's sizes: a snapshot pins the maps of its generation, and deleting it gives back those no other root
+// still uses.
+
+/// Safety: as get; `arg` is what `mark` expects.
+unsafe fn allocIndexWalk(fs: *mut cfs, idx: u64, mark: extern "C" fn(*mut void, u64), arg: *mut void,
+    rc: borrow mut i32) {
+    let lin = cfs_dva_lin(fs as *cfs, idx);
+    if (idx == 0 || lin == CFS_DVA_NONE) {
+        return;
+    }
+    mark(arg, lin);
+    var b = 0 as *mut cfs_buf;
+    if (get(fs, idx, CFS_KIND_ALLOCIDX, mut b) != 0) {
+        rc = -EIO;
+        return;
+    }
+    for (i in 0..CFS_PTRS_PER_BLOCK) {
+        let slot = word(b, i * 8);
+        let l = if (slot != 0) cfs_dva_lin(fs as *cfs, slot) else CFS_DVA_NONE;
+        if (l != CFS_DVA_NONE) {
+            mark(arg, l);
+        }
+    }
+    cfs_buf_put(fs, b);
+}
+
+/// Every block of the allocation maps `root` names, to `mark` by its linear number.
+/// Safety: as allocIndexWalk.
+@export("cfs_alloc_walk")
+unsafe fn allocWalk(fs: *mut cfs, root: u64, mark: extern "C" fn(*mut void, u64), arg: *mut void) -> i32 {
+    var rc: i32 = 0;
+    if (root == 0) {
+        return 0;
+    }
+    if (fsOf(fs).sb.version < 4) {
+        allocIndexWalk(fs, root, mark, arg, mut rc);
+        return rc;
+    }
+    let lin = cfs_dva_lin(fs as *cfs, root);
+    if (lin == CFS_DVA_NONE) {
+        return -EIO;
+    }
+    mark(arg, lin);
+    var mb = 0 as *mut cfs_buf;
+    if (get(fs, root, CFS_KIND_MEMBERS, mut mb) != 0) {
+        return -EIO;
+    }
+    let count = word(mb, MEMBERS_COUNT);
+    let n = if (count <= CFS_MEMBERS_PER_BLOCK) truncate<u32>(count) else truncate<u32>(CFS_MEMBERS_PER_BLOCK);
+    var roots = [0u64; 64];
+    let nr = if (n < ROOTS_MAX) n else ROOTS_MAX;
+    for (v in 0u32..nr) {
+        roots[v as usize] = word(mb, MEMBERS_M + v as usize * MEMBER_SIZE + MEMBER_ALLOC_ROOT);
+    }
+    cfs_buf_put(fs, mb);
+    var v: u32 = 0;
+    while (v < nr && rc == 0) {
+        allocIndexWalk(fs, roots[v as usize], mark, arg, mut rc);
+        v += 1;
+    }
+    return rc;
+}
+
+/// What a snapshot holds beyond its tree: its allocation maps and its deadlist, the chain and the blocks it names.
+/// Safety: as allocIndexWalk; `s` an entry.
+@export("cfs_snapshot_walk_held")
+unsafe fn walkHeld(fs: *mut cfs, s: *cfs_snapshot, mark: extern "C" fn(*mut void, u64), arg: *mut void) -> i32 {
+    let rc = allocWalk(fs, snapOf(s).alloc_root, mark, arg);
+    var at = snapOf(s).deadlist;
+    var guard: u32 = 0;
+    while (at != 0 && rc == 0) {
+        let over = guard > CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            return -EIO;
+        }
+        let lin = cfs_dva_lin(fs as *cfs, at);
+        if (lin == CFS_DVA_NONE) {
+            return -EIO;
+        }
+        mark(arg, lin);
+        var db = 0 as *mut cfs_buf;
+        if (get(fs, at, CFS_KIND_DEADLIST, mut db) != 0) {
+            return -EIO;
+        }
+        let count = word(db, DEAD_COUNT);
+        let n = if (count < CFS_DEAD_PER_BLOCK) count else CFS_DEAD_PER_BLOCK;
+        for (k in 0u64..n) {
+            let l = cfs_dva_lin(fs as *cfs, word(db, DEAD_BLK + k as usize * 8));
+            if (l != CFS_DVA_NONE) {
+                mark(arg, l);
+            }
+        }
+        at = word(db, DEAD_NEXT);
+        cfs_buf_put(fs, db);
+    }
+    return rc;
+}
+
+/// Take off every deadlist each block for which `live` answers true, and report how many entries went (design.md,
+/// "Rollback").
+///
+/// A deadlist entry is a block the allocator gets back when its snapshot goes; a rollback makes some of those live
+/// again -- the target's tree is the live tree now, and the live tree had released them -- so they must not stay on
+/// any list. Each list is rebuilt from the entries kept, on a copy of the snapshot list, its old chain freed exempt.
+/// Allocates: only before a commit's fixpoint, which is where the mount's switch calls it.
+/// Safety: as get; `arg` is what `live` expects; `dropped` writable.
+@export("cfs_snapshot_deadlists_filter")
+unsafe fn deadlistsFilter(fs: *mut cfs, live: extern "C" fn(*mut void, u64) -> bool, arg: *mut void,
+    dropped: *mut u64) -> i32 {
+    dropped.write(0);
+    if (fsOf(fs).sb.snap_root == 0) {
+        return 0;
+    }
+    var rc = snapCow(fs, 0 as *mut cfs_res);
+    if (rc != 0) {
+        return rc;
+    }
+    let kind = snaplistKind(fs as *cfs);
+    let slots = snaplistSlots(fs as *cfs);
+    var blkno = fsOf(fs).sb.snap_root;
+    var guard: u32 = 0;
+    while (blkno != 0 && rc == 0) {
+        let over = guard > CFS_SNAP_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            return -EIO;
+        }
+        var b = 0 as *mut cfs_buf;
+        rc = get(fs, blkno, kind, mut b);
+        if (rc != 0) {
+            break;
+        }
+        let next = snaplistNext(b as *cfs_buf);
+        var i: u32 = 0;
+        while (i < slots && rc == 0) {
+            var slot = [0u64; 16];
+            let sp = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+            if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, i, sp) || snapOf(sp as *cfs_snapshot).deadlist == 0) {
+                i += 1;
+                continue;
+            }
+            var head: u64 = 0;
+            var at = snapOf(sp as *cfs_snapshot).deadlist;
+            var dguard: u32 = 0;
+            while (at != 0 && rc == 0) {
+                let dover = dguard > CFS_SNAP_MAX_CHAIN;
+                dguard += 1;
+                if (dover) {
+                    rc = -EIO;
+                    break;
+                }
+                var db = 0 as *mut cfs_buf;
+                rc = get(fs, at, CFS_KIND_DEADLIST, mut db);
+                if (rc != 0) {
+                    break;
+                }
+                let dnext = word(db, DEAD_NEXT);
+                let count = word(db, DEAD_COUNT);
+                let n = if (count < CFS_DEAD_PER_BLOCK) count else CFS_DEAD_PER_BLOCK;
+                let blks = if (n != 0) kmalloc(n as usize * 8, 0) as *mut u64 else 0 as *mut u64;
+                if (n != 0 && blks.isNull()) {
+                    cfs_buf_put(fs, db);
+                    rc = -ENOMEM;
+                    break;
+                }
+                if (n != 0) {
+                    memcpy(blks as *mut void, payloadOf(db).add(DEAD_BLK) as *void, n as usize * 8);
+                }
+                cfs_buf_put(fs, db);
+                var k: u64 = 0;
+                while (k < n && rc == 0) {
+                    let blk = blks.add(k as usize).read();
+                    if (live(arg, blk)) {
+                        dropped.write(dropped.read() + 1);
+                    } else {
+                        rc = deadlistAppend(fs, borrow mut head as *mut u64, blk, 0 as *mut cfs_res);
+                    }
+                    k += 1;
+                }
+                kfree(blks as *mut void);
+                cfs_free_block_exempt(fs, at); // the chain's own block: nothing else names it
+                at = dnext;
+            }
+            if (rc == 0) {
+                let s = snapMut(sp);
+                s.deadlist = head;
+                snaplistSet(fs as *cfs, b, i, sp as *cfs_snapshot);
+                cfs_buf_mark_dirty(fs, b);
+            }
+            i += 1;
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    return rc;
+}
+
+/// For the clone code: a copy of the list in the open transaction.
+/// Safety: as get.
+@export("cfs_snapshot_list_cow")
+unsafe fn listCow(fs: *mut cfs) -> i32 => snapCow(fs, 0 as *mut cfs_res);
+
+/// For the clone code: a walk whose callback may change the entry it is shown.
+/// Safety: as get; `arg` is what `visit` expects.
+@export("cfs_snapshot_walk_write")
+unsafe fn walkWrite(fs: *mut cfs, visit: extern "C" fn(*mut cfs_snapshot, *mut void) -> bool, arg: *mut void) -> i32 =>
+    snapWalk(fs, visit, arg, true);
+
+/// A clone's entry: origin's roots, a new id and uuid, CFS_SNAP_F_CLONE and the origin's id, no deadlist. In the open
+/// transaction; the caller commits (design.md, "Clones").
+/// Safety: as get; `origin` an entry; `name` null or a terminated string; `out` an entry.
+@export("cfs_snapshot_add_clone")
+unsafe fn addClone(fs: *mut cfs, origin: *cfs_snapshot, name: *CChar, out: *mut cfs_snapshot) -> i32 {
+    if (!nameOk(name)) {
+        return -EINVAL;
+    }
+    var maxId: u64 = 0;
+    var live: u32 = 0;
+    var rc = snapMaxId(fs, mut maxId, mut live);
+    if (rc != 0) {
+        return rc;
+    }
+    let diskMax = snaplistMaxId(fs);
+    if (diskMax > maxId) {
+        maxId = diskMax;
+    }
+    if (maxId >= CFS_SNAP_ID_MAX) {
+        return -ENOSPC;
+    }
+    rc = snapCow(fs, 0 as *mut cfs_res);
+    if (rc != 0) {
+        return rc;
+    }
+    var slot = [0u64; 16];
+    let cp = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+    memcpy(cp as *mut void, origin as *void, layoutOf<cfs_snapshot>().size);
+    let c = snapMut(cp);
+    c.id = maxId + 1;
+    c.deadlist = 0;
+    c.created_ns = clock_realtime_ns();
+    c.origin_id = snapOf(origin).id;
+    c.flags = CFS_SNAP_F_CLONE;
+    c.generation = fsOf(fs).sb.generation;
+    newUuid(fs, borrow mut c.uuid as *mut [u8; 16] as *mut u8, 0 as *u8, 0);
+    let cname = borrow mut c.name as *mut [u8; 32] as *mut CChar;
+    memset(cname as *mut void, 0, SNAP_NAME_SIZE);
+    strlcpy(cname, name, SNAP_NAME_SIZE);
+    rc = snaplistInsert(fs, cp as *cfs_snapshot);
+    if (rc == 0) {
+        rc = snaplistSetMaxId(fs, c.id);
+    }
+    if (rc != 0) {
+        cfs_fail(fs, rc);
+        return rc;
+    }
+    let f = fsOf(fs);
+    f.snap_count = f.snap_count.wrappingAdd(1);
+    f.snap_max_id = c.id;
+    memcpy(out as *mut void, cp as *void, layoutOf<cfs_snapshot>().size);
+    return 0;
+}

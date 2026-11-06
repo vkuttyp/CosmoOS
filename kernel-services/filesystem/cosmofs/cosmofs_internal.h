@@ -357,7 +357,7 @@ void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b);
 /* Dirty in the open transaction: in memory only (the scrub's question). */
 bool cfs_buf_is_dirty(struct cfs *fs, uint64_t blkno);
 
-/* Snapshots (cosmofs_snap.c; design.md, "Format version 3"). */
+/* Snapshots (cosmofs_snap.cee; design.md, "Format version 3"). */
 int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uint64_t ino,
                       struct cfs_inode *out);
 int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct cfs_snapshot *out);
@@ -366,7 +366,7 @@ int cfs_snapshot_create(struct cfs *fs, const char *name, bool identity, struct 
 int cfs_snap_raise(struct cfs *fs);
 int cfs_snapshot_create_ex(struct cfs *fs, const char *name, bool identity, bool commit, const uint8_t *uuid,
                            struct cfs_snapshot *out);
-bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t uuid[16], struct cfs_snapshot *out);
+bool cfs_snapshot_find_uuid(struct cfs *fs, const uint8_t *uuid, struct cfs_snapshot *out);
 /* The same, telling "not there" (-ENOENT) from "the list does not read"
  * (-EIO, a cycle included), which only the first may act on. `uuid` is
  * 16 bytes, taken as a pointer as cosmofs_rollback.cee's generated
@@ -430,7 +430,7 @@ bool cfs_has_snapshots(struct cfs *fs);
 /* The checker's repair for a version-12 list's identity faults. */
 int cfs_snapshot_fix_identity(struct cfs *fs, unsigned *fixed);
 /* A uuid no snapshot on the list, and none of `also`, has (CF18). */
-void cfs_snapshot_new_uuid(struct cfs *fs, uint8_t out[16], const uint8_t (*also)[16], unsigned nalso);
+void cfs_snapshot_new_uuid(struct cfs *fs, uint8_t *out, const uint8_t *also, unsigned nalso);   /* `also`: nalso uuids of 16 bytes */
 uint32_t cfs_snaplist_kind(const struct cfs *fs);
 unsigned cfs_snaplist_slots(const struct cfs *fs);
 uint64_t cfs_snaplist_next(const struct cfs_buf *b);
@@ -448,7 +448,7 @@ int cfs_tree_walk(struct cfs *fs, uint64_t imap_root, uint64_t next_ino,
                   void (*mark)(void *arg, uint64_t lin), void *arg);
 /* The allocation maps a root names (a member table, or before version 4
  * an index) and, for a snapshot, its deadlist: what the listing's sizes
- * add to a tree's walk (cosmofs_snap.c). */
+ * add to a tree's walk (cosmofs_snap.cee). */
 int cfs_alloc_walk(struct cfs *fs, uint64_t root, void (*mark)(void *arg, uint64_t lin), void *arg);
 int cfs_snapshot_walk_held(struct cfs *fs, const struct cfs_snapshot *s, void (*mark)(void *arg, uint64_t lin),
                            void *arg);

@@ -904,7 +904,7 @@ unsafe fn checkIdentity(ck: borrow mut Check, s: *cfs_snapshot, maxId: u64) {
 }
 
 /// A snapshot's allocation state. From version 4 a snapshot's alloc_root is the *member table* it was taken with, and
-/// each member's own index hangs off that (cosmofs_snap.c, snap_alloc_root); before it, the single member's index
+/// each member's own index hangs off that (cosmofs_snap.cee, snapAllocRoot); before it, the single member's index
 /// directly. Reading it as an index is how this walk first reported a snapshot's own member table as unreadable.
 /// Safety: as claim.
 unsafe fn walkSnapAlloc(ck: borrow mut Check, allocRoot: u64) {

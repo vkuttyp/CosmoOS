@@ -1,5 +1,5 @@
 /*
- * test_cfssnap.c - cosmofs's snapshots (kernel-services/filesystem/cosmofs/cosmofs_snap.c) on the host: roadmap 2.0
+ * test_cfssnap.c - cosmofs's snapshots (kernel-services/filesystem/cosmofs/cosmofs_snap.cee) on the host: roadmap 2.0
  * SA7. A digest recorded from the C over seeded filesystems the test builds and owns, with the real list decoders
  * (cfsparse): snapshot lists in the version-11 and version-12 layouts, one block or several, in a loop or unreadable;
  * entries with and without identity, clones among them; member tables (or, below version 4, one index) whose bitmaps
@@ -26,6 +26,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(ENOENT == 2 && EIO == 5 && ENOMEM == 12 && EBUSY == 16 && EEXIST == 17 && EINVAL == 22 &&
+                   ENOSPC == 28 && EOPNOTSUPP == 95,
+               "cosmofs_snap's errno.h values");
+_Static_assert(CFS_DVA_NONE == 0xFFFFFFFFFFFFFFFFull && CFS_DVA_VDEV_SHIFT == 56 &&
+                   CFS_DVA_BLK_MASK == 0x00FFFFFFFFFFFFFFull && CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 &&
+                   CFS_PTRS_PER_BLOCK == 508 && CFS_BITS_PER_BITMAP == 32512 && CFS_SNAPS_PER_BLOCK == 42 &&
+                   CFS_SNAPS_PER_BLOCK2 == 31 && CFS_SNAP_MAX_CHAIN == 4096 && CFS_SNAP_ID_MAX == 0xFFFE &&
+                   CFS_SNAP_NAME_MAX == 31 && CFS_SNAP_F_CLONE == 1 && CFS_DEAD_PER_BLOCK == 506 &&
+                   CFS_MEMBERS_PER_BLOCK == 63 && CFS_MAX_MEMBERS == 255,
+               "cosmofs_snap's cosmofs_format.h values");
+_Static_assert(CFS_KIND_ALLOCIDX == 4 && CFS_KIND_BITMAP == 5 && CFS_KIND_SNAPLIST == 9 && CFS_KIND_DEADLIST == 10 &&
+                   CFS_KIND_MEMBERS == 11 && CFS_KIND_SNAPLIST2 == 15,
+               "cosmofs_snap's block kinds");
+_Static_assert(offsetof(struct cfs_snap_block, next) == 0 && offsetof(struct cfs_snap_block, snap) == 8 &&
+                   offsetof(struct cfs_snap_block2, next) == 0 && offsetof(struct cfs_snap_block2, max_id) == 8 &&
+                   offsetof(struct cfs_snap_block2, snap) == 16 && sizeof(struct cfs_snapshot) == 128 &&
+                   sizeof(struct cfs_snapshot_v11) == 96 && offsetof(struct cfs_snapshot_v11, generation) == 0 &&
+                   offsetof(struct cfs_snapshot_v11, imap_root) == 8 && offsetof(struct cfs_snapshot_v11, alloc_root) == 16 &&
+                   offsetof(struct cfs_snapshot_v11, next_ino) == 24 && offsetof(struct cfs_snapshot_v11, inode_count) == 32 &&
+                   offsetof(struct cfs_snapshot_v11, deadlist) == 40 && offsetof(struct cfs_snapshot_v11, created_ns) == 48 &&
+                   offsetof(struct cfs_snapshot_v11, id) == 56 && offsetof(struct cfs_snapshot_v11, name) == 64 &&
+                   sizeof(((struct cfs_snapshot *)0)->name) == 32 && offsetof(struct cfs_dead_block, next) == 0 &&
+                   offsetof(struct cfs_dead_block, count) == 8 && offsetof(struct cfs_dead_block, blk) == 16 &&
+                   offsetof(struct cfs_member_block, count) == 0 && offsetof(struct cfs_member_block, m) == 8 &&
+                   sizeof(struct cfs_member) == 64 && offsetof(struct cfs_member, alloc_root) == 32,
+               "cosmofs_snap.cee reads and writes these structures at these offsets");
+/* cosmofs_snap.cee keeps a snapshot entry in a stack slot of 16 words. */
+_Static_assert(sizeof(struct cfs_snapshot) <= 16 * 8, "cosmofs_snap.cee's stack slot");
 
 /* The digest of the C (cosmofs_snap.c, 2026-11-07), which the CeeSafe port gives. */
 #define SNAP_DIGEST 0xcdbb968635a6b0f6ull
@@ -955,7 +985,7 @@ static void op(struct cfs *fs)
         unsigned na = pick(4);
         for (unsigned i = 0; i < na; i++)
             memcpy(also[i], g_given[pick(8)], 16);
-        cfs_snapshot_new_uuid(fs, out, (const uint8_t (*)[16])also, na);
+        cfs_snapshot_new_uuid(fs, out, &also[0][0], na);
         mix(out, 16);
         break;
     }

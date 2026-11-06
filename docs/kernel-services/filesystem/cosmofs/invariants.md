@@ -573,7 +573,7 @@ Found while writing this file; the code was read, nothing was changed.
   harness `cosmofs-crash`; `cosmofscrash.c` registers `cosmofs-replay`.
 - V22 and `design.md` ("Reading a snapshot") say a snapshot id is never
   reused while the filesystem lives. Below format version 12 that is
-  per mount: `snap_max_id` (`cosmofs_snap.c`) starts from
+  per mount: `snap_max_id` (`cosmofs_snap.cee`) starts from
   `fs->snap_max_id` and the ids on the list, so after the newest snapshot
   is deleted and the filesystem remounted, its id can be handed out
   again. The vnode cache is per mount, so the property V22 relies on
