@@ -123,6 +123,8 @@ PORTS = [
     ("kernel-services/filesystem/cosmofs/cosmofs_crypt.cee", "kernel-services/filesystem/cosmofs/cosmofs_crypt.c",
      "cosmofs's keys: the key blocks, the key table and the /dev/fsctl key operations (cosmofs.h, cosmofs_internal.h)",
      None, True),
+    ("kernel-services/filesystem/cosmofs/cosmofs_resilver.cee", "kernel-services/filesystem/cosmofs/cosmofs_resilver.c",
+     "cosmofs's resilver, its thread and the pool commands (cosmofs.h, cosmofs_internal.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cfsparse.cee", "kernel-services/filesystem/cosmofs/cfsparse.c",
      "cosmofs's decoders of on-disk metadata (cosmofs_internal.h)", None, False),
     ("kernel/process/elfparse.cee", "kernel/process/elfparse.c", "The user executable validator (elf.h)", None, False),

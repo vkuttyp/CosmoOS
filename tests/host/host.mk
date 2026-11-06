@@ -154,7 +154,7 @@ HOST_CFSCRYPT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cos
 	tests/host/test_cfscrypt.c
 # cosmofs's resilver and pool commands: the pool's operations, the labels, the holds and the devices are the test's.
 HOST_CFSRESILVER_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_resilver.c \
-	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsresilver.c
+	kernel-services/filesystem/cosmofs/cosmofs_resilver_floor.c kernel-services/storage/pool_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsresilver.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c
 HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/object_floor.c kernel/object/handle.c kernel/object/handle_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_handles.c
 HOST_PCI_BAR_SRCS := $(HOST_COMMON_SRCS) tests/host/test_pci_bar.c

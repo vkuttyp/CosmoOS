@@ -1,0 +1,1567 @@
+// cosmofs_resilver.cee - Rebuilding a mirror's copy: the resilver, the operator's commands on copies and spares, and
+// what a mount starts (roadmap 1.2 B3; docs/kernel-services/filesystem/cosmofs/design.md, "Resilvering"), in CeeSafe:
+// roadmap 2.0 SA7. tests/host/test_cfsresilver.c holds it to the digest of the C it replaced.
+//
+// One thread a mount does the copying, under fs->lock a window at a time (fs.resilver_rate, paced as the scrub is), so
+// the pool stays live: a write that lands meanwhile goes to every writable copy, the one being rebuilt included, and
+// the cursor's walk skips nothing it needs to copy again because nothing it has copied can change without that write.
+//
+// struct cfs, the pool and its copies, the pacing state and the /dev/fsctl records stay C (cosmofs_internal.h,
+// kernel/storage.h, kernel/cosmofs.h). The pacing state the C kept on the stack is a zeroed slot of words, checked
+// against its C size (tests/host/test_cfsresilver.c). cosmofs_resilver_floor.c keeps the sysctl's variable,
+// g_cosmofs_resilver_rate, and makes the call to cfs_pace, whose name is the pacing state's too.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/thread.h", "kernel/timer.h", "kernel/wait.h",
+    "kernel/random.h", "kernel/cosmofs.h", "cosmofs_internal.h")
+extern "C" {
+    struct blkdev {
+        obj: kobject;
+        name: [u8; 16];
+        sector_size: u32;
+        capacity: u64;
+        read_only: bool;
+        gone: u32;
+    }
+    struct mount {
+        bdev: *mut blkdev;
+        fs_priv: *mut void;
+    }
+    struct pool_copy {
+        dev: *mut blkdev;
+        state: u32; // enum pool_copy_state: clang and gcc give an enum without negative values unsigned int
+        whole: bool;
+        since: u64;
+        cursor: u64;
+        read_errors: u32;
+        write_errors: u32;
+        csum_errors: u32;
+        tag: u64;
+        peer: u64;
+    }
+    struct spool_member {
+        copy: [pool_copy; 4];
+        ncopies: u32;
+        region_blocks: u32;
+    }
+    struct spool {
+        m: *mut spool_member;
+        nmembers: u32;
+        state_seq: u64;
+        notify: extern "C" fn(*mut void);
+        notify_arg: *mut void;
+        nspares: u32;
+    }
+    struct cfs_mac {
+        on: bool;
+    }
+    struct cfs_super {
+        version: u32;
+        generation: u64;
+        uuid: [u8; 16];
+        label: [u8; 16];
+    }
+    struct cfs_memstate {
+        nblocks: u64;
+        first_usable: u64;
+        copies: u32;
+    }
+    struct cfs {
+        mnt: *mut mount;
+        pool: *mut spool;
+        sb: cfs_super;
+        mem: *mut cfs_memstate;
+        nmembers: u32;
+        lock: mutex;
+        failed: i32;
+        rdonly: bool;
+        mac: cfs_mac;
+        pool_name: [u8; 17];
+        rs_thread: *mut thread;
+        rs_stop: u32;
+        maint: bool;
+        rs_since_record: u64;
+        rs_started_ns: u64;
+        rs_copied: u64;
+        rs_buf: *mut u8;
+        rs_disagree: u64;
+        rs_region_errors: u32;
+        mount_done: bool;
+    }
+    struct cfs_pace {
+        used: u32;
+    }
+    struct cosmofs_copy_info {
+        member: u32;
+        copy: u32;
+        state: u32;
+        flags: u32;
+        since: u64;
+        cursor: u64;
+        blocks: u64;
+        to_do: u64;
+        read_errors: u32;
+        write_errors: u32;
+        csum_errors: u32;
+        dev: [u8; 16];
+    }
+    struct cosmofs_pool_req {
+        op: u32; // enum cosmofs_pool_op
+        name: *CChar;
+        name2: *CChar;
+        out: *mut cosmofs_copy_info;
+        max: u32;
+        count: u32;
+        total: u32;
+        generation: u64;
+        members: u32;
+        format: u32;
+        rate: u32;
+        degraded: bool;
+        resilvering: bool;
+        label: [u8; 16];
+    }
+    struct thread;
+
+    fn pool_copy_readable(p: *spool, dva: u64, c: u32) -> bool;
+    fn pool_copy_online(p: *spool, v: u32, c: u32) -> bool;
+    fn pool_member_degraded(p: *spool, v: u32) -> bool;
+    fn pool_degraded(p: *spool) -> bool;
+    fn pool_read(p: *mut spool, dva: u64, buf: *mut void) -> i32;
+    fn pool_read_copy(p: *mut spool, dva: u64, copy: u32, buf: *mut void) -> i32;
+    fn pool_write_copy(p: *mut spool, dva: u64, copy: u32, buf: *void) -> i32;
+    fn pool_region_clear(p: *mut spool, v: u32, c: u32, r: u64);
+    fn pool_region_missed(p: *spool, v: u32, c: u32, r: u64) -> bool;
+    fn pool_copy_any_missed(p: *spool, v: u32, c: u32) -> bool;
+    fn pool_copy_set_state(p: *mut spool, v: u32, c: u32, state: u32, why: i32) -> i32;
+    fn pool_copy_state_name(s: u32) -> *CChar;
+    fn pool_copy_resilvered(p: *mut spool, v: u32, c: u32) -> i32;
+    fn pool_copy_replace_dev(p: *mut spool, v: u32, c: u32, bd: *mut blkdev, state: u32) -> i32;
+    fn pool_set_copies(p: *mut spool, v: u32, n: u32) -> i32;
+    fn pool_attach_copy(p: *mut spool, v: u32, c: u32, bd: *mut blkdev, state: u32) -> i32;
+    fn pool_detach_copy(p: *mut spool, v: u32, c: u32) -> i32;
+    fn pool_add_spare(p: *mut spool, bd: *mut blkdev, tag: u64) -> i32;
+    fn pool_remove_spare(p: *mut spool, bd: *mut blkdev) -> i32;
+    fn pool_take_spare(p: *mut spool, v: u32, tag: *mut u64) -> *mut blkdev;
+    fn pool_find_dev(p: *spool, bd: *blkdev, v: *mut u32, c: *mut u32) -> bool;
+    fn pool_floor_spare(p: *mut spool, i: u32) -> *mut *mut blkdev;
+    fn cfs_label_write_dev(fs: *mut cfs, bd: *mut blkdev, vdev: u32, flags: u64, tag: u64, nblocks: u64) -> i32;
+    fn cfs_label_write(
+        pool: *mut spool,
+        mac: *cfs_mac,
+        vdev: u32,
+        copy: u32,
+        generation: u64,
+        uuid: *u8,
+        nblocks: u64,
+    ) -> i32;
+    fn cfs_label_clear_dev(bd: *mut blkdev);
+    fn cfs_holds_sync(fs: *mut cfs);
+    fn cfs_holds_sync_with(fs: *mut cfs, extra: *mut blkdev) -> i32;
+    fn cfs_spares_find(fs: *mut cfs);
+    fn cfs_find_lagging(fs: *mut cfs, vdev: u32, since: u64, exact: *mut bool) -> *mut blkdev;
+    fn cfs_dva_lin(fs: *cfs, dva: u64) -> u64;
+    fn cfs_bitmap_test(fs: *cfs, lin: u64) -> bool;
+    fn cfs_pace_init(p: *mut cfs_pace, rate: u32);
+    /// cosmofs_resilver_floor.c: cfs_pace, whose name is the pacing state's too.
+    fn cfs_resilver_floor_pace(fs: *mut cfs, p: *mut cfs_pace) -> bool;
+    fn cosmofs_commit_mount(mnt: *mut mount) -> i32;
+    fn blk_flush(bd: *mut blkdev) -> i32;
+    fn blk_find(name: *CChar) -> *mut blkdev;
+    fn vfs_bdev_mounted(bd: *blkdev) -> bool;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_sleep_ns(ns: u64);
+    fn random_u64() -> u64;
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    /// cosmofs_resilver_floor.c: the address of g_cosmofs_resilver_rate, the sysctl's variable (fs.resilver_rate).
+    fn cfs_resilver_floor_rate() -> *mut u32;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn strlen(s: *CChar) -> usize;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+}
+
+// ---- errno.h, storage.h, thread.h, cosmofs.h and cosmofs_format.h values (asserted in tests/host/test_cfsresilver.c) --
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EAGAIN: i32 = 11;
+const EBUSY: i32 = 16;
+const EEXIST: i32 = 17;
+const ENODEV: i32 = 19;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const EROFS: i32 = 30;
+const EOPNOTSUPP: i32 = 95;
+const ONLINE: u32 = 0;
+const MISSING: u32 = 1;
+const OFFLINE: u32 = 2;
+const FAULTED: u32 = 3;
+const RESILVERING: u32 = 4;
+const POOL_MAX_COPIES: u32 = 4;
+const POOL_BLOCK: u64 = 4096;
+const POOL_DVA_SHIFT: u64 = 56;
+const POOL_DVA_BLK_MASK: u64 = 0x00FFFFFFFFFFFFFF;
+const CFS_BLOCK: usize = 4096;
+const CFS_LABEL_RESILVER: u64 = 1;
+const CFS_LABEL_SPARE: u64 = 2;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const POOL_STATUS: u32 = 0;
+const POOL_OFFLINE: u32 = 1;
+const POOL_ONLINE: u32 = 2;
+const POOL_REPLACE: u32 = 3;
+const POOL_ATTACH: u32 = 4;
+const POOL_DETACH: u32 = 5;
+const POOL_SPARE_ADD: u32 = 6;
+const POOL_SPARE_REMOVE: u32 = 7;
+const COSMOFS_COPY_SPARE: u32 = 5;
+const COSMOFS_COPY_I_WHOLE: u32 = 1;
+const COSMOFS_COPY_I_DETACH: u32 = 2;
+
+const RS_IDLE_MS: u64 = 100;
+/// The cursor reaches the record every this many blocks copied (a commit is made due), so a reboot repeats at most
+/// this much.
+const RS_RECORD_BLOCKS: u64 = 2048;
+/// The pacing state's stack slot, in words (checked against its C size).
+const PACE_WORDS: usize = 4;
+
+/// Test seam (CONFIG_DEBUG's cosmofs_test_resilver_hold): every mount's resilver thread copies nothing while set; the
+/// self-tests drive it with cosmofs_test_resilver_run instead. Never set in a release kernel, where the seam does not
+/// exist.
+static g_rs_hold: AtomicBool = AtomicBool.constant(false);
+
+// ---- The C state, through its addresses ----
+
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn fsOf(fs: *mut cfs) -> borrow mut(static) cfs => Ptr.toBorrowMut(fs);
+
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn poolOf(fs: *mut cfs) -> *mut spool => Ptr.toBorrow(fs as *cfs).pool;
+
+/// Safety: `p` is a pool.
+unsafe fn pool(p: *mut spool) -> borrow mut(static) spool => Ptr.toBorrowMut(p);
+
+/// Safety: `p` is a pool, `v` below its nmembers.
+unsafe fn memberAt(p: *mut spool, v: u32) -> *mut spool_member => Ptr.toBorrow(p as *spool).m.add(v as usize);
+
+/// Safety: as memberAt.
+unsafe fn ncopies(p: *mut spool, v: u32) -> u32 => Ptr.toBorrow(memberAt(p, v) as *spool_member).ncopies;
+
+/// Copy `c` of member `v`.
+/// Safety: as memberAt; `c` below POOL_MAX_COPIES.
+unsafe fn copyAt(p: *mut spool, v: u32, c: u32) -> *mut pool_copy =>
+    borrow mut Ptr.toBorrowMut(memberAt(p, v)).copy[c as usize] as *mut pool_copy;
+
+/// Safety: `cp` is a copy.
+unsafe fn copyOf(cp: *mut pool_copy) -> borrow mut(static) pool_copy => Ptr.toBorrowMut(cp);
+
+/// Safety: `fs` is a mounted filesystem's state, `v` below its nmembers.
+unsafe fn memOf(fs: *mut cfs, v: u32) -> borrow mut(static) cfs_memstate =>
+    Ptr.toBorrowMut(Ptr.toBorrow(fs as *cfs).mem.add(v as usize));
+
+/// Safety: `bd` is a block device.
+unsafe fn devOf(bd: *mut blkdev) -> borrow(static) blkdev => Ptr.toBorrow(bd as *blkdev);
+
+/// kernel/blk.h's blkdev_get.
+/// Safety: `bd` is a referenced block device.
+unsafe fn devGet(bd: *mut blkdev) { kobject_get(borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject); }
+
+/// kernel/blk.h's blkdev_put.
+/// Safety: `bd` is a block device the caller holds a reference to.
+unsafe fn devPut(bd: *mut blkdev) { kobject_put(borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject); }
+
+/// The pool's member-and-block address.
+fn dva(v: u32, blk: u64) -> u64 => ((v as u64) << POOL_DVA_SHIFT) | (blk & POOL_DVA_BLK_MASK);
+
+/// The pool's notifier, when it has one.
+/// Safety: `p` is a pool.
+unsafe fn notify(p: *mut spool) {
+    let k = pool(p);
+    let f = k.notify;
+    let arg = k.notify_arg;
+    if (!f.isNull()) {
+        f(arg);
+    }
+}
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn resilverRate() -> u32 =>
+    Ptr.toBorrow(cfs_resilver_floor_rate() as *AtomicU32).loadWith(LoadOrdering.Relaxed);
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn stopOf(fs: *mut cfs) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut fsOf(fs).rs_stop as *mut u32 as *AtomicU32);
+
+// ---- Console lines ----
+
+/// A C string, appended.
+/// Safety: `s` is a C string.
+unsafe fn cText(line: borrow mut TextWriter, s: *CChar) { line.bytes(Slice.fromRaw(s as *u8, strlen(s))); }
+
+/// "cosmofs: <pool>: ", the start of every line.
+/// Safety: `fs` is a filesystem's state.
+unsafe fn start(line: borrow mut TextWriter, fs: *mut cfs) {
+    line.text("cosmofs: ");
+    cText(mut line, borrow fsOf(fs).pool_name as *[u8; 17] as *CChar);
+    line.text(": ");
+}
+
+/// A device's name, appended.
+/// Safety: `bd` is a block device.
+unsafe fn devName(line: borrow mut TextWriter, bd: *mut blkdev) {
+    cText(mut line, borrow devOf(bd).name as *[u8; 16] as *CChar);
+}
+
+/// kernel/string.h's strlcpy into a 16-byte name: at most 15 bytes and a NUL.
+/// Safety: `dst` is 16 writable bytes, `src` a C string.
+unsafe fn copyName(dst: *mut u8, src: *CChar) {
+    let n = strlen(src);
+    let k = if (n < 15) n else 15;
+    memcpy(dst as *mut void, src as *void, k);
+    dst.add(k).write(0);
+}
+
+// ---- Starting one ----
+
+/// A label tag: never 0, which means none.
+/// Safety: the random source is up (any time after boot).
+unsafe fn newTag() -> u64 {
+    var t = random_u64();
+    while (t == 0) {
+        t = random_u64();
+    }
+    return t;
+}
+
+/// Copy `c` of member `v` becomes RESILVERING: its device is labelled as the target with a new tag (found again by it
+/// after a reboot), and from this moment every write reaches it. What it is missing is what its record says -- the
+/// regions it missed, or everything (`whole`).
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `v` and `c` a copy of its pool.
+unsafe fn rsStart(fs: *mut cfs, v: u32, c: u32) -> i32 {
+    let p = poolOf(fs);
+    let cp = copyAt(p, v, c);
+    let dev = copyOf(cp).dev;
+    if (dev.isNull()) {
+        return -ENODEV;
+    }
+    if (fsOf(fs).sb.version < 11) {
+        return -EOPNOTSUPP; // the record that finds the target again cannot be kept (design.md)
+    }
+    let tag = if (copyOf(cp).tag != 0) copyOf(cp).tag else newTag();
+    let rc = cfs_label_write_dev(fs, dev, v, CFS_LABEL_RESILVER, tag, memOf(fs, v).nblocks);
+    if (rc != 0) {
+        return rc;
+    }
+    let k = copyOf(cp);
+    k.tag = tag;
+    k.cursor = 0;
+    if (k.state != RESILVERING) {
+        // Not through pool_copy_set_state: a copy that was ONLINE keeps nothing to start from, and one that was out
+        // keeps its bitmap.
+        let was = k.state;
+        k.state = RESILVERING;
+        let q = pool(p);
+        q.state_seq += 1;
+        notify(p);
+        var buffer = [0u8; 192];
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        line.text("member ");
+        line.decimal(v as u64);
+        line.text(" copy ");
+        line.decimal(c as u64);
+        line.text(" (");
+        devName(mut line, dev);
+        line.text(") RESILVERING, was ");
+        cText(mut line, pool_copy_state_name(was));
+        line.text(if (copyOf(cp).whole) ": every block" else ": the regions it missed");
+        KernelLog.send(LogLevel.Warn, line);
+    }
+    rsWake(fs);
+    return 0;
+}
+
+/// A spare takes the place of copy `c`, which is FAULTED or MISSING: the takeover is logged, and the spare is a member
+/// once it is resilvered.
+/// Safety: as rsStart.
+unsafe fn rsTakeover(fs: *mut cfs, v: u32, c: u32) -> bool {
+    let p = poolOf(fs);
+    let cp = copyAt(p, v, c);
+    var tag: u64 = 0;
+    let spare = pool_take_spare(p, v, borrow mut tag as *mut u64);
+    if (spare.isNull()) {
+        return false;
+    }
+    var was = [0u8; 16];
+    let old = copyOf(cp).dev;
+    copyName(
+        borrow mut was as *mut [u8; 16] as *mut u8,
+        if (old.isNull()) "no device\0".ptr as *CChar else borrow devOf(old).name as *[u8; 16] as *CChar,
+    );
+    let state = copyOf(cp).state;
+    var buffer = [0u8; 160];
+    var rc = pool_copy_replace_dev(p, v, c, spare, RESILVERING);
+    if (rc != 0) {
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        line.text("spare ");
+        devName(mut line, spare);
+        line.text(" could not take member ");
+        line.decimal(v as u64);
+        line.text(" copy ");
+        line.decimal(c as u64);
+        line.text(" (");
+        line.signed(rc as i64);
+        line.text(")");
+        KernelLog.send(LogLevel.Error, line);
+        let _ = pool_add_spare(p, spare, tag); // the slot never had it
+        devPut(spare);
+        return false;
+    }
+    let k = copyOf(cp);
+    k.tag = tag;
+    rc = rsStart(fs, v, c);
+    if (rc != 0) {
+        // The slot has the spare now and it cannot be labelled: a spare that does not take a label is no spare, and
+        // the copy is out either way (Codex on #440: back on the spare list it would be a copy and a spare at once).
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        line.text("spare ");
+        devName(mut line, spare);
+        line.text(" took member ");
+        line.decimal(v as u64);
+        line.text(" copy ");
+        line.decimal(c as u64);
+        line.text(" and cannot be written (");
+        line.signed(rc as i64);
+        line.text("); FAULTED");
+        KernelLog.send(LogLevel.Error, line);
+        let f = copyOf(cp);
+        f.state = FAULTED;
+        let q = pool(p);
+        q.state_seq += 1;
+        devPut(spare);
+        cfs_holds_sync(fs);
+        return false;
+    }
+    var line = TextWriter.create(mut buffer[..]);
+    start(mut line, fs);
+    line.text("spare ");
+    devName(mut line, spare);
+    line.text(" takes over member ");
+    line.decimal(v as u64);
+    line.text(" copy ");
+    line.decimal(c as u64);
+    line.text(" (was ");
+    cText(mut line, borrow was as *[u8; 16] as *CChar);
+    line.text(", ");
+    cText(mut line, pool_copy_state_name(state));
+    line.text(")");
+    KernelLog.send(LogLevel.Warn, line);
+    devPut(spare); // the pool holds it now
+    cfs_holds_sync(fs);
+    return true;
+}
+
+// ---- The copying ----
+
+/// The walk copies blocks as they are, without knowing what each one is, so it cannot check one against its checksum.
+/// What it can check: when a second ONLINE copy has the block too, that the two agree. A copy being replaced while it
+/// is still good is such a second source; if the first one rotted, the walk has just copied the rot, and detaching the
+/// good copy at the end would leave none (Codex on #440). So a disagreement is counted, and rsFinish keeps the copy it
+/// would have detached until a scrub, which does know what each block is, has put the copies right.
+/// Safety: as rsStart; `got` is the block pool_read gave.
+unsafe fn rsCheckSources(fs: *mut cfs, v: u32, target: u32, at: u64, got: *u8) {
+    let p = poolOf(fs);
+    var first = POOL_MAX_COPIES;
+    for (k in 0u32..ncopies(p, v)) {
+        if (k == target || !pool_copy_readable(p as *spool, at, k)) {
+            continue;
+        }
+        if (first == POOL_MAX_COPIES) {
+            first = k; // the one pool_read took
+            continue;
+        }
+        let other = kmalloc(CFS_BLOCK, 0) as *mut u8;
+        if (other.isNull()) {
+            return;
+        }
+        if (pool_read_copy(p, at, k, other as *mut void) == 0 && memcmp(other as *void, got as *void, CFS_BLOCK) != 0) {
+            let f = fsOf(fs);
+            let seen = f.rs_disagree;
+            f.rs_disagree = seen + 1;
+            if (seen < 8) {
+                var buffer = [0u8; 160];
+                var line = TextWriter.create(mut buffer[..]);
+                start(mut line, fs);
+                line.text("block ");
+                line.decimal(v as u64);
+                line.text(":");
+                line.decimal(at & POOL_DVA_BLK_MASK);
+                line.text(" differs between member ");
+                line.decimal(v as u64);
+                line.text(" copies ");
+                line.decimal(first as u64);
+                line.text(" and ");
+                line.decimal(k as u64);
+                KernelLog.send(LogLevel.Warn, line);
+            }
+        }
+        kfree(other as *mut void);
+        return;
+    }
+}
+
+/// The copy being rebuilt, if any: the first RESILVERING copy with a device whose member has a copy to read from.
+struct CopyIndex {
+    v: u32;
+    c: u32;
+}
+
+/// Safety: `fs` is a mounted filesystem's state, its lock held.
+unsafe fn rsTarget(fs: *mut cfs, out: borrow mut CopyIndex) -> bool {
+    let p = poolOf(fs);
+    for (v in 0u32..pool(p).nmembers) {
+        var online: u32 = 0;
+        for (c in 0u32..ncopies(p, v)) {
+            if (pool_copy_online(p as *spool, v, c)) {
+                online += 1;
+            }
+        }
+        if (online == 0) {
+            continue;
+        }
+        for (c in 0u32..ncopies(p, v)) {
+            let k = copyOf(copyAt(p, v, c));
+            if (k.state == RESILVERING && !k.dev.isNull()) {
+                out.v = v;
+                out.c = c;
+                return true;
+            }
+        }
+        // Then the holes of an ONLINE copy (a write it failed while another copy took it), with another copy to fill
+        // them from.
+        for (c in 0u32..ncopies(p, v)) {
+            if (online <= 1) {
+                break;
+            }
+            let k = copyOf(copyAt(p, v, c));
+            if (k.state == ONLINE && !k.dev.isNull() && pool_copy_any_missed(p as *spool, v, c)) {
+                out.v = v;
+                out.c = c;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// The end of a pass: the target holds every allocated block it missed, and everything written since its resilver
+/// began. Last come the blocks below first_usable -- member 0's superblocks, another member's label -- which turn the
+/// device from a target into a copy; they are copied (or written) only now, with no commit running (fs->lock), so the
+/// target's root is exactly the one its blocks belong to. Then ONLINE, and the copies it was replacing are detached.
+/// Safety: as rsStart; `buf` is a block.
+unsafe fn rsFinish(fs: *mut cfs, v: u32, c: u32, buf: *mut u8) -> i32 {
+    let p = poolOf(fs);
+    let cp = copyAt(p, v, c);
+    var rc = 0;
+    if (v == 0) {
+        var blk: u64 = 0;
+        while (blk < memOf(fs, 0).first_usable && rc == 0) {
+            rc = pool_read(p, dva(0, blk), buf as *mut void);
+            if (rc == 0) {
+                rc = pool_write_copy(p, dva(0, blk), c, buf as *void);
+            }
+            blk += 1;
+        }
+    } else {
+        let f = fsOf(fs);
+        rc = cfs_label_write(
+            p,
+            borrow f.mac as *cfs_mac,
+            v,
+            c,
+            f.sb.generation,
+            borrow f.sb.uuid as *[u8; 16] as *u8,
+            memOf(fs, v).nblocks,
+        );
+    }
+    if (rc == 0) {
+        rc = blk_flush(copyOf(cp).dev);
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    let tag = copyOf(cp).tag;
+    var name = [0u8; 16];
+    copyName(borrow mut name as *mut [u8; 16] as *mut u8, borrow devOf(copyOf(cp).dev).name as *[u8; 16] as *CChar);
+    let k = copyOf(cp);
+    k.tag = 0; // a copy now: its superblock or label says what it is
+    rc = pool_copy_resilvered(p, v, c);
+    if (rc != 0) {
+        return rc;
+    }
+    var buffer = [0u8; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    start(mut line, fs);
+    cText(mut line, borrow name as *[u8; 16] as *CChar);
+    line.text(" resilvered as member ");
+    line.decimal(v as u64);
+    line.text(" copy ");
+    line.decimal(c as u64);
+    line.text(": ");
+    line.decimal(fsOf(fs).rs_copied);
+    line.text(" blocks copied in ");
+    line.decimal(clock_since_ns(fsOf(fs).rs_started_ns) / 1000000);
+    line.text(" ms");
+    KernelLog.send(LogLevel.Info, line);
+    let f = fsOf(fs);
+    f.rs_copied = 0;
+    f.rs_started_ns = 0;
+    // A replace: what this copy was replacing goes now (design.md, "Replacing a copy") -- unless two of the copies it
+    // was built from disagreed, when the one being replaced may be the only good one.
+    if (fsOf(fs).rs_disagree != 0) {
+        var warn = TextWriter.create(mut buffer[..]);
+        start(mut warn, fs);
+        warn.decimal(fsOf(fs).rs_disagree);
+        warn.text(" block(s) differed between the copies ");
+        cText(mut warn, borrow name as *[u8; 16] as *CChar);
+        warn.text(" was built from; the copy it replaces stays until `fsctl scrub --repair` and a `cosmo-pool detach`");
+        KernelLog.send(LogLevel.Warn, warn);
+        for (j in 0u32..ncopies(p, v)) {
+            let o = copyOf(copyAt(p, v, j));
+            if (o.peer == tag) {
+                o.peer = 0;
+            }
+        }
+        let g = fsOf(fs);
+        g.rs_disagree = 0;
+    }
+    var j: u32 = 0;
+    while (j < ncopies(p, v)) {
+        let old = copyOf(copyAt(p, v, j));
+        if (old.peer == 0 || old.peer != tag) {
+            j += 1;
+            continue;
+        }
+        let gone = old.dev;
+        if (!gone.isNull()) {
+            devGet(gone);
+        }
+        if (pool_detach_copy(p, v, j) == 0) {
+            let m = memOf(fs, v);
+            m.copies = ncopies(p, v);
+            if (!gone.isNull()) {
+                cfs_label_clear_dev(gone);
+                var info = TextWriter.create(mut buffer[..]);
+                start(mut info, fs);
+                devName(mut info, gone);
+                info.text(" replaced and detached");
+                KernelLog.send(LogLevel.Info, info);
+            }
+        } else {
+            j += 1;
+        }
+        if (!gone.isNull()) {
+            devPut(gone);
+        }
+    }
+    cfs_holds_sync(fs);
+    return 0;
+}
+
+/// One window's worth of the resilver, under fs->lock. False when there was nothing to do. The cursor walks the
+/// member's blocks; a region is copied when its bit says the copy missed it, or when the cursor is already inside it
+/// (the bit is cleared as the region is begun, so a write that fails on the target during it sets it again, and a
+/// reboot that stops the walk inside it finishes the region before trusting the bits again).
+/// Safety: as rsStart; `buf` is a block, `pace` a pacing state, `budget` null or a count of blocks.
+unsafe fn rsStep(fs: *mut cfs, buf: *mut u8, pace: *mut cfs_pace, budget: *mut u64) -> bool {
+    let p = poolOf(fs);
+    if (fsOf(fs).failed != 0 || fsOf(fs).rdonly) {
+        return false;
+    }
+    // A copy whose device was unregistered (removed: the block layer answers -ENODEV from now on) is MISSING now, not
+    // at its next I/O: an idle pool learns it too, and a spare can take over.
+    for (v in 0u32..pool(p).nmembers) {
+        for (c in 0u32..ncopies(p, v)) {
+            let k = copyOf(copyAt(p, v, c));
+            if (!k.dev.isNull() && devOf(k.dev).gone != 0 && (k.state == ONLINE || k.state == RESILVERING)) {
+                let _ = pool_copy_set_state(p, v, c, MISSING, -ENODEV);
+            }
+        }
+    }
+    // A spare for every copy that is out.
+    var took = false;
+    for (v in 0u32..pool(p).nmembers) {
+        if (pool(p).nspares == 0) {
+            break;
+        }
+        for (c in 0u32..ncopies(p, v)) {
+            if (pool(p).nspares == 0) {
+                break;
+            }
+            let s = copyOf(copyAt(p, v, c)).state;
+            if (s == FAULTED || s == MISSING) {
+                took = rsTakeover(fs, v, c) || took;
+            }
+        }
+    }
+    var target = CopyIndex { v: 0, c: 0 };
+    if (!rsTarget(fs, mut target)) {
+        return took;
+    }
+    let v = target.v;
+    let c = target.c;
+    let cp = copyAt(p, v, c);
+    if (fsOf(fs).rs_started_ns == 0) {
+        let f = fsOf(fs);
+        f.rs_started_ns = clock_now_ns();
+    }
+    let rb = Ptr.toBorrow(memberAt(p, v) as *spool_member).region_blocks as u64;
+    let end = memOf(fs, v).nblocks;
+    var buffer = [0u8; 192];
+    while (copyOf(cp).cursor < end) {
+        let k = copyOf(cp);
+        if ((k.state != RESILVERING && k.state != ONLINE) || k.dev.isNull()) {
+            return true; // the target failed or went: its state says so
+        }
+        let r = k.cursor / rb;
+        let inside = k.cursor % rb != 0;
+        if (!inside && !pool_region_missed(p as *spool, v, c, r)) {
+            k.cursor = (r + 1) * rb;
+            continue;
+        }
+        let online = k.state == ONLINE;
+        if (!inside && online) {
+            let f = fsOf(fs);
+            f.rs_region_errors = k.write_errors;
+        } else if (!inside && !k.whole) {
+            pool_region_clear(p, v, c, r);
+        }
+        let blk = copyOf(cp).cursor;
+        let n = copyOf(cp);
+        n.cursor = blk + 1;
+        // An ONLINE copy's hole is read from no more than the rest of it is: its bit goes when the whole region is
+        // filled, and only if no write to the copy failed meanwhile (which would be a new hole in it). A rebuilding
+        // copy is read from nowhere, so its bit goes as the region begins (above).
+        if (online && (n.cursor % rb == 0 || n.cursor >= end) && n.write_errors == fsOf(fs).rs_region_errors) {
+            pool_region_clear(p, v, c, r);
+        }
+        let fixed = blk < memOf(fs, v).first_usable; // the superblocks or the label
+        if (fixed && !online) {
+            continue; // a rebuilding copy takes them last (rsFinish); an ONLINE one's are as any hole
+        }
+        let at = dva(v, blk);
+        if (!fixed && !cfs_bitmap_test(fs as *cfs, cfs_dva_lin(fs as *cfs, at))) {
+            continue; // free: nothing to copy
+        }
+        let rc = pool_read(p, at, buf as *mut void);
+        if (rc == 0) {
+            rsCheckSources(fs, v, c, at, buf as *u8);
+            let _ = pool_write_copy(p, at, c, buf as *void); // a failure is the pool's: the bit set again, or FAULTED
+        } else {
+            var line = TextWriter.create(mut buffer[..]);
+            start(mut line, fs);
+            line.text("block ");
+            line.decimal(v as u64);
+            line.text(":");
+            line.decimal(blk);
+            line.text(" reads from no copy (");
+            line.signed(rc as i64);
+            line.text("); member ");
+            line.decimal(v as u64);
+            line.text(" copy ");
+            line.decimal(c as u64);
+            line.text(" goes without it");
+            KernelLog.send(LogLevel.Warn, line);
+        }
+        let f = fsOf(fs);
+        f.rs_copied += 1;
+        let pc = Ptr.toBorrowMut(pace);
+        pc.used = pc.used.wrappingAdd(1);
+        if (!budget.isNull()) {
+            let left = budget.read().wrappingSub(1);
+            budget.write(left);
+            if (left == 0) {
+                return true;
+            }
+        }
+        let g = fsOf(fs);
+        g.rs_since_record += 1;
+        if (g.rs_since_record >= RS_RECORD_BLOCKS) {
+            // The cursor into the record: a commit due.
+            g.rs_since_record = 0;
+            let q = pool(p);
+            q.state_seq += 1;
+            notify(p);
+        }
+        if (cfs_resilver_floor_pace(fs, pace)) {
+            return true; // the lock was let go: start again from the state as it is
+        }
+    }
+    // The pass is over. A whole rebuild has done everything; failures on the target during it set bits again, and
+    // those go round.
+    let k = copyOf(cp);
+    k.whole = false;
+    if (pool_copy_any_missed(p as *spool, v, c)) {
+        let z = copyOf(cp);
+        z.cursor = 0;
+        return true;
+    }
+    if (copyOf(cp).state == ONLINE) {
+        // Holes filled: an ONLINE copy has no superblocks to take and no state to change; its bits were cleared as
+        // its regions began.
+        let z = copyOf(cp);
+        z.cursor = 0;
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        line.text("member ");
+        line.decimal(v as u64);
+        line.text(" copy ");
+        line.decimal(c as u64);
+        line.text(" (");
+        devName(mut line, copyOf(cp).dev);
+        line.text("): its holes are filled");
+        KernelLog.send(LogLevel.Info, line);
+        let q = pool(p);
+        q.state_seq += 1;
+        notify(p);
+        return true;
+    }
+    let rc = rsFinish(fs, v, c, buf);
+    if (rc != 0) {
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        line.text("member ");
+        line.decimal(v as u64);
+        line.text(" copy ");
+        line.decimal(c as u64);
+        line.text(": the resilver could not finish (");
+        line.signed(rc as i64);
+        line.text(")");
+        KernelLog.send(LogLevel.Error, line);
+        let _ = pool_copy_set_state(p, v, c, FAULTED, rc);
+    }
+    return true;
+}
+
+/// The resilver thread.
+/// Safety: `arg` is a mounted filesystem's state whose rs_buf is set.
+@callback
+unsafe fn rsThread(arg: *mut void) {
+    let fs = arg as *mut cfs;
+    let buf = fsOf(fs).rs_buf; // rsWake's: the thread exists only with it (Codex on #440)
+    var slot = [0u64; 4];
+    let pace = borrow mut slot as *mut [u64; 4] as *mut cfs_pace;
+    cfs_pace_init(pace, resilverRate());
+    let lock = borrow mut fsOf(fs).lock as *mut mutex;
+    while (stopOf(fs).loadWith(LoadOrdering.Acquire) == 0) {
+        mutex_lock(lock);
+        let worked = !g_rs_hold.loadWith(LoadOrdering.Relaxed) && rsStep(fs, buf, pace, 0 as *mut u64);
+        mutex_unlock(lock);
+        if (!worked) {
+            thread_sleep_ns(RS_IDLE_MS * 1000000);
+            cfs_pace_init(pace, resilverRate());
+        }
+    }
+}
+
+/// With fs->lock held: the thread exists while the mount does (it sleeps when there is nothing to rebuild). Not on a
+/// read-only or maintenance mount: those write nothing.
+/// Safety: `fs` is a mounted filesystem's state, its lock held.
+unsafe fn rsWake(fs: *mut cfs) {
+    let f = fsOf(fs);
+    if (!f.rs_thread.isNull() || f.rs_stop != 0 || f.rdonly || f.maint || !f.mount_done) {
+        return;
+    }
+    if (f.rs_buf.isNull()) {
+        f.rs_buf = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    }
+    var buffer = [0u8; 128];
+    if (fsOf(fs).rs_buf.isNull()) {
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        line.text("no memory for the resilver; tried again at its next wake");
+        KernelLog.send(LogLevel.Warn, line);
+        return;
+    }
+    let t = thread_create(rsThread, fs as *mut void, "cfs-resilver\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+    let g = fsOf(fs);
+    g.rs_thread = t;
+    if (t.isNull()) {
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        line.text("no resilver thread; tried again at its next wake");
+        KernelLog.send(LogLevel.Warn, line);
+    }
+}
+
+/// cosmofs_internal.h's cfs_resilver_stop: the thread stopped and joined, at the unmount.
+/// Safety: `fs` is a mounted filesystem's state, its lock not held.
+@export("cfs_resilver_stop")
+unsafe fn resilverStop(fs: *mut cfs) {
+    let t = fsOf(fs).rs_thread;
+    if (t.isNull()) {
+        return;
+    }
+    stopOf(fs).storeWith(1, StoreOrdering.Release);
+    let _ = thread_join(t);
+    let f = fsOf(fs);
+    f.rs_thread = 0 as *mut thread;
+    kfree(f.rs_buf as *mut void);
+    f.rs_buf = 0 as *mut u8;
+}
+
+/// cosmofs_internal.h's cfs_resilver_mount. After a mount: the pool's spares, the holds, and a resilver for every copy
+/// that wants one -- a target a reboot interrupted, and the copy that was away when its device is back (incremental
+/// when a record says what it missed, else whole). "When the others are consistent": only into a member with an ONLINE
+/// copy to read from. Boot is not held up: the thread does it after the mount returns (design.md, "Import").
+/// Safety: `fs` is a mounted filesystem's state, its lock not held.
+@export("cfs_resilver_mount")
+unsafe fn resilverMount(fs: *mut cfs) {
+    let lock = borrow mut fsOf(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    cfs_spares_find(fs);
+    let p = poolOf(fs);
+    let f = fsOf(fs);
+    let writable = !f.rdonly && !f.maint && f.sb.version >= 11;
+    var buffer = [0u8; 160];
+    for (v in 0u32..pool(p).nmembers) {
+        if (!writable) {
+            break;
+        }
+        if (!pool_member_degraded(p as *spool, v)) {
+            continue;
+        }
+        for (c in 0u32..ncopies(p, v)) {
+            let cp = copyAt(p, v, c);
+            if (copyOf(cp).state == RESILVERING && !copyOf(cp).dev.isNull()) {
+                rsWake(fs);
+                continue;
+            }
+            if (copyOf(cp).state != MISSING || !copyOf(cp).dev.isNull()) {
+                continue;
+            }
+            var exact = false;
+            let since = if (copyOf(cp).whole) 0 else copyOf(cp).since;
+            let bd = cfs_find_lagging(fs, v, since, borrow mut exact as *mut bool);
+            if (bd.isNull()) {
+                continue;
+            }
+            if (!exact) {
+                let k = copyOf(cp);
+                k.whole = true; // no record covers what this device missed
+                k.since = 0;
+            }
+            var rc = pool_attach_copy(p, v, c, bd, MISSING);
+            if (rc == 0) {
+                rc = rsStart(fs, v, c);
+            }
+            var line = TextWriter.create(mut buffer[..]);
+            start(mut line, fs);
+            devName(mut line, bd);
+            line.text(" is back as member ");
+            line.decimal(v as u64);
+            line.text(" copy ");
+            line.decimal(c as u64);
+            line.text(if (exact) ": resilvering what it missed (" else ": resilvering it whole (");
+            line.signed(rc as i64);
+            line.text(")");
+            KernelLog.send(LogLevel.Info, line);
+            devPut(bd);
+        }
+    }
+    // A mirrored pool or one with spares keeps the thread: it is what notices a removed device while nothing is
+    // written (rsStep).
+    var mirrored = pool(p).nspares > 0;
+    for (v in 0u32..pool(p).nmembers) {
+        mirrored = mirrored || ncopies(p, v) > 1;
+    }
+    if (writable && mirrored) {
+        rsWake(fs);
+    }
+    cfs_holds_sync(fs);
+    mutex_unlock(lock);
+}
+
+/// kernel/cosmofs.h's cosmofs_test_resilver_hold (CONFIG_DEBUG): hold every mount's resilver thread.
+@cfg("CONFIG_DEBUG")
+@export("cosmofs_test_resilver_hold")
+fn testHold(hold: bool) { g_rs_hold.storeWith(hold, StoreOrdering.Relaxed); }
+
+/// kernel/cosmofs.h's cosmofs_test_resilver_run (CONFIG_DEBUG): run the resilver here instead for at most `blocks`
+/// blocks copied (0: until there is nothing left), unpaced -- what a self-test needs to stop it at a known place.
+/// Safety: `mnt` is a mount.
+@cfg("CONFIG_DEBUG")
+@export("cosmofs_test_resilver_run")
+unsafe fn testRun(mnt: *mut mount, blocks: u64) -> i32 {
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    if (fs.isNull() || layoutOf<cfs_pace>().size > PACE_WORDS * 8) {
+        return -EINVAL;
+    }
+    let buf = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (buf.isNull()) {
+        return -ENOMEM;
+    }
+    var slot = [0u64; 4];
+    let pace = borrow mut slot as *mut [u64; 4] as *mut cfs_pace;
+    cfs_pace_init(pace, 0);
+    let lock = borrow mut fsOf(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    var budget = blocks;
+    let budgetAt = if (blocks != 0) borrow mut budget as *mut u64 else 0 as *mut u64;
+    for (guard in 0u32..1000000) {
+        if (!rsStep(fs, buf, pace, budgetAt)) {
+            break;
+        }
+        if (blocks != 0 && budget == 0) {
+            break;
+        }
+    }
+    mutex_unlock(lock);
+    kfree(buf as *mut void);
+    return 0;
+}
+
+// ---- The operator's commands ----
+
+/// A C string's bytes.
+/// Safety: `s` is a C string.
+unsafe fn bytesOf(s: *CChar) -> Slice<static, u8> => Slice.fromRaw(s as *u8, strlen(s));
+
+/// Where in `s` the first ':' is, or its length.
+fn colonIn(s: Slice<u8>) -> usize {
+    for (i in 0..s.length) {
+        if (s[i] == 0x3A) {
+            return i;
+        }
+    }
+    return s.length;
+}
+
+/// A decimal number, wrapping as the C's unsigned arithmetic did; null when a byte is not a digit.
+fn decimalOf(s: Slice<u8>) -> u32? {
+    var n: u32 = 0;
+    for (i in 0..s.length) {
+        let b = s[i];
+        if (b < 0x30 || b > 0x39) {
+            return null;
+        }
+        n = n.wrappingMul(10).wrappingAdd((b - 0x30) as u32);
+    }
+    return n;
+}
+
+/// A copy found by name.
+struct Found {
+    v: u32;
+    c: u32;
+}
+
+/// "member:copy", or a device the pool holds as a copy.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `name` null or a C string.
+unsafe fn findCopy(fs: *mut cfs, name: *CChar, out: borrow mut Found) -> i32 {
+    if (name.isNull()) {
+        return -EINVAL;
+    }
+    let s = bytesOf(name);
+    if (s.length == 0) {
+        return -EINVAL;
+    }
+    let colon = colonIn(s);
+    let p = poolOf(fs);
+    if (colon < s.length) {
+        if (colon == 0 || colon + 1 == s.length) {
+            return -EINVAL;
+        }
+        let a = decimalOf(s[..colon]);
+        let b = decimalOf(s[(colon + 1)..]);
+        if (a.isNull() || b.isNull()) {
+            return -EINVAL;
+        }
+        let v = a ?? 0;
+        let c = b ?? 0;
+        if (v >= pool(p).nmembers || c >= ncopies(p, v)) {
+            return -ENOENT;
+        }
+        out.v = v;
+        out.c = c;
+        return 0;
+    }
+    let bd = blk_find(name);
+    if (bd.isNull()) {
+        return -ENODEV;
+    }
+    var v: u32 = 0;
+    var c: u32 = 0;
+    let found = pool_find_dev(p as *spool, bd as *blkdev, borrow mut v as *mut u32, borrow mut c as *mut u32);
+    devPut(bd);
+    if (found) {
+        out.v = v;
+        out.c = c;
+    }
+    return if (found) 0 else -ENOENT;
+}
+
+/// A device that is to join the pool: there, not the pool's already, not another mount's, and big enough for member
+/// `v` (or, for a spare, `v` is -1 and ignored). Referenced, into `out`.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `name` null or a C string; `out` a device pointer.
+unsafe fn newDevice(fs: *mut cfs, name: *CChar, v: i32, out: *mut *mut blkdev) -> i32 {
+    if (name.isNull() || strlen(name) == 0) {
+        return -EINVAL;
+    }
+    let bd = blk_find(name);
+    if (bd.isNull()) {
+        return -ENODEV;
+    }
+    let p = poolOf(fs);
+    var a: u32 = 0;
+    var b: u32 = 0;
+    var rc = 0;
+    let mountDev = Ptr.toBorrow(fsOf(fs).mnt as *mount).bdev;
+    if (pool_find_dev(p as *spool, bd as *blkdev, borrow mut a as *mut u32, borrow mut b as *mut u32) || bd == mountDev) {
+        rc = -EEXIST;
+    }
+    for (i in 0u32..pool(p).nspares) {
+        if (rc != 0) {
+            break;
+        }
+        if (pool_floor_spare(p, i).read() == bd) {
+            rc = -EEXIST;
+        }
+    }
+    if (rc == 0 && vfs_bdev_mounted(bd as *blkdev)) {
+        rc = -EBUSY;
+    }
+    let d = devOf(bd);
+    if (rc == 0 && d.read_only) {
+        rc = -EROFS;
+    }
+    // A sector the pool's block is a whole number of, before anything is divided by it (Codex on #440: an 8 KiB
+    // sector divided by zero).
+    let sector = d.sector_size as u64;
+    if (rc == 0 && (sector == 0 || sector > POOL_BLOCK || POOL_BLOCK % sector != 0)) {
+        rc = -EINVAL;
+    }
+    if (rc == 0 && v >= 0 && d.capacity / (POOL_BLOCK / sector) < memOf(fs, truncate<u32>(v)).nblocks) {
+        rc = -ENOSPC;
+    }
+    // Claimed before anything is written to it: a mount that took it after the check above would otherwise share it
+    // (Codex on #440).
+    if (rc == 0) {
+        rc = cfs_holds_sync_with(fs, bd);
+    }
+    if (rc != 0) {
+        devPut(bd);
+        return rc;
+    }
+    out.write(bd);
+    return 0;
+}
+
+/// One more copy slot for member `v` (attach, or a replace beside a copy still good): the member table grows, which is
+/// adding a copy and nothing else. The new slot's index, into `out`.
+/// Safety: as newDevice; `v` below the pool's nmembers.
+unsafe fn addSlot(fs: *mut cfs, v: u32, out: *mut u32) -> i32 {
+    if (fsOf(fs).sb.version < 11) {
+        return -EOPNOTSUPP; // a copy state could not be recorded (design.md)
+    }
+    let p = poolOf(fs);
+    let n = ncopies(p, v);
+    if (n >= POOL_MAX_COPIES) {
+        return -ENOSPC;
+    }
+    let rc = pool_set_copies(p, v, n + 1);
+    if (rc != 0) {
+        return rc;
+    }
+    let m = memOf(fs, v);
+    m.copies = n + 1;
+    out.write(n);
+    return 0;
+}
+
+/// Safety: as newDevice.
+unsafe fn opOnline(fs: *mut cfs, name: *CChar) -> i32 {
+    let p = poolOf(fs);
+    var at = Found { v: 0, c: 0 };
+    var rc = findCopy(fs, name, mut at);
+    if (rc == -ENOENT && colonIn(bytesOf(name)) == strlen(name)) {
+        // A device that is back: a lagging copy of this pool, into a MISSING slot of its member.
+        let bd = blk_find(name);
+        if (bd.isNull()) {
+            return -ENODEV;
+        }
+        rc = -ENOENT;
+        for (m in 0u32..pool(p).nmembers) {
+            if (rc != -ENOENT) {
+                break;
+            }
+            for (k in 0u32..ncopies(p, m)) {
+                if (rc != -ENOENT) {
+                    break;
+                }
+                let cp = copyAt(p, m, k);
+                if (copyOf(cp).state != MISSING || !copyOf(cp).dev.isNull()) {
+                    continue;
+                }
+                var exact = false;
+                let since = if (copyOf(cp).whole) 0 else copyOf(cp).since;
+                let lag = cfs_find_lagging(fs, m, since, borrow mut exact as *mut bool);
+                if (lag == bd) {
+                    if (!exact) {
+                        let z = copyOf(cp);
+                        z.whole = true;
+                        z.since = 0;
+                    }
+                    rc = pool_attach_copy(p, m, k, bd, MISSING);
+                    if (rc == 0) {
+                        rc = rsStart(fs, m, k);
+                    }
+                }
+                if (!lag.isNull()) {
+                    devPut(lag);
+                }
+            }
+        }
+        devPut(bd);
+        return rc;
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    let cp = copyAt(p, at.v, at.c);
+    if (copyOf(cp).state == ONLINE || copyOf(cp).state == RESILVERING) {
+        return 0;
+    }
+    if (copyOf(cp).dev.isNull()) {
+        return -ENODEV;
+    }
+    // Missed nothing: ONLINE at once. Otherwise what it missed, rebuilt.
+    rc = pool_copy_set_state(p, at.v, at.c, ONLINE, 0);
+    if (rc == -EAGAIN) {
+        let k = copyOf(cp);
+        k.read_errors = 0;
+        k.write_errors = 0;
+        k.csum_errors = 0;
+        rc = rsStart(fs, at.v, at.c);
+    }
+    return rc;
+}
+
+/// Safety: as newDevice; `old` and `new` null or C strings.
+unsafe fn opReplace(fs: *mut cfs, old: *CChar, new: *CChar) -> i32 {
+    let p = poolOf(fs);
+    var at = Found { v: 0, c: 0 };
+    var rc = findCopy(fs, old, mut at);
+    if (rc != 0) {
+        return rc;
+    }
+    let v = at.v;
+    let c = at.c;
+    var bd = 0 as *mut blkdev;
+    rc = newDevice(fs, new, truncate<i32>(v), borrow mut bd as *mut *mut blkdev);
+    if (rc != 0) {
+        return rc;
+    }
+    let cp = copyAt(p, v, c);
+    if (pool_copy_online(p as *spool, v, c) || copyOf(cp).state == RESILVERING) {
+        // The old copy still serves until the new one holds everything: the new one gets a slot of its own, and the
+        // old one is detached when it is done (design.md, "Replacing a copy").
+        var n: u32 = 0;
+        rc = addSlot(fs, v, borrow mut n as *mut u32);
+        if (rc == 0) {
+            rc = pool_copy_replace_dev(p, v, n, bd, RESILVERING);
+        }
+        if (rc == 0) {
+            let nc = copyOf(copyAt(p, v, n));
+            nc.tag = newTag();
+            let o = copyOf(copyAt(p, v, c));
+            o.peer = nc.tag;
+            rc = rsStart(fs, v, n);
+        }
+    } else {
+        // The old copy is out: the new device takes its slot.
+        let gone = copyOf(cp).dev;
+        if (!gone.isNull()) {
+            devGet(gone);
+        }
+        rc = pool_copy_replace_dev(p, v, c, bd, RESILVERING);
+        if (rc == 0) {
+            rc = rsStart(fs, v, c);
+        }
+        if (rc == 0 && !gone.isNull()) {
+            cfs_label_clear_dev(gone);
+        }
+        if (!gone.isNull()) {
+            devPut(gone);
+        }
+    }
+    if (rc == 0) {
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        line.text("replacing member ");
+        line.decimal(v as u64);
+        line.text(" copy ");
+        line.decimal(c as u64);
+        line.text(" with ");
+        devName(mut line, bd);
+        KernelLog.send(LogLevel.Info, line);
+    }
+    devPut(bd);
+    cfs_holds_sync(fs);
+    return rc;
+}
+
+/// Safety: as opReplace.
+unsafe fn opAttach(fs: *mut cfs, existing: *CChar, new: *CChar) -> i32 {
+    let p = poolOf(fs);
+    var at = Found { v: 0, c: 0 };
+    var rc = findCopy(fs, existing, mut at);
+    let mountDev = Ptr.toBorrow(fsOf(fs).mnt as *mount).bdev;
+    if (rc == -ENOENT && !mountDev.isNull() &&
+        strcmp(existing, borrow devOf(mountDev).name as *[u8; 16] as *CChar) == 0) {
+        at.v = 0;
+        rc = 0;
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    let v = at.v;
+    var bd = 0 as *mut blkdev;
+    rc = newDevice(fs, new, truncate<i32>(v), borrow mut bd as *mut *mut blkdev);
+    if (rc != 0) {
+        return rc;
+    }
+    var n: u32 = 0;
+    rc = addSlot(fs, v, borrow mut n as *mut u32);
+    if (rc == 0) {
+        rc = pool_copy_replace_dev(p, v, n, bd, RESILVERING);
+    }
+    if (rc == 0) {
+        rc = rsStart(fs, v, n);
+    }
+    if (rc == 0) {
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        devName(mut line, bd);
+        line.text(" attached as member ");
+        line.decimal(v as u64);
+        line.text(" copy ");
+        line.decimal(n as u64);
+        KernelLog.send(LogLevel.Info, line);
+    }
+    devPut(bd);
+    cfs_holds_sync(fs);
+    return rc;
+}
+
+/// Safety: as newDevice.
+unsafe fn opDetach(fs: *mut cfs, name: *CChar) -> i32 {
+    let p = poolOf(fs);
+    var at = Found { v: 0, c: 0 };
+    var rc = findCopy(fs, name, mut at);
+    if (rc != 0) {
+        return rc;
+    }
+    let gone = copyOf(copyAt(p, at.v, at.c)).dev;
+    if (!gone.isNull()) {
+        devGet(gone);
+    }
+    rc = pool_detach_copy(p, at.v, at.c);
+    if (rc == 0) {
+        let m = memOf(fs, at.v);
+        m.copies = ncopies(p, at.v);
+        // A detached copy no longer names this pool.
+        if (!gone.isNull()) {
+            cfs_label_clear_dev(gone);
+        }
+        cfs_holds_sync(fs);
+    }
+    if (!gone.isNull()) {
+        devPut(gone);
+    }
+    return rc;
+}
+
+/// Safety: as newDevice.
+unsafe fn opSpareAdd(fs: *mut cfs, name: *CChar) -> i32 {
+    if (fsOf(fs).sb.version < 4) {
+        return -EOPNOTSUPP; // no pool uuid to label it with
+    }
+    var bd = 0 as *mut blkdev;
+    var rc = newDevice(fs, name, -1, borrow mut bd as *mut *mut blkdev);
+    if (rc != 0) {
+        return rc;
+    }
+    let tag = newTag();
+    let d = devOf(bd);
+    let blocks = d.capacity / (POOL_BLOCK / (d.sector_size as u64));
+    rc = cfs_label_write_dev(fs, bd, 0, CFS_LABEL_SPARE, tag, blocks);
+    if (rc == 0) {
+        rc = pool_add_spare(poolOf(fs), bd, tag);
+    }
+    if (rc == 0) {
+        var buffer = [0u8; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        start(mut line, fs);
+        devName(mut line, bd);
+        line.text(" is a spare");
+        KernelLog.send(LogLevel.Info, line);
+        cfs_holds_sync(fs);
+        rsWake(fs); // a copy that is out already is taken over now
+    }
+    devPut(bd);
+    return rc;
+}
+
+/// Safety: as newDevice.
+unsafe fn opSpareRemove(fs: *mut cfs, name: *CChar) -> i32 {
+    let bd = blk_find(if (name.isNull()) "\0".ptr as *CChar else name);
+    if (bd.isNull()) {
+        return -ENODEV;
+    }
+    let rc = pool_remove_spare(poolOf(fs), bd);
+    if (rc == 0) {
+        cfs_label_clear_dev(bd);
+        cfs_holds_sync(fs);
+    }
+    devPut(bd);
+    return rc;
+}
+
+/// Safety: as newDevice; `req` a STATUS request, its `out` `max` records.
+unsafe fn status(fs: *mut cfs, req: *mut cosmofs_pool_req) {
+    let p = poolOf(fs);
+    let f = fsOf(fs);
+    let r = Ptr.toBorrowMut(req);
+    r.generation = f.sb.generation;
+    r.members = f.nmembers;
+    r.format = f.sb.version;
+    r.rate = resilverRate();
+    r.degraded = pool_degraded(p as *spool);
+    r.resilvering = false;
+    memcpy(borrow mut r.label as *mut [u8; 16] as *mut void, borrow f.sb.label as *[u8; 16] as *void, 16);
+    r.count = 0;
+    r.total = 0;
+    let size = layoutOf<cosmofs_copy_info>().size;
+    for (v in 0u32..pool(p).nmembers) {
+        let rb = Ptr.toBorrow(memberAt(p, v) as *spool_member).region_blocks as u64;
+        for (c in 0u32..ncopies(p, v)) {
+            let cp = copyOf(copyAt(p, v, c));
+            if (cp.state == RESILVERING) {
+                r.resilvering = true;
+            }
+            r.total += 1;
+            if (r.count >= r.max) {
+                continue;
+            }
+            let at = r.out.add(r.count as usize);
+            r.count += 1;
+            memset(at as *mut void, 0, size);
+            let o = Ptr.toBorrowMut(at);
+            o.member = v;
+            o.copy = c;
+            o.state = cp.state;
+            o.flags = (if (cp.whole) COSMOFS_COPY_I_WHOLE else 0) | (if (cp.peer != 0) COSMOFS_COPY_I_DETACH else 0);
+            o.since = if (cp.state == ONLINE) f.sb.generation else cp.since;
+            o.cursor = cp.cursor;
+            o.blocks = memOf(fs, v).nblocks;
+            if (cp.state == RESILVERING || cp.state != ONLINE) {
+                var todo: u64 = 0;
+                var reg: u64 = 0;
+                while (reg * rb < o.blocks) {
+                    let first = reg * rb;
+                    var last = first + rb;
+                    if (last > o.blocks) {
+                        last = o.blocks;
+                    }
+                    if (!(last <= cp.cursor && cp.state == RESILVERING) && pool_region_missed(p as *spool, v, c, reg)) {
+                        let from = if (first > cp.cursor || cp.state != RESILVERING) first else cp.cursor;
+                        todo = todo.wrappingAdd(last.wrappingSub(from));
+                    }
+                    reg += 1;
+                }
+                o.to_do = todo;
+            }
+            o.read_errors = cp.read_errors;
+            o.write_errors = cp.write_errors;
+            o.csum_errors = cp.csum_errors;
+            if (!cp.dev.isNull()) {
+                copyName(borrow mut o.dev as *mut [u8; 16] as *mut u8, borrow devOf(cp.dev).name as *[u8; 16] as *CChar);
+            }
+        }
+    }
+    r.total += pool(p).nspares;
+    for (i in 0u32..pool(p).nspares) {
+        if (r.count >= r.max) {
+            break;
+        }
+        let at = r.out.add(r.count as usize);
+        r.count += 1;
+        memset(at as *mut void, 0, size);
+        let o = Ptr.toBorrowMut(at);
+        o.member = 0xffff;
+        o.copy = 0xffff;
+        o.state = COSMOFS_COPY_SPARE;
+        let spare = pool_floor_spare(p, i).read();
+        let d = devOf(spare);
+        o.blocks = d.capacity / (POOL_BLOCK / (d.sector_size as u64));
+        copyName(borrow mut o.dev as *mut [u8; 16] as *mut u8, borrow d.name as *[u8; 16] as *CChar);
+    }
+}
+
+/// kernel/cosmofs.h's cosmofs_poolctl: a pool command on a mount.
+/// Safety: `mnt` is a mount, `req` a request.
+@export("cosmofs_poolctl")
+unsafe fn poolctl(mnt: *mut mount, req: *mut cosmofs_pool_req) -> i32 {
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    if (fs.isNull()) {
+        return -EINVAL;
+    }
+    let r = Ptr.toBorrow(req as *cosmofs_pool_req);
+    let op = r.op;
+    let changes = op != POOL_STATUS;
+    if (changes && (fsOf(fs).rdonly || fsOf(fs).maint)) {
+        return -EROFS;
+    }
+    let lock = borrow mut fsOf(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    var rc = if (fsOf(fs).failed != 0 && changes) -EIO else 0;
+    if (rc == 0) {
+        if (op == POOL_STATUS) {
+            status(fs, req);
+        } else if (op == POOL_OFFLINE) {
+            var at = Found { v: 0, c: 0 };
+            rc = findCopy(fs, r.name, mut at);
+            if (rc == 0) {
+                rc = pool_copy_set_state(poolOf(fs), at.v, at.c, OFFLINE, 0);
+            }
+        } else if (op == POOL_ONLINE) {
+            rc = opOnline(fs, r.name);
+        } else if (op == POOL_REPLACE) {
+            rc = opReplace(fs, r.name, r.name2);
+        } else if (op == POOL_ATTACH) {
+            rc = opAttach(fs, r.name, r.name2);
+        } else if (op == POOL_DETACH) {
+            rc = opDetach(fs, r.name);
+        } else if (op == POOL_SPARE_ADD) {
+            rc = opSpareAdd(fs, r.name);
+        } else if (op == POOL_SPARE_REMOVE) {
+            rc = opSpareRemove(fs, r.name);
+        } else {
+            rc = -EINVAL;
+        }
+    }
+    mutex_unlock(lock);
+    // A change of copies is a change of the pool: committed now, so the command's answer is what a reboot finds.
+    if (rc == 0 && changes) {
+        rc = cosmofs_commit_mount(mnt);
+    }
+    return rc;
+}

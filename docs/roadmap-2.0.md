@@ -1295,6 +1295,18 @@ slots of words checked against their C sizes; `cosmofs_crypt_floor.c`
 makes the one call CeeSafe cannot declare (`cfs_mac_ok`'s `char`
 domain). The cipher, hash and key prototypes take pointers, as the
 generated declarations do.
+`cosmofs_resilver.cee`, the resilver, its thread and the pool commands:
+`tests/host/test_cfsresilver.c` builds `struct spool` itself and models
+the pool's operations, the labels, the holds and the devices -- copies
+in every state rebuilt whole and by region, an ONLINE copy's holes,
+sources that disagree, spares taking over or refusing, copies failing
+while the lock is let go, both finishes, replaces that detach, and every
+pool command with malformed names and every refusal; the thread runs a
+few windows at a time (0x2524b2fde370ae3b, clang and gcc; all but the
+branches that cannot be reached). `rs_stop` is a word, as `AtomicU32`
+is; `cosmofs_resilver_floor.c` keeps `g_cosmofs_resilver_rate` and makes
+the `cfs_pace` call (its name is the pacing state's too); the debug
+seams are `@cfg("CONFIG_DEBUG")` exports.
 
 Size: about 4.5x.
 

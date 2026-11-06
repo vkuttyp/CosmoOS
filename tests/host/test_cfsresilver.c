@@ -1,5 +1,5 @@
 /*
- * test_cfsresilver.c - cosmofs's resilver (kernel-services/filesystem/cosmofs/cosmofs_resilver.c) on the host:
+ * test_cfsresilver.c - cosmofs's resilver (kernel-services/filesystem/cosmofs/cosmofs_resilver.cee) on the host:
  * roadmap 2.0 SA7. A digest recorded from the C over seeded pools the test builds and owns (struct spool itself, with
  * the pool's operations, the labels, the holds and the devices modelled here): copies in every state, rebuilt whole
  * and region by region, an ONLINE copy's holes filled, sources that disagree, spares taking over, devices removed, the
@@ -29,6 +29,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants, and the stack slot it relies on. */
+_Static_assert(ENOENT == 2 && EIO == 5 && ENOMEM == 12 && EAGAIN == 11 && EBUSY == 16 && EEXIST == 17 &&
+                   ENODEV == 19 && EINVAL == 22 && ENOSPC == 28 && EROFS == 30 && EOPNOTSUPP == 95,
+               "cosmofs_resilver's errno.h values");
+_Static_assert(POOL_COPY_ONLINE == 0 && POOL_COPY_MISSING == 1 && POOL_COPY_OFFLINE == 2 && POOL_COPY_FAULTED == 3 &&
+                   POOL_COPY_RESILVERING == 4 && POOL_MAX_COPIES == 4 && POOL_BLOCK == 4096 && POOL_DVA_SHIFT == 56 &&
+                   CFS_BLOCK == 4096 && CFS_LABEL_RESILVER == 1 && CFS_LABEL_SPARE == 2 && SCHED_PRIO_DEFAULT == 32,
+               "cosmofs_resilver's storage.h, thread.h and cosmofs_format.h values");
+_Static_assert(COSMOFS_POOL_STATUS == 0 && COSMOFS_POOL_OFFLINE == 1 && COSMOFS_POOL_ONLINE == 2 &&
+                   COSMOFS_POOL_REPLACE == 3 && COSMOFS_POOL_ATTACH == 4 && COSMOFS_POOL_DETACH == 5 &&
+                   COSMOFS_POOL_SPARE_ADD == 6 && COSMOFS_POOL_SPARE_REMOVE == 7 && COSMOFS_COPY_SPARE == 5 &&
+                   COSMOFS_COPY_I_WHOLE == 1 && COSMOFS_COPY_I_DETACH == 2 && sizeof(enum pool_copy_state) == 4 &&
+                   sizeof(enum cosmofs_pool_op) == 4 && sizeof(((struct cfs *)0)->rs_stop) == 4 &&
+                   sizeof(((struct cfs *)0)->pool_name) == 17,
+               "cosmofs_resilver's cosmofs.h values, and the enums and words it reads as u32");
+_Static_assert(sizeof(struct cfs_pace) <= 4 * 8, "cosmofs_resilver.cee keeps the pacing state in 4 words");
 
 /* The digest of the C (cosmofs_resilver.c, 2026-11-06), which the CeeSafe port gives. */
 #define RESILVER_DIGEST 0x2524b2fde370ae3bull

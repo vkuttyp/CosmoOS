@@ -2139,8 +2139,9 @@ for the mount and a copy that missed commits on it is rebuilt whole.
 
 ### Resilvering
 
-A copy being rebuilt is `RESILVERING`: written, never read. From the
-moment it is, every write the pool takes reaches it, so what the
+The resilver, its thread and the pool commands are
+`cosmofs_resilver.cee` (roadmap 2.0 SA7). A copy being rebuilt is
+`RESILVERING`: written, never read. From the moment it is, every write the pool takes reaches it, so what the
 resilver has to copy is exactly what was there before -- the allocated
 blocks of the regions its record names (all of them for a whole
 rebuild). One thread a mount does it, `cfs-resilver`, a window at a time

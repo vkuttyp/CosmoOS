@@ -202,10 +202,10 @@ struct cfs {
     /* The writeback thread (design.md, "The writeback thread"). */
     struct thread *wb_thread;
     bool wb_stop;
-    /* The resilver (cosmofs_resilver.c): one thread a mount, from the
+    /* The resilver (cosmofs_resilver.cee): one thread a mount, from the
      * first copy that needs one until the unmount. */
     struct thread *rs_thread;
-    bool rs_stop;
+    uint32_t rs_stop;           /* 0 or 1, atomic: a word, as CeeSafe's AtomicU32 is */
     bool maint;                 /* a maintenance mount (MOUNT_DETACHED): no resilver, no pool commands */
     uint64_t rs_since_record;   /* blocks copied since the cursor was last made due for the record */
     uint64_t rs_started_ns;
@@ -536,7 +536,7 @@ void cfs_label_clear_dev(struct blkdev *bd);
 struct blkdev *cfs_find_tagged(struct cfs *fs, uint64_t flags, uint64_t tag);
 void cfs_spares_find(struct cfs *fs);
 struct blkdev *cfs_find_lagging(struct cfs *fs, unsigned vdev, uint64_t since, bool *exact);
-/* The resilver (cosmofs_resilver.c): started after a mount, stopped
+/* The resilver (cosmofs_resilver.cee): started after a mount, stopped
  * before the filesystem is torn down; the holds (CFS-5) set again. */
 void cfs_resilver_mount(struct cfs *fs);
 void cfs_resilver_stop(struct cfs *fs);
