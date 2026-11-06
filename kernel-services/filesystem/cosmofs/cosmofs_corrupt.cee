@@ -1,0 +1,832 @@
+// cosmofs_corrupt.cee - The structural check's test hook, in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfscorrupt.c
+// holds it to the digest of the C it replaced.
+//
+// Break a mounted filesystem in one named way (kernel/include/kernel/cosmofs.h), so that every finding the check can
+// report has a test that produced it on purpose. Each case manufactures exactly one finding.
+//
+// struct cfs, the inodes, the buffers, the snapshot entries and the directory blocks stay C (cosmofs_internal.h,
+// cosmofs_format.h). The inodes and the snapshot entry the C kept on the stack are kept in zeroed slots of words,
+// checked against their C sizes (tests/host/test_cfscorrupt.c): a CeeSafe local cannot hold C state. The two entry
+// helpers cosmofs_format.h has as inline functions, the free run and the put, are written out here.
+
+@header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/cosmofs.h",
+    "cosmofs_internal.h")
+extern "C" {
+    struct mount {
+        fs_priv: *mut void;
+    }
+    struct cfs_super {
+        version: u32;
+        next_ino: u64;
+        inode_count: u64;
+        free_blocks: u64;
+        snap_root: u64;
+        rollback_root: u64;
+    }
+    struct cfs {
+        sb: cfs_super;
+        bitmap: *mut u8;
+        bitmap_dirty: *mut u8;
+        free_blocks: u64;
+        lock: mutex;
+    }
+    struct cfs_buf {
+        blkno: u64;
+        data: *mut u8;
+        dirty: bool;
+    }
+    struct cfs_extent {
+        start: u64;
+        count: u32;
+        lblk: u32;
+    }
+    struct cfs_inode {
+        mode: u32;
+        nlink: u32;
+        size: u64;
+        ino: u64;
+        direct: [cfs_extent; 10];
+        indirect: u64;
+        parent: u64;
+        csum_algo: u32;
+    }
+    struct cfs_snapshot {
+        alloc_root: u64;
+        id: u64;
+        uuid: [u8; 16];
+    }
+    struct cfs_rollback {
+        crc: u32;
+    }
+    struct cfs_dirent {
+        ino: u64;
+    }
+
+    fn cfs_inode_read(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_inode_write(fs: *mut cfs, ino: u64, inode: *cfs_inode) -> i32;
+    fn cfs_inode_alloc(fs: *mut cfs, ino: *mut u64) -> i32;
+    fn cfs_alloc_run(fs: *mut cfs, cls: u32, hint: u64, want: u32, start: *mut u64, got: *mut u64) -> i32;
+    fn cfs_dva_lin(fs: *cfs, dva: u64) -> u64;
+    fn cfs_dir_read_block_at(fs: *mut cfs, dir: *cfs_inode, lblk: u64, buf: *mut u8) -> i32;
+    fn cfs_dir_write_block_at(fs: *mut cfs, dir: *mut cfs_inode, lblk: u64, buf: *u8) -> i32;
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_new(fs: *mut cfs, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_mark_dirty(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_snaplist_kind(fs: *cfs) -> u32;
+    fn cfs_snaplist_slots(fs: *cfs) -> u32;
+    fn cfs_snaplist_get(fs: *cfs, b: *cfs_buf, i: u32, out: *mut cfs_snapshot) -> bool;
+    fn cfs_snaplist_next(b: *cfs_buf) -> u64;
+    fn cfs_snaplist_set(fs: *cfs, b: *mut cfs_buf, i: u32, s: *cfs_snapshot);
+    fn cfs_dirent_extra(len: u32) -> u32;
+    fn cfs_dirent_check(blk: *cfs_dirent, s: u32, version: u32) -> u32;
+    fn cfs_dirent_name(blk: *cfs_dirent, s: u32, out: *mut CChar) -> u32;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+}
+
+// ---- errno.h, cosmofs.h, cosmofs_format.h and cosmofs_internal.h values (asserted in tests/host/test_cfscorrupt.c)
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const ENOTDIR: i32 = 20;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const ENOTSUP: i32 = 95;
+const CORRUPT_LEAK: u32 = 0;
+const CORRUPT_FREE_IN_USE: u32 = 1;
+const CORRUPT_CROSSLINK: u32 = 2;
+const CORRUPT_NLINK: u32 = 3;
+const CORRUPT_ORPHAN: u32 = 4;
+const CORRUPT_DANGLING: u32 = 5;
+const CORRUPT_DIRENT: u32 = 6;
+const CORRUPT_COUNTER: u32 = 7;
+const CORRUPT_INO_SLOT: u32 = 8;
+const CORRUPT_EXTENT_ORDER: u32 = 9;
+const CORRUPT_BAD_PTR: u32 = 10;
+const CORRUPT_TWO_PARENTS: u32 = 11;
+const CORRUPT_SNAP_MEMBERS: u32 = 12;
+const CORRUPT_DUP_NAME: u32 = 13;
+const CORRUPT_CHAIN_CYCLE: u32 = 14;
+const CORRUPT_NAMELEN: u32 = 15;
+const CORRUPT_EXTENT_OVERLAP: u32 = 16;
+const CORRUPT_SNAP_UUID: u32 = 17;
+const CORRUPT_ROLLBACK_CRC: u32 = 18;
+const CORRUPT_ROOT_TYPE: u32 = 19;
+const CORRUPT_LONGNAME_EXTRA: u32 = 20;
+const CORRUPT_LONGNAME_CONT: u32 = 21;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_BITS_PER_BITMAP: u64 = 32512;
+const CFS_DVA_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
+const CFS_ROOT_INO: u64 = 1;
+const CFS_TYPE_REG: u32 = 1;
+const CFS_TYPE_DIR: u32 = 2;
+const CFS_CSUM_CRC32C: u32 = 1;
+const CFS_EXT_COMPRESSED: u32 = 0x80000000;
+const CFS_EXT_COUNT_MASK: u32 = 0xFFFF;
+const CFS_ALLOC_META: u32 = 0;
+const CFS_ALLOC_DATA: u32 = 1;
+const CFS_KIND_EXTENTS: u32 = 6;
+const CFS_KIND_MEMBERS: u32 = 11;
+const CFS_KIND_SNAPLIST2: u32 = 15;
+const CFS_KIND_ROLLBACK: u32 = 16;
+const CFS_MEMBERS_PER_BLOCK: u64 = 63;
+const CFS_SNAPS_PER_BLOCK2: u32 = 31;
+const CFS_NAME_MAX_LONG: u32 = 255;
+const CFS_DIRENTS_PER_BLOCK: u32 = 64;
+const CFS_DIRENT_SIZE: usize = 64;
+const CFS_DIRENT_CONT: u64 = 0xFFFFFFFFFFFFFFFF;
+const CFS_DIRENT_HEAD_NAME: u32 = 48;
+const CFS_DIRENT_CONT_NAME: u32 = 56;
+/// Where an entry's fields are (struct cfs_dirent, struct cfs_dirent_cont): checked by the test.
+const DIRENT_TYPE: usize = 8;
+const DIRENT_NAMELEN: usize = 9;
+const DIRENT_EXTRA: usize = 10;
+const DIRENT_NAME: usize = 16;
+const CONT_NAME: usize = 8;
+/// The mode bits of cosmofs_format.h's CFS_MODE: rw-r--r--, and the permission mask.
+const PERM_0644: u32 = 420;
+const PERM_MASK: u32 = 4095;
+
+// ---- Helpers ----
+
+fn mode(kind: u32, perm: u32) -> u32 => (kind << 12) | (perm & PERM_MASK);
+
+fn extCount(e: borrow cfs_extent) -> u32 =>
+    if ((e.count & CFS_EXT_COMPRESSED) != 0) e.count & CFS_EXT_COUNT_MASK else e.count;
+
+/// Safety: `block` is CFS_BLOCK bytes.
+unsafe fn bytes(block: *mut u8) -> SliceMut<static, u8> => SliceMut.fromRaw(block, CFS_BLOCK);
+
+/// Safety: `block` is CFS_BLOCK readable bytes.
+unsafe fn direntIno(block: *mut u8, s: u32) -> u64 =>
+    ByteOrder.readU64LE(Slice.fromRaw(block as *u8, CFS_BLOCK), s as usize * CFS_DIRENT_SIZE);
+
+/// Safety: as direntIno, writable.
+unsafe fn setDirentIno(block: *mut u8, s: u32, ino: u64) {
+    ByteOrder.writeU64LE(bytes(block), s as usize * CFS_DIRENT_SIZE, ino);
+}
+
+/// Safety: as direntIno.
+unsafe fn direntByte(block: *mut u8, s: u32, at: usize) -> u8 => block.add(s as usize * CFS_DIRENT_SIZE + at).read();
+
+/// Safety: as setDirentIno.
+unsafe fn setDirentByte(block: *mut u8, s: u32, at: usize, v: u8) {
+    block.add(s as usize * CFS_DIRENT_SIZE + at).write(v);
+}
+
+/// cosmofs_format.h's cfs_dirent_free_run: the first slot of `block` that starts `need` consecutive free slots, or -1.
+/// Safety: as direntIno.
+unsafe fn freeRun(block: *mut u8, need: u32) -> i32 {
+    var run: u32 = 0;
+    for (s in 0u32..CFS_DIRENTS_PER_BLOCK) {
+        run = if (direntIno(block, s) == 0) run + 1 else 0;
+        if (run == need) {
+            return truncate<i32>(s + 1 - need);
+        }
+    }
+    return -1;
+}
+
+/// cosmofs_format.h's cfs_dirent_put: the entry for `name` (`len` bytes) at slot `s`, whose slots the caller found
+/// free.
+/// Safety: as setDirentIno; `name` is `len` readable bytes.
+unsafe fn direntPut(block: *mut u8, s: u32, ino: u64, kind: u32, name: *u8, len: u32) {
+    let extra = cfs_dirent_extra(len);
+    memset(block.add(s as usize * CFS_DIRENT_SIZE) as *mut void, 0, (1 + extra as usize) * CFS_DIRENT_SIZE);
+    setDirentIno(block, s, ino);
+    setDirentByte(block, s, DIRENT_TYPE, truncate<u8>(kind));
+    setDirentByte(block, s, DIRENT_NAMELEN, truncate<u8>(len));
+    setDirentByte(block, s, DIRENT_EXTRA, truncate<u8>(extra));
+    var n: u32 = 0;
+    while (n < len && n < CFS_DIRENT_HEAD_NAME) {
+        setDirentByte(block, s, DIRENT_NAME + n as usize, name.add(n as usize).read());
+        n += 1;
+    }
+    for (k in 1u32..extra + 1) {
+        setDirentIno(block, s + k, CFS_DIRENT_CONT);
+        var i: u32 = 0;
+        while (i < CFS_DIRENT_CONT_NAME && n < len) {
+            setDirentByte(block, s + k, CONT_NAME + i as usize, name.add(n as usize).read());
+            i += 1;
+            n += 1;
+        }
+    }
+}
+
+/// A zeroed struct cfs_inode in a slot.
+fn inodeSlot() -> [u64; 32] => [0u64; 32];
+
+// ---- The cases ----
+
+/// Allocate a block and reference it from nothing.
+/// Safety: `fs` is a mounted filesystem, locked.
+unsafe fn leak(fs: *mut cfs, token: *mut u64) -> i32 {
+    var blk: u64 = 0;
+    var got: u64 = 0;
+    let rc = cfs_alloc_run(fs, CFS_ALLOC_META, 0, 1, borrow mut blk as *mut u64, borrow mut got as *mut u64);
+    token.write(blk);
+    return rc;
+}
+
+/// Clear the bit of the block the named file's first run starts at.
+/// Safety: as leak; `inp` an inode.
+unsafe fn freeInUse(fs: *mut cfs, inp: *mut cfs_inode, token: *mut u64) -> i32 {
+    let start = Ptr.toBorrow(inp as *cfs_inode).direct[0].start;
+    let lin = cfs_dva_lin(fs as *cfs, start);
+    if (lin == CFS_DVA_NONE) {
+        return -EINVAL;
+    }
+    let f = Ptr.toBorrowMut(fs);
+    let at = f.bitmap.add((lin >> 3) as usize);
+    at.write(at.read() & ((1u8 << truncate<u8>(lin & 7)) ^ 0xFF));
+    f.bitmap_dirty.add((lin / CFS_BITS_PER_BITMAP) as usize).write(1);
+    f.free_blocks = f.free_blocks.wrappingAdd(1);
+    f.sb.free_blocks = f.sb.free_blocks.wrappingAdd(1);
+    token.write(start);
+    return 0;
+}
+
+/// A second inode whose first extent is the named file's: two live claims on one block, which is the cross-link.
+/// Safety: as freeInUse.
+unsafe fn crosslink(fs: *mut cfs, inp: *mut cfs_inode, token: *mut u64) -> i32 {
+    var second: u64 = 0;
+    var rc = cfs_inode_alloc(fs, borrow mut second as *mut u64);
+    if (rc != 0) {
+        return rc;
+    }
+    let i = Ptr.toBorrow(inp as *cfs_inode);
+    var slot = inodeSlot();
+    let twinp = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+    let twin = Ptr.toBorrowMut(twinp);
+    twin.mode = mode(CFS_TYPE_REG, PERM_0644);
+    twin.nlink = 1;
+    twin.ino = second;
+    twin.parent = CFS_ROOT_INO;
+    twin.csum_algo = i.csum_algo;
+    twin.size = CFS_BLOCK as u64;
+    twin.direct[0].start = i.direct[0].start;
+    twin.direct[0].count = i.direct[0].count;
+    twin.direct[0].lblk = i.direct[0].lblk;
+    rc = cfs_inode_write(fs, second, twinp as *cfs_inode);
+    token.write(i.direct[0].start);
+    return rc;
+}
+
+/// An inode with a block and no name: what a crash between an unlink and the eviction that frees the blocks leaves.
+/// Safety: as leak.
+unsafe fn orphan(fs: *mut cfs, token: *mut u64) -> i32 {
+    var lost: u64 = 0;
+    var rc = cfs_inode_alloc(fs, borrow mut lost as *mut u64);
+    if (rc != 0) {
+        return rc;
+    }
+    var slot = inodeSlot();
+    let deadp = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+    let dead = Ptr.toBorrowMut(deadp);
+    dead.mode = mode(CFS_TYPE_REG, PERM_0644);
+    dead.nlink = 0;
+    dead.ino = lost;
+    dead.parent = CFS_ROOT_INO;
+    dead.csum_algo = CFS_CSUM_CRC32C;
+    var blk: u64 = 0;
+    var got: u64 = 0;
+    rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, 0, 1, borrow mut blk as *mut u64, borrow mut got as *mut u64);
+    if (rc != 0) {
+        return rc;
+    }
+    dead.size = CFS_BLOCK as u64;
+    dead.direct[0].start = blk;
+    dead.direct[0].count = 1;
+    dead.direct[0].lblk = 0;
+    rc = cfs_inode_write(fs, lost, deadp as *cfs_inode);
+    token.write(lost);
+    return rc;
+}
+
+/// Rewrite one entry of the root directory: to name a slot nothing allocated (dangling), or to claim a type its inode
+/// does not have.
+/// Safety: as leak.
+unsafe fn rootEntry(fs: *mut cfs, kind: u32, token: *mut u64) -> i32 {
+    var slot = inodeSlot();
+    let rootp = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+    if (cfs_inode_read(fs, CFS_ROOT_INO, rootp) != 0) {
+        return -EIO;
+    }
+    let block = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (block.isNull()) {
+        return -ENOMEM;
+    }
+    var rc = cfs_dir_read_block_at(fs, rootp as *cfs_inode, 0, block);
+    if (rc == 0) {
+        var done = false;
+        var i: u32 = 0;
+        while (i < CFS_DIRENTS_PER_BLOCK && !done) {
+            if (direntIno(block, i) != 0) {
+                if (kind == CORRUPT_DANGLING) {
+                    let t = Ptr.toBorrow(fs as *cfs).sb.next_ino.wrappingAdd(1000);
+                    token.write(t);
+                    setDirentIno(block, i, t);
+                } else {
+                    token.write(direntIno(block, i));
+                    let ty = direntByte(block, i, DIRENT_TYPE);
+                    setDirentByte(block, i, DIRENT_TYPE,
+                        if (ty as u32 == CFS_TYPE_DIR) truncate<u8>(CFS_TYPE_REG) else truncate<u8>(CFS_TYPE_DIR));
+                }
+                done = true;
+            }
+            i += 1;
+        }
+        rc = if (done) cfs_dir_write_block_at(fs, rootp, 0, block as *u8) else -ENOENT;
+    }
+    kfree(block as *mut void);
+    return rc;
+}
+
+/// Add two runs to a named file of exactly one: descending (order), or the third beginning inside a two-block second
+/// (overlap). Both added runs point at freshly allocated blocks, distinct from each other and from the file's own: a
+/// run pointing at the file's block would be a cross-link and one pointing at a free block would be seen_not_alloc,
+/// and either would make the test pass for the wrong reason (docs/audit/next-subsystem-fsck-unchecked.md).
+/// Safety: as freeInUse.
+unsafe fn extents(fs: *mut cfs, inp: *mut cfs_inode, ino: u64, kind: u32, token: *mut u64) -> i32 {
+    let i = Ptr.toBorrowMut(inp);
+    if (ino == 0 || extCount(i.direct[0]) == 0 || extCount(i.direct[1]) != 0 || extCount(i.direct[2]) != 0) {
+        // Needs a file of exactly one run with room after it. Refused rather than silently producing some other fault.
+        return -EINVAL;
+    }
+    // The overlap case needs its middle run to be TWO blocks wide, so a third run can begin inside it: a one-block
+    // allocation under a count of two would have the run claim its neighbour, which the cross-link map catches.
+    let wide: u32 = if (kind == CORRUPT_EXTENT_OVERLAP) 2 else 1;
+    var a: u64 = 0;
+    var b: u64 = 0;
+    var got: u64 = 0;
+    var rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, 0, wide, borrow mut a as *mut u64, borrow mut got as *mut u64);
+    if (rc != 0) {
+        return rc;
+    }
+    if (got < wide as u64) {
+        return -ENOSPC; // a short run would mean the same claim-the-neighbour bug
+    }
+    rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, 0, 1, borrow mut b as *mut u64, borrow mut got as *mut u64);
+    if (rc != 0) {
+        return rc;
+    }
+    if (got < 1) {
+        return -ENOSPC;
+    }
+    let first = i.direct[0].lblk; // count 1: covers [first, first+1)
+    if (kind == CORRUPT_EXTENT_ORDER) {
+        // Ascend, then DESCEND: 0, 5, 3.
+        i.direct[1].start = a;
+        i.direct[1].count = 1;
+        i.direct[1].lblk = first.wrappingAdd(5);
+        i.direct[2].start = b;
+        i.direct[2].count = 1;
+        i.direct[2].lblk = first.wrappingAdd(3);
+    } else {
+        // Ascend throughout, and the third begins inside the second: 0/[1,3)/2.
+        i.direct[1].start = a;
+        i.direct[1].count = wide;
+        i.direct[1].lblk = first.wrappingAdd(1);
+        i.direct[2].start = b;
+        i.direct[2].count = 1;
+        i.direct[2].lblk = first.wrappingAdd(2);
+    }
+    let end = first.wrappingAdd(8) as u64 * CFS_BLOCK as u64;
+    if (i.size < end) {
+        i.size = end;
+    }
+    rc = cfs_inode_write(fs, ino, inp as *cfs_inode);
+    token.write(ino);
+    return rc;
+}
+
+/// An entry of the named directory claiming a name longer than its slot can hold: below version 15 past CFS_NAME_MAX,
+/// from 15 a length needing continuations the entry does not have (design.md, "Format version 15").
+/// Safety: as freeInUse.
+unsafe fn namelen(fs: *mut cfs, inp: *mut cfs_inode, ino: u64, token: *mut u64) -> i32 {
+    let blk = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (blk.isNull()) {
+        return -ENOMEM;
+    }
+    var rc = cfs_dir_read_block_at(fs, inp as *cfs_inode, 0, blk);
+    if (rc == 0) {
+        var s: u32 = 0;
+        while (s < CFS_DIRENTS_PER_BLOCK && direntIno(blk, s) == 0) {
+            s += 1;
+        }
+        if (s == CFS_DIRENTS_PER_BLOCK) {
+            rc = -EINVAL; // an empty directory cannot carry this fault
+        } else {
+            setDirentByte(blk, s, DIRENT_NAMELEN, truncate<u8>(CFS_NAME_MAX_LONG));
+            setDirentByte(blk, s, DIRENT_EXTRA, 0);
+            rc = cfs_dir_write_block_at(fs, inp, 0, blk as *u8);
+            token.write(ino);
+        }
+    }
+    kfree(blk as *mut void);
+    return rc;
+}
+
+/// A second directory naming a directory that already has a parent: a cycle in what must be a tree.
+/// Safety: as leak.
+unsafe fn twoParents(fs: *mut cfs, ino: u64, token: *mut u64) -> i32 {
+    let blk = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (blk.isNull()) {
+        return -ENOMEM;
+    }
+    var slot = inodeSlot();
+    let rootp = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+    var rc = cfs_inode_read(fs, CFS_ROOT_INO, rootp);
+    if (rc == 0) {
+        rc = cfs_dir_read_block_at(fs, rootp as *cfs_inode, 0, blk);
+    }
+    if (rc == 0) {
+        var dst: u32 = 0;
+        while (dst < CFS_DIRENTS_PER_BLOCK && direntIno(blk, dst) != 0) {
+            dst += 1;
+        }
+        if (dst == CFS_DIRENTS_PER_BLOCK) {
+            rc = -ENOSPC;
+        } else {
+            // `ino` is the directory to name a second time.
+            setDirentIno(blk, dst, ino);
+            setDirentByte(blk, dst, DIRENT_TYPE, truncate<u8>(CFS_TYPE_DIR));
+            setDirentByte(blk, dst, DIRENT_NAMELEN, 6);
+            let second = "second\0";
+            for (k in 0usize..7) {
+                setDirentByte(blk, dst, DIRENT_NAME + k, second.ptr.add(k).read());
+            }
+            rc = cfs_dir_write_block_at(fs, rootp, 0, blk as *u8);
+            token.write(ino);
+        }
+    }
+    kfree(blk as *mut void);
+    return rc;
+}
+
+/// Two extent-chain blocks pointing at each other, hung off the named inode: the walk must end on its own guard
+/// rather than on the chain running out.
+/// Safety: as freeInUse.
+unsafe fn chainCycle(fs: *mut cfs, inp: *mut cfs_inode, ino: u64, token: *mut u64) -> i32 {
+    var x = 0 as *mut cfs_buf;
+    var y = 0 as *mut cfs_buf;
+    var rc = cfs_buf_new(fs, CFS_KIND_EXTENTS, borrow mut x as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = cfs_buf_new(fs, CFS_KIND_EXTENTS, borrow mut y as *mut *mut cfs_buf);
+    if (rc != 0) {
+        cfs_buf_put(fs, x);
+        return rc;
+    }
+    let bx = Ptr.toBorrowMut(x);
+    let by = Ptr.toBorrowMut(y);
+    ByteOrder.writeU64LE(bytes(bx.data), CFS_MHDR_SIZE, by.blkno);
+    ByteOrder.writeU64LE(bytes(by.data), CFS_MHDR_SIZE, bx.blkno); // back to the first: the cycle
+    bx.dirty = true;
+    by.dirty = true;
+    let head = bx.blkno;
+    cfs_buf_put(fs, x);
+    cfs_buf_put(fs, y);
+    let i = Ptr.toBorrowMut(inp);
+    i.indirect = head;
+    rc = cfs_inode_write(fs, ino, inp as *cfs_inode);
+    token.write(head);
+    return rc;
+}
+
+/// A snapshot's member table claiming more members than its block can hold. Version 4 and later only: before it, a
+/// snapshot's alloc_root is an index rather than a member table and there is no count to be wrong.
+/// Safety: as leak.
+unsafe fn snapMembers(fs: *mut cfs, token: *mut u64) -> i32 {
+    let f = fs as *cfs;
+    if (Ptr.toBorrow(f).sb.version < 4) {
+        return -ENOTSUP;
+    }
+    var list = Ptr.toBorrow(f).sb.snap_root;
+    var target: u64 = 0;
+    var guard: u32 = 0;
+    var sslot = [0u64; 16];
+    let sp = borrow mut sslot as *mut [u64; 16] as *mut cfs_snapshot;
+    while (list != 0 && target == 0 && guard < 64) {
+        guard += 1;
+        var b = 0 as *mut cfs_buf;
+        if (cfs_buf_get(fs, list, cfs_snaplist_kind(f), borrow mut b as *mut *mut cfs_buf) != 0) {
+            break;
+        }
+        let slots = cfs_snaplist_slots(f);
+        for (i in 0u32..slots) {
+            if (cfs_snaplist_get(f, b as *cfs_buf, i, sp)) {
+                let s = Ptr.toBorrow(sp as *cfs_snapshot);
+                if (s.id != 0 && s.alloc_root != 0) {
+                    target = s.alloc_root;
+                    break;
+                }
+            }
+        }
+        list = cfs_snaplist_next(b as *cfs_buf);
+        cfs_buf_put(fs, b);
+    }
+    if (target == 0) {
+        return -ENOENT; // no snapshot: the caller must take one first
+    }
+    var mb = 0 as *mut cfs_buf;
+    let rc = cfs_buf_get(fs, target, CFS_KIND_MEMBERS, borrow mut mb as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    let m = Ptr.toBorrowMut(mb);
+    ByteOrder.writeU64LE(bytes(m.data), CFS_MHDR_SIZE, CFS_MEMBERS_PER_BLOCK + 1);
+    m.dirty = true;
+    cfs_buf_put(fs, mb);
+    token.write(target);
+    return 0;
+}
+
+/// One name twice in the named directory, at two DIFFERENT inodes -- which is what makes it a fault rather than a hard
+/// link: two entries resolve differently, unlink removes one and the name survives.
+/// Safety: as freeInUse.
+unsafe fn dupName(fs: *mut cfs, inp: *mut cfs_inode, ino: u64, token: *mut u64) -> i32 {
+    let blk = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (blk.isNull()) {
+        return -ENOMEM;
+    }
+    var rc = cfs_dir_read_block_at(fs, inp as *cfs_inode, 0, blk);
+    if (rc == 0) {
+        var src: u32 = 0;
+        while (src < CFS_DIRENTS_PER_BLOCK && direntIno(blk, src) == 0) {
+            src += 1;
+        }
+        var dst: u32 = 0;
+        while (dst < CFS_DIRENTS_PER_BLOCK && direntIno(blk, dst) != 0) {
+            dst += 1;
+        }
+        if (src == CFS_DIRENTS_PER_BLOCK || dst == CFS_DIRENTS_PER_BLOCK) {
+            rc = -EINVAL;
+        } else {
+            var twin: u64 = 0;
+            rc = cfs_inode_alloc(fs, borrow mut twin as *mut u64);
+            if (rc == 0) {
+                var slot = inodeSlot();
+                let tp = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+                let t = Ptr.toBorrowMut(tp);
+                t.mode = mode(CFS_TYPE_REG, PERM_0644);
+                t.nlink = 1;
+                t.ino = twin;
+                t.parent = ino;
+                rc = cfs_inode_write(fs, twin, tp as *cfs_inode);
+            }
+            if (rc == 0) {
+                // The same name, however many slots it takes, at a different inode.
+                var nm = [0u8; 255];
+                let d = blk as *cfs_dirent;
+                let version = Ptr.toBorrow(fs as *cfs).sb.version;
+                let nlen = if (cfs_dirent_check(d, src, version) != 0)
+                    cfs_dirent_name(d, src, borrow mut nm as *mut [u8; 255] as *mut CChar)
+                else 0;
+                let run = if (nlen != 0) freeRun(blk, 1 + cfs_dirent_extra(nlen)) else -1;
+                if (run < 0) {
+                    rc = -ENOSPC;
+                } else {
+                    direntPut(blk, truncate<u32>(run), twin, CFS_TYPE_REG, borrow nm as *[u8; 255] as *u8, nlen);
+                    rc = cfs_dir_write_block_at(fs, inp, 0, blk as *u8);
+                    token.write(ino);
+                }
+            }
+        }
+    }
+    kfree(blk as *mut void);
+    return rc;
+}
+
+/// Zero the uuid of the first snapshot of the list's head block, where it lies: the fault is in the committed list,
+/// not in a transaction's copy.
+/// Safety: as leak.
+unsafe fn snapUuid(fs: *mut cfs, token: *mut u64) -> i32 {
+    let f = fs as *cfs;
+    let root = Ptr.toBorrow(f).sb.snap_root;
+    if (Ptr.toBorrow(f).sb.version < 12 || root == 0) {
+        return -ENOENT;
+    }
+    var b = 0 as *mut cfs_buf;
+    var rc = cfs_buf_get(fs, root, CFS_KIND_SNAPLIST2, borrow mut b as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = -ENOENT;
+    var sslot = [0u64; 16];
+    let sp = borrow mut sslot as *mut [u64; 16] as *mut cfs_snapshot;
+    for (i in 0u32..CFS_SNAPS_PER_BLOCK2) {
+        if (!cfs_snaplist_get(f, b as *cfs_buf, i, sp)) {
+            continue;
+        }
+        let s = Ptr.toBorrowMut(sp);
+        s.uuid = [0u8; 16];
+        cfs_snaplist_set(f, b, i, sp as *cfs_snapshot);
+        cfs_buf_mark_dirty(fs, b);
+        token.write(s.id);
+        rc = 0;
+        break;
+    }
+    cfs_buf_put(fs, b);
+    return rc;
+}
+
+/// Flip a byte of the rollback record's own CRC, not the block header's: the block still verifies and what it says
+/// does not.
+/// Safety: as leak.
+unsafe fn rollbackCrc(fs: *mut cfs, token: *mut u64) -> i32 {
+    let f = fs as *cfs;
+    let root = Ptr.toBorrow(f).sb.rollback_root;
+    if (Ptr.toBorrow(f).sb.version < 12 || root == 0) {
+        return -ENOENT;
+    }
+    var b = 0 as *mut cfs_buf;
+    let rc = cfs_buf_get(fs, root, CFS_KIND_ROLLBACK, borrow mut b as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    let r = Ptr.toBorrowMut(Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE) as *mut cfs_rollback);
+    r.crc = r.crc ^ 0x5A;
+    cfs_buf_mark_dirty(fs, b);
+    cfs_buf_put(fs, b);
+    token.write(root);
+    return 0;
+}
+
+/// Both superblock counters, in opposite directions: the check must report one finding per counter.
+/// Safety: as leak.
+unsafe fn counter(fs: *mut cfs, token: *mut u64) -> i32 {
+    let f = Ptr.toBorrowMut(fs);
+    f.free_blocks = f.free_blocks.wrappingAdd(1);
+    f.sb.free_blocks = f.sb.free_blocks.wrappingAdd(1);
+    if (f.sb.inode_count > 0) {
+        f.sb.inode_count -= 1;
+    }
+    token.write(f.sb.free_blocks);
+    return 0;
+}
+
+/// Version 15's two shapes the checker must refuse before reading a name (CF13): a head whose `extra` is not what its
+/// length needs, and continuations with no head. The named directory's first long name, in its first block.
+/// Safety: as freeInUse.
+unsafe fn longname(fs: *mut cfs, inp: *mut cfs_inode, ino: u64, kind: u32, token: *mut u64) -> i32 {
+    var rc = cfs_inode_read(fs, ino, inp);
+    if (rc == 0 && Ptr.toBorrow(inp as *cfs_inode).mode >> 12 != CFS_TYPE_DIR) {
+        rc = -ENOTDIR;
+    }
+    let blk = if (rc == 0) kmalloc(CFS_BLOCK, 0) as *mut u8 else 0 as *mut u8;
+    if (rc == 0 && blk.isNull()) {
+        rc = -ENOMEM;
+    }
+    if (rc == 0) {
+        rc = cfs_dir_read_block_at(fs, inp as *cfs_inode, 0, blk);
+    }
+    if (rc == 0) {
+        let d = blk as *cfs_dirent;
+        let version = Ptr.toBorrow(fs as *cfs).sb.version;
+        var s: u32 = 0;
+        while (s < CFS_DIRENTS_PER_BLOCK &&
+            !(cfs_dirent_check(d, s, version) != 0 && direntByte(blk, s, DIRENT_EXTRA) > 0)) {
+            s += 1;
+        }
+        if (s == CFS_DIRENTS_PER_BLOCK) {
+            rc = -ENOENT; // no long name to spoil
+        } else {
+            token.write(direntIno(blk, s));
+            if (kind == CORRUPT_LONGNAME_EXTRA) {
+                setDirentByte(blk, s, DIRENT_EXTRA, direntByte(blk, s, DIRENT_EXTRA) - 1);
+            } else {
+                memset(blk.add(s as usize * CFS_DIRENT_SIZE) as *mut void, 0, CFS_DIRENT_SIZE);
+            }
+            rc = cfs_dir_write_block_at(fs, inp, 0, blk as *u8);
+        }
+    }
+    kfree(blk as *mut void);
+    return rc;
+}
+
+// ---- The hook ----
+
+/// Whether `kind` is one of the whole-filesystem faults, valid without a target inode.
+fn wholeFs(kind: u32) -> bool =>
+    kind == CORRUPT_LEAK || kind == CORRUPT_ORPHAN || kind == CORRUPT_DANGLING || kind == CORRUPT_DIRENT ||
+    kind == CORRUPT_COUNTER || kind == CORRUPT_SNAP_MEMBERS || kind == CORRUPT_SNAP_UUID ||
+    kind == CORRUPT_ROLLBACK_CRC;
+
+/// The case `kind` names, with the lock held.
+/// Safety: `fs` is a mounted filesystem, locked; `inp` the named inode (zeroed when `ino` is 0); `tp` writable.
+unsafe fn dispatch(fs: *mut cfs, inp: *mut cfs_inode, ino: u64, kind: u32, tp: *mut u64) -> i32 {
+    if (kind == CORRUPT_LEAK) {
+        return leak(fs, tp);
+    }
+    if (kind == CORRUPT_FREE_IN_USE) {
+        return freeInUse(fs, inp, tp);
+    }
+    if (kind == CORRUPT_CROSSLINK) {
+        return crosslink(fs, inp, tp);
+    }
+    if (kind == CORRUPT_ROOT_TYPE) {
+        let i = Ptr.toBorrowMut(inp);
+        i.mode = mode(CFS_TYPE_REG, i.mode & PERM_MASK);
+        tp.write(ino);
+        return cfs_inode_write(fs, ino, inp as *cfs_inode);
+    }
+    if (kind == CORRUPT_NLINK) {
+        let i = Ptr.toBorrowMut(inp);
+        i.nlink = i.nlink.wrappingAdd(1);
+        tp.write(ino);
+        return cfs_inode_write(fs, ino, inp as *cfs_inode);
+    }
+    if (kind == CORRUPT_ORPHAN) {
+        return orphan(fs, tp);
+    }
+    if (kind == CORRUPT_DANGLING || kind == CORRUPT_DIRENT) {
+        return rootEntry(fs, kind, tp);
+    }
+    if (kind == CORRUPT_INO_SLOT) {
+        // The slot keeps its position and loses its identity: the walk reaches it by position and must not believe
+        // the number in it.
+        let i = Ptr.toBorrowMut(inp);
+        i.ino = ino.wrappingAdd(1000);
+        tp.write(ino);
+        return cfs_inode_write(fs, ino, inp as *cfs_inode);
+    }
+    if (kind == CORRUPT_EXTENT_ORDER || kind == CORRUPT_EXTENT_OVERLAP) {
+        return extents(fs, inp, ino, kind, tp);
+    }
+    if (kind == CORRUPT_BAD_PTR) {
+        // A data pointer past the end of every member: `claim` maps it to CFS_DVA_NONE and must say so rather than
+        // indexing a bitmap with it. The run keeps count 1, so exactly one bad pointer is claimed.
+        let i = Ptr.toBorrowMut(inp);
+        if (ino == 0 || extCount(i.direct[0]) == 0) {
+            return -EINVAL;
+        }
+        i.direct[0].start = CFS_DVA_NONE - 1;
+        tp.write(i.direct[0].start);
+        return cfs_inode_write(fs, ino, inp as *cfs_inode);
+    }
+    if (kind == CORRUPT_NAMELEN) {
+        return namelen(fs, inp, ino, tp);
+    }
+    if (kind == CORRUPT_TWO_PARENTS) {
+        return twoParents(fs, ino, tp);
+    }
+    if (kind == CORRUPT_CHAIN_CYCLE) {
+        return chainCycle(fs, inp, ino, tp);
+    }
+    if (kind == CORRUPT_SNAP_MEMBERS) {
+        return snapMembers(fs, tp);
+    }
+    if (kind == CORRUPT_DUP_NAME) {
+        return dupName(fs, inp, ino, tp);
+    }
+    if (kind == CORRUPT_SNAP_UUID) {
+        return snapUuid(fs, tp);
+    }
+    if (kind == CORRUPT_ROLLBACK_CRC) {
+        return rollbackCrc(fs, tp);
+    }
+    if (kind == CORRUPT_COUNTER) {
+        return counter(fs, tp);
+    }
+    if (kind == CORRUPT_LONGNAME_EXTRA || kind == CORRUPT_LONGNAME_CONT) {
+        return longname(fs, inp, ino, kind, tp);
+    }
+    return -EINVAL;
+}
+
+/// Break the filesystem in one named way (kernel/include/kernel/cosmofs.h). An inode number rather than a path: a
+/// filesystem-level hook has no business resolving names, it has to work on a filesystem whose directories are the
+/// broken part, and resolving one here would put a VFS symbol in this file that the fuzz harness has to link.
+/// Safety: `mnt` is a mount; `what` null or writable.
+@export("cosmofs_test_corrupt")
+unsafe fn testCorrupt(mnt: *mut mount, kind: u32, ino: u64, what: *mut u64) -> i32 {
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    if (fs.isNull()) {
+        return -EINVAL;
+    }
+    var slot = inodeSlot();
+    let inp = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+    if (ino == 0) {
+        // Only the whole-filesystem faults are valid without a target inode: every inode-targeted case must not
+        // inspect an absent slot.
+        if (!wholeFs(kind)) {
+            return -EINVAL;
+        }
+    } else if (cfs_inode_read(fs, ino, inp) != 0) {
+        return -ENOENT;
+    }
+
+    let lock = borrow mut Ptr.toBorrowMut(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    var token: u64 = 0;
+    let rc = dispatch(fs, inp, ino, kind, borrow mut token as *mut u64);
+    mutex_unlock(lock);
+    if (rc == 0 && !what.isNull()) {
+        what.write(token);
+    }
+    return rc;
+}

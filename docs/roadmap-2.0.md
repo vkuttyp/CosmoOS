@@ -1410,6 +1410,14 @@ flushes, kmalloc and the key and label writers fail
 reached). The user key the C passed through two statics is a parameter;
 the struct cfs it kept on the stack is a slot of words, checked against
 its C size. `cosmofs.h`'s two array parameters became pointers.
+`cosmofs_corrupt.cee`, the fifth, the structural check's corruption
+hook: `tests/host/test_cfscorrupt.c` runs it with the real DVA mapping
+and entry and snapshot-list decoders over every kind, on filesystems of
+every version with holes, long names, noise and snapshot lists that end,
+loop or run into noise, while the inode, allocator, directory, buffer
+and kmalloc calls fail (0x8e1237dd995b9aa1, clang and gcc; every line
+and branch that can be reached). `cfs_dirent_free_run` and
+`cfs_dirent_put`, inline in `cosmofs_format.h`, are written out in it.
 
 Size: about 4.5x.
 

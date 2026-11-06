@@ -1,5 +1,5 @@
 /*
- * test_cfscorrupt.c - cosmofs's corruption hook (kernel-services/filesystem/cosmofs/cosmofs_corrupt.c) on the host:
+ * test_cfscorrupt.c - cosmofs's corruption hook (kernel-services/filesystem/cosmofs/cosmofs_corrupt.cee) on the host:
  * roadmap 2.0 SA7. A digest recorded from the C over every kind the hook knows and some it does not, with the real
  * DVA mapping, directory-entry and snapshot-list decoders (cfsparse): filesystems of every version with one member or
  * two, inode tables with files and directories of zero to four runs (some compressed, some past the pool), directory
@@ -24,6 +24,41 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(ENOENT == 2 && EIO == 5 && ENOMEM == 12 && ENOTDIR == 20 && EINVAL == 22 && ENOSPC == 28 &&
+                   ENOTSUP == 95,
+               "cosmofs_corrupt's errno.h values");
+_Static_assert(COSMOFS_CORRUPT_LEAK == 0 && COSMOFS_CORRUPT_FREE_IN_USE == 1 && COSMOFS_CORRUPT_CROSSLINK == 2 &&
+                   COSMOFS_CORRUPT_NLINK == 3 && COSMOFS_CORRUPT_ORPHAN == 4 && COSMOFS_CORRUPT_DANGLING == 5 &&
+                   COSMOFS_CORRUPT_DIRENT == 6 && COSMOFS_CORRUPT_COUNTER == 7 && COSMOFS_CORRUPT_INO_SLOT == 8 &&
+                   COSMOFS_CORRUPT_EXTENT_ORDER == 9 && COSMOFS_CORRUPT_BAD_PTR == 10 &&
+                   COSMOFS_CORRUPT_TWO_PARENTS == 11 && COSMOFS_CORRUPT_SNAP_MEMBERS == 12 &&
+                   COSMOFS_CORRUPT_DUP_NAME == 13 && COSMOFS_CORRUPT_CHAIN_CYCLE == 14 &&
+                   COSMOFS_CORRUPT_NAMELEN == 15 && COSMOFS_CORRUPT_EXTENT_OVERLAP == 16 &&
+                   COSMOFS_CORRUPT_SNAP_UUID == 17 && COSMOFS_CORRUPT_ROLLBACK_CRC == 18 &&
+                   COSMOFS_CORRUPT_ROOT_TYPE == 19 && COSMOFS_CORRUPT_LONGNAME_EXTRA == 20 &&
+                   COSMOFS_CORRUPT_LONGNAME_CONT == 21,
+               "cosmofs.h's corruptions");
+_Static_assert(CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 && CFS_BITS_PER_BITMAP == 32512 &&
+                   CFS_DVA_NONE == 0xFFFFFFFFFFFFFFFFull && CFS_ROOT_INO == 1 && CFS_TYPE_REG == 1 &&
+                   CFS_TYPE_DIR == 2 && CFS_CSUM_CRC32C == 1 && CFS_EXT_COMPRESSED == 0x80000000u &&
+                   CFS_EXT_COUNT_MASK == 0xFFFF && CFS_ALLOC_META == 0 && CFS_ALLOC_DATA == 1 &&
+                   CFS_KIND_EXTENTS == 6 && CFS_KIND_MEMBERS == 11 && CFS_KIND_SNAPLIST2 == 15 &&
+                   CFS_KIND_ROLLBACK == 16 && CFS_MEMBERS_PER_BLOCK == 63 && CFS_SNAPS_PER_BLOCK2 == 31 &&
+                   CFS_NAME_MAX_LONG == 255 && CFS_DIRENTS_PER_BLOCK == 64 && CFS_DIRENT_CONT == ~0ull &&
+                   CFS_DIRENT_HEAD_NAME == 48 && CFS_DIRENT_CONT_NAME == 56 &&
+                   CFS_MODE(CFS_TYPE_REG, 0644) == ((1u << 12) | 420) && CFS_MODE_TYPE(0x2000u) == 2,
+               "cosmofs_corrupt's cosmofs_format.h and cosmofs_internal.h values");
+_Static_assert(sizeof(struct cfs_dirent) == 64 && offsetof(struct cfs_dirent, ino) == 0 &&
+                   offsetof(struct cfs_dirent, type) == 8 && offsetof(struct cfs_dirent, namelen) == 9 &&
+                   offsetof(struct cfs_dirent, extra) == 10 && offsetof(struct cfs_dirent, name) == 16 &&
+                   offsetof(struct cfs_dirent_cont, name) == 8 && offsetof(struct cfs_extent_block, next) == 0 &&
+                   offsetof(struct cfs_member_block, count) == 0,
+               "cosmofs_corrupt.cee reads and writes these offsets");
+/* cosmofs_corrupt.cee keeps an inode in a stack slot of 32 words and a snapshot entry in one of 16. */
+_Static_assert(sizeof(struct cfs_inode) <= 32 * 8 && sizeof(struct cfs_snapshot) <= 16 * 8,
+               "cosmofs_corrupt.cee's stack slots");
 
 /* The digest of the C (cosmofs_corrupt.c, 2026-11-07), which the CeeSafe port gives. */
 #define CORRUPT_DIGEST 0x8e1237dd995b9aa1ull
@@ -333,7 +368,10 @@ void cfs_buf_put(struct cfs *fs, struct cfs_buf *b)
 }
 
 /* The snapshot list's version-dependent accessors, as cosmofs_snap.cee has them. */
-uint32_t cfs_snaplist_kind(const struct cfs *fs) { return fs->sb.version >= 12 ? CFS_KIND_SNAPLIST2 : CFS_KIND_SNAPLIST; }
+uint32_t cfs_snaplist_kind(const struct cfs *fs)
+{
+    return fs->sb.version >= 12 ? CFS_KIND_SNAPLIST2 : CFS_KIND_SNAPLIST;
+}
 
 unsigned cfs_snaplist_slots(const struct cfs *fs)
 {
